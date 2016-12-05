@@ -4,6 +4,7 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
+#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
@@ -17,18 +18,18 @@
 
 /*
  * mem_write isn't really a good idea right now. It needs
- * to check a lot more: if the process we try to write to 
+ * to check a lot more: if the process we try to write to
  * dies in the middle right now, mem_write will overwrite
  * kernel memory.. This disables it altogether.
  */
 #define mem_write NULL
 
-static int check_range(struct task_struct * tsk, unsigned long addr, int count)
+static int check_range(struct mm_struct * mm, unsigned long addr, int count)
 {
 	struct vm_area_struct *vma;
 	int retval;
 
-	vma = find_vma(tsk, addr);
+	vma = find_vma(mm, addr);
 	if (!vma)
 		return -EACCES;
 	if (vma->vm_start > addr)
@@ -93,7 +94,7 @@ static int mem_read(struct inode * inode, struct file * file,char * buf, int cou
 	if (!tsk)
 		return -ESRCH;
 	addr = file->f_pos;
-	count = check_range(tsk, addr, count);
+	count = check_range(tsk->mm, addr, count);
 	if (count < 0)
 		return count;
 	tmp = buf;
@@ -209,6 +210,7 @@ static int mem_lseek(struct inode * inode, struct file * file, off_t offset, int
 	}
 }
 
+#ifdef CONFIG_UNSAFE_MMAP
 /*
  * This isn't really reliable by any means..
  */
@@ -219,7 +221,7 @@ int mem_mmap(struct inode * inode, struct file * file,
 	pgd_t *src_dir, *dest_dir;
 	pmd_t *src_middle, *dest_middle;
 	pte_t *src_table, *dest_table;
-	unsigned long stmp, dtmp;
+	unsigned long stmp, dtmp, mapnr;
 	struct vm_area_struct *src_vma = NULL;
 
 	/* Get the source's task information */
@@ -299,7 +301,9 @@ int mem_mmap(struct inode * inode, struct file * file,
 
 		set_pte(src_table, pte_mkdirty(*src_table));
 		set_pte(dest_table, *src_table);
-		mem_map[MAP_NR(pte_page(*src_table))].count++;
+                mapnr = MAP_NR(pte_page(*src_table));
+		if (mapnr < MAP_NR(high_memory))
+                        mem_map[mapnr].count++;
 
 		stmp += PAGE_SIZE;
 		dtmp += PAGE_SIZE;
@@ -309,6 +313,7 @@ int mem_mmap(struct inode * inode, struct file * file,
 	flush_tlb_range(src_vma->vm_mm, src_vma->vm_start, src_vma->vm_end);
 	return 0;
 }
+#endif /* CONFIG_UNSAFE_MMAP */
 
 static struct file_operations proc_mem_operations = {
 	mem_lseek,
@@ -317,7 +322,11 @@ static struct file_operations proc_mem_operations = {
 	NULL,		/* mem_readdir */
 	NULL,		/* mem_select */
 	NULL,		/* mem_ioctl */
+#ifdef CONFIG_UNSAFE_MMAP
 	mem_mmap,	/* mmap */
+#else
+	NULL,		/* mmap */
+#endif /* CONFIG_UNSAFE_MMAP */
 	NULL,		/* no special open code */
 	NULL,		/* no special release code */
 	NULL		/* can't fsync */

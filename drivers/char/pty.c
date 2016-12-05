@@ -153,14 +153,32 @@ static int pty_write_room(struct tty_struct *tty)
 	return to->ldisc.receive_room(to);
 }
 
+/*
+ * Modified for asymmetric master/slave behavior
+ * The chars_in_buffer() value is used by the ldisc select() function 
+ * to hold off writing when chars_in_buffer > WAKEUP_CHARS (== 256).
+ * To allow typed-ahead commands to accumulate, the master side returns 0
+ * until the buffer is half full. The slave side returns the true count.
+ */
 static int pty_chars_in_buffer(struct tty_struct *tty)
 {
 	struct tty_struct *to = tty->link;
+	int count;
 
 	if (!to || !to->ldisc.chars_in_buffer)
 		return 0;
 
-	return to->ldisc.chars_in_buffer(to);
+	/* The ldisc must report 0 if no characters available to be read */
+	count = to->ldisc.chars_in_buffer(to);
+
+	if (tty->driver.subtype == PTY_TYPE_SLAVE) return count;
+
+	/* 
+	 * Master side driver ... return 0 if the other side's read buffer 
+	 * is less than half full.  This allows room for typed-ahead commands
+	 * with a reasonable margin to avoid overflow. 
+	 */
+	return ((count < N_TTY_BUF_SIZE/2) ? 0 : count);
 }
 
 static void pty_flush_buffer(struct tty_struct *tty)
@@ -181,67 +199,48 @@ static void pty_flush_buffer(struct tty_struct *tty)
 
 int pty_open(struct tty_struct *tty, struct file * filp)
 {
-#if PTY_SLAVE_WAITS_ON_OPEN
-	struct wait_queue wait = { current, NULL };
-#endif
 	int	retval;
 	int	line;
 	struct	pty_struct *pty;
-	
+
+	retval = -ENODEV;
 	if (!tty || !tty->link)
-		return -ENODEV;
+		goto out;
 	line = MINOR(tty->device) - tty->driver.minor_start;
 	if ((line < 0) || (line >= NR_PTYS))
-		return -ENODEV;
+		goto out;
 	pty = pty_state + line;
 	tty->driver_data = pty;
 
 	if (!tmp_buf) {
-		unsigned long page = get_free_page(GFP_KERNEL);
+		unsigned long page = __get_free_page(GFP_KERNEL);
 		if (!tmp_buf) {
+			retval = -ENOMEM;
 			if (!page)
-				return -ENOMEM;
+				goto out;
 			tmp_buf = (unsigned char *) page;
+			memset((void *) page, 0, PAGE_SIZE);
 		} else
 			free_page(page);
 	}
+	retval = -EIO;
+	if (test_bit(TTY_OTHER_CLOSED, &tty->flags))
+		goto out;
+	if (tty->link->count != 1)
+		goto out;
 
 	clear_bit(TTY_OTHER_CLOSED, &tty->link->flags);
 	wake_up_interruptible(&pty->open_wait);
 	set_bit(TTY_THROTTLED, &tty->flags);
-	if (filp->f_flags & O_NDELAY)
-		return 0;
-	/*
-	 * If we're opening the master pty, just return.  If we're
-	 * trying to open the slave pty, then we have to wait for the
-	 * master pty to open.
-	 */
-	if (tty->driver.subtype == PTY_TYPE_MASTER)
-		return 0;
 	retval = 0;
-#if PTY_SLAVE_WAITS_ON_OPEN
-	add_wait_queue(&pty->open_wait, &wait);
-	while (1) {
-		if (current->signal & ~current->blocked) {
-			retval = -ERESTARTSYS;
-			break;
-		}
-		/*
-		 * Block until the master is open...
-		 */
-		current->state = TASK_INTERRUPTIBLE;
-		if (tty->link->count &&
-		    !test_bit(TTY_OTHER_CLOSED, &tty->flags))
-			break;
-		schedule();
-	}
-	current->state = TASK_RUNNING;
-	remove_wait_queue(&pty->open_wait, &wait);
-#else
-	if (!tty->link->count || test_bit(TTY_OTHER_CLOSED, &tty->flags))
-		retval = -EPERM;
-#endif
+out:
 	return retval;
+}
+
+static void pty_set_termios(struct tty_struct *tty, struct termios *old_termios)
+{
+        tty->termios->c_cflag &= ~(CSIZE | PARENB);
+        tty->termios->c_cflag |= (CS8 | CREAD);
 }
 
 int pty_init(void)
@@ -274,6 +273,7 @@ int pty_init(void)
 	pty_driver.flush_buffer = pty_flush_buffer;
 	pty_driver.chars_in_buffer = pty_chars_in_buffer;
 	pty_driver.unthrottle = pty_unthrottle;
+	pty_driver.set_termios = pty_set_termios;
 
 	pty_slave_driver = pty_driver;
 	pty_slave_driver.name = "ttyp";

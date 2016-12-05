@@ -7,6 +7,8 @@
  *
  */
 
+#include <linux/config.h>
+
 #include <linux/sched.h>
 #include <linux/ncp_fs.h>
 #include <linux/errno.h>
@@ -25,6 +27,7 @@
 #include <linux/ncp_fs_sb.h>
 #include <net/sock.h>
 
+#include "ncpsign_kernel.h"
 
 #define _S(nr) (1<<((nr)-1))
 static int _recvfrom(struct socket *sock, unsigned char *ubuf,
@@ -562,7 +565,12 @@ ncp_do_request(struct ncp_server *server, int size)
 		printk("ncpfs: Server not locked!\n");
 		return -EIO;
 	}
-
+#ifdef CONFIG_NCPFS_PACKET_SIGNING
+	if (server->sign_active)
+	{
+		sign_packet(server, &size);
+	}
+#endif /* CONFIG_NCPFS_PACKET_SIGNING */
 	if (!ncp_conn_valid(server))
 	{
 		return -EIO;
@@ -599,7 +607,7 @@ ncp_request(struct ncp_server *server, int function)
 
 	if (server->has_subfunction != 0)
 	{
-		*(__u16 *)&(h->data[0]) = request_size - 2;
+		*(__u16 *)&(h->data[0]) = htons(request_size - 2);
 	}
 
 	h->type = NCP_REQUEST;
@@ -608,7 +616,7 @@ ncp_request(struct ncp_server *server, int function)
 	h->sequence  = server->sequence;
 	h->conn_low  = (server->connection) & 0xff;
 	h->conn_high = ((server->connection) & 0xff00) >> 8;
-	h->task      = (current->pid) & 0xff;
+	h->task      = 2;
 	h->function  = function;
 
 	if ((result = ncp_do_request(server, request_size + sizeof(*h))) < 0)
@@ -644,7 +652,7 @@ ncp_connect(struct ncp_server *server)
 	h->sequence  = server->sequence;
 	h->conn_low  = 0xff;
 	h->conn_high = 0xff;
-	h->task      = (current->pid) & 0xff;
+	h->task      = 2;
 	h->function  = 0;
 
 	if ((result = ncp_do_request(server, sizeof(*h))) < 0)
@@ -669,7 +677,7 @@ ncp_disconnect(struct ncp_server *server)
 	h->sequence  = server->sequence;
 	h->conn_low  = (server->connection) & 0xff;
 	h->conn_high = ((server->connection) & 0xff00) >> 8;
-	h->task      = (current->pid) & 0xff;
+	h->task      = 2;
 	h->function  = 0;
 
 	return ncp_do_request(server, sizeof(*h));

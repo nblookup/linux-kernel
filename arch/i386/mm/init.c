@@ -26,12 +26,16 @@
 #include <asm/pgtable.h>
 #include <asm/dma.h>
 
+#if 0
 /*
  * The SMP kernel can't handle the 4MB page table optimizations yet
  */
 #ifdef __SMP__
 #undef USE_PENTIUM_MM
 #endif
+#endif
+
+const char bad_pmd_string[] = "Bad pmd in pte_alloc: %08lx\n";
 
 extern void die_if_kernel(char *,struct pt_regs *,long);
 extern void show_net_buffers(void);
@@ -53,11 +57,13 @@ pte_t * __bad_pagetable(void)
 {
 	extern char empty_bad_page_table[PAGE_SIZE];
 
-	__asm__ __volatile__("cld ; rep ; stosl":
-		:"a" (pte_val(BAD_PAGE)),
-		 "D" ((long) empty_bad_page_table),
-		 "c" (PAGE_SIZE/4)
-		:"di","cx");
+	__asm__ __volatile__(
+		"cld ; rep ; stosl"
+		:
+		: "a" (pte_val(BAD_PAGE)),
+		  "D" ((long) empty_bad_page_table),
+		  "c" (PAGE_SIZE/4)
+		: "di","cx");
 	return (pte_t *) empty_bad_page_table;
 }
 
@@ -65,11 +71,13 @@ pte_t __bad_page(void)
 {
 	extern char empty_bad_page[PAGE_SIZE];
 
-	__asm__ __volatile__("cld ; rep ; stosl":
-		:"a" (0),
-		 "D" ((long) empty_bad_page),
-		 "c" (PAGE_SIZE/4)
-		:"di","cx");
+	__asm__ __volatile__(
+		"cld ; rep ; stosl"
+		:
+		: "a" (0),
+		  "D" ((long) empty_bad_page),
+		  "c" (PAGE_SIZE/4)
+		: "di","cx");
 	return pte_mkdirty(mk_pte((unsigned long) empty_bad_page, PAGE_SHARED));
 }
 
@@ -135,7 +143,22 @@ unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
 		 *	the error...
 		 */
 		if (!smp_scan_config(639*0x400,0x400))	/* Scan the top 1K of base RAM */
-			smp_scan_config(0xF0000,0x10000);	/* Scan the 64K of bios */
+		{
+			if(!smp_scan_config(0xF0000,0x10000)) /* Scan the 64K of bios */
+			{
+				/*
+				 * If it is an SMP machine we should know now, unless the
+				 * configuration is in an EISA/MCA bus machine with an
+				 * extended bios data area. 
+				 *
+				 * there is a real-mode segmented pointer pointing to the
+				 * 4K EBDA area at 0x40E, calculate and scan it here:
+				 */
+				address = *(unsigned short *)phys_to_virt(0x40E);
+				address<<=4;
+				smp_scan_config(address, 0x1000);
+			}
+		}
 	}
 	/*
 	 *	If it is an SMP machine we should know now, unless the configuration
@@ -164,23 +187,27 @@ unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
 			__asm__("movl %%cr4,%%eax\n\t"
 				"orl $16,%%eax\n\t"
 				"movl %%eax,%%cr4"
-				: : :"ax");
+				:
+				:
+				: "ax");
 #else
 			__asm__(".byte 0x0f,0x20,0xe0\n\t"
 				"orl $16,%%eax\n\t"
 				".byte 0x0f,0x22,0xe0"
-				: : :"ax");
+				:
+				:
+				: "ax");
 #endif
 			wp_works_ok = 1;
 			pgd_val(pg_dir[0]) = _PAGE_TABLE | _PAGE_4M | address;
-			pgd_val(pg_dir[768]) = _PAGE_TABLE | _PAGE_4M | address;
+			pgd_val(pg_dir[USER_PGD_PTRS]) = _PAGE_TABLE | _PAGE_4M | address;
 			pg_dir++;
 			address += 4*1024*1024;
 			continue;
 		}
 #endif
-		/* map the memory at virtual addr 0xC0000000 */
-		pg_table = (pte_t *) (PAGE_MASK & pgd_val(pg_dir[768]));
+		/* map the memory at virtual addr PAGE_OFFSET */
+		pg_table = (pte_t *) (PAGE_MASK & pgd_val(pg_dir[USER_PGD_PTRS]));
 		if (!pg_table) {
 			pg_table = (pte_t *) start_mem;
 			start_mem += PAGE_SIZE;
@@ -188,7 +215,7 @@ unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
 
 		/* also map it temporarily at 0x0000000 for init */
 		pgd_val(pg_dir[0])   = _PAGE_TABLE | (unsigned long) pg_table;
-		pgd_val(pg_dir[768]) = _PAGE_TABLE | (unsigned long) pg_table;
+		pgd_val(pg_dir[USER_PGD_PTRS]) = _PAGE_TABLE | (unsigned long) pg_table;
 		pg_dir++;
 		for (tmp = 0 ; tmp < PTRS_PER_PTE ; tmp++,pg_table++) {
 			if (address < end_mem)
@@ -198,7 +225,7 @@ unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
 			address += PAGE_SIZE;
 		}
 	}
-	flush_tlb();
+	local_flush_tlb();
 	return free_area_init(start_mem, end_mem);
 }
 
@@ -272,10 +299,10 @@ void mem_init(unsigned long start_mem, unsigned long end_mem)
 /* test if the WP bit is honoured in supervisor mode */
 	if (wp_works_ok < 0) {
 		pg0[0] = pte_val(mk_pte(0, PAGE_READONLY));
-		flush_tlb();
-		__asm__ __volatile__("movb 0,%%al ; movb %%al,0": : :"ax", "memory");
+		local_flush_tlb();
+		__asm__ __volatile__("movb 0,%%al ; movb %%al,0" : : : "ax", "memory");
 		pg0[0] = 0;
-		flush_tlb();
+		local_flush_tlb();
 		if (wp_works_ok < 0)
 			wp_works_ok = 0;
 	}

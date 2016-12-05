@@ -30,7 +30,7 @@ asmlinkage int sys_sigsuspend(unsigned long set, int p2, int p3, int p4, int p6,
 	mask = current->blocked;
 	current->blocked = set & _BLOCKABLE;
 	regs->gpr[3] = -EINTR;
-#if 0	
+#if 0
 printk("Task: %x[%d] - SIGSUSPEND at %x, Mask: %x\n", current, current->pid, regs->nip, set);	
 #endif
 	while (1) {
@@ -107,7 +107,6 @@ asmlinkage int do_signal(unsigned long oldmask, struct pt_regs * regs)
 	struct sigcontext_struct *sc;
 	struct sigaction * sa;
 	int s = _disable_interrupts();
-
 	while ((signr = current->signal & mask)) {
 #if 0
 		signr = ffz(~signr);  /* Compute bit # */
@@ -149,7 +148,7 @@ asmlinkage int do_signal(unsigned long oldmask, struct pt_regs * regs)
 			if (current->pid == 1)
 				continue;
 			switch (signr) {
-			case SIGCONT: case SIGCHLD: case SIGWINCH:
+			case SIGCONT: case SIGCHLD: case SIGWINCH: case SIGURG:
 				continue;
 
 			case SIGSTOP: case SIGTSTP: case SIGTTIN: case SIGTTOU:

@@ -24,13 +24,16 @@
 enum {
   IPPROTO_IP = 0,		/* Dummy protocol for TCP		*/
   IPPROTO_ICMP = 1,		/* Internet Control Message Protocol	*/
-  IPPROTO_IGMP = 2,		/* Internet Gateway Management Protocol */
+  IPPROTO_IGMP = 2,		/* Internet Group Management Protocol	*/
   IPPROTO_IPIP = 4,		/* IPIP tunnels (older KA9Q tunnels use 94) */
   IPPROTO_TCP = 6,		/* Transmission Control Protocol	*/
   IPPROTO_EGP = 8,		/* Exterior Gateway Protocol		*/
   IPPROTO_PUP = 12,		/* PUP protocol				*/
   IPPROTO_UDP = 17,		/* User Datagram Protocol		*/
   IPPROTO_IDP = 22,		/* XNS IDP protocol			*/
+  IPPROTO_GRE = 47,		/* GRE Encapsulation used by PPTP et al	*/
+  IPPROTO_ESP = 50,		/* ESP protocol for IPSec		*/
+  IPPROTO_AH = 51,		/* AH protocol for IPSec		*/
 
   IPPROTO_RAW = 255,		/* Raw IP packets			*/
   IPPROTO_MAX
@@ -101,7 +104,7 @@ struct sockaddr_in {
 #define	INADDR_BROADCAST	((unsigned long int) 0xffffffff)
 
 /* Address indicating an error return. */
-#define	INADDR_NONE		0xffffffff
+#define	INADDR_NONE		((unsigned long int) 0xffffffff)
 
 /* Network number for local host loopback. */
 #define	IN_LOOPBACKNET		127

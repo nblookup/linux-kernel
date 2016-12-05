@@ -1,10 +1,10 @@
 /* fdomain.c -- Future Domain TMC-16x0 SCSI driver
  * Created: Sun May  3 18:53:19 1992 by faith@cs.unc.edu
- * Revised: Thu Apr  4 20:44:47 1996 by r.faith@ieee.org
+ * Revised: Sat Nov  2 09:27:47 1996 by root@cs.unc.edu
  * Author: Rickard E. Faith, faith@cs.unc.edu
  * Copyright 1992, 1993, 1994, 1995, 1996 Rickard E. Faith
  *
- * $Id: fdomain.c,v 5.41 1996/04/05 04:22:25 root Exp $
+ * $Id: fdomain.c,v 5.44 1996/08/08 18:58:53 root Exp $
 
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -104,6 +104,7 @@
  1.3.34      5.39        12 Oct 1995  V3.60 BIOS; /proc
  1.3.72      5.39         8 Feb 1996  Adaptec AHA-2920 board
  1.3.85      5.41         4 Apr 1996
+ 2.0.12      5.44         8 Aug 1996  Use ID 7 for all PCI cards
 
  
 
@@ -275,7 +276,7 @@ struct proc_dir_entry proc_scsi_fdomain = {
     S_IFDIR | S_IRUGO | S_IXUGO, 2
 };
   
-#define VERSION          "$Revision: 5.41 $"
+#define VERSION          "$Revision: 5.44 $"
 
 /* START OF USER DEFINABLE OPTIONS */
 
@@ -460,7 +461,8 @@ struct signature {
    { "IBM F1 P2 BIOS v1.0104/29/93",                        5, 28,  3, -1, 0 },
    { "Future Domain Corp. V1.0008/18/93",                   5, 33,  3,  4, 0 },
    { "Future Domain Corp. V1.0008/18/93",                  26, 33,  3,  4, 1 },
-   { "Adaptec AHA-2920 PCI-SCSI Card",                     42, 31,  3,  0, 1 },
+   { "Adaptec AHA-2920 PCI-SCSI Card",                     42, 31,  3, -1, 1 },
+   { "IBM F1 P264/32",                                      5, 14,  3, -1, 1 },
 				/* This next signature may not be a 3.5 bios */
    { "Future Domain Corp. V2.0108/18/93",                   5, 33,  3,  5, 0 },
    { "FUTURE DOMAIN CORP.  V3.5008/18/93",                  5, 34,  3,  5, 0 },
@@ -580,8 +582,8 @@ static int fdomain_is_valid_port( int port )
 
 				/* Try to toggle 32-bit mode.  This only
 				   works on an 18c30 chip.  (User reports
-				   say that this doesn't work at all, so
-				   we'll use the other method.) */
+				   say this works, so we should switch to
+				   it in the near future.) */
 
       outb( 0x80, port + IO_Control );
       if ((inb( port + Configuration2 ) & 0x80) == 0x80) {
@@ -1000,7 +1002,7 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
    Write_FIFO_port       = port_base + Write_FIFO;
    Write_SCSI_Data_port  = port_base + Write_SCSI_Data;
 
-   fdomain_16x0_reset( NULL );
+   fdomain_16x0_reset( NULL, 0 );
 
    if (fdomain_test_loopback()) {
 #if DEBUG_DETECT
@@ -1018,7 +1020,7 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
       tpnt->this_id = (this_id & 0x07);
       adapter_mask  = (1 << tpnt->this_id);
    } else {
-      if ((bios_major == 3 && bios_minor >= 2) || bios_major < 0) {
+      if (PCI_bus || (bios_major == 3 && bios_minor >= 2) || bios_major < 0) {
 	 tpnt->this_id = 7;
 	 adapter_mask  = 0x80;
       } else {
@@ -1246,7 +1248,7 @@ static int fdomain_select( int target )
 #endif
 #if ERRORS_ONLY
    if (!target) {
-      if (chip == tmc18c30 && !flag) /* Skip first failure for 18C30 chips. */
+      if (!flag) /* Skip first failure for all chips. */
 	    ++flag;
       else
 	    printk( "fdomain: Selection failed\n" );
@@ -1394,7 +1396,9 @@ void fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 	 printk( "Status = %x, ", current_SC->SCp.Status );
 #endif
 #if ERRORS_ONLY
-	 if (current_SC->SCp.Status && current_SC->SCp.Status != 2) {
+	 if (current_SC->SCp.Status
+	     && current_SC->SCp.Status != 2
+	     && current_SC->SCp.Status != 8) {
 	    printk( "fdomain: target = %d, command = %x, status = %x\n",
 		    current_SC->target,
 		    current_SC->cmnd[0],
@@ -1666,7 +1670,7 @@ void fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 	    qualifier = (unsigned char)(*((char *)current_SC->request_buffer
 					  + 13));
 
-	    if (!(key == UNIT_ATTENTION && (code == 0x29 || !code))
+	    if (key != UNIT_ATTENTION
 		&& !(key == NOT_READY
 		     && code == 0x04
 		     && (!qualifier || qualifier == 0x02 || qualifier == 0x01))
@@ -1883,7 +1887,7 @@ int fdomain_16x0_abort( Scsi_Cmnd *SCpnt)
    return SCSI_ABORT_SUCCESS;
 }
 
-int fdomain_16x0_reset( Scsi_Cmnd *SCpnt )
+int fdomain_16x0_reset( Scsi_Cmnd *SCpnt, unsigned int flags )
 {
 #if DEBUG_RESET
    static int called_once = 0;

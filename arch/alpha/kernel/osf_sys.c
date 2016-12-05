@@ -125,14 +125,22 @@ asmlinkage int osf_getdirentries(unsigned int fd, struct osf_dirent * dirent,
 	return count - buf.count;
 }
 
-asmlinkage int osf_getpriority(int which, int who)
+/*
+ * Alpha syscall convention has no problem returning negative
+ * values:
+ */
+asmlinkage int osf_getpriority(int which, int who, int a2, int a3, int a4,
+			       int a5, struct pt_regs regs)
 {
 	extern int sys_getpriority(int, int);
-	/*
-	 * Alpha syscall convention has no problem returning negative
-	 * values:
-	 */
-	return 20 - sys_getpriority(which, who);
+	int prio;
+
+	prio = sys_getpriority(which, who);
+	if (prio < 0)
+		return prio;
+
+	regs.r0 = 0; /* special return: no errors */
+	return 20 - prio;
 }
 
 
@@ -177,16 +185,52 @@ asmlinkage unsigned long osf_mmap(unsigned long addr, unsigned long len,
 		if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
 			return -EBADF;
 	}
+	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	return do_mmap(file, addr, len, prot, flags, off);
 }
 
-asmlinkage int osf_statfs(char * path, struct statfs * buffer, unsigned long bufsiz)
+
+/*
+ * The OSF/1 statfs structure is much larger, but this should
+ * match the beginning, at least.
+ */
+struct osf_statfs {
+	short	f_type;
+	short	f_flags;
+	int	f_fsize;
+	int	f_bsize;
+	int	f_blocks;
+	int	f_bfree;
+	int	f_bavail;
+	int	f_files;
+	int	f_ffree;
+	__kernel_fsid_t f_fsid;
+} * osf_stat;
+
+static void linux_to_osf_statfs (struct statfs * linux_stat, struct osf_statfs * osf_stat)
 {
+	osf_stat->f_type   = linux_stat->f_type;
+	osf_stat->f_flags  = 0;	/* mount flags */
+	/* Linux doesn't provide a "fundamental filesystem block size": */
+	osf_stat->f_fsize  = linux_stat->f_bsize;
+	osf_stat->f_bsize  = linux_stat->f_bsize;
+	osf_stat->f_blocks = linux_stat->f_blocks;
+	osf_stat->f_bfree  = linux_stat->f_bfree;
+	osf_stat->f_bavail = linux_stat->f_bavail;
+	osf_stat->f_files  = linux_stat->f_files;
+	osf_stat->f_ffree  = linux_stat->f_ffree;
+	osf_stat->f_fsid   = linux_stat->f_fsid;
+}
+
+
+asmlinkage int osf_statfs(char * path, struct osf_statfs * buffer, unsigned long bufsiz)
+{
+	struct statfs linux_stat;
 	struct inode * inode;
 	int retval;
 
-	if (bufsiz > sizeof(struct statfs))
-		bufsiz = sizeof(struct statfs);
+	if (bufsiz > sizeof(struct osf_statfs))
+		bufsiz = sizeof(struct osf_statfs);
 	retval = verify_area(VERIFY_WRITE, buffer, bufsiz);
 	if (retval)
 		return retval;
@@ -197,13 +241,15 @@ asmlinkage int osf_statfs(char * path, struct statfs * buffer, unsigned long buf
 		iput(inode);
 		return -ENOSYS;
 	}
-	inode->i_sb->s_op->statfs(inode->i_sb, buffer, bufsiz);
+	inode->i_sb->s_op->statfs(inode->i_sb, &linux_stat, sizeof(linux_stat));
+	linux_to_osf_statfs(&linux_stat, buffer);
 	iput(inode);
 	return 0;
 }
 
-asmlinkage int osf_fstatfs(unsigned long fd, struct statfs * buffer, unsigned long bufsiz)
+asmlinkage int osf_fstatfs(unsigned long fd, struct osf_statfs * buffer, unsigned long bufsiz)
 {
+	struct statfs linux_stat;
 	struct file * file;
 	struct inode * inode;
 	int retval;
@@ -211,15 +257,16 @@ asmlinkage int osf_fstatfs(unsigned long fd, struct statfs * buffer, unsigned lo
 	retval = verify_area(VERIFY_WRITE, buffer, bufsiz);
 	if (retval)
 		return retval;
-	if (bufsiz > sizeof(struct statfs))
-		bufsiz = sizeof(struct statfs);
+	if (bufsiz > sizeof(struct osf_statfs))
+		bufsiz = sizeof(struct osf_statfs);
 	if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
 		return -EBADF;
 	if (!(inode = file->f_inode))
 		return -ENOENT;
 	if (!inode->i_sb->s_op->statfs)
 		return -ENOSYS;
-	inode->i_sb->s_op->statfs(inode->i_sb, buffer, bufsiz);
+	inode->i_sb->s_op->statfs(inode->i_sb, &linux_stat, sizeof(linux_stat));
+	linux_to_osf_statfs(&linux_stat, buffer);
 	return 0;
 }
 
@@ -667,29 +714,25 @@ asmlinkage unsigned long
 osf_getsysinfo (unsigned long op, void * buffer, unsigned long nbytes,
 		int * start, void *arg)
 {
-    extern unsigned long rdfpcr (void);
-    unsigned long fpcw;
+	switch (op) {
+	case 45:	/* GSI_IEEE_FP_CONTROL */
+		/* Return current sw control & status bits.  */
+		put_user(current->tss.flags & IEEE_SW_MASK,
+			 (unsigned long *)buffer);
+		return 0;
 
-    switch (op) {
-      case 45:	/* GSI_IEEE_FP_CONTROL */
-	  /* build and return current fp control word: */
-	  fpcw = current->tss.flags & IEEE_TRAP_ENABLE_MASK;
-	  fpcw |= ((rdfpcr() >> 52) << 17) & IEEE_STATUS_MASK;
-	  put_user(fpcw, (unsigned long *) buffer);
-	  return 0;
+	case 46:	/* GSI_IEEE_STATE_AT_SIGNAL */
+		/*
+		 * Not sure anybody will ever use this weird stuff.  These
+		 * ops can be used (under OSF/1) to set the fpcr that should
+		 * be used when a signal handler starts executing.
+		 */
+		break;
 
-      case 46:	/* GSI_IEEE_STATE_AT_SIGNAL */
-	  /*
-	   * Not sure anybody will ever use this weird stuff.  These
-	   * ops can be used (under OSF/1) to set the fpcr that should
-	   * be used when a signal handler starts executing.
-	   */
-	  break;
-
-      default:
-	  break;
-    }
-    return -EOPNOTSUPP;
+	default:
+		break;
+	}
+	return -EOPNOTSUPP;
 }
 
 
@@ -697,25 +740,43 @@ asmlinkage unsigned long
 osf_setsysinfo (unsigned long op, void * buffer, unsigned long nbytes,
 		int * start, void *arg)
 {
-    unsigned long fpcw;
+	switch (op) {
+	case 14: {	/* SSI_IEEE_FP_CONTROL */
+		unsigned long sw, fpcw;
 
-    switch (op) {
-      case 14:	/* SSI_IEEE_FP_CONTROL */
-	  /* update trap enable bits: */
-	  fpcw = get_user((unsigned long *) buffer);
-	  current->tss.flags &= ~IEEE_TRAP_ENABLE_MASK;
-	  current->tss.flags |= (fpcw & IEEE_TRAP_ENABLE_MASK);
-	  return 0;
+		/*
+		 * Alpha Architecture Handbook 4.7.7.3:
+		 * To be fully IEEE compiant, we must track the current IEEE
+		 * exception state in software, because spurrious bits can be
+		 * set in the trap shadow of a software-complete insn.
+		 */
 
-      case 15:	/* SSI_IEEE_STATE_AT_SIGNAL */
-      case 16:	/* SSI_IEEE_IGNORE_STATE_AT_SIGNAL */
-	  /*
-	   * Not sure anybody will ever use this weird stuff.  These
-	   * ops can be used (under OSF/1) to set the fpcr that should
-	   * be used when a signal handler starts executing.
-	   */
-      default:
-	  break;
-    }
-    return -EOPNOTSUPP;
+		/* Update software trap enable bits.  */
+		sw = get_user((unsigned long *) buffer) & IEEE_SW_MASK;
+		current->tss.flags &= ~IEEE_SW_MASK;
+		current->tss.flags |= sw & IEEE_SW_MASK;
+
+		/* Update the real fpcr.  For exceptions that are disabled,
+		   but that we have seen, turn off exceptions in h/w.
+		   Otherwise leave them enabled so that we can update our
+		   software status mask.  */
+		fpcw = rdfpcr() & (~FPCR_MASK | FPCR_DYN_MASK);
+		fpcw |= ieee_sw_to_fpcr(sw | ((~sw & IEEE_STATUS_MASK) >> 16));
+		wrfpcr(fpcw);
+		return 0;
+	}
+
+	case 15:	/* SSI_IEEE_STATE_AT_SIGNAL */
+	case 16:	/* SSI_IEEE_IGNORE_STATE_AT_SIGNAL */
+		/*
+		 * Not sure anybody will ever use this weird stuff.  These
+		 * ops can be used (under OSF/1) to set the fpcr that should
+		 * be used when a signal handler starts executing.
+		 */
+		break;
+
+	default:
+		break;
+	}
+	return -EOPNOTSUPP;
 }

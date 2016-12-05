@@ -5,7 +5,7 @@
  *
  *		Definitions for the Interfaces handler.
  *
- * Version:	@(#)dev.h	1.0.10	08/12/93
+ * Version:	@(#)dev.h	1.0.11	07/31/96
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -13,6 +13,7 @@
  *		Donald J. Becker, <becker@super.org>
  *		Alan Cox, <A.Cox@swansea.ac.uk>
  *		Bjorn Ekwall. <bj0rn@blox.se>
+ *		Lawrence V. Stefani, <stefani@lkg.dec.com>
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -20,6 +21,7 @@
  *		2 of the License, or (at your option) any later version.
  *
  *		Moved to /usr/include/linux for NET3
+ *		Added extern for fddi_setup()
  */
 #ifndef _LINUX_NETDEVICE_H
 #define _LINUX_NETDEVICE_H
@@ -27,14 +29,14 @@
 #include <linux/config.h>
 #include <linux/if.h>
 #include <linux/if_ether.h>
-#include <linux/skbuff.h>
 
 /* for future expansion when we will have different priorities. */
 #define DEV_NUMBUFFS	3
 #define MAX_ADDR_LEN	7
 #ifndef CONFIG_AX25
+#ifndef CONFIG_AX25_MODULE
 #ifndef CONFIG_TR
-#ifndef CONFIG_NET_IPIP
+#if !defined(CONFIG_NET_IPIP) && !defined(CONFIG_NET_IPIP_MODULE)
 #define MAX_HEADER	32		/* We really need about 18 worst case .. so 32 is aligned */
 #else
 #define MAX_HEADER	80		/* We need to allow for having tunnel headers */
@@ -43,14 +45,21 @@
 #define MAX_HEADER	48		/* Token Ring header needs 40 bytes ... 48 is aligned */ 
 #endif /* TR */
 #else
-#define MAX_HEADER	96		/* AX.25 + NetROM */
-#endif /* AX25 */
+#define MAX_HEADER	96		/* AX.25 + NET/ROM module*/
+#endif /* AX.25 module */
+#else
+#define MAX_HEADER	96		/* AX.25 + NET/ROM */
+#endif /* AX.25 */
 
 #define IS_MYADDR	1		/* address is (one of) our own	*/
 #define IS_LOOPBACK	2		/* address is for LOOPBACK	*/
 #define IS_BROADCAST	3		/* address is a valid broadcast	*/
 #define IS_INVBCAST	4		/* Wrong netmask bcast not for us (unused)*/
 #define IS_MULTICAST	5		/* Multicast IP address */
+
+#ifdef __KERNEL__
+
+#include <linux/skbuff.h>
 
 /*
  *	We tag multicasts with these structures.
@@ -188,7 +197,9 @@ struct device
   void			  (*header_cache_bind)(struct hh_cache **hhp, struct device *dev, unsigned short htype, __u32 daddr);
   void			  (*header_cache_update)(struct hh_cache *hh, struct device *dev, unsigned char *  haddr);
 #define HAVE_CHANGE_MTU
-  int			  (*change_mtu)(struct device *dev, int new_mtu);            
+  int			  (*change_mtu)(struct device *dev, int new_mtu);
+
+  struct iw_statistics*	  (*get_wireless_stats)(struct device *dev);
 };
 
 
@@ -201,8 +212,6 @@ struct packet_type {
   struct packet_type	*next;
 };
 
-
-#ifdef __KERNEL__
 
 #include <linux/interrupt.h>
 #include <linux/notifier.h>
@@ -285,6 +294,7 @@ extern __inline__ void dev_lock_wait(void)
 
 extern void		ether_setup(struct device *dev);
 extern void		tr_setup(struct device *dev);
+extern void		fddi_setup(struct device *dev);
 extern int		ether_config(struct device *dev, struct ifmap *map);
 /* Support for loadable net-drivers */
 extern int		register_netdev(struct device *dev);

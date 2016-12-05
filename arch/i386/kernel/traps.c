@@ -24,6 +24,7 @@
 #include <asm/system.h>
 #include <asm/segment.h>
 #include <asm/io.h>
+#include <asm/pgtable.h>
 
 asmlinkage int system_call(void);
 asmlinkage void lcall7(void);
@@ -44,21 +45,39 @@ asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
 	die_if_kernel(str,regs,error_code); \
 }
 
+#define DO_VM86_ERROR(trapnr, signr, str, name, tsk) \
+asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
+{ \
+	if (regs->eflags & VM_MASK) { \
+		if (!handle_vm86_trap((struct vm86_regs *) regs, error_code, trapnr)) \
+			return; \
+		/* else fall through */ \
+	} \
+	tsk->tss.error_code = error_code; \
+	tsk->tss.trap_no = trapnr; \
+	force_sig(signr, tsk); \
+	die_if_kernel(str,regs,error_code); \
+}
+
 #define get_seg_byte(seg,addr) ({ \
 register unsigned char __res; \
-__asm__("push %%fs;mov %%ax,%%fs;movb %%fs:%2,%%al;pop %%fs" \
-	:"=a" (__res):"0" (seg),"m" (*(addr))); \
+__asm__("push %%fs; mov %%ax, %%fs; movb %%fs:%2, %%al; pop %%fs" \
+	: "=a" (__res) \
+	: "0" (seg), "m" (*(addr))); \
 __res;})
 
 #define get_seg_long(seg,addr) ({ \
 register unsigned long __res; \
-__asm__("push %%fs;mov %%ax,%%fs;movl %%fs:%2,%%eax;pop %%fs" \
-	:"=a" (__res):"0" (seg),"m" (*(addr))); \
+__asm__("push %%fs; mov %%ax, %%fs; movl %%fs:%2, %%eax; pop %%fs" \
+	: "=a" (__res) \
+	: "0" (seg), "m" (*(addr))); \
 __res;})
 
 #define _fs() ({ \
 register unsigned short __res; \
-__asm__("mov %%fs,%%ax":"=a" (__res):); \
+__asm__("mov %%fs, %%ax" \
+	: "=a" (__res) \
+	:); \
 __res;})
 
 void page_exception(void);
@@ -81,6 +100,7 @@ asmlinkage void page_fault(void);
 asmlinkage void coprocessor_error(void);
 asmlinkage void reserved(void);
 asmlinkage void alignment_check(void);
+asmlinkage void spurious_interrupt_bug(void);
 
 int kstack_depth_to_print = 24;
 
@@ -162,19 +182,23 @@ int kstack_depth_to_print = 24;
 	do_exit(SIGSEGV);
 }
 
-DO_ERROR( 0, SIGFPE,  "divide error", divide_error, current)
-DO_ERROR( 3, SIGTRAP, "int3", int3, current)
-DO_ERROR( 4, SIGSEGV, "overflow", overflow, current)
-DO_ERROR( 5, SIGSEGV, "bounds", bounds, current)
+DO_VM86_ERROR( 0, SIGFPE,  "divide error", divide_error, current)
+DO_VM86_ERROR( 3, SIGTRAP, "int3", int3, current)
+DO_VM86_ERROR( 4, SIGSEGV, "overflow", overflow, current)
+DO_VM86_ERROR( 5, SIGSEGV, "bounds", bounds, current)
 DO_ERROR( 6, SIGILL,  "invalid operand", invalid_op, current)
-DO_ERROR( 7, SIGSEGV, "device not available", device_not_available, current)
+DO_VM86_ERROR( 7, SIGSEGV, "device not available", device_not_available, current)
 DO_ERROR( 8, SIGSEGV, "double fault", double_fault, current)
 DO_ERROR( 9, SIGFPE,  "coprocessor segment overrun", coprocessor_segment_overrun, last_task_used_math)
 DO_ERROR(10, SIGSEGV, "invalid TSS", invalid_TSS, current)
 DO_ERROR(11, SIGBUS,  "segment not present", segment_not_present, current)
 DO_ERROR(12, SIGBUS,  "stack segment", stack_segment, current)
-DO_ERROR(15, SIGSEGV, "reserved", reserved, current)
 DO_ERROR(17, SIGSEGV, "alignment check", alignment_check, current)
+DO_ERROR(18, SIGSEGV, "reserved", reserved, current)
+
+/* divide_error is after ret_from_sys_call in entry.S */
+asmlinkage void ret_from_sys_call(void)	__asm__("ret_from_sys_call");
+asmlinkage void divide_error(void)	__asm__("divide_error");
 
 asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
 {
@@ -182,29 +206,48 @@ asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
 		handle_vm86_fault((struct vm86_regs *) regs, error_code);
 		return;
 	}
-	die_if_kernel("general protection",regs,error_code);
+
+	/*
+	 * HACK HACK HACK  :)  Fixing the segment invalid on syscall return
+	 * barfage for 2.0 has been put into the too-hard basket but having
+	 * a user producing endless GPFs is unacceptable as well. - Paul G.
+	 */
+	if ((regs->cs & 3) != 3) {
+		if (regs->eip >= (unsigned long)ret_from_sys_call &&
+		    regs->eip < (unsigned long)divide_error) {
+			static int moancount = 0;
+			if (moancount < 5) {
+				printk(KERN_INFO "Ignoring GPF attempt from program \"%s\" (pid %d).\n",
+					current->comm, current->pid);
+				moancount++;
+			}
+			do_exit(SIGSEGV);
+		}
+		else
+			die_if_kernel("general protection",regs,error_code);
+	}
 	current->tss.error_code = error_code;
 	current->tss.trap_no = 13;
-	force_sig(SIGSEGV, current);	
+	force_sig(SIGSEGV, current);
 }
 
 asmlinkage void do_nmi(struct pt_regs * regs, long error_code)
 {
 #ifdef CONFIG_SMP_NMI_INVAL
 	smp_flush_tlb_rcv();
-#else
+#else /* CONFIG_SMP_NMI_INVAL */
 #ifndef CONFIG_IGNORE_NMI
 	printk("Uhhuh. NMI received. Dazed and confused, but trying to continue\n");
 	printk("You probably have a hardware problem with your RAM chips or a\n");
 	printk("power saving mode enabled.\n");
-#endif	
-#endif
+#endif /* !CONFIG_IGNORE_NMI */
+#endif /* !CONFIG_SMP_NMI_INVAL */
 }
 
 asmlinkage void do_debug(struct pt_regs * regs, long error_code)
 {
 	if (regs->eflags & VM_MASK) {
-		handle_vm86_debug((struct vm86_regs *) regs, error_code);
+		handle_vm86_trap((struct vm86_regs *) regs, error_code, 1);
 		return;
 	}
 	force_sig(SIGTRAP, current);
@@ -212,7 +255,7 @@ asmlinkage void do_debug(struct pt_regs * regs, long error_code)
 	current->tss.error_code = error_code;
 	if ((regs->cs & 3) == 0) {
 		/* If this is a kernel mode trap, then reset db7 and allow us to continue */
-		__asm__("movl %0,%%db7"
+		__asm__("movl %0, %%db7"
 			: /* no output */
 			: "r" (0));
 		return;
@@ -243,7 +286,8 @@ void math_error(void)
 	/*
 	 *	Save the info for the exception handler
 	 */
-	__asm__ __volatile__("fnsave %0":"=m" (task->tss.i387.hard));
+	__asm__ __volatile__("fnsave %0"
+		: "=m" (task->tss.i387.hard));
 	task->flags&=~PF_USEDFPU;
 	stts();
 
@@ -256,6 +300,15 @@ asmlinkage void do_coprocessor_error(struct pt_regs * regs, long error_code)
 {
 	ignore_irq13 = 1;
 	math_error();
+}
+
+asmlinkage void do_spurious_interrupt_bug(struct pt_regs * regs,
+					  long error_code)
+{
+#if 0
+	/* No need to warn about this any longer. */
+	printk("Ignoring P6 Local APIC Spurious Interrupt Bug...\n");
+#endif
 }
 
 /*
@@ -281,16 +334,18 @@ asmlinkage void math_state_restore(void)
 	if (last_task_used_math == current)
 		return;
 	if (last_task_used_math)
-		__asm__("fnsave %0":"=m" (last_task_used_math->tss.i387));
+		__asm__("fnsave %0"
+			: "=m" (last_task_used_math->tss.i387));
 	else
 		__asm__("fnclex");
 	last_task_used_math = current;
 #endif
 
 	if(current->used_math)
-		__asm__("frstor %0": :"m" (current->tss.i387));
-	else
-	{
+		__asm__("frstor %0"
+			:
+			: "m" (current->tss.i387));
+	else {
 		/*
 		 *	Our first FPU usage, clean the chip.
 		 */
@@ -312,15 +367,59 @@ asmlinkage void math_emulate(long arg)
 
 #endif /* CONFIG_MATH_EMULATION */
 
+struct {
+	unsigned short limit;
+	unsigned long addr __attribute__((packed));
+} idt_descriptor;
+
+void trap_init_f00f_bug(void)
+{
+	pgd_t * pgd;
+	pmd_t * pmd;
+	pte_t * pte;
+	unsigned long page;
+	unsigned long idtpage = (unsigned long)idt;
+	struct desc_struct *alias_idt;
+
+	printk("alias mapping IDT readonly ... ");
+
+		/* just to get free address space */
+	page = (unsigned long) vmalloc (PAGE_SIZE);
+
+	alias_idt = (void *)(page + (idtpage & ~PAGE_MASK));
+	idt_descriptor.limit = 256*8-1;
+	idt_descriptor.addr = VMALLOC_VMADDR(alias_idt);
+
+	/*
+	 * alias map the original idt to the alias page:
+	 */
+	page = VMALLOC_VMADDR(page);
+	pgd = pgd_offset(&init_mm, page);
+	pmd = pmd_offset(pgd, page);
+	pte = pte_offset(pmd, page);
+		/* give memory back to the pool, don't need it */
+	free_page(pte_page(*pte));
+		/* ... and set the readonly alias */
+	set_pte(pte, mk_pte(idtpage  & PAGE_MASK, PAGE_KERNEL));
+	*pte = pte_wrprotect(*pte);
+	flush_tlb_all();
+
+		/* now we have the mapping ok, we can do LIDT */
+	 __asm__ __volatile__("\tlidt %0"
+		: "=m" (idt_descriptor));
+
+	printk(" ... done\n");
+}
+
+
 void trap_init(void)
 {
 	int i;
 	struct desc_struct * p;
 	static int smptrap=0;
-	
-	if(smptrap)
-	{
-		__asm__("pushfl ; andl $0xffffbfff,(%esp) ; popfl");
+
+	if(smptrap) {
+		__asm__("pushfl; andl $0xffffbfff, (%esp); popfl");
 		load_ldt(0);
 		return;
 	}
@@ -343,7 +442,7 @@ void trap_init(void)
 	set_trap_gate(12,&stack_segment);
 	set_trap_gate(13,&general_protection);
 	set_trap_gate(14,&page_fault);
-	set_trap_gate(15,&reserved);
+	set_trap_gate(15,&spurious_interrupt_bug);
 	set_trap_gate(16,&coprocessor_error);
 	set_trap_gate(17,&alignment_check);
 	for (i=18;i<48;i++)
@@ -362,7 +461,7 @@ void trap_init(void)
 		p++;
 	}
 /* Clear NT, so that we won't have troubles with that later on */
-	__asm__("pushfl ; andl $0xffffbfff,(%esp) ; popfl");
+	__asm__("pushfl; andl $0xffffbfff, (%esp); popfl");
 	load_TR(0);
 	load_ldt(0);
 }

@@ -13,6 +13,11 @@
  *        controller).
  *  Modified by Matti Aarnio
  *        Accept parameters from LILO cmd-line. -- 1-Oct-94
+ *  Modified by Mike McLagan <mike.mclagan@linux.org>
+ *        Recognise extended mode on AHA1542CP, different bit than 1542CF
+ *        1-Jan-97
+ *  Modified by Bjorn L. Thordarson and Einar Thor Einarsson
+ *        Recognize that DMA0 is valid DMA channel -- 13-Jul-98
  */
 
 #include <linux/module.h>
@@ -86,13 +91,6 @@ static char *setup_str[MAXBOARDS] = {(char *)NULL,(char *)NULL};
  *		    Factory default is 5 MB/s.
  */
 
-
-/* The DMA-Controller.  We need to fool with this because we want to 
-   be able to use the aha1542 without having to have the bios enabled */
-#define DMA_MODE_REG	0xd6
-#define DMA_MASK_REG	0xd4
-#define	CASCADE		0xc0
-
 #define BIOS_TRANSLATION_1632 0  /* Used by some old 1542A boards */
 #define BIOS_TRANSLATION_6432 1 /* Default case these days */
 #define BIOS_TRANSLATION_25563 2 /* Big disk case */
@@ -122,8 +120,8 @@ static int aha1542_restart(struct Scsi_Host * shost);
 #define aha1542_intr_reset(base)  outb(IRST, CONTROL(base))
 
 #define WAIT(port, mask, allof, noneof)					\
- { register WAITbits;							\
-   register WAITtimeout = WAITnexttimeout;				\
+ { register int WAITbits;							\
+   register int WAITtimeout = WAITnexttimeout;				\
    while (1) {								\
      WAITbits = inb(port) & (mask);					\
      if ((WAITbits & (allof)) == (allof) && ((WAITbits & (noneof)) == 0)) \
@@ -135,8 +133,8 @@ static int aha1542_restart(struct Scsi_Host * shost);
 /* Similar to WAIT, except we use the udelay call to regulate the
    amount of time we wait.  */
 #define WAITd(port, mask, allof, noneof, timeout)			\
- { register WAITbits;							\
-   register WAITtimeout = timeout;					\
+ { register int WAITbits;							\
+   register int WAITtimeout = timeout;					\
    while (1) {								\
      WAITbits = inb(port) & (mask);					\
      if ((WAITbits & (allof)) == (allof) && ((WAITbits & (noneof)) == 0)) \
@@ -209,7 +207,7 @@ static int aha1542_in(unsigned int base, unchar *cmdp, int len)
 
 /* Similar to aha1542_in, except that we wait a very short period of time.
    We use this if we know the board is alive and awake, but we are not sure
-   if the board will respond the the command we are about to send or not */
+   if the board will respond to the command we are about to send or not */
 static int aha1542_in1(unsigned int base, unchar *cmdp, int len)
 {
     unsigned long flags;
@@ -358,7 +356,7 @@ static void aha1542_intr_handle(int irq, void *dev_id, struct pt_regs *regs)
     void (*my_done)(Scsi_Cmnd *) = NULL;
     int errstatus, mbi, mbo, mbistatus;
     int number_serviced;
-    unsigned int flags;
+    unsigned long flags;
     struct Scsi_Host * shost;
     Scsi_Cmnd * SCtmp;
     int flag;
@@ -745,8 +743,8 @@ static int aha1542_getconfig(int base_io, unsigned char * irq_level, unsigned ch
     *dma_chan = 5;
     break;
   case 0x01:
-    printk("DMA priority 0 not available for Adaptec driver\n");
-    return -1;
+    *dma_chan = 0;
+    break;
   case 0:
     /* This means that the adapter, although Adaptec 1542 compatible, doesn't use a DMA channel.
        Currently only aware of the BusLogic BT-445S VL-Bus adapter which needs this. */
@@ -805,7 +803,9 @@ static int aha1542_mbenable(int base)
      mbenable_cmd[0]=CMD_MBENABLE;
      mbenable_cmd[1]=0;
      mbenable_cmd[2]=mbenable_result[1];
-     if(mbenable_result[1] & 1) retval = BIOS_TRANSLATION_25563;
+
+     if((mbenable_result[0] & 0x08) && (mbenable_result[1] & 0x03)) retval = BIOS_TRANSLATION_25563;
+
      aha1542_out(base,mbenable_cmd,3);
      WAIT(INTRFLAGS(base),INTRMASK,HACC,0);
   };
@@ -1002,6 +1002,7 @@ int aha1542_detect(Scsi_Host_Template * tpnt)
 		    cli();
 		    if (request_irq(irq_level,aha1542_intr_handle, 0, "aha1542", NULL)) {
 			    printk("Unable to allocate IRQ for adaptec controller.\n");
+			    restore_flags(flags);
 			    goto unregister;
 		    }
 		    
@@ -1009,12 +1010,13 @@ int aha1542_detect(Scsi_Host_Template * tpnt)
 			    if (request_dma(dma_chan,"aha1542")) {
 				    printk("Unable to allocate DMA channel for Adaptec.\n");
 				    free_irq(irq_level, NULL);
+				    restore_flags(flags);
 				    goto unregister;
 			    }
 			    
-			    if (dma_chan >= 5) {
-				    outb((dma_chan - 4) | CASCADE, DMA_MODE_REG);
-				    outb(dma_chan - 4, DMA_MASK_REG);
+			    if (dma_chan == 0 || dma_chan >= 5) {
+				    set_dma_mode(dma_chan, DMA_MODE_CASCADE);
+				    enable_dma(dma_chan);
 			    }
 		    }
 		    aha_host[irq_level - 9] = shpnt;
@@ -1025,7 +1027,7 @@ int aha1542_detect(Scsi_Host_Template * tpnt)
 		    shpnt->dma_channel = dma_chan;
 		    shpnt->irq = irq_level;
 		    HOSTDATA(shpnt)->bios_translation  = trans;
-		    if(trans == 2) 
+		    if(trans == BIOS_TRANSLATION_25563) 
 		      printk("aha1542.c: Using extended bios translation\n");
 		    HOSTDATA(shpnt)->aha1542_last_mbi_used  = (2*AHA1542_MAILBOXES - 1);
 		    HOSTDATA(shpnt)->aha1542_last_mbo_used  = (AHA1542_MAILBOXES - 1);
@@ -1298,8 +1300,8 @@ int aha1542_biosparam(Scsi_Disk * disk, kdev_t dev, int * ip)
   int size = disk->capacity;
 
   translation_algorithm = HOSTDATA(disk->device->host)->bios_translation;
-  /* Should this be > 1024, or >= 1024?  Enquiring minds want to know. */
-  if((size>>11) > 1024 && translation_algorithm == 2) {
+
+  if((size>>11) > 1024 && translation_algorithm == BIOS_TRANSLATION_25563) {
     /* Please verify that this is the same as what DOS returns */
     ip[0] = 255;
     ip[1] = 63;
@@ -1308,8 +1310,8 @@ int aha1542_biosparam(Scsi_Disk * disk, kdev_t dev, int * ip)
     ip[0] = 64;
     ip[1] = 32;
     ip[2] = size >> 11;
-  };
-/*  if (ip[2] >= 1024) ip[2] = 1024; */
+  }
+
   return 0;
 }
 

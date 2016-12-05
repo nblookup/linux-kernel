@@ -147,14 +147,14 @@ struct i596_scp {
 };
 
 struct i596_private {
-    struct i596_scp scp;
-    struct i596_iscp iscp;
-    struct i596_scb scb;
-    struct i596_cmd set_add;
+    volatile struct i596_scp scp;
+    volatile struct i596_iscp iscp;
+    volatile struct i596_scb scb;
+    volatile struct i596_cmd set_add;
     char eth_addr[8];
-    struct i596_cmd set_conf;
+    volatile struct i596_cmd set_conf;
     char i596_config[16];
-    struct i596_cmd tdr;
+    volatile struct i596_cmd tdr;
     unsigned long stat;
     int last_restart;
     struct i596_rfd *rx_tail;
@@ -930,7 +930,7 @@ i596_close(struct device *dev)
     while (lp->scb.status, lp->scb.command)
 	if (--boguscnt == 0)
 	{
-	    printk("%s: close timed timed out with status %4.4x, cmd %4.4x.\n",
+	    printk("%s: close timed out with status %4.4x, cmd %4.4x.\n",
 		   dev->name, lp->scb.status, lp->scb.command);
 	    break;
     	}

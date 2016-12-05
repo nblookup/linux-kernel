@@ -22,7 +22,7 @@ file linux/README.  It generally goes like:
 	make config
 	make dep
 	make clean
-	make zImage or make zlilo
+	make zImage or make bzImage or make zlilo
 
 In "make config", you select what you want to include in the "resident"
 kernel and what features you want to have available as loadable modules.
@@ -121,7 +121,7 @@ And, yes, there _are_ man-pages for all this...
 
 To use modprobe successfully, you generally place the following
 command in your /etc/rc.d/rc.S script.  (Read more about this in the
-"rc.hints" file in the module utilities package, "modules-x.y.z.tar.gz".)
+"rc.hints" file in the module utilities package, "modutils-x.y.z.tar.gz".)
 
 	/sbin/depmod -a
 
@@ -148,7 +148,7 @@ current kernel. (Read more about this in the module utilities package.)
 
 Whenever a program wants the kernel to use a feature that is only
 available as a loadable module, and if the kernel hasn't got the
-module installed yet, the kernel will ask the kerneld deamon to take
+module installed yet, the kernel will ask the kerneld daemon to take
 care of the situation and make the best of it.
 
 This is what happens:
@@ -166,7 +166,7 @@ This is what happens:
 	  has decided that the kernel needs.  Every module will be
 	  configured according to the "options" lines in "/etc/conf.modules".
 	- modprobe exits and kerneld tells the kernel that the request
-	  succeded (or failed...)
+	  succeeded (or failed...)
 	- The kernel uses the freshly installed feature just as if it
 	  had been configured into the kernel as a "resident" part.
 

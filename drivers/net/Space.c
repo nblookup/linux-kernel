@@ -13,7 +13,7 @@
  *		field of the 'device' structure to store the unit number...
  *		-FvK
  *
- * Version:	@(#)Space.c	1.0.7	08/12/93
+ * Version:	@(#)Space.c	1.0.8	07/31/96
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -41,15 +41,18 @@
 extern int tulip_probe(struct device *dev);
 extern int hp100_probe(struct device *dev);
 extern int ultra_probe(struct device *dev);
+extern int ultra32_probe(struct device *dev);
 extern int wd_probe(struct device *dev);
 extern int el2_probe(struct device *dev);
 extern int ne_probe(struct device *dev);
+extern int ne2k_pci_probe(struct device *dev);
 extern int hp_probe(struct device *dev);
 extern int hp_plus_probe(struct device *dev);
 extern int znet_probe(struct device *);
 extern int express_probe(struct device *);
 extern int eepro_probe(struct device *);
 extern int el3_probe(struct device *);
+extern int tc515_probe(struct device *);
 extern int at1500_probe(struct device *);
 extern int at1700_probe(struct device *);
 extern int fmv18x_probe(struct device *);
@@ -59,6 +62,7 @@ extern int apricot_probe(struct device *);
 extern int ewrk3_probe(struct device *);
 extern int de4x5_probe(struct device *);
 extern int el1_probe(struct device *);
+extern int via_rhine_probe(struct device *);
 #if	defined(CONFIG_WAVELAN)
 extern int wavelan_probe(struct device *);
 #endif	/* defined(CONFIG_WAVELAN) */
@@ -78,11 +82,22 @@ extern int atarilance_probe(struct device *);
 extern int a2065_probe(struct device *);
 extern int ariadne_probe(struct device *);
 extern int hydra_probe(struct device *);
-
+extern int yellowfin_probe(struct device *);
+extern int eepro100_probe(struct device *);
+extern int epic100_probe(struct device *);
+extern int rtl8139_probe(struct device *);
+extern int tlan_probe(struct device *);
+extern int isa515_probe(struct device *);
+extern int pcnet32_probe(struct device *);
+extern int lance_probe(struct device *);
 /* Detachable devices ("pocket adaptors") */
 extern int atp_init(struct device *);
 extern int de600_probe(struct device *);
 extern int de620_probe(struct device *);
+/* The shaper hook */
+extern int shaper_probe(struct device *);
+/* Red Creek PCI hook */
+extern int rcpci_probe(struct device *);
 
 static int
 ethif_probe(struct device *dev)
@@ -93,53 +108,83 @@ ethif_probe(struct device *dev)
 	return 1;		/* ENXIO */
 
     if (1
+	/* All PCI probes are safe, and thus should be first. */
+#ifdef CONFIG_DE4X5             /* DEC DE425, DE434, DE435 adapters */
+	&& de4x5_probe(dev)
+#endif
 #ifdef CONFIG_DGRS
 	&& dgrs_probe(dev)
 #endif
-#if defined(CONFIG_VORTEX)
-	&& tc59x_probe(dev)
+#ifdef CONFIG_EEXPRESS_PRO100B	/* Intel EtherExpress Pro100B */
+	&& eepro100_probe(dev)
 #endif
-#if defined(CONFIG_SEEQ8005)
-	&& seeq8005_probe(dev)
-#endif
-#if defined(CONFIG_DEC_ELCP)
-	&& tulip_probe(dev)
+#ifdef CONFIG_EPIC
+	&& epic100_probe(dev)
 #endif
 #if defined(CONFIG_HP100)
 	&& hp100_probe(dev)
 #endif	
+#if defined(CONFIG_NE2K_PCI)
+	&& ne2k_pci_probe(dev)
+#endif
+#ifdef CONFIG_PCNET32
+	&& pcnet32_probe(dev)
+#endif
+#ifdef CONFIG_RTL8139
+	&& rtl8139_probe(dev)
+#endif
+#if defined(CONFIG_VIA_RHINE)
+	&& via_rhine_probe(dev)
+#endif
+#if defined(CONFIG_VORTEX)
+	&& tc59x_probe(dev)
+#endif
+#if defined(CONFIG_DEC_ELCP)
+	&& tulip_probe(dev)
+#endif
+#ifdef CONFIG_YELLOWFIN
+	&& yellowfin_probe(dev)
+#endif
+	/* Next mostly-safe EISA-only drivers. */
+#ifdef CONFIG_AC3200		/* Ansel Communications EISA 3200. */
+	&& ac3200_probe(dev)
+#endif
+#if defined(CONFIG_ULTRA32)
+	&& ultra32_probe(dev)
+#endif
+	/* Third, sensitive ISA boards. */
+#ifdef CONFIG_AT1700
+	&& at1700_probe(dev)
+#endif
 #if defined(CONFIG_ULTRA)
 	&& ultra_probe(dev)
 #endif
 #if defined(CONFIG_SMC9194)
 	&& smc_init(dev)
 #endif
-#if defined(CONFIG_WD80x3) || defined(WD80x3)
+#if defined(CONFIG_WD80x3)
 	&& wd_probe(dev)
 #endif
-#if defined(CONFIG_EL2) || defined(EL2)	/* 3c503 */
+#if defined(CONFIG_EL2)		/* 3c503 */
 	&& el2_probe(dev)
 #endif
-#if defined(CONFIG_HPLAN) || defined(HPLAN)
+#if defined(CONFIG_HPLAN)
 	&& hp_probe(dev)
 #endif
 #if defined(CONFIG_HPLAN_PLUS)
 	&& hp_plus_probe(dev)
 #endif
-#ifdef CONFIG_AC3200		/* Ansel Communications EISA 3200. */
-	&& ac3200_probe(dev)
+#if defined(CONFIG_SEEQ8005)
+	&& seeq8005_probe(dev)
 #endif
 #ifdef CONFIG_E2100		/* Cabletron E21xx series. */
 	&& e2100_probe(dev)
 #endif
-#if defined(CONFIG_NE2000) || defined(NE2000)
+#if defined(CONFIG_NE2000)
 	&& ne_probe(dev)
 #endif
 #ifdef CONFIG_AT1500
 	&& at1500_probe(dev)
-#endif
-#ifdef CONFIG_AT1700
-	&& at1700_probe(dev)
 #endif
 #ifdef CONFIG_FMV18X		/* Fujitsu FMV-181/182 */
 	&& fmv18x_probe(dev)
@@ -149,6 +194,9 @@ ethif_probe(struct device *dev)
 #endif
 #ifdef CONFIG_EL3		/* 3c509 */
 	&& el3_probe(dev)
+#endif
+#ifdef CONFIG_3C515		/* 3c515 */
+	&& tc515_probe(dev)
 #endif
 #ifdef CONFIG_ZNET		/* Zenith Z-Note and some IBM Thinkpads. */
 	&& znet_probe(dev)
@@ -164,9 +212,6 @@ ethif_probe(struct device *dev)
 #endif
 #ifdef CONFIG_EWRK3             /* DEC EtherWORKS 3 */
         && ewrk3_probe(dev)
-#endif
-#ifdef CONFIG_DE4X5             /* DEC DE425, DE434, DE435 adapters */
-        && de4x5_probe(dev)
 #endif
 #ifdef CONFIG_APRICOT		/* Apricot I82596 */
 	&& apricot_probe(dev)
@@ -195,6 +240,12 @@ ethif_probe(struct device *dev)
 #ifdef CONFIG_NI52
 	&& ni52_probe(dev)
 #endif
+#ifdef CONFIG_NI65
+	&& ni65_probe(dev)
+#endif
+#ifdef CONFIG_LANCE	/* ISA LANCE boards */
+	&& lance_probe(dev)
+#endif
 #ifdef CONFIG_ATARILANCE	/* Lance-based Atari ethernet boards */
 	&& atarilance_probe(dev)
 #endif
@@ -210,6 +261,12 @@ ethif_probe(struct device *dev)
 #ifdef CONFIG_SUNLANCE
 	&& sparc_lance_probe(dev)
 #endif
+#ifdef CONFIG_TLAN
+	&& tlan_probe(dev)
+#endif
+#ifdef CONFIG_LANCE
+	&& lance_probe(dev)
+#endif
 	&& 1 ) {
 	return 1;	/* -ENODEV or -EAGAIN would be more accurate. */
     }
@@ -222,18 +279,6 @@ ethif_probe(struct device *dev)
 
 #   undef NEXT_DEV
 #   define NEXT_DEV	(&sdla0_dev)
-#endif
-
-#ifdef CONFIG_NETROM
-	extern int nr_init(struct device *);
-	
-	static struct device nr3_dev = { "nr3", 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV, nr_init, };
-	static struct device nr2_dev = { "nr2", 0, 0, 0, 0, 0, 0, 0, 0, 0, &nr3_dev, nr_init, };
-	static struct device nr1_dev = { "nr1", 0, 0, 0, 0, 0, 0, 0, 0, 0, &nr2_dev, nr_init, };
-	static struct device nr0_dev = { "nr0", 0, 0, 0, 0, 0, 0, 0, 0, 0, &nr1_dev, nr_init, };
-
-#   undef NEXT_DEV
-#   define	NEXT_DEV	(&nr0_dev)
 #endif
 
 /* Run-time ATtachable (Pocket) devices have a different (not "eth#") name. */
@@ -306,6 +351,16 @@ static struct device slip_bootstrap = {
 #define NEXT_DEV (&slip_bootstrap)
 #endif	/* SLIP */
   
+#if defined(CONFIG_MKISS)
+	/* To be exact, this node just hooks the initialization
+	   routines to the device structures.			*/
+extern int mkiss_init_ctrl_dev(struct device *);
+static struct device mkiss_bootstrap = {
+  "mkiss_proto", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NEXT_DEV, mkiss_init_ctrl_dev, };
+#undef NEXT_DEV
+#define NEXT_DEV (&mkiss_bootstrap)
+#endif	/* MKISS */
+  
 #if defined(CONFIG_STRIP)
 extern int strip_init_ctrl_dev(struct device *);
 static struct device strip_bootstrap = {
@@ -313,6 +368,20 @@ static struct device strip_bootstrap = {
 #undef NEXT_DEV
 #define NEXT_DEV (&strip_bootstrap)
 #endif   /* STRIP */
+
+#if defined(CONFIG_SHAPER)
+static struct device shaper_bootstrap = {
+    "shaper", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NEXT_DEV, shaper_probe, };
+#undef NEXT_DEV
+#define NEXT_DEV (&shaper_bootstrap)
+#endif   /* SHAPER */
+
+#if defined(CONFIG_RCPCI)
+static struct device rcpci_bootstrap = {
+    "rcpci", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NEXT_DEV, rcpci_probe, };
+#undef NEXT_DEV
+#define NEXT_DEV (&rcpci_bootstrap)
+#endif   /* RCPCI */
 
 #if defined(CONFIG_PPP)
 extern int ppp_init(struct device *);
@@ -381,8 +450,31 @@ struct device eql_dev = {
 #   define	NEXT_DEV	(&ibmtr_dev0)
 
 #endif 
+
+#ifdef CONFIG_DEFXX
+	extern int dfx_probe(struct device *dev);
+	static struct device fddi7_dev =
+		{"fddi7", 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV, dfx_probe};
+	static struct device fddi6_dev =
+		{"fddi6", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi7_dev, dfx_probe};
+	static struct device fddi5_dev =
+		{"fddi5", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi6_dev, dfx_probe};
+	static struct device fddi4_dev =
+		{"fddi4", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi5_dev, dfx_probe};
+	static struct device fddi3_dev =
+		{"fddi3", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi4_dev, dfx_probe};
+	static struct device fddi2_dev =
+		{"fddi2", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi3_dev, dfx_probe};
+	static struct device fddi1_dev =
+		{"fddi1", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi2_dev, dfx_probe};
+	static struct device fddi0_dev =
+		{"fddi0", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi1_dev, dfx_probe};
+
+#undef	NEXT_DEV
+#define	NEXT_DEV	(&fddi0_dev)
+#endif 
+
 #ifdef CONFIG_NET_IPIP
-#ifdef CONFIG_IP_FORWARD
 	extern int tunnel_init(struct device *);
 	
 	static struct device tunnel_dev1 = 
@@ -415,22 +507,22 @@ struct device eql_dev = {
 #   undef	NEXT_DEV
 #   define	NEXT_DEV	(&tunnel_dev0)
 
-#endif 
 #endif
 
-#ifdef CONFIG_AP1000
+#ifdef CONFIG_APFDDI
     extern int apfddi_init(struct device *dev);
     static struct device fddi_dev = {
 	"fddi", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NEXT_DEV, apfddi_init };
 #   undef       NEXT_DEV
 #   define      NEXT_DEV        (&fddi_dev)
+#endif
 
+#ifdef CONFIG_APBIF
     extern int bif_init(struct device *dev);
     static struct device bif_dev = {
         "bif", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NEXT_DEV, bif_init };
 #   undef       NEXT_DEV
 #   define      NEXT_DEV        (&bif_dev)
-
 #endif
 	
 extern int loopback_init(struct device *dev);

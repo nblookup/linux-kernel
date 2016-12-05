@@ -266,7 +266,7 @@ static struct vm_area_struct * find_extend_vma(struct task_struct * tsk,
 	struct vm_area_struct * vma;
 
 	addr &= PAGE_MASK;
-	vma = find_vma(tsk,addr);
+	vma = find_vma(tsk->mm,addr);
 	if (!vma)
 		return NULL;
 	if (vma->vm_start <= addr)
@@ -641,7 +641,7 @@ asmlinkage void syscall_trace(void)
 		return;
 	current->exit_code = SIGTRAP;
 	current->state = TASK_STOPPED;
-	notify_parent(current);
+	notify_parent(current, SIGCHLD);
 	schedule();
 	/*
 	 * this isn't the same as continuing with a signal, but it will do

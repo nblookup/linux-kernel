@@ -26,16 +26,15 @@
 #include "constants.h"
 
 #include "sd.h"
+#include <scsi/scsicam.h>
 /*
  * This source file contains the symbol table used by scsi loadable
  * modules.
  */
-extern int scsicam_bios_param (Disk * disk,
-                               int dev,	int *ip	); 
-
 
 extern void print_command (unsigned char *command);
 extern void print_sense(const char * devclass, Scsi_Cmnd * SCpnt);
+extern int scsi_ioctl_send_command(Scsi_Device *dev, void *buffer);
 
 struct symbol_table scsi_symbol_table = {
 #include <linux/symtab_begin.h>
@@ -46,6 +45,7 @@ struct symbol_table scsi_symbol_table = {
     X(scsi_register),
     X(scsi_unregister),
     X(scsicam_bios_param),
+    X(scsi_partsize),
     X(allocate_device),
     X(scsi_do_cmd),
     X(scsi_command_size),
@@ -63,6 +63,8 @@ struct symbol_table scsi_symbol_table = {
     X(print_Scsi_Cmnd),
     X(scsi_mark_host_reset),
     X(scsi_mark_bus_reset),
+    X(scsi_device_types),
+    X(scsi_ioctl_send_command),
 #if defined(CONFIG_PROC_FS)
     X(proc_print_scsidevice),
 #endif

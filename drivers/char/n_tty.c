@@ -89,6 +89,13 @@ void n_tty_flush_buffer(struct tty_struct * tty)
  */
 int n_tty_chars_in_buffer(struct tty_struct *tty)
 {
+	if (tty->icanon) {
+		if (!tty->canon_data) return 0;
+
+		return (tty->canon_head > tty->read_tail) ?
+			tty->canon_head - tty->read_tail :
+			tty->canon_head + (N_TTY_BUF_SIZE - tty->read_tail);
+	}
 	return tty->read_cnt;
 }
 
@@ -201,7 +208,7 @@ static void eraser(unsigned char c, struct tty_struct *tty)
 			tty->read_head = tty->canon_head;
 			return;
 		}
-		if (!L_ECHOK(tty) || !L_ECHOKE(tty)) {
+		if (!L_ECHOK(tty) || !L_ECHOKE(tty) || !L_ECHOE(tty)) {
 			tty->read_cnt -= ((tty->read_head - tty->canon_head) &
 					  (N_TTY_BUF_SIZE - 1));
 			tty->read_head = tty->canon_head;
@@ -236,7 +243,7 @@ static void eraser(unsigned char c, struct tty_struct *tty)
 					tty->erasing = 1;
 				}
 				echo_char(c, tty);
-			} else if (!L_ECHOE(tty)) {
+			} else if (kill_type == ERASE && !L_ECHOE(tty)) {
 				echo_char(ERASE_CHAR(tty), tty);
 			} else if (c == '\t') {
 				unsigned int col = tty->canon_column;
@@ -290,11 +297,11 @@ static void eraser(unsigned char c, struct tty_struct *tty)
 		finish_erasing(tty);
 }
 
-static void isig(int sig, struct tty_struct *tty)
+static inline void isig(int sig, struct tty_struct *tty, int flush)
 {
 	if (tty->pgrp > 0)
 		kill_pg(tty->pgrp, sig, 1);
-	if (!L_NOFLSH(tty)) {
+	if (flush || !L_NOFLSH(tty)) {
 		n_tty_flush_buffer(tty);
 		if (tty->driver.flush_buffer)
 			tty->driver.flush_buffer(tty);
@@ -306,7 +313,7 @@ static inline void n_tty_receive_break(struct tty_struct *tty)
 	if (I_IGNBRK(tty))
 		return;
 	if (I_BRKINT(tty)) {
-		isig(SIGINT, tty);
+		isig(SIGINT, tty, 1);
 		return;
 	}
 	if (I_PARMRK(tty)) {
@@ -340,8 +347,10 @@ static inline void n_tty_receive_parity_error(struct tty_struct *tty,
 		put_tty_queue('\377', tty);
 		put_tty_queue('\0', tty);
 		put_tty_queue(c, tty);
-	} else
+	} else	if (I_INPCK(tty))
 		put_tty_queue('\0', tty);
+	else
+		put_tty_queue(c, tty);
 	wake_up_interruptible(&tty->read_wait);
 }
 
@@ -415,17 +424,17 @@ static inline void n_tty_receive_char(struct tty_struct *tty, unsigned char c)
 		}
 	}
 	if (L_ISIG(tty)) {
-		if (c == INTR_CHAR(tty)) {
-			isig(SIGINT, tty);
-			return;
-		}
-		if (c == QUIT_CHAR(tty)) {
-			isig(SIGQUIT, tty);
-			return;
-		}
+		int signal;
+		signal = SIGINT;
+		if (c == INTR_CHAR(tty))
+			goto send_signal;
+		signal = SIGQUIT;
+		if (c == QUIT_CHAR(tty))
+			goto send_signal;
+		signal = SIGTSTP;
 		if (c == SUSP_CHAR(tty)) {
-			if (!is_orphaned_pgrp(tty->pgrp))
-				isig(SIGTSTP, tty);
+send_signal:
+			isig(signal, tty, 0);
 			return;
 		}
 	}
@@ -793,7 +802,7 @@ do_it_again:
 		  	current->timeout = (unsigned long) -1;
 			if (time)
 				tty->minimum_to_wake = 1;
-			else if (!tty->read_wait ||
+			else if (!waitqueue_active(&tty->read_wait) ||
 				 (tty->minimum_to_wake > minimum))
 				tty->minimum_to_wake = minimum;
 		} else {
@@ -905,7 +914,7 @@ do_it_again:
 	}
 	remove_wait_queue(&tty->read_wait, &wait);
 
-	if (!tty->read_wait)
+	if (!waitqueue_active(&tty->read_wait))
 		tty->minimum_to_wake = minimum;
 
 	current->state = TASK_RUNNING;
@@ -989,7 +998,7 @@ static int normal_select(struct tty_struct * tty, struct inode * inode,
 				return 1;
 			if (tty_hung_up_p(file))
 				return 1;
-			if (!tty->read_wait) {
+			if (!waitqueue_active(&tty->read_wait)) {
 				if (MIN_CHAR(tty) && !TIME_CHAR(tty))
 					tty->minimum_to_wake = MIN_CHAR(tty);
 				else

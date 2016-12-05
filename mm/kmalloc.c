@@ -16,13 +16,11 @@
 
 #include <linux/mm.h>
 #include <linux/delay.h>
+#include <linux/config.h>
 #include <linux/interrupt.h>
 
 #include <asm/system.h>
 #include <asm/dma.h>
-
-/* Define this if you want slow routines that try to trip errors */
-#undef SADISTIC_KMALLOC
 
 /* Private flags. */
 
@@ -295,7 +293,7 @@ found_it:
 	bucket->nbytesmalloced += size;
 	p->bh_flags = type;	/* As of now this block is officially in use */
 	p->bh_length = size;
-#ifdef SADISTIC_KMALLOC
+#if CONFIG_SADISTIC_KMALLOC
 	memset(p+1, 0xf0, size);
 #endif
 	return p + 1;		/* Pointer arithmetic: increments past header */
@@ -362,7 +360,8 @@ no_free_page:
 	}
 	{
 		static unsigned long last = 0;
-		if (priority != GFP_BUFFER && (last + 10 * HZ < jiffies)) {
+		if (priority != GFP_BUFFER && priority != GFP_IO &&
+		    (last + 10 * HZ < jiffies)) {
 			last = jiffies;
 			printk("Couldn't get a free page.....\n");
 		}
@@ -404,7 +403,7 @@ void kfree(void *__ptr)
 	if (ptr->bh_flags != MF_USED)
 		goto bad_order;
 	ptr->bh_flags = MF_FREE;	/* As of now this block is officially free */
-#ifdef SADISTIC_KMALLOC
+#if CONFIG_SADISTIC_KMALLOC
 	memset(ptr+1, 0xe0, ptr->bh_length);
 #endif
 	save_flags(flags);
@@ -447,6 +446,6 @@ bad_order:
 	return;
 
 not_on_freelist:
-	printk("Ooops. page %p doesn't show on freelist.\n", page);
 	restore_flags(flags);
+	printk("Ooops. page %p doesn't show on freelist.\n", page);
 }

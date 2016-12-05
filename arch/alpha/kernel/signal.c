@@ -30,24 +30,42 @@ extern int ptrace_cancel_bpt (struct task_struct *child);
 /*
  * The OSF/1 sigprocmask calling sequence is different from the
  * C sigprocmask() sequence..
+ *
+ * how:
+ * 1 - SIG_BLOCK
+ * 2 - SIG_UNBLOCK
+ * 3 - SIG_SETMASK
+ *
+ * We change the range to -1 .. 1 in order to let gcc easily
+ * use the conditional move instructions.
  */
-asmlinkage unsigned long osf_sigprocmask(int how, unsigned long newmask)
+asmlinkage unsigned long osf_sigprocmask(int how, unsigned long newmask,
+	long a2, long a3, long a4, long a5, struct pt_regs regs)
 {
-	unsigned long oldmask = current->blocked;
+	unsigned long ok, oldmask;
+	struct task_struct * tsk;
 
-	newmask &= _BLOCKABLE;
-	switch (how) {
-		case SIG_BLOCK:
-			current->blocked |= newmask;
-			return oldmask;
-		case SIG_UNBLOCK:
-			current->blocked &= ~newmask;
-			return oldmask;
-		case SIG_SETMASK:
-			current->blocked = newmask;
-			return oldmask;
+	ok = how-1;		/*  0 .. 2 */
+	tsk = current;
+	ok = ok <= 2;
+	oldmask = -EINVAL;
+	if (ok) {
+		long sign;		/* -1 .. 1 */
+		unsigned long block, unblock;
+
+		oldmask = tsk->blocked;
+		newmask &= _BLOCKABLE;
+		sign = how-2;
+		unblock = oldmask & ~newmask;
+		block = oldmask | newmask;
+		if (!sign)
+			block = unblock;
+		regs.r0 = 0;	/* special no error return */
+		if (sign <= 0)
+			newmask = block;
+		tsk->blocked = newmask;
 	}
-	return -EINVAL;
+	return oldmask;
 }
 
 /*
@@ -130,24 +148,28 @@ asmlinkage void do_sigreturn(struct sigcontext_struct * sc,
 /*
  * Set up a signal frame...
  */
-static void setup_frame(struct sigaction * sa, struct sigcontext_struct ** fp,
-			unsigned long pc, struct pt_regs * regs,
+static void setup_frame(struct sigaction * sa,
+			struct pt_regs * regs,
 			struct switch_stack * sw, int signr,
 			unsigned long oldmask)
 {
 	int i;
+	unsigned long oldsp;
 	struct sigcontext_struct * sc;
 
-	sc = *fp;
+	oldsp = rdusp();
+	sc = ((struct sigcontext_struct *) oldsp) - 1;
+
 	/* check here if we would need to switch stacks.. */
-	sc--;
 	if (verify_area(VERIFY_WRITE, sc, sizeof(*sc)))
 		do_exit(SIGSEGV);
 
+	wrusp((unsigned long) sc);
+
 	put_fs_quad(oldmask, &sc->sc_mask);
 	put_fs_quad(8, &sc->sc_ps);
-	put_fs_quad(pc, &sc->sc_pc);
-	put_fs_quad((unsigned long)*fp, sc->sc_regs+30);
+	put_fs_quad(regs->pc, &sc->sc_pc);
+	put_fs_quad(oldsp, sc->sc_regs+30);
 
 	put_fs_quad(regs->r0 , sc->sc_regs+0);
 	put_fs_quad(regs->r1 , sc->sc_regs+1);
@@ -181,6 +203,9 @@ static void setup_frame(struct sigaction * sa, struct sigcontext_struct ** fp,
 	put_fs_quad(regs->gp , sc->sc_regs+29);
 	for (i = 0; i < 31; i++)
 		put_fs_quad(sw->fp[i], sc->sc_fpregs+i);
+	put_fs_quad(regs->trap_a0, &sc->sc_traparg_a0);
+	put_fs_quad(regs->trap_a1, &sc->sc_traparg_a1);
+	put_fs_quad(regs->trap_a2, &sc->sc_traparg_a2);
 
 	/*
 	 * The following is:
@@ -193,12 +218,49 @@ static void setup_frame(struct sigaction * sa, struct sigcontext_struct ** fp,
 	 */
 	put_fs_quad(0x43ecf40047de0410, sc->sc_retcode+0);
 	put_fs_quad(0x0000000000000083, sc->sc_retcode+1);
+	imb();
+
+	/* "return" to the handler */
+	regs->r27 = regs->pc = (unsigned long) sa->sa_handler;
 	regs->r26 = (unsigned long) sc->sc_retcode;
 	regs->r16 = signr;		/* a0: signal number */
 	regs->r17 = 0;			/* a1: exception code; see gentrap.h */
 	regs->r18 = (unsigned long) sc;	/* a2: sigcontext pointer */
-	*fp = sc;
 }
+
+/*
+ * OK, we're invoking a handler
+ */
+static inline void handle_signal(unsigned long signr, struct sigaction *sa,
+	unsigned long oldmask, struct pt_regs * regs, struct switch_stack *sw)
+{
+	setup_frame(sa,regs,sw,signr,oldmask);
+
+	if (sa->sa_flags & SA_ONESHOT)
+		sa->sa_handler = NULL;
+	if (!(sa->sa_flags & SA_NOMASK))
+		current->blocked |= (sa->sa_mask | _S(signr)) & _BLOCKABLE;
+}
+
+static inline void syscall_restart(unsigned long r0, unsigned long r19,
+	struct pt_regs * regs, struct sigaction * sa)
+{
+	switch (regs->r0) {
+		case ERESTARTNOHAND:
+		no_system_call_restart:
+			regs->r0 = EINTR;
+			break;
+		case ERESTARTSYS:
+			if (!(sa->sa_flags & SA_RESTART))
+				goto no_system_call_restart;
+		/* fallthrough */
+		case ERESTARTNOINTR:
+			regs->r0 = r0;	/* reset v0 and a3 and replay syscall */
+			regs->r19 = r19;
+			regs->pc -= 4;
+	}
+}
+
 
 /*
  * Note that 'init' is a special process: it doesn't get signals it doesn't
@@ -219,9 +281,6 @@ asmlinkage int do_signal(unsigned long oldmask,
 	unsigned long r0, unsigned long r19)
 {
 	unsigned long mask = ~current->blocked;
-	unsigned long handler_signal = 0;
-	struct sigcontext_struct *frame = NULL;
-	unsigned long pc = 0;
 	unsigned long signr, single_stepping;
 	struct sigaction * sa;
 
@@ -235,7 +294,7 @@ asmlinkage int do_signal(unsigned long oldmask,
 		if ((current->flags & PF_PTRACED) && signr != SIGKILL) {
 			current->exit_code = signr;
 			current->state = TASK_STOPPED;
-			notify_parent(current);
+			notify_parent(current, SIGCHLD);
 			schedule();
 			single_stepping |= ptrace_cancel_bpt(current);
 			if (!(signr = current->exit_code))
@@ -261,17 +320,20 @@ asmlinkage int do_signal(unsigned long oldmask,
 			if (current->pid == 1)
 				continue;
 			switch (signr) {
-			case SIGCONT: case SIGCHLD: case SIGWINCH:
+			case SIGCONT: case SIGCHLD: case SIGWINCH: case SIGURG:
 				continue;
 
-			case SIGSTOP: case SIGTSTP: case SIGTTIN: case SIGTTOU:
+			case SIGTSTP: case SIGTTIN: case SIGTTOU:
+				if (is_orphaned_pgrp(current->pgrp))
+					continue;
+			case SIGSTOP:
 				if (current->flags & PF_PTRACED)
 					continue;
 				current->state = TASK_STOPPED;
 				current->exit_code = signr;
 				if (!(current->p_pptr->sig->action[SIGCHLD-1].sa_flags & 
 						SA_NOCLDSTOP))
-					notify_parent(current);
+					notify_parent(current, SIGCHLD);
 				schedule();
 				single_stepping |= ptrace_cancel_bpt(current);
 				continue;
@@ -289,16 +351,13 @@ asmlinkage int do_signal(unsigned long oldmask,
 				do_exit(signr);
 			}
 		}
-		/*
-		 * OK, we're invoking a handler
-		 */
-		if (r0) {
-			if (regs->r0 == ERESTARTNOHAND ||
-			   (regs->r0 == ERESTARTSYS && !(sa->sa_flags & SA_RESTART)))
-				regs->r0 = EINTR;
+		if (r0)
+			syscall_restart(r0, r19, regs, sa);
+		handle_signal(signr, sa, oldmask, regs, sw);
+		if (single_stepping) {
+			ptrace_set_bpt(current);	/* re-set breakpoint */
 		}
-		handler_signal |= 1 << (signr-1);
-		mask &= ~sa->sa_mask;
+		return 1;
 	}
 	if (r0 &&
 	    (regs->r0 == ERESTARTNOHAND ||
@@ -308,34 +367,8 @@ asmlinkage int do_signal(unsigned long oldmask,
 		regs->r19 = r19;
 		regs->pc -= 4;
 	}
-	if (!handler_signal) {	/* no handler will be called - return 0 */
-		if (single_stepping) {
-			ptrace_set_bpt(current);	/* re-set breakpoint */
-		}
-		return 0;
-	}
-	pc = regs->pc;
-	frame = (struct sigcontext_struct *) rdusp();
-	signr = 1;
-	sa = current->sig->action;
-	for (mask = 1 ; mask ; sa++,signr++,mask += mask) {
-		if (mask > handler_signal)
-			break;
-		if (!(mask & handler_signal))
-			continue;
-		setup_frame(sa,&frame,pc,regs,sw,signr,oldmask);
-		pc = (unsigned long) sa->sa_handler;
-		regs->r27 = pc;
-		if (sa->sa_flags & SA_ONESHOT)
-			sa->sa_handler = NULL;
-		current->blocked |= sa->sa_mask;
-		oldmask |= sa->sa_mask;
-	}
-	imb();
-	wrusp((unsigned long) frame);
-	regs->pc = pc;			/* "return" to the first handler */
 	if (single_stepping) {
 		ptrace_set_bpt(current);	/* re-set breakpoint */
 	}
-	return 1;
+	return 0;
 }

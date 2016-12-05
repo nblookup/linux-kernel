@@ -66,7 +66,9 @@ static int do_ioctl(int target, unsigned char * sr_cmd, void * buffer, unsigned 
 	    printk("CDROM not ready.  Make sure there is a disc in the drive.\n");
 	    break;
 	case ILLEGAL_REQUEST:
-	    printk("CDROM (ioctl) reports ILLEGAL REQUEST.\n");
+	  /* CDROMCLOSETRAY should not print an error for caddy drives. */
+	    if (!(sr_cmd[0] == START_STOP && sr_cmd[4] == 0x03))
+	      printk("CDROM (ioctl) reports ILLEGAL REQUEST.\n");
 	    break;
 	default:
 	    printk("SCSI CD error: host %d id %d lun %d return code = %03x\n", 
@@ -517,9 +519,10 @@ int sr_ioctl(struct inode * inode, struct file * file, unsigned int cmd, unsigne
 	return result;
     }
 	
-    case CDROMREADMODE2:
-	return -EINVAL;
+    /* these are compatible with the ide-cd driver */
+    case CDROMREADRAW:
     case CDROMREADMODE1:
+    case CDROMREADMODE2:
 	return -EINVAL;
 	
 	/* block-copy from ../block/sbpcd.c with some adjustments... */

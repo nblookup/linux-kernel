@@ -226,6 +226,7 @@
  * Eastlake, Steve Crocker, and Jeff Schiller.
  */
 
+#include <linux/config.h> /* CONFIG_RST_COOKIES and CONFIG_SYN_COOKIES */
 #include <linux/utsname.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
@@ -357,8 +358,6 @@ static void add_entropy_word(struct random_bucket *r,
 #if (!defined (__i386__))
 extern inline __u32 rotate_left(int i, __u32 word)
 {
-	__u32 nbits = 0;
-	
 	return (word << i) | (word >> (32 - i));
 	
 }
@@ -1004,6 +1003,18 @@ static int extract_entropy(struct random_bucket *r, char * buf,
 		nbytes -= i;
 		buf += i;
 		add_timer_randomness(r, &extract_timer_state, nbytes);
+		if (to_user && need_resched)
+		{
+			if(current->signal & ~current->blocked)
+			{
+				if(nbytes==0)
+					ret = -ERESTARTSYS;
+				else
+					ret -= nbytes;
+				break;
+			}
+			schedule();
+		}
 	}
 
 	/* Wipe data from memory */
@@ -1071,10 +1082,8 @@ random_read(struct inode * inode, struct file * file, char * buf, int nbytes)
 	 * If we gave the user some bytes and we have an inode pointer,
 	 * update the access time.
 	 */
-	if (inode && count != 0) {
-		inode->i_atime = CURRENT_TIME;
-		inode->i_dirt = 1;
-	}
+	if (inode && count != 0)
+		UPDATE_ATIME(inode);
 	
 	return (count ? count : retval);
 }
@@ -1231,7 +1240,7 @@ random_ioctl(struct inode * inode, struct file * file,
 			return -EINVAL;
 		size = get_user(p++);
 		retval = random_write(0, file, (const char *) p, size);
-		if (retval)
+		if (retval < 0)
 			return retval;
 		/*
 		 * Add ent_count to entropy_count, limiting the result to be
@@ -1339,11 +1348,149 @@ __u32 secure_tcp_sequence_number(__u32 saddr, __u32 daddr,
 	do_gettimeofday(&tv);
 	seq = tmp[1] + tv.tv_usec+tv.tv_sec*1000000;
 #if 0
-	printk("init_seq(%lx, %lx, %d, %d) = %d\n",
-	       saddr, daddr, sport, dport, seq);
+	/*
+	  ugh...we can only use in_ntoa once per printk, splitting
+	  a single line of info into multiple printk's confuses klogd,
+	  and Linus says in_ntoa sucks anyway :)
+	*/
+	printk("init_seq(%d.%d.%d.%d:%d, %d.%d.%d.%d:%d) = %d\n",
+		NIPQUAD(saddr), sport, NIPQUAD(daddr), dport, seq);
 #endif
 	return (seq);
 }
+
+#ifdef CONFIG_RST_COOKIES
+/*
+ * TCP security probe sequence number picking. Losely based upon
+ * secure sequence number algorithm above.
+ */
+__u32 secure_tcp_probe_number(__u32 saddr, __u32 daddr,
+		 __u16 sport, __u16 dport, __u32 sseq, int validate)
+{
+	static int	is_init = 0;
+	static int	valid_secret[2];
+	static __u32	secret_timestamp[2];
+	static __u32	secret[2][16];
+	static int	offset = 0;
+	__u32 		tmp[16];
+	__u32		seq;
+
+	/*
+	 * Pick a random secret the first time we open a TCP
+	 * connection, and expire secrets older than 5 minutes.
+	 */
+	if (is_init == 0 || jiffies-secret_timestamp[offset] > 600*HZ) {
+		if (is_init == 0) valid_secret[0] = valid_secret[1] = 0;
+		else offset = (offset+1)%2;
+		get_random_bytes(&secret[offset], sizeof(secret[offset]));
+		valid_secret[offset] = 1;
+		secret_timestamp[offset] = jiffies;
+		is_init = 1;
+	}
+
+	memcpy(tmp, secret[offset], sizeof(tmp));
+	/*
+	 * Pick a unique starting offset for each
+	 * TCP connection endpoints (saddr, daddr, sport, dport)
+	 */
+	tmp[8]=saddr;
+	tmp[9]=daddr;
+	tmp[10]=(sport << 16) + dport;
+	HASH_TRANSFORM(tmp, tmp);
+	seq = tmp[1];
+
+	if (!validate) {
+		if (seq == sseq) seq++;
+#if 0
+		printk("init_seq(%d.%d.%d.%d:%d %d.%d.%d.%d:%d, %d) = %d\n",
+			NIPQUAD(saddr), sport, NIPQUAD(daddr), dport, sseq, seq);
+#endif
+		return (seq);
+	} else {
+		if (seq == sseq || (seq+1) == sseq) {
+			printk("validated probe(%d.%d.%d.%d:%d, %d.%d.%d.%d:%d, %d)\n",
+				NIPQUAD(saddr), sport, NIPQUAD(daddr), dport, sseq);
+			return 1;
+		}
+		if (jiffies-secret_timestamp[(offset+1)%2] <= 1200*HZ) {
+			memcpy(tmp, secret[(offset+1)%2], sizeof(tmp));
+			tmp[8]=saddr;
+			tmp[9]=daddr;
+			tmp[10]=(sport << 16) + dport;
+			HASH_TRANSFORM(tmp, tmp);
+			seq = tmp[1];
+			if (seq == sseq || (seq+1) == sseq) {
+#ifdef 0
+				printk("validated probe(%d.%d.%d.%d:%d, %d.%d.%d.%d:%d, %d)\n",
+					NIPQUAD(saddr), sport, NIPQUAD(daddr), dport, sseq);
+#endif
+				return 1;
+			}
+		}
+#ifdef 0
+		printk("failed validation on probe(%d.%d.%d.%d:%d, %d.%d.%d.%d:%d, %d)\n",
+			NIPQUAD(saddr), sport, NIPQUAD(daddr), dport, sseq);
+#endif
+		return 0;
+	}
+}
+#endif
+
+#ifdef CONFIG_SYN_COOKIES
+/*
+ * Secure SYN cookie computation. This is the algorithm worked out by
+ * Dan Bernstien and Eric Schenk.
+ *
+ * For linux I implement the 1 minute counter by looking at the jiffies clock.
+ * The count is passed in as a parameter;
+ *
+ */
+__u32 secure_tcp_syn_cookie(__u32 saddr, __u32 daddr,
+		 __u16 sport, __u16 dport, __u32 sseq, __u32 count)
+{
+	static int	is_init = 0;
+	static __u32	secret[2][16];
+	__u32 		tmp[16];
+	__u32		seq;
+
+	/*
+	 * Pick two random secret the first time we open a TCP connection.
+	 */
+	if (is_init == 0) {
+		get_random_bytes(&secret[0], sizeof(secret[0]));
+		get_random_bytes(&secret[1], sizeof(secret[1]));
+		is_init = 1;
+	}
+
+	/*
+	 * Compute the secure sequence number.
+	 * The output should be:
+   	 *   MD5(sec1,saddr,sport,daddr,dport,sec1) + their sequence number
+         *      + (count * 2^24)
+	 *      + (MD5(sec2,saddr,sport,daddr,dport,count,sec2) % 2^24).
+	 * Where count increases every minute by 1.
+	 */
+
+	memcpy(tmp, secret[0], sizeof(tmp));
+	tmp[8]=saddr;
+	tmp[9]=daddr;
+	tmp[10]=(sport << 16) + dport;
+	HASH_TRANSFORM(tmp, tmp);
+	seq = tmp[1];
+
+	memcpy(tmp, secret[1], sizeof(tmp));
+	tmp[8]=saddr;
+	tmp[9]=daddr;
+	tmp[10]=(sport << 16) + dport;
+	tmp[11]=count;	/* minute counter */
+	HASH_TRANSFORM(tmp, tmp);
+
+	seq += sseq + (count << 24) + (tmp[1] & 0x00ffffff);
+
+	/* Zap lower 3 bits to leave room for the MSS representation */
+	return (seq & 0xfffff8);
+}
+#endif
 
 #ifdef RANDOM_BENCHMARK
 /*
@@ -1363,7 +1510,7 @@ static inline unsigned long long get_clock_cnt(void)
 {
 	unsigned long low, high;
 	__asm__(".byte 0x0f,0x31" :"=a" (low), "=d" (high));
-	return (((unsigned long long) high << 31) | low); 
+	return (((unsigned long long) high << 32) | low); 
 }
 
 static void initialize_benchmark(struct random_benchmark *bench,

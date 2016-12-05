@@ -21,6 +21,103 @@
 #include <linux/tcp.h>
 #include <net/checksum.h>
 
+/* This is for all connections with a full identity, no wildcards. */
+#define TCP_HTABLE_SIZE		256
+
+/* This is for listening sockets, thus all sockets which possess wildcards. */
+#define TCP_LHTABLE_SIZE	32	/* Yes, really, this is all you need. */
+
+/* This is for all sockets, to keep track of the local port allocations. */
+#define TCP_BHTABLE_SIZE	64
+
+/* tcp_ipv4.c: These need to be shared by v4 and v6 because the lookup
+ *             and hashing code needs to work with different AF's yet
+ *             the port space is shared.
+ */
+extern struct sock *tcp_established_hash[TCP_HTABLE_SIZE];
+extern struct sock *tcp_listening_hash[TCP_LHTABLE_SIZE];
+extern struct sock *tcp_bound_hash[TCP_BHTABLE_SIZE];
+
+/* These are AF independant. */
+static __inline__ int tcp_bhashfn(__u16 lport)
+{
+	return (lport ^ (lport >> 7)) & (TCP_BHTABLE_SIZE-1);
+}
+
+/* Find the next port that hashes h that is larger than lport.
+ * If you change the hash, change this function to match, or you will
+ * break TCP port selection. This function must also NOT wrap around
+ * when the next number exceeds the largest possible port (2^16-1).
+ */
+static __inline__ int tcp_bhashnext(__u16 lport, __u16 h)
+{
+        __u32 s;	/* don't change this to a smaller type! */
+
+        s = (lport ^ (h ^ tcp_bhashfn(lport)));
+        if (s > lport)
+                return s;
+        s = lport + TCP_BHTABLE_SIZE;
+        return (s ^ (h ^ tcp_bhashfn(s)));
+}
+
+static __inline__ int tcp_sk_bhashfn(struct sock *sk)
+{
+	__u16 lport = sk->num;
+	return tcp_bhashfn(lport);
+}
+
+/* These can have wildcards, don't try too hard.
+ * XXX deal with thousands of IP aliases for listening ports later
+ */
+static __inline__ int tcp_lhashfn(unsigned short num)
+{
+	return num & (TCP_LHTABLE_SIZE - 1);
+}
+
+static __inline__ int tcp_sk_listen_hashfn(struct sock *sk)
+{
+	return tcp_lhashfn(sk->num);
+}
+
+/* This is IPv4 specific. */
+static __inline__ int tcp_hashfn(__u32 laddr, __u16 lport,
+				 __u32 faddr, __u16 fport)
+{
+	return ((laddr ^ lport) ^ (faddr ^ fport)) & (TCP_HTABLE_SIZE - 1);
+}
+
+static __inline__ int tcp_sk_hashfn(struct sock *sk)
+{
+	__u32 laddr = sk->rcv_saddr;
+	__u16 lport = sk->num;
+	__u32 faddr = sk->daddr;
+	__u16 fport = sk->dummy_th.dest;
+
+	return tcp_hashfn(laddr, lport, faddr, fport);
+}
+
+/* Only those holding the sockhash lock call these two things here.
+ * Note the slightly gross overloading of sk->prev, AF_UNIX is the
+ * only other main benefactor of that member of SK, so who cares.
+ */
+static __inline__ void tcp_sk_bindify(struct sock *sk)
+{
+	int hashent = tcp_sk_bhashfn(sk);
+	struct sock **htable = &tcp_bound_hash[hashent];
+
+	if((sk->bind_next = *htable) != NULL)
+		(*htable)->bind_pprev = &sk->bind_next;
+	*htable = sk;
+	sk->bind_pprev = htable;
+}
+
+static __inline__ void tcp_sk_unbindify(struct sock *sk)
+{
+	if(sk->bind_next)
+		sk->bind_next->bind_pprev = sk->bind_pprev;
+	*(sk->bind_pprev) = sk->bind_next;
+}
+
 /*
  * 40 is maximal IP options size
  * 4  is TCP option size (MSS)
@@ -35,7 +132,7 @@
 					   stacks do signed 16bit maths! */
 #define MIN_WINDOW	2048
 #define MAX_ACK_BACKLOG	2
-#define MAX_DUP_ACKS	2
+#define MAX_DUP_ACKS	3
 #define MIN_WRITE_SPACE	2048
 #define TCP_WINDOW_DIFF	2048
 
@@ -65,7 +162,7 @@
 #define TCP_WRITE_TIME	(30*HZ)	/* initial time to wait for an ACK,
 			         * after last transmit			*/
 #define TCP_TIMEOUT_INIT (3*HZ)	/* RFC 1122 initial timeout value	*/
-#define TCP_SYN_RETRIES	 10	/* number of times to retry opening a
+#define TCP_SYN_RETRIES	 5	/* number of times to retry opening a
 				 * connection 	(TCP_RETR2-....)	*/
 #define TCP_PROBEWAIT_LEN (1*HZ)/* time to wait between probes when
 				 * I've got something to write and
@@ -128,8 +225,10 @@ static __inline__ int max(unsigned int a, unsigned int b)
 extern struct proto tcp_prot;
 extern struct tcp_mib tcp_statistics;
 
+extern unsigned short		tcp_good_socknum(void);
+
 extern void	tcp_err(int type, int code, unsigned char *header, __u32 daddr,
-			__u32, struct inet_protocol *protocol);
+			__u32, struct inet_protocol *protocol, int len);
 extern void	tcp_shutdown (struct sock *sk, int how);
 extern int	tcp_rcv(struct sk_buff *skb, struct device *dev,
 			struct options *opt, __u32 daddr,
@@ -137,6 +236,8 @@ extern int	tcp_rcv(struct sk_buff *skb, struct device *dev,
 			struct inet_protocol *protocol);
 
 extern int tcp_ioctl(struct sock *sk, int cmd, unsigned long arg);
+
+extern void tcp_v4_unhash(struct sock *sk);
 
 extern void tcp_read_wakeup(struct sock *);
 extern void tcp_write_xmit(struct sock *);
@@ -152,7 +253,7 @@ extern void tcp_send_probe0(struct sock *);
 extern void tcp_send_partial(struct sock *);
 extern void tcp_write_wakeup(struct sock *);
 extern void tcp_send_fin(struct sock *sk);
-extern void tcp_send_synack(struct sock *, struct sock *, struct sk_buff *);
+extern void tcp_send_synack(struct sock *, struct sock *, struct sk_buff *, int);
 extern void tcp_send_skb(struct sock *, struct sk_buff *);
 extern void tcp_send_ack(struct sock *sk);
 extern void tcp_send_delayed_ack(struct sock *sk, int max_timeout, unsigned long timeout);
@@ -161,9 +262,7 @@ extern void tcp_send_reset(unsigned long saddr, unsigned long daddr, struct tcph
 
 extern void tcp_enqueue_partial(struct sk_buff *, struct sock *);
 extern struct sk_buff * tcp_dequeue_partial(struct sock *);
-
-/* tcp_input.c */
-extern void tcp_cache_zap(void);
+extern void tcp_shrink_skb(struct sock *,struct sk_buff *,u32);
 
 /* CONFIG_IP_TRANSPARENT_PROXY */
 extern int tcp_chkaddr(struct sk_buff *);
@@ -173,22 +272,6 @@ extern int tcp_chkaddr(struct sk_buff *);
 extern void tcp_reset_xmit_timer(struct sock *, int, unsigned long);
 extern void tcp_delack_timer(unsigned long);
 extern void tcp_retransmit_timer(unsigned long);
-
-/*
- *	Default sequence number picking algorithm.
- *	As close as possible to RFC 793, which
- *	suggests using a 250kHz clock.
- *	Further reading shows this assumes 2MB/s networks.
- *	For 10MB/s ethernet, a 1MHz clock is appropriate.
- *	That's funny, Linux has one built in!  Use it!
- */
-
-static inline u32 tcp_init_seq(void)
-{
-	struct timeval tv;
-	do_gettimeofday(&tv);
-	return tv.tv_usec+tv.tv_sec*1000000;
-}
 
 static __inline__ int tcp_old_window(struct sock * sk)
 {
@@ -277,7 +360,8 @@ static __inline__ void tcp_set_state(struct sock *sk, int state)
 		break;
 
 	case TCP_CLOSE:
-		tcp_cache_zap();
+		/* Preserve the invariant */
+		tcp_v4_unhash(sk);
 		/* Should be about 2 rtt's */
 		reset_timer(sk, TIME_DONE, min(sk->rtt * 2, TCP_DONE_TIME));
 		/* fall through */

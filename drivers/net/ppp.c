@@ -5,8 +5,9 @@
  *
  *  Dynamic PPP devices by Jim Freeman <jfree@caldera.com>.
  *  ppp_tty_receive ``noisy-raise-bug'' fixed by Ove Ewerlid <ewerlid@syscon.uu.se>
+ *  Fixed (I hope) the wait_queue trashing bug. Alan Cox <alan@redhat.com>
  *
- *  ==FILEVERSION 960528==
+ *  ==FILEVERSION 980512==
  *
  *  NOTE TO MAINTAINERS:
  *     If you modify this file at all, please set the number above to the
@@ -60,7 +61,6 @@
  */
 
 #include <linux/module.h>
-#include <endian.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -407,7 +407,14 @@ ppp_init_dev (struct device *dev)
 		skb_queue_head_init (&dev->buffs[indx]);
 
 	/* New-style flags */
+#ifdef IFF_SOFTHEADERS
+	/* Needed to make SOCK_PACKET work correctly in
+	 * memory fussy kernels.
+	 */
+	dev->flags	= IFF_POINTOPOINT|IFF_SOFTHEADERS;
+#else
 	dev->flags	= IFF_POINTOPOINT;
+#endif
 	dev->family	= AF_INET;
 	dev->pa_addr	= 0;
 	dev->pa_brdaddr = 0;
@@ -442,8 +449,13 @@ ppp_init_ctrl_blk (register struct ppp *ppp)
 	ppp->ubuf	= NULL;
 	ppp->cbuf	= NULL;
 	ppp->slcomp	= NULL;
+#if 0
+	/* AC - We don't want to initialise this as the wait queue may still
+	   be live. Having someone waiting on the old and the new queue is fine
+	   the old people will unhook themselves so just set this up in ppp_alloc */
 	ppp->read_wait	= NULL;
 	ppp->write_wait = NULL;
+#endif	
 	ppp->last_xmit	= jiffies - flag_time;
 
 	/* clear statistics */
@@ -698,7 +710,7 @@ ppp_release (struct ppp *ppp)
 
 	if (dev && dev->flags & IFF_UP) {
 		dev_close (dev); /* close the device properly */
-		dev->flags = 0;	 /* prevent recursion */
+		dev->flags &= ~IFF_UP;	 /* prevent recursion */
 	}
 
 	ppp_free_buf (ppp->rbuf);
@@ -768,11 +780,16 @@ ppp_tty_close (struct tty_struct *tty)
 static int
 ppp_tty_open (struct tty_struct *tty)
 {
-	struct ppp *ppp = tty2ppp (tty);
+	struct ppp *ppp;
 	int indx;
+
+	if (!suser())
+		return -EPERM;
+
 /*
  * There should not be an existing table for this slot.
  */
+	ppp = tty2ppp (tty);
 	if (ppp) {
 		if (ppp->flags & SC_DEBUG)
 			printk (KERN_ERR
@@ -792,9 +809,7 @@ ppp_tty_open (struct tty_struct *tty)
         }
 
 	if (ppp == NULL) {
-		if (ppp->flags & SC_DEBUG)
-			printk (KERN_ERR
-			"ppp_tty_open: couldn't allocate ppp channel\n");
+		printk (KERN_WARNING "ppp_tty_open: couldn't allocate ppp channel\n");
 		return -ENFILE;
 	}
 /*
@@ -3080,7 +3095,15 @@ ppp_dev_xmit (sk_buff *skb, struct device *dev)
  * Fetch the pointer to the data
  */
 	len   = skb->len;
-	data  = skb_data(skb);
+	data  = skb_data(skb) + PPP_HARD_HDR_LEN;
+/*
+ * Bug trap for null data. Release the skb and bail out.
+ */
+	if(data == NULL) {
+		printk("ppp_dev_xmit: data=NULL before ppp_dev_xmit_ip.\n");
+		dev_kfree_skb (skb, FREE_WRITE);
+		return 0;
+	}
 /*
  * Look at the protocol in the skb to determine the difference between
  * an IP frame and an IPX frame.
@@ -3137,7 +3160,7 @@ ppp_dev_stats (struct device *dev)
 	ppp_stats.tx_heartbeat_errors = 0;
 
 	if (ppp->flags & SC_DEBUG)
-		printk (KERN_INFO "ppp_dev_stats called");
+		printk (KERN_INFO "ppp_dev_stats called\n");
 	return &ppp_stats;
 }
 
@@ -3145,7 +3168,12 @@ static int ppp_dev_header (sk_buff *skb, struct device *dev,
 			   __u16 type, void *daddr,
 			   void *saddr, unsigned int len)
 {
-	return (0);
+	/* On the PPP device the hard header must be ignored
+	 * by the SOCK_PACKET layer. (Backward compatability).
+	 */
+	skb->mac.raw = skb->data;
+	skb_push(skb,PPP_HARD_HDR_LEN);
+	return PPP_HARD_HDR_LEN;
 }
 
 static int

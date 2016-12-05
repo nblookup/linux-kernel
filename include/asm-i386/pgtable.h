@@ -19,6 +19,8 @@
  * the i386 page table tree.
  */
 
+#ifndef __ASSEMBLY__
+
 /* Caches aren't brain-dead on the intel. */
 #define flush_cache_all()			do { } while (0)
 #define flush_cache_mm(mm)			do { } while (0)
@@ -42,17 +44,35 @@
 #define __flush_tlb() \
 do { unsigned long tmpreg; __asm__ __volatile__("movl %%cr3,%0\n\tmovl %0,%%cr3":"=r" (tmpreg) : :"memory"); } while (0)
 
+/*
+ * NOTE! The intel "invlpg" semantics are extremely strange. The
+ * chip will add the segment base to the memory address, even though
+ * no segment checking is done. We correct for this by using an
+ * offset of -__PAGE_OFFSET that will wrap around the kernel segment base
+ * of __PAGE_OFFSET to get the correct address (it will always be outside
+ * the kernel segment, but we're only interested in the final linear
+ * address.
+ */
+#define __invlpg_mem(addr) \
+	(*((char *)(addr)-__PAGE_OFFSET))
+#define __invlpg(addr) \
+	__asm__ __volatile__("invlpg %0": :"m" (__invlpg_mem(addr)))
+
+/*
+ * The i386 doesn't have a page-granular invalidate. Invalidate
+ * everything for it.
+ */
 #ifdef CONFIG_M386
-#define __flush_tlb_one(addr) flush_tlb()
+  #define __flush_tlb_one(addr) __flush_tlb()
 #else
-#define __flush_tlb_one(addr) \
-__asm__ __volatile__("invlpg %0": :"m" (*(char *) addr))
+  #define __flush_tlb_one(addr) __invlpg(addr)
 #endif
  
 #ifndef __SMP__
 
 #define flush_tlb() __flush_tlb()
 #define flush_tlb_all() __flush_tlb()
+#define local_flush_tlb() __flush_tlb()
 
 static inline void flush_tlb_mm(struct mm_struct *mm)
 {
@@ -87,7 +107,7 @@ static inline void flush_tlb_range(struct mm_struct *mm,
 	__flush_tlb()
 
 
-#undef CLEVER_SMP_INVALIDATE
+#define CLEVER_SMP_INVALIDATE
 #ifdef CLEVER_SMP_INVALIDATE
 
 /*
@@ -96,9 +116,6 @@ static inline void flush_tlb_range(struct mm_struct *mm,
  *
  *	These mean you can really definitely utterly forget about
  *	writing to user space from interrupts. (Its not allowed anyway).
- *
- *	Doesn't currently work as Linus makes flush tlb calls before
- *	stuff like current/current->mm are setup properly
  */
  
 static inline void flush_tlb_current_task(void)
@@ -162,6 +179,7 @@ static inline void flush_tlb_range(struct mm_struct *mm,
 }
 #endif
 #endif
+#endif /* !__ASSEMBLY__ */
 
 
 /* Certain architectures need to do special things when pte's
@@ -187,6 +205,21 @@ static inline void flush_tlb_range(struct mm_struct *mm,
 #define PTRS_PER_PTE	1024
 #define PTRS_PER_PMD	1
 #define PTRS_PER_PGD	1024
+
+/*
+ * pgd entries used up by user/kernel:
+ */
+
+#if CONFIG_MAX_MEMSIZE & 3
+#error Invalid max physical memory size requested
+#endif
+
+#define USER_PGD_PTRS ((unsigned long)__PAGE_OFFSET >> PGDIR_SHIFT)
+#define KERNEL_PGD_PTRS (PTRS_PER_PGD-USER_PGD_PTRS)
+#define __USER_PGD_PTRS (__PAGE_OFFSET >> PGDIR_SHIFT)
+#define __KERNEL_PGD_PTRS (PTRS_PER_PGD-__USER_PGD_PTRS)
+
+#ifndef __ASSEMBLY__
 
 /* Just any arbitrary offset to the start of the vmalloc VM area: the
  * current 8MB value just means that there will be a 8MB "hole" after the
@@ -293,14 +326,14 @@ do { \
 		__asm__ __volatile__("movl %0,%%cr3": :"r" (pgdir)); \
 } while (0)
 
-extern inline int pte_none(pte_t pte)		{ return !pte_val(pte); }
-extern inline int pte_present(pte_t pte)	{ return pte_val(pte) & _PAGE_PRESENT; }
-extern inline void pte_clear(pte_t *ptep)	{ pte_val(*ptep) = 0; }
+#define pte_none(x)	(!pte_val(x))
+#define pte_present(x)	(pte_val(x) & _PAGE_PRESENT)
+#define pte_clear(xp)	do { pte_val(*(xp)) = 0; } while (0)
 
-extern inline int pmd_none(pmd_t pmd)		{ return !pmd_val(pmd); }
-extern inline int pmd_bad(pmd_t pmd)		{ return (pmd_val(pmd) & ~PAGE_MASK) != _PAGE_TABLE || pmd_val(pmd) > high_memory; }
-extern inline int pmd_present(pmd_t pmd)	{ return pmd_val(pmd) & _PAGE_PRESENT; }
-extern inline void pmd_clear(pmd_t * pmdp)	{ pmd_val(*pmdp) = 0; }
+#define pmd_none(x)	(!pmd_val(x))
+#define	pmd_bad(x)	((pmd_val(x) & ~PAGE_MASK) != _PAGE_TABLE)
+#define pmd_present(x)	(pmd_val(x) & _PAGE_PRESENT)
+#define pmd_clear(xp)	do { pmd_val(*(xp)) = 0; } while (0)
 
 /*
  * The "pgd_xxx()" functions here are trivial for a folded two-level
@@ -377,6 +410,8 @@ extern inline void pte_free_kernel(pte_t * pte)
 	free_page((unsigned long) pte);
 }
 
+extern const char bad_pmd_string[];
+
 extern inline pte_t * pte_alloc_kernel(pmd_t * pmd, unsigned long address)
 {
 	address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
@@ -393,7 +428,7 @@ extern inline pte_t * pte_alloc_kernel(pmd_t * pmd, unsigned long address)
 		free_page((unsigned long) page);
 	}
 	if (pmd_bad(*pmd)) {
-		printk("Bad pmd in pte_alloc: %08lx\n", pmd_val(*pmd));
+		printk(bad_pmd_string, pmd_val(*pmd));
 		pmd_val(*pmd) = _PAGE_TABLE | (unsigned long) BAD_PAGETABLE;
 		return NULL;
 	}
@@ -421,25 +456,35 @@ extern inline void pte_free(pte_t * pte)
 
 extern inline pte_t * pte_alloc(pmd_t * pmd, unsigned long address)
 {
-	address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
-	if (pmd_none(*pmd)) {
-		pte_t * page = (pte_t *) get_free_page(GFP_KERNEL);
-		if (pmd_none(*pmd)) {
-			if (page) {
-				pmd_val(*pmd) = _PAGE_TABLE | (unsigned long) page;
-				return page + address;
-			}
-			pmd_val(*pmd) = _PAGE_TABLE | (unsigned long) BAD_PAGETABLE;
-			return NULL;
-		}
-		free_page((unsigned long) page);
-	}
-	if (pmd_bad(*pmd)) {
-		printk("Bad pmd in pte_alloc: %08lx\n", pmd_val(*pmd));
-		pmd_val(*pmd) = _PAGE_TABLE | (unsigned long) BAD_PAGETABLE;
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + address;
+	address = (address >> (PAGE_SHIFT-2)) & 4*(PTRS_PER_PTE - 1);
+
+repeat:
+	if (pmd_none(*pmd))
+		goto getnew;
+	if (pmd_bad(*pmd))
+		goto fix;
+	return (pte_t *) (pmd_page(*pmd) + address);
+	
+getnew:
+{
+	unsigned long page = __get_free_page(GFP_KERNEL);
+	if (!pmd_none(*pmd))
+		goto freenew;
+	if (!page)
+		goto oom;
+	memset((void *) page, 0, PAGE_SIZE);
+	pmd_val(*pmd) = _PAGE_TABLE | page;
+	return (pte_t *) (page + address);
+freenew:
+	free_page(page);
+	goto repeat;
+}
+
+fix:
+	printk(bad_pmd_string, pmd_val(*pmd));
+oom:
+	pmd_val(*pmd) = _PAGE_TABLE | (unsigned long) BAD_PAGETABLE;
+	return NULL;
 }
 
 /*
@@ -480,5 +525,7 @@ extern inline void update_mmu_cache(struct vm_area_struct * vma,
 #define SWP_TYPE(entry) (((entry) >> 1) & 0x7f)
 #define SWP_OFFSET(entry) ((entry) >> 8)
 #define SWP_ENTRY(type,offset) (((type) << 1) | ((offset) << 8))
+
+#endif /* !__ASSEMBLY__ */
 
 #endif /* _I386_PAGE_H */

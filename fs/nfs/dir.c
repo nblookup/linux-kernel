@@ -8,6 +8,11 @@
  * 10 Apr 1996	Added silly rename for unlink	--okir
  */
 
+/*
+ * Fixes:
+ *    Ion Badulescu <ionut@cs.columbia.edu>     : FIFO's need special handling in NFSv2
+ */
+
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/stat.h>
@@ -32,7 +37,7 @@ static int nfs_symlink(struct inode *, const char *, int, const char *);
 static int nfs_link(struct inode *, struct inode *, const char *, int);
 static int nfs_mknod(struct inode *, const char *, int, int, int);
 static int nfs_rename(struct inode *, const char *, int,
-		      struct inode *, const char *, int);
+		      struct inode *, const char *, int, int);
 
 static struct file_operations nfs_dir_operations = {
 	NULL,			/* lseek - default */
@@ -71,14 +76,17 @@ static inline void revalidate_dir(struct nfs_server * server, struct inode * dir
 {
 	struct nfs_fattr fattr;
 
-	if (jiffies - NFS_READTIME(dir) < server->acdirmax)
+	if (jiffies - NFS_READTIME(dir) < NFS_ATTRTIMEO(dir))
 		return;
 
 	NFS_READTIME(dir) = jiffies;
 	if (nfs_proc_getattr(server, NFS_FH(dir), &fattr) == 0) {
 		nfs_refresh_inode(dir, &fattr);
-		if (fattr.mtime.seconds == NFS_OLDMTIME(dir))
+		if (fattr.mtime.seconds == NFS_OLDMTIME(dir)) {
+			if ((NFS_ATTRTIMEO(dir) <<= 1) > server->acdirmax)
+				NFS_ATTRTIMEO(dir) = server->acdirmax;
 			return;
+		}
 		NFS_OLDMTIME(dir) = fattr.mtime.seconds;
 	}
 	/* invalidate directory cache here when we _really_ start caching */
@@ -440,7 +448,10 @@ static int nfs_mknod(struct inode *dir, const char *name, int len,
 		iput(dir);
 		return -ENAMETOOLONG;
 	}
-	sattr.mode = mode;
+	if (S_ISFIFO(mode))
+		sattr.mode = (mode & ~S_IFMT) | S_IFCHR;
+	else
+		sattr.mode = mode;
 	sattr.uid = sattr.gid = (unsigned) -1;
 	if (S_ISCHR(mode) || S_ISBLK(mode))
 		sattr.size = rdev; /* get out your barf bag */
@@ -449,6 +460,11 @@ static int nfs_mknod(struct inode *dir, const char *name, int len,
 	sattr.atime.seconds = sattr.mtime.seconds = (unsigned) -1;
 	error = nfs_proc_create(NFS_SERVER(dir), NFS_FH(dir),
 		name, &sattr, &fhandle, &fattr);
+	if (error == -EINVAL && (S_ISFIFO(mode))) {
+		sattr.mode = mode;
+		error = nfs_proc_create(NFS_SERVER(dir), NFS_FH(dir),
+					name, &sattr, &fhandle, &fattr);
+	}
 	if (!error)
 	{
 		nfs_lookup_cache_add(dir, name, &fhandle, &fattr);
@@ -488,6 +504,8 @@ static int nfs_mkdir(struct inode *dir, const char *name, int len, int mode)
 			nfs_lookup_cache_add(dir, name, &fhandle, &fattr);
 	}
 	iput(dir);
+	/* The parent dir link count may have changed */
+	nfs_lookup_cache_remove( NULL, dir, NULL);
 	return error;
 }
 
@@ -505,8 +523,7 @@ static int nfs_rmdir(struct inode *dir, const char *name, int len)
 		return -ENAMETOOLONG;
 	}
 	error = nfs_proc_rmdir(NFS_SERVER(dir), NFS_FH(dir), name);
-	if (!error)
-		nfs_lookup_cache_remove(dir, NULL, name);
+	nfs_lookup_cache_remove(dir, NULL, name);
 	iput(dir);
 	return error;
 }
@@ -531,7 +548,7 @@ static int nfs_sillyrename(struct inode *dir, const char *name, int len)
 		return -EIO;		/* DWIM */
 	}
 	ret = nfs_proc_rename(NFS_SERVER(dir), NFS_FH(dir), name,
-					       NFS_FH(dir), silly);
+					       NFS_FH(dir), silly, 0);
 	if (ret >= 0) {
 		nfs_lookup_cache_remove(dir, NULL, name);
 		nfs_lookup_cache_remove(dir, NULL, silly);
@@ -549,11 +566,13 @@ void nfs_sillyrename_cleanup(struct inode *inode)
 	int		error, slen;
 
 	slen = sprintf(silly, ".nfs%ld", inode->i_ino);
-	if ((error = nfs_unlink(dir, silly, slen)) < 0) {
+	error = nfs_proc_remove(NFS_SERVER(dir), NFS_FH(dir), silly);
+	nfs_lookup_cache_remove(dir, NULL, silly);
+	if (error < 0)
 		printk("NFS silly_rename cleanup failed (err = %d)\n",
 					-error);
-	}
 	NFS_RENAMED_DIR(inode) = NULL;
+	iput(dir);
 }
 
 static int nfs_unlink(struct inode *dir, const char *name, int len)
@@ -571,8 +590,7 @@ static int nfs_unlink(struct inode *dir, const char *name, int len)
 	}
 	if ((error = nfs_sillyrename(dir, name, len)) < 0) {
 		error = nfs_proc_remove(NFS_SERVER(dir), NFS_FH(dir), name);
-		if (!error)
-			nfs_lookup_cache_remove(dir, NULL, name);
+		nfs_lookup_cache_remove(dir, NULL, name);
 	}
 	iput(dir);
 	return error;
@@ -630,15 +648,17 @@ static int nfs_link(struct inode *oldinode, struct inode *dir,
 	}
 	error = nfs_proc_link(NFS_SERVER(oldinode), NFS_FH(oldinode),
 		NFS_FH(dir), name);
-	if (!error)
-		nfs_lookup_cache_remove(dir, oldinode, NULL);
+
+	nfs_lookup_cache_remove(dir, oldinode, NULL);
+	NFS_CACHEINV(oldinode);
 	iput(oldinode);
 	iput(dir);
 	return error;
 }
 
 static int nfs_rename(struct inode *old_dir, const char *old_name, int old_len,
-		      struct inode *new_dir, const char *new_name, int new_len)
+		      struct inode *new_dir, const char *new_name, int new_len,
+		      int must_be_dir)
 {
 	int error;
 
@@ -661,11 +681,11 @@ static int nfs_rename(struct inode *old_dir, const char *old_name, int old_len,
 	}
 	error = nfs_proc_rename(NFS_SERVER(old_dir),
 		NFS_FH(old_dir), old_name,
-		NFS_FH(new_dir), new_name);
-	if (!error) {
-		nfs_lookup_cache_remove(old_dir, NULL, old_name);
-		nfs_lookup_cache_remove(new_dir, NULL, new_name);
-	}
+		NFS_FH(new_dir), new_name,
+		must_be_dir);
+
+	nfs_lookup_cache_remove(old_dir, NULL, old_name);
+	nfs_lookup_cache_remove(new_dir, NULL, new_name);
 	iput(old_dir);
 	iput(new_dir);
 	return error;
@@ -690,7 +710,17 @@ void nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
 		return;
 	}
 	was_empty = (inode->i_mode == 0);
-	inode->i_mode = fattr->mode;
+	
+	/*
+	 * Some (broken?) NFS servers return 0 as the file type.
+	 * We'll assume that 0 means the file type has not changed.
+	 */
+	if(!(fattr->mode & S_IFMT)){
+		inode->i_mode = (inode->i_mode & S_IFMT) |
+				(fattr->mode & ~S_IFMT);
+	}else{
+		inode->i_mode = fattr->mode;
+	}
 	inode->i_nlink = fattr->nlink;
 	inode->i_uid = fattr->uid;
 	inode->i_gid = fattr->gid;
@@ -698,6 +728,8 @@ void nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
 	/* Size changed from outside: invalidate caches on next read */
 	if (inode->i_size != fattr->size)
 		NFS_CACHEINV(inode);
+	if (NFS_OLDMTIME(inode) != fattr->mtime.seconds)
+		NFS_ATTRTIMEO(inode) = NFS_MINATTRTIMEO(inode);
 	inode->i_size = fattr->size;
 	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode))
 		inode->i_rdev = to_kdev_t(fattr->rdev);

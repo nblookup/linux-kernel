@@ -60,6 +60,8 @@
  * User-defined bell sound, new setterm control sequences and printk
  * redirection by Martin Mares <mj@k332.feld.cvut.cz> 19-Nov-95
  *
+ * APM screenblank bug fixed Takashi Manabe <manabe@roy.dsl.tutics.tut.jp>
+ * Backported to 2.0.31 by Adam Bradley <artdodge@cs.bu.edu>
  */
 
 #define BLANK 0x0020
@@ -306,7 +308,7 @@ int vc_cons_allocated(unsigned int i)
 int vc_allocate(unsigned int i)		/* return 0 on success */
 {
 	if (i >= MAX_NR_CONSOLES)
-	  return -ENODEV;
+	  return -ENXIO;
 	if (!vc_cons[i].d) {
 	    long p, q;
 
@@ -482,7 +484,7 @@ int default_blu[] = {0x00,0x00,0x00,0x00,0xaa,0xaa,0xaa,0xaa,
  */
 static void gotoxy(int currcons, int new_x, int new_y)
 {
-	int max_y;
+	int min_y, max_y;
 
 	if (new_x < 0)
 		x = 0;
@@ -492,19 +494,26 @@ static void gotoxy(int currcons, int new_x, int new_y)
 		else
 			x = new_x;
  	if (decom) {
-		new_y += top;
+		min_y = top;
 		max_y = bottom;
-	} else
+	} else {
+		min_y = 0;
 		max_y = video_num_lines;
-	if (new_y < 0)
-		y = 0;
+	}
+	if (new_y < min_y)
+		y = min_y;
+	else if (new_y >= max_y)
+		y = max_y - 1;
 	else
-		if (new_y >= max_y)
-			y = max_y - 1;
-		else
-			y = new_y;
+		y = new_y;
 	pos = origin + y*video_size_row + (x<<1);
 	need_wrap = 0;
+}
+
+/* for absolute user moves, when decom is set */
+static void gotoxay(int currcons, int new_x, int new_y)
+{
+	gotoxy(currcons, new_x, decom ? (top+new_y) : new_y);
 }
 
 /*
@@ -585,13 +594,15 @@ static void set_origin(int currcons)
 	__set_origin(__real_origin);
 }
 
-void scrup(int currcons, unsigned int t, unsigned int b)
+static void scrup(int currcons, unsigned int t, unsigned int b, unsigned int nr)
 {
 	int hardscroll = hardscroll_enabled;
 
-	if (b > video_num_lines || t >= b)
+	if (t+nr >= b)
+		nr = b - t - 1;
+	if (b > video_num_lines || t >= b || nr < 1)
 		return;
-	if (t || b != video_num_lines)
+	if (t || b != video_num_lines || nr > 1)
 		hardscroll = 0;
 	if (hardscroll) {
 		origin += video_size_row;
@@ -632,40 +643,34 @@ void scrup(int currcons, unsigned int t, unsigned int b)
 		set_origin(currcons);
 	} else {
 		unsigned short * d = (unsigned short *) (origin+video_size_row*t);
-		unsigned short * s = (unsigned short *) (origin+video_size_row*(t+1));
-		unsigned int count = (b-t-1) * video_num_columns;
+		unsigned short * s = (unsigned short *) (origin+video_size_row*(t+nr));
 
-		while (count) {
-			count--;
-			scr_writew(scr_readw(s++), d++);
-		}
-		count = video_num_columns;
-		while (count) {
-			count--;
-			scr_writew(video_erase_char, d++);
-		}
+		memcpyw(d, s, (b-t-nr) * video_size_row);
+		memsetw(d + (b-t-nr) * video_num_columns, video_erase_char, video_size_row*nr);
 	}
 }
 
-void
-scrdown(int currcons, unsigned int t, unsigned int b)
+static void
+scrdown(int currcons, unsigned int t, unsigned int b, unsigned int nr)
 {
-	unsigned short *d, *s;
+	unsigned short *s;
 	unsigned int count;
+	unsigned int step;
 
-	if (b > video_num_lines || t >= b)
+	if (t+nr >= b)
+		nr = b - t - 1;
+	if (b > video_num_lines || t >= b || nr < 1)
 		return;
-	d = (unsigned short *) (origin+video_size_row*b);
-	s = (unsigned short *) (origin+video_size_row*(b-1));
-	count = (b-t-1)*video_num_columns;
-	while (count) {
-		count--;
-		scr_writew(scr_readw(--s), --d);
+	s = (unsigned short *) (origin+video_size_row*(b-nr-1));
+	step = video_num_columns * nr;
+	count = b - t - nr;
+	while (count--) {
+		memcpyw(s + step, s, video_size_row);
+		s -= video_num_columns;
 	}
-	count = video_num_columns;
-	while (count) {
-		count--;
-		scr_writew(video_erase_char, --d);
+	while (nr--) {
+		s += video_num_columns;
+		memsetw(s, video_erase_char, video_size_row);
 	}
 	has_scrolled = 1;
 }
@@ -676,7 +681,7 @@ static void lf(int currcons)
 	 * if below scrolling region
 	 */
     	if (y+1 == bottom)
-		scrup(currcons,top,bottom);
+		scrup(currcons,top,bottom, 1);
 	else if (y < video_num_lines-1) {
 	    	y++;
 		pos += video_size_row;
@@ -690,7 +695,7 @@ static void ri(int currcons)
 	 * if above scrolling region
 	 */
 	if (y == top)
-		scrdown(currcons,top,bottom);
+		scrdown(currcons,top,bottom, 1);
 	else if (y > 0) {
 		y--;
 		pos -= video_size_row;
@@ -1075,7 +1080,7 @@ static void set_mode(int currcons, int on_off)
 				break;
 			case 6:			/* Origin relative/absolute */
 				decom = on_off;
-				gotoxy(currcons,0,0);
+				gotoxay(currcons,0,0);
 				break;
 			case 7:			/* Autowrap on/off */
 				decawm = on_off;
@@ -1179,9 +1184,9 @@ static void insert_char(int currcons)
 	need_wrap = 0;
 }
 
-static void insert_line(int currcons)
+static void insert_line(int currcons, unsigned int nr)
 {
-	scrdown(currcons,y,bottom);
+	scrdown(currcons, y, bottom, nr);
 	need_wrap = 0;
 }
 
@@ -1198,9 +1203,9 @@ static void delete_char(int currcons)
 	need_wrap = 0;
 }
 
-static void delete_line(int currcons)
+static void delete_line(int currcons, unsigned int nr)
 {
-	scrup(currcons,y,bottom);
+	scrup(currcons, y, bottom, nr);
 	need_wrap = 0;
 }
 
@@ -1220,8 +1225,7 @@ static void csi_L(int currcons, unsigned int nr)
 		nr = video_num_lines;
 	else if (!nr)
 		nr = 1;
-	while (nr--)
-		insert_line(currcons);
+	insert_line(currcons, nr);
 }
 
 static void csi_P(int currcons, unsigned int nr)
@@ -1240,8 +1244,7 @@ static void csi_M(int currcons, unsigned int nr)
 		nr = video_num_lines;
 	else if (!nr)
 		nr=1;
-	while (nr--)
-		delete_line(currcons);
+	delete_line(currcons, nr);
 }
 
 static void save_cur(int currcons)
@@ -1426,34 +1429,35 @@ static int con_write(struct tty_struct * tty, int from_user,
 		  tc = translate[toggle_meta ? (c|0x80) : c];
 		}
 
-		/* If the original code was < 32 we only allow a
-		 * glyph to be displayed if the code is not normally
-		 * used (such as for cursor movement) or if the
-		 * disp_ctrl mode has been explicitly enabled.
-		 * Note: ESC is *never* allowed to be displayed as
-		 * that would disable all escape sequences!
-		 * To display font position 0x1B, go into UTF mode
-		 * and display character U+F01B, or change the mapping.
-		 */
-		ok = (tc && (c >= 32 || (!utf && !(((disp_ctrl ? CTRL_ALWAYS
-					    : CTRL_ACTION) >> c) & 1))));
+                /* If the original code was a control character we
+                 * only allow a glyph to be displayed if the code is
+                 * not normally used (such as for cursor movement) or
+                 * if the disp_ctrl mode has been explicitly enabled.
+                 * Certain characters (as given by the CTRL_ALWAYS
+                 * bitmap) are always displayed as control characters,
+                 * as the console would be pretty useless without
+                 * them; to display an arbitrary font position use the
+                 * direct-to-font zone in UTF-8 mode.
+                 */
+                ok = tc && (c >= 32 ||
+                            (!utf && !(((disp_ctrl ? CTRL_ALWAYS
+                                         : CTRL_ACTION) >> c) & 1)))
+                        && (c != 127 || disp_ctrl)
+			&& (c != 128+27);
 
 		if (vc_state == ESnormal && ok) {
 			/* Now try to find out how to display it */
 			tc = conv_uni_to_pc(tc);
-			if ( tc == -4 )
-			  {
-			    /* If we got -4 (not found) then see if we have
-			       defined a replacement character (U+FFFD) */
-			    tc = conv_uni_to_pc(0xfffd);
-			  }
-			else if ( tc == -3 )
-			  {
-			    /* Bad hash table -- hope for the best */
-			    tc = c;
-			  }
+			if ( tc == -4 ) {
+                                /* If we got -4 (not found) then see if we have
+                                   defined a replacement character (U+FFFD) */
+                                tc = conv_uni_to_pc(0xfffd);
+                        } else if ( tc == -3 ) {
+                                /* Bad hash table -- hope for the best */
+                                tc = c;
+                        }
 			if (tc & ~console_charmask)
-			  continue; /* Conversion failed */
+                                continue; /* Conversion failed */
 
 			if (need_wrap) {
 				cr(currcons);
@@ -1479,6 +1483,8 @@ static int con_write(struct tty_struct * tty, int from_user,
 		 *  of an escape sequence.
 		 */
 		switch (c) {
+			case 0:
+				continue;
 			case 7:
 				if (bell_duration)
 					kd_mksound(bell_pitch, bell_duration);
@@ -1683,12 +1689,12 @@ static int con_write(struct tty_struct * tty, int from_user,
 						continue;
 					case 'd':
 						if (par[0]) par[0]--;
-						gotoxy(currcons,x,par[0]);
+						gotoxay(currcons,x,par[0]);
 						continue;
 					case 'H': case 'f':
 						if (par[0]) par[0]--;
 						if (par[1]) par[1]--;
-						gotoxy(currcons,par[1],par[0]);
+						gotoxay(currcons,par[1],par[0]);
 						continue;
 					case 'J':
 						csi_J(currcons,par[0]);
@@ -1739,7 +1745,7 @@ static int con_write(struct tty_struct * tty, int from_user,
 						    par[1] <= video_num_lines) {
 							top=par[0]-1;
 							bottom=par[1];
-							gotoxy(currcons,0,0);
+							gotoxay(currcons,0,0);
 						}
 						continue;
 					case 's':
@@ -2141,12 +2147,14 @@ void do_blank_screen(int nopowersave)
 	hide_cursor();
 	console_blanked = fg_console + 1;
 
-#ifdef CONFIG_APM
-	if (apm_display_blank())
-		return;
-#endif
 	if(!nopowersave)
-	    vesa_blank();
+	{
+#ifdef CONFIG_APM
+		if (apm_display_blank())
+			return;
+#endif
+		vesa_blank();
+	}
 }
 
 void do_unblank_screen(void)
@@ -2309,4 +2317,23 @@ int con_set_font (char *arg, int ch512)
 int con_get_font (char *arg)
 {
 	return set_get_font (arg,0,video_mode_512ch);
+}
+
+/*
+ * Report the current status of the vc. This is exported to modules (ARub)
+ */
+
+int con_get_info(int *mode, int *shift, int *col, int *row,
+			struct tty_struct **tty)
+{
+	extern int shift_state;
+	extern struct tty_driver console_driver;
+	struct tty_struct **console_table=console_driver.table;
+
+	if (mode) *mode = vt_cons[fg_console]->vc_mode;
+	if (shift) *shift = shift_state;
+	if (col) *col = video_num_columns;
+	if (row) *row = video_num_lines;
+	if (tty) *tty = console_table[fg_console];
+	return fg_console;
 }

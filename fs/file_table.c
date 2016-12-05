@@ -5,6 +5,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/stddef.h>
 #include <linux/fs.h>
 #include <linux/string.h>
 #include <linux/mm.h>
@@ -23,12 +24,16 @@ int max_files = NR_FILE;
  */
 static inline void insert_file_free(struct file *file)
 {
-	file->f_count = 0;
-	file->f_next = first_file;
-	file->f_prev = first_file->f_prev;
-	file->f_next->f_prev = file;
-	file->f_prev->f_next = file;
+	struct file *next, *prev;
+
+	next = first_file;
 	first_file = file;
+	file->f_count = 0;
+	prev = next->f_prev;
+	file->f_next = next;
+	next->f_prev = file;
+	file->f_prev = prev;
+	prev->f_next = file;
 }
 
 /*
@@ -36,11 +41,15 @@ static inline void insert_file_free(struct file *file)
  */
 static inline void remove_file_free(struct file *file)
 {
-	if (first_file == file)
-		first_file = first_file->f_next;
-	file->f_next->f_prev = file->f_prev;
-	file->f_prev->f_next = file->f_next;
+	struct file *next, *prev;
+
+	next = file->f_next;
+	prev = file->f_prev;
 	file->f_next = file->f_prev = NULL;
+	if (first_file == file)
+		first_file = next;
+	next->f_prev = prev;
+	prev->f_next = next;
 }
 
 /*
@@ -48,10 +57,14 @@ static inline void remove_file_free(struct file *file)
  */
 static inline void put_last_free(struct file *file)
 {
-	file->f_prev = first_file->f_prev;
-	file->f_prev->f_next = file;
-	file->f_next = first_file;
-	file->f_next->f_prev = file;
+	struct file *next, *prev;
+
+	next = first_file;
+	file->f_next = next;
+	prev = next->f_prev;
+	next->f_prev = file;
+	file->f_prev = prev;
+	prev->f_next = file;
 }
 
 /*
@@ -117,11 +130,12 @@ struct file * get_empty_filp(void)
 	do {
 		for (f = first_file, i=0; i < nr_files; i++, f = f->f_next)
 			if (!f->f_count) {
-				remove_file_free(f);
-				memset(f,0,sizeof(*f));
-				put_last_free(f);
+				/* The f_next pointer is followed by the f_prev pointer */
+				memset(f, 0, offsetof(struct file, f_next));
+				memset(&f->f_prev + 1, 0, sizeof(*f) - sizeof(f->f_prev) - offsetof(struct file, f_prev));
 				f->f_count = 1;
 				f->f_version = ++event;
+				first_file = f->f_next;
 				return f;
 			}
 	} while (nr_files < max && grow_files());

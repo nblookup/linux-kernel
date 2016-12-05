@@ -41,7 +41,7 @@ static struct file_operations ext2_dir_operations = {
 	NULL,			/* mmap */
 	NULL,			/* no special open code */
 	NULL,			/* no special release code */
-	file_fsync,		/* fsync */
+	ext2_sync_file,		/* fsync */
 	NULL,			/* fasync */
 	NULL,			/* check_media_change */
 	NULL			/* revalidate */
@@ -72,7 +72,7 @@ struct inode_operations ext2_dir_inode_operations = {
 };
 
 int ext2_check_dir_entry (const char * function, struct inode * dir,
-			  struct ext2_dir_entry * de, struct buffer_head * bh,
+			  struct ext2_dir_entry_2 * de, struct buffer_head * bh,
 			  unsigned long offset)
 {
 	const char * error_msg = NULL;
@@ -104,7 +104,7 @@ static int ext2_readdir (struct inode * inode, struct file * filp,
 	unsigned long offset, blk;
 	int i, num, stored;
 	struct buffer_head * bh, * tmp, * bha[16];
-	struct ext2_dir_entry * de;
+	struct ext2_dir_entry_2 * de;
 	struct super_block * sb;
 	int err;
 
@@ -145,7 +145,7 @@ static int ext2_readdir (struct inode * inode, struct file * filp,
 					brelse (bha[i]);
 			}
 		}
-		
+
 revalidate:
 		/* If the dir block has changed since the last call to
 		 * readdir(2), then we might be pointing to an invalid
@@ -153,7 +153,7 @@ revalidate:
 		 * to make sure. */
 		if (filp->f_version != inode->i_version) {
 			for (i = 0; i < sb->s_blocksize && i < offset; ) {
-				de = (struct ext2_dir_entry *) 
+				de = (struct ext2_dir_entry_2 *)
 					(bh->b_data + i);
 				/* It's too expensive to do a full
 				 * dirent test each time round this
@@ -170,10 +170,10 @@ revalidate:
 				| offset;
 			filp->f_version = inode->i_version;
 		}
-		
-		while (!error && filp->f_pos < inode->i_size 
+
+		while (!error && filp->f_pos < inode->i_size
 		       && offset < sb->s_blocksize) {
-			de = (struct ext2_dir_entry *) (bh->b_data + offset);
+			de = (struct ext2_dir_entry_2 *) (bh->b_data + offset);
 			if (!ext2_check_dir_entry ("ext2_readdir", inode, de,
 						   bh, offset)) {
 				/* On error, skip the f_pos to the
@@ -206,9 +206,6 @@ revalidate:
 		offset = 0;
 		brelse (bh);
 	}
-	if (!IS_RDONLY(inode)) {
-		inode->i_atime = CURRENT_TIME;
-		inode->i_dirt = 1;
-	}
+	UPDATE_ATIME(inode);
 	return 0;
 }

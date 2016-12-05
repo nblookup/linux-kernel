@@ -25,6 +25,9 @@
 #undef REALLY_FAST_IO			/* define if ide ports are perfect */
 #define INITIAL_MULT_COUNT	0	/* off=0; on=2,4,8,16,32, etc.. */
 
+#ifndef SUPPORT_SLOW_DATA_PORTS		/* 1 to support slow data ports */
+#define SUPPORT_SLOW_DATA_PORTS	1	/* 0 to reduce kernel size */
+#endif
 #ifndef SUPPORT_VLB_SYNC		/* 1 to support weird 32-bit chips */
 #define SUPPORT_VLB_SYNC	1	/* 0 to reduce kernel size */
 #endif
@@ -41,7 +44,15 @@
 #define FANCY_STATUS_DUMPS	1	/* 0 to reduce kernel size */
 #endif
 
-#if defined(CONFIG_BLK_DEV_IDECD) || defined(CONFIG_BLK_DEV_IDETAPE)
+#ifdef CONFIG_BLK_DEV_CMD640
+#if 0	/* change to 1 when debugging cmd640 problems */
+void cmd640_dump_regs (void);
+#define CMD640_DUMP_REGS cmd640_dump_regs() /* for debugging cmd640 chipset */
+#endif
+#endif  /* CONFIG_BLK_DEV_CMD640 */
+
+#if	defined(CONFIG_BLK_DEV_IDECD) || defined(CONFIG_BLK_DEV_IDETAPE) || \
+	defined(CONFIG_BLK_DEV_IDEFLOPPY) || defined(CONFIG_BLK_DEV_IDESCSI)
 #define CONFIG_BLK_DEV_IDEATAPI 1
 #endif
 
@@ -53,6 +64,10 @@
 /*
  *  "No user-serviceable parts" beyond this point  :)
  *****************************************************************************/
+
+#if defined(CONFIG_BLK_DEV_IDESCSI) && !defined(CONFIG_SCSI)
+#error "SCSI must also be selected"
+#endif
 
 typedef unsigned char	byte;	/* used everywhere */
 
@@ -100,6 +115,9 @@ typedef unsigned char	byte;	/* used everywhere */
 #define IDE_FEATURE_REG		IDE_ERROR_REG
 #define IDE_COMMAND_REG		IDE_STATUS_REG
 #define IDE_ALTSTATUS_REG	IDE_CONTROL_REG
+#define IDE_IREASON_REG		IDE_NSECTOR_REG
+#define IDE_BCOUNTL_REG		IDE_LCYL_REG
+#define IDE_BCOUNTH_REG		IDE_HCYL_REG
 
 #ifdef REALLY_FAST_IO
 #define OUT_BYTE(b,p)		outb((b),(p))
@@ -116,7 +134,7 @@ typedef unsigned char	byte;	/* used everywhere */
 #define BAD_W_STAT		(BAD_R_STAT  | WRERR_STAT)
 #define BAD_STAT		(BAD_R_STAT  | DRQ_STAT)
 #define DRIVE_READY		(READY_STAT  | SEEK_STAT)
-#define DATA_READY		(DRIVE_READY | DRQ_STAT)
+#define DATA_READY		(DRQ_STAT)
 
 /*
  * Some more useful definitions
@@ -127,7 +145,7 @@ typedef unsigned char	byte;	/* used everywhere */
 #define PARTN_MASK	((1<<PARTN_BITS)-1)	/* a useful bit mask */
 #define MAX_DRIVES	2	/* per interface; 2 assumed by lots of code */
 #ifndef MAX_HWIFS
-#define MAX_HWIFS	4	/* an arbitrary, but realistic limit */
+#define MAX_HWIFS	6	/* an arbitrary, but realistic limit */
 #endif
 #define SECTOR_WORDS	(512 / 4)	/* number of 32bit words per sector */
 
@@ -135,7 +153,11 @@ typedef unsigned char	byte;	/* used everywhere */
  * Timeouts for various operations:
  */
 #define WAIT_DRQ	(5*HZ/100)	/* 50msec - spec allows up to 20ms */
+#ifdef CONFIG_APM
+#define WAIT_READY	(5*HZ)		/* 5sec - some laptops are very slow */
+#else
 #define WAIT_READY	(3*HZ/100)	/* 30msec - should be instantaneous */
+#endif /* CONFIG_APM */
 #define WAIT_PIDENTIFY	(1*HZ)	/* 1sec   - should be less than 3ms (?) */
 #define WAIT_WORSTCASE	(30*HZ)	/* 30sec  - worst case when spinning up */
 #define WAIT_CMD	(10*HZ)	/* 10sec  - maximum wait for an IRQ to happen */
@@ -271,6 +293,8 @@ struct cdrom_info {
 	/* The result of the last successful request sense command
 	   on this device. */
 	struct atapi_request_sense sense_data;
+
+	int max_sectors;
 };
 
 #endif /* CONFIG_BLK_DEV_IDECD */
@@ -279,7 +303,7 @@ struct cdrom_info {
  * Now for the data we need to maintain per-drive:  ide_drive_t
  */
 
-typedef enum {ide_disk, ide_cdrom, ide_tape} ide_media_t;
+typedef enum {ide_disk, ide_cdrom, ide_tape, ide_floppy, ide_scsi} ide_media_t;
 
 typedef union {
 	unsigned all			: 8;	/* all of the bits together */
@@ -287,8 +311,9 @@ typedef union {
 		unsigned set_geometry	: 1;	/* respecify drive geometry */
 		unsigned recalibrate	: 1;	/* seek to cyl 0      */
 		unsigned set_multmode	: 1;	/* set multmode count */
-		unsigned set_pio	: 1;	/* set pio mode */
-		unsigned reserved	: 4;	/* unused */
+		unsigned set_tune	: 1;	/* tune interface for drive */
+		unsigned mc		: 1;	/* acknowledge media change */
+		unsigned reserved	: 3;	/* unused */
 		} b;
 	} special_t;
 
@@ -313,18 +338,22 @@ typedef struct ide_drive_s {
 	unsigned using_dma	: 1;	/* disk is using dma for read/write */
 	unsigned forced_geom	: 1;	/* 1 if hdx=c,h,s was given at boot */
 	unsigned unmask		: 1;	/* flag: okay to unmask other irqs */
+	unsigned no_unmask	: 1;	/* disallow setting unmask bit */
+	unsigned no_io_32bit	: 1;	/* disallow enabling 32bit I/O */
 	unsigned nobios		: 1;	/* flag: do not probe bios for drive */
+	unsigned slow		: 1;	/* flag: slow data port */
 	unsigned autotune	: 2;	/* 1=autotune, 2=noautotune, 0=default */
 #if FAKE_FDISK_FOR_EZDRIVE
 	unsigned remap_0_to_1	: 1;	/* flag: partitioned with ezdrive */
 #endif /* FAKE_FDISK_FOR_EZDRIVE */
-	ide_media_t	media;		/* disk, cdrom, tape */
+	unsigned no_geom	: 1;	/* flag: do not set geometry */
+	ide_media_t	media;		/* disk, cdrom, tape, floppy */
 	select_t	select;		/* basic drive/head select reg value */
 	byte		ctl;		/* "normal" value for IDE_CONTROL_REG */
 	byte		ready_stat;	/* min status value for drive ready */
 	byte		mult_count;	/* current multiple sector setting */
 	byte 		mult_req;	/* requested multiple sector setting */
-	byte 		pio_req;	/* requested multiple sector setting */
+	byte 		tune_req;	/* requested drive tuning setting */
 	byte		io_32bit;	/* 0=16-bit, 1=32-bit, 2/3=32bit+sync */
 	byte		bad_wstat;	/* used for ignoring WRERR_STAT */
 	byte		sect0;		/* offset of first sector for DM6:DDO */
@@ -346,6 +375,13 @@ typedef struct ide_drive_s {
 #ifdef CONFIG_BLK_DEV_IDETAPE
 	idetape_tape_t	tape;		/* for ide-tape.c */
 #endif /* CONFIG_BLK_DEV_IDETAPE */
+#ifdef CONFIG_BLK_DEV_IDEFLOPPY
+	void *floppy;			/* for ide-floppy.c */
+#endif /* CONFIG_BLK_DEV_IDEFLOPPY */
+#ifdef CONFIG_BLK_DEV_IDESCSI
+	void *scsi;			/* for ide-scsi.c */
+#endif /* CONFIG_BLK_DEV_IDESCSI */
+	byte		ide_scsi;	/* use ide-scsi driver */
 	} ide_drive_t;
 
 /*
@@ -393,7 +429,8 @@ typedef void (ide_selectproc_t) (ide_drive_t *);
 typedef enum {	ide_unknown,	ide_generic,	ide_triton,
 		ide_cmd640,	ide_dtc2278,	ide_ali14xx,
 		ide_qd6580,	ide_umc8672,	ide_ht6560b,
-		ide_promise }
+		ide_promise,	ide_hpt343,	ide_udma,
+		ide_ultra66 }
 	hwif_chipset_t;
 
 typedef struct hwif_s {
@@ -418,7 +455,6 @@ typedef struct hwif_s {
 	unsigned	noprobe    : 1;	/* don't probe for this interface */
 	unsigned	present    : 1;	/* this interface exists */
 	unsigned	serialized : 1;	/* serialized operation with mate hwif */
-	unsigned	no_unmask  : 1;	/* disallow setting unmask bits */
 	unsigned	sharing_irq: 1;	/* 1 = sharing irq with another hwif */
 #ifdef CONFIG_BLK_DEV_PROMISE
 	unsigned	is_promise2: 1;	/* 2nd i/f on promise DC4030 */
@@ -449,6 +485,7 @@ typedef struct hwgroup_s {
 	struct timer_list	timer;	/* failsafe timer */
 	struct request		wrq;	/* local copy of current write rq */
 	unsigned long		poll_timeout;	/* timeout value during long polls */
+	int			active; /* set when servicing requests */
 	} ide_hwgroup_t;
 
 /*
@@ -457,11 +494,10 @@ typedef struct hwgroup_s {
  * should be using pointers to a drive (ide_drive_t *) or 
  * pointers to a hwif (ide_hwif_t *), rather than indexing this
  * structure directly (the allocation/layout may change!).
+ *
  */
-#ifdef _IDE_C
-	ide_hwif_t	ide_hwifs[MAX_HWIFS];	/* master data repository */
-#else
-extern	ide_hwif_t	ide_hwifs[];
+#ifndef _IDE_C
+extern	ide_hwif_t	ide_hwifs[];		/* master data repository */
 #endif
 
 /*
@@ -486,6 +522,12 @@ void ide_input_data (ide_drive_t *drive, void *buffer, unsigned int wcount);
  * This is used for (nearly) all data transfers to the IDE interface
  */
 void ide_output_data (ide_drive_t *drive, void *buffer, unsigned int wcount);
+
+/*
+ * This is used for (nearly) all ATAPI data transfers from/to the IDE interface
+ */
+void atapi_input_bytes (ide_drive_t *drive, void *buffer, unsigned int bytecount);
+void atapi_output_bytes (ide_drive_t *drive, void *buffer, unsigned int bytecount);
 
 /*
  * This is used on exit from the driver, to designate the next irq handler
@@ -564,9 +606,9 @@ typedef enum
  * This function issues a special IDE device request
  * onto the request queue.
  *
- * If action is ide_wait, then then rq is queued at the end of
- * the request queue, and the function sleeps until it has been
- * processed.  This is for use when invoked from an ioctl handler.
+ * If action is ide_wait, then the rq is queued at the end of the
+ * request queue, and the function sleeps until it has been processed.
+ * This is for use when invoked from an ioctl handler.
  *
  * If action is ide_preempt, then the rq is queued at the head of
  * the request queue, displacing the currently-being-processed
@@ -593,6 +635,14 @@ int ide_do_drive_cmd (ide_drive_t *drive, struct request *rq, ide_action_t actio
  * stat/err are used only when (HWGROUP(drive)->rq->cmd == IDE_DRIVE_CMD).
  */
 void ide_end_drive_cmd (ide_drive_t *drive, byte stat, byte err);
+
+/*
+ * ide_system_bus_speed() returns what we think is the system VESA/PCI
+ * bus speed (in Mhz).  This is used for calculating interface PIO timings.
+ * The default is 40 for known PCI systems, 50 otherwise.
+ * The "idebus=xx" parameter can be used to override this value.
+ */
+int ide_system_bus_speed (void);
 
 /*
  * ide_multwrite() transfers a block of up to mcount sectors of data
@@ -669,6 +719,28 @@ void idetape_blkdev_release (struct inode *inode, struct file *filp, ide_drive_t
 void idetape_register_chrdev (void);
 
 #endif /* CONFIG_BLK_DEV_IDETAPE */
+
+#ifdef CONFIG_BLK_DEV_IDEFLOPPY
+int idefloppy_identify_device (ide_drive_t *drive,struct hd_driveid *id);
+void idefloppy_setup (ide_drive_t *drive);
+void idefloppy_do_request (ide_drive_t *drive, struct request *rq, unsigned long block);
+void idefloppy_end_request (byte uptodate, ide_hwgroup_t *hwgroup);
+int idefloppy_ioctl (ide_drive_t *drive, struct inode *inode, struct file *file,
+			unsigned int cmd, unsigned long arg);
+int idefloppy_open (struct inode *inode, struct file *filp, ide_drive_t *drive);
+void idefloppy_release (struct inode *inode, struct file *filp, ide_drive_t *drive);
+int idefloppy_media_change (ide_drive_t *drive);
+unsigned long idefloppy_capacity (ide_drive_t *drive);
+#endif /* CONFIG_BLK_DEV_IDEFLOPPY */
+
+#ifdef CONFIG_BLK_DEV_IDESCSI
+void idescsi_setup (ide_drive_t *drive);
+void idescsi_do_request (ide_drive_t *drive, struct request *rq, unsigned long block);
+void idescsi_end_request (byte uptodate, ide_hwgroup_t *hwgroup);
+int idescsi_ioctl (ide_drive_t *drive, struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg);
+int idescsi_open (struct inode *inode, struct file *filp, ide_drive_t *drive);
+void idescsi_ide_release (struct inode *inode, struct file *filp, ide_drive_t *drive);
+#endif /* CONFIG_BLK_DEV_IDESCSI */
 
 #ifdef CONFIG_BLK_DEV_TRITON
 void ide_init_triton (byte, byte);

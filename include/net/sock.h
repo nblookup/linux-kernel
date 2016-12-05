@@ -22,6 +22,8 @@
  *		Alan Cox	:	New fields for options
  *	Pauline Middelink	:	identd support
  *		Alan Cox	:	Eliminate low level recv/recvfrom
+ *		David S. Miller	:	New socket lookup architecture for ISS.
+ *              Elliot Poger    :       New field for SO_BINDTODEVICE option.
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -40,10 +42,13 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>	/* struct sk_buff */
 #include <net/protocol.h>		/* struct inet_protocol */
-#ifdef CONFIG_AX25
+#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 #include <net/ax25.h>
-#ifdef CONFIG_NETROM
+#if defined(CONFIG_NETROM) || defined(CONFIG_NETROM_MODULE)
 #include <net/netrom.h>
+#endif
+#if defined(CONFIG_ROSE) || defined(CONFIG_ROSE_MODULE)
+#include <net/rose.h>
 #endif
 #endif
 
@@ -58,10 +63,6 @@
 #include <linux/igmp.h>
 
 #include <asm/atomic.h>
-
-/* Think big (also on some systems a byte is faster) */
-#define SOCK_ARRAY_SIZE	256
-
 
 /*
  *	The AF_UNIX specific socket options
@@ -112,7 +113,11 @@ struct ipx_opt
  * know the connection this socket belongs to. 
  */
 	struct ncp_server       *ncp_server;
-	
+/* 
+ * To handle special ncp connection-handling sockets for mars_nwe,
+ * the connection number must be stored in the socket.
+ */
+	unsigned short		ipx_ncp_conn;
 };
 #endif
 
@@ -155,6 +160,10 @@ struct tcp_opt
  */
 struct sock 
 {
+	/* This must be first. */
+	struct sock		*sklist_next;
+	struct sock		*sklist_prev;
+
 	struct options		*opt;
 	atomic_t		wmem_alloc;
 	atomic_t		rmem_alloc;
@@ -169,6 +178,7 @@ struct sock
 	__u32			fin_seq;
 	__u32			urg_seq;
 	__u32			urg_data;
+	__u32			syn_seq;
 	int			users;			/* user count */
   /*
    *	Not all are volatile, but some are, so we
@@ -190,11 +200,17 @@ struct sock
 				broadcast,
 				nonagle,
 				bsdism;
+	struct device           * bound_device;
 	unsigned long	        lingertime;
 	int			proc;
+
 	struct sock		*next;
-	struct sock		*prev; /* Doubly linked chain.. */
+	struct sock		**pprev;
+	struct sock		*bind_next;
+	struct sock		**bind_pprev;
 	struct sock		*pair;
+	int			hashent;
+	struct sock		*prev;
 	struct sk_buff		* volatile send_head;
 	struct sk_buff		* volatile send_next;
 	struct sk_buff		* volatile send_tail;
@@ -216,7 +232,7 @@ struct sock
 	volatile unsigned long  ato;            /* ack timeout */
 	volatile unsigned long  lrcvtime;       /* jiffies at last data rcv */
 	volatile unsigned long  idletime;       /* jiffies at last rcv */
-	unsigned short		bytes_rcv;
+	unsigned int		bytes_rcv;
 /*
  *	mss is min(mtu, max_window) 
  */
@@ -247,20 +263,13 @@ struct sock
 						   'timed out' */
 	unsigned char		protocol;
 	volatile unsigned char	state;
-	unsigned char		ack_backlog;
-	unsigned char		max_ack_backlog;
+	unsigned short		ack_backlog;
 	unsigned char		priority;
 	unsigned char		debug;
-	unsigned short		rcvbuf;
-	unsigned short		sndbuf;
+	int			rcvbuf;
+	int			sndbuf;
 	unsigned short		type;
 	unsigned char		localroute;	/* Route locally only */
-#ifdef CONFIG_AX25
-	ax25_cb			*ax25;
-#ifdef CONFIG_NETROM
-	nr_cb			*nr;
-#endif
-#endif
   
 /*
  *	This is where all the private (optional) areas that don't
@@ -270,6 +279,15 @@ struct sock
 	union
 	{
 	  	struct unix_opt	af_unix;
+#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
+		ax25_cb			*ax25;
+#if defined(CONFIG_NETROM) || defined(CONFIG_NETROM_MODULE)
+		nr_cb			*nr;
+#endif
+#if defined(CONFIG_ROSE) || defined(CONFIG_ROSE_MODULE)
+		rose_cb			*rose;
+#endif
+#endif
 #if defined(CONFIG_ATALK) || defined(CONFIG_ATALK_MODULE)
 		struct atalk_sock	af_at;
 #endif
@@ -327,7 +345,13 @@ struct sock
 	void			(*data_ready)(struct sock *sk,int bytes);
 	void			(*write_space)(struct sock *sk);
 	void			(*error_report)(struct sock *sk);
-  
+
+  /*
+   *	Moved solely for 2.0 to keep binary module compatibility stuff straight.
+   */
+   
+	unsigned short		max_ack_backlog;
+	struct sock		*listening;
 };
 
 /*
@@ -336,6 +360,10 @@ struct sock
  
 struct proto 
 {
+	/* These must be first. */
+	struct sock		*sklist_next;
+	struct sock		*sklist_prev;
+
 	void			(*close)(struct sock *sk, unsigned long timeout);
 	int			(*build_header)(struct sk_buff *skb,
 					__u32 saddr,
@@ -371,11 +399,18 @@ struct proto
 	int			(*recvmsg)(struct sock *sk, struct msghdr *msg, int len,
 					int noblock, int flags, int *addr_len);
 	int			(*bind)(struct sock *sk, struct sockaddr *uaddr, int addr_len);
+
+	/* Keeping track of sk's, looking them up, and port selection methods. */
+	void			(*hash)(struct sock *sk);
+	void			(*unhash)(struct sock *sk);
+	void			(*rehash)(struct sock *sk);
+	unsigned short		(*good_socknum)(void);
+	int			(*verify_bind)(struct sock *sk, unsigned short snum);
+
 	unsigned short		max_header;
 	unsigned long		retransmits;
 	char			name[32];
 	int			inuse, highestinuse;
-	struct sock *		sock_array[SOCK_ARRAY_SIZE];
 };
 
 #define TIME_WRITE	1
@@ -400,6 +435,46 @@ struct proto
 #define SHUTDOWN_MASK	3
 #define RCV_SHUTDOWN	1
 #define SEND_SHUTDOWN	2
+
+/* Per-protocol hash table implementations use this to make sure
+ * nothing changes.
+ */
+#define SOCKHASH_LOCK()		start_bh_atomic()
+#define SOCKHASH_UNLOCK()	end_bh_atomic()
+
+/* Some things in the kernel just want to get at a protocols
+ * entire socket list commensurate, thus...
+ */
+static __inline__ void add_to_prot_sklist(struct sock *sk)
+{
+	SOCKHASH_LOCK();
+	if(!sk->sklist_next) {
+		struct proto *p = sk->prot;
+
+		sk->sklist_prev = (struct sock *) p;
+		sk->sklist_next = p->sklist_next;
+		p->sklist_next->sklist_prev = sk;
+		p->sklist_next = sk;
+
+		/* Charge the protocol. */
+		sk->prot->inuse += 1;
+		if(sk->prot->highestinuse < sk->prot->inuse)
+			sk->prot->highestinuse = sk->prot->inuse;
+	}
+	SOCKHASH_UNLOCK();
+}
+
+static __inline__ void del_from_prot_sklist(struct sock *sk)
+{
+	SOCKHASH_LOCK();
+	if(sk->sklist_next) {
+		sk->sklist_next->sklist_prev = sk->sklist_prev;
+		sk->sklist_prev->sklist_next = sk->sklist_next;
+		sk->sklist_next = NULL;
+		sk->prot->inuse--;
+	}
+	SOCKHASH_UNLOCK();
+}
 
 /*
  * Used by processes to "lock" a socket state, so that
@@ -448,18 +523,6 @@ here:
 extern struct sock *		sk_alloc(int priority);
 extern void			sk_free(struct sock *sk);
 extern void			destroy_sock(struct sock *sk);
-extern unsigned short		get_new_socknum(struct proto *,
-						unsigned short);
-extern void			put_sock(unsigned short, struct sock *); 
-extern struct sock		*get_sock(struct proto *, unsigned short,
-					  unsigned long, unsigned short,
-					  unsigned long,
-					  unsigned long, unsigned short);
-extern struct sock		*get_sock_mcast(struct sock *, unsigned short,
-					  unsigned long, unsigned short,
-					  unsigned long);
-extern struct sock		*get_sock_raw(struct sock *, unsigned short,
-					  unsigned long, unsigned long);
 
 extern struct sk_buff		*sock_wmalloc(struct sock *sk,
 					      unsigned long size, int force,

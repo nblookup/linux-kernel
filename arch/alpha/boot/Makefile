@@ -12,8 +12,12 @@ ifdef CONFIG_CROSSCOMPILE
 # enable this for linking under OSF/1:
 LINKFLAGS = -non_shared -T 0x20000000 -N
 else
-# enable this for linking under Linux:
-LINKFLAGS = -static -T bootloader.lds -N 
+ elf=$(shell if $(LD) --help | grep elf64alpha >/dev/null; then echo yes; fi)
+ ifeq ($(elf),yes)
+  LINKFLAGS = -static -Ttext 0x20000000 -N
+ else
+  LINKFLAGS = -static -T bootloader.lds -N
+ endif
 endif
 
 .S.s:
@@ -22,13 +26,16 @@ endif
 	$(CC) -D__ASSEMBLY__ -traditional -c -o $*.o $<
 
 OBJECTS = head.o main.o
-TARGETS = vmlinux.gz
+BPOBJECTS = head.o bootp.o
+TARGETS = vmlinux.gz tools/objstrip # also needed by aboot & milo
+VMLINUX = $(TOPDIR)/vmlinux
+OBJSTRIP = tools/objstrip
 
 all:	$(TARGETS)
 	@echo Ready to install kernel in $(shell pwd)/vmlinux.gz
 
 # normally no need to build these:
-rawboot: vmlinux.nh tools/lxboot tools/bootlx vmlinux
+rawboot: vmlinux.nh tools/lxboot tools/bootlx
 
 msb:	tools/lxboot tools/bootlx vmlinux.nh
 	( cat tools/lxboot tools/bootlx vmlinux.nh ) > /dev/rz0a
@@ -37,6 +44,9 @@ msb:	tools/lxboot tools/bootlx vmlinux.nh
 bootimage:	tools/mkbb tools/lxboot tools/bootlx vmlinux.nh
 	( cat tools/lxboot tools/bootlx vmlinux.nh ) > bootimage
 	tools/mkbb bootimage tools/lxboot
+
+bootpfile:	tools/bootph vmlinux.nh
+	( cat tools/bootph vmlinux.nh ) > bootpfile
 
 srmboot:	bootdevice bootimage
 	dd if=bootimage of=$(BOOTDEV) bs=512 seek=1 skip=1
@@ -51,21 +61,38 @@ vmlinux.gz: vmlinux
 #
 # A raw binary without header.  Used by raw boot.
 #
-vmlinux.nh: tools/build
-	tools/build -v $(TOPDIR)/vmlinux > vmlinux.nh
+main.o: ksize.h
+
+bootp.o: ksize.h
+
+ksize.h: $(OBJSTRIP) vmlinux.nh
+	echo "#define KERNEL_SIZE `$(OBJSTRIP) -p vmlinux.nh /dev/null`" > $@
+
+vmlinux.nh: $(VMLINUX) $(OBJSTRIP)
+ifeq ($(elf),yes)
+	cp $(VMLINUX) vmlinux.stripped
+	strip vmlinux.stripped		# work around ELF binutils bug...
+	$(OBJSTRIP) -v vmlinux.stripped vmlinux.nh
+	rm -f vmlinux.stripped
+else
+	$(OBJSTRIP) -v $(VMLINUX) vmlinux.nh
+endif
 
 vmlinux: $(TOPDIR)/vmlinux
 	cp $(TOPDIR)/vmlinux vmlinux
-	quickstrip vmlinux
+	strip vmlinux
 
-tools/lxboot: tools/build
-	tools/build > tools/lxboot
+tools/lxboot: $(OBJSTRIP) bootloader
+	$(OBJSTRIP) -p bootloader tools/lxboot
 
-tools/bootlx: bootloader tools/build
-	tools/build -vb bootloader > tools/bootlx
+tools/bootlx: bootloader $(OBJSTRIP)
+	$(OBJSTRIP) -vb bootloader tools/bootlx
 
-tools/build: tools/build.c
-	$(HOSTCC) tools/build.c -o tools/build
+tools/bootph: bootpheader $(OBJSTRIP)
+	$(OBJSTRIP) -vb bootpheader tools/bootph
+
+$(OBJSTRIP): $(OBJSTRIP).c
+	$(HOSTCC) $(OBJSTRIP).c -o $(OBJSTRIP)
 
 tools/mkbb: tools/mkbb.c
 	$(HOSTCC) tools/mkbb.c -o tools/mkbb
@@ -74,11 +101,18 @@ bootloader: $(OBJECTS)
 	$(LD) $(LINKFLAGS) \
 		$(OBJECTS) \
 		$(LIBS) \
-		-o bootloader || \
+		-o bootloader && strip bootloader || \
 		(rm -f bootloader && exit 1)
 
+bootpheader: $(BPOBJECTS)
+	$(LD) $(LINKFLAGS) \
+		$(BPOBJECTS) \
+		$(LIBS) \
+		-o bootpheader && strip bootpheader || \
+		(rm -f bootpheader && exit 1)
+
 clean:
-	rm -f $(TARGETS) bootloader bootimage vmlinux.nh tools/build \
-		tools/mkbb tools/bootlx tools/lxboot
+	rm -f $(TARGETS) bootloader bootimage vmlinux.nh \
+		tools/mkbb tools/bootlx tools/lxboot ksize.h
 
 dep:

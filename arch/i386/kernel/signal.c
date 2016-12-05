@@ -69,7 +69,7 @@ static void restore_i387(struct _fpstate *buf)
 		restore_i387_hard(buf);
 		return;
 	}
-	restore_i387_soft(buf);
+	restore_i387_soft(&current->tss.i387.soft, buf);
 #endif	
 }
 	
@@ -81,7 +81,10 @@ asmlinkage int sys_sigreturn(unsigned long __unused)
 {
 #define COPY(x) regs->x = context.x
 #define COPY_SEG(x) \
-if ((context.x & 0xfffc) && (context.x & 3) != 3) goto badframe; COPY(x);
+if (   (context.x & 0xfffc)     /* not a NULL selectors */ \
+    && (context.x & 0x4) != 0x4 /* not a LDT selector */ \
+    && (context.x & 3) != 3     /* not a RPL3 GDT selector */ \
+   ) goto badframe; COPY(x);
 #define COPY_SEG_STRICT(x) \
 if (!(context.x & 0xfffc) || (context.x & 3) != 3) goto badframe; COPY(x);
 	struct sigcontext_struct context;
@@ -149,7 +152,8 @@ static struct _fpstate * save_i387(struct _fpstate * buf)
 #else
 	if (hard_math)
 		return save_i387_hard(buf);
-	return save_i387_soft(buf);
+	save_i387_soft(&current->tss.i387.soft, buf);
+	return buf;
 #endif
 }
 
@@ -248,7 +252,8 @@ static void handle_signal(unsigned long signr, struct sigaction *sa,
 
 	if (sa->sa_flags & SA_ONESHOT)
 		sa->sa_handler = NULL;
-	current->blocked |= sa->sa_mask;
+	if (!(sa->sa_flags & SA_NOMASK))
+		current->blocked |= (sa->sa_mask | _S(signr)) & _BLOCKABLE;
 }
 
 /*
@@ -272,7 +277,7 @@ asmlinkage int do_signal(unsigned long oldmask, struct pt_regs * regs)
 		 *	including volatiles for the inline function to get
 		 *	current combined with this gets it confused.
 		 */
-	        struct task_struct *t=current;
+		struct task_struct *t=current;
 		__asm__("bsf %3,%1\n\t"
 			"btrl %1,%0"
 			:"=m" (t->signal),"=r" (signr)
@@ -282,7 +287,7 @@ asmlinkage int do_signal(unsigned long oldmask, struct pt_regs * regs)
 		if ((current->flags & PF_PTRACED) && signr != SIGKILL) {
 			current->exit_code = signr;
 			current->state = TASK_STOPPED;
-			notify_parent(current);
+			notify_parent(current, SIGCHLD);
 			schedule();
 			if (!(signr = current->exit_code))
 				continue;
@@ -307,17 +312,20 @@ asmlinkage int do_signal(unsigned long oldmask, struct pt_regs * regs)
 			if (current->pid == 1)
 				continue;
 			switch (signr) {
-			case SIGCONT: case SIGCHLD: case SIGWINCH:
+			case SIGCONT: case SIGCHLD: case SIGWINCH: case SIGURG:
 				continue;
 
-			case SIGSTOP: case SIGTSTP: case SIGTTIN: case SIGTTOU:
+			case SIGTSTP: case SIGTTIN: case SIGTTOU:
+				if (is_orphaned_pgrp(current->pgrp))
+					continue;
+			case SIGSTOP:
 				if (current->flags & PF_PTRACED)
 					continue;
 				current->state = TASK_STOPPED;
 				current->exit_code = signr;
 				if (!(current->p_pptr->sig->action[SIGCHLD-1].sa_flags & 
 						SA_NOCLDSTOP))
-					notify_parent(current);
+					notify_parent(current, SIGCHLD);
 				schedule();
 				continue;
 

@@ -3,9 +3,13 @@
 # Makefile for the Linux network (ethercard) device drivers.
 #
 
-# This will go away in some future future: hidden configuration files
+# This will go away in some future: hidden configuration files
 # are difficult for users to deal with.
 include CONFIG
+
+SUB_DIRS     := 
+MOD_SUB_DIRS := $(SUB_DIRS)
+ALL_SUB_DIRS := $(SUB_DIRS)
 
 L_TARGET := net.a
 L_OBJS   := auto_irq.o
@@ -18,6 +22,8 @@ CONFIG_8390_BUILTIN :=
 CONFIG_8390_MODULE  :=
 CONFIG_SLHC_BUILTIN :=
 CONFIG_SLHC_MODULE  :=
+CONFIG_HDLCDRV_BUILTIN :=
+CONFIG_HDLCDRV_MODULE  :=
 
 ifeq ($(CONFIG_ISDN),y)
   ifeq ($(CONFIG_ISDN_PPP),y)
@@ -47,6 +53,14 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_SHAPER),y)
+L_OBJS += shaper.o
+else
+  ifeq ($(CONFIG_SHAPER),m)
+  M_OBJS += shaper.o
+  endif
+endif
+
 ifeq ($(CONFIG_SK_G16),y)
 L_OBJS += sk_g16.o
 endif
@@ -64,14 +78,6 @@ L_OBJS += hp100.o
 else
   ifeq ($(CONFIG_HP100),m)
   M_OBJS += hp100.o
-  endif
-endif
-
-ifeq ($(CONFIG_WIC),y)
-L_OBJS += wic.o
-else
-  ifeq ($(CONFIG_WIC),m)
-  M_OBJS += wic.o
   endif
 endif
 
@@ -141,6 +147,16 @@ else
   ifeq ($(CONFIG_ULTRA),m)
   CONFIG_8390_MODULE = y
   M_OBJS += smc-ultra.o
+  endif
+endif
+
+ifeq ($(CONFIG_ULTRA32),y)
+L_OBJS += smc-ultra32.o
+CONFIG_8390_BUILTIN = y
+else
+  ifeq ($(CONFIG_ULTRA32),m)
+  CONFIG_8390_MODULE = y
+  M_OBJS += smc-ultra32.o
   endif
 endif
 
@@ -237,8 +253,9 @@ endif
 
 ifeq ($(CONFIG_LANCE),y)
 L_OBJS += lance.o
-  ifeq ($(CONFIG_LANCE32),y)
-  L_OBJS += lance32.o
+else
+  ifeq ($(CONFIG_LANCE),m)
+  M_OBJS += lance.o
   endif
 endif
 
@@ -286,11 +303,27 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_3C515),y)
+L_OBJS += 3c515.o
+else
+  ifeq ($(CONFIG_3C515),m)
+  M_OBJS += 3c515.o
+  endif
+endif
+
 ifeq ($(CONFIG_VORTEX),y)
 L_OBJS += 3c59x.o
 else
   ifeq ($(CONFIG_VORTEX),m)
   M_OBJS += 3c59x.o
+  endif
+endif
+
+ifeq ($(CONFIG_VIA_RHINE),y)
+L_OBJS += via-rhine.o
+else
+  ifeq ($(CONFIG_VIA_RHINE),m)
+  M_OBJS += via-rhine.o
   endif
 endif
 
@@ -307,6 +340,56 @@ L_OBJS += eepro.o
 else
   ifeq ($(CONFIG_EEXPRESS_PRO),m)
   M_OBJS += eepro.o
+  endif
+endif
+
+ifeq ($(CONFIG_EEXPRESS_PRO100B),y)
+L_OBJS += eepro100.o
+else
+  ifeq ($(CONFIG_EEXPRESS_PRO100B),m)
+  M_OBJS += eepro100.o
+  endif
+endif
+
+ifeq ($(CONFIG_EPIC),y)
+L_OBJS += epic100.o
+else
+  ifeq ($(CONFIG_EPIC),m)
+  M_OBJS += epic100.o
+  endif
+endif
+
+ifeq ($(CONFIG_NE2K_PCI),y)
+L_OBJS += ne2k-pci.o
+CONFIG_8390_BUILTIN = y
+else
+  ifeq ($(CONFIG_NE2K_PCI),m)
+  CONFIG_8390_MODULE = y
+  M_OBJS += ne2k-pci.o
+  endif
+endif
+
+ifeq ($(CONFIG_PCNET32),y)
+L_OBJS += pcnet32.o
+else
+  ifeq ($(CONFIG_PCNET32),m)
+  M_OBJS += pcnet32.o
+  endif
+endif
+
+ifeq ($(CONFIG_RTL8139),y)
+L_OBJS += rtl8139.o
+else
+  ifeq ($(CONFIG_RTL8139),m)
+  M_OBJS += rtl8139.o
+  endif
+endif
+
+ifeq ($(CONFIG_YELLOWFIN),y)
+L_OBJS += yellowfin.o
+else
+  ifeq ($(CONFIG_YELLOWFIN),m)
+  M_OBJS += yellowfin.o
   endif
 endif
 
@@ -340,6 +423,10 @@ endif
 
 ifeq ($(CONFIG_ATP),y)
 L_OBJS += atp.o
+else
+  ifeq ($(CONFIG_ATP),m)
+  M_OBJS += atp.o
+  endif
 endif
 
 ifeq ($(CONFIG_DE4X5),y)
@@ -348,6 +435,10 @@ else
   ifeq ($(CONFIG_DE4X5),m)
   M_OBJS += de4x5.o
   endif
+endif
+
+ifeq ($(CONFIG_DEFXX),y)
+L_OBJS += defxx.o
 endif
 
 ifeq ($(CONFIG_NI52),y)
@@ -360,6 +451,10 @@ endif
 
 ifeq ($(CONFIG_NI65),y)
 L_OBJS += ni65.o
+else
+  ifeq ($(CONFIG_NI65),m)
+  M_OBJS += ni65.o
+  endif
 endif
 
 ifeq ($(CONFIG_ELPLUS),y)
@@ -396,6 +491,14 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_TLAN),y)
+L_OBJS += tlan.o
+else
+  ifeq ($(CONFIG_TLAN),m)
+  M_OBJS += tlan.o
+  endif
+endif
+
 ifeq ($(CONFIG_ARCNET),y)
 L_OBJS += arcnet.o
 else
@@ -412,12 +515,36 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_MKISS),y)
+L_OBJS += mkiss.o
+else
+  ifeq ($(CONFIG_MKISS),m)
+  M_OBJS += mkiss.o
+  endif
+endif
+
 ifeq ($(CONFIG_PI),y)
 L_OBJS += pi2.o
+else
+  ifeq ($(CONFIG_PI),m)
+  M_OBJS += pi2.o
+  endif
 endif
 
 ifeq ($(CONFIG_PT),y)
 L_OBJS += pt.o
+else
+  ifeq ($(CONFIG_PT),m)
+  M_OBJS += pt.o
+  endif
+endif
+
+ifeq ($(CONFIG_BPQETHER),y)
+L_OBJS += bpqether.o
+else
+  ifeq ($(CONFIG_BPQETHER),m)
+  M_OBJS += bpqether.o
+  endif
 endif
 
 # If anything built-in uses slhc, then build it into the kernel also.
@@ -427,6 +554,40 @@ LX_OBJS += slhc.o
 else
   ifdef CONFIG_SLHC_MODULE
   MX_OBJS += slhc.o
+  endif
+endif
+
+
+ifeq ($(CONFIG_BAYCOM),y)
+L_OBJS += baycom.o
+CONFIG_HDLCDRV_BUILTIN = y
+else
+  ifeq ($(CONFIG_BAYCOM),m)
+  CONFIG_HDLCDRV_MODULE = y
+  M_OBJS += baycom.o
+  endif
+endif
+
+ifeq ($(CONFIG_SOUNDMODEM),y)
+ALL_SUB_DIRS += soundmodem
+SUB_DIRS += soundmodem
+L_OBJS += soundmodem/soundmodem.o
+CONFIG_HDLCDRV_BUILTIN = y
+else
+  ifeq ($(CONFIG_SOUNDMODEM),m)
+  CONFIG_HDLCDRV_MODULE = y
+  ALL_SUB_DIRS += soundmodem
+  MOD_SUB_DIRS += soundmodem
+  endif
+endif
+
+# If anything built-in uses the hdlcdrv, then build it into the kernel also.
+# If not, but a module uses it, build as a module.
+ifdef CONFIG_HDLCDRV_BUILTIN
+LX_OBJS += hdlcdrv.o
+else
+  ifdef CONFIG_HDLCDRV_MODULE
+  MX_OBJS += hdlcdrv.o
   endif
 endif
 
@@ -506,10 +667,23 @@ else
   endif
 endif
 
+
+
+ifeq ($(CONFIG_RCPCI),y)
+L_OBJS += rcpci.o
+else
+  ifeq ($(CONFIG_RCPCI),m)
+  M_OBJS += rcpci.o
+  endif
+endif
+
 include $(TOPDIR)/Rules.make
 
 clean:
 	rm -f core *.o *.a *.s
+
+rcpci.o: rcpci45.o rclanmtl.o
+	$(LD) -r -o rcpci.o rcpci45.o rclanmtl.o
 
 wd.o:	wd.c CONFIG
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(WD_OPTS) -c $<
@@ -525,6 +699,9 @@ pi2.o:  pi2.c CONFIG
 
 de4x5.o: de4x5.c CONFIG
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DE4X5_OPTS) -c $<
+
+defxx.o: defxx.c CONFIG
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEFXX_OPTS) -c $<
 
 ewrk3.o: ewrk3.c CONFIG
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(EWRK3_OPTS) -c $<

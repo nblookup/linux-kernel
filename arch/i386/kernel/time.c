@@ -12,6 +12,8 @@
  *      precision CMOS clock update
  * 1996-05-03    Ingo Molnar
  *      fixed time warps in do_[slow|fast]_gettimeoffset()
+ * 1997-09-10	Updated NTP code according to technical memorandum Jan '96
+ *		"A Kernel Model for Precision Timekeeping" by Dave Mills
  */
 #include <linux/errno.h>
 #include <linux/sched.h>
@@ -20,10 +22,13 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
+#include <linux/time.h>
+#include <linux/delay.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
 #include <asm/irq.h>
+#include <asm/delay.h>
 
 #include <linux/mc146818rtc.h>
 #include <linux/timex.h>
@@ -68,7 +73,7 @@ static unsigned long do_fast_gettimeoffset(void)
 		 */
 		if (test_bit(TIMER_BH, &bh_active) )
 		{
-			missing_time = 997670/HZ;
+			missing_time = 1000020/HZ;
 		}
 
 		/* Get last timer tick in absolute kernel time */
@@ -90,7 +95,7 @@ static unsigned long do_fast_gettimeoffset(void)
 			:"r" (tmp),
 			 "0" (eax), "1" (edx));
 
-		edx = 997670/HZ;
+		edx = 1000020/HZ;
 		tmp = eax;
 		eax = 0;
 
@@ -111,7 +116,7 @@ static unsigned long do_fast_gettimeoffset(void)
 	eax -= low_timer;
 
 	/*
-	 * Time offset = (997670/HZ * time_low) / quotient.
+	 * Time offset = (1000020/HZ * time_low) / quotient.
 	 */
 
 	__asm__("mull %2"
@@ -124,8 +129,8 @@ static unsigned long do_fast_gettimeoffset(void)
 	 * we need to check the result so that we'll get a timer
 	 * that is monotonic.
 	 */
-	if (edx >= 997670/HZ)
-		edx = 997670/HZ-1;
+	if (edx >= 1000020/HZ)
+		edx = 1000020/HZ-1;
 
 	eax = edx + missing_time;
 	return eax;
@@ -266,9 +271,11 @@ void do_settimeofday(struct timeval *tv)
 	}
 
 	xtime = *tv;
-	time_state = TIME_BAD;
-	time_maxerror = MAXPHASE;
-	time_esterror = MAXPHASE;
+	time_adjust = 0;		/* stop active adjtime() */
+	time_status |= STA_UNSYNC;
+	time_state = TIME_ERROR;	/* p. 24, (a) */
+	time_maxerror = NTP_PHASE_LIMIT;
+	time_esterror = NTP_PHASE_LIMIT;
 	sti();
 }
 
@@ -279,6 +286,9 @@ void do_settimeofday(struct timeval *tv)
  * nowtime is written into the registers of the CMOS clock, it will
  * jump to the next second precisely 500 ms later. Check the Motorola
  * MC146818A or Dallas DS12887 data sheet for details.
+ *
+ * BUG: This routine does not handle hour overflow properly; it just
+ *      sets the minutes. Usually you'll only notice that after reboot!
  */
 static int set_rtc_mmss(unsigned long nowtime)
 {
@@ -315,8 +325,12 @@ static int set_rtc_mmss(unsigned long nowtime)
 		}
 		CMOS_WRITE(real_seconds,RTC_SECONDS);
 		CMOS_WRITE(real_minutes,RTC_MINUTES);
-	} else
+	} else {
+		printk(KERN_WARNING
+		       "set_rtc_mmss: can't update from %d to %d\n",
+		       cmos_minutes, real_minutes);
 		retval = -1;
+	}
 
 	/* The following flags have to be released exactly in this order,
 	 * otherwise the DS12887 (popular MC146818A clone with integrated
@@ -347,7 +361,8 @@ static inline void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	 * CMOS clock accordingly every ~11 minutes. Set_rtc_mmss() has to be
 	 * called as close as possible to 500 ms before the new second starts.
 	 */
-	if (time_state != TIME_BAD && xtime.tv_sec > last_rtc_update + 660 &&
+	if ((time_status & STA_UNSYNC) == 0 &&
+	    xtime.tv_sec > last_rtc_update + 660 &&
 	    xtime.tv_usec > 500000 - (tick >> 1) &&
 	    xtime.tv_usec < 500000 + (tick >> 1))
 	  if (set_rtc_mmss(xtime.tv_sec) == 0)
@@ -409,6 +424,7 @@ static inline unsigned long mktime(unsigned int year, unsigned int mon,
 	  )*60 + sec; /* finally seconds */
 }
 
+/* not static: needed by APM */
 unsigned long get_cmos_time(void)
 {
 	unsigned int year, mon, day, hour, min, sec;
@@ -460,14 +476,30 @@ void time_init(void)
 				/* Don't use them if a suspend/resume could
                                    corrupt the timer value.  This problem
                                    needs more debugging. */
-	if (x86_capability & 16) {
-		do_gettimeoffset = do_fast_gettimeoffset;
-		/* read Pentium cycle counter */
-		__asm__(".byte 0x0f,0x31"
-			:"=a" (init_timer_cc.low),
-			 "=d" (init_timer_cc.high));
-		irq0.handler = pentium_timer_interrupt;
-	}
+	if (x86_capability & 16)
+		if (strncmp(x86_vendor_id, "Cyrix", 5) != 0) {
+			do_gettimeoffset = do_fast_gettimeoffset;
+
+			if( strcmp( x86_vendor_id, "AuthenticAMD" ) == 0 ) {
+				if( x86 == 5 ) {
+					if( x86_model == 0 ) {
+						/* turn on cycle counters during power down */
+						__asm__ __volatile__ (" movl $0x83, %%ecx \n \
+									.byte 0x0f,0x32 \n \
+									orl $1,%%eax \n \
+									.byte 0x0f,0x30 \n " 
+                                                                	: : : "ax", "cx", "dx" );
+						udelay(500);
+					}
+				}
+			}	
+
+			/* read Pentium cycle counter */
+			__asm__(".byte 0x0f,0x31"
+				:"=a" (init_timer_cc.low),
+			 	"=d" (init_timer_cc.high));
+			irq0.handler = pentium_timer_interrupt;
+		}
 #endif
 	setup_x86_irq(0, &irq0);
 }

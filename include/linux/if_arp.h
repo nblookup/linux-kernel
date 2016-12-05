@@ -5,14 +5,15 @@
  *
  *		Global definitions for the ARP (RFC 826) protocol.
  *
- * Version:	@(#)if_arp.h	1.0.1	04/16/93
+ * Version:	@(#)if_arp.h	1.0.2	08/12/96
  *
  * Authors:	Original taken from Berkeley UNIX 4.3, (c) UCB 1986-1988
  *		Portions taken from the KA9Q/NOS (v2.00m PA0GRI) source.
  *		Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *		Florian La Roche,
- *		Jonathan Layes <layes@loran.com>
+ *		Jonathan Layes, <layes@loran.com>
+ *		Lawrence V. Stefani, <stefani@lkg.dec.com>
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -22,6 +23,7 @@
 #ifndef _LINUX_IF_ARP_H
 #define _LINUX_IF_ARP_H
 
+#include <linux/netdevice.h>
 
 /* ARP protocol HARDWARE identifiers. */
 #define ARPHRD_NETROM	0		/* from KA9Q: NET/ROM pseudo	*/
@@ -43,6 +45,7 @@
 #define ARPHRD_CSLIP6	259
 #define ARPHRD_RSRVD	260		/* Notional KISS type 		*/
 #define ARPHRD_ADAPT	264
+#define	ARPHRD_ROSE	270
 #define ARPHRD_PPP	512
 
 #define ARPHRD_TUNNEL	768		/* IPIP tunnel			*/
@@ -51,6 +54,7 @@
 #define ARPHRD_SKIP	771		/* SKIP vif			*/
 #define ARPHRD_LOOPBACK	772		/* Loopback device		*/
 #define ARPHRD_LOCALTLK 773		/* Localtalk device		*/
+#define ARPHRD_FDDI		774		/* Fiber Distributed Data Interface */
 
 /* ARP protocol opcodes. */
 #define	ARPOP_REQUEST	1		/* ARP request			*/

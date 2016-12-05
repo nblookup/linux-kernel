@@ -232,7 +232,7 @@ int get_irq_list(char *buf)
 		action = irq_action[i];
 		if (!action) 
 			continue;
-		len += sprintf(buf+len, "%2d: %8d %c %s",
+		len += sprintf(buf+len, "%2d: %10u %c %s",
 			i, kstat.interrupts[i],
 			(action->flags & SA_INTERRUPT) ? '+' : ' ',
 			action->name);
@@ -285,7 +285,7 @@ int get_smp_prof_list(char *buf) {
 		for (j=0;j<smp_num_cpus;j++)
 			len+=sprintf(buf+len, "%10d ",
 				int_count[cpu_logical_map[j]][i]);
-		len += sprintf(buf+len, "%c %s\n",
+		len += sprintf(buf+len, "%c %s",
 			(action->flags & SA_INTERRUPT) ? '+' : ' ',
 			action->name);
 		for (action=action->next; action; action = action->next) {
@@ -293,6 +293,7 @@ int get_smp_prof_list(char *buf) {
 				(action->flags & SA_INTERRUPT) ? " +" : "",
 				action->name);
 		}
+		len += sprintf(buf+len, "\n");
 	}
 	len+=sprintf(buf+len, "LCK: %10lu",
 		sum_spins);
@@ -344,7 +345,29 @@ asmlinkage void do_IRQ(int irq, struct pt_regs * regs)
 {
 	struct irqaction * action = *(irq + irq_action);
 	int do_random = 0;
-
+	int c,intm,mask;
+#ifdef IRQ_DEBUG
+	static int count;
+	if (smp_processor_id() != 0 && count++ < 1000)
+	  printk("IRQ %d: done by CPU %d\n",irq,smp_processor_id());
+#endif	  
+	if (irq  >= 8) {
+	  c = cache_A1;
+	  intm = inb(0xA1);
+	  mask =  1 << (irq - 8);
+	} else {
+	  c = cache_21;
+	  intm = inb(0x21);
+	  mask =  1 << irq;
+	}
+	if (!(c & mask) || !(intm & mask)) {
+#ifdef IRQ_DEBUG	
+	  printk("IRQ %d (proc %d):cache_x1=0x%x,INT mask=0x%x\n", irq, smp_processor_id(),c,intm);
+#endif	  
+	  /* better to return because the interrupt may be asserted again,
+	     the bad thing is that we may loose some interrupts */
+	  return;
+	}
 #ifdef __SMP__
 	if(smp_threads_ready && active_kernel_processor!=smp_processor_id())
 		panic("IRQ %d: active processor set wrongly(%d not %d).\n", irq, active_kernel_processor, smp_processor_id());
@@ -522,7 +545,7 @@ int probe_irq_off (unsigned long irqs)
 
 	irqmask = (((unsigned int)cache_A1)<<8) | (unsigned int)cache_21;
 #ifdef DEBUG
-	printk("probe_irq_off: irqs=0x%04x irqmask=0x%04x\n", irqs, irqmask);
+	printk("probe_irq_off: irqs=0x%04lx irqmask=0x%04x\n", irqs, irqmask);
 #endif
 	irqs &= irqmask;
 	if (!irqs)

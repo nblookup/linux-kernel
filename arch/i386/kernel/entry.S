@@ -65,7 +65,9 @@ OLDESP		= 0x3C
 OLDSS		= 0x40
 
 CF_MASK		= 0x00000001
+TF_MASK		= 0x00000100
 IF_MASK		= 0x00000200
+DF_MASK		= 0x00000400
 NT_MASK		= 0x00004000
 VM_MASK		= 0x00020000
 
@@ -132,7 +134,10 @@ ENOSYS = 38
 	decl SYMBOL_NAME(syscall_count); \
 	decl SYMBOL_NAME(kernel_counter); \
 	jnz 1f;	\
-	movb $(NO_PROC_ID), SYMBOL_NAME(active_kernel_processor); \
+	movb SYMBOL_NAME(saved_active_kernel_processor), %al; \
+	movb %al, SYMBOL_NAME(active_kernel_processor); \
+	cmpb $(NO_PROC_ID), %al; \
+	jnz 1f; \
 	lock; \
 	btrl $0, SYMBOL_NAME(kernel_flag); \
 1:	popfl;
@@ -163,9 +168,13 @@ ENOSYS = 38
 
 #define	ENTER_KERNEL \
 	pushl %eax; \
+	pushl %ebx; \
+	pushl %ecx; \
 	pushl %edx; \
 	pushfl; \
 	cli; \
+	movl $6000, %ebx; \
+	movl SYMBOL_NAME(smp_loops_per_tick), %ecx; \
 	GET_PROCESSOR_ID \
 	btsl $ SMP_FROM_SYSCALL,SYMBOL_NAME(smp_proc_in_lock)(,%eax,4); \
 	SMP_PROF_A \
@@ -175,14 +184,25 @@ ENOSYS = 38
 	cmpb SYMBOL_NAME(active_kernel_processor), %al; \
 	je 4f; \
 2:	SMP_PROF_B \
-	btl %al, SYMBOL_NAME(smp_invalidate_needed); \
+	btl %eax, SYMBOL_NAME(smp_invalidate_needed); \
 	jnc 5f; \
 	lock; \
-	btrl %al, SYMBOL_NAME(smp_invalidate_needed); \
+	btrl %eax, SYMBOL_NAME(smp_invalidate_needed); \
 	jnc 5f; \
 	movl %cr3,%edx; \
 	movl %edx,%cr3; \
-5:	btl $0, SYMBOL_NAME(kernel_flag); \
+5:	sti; \
+	decl %ecx; \
+	cli; \
+	jne 7f; \
+	decl %ebx; \
+	jne 6f; \
+	call SYMBOL_NAME(non_irq_deadlock_detected); \
+6:	movl SYMBOL_NAME(smp_loops_per_tick), %ecx; \
+	cmpb SYMBOL_NAME(boot_cpu_id), %al; \
+	jne 7f; \
+	incl SYMBOL_NAME(jiffies);  \
+7:	btl $0, SYMBOL_NAME(kernel_flag); \
 	jc 2b; \
 	jmp 1b; \
 3:	movb %al, SYMBOL_NAME(active_kernel_processor); \
@@ -190,6 +210,8 @@ ENOSYS = 38
 	incl SYMBOL_NAME(syscall_count); \
 	popfl; \
 	popl %edx; \
+	popl %ecx; \
+	popl %ebx; \
 	popl %eax;
 
 
@@ -239,7 +261,6 @@ ENOSYS = 38
 	iret
 #endif
 
-
 ENTRY(lcall7)
 	pushfl			# We get a different stack layout with call gates,
 	pushl %eax		# which has to be cleaned up later..
@@ -251,6 +272,9 @@ ENTRY(lcall7)
 	movl CS(%esp),%edx	# this is eip..
 	movl EFLAGS(%esp),%ecx	# and this is cs..
 	movl %eax,EFLAGS(%esp)	#
+	andl $~(NT_MASK|TF_MASK|DF_MASK), %eax
+	pushl %eax
+	popfl
 	movl %edx,EIP(%esp)	# Now we move them to their "normal" places
 	movl %ecx,CS(%esp)	#
 	movl %esp,%eax
@@ -307,7 +331,7 @@ ENTRY(system_call)
 	ALIGN
 1:	call SYMBOL_NAME(syscall_trace)
 	movl ORIG_EAX(%esp),%eax
-	call SYMBOL_NAME(sys_call_table)(,%eax,4)
+	call *SYMBOL_NAME(sys_call_table)(,%eax,4)
 	movl %eax,EAX(%esp)		# save the return value
 #ifdef __SMP__
 	GET_PROCESSOR_OFFSET(%eax)
@@ -325,6 +349,10 @@ ret_from_sys_call:
 9:	movl SYMBOL_NAME(bh_mask),%eax
 	andl SYMBOL_NAME(bh_active),%eax
 	jne handle_bottom_half
+#ifdef __SMP__
+	cmpb $(NO_PROC_ID), SYMBOL_NAME(saved_active_kernel_processor)
+	jne 2f
+#endif
 	movl EFLAGS(%esp),%eax		# check VM86 flag: CS/SS are
 	testl $(VM_MASK),%eax		# different then
 	jne 1f
@@ -351,6 +379,7 @@ ret_from_sys_call:
 	jne signal_return
 2:	RESTORE_ALL
 	ALIGN
+	.globl signal_return
 signal_return:
 	movl %esp,%ecx
 	pushl %ecx
@@ -377,26 +406,27 @@ ENTRY(divide_error)
 	pushl $ SYMBOL_NAME(do_divide_error)
 	ALIGN
 error_code:
+	pushfl
+	andl $~(NT_MASK|TF_MASK|DF_MASK), (%esp)
+	popfl
 	push %fs
 	push %es
 	push %ds
 	pushl %eax
+	xorl %eax,%eax
 	pushl %ebp
 	pushl %edi
 	pushl %esi
 	pushl %edx
+	decl %eax			# eax = -1
 	pushl %ecx
 	pushl %ebx
-	movl $0,%eax
-	movl %eax,%db7			# disable hardware debugging...
-	cld
-	movl $-1, %eax
-	xchgl %eax, ORIG_EAX(%esp)	# orig_eax (get the error code. )
 	xorl %ebx,%ebx			# zero ebx
+	xchgl %eax, ORIG_EAX(%esp)	# orig_eax (get the error code. )
 	mov %gs,%bx			# get the lower order bits of gs
+	movl %esp,%edx
 	xchgl %ebx, GS(%esp)		# get the address and save gs.
 	pushl %eax			# push the error code
-	lea 4(%esp),%edx
 	pushl %edx
 	movl $(KERNEL_DS),%edx
 	mov %dx,%ds
@@ -405,9 +435,6 @@ error_code:
 	mov %dx,%fs
 #ifdef __SMP__
 	ENTER_KERNEL
-#endif
-	pushl %eax
-#ifdef __SMP__
 	GET_PROCESSOR_OFFSET(%eax)
 	movl SYMBOL_NAME(current_set)(,%eax), %eax
 #else
@@ -415,7 +442,6 @@ error_code:
 #endif
 	movl %db6,%edx
 	movl %edx,dbgreg6(%eax)  # save current hardware debugging status
-	popl %eax
 	call *%ebx
 	addl $8,%esp
 	jmp ret_from_sys_call
@@ -506,6 +532,11 @@ ENTRY(alignment_check)
 
 ENTRY(page_fault)
 	pushl $ SYMBOL_NAME(do_page_fault)
+	jmp error_code
+
+ENTRY(spurious_interrupt_bug)
+	pushl $0
+	pushl $ SYMBOL_NAME(do_spurious_interrupt_bug)
 	jmp error_code
 
 .data
@@ -623,7 +654,7 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_iopl)		/* 110 */
 	.long SYMBOL_NAME(sys_vhangup)
 	.long SYMBOL_NAME(sys_idle)
-	.long SYMBOL_NAME(sys_vm86)
+	.long SYMBOL_NAME(sys_vm86old)
 	.long SYMBOL_NAME(sys_wait4)
 	.long SYMBOL_NAME(sys_swapoff)		/* 115 */
 	.long SYMBOL_NAME(sys_sysinfo)
@@ -674,4 +705,13 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_sched_rr_get_interval)
 	.long SYMBOL_NAME(sys_nanosleep)
 	.long SYMBOL_NAME(sys_mremap)
-	.space (NR_syscalls-163)*4
+	.long 0,0
+	.long SYMBOL_NAME(sys_vm86)		/* 166 */
+	.long 0					/* 167 */
+	.long 0					/* 168 STREAMS poll */
+	.long 0					/* 169 */
+	.long 0,0,0,0,0,0,0,0,0,0		/* 170 - 179 */
+	.long 0,0,0,0,0,0,0,0			/* 180 - 187 */
+	.long 0					/* 188 STREAMS getpmsg */
+	.long 0					/* 189 STREAMS putpmsg */
+	.space (NR_syscalls-189)*4

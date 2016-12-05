@@ -58,6 +58,10 @@
  *              Jonathan Layes  :       Added arpd support through kerneld 
  *                                      message queue (960314)
  *		Mike Shaver	:	/proc/sys/net/ipv4/arp_* support
+ *		Stuart Cheshire	:	Metricom and grat arp fixes
+ *					*** FOR 2.1 clean this up ***
+ *		Lawrence V. Stefani: (08/12/96) Added FDDI support.
+ *		David S. Miller	:	Fix skb leakage in arp_find.
  */
 
 /* RFC1122 Status:
@@ -84,6 +88,7 @@
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <linux/fddidevice.h>
 #include <linux/if_arp.h>
 #include <linux/trdevice.h>
 #include <linux/skbuff.h>
@@ -97,9 +102,9 @@
 #include <net/tcp.h>
 #include <net/sock.h>
 #include <net/arp.h>
-#ifdef CONFIG_AX25
+#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 #include <net/ax25.h>
-#ifdef CONFIG_NETROM
+#if defined(CONFIG_NETROM) || defined(CONFIG_NETROM_MODULE)
 #include <net/netrom.h>
 #endif
 #endif
@@ -734,7 +739,7 @@ static int arp_force_expire(void)
 	unsigned long now = jiffies;
 	int result = 0;
 
-	static last_index;
+	static int last_index;
 
 	if (ARP_LOCKED())
 		return 0;
@@ -1136,6 +1141,7 @@ static void arp_send_q(struct arp_table *entry)
 			else
 				dev_queue_xmit(skb,skb->dev,skb->sk->priority);
 		}
+		cli();
 	}
 	restore_flags(flags);
 }
@@ -1286,7 +1292,8 @@ static int arp_set_predefined(int addr_hint, unsigned char * haddr, u32 paddr, s
 			return 1;
 #ifdef CONFIG_IP_MULTICAST
 		case IS_MULTICAST:
-			if(dev->type==ARPHRD_ETHER || dev->type==ARPHRD_IEEE802)
+			if(dev->type==ARPHRD_ETHER || dev->type==ARPHRD_IEEE802 
+				|| dev->type==ARPHRD_FDDI)
 			{
 				u32 taddr;
 				haddr[0]=0x01;
@@ -1423,7 +1430,8 @@ int arp_find(unsigned char *haddr, u32 paddr, struct device *dev,
 			 */
 			else
 			{
-				icmp_send(skb, ICMP_DEST_UNREACH, ICMP_HOST_UNREACH, 0, dev);
+				icmp_send(skb, ICMP_DEST_UNREACH, ICMP_HOST_UNREACH, 0, dev, 1);
+				skb_device_unlock(skb); /* else it is lost forever */
 				dev_kfree_skb(skb, FREE_WRITE);
 			}
 		}
@@ -1433,8 +1441,10 @@ int arp_find(unsigned char *haddr, u32 paddr, struct device *dev,
 
 	entry = arp_new_entry(paddr, dev, NULL, skb);
 
-	if (skb != NULL && !entry)
+	if (skb != NULL && !entry) {
+		skb_device_unlock(skb); /* else it is lost forever */
 		dev_kfree_skb(skb, FREE_WRITE);
+	}
 
 	arp_unlock();
 	return 1;
@@ -1694,18 +1704,30 @@ void arp_send(int type, int ptype, u32 dest_ip,
 	skb->arp = 1;
 	skb->dev = dev;
 	skb->free = 1;
-	skb->protocol = htons (ETH_P_IP);
+	skb->protocol = htons (ETH_P_ARP);
 
 	/*
 	 *	Fill the device header for the ARP frame
 	 */
-
 	dev->hard_header(skb,dev,ptype,dest_hw?dest_hw:dev->broadcast,src_hw?src_hw:NULL,skb->len);
 
-	/* Fill out the arp protocol part. */
+	/*
+	 * Fill out the arp protocol part.
+	 *
+	 * The arp hardware type should match the device type, except for FDDI,
+	 * which (according to RFC 1390) should always equal 1 (Ethernet).
+	 */
+#ifdef CONFIG_FDDI
+	arp->ar_hrd = (dev->type == ARPHRD_FDDI) ? htons(ARPHRD_ETHER) : htons(dev->type);
+#else
 	arp->ar_hrd = htons(dev->type);
-#ifdef CONFIG_AX25
-#ifdef CONFIG_NETROM
+#endif
+	/*
+	 *	Exceptions everywhere. AX.25 uses the AX.25 PID value not the
+	 *	DIX code for the protocol. Make these device structure fields.
+	 */
+#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
+#if defined(CONFIG_NETROM) || defined(CONFIG_NETROM_MODULE)
 	arp->ar_pro = (dev->type == ARPHRD_AX25 || dev->type == ARPHRD_NETROM) ? htons(AX25_P_IP) : htons(ETH_P_IP);
 #else
 	arp->ar_pro = (dev->type != ARPHRD_AX25) ? htons(ETH_P_IP) : htons(AX25_P_IP);
@@ -1748,6 +1770,12 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	unsigned char *arp_ptr= (unsigned char *)(arp+1);
 	unsigned char *sha,*tha;
 	u32 sip,tip;
+
+	if(skb->pkt_type == PACKET_OTHERHOST)
+	{
+		kfree_skb(skb, FREE_READ);
+		return 0;
+	}
 	
 /*
  *	The hardware length of the packet should match the hardware length
@@ -1756,16 +1784,57 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
  *	is not from an IP number.  We can't currently handle this, so toss
  *	it. 
  */  
+#if defined(CONFIG_NET_ETHERNET) || defined(CONFIG_FDDI)
+	if (dev->type == ARPHRD_ETHER || dev->type == ARPHRD_FDDI)
+	{
+		/*
+		 * According to RFC 1390, FDDI devices should accept ARP hardware types
+		 * of 1 (Ethernet).  However, to be more robust, we'll accept hardware
+		 * types of either 1 (Ethernet) or 6 (IEEE 802.2).
+		 *
+		 * ETHERNET devices will accept both hardware types, too. (RFC 1042)
+		 */
+		if (arp->ar_hln != dev->addr_len    || 
+			((ntohs(arp->ar_hrd) != ARPHRD_ETHER) && (ntohs(arp->ar_hrd) != ARPHRD_IEEE802)) ||
+			dev->flags & IFF_NOARP          ||
+			arp->ar_pln != 4)
+		{
+			kfree_skb(skb, FREE_READ);
+			return 0;
+		}
+	}
+	else
+	{
+		if (arp->ar_hln != dev->addr_len    || 
+			dev->type != ntohs(arp->ar_hrd) ||
+			dev->flags & IFF_NOARP          ||
+			arp->ar_pln != 4)
+		{
+			kfree_skb(skb, FREE_READ);
+			return 0;
+		}
+	}
+#else
 	if (arp->ar_hln != dev->addr_len    || 
-     		dev->type != ntohs(arp->ar_hrd) || 
+#if CONFIG_AP1000
+	    /*
+	     * ARP from cafe-f was found to use ARPHDR_IEEE802 instead of
+	     * the expected ARPHDR_ETHER.
+	     */
+	    (strcmp(dev->name,"fddi") == 0 && 
+	     arp->ar_hrd != ARPHRD_ETHER && arp->ar_hrd != ARPHRD_IEEE802) ||
+	    (strcmp(dev->name,"fddi") != 0 &&
+	     dev->type != ntohs(arp->ar_hrd)) ||
+#else
+		dev->type != ntohs(arp->ar_hrd) ||
+#endif
 		dev->flags & IFF_NOARP          ||
 		arp->ar_pln != 4)
 	{
 		kfree_skb(skb, FREE_READ);
 		return 0;
-		/* Should this be an error/printk?  Seems like something */
-		/* you'd want to know about. Unless it's just !IFF_NOARP. -- MS */
 	}
+#endif
 
 /*
  *	Another test.
@@ -1773,11 +1842,10 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
  *	match the protocol the device speaks.  If it doesn't, there is a
  *	problem, so toss the packet.
  */
-/* Again, should this be an error/printk? -- MS */
 
   	switch (dev->type)
   	{
-#ifdef CONFIG_AX25
+#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 		case ARPHRD_AX25:
 			if(arp->ar_pro != htons(AX25_P_IP))
 			{
@@ -1786,7 +1854,7 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 			}
 			break;
 #endif
-#ifdef CONFIG_NETROM
+#if defined(CONFIG_NETROM) || defined(CONFIG_NETROM_MODULE)
 		case ARPHRD_NETROM:
 			if(arp->ar_pro != htons(AX25_P_IP))
 			{
@@ -1798,14 +1866,8 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 		case ARPHRD_ETHER:
 		case ARPHRD_ARCNET:
 		case ARPHRD_METRICOM:
-			if(arp->ar_pro != htons(ETH_P_IP))
-			{
-				kfree_skb(skb, FREE_READ);
-				return 0;
-			}
-			break;
-
 		case ARPHRD_IEEE802:
+		case ARPHRD_FDDI:
 			if(arp->ar_pro != htons(ETH_P_IP))
 			{
 				kfree_skb(skb, FREE_READ);
@@ -1866,9 +1928,10 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	if (tip != dev->pa_addr && net_alias_has(skb->dev)) 
 	{
 		/*
-		 *	net_alias_dev_rcv_sel32 returns main dev if it fails to found other.
+		 *	net_alias_dev_rx32 returns main dev if it fails to found other.
+		 *  	if successful, also incr. alias rx count.
 		 */
-		dev = net_alias_dev_rcv_sel32(dev, AF_INET, sip, tip);
+		dev = net_alias_dev_rx32(dev, AF_INET, sip, tip);
 
 		if (dev->type != ntohs(arp->ar_hrd) || dev->flags & IFF_NOARP)
 		{
@@ -1919,7 +1982,7 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 				memcpy(ha, proxy_entry->ha, dev->addr_len);
 				arp_unlock();
 
-				rt = ip_rt_route(tip, 0);
+				rt = ip_rt_route(tip, 0, NULL);
 				if (rt  && rt->rt_dev != dev)
 					arp_send(ARPOP_REPLY,ETH_P_ARP,sip,dev,tip,sha,ha,sha);
 				ip_rt_put(rt);
@@ -1931,18 +1994,10 @@ int arp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 		else
 			arp_send(ARPOP_REPLY,ETH_P_ARP,sip,dev,tip,sha,dev->dev_addr,sha);
 
-/*
- *	Handle gratuitous arp.
- */
-		arp_fast_lock();
-		arp_update(sip, sha, dev, 0, NULL, 1);
-		arp_unlock();
-		kfree_skb(skb, FREE_READ);
-		return 0;
 	}
 
 	arp_fast_lock();
-	arp_update(sip, sha, dev, 0, NULL, ip_chk_addr(tip) != IS_MYADDR);
+	arp_update(sip, sha, dev, 0, NULL, ip_chk_addr(tip) != IS_MYADDR && dev->type != ARPHRD_METRICOM);
 	arp_unlock();
 	kfree_skb(skb, FREE_READ);
 	return 0;
@@ -1989,24 +2044,29 @@ static int arp_req_set(struct arpreq *r, struct device * dev)
 	{
 		if (!mask && ip)
 			return -EINVAL;
-		if (!dev)
+		if (!dev) {
 			dev = dev_getbytype(r->arp_ha.sa_family);
+			if (!dev)
+				return -ENODEV;
+		}
 	}
 	else
 	{
-		if (ip_chk_addr(ip))
-			return -EINVAL;
 		if (!dev)
 		{
 			struct rtable * rt;
-			rt = ip_rt_route(ip, 0);
+			rt = ip_rt_route(ip, 0, NULL);
 			if (!rt)
 				return -ENETUNREACH;
 			dev = rt->rt_dev;
 			ip_rt_put(rt);
+			if (!dev)
+				return -ENODEV;
 		}
+		if (dev->type != ARPHRD_METRICOM && ip_chk_addr(ip))
+			return -EINVAL;
 	}
-	if (!dev || (dev->flags&(IFF_LOOPBACK|IFF_NOARP)))
+	if (dev->flags & (IFF_LOOPBACK | IFF_NOARP))
 		return -ENODEV;
 
 	if (r->arp_ha.sa_family != dev->type)	
@@ -2306,8 +2366,8 @@ int arp_get_info(char *buffer, char **start, off_t offset, int length, int dummy
 /*
  *	Convert hardware address to XX:XX:XX:XX ... form.
  */
-#ifdef CONFIG_AX25
-#ifdef CONFIG_NETROM
+#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
+#if defined(CONFIG_NETROM) || defined(CONFIG_NETROM_MODULE)
 			if (entry->dev->type == ARPHRD_AX25 || entry->dev->type == ARPHRD_NETROM)
 			     strcpy(hbuffer,ax2asc((ax25_address *)entry->ha));
 			else {
@@ -2326,7 +2386,7 @@ int arp_get_info(char *buffer, char **start, off_t offset, int length, int dummy
 			}
 			hbuffer[--k]=0;
 	
-#ifdef CONFIG_AX25
+#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 			}
 #endif
 			size = sprintf(buffer+len,
@@ -2412,3 +2472,39 @@ void arp_init (void)
 	netlink_attach(NETLINK_ARPD, arpd_callback);
 #endif
 }
+
+#ifdef CONFIG_AX25_MODULE
+
+/*
+ *	ax25 -> ascii conversion
+ */
+char *ax2asc(ax25_address *a)
+{
+	static char buf[11];
+	char c, *s;
+	int n;
+
+	for (n = 0, s = buf; n < 6; n++) {
+		c = (a->ax25_call[n] >> 1) & 0x7F;
+
+		if (c != ' ') *s++ = c;
+	}
+	
+	*s++ = '-';
+
+	if ((n = ((a->ax25_call[6] >> 1) & 0x0F)) > 9) {
+		*s++ = '1';
+		n -= 10;
+	}
+	
+	*s++ = n + '0';
+	*s++ = '\0';
+
+	if (*buf == '\0' || *buf == '-')
+	   return "*";
+
+	return buf;
+
+}
+
+#endif

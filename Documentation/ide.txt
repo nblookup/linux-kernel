@@ -1,9 +1,12 @@
-ide.txt -- Information regarding the Enhanced IDE drive in Linux 2.0.x
+ide.txt -- Information regarding the Enhanced IDE drive in Linux 2.0.xx
 ===============================================================================
 Supported by:
 	Mark Lord    <mlord@pobox.com>		-- disks, interfaces, probing
 	Gadi Oxman   <gadio@netvision.net.il>	-- tapes, disks, whatever
 	Scott Snyder <snyder@fnald0.fnal.gov>	-- cdroms, ATAPI, audio
+
+UDMA support was added for various chipsets, from kernel 2.0.35 on. Check
+the udma.txt file in this directory for details.
 
    +-----------------------------------------------------------------+
    |  The hdparm utility for controlling various IDE features is     |
@@ -14,6 +17,7 @@ See description later on below for handling BIG IDE drives with >1024 cyls.
 
 Major features of ide.c & ide-cd.c ("NEW!" marks changes since 1.2.13):
 
+NEW!	- support for IDE ATAPI *floppy* drives
 NEW!	- support for IDE ATAPI *tape* drives, courtesy of Gadi Oxman
 		(re-run MAKEDEV.ide to create the tape device entries in /dev/)
 NEW!	- support for up to *four* IDE interfaces on one or more IRQs
@@ -37,8 +41,8 @@ NEW!	- support for reliable operation of buggy RZ1000 interfaces
 NEW!	- support for reliable operation of buggy CMD-640 interfaces
 		- PCI support is automatic when cmd640 support is configured
 		- for VLB, use kernel command line option:   ide0=cmd640_vlb
-		- this support also enables the secondary i/f on most cards
-		- experimental interface timing parameter support
+		- this support also enables the secondary i/f when needed
+		- interface PIO timing & prefetch parameter support
 NEW!	- experimental support for UMC 8672 interfaces
 NEW!	- support for secondary interface on the FGI/Holtek HT-6560B VLB i/f
 		- use kernel command line option:   ide0=ht6560
@@ -62,7 +66,7 @@ NEW!    - ide-cd.c now supports door locking and auto-loading.
 		  and direct reads of audio data.
 NEW!	- experimental support for Promise DC4030VL caching interface card
 NEW!		- email thanks/problems to: peterd@pnd-pc.demon.co.uk
-NEW!	- the hdparm-2.7 package can be used to set PIO modes for some chipsets.
+NEW!	- the hdparm-3.1 package can be used to set PIO modes for some chipsets.
 
 For work in progress, see the comments in ide.c, ide-cd.c, and triton.c.
 
@@ -71,17 +75,28 @@ caching IDE cards, such as the DC4030VL, and early results are encouraging.
 Look for this support to be added to the kernel soon.
 
 
-***  IMPORTANT NOTICES (for kernel versions after 1.3.21)
+***  IMPORTANT NOTICES:  BUGGY IDE CHIPSETS CAN CORRUPT DATA!!
 ***  =================
 ***  PCI versions of the CMD640 and RZ1000 interfaces are now detected
 ***  automatically at startup when PCI BIOS support is configured.
-***  Linux disables the "pre-fetch" or "read-ahead" modes of these interfaces
+***
+***  Linux disables the "prefetch" ("readahead") mode of the RZ1000
 ***  to prevent data corruption possible due to hardware design flaws.
-***  Use of the "serialize" option is no longer necessary.
+***
+***  For the CMD640, linux disables "IRQ unmasking" (hdparm -u1) on any
+***  drive for which the "prefetch" mode of the CMD640 is turned on.
+***  If "prefetch" is disabled (hdparm -p8), then "IRQ unmasking" can be
+***  used again.
+***
+***  For the CMD640, linux disables "32bit I/O" (hdparm -c1) on any drive
+***  for which the "prefetch" mode of the CMD640 is turned off.
+***  If "prefetch" is enabled (hdparm -p9), then "32bit I/O" can be
+***  used again.
 ***
 ***  The CMD640 is also used on some Vesa Local Bus (VLB) cards, and is *NOT*
 ***  automatically detected by Linux.  For safe, reliable operation with such
 ***  interfaces, one *MUST* use the "ide0=cmd640_vlb" kernel option.
+***
 ***  Use of the "serialize" option is no longer necessary.
 
 This is the multiple IDE interface driver, as evolved from hd.c.
@@ -90,8 +105,8 @@ There can be up to two drives per interface, as per the ATA-2 spec.
 
 Primary:    ide0, port 0x1f0; major=3;  hda is minor=0; hdb is minor=64
 Secondary:  ide1, port 0x170; major=22; hdc is minor=0; hdd is minor=64
-Tertiary:   ide2, port 0x???; major=33; hde is minor=0; hdf is minor=64
-Quaternary: ide3, port 0x???; major=34; hdg is minor=0; hdh is minor=64
+Tertiary:   ide2, port 0x1e8; major=33; hde is minor=0; hdf is minor=64
+Quaternary: ide3, port 0x168; major=34; hdg is minor=0; hdh is minor=64
 
 To access devices on the 2nd/3rd/4th interfaces, device entries must first be
 created in /dev for them.  To create such entries, simply run the included
@@ -100,18 +115,32 @@ shell script:   /usr/src/linux/scripts/MAKEDEV.ide
 Apparently many releases of Slackware 2.2/2.3 have incorrect entries
 in /dev for hdc* and hdd* -- this can also be corrected by running MAKEDEV.ide
 
-ide.c automatically probes for the primary and secondary interfaces,
+ide.c automatically probes for the standard four IDE interfaces,
 for the drives/geometries attached to those interfaces, and for the
-IRQ numbers being used by the interfaces (normally IRQ14 & IRQ15).
+IRQ numbers being used by the interfaces (normally 14, 15, 11 and 10).
 
-Interfaces beyond the first two are not normally probed for, but may be
-specified using kernel "command line" options.  For example,
+For special cases, interfaces may be specified using kernel "command line"
+options.  For example,
 
-	ide3=0x1e8,0x3f0,11	/* ioports 0x1e8-0x1ef,0x3f0, irq 11 */
+	ide3=0x168,0x36e,10	/* ioports 0x168-0x16f,0x36e, irq 10 */
 
 Normally the irq number need not be specified, as ide.c will probe for it:
 
-	ide3=0x1e8,0x3f0	/* ioports 0x1e8-0x1ef,0x3f0 */
+	ide3=0x168,0x36e	/* ioports 0x168-0x16f,0x36e */
+
+The standard port, and irq values are these:
+
+	ide0=0x1f0,0x3f6,14
+	ide1=0x170,0x376,15
+	ide2=0x1e8,0x3ee,11
+	ide3=0x168,0x36e,10
+
+Note that the first parameter reserves 8 contiguous ioports, whereas the
+second value denotes a single ioport. If in doubt, do a 'cat /proc/ioports'.
+
+In all probability the device uses these ports and IRQs if it is attached
+to the appropriate ide channel.  Pass the parameter for the correct ide
+channel to the kernel, as explained above.
 
 Any number of interfaces may share a single IRQ if necessary, at a slight
 performance penalty, whether on separate cards or a single VLB card.
@@ -154,7 +183,7 @@ when the drive is jumpered correctly.
 
 Courtesy of Scott Snyder, the driver supports ATAPI cdrom drives
 such as the NEC-260 and the new MITSUMI triple/quad speed drives.
-Such drives will be identified at boot time, just like a harddisk.
+Such drives will be identified at boot time, just like a hard disk.
 
 If for some reason your cdrom drive is *not* found at boot time, you can force
 the probe to look harder by supplying a kernel command line parameter
@@ -164,7 +193,7 @@ via LILO, such as:
 or
 	hdd=cdrom	/* hdd = "slave" on second interface */
 
-For example, a GW2000 system might have a harddrive on the primary
+For example, a GW2000 system might have a hard drive on the primary
 interface (/dev/hda) and an IDE cdrom drive on the secondary interface
 (/dev/hdc).  To mount a CD in the cdrom drive, one would use something like:
 
@@ -230,6 +259,19 @@ Summary of ide driver parameters for kernel "command line":
 				Not fully supported by all chipset types,
 				and quite likely to cause trouble with
 				older/odd IDE drives.
+ "hdx=slow"		: insert a huge pause after each access to the data
+				port. Should be used only as a last resort.
+ "hdx=ide-scsi"		: use the ide-scsi driver for hdx
+
+ "idebus=xx"		: inform IDE driver of VESA/PCI bus speed in Mhz,
+				where "xx" is between 20 and 66 inclusive,
+				used when tuning chipset PIO modes.
+				For PCI bus, 25 is correct for a P75 system,
+				30 is correct for P90,P120,P180 systems,
+				and 33 is used for P100,P133,P166 systems.
+				If in doubt, use idebus=33 for PCI.
+				As for VLB, it is safest to not specify it.
+				Bigger values are safer than smaller ones.
 
  "idex=noprobe"		: do not attempt to access/use this interface
  "idex=base"		: probe for an interface at the addr specified,
@@ -390,7 +432,7 @@ To ensure that LILO can boot linux, the boot files (kernel and /boot/*)
 must reside within the first 1024 cylinders of the drive.  If your linux
 root partition is *not* completely within the first 1024 cyls (quite common),
 then you can use LILO to boot linux from files on your DOS partition
-by doing the following after installing slackware (or whatever):
+by doing the following after installing Slackware (or whatever):
 
 	0. Boot from the "boot floppy" created during the installation
         1. Mount your DOS partition as /dos (and stick it in /etc/fstab)
@@ -444,3 +486,135 @@ The new WD1.6GB models are also cheap screamers.
 For really high end systems, go for fast/wide 7200rpm SCSI.  But it'll cost ya!
 
 mlord@pobox.com
+================================================================================
+
+DMA Bus Master transfer
+-----------------------
+The triton.c driver provides support for the DMA Bus Mastering functions of
+the Intel PCI Triton I/II chipsets (i82371FB or i82371SB).
+
+Pretty much the same code will work for the OPTi "Viper" chipset. Look for
+DMA support for this in linux kernel 2.1.xx, when it appears.
+
+DMA is currently supported only for hard disk drives (not cdroms).
+
+Support for cdroms will likely be added at a later date, after broader
+experience has been obtained with hard disks.
+
+Up to four drives may be enabled for DMA, and the motherboard chipset will
+(hopefully) arbitrate the PCI bus among them.  Note that the i82371 chip
+provides a single "line buffer" for the BM IDE function, so performance of
+multiple (two) drives doing DMA simultaneously will suffer somewhat, as they
+contest for that resource bottleneck.  This is handled transparently inside
+the i82371 chip.
+
+The SiS 5513 controller has two completely independent IDE controller units,
+each with a 64-byte line buffer (same size as the Intel); there is no
+bottleneck in simultaneous (U)DMA transfers for this resource. The 5513 is
+built-in the SiS 5571, 5598 and 5591 chipsets.
+
+The VIA chipsets like the Intel have a single 64 byte line buffer, but it
+can be split 1/2-1/2 or 1/4-3/4 between both channels.
+
+By default, DMA support is prepared for use, but is currently enabled only
+for drives which support multi-word DMA mode2 (mword2), or which are
+recognized as "good" (see table below).  Drives with only mode0 or mode1
+(single or multi) DMA should also work with this chipset/driver (eg.
+MC2112A) but are not enabled by default.  Use "hdparm -i" to view modes
+supported by a given drive.
+
+The hdparm-3.3 (patched) utility can be used to manually enable /disable DMA
+support, but must be (re-)compiled against this kernel version or later.
+
+Michel Aubry has produced a patch against hdparm-3.3 to support UDMA.
+
+To enable DMA, use "hdparm -d1 /dev/hd?" on a per-drive basis after booting.
+If problems arise, ide.c will disable DMA operation after a few retries.
+This error recovery mechanism works and has been extremely well exercised.
+
+IDE drives, depending on their vintage, may support several different modes
+of DMA operation.  The boot-time modes are indicated with a "*" in the
+"hdparm -I" listing, and can be changed with *knowledgeable* use of the
+"hdparm -X" feature (X32 for DMA 0, X33 for DMA 1, X34 for DMA 2, X64 for
+UDMA 0, X65 for UDMA 1 and X66 for UDMA 2).
+
+Testing was done with an ASUS P55TP4XE/100 system and the following drives:
+
+  Quantum Fireball 1080A (1Gig w/83kB buffer), DMA mode2, PIO mode4.
+ 	- DMA mode2 works well (7.4MB/sec), despite the tiny on-drive buffer.
+ 	- This drive also does PIO mode4, at about the same speed as DMA mode2.
+ 	  An awesome drive for the price!
+ 
+  Fujitsu M1606TA (1Gig w/256kB buffer), DMA mode2, PIO mode4.
+ 	- DMA mode2 gives horrible performance (1.6MB/sec), despite the good
+ 	  size of the on-drive buffer and a boasted 10ms average access time.
+ 	- PIO mode4 was better, but peaked at a mere 4.5MB/sec.
+ 
+  Micropolis MC2112A (1Gig w/508kB buffer), drive pre-dates EIDE and ATA2.
+ 	- DMA works fine (2.2MB/sec), probably due to the large on-drive buffer.
+ 	- This older drive can also be tweaked for fastPIO (3.7MB/sec) by using
+ 	  maximum clock settings (5,4) and setting all flags except prefetch.
+ 
+  Western Digital AC31000H (1Gig w/128kB buffer), DMA mode1, PIO mode3.
+ 	- DMA does not work reliably.  The drive appears to be somewhat tardy
+ 	  in deasserting DMARQ at the end of a sector.  This is evident in
+ 	  the observation that WRITEs work most of the time, depending on
+ 	  cache-buffer occupancy, but multi-sector reads seldom work.
+ 
+Testing was done with a Gigabyte GA-586 ATE system and the following drive:
+(Uwe Bonnes - bon@elektron.ikp.physik.th-darmstadt.de)
+ 
+  Western Digital AC31600H (1.6Gig w/128kB buffer), DMA mode2, PIO mode4.
+ 	- much better than its 1Gig cousin, this drive is reported to work
+ 	  very well with DMA (7.3MB/sec).
+ 
+Other drives:
+ 
+  Maxtor 7540AV (515Meg w/32kB buffer), DMA modes mword0/sword2, PIO mode3.
+ 	- a budget drive, with budget performance, around 3MB/sec.
+ 
+  Western Digital AC2850F (814Meg w/64kB buffer), DMA mode1, PIO mode3.
+ 	- another "caviar" drive, similar to the AC31000, except that this one
+ 	  worked with DMA in at least one system.  Throughput is about 3.8MB/sec
+ 	  for both DMA and PIO.
+ 
+  Conner CFS850A (812Meg w/64kB buffer), DMA mode2, PIO mode4.
+ 	- like most Conner models, this drive proves that even a fast interface
+ 	  cannot improve slow media.  Both DMA and PIO peak around 3.5MB/sec.
+ 
+  Maxtor 71260AT (1204Meg w/256kB buffer), DMA mword0/sword2, PIO mode3.
+ 	- works with DMA, on some systems (but not always on others, eg. Dell),
+ 	  giving 3-4MB/sec performance, about the same as mode3.
+ 
+  IBM DHEA 36480 (6197Meg w/476kB buffer), DMA mode2, PIO mode4, UDMA mode2
+	- works with DMA and UDMA on systems that support it. This drive and its
+	  larger 8.4GB cousin provide throughput of 9.8MB/sec under UDMA.
+ 
+If you have any drive models to add, email your results to:  mlord@pobox.com
+Keep an eye on /var/adm/messages for "DMA disabled" messages.
+ 
+Some people have reported trouble with Intel Zappa motherboards.
+This can be fixed by upgrading the AMI BIOS to version 1.00.04.BS0,
+available from ftp://ftp.intel.com/pub/bios/10004bs0.exe
+(thanks to Glen Morrell <glen@spin.Stanford.edu> for researching this).
+ 
+And, yes, Intel Zappa boards really *do* use the Triton IDE ports.
+ 
+Changes by Michel Aubry, Andre Hedrick and Andrew D. Balsa, June 1998:
+  a) Added support for non-Intel chipsets that support Bus Mastering DMA.
+  b) Added support for UDMA (33Mb/s) drives and controllers. Note that UDMA
+     support must be enabled in the BIOS, and that both the hard disk drive
+     _and_ the chipset must support UDMA.
+  On the IBM DHEA-36480 drive, transfer rates go from 7.76Mb/s to 9.76Mb/s,
+  a 25% improvement with zero cost (DMA mode2 to UDMA mode2).
+ 
+Extra UDMA PCI controller card support by Andre M. Hedrick, June 1998:
+  - PDC20246 Promise Ultra33 UDMA.
+  - AEC6210  Artop Electronics Corp. ACARD
+        sold under SIIG CN2449 UltraIDE Pro.
+  - HPT343   Triones Technologies (HighPoint Technologies) Inc.
+        future support -- nonbooting cards, need MNDA approval for
+        information release.
+        sold under Digital Research DRIDEUDMA.
+
+For more information on UDMA support, check /Documentation/udma.txt.

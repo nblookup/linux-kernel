@@ -4,22 +4,27 @@
  *	Authors:	Alan Cox <iiitac@pyr.swan.ac.uk>
  *			Florian La Roche <rzsfl@rz.uni-sb.de>
  *
- *	Fixes:	
- *		Alan Cox	:	Fixed the worst of the load balancer bugs.
- *		Dave Platt	:	Interrupt stacking fix.
- *	Richard Kooijman	:	Timestamp fixes.
- *		Alan Cox	:	Changed buffer format.
- *		Alan Cox	:	destructor hook for AF_UNIX etc.
- *		Linus Torvalds	:	Better skb_clone.
- *		Alan Cox	:	Added skb_copy.
+ *	Fixes:
+ *		Alan Cox	:	Fixed the worst of the load
+ *					balancer bugs
+ *		Dave Platt	:	Interrupt stacking fix
+ *	Richard Kooijman	:	Timestamp fixes
+ *		Alan Cox	:	Changed buffer format
+ *		Alan Cox	:	destructor hook for AF_UNIX etc
+ *		Linus Torvalds	:	Better skb_clone
+ *		Alan Cox	:	Added skb_copy
  *		Alan Cox	:	Added all the changed routines Linus
  *					only put in the headers
  *		Ray VanTassle	:	Fixed --skb->lock in free
+ *	Michael Deutschmann	:	Corrected and expanded
+ *					CONFIG_SKB_CHECK system
+ *	        David Weinehall :	Attempt to pad skb's properly
+ *	        			(partial backport form 2.2.25)
  *
  *	TO FIX:
  *		The __skb_ routines ought to check interrupts are disabled
  *	when called, and bitch like crazy if not. Unfortunately I don't think
- *	we currently have a portable way to check if interrupts are off - 
+ *	we currently have a portable way to check if interrupts are off -
  *	Linus ???
  *
  *	This program is free software; you can redistribute it and/or
@@ -81,79 +86,166 @@ void show_net_buffers(void)
 
 #if CONFIG_SKB_CHECK
 
-/*
- *	Debugging paranoia. Can go later when this crud stack works
+/* Verify that an SKB has an appropriate magic number, and note the list 
+ * to which it belongs.
+ *
+ * If (*list) is NULL, it will be overwritten with the list membership of 
+ * this SKB (which might also be null).  Otherwise, an error will be 
+ * reported if the SKB does not belong to the same list.
  */
-
-int skb_check(struct sk_buff *skb, int head, int line, char *file)
+static __inline__ int skb_magiccheck(struct sk_buff *skb,
+				     struct sk_buff_head **list,
+				     int line,
+				     char *file, 
+				     char *direct)
 {
-	if (head) {
-		if (skb->magic_debug_cookie != SK_HEAD_SKB) {
-			printk("File: %s Line %d, found a bad skb-head\n",
-				file,line);
-			return -1;
-		}
-		if (!skb->next || !skb->prev) {
-			printk("skb_check: head without next or prev\n");
-			return -1;
-		}
-		if (skb->next->magic_debug_cookie != SK_HEAD_SKB
-			&& skb->next->magic_debug_cookie != SK_GOOD_SKB) {
-			printk("File: %s Line %d, bad next head-skb member\n",
-				file,line);
-			return -1;
-		}
-		if (skb->prev->magic_debug_cookie != SK_HEAD_SKB
-			&& skb->prev->magic_debug_cookie != SK_GOOD_SKB) {
-			printk("File: %s Line %d, bad prev head-skb member\n",
-				file,line);
-			return -1;
-		}
-#if 0
-		{
-		struct sk_buff *skb2 = skb->next;
-		int i = 0;
-		while (skb2 != skb && i < 5) {
-			if (skb_check(skb2, 0, line, file) < 0) {
-				printk("bad queue element in whole queue\n");
-				return -1;
-			}
-			i++;
-			skb2 = skb2->next;
-		}
-		}
-#endif
-		return 0;
-	}
-	if (skb->next != NULL && skb->next->magic_debug_cookie != SK_HEAD_SKB
-		&& skb->next->magic_debug_cookie != SK_GOOD_SKB) {
-		printk("File: %s Line %d, bad next skb member\n",
-			file,line);
-		return -1;
-	}
-	if (skb->prev != NULL && skb->prev->magic_debug_cookie != SK_HEAD_SKB
-		&& skb->prev->magic_debug_cookie != SK_GOOD_SKB) {
-		printk("File: %s Line %d, bad prev skb member\n",
-			file,line);
+	struct sk_buff_head *list2;
+
+	if (!skb) {
+		printk("File: %s Line %d, found a null skb pointer (%s)\n",
+			file,line,direct);
 		return -1;
 	}
 
+	if (skb->magic_debug_cookie == SK_HEAD_SKB) { 
+		list2 = (struct sk_buff_head *) skb;
+		goto match_list;
+	}
 
-	if(skb->magic_debug_cookie==SK_FREED_SKB)
-	{
-		printk("File: %s Line %d, found a freed skb lurking in the undergrowth!\n",
-			file,line);
-		printk("skb=%p, real size=%d, free=%d\n",
-			skb,skb->truesize,skb->free);
+	if (skb->magic_debug_cookie == SK_GOOD_SKB) {
+		list2 = skb->list;
+	match_list:
+		if (!*list) *list = list2;
+
+		if (*list == list2) 
+			return 0;
+
+		printk("File %s: Line %d, list mismatch on linked skb (%s)\n",
+		       file,line,direct);
 		return -1;
 	}
-	if(skb->magic_debug_cookie!=SK_GOOD_SKB)
-	{
-		printk("File: %s Line %d, passed a non skb!\n", file,line);
+
+	if (skb->magic_debug_cookie == SK_FREED_SKB) {
+		printk("File: %s Line %d, found a freed skb (%s)\n",
+		       file,line,direct);
 		printk("skb=%p, real size=%d, free=%d\n",
-			skb,skb->truesize,skb->free);
+		       skb,skb->truesize,skb->free);
 		return -1;
 	}
+
+	printk("File: %s Line %d, found an invalid skb (%s)\n",
+	       file,line,direct);
+
+	return -1;
+}
+
+/* Check that the links on an SKB both point to valid SKBs in the same 
+ * list, and are reciprocal (s->p->n == s == s->n->p) 
+ */
+static __inline__ int skb_linkscheck(struct sk_buff *skb,
+				     struct sk_buff_head *list,
+				     int line, 
+				     char *file)
+{
+	if (list->magic_debug_cookie != SK_HEAD_SKB) {
+		printk("File %s: Line %d, skb list is not skb-head\n",
+		       file,line);
+		return -1;
+	}
+
+	if (skb_magiccheck(skb->next,&list,line,file,"next"))
+		return -1;
+
+	if (skb_magiccheck(skb->prev,&list,line,file,"prev"))
+		return -1;
+
+	if (skb->next->prev != skb ||
+	    skb->prev->next != skb) {
+		printk("File %s: Line %d, skb links not reciprocal\n",
+		       file,line);
+		return -1;
+	}
+	return 0;
+}
+
+/* Checks specific to sk_buff_head objects.  This actually devolves to 
+ * linkscheck unless whole-queue paranoia is enabled.
+ */
+static __inline__ int skb_headcheck(struct sk_buff_head *list,
+				    int line, char *file)
+{
+#if CONFIG_SKB_CHECK_WHOLE_QUEUE	
+	struct sk_buff *skb = (struct sk_buff *) list;
+
+	int qlen = 0;			
+
+	while (skb->next != (struct sk_buff *) list) {	
+		if (skb_magiccheck(skb->next,&list,line,file,"scan")); 
+			return -1;
+
+		if (skb->next->prev != skb) {
+			printk("File %s: Line %d, nonreciprocal links"
+			       " in skb queue\n",file,line);
+			return -1;
+		}
+
+		qlen++;
+		skb = skb->next;
+	} 
+
+	if (list->prev != skb)
+	{
+		printk("File %s: Line %d, skb-head prev link not"
+		       " consistent\n",file,line);
+		return -1;
+	}
+
+	if (qlen != list->qlen) {
+		printk("File %s: Line %d, skb-head queue length wrong\n",
+		       file,line);
+		return -1;
+	}
+	return 0;
+#else	/* ! CONFIG_SKB_CHECK_WHOLE_QUEUE */
+	return skb_linkscheck( (struct sk_buff *) list, list, line, file);
+#endif	/* ! CONFIG_SKB_CHECK_WHOLE_QUEUE */
+}	
+
+
+/*
+ *	Debugging paranoia.
+ */
+int skb_check(struct sk_buff *skb, int type, int line, char *file)
+{
+	struct sk_buff_head *list = NULL;
+
+	if (skb_magiccheck(skb,&list,line,file,"self"))
+		return -1;
+
+	if (skb->magic_debug_cookie == SK_HEAD_SKB) {
+		if (type != 0) 
+			return skb_headcheck(list,line,file);
+
+		printk("File %s: Line %d, found skb-head instead of skb\n",
+		       file,line);
+		return -1;
+	}
+
+	if (list) {
+		if (type == 3) {
+			printk("File %s: Line %d, skb is already linked\n",
+			       file,line);
+			return -1;
+		}
+		if (skb_linkscheck(skb,list,line,file))
+			return -1;
+	}
+	else if (skb->prev || skb->next) {
+		printk("File %s: Line %d, skb has prev/next field,"
+		       " but no list\n",file,line);
+		return -1;
+	}
+
 	if(skb->head>skb->data)
 	{
 		printk("File: %s Line %d, head > data !\n", file,line);
@@ -182,7 +274,8 @@ int skb_check(struct sk_buff *skb, int head, int line, char *file)
 			skb,skb->data,skb->end,skb->len);
 		return -1;
 	}
-	if((unsigned long) skb->end > (unsigned long) skb)
+	if((unsigned long) skb->end > 
+           (unsigned long) (skb->data_skb ? skb->data_skb : skb))
 	{
 		printk("File: %s Line %d, control overrun\n", file,line);
 		printk("skb=%p, end=%p\n",
@@ -217,7 +310,7 @@ void skb_queue_head(struct sk_buff_head *list_,struct sk_buff *newsk)
 	save_flags(flags);
 	cli();
 
-	IS_SKB(newsk);
+	IS_SKB_UNLINKED(newsk);
 	IS_SKB_HEAD(list);
 	if (newsk->next || newsk->prev)
 		printk("Suspicious queue head: sk_buff on list!\n");
@@ -238,7 +331,7 @@ void __skb_queue_head(struct sk_buff_head *list_,struct sk_buff *newsk)
 	struct sk_buff *list = (struct sk_buff *)list_;
 
 
-	IS_SKB(newsk);
+	IS_SKB_UNLINKED(newsk);
 	IS_SKB_HEAD(list);
 	if (newsk->next || newsk->prev)
 		printk("Suspicious queue head: sk_buff on list!\n");
@@ -266,7 +359,7 @@ void skb_queue_tail(struct sk_buff_head *list_, struct sk_buff *newsk)
 
 	if (newsk->next || newsk->prev)
 		printk("Suspicious queue tail: sk_buff on list!\n");
-	IS_SKB(newsk);
+	IS_SKB_UNLINKED(newsk);
 	IS_SKB_HEAD(list);
 
 	newsk->next = list;
@@ -287,7 +380,7 @@ void __skb_queue_tail(struct sk_buff_head *list_, struct sk_buff *newsk)
 
 	if (newsk->next || newsk->prev)
 		printk("Suspicious queue tail: sk_buff on list!\n");
-	IS_SKB(newsk);
+	IS_SKB_UNLINKED(newsk);
 	IS_SKB_HEAD(list);
 
 	newsk->next = list;
@@ -332,7 +425,7 @@ struct sk_buff *skb_dequeue(struct sk_buff_head *list_)
 	
 	restore_flags(flags);
 
-	IS_SKB(result);
+	IS_SKB_UNLINKED(result);
 	return result;
 }
 
@@ -356,7 +449,7 @@ struct sk_buff *__skb_dequeue(struct sk_buff_head *list_)
 	list_->qlen--;
 	result->list = NULL;
 	
-	IS_SKB(result);
+	IS_SKB_UNLINKED(result);
 	return result;
 }
 
@@ -367,8 +460,8 @@ void skb_insert(struct sk_buff *old, struct sk_buff *newsk)
 {
 	unsigned long flags;
 
-	IS_SKB(old);
-	IS_SKB(newsk);
+	IS_SKB_LINKED(old);
+	IS_SKB_UNLINKED(newsk);
 
 	if(!old->next || !old->prev)
 		printk("insert before unlisted item!\n");
@@ -395,9 +488,9 @@ void __skb_insert(struct sk_buff *newsk,
 	struct sk_buff * prev, struct sk_buff *next,
 	struct sk_buff_head * list)
 {
-	IS_SKB(prev);
-	IS_SKB(newsk);
-	IS_SKB(next);
+	IS_SKB_LINKED(prev);
+	IS_SKB_UNLINKED(newsk);
+	IS_SKB_LINKED(next);
 
 	if(!prev->next || !prev->prev)
 		printk("insert after unlisted item!\n");
@@ -422,8 +515,8 @@ void skb_append(struct sk_buff *old, struct sk_buff *newsk)
 {
 	unsigned long flags;
 
-	IS_SKB(old);
-	IS_SKB(newsk);
+	IS_SKB_LINKED(old);
+	IS_SKB_UNLINKED(newsk);
 
 	if(!old->next || !old->prev)
 		printk("append before unlisted item!\n");
@@ -474,9 +567,12 @@ void skb_unlink(struct sk_buff *skb)
 	restore_flags(flags);
 }
 
-void __skb_unlink(struct sk_buff *skb)
+void __skb_unlink(struct sk_buff *skb,struct sk_buff_head *list)
 {
 	IS_SKB(skb);
+
+        if(skb->list != list)
+		printk("__skb_unlink called with wrong list argument\n");
 
 	if(skb->list)
 	{
@@ -581,15 +677,26 @@ void kfree_skb(struct sk_buff *skb, int rw)
 			__builtin_return_address(0));
 		return;
   	}
-#if CONFIG_SKB_CHECK
-	IS_SKB(skb);
-#endif
-	if (skb->lock)
-	{
-		skb->free = 3;    /* Free when unlocked */
-		net_free_locked++;
-		return;
+
+	IS_SKB_UNLINKED(skb);
+
+	/* Check it twice, this is such a rare event and only occurs under
+	 * extremely high load, normal code path should not suffer from the
+	 * overhead of the cli.
+	 */
+	if (skb->lock) {
+		unsigned long flags;
+
+		save_flags(flags); cli();
+		if(skb->lock) {
+			skb->free = 3;    /* Free when unlocked */
+			net_free_locked++;
+			restore_flags(flags);
+			return;
+		}
+		restore_flags(flags);
   	}
+
   	if (skb->free == 2)
 		printk(KERN_WARNING "Warning: kfree_skb passed an skb that nobody set the free flag on! (from %p)\n",
 			__builtin_return_address(0));
@@ -744,13 +851,16 @@ struct sk_buff *skb_clone(struct sk_buff *skb, int priority)
 	struct sk_buff *n;
 
 	IS_SKB(skb);
-	n = kmalloc(sizeof(*n), priority);
-	if (!n)
+
+	if (!(n = kmalloc(sizeof (*n), priority)))
 		return NULL;
-	memcpy(n, skb, sizeof(*n));
+
+	memcpy(n, skb, sizeof (*n));
 	n->count = 1;
+
 	if (skb->data_skb)
 		skb = skb->data_skb;
+
 	atomic_inc(&skb->count);
 	atomic_inc(&net_allocs);
 	atomic_inc(&net_skbcount);
@@ -762,13 +872,14 @@ struct sk_buff *skb_clone(struct sk_buff *skb, int priority)
 	n->tries = 0;
 	n->lock = 0;
 	n->users = 0;
+
 	return n;
 }
 
 /*
- *	This is slower, and copies the whole data area 
+ *	This is slower, and copies the whole data area
  */
- 
+
 struct sk_buff *skb_copy(struct sk_buff *skb, int priority)
 {
 	struct sk_buff *n;
@@ -777,52 +888,127 @@ struct sk_buff *skb_copy(struct sk_buff *skb, int priority)
 	/*
 	 *	Allocate the copy buffer
 	 */
-	 
+
 	IS_SKB(skb);
-	
-	n=alloc_skb(skb->truesize-sizeof(struct sk_buff),priority);
-	if(n==NULL)
+
+	if (!(n = alloc_skb(skb->truesize - sizeof (struct sk_buff), priority)))
 		return NULL;
 
 	/*
 	 *	Shift between the two data areas in bytes
 	 */
-	 
-	offset=n->head-skb->head;
+
+	offset = n->head - skb->head;
 
 	/* Set the data pointer */
-	skb_reserve(n,skb->data-skb->head);
+	skb_reserve(n, skb->data - skb->head);
 	/* Set the tail pointer and length */
-	skb_put(n,skb->len);
+	skb_put(n, skb->len);
 	/* Copy the bytes */
-	memcpy(n->head,skb->head,skb->end-skb->head);
-	n->link3=NULL;
-	n->list=NULL;
-	n->sk=NULL;
-	n->when=skb->when;
-	n->dev=skb->dev;
-	n->h.raw=skb->h.raw+offset;
-	n->mac.raw=skb->mac.raw+offset;
-	n->ip_hdr=(struct iphdr *)(((char *)skb->ip_hdr)+offset);
-	n->saddr=skb->saddr;
-	n->daddr=skb->daddr;
-	n->raddr=skb->raddr;
-	n->seq=skb->seq;
-	n->end_seq=skb->end_seq;
-	n->ack_seq=skb->ack_seq;
-	n->acked=skb->acked;
-	memcpy(n->proto_priv, skb->proto_priv, sizeof(skb->proto_priv));
-	n->used=skb->used;
-	n->free=1;
-	n->arp=skb->arp;
-	n->tries=0;
-	n->lock=0;
-	n->users=0;
-	n->pkt_type=skb->pkt_type;
-	n->stamp=skb->stamp;
-	
+	memcpy(n->head, skb->head, skb->end - skb->head);
+	n->link3 = NULL;
+	n->list = NULL;
+	n->sk = NULL;
+	n->when = skb->when;
+	n->dev = skb->dev;
+	n->h.raw = skb->h.raw+offset;
+	n->mac.raw = skb->mac.raw+offset;
+	n->ip_hdr = (struct iphdr *)(((char *)skb->ip_hdr) + offset);
+	n->saddr = skb->saddr;
+	n->daddr = skb->daddr;
+	n->raddr = skb->raddr;
+	n->seq = skb->seq;
+	n->end_seq = skb->end_seq;
+	n->ack_seq = skb->ack_seq;
+	n->acked = skb->acked;
+	memcpy(n->proto_priv, skb->proto_priv, sizeof (skb->proto_priv));
+	n->used = skb->used;
+	n->free = 1;
+	n->arp = skb->arp;
+	n->tries = 0;
+	n->lock = 0;
+	n->users = 0;
+	n->pkt_type = skb->pkt_type;
+	n->stamp = skb->stamp;
+
 	IS_SKB(n);
+
 	return n;
+}
+
+static struct sk_buff *skb_copy_grow(struct sk_buff *skb, int pad, int priority)
+{
+	struct sk_buff *n;
+	unsigned long offset;
+
+	/*
+	 *	Allocate the copy buffer
+	 */
+
+	IS_SKB(skb);
+
+	if (!(n = alloc_skb(skb->truesize - sizeof (struct sk_buff) + pad, priority)))
+		return NULL;
+
+	/*
+	 *	Shift between the two data areas in bytes
+	 */
+
+	offset = n->head - skb->head;
+
+	/* Set the data pointer */
+	skb_reserve(n, skb->data - skb->head);
+	/* Set the tail pointer and length */
+	skb_put(n, skb->len);
+	/* Copy the bytes */
+	memcpy(n->head, skb->head, skb->end - skb->head);
+	n->link3 = NULL;
+	n->list = NULL;
+	n->sk = NULL;
+	n->when = skb->when;
+	n->dev = skb->dev;
+	n->h.raw = skb->h.raw+offset;
+	n->mac.raw = skb->mac.raw+offset;
+	n->ip_hdr = (struct iphdr *)(((char *)skb->ip_hdr) + offset);
+	n->saddr = skb->saddr;
+	n->daddr = skb->daddr;
+	n->raddr = skb->raddr;
+	n->seq = skb->seq;
+	n->end_seq = skb->end_seq;
+	n->ack_seq = skb->ack_seq;
+	n->acked = skb->acked;
+	memcpy(n->proto_priv, skb->proto_priv, sizeof (skb->proto_priv));
+	n->used = skb->used;
+	n->free = 1;
+	n->arp = skb->arp;
+	n->tries = 0;
+	n->lock = 0;
+	n->users = 0;
+	n->pkt_type = skb->pkt_type;
+	n->stamp = skb->stamp;
+
+	IS_SKB(n);
+
+	return n;
+}
+
+struct sk_buff *skb_pad(struct sk_buff *skb, int pad)
+{
+	struct sk_buff *nskb;
+
+	/* If the skbuff is non linear tailroom is always zero.. */
+	if (skb_tailroom(skb) >= pad) {
+		memset(skb->data + skb->len, 0, pad);
+		return skb;
+	}
+
+	nskb = skb_copy_grow(skb, pad, GFP_ATOMIC);
+	kfree_skb(skb, FREE_WRITE);
+
+	if (nskb)
+		memset(nskb->data + nskb->len, 0, pad);
+
+	return nskb;
 }
 
 /*
@@ -831,21 +1017,34 @@ struct sk_buff *skb_copy(struct sk_buff *skb, int priority)
 
 void skb_device_lock(struct sk_buff *skb)
 {
+	unsigned long flags;
+
+	save_flags(flags); cli();
 	if(skb->lock)
 		printk("double lock on device queue, lock=%d caller=%p\n",
 			skb->lock, (&skb)[-1]);
 	else
 		net_locked++;
 	skb->lock++;
+	restore_flags(flags);
 }
 
 void skb_device_unlock(struct sk_buff *skb)
 {
+	unsigned long flags;
+
+	save_flags(flags); cli();
 	if(skb->lock==0)
 		printk("double unlock on device queue!\n");
 	skb->lock--;
 	if(skb->lock==0)
 		net_locked--;
+	restore_flags(flags);
+
+        if (skb->free == 3) {
+            skb->free = 1;
+            kfree_skb(skb, FREE_WRITE);
+        }
 }
 
 void dev_kfree_skb(struct sk_buff *skb, int mode)

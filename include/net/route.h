@@ -13,6 +13,12 @@
  *		Alan Cox	:	Reformatted. Added ip_rt_local()
  *		Alan Cox	:	Support for TCP parameters.
  *		Alexey Kuznetsov:	Major changes for new routing code.
+ *              Elliot Poger    :       Added support for SO_BINDTODEVICE.
+ *		Wolfgang Walter,
+ *		Daniel Ryde,
+ *		Ingo Molinar	:	fixed bug in ip_rt_put introduced
+ *					by SO_BINDTODEVICE support causing
+ *					a memory leak
  *
  *	FIXME:
  *		Make atomic ops more generic and hide them in asm/...
@@ -83,7 +89,8 @@ struct rtable
 extern void		ip_rt_flush(struct device *dev);
 extern void		ip_rt_update(int event, struct device *dev);
 extern void		ip_rt_redirect(__u32 src, __u32 dst, __u32 gw, struct device *dev);
-extern struct rtable	*ip_rt_slow_route(__u32 daddr, int local);
+extern struct rtable	*ip_rt_slow_route(__u32 daddr, int local, struct device *dev);
+extern struct device	*ip_rt_dev(__u32 addr);
 extern int		rt_get_info(char * buffer, char **start, off_t offset, int length, int dummy);
 extern int		rt_cache_get_info(char *buffer, char **start, off_t offset, int length, int dummy);
 extern int		ip_rt_ioctl(unsigned int cmd, void *arg);
@@ -96,6 +103,7 @@ extern void		ip_rt_run_bh(void);
 extern atomic_t	    	ip_rt_lock;
 extern unsigned		ip_rt_bh_mask;
 extern struct rtable 	*ip_rt_hash_table[RT_HASH_DIVISOR];
+extern void	 	rt_free(struct rtable * rt);
 
 extern __inline__ void ip_rt_fast_lock(void)
 {
@@ -123,17 +131,20 @@ extern __inline__ unsigned ip_rt_hash_code(__u32 addr)
 extern __inline__ void ip_rt_put(struct rtable * rt)
 #ifndef MODULE
 {
-	if (rt)
-		atomic_dec(&rt->rt_refcnt);
+	/* If this rtable entry is not in the cache, we'd better free
+	 * it once the refcnt goes to zero, because nobody else will.
+	 */
+	if (rt&&atomic_dec_and_test(&rt->rt_refcnt)&&(rt->rt_flags&RTF_NOTCACHED))
+		rt_free(rt);
 }
 #else
 ;
 #endif
 
 #ifdef CONFIG_KERNELD
-extern struct rtable * ip_rt_route(__u32 daddr, int local);
+extern struct rtable * ip_rt_route(__u32 daddr, int local, struct device *dev);
 #else
-extern __inline__ struct rtable * ip_rt_route(__u32 daddr, int local)
+extern __inline__ struct rtable * ip_rt_route(__u32 daddr, int local, struct device *dev)
 #ifndef MODULE
 {
 	struct rtable * rth;
@@ -142,7 +153,8 @@ extern __inline__ struct rtable * ip_rt_route(__u32 daddr, int local)
 
 	for (rth=ip_rt_hash_table[ip_rt_hash_code(daddr)^local]; rth; rth=rth->rt_next)
 	{
-		if (rth->rt_dst == daddr)
+		/* If an interface is specified, make sure this route points to it. */
+		if ( (rth->rt_dst == daddr) && ((dev==NULL) || (dev==rth->rt_dev)) )
 		{
 			rth->rt_lastuse = jiffies;
 			atomic_inc(&rth->rt_use);
@@ -151,23 +163,23 @@ extern __inline__ struct rtable * ip_rt_route(__u32 daddr, int local)
 			return rth;
 		}
 	}
-	return ip_rt_slow_route (daddr, local);
+	return ip_rt_slow_route (daddr, local, dev);
 }
 #else
 ;
 #endif
 #endif
 
-extern __inline__ struct rtable * ip_check_route(struct rtable ** rp,
-						       __u32 daddr, int local)
+extern __inline__ struct rtable * ip_check_route(struct rtable ** rp, __u32 daddr, 
+						 int local, struct device *dev)
 {
 	struct rtable * rt = *rp;
 
-	if (!rt || rt->rt_dst != daddr || !(rt->rt_flags&RTF_UP)
+	if (!rt || rt->rt_dst != daddr || !(rt->rt_flags&RTF_UP) || (dev!=NULL)
 	    || ((local==1)^((rt->rt_flags&RTF_LOCAL) != 0)))
 	{
 		ip_rt_put(rt);
-		rt = ip_rt_route(daddr, local);
+		rt = ip_rt_route(daddr, local, dev);
 		*rp = rt;
 	}
 	return rt;

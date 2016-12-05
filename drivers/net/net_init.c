@@ -20,6 +20,13 @@
 		Use dev_close cleanly so we always shut things down tidily.
 		
 	Changed 29/10/95, Alan Cox to pass sockaddr's around for mac addresses.
+	
+	14/06/96 - Paul Gortmaker:	Add generic eth_change_mtu() function.
+
+	August 12, 1996 - Lawrence V. Stefani: Added fddi_change_mtu() and
+					  fddi_setup() functions.
+	Sept. 10, 1996  - Lawrence V. Stefani: Increased hard_header_len to
+					  include 3 pad bytes.
 */
 
 #include <linux/config.h>
@@ -32,6 +39,7 @@
 #include <linux/string.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <linux/fddidevice.h>
 #include <linux/trdevice.h>
 #include <linux/if_arp.h>
 #ifdef CONFIG_NET_ALIAS
@@ -144,6 +152,26 @@ static int eth_mac_addr(struct device *dev, void *p)
 	return 0;
 }
 
+static int eth_change_mtu(struct device *dev, int new_mtu)
+{
+	if ((new_mtu < 68) || (new_mtu > 1500))
+		return -EINVAL;
+	dev->mtu = new_mtu;
+	return 0;
+}
+
+#ifdef CONFIG_FDDI
+
+static int fddi_change_mtu(struct device *dev, int new_mtu)
+{
+	if ((new_mtu < FDDI_K_SNAP_HLEN) || (new_mtu > FDDI_K_SNAP_DLEN))
+		return(-EINVAL);
+	dev->mtu = new_mtu;
+	return(0);
+}
+
+#endif
+
 void ether_setup(struct device *dev)
 {
 	int i;
@@ -165,6 +193,7 @@ void ether_setup(struct device *dev)
 		}
 	}
 
+	dev->change_mtu		= eth_change_mtu;
 	dev->hard_header	= eth_header;
 	dev->rebuild_header 	= eth_rebuild_header;
 	dev->set_mac_address 	= eth_mac_addr;
@@ -220,6 +249,43 @@ void tr_setup(struct device *dev)
 
 #endif
 
+#ifdef CONFIG_FDDI
+
+void fddi_setup(struct device *dev)
+	{
+	int i;
+
+	/*
+	 * Fill in the fields of the device structure with FDDI-generic values.
+	 * This should be in a common file instead of per-driver.
+	 */
+	for (i=0; i < DEV_NUMBUFFS; i++)
+		skb_queue_head_init(&dev->buffs[i]);
+
+	dev->change_mtu			= fddi_change_mtu;
+	dev->hard_header		= fddi_header;
+	dev->rebuild_header		= fddi_rebuild_header;
+
+	dev->type				= ARPHRD_FDDI;
+	dev->hard_header_len	= FDDI_K_SNAP_HLEN+3;	/* Assume 802.2 SNAP hdr len + 3 pad bytes */
+	dev->mtu				= FDDI_K_SNAP_DLEN;		/* Assume max payload of 802.2 SNAP frame */
+	dev->addr_len			= FDDI_K_ALEN;
+	dev->tx_queue_len		= 100;	/* Long queues on FDDI */
+	
+	memset(dev->broadcast, 0xFF, FDDI_K_ALEN);
+
+	/* New-style flags */
+	dev->flags		= IFF_BROADCAST | IFF_MULTICAST;
+	dev->family		= AF_INET;
+	dev->pa_addr	= 0;
+	dev->pa_brdaddr = 0;
+	dev->pa_mask	= 0;
+	dev->pa_alen	= 4;
+	return;
+	}
+
+#endif
+
 int ether_config(struct device *dev, struct ifmap *map)
 {
 	if (map->mem_start != (u_long)(-1))
@@ -252,7 +318,7 @@ int register_netdev(struct device *dev)
 			for (i = 0; i < MAX_ETH_CARDS; ++i)
 				if (ethdev_index[i] == NULL) {
 					sprintf(dev->name, "eth%d", i);
-					printk("loading device '%s'...\n", dev->name);
+/*					printk("loading device '%s'...\n", dev->name);*/
 					ethdev_index[i] = dev;
 					break;
 				}

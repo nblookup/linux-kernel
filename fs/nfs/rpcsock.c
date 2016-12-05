@@ -357,6 +357,9 @@ rpc_grok(struct rpc_sock *rsock)
 	if (result < 4) {
 		printk(KERN_WARNING "RPC: impossible RPC reply size %d\n",
 						result);
+		iov[0].iov_base=(void*)&xid;	/* xid=32bits, which is large enough */
+		iov[0].iov_len=result;
+		rpc_recvmsg(rsock, iov, 1, result, 0);
 		return 0;
 	}
 
@@ -564,7 +567,7 @@ rpc_closesock(struct rpc_sock *rsock)
 	unsigned long	t0 = jiffies;
 
 	rsock->shutdown = 1;
-	while (rsock->pending || rsock->backlog) {
+	while (rsock->pending || waitqueue_active(&rsock->backlog)) {
 		interruptible_sleep_on(&rsock->shutwait);
 		if (current->signal & ~current->blocked)
 			return -EINTR;

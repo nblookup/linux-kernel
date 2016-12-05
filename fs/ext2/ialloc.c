@@ -62,22 +62,37 @@ static struct ext2_group_desc * get_group_desc (struct super_block * sb,
 	return gdp + desc;
 }
 
-static void read_inode_bitmap (struct super_block * sb,
-			       unsigned long block_group,
-			       unsigned int bitmap_nr)
+/*
+ * Read the inode allocation bitmap for a given block_group, reading
+ * into the specified slot in the superblock's bitmap cache.
+ *
+ * Return >=0 on success or a -ve error code.
+ */
+
+static int read_inode_bitmap (struct super_block * sb,
+			      unsigned long block_group,
+			      unsigned int bitmap_nr)
 {
 	struct ext2_group_desc * gdp;
 	struct buffer_head * bh;
+	int retval = 0;
 
 	gdp = get_group_desc (sb, block_group, NULL);
 	bh = bread (sb->s_dev, gdp->bg_inode_bitmap, sb->s_blocksize);
-	if (!bh)
-		ext2_panic (sb, "read_inode_bitmap",
+	if (!bh) {
+		ext2_error (sb, "read_inode_bitmap",
 			    "Cannot read inode bitmap - "
 			    "block_group = %lu, inode_bitmap = %lu",
 			    block_group, (unsigned long) gdp->bg_inode_bitmap);
+		retval = -EIO;
+	}
+	/*
+	 * On IO error, just leave a zero in the superblock's block pointer for
+	 * this group.  The IO will be retried next time.
+	 */
 	sb->u.ext2_sb.s_inode_bitmap_number[bitmap_nr] = block_group;
 	sb->u.ext2_sb.s_inode_bitmap[bitmap_nr] = bh;
+	return retval;
 }
 
 /*
@@ -90,11 +105,13 @@ static void read_inode_bitmap (struct super_block * sb,
  * 1/ There is one cache per mounted file system.
  * 2/ If the file system contains less than EXT2_MAX_GROUP_LOADED groups,
  *    this function reads the bitmap without maintaining a LRU cache.
+ *
+ * Return the slot used to store the bitmap, or a -ve error code.
  */
 static int load_inode_bitmap (struct super_block * sb,
 			      unsigned int block_group)
 {
-	int i, j;
+	int i, j, retval = 0;
 	unsigned long inode_bitmap_number;
 	struct buffer_head * inode_bitmap;
 
@@ -114,7 +131,9 @@ static int load_inode_bitmap (struct super_block * sb,
 			else
 				return block_group;
 		} else {
-			read_inode_bitmap (sb, block_group, block_group);
+			retval = read_inode_bitmap (sb, block_group, block_group);
+			if (retval < 0)
+				return retval;
 			return block_group;
 		}
 	}
@@ -135,6 +154,14 @@ static int load_inode_bitmap (struct super_block * sb,
 		}
 		sb->u.ext2_sb.s_inode_bitmap_number[0] = inode_bitmap_number;
 		sb->u.ext2_sb.s_inode_bitmap[0] = inode_bitmap;
+
+		/*
+		 * There's still one special case here --- if inode_bitmap == 0
+		 * then our last attempt to read the bitmap failed and we have
+		 * just ended up caching that failure.  Try again to read it.
+		 */
+		if (!inode_bitmap)
+			retval = read_inode_bitmap (sb, block_group, 0);
 	} else {
 		if (sb->u.ext2_sb.s_loaded_inode_bitmaps < EXT2_MAX_GROUP_LOADED)
 			sb->u.ext2_sb.s_loaded_inode_bitmaps++;
@@ -146,9 +173,9 @@ static int load_inode_bitmap (struct super_block * sb,
 			sb->u.ext2_sb.s_inode_bitmap[j] =
 				sb->u.ext2_sb.s_inode_bitmap[j - 1];
 		}
-		read_inode_bitmap (sb, block_group, 0);
+		retval = read_inode_bitmap (sb, block_group, 0);
 	}
-	return 0;
+	return retval;
 }
 
 void ext2_free_inode (struct inode * inode)
@@ -169,7 +196,7 @@ void ext2_free_inode (struct inode * inode)
 		return;
 	}
 	if (inode->i_count > 1) {
-		printk ("ext2_free_inode: inode has count=%d\n",
+		printk ("ext2_free_inode: inode has count=%ld\n",
 			inode->i_count);
 		return;
 	}
@@ -178,14 +205,30 @@ void ext2_free_inode (struct inode * inode)
 			inode->i_nlink);
 		return;
 	}
-	if (!inode->i_sb) {
+	sb = inode->i_sb;
+	if (!sb) {
 		printk("ext2_free_inode: inode on nonexistent device\n");
 		return;
 	}
 
 	ext2_debug ("freeing inode %lu\n", inode->i_ino);
 
-	sb = inode->i_sb;
+	/* We need to kill quota references now, before grabbing the
+	 * superblock lock because writing the quota out to disk
+	 * may need to lock the superblock as well.
+	 *
+	 * It is safe to do this early instead of the original
+	 * places because we cannot be here in ext2_free_inode
+	 * if any other references to this inode exist at all.
+	 *
+	 * Based upon a 2.1.x fix by Bill Hawes.   --DaveM
+	 */
+	if (sb->dq_op) {
+		sb->dq_op->free_inode (inode, 1);
+		if (IS_WRITABLE (inode))
+			sb->dq_op->drop(inode);
+	}
+
 	lock_super (sb);
 	if (inode->i_ino < EXT2_FIRST_INO(sb) ||
 	    inode->i_ino > sb->u.ext2_sb.s_es->s_inodes_count) {
@@ -198,6 +241,11 @@ void ext2_free_inode (struct inode * inode)
 	block_group = (inode->i_ino - 1) / EXT2_INODES_PER_GROUP(sb);
 	bit = (inode->i_ino - 1) % EXT2_INODES_PER_GROUP(sb);
 	bitmap_nr = load_inode_bitmap (sb, block_group);
+	if (bitmap_nr < 0) {
+		unlock_super (sb);
+		return;
+	}
+	
 	bh = sb->u.ext2_sb.s_inode_bitmap[bitmap_nr];
 	if (!clear_bit (bit, bh->b_data))
 		ext2_warning (sb, "ext2_free_inode",
@@ -217,8 +265,6 @@ void ext2_free_inode (struct inode * inode)
 		ll_rw_block (WRITE, 1, &bh);
 		wait_on_buffer (bh);
 	}
-	if (sb->dq_op)
-		sb->dq_op->free_inode (inode, 1);
 	sb->s_dirt = 1;
 	clear_inode (inode);
 	unlock_super (sb);
@@ -253,7 +299,7 @@ struct inode * ext2_new_inode (const struct inode * dir, int mode, int * err)
 {
 	struct super_block * sb;
 	struct buffer_head * bh;
-	struct buffer_head * bh2;
+	struct buffer_head * bh2, * tmpbh2;
 	int i, j, avefreei;
 	struct inode * inode;
 	int bitmap_nr;
@@ -262,7 +308,10 @@ struct inode * ext2_new_inode (const struct inode * dir, int mode, int * err)
 	struct ext2_super_block * es;
 
 	if (!dir || !(inode = get_empty_inode ()))
+	{
+		*err=-ENOMEM;
 		return NULL;
+	}
 	sb = dir->i_sb;
 	inode->i_sb = sb;
 	inode->i_flags = sb->s_flags;
@@ -278,9 +327,10 @@ repeat:
 /* I am not yet convinced that this next bit is necessary.
 		i = dir->u.ext2_i.i_block_group;
 		for (j = 0; j < sb->u.ext2_sb.s_groups_count; j++) {
-			tmp = get_group_desc (sb, i, &bh2);
+			tmp = get_group_desc (sb, i, &tmpbh2);
 			if ((tmp->bg_used_dirs_count << 8) < 
 			    tmp->bg_free_inodes_count) {
+				bh2 = tmpbh2;
 				gdp = tmp;
 				break;
 			}
@@ -290,13 +340,14 @@ repeat:
 */
 		if (!gdp) {
 			for (j = 0; j < sb->u.ext2_sb.s_groups_count; j++) {
-				tmp = get_group_desc (sb, j, &bh2);
+				tmp = get_group_desc (sb, j, &tmpbh2);
 				if (tmp->bg_free_inodes_count &&
 					tmp->bg_free_inodes_count >= avefreei) {
 					if (!gdp || 
 					    (tmp->bg_free_blocks_count >
 					     gdp->bg_free_blocks_count)) {
 						i = j;
+						bh2 = tmpbh2;
 						gdp = tmp;
 					}
 				}
@@ -309,11 +360,11 @@ repeat:
 		 * Try to place the inode in its parent directory
 		 */
 		i = dir->u.ext2_i.i_block_group;
-		tmp = get_group_desc (sb, i, &bh2);
-		if (tmp->bg_free_inodes_count)
+		tmp = get_group_desc (sb, i, &tmpbh2);
+		if (tmp->bg_free_inodes_count) {
+			bh2 = tmpbh2;
 			gdp = tmp;
-		else
-		{
+		} else {
 			/*
 			 * Use a quadratic hash to find a group with a
 			 * free inode
@@ -322,8 +373,9 @@ repeat:
 				i += j;
 				if (i >= sb->u.ext2_sb.s_groups_count)
 					i -= sb->u.ext2_sb.s_groups_count;
-				tmp = get_group_desc (sb, i, &bh2);
+				tmp = get_group_desc (sb, i, &tmpbh2);
 				if (tmp->bg_free_inodes_count) {
+					bh2 = tmpbh2;
 					gdp = tmp;
 					break;
 				}
@@ -337,8 +389,9 @@ repeat:
 			for (j = 2; j < sb->u.ext2_sb.s_groups_count; j++) {
 				if (++i >= sb->u.ext2_sb.s_groups_count)
 					i = 0;
-				tmp = get_group_desc (sb, i, &bh2);
+				tmp = get_group_desc (sb, i, &tmpbh2);
 				if (tmp->bg_free_inodes_count) {
+					bh2 = tmpbh2;
 					gdp = tmp;
 					break;
 				}
@@ -352,6 +405,13 @@ repeat:
 		return NULL;
 	}
 	bitmap_nr = load_inode_bitmap (sb, i);
+	if (bitmap_nr < 0) {
+		unlock_super (sb);
+		iput(inode);
+		*err = -EIO;
+		return NULL;
+	}
+	
 	bh = sb->u.ext2_sb.s_inode_bitmap[bitmap_nr];
 	if ((j = find_first_zero_bit ((unsigned long *) bh->b_data,
 				      EXT2_INODES_PER_GROUP(sb))) <
@@ -465,6 +525,9 @@ unsigned long ext2_count_free_inodes (struct super_block * sb)
 		gdp = get_group_desc (sb, i, NULL);
 		desc_count += gdp->bg_free_inodes_count;
 		bitmap_nr = load_inode_bitmap (sb, i);
+		if (bitmap_nr < 0)
+			continue;
+		
 		x = ext2_count_free (sb->u.ext2_sb.s_inode_bitmap[bitmap_nr],
 				     EXT2_INODES_PER_GROUP(sb) / 8);
 		printk ("group %d: stored = %d, counted = %lu\n",
@@ -497,6 +560,9 @@ void ext2_check_inodes_bitmap (struct super_block * sb)
 		gdp = get_group_desc (sb, i, NULL);
 		desc_count += gdp->bg_free_inodes_count;
 		bitmap_nr = load_inode_bitmap (sb, i);
+		if (bitmap_nr < 0)
+			continue;
+		
 		x = ext2_count_free (sb->u.ext2_sb.s_inode_bitmap[bitmap_nr],
 				     EXT2_INODES_PER_GROUP(sb) / 8);
 		if (gdp->bg_free_inodes_count != x)

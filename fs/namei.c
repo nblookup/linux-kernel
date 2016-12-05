@@ -6,6 +6,8 @@
 
 /*
  * Some corrections by tytso.
+ *
+ * Aug 97 - cevans - fix security problem with O_TRUNC and append only files
  */
 
 #include <asm/segment.h>
@@ -32,7 +34,7 @@ static inline int get_max_filename(unsigned long address)
 
 	if (get_fs() == KERNEL_DS)
 		return 0;
-	vma = find_vma(current, address);
+	vma = find_vma(current->mm, address);
 	if (!vma || vma->vm_start > address || !(vma->vm_flags & VM_READ))
 		return -EFAULT;
 	address = vma->vm_end - address;
@@ -102,6 +104,9 @@ int permission(struct inode * inode,int mask)
 
 	if (inode->i_op && inode->i_op->permission)
 		return inode->i_op->permission(inode, mask);
+	else if ((mask & S_IWOTH) && IS_RDONLY(inode) &&
+		 (S_ISREG(mode) || S_ISDIR(mode) || S_ISLNK(mode)))
+		return -EROFS; /* Nobody gets write access to a read-only fs */
 	else if ((mask & S_IWOTH) && IS_IMMUTABLE(inode))
 		return -EACCES; /* Nobody gets write access to an immutable file */
 	else if (current->fsuid == inode->i_uid)
@@ -279,6 +284,10 @@ static int _namei(const char * pathname, struct inode * base,
 			return error;
 	} else
 		iput(base);
+	if ((inode->i_flags & S_BAD_INODE) != 0) {
+		iput(inode);
+		return -EIO;
+	}
 	*res_inode = inode;
 	return 0;
 }
@@ -363,12 +372,12 @@ int open_namei(const char * pathname, int flag, int mode,
 				iput(inode);
 				error = -EEXIST;
 			}
-		} else if ((error = permission(dir,MAY_WRITE | MAY_EXEC)) != 0)
-			;	/* error is already set! */
+		} else if (IS_RDONLY(dir))
+			error = -EROFS;
 		else if (!dir->i_op || !dir->i_op->create)
 			error = -EACCES;
-		else if (IS_RDONLY(dir))
-			error = -EROFS;
+		else if ((error = permission(dir,MAY_WRITE | MAY_EXEC)) != 0)
+			;	/* error is already set! */
 		else {
 			dir->i_count++;		/* create eats the dir */
 			if (dir->i_sb && dir->i_sb->dq_op)
@@ -405,6 +414,7 @@ int open_namei(const char * pathname, int flag, int mode,
 		 * If there was something like IS_NODEV(inode) for
 		 * pipes and/or sockets I'd check it here.
 		 */
+	    	flag &= ~O_TRUNC;
 	}
 	else if (S_ISBLK(inode->i_mode) || S_ISCHR(inode->i_mode)) {
 		if (IS_NODEV(inode)) {
@@ -420,8 +430,9 @@ int open_namei(const char * pathname, int flag, int mode,
 	}
 	/*
 	 * An append-only file must be opened in append mode for writing
+	 * Additionally, we must disallow O_TRUNC -- cevans
 	 */
-	if (IS_APPEND(inode) && ((flag & FMODE_WRITE) && !(flag & O_APPEND))) {
+	if (IS_APPEND(inode) && (((flag & FMODE_WRITE) && !(flag & O_APPEND)) || (flag & O_TRUNC))) {
 		iput(inode);
 		return -EPERM;
 	}
@@ -515,6 +526,43 @@ asmlinkage int sys_mknod(const char * filename, int mode, dev_t dev)
 	return error;
 }
 
+/*
+ * Some operations need to remove trailing slashes for POSIX.1
+ * conformance. For rename we also need to change the behaviour
+ * depending on whether we had a trailing slash or not.. (we
+ * cannot rename normal files with trailing slashes, only dirs)
+ *
+ * "dummy" is used to make sure we don't do "/" -> "".
+ */
+static int remove_trailing_slashes(char * name)
+{
+	int result;
+	char dummy[1];
+	char *remove = dummy+1;
+
+	for (;;) {
+		char c = *name;
+		name++;
+		if (!c)
+			break;
+		if (c != '/') {
+			remove = NULL;
+			continue;
+		}
+		if (remove)
+			continue;
+		remove = name;
+	}
+
+	result = 0;
+	if (remove) {
+		remove[-1] = 0;
+		result = 1;
+	}
+
+	return result;
+}
+
 static int do_mkdir(const char * pathname, int mode)
 {
 	const char * basename;
@@ -544,7 +592,7 @@ static int do_mkdir(const char * pathname, int mode)
 	if (dir->i_sb && dir->i_sb->dq_op)
 		dir->i_sb->dq_op->initialize(dir, -1);
 	down(&dir->i_sem);
-	error = dir->i_op->mkdir(dir, basename, namelen, mode & 0777 & ~current->fs->umask);
+	error = dir->i_op->mkdir(dir, basename, namelen, mode & 01777 & ~current->fs->umask);
 	up(&dir->i_sem);
 	iput(dir);
 	return error;
@@ -557,6 +605,7 @@ asmlinkage int sys_mkdir(const char * pathname, int mode)
 
 	error = getname(pathname,&tmp);
 	if (!error) {
+		remove_trailing_slashes(tmp);
 		error = do_mkdir(tmp,mode);
 		putname(tmp);
 	}
@@ -597,7 +646,10 @@ static int do_rmdir(const char * name)
 	}
 	if (dir->i_sb && dir->i_sb->dq_op)
 		dir->i_sb->dq_op->initialize(dir, -1);
-	return dir->i_op->rmdir(dir,basename,namelen);
+	down(&dir->i_sem);
+	error = dir->i_op->rmdir(dir,basename,namelen);
+	up(&dir->i_sem);
+	return error;
 }
 
 asmlinkage int sys_rmdir(const char * pathname)
@@ -607,6 +659,7 @@ asmlinkage int sys_rmdir(const char * pathname)
 
 	error = getname(pathname,&tmp);
 	if (!error) {
+		remove_trailing_slashes(tmp);
 		error = do_rmdir(tmp);
 		putname(tmp);
 	}
@@ -647,7 +700,10 @@ static int do_unlink(const char * name)
 	}
 	if (dir->i_sb && dir->i_sb->dq_op)
 		dir->i_sb->dq_op->initialize(dir, -1);
-	return dir->i_op->unlink(dir,basename,namelen);
+	down(&dir->i_sem);
+	error = dir->i_op->unlink(dir,basename,namelen);
+	up(&dir->i_sem);
+	return error;
 }
 
 asmlinkage int sys_unlink(const char * pathname)
@@ -788,7 +844,7 @@ asmlinkage int sys_link(const char * oldname, const char * newname)
 	return error;
 }
 
-static int do_rename(const char * oldname, const char * newname)
+static int do_rename(const char * oldname, const char * newname, int must_be_dir)
 {
 	struct inode * old_dir, * new_dir;
 	const char * old_base, * new_base;
@@ -852,7 +908,7 @@ static int do_rename(const char * oldname, const char * newname)
 		new_dir->i_sb->dq_op->initialize(new_dir, -1);
 	down(&new_dir->i_sem);
 	error = old_dir->i_op->rename(old_dir, old_base, old_len, 
-		new_dir, new_base, new_len);
+		new_dir, new_base, new_len, must_be_dir);
 	up(&new_dir->i_sem);
 	iput(new_dir);
 	return error;
@@ -867,7 +923,9 @@ asmlinkage int sys_rename(const char * oldname, const char * newname)
 	if (!error) {
 		error = getname(newname,&to);
 		if (!error) {
-			error = do_rename(from,to);
+			error = do_rename(from,to,
+				remove_trailing_slashes(from) |
+				remove_trailing_slashes(to));
 			putname(to);
 		}
 		putname(from);

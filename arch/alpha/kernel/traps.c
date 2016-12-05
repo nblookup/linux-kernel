@@ -236,13 +236,13 @@ static inline unsigned long s_mem_to_reg (unsigned long s_mem)
 	exp = (exp_msb << 10) | exp_low;	/* common case */
 	if (exp_msb) {
 		if (exp_low == 0x7f) {
-			exp = 0x3ff;
+			exp = 0x7ff;
 		}
 	} else {
 		if (exp_low == 0x00) {
 			exp = 0x000;
 		} else {
-			exp |= (0x7 << 8);
+			exp |= (0x7 << 7);
 		}
 	}
 	return (sign << 63) | (exp << 52) | (frac << 29);
@@ -286,7 +286,7 @@ asmlinkage void do_entUnaUser(void * va, unsigned long opcode, unsigned long reg
 	extern void alpha_write_fp_reg (unsigned long reg, unsigned long val);
 	extern unsigned long alpha_read_fp_reg (unsigned long reg);
 
-	pc_addr = frame + 7 + 20 + 1;			/* pc in PAL frame */
+	pc_addr = frame + 7 + 20 + 3 /* em86 */ + 1;	/* pc in PAL frame */
 
 	if (cnt >= 5 && jiffies - last_time > 5*HZ) {
 		cnt = 0;
@@ -336,7 +336,7 @@ asmlinkage void do_entUnaUser(void * va, unsigned long opcode, unsigned long reg
 
 		      case 16: case 17: case 18: 
 			/* a0-a2 in PAL frame */
-			reg_addr += 7 + 20 + 3 + (reg - 16);
+			reg_addr += 7 + 20 + 3 /* em86 */ + 3 + (reg - 16);
 			break;
 
 		      case 19: case 20: case 21: case 22: case 23: 
@@ -347,7 +347,7 @@ asmlinkage void do_entUnaUser(void * va, unsigned long opcode, unsigned long reg
 
 		      case 29:
 			/* gp in PAL frame */
-			reg_addr += 7 + 20 + 2;
+			reg_addr += 7 + 20 + 3 /* em86 */ + 2;
 			break;
 
 		      case 30:
@@ -420,9 +420,9 @@ asmlinkage long do_entSys(unsigned long a0, unsigned long a1, unsigned long a2,
 			  unsigned long a3, unsigned long a4, unsigned long a5,
 			  struct pt_regs regs)
 {
-	if (regs.r0 != 112)
+	if (regs.r0 != 112 && regs.r0 < 300)
 		printk("<sc %ld(%lx,%lx,%lx)>", regs.r0, a0, a1, a2);
-	return -1;
+	return -ENOSYS;
 }
 
 extern asmlinkage void entMM(void);

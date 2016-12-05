@@ -17,7 +17,9 @@ extern unsigned long event;
 #include <linux/personality.h>
 #include <linux/tasks.h>
 #include <linux/kernel.h>
+
 #include <asm/system.h>
+#include <asm/semaphore.h>
 #include <asm/page.h>
 
 #include <linux/smp.h>
@@ -108,19 +110,17 @@ extern void trap_init(void);
 
 asmlinkage void schedule(void);
 
-/* ??? */
+/* Open file table structure */
 struct files_struct {
-	/* ??? */
 	int count;
-	/* bit mask to close fds on exec */
 	fd_set close_on_exec;
-	/* do we have at most NR_OPEN available fds? I assume fd i maps into
- 	 * each open file */	
+	fd_set open_fds;
 	struct file * fd[NR_OPEN];
 };
 
 #define INIT_FILES { \
 	1, \
+	{ { 0, } }, \
 	{ { 0, } }, \
 	{ NULL, } \
 }
@@ -148,6 +148,7 @@ struct mm_struct {
 	unsigned long def_flags;
 	struct vm_area_struct * mmap;
 	struct vm_area_struct * mmap_avl;
+	struct semaphore mmap_sem;
 };
 
 #define INIT_MM { \
@@ -159,7 +160,7 @@ struct mm_struct {
 		0, 0, 0, 0, \
 		0, 0, 0, \
 		0, \
-		&init_mmap, &init_mmap }
+		&init_mmap, &init_mmap, MUTEX }
 
 struct signal_struct {
 	int count;
@@ -243,6 +244,8 @@ struct task_struct {
 	struct mm_struct *mm;
 /* signal handlers */
 	struct signal_struct *sig;
+/* privileged execution counters, for exit_signal permission checking */
+	int priv, ppriv;
 #ifdef __SMP__
 	int processor;
 	int last_processor;
@@ -262,8 +265,8 @@ struct task_struct {
 #define PF_DUMPCORE	0x00000200	/* dumped core */
 #define PF_SIGNALED	0x00000400	/* killed by a signal */
 
-#define PF_STARTING	0x00000100	/* being created */
-#define PF_EXITING	0x00000200	/* getting shut down */
+#define PF_STARTING	0x00000002	/* being created */
+#define PF_EXITING	0x00000004	/* getting shut down */
 
 #define PF_USEDFPU	0x00100000	/* Process used the FPU this quantum (SMP only) */
 #define PF_DTRACE	0x00200000	/* delayed trace (used on m68k) */
@@ -308,6 +311,7 @@ struct task_struct {
 /* files */	&init_files, \
 /* mm */	&init_mm, \
 /* signals */	&init_signals, \
+/* priv */	0, 0, \
 }
 
 extern struct   mm_struct init_mm;
@@ -323,7 +327,7 @@ extern struct task_struct *current_set[NR_CPUS];
 extern unsigned long volatile jiffies;
 extern unsigned long itimer_ticks;
 extern unsigned long itimer_next;
-extern struct timeval xtime;
+extern volatile struct timeval xtime;
 extern int need_resched;
 extern void do_timer(struct pt_regs *);
 
@@ -341,7 +345,7 @@ extern void wake_up(struct wait_queue ** p);
 extern void wake_up_interruptible(struct wait_queue ** p);
 extern void wake_up_process(struct task_struct * tsk);
 
-extern void notify_parent(struct task_struct * tsk);
+extern void notify_parent(struct task_struct * tsk, int signal);
 extern void force_sig(unsigned long sig,struct task_struct * p);
 extern int send_sig(unsigned long sig,struct task_struct * p,int priv);
 extern int in_group_p(gid_t grp);
@@ -400,70 +404,49 @@ extern inline struct file *file_from_fd(const unsigned int fd)
  * to keep them correct. Use only these two functions to add/remove
  * entries in the queues.
  */
+extern inline void __add_wait_queue(struct wait_queue ** p, struct wait_queue * wait)
+{
+	struct wait_queue *head = *p;
+	struct wait_queue *next = WAIT_QUEUE_HEAD(p);
+
+	if (head)
+		next = head;
+	*p = wait;
+	wait->next = next;
+}
+
 extern inline void add_wait_queue(struct wait_queue ** p, struct wait_queue * wait)
 {
 	unsigned long flags;
 
-#ifdef DEBUG
-	if (wait->next) {
-		__label__ here;
-		unsigned long pc;
-		pc = (unsigned long) &&here;
-	      here:
-		printk("add_wait_queue (%08lx): wait->next = %08lx\n",pc,(unsigned long) wait->next);
-	}
-#endif
 	save_flags(flags);
 	cli();
-	if (!*p) {
-		wait->next = wait;
-		*p = wait;
-	} else {
-		wait->next = (*p)->next;
-		(*p)->next = wait;
-	}
+	__add_wait_queue(p, wait);
 	restore_flags(flags);
+}
+
+extern inline void __remove_wait_queue(struct wait_queue ** p, struct wait_queue * wait)
+{
+	struct wait_queue * next = wait->next;
+	struct wait_queue * head = next;
+
+	for (;;) {
+		struct wait_queue * nextlist = head->next;
+		if (nextlist == wait)
+			break;
+		head = nextlist;
+	}
+	head->next = next;
 }
 
 extern inline void remove_wait_queue(struct wait_queue ** p, struct wait_queue * wait)
 {
 	unsigned long flags;
-	struct wait_queue * tmp;
-#ifdef DEBUG
-	unsigned long ok = 0;
-#endif
 
 	save_flags(flags);
 	cli();
-	if ((*p == wait) &&
-#ifdef DEBUG
-	    (ok = 1) &&
-#endif
-	    ((*p = wait->next) == wait)) {
-		*p = NULL;
-	} else {
-		tmp = wait;
-		while (tmp->next != wait) {
-			tmp = tmp->next;
-#ifdef DEBUG
-			if (tmp == *p)
-				ok = 1;
-#endif
-		}
-		tmp->next = wait->next;
-	}
-	wait->next = NULL;
+	__remove_wait_queue(p, wait);
 	restore_flags(flags);
-#ifdef DEBUG
-	if (!ok) {
-		__label__ here;
-		ok = (unsigned long) &&here;
-		printk("removed wait_queue not on list.\n");
-		printk("list = %08lx, queue = %08lx\n",(unsigned long) p, (unsigned long) wait);
-	      here:
-		printk("eip = %08lx\n",ok);
-	}
-#endif
 }
 
 extern inline void select_wait(struct wait_queue ** wait_address, select_table * p)
@@ -474,31 +457,13 @@ extern inline void select_wait(struct wait_queue ** wait_address, select_table *
 		return;
 	if (p->nr >= __MAX_SELECT_TABLE_ENTRIES)
 		return;
- 	entry = p->entry + p->nr;
+	entry = p->entry + p->nr;
 	entry->wait_address = wait_address;
 	entry->wait.task = current;
 	entry->wait.next = NULL;
 	add_wait_queue(wait_address,&entry->wait);
 	p->nr++;
 }
-
-extern void __down(struct semaphore * sem);
-
-/*
- * These are not yet interrupt-safe
- */
-extern inline void down(struct semaphore * sem)
-{
-	if (sem->count <= 0)
-		__down(sem);
-	sem->count--;
-}
-
-extern inline void up(struct semaphore * sem)
-{
-	sem->count++;
-	wake_up(&sem->wait);
-}	
 
 #define REMOVE_LINKS(p) do { unsigned long flags; \
 	save_flags(flags) ; cli(); \

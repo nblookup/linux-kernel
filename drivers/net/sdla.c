@@ -5,7 +5,7 @@
  *
  *		Global definitions for the Frame relay interface.
  *
- * Version:	@(#)sdla.c   0.25	14 May 1996
+ * Version:	@(#)sdla.c   0.30	12 Sep 1996
  *
  * Credits:	Sangoma Technologies, for the use of 2 cards for an extended
  *			period of time.
@@ -23,7 +23,8 @@
  *					non DLCI devices.
  *		0.25	Mike McLagan	Fixed problem with rejecting packets
  *					from non DLCI devices.
- *
+ *		0.30	Mike McLagan	Fixed kernel panic when used with modified
+ *					ifconfig
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -31,6 +32,7 @@
  *		2 of the License, or (at your option) any later version.
  */
 
+#include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/kernel.h>
@@ -58,7 +60,7 @@
 
 #include <linux/sdla.h>
 
-static const char* version = "SDLA driver v0.25, 14 May 1996, mike.mclagan@linux.org";
+static const char* version = "SDLA driver v0.30, 12 Sep 1996, mike.mclagan@linux.org";
 
 static const char* devname = "sdla";
 
@@ -424,6 +426,7 @@ static int sdla_cmd(struct device *dev, int cmd, short dlci, short flags,
    window = flp->type == SDLA_S508 ? SDLA_508_CMD_BUF : SDLA_502_CMD_BUF;
    cmd_buf = (struct sdla_cmd *)(dev->mem_start + (window & SDLA_ADDR_MASK));
    ret = 0;
+   len = 0;
    jiffs = jiffies + HZ;  /* 1 second is plenty */
    save_flags(pflags);
    cli();
@@ -449,7 +452,7 @@ static int sdla_cmd(struct device *dev, int cmd, short dlci, short flags,
          save_flags(pflags);
          cli();
          SDLA_WINDOW(dev, window);
-         waiting = ((volatile)(cmd_buf->opp_flag));
+         waiting = ((volatile int)(cmd_buf->opp_flag));
          restore_flags(pflags);
       }
    }
@@ -563,11 +566,12 @@ int sdla_assoc(struct device *slave, struct device *master)
    flp->dlci[i] = -*(short *)(master->dev_addr);
    master->mtu = slave->mtu;
 
-   if (slave->start)
+   if (slave->start) {
       if (flp->config.station == FRAD_STATION_CPE)
          sdla_reconfig(slave);
       else
          sdla_cmd(slave, SDLA_ADD_DLCI, 0, 0, master->dev_addr, sizeof(short), NULL, NULL);
+   }
 
    return(0);
 }
@@ -591,11 +595,12 @@ int sdla_deassoc(struct device *slave, struct device *master)
 
    MOD_DEC_USE_COUNT;
 
-   if (slave->start)
+   if (slave->start) {
       if (flp->config.station == FRAD_STATION_CPE)
          sdla_reconfig(slave);
       else
          sdla_cmd(slave, SDLA_DELETE_DLCI, 0, 0, master->dev_addr, sizeof(short), NULL, NULL);
+   }
 
    return(0);
 }
@@ -603,7 +608,7 @@ int sdla_deassoc(struct device *slave, struct device *master)
 int sdla_dlci_conf(struct device *slave, struct device *master, int get)
 {
    struct frad_local *flp;
-   struct frad_local *dlp;
+   struct dlci_local *dlp;
    int               i;
    short             len, ret;
 
@@ -620,13 +625,14 @@ int sdla_dlci_conf(struct device *slave, struct device *master, int get)
 
    ret = SDLA_RET_OK;
    len = sizeof(struct dlci_conf);
-   if (slave->start)
+   if (slave->start) {
       if (get)
          ret = sdla_cmd(slave, SDLA_READ_DLCI_CONFIGURATION, abs(flp->dlci[i]), 0,  
                      NULL, 0, &dlp->config, &len);
       else
          ret = sdla_cmd(slave, SDLA_SET_DLCI_CONFIGURATION, abs(flp->dlci[i]), 0,  
                      &dlp->config, sizeof(struct dlci_conf) - 4 * sizeof(short), NULL, NULL);
+   }
 
    return(ret == SDLA_RET_OK ? 0 : -EIO);
 }
@@ -656,8 +662,10 @@ static int sdla_transmit(struct sk_buff *skb, struct device *dev)
    if (skb == NULL) 
       return(0);
 
-   if (set_bit(0, (void*)&dev->tbusy) != 0)
+   if (set_bit(0, (void*)&dev->tbusy) != 0) {
       printk(KERN_WARNING "%s: transmitter access conflict.\n", dev->name);
+      dev_kfree_skb(skb, FREE_WRITE);
+   }
    else
    {
       /*

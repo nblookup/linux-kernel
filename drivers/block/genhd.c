@@ -37,6 +37,7 @@
  */
 #include <asm/unaligned.h>
 
+#define SYS_IND(p)	get_unaligned(&p->sys_ind)
 #define NR_SECTS(p)	get_unaligned(&p->nr_sects)
 #define START_SECT(p)	get_unaligned(&p->start_sect)
 
@@ -50,6 +51,9 @@ extern void initrd_load(void);
 
 extern int chr_dev_init(void);
 extern int blk_dev_init(void);
+#ifdef CONFIG_BLK_DEV_DAC960
+extern void DAC960_Initialize(void);
+#endif
 extern int scsi_dev_init(void);
 extern int net_dev_init(void);
 
@@ -72,6 +76,10 @@ char *disk_name (struct gendisk *hd, int minor, char *buf)
 	 * This requires special handling here.
 	 */
 	switch (hd->major) {
+		case IDE5_MAJOR:
+			unit += 2;
+		case IDE4_MAJOR:
+			unit += 2;
 		case IDE3_MAJOR:
 			unit += 2;
 		case IDE2_MAJOR:
@@ -80,6 +88,29 @@ char *disk_name (struct gendisk *hd, int minor, char *buf)
 			unit += 2;
 		case IDE0_MAJOR:
 			maj = "hd";
+	}
+#endif
+	if (hd->major >= DAC960_MAJOR+0 && hd->major <= DAC960_MAJOR+7)
+	  {
+	    int controller = hd->major - DAC960_MAJOR;
+	    int partition = minor & ((1 << hd->minor_shift) - 1);
+	    if (partition == 0)
+	      sprintf(buf, "%s/c%dd%d",
+		      maj, controller, minor >> hd->minor_shift);
+	    else sprintf(buf, "%s/c%dd%dp%d",
+			 maj, controller, minor >> hd->minor_shift, partition);
+	    return buf;
+	  }
+#if defined(CONFIG_BLK_CPQ_DA) || defined(CONFIG_BLK_CPQ_DA_MODULE)
+	if (hd->major >= COMPAQ_SMART2_MAJOR && hd->major <= COMPAQ_SMART2_MAJOR+7) {
+		int ctlr = hd->major - COMPAQ_SMART2_MAJOR;
+		int disk = minor >> hd->minor_shift;
+		int part = minor & (( 1 << hd->minor_shift) - 1);
+		if (part == 0)
+			sprintf(buf, "%s/c%dd%d", maj, ctlr, disk);
+		else
+			sprintf(buf, "%s/c%dd%dp%d", maj, ctlr, disk, part);
+		return buf;
 	}
 #endif
 	part = minor & ((1 << hd->minor_shift) - 1);
@@ -92,16 +123,25 @@ char *disk_name (struct gendisk *hd, int minor, char *buf)
 
 static void add_partition (struct gendisk *hd, int minor, int start, int size)
 {
-	char buf[8];
+	char buf[40];
 	hd->part[minor].start_sect = start;
 	hd->part[minor].nr_sects   = size;
-	printk(" %s", disk_name(hd, minor, buf));
+	if (hd->major >= DAC960_MAJOR+0 && hd->major <= DAC960_MAJOR+7)
+		printk(" p%d", (minor & ((1 << hd->minor_shift) - 1)));
+	else
+#if defined(CONFIG_BLK_CPQ_DA) || defined(CONFIG_BLK_CPQ_DA_MODULE)
+	if (hd->major >= COMPAQ_SMART2_MAJOR && hd->major <= COMPAQ_SMART2_MAJOR+7) 
+		printk(" p%d", (minor & ((1 << hd->minor_shift) - 1)));
+	else
+#endif
+		printk(" %s", disk_name(hd, minor, buf));
 }
 
 static inline int is_extended_partition(struct partition *p)
 {
-	return (p->sys_ind == DOS_EXTENDED_PARTITION ||
-		p->sys_ind == LINUX_EXTENDED_PARTITION);
+	return (SYS_IND(p) == DOS_EXTENDED_PARTITION ||
+		SYS_IND(p) == WIN98_EXTENDED_PARTITION ||
+		SYS_IND(p) == LINUX_EXTENDED_PARTITION);
 }
 
 #ifdef CONFIG_MSDOS_PARTITION
@@ -122,6 +162,8 @@ static void extended_partition(struct gendisk *hd, kdev_t dev)
 	struct partition *p;
 	unsigned long first_sector, first_size, this_sector, this_size;
 	int mask = (1 << hd->minor_shift) - 1;
+	int loopct = 0;		/* number of links followed
+				   without finding a data partition */
 	int i;
 
 	first_sector = hd->part[MINOR(dev)].start_sect;
@@ -129,6 +171,8 @@ static void extended_partition(struct gendisk *hd, kdev_t dev)
 	this_sector = first_sector;
 
 	while (1) {
+		if (++loopct > 100)
+			return;
 		if ((current_minor & mask) == 0)
 			return;
 		if (!(bh = bread(dev,0,1024)))
@@ -173,6 +217,7 @@ static void extended_partition(struct gendisk *hd, kdev_t dev)
 
 		    add_partition(hd, current_minor, this_sector+START_SECT(p), NR_SECTS(p));
 		    current_minor++;
+		    loopct = 0;
 		    if ((current_minor & mask) == 0)
 		      goto done;
 		}
@@ -277,7 +322,7 @@ check_table:
 		 */
 		extern int ide_xlate_1024(kdev_t, int, const char *);
 		unsigned int sig = *(unsigned short *)(data + 2);
-		if (p->sys_ind == EZD_PARTITION) {
+		if (SYS_IND(p) == EZD_PARTITION) {
 			/*
 			 * The remainder of the disk must be accessed using
 			 * a translated geometry that reduces the number of 
@@ -290,7 +335,7 @@ check_table:
 				data += 512;
 				goto check_table;
 			}
-		} else if (p->sys_ind == DM6_PARTITION) {
+		} else if (SYS_IND(p) == DM6_PARTITION) {
 
 			/*
 			 * Everything on the disk is offset by 63 sectors,
@@ -313,7 +358,7 @@ check_table:
 			 * DM6 signature in MBR, courtesy of OnTrack
 			 */
 			(void) ide_xlate_1024 (dev, 0, " [DM6:MBR]");
-		} else if (p->sys_ind == DM6_AUX1PARTITION || p->sys_ind == DM6_AUX3PARTITION) {
+		} else if (SYS_IND(p) == DM6_AUX1PARTITION || SYS_IND(p) == DM6_AUX3PARTITION) {
 			/*
 			 * DM6 on other than the first (boot) drive
 			 */
@@ -326,9 +371,13 @@ check_table:
 			 */
 			for (i = 0; i < 4 ; i++) {
 				struct partition *q = &p[i];
-				if (NR_SECTS(q) && q->sector == 1 && q->end_sector == 63) {
+				if (NR_SECTS(q)
+				   && (q->sector & 63) == 1
+				   && (q->end_sector & 63) == 63) {
 					unsigned int heads = q->end_head + 1;
-					if (heads == 32 || heads == 64 || heads == 128) {
+					if (heads == 32 || heads == 64 ||
+					    heads == 128 || heads == 240 ||
+					    heads == 255) {
 
 						(void) ide_xlate_1024(dev, heads, " [PTBL]");
 						break;
@@ -362,7 +411,7 @@ check_table:
 				hd->part[minor].nr_sects = 2;
 		}
 #ifdef CONFIG_BSD_DISKLABEL
-		if (p->sys_ind == BSD_PARTITION) {
+		if (SYS_IND(p) == BSD_PARTITION) {
 			printk(" <");
 			bsd_disklabel_partition(hd, MKDEV(hd->major, minor));
 			printk(" >");
@@ -551,11 +600,93 @@ static int sun_partition(struct gendisk *hd, kdev_t dev, unsigned long first_sec
 
 #endif /* CONFIG_SUN_PARTITION */
 
+#ifdef CONFIG_AMIGA_PARTITION
+#include <asm/byteorder.h>
+#include <linux/affs_hardblocks.h>
+
+static __inline__ __u32
+checksum_block(__u32 *m, int size)
+{
+	__u32 sum = 0;
+
+	while (size--)
+		sum += htonl(*m++);
+	return sum;
+}
+
+static int
+amiga_partition(struct gendisk *hd, unsigned int dev, unsigned long first_sector)
+{
+	struct buffer_head	*bh;
+	struct RigidDiskBlock	*rdb;
+	struct PartitionBlock	*pb;
+	int			 start_sect;
+	int			 nr_sects;
+	int			 blk;
+	int			 part, res;
+
+	set_blocksize(dev,512);
+	res = 0;
+
+	for (blk = 0; blk < RDB_ALLOCATION_LIMIT; blk++) {
+		if(!(bh = bread(dev,blk,512))) {
+			printk("Dev %d: unable to read RDB block %d\n",dev,blk);
+			goto rdb_done;
+		}
+		if (*(__u32 *)bh->b_data == htonl(IDNAME_RIGIDDISK)) {
+			rdb = (struct RigidDiskBlock *)bh->b_data;
+			if (checksum_block((__u32 *)bh->b_data,htonl(rdb->rdb_SummedLongs) & 0x7F)) {
+				printk("Dev %d: RDB in block %d has bad checksum\n",dev,blk);
+				brelse(bh);
+				continue;
+			}
+			printk(" RDSK");
+			blk = htonl(rdb->rdb_PartitionList);
+			brelse(bh);
+			for (part = 1; blk > 0 && part <= 16; part++) {
+				if (!(bh = bread(dev,blk,512))) {
+					printk("Dev %d: unable to read partition block %d\n",
+						       dev,blk);
+					goto rdb_done;
+				}
+				pb  = (struct PartitionBlock *)bh->b_data;
+				blk = htonl(pb->pb_Next);
+				if (pb->pb_ID == htonl(IDNAME_PARTITION) && checksum_block(
+				    (__u32 *)pb,htonl(pb->pb_SummedLongs) & 0x7F) == 0 ) {
+					
+					/* Tell Kernel about it */
+
+					if (!(nr_sects = (htonl(pb->pb_Environment[10]) + 1 -
+							  htonl(pb->pb_Environment[9])) *
+							 htonl(pb->pb_Environment[3]) *
+							 htonl(pb->pb_Environment[5]))) {
+						continue;
+					}
+					start_sect = htonl(pb->pb_Environment[9]) *
+						     htonl(pb->pb_Environment[3]) *
+						     htonl(pb->pb_Environment[5]);
+					add_partition(hd,current_minor,start_sect,nr_sects);
+					current_minor++;
+					res = 1;
+				}
+				brelse(bh);
+			}
+			printk("\n");
+			break;
+		}
+	}
+
+rdb_done:
+	set_blocksize(dev,BLOCK_SIZE);
+	return res;
+}
+#endif /* CONFIG_AMIGA_PARTITION */
+
 static void check_partition(struct gendisk *hd, kdev_t dev)
 {
 	static int first_time = 1;
 	unsigned long first_sector;
-	char buf[8];
+	char buf[40];
 
 	if (first_time)
 		printk("Partition check:\n");
@@ -582,6 +713,10 @@ static void check_partition(struct gendisk *hd, kdev_t dev)
 #endif
 #ifdef CONFIG_SUN_PARTITION
 	if(sun_partition(hd, dev, first_sector))
+		return;
+#endif
+#ifdef CONFIG_AMIGA_PARTITION
+	if(amiga_partition(hd, dev, first_sector))
 		return;
 #endif
 	printk(" unknown partition table\n");
@@ -643,14 +778,21 @@ static void setup_dev(struct gendisk *dev)
 void device_setup(void)
 {
 	extern void console_map_init(void);
+	extern void cpqarray_init(void);
 	struct gendisk *p;
 	int nr=0;
 
 	chr_dev_init();
 	blk_dev_init();
 	sti();
+#ifdef CONFIG_BLK_DEV_DAC960
+	DAC960_Initialize();
+#endif
 #ifdef CONFIG_SCSI
 	scsi_dev_init();
+#endif
+#ifdef CONFIG_BLK_CPQ_DA
+	cpqarray_init();
 #endif
 #ifdef CONFIG_INET
 	net_dev_init();

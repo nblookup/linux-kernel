@@ -12,7 +12,7 @@
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
- *		Alan Cox, <gw4pts@gw4pts.ampr.org>
+ *		Alan Cox, <alan@lxorguk.ukuu.org.uk>
  *
  * Fixes:	
  *		Alan Cox	:	verify_area() now used correctly
@@ -169,10 +169,11 @@ static int packet_sendmsg(struct sock *sk, struct msghdr *msg, int len,
 	 *	raw protocol and you must do your own fragmentation at this level.
 	 */
 	 
-	if(len>dev->mtu+dev->hard_header_len)
+	if ((dev->flags & IFF_SOFTHEADERS && len>dev->mtu)
+	|| len>dev->mtu+dev->hard_header_len)
   		return -EMSGSIZE;
 
-	skb = sock_wmalloc(sk, len, 0, GFP_KERNEL);
+	skb = sock_wmalloc(sk, len+dev->hard_header_len, 0, GFP_KERNEL);
 
 	/*
 	 *	If the write buffer is full, then tough. At this level the user gets to
@@ -191,6 +192,16 @@ static int packet_sendmsg(struct sock *sk, struct msghdr *msg, int len,
 	 
 	skb->sk = sk;
 	skb->free = 1;
+	if (dev->flags & IFF_SOFTHEADERS) {
+        	/* Do the hard header calls for drivers that must set the
+		 * headers at transmission time by themselves. PPP and ISDN
+	 	 * are the notable offenders here. A proper fix requires some
+         	 * changes at the device driver level, but that is a 2.1 issue.
+         	 */
+        	skb_reserve(skb,dev->hard_header_len);
+		if (dev->hard_header)
+			dev->hard_header(skb,dev,ETH_P_IP,NULL,NULL,len);
+	}
 	memcpy_fromiovec(skb_put(skb,len), msg->msg_iov, len);
 	skb->arp = 1;		/* No ARP needs doing on this (complete) frame */
 	skb->protocol = proto;
@@ -479,28 +490,34 @@ int packet_recvmsg(struct sock *sk, struct msghdr *msg, int len,
  
 struct proto packet_prot = 
 {
-	packet_close,
-	ip_build_header,	/* Not actually used */
-	NULL,
-	NULL,
-	ip_queue_xmit,		/* These two are not actually used */
-	NULL,
-	NULL,
-	NULL,
-	NULL, 
-	datagram_select,
-	NULL,			/* No ioctl */
-	packet_init,
-	NULL,
-	NULL,			/* No set/get socket options */
-	NULL,
-	packet_sendmsg,		/* Sendmsg */
-	packet_recvmsg,		/* Recvmsg */
-	packet_bind,		/* Bind */
-	128,
-	0,
-	"PACKET",
-	0, 0
+	(struct sock *)&packet_prot,	/* sklist_next */
+	(struct sock *)&packet_prot,	/* sklist_prev */
+	packet_close,			/* close */
+	ip_build_header,		/* build_header, Not actually used */
+	NULL,				/* connect */
+	NULL,				/* accept */
+	ip_queue_xmit,			/* queue_xmit, These two are not actually used */
+	NULL,				/* retransmit */
+	NULL,				/* write_wakeup */
+	NULL,				/* read_wakeup */
+	NULL,				/* rcv */
+	datagram_select,		/* select */
+	NULL,				/* ioctl, No ioctl */
+	packet_init,			/* init */
+	NULL,				/* shutdown */
+	NULL,				/* setsockopt, No set/get socket options */
+	NULL,				/* getsockopt */
+	packet_sendmsg,			/* sendmsg */
+	packet_recvmsg,			/* recvmsg */
+	packet_bind,			/* bind */
+	NULL,				/* hash */
+	NULL,				/* unhash */
+	NULL,				/* rehash */
+	NULL,				/* good_socknum */
+	NULL,				/* verify_bind */
+	128,				/* max_header */
+	0,				/* retransmits */
+	"PACKET",			/* name */
+	0,				/* inuse */
+	0				/* highestinuse */
 };
-
-	

@@ -41,8 +41,8 @@
  *
  * DTC2278S has only a single IDE interface.
  * DTC2278D has two IDE interfaces and is otherwise identical to the S version.
- * DTC2278E has onboard BIOS, while the others do not.
- * DTC2278EB: "works like a charm" -- Kent Bradford <kent@theory.caltech.edu>
+ * DTC2278E also has serial ports and a printer port
+ * DTC2278EB: has onboard BIOS, and "works like a charm" -- Kent Bradford <kent@theory.caltech.edu>
  *
  * There may be a fourth controller type. The S and D versions use the
  * Winbond chip, and I think the E version does also.
@@ -71,8 +71,7 @@ static void tune_dtc2278 (ide_drive_t *drive, byte pio)
 {
 	unsigned long flags;
 
-	if (pio == 255)
-		pio = ide_get_best_pio_mode(drive);
+	pio = ide_get_best_pio_mode(drive, pio, 4, NULL);
 
 	if (pio >= 3) {
 		save_flags(flags);
@@ -122,6 +121,8 @@ void init_dtc2278 (void)
 	ide_hwifs[0].chipset = ide_dtc2278;
 	ide_hwifs[1].chipset = ide_dtc2278;
 	ide_hwifs[0].tuneproc = &tune_dtc2278;
-	ide_hwifs[0].no_unmask = 1;
-	ide_hwifs[1].no_unmask = 1;
+	ide_hwifs[0].drives[0].no_unmask = 1;
+	ide_hwifs[0].drives[1].no_unmask = 1;
+	ide_hwifs[1].drives[0].no_unmask = 1;
+	ide_hwifs[1].drives[1].no_unmask = 1;
 }

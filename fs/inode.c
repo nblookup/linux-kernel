@@ -173,6 +173,25 @@ void clear_inode(struct inode * inode)
 {
 	struct wait_queue * wait;
 
+	/*
+	 * We can clear inodes either when a last deref to the inode 
+	 * causes it to be deleted (reference count==1), or when we want to 
+	 * reuse it (reference count==0).  Any other count is an error.
+	 */
+	if (inode->i_count > 1)
+		panic ("clear_inode: Inode still has references");
+
+	/*
+	 * We are about to zap this inode.  This operation may block,
+	 * and it's imperative that we don't allow another process to
+	 * grab it before it is completely pulled down.  The i_count
+	 * will prevent reuse of the inode by get_empty_inode(), but the
+	 * i_condemned flag will also prevent __iget() from finding the
+	 * inode until it is completely dead. 
+	 */
+	inode->i_condemned = 1;
+	inode->i_count++;
+	
 	truncate_inode_pages(inode, 0);
 	wait_on_inode(inode);
 	if (IS_WRITABLE(inode)) {
@@ -182,11 +201,16 @@ void clear_inode(struct inode * inode)
 	remove_inode_hash(inode);
 	remove_inode_free(inode);
 	wait = ((volatile struct inode *) inode)->i_wait;
-	if (inode->i_count)
+	if (--inode->i_count)
 		nr_free_inodes++;
 	memset(inode,0,sizeof(*inode));
 	((volatile struct inode *) inode)->i_wait = wait;
 	insert_inode_free(inode);
+	/*
+	 * The inode is now reusable again, and the condemned flag is
+	 * clear.  Wake up anybody who is waiting on the condemned flag. 
+	 */
+	wake_up(&inode->i_wait);
 }
 
 int fs_may_mount(kdev_t dev)
@@ -427,6 +451,7 @@ void iput(struct inode * inode)
 	}
 	if (inode->i_pipe)
 		wake_up_interruptible(&PIPE_WAIT(*inode));
+
 repeat:
 	if (inode->i_count>1) {
 		inode->i_count--;
@@ -466,6 +491,14 @@ repeat:
 	
 	inode->i_count--;
 
+	if (inode->i_count)
+	/*
+	 * Huoh, we were supposed to be the last user, but someone has
+	 * grabbed it while we were sleeping. Dont destroy inode VM
+	 * mappings, it might cause a memory leak.
+	 */
+		return;
+
 	if (inode->i_mmap) {
 		printk("iput: inode %lu on device %s still has mappings.\n",
 			inode->i_ino, kdevname(inode->i_dev));
@@ -476,20 +509,11 @@ repeat:
 	return;
 }
 
-static inline unsigned long value(struct inode * inode)
-{
-	if (inode->i_lock)  
-		return 1000;
-	if (inode->i_dirt)
-		return 1000;
-	return inode->i_nrpages;
-}
-
 struct inode * get_empty_inode(void)
 {
 	static int ino = 0;
 	struct inode * inode, * best;
-	unsigned long badness = 1000;
+	unsigned long badness;
 	int i;
 
 	if (nr_inodes < max_inodes && nr_free_inodes < (nr_inodes >> 1))
@@ -497,50 +521,54 @@ struct inode * get_empty_inode(void)
 repeat:
 	inode = first_inode;
 	best = NULL;
+	badness = 1000;
 	for (i = nr_inodes/2; i > 0; i--,inode = inode->i_next) {
 		if (!inode->i_count) {
-			unsigned long i = value(inode);
+			unsigned long i = 999;
+			if (!(inode->i_lock || inode->i_dirt))
+				i = inode->i_nrpages;
 			if (i < badness) {
 				best = inode;
-				if ((badness = i) == 0)
-					break;
+				if (!i)
+					goto found_good;
+				badness = i;
 			}
 		}
 	}
-	if (badness)
-		if (nr_inodes < max_inodes) {
-			if (grow_inodes() == 0)
-				goto repeat;
-		}
-	inode = best;
-	if (!inode) {
+	if (nr_inodes < max_inodes) {
+		if (grow_inodes() == 0)
+			goto repeat;
+		best = NULL;
+	}
+	if (!best) {
 		printk("VFS: No free inodes - contact Linus\n");
 		sleep_on(&inode_wait);
 		goto repeat;
 	}
-	if (inode->i_lock) {
-		wait_on_inode(inode);
+	if (best->i_lock) {
+		wait_on_inode(best);
 		goto repeat;
 	}
-	if (inode->i_dirt) {
-		write_inode(inode);
+	if (best->i_dirt) {
+		write_inode(best);
 		goto repeat;
 	}
-	if (inode->i_count)
+	if (best->i_count)
 		goto repeat;
-	clear_inode(inode);
-	inode->i_count = 1;
-	inode->i_nlink = 1;
-	inode->i_version = ++event;
-	inode->i_sem.count = 1;
-	inode->i_ino = ++ino;
-	inode->i_dev = 0;
+found_good:
+	clear_inode(best);
+	best->i_count = 1;
+	best->i_nlink = 1;
+	best->i_version = ++event;
+	best->i_sem.count = 1;
+	best->i_ino = ++ino;
+	best->i_dev = 0;
 	nr_free_inodes--;
 	if (nr_free_inodes < 0) {
 		printk ("VFS: get_empty_inode: bad free inode count.\n");
 		nr_free_inodes = 0;
 	}
-	return inode;
+	return best;
 }
 
 struct inode * get_pipe_inode(void)
@@ -611,6 +639,15 @@ repeat:
 	goto return_it;
 
 found_it:
+	/*
+	 * The inode may currently be being pulled down by
+	 * clear_inode().  Avoid it if so.  If we get past this, then
+	 * the increment of i_count will prevent the inode's reuse.
+	 */
+	if (inode->i_condemned) {
+		sleep_on(&inode->i_wait);
+		goto repeat;
+	}
 	if (!inode->i_count)
 		nr_free_inodes--;
 	inode->i_count++;

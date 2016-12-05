@@ -10,13 +10,13 @@
 #
 
 #
-# Note : at this point, these files are compiled on all systems. 
+# Note : at this point, these files are compiled on all systems.
 # In the future, some of these should be built conditionally.
 #
 
 
 L_TARGET := block.a
-L_OBJS   := ll_rw_blk.o genhd.o 
+L_OBJS   := ll_rw_blk.o genhd.o
 M_OBJS   :=
 MOD_LIST_NAME := BLOCK_MODULES
 LX_OBJS :=
@@ -97,12 +97,29 @@ ifeq ($(CONFIG_BLK_DEV_IDETAPE),y)
 L_OBJS += ide-tape.o
 endif
 
+ifeq ($(CONFIG_BLK_DEV_IDEFLOPPY),y)
+L_OBJS += ide-floppy.o
+endif
+
 ifeq ($(CONFIG_BLK_DEV_XD),y)
 L_OBJS += xd.o
 else
   ifeq ($(CONFIG_BLK_DEV_XD),m)
   M_OBJS += xd.o
   endif
+endif
+
+ifeq ($(CONFIG_PARIDE),y)
+SUB_DIRS        += paride
+MOD_SUB_DIRS    += paride
+else
+  ifeq ($(CONFIG_PARIDE),m)
+  MOD_SUB_DIRS  += paride
+  endif
+endif
+
+ifeq ($(CONFIG_BLK_DEV_DAC960),y)
+L_OBJS += DAC960.o
 endif
 
 ifeq ($(CONFIG_BLK_DEV_MD),y)
@@ -124,26 +141,30 @@ else
   endif
 endif
 
-#ifeq ($(CONFIG_MD_RAID1),y)
-#L_OBJS += raid1.o
-#else
-#  ifeq ($(CONFIG_MD_SUPPORT_RAID1),y)
-#    ifeq ($(CONFIG_MD_RAID1),m)
-#    M_OBJS += raid1.o
-#    endif
-#  endif
-#endif
-#
-#ifeq ($(CONFIG_MD_RAID5),y)
-#L_OBJS += raid5.o
-#else
-#  ifeq ($(CONFIG_MD_SUPPORT_RAID5),y)
-#    ifeq ($(CONFIG_MD_RAID5),m)
-#    M_OBJS += raid5.o
-#    endif
-#  endif
-#endif
-
+ifeq ($(CONFIG_MD_MIRRORING),y)
+L_OBJS += raid1.o
+else
+  ifeq ($(CONFIG_MD_MIRRORING),m)
+  M_OBJS += raid1.o
+  endif
 endif
+
+ifeq ($(CONFIG_MD_RAID5),y)
+L_OBJS += raid5.o
+else
+  ifeq ($(CONFIG_MD_RAID5),m)
+  M_OBJS += raid5.o
+  endif
+endif
+endif
+
+ifeq ($(CONFIG_BLK_CPQ_DA),y)
+L_OBJS += cpqarray.o proc_array.o
+else 
+  ifeq ($(CONFIG_BLK_CPQ_DA),m)
+  M_OBJS += cpqarray.o
+  endif
+endif
+
 
 include $(TOPDIR)/Rules.make

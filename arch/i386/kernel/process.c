@@ -25,13 +25,13 @@
 #include <linux/interrupt.h>
 #include <linux/config.h>
 #include <linux/unistd.h>
+#include <linux/delay.h>
 
 #include <asm/segment.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/io.h>
 #include <linux/smp.h>
-
 
 asmlinkage void ret_from_sys_call(void) __asm__("ret_from_sys_call");
 
@@ -182,33 +182,201 @@ int cpu_idle(void *unused)
  * and if it doesn't work, we do some other stupid things.
  */
 static long no_idt[2] = {0, 0};
+static int reboot_mode = 0;
+static int reboot_thru_bios = 0;
+
+void reboot_setup(char *str, int *ints)
+{
+	while(1) {
+		switch (*str) {
+		case 'w': /* "warm" reboot (no memory testing etc) */
+			reboot_mode = 0x1234;
+			break;
+		case 'c': /* "cold" reboot (with memory testing etc) */
+			reboot_mode = 0x0;
+			break;
+		case 'b': /* "bios" reboot by jumping through the BIOS */
+			reboot_thru_bios = 1;
+			break;
+		case 'h': /* "hard" reboot by toggling RESET and/or crashing the CPU */
+			reboot_thru_bios = 0;
+			break;
+		}
+		if((str = strchr(str,',')) != NULL)
+			str++;
+		else
+			break;
+	}
+}
+
+
+/* The following code and data reboots the machine by switching to real
+   mode and jumping to the BIOS reset entry point, as if the CPU has
+   really been reset.  The previous version asked the keyboard
+   controller to pulse the CPU reset line, which is more thorough, but
+   doesn't work with at least one type of 486 motherboard.  It is easy
+   to stop this code working; hence the copious comments. */
+
+unsigned long long
+real_mode_gdt_entries [3] =
+{
+	0x0000000000000000ULL,	/* Null descriptor */
+	0x00009a000000ffffULL,	/* 16-bit real-mode 64k code at 0x00000000 */
+	0x000092000100ffffULL		/* 16-bit real-mode 64k data at 0x00000100 */
+};
+
+struct
+{
+	unsigned short       size __attribute__ ((packed));
+	unsigned long long * base __attribute__ ((packed));
+}
+real_mode_gdt = { sizeof (real_mode_gdt_entries) - 1, real_mode_gdt_entries },
+real_mode_idt = { 0x3ff, 0 };
+
+/* This is 16-bit protected mode code to disable paging and the cache,
+   switch to real mode and jump to the BIOS reset code.
+
+   The instruction that switches to real mode by writing to CR0 must be
+   followed immediately by a far jump instruction, which set CS to a
+   valid value for real mode, and flushes the prefetch queue to avoid
+   running instructions that have already been decoded in protected
+   mode.
+
+   Clears all the flags except ET, especially PG (paging), PE
+   (protected-mode enable) and TS (task switch for coprocessor state
+   save).  Flushes the TLB after paging has been disabled.  Sets CD and
+   NW, to disable the cache on a 486, and invalidates the cache.  This
+   is more like the state of a 486 after reset.  I don't know if
+   something else should be done for other chips.
+
+   More could be done here to set up the registers as if a CPU reset had
+   occurred; hopefully real BIOSes don't assume much. */
+
+unsigned char real_mode_switch [] =
+{
+	0x66, 0x0f, 0x20, 0xc0,			/*    movl  %cr0,%eax        */
+	0x66, 0x83, 0xe0, 0x11,			/*    andl  $0x00000011,%eax */
+	0x66, 0x0d, 0x00, 0x00, 0x00, 0x60,		/*    orl   $0x60000000,%eax */
+	0x66, 0x0f, 0x22, 0xc0,			/*    movl  %eax,%cr0        */
+	0x66, 0x0f, 0x22, 0xd8,			/*    movl  %eax,%cr3        */
+	0x66, 0x0f, 0x20, 0xc3,			/*    movl  %cr0,%ebx        */
+	0x66, 0x81, 0xe3, 0x00, 0x00, 0x00, 0x60,	/*    andl  $0x60000000,%ebx */
+	0x74, 0x02,					/*    jz    f                */
+	0x0f, 0x08,					/*    invd                   */
+	0x24, 0x10,					/* f: andb  $0x10,al         */
+	0x66, 0x0f, 0x22, 0xc0,			/*    movl  %eax,%cr0        */
+	0xea, 0x00, 0x00, 0xff, 0xff			/*    ljmp  $0xffff,$0x0000  */
+};
 
 static inline void kb_wait(void)
 {
 	int i;
-
 	for (i=0; i<0x10000; i++)
 		if ((inb_p(0x64) & 0x02) == 0)
 			break;
 }
 
-void hard_reset_now(void)
+void hard_reset_now (void)
 {
-	int i, j;
 
-	sti();
-/* rebooting needs to touch the page at absolute addr 0 */
-	pg0[0] = 7;
-	*((unsigned short *)0x472) = 0x1234;
-	for (;;) {
-		for (i=0; i<100; i++) {
-			kb_wait();
-			for(j = 0; j < 100000 ; j++)
-				/* nothing */;
-			outb(0xfe,0x64);	 /* pulse reset low */
+	if(!reboot_thru_bios) {
+		sti();
+		/* rebooting needs to touch the page at absolute addr 0 */
+		pg0[0] = 7;
+		*((unsigned short *)0x472) = reboot_mode;
+		for (;;) {
+			int i;
+			for (i=0; i<100; i++) {
+				int j;
+				kb_wait();
+				for(j = 0; j < 100000 ; j++)
+					/* nothing */;
+				outb(0xfe,0x64);         /* pulse reset low */
+				udelay(10);
+			}
+			__asm__ __volatile__("\tlidt %0": "=m" (no_idt));
 		}
-		__asm__ __volatile__("\tlidt %0": "=m" (no_idt));
 	}
+
+	cli ();
+
+	/* Write zero to CMOS register number 0x0f, which the BIOS POST
+	   routine will recognize as telling it to do a proper reboot.  (Well
+	   that's what this book in front of me says -- it may only apply to
+	   the Phoenix BIOS though, it's not clear).  At the same time,
+	   disable NMIs by setting the top bit in the CMOS address register,
+	   as we're about to do peculiar things to the CPU.  I'm not sure if
+	   `outb_p' is needed instead of just `outb'.  Use it to be on the
+	   safe side. */
+
+	outb_p (0x8f, 0x70);
+	outb_p (0x00, 0x71);
+
+	/* Remap the kernel at virtual address zero, as well as offset zero
+	   from the kernel segment.  This assumes the kernel segment starts at
+	   virtual address PAGE_OFFSET. */
+
+	memcpy (swapper_pg_dir, swapper_pg_dir + USER_PGD_PTRS,
+		sizeof (swapper_pg_dir [0]) * KERNEL_PGD_PTRS);
+
+	/* Make sure the first page is mapped to the start of physical memory.
+	   It is normally not mapped, to trap kernel NULL pointer dereferences. */
+
+	pg0 [0] = 7;
+
+	/* Use `swapper_pg_dir' as our page directory.  Don't bother with
+	   `SET_PAGE_DIR' because interrupts are disabled and we're rebooting.
+	   This instruction flushes the TLB. */
+
+	__asm__ __volatile__ ("movl %0,%%cr3" : : "a" (swapper_pg_dir) : "memory");
+
+	/* Write 0x1234 to absolute memory location 0x472.  The BIOS reads
+	   this on booting to tell it to "Bypass memory test (also warm
+	   boot)".  This seems like a fairly standard thing that gets set by
+	   REBOOT.COM programs, and the previous reset routine did this
+	   too. */
+
+	*((unsigned short *)0x472) = reboot_mode;
+
+	/* For the switch to real mode, copy some code to low memory.  It has
+	   to be in the first 64k because it is running in 16-bit mode, and it
+	   has to have the same physical and virtual address, because it turns
+	   off paging.  Copy it near the end of the first page, out of the way
+	   of BIOS variables. */
+
+	memcpy ((void *) (0x1000 - sizeof (real_mode_switch)),
+		real_mode_switch, sizeof (real_mode_switch));
+
+	/* Set up the IDT for real mode. */
+
+	__asm__ __volatile__ ("lidt %0" : : "m" (real_mode_idt));
+
+	/* Set up a GDT from which we can load segment descriptors for real
+	   mode.  The GDT is not used in real mode; it is just needed here to
+	   prepare the descriptors. */
+
+	__asm__ __volatile__ ("lgdt %0" : : "m" (real_mode_gdt));
+
+	/* Load the data segment registers, and thus the descriptors ready for
+	   real mode.  The base address of each segment is 0x100, 16 times the
+	   selector value being loaded here.  This is so that the segment
+	   registers don't have to be reloaded after switching to real mode:
+	   the values are consistent for real mode operation already. */
+
+	__asm__ __volatile__ ("movw $0x0010,%%ax\n"
+				"\tmovw %%ax,%%ds\n"
+				"\tmovw %%ax,%%es\n"
+				"\tmovw %%ax,%%fs\n"
+				"\tmovw %%ax,%%gs\n"
+				"\tmovw %%ax,%%ss" : : : "eax");
+
+	/* Jump to the 16-bit code that we copied earlier.  It disables paging
+	   and the cache, switches to real mode, and jumps to the BIOS reset
+	   entry point. */
+
+	__asm__ __volatile__ ("ljmp $0x0008,%0"
+				:
+				: "i" ((void *) (0x1000 - sizeof (real_mode_switch))));
 }
 
 void show_regs(struct pt_regs * regs)
@@ -253,8 +421,9 @@ void flush_thread(void)
 	int i;
 
 	if (current->ldt) {
-		free_page((unsigned long) current->ldt);
+		void * ldt = current->ldt;
 		current->ldt = NULL;
+		vfree(ldt);
 		for (i=1 ; i<NR_TASKS ; i++) {
 			if (task[i] == current)  {
 				set_ldt_desc(gdt+(i<<1)+
@@ -319,7 +488,7 @@ void copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 	}
 	set_tss_desc(gdt+(nr<<1)+FIRST_TSS_ENTRY,&(p->tss));
 	if (p->ldt)
-		set_ldt_desc(gdt+(nr<<1)+FIRST_LDT_ENTRY,p->ldt, 512);
+		set_ldt_desc(gdt+(nr<<1)+FIRST_LDT_ENTRY,p->ldt, LDT_ENTRIES);
 	else
 		set_ldt_desc(gdt+(nr<<1)+FIRST_LDT_ENTRY,&default_ldt, 1);
 	p->tss.bitmap = offsetof(struct thread_struct,io_bitmap);
@@ -332,23 +501,30 @@ void copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 /*
  * fill in the fpu structure for a core dump..
  */
-int dump_fpu (struct user_i387_struct* fpu)
+int dump_fpu (struct pt_regs * regs, struct user_i387_struct* fpu)
 {
 	int fpvalid;
 
-/* Flag indicating the math stuff is valid. We don't support this for the
-   soft-float routines yet */
 	if (hard_math) {
 		if ((fpvalid = current->used_math) != 0) {
-			if (last_task_used_math == current)
+#ifdef __SMP__
+			if (current->flags & PF_USEDFPU)
+#else
+			if (last_task_used_math == current) 
+#endif
 				__asm__("clts ; fnsave %0": :"m" (*fpu));
 			else
 				memcpy(fpu,&current->tss.i387.hard,sizeof(*fpu));
 		}
-	} else {
-		/* we should dump the emulator state here, but we need to
-		   convert it into standard 387 format first.. */
+		} else {
+		/* We dump the emulator state here.
+		   We convert it into standard 387 format first.. */
+#ifdef CONFIG_MATH_EMULATION
+		fpvalid = save_i387_soft(&current->tss.i387.soft,
+					 (struct _fpstate *)fpu);
+#else /* defined(CONFIG_MATH_EMULATION) */
 		fpvalid = 0;
+#endif /* !defined(CONFIG_MATH_EMULATION) */
 	}
 
 	return fpvalid;
@@ -377,7 +553,7 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 
 	dump->regs = *regs;
 
-	dump->u_fpvalid = dump_fpu (&dump->i387);
+	dump->u_fpvalid = dump_fpu (regs, &dump->i387);
 }
 
 asmlinkage int sys_fork(struct pt_regs regs)

@@ -10,6 +10,7 @@
  */
 #include <stdarg.h>
 
+#include <linux/config.h> /* CONFIG_SCSI_GDTH */
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
@@ -17,6 +18,8 @@
 asmlinkage void sys_sync(void);	/* it's really int */
 extern void hard_reset_now(void);
 extern void do_unblank_screen(void);
+extern void DAC960_Finalize(void);
+extern void gdth_halt(void);
 extern int C_A_D;
 
 int panic_timeout = 0;
@@ -53,6 +56,12 @@ NORET_TYPE void panic(const char * fmt, ...)
 		printk(KERN_EMERG "Rebooting in %d seconds..",panic_timeout);
 		for(i = 0; i < (panic_timeout*1000); i++)
 			udelay(1000);
+#ifdef CONFIG_BLK_DEV_DAC960
+		DAC960_Finalize();
+#endif
+#ifdef CONFIG_SCSI_GDTH
+		gdth_halt();
+#endif
 		hard_reset_now();
 	}
 	for(;;);

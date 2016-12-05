@@ -17,8 +17,10 @@
  * 
  * Author:  Marco van Wieringen <mvw@mcs.ow.nl> <mvw@tnix.net>
  * 
- * Fixes:   Dmitry Gorodchanin <begemot@bgm.rosprint.net>, 11 Feb 96
+ * Fixes:   Dmitry Gorodchanin <pgmdsg@ibi.com>, 11 Feb 96
  *	    removed race conditions in dqput(), dqget() and iput(). 
+ *          Nick Kralevich <nickkral@cal.alumni.berkeley.edu>, 21 Jul 97
+ *          Fixed a condition where user and group quotas could get mixed up.
  *
  * (C) Copyright 1994, 1995 Marco van Wieringen 
  *
@@ -141,14 +143,17 @@ static void grow_dquots(void)
 		return;
 	dqstats.pages_allocated++;
 	cnt = PAGE_SIZE / sizeof(struct dquot);
+	memset(dquot, 0, PAGE_SIZE);
 	nr_dquots += cnt;
 	nr_free_dquots += cnt;
 	if (!first_dquot) {
 		dquot->dq_next = dquot->dq_prev = first_dquot = dquot++;
 		cnt--;
 	}
-	for (; cnt; cnt--)
+	for (; cnt; cnt--) {
+		init_waitqueue(&dquot->dq_wait);
 		insert_dquot_free(dquot++);
+	}
 }
 
 /*
@@ -217,11 +222,18 @@ static void write_dquot(struct dquot *dquot)
 	short type = dquot->dq_type;
 	struct file *filp = dquot->dq_mnt->mnt_quotas[type];
 	unsigned short fs;
+	struct dqblk wrt_dquot;
 
 	if (!(dquot->dq_flags & DQ_MOD) || (filp == (struct file *)NULL))
 		return;
 	lock_dquot(dquot);
+	if (!dquot->dq_mnt) {	/* Invalidated dquot? */
+		unlock_dquot(dquot);
+		return;
+	}
 	down(&dquot->dq_mnt->mnt_sem);
+	dquot->dq_flags &= ~DQ_MOD;	/* Clear the flag unconditionally - we don't want to loop on error */
+	memcpy(&wrt_dquot, &dquot->dq_dqb, sizeof(struct dqblk));	/* Copy structure so we can unlock it */
 	if (filp->f_op->lseek) {
 		if (filp->f_op->lseek(filp->f_inode, filp,
 		    dqoff(dquot->dq_id), 0) != dqoff(dquot->dq_id)) {
@@ -229,16 +241,20 @@ static void write_dquot(struct dquot *dquot)
 			unlock_dquot(dquot);
 			return;
 		}
-	} else
-		filp->f_pos = dqoff(dquot->dq_id);
+	}
+	else
+	{
+		int p = dqoff(dquot->dq_id);
+		if(p>=0)
+			filp->f_pos = p;
+	}
+	unlock_dquot(dquot);	/* We have to unlock structure as write might need to update it */
 	fs = get_fs();
 	set_fs(KERNEL_DS);
-	if (filp->f_op->write(filp->f_inode, filp,
-	   (char *)&dquot->dq_dqb, sizeof(struct dqblk)) == sizeof(struct dqblk))
-		dquot->dq_flags &= ~DQ_MOD;
+	if (filp->f_op->write(filp->f_inode, filp, (char *)&wrt_dquot, sizeof(struct dqblk)) != sizeof(struct dqblk))
+		printk(KERN_ERR "VFS: write_dquot() failed.\n");
 	up(&dquot->dq_mnt->mnt_sem);
 	set_fs(fs);
-	unlock_dquot(dquot);
 	dqstats.writes++;
 }
 
@@ -279,14 +295,18 @@ int sync_dquots(kdev_t dev, short type)
 	int i;
 
 	dqstats.syncs++;
+restart:
 	for (i = 0; i < nr_dquots * 2; i++, dquot = dquot->dq_next) {
 		if (dev == NODEV || dquot->dq_count == 0 || dquot->dq_dev != dev)
 			continue;
 		if (type != -1 && dquot->dq_type != type)
 			continue;
+		if (!(dquot->dq_flags & DQ_MOD))	/* It might get modified I know but to restart after each locked dquot... */
+			continue;
 		wait_on_dquot(dquot);
 		if (dquot->dq_flags & DQ_MOD)
 			write_dquot(dquot);
+		goto restart;
 	}
 	return(0);
 }
@@ -299,6 +319,7 @@ void invalidate_dquots(kdev_t dev, short type)
 	struct dquot *dquot, *next;
 	int cnt;
 
+restart:
 	next = first_dquot;
 	for (cnt = nr_dquots ; cnt > 0 ; cnt--) {
 		dquot = next;
@@ -309,10 +330,14 @@ void invalidate_dquots(kdev_t dev, short type)
 			printk("VFS: dquot busy on removed device %s\n", kdevname(dev));
 			continue;
 		}
-		if (dquot->dq_flags & DQ_MOD)
+		if (dquot->dq_flags & DQ_MOD) {
 			write_dquot(dquot);
+			dqstats.drops++;
+			clear_dquot(dquot);
+			goto restart;	/* As we might block inside of write or clear_dquot */
+		}
 		dqstats.drops++;
-		clear_dquot(dquot);
+		clear_dquot(dquot);	/* Here we can't block - DQ_LOCKED was tested before */
 	}
 }
 
@@ -456,30 +481,34 @@ static void dqput(struct dquot *dquot)
 	 * checking and doesn't need to be written. It just an empty
 	 * dquot that is put back into the freelist.
 	 */
-	if (dquot->dq_mnt != (struct vfsmount *)NULL) {
-		dqstats.drops++;
-		wait_on_dquot(dquot);
+repeat:
+	if (dquot->dq_mnt) {	/* We can block inside of wait and so we have to check again */
+		if (dquot->dq_flags & DQ_LOCKED) {
+			__wait_on_dquot(dquot);
+			goto repeat;
+		}
+			
 		if (!dquot->dq_count) {
 			printk("VFS: dqput: trying to free free dquot\n");
 			printk("VFS: device %s, dquot of %s %d\n", kdevname(dquot->dq_dev),
 			       quotatypes[dquot->dq_type], dquot->dq_id);
 			return;
 		}
-repeat:
 		if (dquot->dq_count > 1) {
 			dquot->dq_count--;
 			return;
 		}
-		wake_up(&dquot_wait);
 		if (dquot->dq_flags & DQ_MOD) {
 			write_dquot(dquot);	/* we can sleep - so do again */
 			wait_on_dquot(dquot);
 			goto repeat;
 		}
+		dqstats.drops++;
 	}
 	if (dquot->dq_count) {
 		dquot->dq_count--;
 		nr_free_dquots++;
+		wake_up(&dquot_wait);	/* Here the dquot is really free */
 	}
 	return;
 }
@@ -549,12 +578,14 @@ static struct dquot *dqget(kdev_t dev, unsigned int id, short type)
 repeat:
 	dquot = *(hash(dev, id, type));
 	while (dquot) {
-		if (dquot->dq_dev != dev || dquot->dq_id != id) {
+		if (dquot->dq_dev != dev || dquot->dq_id != id ||
+		    dquot->dq_type != type) {
 			dquot = dquot->dq_hash_next;
 			continue;
 		}
 		wait_on_dquot(dquot);
-		if (dquot->dq_dev != dev || dquot->dq_id != id)
+		if (dquot->dq_dev != dev || dquot->dq_id != id ||
+		    dquot->dq_type != type)
 			goto repeat;
 		if (!dquot->dq_count)
 			nr_free_dquots--;
@@ -574,6 +605,14 @@ repeat:
 	put_last_free(dquot);
 	insert_dquot_hash(dquot);
 	read_dquot(dquot);
+	if (!dquot->dq_mnt) {	/* Invalidated in the mean time? */
+	/*
+	 * As quota was turned off we can just return NODQUOT. I know it's
+	 * not perfect as somebody might turn quota on again but...
+	 */
+		dqput(dquot);
+		return NODQUOT;
+	}
 	return(dquot);
 }
 
@@ -683,7 +722,7 @@ void dquot_initialize(struct inode *inode, short type)
 	short cnt;
 	struct dquot *tmp;
 
-	if (S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode) || S_ISLNK(inode->i_mode)) {
+	if (S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode) || S_ISLNK(inode->i_mode) || S_ISFIFO(inode->i_mode) || S_ISSOCK(inode->i_mode)) {
 		for (cnt = 0; cnt < MAXQUOTAS; cnt++) {
 			if (type != -1 && cnt != type)
 				continue;
@@ -834,6 +873,15 @@ int dquot_transfer(struct inode *inode, struct iattr *iattr, char direction)
 		blocks = isize_to_blocks(inode->i_size, BLOCK_SIZE);
 	else
 		blocks = (inode->i_blocks / 2);
+		
+		
+	/*
+	 *	This shouldnt be needed but the goal is to fix 2.0 not
+	 *	do things in best of Torvalds style. Thats for 2.1...
+	 */
+	 
+	if(S_ISFIFO(inode->i_mode)||S_ISSOCK(inode->i_mode))
+		blocks = 0;
 
 	/*
 	 * Build the transfer_from and transfer_to lists and check quotas to see
@@ -941,9 +989,11 @@ int quota_off(kdev_t dev, short type)
 		vfsmnt->mnt_sb->dq_op = (struct dquot_operations *)NULL;
 		reset_dquot_ptrs(dev, cnt);
 		invalidate_dquots(dev, cnt);
+		down(&vfsmnt->mnt_sem);	/* Wait for any pending IO - dquot is not locked on write so we can easily go here during write */
 		close_fp(vfsmnt->mnt_quotas[cnt]);
 		vfsmnt->mnt_quotas[cnt] = (struct file *)NULL;
 		vfsmnt->mnt_iexp[cnt] = vfsmnt->mnt_bexp[cnt] = (time_t)NULL;
+		up(&vfsmnt->mnt_sem);
 	}
 	return(0);
 }
@@ -1070,6 +1120,9 @@ asmlinkage int sys_quotactl(int cmd, const char *special, int id, caddr_t addr)
 		default:
 			return(-EINVAL);
 	}
+
+	if (id & ~0xFFFF)
+		return(-EINVAL);
 
 	flags |= QUOTA_SYSCALL;
 	if (has_quota_enabled(dev, type))

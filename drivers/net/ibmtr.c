@@ -50,6 +50,11 @@
 	- detecting PCMCIA Card Removal in interrupt handler.  if
 	  ISRP is FF, then a PCMCIA card has been removed
 
+   Changes by Paul Norton (pnorton@cts.com) :
+ 	- restructured the READ.LOG logic to prevent the transmit SRB
+	  from being rudely overwritten before the transmit cycle is
+	  complete. (August 15 1996)
+
    Warnings !!!!!!!!!!!!!!
       This driver is only partially sanitized for support of multiple
       adapters.  It will almost definitely fail if more than one
@@ -168,6 +173,7 @@ static int tok_open(struct device *dev);
 static int tok_close(struct device *dev);
 static int tok_send_packet(struct sk_buff *skb, struct device *dev);
 static struct enet_statistics * tok_get_stats(struct device *dev);
+void tr_readlog(struct device *dev);
 
 static struct timer_list tr_timer={NULL,NULL,0,0L,tok_open_adapter};
 
@@ -331,6 +337,7 @@ int tok_probe(struct device *dev)
 	memset(ti, 0, sizeof(struct tok_info));
 
 	ti->mmio= t_mmio;
+	ti->readlog_pending = 0;
 
 	dev->priv = ti;     /* this seems like the logical use of the
                          field ... let's try some empirical tests
@@ -432,12 +439,12 @@ int tok_probe(struct device *dev)
 	/* We must figure out how much shared memory space this adapter
 	   will occupy so that if there are two adapters we can fit both
 	   in.  Given a choice, we will limit this adapter to 32K.  The
-	   maximum space will will use for two adapters is 64K so if the
-	   adapter we are working on demands 64K (it also doesn't support
-	   paging), then only one adapter can be supported.  */
+	   maximum space will use for two adapters is 64K so if the adapter
+	   we are working on demands 64K (it also doesn't support paging),
+	   then only one adapter can be supported.  */
 	
 	/* determine how much of total RAM is mapped into PC space */
-	ti->mapped_ram_size=1<<(((readb(ti->mmio+ ACA_OFFSET + ACA_RW + RRR_ODD)) >>2) +4);
+	ti->mapped_ram_size=1<<((((readb(ti->mmio+ ACA_OFFSET + ACA_RW + RRR_ODD)) >>2) & 0x03) + 4);
 	ti->page_mask=0;
 	if (ti->shared_ram_paging == 0xf) { /* No paging in adapter */
 		ti->mapped_ram_size = ti->avail_shared_ram;
@@ -493,7 +500,7 @@ int tok_probe(struct device *dev)
 	if (cardpresent==TR_ISA) {
 		static unsigned char ram_bndry_mask[]={0xfe, 0xfc, 0xf8, 0xf0};
 		unsigned char new_base, rrr_32, chk_base, rbm;
-		rrr_32 = (readb(ti->mmio+ ACA_OFFSET + ACA_RW + RRR_ODD))>>2;
+		rrr_32 = ((readb(ti->mmio+ ACA_OFFSET + ACA_RW + RRR_ODD))>>2) & 0x03;
 		rbm = ram_bndry_mask[rrr_32];
 		new_base = (Shared_Ram_Base + (~rbm)) & rbm; /* up to boundary */
 		chk_base = new_base + (ti->mapped_ram_size>>3);
@@ -730,6 +737,7 @@ void tok_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 							      ti->current_skb=NULL;
 						      }
 						      dev->tbusy=0;
+						      if (ti->readlog_pending) tr_readlog(dev);
 					      }
 				      }
 				      break;
@@ -746,6 +754,7 @@ void tok_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 							      ti->current_skb=NULL;
 						      }
 						      dev->tbusy=0;
+						      if (ti->readlog_pending) tr_readlog(dev);
 					      }
 				      }
 				      break;
@@ -761,7 +770,7 @@ void tok_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 					      ti->current_skb=NULL;
 					      
 					      open_ret_code = readb(ti->init_srb +offsetof(struct srb_open_response, ret_code));
-					      open_error_code = readw(ti->init_srb +offsetof(struct srb_open_response, error_code));
+					      open_error_code = ntohs(readw(ti->init_srb +offsetof(struct srb_open_response, error_code)));
 
 					      if (open_ret_code==7) {
 						      
@@ -774,7 +783,7 @@ void tok_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 							      DPRINTK("retrying open to adjust to ring speed\n");
 						      else if ((open_error_code==0x2d) && ti->auto_ringspeedsave)
 							      DPRINTK("No signal detected for Auto Speed Detection\n");
-						      else DPRINTK("Unrecoverable error: error code = %02X\n", 
+						      else DPRINTK("Unrecoverable error: error code = %04x\n", 
 								   open_error_code);
 						      
 					      } else if (!open_ret_code) {
@@ -887,10 +896,6 @@ void tok_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 				      case REC_DATA:
 				      case XMIT_UI_FRAME:
 				      case XMIT_DIR_FRAME:
-					if (readb(ti->asb+2)!=0xff) /* checks ret_code */
-						DPRINTK("ASB error %02X in cmd %02X\n", 
-							(int)readb(ti->asb+2), 
-									(int)readb(ti->asb));
 					break;
 					
 				      default:
@@ -899,6 +904,9 @@ void tok_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 					
 				} /* ASB command check */
 				
+				if (readb(ti->asb+2)!=0xff) /* checks ret_code */
+				    DPRINTK("ASB error %02X in cmd %02X\n", 
+					    (int)readb(ti->asb+2),(int)readb(ti->asb));
 				writeb(~ASB_FREE_INT, ti->mmio + ACA_OFFSET + ACA_RESET + ISRP_ODD);
 				
 			} /* ASB response */
@@ -938,14 +946,10 @@ void tok_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 						      DPRINTK("New ring status: %02X\n", ring_status);
 					      
 					      if (ring_status & LOG_OVERFLOW) {
-						      
-						      writeb(DIR_READ_LOG, ti->srb);
-						      writeb(INT_ENABLE, 
-							     ti->mmio + ACA_OFFSET + ACA_SET + ISRP_EVEN);
-						      writeb(CMD_IN_SRB, 
-							     ti->mmio + ACA_OFFSET + ACA_SET + ISRA_ODD);
-						      dev->tbusy=1; /* really srb busy... */
-						      
+						      if (dev->tbusy)
+                                                              ti->readlog_pending = 1;
+						      else
+                                                              tr_readlog(dev);
 					      }
 				      }
 				      break;
@@ -967,14 +971,15 @@ void tok_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 			} /* ARB response */
 			
 			if (status & SSB_RESP_INT) { /* SSB response */
-						
+				unsigned char retcode;		
 				switch (readb(ti->ssb)) { /* SSB command check */
 					
 				      case XMIT_DIR_FRAME:
 				      case XMIT_UI_FRAME:
-					if (readb(ti->ssb+2)) /* checks ret_code */
+					retcode = readb(ti->ssb+2);
+					if (retcode && (retcode != 0x22)) /* checks ret_code */
 						DPRINTK("xmit ret_code: %02X xmit error code: %02X\n", 
-							(int)readb(ti->ssb+2), (int)readb(ti->ssb+6));		
+							(int)retcode, (int)readb(ti->ssb+6));		
 					else ti->tr_stats.tx_packets++;
 					break;
 					
@@ -1269,6 +1274,7 @@ static void tr_tx(struct device *dev)
 	dev_kfree_skb(ti->current_skb,FREE_WRITE);
 	ti->current_skb=NULL;
 	mark_bh(NET_BH);
+	if (ti->readlog_pending) tr_readlog(dev);
 }
 
 static void tr_rx(struct device *dev) 
@@ -1455,9 +1461,10 @@ static int tok_send_packet(struct sk_buff *skb, struct device *dev)
 		return 0;
 	}
 	
-	if (set_bit(0,(void *)&dev->tbusy)!=0)
+	if (set_bit(0,(void *)&dev->tbusy)!=0) {
+		dev_kfree_skb(skb, FREE_WRITE);
 		DPRINTK("Transmitter access conflict\n");
-	else {
+	} else {
 		/* Save skb; we'll need it when the adapter asks for the data */
 		ti->current_skb=skb; 
 		writeb(XMIT_UI_FRAME, ti->srb + offsetof(struct srb_xmit, command));
@@ -1468,7 +1475,18 @@ static int tok_send_packet(struct sk_buff *skb, struct device *dev)
 	}
 	
 	return 0;
-}	
+}
+
+void tr_readlog(struct device *dev) {
+	 struct tok_info *ti;
+	 ti=(struct tok_info *) dev->priv;
+
+	 ti->readlog_pending = 0;
+	 writeb(DIR_READ_LOG, ti->srb);
+	 writeb(INT_ENABLE, ti->mmio + ACA_OFFSET + ACA_SET + ISRP_EVEN);
+	 writeb(CMD_IN_SRB, ti->mmio + ACA_OFFSET + ACA_SET + ISRA_ODD);
+	 dev->tbusy=1; /* really srb busy... */
+}
 
 /* tok_get_stats():  Basically a scaffold routine which will return
    the address of the tr_statistics structure associated with
@@ -1493,16 +1511,21 @@ static struct device dev_ibmtr = {
 	0, 0, 0, NULL, tok_probe };
 
 static int io = 0xa20;
+static char *device = NULL;
 
 int init_module(void)
 {
+	if (device)
+		strcpy(dev_ibmtr.name,device);
+	else if (!dev_ibmtr.name[0]) strcpy(dev_ibmtr.name,"tr0");
+
 	if (io == 0) 
 		printk("ibmtr: You should not use auto-probing with insmod!\n");
 	dev_ibmtr.base_addr = io;
 	dev_ibmtr.irq       = 0;
 	
 	if (register_netdev(&dev_ibmtr) != 0) {
-		printk("ibmtr: register_netdev() returned non-zero.\n");
+		printk("ibmtr: No adapters were found.\n");
 		return -EIO;
 	}
 	return 0;

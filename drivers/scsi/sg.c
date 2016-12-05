@@ -73,13 +73,20 @@ static int sg_ioctl(struct inode * inode,struct file * file,
     switch(cmd_in)
     {
     case SG_SET_TIMEOUT:
-        result = verify_area(VERIFY_READ, (const void *)arg, sizeof(long));
+        result = verify_area(VERIFY_READ, (const void *)arg, sizeof(int));
         if (result) return result;
 
 	scsi_generics[dev].timeout=get_user((int *) arg);
 	return 0;
     case SG_GET_TIMEOUT:
 	return scsi_generics[dev].timeout;
+    case SCSI_IOCTL_SEND_COMMAND:
+	/*
+	  Allow SCSI_IOCTL_SEND_COMMAND without checking suser() since the
+	  user already has read/write access to the generic device and so
+	  can execute arbitrary SCSI commands.
+	*/
+	return scsi_ioctl_send_command(scsi_generics[dev].device, (void *) arg);
     default:
 	return scsi_ioctl(scsi_generics[dev].device, cmd_in, (void *) arg);
     }
@@ -230,7 +237,7 @@ static int sg_read(struct inode *inode,struct file *filp,char *buf,int count)
      * Now copy the result back to the user buffer.
      */
     device->header.pack_len=device->header.reply_len;
-    device->header.result=0;
+
     if (count>=sizeof(struct sg_header))
     {
 	memcpy_tofs(buf,&device->header,sizeof(struct sg_header));
@@ -242,7 +249,7 @@ static int sg_read(struct inode *inode,struct file *filp,char *buf,int count)
 	}
     }
     else
-	count=0;
+	count= device->header.result==0 ? 0 : -EIO;
     
     /*
      * Clean up, and release the device so that we can send another
@@ -275,13 +282,39 @@ static void sg_command_done(Scsi_Cmnd * SCpnt)
      * See if the command completed normally, or whether something went
      * wrong.
      */
-    memcpy(device->header.sense_buffer, SCpnt->sense_buffer, sizeof(SCpnt->sense_buffer));
-    if (SCpnt->sense_buffer[0])
-    {
-	device->header.result=EIO;
+    memcpy(device->header.sense_buffer, SCpnt->sense_buffer,
+	   sizeof(SCpnt->sense_buffer));
+    switch (host_byte(SCpnt->result)) {
+    case DID_OK:
+      device->header.result = 0;
+      break;
+    case DID_NO_CONNECT:
+    case DID_BUS_BUSY:
+    case DID_TIME_OUT: 
+      device->header.result = EBUSY;
+      break;
+    case DID_BAD_TARGET: 
+    case DID_ABORT: 
+    case DID_PARITY: 
+    case DID_RESET:
+    case DID_BAD_INTR: 
+      device->header.result = EIO;
+      break;
+    case DID_ERROR:
+      /*
+       * There really should be DID_UNDERRUN and DID_OVERRUN error values,
+       * and a means for callers of scsi_do_cmd to indicate whether an
+       * underrun or overrun should signal an error.  Until that can be
+       * implemented, this kludge allows for returning useful error values
+       * except in cases that return DID_ERROR that might be due to an
+       * underrun.
+       */
+      if (SCpnt->sense_buffer[0] == 0 &&
+	  status_byte(SCpnt->result) == GOOD)
+	device->header.result = 0;
+      else device->header.result = EIO;
+      break;
     }
-    else
-	device->header.result=SCpnt->result;
 
     /*
      * Now wake up the process that is waiting for the
@@ -593,6 +626,11 @@ static void sg_detach(Scsi_Device * SDp)
 	    gpnt->device = NULL;
 	    SDp->attached--;
 	    sg_template.nr_dev--;
+            /* 
+             * avoid associated device /dev/sg? bying incremented 
+             * each time module is inserted/removed , <dan@lectra.fr>
+             */
+            sg_template.dev_noticed--;
 	    return;
 	}
     return;

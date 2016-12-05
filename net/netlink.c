@@ -87,6 +87,8 @@ static int netlink_write(struct inode * inode, struct file * file, const char * 
 	unsigned int minor = MINOR(inode->i_rdev);
 	struct sk_buff *skb;
 	skb=alloc_skb(count, GFP_KERNEL);
+	if (!skb)
+		return -ENOBUFS;
 	skb->free=1;
 	memcpy_fromfs(skb_put(skb,count),buf, count);
 	return (netlink_handler[minor])(skb);
@@ -196,6 +198,7 @@ int netlink_attach(int unit, int (*function)(struct sk_buff *skb))
 	if(active_map&(1<<unit))
 		return -EBUSY;
 	active_map|=(1<<unit);
+	open_map&=~(1<<unit);	
 	netlink_handler[unit]=function;
 	return 0;
 }
@@ -204,6 +207,7 @@ void netlink_detach(int unit)
 {
 	active_map&=~(1<<unit);
 	netlink_handler[unit]=netlink_err;
+	open_map&=~(1<<unit);	
 }
 
 int netlink_post(int unit, struct sk_buff *skb)

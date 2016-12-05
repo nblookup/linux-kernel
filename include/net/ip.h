@@ -9,7 +9,7 @@
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
- *		Alan Cox, <gw4pts@gw4pts.ampr.org>
+ *		Alan Cox, <alan@lxorguk.ukuu.org.uk>
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -122,6 +122,9 @@ extern int		ip_build_xmit(struct sock *sk,
 
 extern struct ip_mib	ip_statistics;
 
+extern int sysctl_ip_dynaddr;
+int ip_rewrite_addrs(struct sock *sk, struct sk_buff *skb, struct device *dev);
+
 /*
  *	Functions provided by ip_fragment.o
  */
@@ -134,6 +137,8 @@ void ip_fragment(struct sock *sk, struct sk_buff *skb, struct device *dev, int i
  */
  
 extern int ip_forward(struct sk_buff *skb, struct device *dev, int is_frag, __u32 target_addr);
+extern int sysctl_ip_forward; 
+
  
 /*
  *	Functions provided by ip_options.c

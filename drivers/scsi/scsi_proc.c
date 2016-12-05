@@ -175,9 +175,9 @@ parseHandle *parseInit(char *buf, char *cmdList, int cmdNum)
     
     if (!buf || !cmdList)                           /* bad input ?     */
 	return(NULL);
-    if ((handle = (parseHandle*) kmalloc(sizeof(parseHandle), 1)) == 0)
+    if ((handle = (parseHandle*) kmalloc(sizeof(parseHandle), GFP_KERNEL)) == 0)
 	return(NULL);                               /* out of memory   */
-    if ((handle->cmdPos = (char**) kmalloc(sizeof(int), cmdNum)) == 0) {
+    if ((handle->cmdPos = (char**) kmalloc(sizeof(int) * cmdNum, GFP_KERNEL)) == 0) {
 	kfree(handle);
 	return(NULL);                               /* out of memory   */
     }
@@ -239,21 +239,6 @@ int parseOpt(parseHandle *handle, char **param)
     return(cmdIndex);
 }
 
-#define MAX_SCSI_DEVICE_CODE 10
-const char *const scsi_dev_types[MAX_SCSI_DEVICE_CODE] =
-{
-    "Direct-Access    ",
-    "Sequential-Access",
-    "Printer          ",
-    "Processor        ",
-    "WORM             ",
-    "CD-ROM           ",
-    "Scanner          ",
-    "Optical Device   ",
-    "Medium Changer   ",
-    "Communications   "
-};
-
 void proc_print_scsidevice(Scsi_Device *scd, char *buffer, int *size, int len)
 {	    
     int x, y = *size;
@@ -285,7 +270,7 @@ void proc_print_scsidevice(Scsi_Device *scd, char *buffer, int *size, int len)
     
     y += sprintf(buffer + len + y, "  Type:   %s ",
 		     scd->type < MAX_SCSI_DEVICE_CODE ? 
-		     scsi_dev_types[(int)scd->type] : "Unknown          " );
+		     scsi_device_types[(int)scd->type] : "Unknown          " );
     y += sprintf(buffer + len + y, "               ANSI"
 		     " SCSI revision: %02x", (scd->scsi_level < 3)?1:2);
     if (scd->scsi_level == 2)

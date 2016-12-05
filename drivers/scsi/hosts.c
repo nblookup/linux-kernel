@@ -133,6 +133,10 @@
 #include "53c7,8xx.h"
 #endif
 
+#ifdef CONFIG_SCSI_NCR53C8XX
+#include "ncr53c8xx.h"
+#endif
+
 #ifdef CONFIG_SCSI_ULTRASTOR
 #include "ultrastor.h"
 #endif
@@ -149,16 +153,64 @@
 #include "NCR53c406a.h"
 #endif
 
+#ifdef CONFIG_SCSI_SYM53C416 
+#include "sym53c416.h" 
+#endif
+
+#ifdef CONFIG_SCSI_DC390T
+#include "dc390.h"
+#endif
+
 #ifdef CONFIG_SCSI_AM53C974
 #include "AM53C974.h"
+#endif
+
+#ifdef CONFIG_SCSI_MEGARAID
+#include "megaraid.h"
 #endif
 
 #ifdef CONFIG_SCSI_PPA
 #include "ppa.h"
 #endif
 
+#ifdef CONFIG_SCSI_ACARD
+#include "atp870u.h"
+#endif
+
 #ifdef CONFIG_SCSI_SUNESP
 #include "esp.h"
+#endif
+
+#ifdef CONFIG_BLK_DEV_IDESCSI
+#include "ide-scsi.h"
+#endif
+
+#ifdef CONFIG_SCSI_GDTH
+#include "gdth.h"
+#endif
+
+#ifdef CONFIG_SCSI_INITIO
+#include "ini9100u.h"
+#endif
+
+#ifdef CONFIG_SCSI_TC2550
+#include "tripace.h"
+#endif
+
+#ifdef CONFIG_SCSI_INIA100
+#include "inia100.h"
+#endif
+
+#ifdef CONFIG_SCSI_PCI2000
+#include "pci2000.h"
+#endif
+
+#ifdef CONFIG_SCSI_PCI2220I
+#include "pci2220i.h"
+#endif
+
+#ifdef CONFIG_SCSI_PSI240I
+#include "psi240i.h"
 #endif
 
 #ifdef CONFIG_SCSI_DEBUG
@@ -254,8 +306,14 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #ifdef CONFIG_SCSI_NCR53C406A	/* 53C406A should come before QLOGIC */
     NCR53c406a,
 #endif
+#ifdef CONFIG_SCSI_SYM53C416 
+    SYM53C416, 
+#endif 
 #ifdef CONFIG_SCSI_QLOGIC_FAS
     QLOGICFAS,
+#endif
+#ifdef CONFIG_SCSI_QLOGIC_ISP
+    QLOGICISP,
 #endif
 #ifdef CONFIG_SCSI_PAS16
     MV_PAS16,
@@ -269,8 +327,14 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #ifdef CONFIG_SCSI_DTC3280
         DTC3x80,
 #endif
+#ifdef CONFIG_SCSI_DC390T
+    DC390_T,
+#endif
 #ifdef CONFIG_SCSI_NCR53C7xx
     NCR53c7xx,
+#endif
+#ifdef CONFIG_SCSI_NCR53C8XX
+    NCR53C8XX,
 #endif
 #ifdef CONFIG_SCSI_EATA_DMA
     EATA_DMA,
@@ -287,14 +351,38 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #ifdef CONFIG_SCSI_AM53C974
     AM53C974,
 #endif
-#ifdef CONFIG_SCSI_QLOGIC_ISP
-    QLOGICISP,
+#ifdef CONFIG_SCSI_MEGARAID
+    MEGARAID,
+#endif
+#ifdef CONFIG_SCSI_INIA100
+    INIA100,
 #endif
 #ifdef CONFIG_SCSI_PPA
     PPA,
 #endif
+#ifdef CONFIG_SCSI_ACARD
+    ATP870U,
+#endif
 #ifdef CONFIG_SCSI_SUNESP
     SCSI_SPARC_ESP,
+#endif
+#ifdef CONFIG_SCSI_GDTH
+    GDTH,
+#endif
+#ifdef CONFIG_SCSI_INITIO
+    INI9100U,
+#endif
+#ifdef CONFIG_SCSI_PCI2000
+    PCI2000,
+#endif
+#ifdef CONFIG_SCSI_PCI2220I
+    PCI2220I,
+#endif
+#ifdef CONFIG_SCSI_PSI240I
+    PSI240I,
+#endif
+#ifdef CONFIG_BLK_DEV_IDESCSI
+    IDESCSI,
 #endif
 #ifdef CONFIG_SCSI_DEBUG
     SCSI_DEBUG,
@@ -329,10 +417,18 @@ scsi_unregister(struct Scsi_Host * sh){
     
     /* If we are removing the last host registered, it is safe to reuse
      * its host number (this avoids "holes" at boot time) (DB) 
+     * It is also safe to reuse those of numbers directly below which have
+     * been released earlier (to avoid some holes in numbering).
      */
-    if (max_scsi_hosts == next_scsi_host && !scsi_loadable_module_flag)
-	max_scsi_hosts--;
-    
+    if(sh->host_no == max_scsi_hosts - 1) {
+	while(--max_scsi_hosts >= next_scsi_host) {
+	    shpnt = scsi_hostlist;
+	    while(shpnt && shpnt->host_no != max_scsi_hosts - 1)
+		shpnt = shpnt->next;
+	    if(shpnt)
+		break;
+	}
+    }
     next_scsi_host--;
     scsi_init_free((char *) sh, sizeof(struct Scsi_Host) + sh->extra_bytes);
 }

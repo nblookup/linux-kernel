@@ -10,7 +10,7 @@
 #define __ASSEMBLY__
 #include <asm/system.h>
 
-#define halt .long PAL_halt
+#define halt call_pal PAL_halt
 
 .globl swapper_pg_dir
 .globl _stext
@@ -32,7 +32,7 @@ __start:
 	.globl	wrent
 	.ent	wrent
 wrent:
-	.long PAL_wrent
+	call_pal PAL_wrent
 	ret	($26)
 	.end wrent
 
@@ -40,7 +40,7 @@ wrent:
 	.globl	wrkgp
 	.ent	wrkgp
 wrkgp:
-	.long PAL_wrkgp
+	call_pal PAL_wrkgp
 	ret	($26)
 	.end wrkgp
 
@@ -48,7 +48,7 @@ wrkgp:
 	.globl	wrusp
 	.ent	wrusp
 wrusp:
-	.long PAL_wrusp
+	call_pal PAL_wrusp
 	ret	($26)
 	.end wrusp
 
@@ -56,7 +56,7 @@ wrusp:
 	.globl	rdusp
 	.ent	rdusp
 rdusp:
-	.long PAL_rdusp
+	call_pal PAL_rdusp
 	ret	($26)
 	.end rdusp
 
@@ -64,7 +64,7 @@ rdusp:
 	.globl	tbi
 	.ent	tbi
 tbi:
-	.long PAL_tbi
+	call_pal PAL_tbi
 	ret	($26)
 	.end tbi
 
@@ -72,7 +72,7 @@ tbi:
 	.globl	imb
 	.ent	imb
 imb:
-	.long PAL_imb
+	call_pal PAL_imb
 	ret	($26)
 	.end imb
 
@@ -91,6 +91,50 @@ wrmces:
 	call_pal PAL_wrmces
 	ret	($26)
 	.end wrmces
+
+	.align 3
+	.globl  whami
+	.ent    whami
+whami:
+	call_pal PAL_whami
+	ret     ($26)
+	.end whami
+ 
+	.align 3
+	.globl  wripir
+	.ent    wripir
+wripir:
+	call_pal PAL_wripir
+	ret     ($26)
+	.end wripir
+
+	.align 3
+	.globl	cserve_ena
+	.ent	cserve_ena
+cserve_ena:
+	lda	$30,-0x08($30)
+	stq	$17,0($30)
+	bis	$16,$16,$17
+	lda	$16,52($31)
+	call_pal PAL_cserve
+	ldq	$17,0($30)
+	lda	$30,0x08($30)
+	ret	($26)
+	.end	cserve_ena
+
+	.align 3
+	.globl	cserve_dis
+	.ent	cserve_dis
+cserve_dis:
+	lda	$30,-0x08($30)
+	stq	$17,0($30)
+	bis	$16,$16,$17
+	lda	$16,53($31)
+	call_pal PAL_cserve
+	ldq	$17,0($30)
+	lda	$30,0x08($30)
+	ret	($26)
+	.end	cserve_dis
 
 	#
 	# The following two functions don't need trapb/excb instructions

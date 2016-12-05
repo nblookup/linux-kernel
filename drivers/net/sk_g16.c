@@ -778,16 +778,16 @@ int SK_probe(struct device *dev, short ioaddr)
 	    dev->dev_addr[4],
 	    dev->dev_addr[5]);
 
-    /* Grab the I/O Port region */
-    request_region(ioaddr, ETHERCARD_TOTAL_SIZE,"sk_g16");
-
-    /* Initialize device structure */
-
     /* Allocate memory for private structure */
     p = dev->priv = (void *) kmalloc(sizeof(struct priv), GFP_KERNEL);
-    if (p == NULL)
+    if (p == NULL) {
+	   printk("%s: ERROR - no memory for driver data!\n", dev->name);
 	   return -ENOMEM;
+    }
     memset((char *) dev->priv, 0, sizeof(struct priv)); /* clear memory */
+
+    /* Grab the I/O Port region */
+    request_region(ioaddr, ETHERCARD_TOTAL_SIZE,"sk_g16");
 
     /* Assign our Device Driver functions */
 
@@ -1192,6 +1192,7 @@ static int SK_send_packet(struct sk_buff *skb, struct device *dev)
 {
     struct priv *p = (struct priv *) dev->priv;
     struct tmd *tmdp;
+    static char pad[64];
 
     if (dev->tbusy)
     {
@@ -1253,8 +1254,11 @@ static int SK_send_packet(struct sk_buff *skb, struct device *dev)
 
 	/* Copy data into dual ported ram */
 
-	memcpy((char *) (tmdp->u.buffer & 0x00ffffff), (char *)skb->data,
+	memcpy((char *)(tmdp->u.buffer & 0x00ffffff), (char *)skb->data,
 	       skb->len);
+	if (len != skb->len)
+		memcpy((char *)(tmdp->u.buffer & 0x00ffffff) + skb->len, pad,
+		       len - skb->len);
 
 	tmdp->blen = -len;            /* set length to transmit */
 

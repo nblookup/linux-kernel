@@ -11,7 +11,7 @@
  * Kill-line thanks to John T Kohl, who also corrected VMIN = VTIME = 0.
  *
  * Modified by Theodore Ts'o, 9/14/92, to dynamically allocate the
- * tty_struct and tty_queue structures.  Previously there was a array
+ * tty_struct and tty_queue structures.  Previously there was an array
  * of 256 tty_struct's which was statically allocated, and the
  * tty_queue structures were allocated at boot time.  Both are now
  * dynamically allocated only when the tty is open.
@@ -44,6 +44,9 @@
  * 
  * Restrict vt switching via ioctl()
  *      -- grif@cs.ucr.edu, 5-Dec-95
+ *
+ * Rewrote init_dev and release_dev to eliminate races.
+ *	-- Bill Hawes <whawes@star.net>, June 97
  */
 
 #include <linux/config.h>
@@ -330,7 +333,7 @@ static int hung_up_tty_select(struct inode * inode, struct file * filp, int sel_
 static int hung_up_tty_ioctl(struct inode * inode, struct file * file,
 			     unsigned int cmd, unsigned long arg)
 {
-	return -EIO;
+	return cmd == TIOCSPGRP ? -ENOTTY : -EIO;
 }
 
 static int tty_lseek(struct inode * inode, struct file * file, off_t offset, int orig)
@@ -380,8 +383,9 @@ void do_tty_hangup(struct tty_struct * tty, struct file_operations *fops)
 			continue;
 		if (filp->private_data != tty)
 			continue;
-		if (filp->f_inode
-		    && filp->f_inode->i_rdev == CONSOLE_DEV)
+		if (!filp->f_inode)
+			continue;
+		if (filp->f_inode->i_rdev == CONSOLE_DEV)
 			continue;
 		if (filp->f_op != &tty_fops)
 			continue;
@@ -475,8 +479,10 @@ void disassociate_ctty(int on_exit)
 {
 	struct tty_struct *tty = current->tty;
 	struct task_struct *p;
+	int tty_pgrp = -1;
 
 	if (tty) {
+		tty_pgrp = tty->pgrp;
 		if (on_exit && tty->driver.type != TTY_DRIVER_TYPE_PTY)
 			tty_vhangup(tty);
 	} else {
@@ -486,9 +492,10 @@ void disassociate_ctty(int on_exit)
 		}
 		return;
 	}
-	if (tty->pgrp > 0) {
-		kill_pg(tty->pgrp, SIGHUP, on_exit);
-		kill_pg(tty->pgrp, SIGCONT, on_exit);
+	if (tty_pgrp > 0) {
+		kill_pg(tty_pgrp, SIGHUP, on_exit);
+		if (!on_exit)
+			kill_pg(tty_pgrp, SIGCONT, on_exit);
 	}
 
 	current->tty_old_pgrp = 0;
@@ -752,9 +759,49 @@ static int tty_read(struct inode * inode, struct file * file, char * buf, int co
 	return i;
 }
 
+/*
+ * Split writes up in sane blocksizes to avoid
+ * denial-of-service type attacks
+ */
+static inline int do_tty_write(
+	int (*write)(struct tty_struct *, struct file *, const unsigned char *, unsigned int),
+	struct inode *inode,
+	struct tty_struct *tty,
+	struct file *file,
+	const unsigned char *buf,
+	unsigned int count)
+{
+	int ret = 0, written = 0;
+
+	for (;;) {
+		unsigned int size = PAGE_SIZE*2;
+		if (size > count)
+			size = count;
+		ret = write(tty, file, buf, size);
+		if (ret <= 0)
+			break;
+		written += ret;
+		buf += ret;
+		count -= ret;
+		if (!count)
+			break;
+		ret = -ERESTARTSYS;
+		if (current->signal & ~current->blocked)
+			break;
+		if (need_resched)
+			schedule();
+	}
+	if (written) {
+		inode->i_mtime = CURRENT_TIME;
+		ret = written;
+	}
+	return ret;
+}
+
+
 static int tty_write(struct inode * inode, struct file * file, const char * buf, int count)
 {
-	int i, is_console;
+	int is_console;
 	struct tty_struct * tty;
 
 	is_console = (inode->i_rdev == CONSOLE_DEV);
@@ -778,24 +825,35 @@ static int tty_write(struct inode * inode, struct file * file, const char * buf,
 		}
 	}
 #endif
-	if (tty->ldisc.write)
-		/* XXX casts are for what kernel-wide prototypes should be. */
-		i = (tty->ldisc.write)(tty,file,(const unsigned char *)buf,(unsigned int)count);
-	else
-		i = -EIO;
-	if (i > 0)
-		inode->i_mtime = CURRENT_TIME;
-	return i;
+	if (!tty->ldisc.write)
+		return -EIO;
+	return do_tty_write(tty->ldisc.write,
+		inode, tty, file,
+		(const unsigned char *)buf,
+		(unsigned int)count);
 }
 
+/* Semaphore to protect creating and releasing a tty */
+static struct semaphore tty_sem = MUTEX;
+static void down_tty_sem(int index)
+{
+	down(&tty_sem);
+}
+static void up_tty_sem(int index)
+{
+	up(&tty_sem);
+}
+static void release_mem(struct tty_struct *tty, int idx);
+
 /*
- * This is so ripe with races that you should *really* not touch this
- * unless you know exactly what you are doing. All the changes have to be
- * made atomically, or there may be incorrect pointers all over the place.
+ * Rewritten to remove races and properly clean up after a failed open.  
+ * The new code protects the open with a semaphore, so it's really 
+ * quite straightforward.  The semaphore locking can probably be
+ * relaxed for the (most common) case of reopening a tty.
  */
 static int init_dev(kdev_t device, struct tty_struct **ret_tty)
 {
-	struct tty_struct *tty, **tty_loc, *o_tty, **o_tty_loc;
+	struct tty_struct *tty, *o_tty;
 	struct termios *tp, **tp_loc, *o_tp, **o_tp_loc;
 	struct termios *ltp, **ltp_loc, *o_ltp, **o_ltp_loc;
 	struct tty_driver *driver;	
@@ -807,163 +865,227 @@ static int init_dev(kdev_t device, struct tty_struct **ret_tty)
 		return -ENODEV;
 
 	idx = MINOR(device) - driver->minor_start;
-	tty = o_tty = NULL;
+
+	/* 
+	 * Check whether we need to acquire the tty semaphore to avoid
+	 * race conditions.  For now, play it safe.
+	 */
+	down_tty_sem(idx);
+
+	/* check whether we're reopening an existing tty */
+	tty = driver->table[idx];
+	if(tty) goto fast_track;
+
+	/*
+	 * First time open is complex, especially for PTY devices.
+	 * This code guarantees that either everything succeeds and the
+	 * TTY is ready for operation, or else the table slots are vacated
+	 * and the allocated memory released.  (Except that the termios 
+	 * and locked termios may be retained.)
+	 */
+
+	o_tty = NULL;
 	tp = o_tp = NULL;
 	ltp = o_ltp = NULL;
-	o_tty_loc = NULL;
-	o_tp_loc = o_ltp_loc = NULL;
 
-	tty_loc = &driver->table[idx];
+	tty = (struct tty_struct*) get_free_page(GFP_KERNEL);
+	if(!tty)
+		goto fail_no_mem;
+	initialize_tty_struct(tty);
+	tty->device = device;
+	tty->driver = *driver;
+
 	tp_loc = &driver->termios[idx];
-	ltp_loc = &driver->termios_locked[idx];
-
-repeat:
-	retval = -EIO;
-	if (driver->type == TTY_DRIVER_TYPE_PTY &&
-	    driver->subtype == PTY_TYPE_MASTER &&
-	    *tty_loc && (*tty_loc)->count)
-		goto end_init;
-	retval = -ENOMEM;
-	if (!*tty_loc && !tty) {
-		if (!(tty = (struct tty_struct*) get_free_page(GFP_KERNEL)))
-			goto end_init;
-		initialize_tty_struct(tty);
-		tty->device = device;
-		tty->driver = *driver;
-		goto repeat;
-	}
-	if (!*tp_loc && !tp) {
+	if (!*tp_loc) {
 		tp = (struct termios *) kmalloc(sizeof(struct termios),
 						GFP_KERNEL);
 		if (!tp)
-			goto end_init;
+			goto free_mem_out;
 		*tp = driver->init_termios;
-		goto repeat;
 	}
-	if (!*ltp_loc && !ltp) {
+
+	ltp_loc = &driver->termios_locked[idx];
+	if (!*ltp_loc) {
 		ltp = (struct termios *) kmalloc(sizeof(struct termios),
 						 GFP_KERNEL);
 		if (!ltp)
-			goto end_init;
+			goto free_mem_out;
 		memset(ltp, 0, sizeof(struct termios));
-		goto repeat;
 	}
-	if (driver->type == TTY_DRIVER_TYPE_PTY) {
-		o_tty_loc = &driver->other->table[idx];
-		o_tp_loc = &driver->other->termios[idx];
-		o_ltp_loc = &driver->other->termios_locked[idx];
 
-		if (!*o_tty_loc && !o_tty) {
-			kdev_t 	o_device;
-			
-			o_tty = (struct tty_struct *)
-				get_free_page(GFP_KERNEL);
-			if (!o_tty)
-				goto end_init;
-			o_device = MKDEV(driver->other->major,
-					 driver->other->minor_start + idx);
-			initialize_tty_struct(o_tty);
-			o_tty->device = o_device;
-			o_tty->driver = *driver->other;
-			goto repeat;
-		}
-		if (!*o_tp_loc && !o_tp) {
+	if (driver->type == TTY_DRIVER_TYPE_PTY) {
+		o_tty = (struct tty_struct *) get_free_page(GFP_KERNEL);
+		if (!o_tty)
+			goto free_mem_out;
+		initialize_tty_struct(o_tty);
+		o_tty->device = (kdev_t) MKDEV(driver->other->major,
+					driver->other->minor_start + idx);
+		o_tty->driver = *driver->other;
+
+		o_tp_loc  = &driver->other->termios[idx];
+		if (!*o_tp_loc) {
 			o_tp = (struct termios *)
 				kmalloc(sizeof(struct termios), GFP_KERNEL);
 			if (!o_tp)
-				goto end_init;
+				goto free_mem_out;
 			*o_tp = driver->other->init_termios;
-			goto repeat;
 		}
-		if (!*o_ltp_loc && !o_ltp) {
+
+		o_ltp_loc = &driver->other->termios_locked[idx];
+		if (!*o_ltp_loc) {
 			o_ltp = (struct termios *)
 				kmalloc(sizeof(struct termios), GFP_KERNEL);
 			if (!o_ltp)
-				goto end_init;
+				goto free_mem_out;
 			memset(o_ltp, 0, sizeof(struct termios));
-			goto repeat;
 		}
-		
-	}
-	/* Now we have allocated all the structures: update all the pointers.. */
-	if (!*tp_loc) {
-		*tp_loc = tp;
-		tp = NULL;
-	}
-	if (!*ltp_loc) {
-		*ltp_loc = ltp;
-		ltp = NULL;
-	}
-	if (!*tty_loc) {
-		tty->termios = *tp_loc;
-		tty->termios_locked = *ltp_loc;
-		*tty_loc = tty;
-		(*driver->refcount)++;
-		(*tty_loc)->count++;
-		if (tty->ldisc.open) {
-			retval = (tty->ldisc.open)(tty);
-			if (retval < 0) {
-				(*tty_loc)->count--;
-				tty = NULL;
-				goto end_init;
-			}
-		}
-		tty = NULL;
-	} else {
-		if ((*tty_loc)->flags & (1 << TTY_CLOSING)) {
-			printk("Attempt to open closing tty %s.\n",
-			       tty_name(*tty_loc));
-			printk("Ack!!!!  This should never happen!!\n");
-			return -EINVAL;
-		}
-		(*tty_loc)->count++;
-	}
-	if (driver->type == TTY_DRIVER_TYPE_PTY) {
-		if (!*o_tp_loc) {
+
+		/*
+		 * Everything allocated ... set up the o_tty structure.
+		 */
+		driver->other->table[idx] = o_tty;
+		if (!*o_tp_loc)
 			*o_tp_loc = o_tp;
-			o_tp = NULL;
-		}
-		if (!*o_ltp_loc) {
+		if (!*o_ltp_loc)
 			*o_ltp_loc = o_ltp;
-			o_ltp = NULL;
-		}
-		if (!*o_tty_loc) {
-			o_tty->termios = *o_tp_loc;
-			o_tty->termios_locked = *o_ltp_loc;
-			*o_tty_loc = o_tty;
-			(*driver->other->refcount)++;
-			if (o_tty->ldisc.open) {
-				retval = (o_tty->ldisc.open)(o_tty);
-				if (retval < 0) {
-					(*tty_loc)->count--;
-					o_tty = NULL;
-					goto end_init;
-				}
-			}
-			o_tty = NULL;
-		}
-		(*tty_loc)->link = *o_tty_loc;
-		(*o_tty_loc)->link = *tty_loc;
+		o_tty->termios = *o_tp_loc;
+		o_tty->termios_locked = *o_ltp_loc;
+		(*driver->other->refcount)++;
 		if (driver->subtype == PTY_TYPE_MASTER)
-			(*o_tty_loc)->count++;
+			o_tty->count++;
+
+		/* Establish the links in both directions */
+		tty->link   = o_tty;
+		o_tty->link = tty;
 	}
-	(*tty_loc)->driver = *driver;
-	*ret_tty = *tty_loc;
+
+	/* 
+	 * All structures have been allocated, so now we install them.
+	 * Failures after this point use release_mem to clean up, so 
+	 * there's no need to null out the local pointers.
+	 */
+	driver->table[idx] = tty;	/* FIXME: this is broken and
+	probably causes ^D bug. tty->private_date does not (yet) point
+	to a console, if keypress comes now, await armagedon. 
+
+	also, driver->table is accessed from interrupt for vt case,
+	and this does not look like atomic access at all. */
+	
+	if (!*tp_loc)
+		*tp_loc = tp;
+	if (!*ltp_loc)
+		*ltp_loc = ltp;
+	tty->termios = *tp_loc;
+	tty->termios_locked = *ltp_loc;
+	(*driver->refcount)++;
+	tty->count++;
+
+	/* 
+	 * Structures all installed ... call the ldisc open routines.
+	 * If we fail here just call release_mem to clean up.  No need
+	 * to decrement the use counts, as release_mem doesn't care.
+	 */
+	if (tty->ldisc.open) {
+		retval = (tty->ldisc.open)(tty);
+		if (retval)
+			goto release_mem_out;
+	}
+	if (o_tty && o_tty->ldisc.open) {
+		retval = (o_tty->ldisc.open)(o_tty);
+		if (retval) {
+			if (tty->ldisc.close)
+				(tty->ldisc.close)(tty);
+			goto release_mem_out;
+		}
+	}
+	goto success;
+
+	/*
+	 * This fast open can be used if the tty is already open.
+	 * No memory is allocated, and the only failures are from
+	 * attempting to open a closing tty or attempting multiple
+	 * opens on a pty master.
+	 */
+fast_track:
+	retval = -EIO;
+	if (test_bit(TTY_CLOSING, &tty->flags))
+		goto end_init;
+
+	if (driver->type == TTY_DRIVER_TYPE_PTY &&
+	    driver->subtype == PTY_TYPE_MASTER) {
+		/*
+		 * special case for PTY masters: only one open permitted, 
+		 * and the slave side open count is incremented as well.
+		 */
+		if (tty->count)
+			goto end_init;
+		tty->link->count++;
+	}
+	tty->count++;
+	tty->driver = *driver; /* N.B. why do this every time?? */
+
+success:
 	retval = 0;
+	*ret_tty = tty;
+	
+	/* All paths come through here to release the semaphore */
 end_init:
-	if (tty)
-		free_page((unsigned long) tty);
-	if (o_tty)
-		free_page((unsigned long) o_tty);
-	if (tp)
-		kfree_s(tp, sizeof(struct termios));
+	up_tty_sem(idx);
+	return retval;
+
+	/* Release locally allocated memory ... nothing placed in slots */
+free_mem_out:
 	if (o_tp)
 		kfree_s(o_tp, sizeof(struct termios));
+	if (o_tty)
+		free_page((unsigned long) o_tty);
 	if (ltp)
 		kfree_s(ltp, sizeof(struct termios));
-	if (o_ltp)
-		kfree_s(o_ltp, sizeof(struct termios));
-	return retval;
+	if (tp)
+		kfree_s(tp, sizeof(struct termios));
+	free_page((unsigned long) tty);
+
+fail_no_mem:
+	retval = -ENOMEM;
+	goto end_init;
+
+	/* call the tty release_mem routine to clean out this slot */
+release_mem_out:
+	printk("init_dev: ldisc open failed, clearing slot %d\n", idx);
+	release_mem(tty, idx);
+	goto end_init;
+}
+
+/*
+ * Releases memory associated with a tty structure, and clears out the
+ * driver table slots.
+ */
+static void release_mem(struct tty_struct *tty, int idx)
+{
+	struct tty_struct *o_tty;
+	struct termios *tp;
+
+	if ((o_tty = tty->link) != NULL) {
+		o_tty->driver.table[idx] = NULL;
+		if (o_tty->driver.flags & TTY_DRIVER_RESET_TERMIOS) {
+			tp = o_tty->driver.termios[idx];
+			o_tty->driver.termios[idx] = NULL;
+			kfree_s(tp, sizeof(struct termios));
+		}
+		o_tty->magic = 0;
+		(*o_tty->driver.refcount)--;
+		free_page((unsigned long) o_tty);
+	}
+
+	tty->driver.table[idx] = NULL;
+	if (tty->driver.flags & TTY_DRIVER_RESET_TERMIOS) {
+		tp = tty->driver.termios[idx];
+		tty->driver.termios[idx] = NULL;
+		kfree_s(tp, sizeof(struct termios));
+	}
+	tty->magic = 0;
+	(*tty->driver.refcount)--;
+	free_page((unsigned long) tty);
 }
 
 /*
@@ -974,8 +1096,7 @@ end_init:
 static void release_dev(struct file * filp)
 {
 	struct tty_struct *tty, *o_tty;
-	struct termios *tp, *o_tp, *ltp, *o_ltp;
-	struct task_struct **p;
+	int	pty_master, tty_closing, o_tty_closing, do_sleep;
 	int	idx;
 	
 	tty = (struct tty_struct *)filp->private_data;
@@ -986,10 +1107,11 @@ static void release_dev(struct file * filp)
 
 	tty_fasync(filp->f_inode, filp, 0);
 
-	tp = tty->termios;
-	ltp = tty->termios_locked;
-
 	idx = MINOR(tty->device) - tty->driver.minor_start;
+	pty_master = (tty->driver.type == TTY_DRIVER_TYPE_PTY &&
+		      tty->driver.subtype == PTY_TYPE_MASTER);
+	o_tty = tty->link;
+
 #ifdef TTY_PARANOIA_CHECK
 	if (idx < 0 || idx >= tty->driver.num) {
 		printk("release_dev: bad idx when trying to free (%s)\n",
@@ -1001,15 +1123,15 @@ static void release_dev(struct file * filp)
 		       idx, kdevname(tty->device));
 		return;
 	}
-	if (tp != tty->driver.termios[idx]) {
-		printk("release_dev: driver.termios[%d] not termios for ("
-		       "%s)\n",
+	if (tty->termios != tty->driver.termios[idx]) {
+		printk("release_dev: driver.termios[%d] not termios "
+		       "for (%s)\n",
 		       idx, kdevname(tty->device));
 		return;
 	}
-	if (ltp != tty->driver.termios_locked[idx]) {
-		printk("release_dev: driver.termios_locked[%d] not termios_locked for ("
-		       "%s)\n",
+	if (tty->termios_locked != tty->driver.termios_locked[idx]) {
+		printk("release_dev: driver.termios_locked[%d] not "
+		       "termios_locked for (%s)\n",
 		       idx, kdevname(tty->device));
 		return;
 	}
@@ -1020,10 +1142,6 @@ static void release_dev(struct file * filp)
 	       tty->count);
 #endif
 
-	o_tty = tty->link;
-	o_tp = (o_tty) ? o_tty->termios : NULL;
-	o_ltp = (o_tty) ? o_tty->termios_locked : NULL;
-
 #ifdef TTY_PARANOIA_CHECK
 	if (tty->driver.other) {
 		if (o_tty != tty->driver.other->table[idx]) {
@@ -1032,34 +1150,91 @@ static void release_dev(struct file * filp)
 			       idx, kdevname(tty->device));
 			return;
 		}
-		if (o_tp != tty->driver.other->termios[idx]) {
-			printk("release_dev: other->termios[%d] not o_termios for ("
-			       "%s)\n",
+		if (o_tty->termios != tty->driver.other->termios[idx]) {
+			printk("release_dev: other->termios[%d] not o_termios "
+			       "for (%s)\n",
 			       idx, kdevname(tty->device));
 			return;
 		}
-		if (o_ltp != tty->driver.other->termios_locked[idx]) {
-			printk("release_dev: other->termios_locked[%d] not o_termios_locked for ("
-			       "%s)\n",
+		if (o_tty->termios_locked != 
+		      tty->driver.other->termios_locked[idx]) {
+			printk("release_dev: other->termios_locked[%d] not "
+			       "o_termios_locked for (%s)\n",
 			       idx, kdevname(tty->device));
 			return;
 		}
-
 		if (o_tty->link != tty) {
 			printk("release_dev: bad pty pointers\n");
 			return;
 		}
 	}
 #endif
-	
+
 	if (tty->driver.close)
 		tty->driver.close(tty, filp);
-	if (tty->driver.type == TTY_DRIVER_TYPE_PTY &&
-	    tty->driver.subtype == PTY_TYPE_MASTER) {
-		if (--tty->link->count < 0) {
+
+	/*
+	 * Sanity check: if tty->count is going to zero, there shouldn't be
+	 * any waiters on tty->read_wait or tty->write_wait.  We test the
+	 * wait queues and kick everyone out _before_ actually starting to
+	 * close.  This ensures that we won't block while releasing the tty
+	 * structure.
+	 *
+	 * The test for the o_tty closing is necessary, since the master and
+	 * slave sides may close in any order.  If the slave side closes out
+	 * first, its count will be one, since the master side holds an open.
+	 * Thus this test wouldn't be triggered at the time the slave closes,
+	 * so we do it now.
+	 *
+	 * Note that it's possible for the tty to be opened again while we're
+	 * flushing out waiters.  By recalculating the closing flags before
+	 * each iteration we avoid any problems.
+	 */
+	while (1) {
+		tty_closing = tty->count <= 1;
+		o_tty_closing = o_tty &&
+			(o_tty->count <= (pty_master ? 1 : 0));
+		do_sleep = 0;
+
+		if (tty_closing) {
+			if (waitqueue_active(&tty->read_wait)) {
+				wake_up(&tty->read_wait);
+				do_sleep++;
+			}
+			if (waitqueue_active(&tty->write_wait)) {
+				wake_up(&tty->write_wait);
+				do_sleep++;
+			}
+		}
+		if (o_tty_closing) {
+			if (waitqueue_active(&o_tty->read_wait)) {
+				wake_up(&o_tty->read_wait);
+				do_sleep++;
+			}
+			if (waitqueue_active(&o_tty->write_wait)) {
+				wake_up(&o_tty->write_wait);
+				do_sleep++;
+			}
+		}
+		if (!do_sleep)
+			break;
+
+		printk("release_dev: %s: read/write wait queue active!\n",
+		       tty_name(tty));
+		schedule();
+	}	
+
+	/*
+	 * The closing flags are now consistent with the open counts on 
+	 * both sides, and we've completed the last operation that could 
+	 * block, so it's safe to proceed with closing.
+	 */
+
+	if (pty_master) {
+		if (--o_tty->count < 0) {
 			printk("release_dev: bad pty slave count (%d) for %s\n",
-			       tty->count, tty_name(tty));
-			tty->link->count = 0;
+			       o_tty->count, tty_name(o_tty));
+			o_tty->count = 0;
 		}
 	}
 	if (--tty->count < 0) {
@@ -1067,41 +1242,48 @@ static void release_dev(struct file * filp)
 		       tty->count, tty_name(tty));
 		tty->count = 0;
 	}
-	if (tty->count)
-		return;
 
 	/*
-	 * We're committed; at this point, we must not block!
+	 * Perform some housekeeping before deciding whether to return.
+	 *
+	 * Set the TTY_CLOSING flag if this was the last open.  In the
+	 * case of a pty we may have to wait around for the other side
+	 * to close, and TTY_CLOSING makes sure we can't be reopened.
 	 */
-	if (o_tty) {
-		if (o_tty->count)
-			return;
-		tty->driver.other->table[idx] = NULL;
-		tty->driver.other->termios[idx] = NULL;
-		kfree_s(o_tp, sizeof(struct termios));
+	if(tty_closing)
+		set_bit(TTY_CLOSING, &tty->flags);
+	if(o_tty_closing)
+		set_bit(TTY_CLOSING, &o_tty->flags);
+
+	/*
+	 * If _either_ side is closing, make sure there aren't any
+	 * processes that still think tty or o_tty is their controlling
+	 * tty.  Also, clear redirect if it points to either tty.
+	 */
+	if (tty_closing || o_tty_closing) {
+		struct task_struct *p;
+
+		for_each_task(p) {
+			if (p->tty == tty || (o_tty && p->tty == o_tty))
+				p->tty = NULL;
+		}
+
+		if (redirect == tty || (o_tty && redirect == o_tty))
+			redirect = NULL;
 	}
+
+	/* check whether both sides are closing ... */
+	if (!tty_closing || (o_tty && !o_tty_closing))
+		return;
+	filp->private_data = 0;
 	
 #ifdef TTY_DEBUG_HANGUP
 	printk("freeing tty structure...");
 #endif
-	tty->flags |= (1 << TTY_CLOSING);
 
 	/*
-	 * Make sure there aren't any processes that still think this
-	 * tty is their controlling tty.
-	 */
-	for (p = &LAST_TASK ; p > &FIRST_TASK ; --p) {
-		if (*p == 0)
-			continue;
-		if ((*p)->tty == tty)
-			(*p)->tty = NULL;
-		if (o_tty && (*p)->tty == o_tty)
-			(*p)->tty = NULL;
-	}
-
-	/*
-	 * Shutdown the current line discipline, and reset it to
-	 * N_TTY.
+	 * Shutdown the current line discipline, and reset it to N_TTY.
+	 * N.B. why reset ldisc when we're releasing the memory??
 	 */
 	if (tty->ldisc.close)
 		(tty->ldisc.close)(tty);
@@ -1113,41 +1295,34 @@ static void release_dev(struct file * filp)
 		o_tty->ldisc = ldiscs[N_TTY];
 	}
 	
-	tty->driver.table[idx] = NULL;
-	if (tty->driver.flags & TTY_DRIVER_RESET_TERMIOS) {
-		tty->driver.termios[idx] = NULL;
-		kfree_s(tp, sizeof(struct termios));
-	}
-	if (tty == redirect || o_tty == redirect)
-		redirect = NULL;
 	/*
 	 * Make sure that the tty's task queue isn't activated.  If it
-	 * is, take it out of the linked list.
+	 * is, take it out of the linked list.  The tqueue isn't used by
+	 * pty's, so skip the test for them.
 	 */
-	cli();
-	if (tty->flip.tqueue.sync) {
-		struct tq_struct *tq, *prev;
+	if (tty->driver.type != TTY_DRIVER_TYPE_PTY) {
+		cli();
+		if (tty->flip.tqueue.sync) {
+			struct tq_struct *tq, *prev;
 
-		for (tq=tq_timer, prev=0; tq; prev=tq, tq=tq->next) {
-			if (tq == &tty->flip.tqueue) {
-				if (prev)
-					prev->next = tq->next;
-				else
-					tq_timer = tq->next;
-				break;
+			for (tq=tq_timer, prev=0; tq; prev=tq, tq=tq->next) {
+				if (tq == &tty->flip.tqueue) {
+					if (prev)
+						prev->next = tq->next;
+					else
+						tq_timer = tq->next;
+					break;
+				}
 			}
 		}
+		sti();
 	}
-	sti();
-	tty->magic = 0;
-	(*tty->driver.refcount)--;
-	free_page((unsigned long) tty);
-	filp->private_data = 0;
-	if (o_tty) {
-		o_tty->magic = 0;
-		(*o_tty->driver.refcount)--;
-		free_page((unsigned long) o_tty);
-	}
+
+	/* 
+	 * The release_mem function takes care of the details of clearing
+	 * the slots and preserving the termios structure.
+	 */
+	release_mem(tty, idx);
 }
 
 /*
@@ -1232,11 +1407,6 @@ retry_open:
 	return 0;
 }
 
-/*
- * Note that releasing a pty master also releases the child, so
- * we have to make the redirection checks after that and on both
- * sides of a pty.
- */
 static void tty_release(struct inode * inode, struct file * filp)
 {
 	release_dev(filp);
@@ -1309,16 +1479,15 @@ static int tty_fasync(struct inode * inode, struct file * filp, int on)
 		return retval;
 
 	if (on) {
-		if (!tty->read_wait)
+		if (!waitqueue_active(&tty->read_wait))
 			tty->minimum_to_wake = 1;
-		if (filp->f_owner == 0) {
-			if (tty->pgrp)
-				filp->f_owner = -tty->pgrp;
-			else
-				filp->f_owner = current->pid;
+		if (filp->f_owner.pid == 0) {
+			filp->f_owner.pid = (-tty->pgrp) ? : current->pid;
+			filp->f_owner.uid = current->uid;
+			filp->f_owner.euid = current->euid;
 		}
 	} else {
-		if (!tty->fasync && !tty->read_wait)
+		if (!tty->fasync && !waitqueue_active(&tty->read_wait))
 			tty->minimum_to_wake = N_TTY_BUF_SIZE;
 	}
 	return 0;
@@ -1496,6 +1665,8 @@ static int tty_ioctl(struct inode * inode, struct file * file,
 			return 0;
 		case TIOCSPGRP:
 			retval = tty_check_change(real_tty);
+			if (retval == -EIO)
+				return -ENOTTY;
 			if (retval)
 				return retval;
 			if (!current->tty ||
@@ -1652,7 +1823,7 @@ void do_SAK( struct tty_struct *tty)
 		if (((*p)->tty == tty) ||
 		    ((session > 0) && ((*p)->session == session)))
 			send_sig(SIGKILL, *p, 1);
-		else {
+		else if ((*p)->files) {
 			for (i=0; i < NR_OPEN; i++) {
 				filp = (*p)->files->fd[i];
 				if (filp && (filp->f_op == &tty_fops) &&
@@ -1761,8 +1932,9 @@ int tty_unregister_driver(struct tty_driver *driver)
 {
 	int	retval;
 	struct tty_driver *p;
-	int	found = 0;
+	int	i, found = 0;
 	const char *othername = NULL;
+	struct termios *tp;
 	
 	if (*driver->refcount)
 		return -EBUSY;
@@ -1792,6 +1964,18 @@ int tty_unregister_driver(struct tty_driver *driver)
 	if (driver->next)
 		driver->next->prev = driver->prev;
 
+	for (i = 0; i < driver->num; i++) {
+		tp = driver->termios[i];
+		if (tp != NULL) {
+			kfree_s(tp, sizeof(struct termios));
+			driver->termios[i] = NULL;
+		}
+		tp = driver->termios_locked[i];
+		if (tp != NULL) {
+			kfree_s(tp, sizeof(struct termios));
+			driver->termios_locked[i] = NULL;
+		}
+	}
 	return 0;
 }
 
@@ -1816,7 +2000,7 @@ long console_init(long kmem_start, long kmem_end)
 	memcpy(tty_std_termios.c_cc, INIT_C_CC, NCCS);
 	tty_std_termios.c_iflag = ICRNL | IXON;
 	tty_std_termios.c_oflag = OPOST | ONLCR;
-	tty_std_termios.c_cflag = B38400 | CS8 | CREAD;
+	tty_std_termios.c_cflag = B38400 | CS8 | CREAD | HUPCL;
 	tty_std_termios.c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK |
 		ECHOCTL | ECHOKE | IEXTEN;
 
@@ -1884,11 +2068,10 @@ int tty_init(void)
 #ifdef CONFIG_RISCOM8
 	riscom8_init();
 #endif
-#ifdef CONFIG_BAYCOM
-	baycom_init();
+#ifdef CONFIG_SPECIALIX
+	specialix_init();
 #endif
 	pty_init();
 	vcs_init();
 	return 0;
 }
-

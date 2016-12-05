@@ -18,7 +18,7 @@
 ! March 1993/June 1994 (Christoph.Niemann@linux.org)
 !
 ! add APM BIOS checking by Stephen Rothwell, May 1994
-! (Stephen.Rothwell@pd.necisa.oz.au)
+! (Stephen.Rothwell@canb.auug.org.au)
 !
 ! High load stuff, initrd support and position independency
 ! by Hans Lermen & Werner Almesberger, February 1996
@@ -232,6 +232,29 @@ loader_panic_mess:
 loader_ok:
 ! Get memory size (extended mem, kB)
 
+#ifndef STANDARD_MEMORY_BIOS_CALL
+	push	ebx
+
+        xor     ebx,ebx		! preload new memory slot with 0k
+        mov	[0x1e0], ebx
+
+        mov     ax,#0xe801
+	int     0x15
+	jc      oldstylemem
+
+	and     ebx, #0xffff    ! clear sign extend
+	shl     ebx, 6          ! and go from 64k to 1k chunks
+	mov     [0x1e0],ebx     ! store extended memory size
+
+	and     eax, #0xffff    ! clear sign extend
+ 	add     [0x1e0],eax     ! and add lower memory into total size.
+  
+	! and fall into the old memory detection code to populate the
+	! compatability slot.
+
+oldstylemem:
+	pop	ebx
+#endif
 	mov	ah,#0x88
 	int	0x15
 	mov	[2],ax
@@ -308,7 +331,7 @@ no_psmouse:
 
 #ifdef CONFIG_APM
 ! check for APM BIOS
-		! NOTE:	DS is pointing to the bootsector
+		! NOTE:	DS is pointing to the boot sector
 		!
 	mov	[64],#0		! version == 0 means no APM BIOS
 
@@ -458,6 +481,29 @@ end_move_self:
 	mov	al,#0xDF		! A20 on
 	out	#0x60,al
 	call	empty_8042
+
+! wait until a20 really *is* enabled; it can take a fair amount of
+! time on certain systems; Toshiba Tecras are known to have this
+! problem.  The memory location used here is the int 0x1f vector,
+! which should be safe to use; any *unused* memory location < 0xfff0
+! should work here.  
+
+#define	TEST_ADDR 0x7c
+
+	push	ds
+	xor	ax,ax			! segment 0x0000
+	mov	ds,ax
+	dec	ax			! segment 0xffff (HMA)
+	mov	gs,ax
+	mov	bx,[TEST_ADDR]		! we want to restore the value later
+a20_wait:
+	inc	ax
+	mov	[TEST_ADDR],ax
+	seg	gs
+	cmp	ax,[TEST_ADDR+0x10]
+	je	a20_wait		! loop until no longer aliased
+	mov	[TEST_ADDR],bx		! restore original value
+	pop	ds
 
 ! make sure any possible coprocessor is properly reset..
 

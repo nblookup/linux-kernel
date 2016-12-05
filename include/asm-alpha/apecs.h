@@ -31,7 +31,7 @@
    BIOS ROMs. So we must put the windows high enough to avoid these areas.
 
    We put window 1 at BUS 64Mb for 64Mb, mapping physical 0 to 64Mb-1,
-   and window 2 at BUS 512Mb for 512Mb, mapping physical 0 to 512Mb-1.
+   and window 2 at BUS 1Gb for 1Gb, mapping physical 0 to 1Gb-1.
    Yes, this does map 0 to 64Mb-1 twice, but only window 1 will actually
    be used for that range (via virt_to_bus()).
 
@@ -53,12 +53,14 @@
    DMAable memory; they count on being able to DMA to any memory they
    get from kmalloc()/get_free_pages(). They will also use window 1 for
    any physical memory accesses below 64Mb; the rest will be handled by
-   window 2, maxing out at 512Mb of memory. I trust this is enough... :-)
+   window 2, maxing out at 1Gb of memory. I trust this is enough... :-)
 
-   Finally, the reason we make window 2 start at 512Mb for 512Mb, is so that
-   we can allocate PCI bus devices' memory starting at 1Gb and up, to ensure
-   that no conflicts occur and bookkeeping is simplified (ie we don't
-   try to fill the gap between the two windows, we just go above the top).
+   We hope that the area before the first window is large enough so that
+   there will be no overlap at the top end (64Mb). We *must* locate the
+   PCI cards' memory just below window 1, so that there's still the
+   possibility of being able to access it via SPARSE space. This is
+   important for cards such as the Matrox Millennium, whose Xserver
+   wants to access memory-mapped registers in byte and short lengths.
 
    Note that the XL is treated differently from the AVANTI, even though
    for most other things they are identical. It didn't seem reasonable to
@@ -69,14 +71,24 @@
 #define APECS_XL_DMA_WIN1_BASE		(64*1024*1024)
 #define APECS_XL_DMA_WIN1_SIZE		(64*1024*1024)
 #define APECS_XL_DMA_WIN1_SIZE_PARANOID	(48*1024*1024)
-#define APECS_XL_DMA_WIN2_BASE		(512*1024*1024)
-#define APECS_XL_DMA_WIN2_SIZE		(512*1024*1024)
+#define APECS_XL_DMA_WIN2_BASE		(1024*1024*1024)
+#define APECS_XL_DMA_WIN2_SIZE		(1024*1024*1024)
 
 #else /* CONFIG_ALPHA_XL */
 
 /* these are for normal APECS family machines, AVANTI/MUSTANG/EB64/PC64 */
+#ifdef CONFIG_ALPHA_SRM_SETUP
+/* if we are using the SRM PCI setup, we'll need to use variables instead */
+#define APECS_DMA_WIN_BASE_DEFAULT	(1024*1024*1024)
+#define APECS_DMA_WIN_SIZE_DEFAULT	(1024*1024*1024)
+
+extern unsigned int APECS_DMA_WIN_BASE;
+extern unsigned int APECS_DMA_WIN_SIZE;
+
+#else /* SRM_SETUP */
 #define APECS_DMA_WIN_BASE	(1024*1024*1024)
 #define APECS_DMA_WIN_SIZE	(1024*1024*1024)
+#endif /* SRM_SETUP */
 
 #endif /* CONFIG_ALPHA_XL */
 
@@ -414,6 +426,77 @@ extern unsigned long apecs_init (unsigned long mem_start,
 /*
  * Data structure for handling APECS machine checks:
  */
+#ifdef CONFIG_ALPHA_MIKASA
+struct el_apecs_sysdata_mcheck {
+    unsigned long coma_gcr;
+    unsigned long coma_edsr;
+    unsigned long coma_ter;
+    unsigned long coma_elar;
+    unsigned long coma_ehar;
+    unsigned long coma_ldlr;
+    unsigned long coma_ldhr;
+    unsigned long coma_base0;
+    unsigned long coma_base1;
+    unsigned long coma_base2;
+    unsigned long coma_base3;
+    unsigned long coma_cnfg0;
+    unsigned long coma_cnfg1;
+    unsigned long coma_cnfg2;
+    unsigned long coma_cnfg3;
+    unsigned long epic_dcsr;
+    unsigned long epic_pear;
+    unsigned long epic_sear;
+    unsigned long epic_tbr1;
+    unsigned long epic_tbr2;
+    unsigned long epic_pbr1;
+    unsigned long epic_pbr2;
+    unsigned long epic_pmr1;
+    unsigned long epic_pmr2;
+    unsigned long epic_harx1;
+    unsigned long epic_harx2;
+    unsigned long epic_pmlt;
+    unsigned long epic_tag0;
+    unsigned long epic_tag1;
+    unsigned long epic_tag2;
+    unsigned long epic_tag3;
+    unsigned long epic_tag4;
+    unsigned long epic_tag5;
+    unsigned long epic_tag6;
+    unsigned long epic_tag7;
+    unsigned long epic_data0;
+    unsigned long epic_data1;
+    unsigned long epic_data2;
+    unsigned long epic_data3;
+    unsigned long epic_data4;
+    unsigned long epic_data5;
+    unsigned long epic_data6;
+    unsigned long epic_data7;
+
+    unsigned long pceb_vid;
+    unsigned long pceb_did;
+    unsigned long pceb_revision;
+    unsigned long pceb_command;
+    unsigned long pceb_status;
+    unsigned long pceb_latency;
+    unsigned long pceb_control;
+    unsigned long pceb_arbcon;
+    unsigned long pceb_arbpri;
+
+    unsigned long esc_id;
+    unsigned long esc_revision;
+    unsigned long esc_int0;
+    unsigned long esc_int1;
+    unsigned long esc_elcr0;
+    unsigned long esc_elcr1;
+    unsigned long esc_last_eisa;
+    unsigned long esc_nmi_stat;
+
+    unsigned long pci_ir;
+    unsigned long pci_imr;
+    unsigned long svr_mgr;
+};
+#else /* CONFIG_ALPHA_MIKASA */
+/* this for the normal APECS machines */
 struct el_apecs_sysdata_mcheck {
     unsigned long coma_gcr;
     unsigned long coma_edsr;
@@ -457,6 +540,31 @@ struct el_apecs_sysdata_mcheck {
     unsigned long epic_data6;
     unsigned long epic_data7;
 };
+#endif /* CONFIG_ALPHA_MIKASA */
+
+struct el_procdata {
+    unsigned long paltemp[32];  /* PAL TEMP REGS. */
+    /* EV4-specific fields */
+    unsigned long exc_addr;     /* Address of excepting instruction. */
+    unsigned long exc_sum;      /* Summary of arithmetic traps. */
+    unsigned long exc_mask;     /* Exception mask (from exc_sum). */
+    unsigned long iccsr;        /* IBox hardware enables. */
+    unsigned long pal_base;     /* Base address for PALcode. */
+    unsigned long hier;         /* Hardware Interrupt Enable. */
+    unsigned long hirr;         /* Hardware Interrupt Request. */
+    unsigned long csr;          /* D-stream fault info. */
+    unsigned long dc_stat;      /* D-cache status (ECC/Parity Err). */
+    unsigned long dc_addr;      /* EV3 Phys Addr for ECC/DPERR. */
+    unsigned long abox_ctl;     /* ABox Control Register. */
+    unsigned long biu_stat;     /* BIU Status. */
+    unsigned long biu_addr;     /* BUI Address. */
+    unsigned long biu_ctl;      /* BIU Control. */
+    unsigned long fill_syndrome;/* For correcting ECC errors. */
+    unsigned long fill_addr;    /* Cache block which was being read */
+    unsigned long va;           /* Effective VA of fault or miss. */
+    unsigned long bc_tag;       /* Backup Cache Tag Probe Results.*/
+};
+
 
 #define RTC_PORT(x)	(0x70 + (x))
 #define RTC_ADDR(x)	(0x80 | (x))

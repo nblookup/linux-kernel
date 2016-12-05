@@ -14,12 +14,15 @@
 #ifdef __KERNEL__
 
 #define NCP_DEFAULT_BUFSIZE 1024
+#define NCP_DEFAULT_OPTIONS 0		/* 2 for packet signatures */
 
 struct ncp_server {
 
 	struct ncp_mount_data m; /* Nearly all of the mount data is of
 				    interest for us later, so we store
 				    it completely. */
+
+	__u8 name_space[NCP_NUMBER_OF_VOLUMES];
 
 	struct file *ncp_filp;	/* File pointer to ncp socket */
 	struct file *wdog_filp;	/* File pointer to wdog socket */
@@ -55,6 +58,12 @@ struct ncp_server {
 
         struct ncp_inode_info root;
 	char       root_path;	/* '\0' */
+
+/* info for packet signing */
+	int sign_wanted;        /* 1=Server needs signed packets */
+	int sign_active;        /* 0=don't do signing, 1=do */
+	char sign_root[8];	/* generated from password and encr. key */
+	char sign_last[16];	
 };
 
 static inline int

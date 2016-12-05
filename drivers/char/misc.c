@@ -57,7 +57,7 @@ static struct miscdevice misc_list = { 0, "head", NULL, &misc_list, &misc_list }
 /*
  * Assigned numbers, used for dynamic minors
  */
-#define DYNAMIC_MINORS 64 /* like dynamic majors */
+#define DYNAMIC_MINORS 64 /* like dynamic majors used to do */
 static unsigned char misc_minors[DYNAMIC_MINORS / 8];
 
 #ifndef MODULE
@@ -67,7 +67,11 @@ extern int ms_bus_mouse_init(void);
 extern int atixl_busmouse_init(void);
 extern int sun_mouse_init(void);
 extern void watchdog_init(void);
+extern void wdt_init(void);
+extern void pcwatchdog_init(void);
 extern int rtc_init(void);
+extern int con_get_info(int *mode, int *shift, int *col, int *row,
+			struct tty_struct **tty);
 
 #ifdef CONFIG_PROC_FS
 static int proc_misc_read(char *buf, char **start, off_t offset, int len, int unused)
@@ -179,6 +183,7 @@ static struct symbol_table misc_syms = {
 #ifndef MODULE
 	X(set_selection),   /* used by the kmouse module, can only */
 	X(paste_selection), /* be exported if misc.c is in linked in */
+	X(con_get_info),
 #endif
 #include <linux/symtab_end.h>
 };
@@ -192,7 +197,7 @@ int misc_init(void)
 		S_IFREG | S_IRUGO, 1, 0, 0,
 		0, NULL /* ops -- default to array */,
 		&proc_misc_read /* get_info */,
-	});	
+	});
 #endif /* PROC_FS */
 #ifdef CONFIG_BUSMOUSE
 	bus_mouse_init();
@@ -215,11 +220,24 @@ int misc_init(void)
 #ifdef CONFIG_SUN_MOUSE
 	sun_mouse_init();
 #endif
+	/* In 2.0.xx, only the first misc_register() is significant for
+	 * each minor. So we load the hardware watchdogs first, then
+	 * the softdog driver.
+	 */
+#ifdef CONFIG_WDT
+	wdt_init();
+#endif
+#ifdef CONFIG_PCWATCHDOG
+	pcwatchdog_init();
+#endif
 #ifdef CONFIG_SOFT_WATCHDOG
 	watchdog_init();
-#endif	
+#endif
 #ifdef CONFIG_APM
 	apm_bios_init();
+#endif
+#ifdef CONFIG_H8
+	h8_init();
 #endif
 #ifdef CONFIG_RTC
 	rtc_init();

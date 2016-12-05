@@ -24,6 +24,11 @@
  */
 
 /*
+ * Fixes:
+ *    Ion Badulescu <ionut@cs.columbia.edu>     : FIFO's need special handling in NFSv2
+ */
+
+/*
  * Defining NFS_PROC_DEBUG causes a lookup of a file named
  * "xyzzy" to toggle debugging.  Just cd to an NFS-mounted
  * filesystem and type 'ls xyzzy' to turn on debugging.
@@ -180,6 +185,11 @@ static int *xdr_decode_fattr(int *p, struct nfs_fattr *fattr)
 	fattr->mtime.useconds = ntohl(*p++);
 	fattr->ctime.seconds = ntohl(*p++);
 	fattr->ctime.useconds = ntohl(*p++);
+	if (fattr->type == NFCHR && fattr->rdev == NFS_FIFO_DEV) {
+		fattr->type = NFFIFO;
+		fattr->mode = (fattr->mode & ~S_IFMT) | S_IFIFO;
+		fattr->rdev = 0;
+	}
 	return p;
 }
 
@@ -451,13 +461,12 @@ nfs_proc_read_request(struct rpc_ioreq *req, struct nfs_server *server,
 	req->rq_addr = &server->toaddr;
 	req->rq_alen = sizeof(server->toaddr);
 
-	return 0;
+	return rpc_transmit(server->rsock, req);
 }
 
 int
-nfs_proc_read_reply(struct rpc_ioreq *req)
+nfs_proc_read_reply(struct rpc_ioreq *req, struct nfs_fattr *fattr)
 {
-	struct nfs_fattr fattr;
 	int		status;
 	__u32		*p0, *p;
 	int		count;
@@ -465,9 +474,11 @@ nfs_proc_read_reply(struct rpc_ioreq *req)
 	p0 = (__u32 *) req->rq_rvec[0].iov_base;
 
 	if (!(p = nfs_rpc_verify(p0))) {
-		status = -errno_NFSERR_IO;
+		/* Tell the upper layers to retry */
+		status = -EAGAIN;
+		/* status = -errno_NFSERR_IO; */
 	} else if ((status = ntohl(*p++)) == NFS_OK) {
-		p = xdr_decode_fattr(p, &fattr);
+		p = xdr_decode_fattr(p, fattr);
 		count = ntohl(*p++);
 		if (p != req->rq_rvec[2].iov_base) {
 			/* unexpected RPC reply header size. punt.
@@ -612,12 +623,19 @@ retry:
 
 int nfs_proc_rename(struct nfs_server *server,
 		    struct nfs_fh *old_dir, const char *old_name,
-		    struct nfs_fh *new_dir, const char *new_name)
+		    struct nfs_fh *new_dir, const char *new_name,
+		    int must_be_dir)
 {
 	int *p, *p0;
 	int status;
 	int ruid = 0;
 
+	/*
+	 * Disallow "rename()" with trailing slashes over NFS: getting
+	 * POSIX.1 behaviour is just too unlikely.
+	 */
+	if (must_be_dir)
+		return -EINVAL;
 	PRINTK("NFS call  rename %s -> %s\n", old_name, new_name);
 	if (!(p0 = nfs_rpc_alloc(server->wsize)))
 		return -EIO;
@@ -994,6 +1012,7 @@ static struct {
 	{ NFSERR_EAGAIN,	EAGAIN		},
 	{ NFSERR_ACCES,		EACCES		},
 	{ NFSERR_EXIST,		EEXIST		},
+	{ NFSERR_XDEV,		EXDEV		},
 	{ NFSERR_NODEV,		ENODEV		},
 	{ NFSERR_NOTDIR,	ENOTDIR		},
 	{ NFSERR_ISDIR,		EISDIR		},

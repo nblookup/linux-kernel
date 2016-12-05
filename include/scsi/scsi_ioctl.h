@@ -5,6 +5,8 @@
 #define SCSI_IOCTL_TEST_UNIT_READY 2
 #define SCSI_IOCTL_BENCHMARK_COMMAND 3
 #define SCSI_IOCTL_SYNC 4			/* Request synchronous parameters */
+#define SCSI_IOCTL_START_UNIT 5
+#define SCSI_IOCTL_STOP_UNIT 6
 /* The door lock/unlock constants are compatible with Sun constants for
    the cdrom */
 #define SCSI_IOCTL_DOORLOCK 0x5380		/* lock the eject mechanism */
@@ -17,6 +19,7 @@
 
 extern int scsi_ioctl (Scsi_Device *dev, int cmd, void *arg);
 extern int kernel_scsi_ioctl (Scsi_Device *dev, int cmd, void *arg);
+extern int scsi_ioctl_send_command(Scsi_Device *dev, void *buffer);
 
 #endif
 

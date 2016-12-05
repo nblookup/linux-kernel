@@ -89,7 +89,18 @@ static inline int lp_char_polled(char lpchar, int minor)
 	while(wait != LP_WAIT(minor)) wait++;
 	/* control port takes strobe high */
 	outb_p(( LP_PSELECP | LP_PINITP | LP_PSTROBE ), ( LP_C( minor )));
-	while(wait) wait--;
+	
+	if(LP_F(minor)&LP_STRICT)
+	{
+		/* Wait until NBUSY line goes high */
+		count = 0;
+		do {
+			status = LP_S(minor);
+			count++;
+		} while (LP_READY(minor, status) && (count<LP_CHAR(minor)));
+	}
+	else while(wait) wait--;
+	
 	/* take strobe low */
 	outb_p(( LP_PSELECP | LP_PINITP ), ( LP_C( minor )));
 	/* update waittime statistics */
@@ -116,6 +127,8 @@ static inline int lp_char_interrupt(char lpchar, int minor)
 	struct lp_stats *stats;
 
 	do {
+	    if(need_resched)
+		schedule();
 	    if ((status = LP_S(minor)) & LP_PBUSY) {
 		if (!LP_CAREFUL_READY(minor, status))
 			return 0;
@@ -322,9 +335,9 @@ static int lp_open(struct inode * inode, struct file * file)
 	unsigned int irq;
 
 	if (minor >= LP_NO)
-		return -ENODEV;
+		return -ENXIO;
 	if ((LP_F(minor) & LP_EXIST) == 0)
-		return -ENODEV;
+		return -ENXIO;
 	if (LP_F(minor) & LP_BUSY)
 		return -EBUSY;
 
@@ -426,6 +439,12 @@ static int lp_ioctl(struct inode *inode, struct file *file,
 				LP_F(minor) |= LP_CAREFUL;
 			else
 				LP_F(minor) &= ~LP_CAREFUL;
+			break;
+		case LPSTRICT:
+			if (arg)
+				LP_F(minor) |= LP_STRICT;
+			else
+				LP_F(minor) &= ~LP_STRICT;
 			break;
 		case LPWAIT:
 			LP_WAIT(minor) = arg;

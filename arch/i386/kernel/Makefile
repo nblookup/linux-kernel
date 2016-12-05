@@ -11,7 +11,6 @@
 #	$(CPP) -D__ASSEMBLY__ -traditional $< -o $*.s
 
 ifdef SMP
-
 .S.o:
 	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c $< -o $*.o
 else
@@ -24,8 +23,17 @@ all: kernel.o head.o
 O_TARGET := kernel.o
 O_OBJS   := process.o signal.o entry.o traps.o irq.o vm86.o bios32.o \
             ptrace.o ioport.o ldt.o setup.o time.o sys_i386.o ksyms.o
+OX_OBJS  :=
+
+ifdef CONFIG_APM
+OX_OBJS += apm.o
+endif
 
 ifdef SMP
+
+ifdef CONFIG_MTRR
+O_OBJS += mtrr.o
+endif
 
 O_OBJS += smp.o
 
@@ -63,6 +71,6 @@ trampoline32.s: trampoline32.S $(CONFIGURE) $(TOPDIR)/include/linux/config.h Mak
 	$(CPP) -D__SMP__ -traditional $< -o $@
 
 clean:
-	rm -f trampoline hexify
+	rm -f trampoline trampoline.hex hexify
 
 include $(TOPDIR)/Rules.make

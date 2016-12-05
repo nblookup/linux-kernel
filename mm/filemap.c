@@ -9,6 +9,7 @@
  * most "normal" filesystems (but you don't /have/ to use this:
  * the NFS filesystem does this differently, for example)
  */
+#include <linux/config.h> /* CONFIG_READA_SMALL */
 #include <linux/stat.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -41,18 +42,7 @@ struct page * page_hash_table[PAGE_HASH_SIZE];
  * Simple routines for both non-shared and shared mappings.
  */
 
-/*
- * This is a special fast page-free routine that _only_ works
- * on page-cache pages that we are currently using. We can
- * just decrement the page count, because we know that the page
- * has a count > 1 (the page cache itself counts as one, and
- * we're currently using it counts as one). So we don't need
- * the full free_page() stuff..
- */
-static inline void release_page(struct page * page)
-{
-	atomic_dec(&page->count);
-}
+#define release_page(page) __free_page((page))
 
 /*
  * Invalidate the pages of an inode, removing all pages that aren't
@@ -78,7 +68,7 @@ void invalidate_inode_pages(struct inode * inode)
 		page->prev = NULL;
 		remove_page_from_hash_queue(page);
 		page->inode = NULL;
-		free_page(page_address(page));
+		__free_page(page);
 		continue;
 	}
 }
@@ -100,7 +90,7 @@ repeat:
 		/* page wholly truncated - free it */
 		if (offset >= start) {
 			if (PageLocked(page)) {
-				wait_on_page(page);
+				__wait_on_page(page);
 				goto repeat;
 			}
 			inode->i_nrpages--;
@@ -111,20 +101,21 @@ repeat:
 			page->prev = NULL;
 			remove_page_from_hash_queue(page);
 			page->inode = NULL;
-			free_page(page_address(page));
+			__free_page(page);
 			continue;
 		}
 		p = &page->next;
 		offset = start - offset;
 		/* partial truncate, clear end of page */
 		if (offset < PAGE_SIZE) {
-			memset((void *) (offset + page_address(page)), 0, PAGE_SIZE - offset);
-			flush_page_to_ram(page_address(page));
+			unsigned long address = page_address(page);
+			memset((void *) (offset + address), 0, PAGE_SIZE - offset);
+			flush_page_to_ram(address);
 		}
 	}
 }
 
-int shrink_mmap(int priority, int dma)
+int shrink_mmap(int priority, int dma, int free_buf)
 {
 	static int clock = 0;
 	struct page * page;
@@ -168,19 +159,23 @@ int shrink_mmap(int priority, int dma)
 		switch (page->count) {
 			case 1:
 				/* If it has been referenced recently, don't free it */
-				if (clear_bit(PG_referenced, &page->flags))
+				if (clear_bit(PG_referenced, &page->flags)) {
+					/* age this page potential used */
+					if (priority < 4)
+						age_page(page);
 					break;
+				}
 
 				/* is it a page cache page? */
 				if (page->inode) {
 					remove_page_from_hash_queue(page);
 					remove_page_from_inode_queue(page);
-					free_page(page_address(page));
+					__free_page(page);
 					return 1;
 				}
 
 				/* is it a buffer cache page? */
-				if (bh && try_to_free_buffer(bh, &bh, 6))
+				if (free_buf && bh && try_to_free_buffer(bh, &bh, 6))
 					return 1;
 				break;
 
@@ -254,13 +249,14 @@ void update_vm_cache(struct inode * inode, unsigned long pos, const char * buf, 
 }
 
 static inline void add_to_page_cache(struct page * page,
-	struct inode * inode, unsigned long offset)
+	struct inode * inode, unsigned long offset,
+	struct page **hash)
 {
 	page->count++;
 	page->flags &= ~((1 << PG_uptodate) | (1 << PG_error));
 	page->offset = offset;
 	add_page_to_inode_queue(inode, page);
-	add_page_to_hash_queue(inode, page);
+	__add_page_to_hash_queue(page, hash);
 }
 
 /*
@@ -271,32 +267,31 @@ static inline void add_to_page_cache(struct page * page,
 static unsigned long try_to_read_ahead(struct inode * inode, unsigned long offset, unsigned long page_cache)
 {
 	struct page * page;
+	struct page ** hash;
 
 	offset &= PAGE_MASK;
-	if (!page_cache) {
+	switch (page_cache) {
+	case 0:
 		page_cache = __get_free_page(GFP_KERNEL);
 		if (!page_cache)
-			return 0;
-	}
-	if (offset >= inode->i_size)
-		return page_cache;
-#if 1
-	page = find_page(inode, offset);
-	if (page) {
+			break;
+	default:
+		if (offset >= inode->i_size)
+			break;
+		hash = page_hash(inode, offset);
+		page = __find_page(inode, offset, *hash);
+		if (!page) {
+			/*
+			 * Ok, add the new page to the hash-queues...
+			 */
+			page = mem_map + MAP_NR(page_cache);
+			add_to_page_cache(page, inode, offset, hash);
+			inode->i_op->readpage(inode, page);
+			page_cache = 0;
+		}
 		release_page(page);
-		return page_cache;
 	}
-	/*
-	 * Ok, add the new page to the hash-queues...
-	 */
-	page = mem_map + MAP_NR(page_cache);
-	add_to_page_cache(page, inode, offset);
-	inode->i_op->readpage(inode, page);
-	free_page(page_cache);
-	return 0;
-#else
 	return page_cache;
-#endif
 }
 
 /* 
@@ -328,9 +323,9 @@ repeat:
 #endif
 
 /*
- * Read-ahead profiling informations
- * ---------------------------------
- * Every PROFILE_MAXREADCOUNT, the following informations are written 
+ * Read-ahead profiling information
+ * --------------------------------
+ * Every PROFILE_MAXREADCOUNT, the following information is written 
  * to the syslog:
  *   Percentage of asynchronous read-ahead.
  *   Average of read-ahead fields context value.
@@ -415,7 +410,7 @@ static void profile_readahead(int async, struct file *filp)
  * Reasonable means, in this context, not too large but not too small.
  * The actual maximum value is:
  *	MAX_READAHEAD + PAGE_SIZE = 76k is CONFIG_READA_SMALL is undefined
- *      and 32K if defined.
+ *      and 32K if defined (4K page size assumed).
  *
  * Asynchronous read-ahead benefits:
  * ---------------------------------
@@ -442,25 +437,26 @@ static void profile_readahead(int async, struct file *filp)
  * - The total memory pool usage for the file access stream.
  *   This maximum memory usage is implicitly 2 IO read chunks:
  *   2*(MAX_READAHEAD + PAGE_SIZE) = 156K if CONFIG_READA_SMALL is undefined,
- *   64k if defined.
+ *   64k if defined (4K page size assumed).
  */
 
-#if 0 /* small readahead */
-#define MAX_READAHEAD (PAGE_SIZE*7)
-#define MIN_READAHEAD (PAGE_SIZE*2)
-#else
-#define MAX_READAHEAD (PAGE_SIZE*18)
-#define MIN_READAHEAD (PAGE_SIZE*3)
+#define PageAlignSize(size) (((size) + PAGE_SIZE -1) & PAGE_MASK)
+
+#ifdef CONFIG_READA_SMALL  /* small readahead */
+#define MAX_READAHEAD PageAlignSize(4096*7)
+#define MIN_READAHEAD PageAlignSize(4096*2)
+#else /* large readahead */
+#define MAX_READAHEAD PageAlignSize(4096*18)
+#define MIN_READAHEAD PageAlignSize(4096*3)
 #endif
 
 static inline unsigned long generic_file_readahead(int reada_ok, struct file * filp, struct inode * inode,
-	unsigned long pos, struct page * page,
+	unsigned long ppos, struct page * page,
 	unsigned long page_cache)
 {
 	unsigned long max_ahead, ahead;
-	unsigned long raend, ppos;
+	unsigned long raend;
 
-	ppos = pos & PAGE_MASK;
 	raend = filp->f_raend & PAGE_MASK;
 	max_ahead = 0;
 
@@ -604,7 +600,7 @@ int generic_file_read(struct inode * inode, struct file * filp, char * buf, int 
 	} else {
 		unsigned long needed;
 
-		needed = ((pos + count) & PAGE_MASK) - (pos & PAGE_MASK);
+		needed = ((pos + count) & PAGE_MASK) - ppos;
 
 		if (filp->f_ramax < needed)
 			filp->f_ramax = needed;
@@ -616,7 +612,7 @@ int generic_file_read(struct inode * inode, struct file * filp, char * buf, int 
 	}
 
 	for (;;) {
-		struct page *page;
+		struct page *page, **hash;
 
 		if (pos >= inode->i_size)
 			break;
@@ -624,7 +620,8 @@ int generic_file_read(struct inode * inode, struct file * filp, char * buf, int 
 		/*
 		 * Try to find the data in the page cache..
 		 */
-		page = find_page(inode, pos & PAGE_MASK);
+		hash = page_hash(inode, pos & PAGE_MASK);
+		page = __find_page(inode, pos & PAGE_MASK, *hash);
 		if (!page)
 			goto no_cached_page;
 
@@ -637,7 +634,7 @@ found_page:
  * the page has been rewritten.
  */
 		if (PageUptodate(page) || PageLocked(page))
-			page_cache = generic_file_readahead(reada_ok, filp, inode, pos, page, page_cache);
+			page_cache = generic_file_readahead(reada_ok, filp, inode, pos & PAGE_MASK, page, page_cache);
 		else if (reada_ok && filp->f_ramax > MIN_READAHEAD)
 				filp->f_ramax = MIN_READAHEAD;
 
@@ -666,8 +663,15 @@ success:
 		pos += nr;
 		read += nr;
 		count -= nr;
-		if (count)
+		if (count) {
+			/*
+			 * to prevent hogging the CPU on well-cached systems,
+			 * schedule if needed, it's safe to do it here:
+			 */
+			if (need_resched)
+				schedule();
 			continue;
+		}
 		break;
 	}
 
@@ -693,7 +697,7 @@ no_cached_page:
 		 */
 		page = mem_map + MAP_NR(page_cache);
 		page_cache = 0;
-		add_to_page_cache(page, inode, pos & PAGE_MASK);
+		add_to_page_cache(page, inode, pos & PAGE_MASK, hash);
 
 		/*
 		 * Error handling is tricky. If we get a read error,
@@ -740,10 +744,7 @@ page_read_error:
 	filp->f_reada = 1;
 	if (page_cache)
 		free_page(page_cache);
-	if (!IS_RDONLY(inode)) {
-		inode->i_atime = CURRENT_TIME;
-		inode->i_dirt = 1;
-	}
+	UPDATE_ATIME(inode)
 	if (!read)
 		read = error;
 	return read;
@@ -761,7 +762,7 @@ page_read_error:
 static unsigned long filemap_nopage(struct vm_area_struct * area, unsigned long address, int no_share)
 {
 	unsigned long offset;
-	struct page * page;
+	struct page * page, **hash;
 	struct inode * inode = area->vm_inode;
 	unsigned long old_page, new_page;
 
@@ -773,16 +774,25 @@ static unsigned long filemap_nopage(struct vm_area_struct * area, unsigned long 
 	/*
 	 * Do we have something in the page cache already?
 	 */
-	page = find_page(inode, offset);
+	hash = page_hash(inode, offset);
+	page = __find_page(inode, offset, *hash);
 	if (!page)
 		goto no_cached_page;
 
 found_page:
 	/*
 	 * Ok, found a page in the page cache, now we need to check
-	 * that it's up-to-date
+	 * that it's up-to-date.  First check whether we'll need an
+	 * extra page -- better to overlap the allocation with the I/O.
 	 */
-	wait_on_page(page);
+	if (no_share && !new_page) {
+		new_page = __get_free_page(GFP_KERNEL);
+		if (!new_page)
+			goto failure;
+	}
+
+	if (PageLocked(page))
+		goto page_locked_wait;
 	if (!PageUptodate(page))
 		goto page_read_error;
 
@@ -805,13 +815,8 @@ success:
 	}
 
 	/*
-	 * Check that we have another page to copy it over to..
+	 * No sharing ... copy to the new page.
 	 */
-	if (!new_page) {
-		new_page = __get_free_page(GFP_KERNEL);
-		if (!new_page)
-			goto failure;
-	}
 	memcpy((void *) new_page, (void *) old_page, PAGE_SIZE);
 	flush_page_to_ram(new_page);
 	release_page(page);
@@ -837,7 +842,7 @@ no_cached_page:
 	 */
 	page = mem_map + MAP_NR(new_page);
 	new_page = 0;
-	add_to_page_cache(page, inode, offset);
+	add_to_page_cache(page, inode, offset, hash);
 
 	if (inode->i_op->readpage(inode, page) != 0)
 		goto failure;
@@ -849,6 +854,11 @@ no_cached_page:
 		new_page = try_to_read_ahead(inode, offset + PAGE_SIZE, 0);
 	goto found_page;
 
+page_locked_wait:
+	__wait_on_page(page);
+	if (PageUptodate(page))
+		goto success;
+	
 page_read_error:
 	/*
 	 * Umm, take care of errors if the page isn't up-to-date.
@@ -870,6 +880,8 @@ page_read_error:
 	 */
 failure:
 	release_page(page);
+	if (new_page)
+		free_page(new_page);
 no_page:
 	return 0;
 }
@@ -993,6 +1005,8 @@ static inline int filemap_sync_pte(pte_t * ptep, struct vm_area_struct *vma,
 	unsigned long page;
 	int error;
 
+	if (pte_none(pte))
+		return 0;
 	if (!(flags & MS_INVALIDATE)) {
 		if (!pte_present(pte))
 			return 0;
@@ -1005,8 +1019,6 @@ static inline int filemap_sync_pte(pte_t * ptep, struct vm_area_struct *vma,
 		page = pte_page(pte);
 		mem_map[MAP_NR(page)].count++;
 	} else {
-		if (pte_none(pte))
-			return 0;
 		flush_cache_page(vma, address);
 		pte_clear(ptep);
 		flush_tlb_page(vma, address);
@@ -1168,10 +1180,7 @@ int generic_file_mmap(struct inode * inode, struct file * file, struct vm_area_s
 		return -EACCES;
 	if (!inode->i_op || !inode->i_op->readpage)
 		return -ENOEXEC;
-	if (!IS_RDONLY(inode)) {
-		inode->i_atime = CURRENT_TIME;
-		inode->i_dirt = 1;
-	}
+	UPDATE_ATIME(inode)
 	vma->vm_inode = inode;
 	inode->i_count++;
 	vma->vm_ops = ops;
@@ -1186,9 +1195,7 @@ int generic_file_mmap(struct inode * inode, struct file * file, struct vm_area_s
 static int msync_interval(struct vm_area_struct * vma,
 	unsigned long start, unsigned long end, int flags)
 {
-	if (!vma->vm_inode)
-		return 0;
-	if (vma->vm_ops->sync) {
+	if (vma->vm_inode && vma->vm_ops && vma->vm_ops->sync) {
 		int error;
 		error = vma->vm_ops->sync(vma, start, end-start, flags);
 		if (error)
@@ -1220,7 +1227,7 @@ asmlinkage int sys_msync(unsigned long start, size_t len, int flags)
 	 * If the interval [start,end) covers some unmapped address ranges,
 	 * just ignore them, but return -EFAULT at the end.
 	 */
-	vma = find_vma(current, start);
+	vma = find_vma(current->mm, start);
 	unmapped_error = 0;
 	for (;;) {
 		/* Still start < end. */

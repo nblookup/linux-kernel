@@ -1,18 +1,8 @@
 This is a subset of the documentation. To use this driver you MUST have the
-full package from:
-
-Internet:
-=========
-
-ftp.ucsd.edu:/hamradio/packet/tcpip/incoming/z8530drv-2.0.dl1bke.real.tar.gz
-
-[
-  if you can't find it there, try:
-  .../tcpip/linux/z8530drv-2.0.dl1bke.tar.gz
-
-]
-
-and various mirrors (i.e. nic.switch.ch)
+full package "z8530drv-2.4c.dl1bke.tar.gz" from either ftp.pspt.fi, 
+sunsite.unc.edu or db0bm.automation.fh-aachen.de. Do not try to use the
+utilities from z8530drv-utils-3.0 as they will not work with the 2.4 series
+of the driver!
 
 ---------------------------------------------------------------------------
 
@@ -21,7 +11,7 @@ and various mirrors (i.e. nic.switch.ch)
 
    ********************************************************************
 
-        (c) 1993,1995 by Joerg Reuter DL1BKE
+        (c) 1993,1997 by Joerg Reuter DL1BKE
 
         portions (c) 1993 Guido ten Dolle PE1NNZ
 
@@ -248,7 +238,7 @@ speed 1200		# the default baudrate
 clock dpll		# clock source: 
 			# 	dpll     = normal halfduplex operation
 			# 	external = MODEM provides own Rx/Tx clock
-			#	divider  = use fullduplex divider if
+			#	divider  = use full duplex divider if
 			#		   installed (1)
 mode nrzi		# HDLC encoding mode
 			#	nrzi = 1k2 MODEM, G3RUH 9k6 MODEM
@@ -473,7 +463,7 @@ speed:
      Example: sccparam /dev/scc3 speed 9600
 
 txdelay:
-     The delay (in units of 10ms) after keying of the 
+     The delay (in units of 10 ms) after keying of the 
      transmitter, until the first byte is sent. This is usually 
      called "TXDELAY" in a TNC.  When 0 is specified, the driver 
      will just wait until the CTS signal is asserted. This 
@@ -495,7 +485,7 @@ persist:
 
 slottime:
      This is the time between samples of the channel. It is 
-     expressed in units of 10ms.  About 200-300 ms (value 20-30) 
+     expressed in units of 10 ms.  About 200-300 ms (value 20-30) 
      seems to be a good value.
 
      Example: sccparam /dev/scc0 slot 20
@@ -507,7 +497,7 @@ tail:
      SCC before the transmitter is keyed down. The value depends 
      on the baudrate selected.  A few character times should be 
      sufficient, e.g. 40ms at 1200 baud. (value 4)
-     The value of this parameter is in 10ms units.
+     The value of this parameter is in 10 ms units.
 
      Example: sccparam /dev/scc2 4
 
@@ -530,9 +520,9 @@ full:
 wait:
      The initial waittime before any transmit attempt, after the 
      frame has been queue for transmit.  This is the length of 
-     the first slot in CSMA mode.  In fullduplex modes it is
+     the first slot in CSMA mode.  In full duplex modes it is
      set to 0 for maximum performance.
-     The value of this parameter is in 10ms units. 
+     The value of this parameter is in 10 ms units. 
 
      Example: sccparam /dev/scc1 wait 4
 
@@ -557,7 +547,7 @@ min:
      Example: sccparam /dev/scc3 min 10
 
 idle
-     This parameter specifies the maximum idle time in fullduplex 
+     This parameter specifies the maximum idle time in full duplex 
      2 mode, in seconds.  When no frames have been sent for this 
      time, the transmitter will be keyed down.  A value of 0 is
      has same result as the fullduplex mode 1. This parameter
@@ -787,5 +777,5 @@ Many thanks to Linus Torvalds and Alan Cox for including the driver
 in the Linux standard distribution and their support.
 
 Joerg Reuter	ampr-net: dl1bke@db0pra.ampr.org
-		AX-25   : DL1BKE @ DB0ACH.#NRW.DEU.EU
-		Internet: jreuter@lykos.tng.oche.de
+		WWW     : http://www.rat.de/jr
+		Internet: jreuter@poboxes.com

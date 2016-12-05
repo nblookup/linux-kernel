@@ -112,21 +112,21 @@ struct vm_operations_struct {
  * here (16 bytes or greater).  This ordering should be particularly
  * beneficial on 32-bit processors.
  *
- * The first line is data used in linear searches (eg. clock algorithm
- * scans).  The second line is data used in page searches through the
- * page-cache.  -- sct 
+ * The first line is data used in page cache lookup, the second line
+ * is used for linear searches (eg. clock algorithm scans). 
  */
 typedef struct page {
+	/* these must be first (free area handling) */
+	struct page *next;
+	struct page *prev;
+	struct inode *inode;
+	unsigned long offset;
+	struct page *next_hash;
 	atomic_t count;
+	unsigned flags;	/* atomic flags, some possibly updated asynchronously */
 	unsigned dirty:16,
 		 age:8;
-	unsigned flags;	/* atomic flags, some possibly updated asynchronously */
 	struct wait_queue *wait;
-	struct page *next;
-	struct page *next_hash;
-	unsigned long offset;
-	struct inode *inode;
-	struct page *prev;
 	struct page *prev_hash;
 	struct buffer_head * buffers;
 	unsigned long swap_unlock_entry;
@@ -248,6 +248,7 @@ extern inline unsigned long get_free_page(int priority)
 
 #define free_page(addr) free_pages((addr),0)
 extern void free_pages(unsigned long addr, unsigned long order);
+extern void __free_page(struct page *);
 
 extern void show_free_areas(void);
 extern unsigned long put_dirty_page(struct task_struct * tsk,unsigned long page,
@@ -284,8 +285,8 @@ extern int vread(char *buf, char *addr, int count);
 /* mmap.c */
 extern unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	unsigned long prot, unsigned long flags, unsigned long off);
-extern void merge_segments(struct task_struct *, unsigned long, unsigned long);
-extern void insert_vm_struct(struct task_struct *, struct vm_area_struct *);
+extern void merge_segments(struct mm_struct *, unsigned long, unsigned long);
+extern void insert_vm_struct(struct mm_struct *, struct vm_area_struct *);
 extern void remove_shared_vm_struct(struct vm_area_struct *);
 extern void build_mmap_avl(struct mm_struct *);
 extern void exit_mmap(struct mm_struct *);
@@ -294,7 +295,7 @@ extern unsigned long get_unmapped_area(unsigned long, unsigned long);
 
 /* filemap.c */
 extern unsigned long page_unuse(unsigned long);
-extern int shrink_mmap(int, int);
+extern int shrink_mmap(int, int, int);
 extern void truncate_inode_pages(struct inode *, unsigned long);
 
 #define GFP_BUFFER	0x00
@@ -303,6 +304,7 @@ extern void truncate_inode_pages(struct inode *, unsigned long);
 #define GFP_KERNEL	0x03
 #define GFP_NOBUFFER	0x04
 #define GFP_NFS		0x05
+#define GFP_IO		0x06
 
 /* Flag - indicates that the buffer will be suitable for DMA.  Ignored on some
    platforms, used as appropriate on others */
@@ -318,9 +320,12 @@ static inline int expand_stack(struct vm_area_struct * vma, unsigned long addres
 	unsigned long grow;
 
 	address &= PAGE_MASK;
-	if (vma->vm_end - address > current->rlim[RLIMIT_STACK].rlim_cur)
-		return -ENOMEM;
 	grow = vma->vm_start - address;
+	if (vma->vm_end - address
+	    > (unsigned long) current->rlim[RLIMIT_STACK].rlim_cur ||
+	    (vma->vm_mm->total_vm << PAGE_SHIFT) + grow
+	    > (unsigned long) current->rlim[RLIMIT_AS].rlim_cur)
+		return -ENOMEM;
 	vma->vm_start = address;
 	vma->vm_offset -= grow;
 	vma->vm_mm->total_vm += grow >> PAGE_SHIFT;
@@ -332,12 +337,12 @@ static inline int expand_stack(struct vm_area_struct * vma, unsigned long addres
 #define avl_empty	(struct vm_area_struct *) NULL
 
 /* Look up the first VMA which satisfies  addr < vm_end,  NULL if none. */
-static inline struct vm_area_struct * find_vma (struct task_struct * task, unsigned long addr)
+static inline struct vm_area_struct * find_vma(struct mm_struct * mm, unsigned long addr)
 {
 	struct vm_area_struct * result = NULL;
 
-	if (task->mm) {
-		struct vm_area_struct * tree = task->mm->mmap_avl;
+	if (mm) {
+		struct vm_area_struct * tree = mm->mmap_avl;
 		for (;;) {
 			if (tree == avl_empty)
 				break;
@@ -355,13 +360,13 @@ static inline struct vm_area_struct * find_vma (struct task_struct * task, unsig
 
 /* Look up the first VMA which intersects the interval start_addr..end_addr-1,
    NULL if none.  Assume start_addr < end_addr. */
-static inline struct vm_area_struct * find_vma_intersection (struct task_struct * task, unsigned long start_addr, unsigned long end_addr)
+static inline struct vm_area_struct * find_vma_intersection(struct mm_struct * mm, unsigned long start_addr, unsigned long end_addr)
 {
 	struct vm_area_struct * vma;
 
-	vma = find_vma(task,start_addr);
-	if (!vma || end_addr <= vma->vm_start)
-		return NULL;
+	vma = find_vma(mm,start_addr);
+	if (vma && end_addr <= vma->vm_start)
+		vma = NULL;
 	return vma;
 }
 

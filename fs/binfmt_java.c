@@ -10,7 +10,6 @@
 #include <linux/stat.h>
 #include <linux/malloc.h>
 #include <linux/binfmts.h>
-#include <paths.h>
 
 #define _PATH_JAVA	"/usr/bin/java"
 #define _PATH_APPLET	"/usr/bin/appletviewer"
@@ -63,8 +62,8 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 		i_name = bprm->buf;
 	bprm->p = copy_strings(1, &i_name, bprm->page, bprm->p, 2);
 	bprm->argc++;
-	if (!bprm->p) 
-		return -E2BIG;
+	if ((long)bprm->p < 0)
+		return (long)bprm->p;
 	/*
 	 * OK, now restart the process with the interpreter's inode.
 	 * Note that we use open_namei() as the name is now in kernel
@@ -93,7 +92,7 @@ static int do_load_applet(struct linux_binprm *bprm,struct pt_regs *regs)
 
 	/*
 	 * OK, we've set the interpreter name
-	 * Splice in (1) the interpreter's name for argv[0] (_PATH_BSHELL)
+	 * Splice in (1) the interpreter's name for argv[0] (_PATH_SH)
 	 *           (2) the name of the appletviewer wrapper for argv[1] (_PATH_APPLET)
 	 *           (3) filename of html file (replace argv[0])
 	 *
@@ -118,8 +117,8 @@ static int do_load_applet(struct linux_binprm *bprm,struct pt_regs *regs)
 		i_name = bprm->buf;
 	bprm->p = copy_strings(1, &i_name, bprm->page, bprm->p, 2);
 	bprm->argc++;
-	if (!bprm->p) 
-		return -E2BIG;
+	if ((long)bprm->p < 0)
+		return (long)bprm->p;
 	/*
 	 * OK, now restart the process with the interpreter's inode.
 	 * Note that we use open_namei() as the name is now in kernel

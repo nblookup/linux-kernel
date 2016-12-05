@@ -14,7 +14,7 @@
  *                      EVERY character on the current page.
  *                      <middelin@polyware.iaf.nl>
  *
- * Danny ter Haar    :	added cpuinfo 
+ * Danny ter Haar    :	added cpuinfo
  *			<dth@cistron.nl>
  *
  * Alessandro Rubini :  profile extension.
@@ -25,6 +25,11 @@
  *
  * Bruno Haible      :  remove 4K limit for the maps file
  * <haible@ma2s2.mathematik.uni-karlsruhe.de>
+ *
+ * Yves Arrouye      :  remove removal of trailing spaces in get_array.
+ *			<Yves.Arrouye@marin.fdn.fr>
+ *
+ * Alan Cox	     :  security fixes. <Alan.Cox@linux.org>
  */
 
 #include <linux/types.h>
@@ -55,6 +60,7 @@
 int get_malloc(char * buffer);
 #endif
 
+extern unsigned long get_wchan(struct task_struct *);
 
 static int read_core(struct inode * inode, struct file * file,char * buf, int count)
 {
@@ -304,7 +310,7 @@ static int get_meminfo(char * buffer)
 
 static int get_version(char * buffer)
 {
-	extern char *linux_banner;
+	extern const char *linux_banner;
 
 	strcpy(buffer, linux_banner);
 	return strlen(buffer);
@@ -370,7 +376,7 @@ static int get_array(struct task_struct ** p, unsigned long start, unsigned long
 	for (;;) {
 		addr = get_phys_addr(*p, start);
 		if (!addr)
-			goto ready;
+			return result;
 		do {
 			c = *(char *) addr;
 			if (!c)
@@ -378,17 +384,13 @@ static int get_array(struct task_struct ** p, unsigned long start, unsigned long
 			if (size < PAGE_SIZE)
 				buffer[size++] = c;
 			else
-				goto ready;
+				return result;
 			addr++;
 			start++;
 			if (!c && start >= end)
-				goto ready;
+				return result;
 		} while (addr & ~PAGE_MASK);
 	}
-ready:
-	/* remove the trailing blanks, used to fill out argv,envp space */
-	while (result>0 && buffer[result-1]==' ')
-		result--;
 	return result;
 }
 
@@ -408,55 +410,6 @@ static int get_arg(int pid, char * buffer)
 	if (!p || !*p || !(*p)->mm)
 		return 0;
 	return get_array(p, (*p)->mm->arg_start, (*p)->mm->arg_end, buffer);
-}
-
-static unsigned long get_wchan(struct task_struct *p)
-{
-	if (!p || p == current || p->state == TASK_RUNNING)
-		return 0;
-#if defined(__i386__)
-	{
-		unsigned long ebp, eip;
-		unsigned long stack_page;
-		int count = 0;
-
-		stack_page = p->kernel_stack_page;
-		if (!stack_page)
-			return 0;
-		ebp = p->tss.ebp;
-		do {
-			if (ebp < stack_page || ebp >= 4092+stack_page)
-				return 0;
-			eip = *(unsigned long *) (ebp+4);
-			if ((void *)eip != sleep_on &&
-			    (void *)eip != interruptible_sleep_on)
-				return eip;
-			ebp = *(unsigned long *) ebp;
-		} while (count++ < 16);
-	}
-#elif defined(__alpha__)
-	/*
-	 * This one depends on the frame size of schedule().  Do a
-	 * "disass schedule" in gdb to find the frame size.  Also, the
-	 * code assumes that sleep_on() follows immediately after
-	 * interruptible_sleep_on() and that add_timer() follows
-	 * immediately after interruptible_sleep().  Ugly, isn't it?
-	 * Maybe adding a wchan field to task_struct would be better,
-	 * after all...
-	 */
-	{
-	    unsigned long schedule_frame;
-	    unsigned long pc;
-
-	    pc = thread_saved_pc(&p->tss);
-	    if (pc >= (unsigned long) interruptible_sleep_on && pc < (unsigned long) add_timer) {
-		schedule_frame = ((unsigned long *)p->tss.ksp)[6];
-		return ((unsigned long *)schedule_frame)[12];
-	    }
-	    return pc;
-	}
-#endif
-	return 0;
 }
 
 #if defined(__i386__)
@@ -657,6 +610,7 @@ static int get_stat(int pid, char * buffer)
 			vsize += vma->vm_end - vma->vm_start;
 			vma = vma->vm_next;
 		}
+		if ((current->fsuid == tsk->euid && tsk->dumpable) || suser())
 		if (tsk->kernel_stack_page) {
 			eip = KSTK_EIP(tsk);
 			esp = KSTK_ESP(tsk);
@@ -861,8 +815,16 @@ static int get_statm(int pid, char * buffer)
  * f_pos = (number of the vma in the task->mm->mmap list) * MAPS_LINE_LENGTH
  *         + (index into the line)
  */
-#define MAPS_LINE_FORMAT	  "%08lx-%08lx %s %08lx %s %lu\n"
-#define MAPS_LINE_MAX	49 /* sum of 8  1  8  1 4 1 8 1 5 1 10 1 */
+/* for systems with sizeof(void*) == 4: */
+#define MAPS_LINE_FORMAT4	  "%08lx-%08lx %s %08lx %s %lu\n"
+#define MAPS_LINE_MAX4	49 /* sum of 8  1  8  1 4 1 8 1 5 1 10 1 */
+
+/* for systems with sizeof(void*) == 8: */
+#define MAPS_LINE_FORMAT8	  "%016lx-%016lx %s %016lx %s %lu\n"
+#define MAPS_LINE_MAX8	73 /* sum of 16  1  16  1 4 1 16 1 5 1 10 1 */
+
+#define MAPS_LINE_MAX	MAPS_LINE_MAX8
+
 
 static int read_maps (int pid, struct file * file, char * buf, int count)
 {
@@ -914,7 +876,8 @@ static int read_maps (int pid, struct file * file, char * buf, int count)
 			ino = 0;
 		}
 
-		len = sprintf(line, MAPS_LINE_FORMAT,
+		len = sprintf(line,
+			      sizeof(void*) == 4 ? MAPS_LINE_FORMAT4 : MAPS_LINE_FORMAT8,
 			      map->vm_start, map->vm_end, str, map->vm_offset,
 			      kdevname(dev), ino);
 
@@ -967,7 +930,7 @@ extern int get_cpuinfo(char *);
 extern int get_pci_list(char*);
 extern int get_md_status (char *);
 extern int get_rtc_status (char *);
-extern int get_locks_status (char *);
+extern int get_locks_status (char *, char **, off_t, int);
 #ifdef __SMP_PROF__
 extern int get_smp_prof_list(char *);
 #endif
@@ -1043,10 +1006,32 @@ static int get_root_array(char * page, int type, char **start, off_t offset, int
 			return get_rtc_status(page);
 #endif
 		case PROC_LOCKS:
-			return get_locks_status(page);
+			return get_locks_status(page, start, offset, length);
 	}
 	return -EBADF;
 }
+
+static int process_unauthorized(int type, int pid)
+{
+	struct task_struct ** p = get_task(pid);
+
+	if (!p || !*p || !(*p)->mm)
+		return 1;
+
+	switch(type)
+	{
+		case PROC_PID_STATUS:
+		case PROC_PID_STATM:
+		case PROC_PID_STAT:
+		case PROC_PID_MAPS:
+		case PROC_PID_CMDLINE:
+			return 0;	
+	}
+	if ((current->fsuid == (*p)->euid && (*p)->dumpable) || suser())
+		return 0;
+	return 1;
+}
+
 
 static int get_process_array(char * page, int pid, int type)
 {
@@ -1095,6 +1080,13 @@ static int array_read(struct inode * inode, struct file * file,char * buf, int c
 	type &= 0x0000ffff;
 	start = NULL;
 	dp = (struct proc_dir_entry *) inode->u.generic_ip;
+	
+	if (pid && process_unauthorized(type, pid))
+	{
+		free_page(page);
+		return -EIO;
+	}
+	
 	if (dp->get_info)
 		length = dp->get_info((char *)page, &start, file->f_pos,
 				      count, 0);

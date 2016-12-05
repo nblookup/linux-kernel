@@ -17,6 +17,27 @@
          
 	**********************
 	
+	v2.56 (96/10/18)
+	  - Turned arc0e/arc0s startup messages back on by default, as most
+	    people will probably not notice the additional devices
+	    otherwise, and experience more protocol confusion than
+	    necessary.
+	  - Fixed a tiny but noticeable bug in the packet debugging routines
+	    (thanks Tomasz)
+
+	v2.55 (96/08/05)
+	  - A couple more messages moved to D_EXTRA.
+	  - SLOW_XMIT_COPY off by default.
+	  - Some tiny changes.
+	
+	v2.54 (96/07/05)
+	  - Under some situations, Stage 5 autoprobe was a little bit too
+	    picky about the TXACK flag.
+	  - D_EXTRA removed from default debugging flags.  Hey, it's stable,
+	    right?
+	  - Removed redundant "unknown protocol ID" messages and made remaining
+	    ones D_EXTRA.
+	
 	v2.53 (96/06/06)
 	  - arc0e and arc0s wouldn't initialize in newer kernels, which
 	    don't like dev->open==NULL or dev->stop==NULL.
@@ -146,14 +167,19 @@
          
 	TO DO: (semi-prioritized)
 	
-         - Smarter recovery from RECON-during-transmit conditions.
+         - Support "arpless" mode like NetBSD does, and as recommended
+           by the (obsoleted) RFC1051.
+         - Smarter recovery from RECON-during-transmit conditions. (ie.
+           retransmit immediately)
          - Make arcnetE_send_packet use arcnet_prepare_tx for loading the
            packet into ARCnet memory.
-	 - Probe for multiple devices in one shot (trying to decide whether
-	   to do it the "ugly" way or not).
-         - Add support for the new 1.3.x IP header cache features.
-	 - Debug level should be changed with a system call, not a hack to
-	   the "metric" flag.
+         - Some cards have shared memory with 4k mirrors instead of just 2k,
+           so we (uneventfully) find the "wrong" shmem when probing.
+         - Probe for multiple devices in one shot (trying to decide whether
+           to do it the "ugly" way or not).
+         - Add support for the new 1.3.x IP header cache, and other features.
+         - Debug level should be changed with a system call, not a hack to
+           the "metric" flag.
          - What about cards with shared memory that can be "turned off?"
            (or that have none at all, like the SMC PC500longboard)
          - Autoconfigure PDI5xxPlus cards. (I now have a PDI508Plus to play
@@ -184,7 +210,7 @@
 */
 
 static const char *version =
- "arcnet.c: v2.53 96/06/06 Avery Pennarun <apenwarr@foxnet.net>\n";
+ "arcnet.c: v2.56 96/10/18 Avery Pennarun <apenwarr@foxnet.net>\n";
 
  
 
@@ -236,11 +262,11 @@ static const char *version =
  * defines; ARCnet probably is not the only driver that can screw up an
  * ftape DMA transfer.
  *
- * Turn this off if you don't have timing-sensitive DMA (ie. a tape drive)
- * and would like the little bit of speed back.  It's on by default because
- * - trust me - it's very difficult to figure out that you need it!
+ * Turn this on if you have timing-sensitive DMA (ie. a tape drive) and
+ * would like to sacrifice a little bit of network speed to reduce tape
+ * write retries or some related problem.
  */
-#define SLOW_XMIT_COPY
+#undef SLOW_XMIT_COPY
 
 /* The card sends the reconfiguration signal when it loses the connection to
  * the rest of its network. It is a 'Hello, is anybody there?' cry.  This
@@ -341,13 +367,13 @@ static const char *version =
 #endif
 
 #ifndef ARCNET_DEBUG
-#define ARCNET_DEBUG (D_NORMAL|D_EXTRA)
+#define ARCNET_DEBUG (D_NORMAL)
 #endif
 int arcnet_debug = ARCNET_DEBUG;
 
 /* macros to simplify debug checking */
 #define BUGLVL(x) if ((ARCNET_DEBUG_MAX)&arcnet_debug&(x))
-#define BUGMSG2(x,msg,args...) BUGLVL(x) printk(msg, ## args)
+#define BUGMSG2(x,msg,args...) do{BUGLVL(x) printk(msg, ## args);}while(0)
 #define BUGMSG(x,msg,args...) BUGMSG2(x,"%s%6s: " msg, \
             x==D_NORMAL	? KERN_WARNING : \
       x<=D_INIT_REASONS	? KERN_INFO    : KERN_DEBUG , \
@@ -690,8 +716,7 @@ void arcnet_dump_skb(struct device *dev,struct sk_buff *skb,char *desc)
         {
 		if (i%16==0)
 			printk("\n" KERN_DEBUG "[%04X] ",i);
-		else
-                       	printk("%02X ",((u_char *)skb->data)[i]);
+               	printk("%02X ",((u_char *)skb->data)[i]);
 	}
         printk("\n");
         restore_flags(flags);
@@ -713,8 +738,7 @@ void arcnet_dump_packet(struct device *dev,u_char *buffer,int ext,char *desc)
 	{
 		if (i%16==0)
 			printk("\n" KERN_DEBUG "[%04X] ",i);
-		else
-			printk("%02X ",buffer[i]);
+		printk("%02X ",buffer[i]);
 	}
 	printk("\n");
 	restore_flags(flags);
@@ -736,6 +760,8 @@ void arcnet_dump_packet(struct device *dev,u_char *buffer,int ext,char *desc)
  * NOTE: the list of possible ports/shmems is static, so it is retained
  * across calls to arcnet_probe.  So, if more than one ARCnet probe is made,
  * values that were discarded once will not even be tried again.
+ *
+ * FIXME: grab all devices in one shot and eliminate the big static array.
  */
 int arcnet_probe(struct device *dev)
 {
@@ -757,9 +783,8 @@ int arcnet_probe(struct device *dev)
 			ports[(count-0x200)/16] = count;
 		for (count=0xA0000; count<=0xFF800; count+=2048)
 			shmems[(count-0xA0000)/2048] = count;
-	}
-	else
 		init_once=1;
+	}
 
 	BUGLVL(D_NORMAL) printk(version);
 
@@ -976,7 +1001,7 @@ int arcnet_probe(struct device *dev)
 		ioaddr=*port;
 		status=inb(STATUS);
 		
-		if ((status & 0x9F)
+		if ((status & 0x9D)
 			!= (NORXflag|RECONflag|TXFREEflag|RESETflag))
 		{
 			BUGMSG2(D_INIT_REASONS,"(status=%Xh)\n",status);
@@ -1352,7 +1377,7 @@ arcnet_open(struct device *dev)
 	
 	/* The RFC1201 driver is the default - just store */
 	lp->adev=dev;
-	BUGMSG(D_EXTRA,"ARCnet RFC1201 protocol initialized.\n");
+	BUGMSG(D_NORMAL,"ARCnet RFC1201 protocol initialized.\n");
 
 #ifdef CONFIG_ARCNET_ETH	
 	/* Initialize the ethernet-encap protocol driver */
@@ -1370,7 +1395,7 @@ arcnet_open(struct device *dev)
 	lp->edev->init=arcnetE_init;
 	register_netdev(lp->edev);
 #else
-	BUGMSG(D_EXTRA,"Ethernet-Encap protocol not available (disabled).\n");
+	BUGMSG(D_NORMAL,"Ethernet-Encap protocol not available (disabled).\n");
 #endif
 
 #ifdef CONFIG_ARCNET_1051
@@ -1382,7 +1407,7 @@ arcnet_open(struct device *dev)
 	lp->sdev->init=arcnetS_init;
 	register_netdev(lp->sdev);
 #else
-	BUGMSG(D_EXTRA,"RFC1051 protocol not available (disabled).\n");
+	BUGMSG(D_NORMAL,"RFC1051 protocol not available (disabled).\n");
 #endif
 
 	/* we're started */
@@ -2240,7 +2265,7 @@ arcnet_rx(struct device *dev,int recbuf)
 #endif
 	case ARC_P_LANSOFT: /* don't understand.  fall through. */
 	default:
-		BUGMSG(D_NORMAL,"received unknown protocol %d (%Xh) from station %d.\n",
+		BUGMSG(D_EXTRA,"received unknown protocol %d (%Xh) from station %d.\n",
 			arcsoft[0],arcsoft[0],saddr);
 		lp->stats.rx_errors++;
 		lp->stats.rx_crc_errors++;
@@ -2302,7 +2327,7 @@ arcnetA_rx(struct device *dev,u_char *buf,
 			
 		if (in->skb)	/* already assembling one! */
         	{
-        		BUGMSG(D_NORMAL,"aborting assembly (seq=%d) for unsplit packet (splitflag=%d, seq=%d)\n",
+        		BUGMSG(D_EXTRA,"aborting assembly (seq=%d) for unsplit packet (splitflag=%d, seq=%d)\n",
         			in->sequence,arcsoft->split_flag,
         			arcsoft->sequence);
         		kfree_skb(in->skb,FREE_WRITE);
@@ -2399,7 +2424,7 @@ arcnetA_rx(struct device *dev,u_char *buf,
 
 		if (in->skb && in->sequence!=arcsoft->sequence)
 		{
-			BUGMSG(D_NORMAL,"wrong seq number (saddr=%d, expected=%d, seq=%d, splitflag=%d)\n",
+			BUGMSG(D_EXTRA,"wrong seq number (saddr=%d, expected=%d, seq=%d, splitflag=%d)\n",
 				saddr,in->sequence,arcsoft->sequence,
 				arcsoft->split_flag);
 	        	kfree_skb(in->skb,FREE_WRITE);
@@ -2415,7 +2440,7 @@ arcnetA_rx(struct device *dev,u_char *buf,
 	        		arcsoft->split_flag);
 	        	if (in->skb)	/* already assembling one! */
 	        	{
-	        		BUGMSG(D_NORMAL,"aborting previous (seq=%d) assembly (splitflag=%d, seq=%d)\n",
+	        		BUGMSG(D_EXTRA,"aborting previous (seq=%d) assembly (splitflag=%d, seq=%d)\n",
 	        			in->sequence,arcsoft->split_flag,
 	        			arcsoft->sequence);
 				lp->stats.rx_errors++;
@@ -2429,7 +2454,7 @@ arcnetA_rx(struct device *dev,u_char *buf,
 	        	
 	        	if (in->numpackets>16)
 	        	{
-	        		BUGMSG(D_NORMAL,"incoming packet more than 16 segments; dropping. (splitflag=%d)\n",
+	        		BUGMSG(D_EXTRA,"incoming packet more than 16 segments; dropping. (splitflag=%d)\n",
 	        			arcsoft->split_flag);
 	        		lp->stats.rx_errors++;
 	        		lp->stats.rx_length_errors++;
@@ -2469,7 +2494,7 @@ arcnetA_rx(struct device *dev,u_char *buf,
 			 */			
 			if (!in->skb)
 			{
-				BUGMSG(D_NORMAL,"can't continue split without starting first! (splitflag=%d, seq=%d)\n",
+				BUGMSG(D_EXTRA,"can't continue split without starting first! (splitflag=%d, seq=%d)\n",
 					arcsoft->split_flag,arcsoft->sequence);
 				lp->stats.rx_errors++;
 				lp->stats.rx_missed_errors++;
@@ -2482,7 +2507,7 @@ arcnetA_rx(struct device *dev,u_char *buf,
 				/* harmless duplicate? ignore. */
 				if (packetnum<=in->lastpacket-1)
 				{
-					BUGMSG(D_NORMAL,"duplicate splitpacket ignored! (splitflag=%d)\n",
+					BUGMSG(D_EXTRA,"duplicate splitpacket ignored! (splitflag=%d)\n",
 						arcsoft->split_flag);
 					lp->stats.rx_errors++;
 					lp->stats.rx_frame_errors++;
@@ -2490,7 +2515,7 @@ arcnetA_rx(struct device *dev,u_char *buf,
 				}
 				
 				/* "bad" duplicate, kill reassembly */
-				BUGMSG(D_NORMAL,"out-of-order splitpacket, reassembly (seq=%d) aborted (splitflag=%d, seq=%d)\n",	
+				BUGMSG(D_EXTRA,"out-of-order splitpacket, reassembly (seq=%d) aborted (splitflag=%d, seq=%d)\n",
 					in->sequence,arcsoft->split_flag,
 					arcsoft->sequence);
 	        		kfree_skb(in->skb,FREE_WRITE);
@@ -2733,8 +2758,6 @@ unsigned short arcnetA_type_trans(struct sk_buff *skb,struct device *dev)
 	case ARC_P_NOVELL_EC:
 		return htons(ETH_P_802_3);
 	default:
-		BUGMSG(D_NORMAL,"received packet of unknown protocol id %d (%Xh)\n",
-				head->protocol_id,head->protocol_id);
 		lp->stats.rx_errors++;
 		lp->stats.rx_crc_errors++;
 		return 0;
@@ -2765,7 +2788,7 @@ static int arcnetE_init(struct device *dev)
 	dev->stop=arcnetE_open_close;
 	dev->hard_start_xmit=arcnetE_send_packet;
 
-	BUGMSG(D_EXTRA,"ARCnet Ethernet-Encap protocol initialized.\n");
+	BUGMSG(D_NORMAL,"ARCnet Ethernet-Encap protocol initialized.\n");
 			
 	return 0;
 }
@@ -2945,7 +2968,7 @@ static int arcnetS_init(struct device *dev)
 	dev->hard_start_xmit=arcnetS_send_packet;
 	dev->hard_header=arcnetS_header;
 	dev->rebuild_header=arcnetS_rebuild_header;
-	BUGMSG(D_EXTRA,"ARCnet RFC1051 (NetBSD, AmiTCP) protocol initialized.\n");
+	BUGMSG(D_NORMAL,"ARCnet RFC1051 (NetBSD, AmiTCP) protocol initialized.\n");
 
 	return 0;
 }
@@ -3196,8 +3219,6 @@ unsigned short arcnetS_type_trans(struct sk_buff *skb,struct device *dev)
 	case ARC_P_ARP_RFC1051:	return htons(ETH_P_ARP);
 	case ARC_P_ATALK:   return htons(ETH_P_ATALK); /* untested appletalk */
 	default:
-		BUGMSG(D_NORMAL,"received packet of unknown protocol id %d (%Xh)\n",
-			head->protocol_id,head->protocol_id);
 		lp->stats.rx_errors++;
 		lp->stats.rx_crc_errors++;
 		return 0;
@@ -3227,10 +3248,10 @@ static struct device thiscard = {
 	
 	
 static int io=0x0;	/* <--- EDIT THESE LINES FOR YOUR CONFIGURATION */
-static int irqnum=0;	/* or use the insmod io= irqnum= shmem= options */
+static int irqnum=0;	/* or use the insmod io= irq= shmem= options */
 static int irq=0;
 static int shmem=0;
-static char *device = NULL;
+static char *device = NULL;	/* use eg. device="arc1" to change name */
 
 int
 init_module(void)
@@ -3290,15 +3311,3 @@ cleanup_module(void)
 }
 
 #endif /* MODULE */
-
-
-
-/*
- * Local variables:
- *  compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/net/inet -Wall -Wstrict-prototypes -O6 -m486 -c arcnet.c"
- *  version-control: t
- *  kept-new-versions: 5
- *  tab-width: 8
- * End:
- */
-

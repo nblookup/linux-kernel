@@ -17,7 +17,7 @@
  */
 
 static const char *version = 
-	"Equalizer1996: $Revision: 1.2 $ $Date: 1996/04/11 17:51:52 $ Simon Janes (simon@ncm.com)\n";
+	"Equalizer1996: $Revision: 1.9 $ $Date: 1996/10/12 11:14:37 $ Simon Janes (simon@ncm.com)\n";
 
 /*
  * Sources:
@@ -31,6 +31,9 @@ static const char *version =
 
 /*
  * $Log: eql.c,v $
+ * Revision 1.9  1996/10/12 11:14:37  davem
+ * Quick merge to 2.0.20
+ *
  * Revision 1.2  1996/04/11 17:51:52  guru
  * Added one-line eql_remove_slave patch.
  *
@@ -262,6 +265,7 @@ int eql_init(struct device *dev)
 
 	dev->hard_header	= eql_header; 
 	dev->rebuild_header	= eql_rebuild_header;
+	dev->hard_header_len	= MAX_HEADER; /* enough space for any slave */
 
 	/*
 	 *	Now we undo some of the things that eth_setup does
@@ -375,10 +379,18 @@ static int eql_slave_xmit(struct sk_buff *skb, struct device *dev)
 	if (skb == NULL)
 		return 0;
 
+#if 0
+	/* Make a copy we can free so we don't mess up the skb->dev pointer */
+	skb2 = skb_clone(skb, GFP_ATOMIC);
+
+	if (skb2 == NULL)
+		return 1;
+#endif
+
 	eql_schedule_slaves (eql->queue);
   
-	slave_dev = eql_best_slave_dev (eql->queue);
 	slave = eql_best_slave (eql->queue); 
+	slave_dev = slave ? slave->dev : 0;
 
 	if ( slave_dev != 0 )
 	{
@@ -388,20 +400,48 @@ static int eql_slave_xmit(struct sk_buff *skb, struct device *dev)
 				dev->name, eql_number_slaves (eql->queue), skb->len,
 				slave_dev->name);
 #endif
-		dev_queue_xmit (skb, slave_dev, 1);
-		eql->stats->tx_packets++;
-		slave->bytes_queued += skb->len; 
-	}
-	else
-	{
-		/*
-		 *	The alternative for this is the return 1 and have
-		 *	dev_queue_xmit just queue it up on the eql's queue. 
+
+		/* Rip off the fake header */
+		skb_pull(skb,MAX_HEADER);
+
+		/* The original code had no hard header constructed.
+		 * If a frame is fragmented on EQL and then passed to PPP,
+		 * or ISDN, the result will be a panic.
+		 * The solution is to call the hard_header constructor
+		 * for the device we point to just before we send the packet.
+		 * If this fails we drop the packet.
+		 * We don't know any special parameters for the hard_header
+		 * constructor at this point, so we pass in made up values
+		 * that will cause the constructor to fail on every device
+		 * except those that we are allowed to use EQL on:
+		 * PPP, SLIP and ISDN (in some cases!).
+		 * The worst thing that happens is if some fool
+		 * configures EQL to enslave something that needs
+		 * these parameters it throws out packets.
+		 * This is not an issue for the things EQL is intended for
+		 * anyway, and probably would have crashed the kernel
+		 * or sent garbage down the wire previously.
 		 */
 
-		eql->stats->tx_dropped++;
-		dev_kfree_skb(skb, FREE_WRITE);
-	}	  
+		if (slave_dev->hard_header == NULL
+		|| slave_dev->hard_header(skb,slave_dev,
+			ETH_P_IP,NULL,NULL,skb->len) >= 0) {
+			slave->bytes_queued += skb->len; 
+			dev_queue_xmit (skb, slave_dev, 1);
+			eql->stats->tx_packets++;
+			/* dev_kfree_skb(skb, FREE_WRITE); */
+			return 0;
+		}
+	}
+
+	/*
+	 *	The alternative for this is the return 1 and have
+	 *	dev_queue_xmit just queue it up on the eql's queue. 
+	 */
+
+	eql->stats->tx_dropped++;
+	/* dev_kfree_skb(skb2, FREE_WRITE); */
+	dev_kfree_skb(skb, FREE_WRITE);
 	return 0;
 }
 
@@ -417,7 +457,9 @@ static int  eql_header(struct sk_buff *skb, struct device *dev,
 	   unsigned short type, void *daddr, void *saddr, 
 	   unsigned len)
 {
-	return 0;
+	/* Fake header to keep space during buggy IP fragmentation.  */
+	skb_push(skb,MAX_HEADER);
+	return MAX_HEADER;
 }
 
 
@@ -459,28 +501,35 @@ static int eql_enslave(struct device *dev, slaving_request_t *srqp)
 
 	if (master_dev != 0 && slave_dev != 0)
 	{
-		if (! eql_is_master (slave_dev)  &&   /* slave is not a master */
-			! eql_is_slave (slave_dev)      ) /* slave is not already a slave */
-		{
-			slave_t *s = eql_new_slave ();
-			equalizer_t *eql = (equalizer_t *) master_dev->priv;
-			s->dev = slave_dev;
-			s->priority = srq.priority;
-			s->priority_bps = srq.priority;
-			s->priority_Bps = srq.priority / 8;
-			slave_dev->flags |= IFF_SLAVE;
-			eql_insert_slave (eql->queue, s);
-			return 0;
+		if ((master_dev->flags & IFF_UP) == IFF_UP)
+                {
+			/*slave is not a master & not already a slave:*/
+			if (! eql_is_master (slave_dev)  &&
+			    ! eql_is_slave (slave_dev) )
+			{
+				slave_t *s = eql_new_slave ();
+				equalizer_t *eql = 
+					(equalizer_t *) master_dev->priv;
+				s->dev = slave_dev;
+				s->priority = srq.priority;
+				s->priority_bps = srq.priority;
+				s->priority_Bps = srq.priority / 8;
+				slave_dev->flags |= IFF_SLAVE;
+				eql_insert_slave (eql->queue, s);
+				return 0;
+			}
+#ifdef EQL_DEBUG
+			else if (eql_debug >= 20)
+				printk ("EQL enslave: slave is master or slave is already slave\n");
+#endif  
 		}
 #ifdef EQL_DEBUG
-	if (eql_debug >= 20)
-		printk ("EQL enslave: slave is master or slave is already slave\n");
+		else if (eql_debug >= 20)
+			printk ("EQL enslave: master device not up!\n");
 #endif  
-
-		return -EINVAL;
 	}
 #ifdef EQL_DEBUG
-	if (eql_debug >= 20)
+	else if (eql_debug >= 20)
 		printk ("EQL enslave: master or slave are NULL");
 #endif  
 	return -EINVAL;

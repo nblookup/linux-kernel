@@ -169,6 +169,9 @@
 #define __NR_sched_rr_get_interval	161
 #define __NR_nanosleep		162
 #define __NR_mremap		163
+#define __NR_poll		168
+#define __NR_getpmsg		188
+#define __NR_putpmsg		189
 
 /* XXX - _foo needs to be __foo, while __NR_bar could be _NR_bar. */
 #define _syscall0(type,name) \
@@ -275,6 +278,8 @@ static inline _syscall0(int,pause)
 static inline _syscall0(int,setup)
 static inline _syscall0(int,sync)
 static inline _syscall0(pid_t,setsid)
+static inline _syscall3(int,read,int,fd,char *,buf,off_t,count)
+static inline _syscall3(off_t,lseek,int,fd,off_t,offset,int,count)
 static inline _syscall3(int,write,int,fd,const char *,buf,off_t,count)
 static inline _syscall1(int,dup,int,fd)
 static inline _syscall3(int,execve,const char *,file,char **,argv,char **,envp)

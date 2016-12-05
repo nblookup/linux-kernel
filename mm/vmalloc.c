@@ -157,7 +157,6 @@ static int alloc_area_pages(unsigned long address, unsigned long size)
 	unsigned long end = address + size;
 
 	dir = pgd_offset(&init_mm, address);
-	flush_cache_all();
 	while (address < end) {
 		pmd_t *pmd = pmd_alloc_kernel(dir, address);
 		if (!pmd)
@@ -168,7 +167,7 @@ static int alloc_area_pages(unsigned long address, unsigned long size)
 		address = (address + PGDIR_SIZE) & PGDIR_MASK;
 		dir++;
 	}
-	flush_tlb_all();
+	flush_cache_all();
 	return 0;
 }
 
@@ -306,7 +305,7 @@ void * vremap(unsigned long offset, unsigned long size)
 	void * addr;
 	struct vm_struct * area;
 
-	if (offset < high_memory)
+	if (MAP_NR(offset) < MAP_NR(high_memory))
 		return NULL;
 	if (offset & ~PAGE_MASK)
 		return NULL;

@@ -27,6 +27,8 @@
 int nr_swap_pages = 0;
 int nr_free_pages = 0;
 
+extern struct wait_queue *buffer_wait;
+
 /*
  * Free area management
  *
@@ -36,30 +38,34 @@ int nr_free_pages = 0;
 
 #define NR_MEM_LISTS 6
 
+/* The start of this MUST match the start of "struct page" */
 struct free_area_struct {
-	struct page list;
+	struct page *next;
+	struct page *prev;
 	unsigned int * map;
 };
 
+#define memory_head(x) ((struct page *)(x))
+
 static struct free_area_struct free_area[NR_MEM_LISTS];
 
-static inline void init_mem_queue(struct page * head)
+static inline void init_mem_queue(struct free_area_struct * head)
 {
-	head->next = head;
-	head->prev = head;
+	head->next = memory_head(head);
+	head->prev = memory_head(head);
 }
 
-static inline void add_mem_queue(struct page * head, struct page * entry)
+static inline void add_mem_queue(struct free_area_struct * head, struct page * entry)
 {
 	struct page * next = head->next;
 
-	entry->prev = head;
+	entry->prev = memory_head(head);
 	entry->next = next;
 	next->prev = entry;
 	head->next = entry;
 }
 
-static inline void remove_mem_queue(struct page * head, struct page * entry)
+static inline void remove_mem_queue(struct page * entry)
 {
 	struct page * next = entry->next;
 	struct page * prev = entry->prev;
@@ -85,9 +91,12 @@ static inline void remove_mem_queue(struct page * head, struct page * entry)
 
 /*
  * Buddy system. Hairy. You really aren't expected to understand this
+ *
+ * Hint: -mask = 1+~mask
  */
 static inline void free_pages_ok(unsigned long map_nr, unsigned long order)
 {
+	struct free_area_struct *area = free_area + order;
 	unsigned long index = map_nr >> (1 + order);
 	unsigned long mask = (~0UL) << order;
 	unsigned long flags;
@@ -98,21 +107,33 @@ static inline void free_pages_ok(unsigned long map_nr, unsigned long order)
 #define list(x) (mem_map+(x))
 
 	map_nr &= mask;
-	nr_free_pages += 1 << order;
-	while (order < NR_MEM_LISTS-1) {
-		if (!change_bit(index, free_area[order].map))
+	nr_free_pages -= mask;
+	while (mask + (1 << (NR_MEM_LISTS-1))) {
+		if (!change_bit(index, area->map))
 			break;
-		remove_mem_queue(&free_area[order].list, list(map_nr ^ (1+~mask)));
+		remove_mem_queue(list(map_nr ^ -mask));
 		mask <<= 1;
-		order++;
+		area++;
 		index >>= 1;
 		map_nr &= mask;
 	}
-	add_mem_queue(&free_area[order].list, list(map_nr));
+	add_mem_queue(area, list(map_nr));
 
 #undef list
 
 	restore_flags(flags);
+	if (!waitqueue_active(&buffer_wait))
+		return;
+	wake_up(&buffer_wait);
+}
+
+void __free_page(struct page *page)
+{
+	if (!PageReserved(page) && atomic_dec_and_test(&page->count)) {
+		unsigned long map_nr = page->map_nr;
+		delete_from_swap_cache(map_nr);
+		free_pages_ok(map_nr, 0);
+	}
 }
 
 void free_pages(unsigned long addr, unsigned long order)
@@ -141,8 +162,8 @@ void free_pages(unsigned long addr, unsigned long order)
 #define RMQUEUE(order, dma) \
 do { struct free_area_struct * area = free_area+order; \
      unsigned long new_order = order; \
-	do { struct page *prev = &area->list, *ret; \
-		while (&area->list != (ret = prev->next)) { \
+	do { struct page *prev = memory_head(area), *ret; \
+		while (memory_head(area) != (ret = prev->next)) { \
 			if (!dma || CAN_DMA(ret)) { \
 				unsigned long map_nr = ret->map_nr; \
 				(prev->next = ret->next)->prev = prev; \
@@ -162,7 +183,7 @@ do { struct free_area_struct * area = free_area+order; \
 do { unsigned long size = 1 << high; \
 	while (high > low) { \
 		area--; high--; size >>= 1; \
-		add_mem_queue(&area->list, map); \
+		add_mem_queue(area, map); \
 		MARK_USED(index, high, area); \
 		index += size; \
 		map += size; \
@@ -189,6 +210,8 @@ unsigned long __get_free_pages(int priority, unsigned long order, int dma)
 	reserved_pages = 5;
 	if (priority != GFP_NFS)
 		reserved_pages = min_free_pages;
+	if ((priority == GFP_BUFFER || priority == GFP_IO) && reserved_pages >= 48)
+		reserved_pages -= (12 + (reserved_pages>>3));
 	save_flags(flags);
 repeat:
 	cli();
@@ -219,7 +242,7 @@ void show_free_areas(void)
  	for (order=0 ; order < NR_MEM_LISTS; order++) {
 		struct page * tmp;
 		unsigned long nr = 0;
-		for (tmp = free_area[order].list.next ; tmp != &free_area[order].list ; tmp = tmp->next) {
+		for (tmp = free_area[order].next ; tmp != memory_head(free_area+order) ; tmp = tmp->next) {
 			nr ++;
 		}
 		total += nr * ((PAGE_SIZE>>10) << order);
@@ -248,11 +271,13 @@ unsigned long free_area_init(unsigned long start_mem, unsigned long end_mem)
 
 	/*
 	 * select nr of pages we try to keep free for important stuff
-	 * with a minimum of 16 pages. This is totally arbitrary
+	 * with a minimum of 48 pages. This is totally arbitrary
 	 */
 	i = (end_mem - PAGE_OFFSET) >> (PAGE_SHIFT+7);
-	if (i < 16)
-		i = 16;
+	if (i < 24)
+		i = 24;
+	i += 24;   /* The limit for buffer pages in __get_free_pages is
+	   	    * decreased by 12+(i>>3) */
 	min_free_pages = i;
 	free_pages_low = i + (i>>1);
 	free_pages_high = i + i;
@@ -269,7 +294,7 @@ unsigned long free_area_init(unsigned long start_mem, unsigned long end_mem)
 
 	for (i = 0 ; i < NR_MEM_LISTS ; i++) {
 		unsigned long bitmap_size;
-		init_mem_queue(&free_area[i].list);
+		init_mem_queue(free_area+i);
 		mask += mask;
 		end_mem = (end_mem + ~mask) & mask;
 		bitmap_size = (end_mem - PAGE_OFFSET) >> (PAGE_SHIFT + i);
@@ -295,10 +320,12 @@ void swap_in(struct task_struct * tsk, struct vm_area_struct * vma,
 	unsigned long page = __get_free_page(GFP_KERNEL);
 
 	if (pte_val(*page_table) != entry) {
-		free_page(page);
+		if (page)
+			free_page(page);
 		return;
 	}
 	if (!page) {
+		printk("swap_in:");
 		set_pte(page_table, BAD_PAGE);
 		swap_free(entry);
 		oom(tsk);
@@ -311,6 +338,11 @@ void swap_in(struct task_struct * tsk, struct vm_area_struct * vma,
 	}
 	vma->vm_mm->rss++;
 	tsk->maj_flt++;
+
+	/* Give the physical reallocated page a bigger start */
+	if (vma->vm_mm->rss < (MAP_NR(high_memory) >> 2))
+		mem_map[MAP_NR(page)].age = (PAGE_INITIAL_AGE + PAGE_ADVANCE);
+
 	if (!write_access && add_to_swap_cache(MAP_NR(page), entry)) {
 		/* keep swap page allocated for the moment (swap cache) */
 		set_pte(page_table, mk_pte(page, vma->vm_page_prot));

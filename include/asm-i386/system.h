@@ -5,11 +5,12 @@
 
 /*
  * Entry into gdt where to find first TSS. GDT layout:
- *   0 - nul
- *   1 - kernel code segment
- *   2 - kernel data segment
- *   3 - user code segment
- *   4 - user data segment
+ *   0 - null
+ *   1 - not used
+ *   2 - kernel code segment
+ *   3 - kernel data segment
+ *   4 - user code segment
+ *   5 - user data segment
  * ...
  *   8 - TSS #0
  *   9 - LDT #0
@@ -274,7 +275,7 @@ __asm__ __volatile__ ("movw $" #limit ",%1\n\t" \
 	"movb %%ah,%6\n\t" \
 	"rorl $16,%%eax" \
 	: /* no output */ \
-	:"a" (addr+0xc0000000), "m" (*(n)), "m" (*(n+2)), "m" (*(n+4)), \
+	:"a" (addr+__PAGE_OFFSET), "m" (*(n)), "m" (*(n+2)), "m" (*(n+4)), \
 	 "m" (*(n+5)), "m" (*(n+6)), "m" (*(n+7)) \
 	)
 
@@ -294,5 +295,40 @@ extern struct desc_struct default_ldt;
 #define HAVE_DISABLE_HLT
 void disable_hlt(void);
 void enable_hlt(void);
+
+static __inline__ unsigned long long rdmsr(unsigned int msr)
+{
+	unsigned long long ret;
+        __asm__ __volatile__("rdmsr"
+			    : "=A" (ret)
+			    : "c" (msr));
+        return ret;
+}
+
+static __inline__ void wrmsr(unsigned int msr,unsigned long long val)
+{
+        __asm__ __volatile__("wrmsr"
+			    : /* no Outputs */
+			    : "c" (msr), "A" (val));
+}
+
+
+static __inline__ unsigned long long rdtsc(void)
+{
+	unsigned long long ret;
+        __asm__ __volatile__("rdtsc"
+			    : "=A" (ret)
+			    : /* no inputs */);
+        return ret;
+}
+
+static __inline__ unsigned long long rdpmc(unsigned int counter)
+{
+	unsigned long long ret;
+        __asm__ __volatile__("rdpmc"
+			    : "=A" (ret)
+			    : "c" (counter));
+        return ret;
+}
 
 #endif

@@ -9,6 +9,7 @@
 #include <asm/io.h>
 #include <asm/segment.h>
 #include <asm/system.h>
+#include <asm/page.h>
 
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -21,9 +22,14 @@
 #include "hosts.h"
 #include <scsi/scsi_ioctl.h>
 
-#define MAX_RETRIES 5   
-#define MAX_TIMEOUT (9 * HZ)
-#define MAX_BUF 4096
+#define NORMAL_RETRIES 5   
+#define NORMAL_TIMEOUT (10 * HZ)
+#define FORMAT_UNIT_TIMEOUT (2 * 60 * 60 * HZ)
+#define START_STOP_TIMEOUT (60 * HZ)
+#define MOVE_MEDIUM_TIMEOUT (5 * 60 * HZ)
+#define READ_ELEMENT_STATUS_TIMEOUT (5 * 60 * HZ)
+
+#define MAX_BUF PAGE_SIZE
 
 #define max(a,b) (((a) > (b)) ? (a) : (b))
 
@@ -65,7 +71,7 @@ static int ioctl_probe(struct Scsi_Host * host, void *buffer)
 /*
  * 
  * The SCSI_IOCTL_SEND_COMMAND ioctl sends a command out to the SCSI host.
- * The MAX_TIMEOUT and MAX_RETRIES  variables are used.  
+ * The NORMAL_TIMEOUT and NORMAL_RETRIES  variables are used.  
  * 
  * dev is the SCSI device struct ptr, *(int *) arg is the length of the
  * input data, if any, not including the command string & counts, 
@@ -73,12 +79,9 @@ static int ioctl_probe(struct Scsi_Host * host, void *buffer)
  * 
  * *(char *) ((int *) arg)[2] the actual command byte.   
  * 
- * Note that no more than MAX_BUF data bytes will be transfered.  Since
- * SCSI block device size is 512 bytes, I figured 1K was good.
- * but (WDE) changed it to 8192 to handle large bad track buffers.
- * ERY: I changed this to a dynamic allocation using scsi_malloc - we were
- * getting a kernel stack overflow which was crashing the system when we
- * were using 8192 bytes.
+ * Note that if more than MAX_BUF bytes are requested to be transfered,
+ * the ioctl will fail with error EINVAL.  MAX_BUF can be increased in
+ * the future by increasing the size that scsi_malloc will accept.
  * 
  * This size *does not* include the initial lengths that were passed.
  * 
@@ -101,7 +104,8 @@ static void scsi_ioctl_done (Scsi_Cmnd * SCpnt)
     }
 }   
 
-static int ioctl_internal_command(Scsi_Device *dev, char * cmd)
+static int ioctl_internal_command(Scsi_Device *dev, char * cmd,
+				  int timeout, int retries)
 {
     int result;
     Scsi_Cmnd * SCpnt;
@@ -110,9 +114,7 @@ static int ioctl_internal_command(Scsi_Device *dev, char * cmd)
     {
 	struct semaphore sem = MUTEX_LOCKED;
 	SCpnt->request.sem = &sem;
-	scsi_do_cmd(SCpnt,  cmd, NULL,  0,
-		    scsi_ioctl_done,  MAX_TIMEOUT,
-		    MAX_RETRIES);
+	scsi_do_cmd(SCpnt,  cmd, NULL,  0, scsi_ioctl_done,  timeout, retries);
 	down(&sem);
     }
     
@@ -162,10 +164,10 @@ static int ioctl_internal_command(Scsi_Device *dev, char * cmd)
  * interface instead, as this is a more flexible approach to performing
  * generic SCSI commands on a device.
  */
-static int ioctl_command(Scsi_Device *dev, void *buffer)
+int scsi_ioctl_send_command(Scsi_Device *dev, void *buffer)
 {
     char * buf;
-    char cmd[12];
+    unsigned char cmd[12]; 
     char * cmd_in;
     Scsi_Cmnd * SCpnt;
     unsigned char opcode;
@@ -186,11 +188,12 @@ static int ioctl_command(Scsi_Device *dev, void *buffer)
     /*
      * The structure that we are passed should look like:
      *
-     * struct sdata{
-     *	int inlen;
-     *	int outlen;
-     *	char cmd[];  # However many bytes are used for cmd.
-     *	char data[];
+     * struct sdata {
+     *	unsigned int inlen;
+     *	unsigned int outlen;
+     *	unsigned char  cmd[];  # However many bytes are used for cmd.
+     *	unsigned char  data[];
+     * };
      */
     inlen = get_user((unsigned int *) buffer);
     outlen = get_user( ((unsigned int *) buffer) + 1);
@@ -200,8 +203,8 @@ static int ioctl_command(Scsi_Device *dev, void *buffer)
      * If the user needs to transfer more data than this, they
      * should use scsi_generics instead.
      */
-    if( inlen > MAX_BUF ) inlen = MAX_BUF;
-    if( outlen > MAX_BUF ) outlen = MAX_BUF;
+    if( inlen > MAX_BUF )  return -EINVAL;
+    if( outlen > MAX_BUF )  return -EINVAL;
 
     cmd_in = (char *) ( ((int *)buffer) + 2);
     opcode = get_user(cmd_in); 
@@ -242,16 +245,24 @@ static int ioctl_command(Scsi_Device *dev, void *buffer)
     switch (opcode)
       {
       case FORMAT_UNIT:
-	timeout =  2 * 60 * 60 * HZ; /* 2 Hours */
+	timeout = FORMAT_UNIT_TIMEOUT;
 	retries = 1;
 	break;
       case START_STOP:
-	timeout =  60 * HZ;	/* 60 seconds */
-	retries = 1;
+	timeout = START_STOP_TIMEOUT;
+	retries = NORMAL_RETRIES;
+	break;
+      case MOVE_MEDIUM:
+	timeout = MOVE_MEDIUM_TIMEOUT;
+	retries = NORMAL_RETRIES;
+	break;
+      case READ_ELEMENT_STATUS:
+	timeout = READ_ELEMENT_STATUS_TIMEOUT;
+	retries = NORMAL_RETRIES;
 	break;
       default:
-	timeout = MAX_TIMEOUT;
-	retries = MAX_RETRIES;
+	timeout = NORMAL_TIMEOUT;
+	retries = NORMAL_RETRIES;
 	break;
       }
 
@@ -337,6 +348,11 @@ int scsi_ioctl (Scsi_Device *dev, int cmd, void *arg)
 		    (unsigned long *) arg);
         put_user( dev->host->unique_id, (unsigned long *) arg+1);
 	return 0;
+    case SCSI_IOCTL_GET_BUS_NUMBER:
+        result = verify_area(VERIFY_WRITE, (void *) arg, sizeof(int));
+        if (result) return result;
+        put_user( dev->host->host_no, (int *) arg);
+        return 0;
     case SCSI_IOCTL_TAGGED_ENABLE:
 	if(!suser())  return -EACCES;
 	if(!dev->tagged_supported) return -EINVAL;
@@ -352,15 +368,16 @@ int scsi_ioctl (Scsi_Device *dev, int cmd, void *arg)
     case SCSI_IOCTL_PROBE_HOST:
 	return ioctl_probe(dev->host, arg);
     case SCSI_IOCTL_SEND_COMMAND:
-	if(!suser())  return -EACCES;
-	return ioctl_command((Scsi_Device *) dev, arg);
+	if(!suser() || securelevel > 0)  return -EACCES;
+	return scsi_ioctl_send_command((Scsi_Device *) dev, arg);
     case SCSI_IOCTL_DOORLOCK:
 	if (!dev->removable || !dev->lockable) return 0;
 	scsi_cmd[0] = ALLOW_MEDIUM_REMOVAL;
 	scsi_cmd[1] = dev->lun << 5;
 	scsi_cmd[2] = scsi_cmd[3] = scsi_cmd[5] = 0;
 	scsi_cmd[4] = SCSI_REMOVAL_PREVENT;
-	return ioctl_internal_command((Scsi_Device *) dev, scsi_cmd);
+	return ioctl_internal_command((Scsi_Device *) dev, scsi_cmd,
+				      NORMAL_TIMEOUT, NORMAL_RETRIES);
 	break;
     case SCSI_IOCTL_DOORUNLOCK:
 	if (!dev->removable || !dev->lockable) return 0;
@@ -368,13 +385,31 @@ int scsi_ioctl (Scsi_Device *dev, int cmd, void *arg)
 	scsi_cmd[1] = dev->lun << 5;
 	scsi_cmd[2] = scsi_cmd[3] = scsi_cmd[5] = 0;
 	scsi_cmd[4] = SCSI_REMOVAL_ALLOW;
-	return ioctl_internal_command((Scsi_Device *) dev, scsi_cmd);
+	return ioctl_internal_command((Scsi_Device *) dev, scsi_cmd,
+				      NORMAL_TIMEOUT, NORMAL_RETRIES);
     case SCSI_IOCTL_TEST_UNIT_READY:
 	scsi_cmd[0] = TEST_UNIT_READY;
 	scsi_cmd[1] = dev->lun << 5;
 	scsi_cmd[2] = scsi_cmd[3] = scsi_cmd[5] = 0;
 	scsi_cmd[4] = 0;
-	return ioctl_internal_command((Scsi_Device *) dev, scsi_cmd);
+	return ioctl_internal_command((Scsi_Device *) dev, scsi_cmd,
+				      NORMAL_TIMEOUT, NORMAL_RETRIES);
+	break;
+    case SCSI_IOCTL_START_UNIT:
+	scsi_cmd[0] = START_STOP;
+	scsi_cmd[1] = dev->lun << 5;
+	scsi_cmd[2] = scsi_cmd[3] = scsi_cmd[5] = 0;
+	scsi_cmd[4] = 1;
+	return ioctl_internal_command((Scsi_Device *) dev, scsi_cmd,
+				      START_STOP_TIMEOUT, NORMAL_RETRIES);
+	break;
+    case SCSI_IOCTL_STOP_UNIT:
+	scsi_cmd[0] = START_STOP;
+	scsi_cmd[1] = dev->lun << 5;
+	scsi_cmd[2] = scsi_cmd[3] = scsi_cmd[5] = 0;
+	scsi_cmd[4] = 0;
+	return ioctl_internal_command((Scsi_Device *) dev, scsi_cmd,
+				      START_STOP_TIMEOUT, NORMAL_RETRIES);
 	break;
     default :           
 	return -EINVAL;

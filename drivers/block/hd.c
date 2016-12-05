@@ -871,6 +871,7 @@ static int hd_ioctl(struct inode * inode, struct file * file,
 			restore_flags(flags);
 			return err;
 
+		case HDIO_OBSOLETE_IDENTITY:
 		case HDIO_GET_IDENTITY:
 			if (!arg)  return -EINVAL;
 			if (MINOR(inode->i_rdev) & 0x3F) return -EINVAL;
@@ -1064,7 +1065,7 @@ int hd_init(void)
 #define DEVICE_BUSY busy[target]
 #define USAGE access_count[target]
 #define CAPACITY (bios_info[target].head*bios_info[target].sect*bios_info[target].cyl)
-/* We assume that the the bios parameters do not change, so the disk capacity
+/* We assume that the BIOS parameters do not change, so the disk capacity
    will not change */
 #undef MAYBE_REINIT
 #define GENDISK_STRUCT hd_gendisk

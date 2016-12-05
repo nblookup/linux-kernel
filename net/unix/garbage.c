@@ -5,6 +5,16 @@
  *	Copyright (C) Barak A. Pearlmutter.
  *	Released under the GPL version 2 or later.
  *
+ * 12/3/97 -- Flood
+ * Internal stack is only allocated one page.  On systems with NR_FILE
+ * > 1024, this makes it quite easy for a user-space program to open
+ * a large number of AF_UNIX domain sockets, causing the garbage
+ * collection routines to run up against the wall (and panic).
+ * Changed the MAX_STACK to be associated to the system-wide open file
+ * maximum, and use vmalloc() instead of get_free_page() [as more than
+ * one page may be necessary].  As noted below, this should ideally be
+ * done with a linked list.  
+ *
  * Chopped about by Alan Cox 22/3/96 to make it fit the AF_UNIX socket problem.
  * If it doesn't work blame me, it worked when Barak sent it.
  *
@@ -29,6 +39,25 @@
  *	2 of the License, or (at your option) any later version.
  *
  *  Fixes:
+ *     Al Viro         11 Oct 1998
+ *             Graph may have cycles. That is, we can send the descriptor
+ *             of foo to bar and vice versa. Current code chokes on that.
+ *             Fix: move SCM_RIGHTS ones into the separate list and then
+ *             kfree_skb() them all instead of doing explicit fput's.
+ *             Another problem: since fput() may block somebody may
+ *             create a new unix_socket when we are in the middle of sweep
+ *             phase. Fix: revert the logic wrt MARKED. Mark everything
+ *             upon the beginning and unmark non-junk ones.
+ *
+ *             [12 Oct 1998] AAARGH! New code purges all SCM_RIGHTS
+ *             sent to connect()'ed but still not accept()'ed sockets.
+ *             Fixed. Old code had slightly different problem here:
+ *             extra fput() in situation when we passed the descriptor via
+ *             such socket and closed it (descriptor). That would happen on
+ *             each unix_gc() until the accept(). Since the struct file in
+ *             question would go to the free list and might be reused...
+ *             That might be the reason of random oopses on close_fp() in
+ *             unrelated processes.
  *
  */
  
@@ -39,7 +68,6 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/stat.h>
-#include <linux/socket.h>
 #include <linux/un.h>
 #include <linux/fcntl.h>
 #include <linux/termios.h>
@@ -59,10 +87,9 @@
 
 /* Internal data structures and random procedures: */
 
-#define MAX_STACK 1000		/* Maximum depth of tree (about 1 page) */
 static unix_socket **stack;	/* stack of objects to mark */
 static int in_stack = 0;	/* first free entry in stack */
-
+static int max_stack;		/* Calculated in unix_gc() */
 
 extern inline unix_socket *unix_get_socket(struct file *filp)
 {
@@ -110,7 +137,7 @@ void unix_notinflight(struct file *fp)
  
 extern inline void push_stack(unix_socket *x)
 {
-	if (in_stack == MAX_STACK)
+	if (in_stack == max_stack)
 		panic("can't push onto full stack");
 	stack[in_stack++] = x;
 }
@@ -127,11 +154,11 @@ extern inline int empty_stack(void)
 	return in_stack == 0;
 }
 
-extern inline void maybe_mark_and_push(unix_socket *x)
+extern inline void maybe_unmark_and_push(unix_socket *x)
 {
-	if (x->protinfo.af_unix.marksweep&MARKED)
+	if (!(x->protinfo.af_unix.marksweep&MARKED))
 		return;
-	x->protinfo.af_unix.marksweep|=MARKED;
+	x->protinfo.af_unix.marksweep&=~MARKED;
 	push_stack(x);
 }
 
@@ -142,8 +169,9 @@ void unix_gc(void)
 {
 	static int in_unix_gc=0;
 	unix_socket *s;
-	unix_socket *next;
-	
+	struct sk_buff *skb;
+	struct sk_buff_head hitlist;
+		
 	/*
 	 *	Avoid a recursive GC.
 	 */
@@ -151,20 +179,31 @@ void unix_gc(void)
 	if(in_unix_gc)
 		return;
 	in_unix_gc=1;
-	
-	stack=(unix_socket **)get_free_page(GFP_KERNEL);
+
+	max_stack = max_files;
+
+	stack=(unix_socket **)vmalloc(max_stack * sizeof(unix_socket **));
+	if (!stack) {
+		in_unix_gc=0;
+		return;
+	}
 	
 	/*
-	 *	Assume everything is now unmarked 
+	 *	Everything is now marked
 	 */
 
+	for(s=unix_socket_list;s!=NULL;s=s->next)
+	{
+		s->protinfo.af_unix.marksweep|=MARKED;
+	}
+	
 	/* Invariant to be maintained:
-		- everything marked is either:
+		- everything unmarked is either:
 		-- (a) on the stack, or
-		-- (b) has all of its children marked
-		- everything on the stack is always marked
+		-- (b) has all of its children unmarked
+		- everything on the stack is always unmarked
 		- nothing is ever pushed onto the stack twice, because:
-		-- nothing previously marked is ever pushed on the stack
+		-- nothing previously unmarked is ever pushed on the stack
 	 */
 
 	/*
@@ -177,19 +216,19 @@ void unix_gc(void)
 		 *	If all instances of the descriptor are not
 		 *	in flight we are in use.
 		 */
-		if(s->socket && s->socket->file && s->socket->file->f_count > s->protinfo.af_unix.inflight)
-			maybe_mark_and_push(s);
+		if(s->socket && s->socket->file && 
+			s->socket->file->f_count > s->protinfo.af_unix.inflight)
+			maybe_unmark_and_push(s);
 	}
 
 	/*
-	 *	Mark phase 
+	 *	Mark phase
 	 */
 
 	while (!empty_stack())
 	{
 		unix_socket *x = pop_stack();
 		unix_socket *f=NULL,*sk;
-		struct sk_buff *skb;
 tail:		
 		skb=skb_peek(&x->receive_queue);
 		
@@ -218,27 +257,38 @@ tail:
 					if((sk=unix_get_socket(*fp++))!=NULL)
 					{
 						/*
-						 *	Remember the first, mark the
+						 *	Remember the first, unmark the
 						 *	rest.
 						 */
 						if(f==NULL)
 							f=sk;
 						else
-							maybe_mark_and_push(sk);
+							maybe_unmark_and_push(sk);
 					}
 				}
 			}
+			/* 
+			 *	If we are connecting we need to handle this too
+			 */
+			if(x->state == TCP_LISTEN)
+			{
+				if(f==NULL)
+					f=skb->sk;
+				else
+					maybe_unmark_and_push(skb->sk);
+			}			 
 			skb=skb->next;
 		}
+
 		/*
 		 *	Handle first born specially 
 		 */
 
 		if (f) 
 		{
-			if (!(f->protinfo.af_unix.marksweep&MARKED))
+			if (f->protinfo.af_unix.marksweep&MARKED)
 			{
-				f->protinfo.af_unix.marksweep|=MARKED;
+				f->protinfo.af_unix.marksweep&=~MARKED;
 				x=f;
 				f=NULL;
 				goto tail;
@@ -246,35 +296,44 @@ tail:
 		}
 	}
 
+	skb_queue_head_init(&hitlist);
+
+	for(s=unix_socket_list;s!=NULL;s=s->next)
+	{
+		if (s->protinfo.af_unix.marksweep&MARKED)
+		{
+			struct sk_buff *nextsk;
+			skb=skb_peek(&s->receive_queue);
+			while(skb && skb != (struct sk_buff *)&s->receive_queue)
+			{
+				nextsk=skb->next;
+				/*
+				 *      Do we have file descriptors ?
+ 				 */
+				if(*(int *)(skb->h.filp))
+				{
+					/* 
+					 *	Pull these buffers out of line
+					 *	so they will each be freed once
+					 *	at the end.
+					 */       	
+					skb_unlink(skb);
+					skb_queue_tail(&hitlist,skb);
+				}
+				skb=nextsk;
+			}
+		}
+	}
+
 	/*
-	 *	Sweep phase.  NOTE: this part dominates the time complexity 
+	 *      Here we are. Hitlist is filled. Die.
 	 */
 
-	for(s=unix_socket_list;s!=NULL;s=next)
+	while ((skb=skb_dequeue(&hitlist))!=NULL) 
 	{
-		next=s->next;
-		if (!(s->protinfo.af_unix.marksweep&MARKED))
-		{
-			/*
-			 *	We exist only in the passing tree of sockets
-			 *	that is no longer connected to active descriptors
-			 *	Time to die..
-			 *
-			 *	Subtle item: We will correctly sweep out the
-			 *	socket that has just been closed by the user.
-			 *	We must not close this as we are in the middle
-			 *	of its close at this moment. Skip that file
-			 *	using f_count==0 to spot it.
-			 */
-			 
-			if(s->socket && s->socket->file && s->socket->file->f_count)
-				close_fp(s->socket->file);
-		}
-		else
-			s->protinfo.af_unix.marksweep&=~MARKED;	/* unmark everything for next collection */
+		kfree_skb(skb, FREE_READ);
 	}
-	
+
 	in_unix_gc=0;
-	
-	free_page((long)stack);
+	vfree(stack);
 }

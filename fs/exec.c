@@ -114,41 +114,34 @@ int unregister_binfmt(struct linux_binfmt * fmt)
 
 int open_inode(struct inode * inode, int mode)
 {
-	int error, fd;
-	struct file *f, **fpp;
+	int fd;
 
 	if (!inode->i_op || !inode->i_op->default_file_ops)
 		return -EINVAL;
-	f = get_empty_filp();
-	if (!f)
-		return -ENFILE;
-	fd = 0;
-	fpp = current->files->fd;
-	for (;;) {
-		if (!*fpp)
-			break;
-		if (++fd >= NR_OPEN) {
-			f->f_count--;
-			return -EMFILE;
+	fd = get_unused_fd();
+	if (fd >= 0) {
+		struct file * f = get_empty_filp();
+		if (!f) {
+			put_unused_fd(fd);
+			return -ENFILE;
 		}
-		fpp++;
-	}
-	*fpp = f;
-	f->f_flags = mode;
-	f->f_mode = (mode+1) & O_ACCMODE;
-	f->f_inode = inode;
-	f->f_pos = 0;
-	f->f_reada = 0;
-	f->f_op = inode->i_op->default_file_ops;
-	if (f->f_op->open) {
-		error = f->f_op->open(inode,f);
-		if (error) {
-			*fpp = NULL;
-			f->f_count--;
-			return error;
+		f->f_flags = mode;
+		f->f_mode = (mode+1) & O_ACCMODE;
+		f->f_inode = inode;
+		f->f_pos = 0;
+		f->f_reada = 0;
+		f->f_op = inode->i_op->default_file_ops;
+		if (f->f_op->open) {
+			int error = f->f_op->open(inode,f);
+			if (error) {
+				f->f_count--;
+				put_unused_fd(fd);
+				return error;
+			}
 		}
+		current->files->fd[fd] = f;
+		inode->i_count++;
 	}
-	inode->i_count++;
 	return fd;
 }
 
@@ -185,26 +178,51 @@ asmlinkage int sys_uselib(const char * library)
 
 /*
  * count() counts the number of arguments/envelopes
- *
- * We also do some limited EFAULT checking: this isn't complete, but
- * it does cover most cases. I'll have to do this correctly some day..
  */
-static int count(char ** argv)
+static int count(void *base, int size, int max)
 {
 	int error, i = 0;
-	char ** tmp, *p;
+	void *tmp = base;
+	unsigned long length = 0, chunk = size, limit;
+	int grow = 1;
 
-	if ((tmp = argv) != NULL) {
-		error = verify_area(VERIFY_READ, tmp, sizeof(char *));
-		if (error)
-			return error;
-		while ((p = get_user(tmp++)) != NULL) {
-			i++;
-			error = verify_area(VERIFY_READ, p, 1);
-			if (error)
-				return error;
+	if (!tmp) return 0;
+
+	limit = PAGE_SIZE - ((unsigned long)tmp & (PAGE_SIZE - 1));
+	error = verify_area(VERIFY_READ, tmp, limit);
+	if (error) limit = 0;
+
+	do {
+		if (length >= limit)
+		do {
+			if (!grow) {
+				if (chunk <= sizeof(char *))
+					return -EFAULT;
+				chunk >>= 1;
+			}
+			error = verify_area(VERIFY_READ, tmp, chunk);
+			if (error) grow = 0; else {
+				limit += chunk;
+				if (grow) chunk <<= 1;
+			}
+		} while (error);
+
+		if (size == 1) {
+			do {
+				if (!get_user(((char *)tmp)++)) goto out;
+				if (++i > max) return -E2BIG;
+			} while (i < limit);
+			length = i;
+		} else {
+			do {
+				if (!get_user(((char **)tmp)++)) goto out;
+				if ((length += size) > max) return -E2BIG;
+				i++;
+			} while (length < limit);
 		}
-	}
+	} while (1);
+
+out:
 	return i;
 }
 
@@ -228,12 +246,12 @@ static int count(char ** argv)
 unsigned long copy_strings(int argc,char ** argv,unsigned long *page,
 		unsigned long p, int from_kmem)
 {
-	char *tmp, *tmp1, *pag = NULL;
+	char *tmp, *pag = NULL;
 	int len, offset = 0;
 	unsigned long old_fs, new_fs;
 
-	if (!p)
-		return 0;	/* bullet-proofing */
+	if ((long)p <= 0)
+		return p;	/* bullet-proofing */
 	new_fs = get_ds();
 	old_fs = get_fs();
 	if (from_kmem==2)
@@ -241,16 +259,16 @@ unsigned long copy_strings(int argc,char ** argv,unsigned long *page,
 	while (argc-- > 0) {
 		if (from_kmem == 1)
 			set_fs(new_fs);
-		if (!(tmp1 = tmp = get_user(argv+argc)))
+		if (!(tmp = get_user(argv+argc)))
 			panic("VFS: argc is wrong");
 		if (from_kmem == 1)
 			set_fs(old_fs);
-		while (get_user(tmp++));
-		len = tmp - tmp1;
-		if (p < len) {	/* this shouldn't happen - 128kB */
+		len = count(tmp, 1, p);
+		if (len < 0 || len >= p) {	/* EFAULT or E2BIG */
 			set_fs(old_fs);
-			return 0;
+			return len < 0 ? len : -E2BIG;
 		}
+		tmp += ++len;
 		while (len) {
 			--p; --tmp; --len;
 			if (--offset < 0) {
@@ -260,7 +278,7 @@ unsigned long copy_strings(int argc,char ** argv,unsigned long *page,
 				if (!(pag = (char *) page[p/PAGE_SIZE]) &&
 				    !(pag = (char *) page[p/PAGE_SIZE] =
 				      (unsigned long *) get_free_page(GFP_USER))) 
-					return 0;
+					return -EFAULT;
 				if (from_kmem==2)
 					set_fs(new_fs);
 
@@ -306,17 +324,32 @@ unsigned long setup_arg_pages(unsigned long p, struct linux_binprm * bprm)
 		mpnt->vm_offset = 0;
 		mpnt->vm_inode = NULL;
 		mpnt->vm_pte = 0;
-		insert_vm_struct(current, mpnt);
+		insert_vm_struct(current->mm, mpnt);
 		current->mm->total_vm = (mpnt->vm_end - mpnt->vm_start) >> PAGE_SHIFT;
+
+		for (i = 0 ; i < MAX_ARG_PAGES ; i++) {
+			if (bprm->page[i]) {
+				current->mm->rss++;
+				put_dirty_page(current,bprm->page[i],stack_base);
+			}
+			stack_base += PAGE_SIZE;
+		}
+	} else {
+		/*
+		 * This one is tricky. We are already in the new context, so we cannot
+		 * return with -ENOMEM. So we _have_ to deallocate argument pages here,
+		 * if there is no VMA, they wont be freed at exit_mmap() -> memory leak.
+		 *
+		 * User space then gets a SIGSEGV when it tries to access argument pages.
+		 */
+		for (i = 0 ; i < MAX_ARG_PAGES ; i++) {
+			if (bprm->page[i]) {
+				free_page(bprm->page[i]);
+				bprm->page[i] = 0;
+			}
+		}
 	}
 
-	for (i = 0 ; i < MAX_ARG_PAGES ; i++) {
-		if (bprm->page[i]) {
-			current->mm->rss++;
-			put_dirty_page(current,bprm->page[i],stack_base);
-		}
-		stack_base += PAGE_SIZE;
-	}
 	return p;
 }
 
@@ -368,20 +401,17 @@ end_readexec:
 	return result;
 }
 
-static void exec_mmap(void)
+static int exec_mmap(void)
 {
 	/*
 	 * The clear_page_tables done later on exec does the right thing
 	 * to the page directory when shared, except for graceful abort
-	 * (the oom is wrong there, too, IMHO)
 	 */
 	if (current->mm->count > 1) {
-		struct mm_struct *mm = kmalloc(sizeof(*mm), GFP_KERNEL);
-		if (!mm) {
-			/* this is wrong, I think. */
-			oom(current);
-			return;
-		}
+		struct mm_struct *old_mm, *mm = kmalloc(sizeof(*mm), GFP_KERNEL);
+		if (!mm)
+			return -ENOMEM;
+
 		*mm = *current->mm;
 		mm->def_flags = 0;	/* should future lockings be kept? */
 		mm->count = 1;
@@ -389,28 +419,87 @@ static void exec_mmap(void)
 		mm->mmap_avl = NULL;
 		mm->total_vm = 0;
 		mm->rss = 0;
-		current->mm->count--;
+
+		old_mm = current->mm;
 		current->mm = mm;
-		new_page_tables(current);
-		return;
+		if (new_page_tables(current)) {
+			/* The pgd belongs to the parent ... don't free it! */
+			mm->pgd = NULL;
+			current->mm = old_mm;
+			exit_mmap(mm);
+			kfree(mm);
+			return -ENOMEM;
+		}
+
+		if ((old_mm != &init_mm) && (!--old_mm->count)) {
+			/*
+			 * all threads exited while we were sleeping, 'old_mm' is held
+			 * by us exclusively, lets get rid of it:
+			 */
+			exit_mmap(old_mm);
+			free_page_tables(old_mm);
+			kfree(old_mm);
+		}
+
+		return 0;
 	}
+	flush_cache_mm(current->mm);
 	exit_mmap(current->mm);
 	clear_page_tables(current);
+	flush_tlb_mm(current->mm);
+
+	return 0;
 }
 
 /*
- * This function flushes out all traces of the currently running executable so
- * that a new one can be started
+ * These functions flushes out all traces of the currently running executable
+ * so that a new one can be started
  */
 
-void flush_old_exec(struct linux_binprm * bprm)
+static inline void flush_old_signals(struct signal_struct *sig)
+{
+	int i;
+	struct sigaction * sa = sig->action;
+
+	for (i=32 ; i != 0 ; i--) {
+		sa->sa_mask = 0;
+		sa->sa_flags = 0;
+		if (sa->sa_handler != SIG_IGN)
+			sa->sa_handler = NULL;
+		sa++;
+	}
+}
+
+static inline void flush_old_files(struct files_struct * files)
+{
+	unsigned long j;
+
+	j = 0;
+	for (;;) {
+		unsigned long set, i;
+
+		i = j * __NFDBITS;
+		if (i >= NR_OPEN)
+			break;
+		set = files->close_on_exec.fds_bits[j];
+		files->close_on_exec.fds_bits[j] = 0;
+		j++;
+		for ( ; set ; i++,set >>= 1) {
+			if (set & 1)
+				sys_close(i);
+		}
+	}
+}
+
+int flush_old_exec(struct linux_binprm * bprm)
 {
 	int i;
 	int ch;
 	char * name;
 
+	bprm->dumpable = 0;
 	if (current->euid == current->uid && current->egid == current->gid)
-		current->dumpable = 1;
+		bprm->dumpable = 1;
 	name = bprm->filename;
 	for (i=0; (ch = *(name++)) != '\0';) {
 		if (ch == '/')
@@ -422,24 +511,19 @@ void flush_old_exec(struct linux_binprm * bprm)
 	current->comm[i] = '\0';
 
 	/* Release all of the old mmap stuff. */
-	exec_mmap();
+	if (exec_mmap())
+		return -ENOMEM;
 
 	flush_thread();
 
-	if (bprm->e_uid != current->euid || bprm->e_gid != current->egid || 
-	    permission(bprm->inode,MAY_READ))
-		current->dumpable = 0;
-	current->signal = 0;
-	for (i=0 ; i<32 ; i++) {
-		current->sig->action[i].sa_mask = 0;
-		current->sig->action[i].sa_flags = 0;
-		if (current->sig->action[i].sa_handler != SIG_IGN)
-			current->sig->action[i].sa_handler = NULL;
-	}
-	for (i=0 ; i<NR_OPEN ; i++)
-		if (FD_ISSET(i,&current->files->close_on_exec))
-			sys_close(i);
-	FD_ZERO(&current->files->close_on_exec);
+	if (bprm->e_uid != current->euid || bprm->e_gid != current->egid ||
+	    permission(bprm->inode, MAY_READ))
+		bprm->dumpable = 0;
+
+	flush_old_signals(current->sig);
+	flush_old_files(current->files);
+
+	return 0;
 }
 
 /* 
@@ -501,6 +585,27 @@ int prepare_binprm(struct linux_binprm *bprm)
 			if (!suser())
 				return -EPERM;
 		}
+
+		/*
+		 * Increment the privileged execution counter, so that our
+		 * old children know not to send bad exit_signal's to us.
+		 */
+		if (!++current->priv) {
+			struct task_struct *p;
+
+			/*
+			 * The counter can't really overflow with real-world
+			 * programs (and it has to be the privileged program
+			 * itself that causes the overflow), but we handle
+			 * this case anyway, just for correctness.
+			 */
+			for_each_task(p) {
+				if (p->p_pptr == current) {
+					p->ppriv = 0;
+					current->priv = 1;
+				}
+			}
+		}
 	}
 
 	memset(bprm->buf,0,sizeof(bprm->buf));
@@ -543,6 +648,8 @@ int search_binary_handler(struct linux_binprm *bprm,struct pt_regs *regs)
 		bprm->dont_iput = 1;
 		remove_arg_zero(bprm);
 		bprm->p = copy_strings(1, dynloader, bprm->page, bprm->p, 2);
+		if ((long)bprm->p < 0)
+			return (long)bprm->p;
 		bprm->argc++;
 		bprm->loader = bprm->p;
 		retval = open_namei(dynloader[0], 0, 0, &bprm->inode, NULL);
@@ -601,6 +708,7 @@ int search_binary_handler(struct linux_binprm *bprm,struct pt_regs *regs)
 int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs)
 {
 	struct linux_binprm bprm;
+	int was_dumpable;
 	int retval;
 	int i;
 
@@ -615,10 +723,13 @@ int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs
 	bprm.loader = 0;
 	bprm.exec = 0;
 	bprm.dont_iput = 0;
-	if ((bprm.argc = count(argv)) < 0)
+	if ((bprm.argc = count(argv, sizeof(char *), bprm.p)) < 0)
 		return bprm.argc;
-	if ((bprm.envc = count(envp)) < 0)
+	if ((bprm.envc = count(envp, sizeof(char *), bprm.p)) < 0)
 		return bprm.envc;
+
+	was_dumpable = current->dumpable;
+	current->dumpable = 0;
 
 	retval = prepare_binprm(&bprm);
 	
@@ -627,20 +738,26 @@ int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs
 		bprm.exec = bprm.p;
 		bprm.p = copy_strings(bprm.envc,envp,bprm.page,bprm.p,0);
 		bprm.p = copy_strings(bprm.argc,argv,bprm.page,bprm.p,0);
-		if (!bprm.p)
-			retval = -E2BIG;
+		if ((long)bprm.p < 0)
+			retval = (long)bprm.p;
 	}
 
 	if(retval>=0)
 		retval = search_binary_handler(&bprm,regs);
-	if(retval>=0)
+
+	if(retval>=0) {
 		/* execve success */
+		current->dumpable = bprm.dumpable;
 		return retval;
+	}
 
 	/* Something went wrong, return the inode and free the argument pages*/
 	if(!bprm.dont_iput)
 		iput(bprm.inode);
 	for (i=0 ; i<MAX_ARG_PAGES ; i++)
 		free_page(bprm.page[i]);
+
+	current->dumpable = was_dumpable;
+
 	return(retval);
 }

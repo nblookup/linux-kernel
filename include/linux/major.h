@@ -8,8 +8,8 @@
 
 /* limits */
 
-#define MAX_CHRDEV 64
-#define MAX_BLKDEV 64
+#define MAX_CHRDEV 128
+#define MAX_BLKDEV 128
 
 #define UNNAMED_MAJOR	0
 #define MEM_MAJOR	1
@@ -42,9 +42,9 @@
 #define MITSUMI_X_CDROM_MAJOR 20
 #define SCSI_GENERIC_MAJOR 21
 #define Z8530_MAJOR 34
-#define DIGI_MAJOR 22
+#define DIGI_MAJOR 23
 #define IDE1_MAJOR	22
-#define DIGICU_MAJOR 23
+#define DIGICU_MAJOR 22
 #define MITSUMI_CDROM_MAJOR 23
 #define CDU535_CDROM_MAJOR 24
 #define STL_SERIALMAJOR 24
@@ -65,22 +65,38 @@
 #define IDETAPE_MAJOR	37
 #define Z2RAM_MAJOR	37
 #define RISCOM8_NORMAL_MAJOR 48
+#define DAC960_MAJOR	48	/* 48..55 */
 #define RISCOM8_CALLOUT_MAJOR 49
+#define MKISS_MAJOR	55
+
+#define IDE4_MAJOR	56
+#define IDE5_MAJOR	57
+
 #define APBLOCK_MAJOR   60   /* AP1000 Block device */
 #define DDV_MAJOR       61   /* AP1000 DDV block device */
+
+#define COMPAQ_SMART2_MAJOR	72
+#define COMPAQ_SMART2_MAJOR1	73
+#define COMPAQ_SMART2_MAJOR2	74
+#define COMPAQ_SMART2_MAJOR3	75
+#define COMPAQ_SMART2_MAJOR4	76
+#define COMPAQ_SMART2_MAJOR5	77
+#define COMPAQ_SMART2_MAJOR6	78
+#define COMPAQ_SMART2_MAJOR7	79
+
+#define SPECIALIX_NORMAL_MAJOR 75
+#define SPECIALIX_CALLOUT_MAJOR 76
 
 /*
  * Tests for SCSI devices.
  */
 
-#define SCSI_MAJOR(M) \
+#define SCSI_BLK_MAJOR(M) \
   ((M) == SCSI_DISK_MAJOR	\
-   || (M) == SCSI_TAPE_MAJOR	\
-   || (M) == SCSI_CDROM_MAJOR	\
-   || (M) == SCSI_GENERIC_MAJOR)
+   || (M) == SCSI_CDROM_MAJOR)
 
-static inline int scsi_major(int m) {
-	return SCSI_MAJOR(m);
+static __inline__ int scsi_blk_major(int m) {
+	return SCSI_BLK_MAJOR(m);
 }
 
 #endif

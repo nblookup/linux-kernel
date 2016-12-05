@@ -1,7 +1,7 @@
 /*
- *	Linux NET3:	Internet Gateway Management Protocol  [IGMP]
+ *	Linux NET3:	Internet Group Management Protocol  [IGMP]
  *
- *	This code implements the IGMP protocol as defined in RFC1122. There has
+ *	This code implements the IGMP protocol as defined in RFC1112. There has
  *	been a further revision of this protocol since which is now supported.
  *
  *	If you have trouble with this module be careful what gcc you have used,
@@ -56,6 +56,17 @@
  *             Christian Daudt :       igmp_heard_report now only calls
  *                                     igmp_timer_expire if tm->running is
  *                                     true (960216).
+ *		Malcolm Beattie :	ttl comparison wrong in igmp_rcv made
+ *					igmp_heard_query never trigger. Expiry
+ *					miscalculation fixed in igmp_heard_query
+ *					and random() made to return unsigned to
+ *					prevent negative expiry times.
+ *		Alexey Kuznetsov:	Wrong group leaving behaviour, backport
+ *					fix from pending 2.1.x patches.
+ *		Alan Cox:		Forget to enable FDDI support earlier.
+ *     Elena Apolinario Fdez de Sousa,: IGMP Leave Messages must be sent to
+ *     Juan-Mariano de Goyeneche        the "all routers" group, not the group
+ *					group being left.
  */
 
 
@@ -207,7 +218,7 @@ static void igmp_stop_timer(struct ip_mc_list *im)
   }
 }
 
-extern __inline__ int random(void)
+extern __inline__ unsigned int random(void)
 {
 	static unsigned long seed=152L;
 	seed=seed*69069L+1;
@@ -243,8 +254,12 @@ static void igmp_send_report(struct device *dev, unsigned long address, int type
 
 	if(skb==NULL)
 		return;
-	tmp=ip_build_header(skb, INADDR_ANY, address, &dev, IPPROTO_IGMP, NULL,
-				28 , 0, 1, NULL);
+	if (type != IGMP_HOST_LEAVE_MESSAGE)
+		tmp=ip_build_header(skb, dev->pa_addr, address, &dev, IPPROTO_IGMP, NULL,
+			28 , 0, 1, NULL);
+	else
+		tmp=ip_build_header(skb, dev->pa_addr, IGMP_ALL_ROUTER, &dev, IPPROTO_IGMP, NULL,
+			28, 0, 1, NULL);
 	if(tmp<0)
 	{
 		kfree_skb(skb, FREE_WRITE);
@@ -273,6 +288,7 @@ static void igmp_timer_expire(unsigned long data)
 		igmp_send_report(im->interface, im->multiaddr, IGMP_HOST_NEW_MEMBERSHIP_REPORT);
 	else
 		igmp_send_report(im->interface, im->multiaddr, IGMP_HOST_MEMBERSHIP_REPORT);
+	im->reporter=1;
 }
 
 static void igmp_init_timer(struct ip_mc_list *im)
@@ -284,17 +300,24 @@ static void igmp_init_timer(struct ip_mc_list *im)
 }
 
 
-static void igmp_heard_report(struct device *dev, unsigned long address)
+static void igmp_heard_report(struct device *dev, __u32 address, __u32 src)
 {
 	struct ip_mc_list *im;
 
-	if ((address & IGMP_LOCAL_GROUP_MASK) != IGMP_LOCAL_GROUP) {
-	  /* Timers are only set for non-local groups */
-	  for(im=dev->ip_mc_list;im!=NULL;im=im->next) {
-	    if(im->multiaddr==address && im->tm_running) {
-	      igmp_stop_timer(im);
-	    }
-	  }
+	if ((address & IGMP_LOCAL_GROUP_MASK) != IGMP_LOCAL_GROUP) 
+	{
+		/* Timers are only set for non-local groups */
+		for(im=dev->ip_mc_list;im!=NULL;im=im->next) 
+		{
+			if(im->multiaddr==address)
+			{
+				if(im->tm_running) 
+					igmp_stop_timer(im);
+				if(src!=dev->pa_addr)
+					im->reporter=0;
+				return;
+			}
+		}
 	}
 }
 
@@ -326,7 +349,7 @@ static void igmp_heard_query(struct device *dev,unsigned char max_resp_time)
 		{
 			if(im->tm_running)
 			{
-				if(im->timer.expires>max_resp_time*HZ/IGMP_TIMER_SCALE)
+				if(im->timer.expires>jiffies+max_resp_time*HZ/IGMP_TIMER_SCALE)
 				{
 					igmp_stop_timer(im);
 					igmp_start_timer(im,max_resp_time);
@@ -386,8 +409,8 @@ extern __inline__ void ip_mc_map(unsigned long addr, char *buf)
 void ip_mc_filter_add(struct device *dev, unsigned long addr)
 {
 	char buf[6];
-	if(dev->type!=ARPHRD_ETHER)
-		return; /* Only do ethernet now */
+	if(dev->type!=ARPHRD_ETHER && dev->type!=ARPHRD_FDDI)
+		return; /* Only do ethernet or FDDI for now */
 	ip_mc_map(addr,buf);
 	dev_mc_add(dev,buf,ETH_ALEN,0);
 }
@@ -399,8 +422,8 @@ void ip_mc_filter_add(struct device *dev, unsigned long addr)
 void ip_mc_filter_del(struct device *dev, unsigned long addr)
 {
 	char buf[6];
-	if(dev->type!=ARPHRD_ETHER)
-		return; /* Only do ethernet now */
+	if(dev->type!=ARPHRD_ETHER && dev->type!=ARPHRD_FDDI)
+		return; /* Only do ethernet or FDDI for now */
 	ip_mc_map(addr,buf);
 	dev_mc_delete(dev,buf,ETH_ALEN,0);
 }
@@ -408,7 +431,10 @@ void ip_mc_filter_del(struct device *dev, unsigned long addr)
 extern __inline__ void igmp_group_dropped(struct ip_mc_list *im)
 {
 	del_timer(&im->timer);
-	igmp_send_report(im->interface, im->multiaddr, IGMP_HOST_LEAVE_MESSAGE);
+        /* It seems we have to send Leave Messages to 224.0.0.2 and not to
+           the group itself, to remain RFC 2236 compliant... (jmel) */
+        /*igmp_send_report(im->interface, IGMP_ALL_ROUTER, IGMP_HOST_LEAVE_MESSAGE);*/
+        igmp_send_report(im->interface, im->multiaddr, IGMP_HOST_LEAVE_MESSAGE);
 	ip_mc_filter_del(im->interface, im->multiaddr);
 }
 
@@ -447,7 +473,7 @@ int igmp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 	}
 	ih=(struct igmphdr *)skb->h.raw;
 
-	if(skb->len <sizeof(struct igmphdr) || skb->ip_hdr->ttl>1 || ip_compute_csum((void *)skb->h.raw,sizeof(struct igmphdr)))
+	if(len <sizeof(struct igmphdr) || skb->ip_hdr->ttl<1 || ip_compute_csum((void *)skb->h.raw,sizeof(struct igmphdr)))
 	{
 		kfree_skb(skb, FREE_READ);
 		return 0;
@@ -468,9 +494,9 @@ int igmp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 	if(ih->type==IGMP_HOST_MEMBERSHIP_QUERY && daddr==IGMP_ALL_HOSTS)
 		igmp_heard_query(dev,ih->code);
 	if(ih->type==IGMP_HOST_MEMBERSHIP_REPORT && daddr==ih->group)
-		igmp_heard_report(dev,ih->group);
+		igmp_heard_report(dev,ih->group, saddr);
 	if(ih->type==IGMP_HOST_NEW_MEMBERSHIP_REPORT && daddr==ih->group)
-		igmp_heard_report(dev,ih->group);
+		igmp_heard_report(dev,ih->group, saddr);
 	kfree_skb(skb, FREE_READ);
 	return 0;
 }

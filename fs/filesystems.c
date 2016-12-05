@@ -9,6 +9,9 @@
 #include <linux/config.h>
 #include <linux/fs.h>
 
+#ifdef CONFIG_NLS
+#include <linux/nls.h>
+#endif
 #include <linux/minix_fs.h>
 #include <linux/ext_fs.h>
 #include <linux/ext2_fs.h>
@@ -24,6 +27,7 @@
 #include <linux/ncp_fs.h>
 #include <linux/affs_fs.h>
 #include <linux/ufs_fs.h>
+#include <linux/auto_fs.h>
 #include <linux/major.h>
 
 extern void device_setup(void);
@@ -41,6 +45,10 @@ asmlinkage int sys_setup(void)
 	device_setup();
 
 	binfmt_setup();
+
+#ifdef CONFIG_NLS
+	init_nls();
+#endif
 
 #ifdef CONFIG_EXT_FS
 	init_ext_fs();
@@ -110,6 +118,9 @@ asmlinkage int sys_setup(void)
 	init_ufs_fs();
 #endif
 
+#ifdef CONFIG_AUTOFS_FS
+	init_autofs_fs();
+#endif
 	mount_root();
 	return 0;
 }

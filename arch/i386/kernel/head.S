@@ -9,10 +9,14 @@
  */
 
 .text
+#include <linux/config.h>
 #include <linux/tasks.h>
 #include <linux/linkage.h>
 #include <asm/segment.h>
 #include <linux/config.h>
+#include <asm/page.h>
+#include <asm/pgtable.h>
+
 
 #define CL_MAGIC_ADDR	0x90020
 #define CL_MAGIC	0xA33F
@@ -47,7 +51,7 @@ startup_32:
 	jmp checkCPUtype
 1:
 	lss stack_start,%esp
-#endif __SMP__
+#endif /* __SMP__ */
 /*
  * Clear BSS first so that there are no surprises...
  */
@@ -103,16 +107,17 @@ startup_32:
 checkCPUtype:
 #endif
 
-/* check if it is 486 or 386. */
+/* check Processor type: 386, 486, 6x86(L) or CPUID capable processor */
 /*
  * XXX - this does a lot of unnecessary setup.  Alignment checks don't
  * apply at our cpl of 0 and the stack ought to be aligned already, and
  * we don't need to preserve eflags.
  */
+
 	movl $3, SYMBOL_NAME(x86)
 	pushfl			# push EFLAGS
 	popl %eax		# get EFLAGS
-	movl %eax,%ecx		# save original EFLAGS
+	movl %eax,%ecx		# save original EFLAGS in ecx
 	xorl $0x40000,%eax	# flip AC bit in EFLAGS
 	pushl %eax		# copy to EFLAGS
 	popfl			# set EFLAGS
@@ -127,20 +132,28 @@ checkCPUtype:
 	pushl %eax
 	popfl			# if we are on a straight 486DX, SX, or
 	pushfl			# 487SX we can't change it
-	popl %eax
-	xorl %ecx,%eax
+	popl %eax		# Also if we are on a Cyrix 6x86(L)
+	xorl %ecx,%eax		# OTOH 6x86MXs and MIIs check OK
 	andl $0x200000,%eax
-	je is486
+	je is486x
+
 isnew:	pushl %ecx		# restore original EFLAGS
 	popfl
 	incl SYMBOL_NAME(have_cpuid)	# we have CPUID
+	/*
+ 	 *	Technically we should use CPUID 0 to see if we have CPUID 1!
+	 */
 	/* get processor type */
 	movl $1, %eax		# Use the CPUID instruction to 
+#ifdef GAS_KNOWS_CPUID
+	cpuid			# check the processor type
+#else
 	.byte 0x0f, 0xa2	# check the processor type
+#endif
 	movb %al, %cl		# save reg for future use
 	andb $0x0f,%ah		# mask processor family
 	movb %ah,SYMBOL_NAME(x86)
-	andb $0xf0, %eax	# mask model
+	andb $0xf0, %al		# mask model
 	shrb $4, %al
 	movb %al,SYMBOL_NAME(x86_model)
 	andb $0x0f, %cl		# mask mask revision
@@ -148,7 +161,11 @@ isnew:	pushl %ecx		# restore original EFLAGS
 	movl %edx,SYMBOL_NAME(x86_capability)
 	/* get vendor info */
 	xorl %eax, %eax			# call CPUID with 0 -> return vendor ID
+#ifdef GAS_KNOWS_CPUID
+	cpuid
+#else
 	.byte 0x0f, 0xa2		# CPUID
+#endif
 	movl %ebx,SYMBOL_NAME(x86_vendor_id)	# lo 4 chars
 	movl %edx,SYMBOL_NAME(x86_vendor_id)+4	# next 4 chars
 	movl %ecx,SYMBOL_NAME(x86_vendor_id)+8	# last 4 chars
@@ -157,7 +174,73 @@ isnew:	pushl %ecx		# restore original EFLAGS
 	andl $0x80000011,%eax	# Save PG,PE,ET
 	orl $0x50022,%eax	# set AM, WP, NE and MP
 	jmp 2f
-is486:	pushl %ecx		# restore original EFLAGS
+
+/* Now we test if we have a Cyrix 6x86(L). We didn't test before to avoid
+ * clobbering the new BX chipset used with the Pentium II, which has a register
+ * at the same addresses as those used to access the Cyrix special configuration
+ * registers (CCRs).
+ */
+	/*
+	 * A Cyrix/IBM 6x86(L) preserves flags after dividing 5 by 2
+	 * (and it _must_ be 5 divided by 2) while other CPUs change
+	 * them in undefined ways. We need to know this since we may
+	 * need to enable the CPUID instruction at least.
+	 * We couldn't use this test before since the PPro and PII behave
+	 * like Cyrix chips in this respect.
+	 */
+is486x:	xor %ax,%ax
+	sahf
+	movb $5,%ax
+	movb $2,%bx
+	div %bl
+	lahf
+	cmpb $2,%ah
+	jne ncyrix
+	/*
+	 * N.B. The pattern of accesses to 0x22 and 0x23 is *essential*
+	 *      so do not try to "optimize" it! For the same reason we
+	 *	do all this with interrupts off.
+	 */
+#define setCx86(reg, val) \
+	movb reg,%ax;	\
+	outb %ax,$0x22;	\
+	movb val,%ax;	\
+	outb %ax,$0x23
+
+#define getCx86(reg) \
+	movb reg,%ax;	\
+	outb %ax,$0x22;	\
+	inb $0x23,%ax
+
+	cli
+	getCx86($0xc3)		# get CCR3
+	movb %ax,%cx		# Save old value
+	movb %ax,%bx
+	andb $0x0f,%bx		# Enable access to all config registers
+	orb $0x10,%bx		# by setting bit 4
+	setCx86($0xc3,%bx)
+
+        getCx86($0xfe)          # DIR0 : let's check this is a 6x86(L)
+        andb $0xf0,%ax		# should be 3xh
+	cmpb $0x30,%ax		# 
+	jne n6x86
+
+	getCx86($0xe8)		# now we can get CCR4
+	orb $0x80,%ax		# and set bit 7 (CPUIDEN)
+	movb %ax,%bx		# to enable CPUID execution
+	setCx86($0xe8,%bx)
+
+        getCx86($0xe9)          # CCR5 : we reset the SLOP bit
+        andb $0xfd,%ax		# so that udelay calculation
+        movb %ax,%bx		# is correct on 6x86(L) CPUs
+        setCx86($0xe9,%bx)
+	setCx86($0xc3,%cx)	# Restore old CCR3
+	sti
+	jmp isnew		# We enabled CPUID now
+
+n6x86:	setCx86($0xc3,%cx)	# Restore old CCR3
+	sti
+ncyrix:	pushl %ecx		# restore original EFLAGS
 	popfl
 	movl %cr0,%eax		# 486
 	andl $0x80000011,%eax	# Save PG,PE,ET
@@ -171,8 +254,8 @@ is386:	pushl %ecx		# restore original EFLAGS
 2:	movl %eax,%cr0
 	call check_x87
 #ifdef __SMP__
-	movb ready,%eax
-	orb %eax,%eax
+	movb ready,%al
+	orb %al,%al
 	jz 3f	
 	movl $ SYMBOL_NAME(swapper_pg_dir), %eax
 	movl %eax, %cr3
@@ -250,7 +333,7 @@ check_x87:
  *  sets up a idt with 256 entries pointing to
  *  ignore_int, interrupt gates. It doesn't actually load
  *  idt - that can be done only after paging has been enabled
- *  and the kernel moved to 0xC0000000. Interrupts
+ *  and the kernel moved to PAGE_OFFSET. Interrupts
  *  are enabled elsewhere, when we can be relatively
  *  sure everything is ok.
  */
@@ -291,9 +374,9 @@ setup_paging:
 /* Identity-map the kernel in low 4MB memory for ease of transition */
 /* set present bit/user r/w */
 	movl $ SYMBOL_NAME(pg0)+7,SYMBOL_NAME(swapper_pg_dir)
-/* But the real place is at 0xC0000000 */
+/* But the real place is at PAGE_OFFSET */
 /* set present bit/user r/w */
-	movl $ SYMBOL_NAME(pg0)+7,SYMBOL_NAME(swapper_pg_dir)+3072
+	movl $ SYMBOL_NAME(pg0)+7,SYMBOL_NAME(swapper_pg_dir)+__USER_PGD_PTRS*4
 	movl $ SYMBOL_NAME(pg0)+4092,%edi
 	movl $0x03ff007,%eax		/*  4Mb - 4096 + 7 (r/w user,p) */
 	std
@@ -342,6 +425,11 @@ stack_start:
 	.long SYMBOL_NAME(init_user_stack)+4096
 	.long KERNEL_DS
 
+/* NOTE: keep the idt short behind the above '.org 0x6000'
+	 It must fit completely within _one_ page */
+ENTRY(idt)
+	.fill 256,8,0		# idt is uninitialized
+
 /* This is the default interrupt "handler" :-) */
 int_msg:
 	.asciz "Unknown interrupt\n"
@@ -376,10 +464,7 @@ ignore_int:
 .word 0
 idt_descr:
 	.word 256*8-1		# idt contains 256 entries
-	.long 0xc0000000+SYMBOL_NAME(idt)
-
-ENTRY(idt)
-	.fill 256,8,0		# idt is uninitialized
+	.long __PAGE_OFFSET+SYMBOL_NAME(idt)
 
 	ALIGN
 .word 0
@@ -389,19 +474,45 @@ gdt_descr:
 #else
 	.word (8+2*NR_TASKS)*8-1
 #endif
-	.long 0xc0000000+SYMBOL_NAME(gdt)
+	.long __PAGE_OFFSET+SYMBOL_NAME(gdt)
 
 /*
  * This gdt setup gives the kernel a 1GB address space at virtual
- * address 0xC0000000 - space enough for expansion, I hope.
+ * address PAGE_OFFSET - space enough for expansion, I hope.
  */
+
+#define upper_seg(type,dpl,base,limit) \
+        ((base) & 0xff000000) | \
+        (((base) & 0x00ff0000)>>16) | \
+        (((limit)>>12) & 0xf0000) | \
+        ((dpl)<<13) | \
+        (0x00c09000) | \
+        ((type)<<8)
+
+#define lower_seg(type,dpl,base,limit) \
+        (((base) & 0x0000ffff)<<16) | \
+        (((limit)>>12) & 0x0ffff)
+
+#define x86_seg(type,dpl,base,limit) \
+	.long lower_seg(type,dpl,base,limit); \
+	.long upper_seg(type,dpl,base,limit)
+
 ENTRY(gdt)
 	.quad 0x0000000000000000	/* NULL descriptor */
 	.quad 0x0000000000000000	/* not used */
-	.quad 0xc0c39a000000ffff	/* 0x10 kernel 1GB code at 0xC0000000 */
-	.quad 0xc0c392000000ffff	/* 0x18 kernel 1GB data at 0xC0000000 */
-	.quad 0x00cbfa000000ffff	/* 0x23 user   3GB code at 0x00000000 */
-	.quad 0x00cbf2000000ffff	/* 0x2b user   3GB data at 0x00000000 */
+
+	/* 0x10 kernel 1GB code at 0xC0000000: */
+	x86_seg(0xa,0,__PAGE_OFFSET,0xffffffff-__PAGE_OFFSET)
+
+	/* 0x18 kernel 1GB data at 0xC0000000: */
+	x86_seg(0x2,0,__PAGE_OFFSET,0xffffffff-__PAGE_OFFSET)
+
+	/* 0x23 user 3GB code at 0x00000000: */
+        x86_seg(0xa,3,0,__PAGE_OFFSET-1)
+
+	/* 0x2b user 3GB data at 0x00000000: */
+        x86_seg(0x2,3,0,__PAGE_OFFSET-1)
+
 	.quad 0x0000000000000000	/* not used */
 	.quad 0x0000000000000000	/* not used */
 	.fill 2*NR_TASKS,8,0		/* space for LDT's and TSS's etc */

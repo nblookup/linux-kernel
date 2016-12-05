@@ -12,6 +12,7 @@
  *		Martin Mares	:	TOS setting fixed.
  *		Alan Cox	:	Fixed a couple of oopses in Martin's 
  *					TOS tweaks.
+ *              Elliot Poger    :       Added support for SO_BINDTODEVICE.
  */
 
 #include <linux/config.h>
@@ -97,11 +98,20 @@ int ip_mc_procinfo(char *buffer, char **start, off_t offset, int length, int dum
 static struct device *ip_mc_find_devfor(unsigned long addr)
 {
 	struct device *dev;
-	for(dev = dev_base; dev; dev = dev->next)
-	{
-		if((dev->flags&IFF_UP)&&(dev->flags&IFF_MULTICAST)&&
-			(dev->pa_addr==addr))
-			return dev;
+	for(dev = dev_base; dev; dev = dev->next) {
+		if((dev->flags&IFF_UP)&&(dev->flags&IFF_MULTICAST)) {
+			if(dev->flags&IFF_POINTOPOINT) {
+				/* gated needs this so that Multicast works   */
+				/* PTP interfaces cant be identified uniquely */
+				/* by their protocol address as it can very   */
+				/* likely be the address of eth0!             */
+				if(dev->pa_dstaddr==addr)
+					return dev;
+			} else {
+				 if(dev->pa_addr==addr)
+					return dev;
+			}
+		}
 	}
 
 	return NULL;
@@ -178,17 +188,18 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 			  	kfree_s(old_opt, sizeof(struct optlen) + old_opt->optlen);
 			  return 0;
 		  }
-		case IP_TOS:		/* This sets both TOS and Precedence */
-			if (val<0 || val>63)	/* Reject setting of unused bits */
+		case IP_TOS:			/* This sets both TOS and Precedence */
+			if (val & ~0xfe)	/* Reject setting of unused bits */
 				return -EINVAL;
-			if ((val&7) > 4 && !suser())	/* Only root can set Prec>4 */
+			if ((val>>5) > 4 && !suser())	/* Only root can set Prec>4 */
 				return -EPERM;
 			sk->ip_tos=val;
-			switch (val & 0x38) {
+			switch (val & 0x1E) {
 				case IPTOS_LOWDELAY:
 					sk->priority=SOPRI_INTERACTIVE;
 					break;
 				case IPTOS_THROUGHPUT:
+				case IPTOS_MINCOST:
 					sk->priority=SOPRI_BACKGROUND;
 					break;
 				default:
@@ -270,7 +281,6 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
  *	FIXME: Add/Del membership should have a semaphore protecting them from re-entry
  */
 			struct ip_mreq mreq;
-			__u32 route_src;
 			struct rtable *rt;
 			struct device *dev=NULL;
 			
@@ -293,10 +303,9 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 				/*
 				 *	Not set so scan.
 				 */
-				if((rt=ip_rt_route(mreq.imr_multiaddr.s_addr,0))!=NULL)
+				if((rt=ip_rt_route(mreq.imr_multiaddr.s_addr,0,sk->bound_device))!=NULL)
 				{
 					dev=rt->rt_dev;
-					route_src = rt->rt_src;
 					atomic_dec(&rt->rt_use);
 					ip_rt_put(rt);
 				}
@@ -328,7 +337,6 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 		{
 			struct ip_mreq mreq;
 			struct rtable *rt;
-			__u32 route_src;
 			struct device *dev=NULL;
 
 			/*
@@ -347,11 +355,10 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
  
 			if(mreq.imr_interface.s_addr==INADDR_ANY) 
 			{
-				if((rt=ip_rt_route(mreq.imr_multiaddr.s_addr,0))!=NULL)
+				if((rt=ip_rt_route(mreq.imr_multiaddr.s_addr,0,sk->bound_device))!=NULL)
 			        {
 					dev=rt->rt_dev;
 					atomic_dec(&rt->rt_use);
-					route_src = rt->rt_src;
 					ip_rt_put(rt);
 				}
 			}
@@ -410,6 +417,22 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 			return -err;	/* -0 is 0 after all */
 			
 #endif
+#ifdef CONFIG_IP_MASQUERADE_IPAUTOFW
+		case IP_AUTOFW_ADD:
+		case IP_AUTOFW_DEL:
+		case IP_AUTOFW_FLUSH:
+			if(!suser())
+				return -EPERM;
+			if(optlen>sizeof(tmp_fw) || optlen<1)
+				return -EINVAL;
+			err=verify_area(VERIFY_READ,optval,optlen);
+			if(err)
+				return err;
+			memcpy_fromfs(&tmp_fw,optval,optlen);
+			err=ip_autofw_ctl(optname, &tmp_fw,optlen);
+			return -err;	/* -0 is 0 after all */
+			
+#endif
 #ifdef CONFIG_IP_ACCT
 		case IP_ACCT_INSERT:
 		case IP_ACCT_APPEND:
@@ -441,9 +464,6 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 int ip_getsockopt(struct sock *sk, int level, int optname, char *optval, int *optlen)
 {
 	int val,err;
-#ifdef CONFIG_IP_MULTICAST
-	int len;
-#endif
 	
 	if(level!=SOL_IP)
 		return -EOPNOTSUPP;
@@ -527,16 +547,33 @@ int ip_getsockopt(struct sock *sk, int level, int optname, char *optval, int *op
 			val=sk->ip_mc_loop;
 			break;
 		case IP_MULTICAST_IF:
+		{
+			struct device *dev;
+			struct in_addr ia;
+			
 			err=verify_area(VERIFY_WRITE, optlen, sizeof(int));
 			if(err)
   				return err;
-  			len=strlen(sk->ip_mc_name);
-  			err=verify_area(VERIFY_WRITE, optval, len);
+  			err=verify_area(VERIFY_WRITE, optval, sizeof(ia));
 		  	if(err)
   				return err;
-  			put_user(len,(int *) optlen);
-			memcpy_tofs((void *)optval,sk->ip_mc_name, len);
+  			
+  			if(*sk->ip_mc_name)
+  			{
+	  			dev=dev_get(sk->ip_mc_name);
+  				/* Someone ran off with the interface, its probably
+  				   been downed. */
+  				if(dev==NULL)
+  					return -ENODEV;
+	  			ia.s_addr = dev->pa_addr;
+	  		}
+	  		else
+	  			ia.s_addr = 0L;
+	 
+  			put_user(sizeof(ia),(int *) optlen);
+			memcpy_tofs((void *)optval, &ia, sizeof(ia));
 			return 0;
+		}
 #endif
 		default:
 			return(-ENOPROTOOPT);

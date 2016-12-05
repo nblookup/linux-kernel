@@ -21,7 +21,7 @@
 
 #define FM_WRITE	0x2                 /* file mode write bit */
 
-#define VERSION "$Id: cdrom.c,v 0.4 1996/04/17 20:47:50 david Exp david $"
+#define VERSION "$Id: cdrom.c,v 0.8 1996/08/10 10:52:11 david Exp $"
 
 /* Not-exported routines. */
 int cdrom_open(struct inode *ip, struct file *fp);
@@ -97,7 +97,9 @@ int unregister_cdrom(int major, char *name)
 
 /* We need our own cdrom error types! This is a temporary solution. */
 
+#ifndef ENOMEDIUM
 #define ENOMEDIUM EAGAIN				/* no medium in removable device */
+#endif
 
 /* We use the open-option O_NONBLOCK to indicate that the
  * purpose of opening is only for subsequent ioctl() calls; no device
@@ -351,7 +353,7 @@ int cdrom_ioctl(struct inode *ip, struct file *fp,
                 return cdo->options;
                 
         case CDROM_SELECT_SPEED:
-                if (0 <= arg && arg < (int) (cdo->speed + 0.5) &&
+                if (0 <= arg && arg <= cdo->speed &&
                     cdo->capability & ~cdo->mask & CDC_SELECT_SPEED)
                         return cdo->select_speed(dev, arg);
                 else
@@ -457,7 +459,7 @@ int cdrom_ioctl(struct inode *ip, struct file *fp,
                 }
                 case CDROMPLAYMSF: {
                         struct cdrom_msf msf;
-                        GETARG(struct cdrom_mdf, msf);
+                        GETARG(struct cdrom_msf, msf);
                         return cdo->audio_ioctl(dev, cmd, &msf);
                 }
                 case CDROMPLAYTRKIND: {
@@ -467,13 +469,13 @@ int cdrom_ioctl(struct inode *ip, struct file *fp,
                 }
                 case CDROMVOLCTRL: {
                         struct cdrom_volctrl volume;
-                        GETARG(struct cdrom_volctl, volume);
+                        GETARG(struct cdrom_volctrl, volume);
                         return cdo->audio_ioctl(dev, cmd, &volume);
                 }
                 case CDROMVOLREAD: {
                         struct cdrom_volctrl volume;
                         if (!cdo->audio_ioctl(dev, cmd, &volume)) {
-                                PUTARG(struct cdrom_volctl, volume);
+                                PUTARG(struct cdrom_volctrl, volume);
                                 return 0;
                         }
                         return -EINVAL;

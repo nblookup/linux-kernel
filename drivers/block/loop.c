@@ -6,15 +6,19 @@
  * Copyright 1993 by Theodore Ts'o.  Redistribution of this file is
  * permitted under the GNU Public License.
  *
+ * more DES encryption plus IDEA encryption by Nicholas J. Leon, June 20, 1996
  * DES encryption plus some minor changes by Werner Almesberger, 30-MAY-1993
  *
  * Modularized and updated for 1.1.16 kernel - Mitch Dsouza 28th May 1994
  *
  * Adapted for 1.3.59 kernel - Andries Brouwer, 1 Feb 1996
+ *
+ * Fixed do_loop_request() re-entrancy - <Vincent.Renardias@waw.com> Mar 20, 1997
  */
 
 #include <linux/module.h>
 
+#include <linux/config.h>
 #include <linux/fs.h>
 #include <linux/stat.h>
 #include <linux/errno.h>
@@ -22,9 +26,14 @@
 
 #include <asm/segment.h>
 
-#ifdef DES_AVAILABLE
-#include "des.h"
+#ifdef CONFIG_BLK_DEV_LOOP_DES
+#include <linux/des.h>
 #endif
+
+#ifdef CONFIG_BLK_DEV_LOOP_IDEA
+#include <linux/idea.h>
+#endif
+
 #include <linux/loop.h>		/* must follow des.h */
 
 #define MAJOR_NR LOOP_MAJOR
@@ -41,6 +50,7 @@
 #define MAX_LOOP 8
 static struct loop_device loop_dev[MAX_LOOP];
 static int loop_sizes[MAX_LOOP];
+static int loop_blksizes[MAX_LOOP];
 
 /*
  * Transfer functions
@@ -113,6 +123,23 @@ static int transfer_des(struct loop_device *lo, int cmd, char *raw_buf,
 }
 #endif
 
+#ifdef IDEA_AVAILABLE
+
+extern void idea_encrypt_block(idea_key,char *,char *,int);
+
+static int transfer_idea(struct loop_device *lo, int cmd, char *raw_buf,
+		  char *loop_buf, int size)
+{
+  if (cmd==READ) {
+    idea_encrypt_block(lo->lo_idea_en_key,raw_buf,loop_buf,size);
+  }
+  else {
+    idea_encrypt_block(lo->lo_idea_de_key,loop_buf,raw_buf,size);
+  }
+  return 0;
+}
+#endif
+
 static transfer_proc_t xfer_funcs[MAX_LOOP] = {
 	transfer_none,		/* LO_CRYPT_NONE */
 	transfer_xor,		/* LO_CRYPT_XOR */
@@ -121,7 +148,11 @@ static transfer_proc_t xfer_funcs[MAX_LOOP] = {
 #else
 	NULL,			/* LO_CRYPT_DES */
 #endif
-	0			/* LO_CRYPT_IDEA */
+#ifdef IDEA_AVAILABLE           /* LO_CRYPT_IDEA */
+	transfer_idea
+#else
+	NULL
+#endif
 };
 
 
@@ -142,6 +173,7 @@ static void figure_loop_size(struct loop_device *lo)
 		else
 			size = MAX_DISK_SIZE;
 	}
+
 	loop_sizes[lo->lo_number] = size;
 }
 
@@ -151,12 +183,15 @@ static void do_lo_request(void)
 	char	*dest_addr;
 	struct loop_device *lo;
 	struct buffer_head *bh;
+	struct request *current_request;
 
 repeat:
 	INIT_REQUEST;
-	if (MINOR(CURRENT->rq_dev) >= MAX_LOOP)
+	current_request=CURRENT;
+	CURRENT=current_request->next;
+	if (MINOR(current_request->rq_dev) >= MAX_LOOP)
 		goto error_out;
-	lo = &loop_dev[MINOR(CURRENT->rq_dev)];
+	lo = &loop_dev[MINOR(current_request->rq_dev)];
 	if (!lo->lo_inode || !lo->transfer)
 		goto error_out;
 
@@ -167,14 +202,14 @@ repeat:
 	      blksize = BLOCK_SIZE;
 	}
 
-	dest_addr = CURRENT->buffer;
+	dest_addr = current_request->buffer;
 	
 	if (blksize < 512) {
-		block = CURRENT->sector * (512/blksize);
+		block = current_request->sector * (512/blksize);
 		offset = 0;
 	} else {
-		block = CURRENT->sector / (blksize >> 9);
-		offset = CURRENT->sector % (blksize >> 9);
+		block = current_request->sector / (blksize >> 9);
+		offset = (current_request->sector % (blksize >> 9)) << 9;
 	}
 	block += lo->lo_offset / blksize;
 	offset += lo->lo_offset % blksize;
@@ -182,12 +217,13 @@ repeat:
 		block++;
 		offset -= blksize;
 	}
-	len = CURRENT->current_nr_sectors << 9;
-	if (CURRENT->cmd == WRITE) {
+	len = current_request->current_nr_sectors << 9;
+
+	if (current_request->cmd == WRITE) {
 		if (lo->lo_flags & LO_FLAGS_READ_ONLY)
 			goto error_out;
-	} else if (CURRENT->cmd != READ) {
-		printk("unknown loop device command (%d)?!?", CURRENT->cmd);
+	} else if (current_request->cmd != READ) {
+		printk("unknown loop device command (%d)?!?", current_request->cmd);
 		goto error_out;
 	}
 	while (len > 0) {
@@ -206,7 +242,7 @@ repeat:
 			       block, blksize);
 			goto error_out;
 		}
-		if (!buffer_uptodate(bh) && ((CURRENT->cmd == READ) ||
+		if (!buffer_uptodate(bh) && ((current_request->cmd == READ) ||
 					(offset || (len < blksize)))) {
 			ll_rw_block(READ, 1, &bh);
 			wait_on_buffer(bh);
@@ -219,23 +255,29 @@ repeat:
 		if (size > len)
 			size = len;
 			   
-		if ((lo->transfer)(lo, CURRENT->cmd, bh->b_data + offset,
+		if ((lo->transfer)(lo, current_request->cmd, bh->b_data + offset,
 				   dest_addr, size)) {
 			printk("loop: transfer error block %d\n", block);
 			brelse(bh);
 			goto error_out;
 		}
-		if (CURRENT->cmd == WRITE)
+		if (current_request->cmd == WRITE) {
+			mark_buffer_uptodate(bh, 1);
 			mark_buffer_dirty(bh, 1);
+		}
 		brelse(bh);
 		dest_addr += size;
 		len -= size;
 		offset = 0;
 		block++;
 	}
+	current_request->next=CURRENT;
+	CURRENT=current_request;
 	end_request(1);
 	goto repeat;
 error_out:
+    current_request->next=CURRENT;
+	CURRENT=current_request;
 	end_request(0);
 	goto repeat;
 }
@@ -323,7 +365,7 @@ static int loop_set_status(struct loop_device *lo, struct loop_info *arg)
 	case LO_CRYPT_NONE:
 		break;
 	case LO_CRYPT_XOR:
-		if (info.lo_encrypt_key_size < 0)
+		if (info.lo_encrypt_key_size <= 0)
 			return -EINVAL;
 		break;
 #ifdef DES_AVAILABLE
@@ -334,6 +376,20 @@ static int loop_set_status(struct loop_device *lo, struct loop_info *arg)
 		   lo->lo_des_key);
 		memcpy(lo->lo_des_init,info.lo_init,8);
 		break;
+#endif
+#ifdef IDEA_AVAILABLE
+	case LO_CRYPT_IDEA:
+	  {
+	        uint16 tmpkey[8];
+
+	        if (info.lo_encrypt_key_size != IDEAKEYSIZE)
+		        return -EINVAL;
+                /* create key in lo-> from info.lo_encrypt_key */
+		memcpy(tmpkey,info.lo_encrypt_key,sizeof(tmpkey));
+		en_key_idea(tmpkey,lo->lo_idea_en_key);
+		de_key_idea(lo->lo_idea_en_key,lo->lo_idea_de_key);
+		break;
+	  }
 #endif
 	default:
 		return -EINVAL;
@@ -494,6 +550,12 @@ loop_init( void ) {
 	}
 #ifndef MODULE
 	printk("loop: registered device at major %d\n", MAJOR_NR);
+#ifdef DES_AVAILABLE
+	printk("loop: DES encryption available\n");
+#endif
+#ifdef IDEA_AVAILABLE
+	printk("loop: IDEA encryption available\n");
+#endif
 #endif
 
 	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
@@ -502,7 +564,9 @@ loop_init( void ) {
 		loop_dev[i].lo_number = i;
 	}
 	memset(&loop_sizes, 0, sizeof(loop_sizes));
+	memset(&loop_blksizes, 0, sizeof(loop_blksizes));
 	blk_size[MAJOR_NR] = loop_sizes;
+	blksize_size[MAJOR_NR] = loop_blksizes;
 
 	return 0;
 }

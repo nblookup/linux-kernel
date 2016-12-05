@@ -21,6 +21,10 @@
 
 extern void die_if_kernel(const char *,struct pt_regs *,long);
 
+asmlinkage void do_invalid_op (struct pt_regs *, unsigned long);
+
+extern int pentium_f00f_bug;
+
 /*
  * This routine handles page faults.  It determines the address,
  * and the problem, and then passes it off to one of the appropriate
@@ -33,13 +37,21 @@ extern void die_if_kernel(const char *,struct pt_regs *,long);
  */
 asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
 {
+	void (*handler)(struct task_struct *,
+			struct vm_area_struct *,
+			unsigned long,
+			int);
+	struct task_struct *tsk = current;
+	struct mm_struct *mm = tsk->mm;
 	struct vm_area_struct * vma;
 	unsigned long address;
 	unsigned long page;
+	int write;
 
 	/* get the address */
-	__asm__("movl %%cr2,%0":"=r" (address));
-	vma = find_vma(current, address);
+	__asm__("movl %%cr2,%0" : "=r" (address));
+	down(&mm->mmap_sem);
+	vma = find_vma(mm, address);
 	if (!vma)
 		goto bad_area;
 	if (vma->vm_start <= address)
@@ -63,36 +75,37 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
  * we can handle it..
  */
 good_area:
-	/*
-	 * was it a write?
-	 */
-	if (error_code & 2) {
-		if (!(vma->vm_flags & VM_WRITE))
+	write = 0;
+	handler = do_no_page;
+	switch (error_code & 3) {
+		default:	/* 3: write, present */
+			handler = do_wp_page;
+#ifdef TEST_VERIFY_AREA
+			if (regs->cs == KERNEL_CS)
+				printk("WP fault at %08lx\n", regs->eip);
+#endif
+			/* fall through */
+		case 2:		/* write, not present */
+			if (!(vma->vm_flags & VM_WRITE))
+				goto bad_area;
+			write++;
+			break;
+		case 1:		/* read, present */
 			goto bad_area;
-	} else {
-		/* read with protection fault? */
-		if (error_code & 1)
-			goto bad_area;
-		if (!(vma->vm_flags & (VM_READ | VM_EXEC)))
-			goto bad_area;
+		case 0:		/* read, not present */
+			if (!(vma->vm_flags & (VM_READ | VM_EXEC)))
+				goto bad_area;
 	}
+	handler(tsk, vma, address, write);
+	up(&mm->mmap_sem);
 	/*
 	 * Did it hit the DOS screen memory VA from vm86 mode?
 	 */
 	if (regs->eflags & VM_MASK) {
 		unsigned long bit = (address - 0xA0000) >> PAGE_SHIFT;
 		if (bit < 32)
-			current->tss.screen_bitmap |= 1 << bit;
+			tsk->tss.screen_bitmap |= 1 << bit;
 	}
-	if (error_code & 1) {
-#ifdef TEST_VERIFY_AREA
-		if (regs->cs == KERNEL_CS)
-			printk("WP fault at %08x\n", regs->eip);
-#endif
-		do_wp_page(current, vma, address, error_code & 2);
-		return;
-	}
-	do_no_page(current, vma, address, error_code & 2);
 	return;
 
 /*
@@ -100,13 +113,34 @@ good_area:
  * Fix it, but check if it's kernel or user first..
  */
 bad_area:
+	up(&mm->mmap_sem);
 	if (error_code & 4) {
-		current->tss.cr2 = address;
-		current->tss.error_code = error_code;
-		current->tss.trap_no = 14;
-		force_sig(SIGSEGV, current);
+		tsk->tss.cr2 = address;
+		tsk->tss.error_code = error_code;
+		tsk->tss.trap_no = 14;
+		force_sig(SIGSEGV, tsk);
 		return;
 	}
+
+	/*
+	 * Pentium F0 0F C7 C8 bug workaround:
+	 */
+	if ( pentium_f00f_bug ) {
+		unsigned long nr;
+		extern struct {
+			unsigned short limit;
+			unsigned long addr __attribute__((packed));
+		} idt_descriptor;
+
+		nr = (address - idt_descriptor.addr) >> 3;
+
+		if (nr == 6) {
+			do_invalid_op(regs, 0);
+			return;
+		}
+	}
+
+
 /*
  * Oops. The kernel tried to access some bad page. We'll have to
  * terminate things with extreme prejudice.
@@ -120,15 +154,14 @@ bad_area:
 		printk("This processor honours the WP bit even when in supervisor mode. Good.\n");
 		return;
 	}
-	if ((unsigned long) (address-TASK_SIZE) < PAGE_SIZE) {
+	if ((unsigned long) (address-TASK_SIZE) < PAGE_SIZE)
 		printk(KERN_ALERT "Unable to handle kernel NULL pointer dereference");
-		pg0[0] = pte_val(mk_pte(0, PAGE_SHARED));
-	} else
+	else
 		printk(KERN_ALERT "Unable to handle kernel paging request");
 	printk(" at virtual address %08lx\n",address);
 	__asm__("movl %%cr3,%0" : "=r" (page));
 	printk(KERN_ALERT "current->tss.cr3 = %08lx, %%cr3 = %08lx\n",
-		current->tss.cr3, page);
+		tsk->tss.cr3, page);
 	page = ((unsigned long *) page)[address >> 22];
 	printk(KERN_ALERT "*pde = %08lx\n", page);
 	if (page & 1) {

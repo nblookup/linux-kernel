@@ -22,6 +22,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/config.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/sched.h>
@@ -35,6 +36,9 @@
 #include <asm/bitops.h>
 #include <asm/pgtable.h>
 #include <asm/smp.h>
+#ifdef CONFIG_MTRR
+#include <asm/mtrr.h>
+#endif
 
 /*
  *	Why isn't this somewhere standard ??
@@ -537,7 +541,13 @@ void smp_callin(void)
 	extern void calibrate_delay(void);
 	int cpuid=GET_APIC_ID(apic_read(APIC_ID));
 	unsigned long l;
+	extern struct desc_struct idt_descriptor;
+	extern int pentium_f00f_bug;
 	
+	if (pentium_f00f_bug) {
+		__asm__ __volatile__("\tlidt %0": "=m" (idt_descriptor));
+	}
+
 	/*
 	 *	Activate our APIC
 	 */
@@ -546,6 +556,14 @@ void smp_callin(void)
  	l=apic_read(APIC_SPIV);
  	l|=(1<<8);		/* Enable */
  	apic_write(APIC_SPIV,l);
+
+#ifdef CONFIG_MTRR
+	/*
+	 * checks the MTRR configuration of this application processor
+	 */
+	check_mtrr_config();
+#endif
+
  	sti();
 	/*
 	 *	Get our bogomips.
@@ -1019,7 +1037,7 @@ void smp_message_pass(int target, int msg, unsigned long data, int wait)
 	 */
 	 
 	if(ct==1000)
-		printk("CPU #%d: previous IPI still not cleared after 10mS", smp_processor_id());
+		printk("CPU #%d: previous IPI still not cleared after 10ms\n", smp_processor_id());
 		
 	/*
 	 *	Program the APIC to deliver the IPI
@@ -1201,4 +1219,16 @@ void smp_message_irq(int cpl, void *dev_id, struct pt_regs *regs)
 	 
 	apic_read(APIC_SPIV);		/* Dummy read */
 	apic_write(APIC_EOI, 0);	/* Docs say use 0 for future compatibility */
+}
+
+void irq_deadlock_detected(void)
+{
+  printk("IRQ DEADLOCK DETECTED BY CPU %d\n", smp_processor_id());
+  __asm__("hlt");
+}
+
+void non_irq_deadlock_detected(void)
+{
+  printk("NON-IRQ DEADLOCK DETECTED BY CPU %d\n", smp_processor_id());
+  __asm__("hlt");
 }

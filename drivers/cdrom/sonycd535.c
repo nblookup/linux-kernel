@@ -4,7 +4,7 @@
  * This is a modified version of the CDU-31A device driver (see below).
  * Changes were made using documentation for the CDU-531 (which Sony
  * assures me is very similar to the 535) and partial disassembly of the
- * DOS driver.  I used Minyard's driver and replaced the the CDU-31A
+ * DOS driver.  I used Minyard's driver and replaced the CDU-31A
  * commands with the CDU-531 commands.  This was complicated by a different
  * interface protocol with the drive.  The driver is still polled.
  *
@@ -30,6 +30,10 @@
  * 1995-06-01
  *  More changes to support CDU-510/515 series
  *      (Claudio Porfiri<C.Porfiri@nisms.tei.ericsson.se>)
+ *
+ * 1997-11-18
+ *  Blocksize awareness
+ *      Dong Liu <qian!dliu@arrow.njit.edu>
  *
  * Things to do:
  *  - handle errors and status better, put everything into a single word
@@ -151,6 +155,8 @@
 #ifndef CDU535_MESSAGE_NAME
 # define CDU535_MESSAGE_NAME	"Sony CDU-535"
 #endif
+
+#define CDU535_BLOCK_SIZE	2048
 
 #ifndef MAX_SPINUP_RETRY
 # define MAX_SPINUP_RETRY		3	/* 1 is sufficient for most drives... */
@@ -589,11 +595,11 @@ set_drive_mode(int mode, Byte status[2])
  *    The routine returns number of bytes read in if successful, otherwise
  *  it returns one of the standard error returns.
  ***************************************************************************/
+
 static int
 seek_and_read_N_blocks(Byte params[], int n_blocks, Byte status[2],
 					   Byte **buff, int buf_size)
 {
-	const int block_size = 2048;
 	Byte cmd_buff[7];
 	int  i;
 	int  read_status;
@@ -601,7 +607,7 @@ seek_and_read_N_blocks(Byte params[], int n_blocks, Byte status[2],
 	Byte *data_buff;
 	int  sector_count = 0;
 
-	if (buf_size < ((long)block_size) * n_blocks)
+	if (buf_size < CDU535_BLOCK_SIZE * n_blocks)
 		return NO_ROOM;
 
 	set_drive_mode(SONY535_CDROM_DRIVE_MODE, status);
@@ -626,7 +632,7 @@ seek_and_read_N_blocks(Byte params[], int n_blocks, Byte status[2],
 			if ((read_status & SONY535_DATA_NOT_READY_BIT) == 0) {
 				/* data is ready, read it */
 				data_buff = buff[sector_count++];
-				for (i = 0; i < block_size; i++)
+				for (i = 0; i < CDU535_BLOCK_SIZE; i++)
 					*data_buff++ = inb(data_reg);	/* unrolling this loop does not seem to help */
 				break;			/* exit the timeout loop */
 			}
@@ -639,7 +645,7 @@ seek_and_read_N_blocks(Byte params[], int n_blocks, Byte status[2],
 	/* read all the data, now read the status */
 	if ((i = read_exec_status(status)) != 0)
 		return i;
-	return block_size * sector_count;
+	return CDU535_BLOCK_SIZE * sector_count;
 }	/* seek_and_read_N_blocks() */
 
 /****************************************************************************
@@ -776,7 +782,7 @@ size_to_buf(unsigned int size, Byte *buf)
  * The OS calls this to perform a read or write operation to the drive.
  * Write obviously fail.  Reads to a read ahead of sony_buffer_size
  * bytes to help speed operations.  This especially helps since the OS
- * uses 1024 byte blocks and the drive uses 2048 byte blocks.  Since most
+ * may use 1024 byte blocks and the drive uses 2048 byte blocks.  Since most
  * data access on a CD is done sequentially, this saves a lot of operations.
  */
 static void
@@ -873,7 +879,7 @@ do_cdu535_request(void)
 						 * seek_and_read_N_blocks for the various cases.
 						 */
 						int readStatus = seek_and_read_N_blocks(params, read_size,
-									status, sony_buffer, (read_size * 2048));
+									status, sony_buffer, (read_size * CDU535_BLOCK_SIZE));
 						if (0 <= readStatus)	/* Good data; common case, placed first */
 							break;
 						if (readStatus == NO_ROOM || spin_up_retry == MAX_SPINUP_RETRY) {
@@ -1479,6 +1485,8 @@ static struct file_operations cdu_fops =
 	NULL						/* revalidate */
 };
 
+static int sonycd535_block_size = CDU535_BLOCK_SIZE;
+
 /*
  * Initialize the driver.
  */
@@ -1577,7 +1585,7 @@ sony535_init(void)
 			if (do_sony_cmd(cmd_buff, 2, status, ret_buff, 1, 1) == 0) {
 				/* set the drive mode successful, we are set! */
 				sony_buffer_size = SONY535_BUFFER_SIZE;
-				sony_buffer_sectors = sony_buffer_size / 2048;
+				sony_buffer_sectors = sony_buffer_size / CDU535_BLOCK_SIZE;
 
 				printk(KERN_INFO CDU535_MESSAGE_NAME " I/F CDROM : %8.8s %16.16s %4.4s",
 					   drive_config.vendor_id,
@@ -1594,6 +1602,7 @@ sony535_init(void)
 					return -EIO;
 				}
 				blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+				blksize_size[MAJOR_NR] = &sonycd535_block_size;
 				read_ahead[MAJOR_NR] = 8;	/* 8 sector (4kB) read-ahead */
 
 				sony_toc = (struct s535_sony_toc *)
@@ -1614,7 +1623,8 @@ sony535_init(void)
 					return -ENOMEM;
 				}
 				for (i = 0; i < sony_buffer_sectors; i++) {
-					sony_buffer[i] = (Byte *)kmalloc(2048, GFP_KERNEL);
+					sony_buffer[i] =
+								(Byte *)kmalloc(CDU535_BLOCK_SIZE, GFP_KERNEL);
 					if (sony_buffer[i] == NULL) {
 						while (--i>=0)
 							kfree(sony_buffer[i]);
@@ -1677,7 +1687,7 @@ cleanup_module(void)
 
 	release_region(sony535_cd_base_io, 4);
 	for (i = 0; i < sony_buffer_sectors; i++)
-		kfree_s(sony_buffer[i], 2048);
+		kfree_s(sony_buffer[i], CDU535_BLOCK_SIZE);
 	kfree_s(sony_buffer, 4 * sony_buffer_sectors);
 	kfree_s(last_sony_subcode, sizeof *last_sony_subcode);
 	kfree_s(sony_toc, sizeof *sony_toc);

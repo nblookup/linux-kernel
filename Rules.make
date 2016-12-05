@@ -22,11 +22,13 @@ unexport O_TARGET
 unexport O_OBJS
 unexport L_OBJS
 unexport M_OBJS
+unexport MI_OBJS
 unexport ALL_MOBJS
 # objects that export symbol tables
 unexport OX_OBJS
 unexport LX_OBJS
 unexport MX_OBJS
+unexport MIX_OBJS
 unexport SYMTAB_OBJS
 
 unexport MOD_LIST_NAME
@@ -83,7 +85,7 @@ endif
 #
 fastdep: dummy
 	if [ -n "$(wildcard *.[chS])" ]; then \
-	$(AWK) -f $(TOPDIR)/scripts/depend.awk *.[chS] > .depend; fi
+	$(TOPDIR)/scripts/mkdep *.[chS] > .depend; fi
 ifdef ALL_SUB_DIRS
 	set -e; for i in $(ALL_SUB_DIRS); do $(MAKE) -C $$i fastdep; done
 endif
@@ -103,7 +105,7 @@ ALL_MOBJS = $(MX_OBJS) $(M_OBJS)
 ifneq "$(strip $(ALL_MOBJS))" ""
 PDWN=$(shell $(CONFIG_SHELL) $(TOPDIR)/scripts/pathdown.sh)
 endif
-modules: $(ALL_MOBJS) dummy
+modules: $(ALL_MOBJS) $(MIX_OBJS) $(MI_OBJS) dummy
 ifdef MOD_SUB_DIRS
 	set -e; for i in $(MOD_SUB_DIRS); do $(MAKE) -C $$i modules; done
 endif
@@ -141,7 +143,7 @@ script:
 # Exporting objects are: all objects that define symbol tables
 #
 ifdef CONFIG_MODVERSIONS
-SYMTAB_OBJS = $(LX_OBJS) $(OX_OBJS) $(MX_OBJS)
+SYMTAB_OBJS = $(LX_OBJS) $(OX_OBJS) $(MX_OBJS) $(MIX_OBJS)
 ifneq "$(strip $(SYMTAB_OBJS))" ""
 
 MODINCL = $(TOPDIR)/include/linux/modules
@@ -152,6 +154,8 @@ $(MODINCL)/%.ver: %.c
 	$(CC) $(CFLAGS) -E -D__GENKSYMS__ $< | /sbin/genksyms $(MODINCL)
 
 $(addprefix $(MODINCL)/,$(SYMTAB_OBJS:.o=.ver)): $(TOPDIR)/include/linux/autoconf.h
+
+.PHONY: $(TOPDIR)/include/linux/modversions.h
 
 $(TOPDIR)/include/linux/modversions.h: $(addprefix $(MODINCL)/,$(SYMTAB_OBJS:.o=.ver))
 	@echo updating $(TOPDIR)/include/linux/modversions.h

@@ -29,6 +29,9 @@ void soundcard_init(void);
 #ifdef CONFIG_ISDN
 void isdn_init(void);
 #endif
+#ifdef CONFIG_PCWATCHDOG
+void pcwatchdog_init(void);
+#endif
 
 static int read_ram(struct inode * inode, struct file * file, char * buf, int count)
 {
@@ -176,6 +179,8 @@ static int read_zero(struct inode * node, struct file * file, char * buf, int co
 	for (left = count; left > 0; left--) {
 		put_user(0,buf);
 		buf++;
+		if (need_resched)
+			schedule();
 	}
 	return count;
 }
@@ -187,11 +192,6 @@ static int mmap_zero(struct inode * inode, struct file * file, struct vm_area_st
 	if (zeromap_page_range(vma->vm_start, vma->vm_end - vma->vm_start, vma->vm_page_prot))
 		return -EAGAIN;
 	return 0;
-}
-
-static int read_full(struct inode * node, struct file * file, char * buf,int count)
-{
-	return count;
 }
 
 static int write_full(struct inode * inode, struct file * file, const char * buf, int count)
@@ -236,7 +236,9 @@ static int memory_lseek(struct inode * inode, struct file * file, off_t offset, 
 #define write_kmem	write_mem
 #define mmap_kmem	mmap_mem
 #define zero_lseek	null_lseek
+#define full_lseek	null_lseek
 #define write_zero	write_null
+#define read_full	read_null
 
 static struct file_operations ram_fops = {
 	memory_lseek,
@@ -316,7 +318,7 @@ static struct file_operations zero_fops = {
 };
 
 static struct file_operations full_fops = {
-	memory_lseek,
+	full_lseek,
 	read_full,
 	write_full,
 	NULL,		/* full_readdir */
@@ -329,6 +331,14 @@ static struct file_operations full_fops = {
 
 static int memory_open(struct inode * inode, struct file * filp)
 {
+	switch (MINOR(inode->i_rdev)) {
+		case 0:
+		case 1:
+		case 2:
+		case 4:
+			if(securelevel>0)
+				return -EPERM;
+	}
 	switch (MINOR(inode->i_rdev)) {
 		case 0:
 			filp->f_op = &ram_fops;
@@ -358,7 +368,7 @@ static int memory_open(struct inode * inode, struct file * filp)
 			filp->f_op = &urandom_fops;
 			break;
 		default:
-			return -ENODEV;
+			return -ENXIO;
 	}
 	if (filp->f_op && filp->f_op->open)
 		return filp->f_op->open(inode,filp);
@@ -390,6 +400,7 @@ int chr_dev_init(void)
 #if defined (CONFIG_BUSMOUSE) || defined(CONFIG_UMISC) || \
     defined (CONFIG_PSMOUSE) || defined (CONFIG_MS_BUSMOUSE) || \
     defined (CONFIG_ATIXL_BUSMOUSE) || defined(CONFIG_SOFT_WATCHDOG) || \
+    defined (CONFIG_PCWATCHDOG) || defined (CONFIG_H8) || defined(CONFIG_WDT) || \
     defined (CONFIG_APM) || defined (CONFIG_RTC) || defined (CONFIG_SUN_MOUSE)
 	misc_init();
 #endif
