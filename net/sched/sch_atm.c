@@ -19,9 +19,6 @@
 
 
 extern struct socket *sockfd_lookup(int fd, int *err); /* @@@ fix this */
-#define sockfd_put(sock) fput((sock)->file)	/* @@@ copied because it's
-						   __inline__ in socket.c */
-
 
 #if 0 /* control */
 #define DPRINTK(format,args...) printk(KERN_DEBUG format,##args)
@@ -495,7 +492,7 @@ static void sch_atm_dequeue(unsigned long data)
 				(void) flow->q->ops->requeue(skb,flow->q);
 				break;
 			}
-			D2PRINTK("atm_tc_deqeueue: sending on class %p\n",flow);
+			D2PRINTK("atm_tc_dequeue: sending on class %p\n",flow);
 			/* remove any LL header somebody else has attached */
 			skb_pull(skb,(char *) skb->nh.iph-(char *) skb->data);
 			if (skb_headroom(skb) < flow->hdr_len) {
@@ -511,8 +508,8 @@ static void sch_atm_dequeue(unsigned long data)
 			ATM_SKB(skb)->vcc = flow->vcc;
 			memcpy(skb_push(skb,flow->hdr_len),flow->hdr,
 			    flow->hdr_len);
-			atomic_add(skb->truesize,&flow->vcc->tx_inuse);
-			ATM_SKB(skb)->iovcnt = 0;
+			atomic_add(skb->truesize,
+				   &flow->vcc->sk->sk_wmem_alloc);
 			/* atm.atm_options are already set by atm_tc_enqueue */
 			(void) flow->vcc->send(flow->vcc,skb);
 		}
@@ -548,15 +545,16 @@ static int atm_tc_requeue(struct sk_buff *skb,struct Qdisc *sch)
 }
 
 
-static int atm_tc_drop(struct Qdisc *sch)
+static unsigned int atm_tc_drop(struct Qdisc *sch)
 {
 	struct atm_qdisc_data *p = PRIV(sch);
 	struct atm_flow_data *flow;
+	unsigned int len;
 
 	DPRINTK("atm_tc_drop(sch %p,[qdisc %p])\n",sch,p);
 	for (flow = p->flows; flow; flow = flow->next)
-		if (flow->q->ops->drop && flow->q->ops->drop(flow->q))
-			return 1;
+		if (flow->q->ops->drop && (len = flow->q->ops->drop(flow->q)))
+			return len;
 	return 0;
 }
 
@@ -578,7 +576,6 @@ static int atm_tc_init(struct Qdisc *sch,struct rtattr *opt)
 	p->link.ref = 1;
 	p->link.next = NULL;
 	tasklet_init(&p->task,sch_atm_dequeue,(unsigned long) sch);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -615,11 +612,8 @@ static void atm_tc_destroy(struct Qdisc *sch)
 		}
 	}
 	tasklet_kill(&p->task);
-	MOD_DEC_USE_COUNT;
 }
 
-
-#ifdef CONFIG_RTNETLINK
 
 static int atm_tc_dump_class(struct Qdisc *sch, unsigned long cl,
     struct sk_buff *skb, struct tcmsg *tcm)
@@ -668,48 +662,35 @@ static int atm_tc_dump(struct Qdisc *sch, struct sk_buff *skb)
 	return 0;
 }
 
-#endif
-
-
-static struct Qdisc_class_ops atm_class_ops =
-{
-	atm_tc_graft,			/* graft */
-	atm_tc_leaf,			/* leaf */
-	atm_tc_get,			/* get */
-	atm_tc_put,			/* put */
-	atm_tc_change,			/* change */
-	atm_tc_delete,			/* delete */
-	atm_tc_walk,			/* walk */
-
-	atm_tc_find_tcf,		/* tcf_chain */
-	atm_tc_bind_filter,		/* bind_tcf */
-	atm_tc_put,			/* unbind_tcf */
-
-#ifdef CONFIG_RTNETLINK
-	atm_tc_dump_class,		/* dump */
-#endif
+static struct Qdisc_class_ops atm_class_ops = {
+	.graft		=	atm_tc_graft,
+	.leaf		=	atm_tc_leaf,
+	.get		=	atm_tc_get,
+	.put		=	atm_tc_put,
+	.change		=	atm_tc_change,
+	.delete		=	atm_tc_delete,
+	.walk		=	atm_tc_walk,
+	.tcf_chain	=	atm_tc_find_tcf,
+	.bind_tcf	=	atm_tc_bind_filter,
+	.unbind_tcf	=	atm_tc_put,
+	.dump		=	atm_tc_dump_class,
 };
 
-struct Qdisc_ops atm_qdisc_ops =
-{
-	NULL,				/* next */
-	&atm_class_ops,			/* cl_ops */
-	"atm",
-	sizeof(struct atm_qdisc_data),
-
-	atm_tc_enqueue,			/* enqueue */
-	atm_tc_dequeue,			/* dequeue */
-	atm_tc_requeue,			/* requeue */
-	atm_tc_drop,			/* drop */
-
-	atm_tc_init,			/* init */
-	atm_tc_reset,			/* reset */
-	atm_tc_destroy,			/* destroy */
-	NULL,				/* change */
-
-#ifdef CONFIG_RTNETLINK
-	atm_tc_dump			/* dump */
-#endif
+struct Qdisc_ops atm_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	&atm_class_ops,
+	.id		=	"atm",
+	.priv_size	=	sizeof(struct atm_qdisc_data),
+	.enqueue	=	atm_tc_enqueue,
+	.dequeue	=	atm_tc_dequeue,
+	.requeue	=	atm_tc_requeue,
+	.drop		=	atm_tc_drop,
+	.init		=	atm_tc_init,
+	.reset		=	atm_tc_reset,
+	.destroy	=	atm_tc_destroy,
+	.change		=	NULL,
+	.dump		=	atm_tc_dump,
+	.owner		=	THIS_MODULE,
 };
 
 

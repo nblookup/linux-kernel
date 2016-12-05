@@ -20,6 +20,8 @@
 asmlinkage void sys_sync(void);	/* it's really int */
 
 int panic_timeout;
+int panic_on_oops;
+int tainted;
 
 struct notifier_block *panic_notifier_list;
 
@@ -28,7 +30,6 @@ static int __init panic_setup(char *str)
 	panic_timeout = simple_strtoul(str, NULL, 0);
 	return 1;
 }
-
 __setup("panic=", panic_setup);
 
 /**
@@ -51,7 +52,7 @@ NORET_TYPE void panic(const char * fmt, ...)
 
 	bust_spinlocks(1);
 	va_start(args, fmt);
-	vsprintf(buf, fmt, args);
+	vsnprintf(buf, sizeof(buf), fmt, args);
 	va_end(args);
 	printk(KERN_EMERG "Kernel panic: %s\n",buf);
 	if (in_interrupt())
@@ -66,7 +67,7 @@ NORET_TYPE void panic(const char * fmt, ...)
 	smp_send_stop();
 #endif
 
-	notifier_call_chain(&panic_notifier_list, 0, NULL);
+       notifier_call_chain(&panic_notifier_list, 0, buf);
 
 	if (panic_timeout > 0)
 	{
@@ -88,35 +89,37 @@ NORET_TYPE void panic(const char * fmt, ...)
 		extern int stop_a_enabled;
 		/* Make sure the user can actually press L1-A */
 		stop_a_enabled = 1;
-		printk("Press L1-A to return to the boot prom\n");
+		printk(KERN_EMERG "Press L1-A to return to the boot prom\n");
 	}
 #endif
 #if defined(CONFIG_ARCH_S390)
         disabled_wait(caller);
 #endif
-	sti();
-	for(;;) {
-		CHECK_EMERGENCY_SYNC
-	}
+	local_irq_enable();
+	for (;;)
+		;
 }
 
 /**
  *	print_tainted - return a string to represent the kernel taint state.
  *
+ *  'P' - Proprietary module has been loaded.
+ *  'F' - Module has been forcibly loaded.
+ *  'S' - SMP with CPUs not designed for SMP.
+ *
  *	The string is overwritten by the next call to print_taint().
  */
  
-const char *print_tainted()
+const char *print_tainted(void)
 {
 	static char buf[20];
 	if (tainted) {
-		snprintf(buf, sizeof(buf), "Tainted: %c%c",
-			tainted & 1 ? 'P' : 'G',
-			tainted & 2 ? 'F' : ' ');
+		snprintf(buf, sizeof(buf), "Tainted: %c%c%c",
+			tainted & TAINT_PROPRIETARY_MODULE ? 'P' : 'G',
+			tainted & TAINT_FORCED_MODULE ? 'F' : ' ',
+			tainted & TAINT_UNSAFE_SMP ? 'S' : ' ');
 	}
 	else
 		snprintf(buf, sizeof(buf), "Not tainted");
 	return(buf);
 }
-
-int tainted = 0;

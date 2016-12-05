@@ -7,61 +7,123 @@
  * Arbitrary resource management.
  */
 
+#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/fs.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <asm/io.h>
 
-struct resource ioport_resource = { "PCI IO", 0x0000, IO_SPACE_LIMIT, IORESOURCE_IO };
-struct resource iomem_resource = { "PCI mem", 0x00000000, 0xffffffff, IORESOURCE_MEM };
+
+struct resource ioport_resource = {
+	.name	= "PCI IO",
+	.start	= 0x0000,
+	.end	= IO_SPACE_LIMIT,
+	.flags	= IORESOURCE_IO,
+};
+
+struct resource iomem_resource = {
+	.name	= "PCI mem",
+	.start	= 0UL,
+	.end	= ~0UL,
+	.flags	= IORESOURCE_MEM,
+};
 
 static rwlock_t resource_lock = RW_LOCK_UNLOCKED;
 
+#ifdef CONFIG_PROC_FS
+
+#define MAX_IORES_LEVEL		5
+
 /*
- * This generates reports for /proc/ioports and /proc/iomem
+ * do_resource_list():
+ * for reports of /proc/ioports and /proc/iomem;
+ * do current entry, then children, then siblings;
  */
-static char * do_resource_list(struct resource *entry, const char *fmt, int offset, char *buf, char *end)
+static int do_resource_list(struct seq_file *m, struct resource *res, const char *fmt, int level)
 {
-	if (offset < 0)
-		offset = 0;
+	while (res) {
+		const char *name;
 
-	while (entry) {
-		const char *name = entry->name;
-		unsigned long from, to;
+		name = res->name ? res->name : "<BAD>";
+		if (level > MAX_IORES_LEVEL)
+			level = MAX_IORES_LEVEL;
+		seq_printf (m, fmt + 2 * MAX_IORES_LEVEL - 2 * level,
+				res->start, res->end, name);
 
-		if ((int) (end-buf) < 80)
-			return buf;
+		if (res->child)
+			do_resource_list(m, res->child, fmt, level + 1);
 
-		from = entry->start;
-		to = entry->end;
-		if (!name)
-			name = "<BAD>";
-
-		buf += sprintf(buf, fmt + offset, from, to, name);
-		if (entry->child)
-			buf = do_resource_list(entry->child, fmt, offset-2, buf, end);
-		entry = entry->sibling;
+		res = res->sibling;
 	}
 
-	return buf;
+	return 0;
 }
 
-int get_resource_list(struct resource *root, char *buf, int size)
+static int ioresources_show(struct seq_file *m, void *v)
 {
+	struct resource *root = m->private;
 	char *fmt;
 	int retval;
 
-	fmt = "        %08lx-%08lx : %s\n";
-	if (root->end < 0x10000)
-		fmt = "        %04lx-%04lx : %s\n";
+	fmt = root->end < 0x10000
+		? "          %04lx-%04lx : %s\n"
+		: "          %08lx-%08lx : %s\n";
 	read_lock(&resource_lock);
-	retval = do_resource_list(root->child, fmt, 8, buf, buf + size) - buf;
+	retval = do_resource_list(m, root->child, fmt, 0);
 	read_unlock(&resource_lock);
 	return retval;
-}	
+}
+
+static int ioresources_open(struct file *file, struct resource *root)
+{
+	return single_open(file, ioresources_show, root);
+}
+
+static int ioports_open(struct inode *inode, struct file *file)
+{
+	return ioresources_open(file, &ioport_resource);
+}
+
+static struct file_operations proc_ioports_operations = {
+	.open		= ioports_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int iomem_open(struct inode *inode, struct file *file)
+{
+	return ioresources_open(file, &iomem_resource);
+}
+
+static struct file_operations proc_iomem_operations = {
+	.open		= iomem_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int __init ioresources_init(void)
+{
+	struct proc_dir_entry *entry;
+
+	entry = create_proc_entry("ioports", 0, NULL);
+	if (entry)
+		entry->proc_fops = &proc_ioports_operations;
+	entry = create_proc_entry("iomem", 0, NULL);
+	if (entry)
+		entry->proc_fops = &proc_iomem_operations;
+	return 0;
+}
+__initcall(ioresources_init);
+
+#endif /* CONFIG_PROC_FS */
 
 /* Return the conflict entry if you can't request it */
 static struct resource * __request_resource(struct resource *root, struct resource *new)
@@ -131,20 +193,6 @@ int release_resource(struct resource *old)
 	return retval;
 }
 
-int check_resource(struct resource *root, unsigned long start, unsigned long len)
-{
-	struct resource *conflict, tmp;
-
-	tmp.start = start;
-	tmp.end = start + len - 1;
-	write_lock(&resource_lock);
-	conflict = __request_resource(root, &tmp);
-	if (!conflict)
-		__release_resource(&tmp);
-	write_unlock(&resource_lock);
-	return conflict ? -EBUSY : 0;
-}
-
 /*
  * Find empty slot in the resource tree given range and alignment.
  */
@@ -152,7 +200,8 @@ static int find_resource(struct resource *root, struct resource *new,
 			 unsigned long size,
 			 unsigned long min, unsigned long max,
 			 unsigned long align,
-			 void (*alignf)(void *, struct resource *, unsigned long),
+			 void (*alignf)(void *, struct resource *,
+					unsigned long, unsigned long),
 			 void *alignf_data)
 {
 	struct resource *this = root->child;
@@ -169,7 +218,7 @@ static int find_resource(struct resource *root, struct resource *new,
 			new->end = max;
 		new->start = (new->start + align - 1) & ~(align - 1);
 		if (alignf)
-			alignf(alignf_data, new, size);
+			alignf(alignf_data, new, size, align);
 		if (new->start < new->end && new->end - new->start + 1 >= size) {
 			new->end = new->start + size - 1;
 			return 0;
@@ -189,7 +238,8 @@ int allocate_resource(struct resource *root, struct resource *new,
 		      unsigned long size,
 		      unsigned long min, unsigned long max,
 		      unsigned long align,
-		      void (*alignf)(void *, struct resource *, unsigned long),
+		      void (*alignf)(void *, struct resource *,
+				     unsigned long, unsigned long),
 		      void *alignf_data)
 {
 	int err;
@@ -249,7 +299,7 @@ struct resource * __request_region(struct resource *parent, unsigned long start,
 	return res;
 }
 
-int __check_region(struct resource *parent, unsigned long start, unsigned long n)
+int __deprecated __check_region(struct resource *parent, unsigned long start, unsigned long n)
 {
 	struct resource * res;
 
@@ -288,7 +338,7 @@ void __release_region(struct resource *parent, unsigned long start, unsigned lon
 		}
 		p = &res->sibling;
 	}
-	printk("Trying to free nonexistent resource <%08lx-%08lx>\n", start, end);
+	printk(KERN_WARNING "Trying to free nonexistent resource <%08lx-%08lx>\n", start, end);
 }
 
 /*

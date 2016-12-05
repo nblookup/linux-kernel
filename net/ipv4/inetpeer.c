@@ -18,6 +18,7 @@
 #include <linux/time.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/net.h>
 #include <net/inetpeer.h>
 
 /*
@@ -74,9 +75,9 @@ static kmem_cache_t *peer_cachep;
 
 #define node_height(x) x->avl_height
 static struct inet_peer peer_fake_node = {
-	avl_left : &peer_fake_node,
-	avl_right : &peer_fake_node,
-	avl_height : 0
+	.avl_left	= &peer_fake_node,
+	.avl_right	= &peer_fake_node,
+	.avl_height	= 0
 };
 #define peer_avl_empty (&peer_fake_node)
 static struct inet_peer *peer_root = peer_avl_empty;
@@ -98,7 +99,7 @@ spinlock_t inet_peer_unused_lock = SPIN_LOCK_UNLOCKED;
 
 static void peer_check_expire(unsigned long dummy);
 static struct timer_list peer_periodic_timer =
-	{ { NULL, NULL }, 0, 0, &peer_check_expire };
+	TIMER_INITIALIZER(peer_check_expire, 0, 0);
 
 /* Exported for sysctl_net_ipv4.  */
 int inet_peer_gc_mintime = 10 * HZ,

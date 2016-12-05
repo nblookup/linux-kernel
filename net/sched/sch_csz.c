@@ -17,7 +17,7 @@
 #include <asm/bitops.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/socket.h>
@@ -56,7 +56,7 @@
 	CSZ presents a more precise but less flexible and less efficient
 	approach. As I understand it, the main idea is to create
 	WFQ flows for each guaranteed service and to allocate
-	the rest of bandwith to dummy flow-0. Flow-0 comprises
+	the rest of bandwidth to dummy flow-0. Flow-0 comprises
 	the predictive services and the best effort traffic;
 	it is handled by a priority scheduler with the highest
 	priority band allocated	for predictive services, and the rest ---
@@ -184,7 +184,7 @@
 	procedure for solving these equations.
 	See procedure csz_update(), that is a generalization of
 	the algorithm from S. Keshav's thesis Chapter 3
-	"Efficient Implementation of Fair Queeing".
+	"Efficient Implementation of Fair Queuing".
 
 	NOTES.
 
@@ -301,8 +301,8 @@ struct csz_sched_data
 
 #if 0
 /* Scan forward */
-extern __inline__ void csz_insert_finish(struct csz_head *b,
-					 struct csz_flow *this)
+static inline void csz_insert_finish(struct csz_head *b,
+				     struct csz_flow *this)
 {
 	struct csz_head *f = b->fnext;
 	unsigned long finish = this->finish;
@@ -318,8 +318,8 @@ extern __inline__ void csz_insert_finish(struct csz_head *b,
 }
 #else
 /* Scan backward */
-extern __inline__ void csz_insert_finish(struct csz_head *b,
-					 struct csz_flow *this)
+static inline void csz_insert_finish(struct csz_head *b,
+				     struct csz_flow *this)
 {
 	struct csz_head *f = b->fprev;
 	unsigned long finish = this->finish;
@@ -339,8 +339,8 @@ extern __inline__ void csz_insert_finish(struct csz_head *b,
    flow with greater start number.
  */
 
-extern __inline__ void csz_insert_start(struct csz_head *b,
-					struct csz_flow *this)
+static inline void csz_insert_start(struct csz_head *b,
+				    struct csz_flow *this)
 {
 	struct csz_head *f = b->snext;
 	unsigned long start = this->start;
@@ -624,7 +624,7 @@ static __inline__ int csz_enough_tokens(struct csz_sched_data *q,
 
 	toks = -toks;
 
-	/* Remeber, that we should start watchdog */
+	/* Remember, that we should start watchdog */
 	if (toks < q->wd_expires)
 		q->wd_expires = toks;
 
@@ -708,11 +708,9 @@ csz_dequeue(struct Qdisc* sch)
 	 */
 	if (q->wd_expires) {
 		unsigned long delay = PSCHED_US2JIFFIE(q->wd_expires);
-		del_timer(&q->wd_timer);
 		if (delay == 0)
 			delay = 1;
-		q->wd_timer.expires = jiffies + delay;
-		add_timer(&q->wd_timer);
+		mod_timer(&q->wd_timer, jiffies + delay);
 		sch->stats.overlimits++;
 	}
 #endif
@@ -749,7 +747,13 @@ csz_reset(struct Qdisc* sch)
 static void
 csz_destroy(struct Qdisc* sch)
 {
-	MOD_DEC_USE_COUNT;
+	struct csz_sched_data *q = (struct csz_sched_data *)sch->data;
+	struct tcf_proto *tp;
+
+	while ((tp = q->filter_list) != NULL) {
+		q->filter_list = tp->next;
+		tp->ops->destroy(tp);
+	}
 }
 
 static int csz_init(struct Qdisc *sch, struct rtattr *opt)
@@ -791,11 +795,9 @@ static int csz_init(struct Qdisc *sch, struct rtattr *opt)
 	q->wd_timer.data = (unsigned long)sch;
 	q->wd_timer.function = csz_watchdog;
 #endif
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
-#ifdef CONFIG_RTNETLINK
 static int csz_dump(struct Qdisc *sch, struct sk_buff *skb)
 {
 	struct csz_sched_data *q = (struct csz_sched_data *)sch->data;
@@ -817,8 +819,6 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
-#endif
-
 
 static int csz_graft(struct Qdisc *sch, unsigned long cl, struct Qdisc *new,
 		     struct Qdisc **old)
@@ -932,7 +932,6 @@ static int csz_delete(struct Qdisc *sch, unsigned long cl)
 	return 0;
 }
 
-#ifdef CONFIG_RTNETLINK
 static int csz_dump_class(struct Qdisc *sch, unsigned long cl, struct sk_buff *skb, struct tcmsg *tcm)
 {
 	struct csz_sched_data *q = (struct csz_sched_data *)sch->data;
@@ -978,7 +977,6 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
-#endif
 
 static void csz_walk(struct Qdisc *sch, struct qdisc_walker *arg)
 {
@@ -1015,46 +1013,35 @@ static struct tcf_proto ** csz_find_tcf(struct Qdisc *sch, unsigned long cl)
 	return &q->filter_list;
 }
 
-struct Qdisc_class_ops csz_class_ops =
-{
-	csz_graft,
-	csz_leaf,
-
-	csz_get,
-	csz_put,
-	csz_change,
-	csz_delete,
-	csz_walk,
-
-	csz_find_tcf,
-	csz_bind,
-	csz_put,
-
-#ifdef CONFIG_RTNETLINK
-	csz_dump_class,
-#endif
+struct Qdisc_class_ops csz_class_ops = {
+	.graft		=	csz_graft,
+	.leaf		=	csz_leaf,
+	.get		=	csz_get,
+	.put		=	csz_put,
+	.change		=	csz_change,
+	.delete		=	csz_delete,
+	.walk		=	csz_walk,
+	.tcf_chain	=	csz_find_tcf,
+	.bind_tcf	=	csz_bind,
+	.unbind_tcf	=	csz_put,
+	.dump		=	csz_dump_class,
 };
 
-struct Qdisc_ops csz_qdisc_ops =
-{
-	NULL,
-	&csz_class_ops,
-	"csz",
-	sizeof(struct csz_sched_data),
-
-	csz_enqueue,
-	csz_dequeue,
-	NULL,
-	NULL,
-
-	csz_init,
-	csz_reset,
-	csz_destroy,
-	NULL /* csz_change */,
-
-#ifdef CONFIG_RTNETLINK
-	csz_dump,
-#endif
+struct Qdisc_ops csz_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	&csz_class_ops,
+	.id		=	"csz",
+	.priv_size	=	sizeof(struct csz_sched_data),
+	.enqueue	=	csz_enqueue,
+	.dequeue	=	csz_dequeue,
+	.requeue	=	NULL,
+	.drop		=	NULL,
+	.init		=	csz_init,
+	.reset		=	csz_reset,
+	.destroy	=	csz_destroy,
+	.change		=	NULL,
+	.dump		=	csz_dump,
+	.owner		=	THIS_MODULE,
 };
 
 

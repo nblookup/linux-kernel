@@ -5,7 +5,7 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br.c,v 1.46 2001/10/02 02:22:36 davem Exp $
+ *	$Id: br.c,v 1.47 2001/12/24 00:56:41 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -28,24 +28,19 @@
 #include "../atm/lec.h"
 #endif
 
-void br_dec_use_count()
-{
-	MOD_DEC_USE_COUNT;
-}
-
-void br_inc_use_count()
-{
-	MOD_INC_USE_COUNT;
-}
+int (*br_should_route_hook) (struct sk_buff **pskb) = NULL;
 
 static int __init br_init(void)
 {
 	printk(KERN_INFO "NET4: Ethernet Bridge 008 for NET4.0\n");
 
-	br_handle_frame_hook = br_handle_frame;
-#ifdef CONFIG_INET
-	br_ioctl_hook = br_ioctl_deviceless_stub;
+#ifdef CONFIG_NETFILTER
+	if (br_netfilter_init())
+		return 1;
 #endif
+	brioctl_set(br_ioctl_deviceless_stub);
+	br_handle_frame_hook = br_handle_frame;
+
 #if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
 	br_fdb_get_hook = br_fdb_get;
 	br_fdb_put_hook = br_fdb_put;
@@ -55,30 +50,26 @@ static int __init br_init(void)
 	return 0;
 }
 
-static void __br_clear_frame_hook(void)
-{
-	br_handle_frame_hook = NULL;
-}
-
-static void __br_clear_ioctl_hook(void)
-{
-#ifdef CONFIG_INET
-	br_ioctl_hook = NULL;
-#endif	
-}
-
 static void __exit br_deinit(void)
 {
+#ifdef CONFIG_NETFILTER
+	br_netfilter_fini();
+#endif
 	unregister_netdevice_notifier(&br_device_notifier);
-	br_call_ioctl_atomic(__br_clear_ioctl_hook);
-	net_call_rx_atomic(__br_clear_frame_hook);
+	brioctl_set(NULL);
+	br_handle_frame_hook = NULL;
+
 #if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
 	br_fdb_get_hook = NULL;
 	br_fdb_put_hook = NULL;
 #endif
+
+	br_cleanup_bridges();
+
+	synchronize_net();
 }
 
-EXPORT_NO_SYMBOLS;
+EXPORT_SYMBOL(br_should_route_hook);
 
 module_init(br_init)
 module_exit(br_deinit)

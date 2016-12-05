@@ -61,7 +61,7 @@ Short description.
 
 	avg = (1-W)*avg + W*current_queue_len,
 
-	W is the filter time constant (choosen as 2^(-Wlog)), it controls
+	W is the filter time constant (chosen as 2^(-Wlog)), it controls
 	the inertia of the algorithm. To allow larger bursts, W should be
 	decreased.
 
@@ -342,19 +342,19 @@ red_dequeue(struct Qdisc* sch)
 	return NULL;
 }
 
-static int
-red_drop(struct Qdisc* sch)
+static unsigned int red_drop(struct Qdisc* sch)
 {
 	struct sk_buff *skb;
 	struct red_sched_data *q = (struct red_sched_data *)sch->data;
 
 	skb = __skb_dequeue_tail(&sch->q);
 	if (skb) {
-		sch->stats.backlog -= skb->len;
+		unsigned int len = skb->len;
+		sch->stats.backlog -= len;
 		sch->stats.drops++;
 		q->st.other++;
 		kfree_skb(skb);
-		return 1;
+		return len;
 	}
 	PSCHED_GET_TIME(q->qidlestart);
 	return 0;
@@ -407,18 +407,10 @@ static int red_change(struct Qdisc *sch, struct rtattr *opt)
 
 static int red_init(struct Qdisc* sch, struct rtattr *opt)
 {
-	int err;
-
-	MOD_INC_USE_COUNT;
-
-	if ((err = red_change(sch, opt)) != 0) {
-		MOD_DEC_USE_COUNT;
-	}
-	return err;
+	return red_change(sch, opt);
 }
 
 
-#ifdef CONFIG_RTNETLINK
 int red_copy_xstats(struct sk_buff *skb, struct tc_red_xstats *st)
 {
         RTA_PUT(skb, TCA_XSTATS, sizeof(*st), st);
@@ -456,33 +448,26 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
-#endif
 
 static void red_destroy(struct Qdisc *sch)
 {
-	MOD_DEC_USE_COUNT;
 }
 
-struct Qdisc_ops red_qdisc_ops =
-{
-	NULL,
-	NULL,
-	"red",
-	sizeof(struct red_sched_data),
-
-	red_enqueue,
-	red_dequeue,
-	red_requeue,
-	red_drop,
-
-	red_init,
-	red_reset,
-	red_destroy,
-	red_change,
-
-#ifdef CONFIG_RTNETLINK
-	red_dump,
-#endif
+struct Qdisc_ops red_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	NULL,
+	.id		=	"red",
+	.priv_size	=	sizeof(struct red_sched_data),
+	.enqueue	=	red_enqueue,
+	.dequeue	=	red_dequeue,
+	.requeue	=	red_requeue,
+	.drop		=	red_drop,
+	.init		=	red_init,
+	.reset		=	red_reset,
+	.destroy	=	red_destroy,
+	.change		=	red_change,
+	.dump		=	red_dump,
+	.owner		=	THIS_MODULE,
 };
 
 

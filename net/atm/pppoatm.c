@@ -125,7 +125,7 @@ static void pppoatm_unassign_vcc(struct atm_vcc *atmvcc)
 	pvcc = atmvcc_to_pvcc(atmvcc);
 	atmvcc->push = pvcc->old_push;
 	atmvcc->pop = pvcc->old_pop;
-	tasklet_disable(&pvcc->wakeup_tasklet);
+	tasklet_kill(&pvcc->wakeup_tasklet);
 	ppp_unregister_channel(&pvcc->chan);
 	atmvcc->user_back = NULL;
 	kfree(pvcc);
@@ -231,8 +231,7 @@ static int pppoatm_send(struct ppp_channel *chan, struct sk_buff *skb)
 		kfree_skb(skb);
 		return 1;
 	}
-	atomic_add(skb->truesize, &ATM_SKB(skb)->vcc->tx_inuse);
-	ATM_SKB(skb)->iovcnt = 0;
+	atomic_add(skb->truesize, &ATM_SKB(skb)->vcc->sk->sk_wmem_alloc);
 	ATM_SKB(skb)->atm_options = ATM_SKB(skb)->vcc->atm_options;
 	DPRINTK("(unit %d): atm_skb(%p)->vcc(%p)->dev(%p)\n",
 	    pvcc->chan.unit, skb, ATM_SKB(skb)->vcc,
@@ -266,8 +265,8 @@ static int pppoatm_devppp_ioctl(struct ppp_channel *chan, unsigned int cmd,
 }
 
 static /*const*/ struct ppp_channel_ops pppoatm_ops = {
-	start_xmit: pppoatm_send,
-	ioctl: pppoatm_devppp_ioctl,
+	.start_xmit = pppoatm_send,
+	.ioctl = pppoatm_devppp_ioctl,
 };
 
 static int pppoatm_assign_vcc(struct atm_vcc *atmvcc, unsigned long arg)
@@ -363,3 +362,4 @@ module_exit(pppoatm_exit);
 
 MODULE_AUTHOR("Mitchell Blank Jr <mitch@sfgoth.com>");
 MODULE_DESCRIPTION("RFC2364 PPP over ATM/AAL5");
+MODULE_LICENSE("GPL");

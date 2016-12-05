@@ -42,8 +42,9 @@ static int parse_qos(const char *buff, int len);
  *   Define allowed FILE OPERATIONS
  */
 static struct file_operations mpc_file_operations = {
-	read:		proc_mpc_read,
-	write:		proc_mpc_write,
+	.owner =	THIS_MODULE,
+	.read =		proc_mpc_read,
+	.write =	proc_mpc_write,
 };
 
 static int print_header(char *buff,struct mpoa_client *mpc){
@@ -111,7 +112,7 @@ static ssize_t proc_mpc_read(struct file *file, char *buff,
 	unsigned char ip_string[16];
 	if(count == 0)
 	        return 0;
-	page = get_free_page(GFP_KERNEL);
+	page = get_zeroed_page(GFP_KERNEL);
 	if(!page)
 	        return -ENOMEM;
 	atm_mpoa_disp_qos((char *)page, &length);
@@ -222,7 +223,7 @@ static int parse_qos(const char *buff, int len)
 	int value[5];
         
         memset(&qos, 0, sizeof(struct atm_qos));
-        strncpy(cmd, buff, 3);
+        strlcpy(cmd, buff, sizeof(cmd));
         if( strncmp(cmd,"add", 3) &&  strncmp(cmd,"del", 3))
 	        return 0;  /* not add or del */
 

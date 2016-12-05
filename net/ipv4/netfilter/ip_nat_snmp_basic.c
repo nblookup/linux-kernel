@@ -50,7 +50,6 @@
 #include <linux/netfilter_ipv4.h>
 #include <linux/netfilter_ipv4/ip_nat.h>
 #include <linux/netfilter_ipv4/ip_nat_helper.h>
-#include <linux/brlock.h>
 #include <linux/types.h>
 #include <linux/ip.h>
 #include <net/udp.h>
@@ -606,7 +605,7 @@ struct snmp_v1_trap
 #define SERR_NSI    1
 #define SERR_EOM    2
 
-static void inline mangle_address(unsigned char *begin,
+static inline void mangle_address(unsigned char *begin,
                                   unsigned char *addr,
                                   const struct oct1_map *map,
                                   u_int16_t *check);
@@ -995,7 +994,7 @@ static void fast_csum(unsigned char *csum,
  * 	- begin points to the start of the snmp messgae
  *      - addr points to the start of the address
  */
-static void inline mangle_address(unsigned char *begin,
+static inline void mangle_address(unsigned char *begin,
                                   unsigned char *addr,
                                   const struct oct1_map *map,
                                   u_int16_t *check)
@@ -1243,6 +1242,7 @@ static int snmp_translate(struct ip_conntrack *ct,
  * NAT helper function, packets arrive here from NAT code.
  */
 static unsigned int nat_help(struct ip_conntrack *ct,
+			     struct ip_conntrack_expect *exp,
                              struct ip_nat_info *info,
                              enum ip_conntrack_info ctinfo,
                              unsigned int hooknum,
@@ -1259,9 +1259,9 @@ static unsigned int nat_help(struct ip_conntrack *ct,
 	 * on post routing (SNAT).
 	 */
 	if (!((dir == IP_CT_DIR_REPLY && hooknum == NF_IP_PRE_ROUTING &&
-			udph->source == __constant_ntohs(SNMP_PORT)) ||
+			udph->source == ntohs(SNMP_PORT)) ||
 	      (dir == IP_CT_DIR_ORIGINAL && hooknum == NF_IP_POST_ROUTING &&
-	      		udph->dest == __constant_ntohs(SNMP_TRAP_PORT)))) {
+	      		udph->dest == ntohs(SNMP_TRAP_PORT)))) {
 		spin_unlock_bh(&snmp_lock);
 		return NF_ACCEPT;
 	}
@@ -1303,19 +1303,27 @@ static unsigned int nat_help(struct ip_conntrack *ct,
 	return NF_DROP;
 }
 
-static struct ip_nat_helper snmp = { { NULL, NULL },
-	{ { 0, { __constant_htons(SNMP_PORT) } },
+static struct ip_nat_helper snmp = { 
+	{ NULL, NULL },
+	"snmp",
+	0,
+	THIS_MODULE,
+	{ { 0, { .udp = { __constant_htons(SNMP_PORT) } } },
 	  { 0, { 0 }, IPPROTO_UDP } },
-	{ { 0, { 0xFFFF } },
+	{ { 0, { .udp = { 0xFFFF } } },
 	  { 0, { 0 }, 0xFFFF } },
-	  nat_help, "snmp" };
+	nat_help, NULL };
  
-static struct ip_nat_helper snmp_trap = { { NULL, NULL },
-	{ { 0, { __constant_htons(SNMP_TRAP_PORT) } },
+static struct ip_nat_helper snmp_trap = { 
+	{ NULL, NULL },
+	"snmp_trap",
+	0,
+	THIS_MODULE,
+	{ { 0, { .udp = { __constant_htons(SNMP_TRAP_PORT) } } },
 	  { 0, { 0 }, IPPROTO_UDP } },
-	{ { 0, { 0xFFFF } },
+	{ { 0, { .udp = { 0xFFFF } } },
 	  { 0, { 0 }, 0xFFFF } },
-	nat_help, "snmp_trap" };
+	nat_help, NULL };
 
 /*****************************************************************************
  *
@@ -1342,8 +1350,7 @@ static void __exit fini(void)
 {
 	ip_nat_helper_unregister(&snmp);
 	ip_nat_helper_unregister(&snmp_trap);
-	br_write_lock_bh(BR_NETPROTO_LOCK);
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
+	synchronize_net();
 }
 
 module_init(init);

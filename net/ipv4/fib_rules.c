@@ -5,7 +5,7 @@
  *
  *		IPv4 Forwarding Information Base: policy rules.
  *
- * Version:	$Id: fib_rules.c,v 1.16 2001/04/30 04:39:14 davem Exp $
+ * Version:	$Id: fib_rules.c,v 1.17 2001/10/31 21:55:54 davem Exp $
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
@@ -77,25 +77,25 @@ struct fib_rule
 };
 
 static struct fib_rule default_rule = {
-	r_clntref:	ATOMIC_INIT(2),
-	r_preference:	0x7FFF,
-	r_table:	RT_TABLE_DEFAULT,
-	r_action:	RTN_UNICAST,
+	.r_clntref =	ATOMIC_INIT(2),
+	.r_preference =	0x7FFF,
+	.r_table =	RT_TABLE_DEFAULT,
+	.r_action =	RTN_UNICAST,
 };
 
 static struct fib_rule main_rule = {
-	r_next:		&default_rule,
-	r_clntref:	ATOMIC_INIT(2),
-	r_preference:	0x7FFE,
-	r_table:	RT_TABLE_MAIN,
-	r_action:	RTN_UNICAST,
+	.r_next =	&default_rule,
+	.r_clntref =	ATOMIC_INIT(2),
+	.r_preference =	0x7FFE,
+	.r_table =	RT_TABLE_MAIN,
+	.r_action =	RTN_UNICAST,
 };
 
 static struct fib_rule local_rule = {
-	r_next:		&main_rule,
-	r_clntref:	ATOMIC_INIT(2),
-	r_table:	RT_TABLE_LOCAL,
-	r_action:	RTN_UNICAST,
+	.r_next =	&main_rule,
+	.r_clntref =	ATOMIC_INIT(2),
+	.r_table =	RT_TABLE_LOCAL,
+	.r_action =	RTN_UNICAST,
 };
 
 static struct fib_rule *fib_rules = &local_rule;
@@ -307,28 +307,28 @@ static void fib_rules_attach(struct net_device *dev)
 	}
 }
 
-int fib_lookup(const struct rt_key *key, struct fib_result *res)
+int fib_lookup(const struct flowi *flp, struct fib_result *res)
 {
 	int err;
 	struct fib_rule *r, *policy;
 	struct fib_table *tb;
 
-	u32 daddr = key->dst;
-	u32 saddr = key->src;
+	u32 daddr = flp->fl4_dst;
+	u32 saddr = flp->fl4_src;
 
 FRprintk("Lookup: %u.%u.%u.%u <- %u.%u.%u.%u ",
-	NIPQUAD(key->dst), NIPQUAD(key->src));
+	NIPQUAD(flp->fl4_dst), NIPQUAD(flp->fl4_src));
 	read_lock(&fib_rules_lock);
 	for (r = fib_rules; r; r=r->r_next) {
 		if (((saddr^r->r_src) & r->r_srcmask) ||
 		    ((daddr^r->r_dst) & r->r_dstmask) ||
 #ifdef CONFIG_IP_ROUTE_TOS
-		    (r->r_tos && r->r_tos != key->tos) ||
+		    (r->r_tos && r->r_tos != flp->fl4_tos) ||
 #endif
 #ifdef CONFIG_IP_ROUTE_FWMARK
-		    (r->r_fwmark && r->r_fwmark != key->fwmark) ||
+		    (r->r_fwmark && r->r_fwmark != flp->fl4_fwmark) ||
 #endif
-		    (r->r_ifindex && r->r_ifindex != key->iif))
+		    (r->r_ifindex && r->r_ifindex != flp->iif))
 			continue;
 
 FRprintk("tb %d r %d ", r->r_table, r->r_action);
@@ -351,7 +351,7 @@ FRprintk("tb %d r %d ", r->r_table, r->r_action);
 
 		if ((tb = fib_get_table(r->r_table)) == NULL)
 			continue;
-		err = tb->tb_lookup(tb, key, res);
+		err = tb->tb_lookup(tb, flp, res);
 		if (err == 0) {
 			res->r = policy;
 			if (policy)
@@ -369,13 +369,13 @@ FRprintk("FAILURE\n");
 	return -ENETUNREACH;
 }
 
-void fib_select_default(const struct rt_key *key, struct fib_result *res)
+void fib_select_default(const struct flowi *flp, struct fib_result *res)
 {
 	if (res->r && res->r->r_action == RTN_UNICAST &&
 	    FIB_RES_GW(*res) && FIB_RES_NH(*res).nh_scope == RT_SCOPE_LINK) {
 		struct fib_table *tb;
 		if ((tb = fib_get_table(res->r->r_table)) != NULL)
-			tb->tb_select_default(tb, key, res);
+			tb->tb_select_default(tb, flp, res);
 	}
 }
 
@@ -392,12 +392,10 @@ static int fib_rules_event(struct notifier_block *this, unsigned long event, voi
 
 
 struct notifier_block fib_rules_notifier = {
-	notifier_call:	fib_rules_event,
+	.notifier_call =fib_rules_event,
 };
 
-#ifdef CONFIG_RTNETLINK
-
-extern __inline__ int inet_fill_rule(struct sk_buff *skb,
+static __inline__ int inet_fill_rule(struct sk_buff *skb,
 				     struct fib_rule *r,
 				     struct netlink_callback *cb)
 {
@@ -462,8 +460,6 @@ int inet_dump_rules(struct sk_buff *skb, struct netlink_callback *cb)
 
 	return skb->len;
 }
-
-#endif /* CONFIG_RTNETLINK */
 
 void __init fib_rules_init(void)
 {

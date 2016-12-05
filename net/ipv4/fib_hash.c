@@ -5,7 +5,7 @@
  *
  *		IPv4 FIB: lookup engine and maintenance routines.
  *
- * Version:	$Id: fib_hash.c,v 1.12 1999/08/31 07:03:27 davem Exp $
+ * Version:	$Id: fib_hash.c,v 1.13 2001/10/31 21:55:54 davem Exp $
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
@@ -89,7 +89,7 @@ struct fn_zone
 	int		fz_nent;	/* Number of entries	*/
 
 	int		fz_divisor;	/* Hash divisor		*/
-	u32		fz_hashmask;	/* (1<<fz_divisor) - 1	*/
+	u32		fz_hashmask;	/* (fz_divisor - 1)	*/
 #define FZ_HASHMASK(fz)	((fz)->fz_hashmask)
 
 	int		fz_order;	/* Zone order		*/
@@ -137,21 +137,31 @@ static __inline__ struct fib_node * fz_chain(fn_key_t key, struct fn_zone *fz)
 	return fz->fz_hash[fn_hash(key, fz).datum];
 }
 
-extern __inline__ int fn_key_eq(fn_key_t a, fn_key_t b)
+static __inline__ int fn_key_eq(fn_key_t a, fn_key_t b)
 {
 	return a.datum == b.datum;
 }
 
-extern __inline__ int fn_key_leq(fn_key_t a, fn_key_t b)
+static __inline__ int fn_key_leq(fn_key_t a, fn_key_t b)
 {
 	return a.datum <= b.datum;
 }
 
 static rwlock_t fib_hash_lock = RW_LOCK_UNLOCKED;
 
-#define FZ_MAX_DIVISOR 1024
+#define FZ_MAX_DIVISOR ((PAGE_SIZE<<MAX_ORDER) / sizeof(struct fib_node *))
 
-#ifdef CONFIG_IP_ROUTE_LARGE_TABLES
+static struct fib_node **fz_hash_alloc(int divisor)
+{
+	unsigned long size = divisor * sizeof(struct fib_node *);
+
+	if (divisor <= 1024) {
+		return kmalloc(size, GFP_KERNEL);
+	} else {
+		return (struct fib_node **)
+			__get_free_pages(GFP_KERNEL, get_order(size));
+	}
+}
 
 /* The fib hash lock must be held when this is called. */
 static __inline__ void fn_rebuild_zone(struct fn_zone *fz,
@@ -174,6 +184,15 @@ static __inline__ void fn_rebuild_zone(struct fn_zone *fz,
 	}
 }
 
+static void fz_hash_free(struct fib_node **hash, int divisor)
+{
+	if (divisor <= 1024)
+		kfree(hash);
+	else
+		free_pages((unsigned long) hash,
+			   get_order(divisor * sizeof(struct fib_node *)));
+}
+
 static void fn_rehash_zone(struct fn_zone *fz)
 {
 	struct fib_node **ht, **old_ht;
@@ -185,24 +204,30 @@ static void fn_rehash_zone(struct fn_zone *fz)
 	switch (old_divisor) {
 	case 16:
 		new_divisor = 256;
-		new_hashmask = 0xFF;
 		break;
 	case 256:
 		new_divisor = 1024;
-		new_hashmask = 0x3FF;
 		break;
 	default:
-		printk(KERN_CRIT "route.c: bad divisor %d!\n", old_divisor);
-		return;
+		if ((old_divisor << 1) > FZ_MAX_DIVISOR) {
+			printk(KERN_CRIT "route.c: bad divisor %d!\n", old_divisor);
+			return;
+		}
+		new_divisor = (old_divisor << 1);
+		break;
 	}
+
+	new_hashmask = (new_divisor - 1);
+
 #if RT_CACHE_DEBUG >= 2
 	printk("fn_rehash_zone: hash for zone %d grows from %d\n", fz->fz_order, old_divisor);
 #endif
 
-	ht = kmalloc(new_divisor*sizeof(struct fib_node*), GFP_KERNEL);
+	ht = fz_hash_alloc(new_divisor);
 
 	if (ht)	{
 		memset(ht, 0, new_divisor*sizeof(struct fib_node*));
+
 		write_lock_bh(&fib_hash_lock);
 		old_ht = fz->fz_hash;
 		fz->fz_hash = ht;
@@ -210,10 +235,10 @@ static void fn_rehash_zone(struct fn_zone *fz)
 		fz->fz_divisor = new_divisor;
 		fn_rebuild_zone(fz, old_ht, old_divisor);
 		write_unlock_bh(&fib_hash_lock);
-		kfree(old_ht);
+
+		fz_hash_free(old_ht, old_divisor);
 	}
 }
-#endif /* CONFIG_IP_ROUTE_LARGE_TABLES */
 
 static void fn_free_node(struct fib_node * f)
 {
@@ -233,12 +258,11 @@ fn_new_zone(struct fn_hash *table, int z)
 	memset(fz, 0, sizeof(struct fn_zone));
 	if (z) {
 		fz->fz_divisor = 16;
-		fz->fz_hashmask = 0xF;
 	} else {
 		fz->fz_divisor = 1;
-		fz->fz_hashmask = 0;
 	}
-	fz->fz_hash = kmalloc(fz->fz_divisor*sizeof(struct fib_node*), GFP_KERNEL);
+	fz->fz_hashmask = (fz->fz_divisor - 1);
+	fz->fz_hash = fz_hash_alloc(fz->fz_divisor);
 	if (!fz->fz_hash) {
 		kfree(fz);
 		return NULL;
@@ -266,7 +290,7 @@ fn_new_zone(struct fn_hash *table, int z)
 }
 
 static int
-fn_hash_lookup(struct fib_table *tb, const struct rt_key *key, struct fib_result *res)
+fn_hash_lookup(struct fib_table *tb, const struct flowi *flp, struct fib_result *res)
 {
 	int err;
 	struct fn_zone *fz;
@@ -275,7 +299,7 @@ fn_hash_lookup(struct fib_table *tb, const struct rt_key *key, struct fib_result
 	read_lock(&fib_hash_lock);
 	for (fz = t->fn_zone_list; fz; fz = fz->fz_next) {
 		struct fib_node *f;
-		fn_key_t k = fz_key(key->dst, fz);
+		fn_key_t k = fz_key(flp->fl4_dst, fz);
 
 		for (f = fz_chain(k, fz); f; f = f->fn_next) {
 			if (!fn_key_eq(k, f->fn_key)) {
@@ -285,17 +309,17 @@ fn_hash_lookup(struct fib_table *tb, const struct rt_key *key, struct fib_result
 					continue;
 			}
 #ifdef CONFIG_IP_ROUTE_TOS
-			if (f->fn_tos && f->fn_tos != key->tos)
+			if (f->fn_tos && f->fn_tos != flp->fl4_tos)
 				continue;
 #endif
 			f->fn_state |= FN_S_ACCESSED;
 
 			if (f->fn_state&FN_S_ZOMBIE)
 				continue;
-			if (f->fn_scope < key->scope)
+			if (f->fn_scope < flp->fl4_scope)
 				continue;
 
-			err = fib_semantic_match(f->fn_type, FIB_INFO(f), key, res);
+			err = fib_semantic_match(f->fn_type, FIB_INFO(f), flp, res);
 			if (err == 0) {
 				res->type = f->fn_type;
 				res->scope = f->fn_scope;
@@ -338,7 +362,7 @@ static int fib_detect_death(struct fib_info *fi, int order,
 }
 
 static void
-fn_hash_select_default(struct fib_table *tb, const struct rt_key *key, struct fib_result *res)
+fn_hash_select_default(struct fib_table *tb, const struct flowi *flp, struct fib_result *res)
 {
 	int order, last_idx;
 	struct fib_node *f;
@@ -425,14 +449,9 @@ for ( ; ((f) = *(fp)) != NULL && fn_key_eq((f)->fn_key, (key)) && \
 #endif
 
 
-#ifdef CONFIG_RTNETLINK
 static void rtmsg_fib(int, struct fib_node*, int, int,
 		      struct nlmsghdr *n,
 		      struct netlink_skb_parms *);
-#else
-#define rtmsg_fib(a, b, c, d, e, f)
-#endif
-
 
 static int
 fn_hash_insert(struct fib_table *tb, struct rtmsg *r, struct kern_rta *rta,
@@ -472,12 +491,10 @@ rta->rta_prefsrc ? *(u32*)rta->rta_prefsrc : 0);
 	if  ((fi = fib_create_info(r, rta, n, &err)) == NULL)
 		return err;
 
-#ifdef CONFIG_IP_ROUTE_LARGE_TABLES
-	if (fz->fz_nent > (fz->fz_divisor<<2) &&
+	if (fz->fz_nent > (fz->fz_divisor<<1) &&
 	    fz->fz_divisor < FZ_MAX_DIVISOR &&
 	    (z==32 || (1<<z) > fz->fz_divisor))
 		fn_rehash_zone(fz);
-#endif
 
 	fp = fz_chain_p(key, fz);
 
@@ -708,7 +725,7 @@ FTprint("tb(%d)_delete: %d %08x/%d %d\n", tb->tb_id, r->rtm_type, rta->rta_dst ?
 	return -ESRCH;
 }
 
-extern __inline__ int
+static __inline__ int
 fn_flush_list(struct fib_node ** fp, int z, struct fn_hash *table)
 {
 	int found = 0;
@@ -750,55 +767,7 @@ static int fn_hash_flush(struct fib_table *tb)
 }
 
 
-#ifdef CONFIG_PROC_FS
-
-static int fn_hash_get_info(struct fib_table *tb, char *buffer, int first, int count)
-{
-	struct fn_hash *table = (struct fn_hash*)tb->tb_data;
-	struct fn_zone *fz;
-	int pos = 0;
-	int n = 0;
-
-	read_lock(&fib_hash_lock);
-	for (fz=table->fn_zone_list; fz; fz = fz->fz_next) {
-		int i;
-		struct fib_node *f;
-		int maxslot = fz->fz_divisor;
-		struct fib_node **fp = fz->fz_hash;
-
-		if (fz->fz_nent == 0)
-			continue;
-
-		if (pos + fz->fz_nent <= first) {
-			pos += fz->fz_nent;
-			continue;
-		}
-
-		for (i=0; i < maxslot; i++, fp++) {
-			for (f = *fp; f; f = f->fn_next) {
-				if (++pos <= first)
-					continue;
-				fib_node_get_info(f->fn_type,
-						  f->fn_state&FN_S_ZOMBIE,
-						  FIB_INFO(f),
-						  fz_prefix(f->fn_key, fz),
-						  FZ_MASK(fz), buffer);
-				buffer += 128;
-				if (++n >= count)
-					goto out;
-			}
-		}
-	}
-out:
-	read_unlock(&fib_hash_lock);
-  	return n;
-}
-#endif
-
-
-#ifdef CONFIG_RTNETLINK
-
-extern __inline__ int
+static __inline__ int
 fn_hash_dump_bucket(struct sk_buff *skb, struct netlink_callback *cb,
 		     struct fib_table *tb,
 		     struct fn_zone *fz,
@@ -823,7 +792,7 @@ fn_hash_dump_bucket(struct sk_buff *skb, struct netlink_callback *cb,
 	return skb->len;
 }
 
-extern __inline__ int
+static __inline__ int
 fn_hash_dump_zone(struct sk_buff *skb, struct netlink_callback *cb,
 		   struct fib_table *tb,
 		   struct fn_zone *fz)
@@ -894,8 +863,6 @@ static void rtmsg_fib(int event, struct fib_node* f, int z, int tb_id,
 		netlink_unicast(rtnl, skb, pid, MSG_DONTWAIT);
 }
 
-#endif /* CONFIG_RTNETLINK */
-
 #ifdef CONFIG_IP_MULTIPLE_TABLES
 struct fib_table * fib_hash_init(int id)
 #else
@@ -920,12 +887,228 @@ struct fib_table * __init fib_hash_init(int id)
 	tb->tb_delete = fn_hash_delete;
 	tb->tb_flush = fn_hash_flush;
 	tb->tb_select_default = fn_hash_select_default;
-#ifdef CONFIG_RTNETLINK
 	tb->tb_dump = fn_hash_dump;
-#endif
-#ifdef CONFIG_PROC_FS
-	tb->tb_get_info = fn_hash_get_info;
-#endif
 	memset(tb->tb_data, 0, sizeof(struct fn_hash));
 	return tb;
 }
+
+/* ------------------------------------------------------------------------ */
+#ifdef CONFIG_PROC_FS
+
+struct fib_iter_state {
+	struct fn_zone	*zone;
+	int		bucket;
+	struct fib_node **hash;
+	struct fib_node *node;
+};
+
+static __inline__ struct fib_node *fib_get_first(struct seq_file *seq)
+{
+	struct fib_iter_state* iter = seq->private;
+	struct fn_hash *table = (struct fn_hash *)ip_fib_main_table->tb_data;
+
+	iter->bucket = 0;
+	iter->hash   = NULL;
+	iter->node   = NULL;
+
+	for (iter->zone = table->fn_zone_list; iter->zone;
+	     iter->zone = iter->zone->fz_next) {
+		int maxslot;
+
+		if (!iter->zone->fz_next)
+			continue;
+
+		iter->hash = iter->zone->fz_hash;
+		maxslot = iter->zone->fz_divisor;
+
+		for (iter->bucket = 0; iter->bucket < maxslot;
+		     ++iter->bucket, ++iter->hash) {
+			iter->node = *iter->hash;
+
+			if (iter->node)
+				goto out;
+		}
+	}
+out:
+	return iter->node;
+}
+
+static __inline__ struct fib_node *fib_get_next(struct seq_file *seq)
+{
+	struct fib_iter_state* iter = seq->private;
+
+	if (iter->node)
+		iter->node = iter->node->fn_next;
+
+	if (iter->node)
+		goto out;
+
+	if (!iter->zone)
+		goto out;
+
+	for (;;) {
+		int maxslot;
+
+		maxslot = iter->zone->fz_divisor;
+
+		while (++iter->bucket < maxslot) {
+			iter->node = *++iter->hash;
+
+			if (iter->node)
+				goto out;
+		}
+
+		iter->zone = iter->zone->fz_next;
+
+		if (!iter->zone)
+			goto out;
+		
+		iter->hash = iter->zone->fz_hash;
+		iter->bucket = 0;
+		iter->node = *iter->hash;
+		if (iter->node)
+			break;
+	}
+out:
+	return iter->node;
+}
+
+static void *fib_seq_start(struct seq_file *seq, loff_t *pos)
+{
+	void *v = NULL;
+
+	read_lock(&fib_hash_lock);
+	if (ip_fib_main_table)
+		v = *pos ? fib_get_next(seq) : (void *)1;
+	return v;
+}
+
+static void *fib_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	++*pos;
+	return v == (void *)1 ? fib_get_first(seq) : fib_get_next(seq);
+}
+
+static void fib_seq_stop(struct seq_file *seq, void *v)
+{
+	read_unlock(&fib_hash_lock);
+}
+
+static unsigned fib_flag_trans(int type, int dead, u32 mask, struct fib_info *fi)
+{
+	static unsigned type2flags[RTN_MAX + 1] = {
+		[7] = RTF_REJECT, [8] = RTF_REJECT,
+	};
+	unsigned flags = type2flags[type];
+
+	if (fi && fi->fib_nh->nh_gw)
+		flags |= RTF_GATEWAY;
+	if (mask == 0xFFFFFFFF)
+		flags |= RTF_HOST;
+	if (!dead)
+		flags |= RTF_UP;
+	return flags;
+}
+
+/* 
+ *	This outputs /proc/net/route.
+ *
+ *	It always works in backward compatibility mode.
+ *	The format of the file is not supposed to be changed.
+ */
+static int fib_seq_show(struct seq_file *seq, void *v)
+{
+	struct fib_iter_state* iter;
+	char bf[128];
+	u32 prefix, mask;
+	unsigned flags;
+	struct fib_node *f;
+	struct fib_info *fi;
+
+	if (v == (void *)1) {
+		seq_printf(seq, "%-127s\n", "Iface\tDestination\tGateway "
+			   "\tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU"
+			   "\tWindow\tIRTT");
+		goto out;
+	}
+
+	f	= v;
+	fi	= FIB_INFO(f);
+	iter	= seq->private;
+	prefix	= fz_prefix(f->fn_key, iter->zone);
+	mask	= FZ_MASK(iter->zone);
+	flags	= fib_flag_trans(f->fn_type, f->fn_state & FN_S_ZOMBIE,
+				 mask, fi);
+	if (fi)
+		snprintf(bf, sizeof(bf),
+			 "%s\t%08X\t%08X\t%04X\t%d\t%u\t%d\t%08X\t%d\t%u\t%u",
+			 fi->fib_dev ? fi->fib_dev->name : "*", prefix,
+			 fi->fib_nh->nh_gw, flags, 0, 0, fi->fib_priority,
+			 mask, (fi->fib_advmss ? fi->fib_advmss + 40 : 0),
+			 fi->fib_window,
+			 fi->fib_rtt >> 3);
+	else
+		snprintf(bf, sizeof(bf),
+			 "*\t%08X\t%08X\t%04X\t%d\t%u\t%d\t%08X\t%d\t%u\t%u",
+			 prefix, 0, flags, 0, 0, 0, mask, 0, 0, 0);
+	seq_printf(seq, "%-127s\n", bf);
+out:
+	return 0;
+}
+
+static struct seq_operations fib_seq_ops = {
+	.start  = fib_seq_start,
+	.next   = fib_seq_next,
+	.stop   = fib_seq_stop,
+	.show   = fib_seq_show,
+};
+
+static int fib_seq_open(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq;
+	int rc = -ENOMEM;
+	struct fib_iter_state *s = kmalloc(sizeof(*s), GFP_KERNEL);
+       
+	if (!s)
+		goto out;
+
+	rc = seq_open(file, &fib_seq_ops);
+	if (rc)
+		goto out_kfree;
+
+	seq	     = file->private_data;
+	seq->private = s;
+	memset(s, 0, sizeof(*s));
+out:
+	return rc;
+out_kfree:
+	kfree(s);
+	goto out;
+}
+
+static struct file_operations fib_seq_fops = {
+	.owner		= THIS_MODULE,
+	.open           = fib_seq_open,
+	.read           = seq_read,
+	.llseek         = seq_lseek,
+	.release	= seq_release_private,
+};
+
+int __init fib_proc_init(void)
+{
+	struct proc_dir_entry *p;
+	int rc = 0;
+
+	p = create_proc_entry("route", S_IRUGO, proc_net);
+	if (p)
+		p->proc_fops = &fib_seq_fops;
+	else
+		rc = -ENOMEM;
+	return rc;
+}
+
+void __init fib_proc_exit(void)
+{
+	remove_proc_entry("route", proc_net);
+}
+#endif /* CONFIG_PROC_FS */

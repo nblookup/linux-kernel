@@ -1,24 +1,36 @@
 /* ip_nat_mangle.c - generic support functions for NAT helpers 
  *
- * (C) 2000 by Harald Welte <laforge@gnumonks.org>
+ * (C) 2000-2002 by Harald Welte <laforge@gnumonks.org>
  *
  * distributed under the terms of GNU GPL
+ *
+ * 	14 Jan 2002 Harald Welte <laforge@gnumonks.org>:
+ *		- add support for SACK adjustment 
+ *	14 Mar 2002 Harald Welte <laforge@gnumonks.org>:
+ *		- merge SACK support into newnat API
+ *	16 Aug 2002 Brian J. Murrell <netfilter@interlinx.bc.ca>:
+ *		- make ip_nat_resize_packet more generic (TCP and UDP)
+ *		- add ip_nat_mangle_udp_packet
  */
 #include <linux/version.h>
+#include <linux/config.h>
 #include <linux/module.h>
+#include <linux/kmod.h>
 #include <linux/types.h>
 #include <linux/timer.h>
 #include <linux/skbuff.h>
 #include <linux/netfilter_ipv4.h>
-#include <linux/brlock.h>
 #include <net/checksum.h>
 #include <net/icmp.h>
 #include <net/ip.h>
 #include <net/tcp.h>
+#include <net/udp.h>
 
 #define ASSERT_READ_LOCK(x) MUST_BE_READ_LOCKED(&ip_nat_lock)
 #define ASSERT_WRITE_LOCK(x) MUST_BE_WRITE_LOCKED(&ip_nat_lock)
 
+#include <linux/netfilter_ipv4/ip_conntrack.h>
+#include <linux/netfilter_ipv4/ip_conntrack_helper.h>
 #include <linux/netfilter_ipv4/ip_nat.h>
 #include <linux/netfilter_ipv4/ip_nat_protocol.h>
 #include <linux/netfilter_ipv4/ip_nat_core.h>
@@ -32,175 +44,327 @@
 #define DEBUGP(format, args...)
 #define DUMP_OFFSET(x)
 #endif
-	
+
 DECLARE_LOCK(ip_nat_seqofs_lock);
-			 
-static inline int 
-ip_nat_resize_packet(struct sk_buff **skb,
-		     struct ip_conntrack *ct, 
-		     enum ip_conntrack_info ctinfo,
-		     int new_size)
+
+/* Setup TCP sequence correction given this change at this sequence */
+static inline void 
+adjust_tcp_sequence(u32 seq,
+		    int sizediff,
+		    struct ip_conntrack *ct, 
+		    enum ip_conntrack_info ctinfo)
 {
-	struct iphdr *iph;
-	struct tcphdr *tcph;
-	void *data;
 	int dir;
 	struct ip_nat_seq *this_way, *other_way;
 
 	DEBUGP("ip_nat_resize_packet: old_size = %u, new_size = %u\n",
 		(*skb)->len, new_size);
 
-	iph = (*skb)->nh.iph;
-	tcph = (void *)iph + iph->ihl*4;
-	data = (void *)tcph + tcph->doff*4;
-
 	dir = CTINFO2DIR(ctinfo);
 
 	this_way = &ct->nat.info.seq[dir];
 	other_way = &ct->nat.info.seq[!dir];
-
-	if (new_size > (*skb)->len + skb_tailroom(*skb)) {
-		struct sk_buff *newskb;
-		newskb = skb_copy_expand(*skb, skb_headroom(*skb),
-					 new_size - (*skb)->len,
-					 GFP_ATOMIC);
-
-		if (!newskb) {
-			printk("ip_nat_resize_packet: oom\n");
-			return 0;
-		} else {
-			kfree_skb(*skb);
-			*skb = newskb;
-		}
-	}
-
-	iph = (*skb)->nh.iph;
-	tcph = (void *)iph + iph->ihl*4;
-	data = (void *)tcph + tcph->doff*4;
 
 	DEBUGP("ip_nat_resize_packet: Seq_offset before: ");
 	DUMP_OFFSET(this_way);
 
 	LOCK_BH(&ip_nat_seqofs_lock);
 
-	/* SYN adjust. If it's uninitialized, of this is after last 
-	 * correction, record it: we don't handle more than one 
-	 * adjustment in the window, but do deal with common case of a 
+	/* SYN adjust. If it's uninitialized, of this is after last
+	 * correction, record it: we don't handle more than one
+	 * adjustment in the window, but do deal with common case of a
 	 * retransmit */
 	if (this_way->offset_before == this_way->offset_after
-	    || before(this_way->correction_pos, ntohl(tcph->seq))) {
-		this_way->correction_pos = ntohl(tcph->seq);
-		this_way->offset_before = this_way->offset_after;
-		this_way->offset_after = (int32_t)
-			this_way->offset_before + new_size - (*skb)->len;
+	    || before(this_way->correction_pos, seq)) {
+		    this_way->correction_pos = seq;
+		    this_way->offset_before = this_way->offset_after;
+		    this_way->offset_after += sizediff;
 	}
-
 	UNLOCK_BH(&ip_nat_seqofs_lock);
 
 	DEBUGP("ip_nat_resize_packet: Seq_offset after: ");
 	DUMP_OFFSET(this_way);
-	
+}
+
+/* Frobs data inside this packet, which is linear. */
+static void mangle_contents(struct sk_buff *skb,
+			    unsigned int dataoff,
+			    unsigned int match_offset,
+			    unsigned int match_len,
+			    const char *rep_buffer,
+			    unsigned int rep_len)
+{
+	unsigned char *data;
+
+	BUG_ON(skb_is_nonlinear(skb));
+	data = (unsigned char *)skb->nh.iph + dataoff;
+
+	/* move post-replacement */
+	memmove(data + match_offset + rep_len,
+		data + match_offset + match_len,
+		skb->tail - (data + match_offset + match_len));
+
+	/* insert data from buffer */
+	memcpy(data + match_offset, rep_buffer, rep_len);
+
+	/* update skb info */
+	if (rep_len > match_len) {
+		DEBUGP("ip_nat_mangle_packet: Extending packet by "
+			"%u from %u bytes\n", rep_len - match_len,
+		       skb->len);
+		skb_put(skb, rep_len - match_len);
+	} else {
+		DEBUGP("ip_nat_mangle_packet: Shrinking packet from "
+			"%u from %u bytes\n", match_len - rep_len,
+		       skb->len);
+		__skb_trim(skb, skb->len + rep_len - match_len);
+	}
+
+	/* fix IP hdr checksum information */
+	skb->nh.iph->tot_len = htons(skb->len);
+	ip_send_check(skb->nh.iph);
+	skb->csum = csum_partial(data, skb->len - dataoff, 0);
+}
+
+/* Unusual, but possible case. */
+static int enlarge_skb(struct sk_buff **pskb, unsigned int extra)
+{
+	struct sk_buff *nskb;
+
+	if ((*pskb)->len + extra > 65535)
+		return 0;
+
+	nskb = skb_copy_expand(*pskb, skb_headroom(*pskb), extra, GFP_ATOMIC);
+	if (!nskb)
+		return 0;
+
+	/* Transfer socket to new skb. */
+	if ((*pskb)->sk)
+		skb_set_owner_w(nskb, (*pskb)->sk);
+#ifdef CONFIG_NETFILTER_DEBUG
+	nskb->nf_debug = (*pskb)->nf_debug;
+#endif
+	kfree_skb(*pskb);
+	*pskb = nskb;
 	return 1;
 }
 
-
 /* Generic function for mangling variable-length address changes inside
- * NATed connections (like the PORT XXX,XXX,XXX,XXX,XXX,XXX command in FTP).
+ * NATed TCP connections (like the PORT XXX,XXX,XXX,XXX,XXX,XXX
+ * command in FTP).
  *
  * Takes care about all the nasty sequence number changes, checksumming,
  * skb enlargement, ...
  *
  * */
 int 
-ip_nat_mangle_tcp_packet(struct sk_buff **skb,
+ip_nat_mangle_tcp_packet(struct sk_buff **pskb,
 			 struct ip_conntrack *ct,
 			 enum ip_conntrack_info ctinfo,
 			 unsigned int match_offset,
 			 unsigned int match_len,
-			 char *rep_buffer,
+			 const char *rep_buffer,
 			 unsigned int rep_len)
-{
-	struct iphdr *iph = (*skb)->nh.iph;
-	struct tcphdr *tcph;
-	unsigned char *data;
-	u_int32_t tcplen, newlen, newtcplen;
-
-	tcplen = (*skb)->len - iph->ihl*4;
-	newtcplen = tcplen - match_len + rep_len;
-	newlen = iph->ihl*4 + newtcplen;
-
-	if (newlen > 65535) {
-		if (net_ratelimit())
-			printk("ip_nat_mangle_tcp_packet: nat'ed packet "
-				"exceeds maximum packet size\n");
-		return 0;
-	}
-
-	if ((*skb)->len != newlen) {
-		if (!ip_nat_resize_packet(skb, ct, ctinfo, newlen)) {
-			printk("resize_packet failed!!\n");
-			return 0;
-		}
-	}
-
-	/* skb may be copied !! */
-	iph = (*skb)->nh.iph;
-	tcph = (void *)iph + iph->ihl*4;
-	data = (void *)tcph + tcph->doff*4;
-
-	/* move post-replacement */
-	memmove(data + match_offset + rep_len,
-		 data + match_offset + match_len,
-		 (*skb)->tail - (data + match_offset + match_len));
-
-	/* insert data from buffer */
-	memcpy(data + match_offset, rep_buffer, rep_len);
-
-	/* update skb info */
-	if (newlen > (*skb)->len) {
-		DEBUGP("ip_nat_mangle_tcp_packet: Extending packet by "
-			"%u to %u bytes\n", newlen - (*skb)->len, newlen);
-		skb_put(*skb, newlen - (*skb)->len);
-	} else {
-		DEBUGP("ip_nat_mangle_tcp_packet: Shrinking packet from "
-			"%u to %u bytes\n", (*skb)->len, newlen);
-		skb_trim(*skb, newlen);
-	}
-
-	/* fix checksum information */
-
-	iph->tot_len = htons(newlen);
-	(*skb)->csum = csum_partial((char *)tcph + tcph->doff*4,
-				    newtcplen - tcph->doff*4, 0);
-
-	tcph->check = 0;
-	tcph->check = tcp_v4_check(tcph, newtcplen, iph->saddr, iph->daddr,
-				   csum_partial((char *)tcph, tcph->doff*4,
-					   (*skb)->csum));
-	ip_send_check(iph);
-
-	return 1;
-}
-
-/* TCP sequence number adjustment */
-int 
-ip_nat_seq_adjust(struct sk_buff *skb, 
-		  struct ip_conntrack *ct, 
-		  enum ip_conntrack_info ctinfo)
 {
 	struct iphdr *iph;
 	struct tcphdr *tcph;
+
+	if (!skb_ip_make_writable(pskb, (*pskb)->len))
+		return 0;
+
+	if (rep_len > match_len
+	    && rep_len - match_len > skb_tailroom(*pskb)
+	    && !enlarge_skb(pskb, rep_len - match_len))
+		return 0;
+
+	SKB_LINEAR_ASSERT(*pskb);
+
+	iph = (*pskb)->nh.iph;
+	tcph = (void *)iph + iph->ihl*4;
+
+	mangle_contents(*pskb, iph->ihl*4 + tcph->doff*4,
+			match_offset, match_len, rep_buffer, rep_len);
+
+	tcph->check = 0;
+	tcph->check = tcp_v4_check(tcph, (*pskb)->len - iph->ihl*4,
+				   iph->saddr, iph->daddr,
+				   csum_partial((char *)tcph, tcph->doff*4,
+						(*pskb)->csum));
+	adjust_tcp_sequence(ntohl(tcph->seq),
+			    (int)match_len - (int)rep_len,
+			    ct, ctinfo);
+	return 1;
+}
+			
+/* Generic function for mangling variable-length address changes inside
+ * NATed UDP connections (like the CONNECT DATA XXXXX MESG XXXXX INDEX XXXXX
+ * command in the Amanda protocol)
+ *
+ * Takes care about all the nasty sequence number changes, checksumming,
+ * skb enlargement, ...
+ *
+ * XXX - This function could be merged with ip_nat_mangle_tcp_packet which
+ *       should be fairly easy to do.
+ */
+int 
+ip_nat_mangle_udp_packet(struct sk_buff **pskb,
+			 struct ip_conntrack *ct,
+			 enum ip_conntrack_info ctinfo,
+			 unsigned int match_offset,
+			 unsigned int match_len,
+			 const char *rep_buffer,
+			 unsigned int rep_len)
+{
+	struct iphdr *iph;
+	struct udphdr *udph;
+	int need_csum = ((*pskb)->csum != 0);
+
+	if (!skb_ip_make_writable(pskb, (*pskb)->len))
+		return 0;
+
+	if (rep_len > match_len
+	    && rep_len - match_len > skb_tailroom(*pskb)
+	    && !enlarge_skb(pskb, rep_len - match_len))
+		return 0;
+
+	iph = (*pskb)->nh.iph;
+	udph = (void *)iph + iph->ihl*4;
+	mangle_contents(*pskb, iph->ihl*4 + sizeof(*udph),
+			match_offset, match_len, rep_buffer, rep_len);
+
+	/* update the length of the UDP packet */
+	udph->len = htons((*pskb)->len - iph->ihl*4);
+
+	/* fix udp checksum if udp checksum was previously calculated */
+	if (need_csum) {
+		udph->check = 0;
+		udph->check
+			= csum_tcpudp_magic(iph->saddr, iph->daddr,
+					    (*pskb)->len - iph->ihl*4,
+					    IPPROTO_UDP,
+					    csum_partial((char *)udph,
+							 sizeof(struct udphdr),
+							 (*pskb)->csum));
+	} else
+		(*pskb)->csum = 0;
+	return 1;
+}
+
+/* Adjust one found SACK option including checksum correction */
+static void
+sack_adjust(struct sk_buff *skb,
+	    struct tcphdr *tcph, 
+	    unsigned int sackoff,
+	    unsigned int sackend,
+	    struct ip_nat_seq *natseq)
+{
+	while (sackoff < sackend) {
+		struct tcp_sack_block *sack;
+		u_int32_t new_start_seq, new_end_seq;
+
+		sack = (void *)skb->data + sackoff;
+		if (after(ntohl(sack->start_seq) - natseq->offset_before,
+			  natseq->correction_pos))
+			new_start_seq = ntohl(sack->start_seq) 
+					- natseq->offset_after;
+		else
+			new_start_seq = ntohl(sack->start_seq) 
+					- natseq->offset_before;
+		new_start_seq = htonl(new_start_seq);
+
+		if (after(ntohl(sack->end_seq) - natseq->offset_before,
+			  natseq->correction_pos))
+			new_end_seq = ntohl(sack->end_seq)
+				      - natseq->offset_after;
+		else
+			new_end_seq = ntohl(sack->end_seq)
+				      - natseq->offset_before;
+		new_end_seq = htonl(new_end_seq);
+
+		DEBUGP("sack_adjust: start_seq: %d->%d, end_seq: %d->%d\n",
+			ntohl(sack->start_seq), new_start_seq,
+			ntohl(sack->end_seq), new_end_seq);
+
+		tcph->check = 
+			ip_nat_cheat_check(~sack->start_seq, new_start_seq,
+					   ip_nat_cheat_check(~sack->end_seq, 
+						   	      new_end_seq,
+							      tcph->check));
+		sack->start_seq = new_start_seq;
+		sack->end_seq = new_end_seq;
+		sackoff += sizeof(*sack);
+	}
+}
+
+/* TCP SACK sequence number adjustment */
+static inline unsigned int
+ip_nat_sack_adjust(struct sk_buff **pskb,
+		   struct tcphdr *tcph,
+		   struct ip_conntrack *ct,
+		   enum ip_conntrack_info ctinfo)
+{
+	unsigned int dir, optoff, optend;
+
+	optoff = (*pskb)->nh.iph->ihl*4 + sizeof(struct tcphdr);
+	optend = (*pskb)->nh.iph->ihl*4 + tcph->doff*4;
+
+	if (!skb_ip_make_writable(pskb, optend))
+		return 0;
+
+	dir = CTINFO2DIR(ctinfo);
+
+	while (optoff < optend) {
+		/* Usually: option, length. */
+		unsigned char *op = (*pskb)->data + optoff;
+
+		switch (op[0]) {
+		case TCPOPT_EOL:
+			return 1;
+		case TCPOPT_NOP:
+			optoff++;
+			continue;
+		default:
+			/* no partial options */
+			if (optoff + 1 == optend
+			    || optoff + op[1] > optend
+			    || op[1] < 2)
+				return 0;
+			if (op[0] == TCPOPT_SACK
+			    && op[1] >= 2+TCPOLEN_SACK_PERBLOCK
+			    && ((op[1] - 2) % TCPOLEN_SACK_PERBLOCK) == 0)
+				sack_adjust(*pskb, tcph, optoff+2,
+					    optoff+op[1],
+					    &ct->nat.info.seq[!dir]);
+			optoff += op[1];
+		}
+	}
+	return 1;
+}
+
+/* TCP sequence number adjustment.  Returns true or false.  */
+int
+ip_nat_seq_adjust(struct sk_buff **pskb, 
+		  struct ip_conntrack *ct, 
+		  enum ip_conntrack_info ctinfo)
+{
+	struct tcphdr *tcph;
 	int dir, newseq, newack;
 	struct ip_nat_seq *this_way, *other_way;	
-	
-	iph = skb->nh.iph;
-	tcph = (void *)iph + iph->ihl*4;
 
 	dir = CTINFO2DIR(ctinfo);
 
 	this_way = &ct->nat.info.seq[dir];
 	other_way = &ct->nat.info.seq[!dir];
-	
+
+	/* No adjustments to make?  Very common case. */
+	if (!this_way->offset_before && !this_way->offset_after
+	    && !other_way->offset_before && !other_way->offset_after)
+		return 1;
+
+	if (!skb_ip_make_writable(pskb, (*pskb)->nh.iph->ihl*4+sizeof(*tcph)))
+		return 0;
+
+	tcph = (void *)(*pskb)->data + (*pskb)->nh.iph->ihl*4;
 	if (after(ntohl(tcph->seq), this_way->correction_pos))
 		newseq = ntohl(tcph->seq) + this_way->offset_after;
 	else
@@ -226,51 +390,7 @@ ip_nat_seq_adjust(struct sk_buff *skb,
 	tcph->seq = newseq;
 	tcph->ack_seq = newack;
 
-	return 0;
-}
-
-/* Grrr... SACK.  Fuck me even harder.  Don't want to fix it on the
-   fly, so blow it away. */
-void
-ip_nat_delete_sack(struct sk_buff *skb, struct tcphdr *tcph)
-{
-	unsigned int i;
-	u_int8_t *opt = (u_int8_t *)tcph;
-
-	DEBUGP("Seeking SACKPERM in SYN packet (doff = %u).\n",
-	       tcph->doff * 4);
-	for (i = sizeof(struct tcphdr); i < tcph->doff * 4;) {
-		DEBUGP("%u ", opt[i]);
-		switch (opt[i]) {
-		case TCPOPT_NOP:
-		case TCPOPT_EOL:
-			i++;
-			break;
-
-		case TCPOPT_SACK_PERM:
-			goto found_opt;
-
-		default:
-			/* Worst that can happen: it will take us over. */
-			i += opt[i+1] ?: 1;
-		}
-	}
-	DEBUGP("\n");
-	return;
-
- found_opt:
-	DEBUGP("\n");
-	DEBUGP("Found SACKPERM at offset %u.\n", i);
-
-	/* Must be within TCP header, and valid SACK perm. */
-	if (i + opt[i+1] <= tcph->doff*4 && opt[i+1] == 2) {
-		/* Replace with NOPs. */
-		tcph->check
-			= ip_nat_cheat_check(*((u_int16_t *)(opt + i))^0xFFFF,
-					     (TCPOPT_NOP<<8)|TCPOPT_NOP, tcph->check);
-		opt[i] = opt[i+1] = TCPOPT_NOP;
-	}
-	else DEBUGP("Something wrong with SACK_PERM.\n");
+	return ip_nat_sack_adjust(pskb, tcph, ct, ctinfo);
 }
 
 static inline int
@@ -287,10 +407,8 @@ int ip_nat_helper_register(struct ip_nat_helper *me)
 	WRITE_LOCK(&ip_nat_lock);
 	if (LIST_FIND(&helpers, helper_cmp, struct ip_nat_helper *,&me->tuple))
 		ret = -EBUSY;
-	else {
+	else
 		list_prepend(&helpers, me);
-		MOD_INC_USE_COUNT;
-	}
 	WRITE_UNLOCK(&ip_nat_lock);
 
 	return ret;
@@ -311,12 +429,14 @@ kill_helper(const struct ip_conntrack *i, void *helper)
 void ip_nat_helper_unregister(struct ip_nat_helper *me)
 {
 	WRITE_LOCK(&ip_nat_lock);
-	LIST_DELETE(&helpers, me);
+	/* Autoloading conntrack helper might have failed */
+	if (LIST_FIND(&helpers, helper_cmp, struct ip_nat_helper *,&me->tuple)) {
+		LIST_DELETE(&helpers, me);
+	}
 	WRITE_UNLOCK(&ip_nat_lock);
 
 	/* Someone could be still looking at the helper in a bh. */
-	br_write_lock_bh(BR_NETPROTO_LOCK);
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
+	synchronize_net();
 
 	/* Find anything using it, and umm, kill them.  We can't turn
 	   them into normal connections: if we've adjusted SYNs, then
@@ -326,6 +446,4 @@ void ip_nat_helper_unregister(struct ip_nat_helper *me)
 	   which is just a long-winded way of making things
 	   worse. --RR */
 	ip_ct_selective_cleanup(kill_helper, me);
-
-	MOD_DEC_USE_COUNT;
 }

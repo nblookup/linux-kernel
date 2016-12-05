@@ -15,37 +15,9 @@ struct notifier_block;
 #include <linux/netfilter_ipv4/compat_firewall.h>
 #include <linux/netfilter_ipv4/ip_conntrack.h>
 #include <linux/netfilter_ipv4/ip_conntrack_core.h>
-
-/* Theoretically, we could one day use 2.4 helpers, but for now it
-   just confuses depmod --RR */
-EXPORT_NO_SYMBOLS;
+#include "ip_fw_compat.h"
 
 static struct firewall_ops *fwops;
-
-/* From ip_fw_compat_redir.c */
-extern unsigned int
-do_redirect(struct sk_buff *skb,
-	    const struct net_device *dev,
-	    u_int16_t redirpt);
-
-extern void
-check_for_redirect(struct sk_buff *skb);
-
-extern void
-check_for_unredirect(struct sk_buff *skb);
-
-/* From ip_fw_compat_masq.c */
-extern unsigned int
-do_masquerade(struct sk_buff **pskb, const struct net_device *dev);
-
-extern unsigned int
-check_for_masq_error(struct sk_buff *pskb);
-
-extern unsigned int
-check_for_demasq(struct sk_buff **pskb);
-
-extern int __init masq_init(void);
-extern void masq_cleanup(void);
 
 /* They call these; we do what they want. */
 int register_firewall(int pf, struct firewall_ops *fw)
@@ -89,7 +61,7 @@ fw_in(unsigned int hooknum,
 		if (fwops->fw_acct_in)
 			fwops->fw_acct_in(fwops, PF_INET,
 					  (struct net_device *)in,
-					  (*pskb)->nh.raw, &redirpt, pskb);
+					  &redirpt, pskb);
 
 		if ((*pskb)->nh.iph->frag_off & htons(IP_MF|IP_OFFSET)) {
 			*pskb = ip_ct_gather_frags(*pskb);
@@ -99,7 +71,7 @@ fw_in(unsigned int hooknum,
 		}
 
 		ret = fwops->fw_input(fwops, PF_INET, (struct net_device *)in,
-				      (*pskb)->nh.raw, &redirpt, pskb);
+				      &redirpt, pskb);
 		break;
 
 	case NF_IP_FORWARD:
@@ -109,18 +81,18 @@ fw_in(unsigned int hooknum,
 			ret = FW_ACCEPT;
 		else ret = fwops->fw_forward(fwops, PF_INET,
 					     (struct net_device *)out,
-					     (*pskb)->nh.raw, &redirpt, pskb);
+					     &redirpt, pskb);
 		break;
 
 	case NF_IP_POST_ROUTING:
 		ret = fwops->fw_output(fwops, PF_INET,
 				       (struct net_device *)out,
-				       (*pskb)->nh.raw, &redirpt, pskb);
+				       &redirpt, pskb);
 		if (ret == FW_ACCEPT || ret == FW_SKIP) {
 			if (fwops->fw_acct_out)
 				fwops->fw_acct_out(fwops, PF_INET,
 						   (struct net_device *)out,
-						   (*pskb)->nh.raw, &redirpt,
+						   &redirpt,
 						   pskb);
 
 			/* ip_conntrack_confirm return NF_DROP or NF_ACCEPT */
@@ -157,7 +129,7 @@ fw_in(unsigned int hooknum,
 			/* Handle ICMP errors from client here */
 			if ((*pskb)->nh.iph->protocol == IPPROTO_ICMP
 			    && (*pskb)->nfct)
-				check_for_masq_error(*pskb);
+				check_for_masq_error(pskb);
 		}
 		return NF_ACCEPT;
 
@@ -210,21 +182,44 @@ static int sock_fn(struct sock *sk, int optval, void *user, unsigned int len)
 	return -ip_fw_ctl(optval, &tmp_fw, len);
 }
 
-static struct nf_hook_ops preroute_ops
-= { { NULL, NULL }, fw_in, PF_INET, NF_IP_PRE_ROUTING, NF_IP_PRI_FILTER };
+static struct nf_hook_ops preroute_ops = {
+	.hook		= fw_in,
+	.owner		= THIS_MODULE,
+	.pf		= PF_INET,
+	.hooknum	= NF_IP_PRE_ROUTING,
+	.priority	= NF_IP_PRI_FILTER,
+};
 
-static struct nf_hook_ops postroute_ops
-= { { NULL, NULL }, fw_in, PF_INET, NF_IP_POST_ROUTING, NF_IP_PRI_FILTER };
+static struct nf_hook_ops postroute_ops = {
+	.hook		= fw_in,
+	.owner		= THIS_MODULE,
+	.pf		= PF_INET,
+	.hooknum	= NF_IP_POST_ROUTING,
+	.priority	= NF_IP_PRI_FILTER,
+};
 
-static struct nf_hook_ops forward_ops
-= { { NULL, NULL }, fw_in, PF_INET, NF_IP_FORWARD, NF_IP_PRI_FILTER };
+static struct nf_hook_ops forward_ops = {
+	.hook		= fw_in,
+	.owner		= THIS_MODULE,
+	.pf		= PF_INET,
+	.hooknum	= NF_IP_FORWARD,
+	.priority	= NF_IP_PRI_FILTER,
+};
 
-static struct nf_hook_ops local_in_ops
-= { { NULL, NULL }, fw_confirm, PF_INET, NF_IP_LOCAL_IN, NF_IP_PRI_LAST - 1 };
+static struct nf_hook_ops local_in_ops = {
+	.hook		= fw_confirm,
+	.owner		= THIS_MODULE,
+	.pf		= PF_INET,
+	.hooknum	= NF_IP_LOCAL_IN,
+	.priority	= NF_IP_PRI_LAST - 1,
+};
 
-static struct nf_sockopt_ops sock_ops
-= { { NULL, NULL }, PF_INET, 64, 64 + 1024 + 1, &sock_fn, 0, 0, NULL,
-    0, NULL };
+static struct nf_sockopt_ops sock_ops = {
+	.pf		= PF_INET,
+	.set_optmin	= 64,
+	.set_optmax	= 64 + 1024 + 1,
+	.set		= &sock_fn,
+};
 
 extern int ipfw_init_or_cleanup(int init);
 

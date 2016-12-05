@@ -10,6 +10,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -80,16 +81,17 @@ bfifo_dequeue(struct Qdisc* sch)
 	return skb;
 }
 
-static int
+static unsigned int 
 fifo_drop(struct Qdisc* sch)
 {
 	struct sk_buff *skb;
 
 	skb = __skb_dequeue_tail(&sch->q);
 	if (skb) {
-		sch->stats.backlog -= skb->len;
+		unsigned int len = skb->len;
+		sch->stats.backlog -= len;
 		kfree_skb(skb);
-		return 1;
+		return len;
 	}
 	return 0;
 }
@@ -152,7 +154,6 @@ static int fifo_init(struct Qdisc *sch, struct rtattr *opt)
 	return 0;
 }
 
-#ifdef CONFIG_RTNETLINK
 static int fifo_dump(struct Qdisc *sch, struct sk_buff *skb)
 {
 	struct fifo_sched_data *q = (void*)sch->data;
@@ -168,47 +169,37 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
-#endif
 
-struct Qdisc_ops pfifo_qdisc_ops =
-{
-	NULL,
-	NULL,
-	"pfifo",
-	sizeof(struct fifo_sched_data),
-
-	pfifo_enqueue,
-	pfifo_dequeue,
-	pfifo_requeue,
-	fifo_drop,
-
-	fifo_init,
-	fifo_reset,
-	NULL,
-	fifo_init,
-
-#ifdef CONFIG_RTNETLINK
-	fifo_dump,
-#endif
+struct Qdisc_ops pfifo_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	NULL,
+	.id		=	"pfifo",
+	.priv_size	=	sizeof(struct fifo_sched_data),
+	.enqueue	=	pfifo_enqueue,
+	.dequeue	=	pfifo_dequeue,
+	.requeue	=	pfifo_requeue,
+	.drop		=	fifo_drop,
+	.init		=	fifo_init,
+	.reset		=	fifo_reset,
+	.destroy	=	NULL,
+	.change		=	fifo_init,
+	.dump		=	fifo_dump,
+	.owner		=	THIS_MODULE,
 };
 
-struct Qdisc_ops bfifo_qdisc_ops =
-{
-	NULL,
-	NULL,
-	"bfifo",
-	sizeof(struct fifo_sched_data),
-
-	bfifo_enqueue,
-	bfifo_dequeue,
-	bfifo_requeue,
-	fifo_drop,
-
-	fifo_init,
-	fifo_reset,
-	NULL,
-	fifo_init,
-#ifdef CONFIG_RTNETLINK
-	fifo_dump,
-#endif
+struct Qdisc_ops bfifo_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	NULL,
+	.id		=	"bfifo",
+	.priv_size	=	sizeof(struct fifo_sched_data),
+	.enqueue	=	bfifo_enqueue,
+	.dequeue	=	bfifo_dequeue,
+	.requeue	=	bfifo_requeue,
+	.drop		=	fifo_drop,
+	.init		=	fifo_init,
+	.reset		=	fifo_reset,
+	.destroy	=	NULL,
+	.change		=	fifo_init,
+	.dump		=	fifo_dump,
+	.owner		=	THIS_MODULE,
 };

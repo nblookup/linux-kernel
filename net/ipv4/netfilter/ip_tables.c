@@ -2,8 +2,14 @@
  * Packet matching code.
  *
  * Copyright (C) 1999 Paul `Rusty' Russell & Michael J. Neuling
+ * Copyright (C) 2009-2002 Netfilter core team <coreteam@netfilter.org>
+ *
+ * 19 Jan 2002 Harald Welte <laforge@gnumonks.org>
+ * 	- increase module usage count as soon as we have rules inside
+ * 	  a table
  */
 #include <linux/config.h>
+#include <linux/cache.h>
 #include <linux/skbuff.h>
 #include <linux/kmod.h>
 #include <linux/vmalloc.h>
@@ -62,13 +68,12 @@ static DECLARE_MUTEX(ipt_mutex);
 #define inline
 #endif
 
-/* Locking is simple: we assume at worst case there will be one packet
-   in user context and one from bottom halves (or soft irq if Alexey's
-   softnet patch was applied).
-
+/*
    We keep a set of rules for each CPU, so we can avoid write-locking
-   them; doing a readlock_bh() stops packets coming through if we're
-   in user context.
+   them in the softirq when updating the counters and therefore
+   only need to read-lock in the softirq; doing a write_lock_bh() in user
+   context stops packets coming through and allows user context to read
+   the counters or update the rules.
 
    To be cache friendly on SMP, we arrange them like so:
    [ n-entries ]
@@ -84,13 +89,15 @@ struct ipt_table_info
 	unsigned int size;
 	/* Number of entries: FIXME. --RR */
 	unsigned int number;
+	/* Initial number of entries. Needed for module usage count */
+	unsigned int initial_entries;
 
 	/* Entry points and underflows */
 	unsigned int hook_entry[NF_IP_NUMHOOKS];
 	unsigned int underflow[NF_IP_NUMHOOKS];
 
 	/* ipt_entry tables: one per CPU */
-	char entries[0] __attribute__((aligned(SMP_CACHE_BYTES)));
+	char entries[0] ____cacheline_aligned;
 };
 
 static LIST_HEAD(ipt_target);
@@ -207,9 +214,9 @@ ip_checkentry(const struct ipt_ip *ip)
 
 static unsigned int
 ipt_error(struct sk_buff **pskb,
-	  unsigned int hooknum,
 	  const struct net_device *in,
 	  const struct net_device *out,
+	  unsigned int hooknum,
 	  const void *targinfo,
 	  void *userinfo)
 {
@@ -225,13 +232,10 @@ int do_match(struct ipt_entry_match *m,
 	     const struct net_device *in,
 	     const struct net_device *out,
 	     int offset,
-	     const void *hdr,
-	     u_int16_t datalen,
 	     int *hotdrop)
 {
 	/* Stop iteration if it doesn't match */
-	if (!m->u.kernel.match->match(skb, in, out, m->data,
-				      offset, hdr, datalen, hotdrop))
+	if (!m->u.kernel.match->match(skb, in, out, m->data, offset, hotdrop))
 		return 1;
 	else
 		return 0;
@@ -255,7 +259,6 @@ ipt_do_table(struct sk_buff **pskb,
 	static const char nulldevname[IFNAMSIZ] = { 0 };
 	u_int16_t offset;
 	struct iphdr *ip;
-	void *protohdr;
 	u_int16_t datalen;
 	int hotdrop = 0;
 	/* Initializing verdict to NF_DROP keeps gcc happy. */
@@ -266,7 +269,6 @@ ipt_do_table(struct sk_buff **pskb,
 
 	/* Initialization */
 	ip = (*pskb)->nh.iph;
-	protohdr = (u_int32_t *)ip + ip->ihl;
 	datalen = (*pskb)->len - ip->ihl * 4;
 	indev = in ? in->name : nulldevname;
 	outdev = out ? out->name : nulldevname;
@@ -281,8 +283,7 @@ ipt_do_table(struct sk_buff **pskb,
 	read_lock_bh(&table->lock);
 	IP_NF_ASSERT(table->valid_hooks & (1 << hook));
 	table_base = (void *)table->private->entries
-		+ TABLE_OFFSET(table->private,
-			       cpu_number_map(smp_processor_id()));
+		+ TABLE_OFFSET(table->private, smp_processor_id());
 	e = get_entry(table_base, table->private->hook_entry[hook]);
 
 #ifdef CONFIG_NETFILTER_DEBUG
@@ -310,8 +311,7 @@ ipt_do_table(struct sk_buff **pskb,
 
 			if (IPT_MATCH_ITERATE(e, do_match,
 					      *pskb, in, out,
-					      offset, protohdr,
-					      datalen, &hotdrop) != 0)
+					      offset, &hotdrop) != 0)
 				goto no_match;
 
 			ADD_COUNTER(e->counters, ntohs(ip->tot_len), 1);
@@ -354,8 +354,8 @@ ipt_do_table(struct sk_buff **pskb,
 					= 0xeeeeeeec;
 #endif
 				verdict = t->u.kernel.target->target(pskb,
-								     hook,
 								     in, out,
+								     hook,
 								     t->data,
 								     userdata);
 
@@ -372,7 +372,6 @@ ipt_do_table(struct sk_buff **pskb,
 #endif
 				/* Target might have changed stuff. */
 				ip = (*pskb)->nh.iph;
-				protohdr = (u_int32_t *)ip + ip->ihl;
 				datalen = (*pskb)->len - ip->ihl * 4;
 
 				if (verdict == IPT_CONTINUE)
@@ -444,11 +443,8 @@ find_inlist_lock(struct list_head *head,
 
 	ret = find_inlist_lock_noload(head, name, error, mutex);
 	if (!ret) {
-		char modulename[IPT_FUNCTION_MAXNAMELEN + strlen(prefix) + 1];
-		strcpy(modulename, prefix);
-		strcat(modulename, name);
-		duprintf("find_inlist: loading `%s'.\n", modulename);
-		request_module(modulename);
+		duprintf("find_inlist: loading `%s%s'.\n", prefix, name);
+		request_module("%s%s", prefix, name);
 		ret = find_inlist_lock_noload(head, name, error, mutex);
 	}
 
@@ -592,10 +588,7 @@ cleanup_match(struct ipt_entry_match *m, unsigned int *i)
 	if (m->u.kernel.match->destroy)
 		m->u.kernel.match->destroy(m->data,
 					   m->u.match_size - sizeof(*m));
-
-	if (m->u.kernel.match->me)
-		__MOD_DEC_USE_COUNT(m->u.kernel.match->me);
-
+	module_put(m->u.kernel.match->me);
 	return 0;
 }
 
@@ -644,8 +637,10 @@ check_match(struct ipt_entry_match *m,
 		duprintf("check_match: `%s' not found\n", m->u.user.name);
 		return ret;
 	}
-	if (match->me)
-		__MOD_INC_USE_COUNT(match->me);
+	if (!try_module_get(match->me)) {
+		up(&ipt_mutex);
+		return -ENOENT;
+	}
 	m->u.kernel.match = match;
 	up(&ipt_mutex);
 
@@ -653,8 +648,7 @@ check_match(struct ipt_entry_match *m,
 	    && !m->u.kernel.match->checkentry(name, ip, m->data,
 					      m->u.match_size - sizeof(*m),
 					      hookmask)) {
-		if (m->u.kernel.match->me)
-			__MOD_DEC_USE_COUNT(m->u.kernel.match->me);
+		module_put(m->u.kernel.match->me);
 		duprintf("ip_tables: check failed for `%s'.\n",
 			 m->u.kernel.match->name);
 		return -EINVAL;
@@ -691,8 +685,11 @@ check_entry(struct ipt_entry *e, const char *name, unsigned int size,
 		duprintf("check_entry: `%s' not found\n", t->u.user.name);
 		goto cleanup_matches;
 	}
-	if (target->me)
-		__MOD_INC_USE_COUNT(target->me);
+	if (!try_module_get(target->me)) {
+		up(&ipt_mutex);
+		ret = -ENOENT;
+		goto cleanup_matches;
+	}
 	t->u.kernel.target = target;
 	up(&ipt_mutex);
 
@@ -706,8 +703,7 @@ check_entry(struct ipt_entry *e, const char *name, unsigned int size,
 						      t->u.target_size
 						      - sizeof(*t),
 						      e->comefrom)) {
-		if (t->u.kernel.target->me)
-			__MOD_DEC_USE_COUNT(t->u.kernel.target->me);
+		module_put(t->u.kernel.target->me);
 		duprintf("ip_tables: check failed for `%s'.\n",
 			 t->u.kernel.target->name);
 		ret = -EINVAL;
@@ -779,9 +775,7 @@ cleanup_entry(struct ipt_entry *e, unsigned int *i)
 	if (t->u.kernel.target->destroy)
 		t->u.kernel.target->destroy(t->data,
 					    t->u.target_size - sizeof(*t));
-	if (t->u.kernel.target->me)
-		__MOD_DEC_USE_COUNT(t->u.kernel.target->me);
-
+	module_put(t->u.kernel.target->me);
 	return 0;
 }
 
@@ -858,7 +852,7 @@ translate_table(const char *name,
 	}
 
 	/* And one copy for every other CPU */
-	for (i = 1; i < smp_num_cpus; i++) {
+	for (i = 1; i < NR_CPUS; i++) {
 		memcpy(newinfo->entries + SMP_ALIGN(newinfo->size)*i,
 		       newinfo->entries,
 		       SMP_ALIGN(newinfo->size));
@@ -880,7 +874,7 @@ replace_table(struct ipt_table *table,
 		struct ipt_entry *table_base;
 		unsigned int i;
 
-		for (i = 0; i < smp_num_cpus; i++) {
+		for (i = 0; i < NR_CPUS; i++) {
 			table_base =
 				(void *)newinfo->entries
 				+ TABLE_OFFSET(newinfo, i);
@@ -902,6 +896,7 @@ replace_table(struct ipt_table *table,
 	}
 	oldinfo = table->private;
 	table->private = newinfo;
+	newinfo->initial_entries = oldinfo->initial_entries;
 	write_unlock_bh(&table->lock);
 
 	return oldinfo;
@@ -926,7 +921,7 @@ get_counters(const struct ipt_table_info *t,
 	unsigned int cpu;
 	unsigned int i;
 
-	for (cpu = 0; cpu < smp_num_cpus; cpu++) {
+	for (cpu = 0; cpu < NR_CPUS; cpu++) {
 		i = 0;
 		IPT_ENTRY_ITERATE(t->entries + TABLE_OFFSET(t, cpu),
 				  t->size,
@@ -1064,7 +1059,7 @@ do_replace(void *user, unsigned int len)
 		return -ENOMEM;
 
 	newinfo = vmalloc(sizeof(struct ipt_table_info)
-			  + SMP_ALIGN(tmp.size) * smp_num_cpus);
+			  + SMP_ALIGN(tmp.size) * NR_CPUS);
 	if (!newinfo)
 		return -ENOMEM;
 
@@ -1101,9 +1096,26 @@ do_replace(void *user, unsigned int len)
 		goto free_newinfo_counters_untrans_unlock;
 	}
 
+	/* Get a reference in advance, we're not allowed fail later */
+	if (!try_module_get(t->me)) {
+		ret = -EBUSY;
+		goto free_newinfo_counters_untrans_unlock;
+	}
+
+
 	oldinfo = replace_table(t, tmp.num_counters, newinfo, &ret);
 	if (!oldinfo)
-		goto free_newinfo_counters_untrans_unlock;
+		goto put_module;
+
+	/* Update module usage count based on number of rules */
+	duprintf("do_replace: oldnum=%u, initnum=%u, newnum=%u\n",
+		oldinfo->number, oldinfo->initial_entries, newinfo->number);
+	if ((oldinfo->number > oldinfo->initial_entries) || 
+	    (newinfo->number <= oldinfo->initial_entries)) 
+		module_put(t->me);
+	if ((oldinfo->number > oldinfo->initial_entries) &&
+	    (newinfo->number <= oldinfo->initial_entries))
+		module_put(t->me);
 
 	/* Get the old counters. */
 	get_counters(oldinfo, counters);
@@ -1117,6 +1129,8 @@ do_replace(void *user, unsigned int len)
 	up(&ipt_mutex);
 	return 0;
 
+ put_module:
+	module_put(t->me);
  free_newinfo_counters_untrans_unlock:
 	up(&ipt_mutex);
  free_newinfo_counters_untrans:
@@ -1302,17 +1316,14 @@ ipt_register_target(struct ipt_target *target)
 {
 	int ret;
 
-	MOD_INC_USE_COUNT;
 	ret = down_interruptible(&ipt_mutex);
-	if (ret != 0) {
-		MOD_DEC_USE_COUNT;
+	if (ret != 0)
 		return ret;
-	}
+
 	if (!list_named_insert(&ipt_target, target)) {
 		duprintf("ipt_register_target: `%s' already in list!\n",
 			 target->name);
 		ret = -EINVAL;
-		MOD_DEC_USE_COUNT;
 	}
 	up(&ipt_mutex);
 	return ret;
@@ -1324,7 +1335,6 @@ ipt_unregister_target(struct ipt_target *target)
 	down(&ipt_mutex);
 	LIST_DELETE(&ipt_target, target);
 	up(&ipt_mutex);
-	MOD_DEC_USE_COUNT;
 }
 
 int
@@ -1332,16 +1342,13 @@ ipt_register_match(struct ipt_match *match)
 {
 	int ret;
 
-	MOD_INC_USE_COUNT;
 	ret = down_interruptible(&ipt_mutex);
-	if (ret != 0) {
-		MOD_DEC_USE_COUNT;
+	if (ret != 0)
 		return ret;
-	}
+
 	if (!list_named_insert(&ipt_match, match)) {
 		duprintf("ipt_register_match: `%s' already in list!\n",
 			 match->name);
-		MOD_DEC_USE_COUNT;
 		ret = -EINVAL;
 	}
 	up(&ipt_mutex);
@@ -1355,7 +1362,6 @@ ipt_unregister_match(struct ipt_match *match)
 	down(&ipt_mutex);
 	LIST_DELETE(&ipt_match, match);
 	up(&ipt_mutex);
-	MOD_DEC_USE_COUNT;
 }
 
 int ipt_register_table(struct ipt_table *table)
@@ -1363,16 +1369,13 @@ int ipt_register_table(struct ipt_table *table)
 	int ret;
 	struct ipt_table_info *newinfo;
 	static struct ipt_table_info bootstrap
-		= { 0, 0, { 0 }, { 0 }, { } };
+		= { 0, 0, 0, { 0 }, { 0 }, { } };
 
-	MOD_INC_USE_COUNT;
 	newinfo = vmalloc(sizeof(struct ipt_table_info)
-			  + SMP_ALIGN(table->table->size) * smp_num_cpus);
-	if (!newinfo) {
-		ret = -ENOMEM;
-		MOD_DEC_USE_COUNT;
-		return ret;
-	}
+			  + SMP_ALIGN(table->table->size) * NR_CPUS);
+	if (!newinfo)
+		return -ENOMEM;
+
 	memcpy(newinfo->entries, table->table->entries, table->table->size);
 
 	ret = translate_table(table->name, table->valid_hooks,
@@ -1382,14 +1385,12 @@ int ipt_register_table(struct ipt_table *table)
 			      table->table->underflow);
 	if (ret != 0) {
 		vfree(newinfo);
-		MOD_DEC_USE_COUNT;
 		return ret;
 	}
 
 	ret = down_interruptible(&ipt_mutex);
 	if (ret != 0) {
 		vfree(newinfo);
-		MOD_DEC_USE_COUNT;
 		return ret;
 	}
 
@@ -1406,6 +1407,9 @@ int ipt_register_table(struct ipt_table *table)
 
 	duprintf("table->private->number = %u\n",
 		 table->private->number);
+	
+	/* save number of initial entries */
+	table->private->initial_entries = table->private->number;
 
 	table->lock = RW_LOCK_UNLOCKED;
 	list_prepend(&ipt_tables, table);
@@ -1416,7 +1420,6 @@ int ipt_register_table(struct ipt_table *table)
 
  free_unlock:
 	vfree(newinfo);
-	MOD_DEC_USE_COUNT;
 	goto unlock;
 }
 
@@ -1430,7 +1433,6 @@ void ipt_unregister_table(struct ipt_table *table)
 	IPT_ENTRY_ITERATE(table->private->entries, table->private->size,
 			  cleanup_entry, NULL);
 	vfree(table->private);
-	MOD_DEC_USE_COUNT;
 }
 
 /* Returns 1 if the port is matched by the range, 0 otherwise */
@@ -1445,22 +1447,24 @@ port_match(u_int16_t min, u_int16_t max, u_int16_t port, int invert)
 
 static int
 tcp_find_option(u_int8_t option,
-		const struct tcphdr *tcp,
-		u_int16_t datalen,
+		const struct sk_buff *skb,
+		unsigned int optlen,
 		int invert,
 		int *hotdrop)
 {
-	unsigned int i = sizeof(struct tcphdr);
-	const u_int8_t *opt = (u_int8_t *)tcp;
+	/* tcp.doff is only 4 bits, ie. max 15 * 4 bytes */
+	char opt[60 - sizeof(struct tcphdr)];
+	unsigned int i;
 
 	duprintf("tcp_match: finding option\n");
 	/* If we don't have the whole header, drop packet. */
-	if (tcp->doff * 4 > datalen) {
+	if (skb_copy_bits(skb, skb->nh.iph->ihl*4 + sizeof(struct tcphdr),
+			  opt, optlen) < 0) {
 		*hotdrop = 1;
 		return 0;
 	}
 
-	while (i < tcp->doff * 4) {
+	for (i = 0; i < optlen; ) {
 		if (opt[i] == option) return !invert;
 		if (opt[i] < 2) i++;
 		else i += opt[i+1]?:1;
@@ -1475,25 +1479,29 @@ tcp_match(const struct sk_buff *skb,
 	  const struct net_device *out,
 	  const void *matchinfo,
 	  int offset,
-	  const void *hdr,
-	  u_int16_t datalen,
 	  int *hotdrop)
 {
-	const struct tcphdr *tcp = hdr;
+	struct tcphdr tcph;
 	const struct ipt_tcp *tcpinfo = matchinfo;
 
-	/* To quote Alan:
+	if (offset) {
+		/* To quote Alan:
 
-	   Don't allow a fragment of TCP 8 bytes in. Nobody normal
-	   causes this. Its a cracker trying to break in by doing a
-	   flag overwrite to pass the direction checks.
-	*/
-
-	if (offset == 1) {
-		duprintf("Dropping evil TCP offset=1 frag.\n");
-		*hotdrop = 1;
+		   Don't allow a fragment of TCP 8 bytes in. Nobody normal
+		   causes this. Its a cracker trying to break in by doing a
+		   flag overwrite to pass the direction checks.
+		*/
+		if (offset == 1) {
+			duprintf("Dropping evil TCP offset=1 frag.\n");
+			*hotdrop = 1;
+		}
+		/* Must not be a fragment. */
 		return 0;
-	} else if (offset == 0 && datalen < sizeof(struct tcphdr)) {
+	}
+
+#define FWINVTCP(bool,invflg) ((bool) ^ !!(tcpinfo->invflags & invflg))
+
+	if (skb_copy_bits(skb, skb->nh.iph->ihl*4, &tcph, sizeof(tcph)) < 0) {
 		/* We've been asked to examine this packet, and we
 		   can't.  Hence, no choice but to drop. */
 		duprintf("Dropping evil TCP offset=0 tinygram.\n");
@@ -1501,27 +1509,24 @@ tcp_match(const struct sk_buff *skb,
 		return 0;
 	}
 
-	/* FIXME: Try tcp doff >> packet len against various stacks --RR */
-
-#define FWINVTCP(bool,invflg) ((bool) ^ !!(tcpinfo->invflags & invflg))
-
-	/* Must not be a fragment. */
-	return !offset
-		&& port_match(tcpinfo->spts[0], tcpinfo->spts[1],
-			      ntohs(tcp->source),
-			      !!(tcpinfo->invflags & IPT_TCP_INV_SRCPT))
-		&& port_match(tcpinfo->dpts[0], tcpinfo->dpts[1],
-			      ntohs(tcp->dest),
-			      !!(tcpinfo->invflags & IPT_TCP_INV_DSTPT))
-		&& FWINVTCP((((unsigned char *)tcp)[13]
-			     & tcpinfo->flg_mask)
-			    == tcpinfo->flg_cmp,
-			    IPT_TCP_INV_FLAGS)
-		&& (!tcpinfo->option
-		    || tcp_find_option(tcpinfo->option, tcp, datalen,
-				       tcpinfo->invflags
-				       & IPT_TCP_INV_OPTION,
-				       hotdrop));
+	if (!port_match(tcpinfo->spts[0], tcpinfo->spts[1],
+			ntohs(tcph.source),
+			!!(tcpinfo->invflags & IPT_TCP_INV_SRCPT)))
+		return 0;
+	if (!port_match(tcpinfo->dpts[0], tcpinfo->dpts[1],
+			ntohs(tcph.dest),
+			!!(tcpinfo->invflags & IPT_TCP_INV_DSTPT)))
+		return 0;
+	if (!FWINVTCP((((unsigned char *)&tcph)[13] & tcpinfo->flg_mask)
+		      == tcpinfo->flg_cmp,
+		      IPT_TCP_INV_FLAGS))
+		return 0;
+	if (tcpinfo->option &&
+	    !tcp_find_option(tcpinfo->option, skb, tcph.doff*4 - sizeof(tcph),
+			     tcpinfo->invflags & IPT_TCP_INV_OPTION,
+			     hotdrop))
+		return 0;
+	return 1;
 }
 
 /* Called when user tries to insert an entry of this type. */
@@ -1547,14 +1552,16 @@ udp_match(const struct sk_buff *skb,
 	  const struct net_device *out,
 	  const void *matchinfo,
 	  int offset,
-	  const void *hdr,
-	  u_int16_t datalen,
 	  int *hotdrop)
 {
-	const struct udphdr *udp = hdr;
+	struct udphdr udph;
 	const struct ipt_udp *udpinfo = matchinfo;
 
-	if (offset == 0 && datalen < sizeof(struct udphdr)) {
+	/* Must not be a fragment. */
+	if (offset)
+		return 0;
+
+	if (skb_copy_bits(skb, skb->nh.iph->ihl*4, &udph, sizeof(udph)) < 0) {
 		/* We've been asked to examine this packet, and we
 		   can't.  Hence, no choice but to drop. */
 		duprintf("Dropping evil UDP tinygram.\n");
@@ -1562,13 +1569,11 @@ udp_match(const struct sk_buff *skb,
 		return 0;
 	}
 
-	/* Must not be a fragment. */
-	return !offset
-		&& port_match(udpinfo->spts[0], udpinfo->spts[1],
-			      ntohs(udp->source),
-			      !!(udpinfo->invflags & IPT_UDP_INV_SRCPT))
+	return port_match(udpinfo->spts[0], udpinfo->spts[1],
+			  ntohs(udph.source),
+			  !!(udpinfo->invflags & IPT_UDP_INV_SRCPT))
 		&& port_match(udpinfo->dpts[0], udpinfo->dpts[1],
-			      ntohs(udp->dest),
+			      ntohs(udph.dest),
 			      !!(udpinfo->invflags & IPT_UDP_INV_DSTPT));
 }
 
@@ -1608,7 +1613,7 @@ icmp_type_code_match(u_int8_t test_type, u_int8_t min_code, u_int8_t max_code,
 		     u_int8_t type, u_int8_t code,
 		     int invert)
 {
-	return (type == test_type && code >= min_code && code <= max_code)
+	return ((test_type == 0xFF) || (type == test_type && code >= min_code && code <= max_code))
 		^ invert;
 }
 
@@ -1618,14 +1623,16 @@ icmp_match(const struct sk_buff *skb,
 	   const struct net_device *out,
 	   const void *matchinfo,
 	   int offset,
-	   const void *hdr,
-	   u_int16_t datalen,
 	   int *hotdrop)
 {
-	const struct icmphdr *icmp = hdr;
+	struct icmphdr icmph;
 	const struct ipt_icmp *icmpinfo = matchinfo;
 
-	if (offset == 0 && datalen < 2) {
+	/* Must not be a fragment. */
+	if (offset)
+		return 0;
+
+	if (skb_copy_bits(skb, skb->nh.iph->ihl*4, &icmph, sizeof(icmph)) < 0){
 		/* We've been asked to examine this packet, and we
 		   can't.  Hence, no choice but to drop. */
 		duprintf("Dropping evil ICMP tinygram.\n");
@@ -1633,13 +1640,11 @@ icmp_match(const struct sk_buff *skb,
 		return 0;
 	}
 
-	/* Must not be a fragment. */
-	return !offset
-		&& icmp_type_code_match(icmpinfo->type,
-					icmpinfo->code[0],
-					icmpinfo->code[1],
-					icmp->type, icmp->code,
-					!!(icmpinfo->invflags&IPT_ICMP_INV));
+	return icmp_type_code_match(icmpinfo->type,
+				    icmpinfo->code[0],
+				    icmpinfo->code[1],
+				    icmph.type, icmph.code,
+				    !!(icmpinfo->invflags&IPT_ICMP_INV));
 }
 
 /* Called when user tries to insert an entry of this type. */
@@ -1660,31 +1665,53 @@ icmp_checkentry(const char *tablename,
 }
 
 /* The built-in targets: standard (NULL) and error. */
-static struct ipt_target ipt_standard_target
-= { { NULL, NULL }, IPT_STANDARD_TARGET, NULL, NULL, NULL };
-static struct ipt_target ipt_error_target
-= { { NULL, NULL }, IPT_ERROR_TARGET, ipt_error, NULL, NULL };
+static struct ipt_target ipt_standard_target = {
+	.name		= IPT_STANDARD_TARGET,
+};
 
-static struct nf_sockopt_ops ipt_sockopts
-= { { NULL, NULL }, PF_INET, IPT_BASE_CTL, IPT_SO_SET_MAX+1, do_ipt_set_ctl,
-    IPT_BASE_CTL, IPT_SO_GET_MAX+1, do_ipt_get_ctl, 0, NULL  };
+static struct ipt_target ipt_error_target = {
+	.name		= IPT_ERROR_TARGET,
+	.target		= ipt_error,
+};
 
-static struct ipt_match tcp_matchstruct
-= { { NULL, NULL }, "tcp", &tcp_match, &tcp_checkentry, NULL };
-static struct ipt_match udp_matchstruct
-= { { NULL, NULL }, "udp", &udp_match, &udp_checkentry, NULL };
-static struct ipt_match icmp_matchstruct
-= { { NULL, NULL }, "icmp", &icmp_match, &icmp_checkentry, NULL };
+static struct nf_sockopt_ops ipt_sockopts = {
+	.pf		= PF_INET,
+	.set_optmin	= IPT_BASE_CTL,
+	.set_optmax	= IPT_SO_SET_MAX+1,
+	.set		= do_ipt_set_ctl,
+	.get_optmin	= IPT_BASE_CTL,
+	.get_optmax	= IPT_SO_GET_MAX+1,
+	.get		= do_ipt_get_ctl,
+};
+
+static struct ipt_match tcp_matchstruct = {
+	.name		= "tcp",
+	.match		= &tcp_match,
+	.checkentry	= &tcp_checkentry,
+};
+
+static struct ipt_match udp_matchstruct = {
+	.name		= "udp",
+	.match		= &udp_match,
+	.checkentry	= &udp_checkentry,
+};
+
+static struct ipt_match icmp_matchstruct = {
+	.name		= "icmp",
+	.match		= &icmp_match,
+	.checkentry	= &icmp_checkentry,
+};
 
 #ifdef CONFIG_PROC_FS
-static inline int print_name(const struct ipt_table *t,
+static inline int print_name(const char *i,
 			     off_t start_offset, char *buffer, int length,
 			     off_t *pos, unsigned int *count)
 {
 	if ((*count)++ >= start_offset) {
 		unsigned int namelen;
 
-		namelen = sprintf(buffer + *pos, "%s\n", t->name);
+		namelen = sprintf(buffer + *pos, "%s\n",
+				  i + sizeof(struct list_head));
 		if (*pos + namelen > length) {
 			/* Stop iterating */
 			return 1;
@@ -1702,7 +1729,7 @@ static int ipt_get_tables(char *buffer, char **start, off_t offset, int length)
 	if (down_interruptible(&ipt_mutex) != 0)
 		return 0;
 
-	LIST_FIND(&ipt_tables, print_name, struct ipt_table *,
+	LIST_FIND(&ipt_tables, print_name, void *,
 		  offset, buffer, length, &pos, &count);
 
 	up(&ipt_mutex);
@@ -1711,6 +1738,46 @@ static int ipt_get_tables(char *buffer, char **start, off_t offset, int length)
 	*start=(char *)((unsigned long)count-offset);
 	return pos;
 }
+
+static int ipt_get_targets(char *buffer, char **start, off_t offset, int length)
+{
+	off_t pos = 0;
+	unsigned int count = 0;
+
+	if (down_interruptible(&ipt_mutex) != 0)
+		return 0;
+
+	LIST_FIND(&ipt_target, print_name, void *,
+		  offset, buffer, length, &pos, &count);
+	
+	up(&ipt_mutex);
+
+	*start = (char *)((unsigned long)count - offset);
+	return pos;
+}
+
+static int ipt_get_matches(char *buffer, char **start, off_t offset, int length)
+{
+	off_t pos = 0;
+	unsigned int count = 0;
+
+	if (down_interruptible(&ipt_mutex) != 0)
+		return 0;
+	
+	LIST_FIND(&ipt_match, print_name, void *,
+		  offset, buffer, length, &pos, &count);
+
+	up(&ipt_mutex);
+
+	*start = (char *)((unsigned long)count - offset);
+	return pos;
+}
+
+static struct { char *name; get_info_t *get_info; } ipt_proc_entry[] =
+{ { "ip_tables_names", ipt_get_tables },
+  { "ip_tables_targets", ipt_get_targets },
+  { "ip_tables_matches", ipt_get_matches },
+  { NULL, NULL} };
 #endif /*CONFIG_PROC_FS*/
 
 static int __init init(void)
@@ -1736,17 +1803,23 @@ static int __init init(void)
 #ifdef CONFIG_PROC_FS
 	{
 	struct proc_dir_entry *proc;
+	int i;
 
-	proc = proc_net_create("ip_tables_names", 0, ipt_get_tables);
-	if (!proc) {
-		nf_unregister_sockopt(&ipt_sockopts);
-		return -ENOMEM;
+	for (i = 0; ipt_proc_entry[i].name; i++) {
+		proc = proc_net_create(ipt_proc_entry[i].name, 0,
+				       ipt_proc_entry[i].get_info);
+		if (!proc) {
+			while (--i >= 0)
+				proc_net_remove(ipt_proc_entry[i].name);
+			nf_unregister_sockopt(&ipt_sockopts);
+			return -ENOMEM;
+		}
+		proc->owner = THIS_MODULE;
 	}
-	proc->owner = THIS_MODULE;
 	}
 #endif
 
-	printk("ip_tables: (c)2000 Netfilter core team\n");
+	printk("ip_tables: (C) 2000-2002 Netfilter core team\n");
 	return 0;
 }
 
@@ -1754,7 +1827,11 @@ static void __exit fini(void)
 {
 	nf_unregister_sockopt(&ipt_sockopts);
 #ifdef CONFIG_PROC_FS
-	proc_net_remove("ip_tables_names");
+	{
+	int i;
+	for (i = 0; ipt_proc_entry[i].name; i++)
+		proc_net_remove(ipt_proc_entry[i].name);
+	}
 #endif
 }
 

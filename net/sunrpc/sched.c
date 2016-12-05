@@ -15,12 +15,15 @@
 #include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
+#include <linux/mempool.h>
 #include <linux/unistd.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/spinlock.h>
+#include <linux/suspend.h>
 
 #include <linux/sunrpc/clnt.h>
+#include <linux/sunrpc/xprt.h>
 
 #ifdef RPC_DEBUG
 #define RPCDBG_FACILITY		RPCDBG_SCHED
@@ -28,9 +31,15 @@ static int			rpc_task_id;
 #endif
 
 /*
- * We give RPC the same get_free_pages priority as NFS
+ * RPC slabs and memory pools
  */
-#define GFP_RPC			GFP_NOFS
+#define RPC_BUFFER_MAXSIZE	(2048)
+#define RPC_BUFFER_POOLSIZE	(8)
+#define RPC_TASK_POOLSIZE	(8)
+static kmem_cache_t	*rpc_task_slabp;
+static kmem_cache_t	*rpc_buffer_slabp;
+static mempool_t	*rpc_task_mempool;
+static mempool_t	*rpc_buffer_mempool;
 
 static void			__rpc_default_timer(struct rpc_task *task);
 static void			rpciod_killall(void);
@@ -40,23 +49,23 @@ static void			rpciod_killall(void);
  * handler, or while executing another RPC task, it is put on
  * schedq, and rpciod is woken up.
  */
-static struct rpc_wait_queue	schedq = RPC_INIT_WAITQ("schedq");
+static RPC_WAITQ(schedq, "schedq");
 
 /*
  * RPC tasks that create another task (e.g. for contacting the portmapper)
  * will wait on this queue for their child's completion
  */
-static struct rpc_wait_queue	childq = RPC_INIT_WAITQ("childq");
+static RPC_WAITQ(childq, "childq");
 
 /*
  * RPC tasks sit here while waiting for conditions to improve.
  */
-static struct rpc_wait_queue	delay_queue = RPC_INIT_WAITQ("delayq");
+static RPC_WAITQ(delay_queue, "delayq");
 
 /*
  * All RPC tasks are linked into this list
  */
-static struct rpc_task *	all_tasks;
+static LIST_HEAD(all_tasks);
 
 /*
  * rpciod-related stuff
@@ -72,29 +81,11 @@ static int			rpc_inhibit;
  * Spinlock for wait queues. Access to the latter also has to be
  * interrupt-safe in order to allow timers to wake up sleeping tasks.
  */
-spinlock_t rpc_queue_lock = SPIN_LOCK_UNLOCKED;
+static spinlock_t rpc_queue_lock = SPIN_LOCK_UNLOCKED;
 /*
  * Spinlock for other critical sections of code.
  */
 static spinlock_t rpc_sched_lock = SPIN_LOCK_UNLOCKED;
-
-/*
- * This is the last-ditch buffer for NFS swap requests
- */
-static u32			swap_buffer[PAGE_SIZE >> 2];
-static long			swap_buffer_used;
-
-/*
- * Make allocation of the swap_buffer SMP-safe
- */
-static __inline__ int rpc_lock_swapbuf(void)
-{
-	return !test_and_set_bit(1, &swap_buffer_used);
-}
-static __inline__ void rpc_unlock_swapbuf(void)
-{
-	clear_bit(1, &swap_buffer_used);
-}
 
 /*
  * Disable the timer for a given RPC task. Should be called with
@@ -156,7 +147,7 @@ __rpc_add_timer(struct rpc_task *task, rpc_action timer)
 void rpc_add_timer(struct rpc_task *task, rpc_action timer)
 {
 	spin_lock_bh(&rpc_queue_lock);
-	if (!(RPC_IS_RUNNING(task) || task->tk_wakeup))
+	if (!RPC_IS_RUNNING(task))
 		__rpc_add_timer(task, timer);
 	spin_unlock_bh(&rpc_queue_lock);
 }
@@ -168,10 +159,8 @@ void rpc_add_timer(struct rpc_task *task, rpc_action timer)
 static inline void
 rpc_delete_timer(struct rpc_task *task)
 {
-	if (timer_pending(&task->tk_timer)) {
+	if (del_timer_sync(&task->tk_timer))
 		dprintk("RPC: %4d deleting timer\n", task->tk_pid);
-		del_timer_sync(&task->tk_timer);
-	}
 }
 
 /*
@@ -193,9 +182,9 @@ __rpc_add_wait_queue(struct rpc_wait_queue *queue, struct rpc_task *task)
 		return -EWOULDBLOCK;
 	}
 	if (RPC_IS_SWAPPER(task))
-		rpc_insert_list(&queue->task, task);
+		list_add(&task->tk_list, &queue->tasks);
 	else
-		rpc_append_list(&queue->task, task);
+		list_add_tail(&task->tk_list, &queue->tasks);
 	task->tk_rpcwait = queue;
 
 	dprintk("RPC: %4d added to queue %p \"%s\"\n",
@@ -227,7 +216,7 @@ __rpc_remove_wait_queue(struct rpc_task *task)
 	if (!queue)
 		return;
 
-	rpc_remove_list(&queue->task, task);
+	list_del(&task->tk_list);
 	task->tk_rpcwait = NULL;
 
 	dprintk("RPC: %4d removed from queue %p \"%s\"\n",
@@ -357,26 +346,9 @@ rpc_sleep_on(struct rpc_wait_queue *q, struct rpc_task *task,
 	spin_unlock_bh(&rpc_queue_lock);
 }
 
-void
-rpc_sleep_locked(struct rpc_wait_queue *q, struct rpc_task *task,
-		 rpc_action action, rpc_action timer)
-{
-	/*
-	 * Protect the queue operations.
-	 */
-	spin_lock_bh(&rpc_queue_lock);
-	__rpc_sleep_on(q, task, action, timer);
-	__rpc_lock_task(task);
-	spin_unlock_bh(&rpc_queue_lock);
-}
-
 /**
  * __rpc_wake_up_task - wake up a single rpc_task
  * @task: task to be woken up
- *
- * If the task is locked, it is merely removed from the queue, and
- * 'task->tk_wakeup' is set. rpc_unlock_task() will then ensure
- * that it is woken up as soon as the lock count goes to zero.
  *
  * Caller must hold rpc_queue_lock
  */
@@ -405,14 +377,6 @@ __rpc_wake_up_task(struct rpc_task *task)
 	__rpc_disable_timer(task);
 	if (task->tk_rpcwait != &schedq)
 		__rpc_remove_wait_queue(task);
-
-	/* If the task has been locked, then set tk_wakeup so that
-	 * rpc_unlock_task() wakes us up... */
-	if (task->tk_lock) {
-		task->tk_wakeup = 1;
-		return;
-	} else
-		task->tk_wakeup = 0;
 
 	rpc_make_runnable(task);
 
@@ -449,11 +413,11 @@ rpc_wake_up_task(struct rpc_task *task)
 struct rpc_task *
 rpc_wake_up_next(struct rpc_wait_queue *queue)
 {
-	struct rpc_task	*task;
+	struct rpc_task	*task = NULL;
 
 	dprintk("RPC:      wake_up_next(%p \"%s\")\n", queue, rpc_qname(queue));
 	spin_lock_bh(&rpc_queue_lock);
-	if ((task = queue->task) != 0)
+	task_for_first(task, &queue->tasks)
 		__rpc_wake_up_task(task);
 	spin_unlock_bh(&rpc_queue_lock);
 
@@ -469,9 +433,12 @@ rpc_wake_up_next(struct rpc_wait_queue *queue)
 void
 rpc_wake_up(struct rpc_wait_queue *queue)
 {
+	struct rpc_task *task;
+
 	spin_lock_bh(&rpc_queue_lock);
-	while (queue->task)
-		__rpc_wake_up_task(queue->task);
+	while (!list_empty(&queue->tasks))
+		task_for_first(task, &queue->tasks)
+			__rpc_wake_up_task(task);
 	spin_unlock_bh(&rpc_queue_lock);
 }
 
@@ -485,37 +452,15 @@ rpc_wake_up(struct rpc_wait_queue *queue)
 void
 rpc_wake_up_status(struct rpc_wait_queue *queue, int status)
 {
-	struct rpc_task	*task;
+	struct rpc_task *task;
 
 	spin_lock_bh(&rpc_queue_lock);
-	while ((task = queue->task) != NULL) {
-		task->tk_status = status;
-		__rpc_wake_up_task(task);
+	while (!list_empty(&queue->tasks)) {
+		task_for_first(task, &queue->tasks) {
+			task->tk_status = status;
+			__rpc_wake_up_task(task);
+		}
 	}
-	spin_unlock_bh(&rpc_queue_lock);
-}
-
-/*
- * Lock down a sleeping task to prevent it from waking up
- * and disappearing from beneath us.
- *
- * This function should always be called with the
- * rpc_queue_lock held.
- */
-int
-__rpc_lock_task(struct rpc_task *task)
-{
-	if (!RPC_IS_RUNNING(task))
-		return ++task->tk_lock;
-	return 0;
-}
-
-void
-rpc_unlock_task(struct rpc_task *task)
-{
-	spin_lock_bh(&rpc_queue_lock);
-	if (task->tk_lock && !--task->tk_lock && task->tk_wakeup)
-		__rpc_wake_up_task(task);
 	spin_unlock_bh(&rpc_queue_lock);
 }
 
@@ -635,10 +580,7 @@ __rpc_execute(struct rpc_task *task)
 				/* Release RPC slot and buffer memory */
 				if (task->tk_rqstp)
 					xprt_release(task);
-				if (task->tk_buffer) {
-					rpc_free(task->tk_buffer);
-					task->tk_buffer = NULL;
-				}
+				rpc_free(task);
 				goto restarted;
 			}
 			printk(KERN_ERR "RPC: dead task tries to walk away.\n");
@@ -698,29 +640,19 @@ __rpc_schedule(void)
 
 	dprintk("RPC:      rpc_schedule enter\n");
 	while (1) {
-		/* Ensure equal rights for tcp tasks... */
-		rpciod_tcp_dispatcher();
-
 		spin_lock_bh(&rpc_queue_lock);
-		if (!(task = schedq.task)) {
+
+		task_for_first(task, &schedq.tasks) {
+			__rpc_remove_wait_queue(task);
+			spin_unlock_bh(&rpc_queue_lock);
+
+			__rpc_execute(task);
+		} else {
 			spin_unlock_bh(&rpc_queue_lock);
 			break;
 		}
-		if (task->tk_lock) {
-			spin_unlock_bh(&rpc_queue_lock);
-			printk(KERN_ERR "RPC: Locked task was scheduled !!!!\n");
-#ifdef RPC_DEBUG			
-			rpc_debug = ~0;
-			rpc_show_tasks();
-#endif			
-			break;
-		}
-		__rpc_remove_wait_queue(task);
-		spin_unlock_bh(&rpc_queue_lock);
 
-		__rpc_execute(task);
-
-		if (++count >= 200 || current->need_resched) {
+		if (++count >= 200 || need_resched()) {
 			count = 0;
 			schedule();
 		}
@@ -729,64 +661,46 @@ __rpc_schedule(void)
 }
 
 /*
- * Allocate memory for RPC purpose.
+ * Allocate memory for RPC purposes.
  *
- * This is yet another tricky issue: For sync requests issued by
- * a user process, we want to make kmalloc sleep if there isn't
- * enough memory. Async requests should not sleep too excessively
- * because that will block rpciod (but that's not dramatic when
- * it's starved of memory anyway). Finally, swapout requests should
- * never sleep at all, and should not trigger another swap_out
- * request through kmalloc which would just increase memory contention.
- *
- * I hope the following gets it right, which gives async requests
- * a slight advantage over sync requests (good for writeback, debatable
- * for readahead):
- *
- *   sync user requests:	GFP_KERNEL
- *   async requests:		GFP_RPC		(== GFP_NOFS)
- *   swap requests:		GFP_ATOMIC	(or new GFP_SWAPPER)
+ * We try to ensure that some NFS reads and writes can always proceed
+ * by using a mempool when allocating 'small' buffers.
+ * In order to avoid memory starvation triggering more writebacks of
+ * NFS requests, we use GFP_NOFS rather than GFP_KERNEL.
  */
 void *
-rpc_allocate(unsigned int flags, unsigned int size)
+rpc_malloc(struct rpc_task *task, size_t size)
 {
-	u32	*buffer;
 	int	gfp;
 
-	if (flags & RPC_TASK_SWAPPER)
+	if (task->tk_flags & RPC_TASK_SWAPPER)
 		gfp = GFP_ATOMIC;
-	else if (flags & RPC_TASK_ASYNC)
-		gfp = GFP_RPC;
 	else
-		gfp = GFP_KERNEL;
+		gfp = GFP_NOFS;
 
-	do {
-		if ((buffer = (u32 *) kmalloc(size, gfp)) != NULL) {
-			dprintk("RPC:      allocated buffer %p\n", buffer);
-			return buffer;
-		}
-		if ((flags & RPC_TASK_SWAPPER) && size <= sizeof(swap_buffer)
-		    && rpc_lock_swapbuf()) {
-			dprintk("RPC:      used last-ditch swap buffer\n");
-			return swap_buffer;
-		}
-		if (flags & RPC_TASK_ASYNC)
-			return NULL;
-		current->policy |= SCHED_YIELD;
-		schedule();
-	} while (!signalled());
-
-	return NULL;
+	if (size > RPC_BUFFER_MAXSIZE) {
+		task->tk_buffer =  kmalloc(size, gfp);
+		if (task->tk_buffer)
+			task->tk_bufsize = size;
+	} else {
+		task->tk_buffer =  mempool_alloc(rpc_buffer_mempool, gfp);
+		if (task->tk_buffer)
+			task->tk_bufsize = RPC_BUFFER_MAXSIZE;
+	}
+	return task->tk_buffer;
 }
 
 void
-rpc_free(void *buffer)
+rpc_free(struct rpc_task *task)
 {
-	if (buffer != swap_buffer) {
-		kfree(buffer);
-		return;
+	if (task->tk_buffer) {
+		if (task->tk_bufsize == RPC_BUFFER_MAXSIZE)
+			mempool_free(task->tk_buffer, rpc_buffer_mempool);
+		else
+			kfree(task->tk_buffer);
+		task->tk_buffer = NULL;
+		task->tk_bufsize = 0;
 	}
-	rpc_unlock_swapbuf();
 }
 
 /*
@@ -814,11 +728,7 @@ rpc_init_task(struct rpc_task *task, struct rpc_clnt *clnt,
 
 	/* Add to global list of all tasks */
 	spin_lock(&rpc_sched_lock);
-	task->tk_next_task = all_tasks;
-	task->tk_prev_task = NULL;
-	if (all_tasks)
-		all_tasks->tk_prev_task = task;
-	all_tasks = task;
+	list_add(&task->tk_task, &all_tasks);
 	spin_unlock(&rpc_sched_lock);
 
 	if (clnt)
@@ -832,11 +742,17 @@ rpc_init_task(struct rpc_task *task, struct rpc_clnt *clnt,
 				current->pid);
 }
 
+static struct rpc_task *
+rpc_alloc_task(void)
+{
+	return (struct rpc_task *)mempool_alloc(rpc_task_mempool, GFP_NOFS);
+}
+
 static void
 rpc_default_free_task(struct rpc_task *task)
 {
 	dprintk("RPC: %4d freeing task\n", task->tk_pid);
-	rpc_free(task);
+	mempool_free(task, rpc_task_mempool);
 }
 
 /*
@@ -849,7 +765,7 @@ rpc_new_task(struct rpc_clnt *clnt, rpc_action callback, int flags)
 {
 	struct rpc_task	*task;
 
-	task = (struct rpc_task *) rpc_allocate(flags, sizeof(*task));
+	task = rpc_alloc_task();
 	if (!task)
 		goto cleanup;
 
@@ -877,8 +793,6 @@ cleanup:
 void
 rpc_release_task(struct rpc_task *task)
 {
-	struct rpc_task	*next, *prev;
-
 	dprintk("RPC: %4d release task\n", task->tk_pid);
 
 #ifdef RPC_DEBUG
@@ -892,15 +806,7 @@ rpc_release_task(struct rpc_task *task)
 
 	/* Remove from global task list */
 	spin_lock(&rpc_sched_lock);
-	prev = task->tk_prev_task;
-	next = task->tk_next_task;
-	if (next)
-		next->tk_prev_task = prev;
-	if (prev)
-		prev->tk_next_task = next;
-	else
-		all_tasks = next;
-	task->tk_next_task = task->tk_prev_task = NULL;
+	list_del(&task->tk_task);
 	spin_unlock(&rpc_sched_lock);
 
 	/* Protect the execution below. */
@@ -924,10 +830,7 @@ rpc_release_task(struct rpc_task *task)
 		xprt_release(task);
 	if (task->tk_msg.rpc_cred)
 		rpcauth_unbindcred(task);
-	if (task->tk_buffer) {
-		rpc_free(task->tk_buffer);
-		task->tk_buffer = NULL;
-	}
+	rpc_free(task);
 	if (task->tk_client) {
 		rpc_release_client(task->tk_client);
 		task->tk_client = NULL;
@@ -954,14 +857,13 @@ static inline struct rpc_task *
 rpc_find_parent(struct rpc_task *child)
 {
 	struct rpc_task	*task, *parent;
+	struct list_head *le;
 
 	parent = (struct rpc_task *) child->tk_calldata;
-	if ((task = childq.task) != NULL) {
-		do {
-			if (task == parent)
-				return parent;
-		} while ((task = task->tk_next) != childq.task);
-	}
+	task_for_each(task, le, &childq.tasks)
+		if (task == parent)
+			return parent;
+
 	return NULL;
 }
 
@@ -1015,7 +917,8 @@ rpc_run_child(struct rpc_task *task, struct rpc_task *child, rpc_action func)
 void
 rpc_killall_tasks(struct rpc_clnt *clnt)
 {
-	struct rpc_task	**q, *rovr;
+	struct rpc_task	*rovr;
+	struct list_head *le;
 
 	dprintk("RPC:      killing all tasks for client %p\n", clnt);
 
@@ -1023,13 +926,12 @@ rpc_killall_tasks(struct rpc_clnt *clnt)
 	 * Spin lock all_tasks to prevent changes...
 	 */
 	spin_lock(&rpc_sched_lock);
-	for (q = &all_tasks; (rovr = *q); q = &rovr->tk_next_task) {
+	alltask_for_each(rovr, le, &all_tasks)
 		if (!clnt || rovr->tk_client == clnt) {
 			rovr->tk_flags |= RPC_TASK_KILLED;
 			rpc_exit(rovr, -EIO);
 			rpc_wake_up_task(rovr);
 		}
-	}
 	spin_unlock(&rpc_sched_lock);
 }
 
@@ -1038,7 +940,7 @@ static DECLARE_MUTEX_LOCKED(rpciod_running);
 static inline int
 rpciod_task_pending(void)
 {
-	return schedq.task != NULL || xprt_tcp_pending();
+	return !list_empty(&schedq.tasks);
 }
 
 
@@ -1051,7 +953,6 @@ rpciod(void *ptr)
 	wait_queue_head_t *assassin = (wait_queue_head_t*) ptr;
 	int		rounds = 0;
 
-	MOD_INC_USE_COUNT;
 	lock_kernel();
 	/*
 	 * Let our maker know we're running ...
@@ -1059,14 +960,8 @@ rpciod(void *ptr)
 	rpciod_pid = current->pid;
 	up(&rpciod_running);
 
-	daemonize();
-
-	spin_lock_irq(&current->sigmask_lock);
-	siginitsetinv(&current->blocked, sigmask(SIGKILL));
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
-
-	strcpy(current->comm, "rpciod");
+	daemonize("rpciod");
+	allow_signal(SIGKILL);
 
 	dprintk("RPC: rpciod starting (pid %d)\n", rpciod_pid);
 	while (rpciod_users) {
@@ -1075,6 +970,8 @@ rpciod(void *ptr)
 			flush_signals(current);
 		}
 		__rpc_schedule();
+		if (current->flags & PF_FREEZE)
+			refrigerator(PF_IOTHREAD);
 
 		if (++rounds >= 64) {	/* safeguard */
 			schedule();
@@ -1090,7 +987,7 @@ rpciod(void *ptr)
 	}
 
 	dprintk("RPC: rpciod shutdown commences\n");
-	if (all_tasks) {
+	if (!list_empty(&all_tasks)) {
 		printk(KERN_ERR "rpciod: active tasks at shutdown?!\n");
 		rpciod_killall();
 	}
@@ -1099,7 +996,7 @@ rpciod(void *ptr)
 	wake_up(assassin);
 
 	dprintk("RPC: rpciod exiting\n");
-	MOD_DEC_USE_COUNT;
+	unlock_kernel();
 	return 0;
 }
 
@@ -1108,20 +1005,19 @@ rpciod_killall(void)
 {
 	unsigned long flags;
 
-	while (all_tasks) {
-		current->sigpending = 0;
+	while (!list_empty(&all_tasks)) {
+		clear_thread_flag(TIF_SIGPENDING);
 		rpc_killall_tasks(NULL);
 		__rpc_schedule();
-		if (all_tasks) {
+		if (!list_empty(&all_tasks)) {
 			dprintk("rpciod_killall: waiting for tasks to exit\n");
-			current->policy |= SCHED_YIELD;
-			schedule();
+			yield();
 		}
 	}
 
-	spin_lock_irqsave(&current->sigmask_lock, flags);
-	recalc_sigpending(current);
-	spin_unlock_irqrestore(&current->sigmask_lock, flags);
+	spin_lock_irqsave(&current->sighand->siglock, flags);
+	recalc_sigpending();
+	spin_unlock_irqrestore(&current->sighand->siglock, flags);
 }
 
 /*
@@ -1132,7 +1028,6 @@ rpciod_up(void)
 {
 	int error = 0;
 
-	MOD_INC_USE_COUNT;
 	down(&rpciod_sema);
 	dprintk("rpciod_up: pid %d, users %d\n", rpciod_pid, rpciod_users);
 	rpciod_users++;
@@ -1156,7 +1051,6 @@ rpciod_up(void)
 	error = 0;
 out:
 	up(&rpciod_sema);
-	MOD_DEC_USE_COUNT;
 	return error;
 }
 
@@ -1165,7 +1059,6 @@ rpciod_down(void)
 {
 	unsigned long flags;
 
-	MOD_INC_USE_COUNT;
 	down(&rpciod_sema);
 	dprintk("rpciod_down pid %d sema %d\n", rpciod_pid, rpciod_users);
 	if (rpciod_users) {
@@ -1184,9 +1077,8 @@ rpciod_down(void)
 	 * Usually rpciod will exit very quickly, so we
 	 * wait briefly before checking the process id.
 	 */
-	current->sigpending = 0;
-	current->policy |= SCHED_YIELD;
-	schedule();
+	clear_thread_flag(TIF_SIGPENDING);
+	yield();
 	/*
 	 * Display a message if we're going to wait longer.
 	 */
@@ -1198,36 +1090,82 @@ rpciod_down(void)
 		}
 		interruptible_sleep_on(&rpciod_killer);
 	}
-	spin_lock_irqsave(&current->sigmask_lock, flags);
-	recalc_sigpending(current);
-	spin_unlock_irqrestore(&current->sigmask_lock, flags);
+	spin_lock_irqsave(&current->sighand->siglock, flags);
+	recalc_sigpending();
+	spin_unlock_irqrestore(&current->sighand->siglock, flags);
 out:
 	up(&rpciod_sema);
-	MOD_DEC_USE_COUNT;
 }
 
 #ifdef RPC_DEBUG
 void rpc_show_tasks(void)
 {
-	struct rpc_task *t = all_tasks, *next;
+	struct list_head *le;
+	struct rpc_task *t;
 
 	spin_lock(&rpc_sched_lock);
-	t = all_tasks;
-	if (!t) {
+	if (list_empty(&all_tasks)) {
 		spin_unlock(&rpc_sched_lock);
 		return;
 	}
 	printk("-pid- proc flgs status -client- -prog- --rqstp- -timeout "
 		"-rpcwait -action- --exit--\n");
-	for (; t; t = next) {
-		next = t->tk_next_task;
+	alltask_for_each(t, le, &all_tasks)
 		printk("%05d %04d %04x %06d %8p %6d %8p %08ld %8s %8p %8p\n",
-			t->tk_pid, t->tk_msg.rpc_proc, t->tk_flags, t->tk_status,
-			t->tk_client, t->tk_client->cl_prog,
+			t->tk_pid,
+			(t->tk_msg.rpc_proc ? t->tk_msg.rpc_proc->p_proc : -1),
+			t->tk_flags, t->tk_status,
+			t->tk_client,
+			(t->tk_client ? t->tk_client->cl_prog : 0),
 			t->tk_rqstp, t->tk_timeout,
-			t->tk_rpcwait ? rpc_qname(t->tk_rpcwait) : " <NULL> ",
+			rpc_qname(t->tk_rpcwait),
 			t->tk_action, t->tk_exit);
-	}
 	spin_unlock(&rpc_sched_lock);
 }
 #endif
+
+void
+rpc_destroy_mempool(void)
+{
+	if (rpc_buffer_mempool)
+		mempool_destroy(rpc_buffer_mempool);
+	if (rpc_task_mempool)
+		mempool_destroy(rpc_task_mempool);
+	if (rpc_task_slabp && kmem_cache_destroy(rpc_task_slabp))
+		printk(KERN_INFO "rpc_task: not all structures were freed\n");
+	if (rpc_buffer_slabp && kmem_cache_destroy(rpc_buffer_slabp))
+		printk(KERN_INFO "rpc_buffers: not all structures were freed\n");
+}
+
+int
+rpc_init_mempool(void)
+{
+	rpc_task_slabp = kmem_cache_create("rpc_tasks",
+					     sizeof(struct rpc_task),
+					     0, SLAB_HWCACHE_ALIGN,
+					     NULL, NULL);
+	if (!rpc_task_slabp)
+		goto err_nomem;
+	rpc_buffer_slabp = kmem_cache_create("rpc_buffers",
+					     RPC_BUFFER_MAXSIZE,
+					     0, SLAB_HWCACHE_ALIGN,
+					     NULL, NULL);
+	if (!rpc_buffer_slabp)
+		goto err_nomem;
+	rpc_task_mempool = mempool_create(RPC_TASK_POOLSIZE,
+					    mempool_alloc_slab,
+					    mempool_free_slab,
+					    rpc_task_slabp);
+	if (!rpc_task_mempool)
+		goto err_nomem;
+	rpc_buffer_mempool = mempool_create(RPC_BUFFER_POOLSIZE,
+					    mempool_alloc_slab,
+					    mempool_free_slab,
+					    rpc_buffer_slabp);
+	if (!rpc_buffer_mempool)
+		goto err_nomem;
+	return 0;
+err_nomem:
+	rpc_destroy_mempool();
+	return -ENOMEM;
+}

@@ -18,8 +18,8 @@
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/swap.h>
-#include <linux/swapctl.h>
 #include <linux/timex.h>
+#include <linux/jiffies.h>
 
 /* #define DEBUG */
 
@@ -51,7 +51,7 @@ static unsigned int int_sqrt(unsigned int x)
  * 3) we don't kill anything innocent of eating tons of memory
  * 4) we want to kill the minimum amount of processes (one)
  * 5) we try to kill the process the user expects us to kill, this
- *    algorithm has been meticulously tuned to meet the priniciple
+ *    algorithm has been meticulously tuned to meet the principle
  *    of least surprise ... (be careful when you change it)
  */
 
@@ -61,6 +61,9 @@ static int badness(struct task_struct *p)
 
 	if (!p->mm)
 		return 0;
+
+	if (p->flags & PF_MEMDIE)
+		return 0;
 	/*
 	 * The memory size of the process is the basis for the badness.
 	 */
@@ -69,11 +72,10 @@ static int badness(struct task_struct *p)
 	/*
 	 * CPU time is in seconds and run time is in minutes. There is no
 	 * particular reason for this other than that it turned out to work
-	 * very well in practice. This is not safe against jiffie wraps
-	 * but we don't care _that_ much...
+	 * very well in practice.
 	 */
-	cpu_time = (p->times.tms_utime + p->times.tms_stime) >> (SHIFT_HZ + 3);
-	run_time = (jiffies - p->start_time) >> (SHIFT_HZ + 10);
+	cpu_time = (p->utime + p->stime) >> (SHIFT_HZ + 3);
+	run_time = (get_jiffies_64() - p->start_time) >> (SHIFT_HZ + 10);
 
 	points /= int_sqrt(cpu_time);
 	points /= int_sqrt(int_sqrt(run_time));
@@ -82,7 +84,7 @@ static int badness(struct task_struct *p)
 	 * Niced processes are most likely less important, so double
 	 * their badness points.
 	 */
-	if (p->nice > 0)
+	if (task_nice(p) > 0)
 		points *= 2;
 
 	/*
@@ -110,28 +112,27 @@ static int badness(struct task_struct *p)
 
 /*
  * Simple selection loop. We chose the process with the highest
- * number of 'points'. We need the locks to make sure that the
- * list of task structs doesn't change while we look the other way.
+ * number of 'points'. We expect the caller will lock the tasklist.
  *
  * (not docbooked, we don't want this one cluttering up the manual)
  */
 static struct task_struct * select_bad_process(void)
 {
 	int maxpoints = 0;
-	struct task_struct *p = NULL;
+	struct task_struct *g, *p;
 	struct task_struct *chosen = NULL;
 
-	read_lock(&tasklist_lock);
-	for_each_task(p) {
+	do_each_thread(g, p)
 		if (p->pid) {
 			int points = badness(p);
 			if (points > maxpoints) {
 				chosen = p;
 				maxpoints = points;
 			}
+			if (p->flags & PF_SWAPOFF)
+				return p;
 		}
-	}
-	read_unlock(&tasklist_lock);
+	while_each_thread(g, p);
 	return chosen;
 }
 
@@ -149,7 +150,7 @@ void oom_kill_task(struct task_struct *p)
 	 * all the memory it needs. That way it should be able to
 	 * exit() and clear out its resources quickly...
 	 */
-	p->counter = 5 * HZ;
+	p->time_slice = HZ;
 	p->flags |= PF_MEMALLOC | PF_MEMDIE;
 
 	/* This process has hardware access, be more careful. */
@@ -170,17 +171,27 @@ void oom_kill_task(struct task_struct *p)
  */
 static void oom_kill(void)
 {
-	struct task_struct *p = select_bad_process(), *q;
+	struct task_struct *g, *p, *q;
+	
+	read_lock(&tasklist_lock);
+	p = select_bad_process();
 
 	/* Found nothing?!?! Either we hang forever, or we panic. */
-	if (p == NULL)
+	if (!p) {
+		show_free_areas();
 		panic("Out of memory and no killable processes...\n");
-
-	/* kill all processes that share the ->mm (i.e. all threads) */
-	read_lock(&tasklist_lock);
-	for_each_task(q) {
-		if(q->mm == p->mm) oom_kill_task(q);
 	}
+
+	oom_kill_task(p);
+	/*
+	 * kill all processes that share the ->mm (i.e. all threads),
+	 * but are in a different thread group
+	 */
+	do_each_thread(g, q)
+		if (q->mm == p->mm && q->tgid != p->tgid)
+			oom_kill_task(q);
+	while_each_thread(g, q);
+
 	read_unlock(&tasklist_lock);
 
 	/*
@@ -188,8 +199,7 @@ static void oom_kill(void)
 	 * killing itself before someone else gets the chance to ask
 	 * for more memory.
 	 */
-	current->policy |= SCHED_YIELD;
-	schedule();
+	yield();
 	return;
 }
 
@@ -198,7 +208,12 @@ static void oom_kill(void)
  */
 void out_of_memory(void)
 {
-	static unsigned long first, last, count;
+	/*
+	 * oom_lock protects out_of_memory()'s static variables.
+	 * It's a global lock; this is not performance-critical.
+	 */
+	static spinlock_t oom_lock = SPIN_LOCK_UNLOCKED;
+	static unsigned long first, last, count, lastkill;
 	unsigned long now, since;
 
 	/*
@@ -207,6 +222,7 @@ void out_of_memory(void)
 	if (nr_swap_pages > 0)
 		return;
 
+	spin_lock(&oom_lock);
 	now = jiffies;
 	since = now - last;
 	last = now;
@@ -225,21 +241,43 @@ void out_of_memory(void)
 	 */
 	since = now - first;
 	if (since < HZ)
-		return;
+		goto out_unlock;
 
 	/*
 	 * If we have gotten only a few failures,
 	 * we're not really oom. 
 	 */
 	if (++count < 10)
-		return;
+		goto out_unlock;
+
+	/*
+	 * If we just killed a process, wait a while
+	 * to give that task a chance to exit. This
+	 * avoids killing multiple processes needlessly.
+	 */
+	since = now - lastkill;
+	if (since < HZ*5)
+		goto out_unlock;
 
 	/*
 	 * Ok, really out of memory. Kill something.
 	 */
+	lastkill = now;
+
+	/* oom_kill() sleeps */
+	spin_unlock(&oom_lock);
 	oom_kill();
+	spin_lock(&oom_lock);
 
 reset:
-	first = now;
+	/*
+	 * We dropped the lock above, so check to be sure the variable
+	 * first only ever increases to prevent false OOM's.
+	 */
+	if (time_after(now, first))
+		first = now;
 	count = 0;
+
+out_unlock:
+	spin_unlock(&oom_lock);
 }

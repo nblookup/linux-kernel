@@ -32,9 +32,13 @@
 #define DEBUGP(format, args...)
 #endif
 
-struct module *ip_conntrack_module = THIS_MODULE;
 MODULE_LICENSE("GPL");
 
+static int kill_proto(const struct ip_conntrack *i, void *data)
+{
+	return (i->tuplehash[IP_CT_DIR_ORIGINAL].tuple.dst.protonum == 
+			*((u_int8_t *) data));
+}
 
 static unsigned int
 print_tuple(char *buffer, const struct ip_conntrack_tuple *tuple,
@@ -56,20 +60,26 @@ print_expect(char *buffer, const struct ip_conntrack_expect *expect)
 {
 	unsigned int len;
 
-	len = sprintf(buffer, "EXPECTING: proto=%u ",
-		      expect->tuple.dst.protonum);
+	if (expect->expectant->helper->timeout)
+		len = sprintf(buffer, "EXPECTING: %lu ",
+			      timer_pending(&expect->timeout)
+			      ? (expect->timeout.expires - jiffies)/HZ : 0);
+	else
+		len = sprintf(buffer, "EXPECTING: - ");
+	len += sprintf(buffer + len, "use=%u proto=%u ",
+		      atomic_read(&expect->use), expect->tuple.dst.protonum);
 	len += print_tuple(buffer + len, &expect->tuple,
-			   __find_proto(expect->tuple.dst.protonum));
+			   __ip_ct_find_proto(expect->tuple.dst.protonum));
 	len += sprintf(buffer + len, "\n");
 	return len;
 }
 
 static unsigned int
-print_conntrack(char *buffer, const struct ip_conntrack *conntrack)
+print_conntrack(char *buffer, struct ip_conntrack *conntrack)
 {
 	unsigned int len;
 	struct ip_conntrack_protocol *proto
-		= __find_proto(conntrack->tuplehash[IP_CT_DIR_ORIGINAL]
+		= __ip_ct_find_proto(conntrack->tuplehash[IP_CT_DIR_ORIGINAL]
 			       .tuple.dst.protonum);
 
 	len = sprintf(buffer, "%-8s %u %lu ",
@@ -83,12 +93,12 @@ print_conntrack(char *buffer, const struct ip_conntrack *conntrack)
 	len += print_tuple(buffer + len,
 			   &conntrack->tuplehash[IP_CT_DIR_ORIGINAL].tuple,
 			   proto);
-	if (!(conntrack->status & IPS_SEEN_REPLY))
+	if (!(test_bit(IPS_SEEN_REPLY_BIT, &conntrack->status)))
 		len += sprintf(buffer + len, "[UNREPLIED] ");
 	len += print_tuple(buffer + len,
 			   &conntrack->tuplehash[IP_CT_DIR_REPLY].tuple,
 			   proto);
-	if (conntrack->status & IPS_ASSURED)
+	if (test_bit(IPS_ASSURED_BIT, &conntrack->status))
 		len += sprintf(buffer + len, "[ASSURED] ");
 	len += sprintf(buffer + len, "use=%u ",
 		       atomic_read(&conntrack->ct_general.use));
@@ -141,7 +151,8 @@ list_conntracks(char *buffer, char **start, off_t offset, int length)
 	}
 
 	/* Now iterate through expecteds. */
-	for (e = expect_list.next; e != &expect_list; e = e->next) {
+	for (e = ip_conntrack_expect_list.next; 
+	     e != &ip_conntrack_expect_list; e = e->next) {
 		unsigned int last_len;
 		struct ip_conntrack_expect *expect
 			= (struct ip_conntrack_expect *)e;
@@ -188,7 +199,7 @@ static unsigned int ip_refrag(unsigned int hooknum,
 	/* Local packets are never produced too large for their
 	   interface.  We degfragment them at LOCAL_OUT, however,
 	   so we have to refragment them here. */
-	if ((*pskb)->len > rt->u.dst.pmtu) {
+	if ((*pskb)->len > dst_pmtu(&rt->u.dst)) {
 		/* No hook can be after us, so this should be OK. */
 		ip_fragment(*pskb, okfn);
 		return NF_STOLEN;
@@ -214,17 +225,38 @@ static unsigned int ip_conntrack_local(unsigned int hooknum,
 
 /* Connection tracking may drop packets, but never alters them, so
    make it the first hook. */
-static struct nf_hook_ops ip_conntrack_in_ops
-= { { NULL, NULL }, ip_conntrack_in, PF_INET, NF_IP_PRE_ROUTING,
-	NF_IP_PRI_CONNTRACK };
-static struct nf_hook_ops ip_conntrack_local_out_ops
-= { { NULL, NULL }, ip_conntrack_local, PF_INET, NF_IP_LOCAL_OUT,
-	NF_IP_PRI_CONNTRACK };
+static struct nf_hook_ops ip_conntrack_in_ops = {
+	.hook		= ip_conntrack_in,
+	.owner		= THIS_MODULE,
+	.pf		= PF_INET,
+	.hooknum	= NF_IP_PRE_ROUTING,
+	.priority	= NF_IP_PRI_CONNTRACK,
+};
+
+static struct nf_hook_ops ip_conntrack_local_out_ops = {
+	.hook		= ip_conntrack_local,
+	.owner		= THIS_MODULE,
+	.pf		= PF_INET,
+	.hooknum	= NF_IP_LOCAL_OUT,
+	.priority	= NF_IP_PRI_CONNTRACK,
+};
+
 /* Refragmenter; last chance. */
-static struct nf_hook_ops ip_conntrack_out_ops
-= { { NULL, NULL }, ip_refrag, PF_INET, NF_IP_POST_ROUTING, NF_IP_PRI_LAST };
-static struct nf_hook_ops ip_conntrack_local_in_ops
-= { { NULL, NULL }, ip_confirm, PF_INET, NF_IP_LOCAL_IN, NF_IP_PRI_LAST-1 };
+static struct nf_hook_ops ip_conntrack_out_ops = {
+	.hook		= ip_refrag,
+	.owner		= THIS_MODULE,
+	.pf		= PF_INET,
+	.hooknum	= NF_IP_POST_ROUTING,
+	.priority	= NF_IP_PRI_LAST,
+};
+
+static struct nf_hook_ops ip_conntrack_local_in_ops = {
+	.hook		= ip_confirm,
+	.owner		= THIS_MODULE,
+	.pf		= PF_INET,
+	.hooknum	= NF_IP_LOCAL_IN,
+	.priority	= NF_IP_PRI_LAST-1,
+};
 
 static int init_or_cleanup(int init)
 {
@@ -243,7 +275,7 @@ static int init_or_cleanup(int init)
 
 	ret = nf_register_hook(&ip_conntrack_in_ops);
 	if (ret < 0) {
-		printk("ip_conntrack: can't register in hook.\n");
+		printk("ip_conntrack: can't register pre-routing hook.\n");
 		goto cleanup_proc;
 	}
 	ret = nf_register_hook(&ip_conntrack_local_out_ops);
@@ -297,19 +329,27 @@ int ip_conntrack_protocol_register(struct ip_conntrack_protocol *proto)
 	}
 
 	list_prepend(&protocol_list, proto);
-	MOD_INC_USE_COUNT;
 
  out:
 	WRITE_UNLOCK(&ip_conntrack_lock);
 	return ret;
 }
 
-/* FIXME: Implement this --RR */
-#if 0
 void ip_conntrack_protocol_unregister(struct ip_conntrack_protocol *proto)
 {
+	WRITE_LOCK(&ip_conntrack_lock);
+
+	/* ip_ct_find_proto() returns proto_generic in case there is no protocol 
+	 * helper. So this should be enough - HW */
+	LIST_DELETE(&protocol_list, proto);
+	WRITE_UNLOCK(&ip_conntrack_lock);
+	
+	/* Somebody could be still looking at the proto in bh. */
+	synchronize_net();
+
+	/* Remove all contrack entries for this protocol */
+	ip_ct_selective_cleanup(kill_proto, &proto->proto);
 }
-#endif
 
 static int __init init(void)
 {
@@ -324,17 +364,36 @@ static void __exit fini(void)
 module_init(init);
 module_exit(fini);
 
+/* Some modules need us, but don't depend directly on any symbol.
+   They should call this. */
+void need_ip_conntrack(void)
+{
+}
+
 EXPORT_SYMBOL(ip_conntrack_protocol_register);
+EXPORT_SYMBOL(ip_conntrack_protocol_unregister);
 EXPORT_SYMBOL(invert_tuplepr);
 EXPORT_SYMBOL(ip_conntrack_alter_reply);
 EXPORT_SYMBOL(ip_conntrack_destroyed);
 EXPORT_SYMBOL(ip_conntrack_get);
-EXPORT_SYMBOL(ip_conntrack_module);
+EXPORT_SYMBOL(need_ip_conntrack);
 EXPORT_SYMBOL(ip_conntrack_helper_register);
 EXPORT_SYMBOL(ip_conntrack_helper_unregister);
 EXPORT_SYMBOL(ip_ct_selective_cleanup);
 EXPORT_SYMBOL(ip_ct_refresh);
+EXPORT_SYMBOL(ip_ct_find_proto);
+EXPORT_SYMBOL(__ip_ct_find_proto);
+EXPORT_SYMBOL(ip_ct_find_helper);
 EXPORT_SYMBOL(ip_conntrack_expect_related);
+EXPORT_SYMBOL(ip_conntrack_change_expect);
+EXPORT_SYMBOL(ip_conntrack_unexpect_related);
+EXPORT_SYMBOL_GPL(ip_conntrack_expect_find_get);
+EXPORT_SYMBOL_GPL(ip_conntrack_expect_put);
 EXPORT_SYMBOL(ip_conntrack_tuple_taken);
 EXPORT_SYMBOL(ip_ct_gather_frags);
 EXPORT_SYMBOL(ip_conntrack_htable_size);
+EXPORT_SYMBOL(ip_conntrack_expect_list);
+EXPORT_SYMBOL(ip_conntrack_lock);
+EXPORT_SYMBOL(ip_conntrack_hash);
+EXPORT_SYMBOL_GPL(ip_conntrack_find_get);
+EXPORT_SYMBOL_GPL(ip_conntrack_put);

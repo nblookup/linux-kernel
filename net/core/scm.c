@@ -22,17 +22,15 @@
 #include <linux/net.h>
 #include <linux/interrupt.h>
 #include <linux/netdevice.h>
+#include <linux/security.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
 
-#include <linux/inet.h>
-#include <net/ip.h>
 #include <net/protocol.h>
-#include <net/tcp.h>
-#include <net/udp.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
+#include <net/compat.h>
 #include <net/scm.h>
 
 
@@ -175,6 +173,9 @@ int put_cmsg(struct msghdr * msg, int level, int type, int len, void *data)
 	int cmlen = CMSG_LEN(len);
 	int err;
 
+	if (MSG_CMSG_COMPAT & msg->msg_flags)
+		return put_cmsg_compat(msg, level, type, len, data);
+
 	if (cm==NULL || msg->msg_controllen < sizeof(*cm)) {
 		msg->msg_flags |= MSG_CTRUNC;
 		return 0; /* XXX: return error? check spec. */
@@ -210,6 +211,9 @@ void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm)
 	int *cmfptr;
 	int err = 0, i;
 
+	if (MSG_CMSG_COMPAT & msg->msg_flags)
+		return scm_detach_fds_compat(msg, scm);
+
 	if (msg->msg_controllen > sizeof(struct cmsghdr))
 		fdmax = ((msg->msg_controllen - sizeof(struct cmsghdr))
 			 / sizeof(int));
@@ -220,6 +224,9 @@ void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm)
 	for (i=0, cmfptr=(int*)CMSG_DATA(cm); i<fdmax; i++, cmfptr++)
 	{
 		int new_fd;
+		err = security_file_receive(fp[i]);
+		if (err)
+			break;
 		err = get_unused_fd();
 		if (err < 0)
 			break;

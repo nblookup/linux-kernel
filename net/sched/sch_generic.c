@@ -15,6 +15,7 @@
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -222,51 +223,45 @@ noop_requeue(struct sk_buff *skb, struct Qdisc* qdisc)
 	return NET_XMIT_CN;
 }
 
-struct Qdisc_ops noop_qdisc_ops =
-{
-	NULL,
-	NULL,
-	"noop",
-	0,
-
-	noop_enqueue,
-	noop_dequeue,
-	noop_requeue,
+struct Qdisc_ops noop_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	NULL,
+	.id		=	"noop",
+	.priv_size	=	0,
+	.enqueue	=	noop_enqueue,
+	.dequeue	=	noop_dequeue,
+	.requeue	=	noop_requeue,
+	.owner		=	THIS_MODULE,
 };
 
-struct Qdisc noop_qdisc =
-{
-	noop_enqueue,
-	noop_dequeue,
-	TCQ_F_BUILTIN,
-	&noop_qdisc_ops,	
+struct Qdisc noop_qdisc = {
+	.enqueue	=	noop_enqueue,
+	.dequeue	=	noop_dequeue,
+	.flags		=	TCQ_F_BUILTIN,
+	.ops		=	&noop_qdisc_ops,	
 };
 
-
-struct Qdisc_ops noqueue_qdisc_ops =
-{
-	NULL,
-	NULL,
-	"noqueue",
-	0,
-
-	noop_enqueue,
-	noop_dequeue,
-	noop_requeue,
-
+struct Qdisc_ops noqueue_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	NULL,
+	.id		=	"noqueue",
+	.priv_size	=	0,
+	.enqueue	=	noop_enqueue,
+	.dequeue	=	noop_dequeue,
+	.requeue	=	noop_requeue,
+	.owner		=	THIS_MODULE,
 };
 
-struct Qdisc noqueue_qdisc =
-{
-	NULL,
-	noop_dequeue,
-	TCQ_F_BUILTIN,
-	&noqueue_qdisc_ops,
+struct Qdisc noqueue_qdisc = {
+	.enqueue	=	NULL,
+	.dequeue	=	noop_dequeue,
+	.flags		=	TCQ_F_BUILTIN,
+	.ops		=	&noqueue_qdisc_ops,
 };
 
 
 static const u8 prio2band[TC_PRIO_MAX+1] =
-{ 1, 2, 2, 2, 1, 2, 0, 0 , 1, 1, 1, 1, 1, 1, 1, 1 };
+	{ 1, 2, 2, 2, 1, 2, 0, 0 , 1, 1, 1, 1, 1, 1, 1, 1 };
 
 /* 3-band FIFO queue: old style, but should be a bit faster than
    generic prio+fifo combination.
@@ -280,7 +275,7 @@ pfifo_fast_enqueue(struct sk_buff *skb, struct Qdisc* qdisc)
 	list = ((struct sk_buff_head*)qdisc->data) +
 		prio2band[skb->priority&TC_PRIO_MAX];
 
-	if (list->qlen <= skb->dev->tx_queue_len) {
+	if (list->qlen <= qdisc->dev->tx_queue_len) {
 		__skb_queue_tail(list, skb);
 		qdisc->q.qlen++;
 		return 0;
@@ -344,20 +339,17 @@ static int pfifo_fast_init(struct Qdisc *qdisc, struct rtattr *opt)
 	return 0;
 }
 
-static struct Qdisc_ops pfifo_fast_ops =
-{
-	NULL,
-	NULL,
-	"pfifo_fast",
-	3 * sizeof(struct sk_buff_head),
-
-	pfifo_fast_enqueue,
-	pfifo_fast_dequeue,
-	pfifo_fast_requeue,
-	NULL,
-
-	pfifo_fast_init,
-	pfifo_fast_reset,
+static struct Qdisc_ops pfifo_fast_ops = {
+	.next		=	NULL,
+	.cl_ops		=	NULL,
+	.id		=	"pfifo_fast",
+	.priv_size	=	3 * sizeof(struct sk_buff_head),
+	.enqueue	=	pfifo_fast_enqueue,
+	.dequeue	=	pfifo_fast_dequeue,
+	.requeue	=	pfifo_fast_requeue,
+	.init		=	pfifo_fast_init,
+	.reset		=	pfifo_fast_reset,
+	.owner		=	THIS_MODULE,
 };
 
 struct Qdisc * qdisc_create_dflt(struct net_device *dev, struct Qdisc_ops *ops)
@@ -424,6 +416,7 @@ void qdisc_destroy(struct Qdisc *qdisc)
 		ops->reset(qdisc);
 	if (ops->destroy)
 		ops->destroy(qdisc);
+	module_put(ops->owner);
 	if (!(qdisc->flags&TCQ_F_BUILTIN))
 		kfree(qdisc);
 }
@@ -475,10 +468,8 @@ void dev_deactivate(struct net_device *dev)
 
 	dev_watchdog_down(dev);
 
-	while (test_bit(__LINK_STATE_SCHED, &dev->state)) {
-		current->policy |= SCHED_YIELD;
-		schedule();
-	}
+	while (test_bit(__LINK_STATE_SCHED, &dev->state))
+		yield();
 
 	spin_unlock_wait(&dev->xmit_lock);
 }

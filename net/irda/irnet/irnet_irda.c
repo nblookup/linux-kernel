@@ -13,7 +13,7 @@
 /************************* CONTROL CHANNEL *************************/
 /*
  * When ppp is not active, /dev/irnet act as a control channel.
- * Writting allow to set up the IrDA destination of the IrNET channel,
+ * Writing allow to set up the IrDA destination of the IrNET channel,
  * and any application may be read events happening on IrNET...
  */
 
@@ -28,19 +28,19 @@ irnet_post_event(irnet_socket *	ap,
 		 irnet_event	event,
 		 __u32		saddr,
 		 __u32		daddr,
-		 char *		name)
+		 char *		name,
+		 __u16		hints)
 {
-  unsigned long		flags;		/* For spinlock */
   int			index;		/* In the log */
 
-  DENTER(CTRL_TRACE, "(ap=0x%X, event=%d, daddr=%08x, name=``%s'')\n",
-	 (unsigned int) ap, event, daddr, name);
+  DENTER(CTRL_TRACE, "(ap=0x%p, event=%d, daddr=%08x, name=``%s'')\n",
+	 ap, event, daddr, name);
 
   /* Protect this section via spinlock.
    * Note : as we are the only event producer, we only need to exclude
    * ourself when touching the log, which is nice and easy.
    */
-  spin_lock_irqsave(&irnet_events.spinlock, flags);
+  spin_lock_bh(&irnet_events.spinlock);
 
   /* Copy the event in the log */
   index = irnet_events.index;
@@ -52,6 +52,8 @@ irnet_post_event(irnet_socket *	ap,
     strcpy(irnet_events.log[index].name, name);
   else
     irnet_events.log[index].name[0] = '\0';
+  /* Copy hints */
+  irnet_events.log[index].hints.word = hints;
   /* Try to get ppp unit number */
   if((ap != (irnet_socket *) NULL) && (ap->ppp_open))
     irnet_events.log[index].unit = ppp_unit_number(&ap->chan);
@@ -66,7 +68,7 @@ irnet_post_event(irnet_socket *	ap,
   DEBUG(CTRL_INFO, "New event index is %d\n", irnet_events.index);
 
   /* Spin lock end */
-  spin_unlock_irqrestore(&irnet_events.spinlock, flags);
+  spin_unlock_bh(&irnet_events.spinlock);
 
   /* Now : wake up everybody waiting for events... */
   wake_up_interruptible_all(&irnet_events.rwait);
@@ -98,7 +100,7 @@ irnet_open_tsap(irnet_socket *	self)
 {
   notify_t	notify;		/* Callback structure */
 
-  DENTER(IRDA_SR_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_SR_TRACE, "(self=0x%p)\n", self);
 
   DABORT(self->tsap != NULL, -EBUSY, IRDA_SR_ERROR, "Already busy !\n");
 
@@ -112,7 +114,7 @@ irnet_open_tsap(irnet_socket *	self)
   notify.flow_indication	= irnet_flow_indication;
   notify.status_indication	= irnet_status_indication;
   notify.instance		= self;
-  strncpy(notify.name, IRNET_NOTIFY_NAME, NOTIFY_MAX_NAME);
+  strlcpy(notify.name, IRNET_NOTIFY_NAME, sizeof(notify.name));
 
   /* Open an IrTTP instance */
   self->tsap = irttp_open_tsap(LSAP_ANY, DEFAULT_INITIAL_CREDIT,
@@ -123,8 +125,8 @@ irnet_open_tsap(irnet_socket *	self)
   /* Remember which TSAP selector we actually got */
   self->stsap_sel = self->tsap->stsap_sel;
 
-  DEXIT(IRDA_SR_TRACE, " - tsap=0x%X, sel=0x%X\n",
-	(unsigned int) self->tsap, self->stsap_sel);
+  DEXIT(IRDA_SR_TRACE, " - tsap=0x%p, sel=0x%X\n",
+	self->tsap, self->stsap_sel);
   return 0;
 }
 
@@ -149,7 +151,7 @@ irnet_ias_to_tsap(irnet_socket *	self,
 {
   __u8	dtsap_sel = 0;		/* TSAP we are looking for */
 
-  DENTER(IRDA_SR_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_SR_TRACE, "(self=0x%p)\n", self);
 
   /* By default, no error */
   self->errno = 0;
@@ -229,7 +231,7 @@ irnet_ias_to_tsap(irnet_socket *	self,
 static inline int
 irnet_find_lsap_sel(irnet_socket *	self)
 {
-  DENTER(IRDA_SR_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_SR_TRACE, "(self=0x%p)\n", self);
 
   /* This should not happen */
   DABORT(self->iriap, -EBUSY, IRDA_SR_ERROR, "busy with a previous query.\n");
@@ -266,7 +268,7 @@ irnet_connect_tsap(irnet_socket *	self)
 {
   int		err;
 
-  DENTER(IRDA_SR_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_SR_TRACE, "(self=0x%p)\n", self);
 
   /* Open a local TSAP (an IrTTP instance) */
   err = irnet_open_tsap(self);
@@ -367,7 +369,7 @@ irnet_discover_daddr_and_lsap_sel(irnet_socket *	self)
 {
   int	ret;
 
-  DENTER(IRDA_SR_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_SR_TRACE, "(self=0x%p)\n", self);
 
   /* Ask lmp for the current discovery log */
   self->discoveries = irlmp_get_discoveries(&self->disco_number, self->mask,
@@ -380,8 +382,8 @@ irnet_discover_daddr_and_lsap_sel(irnet_socket *	self)
       clear_bit(0, &self->ttp_connect);
       DRETURN(-ENETUNREACH, IRDA_SR_INFO, "No Cachelog...\n");
     }
-  DEBUG(IRDA_SR_INFO, "Got the log (0x%X), size is %d\n",
-	(unsigned int) self->discoveries, self->disco_number);
+  DEBUG(IRDA_SR_INFO, "Got the log (0x%p), size is %d\n",
+	self->discoveries, self->disco_number);
 
   /* Start with the first discovery */
   self->disco_index = -1;
@@ -424,7 +426,7 @@ irnet_dname_to_daddr(irnet_socket *	self)
   int	number;			/* Number of nodes in the log */
   int	i;
 
-  DENTER(IRDA_SR_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_SR_TRACE, "(self=0x%p)\n", self);
 
   /* Ask lmp for the current discovery log */
   discoveries = irlmp_get_discoveries(&number, 0xffff,
@@ -472,7 +474,7 @@ irnet_dname_to_daddr(irnet_socket *	self)
 int
 irda_irnet_create(irnet_socket *	self)
 {
-  DENTER(IRDA_SOCK_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_SOCK_TRACE, "(self=0x%p)\n", self);
 
   self->magic = IRNET_MAGIC;	/* Paranoia */
 
@@ -516,7 +518,7 @@ irda_irnet_connect(irnet_socket *	self)
 {
   int		err;
 
-  DENTER(IRDA_SOCK_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_SOCK_TRACE, "(self=0x%p)\n", self);
 
   /* Check if we are already trying to connect.
    * Because irda_irnet_connect() can be called directly by pppd plus
@@ -533,10 +535,9 @@ irda_irnet_connect(irnet_socket *	self)
    *	     Can't re-insert (MUST remove first) so check for that... */
   if((irnet_server.running) && (self->q.q_next == NULL))
     {
-      unsigned long		flags;
-      spin_lock_irqsave(&irnet_server.spinlock, flags);
+      spin_lock_bh(&irnet_server.spinlock);
       hashbin_insert(irnet_server.list, (irda_queue_t *) self, 0, self->rname);
-      spin_unlock_irqrestore(&irnet_server.spinlock, flags);
+      spin_unlock_bh(&irnet_server.spinlock);
       DEBUG(IRDA_SOCK_INFO, "Inserted ``%s'' in hashbin...\n", self->rname);
     }
 
@@ -584,7 +585,7 @@ irda_irnet_connect(irnet_socket *	self)
 void
 irda_irnet_destroy(irnet_socket *	self)
 {
-  DENTER(IRDA_SOCK_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_SOCK_TRACE, "(self=0x%p)\n", self);
   if(self == NULL)
     return;
 
@@ -593,12 +594,11 @@ irda_irnet_destroy(irnet_socket *	self)
   if((irnet_server.running) && (self->q.q_next != NULL))
     {
       struct irnet_socket *	entry;
-      unsigned long		flags;
       DEBUG(IRDA_SOCK_INFO, "Removing from hash..\n");
-      spin_lock_irqsave(&irnet_server.spinlock, flags);
+      spin_lock_bh(&irnet_server.spinlock);
       entry = hashbin_remove_this(irnet_server.list, (irda_queue_t *) self);
       self->q.q_next = NULL;
-      spin_unlock_irqrestore(&irnet_server.spinlock, flags);
+      spin_unlock_bh(&irnet_server.spinlock);
       DASSERT(entry == self, , IRDA_SOCK_ERROR, "Can't remove from hash.\n");
     }
 
@@ -609,7 +609,7 @@ irda_irnet_destroy(irnet_socket *	self)
        * doesn't exist anymore when we post the event, so we need to pass
        * NULL as the first arg... */
       irnet_post_event(NULL, IRNET_DISCONNECT_TO,
-		       self->saddr, self->daddr, self->rname);
+		       self->saddr, self->daddr, self->rname, 0);
     }
 
   /* Prevent various IrDA callbacks from messing up things
@@ -676,7 +676,7 @@ irnet_daddr_to_dname(irnet_socket *	self)
   int	number;			/* Number of nodes in the log */
   int	i;
 
-  DENTER(IRDA_SERV_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_SERV_TRACE, "(self=0x%p)\n", self);
 
   /* Ask lmp for the current discovery log */
   discoveries = irlmp_get_discoveries(&number, 0xffff,
@@ -692,7 +692,7 @@ irnet_daddr_to_dname(irnet_socket *	self)
       if(discoveries[i].daddr == self->daddr)
 	{
 	  /* Yes !!! Get it.. */
-	  strncpy(self->rname, discoveries[i].info, NICKNAME_MAX_LEN);
+	  strlcpy(self->rname, discoveries[i].info, sizeof(self->rname));
 	  self->rname[NICKNAME_MAX_LEN + 1] = '\0';
 	  DEBUG(IRDA_SERV_INFO, "Device 0x%08x is in fact ``%s''.\n",
 		self->daddr, self->rname);
@@ -720,10 +720,9 @@ static inline irnet_socket *
 irnet_find_socket(irnet_socket *	self)
 {
   irnet_socket *	new = (irnet_socket *) NULL;
-  unsigned long		flags;
   int			err;
 
-  DENTER(IRDA_SERV_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_SERV_TRACE, "(self=0x%p)\n", self);
 
   /* Get the addresses of the requester */
   self->daddr = irttp_get_daddr(self->tsap);
@@ -733,7 +732,7 @@ irnet_find_socket(irnet_socket *	self)
   err = irnet_daddr_to_dname(self);
 
   /* Protect access to the instance list */
-  spin_lock_irqsave(&irnet_server.spinlock, flags);
+  spin_lock_bh(&irnet_server.spinlock);
 
   /* So now, try to get an socket having specifically
    * requested that nickname */
@@ -742,8 +741,8 @@ irnet_find_socket(irnet_socket *	self)
       new = (irnet_socket *) hashbin_find(irnet_server.list,
 					  0, self->rname);
       if(new)
-	DEBUG(IRDA_SERV_INFO, "Socket 0x%X matches rname ``%s''.\n",
-	      (unsigned int) new, new->rname);
+	DEBUG(IRDA_SERV_INFO, "Socket 0x%p matches rname ``%s''.\n",
+	      new, new->rname);
     }
 
   /* If no name matches, try to find an socket by the destination address */
@@ -759,8 +758,8 @@ irnet_find_socket(irnet_socket *	self)
 	  if((new->rdaddr == self->daddr) || (new->daddr == self->daddr))
 	    {
 	      /* Yes !!! Get it.. */
-	      DEBUG(IRDA_SERV_INFO, "Socket 0x%X matches daddr %#08x.\n",
-		    (unsigned int) new, self->daddr);
+	      DEBUG(IRDA_SERV_INFO, "Socket 0x%p matches daddr %#08x.\n",
+		    new, self->daddr);
 	      break;
 	    }
 	  new = (irnet_socket *) hashbin_get_next(irnet_server.list);
@@ -778,8 +777,8 @@ irnet_find_socket(irnet_socket *	self)
 	     (new->rname[0] == '\0') && (new->ppp_open))
 	    {
 	      /* Yes !!! Get it.. */
-	      DEBUG(IRDA_SERV_INFO, "Socket 0x%X is free.\n",
-		    (unsigned int) new);
+	      DEBUG(IRDA_SERV_INFO, "Socket 0x%p is free.\n",
+		    new);
 	      break;
 	    }
 	  new = (irnet_socket *) hashbin_get_next(irnet_server.list);
@@ -787,9 +786,9 @@ irnet_find_socket(irnet_socket *	self)
     }
 
   /* Spin lock end */
-  spin_unlock_irqrestore(&irnet_server.spinlock, flags);
+  spin_unlock_bh(&irnet_server.spinlock);
 
-  DEXIT(IRDA_SERV_TRACE, " - new = 0x%X\n", (unsigned int) new);
+  DEXIT(IRDA_SERV_TRACE, " - new = 0x%p\n", new);
   return new;
 }
 
@@ -807,8 +806,8 @@ irnet_connect_socket(irnet_socket *	server,
 		     __u32		max_sdu_size,
 		     __u8		max_header_size)
 {
-  DENTER(IRDA_SERV_TRACE, "(server=0x%X, new=0x%X)\n",
-	 (unsigned int) server, (unsigned int) new);
+  DENTER(IRDA_SERV_TRACE, "(server=0x%p, new=0x%p)\n",
+	 server, new);
 
   /* Now attach up the new socket */
   new->tsap = irttp_dup(server->tsap, new);
@@ -830,8 +829,7 @@ irnet_connect_socket(irnet_socket *	server,
 #endif /* STREAM_COMPAT */
 
   /* Clean up the original one to keep it in listen state */
-  server->tsap->dtsap_sel = server->tsap->lsap->dlsap_sel = LSAP_ANY;
-  server->tsap->lsap->lsap_state = LSAP_DISCONNECTED;
+  irttp_listen(server->tsap);
 
   /* Send a connection response on the new socket */
   irttp_connect_response(new->tsap, new->max_sdu_size_rx, NULL);
@@ -857,13 +855,13 @@ irnet_connect_socket(irnet_socket *	server,
   /* As currently we don't block packets in ppp_irnet_send() while passive,
    * this is not really needed...
    * Also, not doing it give IrDA a chance to finish the setup properly
-   * before beeing swamped with packets... */
+   * before being swamped with packets... */
   ppp_output_wakeup(&new->chan);
 #endif /* CONNECT_INDIC_KICK */
 
   /* Notify the control channel */
   irnet_post_event(new, IRNET_CONNECT_FROM,
-		   new->saddr, new->daddr, server->rname);
+		   new->saddr, new->daddr, server->rname, 0);
 
   DEXIT(IRDA_SERV_TRACE, "\n");
   return 0;
@@ -880,7 +878,7 @@ static inline void
 irnet_disconnect_server(irnet_socket *	self,
 			struct sk_buff *skb)
 {
-  DENTER(IRDA_SERV_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_SERV_TRACE, "(self=0x%p)\n", self);
 
   /* Put the received packet in the black hole */
   kfree_skb(skb);
@@ -894,11 +892,10 @@ irnet_disconnect_server(irnet_socket *	self,
 
   /* Notify the control channel (see irnet_find_socket()) */
   irnet_post_event(NULL, IRNET_REQUEST_FROM,
-		   self->saddr, self->daddr, self->rname);
+		   self->saddr, self->daddr, self->rname, 0);
 
   /* Clean up the server to keep it in listen state */
-  self->tsap->dtsap_sel = self->tsap->lsap->dlsap_sel = LSAP_ANY;
-  self->tsap->lsap->lsap_state = LSAP_DISCONNECTED;
+  irttp_listen(self->tsap);
 
   DEXIT(IRDA_SERV_TRACE, "\n");
   return;
@@ -1013,8 +1010,8 @@ irnet_data_indication(void *	instance,
   unsigned char *	p;
   int			code = 0;
 
-  DENTER(IRDA_TCB_TRACE, "(self/ap=0x%X, skb=0x%X)\n",
-	 (unsigned int) ap,(unsigned int) skb);
+  DENTER(IRDA_TCB_TRACE, "(self/ap=0x%p, skb=0x%p)\n",
+	 ap, skb);
   DASSERT(skb != NULL, 0, IRDA_CB_ERROR, "skb is NULL !!!\n");
 
   /* Check is ppp is ready to receive our packet */
@@ -1072,7 +1069,7 @@ irnet_data_indication(void *	instance,
  *	o attempted to connect, timeout
  *	o connected, link is broken, LAP has timeout
  *	o connected, other side close the link
- *	o connection request on the server no handled
+ *	o connection request on the server not handled
  */
 static void
 irnet_disconnect_indication(void *	instance,
@@ -1081,9 +1078,10 @@ irnet_disconnect_indication(void *	instance,
 			    struct sk_buff *skb)
 {
   irnet_socket *	self = (irnet_socket *) instance;
-  int			test = 0;
+  int			test_open;
+  int			test_connect;
 
-  DENTER(IRDA_TCB_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_TCB_TRACE, "(self=0x%p)\n", self);
   DASSERT(self != NULL, , IRDA_CB_ERROR, "Self is NULL !!!\n");
 
   /* Don't care about it, but let's not leak it */
@@ -1091,30 +1089,30 @@ irnet_disconnect_indication(void *	instance,
     dev_kfree_skb(skb);
 
   /* Prevent higher layer from accessing IrTTP */
-  test = test_and_clear_bit(0, &self->ttp_open);
+  test_open = test_and_clear_bit(0, &self->ttp_open);
   /* Not connecting anymore...
    * (note : TSAP is open, so IAP callbacks are no longer pending...) */
-  test |= test_and_clear_bit(0, &self->ttp_connect);
+  test_connect = test_and_clear_bit(0, &self->ttp_connect);
 
   /* If both self->ttp_open and self->ttp_connect are NULL, it mean that we
    * have a race condition with irda_irnet_destroy() or
    * irnet_connect_indication(), so don't mess up tsap...
    */
-  if(!test)
+  if(!(test_open || test_connect))
     {
       DERROR(IRDA_CB_ERROR, "Race condition detected...\n");
       return;
     }
 
   /* If we were active, notify the control channel */
-  if(test_bit(0, &self->ttp_open))
+  if(test_open)
     irnet_post_event(self, IRNET_DISCONNECT_FROM,
-		     self->saddr, self->daddr, self->rname);
+		     self->saddr, self->daddr, self->rname, 0);
   else
     /* If we were trying to connect, notify the control channel */
     if((self->tsap) && (self != &irnet_server.s))
       irnet_post_event(self, IRNET_NOANSWER_FROM,
-		       self->saddr, self->daddr, self->rname);
+		       self->saddr, self->daddr, self->rname, 0);
 
   /* Close our IrTTP connection, cleanup tsap */
   if((self->tsap) && (self != &irnet_server.s))
@@ -1122,19 +1120,36 @@ irnet_disconnect_indication(void *	instance,
       DEBUG(IRDA_CB_INFO, "Closing our TTP connection.\n");
       irttp_close_tsap(self->tsap);
       self->tsap = NULL;
-
-      /* Flush (drain) ppp_generic Tx queue (most often we have blocked it) */
-      if(self->ppp_open)
-	ppp_output_wakeup(&self->chan);
     }
-  /* Cleanup the socket in case we want to reconnect */
+  /* Cleanup the socket in case we want to reconnect in ppp_output_wakeup() */
   self->stsap_sel = 0;
   self->daddr = DEV_ADDR_ANY;
   self->tx_flow = FLOW_START;
 
-  /* Note : what should we say to ppp ?
-   * It seem the ppp_generic and pppd are happy that way and will eventually
-   * timeout gracefully, so don't bother them... */
+  /* Deal with the ppp instance if it's still alive */
+  if(self->ppp_open)
+    {
+      if(test_open)
+	{
+#ifdef MISSING_PPP_API
+	  /* ppp_unregister_channel() wants a user context, which we
+	   * are guaranteed to NOT have here. What are we supposed
+	   * to do here ? Jean II */
+	  /* If we were connected, cleanup & close the PPP channel,
+	   * which will kill pppd (hangup) and the rest */
+	  ppp_unregister_channel(&self->chan);
+	  self->ppp_open = 0;
+#endif
+	}
+      else
+	{
+	  /* If we were trying to connect, flush (drain) ppp_generic
+	   * Tx queue (most often we have blocked it), which will
+	   * trigger an other attempt to connect. If we are passive,
+	   * this will empty the Tx queue after last try. */
+	  ppp_output_wakeup(&self->chan);
+	}
+    }
 
   DEXIT(IRDA_TCB_TRACE, "\n");
 }
@@ -1156,7 +1171,7 @@ irnet_connect_confirm(void *	instance,
 {
   irnet_socket *	self = (irnet_socket *) instance;
 
-  DENTER(IRDA_TCB_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_TCB_TRACE, "(self=0x%p)\n", self);
 
   /* Check if socket is closing down (via irda_irnet_destroy()) */
   if(! test_bit(0, &self->ttp_connect))
@@ -1202,7 +1217,7 @@ irnet_connect_confirm(void *	instance,
 
   /* Notify the control channel */
   irnet_post_event(self, IRNET_CONNECT_TO,
-		   self->saddr, self->daddr, self->rname);
+		   self->saddr, self->daddr, self->rname, 0);
 
   DEXIT(IRDA_TCB_TRACE, "\n");
 }
@@ -1222,7 +1237,7 @@ irnet_flow_indication(void *	instance,
   irnet_socket *	self = (irnet_socket *) instance;
   LOCAL_FLOW		oldflow = self->tx_flow;
 
-  DENTER(IRDA_TCB_TRACE, "(self=0x%X, flow=%d)\n", (unsigned int) self, flow);
+  DENTER(IRDA_TCB_TRACE, "(self=0x%p, flow=%d)\n", self, flow);
 
   /* Update our state */
   self->tx_flow = flow;
@@ -1263,7 +1278,7 @@ irnet_status_indication(void *	instance,
 {
   irnet_socket *	self = (irnet_socket *) instance;
 
-  DENTER(IRDA_TCB_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_TCB_TRACE, "(self=0x%p)\n", self);
   DASSERT(self != NULL, , IRDA_CB_ERROR, "Self is NULL !!!\n");
 
   /* We can only get this event if we are connected */
@@ -1271,7 +1286,7 @@ irnet_status_indication(void *	instance,
     {
     case STATUS_NO_ACTIVITY:
       irnet_post_event(self, IRNET_BLOCKED_LINK,
-		       self->saddr, self->daddr, self->rname);
+		       self->saddr, self->daddr, self->rname, 0);
       break;
     default:
       DEBUG(IRDA_CB_INFO, "Unknown status...\n");
@@ -1305,9 +1320,9 @@ irnet_connect_indication(void *		instance,
   irnet_socket *	server = &irnet_server.s;
   irnet_socket *	new = (irnet_socket *) NULL;
 
-  DENTER(IRDA_TCB_TRACE, "(server=0x%X)\n", (unsigned int) server);
+  DENTER(IRDA_TCB_TRACE, "(server=0x%p)\n", server);
   DASSERT(instance == &irnet_server, , IRDA_CB_ERROR,
-	  "Invalid instance (0x%X) !!!\n", (unsigned int) instance);
+	  "Invalid instance (0x%p) !!!\n", instance);
   DASSERT(sap == irnet_server.s.tsap, , IRDA_CB_ERROR, "Invalid sap !!!\n");
 
   /* Try to find the most appropriate IrNET socket */
@@ -1329,46 +1344,80 @@ irnet_connect_indication(void *		instance,
       return;
     }
 
-  /* Socket connecting ?
-   * Clear up flag : prevent irnet_disconnect_indication() to mess up tsap */
-  if(test_and_clear_bit(0, &new->ttp_connect))
-    {
-      /* The socket is trying to connect to the other end and may have sent
-       * a IrTTP connection request and is waiting for a connection response
-       * (that may never come).
-       * Now, the pain is that the socket may have opened a tsap and is
-       * waiting on it, while the other end is trying to connect to it on
-       * another tsap.
-       */
-      DERROR(IRDA_CB_ERROR, "Socket already connecting. Ouch !\n");
+  /* The following code is a bit tricky, so need comments ;-)
+   */
+  /* If ttp_connect is set, the socket is trying to connect to the other
+   * end and may have sent a IrTTP connection request and is waiting for
+   * a connection response (that may never come).
+   * Now, the pain is that the socket may have opened a tsap and is
+   * waiting on it, while the other end is trying to connect to it on
+   * another tsap.
+   * Because IrNET can be peer to peer, we need to workaround this.
+   * Furthermore, the way the irnetd script is implemented, the
+   * target will create a second IrNET connection back to the
+   * originator and expect the originator to bind this new connection
+   * to the original PPPD instance.
+   * And of course, if we don't use irnetd, we can have a race when
+   * both side try to connect simultaneously, which could leave both
+   * connections half closed (yuck).
+   * Conclusions :
+   *	1) The "originator" must accept the new connection and get rid
+   *	   of the old one so that irnetd works
+   *	2) One side must deny the new connection to avoid races,
+   *	   but both side must agree on which side it is...
+   * Most often, the originator is primary at the LAP layer.
+   * Jean II
+   */
+  /* Now, let's look at the way I wrote the test...
+   * We need to clear up the ttp_connect flag atomically to prevent
+   * irnet_disconnect_indication() to mess up the tsap we are going to close.
+   * We want to clear the ttp_connect flag only if we close the tsap,
+   * otherwise we will never close it, so we need to check for primary
+   * *before* doing the test on the flag.
+   * And of course, ALLOW_SIMULT_CONNECT can disable this entirely...
+   * Jean II
+   */
+
+  /* Socket already connecting ? On primary ? */
+  if(0
 #ifdef ALLOW_SIMULT_CONNECT
-      /* Cleanup the TSAP if necessary - IrIAP will be cleaned up later */
+     || ((irttp_is_primary(server->tsap) == 1)	/* primary */
+	 && (test_and_clear_bit(0, &new->ttp_connect)))
+#endif /* ALLOW_SIMULT_CONNECT */
+     )
+    {
+      DERROR(IRDA_CB_ERROR, "Socket already connecting, but going to reuse it !\n");
+
+      /* Cleanup the old TSAP if necessary - IrIAP will be cleaned up later */
       if(new->tsap != NULL)
 	{
-	  /* Close the connection the new socket was attempting.
-	   * This seems to be safe... */
+	  /* Close the old connection the new socket was attempting,
+	   * so that we can hook it up to the new connection.
+	   * It's now safe to do it... */
 	  irttp_close_tsap(new->tsap);
 	  new->tsap = NULL;
 	}
-      /* Note : no return, fall through... */
-#else /* ALLOW_SIMULT_CONNECT */
-      irnet_disconnect_server(server, skb);
-      return;
-#endif /* ALLOW_SIMULT_CONNECT */
     }
   else
-    /* If socket is not connecting or connected, tsap should be NULL */
-    if(new->tsap != NULL)
-      {
-	/* If we are here, we are also in irnet_disconnect_indication(),
-	 * and it's a nice race condition... On the other hand, we can't be
-	 * in irda_irnet_destroy() otherwise we would not have found the
-	 * socket in the hashbin. */
-	/* Better get out of here, otherwise we will mess up tsaps ! */
-	DERROR(IRDA_CB_ERROR, "Race condition detected, abort connect...\n");
-	irnet_disconnect_server(server, skb);
-	return;
-      }
+    {
+      /* Three options :
+       * 1) socket was not connecting or connected : ttp_connect should be 0.
+       * 2) we don't want to connect the socket because we are secondary or
+       * ALLOW_SIMULT_CONNECT is undefined. ttp_connect should be 1.
+       * 3) we are half way in irnet_disconnect_indication(), and it's a
+       * nice race condition... Fortunately, we can detect that by checking
+       * if tsap is still alive. On the other hand, we can't be in
+       * irda_irnet_destroy() otherwise we would not have found this
+       * socket in the hashbin.
+       * Jean II */
+      if((test_bit(0, &new->ttp_connect)) || (new->tsap != NULL))
+	{
+	  /* Don't mess this socket, somebody else in in charge... */
+	  DERROR(IRDA_CB_ERROR, "Race condition detected, socket in use, abort connect...\n");
+	  irnet_disconnect_server(server, skb);
+	  return;
+	}
+    }
 
   /* So : at this point, we have a socket, and it is idle. Good ! */
   irnet_connect_socket(server, new, qos, max_sdu_size, max_header_size);
@@ -1417,7 +1466,7 @@ irnet_getvalue_confirm(int	result,
 {
   irnet_socket *	self = (irnet_socket *) priv;
 
-  DENTER(IRDA_OCB_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_OCB_TRACE, "(self=0x%p)\n", self);
   DASSERT(self != NULL, , IRDA_OCB_ERROR, "Self is NULL !!!\n");
 
   /* Check if already connected (via irnet_connect_socket())
@@ -1481,7 +1530,7 @@ irnet_discovervalue_confirm(int		result,
   irnet_socket *	self = (irnet_socket *) priv;
   __u8			dtsap_sel;		/* TSAP we are looking for */
 
-  DENTER(IRDA_OCB_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_OCB_TRACE, "(self=0x%p)\n", self);
   DASSERT(self != NULL, , IRDA_OCB_ERROR, "Self is NULL !!!\n");
 
   /* Check if already connected (via irnet_connect_socket())
@@ -1534,8 +1583,8 @@ irnet_discovervalue_confirm(int		result,
   self->iriap = NULL;
 
   /* No more items : remove the log and signal termination */
-  DEBUG(IRDA_OCB_INFO, "Cleaning up log (0x%X)\n",
-	(unsigned int) self->discoveries);
+  DEBUG(IRDA_OCB_INFO, "Cleaning up log (0x%p)\n",
+	self->discoveries);
   if(self->discoveries != NULL)
     {
       /* Cleanup our copy of the discovery log */
@@ -1571,8 +1620,8 @@ irnet_discovervalue_confirm(int		result,
  *
  *    Got a discovery indication from IrLMP, post an event
  *
- * Note : IrLMP take care of matching the hint mask for us, we only
- * check if it is a "new" node...
+ * Note : IrLMP take care of matching the hint mask for us, and also
+ * check if it is a "new" node for us...
  *
  * As IrLMP filter on the IrLAN hint bit, we get both IrLAN and IrNET
  * nodes, so it's only at connection time that we will know if the
@@ -1588,30 +1637,23 @@ irnet_discovervalue_confirm(int		result,
  * is to messy, so we leave that to user space...
  */
 static void
-irnet_discovery_indication(discovery_t *discovery,
-			   void *	priv)
+irnet_discovery_indication(discinfo_t *		discovery,
+			   DISCOVERY_MODE	mode,
+			   void *		priv)
 {
   irnet_socket *	self = &irnet_server.s;
 	
-  DENTER(IRDA_OCB_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_OCB_TRACE, "(self=0x%p)\n", self);
   DASSERT(priv == &irnet_server, , IRDA_OCB_ERROR,
-	  "Invalid instance (0x%X) !!!\n", (unsigned int) priv);
-
-  /* Check if node is discovered is a new one or an old one.
-   * We check when how long ago this node was discovered, with a
-   * coarse timeout (we may miss some discovery events or be delayed).
-   */
-  if((jiffies - discovery->first_timestamp) >= (sysctl_discovery_timeout * HZ))
-    {
-      return;		/* Too old, not interesting -> goodbye */
-    }
+	  "Invalid instance (0x%p) !!!\n", priv);
 
   DEBUG(IRDA_OCB_INFO, "Discovered new IrNET/IrLAN node %s...\n",
-	discovery->nickname);
+	discovery->info);
 
   /* Notify the control channel */
   irnet_post_event(NULL, IRNET_DISCOVER,
-		   discovery->saddr, discovery->daddr, discovery->nickname);
+		   discovery->saddr, discovery->daddr, discovery->info,
+		   u16ho(discovery->hints));
 
   DEXIT(IRDA_OCB_TRACE, "\n");
 }
@@ -1626,21 +1668,23 @@ irnet_discovery_indication(discovery_t *discovery,
  * check if it is a "new" node...
  */
 static void
-irnet_expiry_indication(discovery_t *	expiry,
+irnet_expiry_indication(discinfo_t *	expiry,
+			DISCOVERY_MODE	mode,
 			void *		priv)
 {
   irnet_socket *	self = &irnet_server.s;
 	
-  DENTER(IRDA_OCB_TRACE, "(self=0x%X)\n", (unsigned int) self);
+  DENTER(IRDA_OCB_TRACE, "(self=0x%p)\n", self);
   DASSERT(priv == &irnet_server, , IRDA_OCB_ERROR,
-	  "Invalid instance (0x%X) !!!\n", (unsigned int) priv);
+	  "Invalid instance (0x%p) !!!\n", priv);
 
   DEBUG(IRDA_OCB_INFO, "IrNET/IrLAN node %s expired...\n",
-	expiry->nickname);
+	expiry->info);
 
   /* Notify the control channel */
   irnet_post_event(NULL, IRNET_EXPIRE,
-		   expiry->saddr, expiry->daddr, expiry->nickname);
+		   expiry->saddr, expiry->daddr, expiry->info,
+		   u16ho(expiry->hints));
 
   DEXIT(IRDA_OCB_TRACE, "\n");
 }
@@ -1668,7 +1712,6 @@ irnet_proc_read(char *	buf,
 {
   irnet_socket *	self;
   char *		state;
-  unsigned long		flags;
   int			i = 0;
 
   len = 0;
@@ -1685,7 +1728,7 @@ irnet_proc_read(char *	buf,
     return len;
 
   /* Protect access to the instance list */
-  spin_lock_irqsave(&irnet_server.spinlock, flags);
+  spin_lock_bh(&irnet_server.spinlock);
 
   /* Get the sockets one by one... */
   self = (irnet_socket *) hashbin_get_first(irnet_server.list);
@@ -1737,7 +1780,7 @@ irnet_proc_read(char *	buf,
     }
 
   /* Spin lock end */
-  spin_unlock_irqrestore(&irnet_server.spinlock, flags);
+  spin_unlock_bh(&irnet_server.spinlock);
 
   return len;
 }
@@ -1754,7 +1797,7 @@ irnet_proc_read(char *	buf,
 /*
  * Prepare the IrNET layer for operation...
  */
-int
+int __init
 irda_irnet_init(void)
 {
   int		err = 0;
@@ -1797,7 +1840,7 @@ irda_irnet_init(void)
 /*
  * Cleanup at exit...
  */
-void
+void __exit
 irda_irnet_cleanup(void)
 {
   DENTER(MODULE_TRACE, "()\n");

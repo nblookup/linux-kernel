@@ -1,20 +1,11 @@
 #
-# Makefile for the Bluetooth subsystem
+# Makefile for the Linux Bluetooth subsystem.
 #
-O_TARGET	:= bluetooth.o
 
-list-multi	:= hci.o l2cap.o
-export-objs	:= syms.o
-hci-objs	:= af_bluetooth.o hci_core.o hci_sock.o lib.o syms.o
-l2cap-objs	:= l2cap_core.o l2cap_proc.o
+obj-$(CONFIG_BT)	+= bluetooth.o
+obj-$(CONFIG_BT_L2CAP)	+= l2cap.o
+obj-$(CONFIG_BT_SCO)	+= sco.o
+obj-$(CONFIG_BT_RFCOMM)	+= rfcomm/
+obj-$(CONFIG_BT_BNEP)	+= bnep/
 
-obj-$(CONFIG_BLUEZ) += hci.o
-obj-$(CONFIG_BLUEZ_L2CAP) += l2cap.o
-
-include $(TOPDIR)/Rules.make
-
-hci.o: $(hci-objs)
-	$(LD) -r -o $@ $(hci-objs)
-
-l2cap.o: $(l2cap-objs)
-	$(LD) -r -o $@ $(l2cap-objs)
+bluetooth-objs := af_bluetooth.o hci_core.o hci_conn.o hci_event.o hci_sock.o hci_proc.o lib.o syms.o

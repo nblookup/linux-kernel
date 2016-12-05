@@ -15,10 +15,10 @@
 #include <linux/rtnetlink.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/netfilter.h>
+#include <linux/smp.h>
 #include <net/pkt_sched.h>
 #include <asm/byteorder.h>
 #include <asm/uaccess.h>
-#include <asm/smp.h>
 #include <linux/kmod.h>
 #include <linux/stat.h>
 #include <linux/interrupt.h>
@@ -43,6 +43,9 @@
 #define PRIV(sch) ((struct ingress_qdisc_data *) (sch)->data)
 
 
+/* Thanks to Doron Oz for this hack
+*/
+static int nf_registered; 
 
 struct ingress_qdisc_data {
 	struct Qdisc		*q;
@@ -103,7 +106,7 @@ static int ingress_change(struct Qdisc *sch, u32 classid, u32 parent,
 #endif
 	DPRINTK("ingress_change(sch %p,[qdisc %p],classid %x,parent %x),"
 		"arg 0x%lx\n", sch, p, classid, parent, *arg);
-	DPRINTK("No effect. sch_ingress doesnt maintain classes at the moment");
+	DPRINTK("No effect. sch_ingress doesn't maintain classes at the moment");
 	return 0;
 }
 
@@ -115,7 +118,7 @@ static void ingress_walk(struct Qdisc *sch,struct qdisc_walker *walker)
 	struct ingress_qdisc_data *p = PRIV(sch);
 #endif
 	DPRINTK("ingress_walk(sch %p,[qdisc %p],walker %p)\n", sch, p, walker);
-	DPRINTK("No effect. sch_ingress doesnt maintain classes at the moment");
+	DPRINTK("No effect. sch_ingress doesn't maintain classes at the moment");
 }
 
 
@@ -143,19 +146,25 @@ static int ingress_enqueue(struct sk_buff *skb,struct Qdisc *sch)
 	 * Unlike normal "enqueue" functions, ingress_enqueue returns a
 	 * firewall FW_* code.
 	 */
-	switch (result) {
 #ifdef CONFIG_NET_CLS_POLICE
+	switch (result) {
 		case TC_POLICE_SHOT:
 			result = NF_DROP;
+			sch->stats.drops++;
 			break;
 		case TC_POLICE_RECLASSIFY: /* DSCP remarking here ? */
 		case TC_POLICE_OK:
 		case TC_POLICE_UNSPEC:
 		default:
+			sch->stats.packets++;
+			sch->stats.bytes += skb->len;
 			result = NF_ACCEPT;
 			break;
-#endif
 	};
+#else
+	sch->stats.packets++;
+	sch->stats.bytes += skb->len;
+#endif
 
 	skb->tc_index = TC_H_MIN(res.classid);
 	return result;
@@ -181,7 +190,7 @@ static int ingress_requeue(struct sk_buff *skb,struct Qdisc *sch)
 	return 0;
 }
 
-static int ingress_drop(struct Qdisc *sch)
+static unsigned int ingress_drop(struct Qdisc *sch)
 {
 #ifdef DEBUG_INGRESS
 	struct ingress_qdisc_data *p = PRIV(sch);
@@ -223,35 +232,32 @@ used on the egress (might slow things for an iota)
 }
 
 /* after ipt_filter */
-static struct nf_hook_ops ing_ops =
-{
-	{ NULL, NULL},
-	ing_hook,
-	PF_INET,
-	NF_IP_PRE_ROUTING,
-	NF_IP_PRI_FILTER + 1
+static struct nf_hook_ops ing_ops = {
+	.hook           = ing_hook,
+	.owner		= THIS_MODULE,
+	.pf             = PF_INET,
+	.hooknum        = NF_IP_PRE_ROUTING,
+	.priority       = NF_IP_PRI_FILTER + 1,
 };
 
 int ingress_init(struct Qdisc *sch,struct rtattr *opt)
 {
 	struct ingress_qdisc_data *p = PRIV(sch);
 
+	if (!nf_registered) {
+		if (nf_register_hook(&ing_ops) < 0) {
+			printk("ingress qdisc registration error \n");
+			goto error;
+		}
+		nf_registered++;
+	}
+
 	DPRINTK("ingress_init(sch %p,[qdisc %p],opt %p)\n",sch,p,opt);
 	memset(p, 0, sizeof(*p));
 	p->filter_list = NULL;
 	p->q = &noop_qdisc;
-#ifndef MODULE
-	if (nf_register_hook(&ing_ops) < 0) {
-		printk("Unable to register ingress \n");
-		goto error;
-	}
-#endif
-	DPRINTK("ingress_init: qdisc %p\n", sch);
-	MOD_INC_USE_COUNT;
 	return 0;
-#ifndef MODULE
 error:
-#endif
 	return -EINVAL;
 }
 
@@ -295,16 +301,7 @@ static void ingress_destroy(struct Qdisc *sch)
 /* for future use */
 	qdisc_destroy(p->q);
 #endif
-
-#ifndef MODULE
-	nf_unregister_hook(&ing_ops);
-#endif
-
-	MOD_DEC_USE_COUNT;
 }
-
-
-#ifdef CONFIG_RTNETLINK
 
 
 static int ingress_dump(struct Qdisc *sch, struct sk_buff *skb)
@@ -322,49 +319,37 @@ rtattr_failure:
 	return -1;
 }
 
-#endif
-
-
-static struct Qdisc_class_ops ingress_class_ops =
-{
-	ingress_graft,			/* graft */
-	ingress_leaf,			/* leaf */
-	ingress_get,			/* get */
-	ingress_put,			/* put */
-	ingress_change,			/* change */
-	NULL,				/* delete */
-	ingress_walk,				/* walk */
-
-	ingress_find_tcf,		/* tcf_chain */
-	ingress_bind_filter,		/* bind_tcf */
-	ingress_put,			/* unbind_tcf */
-
-#ifdef CONFIG_RTNETLINK
-	NULL,		/* dump */
-#endif
+static struct Qdisc_class_ops ingress_class_ops = {
+	.graft		=	ingress_graft,
+	.leaf		=	ingress_leaf,
+	.get		=	ingress_get,
+	.put		=	ingress_put,
+	.change		=	ingress_change,
+	.delete		=	NULL,
+	.walk		=	ingress_walk,
+	.tcf_chain	=	ingress_find_tcf,
+	.bind_tcf	=	ingress_bind_filter,
+	.unbind_tcf	=	ingress_put,
+	.dump		=	NULL,
 };
 
-struct Qdisc_ops ingress_qdisc_ops =
-{
-	NULL,				/* next */
-	&ingress_class_ops,		/* cl_ops */
-	"ingress",
-	sizeof(struct ingress_qdisc_data),
-
-	ingress_enqueue,		/* enqueue */
-	ingress_dequeue,		/* dequeue */
-	ingress_requeue,		/* requeue */
-	ingress_drop,			/* drop */
-
-	ingress_init,			/* init */
-	ingress_reset,			/* reset */
-	ingress_destroy,		/* destroy */
-	NULL,				/* change */
-
-#ifdef CONFIG_RTNETLINK
-	ingress_dump,			/* dump */
-#endif
+struct Qdisc_ops ingress_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	&ingress_class_ops,
+	.id		=	"ingress",
+	.priv_size	=	sizeof(struct ingress_qdisc_data),
+	.enqueue	=	ingress_enqueue,
+	.dequeue	=	ingress_dequeue,
+	.requeue	=	ingress_requeue,
+	.drop		=	ingress_drop,
+	.init		=	ingress_init,
+	.reset		=	ingress_reset,
+	.destroy	=	ingress_destroy,
+	.change		=	NULL,
+	.dump		=	ingress_dump,
+	.owner		=	THIS_MODULE,
 };
+
 
 #ifdef MODULE
 int init_module(void)
@@ -376,20 +361,15 @@ int init_module(void)
 		return ret;
 	}
 
-        if (nf_register_hook(&ing_ops) < 0) {
-		printk("Unable to register ingress on hook \n");
-		unregister_qdisc(&ingress_qdisc_ops);
-		return 0;
-	}
-
 	return ret;
 }
 
 
 void cleanup_module(void) 
 {
-	nf_unregister_hook(&ing_ops);
 	unregister_qdisc(&ingress_qdisc_ops);
+	if (nf_registered)
+		nf_unregister_hook(&ing_ops);
 }
 #endif
 MODULE_LICENSE("GPL");

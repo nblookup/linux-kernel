@@ -53,9 +53,9 @@ redirect_check(const char *tablename,
 
 static unsigned int
 redirect_target(struct sk_buff **pskb,
-		unsigned int hooknum,
 		const struct net_device *in,
 		const struct net_device *out,
+		unsigned int hooknum,
 		const void *targinfo,
 		void *userinfo)
 {
@@ -74,10 +74,17 @@ redirect_target(struct sk_buff **pskb,
 	/* Local packets: make them go to loopback */
 	if (hooknum == NF_IP_LOCAL_OUT)
 		newdst = htonl(0x7F000001);
-	else
+	else {
+		struct in_device *indev;
+
+		/* Device might not have an associated in_device. */
+		indev = (struct in_device *)(*pskb)->dev->ip_ptr;
+		if (indev == NULL)
+			return NF_DROP;
+
 		/* Grab first address on interface. */
-		newdst = (((struct in_device *)(*pskb)->dev->ip_ptr)
-			  ->ifa_list->ifa_local);
+		newdst = indev->ifa_list->ifa_local;
+	}
 
 	/* Transfer from original range. */
 	newrange = ((struct ip_nat_multi_range)
@@ -89,9 +96,12 @@ redirect_target(struct sk_buff **pskb,
 	return ip_nat_setup_info(ct, &newrange, hooknum);
 }
 
-static struct ipt_target redirect_reg
-= { { NULL, NULL }, "REDIRECT", redirect_target, redirect_check, NULL,
-    THIS_MODULE };
+static struct ipt_target redirect_reg = {
+	.name		= "REDIRECT",
+	.target		= redirect_target,
+	.checkentry	= redirect_check,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

@@ -18,6 +18,7 @@
  *****************************************************************************/
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/stddef.h>	/* offsetof(), etc. */
 #include <linux/errno.h>	/* return codes */
 #include <linux/kernel.h>
@@ -25,7 +26,6 @@
 #include <linux/mm.h>		/* verify_area(), etc. */
 #include <linux/string.h>	/* inline mem*, str* functions */
 #include <linux/init.h>		/* __initfunc et al. */
-#include <asm/segment.h>	/* kernel <-> user copy */
 #include <asm/byteorder.h>	/* htons(), etc. */
 #include <asm/uaccess.h>	/* copy_to_user */
 #include <asm/io.h>
@@ -76,8 +76,9 @@ static char term_msg[]   = "***KERNEL:  Out of buffer space!***\n";
  */
 
 static struct file_operations vlan_fops = {
-	read:	vlan_proc_read,
-	ioctl: NULL, /* vlan_proc_ioctl */
+	.owner = THIS_MODULE,
+	.read =	vlan_proc_read,
+	.ioctl = NULL, /* vlan_proc_ioctl */
 };
 
 /*
@@ -85,8 +86,9 @@ static struct file_operations vlan_fops = {
  */
 
 static struct file_operations vlandev_fops = {
-	read:	vlan_proc_read,
-	ioctl:	NULL, /* vlan_proc_ioctl */
+	.owner = THIS_MODULE,
+	.read =	vlan_proc_read,
+	.ioctl =NULL, /* vlan_proc_ioctl */
 };
 
 /*
@@ -116,7 +118,7 @@ static char conf_hdr[] = "VLAN Dev name	 | VLAN ID\n";
  *	Clean up /proc/net/vlan entries
  */
 
-void __exit vlan_proc_cleanup(void)
+void vlan_proc_cleanup(void)
 {
 	if (proc_vlan_conf)
 		remove_proc_entry(name_conf, proc_vlan_dir);
@@ -188,14 +190,14 @@ int vlan_proc_add_dev (struct net_device *vlandev)
 int vlan_proc_rem_dev(struct net_device *vlandev)
 {
 	if (!vlandev) {
-		printk(VLAN_ERR __FUNCTION__ ": invalid argument: %p\n",
-		       vlandev);
+		printk(VLAN_ERR "%s: invalid argument: %p\n",
+			__FUNCTION__, vlandev);
 		return -EINVAL;
 	}
 
 	if (!(vlandev->priv_flags & IFF_802_1Q_VLAN)) {
-		printk(VLAN_DBG __FUNCTION__ ": invalid argument, device: %s is not a VLAN device, priv_flags: 0x%4hX.\n",
-		       vlandev->name, vlandev->priv_flags);
+		printk(VLAN_DBG "%s: invalid argument, device: %s is not a VLAN device, priv_flags: 0x%4hX.\n",
+			__FUNCTION__, vlandev->name, vlandev->priv_flags);
 		return -EINVAL;
 	}
 
@@ -237,7 +239,7 @@ static ssize_t vlan_proc_read(struct file *file, char *buf,
 	if (count <= 0)
 		return 0;
 
-	dent = inode->u.generic_ip;
+	dent = PDE(inode);
 	if ((dent == NULL) || (dent->get_info == NULL))
 		return 0;
 
@@ -252,8 +254,10 @@ static ssize_t vlan_proc_read(struct file *file, char *buf,
 	offs = file->f_pos;
 	if (offs < pos) {
 		len = min_t(int, pos - offs, count);
-		if (copy_to_user(buf, (page + offs), len))
+		if (copy_to_user(buf, (page + offs), len)) {
+			kfree(page);
 			return -EFAULT;
+		}
 
 		file->f_pos += len;
 	} else {
@@ -273,7 +277,7 @@ static int vlan_proc_get_vlan_info(char* buf, unsigned int cnt)
 {
 	struct net_device *vlandev = NULL;
 	struct vlan_group *grp = NULL;
-	int i = 0;
+	int h, i;
 	char *nm_type = NULL;
 	struct vlan_dev_info *dev_info = NULL;
 
@@ -293,46 +297,34 @@ static int vlan_proc_get_vlan_info(char* buf, unsigned int cnt)
 		nm_type = "UNKNOWN";
 	}
 
-	cnt += sprintf(buf + cnt, "Name-Type: %s  bad_proto_recvd: %lu\n",
-		       nm_type, vlan_bad_proto_recvd);
+	cnt += sprintf(buf + cnt, "Name-Type: %s\n", nm_type);
 
-	for (grp = p802_1Q_vlan_list; grp != NULL; grp = grp->next) {
-		/* loop through all devices for this device */
-#ifdef VLAN_DEBUG
-		printk(VLAN_DBG __FUNCTION__ ": found a group, addr: %p\n",grp);
-#endif
-		for (i = 0; i < VLAN_GROUP_ARRAY_LEN; i++) {
-			vlandev = grp->vlan_devices[i];
-			if (!vlandev)
-				continue;
-#ifdef VLAN_DEBUG
-			printk(VLAN_DBG __FUNCTION__
-			       ": found a vlan_dev, addr: %p\n", vlandev);
-#endif
-			if ((cnt + 100) > VLAN_PROC_BUFSZ) {
-				if ((cnt+strlen(term_msg)) < VLAN_PROC_BUFSZ)
-					cnt += sprintf(buf+cnt, "%s", term_msg);
+	spin_lock_bh(&vlan_group_lock);
+	for (h = 0; h < VLAN_GRP_HASH_SIZE; h++) {
+		for (grp = vlan_group_hash[h]; grp != NULL; grp = grp->next) {
+			for (i = 0; i < VLAN_GROUP_ARRAY_LEN; i++) {
+				vlandev = grp->vlan_devices[i];
+				if (!vlandev)
+					continue;
 
-				return cnt;
+				if ((cnt + 100) > VLAN_PROC_BUFSZ) {
+					if ((cnt+strlen(term_msg)) < VLAN_PROC_BUFSZ)
+						cnt += sprintf(buf+cnt, "%s", term_msg);
+
+					goto out;
+				}
+
+				dev_info = VLAN_DEV_INFO(vlandev);
+				cnt += sprintf(buf + cnt, "%-15s| %d  | %s\n",
+					       vlandev->name,
+					       dev_info->vlan_id,
+					       dev_info->real_dev->name);
 			}
-			if (!vlandev->priv) {
-				printk(KERN_ERR __FUNCTION__
-				       ": ERROR: vlandev->priv is NULL\n");
-				continue;
-			}
-
-			dev_info = VLAN_DEV_INFO(vlandev);
-
-#ifdef VLAN_DEBUG
-			printk(VLAN_DBG __FUNCTION__
-			       ": got a good vlandev, addr: %p\n",
-			       VLAN_DEV_INFO(vlandev));
-#endif
-			cnt += sprintf(buf + cnt, "%-15s| %d  | %s\n",
-				       vlandev->name, dev_info->vlan_id,
-				       dev_info->real_dev->name);
 		}
 	}
+out:
+	spin_unlock_bh(&vlan_group_lock);
+
 	return cnt;
 }
 
@@ -366,11 +358,7 @@ static int vlandev_get_info(char *buf, char **start,
 	int cnt = 0;
 	int i;
 
-#ifdef VLAN_DEBUG
-	printk(VLAN_DBG __FUNCTION__ ": vlandev: %p\n", vlandev);
-#endif
-
-	if ((vlandev == NULL) || (!vlandev->priv_flags & IFF_802_1Q_VLAN))
+	if ((vlandev == NULL) || (!(vlandev->priv_flags & IFF_802_1Q_VLAN)))
 		return 0;
 
 	dev_info = VLAN_DEV_INFO(vlandev);
@@ -427,7 +415,7 @@ static int vlandev_get_info(char *buf, char **start,
 
 	cnt += sprintf(buf + cnt, "EGRESSS priority Mappings: ");
 
-	for (i = 0; i<16; i++) {
+	for (i = 0; i < 16; i++) {
 		mp = dev_info->egress_priority_map[i];
 		while (mp) {
 			cnt += sprintf(buf + cnt, "%lu:%hu ",
@@ -462,7 +450,7 @@ int __init vlan_proc_init (void)
 	return 0;
 }
 
-void __exit vlan_proc_cleanup(void)
+void vlan_proc_cleanup(void)
 {
 	return;
 }

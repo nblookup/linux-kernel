@@ -144,12 +144,10 @@ static int tcindex_init(struct tcf_proto *tp)
 	struct tcindex_data *p;
 
 	DPRINTK("tcindex_init(tp %p)\n",tp);
-	MOD_INC_USE_COUNT;
 	p = kmalloc(sizeof(struct tcindex_data),GFP_KERNEL);
-	if (!p) {
-		MOD_DEC_USE_COUNT;
+	if (!p)
 		return -ENOMEM;
-	}
+
 	tp->root = p;
 	p->perfect = NULL;
 	p->h = NULL;
@@ -417,11 +415,8 @@ static void tcindex_destroy(struct tcf_proto *tp)
 		kfree(p->h);
 	kfree(p);
 	tp->root = NULL;
-	MOD_DEC_USE_COUNT;
 }
 
-
-#ifdef CONFIG_RTNETLINK
 
 static int tcindex_dump(struct tcf_proto *tp, unsigned long fh,
     struct sk_buff *skb, struct tcmsg *t)
@@ -481,26 +476,19 @@ rtattr_failure:
 	return -1;
 }
 
-#endif
-
-
 struct tcf_proto_ops cls_tcindex_ops = {
-	NULL,
-	"tcindex",
-	tcindex_classify,
-	tcindex_init,
-	tcindex_destroy,
-
-	tcindex_get,
-	tcindex_put,
-	tcindex_change,
-	tcindex_delete,
-	tcindex_walk,
-#ifdef CONFIG_RTNETLINK
-	tcindex_dump
-#else
-	NULL
-#endif
+	.next		=	NULL,
+	.kind		=	"tcindex",
+	.classify	=	tcindex_classify,
+	.init		=	tcindex_init,
+	.destroy	=	tcindex_destroy,
+	.get		=	tcindex_get,
+	.put		=	tcindex_put,
+	.change		=	tcindex_change,
+	.delete		=	tcindex_delete,
+	.walk		=	tcindex_walk,
+	.dump		=	tcindex_dump,
+	.owner		=	THIS_MODULE,
 };
 
 

@@ -13,8 +13,6 @@ match(const struct sk_buff *skb,
       const struct net_device *out,
       const void *matchinfo,
       int offset,
-      const void *hdr,
-      u_int16_t datalen,
       int *hotdrop)
 {
 	const struct ipt_state_info *sinfo = matchinfo;
@@ -41,22 +39,22 @@ static int check(const char *tablename,
 	return 1;
 }
 
-static struct ipt_match state_match
-= { { NULL, NULL }, "state", &match, &check, NULL, THIS_MODULE };
+static struct ipt_match state_match = {
+	.name		= "state",
+	.match		= &match,
+	.checkentry	= &check,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {
-	/* NULL if ip_conntrack not a module */
-	if (ip_conntrack_module)
-		__MOD_INC_USE_COUNT(ip_conntrack_module);
+	need_ip_conntrack();
 	return ipt_register_match(&state_match);
 }
 
 static void __exit fini(void)
 {
 	ipt_unregister_match(&state_match);
-	if (ip_conntrack_module)
-		__MOD_DEC_USE_COUNT(ip_conntrack_module);
 }
 
 module_init(init);

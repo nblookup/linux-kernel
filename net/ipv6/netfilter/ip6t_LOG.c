@@ -25,16 +25,6 @@ struct in_device;
 #define DEBUGP(format, args...)
 #endif
 
-#define NIP6(addr) \
-	ntohs((addr).s6_addr16[0]), \
-	ntohs((addr).s6_addr16[1]), \
-	ntohs((addr).s6_addr16[2]), \
-	ntohs((addr).s6_addr16[3]), \
-	ntohs((addr).s6_addr16[4]), \
-	ntohs((addr).s6_addr16[5]), \
-	ntohs((addr).s6_addr16[6]), \
-	ntohs((addr).s6_addr16[7])
-
 struct esphdr {
 	__u32   spi;
 }; /* FIXME evil kludge */
@@ -89,7 +79,7 @@ static void dump_packet(const struct ip6t_log_info *info,
 	printk("DST=%04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x ", NIP6(ipv6h->daddr));
 
 	/* Max length: 44 "LEN=65535 TC=255 HOPLIMIT=255 FLOWLBL=FFFFF " */
-	printk("LEN=%u TC=%u HOPLIMIT=%u FLOWLBL=%u ",
+	printk("LEN=%Zu TC=%u HOPLIMIT=%u FLOWLBL=%u ",
 	       ntohs(ipv6h->payload_len) + sizeof(struct ipv6hdr),
 	       (ntohl(*(u_int32_t *)ipv6h) & 0x0ff00000) >> 20,
 	       ipv6h->hop_limit,
@@ -112,7 +102,7 @@ static void dump_packet(const struct ip6t_log_info *info,
 			printk("FRAG:%u ", ntohs(fhdr->frag_off) & 0xFFF8);
 
 			/* Max length: 11 "INCOMPLETE " */
-			if (fhdr->frag_off & __constant_htons(0x0001))
+			if (fhdr->frag_off & htons(0x0001))
 				printk("INCOMPLETE ");
 
 			printk("ID:%08x ", fhdr->identification);
@@ -289,12 +279,39 @@ ip6t_log_target(struct sk_buff **pskb,
 		/* MAC logging for input chain only. */
 		printk("MAC=");
 		if ((*pskb)->dev && (*pskb)->dev->hard_header_len && (*pskb)->mac.raw != (void*)ipv6h) {
-			int i;
-			unsigned char *p = (*pskb)->mac.raw;
-			for (i = 0; i < (*pskb)->dev->hard_header_len; i++,p++)
+			if ((*pskb)->dev->type != ARPHRD_SIT){
+			  int i;
+			  unsigned char *p = (*pskb)->mac.raw;
+			  for (i = 0; i < (*pskb)->dev->hard_header_len; i++,p++)
 				printk("%02x%c", *p,
-				       i==(*pskb)->dev->hard_header_len - 1
-				       ? ' ':':');
+			       		i==(*pskb)->dev->hard_header_len - 1
+			       		? ' ':':');
+			} else {
+			  int i;
+			  unsigned char *p = (*pskb)->mac.raw;
+			  if ( p - (ETH_ALEN*2+2) > (*pskb)->head ){
+			    p -= (ETH_ALEN+2);
+			    for (i = 0; i < (ETH_ALEN); i++,p++)
+				printk("%02x%s", *p,
+					i == ETH_ALEN-1 ? "->" : ":");
+			    p -= (ETH_ALEN*2);
+			    for (i = 0; i < (ETH_ALEN); i++,p++)
+				printk("%02x%c", *p,
+					i == ETH_ALEN-1 ? ' ' : ':');
+			  }
+			  
+			  if (((*pskb)->dev->addr_len == 4) &&
+			      (*pskb)->dev->hard_header_len > 20){
+			    printk("TUNNEL=");
+			    p = (*pskb)->mac.raw + 12;
+			    for (i = 0; i < 4; i++,p++)
+				printk("%3d%s", *p,
+					i == 3 ? "->" : ".");
+			    for (i = 0; i < 4; i++,p++)
+				printk("%3d%c", *p,
+					i == 3 ? ' ' : '.');
+			  }
+			}
 		} else
 			printk(" ");
 	}

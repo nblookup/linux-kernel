@@ -47,8 +47,6 @@ ipt_limit_match(const struct sk_buff *skb,
 		const struct net_device *out,
 		const void *matchinfo,
 		int offset,
-		const void *hdr,
-		u_int16_t datalen,
 		int *hotdrop)
 {
 	struct ipt_rateinfo *r = ((struct ipt_rateinfo *)matchinfo)->master;
@@ -115,9 +113,12 @@ ipt_limit_checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_match ipt_limit_reg
-= { { NULL, NULL }, "limit", ipt_limit_match, ipt_limit_checkentry, NULL,
-    THIS_MODULE };
+static struct ipt_match ipt_limit_reg = {
+	.name		= "limit",
+	.match		= ipt_limit_match,
+	.checkentry	= ipt_limit_checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

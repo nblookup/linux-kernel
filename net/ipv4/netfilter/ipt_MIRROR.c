@@ -6,6 +6,10 @@
 
   Copyright (C) 2000 Emmanuel Roger <winfield@freegates.be>
 
+  Changes:
+	25 Aug 2001 Harald Welte <laforge@gnumonks.org>
+		- decrement and check TTL if not called from FORWARD hook
+
   This program is free software; you can redistribute it and/or modify it
   under the terms of the GNU General Public License as published by the
   Free Software Foundation; either version 2 of the License, or (at your
@@ -24,6 +28,7 @@
 #include <linux/skbuff.h>
 #include <linux/ip.h>
 #include <net/ip.h>
+#include <net/icmp.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netdevice.h>
 #include <linux/route.h>
@@ -39,12 +44,13 @@ struct in_device;
 static int route_mirror(struct sk_buff *skb)
 {
         struct iphdr *iph = skb->nh.iph;
+	struct flowi fl = { .nl_u = { .ip4_u = { .daddr = iph->saddr,
+						 .saddr = iph->daddr,
+						 .tos = RT_TOS(iph->tos) | RTO_CONN } } };
 	struct rtable *rt;
 
 	/* Backwards */
-	if (ip_route_output(&rt, iph->saddr, iph->daddr,
-			    RT_TOS(iph->tos) | RTO_CONN,
-			    0)) {
+	if (ip_route_output_key(&rt, &fl)) {
 		return 0;
 	}
 
@@ -59,18 +65,22 @@ static int route_mirror(struct sk_buff *skb)
 	return 0;
 }
 
-static void
-ip_rewrite(struct sk_buff *skb)
+static int ip_rewrite(struct sk_buff **pskb)
 {
-	struct iphdr *iph = skb->nh.iph;
-	u32 odaddr = iph->saddr;
-	u32 osaddr = iph->daddr;
+	u32 odaddr, osaddr;
 
-	skb->nfcache |= NFC_ALTERED;
+	if (!skb_ip_make_writable(pskb, sizeof(struct iphdr)))
+		return 0;
+
+	odaddr = (*pskb)->nh.iph->saddr;
+	osaddr = (*pskb)->nh.iph->daddr;
+
+	(*pskb)->nfcache |= NFC_ALTERED;
 
 	/* Rewrite IP header */
-	iph->daddr = odaddr;
-	iph->saddr = osaddr;
+	(*pskb)->nh.iph->daddr = odaddr;
+	(*pskb)->nh.iph->saddr = osaddr;
+	return 1;
 }
 
 /* Stolen from ip_finish_output2 */
@@ -80,8 +90,11 @@ static void ip_direct_send(struct sk_buff *skb)
 	struct hh_cache *hh = dst->hh;
 
 	if (hh) {
+		int hh_alen;
+
 		read_lock_bh(&hh->hh_lock);
-  		memcpy(skb->data - 16, hh->hh_data, 16);
+		hh_alen = HH_DATA_ALIGN(hh->hh_len);
+  		memcpy(skb->data - hh_alen, hh->hh_data, hh_alen);
 		read_unlock_bh(&hh->hh_lock);
 	        skb_push(skb, hh->hh_len);
 		hh->hh_output(skb);
@@ -94,21 +107,36 @@ static void ip_direct_send(struct sk_buff *skb)
 }
 
 static unsigned int ipt_mirror_target(struct sk_buff **pskb,
-				      unsigned int hooknum,
 				      const struct net_device *in,
 				      const struct net_device *out,
+				      unsigned int hooknum,
 				      const void *targinfo,
 				      void *userinfo)
 {
-	if ((*pskb)->dst != NULL) {
-		if (route_mirror(*pskb)) {
-			ip_rewrite(*pskb);
-			/* Don't let conntrack code see this packet:
-                           it will think we are starting a new
-                           connection! --RR */
-			ip_direct_send(*pskb);
-			return NF_STOLEN;
+	if (((*pskb)->dst != NULL) && route_mirror(*pskb)) {
+		if (!ip_rewrite(pskb))
+			return NF_DROP;
+
+		/* If we are not at FORWARD hook (INPUT/PREROUTING),
+		 * the TTL isn't decreased by the IP stack */
+		if (hooknum != NF_IP_FORWARD) {
+			if ((*pskb)->nh.iph->ttl <= 1) {
+				/* this will traverse normal stack, and 
+				 * thus call conntrack on the icmp packet */
+				icmp_send(*pskb, ICMP_TIME_EXCEEDED, 
+					  ICMP_EXC_TTL, 0);
+				return NF_DROP;
+			}
+			/* Made writable by ip_rewrite */
+			ip_decrease_ttl((*pskb)->nh.iph);
 		}
+
+		/* Don't let conntrack code see this packet:
+                   it will think we are starting a new
+                   connection! --RR */
+		ip_direct_send(*pskb);
+
+		return NF_STOLEN;
 	}
 	return NF_DROP;
 }
@@ -135,9 +163,12 @@ static int ipt_mirror_checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_target ipt_mirror_reg
-= { { NULL, NULL }, "MIRROR", ipt_mirror_target, ipt_mirror_checkentry, NULL,
-    THIS_MODULE };
+static struct ipt_target ipt_mirror_reg = {
+	.name		= "MIRROR",
+	.target		= ipt_mirror_target,
+	.checkentry	= ipt_mirror_checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

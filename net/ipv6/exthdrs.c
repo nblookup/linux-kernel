@@ -18,6 +18,9 @@
 /* Changes:
  *	yoshfuji		: ensure not to overrun while parsing 
  *				  tlv options.
+ *	Mitsuru KANDA @USAGI and: Remove ipv6_parse_exthdrs().
+ *	YOSHIFUJI Hideaki @USAGI  Register inbound extension header
+ *				  handlers as inet6_protocol{}.
  */
 
 #include <linux/errno.h>
@@ -44,20 +47,6 @@
 #include <asm/uaccess.h>
 
 /*
- *	Parsing inbound headers.
- *
- *	Parsing function "func" returns offset wrt skb->nh of the place,
- *	where next nexthdr value is stored or NULL, if parsing
- *	failed. It should also update skb->h tp point at the next header.
- */
-
-struct hdrtype_proc
-{
-	int	type;
-	int	(*func) (struct sk_buff **, int offset);
-};
-
-/*
  *	Parsing tlv encoded headers.
  *
  *	Parsing function "func" returns 1, if parsing succeed
@@ -65,10 +54,9 @@ struct hdrtype_proc
  *	It MUST NOT touch skb->h.
  */
 
-struct tlvtype_proc
-{
+struct tlvtype_proc {
 	int	type;
-	int	(*func) (struct sk_buff *, int offset);
+	int	(*func)(struct sk_buff *skb, int offset);
 };
 
 /*********************
@@ -77,7 +65,7 @@ struct tlvtype_proc
 
 /* An unknown option is detected, decide what to do */
 
-int ip6_tlvopt_unknown(struct sk_buff *skb, int optoff)
+static int ip6_tlvopt_unknown(struct sk_buff *skb, int optoff)
 {
 	switch ((skb->nh.raw[optoff] & 0xC0) >> 6) {
 	case 0: /* ignore */
@@ -159,14 +147,14 @@ bad:
   Destination options header.
  *****************************/
 
-struct tlvtype_proc tlvprocdestopt_lst[] = {
+static struct tlvtype_proc tlvprocdestopt_lst[] = {
 	/* No destination options are defined now */
 	{-1,			NULL}
 };
 
-static int ipv6_dest_opt(struct sk_buff **skb_ptr, int nhoff)
+static int ipv6_destopt_rcv(struct sk_buff **skbp, unsigned int *nhoffp)
 {
-	struct sk_buff *skb=*skb_ptr;
+	struct sk_buff *skb = *skbp;
 	struct inet6_skb_parm *opt = (struct inet6_skb_parm *)skb->cb;
 
 	if (!pskb_may_pull(skb, (skb->h.raw-skb->data)+8) ||
@@ -179,29 +167,54 @@ static int ipv6_dest_opt(struct sk_buff **skb_ptr, int nhoff)
 
 	if (ip6_parse_tlv(tlvprocdestopt_lst, skb)) {
 		skb->h.raw += ((skb->h.raw[1]+1)<<3);
-		return opt->dst1;
+		*nhoffp = opt->dst1;
+		return 1;
 	}
 
 	return -1;
+}
+
+static struct inet6_protocol destopt_protocol = {
+	.handler	=	ipv6_destopt_rcv,
+	.flags		=	INET6_PROTO_NOPOLICY,
+};
+
+void __init ipv6_destopt_init(void)
+{
+	if (inet6_add_protocol(&destopt_protocol, IPPROTO_DSTOPTS) < 0)
+		printk(KERN_ERR "ipv6_destopt_init: Could not register protocol\n");
 }
 
 /********************************
   NONE header. No data in packet.
  ********************************/
 
-static int ipv6_nodata(struct sk_buff **skb_ptr, int nhoff)
+static int ipv6_nodata_rcv(struct sk_buff **skbp, unsigned int *nhoffp)
 {
-	kfree_skb(*skb_ptr);
-	return -1;
+	struct sk_buff *skb = *skbp;
+
+	kfree_skb(skb);
+	return 0;
+}
+
+static struct inet6_protocol nodata_protocol = {
+	.handler	=	ipv6_nodata_rcv,
+	.flags		=	INET6_PROTO_NOPOLICY,
+};
+
+void __init ipv6_nodata_init(void)
+{
+	if (inet6_add_protocol(&nodata_protocol, IPPROTO_NONE) < 0)
+		printk(KERN_ERR "ipv6_nodata_init: Could not register protocol\n");
 }
 
 /********************************
   Routing header.
  ********************************/
 
-static int ipv6_routing_header(struct sk_buff **skb_ptr, int nhoff)
+static int ipv6_rthdr_rcv(struct sk_buff **skbp, unsigned int *nhoffp)
 {
-	struct sk_buff *skb = *skb_ptr;
+	struct sk_buff *skb = *skbp;
 	struct inet6_skb_parm *opt = (struct inet6_skb_parm *)skb->cb;
 	struct in6_addr *addr;
 	struct in6_addr daddr;
@@ -232,17 +245,23 @@ looped_back:
 		skb->h.raw += (hdr->hdrlen + 1) << 3;
 		opt->dst0 = opt->dst1;
 		opt->dst1 = 0;
-		return (&hdr->nexthdr) - skb->nh.raw;
+		*nhoffp = (&hdr->nexthdr) - skb->nh.raw;
+		return 1;
 	}
 
-	if (hdr->type != IPV6_SRCRT_TYPE_0 || (hdr->hdrlen & 0x01)) {
-		icmpv6_param_prob(skb, ICMPV6_HDR_FIELD, hdr->type != IPV6_SRCRT_TYPE_0 ? 2 : 1);
+	if (hdr->type != IPV6_SRCRT_TYPE_0) {
+		icmpv6_param_prob(skb, ICMPV6_HDR_FIELD, (&hdr->type) - skb->nh.raw);
+		return -1;
+	}
+	
+	if (hdr->hdrlen & 0x01) {
+		icmpv6_param_prob(skb, ICMPV6_HDR_FIELD, (&hdr->hdrlen) - skb->nh.raw);
 		return -1;
 	}
 
 	/*
 	 *	This is the routing header forwarding algorithm from
-	 *	RFC 1883, page 17.
+	 *	RFC 2460, page 16.
 	 */
 
 	n = hdr->hdrlen >> 1;
@@ -260,7 +279,7 @@ looped_back:
 		kfree_skb(skb);
 		if (skb2 == NULL)
 			return -1;
-		*skb_ptr = skb = skb2;
+		*skbp = skb = skb2;
 		opt = (struct inet6_skb_parm *)skb2->cb;
 		hdr = (struct ipv6_rt_hdr *) skb2->h.raw;
 	}
@@ -288,7 +307,7 @@ looped_back:
 	dst_release(xchg(&skb->dst, NULL));
 	ip6_route_input(skb);
 	if (skb->dst->error) {
-		skb->dst->input(skb);
+		dst_input(skb);
 		return -1;
 	}
 	if (skb->dst->dev->flags&IFF_LOOPBACK) {
@@ -302,9 +321,20 @@ looped_back:
 		goto looped_back;
 	}
 
-	skb->dst->input(skb);
+	dst_input(skb);
 	return -1;
 }
+
+static struct inet6_protocol rthdr_protocol = {
+	.handler	=	ipv6_rthdr_rcv,
+	.flags		=	INET6_PROTO_NOPOLICY,
+};
+
+void __init ipv6_rthdr_init(void)
+{
+	if (inet6_add_protocol(&rthdr_protocol, IPPROTO_ROUTING) < 0)
+		printk(KERN_ERR "ipv6_rthdr_init: Could not register protocol\n");
+};
 
 /*
    This function inverts received rthdr.
@@ -315,7 +345,7 @@ looped_back:
    this stupid requirement making rthdr idea useless)
 
    Actually, it creates severe problems  for us.
-   Embrionic requests has no associated sockets,
+   Embryonic requests has no associated sockets,
    so that user have no control over it and
    cannot not only to set reply options, but
    even to know, that someone wants to connect
@@ -371,96 +401,11 @@ ipv6_invert_rthdr(struct sock *sk, struct ipv6_rt_hdr *hdr)
 	return opt;
 }
 
-/********************************
-  AUTH header.
- ********************************/
-
-/*
-   rfc1826 said, that if a host does not implement AUTH header
-   it MAY ignore it. We use this hole 8)
-
-   Actually, now we can implement OSPFv6 without kernel IPsec.
-   Authentication for poors may be done in user space with the same success.
-
-   Yes, it means, that we allow application to send/receive
-   raw authentication header. Apparently, we suppose, that it knows
-   what it does and calculates authentication data correctly.
-   Certainly, it is possible only for udp and raw sockets, but not for tcp.
-
-   AUTH header has 4byte granular length, which kills all the idea
-   behind AUTOMATIC 64bit alignment of IPv6. Now we will lose
-   cpu ticks, checking that sender did not something stupid
-   and opt->hdrlen is even. Shit!		--ANK (980730)
- */
-
-static int ipv6_auth_hdr(struct sk_buff **skb_ptr, int nhoff)
-{
-	struct sk_buff *skb=*skb_ptr;
-	struct inet6_skb_parm *opt = (struct inet6_skb_parm *)skb->cb;
-	int len;
-
-	if (!pskb_may_pull(skb, (skb->h.raw-skb->data)+8))
-		goto fail;
-
-	len = (skb->h.raw[1]+1)<<2;
-
-	if (len&7)
-		goto fail;
-
-	if (!pskb_may_pull(skb, (skb->h.raw-skb->data)+len))
-		goto fail;
-
-	opt->auth = skb->h.raw - skb->nh.raw;
-	skb->h.raw += len;
-	return opt->auth;
-
-fail:
-	kfree_skb(skb);
-	return -1;
-}
-
-/* This list MUST NOT contain entry for NEXTHDR_HOP.
-   It is parsed immediately after packet received
-   and if it occurs somewhere in another place we must
-   generate error.
- */
-
-struct hdrtype_proc hdrproc_lst[] = {
-	{NEXTHDR_FRAGMENT,	ipv6_reassembly},
-	{NEXTHDR_ROUTING,	ipv6_routing_header},
-	{NEXTHDR_DEST,		ipv6_dest_opt},
-	{NEXTHDR_NONE,		ipv6_nodata},
-	{NEXTHDR_AUTH,		ipv6_auth_hdr},
-   /*
-	{NEXTHDR_ESP,		ipv6_esp_hdr},
-    */
-	{-1,			NULL}
-};
-
-int ipv6_parse_exthdrs(struct sk_buff **skb_in, int nhoff)
-{
-	struct hdrtype_proc *hdrt;
-	u8 nexthdr = (*skb_in)->nh.raw[nhoff];
-
-restart:
-	for (hdrt=hdrproc_lst; hdrt->type >= 0; hdrt++) {
-		if (hdrt->type == nexthdr) {
-			if ((nhoff = hdrt->func(skb_in, nhoff)) >= 0) {
-				nexthdr = (*skb_in)->nh.raw[nhoff];
-				goto restart;
-			}
-			return -1;
-		}
-	}
-	return nhoff;
-}
-
-
 /**********************************
   Hop-by-hop options.
  **********************************/
 
-/* Router Alert as of draft-ietf-ipngwg-ipv6router-alert-04 */
+/* Router Alert as of RFC 2711 */
 
 static int ipv6_hop_ra(struct sk_buff *skb, int optoff)
 {
@@ -487,7 +432,7 @@ static int ipv6_hop_jumbo(struct sk_buff *skb, int optoff)
 	}
 
 	pkt_len = ntohl(*(u32*)(skb->nh.raw+optoff+2));
-	if (pkt_len < 0x10000) {
+	if (pkt_len <= IPV6_MAXPLEN) {
 		icmpv6_param_prob(skb, ICMPV6_HDR_FIELD, optoff+2);
 		return 0;
 	}
@@ -512,10 +457,16 @@ drop:
 	return 0;
 }
 
-struct tlvtype_proc tlvprochopopt_lst[] = {
-	{IPV6_TLV_ROUTERALERT,	ipv6_hop_ra},
-	{IPV6_TLV_JUMBO,	ipv6_hop_jumbo},
-	{-1,			NULL}
+static struct tlvtype_proc tlvprochopopt_lst[] = {
+	{
+		.type	= IPV6_TLV_ROUTERALERT,
+		.func	= ipv6_hop_ra,
+	},
+	{
+		.type	= IPV6_TLV_JUMBO,
+		.func	= ipv6_hop_jumbo,
+	},
+	{ -1, }
 };
 
 int ipv6_parse_hopopts(struct sk_buff *skb, int nhoff)
@@ -536,7 +487,7 @@ int ipv6_parse_hopopts(struct sk_buff *skb, int nhoff)
  *	for headers.
  */
 
-u8 *ipv6_build_rthdr(struct sk_buff *skb, u8 *prev_hdr,
+static u8 *ipv6_build_rthdr(struct sk_buff *skb, u8 *prev_hdr,
 		     struct ipv6_rt_hdr *opt, struct in6_addr *addr)
 {
 	struct rt0_hdr *phdr, *ihdr;
@@ -733,7 +684,7 @@ int ipv6_ext_hdr(u8 nexthdr)
 /*
  * Skip any extension headers. This is used by the ICMP module.
  *
- * Note that strictly speaking this conflicts with RFC1883 4.0:
+ * Note that strictly speaking this conflicts with RFC 2460 4.0:
  * ...The contents and semantics of each extension header determine whether 
  * or not to proceed to the next header.  Therefore, extension headers must
  * be processed strictly in the order they appear in the packet; a

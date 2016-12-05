@@ -149,11 +149,6 @@ static int rsvp_classify(struct sk_buff *skb, struct tcf_proto *tp,
 	struct iphdr *nhptr = skb->nh.iph;
 #endif
 
-#if !defined( __i386__) && !defined(__mc68000__)
-	if ((unsigned long)nhptr & 3)
-		return -1;
-#endif
-
 restart:
 
 #if RSVP_DST_LEN == 4
@@ -247,14 +242,12 @@ static int rsvp_init(struct tcf_proto *tp)
 {
 	struct rsvp_head *data;
 
-	MOD_INC_USE_COUNT;
 	data = kmalloc(sizeof(struct rsvp_head), GFP_KERNEL);
 	if (data) {
 		memset(data, 0, sizeof(struct rsvp_head));
 		tp->root = data;
 		return 0;
 	}
-	MOD_DEC_USE_COUNT;
 	return -ENOBUFS;
 }
 
@@ -294,7 +287,6 @@ static void rsvp_destroy(struct tcf_proto *tp)
 		}
 	}
 	kfree(data);
-	MOD_DEC_USE_COUNT;
 }
 
 static int rsvp_delete(struct tcf_proto *tp, unsigned long arg)
@@ -523,7 +515,7 @@ static int rsvp_change(struct tcf_proto *tp, unsigned long base,
 
 	for (sp = &data->ht[h1]; (s=*sp) != NULL; sp = &s->next) {
 		if (dst[RSVP_DST_LEN-1] == s->dst[RSVP_DST_LEN-1] &&
-		    pinfo->protocol == s->protocol &&
+		    pinfo && pinfo->protocol == s->protocol &&
 		    memcmp(&pinfo->dpi, &s->dpi, sizeof(s->dpi)) == 0
 #if RSVP_DST_LEN == 4
 		    && dst[0] == s->dst[0]
@@ -565,9 +557,12 @@ insert:
 		goto errout;
 	memset(s, 0, sizeof(*s));
 	memcpy(s->dst, dst, sizeof(s->dst));
-	s->dpi = pinfo->dpi;
-	s->protocol = pinfo->protocol;
-	s->tunnelid = pinfo->tunnelid;
+
+	if (pinfo) {
+		s->dpi = pinfo->dpi;
+		s->protocol = pinfo->protocol;
+		s->tunnelid = pinfo->tunnelid;
+	}
 	for (sp = &data->ht[h1]; *sp; sp = &(*sp)->next) {
 		if (((*sp)->dpi.mask&s->dpi.mask) != s->dpi.mask)
 			break;
@@ -615,7 +610,6 @@ static void rsvp_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 	}
 }
 
-#ifdef CONFIG_RTNETLINK
 static int rsvp_dump(struct tcf_proto *tp, unsigned long fh,
 		     struct sk_buff *skb, struct tcmsg *t)
 {
@@ -672,25 +666,20 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
-#endif
 
 struct tcf_proto_ops RSVP_OPS = {
-	NULL,
-	RSVP_ID,
-	rsvp_classify,
-	rsvp_init,
-	rsvp_destroy,
-
-	rsvp_get,
-	rsvp_put,
-	rsvp_change,
-	rsvp_delete,
-	rsvp_walk,
-#ifdef CONFIG_RTNETLINK
-	rsvp_dump
-#else
-	NULL
-#endif
+	.next		=	NULL,
+	.kind		=	RSVP_ID,
+	.classify	=	rsvp_classify,
+	.init		=	rsvp_init,
+	.destroy	=	rsvp_destroy,
+	.get		=	rsvp_get,
+	.put		=	rsvp_put,
+	.change		=	rsvp_change,
+	.delete		=	rsvp_delete,
+	.walk		=	rsvp_walk,
+	.dump		=	rsvp_dump,
+	.owner		=	THIS_MODULE,
 };
 
 #ifdef MODULE

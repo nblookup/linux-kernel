@@ -5,7 +5,7 @@
  *
  *		IPv4 Forwarding Information Base: FIB frontend.
  *
- * Version:	$Id: fib_frontend.c,v 1.25 2001/05/29 22:16:25 davem Exp $
+ * Version:	$Id: fib_frontend.c,v 1.26 2001/10/31 21:55:54 davem Exp $
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
@@ -31,7 +31,6 @@
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
-#include <linux/proc_fs.h>
 #include <linux/skbuff.h>
 #include <linux/netlink.h>
 #include <linux/init.h>
@@ -51,8 +50,8 @@
 
 #define RT_TABLE_MIN RT_TABLE_MAIN
 
-struct fib_table *local_table;
-struct fib_table *main_table;
+struct fib_table *ip_fib_local_table;
+struct fib_table *ip_fib_main_table;
 
 #else
 
@@ -88,55 +87,13 @@ void fib_flush(void)
 		flushed += tb->tb_flush(tb);
 	}
 #else /* CONFIG_IP_MULTIPLE_TABLES */
-	flushed += main_table->tb_flush(main_table);
-	flushed += local_table->tb_flush(local_table);
+	flushed += ip_fib_main_table->tb_flush(ip_fib_main_table);
+	flushed += ip_fib_local_table->tb_flush(ip_fib_local_table);
 #endif /* CONFIG_IP_MULTIPLE_TABLES */
 
 	if (flushed)
 		rt_cache_flush(-1);
 }
-
-
-#ifdef CONFIG_PROC_FS
-
-/* 
- *	Called from the PROCfs module. This outputs /proc/net/route.
- *
- *	It always works in backward compatibility mode.
- *	The format of the file is not supposed to be changed.
- */
- 
-static int
-fib_get_procinfo(char *buffer, char **start, off_t offset, int length)
-{
-	int first = offset/128;
-	char *ptr = buffer;
-	int count = (length+127)/128;
-	int len;
-
-	*start = buffer + offset%128;
-	
-	if (--first < 0) {
-		sprintf(buffer, "%-127s\n", "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT");
-		--count;
-		ptr += 128;
-		first = 0;
-  	}
-
-	if (main_table && count > 0) {
-		int n = main_table->tb_get_info(main_table, ptr, first, count);
-		count -= n;
-		ptr += n*128;
-	}
-	len = ptr - *start;
-	if (len >= length)
-		return length;
-	if (len >= 0)
-		return len;
-	return 0;
-}
-
-#endif /* CONFIG_PROC_FS */
 
 /*
  *	Find the first device with a given source address.
@@ -144,25 +101,23 @@ fib_get_procinfo(char *buffer, char **start, off_t offset, int length)
 
 struct net_device * ip_dev_find(u32 addr)
 {
-	struct rt_key key;
+	struct flowi fl = { .nl_u = { .ip4_u = { .daddr = addr } } };
 	struct fib_result res;
 	struct net_device *dev = NULL;
 
-	memset(&key, 0, sizeof(key));
-	key.dst = addr;
 #ifdef CONFIG_IP_MULTIPLE_TABLES
 	res.r = NULL;
 #endif
 
-	if (!local_table || local_table->tb_lookup(local_table, &key, &res)) {
+	if (!ip_fib_local_table ||
+	    ip_fib_local_table->tb_lookup(ip_fib_local_table, &fl, &res))
 		return NULL;
-	}
 	if (res.type != RTN_LOCAL)
 		goto out;
 	dev = FIB_RES_DEV(res);
-	if (dev)
-		atomic_inc(&dev->refcnt);
 
+	if (dev)
+		dev_hold(dev);
 out:
 	fib_res_put(&res);
 	return dev;
@@ -170,7 +125,7 @@ out:
 
 unsigned inet_addr_type(u32 addr)
 {
-	struct rt_key		key;
+	struct flowi		fl = { .nl_u = { .ip4_u = { .daddr = addr } } };
 	struct fib_result	res;
 	unsigned ret = RTN_BROADCAST;
 
@@ -179,15 +134,14 @@ unsigned inet_addr_type(u32 addr)
 	if (MULTICAST(addr))
 		return RTN_MULTICAST;
 
-	memset(&key, 0, sizeof(key));
-	key.dst = addr;
 #ifdef CONFIG_IP_MULTIPLE_TABLES
 	res.r = NULL;
 #endif
 	
-	if (local_table) {
+	if (ip_fib_local_table) {
 		ret = RTN_UNICAST;
-		if (local_table->tb_lookup(local_table, &key, &res) == 0) {
+		if (!ip_fib_local_table->tb_lookup(ip_fib_local_table,
+						   &fl, &res)) {
 			ret = res.type;
 			fib_res_put(&res);
 		}
@@ -207,17 +161,14 @@ int fib_validate_source(u32 src, u32 dst, u8 tos, int oif,
 			struct net_device *dev, u32 *spec_dst, u32 *itag)
 {
 	struct in_device *in_dev;
-	struct rt_key key;
+	struct flowi fl = { .nl_u = { .ip4_u =
+				      { .daddr = src,
+					.saddr = dst,
+					.tos = tos } },
+			    .iif = oif };
 	struct fib_result res;
 	int no_addr, rpf;
 	int ret;
-
-	key.dst = src;
-	key.src = dst;
-	key.tos = tos;
-	key.oif = 0;
-	key.iif = oif;
-	key.scope = RT_SCOPE_UNIVERSE;
 
 	no_addr = rpf = 0;
 	read_lock(&inetdev_lock);
@@ -231,7 +182,7 @@ int fib_validate_source(u32 src, u32 dst, u8 tos, int oif,
 	if (in_dev == NULL)
 		goto e_inval;
 
-	if (fib_lookup(&key, &res))
+	if (fib_lookup(&fl, &res))
 		goto last_resort;
 	if (res.type != RTN_UNICAST)
 		goto e_inval_res;
@@ -252,10 +203,10 @@ int fib_validate_source(u32 src, u32 dst, u8 tos, int oif,
 		goto last_resort;
 	if (rpf)
 		goto e_inval;
-	key.oif = dev->ifindex;
+	fl.oif = dev->ifindex;
 
 	ret = 0;
-	if (fib_lookup(&key, &res) == 0) {
+	if (fib_lookup(&fl, &res) == 0) {
 		if (res.type == RTN_UNICAST) {
 			*spec_dst = FIB_RES_PREFSRC(res);
 			ret = FIB_RES_NH(res).nh_scope >= RT_SCOPE_HOST;
@@ -332,8 +283,6 @@ int ip_rt_ioctl(unsigned int cmd, void *arg)
 
 #endif
 
-#ifdef CONFIG_RTNETLINK
-
 static int inet_check_attr(struct rtmsg *r, struct rtattr **rta)
 {
 	int i;
@@ -408,8 +357,6 @@ int inet_dump_fib(struct sk_buff *skb, struct netlink_callback *cb)
 
 	return skb->len;
 }
-
-#endif
 
 /* Prepare and feed intra-kernel routing request.
    Really, it should be netlink message, but :-( netlink
@@ -583,6 +530,9 @@ static int fib_inetaddr_event(struct notifier_block *this, unsigned long event, 
 	switch (event) {
 	case NETDEV_UP:
 		fib_add_ifaddr(ifa);
+#ifdef CONFIG_IP_ROUTE_MULTIPATH
+		fib_sync_up(ifa->ifa_dev->dev);
+#endif
 		rt_cache_flush(-1);
 		break;
 	case NETDEV_DOWN:
@@ -605,6 +555,11 @@ static int fib_netdev_event(struct notifier_block *this, unsigned long event, vo
 	struct net_device *dev = ptr;
 	struct in_device *in_dev = __in_dev_get(dev);
 
+	if (event == NETDEV_UNREGISTER) {
+		fib_disable_ip(dev, 2);
+		return NOTIFY_DONE;
+	}
+
 	if (!in_dev)
 		return NOTIFY_DONE;
 
@@ -621,9 +576,6 @@ static int fib_netdev_event(struct notifier_block *this, unsigned long event, vo
 	case NETDEV_DOWN:
 		fib_disable_ip(dev, 0);
 		break;
-	case NETDEV_UNREGISTER:
-		fib_disable_ip(dev, 1);
-		break;
 	case NETDEV_CHANGEMTU:
 	case NETDEV_CHANGE:
 		rt_cache_flush(0);
@@ -633,22 +585,18 @@ static int fib_netdev_event(struct notifier_block *this, unsigned long event, vo
 }
 
 struct notifier_block fib_inetaddr_notifier = {
-	notifier_call:	fib_inetaddr_event,
+	.notifier_call =fib_inetaddr_event,
 };
 
 struct notifier_block fib_netdev_notifier = {
-	notifier_call:	fib_netdev_event,
+	.notifier_call =fib_netdev_event,
 };
 
 void __init ip_fib_init(void)
 {
-#ifdef CONFIG_PROC_FS
-	proc_net_create("route",0,fib_get_procinfo);
-#endif		/* CONFIG_PROC_FS */
-
 #ifndef CONFIG_IP_MULTIPLE_TABLES
-	local_table = fib_hash_init(RT_TABLE_LOCAL);
-	main_table = fib_hash_init(RT_TABLE_MAIN);
+	ip_fib_local_table = fib_hash_init(RT_TABLE_LOCAL);
+	ip_fib_main_table  = fib_hash_init(RT_TABLE_MAIN);
 #else
 	fib_rules_init();
 #endif
