@@ -1,24 +1,25 @@
 /*
- *  linux/kernel/system_call.s
+ *  linux/kernel/sys_call.S
  *
- *  (C) 1991  Linus Torvalds
+ *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
 /*
- *  system_call.s  contains the system-call low-level handling routines.
- * This also contains the timer-interrupt handler, as some of the code is
- * the same. The hd- and flopppy-interrupts are also here.
+ * sys_call.S  contains the system-call and fault low-level handling routines.
+ * This also contains the timer-interrupt handler, as well as all interrupts
+ * and faults that can result in a task-switch.
  *
  * NOTE: This code handles signal-recognition, which happens every time
- * after a timer-interrupt and after each system call. Ordinary interrupts
- * don't handle signal-recognition, as that would clutter them up totally
- * unnecessarily.
+ * after a timer-interrupt and after each system call.
+ *
+ * I changed all the .align's to 4 (16 byte alignment), as that's faster
+ * on a 486.
  *
  * Stack layout in 'ret_from_system_call':
  * 	ptrace needs to have all regs on the stack.
  *	if the order here is changed, it needs to be 
  *	updated in fork.c:copy_process, signal.c:do_signal,
- *	ptrace.c ptrace.h
+ *	ptrace.c and ptrace.h
  *
  *	 0(%esp) - %ebx
  *	 4(%esp) - %ecx
@@ -39,7 +40,7 @@
  *	40(%esp) - %oldss
  */
 
-SIG_CHLD	= 17
+#include <linux/segment.h>
 
 EBX		= 0x00
 ECX		= 0x04
@@ -59,150 +60,244 @@ EFLAGS		= 0x38
 OLDESP		= 0x3C
 OLDSS		= 0x40
 
-state	= 0		# these are offsets into the task-struct.
-counter	= 4
-priority = 8
-signal	= 12
-sigaction = 16		# MUST be 16 (=len of sigaction)
-blocked = (33*16)
+CF_MASK		= 0x00000001
+IF_MASK		= 0x00000200
+NT_MASK		= 0x00004000
+VM_MASK		= 0x00020000
 
-# offsets within sigaction
-sa_handler = 0
-sa_mask = 4
-sa_flags = 8
-sa_restorer = 12
-
-nr_system_calls = 82
+/*
+ * these are offsets into the task-struct.
+ */
+state		=  0
+counter		=  4
+priority	=  8
+signal		= 12
+blocked		= 16
+flags		= 20
+errno		= 24
+dbgreg6		= 52
+dbgreg7		= 56
 
 ENOSYS = 38
 
-/*
- * Ok, I get parallel printer interrupts while using the floppy for some
- * strange reason. Urgel. Now I just ignore them.
- */
-.globl _system_call,_timer_interrupt,_sys_execve
-.globl _hd_interrupt,_floppy_interrupt,_parallel_interrupt
+.globl _system_call,_lcall7
 .globl _device_not_available, _coprocessor_error
+.globl _divide_error,_debug,_nmi,_int3,_overflow,_bounds,_invalid_op
+.globl _double_fault,_coprocessor_segment_overrun
+.globl _invalid_TSS,_segment_not_present,_stack_segment
+.globl _general_protection,_reserved
+.globl _alignment_check,_page_fault
+.globl ret_from_sys_call
 
-.align 2
-bad_sys_call:
-	pushl $-ENOSYS
+#define SAVE_ALL \
+	cld; \
+	push %gs; \
+	push %fs; \
+	push %es; \
+	push %ds; \
+	pushl %eax; \
+	pushl %ebp; \
+	pushl %edi; \
+	pushl %esi; \
+	pushl %edx; \
+	pushl %ecx; \
+	pushl %ebx; \
+	movl $(KERNEL_DS),%edx; \
+	mov %dx,%ds; \
+	mov %dx,%es; \
+	movl $(USER_DS),%edx; \
+	mov %dx,%fs;
+
+#define RESTORE_ALL \
+	cmpw $(KERNEL_CS),CS(%esp); \
+	je 1f;   \
+	movl _current,%eax; \
+	movl dbgreg7(%eax),%ebx; \
+	movl %ebx,%db7;	\
+1:	popl %ebx; \
+	popl %ecx; \
+	popl %edx; \
+	popl %esi; \
+	popl %edi; \
+	popl %ebp; \
+	popl %eax; \
+	pop %ds; \
+	pop %es; \
+	pop %fs; \
+	pop %gs; \
+	addl $4,%esp; \
+	iret
+
+.align 4
+_lcall7:
+	pushfl			# We get a different stack layout with call gates,
+	pushl %eax		# which has to be cleaned up later..
+	SAVE_ALL
+	movl EIP(%esp),%eax	# due to call gates, this is eflags, not eip..
+	movl CS(%esp),%edx	# this is eip..
+	movl EFLAGS(%esp),%ecx	# and this is cs..
+	movl %eax,EFLAGS(%esp)	#
+	movl %edx,EIP(%esp)	# Now we move them to their "normal" places
+	movl %ecx,CS(%esp)	#
+	movl %esp,%eax
+	pushl %eax
+	call _iABI_emulate
+	popl %eax
 	jmp ret_from_sys_call
-.align 2
+
+.align 4
+handle_bottom_half:
+	pushfl
+	incl _intr_count
+	sti
+	call _do_bottom_half
+	popfl
+	decl _intr_count
+	jmp 9f
+.align 4
 reschedule:
 	pushl $ret_from_sys_call
 	jmp _schedule
-.align 2
+.align 4
 _system_call:
-	cld
-	pushl %eax		# save orig_eax
-	push %gs
-	push %fs
-	push %es
-	push %ds
-	pushl %eax		# save eax.  The return value will be put here.
-	pushl %ebp
-	pushl %edi
-	pushl %esi
-	pushl %edx		
-	pushl %ecx		# push %ebx,%ecx,%edx as parameters
-	pushl %ebx		# to the system call
-	movl $0x10,%edx		# set up ds,es to kernel space
-	mov %dx,%ds
-	mov %dx,%es
-	movl $0x17,%edx		# fs points to local data space
-	mov %dx,%fs
+	pushl %eax			# save orig_eax
+	SAVE_ALL
+	movl $-ENOSYS,EAX(%esp)
 	cmpl _NR_syscalls,%eax
-	jae bad_sys_call
+	jae ret_from_sys_call
+	movl _current,%ebx
+	andl $~CF_MASK,EFLAGS(%esp)	# clear carry - assume no errors
+	movl $0,errno(%ebx)
+	movl %db6,%edx
+	movl %edx,dbgreg6(%ebx)  # save current hardware debugging status
+	testb $0x20,flags(%ebx)		# PF_TRACESYS
+	jne 1f
 	call _sys_call_table(,%eax,4)
 	movl %eax,EAX(%esp)		# save the return value
-2:	movl _current,%eax
+	movl errno(%ebx),%edx
+	negl %edx
+	je ret_from_sys_call
+	movl %edx,EAX(%esp)
+	orl $(CF_MASK),EFLAGS(%esp)	# set carry to indicate error
+	jmp ret_from_sys_call
+.align 4
+1:	call _syscall_trace
+	movl ORIG_EAX(%esp),%eax
+	call _sys_call_table(,%eax,4)
+	movl %eax,EAX(%esp)		# save the return value
+	movl _current,%eax
+	movl errno(%eax),%edx
+	negl %edx
+	je 1f
+	movl %edx,EAX(%esp)
+	orl $(CF_MASK),EFLAGS(%esp)	# set carry to indicate error
+1:	call _syscall_trace
+
+	.align 4,0x90
+ret_from_sys_call:
+	cmpl $0,_intr_count
+	jne 2f
+	movl _bh_mask,%eax
+	andl _bh_active,%eax
+	jne handle_bottom_half
+9:	movl EFLAGS(%esp),%eax		# check VM86 flag: CS/SS are
+	testl $(VM_MASK),%eax		# different then
+	jne 1f
+	cmpw $(KERNEL_CS),CS(%esp)	# was old code segment supervisor ?
+	je 2f
+1:	sti
+	orl $(IF_MASK),%eax		# these just try to make sure
+	andl $~NT_MASK,%eax		# the program doesn't do anything
+	movl %eax,EFLAGS(%esp)		# stupid
+	cmpl $0,_need_resched
+	jne reschedule
+	movl _current,%eax
+	cmpl _task,%eax			# task[0] cannot have signals
+	je 2f
 	cmpl $0,state(%eax)		# state
 	jne reschedule
 	cmpl $0,counter(%eax)		# counter
 	je reschedule
-ret_from_sys_call:
-	movl _current,%eax
-	cmpl _task,%eax			# task[0] cannot have signals
-	je 3f
-	cmpw $0x0f,CS(%esp)		# was old code segment supervisor ?
-	jne 3f
-	cmpw $0x17,OLDSS(%esp)		# was stack segment = 0x17 ?
-	jne 3f
-	movl signal(%eax),%ebx
 	movl blocked(%eax),%ecx
+	movl %ecx,%ebx			# save blocked in %ebx for signal handling
 	notl %ecx
-	andl %ebx,%ecx
-	bsfl %ecx,%ecx
-	je 3f
-	btrl %ecx,%ebx
-	movl %ebx,signal(%eax)
-	incl %ecx
+	andl signal(%eax),%ecx
+	jne signal_return
+2:	RESTORE_ALL
+.align 4
+signal_return:
+	movl %esp,%ecx
 	pushl %ecx
+	testl $(VM_MASK),EFLAGS(%ecx)
+	jne v86_signal_return
+	pushl %ebx
 	call _do_signal
-	popl %ecx
-	testl %eax, %eax
-	jne 2b		# see if we need to switch tasks, or do more signals
-3:
 	popl %ebx
-	popl %ecx
-	popl %edx
-	popl %esi
-	popl %edi
-	popl %ebp
+	popl %ebx
+	RESTORE_ALL
+.align 4
+v86_signal_return:
+	call _save_v86_state
+	movl %eax,%esp
+	pushl %eax
+	pushl %ebx
+	call _do_signal
+	popl %ebx
+	popl %ebx
+	RESTORE_ALL
+
+.align 4
+_divide_error:
+	pushl $0		# no error code
+	pushl $_do_divide_error
+.align 4,0x90
+error_code:
+	push %fs
+	push %es
+	push %ds
+	pushl %eax
+	pushl %ebp
+	pushl %edi
+	pushl %esi
+	pushl %edx
+	pushl %ecx
+	pushl %ebx
+	movl $0,%eax
+	movl %eax,%db7			# disable hardware debugging...
+	cld
+	movl $-1, %eax
+	xchgl %eax, ORIG_EAX(%esp)	# orig_eax (get the error code. )
+	xorl %ebx,%ebx			# zero ebx
+	mov %gs,%bx			# get the lower order bits of gs
+	xchgl %ebx, GS(%esp)		# get the address and save gs.
+	pushl %eax			# push the error code
+	lea 4(%esp),%edx
+	pushl %edx
+	movl $(KERNEL_DS),%edx
+	mov %dx,%ds
+	mov %dx,%es
+	movl $(USER_DS),%edx
+	mov %dx,%fs
+	pushl %eax
+	movl _current,%eax
+	movl %db6,%edx
+	movl %edx,dbgreg6(%eax)  # save current hardware debugging status
 	popl %eax
-	pop %ds
-	pop %es
-	pop %fs
-	pop %gs
-	addl $4,%esp 		# skip the orig_eax
-	iret
+	call *%ebx
+	addl $8,%esp
+	jmp ret_from_sys_call
 
-.align 2
+.align 4
 _coprocessor_error:
-	cld
-	pushl $-1		# mark this as an int. 
-	push %gs
-	push %fs
-	push %es
-	push %ds
-	pushl %eax		# save eax.
-	pushl %ebp
-	pushl %edi
-	pushl %esi
-	pushl %edx
-	pushl %ecx
-	pushl %ebx
-	movl $0x10,%eax
-	mov %ax,%ds
-	mov %ax,%es
-	movl $0x17,%eax
-	mov %ax,%fs
-	pushl $ret_from_sys_call
-	jmp _math_error
+	pushl $0
+	pushl $_do_coprocessor_error
+	jmp error_code
 
-.align 2
+.align 4
 _device_not_available:
-	cld
 	pushl $-1		# mark this as an int
-	push %gs
-	push %fs
-	push %es
-	push %ds
-	pushl %eax		
-	pushl %ebp
-	pushl %edi
-	pushl %esi
-	pushl %edx
-	pushl %ecx
-	pushl %ebx
-	movl $0x10,%eax
-	mov %ax,%ds
-	mov %ax,%es
-	movl $0x17,%eax
-	mov %ax,%fs
+	SAVE_ALL
 	pushl $ret_from_sys_call
-	clts				# clear TS so that we can use math
 	movl %cr0,%eax
 	testl $0x4,%eax			# EM (math emulation bit)
 	je _math_state_restore
@@ -211,110 +306,85 @@ _device_not_available:
 	addl $4,%esp
 	ret
 
-.align 2
-_timer_interrupt:
-	cld
-	pushl $-1		# mark this as an int
-	push %gs
-	push %fs
-	push %es
-	push %ds
-	pushl %eax
-	pushl %ebp
-	pushl %edi
-	pushl %esi
-	pushl %edx		
-	pushl %ecx
-	pushl %ebx
-	movl $0x10,%eax
-	mov %ax,%ds
-	mov %ax,%es
-	movl $0x17,%eax
-	mov %ax,%fs
-	incl _jiffies
-	movb $0x20,%al		# EOI to interrupt controller #1
-	outb %al,$0x20
-	movl CS(%esp),%eax
-	andl $3,%eax		# %eax is CPL (0 or 3, 0=supervisor)
-	pushl %eax
-	call _do_timer		# 'do_timer(long CPL)' does everything from
-	addl $4,%esp		# task switching to accounting ...
-	jmp ret_from_sys_call
+.align 4
+_debug:
+	pushl $0
+	pushl $_do_debug
+	jmp error_code
 
-.align 2
-_sys_execve:
-	lea (EIP+4)(%esp),%eax  # don't forget about the return address.
-	pushl %eax
-	call _do_execve
-	addl $4,%esp
-	ret
+.align 4
+_nmi:
+	pushl $0
+	pushl $_do_nmi
+	jmp error_code
 
-_hd_interrupt:
-	cld
-	pushl %eax
-	pushl %ecx
-	pushl %edx
-	push %ds
-	push %es
-	push %fs
-	movl $0x10,%eax
-	mov %ax,%ds
-	mov %ax,%es
-	movl $0x17,%eax
-	mov %ax,%fs
-	movb $0x20,%al
-	outb %al,$0xA0		# EOI to interrupt controller #1
-	jmp 1f			# give port chance to breathe
-1:	jmp 1f
-1:	outb %al,$0x20
-	andl $0xfffeffff,_timer_active
-	xorl %edx,%edx
-	xchgl _do_hd,%edx
-	testl %edx,%edx
-	jne 1f
-	movl $_unexpected_hd_interrupt,%edx
-1:	call *%edx		# "interesting" way of handling intr.
-	pop %fs
-	pop %es
-	pop %ds
-	popl %edx
-	popl %ecx
-	popl %eax
-	iret
+.align 4
+_int3:
+	pushl $0
+	pushl $_do_int3
+	jmp error_code
 
-_floppy_interrupt:
-	cld
-	pushl %eax
-	pushl %ecx
-	pushl %edx
-	push %ds
-	push %es
-	push %fs
-	movl $0x10,%eax
-	mov %ax,%ds
-	mov %ax,%es
-	movl $0x17,%eax
-	mov %ax,%fs
-	movb $0x20,%al
-	outb %al,$0x20		# EOI to interrupt controller #1
-	xorl %eax,%eax
-	xchgl _do_floppy,%eax
-	testl %eax,%eax
-	jne 1f
-	movl $_unexpected_floppy_interrupt,%eax
-1:	call *%eax		# "interesting" way of handling intr.
-	pop %fs
-	pop %es
-	pop %ds
-	popl %edx
-	popl %ecx
-	popl %eax
-	iret
+.align 4
+_overflow:
+	pushl $0
+	pushl $_do_overflow
+	jmp error_code
 
-_parallel_interrupt:
-	cld
-	pushl %eax
-	movb $0x20,%al
-	outb %al,$0x20
-	popl %eax
-	iret
+.align 4
+_bounds:
+	pushl $0
+	pushl $_do_bounds
+	jmp error_code
+
+.align 4
+_invalid_op:
+	pushl $0
+	pushl $_do_invalid_op
+	jmp error_code
+
+.align 4
+_coprocessor_segment_overrun:
+	pushl $0
+	pushl $_do_coprocessor_segment_overrun
+	jmp error_code
+
+.align 4
+_reserved:
+	pushl $0
+	pushl $_do_reserved
+	jmp error_code
+
+.align 4
+_double_fault:
+	pushl $_do_double_fault
+	jmp error_code
+
+.align 4
+_invalid_TSS:
+	pushl $_do_invalid_TSS
+	jmp error_code
+
+.align 4
+_segment_not_present:
+	pushl $_do_segment_not_present
+	jmp error_code
+
+.align 4
+_stack_segment:
+	pushl $_do_stack_segment
+	jmp error_code
+
+.align 4
+_general_protection:
+	pushl $_do_general_protection
+	jmp error_code
+
+.align 4
+_alignment_check:
+	pushl $_do_alignment_check
+	jmp error_code
+
+.align 4
+_page_fault:
+	pushl $_do_page_fault
+	jmp error_code
