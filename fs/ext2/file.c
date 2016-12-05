@@ -33,7 +33,10 @@
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
 
-static int ext2_file_write (struct inode *, struct file *, const char *, int);
+#include <linux/fs.h>
+#include <linux/ext2_fs.h>
+
+static long ext2_file_write (struct inode *, struct file *, const char *, unsigned long);
 static void ext2_release_file (struct inode *, struct file *);
 
 /*
@@ -77,8 +80,8 @@ struct inode_operations ext2_file_inode_operations = {
 	NULL			/* smap */
 };
 
-static int ext2_file_write (struct inode * inode, struct file * filp,
-			    const char * buf, int count)
+static long ext2_file_write (struct inode * inode, struct file * filp,
+			    const char * buf, unsigned long count)
 {
 	const loff_t two_gb = 2147483647;
 	loff_t pos;
@@ -137,9 +140,9 @@ static int ext2_file_write (struct inode * inode, struct file * filp,
 				written = err;
 			break;
 		}
+		if (c > count)
+			c = count;
 		count -= c;
-		if (count < 0)
-			c += count;
 		if (c != sb->s_blocksize && !buffer_uptodate(bh)) {
 			ll_rw_block (READ, 1, &bh);
 			wait_on_buffer (bh);

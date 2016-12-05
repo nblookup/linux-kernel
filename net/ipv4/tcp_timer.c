@@ -13,8 +13,8 @@
  *		Corey Minyard <wf-rch!minyard@relay.EU.net>
  *		Florian La Roche, <flla@stud.uni-sb.de>
  *		Charles Hedrick, <hedrick@klinzhai.rutgers.edu>
- *		Linus Torvalds, <torvalds@transmeta.com>
- *		Alan Cox, <alan@lxorguk.ukuu.org.uk>
+ *		Linus Torvalds, <torvalds@cs.helsinki.fi>
+ *		Alan Cox, <gw4pts@gw4pts.ampr.org>
  *		Matthew Dillon, <dillon@apollo.west.oic.com>
  *		Arnt Gulbrandsen, <agulbra@nvg.unit.no>
  *		Jorge Cwik, <jorge@laser.satlink.net>
@@ -116,7 +116,6 @@ static void tcp_retransmit_time(struct sock *sk, int all)
 	if (sk->send_head)
 		tcp_reset_xmit_timer(sk, TIME_WRITE, sk->rto);
 	else
-		/* This should never happen! */
 		printk(KERN_ERR "send_head NULL in tcp_retransmit_time\n");
 }
 
@@ -138,9 +137,7 @@ void tcp_retransmit(struct sock *sk, int all)
 		return;
 	}
 
-	/* remember window where we lost */
-	sk->ssthresh = min(sk->cong_window,
-			(sk->window_seq-sk->rcv_ack_seq)/max(sk->mss,1)) >> 1;
+	sk->ssthresh = sk->cong_window >> 1; /* remember window where we lost */
 	/* sk->ssthresh in theory can be zero.  I guess that's OK */
 	sk->cong_count = 0;
 	sk->cong_window = 1;
@@ -170,15 +167,9 @@ static int tcp_write_timeout(struct sock *sk)
 	
 	/*
 	 *	Have we tried to SYN too many times (repent repent 8))
-	 *	NOTE: we must be careful to do this test for both
-	 *	the SYN_SENT and SYN_RECV states, otherwise we take
-	 *	23 minutes to timeout on the SYN_RECV state, which
-	 *	leaves us (more) open to denial of service attacks
-	 *	than we would like.
 	 */
 	 
-	if (sk->retransmits > TCP_SYN_RETRIES
-	&& (sk->state==TCP_SYN_SENT || sk->state==TCP_SYN_RECV))
+	if(sk->retransmits > TCP_SYN_RETRIES && sk->state==TCP_SYN_SENT)
 	{
 		if(sk->err_soft)
 			sk->err=sk->err_soft;

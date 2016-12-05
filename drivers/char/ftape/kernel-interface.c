@@ -61,10 +61,10 @@ static int ftape_open(struct inode *ino, struct file *filep);
 static void ftape_close(struct inode *ino, struct file *filep);
 static int ftape_ioctl(struct inode *ino, struct file *filep,
 		       unsigned int command, unsigned long arg);
-static int ftape_read(struct inode *ino, struct file *fp, char *buff,
-		      int req_len);
-static int ftape_write(struct inode *ino, struct file *fp, const char *buff,
-		       int req_len);
+static long ftape_read(struct inode *ino, struct file *fp,
+		       char *buff, unsigned long req_len);
+static long ftape_write(struct inode *ino, struct file *fp,
+			const char *buff, unsigned long req_len);
 
 static struct file_operations ftape_cdev =
 {
@@ -128,7 +128,6 @@ int ftape_init(void)
 	printk(KERN_INFO "ftape-2.08 960314\n"
 	       KERN_INFO " (c) 1993-1995 Bas Laarhoven (bas@vimec.nl)\n"
 	       KERN_INFO " (c) 1995-1996 Kai Harrekilde-Petersen (khp@dolphinics.no)\n"
-	       KERN_INFO " (c) 1996-1997 Claus Heine (claus@momo.math.rwth-aachen.de)\n"
 	KERN_INFO " QIC-117 driver for QIC-40/80/3010/3020 tape drives\n"
 	       KERN_INFO " Compiled for kernel version %s"
 #ifdef MODVERSIONS
@@ -311,13 +310,14 @@ static int ftape_ioctl(struct inode *ino, struct file *filep,
 
 /*      Read from tape device
  */
-static int ftape_read(struct inode *ino, struct file *fp, char *buff, int req_len)
+static long ftape_read(struct inode *ino, struct file *fp,
+	char *buff, unsigned long req_len)
 {
 	TRACE_FUN(5, "ftape_read");
 	int result = -EIO;
 	int old_sigmask;
 
-	TRACEi(5, "called with count:", req_len);
+	TRACEi(5, "called with count:", (int) req_len);
 	if (!busy_flag || MINOR(ino->i_rdev) != ftape_unit || ftape_failure) {
 		TRACE(1, "failed: not busy, failure or wrong unit");
 		TRACE_EXIT;
@@ -334,13 +334,14 @@ static int ftape_read(struct inode *ino, struct file *fp, char *buff, int req_le
 
 /*      Write to tape device
  */
-static int ftape_write(struct inode *ino, struct file *fp, const char *buff, int req_len)
+static long ftape_write(struct inode *ino, struct file *fp,
+	const char *buff, unsigned long req_len)
 {
 	TRACE_FUN(8, "ftape_write");
 	int result = -EIO;
 	int old_sigmask;
 
-	TRACEi(5, "called with count:", req_len);
+	TRACEi(5, "called with count:", (int) req_len);
 	if (!busy_flag || MINOR(ino->i_rdev) != ftape_unit || ftape_failure) {
 		TRACE(1, "failed: not busy, failure or wrong unit");
 		TRACE_EXIT;

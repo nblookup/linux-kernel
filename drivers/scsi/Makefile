@@ -6,11 +6,6 @@
 # unless it's something special (ie not a .c file).
 #
 
-ifdef CONFIG_KERNEL_ELF
-# This is used for ELF - it needs to migrate or be moved.
-LD_RFLAG = -m elf_i386
-endif
-
 L_TARGET := scsi.a
 L_OBJS   := 
 M_OBJS   := 
@@ -19,7 +14,6 @@ MOD_LIST_NAME := SCSI_MODULES
 SCSI_SRCS = $(wildcard $(L_OBJS:%.o=%.c))
 
 AHA152X	= -DDEBUG_AHA152X -DAUTOCONF
-GDTH = #-DDEBUG_GDTH=2 -D__SERIAL__ -D__COM2__ -DGDTH_STATISTICS
 
 .SUFFIXES:
 .SUFFIXES: .c .o .h .a
@@ -145,23 +139,6 @@ else
   endif
 endif
 
-ifeq ($(CONFIG_SCSI_ACARD),y)
-L_OBJS += atp870u.o 
-else
-  ifeq ($(CONFIG_SCSI_ACARD),m)
-  M_OBJS += atp870u.o 
-  endif
-endif
-
-
-ifeq ($(CONFIG_SCSI_INITIO),y)
-L_OBJS += initio.o
-else
-  ifeq ($(CONFIG_SCSI_INITIO),m)
-  M_OBJS += initio.o
-  endif
-endif
-
 
 ifeq ($(CONFIG_SCSI_AHA152X),y)
 L_OBJS += aha152x.o
@@ -195,20 +172,8 @@ else
   endif
 endif
 
-ifeq ($(CONFIG_SCSI_DC390T),y)
-L_OBJS += tmscsim.o
-else
-  ifeq ($(CONFIG_SCSI_DC390T),m)
-  M_OBJS += tmscsim.o
-  endif
-endif
-
 ifeq ($(CONFIG_SCSI_AM53C974),y)
 L_OBJS += AM53C974.o
-else
-  ifeq ($(CONFIG_SCSI_AM53C974),m)
-  M_OBJS += AM53C974.o
-  endif
 endif
 
 ifeq ($(CONFIG_SCSI_BUSLOGIC),y)
@@ -251,14 +216,6 @@ else
   endif
 endif
 
-ifeq ($(CONFIG_SCSI_GDTH),y)
-L_OBJS += gdth.o
-else
-  ifeq ($(CONFIG_SCSI_GDTH),m)
-  M_OBJS += gdth.o
-  endif
-endif
-
 ifeq ($(CONFIG_SCSI_DEBUG),y)
 L_OBJS += scsi_debug.o
 else
@@ -285,8 +242,10 @@ endif
 
 ifeq ($(CONFIG_SCSI_GENERIC_NCR5380),y)
 L_OBJS += g_NCR5380.o
+EXTRA_CFLAGS = -DGENERIC_NCR5380_OVERRIDE="{{(NCR5380_map_type)0x350,5,0, BOARD_NCR53C400}};"
 else
   ifeq ($(CONFIG_SCSI_GENERIC_NCR5380),m)
+  EXTRA_CFLAGS = -DGENERIC_NCR5380_OVERRIDE="{{(NCR5380_map_type)0x350,5,0, BOARD_NCR53C400}};"
   M_OBJS += g_NCR5380.o
   endif
 endif
@@ -380,82 +339,24 @@ else
   endif
 endif
 
-ifeq ($(CONFIG_SCSI_SYM53C416),y) 
-L_OBJS += sym53c416.o 
-else 
-  ifeq ($(CONFIG_SCSI_SYM53C416),m) 
-  M_OBJS += sym53c416.o 
-  endif 
-endif 
-
-ifeq ($(CONFIG_SCSI_TC2550),y) 
-L_OBJS += tripace.o 
-else 
-  ifeq ($(CONFIG_SCSI_TC2550),m) 
-  M_OBJS += tripace.o 
-  endif 
-endif 
-
-ifeq ($(CONFIG_SCSI_MEGARAID),y)
-L_OBJS += megaraid.o
-else
-  ifeq ($(CONFIG_SCSI_MEGARAID),m)
-  M_OBJS += megaraid.o
-  endif
-endif
-
-ifeq ($(CONFIG_SCSI_INIA100),y)
-L_OBJS += a100u2w.o
-else
-  ifeq ($(CONFIG_SCSI_INIA100),m)
-  M_OBJS += a100u2w.o
-  endif
-endif
-
-ifeq ($(CONFIG_SCSI_PCI2000),y)
-L_OBJS += pci2000.o
-else
-    ifeq ($(CONFIG_SCSI_PCI2000),m)
-    M_OBJS += pci2000.o
-    endif
-endif
-
-ifeq ($(CONFIG_SCSI_PCI2220I),y)
-L_OBJS += pci2220i.o
-else
-    ifeq ($(CONFIG_SCSI_PCI2220I),m)
-    M_OBJS += pci2220i.o
-    endif
-endif
-
-ifeq ($(CONFIG_SCSI_PSI240I),y)
-L_OBJS += psi240i.o
-else
-    ifeq ($(CONFIG_SCSI_PSI240I),m)
-    M_OBJS += psi240i.o
-    endif
-endif
-
-ifeq ($(CONFIG_BLK_DEV_IDESCSI),y)
-L_OBJS += ide-scsi.o
-endif
-
 include $(TOPDIR)/Rules.make
 
 aha152x.o: aha152x.c
 	$(CC) $(CFLAGS) $(AHA152X) -c aha152x.c 
 
-gdth.o: gdth.c gdth.h gdth_proc.c gdth_proc.h
-	$(CC) $(CFLAGS) $(GDTH) -c gdth.c 
+aic7xxx_asm:	aic7xxx_asm.c
+	$(HOSTCC) -o $@ aic7xxx_asm.c
 
-aic7xxx.o: aic7xxx.c aic7xxx_seq.c aic7xxx_reg.h
-	$(CC) $(CFLAGS) -c -o $@ aic7xxx.c
+aic7xxx.c: aic7xxx_seq.h
+aic7xxx_seq.h:	aic7xxx_asm aic7xxx.seq
+	./aic7xxx_asm -o $@ aic7xxx.seq
 
 seagate.o: seagate.c
 	$(CC) $(CFLAGS) -DARBITRATE -DSLOW_HANDSHAKE -DFAST32 -c seagate.c 
 
-tmscsim.o : tmscsim.c
-	$(CC) $(CFLAGS) -c tmscsim.c
+# For debugging, use the -g flag
+53c7,8xx.o : 53c7,8xx.c
+	$(CC) $(CFLAGS) -g -c 53c7,8xx.c
 
 53c8xx_d.h 53c8xx_u.h : 53c7,8xx.scr script_asm.pl
 	ln -sf 53c7,8xx.scr fake.c
@@ -464,17 +365,8 @@ tmscsim.o : tmscsim.c
 	mv scriptu.h 53c8xx_u.h
 	rm fake.c
 
-g_NCR5380.o: g_NCR5380.c
-	$(CC) $(CFLAGS) -DGENERIC_NCR5380_OVERRIDE="{{(NCR5380_map_type)0x350,5,0, BOARD_NCR53C400}};" -c g_NCR5380.c
-
-initio.o: ini9100u.o i91uscsi.o
-	$(LD) -r -o initio.o ini9100u.o i91uscsi.o
-
-megaraid.o: megaraid.c
-	$(CC) $(CFLAGS) -c megaraid.c
-
-a100u2w.o: inia100.o i60uscsi.o
-	$(LD) -r -o a100u2w.o inia100.o i60uscsi.o
+ncr53c8xx.o : ncr53c8xx.c
+	$(CC) $(CFLAGS) -c ncr53c8xx.c
 
 scsi_mod.o: $(MX_OBJS) hosts.o scsi.o scsi_ioctl.o constants.o \
 		scsicam.o scsi_proc.o

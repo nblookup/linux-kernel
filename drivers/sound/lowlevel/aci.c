@@ -58,7 +58,6 @@
  *
  */
 
-#include <linux/config.h> /* CONFIG_ACI_MIXER */
 #include "../sound_config.h"
 #ifdef CONFIG_ACI_MIXER
 

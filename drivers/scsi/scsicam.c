@@ -26,8 +26,9 @@
 #include "scsi.h"
 #include "hosts.h"
 #include "sd.h"
-#include <scsi/scsicam.h>
 
+static int partsize(struct buffer_head *bh, unsigned long capacity,
+    unsigned int  *cyls, unsigned int *hds, unsigned int *secs);
 static int setsize(unsigned long capacity,unsigned int *cyls,unsigned int *hds,
     unsigned int *secs);
 
@@ -49,42 +50,30 @@ int scsicam_bios_param (Disk *disk, /* SCSI disk */
     struct buffer_head *bh;
     int ret_code;
     int size = disk->capacity;
-    unsigned long temp_cyl;
 
     if (!(bh = bread(MKDEV(MAJOR(dev), MINOR(dev)&~0xf), 0, 1024)))
 	return -1;
 
-    /* try to infer mapping from partition table */
-    ret_code = scsi_partsize (bh, (unsigned long) size, (unsigned int *) ip + 2, 
+#ifdef DEBUG
+	printk ("scsicam_bios_param : trying existing mapping\n");
+#endif
+    ret_code = partsize (bh, (unsigned long) size, (unsigned int *) ip + 2, 
 	(unsigned int *) ip + 0, (unsigned int *) ip + 1);
     brelse (bh);
 
     if (ret_code == -1) {
-	/* pick some standard mapping with at most 1024 cylinders,
-	   and at most 62 sectors per track - this works up to
-	   7905 MB */
+#ifdef DEBUG
+	printk ("scsicam_bios_param : trying optimal mapping\n");
+#endif
 	ret_code = setsize ((unsigned long) size, (unsigned int *) ip + 2, 
     	    (unsigned int *) ip + 0, (unsigned int *) ip + 1);
     }
 
-    /* if something went wrong, then apparently we have to return
-       a geometry with more than 1024 cylinders */
-    if (ret_code || ip[0] > 255 || ip[1] > 63) {
-	 ip[0] = 64;
-	 ip[1] = 32;
-	 temp_cyl = size / (ip[0] * ip[1]);
-	 if (temp_cyl > 65534) {
-	      ip[0] = 255;
-	      ip[1] = 63;
-	 }
-	 ip[2] = size / (ip[0] * ip[1]);
-    }
-
-    return 0;
+    return ret_code;
 }
 
 /*
- * Function : static int scsi_partsize(struct buffer_head *bh, unsigned long 
+ * Function : static int partsize(struct buffer_head *bh, unsigned long 
  *     capacity,unsigned int *cyls, unsigned int *hds, unsigned int *secs);
  *
  * Purpose : to determine the BIOS mapping used to create the partition
@@ -94,7 +83,7 @@ int scsicam_bios_param (Disk *disk, /* SCSI disk */
  *
  */
 
-int scsi_partsize(struct buffer_head *bh, unsigned long capacity,
+static int partsize(struct buffer_head *bh, unsigned long capacity,
     unsigned int  *cyls, unsigned int *hds, unsigned int *secs) {
     struct partition *p, *largest = NULL;
     int i, largest_cyl;
@@ -123,8 +112,6 @@ int scsi_partsize(struct buffer_head *bh, unsigned long capacity,
     	end_cyl = largest->end_cyl + ((largest->end_sector & 0xc0) << 2);
     	end_head = largest->end_head;
     	end_sector = largest->end_sector & 0x3f;
-
-        if( end_head + 1 == 0 || end_sector == 0 ) return -1;
 
 #ifdef DEBUG
 	printk ("scsicam_bios_param : end at h = %d, c = %d, s = %d\n",

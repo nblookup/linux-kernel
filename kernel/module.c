@@ -6,6 +6,7 @@
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/malloc.h>
+#include <linux/vmalloc.h>
 #include <linux/config.h>
 /*
  * Originally by Anonymous (as far as I know...)
@@ -86,7 +87,7 @@ sys_create_module(char *module_name, unsigned long size)
 	int sspace = sizeof(struct module) + MOD_MAX_NAME;
 	char name[MOD_MAX_NAME];
 
-	if (!suser() || securelevel > 0)
+	if (!suser())
 		return -EPERM;
 	if (module_name == NULL || size == 0)
 		return -EINVAL;
@@ -138,7 +139,7 @@ sys_init_module(char *module_name, char *code, unsigned codesize,
 	int error;
 	struct mod_routines rt;
 
-	if (!suser() || securelevel > 0)
+	if (!suser())
 		return -EPERM;
 
 #ifdef __i386__
@@ -264,7 +265,7 @@ sys_delete_module(char *module_name)
 	char name[MOD_MAX_NAME];
 	int error;
 
-	if (!suser() || securelevel > 0)
+	if (!suser())
 		return -EPERM;
 	/* else */
 	if (module_name != NULL) {
@@ -594,36 +595,6 @@ int get_ksyms_list(char *buf, char **start, off_t offset, int length)
 	if (len > length)
 		len = length;
 	return len;
-}
-
-/*
- * Gets the address for a symbol in the given module.  If modname is
- * NULL, it looks for the name in any registered symbol table.  If the
- * modname is an empty string, it looks for the symbol in kernel exported
- * symbol tables.
- */
-void *get_module_symbol(char *modname, char *symname)
-{
-	struct module *mp;
-	struct internal_symbol *sym;
-	int i;
-
-	for (mp = module_list; mp; mp = mp->next) {
-		if (((modname == NULL) || (strcmp(mp->name, modname) == 0)) &&
-			(mp->state == MOD_RUNNING) &&
-		    (mp->symtab != NULL) &&
-		    (mp->symtab->n_symbols > 0)) {
-			for (i = mp->symtab->n_symbols,
-				sym = mp->symtab->symbol;
-				i > 0; --i, ++sym) {
-
-				if (strcmp(sym->name, symname) == 0) {
-					return sym->addr;
-				}
-			}
-		}
-	}
-	return NULL;
 }
 
 /*

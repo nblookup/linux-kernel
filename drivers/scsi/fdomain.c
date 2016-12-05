@@ -1,6 +1,6 @@
 /* fdomain.c -- Future Domain TMC-16x0 SCSI driver
  * Created: Sun May  3 18:53:19 1992 by faith@cs.unc.edu
- * Revised: Sat Nov  2 09:27:47 1996 by root@cs.unc.edu
+ * Revised: Thu Aug  8 14:58:51 1996 by r.faith@ieee.org
  * Author: Rickard E. Faith, faith@cs.unc.edu
  * Copyright 1992, 1993, 1994, 1995, 1996 Rickard E. Faith
  *
@@ -461,8 +461,7 @@ struct signature {
    { "IBM F1 P2 BIOS v1.0104/29/93",                        5, 28,  3, -1, 0 },
    { "Future Domain Corp. V1.0008/18/93",                   5, 33,  3,  4, 0 },
    { "Future Domain Corp. V1.0008/18/93",                  26, 33,  3,  4, 1 },
-   { "Adaptec AHA-2920 PCI-SCSI Card",                     42, 31,  3, -1, 1 },
-   { "IBM F1 P264/32",                                      5, 14,  3, -1, 1 },
+   { "Adaptec AHA-2920 PCI-SCSI Card",                     42, 31,  3,  0, 1 },
 				/* This next signature may not be a 3.5 bios */
    { "Future Domain Corp. V2.0108/18/93",                   5, 33,  3,  5, 0 },
    { "FUTURE DOMAIN CORP.  V3.5008/18/93",                  5, 34,  3,  5, 0 },
@@ -1002,7 +1001,7 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
    Write_FIFO_port       = port_base + Write_FIFO;
    Write_SCSI_Data_port  = port_base + Write_SCSI_Data;
 
-   fdomain_16x0_reset( NULL, 0 );
+   fdomain_16x0_reset( NULL );
 
    if (fdomain_test_loopback()) {
 #if DEBUG_DETECT
@@ -1887,7 +1886,7 @@ int fdomain_16x0_abort( Scsi_Cmnd *SCpnt)
    return SCSI_ABORT_SUCCESS;
 }
 
-int fdomain_16x0_reset( Scsi_Cmnd *SCpnt, unsigned int flags )
+int fdomain_16x0_reset( Scsi_Cmnd *SCpnt )
 {
 #if DEBUG_RESET
    static int called_once = 0;

@@ -14,7 +14,7 @@
  *                      EVERY character on the current page.
  *                      <middelin@polyware.iaf.nl>
  *
- * Danny ter Haar    :	added cpuinfo
+ * Danny ter Haar    :	added cpuinfo 
  *			<dth@cistron.nl>
  *
  * Alessandro Rubini :  profile extension.
@@ -28,8 +28,6 @@
  *
  * Yves Arrouye      :  remove removal of trailing spaces in get_array.
  *			<Yves.Arrouye@marin.fdn.fr>
- *
- * Alan Cox	     :  security fixes. <Alan.Cox@linux.org>
  */
 
 #include <linux/types.h>
@@ -60,9 +58,9 @@
 int get_malloc(char * buffer);
 #endif
 
-extern unsigned long get_wchan(struct task_struct *);
 
-static int read_core(struct inode * inode, struct file * file,char * buf, int count)
+static long read_core(struct inode * inode, struct file * file,
+	char * buf, unsigned long count)
 {
 	unsigned long p = file->f_pos, memsize;
 	int read;
@@ -77,14 +75,12 @@ static int read_core(struct inode * inode, struct file * file,char * buf, int co
 
 	memset(&dump, 0, sizeof(struct user));
 	dump.magic = CMAGIC;
-	dump.u_dsize = MAP_NR(high_memory);
+	dump.u_dsize = max_mapnr;
 #ifdef __alpha__
 	dump.start_data = PAGE_OFFSET;
 #endif
 
-	if (count < 0)
-		return -EINVAL;
-	memsize = MAP_NR(high_memory + PAGE_SIZE) << PAGE_SHIFT;
+	memsize = (max_mapnr + 1) << PAGE_SHIFT;
 	if (p >= memsize)
 		return 0;
 	if (count > memsize - p)
@@ -132,15 +128,14 @@ struct inode_operations proc_kcore_inode_operations = {
  * buffer. Use of the program readprofile is recommended in order to
  * get meaningful info out of these data.
  */
-static int read_profile(struct inode *inode, struct file *file, char *buf, int count)
+static long read_profile(struct inode *inode, struct file *file,
+	char *buf, unsigned long count)
 {
 	unsigned long p = file->f_pos;
 	int read;
 	char * pnt;
 	unsigned int sample_step = 1 << prof_shift;
 
-	if (count < 0)
-		return -EINVAL;
 	if (p >= (prof_len+1)*sizeof(unsigned int))
 		return 0;
 	if (count > (prof_len+1)*sizeof(unsigned int) - p)
@@ -159,7 +154,8 @@ static int read_profile(struct inode *inode, struct file *file, char *buf, int c
 }
 
 /* Writing to /proc/profile resets the counters */
-static int write_profile(struct inode * inode, struct file * file, const char * buf, int count)
+static long write_profile(struct inode * inode, struct file * file,
+	const char * buf, unsigned long count)
 {
     int i=prof_len;
 
@@ -310,7 +306,7 @@ static int get_meminfo(char * buffer)
 
 static int get_version(char * buffer)
 {
-	extern const char *linux_banner;
+	extern char *linux_banner;
 
 	strcpy(buffer, linux_banner);
 	return strlen(buffer);
@@ -410,6 +406,55 @@ static int get_arg(int pid, char * buffer)
 	if (!p || !*p || !(*p)->mm)
 		return 0;
 	return get_array(p, (*p)->mm->arg_start, (*p)->mm->arg_end, buffer);
+}
+
+static unsigned long get_wchan(struct task_struct *p)
+{
+	if (!p || p == current || p->state == TASK_RUNNING)
+		return 0;
+#if defined(__i386__)
+	{
+		unsigned long ebp, eip;
+		unsigned long stack_page;
+		int count = 0;
+
+		stack_page = p->kernel_stack_page;
+		if (!stack_page)
+			return 0;
+		ebp = p->tss.ebp;
+		do {
+			if (ebp < stack_page || ebp >= 4092+stack_page)
+				return 0;
+			eip = *(unsigned long *) (ebp+4);
+			if (eip < (unsigned long) interruptible_sleep_on
+			    || eip >= (unsigned long) add_timer)
+				return eip;
+			ebp = *(unsigned long *) ebp;
+		} while (count++ < 16);
+	}
+#elif defined(__alpha__)
+	/*
+	 * This one depends on the frame size of schedule().  Do a
+	 * "disass schedule" in gdb to find the frame size.  Also, the
+	 * code assumes that sleep_on() follows immediately after
+	 * interruptible_sleep_on() and that add_timer() follows
+	 * immediately after interruptible_sleep().  Ugly, isn't it?
+	 * Maybe adding a wchan field to task_struct would be better,
+	 * after all...
+	 */
+	{
+	    unsigned long schedule_frame;
+	    unsigned long pc;
+
+	    pc = thread_saved_pc(&p->tss);
+	    if (pc >= (unsigned long) interruptible_sleep_on && pc < (unsigned long) add_timer) {
+		schedule_frame = ((unsigned long *)p->tss.ksp)[6];
+		return ((unsigned long *)schedule_frame)[12];
+	    }
+	    return pc;
+	}
+#endif
+	return 0;
 }
 
 #if defined(__i386__)
@@ -610,7 +655,6 @@ static int get_stat(int pid, char * buffer)
 			vsize += vma->vm_end - vma->vm_start;
 			vma = vma->vm_next;
 		}
-		if ((current->fsuid == tsk->euid && tsk->dumpable) || suser())
 		if (tsk->kernel_stack_page) {
 			eip = KSTK_EIP(tsk);
 			esp = KSTK_ESP(tsk);
@@ -717,7 +761,7 @@ static inline void statm_pte_range(pmd_t * pmd, unsigned long address, unsigned 
 		++*pages;
 		if (pte_dirty(page))
 			++*dirty;
-		if (pte_page(page) >= high_memory)
+		if (MAP_NR(pte_page(page)) >= max_mapnr)
 			continue;
 		if (mem_map[MAP_NR(pte_page(page))].count > 1)
 			++*shared;
@@ -826,7 +870,8 @@ static int get_statm(int pid, char * buffer)
 #define MAPS_LINE_MAX	MAPS_LINE_MAX8
 
 
-static int read_maps (int pid, struct file * file, char * buf, int count)
+static long read_maps (int pid, struct file * file,
+	char * buf, unsigned long count)
 {
 	struct task_struct ** p = get_task(pid);
 	char * destptr;
@@ -930,12 +975,13 @@ extern int get_cpuinfo(char *);
 extern int get_pci_list(char*);
 extern int get_md_status (char *);
 extern int get_rtc_status (char *);
-extern int get_locks_status (char *, char **, off_t, int);
+extern int get_locks_status (char *);
 #ifdef __SMP_PROF__
 extern int get_smp_prof_list(char *);
 #endif
 
-static int get_root_array(char * page, int type, char **start, off_t offset, int length)
+static long get_root_array(char * page, int type, char **start,
+	off_t offset, unsigned long length)
 {
 	switch (type) {
 		case PROC_LOADAVG:
@@ -1006,32 +1052,10 @@ static int get_root_array(char * page, int type, char **start, off_t offset, int
 			return get_rtc_status(page);
 #endif
 		case PROC_LOCKS:
-			return get_locks_status(page, start, offset, length);
+			return get_locks_status(page);
 	}
 	return -EBADF;
 }
-
-static int process_unauthorized(int type, int pid)
-{
-	struct task_struct ** p = get_task(pid);
-
-	if (!p || !*p || !(*p)->mm)
-		return 1;
-
-	switch(type)
-	{
-		case PROC_PID_STATUS:
-		case PROC_PID_STATM:
-		case PROC_PID_STAT:
-		case PROC_PID_MAPS:
-		case PROC_PID_CMDLINE:
-			return 0;	
-	}
-	if ((current->fsuid == (*p)->euid && (*p)->dumpable) || suser())
-		return 0;
-	return 1;
-}
-
 
 static int get_process_array(char * page, int pid, int type)
 {
@@ -1060,7 +1084,8 @@ static inline int fill_array(char * page, int pid, int type, char **start, off_t
 
 #define PROC_BLOCK_SIZE	(3*1024)		/* 4K page size but our output routines use some slack for overruns */
 
-static int array_read(struct inode * inode, struct file * file,char * buf, int count)
+static long array_read(struct inode * inode, struct file * file,
+	char * buf, unsigned long count)
 {
 	unsigned long page;
 	char *start;
@@ -1069,8 +1094,6 @@ static int array_read(struct inode * inode, struct file * file,char * buf, int c
 	unsigned int type, pid;
 	struct proc_dir_entry *dp;
 
-	if (count < 0)
-		return -EINVAL;
 	if (count > PROC_BLOCK_SIZE)
 		count = PROC_BLOCK_SIZE;
 	if (!(page = __get_free_page(GFP_KERNEL)))
@@ -1080,13 +1103,6 @@ static int array_read(struct inode * inode, struct file * file,char * buf, int c
 	type &= 0x0000ffff;
 	start = NULL;
 	dp = (struct proc_dir_entry *) inode->u.generic_ip;
-	
-	if (pid && process_unauthorized(type, pid))
-	{
-		free_page(page);
-		return -EIO;
-	}
-	
 	if (dp->get_info)
 		length = dp->get_info((char *)page, &start, file->f_pos,
 				      count, 0);
@@ -1151,13 +1167,11 @@ struct inode_operations proc_array_inode_operations = {
 	NULL			/* permission */
 };
 
-static int arraylong_read (struct inode * inode, struct file * file, char * buf, int count)
+static long arraylong_read(struct inode * inode, struct file * file,
+	char * buf, unsigned long count)
 {
 	unsigned int pid = inode->i_ino >> 16;
 	unsigned int type = inode->i_ino & 0x0000ffff;
-
-	if (count < 0)
-		return -EINVAL;
 
 	switch (type) {
 		case PROC_PID_MAPS:

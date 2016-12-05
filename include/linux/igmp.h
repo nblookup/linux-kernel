@@ -36,7 +36,6 @@ struct igmphdr
 #define IGMP_HOST_MEMBERSHIP_REPORT	0x12	/* Ditto */
 #define IGMP_DVMRP			0x13	/* DVMRP routing */
 #define IGMP_PIM			0x14	/* PIM routing */
-#define IGMP_TRACE			0x15	/* CISCO trace */
 #define IGMP_HOST_NEW_MEMBERSHIP_REPORT 0x16	/* New version of 0x11 */
 #define IGMP_HOST_LEAVE_MESSAGE 	0x17	/* An extra BSD seems to send */
 
@@ -91,8 +90,7 @@ struct ip_mc_list
 	unsigned long multiaddr;
 	struct ip_mc_list *next;
 	struct timer_list timer;
-	short tm_running;
-	short reporter;
+	int tm_running;
 	int users;
 };
 

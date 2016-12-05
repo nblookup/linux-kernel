@@ -27,8 +27,6 @@
 int nr_swap_pages = 0;
 int nr_free_pages = 0;
 
-extern struct wait_queue *buffer_wait;
-
 /*
  * Free area management
  *
@@ -122,9 +120,6 @@ static inline void free_pages_ok(unsigned long map_nr, unsigned long order)
 #undef list
 
 	restore_flags(flags);
-	if (!waitqueue_active(&buffer_wait))
-		return;
-	wake_up(&buffer_wait);
 }
 
 void __free_page(struct page *page)
@@ -140,7 +135,7 @@ void free_pages(unsigned long addr, unsigned long order)
 {
 	unsigned long map_nr = MAP_NR(addr);
 
-	if (map_nr < MAP_NR(high_memory)) {
+	if (map_nr < max_mapnr) {
 		mem_map_t * map = mem_map + map_nr;
 		if (PageReserved(map))
 			return;
@@ -210,8 +205,6 @@ unsigned long __get_free_pages(int priority, unsigned long order, int dma)
 	reserved_pages = 5;
 	if (priority != GFP_NFS)
 		reserved_pages = min_free_pages;
-	if ((priority == GFP_BUFFER || priority == GFP_IO) && reserved_pages >= 48)
-		reserved_pages -= (12 + (reserved_pages>>3));
 	save_flags(flags);
 repeat:
 	cli();
@@ -271,13 +264,11 @@ unsigned long free_area_init(unsigned long start_mem, unsigned long end_mem)
 
 	/*
 	 * select nr of pages we try to keep free for important stuff
-	 * with a minimum of 48 pages. This is totally arbitrary
+	 * with a minimum of 16 pages. This is totally arbitrary
 	 */
 	i = (end_mem - PAGE_OFFSET) >> (PAGE_SHIFT+7);
-	if (i < 24)
-		i = 24;
-	i += 24;   /* The limit for buffer pages in __get_free_pages is
-	   	    * decreased by 12+(i>>3) */
+	if (i < 16)
+		i = 16;
 	min_free_pages = i;
 	free_pages_low = i + (i>>1);
 	free_pages_high = i + i;
@@ -320,12 +311,10 @@ void swap_in(struct task_struct * tsk, struct vm_area_struct * vma,
 	unsigned long page = __get_free_page(GFP_KERNEL);
 
 	if (pte_val(*page_table) != entry) {
-		if (page)
-			free_page(page);
+		free_page(page);
 		return;
 	}
 	if (!page) {
-		printk("swap_in:");
 		set_pte(page_table, BAD_PAGE);
 		swap_free(entry);
 		oom(tsk);
@@ -338,11 +327,6 @@ void swap_in(struct task_struct * tsk, struct vm_area_struct * vma,
 	}
 	vma->vm_mm->rss++;
 	tsk->maj_flt++;
-
-	/* Give the physical reallocated page a bigger start */
-	if (vma->vm_mm->rss < (MAP_NR(high_memory) >> 2))
-		mem_map[MAP_NR(page)].age = (PAGE_INITIAL_AGE + PAGE_ADVANCE);
-
 	if (!write_access && add_to_swap_cache(MAP_NR(page), entry)) {
 		/* keep swap page allocated for the moment (swap cache) */
 		set_pte(page_table, mk_pte(page, vma->vm_page_prot));

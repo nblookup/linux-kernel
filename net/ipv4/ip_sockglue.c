@@ -12,7 +12,6 @@
  *		Martin Mares	:	TOS setting fixed.
  *		Alan Cox	:	Fixed a couple of oopses in Martin's 
  *					TOS tweaks.
- *              Elliot Poger    :       Added support for SO_BINDTODEVICE.
  */
 
 #include <linux/config.h>
@@ -98,20 +97,11 @@ int ip_mc_procinfo(char *buffer, char **start, off_t offset, int length, int dum
 static struct device *ip_mc_find_devfor(unsigned long addr)
 {
 	struct device *dev;
-	for(dev = dev_base; dev; dev = dev->next) {
-		if((dev->flags&IFF_UP)&&(dev->flags&IFF_MULTICAST)) {
-			if(dev->flags&IFF_POINTOPOINT) {
-				/* gated needs this so that Multicast works   */
-				/* PTP interfaces cant be identified uniquely */
-				/* by their protocol address as it can very   */
-				/* likely be the address of eth0!             */
-				if(dev->pa_dstaddr==addr)
-					return dev;
-			} else {
-				 if(dev->pa_addr==addr)
-					return dev;
-			}
-		}
+	for(dev = dev_base; dev; dev = dev->next)
+	{
+		if((dev->flags&IFF_UP)&&(dev->flags&IFF_MULTICAST)&&
+			(dev->pa_addr==addr))
+			return dev;
 	}
 
 	return NULL;
@@ -303,7 +293,7 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 				/*
 				 *	Not set so scan.
 				 */
-				if((rt=ip_rt_route(mreq.imr_multiaddr.s_addr,0,sk->bound_device))!=NULL)
+				if((rt=ip_rt_route(mreq.imr_multiaddr.s_addr,0))!=NULL)
 				{
 					dev=rt->rt_dev;
 					atomic_dec(&rt->rt_use);
@@ -355,7 +345,7 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
  
 			if(mreq.imr_interface.s_addr==INADDR_ANY) 
 			{
-				if((rt=ip_rt_route(mreq.imr_multiaddr.s_addr,0,sk->bound_device))!=NULL)
+				if((rt=ip_rt_route(mreq.imr_multiaddr.s_addr,0))!=NULL)
 			        {
 					dev=rt->rt_dev;
 					atomic_dec(&rt->rt_use);
@@ -417,22 +407,6 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 			return -err;	/* -0 is 0 after all */
 			
 #endif
-#ifdef CONFIG_IP_MASQUERADE_IPAUTOFW
-		case IP_AUTOFW_ADD:
-		case IP_AUTOFW_DEL:
-		case IP_AUTOFW_FLUSH:
-			if(!suser())
-				return -EPERM;
-			if(optlen>sizeof(tmp_fw) || optlen<1)
-				return -EINVAL;
-			err=verify_area(VERIFY_READ,optval,optlen);
-			if(err)
-				return err;
-			memcpy_fromfs(&tmp_fw,optval,optlen);
-			err=ip_autofw_ctl(optname, &tmp_fw,optlen);
-			return -err;	/* -0 is 0 after all */
-			
-#endif
 #ifdef CONFIG_IP_ACCT
 		case IP_ACCT_INSERT:
 		case IP_ACCT_APPEND:
@@ -464,6 +438,9 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 int ip_getsockopt(struct sock *sk, int level, int optname, char *optval, int *optlen)
 {
 	int val,err;
+#ifdef CONFIG_IP_MULTICAST
+	int len;
+#endif
 	
 	if(level!=SOL_IP)
 		return -EOPNOTSUPP;
@@ -547,33 +524,16 @@ int ip_getsockopt(struct sock *sk, int level, int optname, char *optval, int *op
 			val=sk->ip_mc_loop;
 			break;
 		case IP_MULTICAST_IF:
-		{
-			struct device *dev;
-			struct in_addr ia;
-			
 			err=verify_area(VERIFY_WRITE, optlen, sizeof(int));
 			if(err)
   				return err;
-  			err=verify_area(VERIFY_WRITE, optval, sizeof(ia));
+  			len=strlen(sk->ip_mc_name);
+  			err=verify_area(VERIFY_WRITE, optval, len);
 		  	if(err)
   				return err;
-  			
-  			if(*sk->ip_mc_name)
-  			{
-	  			dev=dev_get(sk->ip_mc_name);
-  				/* Someone ran off with the interface, its probably
-  				   been downed. */
-  				if(dev==NULL)
-  					return -ENODEV;
-	  			ia.s_addr = dev->pa_addr;
-	  		}
-	  		else
-	  			ia.s_addr = 0L;
-	 
-  			put_user(sizeof(ia),(int *) optlen);
-			memcpy_tofs((void *)optval, &ia, sizeof(ia));
+  			put_user(len,(int *) optlen);
+			memcpy_tofs((void *)optval,sk->ip_mc_name, len);
 			return 0;
-		}
 #endif
 		default:
 			return(-ENOPROTOOPT);

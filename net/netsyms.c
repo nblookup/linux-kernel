@@ -12,9 +12,11 @@
 #include <linux/net.h>
 #include <linux/netdevice.h>
 #include <linux/trdevice.h>
-#include <linux/fddidevice.h>
 #include <linux/ioport.h>
-#include <net/sock.h>
+
+#ifdef CONFIG_AX25
+#include <net/ax25.h>
+#endif
 
 #ifdef CONFIG_INET
 #include <linux/ip.h>
@@ -27,7 +29,6 @@
 #include <net/icmp.h>
 #include <net/route.h>
 #include <linux/net_alias.h>
-#include <linux/inet.h>
 #endif
 
 #ifdef CONFIG_NETLINK
@@ -41,8 +42,7 @@
 #if     defined(CONFIG_ULTRA)   ||      defined(CONFIG_WD80x3)          || \
         defined(CONFIG_EL2)     ||      defined(CONFIG_NE2000)          || \
         defined(CONFIG_E2100)   ||      defined(CONFIG_HPLAN_PLUS)      || \
-        defined(CONFIG_HPLAN)   ||      defined(CONFIG_AC3200)		|| \
-	defined(CONFIG_ULTRA32) ||	defined(CONFIG_NE2K_PCI)
+        defined(CONFIG_HPLAN)   ||      defined(CONFIG_AC3200)
 #include "../drivers/net/8390.h"
 #endif
 
@@ -65,9 +65,6 @@ static struct symbol_table net_syms = {
 	/* Socket layer registration */
 	X(sock_register),
 	X(sock_unregister),
-
-	X(sock_alloc),
-	X(sock_release),
 
 	/* Socket layer support routines */
 	X(memcpy_fromiovec),
@@ -102,24 +99,20 @@ static struct symbol_table net_syms = {
 
 	X(init_etherdev),
 	X(ip_rt_route),
-	X(ip_rt_dev),
 	X(icmp_send),
 	X(ip_options_compile),
 	X(ip_rt_put),
 	X(arp_send),
-	X(arp_bind_cache),
 	X(ip_id_count),
 	X(ip_send_check),
+#ifdef CONFIG_IP_FORWARD
 	X(ip_forward),
-	X(ip_queue_xmit),
-	X(ip_fragment),
-	X(sysctl_ip_forward),
+#endif
 
 #if	defined(CONFIG_ULTRA)	||	defined(CONFIG_WD80x3)		|| \
 	defined(CONFIG_EL2)	||	defined(CONFIG_NE2000)		|| \
 	defined(CONFIG_E2100)	||	defined(CONFIG_HPLAN_PLUS)	|| \
-	defined(CONFIG_HPLAN)	||	defined(CONFIG_AC3200)		|| \
-	defined(CONFIG_ULTRA32)	||	defined(CONFIG_NE2K_PCI)
+	defined(CONFIG_HPLAN)	||	defined(CONFIG_AC3200)
 	/* If 8390 NIC support is built in, we will need these. */
 	X(ei_open),
 	X(ei_close),
@@ -132,11 +125,6 @@ static struct symbol_table net_syms = {
 #ifdef CONFIG_TR
 	X(tr_setup),
 	X(tr_type_trans),
-#endif
-                          
-#ifdef CONFIG_FDDI
-	X(fddi_setup),
-	X(fddi_type_trans),
 #endif
                           
 #ifdef CONFIG_NET_ALIAS
@@ -155,6 +143,10 @@ static struct symbol_table net_syms = {
 #endif
 
         /* support for loadable net drivers */
+#ifdef CONFIG_AX25
+	X(ax25_encapsulate),
+	X(ax25_rebuild_header),
+#endif
 #ifdef CONFIG_INET
 	X(register_netdev),
 	X(unregister_netdev),
@@ -165,12 +157,9 @@ static struct symbol_table net_syms = {
 	X(alloc_skb),
 	X(kfree_skb),
 	X(skb_clone),
-	X(skb_copy),
-	X(skb_pad),
 	X(dev_alloc_skb),
 	X(dev_kfree_skb),
 	X(skb_device_unlock),
-	X(skb_device_locked),
 	X(netif_rx),
 	X(dev_tint),
 	X(irq2dev_map),
@@ -187,10 +176,6 @@ static struct symbol_table net_syms = {
 	X(tty_register_ldisc),
 	X(kill_fasync),
 	X(arp_query),
-	X(ip_rcv),
-	X(arp_rcv),
-	X(in_aton),
-	X(in_ntoa),
 #endif  /* CONFIG_INET */
 
 #ifdef CONFIG_NETLINK

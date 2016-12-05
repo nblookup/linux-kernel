@@ -39,12 +39,8 @@ NORET_TYPE void panic(const char * fmt, ...)
 NORET_TYPE void do_exit(long error_code)
 	ATTRIB_NORET;
 extern unsigned long simple_strtoul(const char *,char **,unsigned int);
-extern int sprintf(char *buf, const char *fmt, ...)
-	__attribute__ ((format (printf, 2, 3)));
-extern int vsprintf(char *buf, const char *, va_list)
-	__attribute__ ((format (printf, 2, 0)));
-extern int _vsnprintf(char *buf, int n, const char *, va_list)
-	__attribute__ ((format (printf, 3, 0)));
+extern int sprintf(char * buf, const char * fmt, ...);
+extern int vsprintf(char *buf, const char *, va_list);
 
 extern int session_of_pgrp(int pgrp);
 
@@ -71,16 +67,6 @@ asmlinkage int printk(const char * fmt, ...)
  * is used for file permission checking and checks against the fsuid..
  */
 #define fsuser() (current->fsuid == 0)
-
-/*
- *      Display an IP address in readable format. 
- */
-  
-#define NIPQUAD(addr) \
-        (((addr) >> 0)  & 0xff), \
-        (((addr) >> 8)  & 0xff), \
-        (((addr) >> 16) & 0xff), \
-        (((addr) >> 24) & 0xff)
 
 #endif /* __KERNEL__ */
 

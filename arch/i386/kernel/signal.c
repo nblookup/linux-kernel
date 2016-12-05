@@ -69,7 +69,7 @@ static void restore_i387(struct _fpstate *buf)
 		restore_i387_hard(buf);
 		return;
 	}
-	restore_i387_soft(&current->tss.i387.soft, buf);
+	restore_i387_soft(buf);
 #endif	
 }
 	
@@ -81,10 +81,7 @@ asmlinkage int sys_sigreturn(unsigned long __unused)
 {
 #define COPY(x) regs->x = context.x
 #define COPY_SEG(x) \
-if (   (context.x & 0xfffc)     /* not a NULL selectors */ \
-    && (context.x & 0x4) != 0x4 /* not a LDT selector */ \
-    && (context.x & 3) != 3     /* not a RPL3 GDT selector */ \
-   ) goto badframe; COPY(x);
+if ((context.x & 0xfffc) && (context.x & 3) != 3) goto badframe; COPY(x);
 #define COPY_SEG_STRICT(x) \
 if (!(context.x & 0xfffc) || (context.x & 3) != 3) goto badframe; COPY(x);
 	struct sigcontext_struct context;
@@ -152,8 +149,7 @@ static struct _fpstate * save_i387(struct _fpstate * buf)
 #else
 	if (hard_math)
 		return save_i387_hard(buf);
-	save_i387_soft(&current->tss.i387.soft, buf);
-	return buf;
+	return save_i387_soft(buf);
 #endif
 }
 
@@ -201,7 +197,7 @@ static void setup_frame(struct sigaction * sa,
 	put_user(regs->eflags, frame+18);
 	put_user(regs->esp, frame+19);
 	put_user(regs->ss, frame+20);
-	put_user(save_i387((struct _fpstate *)(frame+32)),frame+21);
+	put_user((unsigned long) save_i387((struct _fpstate *)(frame+32)),frame+21);
 /* non-iBCS2 extensions.. */
 	put_user(oldmask, frame+22);
 	put_user(current->tss.cr2, frame+23);
@@ -277,7 +273,7 @@ asmlinkage int do_signal(unsigned long oldmask, struct pt_regs * regs)
 		 *	including volatiles for the inline function to get
 		 *	current combined with this gets it confused.
 		 */
-		struct task_struct *t=current;
+	        struct task_struct *t=current;
 		__asm__("bsf %3,%1\n\t"
 			"btrl %1,%0"
 			:"=m" (t->signal),"=r" (signr)
@@ -287,7 +283,7 @@ asmlinkage int do_signal(unsigned long oldmask, struct pt_regs * regs)
 		if ((current->flags & PF_PTRACED) && signr != SIGKILL) {
 			current->exit_code = signr;
 			current->state = TASK_STOPPED;
-			notify_parent(current, SIGCHLD);
+			notify_parent(current);
 			schedule();
 			if (!(signr = current->exit_code))
 				continue;
@@ -312,7 +308,7 @@ asmlinkage int do_signal(unsigned long oldmask, struct pt_regs * regs)
 			if (current->pid == 1)
 				continue;
 			switch (signr) {
-			case SIGCONT: case SIGCHLD: case SIGWINCH: case SIGURG:
+			case SIGCONT: case SIGCHLD: case SIGWINCH:
 				continue;
 
 			case SIGTSTP: case SIGTTIN: case SIGTTOU:
@@ -325,7 +321,7 @@ asmlinkage int do_signal(unsigned long oldmask, struct pt_regs * regs)
 				current->exit_code = signr;
 				if (!(current->p_pptr->sig->action[SIGCHLD-1].sa_flags & 
 						SA_NOCLDSTOP))
-					notify_parent(current, SIGCHLD);
+					notify_parent(current);
 				schedule();
 				continue;
 

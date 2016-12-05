@@ -1149,10 +1149,7 @@ sequencer_open (int dev, struct fileinfo *file)
       }
 
   if (!max_synthdev && !max_mididev)
-    {
-      sequencer_busy = 0;
-      return -(ENXIO);
-    }
+    return -(ENXIO);
 
   synth_open_mask = 0;
 
@@ -1595,7 +1592,7 @@ sequencer_ioctl (int dev, struct fileinfo *file,
 	return -(EIO);
 
       midi_dev = get_user ((int *) arg);
-      if (midi_dev < 0 || midi_dev >= max_mididev)
+      if (midi_dev >= max_mididev)
 	return -(ENXIO);
 
       if (!midi_opened[midi_dev])
@@ -2041,7 +2038,7 @@ sequencer_init (void)
   iqueue = (unsigned char *) (sound_mem_blocks[sound_nblocks] = vmalloc (SEQ_MAX_QUEUE * IEV_SZ));
   if (sound_nblocks < 1024)
     sound_nblocks++;;
-  if (iqueue == NULL)
+  if (queue == NULL)
     {
       printk ("Sound: Can't allocate memory for sequencer input queue\n");
       return;

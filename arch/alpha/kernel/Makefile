@@ -16,12 +16,7 @@ all: kernel.o head.o
 
 O_TARGET := kernel.o
 O_OBJS   := entry.o traps.o process.o osf_sys.o irq.o signal.o setup.o \
-	    bios32.o ptrace.o time.o apecs.o lca.o cia.o t2.o pyxis.o \
-	    ksyms.o smc.o
-
-ifdef CONFIG_KGDB
-O_OBJS += kgdb.o
-endif
+	    bios32.o ptrace.o time.o apecs.o lca.o cia.o ksyms.o
 
 all: kernel.o head.o
 

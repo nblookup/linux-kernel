@@ -164,18 +164,18 @@ void cb_in_1(struct pcbit_dev * dev, struct pcbit_chan* chan,
          *  ictl.num >= strlen() + strlen() + 5
          */
 
-	if (cbdata->data.setup.CallingPN == NULL)
-		strcpy(ictl.parm.setup.phone, "0");
+        if (cbdata->data.setup.CalledPN) 
+		sprintf(ictl.num, "%s,%d,%d,%s", 
+			cbdata->data.setup.CallingPN, 
+			7, 0, 
+			cbdata->data.setup.CalledPN);
+	
 	else
-		strcpy(ictl.parm.setup.phone, cbdata->data.setup.CallingPN);
-	if (cbdata->data.setup.CalledPN == NULL)
-		strcpy(ictl.parm.setup.eazmsn, "0");
-	else
-		strcpy(ictl.parm.setup.eazmsn, cbdata->data.setup.CalledPN);
-	ictl.parm.setup.si1 = 7;
-	ictl.parm.setup.si2 = 0;
-	ictl.parm.setup.plan = 0;
-	ictl.parm.setup.screen = 0;
+		sprintf(ictl.num, "%s,%d,%d,%s", 
+			cbdata->data.setup.CallingPN,
+			7, 0, 
+			"0");
+
 
 #ifdef DEBUG
 	printk(KERN_DEBUG "statstr: %s\n", ictl.num);

@@ -20,19 +20,22 @@ extern int *blksize_size[];
 #define MAX_BUF_PER_PAGE (PAGE_SIZE / 512)
 #define NBUF 64
 
-int block_write(struct inode * inode, struct file * filp,
-	const char * buf, int count)
+long block_write(struct inode * inode, struct file * filp,
+	const char * buf, unsigned long count)
 {
-	int blocksize, blocksize_bits, i, buffercount,write_error;
+	int blocksize, blocksize_bits, i, j, buffercount,write_error;
 	int block, blocks;
 	loff_t offset;
 	int chars;
-	int written = 0, retval = 0;
+	int written = 0;
+	int cluster_list[MAX_BUF_PER_PAGE];
 	struct buffer_head * bhlist[NBUF];
+	int blocks_per_cluster;
 	unsigned int size;
 	kdev_t dev;
 	struct buffer_head * bh, *bufferlist[NBUF];
 	register char * p;
+	int excess;
 
 	write_error = buffercount = 0;
 	dev = inode->i_rdev;
@@ -49,6 +52,8 @@ int block_write(struct inode * inode, struct file * filp,
 		i >>= 1;
 	}
 
+	blocks_per_cluster = PAGE_SIZE / blocksize;
+
 	block = filp->f_pos >> blocksize_bits;
 	offset = filp->f_pos & (blocksize-1);
 
@@ -57,23 +62,22 @@ int block_write(struct inode * inode, struct file * filp,
 	else
 		size = INT_MAX;
 	while (count>0) {
-		if (block >= size) {
-			retval = -ENOSPC;
-			goto cleanup;
-		}
+		if (block >= size)
+			return written ? written : -ENOSPC;
 		chars = blocksize - offset;
 		if (chars > count)
 			chars=count;
 
 #if 0
-		/* get the buffer head */
-		{
-			struct buffer_head * (*fn)(kdev_t, int, int) = getblk;
-			if (chars != blocksize)
-				fn = bread;
-			bh = fn(dev, block, blocksize);
-		}
+		if (chars == blocksize)
+			bh = getblk(dev, block, blocksize);
+		else
+			bh = breada(dev,block,block+1,block+2,-1);
+
 #else
+		for(i=0; i<blocks_per_cluster; i++) cluster_list[i] = block+i;
+		if((block % blocks_per_cluster) == 0)
+		  generate_cluster(dev, cluster_list, blocksize);
 		bh = getblk(dev, block, blocksize);
 
 		if (chars != blocksize && !buffer_uptodate(bh)) {
@@ -87,13 +91,19 @@ int block_write(struct inode * inode, struct file * filp,
 		    blocks = read_ahead[MAJOR(dev)] / (blocksize >> 9) / 2;
 		    if (block + blocks > size) blocks = size - block;
 		    if (blocks > NBUF) blocks=NBUF;
+		    excess = (block + blocks) % blocks_per_cluster;
+		    if ( blocks > excess )
+			blocks -= excess;
 		    bhlist[0] = bh;
 		    for(i=1; i<blocks; i++){
+		      if(((i+block) % blocks_per_cluster) == 0) {
+			for(j=0; j<blocks_per_cluster; j++) cluster_list[j] = block+i+j;
+			generate_cluster(dev, cluster_list, blocksize);
+		      };
 		      bhlist[i] = getblk (dev, block+i, blocksize);
 		      if(!bhlist[i]){
 			while(i >= 0) brelse(bhlist[i--]);
-			retval= -EIO;
-			goto cleanup;
+			return written ? written : -EIO;
 		      };
 		    };
 		    ll_rw_block(READ, blocks, bhlist);
@@ -104,10 +114,8 @@ int block_write(struct inode * inode, struct file * filp,
 		};
 #endif
 		block++;
-		if (!bh) {
-			retval = -EIO;
-			goto cleanup;
-		}
+		if (!bh)
+			return written ? written : -EIO;
 		p = offset + bh->b_data;
 		offset = 0;
 		filp->f_pos += chars;
@@ -135,7 +143,6 @@ int block_write(struct inode * inode, struct file * filp,
 		if(write_error)
 			break;
 	}
-	cleanup:
 	if ( buffercount ){
 		ll_rw_block(WRITE, buffercount, bufferlist);
 		for(i=0; i<buffercount; i++){
@@ -145,15 +152,14 @@ int block_write(struct inode * inode, struct file * filp,
 			brelse(bufferlist[i]);
 		}
 	}		
-	if(!retval)
-		filp->f_reada = 1;
+	filp->f_reada = 1;
 	if(write_error)
 		return -EIO;
-	return written ? written : retval;
+	return written;
 }
 
-int block_read(struct inode * inode, struct file * filp,
-	char * buf, int count)
+long block_read(struct inode * inode, struct file * filp,
+	char * buf, unsigned long count)
 {
 	unsigned int block;
 	loff_t offset;
@@ -161,6 +167,8 @@ int block_read(struct inode * inode, struct file * filp,
 	int blocksize_bits, i;
 	unsigned int blocks, rblocks, left;
 	int bhrequest, uptodate;
+	int cluster_list[MAX_BUF_PER_PAGE];
+	int blocks_per_cluster;
 	struct buffer_head ** bhb, ** bhe;
 	struct buffer_head * buflist[NBUF];
 	struct buffer_head * bhreq[NBUF];
@@ -168,6 +176,7 @@ int block_read(struct inode * inode, struct file * filp,
 	loff_t size;
 	kdev_t dev;
 	int read;
+	int excess;
 
 	dev = inode->i_rdev;
 	blocksize = BLOCK_SIZE;
@@ -185,6 +194,8 @@ int block_read(struct inode * inode, struct file * filp,
 		size = (loff_t) blk_size[MAJOR(dev)][MINOR(dev)] << BLOCK_SIZE_BITS;
 	else
 		size = INT_MAX;
+
+	blocks_per_cluster = PAGE_SIZE / blocksize;
 
 	if (offset > size)
 		left = 0;
@@ -206,15 +217,15 @@ int block_read(struct inode * inode, struct file * filp,
 	if (filp->f_reada) {
 	        if (blocks < read_ahead[MAJOR(dev)] / (blocksize >> 9))
 			blocks = read_ahead[MAJOR(dev)] / (blocksize >> 9);
+		excess = (block + blocks) % blocks_per_cluster;
+		if ( blocks > excess )
+			blocks -= excess;		
 		if (rblocks > blocks)
 			blocks = rblocks;
 		
 	}
-	if (block + blocks > size) {
+	if (block + blocks > size)
 		blocks = size - block;
-		if (blocks == 0)
-			return 0;
-	}
 
 	/* We do this in a two stage process.  We first try to request
 	   as many blocks as we can, then we wait for the first one to
@@ -231,6 +242,12 @@ int block_read(struct inode * inode, struct file * filp,
 		uptodate = 1;
 		while (blocks) {
 			--blocks;
+#if 1
+			if((block % blocks_per_cluster) == 0) {
+			  for(i=0; i<blocks_per_cluster; i++) cluster_list[i] = block+i;
+			  generate_cluster(dev, cluster_list, blocksize);
+			}
+#endif
 			*bhb = getblk(dev, block++, blocksize);
 			if (*bhb && !buffer_uptodate(*bhb)) {
 				uptodate = 0;
@@ -251,6 +268,7 @@ int block_read(struct inode * inode, struct file * filp,
 		/* Now request them all */
 		if (bhrequest) {
 			ll_rw_block(READ, bhrequest, bhreq);
+			refill_freelist(blocksize);
 		}
 
 		do { /* Finish off all I/O that has actually completed */

@@ -31,10 +31,9 @@
 
 extern __inline__ unsigned long set_bit(unsigned long nr, SMPVOL void *addr)
 {
-	int mask;
+	int mask, flags;
 	unsigned long *ADDR = (unsigned long *) addr;
 	unsigned long oldbit;
-	unsigned long flags;
 
 	ADDR += nr >> 5;
 	mask = 1 << (nr & 31);
@@ -47,10 +46,9 @@ extern __inline__ unsigned long set_bit(unsigned long nr, SMPVOL void *addr)
 
 extern __inline__ unsigned long clear_bit(unsigned long nr, SMPVOL void *addr)
 {
-	int mask;
+	int mask, flags;
 	unsigned long *ADDR = (unsigned long *) addr;
 	unsigned long oldbit;
-	unsigned long flags;
 
 	ADDR += nr >> 5;
 	mask = 1 << (nr & 31);
@@ -63,10 +61,9 @@ extern __inline__ unsigned long clear_bit(unsigned long nr, SMPVOL void *addr)
 
 extern __inline__ unsigned long change_bit(unsigned long nr, SMPVOL void *addr)
 {
-	int mask;
+	int mask, flags;
 	unsigned long *ADDR = (unsigned long *) addr;
 	unsigned long oldbit;
-	unsigned long flags;
 
 	ADDR += nr >> 5;
 	mask = 1 << (nr & 31);
@@ -147,9 +144,8 @@ found_middle:
 
 extern __inline__ int ext2_set_bit(int nr,void * addr)
 {
-	int		mask, retval;
+	int		mask, retval, flags;
 	unsigned char	*ADDR = (unsigned char *) addr;
-	unsigned long	flags;
 
 	ADDR += nr >> 3;
 	mask = 1 << (nr & 0x07);
@@ -162,9 +158,8 @@ extern __inline__ int ext2_set_bit(int nr,void * addr)
 
 extern __inline__ int ext2_clear_bit(int nr, void * addr)
 {
-	int		mask, retval;
+	int		mask, retval, flags;
 	unsigned char	*ADDR = (unsigned char *) addr;
-	unsigned long	flags;
 
 	ADDR += nr >> 3;
 	mask = 1 << (nr & 0x07);

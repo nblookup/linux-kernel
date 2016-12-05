@@ -47,7 +47,6 @@
 extern void wait_for_keypress(void);
 extern struct file_operations * get_blkfops(unsigned int major);
 extern void blkdev_release (struct inode *);
-extern void rd_load_secondary(void);
 
 extern int root_mountflags;
 
@@ -147,8 +146,6 @@ void remove_vfsmnt(kdev_t dev)
 		if (vfsmnttail->mnt_dev == dev)
 			vfsmnttail = lptr;
 	}
-	if (tofree == mru_vfsmnt)
-		mru_vfsmnt = NULL;
 	kfree(tofree->mnt_devname);
 	kfree(tofree->mnt_dirname);
 	kfree_s(tofree, sizeof(struct vfsmount));
@@ -278,8 +275,6 @@ static struct proc_fs_info {
 	{ MS_NOSUID, ",nosuid" },
 	{ MS_NODEV, ",nodev" },
 	{ MS_SYNCHRONOUS, ",sync" },
-	{ MS_MANDLOCK, ",mand" },
-	{ MS_NOATIME, ",noatime" },
 #ifdef MS_NOSUB			/* Can't find this except in mount.c */
 	{ MS_NOSUB, ",nosub" },
 #endif
@@ -556,7 +551,6 @@ kdev_t get_unnamed_dev(void)
 		if (!set_bit(i,unnamed_dev_in_use))
 			return MKDEV(UNNAMED_MAJOR, i);
 	}
-	printk("VFS: Sorry, out of unnamed devices\n");
 	return 0;
 }
 
@@ -765,7 +759,8 @@ static int do_remount_sb(struct super_block *sb, int flags, char *data)
 		if (retval)
 			return retval;
 	}
-	sb->s_flags = (sb->s_flags & ~MS_RMT_MASK) | (flags & MS_RMT_MASK);
+	sb->s_flags = (sb->s_flags & ~MS_RMT_MASK) |
+		(flags & MS_RMT_MASK);
 	vfsmnt = lookup_vfsmnt(sb->s_dev);
 	if (vfsmnt)
 		vfsmnt->mnt_flags = sb->s_flags;
@@ -913,8 +908,6 @@ asmlinkage int sys_mount(char * dev_name, char * dir_name, char * type,
 	}
 	retval = do_mount(dev,dev_name,dir_name,t,flags,(void *) page);
 	free_page(page);
-	if (retval && !fstype->requires_dev) 
-		put_unnamed_dev(dev);
 	if (retval && fops && fops->release)
 		fops->release(inode, NULL);
 	iput(inode);
@@ -973,23 +966,12 @@ static void do_mount_root(void)
 
 #ifdef CONFIG_BLK_DEV_FD
 	if (MAJOR(ROOT_DEV) == FLOPPY_MAJOR) {
-#ifdef CONFIG_BLK_DEV_INITRD
-		extern int rd_doload;
-#endif
 		floppy_eject();
 #ifndef CONFIG_BLK_DEV_RAM
 		printk(KERN_NOTICE "(Warning, this kernel has no ramdisk support)\n");
 #endif
-#ifdef CONFIG_BLK_DEV_INITRD
-		/* rd_doload is 2 for a dual initrd/ramload setup */
-		if(rd_doload==2)
-			rd_load_secondary();
-		else
-#endif		
-		{
-			printk(KERN_NOTICE "VFS: Insert root floppy and press ENTER\n");
-			wait_for_keypress();
-		}
+		printk(KERN_NOTICE "VFS: Insert root floppy and press ENTER\n");
+		wait_for_keypress();
 	}
 #endif
 

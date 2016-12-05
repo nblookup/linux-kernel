@@ -376,6 +376,7 @@ int n_tty_ioctl(struct tty_struct * tty, struct file * file,
 {
 	struct tty_struct * real_tty;
 	int retval;
+	int opt = 0;
 
 	if (tty->driver.type == TTY_DRIVER_TYPE_PTY &&
 	    tty->driver.subtype == PTY_TYPE_MASTER)
@@ -413,19 +414,19 @@ int n_tty_ioctl(struct tty_struct * tty, struct file * file,
 				    sizeof (struct termios));
 			return 0;
 		case TCSETSF:
-			return set_termios(real_tty, arg, TERMIOS_FLUSH);
+			opt |= TERMIOS_FLUSH;
 		case TCSETSW:
-			return set_termios(real_tty, arg, TERMIOS_WAIT);
+			opt |= TERMIOS_WAIT;
 		case TCSETS:
-			return set_termios(real_tty, arg, 0);
+			return set_termios(real_tty, arg, opt);
 		case TCGETA:
 			return get_termio(real_tty,(struct termio *) arg);
 		case TCSETAF:
-			return set_termios(real_tty, arg, TERMIOS_FLUSH | TERMIOS_TERMIO);
+			opt |= TERMIOS_FLUSH;
 		case TCSETAW:
-			return set_termios(real_tty, arg, TERMIOS_WAIT | TERMIOS_TERMIO);
+			opt |= TERMIOS_WAIT;
 		case TCSETA:
-			return set_termios(real_tty, arg, TERMIOS_TERMIO);
+			return set_termios(real_tty, arg, opt|TERMIOS_TERMIO);
 		case TCXONC:
 			retval = tty_check_change(tty);
 			if (retval)

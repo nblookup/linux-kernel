@@ -19,8 +19,6 @@
 #include <asm/system.h>
 #include <asm/pgtable.h>
 
-extern int vm_enough_memory(long pages);
-
 static inline pte_t *get_one_pte(struct mm_struct *mm, unsigned long addr)
 {
 	pgd_t * pgd;
@@ -148,7 +146,6 @@ static inline unsigned long move_vma(struct vm_area_struct * vma,
 			insert_vm_struct(current->mm, new_vma);
 			merge_segments(current->mm, new_vma->vm_start, new_vma->vm_end);
 			do_munmap(addr, old_len);
-			current->mm->total_vm += new_len >> PAGE_SHIFT;
 			return new_addr;
 		}
 		kfree(new_vma);
@@ -175,7 +172,7 @@ asmlinkage unsigned long sys_mremap(unsigned long addr,
 	 * Always allow a shrinking remap: that just unmaps
 	 * the unnecessary pages..
 	 */
-	if (old_len >= new_len) {
+	if (old_len > new_len) {
 		do_munmap(addr+new_len, old_len - new_len);
 		return addr;
 	}
@@ -195,19 +192,11 @@ asmlinkage unsigned long sys_mremap(unsigned long addr,
 		if (locked > current->rlim[RLIMIT_MEMLOCK].rlim_cur)
 			return -EAGAIN;
 	}
-	if ((current->mm->total_vm << PAGE_SHIFT) + (new_len - old_len)
-	    > current->rlim[RLIMIT_AS].rlim_cur)
-		return -ENOMEM;
-	/* Private writable mapping? Check memory availability.. */
-	if ((vma->vm_flags & (VM_SHARED | VM_WRITE)) == VM_WRITE) {
-		if (!vm_enough_memory((new_len - old_len) >> PAGE_SHIFT))
-			return -ENOMEM;
-	}
 
 	/* old_len exactly to the end of the area.. */
 	if (old_len == vma->vm_end - addr &&
 	    (old_len != new_len || !(flags & MREMAP_MAYMOVE))) {
-		unsigned long max_addr = MAX_USER_ADDR;
+		unsigned long max_addr = TASK_SIZE;
 		if (vma->vm_next)
 			max_addr = vma->vm_next->vm_start;
 		/* can we just expand the current mapping? */

@@ -183,8 +183,7 @@ static inline void copy_ttentry(struct tt_entry *src, struct tt_entry *dest)
 /* Initialize the kgdb_savettable so that debugging can commence */
 static void eh_init(void)
 {
-	int i;
-	unsigned long flags;
+	int i, flags;
 
 	save_flags(flags); cli();
 	for(i=0; i < 256; i++)
@@ -196,7 +195,7 @@ static void eh_init(void)
 static void exceptionHandler(int tnum, trapfunc_t trap_entry)
 {
 	unsigned long te_addr = (unsigned long) trap_entry;
-	unsigned long flags;
+	int flags;
 
 	/* We are dorking with a live trap table, all irqs off */
 	save_flags(flags); cli();

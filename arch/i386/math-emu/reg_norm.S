@@ -1,19 +1,16 @@
 /*---------------------------------------------------------------------------+
  |  reg_norm.S                                                               |
  |                                                                           |
- | Copyright (C) 1992,1993,1994,1995,1997                                    |
+ | Copyright (C) 1992,1993,1994,1995                                         |
  |                       W. Metzenthen, 22 Parker St, Ormond, Vic 3163,      |
- |                       Australia.  E-mail billm@suburbia.net               |
+ |                       Australia.  E-mail billm@jacobi.maths.monash.edu.au |
  |                                                                           |
  | Normalize the value in a FPU_REG.                                         |
  |                                                                           |
  | Call from C as:                                                           |
- |    int FPU_normalize(FPU_REG *n)                                          |
+ |   void normalize(FPU_REG *n)                                              |
  |                                                                           |
- |    int FPU_normalize_nuo(FPU_REG *n)                                      |
- |                                                                           |
- |    Return value is the tag of the answer, or-ed with FPU_Exception if     |
- |    one was raised, or -1 on internal error.                               |
+ |   void normalize_nuo(FPU_REG *n)                                          |
  |                                                                           |
  +---------------------------------------------------------------------------*/
 
@@ -21,12 +18,23 @@
 
 
 .text
-ENTRY(FPU_normalize)
+ENTRY(normalize)
 	pushl	%ebp
 	movl	%esp,%ebp
 	pushl	%ebx
 
 	movl	PARAM1,%ebx
+
+#ifdef PARANOID
+	cmpb	TW_Valid,TAG(%ebx)
+	je	L_ok
+
+	pushl	$0x220
+	call	SYMBOL_NAME(exception)
+	addl	$4,%esp
+
+L_ok:
+#endif PARANOID
 
 	movl	SIGH(%ebx),%edx
 	movl	SIGL(%ebx),%eax
@@ -40,7 +48,7 @@ ENTRY(FPU_normalize)
 
 	movl	%eax,%edx
 	xorl	%eax,%eax
-	subw	$32,EXP(%ebx)	/* This can cause an underflow */
+	subl	$32,EXP(%ebx)	/* This can cause an underflow */
 
 /* We need to shift left by 1 - 31 bits */
 L_shift_1:
@@ -49,24 +57,17 @@ L_shift_1:
 	negl	%ecx
 	shld	%cl,%eax,%edx
 	shl	%cl,%eax
-	subw	%cx,EXP(%ebx)	/* This can cause an underflow */
+	subl	%ecx,EXP(%ebx)	/* This can cause an underflow */
 
 	movl	%edx,SIGH(%ebx)
 	movl	%eax,SIGL(%ebx)
 
 L_done:
-	cmpw	EXP_OVER,EXP(%ebx)
+	cmpl	EXP_OVER,EXP(%ebx)
 	jge	L_overflow
 
-	cmpw	EXP_UNDER,EXP(%ebx)
+	cmpl	EXP_UNDER,EXP(%ebx)
 	jle	L_underflow
-
-L_exit_valid:
-	movl	TAG_Valid,%eax
-
-	/* Convert the exponent to 80x87 form. */
-	addw	EXTENDED_Ebias,EXP(%ebx)
-	andw	$0x7fff,EXP(%ebx)
 
 L_exit:
 	popl	%ebx
@@ -75,57 +76,56 @@ L_exit:
 
 
 L_zero:
-	movw	$0,EXP(%ebx)
-	movl	TAG_Zero,%eax
+	movl	EXP_UNDER,EXP(%ebx)
+	movb	TW_Zero,TAG(%ebx)
 	jmp	L_exit
 
 L_underflow:
-	/* Convert the exponent to 80x87 form. */
-	addw	EXTENDED_Ebias,EXP(%ebx)
 	push	%ebx
 	call	SYMBOL_NAME(arith_underflow)
 	pop	%ebx
 	jmp	L_exit
 
 L_overflow:
-	/* Convert the exponent to 80x87 form. */
-	addw	EXTENDED_Ebias,EXP(%ebx)
-	cmpb	SIGN_POS,PARAM2
-	jne	L_ovfl_neg
-	push	$0
-	jmp	L_ovfl_signed
-L_ovfl_neg:
-	push	$1
-L_ovfl_signed:
 	push	%ebx
 	call	SYMBOL_NAME(arith_overflow)
 	pop	%ebx
-	addl	$4,%esp
 	jmp	L_exit
 
 
 
 /* Normalise without reporting underflow or overflow */
-ENTRY(FPU_normalize_nuo)
+ENTRY(normalize_nuo)
 	pushl	%ebp
 	movl	%esp,%ebp
 	pushl	%ebx
 
 	movl	PARAM1,%ebx
 
+#ifdef PARANOID
+	cmpb	TW_Valid,TAG(%ebx)
+	je	L_ok_nuo
+
+	pushl	$0x221
+	call	SYMBOL_NAME(exception)
+	addl	$4,%esp
+
+L_ok_nuo:
+#endif PARANOID
+
 	movl	SIGH(%ebx),%edx
 	movl	SIGL(%ebx),%eax
 
 	orl	%edx,%edx	/* ms bits */
-	js	L_exit_nuo_valid	/* Already normalized */
+	js	L_exit		/* Already normalized */
 	jnz	L_nuo_shift_1	/* Shift left 1 - 31 bits */
 
 	orl	%eax,%eax
-	jz	L_exit_nuo_zero		/* The contents are zero */
+	jz	L_zero		/* The contents are zero */
 
 	movl	%eax,%edx
 	xorl	%eax,%eax
-	subw	$32,EXP(%ebx)	/* This can cause an underflow */
+	subl	$32,EXP(%ebx)	/* This can cause an underflow */
 
 /* We need to shift left by 1 - 31 bits */
 L_nuo_shift_1:
@@ -134,22 +134,10 @@ L_nuo_shift_1:
 	negl	%ecx
 	shld	%cl,%eax,%edx
 	shl	%cl,%eax
-	subw	%cx,EXP(%ebx)	/* This can cause an underflow */
+	subl	%ecx,EXP(%ebx)	/* This can cause an underflow */
 
 	movl	%edx,SIGH(%ebx)
 	movl	%eax,SIGL(%ebx)
+	jmp	L_exit
 
-L_exit_nuo_valid:
-	movl	TAG_Valid,%eax
 
-	popl	%ebx
-	leave
-	ret
-
-L_exit_nuo_zero:
-	movl	TAG_Zero,%eax
-	movw	EXP_UNDER,EXP(%ebx)
-
-	popl	%ebx
-	leave
-	ret

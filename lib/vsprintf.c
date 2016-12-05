@@ -112,14 +112,13 @@ static char * number(char * str, long num, int base, int size, int precision
 			*str++ = ' ';
 	if (sign)
 		*str++ = sign;
-	if (type & SPECIAL) {
-		if (base==8) {
+	if (type & SPECIAL)
+		if (base==8)
 			*str++ = '0';
-		} else if (base==16) {
+		else if (base==16) {
 			*str++ = '0';
 			*str++ = digits[33];
 		}
-	}
 	if (!(type & LEFT))
 		while (size-- > 0)
 			*str++ = c;
@@ -132,7 +131,7 @@ static char * number(char * str, long num, int base, int size, int precision
 	return str;
 }
 
-int _vsnprintf(char *buf, int n, const char *fmt, va_list args)
+int vsprintf(char *buf, const char *fmt, va_list args)
 {
 	int len;
 	unsigned long num;
@@ -147,36 +146,24 @@ int _vsnprintf(char *buf, int n, const char *fmt, va_list args)
 				   number of chars for from string */
 	int qualifier;		/* 'h', 'l', or 'L' for integer fields */
 
-	for (str = buf; *fmt && (n == -1 || str - buf < n); ++fmt) {
+	for (str=buf ; *fmt ; ++fmt) {
 		if (*fmt != '%') {
 			*str++ = *fmt;
 			continue;
 		}
-
+			
 		/* process flags */
 		flags = 0;
-	repeat:
-		++fmt;		/* this also skips first '%' */
-		switch (*fmt) {
-		case '-':
-			flags |= LEFT;
-			goto repeat;
-		case '+':
-			flags |= PLUS;
-			goto repeat;
-		case ' ':
-			flags |= SPACE;
-			goto repeat;
-		case '#':
-			flags |= SPECIAL;
-			goto repeat;
-		case '0':
-			flags |= ZEROPAD;
-			goto repeat;
-		default:
-			break;
-		}
-
+		repeat:
+			++fmt;		/* this also skips first '%' */
+			switch (*fmt) {
+				case '-': flags |= LEFT; goto repeat;
+				case '+': flags |= PLUS; goto repeat;
+				case ' ': flags |= SPACE; goto repeat;
+				case '#': flags |= SPECIAL; goto repeat;
+				case '0': flags |= ZEROPAD; goto repeat;
+				}
+		
 		/* get field width */
 		field_width = -1;
 		if (is_digit(*fmt))
@@ -232,12 +219,6 @@ int _vsnprintf(char *buf, int n, const char *fmt, va_list args)
 				s = "<NULL>";
 
 			len = strnlen(s, precision);
-
-			if (n != -1 && len >= n - (str - buf)) {
-				len = n - 1 - (str - buf);
-				if (len <= 0) break;
-				if (len < field_width) field_width = len;
-			}
 
 			if (!(flags & LEFT))
 				while (len < field_width--)
@@ -310,11 +291,6 @@ int _vsnprintf(char *buf, int n, const char *fmt, va_list args)
 	}
 	*str = '\0';
 	return str-buf;
-}
-
-int vsprintf(char *buf, const char *fmt, va_list args)
-{
-	return _vsnprintf(buf, -1, fmt, args);
 }
 
 int sprintf(char * buf, const char *fmt, ...)

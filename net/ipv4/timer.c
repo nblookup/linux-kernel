@@ -139,10 +139,12 @@ void net_timer (unsigned long data)
 
 		case TIME_CLOSE:
 			/* We've waited long enough, close the socket. */
-			tcp_set_state(sk, TCP_CLOSE);
+			sk->state = TCP_CLOSE;
+			delete_timer (sk);
 			if (!sk->dead)
 				sk->state_change(sk);
 			sk->shutdown = SHUTDOWN_MASK;
+			reset_timer (sk, TIME_DONE, TCP_DONE_TIME);
 			break;
 
 		default:

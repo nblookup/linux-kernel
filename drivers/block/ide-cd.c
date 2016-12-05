@@ -1,15 +1,5 @@
-/* #define VERBOSE_IDE_CD_ERRORS 1 */
 /*
  * linux/drivers/block/ide-cd.c
- * ATAPI cd-rom driver.  To be used with ide.c.
- * See Documentation/cdrom/ide-cd for usage information.
- *
- * Copyright (C) 1994, 1995, 1996  scott snyder  <snyder@fnald0.fnal.gov>
- * Copyright (C) 1996, 1997  Erik Andersen <andersee@debian.org>
- * Copyright (C) 1998  Jens Axboe and Chris Zwilling
- *
- * May be copied or modified under the terms of the GNU General Public License
- * see linux/COPYING for more information.
  *
  * 1.00  Oct 31, 1994 -- Initial version.
  * 1.01  Nov  2, 1994 -- Fixed problem with starting request in
@@ -119,35 +109,15 @@
  * 3.17  Sep 17, 1996 -- Tweak audio reads for some drives.
  *                       Start changing CDROMLOADFROMSLOT to CDROM_SELECT_DISC.
  *
- * 3.19  Nov 5, 1996  -- New ide-cd maintainer:
- *                                 Erik B. Andersen <andersee@debian.org>
- * 3.20  Jan 13,1997  -- Bug Fixes:
- *                        Fix errors on CDROMSTOP (If you have a "Dolphin",
- *                          you must define IHAVEADOLPHIN)
- *                        Added identifier so new Sanyo CD-changer works
- *                        Better detection if door locking isn't supported 
- * 3.21  Jun 16,1997  -- Add work-around for GCD-R580B
- *
- * 3.22  Nov 13, 1998 -- New ide-cd maintainers:
- *                           Jens Axboe <axboe@image.dk>
- *                           Chris Zwilling <chris@cloudnet.com>
- *
  * NOTE: Direct audio reads will only work on some types of drive.
  * So far, i've received reports of success for Sony and Toshiba drives.
  *
- * ALSO NOTE:
+ * ATAPI cd-rom driver.  To be used with ide.c.
+ * See Documentation/cdrom/ide-cd for usage information.
  *
- *  The ide cdrom driver has undergone extensive changes for the
- *       latest development kernel.  If you wish to add new features to
- *       this driver, make your changes to the latest version in the
- *       development kernel.  Only Bug fixes will be accepted for this
- *       version.
- *
- *       For those wishing to work on this driver, please be sure you download
- *       and comply with the latest ATAPI standard.  This document can be
- *       obtained by anonymous ftp from fission.dt.wdc.com in directory:
- *       /pub/standards/atapi/spec/SFF8020-r2.6/PDF/8020r26.pdf
- *
+ * Copyright (C) 1994, 1995, 1996  scott snyder  <snyder@fnald0.fnal.gov>
+ * May be copied or modified under the terms of the GNU General Public License
+ * (../../COPYING).
  */
 
 
@@ -644,6 +614,14 @@ static void cdrom_queue_request_sense (ide_drive_t *drive,
 static void cdrom_end_request (int uptodate, ide_drive_t *drive)
 {
 	struct request *rq = HWGROUP(drive)->rq;
+
+	/* The code in blk.h can screw us up on error recovery if the block
+	   size is larger than 1k.  Fix that up here. */
+	if (!uptodate && rq->bh != 0) {
+		int adj = rq->current_nr_sectors - 1;
+		rq->current_nr_sectors -= adj;
+		rq->sector += adj;
+	}
 
 	if (rq->cmd == REQUEST_SENSE_COMMAND && uptodate) {
 		struct packet_command *pc = (struct packet_command *)
@@ -1147,11 +1125,6 @@ static void cdrom_start_read_continuation (ide_drive_t *drive)
 	/* Number of sectors to transfer. */
 	nsect = rq->nr_sectors;
 
-#if !STANDARD_ATAPI
-	if (nsect > drive->cdrom_info.max_sectors)
-		nsect = drive->cdrom_info.max_sectors;
-#endif /* not STANDARD_ATAPI */
-
 	/* Starting sector. */
 	sector = rq->sector;
 
@@ -1582,7 +1555,7 @@ cdrom_lockdoor (ide_drive_t *drive, int lockflag,
 		/* If we got an illegal field error, the drive
 		   probably cannot lock the door. */
 		if (reqbuf->sense_key == ILLEGAL_REQUEST &&
-		    (reqbuf->asc == 0x24 || reqbuf->asc == 0x20)) {
+		    reqbuf->asc == 0x24) {
 			printk ("%s: door locking not supported\n",
 				drive->name);
 			CDROM_CONFIG_FLAGS (drive)->no_doorlock = 1;
@@ -1985,7 +1958,7 @@ cdrom_read_block (ide_drive_t *drive, int format, int lba, int nblocks,
 	pc.c[7] = ((nblocks>>8) & 0xff);
 	pc.c[6] = ((nblocks>>16) & 0xff);
 	if (format <= 1)
-		pc.c[9] = 0xf8;
+		pc.c[9] = 0xf0;
 	else
 		pc.c[9] = 0x10;
 
@@ -2092,18 +2065,13 @@ int ide_cdrom_ioctl (ide_drive_t *drive, struct inode *inode,
 		return cdrom_startstop (drive, 1, NULL);
 
 	case CDROMSTOP: {
-#ifdef IHAVEADOLPHIN
-		/*  Certain Drives require this.  Most don't
-		    and will produce errors upon CDROMSTOP
-		    pit says the Dolphin needs this.  If you
-		    own a dolphin, just define IHAVEADOLPHIN somewhere */
 		int stat;
+
 		stat = cdrom_startstop (drive, 0, NULL);
 		if (stat) return stat;
+		/* pit says the Dolphin needs this. */
 		return cdrom_eject (drive, 1, NULL);
-#endif /* end of IHAVEADOLPHIN  */
-		return cdrom_startstop (drive, 0, NULL);
-	}
+      }
 
 	case CDROMPLAYMSF: {
 		struct cdrom_msf msf;
@@ -2414,23 +2382,21 @@ int ide_cdrom_ioctl (ide_drive_t *drive, struct inode *inode,
 		kfree (buf);
 		return stat;
 	}
-	case CDROMREADRAW:
+
 	case CDROMREADMODE1:
 	case CDROMREADMODE2: {
 		struct cdrom_msf msf;
 		int blocksize, format, stat, lba;
+		struct atapi_toc *toc;
 		char *buf;
 
 		if (cmd == CDROMREADMODE1) {
 			blocksize = CD_FRAMESIZE;
 			format = 2;
-		} else if (cmd == CDROMREADMODE2) {
-				blocksize = CD_FRAMESIZE_RAW0;
-				format = 3;
-		       } else {
-				blocksize = CD_FRAMESIZE_RAW;
-			 	format = 0;      	
-		       }
+		} else {
+			blocksize = CD_FRAMESIZE_RAW0;
+			format = 3;
+		}
 
 		stat = verify_area (VERIFY_WRITE, (char *)arg, blocksize);
 		if (stat) return stat;
@@ -2441,16 +2407,16 @@ int ide_cdrom_ioctl (ide_drive_t *drive, struct inode *inode,
 				  msf.cdmsf_sec0,
 				  msf.cdmsf_frame0);
 	
-		/* DON'T make sure the TOC is up to date. */
-	     /*	stat = cdrom_read_toc (drive, NULL);
+		/* Make sure the TOC is up to date. */
+		stat = cdrom_read_toc (drive, NULL);
 		if (stat) return stat;
 
 		toc = drive->cdrom_info.toc;
 
 		if (lba < 0 || lba >= toc->capacity)
-			return -EINVAL; */
+			return -EINVAL;
 
-		buf = (char *) kmalloc (CD_FRAMESIZE_RAW, GFP_KERNEL);
+		buf = (char *) kmalloc (CD_FRAMESIZE_RAW0, GFP_KERNEL);
 		if (buf == NULL)
 			return -ENOMEM;
 
@@ -2687,8 +2653,6 @@ void ide_cdrom_setup (ide_drive_t *drive)
 		CDROM_CONFIG_FLAGS (drive)->drq_interrupt = 0;
 
 #if ! STANDARD_ATAPI
-	drive->cdrom_info.max_sectors = 252;
-
 	CDROM_CONFIG_FLAGS (drive)->old_readcd = 0;
 	CDROM_CONFIG_FLAGS (drive)->toctracks_as_bcd = 0;
 	CDROM_CONFIG_FLAGS (drive)->tocaddr_as_bcd = 0;
@@ -2714,9 +2678,6 @@ void ide_cdrom_setup (ide_drive_t *drive)
 			CDROM_CONFIG_FLAGS (drive)->toctracks_as_bcd = 1;
 		}
 
-		else if (strcmp (drive->id->model, "GCD-R580B") == 0)
-			drive->cdrom_info.max_sectors = 124;
-
 		else if (strcmp (drive->id->model,
 				 "NEC CD-ROM DRIVE:260") == 0 &&
 			 strcmp (drive->id->fw_rev, "1.01") == 0) {
@@ -2733,15 +2694,14 @@ void ide_cdrom_setup (ide_drive_t *drive)
 			CDROM_CONFIG_FLAGS (drive)->subchan_as_bcd = 1;
 		}
 
-                /* Sanyo 3 CD changer uses a non-standard command
-                    for CD changing */
-                 else if ((strcmp(drive->id->model, "CD-ROM CDR-C3 G") == 0) ||
-                         (strcmp(drive->id->model, "CD-ROM CDR-C3G") == 0) ||
-                         (strcmp(drive->id->model, "CD-ROM CDR_C36") == 0)) {
-                        /* uses CD in slot 0 when value is set to 3 */
-                        CDROM_STATE_FLAGS (drive)->sanyo_slot = 3;
-                }
-                
+		/* Sanyo 3 CD changer uses a non-standard command 
+                   for CD changing */
+                else if ((strcmp(drive->id->model, "CD-ROM CDR-C3 G") == 0) ||
+                         (strcmp(drive->id->model, "CD-ROM CDR-C3G") == 0)) {
+			/* uses CD in slot 0 when value is set to 3 */
+			CDROM_STATE_FLAGS (drive)->sanyo_slot = 3;
+		}
+
 	}
 #endif /* not STANDARD_ATAPI */
 

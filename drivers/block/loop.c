@@ -12,8 +12,6 @@
  * Modularized and updated for 1.1.16 kernel - Mitch Dsouza 28th May 1994
  *
  * Adapted for 1.3.59 kernel - Andries Brouwer, 1 Feb 1996
- *
- * Fixed do_loop_request() re-entrancy - <Vincent.Renardias@waw.com> Mar 20, 1997
  */
 
 #include <linux/module.h>
@@ -183,15 +181,12 @@ static void do_lo_request(void)
 	char	*dest_addr;
 	struct loop_device *lo;
 	struct buffer_head *bh;
-	struct request *current_request;
 
 repeat:
 	INIT_REQUEST;
-	current_request=CURRENT;
-	CURRENT=current_request->next;
-	if (MINOR(current_request->rq_dev) >= MAX_LOOP)
+	if (MINOR(CURRENT->rq_dev) >= MAX_LOOP)
 		goto error_out;
-	lo = &loop_dev[MINOR(current_request->rq_dev)];
+	lo = &loop_dev[MINOR(CURRENT->rq_dev)];
 	if (!lo->lo_inode || !lo->transfer)
 		goto error_out;
 
@@ -202,14 +197,14 @@ repeat:
 	      blksize = BLOCK_SIZE;
 	}
 
-	dest_addr = current_request->buffer;
+	dest_addr = CURRENT->buffer;
 	
 	if (blksize < 512) {
-		block = current_request->sector * (512/blksize);
+		block = CURRENT->sector * (512/blksize);
 		offset = 0;
 	} else {
-		block = current_request->sector / (blksize >> 9);
-		offset = (current_request->sector % (blksize >> 9)) << 9;
+		block = CURRENT->sector / (blksize >> 9);
+		offset = (CURRENT->sector % (blksize >> 9)) << 9;
 	}
 	block += lo->lo_offset / blksize;
 	offset += lo->lo_offset % blksize;
@@ -217,13 +212,13 @@ repeat:
 		block++;
 		offset -= blksize;
 	}
-	len = current_request->current_nr_sectors << 9;
+	len = CURRENT->current_nr_sectors << 9;
 
-	if (current_request->cmd == WRITE) {
+	if (CURRENT->cmd == WRITE) {
 		if (lo->lo_flags & LO_FLAGS_READ_ONLY)
 			goto error_out;
-	} else if (current_request->cmd != READ) {
-		printk("unknown loop device command (%d)?!?", current_request->cmd);
+	} else if (CURRENT->cmd != READ) {
+		printk("unknown loop device command (%d)?!?", CURRENT->cmd);
 		goto error_out;
 	}
 	while (len > 0) {
@@ -242,7 +237,7 @@ repeat:
 			       block, blksize);
 			goto error_out;
 		}
-		if (!buffer_uptodate(bh) && ((current_request->cmd == READ) ||
+		if (!buffer_uptodate(bh) && ((CURRENT->cmd == READ) ||
 					(offset || (len < blksize)))) {
 			ll_rw_block(READ, 1, &bh);
 			wait_on_buffer(bh);
@@ -255,13 +250,13 @@ repeat:
 		if (size > len)
 			size = len;
 			   
-		if ((lo->transfer)(lo, current_request->cmd, bh->b_data + offset,
+		if ((lo->transfer)(lo, CURRENT->cmd, bh->b_data + offset,
 				   dest_addr, size)) {
 			printk("loop: transfer error block %d\n", block);
 			brelse(bh);
 			goto error_out;
 		}
-		if (current_request->cmd == WRITE) {
+		if (CURRENT->cmd == WRITE) {
 			mark_buffer_uptodate(bh, 1);
 			mark_buffer_dirty(bh, 1);
 		}
@@ -271,13 +266,9 @@ repeat:
 		offset = 0;
 		block++;
 	}
-	current_request->next=CURRENT;
-	CURRENT=current_request;
 	end_request(1);
 	goto repeat;
 error_out:
-    current_request->next=CURRENT;
-	CURRENT=current_request;
 	end_request(0);
 	goto repeat;
 }
@@ -365,7 +356,7 @@ static int loop_set_status(struct loop_device *lo, struct loop_info *arg)
 	case LO_CRYPT_NONE:
 		break;
 	case LO_CRYPT_XOR:
-		if (info.lo_encrypt_key_size <= 0)
+		if (info.lo_encrypt_key_size < 0)
 			return -EINVAL;
 		break;
 #ifdef DES_AVAILABLE

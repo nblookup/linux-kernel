@@ -21,7 +21,7 @@
 #define fd_free_dma()           free_dma(FLOPPY_DMA)
 #define fd_clear_dma_ff()       clear_dma_ff(FLOPPY_DMA)
 #define fd_set_dma_mode(mode)   set_dma_mode(FLOPPY_DMA,mode)
-#define fd_set_dma_addr(addr)   set_dma_addr(FLOPPY_DMA,addr)
+#define fd_set_dma_addr(addr)   set_dma_addr(FLOPPY_DMA,virt_to_bus(addr))
 #define fd_set_dma_count(count) set_dma_count(FLOPPY_DMA,count)
 #define fd_enable_irq()         enable_irq(FLOPPY_IRQ)
 #define fd_disable_irq()        disable_irq(FLOPPY_IRQ)
@@ -51,11 +51,11 @@ static int FDC2 = -1;
 /*
  * Most Alphas have no problems with floppy DMA crossing 64k borders. Sigh...
  */
-#if defined(CONFIG_ALPHA_XL) || defined(CONFIG_ALPHA_RUFFIAN)
+#ifdef CONFIG_ALPHA_XL
 #define CROSS_64KB(a,s) \
     ((unsigned long)(a)/0x10000 != ((unsigned long)(a) + (s) - 1) / 0x10000)
-#else /* XL || RUFFIAN */
+#else /* CONFIG_ALPHA_XL */
 #define CROSS_64KB(a,s) (0)
-#endif /* XL || RUFFIAN */
+#endif /* CONFIG_ALPHA_XL */
 
 #endif /* __ASM_ALPHA_FLOPPY_H */

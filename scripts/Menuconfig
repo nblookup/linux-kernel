@@ -19,17 +19,16 @@
 # Portions of this script were borrowed from the original Configure
 # script.
 #
-# Please send comments / questions / bug fixes to roadcapw@titus.org
+# Please send comments / questions / bug fixes to roadcapw@cfw.com
 #
-# 070498 Stepan Kasal <kasal@math.cas.cz> - one change borrowed
-# from 2.1.x version:
-#     131197 Michael Chastain (mec@shout.net) - output all lines for a
-#     choice list, not just the selected one.  This makes the output
-#     the same as Configure output, which is important for smart config
-#     dependencies.
-# It also fixes the bug when menuconfig sets CONFIG_M386=y every time
-# it is ran.
 #----------------------------------------------------------------------------
+
+
+#
+# Change this to TRUE if you prefer all kernel options listed
+# in a single menu rather than the standard menu hierarchy.
+#
+single_menu_mode=
 
 #
 # Make sure we're really running bash.
@@ -42,12 +41,7 @@
 set -h +o posix
 
 
-#
-# If you prefer all kernel options listed in a single menu rather than
-# the standard menu hierarchy, set SINGLE_MENU_MODE to "TRUE" in your
-# environment.
-#
-single_menu_mode="${SINGLE_MENU_MODE:-FALSE}"
+
 
 
 #
@@ -70,18 +64,10 @@ function comment () {
 }
 
 #
-# Define a boolean to a specific value.
+# Don't need this yet, but we don't want to puke either.
 #
 function define_bool () {
-	eval $1=$2
-}
-
-#
-# Define an int to a specific value.
-#
-
-function define_int () {
-	eval $1=$2
+	:	
 }
 
 #
@@ -414,8 +400,7 @@ function l_int () {
 			answer="`cat MCdialog.out`"
 			answer="${answer:-$3}"
 
-			# Avoid problems with GNU vs POSIX expr semantics.
-			if expr "$answer" : '0$\|-[1-9][0-9]*$\|[1-9][0-9]*$' >/dev/null
+			if expr $answer : '0$\|-?[1-9][0-9]*$' >/dev/null
 			then
 				eval $2="$answer"
 			else
@@ -448,8 +433,7 @@ function l_hex () {
 			answer="${answer:-$3}"
 			answer="${answer##*[x,X]}"
 
-			# Avoid problems with GNU vs POSIX expr semantics.
-			if expr "$answer" : '[0-9a-fA-F][0-9a-fA-F]*$' >/dev/null
+			if expr $answer : '[0-9a-fA-F]+$' >/dev/null
 			then
 				eval $2="$answer"
 			else
@@ -468,7 +452,7 @@ function l_hex () {
 }
 
 #
-# Handle a one-of-many choice list.
+# Handle a on-of-many choice list.
 #
 function l_choice () {
 	#
@@ -509,7 +493,7 @@ function l_choice () {
 	done
 
 	#
-	# Now set the boolean value of each option based on
+	# Now set the boolean value of each option base on
 	# the selection made from the radiolist.
 	#
 	set -- $choices
@@ -595,7 +579,7 @@ function parser(ifile,menu) {
 		if ($1 ~ /mainmenu_option|endmenu/) {
 			printf("") >>menu
 		} 
-		else if ($0 ~ /^#|\$MAKE|mainmenu_name/) {
+		else if ($0 ~ /^#|$MAKE|mainmenu_name/) {
 			printf("") >>menu
 		}
 		else if ($1 == "source") {
@@ -671,8 +655,8 @@ function activate_menu () {
 Menuconfig has encountered a possible error in one of the kernel's
 configuration files and is unable to continue.
 
-Please report this to the author <roadcapw@titus.org>.  You may also
-send a problem report to linux-kernel@vger.kernel.org or post a
+Please report this to the author <roadcapw@cfw.com>.  You may also
+send a problem report to linux-kernel@vger.rutgers.edu or post a
 message to the linux.dev.kernel news group.
 
 Please indicate the kernel version you are trying to configure and
@@ -734,7 +718,7 @@ the /usr/src/linux/scripts/lxdialog directory and issuing the
 "make clean all" command.
 
 If you have verified that your ncurses install is correct, you may email
-the author <roadcapw@titus.org> or post a message on the linux.dev.kernel
+the author <roadcapw@cfw.com> or post a message on the linux.dev.kernel
 news group for additional assistance. 
 
 EOM
@@ -762,7 +746,7 @@ get_alt_config () {
 
 	while true
 	do
-		ALT_CONFIG="${ALT_CONFIG:-$_CONFIG}"
+		ALT_CONFIG="${ALT_CONFIG:-$DEFAULTS}"
 
 		$DIALOG --backtitle "$backtitle" \
 			--inputbox "\
@@ -828,7 +812,6 @@ save_alt_config () {
 			
 	while true
 	do
-
 		$DIALOG --backtitle "$backtitle" \
 			--inputbox "\
 Enter a filename to which this configuration should be saved \
@@ -875,18 +858,19 @@ EOM
 	rm -f help.out MCdialog.out
 }
 
-
 #
-# Load config file into the environment converting all
-# "# OPTION is not set" lines to "OPTION=n".
-#
-# The $ARCH defaults are loaded first so "new"/previously 
-# unconfigured parameters are assigned the proper defaults.
+# Load config options from a file.
+# Converts all "# OPTION is not set" lines to "OPTION=" lines
 #
 function load_config_file () {
-	eval "`sed -e 's/# \(.*\) is not set.*/\1=n/' arch/$ARCH/defconfig $1`"
-}
+	awk '
+	  /# .* is not set.*/ { printf("%s=\n", $2) }
+	! /# .* is not set.*/ { print }
+	' $1 >.tmpconfig
 
+	source ./.tmpconfig
+	rm -f .tmpconfig
+}
 
 #
 # Just what it says.
@@ -963,13 +947,6 @@ save_configuration () {
         	esac
 	}
 
-	function define_int () {
-		eval $1="$2"
-		echo "$1=$2" >>$CONFIG
-		echo "#define $1 $2" >>$CONFIG_H
-	}
-
-
 	function choice () {
 		#
 		# Find the first choice that's already set to 'y'
@@ -995,19 +972,11 @@ save_configuration () {
 		: ${current:=$default}
 
 		#
-		# Output all choices (to be compatible with other configs).
+		# Then extract the actual option from the list of choices.
 		#
-		set -- $choices
-		while [ -n "$2" ]
-		do
-			if eval [ "$1" = "$current" ]
-			then
-			    define_bool "$2" "y"
-			else
-			    define_bool "$2" "n"
-			fi
-			shift ; shift
-		done
+		current=${choices#*$current} ; set $current
+
+		define_bool "$1" "y"
 	}
 
 	function mainmenu_name () {
@@ -1038,8 +1007,8 @@ save_configuration () {
 		fi
 	}
 
-	DEF_CONFIG="${1:-$_CONFIG}"
-	DEF_CONFIG_H="$AUTOCONF_H"
+	DEF_CONFIG="${1:-.config}"
+	DEF_CONFIG_H="include/linux/autoconf.h"
 
 	CONFIG=.tmpconfig
 	CONFIG_H=.tmpconfig.h
@@ -1056,11 +1025,7 @@ save_configuration () {
 	
 	if . $CONFIG_IN >>.menuconfig.log 2>&1
 	then
-		#
-		# Skip these steps if we are saving to an
-		# alternate configuration file.
-		#
-		if [ "$DEF_CONFIG" = "$_CONFIG" ]
+		if [ "$DEF_CONFIG" = ".config" ]
 		then
 			#
 			# Create the sound driver's config files for cards
@@ -1090,14 +1055,12 @@ save_configuration () {
 	fi
 }
 
-
 #
 # Remove temporary files
 #
 cleanup () {
 	cleanup1
 	cleanup2
-	stty $S_TERMIO
 }
 
 cleanup1 () {
@@ -1130,7 +1093,6 @@ set_geometry () {
 	ROWS=$((ROWS-4))  COLS=$((COLS-5))
 }
 
-S_TERMIO=`stty -g`
 
 set_geometry `stty size 2>/dev/null`
 
@@ -1149,7 +1111,7 @@ followed by the <SPACE BAR>.
 Press <?> for additional information about this option."
 
 inputbox_instructions_int="\
-Please enter a decimal value. \
+Please enter a decimal value between 1 and 9999. \
 Fractions will not be accepted.  \
 Use the <TAB> key to move from the input field to the buttons below it."
 
@@ -1157,11 +1119,11 @@ inputbox_instructions_hex="\
 Please enter a hexadecimal value. \
 Use the <TAB> key to move from the input field to the buttons below it."
 
-DIALOG="${DIALOG:-./scripts/lxdialog/lxdialog}"
+backtitle="Linux Kernel Configuration"
+
+DIALOG="./scripts/lxdialog/lxdialog"
 
 kernel_version="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
-
-backtitle="Linux Kernel v$kernel_version Configuration"
 
 trap "cleanup ; rm -f .menuconfig ; exit 1" 1 2 15
 
@@ -1169,27 +1131,28 @@ trap "cleanup ; rm -f .menuconfig ; exit 1" 1 2 15
 #
 # Locate default files.
 #
-DEFAULTS="arch/$ARCH/defconfig"
-
-CONFIG_IN="${1:-./config.in}"
-
-_CONFIG="${2:-.config}"
-
-if [ -f "$_CONFIG" ]; then
-  DEFAULTS=$_CONFIG
+CONFIG_IN=./config.in
+if [ "$1" != "" ] ; then
+	CONFIG_IN=$1
 fi
 
-AUTOCONF_H="${3:-include/linux/autoconf.h}"
+DEFAULTS=arch/$ARCH/defconfig
+if [ -f .config ]; then
+  DEFAULTS=.config
+fi
 
 if [ -f $DEFAULTS ]
 then
-  echo
-  echo "Using defaults found in" $DEFAULTS
-  load_config_file $DEFAULTS
+  echo "#"
+  echo "# Using defaults found in" $DEFAULTS
+  echo "#"
+  . $DEFAULTS
 else
-  echo
-  echo "No defaults found"
+  echo "#"
+  echo "# No defaults found"
+  echo "#"
 fi
+
 
 # Fresh new log.
 >.menuconfig.log
@@ -1248,9 +1211,8 @@ if $DIALOG --backtitle "$backtitle" \
 	   
 then
 	save_configuration
-	stty $S_TERMIO
-	clear
 
+	clear
 	cat <<EOM
 
 
@@ -1262,7 +1224,6 @@ the files are correctly re-made.
 EOM
 else
 	clear
-	stty $S_TERMIO
 	echo -e "Your kernel configuration changes were NOT saved.\n"
 fi
 

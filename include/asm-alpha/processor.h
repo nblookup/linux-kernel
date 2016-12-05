@@ -8,17 +8,9 @@
 #define __ASM_ALPHA_PROCESSOR_H
 
 /*
- * We have a 41-bit user address space: 2TB user VM.
- * Under certain circumstances (e.g. when emulating 32-bit code)
- * we may want to voluntarily limit this...
+ * We have a 41-bit user address space: 2TB user VM...
  */
 #define TASK_SIZE (0x40000000000UL)
-#define MAX_USER_ADDR ((current->personality&ADDR_MAX_32BIT) ? 0x100000000UL : \
-	((current->personality & ADDR_MAX_31BIT) ? 0x80000000UL : \
-							0x40000000000UL))
-#define MMAP_SEARCH_START ((current->personality & ADDR_MAX_31BIT) ? \
-			(MAX_USER_ADDR/2) : (MAX_USER_ADDR/3))
-
 
 /*
  * Bus types
@@ -51,9 +43,8 @@ struct thread_struct {
 
 	/* the fields below are Linux-specific: */
 	/*
-	 * bit 0:	perform syscall argument validation (get/set_fs)
-	 * bit 1..5:	IEEE_TRAP_ENABLE bits (see fpu.h)
-	 * bit 17..21:	IEEE_STATUS bits (see fpu.h)
+	 * bit 0:    perform syscall argument validation (get/set_fs)
+	 * bit 1..5: IEEE_TRAP_ENABLE bits (see fpu.h)
 	 */
 	unsigned long flags;
 };

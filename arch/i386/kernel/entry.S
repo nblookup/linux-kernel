@@ -38,6 +38,8 @@
  *	38(%esp) - %eflags
  *	3C(%esp) - %oldesp
  *	40(%esp) - %oldss
+ *
+ * "current" is in register %ebx during any slow entries.
  */
 
 #include <linux/sys.h>
@@ -65,9 +67,7 @@ OLDESP		= 0x3C
 OLDSS		= 0x40
 
 CF_MASK		= 0x00000001
-TF_MASK		= 0x00000100
 IF_MASK		= 0x00000200
-DF_MASK		= 0x00000400
 NT_MASK		= 0x00004000
 VM_MASK		= 0x00020000
 
@@ -101,9 +101,7 @@ ENOSYS = 38
 	pushl %ebx; \
 	movl $(KERNEL_DS),%edx; \
 	mov %dx,%ds; \
-	mov %dx,%es; \
-	movl $(USER_DS),%edx; \
-	mov %dx,%fs;
+	mov %dx,%es;
 
 #ifdef	__SMP__
 
@@ -134,10 +132,7 @@ ENOSYS = 38
 	decl SYMBOL_NAME(syscall_count); \
 	decl SYMBOL_NAME(kernel_counter); \
 	jnz 1f;	\
-	movb SYMBOL_NAME(saved_active_kernel_processor), %al; \
-	movb %al, SYMBOL_NAME(active_kernel_processor); \
-	cmpb $(NO_PROC_ID), %al; \
-	jnz 1f; \
+	movb $(NO_PROC_ID), SYMBOL_NAME(active_kernel_processor); \
 	lock; \
 	btrl $0, SYMBOL_NAME(kernel_flag); \
 1:	popfl;
@@ -168,13 +163,9 @@ ENOSYS = 38
 
 #define	ENTER_KERNEL \
 	pushl %eax; \
-	pushl %ebx; \
-	pushl %ecx; \
 	pushl %edx; \
 	pushfl; \
 	cli; \
-	movl $6000, %ebx; \
-	movl SYMBOL_NAME(smp_loops_per_tick), %ecx; \
 	GET_PROCESSOR_ID \
 	btsl $ SMP_FROM_SYSCALL,SYMBOL_NAME(smp_proc_in_lock)(,%eax,4); \
 	SMP_PROF_A \
@@ -184,25 +175,14 @@ ENOSYS = 38
 	cmpb SYMBOL_NAME(active_kernel_processor), %al; \
 	je 4f; \
 2:	SMP_PROF_B \
-	btl %eax, SYMBOL_NAME(smp_invalidate_needed); \
+	btl %al, SYMBOL_NAME(smp_invalidate_needed); \
 	jnc 5f; \
 	lock; \
-	btrl %eax, SYMBOL_NAME(smp_invalidate_needed); \
+	btrl %al, SYMBOL_NAME(smp_invalidate_needed); \
 	jnc 5f; \
 	movl %cr3,%edx; \
 	movl %edx,%cr3; \
-5:	sti; \
-	decl %ecx; \
-	cli; \
-	jne 7f; \
-	decl %ebx; \
-	jne 6f; \
-	call SYMBOL_NAME(non_irq_deadlock_detected); \
-6:	movl SYMBOL_NAME(smp_loops_per_tick), %ecx; \
-	cmpb SYMBOL_NAME(boot_cpu_id), %al; \
-	jne 7f; \
-	incl SYMBOL_NAME(jiffies);  \
-7:	btl $0, SYMBOL_NAME(kernel_flag); \
+5:	btl $0, SYMBOL_NAME(kernel_flag); \
 	jc 2b; \
 	jmp 1b; \
 3:	movb %al, SYMBOL_NAME(active_kernel_processor); \
@@ -210,19 +190,11 @@ ENOSYS = 38
 	incl SYMBOL_NAME(syscall_count); \
 	popfl; \
 	popl %edx; \
-	popl %ecx; \
-	popl %ebx; \
 	popl %eax;
 
 
 #define RESTORE_ALL \
-	cmpw $(KERNEL_CS),CS(%esp); \
-	je 1f;   \
-	GET_PROCESSOR_OFFSET(%edx) \
-	movl SYMBOL_NAME(current_set)(,%edx), %eax ; ; \
-	movl dbgreg7(%eax),%ebx; \
-	movl %ebx,%db7;	\
-1:	LEAVE_KERNEL \
+	LEAVE_KERNEL \
 	popl %ebx; \
 	popl %ecx; \
 	popl %edx; \
@@ -237,15 +209,16 @@ ENOSYS = 38
 	addl $4,%esp; \
 	iret
 
+#define GET_CURRENT \
+	GET_PROCESSOR_OFFSET(%ebx) \
+	movl SYMBOL_NAME(current_set)(%ebx),%ebx
+
 #else
 
+#define GET_CURRENT \
+	movl SYMBOL_NAME(current_set),%ebx
+
 #define RESTORE_ALL \
-	cmpw $(KERNEL_CS),CS(%esp); \
-	je 1f;   \
-	movl SYMBOL_NAME(current_set),%eax; \
-	movl dbgreg7(%eax),%ebx; \
-	movl %ebx,%db7;	\
-1:	\
 	popl %ebx; \
 	popl %ecx; \
 	popl %edx; \
@@ -261,10 +234,12 @@ ENOSYS = 38
 	iret
 #endif
 
+
 ENTRY(lcall7)
 	pushfl			# We get a different stack layout with call gates,
 	pushl %eax		# which has to be cleaned up later..
 	SAVE_ALL
+	GET_CURRENT
 #ifdef __SMP__
 	ENTER_KERNEL
 #endif
@@ -272,9 +247,6 @@ ENTRY(lcall7)
 	movl CS(%esp),%edx	# this is eip..
 	movl EFLAGS(%esp),%ecx	# and this is cs..
 	movl %eax,EFLAGS(%esp)	#
-	andl $~(NT_MASK|TF_MASK|DF_MASK), %eax
-	pushl %eax
-	popfl
 	movl %edx,EIP(%esp)	# Now we move them to their "normal" places
 	movl %ecx,CS(%esp)	#
 	movl %esp,%eax
@@ -305,6 +277,7 @@ reschedule:
 ENTRY(system_call)
 	pushl %eax			# save orig_eax
 	SAVE_ALL
+	GET_CURRENT
 #ifdef __SMP__
 	ENTER_KERNEL
 #endif
@@ -314,33 +287,11 @@ ENTRY(system_call)
 	movl SYMBOL_NAME(sys_call_table)(,%eax,4),%eax
 	testl %eax,%eax
 	je ret_from_sys_call
-#ifdef __SMP__
-	GET_PROCESSOR_OFFSET(%edx)
-	movl SYMBOL_NAME(current_set)(,%edx),%ebx
-#else
-	movl SYMBOL_NAME(current_set),%ebx
-#endif
 	andl $~CF_MASK,EFLAGS(%esp)	# clear carry - assume no errors
-	movl %db6,%edx
-	movl %edx,dbgreg6(%ebx)  # save current hardware debugging status
 	testb $0x20,flags(%ebx)		# PF_TRACESYS
-	jne 1f
+	jne tracesys
 	call *%eax
 	movl %eax,EAX(%esp)		# save the return value
-	jmp ret_from_sys_call
-	ALIGN
-1:	call SYMBOL_NAME(syscall_trace)
-	movl ORIG_EAX(%esp),%eax
-	call *SYMBOL_NAME(sys_call_table)(,%eax,4)
-	movl %eax,EAX(%esp)		# save the return value
-#ifdef __SMP__
-	GET_PROCESSOR_OFFSET(%eax)
-	movl SYMBOL_NAME(current_set)(,%eax),%eax
-#else
-	movl SYMBOL_NAME(current_set),%eax
-#endif
-	call SYMBOL_NAME(syscall_trace)
-
 	ALIGN
 	.globl ret_from_sys_call
 ret_from_sys_call:
@@ -349,10 +300,6 @@ ret_from_sys_call:
 9:	movl SYMBOL_NAME(bh_mask),%eax
 	andl SYMBOL_NAME(bh_active),%eax
 	jne handle_bottom_half
-#ifdef __SMP__
-	cmpb $(NO_PROC_ID), SYMBOL_NAME(saved_active_kernel_processor)
-	jne 2f
-#endif
 	movl EFLAGS(%esp),%eax		# check VM86 flag: CS/SS are
 	testl $(VM_MASK),%eax		# different then
 	jne 1f
@@ -364,51 +311,52 @@ ret_from_sys_call:
 	movl %eax,EFLAGS(%esp)		# stupid
 	cmpl $0,SYMBOL_NAME(need_resched)
 	jne reschedule
-#ifdef __SMP__
-	GET_PROCESSOR_OFFSET(%eax)
-	movl SYMBOL_NAME(current_set)(,%eax), %eax
-#else
-	movl SYMBOL_NAME(current_set),%eax
-#endif
-	cmpl SYMBOL_NAME(task),%eax	# task[0] cannot have signals
+	cmpl SYMBOL_NAME(task),%ebx	# task[0] cannot have signals
 	je 2f
-	movl blocked(%eax),%ecx
-	movl %ecx,%ebx			# save blocked in %ebx for signal handling
+	movl blocked(%ebx),%ecx
+	movl %ecx,%eax			# save blocked in %eax for signal handling
 	notl %ecx
-	andl signal(%eax),%ecx
+	andl signal(%ebx),%ecx
 	jne signal_return
 2:	RESTORE_ALL
 	ALIGN
-	.globl signal_return
 signal_return:
 	movl %esp,%ecx
 	pushl %ecx
 	testl $(VM_MASK),EFLAGS(%ecx)
 	jne v86_signal_return
-	pushl %ebx
+	pushl %eax
 	call SYMBOL_NAME(do_signal)
-	popl %ebx
-	popl %ebx
+	popl %eax
+	popl %eax
 	RESTORE_ALL
 	ALIGN
 v86_signal_return:
+	pushl %eax
 	call SYMBOL_NAME(save_v86_state)
+	popl %edx
 	movl %eax,%esp
 	pushl %eax
-	pushl %ebx
+	pushl %edx
 	call SYMBOL_NAME(do_signal)
-	popl %ebx
-	popl %ebx
+	popl %edx
+	popl %edx
 	RESTORE_ALL
+	ALIGN
+tracesys:
+	call SYMBOL_NAME(syscall_trace)
+	movl ORIG_EAX(%esp),%eax
+	call SYMBOL_NAME(sys_call_table)(,%eax,4)
+	movl %eax,EAX(%esp)		# save the return value
+	call SYMBOL_NAME(syscall_trace)
+	jmp ret_from_sys_call
+
 
 ENTRY(divide_error)
 	pushl $0		# no error code
 	pushl $ SYMBOL_NAME(do_divide_error)
 	ALIGN
 error_code:
-	pushfl
-	andl $~(NT_MASK|TF_MASK|DF_MASK), (%esp)
-	popfl
 	push %fs
 	push %es
 	push %ds
@@ -421,28 +369,22 @@ error_code:
 	decl %eax			# eax = -1
 	pushl %ecx
 	pushl %ebx
-	xorl %ebx,%ebx			# zero ebx
+	cld
+	xorl %ecx,%ecx			# zero ecx
 	xchgl %eax, ORIG_EAX(%esp)	# orig_eax (get the error code. )
 	mov %gs,%bx			# get the lower order bits of gs
 	movl %esp,%edx
-	xchgl %ebx, GS(%esp)		# get the address and save gs.
+	xchgl %ecx, GS(%esp)		# get the address and save gs.
 	pushl %eax			# push the error code
 	pushl %edx
 	movl $(KERNEL_DS),%edx
 	mov %dx,%ds
 	mov %dx,%es
-	movl $(USER_DS),%edx
-	mov %dx,%fs
+	GET_CURRENT
 #ifdef __SMP__
 	ENTER_KERNEL
-	GET_PROCESSOR_OFFSET(%eax)
-	movl SYMBOL_NAME(current_set)(,%eax), %eax
-#else
-	movl SYMBOL_NAME(current_set),%eax
 #endif
-	movl %db6,%edx
-	movl %edx,dbgreg6(%eax)  # save current hardware debugging status
-	call *%ebx
+	call *%ecx
 	addl $8,%esp
 	jmp ret_from_sys_call
 
@@ -454,6 +396,7 @@ ENTRY(coprocessor_error)
 ENTRY(device_not_available)
 	pushl $-1		# mark this as an int
 	SAVE_ALL
+	GET_CURRENT
 #ifdef __SMP__
 	ENTER_KERNEL
 #endif
@@ -532,11 +475,6 @@ ENTRY(alignment_check)
 
 ENTRY(page_fault)
 	pushl $ SYMBOL_NAME(do_page_fault)
-	jmp error_code
-
-ENTRY(spurious_interrupt_bug)
-	pushl $0
-	pushl $ SYMBOL_NAME(do_spurious_interrupt_bug)
 	jmp error_code
 
 .data
@@ -654,7 +592,7 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_iopl)		/* 110 */
 	.long SYMBOL_NAME(sys_vhangup)
 	.long SYMBOL_NAME(sys_idle)
-	.long SYMBOL_NAME(sys_vm86old)
+	.long SYMBOL_NAME(sys_vm86)
 	.long SYMBOL_NAME(sys_wait4)
 	.long SYMBOL_NAME(sys_swapoff)		/* 115 */
 	.long SYMBOL_NAME(sys_sysinfo)
@@ -705,13 +643,4 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_sched_rr_get_interval)
 	.long SYMBOL_NAME(sys_nanosleep)
 	.long SYMBOL_NAME(sys_mremap)
-	.long 0,0
-	.long SYMBOL_NAME(sys_vm86)		/* 166 */
-	.long 0					/* 167 */
-	.long 0					/* 168 STREAMS poll */
-	.long 0					/* 169 */
-	.long 0,0,0,0,0,0,0,0,0,0		/* 170 - 179 */
-	.long 0,0,0,0,0,0,0,0			/* 180 - 187 */
-	.long 0					/* 188 STREAMS getpmsg */
-	.long 0					/* 189 STREAMS putpmsg */
-	.space (NR_syscalls-189)*4
+	.space (NR_syscalls-163)*4

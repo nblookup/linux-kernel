@@ -78,22 +78,6 @@ else
   endif
 endif
 
-ifeq ($(CONFIG_SPECIALIX),y)
-L_OBJS += specialix.o
-else
-  ifeq ($(CONFIG_SPECIALIX),m)
-  M_OBJS += specialix.o
-  endif
-endif
-
-ifeq ($(CONFIG_ISI),y)
-L_OBJS += isicom.o
-else
-  ifeq ($(CONFIG_ISI),m)
-  M_OBJS += isicom.o
-  endif
-endif
-
 ifeq ($(CONFIG_ATIXL_BUSMOUSE),y)
 M = y
 L_OBJS += atixlmouse.o
@@ -200,11 +184,7 @@ else
 endif
 
 ifdef CONFIG_APM
-M = y
-endif
-
-ifdef CONFIG_H8
-LX_OBJS += h8.o
+LX_OBJS += apm_bios.o
 M = y
 endif
 
@@ -224,11 +204,16 @@ else
   endif
 endif  
 
+ifeq ($(CONFIG_BAYCOM),y)
+L_OBJS += baycom.o
+else
+  ifeq ($(CONFIG_BAYCOM),m)
+  M_OBJS += baycom.o
+  endif
+endif  
+
 ifdef CONFIG_TGA_CONSOLE
 L_OBJS += tga.o
-  ifdef CONFIG_VGA_CONSOLE
-    L_OBJS += vga.o vesa_blank.o
-  endif
 else
  ifndef CONFIG_SUN_CONSOLE
  L_OBJS += vga.o vesa_blank.o

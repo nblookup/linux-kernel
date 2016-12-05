@@ -1,8 +1,8 @@
 /*
  *
  *		SNMP MIB entries for the IP subsystem.
- *
- *		Alan Cox, <alan@lxorguk.ukuu.org.uk>
+ *		
+ *		Alan Cox <gw4pts@gw4pts.ampr.org>
  *
  *		We don't chose to implement SNMP in the kernel (this would
  *		be silly as SNMP is a pain in the backside in places). We do

@@ -60,8 +60,6 @@
  * User-defined bell sound, new setterm control sequences and printk
  * redirection by Martin Mares <mj@k332.feld.cvut.cz> 19-Nov-95
  *
- * APM screenblank bug fixed Takashi Manabe <manabe@roy.dsl.tutics.tut.jp>
- * Backported to 2.0.31 by Adam Bradley <artdodge@cs.bu.edu>
  */
 
 #define BLANK 0x0020
@@ -594,15 +592,13 @@ static void set_origin(int currcons)
 	__set_origin(__real_origin);
 }
 
-static void scrup(int currcons, unsigned int t, unsigned int b, unsigned int nr)
+void scrup(int currcons, unsigned int t, unsigned int b)
 {
 	int hardscroll = hardscroll_enabled;
 
-	if (t+nr >= b)
-		nr = b - t - 1;
-	if (b > video_num_lines || t >= b || nr < 1)
+	if (b > video_num_lines || t >= b)
 		return;
-	if (t || b != video_num_lines || nr > 1)
+	if (t || b != video_num_lines)
 		hardscroll = 0;
 	if (hardscroll) {
 		origin += video_size_row;
@@ -643,34 +639,40 @@ static void scrup(int currcons, unsigned int t, unsigned int b, unsigned int nr)
 		set_origin(currcons);
 	} else {
 		unsigned short * d = (unsigned short *) (origin+video_size_row*t);
-		unsigned short * s = (unsigned short *) (origin+video_size_row*(t+nr));
+		unsigned short * s = (unsigned short *) (origin+video_size_row*(t+1));
+		unsigned int count = (b-t-1) * video_num_columns;
 
-		memcpyw(d, s, (b-t-nr) * video_size_row);
-		memsetw(d + (b-t-nr) * video_num_columns, video_erase_char, video_size_row*nr);
+		while (count) {
+			count--;
+			scr_writew(scr_readw(s++), d++);
+		}
+		count = video_num_columns;
+		while (count) {
+			count--;
+			scr_writew(video_erase_char, d++);
+		}
 	}
 }
 
-static void
-scrdown(int currcons, unsigned int t, unsigned int b, unsigned int nr)
+void
+scrdown(int currcons, unsigned int t, unsigned int b)
 {
-	unsigned short *s;
+	unsigned short *d, *s;
 	unsigned int count;
-	unsigned int step;
 
-	if (t+nr >= b)
-		nr = b - t - 1;
-	if (b > video_num_lines || t >= b || nr < 1)
+	if (b > video_num_lines || t >= b)
 		return;
-	s = (unsigned short *) (origin+video_size_row*(b-nr-1));
-	step = video_num_columns * nr;
-	count = b - t - nr;
-	while (count--) {
-		memcpyw(s + step, s, video_size_row);
-		s -= video_num_columns;
+	d = (unsigned short *) (origin+video_size_row*b);
+	s = (unsigned short *) (origin+video_size_row*(b-1));
+	count = (b-t-1)*video_num_columns;
+	while (count) {
+		count--;
+		scr_writew(scr_readw(--s), --d);
 	}
-	while (nr--) {
-		s += video_num_columns;
-		memsetw(s, video_erase_char, video_size_row);
+	count = video_num_columns;
+	while (count) {
+		count--;
+		scr_writew(video_erase_char, --d);
 	}
 	has_scrolled = 1;
 }
@@ -681,7 +683,7 @@ static void lf(int currcons)
 	 * if below scrolling region
 	 */
     	if (y+1 == bottom)
-		scrup(currcons,top,bottom, 1);
+		scrup(currcons,top,bottom);
 	else if (y < video_num_lines-1) {
 	    	y++;
 		pos += video_size_row;
@@ -695,7 +697,7 @@ static void ri(int currcons)
 	 * if above scrolling region
 	 */
 	if (y == top)
-		scrdown(currcons,top,bottom, 1);
+		scrdown(currcons,top,bottom);
 	else if (y > 0) {
 		y--;
 		pos -= video_size_row;
@@ -1184,9 +1186,9 @@ static void insert_char(int currcons)
 	need_wrap = 0;
 }
 
-static void insert_line(int currcons, unsigned int nr)
+static void insert_line(int currcons)
 {
-	scrdown(currcons, y, bottom, nr);
+	scrdown(currcons,y,bottom);
 	need_wrap = 0;
 }
 
@@ -1203,9 +1205,9 @@ static void delete_char(int currcons)
 	need_wrap = 0;
 }
 
-static void delete_line(int currcons, unsigned int nr)
+static void delete_line(int currcons)
 {
-	scrup(currcons, y, bottom, nr);
+	scrup(currcons,y,bottom);
 	need_wrap = 0;
 }
 
@@ -1225,7 +1227,8 @@ static void csi_L(int currcons, unsigned int nr)
 		nr = video_num_lines;
 	else if (!nr)
 		nr = 1;
-	insert_line(currcons, nr);
+	while (nr--)
+		insert_line(currcons);
 }
 
 static void csi_P(int currcons, unsigned int nr)
@@ -1244,7 +1247,8 @@ static void csi_M(int currcons, unsigned int nr)
 		nr = video_num_lines;
 	else if (!nr)
 		nr=1;
-	delete_line(currcons, nr);
+	while (nr--)
+		delete_line(currcons);
 }
 
 static void save_cur(int currcons)
@@ -1442,8 +1446,7 @@ static int con_write(struct tty_struct * tty, int from_user,
                 ok = tc && (c >= 32 ||
                             (!utf && !(((disp_ctrl ? CTRL_ALWAYS
                                          : CTRL_ACTION) >> c) & 1)))
-                        && (c != 127 || disp_ctrl)
-			&& (c != 128+27);
+                        && (c != 127 || disp_ctrl);
 
 		if (vc_state == ESnormal && ok) {
 			/* Now try to find out how to display it */
@@ -1483,8 +1486,6 @@ static int con_write(struct tty_struct * tty, int from_user,
 		 *  of an escape sequence.
 		 */
 		switch (c) {
-			case 0:
-				continue;
 			case 7:
 				if (bell_duration)
 					kd_mksound(bell_pitch, bell_duration);
@@ -2147,14 +2148,12 @@ void do_blank_screen(int nopowersave)
 	hide_cursor();
 	console_blanked = fg_console + 1;
 
-	if(!nopowersave)
-	{
 #ifdef CONFIG_APM
-		if (apm_display_blank())
-			return;
+	if (apm_display_blank())
+		return;
 #endif
-		vesa_blank();
-	}
+	if(!nopowersave)
+	    vesa_blank();
 }
 
 void do_unblank_screen(void)
@@ -2317,23 +2316,4 @@ int con_set_font (char *arg, int ch512)
 int con_get_font (char *arg)
 {
 	return set_get_font (arg,0,video_mode_512ch);
-}
-
-/*
- * Report the current status of the vc. This is exported to modules (ARub)
- */
-
-int con_get_info(int *mode, int *shift, int *col, int *row,
-			struct tty_struct **tty)
-{
-	extern int shift_state;
-	extern struct tty_driver console_driver;
-	struct tty_struct **console_table=console_driver.table;
-
-	if (mode) *mode = vt_cons[fg_console]->vc_mode;
-	if (shift) *shift = shift_state;
-	if (col) *col = video_num_columns;
-	if (row) *row = video_num_lines;
-	if (tty) *tty = console_table[fg_console];
-	return fg_console;
 }

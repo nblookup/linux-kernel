@@ -4,7 +4,7 @@
  * Authors:	Alan Cox, <alan@cymru.net>
  *
  *		Currently this contains all but the file descriptor passing code.
- *		Before that goes in the odd bugs in the iovec handlers need
+ *		Before that goes in the odd bugs in the iovec handlers need 
  *		fixing, and this bit testing. BSD fd passing is not a trivial part
  *		of the exercise it turns out. Anyone like writing garbage collectors.
  *
@@ -28,35 +28,20 @@
  *		Nick Nevin	:	recvmsg bugfix.
  *		Alan Cox	:	Started proper garbage collector
  *		Heiko EiBfeldt	:	Missing verify_area check
- *		Alan Cox	:	Shutdown() bug
- *	Michael Deutschmann	:	release was writing to the socket
- *					structure after freeing it.
- *		Jon Nelson,
- *		Alan Cox,
- *		David Weinehall	:	Fix possible memory-leaks
- *	Michael Deutschmann	:	Fix fd-passing semantics to
- *					match what OpenSSH expects.
  *
  * Known differences from reference BSD that was tested:
  *
  *	[TO FIX]
- *	ECONNREFUSED is not returned from one end of a connected() socket
- *	to the other the moment one end closes.
- *
- *	fstat() doesn't return st_dev=NODEV, and give the blksize as
- *	high water mark and a fake inode identifier (nor the BSD first socket
- *	fstat twice bug).
- *
+ *	ECONNREFUSED is not returned from one end of a connected() socket to the
+ *		other the moment one end closes.
+ *	fstat() doesn't return st_dev=NODEV, and give the blksize as high water mark
+ *		and a fake inode identifier (nor the BSD first socket fstat twice bug).
  *	[NOT TO FIX]
  *	accept() returns a path name even if the connecting socket has closed
- *	in the meantime (BSD loses the path and gives up).
- *
- *	accept() returns 0 length path for an unbound connector. BSD returns
- *	16 and a null first byte in the path (but not for gethost/peername
- *	- BSD bug ??)
- *
+ *		in the meantime (BSD loses the path and gives up).
+ *	accept() returns 0 length path for an unbound connector. BSD returns 16
+ *		and a null first byte in the path (but not for gethost/peername - BSD bug ??)
  *	socketpair(...SOCK_RAW..) doesn't panic the kernel.
- *
  *	BSD af_unix apparently has connect forgetting to block properly.
  */
 
@@ -68,6 +53,7 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/stat.h>
+#include <linux/socket.h>
 #include <linux/un.h>
 #include <linux/fcntl.h>
 #include <linux/termios.h>
@@ -92,7 +78,7 @@ unix_socket *unix_socket_list=NULL;
 /*
  *	Make sure the unix name is null-terminated.
  */
-
+ 
 static inline void unix_mkname(struct sockaddr_un * sunaddr, unsigned long len)
 {
 	if (len >= sizeof(*sunaddr))
@@ -105,11 +91,11 @@ static inline void unix_mkname(struct sockaddr_un * sunaddr, unsigned long len)
  *	handler using this technique. They can be added although we do not
  *	use this facility.
  */
-
+ 
 static void unix_remove_socket(unix_socket *sk)
 {
 	unix_socket **s;
-
+	
 	cli();
 	s=&unix_socket_list;
 
@@ -161,20 +147,21 @@ static void unix_destroy_timer(unsigned long data)
 	unix_socket *sk=(unix_socket *)data;
 	if(sk->protinfo.af_unix.locks==0 && sk->wmem_alloc==0)
 	{
-		kfree(sk->protinfo.af_unix.name);
+		if(sk->protinfo.af_unix.name)
+			kfree(sk->protinfo.af_unix.name);
 		sk_free(sk);
 		return;
 	}
-
+	
 	/*
 	 *	Retry;
 	 */
-
+	 
 	sk->timer.expires=jiffies+10*HZ;	/* No real hurry try it every 10 seconds or so */
 	add_timer(&sk->timer);
 }
-
-
+	 
+	 
 static void unix_delayed_delete(unix_socket *sk)
 {
 	sk->timer.data=(unsigned long)sk;
@@ -182,15 +169,13 @@ static void unix_delayed_delete(unix_socket *sk)
 	sk->timer.function=unix_destroy_timer;
 	add_timer(&sk->timer);
 }
-
+	
 static void unix_destroy_socket(unix_socket *sk)
 {
 	struct sk_buff *skb;
 
 	unix_remove_socket(sk);
-
-	sk->socket = NULL;
-
+	
 	while((skb=skb_dequeue(&sk->receive_queue))!=NULL)
 	{
 		if(sk->state==TCP_LISTEN)
@@ -199,7 +184,7 @@ static void unix_destroy_socket(unix_socket *sk)
 			osk->state=TCP_CLOSE;
 			kfree_skb(skb, FREE_WRITE);	/* Now surplus - free the skb first before the socket */
 			osk->state_change(osk);		/* So the connect wakes and cleans up (if any) */
-			/* osk will be destroyed when it gets to close or the timer fires */
+			/* osk will be destroyed when it gets to close or the timer fires */			
 		}
 		else
 		{
@@ -207,16 +192,17 @@ static void unix_destroy_socket(unix_socket *sk)
 			kfree_skb(skb,FREE_WRITE);
 		}
 	}
-
+	
 	if(sk->protinfo.af_unix.inode!=NULL)
 	{
 		iput(sk->protinfo.af_unix.inode);
 		sk->protinfo.af_unix.inode=NULL;
 	}
-
+	
 	if(--sk->protinfo.af_unix.locks==0 && sk->wmem_alloc==0)
 	{
-		kfree(sk->protinfo.af_unix.name);
+		if(sk->protinfo.af_unix.name)
+			kfree(sk->protinfo.af_unix.name);
 		sk_free(sk);
 	}
 	else
@@ -229,7 +215,7 @@ static void unix_destroy_socket(unix_socket *sk)
 /*
  *	Fixme: We need async I/O on AF_UNIX doing next.
  */
-
+ 
 static int unix_fcntl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	return -EINVAL;
@@ -238,13 +224,13 @@ static int unix_fcntl(struct socket *sock, unsigned int cmd, unsigned long arg)
 /*
  *	Yes socket options work with the new unix domain socketry!!!!!!!
  */
-
+ 
 static int unix_setsockopt(struct socket *sock, int level, int optname, char *optval, int optlen)
 {
 	unix_socket *sk=sock->data;
 	if(level!=SOL_SOCKET)
 		return -EOPNOTSUPP;
-	return sock_setsockopt(sk,level,optname,optval,optlen);
+	return sock_setsockopt(sk,level,optname,optval,optlen);	
 }
 
 static int unix_getsockopt(struct socket *sock, int level, int optname, char *optval, int *optlen)
@@ -350,12 +336,12 @@ static int unix_release(struct socket *sock, struct socket *peer)
 {
 	unix_socket *sk=sock->data;
 	unix_socket *skpair;
-
+	
 	/* May not have data attached */
-
+	
 	if(sk==NULL)
 		return 0;
-
+		
 	sk->state_change(sk);
 	sk->dead=1;
 	skpair=(unix_socket *)sk->protinfo.af_unix.other;	/* Person we send to (default) */
@@ -368,16 +354,16 @@ static int unix_release(struct socket *sock, struct socket *peer)
 		skpair->protinfo.af_unix.locks--;	/* It may now die */
 	sk->protinfo.af_unix.other=NULL;		/* No pair */
 	unix_destroy_socket(sk);			/* Try to flush out this socket. Throw out buffers at least */
-	unix_gc();					/* Garbage collect fds */
+	unix_gc();					/* Garbage collect fds */	
 
 	/*
-	 * FIXME: BSD difference: In BSD all sockets connected to use get
-	 * ECONNRESET and we die on the spot. In Linux we behave like files
-	 * and pipes do and wait for the last dereference.
+	 *	FIXME: BSD difference: In BSD all sockets connected to use get ECONNRESET and we die on the spot. In
+	 *	Linux we behave like files and pipes do and wait for the last dereference.
 	 */
-
+	 
 	sock->data = NULL;
-
+	sk->socket = NULL;
+	
 	return 0;
 }
 
@@ -388,7 +374,7 @@ static unix_socket *unix_find_other(char *path, int *error)
 	int err;
 	struct inode *inode;
 	unix_socket *u;
-
+	
 	old_fs=get_fs();
 	set_fs(get_ds());
 	err = open_namei(path, 2, S_IFSOCK, &inode, NULL);
@@ -415,10 +401,10 @@ static int unix_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	unix_socket *sk=sock->data;
 	int old_fs;
 	int err;
-
+	
 	if(sk->protinfo.af_unix.name)
 		return -EINVAL;		/* Already bound */
-
+	
 	if(addr_len>sizeof(struct sockaddr_un) || addr_len<3 || sunaddr->sun_family!=AF_UNIX)
 		return -EINVAL;
 	unix_mkname(sunaddr, addr_len);
@@ -427,21 +413,21 @@ static int unix_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	 */
 	if(sk->protinfo.af_unix.inode!=NULL)
 		return -EINVAL;
-
+	
 	sk->protinfo.af_unix.name=kmalloc(addr_len+1, GFP_KERNEL);
 	if(sk->protinfo.af_unix.name==NULL)
 		return -ENOMEM;
 	memcpy(sk->protinfo.af_unix.name, sunaddr->sun_path, addr_len+1);
-
+	
 	old_fs=get_fs();
 	set_fs(get_ds());
-
+	
 	err=do_mknod(sk->protinfo.af_unix.name,S_IFSOCK|S_IRWXUGO,0);
 	if(err==0)
 		err=open_namei(sk->protinfo.af_unix.name, 2, S_IFSOCK, &sk->protinfo.af_unix.inode, NULL);
-
+	
 	set_fs(old_fs);
-
+	
 	if(err<0)
 	{
 		kfree_s(sk->protinfo.af_unix.name,addr_len+1);
@@ -451,9 +437,9 @@ static int unix_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 		else
 			return err;
 	}
-
+	
 	return 0;
-
+	
 }
 
 static int unix_connect(struct socket *sock, struct sockaddr *uaddr, int addr_len, int flags)
@@ -484,12 +470,12 @@ static int unix_connect(struct socket *sock, struct sockaddr *uaddr, int addr_le
 		 *	Drop through the connect up logic to the wait.
 		 */
 	}
-
+	
 	if(addr_len < sizeof(sunaddr->sun_family)+1 || sunaddr->sun_family!=AF_UNIX)
 		return -EINVAL;
-
+		
 	unix_mkname(sunaddr, addr_len);
-
+		
 	if(sk->type==SOCK_DGRAM)
 	{
 		if(sk->protinfo.af_unix.other)
@@ -509,14 +495,14 @@ static int unix_connect(struct socket *sock, struct sockaddr *uaddr, int addr_le
 		sk->state=TCP_ESTABLISHED;
 		return 0;			/* Done */
 	}
-
+	
 
 	if(sock->state==SS_UNCONNECTED)
 	{
 		/*
 		 *	Now ready to connect
 		 */
-
+	 
 		skb=sock_alloc_send_skb(sk, 0, 0, 0, &err); /* Marker object */
 		if(skb==NULL)
 			return err;
@@ -543,12 +529,12 @@ static int unix_connect(struct socket *sock, struct sockaddr *uaddr, int addr_le
 		sk->state=TCP_SYN_SENT;
 		sock->state=SS_CONNECTING;
 		sti();
-		other->data_ready(other,0);		/* Wake up ! */
+		other->data_ready(other,0);		/* Wake up ! */		
 	}
-
-
+			
+	
 	/* Wait for an accept */
-
+	
 	cli();
 	while(sk->state==TCP_SYN_SENT)
 	{
@@ -564,11 +550,11 @@ static int unix_connect(struct socket *sock, struct sockaddr *uaddr, int addr_le
 			return -ERESTARTSYS;
 		}
 	}
-
+	
 	/*
 	 *	Has the other end closed on us ?
 	 */
-
+	 
 	if(sk->state==TCP_CLOSE)
 	{
 		sk->protinfo.af_unix.other->protinfo.af_unix.locks--;
@@ -577,21 +563,21 @@ static int unix_connect(struct socket *sock, struct sockaddr *uaddr, int addr_le
 		sti();
 		return -ECONNREFUSED;
 	}
-
+	
 	/*
 	 *	Amazingly it has worked
 	 */
-
+	 
 	sock->state=SS_CONNECTED;
 	sti();
 	return 0;
-
+	
 }
 
 static int unix_socketpair(struct socket *a, struct socket *b)
 {
-	unix_socket *ska,*skb;
-
+	unix_socket *ska,*skb;	
+	
 	ska=a->data;
 	skb=b->data;
 
@@ -610,7 +596,7 @@ static int unix_accept(struct socket *sock, struct socket *newsock, int flags)
 	unix_socket *sk=sock->data;
 	unix_socket *newsk, *tsk;
 	struct sk_buff *skb;
-
+	
 	if(sk->type!=SOCK_STREAM)
 	{
 		return -EOPNOTSUPP;
@@ -619,7 +605,7 @@ static int unix_accept(struct socket *sock, struct socket *newsock, int flags)
 	{
 		return -EINVAL;
 	}
-
+		
 	newsk=newsock->data;
 	if(sk->protinfo.af_unix.name!=NULL)
 	{
@@ -628,7 +614,7 @@ static int unix_accept(struct socket *sock, struct socket *newsock, int flags)
 			return -ENOMEM;
 		strcpy(newsk->protinfo.af_unix.name, sk->protinfo.af_unix.name);
 	}
-
+		
 	do
 	{
 		cli();
@@ -670,7 +656,7 @@ static int unix_getname(struct socket *sock, struct sockaddr *uaddr, int *uaddr_
 {
 	unix_socket *sk=sock->data;
 	struct sockaddr_un *sunaddr=(struct sockaddr_un *)uaddr;
-
+	
 	if(peer)
 	{
 		if(sk->protinfo.af_unix.other==NULL)
@@ -692,16 +678,14 @@ static int unix_getname(struct socket *sock, struct sockaddr *uaddr, int *uaddr_
 /*
  *	Support routines for struct cmsghdr handling
  */
-
-static struct cmsghdr *unix_copyrights(void *userp, int len) /* AT&T ? */
+ 
+static struct cmsghdr *unix_copyrights(void *userp, int len)
 {
 	struct cmsghdr *cm;
 
 	if(len>256|| len <=0)
 		return NULL;
 	cm=kmalloc(len, GFP_KERNEL);
-	if(cm==NULL)
-		return NULL;
 	memcpy_fromfs(cm, userp, len);
 	return cm;
 }
@@ -709,7 +693,7 @@ static struct cmsghdr *unix_copyrights(void *userp, int len) /* AT&T ? */
 /*
  *	Return a header block
  */
-
+ 
 static void unix_returnrights(void *userp, int len, struct cmsghdr *cm)
 {
 	memcpy_tofs(userp, cm, len);
@@ -720,7 +704,7 @@ static void unix_returnrights(void *userp, int len, struct cmsghdr *cm)
  *	Copy file descriptors into system space.
  *	Return number copied or negative error code
  */
-
+ 
 static int unix_fd_copy(struct sock *sk, struct cmsghdr *cmsg, struct file **fp)
 {
 	int num=cmsg->cmsg_len-sizeof(struct cmsghdr);
@@ -730,22 +714,25 @@ static int unix_fd_copy(struct sock *sk, struct cmsghdr *cmsg, struct file **fp)
 	num /= sizeof(int);	/* Odd bytes are forgotten in BSD not errored */
 	if (num >= UNIX_MAX_FD)
 		return -EINVAL;
-
+	
 	/*
 	 *	Verify the descriptors.
 	 */
-
+	 
 	for(i=0; i< num; i++)
 	{
 		int fd;
-
-		fd = fdp[i];
+		
+		fd = fdp[i];	
+#if 0
+		printk("testing  fd %d\n", fd);
+#endif
 		if (fd < 0 || fd >= NR_OPEN)
 			return -EBADF;
 		if (current->files->fd[fd]==NULL)
 			return -EBADF;
 	}
-
+	
         /* add another reference to these files */
 	for(i=0; i< num; i++)
 	{
@@ -753,7 +740,7 @@ static int unix_fd_copy(struct sock *sk, struct cmsghdr *cmsg, struct file **fp)
 		fp[i]->f_count++;
 		unix_inflight(fp[i]);
 	}
-
+	
 	return num;
 }
 
@@ -793,15 +780,12 @@ static void unix_detach_fds(struct sk_buff *skb, struct cmsghdr *cmsg)
 		cmnum = (cmsg->cmsg_len-sizeof(struct cmsghdr)) / sizeof(int);
 		cmfptr = (int *)&cmsg->cmsg_data;
 	}
-
+	
 	fdnum = *(int *)skb->h.filp;
 	fp = (struct file **)(skb->h.filp+sizeof(long));
 
 	if (cmnum > fdnum)
-	{
 		cmnum = fdnum;
-		cmsg->cmsg_len = sizeof(struct cmsghdr) + sizeof(int) * fdnum;
-	}
 
 	/*
 	 *	Copy those that fit
@@ -834,29 +818,26 @@ static void unix_destruct_fds(struct sk_buff *skb)
 {
 	unix_detach_fds(skb,NULL);
 }
-
+	
 /*
  *	Attach the file descriptor array to an sk_buff
  */
-static int unix_attach_fds(int fpnum,struct file **fp,struct sk_buff *skb)
+static void unix_attach_fds(int fpnum,struct file **fp,struct sk_buff *skb)
 {
 
-	skb->h.filp = kmalloc(sizeof(long)+fpnum*sizeof(struct file *),
+	skb->h.filp = kmalloc(sizeof(long)+fpnum*sizeof(struct file *), 
 							GFP_KERNEL);
-	if(skb->h.filp==NULL)
-		return -ENOMEM;
 	/* number of descriptors starts block */
 	*(int *)skb->h.filp = fpnum;
 	/* actual  descriptors */
 	memcpy(skb->h.filp+sizeof(long),fp,fpnum*sizeof(struct file *));
 	skb->destructor = unix_destruct_fds;
-	return 0;
 }
 
 /*
  *	Send AF_UNIX data.
  */
-
+		
 static int unix_sendmsg(struct socket *sock, struct msghdr *msg, int len, int nonblock, int flags)
 {
 	unix_socket *sk=sock->data;
@@ -868,7 +849,7 @@ static int unix_sendmsg(struct socket *sock, struct msghdr *msg, int len, int no
 	int sent=0;
 	struct file *fp[UNIX_MAX_FD];
 	/* number of fds waiting to be passed, 0 means either
-	 * no fds to pass or they've already been passed
+	 * no fds to pass or they've already been passed 
 	 */
 	int fpnum=0;
 
@@ -877,17 +858,17 @@ static int unix_sendmsg(struct socket *sock, struct msghdr *msg, int len, int no
 
 	if(flags&MSG_OOB)
 		return -EOPNOTSUPP;
-
+			
 	if(flags)	/* For now */ {
 		return -EINVAL;
 	}
-
+		
 	if(sk->shutdown&SEND_SHUTDOWN)
 	{
 		send_sig(SIGPIPE,current,0);
 		return -EPIPE;
 	}
-
+	
 	if(sunaddr!=NULL)
 	{
 		if(sock->type==SOCK_STREAM)
@@ -908,9 +889,9 @@ static int unix_sendmsg(struct socket *sock, struct msghdr *msg, int len, int no
 	/*
 	 *	A control message has been attached.
 	 */
-	if(msg->msg_control)
+	if(msg->msg_control) 
 	{
-		struct cmsghdr *cm=unix_copyrights(msg->msg_control,
+		struct cmsghdr *cm=unix_copyrights(msg->msg_control, 
 						msg->msg_controllen);
 		if(cm==NULL || msg->msg_controllen<sizeof(struct cmsghdr) ||
 		   cm->cmsg_type!=SCM_RIGHTS ||
@@ -918,7 +899,7 @@ static int unix_sendmsg(struct socket *sock, struct msghdr *msg, int len, int no
 		   msg->msg_controllen!=cm->cmsg_len)
 		{
 			kfree(cm);
-			return -EINVAL;
+		   	return -EINVAL;
 		}
 		fpnum=unix_fd_copy(sk,cm,fp);
 		kfree(cm);
@@ -930,10 +911,10 @@ static int unix_sendmsg(struct socket *sock, struct msghdr *msg, int len, int no
 	while(sent < len)
 	{
 		/*
-		 * Optimisation for the fact that under 0.01% of X messages
-		 * typically need breaking up.
+		 *	Optimisation for the fact that under 0.01% of X messages typically
+		 *	need breaking up.
 		 */
-
+		 
 		size=len-sent;
 
 		if(size>(sk->sndbuf-sizeof(struct sk_buff))/2)	/* Keep two messages in the pipe so it schedules better */
@@ -950,18 +931,18 @@ static int unix_sendmsg(struct socket *sock, struct msghdr *msg, int len, int no
 		 *	have suggested. Big mallocs stress the vm too
 		 *	much.
 		 */
-#define MAX_ALLOC (PAGE_SIZE*7/8)
-		if(size > MAX_ALLOC && sock->type!=SOCK_DGRAM)
-			limit = MAX_ALLOC;	/* Fall back to 4K if we can't grab a big buffer this instant */
+
+		if(size > 4000 && sock->type!=SOCK_DGRAM)
+			limit = 4000;	/* Fall back to 4K if we can't grab a big buffer this instant */
 		else
 			limit = 0;	/* Otherwise just grab and wait */
 
 		/*
 		 *	Grab a buffer
 		 */
-
+		 
 		skb=sock_alloc_send_skb(sk,size,limit,nonblock, &err);
-
+		
 		if(skb==NULL)
 		{
 			unix_fd_free(sk,fp,fpnum);
@@ -976,16 +957,10 @@ static int unix_sendmsg(struct socket *sock, struct msghdr *msg, int len, int no
 
 		skb->sk=sk;
 		skb->free=1;
-
+		
 		if(fpnum)
 		{
-			int err=unix_attach_fds(fpnum,fp,skb);
-			if(err)
-			{
-				unix_fd_free(sk, fp, fpnum);
-				kfree(skb);
-				return err;
-			}
+			unix_attach_fds(fpnum,fp,skb);
 			fpnum=0;
 		}
 		else
@@ -1053,7 +1028,7 @@ static int unix_sendmsg(struct socket *sock, struct msghdr *msg, int len, int no
 /*
  *	Sleep until data has arrive. But check for races..
  */
-
+ 
 static void unix_data_wait(unix_socket * sk)
 {
 	cli();
@@ -1080,28 +1055,33 @@ static int unix_recvmsg(struct socket *sock, struct msghdr *msg, int size, int n
 
 	if(flags&MSG_OOB)
 		return -EOPNOTSUPP;
-
+		
 	if(addr_len)
 		*addr_len=0;
-
+		
 	if(sk->err)
 		return sock_error(sk);
 
-	if(msg->msg_control)
+	if(msg->msg_control) 
 	{
-		cm=unix_copyrights(msg->msg_control,
+		cm=unix_copyrights(msg->msg_control, 
 			msg->msg_controllen);
-		if(cm==NULL || msg->msg_controllen<sizeof(struct cmsghdr))
+		if(msg->msg_controllen<sizeof(struct cmsghdr)
+#if 0 
+/*		investigate this further -- Stevens example doesn't seem to care */
+		||
+		   cm->cmsg_type!=SCM_RIGHTS ||
+		   cm->cmsg_level!=SOL_SOCKET ||
+		   msg->msg_controllen!=cm->cmsg_len
+#endif
+		)
 		{
 			kfree(cm);
 /*			printk("recvmsg: Bad msg_control\n");*/
-			return -EINVAL;
+		   	return -EINVAL;
 		}
-		cm->cmsg_type = SCM_RIGHTS;
-		cm->cmsg_level = SOL_SOCKET;
-		cm->cmsg_len = msg->msg_controllen;
 	}
-
+	
 	down(&sk->protinfo.af_unix.readsem);		/* Lock the socket */
 	while(ct--)
 	{
@@ -1109,7 +1089,7 @@ static int unix_recvmsg(struct socket *sock, struct msghdr *msg, int size, int n
 		sp=iov->iov_base;
 		len=iov->iov_len;
 		iov++;
-
+		
 		while(done<len)
 		{
 			if (copied && (flags & MSG_PEEK))
@@ -1126,9 +1106,9 @@ static int unix_recvmsg(struct socket *sock, struct msghdr *msg, int size, int n
 					return copied;
 				if(noblock)
 					return -EAGAIN;
-				unix_data_wait(sk);
 				if(current->signal & ~current->blocked)
 					return -ERESTARTSYS;
+				unix_data_wait(sk);
 				down(&sk->protinfo.af_unix.readsem);
 				continue;
 			}
@@ -1178,9 +1158,6 @@ static int unix_shutdown(struct socket *sock, int mode)
 {
 	unix_socket *sk=(unix_socket *)sock->data;
 	unix_socket *other=sk->protinfo.af_unix.other;
-
-	mode++;
-
 	if(mode&SEND_SHUTDOWN)
 	{
 		sk->shutdown|=SEND_SHUTDOWN;
@@ -1205,7 +1182,7 @@ static int unix_shutdown(struct socket *sock, int mode)
 	return 0;
 }
 
-
+		
 static int unix_select(struct socket *sock,  int sel_type, select_table *wait)
 {
 	return datagram_select(sock->data,sel_type,wait);
@@ -1216,10 +1193,10 @@ static int unix_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	unix_socket *sk=sock->data;
 	int err;
 	long amount=0;
-
+			
 	switch(cmd)
 	{
-
+	
 		case TIOCOUTQ:
 			err=verify_area(VERIFY_WRITE,(void *)arg,sizeof(unsigned long));
 			if(err)
@@ -1258,10 +1235,10 @@ static int unix_get_info(char *buffer, char **start, off_t offset, int length, i
 	off_t begin=0;
 	int len=0;
 	unix_socket *s=unix_socket_list;
-
+	
 	len+= sprintf(buffer,"Num       RefCount Protocol Flags    Type St "
 	    "Inode Path\n");
-
+	
 	while(s!=NULL)
 	{
 		len+=sprintf(buffer+len,"%p: %08X %08X %08lX %04X %02X %5ld",
@@ -1276,7 +1253,7 @@ static int unix_get_info(char *buffer, char **start, off_t offset, int length, i
 			len+=sprintf(buffer+len, " %s\n", s->protinfo.af_unix.name);
 		else
 			buffer[len++]='\n';
-
+		
 		pos=begin+len;
 		if(pos<offset)
 		{
@@ -1297,7 +1274,7 @@ static int unix_get_info(char *buffer, char **start, off_t offset, int length, i
 
 struct proto_ops unix_proto_ops = {
 	AF_UNIX,
-
+	
 	unix_create,
 	unix_dup,
 	unix_release,
@@ -1320,7 +1297,7 @@ struct proto_ops unix_proto_ops = {
 
 void unix_proto_init(struct net_proto *pro)
 {
-	printk(KERN_INFO "NET3: Unix domain sockets 0.13 for Linux NET3.035.\n");
+	printk(KERN_INFO "NET3: Unix domain sockets 0.12 for Linux NET3.035.\n");
 	sock_register(unix_proto_ops.family, &unix_proto_ops);
 #ifdef CONFIG_PROC_FS
 	proc_net_register(&(struct proc_dir_entry) {

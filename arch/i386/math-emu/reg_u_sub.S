@@ -4,23 +4,21 @@
  |                                                                           |
  | Core floating point subtraction routine.                                  |
  |                                                                           |
- | Copyright (C) 1992,1993,1995,1997                                         |
- |                  W. Metzenthen, 22 Parker St, Ormond, Vic 3163, Australia |
- |                  E-mail   billm@suburbia.net                              |
+ | Copyright (C) 1992,1993,1995                                              |
+ |                       W. Metzenthen, 22 Parker St, Ormond, Vic 3163,      |
+ |                       Australia.  E-mail billm@jacobi.maths.monash.edu.au |
  |                                                                           |
  | Call from C as:                                                           |
- |    int FPU_u_sub(FPU_REG *arg1, FPU_REG *arg2, FPU_REG *answ,             |
+ |   void reg_u_sub(FPU_REG *arg1, FPU_REG *arg2, FPU_REG *answ,             |
  |                                                int control_w)             |
- |    Return value is the tag of the answer, or-ed with FPU_Exception if     |
- |    one was raised, or -1 on internal error.                               |
  |                                                                           |
  +---------------------------------------------------------------------------*/
 
 /*
- |    Kernel subtraction routine FPU_u_sub(reg *arg1, reg *arg2, reg *answ).
- |    Takes two valid reg f.p. numbers (TAG_Valid), which are
+ |    Kernel subtraction routine reg_u_sub(reg *arg1, reg *arg2, reg *answ).
+ |    Takes two valid reg f.p. numbers (TW_Valid), which are
  |    treated as unsigned numbers,
- |    and returns their difference as a TAG_Valid or TAG_Zero f.p.
+ |    and returns their difference as a TW_Valid or TW_Zero f.p.
  |    number.
  |    The first number (arg1) must be the larger.
  |    The returned number is normalized.
@@ -32,7 +30,7 @@
 #include "control_w.h"
 
 .text
-ENTRY(FPU_u_sub)
+ENTRY(reg_u_sub)
 	pushl	%ebp
 	movl	%esp,%ebp
 	pushl	%esi
@@ -41,9 +39,28 @@ ENTRY(FPU_u_sub)
 
 	movl	PARAM1,%esi	/* source 1 */
 	movl	PARAM2,%edi	/* source 2 */
-	
-	movl	PARAM6,%ecx
-	subl	PARAM7,%ecx	/* exp1 - exp2 */
+
+#ifdef DENORM_OPERAND
+	cmpl	EXP_UNDER,EXP(%esi)
+	jg	xOp1_not_denorm
+
+	call	SYMBOL_NAME(denormal_operand)
+	orl	%eax,%eax
+	jnz	fpu_Arith_exit
+
+xOp1_not_denorm:
+	cmpl	EXP_UNDER,EXP(%edi)
+	jg	xOp2_not_denorm
+
+	call	SYMBOL_NAME(denormal_operand)
+	orl	%eax,%eax
+	jnz	fpu_Arith_exit
+
+xOp2_not_denorm:
+#endif DENORM_OPERAND
+
+	movl	EXP(%esi),%ecx
+	subl	EXP(%edi),%ecx	/* exp1 - exp2 */
 
 #ifdef PARANOID
 	/* source 2 is always smaller than source 1 */
@@ -54,7 +71,7 @@ ENTRY(FPU_u_sub)
 
 	testl	$0x80000000,SIGH(%esi)
 	je	L_bugged_2
-#endif /* PARANOID */
+#endif PARANOID
 
 /*--------------------------------------+
  |	Form a register holding the     |
@@ -64,8 +81,10 @@ ENTRY(FPU_u_sub)
 	movl	SIGL(%edi),%ebx	/* register ls word */
 
 	movl	PARAM3,%edi	/* destination */
-	movl	PARAM6,%edx
-	movw	%dx,EXP(%edi)	/* Copy exponent to destination */
+	movl	EXP(%esi),%edx
+	movl	%edx,EXP(%edi)	/* Copy exponent to destination */
+/*	movb	SIGN(%esi),%dl
+	movb	%dl,SIGN(%edi) */	/* Copy the sign from the first arg */
 
 	xorl	%edx,%edx	/* register extension */
 
@@ -74,8 +93,8 @@ ENTRY(FPU_u_sub)
  |      right the required number of	|
  |	places.				|
  +--------------------------------------*/
-
-	cmpw	$32,%cx		/* shrd only works for 0..31 bits */
+L_shift_r:
+	cmpl	$32,%ecx		/* shrd only works for 0..31 bits */
 	jnc	L_more_than_31
 
 /* less than 32 bits */
@@ -85,7 +104,7 @@ ENTRY(FPU_u_sub)
 	jmp	L_shift_done
 
 L_more_than_31:
-	cmpw	$64,%cx
+	cmpl	$64,%ecx
 	jnc	L_more_than_63
 
 	subb	$32,%cl
@@ -165,7 +184,7 @@ L_subtr:
 #ifdef PARANOID
 	/* We can never get a borrow */
 	jc	L_bugged
-#endif /* PARANOID */
+#endif PARANOID
 
 /*--------------------------------------+
  |	Normalize the result		|
@@ -191,7 +210,7 @@ L_subtr:
 	jnz	L_must_be_zero
 
 	/* Shift left 64 bits */
-	subw	$64,EXP(%edi)
+	subl	$64,EXP(%edi)
 	xchg	%edx,%eax
 	jmp	fpu_reg_round
 
@@ -199,20 +218,20 @@ L_must_be_zero:
 #ifdef PARANOID
 	orl	%edx,%edx
 	jnz	L_bugged_3
-#endif /* PARANOID */ 
+#endif PARANOID
 
 	/* The result is zero */
-	movw	$0,EXP(%edi)		/* exponent */
+	movb	TW_Zero,TAG(%edi)
+	movl	$0,EXP(%edi)		/* exponent */
 	movl	$0,SIGL(%edi)
 	movl	$0,SIGH(%edi)
-	movl	TAG_Zero,%eax
-	jmp	L_exit
+	jmp	L_exit		/* %eax contains zero */
 
 L_shift_32:
 	movl	%ebx,%eax
 	movl	%edx,%ebx
 	movl	$0,%edx
-	subw	$32,EXP(%edi)	/* Can get underflow here */
+	subl	$32,EXP(%edi)	/* Can get underflow here */
 
 /* We need to shift left by 1 - 31 bits */
 L_shift_1:
@@ -222,7 +241,7 @@ L_shift_1:
 	shld	%cl,%ebx,%eax
 	shld	%cl,%edx,%ebx
 	shl	%cl,%edx
-	subw	%cx,EXP(%edi)	/* Can get underflow here */
+	subl	%ecx,EXP(%edi)	/* Can get underflow here */
 
 L_round:
 	jmp	fpu_reg_round	/* Round the result */
@@ -258,12 +277,11 @@ L_bugged:
 	call	EXCEPTION
 	pop	%ebx
 	jmp	L_error_exit
+#endif PARANOID
+
 
 L_error_exit:
-	movl	$-1,%eax
-
-#endif /* PARANOID */
-
+	movl	$1,%eax
 L_exit:
 	popl	%ebx
 	popl	%edi

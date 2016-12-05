@@ -28,9 +28,7 @@
  * Fixes
  *	Alan Cox	:	Rarp delete on device down needed as
  *				reported by Walter Wolfgang.
- *  Lawrence V. Stefani :	Added FDDI support.
- *      San Mehat	:	Fixed bug where rarp would fail to build
- *				if procfs was not compiled into the kernel
+ *
  */
 
 #include <linux/module.h>
@@ -61,7 +59,7 @@
 #include <net/sock.h>
 #include <net/arp.h>
 #include <net/rarp.h>
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
+#ifdef CONFIG_AX25
 #include <net/ax25.h>
 #endif
 #include <linux/proc_fs.h>
@@ -97,7 +95,7 @@ static struct packet_type rarp_packet_type =
 	NULL
 };
 
-static int initflag = 1;
+static initflag = 1;
 
 
 /*
@@ -177,8 +175,6 @@ static struct notifier_block rarp_dev_notifier={
 	NULL,
 	0
 };
-
-static int rarp_pkt_inited=0;
  
 static void rarp_init_pkt (void)
 {
@@ -186,22 +182,7 @@ static void rarp_init_pkt (void)
 	rarp_packet_type.type=htons(ETH_P_RARP);
 	dev_add_pack(&rarp_packet_type);
 	register_netdevice_notifier(&rarp_dev_notifier);
-        rarp_pkt_inited=1;
 }
-
-#ifdef MODULE
-
-static void rarp_end_pkt(void)
-{
-        if(!rarp_pkt_inited)
-                return;
-        dev_remove_pack(&rarp_packet_type);
-        unregister_netdevice_notifier(&rarp_dev_notifier);
-        rarp_pkt_inited=0;
-}
-
-#endif
-
 
 /*
  *	Receive an arp request by the device layer.  Maybe it should be 
@@ -223,40 +204,13 @@ static int rarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type 
 /*
  *	If this test doesn't pass, it's not IP, or we should ignore it anyway
  */
-#ifdef CONFIG_FDDI
-	if (dev->type == ARPHRD_FDDI)
-	{
-		/*
-		 * Since the dev->type for FDDI is "made up", compare the rarp->ar_hrd
-		 * field against ARPHRD_ETHER and ARPHRD_IEEE802.
-		 *
-		 * Ought to move to a device specifc 'arp_type_ok()'
-		 */
-		if (rarp->ar_hln != dev->addr_len
-			|| ((ntohs(rarp->ar_hrd) != ARPHRD_ETHER) && (ntohs(rarp->ar_hrd) != ARPHRD_IEEE802))
-			|| dev->flags&IFF_NOARP)
-		{
-			kfree_skb(skb, FREE_READ);
-			return 0;
-		}
-	}
-	else
-	{
-		if (rarp->ar_hln != dev->addr_len || dev->type != ntohs(rarp->ar_hrd) 
-			|| dev->flags&IFF_NOARP)
-			{
-			kfree_skb(skb, FREE_READ);
-			return 0;
-		}
-	}
-#else
+
 	if (rarp->ar_hln != dev->addr_len || dev->type != ntohs(rarp->ar_hrd) 
 		|| dev->flags&IFF_NOARP)
 	{
 		kfree_skb(skb, FREE_READ);
 		return 0;
 	}
-#endif
 
 /*
  *	If it's not a RARP request, delete it.
@@ -272,7 +226,7 @@ static int rarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type 
  */
 
 	if (
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
+#ifdef CONFIG_AX25
 		(rarp->ar_pro != htons(AX25_P_IP) && dev->type == ARPHRD_AX25) ||
 #endif
 		(rarp->ar_pro != htons(ETH_P_IP) && dev->type != ARPHRD_AX25)
@@ -351,7 +305,7 @@ static int rarp_req_set(struct arpreq *req)
 			htype = ARPHRD_ETHER;
 			hlen = ETH_ALEN;
 			break;
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
+#ifdef CONFIG_AX25
 		case ARPHRD_AX25:
 			htype = ARPHRD_AX25;
 			hlen = 7;
@@ -373,7 +327,7 @@ static int rarp_req_set(struct arpreq *req)
  *	Is it reachable directly ?
  */
   
-	rt = ip_rt_route(ip, 0, NULL);
+	rt = ip_rt_route(ip, 0);
 	if (rt == NULL)
 		return -ENETUNREACH;
 	dev = rt->rt_dev;
@@ -593,14 +547,12 @@ int rarp_get_info(char *buffer, char **start, off_t offset, int length, int dumm
 void
 rarp_init(void)
 {
-#ifdef CONFIG_PROC_FS
 	proc_net_register(&(struct proc_dir_entry) {
 		PROC_NET_RARP, 4, "rarp",
 		S_IFREG | S_IRUGO, 1, 0, 0,
 		0, &proc_net_inode_operations,
 		rarp_get_info
 	});
-#endif
 	rarp_ioctl_hook = rarp_ioctl;
 }
 
@@ -615,9 +567,7 @@ int init_module(void)
 void cleanup_module(void)
 {
 	struct rarp_table *rt, *rt_next;
-#ifdef CONFIG_PROC_FS
 	proc_net_unregister(PROC_NET_RARP);
-#endif
 	rarp_ioctl_hook = NULL;
 	cli();
 	/* Destroy the RARP-table */
@@ -629,6 +579,5 @@ void cleanup_module(void)
 		rt_next = rt->next;
 		rarp_release_entry(rt);
 	}
-	rarp_end_pkt();
 }
 #endif

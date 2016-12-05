@@ -246,14 +246,6 @@ slhc_compress(struct slcompress *comp, unsigned char *icp, int isize,
 	struct iphdr *ip;
 	struct tcphdr *th, *oth;
 
-
-	/*
-	 *	Don't play with runt packets.
-	 */
-	 
-	if(isize<sizeof(struct iphdr))
-		return isize;
-		
 	ip = (struct iphdr *) icp;
 
 	/* Bail if this packet isn't TCP, or is an IP fragment */
@@ -272,10 +264,9 @@ slhc_compress(struct slcompress *comp, unsigned char *icp, int isize,
 	hlen = ip->ihl*4 + th->doff*4;
 
 	/*  Bail if the TCP packet isn't `compressible' (i.e., ACK isn't set or
-	 *  some other control bit is set). Also uncompressible if
-	 *  its a runt.
+	 *  some other control bit is set).
 	 */
-	if(hlen > isize || th->syn || th->fin || th->rst ||
+	if(th->syn || th->fin || th->rst ||
 	    ! (th->ack)){
 		/* TCP connection stuff; send as regular IP */
 		comp->sls_o_tcp++;

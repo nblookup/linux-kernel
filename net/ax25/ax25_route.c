@@ -1,5 +1,8 @@
 /*
- *	AX.25 release 035
+ *	AX.25 release 032
+ *
+ *	This is ALPHA test software. This code may break your machine, randomly fail to work with new 
+ *	releases, misbehave and/or generally screw up. It might even work. 
  *
  *	This code REQUIRES 1.2.1 or higher/ NET3.029
  *
@@ -34,14 +37,11 @@
  *			Joerg(DL1BKE)	Fixed AX.25 routing of IP datagram and VC, new ioctl()
  *					"SIOCAX25OPTRT" to set IP mode and a 'permanent' flag
  *					on routes.
- *	AX.25 033	Jonathan(G4KLX)	Remove auto-router.
- *			Joerg(DL1BKE)	Moved BPQ Ethernet driver to seperate device.
- *	AX.25 035	Frederic(F1OAT)	Support for pseudo-digipeating.
- *			Jonathan(G4KLX)	Support for packet forwarding.
+ *	AX.25 032	Jonathan(G4KLX)	Remove auto-router.
  */
-
+ 
 #include <linux/config.h>
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
+#ifdef CONFIG_AX25
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -72,12 +72,11 @@ static struct ax25_route {
 	char ip_mode;
 } *ax25_route = NULL;
 
-struct ax25_dev ax25_device[AX25_MAX_DEVICES] = {
-	{"", NULL}, {"", NULL}, {"", NULL}, {"", NULL}, {"", NULL},
-	{"", NULL}, {"", NULL}, {"", NULL}, {"", NULL}, {"", NULL},
-	{"", NULL}, {"", NULL}, {"", NULL}, {"", NULL}, {"", NULL},
-	{"", NULL}, {"", NULL}, {"", NULL}, {"", NULL}, {"", NULL}
-};
+static struct ax25_dev {
+	struct ax25_dev *next;
+	struct device *dev;
+	unsigned short values[AX25_MAX_VALUES];
+} *ax25_device = NULL;
 
 static struct ax25_route *ax25_find_route(ax25_address *, struct device *);
 
@@ -120,7 +119,7 @@ void ax25_rt_device_down(struct device *dev)
 						kfree_s((void *)s, sizeof(*s));
 						break;
 					}
-				}
+				}				
 			}
 		}
 	}
@@ -153,7 +152,7 @@ int ax25_rt_ioctl(unsigned int cmd, void *arg)
 					if (route.digi_count != 0) {
 						if ((ax25_rt->digipeat = kmalloc(sizeof(ax25_digi), GFP_ATOMIC)) == NULL)
 							return -ENOMEM;
-						ax25_rt->digipeat->lastrepeat = -1;
+						ax25_rt->digipeat->lastrepeat = 0;
 						ax25_rt->digipeat->ndigi      = route.digi_count;
 						for (i = 0; i < route.digi_count; i++) {
 							ax25_rt->digipeat->repeated[i] = 0;
@@ -174,7 +173,7 @@ int ax25_rt_ioctl(unsigned int cmd, void *arg)
 					kfree_s(ax25_rt, sizeof(struct ax25_route));
 					return -ENOMEM;
 				}
-				ax25_rt->digipeat->lastrepeat = -1;
+				ax25_rt->digipeat->lastrepeat = 0;
 				ax25_rt->digipeat->ndigi      = route.digi_count;
 				for (i = 0; i < route.digi_count; i++) {
 					ax25_rt->digipeat->repeated[i] = 0;
@@ -286,20 +285,20 @@ int ax25_rt_get_info(char *buffer, char **start, off_t offset, int length, int d
 				len += sprintf(buffer + len, "    *");
 				break;
 		}
-
+		
 		if (ax25_rt->digipeat != NULL)
 			for (i = 0; i < ax25_rt->digipeat->ndigi; i++)
 				len += sprintf(buffer + len, " %s", ax2asc(&ax25_rt->digipeat->calls[i]));
-
+		
 		len += sprintf(buffer + len, "\n");
-
+				
 		pos = begin + len;
 
 		if (pos < offset) {
 			len   = 0;
 			begin = pos;
 		}
-
+		
 		if (pos > offset + length)
 			break;
 	}
@@ -357,7 +356,7 @@ static struct ax25_route *ax25_find_route(ax25_address *addr, struct device *dev
 	struct ax25_route *ax25_spe_rt = NULL;
 	struct ax25_route *ax25_def_rt = NULL;
 	struct ax25_route *ax25_rt;
-
+	
 	/*
 	 *	Bind to the physical interface we heard them on, or the default
 	 *	route if none is found;
@@ -378,7 +377,7 @@ static struct ax25_route *ax25_find_route(ax25_address *addr, struct device *dev
 
 	if (ax25_spe_rt != NULL)
 		return ax25_spe_rt;
-
+		
 	return ax25_def_rt;
 }
 
@@ -390,12 +389,12 @@ static struct ax25_route *ax25_find_route(ax25_address *addr, struct device *dev
 static inline void ax25_adjust_path(ax25_address *addr, ax25_digi *digipeat)
 {
 	int k;
-
+	
 	for (k = 0; k < digipeat->ndigi; k++) {
 		if (ax25cmp(addr, &digipeat->calls[k]) == 0)
 			break;
 	}
-
+	
 	digipeat->ndigi = k;
 }
  
@@ -410,7 +409,7 @@ int ax25_rt_autobind(ax25_cb *ax25, ax25_address *addr)
 
 	if ((ax25_rt = ax25_find_route(addr, NULL)) == NULL)
 		return -EHOSTUNREACH;
-
+		
 	ax25->device = ax25_rt->dev;
 
 	if ((call = ax25_findbyuid(current->euid)) == NULL) {
@@ -438,37 +437,63 @@ int ax25_rt_autobind(ax25_cb *ax25, ax25_address *addr)
  *	dl1bke 960117: build digipeater path
  *	dl1bke 960301: use the default route if it exists
  */
-ax25_digi *ax25_rt_find_path(ax25_address *addr, struct device *dev)
+void ax25_rt_build_path(ax25_cb *ax25, ax25_address *addr, struct device *dev)
 {
 	struct ax25_route *ax25_rt;
-
+	
 	if ((ax25_rt = ax25_find_route(addr, dev)) == NULL)
-		return NULL;
+		return;
+	
+	if (ax25_rt->digipeat == NULL)
+		return;
 
-	return ax25_rt->digipeat;
+	if ((ax25->digipeat = kmalloc(sizeof(ax25_digi), GFP_ATOMIC)) == NULL)
+		return;
+
+	ax25->device    = ax25_rt->dev;
+	*ax25->digipeat = *ax25_rt->digipeat;
+	ax25_adjust_path(addr, ax25->digipeat);
 }
 
-void ax25_rt_build_path(struct sk_buff *skb, ax25_address *src, ax25_address *dest, ax25_digi *digi)
+void ax25_dg_build_path(struct sk_buff *skb, ax25_address *addr, struct device *dev)
 {
+	struct ax25_route *ax25_rt;
+	ax25_digi digipeat;
+	ax25_address src, dest;
 	unsigned char *bp;
 	int len;
 
-	len = digi->ndigi * AX25_ADDR_LEN;
+	skb_pull(skb, 1);	/* skip KISS command */
 
+	if ((ax25_rt = ax25_find_route(addr, dev)) == NULL)
+		return;
+
+	if (ax25_rt->digipeat == NULL)
+		return;
+		
+	digipeat = *ax25_rt->digipeat;
+	
+	ax25_adjust_path(addr, &digipeat);
+
+	len = ax25_rt->digipeat->ndigi * AX25_ADDR_LEN;
+		
 	if (skb_headroom(skb) < len) {
-		printk(KERN_CRIT "ax25_rt_build_path: not enough headroom for digis in skb\n");
+		printk(KERN_CRIT "ax25_dg_build_path: not enough headroom for digis in skb\n");
 		return;
 	}
+	
+	memcpy(&dest, skb->data    , AX25_ADDR_LEN);
+	memcpy(&src,  skb->data + 7, AX25_ADDR_LEN);
 
 	bp = skb_push(skb, len);
 
-	build_ax25_addr(bp, src, dest, digi, AX25_COMMAND, AX25_MODULUS);
+	build_ax25_addr(bp, &src, &dest, ax25_rt->digipeat, C_COMMAND, MODULUS);
 }
 
 /*
  *	Return the IP mode of a given callsign/device pair.
  */
-char ax25_rt_mode_get(ax25_address *callsign, struct device *dev)
+char ax25_ip_mode_get(ax25_address *callsign, struct device *dev)
 {
 	struct ax25_route *ax25_rt;
 
@@ -481,24 +506,24 @@ char ax25_rt_mode_get(ax25_address *callsign, struct device *dev)
 
 static struct ax25_dev *ax25_dev_get_dev(struct device *dev)
 {
-	int i;
+	struct ax25_dev *s;
 
-	for (i = 0; i < AX25_MAX_DEVICES; i++)
-		if (ax25_device[i].dev != NULL && ax25_device[i].dev == dev)
-			return ax25_device + i;
-
+	for (s = ax25_device; s != NULL; s = s->next)
+		if (s->dev == dev)
+			return s;
+	
 	return NULL;
 }
 
 /*
  *	Wow, a bit of data hiding. Is this C++ or what ?
  */
-int ax25_dev_get_value(struct device *dev, int valueno)
+unsigned short ax25_dev_get_value(struct device *dev, int valueno)
 {
 	struct ax25_dev *ax25_dev;
 
 	if ((ax25_dev = ax25_dev_get_dev(dev)) == NULL) {
-		printk(KERN_WARNING "ax25_dev_get_value called with invalid device\n");
+		printk(KERN_WARNING "ax25_dev_get_flag called with invalid device\n");
 		return 1;
 	}
 
@@ -511,120 +536,248 @@ int ax25_dev_get_value(struct device *dev, int valueno)
  */
 void ax25_dev_device_up(struct device *dev)
 {
-	struct ax25_dev *ax25_dev = NULL;
-	int i;
+	unsigned long flags;
+	struct ax25_dev *ax25_dev;
+	
+	if ((ax25_dev = (struct ax25_dev *)kmalloc(sizeof(struct ax25_dev), GFP_ATOMIC)) == NULL)
+		return;		/* No space */
 
-	for (i = 0; i < AX25_MAX_DEVICES; i++) {
-		if (ax25_device[i].dev == NULL) {
-			ax25_dev = ax25_device + i;
-			break;
-		}
-	}
-
-	if (ax25_dev == NULL) {
-		printk(KERN_ERR "ax25_dev_device_up cannot find free AX.25 device\n");
-		return;
-	}
-
-	ax25_unregister_sysctl();
-
-	strcpy(ax25_dev->name, dev->name);
-
-	ax25_dev->dev     = dev;
-	ax25_dev->forward = NULL;
+	ax25_dev->dev        = dev;
 
 	ax25_dev->values[AX25_VALUES_IPDEFMODE] = AX25_DEF_IPDEFMODE;
 	ax25_dev->values[AX25_VALUES_AXDEFMODE] = AX25_DEF_AXDEFMODE;
+	ax25_dev->values[AX25_VALUES_NETROM]    = AX25_DEF_NETROM;
+	ax25_dev->values[AX25_VALUES_TEXT]      = AX25_DEF_TEXT;
 	ax25_dev->values[AX25_VALUES_BACKOFF]   = AX25_DEF_BACKOFF;
 	ax25_dev->values[AX25_VALUES_CONMODE]   = AX25_DEF_CONMODE;
 	ax25_dev->values[AX25_VALUES_WINDOW]    = AX25_DEF_WINDOW;
 	ax25_dev->values[AX25_VALUES_EWINDOW]   = AX25_DEF_EWINDOW;
-	ax25_dev->values[AX25_VALUES_T1]        = AX25_DEF_T1;
-	ax25_dev->values[AX25_VALUES_T2]        = AX25_DEF_T2;
-	ax25_dev->values[AX25_VALUES_T3]        = AX25_DEF_T3;
-	ax25_dev->values[AX25_VALUES_IDLE]	= AX25_DEF_IDLE;
+	ax25_dev->values[AX25_VALUES_T1]        = AX25_DEF_T1 * PR_SLOWHZ;
+	ax25_dev->values[AX25_VALUES_T2]        = AX25_DEF_T2 * PR_SLOWHZ;
+	ax25_dev->values[AX25_VALUES_T3]        = AX25_DEF_T3 * PR_SLOWHZ;
+	ax25_dev->values[AX25_VALUES_IDLE]	= AX25_DEF_IDLE * PR_SLOWHZ * 60;
 	ax25_dev->values[AX25_VALUES_N2]        = AX25_DEF_N2;
+	ax25_dev->values[AX25_VALUES_DIGI]      = AX25_DEF_DIGI;
 	ax25_dev->values[AX25_VALUES_PACLEN]	= AX25_DEF_PACLEN;
+	ax25_dev->values[AX25_VALUES_IPMAXQUEUE]= AX25_DEF_IPMAXQUEUE;
 
-	ax25_register_sysctl();
+	save_flags(flags);
+	cli();
+
+	ax25_dev->next = ax25_device;
+	ax25_device    = ax25_dev;
+
+	restore_flags(flags);
 }
 
 void ax25_dev_device_down(struct device *dev)
 {
-	struct ax25_dev *ax25_dev;
+	struct ax25_dev *s, *t, *ax25_dev = ax25_device;
+	
+	while (ax25_dev != NULL) {
+		s        = ax25_dev;
+		ax25_dev = ax25_dev->next;
 
-	ax25_unregister_sysctl();
-
-	if ((ax25_dev = ax25_dev_get_dev(dev)) != NULL)
-		ax25_dev->dev = NULL;
-
-	ax25_register_sysctl();
+		if (s->dev == dev) {
+			if (ax25_device == s) {
+				ax25_device = s->next;
+				kfree_s((void *)s, (sizeof *s));
+			} else {
+				for (t = ax25_device; t != NULL; t = t->next) {
+					if (t->next == s) {
+						t->next = s->next;
+						kfree_s((void *)s, sizeof(*s));
+						break;
+					}
+				}				
+			}
+		}
+	}
 }
 
-int ax25_fwd_ioctl(unsigned int cmd, struct ax25_fwd_struct *fwd)
+int ax25_dev_ioctl(unsigned int cmd, void *arg)
 {
+	struct ax25_parms_struct ax25_parms;
 	struct device *dev;
 	struct ax25_dev *ax25_dev;
-
-	if ((dev = ax25rtr_get_dev(&fwd->port_from)) == NULL)
-		return -EINVAL;
-
-	if ((ax25_dev = ax25_dev_get_dev(dev)) == NULL)
-		return -EINVAL;
+	int err;
 
 	switch (cmd) {
-		case SIOCAX25ADDFWD:
-			if ((dev = ax25rtr_get_dev(&fwd->port_to)) == NULL)
+		case SIOCAX25SETPARMS:
+			if (!suser())
+				return -EPERM;
+			if ((err = verify_area(VERIFY_READ, arg, sizeof(ax25_parms))) != 0)
+				return err;
+			memcpy_fromfs(&ax25_parms, arg, sizeof(ax25_parms));
+			if ((dev = ax25rtr_get_dev(&ax25_parms.port_addr)) == NULL)
 				return -EINVAL;
-			if (ax25_dev->forward != NULL)
+			if ((ax25_dev = ax25_dev_get_dev(dev)) == NULL)
 				return -EINVAL;
-			ax25_dev->forward = dev;
+			if (ax25_parms.values[AX25_VALUES_IPDEFMODE] != 'D' &&
+			    ax25_parms.values[AX25_VALUES_IPDEFMODE] != 'V')
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_AXDEFMODE] != MODULUS &&
+			    ax25_parms.values[AX25_VALUES_AXDEFMODE] != EMODULUS)
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_NETROM] != 0 &&
+			    ax25_parms.values[AX25_VALUES_NETROM] != 1)
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_TEXT] != 0 &&
+			    ax25_parms.values[AX25_VALUES_TEXT] != 1)
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_BACKOFF] != 'E' &&
+			    ax25_parms.values[AX25_VALUES_BACKOFF] != 'L')
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_CONMODE] != 0 &&
+			    ax25_parms.values[AX25_VALUES_CONMODE] != 1)
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_WINDOW] < 1 ||
+			    ax25_parms.values[AX25_VALUES_WINDOW] > 7)
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_EWINDOW] < 1 ||
+			    ax25_parms.values[AX25_VALUES_EWINDOW] > 63)
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_T1] < 1)
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_T2] < 1)
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_T3] < 1)
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_IDLE] > 100)
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_N2] < 1 ||
+			    ax25_parms.values[AX25_VALUES_N2] > 31)
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_PACLEN] < 22)
+				return -EINVAL;
+			if ((ax25_parms.values[AX25_VALUES_DIGI] &
+			    ~(AX25_DIGI_INBAND | AX25_DIGI_XBAND)) != 0)
+				return -EINVAL;
+			if (ax25_parms.values[AX25_VALUES_IPMAXQUEUE] < 1)
+				return -EINVAL;
+			memcpy(ax25_dev->values, ax25_parms.values, AX25_MAX_VALUES * sizeof(short));
+			ax25_dev->values[AX25_VALUES_T1] *= PR_SLOWHZ;
+			ax25_dev->values[AX25_VALUES_T1] /= 2;
+			ax25_dev->values[AX25_VALUES_T2] *= PR_SLOWHZ;
+			ax25_dev->values[AX25_VALUES_T3] *= PR_SLOWHZ;
+			ax25_dev->values[AX25_VALUES_IDLE] *= PR_SLOWHZ * 60;
 			break;
 
-		case SIOCAX25DELFWD:
-			if (ax25_dev->forward == NULL)
+		case SIOCAX25GETPARMS:
+			if ((err = verify_area(VERIFY_WRITE, arg, sizeof(struct ax25_parms_struct))) != 0)
+				return err;
+			memcpy_fromfs(&ax25_parms, arg, sizeof(ax25_parms));
+			if ((dev = ax25rtr_get_dev(&ax25_parms.port_addr)) == NULL)
 				return -EINVAL;
-			ax25_dev->forward = NULL;
+			if ((ax25_dev = ax25_dev_get_dev(dev)) == NULL)
+				return -EINVAL;
+			memcpy(ax25_parms.values, ax25_dev->values, AX25_MAX_VALUES * sizeof(short));
+			ax25_parms.values[AX25_VALUES_T1] *= 2;
+			ax25_parms.values[AX25_VALUES_T1] /= PR_SLOWHZ;
+			ax25_parms.values[AX25_VALUES_T2] /= PR_SLOWHZ;
+			ax25_parms.values[AX25_VALUES_T3] /= PR_SLOWHZ;
+			ax25_parms.values[AX25_VALUES_IDLE] /= PR_SLOWHZ * 60;
+			memcpy_tofs(arg, &ax25_parms, sizeof(ax25_parms));
 			break;
-
-		default:
-			return -EINVAL;
 	}
 
 	return 0;
 }
 
-struct device *ax25_fwd_dev(struct device *dev)
+#ifdef CONFIG_BPQETHER
+static struct ax25_bpqdev {
+	struct ax25_bpqdev *next;
+	struct device *dev;
+	ax25_address callsign;
+} *ax25_bpqdev = NULL;
+
+int ax25_bpq_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
 {
-	struct ax25_dev *ax25_dev;
+	struct ax25_bpqdev *bpqdev;
+	int len     = 0;
+	off_t pos   = 0;
+	off_t begin = 0;
+  
+	cli();
 
-	if ((ax25_dev = ax25_dev_get_dev(dev)) == NULL)
-		return dev;
+	len += sprintf(buffer, "dev  callsign\n");
 
-	if (ax25_dev->forward == NULL)
-		return dev;
+	for (bpqdev = ax25_bpqdev; bpqdev != NULL; bpqdev = bpqdev->next) {
+		len += sprintf(buffer + len, "%-4s %-9s\n",
+			bpqdev->dev ? bpqdev->dev->name : "???",
+			ax2asc(&bpqdev->callsign));
 
-	return ax25_dev->forward;
+		pos = begin + len;
+
+		if (pos < offset) {
+			len   = 0;
+			begin = pos;
+		}
+		
+		if (pos > offset + length)
+			break;
+	}
+
+	sti();
+
+	*start = buffer + (offset - begin);
+	len   -= (offset - begin);
+
+	if (len > length) len = length;
+
+	return len;
+} 
+
+ax25_address *ax25_bpq_get_addr(struct device *dev)
+{
+	struct ax25_bpqdev *bpqdev;
+	
+	for (bpqdev = ax25_bpqdev; bpqdev != NULL; bpqdev = bpqdev->next)
+		if (bpqdev->dev == dev)
+			return &bpqdev->callsign;
+
+	return NULL;
 }
 
-#ifdef MODULE
-
-/*
- *	Free all memory associated with routing and device structures.
- */
-void ax25_rt_free(void)
+int ax25_bpq_ioctl(unsigned int cmd, void *arg)
 {
-	struct ax25_route *s, *ax25_rt = ax25_route;
+	unsigned long flags;
+	struct ax25_bpqdev *bpqdev;
+	struct ax25_bpqaddr_struct bpqaddr;
+	struct device *dev;
+	int err;
 
-	while (ax25_rt != NULL) {
-		s       = ax25_rt;
-		ax25_rt = ax25_rt->next;
-
-		if (s->digipeat != NULL)
-			kfree_s(s->digipeat, sizeof(ax25_digi));
-
-		kfree_s(s, sizeof(struct ax25_route));
+	switch (cmd) {
+		case SIOCAX25BPQADDR:
+			if ((err = verify_area(VERIFY_READ, arg, sizeof(bpqaddr))) != 0)
+				return err;
+			memcpy_fromfs(&bpqaddr, arg, sizeof(bpqaddr));
+			if ((dev = dev_get(bpqaddr.dev)) == NULL)
+				return -EINVAL;
+			if (dev->type != ARPHRD_ETHER)
+				return -EINVAL;
+			for (bpqdev = ax25_bpqdev; bpqdev != NULL; bpqdev = bpqdev->next) {
+				if (bpqdev->dev == dev) {
+					bpqdev->callsign = bpqaddr.addr;
+					return 0;
+				}
+			}
+			if ((bpqdev = (struct ax25_bpqdev *)kmalloc(sizeof(struct ax25_bpqdev), GFP_ATOMIC)) == NULL)
+				return -ENOMEM;
+			bpqdev->dev      = dev;
+			bpqdev->callsign = bpqaddr.addr;
+			save_flags(flags);
+			cli();
+			bpqdev->next = ax25_bpqdev;
+			ax25_bpqdev  = bpqdev;
+			restore_flags(flags);
+			break;
+			
+		default:
+			return -EINVAL;
 	}
+
+	return 0;
 }
 
 #endif

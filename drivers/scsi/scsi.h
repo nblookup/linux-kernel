@@ -39,12 +39,11 @@ extern void scsi_make_blocked_list(void);
 extern volatile int in_scan_scsis;
 extern const unsigned char scsi_command_size[8];
 #define COMMAND_SIZE(opcode) scsi_command_size[((opcode) >> 5) & 7]
+
 #define IDENTIFY_BASE       0x80
 #define IDENTIFY(can_disconnect, lun)   (IDENTIFY_BASE |\
 		     ((can_disconnect) ?  0x40 : 0) |\
 		     ((lun) & 0x07)) 
-#define MAX_SCSI_DEVICE_CODE 10
-extern const char *const scsi_device_types[MAX_SCSI_DEVICE_CODE];
 
 		 
     
@@ -133,6 +132,7 @@ extern const char *const scsi_device_types[MAX_SCSI_DEVICE_CODE];
 #define SCSI_MAN_NEC_OLDCDR  3
 #define SCSI_MAN_SONY        4
 #define SCSI_MAN_PIONEER     5
+#define SCSI_MAN_MATSHITA    6
 
 /*
  *  As the scsi do command functions are intelligent, and may need to
@@ -218,12 +218,6 @@ typedef struct scsi_device {
  */
 
 extern Scsi_Device * scsi_devices;
-
-extern struct hd_struct * sd;
-
-#if defined(MAJOR_NR) && (MAJOR_NR == SCSI_DISK_MAJOR)
-extern struct hd_struct * sd;
-#endif
 
 /*
  *  Initializes all SCSI devices.  This scans all scsi busses.
@@ -505,14 +499,8 @@ static Scsi_Cmnd * end_scsi_request(Scsi_Cmnd * SCpnt, int uptodate, int sectors
     req = &SCpnt->request;
     req->errors = 0;
     if (!uptodate) {
-#if defined(MAJOR_NR) && (MAJOR_NR == SCSI_DISK_MAJOR)
-	printk(DEVICE_NAME " I/O error: dev %s, sector %lu, absolute sector %lu\n",
-	       kdevname(req->rq_dev), req->sector, 
-	       req->sector + sd[MINOR(SCpnt->request.rq_dev)].start_sect);
-#else
 	printk(DEVICE_NAME " I/O error: dev %s, sector %lu\n",
 	       kdevname(req->rq_dev), req->sector);
-#endif
     }
     
     do {
@@ -521,23 +509,8 @@ static Scsi_Cmnd * end_scsi_request(Scsi_Cmnd * SCpnt, int uptodate, int sectors
 	    req->nr_sectors -= bh->b_size >> 9;
 	    req->sector += bh->b_size >> 9;
 	    bh->b_reqnext = NULL;
-	    /*
-	     * This is our 'MD IO has finished' event handler.
-	     * note that b_state should be cached in a register
-	     * anyways, so the overhead if this checking is almost 
-	     * zero. But anyways .. we never get OO for free :)
-	     */
-	    if (test_bit(BH_MD, &bh->b_state)) {
-		struct md_personality * pers=(struct md_personality *)bh->personality;
-		pers->end_request(bh,uptodate);
-	    }
-	    /*
-	     * the normal (nonmirrored and no RAID5) case:
-	     */
-	    else {
-		mark_buffer_uptodate(bh, uptodate);
-		unlock_buffer(bh);
-	    }
+	    mark_buffer_uptodate(bh, uptodate);
+	    unlock_buffer(bh);
 	    sectors -= bh->b_size >> 9;
 	    if ((bh = req->bh) != NULL) {
 		req->current_nr_sectors = bh->b_size >> 9;

@@ -1,5 +1,5 @@
 /*
- * linux/drivers/block/ide-tape.h	Version 1.9 - ALPHA	Nov   5, 1996
+ * linux/drivers/block/ide-tape.h	Version 1.8 - ALPHA	Sep  26, 1996
  *
  * Copyright (C) 1995, 1996 Gadi Oxman <gadio@netvision.net.il>
  */
@@ -466,7 +466,6 @@ typedef struct {
 	/* Character device operation */
 
 	chrdev_direction_t chrdev_direction;	/* Current character device data transfer direction */
-	int filemark;				/* Currently on a filemark */
 	byte busy;				/* Device already opened */
 
 	/* Device information */
@@ -510,8 +509,6 @@ typedef struct {
 	idetape_pipeline_stage_t *next_stage;	/* Will be serviced after the currently active request */
 	idetape_pipeline_stage_t *last_stage;	/* New requests will be added to the pipeline here */
 	int error_in_pipeline_stage;		/* Set when an error was detected in one of the pipeline stages */	
-	
-	int drq_interrupt;
 	
 } idetape_tape_t;
 

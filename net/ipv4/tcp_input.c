@@ -13,8 +13,8 @@
  *		Corey Minyard <wf-rch!minyard@relay.EU.net>
  *		Florian La Roche, <flla@stud.uni-sb.de>
  *		Charles Hedrick, <hedrick@klinzhai.rutgers.edu>
- *		Linus Torvalds, <torvalds@transmeta.com>
- *		Alan Cox, <alan@lxorguk.ukuu.org.uk>
+ *		Linus Torvalds, <torvalds@cs.helsinki.fi>
+ *		Alan Cox, <gw4pts@gw4pts.ampr.org>
  *		Matthew Dillon, <dillon@apollo.west.oic.com>
  *		Arnt Gulbrandsen, <agulbra@nvg.unit.no>
  *		Jorge Cwik, <jorge@laser.satlink.net>
@@ -26,27 +26,9 @@
  *		Eric Schenk	:	Delayed ACK bug fixes.
  *		Eric Schenk	:	Floyd style fast retrans war avoidance.
  *		Eric Schenk	: 	Skip fast retransmit on small windows.
- *		Eric Schenk	:	Fixes to retransmission code to
+ *		Eric schenk	:	Fixes to retransmission code to
  *				:	avoid extra retransmission.
  *		Theodore Ts'o	:	Do secure TCP sequence numbers.
- *		Eric Schenk	:	SYN and RST cookies for dealing
- *				:	with SYN flooding attacks.
- *		David S. Miller	:	New socket lookup architecture for ISS.
- *					This code is dedicated to John Dyson.
- *              Elliot Poger    :       Added support for SO_BINDTODEVICE.
- *	Willy Konynenberg	:	Transparent proxy adapted to new
- *					socket hash code.
- *	J Hadi Salim		:	We assumed that some idiot wasnt going
- *	Alan Cox			to idly redefine bits of ToS in an
- *					experimental protocol for other things
- *					(ECN) - wrong!. Mask the bits off. Note
- *					masking the bits if they dont use ECN
- *					then use it for ToS is even more 
- *					broken. 
- *					</RANT>
- *	George Baeslack		:	SIGIO delivery on accept() bug that
- *					affected sun jdk.
- *	Michael Deutschmann	:	Added IS_SKBs to tcp_insert_skb
  */
 
 #include <linux/config.h>
@@ -54,12 +36,6 @@
 #include <linux/random.h>
 #include <net/tcp.h>
 
-/*
- *	Do we assume the IP ToS is entirely for its intended purpose
- */
- 
-#define TOS_VALID_MASK(x)		((x)&0x3F)
- 
 /*
  *	Policy code extracted so it's now separate
  */
@@ -170,193 +146,42 @@ extern __inline__ void tcp_rtt_estimator(struct sock *sk, struct sk_buff *oskb)
 	sk->backoff = 0;
 }
 
-#if defined(CONFIG_RST_COOKIES)
-
 /*
- * This code needs to be a bit more clever.
- * Does 300 second timeouts now. Still just a circular buffer.
- * At most 32 validations stored. New validations are ignored
- * if all 32 validations are currently valid. To do otherwise
- * allows a situation in which clearances are forgotten before
- * they can be used (provided valid traffic is coming fast enough).
- * The buffer should really be as long as the number of valid
- * connections we want to accept in an 300 second period.
- * 32 is maybe to small. On the other hand, the validation check
- * algorithm has to walk the whole table, which is also stupid.
- * It would be better to have a combined hash/circular buffer.
- * The hash could be used with chaining for fast lookup.
- * Really this is probably an argument against using RST cookies
- * at all, since they take up space for the clearances.
+ *	Cached last hit socket
  */
+ 
+static volatile unsigned long 	th_cache_saddr, th_cache_daddr;
+static volatile unsigned short  th_cache_dport, th_cache_sport;
+static volatile struct sock *th_cache_sk;
 
-static struct {
-	u32 saddr;
-	unsigned long tstamp;
-} clearances[32] = {
-{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
-{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
-{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},
-{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0},{0,0}};
-
-static next_clearance = 0;
-/* Does the address saddr have an active security clearance? */
-int tcp_clearance(__u32 saddr)
+void tcp_cache_zap(void)
 {
-	int i;
-	for (i = 0; i < 32; i++)
-		if (clearances[i].saddr == saddr
-		&& clearances[i].tstamp > jiffies-HZ*300)
-			return 1;
-	return 0;
+	th_cache_sk=NULL;
 }
 
-void add_clearance(__u32 saddr)
-{
-	/*
-	 * If expired then we can add a new entry.
-	 */
-	if (clearances[next_clearance].tstamp <= jiffies-HZ*300) {
-		clearances[next_clearance].saddr = saddr;
-		clearances[next_clearance].tstamp = jiffies;
-		next_clearance = (next_clearance+1)%32;
-	}
-}
-
-#endif
-
-#ifdef CONFIG_SYN_COOKIES
 /*
- *	MTU values we can represent in fall back mode.
- *	These values are partially borrowed from Jeff Weisberg's SunOS
- *	implementation of SYNCOOKIES. I have added an extra limiting
- * 	value of 64 to deal with the case of very small MTU values.
- *	(e.g. long delay packet radio links, 1200 baud modems.)
+ *	Find the socket, using the last hit cache if applicable. The cache is not quite
+ *	right...
  */
-static __u32 cookie_mtu[8] = { 64, 256, 512, 536, 1024, 1440, 1460, 4312 };
-unsigned int ui_c_send_cookies = 0;
-#endif
 
-extern void tcp_v4_hash(struct sock *sk);
-extern void tcp_v4_unhash(struct sock *sk);
-extern void tcp_v4_rehash(struct sock *sk);
-
-/* Don't inline this cruft.  Here are some nice properties to
- * exploit here.  The BSD API does not allow a listening TCP
- * to specify the remote port nor the remote address for the
- * connection.  So always assume those are both wildcarded
- * during the search since they can never be otherwise.
- */
-static struct sock *tcp_v4_lookup_longway(u32 daddr, unsigned short hnum,
-					  struct device *dev)
+static inline struct sock * get_tcp_sock(u32 saddr, u16 sport, u32 daddr, u16 dport, u32 paddr, u16 pport)
 {
-	struct sock *sk = tcp_listening_hash[tcp_lhashfn(hnum)];
-	struct sock *result = NULL;
-	int score, hiscore = 0;
+	struct sock * sk;
 
-	for(; sk; sk = sk->next) {
-		if(sk->num == hnum) {
-			__u32 rcv_saddr = sk->rcv_saddr;
-			score = 1;
-
-			/* If this socket is bound to a particular IP address,
-			 * does the dest IPaddr of the packet match it?
-			 */
-			if(rcv_saddr) {
-				if(rcv_saddr != daddr)
-					continue;
-				score++;
-			}
-
-			/* If this socket is bound to a particular interface,
-			 * did the packet come in on it? */
-			if (sk->bound_device) {
-				if (dev != sk->bound_device)
-					continue;
-				score++;
-			}
-
-			/* Check the score--max is 3. */
-			if (score == 3)
-				return sk; /* Best possible match. */
-			if (score > hiscore) {
-				hiscore = score;
-				result = sk;
-			}
+	sk = (struct sock *) th_cache_sk;
+	if (!sk || saddr != th_cache_saddr || daddr != th_cache_daddr ||
+	    sport != th_cache_sport || dport != th_cache_dport) {
+		sk = get_sock(&tcp_prot, dport, saddr, sport, daddr, paddr, pport);
+		if (sk) {
+			th_cache_saddr=saddr;
+			th_cache_daddr=daddr;
+  			th_cache_dport=dport;
+			th_cache_sport=sport;
+			th_cache_sk=sk;
 		}
 	}
-	return result;
-}
-
-/* Sockets in TCP_CLOSE state are _always_ taken out of the hash, so
- * we need not check it for TCP lookups anymore, thanks Alexey. -DaveM
- */
-static inline struct sock *__tcp_v4_lookup(struct tcphdr *th,
-					   u32 saddr, u16 sport, u32 daddr, 
-					   u16 dport, struct device *dev)
-{
-	unsigned short hnum = ntohs(dport);
-	struct sock *sk;
-
-	/* Optimize here for direct hit, only listening connections can
-	 * have wildcards anyways.  It is assumed that this code only
-	 * gets called from within NET_BH.
-	 */
-	sk = tcp_established_hash[tcp_hashfn(daddr, hnum, saddr, sport)];
-	for(; sk; sk = sk->next)
-		if(sk->daddr		== saddr		&& /* remote address */
-		   sk->dummy_th.dest	== sport		&& /* remote port    */
-		   sk->num		== hnum			&& /* local port     */
-		   sk->rcv_saddr	== daddr		&& /* local address  */
-		   ((sk->bound_device==NULL) || (sk->bound_device==dev))  )
-			goto hit; /* You sunk my battleship! */
-	sk = tcp_v4_lookup_longway(daddr, hnum, dev);
-hit:
 	return sk;
 }
- 
-__inline__ struct sock *tcp_v4_lookup(u32 saddr, u16 sport, u32 daddr, u16 dport,
-				      struct device *dev)
-{
-	return __tcp_v4_lookup(0, saddr, sport, daddr, dport, dev);
-}
-
-#ifdef CONFIG_IP_TRANSPARENT_PROXY
-/* I am not entirely sure this is fully equivalent to the old lookup code, but it does
- * look reasonable.  WFK
- */
-struct sock *tcp_v4_proxy_lookup(u32 saddr, u16 sport, u32 daddr, u16 dport, u32 paddr, u16 rport,
-				 struct device *dev)
-{
-	unsigned short hnum = ntohs(dport);
-	unsigned short hrnum = ntohs(rport);
-	struct sock *sk;
-
-	/* Optimize here for direct hit, only listening connections can
-	 * have wildcards anyways.  It is assumed that this code only
-	 * gets called from within NET_BH.
-	 */
-	sk = tcp_established_hash[tcp_hashfn(daddr, hnum, saddr, sport)];
-	for(; sk; sk = sk->next)
-		if(sk->daddr		== saddr		&& /* remote address */
-		   sk->dummy_th.dest	== sport		&& /* remote port    */
-		   sk->num		== hnum			&& /* local port     */
-		   sk->rcv_saddr	== daddr		&& /* local address  */
-		   ((sk->bound_device==NULL) || (sk->bound_device==dev))  )
-			goto hit; /* You sunk my battleship! */
-	/* If we don't match on a bound socket, try to find one explicitly listening
-	 * on the remote address (a proxy bind).
-	 */
-	sk = tcp_v4_lookup_longway(daddr, hnum, dev);
-	/* If that didn't yield an exact match, look for a socket listening on the
-	 * redirect port.
-	 */
-	if (!sk || sk->rcv_saddr != daddr) {
-		sk = tcp_v4_lookup_longway(paddr, hrnum, dev);
-	}
-hit:
-	return sk;
-}
-#endif
 
 /*
  * React to a out-of-window TCP sequence number in an incoming packet
@@ -377,7 +202,7 @@ static void bad_tcp_sequence(struct sock *sk, struct tcphdr *th, u32 end_seq,
   	 
 	if (sk->state==TCP_SYN_SENT || sk->state==TCP_SYN_RECV) 
 	{
-		tcp_send_reset(sk->saddr,sk->daddr,th,sk->prot,NULL,dev,0,255);
+		tcp_send_reset(sk->saddr,sk->daddr,th,sk->prot,NULL,dev, sk->ip_tos,sk->ip_ttl);
 		return;
 	}
 
@@ -423,18 +248,11 @@ static int tcp_reset(struct sock *sk, struct sk_buff *skb)
 	/*
 	 *	We want the right error as BSD sees it (and indeed as we do).
 	 */
-	switch (sk->state) {
-	case TCP_TIME_WAIT:
-		break;
-	case TCP_SYN_SENT:
+	sk->err = ECONNRESET;
+	if (sk->state == TCP_SYN_SENT)
 		sk->err = ECONNREFUSED;
-		break;
-	case TCP_CLOSE_WAIT:
+	if (sk->state == TCP_CLOSE_WAIT)
 		sk->err = EPIPE;
-		break;
-	default:
-		sk->err = ECONNRESET;
-	}
 #ifdef CONFIG_TCP_RFC1337
 	/*
 	 *	Time wait assassination protection [RFC1337]
@@ -486,7 +304,7 @@ static void tcp_options(struct sock *sk, struct tcphdr *th)
 	  	switch(opcode)
 	  	{
 	  		case TCPOPT_EOL:
-	  			goto ende;
+	  			return;
 	  		case TCPOPT_NOP:	/* Ref: RFC 793 section 3.1 */
 	  			length--;
 	  			ptr--;		/* the opsize=*ptr++ above was a mistake */
@@ -494,7 +312,7 @@ static void tcp_options(struct sock *sk, struct tcphdr *th)
 	  		
 	  		default:
 	  			if(opsize<=2)	/* Avoid silly options looping forever */
-	  				goto ende;
+	  				return;
 	  			switch(opcode)
 	  			{
 	  				case TCPOPT_MSS:
@@ -510,7 +328,7 @@ static void tcp_options(struct sock *sk, struct tcphdr *th)
 	  			length-=opsize;
 	  	}
 	}
-ende:	if (th->syn) 
+	if (th->syn) 
 	{
 		if (! mss_seen)
 		      sk->mtu=min(sk->mtu, 536);  /* default MSS if none sent */
@@ -538,25 +356,19 @@ static void tcp_conn_request(struct sock *sk, struct sk_buff *skb,
 	struct sock *newsk;
 	struct tcphdr *th;
 	struct rtable *rt;
-#ifdef CONFIG_SYN_COOKIES
-	int send_cookie = 0;
-#endif
-
+  
 	th = skb->h.th;
 
 	/* If the socket is dead, don't accept the connection. */
 	if (!sk->dead) 
 	{
-		/*
-		 * This must wait for 3 way completion.
-  		 * sk->data_ready(sk,0);
-  		 */
+  		sk->data_ready(sk,0);
 	}
 	else 
 	{
 		if(sk->debug)
 			printk("Reset on %p: Connect on dead socket.\n",sk);
-		tcp_send_reset(daddr, saddr, th, sk->prot, opt, dev, 0,255);
+		tcp_send_reset(daddr, saddr, th, sk->prot, opt, dev, sk->ip_tos,sk->ip_ttl);
 		tcp_statistics.TcpAttemptFails++;
 		kfree_skb(skb, FREE_READ);
 		return;
@@ -568,73 +380,13 @@ static void tcp_conn_request(struct sock *sk, struct sk_buff *skb,
 	 *
 	 *	BSD does some funnies here and allows 3/2 times the
 	 *	set backlog as a fudge factor. That's just too gross.
-	 *
-         *	Well, now I'm making things even grosser for dealing
-	 *	with SYNACK flooding.
 	 */
 
-	if (sk->ack_backlog >= sk->max_ack_backlog)
+	if (sk->ack_backlog >= sk->max_ack_backlog) 
 	{
-#if defined(CONFIG_RST_COOKIES) || defined(CONFIG_SYN_COOKIES)
-		static unsigned long warning_time = 0;
-
-		/* We may be experiencing SYNACK flooding.
-		 * We now must decide if we should accept this connection.
-		 * If we have a security clearance for the incoming
-		 * packet, i.e. it is from a location we where talking
-		 * to succesfully recently, or that has responded to
-		 * a security probe, then we go ahead and deal normally,
-		 * accepting up to 2*max in the backlog.
-		 * Otherwise, we send out either an RST security probe
-		 * or a SYN cookie, or both. (depending on configuration).
-		 * Note that we send out a cookie even if the backlog
-		 * is full up to 2*max, since the backlog may clear
-		 * by the time we get a response.
-		 * WARNING: This code changes the semantics of the backlog
-		 * a bit. I'm not entirely sure this is the right thing
-		 * to do here.
-	 	 */
-		extern void tcp_send_synack_probe(unsigned long saddr,
-						  unsigned long daddr, struct tcphdr *th,
-						  struct proto *prot,
-						  struct options *opt,
-						  struct device *dev, int tos, int ttl);
-
-#ifdef CONFIG_RST_COOKIES
-		if (!tcp_clearance(saddr)) {
-#endif
-			/* Only let this warning get printed once a minute. */
-			if (jiffies - warning_time > HZ*60) {
-				warning_time = jiffies;
-				printk(KERN_INFO "Warning: possible SYN flood from %d.%d.%d.%d on %d.%d.%d.%d:%d.  Sending cookies.\n", 
-					NIPQUAD(saddr), NIPQUAD(daddr), ntohs(th->dest));
-			}
-#ifdef CONFIG_RST_COOKIES
-			tcp_send_synack_probe(daddr, saddr, th, &tcp_prot,
-				opt, dev, skb->ip_hdr->tos, 255);
-#endif
-#ifdef CONFIG_SYN_COOKIES
-			send_cookie = 1;
-			ui_c_send_cookies++;
-#else
-			/* If we only have RST cookies we should
-			 * not drop through to the rest of the response code.
-			 */
-			kfree_skb(skb, FREE_READ);
-			return;
-#endif
-#ifdef CONFIG_RST_COOKIES
-		} else if (sk->ack_backlog >= 2*sk->max_ack_backlog) {
-			tcp_statistics.TcpAttemptFails++;
-			kfree_skb(skb, FREE_READ);
-			return;
-		}
-#endif
-#else
 		tcp_statistics.TcpAttemptFails++;
 		kfree_skb(skb, FREE_READ);
 		return;
-#endif
 	}
 
 	/*
@@ -655,12 +407,6 @@ static void tcp_conn_request(struct sock *sk, struct sk_buff *skb,
 	}
 
 	memcpy(newsk, sk, sizeof(*newsk));
-
-	/* Or else we die! -DaveM */
-	newsk->sklist_next = NULL;
-	/* and die again -- erics */
-	newsk->pprev = NULL;
-
 	newsk->opt = NULL;
 	newsk->ip_route_cache  = NULL;
 	if (opt && opt->optlen) 
@@ -682,8 +428,6 @@ static void tcp_conn_request(struct sock *sk, struct sk_buff *skb,
 			return;
 		}
 	}
-	
-	skb->when = jiffies;	/* For timeout */
 	skb_queue_head_init(&newsk->write_queue);
 	skb_queue_head_init(&newsk->receive_queue);
 	newsk->send_head = NULL;
@@ -693,7 +437,7 @@ static void tcp_conn_request(struct sock *sk, struct sk_buff *skb,
 	newsk->rtt = 0;
 	newsk->rto = TCP_TIMEOUT_INIT;
 	newsk->mdev = TCP_TIMEOUT_INIT;
-	newsk->max_window = 32;	/* It cannot be left at zero. -DaveM */
+	newsk->max_window = 0;
 	/*
 	 * See draft-stevens-tcpca-spec-01 for discussion of the
 	 * initialization of these values.
@@ -726,10 +470,12 @@ static void tcp_conn_request(struct sock *sk, struct sk_buff *skb,
 	newsk->delay_acks = 1;
 	newsk->copied_seq = skb->seq+1;
 	newsk->fin_seq = skb->seq;
-	newsk->syn_seq = skb->seq;
 	newsk->state = TCP_SYN_RECV;
 	newsk->timeout = 0;
 	newsk->ip_xmit_timeout = 0;
+	newsk->write_seq = seq; 
+	newsk->window_seq = newsk->write_seq;
+	newsk->rcv_ack_seq = newsk->write_seq;
 	newsk->urg_data = 0;
 	newsk->retransmits = 0;
 	newsk->linger=0;
@@ -745,7 +491,6 @@ static void tcp_conn_request(struct sock *sk, struct sk_buff *skb,
 	newsk->retransmit_timer.function = tcp_retransmit_timer;
 	newsk->dummy_th.source = skb->h.th->dest;
 	newsk->dummy_th.dest = skb->h.th->source;
-	newsk->users=0;
 	
 #ifdef CONFIG_IP_TRANSPARENT_PROXY
 	/* 
@@ -762,30 +507,18 @@ static void tcp_conn_request(struct sock *sk, struct sk_buff *skb,
 	newsk->daddr = saddr;
 	newsk->saddr = daddr;
 	newsk->rcv_saddr = daddr;
-#ifdef CONFIG_SYN_COOKIES
-	/* Don't actually stuff the socket into the protocol lists
-	 * if we are going to just destroy it anyway. We don't want any
-	 * funnies happening if the next packet arrives before we get
-	 * a chance to clean this one up.
-	 */
-	if (!send_cookie)
-#endif
-	{
-		tcp_v4_hash(newsk);
-		add_to_prot_sklist(newsk);
-	}
 
+	put_sock(newsk->num,newsk);
 	newsk->acked_seq = skb->seq + 1;
 	newsk->copied_seq = skb->seq + 1;
 	newsk->socket = NULL;
-	newsk->listening = sk;
 
 	/*
 	 *	Grab the ttl and tos values and use them 
 	 */
 
 	newsk->ip_ttl=sk->ip_ttl;
-	newsk->ip_tos=TOS_VALID_MASK(skb->ip_hdr->tos);
+	newsk->ip_tos=skb->ip_hdr->tos;
 
 	/*
 	 *	Use 512 or whatever user asked for 
@@ -795,8 +528,7 @@ static void tcp_conn_request(struct sock *sk, struct sk_buff *skb,
 	 * 	Note use of sk->user_mss, since user has no direct access to newsk 
 	 */
 
-	rt = ip_rt_route(newsk->opt && newsk->opt->srr ? newsk->opt->faddr : saddr, 0,
-			 sk->bound_device);
+	rt = ip_rt_route(newsk->opt && newsk->opt->srr ? newsk->opt->faddr : saddr, 0);
 	newsk->ip_route_cache = rt;
 	
 	if(rt!=NULL && (rt->rt_flags&RTF_WINDOW))
@@ -817,14 +549,6 @@ static void tcp_conn_request(struct sock *sk, struct sk_buff *skb,
 
 	newsk->mtu = min(newsk->mtu, dev->mtu - sizeof(struct iphdr) - sizeof(struct tcphdr));
 
-	/* Must check it here, just to be absolutely safe.  If we end up
-	 * with a newsk->{max_window,mtu} of zero, we can thus end up with
-	 * a newsk->mss of zero, which causes us to bomb out in
-	 * tcp_do_sendmsg. -DaveM
-	 */
-	if(newsk->mtu < 32)
-		newsk->mtu = 32;
-
 #ifdef CONFIG_SKIP
 	
 	/*
@@ -844,246 +568,11 @@ static void tcp_conn_request(struct sock *sk, struct sk_buff *skb,
 	 */
 
 	tcp_options(newsk,skb->h.th);
-
-#ifdef CONFIG_SYN_COOKIES
-	if (send_cookie) {
-		int mtu_index = 0;
-		/* Pick the largest MTU smaller than sk->mtu that we
-		 * can represent in a cookies bottom 3 bits.
-		 */
-		while (newsk->mtu > cookie_mtu[mtu_index+1] && mtu_index < 7)
-			mtu_index++;
-		newsk->mtu = cookie_mtu[mtu_index];
-		/*
-		 * Choose a cookie.
-		 */
-		seq = secure_tcp_syn_cookie(daddr,saddr,
-        	        ntohs(th->source),ntohs(th->dest),ntohl(th->seq),jiffies/(60*HZ));
-		seq |= mtu_index;
-	}
-#endif
-
-	/* Set up the right sequence numbers */
-	newsk->write_seq = seq; 
-	newsk->window_seq = newsk->write_seq;
-	newsk->rcv_ack_seq = newsk->write_seq;
-
-#ifdef CONFIG_SYN_COOKIES
-	tcp_send_synack(newsk, sk, skb, send_cookie);
-#else
-	tcp_send_synack(newsk, sk, skb, 0);
-#endif
+	
+	tcp_cache_zap();
+	tcp_send_synack(newsk, sk, skb);
 }
 
-
-#ifdef CONFIG_SYN_COOKIES
-/*
- *	This routine handles a faked connection request as a result
- *	of a valid SYN cookie being seen. This sets up a socket in the
- *	SYN_SENT state.
- */
- 
-static int tcp_conn_request_fake(struct sock *sk, struct sk_buff *skb,
-		 u32 daddr, u32 saddr, struct options *opt, struct device *dev, u32 seq, u32 mtu)
-{
-	struct sock *newsk;
-	struct sk_buff *newskb;
-	struct rtable *rt;
-
-	/* If the socket is dead, don't accept the connection. */
-	if (!sk->dead) 
-	{
-  		/*sk->data_ready(sk,0); */
-	}
-	else 
-	{
-		if(sk->debug)
-			printk("Reset on %p: Connect on dead socket.\n",sk);
-		tcp_statistics.TcpAttemptFails++;
-		return 0;
-	}
-
-	/*
-	 * We need to build a new sock struct.
-	 * It is sort of bad to have a socket without an inode attached
-	 * to it, but the wake_up's will just wake up the listening socket,
-	 * and if the listening socket is destroyed before this is taken
-	 * off of the queue, this will take care of it.
-	 */
-
-	newsk = (struct sock *) kmalloc(sizeof(struct sock), GFP_ATOMIC);
-	if (newsk == NULL) 
-	{
-		/* Bad juju. If we ignore things now the remote side
-		 * will be frozen. Really we should retrans the cookie,
-		 * but that's a no go also, since we don't have enough
-		 * memory to receive it either. So, we're stuck with
-		 * this bad case, and a few others further down.
-		 * We just have to hope it is a low probability event.
-		 * Also, to avoid a loop we must not go down into
-		 * the recursive call to tcp_rcv in the caller to this
-		 * routine, so we should let them know we failed.
-		 */
-		tcp_statistics.TcpAttemptFails++;
-		return 0;
-	}
-
-	memcpy(newsk, sk, sizeof(*newsk));
-
-	/* Or else we die! -DaveM */
-	newsk->sklist_next = NULL;
-
-	newsk->opt = NULL;
-	newsk->ip_route_cache  = NULL;
-	if (opt && opt->optlen) 
-	{
-		sk->opt = (struct options*)kmalloc(sizeof(struct options)+opt->optlen, GFP_ATOMIC);
-		if (!sk->opt) 
-		{
-			/* More bad juju. */
-	        	kfree_s(newsk, sizeof(struct sock));
-			tcp_statistics.TcpAttemptFails++;
-			return 0;
-		}
-		if (ip_options_echo(sk->opt, opt, daddr, saddr, skb)) 
-		{
-			/* More bad juju. */
-			kfree_s(sk->opt, sizeof(struct options)+opt->optlen);
-	        	kfree_s(newsk, sizeof(struct sock));
-			tcp_statistics.TcpAttemptFails++;
-			return 0;
-		}
-	}
-	
-	skb_queue_head_init(&newsk->write_queue);
-	skb_queue_head_init(&newsk->receive_queue);
-	newsk->send_head = NULL;
-	newsk->send_tail = NULL;
-	newsk->send_next = NULL;
-	skb_queue_head_init(&newsk->back_log);
-	newsk->rtt = 0;
-	newsk->rto = TCP_TIMEOUT_INIT;
-	newsk->mdev = TCP_TIMEOUT_INIT;
-	newsk->max_window = 32; /* It cannot be left at zero. -DaveM */
-	/*
-	 * See draft-stevens-tcpca-spec-01 for discussion of the
-	 * initialization of these values.
-	 */
-	newsk->cong_window = 1;
-	newsk->cong_count = 0;
-	newsk->ssthresh = 0x7fffffff;
-
-	newsk->lrcvtime = 0;
-	newsk->idletime = 0;
-	newsk->high_seq = 0;
-	newsk->backoff = 0;
-	newsk->blog = 0;
-	newsk->intr = 0;
-	newsk->proc = 0;
-	newsk->done = 0;
-	newsk->partial = NULL;
-	newsk->pair = NULL;
-	newsk->wmem_alloc = 0;
-	newsk->rmem_alloc = 0;
-	newsk->localroute = sk->localroute;
-
-	newsk->max_unacked = MAX_WINDOW - TCP_WINDOW_DIFF;
-
-	newsk->err = 0;
-	newsk->shutdown = 0;
-	newsk->ack_backlog = 0;
-	newsk->acked_seq = skb->seq;
-	newsk->lastwin_seq = skb->seq;
-	newsk->delay_acks = 1;
-	newsk->copied_seq = skb->seq;
-	newsk->fin_seq = skb->seq-1;
-	newsk->syn_seq = skb->seq-1;
-	newsk->state = TCP_SYN_RECV;
-	newsk->timeout = 0;
-	newsk->ip_xmit_timeout = 0;
-	newsk->urg_data = 0;
-	newsk->retransmits = 0;
-	newsk->linger=0;
-	newsk->destroy = 0;
-	init_timer(&newsk->timer);
-	newsk->timer.data = (unsigned long)newsk;
-	newsk->timer.function = &net_timer;
-	init_timer(&newsk->delack_timer);
-	newsk->delack_timer.data = (unsigned long)newsk;
-	newsk->delack_timer.function = tcp_delack_timer;
-	init_timer(&newsk->retransmit_timer);
-	newsk->retransmit_timer.data = (unsigned long)newsk;
-	newsk->retransmit_timer.function = tcp_retransmit_timer;
-	newsk->dummy_th.source = skb->h.th->dest;
-	newsk->dummy_th.dest = skb->h.th->source;
-	newsk->users=0;
-	
-#ifdef CONFIG_IP_TRANSPARENT_PROXY
-	/* 
-	 *	Deal with possibly redirected traffic by setting num to
-	 *	the intended destination port of the received packet.
-	 */
-	newsk->num = ntohs(skb->h.th->dest);
-
-#endif
-	/*
-	 *	Swap these two, they are from our point of view. 
-	 */
-	 
-	newsk->daddr = saddr;
-	newsk->saddr = daddr;
-	newsk->rcv_saddr = daddr;
-	tcp_v4_hash(newsk);
-	add_to_prot_sklist(newsk);
-
-	newsk->acked_seq = skb->seq;
-	newsk->copied_seq = skb->seq;
-	newsk->socket = NULL;
-	newsk->listening = sk;
-
-	/*
-	 *	Grab the ttl and tos values and use them 
-	 */
-
-	newsk->ip_ttl=sk->ip_ttl;
-	newsk->ip_tos=TOS_VALID_MASK(skb->ip_hdr->tos);
-
-	rt = ip_rt_route(newsk->opt && newsk->opt->srr ? newsk->opt->faddr : saddr, 0,
-			 sk->bound_device);
-	newsk->ip_route_cache = rt;
-	
-	if (rt!=NULL && (rt->rt_flags&RTF_WINDOW))
-		newsk->window_clamp = rt->rt_window;
-	else
-		newsk->window_clamp = 0;
-
-	newsk->mtu = mtu;
-
-	/* Set up the right sequence numbers.
-	 * Note that we have to make sure write_seq is correct for having
- 	 * sent off the handshake!
-	 */
-	newsk->write_seq = seq+1; 
-	newsk->sent_seq = seq+1;
-	newsk->window_seq = seq;
-	newsk->rcv_ack_seq = seq;
-	newsk->max_unacked = 2 * newsk->mss;
-
-	tcp_select_window(newsk);
-
-	/* We need to get something into the receive queue to enable an
-	 * accept. Possibly we should be faking up a SYN packet, but
-	 * as far as I can tell the contents of this skb don't matter,
-	 * so long as it points to our new socket.
-	 */
-	newskb = skb_clone(skb,GFP_ATOMIC);
-	newskb->sk = newsk;
-	atomic_add(skb->truesize, &newsk->rmem_alloc);
-	sk->ack_backlog++;
-	skb_queue_tail(&sk->receive_queue,newskb);
-	return 1;
-}
-#endif
 
 /*
  * Handle a TCP window that shrunk on us. It shouldn't happen,
@@ -1187,15 +676,6 @@ static int tcp_ack(struct sock *sk, struct tcphdr *th, u32 ack, int len)
 	 *	then we can probably ignore it.
 	 */
 	 
-	if (sk->state == TCP_SYN_RECV) {
-		/*
-		 * Should be the exact sequence number for the handshake
-		 * to succeed, or sequence prediction gets a bit easier.
-		 * Also, "partially-established" connections are bad for
-		 * the rest of our code.
-		 */
-		if (ack != sk->sent_seq) goto uninteresting_ack;
-	} else
 	if (after(ack, sk->sent_seq) || before(ack, sk->rcv_ack_seq)) 
 		goto uninteresting_ack;
 
@@ -1296,7 +776,7 @@ static int tcp_ack(struct sock *sk, struct tcphdr *th, u32 ack, int len)
 
 	if (sk->rcv_ack_seq == ack
 		&& sk->window_seq == window_seq
-		&& len == th->doff*4
+		&& len != th->doff*4
 		&& before(ack, sk->sent_seq)
 		&& after(ack, sk->high_seq))
 	{
@@ -1320,12 +800,8 @@ static int tcp_ack(struct sock *sk, struct tcphdr *th, u32 ack, int len)
 			/* We need to be a bit careful to preserve the
 			 * count of packets that are out in the system here.
 			 */
-			sk->ssthresh = max(
-				min(sk->cong_window,
-				(sk->window_seq-sk->rcv_ack_seq)/max(sk->mss,1))
-				 >> 1, 2);
+			sk->ssthresh = max(sk->cong_window >> 1, 2);
 			sk->cong_window = sk->ssthresh+MAX_DUP_ACKS+1;
-			sk->cong_count = 0;
 			tmp = sk->packets_out;
 			tcp_do_retransmit(sk,0);
 			sk->packets_out = tmp;
@@ -1343,9 +819,7 @@ static int tcp_ack(struct sock *sk, struct tcphdr *th, u32 ack, int len)
 	else
 	{
 		if (sk->rcv_ack_cnt > MAX_DUP_ACKS) {
-			/* Don't allow congestion window to drop to zero. */
-			sk->cong_window = max(sk->ssthresh, 1);
-			sk->cong_count = 0;
+			sk->cong_window = sk->ssthresh;
 		}
 		sk->window_seq = window_seq;
 		sk->rcv_ack_seq = ack;
@@ -1422,7 +896,6 @@ static int tcp_ack(struct sock *sk, struct tcphdr *th, u32 ack, int len)
 	 */
 
 	for (;;) {
-		int was_locked;
 		struct sk_buff * skb = sk->send_head;
 		if (!skb)
 			break;
@@ -1494,22 +967,10 @@ static int tcp_ack(struct sock *sk, struct tcphdr *th, u32 ack, int len)
 		 *	We may need to remove this from the dev send list. 
 		 */
 		cli();
-		was_locked = skb_device_locked(skb);
-
-		if (was_locked) {
-			/* In this case, we are relying on the fact that kfree_skb
-			 * will just set the free flag to be 3, and increment
-			 * a counter. It will not actually free anything, and 
-			 * will not take much time
-			 */
-			kfree_skb(skb, FREE_WRITE);	
-		} else {
+		if (skb->next)
 			skb_unlink(skb);
-		}
 		sti();
-
-		if (!was_locked)
-		    kfree_skb(skb, FREE_WRITE); /* write. */
+		kfree_skb(skb, FREE_WRITE); /* write. */
 		if (!sk->dead)
 			sk->write_space(sk);
 	}
@@ -1609,6 +1070,19 @@ static int tcp_ack(struct sock *sk, struct tcphdr *th, u32 ack, int len)
 	}
 
 	/*
+	 *	We have nothing queued but space to send. Send any partial
+	 *	packets immediately (end of Nagle rule application).
+	 */
+	 
+	if (sk->packets_out == 0
+	    && sk->partial != NULL
+	    && skb_queue_empty(&sk->write_queue)
+	    && sk->send_head == NULL) 
+	{
+		tcp_send_partial(sk);
+	}
+
+	/*
 	 * In the LAST_ACK case, the other end FIN'd us.  We then FIN'd them, and
 	 * we are now waiting for an acknowledge to our FIN.  The other end is
 	 * already in TIME_WAIT.
@@ -1680,38 +1154,16 @@ static int tcp_ack(struct sock *sk, struct tcphdr *th, u32 ack, int len)
 	if (sk->state==TCP_SYN_RECV)
 	{
 		tcp_set_state(sk, TCP_ESTABLISHED);
-		
-		/*
-		 *	We have a listening socket owning us. Wake it for
-		 *	the accept.
-		 */
-		 
-  		if ( sk->listening ) 
-  		{
-  			/* The listener may be sk->dead. Dont worry 
-  			   data_ready traps this */
-			sk->data_ready(sk->listening,0);
-			sk->listening = NULL;
-		}			
-
-		/* Must check for peer advertising zero sized window
-		 * or else we get a sk->{mtu,mss} of zero and thus bomb out
-		 * in tcp_do_sendmsg. -DaveM
-		 */
-		if(sk->max_window == 0)
-			sk->max_window = 32;
-
 		tcp_options(sk,th);
-
-#if 0
 		sk->dummy_th.dest=th->source;
-		tcp_v4_rehash(sk);
-#endif
-
 		sk->copied_seq = sk->acked_seq;
 		if(!sk->dead)
 			sk->state_change(sk);
-
+		if(sk->max_window==0)
+		{
+			sk->max_window=32;	/* Sanity check */
+			sk->mss=min(sk->max_window,sk->mtu);
+		}
 		/* Reset the RTT estimator to the initial
 		 * state rather than testing to avoid
 		 * updating it on the ACK to the SYN packet.
@@ -1729,20 +1181,11 @@ static int tcp_ack(struct sock *sk, struct tcphdr *th, u32 ack, int len)
 	 * If we are retransmitting, and we acked a packet on the retransmit
 	 * queue, and there is still something in the retransmit queue,
 	 * then we can output some retransmission packets.
-	 *
-	 * Note that we need to be a bit careful here about getting the
-	 * correct TIME_WRITE timer set. If we just got an ack of a
-	 * packet we where retransmitting, we will retransmit the next
-	 * packet in the retransmit queue below, and the timeout
-	 * should now start from the time we retransmitted that packet.
-	 * The resetting of the TIME_WRITE timer above will have set it
-	 * relative to the prior transmission time, which would be wrong.
 	 */
 
 	if (sk->send_head != NULL && (flag&2) && sk->retransmits)
 	{
 		tcp_do_retransmit(sk, 1);
-		tcp_reset_xmit_timer(sk, TIME_WRITE, sk->rto);
 	}
 
 	return 1;
@@ -1769,14 +1212,7 @@ uninteresting_ack:
 		if(sk->ip_xmit_timeout==TIME_KEEPOPEN)
 			tcp_reset_xmit_timer(sk, TIME_KEEPOPEN, TCP_TIMEOUT_LEN);
 	}
-
-	/*
-	 * A zero return from tcp_ack(), while in SYN_RECV, means that the
-	 * handshake has failed, and an RST packet should be generated. We
-	 * really have to generate an RST here, or a blind spoofing attack
-	 * would be possible.
-	 */
-	return sk->state != TCP_SYN_RECV;
+	return 1;
 }
 
 
@@ -1898,8 +1334,6 @@ static inline void tcp_insert_skb(struct sk_buff * skb, struct sk_buff_head * li
 	struct sk_buff * prev, * next;
 	u32 seq;
 
-	IS_SKB_UNLINKED(skb);
-
 	/*
 	 * Find where the new skb goes.. (This goes backwards,
 	 * on the assumption that we get the packets in order)
@@ -1907,9 +1341,7 @@ static inline void tcp_insert_skb(struct sk_buff * skb, struct sk_buff_head * li
 	seq = skb->seq;
 	prev = list->prev;
 	next = (struct sk_buff *) list;
-	IS_SKB_HEAD(next);
 	for (;;) {
-		IS_SKB_LINKED(prev);
 		if (prev == (struct sk_buff *) list || !after(prev->seq, seq))
 			break;
 		next = prev;
@@ -2123,7 +1555,7 @@ static int tcp_data(struct sk_buff *skb, struct sock *sk,
 				{
 					sk->acked_seq = new_seq + th->fin;
 					tcp_send_reset(sk->saddr, sk->daddr, skb->h.th,
-						sk->prot, NULL, skb->dev, 0, 255);
+						sk->prot, NULL, skb->dev, sk->ip_tos, sk->ip_ttl);
 					tcp_statistics.TcpEstabResets++;
 					sk->err = EPIPE;
 					sk->error_report(sk);
@@ -2155,9 +1587,6 @@ static int tcp_data(struct sk_buff *skb, struct sock *sk,
  *	moved inline now as tcp_urg is only called from one
  *	place. We handle URGent data wrong. We have to - as
  *	BSD still doesn't use the correction from RFC961.
- *
- *	For 1003.1g we should support a new option TCP_STDURG to permit
- *	either form.
  */
  
 static void tcp_check_urg(struct sock * sk, struct tcphdr * th)
@@ -2184,15 +1613,6 @@ static void tcp_check_urg(struct sock * sk, struct tcphdr * th)
 			kill_pg(-sk->proc, SIGURG, 1);
 		}
 	}
-	/*
-	 *	We may be adding urgent data when the last byte read was
-	 *	urgent. To do this requires some care. We cannot just ignore
-	 *	sk->copied_seq since we would read the last urgent byte again
-	 *	as data, nor can we alter copied_seq until this data arrives
-	 *	or we break the sematics of SIOCATMARK (and thus sockatmark())
-	 */
-	if (sk->urg_seq == sk->copied_seq)
-		sk->copied_seq++;	/* Move the copied sequence on correctly */
 	sk->urg_data = URG_NOTYET;
 	sk->urg_seq = ptr;
 }
@@ -2295,13 +1715,11 @@ int tcp_chkaddr(struct sk_buff *skb)
 	struct tcphdr *th = (struct tcphdr *)(skb->h.raw + iph->ihl*4);
 	struct sock *sk;
 
-	sk = tcp_v4_lookup(iph->saddr, th->source, iph->daddr, th->dest,
-			   skb->dev);
-	if (!sk)
-		return 0;
+	sk = get_sock(&tcp_prot, th->dest, iph->saddr, th->source, iph->daddr, 0, 0);
+
+	if (!sk) return 0;
 	/* 0 means accept all LOCAL addresses here, not all the world... */
-	if (sk->rcv_saddr == 0)
-		return 0;
+	if (sk->rcv_saddr == 0) return 0;
 	return 1;
 }
 #endif
@@ -2317,8 +1735,8 @@ int tcp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 {
 	struct tcphdr *th;
 	struct sock *sk;
+	int syn_ok=0;
 	__u32 seq;
-	int was_ack;
 #ifdef CONFIG_IP_TRANSPARENT_PROXY
 	int r;
 #endif
@@ -2330,13 +1748,7 @@ int tcp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 	 * etc).
 	 */
 	th = skb->h.th;
-	was_ack = th->ack; /* Remember for later when we've freed the skb */
 	sk = skb->sk;
-#ifdef CONFIG_RST_COOKIES
-	if (th->rst && secure_tcp_probe_number(saddr,daddr,ntohs(th->source),ntohs(th->dest),ntohl(th->seq),1)) {
-		add_clearance(saddr);
-	}
-#endif
 	if (!redo) {
 		tcp_statistics.TcpInSegs++;
 		if (skb->pkt_type!=PACKET_HOST)
@@ -2361,15 +1773,7 @@ int tcp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 			default:
 				/* CHECKSUM_UNNECESSARY */
 		}
-#ifdef CONFIG_SYN_COOKIES
-retry_search:
-#endif
-#ifdef CONFIG_IP_TRANSPARENT_PROXY
-		if (skb->redirport)
-			sk = tcp_v4_proxy_lookup(saddr, th->source, daddr, th->dest, dev->pa_addr, skb->redirport, dev);
-		else
-#endif
-		sk = __tcp_v4_lookup(th, saddr, th->source, daddr, th->dest, dev);
+		sk = get_tcp_sock(saddr, th->source, daddr, th->dest, dev->pa_addr, skb->redirport);
 		if (!sk)
 			goto no_tcp_socket;
 		skb->sk = sk;
@@ -2402,9 +1806,8 @@ retry_search:
 	 *	exist so should cause resets as if the port was unreachable.
 	 */
 
-	if (sk->zapped || sk->state==TCP_CLOSE) {
+	if (sk->zapped || sk->state==TCP_CLOSE)
 		goto no_tcp_socket;
-	}
 
 	if (!sk->prot) 
 	{
@@ -2445,50 +1848,8 @@ retry_search:
 	 
 		if(sk->state==TCP_LISTEN)
 		{
-			/* Don't start connections with illegal address
-			   ranges. Trying to talk TCP to a broken dhcp host
-			   isnt good on a lan with broken SunOS 4.x boxes 
-			   who think its a broadcast */
-			   
-			if ((saddr | daddr) == 0)
-				goto discard_it;
-				
-			if (th->ack) {	/* These use the socket TOS.. might want to be the received TOS */
-#ifdef CONFIG_SYN_COOKIES
-				if (!th->syn && !th->rst) {
-					__u32 acked_seq = ntohl(th->ack_seq)-1;
-					int mtu_index = (acked_seq&0x7); /* extract MTU */
-					__u32 count = jiffies/(60*HZ);
-
-					acked_seq = acked_seq&0xfffffff8;
-
-					/* Any time in the last 2 minutes is OK */
-					if (acked_seq == secure_tcp_syn_cookie(daddr,
-					    saddr,ntohs(th->source),ntohs(th->dest),
-					    ntohl(th->seq)-1,count)
-					|| acked_seq == secure_tcp_syn_cookie(daddr,
-					    saddr,ntohs(th->source),ntohs(th->dest),
-					    ntohl(th->seq)-1,count-1)
-					|| acked_seq == secure_tcp_syn_cookie(daddr,
-					    saddr,ntohs(th->source),ntohs(th->dest),
-					    ntohl(th->seq)-1,count-2)) {
-						/* If this passes, we need to fake up the
-						* new socket in TCP_SYN_SENT state and
-						* call ourselves recursively to handle
-						* the move to ESTABLISHED using the
-						* current packet. Nasty, but a cleaner
-						* solution would require major rewrites.
-						*/
-						if (tcp_conn_request_fake(sk, skb, daddr, saddr, opt,
-						     			  dev, (acked_seq | mtu_index), cookie_mtu[mtu_index])) {
-
-							goto retry_search;
-						}
-					}
-				}
-#endif
-				tcp_send_reset(daddr,saddr,th,sk->prot,opt,dev,0, 255);
-			}
+			if(th->ack)	/* These use the socket TOS.. might want to be the received TOS */
+				tcp_send_reset(daddr,saddr,th,sk->prot,opt,dev,sk->ip_tos, sk->ip_ttl);
 
 			/*
 			 *	We don't care for RST, and non SYN are absorbed (old segments)
@@ -2539,14 +1900,10 @@ retry_search:
 		 *	then it's a new connection
 		 */
 		 
-		if (sk->state == TCP_SYN_RECV)
+		if (sk->state == TCP_SYN_RECV && th->syn && skb->seq+1 == sk->acked_seq)
 		{
-			if(th->syn && skb->seq+1 == sk->acked_seq)
-			{
-				kfree_skb(skb, FREE_READ);
-				return 0;
-			}
-			goto rfc_step4;
+			kfree_skb(skb, FREE_READ);
+			return 0;
 		}
 		
 		/*
@@ -2573,7 +1930,7 @@ retry_search:
 					   different connection  [ th->rst is checked in tcp_send_reset()] */
 					tcp_statistics.TcpAttemptFails++;
 					tcp_send_reset(daddr, saddr, th,
-						sk->prot, opt,dev,0,255);
+						sk->prot, opt,dev,sk->ip_tos,sk->ip_ttl);
 					kfree_skb(skb, FREE_READ);
 					return(0);
 				}
@@ -2585,7 +1942,7 @@ retry_search:
 					   start. Shouldn't happen but cover it */
 	         			tcp_statistics.TcpAttemptFails++;
 	                                tcp_send_reset(daddr, saddr, th,
-	                                        sk->prot, opt,dev,0,255);
+	                                        sk->prot, opt,dev,sk->ip_tos,sk->ip_ttl);
 					kfree_skb(skb, FREE_READ);
 					return 0;
 				}
@@ -2597,37 +1954,30 @@ retry_search:
 				 */
 				tcp_ack(sk,th,skb->ack_seq,len);
 
-				/* We must check here (before tcp_options) whether
-				 * peer advertised a zero sized window on us, else
-				 * we end up with a zero sk->{mtu,mss} and thus bomb
-				 * out in tcp_do_sendmsg. -DaveM
-				 */
-				if(sk->max_window == 0)
-					sk->max_window = 32;
 
 				/*
 				 *	Ok.. it's good. Set up sequence numbers and
 				 *	move to established.
 				 */
+				syn_ok=1;	/* Don't reset this connection for the syn */
 				sk->acked_seq = skb->seq+1;
 				sk->lastwin_seq = skb->seq+1;
 				sk->fin_seq = skb->seq;
 				tcp_send_ack(sk);
 				tcp_set_state(sk, TCP_ESTABLISHED);
 				tcp_options(sk,th);
-
-#if 0
 				sk->dummy_th.dest=th->source;
-				tcp_v4_rehash(sk);
-#endif
-
 				sk->copied_seq = sk->acked_seq;
 				if(!sk->dead)
 				{
 					sk->state_change(sk);
 					sock_wake_async(sk->socket, 0);
 				}
-
+				if(sk->max_window==0)
+				{
+					sk->max_window = 32;
+					sk->mss = min(sk->max_window, sk->mtu);
+				}
 				/* Reset the RTT estimator to the initial
 				 * state rather than testing to avoid
 				 * updating it on the ACK to the SYN packet.
@@ -2635,7 +1985,6 @@ retry_search:
 				sk->rtt = 0;
 				sk->rto = TCP_TIMEOUT_INIT;
 				sk->mdev = TCP_TIMEOUT_INIT;
-				goto rfc_step6;
 			}
 			else
 			{
@@ -2662,11 +2011,10 @@ retry_search:
 				kfree_skb(skb, FREE_READ);
 				return 0;
 			}
-
 			/*
-			 *	Data maybe.. drop through
+			 *	SYN_RECV with data maybe.. drop through
 			 */
-			 
+			goto rfc_step6;
 		}
 
 	/*
@@ -2694,28 +2042,12 @@ retry_search:
 			sk->err=ECONNRESET;
 			tcp_set_state(sk, TCP_CLOSE);
 			sk->shutdown = SHUTDOWN_MASK;
-#ifdef CONFIG_IP_TRANSPARENT_PROXY
-			/* What to do here?
-			 * For the non-proxy case, this code is effectively almost a no-op,
-			 * due to the sk = NULL.  Is that intentional?  If so, why shouldn't we
-			 * do the same for the proxy case and get rid of some useless code?
-			 */
-			if (skb->redirport)
-				sk = tcp_v4_proxy_lookup(saddr, th->source, daddr, th->dest,
-							 dev->pa_addr, skb->redirport, dev);
-			else
-#endif
-			sk = __tcp_v4_lookup(th, saddr, th->source, daddr, th->dest, dev);
+			sk=get_sock(&tcp_prot, th->dest, saddr, th->source, daddr, dev->pa_addr, skb->redirport);
 			/* this is not really correct: we should check sk->users */
 			if (sk && sk->state==TCP_LISTEN)
 			{
 				skb->sk = sk;
 				atomic_add(skb->truesize, &sk->rmem_alloc);
-				/* FIXME: Is the sequence number addition
-				 * of 128000 here enough for fast networks?
-				 * Also, does this reduce the security of
-				 * our tcp sequence numbers?
-			 	 */
 				tcp_conn_request(sk, skb, daddr, saddr,opt, dev,seq+128000);
 				return 0;
 			}
@@ -2724,8 +2056,6 @@ retry_search:
 		}
 #endif	
 	}
-
-rfc_step4:		/* I'll clean this up later */
 
 	/*
 	 *	We are now in normal data flow (see the step list in the RFC)
@@ -2744,23 +2074,12 @@ rfc_step4:		/* I'll clean this up later */
 		return tcp_reset(sk,skb);
 	
 	/*
-	 *	Check for a SYN, and ensure it matches the SYN we were
-	 *	first sent. We have to handle the rather unusual (but valid)
-	 *	sequence that KA9Q derived products may generate of
-	 *
-	 *	SYN
-	 *				SYN|ACK Data
-	 *	ACK	(lost)
-	 *				SYN|ACK Data + More Data
-	 *	.. we must ACK not RST...
-	 *
-	 *	We keep syn_seq as the sequence space occupied by the 
-	 *	original syn. 
+	 *	!syn_ok is effectively the state test in RFC793.
 	 */
 	 
-	if(th->syn && skb->seq!=sk->syn_seq)
+	if(th->syn && !syn_ok)
 	{
-		tcp_send_reset(daddr,saddr,th, &tcp_prot, opt, dev,0, 255);
+		tcp_send_reset(daddr,saddr,th, &tcp_prot, opt, dev, skb->ip_hdr->tos, 255);
 		return tcp_reset(sk,skb);	
 	}
 
@@ -2768,13 +2087,8 @@ rfc_step4:		/* I'll clean this up later */
 	 *	Process the ACK
 	 */
 	 
-	if(!th->ack)
-	{
-		kfree_skb(skb, FREE_WRITE);
-		return 0;
-	}
 
-	if(!tcp_ack(sk,th,skb->ack_seq,len))
+	if(th->ack && !tcp_ack(sk,th,skb->ack_seq,len))
 	{
 		/*
 		 *	Our three way handshake failed.
@@ -2782,13 +2096,14 @@ rfc_step4:		/* I'll clean this up later */
 		 
 		if(sk->state==TCP_SYN_RECV)
 		{
-			tcp_send_reset(daddr, saddr, th,sk->prot, opt, dev,0,255);
+			tcp_send_reset(daddr, saddr, th,sk->prot, opt, dev,sk->ip_tos,sk->ip_ttl);
 		}
 		kfree_skb(skb, FREE_READ);
 		return 0;
 	}
 	
-rfc_step6:
+rfc_step6:		/* I'll clean this up later */
+
 	/*
 	 *	If the accepted buffer put us over our queue size we
 	 *	now drop it (we must process the ack first to avoid
@@ -2809,19 +2124,6 @@ rfc_step6:
 		kfree_skb(skb, FREE_READ);
 
 	/*
-	 *	If we had a partial packet being help up due to
-	 *	application of Nagle's rule we are now free to send it.
-	 */
-	if (was_ack
-	    && sk->packets_out == 0
-	    && sk->partial != NULL
-	    && skb_queue_empty(&sk->write_queue)
-	    && sk->send_head == NULL) 
-	{
-		tcp_send_partial(sk);
-	}
-
-	/*
 	 *	If our receive queue has grown past its limits,
 	 *	try to prune away duplicates etc..
 	 */
@@ -2836,9 +2138,9 @@ rfc_step6:
 
 no_tcp_socket:
 	/*
-	 * No such TCB. If th->rst is 0 send a reset (checked in tcp_send_reset)
+	 *	No such TCB. If th->rst is 0 send a reset (checked in tcp_send_reset)
 	 */
-	tcp_send_reset(daddr, saddr, th, &tcp_prot, opt,dev,0,255);
+	tcp_send_reset(daddr, saddr, th, &tcp_prot, opt,dev,skb->ip_hdr->tos,255);
 
 discard_it:
 	/*

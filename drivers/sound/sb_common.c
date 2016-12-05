@@ -261,7 +261,6 @@ sb16_set_dma_hw (sb_devc * devc)
   return 1;
 }
 
-#if defined(CONFIG_MIDI) && defined(CONFIG_UART401)
 static void
 sb16_set_mpu_port(sb_devc *devc, struct address_info *hw_config)
 {
@@ -284,7 +283,6 @@ sb16_set_mpu_port(sb_devc *devc, struct address_info *hw_config)
 		printk("SB16: Invalid MIDI I/O port %x\n", hw_config->io_base);
 	}
 }
-#endif
 
 static int
 sb16_set_irq_hw (sb_devc * devc, int level)
@@ -584,20 +582,6 @@ sb_dsp_detect (struct address_info *hw_config)
 /*
  * Detect the device
  */
-
-  cli();			/* Some ESS1688 cards need this */
-  inb (devc->base + 0x9);
-  inb (devc->base + 0x9);
-  inb (devc->base + 0x9);
-  inb (devc->base + 0xb);
-  inb (devc->base + 0x9);
-  inb (devc->base + 0xb);
-  inb (devc->base + 0x9);
-  inb (devc->base + 0x9);
-  inb (devc->base + 0xb);
-  inb (devc->base + 0x9);
-  inb (devc->base);
-  sti();
 
   if (sb_dsp_reset (devc))
     dsp_get_vers (devc);
@@ -1196,13 +1180,11 @@ probe_sbmpu (struct address_info *hw_config)
     case MDL_SB16:
       if (hw_config->io_base != 0x300 && hw_config->io_base != 0x330)
 	{
-	  printk ("SB16: Invalid MIDI port %x\n", hw_config->io_base);
+	  printk ("SB16: Invalid MIDI port %x\n", hw_config->irq);
 	  return 0;
 	}
       hw_config->name = "Sound Blaster 16";
       hw_config->irq = -devc->irq;
-      hw_config->dma = -1;
-      hw_config->dma2 = -1;
       sb16_set_mpu_port(devc, hw_config);
       break;
 

@@ -591,7 +591,7 @@ static void pcxe_close(struct tty_struct * tty, struct file * filp)
 ** worth noting that while I'm not sure what this hunk of code is supposed
 ** to do, it is not present in the serial.c driver.  Hmmm.  If you know,
 ** please send me a note.  brian@ilinx.com
-** Don't know either what this is supposed to do clameter@waterf.org.
+** Dont know either what this is supposed to do clameter@waterf.org.
 */
 		if(tty->ldisc.num != ldiscs[N_TTY].num) {
 			if(tty->ldisc.close)
@@ -1111,7 +1111,6 @@ int pcxe_init(void)
 	digi_channels = kmalloc(sizeof(struct channel) * nbdevs, GFP_KERNEL);
 	if (!digi_channels)
 		panic("Unable to allocate digi_channel struct");
-	memset(digi_channels, 0, sizeof(struct channel) * nbdevs);
 
 	pcxe_table =  kmalloc(sizeof(struct tty_struct *) * nbdevs, GFP_KERNEL);
 	if (!pcxe_table)
@@ -1121,12 +1120,10 @@ int pcxe_init(void)
 	pcxe_termios = kmalloc(sizeof(struct termios *) * nbdevs, GFP_KERNEL);
 	if (!pcxe_termios)
 		panic("Unable to allocate pcxe_termios struct");
-	memset(pcxe_termios,0,sizeof(struct termios *)*nbdevs);
 
 	pcxe_termios_locked = kmalloc(sizeof(struct termios *) * nbdevs, GFP_KERNEL);
 	if (!pcxe_termios_locked)
 		panic("Unable to allocate pcxe_termios_locked struct");
-	memset(pcxe_termios_locked,0,sizeof(struct termios *)*nbdevs);
 
 	init_bh(DIGI_BH,do_pcxe_bh);
 	enable_bh(DIGI_BH);

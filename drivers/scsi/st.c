@@ -11,7 +11,7 @@
   Copyright 1992 - 1996 Kai Makisara
 		 email Kai.Makisara@metla.fi
 
-  Last modified: Tue Oct  1 22:53:51 1996 by makisara@kai.makisara.fi
+  Last modified: Sun Jul  7 10:08:46 1996 by root@kai.makisara.fi
   Some small formal changes - aeb, 950809
 */
 
@@ -556,7 +556,6 @@ scsi_tape_open(struct inode * inode, struct file * filp)
       STp->buffer = st_buffers[i];
     (STp->buffer)->in_use = 1;
     (STp->buffer)->writing = 0;
-    (STp->buffer)->last_result_fatal = 0;
 
     flags = filp->f_flags;
     STp->write_prot = ((flags & O_ACCMODE) == O_RDONLY);
@@ -615,6 +614,7 @@ scsi_tape_open(struct inode * inode, struct file * filp)
       if ((SCpnt->sense_buffer[0] & 0x70) == 0x70 &&
 	  (SCpnt->sense_buffer[2] & 0x0f) == NO_TAPE) {
 	(STp->mt_status)->mt_fileno = STp->drv_block = 0 ;
+	printk(KERN_NOTICE "st%d: No tape.\n", dev);
 	STp->ready = ST_NO_TAPE;
       } else {
 	(STp->mt_status)->mt_fileno = STp->drv_block = (-1);
@@ -1121,8 +1121,7 @@ st_write(struct inode * inode, struct file * filp, const char * buf, int count)
     }
 
     if (STm->do_async_writes &&
-	(((STp->buffer)->buffer_bytes >= STp->write_threshold &&
-	  (STp->buffer)->buffer_bytes >= STp->block_size) ||
+	((STp->buffer)->buffer_bytes >= STp->write_threshold ||
 	 STp->block_size == 0) ) {
       /* Schedule an asynchronous write */
       if (!SCpnt) {
@@ -2193,8 +2192,7 @@ get_location(struct inode * inode, unsigned int *block, int *partition,
       return (-EBUSY);
 
     if ((STp->buffer)->last_result_fatal != 0 ||
-	(STp->device->scsi_level >= SCSI_2 &&
-	 ((STp->buffer)->b_data[0] & 4) != 0)) {
+	((STp->buffer)->b_data[0] & 4)) {
       *block = *partition = 0;
 #if DEBUG
       if (debugging)
@@ -2315,7 +2313,6 @@ set_location(struct inode * inode, unsigned int block, int partition,
       return (-EBUSY);
 
     STp->drv_block = (STp->mt_status)->mt_fileno = (-1);
-    STp->eof = ST_NOEOF;
     if ((STp->buffer)->last_result_fatal != 0) {
       result = (-EIO);
       if (STp->can_partitions &&

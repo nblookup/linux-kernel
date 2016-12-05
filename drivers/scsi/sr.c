@@ -483,7 +483,7 @@ void sr_photocd(struct inode *inode)
 		    no_multi = 1;
 		}
 	    } else
-		printk(KERN_INFO"sr_photocd: ioctl error (TOSHIBA #1): 0x%x\n",rc);
+		printk(KERN_WARNING"sr_photocd: ioctl error (TOSHIBA #1): 0x%x\n",rc);
 	    break; /* if the first ioctl fails, we don't call the second one */
 	}
 	is_xa  = (rec[0] == 0x20);
@@ -545,9 +545,9 @@ void sr_photocd(struct inode *inode)
 
     case SCSI_MAN_SONY: /* Thomas QUINOT <thomas@melchior.cuivre.fdn.fr> */
     case SCSI_MAN_PIONEER:
-    case SCSI_MAN_UNKNOWN:
+    case SCSI_MAN_MATSHITA:
 #ifdef DEBUG
-	printk(KERN_DEBUG "sr_photocd: use SONY/PIONEER code\n");
+	printk(KERN_DEBUG "sr_photocd: use SONY/PIONEER/MATSHITA code\n");
 #endif
 	get_sectorsize(MINOR(inode->i_rdev));	/* spinup (avoid timeout) */
 	memset(buf,0,40);
@@ -561,11 +561,11 @@ void sr_photocd(struct inode *inode)
 	
 	if (rc != 0) {
             if (rc != 0x28000002) /* drop "not ready" */
-                printk(KERN_WARNING "sr_photocd: ioctl error (SONY/PIONEER): 0x%x\n",rc);
+                printk(KERN_WARNING "sr_photocd: ioctl error (SONY/PIONEER/MATSHITA): 0x%x\n",rc);
 	    break;
 	}
-	if ((rec[0] << 8) + rec[1] < 0x0a) {
-	    printk(KERN_INFO "sr_photocd: (SONY/PIONEER) Hmm, seems the CDROM doesn't support multisession CD's\n");
+	if ((rec[0] << 8) + rec[1] != 0x0a) {
+	    printk(KERN_INFO "sr_photocd: (SONY/PIONEER/MATSHITA) Hmm, seems the CDROM doesn't support multisession CD's\n");
 	    no_multi = 1;
 	    break;
 	}
@@ -578,6 +578,7 @@ void sr_photocd(struct inode *inode)
 	break;
 		
     case SCSI_MAN_NEC_OLDCDR:
+    case SCSI_MAN_UNKNOWN:
     default:
 	sector = 0;
 	no_multi = 1;
@@ -601,15 +602,13 @@ static int sr_open(struct inode * inode, struct file * filp)
     if (filp->f_mode & 2)  
 	return -EROFS;
 
-    if(sr_template.usage_count) (*sr_template.usage_count)++;
-
-    sr_ioctl(inode,filp,CDROMCLOSETRAY,0);
     check_disk_change(inode->i_rdev);
     
     if(!scsi_CDs[MINOR(inode->i_rdev)].device->access_count++)
 	sr_ioctl(inode, NULL, SCSI_IOCTL_DOORLOCK, 0);
     if (scsi_CDs[MINOR(inode->i_rdev)].device->host->hostt->usage_count)
 	(*scsi_CDs[MINOR(inode->i_rdev)].device->host->hostt->usage_count)++;
+    if(sr_template.usage_count) (*sr_template.usage_count)++;
     
     sr_photocd(inode);
     

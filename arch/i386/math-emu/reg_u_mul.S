@@ -4,9 +4,9 @@
  |                                                                           |
  | Core multiplication routine                                               |
  |                                                                           |
- | Copyright (C) 1992,1993,1995,1997                                         |
- |                  W. Metzenthen, 22 Parker St, Ormond, Vic 3163, Australia |
- |                  E-mail   billm@suburbia.net                              |
+ | Copyright (C) 1992,1993,1995                                              |
+ |                       W. Metzenthen, 22 Parker St, Ormond, Vic 3163,      |
+ |                       Australia.  E-mail billm@jacobi.maths.monash.edu.au |
  |                                                                           |
  |                                                                           |
  +---------------------------------------------------------------------------*/
@@ -15,7 +15,7 @@
  |   Basic multiplication routine.                                           |
  |   Does not check the resulting exponent for overflow/underflow            |
  |                                                                           |
- |   FPU_u_mul(FPU_REG *a, FPU_REG *b, FPU_REG *c, unsigned int cw);         |
+ |   reg_u_mul(FPU_REG *a, FPU_REG *b, FPU_REG *c, unsigned int cw);         |
  |                                                                           |
  |   Internal working is at approx 128 bits.                                 |
  |   Result is rounded to nearest 53 or 64 bits, using "nearest or even".    |
@@ -40,16 +40,16 @@ FPU_accum_0:
 	.long	0
 FPU_accum_1:
 	.long	0
-#endif /* NON_REENTRANT_FPU */
+#endif NON_REENTRANT_FPU
 
 
 .text
-ENTRY(FPU_u_mul)
+ENTRY(reg_u_mul)
 	pushl	%ebp
 	movl	%esp,%ebp
 #ifndef NON_REENTRANT_FPU
 	subl	$8,%esp
-#endif /* NON_REENTRANT_FPU */ 
+#endif NON_REENTRANT_FPU
 
 	pushl	%esi
 	pushl	%edi
@@ -63,7 +63,28 @@ ENTRY(FPU_u_mul)
 	jz	L_bugged
 	testl	$0x80000000,SIGH(%edi)
 	jz	L_bugged
-#endif /* PARANOID */
+#endif PARANOID
+
+#ifdef DENORM_OPERAND
+	movl	EXP(%esi),%eax
+	cmpl	EXP_UNDER,%eax
+	jg	xOp1_not_denorm
+
+	call	SYMBOL_NAME(denormal_operand)
+	orl	%eax,%eax
+	jnz	fpu_Arith_exit
+
+xOp1_not_denorm:
+	movl	EXP(%edi),%eax
+	cmpl	EXP_UNDER,%eax
+	jg	xOp2_not_denorm
+
+	call	SYMBOL_NAME(denormal_operand)
+	orl	%eax,%eax
+	jnz	fpu_Arith_exit
+
+xOp2_not_denorm:
+#endif DENORM_OPERAND
 
 	xorl	%ecx,%ecx
 	xorl	%ebx,%ebx
@@ -90,22 +111,13 @@ ENTRY(FPU_u_mul)
 	addl	%eax,%ebx
 	adcl	%edx,%ecx
 
-	/* Get the sum of the exponents. */
-	movl	PARAM6,%eax
+	movl	EXP(%esi),%eax	/* Compute the exponent */
+	addl	EXP(%edi),%eax
 	subl	EXP_BIAS-1,%eax
-
-	/* Two denormals can cause an exponent underflow */
-	cmpl	EXP_WAY_UNDER,%eax
-	jg	Exp_not_underflow
-
-	/* Set to a really low value allow correct handling */
-	movl	EXP_WAY_UNDER,%eax
-
-Exp_not_underflow:
 
 /*  Have now finished with the sources */
 	movl	PARAM3,%edi	/* Point to the destination */
-	movw	%ax,EXP(%edi)
+	movl	%eax,EXP(%edi)
 
 /*  Now make sure that the result is normalized */
 	testl	$0x80000000,%ecx
@@ -116,7 +128,7 @@ Exp_not_underflow:
 	rcll	$1,FPU_accum_1
 	rcll	$1,%ebx
 	rcll	$1,%ecx
-	decw	EXP(%edi)
+	decl	EXP(%edi)
 
 LResult_Normalised:
 	movl	FPU_accum_0,%eax
@@ -144,5 +156,5 @@ L_exit:
 	popl	%esi
 	leave
 	ret
-#endif /* PARANOID */ 
+#endif PARANOID
 

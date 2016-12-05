@@ -6,8 +6,6 @@
 
 /*
  * Some corrections by tytso.
- *
- * Aug 97 - cevans - fix security problem with O_TRUNC and append only files
  */
 
 #include <asm/segment.h>
@@ -284,10 +282,6 @@ static int _namei(const char * pathname, struct inode * base,
 			return error;
 	} else
 		iput(base);
-	if ((inode->i_flags & S_BAD_INODE) != 0) {
-		iput(inode);
-		return -EIO;
-	}
 	*res_inode = inode;
 	return 0;
 }
@@ -430,9 +424,8 @@ int open_namei(const char * pathname, int flag, int mode,
 	}
 	/*
 	 * An append-only file must be opened in append mode for writing
-	 * Additionally, we must disallow O_TRUNC -- cevans
 	 */
-	if (IS_APPEND(inode) && (((flag & FMODE_WRITE) && !(flag & O_APPEND)) || (flag & O_TRUNC))) {
+	if (IS_APPEND(inode) && ((flag & FMODE_WRITE) && !(flag & O_APPEND))) {
 		iput(inode);
 		return -EPERM;
 	}
@@ -646,10 +639,7 @@ static int do_rmdir(const char * name)
 	}
 	if (dir->i_sb && dir->i_sb->dq_op)
 		dir->i_sb->dq_op->initialize(dir, -1);
-	down(&dir->i_sem);
-	error = dir->i_op->rmdir(dir,basename,namelen);
-	up(&dir->i_sem);
-	return error;
+	return dir->i_op->rmdir(dir,basename,namelen);
 }
 
 asmlinkage int sys_rmdir(const char * pathname)
@@ -700,10 +690,7 @@ static int do_unlink(const char * name)
 	}
 	if (dir->i_sb && dir->i_sb->dq_op)
 		dir->i_sb->dq_op->initialize(dir, -1);
-	down(&dir->i_sem);
-	error = dir->i_op->unlink(dir,basename,namelen);
-	up(&dir->i_sem);
-	return error;
+	return dir->i_op->unlink(dir,basename,namelen);
 }
 
 asmlinkage int sys_unlink(const char * pathname)

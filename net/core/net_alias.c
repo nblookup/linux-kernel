@@ -2,8 +2,7 @@
  *		NET_ALIAS network device aliasing module.
  *
  *
- * Version:	@(#)net_alias.c	0.50   4/20/97
- *
+ * Version:	@(#)net_alias.c	0.43   12/20/95
  *
  * Authors:	Juan Jose Ciarlante, <jjciarla@raiz.uncu.edu.ar>
  *		Marcelo Fabian Roccasalva, <mfroccas@raiz.uncu.edu.ar>
@@ -15,16 +14,13 @@
  *	-	fast hashed alias address lookup
  *	-	net_alias_type objs registration/unreg., module-ables.
  *	-	/proc/net/aliases & /proc/net/alias_types entries
- *	-	tx and rx stats
- *	-	/proc/sys/net/core/net_alias_max entry
  * Fixes:
- *	Juan Jose Ciarlante	:	several net_alias_type func. renamed.
- *	Juan Jose Ciarlante	:	net_alias_type object methods now pass 
+ *			JJC	:	several net_alias_type func. renamed.
+ *			JJC	:	net_alias_type object methods now pass 
  *					*this.
- *	Juan Jose Ciarlante	:	xxx_rcv device selection based on <src,dst> addrs
+ *			JJC	:	xxx_rcv device selection based on <src,dst> 
+ *					addrs
  *		Andreas Schultz	:	Kerneld support.
- *	Juan Jose Ciarlante	:	Added tx/rx stats for aliases.
- *	Juan Jose Ciarlante	:	Added sysctl interface for max aliases per device
  *
  * FIXME:
  *	- User calls sleep/wake_up locking.
@@ -43,12 +39,10 @@
 #include <linux/netdevice.h>
 #include <linux/notifier.h>
 #include <linux/if.h>
-#include <linux/if_ether.h>
 #include <linux/inet.h>
 #include <linux/in.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
-#include <linux/sysctl.h>
 
 #ifdef ALIAS_USER_LAND_DEBUG
 #include "net_alias.h"
@@ -61,35 +55,11 @@
 #include <linux/kerneld.h>
 #endif
 
-
 /*
- * 	NET_ALIAS_MAX_DEFAULT: max. alias slot number allowed by default,
- *		can be changed by sysctl
- *	NET_ALIAS_HASH_TAB_SIZE: hash table size (addr lookup), 1 per aliased 
- *		device, due to hash optimizations, MUST be 16 or 256 only.
+ * Only allow the following flags to pass from main device to aliases
  */
 
-#define NET_ALIAS_MAX_DEFAULT		256
-
-/* DO NOT CHANGE the line below ! */
-#define NET_ALIAS_HASH_TAB_SIZE(n)  ( ((n)>=NET_ALIAS_MAX_DEFAULT) ? 256 : 16 )
-
-/*
- *	set default max_aliases per device
- */
-int sysctl_net_alias_max = NET_ALIAS_MAX_DEFAULT;
-
-/*
- * 	Only allow the following flags to pass from main device to aliases
- *	Note that IFF_BROADCAST is not passed by default, this make sense
- *	because:
- *	a) if same-net alias: broadcasts are already handled by main device
- *	b) if diff-net alias: bcasts will be set by 'broadcast' ifconfig opt.
- *	I prefer this approach instead of setting '-broadcast' for each
- *	same-net alias device  --JJC.
- */
-
-#define  NET_ALIAS_IFF_MASK   (IFF_SOFTHEADERS|IFF_NOARP|IFF_LOOPBACK|IFF_POINTOPOINT)
+#define  NET_ALIAS_IFF_MASK   (IFF_UP|IFF_BROADCAST|IFF_RUNNING|IFF_NOARP|IFF_LOOPBACK|IFF_POINTOPOINT)
 
 static struct net_alias_type * nat_getbytype(int type);
 static int nat_attach_chg(struct net_alias_type *nat, int delta);
@@ -98,7 +68,6 @@ static int nat_unbind(struct net_alias_type *nat, struct net_alias *alias);
 
 
 static int net_alias_devinit(struct device *dev);
-static struct enet_statistics *net_alias_dev_stats(struct device *dev);
 static int net_alias_hard_start_xmit(struct sk_buff *skb, struct device *dev);
 static int net_alias_devsetup(struct net_alias *alias, struct net_alias_type *nat, struct sockaddr *sa);
 static struct net_alias **net_alias_slow_findp(struct net_alias_info *alias_info, struct net_alias *alias);
@@ -110,22 +79,7 @@ static void net_alias_free(struct device *dev);
  * net_alias_type base array, will hold net_alias_type obj hashed list heads.
  */
 
-struct net_alias_type *net_alias_type_base[16];
-
-
-/*
- *	get_stats function: return rx/tx pkts based on lookups
- */
-static struct enet_statistics *net_alias_dev_stats(struct device *dev)
-{
-        static struct enet_statistics alias_stats;
-        struct net_alias *alias = dev->my_alias;
-        
-        memset (&alias_stats, 0, sizeof (alias_stats));
-        alias_stats.rx_packets	      = alias->rx_lookups;
-        alias_stats.tx_packets	      = alias->tx_lookups;
-        return &alias_stats;
-}
+struct net_alias_type *nat_base[16];
 
 
 /*
@@ -136,7 +90,7 @@ static __inline__ struct net_alias_type *
 nat_getbytype(int type)
 {
   struct net_alias_type *nat;
-  for(nat = net_alias_type_base[type & 0x0f]; nat ; nat = nat->next)
+  for(nat = nat_base[type & 0x0f]; nat ; nat = nat->next)
   {
     if (nat->type == type) return nat;
   }
@@ -165,14 +119,11 @@ nat_addr32(struct net_alias_type *nat, struct sockaddr *sa)
  */
 
 static __inline__ unsigned
-hash_key(unsigned hsize, __u32 addr)
+HASH(__u32 addr, int af)
 {
   unsigned tmp = addr ^ (addr>>16); /* 4 -> 2 */
   tmp ^= (tmp>>8);                  /* 2 -> 1 */
-  if (hsize == 256)
-    return (tmp & 0xff);
-  else
-    return (tmp^(tmp>>4)) & 0x0f;	    /* 1 -> 1/2 */
+  return (tmp^(tmp>>4)^af) & 0x0f;	    /* 1 -> 1/2 */
 }
 
 
@@ -184,9 +135,9 @@ hash_key(unsigned hsize, __u32 addr)
  */
 
 static __inline__ int
-nat_hash_key(struct net_alias_type *nat, unsigned hsize, struct sockaddr *sa)
+nat_hash_key(struct net_alias_type *nat, struct sockaddr *sa)
 {
-  return hash_key(hsize, nat_addr32(nat,sa));
+  return HASH(nat_addr32(nat,sa), sa->sa_family);
 }
 
 
@@ -285,13 +236,13 @@ net_alias_hard_start_xmit(struct sk_buff *skb, struct device *dev)
 
 
 static int
-net_alias_dev_open(struct device * dev)
+net_alias_open(struct device * dev)
 {
   return 0;
 }
 
 static int
-net_alias_dev_close(struct device * dev)
+net_alias_close(struct device * dev)
 {
   return 0;
 }
@@ -320,16 +271,13 @@ net_alias_devsetup(struct net_alias *alias, struct net_alias_type *nat,
   dev = &alias->dev;
   memset(dev, '\0', sizeof(struct device));
   family = (sa)? sa->sa_family : main_dev->family;
-  alias->rx_lookups = 0;
-  alias->tx_lookups = 0;
+
   dev->alias_info = NULL;	/* no aliasing recursion */
   dev->my_alias = alias;	/* point to alias */
   dev->name = alias->name;
   dev->type = main_dev->type;
-  dev->open = net_alias_dev_open;
-  dev->stop = net_alias_dev_close;
-  dev->get_stats = net_alias_dev_stats;
-  
+  dev->open = net_alias_open;
+  dev->stop = net_alias_close;
   dev->hard_header_len = main_dev->hard_header_len;
   memcpy(dev->broadcast, main_dev->broadcast, MAX_ADDR_LEN);
   memcpy(dev->dev_addr, main_dev->dev_addr, MAX_ADDR_LEN);
@@ -380,7 +328,7 @@ net_alias_slow_findp(struct net_alias_info *alias_info, struct net_alias *alias)
    */
   
   n_aliases = alias_info->n_aliases;
-  for (idx=0; idx < alias_info->hash_tab_size ; idx++)
+  for (idx=0; idx < 16 ; idx++)
     for (aliasp = &alias_info->hash_tab[idx];*aliasp;aliasp = &(*aliasp)->next)
       if (*aliasp == alias)
 	return aliasp;
@@ -405,7 +353,6 @@ net_alias_dev_create(struct device *main_dev, int slot, int *err, struct sockadd
   unsigned long flags;
   int family;
   __u32 addr32;
-  int max_aliases;
   
   /* FIXME: lock */
   alias_info = main_dev->alias_info;
@@ -440,19 +387,6 @@ net_alias_dev_create(struct device *main_dev, int slot, int *err, struct sockadd
 #endif
   }
   
-  *err = -EINVAL;
-  
-  if (!alias_info)
-  	/*
-         *	At this point we take the sysctl value(s)
-         */
-  	max_aliases = sysctl_net_alias_max;
-  else
-  	max_aliases = alias_info->max_aliases;
-  
-  if (slot >= max_aliases )     /* 0-based (eth0:0 _IS_ valid) */
-  	return NULL;
-  
   /*
    * do not allow creation over downed devices
    */
@@ -469,25 +403,10 @@ net_alias_dev_create(struct device *main_dev, int slot, int *err, struct sockadd
   *err = -ENOMEM;
 
   if (!alias_info)
-  {
-          /*
-           *	Allocate space for struct net_alias_info plus hash table
-           */
-          int truesize;
-
-          /* net_alias_info size */
-          truesize = sizeof(struct net_alias_info);
-          /* add   hash_tab size * sizeof(elem)  */
-          truesize += NET_ALIAS_HASH_TAB_SIZE(max_aliases) * sizeof (struct net_alias *);
-          
-          alias_info = kmalloc( truesize , GFP_KERNEL);
-  
-          if (!alias_info) return NULL; /* ENOMEM */
-          
-          memset(alias_info, 0, truesize);
-          alias_info->truesize = truesize;
-          alias_info->max_aliases = max_aliases;
-          alias_info->hash_tab_size = NET_ALIAS_HASH_TAB_SIZE(max_aliases);
+  { 
+    alias_info = kmalloc(sizeof(struct net_alias_info), GFP_KERNEL);
+    if (!alias_info) return NULL; /* ENOMEM */
+    memset(alias_info, 0, sizeof(struct net_alias_info));
   }
   
   if (!(alias = kmalloc(sizeof(struct net_alias), GFP_KERNEL)))
@@ -534,7 +453,7 @@ net_alias_dev_create(struct device *main_dev, int slot, int *err, struct sockadd
    * store hash key in alias: will speed-up rehashing and deletion
    */
   
-  alias->hash = hash_key(alias_info->hash_tab_size, addr32);
+  alias->hash = HASH(addr32, family);
 
   /*
    * insert alias in hashed linked list
@@ -676,7 +595,7 @@ net_alias_dev_delete(struct device *main_dev, int slot, int *err)
   
   kfree_s(alias, sizeof(struct net_alias));
   if (main_dev->alias_info == NULL)
-    kfree_s(alias_info, alias_info->truesize);
+    kfree_s(alias_info, sizeof(struct net_alias_info));
 
   /*
    * deletion ok (*err=0), NULL device returned.
@@ -804,12 +723,14 @@ net_alias_dev_get(char *dev_name, int aliasing_ok, int *err,
   if (!(dev=dev_get(dev_name)))
     return NULL;
   *sptr++=':';
-
+  
   /*
    * fetch slot number
    */
   
   slot = simple_strtoul(sptr,&eptr,10);
+  if (slot >= NET_ALIAS_MAX_SLOT)
+    return NULL;
 
   /*
    * if last char is '-', it is a deletion request
@@ -908,7 +829,7 @@ net_alias_dev_rehash(struct device *dev, struct sockaddr *sa)
    * new hash key. if same as old AND same type (family) return;
    */
   
-  n_hash = nat_hash_key(n_nat, alias_info->hash_tab_size, sa);
+  n_hash = nat_hash_key(n_nat, sa);
   if (n_hash == alias->hash && o_nat == n_nat )
     return 0;
 
@@ -984,7 +905,7 @@ int net_alias_types_getinfo(char *buffer, char **start, off_t offset, int length
   unsigned idx;
   len=sprintf(buffer,"type    name            n_attach\n");
   for (idx=0 ; idx < 16 ; idx++)
-    for (nat = net_alias_type_base[idx]; nat ; nat = nat->next)
+    for (nat = nat_base[idx]; nat ; nat = nat->next)
     {
       len += sprintf(buffer+len, "%-7d %-15s %-7d\n",
 		     nat->type, nat->name,nat->n_attach);
@@ -1106,9 +1027,7 @@ static __inline__ struct device *
 nat_addr_chk(struct net_alias_type *nat, struct net_alias_info *alias_info, struct sockaddr *sa, int flags_on, int flags_off)
 {
   struct net_alias *alias;
-  unsigned hsize = alias_info->hash_tab_size;
-  
-  for(alias = alias_info->hash_tab[nat_hash_key(nat,hsize,sa)];
+  for(alias = alias_info->hash_tab[nat_hash_key(nat,sa)];
       alias; alias = alias->next)
   {
     if (alias->dev.family != sa->sa_family) continue;
@@ -1133,9 +1052,7 @@ static __inline__ struct device *
 nat_addr_chk32(struct net_alias_type *nat, struct net_alias_info *alias_info, int family, __u32 addr32, int flags_on, int flags_off)
 {
   struct net_alias *alias;
-  unsigned hsize = alias_info->hash_tab_size;
-  
-  for (alias=alias_info->hash_tab[hash_key(hsize, addr32)];
+  for (alias=alias_info->hash_tab[HASH(addr32,family)];
        alias; alias=alias->next)
   {
     if (alias->dev.family != family) continue;
@@ -1209,7 +1126,7 @@ net_alias_dev_chk32(struct device *main_dev, int family, __u32 addr32,
  */
 
 struct device *
-net_alias_dev_rx(struct device *main_dev, struct sockaddr *sa_src, struct sockaddr *sa_dst)
+net_alias_dev_rcv_sel(struct device *main_dev, struct sockaddr *sa_src, struct sockaddr *sa_dst)
 {
   int family;
   struct net_alias_type *nat;
@@ -1249,10 +1166,7 @@ net_alias_dev_rx(struct device *main_dev, struct sockaddr *sa_src, struct sockad
 
     dev = nat_addr_chk(nat, alias_info, sa_dst, IFF_UP, 0);
 
-    if (dev != NULL) {
-            net_alias_inc_rx(dev->my_alias);
-            return dev;
-    }
+    if (dev != NULL) return dev;
   }
 
   /*
@@ -1267,29 +1181,24 @@ net_alias_dev_rx(struct device *main_dev, struct sockaddr *sa_src, struct sockad
   /*
    * dev ok only if it is alias of main_dev
    */
-
-  if (net_alias_is(dev)) {
-          struct net_alias *alias=dev->my_alias;
-          if (alias->main_dev == main_dev) {
-                  net_alias_inc_rx(alias);
-                  return dev;
-          }
-  }
   
+  dev = net_alias_is(dev)?
+    ( (dev->my_alias->main_dev == main_dev)? dev : NULL) : NULL;
+
   /*
    * do not return NULL.
    */
   
-  return main_dev;
+  return (dev)? dev : main_dev;
 
 }
 
 /*
- * dev_rx32: dev_rx selection for 'pa_addr' protocols.
+ * dev_rcv_sel32: dev_rcv_sel for 'pa_addr' protocols.
  */
 
 struct device *
-net_alias_dev_rx32(struct device *main_dev, int family, __u32 src, __u32 dst)
+net_alias_dev_rcv_sel32(struct device *main_dev, int family, __u32 src, __u32 dst)
 {
   struct net_alias_type *nat;
   struct net_alias_info *alias_info;
@@ -1327,10 +1236,7 @@ net_alias_dev_rx32(struct device *main_dev, int family, __u32 src, __u32 dst)
   if (dst)
   {
     dev = nat_addr_chk32(nat, alias_info, family, dst, IFF_UP, 0);
-    if (dev) {
-            net_alias_inc_rx(dev->my_alias);
-            return dev;
-    }
+    if (dev) return dev;
   }
   
   /*
@@ -1349,22 +1255,18 @@ net_alias_dev_rx32(struct device *main_dev, int family, __u32 src, __u32 dst)
   /*
    * dev ok only if it is alias of main_dev
    */
-
-  if (net_alias_is(dev)) {
-          struct net_alias *alias=dev->my_alias;
-          if (alias->main_dev == main_dev) {
-                  net_alias_inc_rx(alias);
-                  return dev;
-          }
-  }
+  
+  dev = net_alias_is(dev)?
+    ( (dev->my_alias->main_dev == main_dev)? dev : NULL) : NULL;
 
   /*
    * do not return NULL.
    */
   
-  return main_dev;
+  return (dev)? dev : main_dev;
   
 }
+
 
 /*
  * device event hook
@@ -1431,8 +1333,8 @@ int register_net_alias_type(struct net_alias_type *nat, int type)
   hash = nat->type & 0x0f;
   save_flags(flags);
   cli();
-  nat->next = net_alias_type_base[hash];
-  net_alias_type_base[hash] = nat;
+  nat->next = nat_base[hash];
+  nat_base[hash] = nat;
   restore_flags(flags);
   return 0;
 }
@@ -1464,7 +1366,7 @@ int unregister_net_alias_type(struct net_alias_type *nat)
   hash = nat->type & 0x0f;
   save_flags(flags);
   cli();
-  for (natp = &net_alias_type_base[hash]; *natp ; natp = &(*natp)->next)
+  for (natp = &nat_base[hash]; *natp ; natp = &(*natp)->next)
   {
     if (nat==(*natp))
     {
@@ -1478,26 +1380,3 @@ int unregister_net_alias_type(struct net_alias_type *nat)
   return -EINVAL;
 }
 
-/*
- *	Log sysctl's net_alias_max changes.
- */
-int proc_do_net_alias_max(ctl_table *ctl, int write, struct file *filp,
-			    void *buffer, size_t *lenp) 
-{
-        int old = sysctl_net_alias_max;
-        int ret;
-        
-        ret = proc_dointvec(ctl, write, filp, buffer, lenp);
-        if (write) {
-                if (sysctl_net_alias_max != old) {
-                        printk(KERN_INFO "sysctl: net_alias_max changed (max.aliases=%d, hashsize=%d).\n",
-                               sysctl_net_alias_max,
-                               NET_ALIAS_HASH_TAB_SIZE(sysctl_net_alias_max));
-                        if (!sysctl_net_alias_max)
-                                printk(KERN_INFO "sysctl: net_alias creation disabled.\n");
-                        if (!old)
-                                printk(KERN_INFO "sysctl: net_alias creation enabled.\n");
-                }
-        }
-        return ret; 
-}

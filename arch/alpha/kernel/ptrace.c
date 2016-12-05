@@ -197,7 +197,7 @@ repeat:
 	}
 	page = pte_page(*pgtable);
 /* this is a hack for non-kernel-mapped video buffers and similar */
-	if (page >= high_memory)
+	if (MAP_NR(page) >= max_mapnr)
 		return 0;
 	page += addr & ~PAGE_MASK;
 	return *(unsigned long *) page;
@@ -252,7 +252,7 @@ repeat:
 		goto repeat;
 	}
 /* this is a hack for non-kernel-mapped video buffers and similar */
-	if (page < high_memory)
+	if (MAP_NR(page) < max_mapnr)
 		*(unsigned long *) (page + (addr & ~PAGE_MASK)) = data;
 /* we're bypassing pagetables, so we have to set the dirty bit ourselves */
 /* this should also re-instate whatever read-only mode there was before */
@@ -641,7 +641,7 @@ asmlinkage void syscall_trace(void)
 		return;
 	current->exit_code = SIGTRAP;
 	current->state = TASK_STOPPED;
-	notify_parent(current, SIGCHLD);
+	notify_parent(current);
 	schedule();
 	/*
 	 * this isn't the same as continuing with a signal, but it will do

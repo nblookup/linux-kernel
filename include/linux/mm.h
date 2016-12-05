@@ -9,7 +9,8 @@
 
 #include <linux/string.h>
 
-extern unsigned long high_memory;
+extern unsigned long max_mapnr;
+extern void * high_memory;
 
 #include <asm/page.h>
 #include <asm/atomic.h>
@@ -275,13 +276,6 @@ extern void show_mem(void);
 extern void oom(struct task_struct * tsk);
 extern void si_meminfo(struct sysinfo * val);
 
-/* vmalloc.c */
-
-extern void * vmalloc(unsigned long size);
-extern void * vremap(unsigned long offset, unsigned long size);
-extern void vfree(void * addr);
-extern int vread(char *buf, char *addr, int count);
-
 /* mmap.c */
 extern unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	unsigned long prot, unsigned long flags, unsigned long off);
@@ -295,7 +289,7 @@ extern unsigned long get_unmapped_area(unsigned long, unsigned long);
 
 /* filemap.c */
 extern unsigned long page_unuse(unsigned long);
-extern int shrink_mmap(int, int, int);
+extern int shrink_mmap(int, int);
 extern void truncate_inode_pages(struct inode *, unsigned long);
 
 #define GFP_BUFFER	0x00
@@ -304,7 +298,6 @@ extern void truncate_inode_pages(struct inode *, unsigned long);
 #define GFP_KERNEL	0x03
 #define GFP_NOBUFFER	0x04
 #define GFP_NFS		0x05
-#define GFP_IO		0x06
 
 /* Flag - indicates that the buffer will be suitable for DMA.  Ignored on some
    platforms, used as appropriate on others */
@@ -320,12 +313,10 @@ static inline int expand_stack(struct vm_area_struct * vma, unsigned long addres
 	unsigned long grow;
 
 	address &= PAGE_MASK;
-	grow = vma->vm_start - address;
 	if (vma->vm_end - address
-	    > (unsigned long) current->rlim[RLIMIT_STACK].rlim_cur ||
-	    (vma->vm_mm->total_vm << PAGE_SHIFT) + grow
-	    > (unsigned long) current->rlim[RLIMIT_AS].rlim_cur)
+	    > (unsigned long) current->rlim[RLIMIT_STACK].rlim_cur)
 		return -ENOMEM;
+	grow = vma->vm_start - address;
 	vma->vm_start = address;
 	vma->vm_offset -= grow;
 	vma->vm_mm->total_vm += grow >> PAGE_SHIFT;

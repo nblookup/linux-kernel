@@ -8,11 +8,6 @@
  * 10 Apr 1996	Added silly rename for unlink	--okir
  */
 
-/*
- * Fixes:
- *    Ion Badulescu <ionut@cs.columbia.edu>     : FIFO's need special handling in NFSv2
- */
-
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/stat.h>
@@ -26,7 +21,7 @@
 #include <asm/segment.h>	/* for fs functions */
 
 static int nfs_dir_open(struct inode * inode, struct file * file);
-static int nfs_dir_read(struct inode *, struct file *, char *, int);
+static long nfs_dir_read(struct inode *, struct file *, char *, unsigned long);
 static int nfs_readdir(struct inode *, struct file *, void *, filldir_t);
 static int nfs_lookup(struct inode *, const char *, int, struct inode **);
 static int nfs_create(struct inode *, const char *, int, int, struct inode **);
@@ -98,8 +93,8 @@ static int nfs_dir_open(struct inode * dir, struct file * file)
 	return 0;
 }
 
-static int nfs_dir_read(struct inode *inode, struct file *filp, char *buf,
-			int count)
+static long nfs_dir_read(struct inode *inode, struct file *filp,
+	char *buf, unsigned long count)
 {
 	return -EISDIR;
 }
@@ -448,10 +443,7 @@ static int nfs_mknod(struct inode *dir, const char *name, int len,
 		iput(dir);
 		return -ENAMETOOLONG;
 	}
-	if (S_ISFIFO(mode))
-		sattr.mode = (mode & ~S_IFMT) | S_IFCHR;
-	else
-		sattr.mode = mode;
+	sattr.mode = mode;
 	sattr.uid = sattr.gid = (unsigned) -1;
 	if (S_ISCHR(mode) || S_ISBLK(mode))
 		sattr.size = rdev; /* get out your barf bag */
@@ -460,11 +452,6 @@ static int nfs_mknod(struct inode *dir, const char *name, int len,
 	sattr.atime.seconds = sattr.mtime.seconds = (unsigned) -1;
 	error = nfs_proc_create(NFS_SERVER(dir), NFS_FH(dir),
 		name, &sattr, &fhandle, &fattr);
-	if (error == -EINVAL && (S_ISFIFO(mode))) {
-		sattr.mode = mode;
-		error = nfs_proc_create(NFS_SERVER(dir), NFS_FH(dir),
-					name, &sattr, &fhandle, &fattr);
-	}
 	if (!error)
 	{
 		nfs_lookup_cache_add(dir, name, &fhandle, &fattr);
@@ -504,8 +491,6 @@ static int nfs_mkdir(struct inode *dir, const char *name, int len, int mode)
 			nfs_lookup_cache_add(dir, name, &fhandle, &fattr);
 	}
 	iput(dir);
-	/* The parent dir link count may have changed */
-	nfs_lookup_cache_remove( NULL, dir, NULL);
 	return error;
 }
 
@@ -566,13 +551,11 @@ void nfs_sillyrename_cleanup(struct inode *inode)
 	int		error, slen;
 
 	slen = sprintf(silly, ".nfs%ld", inode->i_ino);
-	error = nfs_proc_remove(NFS_SERVER(dir), NFS_FH(dir), silly);
-	nfs_lookup_cache_remove(dir, NULL, silly);
-	if (error < 0)
+	if ((error = nfs_unlink(dir, silly, slen)) < 0) {
 		printk("NFS silly_rename cleanup failed (err = %d)\n",
 					-error);
+	}
 	NFS_RENAMED_DIR(inode) = NULL;
-	iput(dir);
 }
 
 static int nfs_unlink(struct inode *dir, const char *name, int len)
@@ -650,7 +633,6 @@ static int nfs_link(struct inode *oldinode, struct inode *dir,
 		NFS_FH(dir), name);
 
 	nfs_lookup_cache_remove(dir, oldinode, NULL);
-	NFS_CACHEINV(oldinode);
 	iput(oldinode);
 	iput(dir);
 	return error;
@@ -710,17 +692,7 @@ void nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
 		return;
 	}
 	was_empty = (inode->i_mode == 0);
-	
-	/*
-	 * Some (broken?) NFS servers return 0 as the file type.
-	 * We'll assume that 0 means the file type has not changed.
-	 */
-	if(!(fattr->mode & S_IFMT)){
-		inode->i_mode = (inode->i_mode & S_IFMT) |
-				(fattr->mode & ~S_IFMT);
-	}else{
-		inode->i_mode = fattr->mode;
-	}
+	inode->i_mode = fattr->mode;
 	inode->i_nlink = fattr->nlink;
 	inode->i_uid = fattr->uid;
 	inode->i_gid = fattr->gid;

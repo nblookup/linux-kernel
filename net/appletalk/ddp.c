@@ -408,7 +408,6 @@ static int atif_probe_device(struct atalk_iface *atif)
 	 *	Scan the networks.
 	 */
 	 
-	atif->status |= ATIF_PROBE;
 	for(netct=0;netct<=netrange;netct++)
 	{
 		/*
@@ -436,10 +435,8 @@ static int atif_probe_device(struct atalk_iface *atif)
 					if(atif->status&ATIF_PROBE_FAIL)
 						break;
 				}
-				if(!(atif->status&ATIF_PROBE_FAIL)) {
-					atif->status &= ~ATIF_PROBE;
+				if(!(atif->status&ATIF_PROBE_FAIL))
 					return 0;
-				}
 			}
 			atif->status&=~ATIF_PROBE_FAIL;
 		}
@@ -447,7 +444,6 @@ static int atif_probe_device(struct atalk_iface *atif)
 		if(probe_net>ntohs(atif->nets.nr_lastnet))
 			probe_net=ntohs(atif->nets.nr_firstnet);
 	}
-	atif->status &= ~ATIF_PROBE;
 	return -EADDRINUSE;	/* Network is full... */
 }
 
@@ -513,7 +509,7 @@ static struct atalk_iface *atalk_find_interface(int net, int node)
 	struct atalk_iface *iface;
 	for(iface=atalk_iface_list;iface!=NULL;iface=iface->next)
 	{
-		if((node==ATADDR_BCAST || node==ATADDR_ANYNODE || iface->address.s_node==node) 
+		if((node==ATADDR_BCAST || iface->address.s_node==node) 
 			&& iface->address.s_net==net && !(iface->status&ATIF_PROBE))
 			return iface;
 	}
@@ -832,7 +828,7 @@ int atif_ioctl(int cmd, void *arg)
 			else 
 			{
 				limit=ntohs(nr->nr_lastnet);
-				if(limit-ntohs(nr->nr_firstnet) > 4096)
+				if(limit-ntohs(nr->nr_firstnet) > 256)
 				{
 					printk(KERN_WARNING "Too many routes/iface.\n");
 					return -EINVAL;
@@ -858,16 +854,6 @@ int atif_ioctl(int cmd, void *arg)
 			((struct sockaddr_at *)(&atreq.ifr_addr))->sat_addr.s_net=atif->address.s_net;
 			((struct sockaddr_at *)(&atreq.ifr_addr))->sat_addr.s_node=ATADDR_BCAST;
 			break;
-	        case SIOCATALKDIFADDR:
-			if(!suser())
-				return -EPERM;
-			if(sa->sat_family!=AF_APPLETALK)
-				return -EINVAL;
-			if(atif==NULL)
-				return -EADDRNOTAVAIL;
-			atrtr_device_down(atif->dev);
-			atif_drop_device(atif->dev);
-			break;			
 	}
 	memcpy_tofs(arg,&atreq,sizeof(atreq));
 	return 0;
@@ -1099,7 +1085,7 @@ static int atalk_getsockopt(struct socket *sock, int level, int optname,
 	err=verify_area(VERIFY_WRITE,optval,sizeof(int));
 	if (err) 
 		return err;
-	put_user(val,(int *)optval);
+	put_user(val,optval);
 	return(0);
 }
 
@@ -1158,7 +1144,6 @@ static int atalk_create(struct socket *sock, int protocol)
 	MOD_INC_USE_COUNT;
 
 	sk->no_check=0;		/* Checksums on by default */
-	sk->no_check=1;		/* Checksums off by default */
 	sk->allocation=GFP_KERNEL;
 	sk->rcvbuf=SK_RMEM_MAX;
 	sk->sndbuf=SK_WMEM_MAX;
@@ -1548,10 +1533,7 @@ static int atalk_rcv(struct sk_buff *skb, struct device *dev, struct packet_type
 	/* Which socket - atalk_search_socket() looks for a *full match*
 	   of the <net,node,port> tuple */
 	tosat.sat_addr.s_net = ddp->deh_dnet;
-	if (ddp->deh_dnode == ATADDR_ANYNODE)
-		tosat.sat_addr.s_node = atif->address.s_node;
-	else
-		tosat.sat_addr.s_node = ddp->deh_dnode;
+	tosat.sat_addr.s_node = ddp->deh_dnode;
 	tosat.sat_port = ddp->deh_dport;
 
 	sock=atalk_search_socket( &tosat, atif );
@@ -1639,67 +1621,6 @@ static int ltalk_rcv(struct sk_buff *skb, struct device *dev, struct packet_type
 	}
 	skb->h.raw = skb->data;
 	return atalk_rcv(skb,dev,pt);
-}
-
-
-/*
- *	This is slower, and copies the whole data area 
- */
- 
-static struct sk_buff *ddp_skb_copy(struct sk_buff *skb, int priority)
-{
-	struct sk_buff *n;
-	unsigned long offset;
-
-	/*
-	 *	Allocate the copy buffer
-	 */
-	 
-	IS_SKB(skb);
-	
-	n=alloc_skb(skb->truesize-sizeof(struct sk_buff),priority);
-	if(n==NULL)
-		return NULL;
-
-	/*
-	 *	Shift between the two data areas in bytes
-	 */
-	 
-	offset=n->head-skb->head;
-
-	/* Set the data pointer */
-	skb_reserve(n,skb->data-skb->head);
-	/* Set the tail pointer and length */
-	skb_put(n,skb->len);
-	/* Copy the bytes */
-	memcpy(n->head,skb->head,skb->end-skb->head);
-	n->link3=NULL;
-	n->list=NULL;
-	n->sk=NULL;
-	n->when=skb->when;
-	n->dev=skb->dev;
-	n->h.raw=skb->h.raw+offset;
-	n->mac.raw=skb->mac.raw+offset;
-	n->ip_hdr=(struct iphdr *)(((char *)skb->ip_hdr)+offset);
-	n->saddr=skb->saddr;
-	n->daddr=skb->daddr;
-	n->raddr=skb->raddr;
-	n->seq=skb->seq;
-	n->end_seq=skb->end_seq;
-	n->ack_seq=skb->ack_seq;
-	n->acked=skb->acked;
-	memcpy(n->proto_priv, skb->proto_priv, sizeof(skb->proto_priv));
-	n->used=skb->used;
-	n->free=1;
-	n->arp=skb->arp;
-	n->tries=0;
-	n->lock=0;
-	n->users=0;
-	n->pkt_type=skb->pkt_type;
-	n->stamp=skb->stamp;
-	
-	IS_SKB(n);
-	return n;
 }
 
 static int atalk_sendmsg(struct socket *sock, struct msghdr *msg, int len, int nonblock, int flags)
@@ -1842,27 +1763,16 @@ static int atalk_sendmsg(struct socket *sock, struct msghdr *msg, int len, int n
 	{
 		if((!(rt->flags&RTF_GATEWAY))&&(!(dev->flags&IFF_LOOPBACK)))
 		{
-		  struct sk_buff *skb2;
-
-		  /* Make a copy of the skbuf so that the loopback does not trash it
-		   * in the next block.
-		   * Added by Peter Skarpetis, Serendipity Software 24 June 1997
-		   */
-		  skb2 = ddp_skb_copy(skb, GFP_ATOMIC);
-		  if (skb2 == NULL) {
-			printk("ddp.c: cannot allocate skb copy buffer\n");
-			return -1;
-		  }
-		  
-		  if(skb2)
-		    {
-		      loopback=1;
-		      if(sk->debug)
-			printk("SK %p: send out(copy).\n", sk);
-		      if(aarp_send_ddp(dev, skb2, &usat->sat_addr, NULL)==-1)
-			kfree_skb(skb2, FREE_WRITE);
-		      /* else queued/sent above in the aarp queue */
-		    }
+			struct sk_buff *skb2=skb_clone(skb, GFP_KERNEL);
+			if(skb2)
+			{
+				loopback=1;
+				if(sk->debug)
+					printk("SK %p: send out(copy).\n", sk);
+				if(aarp_send_ddp(dev,skb2,&usat->sat_addr, NULL)==-1)
+					kfree_skb(skb2, FREE_WRITE);
+				/* else queued/sent above in the aarp queue */
+			}
 		}
 	}
 
@@ -2012,7 +1922,6 @@ static int atalk_ioctl(struct socket *sock,unsigned int cmd, unsigned long arg)
 		case SIOCGIFADDR:
 		case SIOCSIFADDR:
 		case SIOCGIFBRDADDR:
-		case SIOCATALKDIFADDR:		  
 			return atif_ioctl(cmd,(void *)arg);
 		/*
 		 *	Physical layer ioctl calls

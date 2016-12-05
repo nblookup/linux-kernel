@@ -19,7 +19,6 @@
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
 #include <linux/malloc.h>
-#include <linux/ldt.h>
 #include <linux/smp.h>
 
 #include <asm/segment.h>
@@ -86,7 +85,7 @@ static inline int dup_mmap(struct mm_struct * mm)
 	for (mpnt = current->mm->mmap ; mpnt ; mpnt = mpnt->vm_next) {
 		tmp = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
 		if (!tmp) {
-			/* exit_mmap is called by the caller */
+			exit_mmap(mm);
 			return -ENOMEM;
 		}
 		*tmp = *mpnt;
@@ -101,10 +100,7 @@ static inline int dup_mmap(struct mm_struct * mm)
 			tmp->vm_prev_share = mpnt;
 		}
 		if (copy_page_range(mm, current->mm, tmp)) {
-			/* link into the linked list for exit_mmap */
-			*p = tmp;
-			p = &tmp->vm_next;
-			/* exit_mmap is called by the caller */
+			exit_mmap(mm);
 			return -ENOMEM;
 		}
 		if (tmp->vm_ops && tmp->vm_ops->open)
@@ -113,7 +109,6 @@ static inline int dup_mmap(struct mm_struct * mm)
 		p = &tmp->vm_next;
 	}
 	build_mmap_avl(mm);
-	flush_tlb_mm(current->mm);
 	return 0;
 }
 
@@ -122,31 +117,20 @@ static inline int copy_mm(unsigned long clone_flags, struct task_struct * tsk)
 	if (!(clone_flags & CLONE_VM)) {
 		struct mm_struct * mm = kmalloc(sizeof(*tsk->mm), GFP_KERNEL);
 		if (!mm)
-			return -ENOMEM;
+			return -1;
 		*mm = *current->mm;
 		mm->count = 1;
 		mm->def_flags = 0;
-		mm->mmap_sem = MUTEX;
 		tsk->mm = mm;
 		tsk->min_flt = tsk->maj_flt = 0;
 		tsk->cmin_flt = tsk->cmaj_flt = 0;
 		tsk->nswap = tsk->cnswap = 0;
-		if (new_page_tables(tsk)) {
-			tsk->mm = NULL;
-			exit_mmap(mm);
-			goto free_mm;
-		}
-		down(&mm->mmap_sem);
+		if (new_page_tables(tsk))
+			return -1;
 		if (dup_mmap(mm)) {
-			up(&mm->mmap_sem);
-			tsk->mm = NULL;
-			exit_mmap(mm);
 			free_page_tables(mm);
-free_mm:
-			kfree(mm);
-			return -ENOMEM;
+			return -1;
 		}
-		up(&mm->mmap_sem);
 		return 0;
 	}
 	SET_PAGE_DIR(tsk, current->mm->pgd);
@@ -228,23 +212,10 @@ static inline int copy_sighand(unsigned long clone_flags, struct task_struct * t
 int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 {
 	int nr;
-	int error = -EINVAL;
+	int error = -ENOMEM;
 	unsigned long new_stack;
 	struct task_struct *p;
 
-/*
- * Disallow unknown clone(2) flags, as well as CLONE_PID, unless we are
- * the boot up thread.
- *
- * Avoid taking any branches in the common case.
- */
-	if (clone_flags &
-	    (-(signed long)current->pid >> (sizeof(long) * 8 - 1)) &
-	    ~(unsigned long)(CSIGNAL |
-	    CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND))
-		goto bad_fork;
-
-	error = -ENOMEM;
 	p = (struct task_struct *) kmalloc(sizeof(*p), GFP_KERNEL);
 	if (!p)
 		goto bad_fork;
@@ -277,13 +248,11 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 	p->p_cptr = NULL;
 	init_waitqueue(&p->wait_chldexit);
 	p->signal = 0;
-	p->priv = 0;
-	p->ppriv = current->priv;
 	p->it_real_value = p->it_virt_value = p->it_prof_value = 0;
 	p->it_real_incr = p->it_virt_incr = p->it_prof_incr = 0;
 	init_timer(&p->real_timer);
 	p->real_timer.data = (unsigned long) p;
-	p->leader = 0;		/* session leadership doesn't inherit */
+	p->leader = 0;		/* process leadership doesn't inherit */
 	p->tty_old_pgrp = 0;
 	p->utime = p->stime = 0;
 	p->cutime = p->cstime = 0;
@@ -312,7 +281,7 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 	/* ok, now we should be set up.. */
 	p->swappable = 1;
 	p->exit_signal = clone_flags & CSIGNAL;
-	p->counter = (current->counter >>= 1);
+	p->counter = current->counter >> 1;
 	wake_up_process(p);			/* do this last, just in case */
 	++total_forks;
 	return p->pid;

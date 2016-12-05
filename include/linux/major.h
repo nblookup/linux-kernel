@@ -8,8 +8,8 @@
 
 /* limits */
 
-#define MAX_CHRDEV 128
-#define MAX_BLKDEV 128
+#define MAX_CHRDEV 64
+#define MAX_BLKDEV 64
 
 #define UNNAMED_MAJOR	0
 #define MEM_MAJOR	1
@@ -65,27 +65,9 @@
 #define IDETAPE_MAJOR	37
 #define Z2RAM_MAJOR	37
 #define RISCOM8_NORMAL_MAJOR 48
-#define DAC960_MAJOR	48	/* 48..55 */
 #define RISCOM8_CALLOUT_MAJOR 49
-#define MKISS_MAJOR	55
-
-#define IDE4_MAJOR	56
-#define IDE5_MAJOR	57
-
 #define APBLOCK_MAJOR   60   /* AP1000 Block device */
 #define DDV_MAJOR       61   /* AP1000 DDV block device */
-
-#define COMPAQ_SMART2_MAJOR	72
-#define COMPAQ_SMART2_MAJOR1	73
-#define COMPAQ_SMART2_MAJOR2	74
-#define COMPAQ_SMART2_MAJOR3	75
-#define COMPAQ_SMART2_MAJOR4	76
-#define COMPAQ_SMART2_MAJOR5	77
-#define COMPAQ_SMART2_MAJOR6	78
-#define COMPAQ_SMART2_MAJOR7	79
-
-#define SPECIALIX_NORMAL_MAJOR 75
-#define SPECIALIX_CALLOUT_MAJOR 76
 
 /*
  * Tests for SCSI devices.

@@ -1,5 +1,5 @@
 /*
- *  linux/drivers/block/ide.c	Version 5.53  Jun  24, 1997
+ *  linux/drivers/block/ide.c	Version 5.52  Sep  24, 1996
  *
  *  Copyright (C) 1994-1996  Linus Torvalds & authors (see below)
  */
@@ -261,32 +261,6 @@
  *			change delay_10ms() to delay_50ms() to fix problems
  * Version 5.52		fix incorrect invalidation of removable devices
  *			add "hdx=slow" command line option
- * Version 5.53		add ATAPI floppy drive support
- *			change default media for type 0 to floppy
- *			add support for Exabyte Nest
- *			add missing set_blocksize() in revalidate_disk()
- *			handle bad status bit sequencing in ide_wait_stat()
- *			support partition table translations with 255 heads
- *			probe all interfaces by default
- *			add probe for the i82371AB chipset
- *			acknowledge media change on removable drives
- *			add work-around for BMI drives
- *			remove "LBA" from boot messages
- * Version 5.53.1	add UDMA "CRC retry" support
- * Version 5.53.2	add Promise/33 auto-detection and DMA support
- *			fix MC_ERR handling
- *			fix mis-detection of NEC cdrom as floppy
- *			issue ATAPI reset and re-probe after "no response"
- * Version 5.53.3	changes by Andrew D. Balsa to enable DMA mode 2 and
- *			UDMA on SiS and TX chipsets.
- * Version 5.53.4	moved Promise/33 auto-detection and DMA support
- *			to trition.c and added UDMA to current DMA support.
- *			update Promise Ultra33 and added AEC6210U/UF UDMA cards.
- *			add configuration flag to allow booting of either card.
- * Version 5.53.5	Fixed chipset identifiers.
- * Version 5.53.6	Added Aladdin IV/V M5229 chipset support.
- * Version 5.53.7	Added HPT343 basic support with everything at PIO 0.
- *			This is regardless of DMA capabilties.
  *
  *  Some additional driver compile-time options are in ide.h
  *
@@ -332,9 +306,9 @@
 #define IS_PROMISE_DRIVE (0)	/* auto-NULLs out Promise code */
 #endif /* CONFIG_BLK_DEV_PROMISE */
 
-static const byte	ide_hwif_to_major[MAX_HWIFS] = {IDE0_MAJOR, IDE1_MAJOR, IDE2_MAJOR, IDE3_MAJOR, IDE4_MAJOR, IDE5_MAJOR};
-static const unsigned short default_io_base[MAX_HWIFS] = {0x1f0, 0x170, 0x1e8, 0x168, 0x1e0, 0x160};
-static const byte	default_irqs[MAX_HWIFS]     = {14, 15, 11, 10, 8, 12};
+static const byte	ide_hwif_to_major[MAX_HWIFS] = {IDE0_MAJOR, IDE1_MAJOR, IDE2_MAJOR, IDE3_MAJOR};
+static const unsigned short default_io_base[MAX_HWIFS] = {0x1f0, 0x170, 0x1e8, 0x168};
+static const byte	default_irqs[MAX_HWIFS]     = {14, 15, 11, 10};
 static int	idebus_parameter; /* holds the "idebus=" parameter */
 static int	system_bus_speed; /* holds what we think is VESA/PCI bus speed */
 
@@ -393,6 +367,7 @@ static void init_hwif_data (unsigned int index)
 
 	/* fill in any non-zero initial values */
 	hwif->index     = index;
+	hwif->noprobe	= (index > 1);
 	hwif->io_base	= default_io_base[index];
 	hwif->ctl_port	= hwif->io_base ? hwif->io_base+0x206 : 0x000;
 #ifdef CONFIG_BLK_DEV_HD
@@ -561,29 +536,6 @@ void ide_output_data (ide_drive_t *drive, void *buffer, unsigned int wcount)
 }
 
 /*
- * The following routines are mainly used by the ATAPI drivers.
- *
- * These routines will round up any request for an odd number of bytes,
- * so if an odd bytecount is specified, be sure that there's at least one
- * extra byte allocated for the buffer.
- */
-void atapi_input_bytes (ide_drive_t *drive, void *buffer, unsigned int bytecount)
-{
-	++bytecount;
-	ide_input_data (drive, buffer, bytecount / 4);
-	if ((bytecount & 0x03) >= 2)
-		insw (IDE_DATA_REG, ((byte *)buffer) + (bytecount & ~0x03), 1);
-}
-
-void atapi_output_bytes (ide_drive_t *drive, void *buffer, unsigned int bytecount)
-{
-	++bytecount;
-	ide_output_data (drive, buffer, bytecount / 4);
-	if ((bytecount & 0x03) >= 2)
-		outsw (IDE_DATA_REG, ((byte *)buffer) + (bytecount & ~0x03), 1);
-}
-
-/*
  * This should get invoked any time we exit the driver to
  * wait for an interrupt response from a drive.  handler() points
  * at the appropriate code to handle the next interrupt, and a
@@ -610,25 +562,12 @@ void ide_set_handler (ide_drive_t *drive, ide_handler_t *handler, unsigned int t
  *
  * Returns:	1 if lba_capacity looks sensible
  *		0 otherwise
- *
- * Note: we must not change id->cyls here, otherwise a second call
- * of this routine might no longer find lba_capacity ok.
  */
 static int lba_capacity_is_ok (struct hd_driveid *id)
 {
 	unsigned long lba_sects   = id->lba_capacity;
 	unsigned long chs_sects   = id->cyls * id->heads * id->sectors;
 	unsigned long _10_percent = chs_sects / 10;
-
-	/*
-	 * The ATA spec tells large drives to return
-	 * C/H/S = 16383/16/63 independent of their size.
-	 * Some drives can be jumpered to use 15 heads instead of 16.
-	 */
-	if (id->cyls == 16383 && id->sectors == 63 &&
-	    (id->heads == 15 || id->heads == 16) &&
-	    id->lba_capacity >= 16383*63*id->heads)
-		return 1;	/* lba_capacity is our only option */
 
 	/* perform a rough sanity check on lba_sects:  within 10% is "okay" */
 	if ((lba_sects - chs_sects) < _10_percent)
@@ -646,26 +585,18 @@ static int lba_capacity_is_ok (struct hd_driveid *id)
 /*
  * current_capacity() returns the capacity (in sectors) of a drive
  * according to its current geometry/LBA settings.
- *
- * It also sets select.b.lba.
  */
 static unsigned long current_capacity (ide_drive_t  *drive)
 {
 	struct hd_driveid *id = drive->id;
-	unsigned long capacity;
+	unsigned long capacity = drive->cyl * drive->head * drive->sect;
 
 	if (!drive->present)
 		return 0;
-#ifdef CONFIG_BLK_DEV_IDEFLOPPY
-	if (drive->media == ide_floppy)
-		return idefloppy_capacity(drive);
-#endif /* CONFIG_BLK_DEV_IDEFLOPPY */
 	if (drive->media != ide_disk)
 		return 0x7fffffff;	/* cdrom or tape */
-
 	drive->select.b.lba = 0;
 	/* Determine capacity, and use LBA if the drive properly supports it */
-	capacity = drive->cyl * drive->head * drive->sect;
 	if (id != NULL && (id->capability & 2) && lba_capacity_is_ok(id)) {
 		if (id->lba_capacity >= capacity) {
 			capacity = id->lba_capacity;
@@ -694,14 +625,8 @@ static void ide_geninit (struct gendisk *gd)
 		if (drive->present && drive->media == ide_tape)
 			idetape_setup(drive);
 #endif /* CONFIG_BLK_DEV_IDETAPE */
-#ifdef CONFIG_BLK_DEV_IDEFLOPPY
-		if (drive->present && drive->media == ide_floppy)
-			idefloppy_setup(drive);
-#endif /* CONFIG_BLK_DEV_IDEFLOPPY */
 		drive->part[0].nr_sects = current_capacity(drive);
-		if (!drive->present
-		    || (drive->media != ide_disk && drive->media != ide_floppy)
-		    || !drive->part[0].nr_sects) {
+		if (!drive->present || drive->media != ide_disk) {
 			drive->part[0].start_sect = -1; /* skip partition check */
 		}
 	}
@@ -886,10 +811,6 @@ static void do_reset1 (ide_drive_t *drive, int  do_not_try_atapi)
 	 */
 	for (unit = 0; unit < MAX_DRIVES; ++unit) {
 		ide_drive_t *rdrive = &hwif->drives[unit];
-#ifdef CONFIG_BLK_DEV_IDETAPE
-		if (rdrive->media == ide_tape)
-			rdrive->tape.reset_issued = 1;
-#endif /* CONFIG_BLK_DEV_IDETAPE */
 		rdrive->special.all = 0;
 		rdrive->special.b.set_geometry = 1;
 		rdrive->special.b.recalibrate  = 1;
@@ -1002,7 +923,7 @@ byte ide_dump_status (ide_drive_t *drive, const char *msg, byte stat)
 #if FANCY_STATUS_DUMPS
 		if (drive->media == ide_disk) {
 			printk(" { ");
-			if (err & ICRC_ERR)	printk((err & ABRT_ERR) ? "BadCRC " : "BadSector ");
+			if (err & BBD_ERR)	printk("BadSector ");
 			if (err & ECC_ERR)	printk("UncorrectableError ");
 			if (err & ID_ERR)	printk("SectorIdNotFound ");
 			if (err & ABRT_ERR)	printk("DriveStatusError ");
@@ -1076,17 +997,10 @@ void ide_error (ide_drive_t *drive, const char *msg, byte stat)
 	} else {
 		if (drive->media == ide_disk && (stat & ERR_STAT)) {
 			/* err has different meaning on cdrom and tape */
-			if (err == ABRT_ERR) {
-				if (drive->select.b.lba && IN_BYTE(IDE_COMMAND_REG) == WIN_SPECIFY)
-					return;	/* some newer drives don't support WIN_SPECIFY */
-			} else if ((err & (ABRT_ERR | ICRC_ERR)) == (ABRT_ERR | ICRC_ERR))
-				; /* UDMA crc error -- just retry the operation */
-			else if (err & (BBD_ERR | ECC_ERR))	/* retries won't help these */
+			if (err & (BBD_ERR | ECC_ERR))	/* retries won't help these */
 				rq->errors = ERROR_MAX;
 			else if (err & TRK0_ERR)	/* help it find track zero */
 				rq->errors |= ERROR_RECAL;
-			else if (err & MC_ERR)
-				drive->special.b.mc = 1;
 		}
 		if ((stat & DRQ_STAT) && rq->cmd != WRITE)
 			try_to_flush_leftover_data(drive);
@@ -1099,20 +1013,9 @@ void ide_error (ide_drive_t *drive, const char *msg, byte stat)
 		if (drive->media == ide_tape) {
 			rq->errors = 0;
 			idetape_end_request(0, HWGROUP(drive));
-		} else
+		}
+		else
 #endif /* CONFIG_BLK_DEV_IDETAPE */
-#ifdef CONFIG_BLK_DEV_IDEFLOPPY
-		if (drive->media == ide_floppy) {
-			rq->errors = 0;
-			idefloppy_end_request(0, HWGROUP(drive));
-		} else
-#endif /* CONFIG_BLK_DEV_IDEFLOPPY */
-#ifdef CONFIG_BLK_DEV_IDESCSI
-		if (drive->media == ide_scsi) {
-			rq->errors = 0;
-			idescsi_end_request(0, HWGROUP(drive));
-		} else
-#endif /* CONFIG_BLK_DEV_IDESCSI */
  		ide_end_request(0, HWGROUP(drive));
 	}
 	else {
@@ -1323,19 +1226,6 @@ static void recal_intr (ide_drive_t *drive)
 }
 
 /*
- * mc_intr() is invoked on completion of a WIN_ACKMC cmd.
- */
-static void mc_intr (ide_drive_t *drive)
-{
-	byte stat = GET_STAT();
-
-	sti();
-	if (!OK_STAT(stat,READY_STAT,BAD_STAT))
-		ide_error(drive, "mc_intr", stat);
-	drive->special.b.mc = 0;
-}
-
-/*
  * drive_cmd_intr() is invoked on completion of a special DRIVE_CMD.
  */
 static void drive_cmd_intr (ide_drive_t *drive)
@@ -1371,7 +1261,7 @@ static inline void do_special (ide_drive_t *drive)
 #endif
 	if (s->b.set_geometry) {
 		s->b.set_geometry = 0;
-		if (drive->media == ide_disk && !drive->no_geom) {
+		if (drive->media == ide_disk) {
 			OUT_BYTE(drive->sect,IDE_SECTOR_REG);
 			OUT_BYTE(drive->cyl,IDE_LCYL_REG);
 			OUT_BYTE(drive->cyl>>8,IDE_HCYL_REG);
@@ -1397,10 +1287,6 @@ static inline void do_special (ide_drive_t *drive)
 				ide_cmd(drive, WIN_SETMULT, drive->mult_req, &set_multmode_intr);
 		} else
 			drive->mult_req = 0;
-	} else if (s->b.mc) {
-		s->b.mc = 0;
-		if (drive->media == ide_disk && !IS_PROMISE_DRIVE)
-			ide_cmd(drive, WIN_ACKMC, drive->sect, &mc_intr);
 	} else if (s->all) {
 		int special = s->all;
 		s->all = 0;
@@ -1424,24 +1310,27 @@ int ide_wait_stat (ide_drive_t *drive, byte good, byte bad, unsigned long timeou
 	byte stat;
 	unsigned long flags;
 
-	udelay(1);	/* spec allows drive 400ns to assert "BUSY" */
-	if ((stat = GET_STAT()) & BUSY_STAT) {
-		save_flags(flags);
-		sti();
-		timeout += jiffies;
-		while ((stat = GET_STAT()) & BUSY_STAT) {
-			if (jiffies > timeout) {
-				restore_flags(flags);
-				ide_error(drive, "status timeout", stat);
-				return 1;
-			}
-		}
-		restore_flags(flags);
-	}
-	udelay(1);	/* allow status to settle, then read it again */
+test:
+	udelay(1);	/* spec allows drive 400ns to change "BUSY" */
 	if (OK_STAT((stat = GET_STAT()), good, bad))
-		return 0;
-	ide_error(drive, "status error", stat);
+		return 0;	/* fast exit for most frequent case */
+	if (!(stat & BUSY_STAT)) {
+		ide_error(drive, "status error", stat);
+		return 1;
+	}
+
+	save_flags(flags);
+	sti();
+	timeout += jiffies;
+	do {
+		if (!((stat = GET_STAT()) & BUSY_STAT)) {
+			restore_flags(flags);
+			goto test;
+		}
+	} while (jiffies <= timeout);
+
+	restore_flags(flags);
+	ide_error(drive, "status timeout", GET_STAT());
 	return 1;
 }
 
@@ -1600,16 +1489,11 @@ static inline void do_request (ide_hwif_t *hwif, struct request *rq)
 		goto kill_rq;
 	}
 	block += drive->part[minor&PARTN_MASK].start_sect + drive->sect0;
-
 #if FAKE_FDISK_FOR_EZDRIVE
-	/* Yecch - this will shift the entire interval,
-	   possibly killing some innocent following sector */
 	if (block == 0 && drive->remap_0_to_1)
 		block = 1;  /* redirect MBR access to EZ-Drive partn table */
 #endif /* FAKE_FDISK_FOR_EZDRIVE */
-
 	((ide_hwgroup_t *)hwif->hwgroup)->drive = drive;
-
 #if (DISK_RECOVERY_TIME > 0)
 	while ((read_timer() - hwif->last_time) < DISK_RECOVERY_TIME);
 #endif
@@ -1644,16 +1528,6 @@ static inline void do_request (ide_hwif_t *hwif, struct request *rq)
 				idetape_do_request (drive, rq, block);
 				return;
 #endif /* CONFIG_BLK_DEV_IDETAPE */
-#ifdef CONFIG_BLK_DEV_IDEFLOPPY
-			case ide_floppy:
-				idefloppy_do_request (drive, rq, block);
-				return;
-#endif /* CONFIG_BLK_DEV_IDEFLOPPY */
-#ifdef CONFIG_BLK_DEV_IDESCSI
-			case ide_scsi:
-				idescsi_do_request (drive, rq, block);
-				return;
-#endif /* CONFIG_BLK_DEV_IDESCSI */
 
 			default:
 				printk("%s: media type %d not supported\n",
@@ -1663,7 +1537,7 @@ static inline void do_request (ide_hwif_t *hwif, struct request *rq)
 #else
 		do_rw_disk (drive, rq, block); /* simpler and faster */
 		return;
-#endif /* CONFIG_BLK_DEV_IDEATAPI */
+#endif /* CONFIG_BLK_DEV_IDEATAPI */;
 	}
 	do_special(drive);
 	return;
@@ -1710,7 +1584,6 @@ void ide_do_request (ide_hwgroup_t *hwgroup)
 				if (rq != NULL && rq->rq_status != RQ_INACTIVE)
 					goto got_rq;
 			} while ((hwif = hwif->next) != hwgroup->next_hwif);
-			hwgroup->active = 0;
 			return;		/* no work left for this hwgroup */
 		}
 	got_rq:	
@@ -1735,7 +1608,6 @@ static void do_hwgroup_request (ide_hwgroup_t *hwgroup)
 	if (hwgroup->handler == NULL) {
 		ide_hwif_t *hgif = hwgroup->hwif;
 		ide_hwif_t *hwif = hgif;
-		hwgroup->active = 1;
 		do {
 			disable_irq(hwif->irq);
 		} while ((hwif = hwif->next) != hgif);
@@ -1769,20 +1641,6 @@ static void do_ide2_request (void)	/* invoked with cli() */
 static void do_ide3_request (void)	/* invoked with cli() */
 {
 	do_hwgroup_request (ide_hwifs[3].hwgroup);
-}
-#endif
-
-#if MAX_HWIFS > 4
-static void do_ide4_request (void)	/* invoked with cli() */
-{
-	do_hwgroup_request (ide_hwifs[4].hwgroup);
-}
-#endif
-
-#if MAX_HWIFS > 5
-static void do_ide5_request (void)	/* invoked with cli() */
-{
-	do_hwgroup_request (ide_hwifs[5].hwgroup);
 }
 #endif
 
@@ -1949,9 +1807,9 @@ void ide_init_drive_cmd (struct request *rq)
  * This function issues a special IDE device request
  * onto the request queue.
  *
- * If action is ide_wait, then the rq is queued at the end of the
- * request queue, and the function sleeps until it has been processed.
- * This is for use when invoked from an ioctl handler.
+ * If action is ide_wait, then then rq is queued at the end of
+ * the request queue, and the function sleeps until it has been
+ * processed.  This is for use when invoked from an ioctl handler.
  *
  * If action is ide_preempt, then the rq is queued at the head of
  * the request queue, displacing the currently-being-processed
@@ -1997,8 +1855,13 @@ int ide_do_drive_cmd (ide_drive_t *drive, struct request *rq, ide_action_t actio
 	if (cur_rq == NULL || action == ide_preempt) {
 		rq->next = cur_rq;
 		bdev->current_request = rq;
-		if (action == ide_preempt)
+		if (action == ide_preempt) {
 			HWGROUP(drive)->rq = NULL;
+		} else
+		if (HWGROUP(drive)->rq == NULL) {  /* is this necessary (?) */
+			bdev->request_fn();
+			cli();
+		}
 	} else {
 		if (action == ide_wait || action == ide_end) {
 			while (cur_rq->next != NULL)	/* find end of list */
@@ -2006,10 +1869,6 @@ int ide_do_drive_cmd (ide_drive_t *drive, struct request *rq, ide_action_t actio
 		}
 		rq->next = cur_rq->next;
 		cur_rq->next = rq;
-	}
-	if (!HWGROUP(drive)->active) {
-		do_hwgroup_request(HWGROUP(drive));
-		cli();
 	}
 	if (action == ide_wait  && rq->rq_status != RQ_INACTIVE)
 		down(&sem);	/* wait for it to be serviced */
@@ -2038,14 +1897,6 @@ static int ide_open(struct inode * inode, struct file * filp)
 	if (drive->media == ide_tape)
 		return idetape_blkdev_open (inode, filp, drive);
 #endif	/* CONFIG_BLK_DEV_IDETAPE */
-#ifdef CONFIG_BLK_DEV_IDEFLOPPY
-	if (drive->media == ide_floppy)
-		return idefloppy_open (inode, filp, drive);
-#endif	/* CONFIG_BLK_DEV_IDEFLOPPY */
-#ifdef CONFIG_BLK_DEV_IDESCSI
-	if (drive->media == ide_scsi)
-		return idescsi_open (inode, filp, drive);
-#endif	/* CONFIG_BLK_DEV_IDESCSI */
 	if (drive->removable && drive->usage == 1) {
 		byte door_lock[] = {WIN_DOORLOCK,0,0,0};
 		struct request rq;
@@ -2085,18 +1936,6 @@ static void ide_release(struct inode * inode, struct file * file)
 			return;
 		}
 #endif	/* CONFIG_BLK_DEV_IDETAPE */
-#ifdef CONFIG_BLK_DEV_IDEFLOPPY
-		if (drive->media == ide_floppy) {
-			idefloppy_release (inode, file, drive);
-			return;
-		}
-#endif	/* CONFIG_BLK_DEV_IDEFLOPPY */
-#ifdef CONFIG_BLK_DEV_IDESCSI
-		if (drive->media == ide_scsi) {
-			idescsi_ide_release (inode, file, drive);
-			return;
-		}
-#endif	/* CONFIG_BLK_DEV_IDESCSI */
 		if (drive->removable && !drive->usage) {
 			byte door_unlock[] = {WIN_DOORUNLOCK,0,0,0};
 			struct request rq;
@@ -2142,15 +1981,13 @@ static int revalidate_disk(kdev_t i_rdev)
 			fsync_dev          (devp);
 			invalidate_inodes  (devp);
 			invalidate_buffers (devp);
-			set_blocksize(devp, 1024);
 		}
 		drive->part[p].start_sect = 0;
 		drive->part[p].nr_sects   = 0;
 	};
 
 	drive->part[0].nr_sects = current_capacity(drive);
-	if ((drive->media != ide_disk && drive->media != ide_floppy)
-	    || !drive->part[0].nr_sects)
+	if (drive->media != ide_disk)
 		drive->part[0].start_sect = -1;
 	resetup_one_dev(HWIF(drive)->gd, drive->select.b.unit);
 
@@ -2188,7 +2025,7 @@ static int ide_ioctl (struct inode *inode, struct file *file,
 		case HDIO_GETGEO:
 		{
 			struct hd_geometry *loc = (struct hd_geometry *) arg;
-			if (!loc || (drive->media != ide_disk && drive->media != ide_floppy)) return -EINVAL;
+			if (!loc || drive->media != ide_disk) return -EINVAL;
 			err = verify_area(VERIFY_WRITE, loc, sizeof(*loc));
 			if (err) return err;
 			put_user(drive->bios_head, (byte *) &loc->heads);
@@ -2234,18 +2071,17 @@ static int ide_ioctl (struct inode *inode, struct file *file,
 		case HDIO_GET_MULTCOUNT:
 			return write_fs_long(arg, drive->mult_count);
 
-		case HDIO_OBSOLETE_IDENTITY:
 		case HDIO_GET_IDENTITY:
 			if (!arg || (MINOR(inode->i_rdev) & PARTN_MASK))
 				return -EINVAL;
 			if (drive->id == NULL)
 				return -ENOMSG;
-			err = verify_area(VERIFY_WRITE, (char *)arg, (cmd == HDIO_GET_IDENTITY) ? sizeof(*drive->id) : 142);
+			err = verify_area(VERIFY_WRITE, (char *)arg, sizeof(*drive->id));
 			if (!err)
-				memcpy_tofs((char *)arg, (char *)drive->id, (cmd == HDIO_GET_IDENTITY) ? sizeof(*drive->id) : 142);
+				memcpy_tofs((char *)arg, (char *)drive->id, sizeof(*drive->id));
 			return err;
 
-		case HDIO_GET_NOWERR:
+			case HDIO_GET_NOWERR:
 			return write_fs_long(arg, drive->bad_wstat == BAD_R_STAT);
 
 		case HDIO_SET_DMA:
@@ -2329,7 +2165,7 @@ static int ide_ioctl (struct inode *inode, struct file *file,
 		{
 			byte args[4], *argbuf = args;
 			int argsize = 4;
-			if (!suser() || securelevel > 0) return -EACCES;
+			if (!suser()) return -EACCES;
 			if (NULL == (void *) arg) {
 				err = ide_do_drive_cmd(drive, &rq, ide_wait);
 			} else if (!(err = verify_area(VERIFY_READ,(void *)arg, 4))) {
@@ -2345,18 +2181,10 @@ static int ide_ioctl (struct inode *inode, struct file *file,
 					argbuf[3] = args[3];
 				}
 				if (!(err = verify_area(VERIFY_WRITE,(void *)arg, argsize))) {
-					if ((args[0] == WIN_SETFEATURES) &&
-					    (args[1] > 66) &&
-					    (args[2] == 3) &&
-					    ((drive->id->word93 & 0x2000) == 0)) {
-						printk("%s: Speed warnings UDMA 3/4 is not functional.\n", drive->name);
-						goto abort_speed;
-					}
 					rq.buffer = argbuf;
 					err = ide_do_drive_cmd(drive, &rq, ide_wait);
 					memcpy_tofs((void *)arg, argbuf, argsize);
 				}
-abort_speed:
 				if (argsize > 4)
 					kfree(argbuf);
 			}
@@ -2391,14 +2219,6 @@ abort_speed:
 			if (drive->media == ide_tape)
 				return idetape_blkdev_ioctl(drive, inode, file, cmd, arg);
 #endif /* CONFIG_BLK_DEV_IDETAPE */
-#ifdef CONFIG_BLK_DEV_IDEFLOPPY
-			if (drive->media == ide_floppy)
-				return idefloppy_ioctl(drive, inode, file, cmd, arg);
-#endif /* CONFIG_BLK_DEV_IDEFLOPPY */
-#ifdef CONFIG_BLK_DEV_IDESCSI
-			if (drive->media == ide_scsi)
-				return idescsi_ioctl(drive, inode, file, cmd, arg);
-#endif /* CONFIG_BLK_DEV_IDESCSI */
 			return -EPERM;
 	}
 }
@@ -2413,10 +2233,6 @@ static int ide_check_media_change (kdev_t i_rdev)
 	if (drive->media == ide_cdrom)
 		return ide_cdrom_check_media_change (drive);
 #endif	/* CONFIG_BLK_DEV_IDECD */
-#ifdef CONFIG_BLK_DEV_IDEFLOPPY
-	if (drive->media == ide_floppy)
-		return idefloppy_media_change (drive);
-#endif	/* CONFIG_BLK_DEV_IDEFLOPPY */
 	if (drive->removable) /* for disks */
 		return 1;	/* always assume it was changed */
 	return 0;
@@ -2456,13 +2272,11 @@ static inline void do_identify (ide_drive_t *drive, byte cmd)
 	unsigned long capacity, check;
 
 	id = drive->id = kmalloc (SECTOR_WORDS*4, GFP_KERNEL);
-	ide_input_data(drive, id, SECTOR_WORDS);/* read 512 bytes of id info */
+	ide_input_data(drive, id, SECTOR_WORDS);	/* read 512 bytes of id info */
 	sti();
 
-#if defined (CONFIG_SCSI_EATA_DMA) || defined (CONFIG_SCSI_EATA_PIO) || defined (CONFIG_SCSI_EATA)
 	/*
-	 * EATA SCSI controllers do a hardware ATA emulation:  
-	 * Ignore them if there is a driver for them available.
+	 * EATA SCSI controllers do a hardware ATA emulation:  ignore them
 	 */
 	if ((id->model[0] == 'P' && id->model[1] == 'M')
 	 || (id->model[0] == 'S' && id->model[1] == 'K')) {
@@ -2470,7 +2284,6 @@ static inline void do_identify (ide_drive_t *drive, byte cmd)
 		drive->present = 0;
 		return;
 	}
-#endif
 
 	/*
 	 *  WIN_IDENTIFY returns little-endian info,
@@ -2487,9 +2300,6 @@ static inline void do_identify (ide_drive_t *drive, byte cmd)
 	ide_fixstring (id->fw_rev,    sizeof(id->fw_rev),    bswap);
 	ide_fixstring (id->serial_no, sizeof(id->serial_no), bswap);
 
-	if (strstr(id->model, "E X A B Y T E N E S T"))
-		return;
-
 #ifdef CONFIG_BLK_DEV_IDEATAPI
 	/*
 	 * Check for an ATAPI device
@@ -2504,23 +2314,8 @@ static inline void do_identify (ide_drive_t *drive, byte cmd)
 			return;
 		}
 #endif /* CONFIG_BLK_DEV_PROMISE */
-		if (!drive->ide_scsi) switch (type) {
-			case 0:
-				if (!strstr(id->model, "oppy") && !strstr(id->model, "poyp") && !strstr(id->model, "ZIP"))
-					printk("cdrom or floppy?, assuming ");
-				if (drive->media != ide_cdrom && !strstr(id->model, "CD-ROM")) {
-#ifdef CONFIG_BLK_DEV_IDEFLOPPY
-					printk("FLOPPY drive\n");
-					drive->media = ide_floppy;
-					if (idefloppy_identify_device(drive, id))
-						drive->present = 1;
-					return;
-#else
-					printk("FLOPPY ");
-					break;
-#endif /* CONFIG_BLK_DEV_IDEFLOPPY */
-				}
-				/* Early cdrom models used zero */
+		switch (type) {
+			case 0:		/* Early cdrom models used zero */
 			case 5:
 #ifdef CONFIG_BLK_DEV_IDECD
 				printk ("CDROM drive\n");
@@ -2559,15 +2354,8 @@ static inline void do_identify (ide_drive_t *drive, byte cmd)
 				printk("Type %d - Unknown device\n", type);
 				return;
 		}
-#ifdef CONFIG_BLK_DEV_IDESCSI
-		printk("drive - enabling SCSI emulation\n");
-		drive->media = ide_scsi;
-		drive->present = 1;
-		idescsi_setup(drive);
-#else
 		drive->present = 0;
 		printk("- not supported by this kernel\n");
-#endif /* CONFIG_BLK_DEV_IDESCSI */
 		return;
 	}
 #endif /* CONFIG_BLK_DEV_IDEATAPI */
@@ -2586,9 +2374,8 @@ static inline void do_identify (ide_drive_t *drive, byte cmd)
 		    return;
 		}
 	}
-
+	
 	drive->media = ide_disk;
-
 	/* Extract geometry if we did not already have one for the drive */
 	if (!drive->present) {
 		drive->present = 1;
@@ -2598,7 +2385,8 @@ static inline void do_identify (ide_drive_t *drive, byte cmd)
 	}
 	/* Handle logical geometry translation by the drive */
 	if ((id->field_valid & 1) && id->cur_cyls && id->cur_heads
-	    && (id->cur_heads <= 16) && id->cur_sectors) {
+	 && (id->cur_heads <= 16) && id->cur_sectors)
+	{
 		/*
 		 * Extract the physical drive geometry for our use.
 		 * Note that we purposely do *not* update the bios info.
@@ -2623,76 +2411,35 @@ static inline void do_identify (ide_drive_t *drive, byte cmd)
 		}
 	}
 	/* Use physical geometry if what we have still makes no sense */
-	if ((!drive->head || drive->head > 16) &&
-	    id->heads && id->heads <= 16) {
+	if ((!drive->head || drive->head > 16) && id->heads && id->heads <= 16) {
 		drive->cyl  = id->cyls;
 		drive->head = id->heads;
 		drive->sect = id->sectors;
 	}
-
-	/* calculate drive capacity, and select LBA if possible */
-	capacity = current_capacity (drive);
-
-	/*
-	 * if possible, give fdisk access to more of the drive,
-	 * by correcting bios_cyls:
-	 */
-	if (capacity > drive->bios_cyl * drive->bios_head * drive->bios_sect
-	    && !drive->forced_geom && drive->bios_sect && drive->bios_head) {
-		int cyl = (capacity / drive->bios_sect) / drive->bios_head;
-		if (cyl <= 65535)
-			drive->bios_cyl = cyl;
-		else {
-			/* OK until 539 GB */
-			drive->bios_sect = 63;
-			drive->bios_head = 255;
-			drive->bios_cyl = capacity / (63*255);
-		}
+	/* Correct the number of cyls if the bios value is too small */
+	if (drive->sect == drive->bios_sect && drive->head == drive->bios_head) {
+		if (drive->cyl > drive->bios_cyl)
+			drive->bios_cyl = drive->cyl;
 	}
 
-	if (!strncmp(id->model, "BMI ", 4) &&
-	    strstr(id->model, " ENHANCED IDE ") &&
-	    drive->select.b.lba)
-		drive->no_geom = 1;
+	(void) current_capacity (drive); /* initialize LBA selection */
+
+	printk ("%s: %.40s, %ldMB w/%dkB Cache, %sCHS=%d/%d/%d",
+	 drive->name, id->model, current_capacity(drive)/2048L, id->buf_size/2,
+	 drive->select.b.lba ? "LBA, " : "",
+	 drive->bios_cyl, drive->bios_head, drive->bios_sect);
 
 	drive->mult_count = 0;
 	if (id->max_multsect) {
-#ifdef CONFIG_IDEDISK_MULTI_MODE
-		id->multsect = ((id->max_multsect/2) > 1) ? id->max_multsect : 0;
-		id->multsect_valid = id->multsect ? 1 : 0;
-		drive->mult_req = id->multsect_valid ? id->max_multsect : INITIAL_MULT_COUNT;
-		drive->special.b.set_multmode = drive->mult_req ? 1 : 0;
-#else	/* original, pre IDE-NFG, per request of AC */
 		drive->mult_req = INITIAL_MULT_COUNT;
 		if (drive->mult_req > id->max_multsect)
 			drive->mult_req = id->max_multsect;
 		if (drive->mult_req || ((id->multsect_valid & 1) && id->multsect))
 			drive->special.b.set_multmode = 1;
-#endif
 	}
-
-	drive->no_io_32bit = id->dword_io ? 1 : 0;
-
 	if (drive->autotune != 2 && HWIF(drive)->dmaproc != NULL) {
-		(void) HWIF(drive)->dmaproc(ide_dma_check, drive);
-	}
-
-	printk ("%s: %.40s, %ldMB w/%dkB Cache, CHS=%d/%d/%d",
-		drive->name, id->model,
-		capacity/2048L, id->buf_size/2,
-		drive->bios_cyl, drive->bios_head, drive->bios_sect);
-	if (drive->using_dma) {
-		if ((id->field_valid & 4) && (id->word93 & 0x2000) &&
-		    (id->dma_ultra & (id->dma_ultra >>  11) & 3)) {
-			printk(", UDMA(66)");	/* UDMA BIOS-enabled! */
-		} else if ((id->field_valid & 4) &&
-			   (id->dma_ultra & (id->dma_ultra >> 8) & 7)) {
-			printk(", UDMA(33)");	/* UDMA BIOS-enabled! */
-		} else if (id->field_valid & 4) {
-			printk(", (U)DMA");	/* Can be BIOS-enabled! */
-		} else {
+		if (!(HWIF(drive)->dmaproc(ide_dma_check, drive)))
 			printk(", DMA");
-		}
 	}
 	printk("\n");
 }
@@ -2722,12 +2469,11 @@ static int try_to_identify (ide_drive_t *drive, byte cmd)
 {
 	int hd_status, rc;
 	unsigned long timeout;
-	unsigned long irqs_on = 0;
-	int irq_off;
+	int irqs = 0;
 
 	if (!HWIF(drive)->irq) {		/* already got an IRQ? */
 		probe_irq_off(probe_irq_on());	/* clear dangling irqs */
-		irqs_on = probe_irq_on();	/* start monitoring irqs */
+		irqs = probe_irq_on();		/* start monitoring irqs */
 		OUT_BYTE(drive->ctl,IDE_CONTROL_REG);	/* enable device irq */
 	}
 
@@ -2738,15 +2484,11 @@ static int try_to_identify (ide_drive_t *drive, byte cmd)
 	} else
 		hd_status = IDE_ALTSTATUS_REG;	/* use non-intrusive polling */
 
-	/* set features register for atapi identify command */
-	if ((cmd == WIN_PIDENTIFY))
-		OUT_BYTE(0,IDE_FEATURE_REG); /* disable dma & overlap mode */
-
 #if CONFIG_BLK_DEV_PROMISE
 	if (IS_PROMISE_DRIVE) {
 		if (promise_cmd(drive,PROMISE_IDENTIFY)) {
-			if (irqs_on)
-				(void) probe_irq_off(irqs_on);
+			if (irqs)
+				(void) probe_irq_off(irqs);
 			return 1;
 		}
 	} else
@@ -2756,8 +2498,8 @@ static int try_to_identify (ide_drive_t *drive, byte cmd)
 	timeout += jiffies;
 	do {
 		if (jiffies > timeout) {
-			if (irqs_on)
-				(void) probe_irq_off(irqs_on);
+			if (irqs)
+				(void) probe_irq_off(irqs);
 			return 1;	/* drive timed-out */
 		}
 		delay_50ms();		/* give drive a breather */
@@ -2775,18 +2517,18 @@ static int try_to_identify (ide_drive_t *drive, byte cmd)
 	} else
 		rc = 2;			/* drive refused ID */
 	if (!HWIF(drive)->irq) {
-		irq_off = probe_irq_off(irqs_on);	/* get our irq number */
-		if (irq_off > 0) {
-			HWIF(drive)->irq = irq_off; /* save it for later */
-			irqs_on = probe_irq_on();
+		irqs = probe_irq_off(irqs);	/* get our irq number */
+		if (irqs > 0) {
+			HWIF(drive)->irq = irqs; /* save it for later */
+			irqs = probe_irq_on();
 			OUT_BYTE(drive->ctl|2,IDE_CONTROL_REG); /* mask device irq */
 			udelay(5);
-			(void) probe_irq_off(irqs_on);
+			(void) probe_irq_off(irqs);
 			(void) probe_irq_off(probe_irq_on()); /* clear self-inflicted irq */
 			(void) GET_STAT();	/* clear drive IRQ */
 
 		} else {	/* Mmmm.. multiple IRQs.. don't know which was ours */
-			printk("%s: IRQ probe failed (%d)\n", drive->name, irq_off);
+			printk("%s: IRQ probe failed (%d)\n", drive->name, irqs);
 #ifdef CONFIG_BLK_DEV_CMD640
 #ifdef CMD640_DUMP_REGS
 			if (HWIF(drive)->chipset == ide_cmd640) {
@@ -2820,7 +2562,6 @@ static int do_probe (ide_drive_t *drive, byte cmd)
 {
 	int rc;
 	ide_hwif_t *hwif = HWIF(drive);
-	unsigned long timeout;
 #ifdef CONFIG_BLK_DEV_IDEATAPI
 	if (drive->present) {	/* avoid waiting for inappropriate probes */
 		if ((drive->media != ide_disk) && (cmd == WIN_IDENTIFY))
@@ -2845,17 +2586,6 @@ static int do_probe (ide_drive_t *drive, byte cmd)
 	{
 		if ((rc = try_to_identify(drive,cmd)))   /* send cmd and wait */
 			rc = try_to_identify(drive,cmd); /* failed: try again */
-		if (rc == 1 && cmd == WIN_PIDENTIFY && drive->autotune != 2) {
-			printk("%s: no response (status = 0x%02x), resetting drive\n", drive->name, GET_STAT());
-			delay_50ms();
-			OUT_BYTE (drive->select.all, IDE_SELECT_REG);
-			delay_50ms();
-			OUT_BYTE(WIN_SRST, IDE_COMMAND_REG);
-			timeout = jiffies;
-			while ((GET_STAT() & BUSY_STAT) && jiffies < timeout + WAIT_WORSTCASE)
-				delay_50ms();
-			rc = try_to_identify(drive, cmd);
-		}
 		if (rc == 1)
 			printk("%s: no response (status = 0x%02x)\n", drive->name, GET_STAT());
 		(void) GET_STAT();		/* ensure drive irq is clear */
@@ -2868,34 +2598,6 @@ static int do_probe (ide_drive_t *drive, byte cmd)
 		(void) GET_STAT();		/* ensure drive irq is clear */
 	}
 	return rc;
-}
-
-static void enable_nest (ide_drive_t *drive)
-{
-	unsigned long timeout;
-
-	printk("%s: enabling %s -- ", HWIF(drive)->name, drive->id->model);
-	SELECT_DRIVE(HWIF(drive), drive);
-	delay_50ms();
-	OUT_BYTE(EXABYTE_ENABLE_NEST, IDE_COMMAND_REG);
-	timeout = jiffies + WAIT_WORSTCASE;
-	do {
-		if (jiffies > timeout) {
-			printk("failed (timeout)\n");
-			return;
-		}
-		delay_50ms();
-	} while (GET_STAT() & BUSY_STAT);
-	delay_50ms();
-	if (!OK_STAT(GET_STAT(), 0, BAD_STAT))
-		printk("failed (status = 0x%02x)\n", GET_STAT());
-	else
-		printk("success\n");
-	if (do_probe(drive, WIN_IDENTIFY) >= 2) { /* if !(success||timed-out) */
-#ifdef CONFIG_BLK_DEV_IDEATAPI
-		(void) do_probe(drive, WIN_PIDENTIFY); /* look for ATAPI device */
-#endif	/* CONFIG_BLK_DEV_IDEATAPI */
-	}
 }
 
 /*
@@ -2913,8 +2615,6 @@ static inline byte probe_for_drive (ide_drive_t *drive)
 		(void) do_probe(drive, WIN_PIDENTIFY); /* look for ATAPI device */
 #endif	/* CONFIG_BLK_DEV_IDEATAPI */
 	}
-	if (drive->id && strstr(drive->id->model, "E X A B Y T E N E S T"))
-		enable_nest(drive);
 	if (!drive->present)
 		return 0;			/* drive not found */
 	if (drive->id == NULL) {		/* identification failed? */
@@ -2955,12 +2655,6 @@ static inline byte probe_for_drive (ide_drive_t *drive)
  * The only "perfect" way to handle this would be to modify the setup.[cS] code
  * to do BIOS calls Int13h/Fn08h and Int13h/Fn48h to get all of the drive info
  * for us during initialization.  I have the necessary docs -- any takers?  -ml
- * [I did this. But the result is more suited for user space. -aeb]
- *
- * Unfortunately the above is far too optimistic. One of the problems is that
- * drives 1 and 2 may be SCSI disks (even when IDE disks are present), so that
- * the geometry we read here from BIOS is attributed to the wrong disks.
- * Eventually the routine below should be removed.
  */
 static void probe_cmos_for_drives (ide_hwif_t *hwif)
 {
@@ -3195,7 +2889,7 @@ void ide_setup (char *s)
 	if (s[0] == 'h' && s[1] == 'd' && s[2] >= 'a' && s[2] <= max_drive) {
 		const char *hd_words[] = {"none", "noprobe", "nowerr", "cdrom",
 				"serialize", "autotune", "noautotune",
-				"slow", "ide-scsi", NULL};
+				"slow", NULL};
 		unit = s[2] - 'a';
 		hw   = unit / MAX_DRIVES;
 		unit = unit % MAX_DRIVES;
@@ -3227,9 +2921,6 @@ void ide_setup (char *s)
 				goto done;
 			case -8: /* "slow" */
 				drive->slow = 1;
-				goto done;
-			case -9: /* "ide-scsi" */
-				drive->ide_scsi = 1;
 				goto done;
 			case 3: /* cyl,head,sect */
 				drive->media	= ide_disk;
@@ -3406,7 +3097,6 @@ done:
  * an IDE disk drive, or if a geometry was "forced" on the commandline.
  * Returns 1 if the geometry translation was successful.
  */
-
 int ide_xlate_1024 (kdev_t i_rdev, int xparm, const char *msg)
 {
 	ide_drive_t *drive;
@@ -3414,21 +3104,13 @@ int ide_xlate_1024 (kdev_t i_rdev, int xparm, const char *msg)
 	const byte *heads = head_vals;
 	unsigned long tracks;
 
-	drive = get_info_ptr(i_rdev);
-	if (!drive)
-		return 0;
-
-	if (drive->forced_geom)
+	if ((drive = get_info_ptr(i_rdev)) == NULL || drive->forced_geom)
 		return 0;
 
 	if (xparm > 1 && xparm <= drive->bios_head && drive->bios_sect == 63)
 		return 0;		/* we already have a translation */
 
 	printk("%s ", msg);
-
-	if (xparm < 0 && (drive->bios_cyl * drive->bios_head * drive->bios_sect) < (1024 * 16 * 63)) {
-		return 0;		/* small disk: no translation needed */
-	}
 
 	if (drive->id) {
 		drive->cyl  = drive->id->cyls;
@@ -3561,7 +3243,6 @@ static int init_irq (ide_hwif_t *hwif)
 		else
 			hwgroup->drive = &hwif->drives[1];
 		hwgroup->poll_timeout = 0;
-		hwgroup->active = 0;
 		init_timer(&hwgroup->timer);
 		hwgroup->timer.function = &timer_expiry;
 		hwgroup->timer.data = (unsigned long) hwgroup;
@@ -3630,18 +3311,7 @@ static void ide_probe_pci (unsigned short vendor, unsigned short device, ide_pci
 	save_flags(flags);
 	cli();
 	for (index = 0; !pcibios_find_device (vendor, device, index, &bus, &fn); ++index) {
-		if ((vendor == PCI_VENDOR_ID_TTI) &&
-		    (device == PCI_DEVICE_ID_TTI_HPT343) && (func_adj)) {
-			unsigned short pcicmd = 0;
-
-			pcibios_read_config_word(bus, fn, PCI_COMMAND, &pcicmd);
-			if (pcicmd & PCI_COMMAND_MEMORY)
-				init (bus, fn);
-			else
-				return;
-		} else {
-			init (bus, fn + func_adj);
-		}
+		init (bus, fn + func_adj);
 	}
 	restore_flags(flags);
 }
@@ -3674,24 +3344,8 @@ static void probe_for_hwifs (void)
 		 * So instead, we search for PCI_DEVICE_ID_INTEL_82371_0,
 		 * and then add 1.
 		 */
-#ifdef CONFIG_BLK_DEV_OFFBOARD
-		ide_probe_pci (PCI_VENDOR_ID_PROMISE, PCI_DEVICE_ID_PROMISE_20246, &ide_init_triton, 0);
-		ide_probe_pci (PCI_VENDOR_ID_PROMISE, PCI_DEVICE_ID_PROMISE_20262, &ide_init_triton, 0);
-		ide_probe_pci (PCI_VENDOR_ID_ARTOP, PCI_DEVICE_ID_ARTOP_ATP850UF, &ide_init_triton, 0);
-		ide_probe_pci (PCI_VENDOR_ID_TTI, PCI_DEVICE_ID_TTI_HPT343, &ide_init_triton, 1);
-#endif /* CONFIG_BLK_DEV_OFFBOARD */
 		ide_probe_pci (PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371_0, &ide_init_triton, 1);
 		ide_probe_pci (PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371SB_1, &ide_init_triton, 0);
-		ide_probe_pci (PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371AB, &ide_init_triton, 0);
-		ide_probe_pci (PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_5513, &ide_init_triton, 0);
-		ide_probe_pci (PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_82C586_1, &ide_init_triton, 0);
-		ide_probe_pci (PCI_VENDOR_ID_AL, PCI_DEVICE_ID_AL_M5229, &ide_init_triton, 0);
-#ifndef CONFIG_BLK_DEV_OFFBOARD
-		ide_probe_pci (PCI_VENDOR_ID_PROMISE, PCI_DEVICE_ID_PROMISE_20246, &ide_init_triton, 0);
-		ide_probe_pci (PCI_VENDOR_ID_PROMISE, PCI_DEVICE_ID_PROMISE_20262, &ide_init_triton, 0);
-		ide_probe_pci (PCI_VENDOR_ID_ARTOP, PCI_DEVICE_ID_ARTOP_ATP850UF, &ide_init_triton, 0);
-#endif /* CONFIG_BLK_DEV_OFFBOARD */
-		ide_probe_pci (PCI_VENDOR_ID_TTI, PCI_DEVICE_ID_TTI_HPT343, &ide_init_triton, 0);
 #endif /* CONFIG_BLK_DEV_TRITON */
 	}
 #endif /* CONFIG_PCI */
@@ -3737,12 +3391,6 @@ static int hwif_init (int h)
 #endif
 #if MAX_HWIFS > 3
 	case IDE3_MAJOR: rfn = &do_ide3_request; break;
-#endif
-#if MAX_HWIFS > 4
-	case IDE4_MAJOR: rfn = &do_ide4_request; break;
-#endif
-#if MAX_HWIFS > 5
-	case IDE5_MAJOR: rfn = &do_ide5_request; break;
 #endif
 	default:
 		printk("%s: request_fn NOT DEFINED\n", hwif->name);

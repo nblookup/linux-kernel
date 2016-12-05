@@ -46,6 +46,7 @@
 #include <linux/igmp.h>
 
 
+#ifdef CONFIG_IP_FORWARD
 #ifdef CONFIG_NET_IPIP
 
 static struct inet_protocol ipip_protocol = 
@@ -61,12 +62,13 @@ static struct inet_protocol ipip_protocol =
 
 
 #endif
+#endif
 
 static struct inet_protocol tcp_protocol = 
 {
 	tcp_rcv,		/* TCP handler		*/
 	tcp_err,		/* TCP error control	*/  
-#if defined(CONFIG_NET_IPIP)
+#if defined(CONFIG_NET_IPIP) && defined(CONFIG_IP_FORWARD)
 	&ipip_protocol,
 #else  
 	NULL,			/* next			*/

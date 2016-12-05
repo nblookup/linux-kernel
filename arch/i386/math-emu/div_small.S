@@ -12,13 +12,13 @@
  +---------------------------------------------------------------------------*/
 
 /*---------------------------------------------------------------------------+
- |    unsigned long FPU_div_small(unsigned long long *x, unsigned long y)    |
+ |    unsigned long div_small(unsigned long long *x, unsigned long y)        |
  +---------------------------------------------------------------------------*/
 
 #include "fpu_emu.h"
 
 .text
-ENTRY(FPU_div_small)
+ENTRY(div_small)
 	pushl	%ebp
 	movl	%esp,%ebp
 

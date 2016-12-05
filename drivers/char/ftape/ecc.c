@@ -33,7 +33,8 @@
  */
 
 #include <linux/ftape.h>
-#include <asm/errno.h>
+#include <stdio.h>
+#include <sys/errno.h>
 
 #include "tracing.h"
 #include "ecc.h"
@@ -80,7 +81,7 @@ unsigned char ftape_trace_id = 0;
  * Notice: to minimize the potential for confusion, we use r to
  *         denote the independent variable of the polynomials
  *         in the Galois Field GF(2^8).  We reserve x for polynomials
- *         that have coefficients in GF(2^8).
+ *         that that have coefficients in GF(2^8).
  *         
  * The Galois Field in which coefficient arithmetic is performed are
  * the polynomials over Z_2 (i.e., 0 and 1) modulo the irreducible

@@ -21,7 +21,6 @@
 #include <linux/errno.h>
 #include <linux/personality.h>
 #include <linux/mm.h>
-#include <linux/file.h>
 
 #include <asm/segment.h>
 #include <asm/system.h>
@@ -46,7 +45,7 @@
  * Linus noticed.  -- jrs
  */
 
-void select_free_wait(select_table * p)
+static void free_wait(select_table * p)
 {
 	struct select_table_entry * entry = p->entry + p->nr;
 
@@ -54,34 +53,6 @@ void select_free_wait(select_table * p)
 		p->nr--;
 		entry--;
 		remove_wait_queue(entry->wait_address,&entry->wait);
-	}
-}
-
-/*
- *	File handle locking
- */
- 
-static void lock_fd_bits(int n, int x)
-{
-	int i;
-	for(i=0;i<__NFDBITS;i++)
-	{
-		if(x&(1<<i))
-			fget(n+i);
-	}
-}
-
-static void unlock_fd_bits(int n, int x)
-{
-	int i;
-	for(i=0;i<__NFDBITS;i++)
-	{
-		if(x&(1<<i))
-		{
-			/* ick */
-			struct file *f=current->files->fd[n+i];
-			fput(f, f->f_inode);
-		}
 	}
 }
 
@@ -96,7 +67,7 @@ static void unlock_fd_bits(int n, int x)
  * and we aren't going to sleep on the select_table.  -- jrs
  */
 
-int select_check(int flag, select_table * wait, struct file * file)
+static int check(int flag, select_table * wait, struct file * file)
 {
 	struct inode * inode;
 	struct file_operations *fops;
@@ -112,7 +83,7 @@ int select_check(int flag, select_table * wait, struct file * file)
 }
 
 static int do_select(int n, fd_set *in, fd_set *out, fd_set *ex,
-	fd_set *res_in, fd_set *res_out, fd_set *res_ex, fd_set *locked)
+	fd_set *res_in, fd_set *res_out, fd_set *res_ex)
 {
 	int count;
 	select_table wait_table, *wait;
@@ -120,7 +91,7 @@ static int do_select(int n, fd_set *in, fd_set *out, fd_set *ex,
 	unsigned long set;
 	int i,j;
 	int max = -1;
-	int threaded = 0;
+
 	j = 0;
 	for (;;) {
 		i = j * __NFDBITS;
@@ -142,34 +113,8 @@ static int do_select(int n, fd_set *in, fd_set *out, fd_set *ex,
 	}
 end_check:
 	n = max + 1;
-	
-	/* Now we _must_ lock the handles before we get the page otherwise
-	   they may get closed on us during the kmalloc causing explosions.. */
-	
-	if(current->files->count>1)
-	{	
-	
-		/*
-		 *	Only for the threaded cases must we do work.
-		 */
-		j = 0;
-		for (;;) {
-			i = j * __NFDBITS;
-			if (i >= n)
-				break;
-			lock_fd_bits(i,in->fds_bits[j]);
-			lock_fd_bits(i,out->fds_bits[j]);
-			lock_fd_bits(i,ex->fds_bits[j]);
-			j++;
-		}
-		threaded=1;
-	}
-		
 	if(!(entry = (struct select_table_entry*) __get_free_page(GFP_KERNEL)))
-	{
-		count = -ENOMEM; 
-		goto bale;
-	}
+		return -ENOMEM;
 	count = 0;
 	wait_table.nr = 0;
 	wait_table.entry = entry;
@@ -177,20 +122,17 @@ end_check:
 repeat:
 	current->state = TASK_INTERRUPTIBLE;
 	for (i = 0 ; i < n ; i++) {
-		struct file * file = current->files->fd[i];
-		if (!file)
-			continue;
-		if (FD_ISSET(i,in) && select_check(SEL_IN,wait,file)) {
+		if (FD_ISSET(i,in) && check(SEL_IN,wait,current->files->fd[i])) {
 			FD_SET(i, res_in);
 			count++;
 			wait = NULL;
 		}
-		if (FD_ISSET(i,out) && select_check(SEL_OUT,wait,file)) {
+		if (FD_ISSET(i,out) && check(SEL_OUT,wait,current->files->fd[i])) {
 			FD_SET(i, res_out);
 			count++;
 			wait = NULL;
 		}
-		if (FD_ISSET(i,ex) && select_check(SEL_EX,wait,file)) {
+		if (FD_ISSET(i,ex) && check(SEL_EX,wait,current->files->fd[i])) {
 			FD_SET(i, res_ex);
 			count++;
 			wait = NULL;
@@ -201,25 +143,9 @@ repeat:
 		schedule();
 		goto repeat;
 	}
-	select_free_wait(&wait_table);
+	free_wait(&wait_table);
 	free_page((unsigned long) entry);
 	current->state = TASK_RUNNING;
-bale:
-
-	if(threaded)
-	{
-		/* Unlock handles now */	
-		j = 0;
-		for (;;) {
-			i = j * __NFDBITS;
-			if (i >= n)
-				break;
-			unlock_fd_bits(i,in->fds_bits[j]);
-			unlock_fd_bits(i,out->fds_bits[j]);
-			unlock_fd_bits(i,ex->fds_bits[j]);
-			j++;
-		}
-	}
 	return count;
 }
 
@@ -314,7 +240,6 @@ asmlinkage int sys_select(int n, fd_set *inp, fd_set *outp, fd_set *exp, struct 
 	limited_fd_set res_in, in;
 	limited_fd_set res_out, out;
 	limited_fd_set res_ex, ex;
-	limited_fd_set locked;
 	unsigned long timeout;
 
 	error = -EINVAL;
@@ -345,10 +270,11 @@ asmlinkage int sys_select(int n, fd_set *inp, fd_set *outp, fd_set *exp, struct 
 		(fd_set *) &ex,
 		(fd_set *) &res_in,
 		(fd_set *) &res_out,
-		(fd_set *) &res_ex,
-		(fd_set *) &locked);
-	timeout = current->timeout?current->timeout - jiffies - 1:0;
+		(fd_set *) &res_ex);
+	timeout = current->timeout - jiffies - 1;
 	current->timeout = 0;
+	if ((long) timeout < 0)
+		timeout = 0;
 	if (tvp && !(current->personality & STICKY_TIMEOUTS)) {
 		put_user(timeout/HZ, &tvp->tv_sec);
 		timeout %= HZ;

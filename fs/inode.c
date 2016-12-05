@@ -173,25 +173,6 @@ void clear_inode(struct inode * inode)
 {
 	struct wait_queue * wait;
 
-	/*
-	 * We can clear inodes either when a last deref to the inode 
-	 * causes it to be deleted (reference count==1), or when we want to 
-	 * reuse it (reference count==0).  Any other count is an error.
-	 */
-	if (inode->i_count > 1)
-		panic ("clear_inode: Inode still has references");
-
-	/*
-	 * We are about to zap this inode.  This operation may block,
-	 * and it's imperative that we don't allow another process to
-	 * grab it before it is completely pulled down.  The i_count
-	 * will prevent reuse of the inode by get_empty_inode(), but the
-	 * i_condemned flag will also prevent __iget() from finding the
-	 * inode until it is completely dead. 
-	 */
-	inode->i_condemned = 1;
-	inode->i_count++;
-	
 	truncate_inode_pages(inode, 0);
 	wait_on_inode(inode);
 	if (IS_WRITABLE(inode)) {
@@ -201,16 +182,11 @@ void clear_inode(struct inode * inode)
 	remove_inode_hash(inode);
 	remove_inode_free(inode);
 	wait = ((volatile struct inode *) inode)->i_wait;
-	if (--inode->i_count)
+	if (inode->i_count)
 		nr_free_inodes++;
 	memset(inode,0,sizeof(*inode));
 	((volatile struct inode *) inode)->i_wait = wait;
 	insert_inode_free(inode);
-	/*
-	 * The inode is now reusable again, and the condemned flag is
-	 * clear.  Wake up anybody who is waiting on the condemned flag. 
-	 */
-	wake_up(&inode->i_wait);
 }
 
 int fs_may_mount(kdev_t dev)
@@ -451,7 +427,6 @@ void iput(struct inode * inode)
 	}
 	if (inode->i_pipe)
 		wake_up_interruptible(&PIPE_WAIT(*inode));
-
 repeat:
 	if (inode->i_count>1) {
 		inode->i_count--;
@@ -491,14 +466,6 @@ repeat:
 	
 	inode->i_count--;
 
-	if (inode->i_count)
-	/*
-	 * Huoh, we were supposed to be the last user, but someone has
-	 * grabbed it while we were sleeping. Dont destroy inode VM
-	 * mappings, it might cause a memory leak.
-	 */
-		return;
-
 	if (inode->i_mmap) {
 		printk("iput: inode %lu on device %s still has mappings.\n",
 			inode->i_ino, kdevname(inode->i_dev));
@@ -525,7 +492,7 @@ repeat:
 	for (i = nr_inodes/2; i > 0; i--,inode = inode->i_next) {
 		if (!inode->i_count) {
 			unsigned long i = 999;
-			if (!(inode->i_lock || inode->i_dirt))
+			if (!(inode->i_lock | inode->i_dirt))
 				i = inode->i_nrpages;
 			if (i < badness) {
 				best = inode;
@@ -639,15 +606,6 @@ repeat:
 	goto return_it;
 
 found_it:
-	/*
-	 * The inode may currently be being pulled down by
-	 * clear_inode().  Avoid it if so.  If we get past this, then
-	 * the increment of i_count will prevent the inode's reuse.
-	 */
-	if (inode->i_condemned) {
-		sleep_on(&inode->i_wait);
-		goto repeat;
-	}
 	if (!inode->i_count)
 		nr_free_inodes--;
 	inode->i_count++;

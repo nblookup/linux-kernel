@@ -60,7 +60,6 @@ int ipip_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 	 *	Discard the original IP header
 	 */
 	 
-	skb->mac.raw = skb->data;
 	skb_pull(skb, ((struct iphdr *)skb->data)->ihl<<2);
 	
 	/*

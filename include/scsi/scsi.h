@@ -74,14 +74,12 @@
 #define LOG_SENSE             0x4d
 #define MODE_SELECT_10        0x55
 #define MODE_SENSE_10         0x5a
-#define MOVE_MEDIUM           0xa5
 #define READ_12               0xa8
 #define WRITE_12              0xaa
 #define WRITE_VERIFY_12       0xae
 #define SEARCH_HIGH_12        0xb0
 #define SEARCH_EQUAL_12       0xb1
 #define SEARCH_LOW_12         0xb2
-#define READ_ELEMENT_STATUS   0xb8
 #define SEND_VOLUME_TAG       0xb6
 #define WRITE_LONG_2          0xea
 
@@ -132,7 +130,6 @@
 #define TYPE_SCANNER        0x06
 #define TYPE_MOD            0x07    /* Magneto-optical disk - 
 				     * - treated as TYPE_DISK */
-#define TYPE_MEDIUM_CHANGER 0x08
 #define TYPE_NO_LUN         0x7f
 
 
@@ -180,8 +177,6 @@
 /* Used to obtain the host number of a device. */
 #define SCSI_IOCTL_PROBE_HOST 0x5385
 
-/* Used to get the bus number for a device */
-#define SCSI_IOCTL_GET_BUS_NUMBER 0x5386
 
 /*
  * Overrides for Emacs so that we follow Linus's tabbing style.

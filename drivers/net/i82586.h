@@ -259,13 +259,8 @@ struct ac_mcs_t
 {
 	ach_t		mcs_h;
 	unsigned short	mcs_cnt;	/* No. of bytes of MC addresses	*/
-#if 0
-	unsigned char	mcs_data[ADDR_LEN]; /* The first MC address ..	*/
-	...
-#endif
+	unsigned short	mcs_data[3];	/* The first MC address ..	*/
 };
-
-#define I82586_MAX_MULTICAST_ADDRESSES	128	/* Hardware hashed filter */
 
 /*
  * The Transmit Action Command.

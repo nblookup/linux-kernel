@@ -3,7 +3,6 @@
  * Copyright (C) 1992, 1993 Krishna Balasubramanian
  *         Many improvements/fixes by Bruno Haible.
  * Replaced `struct shm_desc' by `struct vm_area_struct', July 1994.
- * Fixed the shm swap deallocation (shm_unuse()), August 1998 Andrea Arcangeli.
  */
 
 #include <linux/errno.h>
@@ -14,7 +13,6 @@
 #include <linux/stat.h>
 #include <linux/malloc.h>
 #include <linux/swap.h>
-#include <linux/swapctl.h>
 
 #include <asm/segment.h>
 #include <asm/pgtable.h>
@@ -275,8 +273,6 @@ asmlinkage int sys_shmctl (int shmid, int cmd, struct shmid_ds *buf)
 		tbuf.shm_nattch = shp->shm_nattch;
 		memcpy_tofs (buf, &tbuf, sizeof(*buf));
 		return id;
-	default:
-		break;
 	}
 
 	shp = shm_segs[id = (unsigned int) shmid % SHMMNI];
@@ -428,11 +424,7 @@ static int shm_map (struct vm_area_struct *shmd)
 	do_munmap(shmd->vm_start, shmd->vm_end - shmd->vm_start);
 
 	/* add new mapping */
-	tmp = shmd->vm_end - shmd->vm_start;
-	if((current->mm->total_vm << PAGE_SHIFT) + tmp
-	   > (unsigned long) current->rlim[RLIMIT_AS].rlim_cur)
-		return -ENOMEM;
-	current->mm->total_vm += tmp >> PAGE_SHIFT;
+	current->mm->total_vm += (shmd->vm_end - shmd->vm_start) >> PAGE_SHIFT;
 	insert_vm_struct(current->mm, shmd);
 	merge_segments(current->mm, shmd->vm_start, shmd->vm_end);
 
@@ -497,10 +489,10 @@ asmlinkage int sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *raddr)
 			return -EINVAL;
 	}
 	/*
-	 * Check if addr exceeds MAX_USER_ADDR (from do_mmap)
+	 * Check if addr exceeds TASK_SIZE (from do_mmap)
 	 */
 	len = PAGE_SIZE*shp->shm_npages;
-       if (addr >= MAX_USER_ADDR || len > MAX_USER_ADDR  || addr > MAX_USER_ADDR - len)
+       if (addr >= TASK_SIZE || len > TASK_SIZE  || addr > TASK_SIZE - len)
 		return -EINVAL;
 	/*
 	 * If shm segment goes below stack, make sure there is some
@@ -660,7 +652,6 @@ static pte_t shm_swap_in(struct vm_area_struct * shmd, unsigned long offset, uns
 			oom(current);
 			return BAD_PAGE;
 		}
-	repeat:
 		pte_val(pte) = shp->shm_pages[idx];
 		if (pte_present(pte)) {
 			free_page (page); /* doesn't sleep */
@@ -668,17 +659,15 @@ static pte_t shm_swap_in(struct vm_area_struct * shmd, unsigned long offset, uns
 		}
 		if (!pte_none(pte)) {
 			read_swap_page(pte_val(pte), (char *) page);
-			if (pte_val(pte) != shp->shm_pages[idx])
-				goto repeat;
+			pte_val(pte) = shp->shm_pages[idx];
+			if (pte_present(pte))  {
+				free_page (page); /* doesn't sleep */
+				goto done;
+			}
 			swap_free(pte_val(pte));
 			shm_swp--;
 		}
 		shm_rss++;
-
-		/* Give the physical reallocated page a bigger start */
-		if (shm_rss < (MAP_NR(high_memory) >> 3))
-			mem_map[MAP_NR(page)].age = (PAGE_INITIAL_AGE + PAGE_ADVANCE);
-
 		pte = pte_mkdirty(mk_pte(page, PAGE_SHARED));
 		shp->shm_pages[idx] = pte_val(pte);
 	} else
@@ -699,7 +688,6 @@ static unsigned long swap_idx = 0; /* next to swap */
 int shm_swap (int prio, int dma)
 {
 	pte_t page;
-	struct page *page_map;
 	struct shmid_ds *shp;
 	struct vm_area_struct *shmd;
 	unsigned long swap_nr;
@@ -734,10 +722,7 @@ int shm_swap (int prio, int dma)
 	pte_val(page) = shp->shm_pages[idx];
 	if (!pte_present(page))
 		goto check_table;
-	page_map = &mem_map[MAP_NR(pte_page(page))];
-	if (PageLocked(page_map))
-		goto check_table;
-	if (dma && !PageDMA(page_map))
+	if (dma && !PageDMA(&mem_map[MAP_NR(pte_page(page))]))
 		goto check_table;
 	swap_attempts++;
 
@@ -808,66 +793,4 @@ int shm_swap (int prio, int dma)
 	shm_swp++;
 	shm_rss--;
 	return 1;
-}
-
-/*
- * Free the swap entry and set the new pte for the shm page.
- */
-static void shm_unuse_page(struct shmid_ds *shp, unsigned long idx,
-			   unsigned long type)
-{
-	pte_t pte = __pte(shp->shm_pages[idx]);
-	unsigned long page, entry = shp->shm_pages[idx];
-
-	if (pte_none(pte))
-		return;
-	if (pte_present(pte))
-	{
-		/*
-		 * Security check. Should be not needed...
-		 */
-		unsigned long page_nr = MAP_NR(pte_page(pte));
-		if (page_nr >= MAP_NR(high_memory))
-		{
-			printk("shm page mapped in virtual memory\n");
-			return;
-		}
-		if (!in_swap_cache(page_nr))
-			return;
-		if (SWP_TYPE(in_swap_cache(page_nr)) != type)
-			return;
-		printk("shm page in swap cache, trying to remove it!\n");
-		delete_from_swap_cache(page_nr);
-		
-		shp->shm_pages[idx] = pte_val(pte_mkdirty(pte));
-		return;
-	}
-
-	if (SWP_TYPE(pte_val(pte)) != type)
-		return;
-
-	/*
-	 * Here we must swapin the pte and free the swap.
-	 */
-	page = get_free_page(GFP_KERNEL);
-	read_swap_page(pte_val(pte), (char *) page);
-	pte = pte_mkdirty(mk_pte(page, PAGE_SHARED));
-	shp->shm_pages[idx] = pte_val(pte);
-	shm_rss++;
-
-	swap_free(entry);
-	shm_swp--;
-}
-
-/*
- * unuse_shm() search for an eventually swapped out shm page.
- */
-void shm_unuse(unsigned int type)
-{
-	int i, n;
-
-	for (i = 0; i < SHMMNI; i++)
-		if (shm_segs[i] != IPC_UNUSED && shm_segs[i] != IPC_NOID)
-			for (n = 0; n < shm_segs[i]->shm_npages; n++)
-				shm_unuse_page(shm_segs[i], n, type);
 }

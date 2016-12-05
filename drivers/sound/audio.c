@@ -201,9 +201,6 @@ audio_write (int dev, struct fileinfo *file, const char *buf, int count)
   p = 0;
   c = count;
 
-  if (count < 0)
-    return -EINVAL;
-
   if ((audio_mode[dev] & AM_READ) && !(audio_devs[dev]->flags & DMA_DUPLEX))
     {				/* Direction change */
     }
@@ -406,7 +403,7 @@ audio_ioctl (int dev, struct fileinfo *file,
 
       case SNDCTL_DSP_GETOSPACE:
 	if (!(audio_devs[dev]->open_mode & OPEN_WRITE))
-	  return -EPERM;
+	  return 0;
 	if ((audio_mode[dev] & AM_READ) && !(audio_devs[dev]->flags & DMA_DUPLEX))
 	  return -(EBUSY);
 
@@ -421,7 +418,7 @@ audio_ioctl (int dev, struct fileinfo *file,
 	    return err;
 
 	  if (DMAbuf_get_curr_buffer (dev, &buf_no, &dma_buf, &buf_ptr, &buf_size) >= 0)
-	    info.bytes -= buf_ptr;
+	    info.bytes += buf_size - buf_ptr;
 
 	  memcpy_tofs (&((char *) arg)[0], (char *) &info, sizeof (info));
 	  return 0;

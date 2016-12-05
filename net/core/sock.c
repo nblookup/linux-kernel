@@ -71,8 +71,6 @@
  *		Alan Cox	: 	Generic socket allocation to make hooks
  *					easier (suggested by Craig Metz).
  *		Michael Pall	:	SO_ERROR returns positive errno again
- *              Elliot Poger    :       Added support for SO_BINDTODEVICE.
- *		Russell King	:	Add #ifdef CONFIG_INET to SO_BINDTODEVICE
  *
  * To Fix:
  *
@@ -130,7 +128,6 @@ int sock_setsockopt(struct sock *sk, int level, int optname,
 	int valbool;
 	int err;
 	struct linger ling;
-	struct ifreq req;
 
 	/*
 	 *	Options without arguments
@@ -235,41 +232,7 @@ int sock_setsockopt(struct sock *sk, int level, int optname,
 		case SO_BSDCOMPAT:
 			sk->bsdism = valbool;
 			return 0;
-
-#ifdef CONFIG_NET	
- 	        case SO_BINDTODEVICE:
- 			/* Bind this socket to a particular device like "eth0",
- 			 * as specified in an ifreq structure.  If the device 
- 			 * is "", socket is NOT bound to a device. */
- 			 
- 			if(!suser())
- 				return -EPERM;
- 				
- 			if (!valbool) {
- 				sk->bound_device = NULL;
- 			} else {
- 				err=verify_area(VERIFY_READ,optval,sizeof(req));
- 				if(err)
- 					return err;
- 				memcpy_fromfs(&req,optval,sizeof(req));
-#ifdef CONFIG_INET
-				/* Remove any cached route for this socket. */
-				if (sk->ip_route_cache) {
-					ip_rt_put(sk->ip_route_cache);
-					sk->ip_route_cache=NULL;
-				}
-#endif
- 				if (*(req.ifr_name) == '\0') {
- 					sk->bound_device = NULL;
- 				} else {
- 					sk->bound_device = dev_get(req.ifr_name);
- 					if (sk->bound_device == NULL)
- 						return -EINVAL;
- 				}
- 			}
-  			return 0;
-#endif
-
+			
 		default:
 		  	return(-ENOPROTOOPT);
   	}
@@ -351,28 +314,6 @@ int sock_getsockopt(struct sock *sk, int level, int optname,
 		case SO_BSDCOMPAT:
 			val = sk->bsdism;
 			break;
-
-#ifdef CONFIG_NET
-                case SO_BINDTODEVICE:
-		{
-			struct ifreq req;
-
-                        /* Return the bound device (if any) */
-                        err=verify_area(VERIFY_WRITE,optval,sizeof(req));
-                        if(err)
-                                return err;
-
-                        memset((char *) &req, 0, sizeof(req));
-
-                        if (sk->bound_device) {
-                            strncpy(req.ifr_name, sk->bound_device->name, sizeof(req.ifr_name));
-                            (*(struct sockaddr_in *) &req.ifr_addr).sin_family = sk->bound_device->family;
-                            (*(struct sockaddr_in *) &req.ifr_addr).sin_addr.s_addr = sk->bound_device->pa_addr;
-                        }
-                        memcpy_tofs(optval, &req, sizeof(req));
-                        return 0;
-		}
-#endif
 
 		default:
 			return(-ENOPROTOOPT);
@@ -502,7 +443,7 @@ struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, unsigne
 {
 	struct sk_buff *skb;
 	int err;
-	unsigned long mem;
+
 	do
 	{
 		if(sk->err!=0)
@@ -521,16 +462,13 @@ struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, unsigne
 			return NULL;
 		}
 		
-
-		mem=sk->wmem_alloc;
-
 		if(!fallback)
 			skb = sock_wmalloc(sk, size, 0, sk->allocation);
 		else
 		{
 			/* The buffer get won't block, or use the atomic queue. It does
 			   produce annoying no free page messages still.... */
-			skb = sock_wmalloc(sk, size, 0 , GFP_IO);
+			skb = sock_wmalloc(sk, size, 0 , GFP_BUFFER);
 			if(!skb)
 				skb=sock_wmalloc(sk, fallback, 0, GFP_KERNEL);
 		}
@@ -541,6 +479,8 @@ struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, unsigne
 		 
 		if(skb==NULL)
 		{
+			unsigned long tmp;
+
 			sk->socket->flags |= SO_NOSPACE;
 			if(noblock)
 			{
@@ -552,6 +492,7 @@ struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, unsigne
 				*errcode=-EPIPE;
 				return NULL;
 			}
+			tmp = sk->wmem_alloc;
 			cli();
 			if(sk->shutdown&SEND_SHUTDOWN)
 			{
@@ -560,7 +501,19 @@ struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, unsigne
 				return NULL;
 			}
 			
-			if (sk->wmem_alloc==mem)
+#if 1
+			if( tmp <= sk->wmem_alloc)
+#else
+			/* ANK: Line above seems either incorrect
+			 *	or useless. sk->wmem_alloc has a tiny chance to change
+			 *	between tmp = sk->w... and cli(),
+			 *	but it might(?) change earlier. In real life
+			 *	it does not (I never seen the message).
+			 *	In any case I'd delete this check at all, or
+			 *	change it to:
+			 */
+			if (sk->wmem_alloc + size >= sk->sndbuf) 
+#endif
 			{
 				sk->socket->flags &= ~SO_NOSPACE;
 				interruptible_sleep_on(sk->sleep);

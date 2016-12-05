@@ -124,7 +124,7 @@ void ext2_put_super (struct super_block * sb)
 	return;
 }
 
-static struct super_operations ext2_sops = {
+static struct super_operations ext2_sops = { 
 	ext2_read_inode,
 	NULL,
 	ext2_write_inode,
@@ -415,22 +415,22 @@ struct super_block * ext2_read_super (struct super_block * sb, void * data,
 	if (es->s_rev_level > EXT2_GOOD_OLD_REV) {
 		if (es->s_feature_incompat & ~EXT2_FEATURE_INCOMPAT_SUPP) {
 			printk("EXT2-fs: %s: couldn't mount because of "
-			       "unsupported optional features.\n",
+			       "unsupported optional features.\n", 
 			       kdevname(dev));
 			goto failed_mount;
 		}
 		if (!(sb->s_flags & MS_RDONLY) &&
 		    (es->s_feature_ro_compat & ~EXT2_FEATURE_RO_COMPAT_SUPP)) {
 			printk("EXT2-fs: %s: couldn't mount RDWR because of "
-			       "unsupported optional features.\n",
+			       "unsupported optional features.\n", 
 			       kdevname(dev));
 			goto failed_mount;
 		}
 	}
 	sb->s_blocksize_bits = sb->u.ext2_sb.s_es->s_log_block_size + 10;
 	sb->s_blocksize = 1 << sb->s_blocksize_bits;
-	if (sb->s_blocksize != BLOCK_SIZE &&
-	    (sb->s_blocksize == 1024 || sb->s_blocksize == 2048 ||
+	if (sb->s_blocksize != BLOCK_SIZE && 
+	    (sb->s_blocksize == 1024 || sb->s_blocksize == 2048 ||  
 	     sb->s_blocksize == 4096)) {
 		unsigned long offset;
 
@@ -463,9 +463,6 @@ struct super_block * ext2_read_super (struct super_block * sb, void * data,
 			goto failed_mount;
 		}
 	}
-	sb->u.ext2_sb.s_feature_compat = es->s_feature_compat;
-	sb->u.ext2_sb.s_feature_incompat = es->s_feature_incompat;
-	sb->u.ext2_sb.s_feature_ro_compat = es->s_feature_ro_compat;
 	sb->u.ext2_sb.s_frag_size = EXT2_MIN_FRAG_SIZE <<
 				   es->s_log_frag_size;
 	if (sb->u.ext2_sb.s_frag_size)
@@ -672,7 +669,7 @@ int ext2_remount (struct super_block * sb, int * flags, char * data)
 	else {
 		/*
 		 * Mounting a RDONLY partition read-write, so reread and
-		 * store the current valid flag.  (It may have been changed
+		 * store the current valid flag.  (It may have been changed 
 		 * by e2fsck since we originally mounted the partition.)
 		 */
 		sb->u.ext2_sb.s_mount_state = es->s_state;
@@ -711,8 +708,8 @@ void cleanup_module(void)
 void ext2_statfs (struct super_block * sb, struct statfs * buf, int bufsiz)
 {
 	unsigned long overhead;
+	unsigned long overhead_per_group;
 	struct statfs tmp;
-	int ngroups, i;
 
 	if (test_opt (sb, MINIX_DF))
 		overhead = 0;
@@ -720,35 +717,13 @@ void ext2_statfs (struct super_block * sb, struct statfs * buf, int bufsiz)
 		/*
 		 * Compute the overhead (FS structures)
 		 */
-
-		/*
-		 * All of the blocks before first_data_block are
-		 * overhead
-		 */
-		overhead = sb->u.ext2_sb.s_es->s_first_data_block;
-
-		/*
-		 * Add the overhead attributed to the superblock and
-		 * block group descriptors.  If this is sparse
-		 * superblocks is turned on, then not all groups have
-		 * this.
-		 */
-		if (sb->u.ext2_sb.s_feature_ro_compat &
-		    EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER) {
-			ngroups = 0;
-			for (i=0 ; i < sb->u.ext2_sb.s_groups_count; i++)
-				if (ext2_group_sparse(i))
-					ngroups++;
-		} else
-			ngroups = sb->u.ext2_sb.s_groups_count;
-		overhead += ngroups * (1 + sb->u.ext2_sb.s_db_per_group);
-
-		/*
-		 * Every block group has an inode bitmap, a block
-		 * bitmap, and an inode table.
-		 */
-		overhead += (sb->u.ext2_sb.s_groups_count *
-			     (2 + sb->u.ext2_sb.s_itb_per_group));
+		overhead_per_group = 1 /* super block */ +
+				     sb->u.ext2_sb.s_db_per_group /* descriptors */ +
+				     1 /* block bitmap */ +
+				     1 /* inode bitmap */ +
+				     sb->u.ext2_sb.s_itb_per_group /* inode table */;
+		overhead = sb->u.ext2_sb.s_es->s_first_data_block +
+			   sb->u.ext2_sb.s_groups_count * overhead_per_group;
 	}
 
 	tmp.f_type = EXT2_SUPER_MAGIC;

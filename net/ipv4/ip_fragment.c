@@ -4,15 +4,12 @@
  *		interface as the means of communication with the user level.
  *
  *		The IP fragmentation functionality.
- *
+ *		
  * Authors:	Fred N. van Kempen <waltje@uWalt.NL.Mugnet.ORG>
  *		Alan Cox <Alan.Cox@linux.org>
  *
  * Fixes:
- *		Alan Cox	:	Split from ip.c, see ip_input.c for
- *					history.
- *		Alan Cox	:	Handling oversized frames
- *		Uriel Maimon	:	Accounting errors in two fringe cases.
+ *		Alan Cox	:	Split from ip.c , see ip_input.c for history.
  */
 
 #include <linux/types.h>
@@ -27,7 +24,6 @@
 #include <net/icmp.h>
 #include <linux/tcp.h>
 #include <linux/udp.h>
-#include <linux/inet.h>
 #include <linux/firewall.h>
 #include <linux/ip_fw.h>
 #include <net/checksum.h>
@@ -38,46 +34,44 @@
  *	even the most extreme cases without allowing an attacker to measurably
  *	harm machine performance.
  */
-
-#define IPFRAG_HIGH_THRESH		(256 * 1024)
-#define IPFRAG_LOW_THRESH		(192 * 1024)
+ 
+#define IPFRAG_HIGH_THRESH		(256*1024)
+#define IPFRAG_LOW_THRESH		(192*1024)
 
 /*
- *	This fragment handler is a bit of a heap. On the other hand it works
- *	quite happily and handles things quite well.
+ *	This fragment handler is a bit of a heap. On the other hand it works quite
+ *	happily and handles things quite well.
  */
 
-static struct ipq *ipqueue = NULL;		/* IP fragment queue */
+static struct ipq *ipqueue = NULL;		/* IP fragment queue	*/
 
 atomic_t ip_frag_mem = 0;			/* Memory used for fragments */
-
-char *in_ntoa(unsigned long in);
 
 /*
  *	Memory Tracking Functions
  */
-
+ 
 extern __inline__ void frag_kfree_skb(struct sk_buff *skb, int type)
 {
 	atomic_sub(skb->truesize, &ip_frag_mem);
-	kfree_skb(skb, type);
+	kfree_skb(skb,type);
 }
 
 extern __inline__ void frag_kfree_s(void *ptr, int len)
 {
 	atomic_sub(len, &ip_frag_mem);
-	kfree_s(ptr, len);
+	kfree_s(ptr,len);
 }
-
+ 
 extern __inline__ void *frag_kmalloc(int size, int pri)
 {
-	void *vp = kmalloc(size,pri);
-	if (!vp)
+	void *vp=kmalloc(size,pri);
+	if(!vp)
 		return NULL;
 	atomic_add(size, &ip_frag_mem);
 	return vp;
 }
-
+ 
 /*
  *	Create a new fragment entry.
  */
@@ -87,12 +81,13 @@ static struct ipfrag *ip_frag_create(int offset, int end, struct sk_buff *skb, u
 	struct ipfrag *fp;
 	unsigned long flags;
 
-	fp = (struct ipfrag *)frag_kmalloc(sizeof (struct ipfrag), GFP_ATOMIC);
-	if (fp == NULL) {
+	fp = (struct ipfrag *) frag_kmalloc(sizeof(struct ipfrag), GFP_ATOMIC);
+	if (fp == NULL)
+	{
 		NETDEBUG(printk("IP: frag_create: no memory left !\n"));
-		return NULL;
+		return(NULL);
 	}
-	memset(fp, 0, sizeof (struct ipfrag));
+	memset(fp, 0, sizeof(struct ipfrag));
 
 	/* Fill in the structure. */
 	fp->offset = offset;
@@ -100,18 +95,19 @@ static struct ipfrag *ip_frag_create(int offset, int end, struct sk_buff *skb, u
 	fp->len = end - offset;
 	fp->skb = skb;
 	fp->ptr = ptr;
-
+	
 	/*
 	 *	Charge for the SKB as well.
 	 */
-
+	 
 	save_flags(flags);
 	cli();
-	ip_frag_mem += skb->truesize;
+	ip_frag_mem+=skb->truesize;
 	restore_flags(flags);
 
-	return fp;
+	return(fp);
 }
+
 
 /*
  *	Find the correct entry in the "incomplete datagrams" queue for
@@ -125,21 +121,20 @@ static struct ipq *ip_find(struct iphdr *iph)
 
 	cli();
 	qplast = NULL;
-	for (qp = ipqueue; qp != NULL; qplast = qp, qp = qp->next) {
-		if (iph->id == qp->iph->id && iph->saddr == qp->iph->saddr &&
-		    iph->daddr == qp->iph->daddr &&
-		    iph->protocol == qp->iph->protocol) {
-			/* So it doesn't vanish on us. The timer will be reset
-			 * anyway
-			 */
-			del_timer(&qp->timer);
+	for(qp = ipqueue; qp != NULL; qplast = qp, qp = qp->next)
+	{
+		if (iph->id== qp->iph->id && iph->saddr == qp->iph->saddr &&
+			iph->daddr == qp->iph->daddr && iph->protocol == qp->iph->protocol)
+		{
+			del_timer(&qp->timer);	/* So it doesn't vanish on us. The timer will be reset anyway */
 			sti();
-			return qp;
+			return(qp);
 		}
 	}
 	sti();
-	return NULL;
+	return(NULL);
 }
+
 
 /*
  *	Remove an entry from the "incomplete datagrams" queue, either
@@ -160,11 +155,14 @@ static void ip_free(struct ipq *qp)
 
 	/* Remove this entry from the "incomplete datagrams" queue. */
 	cli();
-	if (qp->prev == NULL) {
+	if (qp->prev == NULL)
+	{
 		ipqueue = qp->next;
 		if (ipqueue != NULL)
 			ipqueue->prev = NULL;
-	} else {
+	}
+	else
+	{
 		qp->prev->next = qp->next;
 		if (qp->next != NULL)
 			qp->next->prev = qp->prev;
@@ -173,11 +171,12 @@ static void ip_free(struct ipq *qp)
 	/* Release all fragment data. */
 
 	fp = qp->fragments;
-	while (fp != NULL) {
+	while (fp != NULL)
+	{
 		xp = fp->next;
 		IS_SKB(fp->skb);
-		frag_kfree_skb(fp->skb, FREE_READ);
-		frag_kfree_s(fp, sizeof (struct ipfrag));
+		frag_kfree_skb(fp->skb,FREE_READ);
+		frag_kfree_s(fp, sizeof(struct ipfrag));
 		fp = xp;
 	}
 
@@ -185,9 +184,10 @@ static void ip_free(struct ipq *qp)
 	frag_kfree_s(qp->iph, 64 + 8);
 
 	/* Finally, release the queue descriptor itself. */
-	frag_kfree_s(qp, sizeof (struct ipq));
+	frag_kfree_s(qp, sizeof(struct ipq));
 	sti();
 }
+
 
 /*
  *	Oops- a fragment queue timed out.  Kill it and send an ICMP reply.
@@ -204,20 +204,11 @@ static void ip_expire(unsigned long arg)
 	 */
 
 	ip_statistics.IpReasmTimeout++;
-	ip_statistics.IpReasmFails++;
+	ip_statistics.IpReasmFails++;   
 	/* This if is always true... shrug */
-	if (qp->fragments != NULL) {
-		struct sk_buff *skb = qp->fragments->skb;
-		struct iphdr *iph = skb->ip_hdr;
-
-		/* ICMP send engine expects skb->data to be just
-		 * past IP header.
-		 */
-		skb_pull(skb, iph->ihl * 4);
-
-		icmp_send(skb, ICMP_TIME_EXCEEDED,
-			  ICMP_EXC_FRAGTIME, 0, qp->dev, 1);
-	}
+	if(qp->fragments!=NULL)
+		icmp_send(qp->fragments->skb,ICMP_TIME_EXCEEDED,
+				ICMP_EXC_FRAGTIME, 0, qp->dev);
 
 	/*
 	 *	Nuke the fragment queue.
@@ -226,24 +217,25 @@ static void ip_expire(unsigned long arg)
 }
 
 /*
- *	Memory limiting on fragments. Evictor trashes the oldest
+ *	Memory limiting on fragments. Evictor trashes the oldest 
  *	fragment queue until we are back under the low threshold
  */
-
+ 
 static void ip_evictor(void)
 {
-	while (ip_frag_mem > IPFRAG_LOW_THRESH) {
-		if (!ipqueue)
+	while(ip_frag_mem>IPFRAG_LOW_THRESH)
+	{
+		if(!ipqueue)
 			panic("ip_evictor: memcount");
 		ip_free(ipqueue);
 	}
 }
 
 /*
- *	Add an entry to the 'ipq' queue for a newly received IP datagram.
- *	We will (hopefully :-) receive all other fragments of this datagram
- *	in time, so we just create a queue for this datagram, in which we
- *	will insert the received fragments at their respective positions.
+ * 	Add an entry to the 'ipq' queue for a newly received IP datagram.
+ * 	We will (hopefully :-) receive all other fragments of this datagram
+ * 	in time, so we just create a queue for this datagram, in which we
+ * 	will insert the received fragments at their respective positions.
  */
 
 static struct ipq *ip_create(struct sk_buff *skb, struct iphdr *iph, struct device *dev)
@@ -251,12 +243,13 @@ static struct ipq *ip_create(struct sk_buff *skb, struct iphdr *iph, struct devi
 	struct ipq *qp;
 	int ihlen;
 
-	qp = (struct ipq *)frag_kmalloc(sizeof (struct ipq), GFP_ATOMIC);
-	if (qp == NULL) {
+	qp = (struct ipq *) frag_kmalloc(sizeof(struct ipq), GFP_ATOMIC);
+	if (qp == NULL)
+	{
 		NETDEBUG(printk("IP: create: no memory left !\n"));
-		return NULL;
+		return(NULL);
 	}
-	memset(qp, 0, sizeof (struct ipq));
+	memset(qp, 0, sizeof(struct ipq));
 
 	/*
 	 *	Allocate memory for the IP header (plus 8 octets for ICMP).
@@ -264,10 +257,11 @@ static struct ipq *ip_create(struct sk_buff *skb, struct iphdr *iph, struct devi
 
 	ihlen = iph->ihl * 4;
 	qp->iph = (struct iphdr *) frag_kmalloc(64 + 8, GFP_ATOMIC);
-	if (qp->iph == NULL) {
+	if (qp->iph == NULL)
+	{
 		NETDEBUG(printk("IP: create: no memory left !\n"));
-		frag_kfree_s(qp, sizeof (struct ipq));
-		return NULL;
+		frag_kfree_s(qp, sizeof(struct ipq));
+		return(NULL);
 	}
 
 	memcpy(qp->iph, iph, ihlen + 8);
@@ -278,7 +272,7 @@ static struct ipq *ip_create(struct sk_buff *skb, struct iphdr *iph, struct devi
 
 	/* Start a timer for this entry. */
 	qp->timer.expires = jiffies + IP_FRAG_TIME;	/* about 30 seconds	*/
-	qp->timer.data = (unsigned long)qp;		/* pointer to queue	*/
+	qp->timer.data = (unsigned long) qp;		/* pointer to queue	*/
 	qp->timer.function = ip_expire;			/* expire function	*/
 	add_timer(&qp->timer);
 
@@ -290,8 +284,9 @@ static struct ipq *ip_create(struct sk_buff *skb, struct iphdr *iph, struct devi
 		qp->next->prev = qp;
 	ipqueue = qp;
 	sti();
-	return qp;
+	return(qp);
 }
+
 
 /*
  *	See if a fragment queue is complete.
@@ -304,28 +299,30 @@ static int ip_done(struct ipq *qp)
 
 	/* Only possible if we received the final fragment. */
 	if (qp->len == 0)
-		return 0;
+		return(0);
 
 	/* Check all fragment offsets to see if they connect. */
 	fp = qp->fragments;
 	offset = 0;
-	while (fp != NULL) {
+	while (fp != NULL)
+	{
 		if (fp->offset > offset)
-			return 0;	/* fragment(s) missing */
+			return(0);	/* fragment(s) missing */
 		offset = fp->end;
 		fp = fp->next;
 	}
 
 	/* All fragments are present. */
-	return 1;
+	return(1);
 }
+
 
 /*
  *	Build a new IP datagram from all its fragments.
  *
  *	FIXME: We copy here because we lack an effective way of handling lists
  *	of bits on input. Until the new skb data handling is in I'm not going
- *	to touch this with a bargepole.
+ *	to touch this with a bargepole. 
  */
 
 static struct sk_buff *ip_glue(struct ipq *qp)
@@ -341,19 +338,12 @@ static struct sk_buff *ip_glue(struct ipq *qp)
 	 */
 	len = qp->ihlen + qp->len;
 
-	if (len > 65535) {
-		NETDEBUG(printk("Oversized IP packet from %s.\n",
-				in_ntoa(qp->iph->saddr)));
-		ip_statistics.IpReasmFails++;
-		ip_free(qp);
-		return NULL;
-	}
-
-	if ((skb = dev_alloc_skb(len)) == NULL) {
+	if ((skb = dev_alloc_skb(len)) == NULL)
+	{
 		ip_statistics.IpReasmFails++;
 		NETDEBUG(printk("IP: queue_glue: no memory for gluing queue %p\n", qp));
 		ip_free(qp);
-		return NULL;
+		return(NULL);
 	}
 
 	/* Fill in the basic details. */
@@ -362,19 +352,21 @@ static struct sk_buff *ip_glue(struct ipq *qp)
 	skb->free = 1;
 
 	/* Copy the original IP headers into the new buffer. */
-	ptr = (unsigned char *)skb->h.raw;
-	memcpy(ptr, ((unsigned char *)qp->iph), qp->ihlen);
+	ptr = (unsigned char *) skb->h.raw;
+	memcpy(ptr, ((unsigned char *) qp->iph), qp->ihlen);
 	ptr += qp->ihlen;
 
 	count = 0;
 
 	/* Copy the data portions of all fragments into the new buffer. */
 	fp = qp->fragments;
-	while (fp != NULL) {
-		if (fp->len < 0 || fp->offset+qp->ihlen+fp->len > skb->len) {
+	while(fp != NULL)
+	{
+		if(count+fp->len > skb->len)
+		{
 			NETDEBUG(printk("Invalid fragment list: Fragment over size.\n"));
 			ip_free(qp);
-			kfree_skb(skb, FREE_WRITE);
+			frag_kfree_skb(skb,FREE_WRITE);
 			ip_statistics.IpReasmFails++;
 			return NULL;
 		}
@@ -383,8 +375,6 @@ static struct sk_buff *ip_glue(struct ipq *qp)
 		fp = fp->next;
 	}
 
-	skb->pkt_type = qp->fragments->skb->pkt_type;
-	skb->protocol = qp->fragments->skb->protocol;
 	/* We glued together all fragments, so remove the queue entry. */
 	ip_free(qp);
 
@@ -395,8 +385,9 @@ static struct sk_buff *ip_glue(struct ipq *qp)
 	skb->ip_hdr = iph;
 
 	ip_statistics.IpReasmOKs++;
-	return skb;
+	return(skb);
 }
+
 
 /*
  *	Process an incoming IP datagram fragment.
@@ -411,30 +402,30 @@ struct sk_buff *ip_defrag(struct iphdr *iph, struct sk_buff *skb, struct device 
 	unsigned char *ptr;
 	int flags, offset;
 	int i, ihl, end;
-
+	
 	ip_statistics.IpReasmReqds++;
 
 	/*
 	 *	Start by cleaning up the memory
 	 */
 
-	if (ip_frag_mem > IPFRAG_HIGH_THRESH)
+	if(ip_frag_mem>IPFRAG_HIGH_THRESH)
 		ip_evictor();
-	/*
-	 *	Find the entry of this IP datagram in the "incomplete
-	 *	datagrams" queue.
+	/* 
+	 *	Find the entry of this IP datagram in the "incomplete datagrams" queue. 
 	 */
-
+	 
 	qp = ip_find(iph);
 
 	/* Is this a non-fragmented datagram? */
 	offset = ntohs(iph->frag_off);
 	flags = offset & ~IP_OFFSET;
 	offset &= IP_OFFSET;
-	if (((flags & IP_MF) == 0) && (offset == 0)) {
+	if (((flags & IP_MF) == 0) && (offset == 0))
+	{
 		if (qp != NULL)
-			ip_free(qp);	/* Fragmented frame replaced by full unfragmented copy */
-		return skb;
+			ip_free(qp);	/* Huh? How could this exist?? */
+		return(skb);
 	}
 
 	offset <<= 3;		/* offset is in 8-byte chunks */
@@ -446,42 +437,34 @@ struct sk_buff *ip_defrag(struct iphdr *iph, struct sk_buff *skb, struct device 
 	 * queue entry.
 	 */
 
-	if (qp != NULL) {
+	if (qp != NULL)
+	{
 		/* ANK. If the first fragment is received,
 		 * we should remember the correct IP header (with options)
 		 */
-	        if (offset == 0) {
+	        if (offset == 0)
+		{
 			qp->ihlen = ihl;
-			memcpy(qp->iph, iph, ihl + 8);
+			memcpy(qp->iph, iph, ihl+8);
 		}
 		del_timer(&qp->timer);
 		qp->timer.expires = jiffies + IP_FRAG_TIME;	/* about 30 seconds */
 		qp->timer.data = (unsigned long) qp;	/* pointer to queue */
 		qp->timer.function = ip_expire;		/* expire function */
 		add_timer(&qp->timer);
-	} else {
+	}
+	else
+	{
 		/*
 		 *	If we failed to create it, then discard the frame
 		 */
-		if ((qp = ip_create(skb, iph, dev)) == NULL) {
+		if ((qp = ip_create(skb, iph, dev)) == NULL)
+		{
 			skb->sk = NULL;
-			kfree_skb(skb, FREE_READ);
+			frag_kfree_skb(skb, FREE_READ);
 			ip_statistics.IpReasmFails++;
 			return NULL;
 		}
-	}
-
-	/*
-	 *	Attempt to construct an oversize packet.
-	 */
-
-	if (ntohs(iph->tot_len) + (int)offset > 65535) {
-		skb->sk = NULL;
-		NETDEBUG(printk("Oversized packet received from %s\n",
-				in_ntoa(iph->saddr)));
-		kfree_skb(skb, FREE_READ);
-		ip_statistics.IpReasmFails++;
-		return NULL;
 	}
 
 	/*
@@ -504,24 +487,26 @@ struct sk_buff *ip_defrag(struct iphdr *iph, struct sk_buff *skb, struct device 
 		qp->len = end;
 
 	/*
-	 *	Find out which fragments are in front and at the back of us
-	 *	in the chain of fragments so far.  We must know where to put
-	 *	this fragment, right?
+	 * 	Find out which fragments are in front and at the back of us
+	 * 	in the chain of fragments so far.  We must know where to put
+	 * 	this fragment, right?
 	 */
 
 	prev = NULL;
-	for (next = qp->fragments; next != NULL; next = next->next) {
-		if (next->offset >= offset)
+	for(next = qp->fragments; next != NULL; next = next->next)
+	{
+		if (next->offset > offset)
 			break;	/* bingo! */
 		prev = next;
 	}
 
 	/*
-	 *	We found where to put this one.
-	 *	Check for overlap with preceding fragment, and, if needed,
-	 *	align things so that any overlaps are eliminated.
+	 * 	We found where to put this one.
+	 * 	Check for overlap with preceding fragment, and, if needed,
+	 * 	align things so that any overlaps are eliminated.
 	 */
-	if (prev != NULL && offset < prev->end) {
+	if (prev != NULL && offset < prev->end)
+	{
 		i = prev->end - offset;
 		offset += i;	/* ptr into datagram */
 		ptr += i;	/* ptr into fragment data */
@@ -532,35 +517,34 @@ struct sk_buff *ip_defrag(struct iphdr *iph, struct sk_buff *skb, struct device 
 	 * If we can merge fragments, do it.
 	 */
 
-	for (tmp = next; tmp != NULL; tmp = tfp) {
+	for(tmp=next; tmp != NULL; tmp = tfp)
+	{
 		tfp = tmp->next;
 		if (tmp->offset >= end)
 			break;		/* no overlaps at all */
 
-		i = end - next->offset;		/* overlap is 'i' bytes */
-		tmp->len -= i;			/* so reduce size of */
-		tmp->offset += i;		/* next fragment */
+		i = end - next->offset;			/* overlap is 'i' bytes */
+		tmp->len -= i;				/* so reduce size of	*/
+		tmp->offset += i;			/* next fragment	*/
 		tmp->ptr += i;
 		/*
 		 *	If we get a frag size of <= 0, remove it and the packet
 		 *	that it goes with.
-		 *
-		 *	We never throw the new frag away, so the frag being
-		 *	dumped has always been charged for.
 		 */
-		if (tmp->len <= 0) {
+		if (tmp->len <= 0)
+		{
 			if (tmp->prev != NULL)
 				tmp->prev->next = tmp->next;
 			else
 				qp->fragments = tmp->next;
 
-			if (tmp->next != NULL)
+			if (tfp->next != NULL)
 				tmp->next->prev = tmp->prev;
+			
+			next=tfp;	/* We have killed the original next frame */
 
-			next = tfp;	/* We have killed the original next frame */
-
-			frag_kfree_skb(tmp->skb, FREE_READ);
-			frag_kfree_s(tmp, sizeof (struct ipfrag));
+			frag_kfree_skb(tmp->skb,FREE_READ);
+			frag_kfree_s(tmp, sizeof(struct ipfrag));
 		}
 	}
 
@@ -572,20 +556,15 @@ struct sk_buff *ip_defrag(struct iphdr *iph, struct sk_buff *skb, struct device 
 	tfp = ip_frag_create(offset, end, skb, ptr);
 
 	/*
-	 *	No memory to save the fragment - so throw the lot. If we
-	 *	failed the frag_create we haven't charged the queue.
+	 *	No memory to save the fragment - so throw the lot
 	 */
 
-	if (!tfp) {
+	if (!tfp)
+	{
 		skb->sk = NULL;
-		kfree_skb(skb, FREE_READ);
+		frag_kfree_skb(skb, FREE_READ);
 		return NULL;
 	}
-
-	/*
-	 *	From now on our buffer is charged to the queues.
-	 */
-
 	tfp->prev = prev;
 	tfp->next = next;
 	if (prev != NULL)
@@ -597,31 +576,32 @@ struct sk_buff *ip_defrag(struct iphdr *iph, struct sk_buff *skb, struct device 
 		next->prev = tfp;
 
 	/*
-	 *	OK, so we inserted this new fragment into the chain.
-	 *	Check if we now have a full IP datagram which we can
-	 *	bump up to the IP layer...
+	 * 	OK, so we inserted this new fragment into the chain.
+	 * 	Check if we now have a full IP datagram which we can
+	 * 	bump up to the IP layer...
 	 */
 
-	if (ip_done(qp)) {
+	if (ip_done(qp))
+	{
 		skb2 = ip_glue(qp);		/* glue together the fragments */
-		return skb2;
+		return(skb2);
 	}
-	return NULL;
+	return(NULL);
 }
 
 
 /*
- *	This IP datagram is too large to be sent in one piece.  Break it up
- *	into smaller pieces (each of size equal to the MAC header plus IP
- *	header plus a block of the data of the original IP data part) that will
- *	yet fit in a single device frame, and queue such a frame for sending by
- *	calling the ip_queue_xmit().  Note that this is recursion, and bad
- *	things will happen if this function causes a loop...
+ *	This IP datagram is too large to be sent in one piece.  Break it up into
+ *	smaller pieces (each of size equal to the MAC header plus IP header plus
+ *	a block of the data of the original IP data part) that will yet fit in a
+ *	single device frame, and queue such a frame for sending by calling the
+ *	ip_queue_xmit().  Note that this is recursion, and bad things will happen
+ *	if this function causes a loop...
  *
  *	Yes this is inefficient, feel free to submit a quicker one.
  *
  */
-
+ 
 void ip_fragment(struct sock *sk, struct sk_buff *skb, struct device *dev, int is_frag)
 {
 	struct iphdr *iph;
@@ -630,7 +610,7 @@ void ip_fragment(struct sock *sk, struct sk_buff *skb, struct device *dev, int i
 	struct sk_buff *skb2;
 	int left, mtu, hlen, len;
 	int offset;
-
+	
 	unsigned short true_hard_header_len;
 
 	/*
@@ -639,7 +619,7 @@ void ip_fragment(struct sock *sk, struct sk_buff *skb, struct device *dev, int i
 
 	raw = skb->data;
 #if 0
-	iph = (struct iphdr *) (raw + dev->hard_header_len);
+	iph = (struct iphdr *) (raw + dev->hard_header_len);	
 	skb->ip_hdr = iph;
 #else
 	iph = skb->ip_hdr;
@@ -665,22 +645,23 @@ void ip_fragment(struct sock *sk, struct sk_buff *skb, struct device *dev, int i
 	 *	Check for any "DF" flag. [DF means do not fragment]
 	 */
 
-	if (iph->frag_off & htons(IP_DF)) {
+	if (iph->frag_off & htons(IP_DF))
+	{
 		ip_statistics.IpFragFails++;
 		NETDEBUG(printk("ip_queue_xmit: frag needed\n"));
 		return;
 	}
 
 	/*
-	 *	The protocol doesn't seem to say what to do in the case that
-	 *	the frame + options doesn't fit the mtu. As it used to fall
-	 *	down dead in this case we were fortunate it didn't happen
+	 *	The protocol doesn't seem to say what to do in the case that the
+	 *	frame + options doesn't fit the mtu. As it used to fall down dead
+	 *	in this case we were fortunate it didn't happen
 	 */
 
-	if (mtu < 8) {
+	if(mtu<8)
+	{
 		/* It's wrong but it's better than nothing */
-		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED,
-			  htons(dev->mtu), dev, 1);
+		icmp_send(skb,ICMP_DEST_UNREACH,ICMP_FRAG_NEEDED,dev->mtu, dev);
 		ip_statistics.IpFragFails++;
 		return;
 	}
@@ -699,26 +680,30 @@ void ip_fragment(struct sock *sk, struct sk_buff *skb, struct device *dev, int i
 	else
 		offset = 0;
 
+
 	/*
 	 *	Keep copying data until we run out.
 	 */
 
-	while (left > 0) {
+	while(left > 0)
+	{
 		len = left;
 		/* IF: it doesn't fit, use 'mtu' - the data space left */
 		if (len > mtu)
 			len = mtu;
 		/* IF: we are not sending upto and including the packet end
 		   then align the next start on an eight byte boundary */
-		if (len < left) {
-			len /= 8;
-			len *= 8;
+		if (len < left)
+		{
+			len/=8;
+			len*=8;
 		}
 		/*
 		 *	Allocate buffer.
 		 */
 
-		if ((skb2 = alloc_skb(len + hlen + 15, GFP_ATOMIC)) == NULL) {
+		if ((skb2 = alloc_skb(len + hlen+15,GFP_ATOMIC)) == NULL)
+		{
 			NETDEBUG(printk("IP: frag: no memory for new fragment!\n"));
 			ip_statistics.IpFragFails++;
 			return;
@@ -730,22 +715,22 @@ void ip_fragment(struct sock *sk, struct sk_buff *skb, struct device *dev, int i
 
 		skb2->arp = skb->arp;
 		skb2->protocol = htons(ETH_P_IP); /* Atleast PPP needs this */
-#if 0
-		if (skb->free == 0)
-			printk(KERN_ERR
-			       "IP fragmenter: BUG free!=1 in fragmenter\n");
-#endif
+#if 0		
+		if(skb->free==0)
+			printk(KERN_ERR "IP fragmenter: BUG free!=1 in fragmenter\n");
+#endif			
 		skb2->free = 1;
-		skb_put(skb2, len + hlen);
-		skb2->h.raw = (char *) skb2->data;
+		skb_put(skb2,len + hlen);
+		skb2->h.raw=(char *) skb2->data;
 		/*
 		 *	Charge the memory for the fragment to any owner
 		 *	it might possess
 		 */
 
-		if (sk) {
+		if (sk)
+		{
 			atomic_add(skb2->truesize, &sk->wmem_alloc);
-			skb2->sk = sk;
+			skb2->sk=sk;
 		}
 		skb2->raddr = skb->raddr;	/* For rebuild_header - must be here */
 
@@ -761,7 +746,7 @@ void ip_fragment(struct sock *sk, struct sk_buff *skb, struct device *dev, int i
 		memcpy(skb2->h.raw + hlen, ptr, len);
 		left -= len;
 
-		skb2->h.raw += true_hard_header_len;
+		skb2->h.raw+=true_hard_header_len;
 
 		/*
 		 *	Fill in the new header fields.
@@ -780,8 +765,8 @@ void ip_fragment(struct sock *sk, struct sk_buff *skb, struct device *dev, int i
 			ip_options_fragment(skb);
 
 		/*
-		 *	Added AC: If we are fragmenting a fragment that's not
-		 *		  the last fragment then keep MF on each bit
+		 *	Added AC : If we are fragmenting a fragment that's not the
+		 *		   last fragment then keep MF on each bit
 		 */
 		if (left > 0 || (is_frag & 1))
 			iph->frag_off |= htons(IP_MF);
@@ -798,3 +783,5 @@ void ip_fragment(struct sock *sk, struct sk_buff *skb, struct device *dev, int i
 	}
 	ip_statistics.IpFragOKs++;
 }
+
+

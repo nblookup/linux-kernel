@@ -60,8 +60,8 @@ static void set_brk(unsigned long start, unsigned long end)
 while (file.f_op->write(inode,&file,(char *)(addr),(nr)) != (nr)) goto close_coredump
 
 #define DUMP_SEEK(offset) \
-if (file.f_op->lseek) { \
-	if (file.f_op->lseek(inode,&file,(offset),0) != (offset)) \
+if (file.f_op->llseek) { \
+	if (file.f_op->llseek(inode,&file,(offset),0) != (offset)) \
  		goto close_coredump; \
 } else file.f_pos = (offset)		
 
@@ -204,7 +204,7 @@ aout_core_dump(long signr, struct pt_regs * regs)
  */
 static unsigned long * create_aout_tables(char * p, struct linux_binprm * bprm)
 {
-	unsigned long *argv,*envp;
+	char **argv, **envp;
 	unsigned long * sp;
 	int argc = bprm->argc;
 	int envc = bprm->envc;
@@ -224,12 +224,12 @@ static unsigned long * create_aout_tables(char * p, struct linux_binprm * bprm)
 	put_user(0x3e9, --sp);
 #endif
 	sp -= envc+1;
-	envp = sp;
+	envp = (char **) sp;
 	sp -= argc+1;
-	argv = sp;
+	argv = (char **) sp;
 #if defined(__i386__) || defined(__mc68000__)
-	put_user(envp,--sp);
-	put_user(argv,--sp);
+	put_user((unsigned long) envp,--sp);
+	put_user((unsigned long) argv,--sp);
 #endif
 	put_user(argc,--sp);
 	current->mm->arg_start = (unsigned long) p;
@@ -298,10 +298,8 @@ do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	if (ex.a_data + ex.a_bss > rlim)
 		return -ENOMEM;
 
-	if (flush_old_exec(bprm))
-		return -ENOMEM;
-
 	/* OK, This is the point of no return */
+	flush_old_exec(bprm);
 
 	current->mm->end_code = ex.a_text +
 		(current->mm->start_code = N_TXTADDR(ex));
@@ -425,8 +423,8 @@ do_load_aout_library(int fd)
 		return -EACCES;
 
 	/* Seek into the file */
-	if (file->f_op->lseek) {
-		if ((error = file->f_op->lseek(inode, file, 0, 0)) != 0)
+	if (file->f_op->llseek) {
+		if ((error = file->f_op->llseek(inode, file, 0, 0)) != 0)
 			return -ENOEXEC;
 	} else
 		file->f_pos = 0;

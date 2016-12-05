@@ -9,7 +9,6 @@
  * bootup setup stuff..
  */
 
-#include <linux/config.h> /* CONFIG_BLK_DEV_RAM */
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>

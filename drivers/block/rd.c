@@ -422,7 +422,7 @@ done:
 /*
  * This routine loads in the ramdisk image.
  */
-static void rd_load_image(kdev_t device,int offset, int unit)
+static void rd_load_image(kdev_t device,int offset)
 {
 	struct inode inode, out_inode;
 	struct file infile, outfile;
@@ -433,7 +433,7 @@ static void rd_load_image(kdev_t device,int offset, int unit)
 	unsigned short rotate = 0;
 	char rotator[4] = { '|' , '/' , '-' , '\\' };
 
-	ram_device = MKDEV(MAJOR_NR, unit);
+	ram_device = MKDEV(MAJOR_NR, 0);
 
 	memset(&infile, 0, sizeof(infile));
 	memset(&inode, 0, sizeof(inode));
@@ -500,7 +500,7 @@ static void rd_load_image(kdev_t device,int offset, int unit)
 
 successful_load:
 	invalidate_buffers(device);
-	ROOT_DEV = MKDEV(MAJOR_NR,unit);
+	ROOT_DEV = MKDEV(MAJOR_NR,0);
 
 done:
 	if (infile.f_op->release)
@@ -509,21 +509,12 @@ done:
 }
 
 
-static void rd_load_disk(int n)
+void rd_load()
 {
-#ifdef CONFIG_BLK_DEV_INITRD
-	extern kdev_t real_root_dev;
-#endif	
-	
 	if (rd_doload == 0)
 		return;
 	
-	if (MAJOR(ROOT_DEV) != FLOPPY_MAJOR
-#ifdef CONFIG_BLK_DEV_INITRD	
-		&& MAJOR(real_root_dev) != FLOPPY_MAJOR
-#endif		
-	)
-			return;
+	if (MAJOR(ROOT_DEV) != FLOPPY_MAJOR) return;
 
 	if (rd_prompt) {
 #ifdef CONFIG_BLK_DEV_FD
@@ -534,24 +525,15 @@ static void rd_load_disk(int n)
 		wait_for_keypress();
 	}
 
-	rd_load_image(ROOT_DEV,rd_image_start,n);
+	rd_load_image(ROOT_DEV,rd_image_start);
 
 }
 
-void rd_load(void)
-{
-	rd_load_disk(0);
-}
-
-void rd_load_secondary(void)
-{
-	rd_load_disk(1);
-}
 
 #ifdef CONFIG_BLK_DEV_INITRD
 void initrd_load(void)
 {
-	rd_load_image(MKDEV(MAJOR_NR, INITRD_MINOR),0,0);
+	rd_load_image(MKDEV(MAJOR_NR, INITRD_MINOR),0);
 }
 #endif
 
@@ -582,7 +564,7 @@ static uch *window;
 static unsigned insize = 0;  /* valid bytes in inbuf */
 static unsigned inptr = 0;   /* index of next byte to be processed in inbuf */
 static unsigned outcnt = 0;  /* bytes in output buffer */
-static int exit_code = 0;
+static exit_code = 0;
 static long bytes_out = 0;
 static struct file *crd_infp, *crd_outfp;
 
@@ -676,13 +658,6 @@ static int
 crd_load(struct file * fp, struct file *outfp)
 {
 	int result;
-
-	insize = 0;  /* valid bytes in inbuf */
-	inptr = 0;   /* index of next byte to be processed in inbuf */
-	outcnt = 0;  /* bytes in output buffer */
-	exit_code = 0;
-	bytes_out = 0;
-	crc = 0xFFFFFFFF;
 	
 	crd_infp = fp;
 	crd_outfp = outfp;

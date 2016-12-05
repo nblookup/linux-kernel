@@ -2,7 +2,8 @@ USS Lite version 3.5.4 release notes
 ------------------------------------
 
 Most up to date information about this driver is available from 
-http://www.4front-tech.com/ossfree.
+http://www.4front-tech.com/usslite or http://personal.eunet.fi/pp/voxware
+(European mirror).
 
 
 
@@ -23,7 +24,7 @@ Linux versions later than 2.0.x.
 
 Packages "snd-util-3.5.tar.gz" and "snd-data-0.1.tar.Z"
 contain useful utilities to be used with this driver.
-See http://www.4front-tech.com/ossfree/getting.html for
+See http://www.4front-tech.com/usslite/getting.html for
 download instructions.
 
 If you are looking for the installation instructions, please
@@ -34,7 +35,7 @@ Supported soundcards
 
 See Readme.cards.
 
-Please check http://www.4front-tech.com/ossfree if you don't find
+Please check http://www.4front-tech.com/usslite if you don't find
 your soundcard there.
 
 Contributors
@@ -112,7 +113,7 @@ If you have some problems
 =========================
 
 Read the sound HOWTO (sunsite.unc.edu:/pub/Linux/docs/...?).
-Also look at the home page (http://www.4front-tech.com/ossfree). It may
+Also look at the home page (http://www.4front-tech.com/usslite). It may
 contain info about some recent bug fixes.
 
 It's likely that you have some problems when trying to use the sound driver
@@ -157,7 +158,7 @@ The following errors are likely with /dev/dsp and /dev/audio.
 	with impossible parameters. Check that the application is
 	for sound driver version 2.X or later.
 
-In general the printout of /dev/sndstat should tell what is the problem.
+In general the printout of of /dev/sndstat should tell what is the problem.
 It's possible that there are bugs in the sound driver but 99% of the problems
 reported to me are caused by somehow incorrect setup during "make config".
 
@@ -166,8 +167,8 @@ Best regards,
 Hannu
 
 Hannu Savolainen
-hannu@4front-tech.com	
-(Please check http://www.4front-tech.com/ossfree before mailing me).
+hannu@voxware.pp.fi, hannu@4front-tech.com	
+(Please check http://www.4front-tech.com/usslite before mailing me).
 
 Snail mail:	Hannu Savolainen
 		Hiekkalaiturintie 3 A 8

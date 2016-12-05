@@ -21,6 +21,7 @@
 #include <asm/segment.h>
 
 #include <linux/utsname.h>
+#include <linux/swapctl.h>
 
 /* External variables not in a header file. */
 extern int panic_timeout;
@@ -45,10 +46,10 @@ extern ctl_table net_table[];
 
 #ifdef CONFIG_PROC_FS
 
-static int proc_readsys(struct inode * inode, struct file * file,
-			char * buf, int count);
-static int proc_writesys(struct inode * inode, struct file * file,
-			 const char * buf, int count);
+static long proc_readsys(struct inode * inode, struct file * file,
+			char * buf, unsigned long count);
+static long proc_writesys(struct inode * inode, struct file * file,
+			 const char * buf, unsigned long count);
 static int proc_sys_permission(struct inode *, int);
 
 struct file_operations proc_sys_file_operations =
@@ -138,7 +139,7 @@ static ctl_table kern_table[] = {
 #ifdef CONFIG_ROOT_NFS
 	{KERN_NFSRNAME, "nfs-root-name", nfs_root_name, NFS_ROOT_NAME_LEN,
 	 0644, NULL, &proc_dostring, &sysctl_string },
-	{KERN_NFSRADDRS, "nfs-root-addrs", nfs_root_addrs, NFS_ROOT_ADDRS_LEN,
+	{KERN_NFSRNAME, "nfs-root-addrs", nfs_root_addrs, NFS_ROOT_ADDRS_LEN,
 	 0644, NULL, &proc_dostring, &sysctl_string },
 #endif
 #ifdef CONFIG_BINFMT_JAVA
@@ -179,7 +180,7 @@ int do_sysctl (int *name, int nlen,
 	struct ctl_table_header *tmp;
 	void *context;
 	
-	if (nlen <= 0 || nlen >= CTL_MAXNAME)
+	if (nlen == 0 || nlen >= CTL_MAXNAME)
 		return -ENOTDIR;
 	
 	error = verify_area(VERIFY_READ,name,nlen*sizeof(int));
@@ -200,7 +201,7 @@ int do_sysctl (int *name, int nlen,
 	do {
 		context = 0;
 		error = parse_table(name, nlen, oldval, oldlenp, 
-				    newval, newlen, tmp->ctl_table, &context);
+				    newval, newlen, root_table, &context);
 		if (context)
 			kfree(context);
 		if (error != -ENOTDIR)
@@ -227,7 +228,7 @@ static int in_egroup_p(gid_t grp)
 {
 	int	i;
 
-	if (grp == current->egid)
+	if (grp == current->euid)
 		return 1;
 
 	for (i = 0; i < NGROUPS; i++) {
@@ -306,8 +307,7 @@ int do_sysctl_strategy (ctl_table *table,
 	if (newval) 
 		op |= 002;
 	if (ctl_perm(table, op))
-		if( table->data != &securelevel || current->euid)
-			return -EPERM;
+		return -EPERM;
 
 	if (table->strategy) {
 		rc = table->strategy(table, name, nlen, oldval, oldlenp,
@@ -378,13 +378,12 @@ struct ctl_table_header *register_sysctl_table(ctl_table * table,
 	return tmp;
 }
 
-void unregister_sysctl_table(struct ctl_table_header * header)
+void unregister_sysctl_table(struct ctl_table_header * table)
 {
-	DLIST_DELETE(header, ctl_entry);
+	DLIST_DELETE(table, ctl_entry);
 #ifdef CONFIG_PROC_FS
-	unregister_proc_table(header->ctl_table, &proc_sys_root);
+	unregister_proc_table(table->ctl_table, &proc_sys_root);
 #endif
-	kfree(header);
 }
 
 /*
@@ -396,11 +395,9 @@ void unregister_sysctl_table(struct ctl_table_header * header)
 /* Scan the sysctl entries in table and add them all into /proc */
 static void register_proc_table(ctl_table * table, struct proc_dir_entry *root)
 {
-	struct proc_dir_entry *de, *tmp;
-	int exists;
+	struct proc_dir_entry *de;
 	
 	for (; table->ctl_name; table++) {
-		exists = 0;
 		/* Can't do anything without a proc name. */
 		if (!table->procname)
 			continue;
@@ -429,24 +426,12 @@ static void register_proc_table(ctl_table * table, struct proc_dir_entry *root)
 		}
 		/* Otherwise it's a subdir */
 		else  {
-			/* First check to see if it already exists */
-			for (tmp = root->subdir; tmp; tmp = tmp->next) {
-				if (tmp->namelen == de->namelen &&
-				    !memcmp(tmp->name,de->name,de->namelen)) {
-					exists = 1;
-					kfree (de);
-					de = tmp;
-				}
-			}
-			if (!exists) {
-				de->ops = &proc_dir_inode_operations;
-				de->nlink++;
-				de->mode |= S_IFDIR;
-			}
+			de->ops = &proc_dir_inode_operations;
+			de->nlink++;
+			de->mode |= S_IFDIR;
 		}
 		table->de = de;
-		if (!exists)
-			proc_register_dynamic(root, de);
+		proc_register_dynamic(root, de);
 		if (de->mode & S_IFDIR )
 			register_proc_table(table->child, de);
 	}
@@ -465,24 +450,20 @@ static void unregister_proc_table(ctl_table * table, struct proc_dir_entry *root
 			}
 			unregister_proc_table(table->child, de);
 		}
-		/* Don't unregister proc directories which still have
-		   entries... */
-		if (!((de->mode & S_IFDIR) && de->subdir)) {
-			proc_unregister(root, de->low_ino);
-			table->de = NULL;
-			kfree(de);			
-		}
+		proc_unregister(root, de->low_ino);
+		kfree(de);			
 	}
 }
 
 
-static int do_rw_proc(int write, struct inode * inode, struct file * file,
-		      char * buf, int count)
+static long do_rw_proc(int write, struct inode * inode, struct file * file,
+		      char * buf, unsigned long count)
 {
-	int error, op;
+	int op;
 	struct proc_dir_entry *de;
 	struct ctl_table *table;
 	size_t res;
+	long error;
 	
 	error = verify_area(write ? VERIFY_READ : VERIFY_WRITE, buf, count);
 	if (error)
@@ -505,14 +486,14 @@ static int do_rw_proc(int write, struct inode * inode, struct file * file,
 	return res;
 }
 
-static int proc_readsys(struct inode * inode, struct file * file,
-			char * buf, int count)
+static long proc_readsys(struct inode * inode, struct file * file,
+			char * buf, unsigned long count)
 {
 	return do_rw_proc(0, inode, file, buf, count);
 }
 
-static int proc_writesys(struct inode * inode, struct file * file,
-			 const char * buf, int count)
+static long proc_writesys(struct inode * inode, struct file * file,
+			 const char * buf, unsigned long count)
 {
 	return do_rw_proc(1, inode, file, (char *) buf, count);
 }

@@ -78,14 +78,10 @@ reply.
 		  the position within the series.
   
     block	Floppy disks
-		  0 = /dev/fd0		Controller 1, drive 1 autodetect
-		  1 = /dev/fd1		Controller 1, drive 2 autodetect
-		  2 = /dev/fd2		Controller 1, drive 3 autodetect
-		  3 = /dev/fd3		Controller 1, drive 4 autodetect
-		128 = /dev/fd4		Controller 2, drive 1 autodetect
-		129 = /dev/fd5		Controller 2, drive 2 autodetect
-		130 = /dev/fd6		Controller 2, drive 3 autodetect
-		131 = /dev/fd7		Controller 2, drive 4 autodetect
+		  0 = /dev/fd0		First floppy disk autodetect
+		  1 = /dev/fd1		Second floppy disk autodetect
+		  2 = /dev/fd2		Third floppy disk autodetect
+		  3 = /dev/fd3		Fourth floppy disk autodetect
 
 		To specify format, add to the autodetect device number:
 		  0 = /dev/fd?		Autodetect format
@@ -261,7 +257,7 @@ reply.
 		      ...
 
 		The metadisk driver is used to span a
-		file system across multiple physical disks.
+		filesystem across multiple physical disks.
 
  10 char	Non-serial mice, misc features
 		  0 = /dev/logibm	Logitech bus mouse
@@ -345,11 +341,11 @@ reply.
 		 33 = /dev/patmgr1	Sequencer patch manager
 		 34 = /dev/midi02	Third MIDI port
 		 50 = /dev/midi03	Fourth MIDI port
-    block	BIOS hard drive callback support
-		  0 = /dev/dos_hda	First BIOS hard drive whole disk
-		 64 = /dev/dos_hdb	Second BIOS hard drive whole disk
-		128 = /dev/dos_hdc	Third BIOS hard drive whole disk
-		192 = /dev/dos_hdd	Fourth BIOS hard drive whole disk
+    block	BIOS harddrive callback support
+		  0 = /dev/dos_hda	First BIOS harddrive whole disk
+		 64 = /dev/dos_hdb	Second BIOS harddrive whole disk
+		128 = /dev/dos_hdc	Third BIOS harddrive whole disk
+		192 = /dev/dos_hdd	Fourth BIOS harddrive whole disk
 
 		Partitions are handled in the same way as IDE disks
 		(see major number 3).
@@ -854,7 +850,7 @@ exist, they should have the following uses.
 /dev/cdwriter	CD-writer	symbolic	Current CD-writer device
 /dev/scanner	scanner		symbolic	Current scanner device
 /dev/modem	modem port	symbolic	Current dialout device
-/dev/root	root device	symbolic	Current root file system
+/dev/root	root device	symbolic	Current root filesystem
 /dev/swap	swap device	symbolic	Current swap device
 
 /dev/modem should not be used for a modem which supports dialin as

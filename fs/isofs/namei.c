@@ -58,9 +58,8 @@ static int isofs_match(int len,const char * name, const char * compare, int dlen
  * itself (as an inode number). It does NOT read the inode of the
  * entry - you'll have to do that yourself if you want to.
  */
-static struct buffer_head *
-isofs_find_entry(struct inode * dir, const char * name, int namelen,
-		 unsigned long * ino, unsigned long * ino_back)
+static struct buffer_head * isofs_find_entry(struct inode * dir,
+	const char * name, int namelen, unsigned long * ino, unsigned long * ino_back)
 {
 	unsigned long bufsize = ISOFS_BUFFER_SIZE(dir);
 	unsigned char bufbits = ISOFS_BUFFER_BITS(dir);
@@ -69,9 +68,8 @@ isofs_find_entry(struct inode * dir, const char * name, int namelen,
 	void * cpnt = NULL;
 	unsigned int old_offset;
 	unsigned int backlink;
-	int dlen, match;
+	int dlen, rrflag, match;
 	char * dpnt;
-	unsigned char *page = NULL;
 	struct iso_directory_record * de;
 	char c;
 
@@ -102,7 +100,7 @@ isofs_find_entry(struct inode * dir, const char * name, int namelen,
 				 + ISOFS_BLOCK_SIZE);
 			block = isofs_bmap(dir,f_pos>>bufbits);
 			if (!block || !(bh = bread(dir->i_dev,block,bufsize)))
-				return NULL;
+				return 0;
 			continue; /* Will kick out if past end of directory */
 		}
 
@@ -116,7 +114,7 @@ isofs_find_entry(struct inode * dir, const char * name, int namelen,
 		        unsigned int frag1;
 			frag1 = bufsize - old_offset;
 			cpnt = kmalloc(*((unsigned char *) de),GFP_KERNEL);
-			if (!cpnt) return NULL;
+			if (!cpnt) return 0;
 			memcpy(cpnt, bh->b_data + old_offset, frag1);
 
 			de = (struct iso_directory_record *) cpnt;
@@ -125,24 +123,21 @@ isofs_find_entry(struct inode * dir, const char * name, int namelen,
 			block = isofs_bmap(dir,f_pos>>bufbits);
 			if (!block || !(bh = bread(dir->i_dev,block,bufsize))) {
 			        kfree(cpnt);
-				return NULL;
+				return 0;
 			};
 			memcpy((char *)cpnt+frag1, bh->b_data, offset);
 		}
-
-		dlen = de->name_len[0];
-		dpnt = de->name;
-
+		
 		/* Handle the '.' case */
 		
-		if (*dpnt==0 && dlen==1) {
+		if (de->name[0]==0 && de->name_len[0]==1) {
 			inode_number = dir->i_ino;
 			backlink = 0;
 		}
 		
 		/* Handle the '..' case */
 
-		else if (*dpnt==1 && dlen==1) {
+		if (de->name[0]==1 && de->name_len[0]==1) {
 #if 0
 			printk("Doing .. (%d %d)",
 			       dir->i_sb->s_firstdatazone,
@@ -153,39 +148,31 @@ isofs_find_entry(struct inode * dir, const char * name, int namelen,
 			else
 				inode_number = dir->i_ino;
 			backlink = 0;
+		}
+    
+		dlen = de->name_len[0];
+		dpnt = de->name;
+		/* Now convert the filename in the buffer to lower case */
+		rrflag = get_rock_ridge_filename(de, &dpnt, &dlen, dir);
+		if (rrflag) {
+		  if (rrflag == -1) goto out; /* Relocated deep directory */
 		} else {
-			if (dir->i_sb->u.isofs_sb.s_rock ||
-			    dir->i_sb->u.isofs_sb.s_joliet_level) {
-				page = (unsigned char *)
-					__get_free_page(GFP_KERNEL);
-				if (!page) return NULL;
-			}
-			if (dir->i_sb->u.isofs_sb.s_rock &&
-			    ((i = get_rock_ridge_filename(de, page, dir)))){
-				if (i == -1)
-					goto out;/* Relocated deep directory */
-				dlen = i;
-				dpnt = page;
-			} else if (dir->i_sb->u.isofs_sb.s_joliet_level) {
-				dlen = get_joliet_filename(de, dir, page);
-				dpnt = page;
-			} else if (dir->i_sb->u.isofs_sb.s_mapping == 'n') {
-				for (i = 0; i < dlen; i++) {
-					c = dpnt[i];
-					/* lower case */
-					if (c >= 'A' && c <= 'Z') c |= 0x20;
-					if (c == ';' && i == dlen-2 && dpnt[i+1] == '1') {
-						dlen -= 2;
-						break;
-					}
-					if (c == ';') c = '.';
-					dpnt[i] = c;
-				}
-				/* This allows us to match with and without
-				 * a trailing period. */
-				if(dpnt[dlen-1] == '.' && namelen == dlen-1)
-					dlen--;
-			}
+		  if(dir->i_sb->u.isofs_sb.s_mapping == 'n') {
+		    for (i = 0; i < dlen; i++) {
+		      c = dpnt[i];
+		      if (c >= 'A' && c <= 'Z') c |= 0x20;  /* lower case */
+		      if (c == ';' && i == dlen-2 && dpnt[i+1] == '1') {
+			dlen -= 2;
+			break;
+		      }
+		      if (c == ';') c = '.';
+		      de->name[i] = c;
+		    }
+		    /* This allows us to match with and without a trailing
+		       period.  */
+		    if(dpnt[dlen-1] == '.' && namelen == dlen-1)
+		      dlen--;
+		  }
 		}
 		/*
 		 * Skip hidden or associated files unless unhide is set 
@@ -203,7 +190,7 @@ isofs_find_entry(struct inode * dir, const char * name, int namelen,
 			cpnt = NULL;
 		}
 
-		if (page) free_page((unsigned long) page);
+		if(rrflag) kfree(dpnt);
 		if (match) {
 			if(inode_number == -1) {
 				/* Should only happen for the '..' entry */
@@ -252,16 +239,12 @@ int isofs_lookup(struct inode * dir,const char * name, int len,
 
 	if (dcache_lookup(dir, name, len, &ino)) ino_back = dir->i_ino;
 
-
 	if (!ino) {
 		char *lcname;
 
-		/* First try the original name. If that doesn't work and the fs
-		 * was mounted with check=relaxed, convert the name to lower
-		 * case and try again.
-		 */
-		if (!(bh = isofs_find_entry(dir,name,len, &ino, &ino_back))
-		    && dir->i_sb->u.isofs_sb.s_name_check == 'r'
+		/* If mounted with check=relaxed (and most likely norock),
+		   then first convert this name to lower case. */
+		if (dir->i_sb->u.isofs_sb.s_name_check == 'r'
 		    && (lcname = kmalloc(len, GFP_KERNEL)) != NULL) {
 			int i;
 			char c;
@@ -273,15 +256,15 @@ int isofs_lookup(struct inode * dir,const char * name, int len,
 			}
 			bh = isofs_find_entry(dir,lcname,len, &ino, &ino_back);
 			kfree(lcname);
-		}
+		} else
+			bh = isofs_find_entry(dir,name,len, &ino, &ino_back);
 
 		if (!bh) {
 			iput(dir);
 	  		return -ENOENT;
 		}
-		if (ino_back == dir->i_ino) {
+		if (ino_back == dir->i_ino)
 			dcache_add(dir, name, len, ino);
-		}
 		brelse(bh);
 	}
 
@@ -297,7 +280,7 @@ int isofs_lookup(struct inode * dir,const char * name, int len,
 	*/
 	
 	if (ino_back && !(*result)->i_pipe && (*result)->i_sb == dir->i_sb) {
-		(*result)->u.isofs_i.i_backlink = ino_back; 
+	  (*result)->u.isofs_i.i_backlink = ino_back; 
 	}
 	
 	iput(dir);

@@ -402,18 +402,10 @@ seeq8005_send_packet(struct sk_buff *skb, struct device *dev)
 	if (set_bit(0, (void*)&dev->tbusy) != 0)
 		printk("%s: Transmitter access conflict.\n", dev->name);
 	else {
-		short length = skb->len;
+		short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
 		unsigned char *buf = skb->data;
 
-		if (length < ETH_ZLEN) {
-			if (!(skb = skb_padto(skb, ETH_ZLEN))) {
-				dev->tbusy = 0;
-				return 0;
-			}
-			length = ETH_ZLEN;
-		}
-
-		hardware_send_packet(dev, buf, length);
+		hardware_send_packet(dev, buf, length); 
 		dev->trans_start = jiffies;
 	}
 	dev_kfree_skb (skb, FREE_WRITE);

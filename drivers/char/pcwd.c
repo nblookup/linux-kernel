@@ -15,9 +15,6 @@
  *		check_region command due to Alan's suggestion.
  * 960821	Made changes to compile in newer 2.0.x kernels.  Added
  *		"cold reboot sense" entry.
- * 970819	Fixed use of is_open flag so pcwd_write does not always return
- *		-EIO; this prevented tickling. Enabled board on open and
- *		disabled on close.
  */
 
 #include <linux/module.h>
@@ -49,11 +46,7 @@
 #define WD_TIMERRESET_PORT2     0x370	/* Reset port - second choice */
 #define WD_CTLSTAT_PORT1        0x271	/* Control port - first choice */
 #define WD_CTLSTAT_PORT2        0x371	/* Control port - second choice */
-#define WD_CTLSTAT2_PORT1       0x272   /* Control port#2 - first choice */
-#define WD_CTLSTAT2_PORT2       0x372   /* Control port#2 - second choice */
-#define WD_DISABLE_PORT1        0x273   /* Disable port - first choice  */
-#define WD_DISABLE_PORT2        0x373   /* Disable port - second choice  */
-#define	WD_PORT_EXTENT		4	/* Takes up four addresses */
+#define	WD_PORT_EXTENT		2	/* Takes up two addresses */
 
 #define WD_WDRST                0x01	/* Previously reset state */
 #define WD_T110                 0x02	/* Temperature overheat sense */
@@ -61,9 +54,7 @@
 #define WD_RLY2                 0x08	/* External relay triggered */
 #define WD_SRLY2                0x80	/* Software external relay triggered */
 
-
 static int current_ctlport, current_readport;
-static int current_ctlport2, current_disport;
 static int is_open, is_eof;
 
 int pcwd_checkcard(void)
@@ -202,7 +193,7 @@ static int pcwd_write(struct inode *inode, struct file *file, const char *data,
 
 	outb_p(wdrst_stat, current_ctlport);
 
-	return(len);
+	return(1);
 }
 
 static int pcwd_ioctl(struct inode *inode, struct file *file,
@@ -244,22 +235,10 @@ static int pcwd_ioctl(struct inode *inode, struct file *file,
 static int pcwd_open(struct inode *ino, struct file *filep)
 {
 #ifdef	DEBUG
-	int before, after;
-
-	before = inb_p (current_ctlport2);
-#endif
-	if (is_open)
-		return -EIO;
-
-	/*  Enable the port  */
-	outb_p (0, current_disport);
-#ifdef	DEBUG
-	after = inb_p (current_ctlport2);
-	printk ("pcwd: open: control status #2 (b,a): %x, %x\n", before,after);
+	printk("pcwd: open request\n");
 #endif
 
 	MOD_INC_USE_COUNT;
-	is_open = 1;
 	is_eof = 0;
 	return(0);
 }
@@ -270,10 +249,6 @@ static void pcwd_close(struct inode *ino, struct file *filep)
 	printk("pcwd: close request\n");
 #endif
 
-	is_open = 0;
-	/*  Disable the board  */
-	outb_p (0xa5, current_disport);
-	outb_p (0xa5, current_disport);
 	MOD_DEC_USE_COUNT;
 }
 
@@ -315,8 +290,6 @@ int pcwatchdog_init(void)
 
 	current_ctlport = WD_TIMERRESET_PORT1;
 	current_readport = WD_CTLSTAT_PORT1;
-	current_ctlport2 = WD_CTLSTAT2_PORT1;
-	current_disport = WD_DISABLE_PORT1;
 
 	if (!pcwd_checkcard()) {
 #ifdef	DEBUG
@@ -325,8 +298,6 @@ int pcwatchdog_init(void)
 
 		current_ctlport = WD_TIMERRESET_PORT2;
 		current_readport = WD_CTLSTAT_PORT2;
-		current_ctlport2 = WD_CTLSTAT2_PORT2;
-		current_disport = WD_DISABLE_PORT2;
 
 		if (!pcwd_checkcard()) {
 			printk("pcwd: No card detected, or wrong port assigned.\n");
@@ -356,11 +327,8 @@ int pcwatchdog_init(void)
 #ifdef	MODULE
 void cleanup_module(void)
 {
-	/*  Disable the board  */
-	outb_p (0xa5, current_disport);
-	outb_p (0xa5, current_disport);
 	misc_deregister(&pcwd_miscdev);
-	release_region(current_ctlport, WD_PORT_EXTENT);
+	release_region(current_ctlport, 2);
 #ifdef	DEBUG
 	printk("pcwd: Cleanup successful.\n");
 #endif

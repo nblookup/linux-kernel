@@ -404,7 +404,7 @@ struct proc_dir_entry proc_scsi_aha152x = {
 
 /* END OF DEFINES */
 
-extern unsigned long loops_per_sec;
+extern long loops_per_sec;
 
 #define DELAY_DEFAULT 100
 
@@ -523,19 +523,19 @@ static unsigned short ports[] =
 
 #if !defined(SKIP_BIOSTEST)
 /* possible locations for the Adaptec BIOS */
-static void *addresses[] =
+static unsigned int addresses[] =
 {
-  (void *) 0xdc000,   /* default first */
-  (void *) 0xc8000,
-  (void *) 0xcc000,
-  (void *) 0xd0000,
-  (void *) 0xd4000,
-  (void *) 0xd8000,
-  (void *) 0xe0000,
-  (void *) 0xeb800,   /* VTech Platinum SMP */
-  (void *) 0xf0000,
+  0xdc000,   /* default first */
+  0xc8000,
+  0xcc000,
+  0xd0000,
+  0xd4000,
+  0xd8000,
+  0xe0000,
+  0xeb800,   /* VTech Platinum SMP */
+  0xf0000,
 };
-#define ADDRESS_COUNT (sizeof(addresses) / sizeof(void *))
+#define ADDRESS_COUNT (sizeof(addresses) / sizeof(unsigned int))
 
 /* signatures for various AIC-6[23]60 based controllers.
    The point in detecting signatures is to avoid useless and maybe
@@ -545,14 +545,12 @@ static void *addresses[] =
    needed anyway.  May be an information whether or not the BIOS supports
    extended translation could be also useful here. */
 static struct signature {
-  char *signature;
+  unsigned char *signature;
   int  sig_offset;
   int  sig_length;
 } signatures[] =
 {
   { "Adaptec AHA-1520 BIOS",      0x102e, 21 },  /* Adaptec 152x */
-  { "Adaptec AHA-1520B",            0x0b, 17 },  /* Adaptec 152x rev B */
-  { "Adaptec AHA-1520B/1522B",    0x3e20, 23 },  /* Adaptec 1520B/1522B */
   { "Adaptec ASW-B626 BIOS",      0x1029, 21 },  /* on-board controller */
   { "Adaptec BIOS: ASW-B626",       0x0f, 22 },  /* on-board controller */
   { "Adaptec ASW-B626 S2",        0x2e6c, 19 },  /* on-board controller */
@@ -611,12 +609,11 @@ static inline Scsi_Cmnd *remove_SC(Scsi_Cmnd **SC, int target, int lun)
       prev = ptr, ptr = (Scsi_Cmnd *) ptr->host_scribble)
     ;
 
-  if(ptr){
+  if(ptr)
     if(prev)
       prev->host_scribble = ptr->host_scribble;
     else
       *SC= (Scsi_Cmnd *) ptr->host_scribble;
-  }
 
   return ptr;
 }
@@ -898,9 +895,8 @@ int aha152x_detect(Scsi_Host_Template * tpnt)
     ok=0;
     for(i=0; i < ADDRESS_COUNT && !ok; i++)
       for(j=0; (j < SIGNATURE_COUNT) && !ok; j++)
-        ok=!memcmp((void *) addresses[i]+signatures[j].sig_offset,
-                   (void *) signatures[j].signature,
-                   (int) signatures[j].sig_length);
+      	ok = check_signature(addresses[i]+signatures[j].sig_offset,
+      		signatures[j].signature, signatures[j].sig_length);
 
     if(!ok && setup_count==0)
       return 0;
@@ -1536,7 +1532,7 @@ void aha152x_done(struct Scsi_Host *shpnt, int error)
 void aha152x_intr(int irqno, void *dev_id, struct pt_regs * regs)
 {
   struct Scsi_Host *shpnt = aha152x_host[irqno-IRQ_MIN];
-  unsigned long flags;
+  unsigned int flags;
   int done=0, phase;
 
 #if defined(DEBUG_RACE)
@@ -1727,7 +1723,7 @@ void aha152x_intr(int irqno, void *dev_id, struct pt_regs * regs)
 
   /* we are waiting for the result of a selection attempt */
   if(CURRENT_SC->SCp.phase & in_selection) {
-    if(TESTLO(SSTAT1, SELTO)) {
+    if(TESTLO(SSTAT1, SELTO))
       /* no timeout */
       if(TESTHI(SSTAT0, SELDO)) {
         /* clear BUS FREE interrupt */
@@ -1803,7 +1799,7 @@ void aha152x_intr(int irqno, void *dev_id, struct pt_regs * regs)
         return;
       } else
         aha152x_panic(shpnt, "neither timeout nor selection\007");
-    } else {
+    else {
 #if defined(DEBUG_SELECTION) || defined(DEBUG_PHASES)
       if(HOSTDATA(shpnt)->debug & (debug_selection|debug_phases))
         printk("SELTO, ");

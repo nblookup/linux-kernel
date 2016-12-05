@@ -21,10 +21,6 @@
 
 extern void die_if_kernel(const char *,struct pt_regs *,long);
 
-asmlinkage void do_invalid_op (struct pt_regs *, unsigned long);
-
-extern int pentium_f00f_bug;
-
 /*
  * This routine handles page faults.  It determines the address,
  * and the problem, and then passes it off to one of the appropriate
@@ -49,7 +45,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
 	int write;
 
 	/* get the address */
-	__asm__("movl %%cr2,%0" : "=r" (address));
+	__asm__("movl %%cr2,%0":"=r" (address));
 	down(&mm->mmap_sem);
 	vma = find_vma(mm, address);
 	if (!vma)
@@ -121,53 +117,34 @@ bad_area:
 		force_sig(SIGSEGV, tsk);
 		return;
 	}
-
-	/*
-	 * Pentium F0 0F C7 C8 bug workaround:
-	 */
-	if ( pentium_f00f_bug ) {
-		unsigned long nr;
-		extern struct {
-			unsigned short limit;
-			unsigned long addr __attribute__((packed));
-		} idt_descriptor;
-
-		nr = (address - idt_descriptor.addr) >> 3;
-
-		if (nr == 6) {
-			do_invalid_op(regs, 0);
-			return;
-		}
-	}
-
-
 /*
  * Oops. The kernel tried to access some bad page. We'll have to
  * terminate things with extreme prejudice.
  *
  * First we check if it was the bootup rw-test, though..
  */
-	if (wp_works_ok < 0 && address == TASK_SIZE && (error_code & 1)) {
+	if (wp_works_ok < 0 && !address && (error_code & 1)) {
 		wp_works_ok = 1;
 		pg0[0] = pte_val(mk_pte(0, PAGE_SHARED));
 		flush_tlb();
 		printk("This processor honours the WP bit even when in supervisor mode. Good.\n");
 		return;
 	}
-	if ((unsigned long) (address-TASK_SIZE) < PAGE_SIZE)
+	if (address < PAGE_SIZE) {
 		printk(KERN_ALERT "Unable to handle kernel NULL pointer dereference");
-	else
+		pg0[0] = pte_val(mk_pte(0, PAGE_SHARED));
+	} else
 		printk(KERN_ALERT "Unable to handle kernel paging request");
 	printk(" at virtual address %08lx\n",address);
 	__asm__("movl %%cr3,%0" : "=r" (page));
 	printk(KERN_ALERT "current->tss.cr3 = %08lx, %%cr3 = %08lx\n",
 		tsk->tss.cr3, page);
-	page = ((unsigned long *) page)[address >> 22];
+	page = ((unsigned long *) __va(page))[address >> 22];
 	printk(KERN_ALERT "*pde = %08lx\n", page);
 	if (page & 1) {
 		page &= PAGE_MASK;
 		address &= 0x003ff000;
-		page = ((unsigned long *) page)[address >> PAGE_SHIFT];
+		page = ((unsigned long *) __va(page))[address >> PAGE_SHIFT];
 		printk(KERN_ALERT "*pte = %08lx\n", page);
 	}
 	die_if_kernel("Oops", regs, error_code);

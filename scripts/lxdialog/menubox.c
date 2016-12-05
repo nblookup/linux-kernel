@@ -29,7 +29,7 @@ static int menu_width, item_x;
 static void
 print_item (WINDOW * win, const char *item, int choice, int selected, int hotkey)
 {
-    int j;
+    int i, j;
     char menu_item[menu_width+1];
 
     strncpy(menu_item, item, menu_width);
@@ -39,15 +39,8 @@ print_item (WINDOW * win, const char *item, int choice, int selected, int hotkey
     /* Clear 'residue' of last item */
     wattrset (win, menubox_attr);
     wmove (win, choice, 0);
-#if OLD_NCURSES
-    {
-        int i;
-        for (i = 0; i < menu_width; i++)
-	    waddch (win, ' ');
-    }
-#else
-    wclrtoeol(win);
-#endif
+    for (i = 0; i < menu_width; i++)
+	waddch (win, ' ');
     wattrset (win, selected ? item_selected_attr : item_attr);
     mvwaddstr (win, choice, item_x, menu_item);
     if (hotkey) {
@@ -148,7 +141,6 @@ dialog_menu (const char *title, const char *prompt, int height, int width,
     for (i = 0; i < width - 2; i++)
 	waddch (dialog, ACS_HLINE);
     wattrset (dialog, dialog_attr);
-    wbkgdset (dialog, dialog_attr & A_COLOR);
     waddch (dialog, ACS_RTEE);
 
     if (title != NULL) {

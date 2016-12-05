@@ -244,8 +244,6 @@ struct task_struct {
 	struct mm_struct *mm;
 /* signal handlers */
 	struct signal_struct *sig;
-/* privileged execution counters, for exit_signal permission checking */
-	int priv, ppriv;
 #ifdef __SMP__
 	int processor;
 	int last_processor;
@@ -311,7 +309,6 @@ struct task_struct {
 /* files */	&init_files, \
 /* mm */	&init_mm, \
 /* signals */	&init_signals, \
-/* priv */	0, 0, \
 }
 
 extern struct   mm_struct init_mm;
@@ -327,7 +324,7 @@ extern struct task_struct *current_set[NR_CPUS];
 extern unsigned long volatile jiffies;
 extern unsigned long itimer_ticks;
 extern unsigned long itimer_next;
-extern volatile struct timeval xtime;
+extern struct timeval xtime;
 extern int need_resched;
 extern void do_timer(struct pt_regs *);
 
@@ -345,7 +342,7 @@ extern void wake_up(struct wait_queue ** p);
 extern void wake_up_interruptible(struct wait_queue ** p);
 extern void wake_up_process(struct task_struct * tsk);
 
-extern void notify_parent(struct task_struct * tsk, int signal);
+extern void notify_parent(struct task_struct * tsk);
 extern void force_sig(unsigned long sig,struct task_struct * p);
 extern int send_sig(unsigned long sig,struct task_struct * p,int priv);
 extern int in_group_p(gid_t grp);
@@ -457,7 +454,7 @@ extern inline void select_wait(struct wait_queue ** wait_address, select_table *
 		return;
 	if (p->nr >= __MAX_SELECT_TABLE_ENTRIES)
 		return;
-	entry = p->entry + p->nr;
+ 	entry = p->entry + p->nr;
 	entry->wait_address = wait_address;
 	entry->wait.task = current;
 	entry->wait.next = NULL;

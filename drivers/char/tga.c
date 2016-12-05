@@ -10,7 +10,6 @@
  * This module exports the console io support for DEC's TGA
  */
 
-#include <linux/config.h> /* CONFIG_VGA_CONSOLE */
 #include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
@@ -40,7 +39,6 @@
 
 extern void register_console(void (*proc)(const char *));
 extern void console_print(const char *);
-extern void set_palette (void); /* vga.c */
 
 /* TGA hardware description (minimal) */
 /*
@@ -203,7 +201,7 @@ void tga_init_video(void);
 void tga_clear_screen(void);
 
 void
-tga_set_palette (void)
+set_palette (void)
 {
   int i, j;
 
@@ -235,7 +233,7 @@ tga_set_palette (void)
 }
 
 void
-tga_set_origin(unsigned short offset)
+__set_origin(unsigned short offset)
 {
   /*
    * should not be called, but if so, do nothing...
@@ -246,7 +244,7 @@ tga_set_origin(unsigned short offset)
  * Hide the cursor from view, during blanking, usually...
  */
 void
-tga_hide_cursor(void)
+hide_cursor(void)
 {
 	unsigned long flags;
 	save_flags(flags); cli();
@@ -261,7 +259,7 @@ tga_hide_cursor(void)
 }
 
 void
-tga_set_cursor(int currcons)
+set_cursor(int currcons)
 {
   unsigned int idx, xt, yt, row, col;
   unsigned long flags;
@@ -269,10 +267,8 @@ tga_set_cursor(int currcons)
   if (currcons != fg_console || console_blanked || vcmode == KD_GRAPHICS)
     return;
 
-#if 0
   if (__real_origin != __origin)
-    tga_set_origin(__real_origin);
-#endif
+    __set_origin(__real_origin);
 
   save_flags(flags); cli();
 
@@ -304,12 +300,12 @@ tga_set_cursor(int currcons)
     }
 
   } else
-    tga_hide_cursor();
+    hide_cursor();
   restore_flags(flags);
 }
 
 unsigned long
-tga_init(unsigned long kmem_start, const char **display_desc)
+con_type_init(unsigned long kmem_start, const char **display_desc)
 {
         can_do_color = 1;
 
@@ -332,7 +328,7 @@ tga_init(unsigned long kmem_start, const char **display_desc)
  * the VGA version of set_scrmem() has some direct VGA references.
  */
 void
-tga_get_scrmem(int currcons)
+get_scrmem(int currcons)
 {
 	memcpyw((unsigned short *)vc_scrbuf[currcons],
 		(unsigned short *)origin, video_screen_size);
@@ -342,7 +338,7 @@ tga_get_scrmem(int currcons)
 }
 
 void
-tga_set_scrmem(int currcons, long offset)
+set_scrmem(int currcons, long offset)
 {
 	if (video_mem_term - video_mem_base < offset + video_screen_size)
 	  offset = 0;	/* strange ... */
@@ -361,7 +357,7 @@ tga_set_scrmem(int currcons, long offset)
  * for now, we will use/allow *only* our built-in font...
  */
 int
-tga_set_get_font(char * arg, int set, int ch512)
+set_get_font(char * arg, int set, int ch512)
 {
 	return -EINVAL;
 }
@@ -375,7 +371,7 @@ tga_set_get_font(char * arg, int set, int ch512)
  * for now, we only support the built-in font...
  */
 int
-tga_adjust_height(unsigned long fontheight)
+con_adjust_height(unsigned long fontheight)
 {
 	return -EINVAL;
 }
@@ -390,7 +386,7 @@ tga_adjust_height(unsigned long fontheight)
  */
 
 int
-tga_set_get_cmap(unsigned char * arg, int set) {
+set_get_cmap(unsigned char * arg, int set) {
 	int i;
 
 	i = verify_area(set ? VERIFY_READ : VERIFY_WRITE, (void *)arg, 16*3);
@@ -428,16 +424,16 @@ tga_set_get_cmap(unsigned char * arg, int set) {
  * dummy routines for the VESA blanking code, which is VGA only,
  * so we don't have to carry that stuff around for the TGA...
  */
-void tga_vesa_powerdown(void)
+void vesa_powerdown(void)
 {
 }
-void tga_vesa_blank(void)
+void vesa_blank(void)
 {
 }
-void tga_vesa_unblank(void)
+void vesa_unblank(void)
 {
 }
-void tga_set_vesa_blanking(const unsigned long arg)
+void set_vesa_blanking(const unsigned long arg)
 {
 }
 
@@ -445,13 +441,9 @@ void tga_set_vesa_blanking(const unsigned long arg)
  * video init code, called from within the PCI bus probing code;
  * when TGA console is configured, at the end of the probing code,
  * we call here to look for a TGA device, and proceed...
- *
- * note that this code MUST be called BEFORE console_init/con_init,
- * so that either VGA or TGA are set up but not both. we had to move
- * console_init to after pci_init in start_kernel to assure this.
  */
 void
-tga_console_find(void)
+tga_console_init(void)
 {
 	unsigned char pci_bus, pci_devfn;
 	int status;
@@ -485,6 +477,10 @@ tga_console_find(void)
 	tga_init_video();
 	tga_clear_screen();
 
+	/*
+	 * FINALLY, we can register TGA as console (whew!)
+	 */
+	register_console(console_print);
 }
 
 unsigned char PLLbits[7] = { 0x80, 0x04, 0x00, 0x24, 0x44, 0x80, 0xb8 };

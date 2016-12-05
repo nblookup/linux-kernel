@@ -60,12 +60,8 @@ struct msghdr
 #define AF_BRIDGE	7	/* Multiprotocol bridge 	*/
 #define AF_AAL5		8	/* Reserved for Werner's ATM 	*/
 #define AF_X25		9	/* Reserved for X.25 project 	*/
-#ifdef LINUX_2_1_X
 #define AF_INET6	10	/* IP version 6			*/
-#endif
-#define AF_ROSE		11	/* Amateur Radio X.25 PLP       */
-#define AF_MAX		13	/* For now.. */
-#define AF_PACKET	17	/* Forward compat hook		*/
+#define AF_MAX		12	/* For now.. */
 
 /* Protocol families, same as address families. */
 #define PF_UNSPEC	AF_UNSPEC
@@ -78,12 +74,10 @@ struct msghdr
 #define PF_BRIDGE	AF_BRIDGE
 #define PF_AAL5		AF_AAL5
 #define PF_X25		AF_X25
-#ifdef LINUX_2_1_X
 #define PF_INET6	AF_INET6
-#endif
-#define	PF_ROSE		AF_ROSE
+
 #define PF_MAX		AF_MAX
-#define PF_PACKET	AF_PACKET
+
 /* Maximum queue length specifiable by listen.  */
 #define SOMAXCONN	128
 
@@ -100,7 +94,6 @@ struct msghdr
 #define SOL_AX25	257
 #define SOL_ATALK	258
 #define	SOL_NETROM	259
-#define	SOL_ROSE	260
 #define SOL_TCP		6
 #define SOL_UDP		17
 

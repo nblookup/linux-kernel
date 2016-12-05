@@ -1,5 +1,3 @@
-#include <linux/module.h>
-
 #include <linux/config.h>
 #include <linux/delay.h>
 #include <linux/signal.h>
@@ -686,7 +684,6 @@ AM53C974_write_8(CNTLREG1, CNTLREG1_DISR | instance->this_id);
 AM53C974_write_8(CMDREG, CMDREG_RBUS);     /* reset SCSI bus */
 udelay(10);
 AM53C974_config_after_reset(instance);
-udelay(500000);
 return(1);
 }
 
@@ -1806,7 +1803,11 @@ if (cfifo) {
    AM53C974_write_8(CMDREG, CMDREG_CFIFO); /* clear FIFO */
    }                  
 
+#ifdef AM53C974_PROHIBIT_DISCONNECT
+tmp[0] = IDENTIFY(0, cmd->lun);
+#else
 tmp[0] = IDENTIFY(1, cmd->lun);
+#endif
 
 #ifdef SCSI2
 if (cmd->device->tagged_queue && (tag != TAG_NONE)) {
@@ -2204,7 +2205,7 @@ return(SCSI_ABORT_NOT_RUNNING);
 * 
 * Returns : status (SCSI_ABORT_SUCCESS)
 **************************************************************************/
-int AM53C974_reset(Scsi_Cmnd *cmd, unsigned int flags)
+int AM53C974_reset(Scsi_Cmnd *cmd)
 {
 AM53C974_local_declare();
 int                      i;
@@ -2251,24 +2252,8 @@ cmd->scsi_done(cmd);
 return SCSI_ABORT_SUCCESS;
 }
 
-
-/*
- * AM53C974_release()
- *
- * Release resources allocated for a single AM53C974 adapter.
- */
-int
-AM53C974_release(struct Scsi_Host *shp)
-{
-	free_irq(shp->irq, NULL);
-	scsi_unregister(shp);
-	return 0;
-}
-
-
 #ifdef MODULE
-/* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = AM53C974;
+static Scsi_Host_Template driver_template = AM53C974;
 
 #include "scsi_module.c"
 #endif

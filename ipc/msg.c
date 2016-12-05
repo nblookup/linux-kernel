@@ -609,8 +609,6 @@ asmlinkage int sys_msgctl (int msqid, int cmd, struct msqid_ds *buf)
 		if (err)
 			return err;
 		break;
-	default:
-		break;
 	}
 
 	id = (unsigned int) msqid % MSGMNI;

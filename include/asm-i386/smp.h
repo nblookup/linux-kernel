@@ -160,7 +160,6 @@ struct cpuinfo_x86
 	char x86_mask;
 	char x86_vendor_id[16];
 	int  x86_capability;
-	int  x86_ext_capability;
 	int  fdiv_bug;
 	int  have_cpuid;
 	char wp_works_ok;

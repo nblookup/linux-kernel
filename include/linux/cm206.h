@@ -137,7 +137,7 @@
 #if !defined(CDROM_GET_UPC)
 #define CDROM_GET_UPC _IO( 'S', 0x11 )
 #define CDROMRESET _IO( 'S', 0x12 )
-#endif /* !defined(CDROM_GET_UPC) */
+#endif
 
 #ifdef STATISTICS
 
@@ -147,10 +147,10 @@
 #ifdef __KERNEL__
 #define x(a) st_ ## a
 #define y enum
-#else /* __KERNEL__ */
+#else
 #define x(a) #a
-#define y char * stats_name[] =
-#endif /* !__KERNEL__ */
+#define y char * stats_name[] = 
+#endif
 
 y {x(interrupt), x(data_ready), x(fifo_overflow), x(data_error),
      x(crc_error), x(sync_error), x(lost_intr), x(echo),
@@ -160,18 +160,18 @@ y {x(interrupt), x(data_ready), x(fifo_overflow), x(data_error),
      x(bh), x(open), x(ioctl_multisession), x(attention)
 #ifdef __KERNEL__
      , x(last_entry)
-#endif /* __KERNEL__ */
+#endif
  };
 
 #ifdef __KERNEL__
 #define NR_STATS st_last_entry
-#else /* __KERNEL__ */
+#else
 #define NR_STATS (sizeof(stats_name)/sizeof(char*))
-#endif /* __KERNEL__ */
+#endif
 
 #undef y
 #undef x
 
-#endif /* STATISTICS */
+#endif STATISTICS
 
-#endif /* LINUX_CM206_H */
+#endif LINUX_CM206_H

@@ -26,7 +26,7 @@
 #define MD_DRIVER
 #define MD_PERSONALITY
 
-static int create_strip_zones (int minor, struct md_dev *mddev)
+static void create_strip_zones (int minor, struct md_dev *mddev)
 {
   int i, j, c=0;
   int current_offset=0;
@@ -50,8 +50,8 @@ static int create_strip_zones (int minor, struct md_dev *mddev)
     c=0;
   }
 
-  if ((data->strip_zone=vmalloc(sizeof(struct strip_zone)*data->nr_strip_zones)) == NULL)
-    return 1;
+  data->strip_zone=kmalloc (sizeof(struct strip_zone)*data->nr_strip_zones,
+			      GFP_KERNEL);
 
   data->smallest=NULL;
   
@@ -81,7 +81,6 @@ static int create_strip_zones (int minor, struct md_dev *mddev)
 					   data->strip_zone[i-1].size) : 0;
     current_offset=smallest_by_zone->size;
   }
-  return 0;
 }
 
 static int raid0_run (int minor, struct md_dev *mddev)
@@ -91,18 +90,16 @@ static int raid0_run (int minor, struct md_dev *mddev)
 
   MOD_INC_USE_COUNT;
 
-  if ((mddev->private=vmalloc (sizeof (struct raid0_data))) == NULL) return 1;
+  mddev->private=kmalloc (sizeof (struct raid0_data), GFP_KERNEL);
   data=(struct raid0_data *) mddev->private;
   
-  if (create_strip_zones (minor, mddev)) return 1;
+  create_strip_zones (minor, mddev);
 
   nb_zone=data->nr_zones=
     md_size[minor]/data->smallest->size +
     (md_size[minor]%data->smallest->size ? 1 : 0);
-
-  printk ("raid0 : Allocating %d bytes for hash.\n",sizeof(struct raid0_hash)*nb_zone);
-  if ((data->hash_table=vmalloc (sizeof (struct raid0_hash)*nb_zone)) == NULL)
-    return 1;
+  
+  data->hash_table=kmalloc (sizeof (struct raid0_hash)*nb_zone, GFP_KERNEL);
 
   size=data->strip_zone[cur].size;
 
@@ -145,9 +142,9 @@ static int raid0_stop (int minor, struct md_dev *mddev)
 {
   struct raid0_data *data=(struct raid0_data *) mddev->private;
 
-  vfree (data->hash_table);
-  vfree (data->strip_zone);
-  vfree (data);
+  kfree (data->hash_table);
+  kfree (data->strip_zone);
+  kfree (data);
 
   MOD_DEC_USE_COUNT;
   return 0;
@@ -243,7 +240,6 @@ static int raid0_status (char *page, int minor, struct md_dev *mddev)
 		 data->strip_zone[j].size);
   }
 #endif
-  sz+=sprintf (page+sz, " %dk chunks", 1<<FACTOR_SHIFT(FACTOR(mddev)));
   return sz;
 }
 
@@ -252,14 +248,11 @@ static struct md_personality raid0_personality=
 {
   "raid0",
   raid0_map,
-  NULL,				/* no special make_request */
-  NULL,				/* no special end_request */
   raid0_run,
   raid0_stop,
   raid0_status,
   NULL,				/* no ioctls */
-  0,
-  NULL,				/* no error_handler */
+  0
 };
 
 

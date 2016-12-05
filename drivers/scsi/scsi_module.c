@@ -34,11 +34,7 @@
 int init_module(void) {
     driver_template.usage_count = &mod_use_count_;
     scsi_register_module(MODULE_SCSI_HA, &driver_template);
-    if (driver_template.present)
-    	return 0;
-
-    scsi_unregister_module(MODULE_SCSI_HA, &driver_template);
-    return -1;
+    return (driver_template.present == 0);
 }
 
 void cleanup_module( void) {

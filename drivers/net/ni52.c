@@ -363,11 +363,10 @@ int ni52_probe(struct device *dev)
 #endif
   int base_addr = dev->base_addr;
 
-  if (base_addr > 0x1ff) {		/* Check a single specified location. */
+  if (base_addr > 0x1ff)		/* Check a single specified location. */
     if( (inb(base_addr+NI52_MAGIC1) == NI52_MAGICVAL1) &&
         (inb(base_addr+NI52_MAGIC2) == NI52_MAGICVAL2))
       return ni52_probe1(dev, base_addr);
-  }
   else if (base_addr > 0)		/* Don't probe at all. */
     return ENXIO;
 
@@ -985,7 +984,7 @@ static void ni52_rcv_int(struct device *dev)
   }
 #endif
 
-#if 0
+#ifdef 0
   if(!at_least_one)
   { 
     int i;
@@ -1134,7 +1133,6 @@ static int ni52_send_packet(struct sk_buff *skb, struct device *dev)
       ni_attn586();
       WAIT_4_SCB_CMD();
       dev->trans_start = jiffies;
-      dev_kfree_skb(skb, FREE_WRITE);
       return 0;
     }
     else
@@ -1176,13 +1174,10 @@ static int ni52_send_packet(struct sk_buff *skb, struct device *dev)
     return 1;
   }
 #endif
-  else {
-	  if ((len = skb->len) < ETH_ZLEN) {
-		  len = ETH_ZLEN;
-		  memset((char *)p->xmit_cbuffs[p->xmit_count] + skb->len, 0,
-			 len - skb->len);
-	  }
+  else
+  {
     memcpy((char *)p->xmit_cbuffs[p->xmit_count],(char *)(skb->data),skb->len);
+    len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
 
 #if (NUM_XMIT_BUFFS == 1)
 #  ifdef NO_NOPCOMMANDS

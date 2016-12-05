@@ -22,6 +22,4 @@
 #define SO_BSDCOMPAT	14
 /* To add :#define SO_REUSEPORT 15 */
 
-#define SO_BINDTODEVICE 25
-
 #endif /* _ASM_SOCKET_H */

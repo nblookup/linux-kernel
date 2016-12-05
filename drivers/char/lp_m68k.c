@@ -182,7 +182,7 @@ static int lp_write_interrupt(struct inode *inode, struct file *file,
 #endif
 {
   unsigned long total_bytes_written = 0;
-  unsigned long flags;
+  unsigned int flags;
   int rc;
   int dev = MINOR(inode->i_rdev);
 

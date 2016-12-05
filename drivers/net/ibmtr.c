@@ -439,12 +439,12 @@ int tok_probe(struct device *dev)
 	/* We must figure out how much shared memory space this adapter
 	   will occupy so that if there are two adapters we can fit both
 	   in.  Given a choice, we will limit this adapter to 32K.  The
-	   maximum space will use for two adapters is 64K so if the adapter
-	   we are working on demands 64K (it also doesn't support paging),
-	   then only one adapter can be supported.  */
+	   maximum space will will use for two adapters is 64K so if the
+	   adapter we are working on demands 64K (it also doesn't support
+	   paging), then only one adapter can be supported.  */
 	
 	/* determine how much of total RAM is mapped into PC space */
-	ti->mapped_ram_size=1<<((((readb(ti->mmio+ ACA_OFFSET + ACA_RW + RRR_ODD)) >>2) & 0x03) + 4);
+	ti->mapped_ram_size=1<<(((readb(ti->mmio+ ACA_OFFSET + ACA_RW + RRR_ODD)) >>2) +4);
 	ti->page_mask=0;
 	if (ti->shared_ram_paging == 0xf) { /* No paging in adapter */
 		ti->mapped_ram_size = ti->avail_shared_ram;
@@ -500,7 +500,7 @@ int tok_probe(struct device *dev)
 	if (cardpresent==TR_ISA) {
 		static unsigned char ram_bndry_mask[]={0xfe, 0xfc, 0xf8, 0xf0};
 		unsigned char new_base, rrr_32, chk_base, rbm;
-		rrr_32 = ((readb(ti->mmio+ ACA_OFFSET + ACA_RW + RRR_ODD))>>2) & 0x03;
+		rrr_32 = (readb(ti->mmio+ ACA_OFFSET + ACA_RW + RRR_ODD))>>2;
 		rbm = ram_bndry_mask[rrr_32];
 		new_base = (Shared_Ram_Base + (~rbm)) & rbm; /* up to boundary */
 		chk_base = new_base + (ti->mapped_ram_size>>3);
@@ -971,15 +971,14 @@ void tok_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 			} /* ARB response */
 			
 			if (status & SSB_RESP_INT) { /* SSB response */
-				unsigned char retcode;		
+						
 				switch (readb(ti->ssb)) { /* SSB command check */
 					
 				      case XMIT_DIR_FRAME:
 				      case XMIT_UI_FRAME:
-					retcode = readb(ti->ssb+2);
-					if (retcode && (retcode != 0x22)) /* checks ret_code */
+					if (readb(ti->ssb+2)) /* checks ret_code */
 						DPRINTK("xmit ret_code: %02X xmit error code: %02X\n", 
-							(int)retcode, (int)readb(ti->ssb+6));		
+							(int)readb(ti->ssb+2), (int)readb(ti->ssb+6));		
 					else ti->tr_stats.tx_packets++;
 					break;
 					
@@ -1461,10 +1460,9 @@ static int tok_send_packet(struct sk_buff *skb, struct device *dev)
 		return 0;
 	}
 	
-	if (set_bit(0,(void *)&dev->tbusy)!=0) {
-		dev_kfree_skb(skb, FREE_WRITE);
+	if (set_bit(0,(void *)&dev->tbusy)!=0)
 		DPRINTK("Transmitter access conflict\n");
-	} else {
+	else {
 		/* Save skb; we'll need it when the adapter asks for the data */
 		ti->current_skb=skb; 
 		writeb(XMIT_UI_FRAME, ti->srb + offsetof(struct srb_xmit, command));

@@ -189,7 +189,6 @@ struct ext2_group_desc
 #define EXT2_IMMUTABLE_FL		0x00000010 /* Immutable file */
 #define EXT2_APPEND_FL			0x00000020 /* writes to file may only append */
 #define EXT2_NODUMP_FL			0x00000040 /* do not dump file */
-#define EXT2_NOATIME_FL			0x00000080 /* do not update atime */
 #define EXT2_RESERVED_FL		0x80000000 /* reserved for ext2 lib */
 	
 /*
@@ -297,7 +296,6 @@ struct ext2_inode {
 #define EXT2_MOUNT_ERRORS_RO		0x0020	/* Remount fs ro on errors */
 #define EXT2_MOUNT_ERRORS_PANIC		0x0040	/* Panic on errors */
 #define EXT2_MOUNT_MINIX_DF		0x0080	/* Mimics the Minix statfs */
-#define EXT2_MOUNT_NO_ATIME		0x0100  /* Don't update the atime */
 
 #define clear_opt(o, opt)		o &= ~EXT2_MOUNT_##opt
 #define set_opt(o, opt)			o |= EXT2_MOUNT_##opt
@@ -368,15 +366,6 @@ struct ext2_super_block {
 	__u32	s_reserved[230];	/* Padding to the end of the block */
 };
 
-#ifdef __KERNEL__
-#define EXT2_SB(sb)	(&((sb)->u.ext2_sb))
-#else
-/* Assume that user mode programs are passing in an ext2fs superblock, not
- * a kernel struct super_block.  This will allow us to call the feature-test
- * macros from user land. */
-#define EXT2_SB(sb)	(sb)
-#endif
-
 /*
  * Codes for operating systems
  */
@@ -416,35 +405,6 @@ struct ext2_dir_entry {
 };
 
 /*
- * The new version of the directory entry.  Since EXT2 structures are
- * stored in intel byte order, and the name_len field could never be
- * bigger than 255 chars, it's safe to reclaim the extra byte for the
- * file_type field.
- */
-struct ext2_dir_entry_2 {
-	__u32	inode;			/* Inode number */
-	__u16	rec_len;		/* Directory entry length */
-	__u8	name_len;		/* Name length */
-	__u8	file_type;
-	char	name[EXT2_NAME_LEN];	/* File name */
-};
-
-/*
- * Ext2 directory file types.  Only the low 3 bits are used.  The
- * other bits are reserved for now.
- */
-#define EXT2_FT_UNKNOWN		0
-#define EXT2_FT_REG_FILE	1
-#define EXT2_FT_DIR		2
-#define EXT2_FT_CHRDEV		3
-#define EXT2_FT_BLKDEV 		4
-#define EXT2_FT_FIFO		5
-#define EXT2_FT_SOCK		6
-#define EXT2_FT_SYMLINK		7
-
-#define EXT2_FT_MAX		8
-
-/*
  * EXT2_DIR_PAD defines the directory entries boundaries
  *
  * NOTE: It must be a multiple of 4
@@ -455,23 +415,11 @@ struct ext2_dir_entry_2 {
 					 ~EXT2_DIR_ROUND)
 
 /*
- * Feature set definitions
+ * Feature set definitions --- none are defined as of now
  */
-
-#define EXT2_HAS_COMPAT_FEATURE(sb,mask)			\
-	( EXT2_SB(sb)->s_feature_compat & (mask) )
-#define EXT2_HAS_RO_COMPAT_FEATURE(sb,mask)			\
-	( EXT2_SB(sb)->s_feature_ro_compat & (mask) )
-#define EXT2_HAS_INCOMPAT_FEATURE(sb,mask)			\
-	( EXT2_SB(sb)->s_feature_incompat & (mask) )
-
-#define EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER	0x0001
-
-#define EXT2_FEATURE_INCOMPAT_FILETYPE		0x0002
-
 #define EXT2_FEATURE_COMPAT_SUPP	0
-#define EXT2_FEATURE_INCOMPAT_SUPP	EXT2_FEATURE_INCOMPAT_FILETYPE
-#define EXT2_FEATURE_RO_COMPAT_SUPP	EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER
+#define EXT2_FEATURE_INCOMPAT_SUPP	0
+#define EXT2_FEATURE_RO_COMPAT_SUPP	0
 
 #ifdef __KERNEL__
 /*
@@ -490,7 +438,6 @@ struct ext2_dir_entry_2 {
 extern int ext2_permission (struct inode *, int);
 
 /* balloc.c */
-extern int ext2_group_sparse(int group);
 extern int ext2_new_block (const struct inode *, unsigned long,
 			   __u32 *, __u32 *, int *);
 extern void ext2_free_blocks (const struct inode *, unsigned long,
@@ -503,7 +450,7 @@ extern unsigned long ext2_count_free (struct buffer_head *, unsigned);
 
 /* dir.c */
 extern int ext2_check_dir_entry (const char *, struct inode *,
-				 struct ext2_dir_entry_2 *, struct buffer_head *,
+				 struct ext2_dir_entry *, struct buffer_head *,
 				 unsigned long);
 
 /* file.c */

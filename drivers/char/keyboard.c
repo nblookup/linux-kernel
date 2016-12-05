@@ -374,13 +374,8 @@ static void handle_scancode(unsigned char scancode)
 	mark_bh(CONSOLE_BH);
 	add_keyboard_randomness(scancode);
 
-	tty = ttytab? ttytab[fg_console]: NULL;
-	if (tty && (!tty->driver_data)) {
-		/* This is to workaround ugly bug in tty_io.c, which
-                   does not do locking when it should */
-		tty = NULL;
-	}
-	kbd = kbd_table + fg_console;
+	tty = ttytab[fg_console];
+ 	kbd = kbd_table + fg_console;
 	if ((raw_mode = (kbd->kbdmode == VC_RAW))) {
  		put_queue(scancode);
 		/* we do not return yet, because we want to maintain
@@ -827,9 +822,8 @@ static void do_self(unsigned char value, char up_flag)
 #define A_CFLEX  '^'
 #define A_TILDE  '~'
 #define A_DIAER  '"'
-#define A_CEDIL  ','
-static unsigned char ret_diacr[NR_DEAD] =
-	{A_GRAVE, A_ACUTE, A_CFLEX, A_TILDE, A_DIAER, A_CEDIL };
+static unsigned char ret_diacr[] =
+	{A_GRAVE, A_ACUTE, A_CFLEX, A_TILDE, A_DIAER };
 
 /* If a dead key pressed twice, output a character corresponding to it,	*/
 /* otherwise just remember the dead key.				*/
@@ -1083,8 +1077,6 @@ static int send_data(unsigned char data)
 		reply_expected = 1;
 		outb_p(data, 0x60);
 		for(i=0; i<0x200000; i++) {
-			extern void allow_interrupts(void);
-			allow_interrupts();
 			inb_p(0x64);		/* just as a delay */
 			if (acknowledge)
 				return 1;

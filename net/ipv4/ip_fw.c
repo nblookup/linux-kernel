@@ -37,8 +37,6 @@
  *		Willy Konynenberg <willy@xos.nl> 10/5/96.
  *	Make separate accounting on incoming and outgoing packets possible.
  *		Jos Vos <jos@xos.nl> 18/5/1996.
- *	Add timeout reprieve for idle control channels.
- *		Keith Owens <kaos@audio.apana.org.au> 05/07/1996.
  *
  *
  * Masquerading functionality
@@ -80,6 +78,7 @@
  * This software is provided ``AS IS'' without any warranties of any kind.
  */
 
+#include <linux/config.h>
 #include <asm/segment.h>
 #include <asm/system.h>
 #include <linux/types.h>
@@ -205,9 +204,9 @@ extern inline int port_match(unsigned short *portptr,int nports,unsigned short p
 int ip_fw_chk(struct iphdr *ip, struct device *rif, __u16 *redirport, struct ip_fw *chain, int policy, int mode)
 {
 	struct ip_fw *f;
-	struct tcphdr		*tcp=(struct tcphdr *)((__u32 *)ip+ip->ihl);
-	struct udphdr		*udp=(struct udphdr *)((__u32 *)ip+ip->ihl);
-	struct icmphdr		*icmp=(struct icmphdr *)((__u32 *)ip+ip->ihl);
+	struct tcphdr		*tcp=(struct tcphdr *)((unsigned long *)ip+ip->ihl);
+	struct udphdr		*udp=(struct udphdr *)((unsigned long *)ip+ip->ihl);
+	struct icmphdr		*icmp=(struct icmphdr *)((unsigned long *)ip+ip->ihl);
 	__u32			src, dst;
 	__u16			src_port=0xFFFF, dst_port=0xFFFF, icmp_type=0xFF;
 	unsigned short		f_prt=0, prt;
@@ -504,7 +503,7 @@ int ip_fw_chk(struct iphdr *ip, struct device *rif, __u16 *redirport, struct ip_
 				printk(":%hu", dst_port);
 			printk(" L=%hu S=0x%2.2hX I=%hu F=0x%4.4hX T=%hu",
 				ntohs(ip->tot_len), ip->tos, ntohs(ip->id),
-				ntohs(ip->frag_off), ip->ttl);
+				ip->frag_off, ip->ttl);
 			for (opti = 0; opti < (ip->ihl - sizeof(struct iphdr) / 4); opti++)
 				printk(" O=0x%8.8X", *opt++);
 			printk("\n");
@@ -887,95 +886,6 @@ int ip_acct_ctl(int stage, void *m, int len)
 }
 #endif
 
-#ifdef CONFIG_IP_MASQUERADE_IPAUTOFW
-
-int ip_autofw_add(struct ip_autofw * af)
-{
-	struct ip_autofw * newaf;
-	init_timer(&af->timer);
-	newaf = kmalloc( sizeof(struct ip_autofw), GFP_ATOMIC );
-	if ( newaf == NULL ) 
-	{
-#ifdef DEBUG_IP_FIREWALL
-		printk("ip_autofw_add:  malloc said no\n");
-#endif
-		return( ENOMEM );
-	}
-
-	memcpy(newaf, af, sizeof(struct ip_autofw));
-	newaf->timer.data = (unsigned long) newaf;
-	newaf->timer.function = ip_autofw_expire;
-	newaf->timer.expires = 0;
-	newaf->lastcontact=0;
-	newaf->next=ip_autofw_hosts;
-	ip_autofw_hosts=newaf;
-	return(0);
-}
-
-int ip_autofw_del(struct ip_autofw * af)
-{
-	struct ip_autofw * prev, * curr;
-	prev=NULL;
-	curr=ip_autofw_hosts;
-	while (curr)
-	{
-		if (af->type     == curr->type &&
-		    af->low      == curr->low &&
-		    af->high     == curr->high &&
-		    af->hidden   == curr->hidden &&
-		    af->visible  == curr->visible &&
-		    af->protocol == curr->protocol &&
-		    af->where    == curr->where &&
-		    af->ctlproto == curr->ctlproto &&
-		    af->ctlport  == curr->ctlport)
-		{
-			if (prev)
-			{
-				prev->next=curr->next;
-	 			kfree_s(curr,sizeof(struct ip_autofw));
-				return(0);
-			}
-			else
-			{
-	 			kfree_s(ip_autofw_hosts,sizeof(struct ip_autofw));
-				ip_autofw_hosts=curr->next;
-				return(0);
-			}
-		}
-		prev=curr;
-		curr=curr->next;
-	}
-	return(EINVAL);
-}
-
-int ip_autofw_flush(void)
-{
-	struct ip_autofw * af;
-	while (ip_autofw_hosts)
-	{
-		af=ip_autofw_hosts;
-		ip_autofw_hosts=ip_autofw_hosts->next;
-		kfree_s(af,sizeof(struct ip_autofw));
-	}
-	return(0);
-}
-
-int ip_autofw_ctl(int stage, void *m, int len)
-{
-	if (stage == IP_AUTOFW_ADD)
-		return (ip_autofw_add((struct ip_autofw *) m));
-
-	if (stage == IP_AUTOFW_DEL)
-		return (ip_autofw_del((struct ip_autofw *) m));
-	
-	if (stage == IP_AUTOFW_FLUSH)
-		return (ip_autofw_flush());
-	
-	return(EINVAL);
-}
-
-#endif /* CONFIG_IP_MASQUERADE_IPAUTOFW */
-
 #ifdef CONFIG_IP_FIREWALL
 int ip_fw_ctl(int stage, void *m, int len)
 {
@@ -1190,7 +1100,7 @@ static int ip_chain_procinfo(int stage, char *buffer, char **start,
 			ntohl(i->fw_dst.s_addr),ntohl(i->fw_dmsk.s_addr),
 			(i->fw_vianame)[0] ? i->fw_vianame : "-",
 			ntohl(i->fw_via.s_addr),i->fw_flg);
-		len+=sprintf(buffer+len,"%u %u %-10lu %-10lu",
+		len+=sprintf(buffer+len,"%u %u %-9lu %-9lu",
 			i->fw_nsp,i->fw_ndp, i->fw_pcnt,i->fw_bcnt);
 		for (p = 0; p < IP_FW_MAX_PORTS; p++)
 			len+=sprintf(buffer+len, " %u", i->fw_pts[p]);

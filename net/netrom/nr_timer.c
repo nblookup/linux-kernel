@@ -1,5 +1,8 @@
 /*
- *	NET/ROM release 006
+ *	NET/ROM release 003
+ *
+ *	This is ALPHA test software. This code may break your machine, randomly fail to work with new 
+ *	releases, misbehave and/or generally screw up. It might even work. 
  *
  *	This code REQUIRES 1.2.1 or higher/ NET3.029
  *
@@ -14,7 +17,7 @@
  */
 
 #include <linux/config.h>
-#if defined(CONFIG_NETROM) || defined(CONFIG_NETROM_MODULE)
+#ifdef CONFIG_NETROM
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -40,34 +43,51 @@
 static void nr_timer(unsigned long);
 
 /*
- *	Linux set timer
+ *	Linux set/reset timer routines
  */
 void nr_set_timer(struct sock *sk)
 {
 	unsigned long flags;
+	
+	save_flags(flags);
+	cli();
+	del_timer(&sk->timer);
+	restore_flags(flags);
 
-	save_flags(flags); cli();
+	sk->timer.next     = sk->timer.prev = NULL;	
+	sk->timer.data     = (unsigned long)sk;
+	sk->timer.function = &nr_timer;
+
+	sk->timer.expires = jiffies+10;
+	add_timer(&sk->timer);
+}
+
+static void nr_reset_timer(struct sock *sk)
+{
+	unsigned long flags;
+	
+	save_flags(flags);
+	cli();
 	del_timer(&sk->timer);
 	restore_flags(flags);
 
 	sk->timer.data     = (unsigned long)sk;
 	sk->timer.function = &nr_timer;
 	sk->timer.expires  = jiffies+10;
-
 	add_timer(&sk->timer);
 }
 
 /*
  *	NET/ROM TIMER 
  *
- *	This routine is called every 100ms. Decrement timer by this
+ *	This routine is called every 500ms. Decrement timer by this
  *	amount - if expired then process the event.
  */
 static void nr_timer(unsigned long param)
 {
 	struct sock *sk = (struct sock *)param;
 
-	switch (sk->protinfo.nr->state) {
+	switch (sk->nr->state) {
 		case NR_STATE_0:
 			/* Magic here: If we listen() and a new link dies before it
 			   is accepted() it isn't 'dead' so doesn't get removed. */
@@ -82,11 +102,11 @@ static void nr_timer(unsigned long param)
 			/*
 			 * Check for the state of the receive buffer.
 			 */
-			if (sk->rmem_alloc < (sk->rcvbuf / 2) && (sk->protinfo.nr->condition & NR_COND_OWN_RX_BUSY)) {
-				sk->protinfo.nr->condition &= ~NR_COND_OWN_RX_BUSY;
-				sk->protinfo.nr->condition &= ~NR_COND_ACK_PENDING;
-				sk->protinfo.nr->vl         = sk->protinfo.nr->vr;
+			if (sk->rmem_alloc < (sk->rcvbuf / 2) && (sk->nr->condition & OWN_RX_BUSY_CONDITION)) {
+				sk->nr->condition &= ~OWN_RX_BUSY_CONDITION;
 				nr_write_internal(sk, NR_INFOACK);
+				sk->nr->condition &= ~ACK_PENDING_CONDITION;
+				sk->nr->vl = sk->nr->vr;
 				break;
 			}
 			/*
@@ -99,75 +119,72 @@ static void nr_timer(unsigned long param)
 			break;
 	}
 
-	if (sk->protinfo.nr->t2timer > 0 && --sk->protinfo.nr->t2timer == 0) {
-		if (sk->protinfo.nr->state == NR_STATE_3) {
-			if (sk->protinfo.nr->condition & NR_COND_ACK_PENDING) {
-				sk->protinfo.nr->condition &= ~NR_COND_ACK_PENDING;
+	if (sk->nr->t2timer > 0 && --sk->nr->t2timer == 0) {
+		if (sk->nr->state == NR_STATE_3) {
+			if (sk->nr->condition & ACK_PENDING_CONDITION) {
+				sk->nr->condition &= ~ACK_PENDING_CONDITION;
 				nr_enquiry_response(sk);
 			}
 		}
 	}
 
-	if (sk->protinfo.nr->t4timer > 0 && --sk->protinfo.nr->t4timer == 0) {
-		sk->protinfo.nr->condition &= ~NR_COND_PEER_RX_BUSY;
+	if (sk->nr->t4timer > 0 && --sk->nr->t4timer == 0) {
+		sk->nr->condition &= ~PEER_RX_BUSY_CONDITION;
 	}
 
-	if (sk->protinfo.nr->t1timer == 0 || --sk->protinfo.nr->t1timer > 0) {
-		nr_set_timer(sk);
+	if (sk->nr->t1timer == 0 || --sk->nr->t1timer > 0) {
+		nr_reset_timer(sk);
 		return;
 	}
 
-	switch (sk->protinfo.nr->state) {
+	switch (sk->nr->state) {
 		case NR_STATE_1: 
-			if (sk->protinfo.nr->n2count == sk->protinfo.nr->n2) {
+			if (sk->nr->n2count == sk->nr->n2) {
 				nr_clear_queues(sk);
-				sk->protinfo.nr->state = NR_STATE_0;
-				sk->state              = TCP_CLOSE;
-				sk->err                = ETIMEDOUT;
-				sk->shutdown          |= SEND_SHUTDOWN;
+				sk->nr->state = NR_STATE_0;
+				sk->state     = TCP_CLOSE;
+				sk->err       = ETIMEDOUT;
 				if (!sk->dead)
 					sk->state_change(sk);
-				sk->dead               = 1;
+				sk->dead      = 1;
 			} else {
-				sk->protinfo.nr->n2count++;
+				sk->nr->n2count++;
 				nr_write_internal(sk, NR_CONNREQ);
 			}
 			break;
 
 		case NR_STATE_2:
-			if (sk->protinfo.nr->n2count == sk->protinfo.nr->n2) {
+			if (sk->nr->n2count == sk->nr->n2) {
 				nr_clear_queues(sk);
-				sk->protinfo.nr->state = NR_STATE_0;
-				sk->state              = TCP_CLOSE;
-				sk->err                = ETIMEDOUT;
-				sk->shutdown          |= SEND_SHUTDOWN;
+				sk->nr->state = NR_STATE_0;
+				sk->state     = TCP_CLOSE;
+				sk->err       = ETIMEDOUT;
 				if (!sk->dead)
 					sk->state_change(sk);
-				sk->dead               = 1;
+				sk->dead      = 1;
 			} else {
-				sk->protinfo.nr->n2count++;
+				sk->nr->n2count++;
 				nr_write_internal(sk, NR_DISCREQ);
 			}
 			break;
 
 		case NR_STATE_3:
-			if (sk->protinfo.nr->n2count == sk->protinfo.nr->n2) {
+			if (sk->nr->n2count == sk->nr->n2) {
 				nr_clear_queues(sk);
-				sk->protinfo.nr->state = NR_STATE_0;
-				sk->state              = TCP_CLOSE;
-				sk->err                = ETIMEDOUT;
-				sk->shutdown          |= SEND_SHUTDOWN;
+				sk->nr->state = NR_STATE_0;
+				sk->state     = TCP_CLOSE;
+				sk->err       = ETIMEDOUT;
 				if (!sk->dead)
 					sk->state_change(sk);
-				sk->dead               = 1;
+				sk->dead      = 1;
 			} else {
-				sk->protinfo.nr->n2count++;
+				sk->nr->n2count++;
 				nr_requeue_frames(sk);
 			}
 			break;
 	}
 
-	sk->protinfo.nr->t1timer = sk->protinfo.nr->t1;
+	sk->nr->t1timer = sk->nr->t1 = nr_calculate_t1(sk);
 
 	nr_set_timer(sk);
 }

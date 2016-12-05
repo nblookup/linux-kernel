@@ -43,10 +43,6 @@ static struct ext2_group_desc * get_group_desc (struct super_block * sb,
 	unsigned long desc;
 	struct ext2_group_desc * gdp;
 
-	/*
-	 * This panic should never trigger on a bad filesystem: the caller
-	 * should have verified the block/group number already.
-	 */
 	if (block_group >= sb->u.ext2_sb.s_groups_count)
 		ext2_panic (sb, "get_group_desc",
 			    "block_group >= groups_count - "
@@ -67,37 +63,22 @@ static struct ext2_group_desc * get_group_desc (struct super_block * sb,
 	return gdp + desc;
 }
 
-/*
- * Read the bitmap for a given block_group, reading into the specified 
- * slot in the superblock's bitmap cache.
- *
- * Return >=0 on success or a -ve error code.
- */
-
-static int read_block_bitmap (struct super_block * sb,
-			      unsigned int block_group,
-			      unsigned long bitmap_nr)
+static void read_block_bitmap (struct super_block * sb,
+			       unsigned int block_group,
+			       unsigned long bitmap_nr)
 {
 	struct ext2_group_desc * gdp;
 	struct buffer_head * bh;
-	int retval = 0;
 	
 	gdp = get_group_desc (sb, block_group, NULL);
 	bh = bread (sb->s_dev, gdp->bg_block_bitmap, sb->s_blocksize);
-	if (!bh) {
-		ext2_error (sb, "read_block_bitmap",
+	if (!bh)
+		ext2_panic (sb, "read_block_bitmap",
 			    "Cannot read block bitmap - "
 			    "block_group = %d, block_bitmap = %lu",
 			    block_group, (unsigned long) gdp->bg_block_bitmap);
-		retval = -EIO;
-	}
-	/*
-	 * On IO error, just leave a zero in the superblock's block pointer for
-	 * this group.  The IO will be retried next time.
-	 */
 	sb->u.ext2_sb.s_block_bitmap_number[bitmap_nr] = block_group;
 	sb->u.ext2_sb.s_block_bitmap[bitmap_nr] = bh;
-	return retval;
 }
 
 /*
@@ -110,13 +91,11 @@ static int read_block_bitmap (struct super_block * sb,
  * 1/ There is one cache per mounted file system.
  * 2/ If the file system contains less than EXT2_MAX_GROUP_LOADED groups,
  *    this function reads the bitmap without maintaining a LRU cache.
- *
- * Return the slot used to store the bitmap, or a -ve error code.
  */
 static int load__block_bitmap (struct super_block * sb,
 			       unsigned int block_group)
 {
-	int i, j, retval = 0;
+	int i, j;
 	unsigned long block_bitmap_number;
 	struct buffer_head * block_bitmap;
 
@@ -135,9 +114,7 @@ static int load__block_bitmap (struct super_block * sb,
 			else
 				return block_group;
 		} else {
-			retval = read_block_bitmap (sb, block_group, block_group);
-			if (retval < 0)
-				return retval;
+			read_block_bitmap (sb, block_group, block_group);
 			return block_group;
 		}
 	}
@@ -157,14 +134,6 @@ static int load__block_bitmap (struct super_block * sb,
 		}
 		sb->u.ext2_sb.s_block_bitmap_number[0] = block_bitmap_number;
 		sb->u.ext2_sb.s_block_bitmap[0] = block_bitmap;
-
-		/*
-		 * There's still one special case here --- if block_bitmap == 0
-		 * then our last attempt to read the bitmap failed and we have
-		 * just ended up caching that failure.  Try again to read it.
-		 */
-		if (!block_bitmap)
-			retval = read_block_bitmap (sb, block_group, 0);
 	} else {
 		if (sb->u.ext2_sb.s_loaded_block_bitmaps < EXT2_MAX_GROUP_LOADED)
 			sb->u.ext2_sb.s_loaded_block_bitmaps++;
@@ -176,71 +145,24 @@ static int load__block_bitmap (struct super_block * sb,
 			sb->u.ext2_sb.s_block_bitmap[j] =
 				sb->u.ext2_sb.s_block_bitmap[j - 1];
 		}
-		retval = read_block_bitmap (sb, block_group, 0);
+		read_block_bitmap (sb, block_group, 0);
 	}
-	return retval;
+	return 0;
 }
 
-/*
- * Load the block bitmap for a given block group.  First of all do a couple
- * of fast lookups for common cases and then pass the request onto the guts
- * of the bitmap loader.
- *
- * Return the slot number of the group in the superblock bitmap cache's on
- * success, or a -ve error code.
- *
- * There is still one inconsistancy here --- if the number of groups in this
- * filesystems is <= EXT2_MAX_GROUP_LOADED, then we have no way of 
- * differentiating between a group for which we have never performed a bitmap
- * IO request, and a group for which the last bitmap read request failed.
- */
 static inline int load_block_bitmap (struct super_block * sb,
 				     unsigned int block_group)
 {
-	int slot;
-	
-	/*
-	 * Do the lookup for the slot.  First of all, check if we're asking
-	 * for the same slot as last time, and did we succeed that last time?
-	 */
 	if (sb->u.ext2_sb.s_loaded_block_bitmaps > 0 &&
-	    sb->u.ext2_sb.s_block_bitmap_number[0] == block_group &&
-	    sb->u.ext2_sb.s_block_bitmap[0]) {
-		slot = 0;
-	}
-	/*
-	 * Or can we do a fast lookup based on a loaded group on a filesystem
-	 * small enough to be mapped directly into the superblock?
-	 */
-	else if (sb->u.ext2_sb.s_groups_count <= EXT2_MAX_GROUP_LOADED && 
-		 sb->u.ext2_sb.s_block_bitmap_number[block_group] == block_group &&
-		 sb->u.ext2_sb.s_block_bitmap[block_group]) {
-		slot = block_group;
-	} 
-	/*
-	 * If not, then do a full lookup for this block group.
-	 */
-	else {
-		slot = load__block_bitmap (sb, block_group);
-	}
+	    sb->u.ext2_sb.s_block_bitmap_number[0] == block_group)
+		return 0;
+	
+	if (sb->u.ext2_sb.s_groups_count <= EXT2_MAX_GROUP_LOADED && 
+	    sb->u.ext2_sb.s_block_bitmap_number[block_group] == block_group &&
+	    sb->u.ext2_sb.s_block_bitmap[block_group]) 
+		return block_group;
 
-	/*
-	 * <0 means we just got an error
-	 */
-	if (slot < 0)
-		return slot;
-	
-	/*
-	 * If it's a valid slot, we may still have cached a previous IO error,
-	 * in which case the bh in the superblock cache will be zero.
-	 */
-	if (!sb->u.ext2_sb.s_block_bitmap[slot])
-		return -EIO;
-	
-	/*
-	 * Must have been read in OK to get this far.
-	 */
-	return slot;
+	return load__block_bitmap (sb, block_group);
 }
 
 void ext2_free_blocks (const struct inode * inode, unsigned long block,
@@ -277,19 +199,12 @@ void ext2_free_blocks (const struct inode * inode, unsigned long block,
 	block_group = (block - es->s_first_data_block) /
 		      EXT2_BLOCKS_PER_GROUP(sb);
 	bit = (block - es->s_first_data_block) % EXT2_BLOCKS_PER_GROUP(sb);
-	if (bit + count > EXT2_BLOCKS_PER_GROUP(sb)) {
-		ext2_error (sb, "ext2_free_blocks",
+	if (bit + count > EXT2_BLOCKS_PER_GROUP(sb))
+		ext2_panic (sb, "ext2_free_blocks",
 			    "Freeing blocks across group boundary - "
 			    "Block = %lu, count = %lu",
 			    block, count);
-		unlock_super (sb);
-		return;
-	}
-	
 	bitmap_nr = load_block_bitmap (sb, block_group);
-	if (bitmap_nr < 0)
-		goto error_return;
-		
 	bh = sb->u.ext2_sb.s_block_bitmap[bitmap_nr];
 	gdp = get_group_desc (sb, block_group, &bh2);
 
@@ -299,14 +214,11 @@ void ext2_free_blocks (const struct inode * inode, unsigned long block,
 	     in_range (block, gdp->bg_inode_table,
 		       sb->u.ext2_sb.s_itb_per_group) ||
 	     in_range (block + count - 1, gdp->bg_inode_table,
-		       sb->u.ext2_sb.s_itb_per_group))) {
-		ext2_error (sb, "ext2_free_blocks",
+		       sb->u.ext2_sb.s_itb_per_group)))
+		ext2_panic (sb, "ext2_free_blocks",
 			    "Freeing blocks in system zones - "
 			    "Block = %lu, count = %lu",
 			    block, count);
-		unlock_super (sb);
-		return;
-	}
 
 	for (i = 0; i < count; i++) {
 		if (!clear_bit (bit + i, bh->b_data))
@@ -330,7 +242,6 @@ void ext2_free_blocks (const struct inode * inode, unsigned long block,
 		wait_on_buffer (bh);
 	}
 	sb->s_dirt = 1;
-error_return:
 	unlock_super (sb);
 	return;
 }
@@ -390,12 +301,6 @@ repeat:
 			goal_attempts++;
 #endif
 		bitmap_nr = load_block_bitmap (sb, i);
-		if (bitmap_nr < 0) {
-			*err = -EIO;
-			unlock_super (sb);
-			return 0;
-		}
-		
 		bh = sb->u.ext2_sb.s_block_bitmap[bitmap_nr];
 
 		ext2_debug ("goal is at %d:%d.\n", i, j);
@@ -467,14 +372,7 @@ repeat:
 		unlock_super (sb);
 		return 0;
 	}
-
 	bitmap_nr = load_block_bitmap (sb, i);
-	if (bitmap_nr < 0) {
-		*err = -EIO;
-		unlock_super (sb);
-		return 0;
-	}
-		
 	bh = sb->u.ext2_sb.s_block_bitmap[bitmap_nr];
 	r = memscan(bh->b_data, 0, EXT2_BLOCKS_PER_GROUP(sb) >> 3);
 	j = (r - bh->b_data) << 3;
@@ -517,14 +415,10 @@ got_block:
 	if (test_opt (sb, CHECK_STRICT) &&
 	    (tmp == gdp->bg_block_bitmap ||
 	     tmp == gdp->bg_inode_bitmap ||
-	     in_range (tmp, gdp->bg_inode_table, sb->u.ext2_sb.s_itb_per_group))) {
-		ext2_error (sb, "ext2_new_block",
+	     in_range (tmp, gdp->bg_inode_table, sb->u.ext2_sb.s_itb_per_group)))
+		ext2_panic (sb, "ext2_new_block",
 			    "Allocating block in system zone - "
 			    "block = %u", tmp);
-		unlock_super (sb);
-		*err = -EIO;
-		return 0;
-	}
 
 	if (set_bit (j, bh->b_data)) {
 		ext2_warning (sb, "ext2_new_block",
@@ -617,11 +511,7 @@ unsigned long ext2_count_free_blocks (struct super_block * sb)
 	for (i = 0; i < sb->u.ext2_sb.s_groups_count; i++) {
 		gdp = get_group_desc (sb, i, NULL);
 		desc_count += gdp->bg_free_blocks_count;
-
 		bitmap_nr = load_block_bitmap (sb, i);
-		if (bitmap_nr < 0)
-			continue;
-		
 		x = ext2_count_free (sb->u.ext2_sb.s_block_bitmap[bitmap_nr],
 				     sb->s_blocksize);
 		printk ("group %d: stored = %d, counted = %lu\n",
@@ -645,25 +535,6 @@ static inline int block_in_use (unsigned long block,
 			 EXT2_BLOCKS_PER_GROUP(sb), map);
 }
 
-static int test_root(int a, int b)
-{
-	if (a == 0)
-		return 1;
-	while (1) {
-		if (a == 1)
-			return 1;
-		if (a % b)
-			return 0;
-		a = a / b;
-	}
-}
-
-int ext2_group_sparse(int group)
-{
-	return (test_root(group, 3) || test_root(group, 5) ||
-		test_root(group, 7));
-}
-
 void ext2_check_blocks_bitmap (struct super_block * sb)
 {
 	struct buffer_head * bh;
@@ -685,27 +556,18 @@ void ext2_check_blocks_bitmap (struct super_block * sb)
 		gdp = get_group_desc (sb, i, NULL);
 		desc_count += gdp->bg_free_blocks_count;
 		bitmap_nr = load_block_bitmap (sb, i);
-		if (bitmap_nr < 0)
-			continue;
-
 		bh = sb->u.ext2_sb.s_block_bitmap[bitmap_nr];
 
-		if (!(sb->u.ext2_sb.s_feature_ro_compat &
-		     EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER) ||
-		    ext2_group_sparse(i)) {
-			if (!test_bit (0, bh->b_data))
-				ext2_error (sb, "ext2_check_blocks_bitmap",
-					    "Superblock in group %d "
-					    "is marked free", i);
+		if (!test_bit (0, bh->b_data))
+			ext2_error (sb, "ext2_check_blocks_bitmap",
+				    "Superblock in group %d is marked free", i);
 
-			for (j = 0; j < desc_blocks; j++)
-				if (!test_bit (j + 1, bh->b_data))
-					ext2_error (sb,
-					    "ext2_check_blocks_bitmap",
+		for (j = 0; j < desc_blocks; j++)
+			if (!test_bit (j + 1, bh->b_data))
+				ext2_error (sb, "ext2_check_blocks_bitmap",
 					    "Descriptor block #%d in group "
 					    "%d is marked free", j, i);
-		}
-		
+
 		if (!block_in_use (gdp->bg_block_bitmap, sb, bh->b_data))
 			ext2_error (sb, "ext2_check_blocks_bitmap",
 				    "Block bitmap for group %d is marked free",

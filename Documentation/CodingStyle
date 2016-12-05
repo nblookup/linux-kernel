@@ -132,7 +132,7 @@ The maximum length of a function is inversely proportional to the
 complexity and indentation level of that function.  So, if you have a
 conceptually simple function that is just one long (but simple)
 case-statement, where you have to do lots of small things for a lot of
-different cases, it's OK to have a longer function. 
+different cases, it's ok to have a longer function. 
 
 However, if you have a complex function, and you suspect that a
 less-than-gifted first-year high-school student might not even
@@ -169,7 +169,7 @@ it.
 
 		Chapter 6: You've made a mess of it
 
-That's OK, we all do.  You've probably been told by your long-time Unix
+That's ok, we all do.  You've probably been told by your long-time unix
 user helper that "GNU emacs" automatically formats the C sources for
 you, and you've noticed that yes, it does do that, but the defaults it
 uses are less than desirable (in fact, they are worse than random
@@ -210,26 +210,3 @@ options "-kr -i8" (stands for "K&R, 8 character indents").
 "indent" has a lot of options, and especially when it comes to comment
 re-formatting you may want to take a look at the manual page.  But
 remember: "indent" is not a fix for bad programming. 
-
-
-		Chapter 7: Configuration-files
-
-For configuration options (arch/xxx/config.in, and all the Config.in files),
-somewhat different indentation is used.
-
-An indention level of 3 is used in the code, while the text in the config-
-options should have an indention-level of 2 to indicate dependencies. The
-latter only applies to bool/tristate options. For other options, just use
-common sense. An example:
-
-if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
-   tristate 'Apply nitroglycerine inside the keyboard (DANGEROUS)' CONFIG_BOOM
-   if [ "$CONFIG_BOOM" != "n" ]; then
-      bool '  Output nice messages when you explode' CONFIG_CHEER
-   fi
-fi
-
-Generally, CONFIG_EXPERIMENTAL should surround all options not considered
-stable. All options that are known to trash data (experimental write-
-support for file-systems, for instance) should be denoted (DANGEROUS), other
-Experimental options should be denoted (EXPERIMENTAL).

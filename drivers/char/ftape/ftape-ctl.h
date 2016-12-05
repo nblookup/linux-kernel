@@ -61,7 +61,7 @@ typedef struct {
  */
 extern int ftape_failure;
 extern int write_protected;
-extern int ftape_offline;
+extern ftape_offline;
 extern int formatted;
 extern int no_tape;
 extern history_record history;

@@ -3,9 +3,7 @@
 
 #include <linux/blkdev.h>
 #include <linux/locks.h>
-#include <linux/malloc.h>
 #include <linux/config.h>
-#include <linux/md.h>
 
 /*
  * NR_REQUEST is the number of entries in the request-queue.
@@ -30,63 +28,63 @@
  */
 #if defined(IDE_DRIVER) || defined(MD_DRIVER)
 #define SECTOR_MASK ((BLOCK_SIZE >> 9) - 1)
-#else /* defined(IDE_DRIVER) || defined(MD_DRIVER) */
+#else
 #define SECTOR_MASK (blksize_size[MAJOR_NR] &&     \
 	blksize_size[MAJOR_NR][MINOR(CURRENT->rq_dev)] ? \
 	((blksize_size[MAJOR_NR][MINOR(CURRENT->rq_dev)] >> 9) - 1) :  \
 	((BLOCK_SIZE >> 9)  -  1))
-#endif /* !(defined(IDE_DRIVER) || defined(MD_DRIVER)) */
+#endif /* IDE_DRIVER */
 
 #define SUBSECTOR(block) (CURRENT->current_nr_sectors > 0)
 
 #ifdef CONFIG_CDU31A
 extern int cdu31a_init(void);
-#endif /* CONFIG_CDU31A */
+#endif CONFIG_CDU31A
 #ifdef CONFIG_MCD
 extern int mcd_init(void);
-#endif /* CONFIG_MCD */
+#endif CONFIG_MCD
 #ifdef CONFIG_MCDX
 extern int mcdx_init(void);
-#endif /* CONFIG_MCDX */
+#endif CONFIG_MCDX
 #ifdef CONFIG_SBPCD
 extern int sbpcd_init(void);
-#endif /* CONFIG_SBPCD */
+#endif CONFIG_SBPCD
 #ifdef CONFIG_AZTCD
 extern int aztcd_init(void);
-#endif /* CONFIG_AZTCD */
+#endif CONFIG_AZTCD
 #ifdef CONFIG_CDU535
 extern int sony535_init(void);
-#endif /* CONFIG_CDU535 */
+#endif CONFIG_CDU535
 #ifdef CONFIG_GSCD
 extern int gscd_init(void);
-#endif /* CONFIG_GSCD */
+#endif CONFIG_GSCD
 #ifdef CONFIG_CM206
 extern int cm206_init(void);
-#endif /* CONFIG_CM206 */
+#endif CONFIG_CM206
 #ifdef CONFIG_OPTCD
 extern int optcd_init(void);
-#endif /* CONFIG_OPTCD */
+#endif CONFIG_OPTCD
 #ifdef CONFIG_SJCD
 extern int sjcd_init(void);
-#endif /* CONFIG_SJCD */
+#endif CONFIG_SJCD
 #ifdef CONFIG_CDI_INIT
 extern int cdi_init(void);
-#endif /* CONFIG_CDI_INIT */
+#endif CONFIG_CDI_INIT
 #ifdef CONFIG_BLK_DEV_HD
 extern int hd_init(void);
-#endif /* CONFIG_BLK_DEV_HD */
+#endif
 #ifdef CONFIG_BLK_DEV_IDE
 extern int ide_init(void);
-#endif /* CONFIG_BLK_DEV_IDE */
+#endif
 #ifdef CONFIG_BLK_DEV_XD
 extern int xd_init(void);
-#endif /* CONFIG_BLK_DEV_XD */
+#endif
 #ifdef CONFIG_BLK_DEV_LOOP
 extern int loop_init(void);
-#endif /* CONFIG_BLK_DEV_LOOP */
+#endif
 #ifdef CONFIG_BLK_DEV_MD
 extern int md_init(void);
-#endif /* CONFIG_BLK_DEV_MD */
+#endif CONFIG_BLK_DEV_MD
 
 extern void set_device_ro(kdev_t dev,int flag);
 void add_blkdev_randomness(int major);
@@ -106,7 +104,7 @@ extern unsigned long initrd_start,initrd_end;
 extern int mount_initrd; /* zero if initrd should not be mounted */
 void initrd_init(void);
 
-#endif /* CONFIG_BLK_DEV_INITRD */
+#endif
 
 #define RO_IOCTLS(dev,where) \
   case BLKROSET: { int __err;  if (!suser()) return -EACCES; \
@@ -114,7 +112,7 @@ void initrd_init(void);
 		   if (!__err) set_device_ro((dev),get_fs_long((long *) (where))); return __err; } \
   case BLKROGET: { int __err = verify_area(VERIFY_WRITE, (void *) (where), sizeof(long)); \
 		   if (!__err) put_fs_long(0!=is_read_only(dev),(long *) (where)); return __err; }
-
+		 
 #if defined(MAJOR_NR) || defined(IDE_DRIVER)
 
 /*
@@ -133,7 +131,7 @@ void initrd_init(void);
 #define DEVICE_NAME "ramdisk"
 #define DEVICE_REQUEST rd_request
 #define DEVICE_NR(device) (MINOR(device))
-#define DEVICE_ON(device)
+#define DEVICE_ON(device) 
 #define DEVICE_OFF(device)
 #define DEVICE_NO_RANDOM
 
@@ -163,7 +161,7 @@ static void floppy_off(unsigned int nr);
 #elif (MAJOR_NR == SCSI_DISK_MAJOR)
 
 #define DEVICE_NAME "scsidisk"
-#define DEVICE_INTR do_sd
+#define DEVICE_INTR do_sd  
 #define TIMEOUT_VALUE (2*HZ)
 #define DEVICE_REQUEST do_sd_request
 #define DEVICE_NR(device) (MINOR(device) >> 4)
@@ -182,7 +180,7 @@ static void floppy_off(unsigned int nr);
 #elif (MAJOR_NR == SCSI_TAPE_MAJOR)
 
 #define DEVICE_NAME "scsitape"
-#define DEVICE_INTR do_st
+#define DEVICE_INTR do_st  
 #define DEVICE_NR(device) (MINOR(device) & 0x7f)
 #define DEVICE_ON(device)
 #define DEVICE_OFF(device)
@@ -310,16 +308,6 @@ static void floppy_off(unsigned int nr);
 #define DEVICE_ON(device)
 #define DEVICE_OFF(device)
 
-#elif (MAJOR_NR == COMPAQ_SMART2_MAJOR)
-
-#define DEVICE_NAME "ida"
-#define DEVICE_INTR do_ida
-#define TIMEOUT_VALUE (25*HZ)
-#define DEVICE_REQUEST do_ida_request0
-#define DEVICE_NR(device) (MINOR(device) >> 4)
-#define DEVICE_ON(device)
-#define DEVICE_OFF(device)
-
 #endif /* MAJOR_NR == whatever */
 
 #if (MAJOR_NR != SCSI_TAPE_MAJOR)
@@ -327,13 +315,13 @@ static void floppy_off(unsigned int nr);
 
 #ifndef CURRENT
 #define CURRENT (blk_dev[MAJOR_NR].current_request)
-#endif /* !CURRENT */
+#endif
 
 #define CURRENT_DEV DEVICE_NR(CURRENT->rq_dev)
 
 #ifdef DEVICE_INTR
 static void (*DEVICE_INTR)(void) = NULL;
-#endif /* DEVICE_INTR */
+#endif
 #ifdef DEVICE_TIMEOUT
 
 #define SET_TIMER \
@@ -349,19 +337,19 @@ if ((DEVICE_INTR = (x)) != NULL) \
 else \
 	CLEAR_TIMER;
 
-#else /* DEVICE_TIMEOUT */
+#else
 
 #define SET_INTR(x) (DEVICE_INTR = (x))
 
-#endif /* !DEVICE_TIMEOUT */
+#endif /* DEVICE_TIMEOUT */
 
 static void (DEVICE_REQUEST)(void);
-
+  
 #ifdef DEVICE_INTR
 #define CLEAR_INTR SET_INTR(NULL)
-#else /* DEVICE_INTR */
+#else
 #define CLEAR_INTR
-#endif /* !DEVICE_INTR */
+#endif
 
 #define INIT_REQUEST \
 	if (!CURRENT) {\
@@ -380,53 +368,36 @@ static void (DEVICE_REQUEST)(void);
 /* end_request() - SCSI devices have their own version */
 /*               - IDE drivers have their own copy too */
 
-#if !SCSI_BLK_MAJOR(MAJOR_NR) && (MAJOR_NR != COMPAQ_SMART2_MAJOR)
+#if ! SCSI_BLK_MAJOR(MAJOR_NR)
 
 #if defined(IDE_DRIVER) && !defined(_IDE_C) /* shared copy for IDE modules */
 void ide_end_request(byte uptodate, ide_hwgroup_t *hwgroup);
-#else /* defined(IDE_DRIVER) && !defined(_IDE_C) */
+#else
 
 #ifdef IDE_DRIVER
 void ide_end_request(byte uptodate, ide_hwgroup_t *hwgroup) {
 	struct request *req = hwgroup->rq;
-#else /* IDE_DRIVER */
+#else
 static void end_request(int uptodate) {
 	struct request *req = CURRENT;
-#endif /* !IDE_DRIVER */
+#endif /* IDE_DRIVER */
 	struct buffer_head * bh;
-	int nsect;
 
 	req->errors = 0;
 	if (!uptodate) {
 		printk("end_request: I/O error, dev %s, sector %lu\n",
 			kdevname(req->rq_dev), req->sector);
-		if ((bh = req->bh) != NULL) {
-			nsect = bh->b_size >> 9;
-			req->nr_sectors--;
-			req->nr_sectors &= ~(nsect - 1);
-			req->sector += nsect;
-			req->sector &= ~(nsect - 1);
-		}
+		req->nr_sectors--;
+		req->nr_sectors &= ~SECTOR_MASK;
+		req->sector += (BLOCK_SIZE / 512);
+		req->sector &= ~SECTOR_MASK;		
 	}
 
 	if ((bh = req->bh) != NULL) {
 		req->bh = bh->b_reqnext;
 		bh->b_reqnext = NULL;
-
-		/* This is our 'MD IO has finished' event handler.
-		 * note that b_state should be cached in a register
-		 * anyways, so the overhead if this checking is almost
-		 * zero. But anyways .. we never get OO for free :)
-		 */
-		if (test_bit(BH_MD, &bh->b_state)) {
-			struct md_personality * pers=(struct md_personality *)bh->personality;
-			pers->end_request(bh,uptodate);
-		} else {
-			/* the normal (nonmirrored and no RAID5) case:
-			 */
-			mark_buffer_uptodate(bh, uptodate);
-			unlock_buffer(bh);
-		}
+		mark_buffer_uptodate(bh, uptodate);
+		unlock_buffer(bh);
 		if ((bh = req->bh) != NULL) {
 			req->current_nr_sectors = bh->b_size >> 9;
 			if (req->nr_sectors < req->current_nr_sectors) {
@@ -439,21 +410,21 @@ static void end_request(int uptodate) {
 	}
 #ifndef DEVICE_NO_RANDOM
 	add_blkdev_randomness(MAJOR(req->rq_dev));
-#endif /* !DEVICE_NO_RANDOM */
+#endif
 #ifdef IDE_DRIVER
 	blk_dev[MAJOR(req->rq_dev)].current_request = req->next;
 	hwgroup->rq = NULL;
-#else /* IDE_DRIVER */
+#else
 	DEVICE_OFF(req->rq_dev);
 	CURRENT = req->next;
-#endif /* !IDE_DRIVER */
+#endif /* IDE_DRIVER */
 	if (req->sem != NULL)
 		up(req->sem);
 	req->rq_status = RQ_INACTIVE;
 	wake_up(&wait_for_request);
 }
-#endif /* !(defined(IDE_DRIVER) && !defined(_IDE_C)) */
-#endif /* !SCSI_BLK_MAJOR(MAJOR_NR) */
+#endif /* defined(IDE_DRIVER) && !defined(_IDE_C) */
+#endif /* ! SCSI_BLK_MAJOR(MAJOR_NR) */
 #endif /* (MAJOR_NR != SCSI_TAPE_MAJOR) */
 
 #endif /* defined(MAJOR_NR) || defined(IDE_DRIVER) */

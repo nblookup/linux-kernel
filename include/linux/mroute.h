@@ -147,8 +147,6 @@ struct mfc_cache
 	struct sk_buff_head mfc_unresolved;	/* Unresolved buffers		*/
 	int mfc_queuelen;			/* Unresolved buffer counter	*/
 	unsigned char mfc_ttls[MAXVIFS];	/* TTL thresholds		*/
-	unsigned long mfc_packets;		/* Packets on this entry	*/
-	unsigned long mfc_bytes;		/* Bytes on this entry		*/
 };
 
 #define MFC_QUEUED		1

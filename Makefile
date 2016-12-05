@@ -1,11 +1,8 @@
 VERSION = 2
-PATCHLEVEL = 0
-SUBLEVEL = 40
-EXTRAVERSION =
+PATCHLEVEL = 1
+SUBLEVEL = 0
 
-KERNELRELEASE=$(VERSION).$(PATCHLEVEL).$(SUBLEVEL)$(EXTRAVERSION)
-
-ARCH := $(shell uname -m | sed -e s/i.86/i386/ -e s/sun4u/sparc64/ -e s/arm.*/arm/ -e s/sa110/arm/)
+ARCH = i386
 
 #
 # For SMP kernels, set this. We don't want to have this in the config file
@@ -29,20 +26,19 @@ TOPDIR	:= $(shell if [ "$$PWD" != "" ]; then echo $$PWD; else pwd; fi)
 HPATH   	= $(TOPDIR)/include
 FINDHPATH	= $(HPATH)/asm $(HPATH)/linux $(HPATH)/scsi $(HPATH)/net
 
-HOSTCC  	=gcc -I$(HPATH)
+HOSTCC  	=gcc
 HOSTCFLAGS	=-O2 -fomit-frame-pointer
 
 CROSS_COMPILE 	=
 
-AS	= $(CROSS_COMPILE)as
-LD	= $(CROSS_COMPILE)ld
-CC	= $(CROSS_COMPILE)gcc -D__KERNEL__ -I$(HPATH)
-CPP	= $(CC) -E
-AR	= $(CROSS_COMPILE)ar
-NM	= $(CROSS_COMPILE)nm
-STRIP	= $(CROSS_COMPILE)strip
-MAKE	= make
-PERL	= perl
+AS	=$(CROSS_COMPILE)as
+LD	=$(CROSS_COMPILE)ld
+CC	=$(CROSS_COMPILE)gcc -D__KERNEL__ -I$(HPATH)
+CPP	=$(CC) -E
+AR	=$(CROSS_COMPILE)ar
+NM	=$(CROSS_COMPILE)nm
+STRIP	=$(CROSS_COMPILE)strip
+MAKE	=make
 
 all:	do-it-all
 
@@ -150,10 +146,6 @@ ifdef CONFIG_SBUS
 DRIVERS := $(DRIVERS) drivers/sbus/sbus.a
 endif
 
-ifeq ($(CONFIG_PARIDE),y)
-DRIVERS := $(DRIVERS) drivers/block/paride/paride.a
-endif
-
 include arch/$(ARCH)/Makefile
 
 ifdef SMP
@@ -189,9 +181,6 @@ vmlinux: $(CONFIGURATION) init/main.o init/version.o linuxsubdirs
 symlinks:
 	rm -f include/asm
 	( cd include ; ln -sf asm-$(ARCH) asm)
-	@if [ ! -d include/linux/modules ]; then \
-		mkdir include/linux/modules; \
-	fi
 
 oldconfig: symlinks
 	$(CONFIG_SHELL) scripts/Configure -d arch/$(ARCH)/config.in
@@ -212,9 +201,6 @@ linuxsubdirs: dummy
 
 $(TOPDIR)/include/linux/version.h: include/linux/version.h
 $(TOPDIR)/include/linux/compile.h: include/linux/compile.h
-
-ksymoops: 
-	$(MAKE) -C scripts ksymoops
 
 newversion:
 	@if [ ! -f .version ]; then \
@@ -243,9 +229,8 @@ include/linux/compile.h: $(CONFIGURATION) include/linux/version.h newversion
 	@mv -f .ver $@
 
 include/linux/version.h: ./Makefile
-	@echo \#define UTS_RELEASE \"$(KERNELRELEASE)\" > .ver
+	@echo \#define UTS_RELEASE \"$(VERSION).$(PATCHLEVEL).$(SUBLEVEL)\" > .ver
 	@echo \#define LINUX_VERSION_CODE `expr $(VERSION) \\* 65536 + $(PATCHLEVEL) \\* 256 + $(SUBLEVEL)` >> .ver
-	@echo '#define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))' >>.ver
 	@mv -f .ver $@
 
 init/version.o: init/version.c include/linux/compile.h
@@ -275,18 +260,6 @@ drivers: dummy
 net: dummy
 	$(MAKE) linuxsubdirs SUBDIRS=net
 
-TAGS: dummy
-	etags `find include/asm-$(ARCH) -name '*.h'`
-	find include -type d \( -name "asm-*" -o -name config \) -prune -o -name '*.h' -print | xargs etags -a
-	find $(SUBDIRS) init -name '*.c' | xargs etags -a
-
-# Exuberant ctags works better with -I
-tags: dummy
-	CTAGSF=`ctags --version | grep -i exuberant >/dev/null && echo "-I __initdata,__exitdata,EXPORT_SYMBOL,EXPORT_SYMBOL_NOVERS"`; \
-	ctags $$CTAGSF `find include/asm-$(ARCH) -name '*.h'` && \
-	find include -type d \( -name "asm-*" -o -name config \) -prune -o -name '*.h' -print | xargs ctags $$CTAGSF -a && \
-	find $(SUBDIRS) init -name '*.c' | xargs ctags $$CTAGSF -a
-
 MODFLAGS = -DMODULE
 ifdef CONFIG_MODULES
 ifdef CONFIG_MODVERSIONS
@@ -301,7 +274,7 @@ modules: include/linux/version.h
 
 modules_install:
 	@( \
-	MODLIB=/lib/modules/$(KERNELRELEASE); \
+	MODLIB=/lib/modules/$(VERSION).$(PATCHLEVEL).$(SUBLEVEL); \
 	cd modules; \
 	MODULES=""; \
 	inst_mod() { These="`cat $$1`"; MODULES="$$MODULES $$These"; \
@@ -346,11 +319,8 @@ clean:	archclean
 mrproper: clean
 	rm -f include/linux/autoconf.h include/linux/version.h
 	rm -f drivers/sound/local.h drivers/sound/.defines
+	rm -f drivers/scsi/aic7xxx_asm drivers/scsi/aic7xxx_seq.h
 	rm -f drivers/char/uni_hash.tbl drivers/char/conmakehash
-	rm -f drivers/net/soundmodem/sm_tbl_{afsk1200,afsk2666,fsk9600}.h
-	rm -f drivers/net/soundmodem/sm_tbl_{hapn4800,psk4800}.h
-	rm -f drivers/net/soundmodem/sm_tbl_{afsk2400_7,afsk2400_8}.h
-	rm -f drivers/net/soundmodem/gentbl
 	rm -f .version .config* config.in config.old
 	rm -f scripts/tkparse scripts/kconfig.tk scripts/kconfig.tmp
 	rm -f scripts/lxdialog/*.o scripts/lxdialog/lxdialog
@@ -365,7 +335,7 @@ mrproper: clean
 distclean: mrproper
 	rm -f core `find . \( -name '*.orig' -o -name '*.rej' -o -name '*~' \
                 -o -name '*.bak' -o -name '#*#' -o -name '.*.orig' \
-                -o -name '.*.rej' -o -name '.SUMS' -o -size 0 \) -print` TAGS tags
+                -o -name '.*.rej' -o -name '.SUMS' -o -size 0 \) -print` TAGS
 
 backup: mrproper
 	cd .. && tar cf - linux/ | gzip -9 > backup.gz
@@ -380,14 +350,6 @@ dep-files: scripts/mkdep archdep include/linux/version.h
 	set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i fastdep; done
 	mv .tmpdepend .depend
 
-# Prepare source tree for RCS version control using Emacs VC;
-# make all needed RCS directories and write-lock nearly everything.
-vc:
-	chmod a-w COPYING CREDITS MAINTAINERS Makefile README Rules.make  
-	find . -type d ! -name "*RCS" -exec mkdir {}/RCS \;
-	find . -type f \( -name *.[chS] -o -name "*Makefile" -o -name "*README*" -o -name "*Config.in" -o -name "*.txt" \) -exec chmod a-w {} \;
-	find Documentation scripts -type f -exec chmod a-w {} \;
-
 MODVERFILE :=
 
 ifdef CONFIG_MODVERSIONS
@@ -395,15 +357,6 @@ MODVERFILE := $(TOPDIR)/include/linux/modversions.h
 endif
 
 depend dep: dep-files $(MODVERFILE)
-
-checkconfig:
-	find * -name '*.[hcS]' -type f -print | sort | xargs $(PERL) -w scripts/checkconfig.pl
-
-checkhelp:
-	find * -name [cC]onfig.in -print | sort | xargs $(PERL) -w scripts/checkhelp.pl
-
-checkincludes:
-	find * -name '*.[hcS]' -type f -print | sort | xargs $(PERL) -w scripts/checkincludes.pl
 
 ifdef CONFIGURATION
 ..$(CONFIGURATION):

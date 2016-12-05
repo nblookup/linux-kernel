@@ -4,7 +4,6 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
@@ -18,7 +17,7 @@
 
 /*
  * mem_write isn't really a good idea right now. It needs
- * to check a lot more: if the process we try to write to
+ * to check a lot more: if the process we try to write to 
  * dies in the middle right now, mem_write will overwrite
  * kernel memory.. This disables it altogether.
  */
@@ -77,7 +76,8 @@ static struct task_struct * get_task(int pid)
 	return tsk;
 }
 
-static int mem_read(struct inode * inode, struct file * file,char * buf, int count)
+static long mem_read(struct inode * inode, struct file * file,
+	char * buf, unsigned long count)
 {
 	pgd_t *page_dir;
 	pmd_t *page_middle;
@@ -88,8 +88,6 @@ static int mem_read(struct inode * inode, struct file * file,char * buf, int cou
 	char *tmp;
 	int i;
 
-	if (count < 0)
-		return -EINVAL;
 	tsk = get_task(inode->i_ino >> 16);
 	if (!tsk)
 		return -ESRCH;
@@ -135,7 +133,8 @@ static int mem_read(struct inode * inode, struct file * file,char * buf, int cou
 
 #ifndef mem_write
 
-static int mem_write(struct inode * inode, struct file * file,char * buf, int count)
+static long mem_write(struct inode * inode, struct file * file,
+	char * buf, unsigned long count)
 {
 	pgd_t *page_dir;
 	pmd_t *page_middle;
@@ -146,8 +145,6 @@ static int mem_write(struct inode * inode, struct file * file,char * buf, int co
 	char *tmp;
 	int i;
 
-	if (count < 0)
-		return -EINVAL;
 	addr = file->f_pos;
 	tsk = get_task(inode->i_ino >> 16);
 	if (!tsk)
@@ -196,7 +193,8 @@ static int mem_write(struct inode * inode, struct file * file,char * buf, int co
 
 #endif
 
-static int mem_lseek(struct inode * inode, struct file * file, off_t offset, int orig)
+static long long mem_lseek(struct inode * inode, struct file * file,
+	long long offset, int orig)
 {
 	switch (orig) {
 		case 0:
@@ -210,7 +208,6 @@ static int mem_lseek(struct inode * inode, struct file * file, off_t offset, int
 	}
 }
 
-#ifdef CONFIG_UNSAFE_MMAP
 /*
  * This isn't really reliable by any means..
  */
@@ -221,7 +218,7 @@ int mem_mmap(struct inode * inode, struct file * file,
 	pgd_t *src_dir, *dest_dir;
 	pmd_t *src_middle, *dest_middle;
 	pte_t *src_table, *dest_table;
-	unsigned long stmp, dtmp, mapnr;
+	unsigned long stmp, dtmp;
 	struct vm_area_struct *src_vma = NULL;
 
 	/* Get the source's task information */
@@ -301,9 +298,7 @@ int mem_mmap(struct inode * inode, struct file * file,
 
 		set_pte(src_table, pte_mkdirty(*src_table));
 		set_pte(dest_table, *src_table);
-                mapnr = MAP_NR(pte_page(*src_table));
-		if (mapnr < MAP_NR(high_memory))
-                        mem_map[mapnr].count++;
+		mem_map[MAP_NR(pte_page(*src_table))].count++;
 
 		stmp += PAGE_SIZE;
 		dtmp += PAGE_SIZE;
@@ -313,7 +308,6 @@ int mem_mmap(struct inode * inode, struct file * file,
 	flush_tlb_range(src_vma->vm_mm, src_vma->vm_start, src_vma->vm_end);
 	return 0;
 }
-#endif /* CONFIG_UNSAFE_MMAP */
 
 static struct file_operations proc_mem_operations = {
 	mem_lseek,
@@ -322,11 +316,7 @@ static struct file_operations proc_mem_operations = {
 	NULL,		/* mem_readdir */
 	NULL,		/* mem_select */
 	NULL,		/* mem_ioctl */
-#ifdef CONFIG_UNSAFE_MMAP
 	mem_mmap,	/* mmap */
-#else
-	NULL,		/* mmap */
-#endif /* CONFIG_UNSAFE_MMAP */
 	NULL,		/* no special open code */
 	NULL,		/* no special release code */
 	NULL		/* can't fsync */

@@ -1,5 +1,5 @@
 /*
- *	NET3	Protocol independent device support routines.
+ * 	NET3	Protocol independent device support routines.
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -7,53 +7,46 @@
  *		2 of the License, or (at your option) any later version.
  *
  *	Derived from the non IP parts of dev.c 1.0.19
- *		Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
+ * 		Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *				Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *				Mark Evans, <evansmp@uhura.aston.ac.uk>
  *
  *	Additional Authors:
  *		Florian la Roche <rzsfl@rz.uni-sb.de>
- *		Alan Cox <alan@lxorguk.ukuu.org.uk>
+ *		Alan Cox <gw4pts@gw4pts.ampr.org>
  *		David Hinds <dhinds@allegro.stanford.edu>
  *
  *	Changes:
  *		Alan Cox	:	device private ioctl copies fields back.
- *		Alan Cox	:	Transmit queue code does relevant stunts
- *					to keep the queue safe.
+ *		Alan Cox	:	Transmit queue code does relevant stunts to
+ *					keep the queue safe.
  *		Alan Cox	:	Fixed double lock.
  *		Alan Cox	:	Fixed promisc NULL pointer trap
  *		????????	:	Support the full private ioctl range
- *		Alan Cox	:	Moved ioctl permission check into
- :					drivers
+ *		Alan Cox	:	Moved ioctl permission check into drivers
  *		Tim Kordas	:	SIOCADDMULTI/SIOCDELMULTI
  *		Alan Cox	:	100 backlog just doesn't cut it when
  *					you start doing multicast video 8)
  *		Alan Cox	:	Rewrote net_bh and list manager.
- *		Alan Cox	:	Fix ETH_P_ALL echoback lengths.
+ *		Alan Cox	: 	Fix ETH_P_ALL echoback lengths.
  *		Alan Cox	:	Took out transmit every packet pass
  *					Saved a few bytes in the ioctl handler
- *		Alan Cox	:	Network driver sets packet type before
- *					calling netif_rx. Saves a function
- *					call a packet.
+ *		Alan Cox	:	Network driver sets packet type before calling netif_rx. Saves
+ *					a function call a packet.
  *		Alan Cox	:	Hashed net_bh()
  *		Richard Kooijman:	Timestamp fixes.
  *		Alan Cox	:	Wrong field in SIOCGIFDSTADDR
  *		Alan Cox	:	Device lock protection.
- *		Alan Cox	:	Fixed nasty side effect of device
- *					close changes.
- *		Rudi Cilibrasi	:	Pass the right thing to
- *					set_mac_address()
- *		Dave Miller	:	32bit quantity for the device lock
- *					to make it work out on a Sparc.
+ *		Alan Cox	: 	Fixed nasty side effect of device close changes.
+ *		Rudi Cilibrasi	:	Pass the right thing to set_mac_address()
+ *		Dave Miller	:	32bit quantity for the device lock to make it work out
+ *					on a Sparc.
  *		Bjorn Ekwall	:	Added KERNELD hack.
  *		Alan Cox	:	Cleaned up the backlog initialise.
  *		Craig Metz	:	SIOCGIFCONF fix if space for under
  *					1 device.
  *	    Thomas Bogendoerfer :	Return ENODEV for dev_open, if there
  *					is no device open function.
- *	    Lawrence V. Stefani	:	Changed set MTU ioctl to not assume
- *					min MTU of 68 bytes for devices
- *					that have change MTU functions.
  *
  */
 
@@ -91,9 +84,6 @@
 #ifdef CONFIG_KERNELD
 #include <linux/kerneld.h>
 #endif
-#ifdef CONFIG_NET_RADIO
-#include <linux/wireless.h>
-#endif	/* CONFIG_NET_RADIO */
 
 /*
  *	The list of packet types we will receive (as opposed to discard)
@@ -229,7 +219,7 @@ struct device *dev_get(const char *name)
 
 extern __inline__ void dev_load(const char *name)
 {
-	if(!dev_get(name) && suser()) {
+	if(!dev_get(name)) {
 #ifdef CONFIG_NET_ALIAS
 		const char *sptr;
  
@@ -396,7 +386,7 @@ static void do_dev_queue_xmit(struct sk_buff *skb, struct device *dev, int pri)
 
 #ifdef CONFIG_NET_ALIAS
 	if (net_alias_is(dev))
-	  	skb->dev = dev = net_alias_dev_tx(dev);
+	  	skb->dev = dev = net_alias_main_dev(dev);
 #endif
 
 	/*
@@ -440,18 +430,7 @@ static void do_dev_queue_xmit(struct sk_buff *skb, struct device *dev, int pri)
 					struct sk_buff *skb2;
 					if ((skb2 = skb_clone(skb, GFP_ATOMIC)) == NULL)
 						break;
-					/* FIXME?: Wrong when the hard_header_len
-					 * is an upper bound. Is this even
-					 * used anywhere?
-					 */
 					skb2->h.raw = skb2->data + dev->hard_header_len;
-					/* On soft header devices we
-					 * yank the header before mac.raw
-					 * back off. This is set by
-					 * dev->hard_header().
-					 */
-					if (dev->flags&IFF_SOFTHEADERS)
-						skb_pull(skb2,skb2->mac.raw-skb2->data);
 					skb2->mac.raw = skb2->data;
 					ptype->func(skb2, skb->dev, ptype);
 				}
@@ -675,14 +654,13 @@ void net_bh(void)
 		pt_prev = NULL;
 		for (ptype = ptype_all; ptype!=NULL; ptype=ptype->next)
 		{
-			if(!ptype->dev || ptype->dev == skb->dev) {
-				if(pt_prev) {
-					struct sk_buff *skb2=skb_clone(skb, GFP_ATOMIC);
-					if(skb2)
-						pt_prev->func(skb2,skb->dev, pt_prev);
-				}
-				pt_prev=ptype;
+			if(pt_prev)
+			{
+				struct sk_buff *skb2=skb_clone(skb, GFP_ATOMIC);
+				if(skb2)
+					pt_prev->func(skb2,skb->dev, pt_prev);
 			}
+			pt_prev=ptype;
 		}
 		
 		for (ptype = ptype_base[ntohs(type)&15]; ptype != NULL; ptype = ptype->next) 
@@ -959,95 +937,6 @@ int dev_get_info(char *buffer, char **start, off_t offset, int length, int dummy
 #endif	/* CONFIG_PROC_FS */
 
 
-#ifdef CONFIG_NET_RADIO
-#ifdef CONFIG_PROC_FS
-
-/*
- * Print one entry of /proc/net/wireless
- * This is a clone of /proc/net/dev (just above)
- */
-static int
-sprintf_wireless_stats(char *		buffer,
-		       struct device *	dev)
-{
-	/* Get stats from the driver */
-	struct iw_statistics *stats = (dev->get_wireless_stats ?
-				       dev->get_wireless_stats(dev) :
-				       (struct iw_statistics *) NULL);
-	int size;
-	
-	if(stats != (struct iw_statistics *) NULL)
-		size = sprintf(buffer,
-			       "%6s: %02x  %3d%c %3d%c  %3d%c %5d %5d %5d\n",
-			       dev->name,
-			       stats->status,
-			       stats->qual.qual,
-			       stats->qual.updated & 1 ? '.' : ' ',
-			       stats->qual.level,
-			       stats->qual.updated & 2 ? '.' : ' ',
-			       stats->qual.noise,
-			       stats->qual.updated & 3 ? '.' : ' ',
-			       stats->discard.nwid,
-			       stats->discard.code,
-			       stats->discard.misc);
-	else
-		size = 0;
-
-	return size;
-}
-
-/*
- * Print info for /proc/net/wireless (print all entries)
- * This is a clone of /proc/net/dev (just above)
- */
-int
-dev_get_wireless_info(char *	buffer,
-		      char **	start,
-		      off_t	offset,
-		      int	length,
-		      int	dummy)
-{
-	int		len = 0;
-	off_t		begin = 0;
-	off_t		pos = 0;
-	int		size;
-
-	struct device *	dev;
-
-	size = sprintf(buffer,
-		       "Inter-|sta|  Quality       |  Discarded packets\n"
-		       " face |tus|link level noise| nwid crypt  misc\n");
-	
-	pos+=size;
-	len+=size;
-
-
-	for(dev = dev_base; dev != NULL; dev = dev->next) 
-	{
-		size = sprintf_wireless_stats(buffer+len, dev);
-		len+=size;
-		pos=begin+len;
-
-		if(pos < offset)
-		{
-			len=0;
-			begin=pos;
-		}
-		if(pos > offset + length)
-			break;
-	}
-
-	*start = buffer + (offset - begin);	/* Start of wanted data */
-	len -= (offset - begin);		/* Start slop */
-	if(len > length)
-		len = length;		/* Ending slop */
-
-	return len;
-}
-#endif	/* CONFIG_PROC_FS */
-#endif	/* CONFIG_NET_RADIO */
-
-
 /*
  *	This checks bitmasks for the ioctl calls for devices.
  */
@@ -1110,15 +999,13 @@ static int dev_ifsioc(void *arg, unsigned int getset)
 	switch(getset) 
 	{
 		case SIOCGIFFLAGS:	/* Get interface flags */
-			ifr.ifr_flags = (dev->flags & ~IFF_SOFTHEADERS);
+			ifr.ifr_flags = dev->flags;
 			goto rarok;
 
 		case SIOCSIFFLAGS:	/* Set interface flags */
 			{
 				int old_flags = dev->flags;
 				
-				if(securelevel>0)
-					ifr.ifr_flags&=~IFF_PROMISC;
 				/*
 				 *	We are not allowed to potentially close/unload
 				 *	a device until we get this lock.
@@ -1134,7 +1021,7 @@ static int dev_ifsioc(void *arg, unsigned int getset)
 					IFF_BROADCAST | IFF_DEBUG | IFF_LOOPBACK |
 					IFF_POINTOPOINT | IFF_NOTRAILERS | IFF_RUNNING |
 					IFF_NOARP | IFF_PROMISC | IFF_ALLMULTI | IFF_SLAVE | IFF_MASTER
-					| IFF_MULTICAST)) | (dev->flags & (IFF_SOFTHEADERS|IFF_UP));
+					| IFF_MULTICAST)) | (dev->flags & IFF_UP);
 				/*
 				 *	Load in the correct multicast list now the flags have changed.
 				 */				
@@ -1197,8 +1084,6 @@ static int dev_ifsioc(void *arg, unsigned int getset)
 			{
 				if(dev->set_mac_address==NULL)
 					return -EOPNOTSUPP;
-				if(securelevel>0)
-					return -EPERM;
 				ret=dev->set_mac_address(dev,&ifr.ifr_addr);
 			}
 			else
@@ -1222,7 +1107,7 @@ static int dev_ifsioc(void *arg, unsigned int getset)
 
 #ifdef CONFIG_NET_ALIAS
 			  	if (net_alias_is(dev))
-				    	net_alias_dev_rehash(dev ,&ifr.ifr_addr);
+			    	net_alias_dev_rehash(dev ,&ifr.ifr_addr);
 #endif
 				dev->pa_addr = new_pa_addr;
 				dev->family = new_family;
@@ -1311,17 +1196,17 @@ static int dev_ifsioc(void *arg, unsigned int getset)
 	
 		case SIOCSIFMTU:	/* Set the MTU of a device */
 		
+			/*
+			 *	MTU must be positive.
+			 */
+			 
+			if(ifr.ifr_mtu<68)
+				return -EINVAL;
+
 			if (dev->change_mtu)
-				ret = dev->change_mtu(dev, ifr.ifr_mtu);
+				ret = (*dev->change_mtu)(dev, ifr.ifr_mtu);
 			else
 			{
-				/*
-				 *	MTU must be positive.
-				 */
-			 
-				if(ifr.ifr_mtu<68)
-					return -EINVAL;
-
 				dev->mtu = ifr.ifr_mtu;
 				ret = 0;
 			}
@@ -1344,8 +1229,6 @@ static int dev_ifsioc(void *arg, unsigned int getset)
 		case SIOCSIFHWADDR:
 			if(dev->set_mac_address==NULL)
 				return -EOPNOTSUPP;
-			if(securelevel > 0)
-				return -EPERM;
 			if(ifr.ifr_hwaddr.sa_family!=dev->type)
 				return -EINVAL;
 			ret=dev->set_mac_address(dev,&ifr.ifr_hwaddr);
@@ -1393,23 +1276,7 @@ static int dev_ifsioc(void *arg, unsigned int getset)
 				memcpy_tofs(arg,&ifr,sizeof(struct ifreq));
 				break;
 			}
-
-#ifdef CONFIG_NET_RADIO
-			if((getset >= SIOCIWFIRST) &&
-			   (getset <= SIOCIWLAST))
-			{
-				if(dev->do_ioctl==NULL)
-					return -EOPNOTSUPP;
-				/* Perform the ioctl */
-				ret=dev->do_ioctl(dev, &ifr, getset);
-				/* If return args... */
-				if(IW_IS_GET(getset))
-					memcpy_tofs(arg, &ifr,
-						    sizeof(struct ifreq));
-				break;
-			}
-#endif	/* CONFIG_NET_RADIO */
-
+			
 			ret = -EINVAL;
 	}
 	return(ret);
@@ -1448,6 +1315,7 @@ int dev_ioctl(unsigned int cmd, void *arg)
 		case SIOCGIFMTU:
 		case SIOCGIFMEM:
 		case SIOCGIFHWADDR:
+		case SIOCSIFHWADDR:
 		case SIOCGIFSLAVE:
 		case SIOCGIFMAP:
 			return dev_ifsioc(arg, cmd);
@@ -1464,7 +1332,6 @@ int dev_ioctl(unsigned int cmd, void *arg)
 		case SIOCSIFMETRIC:
 		case SIOCSIFMTU:
 		case SIOCSIFMEM:
-		case SIOCSIFHWADDR:
 		case SIOCSIFMAP:
 		case SIOCSIFSLAVE:
 		case SIOCADDMULTI:
@@ -1485,15 +1352,6 @@ int dev_ioctl(unsigned int cmd, void *arg)
 			   (cmd <= (SIOCDEVPRIVATE + 15))) {
 				return dev_ifsioc(arg, cmd);
 			}
-#ifdef CONFIG_NET_RADIO
-			if((cmd >= SIOCIWFIRST) &&
-			   (cmd <= SIOCIWLAST))
-			{
-				if((IW_IS_SET(cmd)) && (!suser()))
-					return -EPERM;
-				return dev_ifsioc(arg, cmd);
-			}
-#endif	/* CONFIG_NET_RADIO */
 			return -EINVAL;
 	}
 }
@@ -1506,13 +1364,10 @@ int dev_ioctl(unsigned int cmd, void *arg)
  *
  */
 extern int lance_init(void);
+extern int ni65_init(void);
 extern int pi_init(void);
-extern int pt_init(void);
-extern int bpq_init(void);
 extern void sdla_setup(void);
-extern int dlci_setup(void);
-extern int sm_init(void);
-extern int baycom_init(void);
+extern void dlci_setup(void);
 
 int net_dev_init(void)
 {
@@ -1537,26 +1392,23 @@ int net_dev_init(void)
 	 *
 	 * Some devices want to be initialized early..
 	 */
+#if defined(CONFIG_LANCE)
+	lance_init();
+#endif
+#if defined(CONFIG_NI65)
+	ni65_init();
+#endif
 #if defined(CONFIG_PI)
 	pi_init();
 #endif	
 #if defined(CONFIG_PT)
 	pt_init();
 #endif
-#if defined(CONFIG_BPQETHER)
-	bpq_init();
-#endif
 #if defined(CONFIG_DLCI)
 	dlci_setup();
 #endif
 #if defined(CONFIG_SDLA)
 	sdla_setup();
-#endif
-#if defined(CONFIG_BAYCOM)
-        baycom_init();
-#endif
-#if defined(CONFIG_SOUNDMODEM)
-        sm_init();
 #endif
 	/*
 	 *	SLHC if present needs attaching so other people see it
@@ -1604,17 +1456,6 @@ int net_dev_init(void)
 		dev_get_info
 	});
 #endif
-
-#ifdef CONFIG_NET_RADIO
-#ifdef CONFIG_PROC_FS
-	proc_net_register(&(struct proc_dir_entry) {
-		PROC_NET_WIRELESS, 8, "wireless",
-		S_IFREG | S_IRUGO, 1, 0, 0,
-		0, &proc_net_inode_operations,
-		dev_get_wireless_info
-	});
-#endif	/* CONFIG_PROC_FS */
-#endif	/* CONFIG_NET_RADIO */
 
 	/*	
 	 *	Initialise net_alias engine 

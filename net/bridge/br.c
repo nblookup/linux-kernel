@@ -29,6 +29,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/timer.h>
+#include <linux/string.h>
 #include <linux/net.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
@@ -90,8 +91,6 @@ static struct notifier_block br_dev_notifier={
 
 void transmit_config(int port_no)			  /* (4.6.1)	 */
 {
-	if(!(br_stats.flags & BR_UP))
-		return; /* this should not happen but happens */
 	if (hold_timer[port_no].active) {	  /* (4.6.1.3.1)	 */
 		port_info[port_no].config_pending = TRUE;	/* (4.6.1.3.1)	 */
 	} else {				  /* (4.6.1.3.2)	 */
@@ -268,7 +267,7 @@ void root_selection(void)
 				  (((port_info[port_no].designated_cost
 				     + port_info[port_no].path_cost
 				     )
-				    <
+				    ==
 				    (port_info[root_port].designated_cost
 				     + port_info[root_port].path_cost
 				     )		  /* (4.6.8.3.1(2)) */
@@ -872,12 +871,11 @@ int hold_timer_expired(int port_no)
 
 int send_config_bpdu(int port_no, Config_bpdu *config_bpdu)
 {
-	struct sk_buff *skb;
-	struct device *dev = port_info[port_no].dev;
-	int size;
+struct sk_buff *skb;
+struct device *dev = port_info[port_no].dev;
+int size;
+unsigned long flags;
 	
-	if(!(br_stats.flags & BR_UP))
-		return(-1); /* this should not happen but happens */
 	if (port_info[port_no].state == Disabled) {
 		printk(KERN_DEBUG "send_config_bpdu: port %i not valid\n",port_no);
 		return(-1);
@@ -923,18 +921,20 @@ int send_config_bpdu(int port_no, Config_bpdu *config_bpdu)
 	skb->pkt_bridged = IS_BRIDGED;
 	skb->arp = 1;	/* do not resolve... */
 	skb->h.raw = skb->data + ETH_HLEN;
-	dev_queue_xmit(skb, dev, SOPRI_INTERACTIVE);
+	save_flags(flags);
+	cli();
+	skb_queue_tail(dev->buffs, skb);
+	restore_flags(flags);
 	return(0);
 }
 
 int send_tcn_bpdu(int port_no, Tcn_bpdu *bpdu)
 {
-	struct sk_buff *skb;
-	struct device *dev = port_info[port_no].dev;
-	int size;
+struct sk_buff *skb;
+struct device *dev = port_info[port_no].dev;
+int size;
+unsigned long flags;
 	
-	if(!(br_stats.flags & BR_UP))
-		return(-1); /* this should not happen but happens */
 	if (port_info[port_no].state == Disabled) {
 		printk(KERN_DEBUG "send_tcn_bpdu: port %i not valid\n",port_no);
 		return(-1);
@@ -977,8 +977,10 @@ int send_tcn_bpdu(int port_no, Tcn_bpdu *bpdu)
 	skb->pkt_bridged = IS_BRIDGED;
 	skb->arp = 1;	/* do not resolve... */
 	skb->h.raw = skb->data + ETH_HLEN;
-	
-	dev_queue_xmit(skb, dev, SOPRI_INTERACTIVE);
+	save_flags(flags);
+	cli();
+	skb_queue_tail(dev->buffs, skb);
+	restore_flags(flags);
 	return(0);
 }
 
@@ -1050,6 +1052,7 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 int br_receive_frame(struct sk_buff *skb)	/* 3.5 */
 {
 	int port;
+	int i;
 	
 	if (br_stats.flags & BR_DEBUG)
 		printk("br_receive_frame: ");
@@ -1303,16 +1306,9 @@ int br_forward(struct sk_buff *skb, int port)	/* 3.7 */
 		/*
 		 *	Sending
 		 */
-
-		/*
-		 * Vova Oksman: There was the BUG, we must to check timer 
-		 * before comparing source and destination ports, becouse
-		 * case that destination was switched from same port with
-		 * source to other port. 
-		 */
+		if (f->port!=port && port_info[f->port].state == Forwarding) {
 			/* has entry expired? */
-		if (port_info[f->port].state == Forwarding &&
-		    f->timer + fdb_aging_time < CURRENT_TIME) {
+			if (f->timer + fdb_aging_time < CURRENT_TIME) {
 				/* timer expired, invalidate entry */
 				f->flags &= ~FDB_ENT_VALID;
 				if (br_stats.flags & BR_DEBUG)
@@ -1323,7 +1319,6 @@ int br_forward(struct sk_buff *skb, int port)	/* 3.7 */
 				br_flood(skb, port);
 				return(br_dev_drop(skb));
 			}
-		if (f->port!=port && port_info[f->port].state == Forwarding) {
 			/* mark that's we've been here... */
 			skb->pkt_bridged = IS_BRIDGED;
 			
@@ -1423,7 +1418,7 @@ void br_bpdu(struct sk_buff *skb) /* consumes skb */
 		return;
 	}
 		
-	bpdu = (Tcn_bpdu *) (skb->data + ETH_HLEN);
+	bpdu = (Tcn_bpdu *)skb->data + ETH_HLEN;
 	switch (bpdu->type) {
 		case BPDU_TYPE_CONFIG:
 			received_config_bpdu(port, (Config_bpdu *)bpdu);

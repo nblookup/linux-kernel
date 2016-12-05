@@ -18,7 +18,9 @@
     card and benchmarked with 'ttcp': it transferred 16M  of data at 975kB/s
     (7.8Mb/s) to a DECstation 5000/200.
 
-    The author may be reached at davies@maniac.ultranet.com.
+    The     author  may  be    reached    at  davies@wanton.lkg.dec.com   or
+    davies@maniac.ultranet.com or  Digital  Equipment Corporation,  550 King
+    Street, Littleton MA 01460.
 
     =========================================================================
     This driver has been written  substantially  from scratch, although  its
@@ -136,7 +138,7 @@
     =========================================================================
 */
 
-static const char *version = "ewrk3.c:v0.43 96/8/16 davies@maniac.ultranet.com\n";
+static const char *version = "ewrk3.c:v0.43 96/8/16 davies@wanton.lkg.dec.com\n";
 
 #include <linux/module.h>
 
@@ -588,7 +590,7 @@ ewrk3_hw_init(struct device *dev, u_long iobase)
     }
 
     if (!status) {
-      if (ewrk3_debug > 1) {
+      if (ewrk3_debug > 0) {
 	printk(version);
       }
       
@@ -757,7 +759,6 @@ ewrk3_queue_pkt(struct sk_buff *skb, struct device *dev)
 
       dev->tbusy=0;
       dev->trans_start = jiffies;
-      dev_kfree_skb(skb, FREE_WRITE);
     }
   } else if (skb == NULL) {
     dev_tint(dev);
@@ -1141,7 +1142,7 @@ ewrk3_close(struct device *dev)
 
   /*
   ** Clean out the TX and RX queues here (note that one entry
-  ** may get added to either the TXD or RX queues if the TX or RX
+  ** may get added to either the TXD or RX queues if the the TX or RX
   ** just starts processing a packet before the STOP_EWRK3 command
   ** is received. This will be flushed in the ewrk3_open() call).
   */

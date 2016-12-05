@@ -36,16 +36,12 @@ CONFIG_PCI=y
 CONFIG_ALPHA_EV5=y
 CONFIG_ALPHA_CIA=y
 CONFIG_ALPHA_SRM=y
-CONFIG_KGDB=y
-CONFIG_KGDB_TRACING=n
 # CONFIG_SERIAL_ECHO is not set
 CONFIG_TGA_CONSOLE=y
-CONFIG_VGA_CONSOLE=y
 CONFIG_NET=y
 CONFIG_SYSVIPC=y
 CONFIG_BINFMT_AOUT=y
 CONFIG_BINFMT_ELF=y
-CONFIG_BINFMT_EM86=y
 
 #
 # Floppy, IDE, and other block devices
@@ -159,21 +155,19 @@ CONFIG_NET_ETHERNET=y
 # CONFIG_LANCE is not set
 # CONFIG_NET_VENDOR_SMC is not set
 # CONFIG_NET_ISA is not set
-CONFIG_NET_PCI=y
+CONFIG_NET_EISA=y
 # CONFIG_APRICOT is not set
 CONFIG_DE4X5=y
 # CONFIG_DEC_ELCP is not set
 # CONFIG_DGRS is not set
 # CONFIG_NET_POCKET is not set
 # CONFIG_TR is not set
-# CONFIG_FDDI is not set
 # CONFIG_ARCNET is not set
 
 #
 # ISDN subsystem
 #
 # CONFIG_ISDN is not set
-CONFIG_HISAX_EURO=y
 
 #
 # CD-ROM drivers (not for SCSI or IDE/ATAPI drives)
@@ -184,6 +178,7 @@ CONFIG_HISAX_EURO=y
 # Filesystems
 #
 # CONFIG_QUOTA is not set
+# CONFIG_LOCK_MANDATORY is not set
 # CONFIG_MINIX_FS is not set
 # CONFIG_EXT_FS is not set
 CONFIG_EXT2_FS=y
@@ -193,7 +188,6 @@ CONFIG_MSDOS_FS=y
 # CONFIG_VFAT_FS is not set
 # CONFIG_UMSDOS_FS is not set
 CONFIG_PROC_FS=y
-# CONFIG_UNSAFE_MMAP is not set
 CONFIG_NFS_FS=y
 # CONFIG_ROOT_NFS is not set
 # CONFIG_SMB_FS is not set
@@ -201,7 +195,6 @@ CONFIG_ISO9660_FS=y
 # CONFIG_HPFS_FS is not set
 # CONFIG_SYSV_FS is not set
 # CONFIG_UFS_FS is not set
-# CONFIG_AUTOFS_FS is not set
 
 #
 # Character devices
@@ -221,6 +214,7 @@ CONFIG_PSMOUSE=y
 # CONFIG_UMISC is not set
 # CONFIG_QIC02_TAPE is not set
 # CONFIG_FTAPE is not set
+# CONFIG_APM is not set
 # CONFIG_WATCHDOG is not set
 # CONFIG_RTC is not set
 

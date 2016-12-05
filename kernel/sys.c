@@ -34,8 +34,6 @@
 int C_A_D = 1;
 
 extern void adjust_clock(void);
-extern void DAC960_Finalize(void);
-extern void gdth_halt(void);
 
 asmlinkage int sys_ni_syscall(void)
 {
@@ -172,7 +170,7 @@ asmlinkage int sys_prof(void)
 #endif
 
 extern void hard_reset_now(void);
-extern asmlinkage int sys_kill(int, int);
+extern asmlinkage sys_kill(int, int);
 
 /*
  * Reboot system call: for obvious reasons only root may call it,
@@ -188,29 +186,17 @@ asmlinkage int sys_reboot(int magic, int magic_too, int flag)
 		return -EPERM;
 	if (magic != 0xfee1dead || magic_too != 672274793)
 		return -EINVAL;
-	if (flag == 0x01234567) {
-#ifdef CONFIG_BLK_DEV_DAC960
-		DAC960_Finalize();
-#endif
-#ifdef CONFIG_SCSI_GDTH
-		gdth_halt();
-#endif
+	if (flag == 0x01234567)
 		hard_reset_now();
-	} else if (flag == 0x89ABCDEF)
+	else if (flag == 0x89ABCDEF)
 		C_A_D = 1;
 	else if (!flag)
 		C_A_D = 0;
 	else if (flag == 0xCDEF0123) {
-#ifdef CONFIG_BLK_DEV_DAC960
-		DAC960_Finalize();
-#endif
-#ifdef CONFIG_SCSI_GDTH
-		gdth_halt();
-#endif
 		printk(KERN_EMERG "System halted\n");
 		sys_kill(-1, SIGKILL);
 #if defined(CONFIG_APM) && defined(CONFIG_APM_POWER_OFF)
-		apm_power_off();
+		apm_set_power_state(APM_STATE_OFF);
 #endif
 		do_exit(0);
 	} else
@@ -225,15 +211,9 @@ asmlinkage int sys_reboot(int magic, int magic_too, int flag)
  */
 void ctrl_alt_del(void)
 {
-	if (C_A_D) {
-#ifdef CONFIG_BLK_DEV_DAC960
-		DAC960_Finalize();
-#endif
-#ifdef CONFIG_SCSI_GDTH
-		gdth_halt();
-#endif
+	if (C_A_D)
 		hard_reset_now();
-	} else
+	else
 		kill_proc(1, SIGINT, 1);
 }
 	
@@ -676,8 +656,7 @@ asmlinkage int sys_getgroups(int gidsetsize, gid_t *grouplist)
 	int i;
 	int * groups;
 
-	/* Avoid an integer overflow on systems with 32 bit gid_t (Alpha) */
-	if (gidsetsize & ~0x3FFFFFFF)
+	if (gidsetsize < 0)
 		return -EINVAL;
 	groups = current->groups;
 	for (i = 0 ; i < NGROUPS ; i++) {
@@ -875,8 +854,6 @@ asmlinkage int sys_setrlimit(unsigned int resource, struct rlimit *rlim)
 	if (err)
 		return err;
 	memcpy_fromfs(&new_rlim, rlim, sizeof(*rlim));
-	if (new_rlim.rlim_cur < 0 || new_rlim.rlim_max < 0)
-		return -EINVAL;
 	old_rlim = current->rlim + resource;
 	if (((new_rlim.rlim_cur > old_rlim->rlim_max) ||
 	     (new_rlim.rlim_max > old_rlim->rlim_max)) &&

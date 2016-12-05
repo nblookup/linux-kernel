@@ -2,7 +2,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
-#include <asm/bootinfo.h>
+#include <asm/setup.h>
 #include <asm/atarihw.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
@@ -153,7 +153,7 @@ atari_stram_free (void *ptr)
 /* ++roman:
  * 
  * New version of ST-Ram buffer allocation. Instead of using the
- * 1 MB - 4 KB that remain when the ST-Ram chunk starts at $1000
+ * 1 MB - 4 KB that remain when the the ST-Ram chunk starts at $1000
  * (1 MB granularity!), such buffers are reserved like this:
  *
  *  - If the kernel resides in ST-Ram anyway, we can take the buffer

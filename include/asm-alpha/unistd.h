@@ -166,10 +166,6 @@
 #define __NR_nanosleep			340
 #define __NR_mremap			341
 #define __NR_nfsctl			342
-#define __NR_setresuid			343
-#define __NR_getresuid			344
-#define __NR_pciconfig_read		345
-#define __NR_pciconfig_write		346
 
 #if defined(__LIBRARY__) && defined(__GNUC__)
 
@@ -214,7 +210,7 @@ type name (type1 arg1, type2 arg2, type3 arg3, type4 arg4)		 \
 type name (type1 arg1,type2 arg2,type3 arg3,type4 arg4,type5 arg5)	 \
 {									 \
 	extern long syscall (int, ...);					 \
-	return syscall(__NR_##name, arg1, arg2, arg3, arg4, arg5);	 \
+	return syscall(__NR_##name, arg1, arg2, arg3, arg4);		 \
 }
 
 #endif /* __LIBRARY__ && __GNUC__ */
@@ -274,8 +270,8 @@ static inline int write(int fd, const char * buf, int nr)
 	return sys_write(fd, buf, nr);
 }
 
-extern int sys_read(unsigned int, char *, int);
-static inline int read(unsigned int fd, char * buf, int nr)
+extern int sys_read(int, char *, int);
+static inline int read(int fd, char * buf, int nr)
 {
 	return sys_read(fd, buf, nr);
 }

@@ -24,7 +24,6 @@
     Paul Gortmaker	: multiple card support for module users.
     Paul Gortmaker	: Support for PCI ne2k clones, similar to lance.c
     Paul Gortmaker	: Allow users with bad cards to avoid full probe.
-    Paul Gortmaker	: PCI probe changes, more PCI cards supported.
 
 */
 
@@ -43,7 +42,6 @@ static const char *version =
 #include <linux/bios32.h>
 #include <asm/system.h>
 #include <asm/io.h>
-#include <linux/delay.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -63,25 +61,11 @@ static const char *version =
 /* Do we have a non std. amount of memory? (in units of 256 byte pages) */
 /* #define PACKETBUF_MEMSIZE	0x40 */
 
-#if defined(HAVE_DEVLIST) || !defined(MODULE)
+/* ---- No user-serviceable parts below ---- */
+
 /* A zero-terminated list of I/O addresses to be probed. */
 static unsigned int netcard_portlist[] =
 { 0x300, 0x280, 0x320, 0x340, 0x360, 0};
-#endif /* defined(HAVE_DEVLIST) || !defined(MODULE) */
-
-#ifdef CONFIG_PCI
-/* Ack! People are making PCI ne2000 clones! Oh the horror, the horror... */
-static struct { unsigned short vendor, dev_id;}
-pci_clone_list[] = {
-	{PCI_VENDOR_ID_REALTEK,		PCI_DEVICE_ID_REALTEK_8029},
-	{PCI_VENDOR_ID_WINBOND2,	PCI_DEVICE_ID_WINBOND2_89C940},
-	{PCI_VENDOR_ID_COMPEX,		PCI_DEVICE_ID_COMPEX_RL2000},
-	{PCI_VENDOR_ID_KTI,		PCI_DEVICE_ID_KTI_ET32P2},
-	{PCI_VENDOR_ID_NETVIN,		PCI_DEVICE_ID_NETVIN_NV5000SC},
-	{PCI_VENDOR_ID_VIA,		PCI_DEVICE_ID_VIA_82C926},
-	{0,}
-};
-#endif
 
 #ifdef SUPPORT_NE_BAD_CLONES
 /* A list of bad clones that we none-the-less recognize. */
@@ -96,14 +80,9 @@ bad_clone_list[] = {
     {"4-DIM8","4-DIM16", {0x00,0x00,0x4d,}},  /* Outlaw 4-Dimension cards. */
     {"Con-Intl_8", "Con-Intl_16", {0x00, 0x00, 0x24}}, /* Connect Int'nl */
     {"ET-100","ET-200", {0x00, 0x45, 0x54}}, /* YANG and YA clone */
-    {"COMPEX","COMPEX16",{0x00,0x80,0x48}}, /* Broken ISA Compex cards */
-    {"E-LAN100", "E-LAN200", {0x00, 0x00, 0x5d}}, /* Broken ne1000 clones */
-    {"PCM-4823", "PCM-4823", {0x00, 0xc0, 0x6c}}, /* Broken Advantech MoBo */
     {0,}
 };
 #endif
-
-/* ---- No user-serviceable parts below ---- */
 
 #define NE_BASE	 (dev->base_addr)
 #define NE_CMD	 	0x00
@@ -120,9 +99,6 @@ bad_clone_list[] = {
 static unsigned char pci_irq_line = 0;
 
 int ne_probe(struct device *dev);
-#ifdef CONFIG_PCI
-static int ne_probe_pci(struct device *dev);
-#endif
 static int ne_probe1(struct device *dev, int ioaddr);
 
 static int ne_open(struct device *dev);
@@ -169,9 +145,7 @@ struct netdev_entry netcard_drv =
 
 int ne_probe(struct device *dev)
 {
-#ifndef MODULE
     int i;
-#endif /* MODULE */
     int base_addr = dev ? dev->base_addr : 0;
 
     /* First check any supplied i/o locations. User knows best. <cough> */
@@ -180,13 +154,40 @@ int ne_probe(struct device *dev)
     else if (base_addr != 0)	/* Don't probe at all. */
 	return ENXIO;
 
-#ifdef CONFIG_PCI
     /* Then look for any installed PCI clones */
-    if (pcibios_present() && (ne_probe_pci(dev) == 0))
-  return 0;
-#endif
+#if defined(CONFIG_PCI)
+    if (pcibios_present()) {
+	int pci_index;
+	for (pci_index = 0; pci_index < 8; pci_index++) {
+		unsigned char pci_bus, pci_device_fn;
+		unsigned int pci_ioaddr;
 
-#ifndef MODULE
+		/* Currently only Realtek are making PCI ne2k clones. */
+		if (pcibios_find_device (PCI_VENDOR_ID_REALTEK,
+				PCI_DEVICE_ID_REALTEK_8029, pci_index,
+				&pci_bus, &pci_device_fn) != 0)
+			break;	/* OK, now try to probe for std. ISA card */
+		pcibios_read_config_byte(pci_bus, pci_device_fn,
+				PCI_INTERRUPT_LINE, &pci_irq_line);
+		pcibios_read_config_dword(pci_bus, pci_device_fn,
+				PCI_BASE_ADDRESS_0, &pci_ioaddr);
+		/* Strip the I/O address out of the returned value */
+		pci_ioaddr &= PCI_BASE_ADDRESS_IO_MASK;
+		/* Avoid already found cards from previous ne_probe() calls */
+		if (check_region(pci_ioaddr, NE_IO_EXTENT))
+			continue;
+		printk("ne.c: PCI BIOS reports ne2000 clone at i/o %#x, irq %d.\n",
+				pci_ioaddr, pci_irq_line);
+		if (ne_probe1(dev, pci_ioaddr) != 0) {	/* Shouldn't happen. */
+			printk(KERN_ERR "ne.c: Probe of PCI card at %#x failed.\n", pci_ioaddr);
+			break;	/* Hrmm, try to probe for ISA card... */
+		}
+		pci_irq_line = 0;
+		return 0;
+	}
+    }
+#endif  /* defined(CONFIG_PCI) */
+
     /* Last resort. The semi-risky ISA auto-probe. */
     for (i = 0; netcard_portlist[i]; i++) {
 	int ioaddr = netcard_portlist[i];
@@ -195,67 +196,10 @@ int ne_probe(struct device *dev)
 	if (ne_probe1(dev, ioaddr) == 0)
 	    return 0;
     }
-#endif
 
     return ENODEV;
 }
 #endif
-
-#ifdef CONFIG_PCI
-static int ne_probe_pci(struct device *dev)
-{
-	int i;
-
-	for (i = 0; pci_clone_list[i].vendor != 0; i++) {
-		unsigned char pci_bus, pci_device_fn;
-		unsigned int pci_ioaddr;
-		u16 pci_command, new_command;
-		int pci_index;
-		
-		for (pci_index = 0; pci_index < 8; pci_index++) {
-			if (pcibios_find_device (pci_clone_list[i].vendor,
-					pci_clone_list[i].dev_id, pci_index,
-					&pci_bus, &pci_device_fn) != 0)
-				break;	/* No more of these type of cards */
-			pcibios_read_config_dword(pci_bus, pci_device_fn,
-					PCI_BASE_ADDRESS_0, &pci_ioaddr);
-			/* Strip the I/O address out of the returned value */
-			pci_ioaddr &= PCI_BASE_ADDRESS_IO_MASK;
-			/* Avoid already found cards from previous calls */
-			if (check_region(pci_ioaddr, NE_IO_EXTENT))
-				continue;
-			pcibios_read_config_byte(pci_bus, pci_device_fn,
-					PCI_INTERRUPT_LINE, &pci_irq_line);
-			break;	/* Beauty -- got a valid card. */
-		}
-		if (pci_irq_line == 0) continue;	/* Try next PCI ID */
-		printk("ne.c: PCI BIOS reports NE 2000 clone at i/o %#x, irq %d.\n",
-				pci_ioaddr, pci_irq_line);
-
-		pcibios_read_config_word(pci_bus, pci_device_fn, 
-					PCI_COMMAND, &pci_command);
-
-		/* Activate the card: fix for brain-damaged Win98 BIOSes. */
-		new_command = pci_command | PCI_COMMAND_IO;
-		if (pci_command != new_command) {
-			printk(KERN_INFO "  The PCI BIOS has not enabled this"
-				" NE2k clone!  Updating PCI command %4.4x->%4.4x.\n",
-					pci_command, new_command);
-			pcibios_write_config_word(pci_bus, pci_device_fn,
-					PCI_COMMAND, new_command);
-		}
-
-		if (ne_probe1(dev, pci_ioaddr) != 0) {	/* Shouldn't happen. */
-			printk(KERN_ERR "ne.c: Probe of PCI card at %#x failed.\n", pci_ioaddr);
-			pci_irq_line = 0;
-			return -ENXIO;
-		}
-		pci_irq_line = 0;
-		return 0;
-	}
-	return -ENODEV;
-}
-#endif  /* CONFIG_PCI */
 
 static int ne_probe1(struct device *dev, int ioaddr)
 {
@@ -355,21 +299,14 @@ static int ne_probe1(struct device *dev, int ioaddr)
 	    wordlength = 1;
     }
 
-    /*	At this point, wordlength *only* tells us if the SA_prom is doubled
-	up or not because some broken PCI cards don't respect the byte-wide
-	request in program_seq above, and hence don't have doubled up values. 
-	These broken cards would otherwise be detected as an ne1000.  */
-
-    if (wordlength == 2)
-	for (i = 0; i < 16; i++)
-		SA_prom[i] = SA_prom[i+i];
-    
-    if (pci_irq_line || ioaddr >= 0x400)
-	wordlength = 2;		/* Catch broken PCI cards mentioned above. */
-
     if (wordlength == 2) {
 	/* We must set the 8390 for word mode. */
 	outb_p(0x49, ioaddr + EN0_DCFG);
+	/* We used to reset the ethercard here, but it doesn't seem
+	   to be necessary. */
+	/* Un-double the SA_prom values. */
+	for (i = 0; i < 16; i++)
+	    SA_prom[i] = SA_prom[i+i];
 	start_page = NESM_START_PG;
 	stop_page = NESM_STOP_PG;
     } else {
@@ -415,8 +352,9 @@ static int ne_probe1(struct device *dev, int ioaddr)
 
     }
 
-    if (pci_irq_line)
+    if (pci_irq_line) {
 	dev->irq = pci_irq_line;
+    }
 
     if (dev->irq < 2) {
 	autoirq_setup(0);
@@ -424,7 +362,6 @@ static int ne_probe1(struct device *dev, int ioaddr)
 	outb_p(0x00, ioaddr + EN0_RCNTLO);
 	outb_p(0x00, ioaddr + EN0_RCNTHI);
 	outb_p(E8390_RREAD+E8390_START, ioaddr); /* Trigger it... */
-	udelay(10000);		/* wait 10ms for interrupt to propagate */
 	outb_p(0x00, ioaddr + EN0_IMR); 		/* Mask it again. */
 	dev->irq = autoirq_report(0);
 	if (ei_debug > 2)
@@ -440,10 +377,9 @@ static int ne_probe1(struct device *dev, int ioaddr)
     }
     
     /* Snarf the interrupt now.  There's no point in waiting since we cannot
-       share (with ISA cards) and the board will usually be enabled. */
+       share and the board will usually be enabled. */
     {
-	int irqval = request_irq(dev->irq, ei_interrupt,
-			pci_irq_line ? SA_SHIRQ : 0, name, dev);
+	int irqval = request_irq(dev->irq, ei_interrupt, 0, name, NULL);
 	if (irqval) {
 	    printk (" unable to get IRQ %d (irqval=%d).\n", dev->irq, irqval);
 	    return EAGAIN;
@@ -678,7 +614,9 @@ ne_block_output(struct device *dev, int count,
     outb_p(0x00, nic_base + EN0_RSARHI);
     outb_p(E8390_RREAD+E8390_START, nic_base + NE_CMD);
     /* Make certain that the dummy read has occurred. */
-    udelay(6);
+    SLOW_DOWN_IO;
+    SLOW_DOWN_IO;
+    SLOW_DOWN_IO;
 #endif
 
     outb_p(ENISR_RDC, nic_base + EN0_ISR);
@@ -749,7 +687,6 @@ static struct device dev_ne[MAX_NE_CARDS] = {
 
 static int io[MAX_NE_CARDS] = { 0, };
 static int irq[MAX_NE_CARDS]  = { 0, };
-static int bad[MAX_NE_CARDS]  = { 0, };
 
 /* This is set up so that no autoprobe takes place. We can't guarantee
 that the ne2k probe is the last 8390 based probe to take place (as it
@@ -767,18 +704,17 @@ init_module(void)
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
 		dev->init = ne_probe;
-		dev->mem_end = bad[this_dev];
-		if (register_netdev(dev) == 0) {
-			found++;
-			continue;
+		if (io[this_dev] == 0)  {
+			if (this_dev != 0) break; /* only complain once */
+			printk(KERN_NOTICE "ne.c: Module autoprobing not allowed. Append \"io=0xNNN\" value(s).\n");
+			return -EPERM;
 		}
-		if (found != 0) 	/* Got at least one. */
-			return 0;
-		if (io[this_dev] != 0)
-			printk(KERN_WARNING "ne.c: No NE*000 card found at i/o = %#x\n", io[this_dev]);
-		else
-			printk(KERN_NOTICE "ne.c: No PCI cards found. Use \"io=0xNNN\" value(s) for ISA cards.\n");
-		return -ENXIO;
+		if (register_netdev(dev) != 0) {
+			printk(KERN_WARNING "ne.c: No NE*000 card found (i/o = 0x%x).\n", io[this_dev]);
+			if (found != 0) return 0;	/* Got at least one. */
+			return -ENXIO;
+		}
+		found++;
 	}
 
 	return 0;
@@ -794,7 +730,7 @@ cleanup_module(void)
 		if (dev->priv != NULL) {
 			kfree(dev->priv);
 			dev->priv = NULL;
-			free_irq(dev->irq, dev);
+			free_irq(dev->irq, NULL);
 			irq2dev_map[dev->irq] = NULL;
 			release_region(dev->base_addr, NE_IO_EXTENT);
 			unregister_netdev(dev);

@@ -13,11 +13,6 @@
  *        controller).
  *  Modified by Matti Aarnio
  *        Accept parameters from LILO cmd-line. -- 1-Oct-94
- *  Modified by Mike McLagan <mike.mclagan@linux.org>
- *        Recognise extended mode on AHA1542CP, different bit than 1542CF
- *        1-Jan-97
- *  Modified by Bjorn L. Thordarson and Einar Thor Einarsson
- *        Recognize that DMA0 is valid DMA channel -- 13-Jul-98
  */
 
 #include <linux/module.h>
@@ -39,6 +34,14 @@
 
 
 #include "aha1542.h"
+
+#define SCSI_PA(address) virt_to_bus(address)
+
+#define BAD_DMA(msg, address, length) \
+  { \
+    printk(KERN_CRIT "%s address %p length %d\n", msg, address, length); \
+    panic("Buffer at physical address > 16Mb used for aha1542"); \
+  }
 
 #include<linux/stat.h>
 
@@ -91,6 +94,13 @@ static char *setup_str[MAXBOARDS] = {(char *)NULL,(char *)NULL};
  *		    Factory default is 5 MB/s.
  */
 
+
+/* The DMA-Controller.  We need to fool with this because we want to 
+   be able to use the aha1542 without having to have the bios enabled */
+#define DMA_MODE_REG	0xd6
+#define DMA_MASK_REG	0xd4
+#define	CASCADE		0xc0
+
 #define BIOS_TRANSLATION_1632 0  /* Used by some old 1542A boards */
 #define BIOS_TRANSLATION_6432 1 /* Default case these days */
 #define BIOS_TRANSLATION_25563 2 /* Big disk case */
@@ -120,8 +130,8 @@ static int aha1542_restart(struct Scsi_Host * shost);
 #define aha1542_intr_reset(base)  outb(IRST, CONTROL(base))
 
 #define WAIT(port, mask, allof, noneof)					\
- { register int WAITbits;							\
-   register int WAITtimeout = WAITnexttimeout;				\
+ { register WAITbits;							\
+   register WAITtimeout = WAITnexttimeout;				\
    while (1) {								\
      WAITbits = inb(port) & (mask);					\
      if ((WAITbits & (allof)) == (allof) && ((WAITbits & (noneof)) == 0)) \
@@ -133,8 +143,8 @@ static int aha1542_restart(struct Scsi_Host * shost);
 /* Similar to WAIT, except we use the udelay call to regulate the
    amount of time we wait.  */
 #define WAITd(port, mask, allof, noneof, timeout)			\
- { register int WAITbits;							\
-   register int WAITtimeout = timeout;					\
+ { register WAITbits;							\
+   register WAITtimeout = timeout;					\
    while (1) {								\
      WAITbits = inb(port) & (mask);					\
      if ((WAITbits & (allof)) == (allof) && ((WAITbits & (noneof)) == 0)) \
@@ -207,7 +217,7 @@ static int aha1542_in(unsigned int base, unchar *cmdp, int len)
 
 /* Similar to aha1542_in, except that we wait a very short period of time.
    We use this if we know the board is alive and awake, but we are not sure
-   if the board will respond to the command we are about to send or not */
+   if the board will respond the the command we are about to send or not */
 static int aha1542_in1(unsigned int base, unchar *cmdp, int len)
 {
     unsigned long flags;
@@ -356,7 +366,7 @@ static void aha1542_intr_handle(int irq, void *dev_id, struct pt_regs *regs)
     void (*my_done)(Scsi_Cmnd *) = NULL;
     int errstatus, mbi, mbo, mbistatus;
     int number_serviced;
-    unsigned long flags;
+    unsigned int flags;
     struct Scsi_Host * shost;
     Scsi_Cmnd * SCtmp;
     int flag;
@@ -425,7 +435,7 @@ static void aha1542_intr_handle(int irq, void *dev_id, struct pt_regs *regs)
 	return;
       };
 
-      mbo = (scsi2int(mb[mbi].ccbptr) - ((unsigned int) &ccb[0])) / sizeof(struct ccb);
+      mbo = (scsi2int(mb[mbi].ccbptr) - (SCSI_PA(&ccb[0]))) / sizeof(struct ccb);
       mbistatus = mb[mbi].status;
       mb[mbi].status = 0;
       HOSTDATA(shost)->aha1542_last_mbi_used = mbi;
@@ -585,7 +595,7 @@ int aha1542_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
     printk("Sending command (%d %x)...",mbo, done);
 #endif
 
-    any2scsi(mb[mbo].ccbptr, &ccb[mbo]); /* This gets trashed for some reason*/
+    any2scsi(mb[mbo].ccbptr, SCSI_PA(&ccb[mbo])); /* This gets trashed for some reason*/
 
     memset(&ccb[mbo], 0, sizeof(struct ccb));
 
@@ -625,12 +635,13 @@ int aha1542_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 	  for(i=0;i<18;i++) printk("%02x ", ptr[i]);
 	  panic("Foooooooood fight!");
 	};
-	any2scsi(cptr[i].dataptr, sgpnt[i].address);
-	if(((unsigned  int) sgpnt[i].address) & 0xff000000) goto baddma;
+	any2scsi(cptr[i].dataptr, SCSI_PA(sgpnt[i].address));
+	if(SCSI_PA(sgpnt[i].address+sgpnt[i].length) > ISA_DMA_THRESHOLD)
+	  BAD_DMA("sgpnt", sgpnt[i].address, sgpnt[i].length);
 	any2scsi(cptr[i].datalen, sgpnt[i].length);
       };
       any2scsi(ccb[mbo].datalen, SCpnt->use_sg * sizeof(struct chain));
-      any2scsi(ccb[mbo].dataptr, cptr);
+      any2scsi(ccb[mbo].dataptr, SCSI_PA(cptr));
 #ifdef DEBUG
       printk("cptr %x: ",cptr);
       ptr = (unsigned char *) cptr;
@@ -640,8 +651,9 @@ int aha1542_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
       ccb[mbo].op = 0;	      /* SCSI Initiator Command */
       SCpnt->host_scribble = NULL;
       any2scsi(ccb[mbo].datalen, bufflen);
-      if(((unsigned int) buff & 0xff000000)) goto baddma;
-      any2scsi(ccb[mbo].dataptr, buff);
+      if(buff && SCSI_PA(buff+bufflen) > ISA_DMA_THRESHOLD)
+        BAD_DMA("buff", buff, bufflen);
+      any2scsi(ccb[mbo].dataptr, SCSI_PA(buff));
     };
     ccb[mbo].idlun = (target&7)<<5 | direction | (lun & 7); /*SCSI Target Id*/
     ccb[mbo].rsalen = 16;
@@ -667,8 +679,6 @@ int aha1542_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
       printk("aha1542_queuecommand: done can't be NULL\n");
     
     return 0;
- baddma:
-    panic("Buffer at address  > 16Mb used for 1542B");
 }
 
 static void internal_done(Scsi_Cmnd * SCpnt)
@@ -702,10 +712,10 @@ static void setup_mailboxes(int bse, struct Scsi_Host * shpnt)
 
     for(i=0; i<AHA1542_MAILBOXES; i++){
       mb[i].status = mb[AHA1542_MAILBOXES+i].status = 0;
-      any2scsi(mb[i].ccbptr, &ccb[i]);
+      any2scsi(mb[i].ccbptr, SCSI_PA(&ccb[i]));
     };
     aha1542_intr_reset(bse);     /* reset interrupts, so they don't block */	
-    any2scsi((cmd+2), mb);
+    any2scsi((cmd+2), SCSI_PA(mb));
     aha1542_out(bse, cmd, 5);
     WAIT(INTRFLAGS(bse), INTRMASK, HACC, 0);
     while (0) {
@@ -743,8 +753,8 @@ static int aha1542_getconfig(int base_io, unsigned char * irq_level, unsigned ch
     *dma_chan = 5;
     break;
   case 0x01:
-    *dma_chan = 0;
-    break;
+    printk("DMA priority 0 not available for Adaptec driver\n");
+    return -1;
   case 0:
     /* This means that the adapter, although Adaptec 1542 compatible, doesn't use a DMA channel.
        Currently only aware of the BusLogic BT-445S VL-Bus adapter which needs this. */
@@ -803,9 +813,7 @@ static int aha1542_mbenable(int base)
      mbenable_cmd[0]=CMD_MBENABLE;
      mbenable_cmd[1]=0;
      mbenable_cmd[2]=mbenable_result[1];
-
-     if((mbenable_result[0] & 0x08) && (mbenable_result[1] & 0x03)) retval = BIOS_TRANSLATION_25563;
-
+     if(mbenable_result[1] & 1) retval = BIOS_TRANSLATION_25563;
      aha1542_out(base,mbenable_cmd,3);
      WAIT(INTRFLAGS(base),INTRMASK,HACC,0);
   };
@@ -942,7 +950,7 @@ int aha1542_detect(Scsi_Host_Template * tpnt)
 
 		    /* For now we do this - until kmalloc is more intelligent
 		       we are resigned to stupid hacks like this */
-		    if ((unsigned int) shpnt > 0xffffff) {
+		    if (SCSI_PA(shpnt+1) > ISA_DMA_THRESHOLD) {
 		      printk("Invalid address for shpnt with 1542.\n");
 		      goto unregister;
 		    }
@@ -1014,9 +1022,9 @@ int aha1542_detect(Scsi_Host_Template * tpnt)
 				    goto unregister;
 			    }
 			    
-			    if (dma_chan == 0 || dma_chan >= 5) {
-				    set_dma_mode(dma_chan, DMA_MODE_CASCADE);
-				    enable_dma(dma_chan);
+			    if (dma_chan >= 5) {
+				    outb((dma_chan - 4) | CASCADE, DMA_MODE_REG);
+				    outb(dma_chan - 4, DMA_MASK_REG);
 			    }
 		    }
 		    aha_host[irq_level - 9] = shpnt;
@@ -1027,7 +1035,7 @@ int aha1542_detect(Scsi_Host_Template * tpnt)
 		    shpnt->dma_channel = dma_chan;
 		    shpnt->irq = irq_level;
 		    HOSTDATA(shpnt)->bios_translation  = trans;
-		    if(trans == BIOS_TRANSLATION_25563) 
+		    if(trans == 2) 
 		      printk("aha1542.c: Using extended bios translation\n");
 		    HOSTDATA(shpnt)->aha1542_last_mbi_used  = (2*AHA1542_MAILBOXES - 1);
 		    HOSTDATA(shpnt)->aha1542_last_mbo_used  = (AHA1542_MAILBOXES - 1);
@@ -1300,8 +1308,8 @@ int aha1542_biosparam(Scsi_Disk * disk, kdev_t dev, int * ip)
   int size = disk->capacity;
 
   translation_algorithm = HOSTDATA(disk->device->host)->bios_translation;
-
-  if((size>>11) > 1024 && translation_algorithm == BIOS_TRANSLATION_25563) {
+  /* Should this be > 1024, or >= 1024?  Enquiring minds want to know. */
+  if((size>>11) > 1024 && translation_algorithm == 2) {
     /* Please verify that this is the same as what DOS returns */
     ip[0] = 255;
     ip[1] = 63;
@@ -1310,8 +1318,8 @@ int aha1542_biosparam(Scsi_Disk * disk, kdev_t dev, int * ip)
     ip[0] = 64;
     ip[1] = 32;
     ip[2] = size >> 11;
-  }
-
+  };
+/*  if (ip[2] >= 1024) ip[2] = 1024; */
   return 0;
 }
 

@@ -1,6 +1,3 @@
-#ifndef _FS_FAT_TABLES_H
-#define _FS_FAT_TABLES_H
-
 struct unicode_value {
 	unsigned char uni1;
 	unsigned char uni2;
@@ -36,5 +33,3 @@ extern unsigned char fat_code2uni[];
  * c-continued-brace-offset: 0
  * End:
  */
-
-#endif /* _FS_FAT_TABLES_H */

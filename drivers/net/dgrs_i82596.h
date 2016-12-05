@@ -1,7 +1,7 @@
 /*
  *	i82596 ethernet controller bits and structures (little endian)
  *
- *	$Id: i82596.h,v 1.8 1996/09/03 11:19:03 rick Exp $
+ *	$Id: i82596.h,v 1.7 1996/03/18 15:31:47 rick Exp $
  */
 
 /************************************************************************/
@@ -73,15 +73,10 @@ typedef volatile struct
 	union _I596_CB		*next;
 	I596_TBD		*tbdp;
 	ulong			count;	/* for speed */
-
-	/* Application defined data follows structure... */
-
-#if 0	/* We don't use these intel defined ones */
-		uchar			addr[6];
-		ushort			len;
-		uchar			data[1];
-#else
-		ulong		dstchan;/* Used by multi-NIC mode */
+	uchar			addr[6];
+#if 1	/* We don't use these */
+	ushort			len;
+	uchar			data[1];
 #endif
 } I596_TFD;
 
@@ -95,7 +90,7 @@ typedef volatile struct
 /************************************************************************/
 typedef volatile struct _I596_RBD
 {
-#if INTEL_RETENTIVE
+#if INTEL_RENTENTIVE
 	ushort			count;	/* Length of data in buf */
 	ushort			offset;
 #else
@@ -103,15 +98,13 @@ typedef volatile struct _I596_RBD
 #endif
 	vol struct _I596_RBD	*next;	/* Next buffer descriptor in list */
 	uchar			*buf;	/* Data buffer */
-#if INTEL_RETENTIVE
+#if INTEL_RENTENTIVE
 	ushort			size;	/* Size of buf (constant) */
 	ushort			zero;
 #else
 	ulong			size;	/* Size of buf (constant) */
 #endif
-
-	/* Application defined data follows structure... */
-
+	/* application defined data */
 	uchar			chan;
 	uchar			refcnt;
 	ushort			len;
@@ -136,15 +129,10 @@ typedef volatile struct _I596_RFD
 	vol struct _I596_RBD	*rbdp;
 	ushort			count;	/* Len of data in RFD: always 0 */
 	ushort			size;	/* Size of RFD buffer: always 0 */
-
-	/* Application defined data follows structure... */
-
-#	if 0	/* We don't use these intel defined ones */
+#	if 1	/* We don't use these */
 		uchar		addr[6];
 		ushort		len;
 		uchar		data[1];
-#	else
-		ulong		dstchan;/* Used by multi-nic mode */
 #	endif
 } I596_RFD;
 
@@ -393,7 +381,7 @@ typedef volatile struct
 	/* cmd halfword values */
 #define	I596_SCB_ACK		0xF000	/* ACKNOWLEDGMENTS */
 #define	I596_SCB_ACK_CX		0x8000	/* Ack command completion */
-#define	I596_SCB_ACK_FR		0x4000	/* Ack recieved frame */
+#define	I596_SCB_ACK_FR		0x4000	/* Ack received frame */
 #define	I596_SCB_ACK_CNA	0x2000	/* Ack command unit not active */
 #define	I596_SCB_ACK_RNR	0x1000	/* Ack rcv unit not ready */
 #define	I596_SCB_ACK_ALL	0xF000	/* Ack everything */
@@ -419,7 +407,7 @@ typedef volatile struct
 	/* status halfword values */
 #define	I596_SCB_STAT		0xF000	/* STATUS */
 #define	I596_SCB_CX		0x8000	/* command completion */
-#define	I596_SCB_FR		0x4000	/* recieved frame */
+#define	I596_SCB_FR		0x4000	/* received frame */
 #define	I596_SCB_CNA		0x2000	/* command unit not active */
 #define	I596_SCB_RNR		0x1000	/* rcv unit not ready */
 
