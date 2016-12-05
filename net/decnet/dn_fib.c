@@ -50,7 +50,9 @@
 
 #define endfor_nexthops(fi) }
 
+#ifdef CONFIG_RTNETLINK
 extern int dn_cache_dump(struct sk_buff *skb, struct netlink_callback *cb);
+#endif /* CONFIG_RTNETLINK */
 
 
 static struct dn_fib_info *dn_fib_info_list;
@@ -61,7 +63,7 @@ static struct
 {
 	int error;
 	u8 scope;
-} dn_fib_props[RTN_MAX+1] = {
+} dn_fib_props[RTA_MAX+1] = {
 	{ 0, RT_SCOPE_NOWHERE },		/* RTN_UNSPEC */
 	{ 0, RT_SCOPE_UNIVERSE },		/* RTN_UNICAST */
 	{ 0, RT_SCOPE_HOST },			/* RTN_LOCAL */
@@ -257,9 +259,6 @@ struct dn_fib_info *dn_fib_create_info(const struct rtmsg *r, struct dn_kern_rta
 	struct dn_fib_info *ofi;
 	int nhs = 1;
 
-	if (r->rtm_type > RTN_MAX)
-		goto err_inval;
-
 	if (dn_fib_props[r->rtm_type].scope > r->rtm_scope)
 		goto err_inval;
 
@@ -416,6 +415,8 @@ int dn_fib_rt_message(struct sk_buff *skb)
 }
 
 
+#ifdef CONFIG_RTNETLINK
+
 static int dn_fib_check_attr(struct rtmsg *r, struct rtattr **rta)
 {
 	int i;
@@ -496,6 +497,7 @@ int dn_fib_dump(struct sk_buff *skb, struct netlink_callback *cb)
 
 	return skb->len;
 }
+#endif /* CONFIG_RTNETLINK */
 
 int dn_fib_sync_down(dn_address local, struct net_device *dev, int force)
 {

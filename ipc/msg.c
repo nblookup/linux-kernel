@@ -597,7 +597,7 @@ static int testmsg(struct msg_msg* msg,long type,int mode)
 	return 0;
 }
 
-static int inline pipelined_send(struct msg_queue* msq, struct msg_msg* msg)
+int inline pipelined_send(struct msg_queue* msq, struct msg_msg* msg)
 {
 	struct list_head* tmp;
 
@@ -706,7 +706,7 @@ out_free:
 	return err;
 }
 
-static int inline convert_mode(long* msgtyp, int msgflg)
+int inline convert_mode(long* msgtyp, int msgflg)
 {
 	/* 
 	 *  find message of correct type.
@@ -815,12 +815,10 @@ out_success:
 		schedule();
 		current->state = TASK_RUNNING;
 
-		/* This introduces a race so we must always take
-		   the slow path
 		msg = (struct msg_msg*) msr_d.r_msg;
 		if(!IS_ERR(msg)) 
 			goto out_success;
-		*/
+
 		t = msg_lock(msqid);
 		if(t==NULL)
 			msqid=-1;

@@ -16,7 +16,6 @@
  *	01Mar01 Andrew Morton <andrewm@uow.edu.au>
  */
 
-#include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/tty.h>
 #include <linux/tty_driver.h>
@@ -29,25 +28,15 @@
 
 #include <asm/uaccess.h>
 
-#if !defined(CONFIG_LOG_BUF_SHIFT) || (CONFIG_LOG_BUF_SHIFT == 0)
-#if defined(CONFIG_MULTIQUAD) || defined(CONFIG_IA64)
+#ifdef CONFIG_MULTIQUAD
 #define LOG_BUF_LEN	(65536)
-#elif defined(CONFIG_ARCH_S390)
-#define LOG_BUF_LEN	(131072)
 #elif defined(CONFIG_SMP)
 #define LOG_BUF_LEN	(32768)
 #else	
 #define LOG_BUF_LEN	(16384)			/* This must be a power of two */
 #endif
-#else /* CONFIG_LOG_BUF_SHIFT */
-#define LOG_BUF_LEN (1 << CONFIG_LOG_BUF_SHIFT)
-#endif
 
 #define LOG_BUF_MASK	(LOG_BUF_LEN-1)
-
-#ifndef arch_consoles_callable
-#define arch_consoles_callable() (1)
-#endif
 
 /* printk's without a loglevel use this.. */
 #define DEFAULT_MESSAGE_LOGLEVEL 4 /* KERN_WARNING */
@@ -58,12 +47,11 @@
 
 DECLARE_WAIT_QUEUE_HEAD(log_wait);
 
-int console_printk[4] = {
-	DEFAULT_CONSOLE_LOGLEVEL,	/* console_loglevel */
-	DEFAULT_MESSAGE_LOGLEVEL,	/* default_message_loglevel */
-	MINIMUM_CONSOLE_LOGLEVEL,	/* minimum_console_loglevel */
-	DEFAULT_CONSOLE_LOGLEVEL,	/* default_console_loglevel */
-};
+/* Keep together for sysctl support */
+int console_loglevel = DEFAULT_CONSOLE_LOGLEVEL;
+int default_message_loglevel = DEFAULT_MESSAGE_LOGLEVEL;
+int minimum_console_loglevel = MINIMUM_CONSOLE_LOGLEVEL;
+int default_console_loglevel = DEFAULT_CONSOLE_LOGLEVEL;
 
 int oops_in_progress;
 
@@ -95,7 +83,6 @@ static unsigned long log_end;			/* Index into log_buf: most-recently-written-cha
 static unsigned long logged_chars;		/* Number of chars produced since last read+clear operation */
 
 struct console_cmdline console_cmdline[MAX_CMDLINECONSOLES];
-static int selected_console = -1;
 static int preferred_console = -1;
 
 /* Flag: console code may call schedule() */
@@ -141,12 +128,12 @@ static int __init console_setup(char *str)
 	for(i = 0; i < MAX_CMDLINECONSOLES && console_cmdline[i].name[0]; i++)
 		if (strcmp(console_cmdline[i].name, name) == 0 &&
 			  console_cmdline[i].index == idx) {
-				selected_console = i;
+				preferred_console = i;
 				return 1;
 		}
 	if (i == MAX_CMDLINECONSOLES)
 		return 1;
-	selected_console = i;
+	preferred_console = i;
 	c = &console_cmdline[i];
 	memcpy(c->name, name, sizeof(c->name));
 	c->options = options;
@@ -451,14 +438,6 @@ asmlinkage int printk(const char *fmt, ...)
 			log_level_unknown = 1;
 	}
 
-	if (!arch_consoles_callable()) {
-		/*
-		 * On some architectures, the consoles are not usable
-		 * on secondary CPUs early in the boot process.
-		 */
-		spin_unlock_irqrestore(&logbuf_lock, flags);
-		goto out;
-	}
 	if (!down_trylock(&console_sem)) {
 		/*
 		 * We own the drivers.  We can drop the spinlock and let
@@ -475,7 +454,6 @@ asmlinkage int printk(const char *fmt, ...)
 		 */
 		spin_unlock_irqrestore(&logbuf_lock, flags);
 	}
-out:
 	return printed_len;
 }
 EXPORT_SYMBOL(printk);
@@ -561,14 +539,7 @@ void console_unblank(void)
 {
 	struct console *c;
 
-	/*
-	 * Try to get the console semaphore. If someone else owns it
-	 * we have to return without unblanking because console_unblank
-	 * may be called in interrupt context.
-	 */
-	if (down_trylock(&console_sem) != 0)
-		return;
-	console_may_schedule = 0;
+	acquire_console_sem();
 	for (c = console_drivers; c != NULL; c = c->next)
 		if ((c->flags & CON_ENABLED) && c->unblank)
 			c->unblank();
@@ -586,9 +557,6 @@ void register_console(struct console * console)
 {
 	int     i;
 	unsigned long flags;
-
-	if (preferred_console < 0)
-		preferred_console = selected_console;
 
 	/*
 	 *	See if we want to use this console driver. If we
@@ -644,7 +612,7 @@ void register_console(struct console * console)
 	}
 	if (console->flags & CON_PRINTBUFFER) {
 		/*
-		 * release_console_sem() will print out the buffered messages for us.
+		 * release_cosole_sem() will print out the buffered messages for us.
 		 */
 		spin_lock_irqsave(&logbuf_lock, flags);
 		con_start = log_start;
@@ -679,7 +647,7 @@ int unregister_console(struct console * console)
 	 * would prevent fbcon from taking over.
 	 */
 	if (console_drivers == NULL)
-		preferred_console = selected_console;
+		preferred_console = -1;
 		
 
 	release_console_sem();

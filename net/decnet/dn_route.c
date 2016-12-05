@@ -35,8 +35,6 @@
  *                                 are numbered!
  *              Steve Whitehouse : Added return-to-sender functions. Added
  *                                 backlog congestion level return codes.
- *		Steve Whitehouse : Fixed bug where routes were set up with
- *                                 no ref count on net devices.
  *                                 
  */
 
@@ -761,7 +759,7 @@ static int dn_route_output_slow(struct dst_entry **pprt, dn_address dst, dn_addr
 
 	/* Look in On-Ethernet cache first */
 	if (!(flags & MSG_TRYHARD)) {
-		if ((neigh = neigh_lookup_nodev(&dn_neigh_table, &dst)) != NULL)
+		if ((neigh = dn_neigh_lookup(&dn_neigh_table, &dst)) != NULL)
 			goto got_route;
 	}
 
@@ -803,8 +801,6 @@ got_route:
 
 	rt->u.dst.neighbour = neigh;
 	rt->u.dst.dev = neigh ? neigh->dev : NULL;
-	if (rt->u.dst.dev)
-		dev_hold(rt->u.dst.dev);
 	rt->u.dst.lastuse = jiffies;
 	rt->u.dst.output = dn_output;
 	rt->u.dst.input  = dn_rt_bug;
@@ -982,8 +978,6 @@ add_entry:
 
 	rt->u.dst.neighbour = neigh;
 	rt->u.dst.dev = neigh ? neigh->dev : NULL;
-	if (rt->u.dst.dev)
-		dev_hold(rt->u.dst.dev);
 	rt->u.dst.lastuse = jiffies;
 	rt->u.dst.output = dnrt_output;
 	rt->u.dst.input = dnrt_input;
@@ -1026,6 +1020,7 @@ int dn_route_input(struct sk_buff *skb)
 	return dn_route_input_slow(skb);
 }
 
+#ifdef CONFIG_RTNETLINK
 static int dn_rt_fill_info(struct sk_buff *skb, u32 pid, u32 seq, int event, int nowait)
 {
 	struct dn_route *rt = (struct dn_route *)skb->dst;
@@ -1186,6 +1181,7 @@ done:
 	cb->args[1] = idx;
 	return skb->len;
 }
+#endif /* CONFIG_RTNETLINK */
 
 #ifdef CONFIG_PROC_FS
 

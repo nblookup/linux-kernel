@@ -20,10 +20,6 @@
 #include <linux/if.h>
 #include <linux/netdevice.h>
 #include <linux/brlock.h>
-#include <linux/inetdevice.h>
-#include <net/sock.h>
-#include <net/route.h>
-#include <linux/ip.h>
 
 #define __KERNEL_SYSCALLS__
 #include <linux/unistd.h>
@@ -83,7 +79,8 @@ void nf_unregister_hook(struct nf_hook_ops *reg)
 /* Do exclusive ranges overlap? */
 static inline int overlap(int min1, int max1, int min2, int max2)
 {
-	return max1 > min2 && min1 < max2;
+	return (min1 >= min2 && min1 < max2)
+		|| (max1 > min2 && max1 <= max2);
 }
 
 /* Functions to register sockopt ranges (exclusive). */
@@ -125,10 +122,9 @@ void nf_unregister_sockopt(struct nf_sockopt_ops *reg)
 	down(&nf_sockopt_mutex);
 	if (reg->use != 0) {
 		/* To be woken by nf_sockopt call... */
-		/* FIXME: Stuart Young's name appears gratuitously. */
-		set_current_state(TASK_UNINTERRUPTIBLE);
 		reg->cleanup_task = current;
 		up(&nf_sockopt_mutex);
+		set_current_state(TASK_UNINTERRUPTIBLE);
 		schedule();
 		goto restart;
 	}
@@ -557,85 +553,11 @@ void nf_reinject(struct sk_buff *skb, struct nf_info *info,
 	return;
 }
 
-#ifdef CONFIG_INET
-/* route_me_harder function, used by iptable_nat, iptable_mangle + ip_queue */
-int ip_route_me_harder(struct sk_buff **pskb)
-{
-	struct iphdr *iph = (*pskb)->nh.iph;
-	struct rtable *rt;
-	struct rt_key key = {};
-	struct dst_entry *odst;
-	unsigned int hh_len;
-
-	/* some non-standard hacks like ipt_REJECT.c:send_reset() can cause
-	 * packets with foreign saddr to be appear on the NF_IP_LOCAL_OUT hook.
-	 */
-	if (inet_addr_type(iph->saddr) == RTN_LOCAL) {
-		key.dst = iph->daddr;
-		key.src = iph->saddr;
-		key.oif = (*pskb)->sk ? (*pskb)->sk->bound_dev_if : 0;
-		key.tos = RT_TOS(iph->tos);
-#ifdef CONFIG_IP_ROUTE_FWMARK
-		key.fwmark = (*pskb)->nfmark;
-#endif
-		if (ip_route_output_key(&rt, &key) != 0)
-			return -1;
-
-		/* Drop old route. */
-		dst_release((*pskb)->dst);
-		(*pskb)->dst = &rt->u.dst;
-	} else {
-		/* non-local src, find valid iif to satisfy
-		 * rp-filter when calling ip_route_input. */
-		key.dst = iph->saddr;
-		if (ip_route_output_key(&rt, &key) != 0)
-			return -1;
-
-		odst = (*pskb)->dst;
-		if (ip_route_input(*pskb, iph->daddr, iph->saddr,
-		                   RT_TOS(iph->tos), rt->u.dst.dev) != 0) {
-			dst_release(&rt->u.dst);
-			return -1;
-		}
-		dst_release(&rt->u.dst);
-		dst_release(odst);
-	}
-	
-	if ((*pskb)->dst->error)
-		return -1;
-
-	/* Change in oif may mean change in hh_len. */
-	hh_len = (*pskb)->dst->dev->hard_header_len;
-	if (skb_headroom(*pskb) < hh_len) {
-		struct sk_buff *nskb;
-
-		nskb = skb_realloc_headroom(*pskb, hh_len);
-		if (!nskb)
-			return -1;
-		if ((*pskb)->sk)
-			skb_set_owner_w(nskb, (*pskb)->sk);
-		kfree_skb(*pskb);
-		*pskb = nskb;
-	}
-
-	return 0;
-}
-#endif /*CONFIG_INET*/
-
-/* This does not belong here, but locally generated errors need it if connection
-   tracking in use: without this, connection may not be in hash table, and hence
-   manufactured ICMP or RST packets will not be associated with it. */
+/* This does not belong here, but ipt_REJECT needs it if connection
+   tracking in use: without this, connection may not be in hash table,
+   and hence manufactured ICMP or RST packets will not be associated
+   with it. */
 void (*ip_ct_attach)(struct sk_buff *, struct nf_ct_info *);
-
-void nf_ct_attach(struct sk_buff *new, struct sk_buff *skb)
-{
-	void (*attach)(struct sk_buff *, struct nf_ct_info *);
-
-	if (skb->nfct && (attach = ip_ct_attach) != NULL) {
-		mb(); /* Just to be sure: must be read before executing this */
-		attach(new, skb->nfct);
-	}
-}
 
 void __init netfilter_init(void)
 {

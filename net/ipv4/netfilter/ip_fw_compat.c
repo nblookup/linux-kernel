@@ -47,12 +47,6 @@ check_for_demasq(struct sk_buff **pskb);
 extern int __init masq_init(void);
 extern void masq_cleanup(void);
 
-#ifdef CONFIG_IP_VS
-/* From ip_vs_core.c */
-extern unsigned int
-check_for_ip_vs_out(struct sk_buff **skb_p, int (*okfn)(struct sk_buff *));
-#endif
-
 /* They call these; we do what they want. */
 int register_firewall(int pf, struct firewall_ops *fw)
 {
@@ -90,16 +84,6 @@ fw_in(unsigned int hooknum,
 	if ((*pskb)->ip_summed == CHECKSUM_HW)
 		(*pskb)->ip_summed = CHECKSUM_NONE;
 
-	/* Firewall rules can alter TOS: raw socket (tcpdump) may have
-           clone of incoming skb: don't disturb it --RR */
-	if (skb_cloned(*pskb) && !(*pskb)->sk) {
-		struct sk_buff *nskb = skb_copy(*pskb, GFP_ATOMIC);
-		if (!nskb)
-			return NF_DROP;
-		kfree_skb(*pskb);
-		*pskb = nskb;
-	}
-
 	switch (hooknum) {
 	case NF_IP_PRE_ROUTING:
 		if (fwops->fw_acct_in)
@@ -108,7 +92,7 @@ fw_in(unsigned int hooknum,
 					  (*pskb)->nh.raw, &redirpt, pskb);
 
 		if ((*pskb)->nh.iph->frag_off & htons(IP_MF|IP_OFFSET)) {
-			*pskb = ip_ct_gather_frags(*pskb, IP_DEFRAG_CONNTRACK_IN);
+			*pskb = ip_ct_gather_frags(*pskb);
 
 			if (!*pskb)
 				return NF_STOLEN;
@@ -178,14 +162,8 @@ fw_in(unsigned int hooknum,
 		return NF_ACCEPT;
 
 	case FW_MASQUERADE:
-		if (hooknum == NF_IP_FORWARD) {
-#ifdef CONFIG_IP_VS
-                        /* check if it is for ip_vs */
-                        if (check_for_ip_vs_out(pskb, okfn) == NF_STOLEN)
-                                return NF_STOLEN;
-#endif
+		if (hooknum == NF_IP_FORWARD)
 			return do_masquerade(pskb, out);
-                }
 		else return NF_ACCEPT;
 
 	case FW_REDIRECT:

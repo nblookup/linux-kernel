@@ -68,7 +68,6 @@ extern int actisys_init(void);
 extern int girbil_init(void);
 extern int sa1100_irda_init(void);
 extern int ep7211_ir_init(void);
-extern int mcp2120_init(void);
 
 static void __irda_task_delete(struct irda_task *task);
 
@@ -82,7 +81,6 @@ const char *infrared_mode[] = {
 	"TV_REMOTE",
 };
 
-#ifdef CONFIG_IRDA_DEBUG
 static const char *task_state[] = {
 	"IRDA_TASK_INIT",
 	"IRDA_TASK_DONE", 
@@ -94,7 +92,6 @@ static const char *task_state[] = {
 	"IRDA_TASK_CHILD_WAIT",
 	"IRDA_TASK_CHILD_DONE",
 };
-#endif	/* CONFIG_IRDA_DEBUG */
 
 static void irda_task_timer_expired(void *data);
 
@@ -123,9 +120,6 @@ int __init irda_device_init( void)
 	/* 
 	 * Call the init function of the device drivers that has not been
 	 * compiled as a module 
-	 * Note : non-modular IrDA is not supported in 2.4.X, so don't
-	 * waste too much time fixing this code. If you require it, please
-	 * upgrade to the IrDA stack in 2.5.X. Jean II
 	 */
 #ifdef CONFIG_IRTTY_SIR
 	irtty_init();
@@ -139,7 +133,7 @@ int __init irda_device_init( void)
 #ifdef CONFIG_NSC_FIR
 	nsc_ircc_init();
 #endif
-#ifdef CONFIG_TOSHIBA_OLD
+#ifdef CONFIG_TOSHIBA_FIR
 	toshoboe_init();
 #endif
 #ifdef CONFIG_SMC_IRCC_FIR
@@ -166,15 +160,12 @@ int __init irda_device_init( void)
 #ifdef CONFIG_EP7211_IR
  	ep7211_ir_init();
 #endif
-#ifdef CONFIG_MCP2120_DONGLE
-	mcp2120_init();
-#endif
 	return 0;
 }
 
 void irda_device_cleanup(void)
 {
-	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(4, __FUNCTION__ "()\n");
 
 	hashbin_delete(tasks, (FREE_FUNC) __irda_task_delete);
 	hashbin_delete(dongles, NULL);
@@ -190,7 +181,7 @@ void irda_device_set_media_busy(struct net_device *dev, int status)
 {
 	struct irlap_cb *self;
 
-	IRDA_DEBUG(4, "%s(%s)\n", __FUNCTION__, status ? "TRUE" : "FALSE");
+	IRDA_DEBUG(4, __FUNCTION__ "(%s)\n", status ? "TRUE" : "FALSE");
 
 	self = (struct irlap_cb *) dev->atalk_ptr;
 
@@ -215,11 +206,11 @@ int irda_device_set_dtr_rts(struct net_device *dev, int dtr, int rts)
 	struct if_irda_req req;
 	int ret;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, __FUNCTION__ "()\n");
 
 	if (!dev->do_ioctl) {
-		ERROR("%s(), do_ioctl not impl. by "
-		      "device driver\n", __FUNCTION__);
+		ERROR(__FUNCTION__ "(), do_ioctl not impl. by "
+		      "device driver\n");
 		return -1;
 	}
 
@@ -236,11 +227,11 @@ int irda_device_change_speed(struct net_device *dev, __u32 speed)
 	struct if_irda_req req;
 	int ret;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, __FUNCTION__ "()\n");
 
 	if (!dev->do_ioctl) {
-		ERROR("%s(), do_ioctl not impl. by "
-		      "device driver\n", __FUNCTION__);
+		ERROR(__FUNCTION__ "(), do_ioctl not impl. by "
+		      "device driver\n");
 		return -1;
 	}
 
@@ -262,11 +253,11 @@ int irda_device_is_receiving(struct net_device *dev)
 	struct if_irda_req req;
 	int ret;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, __FUNCTION__ "()\n");
 
 	if (!dev->do_ioctl) {
-		ERROR("%s(), do_ioctl not impl. by "
-		      "device driver\n", __FUNCTION__);
+		ERROR(__FUNCTION__ "(), do_ioctl not impl. by "
+		      "device driver\n");
 		return -1;
 	}
 
@@ -279,7 +270,7 @@ int irda_device_is_receiving(struct net_device *dev)
 
 void irda_task_next_state(struct irda_task *task, IRDA_TASK_STATE state)
 {
-	IRDA_DEBUG(2, "%s(), state = %s\n", __FUNCTION__, task_state[state]);
+	IRDA_DEBUG(2, __FUNCTION__ "(), state = %s\n", task_state[state]);
 
 	task->state = state;
 }
@@ -313,7 +304,7 @@ int irda_task_kick(struct irda_task *task)
 	int count = 0;
 	int timeout;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, __FUNCTION__ "()\n");
 
 	ASSERT(task != NULL, return -1;);
 	ASSERT(task->magic == IRDA_TASK_MAGIC, return -1;);
@@ -322,14 +313,14 @@ int irda_task_kick(struct irda_task *task)
 	do {
 		timeout = task->function(task);
 		if (count++ > 100) {
-			ERROR("%s(), error in task handler!\n", __FUNCTION__);
+			ERROR(__FUNCTION__ "(), error in task handler!\n");
 			irda_task_delete(task);
 			return TRUE;
 		}			
 	} while ((timeout == 0) && (task->state != IRDA_TASK_DONE));
 
 	if (timeout < 0) {
-		ERROR("%s(), Error executing task!\n", __FUNCTION__);
+		ERROR(__FUNCTION__ "(), Error executing task!\n");
 		irda_task_delete(task);
 		return TRUE;
 	}
@@ -361,7 +352,8 @@ int irda_task_kick(struct irda_task *task)
 				 irda_task_timer_expired);
 		finished = FALSE;
 	} else {
-		IRDA_DEBUG(0, "%s(), not finished, and no timeout!\n", __FUNCTION__);
+		IRDA_DEBUG(0, __FUNCTION__ 
+			   "(), not finished, and no timeout!\n");
 		finished = FALSE;
 	}
 
@@ -375,12 +367,6 @@ int irda_task_kick(struct irda_task *task)
  *    time to complete. We do it this hairy way since we may have been
  *    called from interrupt context, so it's not possible to use
  *    schedule_timeout() 
- * Two important notes :
- *	o Make sure you irda_task_delete(task); in case you delete the
- *	  calling instance.
- *	o No real need to lock when calling this function, but you may
- *	  want to lock within the task handler.
- * Jean II
  */
 struct irda_task *irda_task_execute(void *instance, 
 				    IRDA_TASK_CALLBACK function, 
@@ -390,7 +376,7 @@ struct irda_task *irda_task_execute(void *instance,
 	struct irda_task *task;
 	int ret;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, __FUNCTION__ "()\n");
 
 	task = kmalloc(sizeof(struct irda_task), GFP_ATOMIC);
 	if (!task)
@@ -427,7 +413,7 @@ static void irda_task_timer_expired(void *data)
 {
 	struct irda_task *task;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, __FUNCTION__ "()\n");
 
 	task = (struct irda_task *) data;
 
@@ -479,9 +465,6 @@ int irda_device_txqueue_empty(struct net_device *dev)
  * Function irda_device_init_dongle (self, type, qos)
  *
  *    Initialize attached dongle.
- *
- * Important : request_module require us to call this function with
- * a process context and irq enabled. - Jean II
  */
 dongle_t *irda_device_dongle_init(struct net_device *dev, int type)
 {
@@ -493,7 +476,6 @@ dongle_t *irda_device_dongle_init(struct net_device *dev, int type)
 #ifdef CONFIG_KMOD
 	{
 	char modname[32];
-	ASSERT(!in_interrupt(), return NULL;);
 	/* Try to load the module needed */
 	sprintf(modname, "irda-dongle-%d", type);
 	request_module(modname);
@@ -546,7 +528,7 @@ int irda_device_register_dongle(struct dongle_reg *new)
 {
 	/* Check if this dongle has been registred before */
 	if (hashbin_find(dongles, new->type, NULL)) {
-		MESSAGE("%s(), Dongle already registered\n", __FUNCTION__);
+		MESSAGE(__FUNCTION__ "(), Dongle already registered\n");
                 return 0;
         }
 	
@@ -568,7 +550,7 @@ void irda_device_unregister_dongle(struct dongle_reg *dongle)
 
 	node = hashbin_remove(dongles, dongle->type, NULL);
 	if (!node) {
-		ERROR("%s(), dongle not found!\n", __FUNCTION__);
+		ERROR(__FUNCTION__ "(), dongle not found!\n");
 		return;
 	}
 }
@@ -585,11 +567,11 @@ int irda_device_set_mode(struct net_device* dev, int mode)
 	struct if_irda_req req;
 	int ret;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "()\n");
 
 	if (!dev->do_ioctl) {
-		ERROR("%s(), set_raw_mode not impl. by "
-		      "device driver\n", __FUNCTION__);
+		ERROR(__FUNCTION__ "(), set_raw_mode not impl. by "
+		      "device driver\n");
 		return -1;
 	}
 	

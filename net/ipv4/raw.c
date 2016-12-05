@@ -5,7 +5,7 @@
  *
  *		RAW - implementation of IP "raw" sockets.
  *
- * Version:	$Id: raw.c,v 1.63.2.1 2002/03/05 12:47:34 davem Exp $
+ * Version:	$Id: raw.c,v 1.63 2001/07/10 04:29:01 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -266,7 +266,7 @@ struct rawfakehdr
  */
   
 static int raw_getfrag(const void *p, char *to, unsigned int offset,
-		       unsigned int fraglen, struct sk_buff *skb)
+			unsigned int fraglen)
 {
 	struct rawfakehdr *rfh = (struct rawfakehdr *) p;
 	return memcpy_fromiovecend(to, rfh->iov, offset, fraglen);
@@ -277,7 +277,7 @@ static int raw_getfrag(const void *p, char *to, unsigned int offset,
  */
  
 static int raw_getrawfrag(const void *p, char *to, unsigned int offset,
-				unsigned int fraglen, struct sk_buff *skb)
+				unsigned int fraglen)
 {
 	struct rawfakehdr *rfh = (struct rawfakehdr *) p;
 
@@ -360,7 +360,7 @@ static int raw_sendmsg(struct sock *sk, struct msghdr *msg, int len)
 		 * IP_HDRINCL is much more convenient.
 		 */
 	} else {
-		err = -EDESTADDRREQ;
+		err = -EINVAL;
 		if (sk->state != TCP_ESTABLISHED) 
 			goto out;
 		daddr = sk->daddr;
@@ -524,8 +524,6 @@ int raw_recvmsg(struct sock *sk, struct msghdr *msg, int len,
 	}
 	if (sk->protinfo.af_inet.cmsg_flags)
 		ip_cmsg_recv(msg, skb);
-	if (flags & MSG_TRUNC)
-		copied = skb->len;
 done:
 	skb_free_datagram(sk, skb);
 out:	return err ? : copied;
@@ -633,7 +631,7 @@ static void get_raw_sock(struct sock *sp, char *tmpbuf, int i)
 	      srcp  = sp->num;
 
 	sprintf(tmpbuf, "%4d: %08X:%04X %08X:%04X"
-		" %02X %08X:%08X %02X:%08lX %08X %5d %8d %lu %d %p",
+		" %02X %08X:%08X %02X:%08lX %08X %5d %8d %ld %d %p",
 		i, src, srcp, dest, destp, sp->state, 
 		atomic_read(&sp->wmem_alloc), atomic_read(&sp->rmem_alloc),
 		0, 0L, 0,

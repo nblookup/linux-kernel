@@ -299,6 +299,8 @@ static struct notifier_block dn_fib_rules_notifier = {
 	notifier_call:		dn_fib_rules_event,
 };
 
+#ifdef CONFIG_RTNETLINK
+
 static int dn_fib_fill_rule(struct sk_buff *skb, struct dn_fib_rule *r, struct netlink_callback *cb)
 {
 	struct rtmsg *rtm;
@@ -335,7 +337,7 @@ static int dn_fib_fill_rule(struct sk_buff *skb, struct dn_fib_rule *r, struct n
 
 nlmsg_failure:
 rtattr_failure:
-	skb_trim(skb, b - skb->data);
+	skb_put(skb, b - skb->tail);
 	return -1;
 }
 
@@ -357,6 +359,8 @@ int dn_fib_dump_rules(struct sk_buff *skb, struct netlink_callback *cb)
 
 	return skb->len;
 }
+
+#endif /* CONFIG_RTNETLINK */
 
 void __init dn_fib_rules_init(void)
 {

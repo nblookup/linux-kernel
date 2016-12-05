@@ -70,10 +70,10 @@ struct tc_u_hnode
 {
 	struct tc_u_hnode	*next;
 	u32			handle;
-	u32			prio;
 	struct tc_u_common	*tp_c;
 	int			refcnt;
 	unsigned		divisor;
+	u32			hgenerator;
 	struct tc_u_knode	*ht[1];
 };
 
@@ -111,6 +111,11 @@ static int u32_classify(struct sk_buff *skb, struct tcf_proto *tp, struct tcf_re
 	int off2 = 0;
 	int sel = 0;
 	int i;
+
+#if !defined(__i386__) && !defined(__mc68000__)
+	if ((unsigned long)ptr & 3)
+		return -1;
+#endif
 
 next_ht:
 	n = ht->ht[sel];
@@ -272,7 +277,6 @@ static int u32_init(struct tcf_proto *tp)
 	root_ht->divisor = 0;
 	root_ht->refcnt++;
 	root_ht->handle = tp_c ? gen_new_htid(tp_c) : 0x80000000;
-	root_ht->prio = tp->prio;
 
 	if (tp_c == NULL) {
 		tp_c = kmalloc(sizeof(*tp_c), GFP_KERNEL);
@@ -536,7 +540,6 @@ static int u32_change(struct tcf_proto *tp, unsigned long base, u32 handle,
 		ht->refcnt = 0;
 		ht->divisor = divisor;
 		ht->handle = handle;
-		ht->prio = tp->prio;
 		ht->next = tp_c->hlist;
 		tp_c->hlist = ht;
 		*arg = (unsigned long)ht;
@@ -609,8 +612,6 @@ static void u32_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 		return;
 
 	for (ht = tp_c->hlist; ht; ht = ht->next) {
-		if (ht->prio != tp->prio)
-			continue;
 		if (arg->count >= arg->skip) {
 			if (arg->fn(tp, (unsigned long)ht, arg) < 0) {
 				arg->stop = 1;
@@ -634,6 +635,7 @@ static void u32_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 	}
 }
 
+#ifdef CONFIG_RTNETLINK
 static int u32_dump(struct tcf_proto *tp, unsigned long fh,
 		     struct sk_buff *skb, struct tcmsg *t)
 {
@@ -692,6 +694,7 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
+#endif
 
 struct tcf_proto_ops cls_u32_ops = {
 	NULL,
@@ -705,7 +708,11 @@ struct tcf_proto_ops cls_u32_ops = {
 	u32_change,
 	u32_delete,
 	u32_walk,
+#ifdef CONFIG_RTNETLINK
 	u32_dump
+#else
+	NULL
+#endif
 };
 
 #ifdef MODULE

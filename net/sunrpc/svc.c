@@ -31,6 +31,10 @@ svc_create(struct svc_program *prog, unsigned int bufsize, unsigned int xdrsize)
 {
 	struct svc_serv	*serv;
 
+#ifdef RPC_DEBUG
+	rpc_register_sysctl();
+#endif
+
 	if (!(serv = (struct svc_serv *) kmalloc(sizeof(*serv), GFP_KERNEL)))
 		return NULL;
 
@@ -40,10 +44,6 @@ svc_create(struct svc_program *prog, unsigned int bufsize, unsigned int xdrsize)
 	serv->sv_stats     = prog->pg_stats;
 	serv->sv_bufsz	   = bufsize? bufsize : 4096;
 	serv->sv_xdrsize   = xdrsize;
-	INIT_LIST_HEAD(&serv->sv_threads);
-	INIT_LIST_HEAD(&serv->sv_sockets);
-	INIT_LIST_HEAD(&serv->sv_tempsocks);
-	INIT_LIST_HEAD(&serv->sv_permsocks);
 	spin_lock_init(&serv->sv_lock);
 
 	serv->sv_name      = prog->pg_name;
@@ -67,25 +67,13 @@ svc_destroy(struct svc_serv *serv)
 				serv->sv_nrthreads);
 
 	if (serv->sv_nrthreads) {
-		if (--(serv->sv_nrthreads) != 0) {
-			svc_sock_update_bufs(serv);
+		if (--(serv->sv_nrthreads) != 0)
 			return;
-		}
 	} else
 		printk("svc_destroy: no threads for serv=%p!\n", serv);
 
-	while (!list_empty(&serv->sv_tempsocks)) {
-		svsk = list_entry(serv->sv_tempsocks.next,
-				  struct svc_sock,
-				  sk_list);
+	while ((svsk = serv->sv_allsocks) != NULL)
 		svc_delete_socket(svsk);
-	}
-	while (!list_empty(&serv->sv_permsocks)) {
-		svsk = list_entry(serv->sv_permsocks.next,
-				  struct svc_sock,
-				  sk_list);
-		svc_delete_socket(svsk);
-	}
 
 	/* Unregister service with the portmapper */
 	svc_register(serv, 0, 0);
@@ -150,7 +138,6 @@ svc_create_thread(svc_thread_fn func, struct svc_serv *serv)
 	error = kernel_thread((int (*)(void *)) func, rqstp, 0);
 	if (error < 0)
 		goto out_thread;
-	svc_sock_update_bufs(serv);
 	error = 0;
 out:
 	return error;
@@ -309,12 +296,6 @@ svc_process(struct svc_serv *serv, struct svc_rqst *rqstp)
 	memset(rqstp->rq_argp, 0, procp->pc_argsize);
 	memset(rqstp->rq_resp, 0, procp->pc_ressize);
 
-	/* un-reserve some of the out-queue now that we have a 
-	 * better idea of reply size
-	 */
-	if (procp->pc_xdrressize)
-		svc_reserve(rqstp, procp->pc_xdrressize<<2);
-
 	/* Call the function that processes the request. */
 	if (!versp->vs_dispatch) {
 		/* Decode arguments */
@@ -333,12 +314,8 @@ svc_process(struct svc_serv *serv, struct svc_rqst *rqstp)
 		}
 	} else {
 		dprintk("svc: calling dispatcher\n");
-		if (!versp->vs_dispatch(rqstp, statp)) {
-			/* Release reply info */
-			if (procp->pc_release)
-				procp->pc_release(rqstp, NULL, rqstp->rq_resp);
+		if (!versp->vs_dispatch(rqstp, statp))
 			goto dropit;
-		}
 	}
 
 	/* Check RPC status result */
@@ -400,8 +377,7 @@ err_bad_prog:
 
 err_bad_vers:
 #ifdef RPC_PARANOIA
-	if (vers)
-		printk("svc: unknown version (%d)\n", vers);
+	printk("svc: unknown version (%d)\n", vers);
 #endif
 	serv->sv_stats->rpcbadfmt++;
 	svc_putlong(resp, rpc_prog_mismatch);

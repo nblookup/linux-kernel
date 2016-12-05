@@ -97,14 +97,7 @@ static int __init p8022_init(void)
 	return 0;
 }
 
-static void __exit p8022_exit(void)
-{
-	dev_remove_pack(&p8022_packet_type);
-	return;
-}
-
 module_init(p8022_init);
-module_exit(p8022_exit);
 
 struct datalink_proto *register_8022_client(unsigned char type, int (*rcvfunc)(struct sk_buff *, struct net_device *, struct packet_type *))
 {
@@ -149,5 +142,3 @@ void unregister_8022_client(unsigned char type)
 
 	restore_flags(flags);
 }
-
-MODULE_LICENSE("GPL");

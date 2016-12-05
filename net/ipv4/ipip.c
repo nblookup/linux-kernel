@@ -464,13 +464,11 @@ out:
 #endif
 }
 
-static inline void ipip_ecn_decapsulate(struct iphdr *outer_iph, struct sk_buff *skb)
+static inline void ipip_ecn_decapsulate(struct iphdr *iph, struct sk_buff *skb)
 {
-	struct iphdr *inner_iph = skb->nh.iph;
-
-	if (INET_ECN_is_ce(outer_iph->tos) &&
-	    INET_ECN_is_not_ce(inner_iph->tos))
-		IP_ECN_set_ce(inner_iph);
+	if (INET_ECN_is_ce(iph->tos) &&
+	    INET_ECN_is_not_ce(skb->nh.iph->tos))
+		IP_ECN_set_ce(iph);
 }
 
 int ipip_rcv(struct sk_buff *skb)
@@ -485,7 +483,7 @@ int ipip_rcv(struct sk_buff *skb)
 	skb->mac.raw = skb->nh.raw;
 	skb->nh.raw = skb->data;
 	memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
-	skb->protocol = htons(ETH_P_IP);
+	skb->protocol = __constant_htons(ETH_P_IP);
 	skb->pkt_type = PACKET_HOST;
 
 	read_lock(&ipip_lock);
@@ -495,7 +493,13 @@ int ipip_rcv(struct sk_buff *skb)
 		skb->dev = tunnel->dev;
 		dst_release(skb->dst);
 		skb->dst = NULL;
-		nf_reset(skb);
+#ifdef CONFIG_NETFILTER
+		nf_conntrack_put(skb->nfct);
+		skb->nfct = NULL;
+#ifdef CONFIG_NETFILTER_DEBUG
+		skb->nf_debug = 0;
+#endif
+#endif
 		ipip_ecn_decapsulate(iph, skb);
 		netif_rx(skb);
 		read_unlock(&ipip_lock);
@@ -540,7 +544,7 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 		goto tx_error;
 	}
 
-	if (skb->protocol != htons(ETH_P_IP))
+	if (skb->protocol != __constant_htons(ETH_P_IP))
 		goto tx_error;
 
 	if (tos&1)
@@ -568,11 +572,7 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 		goto tx_error;
 	}
 
-	if (tiph->frag_off)
-		mtu = rt->u.dst.pmtu - sizeof(struct iphdr);
-	else
-		mtu = skb->dst ? skb->dst->pmtu : dev->mtu;
-
+	mtu = rt->u.dst.pmtu - sizeof(struct iphdr);
 	if (mtu < 68) {
 		tunnel->stat.collisions++;
 		ip_rt_put(rt);
@@ -581,9 +581,9 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (skb->dst && mtu < skb->dst->pmtu)
 		skb->dst->pmtu = mtu;
 
-	df |= (old_iph->frag_off&htons(IP_DF));
+	df |= (old_iph->frag_off&__constant_htons(IP_DF));
 
-	if ((old_iph->frag_off&htons(IP_DF)) && mtu < ntohs(old_iph->tot_len)) {
+	if ((old_iph->frag_off&__constant_htons(IP_DF)) && mtu < ntohs(old_iph->tot_len)) {
 		icmp_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED, htonl(mtu));
 		ip_rt_put(rt);
 		goto tx_error;
@@ -596,6 +596,8 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 		} else
 			tunnel->err_count = 0;
 	}
+
+	skb->h.raw = skb->nh.raw;
 
 	/*
 	 * Okay, now see if we can stuff it in the buffer as-is.
@@ -615,10 +617,8 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			skb_set_owner_w(new_skb, skb->sk);
 		dev_kfree_skb(skb);
 		skb = new_skb;
-		old_iph = skb->nh.iph;
 	}
 
-	skb->h.raw = skb->nh.raw;
 	skb->nh.raw = skb_push(skb, sizeof(struct iphdr));
 	memset(&(IPCB(skb)->opt), 0, sizeof(IPCB(skb)->opt));
 	dst_release(skb->dst);
@@ -640,7 +640,13 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	if ((iph->ttl = tiph->ttl) == 0)
 		iph->ttl	=	old_iph->ttl;
 
-	nf_reset(skb);
+#ifdef CONFIG_NETFILTER
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#ifdef CONFIG_NETFILTER_DEBUG
+	skb->nf_debug = 0;
+#endif
+#endif
 
 	IPTUNNEL_XMIT();
 	tunnel->recursion--;
@@ -693,10 +699,10 @@ ipip_tunnel_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd)
 
 		err = -EINVAL;
 		if (p.iph.version != 4 || p.iph.protocol != IPPROTO_IPIP ||
-		    p.iph.ihl != 5 || (p.iph.frag_off&htons(~IP_DF)))
+		    p.iph.ihl != 5 || (p.iph.frag_off&__constant_htons(~IP_DF)))
 			goto done;
 		if (p.iph.ttl)
-			p.iph.frag_off |= htons(IP_DF);
+			p.iph.frag_off |= __constant_htons(IP_DF);
 
 		t = ipip_tunnel_locate(&p, cmd == SIOCADDTUNNEL);
 

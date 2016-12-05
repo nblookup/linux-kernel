@@ -98,6 +98,11 @@ static ssize_t netlink_read(struct file * file, char * buf,
 	return sock_recvmsg(sock, &msg, count, msg.msg_flags);
 }
 
+static loff_t netlink_lseek(struct file * file, loff_t offset, int origin)
+{
+	return -ESPIPE;
+}
+
 static int netlink_open(struct inode * inode, struct file * file)
 {
 	unsigned int minor = MINOR(inode->i_rdev);
@@ -161,7 +166,7 @@ static int netlink_ioctl(struct inode *inode, struct file *file,
 
 static struct file_operations netlink_fops = {
 	owner:		THIS_MODULE,
-	llseek:		no_llseek,
+	llseek:		netlink_lseek,
 	read:		netlink_read,
 	write:		netlink_write,
 	poll:		netlink_poll,
@@ -190,13 +195,11 @@ int __init init_netlink(void)
 	/*  Someone tell me the official names for the uppercase ones  */
 	make_devfs_entries ("route", 0);
 	make_devfs_entries ("skip", 1);
-	make_devfs_entries ("usersock", 2);
+	make_devfs_entries ("USERSOCK", 2);
 	make_devfs_entries ("fwmonitor", 3);
-	make_devfs_entries ("tcpdiag", 4);
-	make_devfs_entries ("arpd", 8);
-	make_devfs_entries ("route6", 11);
-	make_devfs_entries ("ip6_fw", 13);
-	make_devfs_entries ("dnrtmsg", 13);
+	make_devfs_entries ("ARPD", 8);
+	make_devfs_entries ("ROUTE6", 11);
+	make_devfs_entries ("IP6_FW", 13);
 	devfs_register_series (devfs_handle, "tap%u", 16, DEVFS_FL_DEFAULT,
 			       NETLINK_MAJOR, 16,
 			       S_IFCHR | S_IRUSR | S_IWUSR,
@@ -205,8 +208,6 @@ int __init init_netlink(void)
 }
 
 #ifdef MODULE
-
-MODULE_LICENSE("GPL");
 
 int init_module(void)
 {

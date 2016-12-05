@@ -219,6 +219,7 @@ int tcf_police(struct sk_buff *skb, struct tcf_police *p)
 	return p->action;
 }
 
+#ifdef CONFIG_RTNETLINK
 int tcf_police_dump(struct sk_buff *skb, struct tcf_police *p)
 {
 	unsigned char	 *b = skb->tail;
@@ -249,3 +250,5 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
+#endif
+

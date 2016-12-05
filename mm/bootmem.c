@@ -18,7 +18,6 @@
 #include <linux/bootmem.h>
 #include <linux/mmzone.h>
 #include <asm/dma.h>
-#include <asm/io.h>
 
 /*
  * Access to this subsystem has to be serialized externally. (this is
@@ -26,7 +25,6 @@
  */
 unsigned long max_low_pfn;
 unsigned long min_low_pfn;
-unsigned long max_pfn;
 
 /* return the number of _pages_ that will be allocated for the boot bitmap */
 unsigned long __init bootmem_bootmap_pages (unsigned long pages)
@@ -156,12 +154,6 @@ static void * __init __alloc_bootmem_core (bootmem_data_t *bdata,
 	if (align & (align-1))
 		BUG();
 
-	offset = 0;
-	if (align &&
-	    (bdata->node_boot_start & (align - 1UL)) != 0)
-		offset = (align - (bdata->node_boot_start & (align - 1UL)));
-	offset >>= PAGE_SHIFT;
-
 	/*
 	 * We try to allocate bootmem pages above 'goal'
 	 * first, then we try to allocate lower pages.
@@ -173,7 +165,6 @@ static void * __init __alloc_bootmem_core (bootmem_data_t *bdata,
 		preferred = 0;
 
 	preferred = ((preferred + align - 1) & ~(align - 1)) >> PAGE_SHIFT;
-	preferred += offset;
 	areasize = (size+PAGE_SIZE-1)/PAGE_SIZE;
 	incr = align >> PAGE_SHIFT ? : 1;
 
@@ -193,7 +184,7 @@ restart_scan:
 	fail_block:;
 	}
 	if (preferred) {
-		preferred = offset;
+		preferred = 0;
 		goto restart_scan;
 	}
 	return NULL;
@@ -325,14 +316,15 @@ unsigned long __init free_all_bootmem (void)
 
 void * __init __alloc_bootmem (unsigned long size, unsigned long align, unsigned long goal)
 {
-	pg_data_t *pgdat;
+	pg_data_t *pgdat = pgdat_list;
 	void *ptr;
 
-	for_each_pgdat(pgdat)
+	while (pgdat) {
 		if ((ptr = __alloc_bootmem_core(pgdat->bdata, size,
 						align, goal)))
 			return(ptr);
-
+		pgdat = pgdat->node_next;
+	}
 	/*
 	 * Whoops, we cannot satisfy the allocation request.
 	 */

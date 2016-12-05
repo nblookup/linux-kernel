@@ -14,33 +14,21 @@ export-objs 	:= common.o atm_misc.o raw.o resources.o ipcommon.o proc.o
 list-multi	:= mpoa.o
 mpoa-objs	:= mpc.o mpoa_caches.o mpoa_proc.o
 
-obj-y		:= addr.o pvc.o signaling.o svc.o common.o atm_misc.o raw.o resources.o
-ifeq ($(CONFIG_ATM),m)
-  obj-m += $(O_TARGET)
-endif
+obj-$(CONFIG_ATM) := addr.o pvc.o signaling.o svc.o common.o atm_misc.o raw.o resources.o
 
-ifneq ($(CONFIG_ATM_CLIP),n)
-  NEED_IPCOM = ipcommon.o
+ifeq ($(CONFIG_ATM_CLIP),y)
+obj-y += clip.o
+NEED_IPCOM = ipcommon.o
 endif
-obj-$(CONFIG_ATM_CLIP) += clip.o
-
-ifeq ($(CONFIG_ATM_BR2684),y)
-  NEED_IPCOM = ipcommon.o
-else
-  ifeq ($(CONFIG_ATM_BR2684),m)
-	NEED_IPCOM = ipcommon.o
-  endif
-endif
-obj-$(CONFIG_ATM_BR2684) += br2684.o
 
 ifeq ($(CONFIG_NET_SCH_ATM),y)
-  NEED_IPCOM = ipcommon.o
+NEED_IPCOM = ipcommon.o
 endif
 
 obj-y += $(NEED_IPCOM)
 
 ifeq ($(CONFIG_PROC_FS),y)
-  obj-y += proc.o
+obj-y += proc.o
 endif
 
 obj-$(CONFIG_ATM_LANE) += lec.o

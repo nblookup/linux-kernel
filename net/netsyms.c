@@ -39,16 +39,12 @@
 #ifdef CONFIG_NET
 extern __u32 sysctl_wmem_max;
 extern __u32 sysctl_rmem_max;
-extern int sysctl_optmem_max;
 #endif
 
 #ifdef CONFIG_INET
 #include <linux/ip.h>
 #include <net/protocol.h>
 #include <net/arp.h>
-#if defined(CONFIG_ATM_CLIP) || defined(CONFIG_ATM_CLIP_MODULE)
-#include <net/atmclip.h>
-#endif
 #include <net/ip.h>
 #include <net/udp.h>
 #include <net/tcp.h>
@@ -60,7 +56,7 @@ extern int sysctl_optmem_max;
 
 extern struct net_proto_family inet_family_ops;
 
-#if defined(CONFIG_IPV6) || defined (CONFIG_IPV6_MODULE) || defined (CONFIG_KHTTPD) || defined (CONFIG_KHTTPD_MODULE) || defined (CONFIG_IP_SCTP_MODULE)
+#if defined(CONFIG_IPV6) || defined (CONFIG_IPV6_MODULE) || defined (CONFIG_KHTTPD) || defined (CONFIG_KHTTPD_MODULE)
 #include <linux/in6.h>
 #include <linux/icmpv6.h>
 #include <net/ipv6.h>
@@ -97,7 +93,6 @@ extern int sysctl_max_syn_backlog;
 /* Skbuff symbols. */
 EXPORT_SYMBOL(skb_over_panic);
 EXPORT_SYMBOL(skb_under_panic);
-EXPORT_SYMBOL(skb_pad);
 
 /* Socket layer registration */
 EXPORT_SYMBOL(sock_register);
@@ -121,7 +116,6 @@ EXPORT_SYMBOL(sk_alloc);
 EXPORT_SYMBOL(sk_free);
 EXPORT_SYMBOL(sock_wake_async);
 EXPORT_SYMBOL(sock_alloc_send_skb);
-EXPORT_SYMBOL(sock_alloc_send_pskb);
 EXPORT_SYMBOL(sock_init_data);
 EXPORT_SYMBOL(sock_no_release);
 EXPORT_SYMBOL(sock_no_bind);
@@ -164,8 +158,6 @@ EXPORT_SYMBOL(datagram_poll);
 EXPORT_SYMBOL(put_cmsg);
 EXPORT_SYMBOL(sock_kmalloc);
 EXPORT_SYMBOL(sock_kfree_s);
-EXPORT_SYMBOL(sock_map_fd);
-EXPORT_SYMBOL(sockfd_lookup);
 
 #ifdef CONFIG_FILTER
 EXPORT_SYMBOL(sk_run_filter);
@@ -179,13 +171,9 @@ EXPORT_SYMBOL(neigh_connected_output);
 EXPORT_SYMBOL(neigh_update);
 EXPORT_SYMBOL(neigh_create);
 EXPORT_SYMBOL(neigh_lookup);
-EXPORT_SYMBOL(neigh_lookup_nodev);
 EXPORT_SYMBOL(__neigh_event_send);
 EXPORT_SYMBOL(neigh_event_ns);
 EXPORT_SYMBOL(neigh_ifdown);
-EXPORT_SYMBOL(neigh_seq_start);
-EXPORT_SYMBOL(neigh_seq_next);
-EXPORT_SYMBOL(neigh_seq_stop);
 #ifdef CONFIG_ARPD
 EXPORT_SYMBOL(neigh_app_ns);
 #endif
@@ -199,7 +187,6 @@ EXPORT_SYMBOL(neigh_parms_alloc);
 EXPORT_SYMBOL(neigh_parms_release);
 EXPORT_SYMBOL(neigh_rand_reach_time);
 EXPORT_SYMBOL(neigh_compat_output); 
-EXPORT_SYMBOL(neigh_changeaddr);
 
 /*	dst_entry	*/
 EXPORT_SYMBOL(dst_alloc);
@@ -261,12 +248,8 @@ EXPORT_SYMBOL(inet_unregister_protosw);
 EXPORT_SYMBOL(ip_route_output_key);
 EXPORT_SYMBOL(ip_route_input);
 EXPORT_SYMBOL(icmp_send);
-EXPORT_SYMBOL(icmp_statistics);
-EXPORT_SYMBOL(icmp_err_convert);
 EXPORT_SYMBOL(ip_options_compile);
 EXPORT_SYMBOL(ip_options_undo);
-EXPORT_SYMBOL(arp_create);
-EXPORT_SYMBOL(arp_xmit);
 EXPORT_SYMBOL(arp_send);
 EXPORT_SYMBOL(arp_broken_ops);
 EXPORT_SYMBOL(__ip_select_ident);
@@ -276,7 +259,6 @@ EXPORT_SYMBOL(inet_family_ops);
 EXPORT_SYMBOL(in_aton);
 EXPORT_SYMBOL(ip_mc_inc_group);
 EXPORT_SYMBOL(ip_mc_dec_group);
-EXPORT_SYMBOL(ip_mc_join_group);
 EXPORT_SYMBOL(ip_finish_output);
 EXPORT_SYMBOL(inet_stream_ops);
 EXPORT_SYMBOL(inet_dgram_ops);
@@ -303,7 +285,14 @@ EXPORT_SYMBOL(dlci_ioctl_hook);
 #endif
 
 
-#if defined (CONFIG_IPV6_MODULE) || defined (CONFIG_KHTTPD) || defined (CONFIG_KHTTPD_MODULE) || defined (CONFIG_IP_SCTP_MODULE)
+#ifdef CONFIG_IPV6
+EXPORT_SYMBOL(ipv6_addr_type);
+EXPORT_SYMBOL(icmpv6_send);
+EXPORT_SYMBOL(ndisc_mc_map);
+EXPORT_SYMBOL(register_inet6addr_notifier);
+EXPORT_SYMBOL(unregister_inet6addr_notifier);
+#endif
+#if defined (CONFIG_IPV6_MODULE) || defined (CONFIG_KHTTPD) || defined (CONFIG_KHTTPD_MODULE)
 /* inet functions common to v4 and v6 */
 EXPORT_SYMBOL(inet_release);
 EXPORT_SYMBOL(inet_stream_connect);
@@ -326,7 +315,6 @@ EXPORT_SYMBOL(tcp_hashinfo);
 EXPORT_SYMBOL(tcp_listen_wlock);
 EXPORT_SYMBOL(udp_hash);
 EXPORT_SYMBOL(udp_hash_lock);
-EXPORT_SYMBOL(udp_poll);
 
 EXPORT_SYMBOL(tcp_destroy_sock);
 EXPORT_SYMBOL(ip_queue_xmit);
@@ -373,6 +361,7 @@ EXPORT_SYMBOL(tcp_inherit_port);
 EXPORT_SYMBOL(tcp_v4_syn_recv_sock);
 EXPORT_SYMBOL(tcp_v4_do_rcv);
 EXPORT_SYMBOL(tcp_v4_connect);
+EXPORT_SYMBOL(tcp_v4_hash_connecting);
 EXPORT_SYMBOL(tcp_unhash);
 EXPORT_SYMBOL(udp_prot);
 EXPORT_SYMBOL(tcp_prot);
@@ -398,7 +387,6 @@ EXPORT_SYMBOL(sysctl_tcp_wmem);
 EXPORT_SYMBOL(sysctl_tcp_ecn);
 EXPORT_SYMBOL(tcp_cwnd_application_limited);
 EXPORT_SYMBOL(tcp_sendpage);
-EXPORT_SYMBOL(sysctl_tcp_low_latency);
 
 EXPORT_SYMBOL(tcp_write_xmit);
 
@@ -418,31 +406,21 @@ EXPORT_SYMBOL(secure_ipv6_id);
 
 #endif
 
-EXPORT_SYMBOL(tcp_read_sock);
-
-#ifdef CONFIG_IP_SCTP_MODULE
-EXPORT_SYMBOL(ip_setsockopt);
-EXPORT_SYMBOL(ip_getsockopt);
-EXPORT_SYMBOL(inet_ioctl);
-EXPORT_SYMBOL(inet_bind);
-EXPORT_SYMBOL(inet_getname);
-#endif /* CONFIG_IP_SCTP_MODULE */
-
+#ifdef CONFIG_NETLINK
 EXPORT_SYMBOL(netlink_set_err);
 EXPORT_SYMBOL(netlink_broadcast);
 EXPORT_SYMBOL(netlink_unicast);
 EXPORT_SYMBOL(netlink_kernel_create);
 EXPORT_SYMBOL(netlink_dump_start);
 EXPORT_SYMBOL(netlink_ack);
-EXPORT_SYMBOL(netlink_set_nonroot);
-EXPORT_SYMBOL(netlink_register_notifier);
-EXPORT_SYMBOL(netlink_unregister_notifier);
 #if defined(CONFIG_NETLINK_DEV) || defined(CONFIG_NETLINK_DEV_MODULE)
 EXPORT_SYMBOL(netlink_attach);
 EXPORT_SYMBOL(netlink_detach);
 EXPORT_SYMBOL(netlink_post);
 #endif
+#endif
 
+#ifdef CONFIG_RTNETLINK
 EXPORT_SYMBOL(rtattr_parse);
 EXPORT_SYMBOL(rtnetlink_links);
 EXPORT_SYMBOL(__rta_fill);
@@ -452,6 +430,7 @@ EXPORT_SYMBOL(rtnl);
 EXPORT_SYMBOL(neigh_delete);
 EXPORT_SYMBOL(neigh_add);
 EXPORT_SYMBOL(neigh_dump_info);
+#endif
 
 EXPORT_SYMBOL(dev_set_allmulti);
 EXPORT_SYMBOL(dev_set_promiscuity);
@@ -469,14 +448,12 @@ EXPORT_SYMBOL(ipv4_config);
 EXPORT_SYMBOL(dev_open);
 
 /* Used by other modules */
+EXPORT_SYMBOL(in_ntoa);
 EXPORT_SYMBOL(xrlim_allow);
 
 EXPORT_SYMBOL(ip_rcv);
 EXPORT_SYMBOL(arp_rcv);
 EXPORT_SYMBOL(arp_tbl);
-#if defined(CONFIG_ATM_CLIP) || defined(CONFIG_ATM_CLIP_MODULE)
-EXPORT_SYMBOL(clip_tbl_hook);
-#endif
 EXPORT_SYMBOL(arp_find);
 
 #endif  /* CONFIG_INET */
@@ -496,8 +473,6 @@ EXPORT_SYMBOL(register_netdevice);
 EXPORT_SYMBOL(unregister_netdevice);
 EXPORT_SYMBOL(netdev_state_change);
 EXPORT_SYMBOL(dev_new_index);
-EXPORT_SYMBOL(dev_get_by_flags);
-EXPORT_SYMBOL(__dev_get_by_flags);
 EXPORT_SYMBOL(dev_get_by_index);
 EXPORT_SYMBOL(__dev_get_by_index);
 EXPORT_SYMBOL(dev_get_by_name);
@@ -516,7 +491,6 @@ EXPORT_SYMBOL(__kfree_skb);
 EXPORT_SYMBOL(skb_clone);
 EXPORT_SYMBOL(skb_copy);
 EXPORT_SYMBOL(netif_rx);
-EXPORT_SYMBOL(netif_receive_skb);
 EXPORT_SYMBOL(dev_add_pack);
 EXPORT_SYMBOL(dev_remove_pack);
 EXPORT_SYMBOL(dev_get);
@@ -548,14 +522,9 @@ EXPORT_SYMBOL(if_port_text);
 EXPORT_SYMBOL(hippi_type_trans);
 #endif
 
-#ifdef CONFIG_NET_FASTROUTE
-EXPORT_SYMBOL(netdev_fastroute);
-#endif
-
 #ifdef CONFIG_SYSCTL
 EXPORT_SYMBOL(sysctl_wmem_max);
 EXPORT_SYMBOL(sysctl_rmem_max);
-EXPORT_SYMBOL(sysctl_optmem_max);
 #ifdef CONFIG_INET
 EXPORT_SYMBOL(sysctl_ip_default_ttl);
 #endif
@@ -571,7 +540,6 @@ EXPORT_SYMBOL(qdisc_tree_lock);
 #ifdef CONFIG_NET_SCHED
 PSCHED_EXPORTLIST;
 EXPORT_SYMBOL(pfifo_qdisc_ops);
-EXPORT_SYMBOL(bfifo_qdisc_ops);
 EXPORT_SYMBOL(register_qdisc);
 EXPORT_SYMBOL(unregister_qdisc);
 EXPORT_SYMBOL(qdisc_get_rtab);
@@ -585,7 +553,9 @@ EXPORT_SYMBOL(qdisc_kill_estimator);
 EXPORT_SYMBOL(tcf_police);
 EXPORT_SYMBOL(tcf_police_locate);
 EXPORT_SYMBOL(tcf_police_destroy);
+#ifdef CONFIG_RTNETLINK
 EXPORT_SYMBOL(tcf_police_dump);
+#endif
 #endif
 #endif
 #ifdef CONFIG_NET_CLS
@@ -606,25 +576,11 @@ EXPORT_SYMBOL(nf_hooks);
 EXPORT_SYMBOL(nf_setsockopt);
 EXPORT_SYMBOL(nf_getsockopt);
 EXPORT_SYMBOL(ip_ct_attach);
-EXPORT_SYMBOL(nf_ct_attach);
-#ifdef CONFIG_INET
-#include <linux/netfilter_ipv4.h>
-EXPORT_SYMBOL(ip_route_me_harder);
-#endif
 #endif
 
 EXPORT_SYMBOL(register_gifconf);
 
+EXPORT_SYMBOL(net_call_rx_atomic);
 EXPORT_SYMBOL(softnet_data);
-
-#if defined(CONFIG_NET_RADIO) || defined(CONFIG_NET_PCMCIA_RADIO)
-#include <net/iw_handler.h>
-EXPORT_SYMBOL(wireless_send_event);
-EXPORT_SYMBOL(iw_handler_set_spy);
-EXPORT_SYMBOL(iw_handler_get_spy);
-EXPORT_SYMBOL(iw_handler_set_thrspy);
-EXPORT_SYMBOL(iw_handler_get_thrspy);
-EXPORT_SYMBOL(wireless_spy_update);
-#endif /* CONFIG_NET_RADIO || CONFIG_NET_PCMCIA_RADIO */
 
 #endif  /* CONFIG_NET */

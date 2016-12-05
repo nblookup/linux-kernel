@@ -9,7 +9,7 @@
  *	as published by the Free Software Foundation; either version
  *	2 of the License, or (at your option) any later version.
  *
- *	Version: $Id: ipmr.c,v 1.65 2001/10/31 21:55:54 davem Exp $
+ *	Version: $Id: ipmr.c,v 1.64 2001/09/18 22:29:09 davem Exp $
  *
  *	Fixes:
  *	Michael Chastain	:	Incorrect size of copying.
@@ -294,6 +294,7 @@ static void ipmr_destroy_unres(struct mfc_cache *c)
 	atomic_dec(&cache_resolve_queue_len);
 
 	while((skb=skb_dequeue(&c->mfc_un.unres.unresolved))) {
+#ifdef CONFIG_RTNETLINK
 		if (skb->nh.iph->version == 0) {
 			struct nlmsghdr *nlh = (struct nlmsghdr *)skb_pull(skb, sizeof(struct iphdr));
 			nlh->nlmsg_type = NLMSG_ERROR;
@@ -302,6 +303,7 @@ static void ipmr_destroy_unres(struct mfc_cache *c)
 			((struct nlmsgerr*)NLMSG_DATA(nlh))->error = -ETIMEDOUT;
 			netlink_unicast(rtnl, skb, NETLINK_CB(skb).dst_pid, MSG_DONTWAIT);
 		} else
+#endif
 			kfree_skb(skb);
 	}
 
@@ -499,6 +501,7 @@ static void ipmr_cache_resolve(struct mfc_cache *uc, struct mfc_cache *c)
 	 */
 
 	while((skb=__skb_dequeue(&uc->mfc_un.unres.unresolved))) {
+#ifdef CONFIG_RTNETLINK
 		if (skb->nh.iph->version == 0) {
 			int err;
 			struct nlmsghdr *nlh = (struct nlmsghdr *)skb_pull(skb, sizeof(struct iphdr));
@@ -513,6 +516,7 @@ static void ipmr_cache_resolve(struct mfc_cache *uc, struct mfc_cache *c)
 			}
 			err = netlink_unicast(rtnl, skb, NETLINK_CB(skb).dst_pid, MSG_DONTWAIT);
 		} else
+#endif
 			ip_mr_forward(skb, c, 0);
 	}
 }
@@ -1096,17 +1100,15 @@ static void ip_encap(struct sk_buff *skb, u32 saddr, u32 daddr)
 
 	skb->h.ipiph = skb->nh.iph;
 	skb->nh.iph = iph;
-	memset(&(IPCB(skb)->opt), 0, sizeof(IPCB(skb)->opt));
-	nf_reset(skb);
+#ifdef CONFIG_NETFILTER
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#endif
 }
 
 static inline int ipmr_forward_finish(struct sk_buff *skb)
 {
-	struct ip_options *opt = &(IPCB(skb)->opt);
 	struct dst_entry *dst = skb->dst;
-
-	if (unlikely(opt->optlen))
-		ip_forward_options(skb);
 
 	if (skb->len <= dst->pmtu)
 		return dst->output(skb);
@@ -1436,14 +1438,17 @@ int pim_rcv_v1(struct sk_buff * skb)
 	skb->nh.iph = (struct iphdr *)skb->data;
 	skb->dev = reg_dev;
 	memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
-	skb->protocol = htons(ETH_P_IP);
+	skb->protocol = __constant_htons(ETH_P_IP);
 	skb->ip_summed = 0;
 	skb->pkt_type = PACKET_HOST;
 	dst_release(skb->dst);
 	skb->dst = NULL;
 	((struct net_device_stats*)reg_dev->priv)->rx_bytes += skb->len;
 	((struct net_device_stats*)reg_dev->priv)->rx_packets++;
-	nf_reset(skb);
+#ifdef CONFIG_NETFILTER
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#endif
 	netif_rx(skb);
 	dev_put(reg_dev);
 	return 0;
@@ -1500,19 +1505,24 @@ int pim_rcv(struct sk_buff * skb)
 	skb->nh.iph = (struct iphdr *)skb->data;
 	skb->dev = reg_dev;
 	memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
-	skb->protocol = htons(ETH_P_IP);
+	skb->protocol = __constant_htons(ETH_P_IP);
 	skb->ip_summed = 0;
 	skb->pkt_type = PACKET_HOST;
 	dst_release(skb->dst);
 	((struct net_device_stats*)reg_dev->priv)->rx_bytes += skb->len;
 	((struct net_device_stats*)reg_dev->priv)->rx_packets++;
 	skb->dst = NULL;
-	nf_reset(skb);
+#ifdef CONFIG_NETFILTER
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#endif
 	netif_rx(skb);
 	dev_put(reg_dev);
 	return 0;
 }
 #endif
+
+#ifdef CONFIG_RTNETLINK
 
 static int
 ipmr_fill_mroute(struct sk_buff *skb, struct mfc_cache *c, struct rtmsg *rtm)
@@ -1588,6 +1598,7 @@ int ipmr_get_route(struct sk_buff *skb, struct rtmsg *rtm, int nowait)
 	read_unlock(&mrt_lock);
 	return err;
 }
+#endif
 
 #ifdef CONFIG_PROC_FS	
 /*

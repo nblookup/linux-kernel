@@ -3,7 +3,7 @@
  *	Linux INET6 implementation 
  *
  *	Authors:
- *	Pedro Roque		<pedro_m@yahoo.com>	
+ *	Pedro Roque		<roque@di.fc.ul.pt>	
  *
  *	$Id: datagram.c,v 1.23 2001/09/01 00:31:50 davem Exp $
  *
@@ -147,7 +147,7 @@ int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 			}
 		} else {
 			ipv6_addr_set(&sin->sin6_addr, 0, 0,
-				      htonl(0xffff),
+				      __constant_htonl(0xffff),
 				      *(u32*)(skb->nh.raw + serr->addr_offset));
 		}
 	}
@@ -158,7 +158,6 @@ int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 	if (serr->ee.ee_origin != SO_EE_ORIGIN_LOCAL) {
 		sin->sin6_family = AF_INET6;
 		sin->sin6_flowinfo = 0;
-		sin->sin6_scope_id = 0;
 		if (serr->ee.ee_origin == SO_EE_ORIGIN_ICMP6) {
 			memcpy(&sin->sin6_addr, &skb->nh.ipv6h->saddr, 16);
 			if (sk->net_pinfo.af_inet6.rxopt.all)
@@ -169,7 +168,7 @@ int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 			}
 		} else {
 			ipv6_addr_set(&sin->sin6_addr, 0, 0,
-				      htonl(0xffff),
+				      __constant_htonl(0xffff),
 				      skb->nh.iph->saddr);
 			if (sk->protinfo.af_inet.cmsg_flags)
 				ip_cmsg_recv(msg, skb);
@@ -260,7 +259,9 @@ int datagram_send_ctl(struct msghdr *msg, struct flowi *fl,
 
 	for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
 
-		if (!CMSG_OK(msg, cmsg)) {
+		if (cmsg->cmsg_len < sizeof(struct cmsghdr) ||
+		    (unsigned long)(((char*)cmsg - (char*)msg->msg_control)
+				    + cmsg->cmsg_len) > msg->msg_controllen) {
 			err = -EINVAL;
 			goto exit_f;
 		}

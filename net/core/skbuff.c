@@ -4,7 +4,7 @@
  *	Authors:	Alan Cox <iiitac@pyr.swan.ac.uk>
  *			Florian La Roche <rzsfl@rz.uni-sb.de>
  *
- *	Version:	$Id: skbuff.c,v 1.90 2001/11/07 05:56:19 davem Exp $
+ *	Version:	$Id: skbuff.c,v 1.89 2001/08/06 13:25:02 davem Exp $
  *
  *	Fixes:	
  *		Alan Cox	:	Fixed the worst of the load balancer bugs.
@@ -49,14 +49,15 @@
 #include <linux/string.h>
 #include <linux/skbuff.h>
 #include <linux/cache.h>
-#include <linux/rtnetlink.h>
 #include <linux/init.h>
 #include <linux/highmem.h>
 
+#include <net/ip.h>
 #include <net/protocol.h>
 #include <net/dst.h>
+#include <net/tcp.h>
+#include <net/udp.h>
 #include <net/sock.h>
-#include <net/checksum.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -231,7 +232,6 @@ static inline void skb_headerinit(void *p, kmem_cache_t *cache,
 	skb->sk = NULL;
 	skb->stamp.tv_sec=0;	/* No idea about time */
 	skb->dev = NULL;
-	skb->real_dev = NULL;
 	skb->dst = NULL;
 	memset(skb->cb, 0, sizeof(skb->cb));
 	skb->pkt_type = PACKET_HOST;	/* Default type */
@@ -363,7 +363,6 @@ struct sk_buff *skb_clone(struct sk_buff *skb, int gfp_mask)
 	n->sk = NULL;
 	C(stamp);
 	C(dev);
-	C(real_dev);
 	C(h);
 	C(nh);
 	C(mac);
@@ -419,7 +418,6 @@ static void copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
 	new->list=NULL;
 	new->sk=NULL;
 	new->dev=old->dev;
-	new->real_dev=old->real_dev;
 	new->priority=old->priority;
 	new->protocol=old->protocol;
 	new->dst=dst_clone(old->dst);
@@ -734,36 +732,6 @@ struct sk_buff *skb_copy_expand(const struct sk_buff *skb,
 	return n;
 }
 
-/**
- *	skb_pad			-	zero pad the tail of an skb
- *	@skb: buffer to pad
- *	@pad: space to pad
- *
- *	Ensure that a buffer is followed by a padding area that is zero
- *	filled. Used by network drivers which may DMA or transfer data
- *	beyond the buffer end onto the wire.
- *
- *	May return NULL in out of memory cases.
- */
- 
-struct sk_buff *skb_pad(struct sk_buff *skb, int pad)
-{
-	struct sk_buff *nskb;
-	
-	/* If the skbuff is non linear tailroom is always zero.. */
-	if(skb_tailroom(skb) >= pad)
-	{
-		memset(skb->data+skb->len, 0, pad);
-		return skb;
-	}
-	
-	nskb = skb_copy_expand(skb, skb_headroom(skb), skb_tailroom(skb) + pad, GFP_ATOMIC);
-	kfree_skb(skb);
-	if(nskb)
-		memset(nskb->data+nskb->len, 0, pad);
-	return nskb;
-}	
- 
 /* Trims skb to length len. It can change skb pointers, if "realloc" is 1.
  * If realloc==0 and trimming is impossible without change of data,
  * it is BUG().
@@ -781,7 +749,7 @@ int ___pskb_trim(struct sk_buff *skb, unsigned int len, int realloc)
 			if (skb_cloned(skb)) {
 				if (!realloc)
 					BUG();
-				if (pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
+				if (!pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
 					return -ENOMEM;
 			}
 			if (len <= offset) {

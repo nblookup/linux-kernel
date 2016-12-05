@@ -5,7 +5,7 @@
  *
  *		ROUTE - implementation of the IP router.
  *
- * Version:	$Id: route.c,v 1.102.2.1 2002/01/12 07:43:57 davem Exp $
+ * Version:	$Id: route.c,v 1.101 2001/10/20 00:00:11 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -85,7 +85,6 @@
 #include <linux/mroute.h>
 #include <linux/netfilter_ipv4.h>
 #include <linux/random.h>
-#include <linux/jhash.h>
 #include <net/protocol.h>
 #include <net/ip.h>
 #include <net/route.h>
@@ -108,7 +107,7 @@ int ip_rt_max_delay		= 10 * HZ;
 int ip_rt_max_size;
 int ip_rt_gc_timeout		= RT_GC_TIMEOUT;
 int ip_rt_gc_interval		= 60 * HZ;
-int ip_rt_gc_min_interval	= HZ / 2;
+int ip_rt_gc_min_interval	= 5 * HZ;
 int ip_rt_redirect_number	= 9;
 int ip_rt_redirect_load		= HZ / 50;
 int ip_rt_redirect_silence	= ((HZ / 50) << (9 + 1));
@@ -118,14 +117,13 @@ int ip_rt_gc_elasticity		= 8;
 int ip_rt_mtu_expires		= 10 * 60 * HZ;
 int ip_rt_min_pmtu		= 512 + 20 + 20;
 int ip_rt_min_advmss		= 256;
-int ip_rt_secret_interval	= 10 * 60 * HZ;
+
 static unsigned long rt_deadline;
 
 #define RTprint(a...)	printk(KERN_DEBUG a)
 
 static struct timer_list rt_flush_timer;
 static struct timer_list rt_periodic_timer;
-static struct timer_list rt_secret_timer;
 
 /*
  *	Interface to generic destination cache.
@@ -196,17 +194,19 @@ struct rt_hash_bucket {
 static struct rt_hash_bucket 	*rt_hash_table;
 static unsigned			rt_hash_mask;
 static int			rt_hash_log;
-static unsigned int		rt_hash_rnd;
 
 struct rt_cache_stat rt_cache_stat[NR_CPUS];
 
 static int rt_intern_hash(unsigned hash, struct rtable *rth,
 				struct rtable **res);
 
-static unsigned int rt_hash_code(u32 daddr, u32 saddr, u8 tos)
+static __inline__ unsigned rt_hash_code(u32 daddr, u32 saddr, u8 tos)
 {
-	return (jhash_3words(daddr, saddr, (u32) tos, rt_hash_rnd)
-		& rt_hash_mask);
+	unsigned hash = ((daddr & 0xF0F0F0F0) >> 4) |
+			((daddr & 0x0F0F0F0F) << 4);
+	hash ^= saddr ^ tos;
+	hash ^= (hash >> 16);
+	return (hash ^ (hash >> 8)) & rt_hash_mask;
 }
 
 static int rt_cache_get_info(char *buffer, char **start, off_t offset,
@@ -214,7 +214,7 @@ static int rt_cache_get_info(char *buffer, char **start, off_t offset,
 {
 	int len = 0;
 	off_t pos = 128;
-	char temp[256];
+	char temp[129];
 	struct rtable *r;
 	int i;
 
@@ -248,8 +248,7 @@ static int rt_cache_get_info(char *buffer, char **start, off_t offset,
 				r->u.dst.__use,
 				0,
 				(unsigned long)r->rt_src,
-				(r->u.dst.advmss ?
-				 (int) r->u.dst.advmss + 40 : 0),
+				(int)r->u.dst.advmss + 40,
 				r->u.dst.window,
 				(int)((r->u.dst.rtt >> 3) + r->u.dst.rttvar),
 				r->key.tos,
@@ -284,11 +283,10 @@ static int rt_cache_stat_get_info(char *buffer, char **start, off_t offset, int 
 	int i, lcpu;
 	int len = 0;
 
- 	len += sprintf(buffer+len, "entries  in_hit in_slow_tot in_slow_mc in_no_route in_brd in_martian_dst in_martian_src  out_hit out_slow_tot out_slow_mc  gc_total gc_ignored gc_goal_miss gc_dst_overflow in_hlist_search out_hlist_search\n");
         for (lcpu = 0; lcpu < smp_num_cpus; lcpu++) {
                 i = cpu_logical_map(lcpu);
 
-		len += sprintf(buffer+len, "%08x  %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x %08x \n",
+		len += sprintf(buffer+len, "%08x  %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x\n",
 			       dst_entries,		       
 			       rt_cache_stat[i].in_hit,
 			       rt_cache_stat[i].in_slow_tot,
@@ -300,15 +298,7 @@ static int rt_cache_stat_get_info(char *buffer, char **start, off_t offset, int 
 
 			       rt_cache_stat[i].out_hit,
 			       rt_cache_stat[i].out_slow_tot,
-			       rt_cache_stat[i].out_slow_mc, 
-
-			       rt_cache_stat[i].gc_total,
-			       rt_cache_stat[i].gc_ignored,
-			       rt_cache_stat[i].gc_goal_miss,
-			       rt_cache_stat[i].gc_dst_overflow,
-			       rt_cache_stat[i].in_hlist_search,
-			       rt_cache_stat[i].out_hlist_search
-
+			       rt_cache_stat[i].out_slow_mc
 			);
 	}
 	len -= offset;
@@ -347,17 +337,16 @@ static __inline__ int rt_valuable(struct rtable *rth)
 		rth->u.dst.expires;
 }
 
-static __inline__ int rt_may_expire(struct rtable *rth, unsigned long tmo1, unsigned long tmo2)
+static __inline__ int rt_may_expire(struct rtable *rth, int tmo1, int tmo2)
 {
-	unsigned long age;
+	int age;
 	int ret = 0;
 
 	if (atomic_read(&rth->u.dst.__refcnt))
 		goto out;
 
 	ret = 1;
-	if (rth->u.dst.expires &&
-	    time_after_eq(jiffies, rth->u.dst.expires))
+	if (rth->u.dst.expires && (long)(rth->u.dst.expires - jiffies) <= 0)
 		goto out;
 
 	age = jiffies - rth->u.dst.lastuse;
@@ -367,27 +356,6 @@ static __inline__ int rt_may_expire(struct rtable *rth, unsigned long tmo1, unsi
 		goto out;
 	ret = 1;
 out:	return ret;
-}
-
-/* Bits of score are:
- * 31: very valuable
- * 30: not quite useless
- * 29..0: usage counter
- */
-static inline u32 rt_score(struct rtable *rt)
-{
-	u32 score = jiffies - rt->u.dst.lastuse;
-
-	score = ~score & ~(3<<30);
-
-	if (rt_valuable(rt))
-		score |= (1<<31);
-
-	if (!rt->key.iif ||
-	    !(rt->rt_flags & (RTCF_BROADCAST|RTCF_MULTICAST|RTCF_LOCAL)))
-		score |= (1<<30);
-
-	return score;
 }
 
 /* This runs via a timer and thus is always in BH context. */
@@ -400,7 +368,7 @@ static void SMP_TIMER_NAME(rt_check_expire)(unsigned long dummy)
 
 	for (t = ip_rt_gc_interval << rt_hash_log; t >= 0;
 	     t -= ip_rt_gc_timeout) {
-		unsigned long tmo = ip_rt_gc_timeout;
+		unsigned tmo = ip_rt_gc_timeout;
 
 		i = (i + 1) & rt_hash_mask;
 		rthp = &rt_hash_table[i].chain;
@@ -409,7 +377,7 @@ static void SMP_TIMER_NAME(rt_check_expire)(unsigned long dummy)
 		while ((rth = *rthp) != NULL) {
 			if (rth->u.dst.expires) {
 				/* Entry is expired even if it is in use */
-				if (time_before_eq(now, rth->u.dst.expires)) {
+				if ((long)(now - rth->u.dst.expires) <= 0) {
 					tmo >>= 1;
 					rthp = &rth->u.rt_next;
 					continue;
@@ -427,7 +395,7 @@ static void SMP_TIMER_NAME(rt_check_expire)(unsigned long dummy)
 		write_unlock(&rt_hash_table[i].lock);
 
 		/* Fallback loop breaker. */
-		if (time_after(jiffies, now))
+		if ((jiffies - now) > 0)
 			break;
 	}
 	rover = i;
@@ -445,8 +413,6 @@ static void SMP_TIMER_NAME(rt_run_flush)(unsigned long dummy)
 	struct rtable *rth, *next;
 
 	rt_deadline = 0;
-
-	get_random_bytes(&rt_hash_rnd, 4);
 
 	for (i = rt_hash_mask; i >= 0; i--) {
 		write_lock_bh(&rt_hash_table[i].lock);
@@ -506,14 +472,6 @@ void rt_cache_flush(int delay)
 	spin_unlock_bh(&rt_flush_lock);
 }
 
-static void rt_secret_rebuild(unsigned long dummy)
-{
-	unsigned long now = jiffies;
-
-	rt_cache_flush(0);
-	mod_timer(&rt_secret_timer, now + ip_rt_secret_interval);
-}
-
 /*
    Short description of GC goals.
 
@@ -529,7 +487,7 @@ static void rt_secret_rebuild(unsigned long dummy)
 
 static int rt_garbage_collect(void)
 {
-	static unsigned long expire = RT_GC_TIMEOUT;
+	static unsigned expire = RT_GC_TIMEOUT;
 	static unsigned long last_gc;
 	static int rover;
 	static int equilibrium;
@@ -541,14 +499,9 @@ static int rt_garbage_collect(void)
 	 * Garbage collection is pretty expensive,
 	 * do not make it too frequently.
 	 */
-
-	rt_cache_stat[smp_processor_id()].gc_total++;
-
 	if (now - last_gc < ip_rt_gc_min_interval &&
-	    atomic_read(&ipv4_dst_ops.entries) < ip_rt_max_size) {
-		rt_cache_stat[smp_processor_id()].gc_ignored++;
+	    atomic_read(&ipv4_dst_ops.entries) < ip_rt_max_size)
 		goto out;
-	}
 
 	/* Calculate number of entries, which we want to expire now. */
 	goal = atomic_read(&ipv4_dst_ops.entries) -
@@ -581,7 +534,7 @@ static int rt_garbage_collect(void)
 		int i, k;
 
 		for (i = rt_hash_mask, k = rover; i >= 0; i--) {
-			unsigned long tmo = expire;
+			unsigned tmo = expire;
 
 			k = (k + 1) & rt_hash_mask;
 			rthp = &rt_hash_table[k].chain;
@@ -614,8 +567,6 @@ static int rt_garbage_collect(void)
 		     We will not spin here for long time in any case.
 		 */
 
-		rt_cache_stat[smp_processor_id()].gc_goal_miss++;
-
 		if (expire == 0)
 			break;
 
@@ -627,13 +578,12 @@ static int rt_garbage_collect(void)
 
 		if (atomic_read(&ipv4_dst_ops.entries) < ip_rt_max_size)
 			goto out;
-	} while (!in_softirq() && time_before_eq(jiffies, now));
+	} while (!in_softirq() && jiffies - now < 1);
 
 	if (atomic_read(&ipv4_dst_ops.entries) < ip_rt_max_size)
 		goto out;
 	if (net_ratelimit())
-		printk(KERN_WARNING "dst cache overflow\n");
-	rt_cache_stat[smp_processor_id()].gc_dst_overflow++;
+		printk("dst cache overflow\n");
 	return 1;
 
 work_done:
@@ -651,19 +601,10 @@ out:	return 0;
 static int rt_intern_hash(unsigned hash, struct rtable *rt, struct rtable **rp)
 {
 	struct rtable	*rth, **rthp;
-	unsigned long	now;
-	struct rtable *cand, **candp;
-	u32 		min_score;
-	int		chain_length;
+	unsigned long	now = jiffies;
 	int attempts = !in_softirq();
 
 restart:
-	chain_length = 0;
-	min_score = ~(u32)0;
-	cand = NULL;
-	candp = NULL;
-	now = jiffies;
-
 	rthp = &rt_hash_table[hash].chain;
 
 	write_lock_bh(&rt_hash_table[hash].lock);
@@ -684,32 +625,7 @@ restart:
 			return 0;
 		}
 
-		if (!atomic_read(&rth->u.dst.__refcnt)) {
-			u32 score = rt_score(rth);
-
-			if (score <= min_score) {
-				cand = rth;
-				candp = rthp;
-				min_score = score;
-			}
-		}
-
-		chain_length++;
-
 		rthp = &rth->u.rt_next;
-	}
-
-	if (cand) {
-		/* ip_rt_gc_elasticity used to be average length of chain
-		 * length, when exceeded gc becomes really aggressive.
-		 *
-		 * The second limit is less certain. At the moment it allows
-		 * only 2 entries per bucket. We will see.
-		 */
-		if (chain_length > ip_rt_gc_elasticity) {
-			*candp = cand->u.rt_next;
-			rt_free(cand);
-		}
 	}
 
 	/* Try to bind route to arp only if it is output
@@ -741,7 +657,7 @@ restart:
 			}
 
 			if (net_ratelimit())
-				printk(KERN_WARNING "Neighbour table overflow.\n");
+				printk("Neighbour table overflow.\n");
 			rt_drop(rt);
 			return -ENOBUFS;
 		}
@@ -751,8 +667,8 @@ restart:
 #if RT_CACHE_DEBUG >= 2
 	if (rt->u.rt_next) {
 		struct rtable *trt;
-		printk(KERN_DEBUG "rt_cache @%02x: %u.%u.%u.%u", hash,
-		       NIPQUAD(rt->rt_dst));
+		printk("rt_cache @%02x: %u.%u.%u.%u", hash,
+				NIPQUAD(rt->rt_dst));
 		for (trt = rt->u.rt_next; trt; trt = trt->u.rt_next)
 			printk(" . %u.%u.%u.%u", NIPQUAD(trt->rt_dst));
 		printk("\n");
@@ -894,7 +810,7 @@ void ip_rt_redirect(u32 old_gw, u32 daddr, u32 new_gw,
 				    rth->u.dst.dev != dev)
 					break;
 
-				dst_hold(&rth->u.dst);
+				dst_clone(&rth->u.dst);
 				read_unlock(&rt_hash_table[hash].lock);
 
 				rt = dst_alloc(&ipv4_dst_ops);
@@ -1019,7 +935,7 @@ void ip_rt_send_redirect(struct sk_buff *skb)
 	/* No redirected packets during ip_rt_redirect_silence;
 	 * reset the algorithm.
 	 */
-	if (time_after(jiffies, rt->u.dst.rate_last + ip_rt_redirect_silence))
+	if (jiffies - rt->u.dst.rate_last > ip_rt_redirect_silence)
 		rt->u.dst.rate_tokens = 0;
 
 	/* Too many ignored redirects; do not send anything
@@ -1033,9 +949,8 @@ void ip_rt_send_redirect(struct sk_buff *skb)
 	/* Check for load limit; set rate_last to the latest sent
 	 * redirect.
 	 */
-	if (time_after(jiffies,
-		       (rt->u.dst.rate_last +
-			(ip_rt_redirect_load << rt->u.dst.rate_tokens)))) {
+	if (jiffies - rt->u.dst.rate_last >
+	    (ip_rt_redirect_load << rt->u.dst.rate_tokens)) {
 		icmp_send(skb, ICMP_REDIRECT, ICMP_REDIR_HOST, rt->rt_gateway);
 		rt->u.dst.rate_last = jiffies;
 		++rt->u.dst.rate_tokens;
@@ -1317,7 +1232,7 @@ static int ip_route_input_mc(struct sk_buff *skb, u32 daddr, u32 saddr,
 		return -EINVAL;
 
 	if (MULTICAST(saddr) || BADCLASS(saddr) || LOOPBACK(saddr) ||
-	    skb->protocol != htons(ETH_P_IP))
+	    skb->protocol != __constant_htons(ETH_P_IP))
 		goto e_inval;
 
 	if (ZERONET(saddr)) {
@@ -1528,7 +1443,7 @@ int ip_route_input_slow(struct sk_buff *skb, u32 daddr, u32 saddr,
 	     inet_addr_onlink(out_dev, saddr, FIB_RES_GW(res))))
 		flags |= RTCF_DOREDIRECT;
 
-	if (skb->protocol != htons(ETH_P_IP)) {
+	if (skb->protocol != __constant_htons(ETH_P_IP)) {
 		/* Not IP (i.e. ARP). Do not create route, if it is
 		 * invalid for proxy arp. DNAT routes are always valid.
 		 */
@@ -1593,7 +1508,7 @@ done:
 out:	return err;
 
 brd_input:
-	if (skb->protocol != htons(ETH_P_IP))
+	if (skb->protocol != __constant_htons(ETH_P_IP))
 		goto e_inval;
 
 	if (ZERONET(saddr))
@@ -1732,7 +1647,6 @@ int ip_route_input(struct sk_buff *skb, u32 daddr, u32 saddr,
 			skb->dst = (struct dst_entry*)rth;
 			return 0;
 		}
-		rt_cache_stat[smp_processor_id()].in_hlist_search++;
 	}
 	read_unlock(&rt_hash_table[hash].lock);
 
@@ -1752,7 +1666,7 @@ int ip_route_input(struct sk_buff *skb, u32 daddr, u32 saddr,
 
 		read_lock(&inetdev_lock);
 		if ((in_dev = __in_dev_get(dev)) != NULL) {
-			int our = ip_check_mc(in_dev, daddr, saddr);
+			int our = ip_check_mc(in_dev, daddr);
 			if (our
 #ifdef CONFIG_IP_MROUTE
 			    || (!LOCAL_MCAST(daddr) && IN_DEV_MFORWARD(in_dev))
@@ -1978,7 +1892,7 @@ make_route:
 		flags |= RTCF_MULTICAST|RTCF_LOCAL;
 		read_lock(&inetdev_lock);
 		if (!__in_dev_get(dev_out) ||
-		    !ip_check_mc(__in_dev_get(dev_out),oldkey->dst,oldkey->src))
+		    !ip_check_mc(__in_dev_get(dev_out), oldkey->dst))
 			flags &= ~RTCF_LOCAL;
 		read_unlock(&inetdev_lock);
 		/* If multicast route do not exist use
@@ -2093,13 +2007,13 @@ int ip_route_output_key(struct rtable **rp, const struct rt_key *key)
 			*rp = rth;
 			return 0;
 		}
-		rt_cache_stat[smp_processor_id()].out_hlist_search++;
 	}
 	read_unlock_bh(&rt_hash_table[hash].lock);
 
 	return ip_route_output_slow(rp, key);
 }	
 
+#ifdef CONFIG_RTNETLINK
 static int rt_fill_info(struct sk_buff *skb, u32 pid, u32 seq, int event,
 			int nowait)
 {
@@ -2214,10 +2128,7 @@ int inet_rtm_getroute(struct sk_buff *in_skb, struct nlmsghdr* nlh, void *arg)
 	/* Reserve room for dummy headers, this skb can pass
 	   through good chunk of routing engine.
 	 */
-	skb->mac.raw = skb->nh.raw = skb->data;
-
-	/* Bugfix: need to give ip_route_input enough of an IP header to not gag. */
-	skb->nh.iph->protocol = IPPROTO_ICMP;
+	skb->mac.raw = skb->data;
 	skb_reserve(skb, MAX_HEADER + sizeof(struct iphdr));
 
 	if (rta[RTA_SRC - 1])
@@ -2231,8 +2142,8 @@ int inet_rtm_getroute(struct sk_buff *in_skb, struct nlmsghdr* nlh, void *arg)
 		struct net_device *dev = __dev_get_by_index(iif);
 		err = -ENODEV;
 		if (!dev)
-			goto out_free;
-		skb->protocol	= htons(ETH_P_IP);
+			goto out;
+		skb->protocol	= __constant_htons(ETH_P_IP);
 		skb->dev	= dev;
 		local_bh_disable();
 		err = ip_route_input(skb, dst, src, rtm->rtm_tos, dev);
@@ -2246,8 +2157,10 @@ int inet_rtm_getroute(struct sk_buff *in_skb, struct nlmsghdr* nlh, void *arg)
 			memcpy(&oif, RTA_DATA(rta[RTA_OIF - 1]), sizeof(int));
 		err = ip_route_output(&rt, dst, src, rtm->rtm_tos, oif);
 	}
-	if (err)
-		goto out_free;
+	if (err) {
+		kfree_skb(skb);
+		goto out;
+	}
 
 	skb->dst = &rt->u.dst;
 	if (rtm->rtm_flags & RTM_F_NOTIFY)
@@ -2258,20 +2171,16 @@ int inet_rtm_getroute(struct sk_buff *in_skb, struct nlmsghdr* nlh, void *arg)
 	err = rt_fill_info(skb, NETLINK_CB(in_skb).pid, nlh->nlmsg_seq,
 				RTM_NEWROUTE, 0);
 	if (!err)
-		goto out_free;
+		goto out;
 	if (err < 0) {
 		err = -EMSGSIZE;
-		goto out_free;
+		goto out;
 	}
 
 	err = netlink_unicast(rtnl, skb, NETLINK_CB(in_skb).pid, MSG_DONTWAIT);
 	if (err > 0)
 		err = 0;
 out:	return err;
-
-out_free:
-	kfree_skb(skb);
-	goto out;
 }
 
 int ip_rt_dump(struct sk_buff *skb,  struct netlink_callback *cb)
@@ -2309,6 +2218,8 @@ done:
 	cb->args[1] = idx;
 	return skb->len;
 }
+
+#endif /* CONFIG_RTNETLINK */
 
 void ip_rt_multicast_event(struct in_device *in_dev)
 {
@@ -2489,15 +2400,6 @@ ctl_table ipv4_route_table[] = {
 		mode:		0644,
 		proc_handler:	&proc_dointvec,
 	},
-	{
-		ctl_name:	NET_IPV4_ROUTE_SECRET_INTERVAL,
-		procname:	"secret_interval",
-		data:		&ip_rt_secret_interval,
-		maxlen:		sizeof(int),
-		mode:		0644,
-		proc_handler:	&proc_dointvec_jiffies,
-		strategy:	&sysctl_jiffies,
-	},
 	 { 0 }
 };
 #endif
@@ -2505,50 +2407,47 @@ ctl_table ipv4_route_table[] = {
 #ifdef CONFIG_NET_CLS_ROUTE
 struct ip_rt_acct *ip_rt_acct;
 
-/* This code sucks.  But you should have seen it before! --RR */
-
-/* IP route accounting ptr for this logical cpu number. */
-#define IP_RT_ACCT_CPU(i) (ip_rt_acct + cpu_logical_map(i) * 256)
-
 static int ip_rt_acct_read(char *buffer, char **start, off_t offset,
 			   int length, int *eof, void *data)
 {
-	unsigned int i;
+	*start = buffer;
 
 	if ((offset & 3) || (length & 3))
 		return -EIO;
-
-	if (offset >= sizeof(struct ip_rt_acct) * 256) {
-		*eof = 1;
-		return 0;
-	}
 
 	if (offset + length >= sizeof(struct ip_rt_acct) * 256) {
 		length = sizeof(struct ip_rt_acct) * 256 - offset;
 		*eof = 1;
 	}
-
-	offset /= sizeof(u32);
-
 	if (length > 0) {
-		u32 *src = ((u32 *) IP_RT_ACCT_CPU(0)) + offset;
-		u32 *dst = (u32 *) buffer;
+		u32 *dst = (u32*)buffer;
+		u32 *src = (u32*)(((u8*)ip_rt_acct) + offset);
 
-		/* Copy first cpu. */
-		*start = buffer;
 		memcpy(dst, src, length);
 
-		/* Add the other cpus in, one int at a time */
-		for (i = 1; i < smp_num_cpus; i++) {
-			unsigned int j;
+#ifdef CONFIG_SMP
+		if (smp_num_cpus > 1 || cpu_logical_map(0) != 0) {
+			int i;
+			int cnt = length / 4;
 
-			src = ((u32 *) IP_RT_ACCT_CPU(i)) + offset;
+			for (i = 0; i < smp_num_cpus; i++) {
+				int cpu = cpu_logical_map(i);
+				int k;
 
-			for (j = 0; j < length/4; j++)
-				dst[j] += src[j];
+				if (cpu == 0)
+					continue;
+
+				src = (u32*)(((u8*)ip_rt_acct) + offset +
+					cpu * 256 * sizeof(struct ip_rt_acct));
+
+				for (k = 0; k < cnt; k++)
+					dst[k] += src[k];
+			}
 		}
+#endif
+		return length;
 	}
-	return length;
+	return 0;
 }
 #endif
 
@@ -2556,12 +2455,9 @@ void __init ip_rt_init(void)
 {
 	int i, order, goal;
 
-	rt_hash_rnd = (int) ((num_physpages ^ (num_physpages>>8)) ^
-			     (jiffies ^ (jiffies >> 7)));
-
 #ifdef CONFIG_NET_CLS_ROUTE
 	for (order = 0;
-	     (PAGE_SIZE << order) < 256 * sizeof(struct ip_rt_acct) * NR_CPUS; order++)
+	     (PAGE_SIZE << order) < 256 * sizeof(ip_rt_acct) * NR_CPUS; order++)
 		/* NOTHING */;
 	ip_rt_acct = (struct ip_rt_acct *)__get_free_pages(GFP_KERNEL, order);
 	if (!ip_rt_acct)
@@ -2594,7 +2490,7 @@ void __init ip_rt_init(void)
 	if (!rt_hash_table)
 		panic("Failed to allocate IP route cache hash table\n");
 
-	printk(KERN_INFO "IP: routing cache hash table of %u buckets, %ldKbytes\n",
+	printk("IP: routing cache hash table of %u buckets, %ldKbytes\n",
 	       rt_hash_mask,
 	       (long) (rt_hash_mask * sizeof(struct rt_hash_bucket)) / 1024);
 
@@ -2615,7 +2511,6 @@ void __init ip_rt_init(void)
 
 	rt_flush_timer.function = rt_run_flush;
 	rt_periodic_timer.function = rt_check_expire;
-	rt_secret_timer.function = rt_secret_rebuild;
 
 	/* All the timers, started at system startup tend
 	   to synchronize. Perturb it a bit.
@@ -2624,13 +2519,8 @@ void __init ip_rt_init(void)
 					ip_rt_gc_interval;
 	add_timer(&rt_periodic_timer);
 
-	rt_secret_timer.expires = jiffies + net_random() % ip_rt_secret_interval +
-		ip_rt_secret_interval;
-	add_timer(&rt_secret_timer);
-
 	proc_net_create ("rt_cache", 0, rt_cache_get_info);
-	create_proc_info_entry ("rt_cache", 0, proc_net_stat, 
-				rt_cache_stat_get_info);
+	proc_net_create ("rt_cache_stat", 0, rt_cache_stat_get_info);
 #ifdef CONFIG_NET_CLS_ROUTE
 	create_proc_read_entry("net/rt_acct", 0, 0, ip_rt_acct_read, NULL);
 #endif

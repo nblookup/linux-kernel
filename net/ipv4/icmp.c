@@ -3,7 +3,7 @@
  *	
  *		Alan Cox, <alan@redhat.com>
  *
- *	Version: $Id: icmp.c,v 1.82.2.1 2001/12/13 08:59:27 davem Exp $
+ *	Version: $Id: icmp.c,v 1.82 2001/11/01 23:44:31 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -139,8 +139,6 @@ struct icmp_err icmp_err_convert[] = {
   { EHOSTUNREACH,	1 }	/*	ICMP_PREC_CUTOFF	*/
 };
 
-extern int sysctl_ip_default_ttl;
-
 /* Control parameters for ECHO replies. */
 int sysctl_icmp_echo_ignore_all;
 int sysctl_icmp_echo_ignore_broadcasts;
@@ -156,8 +154,8 @@ int sysctl_icmp_ignore_bogus_error_responses;
  * 	it's bit position.
  *
  *	default: 
- *	dest unreachable (3), source quench (4),
- *	time exceeded (11), parameter problem (12)
+ *	dest unreachable (0x03), source quench (0x04),
+ *	time exceeded (0x11), parameter problem (0x12)
  */
 
 int sysctl_icmp_ratelimit = 1*HZ;
@@ -178,32 +176,54 @@ struct icmp_control
 static struct icmp_control icmp_pointers[NR_ICMP_TYPES+1];
 
 /*
- *	The ICMP socket(s). This is the most convenient way to flow control
+ *	The ICMP socket. This is the most convenient way to flow control
  *	our ICMP output as well as maintain a clean interface throughout
  *	all layers. All Socketless IP sends will soon be gone.
  */
 	
-static struct inode __icmp_inode[NR_CPUS];
-#define icmp_socket (&__icmp_inode[smp_processor_id()].u.socket_i)
-#define icmp_socket_cpu(X) (&__icmp_inode[(X)].u.socket_i)
+struct inode icmp_inode;
+struct socket *icmp_socket = &icmp_inode.u.socket_i;
 
-static int icmp_xmit_lock(void)
+/* ICMPv4 socket is only a bit non-reenterable (unlike ICMPv6,
+   which is strongly non-reenterable). A bit later it will be made
+   reenterable and the lock may be removed then.
+ */
+
+static int icmp_xmit_holder = -1;
+
+static int icmp_xmit_lock_bh(void)
 {
-	local_bh_disable();
-	if (unlikely(!spin_trylock(&icmp_socket->sk->lock.slock))) {
-		/* This can happen if the output path signals a
-		 * dst_link_failure() for an outgoing ICMP packet.
-		 */
-		local_bh_enable();
-		return 1;
+	if (!spin_trylock(&icmp_socket->sk->lock.slock)) {
+		if (icmp_xmit_holder == smp_processor_id())
+			return -EAGAIN;
+		spin_lock(&icmp_socket->sk->lock.slock);
 	}
+	icmp_xmit_holder = smp_processor_id();
 	return 0;
 }
 
-static void icmp_xmit_unlock(void)
+static __inline__ int icmp_xmit_lock(void)
 {
-	spin_unlock_bh(&icmp_socket->sk->lock.slock);
+	int ret;
+	local_bh_disable();
+	ret = icmp_xmit_lock_bh();
+	if (ret)
+		local_bh_enable();
+	return ret;
 }
+
+static void icmp_xmit_unlock_bh(void)
+{
+	icmp_xmit_holder = -1;
+	spin_unlock(&icmp_socket->sk->lock.slock);
+}
+
+static __inline__ void icmp_xmit_unlock(void)
+{
+	icmp_xmit_unlock_bh();
+	local_bh_enable();
+}
+
 
 /*
  *	Send an ICMP frame.
@@ -281,15 +301,11 @@ static void icmp_out_count(int type)
  *	Checksum each fragment, and on the first include the headers and final checksum.
  */
  
-static int icmp_glue_bits(const void *p, char *to, unsigned int offset,
-                          unsigned int fraglen, struct sk_buff *skb)
+static int icmp_glue_bits(const void *p, char *to, unsigned int offset, unsigned int fraglen)
 {
 	struct icmp_bxm *icmp_param = (struct icmp_bxm *)p;
 	struct icmphdr *icmph;
 	unsigned int csum;
-
-	if (icmp_pointers[icmp_param->data.icmph.type].error)
-		nf_ct_attach(skb, icmp_param->skb);
 
 	if (offset) {
 		icmp_param->csum=skb_copy_and_csum_bits(icmp_param->skb,
@@ -330,7 +346,7 @@ static void icmp_reply(struct icmp_bxm *icmp_param, struct sk_buff *skb)
 	if (ip_options_echo(&icmp_param->replyopts, skb))
 		return;
 
-	if (icmp_xmit_lock())
+	if (icmp_xmit_lock_bh())
 		return;
 
 	icmp_param->data.icmph.checksum=0;
@@ -338,7 +354,6 @@ static void icmp_reply(struct icmp_bxm *icmp_param, struct sk_buff *skb)
 	icmp_out_count(icmp_param->data.icmph.type);
 
 	sk->protinfo.af_inet.tos = skb->nh.iph->tos;
-	sk->protinfo.af_inet.ttl = sysctl_ip_default_ttl;
 	daddr = ipc.addr = rt->rt_src;
 	ipc.opt = NULL;
 	if (icmp_param->replyopts.optlen) {
@@ -356,7 +371,7 @@ static void icmp_reply(struct icmp_bxm *icmp_param, struct sk_buff *skb)
 	}
 	ip_rt_put(rt);
 out:
-	icmp_xmit_unlock();
+	icmp_xmit_unlock_bh();
 }
 
 
@@ -483,7 +498,6 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, u32 info)
 	icmp_param.offset=skb_in->nh.raw - skb_in->data;
 	icmp_out_count(icmp_param.data.icmph.type);
 	icmp_socket->sk->protinfo.af_inet.tos = tos;
-	icmp_socket->sk->protinfo.af_inet.ttl = sysctl_ip_default_ttl;
 	ipc.addr = iph->saddr;
 	ipc.opt = &icmp_param.replyopts;
 	if (icmp_param.replyopts.srr) {
@@ -607,11 +621,8 @@ static void icmp_unreach(struct sk_buff *skb)
 		if (inet_addr_type(iph->daddr) == RTN_BROADCAST)
 		{
 			if (net_ratelimit())
-				printk(KERN_WARNING "%u.%u.%u.%u sent an invalid ICMP type %u, code %u error to a broadcast: %u.%u.%u.%u on %s\n",
-					NIPQUAD(skb->nh.iph->saddr),
-					icmph->type, icmph->code,
-					NIPQUAD(iph->daddr),
-					skb->dev->name);
+				printk(KERN_WARNING "%u.%u.%u.%u sent an invalid ICMP error to a broadcast.\n",
+			       	NIPQUAD(skb->nh.iph->saddr));
 			goto out;
 		}
 	}
@@ -865,7 +876,7 @@ static void icmp_discard(struct sk_buff *skb)
  
 int icmp_rcv(struct sk_buff *skb)
 {
-	struct icmphdr *icmph;
+	struct icmphdr *icmph = skb->h.icmph;
 	struct rtable *rt = (struct rtable*)skb->dst;
 
 	ICMP_INC_STATS_BH(IcmpInMsgs);
@@ -883,8 +894,6 @@ int icmp_rcv(struct sk_buff *skb)
 
 	if (!pskb_pull(skb, sizeof(struct icmphdr)))
 		goto error;
-
-	icmph = skb->h.icmph;
 
 	/*
 	 *	18 is the highest 'known' ICMP type. Anything else is a mystery
@@ -970,38 +979,29 @@ static struct icmp_control icmp_pointers[NR_ICMP_TYPES+1] = {
 
 void __init icmp_init(struct net_proto_family *ops)
 {
-	int err, i;
+	int err;
 
-	for (i = 0; i < NR_CPUS; i++) {
-		__icmp_inode[i].i_mode = S_IFSOCK;
-		__icmp_inode[i].i_sock = 1;
-		__icmp_inode[i].i_uid = 0;
-		__icmp_inode[i].i_gid = 0;
-		init_waitqueue_head(&__icmp_inode[i].i_wait);
-		init_waitqueue_head(&__icmp_inode[i].u.socket_i.wait);
+	icmp_inode.i_mode = S_IFSOCK;
+	icmp_inode.i_sock = 1;
+	icmp_inode.i_uid = 0;
+	icmp_inode.i_gid = 0;
+	init_waitqueue_head(&icmp_inode.i_wait);
+	init_waitqueue_head(&icmp_inode.u.socket_i.wait);
 
-		icmp_socket_cpu(i)->inode = &__icmp_inode[i];
-		icmp_socket_cpu(i)->state = SS_UNCONNECTED;
-		icmp_socket_cpu(i)->type = SOCK_RAW;
+	icmp_socket->inode = &icmp_inode;
+	icmp_socket->state = SS_UNCONNECTED;
+	icmp_socket->type=SOCK_RAW;
 
-		if ((err=ops->create(icmp_socket_cpu(i), IPPROTO_ICMP)) < 0)
-			panic("Failed to create the ICMP control socket.\n");
+	if ((err=ops->create(icmp_socket, IPPROTO_ICMP))<0)
+		panic("Failed to create the ICMP control socket.\n");
+	icmp_socket->sk->allocation=GFP_ATOMIC;
+	icmp_socket->sk->sndbuf = SK_WMEM_MAX*2;
+	icmp_socket->sk->protinfo.af_inet.ttl = MAXTTL;
+	icmp_socket->sk->protinfo.af_inet.pmtudisc = IP_PMTUDISC_DONT;
 
-		icmp_socket_cpu(i)->sk->allocation=GFP_ATOMIC;
-
-		/* Enough space for 2 64K ICMP packets, including
-		 * sk_buff struct overhead.
-		 */
-		icmp_socket_cpu(i)->sk->sndbuf =
-			(2 * ((64 * 1024) + sizeof(struct sk_buff)));
-
-		icmp_socket_cpu(i)->sk->protinfo.af_inet.ttl = MAXTTL;
-		icmp_socket_cpu(i)->sk->protinfo.af_inet.pmtudisc = IP_PMTUDISC_DONT;
-
-		/* Unhash it so that IP input processing does not even
-		 * see it, we do not wish this socket to see incoming
-		 * packets.
-		 */
-		icmp_socket_cpu(i)->sk->prot->unhash(icmp_socket_cpu(i)->sk);
-	}
+	/* Unhash it so that IP input processing does not even
+	 * see it, we do not wish this socket to see incoming
+	 * packets.
+	 */
+	icmp_socket->sk->prot->unhash(icmp_socket->sk);
 }

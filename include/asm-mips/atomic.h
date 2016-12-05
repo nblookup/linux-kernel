@@ -55,13 +55,14 @@ typedef struct { volatile int counter; } atomic_t;
  * Atomically adds @i to @v.  Note that the guaranteed useful range
  * of an atomic_t is only 24 bits.
  */
-static __inline__ void atomic_add(int i, atomic_t * v)
+extern __inline__ void atomic_add(int i, atomic_t * v)
 {
-	unsigned long flags;
+	int	flags;
 
-	local_irq_save(flags);
+	save_flags(flags);
+	cli();
 	v->counter += i;
-	local_irq_restore(flags);
+	restore_flags(flags);
 }
 
 /*
@@ -72,39 +73,40 @@ static __inline__ void atomic_add(int i, atomic_t * v)
  * Atomically subtracts @i from @v.  Note that the guaranteed
  * useful range of an atomic_t is only 24 bits.
  */
-static __inline__ void atomic_sub(int i, atomic_t * v)
+extern __inline__ void atomic_sub(int i, atomic_t * v)
 {
-	unsigned long flags;
+	int	flags;
 
-	local_irq_save(flags);
+	save_flags(flags);
+	cli();
 	v->counter -= i;
-	local_irq_restore(flags);
+	restore_flags(flags);
 }
 
-static __inline__ int atomic_add_return(int i, atomic_t * v)
+extern __inline__ int atomic_add_return(int i, atomic_t * v)
 {
-	unsigned long flags;
-	int temp;
+	int	temp, flags;
 
-	local_irq_save(flags);
+	save_flags(flags);
+	cli();
 	temp = v->counter;
 	temp += i;
 	v->counter = temp;
-	local_irq_restore(flags);
+	restore_flags(flags);
 
 	return temp;
 }
 
-static __inline__ int atomic_sub_return(int i, atomic_t * v)
+extern __inline__ int atomic_sub_return(int i, atomic_t * v)
 {
-	unsigned long flags;
-	int temp;
+	int	temp, flags;
 
-	local_irq_save(flags);
+	save_flags(flags);
+	cli();
 	temp = v->counter;
 	temp -= i;
 	v->counter = temp;
-	local_irq_restore(flags);
+	restore_flags(flags);
 
 	return temp;
 }
@@ -124,7 +126,7 @@ static __inline__ int atomic_sub_return(int i, atomic_t * v)
  * Atomically adds @i to @v.  Note that the guaranteed useful range
  * of an atomic_t is only 24 bits.
  */
-static __inline__ void atomic_add(int i, atomic_t * v)
+extern __inline__ void atomic_add(int i, atomic_t * v)
 {
 	unsigned long temp;
 
@@ -145,7 +147,7 @@ static __inline__ void atomic_add(int i, atomic_t * v)
  * Atomically subtracts @i from @v.  Note that the guaranteed
  * useful range of an atomic_t is only 24 bits.
  */
-static __inline__ void atomic_sub(int i, atomic_t * v)
+extern __inline__ void atomic_sub(int i, atomic_t * v)
 {
 	unsigned long temp;
 
@@ -161,7 +163,7 @@ static __inline__ void atomic_sub(int i, atomic_t * v)
 /*
  * Same as above, but return the result value
  */
-static __inline__ int atomic_add_return(int i, atomic_t * v)
+extern __inline__ int atomic_add_return(int i, atomic_t * v)
 {
 	unsigned long temp, result;
 
@@ -173,7 +175,6 @@ static __inline__ int atomic_add_return(int i, atomic_t * v)
 		"     sc      %0, %2                        \n"
 		"     beqz    %0, 1b                        \n"
 		"     addu    %0, %1, %3                    \n"
-		"     sync                                  \n"
 		".set pop                                   \n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
@@ -182,7 +183,7 @@ static __inline__ int atomic_add_return(int i, atomic_t * v)
 	return result;
 }
 
-static __inline__ int atomic_sub_return(int i, atomic_t * v)
+extern __inline__ int atomic_sub_return(int i, atomic_t * v)
 {
 	unsigned long temp, result;
 
@@ -194,7 +195,6 @@ static __inline__ int atomic_sub_return(int i, atomic_t * v)
 		"     sc    %0, %2                           \n"
 		"     beqz  %0, 1b                           \n"
 		"     subu  %0, %1, %3                       \n"
-		"     sync                                   \n"
 		".set pop                                    \n"
 		: "=&r" (result), "=&r" (temp), "=m" (v->counter)
 		: "Ir" (i), "m" (v->counter)
@@ -228,7 +228,7 @@ static __inline__ int atomic_sub_return(int i, atomic_t * v)
  * other cases.  Note that the guaranteed
  * useful range of an atomic_t is only 24 bits.
  */
-#define atomic_inc_and_test(v) (atomic_inc_return(v) == 0)
+#define atomic_inc_and_test(v) (atomic_inc_return(1, (v)) == 0)
 
 /*
  * atomic_dec_and_test - decrement by 1 and test
@@ -268,14 +268,15 @@ static __inline__ int atomic_sub_return(int i, atomic_t * v)
  * if the result is negative, or false when
  * result is greater than or equal to zero.  Note that the guaranteed
  * useful range of an atomic_t is only 24 bits.
+ *
+ * Currently not implemented for MIPS.
  */
-#define atomic_add_negative(i,v) (atomic_add_return(i, (v)) < 0)
 
 /* Atomic operations are already serializing */
-#define smp_mb__before_atomic_dec()	smp_mb()
-#define smp_mb__after_atomic_dec()	smp_mb()
-#define smp_mb__before_atomic_inc()	smp_mb()
-#define smp_mb__after_atomic_inc()	smp_mb()
+#define smp_mb__before_atomic_dec()	barrier()
+#define smp_mb__after_atomic_dec()	barrier()
+#define smp_mb__before_atomic_inc()	barrier()
+#define smp_mb__after_atomic_inc()	barrier()
 
 #endif /* defined(__KERNEL__) */
 

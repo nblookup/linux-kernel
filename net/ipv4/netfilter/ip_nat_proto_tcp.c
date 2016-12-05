@@ -4,6 +4,7 @@
 #include <linux/ip.h>
 #include <linux/tcp.h>
 #include <linux/if.h>
+
 #include <linux/netfilter_ipv4/ip_nat.h>
 #include <linux/netfilter_ipv4/ip_nat_rule.h>
 #include <linux/netfilter_ipv4/ip_nat_protocol.h>
@@ -31,8 +32,7 @@ tcp_unique_tuple(struct ip_conntrack_tuple *tuple,
 		 enum ip_nat_manip_type maniptype,
 		 const struct ip_conntrack *conntrack)
 {
-	static u_int16_t port = 0;
-	u_int16_t *portptr;
+	static u_int16_t port = 0, *portptr;
 	unsigned int range_size, min, i;
 
 	if (maniptype == IP_NAT_MANIP_SRC)

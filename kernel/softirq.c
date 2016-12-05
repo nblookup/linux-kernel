@@ -40,7 +40,7 @@
    - Bottom halves: globally serialized, grr...
  */
 
-irq_cpustat_t irq_stat[NR_CPUS] ____cacheline_aligned;
+irq_cpustat_t irq_stat[NR_CPUS];
 
 static struct softirq_action softirq_vec[32] __cacheline_aligned;
 
@@ -62,7 +62,7 @@ asmlinkage void do_softirq()
 {
 	int cpu = smp_processor_id();
 	__u32 pending;
-	unsigned long flags;
+	long flags;
 	__u32 mask;
 
 	if (in_interrupt())
@@ -111,7 +111,7 @@ restart:
 /*
  * This function must run with irq disabled!
  */
-inline fastcall void cpu_raise_softirq(unsigned int cpu, unsigned int nr)
+inline void cpu_raise_softirq(unsigned int cpu, unsigned int nr)
 {
 	__cpu_raise_softirq(cpu, nr);
 
@@ -128,9 +128,9 @@ inline fastcall void cpu_raise_softirq(unsigned int cpu, unsigned int nr)
 		wakeup_softirqd(cpu);
 }
 
-void fastcall raise_softirq(unsigned int nr)
+void raise_softirq(unsigned int nr)
 {
-	unsigned long flags;
+	long flags;
 
 	local_irq_save(flags);
 	cpu_raise_softirq(smp_processor_id(), nr);
@@ -149,7 +149,7 @@ void open_softirq(int nr, void (*action)(struct softirq_action*), void *data)
 struct tasklet_head tasklet_vec[NR_CPUS] __cacheline_aligned;
 struct tasklet_head tasklet_hi_vec[NR_CPUS] __cacheline_aligned;
 
-void fastcall __tasklet_schedule(struct tasklet_struct *t)
+void __tasklet_schedule(struct tasklet_struct *t)
 {
 	int cpu = smp_processor_id();
 	unsigned long flags;
@@ -161,7 +161,7 @@ void fastcall __tasklet_schedule(struct tasklet_struct *t)
 	local_irq_restore(flags);
 }
 
-void fastcall __tasklet_hi_schedule(struct tasklet_struct *t)
+void __tasklet_hi_schedule(struct tasklet_struct *t)
 {
 	int cpu = smp_processor_id();
 	unsigned long flags;
@@ -260,7 +260,8 @@ void tasklet_kill(struct tasklet_struct *t)
 	while (test_and_set_bit(TASKLET_STATE_SCHED, &t->state)) {
 		current->state = TASK_RUNNING;
 		do {
-			yield();
+			current->policy |= SCHED_YIELD;
+			schedule();
 		} while (test_bit(TASKLET_STATE_SCHED, &t->state));
 	}
 	tasklet_unlock_wait(t);
@@ -404,8 +405,10 @@ static __init int spawn_ksoftirqd(void)
 				  CLONE_FS | CLONE_FILES | CLONE_SIGNAL) < 0)
 			printk("spawn_ksoftirqd() failed for cpu %d\n", cpu);
 		else {
-			while (!ksoftirqd_task(cpu_logical_map(cpu)))
-				yield();
+			while (!ksoftirqd_task(cpu_logical_map(cpu))) {
+				current->policy |= SCHED_YIELD;
+				schedule();
+			}
 		}
 	}
 

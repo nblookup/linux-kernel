@@ -830,7 +830,8 @@ irnet_connect_socket(irnet_socket *	server,
 #endif /* STREAM_COMPAT */
 
   /* Clean up the original one to keep it in listen state */
-  irttp_listen(server->tsap);
+  server->tsap->dtsap_sel = server->tsap->lsap->dlsap_sel = LSAP_ANY;
+  server->tsap->lsap->lsap_state = LSAP_DISCONNECTED;
 
   /* Send a connection response on the new socket */
   irttp_connect_response(new->tsap, new->max_sdu_size_rx, NULL);
@@ -896,7 +897,8 @@ irnet_disconnect_server(irnet_socket *	self,
 		   self->saddr, self->daddr, self->rname);
 
   /* Clean up the server to keep it in listen state */
-  irttp_listen(self->tsap);
+  self->tsap->dtsap_sel = self->tsap->lsap->dlsap_sel = LSAP_ANY;
+  self->tsap->lsap->lsap_state = LSAP_DISCONNECTED;
 
   DEXIT(IRDA_SERV_TRACE, "\n");
   return;
@@ -1070,7 +1072,7 @@ irnet_data_indication(void *	instance,
  *	o attempted to connect, timeout
  *	o connected, link is broken, LAP has timeout
  *	o connected, other side close the link
- *	o connection request on the server not handled
+ *	o connection request on the server no handled
  */
 static void
 irnet_disconnect_indication(void *	instance,
@@ -1079,8 +1081,7 @@ irnet_disconnect_indication(void *	instance,
 			    struct sk_buff *skb)
 {
   irnet_socket *	self = (irnet_socket *) instance;
-  int			test_open;
-  int			test_connect;
+  int			test = 0;
 
   DENTER(IRDA_TCB_TRACE, "(self=0x%X)\n", (unsigned int) self);
   DASSERT(self != NULL, , IRDA_CB_ERROR, "Self is NULL !!!\n");
@@ -1090,23 +1091,23 @@ irnet_disconnect_indication(void *	instance,
     dev_kfree_skb(skb);
 
   /* Prevent higher layer from accessing IrTTP */
-  test_open = test_and_clear_bit(0, &self->ttp_open);
+  test = test_and_clear_bit(0, &self->ttp_open);
   /* Not connecting anymore...
    * (note : TSAP is open, so IAP callbacks are no longer pending...) */
-  test_connect = test_and_clear_bit(0, &self->ttp_connect);
+  test |= test_and_clear_bit(0, &self->ttp_connect);
 
   /* If both self->ttp_open and self->ttp_connect are NULL, it mean that we
    * have a race condition with irda_irnet_destroy() or
    * irnet_connect_indication(), so don't mess up tsap...
    */
-  if(!(test_open || test_connect))
+  if(!test)
     {
       DERROR(IRDA_CB_ERROR, "Race condition detected...\n");
       return;
     }
 
   /* If we were active, notify the control channel */
-  if(test_open)
+  if(test_bit(0, &self->ttp_open))
     irnet_post_event(self, IRNET_DISCONNECT_FROM,
 		     self->saddr, self->daddr, self->rname);
   else
@@ -1121,31 +1122,19 @@ irnet_disconnect_indication(void *	instance,
       DEBUG(IRDA_CB_INFO, "Closing our TTP connection.\n");
       irttp_close_tsap(self->tsap);
       self->tsap = NULL;
+
+      /* Flush (drain) ppp_generic Tx queue (most often we have blocked it) */
+      if(self->ppp_open)
+	ppp_output_wakeup(&self->chan);
     }
-  /* Cleanup the socket in case we want to reconnect in ppp_output_wakeup() */
+  /* Cleanup the socket in case we want to reconnect */
   self->stsap_sel = 0;
   self->daddr = DEV_ADDR_ANY;
   self->tx_flow = FLOW_START;
 
-  /* Deal with the ppp instance if it's still alive */
-  if(self->ppp_open)
-    {
-      if(test_open)
-	{
-	  /* If we were connected, cleanup & close the PPP channel,
-	   * which will kill pppd (hangup) and the rest */
-	  ppp_unregister_channel(&self->chan);
-	  self->ppp_open = 0;
-	}
-      else
-	{
-	  /* If we were trying to connect, flush (drain) ppp_generic
-	   * Tx queue (most often we have blocked it), which will
-	   * trigger an other attempt to connect. If we are passive,
-	   * this will empty the Tx queue after last try. */
-	  ppp_output_wakeup(&self->chan);
-	}
-    }
+  /* Note : what should we say to ppp ?
+   * It seem the ppp_generic and pppd are happy that way and will eventually
+   * timeout gracefully, so don't bother them... */
 
   DEXIT(IRDA_TCB_TRACE, "\n");
 }
@@ -1340,80 +1329,46 @@ irnet_connect_indication(void *		instance,
       return;
     }
 
-  /* The following code is a bit tricky, so need comments ;-)
-   */
-  /* If ttp_connect is set, the socket is trying to connect to the other
-   * end and may have sent a IrTTP connection request and is waiting for
-   * a connection response (that may never come).
-   * Now, the pain is that the socket may have opened a tsap and is
-   * waiting on it, while the other end is trying to connect to it on
-   * another tsap.
-   * Because IrNET can be peer to peer, we need to workaround this.
-   * Furthermore, the way the irnetd script is implemented, the
-   * target will create a second IrNET connection back to the
-   * originator and expect the originator to bind this new connection
-   * to the original PPPD instance.
-   * And of course, if we don't use irnetd, we can have a race when
-   * both side try to connect simultaneously, which could leave both
-   * connections half closed (yuck).
-   * Conclusions :
-   *	1) The "originator" must accept the new connection and get rid
-   *	   of the old one so that irnetd works
-   *	2) One side must deny the new connection to avoid races,
-   *	   but both side must agree on which side it is...
-   * Most often, the originator is primary at the LAP layer.
-   * Jean II
-   */
-  /* Now, let's look at the way I wrote the test...
-   * We need to clear up the ttp_connect flag atomically to prevent
-   * irnet_disconnect_indication() to mess up the tsap we are going to close.
-   * We want to clear the ttp_connect flag only if we close the tsap,
-   * otherwise we will never close it, so we need to check for primary
-   * *before* doing the test on the flag.
-   * And of course, ALLOW_SIMULT_CONNECT can disable this entirely...
-   * Jean II
-   */
-
-  /* Socket already connecting ? On primary ? */
-  if(0
-#ifdef ALLOW_SIMULT_CONNECT
-     || ((irttp_is_primary(server->tsap) == 1)	/* primary */
-	 && (test_and_clear_bit(0, &new->ttp_connect)))
-#endif /* ALLOW_SIMULT_CONNECT */
-     )
+  /* Socket connecting ?
+   * Clear up flag : prevent irnet_disconnect_indication() to mess up tsap */
+  if(test_and_clear_bit(0, &new->ttp_connect))
     {
-      DERROR(IRDA_CB_ERROR, "Socket already connecting, but going to reuse it !\n");
-
-      /* Cleanup the old TSAP if necessary - IrIAP will be cleaned up later */
+      /* The socket is trying to connect to the other end and may have sent
+       * a IrTTP connection request and is waiting for a connection response
+       * (that may never come).
+       * Now, the pain is that the socket may have opened a tsap and is
+       * waiting on it, while the other end is trying to connect to it on
+       * another tsap.
+       */
+      DERROR(IRDA_CB_ERROR, "Socket already connecting. Ouch !\n");
+#ifdef ALLOW_SIMULT_CONNECT
+      /* Cleanup the TSAP if necessary - IrIAP will be cleaned up later */
       if(new->tsap != NULL)
 	{
-	  /* Close the old connection the new socket was attempting,
-	   * so that we can hook it up to the new connection.
-	   * It's now safe to do it... */
+	  /* Close the connection the new socket was attempting.
+	   * This seems to be safe... */
 	  irttp_close_tsap(new->tsap);
 	  new->tsap = NULL;
 	}
+      /* Note : no return, fall through... */
+#else /* ALLOW_SIMULT_CONNECT */
+      irnet_disconnect_server(server, skb);
+      return;
+#endif /* ALLOW_SIMULT_CONNECT */
     }
   else
-    {
-      /* Three options :
-       * 1) socket was not connecting or connected : ttp_connect should be 0.
-       * 2) we don't want to connect the socket because we are secondary or
-       * ALLOW_SIMULT_CONNECT is undefined. ttp_connect should be 1.
-       * 3) we are half way in irnet_disconnect_indication(), and it's a
-       * nice race condition... Fortunately, we can detect that by checking
-       * if tsap is still alive. On the other hand, we can't be in
-       * irda_irnet_destroy() otherwise we would not have found this
-       * socket in the hashbin.
-       * Jean II */
-      if((test_bit(0, &new->ttp_connect)) || (new->tsap != NULL))
-	{
-	  /* Don't mess this socket, somebody else in in charge... */
-	  DERROR(IRDA_CB_ERROR, "Race condition detected, socket in use, abort connect...\n");
-	  irnet_disconnect_server(server, skb);
-	  return;
-	}
-    }
+    /* If socket is not connecting or connected, tsap should be NULL */
+    if(new->tsap != NULL)
+      {
+	/* If we are here, we are also in irnet_disconnect_indication(),
+	 * and it's a nice race condition... On the other hand, we can't be
+	 * in irda_irnet_destroy() otherwise we would not have found the
+	 * socket in the hashbin. */
+	/* Better get out of here, otherwise we will mess up tsaps ! */
+	DERROR(IRDA_CB_ERROR, "Race condition detected, abort connect...\n");
+	irnet_disconnect_server(server, skb);
+	return;
+      }
 
   /* So : at this point, we have a socket, and it is idle. Good ! */
   irnet_connect_socket(server, new, qos, max_sdu_size, max_header_size);
@@ -1633,9 +1588,8 @@ irnet_discovervalue_confirm(int		result,
  * is to messy, so we leave that to user space...
  */
 static void
-irnet_discovery_indication(discovery_t *	discovery,
-			   DISCOVERY_MODE	mode,
-			   void *		priv)
+irnet_discovery_indication(discovery_t *discovery,
+			   void *	priv)
 {
   irnet_socket *	self = &irnet_server.s;
 	
@@ -1673,7 +1627,6 @@ irnet_discovery_indication(discovery_t *	discovery,
  */
 static void
 irnet_expiry_indication(discovery_t *	expiry,
-			DISCOVERY_MODE	mode,
 			void *		priv)
 {
   irnet_socket *	self = &irnet_server.s;

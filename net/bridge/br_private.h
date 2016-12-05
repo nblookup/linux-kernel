@@ -4,7 +4,7 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br_private.h,v 1.6.2.1 2001/12/24 00:59:27 davem Exp $
+ *	$Id: br_private.h,v 1.6 2001/06/01 09:28:28 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -79,6 +79,7 @@ struct net_bridge_port
 
 struct net_bridge
 {
+	struct net_bridge		*next;
 	rwlock_t			lock;
 	struct net_bridge_port		*port_list;
 	struct net_device		dev;
@@ -120,7 +121,6 @@ extern void br_inc_use_count(void);
 
 /* br_device.c */
 extern void br_dev_setup(struct net_device *dev);
-extern int br_dev_xmit(struct sk_buff *skb, struct net_device *dev);
 
 /* br_fdb.c */
 extern void br_fdb_changeaddr(struct net_bridge_port *p,
@@ -168,6 +168,7 @@ extern void br_get_port_ifindices(struct net_bridge *br,
 extern void br_handle_frame(struct sk_buff *skb);
 
 /* br_ioctl.c */
+extern void br_call_ioctl_atomic(void (*fn)(void));
 extern int br_ioctl(struct net_bridge *br,
 	     unsigned int cmd,
 	     unsigned long arg0,
@@ -197,6 +198,6 @@ extern void br_stp_set_path_cost(struct net_bridge_port *p,
 			  int path_cost);
 
 /* br_stp_bpdu.c */
-extern int br_stp_handle_bpdu(struct sk_buff *skb);
+extern void br_stp_handle_bpdu(struct sk_buff *skb);
 
 #endif

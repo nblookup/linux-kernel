@@ -1544,8 +1544,7 @@ static int ipxrtr_route_packet(struct sock *sk, struct sockaddr_ipx *usipx,
 	ipx->ipx_pktsize = htons(len + sizeof(struct ipxhdr));
 	IPX_SKB_CB(skb)->ipx_tctrl = 0;
 	ipx->ipx_type 	 = usipx->sipx_type;
-	skb->nh.ipxh	 = ipx;
-	skb->h.raw 	 = (void *)skb->nh.ipxh;
+	skb->h.raw 	 = (void *)skb->nh.ipxh = ipx;
 
 	IPX_SKB_CB(skb)->last_hop.index = -1;
 #ifdef CONFIG_IPX_INTERN

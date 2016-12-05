@@ -49,6 +49,7 @@ extern int sysctl_khttpd_stop;
 extern struct khttpd_threadinfo threadinfo[CONFIG_KHTTPD_NUMCPU];
 extern char CurrentTime[];
 extern atomic_t ConnectCount;
+extern struct wait_queue main_wait[CONFIG_KHTTPD_NUMCPU];
 
 /* misc.c */
 

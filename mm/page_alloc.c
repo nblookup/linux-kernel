@@ -1,9 +1,6 @@
 /*
  *  linux/mm/page_alloc.c
  *
- *  Manages the free list, the system allocates free pages here.
- *  Note that kmalloc() lives in slab.c
- *
  *  Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
  *  Swap reorganised 29.12.95, Stephen Tweedie
  *  Support of BIGMEM added by Gerhard Wichert, Siemens AG, July 1999
@@ -20,123 +17,58 @@
 #include <linux/pagemap.h>
 #include <linux/bootmem.h>
 #include <linux/slab.h>
-#include <linux/module.h>
+#include <linux/compiler.h>
 
 int nr_swap_pages;
 int nr_active_pages;
 int nr_inactive_pages;
-LIST_HEAD(inactive_list);
-LIST_HEAD(active_list);
+struct list_head inactive_list;
+struct list_head active_list;
 pg_data_t *pgdat_list;
-
-/*
- *
- * The zone_table array is used to look up the address of the
- * struct zone corresponding to a given zone number (ZONE_DMA,
- * ZONE_NORMAL, or ZONE_HIGHMEM).
- */
-zone_t *zone_table[MAX_NR_ZONES*MAX_NR_NODES];
-EXPORT_SYMBOL(zone_table);
 
 static char *zone_names[MAX_NR_ZONES] = { "DMA", "Normal", "HighMem" };
 static int zone_balance_ratio[MAX_NR_ZONES] __initdata = { 128, 128, 128, };
 static int zone_balance_min[MAX_NR_ZONES] __initdata = { 20 , 20, 20, };
 static int zone_balance_max[MAX_NR_ZONES] __initdata = { 255 , 255, 255, };
-static int lower_zone_reserve_ratio[MAX_NR_ZONES-1] = { 256, 32 };
 
-int vm_gfp_debug = 0;
+/*
+ * Free_page() adds the page to the free lists. This is optimized for
+ * fast normal cases (no error jumps taken normally).
+ *
+ * The way to optimize jumps for gcc-2.2.2 is to:
+ *  - select the "normal" case and put it inside the if () { XXX }
+ *  - no else-statements if you can avoid them
+ *
+ * With the above two rules, you get a straight-line execution path
+ * for the normal case, giving better asm-code.
+ */
 
-static void FASTCALL(__free_pages_ok (struct page *page, unsigned int order));
-
-static spinlock_t free_pages_ok_no_irq_lock = SPIN_LOCK_UNLOCKED;
-struct page * free_pages_ok_no_irq_head;
-
-static void do_free_pages_ok_no_irq(void * arg)
-{
-       struct page * page, * __page;
-
-       spin_lock_irq(&free_pages_ok_no_irq_lock);
-
-       page = free_pages_ok_no_irq_head;
-       free_pages_ok_no_irq_head = NULL;
-
-       spin_unlock_irq(&free_pages_ok_no_irq_lock);
-
-       while (page) {
-               __page = page;
-               page = page->next_hash;
-               __free_pages_ok(__page, __page->index);
-       }
-}
-
-static struct tq_struct free_pages_ok_no_irq_task = {
-       .routine        = do_free_pages_ok_no_irq,
-};
-
+#define memlist_init(x) INIT_LIST_HEAD(x)
+#define memlist_add_head list_add
+#define memlist_add_tail list_add_tail
+#define memlist_del list_del
+#define memlist_entry list_entry
+#define memlist_next(x) ((x)->next)
+#define memlist_prev(x) ((x)->prev)
 
 /*
  * Temporary debugging check.
  */
-#define BAD_RANGE(zone, page)						\
-(									\
-	(((page) - mem_map) >= ((zone)->zone_start_mapnr+(zone)->size))	\
-	|| (((page) - mem_map) < (zone)->zone_start_mapnr)		\
-	|| ((zone) != page_zone(page))					\
-)
+#define BAD_RANGE(zone,x) (((zone) != (x)->zone) || (((x)-mem_map) < (zone)->zone_start_mapnr) || (((x)-mem_map) >= (zone)->zone_start_mapnr+(zone)->size))
 
 /*
- * Freeing function for a buddy system allocator.
- * Contrary to prior comments, this is *NOT* hairy, and there
- * is no reason for anyone not to understand it.
+ * Buddy system. Hairy. You really aren't expected to understand this
  *
- * The concept of a buddy system is to maintain direct-mapped tables
- * (containing bit values) for memory blocks of various "orders".
- * The bottom level table contains the map for the smallest allocatable
- * units of memory (here, pages), and each level above it describes
- * pairs of units from the levels below, hence, "buddies".
- * At a high level, all that happens here is marking the table entry
- * at the bottom level available, and propagating the changes upward
- * as necessary, plus some accounting needed to play nicely with other
- * parts of the VM system.
- * At each level, we keep one bit for each pair of blocks, which
- * is set to 1 iff only one of the pair is allocated.  So when we
- * are allocating or freeing one, we can derive the state of the
- * other.  That is, if we allocate a small block, and both were   
- * free, the remainder of the region must be split into blocks.   
- * If a block is freed, and its buddy is also free, then this
- * triggers coalescing into a block of larger size.            
- *
- * -- wli
+ * Hint: -mask = 1+~mask
  */
 
-static void fastcall __free_pages_ok (struct page *page, unsigned int order)
+static void FASTCALL(__free_pages_ok (struct page *page, unsigned int order));
+static void __free_pages_ok (struct page *page, unsigned int order)
 {
 	unsigned long index, page_idx, mask, flags;
 	free_area_t *area;
 	struct page *base;
 	zone_t *zone;
-
-	/*
-	 * Yes, think what happens when other parts of the kernel take 
-	 * a reference to a page in order to pin it for io. -ben
-	 */
-	if (PageLRU(page)) {
-		if (unlikely(in_interrupt())) {
-			unsigned long flags;
-
-			spin_lock_irqsave(&free_pages_ok_no_irq_lock, flags);
-			page->next_hash = free_pages_ok_no_irq_head;
-			free_pages_ok_no_irq_head = page;
-			page->index = order;
-	
-			spin_unlock_irqrestore(&free_pages_ok_no_irq_lock, flags);
-	
-			schedule_task(&free_pages_ok_no_irq_task);
-			return;
-		}
-		
-		lru_cache_del(page);
-	}
 
 	if (page->buffers)
 		BUG();
@@ -144,18 +76,21 @@ static void fastcall __free_pages_ok (struct page *page, unsigned int order)
 		BUG();
 	if (!VALID_PAGE(page))
 		BUG();
+	if (PageSwapCache(page))
+		BUG();
 	if (PageLocked(page))
+		BUG();
+	if (PageLRU(page))
 		BUG();
 	if (PageActive(page))
 		BUG();
-	ClearPageReferenced(page);
-	ClearPageDirty(page);
+	page->flags &= ~((1<<PG_referenced) | (1<<PG_dirty));
 
 	if (current->flags & PF_FREE_PAGES)
 		goto local_freelist;
  back_local_freelist:
 
-	zone = page_zone(page);
+	zone = page->zone;
 
 	mask = (~0UL) << order;
 	base = zone->zone_mem_map;
@@ -182,8 +117,6 @@ static void fastcall __free_pages_ok (struct page *page, unsigned int order)
 			break;
 		/*
 		 * Move the buddy up one level.
-		 * This code is taking advantage of the identity:
-		 * 	-mask = 1+~mask
 		 */
 		buddy1 = base + (page_idx ^ -mask);
 		buddy2 = base + page_idx;
@@ -192,13 +125,13 @@ static void fastcall __free_pages_ok (struct page *page, unsigned int order)
 		if (BAD_RANGE(zone,buddy2))
 			BUG();
 
-		list_del(&buddy1->list);
+		memlist_del(&buddy1->list);
 		mask <<= 1;
 		area++;
 		index >>= 1;
 		page_idx &= mask;
 	}
-	list_add(&(base + page_idx)->list, &area->free_list);
+	memlist_add_head(&(base + page_idx)->list, &area->free_list);
 
 	spin_unlock_irqrestore(&zone->lock, flags);
 	return;
@@ -228,7 +161,7 @@ static inline struct page * expand (zone_t *zone, struct page *page,
 		area--;
 		high--;
 		size >>= 1;
-		list_add(&(page)->list, &(area)->free_list);
+		memlist_add_head(&(page)->list, &(area)->free_list);
 		MARK_USED(index, high, area);
 		index += size;
 		page += size;
@@ -239,7 +172,7 @@ static inline struct page * expand (zone_t *zone, struct page *page,
 }
 
 static FASTCALL(struct page * rmqueue(zone_t *zone, unsigned int order));
-static struct page * fastcall rmqueue(zone_t *zone, unsigned int order)
+static struct page * rmqueue(zone_t *zone, unsigned int order)
 {
 	free_area_t * area = zone->free_area + order;
 	unsigned int curr_order = order;
@@ -250,15 +183,15 @@ static struct page * fastcall rmqueue(zone_t *zone, unsigned int order)
 	spin_lock_irqsave(&zone->lock, flags);
 	do {
 		head = &area->free_list;
-		curr = head->next;
+		curr = memlist_next(head);
 
 		if (curr != head) {
 			unsigned int index;
 
-			page = list_entry(curr, struct page, list);
+			page = memlist_entry(curr, struct page, list);
 			if (BAD_RANGE(zone,page))
 				BUG();
-			list_del(curr);
+			memlist_del(curr);
 			index = page - zone->zone_mem_map;
 			if (curr_order != MAX_ORDER-1)
 				MARK_USED(index, curr_order, area);
@@ -285,7 +218,7 @@ static struct page * fastcall rmqueue(zone_t *zone, unsigned int order)
 }
 
 #ifndef CONFIG_DISCONTIGMEM
-struct page * fastcall _alloc_pages(unsigned int gfp_mask, unsigned int order)
+struct page *_alloc_pages(unsigned int gfp_mask, unsigned int order)
 {
 	return __alloc_pages(gfp_mask, order,
 		contig_page_data.node_zonelists+(gfp_mask & GFP_ZONEMASK));
@@ -293,18 +226,20 @@ struct page * fastcall _alloc_pages(unsigned int gfp_mask, unsigned int order)
 #endif
 
 static struct page * FASTCALL(balance_classzone(zone_t *, unsigned int, unsigned int, int *));
-static struct page * fastcall balance_classzone(zone_t * classzone, unsigned int gfp_mask, unsigned int order, int * freed)
+static struct page * balance_classzone(zone_t * classzone, unsigned int gfp_mask, unsigned int order, int * freed)
 {
 	struct page * page = NULL;
-	int __freed;
+	int __freed = 0;
 
+	if (!(gfp_mask & __GFP_WAIT))
+		goto out;
 	if (in_interrupt())
 		BUG();
 
 	current->allocation_order = order;
 	current->flags |= PF_MEMALLOC | PF_FREE_PAGES;
 
-	__freed = try_to_free_pages_zone(classzone, gfp_mask);
+	__freed = try_to_free_pages(classzone, gfp_mask, order);
 
 	current->flags &= ~(PF_MEMALLOC | PF_FREE_PAGES);
 
@@ -320,7 +255,7 @@ static struct page * fastcall balance_classzone(zone_t * classzone, unsigned int
 			entry = local_pages->next;
 			do {
 				tmp = list_entry(entry, struct page, list);
-				if (tmp->index == order && memclass(page_zone(tmp), classzone)) {
+				if (tmp->index == order && memclass(tmp->zone, classzone)) {
 					list_del(entry);
 					current->nr_local_pages--;
 					set_page_count(tmp, 1);
@@ -331,6 +266,8 @@ static struct page * fastcall balance_classzone(zone_t * classzone, unsigned int
 					if (page->mapping)
 						BUG();
 					if (!VALID_PAGE(page))
+						BUG();
+					if (PageSwapCache(page))
 						BUG();
 					if (PageLocked(page))
 						BUG();
@@ -357,36 +294,31 @@ static struct page * fastcall balance_classzone(zone_t * classzone, unsigned int
 		}
 		current->nr_local_pages = 0;
 	}
-
+ out:
 	*freed = __freed;
 	return page;
-}
-
-static inline unsigned long zone_free_pages(zone_t * zone, unsigned int order)
-{
-	long free = zone->free_pages - (1UL << order);
-	return free >= 0 ? free : 0;
 }
 
 /*
  * This is the 'heart' of the zoned buddy allocator:
  */
-struct page * fastcall __alloc_pages(unsigned int gfp_mask, unsigned int order, zonelist_t *zonelist)
+struct page * __alloc_pages(unsigned int gfp_mask, unsigned int order, zonelist_t *zonelist)
 {
+	unsigned long min;
 	zone_t **zone, * classzone;
 	struct page * page;
-	int freed, class_idx;
+	int freed;
 
 	zone = zonelist->zones;
 	classzone = *zone;
-	class_idx = zone_idx(classzone);
-
+	min = 1UL << order;
 	for (;;) {
 		zone_t *z = *(zone++);
 		if (!z)
 			break;
 
-		if (zone_free_pages(z, order) > z->watermarks[class_idx].low) {
+		min += z->pages_low;
+		if (z->free_pages > min) {
 			page = rmqueue(z, order);
 			if (page)
 				return page;
@@ -399,16 +331,18 @@ struct page * fastcall __alloc_pages(unsigned int gfp_mask, unsigned int order, 
 		wake_up_interruptible(&kswapd_wait);
 
 	zone = zonelist->zones;
+	min = 1UL << order;
 	for (;;) {
-		unsigned long min;
+		unsigned long local_min;
 		zone_t *z = *(zone++);
 		if (!z)
 			break;
 
-		min = z->watermarks[class_idx].min;
+		local_min = z->pages_min;
 		if (!(gfp_mask & __GFP_WAIT))
-			min >>= 2;
-		if (zone_free_pages(z, order) > min) {
+			local_min >>= 2;
+		min += local_min;
+		if (z->free_pages > min) {
 			page = rmqueue(z, order);
 			if (page)
 				return page;
@@ -417,8 +351,8 @@ struct page * fastcall __alloc_pages(unsigned int gfp_mask, unsigned int order, 
 
 	/* here we're in the low on memory slow path */
 
-	if ((current->flags & PF_MEMALLOC) && 
-			(!in_interrupt() || (current->flags & PF_MEMDIE))) {
+rebalance:
+	if (current->flags & (PF_MEMALLOC | PF_MEMDIE)) {
 		zone = zonelist->zones;
 		for (;;) {
 			zone_t *z = *(zone++);
@@ -434,57 +368,42 @@ struct page * fastcall __alloc_pages(unsigned int gfp_mask, unsigned int order, 
 
 	/* Atomic allocations - we can't balance anything */
 	if (!(gfp_mask & __GFP_WAIT))
-		goto out;
+		return NULL;
 
- rebalance:
 	page = balance_classzone(classzone, gfp_mask, order, &freed);
 	if (page)
 		return page;
 
 	zone = zonelist->zones;
-	if (likely(freed)) {
-		for (;;) {
-			zone_t *z = *(zone++);
-			if (!z)
-				break;
+	min = 1UL << order;
+	for (;;) {
+		zone_t *z = *(zone++);
+		if (!z)
+			break;
 
-			if (zone_free_pages(z, order) > z->watermarks[class_idx].min) {
-				page = rmqueue(z, order);
-				if (page)
-					return page;
-			}
-		}
-		goto rebalance;
-	} else {
-		/* 
-		 * Check that no other task is been killed meanwhile,
-		 * in such a case we can succeed the allocation.
-		 */
-		for (;;) {
-			zone_t *z = *(zone++);
-			if (!z)
-				break;
-
-			if (zone_free_pages(z, order) > z->watermarks[class_idx].high) {
-				page = rmqueue(z, order);
-				if (page)
-					return page;
-			}
+		min += z->pages_min;
+		if (z->free_pages > min) {
+			page = rmqueue(z, order);
+			if (page)
+				return page;
 		}
 	}
 
- out:
-	printk(KERN_NOTICE "__alloc_pages: %u-order allocation failed (gfp=0x%x/%i)\n",
-	       order, gfp_mask, !!(current->flags & PF_MEMALLOC));
-	if (unlikely(vm_gfp_debug))
-		dump_stack();
-	return NULL;
+	/* Don't let big-order allocations loop */
+	if (order > 3)
+		return NULL;
+
+	/* Yield for kswapd, and try again */
+	current->policy |= SCHED_YIELD;
+	__set_current_state(TASK_RUNNING);
+	schedule();
+	goto rebalance;
 }
 
 /*
  * Common helper functions.
  */
-fastcall unsigned long __get_free_pages(unsigned int gfp_mask, unsigned int order)
+unsigned long __get_free_pages(unsigned int gfp_mask, unsigned int order)
 {
 	struct page * page;
 
@@ -494,7 +413,7 @@ fastcall unsigned long __get_free_pages(unsigned int gfp_mask, unsigned int orde
 	return (unsigned long) page_address(page);
 }
 
-fastcall unsigned long get_zeroed_page(unsigned int gfp_mask)
+unsigned long get_zeroed_page(unsigned int gfp_mask)
 {
 	struct page * page;
 
@@ -507,13 +426,22 @@ fastcall unsigned long get_zeroed_page(unsigned int gfp_mask)
 	return 0;
 }
 
-fastcall void __free_pages(struct page *page, unsigned int order)
+void page_cache_release(struct page *page)
+{
+	if (!PageReserved(page) && put_page_testzero(page)) {
+		if (PageLRU(page))
+			lru_cache_del(page);
+		__free_pages_ok(page, 0);
+	}
+}
+
+void __free_pages(struct page *page, unsigned int order)
 {
 	if (!PageReserved(page) && put_page_testzero(page))
 		__free_pages_ok(page, order);
 }
 
-fastcall void free_pages(unsigned long addr, unsigned int order)
+void free_pages(unsigned long addr, unsigned int order)
 {
 	if (addr != 0)
 		__free_pages(virt_to_page(addr), order);
@@ -524,12 +452,16 @@ fastcall void free_pages(unsigned long addr, unsigned int order)
  */
 unsigned int nr_free_pages (void)
 {
-	unsigned int sum = 0;
+	unsigned int sum;
 	zone_t *zone;
+	pg_data_t *pgdat = pgdat_list;
 
-	for_each_zone(zone)
-		sum += zone->free_pages;
-
+	sum = 0;
+	while (pgdat) {
+		for (zone = pgdat->node_zones; zone < pgdat->node_zones + MAX_NR_ZONES; zone++)
+			sum += zone->free_pages;
+		pgdat = pgdat->node_next;
+	}
 	return sum;
 }
 
@@ -538,26 +470,23 @@ unsigned int nr_free_pages (void)
  */
 unsigned int nr_free_buffer_pages (void)
 {
-	pg_data_t *pgdat;
+	pg_data_t *pgdat = pgdat_list;
 	unsigned int sum = 0;
-	zonelist_t *zonelist;
-	zone_t **zonep, *zone;
 
-	for_each_pgdat(pgdat) {
-		int class_idx;
-		zonelist = pgdat->node_zonelists + (GFP_USER & GFP_ZONEMASK);
-		zonep = zonelist->zones;
-		zone = *zonep;
-		class_idx = zone_idx(zone);
+	do {
+		zonelist_t *zonelist = pgdat->node_zonelists + (GFP_USER & GFP_ZONEMASK);
+		zone_t **zonep = zonelist->zones;
+		zone_t *zone;
 
-		sum += zone->nr_cache_pages;
-		for (; zone; zone = *zonep++) {
-			int free = zone->free_pages - zone->watermarks[class_idx].high;
-			if (free <= 0)
-				continue;
-			sum += free;
+		for (zone = *zonep++; zone; zone = *zonep++) {
+			unsigned long size = zone->size;
+			unsigned long high = zone->pages_high;
+			if (size > high)
+				sum += size - high;
 		}
-	}
+
+		pgdat = pgdat->node_next;
+	} while (pgdat);
 
 	return sum;
 }
@@ -565,29 +494,13 @@ unsigned int nr_free_buffer_pages (void)
 #if CONFIG_HIGHMEM
 unsigned int nr_free_highpages (void)
 {
-	pg_data_t *pgdat;
+	pg_data_t *pgdat = pgdat_list;
 	unsigned int pages = 0;
 
-	for_each_pgdat(pgdat)
+	while (pgdat) {
 		pages += pgdat->node_zones[ZONE_HIGHMEM].free_pages;
-
-	return pages;
-}
-
-unsigned int freeable_lowmem(void)
-{
-	unsigned int pages = 0;
-	pg_data_t *pgdat;
-
-	for_each_pgdat(pgdat) {
-		pages += pgdat->node_zones[ZONE_DMA].free_pages;
-		pages += pgdat->node_zones[ZONE_DMA].nr_active_pages;
-		pages += pgdat->node_zones[ZONE_DMA].nr_inactive_pages;
-		pages += pgdat->node_zones[ZONE_NORMAL].free_pages;
-		pages += pgdat->node_zones[ZONE_NORMAL].nr_active_pages;
-		pages += pgdat->node_zones[ZONE_NORMAL].nr_inactive_pages;
+		pgdat = pgdat->node_next;
 	}
-
 	return pages;
 }
 #endif
@@ -613,9 +526,13 @@ void show_free_areas_core(pg_data_t *pgdat)
 		zone_t *zone;
 		for (zone = tmpdat->node_zones;
 			       	zone < tmpdat->node_zones + MAX_NR_ZONES; zone++)
-			printk("Zone:%s freepages:%6lukB\n", 
+			printk("Zone:%s freepages:%6lukB min:%6lukB low:%6lukB " 
+				       "high:%6lukB\n", 
 					zone->name,
-					K(zone->free_pages));
+					K(zone->free_pages),
+					K(zone->pages_min),
+					K(zone->pages_low),
+					K(zone->pages_high));
 			
 		tmpdat = tmpdat->node_next;
 	}
@@ -638,7 +555,8 @@ void show_free_areas_core(pg_data_t *pgdat)
 				curr = head;
 				nr = 0;
 				for (;;) {
-					if ((curr = curr->next) == head)
+					curr = memlist_next(curr);
+					if (curr == head)
 						break;
 					nr++;
 				}
@@ -708,48 +626,6 @@ static inline void build_zonelists(pg_data_t *pgdat)
 	} 
 }
 
-/*
- * Helper functions to size the waitqueue hash table.
- * Essentially these want to choose hash table sizes sufficiently
- * large so that collisions trying to wait on pages are rare.
- * But in fact, the number of active page waitqueues on typical
- * systems is ridiculously low, less than 200. So this is even
- * conservative, even though it seems large.
- *
- * The constant PAGES_PER_WAITQUEUE specifies the ratio of pages to
- * waitqueues, i.e. the size of the waitq table given the number of pages.
- */
-#define PAGES_PER_WAITQUEUE	256
-
-static inline unsigned long wait_table_size(unsigned long pages)
-{
-	unsigned long size = 1;
-
-	pages /= PAGES_PER_WAITQUEUE;
-
-	while (size < pages)
-		size <<= 1;
-
-	/*
-	 * Once we have dozens or even hundreds of threads sleeping
-	 * on IO we've got bigger problems than wait queue collision.
-	 * Limit the size of the wait table to a reasonable size.
-	 */
-	size = min(size, 4096UL);
-
-	return size;
-}
-
-/*
- * This is an integer logarithm so that shifts can be used later
- * to extract the more random high bits from the multiplicative
- * hash function before the remainder is taken.
- */
-static inline unsigned long wait_table_bits(unsigned long size)
-{
-	return ffz(~size);
-}
-
 #define LONG_ALIGN(x) (((x)+(sizeof(long))-1)&~((sizeof(long))-1))
 
 /*
@@ -762,6 +638,7 @@ void __init free_area_init_core(int nid, pg_data_t *pgdat, struct page **gmap,
 	unsigned long *zones_size, unsigned long zone_start_paddr, 
 	unsigned long *zholes_size, struct page *lmem_map)
 {
+	struct page *p;
 	unsigned long i, j;
 	unsigned long map_size;
 	unsigned long totalpages, offset, realtotalpages;
@@ -782,6 +659,9 @@ void __init free_area_init_core(int nid, pg_data_t *pgdat, struct page **gmap,
 			
 	printk("On node %d totalpages: %lu\n", nid, realtotalpages);
 
+	INIT_LIST_HEAD(&active_list);
+	INIT_LIST_HEAD(&inactive_list);
+
 	/*
 	 * Some architectures (with lots of mem and discontinous memory
 	 * maps) have to search for a good mem_map area:
@@ -801,45 +681,37 @@ void __init free_area_init_core(int nid, pg_data_t *pgdat, struct page **gmap,
 	pgdat->node_start_mapnr = (lmem_map - mem_map);
 	pgdat->nr_zones = 0;
 
+	/*
+	 * Initially all pages are reserved - free ones are freed
+	 * up by free_all_bootmem() once the early boot process is
+	 * done.
+	 */
+	for (p = lmem_map; p < lmem_map + totalpages; p++) {
+		set_page_count(p, 0);
+		SetPageReserved(p);
+		init_waitqueue_head(&p->wait);
+		memlist_init(&p->list);
+	}
+
 	offset = lmem_map - mem_map;	
 	for (j = 0; j < MAX_NR_ZONES; j++) {
 		zone_t *zone = pgdat->node_zones + j;
 		unsigned long mask;
 		unsigned long size, realsize;
-		int idx;
 
-		zone_table[nid * MAX_NR_ZONES + j] = zone;
 		realsize = size = zones_size[j];
 		if (zholes_size)
 			realsize -= zholes_size[j];
 
 		printk("zone(%lu): %lu pages.\n", j, size);
 		zone->size = size;
-		zone->realsize = realsize;
 		zone->name = zone_names[j];
 		zone->lock = SPIN_LOCK_UNLOCKED;
 		zone->zone_pgdat = pgdat;
 		zone->free_pages = 0;
 		zone->need_balance = 0;
-		 zone->nr_active_pages = zone->nr_inactive_pages = 0;
-
-
 		if (!size)
 			continue;
-
-		/*
-		 * The per-page waitqueue mechanism uses hashed waitqueues
-		 * per zone.
-		 */
-		zone->wait_table_size = wait_table_size(size);
-		zone->wait_table_shift =
-			BITS_PER_LONG - wait_table_bits(zone->wait_table_size);
-		zone->wait_table = (wait_queue_head_t *)
-			alloc_bootmem_node(pgdat, zone->wait_table_size
-						* sizeof(wait_queue_head_t));
-
-		for(i = 0; i < zone->wait_table_size; ++i)
-			init_waitqueue_head(zone->wait_table + i);
 
 		pgdat->nr_zones = j+1;
 
@@ -848,29 +720,9 @@ void __init free_area_init_core(int nid, pg_data_t *pgdat, struct page **gmap,
 			mask = zone_balance_min[j];
 		else if (mask > zone_balance_max[j])
 			mask = zone_balance_max[j];
-		zone->watermarks[j].min = mask;
-		zone->watermarks[j].low = mask*2;
-		zone->watermarks[j].high = mask*3;
-		/* now set the watermarks of the lower zones in the "j" classzone */
-		for (idx = j-1; idx >= 0; idx--) {
-			zone_t * lower_zone = pgdat->node_zones + idx;
-			unsigned long lower_zone_reserve;
-			if (!lower_zone->size)
-				continue;
-
-			mask = lower_zone->watermarks[idx].min;
-			lower_zone->watermarks[j].min = mask;
-			lower_zone->watermarks[j].low = mask*2;
-			lower_zone->watermarks[j].high = mask*3;
-
-			/* now the brainer part */
-			lower_zone_reserve = realsize / lower_zone_reserve_ratio[idx];
-			lower_zone->watermarks[j].min += lower_zone_reserve;
-			lower_zone->watermarks[j].low += lower_zone_reserve;
-			lower_zone->watermarks[j].high += lower_zone_reserve;
-
-			realsize += lower_zone->realsize;
-		}
+		zone->pages_min = mask;
+		zone->pages_low = mask*2;
+		zone->pages_high = mask*3;
 
 		zone->zone_mem_map = mem_map + offset;
 		zone->zone_start_mapnr = offset;
@@ -879,19 +731,11 @@ void __init free_area_init_core(int nid, pg_data_t *pgdat, struct page **gmap,
 		if ((zone_start_paddr >> PAGE_SHIFT) & (zone_required_alignment-1))
 			printk("BUG: wrong zone alignment, it will crash\n");
 
-		/*
-		 * Initially all pages are reserved - free ones are freed
-		 * up by free_all_bootmem() once the early boot process is
-		 * done. Non-atomic initialization, single-pass.
-		 */
 		for (i = 0; i < size; i++) {
 			struct page *page = mem_map + offset + i;
-			set_page_zone(page, nid * MAX_NR_ZONES + j);
-			set_page_count(page, 0);
-			SetPageReserved(page);
-			INIT_LIST_HEAD(&page->list);
+			page->zone = zone;
 			if (j != ZONE_HIGHMEM)
-				set_page_address(page, __va(zone_start_paddr));
+				page->virtual = __va(zone_start_paddr);
 			zone_start_paddr += PAGE_SIZE;
 		}
 
@@ -899,7 +743,7 @@ void __init free_area_init_core(int nid, pg_data_t *pgdat, struct page **gmap,
 		for (i = 0; ; i++) {
 			unsigned long bitmap_size;
 
-			INIT_LIST_HEAD(&zone->free_area[i].free_list);
+			memlist_init(&zone->free_area[i].free_list);
 			if (i == MAX_ORDER-1) {
 				zone->free_area[i].map = NULL;
 				break;
@@ -954,16 +798,3 @@ static int __init setup_mem_frac(char *str)
 }
 
 __setup("memfrac=", setup_mem_frac);
-
-static int __init setup_lower_zone_reserve(char *str)
-{
-	int j = 0;
-
-	while (get_option(&str, &lower_zone_reserve_ratio[j++]) == 2);
-	printk("setup_lower_zone_reserve: ");
-	for (j = 0; j < MAX_NR_ZONES-1; j++) printk("%d  ", lower_zone_reserve_ratio[j]);
-	printk("\n");
-	return 1;
-}
-
-__setup("lower_zone_reserve=", setup_lower_zone_reserve);

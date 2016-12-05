@@ -31,9 +31,6 @@
  *	NET/ROM 007	Jonathan(G4KLX)	New timer architecture.
  *					Impmented Idle timer.
  *			Arnaldo C. Melo s/suser/capable/, micro cleanups
- *			Jeroen(PE1RXQ)	Use sock_orphan() on release.
- *			Tomi(OH2BNS)	Better frame type checking.
- *					Device refcnt fixes.
  */
 
 #include <linux/config.h>
@@ -130,7 +127,6 @@ static void nr_remove_socket(struct sock *sk)
 
 	if ((s = nr_list) == sk) {
 		nr_list = s->next;
-		dev_put(sk->protinfo.nr->device);
 		restore_flags(flags);
 		return;
 	}
@@ -138,7 +134,6 @@ static void nr_remove_socket(struct sock *sk)
 	while (s != NULL && s->next != NULL) {
 		if (s->next == sk) {
 			s->next = sk->next;
-			dev_put(sk->protinfo.nr->device);
 			restore_flags(flags);
 			return;
 		}
@@ -577,8 +572,9 @@ static int nr_release(struct socket *sock)
 			sk->state                = TCP_CLOSE;
 			sk->shutdown            |= SEND_SHUTDOWN;
 			sk->state_change(sk);
-			sock_orphan(sk);
+			sk->dead                 = 1;
 			sk->destroy              = 1;
+			sk->socket               = NULL;
 			break;
 
 		default:
@@ -620,20 +616,16 @@ full_sockaddr_ax25))
 	 * Only the super user can set an arbitrary user callsign.
 	 */
 	if (addr->fsa_ax25.sax25_ndigis == 1) {
-		if (!capable(CAP_NET_BIND_SERVICE)) {
-			dev_put(dev);
+		if (!capable(CAP_NET_BIND_SERVICE))
 			return -EACCES;
-		}
 		sk->protinfo.nr->user_addr   = addr->fsa_digipeater[0];
 		sk->protinfo.nr->source_addr = addr->fsa_ax25.sax25_call;
 	} else {
 		source = &addr->fsa_ax25.sax25_call;
 
 		if ((user = ax25_findbyuid(current->euid)) == NULL) {
-			if (ax25_uid_policy && !capable(CAP_NET_BIND_SERVICE)) {
-				dev_put(dev);
+			if (ax25_uid_policy && !capable(CAP_NET_BIND_SERVICE))
 				return -EPERM;
-			}
 			user = source;
 		}
 
@@ -688,10 +680,8 @@ static int nr_connect(struct socket *sock, struct sockaddr *uaddr,
 		source = (ax25_address *)dev->dev_addr;
 
 		if ((user = ax25_findbyuid(current->euid)) == NULL) {
-			if (ax25_uid_policy && !capable(CAP_NET_ADMIN)) {
-				dev_put(dev);
+			if (ax25_uid_policy && !capable(CAP_NET_ADMIN))
 				return -EPERM;
-			}
 			user = source;
 		}
 
@@ -848,38 +838,17 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 	frametype          = skb->data[19] & 0x0F;
 	flags              = skb->data[19] & 0xF0;
 
-	switch (frametype) {
-	case NR_PROTOEXT:
 #ifdef CONFIG_INET
-		/*
-		 * Check for an incoming IP over NET/ROM frame.
-		 */
-		if (circuit_index == NR_PROTO_IP && circuit_id == NR_PROTO_IP) {
-			skb_pull(skb, NR_NETWORK_LEN + NR_TRANSPORT_LEN);
-			skb->h.raw = skb->data;
+	/*
+	 * Check for an incoming IP over NET/ROM frame.
+	 */
+	if (frametype == NR_PROTOEXT && circuit_index == NR_PROTO_IP && circuit_id == NR_PROTO_IP) {
+		skb_pull(skb, NR_NETWORK_LEN + NR_TRANSPORT_LEN);
+		skb->h.raw = skb->data;
 
-			return nr_rx_ip(skb, dev);
-		}
-#endif
-		return 0;
-
-	case NR_CONNREQ:
-	case NR_CONNACK:
-	case NR_DISCREQ:
-	case NR_DISCACK:
-	case NR_INFO:
-	case NR_INFOACK:
-		/*
-		 * These frame types we understand.
-		 */
-		break;
-
-	default:
-		/*
-		 * Everything else is ignored.
-		 */
-		return 0;
+		return nr_rx_ip(skb, dev);
 	}
+#endif
 
 	/*
 	 * Find an existing socket connection, based on circuit ID, if it's
@@ -985,8 +954,6 @@ int nr_rx_frame(struct sk_buff *skb, struct net_device *dev)
 	make->protinfo.nr->state     = NR_STATE_3;
 	sk->ack_backlog++;
 	make->pair = sk;
-
-	dev_hold(make->protinfo.nr->device);
 
 	nr_insert_socket(make);
 
@@ -1348,7 +1315,6 @@ MODULE_PARM_DESC(nr_ndevs, "number of NET/ROM devices");
 
 MODULE_AUTHOR("Jonathan Naylor G4KLX <g4klx@g4klx.demon.co.uk>");
 MODULE_DESCRIPTION("The amateur radio NET/ROM network and transport layer protocol");
-MODULE_LICENSE("GPL");
 
 static void __exit nr_exit(void)
 {
@@ -1377,6 +1343,7 @@ static void __exit nr_exit(void)
 			dev_nr[i].priv = NULL;
 			unregister_netdev(&dev_nr[i]);
 		}
+		kfree(dev_nr[i].name);
 	}
 
 	kfree(dev_nr);

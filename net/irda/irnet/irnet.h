@@ -199,29 +199,6 @@
  *	o Avoid leaking discovery log and skb
  *	o Replace "self" with "server" in irnet_connect_indication() to
  *	  better detect cut'n'paste error ;-)
- *
- * v9 - 29.11.01 - Jean II
- *	o Fix event generation in disconnect indication that I broke in v8
- *	  It was always generation "No-Answer" because I was testing ttp_open
- *	  just after clearing it. *blush*.
- *	o Use newly created irttp_listen() to fix potential crash when LAP
- *	  destroyed before irnet module removed.
- *
- * v10 - 4.3.2 - Jean II
- *	o When receiving a disconnect indication, don't reenable the
- *	  PPP Tx queue, this will trigger a reconnect. Instead, close
- *	  the channel, which will kill pppd...
- *
- * v11 - 20.3.02 - Jean II
- *	o Oops ! v10 fix disabled IrNET retries and passive behaviour.
- *	  Better fix in irnet_disconnect_indication() :
- *	  - if connected, kill pppd via hangup.
- *	  - if not connected, reenable ppp Tx, which trigger IrNET retry.
- *
- * v12 - 10.4.02 - Jean II
- *	o Fix race condition in irnet_connect_indication().
- *	  If the socket was already trying to connect, drop old connection
- *	  and use new one only if acting as primary. See comments.
  */
 
 /***************************** INCLUDES *****************************/
@@ -322,29 +299,29 @@
  * compiler will optimise away the if() in all cases.
  */
 /* All error messages (will show up in the normal logs) */
-#define DERROR(dbg, format, args...) \
+#define DERROR(dbg, args...) \
 	{if(DEBUG_##dbg) \
-		printk(KERN_INFO "irnet: %s(): " format, __FUNCTION__ , ##args);}
+		printk(KERN_INFO "irnet: " __FUNCTION__ "(): " args);}
 
 /* Normal debug message (will show up in /var/log/debug) */
-#define DEBUG(dbg, format, args...) \
+#define DEBUG(dbg, args...) \
 	{if(DEBUG_##dbg) \
-		printk(KERN_DEBUG "irnet: %s(): " format, __FUNCTION__ , ##args);}
+		printk(KERN_DEBUG "irnet: " __FUNCTION__ "(): " args);}
 
 /* Entering a function (trace) */
-#define DENTER(dbg, format, args...) \
+#define DENTER(dbg, args...) \
 	{if(DEBUG_##dbg) \
-		printk(KERN_DEBUG "irnet: -> %s" format, __FUNCTION__ , ##args);}
+		printk(KERN_DEBUG "irnet: ->" __FUNCTION__ args);}
 
 /* Entering and exiting a function in one go (trace) */
-#define DPASS(dbg, format, args...) \
+#define DPASS(dbg, args...) \
 	{if(DEBUG_##dbg) \
-		printk(KERN_DEBUG "irnet: <>%s" format, __FUNCTION__ , ##args);}
+		printk(KERN_DEBUG "irnet: <>" __FUNCTION__ args);}
 
 /* Exiting a function (trace) */
-#define DEXIT(dbg, format, args...) \
+#define DEXIT(dbg, args...) \
 	{if(DEBUG_##dbg) \
-		printk(KERN_DEBUG "irnet: <-%s()" format, __FUNCTION__ , ##args);}
+		printk(KERN_DEBUG "irnet: <-" __FUNCTION__ "()" args);}
 
 /* Exit a function with debug */
 #define DRETURN(ret, dbg, args...) \

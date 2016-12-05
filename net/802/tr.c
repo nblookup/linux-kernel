@@ -36,8 +36,7 @@
 #include <linux/init.h>
 #include <net/arp.h>
 
-void tr_source_route(struct sk_buff *skb, struct trh_hdr *trh,
-		     struct net_device *dev);
+static void tr_source_route(struct sk_buff *skb, struct trh_hdr *trh, struct net_device *dev);
 static void tr_add_rif_info(struct trh_hdr *trh, struct net_device *dev);
 static void rif_check_expire(unsigned long dummy);
 
@@ -66,7 +65,8 @@ struct rif_cache_s {
  *	up a lot.
  */
  
-static rif_cache rif_table[RIF_TABLE_SIZE];
+rif_cache rif_table[RIF_TABLE_SIZE]={ NULL, };
+
 static spinlock_t rif_lock = SPIN_LOCK_UNLOCKED;
 
 #define RIF_TIMEOUT 60*10*HZ
@@ -92,10 +92,10 @@ int tr_header(struct sk_buff *skb, struct net_device *dev, unsigned short type,
 	int hdr_len;
 
 	/* 
-	 * Add the 802.2 SNAP header if IP as the IPv4/IPv6 code calls  
+	 * Add the 802.2 SNAP header if IP as the IPv4 code calls  
 	 * dev->hard_header directly.
 	 */
-	if (type == ETH_P_IP || type == ETH_P_IPV6 || type == ETH_P_ARP)
+	if (type == ETH_P_IP || type == ETH_P_ARP)
 	{
 		struct trllc *trllc=(struct trllc *)(trh+1);
 
@@ -217,7 +217,6 @@ unsigned short tr_type_trans(struct sk_buff *skb, struct net_device *dev)
 
 	if (trllc->dsap == EXTENDED_SAP &&
 	    (trllc->ethertype == ntohs(ETH_P_IP) ||
-	     trllc->ethertype == ntohs(ETH_P_IPV6) ||
 	     trllc->ethertype == ntohs(ETH_P_ARP)))
 	{
 		skb_pull(skb, sizeof(struct trllc));
@@ -231,8 +230,7 @@ unsigned short tr_type_trans(struct sk_buff *skb, struct net_device *dev)
  *	We try to do source routing... 
  */
 
-void tr_source_route(struct sk_buff *skb, struct trh_hdr *trh,
-		     struct net_device *dev) 
+static void tr_source_route(struct sk_buff *skb,struct trh_hdr *trh,struct net_device *dev) 
 {
 	int i, slack;
 	unsigned int hash;
@@ -327,9 +325,9 @@ static void tr_add_rif_info(struct trh_hdr *trh, struct net_device *dev)
 	int i;
 	unsigned int hash, rii_p = 0;
 	rif_cache entry;
-	unsigned long flags;
 
-	spin_lock_irqsave(&rif_lock, flags);
+
+	spin_lock_bh(&rif_lock);
 	
 	/*
 	 *	Firstly see if the entry exists
@@ -368,7 +366,7 @@ printk("adding rif_entry: addr:%02X:%02X:%02X:%02X:%02X:%02X rcf:%04X\n",
 		if(!entry) 
 		{
 			printk(KERN_DEBUG "tr.c: Couldn't malloc rif cache entry !\n");
-			spin_unlock_irqrestore(&rif_lock,flags);
+			spin_unlock_bh(&rif_lock);
 			return;
 		}
 
@@ -410,7 +408,7 @@ printk("updating rif_entry: addr:%02X:%02X:%02X:%02X:%02X:%02X rcf:%04X\n",
 		    }                                         
            	entry->last_used=jiffies;               
 	}
-	spin_unlock_irqrestore(&rif_lock,flags);
+	spin_unlock_bh(&rif_lock);
 }
 
 /*
@@ -468,7 +466,6 @@ static int rif_get_info(char *buffer,char **start, off_t offset, int length)
 	off_t pos=0;
 	int size,i,j,rcf_len,segment,brdgnmb;
 	unsigned long now=jiffies;
-	unsigned long flags;
 
 	rif_cache entry;
 
@@ -477,7 +474,7 @@ static int rif_get_info(char *buffer,char **start, off_t offset, int length)
 	pos+=size;
 	len+=size;
 
-	spin_lock_irqsave(&rif_lock, flags);
+	spin_lock_bh(&rif_lock);
 	for(i=0;i < RIF_TABLE_SIZE;i++) 
 	{
 		for(entry=rif_table[i];entry;entry=entry->next) {
@@ -526,7 +523,7 @@ static int rif_get_info(char *buffer,char **start, off_t offset, int length)
 		if(pos>offset+length)
 			break;
 	}
-	spin_unlock_irqrestore(&rif_lock,flags);
+	spin_unlock_bh(&rif_lock);
 
 	*start=buffer+(offset-begin); /* Start of wanted data */
 	len-=(offset-begin);    /* Start slop */

@@ -5,7 +5,7 @@
  *
  *		Implementation of the Transmission Control Protocol(TCP).
  *
- * Version:	$Id: tcp.c,v 1.215 2001/10/31 08:17:58 davem Exp $
+ * Version:	$Id: tcp.c,v 1.214 2001/10/20 00:00:11 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -251,8 +251,6 @@
 #include <linux/poll.h>
 #include <linux/init.h>
 #include <linux/smp_lock.h>
-#include <linux/fs.h>
-#include <linux/random.h>
 
 #include <net/icmp.h>
 #include <net/tcp.h>
@@ -269,8 +267,6 @@ kmem_cache_t *tcp_bucket_cachep;
 kmem_cache_t *tcp_timewait_cachep;
 
 atomic_t tcp_orphan_count = ATOMIC_INIT(0);
-
-int sysctl_tcp_default_win_scale = 0;
 
 int sysctl_tcp_mem[3];
 int sysctl_tcp_wmem[3] = { 4*1024, 16*1024, 128*1024 };
@@ -545,7 +541,6 @@ int tcp_listen_start(struct sock *sk)
 	for (lopt->max_qlen_log = 6; ; lopt->max_qlen_log++)
 		if ((1<<lopt->max_qlen_log) >= sysctl_max_syn_backlog)
 			break;
-	get_random_bytes(&lopt->hash_rnd, 4);
 
 	write_lock_bh(&tp->syn_wait_lock);
 	tp->listen_opt = lopt;
@@ -1162,8 +1157,7 @@ new_segment:
 
 			from += copy;
 			copied += copy;
-			if ((seglen -= copy) == 0 && iovlen == 0)
-				goto out;
+			seglen -= copy;
 
 			if (skb->len != mss_now || (flags&MSG_OOB))
 				continue;
@@ -1382,87 +1376,6 @@ static void tcp_prequeue_process(struct sock *sk)
 	tp->ucopy.memory = 0;
 }
 
-static inline
-struct sk_buff *tcp_recv_skb(struct sock *sk, u32 seq, u32 *off)
-{
-	struct sk_buff *skb;
-	u32 offset;
-
-	skb_queue_walk(&sk->receive_queue, skb) {
-		offset = seq - TCP_SKB_CB(skb)->seq;
-		if (skb->h.th->syn)
-			offset--;
-		if (offset < skb->len || skb->h.th->fin) {
-			*off = offset;
-			return skb;
-		}
-	}
-	return NULL;
-}
-
-/*
- * This routine provides an alternative to tcp_recvmsg() for routines
- * that would like to handle copying from skbuffs directly in 'sendfile'
- * fashion.
- * Note:
- *	- It is assumed that the socket was locked by the caller.
- *	- The routine does not block.
- *	- At present, there is no support for reading OOB data
- *	  or for 'peeking' the socket using this routine
- *	  (although both would be easy to implement).
- */
-int tcp_read_sock(struct sock *sk, read_descriptor_t *desc,
-		  sk_read_actor_t recv_actor)
-{
-	struct sk_buff *skb;
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
-	u32 seq = tp->copied_seq;
-	u32 offset;
-	int copied = 0;
-
-	if (sk->state == TCP_LISTEN)
-		return -ENOTCONN;
-	while ((skb = tcp_recv_skb(sk, seq, &offset)) != NULL) {
-		if (offset < skb->len) {
-			size_t used, len;
-
-			len = skb->len - offset;
-			/* Stop reading if we hit a patch of urgent data */
-			if (tp->urg_data) {
-				u32 urg_offset = tp->urg_seq - seq;
-				if (urg_offset < len)
-					len = urg_offset;
-				if (!len)
-					break;
-			}
-			used = recv_actor(desc, skb, offset, len);
-			if (used <= len) {
-				seq += used;
-				copied += used;
-				offset += used;
-			}
-			if (offset != skb->len)
-				break;
-		}
-		if (skb->h.th->fin) {
-			tcp_eat_skb(sk, skb);
-			++seq;
-			break;
-		}
-		tcp_eat_skb(sk, skb);
-		if (!desc->count)
-			break;
-	}
-	tp->copied_seq = seq;
-
-	tcp_rcv_space_adjust(sk);
-
-	/* Clean up data we have read: This will do ACK frames. */
-	if (copied)
-		cleanup_rbuf(sk, copied);
-	return copied;
-}
-
 /*
  *	This routine copies from a sock struct into the user buffer. 
  *
@@ -1510,14 +1423,19 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 		struct sk_buff * skb;
 		u32 offset;
 
-		/* Are we at urgent data? Stop if we have read anything or have SIGURG pending. */
-		if (tp->urg_data && tp->urg_seq == *seq) {
+		/* Are we at urgent data? Stop if we have read anything. */
+		if (copied && tp->urg_data && tp->urg_seq == *seq)
+			break;
+
+		/* We need to check signals first, to get correct SIGURG
+		 * handling. FIXME: Need to check this doesnt impact 1003.1g
+		 * and move it down to the bottom of the loop
+		 */
+		if (signal_pending(current)) {
 			if (copied)
 				break;
-			if (signal_pending(current)) {
-				copied = timeo ? sock_intr_errno(timeo) : -EAGAIN;
-				break;
-			}
+			copied = timeo ? sock_intr_errno(timeo) : -EAGAIN;
+			break;
 		}
 
 		/* Next get a buffer. */
@@ -1556,7 +1474,6 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 			    sk->state == TCP_CLOSE ||
 			    (sk->shutdown & RCV_SHUTDOWN) ||
 			    !timeo ||
-			    signal_pending(current) ||
 			    (flags & MSG_PEEK))
 				break;
 		} else {
@@ -1584,11 +1501,6 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 
 			if (!timeo) {
 				copied = -EAGAIN;
-				break;
-			}
-
-			if (signal_pending(current)) {
-				copied = sock_intr_errno(timeo);
 				break;
 			}
 		}
@@ -1670,12 +1582,6 @@ do_prequeue:
 				}
 			}
 		}
-		if ((flags & MSG_PEEK) && peek_seq != tp->copied_seq) {
-			if (net_ratelimit())
-				printk(KERN_DEBUG "TCP(%s:%d): Application bug, race in MSG_PEEK.\n",
-				       current->comm, current->pid);
-			peek_seq = tp->copied_seq;
-		}
 		continue;
 
 	found_ok_skb:
@@ -1714,8 +1620,6 @@ do_prequeue:
 		*seq += used;
 		copied += used;
 		len -= used;
-
-		tcp_rcv_space_adjust(sk);
 
 skip_copy:
 		if (tp->urg_data && after(tp->copied_seq,tp->urg_seq)) {
@@ -1887,7 +1791,7 @@ void tcp_destroy_sock(struct sock *sk)
 
 #ifdef TCP_DEBUG
 	if (sk->zapped) {
-		printk(KERN_DEBUG "TCP: double destroy sk=%p\n", sk);
+		printk("TCP: double destroy sk=%p\n", sk);
 		sock_hold(sk);
 	}
 	sk->zapped = 1;
@@ -2075,7 +1979,7 @@ out:
 
 /* These states need RST on ABORT according to RFC793 */
 
-static inline int tcp_need_reset(int state)
+extern __inline__ int tcp_need_reset(int state)
 {
 	return ((1 << state) &
 	       	(TCPF_ESTABLISHED|TCPF_CLOSE_WAIT|TCPF_FIN_WAIT1|
@@ -2133,7 +2037,7 @@ int tcp_disconnect(struct sock *sk, int flags)
 	tp->packets_out = 0;
 	tp->snd_ssthresh = 0x7fffffff;
 	tp->snd_cwnd_cnt = 0;
-	tcp_set_ca_state(tp, TCP_CA_Open);
+	tp->ca_state = TCP_CA_Open;
 	tcp_clear_retrans(tp);
 	tcp_delack_init(tp);
 	tp->send_head = NULL;
@@ -2538,7 +2442,6 @@ int tcp_getsockopt(struct sock *sk, int level, int optname, char *optval,
 
 
 extern void __skb_cb_too_small_for_tcp(int, int);
-extern void tcpdiag_init(void);
 
 void __init tcp_init(void)
 {
@@ -2636,6 +2539,10 @@ void __init tcp_init(void)
 	sysctl_tcp_mem[0] = 768<<order;
 	sysctl_tcp_mem[1] = 1024<<order;
 	sysctl_tcp_mem[2] = 1536<<order;
+	if (sysctl_tcp_mem[2] - sysctl_tcp_mem[1] > 512)
+		sysctl_tcp_mem[1] = sysctl_tcp_mem[2] - 512;
+	if (sysctl_tcp_mem[1] - sysctl_tcp_mem[0] > 512)
+		sysctl_tcp_mem[0] = sysctl_tcp_mem[1] - 512;
 
 	if (order < 3) {
 		sysctl_tcp_wmem[2] = 64*1024;
@@ -2644,9 +2551,6 @@ void __init tcp_init(void)
 		sysctl_tcp_rmem[2] = 2*43689;
 	}
 
-	printk(KERN_INFO "TCP: Hash tables configured (established %d bind %d)\n",
+	printk("TCP: Hash tables configured (established %d bind %d)\n",
 	       tcp_ehash_size<<1, tcp_bhash_size);
-
-	(void) tcp_mib_init();
-	tcpdiag_init();
 }

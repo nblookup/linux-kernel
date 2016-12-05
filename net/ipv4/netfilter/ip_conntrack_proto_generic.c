@@ -4,7 +4,7 @@
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4/ip_conntrack_protocol.h>
 
-unsigned long ip_ct_generic_timeout = 600*HZ;
+#define GENERIC_TIMEOUT (600*HZ)
 
 static int generic_pkt_to_tuple(const void *datah, size_t datalen,
 				struct ip_conntrack_tuple *tuple)
@@ -43,7 +43,7 @@ static int established(struct ip_conntrack *conntrack,
 		       struct iphdr *iph, size_t len,
 		       enum ip_conntrack_info conntrackinfo)
 {
-	ip_ct_refresh(conntrack, ip_ct_generic_timeout);
+	ip_ct_refresh(conntrack, GENERIC_TIMEOUT);
 	return NF_ACCEPT;
 }
 
@@ -57,5 +57,5 @@ new(struct ip_conntrack *conntrack, struct iphdr *iph, size_t len)
 struct ip_conntrack_protocol ip_conntrack_generic_protocol
 = { { NULL, NULL }, 0, "unknown",
     generic_pkt_to_tuple, generic_invert_tuple, generic_print_tuple,
-    generic_print_conntrack, established, new, NULL, NULL, NULL };
+    generic_print_conntrack, established, new, NULL };
 

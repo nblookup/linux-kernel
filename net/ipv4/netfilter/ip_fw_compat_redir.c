@@ -20,9 +20,6 @@
 
 #include <linux/netfilter_ipv4/lockhelp.h>
 
-/* Very simple timeout pushed back by each packet */
-#define REDIR_TIMEOUT (240*HZ)
-
 static DECLARE_LOCK(redir_lock);
 #define ASSERT_READ_LOCK(x) MUST_BE_LOCKED(&redir_lock)
 #define ASSERT_WRITE_LOCK(x) MUST_BE_LOCKED(&redir_lock)
@@ -43,7 +40,7 @@ do {									 \
 		   netplay... */					 \
 		printk("ASSERT: %s:%i(%s)\n",				 \
 		       __FILE__, __LINE__, __FUNCTION__);		 \
-} while(0)
+} while(0);
 #else
 #define IP_NF_ASSERT(x)
 #endif
@@ -153,14 +150,6 @@ static void do_tcp_unredir(struct sk_buff *skb, struct redir *redir)
 	skb->nfcache |= NFC_ALTERED;
 }
 
-static void destroyme(unsigned long me)
-{
-	LOCK_BH(&redir_lock);
-	LIST_DELETE(&redirs, (struct redir *)me);
-	UNLOCK_BH(&redir_lock);
-	kfree((struct redir *)me);
-}
-
 /* REDIRECT a packet. */
 unsigned int
 do_redirect(struct sk_buff *skb,
@@ -183,10 +172,6 @@ do_redirect(struct sk_buff *skb,
 		struct udphdr *udph = (struct udphdr *)((u_int32_t *)iph
 							+ iph->ihl);
 
-		/* Must have whole header */
-		if (skb->len < iph->ihl*4 + sizeof(*udph))
-			return NF_DROP;
-
 		if (udph->check) /* 0 is a special case meaning no checksum */
 			udph->check = cheat_check(~iph->daddr, newdst,
 					  cheat_check(udph->dest ^ 0xFFFF,
@@ -206,10 +191,6 @@ do_redirect(struct sk_buff *skb,
 		struct redir *redir;
 		int ret;
 
-		/* Must have whole header */
-		if (skb->len < iph->ihl*4 + sizeof(*tcph))
-			return NF_DROP;
-
 		DEBUGP("Doing tcp redirect. %08X:%u %08X:%u -> %08X:%u\n",
 		       iph->saddr, tcph->source, iph->daddr, tcph->dest,
 		       newdst, redirpt);
@@ -225,10 +206,6 @@ do_redirect(struct sk_buff *skb,
 			}
 			list_prepend(&redirs, redir);
 			init_timer(&redir->destroyme);
-			redir->destroyme.function = destroyme;
-			redir->destroyme.data = (unsigned long)redir;
-			redir->destroyme.expires = jiffies + REDIR_TIMEOUT;
-			add_timer(&redir->destroyme);
 		}
 		/* In case mangling has changed, rewrite this part. */
 		redir->core = ((struct redir_core)
@@ -248,6 +225,13 @@ do_redirect(struct sk_buff *skb,
 	}
 }
 
+static void destroyme(unsigned long me)
+{
+	LOCK_BH(&redir_lock);
+	LIST_DELETE(&redirs, (struct redir *)me);
+	UNLOCK_BH(&redir_lock);
+}
+
 /* Incoming packet: is it a reply to a masqueraded connection, or
    part of an already-redirected TCP connection? */
 void
@@ -261,18 +245,15 @@ check_for_redirect(struct sk_buff *skb)
 	if (iph->protocol != IPPROTO_TCP)
 		return;
 
-	/* Must have whole header */
-	if (skb->len < iph->ihl*4 + sizeof(*tcph))
-		return;
-
 	LOCK_BH(&redir_lock);
 	redir = find_redir(iph->saddr, iph->daddr, tcph->source, tcph->dest);
 	if (redir) {
 		DEBUGP("Doing tcp redirect again.\n");
 		do_tcp_redir(skb, redir);
-		if (del_timer(&redir->destroyme)) {
-			redir->destroyme.expires = jiffies + REDIR_TIMEOUT;
-			add_timer(&redir->destroyme);
+		if (tcph->rst || tcph->fin) {
+			redir->destroyme.function = destroyme;
+			redir->destroyme.data = (unsigned long)redir;
+			mod_timer(&redir->destroyme, 75*HZ);
 		}
 	}
 	UNLOCK_BH(&redir_lock);
@@ -289,18 +270,15 @@ check_for_unredirect(struct sk_buff *skb)
 	if (iph->protocol != IPPROTO_TCP)
 		return;
 
-	/* Must have whole header */
-	if (skb->len < iph->ihl*4 + sizeof(*tcph))
-		return;
-
 	LOCK_BH(&redir_lock);
 	redir = find_unredir(iph->saddr, iph->daddr, tcph->source, tcph->dest);
 	if (redir) {
 		DEBUGP("Doing tcp unredirect.\n");
 		do_tcp_unredir(skb, redir);
-		if (del_timer(&redir->destroyme)) {
-			redir->destroyme.expires = jiffies + REDIR_TIMEOUT;
-			add_timer(&redir->destroyme);
+		if (tcph->rst || tcph->fin) {
+			redir->destroyme.function = destroyme;
+			redir->destroyme.data = (unsigned long)redir;
+			mod_timer(&redir->destroyme, 75*HZ);
 		}
 	}
 	UNLOCK_BH(&redir_lock);

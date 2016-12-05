@@ -541,7 +541,7 @@ static void route4_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 					}
 					if (arg->fn(tp, (unsigned long)f, arg) < 0) {
 						arg->stop = 1;
-						return;
+						break;
 					}
 					arg->count++;
 				}
@@ -550,6 +550,7 @@ static void route4_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 	}
 }
 
+#ifdef CONFIG_RTNETLINK
 static int route4_dump(struct tcf_proto *tp, unsigned long fh,
 		       struct sk_buff *skb, struct tcmsg *t)
 {
@@ -605,6 +606,7 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
+#endif
 
 struct tcf_proto_ops cls_route4_ops = {
 	NULL,
@@ -618,7 +620,11 @@ struct tcf_proto_ops cls_route4_ops = {
 	route4_change,
 	route4_delete,
 	route4_walk,
+#ifdef CONFIG_RTNETLINK
 	route4_dump
+#else
+	NULL
+#endif
 };
 
 #ifdef MODULE

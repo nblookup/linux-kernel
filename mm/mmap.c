@@ -14,7 +14,6 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/personality.h>
-#include <linux/mount.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgalloc.h>
@@ -46,9 +45,6 @@ pgprot_t protection_map[16] = {
 };
 
 int sysctl_overcommit_memory;
-unsigned long mmap_min_addr;		/* defaults to 0 = no protection */
-
-int max_map_count = DEFAULT_MAX_MAP_COUNT;
 
 /* Check that a process has enough memory to allocate a
  * new virtual mapping.
@@ -72,7 +68,7 @@ int vm_enough_memory(long pages)
 	    return 1;
 
 	/* The page cache contains buffer pages these days.. */
-	free = page_cache_size;
+	free = atomic_read(&page_cache_size);
 	free += nr_free_pages();
 	free += nr_swap_pages;
 
@@ -403,20 +399,13 @@ unsigned long do_mmap_pgoff(struct file * file, unsigned long addr, unsigned lon
 	int error;
 	rb_node_t ** rb_link, * rb_parent;
 
-	if (file) {
-		if (!file->f_op || !file->f_op->mmap)
-			return -ENODEV;
+	if (file && (!file->f_op || !file->f_op->mmap))
+		return -ENODEV;
 
-		if ((prot & PROT_EXEC) && (file->f_vfsmnt->mnt_flags & MNT_NOEXEC))
-			return -EPERM;
-	}
-
-	if (!len)
+	if ((len = PAGE_ALIGN(len)) == 0)
 		return addr;
 
-	len = PAGE_ALIGN(len);
-
-	if (len > TASK_SIZE || len == 0)
+	if (len > TASK_SIZE)
 		return -EINVAL;
 
 	/* offset overflow? */
@@ -424,7 +413,7 @@ unsigned long do_mmap_pgoff(struct file * file, unsigned long addr, unsigned lon
 		return -EINVAL;
 
 	/* Too many mappings? */
-	if (mm->map_count > max_map_count)
+	if (mm->map_count > MAX_MAP_COUNT)
 		return -ENOMEM;
 
 	/* Obtain the address to map to. we verify (or select) it and ensure
@@ -489,6 +478,7 @@ unsigned long do_mmap_pgoff(struct file * file, unsigned long addr, unsigned lon
 	}
 
 	/* Clear old maps */
+	error = -ENOMEM;
 munmap_back:
 	vma = find_vma_prepare(mm, addr, &prev, &rb_link, &rb_parent);
 	if (vma && vma->vm_start < addr + len) {
@@ -558,30 +548,7 @@ munmap_back:
 	 * Answer: Yes, several device drivers can do it in their
 	 *         f_op->mmap method. -DaveM
 	 */
-	if (addr != vma->vm_start) {
-		/*
-		 * It is a bit too late to pretend changing the virtual
-		 * area of the mapping, we just corrupted userspace
-		 * in the do_munmap, so FIXME (not in 2.4 to avoid breaking
-		 * the driver API).
-		 */
-		struct vm_area_struct * stale_vma;
-		/* Since addr changed, we rely on the mmap op to prevent 
-		 * collisions with existing vmas and just use find_vma_prepare 
-		 * to update the tree pointers.
-		 */
-		addr = vma->vm_start;
-		stale_vma = find_vma_prepare(mm, addr, &prev,
-						&rb_link, &rb_parent);
-		/*
-		 * Make sure the lowlevel driver did its job right.
-		 */
-		if (unlikely(stale_vma && stale_vma->vm_start < vma->vm_end)) {
-			printk(KERN_ERR "buggy mmap operation: [<%p>]\n",
-				file ? file->f_op->mmap : NULL);
-			BUG();
-		}
-	}
+	addr = vma->vm_start;
 
 	vma_link(mm, vma, prev, rb_link, rb_parent);
 	if (correct_wcount)
@@ -652,29 +619,17 @@ extern unsigned long arch_get_unmapped_area(struct file *, unsigned long, unsign
 unsigned long get_unmapped_area(struct file *file, unsigned long addr, unsigned long len, unsigned long pgoff, unsigned long flags)
 {
 	if (flags & MAP_FIXED) {
-		if (addr > TASK_SIZE - len || addr >= TASK_SIZE)
-			return -ENOMEM;
+		if (addr > TASK_SIZE - len)
+			return -EINVAL;
 		if (addr & ~PAGE_MASK)
 			return -EINVAL;
-
-		/* Ensure a non-privileged process is not trying to map
-		 * lower pages.
-		 */
-		if (addr < mmap_min_addr && !capable(CAP_SYS_RAWIO))
-			return -EPERM;
-
 		return addr;
 	}
 
 	if (file && file->f_op && file->f_op->get_unmapped_area)
-		addr = file->f_op->get_unmapped_area(file, addr, len, pgoff, flags);
-	else
-		addr = arch_get_unmapped_area(file, addr, len, pgoff, flags);
+		return file->f_op->get_unmapped_area(file, addr, len, pgoff, flags);
 
-	if (addr < mmap_min_addr && !capable(CAP_SYS_RAWIO))
-		return -ENOMEM;
-
-	return addr;
+	return arch_get_unmapped_area(file, addr, len, pgoff, flags);
 }
 
 /* Look up the first VMA which satisfies  addr < vm_end,  NULL if none. */
@@ -922,8 +877,6 @@ static void free_pgtables(struct mm_struct * mm, struct vm_area_struct *prev,
 		break;
 	}
 no_mmaps:
-	if (last < first)
-		return;
 	/*
 	 * If the PGD bits are not consecutive in the virtual address, the
 	 * old method of shifting the VA >> by PGDIR_SHIFT doesn't work.
@@ -945,7 +898,7 @@ int do_munmap(struct mm_struct *mm, unsigned long addr, size_t len)
 {
 	struct vm_area_struct *mpnt, *prev, **npp, *free, *extra;
 
-	if ((addr & ~PAGE_MASK) || addr >= TASK_SIZE || len > TASK_SIZE-addr)
+	if ((addr & ~PAGE_MASK) || addr > TASK_SIZE || len > TASK_SIZE-addr)
 		return -EINVAL;
 
 	if ((len = PAGE_ALIGN(len)) == 0)
@@ -966,7 +919,7 @@ int do_munmap(struct mm_struct *mm, unsigned long addr, size_t len)
 
 	/* If we'll make "hole", check the vm areas limit */
 	if ((mpnt->vm_start < addr && mpnt->vm_end > addr+len)
-	    && mm->map_count >= max_map_count)
+	    && mm->map_count >= MAX_MAP_COUNT)
 		return -ENOMEM;
 
 	/*
@@ -1045,15 +998,6 @@ asmlinkage long sys_munmap(unsigned long addr, size_t len)
 	return ret;
 }
 
-
-static inline void verify_mmap_write_lock_held(struct mm_struct *mm)
-{
-	if (down_read_trylock(&mm->mmap_sem)) {
-		WARN_ON(1);
-		up_read(&mm->mmap_sem);
-	}
-}
-
 /*
  *  this is really a simplified "do_mmap".  it only handles
  *  anonymous maps.  eventually we may be able to do some
@@ -1070,12 +1014,6 @@ unsigned long do_brk(unsigned long addr, unsigned long len)
 	if (!len)
 		return addr;
 
-	if ((addr + len) > TASK_SIZE || (addr + len) < addr)
-		return -EINVAL;
-
-	if (addr < mmap_min_addr && !capable(CAP_SYS_RAWIO))
-		return -ENOMEM;
-
 	/*
 	 * mlock MCL_FUTURE?
 	 */
@@ -1085,12 +1023,6 @@ unsigned long do_brk(unsigned long addr, unsigned long len)
 		if (locked > current->rlim[RLIMIT_MEMLOCK].rlim_cur)
 			return -EAGAIN;
 	}
-
-	/*
-	 * mm->mmap_sem is required to protect against another thread
-	 * changing the mappings while we sleep (on kmalloc for one).
-	 */
-	verify_mmap_write_lock_held(mm);
 
 	/*
 	 * Clear old maps.  this also does some error checking for us
@@ -1108,13 +1040,16 @@ unsigned long do_brk(unsigned long addr, unsigned long len)
 	    > current->rlim[RLIMIT_AS].rlim_cur)
 		return -ENOMEM;
 
-	if (mm->map_count > max_map_count)
+	if (mm->map_count > MAX_MAP_COUNT)
 		return -ENOMEM;
 
 	if (!vm_enough_memory(len >> PAGE_SHIFT))
 		return -ENOMEM;
 
-	flags = VM_DATA_DEFAULT_FLAGS | mm->def_flags;
+	flags = calc_vm_flags(PROT_READ|PROT_WRITE|PROT_EXEC,
+				MAP_FIXED|MAP_PRIVATE) | mm->def_flags;
+
+	flags |= VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
 
 	/* Can we just expand an old anonymous mapping? */
 	if (rb_parent && vma_merge(mm, prev, rb_parent, addr, addr + len, flags))
@@ -1198,14 +1133,13 @@ void exit_mmap(struct mm_struct * mm)
 		kmem_cache_free(vm_area_cachep, mpnt);
 		mpnt = next;
 	}
+	flush_tlb_mm(mm);
 
 	/* This is just debugging */
 	if (mm->map_count)
 		BUG();
 
 	clear_page_tables(mm, FIRST_USER_PGD_NR, USER_PTRS_PER_PGD);
-
-	flush_tlb_mm(mm);
 }
 
 /* Insert vm structure into process list sorted by address
@@ -1225,15 +1159,14 @@ void __insert_vm_struct(struct mm_struct * mm, struct vm_area_struct * vma)
 	validate_mm(mm);
 }
 
-int insert_vm_struct(struct mm_struct * mm, struct vm_area_struct * vma)
+void insert_vm_struct(struct mm_struct * mm, struct vm_area_struct * vma)
 {
 	struct vm_area_struct * __vma, * prev;
 	rb_node_t ** rb_link, * rb_parent;
 
 	__vma = find_vma_prepare(mm, vma->vm_start, &prev, &rb_link, &rb_parent);
 	if (__vma && __vma->vm_start < vma->vm_end)
-		return -ENOMEM;
+		BUG();
 	vma_link(mm, vma, prev, rb_link, rb_parent);
 	validate_mm(mm);
-	return 0;
 }

@@ -67,8 +67,6 @@
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
 #include <linux/wanrouter.h>
-#include <linux/netlink.h>
-#include <linux/rtnetlink.h>
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/cache.h>
@@ -81,11 +79,16 @@
 
 #include <asm/uaccess.h>
 
+#include <linux/inet.h>
+#include <net/ip.h>
 #include <net/sock.h>
+#include <net/tcp.h>
+#include <net/udp.h>
 #include <net/scm.h>
 #include <linux/netfilter.h>
 
 static int sock_no_open(struct inode *irrelevant, struct file *dontcare);
+static loff_t sock_lseek(struct file *file, loff_t offset, int whence);
 static ssize_t sock_read(struct file *file, char *buf,
 			 size_t size, loff_t *ppos);
 static ssize_t sock_write(struct file *file, const char *buf,
@@ -112,7 +115,7 @@ static ssize_t sock_sendpage(struct file *file, struct page *page,
  */
 
 static struct file_operations socket_file_ops = {
-	llseek:		no_llseek,
+	llseek:		sock_lseek,
 	read:		sock_read,
 	write:		sock_write,
 	poll:		sock_poll,
@@ -147,7 +150,8 @@ static void net_family_write_lock(void)
 	while (atomic_read(&net_family_lockct) != 0) {
 		spin_unlock(&net_family_lock);
 
-		yield();
+		current->policy |= SCHED_YIELD;
+		schedule();
 
 		spin_lock(&net_family_lock);
 	}
@@ -311,21 +315,21 @@ static struct dentry_operations sockfs_dentry_operations = {
 /*
  *	Obtains the first available file descriptor and sets it up for use.
  *
- *	This function creates file structure and maps it to fd space
+ *	This functions creates file structure and maps it to fd space
  *	of current process. On success it returns file descriptor
  *	and file struct implicitly stored in sock->file.
  *	Note that another thread may close file descriptor before we return
  *	from this function. We use the fact that now we do not refer
  *	to socket after mapping. If one day we will need it, this
- *	function will increment ref. count on file by 1.
+ *	function will inincrement ref. count on file by 1.
  *
  *	In any case returned fd MAY BE not valid!
- *	This race condition is unavoidable
- *	with shared fd spaces, we cannot solve it inside kernel,
+ *	This race condition is inavoidable
+ *	with shared fd spaces, we cannot solve is inside kernel,
  *	but we take care of internal coherence yet.
  */
 
-int sock_map_fd(struct socket *sock)
+static int sock_map_fd(struct socket *sock)
 {
 	int fd;
 	struct qstr this;
@@ -436,11 +440,11 @@ struct socket *sock_alloc(void)
 	struct inode * inode;
 	struct socket * sock;
 
-	inode = new_inode(sock_mnt->mnt_sb);
+	inode = get_empty_inode();
 	if (!inode)
 		return NULL;
 
-	inode->i_dev = NODEV;
+	inode->i_sb = sock_mnt->mnt_sb;
 	sock = socki_lookup(inode);
 
 	inode->i_mode = S_IFSOCK|S_IRWXUGO;
@@ -523,6 +527,15 @@ int sock_recvmsg(struct socket *sock, struct msghdr *msg, int size, int flags)
 	return size;
 }
 
+
+/*
+ *	Sockets are not seekable.
+ */
+
+static loff_t sock_lseek(struct file *file, loff_t offset, int whence)
+{
+	return -ESPIPE;
+}
 
 /*
  *	Read data from a socket. ubuf is a user mode pointer. We make sure the user
@@ -742,13 +755,11 @@ static int sock_fasync(int fd, struct file *filp, int on)
 			return -ENOMEM;
 	}
 
+
 	sock = socki_lookup(filp->f_dentry->d_inode);
 	
-	if ((sk=sock->sk) == NULL) {
-		if (fna)
-			kfree(fna);
+	if ((sk=sock->sk) == NULL)
 		return -EINVAL;
-	}
 
 	lock_sock(sk);
 
@@ -1016,16 +1027,14 @@ asmlinkage long sys_bind(int fd, struct sockaddr *umyaddr, int addrlen)
  *	ready for listening.
  */
 
-int sysctl_somaxconn = SOMAXCONN;
-
 asmlinkage long sys_listen(int fd, int backlog)
 {
 	struct socket *sock;
 	int err;
 	
 	if ((sock = sockfd_lookup(fd, &err)) != NULL) {
-		if ((unsigned) backlog > sysctl_somaxconn)
-			backlog = sysctl_somaxconn;
+		if ((unsigned) backlog > SOMAXCONN)
+			backlog = SOMAXCONN;
 		err=sock->ops->listen(sock, backlog);
 		sockfd_put(sock);
 	}
@@ -1055,7 +1064,7 @@ asmlinkage long sys_accept(int fd, struct sockaddr *upeer_sockaddr, int *upeer_a
 	if (!sock)
 		goto out;
 
-	err = -ENFILE;
+	err = -EMFILE;
 	if (!(newsock = sock_alloc())) 
 		goto out_put;
 
@@ -1255,7 +1264,7 @@ asmlinkage long sys_recvfrom(int fd, void * ubuf, size_t size, unsigned flags,
 		flags |= MSG_DONTWAIT;
 	err=sock_recvmsg(sock, &msg, size, flags);
 
-	if(err >= 0 && addr != NULL)
+	if(err >= 0 && addr != NULL && msg.msg_namelen)
 	{
 		err2=move_addr_to_user(address, msg.msg_namelen, addr, addr_len);
 		if(err2<0)
@@ -1361,7 +1370,7 @@ asmlinkage long sys_sendmsg(int fd, struct msghdr *msg, unsigned flags)
 		goto out;
 
 	/* do not move before msg_sys is valid */
-	err = -EMSGSIZE;
+	err = -EINVAL;
 	if (msg_sys.msg_iovlen > UIO_MAXIOV)
 		goto out_put;
 
@@ -1444,7 +1453,7 @@ asmlinkage long sys_recvmsg(int fd, struct msghdr *msg, unsigned int flags)
 	if (!sock)
 		goto out;
 
-	err = -EMSGSIZE;
+	err = -EINVAL;
 	if (msg_sys.msg_iovlen > UIO_MAXIOV)
 		goto out_put;
 	
@@ -1479,7 +1488,7 @@ asmlinkage long sys_recvmsg(int fd, struct msghdr *msg, unsigned int flags)
 		goto out_freeiov;
 	len = err;
 
-	if (uaddr != NULL) {
+	if (uaddr != NULL && msg_sys.msg_namelen) {
 		err = move_addr_to_user(addr, msg_sys.msg_namelen, uaddr, uaddr_len);
 		if (err < 0)
 			goto out_freeiov;
@@ -1715,8 +1724,7 @@ void __init sock_init(void)
 	 * The netlink device handler may be needed early.
 	 */
 
-#ifdef CONFIG_NET
-	netlink_proto_init();
+#ifdef  CONFIG_RTNETLINK
 	rtnetlink_init();
 #endif
 #ifdef CONFIG_NETLINK_DEV

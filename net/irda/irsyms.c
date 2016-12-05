@@ -44,7 +44,6 @@
 #include <net/irda/wrapper.h>
 #include <net/irda/timer.h>
 #include <net/irda/parameters.h>
-#include <net/irda/crc.h>
 
 extern struct proc_dir_entry *proc_irda;
 
@@ -159,8 +158,6 @@ EXPORT_SYMBOL(irda_task_delete);
 
 EXPORT_SYMBOL(async_wrap_skb);
 EXPORT_SYMBOL(async_unwrap_char);
-EXPORT_SYMBOL(irda_calc_crc16);
-EXPORT_SYMBOL(irda_crc16_table);
 EXPORT_SYMBOL(irda_start_timer);
 EXPORT_SYMBOL(setup_dma);
 EXPORT_SYMBOL(infrared_mode);
@@ -174,7 +171,7 @@ EXPORT_SYMBOL(irtty_set_packet_mode);
 
 int __init irda_init(void)
 {
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, __FUNCTION__ "()\n");
 
  	irlmp_init();
 	irlap_init();
@@ -201,7 +198,7 @@ int __init irda_init(void)
 	return 0;
 }
 
-void __exit irda_cleanup(void)
+static void __exit irda_cleanup(void)
 {
 #ifdef CONFIG_SYSCTL
 	irda_sysctl_unregister();

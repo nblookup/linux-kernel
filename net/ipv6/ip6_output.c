@@ -3,7 +3,7 @@
  *	Linux INET6 implementation 
  *
  *	Authors:
- *	Pedro Roque		<pedro_m@yahoo.com>	
+ *	Pedro Roque		<roque@di.fc.ul.pt>	
  *
  *	$Id: ip6_output.c,v 1.33 2001/09/20 00:35:35 davem Exp $
  *
@@ -69,11 +69,8 @@ static inline int ip6_output_finish(struct sk_buff *skb)
 	struct hh_cache *hh = dst->hh;
 
 	if (hh) {
-		int hh_alen;
-
 		read_lock_bh(&hh->hh_lock);
-		hh_alen = HH_DATA_ALIGN(hh->hh_len);
-		memcpy(skb->data - hh_alen, hh->hh_data, hh_alen);
+		memcpy(skb->data - 16, hh->hh_data, 16);
 		read_unlock_bh(&hh->hh_lock);
 	        skb_push(skb, hh->hh_len);
 		return hh->hh_output(skb);
@@ -104,14 +101,13 @@ int ip6_output(struct sk_buff *skb)
 	struct dst_entry *dst = skb->dst;
 	struct net_device *dev = dst->dev;
 
-	skb->protocol = htons(ETH_P_IPV6);
+	skb->protocol = __constant_htons(ETH_P_IPV6);
 	skb->dev = dev;
 
 	if (ipv6_addr_is_multicast(&skb->nh.ipv6h->daddr)) {
 		if (!(dev->flags&IFF_LOOPBACK) &&
 		    (skb->sk == NULL || skb->sk->net_pinfo.af_inet6.mc_loop) &&
-		    ipv6_chk_mcast_addr(dev, &skb->nh.ipv6h->daddr,
-				&skb->nh.ipv6h->saddr)) {
+		    ipv6_chk_mcast_addr(dev, &skb->nh.ipv6h->daddr)) {
 			struct sk_buff *newskb = skb_clone(skb, GFP_ATOMIC);
 
 			/* Do not check for IFF_ALLMULTI; multicast routing
@@ -136,7 +132,7 @@ int ip6_output(struct sk_buff *skb)
 
 
 #ifdef CONFIG_NETFILTER
-int ip6_route_me_harder(struct sk_buff *skb)
+static int route6_me_harder(struct sk_buff *skb)
 {
 	struct ipv6hdr *iph = skb->nh.ipv6h;
 	struct dst_entry *dst;
@@ -154,8 +150,7 @@ int ip6_route_me_harder(struct sk_buff *skb)
 
 	if (dst->error) {
 		if (net_ratelimit())
-			printk(KERN_DEBUG "ip6_route_me_harder: No more route.\n");
-		dst_release(dst);
+			printk(KERN_DEBUG "route6_me_harder: No more route.\n");
 		return -EINVAL;
 	}
 
@@ -171,7 +166,7 @@ static inline int ip6_maybe_reroute(struct sk_buff *skb)
 {
 #ifdef CONFIG_NETFILTER
 	if (skb->nfcache & NFC_ALTERED){
-		if (ip6_route_me_harder(skb) != 0){
+		if (route6_me_harder(skb) != 0){
 			kfree_skb(skb);
 			return -EINVAL;
 		}
@@ -226,7 +221,7 @@ int ip6_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 	 *	Fill in the IPv6 header
 	 */
 
-	*(u32*)hdr = htonl(0x60000000) | fl->fl6_flowlabel;
+	*(u32*)hdr = __constant_htonl(0x60000000) | fl->fl6_flowlabel;
 	hlimit = -1;
 	if (np)
 		hlimit = np->hop_limit;
@@ -247,7 +242,6 @@ int ip6_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 
 	if (net_ratelimit())
 		printk(KERN_DEBUG "IPv6: sending pkt_too_big to self\n");
-	skb->dev = dst->dev;
 	icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, dst->pmtu, skb->dev);
 	kfree_skb(skb);
 	return -EMSGSIZE;
@@ -268,7 +262,7 @@ int ip6_nd_hdr(struct sock *sk, struct sk_buff *skb, struct net_device *dev,
 	struct ipv6hdr *hdr;
 	int totlen;
 
-	skb->protocol = htons(ETH_P_IPV6);
+	skb->protocol = __constant_htons(ETH_P_IPV6);
 	skb->dev = dev;
 
 	totlen = len + sizeof(struct ipv6hdr);
@@ -551,7 +545,7 @@ int ip6_build_xmit(struct sock *sk, inet_getfrag_t getfrag, const void *data,
 		    || (fl->oif && fl->oif != dst->dev->ifindex)) {
 			dst = NULL;
 		} else
-			dst_hold(dst);
+			dst_clone(dst);
 	}
 
 	if (dst == NULL)
@@ -569,7 +563,7 @@ int ip6_build_xmit(struct sock *sk, inet_getfrag_t getfrag, const void *data,
 		if (err) {
 #if IP6_DEBUG >= 2
 			printk(KERN_DEBUG "ip6_build_xmit: "
-			       "no available source address\n");
+			       "no availiable source address\n");
 #endif
 			goto out;
 		}

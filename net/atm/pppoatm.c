@@ -44,8 +44,6 @@
 #include <linux/ppp_channel.h>
 #include <linux/atmppp.h>
 
-#include "common.h"
-
 #if 0
 #define DPRINTK(format, args...) \
 	printk(KERN_DEBUG "pppoatm: " format, ##args)
@@ -127,7 +125,7 @@ static void pppoatm_unassign_vcc(struct atm_vcc *atmvcc)
 	pvcc = atmvcc_to_pvcc(atmvcc);
 	atmvcc->push = pvcc->old_push;
 	atmvcc->pop = pvcc->old_pop;
-	tasklet_kill(&pvcc->wakeup_tasklet);
+	tasklet_disable(&pvcc->wakeup_tasklet);
 	ppp_unregister_channel(&pvcc->chan);
 	atmvcc->user_back = NULL;
 	kfree(pvcc);
@@ -233,7 +231,8 @@ static int pppoatm_send(struct ppp_channel *chan, struct sk_buff *skb)
 		kfree_skb(skb);
 		return 1;
 	}
-	atomic_add(skb->truesize, &ATM_SKB(skb)->vcc->sk->wmem_alloc);
+	atomic_add(skb->truesize, &ATM_SKB(skb)->vcc->tx_inuse);
+	ATM_SKB(skb)->iovcnt = 0;
 	ATM_SKB(skb)->atm_options = ATM_SKB(skb)->vcc->atm_options;
 	DPRINTK("(unit %d): atm_skb(%p)->vcc(%p)->dev(%p)\n",
 	    pvcc->chan.unit, skb, ATM_SKB(skb)->vcc,
@@ -346,15 +345,17 @@ static int pppoatm_ioctl(struct atm_vcc *atmvcc, unsigned int cmd,
 /* the following avoids some spurious warnings from the compiler */
 #define UNUSED __attribute__((unused))
 
+extern int (*pppoatm_ioctl_hook)(struct atm_vcc *, unsigned int, unsigned long);
+
 static int __init UNUSED pppoatm_init(void)
 {
-	pppoatm_ioctl_set(pppoatm_ioctl);
+	pppoatm_ioctl_hook = pppoatm_ioctl;
 	return 0;
 }
 
 static void __exit UNUSED pppoatm_exit(void)
 {
-	pppoatm_ioctl_set(NULL);
+	pppoatm_ioctl_hook = NULL;
 }
 
 module_init(pppoatm_init);
@@ -362,4 +363,3 @@ module_exit(pppoatm_exit);
 
 MODULE_AUTHOR("Mitchell Blank Jr <mitch@sfgoth.com>");
 MODULE_DESCRIPTION("RFC2364 PPP over ATM/AAL5");
-MODULE_LICENSE("GPL");

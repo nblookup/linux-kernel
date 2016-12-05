@@ -18,25 +18,6 @@
 #include <asm/uaccess.h>
 #include <asm/io.h>
 
-#ifndef SET_UNALIGN_CTL
-# define SET_UNALIGN_CTL(a,b)	(-EINVAL)
-#endif
-#ifndef GET_UNALIGN_CTL
-# define GET_UNALIGN_CTL(a,b)	(-EINVAL)
-#endif
-#ifndef SET_FPEMU_CTL
-# define SET_FPEMU_CTL(a,b)	(-EINVAL)
-#endif
-#ifndef GET_FPEMU_CTL
-# define GET_FPEMU_CTL(a,b)	(-EINVAL)
-#endif
-#ifndef SET_FPEXC_CTL
-# define SET_FPEXC_CTL(a,b)	(-EINVAL)
-#endif
-#ifndef GET_FPEXC_CTL
-# define GET_FPEXC_CTL(a,b)	(-EINVAL)
-#endif
-
 /*
  * this is where the system-wide overflow UID and GID are defined, for
  * architectures that now have 32-bit UID/GID but didn't in the past
@@ -511,12 +492,19 @@ static inline void cap_emulate_setxuid(int old_ruid, int old_euid,
 
 static int set_user(uid_t new_ruid, int dumpclear)
 {
-	struct user_struct *new_user;
+	struct user_struct *new_user, *old_user;
 
+	/* What if a process setreuid()'s and this brings the
+	 * new uid over his NPROC rlimit?  We can check this now
+	 * cheaply with the new uid cache, so if it matters
+	 * we should be checking for it.  -DaveM
+	 */
 	new_user = alloc_uid(new_ruid);
 	if (!new_user)
 		return -EAGAIN;
-	switch_uid(new_user);
+	old_user = current->user;
+	atomic_dec(&old_user->processes);
+	atomic_inc(&new_user->processes);
 
 	if(dumpclear)
 	{
@@ -524,6 +512,8 @@ static int set_user(uid_t new_ruid, int dumpclear)
 		wmb();
 	}
 	current->uid = new_ruid;
+	current->user = new_user;
+	free_uid(old_user);
 	return 0;
 }
 
@@ -665,8 +655,8 @@ asmlinkage long sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 			wmb();
 		}
 		current->euid = euid;
+		current->fsuid = euid;
 	}
-	current->fsuid = current->euid;
 	if (suid != (uid_t) -1)
 		current->suid = suid;
 
@@ -711,8 +701,8 @@ asmlinkage long sys_setresgid(gid_t rgid, gid_t egid, gid_t sgid)
 			wmb();
 		}
 		current->egid = egid;
+		current->fsgid = egid;
 	}
-	current->fsgid = current->egid;
 	if (rgid != (gid_t) -1)
 		current->gid = rgid;
 	if (sgid != (gid_t) -1)
@@ -1036,7 +1026,6 @@ asmlinkage long sys_newuname(struct new_utsname * name)
 asmlinkage long sys_sethostname(char *name, int len)
 {
 	int errno;
-	char tmp[__NEW_UTS_LEN];
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -1044,8 +1033,7 @@ asmlinkage long sys_sethostname(char *name, int len)
 		return -EINVAL;
 	down_write(&uts_sem);
 	errno = -EFAULT;
-	if (!copy_from_user(tmp, name, len)) {
-		memcpy(system_utsname.nodename, tmp, len);
+	if (!copy_from_user(system_utsname.nodename, name, len)) {
 		system_utsname.nodename[len] = 0;
 		errno = 0;
 	}
@@ -1077,7 +1065,6 @@ asmlinkage long sys_gethostname(char *name, int len)
 asmlinkage long sys_setdomainname(char *name, int len)
 {
 	int errno;
-	char tmp[__NEW_UTS_LEN];
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -1086,10 +1073,9 @@ asmlinkage long sys_setdomainname(char *name, int len)
 
 	down_write(&uts_sem);
 	errno = -EFAULT;
-	if (!copy_from_user(tmp, name, len)) {
-		memcpy(system_utsname.domainname, tmp, len);
-		system_utsname.domainname[len] = 0;
+	if (!copy_from_user(system_utsname.domainname, name, len)) {
 		errno = 0;
+		system_utsname.domainname[len] = 0;
 	}
 	up_write(&uts_sem);
 	return errno;
@@ -1134,8 +1120,6 @@ asmlinkage long sys_setrlimit(unsigned int resource, struct rlimit *rlim)
 		return -EINVAL;
 	if(copy_from_user(&new_rlim, rlim, sizeof(*rlim)))
 		return -EFAULT;
-       if (new_rlim.rlim_cur > new_rlim.rlim_max)
-               return -EINVAL;
 	old_rlim = current->rlim + resource;
 	if (((new_rlim.rlim_cur > old_rlim->rlim_max) ||
 	     (new_rlim.rlim_max > old_rlim->rlim_max)) &&
@@ -1235,7 +1219,7 @@ asmlinkage long sys_prctl(int option, unsigned long arg2, unsigned long arg3,
 			error = put_user(current->pdeath_signal, (int *)arg2);
 			break;
 		case PR_GET_DUMPABLE:
-			if (is_dumpable(current))
+			if (current->mm->dumpable)
 				error = 1;
 			break;
 		case PR_SET_DUMPABLE:
@@ -1245,24 +1229,20 @@ asmlinkage long sys_prctl(int option, unsigned long arg2, unsigned long arg3,
 			}
 			current->mm->dumpable = arg2;
 			break;
-
 	        case PR_SET_UNALIGN:
+#ifdef SET_UNALIGN_CTL
 			error = SET_UNALIGN_CTL(current, arg2);
+#else
+			error = -EINVAL;
+#endif
 			break;
+
 	        case PR_GET_UNALIGN:
+#ifdef GET_UNALIGN_CTL
 			error = GET_UNALIGN_CTL(current, arg2);
-			break;
-	        case PR_SET_FPEMU:
-			error = SET_FPEMU_CTL(current, arg2);
-			break;
-	        case PR_GET_FPEMU:
-			error = GET_FPEMU_CTL(current, arg2);
-			break;
-		case PR_SET_FPEXC:
-			error = SET_FPEXC_CTL(current, arg2);
-			break;
-		case PR_GET_FPEXC:
-			error = GET_FPEXC_CTL(current, arg2);
+#else
+			error = -EINVAL;
+#endif
 			break;
 
 		case PR_GET_KEEPCAPS:

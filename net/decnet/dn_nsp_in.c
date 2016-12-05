@@ -565,19 +565,26 @@ out:
  */
 static __inline__ int dn_queue_skb(struct sock *sk, struct sk_buff *skb, int sig, struct sk_buff_head *queue)
 {
-	int err;
+#ifdef CONFIG_FILTER
+	struct sk_filter *filter;
+#endif
 
         /* Cast skb->rcvbuf to unsigned... It's pointless, but reduces
            number of warnings when compiling with -W --ANK
          */
-        if (atomic_read(&sk->rmem_alloc) + skb->truesize >= (unsigned)sk->rcvbuf) {
-        	err = -ENOMEM;
-        	goto out;
-        }
+        if (atomic_read(&sk->rmem_alloc) + skb->truesize >= (unsigned)sk->rcvbuf
+)
+                return -ENOMEM;
 
-	err = sk_filter(sk, skb, 0);
-	if (err)
-		goto out;
+#ifdef CONFIG_FILTER
+        if (sk->filter) {
+		int err = 0;
+                if ((filter = sk->filter) != NULL && sk_filter(skb, sk->filter))
+                        err = -EPERM;  /* Toss packet */
+		if (err)
+			return err;
+        }
+#endif /* CONFIG_FILTER */
 
         skb_set_owner_r(skb, sk);
         skb_queue_tail(queue, skb);
@@ -595,8 +602,8 @@ static __inline__ int dn_queue_skb(struct sock *sk, struct sk_buff *skb, int sig
 				    (sig == SIGURG) ? POLL_PRI : POLL_IN);
 	}
 	read_unlock(&sk->callback_lock);
-out:
-        return err;
+
+        return 0;
 }
 
 static void dn_nsp_otherdata(struct sock *sk, struct sk_buff *skb)

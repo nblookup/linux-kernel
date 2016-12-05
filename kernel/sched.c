@@ -116,7 +116,7 @@ extern struct task_struct *child_reaper;
 
 #define idle_task(cpu) (init_tasks[cpu_number_map(cpu)])
 #define can_schedule(p,cpu) \
-	((p)->cpus_runnable & (p)->cpus_allowed & (1UL << cpu))
+	((p)->cpus_runnable & (p)->cpus_allowed & (1 << cpu))
 
 #else
 
@@ -209,7 +209,7 @@ static inline int preemption_goodness(struct task_struct * prev, struct task_str
  */
 static FASTCALL(void reschedule_idle(struct task_struct * p));
 
-static void fastcall reschedule_idle(struct task_struct * p)
+static void reschedule_idle(struct task_struct * p)
 {
 #ifdef CONFIG_SMP
 	int this_cpu = smp_processor_id();
@@ -262,27 +262,12 @@ send_now_idle:
 		 * a problem.
 		 */
 		if (tsk == idle_task(cpu)) {
-#if defined(__i386__) && defined(CONFIG_SMP)
-                        /*
-			 * Check if two siblings are idle in the same
-			 * physical package. Use them if found.
-			 */
-			if (smp_num_siblings == 2) {
-				if (cpu_curr(cpu_sibling_map[cpu]) == 
-			            idle_task(cpu_sibling_map[cpu])) {
-					oldest_idle = last_schedule(cpu);
-					target_tsk = tsk;
-					break;
-				}
-				
-                        }
-#endif		
 			if (last_schedule(cpu) < oldest_idle) {
 				oldest_idle = last_schedule(cpu);
 				target_tsk = tsk;
 			}
 		} else {
-			if (oldest_idle == (cycles_t)-1) {
+			if (oldest_idle == -1ULL) {
 				int prio = preemption_goodness(tsk, p, cpu);
 
 				if (prio > max_prio) {
@@ -294,7 +279,7 @@ send_now_idle:
 	}
 	tsk = target_tsk;
 	if (tsk) {
-		if (oldest_idle != (cycles_t)-1) {
+		if (oldest_idle != -1ULL) {
 			best_cpu = tsk->processor;
 			goto send_now_idle;
 		}
@@ -318,17 +303,13 @@ send_now_idle:
 /*
  * Careful!
  *
- * This has to add the process to the _end_ of the 
- * run-queue, not the beginning. The goodness value will
- * determine whether this process will run next. This is
- * important to get SCHED_FIFO and SCHED_RR right, where
- * a process that is either pre-empted or its time slice
- * has expired, should be moved to the tail of the run 
- * queue for its priority - Bhavesh Davda
+ * This has to add the process to the _beginning_ of the
+ * run-queue, not the end. See the comment about "This is
+ * subtle" in the scheduler proper..
  */
 static inline void add_to_runqueue(struct task_struct * p)
 {
-	list_add_tail(&p->run_list, &runqueue_head);
+	list_add(&p->run_list, &runqueue_head);
 	nr_running++;
 }
 
@@ -336,6 +317,12 @@ static inline void move_last_runqueue(struct task_struct * p)
 {
 	list_del(&p->run_list);
 	list_add_tail(&p->run_list, &runqueue_head);
+}
+
+static inline void move_first_runqueue(struct task_struct * p)
+{
+	list_del(&p->run_list);
+	list_add(&p->run_list, &runqueue_head);
 }
 
 /*
@@ -359,7 +346,7 @@ static inline int try_to_wake_up(struct task_struct * p, int synchronous)
 	if (task_on_runqueue(p))
 		goto out;
 	add_to_runqueue(p);
-	if (!synchronous || !(p->cpus_allowed & (1UL << smp_processor_id())))
+	if (!synchronous || !(p->cpus_allowed & (1 << smp_processor_id())))
 		reschedule_idle(p);
 	success = 1;
 out:
@@ -367,7 +354,7 @@ out:
 	return success;
 }
 
-inline int fastcall wake_up_process(struct task_struct * p)
+inline int wake_up_process(struct task_struct * p)
 {
 	return try_to_wake_up(p, 0);
 }
@@ -405,7 +392,7 @@ static void process_timeout(unsigned long __data)
  *
  * In all cases the return value is guaranteed to be non-negative.
  */
-signed long fastcall schedule_timeout(signed long timeout)
+signed long schedule_timeout(signed long timeout)
 {
 	struct timer_list timer;
 	unsigned long expire;
@@ -554,7 +541,7 @@ asmlinkage void schedule(void)
 
 	spin_lock_prefetch(&runqueue_lock);
 
-	BUG_ON(!current->active_mm);
+	if (!current->active_mm) BUG();
 need_resched_back:
 	prev = current;
 	this_cpu = prev->processor;
@@ -673,12 +660,12 @@ repeat_schedule:
 		struct mm_struct *mm = next->mm;
 		struct mm_struct *oldmm = prev->active_mm;
 		if (!mm) {
-			BUG_ON(next->active_mm);
+			if (next->active_mm) BUG();
 			next->active_mm = oldmm;
 			atomic_inc(&oldmm->mm_count);
 			enter_lazy_tlb(oldmm, next, this_cpu);
 		} else {
-			BUG_ON(next->active_mm != mm);
+			if (next->active_mm != mm) BUG();
 			switch_mm(oldmm, mm, next, this_cpu);
 		}
 
@@ -735,7 +722,7 @@ static inline void __wake_up_common (wait_queue_head_t *q, unsigned int mode,
 	}
 }
 
-void fastcall __wake_up(wait_queue_head_t *q, unsigned int mode, int nr)
+void __wake_up(wait_queue_head_t *q, unsigned int mode, int nr)
 {
 	if (q) {
 		unsigned long flags;
@@ -745,7 +732,7 @@ void fastcall __wake_up(wait_queue_head_t *q, unsigned int mode, int nr)
 	}
 }
 
-void fastcall __wake_up_sync(wait_queue_head_t *q, unsigned int mode, int nr)
+void __wake_up_sync(wait_queue_head_t *q, unsigned int mode, int nr)
 {
 	if (q) {
 		unsigned long flags;
@@ -755,7 +742,7 @@ void fastcall __wake_up_sync(wait_queue_head_t *q, unsigned int mode, int nr)
 	}
 }
 
-void fastcall complete(struct completion *x)
+void complete(struct completion *x)
 {
 	unsigned long flags;
 
@@ -765,7 +752,7 @@ void fastcall complete(struct completion *x)
 	spin_unlock_irqrestore(&x->wait.lock, flags);
 }
 
-void fastcall wait_for_completion(struct completion *x)
+void wait_for_completion(struct completion *x)
 {
 	spin_lock_irq(&x->wait.lock);
 	if (!x->done) {
@@ -800,7 +787,7 @@ void fastcall wait_for_completion(struct completion *x)
 	__remove_wait_queue(q, &wait);				\
 	wq_write_unlock_irqrestore(&q->lock,flags);
 
-void fastcall interruptible_sleep_on(wait_queue_head_t *q)
+void interruptible_sleep_on(wait_queue_head_t *q)
 {
 	SLEEP_ON_VAR
 
@@ -811,7 +798,7 @@ void fastcall interruptible_sleep_on(wait_queue_head_t *q)
 	SLEEP_ON_TAIL
 }
 
-long fastcall interruptible_sleep_on_timeout(wait_queue_head_t *q, long timeout)
+long interruptible_sleep_on_timeout(wait_queue_head_t *q, long timeout)
 {
 	SLEEP_ON_VAR
 
@@ -824,7 +811,7 @@ long fastcall interruptible_sleep_on_timeout(wait_queue_head_t *q, long timeout)
 	return timeout;
 }
 
-void fastcall sleep_on(wait_queue_head_t *q)
+void sleep_on(wait_queue_head_t *q)
 {
 	SLEEP_ON_VAR
 	
@@ -835,7 +822,7 @@ void fastcall sleep_on(wait_queue_head_t *q)
 	SLEEP_ON_TAIL
 }
 
-long fastcall sleep_on_timeout(wait_queue_head_t *q, long timeout)
+long sleep_on_timeout(wait_queue_head_t *q, long timeout)
 {
 	SLEEP_ON_VAR
 	
@@ -849,44 +836,6 @@ long fastcall sleep_on_timeout(wait_queue_head_t *q, long timeout)
 }
 
 void scheduling_functions_end_here(void) { }
-
-#if CONFIG_SMP
-/**
- * set_cpus_allowed() - change a given task's processor affinity
- * @p: task to bind
- * @new_mask: bitmask of allowed processors
- *
- * Upon return, the task is running on a legal processor.  Note the caller
- * must have a valid reference to the task: it must not exit() prematurely.
- * This call can sleep; do not hold locks on call.
- */
-void set_cpus_allowed(struct task_struct *p, unsigned long new_mask)
-{
-	new_mask &= cpu_online_map;
-	BUG_ON(!new_mask);
-
-	p->cpus_allowed = new_mask;
-
-	/*
-	 * If the task is on a no-longer-allowed processor, we need to move
-	 * it.  If the task is not current, then set need_resched and send
-	 * its processor an IPI to reschedule.
-	 */
-	if (!(p->cpus_runnable & p->cpus_allowed)) {
-		if (p != current) {
-			p->need_resched = 1;
-			smp_send_reschedule(p->processor);
-		}
-		/*
-		 * Wait until we are on a legal processor.  If the task is
-		 * current, then we should be on a legal processor the next
-		 * time we reschedule.  Otherwise, we need to wait for the IPI.
-		 */
-		while (!(p->cpus_runnable & p->cpus_allowed))
-			schedule();
-	}
-}
-#endif /* CONFIG_SMP */
 
 #ifndef __alpha__
 
@@ -991,6 +940,8 @@ static int setscheduler(pid_t pid, int policy,
 	retval = 0;
 	p->policy = policy;
 	p->rt_priority = lp.sched_priority;
+	if (task_on_runqueue(p))
+		move_first_runqueue(p);
 
 	current->need_resched = 1;
 
@@ -1103,25 +1054,6 @@ asmlinkage long sys_sched_yield(void)
 		spin_unlock_irq(&runqueue_lock);
 	}
 	return 0;
-}
-
-/**
- * yield - yield the current processor to other threads.
- *
- * this is a shortcut for kernel-space yielding - it marks the
- * thread runnable and calls sys_sched_yield().
- */
-void yield(void)
-{
-	set_current_state(TASK_RUNNING);
-	sys_sched_yield();
-	schedule();
-}
-
-void __cond_resched(void)
-{
-	set_current_state(TASK_RUNNING);
-	schedule();
 }
 
 asmlinkage long sys_sched_get_priority_max(int policy)
@@ -1312,7 +1244,7 @@ void reparent_to_init(void)
 	this_task->cap_permitted = CAP_FULL_SET;
 	this_task->keep_capabilities = 0;
 	memcpy(this_task->rlim, init_task.rlim, sizeof(*(this_task->rlim)));
-	switch_uid(INIT_USER);
+	this_task->user = INIT_USER;
 
 	spin_unlock(&runqueue_lock);
 	write_unlock_irq(&tasklist_lock);
@@ -1352,7 +1284,7 @@ void daemonize(void)
 
 extern unsigned long wait_init_idle;
 
-void init_idle(void)
+void __init init_idle(void)
 {
 	struct schedule_data * sched_data;
 	sched_data = &aligned_data[smp_processor_id()].schedule_data;

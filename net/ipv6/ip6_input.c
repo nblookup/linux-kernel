@@ -3,7 +3,7 @@
  *	Linux INET6 implementation 
  *
  *	Authors:
- *	Pedro Roque		<pedro_m@yahoo.com>
+ *	Pedro Roque		<roque@di.fc.ul.pt>
  *	Ian P. Morris		<I.P.Morris@soton.ac.uk>
  *
  *	$Id: ip6_input.c,v 1.19 2000/12/13 18:31:50 davem Exp $
@@ -221,7 +221,7 @@ int ip6_mc_input(struct sk_buff *skb)
 	IP6_INC_STATS_BH(Ip6InMcastPkts);
 
 	hdr = skb->nh.ipv6h;
-	if (ipv6_chk_mcast_addr(skb->dev, &hdr->daddr, &hdr->saddr))
+	if (ipv6_chk_mcast_addr(skb->dev, &hdr->daddr))
 		deliver = 1;
 
 	/*

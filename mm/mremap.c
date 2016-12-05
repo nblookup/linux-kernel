@@ -77,16 +77,12 @@ static inline int copy_one_pte(struct mm_struct *mm, pte_t * src, pte_t * dst)
 static int move_one_page(struct mm_struct *mm, unsigned long old_addr, unsigned long new_addr)
 {
 	int error = 0;
-	pte_t * src, * dst;
+	pte_t * src;
 
 	spin_lock(&mm->page_table_lock);
 	src = get_one_pte(mm, old_addr);
-	if (src) {
-		dst = alloc_one_pte(mm, new_addr);
-		src = get_one_pte(mm, old_addr);
-		if (src) 
-			error = copy_one_pte(mm, src, dst);
-	}
+	if (src)
+		error = copy_one_pte(mm, src, alloc_one_pte(mm, new_addr));
 	spin_unlock(&mm->page_table_lock);
 	return error;
 }
@@ -181,13 +177,11 @@ static inline unsigned long move_vma(struct vm_area_struct * vma,
 	}
 
 	if (!move_page_tables(current->mm, new_addr, addr, old_len)) {
-		unsigned long vm_locked = vma->vm_flags & VM_LOCKED;
-
 		if (allocated_vma) {
 			*new_vma = *vma;
 			new_vma->vm_start = new_addr;
 			new_vma->vm_end = new_addr+new_len;
-			new_vma->vm_pgoff += (addr-vma->vm_start) >> PAGE_SHIFT;
+			new_vma->vm_pgoff += (addr - vma->vm_start) >> PAGE_SHIFT;
 			new_vma->vm_raend = 0;
 			if (new_vma->vm_file)
 				get_file(new_vma->vm_file);
@@ -195,16 +189,12 @@ static inline unsigned long move_vma(struct vm_area_struct * vma,
 				new_vma->vm_ops->open(new_vma);
 			insert_vm_struct(current->mm, new_vma);
 		}
-
-		/* XXX: possible errors masked, mapping might remain */
 		do_munmap(current->mm, addr, old_len);
-
 		current->mm->total_vm += new_len >> PAGE_SHIFT;
-		if (vm_locked) {
+		if (new_vma->vm_flags & VM_LOCKED) {
 			current->mm->locked_vm += new_len >> PAGE_SHIFT;
-			if (new_len > old_len)
-				make_pages_present(new_addr + old_len,
-						   new_addr + new_len);
+			make_pages_present(new_vma->vm_start,
+					   new_vma->vm_end);
 		}
 		return new_addr;
 	}
@@ -237,12 +227,6 @@ unsigned long do_mremap(unsigned long addr,
 	old_len = PAGE_ALIGN(old_len);
 	new_len = PAGE_ALIGN(new_len);
 
-	if (old_len > TASK_SIZE || addr > TASK_SIZE - old_len)
-		goto out;
-
-	if (addr >= TASK_SIZE)
-		goto out;
-
 	/* new_addr is only valid if MREMAP_FIXED is specified */
 	if (flags & MREMAP_FIXED) {
 		if (new_addr & ~PAGE_MASK)
@@ -251,17 +235,6 @@ unsigned long do_mremap(unsigned long addr,
 			goto out;
 
 		if (new_len > TASK_SIZE || new_addr > TASK_SIZE - new_len)
-			goto out;
-
-		if (new_addr >= TASK_SIZE)
-			goto out;
-
-		/*
-		 * Allow new_len == 0 only if new_addr == addr
-		 * to preserve truncation in place (that was working
-		 * safe and some app may depend on it).
-		 */
-		if (unlikely(!new_len && new_addr != addr))
 			goto out;
 
 		/* Check if the location we're moving into overlaps the
@@ -273,26 +246,16 @@ unsigned long do_mremap(unsigned long addr,
 		if ((addr <= new_addr) && (addr+old_len) > new_addr)
 			goto out;
 
-		/* Ensure a non-privileged process is not trying to map
-		 * lower pages.
-		 */
-		if (new_addr < mmap_min_addr && !capable(CAP_SYS_RAWIO))
-			return -EPERM;
-
-		ret = do_munmap(current->mm, new_addr, new_len);
-		if (ret && new_len)
-			goto out;
+		do_munmap(current->mm, new_addr, new_len);
 	}
 
 	/*
 	 * Always allow a shrinking remap: that just unmaps
 	 * the unnecessary pages..
 	 */
+	ret = addr;
 	if (old_len >= new_len) {
-		ret = do_munmap(current->mm, addr+new_len, old_len - new_len);
-		if (ret && old_len != new_len)
-			goto out;
-		ret = addr;
+		do_munmap(current->mm, addr+new_len, old_len - new_len);
 		if (!(flags & MREMAP_FIXED) || (new_addr == addr))
 			goto out;
 	}

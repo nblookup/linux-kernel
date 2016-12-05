@@ -12,7 +12,6 @@
 #include <linux/completion.h>
 #include <linux/personality.h>
 #include <linux/tty.h>
-#include <linux/namespace.h>
 #ifdef CONFIG_BSD_PROCESS_ACCT
 #include <linux/acct.h>
 #endif
@@ -151,9 +150,7 @@ static inline int has_stopped_jobs(int pgrp)
 }
 
 /*
- * When we die, we re-parent all our children.
- * Try to give them to another thread in our thread
- * group, and if no such member exists, give it to
+ * When we die, we re-parent all our children to
  * the global child reaper process (ie "init")
  */
 static inline void forget_original_parent(struct task_struct * father)
@@ -167,10 +164,7 @@ static inline void forget_original_parent(struct task_struct * father)
 			/* We dont want people slaying init */
 			p->exit_signal = SIGCHLD;
 			p->self_exec_id++;
-
-			/* Make sure we're not reparenting to ourselves */
 			p->p_opptr = child_reaper;
-
 			if (p->pdeath_signal) send_sig(p->pdeath_signal, p, 0);
 		}
 	}
@@ -309,7 +303,7 @@ static inline void __exit_mm(struct task_struct * tsk)
 	mm_release();
 	if (mm) {
 		atomic_inc(&mm->mm_count);
-		BUG_ON(mm != tsk->active_mm);
+		if (mm != tsk->active_mm) BUG();
 		/* more a memory barrier than a real lock */
 		task_lock(tsk);
 		tsk->mm = NULL;
@@ -445,7 +439,6 @@ fake_volatile:
 	sem_exit();
 	__exit_files(tsk);
 	__exit_fs(tsk);
-	exit_namespace(tsk);
 	exit_sighand(tsk);
 	exit_thread();
 

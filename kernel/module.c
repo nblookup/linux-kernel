@@ -303,7 +303,7 @@ sys_create_module(const char *name_user, size_t size)
 		error = namelen;
 		goto err0;
 	}
-	if (size < sizeof(struct module)+namelen+1) {
+	if (size < sizeof(struct module)+namelen) {
 		error = -EINVAL;
 		goto err1;
 	}
@@ -345,10 +345,10 @@ err0:
 asmlinkage long
 sys_init_module(const char *name_user, struct module *mod_user)
 {
-	struct module mod_tmp, *mod, *mod2 = NULL;
+	struct module mod_tmp, *mod;
 	char *name, *n_name, *name_tmp = NULL;
 	long namelen, n_namelen, i, error;
-	unsigned long mod_user_size, flags;
+	unsigned long mod_user_size;
 	struct module_ref *dep;
 
 	if (!capable(CAP_SYS_MODULE))
@@ -387,23 +387,11 @@ sys_init_module(const char *name_user, struct module *mod_user)
 	}
 	strcpy(name_tmp, mod->name);
 
-	/* Copying mod_user directly over mod breaks the module_list chain and
-	 * races against search_exception_table.  copy_from_user may sleep so it
-	 * cannot be under modlist_lock, do the copy in two stages.
-	 */
-	if (!(mod2 = vmalloc(mod_user_size))) {
-		error = -ENOMEM;
-		goto err2;
-	}
-	error = copy_from_user(mod2, mod_user, mod_user_size);
+	error = copy_from_user(mod, mod_user, mod_user_size);
 	if (error) {
 		error = -EFAULT;
 		goto err2;
 	}
-	spin_lock_irqsave(&modlist_lock, flags);
-	memcpy(mod, mod2, mod_user_size);
-	mod->next = mod_tmp.next;
-	spin_unlock_irqrestore(&modlist_lock, flags);
 
 	/* Sanity check the size of the module.  */
 	error = -EINVAL;
@@ -494,10 +482,10 @@ sys_init_module(const char *name_user, struct module *mod_user)
 		error = n_namelen;
 		goto err2;
 	}
-	if (namelen != n_namelen || strcmp(n_name, name_tmp) != 0) {
+	if (namelen != n_namelen || strcmp(n_name, mod_tmp.name) != 0) {
 		printk(KERN_ERR "init_module: changed module name to "
 				"`%s' from `%s'\n",
-		       n_name, name_tmp);
+		       n_name, mod_tmp.name);
 		goto err3;
 	}
 
@@ -517,6 +505,7 @@ sys_init_module(const char *name_user, struct module *mod_user)
 	   to make the I and D caches consistent.  */
 	flush_icache_range((unsigned long)mod, (unsigned long)mod + mod->size);
 
+	mod->next = mod_tmp.next;
 	mod->refs = NULL;
 
 	/* Sanity check the module's dependents */
@@ -582,8 +571,6 @@ err2:
 err1:
 	put_mod_name(name);
 err0:
-	if (mod2)
-		vfree(mod2);
 	unlock_kernel();
 	kfree(name_tmp);
 	return error;

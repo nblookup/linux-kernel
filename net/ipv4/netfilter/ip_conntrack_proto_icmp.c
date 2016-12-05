@@ -6,7 +6,7 @@
 #include <linux/icmp.h>
 #include <linux/netfilter_ipv4/ip_conntrack_protocol.h>
 
-unsigned long ip_ct_icmp_timeout = 30*HZ;
+#define ICMP_TIMEOUT (30*HZ)
 
 #if 0
 #define DEBUGP printk
@@ -82,7 +82,7 @@ static int icmp_packet(struct ip_conntrack *ct,
 			ct->timeout.function((unsigned long)ct);
 	} else {
 		atomic_inc(&ct->proto.icmp.count);
-		ip_ct_refresh(ct, ip_ct_icmp_timeout);
+		ip_ct_refresh(ct, ICMP_TIMEOUT);
 	}
 
 	return NF_ACCEPT;
@@ -113,4 +113,4 @@ static int icmp_new(struct ip_conntrack *conntrack,
 struct ip_conntrack_protocol ip_conntrack_protocol_icmp
 = { { NULL, NULL }, IPPROTO_ICMP, "icmp",
     icmp_pkt_to_tuple, icmp_invert_tuple, icmp_print_tuple,
-    icmp_print_conntrack, icmp_packet, icmp_new, NULL, NULL, NULL };
+    icmp_print_conntrack, icmp_packet, icmp_new, NULL };

@@ -46,7 +46,7 @@ bfifo_enqueue(struct sk_buff *skb, struct Qdisc* sch)
 {
 	struct fifo_sched_data *q = (struct fifo_sched_data *)sch->data;
 
-	if (sch->stats.backlog + skb->len <= q->limit) {
+	if (sch->stats.backlog <= q->limit) {
 		__skb_queue_tail(&sch->q, skb);
 		sch->stats.backlog += skb->len;
 		sch->stats.bytes += skb->len;
@@ -80,17 +80,16 @@ bfifo_dequeue(struct Qdisc* sch)
 	return skb;
 }
 
-static unsigned int 
+static int
 fifo_drop(struct Qdisc* sch)
 {
 	struct sk_buff *skb;
 
 	skb = __skb_dequeue_tail(&sch->q);
 	if (skb) {
-		unsigned int len = skb->len;
-		sch->stats.backlog -= len;
+		sch->stats.backlog -= skb->len;
 		kfree_skb(skb);
-		return len;
+		return 1;
 	}
 	return 0;
 }
@@ -107,7 +106,7 @@ pfifo_enqueue(struct sk_buff *skb, struct Qdisc* sch)
 {
 	struct fifo_sched_data *q = (struct fifo_sched_data *)sch->data;
 
-	if (sch->q.qlen < q->limit) {
+	if (sch->q.qlen <= q->limit) {
 		__skb_queue_tail(&sch->q, skb);
 		sch->stats.bytes += skb->len;
 		sch->stats.packets++;
@@ -140,12 +139,10 @@ static int fifo_init(struct Qdisc *sch, struct rtattr *opt)
 	struct fifo_sched_data *q = (void*)sch->data;
 
 	if (opt == NULL) {
-		unsigned int limit = sch->dev->tx_queue_len ? : 1;
-
 		if (sch->ops == &bfifo_qdisc_ops)
-			q->limit = limit*sch->dev->mtu;
+			q->limit = sch->dev->tx_queue_len*sch->dev->mtu;
 		else	
-			q->limit = limit;
+			q->limit = sch->dev->tx_queue_len;
 	} else {
 		struct tc_fifo_qopt *ctl = RTA_DATA(opt);
 		if (opt->rta_len < RTA_LENGTH(sizeof(*ctl)))
@@ -155,6 +152,7 @@ static int fifo_init(struct Qdisc *sch, struct rtattr *opt)
 	return 0;
 }
 
+#ifdef CONFIG_RTNETLINK
 static int fifo_dump(struct Qdisc *sch, struct sk_buff *skb)
 {
 	struct fifo_sched_data *q = (void*)sch->data;
@@ -170,6 +168,7 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
+#endif
 
 struct Qdisc_ops pfifo_qdisc_ops =
 {
@@ -188,7 +187,9 @@ struct Qdisc_ops pfifo_qdisc_ops =
 	NULL,
 	fifo_init,
 
+#ifdef CONFIG_RTNETLINK
 	fifo_dump,
+#endif
 };
 
 struct Qdisc_ops bfifo_qdisc_ops =
@@ -207,5 +208,7 @@ struct Qdisc_ops bfifo_qdisc_ops =
 	fifo_reset,
 	NULL,
 	fifo_init,
+#ifdef CONFIG_RTNETLINK
 	fifo_dump,
+#endif
 };

@@ -102,7 +102,6 @@
  *			Joerg(DL1BKE)		Added support for SO_BINDTODEVICE
  *			Arnaldo C. Melo		s/suser/capable(CAP_NET_ADMIN)/, some more cleanups
  *			Michal Ostrowski	Module initialization cleanup.
- *			Jeroen(PE1RXQ)		Use sock_orphan() on release.
  */
 
 #include <linux/config.h>
@@ -1019,7 +1018,7 @@ static int ax25_release(struct socket *sock)
 				sk->state                = TCP_CLOSE;
 				sk->shutdown            |= SEND_SHUTDOWN;
 				sk->state_change(sk);
-				sock_orphan(sk);
+				sk->dead                 = 1;
 				sk->destroy              = 1;
 				break;
 
@@ -1030,7 +1029,7 @@ static int ax25_release(struct socket *sock)
 		sk->state     = TCP_CLOSE;
 		sk->shutdown |= SEND_SHUTDOWN;
 		sk->state_change(sk);
-		sock_orphan(sk);
+		sk->dead      = 1;
 		ax25_destroy_socket(sk->protinfo.ax25);
 	}
 
@@ -1863,7 +1862,6 @@ module_init(ax25_init);
 
 MODULE_AUTHOR("Jonathan Naylor G4KLX <g4klx@g4klx.demon.co.uk>");
 MODULE_DESCRIPTION("The amateur radio AX.25 link layer protocol");
-MODULE_LICENSE("GPL");
 
 static void __exit ax25_exit(void)
 {

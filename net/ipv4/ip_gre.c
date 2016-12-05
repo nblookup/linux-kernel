@@ -412,7 +412,7 @@ out:
 	struct sk_buff *skb2;
 	struct rtable *rt;
 
-	if (p[1] != htons(ETH_P_IP))
+	if (p[1] != __constant_htons(ETH_P_IP))
 		return;
 
 	flags = p[0];
@@ -535,10 +535,10 @@ out:
 static inline void ipgre_ecn_decapsulate(struct iphdr *iph, struct sk_buff *skb)
 {
 	if (INET_ECN_is_ce(iph->tos)) {
-		if (skb->protocol == htons(ETH_P_IP)) {
+		if (skb->protocol == __constant_htons(ETH_P_IP)) {
 			if (INET_ECN_is_not_ce(skb->nh.iph->tos))
 				IP_ECN_set_ce(skb->nh.iph);
-		} else if (skb->protocol == htons(ETH_P_IPV6)) {
+		} else if (skb->protocol == __constant_htons(ETH_P_IPV6)) {
 			if (INET_ECN_is_not_ce(ip6_get_dsfield(skb->nh.ipv6h)))
 				IP6_ECN_set_ce(skb->nh.ipv6h);
 		}
@@ -549,9 +549,9 @@ static inline u8
 ipgre_ecn_encapsulate(u8 tos, struct iphdr *old_iph, struct sk_buff *skb)
 {
 	u8 inner = 0;
-	if (skb->protocol == htons(ETH_P_IP))
+	if (skb->protocol == __constant_htons(ETH_P_IP))
 		inner = old_iph->tos;
-	else if (skb->protocol == htons(ETH_P_IPV6))
+	else if (skb->protocol == __constant_htons(ETH_P_IPV6))
 		inner = ip6_get_dsfield((struct ipv6hdr*)old_iph);
 	return INET_ECN_encapsulate(tos, inner);
 }
@@ -644,7 +644,13 @@ int ipgre_rcv(struct sk_buff *skb)
 		skb->dev = tunnel->dev;
 		dst_release(skb->dst);
 		skb->dst = NULL;
-		nf_reset(skb);
+#ifdef CONFIG_NETFILTER
+		nf_conntrack_put(skb->nfct);
+		skb->nfct = NULL;
+#ifdef CONFIG_NETFILTER_DEBUG
+		skb->nf_debug = 0;
+#endif
+#endif
 		ipgre_ecn_decapsulate(iph, skb);
 		netif_rx(skb);
 		read_unlock(&ipgre_lock);
@@ -702,13 +708,13 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			goto tx_error;
 		}
 
-		if (skb->protocol == htons(ETH_P_IP)) {
+		if (skb->protocol == __constant_htons(ETH_P_IP)) {
 			rt = (struct rtable*)skb->dst;
 			if ((dst = rt->rt_gateway) == 0)
 				goto tx_error_icmp;
 		}
 #ifdef CONFIG_IPV6
-		else if (skb->protocol == htons(ETH_P_IPV6)) {
+		else if (skb->protocol == __constant_htons(ETH_P_IPV6)) {
 			struct in6_addr *addr6;
 			int addr_type;
 			struct neighbour *neigh = skb->dst->neighbour;
@@ -736,7 +742,7 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	tos = tiph->tos;
 	if (tos&1) {
-		if (skb->protocol == htons(ETH_P_IP))
+		if (skb->protocol == __constant_htons(ETH_P_IP))
 			tos = old_iph->tos;
 		tos &= ~1;
 	}
@@ -754,18 +760,15 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	df = tiph->frag_off;
-	if (df)
-		mtu = rt->u.dst.pmtu - tunnel->hlen;
-	else
-		mtu = skb->dst ? skb->dst->pmtu : dev->mtu;
+	mtu = rt->u.dst.pmtu - tunnel->hlen;
 
-	if (skb->protocol == htons(ETH_P_IP)) {
+	if (skb->protocol == __constant_htons(ETH_P_IP)) {
 		if (skb->dst && mtu < skb->dst->pmtu && mtu >= 68)
 			skb->dst->pmtu = mtu;
 
-		df |= (old_iph->frag_off&htons(IP_DF));
+		df |= (old_iph->frag_off&__constant_htons(IP_DF));
 
-		if ((old_iph->frag_off&htons(IP_DF)) &&
+		if ((old_iph->frag_off&__constant_htons(IP_DF)) &&
 		    mtu < ntohs(old_iph->tot_len)) {
 			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED, htonl(mtu));
 			ip_rt_put(rt);
@@ -773,7 +776,7 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 		}
 	}
 #ifdef CONFIG_IPV6
-	else if (skb->protocol == htons(ETH_P_IPV6)) {
+	else if (skb->protocol == __constant_htons(ETH_P_IPV6)) {
 		struct rt6_info *rt6 = (struct rt6_info*)skb->dst;
 
 		if (rt6 && mtu < rt6->u.dst.pmtu && mtu >= IPV6_MIN_MTU) {
@@ -801,6 +804,8 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			tunnel->err_count = 0;
 	}
 
+	skb->h.raw = skb->nh.raw;
+
 	max_headroom = ((tdev->hard_header_len+15)&~15)+ gre_hlen;
 
 	if (skb_headroom(skb) < max_headroom || skb_cloned(skb) || skb_shared(skb)) {
@@ -816,10 +821,8 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			skb_set_owner_w(new_skb, skb->sk);
 		dev_kfree_skb(skb);
 		skb = new_skb;
-		old_iph = skb->nh.iph;
 	}
 
-	skb->h.raw = skb->nh.raw;
 	skb->nh.raw = skb_push(skb, gre_hlen);
 	memset(&(IPCB(skb)->opt), 0, sizeof(IPCB(skb)->opt));
 	dst_release(skb->dst);
@@ -839,10 +842,10 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	iph->saddr		=	rt->rt_src;
 
 	if ((iph->ttl = tiph->ttl) == 0) {
-		if (skb->protocol == htons(ETH_P_IP))
+		if (skb->protocol == __constant_htons(ETH_P_IP))
 			iph->ttl = old_iph->ttl;
 #ifdef CONFIG_IPV6
-		else if (skb->protocol == htons(ETH_P_IPV6))
+		else if (skb->protocol == __constant_htons(ETH_P_IPV6))
 			iph->ttl = ((struct ipv6hdr*)old_iph)->hop_limit;
 #endif
 		else
@@ -870,7 +873,13 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 		}
 	}
 
-	nf_reset(skb);
+#ifdef CONFIG_NETFILTER
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#ifdef CONFIG_NETFILTER_DEBUG
+	skb->nf_debug = 0;
+#endif
+#endif
 
 	IPTUNNEL_XMIT();
 	tunnel->recursion--;
@@ -924,11 +933,11 @@ ipgre_tunnel_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd)
 
 		err = -EINVAL;
 		if (p.iph.version != 4 || p.iph.protocol != IPPROTO_GRE ||
-		    p.iph.ihl != 5 || (p.iph.frag_off&htons(~IP_DF)) ||
+		    p.iph.ihl != 5 || (p.iph.frag_off&__constant_htons(~IP_DF)) ||
 		    ((p.i_flags|p.o_flags)&(GRE_VERSION|GRE_ROUTING)))
 			goto done;
 		if (p.iph.ttl)
-			p.iph.frag_off |= htons(IP_DF);
+			p.iph.frag_off |= __constant_htons(IP_DF);
 
 		if (!(p.i_flags&GRE_KEY))
 			p.i_key = 0;

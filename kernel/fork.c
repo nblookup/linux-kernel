@@ -19,15 +19,12 @@
 #include <linux/module.h>
 #include <linux/vmalloc.h>
 #include <linux/completion.h>
-#include <linux/namespace.h>
 #include <linux/personality.h>
-#include <linux/compiler.h>
 
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
 #include <asm/uaccess.h>
 #include <asm/mmu_context.h>
-#include <asm/processor.h>
 
 /* The idle threads do not count.. */
 int nr_threads;
@@ -39,7 +36,7 @@ int last_pid;
 
 struct task_struct *pidhash[PIDHASH_SZ];
 
-void fastcall add_wait_queue(wait_queue_head_t *q, wait_queue_t * wait)
+void add_wait_queue(wait_queue_head_t *q, wait_queue_t * wait)
 {
 	unsigned long flags;
 
@@ -49,7 +46,7 @@ void fastcall add_wait_queue(wait_queue_head_t *q, wait_queue_t * wait)
 	wq_write_unlock_irqrestore(&q->lock, flags);
 }
 
-void fastcall add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t * wait)
+void add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t * wait)
 {
 	unsigned long flags;
 
@@ -59,7 +56,7 @@ void fastcall add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t * wait
 	wq_write_unlock_irqrestore(&q->lock, flags);
 }
 
-void fastcall remove_wait_queue(wait_queue_head_t *q, wait_queue_t * wait)
+void remove_wait_queue(wait_queue_head_t *q, wait_queue_t * wait)
 {
 	unsigned long flags;
 
@@ -88,13 +85,11 @@ static int get_pid(unsigned long flags)
 {
 	static int next_safe = PID_MAX;
 	struct task_struct *p;
-	int pid, beginpid;
 
 	if (flags & CLONE_PID)
 		return current->pid;
 
 	spin_lock(&lastpid_lock);
-	beginpid = last_pid;
 	if((++last_pid) & 0xffff8000) {
 		last_pid = 300;		/* Skip daemons etc. */
 		goto inside;
@@ -114,32 +109,20 @@ inside:
 						last_pid = 300;
 					next_safe = PID_MAX;
 				}
-				if(unlikely(last_pid == beginpid)) {
-					next_safe = 0;
-					goto nomorepids;
-				}
 				goto repeat;
 			}
 			if(p->pid > last_pid && next_safe > p->pid)
 				next_safe = p->pid;
 			if(p->pgrp > last_pid && next_safe > p->pgrp)
 				next_safe = p->pgrp;
-			if(p->tgid > last_pid && next_safe > p->tgid)
-				next_safe = p->tgid;
 			if(p->session > last_pid && next_safe > p->session)
 				next_safe = p->session;
 		}
 		read_unlock(&tasklist_lock);
 	}
-	pid = last_pid;
 	spin_unlock(&lastpid_lock);
 
-	return pid;
-
-nomorepids:
-	read_unlock(&tasklist_lock);
-	spin_unlock(&lastpid_lock);
-	return 0;
+	return last_pid;
 }
 
 static inline int dup_mmap(struct mm_struct * mm)
@@ -236,7 +219,6 @@ static struct mm_struct * mm_init(struct mm_struct * mm)
 	init_rwsem(&mm->mmap_sem);
 	mm->page_table_lock = SPIN_LOCK_UNLOCKED;
 	mm->pgd = pgd_alloc(mm);
-	mm->def_flags = 0;
 	if (mm->pgd)
 		return mm;
 	free_mm(mm);
@@ -264,11 +246,10 @@ struct mm_struct * mm_alloc(void)
  * is dropped: either by a lazy thread or by
  * mmput. Free the page directory and the mm.
  */
-void fastcall __mmdrop(struct mm_struct *mm)
+inline void __mmdrop(struct mm_struct *mm)
 {
-	BUG_ON(mm == &init_mm);
+	if (mm == &init_mm) BUG();
 	pgd_free(mm->pgd);
-	check_pgt_cache();
 	destroy_context(mm);
 	free_mm(mm);
 }
@@ -352,9 +333,6 @@ static int copy_mm(unsigned long clone_flags, struct task_struct * tsk)
 	if (!mm_init(mm))
 		goto fail_nomem;
 
-	if (init_new_context(tsk,mm))
-		goto free_pt;
-
 	down_write(&oldmm->mmap_sem);
 	retval = dup_mmap(mm);
 	up_write(&oldmm->mmap_sem);
@@ -366,6 +344,9 @@ static int copy_mm(unsigned long clone_flags, struct task_struct * tsk)
 	 * child gets a private LDT (if there was an LDT in the parent)
 	 */
 	copy_segments(tsk, mm);
+
+	if (init_new_context(tsk,mm))
+		goto free_pt;
 
 good_mm:
 	tsk->mm = mm;
@@ -451,11 +432,6 @@ static int copy_files(unsigned long clone_flags, struct task_struct * tsk)
 		goto out;
 	}
 
-	/*
-	 * Note: we may be using current for both targets (See exec.c)
-	 * This works because we cache current->files (old) as oldf. Don't
-	 * break this.
-	 */
 	tsk->files = NULL;
 	error = -ENOMEM;
 	newf = kmem_cache_alloc(files_cachep, SLAB_KERNEL);
@@ -513,17 +489,8 @@ static int copy_files(unsigned long clone_flags, struct task_struct * tsk)
 
 	for (i = open_files; i != 0; i--) {
 		struct file *f = *old_fds++;
-		if (f) {
+		if (f)
 			get_file(f);
-		} else {
-			/*
-			 * The fd may be claimed in the fd bitmap but not yet
-			 * instantiated in the files array if a sibling thread
-			 * is partway through open().  So make sure that this
-			 * fd is available to the new process.
-			 */
-                        FD_CLR(open_files - i, newf->open_fds);
-		}
 		*new_fds++ = f;
 	}
 	read_unlock(&oldf->file_lock);
@@ -554,33 +521,6 @@ out_release:
 	goto out;
 }
 
-/*
- *	Helper to unshare the files of the current task. 
- *	We don't want to expose copy_files internals to 
- *	the exec layer of the kernel.
- */
-
-int unshare_files(void)
-{
-	struct files_struct *files  = current->files;
-	int rc;
-	
-	if(!files)
-		BUG();
-		
-	/* This can race but the race causes us to copy when we don't
-	   need to and drop the copy */
-	if(atomic_read(&files->count) == 1)
-	{
-		atomic_inc(&files->count);
-		return 0;
-	}
-	rc = copy_files(0, current);
-	if(rc)
-		current->files = files;
-	return rc;
-}		
-
 static inline int copy_sighand(unsigned long clone_flags, struct task_struct * tsk)
 {
 	struct signal_struct *sig;
@@ -610,31 +550,6 @@ static inline void copy_flags(unsigned long clone_flags, struct task_struct *p)
 	p->flags = new_flags;
 }
 
-long kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
-{
-	struct task_struct *task = current;
-	unsigned old_task_dumpable;
-	long ret;
-
-	/* lock out any potential ptracer */
-	task_lock(task);
-	if (task->ptrace) {
-		task_unlock(task);
-		return -EPERM;
-	}
-
-	old_task_dumpable = task->task_dumpable;
-	task->task_dumpable = 0;
-	task_unlock(task);
-
-	ret = arch_kernel_thread(fn, arg, flags);
-
-	/* never reached in child process, only in parent */
-	current->task_dumpable = old_task_dumpable;
-
-	return ret;
-}
-
 /*
  *  Ok, this is the main fork-routine. It copies the system process
  * information (task[nr]) and sets up the necessary registers. It also
@@ -650,9 +565,6 @@ int do_fork(unsigned long clone_flags, unsigned long stack_start,
 	int retval;
 	struct task_struct *p;
 	struct completion vfork;
-
-	if ((clone_flags & (CLONE_NEWNS|CLONE_FS)) == (CLONE_NEWNS|CLONE_FS))
-		return -EINVAL;
 
 	retval = -EPERM;
 
@@ -673,15 +585,7 @@ int do_fork(unsigned long clone_flags, unsigned long stack_start,
 	*p = *current;
 
 	retval = -EAGAIN;
-	/*
-	 * Check if we are over our maximum process limit, but be sure to
-	 * exclude root. This is needed to make it possible for login and
-	 * friends to set the per-user process limit to something lower
-	 * than the amount of processes root is running. -- Rik
-	 */
-	if (atomic_read(&p->user->processes) >= p->rlim[RLIMIT_NPROC].rlim_cur
-		      && p->user != &root_user
-	              && !capable(CAP_SYS_ADMIN) && !capable(CAP_SYS_RESOURCE))
+	if (atomic_read(&p->user->processes) >= p->rlim[RLIMIT_NPROC].rlim_cur)
 		goto bad_fork_free;
 
 	atomic_inc(&p->user->__count);
@@ -706,8 +610,6 @@ int do_fork(unsigned long clone_flags, unsigned long stack_start,
 
 	copy_flags(clone_flags, p);
 	p->pid = get_pid(clone_flags);
-	if (p->pid == 0 && current->pid != 0)
-		goto bad_fork_cleanup;
 
 	p->run_list.next = NULL;
 	p->run_list.prev = NULL;
@@ -759,12 +661,9 @@ int do_fork(unsigned long clone_flags, unsigned long stack_start,
 		goto bad_fork_cleanup_fs;
 	if (copy_mm(clone_flags, p))
 		goto bad_fork_cleanup_sighand;
-	retval = copy_namespace(clone_flags, p);
-	if (retval)
-		goto bad_fork_cleanup_mm;
 	retval = copy_thread(0, clone_flags, stack_start, stack_size, p, regs);
 	if (retval)
-		goto bad_fork_cleanup_namespace;
+		goto bad_fork_cleanup_mm;
 	p->semundo = NULL;
 	
 	/* Our parent execution domain becomes current domain
@@ -779,7 +678,7 @@ int do_fork(unsigned long clone_flags, unsigned long stack_start,
 
 	/*
 	 * "share" dynamic priority between parent and child, thus the
-	 * total amount of dynamic priorities in the system doesn't change,
+	 * total amount of dynamic priorities in the system doesnt change,
 	 * more scheduling fairness. This is only important in the first
 	 * timeslice, on the long run the scheduling behaviour is unchanged.
 	 */
@@ -801,10 +700,10 @@ int do_fork(unsigned long clone_flags, unsigned long stack_start,
 	/* Need tasklist lock for parent etc handling! */
 	write_lock_irq(&tasklist_lock);
 
-	/* CLONE_PARENT re-uses the old parent */
+	/* CLONE_PARENT and CLONE_THREAD re-use the old parent */
 	p->p_opptr = current->p_opptr;
 	p->p_pptr = current->p_pptr;
-	if (!(clone_flags & CLONE_PARENT)) {
+	if (!(clone_flags & (CLONE_PARENT | CLONE_THREAD))) {
 		p->p_opptr = current;
 		if (!(p->ptrace & PT_PTRACED))
 			p->p_pptr = current;
@@ -831,12 +730,8 @@ int do_fork(unsigned long clone_flags, unsigned long stack_start,
 fork_out:
 	return retval;
 
-bad_fork_cleanup_namespace:
-	exit_namespace(p);
 bad_fork_cleanup_mm:
 	exit_mm(p);
-	if (p->active_mm)
-		mmdrop(p->active_mm);
 bad_fork_cleanup_sighand:
 	exit_sighand(p);
 bad_fork_cleanup_fs:

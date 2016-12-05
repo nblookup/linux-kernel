@@ -292,13 +292,14 @@ static void fw_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 			}
 			if (arg->fn(tp, (unsigned long)f, arg) < 0) {
 				arg->stop = 1;
-				return;
+				break;
 			}
 			arg->count++;
 		}
 	}
 }
 
+#ifdef CONFIG_RTNETLINK
 static int fw_dump(struct tcf_proto *tp, unsigned long fh,
 		   struct sk_buff *skb, struct tcmsg *t)
 {
@@ -349,6 +350,8 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
+#endif
+
 
 struct tcf_proto_ops cls_fw_ops = {
 	NULL,
@@ -362,7 +365,11 @@ struct tcf_proto_ops cls_fw_ops = {
 	fw_change,
 	fw_delete,
 	fw_walk,
+#ifdef CONFIG_RTNETLINK
 	fw_dump
+#else
+	NULL
+#endif
 };
 
 #ifdef MODULE

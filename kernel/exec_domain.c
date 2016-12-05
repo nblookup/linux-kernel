@@ -4,7 +4,7 @@
  * We group personalities into execution domains which have their
  * own handlers for kernel entry points, signal mapping, etc...
  *
- * 2001-05-06	Complete rewrite,  Christoph Hellwig (hch@infradead.org)
+ * 2001-05-06	Complete rewrite,  Christoph Hellwig (hch@caldera.de)
  */
 
 #include <linux/config.h>
@@ -102,7 +102,7 @@ lookup_exec_domain(u_long personality)
 	}
 #endif
 
-	ep = &default_exec_domain;
+	ep = NULL;
 out:
 	read_unlock(&exec_domains_lock);
 	return (ep);
@@ -162,6 +162,8 @@ __set_personality(u_long personality)
 	struct exec_domain	*ep, *oep;
 
 	ep = lookup_exec_domain(personality);
+	if (ep == NULL)
+		return -EINVAL;
 	if (ep == current->exec_domain) {
 		current->personality = personality;
 		return 0;
@@ -196,6 +198,8 @@ __set_personality(u_long personality)
 
 	put_exec_domain(oep);
 
+	printk(KERN_DEBUG "[%s:%d]: set personality to %lx\n",
+			current->comm, current->pid, personality);
 	return 0;
 }
 

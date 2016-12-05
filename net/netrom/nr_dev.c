@@ -19,6 +19,7 @@
  */
 
 #include <linux/config.h>
+#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/proc_fs.h>
 #include <linux/kernel.h>

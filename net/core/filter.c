@@ -294,9 +294,10 @@ load_b:
 				goto load_b;
 
 			case BPF_LDX|BPF_B|BPF_MSH:
-				if(fentry->k >= len)
+				k = fentry->k;
+				if(k >= 0 && (unsigned int)k >= len)
 					return (0);
-				X = (data[fentry->k] & 0xf) << 2;
+				X = (data[k] & 0xf) << 2;
 				continue;
 
 			case BPF_LD|BPF_IMM:

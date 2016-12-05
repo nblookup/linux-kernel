@@ -8,7 +8,7 @@
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  *
- * Version:	$Id: af_unix.c,v 1.126.2.5 2002/03/05 12:47:34 davem Exp $
+ * Version:	$Id: af_unix.c,v 1.123 2001/09/19 04:50:32 davem Exp $
  *
  * Fixes:
  *		Linus Torvalds	:	Assorted bug cures.
@@ -101,14 +101,13 @@
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 #include <net/sock.h>
-#include <linux/tcp.h>
+#include <net/tcp.h>
 #include <net/af_unix.h>
 #include <linux/proc_fs.h>
 #include <net/scm.h>
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/smp_lock.h>
-#include <linux/rtnetlink.h>
 
 #include <asm/checksum.h>
 
@@ -178,7 +177,18 @@ static int unix_mkname(struct sockaddr_un * sunaddr, int len, unsigned *hashp)
 		return -EINVAL;
 	if (!sunaddr || sunaddr->sun_family != AF_UNIX)
 		return -EINVAL;
-	if (sunaddr->sun_path[0]) {
+	if (sunaddr->sun_path[0])
+	{
+		/*
+		 *	This may look like an off by one error but it is
+		 *	a bit more subtle. 108 is the longest valid AF_UNIX
+		 *	path for a binding. sun_path[108] doesnt as such
+		 *	exist. However in kernel space we are guaranteed that
+		 *	it is a valid memory location in our kernel
+		 *	address buffer.
+		 */
+		if (len > sizeof(*sunaddr))
+			len = sizeof(*sunaddr);
 		((char *)sunaddr)[len]=0;
 		len = strlen(sunaddr->sun_path)+1+sizeof(short);
 		return len;
@@ -473,7 +483,7 @@ static struct sock * unix_create1(struct socket *sock)
 	sk->protinfo.af_unix.dentry=NULL;
 	sk->protinfo.af_unix.mnt=NULL;
 	sk->protinfo.af_unix.lock = RW_LOCK_UNLOCKED;
-	atomic_set(&sk->protinfo.af_unix.inflight, sock ? 0 : -1);
+	atomic_set(&sk->protinfo.af_unix.inflight, 0);
 	init_MUTEX(&sk->protinfo.af_unix.readsem);/* single task reading lock */
 	init_waitqueue_head(&sk->protinfo.af_unix.peer_wait);
 	sk->protinfo.af_unix.list=NULL;
@@ -554,8 +564,10 @@ retry:
 				      addr->hash)) {
 		write_unlock(&unix_table_lock);
 		/* Sanity yield. It is unusual case, but yet... */
-		if (!(ordernum&0xFF))
-			yield();
+		if (!(ordernum&0xFF)) {
+			current->policy |= SCHED_YIELD;
+			schedule();
+		}
 		goto retry;
 	}
 	addr->hash ^= sk->type;
@@ -595,9 +607,6 @@ static unix_socket *unix_find_other(struct sockaddr_un *sunname, int len,
 		if (!u)
 			goto put_fail;
 
-		if (u->type == type)
-			UPDATE_ATIME(nd.dentry->d_inode);
-
 		path_release(&nd);
 
 		err=-EPROTOTYPE;
@@ -608,12 +617,7 @@ static unix_socket *unix_find_other(struct sockaddr_un *sunname, int len,
 	} else {
 		err = -ECONNREFUSED;
 		u=unix_find_socket_byname(sunname, len, type, hash);
-		if (u) {
-			struct dentry *dentry;
-			dentry = u->protinfo.af_unix.dentry;
-			if (dentry)
-				UPDATE_ATIME(dentry->d_inode);
-		} else
+		if (!u)
 			goto fail;
 	}
 	return u;
@@ -986,12 +990,7 @@ restart:
 	unix_state_wunlock(sk);
 
 	/* take ten and and send info to listening sock */
-	spin_lock(&other->receive_queue.lock);
-	__skb_queue_tail(&other->receive_queue,skb);
-	/* Undo artificially decreased inflight after embrion
-	 * is installed to listening socket. */
-	atomic_inc(&newsk->protinfo.af_unix.inflight);
-	spin_unlock(&other->receive_queue.lock);
+	skb_queue_tail(&other->receive_queue,skb);
 	unix_state_runlock(other);
 	other->data_ready(other, 0);
 	sock_put(other);
@@ -1054,12 +1053,8 @@ static int unix_accept(struct socket *sock, struct socket *newsock, int flags)
 	 */
 
 	skb = skb_recv_datagram(sk, 0, flags&O_NONBLOCK, &err);
-	if (!skb) {
-		/* This means receive shutdown. */
-		if (err == 0)
-			err = -EINVAL;
+	if (!skb)
 		goto out;
-	}
 
 	tsk = skb->sk;
 	skb_free_datagram(sk, skb);
@@ -1380,7 +1375,7 @@ out_err:
 
 static void unix_copy_addr(struct msghdr *msg, struct sock *sk)
 {
-	msg->msg_namelen = 0;
+	msg->msg_namelen = sizeof(short);
 	if (sk->protinfo.af_unix.addr) {
 		msg->msg_namelen=sk->protinfo.af_unix.addr->len;
 		memcpy(msg->msg_name,
@@ -1403,11 +1398,9 @@ static int unix_dgram_recvmsg(struct socket *sock, struct msghdr *msg, int size,
 
 	msg->msg_namelen = 0;
 
-	down(&sk->protinfo.af_unix.readsem);
-
 	skb = skb_recv_datagram(sk, flags, noblock, &err);
 	if (!skb)
-		goto out_unlock;
+		goto out;
 
 	wake_up_interruptible(&sk->protinfo.af_unix.peer_wait);
 
@@ -1451,8 +1444,6 @@ static int unix_dgram_recvmsg(struct socket *sock, struct msghdr *msg, int size,
 
 out_free:
 	skb_free_datagram(sk,skb);
-out_unlock:
-	up(&sk->protinfo.af_unix.readsem);
 out:
 	return err;
 }
@@ -1686,13 +1677,8 @@ static int unix_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			}
 
 			spin_lock(&sk->receive_queue.lock);
-			if (sk->type == SOCK_STREAM) {
-				skb_queue_walk(&sk->receive_queue, skb)
-					amount += skb->len;
-			} else {
-				if((skb=skb_peek(&sk->receive_queue))!=NULL)
-					amount=skb->len;
-			}
+			if((skb=skb_peek(&sk->receive_queue))!=NULL)
+				amount=skb->len;
 			spin_unlock(&sk->receive_queue.lock);
 			err = put_user(amount, (int *)arg);
 			break;
@@ -1756,7 +1742,7 @@ static int unix_read_proc(char *buffer, char **start, off_t offset,
 	{
 		unix_state_rlock(s);
 
-		len+=sprintf(buffer+len,"%p: %08X %08X %08X %04X %02X %5lu",
+		len+=sprintf(buffer+len,"%p: %08X %08X %08X %04X %02X %5ld",
 			s,
 			atomic_read(&s->refcnt),
 			0,
@@ -1889,4 +1875,8 @@ static void __exit af_unix_exit(void)
 module_init(af_unix_init);
 module_exit(af_unix_exit);
 
-MODULE_LICENSE("GPL");
+/*
+ * Local variables:
+ *  compile-command: "gcc -g -D__KERNEL__ -Wall -O6 -I/usr/src/linux/include -c af_unix.c"
+ * End:
+ */

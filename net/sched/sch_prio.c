@@ -124,18 +124,18 @@ prio_dequeue(struct Qdisc* sch)
 
 }
 
-static unsigned int prio_drop(struct Qdisc* sch)
+static int
+prio_drop(struct Qdisc* sch)
 {
 	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
 	int prio;
-	unsigned int len;
 	struct Qdisc *qdisc;
 
 	for (prio = q->bands-1; prio >= 0; prio--) {
 		qdisc = q->queues[prio];
-		if ((len = qdisc->ops->drop(qdisc)) != 0) {
+		if (qdisc->ops->drop(qdisc)) {
 			sch->q.qlen--;
-			return len;
+			return 1;
 		}
 	}
 	return 0;
@@ -158,12 +158,6 @@ prio_destroy(struct Qdisc* sch)
 {
 	int prio;
 	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
-	struct tcf_proto *tp;
-
-	while ((tp = q->filter_list) != NULL) {
-		q->filter_list = tp->next;
-		tcf_destroy(tp);
-	}
 
 	for (prio=0; prio<q->bands; prio++) {
 		qdisc_destroy(q->queues[prio]);
@@ -237,6 +231,7 @@ static int prio_init(struct Qdisc *sch, struct rtattr *opt)
 	return 0;
 }
 
+#ifdef CONFIG_RTNETLINK
 static int prio_dump(struct Qdisc *sch, struct sk_buff *skb)
 {
 	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
@@ -252,6 +247,7 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
+#endif
 
 static int prio_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
 		      struct Qdisc **old)
@@ -268,7 +264,6 @@ static int prio_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
 	sch_tree_lock(sch);
 	*old = q->queues[band];
 	q->queues[band] = new;
-	sch->q.qlen -= (*old)->q.qlen;
 	qdisc_reset(*old);
 	sch_tree_unlock(sch);
 
@@ -327,6 +322,7 @@ static int prio_delete(struct Qdisc *sch, unsigned long cl)
 }
 
 
+#ifdef CONFIG_RTNETLINK
 static int prio_dump_class(struct Qdisc *sch, unsigned long cl, struct sk_buff *skb,
 			   struct tcmsg *tcm)
 {
@@ -334,11 +330,11 @@ static int prio_dump_class(struct Qdisc *sch, unsigned long cl, struct sk_buff *
 
 	if (cl - 1 > q->bands)
 		return -ENOENT;
-	tcm->tcm_handle |= TC_H_MIN(cl);
 	if (q->queues[cl-1])
 		tcm->tcm_info = q->queues[cl-1]->handle;
 	return 0;
 }
+#endif
 
 static void prio_walk(struct Qdisc *sch, struct qdisc_walker *arg)
 {
@@ -385,7 +381,9 @@ static struct Qdisc_class_ops prio_class_ops =
 	prio_bind,
 	prio_put,
 
+#ifdef CONFIG_RTNETLINK
 	prio_dump_class,
+#endif
 };
 
 struct Qdisc_ops prio_qdisc_ops =
@@ -405,7 +403,9 @@ struct Qdisc_ops prio_qdisc_ops =
 	prio_destroy,
 	prio_tune,
 
+#ifdef CONFIG_RTNETLINK
 	prio_dump,
+#endif
 };
 
 #ifdef MODULE

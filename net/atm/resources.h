@@ -10,11 +10,12 @@
 #include <linux/atmdev.h>
 
 
-extern struct list_head atm_devs;
-extern spinlock_t atm_dev_lock;
+extern struct atm_dev *atm_devs;
+extern struct atm_vcc *nodev_vccs; /* VCCs not linked to any device */
 
 
-int atm_dev_ioctl(unsigned int cmd, unsigned long arg);
+struct sock *alloc_atm_vcc_sk(int family);
+void free_atm_vcc_sk(struct sock *sk);
 
 
 #ifdef CONFIG_PROC_FS

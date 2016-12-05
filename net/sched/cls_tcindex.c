@@ -161,8 +161,7 @@ static int tcindex_init(struct tcf_proto *tp)
 }
 
 
-static int
-__tcindex_delete(struct tcf_proto *tp, unsigned long arg, int lock)
+static int tcindex_delete(struct tcf_proto *tp, unsigned long arg)
 {
 	struct tcindex_data *p = PRIV(tp);
 	struct tcindex_filter_result *r = (struct tcindex_filter_result *) arg;
@@ -185,11 +184,9 @@ __tcindex_delete(struct tcf_proto *tp, unsigned long arg, int lock)
 
 found:
 		f = *walk;
-		if (lock)
-			tcf_tree_lock(tp);
+		tcf_tree_lock(tp); 
 		*walk = f->next;
-		if (lock)
-			tcf_tree_unlock(tp);
+		tcf_tree_unlock(tp);
 	}
 	cl = __cls_set_class(&r->res.class,0);
 	if (cl)
@@ -202,10 +199,6 @@ found:
 	return 0;
 }
 
-static int tcindex_delete(struct tcf_proto *tp, unsigned long arg)
-{
-	return __tcindex_delete(tp, arg, 1);
-}
 
 /*
  * There are no parameters for tcindex_init, so we overload tcindex_change
@@ -404,7 +397,7 @@ static void tcindex_walk(struct tcf_proto *tp, struct tcf_walker *walker)
 static int tcindex_destroy_element(struct tcf_proto *tp,
     unsigned long arg, struct tcf_walker *walker)
 {
-	return __tcindex_delete(tp, arg, 0);
+	return tcindex_delete(tp,arg);
 }
 
 
@@ -427,6 +420,8 @@ static void tcindex_destroy(struct tcf_proto *tp)
 	MOD_DEC_USE_COUNT;
 }
 
+
+#ifdef CONFIG_RTNETLINK
 
 static int tcindex_dump(struct tcf_proto *tp, unsigned long fh,
     struct sk_buff *skb, struct tcmsg *t)
@@ -486,6 +481,9 @@ rtattr_failure:
 	return -1;
 }
 
+#endif
+
+
 struct tcf_proto_ops cls_tcindex_ops = {
 	NULL,
 	"tcindex",
@@ -498,7 +496,11 @@ struct tcf_proto_ops cls_tcindex_ops = {
 	tcindex_change,
 	tcindex_delete,
 	tcindex_walk,
+#ifdef CONFIG_RTNETLINK
 	tcindex_dump
+#else
+	NULL
+#endif
 };
 
 

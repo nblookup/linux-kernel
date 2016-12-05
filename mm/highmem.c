@@ -32,8 +32,7 @@
  */
 static int pkmap_count[LAST_PKMAP];
 static unsigned int last_pkmap_nr;
-static spinlock_cacheline_t kmap_lock_cacheline = {SPIN_LOCK_UNLOCKED};
-#define kmap_lock  kmap_lock_cacheline.lock
+static spinlock_t kmap_lock = SPIN_LOCK_UNLOCKED;
 
 pte_t * pkmap_page_table;
 
@@ -77,7 +76,7 @@ static void flush_all_zero_pkmaps(void)
 	flush_tlb_all();
 }
 
-static inline unsigned long map_new_virtual(struct page *page, int nonblocking)
+static inline unsigned long map_new_virtual(struct page *page)
 {
 	unsigned long vaddr;
 	int count;
@@ -95,9 +94,6 @@ start:
 			break;	/* Found a usable entry */
 		if (--count)
 			continue;
-
-		if (nonblocking)
-			return 0;
 
 		/*
 		 * Sleep for somebody else to unmap their entries
@@ -129,7 +125,7 @@ start:
 	return vaddr;
 }
 
-void fastcall *kmap_high(struct page *page, int nonblocking)
+void *kmap_high(struct page *page)
 {
 	unsigned long vaddr;
 
@@ -141,20 +137,16 @@ void fastcall *kmap_high(struct page *page, int nonblocking)
 	 */
 	spin_lock(&kmap_lock);
 	vaddr = (unsigned long) page->virtual;
-	if (!vaddr) {
-		vaddr = map_new_virtual(page, nonblocking);
-		if (!vaddr)
-			goto out;
-	}
+	if (!vaddr)
+		vaddr = map_new_virtual(page);
 	pkmap_count[PKMAP_NR(vaddr)]++;
 	if (pkmap_count[PKMAP_NR(vaddr)] < 2)
 		BUG();
- out:
 	spin_unlock(&kmap_lock);
 	return (void*) vaddr;
 }
 
-void fastcall kunmap_high(struct page *page)
+void kunmap_high(struct page *page)
 {
 	unsigned long vaddr;
 	unsigned long nr;
@@ -339,7 +331,7 @@ struct page *alloc_bounce_page (void)
 	if (page)
 		return page;
 	/*
-	 * No luck. First, kick the VM so it doesn't idle around while
+	 * No luck. First, kick the VM so it doesnt idle around while
 	 * we are using up our emergency rations.
 	 */
 	wakeup_bdflush();
@@ -362,7 +354,9 @@ repeat_alloc:
 	/* we need to wait I/O completion */
 	run_task_queue(&tq_disk);
 
-	yield();
+	current->policy |= SCHED_YIELD;
+	__set_current_state(TASK_RUNNING);
+	schedule();
 	goto repeat_alloc;
 }
 
@@ -375,7 +369,7 @@ struct buffer_head *alloc_bounce_bh (void)
 	if (bh)
 		return bh;
 	/*
-	 * No luck. First, kick the VM so it doesn't idle around while
+	 * No luck. First, kick the VM so it doesnt idle around while
 	 * we are using up our emergency rations.
 	 */
 	wakeup_bdflush();
@@ -398,7 +392,9 @@ repeat_alloc:
 	/* we need to wait I/O completion */
 	run_task_queue(&tq_disk);
 
-	yield();
+	current->policy |= SCHED_YIELD;
+	__set_current_state(TASK_RUNNING);
+	schedule();
 	goto repeat_alloc;
 }
 

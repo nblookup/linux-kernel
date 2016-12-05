@@ -549,7 +549,7 @@ ip_fw_domatch(struct ip_fwkernel *f,
 			strcpy(outskb->data+sizeof(__u32)*2, rif);
 			memcpy(outskb->data+sizeof(__u32)*2+IFNAMSIZ, ip,
 			       len-(sizeof(__u32)*2+IFNAMSIZ));
-			netlink_broadcast(ipfwsk, outskb, 0, ~0, GFP_ATOMIC);
+			netlink_broadcast(ipfwsk, outskb, 0, ~0, GFP_KERNEL);
 		}
 		else {
 #endif
@@ -723,7 +723,6 @@ ip_fw_check(struct iphdr *ip,
 						      src_port, dst_port,
 						      count, tcpsyn)) {
 					ret = FW_BLOCK;
-					cleanup(chain, 0, slot);
 					goto out;
 				}
 				break;
@@ -839,7 +838,6 @@ static int clear_fw_chain(struct ip_chain *chainptr)
 			i->branch->refcount--;
 		kfree(i);
 		i = tmp;
-		MOD_DEC_USE_COUNT;
 	}
 	return 0;
 }
@@ -877,16 +875,13 @@ static int append_to_chain(struct ip_chain *chainptr, struct ip_fwkernel *rule)
 		 * interrupts is not necessary. */
 		chainptr->chain = rule;
 		if (rule->branch) rule->branch->refcount++;
-		goto append_successful;
+		return 0;
 	}
 
 	/* Find the rule before the end of the chain */
 	for (i = chainptr->chain; i->next; i = i->next);
 	i->next = rule;
 	if (rule->branch) rule->branch->refcount++;
-
-append_successful:
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -905,7 +900,7 @@ static int insert_in_chain(struct ip_chain *chainptr,
 		frwl->next = chainptr->chain;
 		if (frwl->branch) frwl->branch->refcount++;
 		chainptr->chain = frwl;
-		goto insert_successful;
+		return 0;
 	}
 	position--;
 	while (--position && f != NULL) f = f->next;
@@ -915,9 +910,6 @@ static int insert_in_chain(struct ip_chain *chainptr,
 	frwl->next = f->next;
 
 	f->next = frwl;
-
-insert_successful:
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -951,8 +943,6 @@ static int del_num_from_chain(struct ip_chain *chainptr, __u32 rulenum)
 		i->next = i->next->next;
 		kfree(tmp);
 	}
-
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -1059,7 +1049,6 @@ static int del_rule_from_chain(struct ip_chain *chainptr,
 		else
 			chainptr->chain = ftmp->next;
 		kfree(ftmp);
-		MOD_DEC_USE_COUNT;
 		break;
 	}
 
@@ -1100,8 +1089,6 @@ static int del_chain(ip_chainlabel label)
 
 	tmp->next = tmp2->next;
 	kfree(tmp2);
-
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -1154,7 +1141,6 @@ static int create_chain(ip_chainlabel label)
 					      * user defined chain *
 					      * and therefore can be
 					      * deleted */
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -1252,7 +1238,7 @@ static struct ip_fwkernel *convert_ipfw(struct ip_fwuser *fwuser, int *errno)
 		return NULL;
 	}
 
-	fwkern = kmalloc(SIZEOF_STRUCT_IP_FW_KERNEL, GFP_ATOMIC);
+	fwkern = kmalloc(SIZEOF_STRUCT_IP_FW_KERNEL, GFP_KERNEL);
 	if (!fwkern) {
 		duprintf("convert_ipfw: kmalloc failed!\n");
 		*errno = ENOMEM;
@@ -1566,8 +1552,16 @@ static int dump_rule(char *buffer,
 
 /* File offset is actually in records, not bytes. */
 static int ip_chain_procinfo(char *buffer, char **start,
-			     off_t offset, int length)
+			     off_t offset, int length
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,29)
+			     , int reset
+#endif
+	)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,29)
+	/* FIXME: No more `atomic' read and reset.  Wonderful 8-( --RR */
+	int reset = 0;
+#endif
 	struct ip_chain *i;
 	struct ip_fwkernel *j = ip_fw_chains->chain;
 	unsigned long flags;
@@ -1604,6 +1598,9 @@ static int ip_chain_procinfo(char *buffer, char **start,
 				len = last_len;
 				goto outside;
 			}
+			else if (reset)
+				memset(j->counters, 0,
+				       sizeof(struct ip_counters)*NUM_SLOTS);
 		}
 	}
 outside:
@@ -1768,4 +1765,4 @@ int ipfw_init_or_cleanup(int init)
 #endif
 	return ret;
 }
-MODULE_LICENSE("Dual BSD/GPL");
+MODULE_LICENSE("BSD without advertisement clause");

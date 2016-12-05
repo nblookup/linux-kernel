@@ -13,7 +13,6 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
-#include <linux/seq_file.h>
 #include <asm/io.h>
 
 struct resource ioport_resource = { "PCI IO", 0x0000, IO_SPACE_LIMIT, IORESOURCE_IO };
@@ -21,92 +20,48 @@ struct resource iomem_resource = { "PCI mem", 0x00000000, 0xffffffff, IORESOURCE
 
 static rwlock_t resource_lock = RW_LOCK_UNLOCKED;
 
-enum { MAX_IORES_LEVEL = 5 };
-
-static void *r_next(struct seq_file *m, void *v, loff_t *pos)
+/*
+ * This generates reports for /proc/ioports and /proc/iomem
+ */
+static char * do_resource_list(struct resource *entry, const char *fmt, int offset, char *buf, char *end)
 {
-	struct resource *p = v;
-	(*pos)++;
-	if (p->child)
-		return p->child;
-	while (!p->sibling && p->parent)
-		p = p->parent;
-	return p->sibling;
+	if (offset < 0)
+		offset = 0;
+
+	while (entry) {
+		const char *name = entry->name;
+		unsigned long from, to;
+
+		if ((int) (end-buf) < 80)
+			return buf;
+
+		from = entry->start;
+		to = entry->end;
+		if (!name)
+			name = "<BAD>";
+
+		buf += sprintf(buf, fmt + offset, from, to, name);
+		if (entry->child)
+			buf = do_resource_list(entry->child, fmt, offset-2, buf, end);
+		entry = entry->sibling;
+	}
+
+	return buf;
 }
 
-static void *r_start(struct seq_file *m, loff_t *pos)
+int get_resource_list(struct resource *root, char *buf, int size)
 {
-	struct resource *p = m->private;
-	loff_t l = 0;
+	char *fmt;
+	int retval;
+
+	fmt = "        %08lx-%08lx : %s\n";
+	if (root->end < 0x10000)
+		fmt = "        %04lx-%04lx : %s\n";
 	read_lock(&resource_lock);
-	for (p = p->child; p && l < *pos; p = r_next(m, p, &l))
-		;
-	return p;
-}
-
-static void r_stop(struct seq_file *m, void *v)
-{
+	retval = do_resource_list(root->child, fmt, 8, buf, buf + size) - buf;
 	read_unlock(&resource_lock);
-}
-
-static int r_show(struct seq_file *m, void *v)
-{
-	struct resource *root = m->private;
-	struct resource *r = v, *p;
-	int width = root->end < 0x10000 ? 4 : 8;
-	int depth;
-
-	for (depth = 0, p = r; depth < MAX_IORES_LEVEL; depth++, p = p->parent)
-		if (p->parent == root)
-			break;
-	seq_printf(m, "%*s%0*lx-%0*lx : %s\n",
-			depth * 2, "",
-			width, r->start,
-			width, r->end,
-			r->name ? r->name : "<BAD>");
-	return 0;
-}
-
-static struct seq_operations resource_op = {
-	.start	= r_start,
-	.next	= r_next,
-	.stop	= r_stop,
-	.show	= r_show,
-};
-
-static int ioports_open(struct inode *inode, struct file *file)
-{
-	int res = seq_open(file, &resource_op);
-	if (!res) {
-		struct seq_file *m = file->private_data;
-		m->private = &ioport_resource;
-	}
-	return res;
-}
-
-static int iomem_open(struct inode *inode, struct file *file)
-{
-	int res = seq_open(file, &resource_op);
-	if (!res) {
-		struct seq_file *m = file->private_data;
-		m->private = &iomem_resource;
-	}
-	return res;
-}
-
-struct file_operations proc_ioports_operations = {
-	.open		= ioports_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release,
-};
-
-struct file_operations proc_iomem_operations = {
-	.open		= iomem_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release,
-};
+	return retval;
+}	
 
 /* Return the conflict entry if you can't request it */
 static struct resource * __request_resource(struct resource *root, struct resource *new)
@@ -197,8 +152,7 @@ static int find_resource(struct resource *root, struct resource *new,
 			 unsigned long size,
 			 unsigned long min, unsigned long max,
 			 unsigned long align,
-			 void (*alignf)(void *, struct resource *,
-					unsigned long, unsigned long),
+			 void (*alignf)(void *, struct resource *, unsigned long),
 			 void *alignf_data)
 {
 	struct resource *this = root->child;
@@ -215,7 +169,7 @@ static int find_resource(struct resource *root, struct resource *new,
 			new->end = max;
 		new->start = (new->start + align - 1) & ~(align - 1);
 		if (alignf)
-			alignf(alignf_data, new, size, align);
+			alignf(alignf_data, new, size);
 		if (new->start < new->end && new->end - new->start + 1 >= size) {
 			new->end = new->start + size - 1;
 			return 0;
@@ -235,8 +189,7 @@ int allocate_resource(struct resource *root, struct resource *new,
 		      unsigned long size,
 		      unsigned long min, unsigned long max,
 		      unsigned long align,
-		      void (*alignf)(void *, struct resource *,
-				     unsigned long, unsigned long),
+		      void (*alignf)(void *, struct resource *, unsigned long),
 		      void *alignf_data)
 {
 	int err;

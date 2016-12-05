@@ -275,7 +275,7 @@ asmlinkage long sys_mprotect(unsigned long start, size_t len, unsigned long prot
 	len = PAGE_ALIGN(len);
 	end = start + len;
 	if (end < start)
-		return -ENOMEM;
+		return -EINVAL;
 	if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
 		return -EINVAL;
 	if (end == start)
@@ -284,7 +284,7 @@ asmlinkage long sys_mprotect(unsigned long start, size_t len, unsigned long prot
 	down_write(&current->mm->mmap_sem);
 
 	vma = find_vma_prev(current->mm, start, &prev);
-	error = -ENOMEM;
+	error = -EFAULT;
 	if (!vma || vma->vm_start > start)
 		goto out;
 
@@ -317,7 +317,7 @@ asmlinkage long sys_mprotect(unsigned long start, size_t len, unsigned long prot
 		nstart = tmp;
 		vma = next;
 		if (!vma || vma->vm_start != nstart) {
-			error = -ENOMEM;
+			error = -EFAULT;
 			goto out;
 		}
 	}

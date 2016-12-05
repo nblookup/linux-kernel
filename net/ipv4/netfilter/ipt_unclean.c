@@ -211,14 +211,15 @@ check_udp(const struct iphdr *iph,
 
 	/* Bad checksum?  Don't print, just say it's unclean. */
 	/* FIXME: SRC ROUTE packets won't match checksum --RR */
-	if (!more_frags && !embedded && udph->check
+	if (!more_frags && !embedded
 	    && csum_tcpudp_magic(iph->saddr, iph->daddr, datalen, IPPROTO_UDP,
 				 csum_partial((char *)udph, datalen, 0)) != 0)
 		return 0;
 
-	/* CHECK: Destination port can't be zero. */
-	if (!udph->dest) {
-		limpk("UDP zero destination port\n");
+	/* CHECK: Ports can't be zero. */
+	if (!udph->source || !udph->dest) {
+		limpk("UDP zero ports %u/%u\n",
+		      ntohs(udph->source), ntohs(udph->dest));
 		return 0;
 	}
 
@@ -256,27 +257,6 @@ check_udp(const struct iphdr *iph,
 #define	TH_PUSH	0x08
 #define	TH_ACK	0x10
 #define	TH_URG	0x20
-#define	TH_ECE	0x40
-#define	TH_CWR	0x80
-
-/* table of valid flag combinations - ECE and CWR are always valid */
-static u8 tcp_valid_flags[(TH_FIN|TH_SYN|TH_RST|TH_PUSH|TH_ACK|TH_URG) + 1] =
-{
-	[TH_SYN]			= 1,
-	[TH_SYN|TH_ACK]			= 1,
-	[TH_SYN|TH_ACK|TH_PUSH]		= 1,
-	[TH_RST]			= 1,
-	[TH_RST|TH_ACK]			= 1,
-	[TH_RST|TH_ACK|TH_PUSH]		= 1,
-	[TH_FIN|TH_ACK]			= 1,
-	[TH_ACK]			= 1,
-	[TH_ACK|TH_PUSH]		= 1,
-	[TH_ACK|TH_URG]			= 1,
-	[TH_ACK|TH_URG|TH_PUSH]		= 1,
-	[TH_FIN|TH_ACK|TH_PUSH]		= 1,
-	[TH_FIN|TH_ACK|TH_URG]		= 1,
-	[TH_FIN|TH_ACK|TH_URG|TH_PUSH]	= 1
-};
 
 /* TCP-specific checks. */
 static int
@@ -348,8 +328,19 @@ check_tcp(const struct iphdr *iph,
 	}
 
 	/* CHECK: TCP flags. */
-	tcpflags = (((u_int8_t *)tcph)[13] & ~(TH_ECE|TH_CWR));
-	if (!tcp_valid_flags[tcpflags]) {
+	tcpflags = ((u_int8_t *)tcph)[13];
+	if (tcpflags != TH_SYN
+	    && tcpflags != (TH_SYN|TH_ACK)
+	    && tcpflags != (TH_RST|TH_ACK)
+	    && tcpflags != (TH_RST|TH_ACK|TH_PUSH)
+	    && tcpflags != (TH_FIN|TH_ACK)
+	    && tcpflags != TH_ACK
+	    && tcpflags != (TH_ACK|TH_PUSH)
+	    && tcpflags != (TH_ACK|TH_URG)
+	    && tcpflags != (TH_ACK|TH_URG|TH_PUSH)
+	    && tcpflags != (TH_FIN|TH_ACK|TH_PUSH)
+	    && tcpflags != (TH_FIN|TH_ACK|TH_URG)
+	    && tcpflags != (TH_FIN|TH_ACK|TH_URG|TH_PUSH)) {
 		limpk("TCP flags bad: %u\n", tcpflags);
 		return 0;
 	}
@@ -468,14 +459,23 @@ check_ip(struct iphdr *iph, size_t length, int embedded)
 	/* Fragment checks. */
 
 	/* CHECK: More fragments, but doesn't fill 8-byte boundary. */
-	if ((ntohs(iph->frag_off) & IP_MF) && datalen % 8 != 0) {
-		limpk("Truncated fragment %u long.\n", datalen);
+	if ((ntohs(iph->frag_off) & IP_MF)
+	    && (ntohs(iph->tot_len) % 8) != 0) {
+		limpk("Truncated fragment %u long.\n", ntohs(iph->tot_len));
 		return 0;
 	}
 
 	/* CHECK: Oversize fragment a-la Ping of Death. */
 	if (offset * 8 + datalen > 65535) {
 		limpk("Oversize fragment to %u.\n", offset * 8);
+		return 0;
+	}
+
+	/* CHECK: DF set and offset or MF set. */
+	if ((ntohs(iph->frag_off) & IP_DF)
+	    && (offset || (ntohs(iph->frag_off) & IP_MF))) {
+		limpk("DF set and offset=%u, MF=%u.\n",
+		      offset, ntohs(iph->frag_off) & IP_MF);
 		return 0;
 	}
 
@@ -516,16 +516,6 @@ check_ip(struct iphdr *iph, size_t length, int embedded)
 	/* CHECK: Protocol specification non-zero. */
 	if (iph->protocol == 0) {
 		limpk("Zero protocol\n");
-		return 0;
-	}
-
-	/* CHECK: Do not use what is unused.
-	 * First bit of fragmentation flags should be unused.
-	 * May be used by OS fingerprinting tools.
-	 * 04 Jun 2002, Maciej Soltysiak, solt@dns.toxicfilms.tv
-	 */
-	if (ntohs(iph->frag_off)>>15) {
-		limpk("IP unused bit set\n");
 		return 0;
 	}
 

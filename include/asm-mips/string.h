@@ -12,7 +12,7 @@
 #include <linux/config.h>
 
 #define __HAVE_ARCH_STRCPY
-static __inline__ char *strcpy(char *__dest, __const__ char *__src)
+extern __inline__ char *strcpy(char *__dest, __const__ char *__src)
 {
   char *__xdest = __dest;
 
@@ -28,13 +28,13 @@ static __inline__ char *strcpy(char *__dest, __const__ char *__src)
 	".set\treorder"
 	: "=r" (__dest), "=r" (__src)
         : "0" (__dest), "1" (__src)
-	: "memory");
+	: "$1","memory");
 
   return __xdest;
 }
 
 #define __HAVE_ARCH_STRNCPY
-static __inline__ char *strncpy(char *__dest, __const__ char *__src, size_t __n)
+extern __inline__ char *strncpy(char *__dest, __const__ char *__src, size_t __n)
 {
   char *__xdest = __dest;
 
@@ -56,13 +56,13 @@ static __inline__ char *strncpy(char *__dest, __const__ char *__src, size_t __n)
 	".set\treorder"
         : "=r" (__dest), "=r" (__src), "=r" (__n)
         : "0" (__dest), "1" (__src), "2" (__n)
-        : "memory");
+        : "$1","memory");
 
-  return __xdest;
+  return __dest;
 }
 
 #define __HAVE_ARCH_STRCMP
-static __inline__ int strcmp(__const__ char *__cs, __const__ char *__ct)
+extern __inline__ int strcmp(__const__ char *__cs, __const__ char *__ct)
 {
   int __res;
 
@@ -84,13 +84,14 @@ static __inline__ int strcmp(__const__ char *__cs, __const__ char *__ct)
 	"3:\t.set\tat\n\t"
 	".set\treorder"
 	: "=r" (__cs), "=r" (__ct), "=r" (__res)
-	: "0" (__cs), "1" (__ct));
+	: "0" (__cs), "1" (__ct)
+	: "$1");
 
   return __res;
 }
 
 #define __HAVE_ARCH_STRNCMP
-static __inline__ int
+extern __inline__ int
 strncmp(__const__ char *__cs, __const__ char *__ct, size_t __count)
 {
 	int __res;
@@ -109,13 +110,14 @@ strncmp(__const__ char *__cs, __const__ char *__ct, size_t __count)
 	"2:\n\t"
 #if defined(CONFIG_CPU_R3000)
 	"nop\n\t"
-#endif
+#endif	
 	"move\t%3,$1\n"
 	"3:\tsubu\t%3,$1\n\t"
 	".set\tat\n\t"
 	".set\treorder"
 	: "=r" (__cs), "=r" (__ct), "=r" (__count), "=r" (__res)
-	: "0" (__cs), "1" (__ct), "2" (__count));
+	: "0" (__cs), "1" (__ct), "2" (__count)
+	: "$1");
 
 	return __res;
 }
@@ -133,21 +135,21 @@ extern void *memmove(void *__dest, __const__ void *__src, size_t __n);
 #define __HAVE_ARCH_BCOPY
 
 #define __HAVE_ARCH_MEMSCAN
-static __inline__ void *memscan(void *__addr, int __c, size_t __size)
+extern __inline__ void *memscan(void *__addr, int __c, size_t __size)
 {
 	char *__end = (char *)__addr + __size;
-	unsigned char __uc = (unsigned char) __c;
 
 	__asm__(".set\tpush\n\t"
 		".set\tnoat\n\t"
 		".set\treorder\n\t"
 		"1:\tbeq\t%0,%1,2f\n\t"
 		"addiu\t%0,1\n\t"
-		"lbu\t$1,-1(%0)\n\t"
+		"lb\t$1,-1(%0)\n\t"
 		"bne\t$1,%z4,1b\n"
 		"2:\t.set\tpop"
 		: "=r" (__addr), "=r" (__end)
-		: "0" (__addr), "1" (__end), "Jr" (__uc));
+		: "0" (__addr), "1" (__end), "Jr" (__c)
+		: "$1");
 
 	return __addr;
 }

@@ -7,7 +7,7 @@
  *		handler for protocols to use and generic option handler.
  *
  *
- * Version:	$Id: sock.c,v 1.116 2001/11/08 04:20:06 davem Exp $
+ * Version:	$Id: sock.c,v 1.112 2001/07/27 09:54:48 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -108,35 +108,28 @@
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/poll.h>
-#include <linux/tcp.h>
 #include <linux/init.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
 
+#include <linux/inet.h>
 #include <linux/netdevice.h>
+#include <net/ip.h>
 #include <net/protocol.h>
+#include <net/arp.h>
+#include <net/route.h>
+#include <net/tcp.h>
+#include <net/udp.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
+#include <net/raw.h>
+#include <net/icmp.h>
 #include <linux/ipsec.h>
 
 #ifdef CONFIG_FILTER
 #include <linux/filter.h>
 #endif
-
-#ifdef CONFIG_INET
-#include <net/tcp.h>
-#endif
-
-/* Take into consideration the size of the struct sk_buff overhead in the
- * determination of these values, since that is non-constant across
- * platforms.  This makes socket queueing behavior and performance
- * not depend upon such differences.
- */
-#define _SK_MEM_PACKETS		256
-#define _SK_MEM_OVERHEAD	(sizeof(struct sk_buff) + 256)
-#define SK_WMEM_MAX		(_SK_MEM_OVERHEAD * _SK_MEM_PACKETS)
-#define SK_RMEM_MAX		(_SK_MEM_OVERHEAD * _SK_MEM_PACKETS)
 
 /* Run time adjustable parameters. */
 __u32 sysctl_wmem_max = SK_WMEM_MAX;
@@ -516,7 +509,7 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 				v.tm.tv_usec = 0;
 			} else {
 				v.tm.tv_sec = sk->rcvtimeo/HZ;
-				v.tm.tv_usec = ((sk->rcvtimeo%HZ)*1000000)/HZ;
+				v.tm.tv_usec = ((sk->rcvtimeo%HZ)*1000)/HZ;
 			}
 			break;
 
@@ -527,7 +520,7 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 				v.tm.tv_usec = 0;
 			} else {
 				v.tm.tv_sec = sk->sndtimeo/HZ;
-				v.tm.tv_usec = ((sk->sndtimeo%HZ)*1000000)/HZ;
+				v.tm.tv_usec = ((sk->sndtimeo%HZ)*1000)/HZ;
 			}
 			break;
 
@@ -637,7 +630,7 @@ void __init sk_init(void)
 		sysctl_wmem_max = 32767;
 		sysctl_rmem_max = 32767;
 		sysctl_wmem_default = 32767;
-		sysctl_rmem_default = 32767;
+		sysctl_wmem_default = 32767;
 	} else if (num_physpages >= 131072) {
 		sysctl_wmem_max = 131071;
 		sysctl_rmem_max = 131071;
@@ -766,63 +759,48 @@ static long sock_wait_for_wmem(struct sock * sk, long timeo)
  *	Generic send/receive buffer handlers
  */
 
-struct sk_buff *sock_alloc_send_pskb(struct sock *sk, unsigned long header_len,
-				     unsigned long data_len, int noblock, int *errcode)
+struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, 
+			int noblock, int *errcode)
 {
+	int err;
 	struct sk_buff *skb;
 	long timeo;
-	int err;
 
 	timeo = sock_sndtimeo(sk, noblock);
+
 	while (1) {
+		unsigned long try_size = size;
+
 		err = sock_error(sk);
 		if (err != 0)
 			goto failure;
 
+		/*
+		 *	We should send SIGPIPE in these cases according to
+		 *	1003.1g draft 6.4. If we (the user) did a shutdown()
+		 *	call however we should not. 
+		 *
+		 *	Note: This routine isnt just used for datagrams and
+		 *	anyway some datagram protocols have a notion of
+		 *	close down.
+		 */
+
 		err = -EPIPE;
-		if (sk->shutdown & SEND_SHUTDOWN)
+		if (sk->shutdown&SEND_SHUTDOWN)
 			goto failure;
 
 		if (atomic_read(&sk->wmem_alloc) < sk->sndbuf) {
-			skb = alloc_skb(header_len, sk->allocation);
-			if (skb) {
-				int npages;
-				int i;
-
-				/* No pages, we're done... */
-				if (!data_len)
-					break;
-
-				npages = (data_len + (PAGE_SIZE - 1)) >> PAGE_SHIFT;
-				skb->truesize += data_len;
-				skb_shinfo(skb)->nr_frags = npages;
-				for (i = 0; i < npages; i++) {
-					struct page *page;
-					skb_frag_t *frag;
-
-					page = alloc_pages(sk->allocation, 0);
-					if (!page) {
-						err = -ENOBUFS;
-						skb_shinfo(skb)->nr_frags = i;
-						kfree_skb(skb);
-						goto failure;
-					}
-
-					frag = &skb_shinfo(skb)->frags[i];
-					frag->page = page;
-					frag->page_offset = 0;
-					frag->size = (data_len >= PAGE_SIZE ?
-						      PAGE_SIZE :
-						      data_len);
-					data_len -= PAGE_SIZE;
-				}
-
-				/* Full success... */
+			skb = alloc_skb(try_size, sk->allocation);
+			if (skb)
 				break;
-			}
 			err = -ENOBUFS;
 			goto failure;
 		}
+
+		/*
+		 *	This means we have too many buffers for this socket already.
+		 */
+
 		set_bit(SOCK_ASYNC_NOSPACE, &sk->socket->flags);
 		set_bit(SOCK_NOSPACE, &sk->socket->flags);
 		err = -EAGAIN;
@@ -841,12 +819,6 @@ interrupted:
 failure:
 	*errcode = err;
 	return NULL;
-}
-
-struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size, 
-				    int noblock, int *errcode)
-{
-	return sock_alloc_send_pskb(sk, size, 0, noblock, errcode);
 }
 
 void __lock_sock(struct sock *sk)

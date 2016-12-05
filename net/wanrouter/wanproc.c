@@ -243,9 +243,7 @@ typedef struct wan_stat_entry
 		struct inode *inode = file->f_dentry->d_inode;
 		struct proc_dir_entry* dent;
 		char* page;
-		int pos, len;
-		loff_t n = *ppos;
-		unsigned offs = n;
+		int pos, offs, len;
 
 		if (count <= 0)
 			return 0;
@@ -259,13 +257,14 @@ typedef struct wan_stat_entry
 			return -ENOBUFS;
 			
 		pos = dent->get_info(page, dent->data, 0, 0);
-		if (offs == n && offs < pos) {
+		offs = file->f_pos;
+		if (offs < pos) {
 			len = min_t(unsigned int, pos - offs, count);
 			if (copy_to_user(buf, (page + offs), len)) {
 				kfree(page);
 				return -EFAULT;
 			}
-			*ppos = offs + len;
+			file->f_pos += len;
 		}
 		else
 			len = 0;
