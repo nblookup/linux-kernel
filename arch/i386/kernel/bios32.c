@@ -363,7 +363,7 @@ int pcibios_write_config_dword (unsigned char bus,
 	return (int) (ret & 0xff00) >> 8;
 }
 
-char *pcibios_strerror (int error)
+const char *pcibios_strerror (int error)
 {
 	static char buf[80];
 
@@ -382,6 +382,12 @@ char *pcibios_strerror (int error)
 
 		case PCIBIOS_BAD_REGISTER_NUMBER:
 			return "BAD_REGISTER_NUMBER";
+
+                case PCIBIOS_SET_FAILED:          
+			return "SET_FAILED";
+
+                case PCIBIOS_BUFFER_TOO_SMALL:    
+			return "BUFFER_TOO_SMALL";
 
 		default:
 			sprintf (buf, "UNKNOWN RETURN 0x%x", error);
@@ -435,14 +441,6 @@ unsigned long pcibios_init(unsigned long memory_start, unsigned long memory_end)
 				bios32_indirect.address = bios32_entry = check->fields.entry;
 				printk ("pcibios_init : BIOS32 Service Directory entry at 0x%lx\n", bios32_entry);
 			}
-		} else {
-			printk ("pcibios_init : multiple entries, mail drew@colorado.edu\n");
-			/*
-			 * Jeremy Fitzhardinge reports at least one PCI BIOS
-			 * with two different service directories, and as both
-			 * worked for him, we'll just mention the fact, and
-			 * not actually disallow it..
-			 */
 		}
 	}
 #ifdef CONFIG_PCI
@@ -452,6 +450,3 @@ unsigned long pcibios_init(unsigned long memory_start, unsigned long memory_end)
 #endif
 	return memory_start;
 }
-
-
-

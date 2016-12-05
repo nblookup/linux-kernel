@@ -12,12 +12,12 @@
 #include <linux/mman.h>
 #include <linux/string.h>
 #include <linux/malloc.h>
+#include <linux/pagemap.h>
+#include <linux/swap.h>
 
 #include <asm/segment.h>
 #include <asm/system.h>
 #include <asm/pgtable.h>
-
-static int anon_map(struct inode *, struct file *, struct vm_area_struct *);
 
 /*
  * description of effects of mapping type and prot in current implementation.
@@ -41,10 +41,104 @@ pgprot_t protection_map[16] = {
 	__S000, __S001, __S010, __S011, __S100, __S101, __S110, __S111
 };
 
+/*
+ * Check that a process has enough memory to allocate a
+ * new virtual mapping.
+ */
+static inline int vm_enough_memory(long pages)
+{
+	/*
+	 * stupid algorithm to decide if we have enough memory: while
+	 * simple, it hopefully works in most obvious cases.. Easy to
+	 * fool it, but this should catch most mistakes.
+	 */
+	long freepages;
+	freepages = buffermem >> PAGE_SHIFT;
+	freepages += page_cache_size;
+	freepages >>= 1;
+	freepages += nr_free_pages;
+	freepages += nr_swap_pages;
+	freepages -= MAP_NR(high_memory) >> 4;
+	return freepages > pages;
+}
+
+asmlinkage unsigned long sys_brk(unsigned long brk)
+{
+	unsigned long rlim;
+	unsigned long newbrk, oldbrk;
+
+	if (brk < current->mm->end_code)
+		return current->mm->brk;
+	newbrk = PAGE_ALIGN(brk);
+	oldbrk = PAGE_ALIGN(current->mm->brk);
+	if (oldbrk == newbrk)
+		return current->mm->brk = brk;
+
+	/*
+	 * Always allow shrinking brk
+	 */
+	if (brk <= current->mm->brk) {
+		current->mm->brk = brk;
+		do_munmap(newbrk, oldbrk-newbrk);
+		return brk;
+	}
+	/*
+	 * Check against rlimit and stack..
+	 */
+	rlim = current->rlim[RLIMIT_DATA].rlim_cur;
+	if (rlim >= RLIM_INFINITY)
+		rlim = ~0;
+	if (brk - current->mm->end_code > rlim)
+		return current->mm->brk;
+
+	/*
+	 * Check against existing mmap mappings.
+	 */
+	if (find_vma_intersection(current, oldbrk, newbrk+PAGE_SIZE))
+		return current->mm->brk;
+
+	/*
+	 * Check if we have enough memory..
+	 */
+	if (!vm_enough_memory((newbrk-oldbrk) >> PAGE_SHIFT))
+		return current->mm->brk;
+
+	/*
+	 * Ok, looks good - let it rip.
+	 */
+	current->mm->brk = brk;
+	do_mmap(NULL, oldbrk, newbrk-oldbrk,
+		PROT_READ|PROT_WRITE|PROT_EXEC,
+		MAP_FIXED|MAP_PRIVATE, 0);
+	return brk;
+}
+
+/*
+ * Combine the mmap "prot" and "flags" argument into one "vm_flags" used
+ * internally. Essentially, translate the "PROT_xxx" and "MAP_xxx" bits
+ * into "VM_xxx".
+ */
+static inline unsigned long vm_flags(unsigned long prot, unsigned long flags)
+{
+#define _trans(x,bit1,bit2) \
+((bit1==bit2)?(x&bit1):(x&bit1)?bit2:0)
+
+	unsigned long prot_bits, flag_bits;
+	prot_bits =
+		_trans(prot, PROT_READ, VM_READ) |
+		_trans(prot, PROT_WRITE, VM_WRITE) |
+		_trans(prot, PROT_EXEC, VM_EXEC);
+	flag_bits =
+		_trans(flags, MAP_GROWSDOWN, VM_GROWSDOWN) |
+		_trans(flags, MAP_DENYWRITE, VM_DENYWRITE) |
+		_trans(flags, MAP_EXECUTABLE, VM_EXECUTABLE);
+	return prot_bits | flag_bits;
+#undef _trans
+}
+
 unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	unsigned long prot, unsigned long flags, unsigned long off)
 {
-	int error;
 	struct vm_area_struct * vma;
 
 	if ((len = PAGE_ALIGN(len)) == 0)
@@ -57,6 +151,14 @@ unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	if (off + len < off)
 		return -EINVAL;
 
+	/* mlock MCL_FUTURE? */
+	if (current->mm->def_flags & VM_LOCKED) {
+		unsigned long locked = current->mm->locked_vm << PAGE_SHIFT;
+		locked += len;
+		if (locked > current->rlim[RLIMIT_MEMLOCK].rlim_cur)
+			return -EAGAIN;
+	}
+
 	/*
 	 * do simple checking here so the lower-level routines won't have
 	 * to. we assume access permissions have been handled by the open
@@ -68,6 +170,11 @@ unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 		case MAP_SHARED:
 			if ((prot & PROT_WRITE) && !(file->f_mode & 2))
 				return -EACCES;
+			/*
+			 * make sure there are no mandatory locks on the file.
+			 */
+			if (locks_verify_locked(file->f_inode))
+				return -EAGAIN;
 			/* fall through */
 		case MAP_PRIVATE:
 			if (!(file->f_mode & 1))
@@ -77,8 +184,10 @@ unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 		default:
 			return -EINVAL;
 		}
-		if ((flags & MAP_DENYWRITE) && (file->f_inode->i_wcount > 0))
-			return -ETXTBSY;
+		if (flags & MAP_DENYWRITE) {
+			if (file->f_inode->i_writecount > 0)
+				return -ETXTBSY;
+		}
 	} else if ((flags & MAP_TYPE) != MAP_PRIVATE)
 		return -EINVAL;
 
@@ -111,11 +220,10 @@ unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 	if (!vma)
 		return -ENOMEM;
 
-	vma->vm_task = current;
+	vma->vm_mm = current->mm;
 	vma->vm_start = addr;
 	vma->vm_end = addr + len;
-	vma->vm_flags = prot & (VM_READ | VM_WRITE | VM_EXEC);
-	vma->vm_flags |= flags & (VM_GROWSDOWN | VM_DENYWRITE | VM_EXECUTABLE);
+	vma->vm_flags = vm_flags(prot,flags) | current->mm->def_flags;
 
 	if (file) {
 		if (file->f_mode & 1)
@@ -145,17 +253,39 @@ unsigned long do_mmap(struct file * file, unsigned long addr, unsigned long len,
 
 	do_munmap(addr, len);	/* Clear old maps */
 
-	if (file)
-		error = file->f_op->mmap(file->f_inode, file, vma);
-	else
-		error = anon_map(NULL, NULL, vma);
-	
-	if (error) {
-		kfree(vma);
-		return error;
+	/* Private writable mapping? Check memory availability.. */
+	if ((vma->vm_flags & (VM_SHARED | VM_WRITE)) == VM_WRITE) {
+		if (!vm_enough_memory(len >> PAGE_SHIFT)) {
+			kfree(vma);
+			return -ENOMEM;
+		}
 	}
+
+	if (file) {
+		int error = file->f_op->mmap(file->f_inode, file, vma);
+	
+		if (error) {
+			kfree(vma);
+			return error;
+		}
+	}
+
+	flags = vma->vm_flags;
 	insert_vm_struct(current, vma);
 	merge_segments(current, vma->vm_start, vma->vm_end);
+
+	/* merge_segments might have merged our vma, so we can't use it any more */
+	current->mm->total_vm += len >> PAGE_SHIFT;
+	if (flags & VM_LOCKED) {
+		unsigned long start = addr;
+		current->mm->locked_vm += len >> PAGE_SHIFT;
+		do {
+			char c = get_user((char *) start);
+			len -= PAGE_SIZE;
+			start += PAGE_SIZE;
+			__asm__ __volatile__("": :"r" (c));
+		} while (len > 0);
+	}
 	return addr;
 }
 
@@ -174,40 +304,15 @@ unsigned long get_unmapped_area(unsigned long addr, unsigned long len)
 		addr = TASK_SIZE / 3;
 	addr = PAGE_ALIGN(addr);
 
-	for (vmm = current->mm->mmap; ; vmm = vmm->vm_next) {
+	for (vmm = find_vma(current, addr); ; vmm = vmm->vm_next) {
+		/* At this point:  (!vmm || addr < vmm->vm_end). */
 		if (TASK_SIZE - len < addr)
 			return 0;
-		if (!vmm)
+		if (!vmm || addr + len <= vmm->vm_start)
 			return addr;
-		if (addr > vmm->vm_end)
-			continue;
-		if (addr + len > vmm->vm_start) {
-			addr = vmm->vm_end;
-			continue;
-		}
-		return addr;
+		addr = vmm->vm_end;
 	}
 }
-
-asmlinkage int sys_mmap(unsigned long *buffer)
-{
-	int error;
-	unsigned long flags;
-	struct file * file = NULL;
-
-	error = verify_area(VERIFY_READ, buffer, 6*sizeof(long));
-	if (error)
-		return error;
-	flags = get_fs_long(buffer+3);
-	if (!(flags & MAP_ANONYMOUS)) {
-		unsigned long fd = get_fs_long(buffer+4);
-		if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
-			return -EBADF;
-	}
-	return do_mmap(file, get_fs_long(buffer), get_fs_long(buffer+1),
-		get_fs_long(buffer+2), flags, get_fs_long(buffer+5));
-}
-
 
 /*
  * Searching a VMA in the linear list task->mm->mmap is horribly slow.
@@ -230,7 +335,6 @@ asmlinkage int sys_mmap(unsigned long *buffer)
  *   vm_avl_height   1+max(heightof(left),heightof(right))
  * The empty tree is represented as NULL.
  */
-#define avl_empty	(struct vm_area_struct *) NULL
 
 /* Since the trees are balanced, their height will never be large. */
 #define avl_maxheight	41	/* why this? a small exercise */
@@ -243,60 +347,8 @@ asmlinkage int sys_mmap(unsigned long *buffer)
  *    foreach node in tree->vm_avl_right: node->vm_avl_key >= tree->vm_avl_key.
  */
 
-/* Look up the first VMA which satisfies  addr < vm_end,  NULL if none. */
-struct vm_area_struct * find_vma (struct task_struct * task, unsigned long addr)
-{
-#if 0 /* equivalent, but slow */
-	struct vm_area_struct * vma;
-
-	for (vma = task->mm->mmap ; ; vma = vma->vm_next) {
-		if (!vma)
-			return NULL;
-		if (vma->vm_end > addr)
-			return vma;
-	}
-#else
-	struct vm_area_struct * result = NULL;
-	struct vm_area_struct * tree;
-
-	for (tree = task->mm->mmap_avl ; ; ) {
-		if (tree == avl_empty)
-			return result;
-		if (tree->vm_end > addr) {
-			if (tree->vm_start <= addr)
-				return tree;
-			result = tree;
-			tree = tree->vm_avl_left;
-		} else
-			tree = tree->vm_avl_right;
-	}
-#endif
-}
-
-/* Look up the first VMA which intersects the interval start_addr..end_addr-1,
-   NULL if none.  Assume start_addr < end_addr. */
-struct vm_area_struct * find_vma_intersection (struct task_struct * task, unsigned long start_addr, unsigned long end_addr)
-{
-	struct vm_area_struct * vma;
-
-#if 0 /* equivalent, but slow */
-	for (vma = task->mm->mmap; vma; vma = vma->vm_next) {
-		if (end_addr <= vma->vm_start)
-			break;
-		if (start_addr < vma->vm_end)
-			return vma;
-	}
-	return NULL;
-#else
-	vma = find_vma(task,start_addr);
-	if (!vma || end_addr <= vma->vm_start)
-		return NULL;
-	return vma;
-#endif
-}
-
 /* Look up the nodes at the left and at the right of a given node. */
-static void avl_neighbours (struct vm_area_struct * node, struct vm_area_struct * tree, struct vm_area_struct ** to_the_left, struct vm_area_struct ** to_the_right)
+static inline void avl_neighbours (struct vm_area_struct * node, struct vm_area_struct * tree, struct vm_area_struct ** to_the_left, struct vm_area_struct ** to_the_right)
 {
 	vm_avl_key_t key = node->vm_avl_key;
 
@@ -342,7 +394,7 @@ static void avl_neighbours (struct vm_area_struct * node, struct vm_area_struct 
  * nodes[0]..nodes[k-1] such that
  * nodes[0] is the root and nodes[i+1] = nodes[i]->{vm_avl_left|vm_avl_right}.
  */
-static void avl_rebalance (struct vm_area_struct *** nodeplaces_ptr, int count)
+static inline void avl_rebalance (struct vm_area_struct *** nodeplaces_ptr, int count)
 {
 	for ( ; count > 0 ; count--) {
 		struct vm_area_struct ** nodeplace = *--nodeplaces_ptr;
@@ -419,7 +471,7 @@ static void avl_rebalance (struct vm_area_struct *** nodeplaces_ptr, int count)
 }
 
 /* Insert a node into a tree. */
-static void avl_insert (struct vm_area_struct * new_node, struct vm_area_struct ** ptree)
+static inline void avl_insert (struct vm_area_struct * new_node, struct vm_area_struct ** ptree)
 {
 	vm_avl_key_t key = new_node->vm_avl_key;
 	struct vm_area_struct ** nodeplace = ptree;
@@ -446,7 +498,7 @@ static void avl_insert (struct vm_area_struct * new_node, struct vm_area_struct 
 /* Insert a node into a tree, and
  * return the node to the left of it and the node to the right of it.
  */
-static void avl_insert_neighbours (struct vm_area_struct * new_node, struct vm_area_struct ** ptree,
+static inline void avl_insert_neighbours (struct vm_area_struct * new_node, struct vm_area_struct ** ptree,
 	struct vm_area_struct ** to_the_left, struct vm_area_struct ** to_the_right)
 {
 	vm_avl_key_t key = new_node->vm_avl_key;
@@ -476,7 +528,7 @@ static void avl_insert_neighbours (struct vm_area_struct * new_node, struct vm_a
 }
 
 /* Removes a node out of a tree. */
-static void avl_remove (struct vm_area_struct * node_to_delete, struct vm_area_struct ** ptree)
+static inline void avl_remove (struct vm_area_struct * node_to_delete, struct vm_area_struct ** ptree)
 {
 	vm_avl_key_t key = node_to_delete->vm_avl_key;
 	struct vm_area_struct ** nodeplace = ptree;
@@ -652,7 +704,7 @@ static void avl_check (struct task_struct * task, char *caller)
  * Case 4 involves the creation of 2 new areas, for each side of
  * the hole.
  */
-void unmap_fixup(struct vm_area_struct *area,
+static void unmap_fixup(struct vm_area_struct *area,
 		 unsigned long addr, size_t len)
 {
 	struct vm_area_struct *mpnt;
@@ -666,6 +718,9 @@ void unmap_fixup(struct vm_area_struct *area,
 		       area->vm_start, area->vm_end, addr, end);
 		return;
 	}
+	area->vm_mm->total_vm -= len >> PAGE_SHIFT;
+	if (area->vm_flags & VM_LOCKED)
+		area->vm_mm->locked_vm -= len >> PAGE_SHIFT;
 
 	/* Unmapping the whole area */
 	if (addr == area->vm_start && end == area->vm_end) {
@@ -782,38 +837,46 @@ int do_munmap(unsigned long addr, size_t len)
 
 		if (mpnt->vm_ops && mpnt->vm_ops->unmap)
 			mpnt->vm_ops->unmap(mpnt, st, end-st);
-
+		zap_page_range(current->mm, st, end-st);
 		unmap_fixup(mpnt, st, end-st);
 		kfree(mpnt);
 	}
 
-	unmap_page_range(addr, len);
+	zap_page_range(current->mm, addr, len);
 	return 0;
 }
 
 /* Build the AVL tree corresponding to the VMA list. */
-void build_mmap_avl(struct task_struct * task)
+void build_mmap_avl(struct mm_struct * mm)
 {
 	struct vm_area_struct * vma;
 
-	task->mm->mmap_avl = NULL;
-	for (vma = task->mm->mmap; vma; vma = vma->vm_next)
-		avl_insert(vma, &task->mm->mmap_avl);
+	mm->mmap_avl = NULL;
+	for (vma = mm->mmap; vma; vma = vma->vm_next)
+		avl_insert(vma, &mm->mmap_avl);
 }
 
 /* Release all mmaps. */
-void exit_mmap(struct task_struct * task)
+void exit_mmap(struct mm_struct * mm)
 {
 	struct vm_area_struct * mpnt;
 
-	mpnt = task->mm->mmap;
-	task->mm->mmap = NULL;
-	task->mm->mmap_avl = NULL;
+	mpnt = mm->mmap;
+	mm->mmap = NULL;
+	mm->mmap_avl = NULL;
+	mm->rss = 0;
+	mm->total_vm = 0;
+	mm->locked_vm = 0;
 	while (mpnt) {
 		struct vm_area_struct * next = mpnt->vm_next;
-		if (mpnt->vm_ops && mpnt->vm_ops->close)
-			mpnt->vm_ops->close(mpnt);
+		if (mpnt->vm_ops) {
+			if (mpnt->vm_ops->unmap)
+				mpnt->vm_ops->unmap(mpnt, mpnt->vm_start, mpnt->vm_end-mpnt->vm_start);
+			if (mpnt->vm_ops->close)
+				mpnt->vm_ops->close(mpnt);
+		}
 		remove_shared_vm_struct(mpnt);
+		zap_page_range(mm, mpnt->vm_start, mpnt->vm_end-mpnt->vm_start);
 		if (mpnt->vm_inode)
 			iput(mpnt->vm_inode);
 		kfree(mpnt);
@@ -966,15 +1029,4 @@ void merge_segments (struct task_struct * task, unsigned long start_addr, unsign
 		kfree_s(mpnt, sizeof(*mpnt));
 		mpnt = prev;
 	}
-}
-
-/*
- * Map memory not associated with any file into a process
- * address space.  Adjacent memory is merged.
- */
-static int anon_map(struct inode *ino, struct file * file, struct vm_area_struct * vma)
-{
-	if (zeromap_page_range(vma->vm_start, vma->vm_end - vma->vm_start, vma->vm_page_prot))
-		return -ENOMEM;
-	return 0;
 }
