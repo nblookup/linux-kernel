@@ -5,7 +5,6 @@
  *  Copyright (C) 1995-1997, 1999 Martin von Löwis
  *  Copyright (C) 1996 Richard Russon
  *  Copyright (C) 1996-1997 Régis Duchesne
- *  Copyright (C) 2000 Anton Altaparmakov
  */
 
 #ifdef HAVE_CONFIG_H
@@ -29,7 +28,6 @@
 #include <linux/nls.h>
 #include <linux/locks.h>
 #include <linux/init.h>
-#include <asm/page.h>
 
 /* Forward declarations */
 static struct inode_operations ntfs_dir_inode_operations;
@@ -81,7 +79,7 @@ ntfs_read(struct file * filp, char *buf, size_t count, loff_t *off)
 	io.param=buf;
 	io.size=count;
 	error=ntfs_read_attr(ino,ino->vol->at_data,NULL,*off,&io);
-	if(error && !io.size)return -error;
+	if(error)return -error;
 	
 	*off+=io.size;
 	return io.size;
@@ -362,11 +360,8 @@ static int parse_options(ntfs_volume* vol,char *opt)
 	if((vol->nct & (nct_uni_xlate | nct_map | nct_utf8))==0)
 		/* default to UTF-8 */
 		vol->nct=nct_utf8;
-	if(!vol->nls_map){
+	if(!vol->nls_map)
 		vol->nls_map=load_nls_default();
-		if (vol->nls_map)
-			vol->nct=nct_map | (vol->nct&nct_uni_xlate);
-	}
 	return 1;
 
  needs_arg:
@@ -942,13 +937,6 @@ struct super_block * ntfs_read_super(struct super_block *sb,
 	brelse(bh);
 	NTFS_SB(vol)=sb;
 	ntfs_debug(DEBUG_OTHER, "Done to init volume\n");
-
-	/* Check the cluster size is within allowed blocksize limits. */
-	if (vol->clustersize > PAGE_SIZE) {
-		ntfs_error("Partition cluster size is not supported yet (it "
-			   "is > max kernel blocksize).\n");
-		goto ntfs_read_super_unl;
-	}
 
 	/* Inform the kernel that a device block is a NTFS cluster */
 	sb->s_blocksize=vol->clustersize;

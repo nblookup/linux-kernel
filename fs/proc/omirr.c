@@ -112,7 +112,7 @@ static long omirr_read(struct inode * inode, struct file * file,
 	if(!count)
 		goto done;
 	error = -EINVAL;
-	if(!buf || count > INT_MAX)
+	if(!buf || count < 0)
 		goto done;
 	
 	error = verify_area(VERIFY_WRITE, buf, count);

@@ -5,7 +5,7 @@
  *
  *		The Internet Protocol (IP) module.
  *
- * Version:	$Id: ip_input.c,v 1.37.2.5 2001/06/07 06:47:54 davem Exp $
+ * Version:	$Id: ip_input.c,v 1.37 1999/04/22 10:38:36 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -97,7 +97,6 @@
  *		Alan Cox	:	Multicast routing hooks
  *		Jos Vos		:	Do accounting *before* call_in_firewall
  *	Willy Konynenberg	:	Transparent proxying support
- *             Stephan Uphoff   :       Check IP header length field
  *
  *  
  *
@@ -155,7 +154,6 @@
 
 struct ip_mib ip_statistics={2,IPDEFTTL,};	/* Forwarding=No, Default TTL=64 */
 
-int sysctl_ip_always_defrag = 0;
 
 /*
  *	Handle the issuing of an ioctl() request
@@ -172,6 +170,11 @@ int ip_ioctl(struct sock *sk, int cmd, unsigned long arg)
 	}
 }
 
+
+#if defined(CONFIG_IP_TRANSPARENT_PROXY) && !defined(CONFIG_IP_ALWAYS_DEFRAG)
+#define CONFIG_IP_ALWAYS_DEFRAG 1
+#endif
+
 /*
  *	0 - deliver
  *	1 - block
@@ -181,11 +184,8 @@ static __inline__ int icmp_filter(struct sock *sk, struct sk_buff *skb)
 	int    type;
 
 	type = skb->h.icmph->type;
-	if (type < 32) {
-		__u32 data = sk->tp_pinfo.tp_raw4.filter.data;
-
-		return ((1 << type) & data) != 0;
-	}
+	if (type < 32)
+		return test_bit(type, &sk->tp_pinfo.tp_raw4.filter);
 
 	/* Do not block unknown ICMP types */
 	return 0;
@@ -235,17 +235,18 @@ int ip_local_deliver(struct sk_buff *skb)
 	unsigned char hash;
 	int flag = 0;
 
+#ifndef CONFIG_IP_ALWAYS_DEFRAG
 	/*
 	 *	Reassemble IP fragments.
 	 */
 
-        if (sysctl_ip_always_defrag == 0 &&
-            (iph->frag_off & htons(IP_MF|IP_OFFSET))) {
+	if (iph->frag_off & htons(IP_MF|IP_OFFSET)) {
 		skb = ip_defrag(skb);
 		if (!skb)
 			return 0;
 		iph = skb->nh.iph;
 	}
+#endif
 
 #ifdef CONFIG_IP_MASQUERADE
 	/*
@@ -425,19 +426,12 @@ int ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 
 	if (skb->len < sizeof(struct iphdr))
 		goto inhdr_error; 
-
-	if (skb->len < (iph->ihl << 2))
-		goto inhdr_error;
-
 	if (iph->ihl < 5 || iph->version != 4 || ip_fast_csum((u8 *)iph, iph->ihl) != 0)
 		goto inhdr_error; 
 
 	{
 	__u32 len = ntohs(iph->tot_len); 
 	if (skb->len < len)
-		goto inhdr_error; 
-
-	if (len <  (iph->ihl << 2))
 		goto inhdr_error; 
 
 	/*
@@ -449,15 +443,16 @@ int ip_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	__skb_trim(skb, len);
 	}
 	
+#ifdef CONFIG_IP_ALWAYS_DEFRAG
 	/* Won't send ICMP reply, since skb->dst == NULL. --RR */
-        if (sysctl_ip_always_defrag != 0 &&
-            iph->frag_off & htons(IP_MF|IP_OFFSET)) {
+	if (iph->frag_off & htons(IP_MF|IP_OFFSET)) {
 		skb = ip_defrag(skb);
 		if (!skb)
 			return 0;
 		iph = skb->nh.iph;
 		ip_send_check(iph);
 	}
+#endif
 
 #ifdef CONFIG_FIREWALL
 	/*

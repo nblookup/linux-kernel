@@ -1,12 +1,14 @@
 /*
- * PCBIT-D interface with isdn4linux
- *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
  * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU General Public License, incorporated herein by reference.
+ * the GNU Public License, incorporated herein by reference.
+ */
+
+/*        
+ *        PCBIT-D interface with isdn4linux
  */
 
 /*
@@ -26,7 +28,7 @@
 #include <linux/kernel.h>
 
 #include <linux/types.h>
-#include <linux/slab.h>
+#include <linux/malloc.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <linux/string.h>
@@ -84,13 +86,10 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 
 	dev_pcbit[board] = dev;
 	memset(dev, 0, sizeof(struct pcbit_dev));
-	init_waitqueue_head(&dev->set_running_wq);
 
-	if (mem_base >= 0xA0000 && mem_base <= 0xFFFFF ) {
-		dev->ph_mem = mem_base;
+	if (mem_base >= 0xA0000 && mem_base <= 0xFFFFF )
 		dev->sh_mem = (unsigned char*) mem_base;
-	}
-	else 
+	else
 	{
 		printk("memory address invalid");
 		kfree(dev);
@@ -117,6 +116,8 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 	memset(dev->b2, 0, sizeof(struct pcbit_chan));
 	dev->b2->id = 1;
 
+
+	dev->qdelivery.next = NULL;
 	dev->qdelivery.sync = 0;
 	dev->qdelivery.routine = pcbit_deliver;
 	dev->qdelivery.data = dev;
@@ -141,7 +142,7 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 	dev->send_seq = 0;
 	dev->unack_seq = 0;
 
-	dev->hl_hdrlen = 16;
+	dev->hl_hdrlen = 10;
 
 	dev_if = kmalloc(sizeof(isdn_if), GFP_KERNEL);
 
@@ -163,7 +164,7 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 			    ISDN_FEATURE_L2_HDLC | ISDN_FEATURE_L2_TRANS );
 
 	dev_if->writebuf_skb = pcbit_xmit;
-	dev_if->hl_hdrlen = 16;
+	dev_if->hl_hdrlen = 10;
 
 	dev_if->maxbufsize = MAXBUFSIZE;
 	dev_if->command  = pcbit_command;
@@ -408,7 +409,7 @@ int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel
 	switch(dev->l2_state) {
 	case L2_LWMODE:
 		/* check (size <= rdp_size); write buf into board */
-		if (len < 0 || len > BANK4 + 1 || len > 1024)
+		if (len > BANK4 + 1)
 		{
 			printk("pcbit_writecmd: invalid length %d\n", len);
 			return -EFAULT;
@@ -418,7 +419,7 @@ int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel
 		{
 			u_char cbuf[1024];
 
-			copy_from_user_ret(cbuf, buf, len, -EFAULT);
+			copy_from_user(cbuf, buf, len);
 			for (i=0; i<len; i++)
 				writeb(cbuf[i], dev->sh_mem + i);
 		}
@@ -436,7 +437,7 @@ int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel
 			/* get it into kernel space */
 			if ((ptr = kmalloc(len, GFP_KERNEL))==NULL)
 				return -ENOMEM;
-			copy_from_user_ret(ptr, buf, len, -EFAULT);
+			copy_from_user(ptr, buf, len);
 			loadbuf = ptr;
 		}
 		else
@@ -491,6 +492,9 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 	struct callb_data cbdata;
 	int complete, err;
 	isdn_ctrl ictl;
+#ifdef DEBUG
+	struct msg_fmt * fmsg;
+#endif
 
 	switch(msg) {
 
@@ -586,6 +590,20 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 		       dev->b1->s_refnum, 
 		       dev->b2->s_refnum);
 #endif
+#if 0	
+		if (dev->b1->s_refnum == refnum)
+			chan = dev->b1;
+		else { 
+		   
+			if (dev->b2->s_refnum == refnum)
+				chan = dev->b2;
+			else {
+				chan = NULL;
+				printk(KERN_WARNING "Connection Confirm - refnum doesn't match chan\n");
+				break;
+			}
+		}
+#else
 		/* We just try to find a channel in the right state */
 
 		if (dev->b1->fsm_state == ST_CALL_INIT)
@@ -599,6 +617,7 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 				break;
 			}
 		}
+#endif
 		if (capi_decode_conn_conf(chan, skb, &complete)) {
 			printk(KERN_DEBUG "conn_conf indicates error\n");
 			pcbit_fsm_event(dev, chan, EV_ERROR, NULL);
@@ -704,6 +723,9 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 	default:
 		printk(KERN_DEBUG "pcbit_l3_receive: unknown message %08lx\n",
 		       msg);
+		fmsg = (struct msg_fmt *) &msg;
+		printk(KERN_DEBUG "cmd=%02x sub=%02x\n", 
+		       fmsg->cmd, fmsg->scmd);
 		break;
 #endif
 	}

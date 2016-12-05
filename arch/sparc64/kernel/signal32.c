@@ -1,4 +1,4 @@
-/*  $Id: signal32.c,v 1.47.2.6 2001/08/12 10:56:22 davem Exp $
+/*  $Id: signal32.c,v 1.47 1998/10/13 09:07:40 davem Exp $
  *  arch/sparc64/kernel/signal32.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
@@ -1033,97 +1033,6 @@ static inline void setup_rt_frame32(struct k_sigaction *ka, struct pt_regs *regs
 		err |= __put_user(0, &sf->fpu_save);
 	}
 	
-	/* Update the siginfo structure.  Is this good?  */
-	if (info->si_code == 0) {
-		info->si_signo = signr;
-		info->si_errno = 0;
-
-		switch (signr) {
-		case SIGSEGV:
-		case SIGILL:
-		case SIGBUS:
-		case SIGEMT:
-			info->si_code = current->tss.sig_desc;
-			info->si_addr = (void *)current->tss.sig_address;
-			info->si_trapno = 0;
-			break;
-		case SIGFPE:
-			switch (current->tss.sig_desc) {
-			case SUBSIG_FPDISABLED:
-				info->si_code = FPE_FLTSUB;
-				break;
-			case SUBSIG_FPERROR:
-				info->si_code = FPE_FLTSUB;
-				break;
-			case SUBSIG_FPINTOVFL:
-				info->si_code = FPE_INTOVF;
-				break;
-			case SUBSIG_FPSTSIG:
-				info->si_code = FPE_FLTSUB;
-				break;
-			case SUBSIG_IDIVZERO:
-				info->si_code = FPE_INTDIV;
-				break;
-			case SUBSIG_FPINEXACT:
-				info->si_code = FPE_FLTRES;
-				break;
-			case SUBSIG_FPDIVZERO:
-				info->si_code = FPE_FLTDIV;
-				break;
-			case SUBSIG_FPUNFLOW:
-				info->si_code = FPE_FLTUND;
-				break;
-			case SUBSIG_FPOPERROR:
-				info->si_code = FPE_FLTINV;
-				break;
-			case SUBSIG_FPOVFLOW:
-				info->si_code = FPE_FLTOVF;
-				break;
-			}
-			info->si_addr = (void *)current->tss.sig_address;
-			info->si_trapno = 0;
-			break;
-		default:
-			break;
-		}
-	}
-
-	err = __put_user (info->si_signo, &sf->info.si_signo);
-	err |= __put_user (info->si_errno, &sf->info.si_errno);
-	err |= __put_user (info->si_code, &sf->info.si_code);
-	if (info->si_code < 0)
-		err |= __copy_to_user (sf->info._sifields._pad, info->_sifields._pad, SI_PAD_SIZE);
-	else {
-		i = info->si_signo;
-		if (info->si_code == SI_USER)
-			i = SIGRTMIN;
-		switch (i) {
-		case SIGPOLL:
-			err |= __put_user (info->si_band, &sf->info.si_band);
-			err |= __put_user (info->si_fd, &sf->info.si_fd);
-			break;
-		case SIGCHLD:
-			err |= __put_user (info->si_pid, &sf->info.si_pid);
-			err |= __put_user (info->si_uid, &sf->info.si_uid);
-			err |= __put_user (info->si_status, &sf->info.si_status);
-			err |= __put_user (info->si_utime, &sf->info.si_utime);
-			err |= __put_user (info->si_stime, &sf->info.si_stime);
-			break;
-		case SIGSEGV:
-		case SIGILL:
-		case SIGFPE:
-		case SIGBUS:
-		case SIGEMT:
-			err |= __put_user ((long)info->si_addr, &sf->info.si_addr);
-			err |= __put_user (info->si_trapno, &sf->info.si_trapno);
-			break;
-		default:
-			err |= __put_user (info->si_pid, &sf->info.si_pid);
-			err |= __put_user (info->si_uid, &sf->info.si_uid);
-			break;
-		}
-	}
-	
 	/* Setup sigaltstack */
 	err |= __put_user(current->sas_ss_sp, &sf->stack.ss_sp);
 	err |= __put_user(sas_ss_flags(regs->u_regs[UREG_FP]), &sf->stack.ss_flags);
@@ -1139,7 +1048,7 @@ static inline void setup_rt_frame32(struct k_sigaction *ka, struct pt_regs *regs
 	case 1: seta.sig[1] = (oldset->sig[0] >> 32);
 	        seta.sig[0] = oldset->sig[0];
 	}
-	err |= __copy_to_user(&sf->mask, &seta, sizeof(sigset_t32));
+	err |= __copy_to_user(&sf->mask, &seta, sizeof(sigset_t));
 
 	err |= copy_in_user((u32 *)sf,
 			    (u32 *)(regs->u_regs[UREG_FP]),
@@ -1314,7 +1223,7 @@ asmlinkage int do_signal32(sigset_t *oldset, struct pt_regs * regs,
 		
 		if (!signr) break;
 
-		if ((current->ptrace & PT_PTRACED) && signr != SIGKILL) {
+		if ((current->flags & PF_PTRACED) && signr != SIGKILL) {
 			current->exit_code = signr;
 			current->state = TASK_STOPPED;
 			notify_parent(current, SIGCHLD);
@@ -1370,7 +1279,7 @@ asmlinkage int do_signal32(sigset_t *oldset, struct pt_regs * regs,
 					continue;
 
 			case SIGSTOP:
-				if (current->ptrace & PT_PTRACED)
+				if (current->flags & PF_PTRACED)
 					continue;
 				current->state = TASK_STOPPED;
 				current->exit_code = signr;
@@ -1382,8 +1291,14 @@ asmlinkage int do_signal32(sigset_t *oldset, struct pt_regs * regs,
 
 			case SIGQUIT: case SIGILL: case SIGTRAP:
 			case SIGABRT: case SIGFPE: case SIGSEGV: case SIGBUS:
-				if (do_coredump(signr, regs))
-					exit_code |= 0x80;
+				if(current->binfmt && current->binfmt->core_dump) {
+					lock_kernel();
+					if(current->binfmt &&
+					   current->binfmt->core_dump &&
+					   current->binfmt->core_dump(signr, regs))
+						exit_code |= 0x80;
+					unlock_kernel();
+				}
 #ifdef DEBUG_SIGNALS
 				/* Very useful to debug dynamic linker problems */
 				printk ("Sig %ld going for %s[%d]...\n", signr, current->comm, current->pid);
@@ -1421,7 +1336,6 @@ asmlinkage int do_signal32(sigset_t *oldset, struct pt_regs * regs,
 			default:
 				lock_kernel();
 				sigaddset(&current->signal, signr);
-				recalc_sigpending(current);
 				current->flags |= PF_SIGNALED;
 				do_exit(exit_code);
 				/* NOT REACHED */

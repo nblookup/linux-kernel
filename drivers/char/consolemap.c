@@ -611,18 +611,16 @@ con_get_unimap(int con, ushort ct, ushort *uct, struct unipair *list)
 			if ((p2 = *(p1++)))
 				for (k = 0; k < 64; k++) {
 					if (*p2 < MAX_GLYPH && ect++ < ct) {
-						put_user_ret((u_short)((i<<11)+(j<<6)+k),
-							&list->unicode,
-							-EFAULT);
-						put_user_ret((u_short) *p2,
-							&list->fontpos,
-							-EFAULT);
+						__put_user((u_short)((i<<11)+(j<<6)+k),
+							   &list->unicode);
+						__put_user((u_short) *p2, 
+							   &list->fontpos);
 						list++;
 					}
 					p2++;
 				}
 	}
-	put_user_ret(ect, uct, -EFAULT);
+	__put_user(ect, uct);
 	return ((ect <= ct) ? 0 : -ENOMEM);
 }
 

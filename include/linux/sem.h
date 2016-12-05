@@ -61,15 +61,15 @@ struct  seminfo {
 };
 
 #define SEMMNI  128             /* ?  max # of semaphore identifiers */
-#define SEMMSL  250              /* <= 512 max num of semaphores per id */
+#define SEMMSL  32              /* <= 512 max num of semaphores per id */
 #define SEMMNS  (SEMMNI*SEMMSL) /* ? max # of semaphores in system */
 #define SEMOPM  32	        /* ~ 100 max num of ops per semop call */
 #define SEMVMX  32767           /* semaphore maximum value */
-#define SEMAEM  SEMVMX          /* adjust on exit max value */
 
 /* unused */
 #define SEMUME  SEMOPM          /* max num of undo entries per process */
 #define SEMMNU  SEMMNS          /* num of undo structures system wide */
+#define SEMAEM  (SEMVMX >> 1)   /* adjust on exit max value */
 #define SEMMAP  SEMMNS          /* # of entries in semaphore map */
 #define SEMUSZ  20		/* sizeof struct sem_undo */
 

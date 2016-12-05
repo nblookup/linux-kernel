@@ -5,7 +5,7 @@
  *
  *		The options processing module for ip.c
  *
- * Version:	$Id: ip_options.c,v 1.16.2.1 1999/06/02 04:06:19 davem Exp $
+ * Version:	$Id: ip_options.c,v 1.16 1999/03/21 05:22:40 davem Exp $
  *
  * Authors:	A.N.Kuznetsov
  *		
@@ -266,7 +266,7 @@ int ip_options_compile(struct ip_options * opt, struct sk_buff * skb)
 	for (l = opt->optlen; l > 0; ) {
 		switch (*optptr) {
 		      case IPOPT_END:
-			for (optptr++, l--; l>0; optptr++, l--) {
+			for (optptr++, l--; l>0; l--) {
 				if (*optptr != IPOPT_END) {
 					*optptr = IPOPT_END;
 					opt->is_changed = 1;
@@ -452,6 +452,7 @@ eol:
 error:
 	if (skb) {
 		icmp_send(skb, ICMP_PARAMETERPROB, 0, htonl((pp_ptr-iph)<<24));
+		kfree_skb(skb);
 	}
 	return -EINVAL;
 }

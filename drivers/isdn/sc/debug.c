@@ -1,11 +1,22 @@
-/* $Id: debug.c,v 1.1.2.1 2001/12/31 13:26:50 kai Exp $
+/*
+ *  $Id: debug.c,v 1.3 1997/10/01 09:22:20 fritz Exp $
+ *  Copyright (C) 1996  SpellCaster Telecommunications Inc.
  *
- * Copyright (C) 1996  SpellCaster Telecommunications Inc.
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
  *
- * This software may be used and distributed according to the terms
- * of the GNU General Public License, incorporated herein by reference.
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
  *
- * For more information, please contact gpl-info@spellcast.com or write:
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *
+ *  For more information, please contact gpl-info@spellcast.com or write:
  *
  *     SpellCaster Telecommunications Inc.
  *     5621 Finch Avenue East, Unit #3
@@ -14,8 +25,12 @@
  *     +1 (416) 297-8565
  *     +1 (416) 297-6433 Facsimile
  */
-
 #include <linux/kernel.h>
+
+#define NULL	0x0
+
+#define REQUEST_IRQ(a,b,c,d,e) request_irq(a,b,c,d,e)
+#define FREE_IRQ(a,b) free_irq(a,b)
 
 inline char *strcpy(char *, const char *);
 
@@ -46,7 +61,7 @@ inline char *strcpy(char *dest, const char *src)
 		*i = *j;
 		i++; j++;
 	}
-	*(++i) = 0;
+	*(++i) = NULL;
 	return dest;
 }
 
@@ -55,6 +70,6 @@ inline void pullphone(char *dn, char *str)
 	int i = 0;
 
 	while(dn[i] != ',')
-		str[i] = dn[i], i++;
+		str[i] = dn[i++];
 	str[i] = 0x0;
 }

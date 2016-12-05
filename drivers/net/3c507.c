@@ -125,7 +125,6 @@ struct net_local {
 	ushort tx_head;
 	ushort tx_cmd_link;
 	ushort tx_reap;
-	ushort tx_pkts_in_ring;
 	spinlock_t lock;
 };
 
@@ -194,7 +193,7 @@ struct net_local {
 #define DUMP_DATA	0x56	/* A 170 byte buffer for dump and Set-MC into. */
 
 #define TX_BUF_START	0x0100
-#define NUM_TX_BUFS 	5
+#define NUM_TX_BUFS 	4
 #define TX_BUF_SIZE 	(1518+14+20+16) /* packet+header+TBD */
 
 #define RX_BUF_START	0x2000
@@ -290,7 +289,7 @@ static void el16_rx(struct device *dev);
 static int	el16_close(struct device *dev);
 static struct net_device_stats *el16_get_stats(struct device *dev);
 
-static void hardware_send_packet(struct device *dev, void *buf, short length, short pad);
+static void hardware_send_packet(struct device *dev, void *buf, short length);
 static void init_82586_mem(struct device *dev);
 
 
@@ -470,7 +469,6 @@ static int el16_send_packet(struct sk_buff *skb, struct device *dev)
 			if (net_debug > 1) printk("Resetting board.\n");
 			/* Completely reset the adaptor. */
 			init_82586_mem(dev);
-			lp->tx_pkts_in_ring = 0;
 		} else {
 			/* Issue the channel attention signal and hope it "gets better". */
 			if (net_debug > 1) printk("Kicking board.\n");
@@ -495,10 +493,10 @@ static int el16_send_packet(struct sk_buff *skb, struct device *dev)
 		outb(0x80, ioaddr + MISC_CTRL);
 #ifdef CONFIG_SMP
 		spin_lock_irqsave(&lp->lock, flags);
-		hardware_send_packet(dev, buf, skb->len, length - skb->len);
+		hardware_send_packet(dev, buf, length);
 		spin_unlock_irqrestore(&lp->lock, flags);
 #else
-		hardware_send_packet(dev, buf, skb->len, length - skb->len);
+		hardware_send_packet(dev, buf, length);
 #endif		
 		dev->trans_start = jiffies;
 		/* Enable the 82586 interrupt input. */
@@ -545,34 +543,31 @@ static void el16_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	outb(0x80, ioaddr + MISC_CTRL);
 
 	/* Reap the Tx packet buffers. */
-	while (lp->tx_pkts_in_ring) {
+	while (lp->tx_reap != lp->tx_head) {
 	  unsigned short tx_status = readw(shmem+lp->tx_reap);
 
-	  if (!(tx_status & 0x8000)) {
-		if (net_debug > 5) 
-			printk("Tx command incomplete (%#x).\n", lp->tx_reap);
+	  if (tx_status == 0) {
+		if (net_debug > 5)  printk("Couldn't reap %#x.\n", lp->tx_reap);
 		break;
 	  }
-	  /* Tx unsuccessful or some interesting status bit set. */
-	  if (!(tx_status & 0x2000) || (tx_status & 0x0f3f)) {
+	  if (tx_status & 0x2000) {
+		lp->stats.tx_packets++;
+		lp->stats.collisions += tx_status & 0xf;
+		dev->tbusy = 0;
+		mark_bh(NET_BH);		/* Inform upper layers. */
+	  } else {
 		lp->stats.tx_errors++;
 		if (tx_status & 0x0600)  lp->stats.tx_carrier_errors++;
 		if (tx_status & 0x0100)  lp->stats.tx_fifo_errors++;
 		if (!(tx_status & 0x0040))  lp->stats.tx_heartbeat_errors++;
 		if (tx_status & 0x0020)  lp->stats.tx_aborted_errors++;
-		lp->stats.collisions += tx_status & 0xf;
 	  }
 	  if (net_debug > 5)
 		  printk("Reaped %x, Tx status %04x.\n" , lp->tx_reap, tx_status);
 	  lp->tx_reap += TX_BUF_SIZE;
 	  if (lp->tx_reap > RX_BUF_START - TX_BUF_SIZE)
 		lp->tx_reap = TX_BUF_START;
-
-	  lp->tx_pkts_in_ring--;
-	  /* There is always more space in the Tx ring buffer now. */
-	  mark_bh(NET_BH);
-
-	  if (++boguscount > 10)
+	  if (++boguscount > 4)
 		break;
 	}
 
@@ -758,13 +753,12 @@ static void init_82586_mem(struct device *dev)
 	return;
 }
 
-static void hardware_send_packet(struct device *dev, void *buf, short length, short pad)
+static void hardware_send_packet(struct device *dev, void *buf, short length)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	short ioaddr = dev->base_addr;
 	ushort tx_block = lp->tx_head;
 	unsigned long write_ptr = dev->mem_start + tx_block;
-	static char padding[ETH_ZLEN];
 
 	/* Set the write pointer to the Tx block, and put out the header. */
 	writew(0x0000,write_ptr);			/* Tx status */
@@ -773,7 +767,7 @@ static void hardware_send_packet(struct device *dev, void *buf, short length, sh
 	writew(tx_block+8,write_ptr+=2);			/* Data Buffer offset. */
 
 	/* Output the data buffer descriptor. */
-	writew((pad + length) | 0x8000,write_ptr+=2);	/* Byte count parameter. */
+	writew(length | 0x8000,write_ptr+=2);		/* Byte count parameter. */
 	writew(-1,write_ptr+=2);			/* No next data buffer. */
 	writew(tx_block+22+SCB_BASE,write_ptr+=2);	/* Buffer follows the NoOp command. */
 	writew(0x0000,write_ptr+=2);			/* Buffer address high bits (always zero). */
@@ -785,8 +779,6 @@ static void hardware_send_packet(struct device *dev, void *buf, short length, sh
 
 	/* Output the packet at the write pointer. */
 	memcpy_toio(write_ptr+2, buf, length);
-	if(pad)
-		memcpy_toio(write_ptr+length+2, padding, pad);
 
 	/* Set the old command link pointing to this send packet. */
 	writew(tx_block,dev->mem_start + lp->tx_cmd_link);
@@ -802,8 +794,7 @@ static void hardware_send_packet(struct device *dev, void *buf, short length, sh
 			   dev->name, ioaddr, length, tx_block, lp->tx_head);
 	}
 
-	/* Grimly block further packets if there has been insufficient reaping. */
-	if (++lp->tx_pkts_in_ring < NUM_TX_BUFS) 
+	if (lp->tx_head != lp->tx_reap)
 		dev->tbusy = 0;
 }
 

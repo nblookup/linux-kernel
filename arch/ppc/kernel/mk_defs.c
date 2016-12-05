@@ -8,7 +8,7 @@
  * #defines from the assembly-language output.
  */
 
-#include <linux/config.h>
+#include <stddef.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -43,18 +43,11 @@ main(void)
 	DEFINE(PGD, offsetof(struct mm_struct, pgd));
 	DEFINE(LAST_SYSCALL, offsetof(struct thread_struct, last_syscall));
 	DEFINE(PT_REGS, offsetof(struct thread_struct, regs));
-	DEFINE(PT_TRACESYS, PT_TRACESYS);
+	DEFINE(PF_TRACESYS, PF_TRACESYS);
 	DEFINE(TASK_FLAGS, offsetof(struct task_struct, flags));
-	DEFINE(TASK_PTRACE, offsetof(struct task_struct, ptrace));
 	DEFINE(NEED_RESCHED, offsetof(struct task_struct, need_resched));
 	DEFINE(TSS_FPR0, offsetof(struct thread_struct, fpr[0]));
 	DEFINE(TSS_FPSCR, offsetof(struct thread_struct, fpscr));
-#ifdef CONFIG_ALTIVEC
-	DEFINE(TSS_VR0, offsetof(struct thread_struct, vr[0]));
-	DEFINE(TSS_VRSAVE, offsetof(struct thread_struct, vrsave));
-	DEFINE(TSS_VSCR, offsetof(struct thread_struct, vscr));
-#endif /* CONFIG_ALTIVEC */
-
 	/* Interrupt register frame */
 	DEFINE(TASK_UNION_SIZE, sizeof(union task_union));
 	DEFINE(STACK_FRAME_OVERHEAD, STACK_FRAME_OVERHEAD);
@@ -104,6 +97,5 @@ main(void)
 	DEFINE(ORIG_GPR3, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, orig_gpr3));
 	DEFINE(RESULT, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, result));
 	DEFINE(TRAP, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, trap));
-	DEFINE(CLONE_VM, CLONE_VM);
 	return 0;
 }

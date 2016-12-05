@@ -18,7 +18,7 @@
 ! March 1993/June 1994 (Christoph.Niemann@linux.org)
 !
 ! add APM BIOS checking by Stephen Rothwell, May 1994
-! (sfr@canb.auug.org.au)
+! (Stephen.Rothwell@canb.auug.org.au)
 !
 ! High load stuff, initrd support and position independency
 ! by Hans Lermen & Werner Almesberger, February 1996
@@ -29,10 +29,6 @@
 !
 ! Extended memory detection scheme retwiddled by orc@pell.chi.il.us (david
 ! parsons) to avoid loadlin confusion, July 1997
-!
-!
-! A20 gating fiddled to work on AMD Elan AmSC4xx series by kira@linuxgrrls.org
-! july 1999 - from a 2.0 patch by Christian Lademann <cal@zls.de>
 !
 
 #define __ASSEMBLY__
@@ -69,7 +65,7 @@ start:
 ! SETUP-header, must start at CS:2 (old 0x9020:2)
 !
 		.ascii	"HdrS"		! Signature for SETUP-header
-		.word	0x0202		! Version number of header format
+		.word	0x0201		! Version number of header format
 					! (must be >= 0x0105
 					! else old loadlin-1.5 will fail)
 realmode_swtch:	.word	0,0		! default_switch,SETUPSEG
@@ -120,28 +116,9 @@ ramdisk_image:	.long	0	! address of loaded ramdisk image
 ramdisk_size:	.long	0	! its size in bytes
 bootsect_kludge:
 		.word   bootsect_helper,SETUPSEG
-heap_end_ptr:	.word	modelist+1024	! (Header version 0x0201 or later)
-					! space from here (exclusive) down to
-					! end of setup code can be used by setup
-					! for local heap purposes.
-
-pad1:		.word 0			! Reserved for future use
-
-cmd_line_ptr:	.long 0			! (Header version 0x0202 or later)
-					! If nonzero, a 32-bit pointer
-					! to the kernel command line.
-					! The command line should be
-					! located between the start of
-					! setup and the end of low
-					! memory (0xa0000), or it may
-					! get overwritten before it
-					! gets read.  If this field is
-					! used, there is no longer
-					! anything magical about the
-					! 0x90000 segment; the setup
-					! can be located anywhere in
-					! low memory 0x10000 or higher.
-	
+heap_end_ptr:	.word	modelist+1024	! space from here (exclusive) down to
+				! end of setup code can be used by setup
+				! for local heap purposes.
 ! ------------------------ end of header ----------------------------------
 
 start_of_setup:
@@ -267,46 +244,16 @@ loader_panic_mess:
 
 loader_ok:
 ! Get memory size (extended mem, kB)
-	xor     eax, eax
-	mov     [0x1e0], eax
+
 #ifndef STANDARD_MEMORY_BIOS_CALL
-	mov     [0x1e8], al
-meme820:
-	xor     ebx, ebx
-	mov     di,#0x2d0
+	push	ebx
 
-jmpe820:
-	mov     eax,#0x0000e820
-	mov     edx,#0x534d4150		! Some biosen trash edx each call
-	mov     ecx,#20
-	push    ds
-	pop     es
+        xor     ebx,ebx		! preload new memory slot with 0k
+        mov	[0x1e0], ebx
+
+        mov     ax,#0xe801
 	int     0x15
-	jc      bail820
-
-	cmp     eax,#0x534d4150
-	jne     bail820
-
-	cmp     16(di),#1
-	jne     again820
-
-good820:
-	mov     al,[0x1e8]
-	cmp     al,#32
-	jnl     bail820
-
-	incb    [0x1e8]
-	mov     ax,di
-	add     ax,#20
-	mov     di,ax
-again820:
-	cmp     ebx,#0
-	jne     jmpe820
-bail820:
-meme801:
-	mov	ax,#0xe801
-	int	0x15
-	jc	mem88
+	jc      oldstylemem
 
 ! Memory size is in 1 k chunksizes, to avoid confusing loadlin.
 ! We store the 0xe801 memory size in a completely different place,
@@ -315,19 +262,23 @@ meme801:
 ! alternative new memory detection scheme, and it's sensible
 ! to write everything into the same place.)
 
-	and 	ebx, #0xffff	! clear sign extend
-	shl	ebx, 6		! and go from 64k to 1k chunks
-	mov	[0x1e0],ebx	! store extented memory size
-	
-	and	eax, #0xffff	! clear sign extend
-	add	[0x1e0],eax	! and add lower memory into total size. 
+	and     ebx, #0xffff    ! clear sign extend
+	shl     ebx, 6          ! and go from 64k to 1k chunks
+	mov     [0x1e0],ebx     ! store extended memory size
 
-	! and fall into the old memory detection to populate the
-	! compatibility slot.	
-mem88:
+	and     eax, #0xffff    ! clear sign extend
+ 	add     [0x1e0],eax     ! and add lower memory into total size.
+  
+	! and fall into the old memory detection code to populate the
+	! compatibility slot.
+
+oldstylemem:
+	pop	ebx
+#else
+	mov     dword ptr [0x1e0], #0
 #endif
-        mov     ah,#0x88
-        int     0x15
+	mov	ah,#0x88
+	int	0x15
 	mov	[2],ax
 
 ! Set the keyboard repeat rate to the max
@@ -392,6 +343,7 @@ is_disk1:
 	mov ax,cs		! aka #SETUPSEG
 	sub ax,#DELTA_INITSEG	! aka #INITSEG
 	mov ds,ax
+	mov ds,ax
 	xor ax,ax
 	mov [0xa0], ax		! set table length to 0
 	mov ah, #0xc0
@@ -452,11 +404,7 @@ no_psmouse:
 	int	0x15		! ignore return code
 
 	mov	ax,#0x05303	! 32 bit connect
-	xor	ebx,ebx
-	xor	cx,cx		! paranoia
-	xor	dx,dx		!   ...
-	xor	esi,esi		!   ...
-	xor	di,di		!   ...
+	xor	bx,bx
 	int	0x15
 	jc	no_32_apm_bios	! error
 
@@ -472,7 +420,6 @@ no_psmouse:
 !
 	mov	ax,#0x05300	! APM BIOS installation check
 	xor	bx,bx
-	xor	cx,cx		! paranoia
 	int	0x15
 	jc	apm_disconnect	! error -> should not happen, tidy up
 
@@ -553,13 +500,6 @@ end_move:
 	mov	ax,cs ! aka #SETUPSEG	! right, forgot this at first. didn't work :-)
 	mov	ds,ax
 
-! Check whether we need to be downward compatible with version <= 0x0201
-	cmp	dword ptr [cmd_line_ptr],#0
-	jne	end_move_self
-	cmp	byte ptr [type_of_loader],#0x20
-	je	end_move_self
-
-! Boot loader does not support boot protocol version 2.02.
 ! If we have our code not at 0x90000, we need to move it there now.
 ! We also then need to move the parameters behind it (command line)
 ! Because we would overwrite the code on the current IP, we move
@@ -598,55 +538,44 @@ move_self_here:
 	mov	ds,ax
 	mov	ss,dx
 			! now we are at the right place
-
 end_move_self:
+
 	lidt	idt_48		! load idt with 0,0
-	xor	eax,eax
-	mov	ax,ds
-	shl	eax,#4
-	add	eax,#gdt
-	mov	[gdt_48+2],eax
 	lgdt	gdt_48		! load gdt with whatever appropriate
 
 ! that was painless, now we enable A20
-	call	empty_8042
 
-! do it the normal way too, so as not to upset normal machines
+	call	empty_8042
 	mov	al,#0xD1		! command write
 	out	#0x64,al
 	call	empty_8042
-
 	mov	al,#0xDF		! A20 on
 	out	#0x60,al
 	call	empty_8042
 
-! if this is SC410 or a few other bits we need to do it with the 'fast' method
-!
-!	You must preserve the other bits here. Otherwise embarrasing things
-!	like laptops powering off on boot happen. Corrected version by Kira
-!	Brown from Linux 2.2
-
-        in      al,#0x92        ! read "System Control Port A"
-        or      al,#0x02        ! Set "Alternate Gate A20" - Bit
-        out     #0x92,al        ! write "System Control Port A"
-
 ! wait until a20 really *is* enabled; it can take a fair amount of
 ! time on certain systems; Toshiba Tecras are known to have this
-! problem.  The memory location used here (0x200) is the int 0x80
-! vector, which should be safe to use.
+! problem.  The memory location used here is the int 0x1f vector,
+! which should be safe to use; any *unused* memory location < 0xfff0
+! should work here.  
 
+#define	TEST_ADDR 0x7c
+
+	push	ds
 	xor	ax,ax			! segment 0x0000
-	mov	fs,ax
+	mov	ds,ax
 	dec	ax			! segment 0xffff (HMA)
 	mov	gs,ax
+	mov	bx,[TEST_ADDR]		! we want to restore the value later
 a20_wait:
-	inc	ax			! unused memory location <0xfff0
-	seg	fs
-	mov	[0x200],ax		! we use the "int 0x80" vector
+	inc	ax
+	mov	[TEST_ADDR],ax
 	seg	gs
-	cmp	ax,[0x210]		! and its corresponding HMA addr
+	cmp	ax,[TEST_ADDR+0x10]
 	je	a20_wait		! loop until no longer aliased
-
+	mov	[TEST_ADDR],bx		! restore original value
+	pop	ds
+		
 ! make sure any possible coprocessor is properly reset..
 
 	xor	ax,ax
@@ -710,11 +639,7 @@ a20_wait:
 	jmp	flush_instr
 flush_instr:
 	xor	bx,bx		! Flag to indicate a boot
-	xor	esi,esi		! Pointer to real-mode code
-	mov	si,cs
-	sub	si,#DELTA_INITSEG
-	shl	esi,#4		! Convert to 32-bit pointer
-	
+
 ! NOTE: For high loaded big kernels we need a
 !	jmpi    0x100000,__KERNEL_CS
 !
@@ -828,36 +753,19 @@ bootsect_panic_mess:
 ! This routine checks that the keyboard command queue is empty
 ! (after emptying the output buffers)
 !
-! Some machines have delusions that the keyboard buffer is always full
-! with no keyboard attached...
-!
-! If there is no keyboard controller, we will usually get 0xff
-! to all the reads.  With each IO taking a microsecond and
-! a timeout of 100,000 iterations, this can take about half a
-! second ("delay" == outb to port 0x80). That should be ok,
-! and should also be plenty of time for a real keyboard controller
-! to empty.
-
+! No timeout is used - if this hangs there is something wrong with
+! the machine, and we probably couldn't proceed anyway.
 empty_8042:
-       push    ecx
-       mov     ecx,#100000
-
-empty_8042_loop:
-       dec     ecx
-       jz      empty_8042_end_loop
-
 	call	delay
 	in	al,#0x64	! 8042 status port
 	test	al,#1		! output buffer?
 	jz	no_output
 	call	delay
 	in	al,#0x60	! read it
-	jmp	empty_8042_loop
+	jmp	empty_8042
 no_output:
 	test	al,#2		! is input buffer full?
-	jnz	empty_8042_loop	! yes - loop
-empty_8042_end_loop:
-        pop     ecx
+	jnz	empty_8042	! yes - loop
 	ret
 
 !
@@ -880,7 +788,7 @@ gettime:
 ! Delay is needed after doing I/O
 !
 delay:
-	out	#0x80,al
+	.word	0x00eb			! jmp $+2
 	ret
 
 !
@@ -908,7 +816,7 @@ idt_48:
 
 gdt_48:
 	.word	0x800		! gdt limit=2048, 256 GDT entries
-	.word	0, 0		! gdt base (filled in later)
+	.word	512+gdt,0x9	! gdt base = 0X9xxxx
 
 !
 ! Include video setup & detection code

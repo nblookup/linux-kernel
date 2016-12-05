@@ -2,7 +2,7 @@
  *		IP_MASQ_IRC irc masquerading module
  *
  *
- * Version:	@(#)ip_masq_irc.c 0.04   99/06/19
+ * Version:	@(#)ip_masq_irc.c 0.03   97/11/30
  *
  * Author:	Juan Jose Ciarlante
  *		
@@ -18,11 +18,9 @@
  *	Oliver Wagner 		:  more IRC cmds processing
  *	  <winmute@lucifer.gv.kotnet.org>
  *	Juan Jose Ciarlante	:  put new ms entry to listen()
- *	Scottie Shore		:  added support for clients that add extra args
- *	  <sshore@escape.ca>
- *	Scottie Shore		:  added support for mIRC DCC resume negotiation
- *	  <sshore@escape.ca>
- *	Juan Jose Ciarlante	:  src addr/port checking for better security (spotted by Michal Zalewski)
+ *
+ * FIXME:
+ *	- detect also previous "PRIVMSG" string ?.
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -39,12 +37,7 @@
  *	/etc/conf.modules (or /etc/modules.conf depending on your config)
  *	where modload will pick it up should you use modload to load your
  *	modules.
- *
- * Insecure "back" data channel opening
- * 	The helper does some trivial checks when opening a new DCC data
- * 	channel. Use module parameter
- * 		insecure=1
- *	... to avoid this and get previous (pre 2.2.20) behaviour.
+ *	
  */
 
 #include <linux/config.h>
@@ -78,32 +71,28 @@ MODULE_PARM(debug, "i");
 
 MODULE_PARM(ports, "1-" __MODULE_STRING(MAX_MASQ_APP_PORTS) "i");
 
-static int insecure=0;
-MODULE_PARM(insecure, "i");
-
 
 /*
  * List of supported DCC protocols
  */
 
+#define NUM_DCCPROTO 5
+
 struct dccproto 
 {
   char *match;
   int matchlen;
+  int xtra_args;
 };
 
-struct dccproto dccprotos[] = {
- { "SEND ", 5 },
- { "CHAT ", 5 },
- { "MOVE ", 5 },
- { "TSEND ", 6 },
- { "SCHAT ", 6 },
- { "ACCEPT ", 7 },
+struct dccproto dccprotos[NUM_DCCPROTO] = {
+ { "SEND ", 5, 1 },
+ { "CHAT ", 5, 0, },
+ { "MOVE ", 5, 1 },
+ { "TSEND ", 6, 1, },
+ { "SCHAT ", 6, 0, }
 };
-
-#define NUM_DCCPROTO (sizeof dccprotos / sizeof dccprotos[0])
-
-#define MAXMATCHLEN 7
+#define MAXMATCHLEN 6
 
 static int
 masq_irc_init_1 (struct ip_masq_app *mapp, struct ip_masq *ms)
@@ -119,30 +108,6 @@ masq_irc_done_1 (struct ip_masq_app *mapp, struct ip_masq *ms)
         return 0;
 }
 
-
-/*
- * 	Ugly workaround [TM] --mummy ... why does this protocol sucks?
- *
- *	The <1024 check and same source address just raise the
- *	security "feeling" => they don't prevent a redirector listening
- *	in same src address at a higher port; you should protect 
- *	your internal network with ipchains output rules anyway
- */
-
-static inline int masq_irc_out_check(const struct ip_masq *ms, __u32 data_saddr, __u16 data_sport) {
-	int allow=1;
-
-	IP_MASQ_DEBUG(1-debug, "masq_irc_out_check( s_addr=%d.%d.%d.%d, data_saddr=%d.%d.%d.%d, data_sport=%d",
-			NIPQUAD(ms->saddr), NIPQUAD(data_saddr), ntohs(data_sport));
-
-	/* 
-	 * 	Ignore data channel back to other src addr, nor to port < 1024
-	 */
-	if (ms->saddr != data_saddr || ntohs(data_sport) < 1024) 
-		allow=0;
-
-	return allow;
-}
 int
 masq_irc_out (struct ip_masq_app *mapp, struct ip_masq *ms, struct sk_buff **skb_p, __u32 maddr)
 {
@@ -151,11 +116,12 @@ masq_irc_out (struct ip_masq_app *mapp, struct ip_masq *ms, struct sk_buff **skb
 	struct tcphdr *th;
 	char *data, *data_limit;
 	__u32 s_addr;
-	__u32 s_port;	/* larger to allow strtoul() return value validation */
+	__u16 s_port;
 	struct ip_masq *n_ms;
 	char buf[20];		/* "m_addr m_port" (dec base)*/
         unsigned buf_len;
 	int diff;
+        int xtra_args = 0;      /* extra int args wanted after addr */
         char *dcc_p, *addr_beg_p, *addr_end_p;
 
         skb = *skb_p;
@@ -166,12 +132,12 @@ masq_irc_out (struct ip_masq_app *mapp, struct ip_masq *ms, struct sk_buff **skb
         /*
 	 *	Hunt irc DCC string, the _shortest_:
 	 *
-	 *	strlen("\1DCC CHAT chat AAAAAAAA P\1\n")=27
-	 *	strlen("\1DCC SCHAT chat AAAAAAAA P\1\n")=28
-	 *	strlen("\1DCC SEND F AAAAAAAA P S\1\n")=26
-	 *	strlen("\1DCC MOVE F AAAAAAAA P S\1\n")=26
-	 *	strlen("\1DCC TSEND F AAAAAAAA P S\1\n")=27
-	 *	strlen("\1DCC ACCEPT F AAAAAAAA P S\1\n")=28
+	 *	strlen("DCC CHAT chat AAAAAAAA P\x01\n")=26
+	 *	strlen("DCC SCHAT chat AAAAAAAA P\x01\n")=27
+	 *	strlen("DCC SEND F AAAAAAAA P S\x01\n")=25
+	 *	strlen("DCC MOVE F AAAAAAAA P S\x01\n")=25
+	 *	strlen("DCC TSEND F AAAAAAAA P S\x01\n")=26
+	 *	strlen("DCC MOVE F AAAAAAAA P S\x01\n")=25
 	 *		AAAAAAAAA: bound addr (1.0.0.0==16777216, min 8 digits)
 	 *		P:         bound port (min 1 d )
 	 *		F:         filename   (min 1 d )
@@ -181,16 +147,16 @@ masq_irc_out (struct ip_masq_app *mapp, struct ip_masq *ms, struct sk_buff **skb
 
         data_limit = skb->h.raw + skb->len;
         
-	while (data < (data_limit - ( 22 + MAXMATCHLEN ) ) )
+	while (data < (data_limit - ( 21 + MAXMATCHLEN ) ) )
 	{
 		int i;
-		if (memcmp(data,"\1DCC ",5))  {
+		if (memcmp(data,"DCC ",4))  {
 			data ++;
 			continue;
 		}
 
 		dcc_p = data;
-		data += 5;     /* point to DCC cmd */
+		data += 4;     /* point to DCC cmd */
 
 		for(i=0; i<NUM_DCCPROTO; i++)
 		{
@@ -200,6 +166,7 @@ masq_irc_out (struct ip_masq_app *mapp, struct ip_masq *ms, struct sk_buff **skb
 
 			if( memcmp(data, dccprotos[i].match, dccprotos[i].matchlen ) == 0 )
 			{
+				xtra_args = dccprotos[i].xtra_args;
 				data += dccprotos[i].matchlen;
 
 				/*
@@ -209,7 +176,7 @@ masq_irc_out (struct ip_masq_app *mapp, struct ip_masq *ms, struct sk_buff **skb
 				while( *data++ != ' ')
 
 					/*
-					 *	must still parse, at least, "AAAAAAAA P\1\n",
+					 *	must still parse, at least, "AAAAAAAA P\x01\n",
 					 *      12 bytes left.
 					 */
 					if (data > (data_limit-12)) return 0;
@@ -232,39 +199,40 @@ masq_irc_out (struct ip_masq_app *mapp, struct ip_masq *ms, struct sk_buff **skb
 				s_port = simple_strtoul(data,&data,10);
 				addr_end_p = data;
 
-				/*	Sanity checks 		*/
-				if (!s_addr || !s_port || s_port > 65535)
-					continue;
-
-				/*	Prefer net order from now on 	*/
-				s_addr = htonl(s_addr);
-				s_port = htons(s_port);
-
-				/* 	Simple validation 	*/
-				if (!insecure && !masq_irc_out_check(ms, s_addr, s_port))
-					/* We may just: return 0; */
-					continue;
-
-				/*	Do we already have a port open for this client?
-				 *	If so, use it (for DCC ACCEPT)
+				/*
+				 *	should check args consistency?
 				 */
 
-				n_ms = ip_masq_out_get(IPPROTO_TCP,
-						s_addr, s_port,
-						0, 0);
+				while(xtra_args) {
+					if (*data != ' ')
+						break;
+					data++;
+					simple_strtoul(data,&data,10);
+					xtra_args--;
+				}
+
+				if (xtra_args != 0) continue;
 
 				/*
-				 *	If we didn't already have a port, we need to make one.
-				 * 	We must set NO_DPORT and NO_DADDR because
+				 *	terminators.
+				 */
+
+				if (data[0] != 0x01)
+					continue;
+				if (data[1]!='\r' && data[1]!='\n')
+					continue;
+
+				/*
+				 *	Now create an masquerade entry for it
+				 * 	must set NO_DPORT and NO_DADDR because
 				 *	connection is requested by another client.
 				 */
 
-				if (n_ms==NULL)
-					n_ms = ip_masq_new(IPPROTO_TCP,
-							maddr, 0,
-							s_addr, s_port,
-							0, 0,
-							IP_MASQ_F_NO_DPORT|IP_MASQ_F_NO_DADDR);
+				n_ms = ip_masq_new(IPPROTO_TCP,
+						maddr, 0,
+						htonl(s_addr),htons(s_port),
+						0, 0,
+						IP_MASQ_F_NO_DPORT|IP_MASQ_F_NO_DADDR);
 				if (n_ms==NULL)
 					return 0;
 
@@ -272,7 +240,7 @@ masq_irc_out (struct ip_masq_app *mapp, struct ip_masq *ms, struct sk_buff **skb
 				 * Replace the old "address port" with the new one
 				 */
 
-				buf_len = sprintf(buf,"%u %u",
+				buf_len = sprintf(buf,"%lu %u",
 						ntohl(n_ms->maddr),ntohs(n_ms->mport));
 
 				/*
@@ -282,10 +250,7 @@ masq_irc_out (struct ip_masq_app *mapp, struct ip_masq *ms, struct sk_buff **skb
 				diff = buf_len - (addr_end_p-addr_beg_p);
 
 				*addr_beg_p = '\0';
-				IP_MASQ_DEBUG(1-debug, "masq_irc_out(): '%s' %d.%d.%d.%d:%d -> %d.%d.%d.%d:%d detected (diff=%d)\n", dcc_p, 
-					NIPQUAD(s_addr), htons(s_port), 
-					NIPQUAD(n_ms->maddr), htons(n_ms->mport), 
-					diff);
+				IP_MASQ_DEBUG(1-debug, "masq_irc_out(): '%s' %X:%X detected (diff=%d)\n", dcc_p, s_addr,s_port, diff);
 
 				/*
 				 *	No shift.
@@ -312,125 +277,6 @@ masq_irc_out (struct ip_masq_app *mapp, struct ip_masq *ms, struct sk_buff **skb
 
 }
 
-int
-masq_irc_in (struct ip_masq_app *mapp, struct ip_masq *ms, struct sk_buff **skb_p, __u32 maddr)
-{
-        struct sk_buff *skb;
-	struct iphdr *iph;
-	struct tcphdr *th;
-	char *data, *data_limit;
-	__u32 s_addr;
-	__u16 s_port;
-	struct ip_masq *n_ms;
-	char buf[20];		/* "m_addr m_port" (dec base)*/
-        unsigned buf_len;
-	int diff;
-        char *dcc_p, *addr_beg_p, *addr_end_p;
-
-        skb = *skb_p;
-	iph = skb->nh.iph;
-        th = (struct tcphdr *)&(((char *)iph)[iph->ihl*4]);
-        data = (char *)&th[1];
-
-        /*
-	 *	Hunt irc DCC RESUME string:
-	 *
-	 *	strlen("\1DCC RESUME chat AAAAAAAA P\1\n")=29
-	 *		AAAAAAAAA: bound addr (1.0.0.0==16777216, min 8 digits)
-	 *		P:         bound port (min 1 d )
-	 *		F:         filename   (min 1 d )
-	 *		S:         size       (min 1 d ) 
-	 *		0x01, \n:  terminators
-         */
-
-        data_limit = skb->h.raw + skb->len;
-        
-	while (data < (data_limit - 29 ) )
-	{
-		if (memcmp(data,"\1DCC RESUME ",12))  {
-			data ++;
-			continue;
-		}
-
-		dcc_p = data;
-		data += 12;
-
-		while( *data++ != ' ')
-			/*
-			 *	must still parse, at least, "AAAAAAAA P\1\n",
-			 *      12 bytes left.
-			 */
-			if (data > (data_limit-12)) return 0;
-
-
-		addr_beg_p = data;
-
-		/*
-		 *	masq bound address in dec base
-		 */
-
-		s_addr = simple_strtoul(data,&data,10);
-		if (*data++ !=' ')
-		continue;
-
-		/*
-		 *	masq bound port in dec base
-		 */
-
-		s_port = simple_strtoul(data,&data,10);
-		addr_end_p = data;
-
-		/*
-		 *	Find the masq entry associated with this connection.
-		 *	The entry should have no dest addr/port yet.
-		 *	If there is no entry, return 0.
-		 */
-
-		n_ms = ip_masq_in_get(IPPROTO_TCP,
-			0, 0,
-			htonl(s_addr), htons(s_port));
-					
-		if (n_ms==NULL)
-			return 0;
-
-		/*
-		 * Replace the outside address with the inside address
-		 */
-
-		buf_len = sprintf(buf,"%u %u",
-			ntohl(n_ms->saddr),ntohs(n_ms->sport));
-
-		/*
-		 * Calculate required delta-offset to keep TCP happy
-		 */
-
-		diff = buf_len - (addr_end_p-addr_beg_p);
-
-		*addr_beg_p = '\0';
-		IP_MASQ_DEBUG(1-debug, "masq_irc_in(): '%s' %X:%X detected (diff=%d)\n", dcc_p, s_addr,s_port, diff);
-
-		/*
-		 *	No shift.
-		 */
-
-		if (diff==0) {
-			/*
-			 * simple case, just copy.
-			 */
-			memcpy(addr_beg_p,buf,buf_len);
-		} else {
-			*skb_p = ip_masq_skb_replace(skb, GFP_ATOMIC,
-				addr_beg_p, addr_end_p-addr_beg_p,
-				buf, buf_len);
-		}
-
-		return diff;
-
-	}
-	return 0;
-
-}
-
 /*
  *	Main irc object
  *     	You need 1 object per port in case you need
@@ -442,12 +288,12 @@ masq_irc_in (struct ip_masq_app *mapp, struct ip_masq *ms, struct sk_buff **skb_
 struct ip_masq_app ip_masq_irc = {
         NULL,			/* next */
 	"irc",			/* name */
-        0,			/* type */
-        0,			/* n_attach */
-        masq_irc_init_1,	/* init_1 */
-        masq_irc_done_1,	/* done_1 */
-        masq_irc_out,		/* pkt_out */
-        masq_irc_in		/* pkt_in */
+        0,                      /* type */
+        0,                      /* n_attach */
+        masq_irc_init_1,        /* init_1 */
+        masq_irc_done_1,        /* done_1 */
+        masq_irc_out,           /* pkt_out */
+        NULL                    /* pkt_in */
 };
 
 /*

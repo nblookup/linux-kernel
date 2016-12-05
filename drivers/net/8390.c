@@ -192,11 +192,10 @@ int ei_close(struct device *dev)
 
 static int ei_start_xmit(struct sk_buff *skb, struct device *dev)
 {
-	long e8390_base = dev->base_addr;
+	int e8390_base = dev->base_addr;
 	struct ei_device *ei_local = (struct ei_device *) dev->priv;
 	int length, send_length, output_page;
 	unsigned long flags;
-	char scratch[ETH_ZLEN];
 
 	/*
 	 *  We normally shouldn't be called if dev->tbusy is set, but the
@@ -349,16 +348,8 @@ static int ei_start_xmit(struct sk_buff *skb, struct device *dev)
 	 * isn't already sending. If it is busy, the interrupt handler will
 	 * trigger the send later, upon receiving a Tx done interrupt.
 	 */
-	 
-	if(length == send_length)
-		ei_block_output(dev, length, skb->data, output_page);
-	else
-	{
-		memset(scratch, 0, ETH_ZLEN);
-		memcpy(scratch, skb->data, skb->len);
-		ei_block_output(dev, ETH_ZLEN, scratch, output_page);
-	}
-		
+
+	ei_block_output(dev, length, skb->data, output_page);
 	if (! ei_local->txing) 
 	{
 		ei_local->txing = 1;
@@ -387,14 +378,7 @@ static int ei_start_xmit(struct sk_buff *skb, struct device *dev)
 	 * reasonable hardware if you only use one Tx buffer.
 	 */
 
-	if(length == send_length)
-		ei_block_output(dev, length, skb->data, ei_local->tx_start_page);
-	else
-	{
-		memset(scratch, 0, ETH_ZLEN);
-		memcpy(scratch, skb->data, skb->len);
-		ei_block_output(dev, ETH_ZLEN, scratch, ei_local->tx_start_page);
-	}
+	ei_block_output(dev, length, skb->data, ei_local->tx_start_page);
 	ei_local->txing = 1;
 	NS8390_trigger_send(dev, send_length, ei_local->tx_start_page);
 	dev->trans_start = jiffies;
@@ -421,7 +405,7 @@ static int ei_start_xmit(struct sk_buff *skb, struct device *dev)
 void ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	struct device *dev = dev_id;
-	long e8390_base;
+	int e8390_base;
 	int interrupts, nr_serviced = 0;
 	struct ei_device *ei_local;
     
@@ -534,7 +518,7 @@ void ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 
 static void ei_tx_err(struct device *dev)
 {
-	long e8390_base = dev->base_addr;
+	int e8390_base = dev->base_addr;
 	struct ei_device *ei_local = (struct ei_device *) dev->priv;
 	unsigned char txsr = inb_p(e8390_base+EN0_TSR);
 	unsigned char tx_was_aborted = txsr & (ENTSR_ABT+ENTSR_FU);
@@ -572,7 +556,7 @@ static void ei_tx_err(struct device *dev)
 
 static void ei_tx_intr(struct device *dev)
 {
-	long e8390_base = dev->base_addr;
+	int e8390_base = dev->base_addr;
 	struct ei_device *ei_local = (struct ei_device *) dev->priv;
 	int status = inb(e8390_base + EN0_TSR);
     
@@ -662,7 +646,7 @@ static void ei_tx_intr(struct device *dev)
 
 static void ei_receive(struct device *dev)
 {
-	long e8390_base = dev->base_addr;
+	int e8390_base = dev->base_addr;
 	struct ei_device *ei_local = (struct ei_device *) dev->priv;
 	unsigned char rxing_page, this_frame, next_frame;
 	unsigned short current_offset;
@@ -791,7 +775,7 @@ static void ei_receive(struct device *dev)
 
 static void ei_rx_overrun(struct device *dev)
 {
-	long e8390_base = dev->base_addr;
+	int e8390_base = dev->base_addr;
 	unsigned char was_txing, must_resend = 0;
 	struct ei_device *ei_local = (struct ei_device *) dev->priv;
     
@@ -860,7 +844,7 @@ static void ei_rx_overrun(struct device *dev)
  
 static struct net_device_stats *get_stats(struct device *dev)
 {
-	long ioaddr = dev->base_addr;
+	int ioaddr = dev->base_addr;
 	struct ei_device *ei_local = (struct ei_device *) dev->priv;
 	unsigned long flags;
     
@@ -935,7 +919,7 @@ static inline void make_mc_bits(u8 *bits, struct device *dev)
  
 static void do_set_multicast_list(struct device *dev)
 {
-	long e8390_base = dev->base_addr;
+	int e8390_base = dev->base_addr;
 	int i;
 	struct ei_device *ei_local = (struct ei_device*)dev->priv;
 
@@ -1040,7 +1024,7 @@ int ethdev_init(struct device *dev)
 
 void NS8390_init(struct device *dev, int startp)
 {
-	long e8390_base = dev->base_addr;
+	int e8390_base = dev->base_addr;
 	struct ei_device *ei_local = (struct ei_device *) dev->priv;
 	int i;
 	int endcfg = ei_local->word16 ? (0x48 | ENDCFG_WTS) : 0x48;
@@ -1104,7 +1088,7 @@ void NS8390_init(struct device *dev, int startp)
 static void NS8390_trigger_send(struct device *dev, unsigned int length,
 								int start_page)
 {
-	long e8390_base = dev->base_addr;
+	int e8390_base = dev->base_addr;
  	struct ei_device *ei_local = (struct ei_device *) dev->priv;
    
 	outb_p(E8390_NODMA+E8390_PAGE0, e8390_base+E8390_CMD);

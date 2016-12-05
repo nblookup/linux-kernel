@@ -1,4 +1,4 @@
-/* $Id: btfixupprep.c,v 1.5.2.1 2001/08/22 15:28:31 davem Exp $
+/* $Id: btfixupprep.c,v 1.5 1998/09/16 12:24:55 jj Exp $
    Simple utility to prepare vmlinux image for sparc.
    Resolves all BTFIXUP uses and settings and creates
    a special .s object to link to the image.
@@ -88,16 +88,6 @@ btfixup *find(int type, char *name)
 	return array + last - 1;
 }
 
-void set_mode (char *buffer)
-{
-  	for (mode = 0;; mode++)
-		if (buffer[mode] < '0' || buffer[mode] > '9')
-			break;
-	if (mode != 8 && mode != 16)
-		fatal();
-}
-
-
 int main(int argc,char **argv)
 {
 	char *p, *q;
@@ -116,6 +106,14 @@ int main(int argc,char **argv)
 			goto main0;
 	fatal();
 main0:
+	if (fgets (buffer, 1024, stdin) == NULL || buffer[0] < '0' || buffer[0] > '9')
+		fatal();
+	for (mode = 0;; mode++)
+		if (buffer[mode] < '0' || buffer[mode] > '9')
+			break;
+	if (mode != 8 && mode != 16)
+		fatal();
+	
 	rellen = strlen(relrec);
 	while (fgets (buffer, 1024, stdin) != NULL)
 		if (!strncmp (buffer, relrec, rellen))
@@ -134,8 +132,6 @@ main1:
 		int nbase;
 		if (!strncmp (buffer, relrec, rellen))
 			goto main1;
-		if (mode == 0)
-			set_mode (buffer);
 		p = strchr (buffer, '\n');
 		if (p) *p = 0;
 		if (strlen (buffer) < 22+mode)

@@ -129,15 +129,15 @@ static const char *invalid_pcb_msg =
 #define INVALID_PCB_MSG(len) \
 	printk(invalid_pcb_msg, (len),filename,__FUNCTION__,__LINE__)
 
-static char *search_msg __initdata = "%s: Looking for 3c505 adapter at address %#x...";
+static const char *search_msg = "%s: Looking for 3c505 adapter at address %#x...";
 
-static char *stilllooking_msg __initdata = "still looking...";
+static const char *stilllooking_msg = "still looking...";
 
-static char *found_msg __initdata = "found.\n";
+static const char *found_msg = "found.\n";
 
-static char *notfound_msg __initdata = "not found (reason = %d)\n";
+static const char *notfound_msg = "not found (reason = %d)\n";
 
-static char *couldnot_msg __initdata = "%s: 3c505 not found\n";
+static const char *couldnot_msg = "%s: 3c505 not found\n";
 
 /*********************************************************
  *
@@ -179,7 +179,7 @@ static const int elp_debug = 0;
  * Last element MUST BE 0!
  *****************************************************************/
 
-static int addr_list[] __initdata = {0x300, 0x280, 0x310, 0};
+static const int addr_list[] __initdata = {0x300, 0x280, 0x310, 0};
 
 /* Dma Memory related stuff */
 
@@ -617,7 +617,7 @@ static void receive_packet(struct device *dev, int len)
 	} else {
 		skb_reserve(skb, 2);
 		target = skb_put(skb, rlen);
-		if ((unsigned long)(target + rlen) >= MAX_DMA_ADDRESS) {
+		if (virt_to_bus(target + rlen) >= MAX_DMA_ADDRESS) {
 			adapter->current_dma.target = target;
 			target = adapter->dma_buffer;
 		} else {
@@ -1062,13 +1062,10 @@ static int send_packet(struct device *dev, struct sk_buff *skb)
 	adapter->current_dma.direction = 1;
 	adapter->current_dma.start_time = jiffies;
 
-	if ((unsigned long)(skb->data + nlen) >= MAX_DMA_ADDRESS || nlen != skb->len) {
-		memcpy(adapter->dma_buffer, skb->data, skb->len);
-		memset(adapter->dma_buffer+skb->len, 0, nlen-skb->len);
+	target = virt_to_bus(skb->data);
+	if ((target + nlen) >= MAX_DMA_ADDRESS) {
+		memcpy(adapter->dma_buffer, skb->data, nlen);
 		target = virt_to_bus(adapter->dma_buffer);
-	}
-	else {
-		target = virt_to_bus(skb->data);
 	}
 	adapter->current_dma.skb = skb;
 

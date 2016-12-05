@@ -1,4 +1,4 @@
-/* $Id: signal.c,v 1.18.2.1 1999/06/17 12:06:40 ralf Exp $
+/* $Id: signal.c,v 1.24 1998/09/16 22:50:42 ralf Exp $
  *
  *  linux/arch/mips/kernel/signal.c
  *
@@ -392,7 +392,6 @@ static inline void syscall_restart(struct pt_regs *regs, struct k_sigaction *ka)
 		}
 	/* fallthrough */
 	case ERESTARTNOINTR:		/* Userland will reload $v0.  */
-		regs->regs[7] = regs->regs[26];
 		regs->cp0_epc -= 8;
 	}
 
@@ -424,7 +423,7 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs)
 		if (!signr)
 			break;
 
-		if ((current->ptrace & PT_PTRACED) && signr != SIGKILL) {
+		if ((current->flags & PF_PTRACED) && signr != SIGKILL) {
 			/* Let the debugger run.  */
 			current->exit_code = signr;
 			current->state = TASK_STOPPED;
@@ -492,15 +491,17 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs)
 
 			case SIGQUIT: case SIGILL: case SIGTRAP:
 			case SIGABRT: case SIGFPE: case SIGSEGV:
-			case SIGBUS:
-				if (do_coredump(signr, regs))
+				lock_kernel();
+				if (current->binfmt
+				    && current->binfmt->core_dump
+				    && current->binfmt->core_dump(signr, regs))
 					exit_code |= 0x80;
+				unlock_kernel();
 				/* FALLTHRU */
 
 			default:
 				lock_kernel();
 				sigaddset(&current->signal, signr);
-				recalc_sigpending(current);
 				current->flags |= PF_SIGNALED;
 				do_exit(exit_code);
 				/* NOTREACHED */
@@ -523,7 +524,6 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs)
 		if (regs->regs[2] == ERESTARTNOHAND ||
 		    regs->regs[2] == ERESTARTSYS ||
 		    regs->regs[2] == ERESTARTNOINTR) {
-			regs->regs[7] = regs->regs[26];
 			regs->cp0_epc -= 8;
 		}
 	}

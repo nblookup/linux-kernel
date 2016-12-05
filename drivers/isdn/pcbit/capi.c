@@ -1,16 +1,17 @@
 /*
- * CAPI encoder/decoder for
- * Portugal Telecom CAPI 2.0
- *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
  * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU General Public License, incorporated herein by reference.
+ * the GNU Public License, incorporated herein by reference.
+ */
+
+/*        
+ *        CAPI encoder/decoder for
+ *        Portugal Telecom CAPI 2.0
  *
- * Not compatible with the AVM Gmbh. CAPI 2.0
- *
+ *        Not compatible with the AVM Gmbh. CAPI 2.0
  */
 
 /*
@@ -27,12 +28,16 @@
  *              encode our number in CallerPN and ConnectedPN
  */
 
+#define __NO_VERSION__
+
+#include <linux/module.h>
+
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 
 #include <linux/types.h>
-#include <linux/slab.h>
+#include <linux/malloc.h>
 #include <linux/mm.h>
 
 #include <linux/tqueue.h>
@@ -299,14 +304,7 @@ int capi_tdata_req(struct pcbit_chan* chan, struct sk_buff *skb)
 	
 	data_len = skb->len;
 
-	if(skb_headroom(skb) < 10)
-	{
-		printk(KERN_CRIT "No headspace (%u) on headroom %p for capi header\n", skb_headroom(skb), skb);
-	}
-	else
-	{	
-		skb_push(skb, 10);
-	}
+	skb_push(skb, 10);
 
 	*((u16 *) (skb->data)) = chan->callref;
 	skb->data[2] = chan->layer2link;
@@ -425,7 +423,7 @@ int capi_decode_conn_ind(struct pcbit_chan * chan,
 #ifdef DEBUG
 		printk(KERN_DEBUG "CPN: Octect 3 %02x\n", skb->data[1]);
 #endif
-		if (len >= 2 && (skb->data[1] & 0x80) == 0)
+		if ((skb->data[1] & 0x80) == 0)
 			count = 2;
 		
 		if (!(info->data.setup.CallingPN = kmalloc(len - count + 1, GFP_ATOMIC)))
@@ -453,7 +451,7 @@ int capi_decode_conn_ind(struct pcbit_chan * chan,
 	if (len > 0) {
 		int count = 1;
 		
-		if (len >= 2 && (skb->data[1] & 0x80) == 0)
+		if ((skb->data[1] & 0x80) == 0)
 			count = 2;
         
 		if (!(info->data.setup.CalledPN = kmalloc(len - count + 1, GFP_ATOMIC)))

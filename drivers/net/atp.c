@@ -133,7 +133,7 @@ static void get_node_ID(struct device *dev);
 static unsigned short eeprom_op(short ioaddr, unsigned int cmd);
 static int net_open(struct device *dev);
 static void hardware_init(struct device *dev);
-static void write_packet(short ioaddr, int length, unsigned char *packet, int pad, int mode);
+static void write_packet(short ioaddr, int length, unsigned char *packet, int mode);
 static void trigger_send(short ioaddr, int length);
 static int	net_send_packet(struct sk_buff *skb, struct device *dev);
 static void net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
@@ -184,7 +184,7 @@ __initfunc(static int atp_probe1(struct device *dev, short ioaddr))
 	/* IRQEN=0, SLCTB=high INITB=high, AUTOFDB=high, STBB=high. */
 	outb(0x04, ioaddr + PAR_CONTROL);
 	write_reg_high(ioaddr, CMR1, CMR1h_RESET);
-	udelay(100);
+	eeprom_delay(2048);
 	status = read_nibble(ioaddr, CMR1);
 
 	if ((status & 0x78) != 0x08) {
@@ -299,12 +299,12 @@ __initfunc(static unsigned short eeprom_op(short ioaddr, unsigned int cmd))
 	while (--num_bits >= 0) {
 		char outval = test_bit(num_bits, &cmd) ? EE_DATA_WRITE : 0;
 		write_reg_high(ioaddr, PROM_CMD, outval | EE_CLK_LOW);
-		udelay(5);
+		eeprom_delay(5);
 		write_reg_high(ioaddr, PROM_CMD, outval | EE_CLK_HIGH);
 		eedata_out <<= 1;
 		if (read_nibble(ioaddr, PROM_DATA) & EE_DATA_READ)
 			eedata_out++;
-		udelay(5);
+		eeprom_delay(5);
 	}
 	write_reg_high(ioaddr, PROM_CMD, EE_CLK_LOW & ~EE_CS);
 	return eedata_out;
@@ -381,23 +381,15 @@ static void trigger_send(short ioaddr, int length)
 	write_reg(ioaddr, CMR1, CMR1_Xmit);
 }
 
-static void write_packet(short ioaddr, int length, unsigned char *packet, int pad_len, int data_mode)
+static void write_packet(short ioaddr, int length, unsigned char *packet, int data_mode)
 {
-    if(length & 1)
-    {
-    	length++;
-    	pad_len++;
-    }
-
+    length = (length + 1) & ~1;		/* Round up to word length. */
     outb(EOC+MAR, ioaddr + PAR_DATA);
     if ((data_mode & 1) == 0) {
 		/* Write the packet out, starting with the write addr. */
 		outb(WrAddr+MAR, ioaddr + PAR_DATA);
 		do {
 			write_byte_mode0(ioaddr, *packet++);
-		} while (--length > pad_len) ;
-		do {
-			write_byte_mode0(ioaddr, 0);
 		} while (--length > 0) ;
     } else {
 		/* Write the packet out in slow mode. */
@@ -411,10 +403,8 @@ static void write_packet(short ioaddr, int length, unsigned char *packet, int pa
 		outbyte >>= 4;
 		outb(outbyte & 0x0f, ioaddr + PAR_DATA);
 		outb(Ctrl_HNibWrite + Ctrl_IRQEN, ioaddr + PAR_CONTROL);
-		while (--length > pad_len)
-			write_byte_mode1(ioaddr, *packet++);
 		while (--length > 0)
-			write_byte_mode1(ioaddr, 0);
+			write_byte_mode1(ioaddr, *packet++);
     }
     /* Terminate the Tx frame.  End of write: ECB. */
     outb(0xff, ioaddr + PAR_DATA);
@@ -460,7 +450,7 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 		write_reg_high(ioaddr, IMR, 0);
 		restore_flags(flags);
 
-		write_packet(ioaddr, length, buf, length-skb->len, dev->if_port);
+		write_packet(ioaddr, length, buf, dev->if_port);
 
 		lp->pac_cnt_in_tx_buf++;
 		if (lp->tx_unit_busy == 0) {

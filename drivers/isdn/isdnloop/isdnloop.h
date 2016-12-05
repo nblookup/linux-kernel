@@ -1,11 +1,31 @@
-/* $Id: isdnloop.h,v 1.1.2.1 2001/12/31 13:26:47 kai Exp $
- *
+/* $Id: isdnloop.h,v 1.2 1997/10/01 09:22:07 fritz Exp $
+
  * Loopback lowlevel module for testing of linklevel.
  *
- * Copyright 1997 by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1997 by Fritz Elfert (fritz@wuemaus.franken.de)
  *
- * This software may be used and distributed according to the terms
- * of the GNU General Public License, incorporated herein by reference.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *
+ * $Log: isdnloop.h,v $
+ * Revision 1.2  1997/10/01 09:22:07  fritz
+ * Removed old compatibility stuff for 2.0.X kernels.
+ * From now on, this code is for 2.1.X ONLY!
+ * Old stuff is still in the separate branch.
+ *
+ * Revision 1.1  1997/03/24 23:02:05  fritz
+ * Added isdnloop driver.
  *
  */
 
@@ -33,6 +53,7 @@ typedef struct isdnloop_sdef {
 #ifdef __KERNEL__
 /* Kernel includes */
 
+#include <linux/module.h>
 #include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
@@ -41,7 +62,7 @@ typedef struct isdnloop_sdef {
 #include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
-#include <linux/slab.h>
+#include <linux/malloc.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/ioport.h>
@@ -103,6 +124,14 @@ typedef struct isdnloop_card {
  */
 #ifdef __KERNEL__
 static isdnloop_card *cards = (isdnloop_card *) 0;
+static char *isdnloop_id = "\0";
+
+#ifdef MODULE
+MODULE_AUTHOR("Fritz Elfert");
+MODULE_PARM(isdnloop_id, "s");
+MODULE_PARM_DESC(isdnloop_id, "ID-String of first card");
+#endif
+
 #endif                          /* __KERNEL__ */
 
 /* Utility-Macros */

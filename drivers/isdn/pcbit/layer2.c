@@ -1,18 +1,15 @@
 /*
- * PCBIT-D low-layer interface
- *
  * Copyright (C) 1996 Universidade de Lisboa
  *
  * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
  *
  * This software may be used and distributed according to the terms of
- * the GNU General Public License, incorporated herein by reference.
+ * the GNU Public License, incorporated herein by reference.
  */
 
 /*
- * 19991203 - Fernando Carvalho - takion@superbofh.org
- * Hacked to compile with egcs and run with current version of isdn modules
-*/
+ *        PCBIT-D low-layer interface
+ */
 
 /*
  *        Based on documentation provided by Inesc:
@@ -24,11 +21,21 @@
  *              re-write/remove debug printks
  */
 
+#define __NO_VERSION__
+
+
+#ifdef MODULE
+#define INCLUDE_INLINE_FUNCS
+#endif
+
+
+#include <linux/module.h>
+
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
-#include <linux/slab.h>
+#include <linux/malloc.h>
 #include <linux/interrupt.h>
 #include <linux/tqueue.h>
 #include <linux/mm.h>
@@ -198,7 +205,7 @@ pcbit_transmit(struct pcbit_dev *dev)
 
 			/* Type 0 frame */
 
-			ulong 	msg;
+			struct msg_fmt *msg;
 
 			if (frame->skb)
 				totlen = FRAME_HDR_LEN + PREHDR_LEN + frame->skb->len;
@@ -207,7 +214,7 @@ pcbit_transmit(struct pcbit_dev *dev)
 
 			flen = MIN(totlen, free);
 
-			msg = frame->msg;
+			msg = (struct msg_fmt *) &(frame->msg);
 
 			/*
 			 *  Board level 2 header
@@ -215,9 +222,9 @@ pcbit_transmit(struct pcbit_dev *dev)
 
 			pcbit_writew(dev, flen - FRAME_HDR_LEN);
 
-			pcbit_writeb(dev, GET_MSG_CPU(msg));
+			pcbit_writeb(dev, msg->cpu);
 
-			pcbit_writeb(dev, GET_MSG_PROC(msg));
+			pcbit_writeb(dev, msg->proc);
 
 			/* TH */
 			pcbit_writew(dev, frame->hdr_len + PREHDR_LEN);
@@ -237,8 +244,8 @@ pcbit_transmit(struct pcbit_dev *dev)
 			pcbit_writew(dev, 0);
 
 			/* C + S */
-			pcbit_writeb(dev, GET_MSG_CMD(msg));
-			pcbit_writeb(dev, GET_MSG_SCMD(msg));
+			pcbit_writeb(dev, msg->cmd);
+			pcbit_writeb(dev, msg->scmd);
 
 			/* NUM */
 			pcbit_writew(dev, frame->refnum);
@@ -305,7 +312,8 @@ void
 pcbit_deliver(void *data)
 {
 	struct frame_buf *frame;
-	unsigned long flags, msg;
+	unsigned long flags;
+	struct msg_fmt msg;
 	struct pcbit_dev *dev = (struct pcbit_dev *) data;
 
 	save_flags(flags);
@@ -315,10 +323,10 @@ pcbit_deliver(void *data)
 		dev->read_queue = frame->next;
 		restore_flags(flags);
 
-		SET_MSG_CPU(msg, 0);
-		SET_MSG_PROC(msg, 0);
-		SET_MSG_CMD(msg, frame->skb->data[2]);
-		SET_MSG_SCMD(msg, frame->skb->data[3]);
+		msg.cpu = 0;
+		msg.proc = 0;
+		msg.cmd = frame->skb->data[2];
+		msg.scmd = frame->skb->data[3];
 
 		frame->refnum = *((ushort *) frame->skb->data + 4);
 		frame->msg = *((ulong *) & msg);
@@ -367,11 +375,16 @@ pcbit_receive(struct pcbit_dev *dev)
 
 		if (dev->read_frame) {
 			printk(KERN_DEBUG "pcbit_receive: Type 0 frame and read_frame != NULL\n");
+#if 0
+			pcbit_l2_error(dev);
+			return;
+#else
 			/* discard previous queued frame */
 			if (dev->read_frame->skb)
 				kfree_skb(dev->read_frame->skb);
 			kfree(dev->read_frame);
 			dev->read_frame = NULL;
+#endif
 		}
 		frame = kmalloc(sizeof(struct frame_buf), GFP_ATOMIC);
 
@@ -447,10 +460,14 @@ pcbit_receive(struct pcbit_dev *dev)
 
 		if (!(frame = dev->read_frame)) {
 			printk("Type 1 frame and no frame queued\n");
+#if 1
 			/* usually after an error: toss frame */
 			dev->readptr += tt;
 			if (dev->readptr > dev->sh_mem + BANK2 + BANKLEN)
 				dev->readptr -= BANKLEN;
+#else
+			pcbit_l2_error(dev);
+#endif
 			return;
 
 		}

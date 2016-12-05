@@ -1,4 +1,4 @@
-/*  $Id: signal.c,v 1.91.2.5 2001/08/12 10:56:22 davem Exp $
+/*  $Id: signal.c,v 1.91 1999/01/26 11:00:44 jj Exp $
  *  linux/arch/sparc/kernel/signal.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
@@ -536,7 +536,7 @@ save_fpu_state(struct pt_regs *regs, __siginfo_fpu_t *fpu)
 
 static inline void
 new_setup_frame(struct k_sigaction *ka, struct pt_regs *regs,
-		int signr, sigset_t *oldset)
+		int signo, sigset_t *oldset)
 {
 	struct new_signal_frame *sf;
 	int sigframe_size, err;
@@ -583,7 +583,7 @@ new_setup_frame(struct k_sigaction *ka, struct pt_regs *regs,
 	
 	/* 3. signal handler back-trampoline and parameters */
 	regs->u_regs[UREG_FP] = (unsigned long) sf;
-	regs->u_regs[UREG_I0] = signr;
+	regs->u_regs[UREG_I0] = signo;
 	regs->u_regs[UREG_I1] = (unsigned long) &sf->info;
 
 	/* 4. signal handler */
@@ -617,7 +617,7 @@ sigsegv:
 
 static inline void
 new_setup_rt_frame(struct k_sigaction *ka, struct pt_regs *regs,
-		   int signr, sigset_t *oldset, siginfo_t *info)
+		   int signo, sigset_t *oldset, siginfo_t *info)
 {
 	struct rt_signal_frame *sf;
 	int sigframe_size;
@@ -650,112 +650,20 @@ new_setup_rt_frame(struct k_sigaction *ka, struct pt_regs *regs,
 	} else {
 		err |= __put_user(0, &sf->fpu_save);
 	}
-
-	/* Update the siginfo structure.  Is this good?  */
-	if (info->si_code == 0) {
-		info->si_signo = signr;
-		info->si_errno = 0;
-
-		switch (signr) {
-		case SIGSEGV:
-		case SIGILL:
-		case SIGBUS:
-		case SIGEMT:
-			info->si_code = current->tss.sig_desc;
-			info->si_addr = (void *)current->tss.sig_address;
-			info->si_trapno = 0;
-			break;
-		case SIGFPE:
-			switch (current->tss.sig_desc) {
-			case SUBSIG_FPDISABLED:
-				info->si_code = FPE_FLTSUB;
-				break;
-			case SUBSIG_FPERROR:
-				info->si_code = FPE_FLTSUB;
-				break;
-			case SUBSIG_FPINTOVFL:
-				info->si_code = FPE_INTOVF;
-				break;
-			case SUBSIG_FPSTSIG:
-				info->si_code = FPE_FLTSUB;
-				break;
-			case SUBSIG_IDIVZERO:
-				info->si_code = FPE_INTDIV;
-				break;
-			case SUBSIG_FPINEXACT:
-				info->si_code = FPE_FLTRES;
-				break;
-			case SUBSIG_FPDIVZERO:
-				info->si_code = FPE_FLTDIV;
-				break;
-			case SUBSIG_FPUNFLOW:
-				info->si_code = FPE_FLTUND;
-				break;
-			case SUBSIG_FPOPERROR:
-				info->si_code = FPE_FLTINV;
-				break;
-			case SUBSIG_FPOVFLOW:
-				info->si_code = FPE_FLTOVF;
-				break;
-			}
-			info->si_addr = (void *)current->tss.sig_address;
-			info->si_trapno = 0;
-			break;
-		default:
-			break;
-		}
-	}
-
-	err = __put_user (info->si_signo, &sf->info.si_signo);
-	err |= __put_user (info->si_errno, &sf->info.si_errno);
-	err |= __put_user (info->si_code, &sf->info.si_code);
-	if (info->si_code < 0)
-		err |= __copy_to_user (sf->info._sifields._pad, info->_sifields._pad, SI_PAD_SIZE);
-	else {
-		int i = info->si_signo;
-		if (info->si_code == SI_USER)
-			i = SIGRTMIN;
-		switch (i) {
-		case SIGPOLL:
-			err |= __put_user (info->si_band, &sf->info.si_band);
-			err |= __put_user (info->si_fd, &sf->info.si_fd);
-			break;
-		case SIGCHLD:
-			err |= __put_user (info->si_pid, &sf->info.si_pid);
-			err |= __put_user (info->si_uid, &sf->info.si_uid);
-			err |= __put_user (info->si_status, &sf->info.si_status);
-			err |= __put_user (info->si_utime, &sf->info.si_utime);
-			err |= __put_user (info->si_stime, &sf->info.si_stime);
-			break;
-		case SIGSEGV:
-		case SIGILL:
-		case SIGFPE:
-		case SIGBUS:
-		case SIGEMT:
-			err |= __put_user ((long)info->si_addr, &sf->info.si_addr);
-			err |= __put_user (info->si_trapno, &sf->info.si_trapno);
-			break;
-		default:
-			err |= __put_user (info->si_pid, &sf->info.si_pid);
-			err |= __put_user (info->si_uid, &sf->info.si_uid);
-			break;
-		}
-	}
-
+	err |= __copy_to_user(&sf->mask, &oldset->sig[0], sizeof(sigset_t));
+	
 	/* Setup sigaltstack */
 	err |= __put_user(current->sas_ss_sp, &sf->stack.ss_sp);
 	err |= __put_user(sas_ss_flags(regs->u_regs[UREG_FP]), &sf->stack.ss_flags);
 	err |= __put_user(current->sas_ss_size, &sf->stack.ss_size);
-
-	err |= __copy_to_user(&sf->mask, &oldset->sig[0], sizeof(sigset_t));
-
+	
 	err |= __copy_to_user(sf, (char *) regs->u_regs [UREG_FP],
 			      sizeof (struct reg_window));	
 	if (err)
 		goto sigsegv;
 
 	regs->u_regs[UREG_FP] = (unsigned long) sf;
-	regs->u_regs[UREG_I0] = signr;
+	regs->u_regs[UREG_I0] = signo;
 	regs->u_regs[UREG_I1] = (unsigned long) &sf->info;
 
 	regs->pc = (unsigned long) ka->sa.sa_handler;
@@ -1174,7 +1082,7 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 
 		if (!signr) break;
 
-		if ((current->ptrace & PT_PTRACED) && signr != SIGKILL) {
+		if ((current->flags & PF_PTRACED) && signr != SIGKILL) {
 			current->exit_code = signr;
 			current->state = TASK_STOPPED;
 
@@ -1238,7 +1146,7 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 					continue;
 
 			case SIGSTOP:
-				if (current->ptrace & PT_PTRACED)
+				if (current->flags & PF_PTRACED)
 					continue;
 				current->state = TASK_STOPPED;
 				current->exit_code = signr;
@@ -1252,8 +1160,14 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 
 			case SIGQUIT: case SIGILL: case SIGTRAP:
 			case SIGABRT: case SIGFPE: case SIGSEGV: case SIGBUS:
-				if (do_coredump(signr, regs))
-					exit_code |= 0x80;
+				if(current->binfmt && current->binfmt->core_dump) {
+					lock_kernel();
+					if(current->binfmt &&
+					   current->binfmt->core_dump &&
+					   current->binfmt->core_dump(signr, regs))
+						exit_code |= 0x80;
+					unlock_kernel();
+				}
 #ifdef DEBUG_SIGNALS
 				/* Very useful to debug dynamic linker problems */
 				printk ("Sig %ld going for %s[%d]...\n", signr, current->comm, current->pid);
@@ -1280,7 +1194,6 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 			default:
 				lock_kernel();
 				sigaddset(&current->signal, signr);
-				recalc_sigpending(current);
 				current->flags |= PF_SIGNALED;
 				do_exit(exit_code);
 				/* NOT REACHED */

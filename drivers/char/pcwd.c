@@ -34,8 +34,6 @@
  * 971222       Changed open/close for temperature handling
  *              Michael Meskes <meskes@debian.org>.
  * 980112       Used minor numbers from include/linux/miscdevice.h
- * 990403       Clear reset status after reading control status register in 
- *              pcwd_showprevstate(). [Marc Boucher <marc@mbsi.ca>]
  */
 
 #include <linux/module.h>
@@ -179,10 +177,8 @@ void pcwd_showprevstate(void)
 
 	if (revision == PCWD_REVISION_A)
 		initial_status = card_status = inb(current_readport);
-	else {
+	else
 		initial_status = card_status = inb(current_readport + 1);
-		outb_p(0x00, current_readport + 1); /* clear reset status */
-	}
 
 	if (revision == PCWD_REVISION_A) {
 		if (card_status & WD_WDRST)
@@ -240,17 +236,14 @@ static int pcwd_ioctl(struct inode *inode, struct file *file,
 
 	switch(cmd) {
 	default:
-		return -ENOTTY;
+		return -ENOIOCTLCMD;
 
 	case WDIOC_GETSUPPORT:
 		i = copy_to_user((void*)arg, &ident, sizeof(ident));
 		return i ? -EFAULT : 0;
 
 	case WDIOC_GETSTATUS:
-		if (revision == PCWD_REVISION_A) 
 		cdat = inb(current_readport);
-		else
-			cdat = inb(current_readport + 1 );
 		rv = 0;
 
 		if (revision == PCWD_REVISION_A) 
@@ -476,8 +469,6 @@ static inline char *get_firmware(void)
 	char *ret;
 
 	ret = kmalloc(6, GFP_KERNEL);
-	if(ret == NULL)
-		return NULL;
 
 	while((count < 3) && (!found)) {
 		outb_p(0x80, current_readport + 2);
@@ -499,8 +490,10 @@ static inline char *get_firmware(void)
 		ten = send_command(0x82);
 		hund = send_command(0x83);
 		minor = send_command(0x84);
-		sprintf(ret, "%c.%c%c%c", one, ten, hund, minor);
 	}
+
+	if (found)
+		sprintf(ret, "%c.%c%c%c", one, ten, hund, minor);
 	else
 		sprintf(ret, "ERROR");
 
@@ -622,12 +615,12 @@ __initfunc(int pcwatchdog_init(void))
 #ifdef	MODULE
 void cleanup_module(void)
 {
-	misc_deregister(&pcwd_miscdev);
 	/*  Disable the board  */
 	if (revision == PCWD_REVISION_C) {
 		outb_p(0xA5, current_readport + 3);
 		outb_p(0xA5, current_readport + 3);
 	}
+	misc_deregister(&pcwd_miscdev);
 	if (supports_temp)
 		misc_deregister(&temp_miscdev);
 

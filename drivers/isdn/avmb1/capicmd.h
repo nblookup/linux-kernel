@@ -1,20 +1,24 @@
-/* $Id: capicmd.h,v 1.1.2.1 2001/12/31 13:26:41 kai Exp $
+/*
+ * $Id: capicmd.h,v 1.1 1997/03/04 21:50:30 calle Exp $
  * 
  * CAPI 2.0 Interface for Linux
  * 
- * Copyright 1997 by Carsten Paeth <calle@calle.de>
+ * Copyright 1997 by Carsten Paeth (calle@calle.in-berlin.de)
  * 
- * This software may be used and distributed according to the terms
- * of the GNU General Public License, incorporated herein by reference.
+ * $Log: capicmd.h,v $
+ * Revision 1.1  1997/03/04 21:50:30  calle
+ * Frirst version in isdn4linux
  *
+ * Revision 2.2  1997/02/12 09:31:39  calle
+ * new version
+ *
+ * Revision 1.1  1997/01/31 10:32:20  calle
+ * Initial revision
+ *
+ * 
  */
-
 #ifndef __CAPICMD_H__
 #define __CAPICMD_H__
-
-#define CAPI_MSG_BASELEN		8
-#define CAPI_DATA_B3_REQ_LEN		(CAPI_MSG_BASELEN+4+4+2+2+2)
-#define CAPI_DATA_B3_RESP_LEN		(CAPI_MSG_BASELEN+4+2)
 
 /*----- CAPI commands -----*/
 #define CAPI_ALERT		    0x01

@@ -67,7 +67,7 @@ static ssize_t nodenum_read(struct file *file, char *buf,
 {
 	struct inode *inode = file->f_dentry->d_inode;
 	char buffer[10];
-
+	
 	if (count < 0 || !inode->u.generic_ip)
 		return -EINVAL;
 	sprintf (buffer, "%8.8x\n", (u32)(long)(inode->u.generic_ip));
@@ -75,7 +75,7 @@ static ssize_t nodenum_read(struct file *file, char *buf,
 		return 0;
 	if (count > 9 - file->f_pos)
 		count = 9 - file->f_pos;
-	copy_to_user_ret(buf, buffer + file->f_pos, count, -EFAULT);
+	copy_to_user(buf, buffer + file->f_pos, count);
 	file->f_pos += count;
 	return count;
 }
@@ -90,8 +90,8 @@ static ssize_t property_read(struct file *filp, char *buf,
 	u32 *q;
 	openprom_property *op;
 	char buffer[64];
-
-	if (filp->f_pos >= 0xffffff || count >= 0xffffff)
+	
+	if (filp->f_pos >= 0xffffff)
 		return -EINVAL;
 	if (!filp->private_data) {
 		node = nodes[(u16)((long)inode->u.generic_ip)].node;
@@ -182,7 +182,7 @@ static ssize_t property_read(struct file *filp, char *buf,
 	if (count > i - k) count = i - k;
 	if (op->flag & OPP_STRING) {
 		if (!k) {
-			put_user_ret('\'', buf, -EFAULT);
+			__put_user('\'', buf);
 			k++;
 			count--;
 		}
@@ -193,16 +193,16 @@ static ssize_t property_read(struct file *filp, char *buf,
 			j = count;
 
 		if (j >= 0) {
-			copy_to_user_ret(buf + k - filp->f_pos,
-					 op->value + k - 1, j, -EFAULT);
+			copy_to_user(buf + k - filp->f_pos,
+				     op->value + k - 1, j);
 			count -= j;
 			k += j;
 		}
 
 		if (count)
-			put_user_ret('\'', &buf [k++ - filp->f_pos], -EFAULT);
+			__put_user('\'', &buf [k++ - filp->f_pos]);
 		if (count > 1)
-			put_user_ret('\n', &buf [k++ - filp->f_pos], -EFAULT);
+			__put_user('\n', &buf [k++ - filp->f_pos]);
 
 	} else if (op->flag & OPP_STRINGLIST) {
 		char *tmp;
@@ -223,7 +223,7 @@ static ssize_t property_read(struct file *filp, char *buf,
 		}
 		strcpy(s, "'\n");
 
-		copy_to_user_ret(buf, tmp + k, count, -EFAULT);
+		copy_to_user(buf, tmp + k, count);
 
 		kfree(tmp);
 		k += count;
@@ -241,63 +241,53 @@ static ssize_t property_read(struct file *filp, char *buf,
 
 		if (first == last) {
 			sprintf (buffer, "%08x.", *first);
-			copy_to_user_ret (buf, buffer + first_off,
-				last_cnt - first_off, -EFAULT);
+			copy_to_user (buf, buffer + first_off, last_cnt - first_off);
 			buf += last_cnt - first_off;
 		} else {		
 			for (q = first; q <= last; q++) {
 				sprintf (buffer, "%08x.", *q);
 				if (q == first) {
-					copy_to_user_ret (buf,
-						buffer + first_off,
-						9 - first_off, -EFAULT);
+					copy_to_user (buf, buffer + first_off,
+						      9 - first_off);
 					buf += 9 - first_off;
 				} else if (q == last) {
-					copy_to_user_ret (buf, buffer,
-						last_cnt, -EFAULT);
+					copy_to_user (buf, buffer, last_cnt);
 					buf += last_cnt;
 				} else {
-					copy_to_user_ret (buf, buffer,
-						9, -EFAULT);
+					copy_to_user (buf, buffer, 9);
 					buf += 9;
 				}
 			}
 		}
 
 		if (last == (u32 *)(op->value + op->len - 4) && last_cnt == 9)
-			put_user_ret('\n', (buf - 1), -EFAULT);
+			__put_user('\n', (buf - 1));
 
 		k += count;
 
 	} else if (op->flag & OPP_HEXSTRING) {
-		char buffer[3];
+		char buffer[2];
 
 		if ((k < i - 1) && (k & 1)) {
-			sprintf (buffer, "%02x",
-				(unsigned char)*(op->value + (k >> 1)) & 0xff);
-			put_user_ret(buffer[1], &buf[k++ - filp->f_pos],
-				-EFAULT);
+			sprintf (buffer, "%02x", *(op->value + (k >> 1)));
+			__put_user(buffer[1], &buf[k++ - filp->f_pos]);
 			count--;
 		}
 
 		for (; (count > 1) && (k < i - 1); k += 2) {
-			sprintf (buffer, "%02x",
-				(unsigned char)*(op->value + (k >> 1)) & 0xff);
-			copy_to_user_ret (buf + k - filp->f_pos, buffer, 2,
-				-EFAULT);
+			sprintf (buffer, "%02x", *(op->value + (k >> 1)));
+			copy_to_user (buf + k - filp->f_pos, buffer, 2);
 			count -= 2;
 		}
 
 		if (count && (k < i - 1)) {
-			sprintf (buffer, "%02x",
-				(unsigned char)*(op->value + (k >> 1)) & 0xff);
-			put_user_ret(buffer[0], &buf[k++ - filp->f_pos],
-				-EFAULT);
+			sprintf (buffer, "%02x", *(op->value + (k >> 1)));
+			__put_user(buffer[0], &buf[k++ - filp->f_pos]);
 			count--;
 		}
 
 		if (count)
-			put_user_ret('\n', &buf [k++ - filp->f_pos], -EFAULT);
+			__put_user('\n', &buf [k++ - filp->f_pos]);
 	}
 	count = k - filp->f_pos;
 	filp->f_pos = k;
@@ -312,8 +302,8 @@ static ssize_t property_write(struct file *filp, const char *buf,
 	u32 *q;
 	void *b;
 	openprom_property *op;
-
-	if (filp->f_pos >= 0xffffff || count >= 0xffffff)
+	
+	if (filp->f_pos >= 0xffffff)
 		return -EINVAL;
 	if (!filp->private_data) {
 		i = property_read (filp, NULL, 0, 0);
@@ -334,7 +324,7 @@ static ssize_t property_write(struct file *filp, const char *buf,
 			if (j == 9) j = 0;
 			if (!j) {
 				char ctmp;
-				get_user_ret(ctmp, &buf[i], -EFAULT);
+				__get_user(ctmp, &buf[i]);
 				if (ctmp != '.') {
 					if (ctmp != '\n') {
 						if (op->flag & OPP_BINARY)
@@ -349,7 +339,7 @@ static ssize_t property_write(struct file *filp, const char *buf,
 				}
 			} else {
 				char ctmp;
-				get_user_ret(ctmp, &buf[i], -EFAULT);
+				__get_user(ctmp, &buf[i]);
 				if (ctmp < '0' || 
 				    (ctmp > '9' && ctmp < 'A') ||
 				    (ctmp > 'F' && ctmp < 'a') ||
@@ -387,9 +377,8 @@ static ssize_t property_write(struct file *filp, const char *buf,
 		last_cnt = (k + count) % 9;
 		if (first + 1 == last) {
 			memset (tmp, '0', 8);
-			copy_from_user_ret (tmp + first_off, buf,
-				(count + first_off > 8) ? 8 - first_off : count,
-				-EFAULT);
+			copy_from_user (tmp + first_off, buf,
+					(count + first_off > 8) ? 8 - first_off : count);
 			mask = 0xffffffff;
 			mask2 = 0xffffffff;
 			for (j = 0; j < first_off; j++)
@@ -408,9 +397,8 @@ static ssize_t property_write(struct file *filp, const char *buf,
 				if (q == first) {
 					if (first_off < 8) {
 						memset (tmp, '0', 8);
-						copy_from_user_ret (
-							tmp + first_off, buf,
-							8 - first_off, -EFAULT);
+						copy_from_user (tmp + first_off, buf,
+								8 - first_off);
 						mask = 0xffffffff;
 						for (j = 0; j < first_off; j++)
 							mask >>= 1;
@@ -421,8 +409,7 @@ static ssize_t property_write(struct file *filp, const char *buf,
 				} else if ((q == last - 1) && last_cnt
 					   && (last_cnt < 8)) {
 					memset (tmp, '0', 8);
-					copy_from_user_ret (tmp, buf, last_cnt,
-						-EFAULT);
+					copy_from_user (tmp, buf, last_cnt);
 					mask = 0xffffffff;
 					for (j = 0; j < 8 - last_cnt; j++)
 						mask <<= 1;
@@ -432,8 +419,7 @@ static ssize_t property_write(struct file *filp, const char *buf,
 				} else {
 					char tchars[17]; /* XXX yuck... */
 
-					copy_from_user_ret(tchars, buf, 16,
-						-EFAULT);
+					copy_from_user(tchars, buf, 16);
 					*q = simple_strtoul (tchars, 0, 16);
 					buf += 9;
 				}
@@ -456,7 +442,7 @@ write_try_string:
 			 */
 			if (k > 0)
 				return -EINVAL;
-			get_user_ret(ctmp, buf, -EFAULT);
+			__get_user(ctmp, buf);
 			if (ctmp == '\'') {
 				op->flag |= OPP_QUOTED;
 				buf++;
@@ -488,7 +474,7 @@ write_try_string:
 			kfree (b);
 		}
 		p = op->value + filp->f_pos - ((op->flag & OPP_QUOTED) ? 1 : 0);
-		copy_from_user_ret (p, buf, count, -EFAULT);
+		copy_from_user (p, buf, count);
 		op->flag |= OPP_DIRTY;
 		for (i = 0; i < count; i++, p++)
 			if (*p == '\n') {

@@ -422,15 +422,8 @@ static int el_start_xmit(struct sk_buff *skb, struct device *dev)
 	}
 	else
 	{
-		int len = skb->len;
-		int pad = 0;
-		int gp_start;
+		int gp_start = 0x800 - (ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN);
 		unsigned char *buf = skb->data;
-		
-		if(len < ETH_ZLEN)
-			pad = ETH_ZLEN - len;
-			
-		gp_start = 0x800 - ( len + pad );
 
 load_it_again_sam:
 		lp->tx_pkt_start = gp_start;
@@ -458,12 +451,7 @@ load_it_again_sam:
 		
 		outw(0x00, RX_BUF_CLR);		/* Set rx packet area to 0. */
 		outw(gp_start, GP_LOW);		/* aim - packet will be loaded into buffer start */
-		outsb(DATAPORT,buf,len);	/* load buffer (usual thing each byte increments the pointer) */
-		if(pad)
-		{
-			while(pad--)		/* Zero fill buffer tail */
-				outb(0, DATAPORT);
-		}
+		outsb(DATAPORT,buf,skb->len);	/* load buffer (usual thing each byte increments the pointer) */
 		outw(gp_start, GP_LOW);		/* the board reuses the same register */
 
 		if(lp->loading==2)		/* A receive upset our load, despite our best efforts */

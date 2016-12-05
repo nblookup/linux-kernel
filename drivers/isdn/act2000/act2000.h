@@ -1,19 +1,54 @@
-/* $Id: act2000.h,v 1.1.2.1 2001/12/31 13:26:35 kai Exp $
+/* $Id: act2000.h,v 1.5 1997/10/09 22:22:59 fritz Exp $
  *
  * ISDN lowlevel-module for the IBM ISDN-S0 Active 2000.
  *
- * Author       Fritz Elfert
- * Copyright    by Fritz Elfert      <fritz@isdn4linux.de>
- * 
- * This software may be used and distributed according to the terms
- * of the GNU General Public License, incorporated herein by reference.
- *
+ * Copyright 1997 by Fritz Elfert (fritz@wuemaus.franken.de)
  * Thanks to Friedemann Baitinger and IBM Germany
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2, or (at your option)
+ * any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
+ *
+ * $Log: act2000.h,v $
+ * Revision 1.5  1997/10/09 22:22:59  fritz
+ * New HL<->LL interface:
+ *   New BSENT callback with nr. of bytes included.
+ *   Sending without ACK.
+ *
+ * Revision 1.4  1997/09/25 17:25:37  fritz
+ * Support for adding cards at runtime.
+ * Support for new Firmware.
+ *
+ * Revision 1.3  1997/09/24 23:11:43  fritz
+ * Optimized IRQ load and polling-mode.
+ *
+ * Revision 1.2  1997/09/24 19:44:12  fritz
+ * Added MSN mapping support, some cleanup.
+ *
+ * Revision 1.1  1997/09/23 18:00:05  fritz
+ * New driver for IBM Active 2000.
  *
  */
 
 #ifndef act2000_h
 #define act2000_h
+
+#ifdef __KERNEL__
+/* Kernel includes */
+
+#include <linux/module.h>
+#include <linux/version.h>
+#endif
 
 #define ACT2000_IOCTL_SETPORT    1
 #define ACT2000_IOCTL_GETPORT    2
@@ -72,7 +107,7 @@ typedef struct act2000_fwid {
 #include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
-#include <linux/slab.h>
+#include <linux/malloc.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/ioport.h>
@@ -177,6 +212,8 @@ typedef struct act2000_card {
         isdn_if interface;               /* Interface to upper layer         */
         char regname[35];                /* Name used for request_region     */
 } act2000_card;
+
+extern act2000_card *actcards;
 
 extern __inline__ void act2000_schedule_tx(act2000_card *card)
 {

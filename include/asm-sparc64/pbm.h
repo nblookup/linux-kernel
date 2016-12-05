@@ -1,4 +1,4 @@
-/* $Id: pbm.h,v 1.16.2.3 2001/08/12 13:17:25 davem Exp $
+/* $Id: pbm.h,v 1.16 1999/03/14 18:13:03 davem Exp $
  * pbm.h: U2P PCI bus module pseudo driver software state.
  *
  * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -13,8 +13,6 @@
 #include <asm/oplib.h>
 
 struct linux_pbm_info;
-
-extern volatile u64 *pci_dma_wsync;
 
 /* This is what we use to determine what the PROM has assigned so
  * far, so that we can perform assignments for addresses which
@@ -50,9 +48,6 @@ struct linux_pbm_info {
 	int				num_pbm_intmap;
 	struct linux_prom_pci_intmask	pbm_intmask;
 
-	/* PCI slot mapping. */
-	unsigned int			pci_first_slot;
-
 	/* Now things for the actual PCI bus probes. */
 	unsigned int			pci_first_busno;
 	unsigned int			pci_last_busno;
@@ -67,7 +62,6 @@ struct linux_psycho {
 	unsigned long			*pci_mem_space;
 	u32				upa_portid;
 	int				index;
-	int				pbms_same_domain;
 	struct linux_pbm_info		pbm_A;
 	struct linux_pbm_info		pbm_B;
 

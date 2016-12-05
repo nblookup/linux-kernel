@@ -364,23 +364,9 @@ void ndisc_send_ns(struct device *dev, struct neighbour *neigh,
         struct nd_msg *msg;
         int len;
 	int err;
-	int send_llinfo;
-
-	if (saddr == NULL) {
-		struct inet6_ifaddr *ifa;
-
-		/* use link local address */
-		ifa = ipv6_get_lladdr(dev);
-
-		if (ifa)
-			saddr = &ifa->addr;
-		else
-			return;
-	}
 
 	len = sizeof(struct icmp6hdr) + sizeof(struct in6_addr);
-	send_llinfo = dev->addr_len && ipv6_addr_type(saddr) != IPV6_ADDR_ANY;
-	if (send_llinfo)
+	if (dev->addr_len)
 		len += NDISC_OPT_SPACE(dev->addr_len);
 
 	skb = sock_alloc_send_skb(sk, MAX_HEADER + len + dev->hard_header_len + 15,
@@ -390,6 +376,15 @@ void ndisc_send_ns(struct device *dev, struct neighbour *neigh,
 		return;
 	}
 
+	if (saddr == NULL) {
+		struct inet6_ifaddr *ifa;
+
+		/* use link local address */
+		ifa = ipv6_get_lladdr(dev);
+
+		if (ifa)
+			saddr = &ifa->addr;
+	}
 
 	if (ndisc_build_ll_hdr(skb, dev, daddr, neigh, len) == 0) {
 		kfree_skb(skb);
@@ -407,7 +402,7 @@ void ndisc_send_ns(struct device *dev, struct neighbour *neigh,
 	/* Set the target address. */
 	ipv6_addr_copy(&msg->target, solicit);
 
-	if (send_llinfo)
+	if (dev->addr_len)
 		ndisc_fill_option((void*)&msg->opt, ND_OPT_SOURCE_LL_ADDR, dev->dev_addr, dev->addr_len);
 
 	/* checksum */
@@ -635,8 +630,7 @@ static void ndisc_router_discovery(struct sk_buff *skb)
 		if (ra_msg->reachable_time) {
 			__u32 rtime = (ntohl(ra_msg->reachable_time)*HZ)/1000;
 
-			if (rtime &&
-			    rtime != in6_dev->nd_parms->base_reachable_time) {
+			if (rtime != in6_dev->nd_parms->base_reachable_time) {
 				in6_dev->nd_parms->base_reachable_time = rtime;
 				in6_dev->nd_parms->gc_staletime = 3 * rtime;
 				in6_dev->nd_parms->reachable_time = neigh_rand_reach_time(rtime);

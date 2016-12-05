@@ -161,10 +161,15 @@ sizeof(nop_cmd) = 8;
 
 /**************************************************************************/
 
-#define DELAY(x) { mdelay(32 * x); }
+#define DELAY(x) {int i=jiffies; \
+                  if(loops_per_sec == 1) \
+                     while(time_after(i+(x), jiffies)); \
+                  else \
+                     __delay((loops_per_sec>>5)*x); \
+                 }
 
 /* a much shorter delay: */
-#define DELAY_16(); { udelay(16) ; }
+#define DELAY_16(); { __delay( (loops_per_sec>>16)+1 ); }
 
 /* wait for command with timeout: */
 #define WAIT_4_SCB_CMD() { int i; \
@@ -1118,10 +1123,8 @@ static int elmc_send_packet(struct sk_buff *skb, struct device *dev)
 	if (test_and_set_bit(0, (void *) &dev->tbusy) != 0) {
 		printk("%s: Transmitter access conflict.\n", dev->name);
 	} else {
-		len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
-		if(len != skb->len)
-			memset((char *) p->xmit_cbuffs[p->xmit_count], 0, ETH_ZLEN);
 		memcpy((char *) p->xmit_cbuffs[p->xmit_count], (char *) (skb->data), skb->len);
+		len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
 
 #if (NUM_XMIT_BUFFS == 1)
 #ifdef NO_NOPCOMMANDS

@@ -7,7 +7,7 @@
  *		handler for protocols to use and generic option handler.
  *
  *
- * Version:	$Id: sock.c,v 1.80.2.5 2001/05/11 02:07:23 davem Exp $
+ * Version:	$Id: sock.c,v 1.80 1999/05/08 03:04:34 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -79,8 +79,6 @@
  *		Jay Schulist	:	Added SO_ATTACH_FILTER and SO_DETACH_FILTER.
  *		Andi Kleen	:	Add sock_kmalloc()/sock_kfree_s()
  *		Andi Kleen	:	Fix write_space callback
- *		Chris Evans	:	Security fixes - signedness again
- *		Holger Smolinski:       Fix initialization of sk->sleep
  *
  * To Fix:
  *
@@ -133,8 +131,6 @@
 #endif
 
 #define min(a,b)	((a)<(b)?(a):(b))
-
-struct linux_mib net_statistics;
 
 /* Run time adjustable parameters. */
 __u32 sysctl_wmem_max = SK_WMEM_MAX;
@@ -383,9 +379,6 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
   	if(get_user(len,optlen))
   		return -EFAULT;
 
-	if(len < 0)
-		return -EINVAL;
-		
   	switch(optname) 
   	{
 		case SO_DEBUG:		
@@ -573,35 +566,6 @@ struct sk_buff *sock_wmalloc(struct sock *sk, unsigned long size, int force, int
 			skb->sk = sk;
 			return skb;
 		}
-#ifdef CONFIG_INET
-		net_statistics.SockMallocOOM++; 
-#endif
-	}
-	return NULL;
-}
-
-/*
- * Allocate memory from the sockets send buffer, telling caller about real OOM. 
- * err is only set for oom, not for socket buffer overflow.
- */ 
-struct sk_buff *sock_wmalloc_err(struct sock *sk, unsigned long size, int force, int priority, int *err)
-{
-	*err = 0; 
-	/* Note: overcommitment possible */ 
-	if (force || atomic_read(&sk->wmem_alloc) < sk->sndbuf) {
-		struct sk_buff * skb;
-		*err = -ENOMEM; 
-		skb = alloc_skb(size, priority);
-		if (skb) {
-			*err = 0;
-			atomic_add(skb->truesize, &sk->wmem_alloc);
-			skb->destructor = sock_wfree;
-			skb->sk = sk;
-			return skb;
-		}
-#ifdef CONFIG_INET
-		net_statistics.SockMallocOOM++; 
-#endif
 	}
 	return NULL;
 }
@@ -619,9 +583,6 @@ struct sk_buff *sock_rmalloc(struct sock *sk, unsigned long size, int force, int
 			skb->sk = sk;
 			return skb;
 		}
-#ifdef CONFIG_INET
-		net_statistics.SockMallocOOM++;
-#endif 
 	}
 	return NULL;
 }
@@ -641,9 +602,6 @@ void *sock_kmalloc(struct sock *sk, int size, int priority)
 		if (mem)
 			return mem;
 		atomic_sub(size, &sk->omem_alloc);
-#ifdef CONFIG_INET
-		net_statistics.SockMallocOOM++; 
-#endif
 	}
 	return NULL;
 }
@@ -753,11 +711,9 @@ struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size,
 				break;
 			try_size = fallback;
 		}
-		skb = sock_wmalloc_err(sk, try_size, 0, sk->allocation, &err);
+		skb = sock_wmalloc(sk, try_size, 0, sk->allocation);
 		if (skb)
 			break;
-		if (err)
-			goto failure;
 
 		/*
 		 *	This means we have too many buffers for this socket already.
@@ -1080,8 +1036,6 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 		sk->type	=	sock->type;
 		sk->sleep	=	&sock->wait;
 		sock->sk	=	sk;
-	} else {
-		sk->sleep	=	NULL;
 	}
 
 	sk->state_change	=	sock_def_wakeup;

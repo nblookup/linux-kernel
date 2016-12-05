@@ -7,7 +7,7 @@
  *
  *	Based on linux/net/ipv4/ip_sockglue.c
  *
- *	$Id: ipv6_sockglue.c,v 1.27.2.2 2001/02/21 01:08:55 davem Exp $
+ *	$Id: ipv6_sockglue.c,v 1.27 1999/04/22 10:07:43 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -230,10 +230,6 @@ addrform_done:
 
 		if (optlen == 0)
 			goto update;
-		
-		retv = -EINVAL;
-		if(optlen > 1024)
-			break;
 
 		opt = sock_kmalloc(sk, sizeof(*opt) + optlen, GFP_KERNEL);
 		retv = -ENOBUFS;
@@ -363,8 +359,6 @@ int ipv6_getsockopt(struct sock *sk, int level, int optname, char *optval,
 		return -ENOPROTOOPT;
 	if (get_user(len, optlen))
 		return -EFAULT;
-	if(len < 0)
-		return -EINVAL;
 	switch (optname) {
 	case IPV6_PKTOPTIONS:
 	{

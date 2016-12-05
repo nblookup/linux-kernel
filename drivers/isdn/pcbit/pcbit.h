@@ -1,12 +1,14 @@
 /*
- * PCBIT-D device driver definitions
- *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
  * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU General Public License, incorporated herein by reference.
+ * the GNU Public License, incorporated herein by reference.
+ */
+
+/*        
+ *        PCBIT-D device driver definitions
  */
 
 #ifndef PCBIT_H
@@ -44,7 +46,6 @@ struct pcbit_dev {
 	/* board */
 
 	volatile unsigned char* sh_mem;		/* RDP address	*/
-	unsigned long ph_mem;
 	unsigned int irq;
 	unsigned int id;
 	unsigned int interrupt;			/* set during interrupt 
@@ -67,7 +68,7 @@ struct pcbit_dev {
 	struct frame_buf *write_queue;
 
 	/* Protocol start */
-	wait_queue_head_t set_running_wq;
+	struct wait_queue *set_running_wq;
 	struct timer_list set_running_timer;
 
 	struct timer_list error_recover_timer;
@@ -165,3 +166,10 @@ struct pcbit_ioctl {
 #define L2_ERROR    6
 
 #endif
+
+
+
+
+
+
+

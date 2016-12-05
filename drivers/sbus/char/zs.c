@@ -1,4 +1,4 @@
-/* $Id: zs.c,v 1.41.2.9 2001/05/09 07:47:10 davem Exp $
+/* $Id: zs.c,v 1.41 1999/04/16 16:22:27 jj Exp $
  * zs.c: Zilog serial port driver for the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -173,7 +173,7 @@ static struct termios **serial_termios_locked;
  * buffer across all the serial ports, since it significantly saves
  * memory if large numbers of serial ports are open.
  */
-static unsigned char tmp_buf[SERIAL_XMIT_SIZE]; /* This is cheating */
+static unsigned char tmp_buf[4096]; /* This is cheating */
 static struct semaphore tmp_buf_sem = MUTEX;
 
 static inline int serial_paranoia_check(struct sun_serial *info,
@@ -374,8 +374,6 @@ static void zs_start(struct tty_struct *tty)
  */
 void batten_down_hatches(void)
 {
-	if (!stop_a_enabled)
-		return;
 	/* If we are doing kadb, we call the debugger
 	 * else we just drop into the boot monitor.
 	 * Note that we must flush the user windows
@@ -441,7 +439,6 @@ static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs
 {
 	struct tty_struct *tty = info->tty;
 	unsigned char ch, stat;
-	int do_queue_task = 1;
 
 	do {
 		ch = (info->zs_channel->data) & info->parity_mask;
@@ -469,13 +466,11 @@ static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs
 				return;
 			}
 			sunkbd_inchar(ch, regs);
-			do_queue_task = 0;
-			goto next_char;
+			return;
 		}
 		if(info->cons_mouse) {
-			sun_mouse_inbyte(ch, 0);
-			do_queue_task = 0;
-			goto next_char;
+			sun_mouse_inbyte(ch);
+			return;
 		}
 		if(info->is_cons) {
 			if(ch==0) {
@@ -507,7 +502,6 @@ static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs
 		*tty->flip.flag_buf_ptr++ = 0;
 		*tty->flip.char_buf_ptr++ = ch;
 
-	next_char:
 		/* Check if we have another character... */
 		stat = info->zs_channel->control;
 		ZSDELAY();
@@ -518,8 +512,7 @@ static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs
 		stat = read_zsreg(info->zs_channel, R1);
 	} while (!(stat & (PAR_ERR | Rx_OVR | CRC_ERR)));
 
-	if (do_queue_task != 0)
-		queue_task(&tty->flip.tqueue, &tq_timer);
+	queue_task(&tty->flip.tqueue, &tq_timer);
 }
 
 static _INLINE_ void transmit_chars(struct sun_serial *info)
@@ -586,12 +579,8 @@ static _INLINE_ void status_handle(struct sun_serial *info)
 	 * 'break asserted' status change interrupt, call
 	 * the boot prom.
 	 */
-	if(status & BRK_ABRT) {
-		if (info->break_abort)
-			batten_down_hatches();
-		if (info->cons_mouse)
-			sun_mouse_inbyte(0, 1);
-	}
+	if((status & BRK_ABRT) && info->break_abort)
+		batten_down_hatches();
 
 	/* XXX Whee, put in a buffer somewhere, the status information
 	 * XXX whee whee whee... Where does the information go...
@@ -737,7 +726,6 @@ static void do_softint(void *private_)
 		    tty->ldisc.write_wakeup)
 			(tty->ldisc.write_wakeup)(tty);
 		wake_up_interruptible(&tty->write_wait);
-		wake_up_interruptible(&tty->poll_wait);
 	}
 }
 
@@ -904,6 +892,7 @@ static void shutdown(struct sun_serial * info)
  */
 static void change_speed(struct sun_serial *info)
 {
+	unsigned short port;
 	unsigned cflag;
 	int	quot = 0;
 	int	i;
@@ -912,7 +901,7 @@ static void change_speed(struct sun_serial *info)
 	if (!info->tty || !info->tty->termios)
 		return;
 	cflag = info->tty->termios->c_cflag;
-	if (!info->port)
+	if (!(port = info->port))
 		return;
 	i = cflag & CBAUD;
 	if (cflag & CBAUDEX) {
@@ -1109,53 +1098,28 @@ static int zs_write(struct tty_struct * tty, int from_user,
 		return 0;
 
 	save_flags(flags);
-	if (from_user) {
-		down(&tmp_buf_sem);
-		while (1) {
-			c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
-					   SERIAL_XMIT_SIZE - info->xmit_head));
-			if (c <= 0)
-				break;
+	while (1) {
+		cli();		
+		c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
+				   SERIAL_XMIT_SIZE - info->xmit_head));
+		if (c <= 0)
+			break;
 
-			c -= copy_from_user(tmp_buf, buf, c);
-			if (!c) {
-				if (!total)
-					total = -EFAULT;
-				break;
-			}
-
-			cli();		
+		if (from_user) {
+			down(&tmp_buf_sem);
+			copy_from_user(tmp_buf, buf, c);
 			c = MIN(c, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
 				       SERIAL_XMIT_SIZE - info->xmit_head));
 			memcpy(info->xmit_buf + info->xmit_head, tmp_buf, c);
-			info->xmit_head = (info->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
-			info->xmit_cnt += c;
-			restore_flags(flags);
-
-			buf += c;
-			count -= c;
-			total += c;
-		}
-		up(&tmp_buf_sem);
-	} else {
-		while (1) {
-			cli();
-			c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
-					   SERIAL_XMIT_SIZE - info->xmit_head));
-			if (c <= 0) {
-				restore_flags(flags);
-				break;
-			}
-
+			up(&tmp_buf_sem);
+		} else
 			memcpy(info->xmit_buf + info->xmit_head, buf, c);
-			info->xmit_head = (info->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
-			info->xmit_cnt += c;
-			restore_flags(flags);
-
-			buf += c;
-			count -= c;
-			total += c;
-		}
+		info->xmit_head = (info->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
+		info->xmit_cnt += c;
+		restore_flags(flags);
+		buf += c;
+		count -= c;
+		total += c;
 	}
 
 	cli();		
@@ -1209,7 +1173,6 @@ static void zs_flush_buffer(struct tty_struct *tty)
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
 	sti();
 	wake_up_interruptible(&tty->write_wait);
-	wake_up_interruptible(&tty->poll_wait);
 	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
 	    tty->ldisc.write_wakeup)
 		(tty->ldisc.write_wakeup)(tty);
@@ -1881,7 +1844,7 @@ int zs_open(struct tty_struct *tty, struct file * filp)
 
 static void show_serial_version(void)
 {
-	char *revision = "$Revision: 1.41.2.9 $";
+	char *revision = "$Revision: 1.41 $";
 	char *version, *p;
 
 	version = strchr(revision, ' ');
@@ -2049,8 +2012,9 @@ get_zs(int chip))
 		/* Can use the prom for other machine types */
 		zsnode = prom_getchild(prom_root_node);
 		if (sparc_cpu_model == sun4d) {
+			int node;
 			int no = 0;
-
+			
 			tmpnode = zsnode;
 			zsnode = 0;
 			bbnode = 0;

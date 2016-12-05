@@ -557,8 +557,7 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 		/* ToDo: We should try to restart the adaptor... */
 		outw(0xffff, ioaddr + 24);
 		outw(0xffff, ioaddr + TX_STATUS);
-		outw(0x5a, ioaddr + CONFIG_0);
-		outw(0xe8, ioaddr + CONFIG_1);
+		outw(0xe85a, ioaddr + CONFIG_0);
 		outw(0x8182, ioaddr + TX_INTR);
 		outb(0x00, ioaddr + TX_START);
 		outb(0x03, ioaddr + COL16CNTL);
@@ -576,8 +575,7 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 	if (test_and_set_bit(0, (void*)&dev->tbusy) != 0)
 		printk("%s: Transmitter access conflict.\n", dev->name);
 	else {
-		short length = skb->len;
-		static u8 pad[ETH_ZLEN];
+		short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
 		unsigned char *buf = skb->data;
 
 		/* We may not start transmitting unless we finish transferring
@@ -588,17 +586,7 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 		lp->tx_queue_ready = 0;
 		{
 			outw(length, ioaddr + DATAPORT);
-			/* Packet data */
 			outsw(ioaddr + DATAPORT, buf, (length + 1) >> 1);
-			/* Check for dribble byte */
-			if(length & 1)
-			{
-				outw(skb->data[skb->len-1], ioaddr + DATAPORT);
-				length--;
-			}
-			/* Check for packet padding */
-			if(length != skb->len)
-				outsw(ioaddr + DATAPORT, pad, (length - skb->len + 1) >> 1);
 
 			lp->tx_queue++;
 			lp->tx_queue_len += length + 2;

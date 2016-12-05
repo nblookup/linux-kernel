@@ -8,7 +8,7 @@
 
 #define SIGCHLD 20
 
-#define NR_SYSCALLS 377
+#define NR_SYSCALLS 371
 
 /*
  * These offsets must match with alpha_mv in <asm/machvec.h>.
@@ -32,12 +32,11 @@
 #define TASK_ADDR_LIMIT		24	
 #define TASK_EXEC_DOMAIN	32
 #define TASK_NEED_RESCHED	40
-#define TASK_PTRACE             48
 
 /*
  * task flags (must match include/linux/sched.h):
  */
-#define	PT_PTRACED	0x00000001
+#define	PF_PTRACED	0x00000010
 
 /*
  * This defines the normal kernel pt-regs layout.
@@ -83,8 +82,8 @@
 	ldq	$1,8($30);		\
 	ldq	$2,16($30);		\
 	ldq	$3,24($30);		\
-	ldq	$20,HAE_CACHE($19);	\
-	ldq	$21,152($30);		\
+	ldq	$20,152($30);		\
+	ldq	$21,HAE_CACHE($19);	\
 	ldq	$4,32($30);		\
 	ldq	$5,40($30);		\
 	ldq	$6,48($30);		\
@@ -273,11 +272,7 @@ __kernel_execve:
 	stq	$26,0($30)
 	stq	$19,8($30)
 	.prologue 1
-#ifdef __SMP__	
-	jsr	$26,___kernel_execve
-#else
 	jsr	$26,do_execve
-#endif	/* __SMP__ */
 	bne	$0,1f		/* error! */
 	ldq	$30,8($30)
 	br	$31,ret_from_sys_call
@@ -556,10 +551,10 @@ entSys:
 	lda	$5,sys_call_table
 	lda	$27,sys_ni_syscall
 	cmpult	$0,$4,$4
-	ldq	$3,TASK_PTRACE($8)
+	ldq	$3,TASK_FLAGS($8)
 	stq	$17,SP_OFF+32($30)
 	s8addq	$0,$5,$5
-	and     $3,PT_PTRACED,$3
+	and     $3,PF_PTRACED,$3
 	stq	$18,SP_OFF+40($30)
 	bne     $3,strace
 	beq	$4,1f
@@ -1148,9 +1143,3 @@ sys_call_table:
 	.quad sys_capget
 	.quad sys_capset
 	.quad sys_sendfile			/* 370 */
-	.quad sys_ni_syscall
-	.quad sys_ni_syscall
-	.quad sys_ni_syscall
-	.quad sys_ni_syscall
-	.quad sys_ni_syscall			/* 375 */
-	.quad sys_pciconfig_iobase

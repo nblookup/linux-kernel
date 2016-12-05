@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
  *
- * $Id: irixsig.c,v 1.10.2.2 1999/06/17 12:06:39 ralf Exp $
+ * $Id: irixsig.c,v 1.11 1998/03/26 07:39:09 ralf Exp $
  */
 
 #include <linux/kernel.h>
@@ -193,7 +193,7 @@ asmlinkage int do_irix_signal(sigset_t *oldset, struct pt_regs *regs)
 		if (!signr)
 			break;
 
-		if ((current->ptrace & PT_PTRACED) && signr != SIGKILL) {
+		if ((current->flags & PF_PTRACED) && signr != SIGKILL) {
 			/* Let the debugger run.  */
 			current->exit_code = signr;
 			current->state = TASK_STOPPED;
@@ -261,14 +261,17 @@ asmlinkage int do_irix_signal(sigset_t *oldset, struct pt_regs *regs)
 
 			case SIGQUIT: case SIGILL: case SIGTRAP:
 			case SIGABRT: case SIGFPE: case SIGSEGV:
-				if (do_coredump(signr, regs))
+				lock_kernel();
+				if (current->binfmt
+				    && current->binfmt->core_dump
+				    && current->binfmt->core_dump(signr, regs))
 					exit_code |= 0x80;
+				unlock_kernel();
 				/* FALLTHRU */
 
 			default:
 				lock_kernel();
 				sigaddset(&current->signal, signr);
-				recalc_sigpending(current);
 				current->flags |= PF_SIGNALED;
 				do_exit(exit_code);
 				/* NOTREACHED */
@@ -703,7 +706,7 @@ repeat:
 				if (!p->exit_code)
 					continue;
 				if (!(options & (W_TRAPPED|W_STOPPED)) &&
-				    !(p->ptrace & PT_PTRACED))
+				    !(p->flags & PF_PTRACED))
 					continue;
 				if (ru != NULL)
 					getrusage(p, RUSAGE_BOTH, ru);

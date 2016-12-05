@@ -23,7 +23,7 @@
 char binfmt_java_interpreter[65] = _PATH_JAVA;
 char binfmt_java_appletviewer[65] = _PATH_APPLET;
 
-static int load_java(struct linux_binprm *bprm,struct pt_regs *regs)
+static int do_load_java(struct linux_binprm *bprm,struct pt_regs *regs)
 {
 	char *i_name;
 	int len;
@@ -74,8 +74,8 @@ static int load_java(struct linux_binprm *bprm,struct pt_regs *regs)
 	bprm->p = copy_strings(1, &i_name, bprm->page, bprm->p, 2);
 	bprm->argc++;
 
-	if ((long)bprm->p < 0)
-		return (long)bprm->p;
+	if (!bprm->p) 
+		return -E2BIG;
 	/*
 	 * OK, now restart the process with the interpreter's dentry.
 	 */
@@ -93,7 +93,7 @@ static int load_java(struct linux_binprm *bprm,struct pt_regs *regs)
 	return search_binary_handler(bprm,regs);
 }
 
-static int load_applet(struct linux_binprm *bprm,struct pt_regs *regs)
+static int do_load_applet(struct linux_binprm *bprm,struct pt_regs *regs)
 {
 	char *i_name;
 	struct dentry * dentry;
@@ -121,8 +121,8 @@ static int load_applet(struct linux_binprm *bprm,struct pt_regs *regs)
 	bprm->p = copy_strings(1, &i_name, bprm->page, bprm->p, 2);
 	bprm->argc++;
 
-	if ((long)bprm->p < 0)
-		return (long)bprm->p;
+	if (!bprm->p) 
+		return -E2BIG;
 	/*
 	 * OK, now restart the process with the interpreter's dentry.
 	 */
@@ -140,14 +140,38 @@ static int load_applet(struct linux_binprm *bprm,struct pt_regs *regs)
 	return search_binary_handler(bprm,regs);
 }
 
+static int load_java(struct linux_binprm *bprm,struct pt_regs *regs)
+{
+	int retval;
+	MOD_INC_USE_COUNT;
+	retval = do_load_java(bprm,regs);
+	MOD_DEC_USE_COUNT;
+	return retval;
+}
+
 static struct linux_binfmt java_format = {
-	module:		THIS_MODULE,
-	load_binary:	load_java,
+#ifndef MODULE
+	NULL, 0, load_java, NULL, NULL
+#else
+	NULL, &__this_module, load_java, NULL, NULL
+#endif
 };
 
+static int load_applet(struct linux_binprm *bprm,struct pt_regs *regs)
+{
+	int retval;
+	MOD_INC_USE_COUNT;
+	retval = do_load_applet(bprm,regs);
+	MOD_DEC_USE_COUNT;
+	return retval;
+}
+
 static struct linux_binfmt applet_format = {
-	module:		THIS_MODULE,
-	load_binary:	load_applet,
+#ifndef MODULE
+	NULL, 0, load_applet, NULL, NULL
+#else
+	NULL, &__this_module, load_applet, NULL, NULL
+#endif
 };
 
 int __init init_java_binfmt(void)

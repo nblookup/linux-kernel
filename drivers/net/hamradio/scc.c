@@ -1,7 +1,7 @@
 #define RCS_ID "$Id: scc.c,v 1.75 1998/11/04 15:15:01 jreuter Exp jreuter $"
 
 #define VERSION "3.0"
-#define BANNER  "Z8530 SCC driver version "VERSION".dl1bke (experimental) by DL1BKE / patch F6FBB\n"
+#define BANNER  "Z8530 SCC driver version "VERSION".dl1bke (experimental) by DL1BKE\n"
 
 /*
  * Please use z8530drv-utils-3.0 with this version.
@@ -19,7 +19,7 @@
 
    ********************************************************************
 
-	Copyright (c) 1993, 2000 Joerg Reuter DL1BKE
+	Copyright (c) 1993, 1998 Joerg Reuter DL1BKE
 
 	portions (c) 1993 Guido ten Dolle PE1NNZ
 
@@ -104,7 +104,6 @@
    		flags that aren't... Restarting the DPLL does not help
    		either, it resynchronizes too slow and the first received
    		frame gets lost.
-   2001-10-05   Set skb to NULL when it is freed in scc_spint. (PE1RXQ)
 
    Thanks to all who contributed to this driver with ideas and bug
    reports!
@@ -118,8 +117,8 @@
    please (!) contact me first.
    
    New versions of the driver will be announced on the linux-hams
-   mailing list on vger.kernel.org. To subscribe send an e-mail
-   to majordomo@vger.kernel.org with the following line in
+   mailing list on vger.rutgers.edu. To subscribe send an e-mail
+   to majordomo@vger.rutgers.edu with the following line in
    the body of the mail:
    
 	   subscribe linux-hams
@@ -128,9 +127,9 @@
 
    vy 73,
    Joerg Reuter	ampr-net: dl1bke@db0pra.ampr.org
-		AX-25   : DL1BKE @ DB0ABH.#BAY.DEU.EU
-		Internet: jreuter@yaina.de
-		www     : http://yaina.de/jreuter/
+		AX-25   : DL1BKE @ DB0ACH.#NRW.DEU.EU
+		Internet: jreuter@poboxes.com
+		www     : http://poboxes.com/jreuter/
 */
 
 /* ----------------------------------------------------------------------- */
@@ -223,7 +222,7 @@ static struct net_device_stats * scc_net_get_stats(struct device *dev);
 
 static unsigned char *SCC_DriverName = "scc";
 
-static struct irqflags { unsigned char used : 1; } Ivec[NR_IRQS];
+static struct irqflags { unsigned char used : 1; } Ivec[16];
 	
 static struct scc_channel SCC_Info[2 * SCC_MAXCHIPS];	/* information per channel */
 
@@ -237,7 +236,7 @@ static unsigned char Driver_Initialized = 0;
 static int Nchips = 0;
 static io_port Vector_Latch = 0;
 
-MODULE_AUTHOR("Joerg Reuter <jreuter@yaina.de>");
+MODULE_AUTHOR("Joerg Reuter <jreuter@poboxes.com>");
 MODULE_DESCRIPTION("Network Device Driver for Z8530 based HDLC cards for Amateur Packet Radio");
 MODULE_SUPPORTED_DEVICE("scc");
 
@@ -418,7 +417,6 @@ static inline void scc_txint(struct scc_channel *scc)
 		{
 			scc_tx_done(scc);
 			Outb(scc->ctrl, RES_Tx_P);
-			del_timer(&scc->fs_wdog);	/* Stop failsafe watchdog */
 			return;
 		}
 		
@@ -428,7 +426,6 @@ static inline void scc_txint(struct scc_channel *scc)
 			scc->tx_buff = NULL;
 			scc_tx_done(scc);
 			Outb(scc->ctrl, RES_Tx_P);
-			del_timer(&scc->fs_wdog);	/* Stop failsafe watchdog */
 			return;
 		}
 
@@ -454,7 +451,6 @@ static inline void scc_txint(struct scc_channel *scc)
 		dev_kfree_skb(skb);
 		scc->tx_buff = NULL;
 		scc->stat.tx_state = TXS_NEWFRAME; /* next frame... */
-		mod_timer(&scc->fs_wdog, jiffies + HZ*60);	/* restart failsafe watchdog */
 		return;
 	} 
 	
@@ -619,7 +615,6 @@ static inline void scc_spint(struct scc_channel *scc)
 		if (skb != NULL) 
 			kfree_skb(skb);
 		scc->rx_buff = NULL;
-		skb=NULL;                        /* prevent reuse of skb */
 	}
 
 	if(status & END_FR && skb != NULL)	/* end of frame */
@@ -828,7 +823,6 @@ static void init_channel(struct scc_channel *scc)
 {
 	del_timer(&scc->tx_t);
 	del_timer(&scc->tx_wdog);
-	del_timer(&scc->fs_wdog);
 
 	disable_irq(scc->irq);
 
@@ -1340,29 +1334,6 @@ static void scc_init_timer(struct scc_channel *scc)
 }
 
 
-/* FailSafe timeout
- *
- * Fall into this timeout if a buffer is waiting
- * and nothing has been sent during 1 minute
- */
-
-static void t_failsafe(unsigned long channel)
-{
-	struct scc_channel *scc = (struct scc_channel *) channel;
-	
-	del_timer(&scc->fs_wdog);
-
-	/* Kernel message */
-	printk(KERN_ERR "z8530drv: scc port %s failed. Re-init done.\n", scc->dev->name);
-
-	/* Add 1000 to the tx-underrun counter */
-	scc->stat.tx_under += 1000;
-	
-	/* re-initialize the port */
-	scc_net_close(scc->dev);
-	scc_net_open(scc->dev);
-}
-
 /* ******************************************************************** */
 /* *			Set/get L1 parameters			      * */
 /* ******************************************************************** */
@@ -1549,7 +1520,7 @@ static void z8530_init(void)
 	printk(KERN_INFO "Init Z8530 driver: %u channels, IRQ", Nchips*2);
 	
 	flag=" ";
-	for (k = 0; k < NR_IRQS; k++)
+	for (k = 0; k < 16; k++)
 		if (Ivec[k].used) 
 		{
 			printk("%s%d", flag, k);
@@ -1716,7 +1687,6 @@ static int scc_net_close(struct device *dev)
 
 	del_timer(&scc->tx_t);
 	del_timer(&scc->tx_wdog);
-	del_timer(&scc->fs_wdog);
 
 	restore_flags(flags);
 	
@@ -1756,7 +1726,6 @@ static int scc_net_tx(struct sk_buff *skb, struct device *dev)
 	struct scc_channel *scc = (struct scc_channel *) dev->priv;
 	unsigned long flags;
 	char kisscmd;
-	int nbbuf;
 	
 	if (scc == NULL || scc->magic != SCC_MAGIC || dev->tbusy)
 	{
@@ -1786,9 +1755,8 @@ static int scc_net_tx(struct sk_buff *skb, struct device *dev)
 
 	save_flags(flags);
 	cli();
-
-	nbbuf = skb_queue_len(&scc->tx_queue);
-	if (nbbuf > scc->dev->tx_queue_len)
+	
+	if (skb_queue_len(&scc->tx_queue) > scc->dev->tx_queue_len)
 	{
 		struct sk_buff *skb_del;
 		skb_del = __skb_dequeue(&scc->tx_queue);
@@ -1797,16 +1765,6 @@ static int scc_net_tx(struct sk_buff *skb, struct device *dev)
 	__skb_queue_tail(&scc->tx_queue, skb);
 
 	dev->trans_start = jiffies;
-
-	if (nbbuf == 0)
-	{
-		del_timer(&scc->fs_wdog);
-		/* Arm the failsafe timer for 1 minute */
-		scc->fs_wdog.data = (unsigned long) scc;
-		scc->fs_wdog.function = t_failsafe;
-		scc->fs_wdog.expires = jiffies + HZ*60;
-		add_timer(&scc->fs_wdog);
-	}
 
 	/*
 	 * Start transmission if the trx state is idle or
@@ -1875,9 +1833,6 @@ static int scc_net_ioctl(struct device *dev, struct ifreq *ifr, int cmd)
 
 			if (hwcfg.irq == 2) hwcfg.irq = 9;
 
-			if (hwcfg.irq <0 || hwcfg.irq > NR_IRQS)
-				return -EINVAL;
-				
 			if (!Ivec[hwcfg.irq].used && hwcfg.irq)
 			{
 				if (request_irq(hwcfg.irq, scc_isr, SA_INTERRUPT, "AX.25 SCC", NULL))
@@ -2287,7 +2242,7 @@ int init_module(void)
 	result = scc_init();
 
 	if (result == 0)
-		printk(KERN_INFO "Copyright 1993,2000 Joerg Reuter DL1BKE (jreuter@yaina.de)\n");
+		printk(KERN_INFO "Copyright 1993,1998 Joerg Reuter DL1BKE (jreuter@poboxes.com)\n");
 		
 	return result;
 }
@@ -2328,7 +2283,7 @@ void cleanup_module(void)
 		}
 	}
 	
-	for (k=0; k < NR_IRQS ; k++)
+	for (k=0; k < 16 ; k++)
 		if (Ivec[k].used) free_irq(k, NULL);
 		
 	restore_flags(flags);

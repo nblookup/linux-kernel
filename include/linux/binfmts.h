@@ -28,11 +28,7 @@ struct linux_binprm{
 	int argc, envc;
 	char * filename;	/* Name of binary */
 	unsigned long loader, exec;
-	int dumpable;
-	int priv_change;
 };
-
-struct file;
 
 /*
  * This structure defines the functions that are used to load the binary formats that
@@ -42,13 +38,10 @@ struct linux_binfmt {
 	struct linux_binfmt * next;
 	struct module *module;
 	int (*load_binary)(struct linux_binprm *, struct  pt_regs * regs);
-	int (*load_shlib)(struct file *file);
-	int (*core_dump)(long signr, struct pt_regs * regs, struct file *file);
-	unsigned long min_coredump;
+	int (*load_shlib)(int fd);
+	int (*core_dump)(long signr, struct pt_regs * regs);
 };
 
-extern void set_binfmt(struct linux_binfmt *);
-extern int do_coredump(long, struct pt_regs *);
 extern int register_binfmt(struct linux_binfmt *);
 extern int unregister_binfmt(struct linux_binfmt *);
 
@@ -59,7 +52,6 @@ extern int open_dentry(struct dentry *, int mode);
 
 extern int init_elf_binfmt(void);
 extern int init_elf32_binfmt(void);
-extern int init_irix_binfmt(void);
 extern int init_aout_binfmt(void);
 extern int init_aout32_binfmt(void);
 extern int init_script_binfmt(void);

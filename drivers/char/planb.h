@@ -8,7 +8,7 @@
 
     Based largely on the bttv driver by Ralph Metzler (rjkm@thp.uni-koeln.de)
 
-    Additional debugging and coding by Takashi Oe (toe@unlserve.unl.edu)
+    Additional debugging and coding by Takashi Oe (toe@unlinfo.unl.edu)
 
 
     This program is free software; you can redistribute it and/or modify
@@ -69,7 +69,6 @@
 
 /* for capture operations */
 #define MAX_GBUFFERS	2
-/* note PLANB_MAX_FBUF must be divisible by PAGE_SIZE */
 #ifdef PLANB_GSCANLINE
 #define PLANB_MAX_FBUF	0x240000	/* 576 * 1024 * 4 */
 #define TAB_FACTOR	(1)
@@ -133,7 +132,8 @@ struct planb_registers {
 	volatile unsigned int		intr_stat;	/* 0x104: irq status */
 #define PLANB_CLR_IRQ		0x00		/* clear Plan B interrupt */
 #define PLANB_GEN_IRQ		0x01		/* assert Plan B interrupt */
-#define PLANB_FRM_IRQ		0x0100		/* end of frame */
+#define PLANB_FRM_IRQ		0x02		/* end of frame */
+#define PLANB_IRQ_CMD_MASK	0x00000003U	/* reserve 2 lsbs for command */
 	unsigned int			pad3[1];	/* empty? */
 	volatile unsigned int		reg5;		/* 0x10c: ??? */
 	unsigned int			pad4[60];	/* empty? */
@@ -199,9 +199,8 @@ struct planb {
 	struct wait_queue *capq;
 	int last_fr;
 	int prev_last_fr;
-	unsigned char **rawbuf;
-	int rawbuf_size;
-	int gbuf_idx[MAX_GBUFFERS];
+        unsigned char *fbuffer;
+	unsigned char *gbuffer[MAX_GBUFFERS];
 	volatile struct dbdma_cmd *cap_cmd[MAX_GBUFFERS];
 	volatile struct dbdma_cmd *last_cmd[MAX_GBUFFERS];
 	volatile struct dbdma_cmd *pre_cmd[MAX_GBUFFERS];
@@ -219,10 +218,8 @@ struct planb {
 #else
 #define MAX_LNUM 431	/* change this if PLANB_MAXLINES or */
 			/* PLANB_MAXPIXELS changes */
-	int l_fr_addr_idx[MAX_GBUFFERS];
+	unsigned char *l_fr_addr[MAX_GBUFFERS];
 	unsigned char *l_to_addr[MAX_GBUFFERS][MAX_LNUM];
-	int l_to_next_idx[MAX_GBUFFERS][MAX_LNUM];
-	int l_to_next_size[MAX_GBUFFERS][MAX_LNUM];
 	int lsize[MAX_GBUFFERS], lnum[MAX_GBUFFERS];
 #endif
 };

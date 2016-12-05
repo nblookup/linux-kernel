@@ -5,7 +5,7 @@
  *
  *		The IP to API glue.
  *		
- * Version:	$Id: ip_sockglue.c,v 1.42.2.1 2001/02/20 04:21:46 davem Exp $
+ * Version:	$Id: ip_sockglue.c,v 1.42 1999/04/22 10:07:34 davem Exp $
  *
  * Authors:	see ip.c
  *
@@ -636,9 +636,6 @@ int ip_getsockopt(struct sock *sk, int level, int optname, char *optval, int *op
 	if(get_user(len,optlen))
 		return -EFAULT;
 
-	if(len < 0)
-		return -EINVAL;
-		
 	switch(optname)
 	{
 		case IP_OPTIONS:

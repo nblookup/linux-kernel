@@ -30,17 +30,17 @@
 #include <asm/pgtable.h>
 
 static int load_aout_binary(struct linux_binprm *, struct pt_regs * regs);
-static int load_aout_library(struct file *file);
-static int aout_core_dump(long signr, struct pt_regs * regs, struct file *);
+static int load_aout_library(int fd);
+static int aout_core_dump(long signr, struct pt_regs * regs);
 
 extern void dump_thread(struct pt_regs *, struct user *);
 
 static struct linux_binfmt aout_format = {
-	module:		THIS_MODULE,
-	load_binary:	load_aout_binary,
-	load_shlib:	load_aout_library,
-	core_dump:	aout_core_dump,
-	min_coredump:	PAGE_SIZE,
+#ifndef MODULE
+	NULL, NULL, load_aout_binary, load_aout_library, aout_core_dump
+#else
+	NULL, &__this_module, load_aout_binary, load_aout_library, aout_core_dump
+#endif
 };
 
 static void set_brk(unsigned long start, unsigned long end)
@@ -62,9 +62,9 @@ static void set_brk(unsigned long start, unsigned long end)
 static int dump_write(struct file *file, const void *addr, int nr)
 {
 	int r;
-	fs_down(&file->f_dentry->d_inode->i_sem);
+	down(&file->f_dentry->d_inode->i_sem);
 	r = file->f_op->write(file, addr, nr, &file->f_pos) == nr;
-	fs_up(&file->f_dentry->d_inode->i_sem);
+	up(&file->f_dentry->d_inode->i_sem);
 	return r;
 }
 
@@ -88,11 +88,15 @@ if (file->f_op->llseek) { \
  * dumping of the process results in another error..
  */
 
-static int
-aout_core_dump(long signr, struct pt_regs * regs, struct file * file)
+static inline int
+do_aout_core_dump(long signr, struct pt_regs * regs)
 {
+	struct dentry * dentry = NULL;
+	struct inode * inode = NULL;
+	struct file * file;
 	mm_segment_t fs;
 	int has_dumped = 0;
+	char corefile[6+sizeof(current->comm)];
 	unsigned long dump_start, dump_size;
 	struct user dump;
 #if defined(__alpha__)
@@ -108,8 +112,32 @@ aout_core_dump(long signr, struct pt_regs * regs, struct file * file)
 #       define START_STACK(u)   (u.start_stack)
 #endif
 
+	if (!current->dumpable || atomic_read(&current->mm->count) != 1)
+		return 0;
+	current->dumpable = 0;
+
+/* See if we have enough room to write the upage.  */
+	if (current->rlim[RLIMIT_CORE].rlim_cur < PAGE_SIZE)
+		return 0;
 	fs = get_fs();
 	set_fs(KERNEL_DS);
+	memcpy(corefile,"core.",5);
+#if 0
+	memcpy(corefile+5,current->comm,sizeof(current->comm));
+#else
+	corefile[4] = '\0';
+#endif
+	file = filp_open(corefile,O_CREAT | 2 | O_TRUNC | O_NOFOLLOW, 0600);
+	if (IS_ERR(file))
+		goto end_coredump;
+	dentry = file->f_dentry;
+	inode = dentry->d_inode;
+	if (!S_ISREG(inode->i_mode))
+		goto close_coredump;
+	if (!inode->i_op || !inode->i_op->default_file_ops)
+		goto close_coredump;
+	if (!file->f_op->write)
+		goto close_coredump;
 	has_dumped = 1;
 	current->flags |= PF_DUMPCORE;
        	strncpy(dump.u_comm, current->comm, sizeof(current->comm));
@@ -189,8 +217,21 @@ aout_core_dump(long signr, struct pt_regs * regs, struct file * file)
 	set_fs(KERNEL_DS);
 	DUMP_WRITE(current,sizeof(*current));
 close_coredump:
+	filp_close(file, NULL);
+end_coredump:
 	set_fs(fs);
 	return has_dumped;
+}
+
+static int
+aout_core_dump(long signr, struct pt_regs * regs)
+{
+	int retval;
+
+	MOD_INC_USE_COUNT;
+	retval = do_aout_core_dump(signr, regs);
+	MOD_DEC_USE_COUNT;
+	return retval;
 }
 
 /*
@@ -255,14 +296,12 @@ static unsigned long * create_aout_tables(char * p, struct linux_binprm * bprm)
 	return sp;
 }
 
-static int warnings = 0;
-
 /*
  * These are the functions used to load a.out style executables and shared
  * libraries.  There is no binary dependent code anywhere else.
  */
 
-static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
+static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 {
 	struct exec ex;
 	struct file * file;
@@ -285,8 +324,15 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 
 #ifdef __i386__
 	if (N_MAGIC(ex) == ZMAGIC && fd_offset != BLOCK_SIZE) {
-		if(warnings++<10)
-			printk(KERN_NOTICE "N_TXTOFF != BLOCK_SIZE. See a.out.h.\n");
+		printk(KERN_NOTICE "N_TXTOFF != BLOCK_SIZE. See a.out.h.\n");
+		return -ENOEXEC;
+	}
+
+	if (N_MAGIC(ex) == ZMAGIC && ex.a_text &&
+	    bprm->dentry->d_inode->i_op &&
+	    bprm->dentry->d_inode->i_op->bmap &&
+	    (fd_offset < bprm->dentry->d_inode->i_sb->s_blocksize)) {
+		printk(KERN_NOTICE "N_TXTOFF < BLOCK_SIZE. Please convert binary.\n");
 		return -ENOEXEC;
 	}
 #endif
@@ -360,23 +406,16 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	} else {
 		if ((ex.a_text & 0xfff || ex.a_data & 0xfff) &&
 		    (N_MAGIC(ex) != NMAGIC))
-			if(warnings++<10)
-				printk(KERN_NOTICE "executable not page aligned\n");
+			printk(KERN_NOTICE "executable not page aligned\n");
 
 		fd = open_dentry(bprm->dentry, O_RDONLY);
 		if (fd < 0)
 			return fd;
-		file = fget(fd);
+		file = fcheck(fd);
 
-		if (!file->f_op || !file->f_op->mmap ||
-		    fd_offset & (bprm->dentry->d_inode->i_sb->s_blocksize-1)) {
-			if (warnings++<10)
-				printk(KERN_NOTICE
-				       "fd_offset is not blocksize aligned. Loading %s in anonymous memory.\n",
-				       file->f_dentry->d_name.name);
-			fput(file);
+		if (!file->f_op || !file->f_op->mmap) {
 			sys_close(fd);
-			do_mmap(NULL, N_TXTADDR(ex), ex.a_text+ex.a_data,
+			do_mmap(NULL, 0, ex.a_text+ex.a_data,
 				PROT_READ|PROT_WRITE|PROT_EXEC,
 				MAP_FIXED|MAP_PRIVATE, 0);
 			read_exec(bprm->dentry, fd_offset,
@@ -393,7 +432,6 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 			fd_offset);
 
 		if (error != N_TXTADDR(ex)) {
-			fput(file);
 			sys_close(fd);
 			send_sig(SIGKILL, current, 0);
 			return error;
@@ -403,7 +441,6 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 				PROT_READ | PROT_WRITE | PROT_EXEC,
 				MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 				fd_offset + ex.a_text);
-		fput(file);
 		sys_close(fd);
 		if (error != N_DATADDR(ex)) {
 			send_sig(SIGKILL, current, 0);
@@ -411,12 +448,16 @@ static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		}
 	}
 beyond_if:
-	set_binfmt(&aout_format);
 	if (current->exec_domain && current->exec_domain->module)
 		__MOD_DEC_USE_COUNT(current->exec_domain->module);
+	if (current->binfmt && current->binfmt->module)
+		__MOD_DEC_USE_COUNT(current->binfmt->module);
 	current->exec_domain = lookup_exec_domain(current->personality);
+	current->binfmt = &aout_format;
 	if (current->exec_domain && current->exec_domain->module)
 		__MOD_INC_USE_COUNT(current->exec_domain->module);
+	if (current->binfmt && current->binfmt->module)
+		__MOD_INC_USE_COUNT(current->binfmt->module);
 
 	set_brk(current->mm->start_brk, current->mm->brk);
 
@@ -428,13 +469,27 @@ beyond_if:
 	regs->gp = ex.a_gpvalue;
 #endif
 	start_thread(regs, ex.a_entry, p);
-	if (current->ptrace & PT_PTRACED)
+	if (current->flags & PF_PTRACED)
 		send_sig(SIGTRAP, current, 0);
 	return 0;
 }
 
-static int load_aout_library(struct file *file)
+
+static int
+load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 {
+	int retval;
+
+	MOD_INC_USE_COUNT;
+	retval = do_load_aout_binary(bprm, regs);
+	MOD_DEC_USE_COUNT;
+	return retval;
+}
+
+static inline int
+do_load_aout_library(int fd)
+{
+        struct file * file;
 	struct inode * inode;
 	unsigned long bss, start_addr, len;
 	unsigned long error;
@@ -442,6 +497,12 @@ static int load_aout_library(struct file *file)
 	loff_t offset = 0;
 	struct exec ex;
 
+	retval = -EACCES;
+	file = fget(fd);
+	if (!file)
+		goto out;
+	if (!file->f_op)
+		goto out_putf;
 	inode = file->f_dentry->d_inode;
 
 	retval = -ENOEXEC;
@@ -459,6 +520,12 @@ static int load_aout_library(struct file *file)
 		goto out_putf;
 	}
 
+	if (N_MAGIC(ex) == ZMAGIC && N_TXTOFF(ex) &&
+	    (N_TXTOFF(ex) < inode->i_sb->s_blocksize)) {
+		printk("N_TXTOFF < BLOCK_SIZE. Please convert library\n");
+		goto out_putf;
+	}
+
 	if (N_FLAGS(ex))
 		goto out_putf;
 
@@ -467,20 +534,6 @@ static int load_aout_library(struct file *file)
 
 	start_addr =  ex.a_entry & 0xfffff000;
 
-	if (N_TXTOFF(ex) & (inode->i_sb->s_blocksize-1)) {
-		if (warnings++<10)
-			printk(KERN_NOTICE
-			       "N_TXTOFF is not blocksize aligned. Loading library %s in anonymous memory.\n",
-			       file->f_dentry->d_name.name);
-		do_mmap(NULL, start_addr, ex.a_text + ex.a_data,
-			PROT_READ | PROT_WRITE | PROT_EXEC,
-			MAP_FIXED| MAP_PRIVATE, 0);
-		read_exec(file->f_dentry, N_TXTOFF(ex),
-			  (char *)start_addr, ex.a_text + ex.a_data, 0);
-		flush_icache_range((unsigned long) start_addr,
-				   (unsigned long) start_addr + ex.a_text + ex.a_data);
-		goto map_bss;
-	}
 	/* Now use mmap to map the library into memory. */
 	error = do_mmap(file, start_addr, ex.a_text + ex.a_data,
 			PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -490,7 +543,6 @@ static int load_aout_library(struct file *file)
 	if (error != start_addr)
 		goto out_putf;
 
- map_bss:
 	len = PAGE_ALIGN(ex.a_text + ex.a_data);
 	bss = ex.a_text + ex.a_data + ex.a_bss;
 	if (bss > len) {
@@ -504,8 +556,22 @@ static int load_aout_library(struct file *file)
 	retval = 0;
 
 out_putf:
+	fput(file);
+out:
 	return retval;
 }
+
+static int
+load_aout_library(int fd)
+{
+	int retval;
+
+	MOD_INC_USE_COUNT;
+	retval = do_load_aout_library(fd);
+	MOD_DEC_USE_COUNT;
+	return retval;
+}
+
 
 int __init init_aout_binfmt(void)
 {

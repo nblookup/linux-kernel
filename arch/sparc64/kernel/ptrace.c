@@ -40,7 +40,6 @@ static pte_t *get_page(struct task_struct * tsk,
 	pgd_t * pgdir;
 	pmd_t * pgmiddle;
 	pte_t * pgtable;
-	int fault;
 
 repeat:
 	pgdir = pgd_offset(vma->vm_mm, addr);
@@ -51,12 +50,8 @@ repeat:
 	current->mm->segments = (void *) (addr & PAGE_SIZE);
 
 	if (pgd_none(*pgdir)) {
-		fault = handle_mm_fault(tsk, vma, addr, write);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return 0;
+		handle_mm_fault(tsk, vma, addr, write);
+		goto repeat;
 	}
 	if (pgd_bad(*pgdir)) {
 		printk("ptrace: bad page directory %016lx\n", pgd_val(*pgdir));
@@ -65,12 +60,8 @@ repeat:
 	}
 	pgmiddle = pmd_offset(pgdir, addr);
 	if (pmd_none(*pgmiddle)) {
-		fault = handle_mm_fault(tsk, vma, addr, write);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return 0;
+		handle_mm_fault(tsk, vma, addr, write);
+		goto repeat;
 	}
 	if (pmd_bad(*pgmiddle)) {
 		printk("ptrace: bad page middle %016lx\n", pmd_val(*pgmiddle));
@@ -79,20 +70,12 @@ repeat:
 	}
 	pgtable = pte_offset(pgmiddle, addr);
 	if (!pte_present(*pgtable)) {
-		fault = handle_mm_fault(tsk, vma, addr, write);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return 0;
+		handle_mm_fault(tsk, vma, addr, write);
+		goto repeat;
 	}
 	if (write && !pte_write(*pgtable)) {
-		fault = handle_mm_fault(tsk, vma, addr, write);
-		if (fault > 0)
-			goto repeat;
-		if (fault < 0)
-			force_sig(SIGKILL, tsk);
-		return 0;
+		handle_mm_fault(tsk, vma, addr, write);
+		goto repeat;
 	}
 	return pgtable;
 }
@@ -120,14 +103,16 @@ static __inline__ unsigned int read_user_int(unsigned long kvaddr)
 
 static __inline__ void write_user_long(unsigned long kvaddr, unsigned long val)
 {
-	*(unsigned long *)kvaddr = val;
-	flush_dcache_page(kvaddr & PAGE_MASK);
+	__asm__ __volatile__("stxa %0, [%1] %2"
+			     : /* no outputs */
+			     : "r" (val), "r" (__pa(kvaddr)), "i" (ASI_PHYS_USE_EC));
 }
 
 static __inline__ void write_user_int(unsigned long kvaddr, unsigned int val)
 {
-	*(unsigned int *)kvaddr = val;
-	flush_dcache_page(kvaddr & PAGE_MASK);
+	__asm__ __volatile__("stwa %0, [%1] %2"
+			     : /* no outputs */
+			     : "r" (val), "r" (__pa(kvaddr)), "i" (ASI_PHYS_USE_EC));
 }
 
 static inline unsigned long get_long(struct task_struct * tsk,
@@ -162,6 +147,11 @@ static inline void put_long(struct task_struct * tsk, struct vm_area_struct * vm
 
 		pgaddr = page + (addr & ~PAGE_MASK);
 		write_user_long(pgaddr, data);
+
+		__asm__ __volatile__("
+		membar	#StoreStore
+		flush	%0
+"		: : "r" (pgaddr & ~7) : "memory");
 	}
 /* we're bypassing pagetables, so we have to set the dirty bit ourselves */
 /* this should also re-instate whatever read-only mode there was before */
@@ -202,6 +192,11 @@ static inline void put_int(struct task_struct * tsk, struct vm_area_struct * vma
 
 		pgaddr = page + (addr & ~PAGE_MASK);
 		write_user_int(pgaddr, data);
+
+		__asm__ __volatile__("
+		membar	#StoreStore
+		flush	%0
+"		: : "r" (pgaddr & ~7) : "memory");
 	}
 /* we're bypassing pagetables, so we have to set the dirty bit ourselves */
 /* this should also re-instate whatever read-only mode there was before */
@@ -569,12 +564,12 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 #endif
 	if(request == PTRACE_TRACEME) {
 		/* are we already being traced? */
-		if (current->ptrace & PT_PTRACED) {
+		if (current->flags & PF_PTRACED) {
 			pt_error_return(regs, EPERM);
 			goto out;
 		}
 		/* set the ptrace bit in the process flags. */
-		current->ptrace |= PT_PTRACED;
+		current->flags |= PF_PTRACED;
 		pt_succ_return(regs, 0);
 		goto out;
 	}
@@ -616,11 +611,11 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 			goto out;
 		}
 		/* the same process cannot be attached many times */
-		if (child->ptrace & PT_PTRACED) {
+		if (child->flags & PF_PTRACED) {
 			pt_error_return(regs, EPERM);
 			goto out;
 		}
-		child->ptrace |= PT_PTRACED;
+		child->flags |= PF_PTRACED;
 		write_lock_irqsave(&tasklist_lock, flags);
 		if(child->p_pptr != current) {
 			REMOVE_LINKS(child);
@@ -632,7 +627,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 		pt_succ_return(regs, 0);
 		goto out;
 	}
-	if (!(child->ptrace & PT_PTRACED)
+	if (!(child->flags & PF_PTRACED)
 	    && ((current->personality & PER_BSD) && (request != PTRACE_SUNATTACH))
 	    && (!(current->personality & PER_BSD) && (request != PTRACE_ATTACH))) {
 		pt_error_return(regs, ESRCH);
@@ -1064,9 +1059,9 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 		}
 
 		if (request == PTRACE_SYSCALL)
-			child->ptrace |= PT_TRACESYS;
+			child->flags |= PF_TRACESYS;
 		else
-			child->ptrace &= ~PT_TRACESYS;
+			child->flags &= ~PF_TRACESYS;
 
 		child->exit_code = data;
 #ifdef DEBUG_PTRACE
@@ -1104,7 +1099,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 			pt_error_return(regs, EIO);
 			goto out;
 		}
-		child->ptrace &= ~(PT_PTRACED|PT_TRACESYS);
+		child->flags &= ~(PF_PTRACED|PF_TRACESYS);
 		child->exit_code = data;
 
 		write_lock_irqsave(&tasklist_lock, flags);
@@ -1139,8 +1134,8 @@ asmlinkage void syscall_trace(void)
 #ifdef DEBUG_PTRACE
 	printk("%s [%d]: syscall_trace\n", current->comm, current->pid);
 #endif
-	if ((current->ptrace & (PT_PTRACED|PT_TRACESYS))
-			!= (PT_PTRACED|PT_TRACESYS))
+	if ((current->flags & (PF_PTRACED|PF_TRACESYS))
+			!= (PF_PTRACED|PF_TRACESYS))
 		return;
 	current->exit_code = SIGTRAP;
 	current->state = TASK_STOPPED;

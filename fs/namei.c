@@ -136,11 +136,13 @@ char * getname(const char * filename)
  * for filesystem access without changing the "normal" uids which
  * are used for other things..
  */
-int vfs_permission(struct inode * inode,int mask)
+int permission(struct inode * inode,int mask)
 {
 	int mode = inode->i_mode;
 
-	if ((mask & S_IWOTH) && IS_RDONLY(inode) &&
+	if (inode->i_op && inode->i_op->permission)
+		return inode->i_op->permission(inode, mask);
+	else if ((mask & S_IWOTH) && IS_RDONLY(inode) &&
 		 (S_ISREG(mode) || S_ISDIR(mode) || S_ISLNK(mode)))
 		return -EROFS; /* Nobody gets write access to a read-only fs */
 	else if ((mask & S_IWOTH) && IS_IMMUTABLE(inode))
@@ -153,17 +155,10 @@ int vfs_permission(struct inode * inode,int mask)
 		return 0;
 	/* read and search access */
 	if ((mask == S_IROTH) ||
-	    (S_ISDIR(inode->i_mode)  && !(mask & ~(S_IROTH | S_IXOTH))))
+	    (S_ISDIR(mode)  && !(mask & ~(S_IROTH | S_IXOTH))))
 		if (capable(CAP_DAC_READ_SEARCH))
 			return 0;
 	return -EACCES;
-}
-
-int permission(struct inode * inode,int mask)
-{
-	if (inode->i_op && inode->i_op->permission)
-		return inode->i_op->permission(inode, mask);
-	return vfs_permission(inode, mask);
 }
 
 /*
@@ -251,7 +246,7 @@ static struct dentry * real_lookup(struct dentry * parent, struct qstr * name, i
 	 * FIXME! This could use version numbering or similar to
 	 * avoid unnecessary cache lookups.
 	 */
-	result = d_lookup(parent, name);
+	result = cached_lookup(parent, name, flags);
 	if (!result) {
 		struct dentry * dentry = d_alloc(parent, name);
 		result = ERR_PTR(-ENOMEM);
@@ -262,30 +257,10 @@ static struct dentry * real_lookup(struct dentry * parent, struct qstr * name, i
 			else
 				result = dentry;
 		}
-		up(&dir->i_sem);
-		return result;
 	}
-
-	/*
-	 * Uhhuh! Nasty case: the cache was re-populated while
-	 * we waited on the semaphore. Need to revalidate, but
-	 * we're going to return this entry regardless (same
-	 * as if it was busy).
-	 */
 	up(&dir->i_sem);
-	if (result->d_op && result->d_op->d_revalidate)
-		result->d_op->d_revalidate(result, flags);
 	return result;
 }
-/*
- * Yes, this really increments the link_count by 5, and
- * decrements it by 4. Together with checking against 25,
- * this limits recursive symlink follows to 5, while
- * limiting consecutive symlinks to 25.
- *
- * Without that kind of total limit, nasty chains of consecutive
- * symlinks can cause almost arbitrarily long lookups.
- */
 
 static struct dentry * do_follow_link(struct dentry *base, struct dentry *dentry, unsigned int follow)
 {
@@ -293,17 +268,13 @@ static struct dentry * do_follow_link(struct dentry *base, struct dentry *dentry
 
 	if ((follow & LOOKUP_FOLLOW)
 	    && inode && inode->i_op && inode->i_op->follow_link) {
-		if (current->link_count < 25) {
+		if (current->link_count < 5) {
 			struct dentry * result;
 
-			if (current->need_resched) {
-				current->state = TASK_RUNNING;	
-				schedule();
-			}
-			current->link_count += 5;
+			current->link_count++;
 			/* This eats the base */
-			result = inode->i_op->follow_link(dentry, base, follow|LOOKUP_INSYMLINK);
-			current->link_count -= 4;
+			result = inode->i_op->follow_link(dentry, base, follow);
+			current->link_count--;
 			dput(dentry);
 			return result;
 		}
@@ -337,8 +308,6 @@ struct dentry * lookup_dentry(const char * name, struct dentry * base, unsigned 
 	struct dentry * dentry;
 	struct inode *inode;
 
-	if (!(lookup_flags & LOOKUP_INSYMLINK))
-		current->link_count=0;
 	if (*name == '/') {
 		if (base)
 			dput(base);
@@ -824,7 +793,7 @@ struct dentry * do_mknod(const char * filename, int mode, dev_t dev)
 	struct dentry *dentry, *retval;
 
 	mode &= ~current->fs->umask;
-	dentry = lookup_dentry(filename, NULL, 0);
+	dentry = lookup_dentry(filename, NULL, LOOKUP_FOLLOW);
 	if (IS_ERR(dentry))
 		return dentry;
 

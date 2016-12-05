@@ -116,7 +116,7 @@ static __inline__ int dev_is_ethdev(struct device *dev)
  */
 static int lapbeth_check_devices(struct device *dev)
 {
-	struct lapbethdev *lapbeth, *lapbeth_prev, *lapbeth_next;
+	struct lapbethdev *lapbeth, *lapbeth_prev;
 	int result = 0;
 	unsigned long flags;
 	
@@ -125,8 +125,7 @@ static int lapbeth_check_devices(struct device *dev)
 
 	lapbeth_prev = NULL;
 
-	for (lapbeth = lapbeth_devices; lapbeth != NULL; lapbeth = lapbeth_next) {
-		lapbeth_next = lapbeth->next;
+	for (lapbeth = lapbeth_devices; lapbeth != NULL; lapbeth = lapbeth->next) {
 		if (!dev_get(lapbeth->ethname)) {
 			if (lapbeth_prev)
 				lapbeth_prev->next = lapbeth->next;
@@ -139,8 +138,8 @@ static int lapbeth_check_devices(struct device *dev)
 			unregister_netdev(&lapbeth->axdev);
 			kfree(lapbeth);
 		}
-		else
-			lapbeth_prev = lapbeth;
+
+		lapbeth_prev = lapbeth;
 	}
 	
 	restore_flags(flags);
