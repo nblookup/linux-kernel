@@ -16,8 +16,9 @@
 #include <linux/malloc.h>
 #include <linux/wait.h>
 #include <linux/time.h>
+#include <linux/config.h>
 
-#define CONFIG_SKB_CHECK	1
+#undef CONFIG_SKB_CHECK
 
 #define HAVE_ALLOC_SKB		/* For the drivers to know */
 
@@ -46,7 +47,7 @@ struct sk_buff {
   volatile unsigned long	when;	/* used to compute rtt's	*/
   struct timeval		stamp;
   struct device			*dev;
-  void				*mem_addr;
+  struct sk_buff		*mem_addr;
   union {
 	struct tcphdr	*th;
 	struct ethhdr	*eth;
@@ -68,8 +69,13 @@ struct sk_buff {
 				used,
 				free,
 				arp;
-  unsigned char			tries,lock,localroute;
+  unsigned char			tries,lock,localroute,pkt_type;
+#define PACKET_HOST		0		/* To us */
+#define PACKET_BROADCAST	1
+#define PACKET_MULTICAST	2
+#define PACKET_OTHERHOST	3		/* Unmatched promiscuous */
   unsigned short		users;		/* User count - see datagram.c (and soon seqpacket.c/stream.c) */
+  unsigned short		pkt_class;	/* For drivers that need to cache the packet type with the skbuff (new PPP) */
 #ifdef CONFIG_SLAVE_BALANCING
   unsigned short		in_dev_queue;
 #endif  
@@ -90,7 +96,9 @@ struct sk_buff {
 /*
  *	Handling routines are only of interest to the kernel
  */
- 
+
+#include <asm/system.h>
+
 #if 0
 extern void			print_skb(struct sk_buff *);
 #endif
@@ -104,11 +112,11 @@ extern void			skb_append(struct sk_buff *old,struct sk_buff *newsk);
 extern void			skb_unlink(struct sk_buff *buf);
 extern struct sk_buff *		skb_peek_copy(struct sk_buff_head *list);
 extern struct sk_buff *		alloc_skb(unsigned int size, int priority);
-extern void			kfree_skbmem(void *mem, unsigned size);
+extern void			kfree_skbmem(struct sk_buff *skb, unsigned size);
 extern struct sk_buff *		skb_clone(struct sk_buff *skb, int priority);
-extern void			skb_kept_by_device(struct sk_buff *skb);
-extern void			skb_device_release(struct sk_buff *skb,
-					int mode);
+extern void			skb_device_lock(struct sk_buff *skb);
+extern void			skb_device_unlock(struct sk_buff *skb);
+extern void			dev_kfree_skb(struct sk_buff *skb, int mode);
 extern int			skb_device_locked(struct sk_buff *skb);
 /*
  *	Peek an sk_buff. Unlike most other operations you _MUST_
@@ -127,8 +135,146 @@ extern int 			skb_check(struct sk_buff *skb,int,int, char *);
 #define IS_SKB(skb)		skb_check((skb), 0, __LINE__,__FILE__)
 #define IS_SKB_HEAD(skb)	skb_check((skb), 1, __LINE__,__FILE__)
 #else
-#define IS_SKB(skb)		0
-#define IS_SKB_HEAD(skb)	0
+#define IS_SKB(skb)		
+#define IS_SKB_HEAD(skb)	
+
+extern __inline__ void skb_queue_head_init(struct sk_buff_head *list)
+{
+	list->prev = (struct sk_buff *)list;
+	list->next = (struct sk_buff *)list;
+}
+
+/*
+ *	Insert an sk_buff at the start of a list.
+ */
+
+extern __inline__ void skb_queue_head(struct sk_buff_head *list_,struct sk_buff *newsk)
+{
+	unsigned long flags;
+	struct sk_buff *list = (struct sk_buff *)list_;
+
+	save_flags(flags);
+	cli();
+	newsk->next = list->next;
+	newsk->prev = list;
+	newsk->next->prev = newsk;
+	newsk->prev->next = newsk;
+	restore_flags(flags);
+}
+
+/*
+ *	Insert an sk_buff at the end of a list.
+ */
+
+extern __inline__ void skb_queue_tail(struct sk_buff_head *list_, struct sk_buff *newsk)
+{
+	unsigned long flags;
+	struct sk_buff *list = (struct sk_buff *)list_;
+
+	save_flags(flags);
+	cli();
+
+	newsk->next = list;
+	newsk->prev = list->prev;
+
+	newsk->next->prev = newsk;
+	newsk->prev->next = newsk;
+
+	restore_flags(flags);
+}
+
+/*
+ *	Remove an sk_buff from a list. This routine is also interrupt safe
+ *	so you can grab read and free buffers as another process adds them.
+ */
+
+extern __inline__ struct sk_buff *skb_dequeue(struct sk_buff_head *list_)
+{
+	long flags;
+	struct sk_buff *result;
+	struct sk_buff *list = (struct sk_buff *)list_;
+
+	save_flags(flags);
+	cli();
+
+	result = list->next;
+	if (result == list) {
+		restore_flags(flags);
+		return NULL;
+	}
+
+	result->next->prev = list;
+	list->next = result->next;
+
+	result->next = NULL;
+	result->prev = NULL;
+
+	restore_flags(flags);
+
+	return result;
+}
+
+/*
+ *	Insert a packet before another one in a list.
+ */
+
+extern __inline__ void skb_insert(struct sk_buff *old, struct sk_buff *newsk)
+{
+	unsigned long flags;
+
+	save_flags(flags);
+	cli();
+	newsk->next = old;
+	newsk->prev = old->prev;
+	old->prev = newsk;
+	newsk->prev->next = newsk;
+
+	restore_flags(flags);
+}
+
+/*
+ *	Place a packet after a given packet in a list.
+ */
+
+extern __inline__ void skb_append(struct sk_buff *old, struct sk_buff *newsk)
+{
+	unsigned long flags;
+
+	save_flags(flags);
+	cli();
+
+	newsk->prev = old;
+	newsk->next = old->next;
+	newsk->next->prev = newsk;
+	old->next = newsk;
+
+	restore_flags(flags);
+}
+
+/*
+ *	Remove an sk_buff from its list. Works even without knowing the list it
+ *	is sitting on, which can be handy at times. It also means that THE LIST
+ *	MUST EXIST when you unlink. Thus a list must have its contents unlinked
+ *	_FIRST_.
+ */
+
+extern __inline__ void skb_unlink(struct sk_buff *skb)
+{
+	unsigned long flags;
+
+	save_flags(flags);
+	cli();
+
+	if(skb->prev && skb->next)
+	{
+		skb->next->prev = skb->prev;
+		skb->prev->next = skb->next;
+		skb->next = NULL;
+		skb->prev = NULL;
+	}
+	restore_flags(flags);
+}
+
 #endif
 
 extern struct sk_buff *		skb_recv_datagram(struct sock *sk,unsigned flags,int noblock, int *err);

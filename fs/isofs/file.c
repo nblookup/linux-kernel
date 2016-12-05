@@ -8,6 +8,10 @@
  *  isofs regular file handling primitives
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#endif
+
 #include <asm/segment.h>
 #include <asm/system.h>
 
@@ -68,18 +72,23 @@ struct inode_operations isofs_file_inode_operations = {
 
 /* This is a heuristic to determine if a file is text of binary.  If it
  * is text, then we translate all 0x0d characters to spaces.  If the 0x0d
- * character is not preceeded or followed by a 0x0a, then we turn it into
+ * character is not preceded or followed by a 0x0a, then we turn it into
  * a 0x0a.  A control-Z is also turned into a linefeed.
  */
 
-static inline void unixify_text_buffer(char * buffer, int chars, int mode)
+static inline void unixify_to_fs(char * outbuf, char * buffer, int chars,
+				 int mode)
 {
+	char outchar;
+
 	while(chars--){
-		if(*buffer == 0x1a) *buffer = 0x0a;
-		if(*buffer == 0x0d){
-			if(mode == ISOFS_FILE_TEXT_M) *buffer = 0x0a;
-			if(mode == ISOFS_FILE_TEXT) *buffer = ' ';
+	  	outchar = *buffer;
+		if(outchar == 0x1a) outchar = 0x0a;
+		if(outchar == 0x0d){
+			if(mode == ISOFS_FILE_TEXT_M) outchar = 0x0a;
+			if(mode == ISOFS_FILE_TEXT) outchar = ' ';
 		}
+		put_fs_byte(outchar, outbuf++);
 		buffer++;
 	}
 }
@@ -114,7 +123,7 @@ static void isofs_determine_filetype(struct inode * inode)
 static int isofs_file_read(struct inode * inode, struct file * filp, char * buf, int count)
 {
 	int read,left,chars;
-	int block, blocks, offset;
+	int block, blocks, offset, total_blocks;
 	int bhrequest;
 	int ra_blocks, max_block, nextblock;
 	struct buffer_head ** bhb, ** bhe;
@@ -141,12 +150,25 @@ static int isofs_file_read(struct inode * inode, struct file * filp, char * buf,
 		return 0;
 	read = 0;
 	block = filp->f_pos >> ISOFS_BUFFER_BITS(inode);
-	offset = filp->f_pos & (ISOFS_BUFFER_SIZE(inode)-1);
+	offset = (inode->u.isofs_i.i_first_extent + filp->f_pos)
+	  & (ISOFS_BUFFER_SIZE(inode)-1);
 	blocks = (left + offset + ISOFS_BUFFER_SIZE(inode) - 1) / ISOFS_BUFFER_SIZE(inode);
 	bhb = bhe = buflist;
 
 	ra_blocks = read_ahead[MAJOR(inode->i_dev)] / (BLOCK_SIZE >> 9);
 	if(ra_blocks > blocks) blocks = ra_blocks;
+
+	/*
+	 * this is for stopping read ahead at EOF. It's  important for
+	 * reading PhotoCD's, because they have many small data tracks instead
+	 * of one big. And between two data-tracks are some unreadable sectors.
+	 * A read ahead after a EOF may try to read such an unreadable sector.
+	 *    kraxel@cs.tu-berlin.de (Gerd Knorr)
+	 */
+	total_blocks = (inode->i_size + (1 << ISOFS_BUFFER_BITS(inode)) - 1)
+	   >> ISOFS_BUFFER_BITS(inode);
+	if (block + blocks > total_blocks)
+		blocks = total_blocks - block;
 
 	max_block = (inode->i_size + BLOCK_SIZE - 1)/BLOCK_SIZE;
 	nextblock = -1;
@@ -210,9 +232,10 @@ static int isofs_file_read(struct inode * inode, struct file * filp, char * buf,
 		  if (*bhe) {
 		    if (inode->u.isofs_i.i_file_format == ISOFS_FILE_TEXT ||
 			inode->u.isofs_i.i_file_format == ISOFS_FILE_TEXT_M)
-		      unixify_text_buffer(offset+(*bhe)->b_data,
-					  chars, inode->u.isofs_i.i_file_format);
-		    memcpy_tofs(buf,offset+(*bhe)->b_data,chars);
+		      unixify_to_fs(buf, offset+(*bhe)->b_data, chars, 
+				    inode->u.isofs_i.i_file_format);
+		    else
+		      memcpy_tofs(buf,offset+(*bhe)->b_data,chars);
 		    brelse(*bhe);
 		    buf += chars;
 		  } else {

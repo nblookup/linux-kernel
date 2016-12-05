@@ -22,6 +22,8 @@
 #include "scsi.h"
 #include "hosts.h"
 
+#include "sd.h"
+
 /* A few options that we want selected */
 
 /* Do not attempt to use a timer to simulate a real disk with latency */
@@ -98,7 +100,6 @@ static int npart = 0;
 #endif
 
 static volatile void (*do_done[SCSI_DEBUG_MAILBOXES])(Scsi_Cmnd *) = {NULL, };
-static int scsi_debug_host = 0;
 extern void scsi_debug_interrupt();
 
 volatile Scsi_Cmnd * SCint[SCSI_DEBUG_MAILBOXES] = {NULL,};
@@ -163,6 +164,7 @@ int scsi_debug_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
     struct scatterlist * sgpnt;
     int target = SCpnt->target;
     int bufflen = SCpnt->request_bufflen;
+    unsigned long flags;
     int i;
     sgcount = 0;
     sgpnt = NULL;
@@ -371,7 +373,8 @@ int scsi_debug_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
       return 0;
     };
 
-    cli();
+   save_flags(flags); 
+   cli();
     for(i=0;i<SCSI_DEBUG_MAILBOXES; i++){
       if (SCint[i] == 0) break;
     };
@@ -404,7 +407,7 @@ int scsi_debug_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
     };
 
     SCpnt->result = scsi_debug_errsts;
-    sti();
+    restore_flags(flags);
 
 #if 0
     printk("Sending command (%d %x %d %d)...", i, done, timeout[i],jiffies);
@@ -440,7 +443,8 @@ static void scsi_debug_intr_handle(void)
     Scsi_Cmnd * SCtmp;
     int i, pending;
     void (*my_done)(Scsi_Cmnd *); 
-   int to;
+    unsigned long flags;
+    int to;
 
 #ifndef IMMEDIATE
     timer_table[SCSI_DEBUG_TIMER].expires = 0;
@@ -448,6 +452,7 @@ static void scsi_debug_intr_handle(void)
 #endif
 
   repeat:
+    save_flags(flags);
     cli();
     for(i=0;i<SCSI_DEBUG_MAILBOXES; i++) {
       if (SCint[i] == 0) continue;
@@ -465,7 +470,7 @@ static void scsi_debug_intr_handle(void)
       for(i=0;i<SCSI_DEBUG_MAILBOXES; i++) {
 	if (SCint[i] == 0) continue;
 	if (timeout[i] == 0) continue;
-	if (timeout[i] <= jiffies) {sti(); goto repeat;};
+	if (timeout[i] <= jiffies) {restore_flags(flags); goto repeat;};
 	if (timeout[i] > jiffies) {
 	  if (pending > timeout[i]) pending = timeout[i];
 	  continue;
@@ -476,7 +481,7 @@ static void scsi_debug_intr_handle(void)
 	  (pending <= jiffies ? jiffies+1 : pending);
 	timer_active |= 1 << SCSI_DEBUG_TIMER;
       };
-      sti();
+      restore_flags(flags);
 #endif
       return;
     };
@@ -489,7 +494,7 @@ static void scsi_debug_intr_handle(void)
       timeout[i] = 0;
       SCtmp = (Scsi_Cmnd *) SCint[i];
       SCint[i] = NULL;
-      sti();
+      restore_flags(flags);
 
       if (!my_done) {
 	printk("scsi_debug_intr_handle: Unexpected interrupt\n"); 
@@ -511,9 +516,8 @@ static void scsi_debug_intr_handle(void)
 }
 
 
-int scsi_debug_detect(int hostnum)
+int scsi_debug_detect(Scsi_Host_Template * tpnt)
 {
-    scsi_debug_host = hostnum;
 #ifndef IMMEDIATE
     timer_table[SCSI_DEBUG_TIMER].fn = scsi_debug_intr_handle;
     timer_table[SCSI_DEBUG_TIMER].expires = 0;
@@ -521,27 +525,31 @@ int scsi_debug_detect(int hostnum)
     return 1;
 }
 
-int scsi_debug_abort(Scsi_Cmnd * SCpnt,int i)
+int scsi_debug_abort(Scsi_Cmnd * SCpnt)
 {
     int j;
     void (*my_done)(Scsi_Cmnd *);
+    unsigned long flags;
+
     DEB(printk("scsi_debug_abort\n"));
-    SCpnt->result = i << 16;
+    SCpnt->result = SCpnt->abort_reason << 16;
     for(j=0;j<SCSI_DEBUG_MAILBOXES; j++) {
       if(SCpnt == SCint[j]) {
 	my_done = do_done[j];
 	my_done(SCpnt);
+        save_flags(flags);
 	cli();
 	timeout[j] = 0;
 	SCint[j] = NULL;
 	do_done[j] = NULL;
-	sti();
+	restore_flags(flags);
       };
     };
     return 0;
 }
 
-int scsi_debug_biosparam(int size, int dev, int* info){
+int scsi_debug_biosparam(Disk * disk, int dev, int* info){
+  int size = disk->capacity;
   info[0] = 32;
   info[1] = 64;
   info[2] = (size + 2047) >> 11;
@@ -552,6 +560,8 @@ int scsi_debug_biosparam(int size, int dev, int* info){
 int scsi_debug_reset(Scsi_Cmnd * SCpnt)
 {
     int i;
+    unsigned long flags;
+
     void (*my_done)(Scsi_Cmnd *);
     DEB(printk("scsi_debug_reset called\n"));
     for(i=0;i<SCSI_DEBUG_MAILBOXES; i++) {
@@ -559,11 +569,12 @@ int scsi_debug_reset(Scsi_Cmnd * SCpnt)
       SCint[i]->result = DID_ABORT << 16;
       my_done = do_done[i];
       my_done(SCint[i]);
+      save_flags(flags);
       cli();
       SCint[i] = NULL;
       do_done[i] = NULL;
       timeout[i] = 0;
-      sti();
+      restore_flags(flags);
     };
     return 0;
 }

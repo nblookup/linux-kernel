@@ -25,6 +25,7 @@
 #include <asm/segment.h>
 
 #include "hpfs.h"
+#include "hpfs_caps.h"
 
 /* 
  * HPFS is a mixture of 512-byte blocks and 2048-byte blocks.  The 2k blocks
@@ -116,6 +117,9 @@
  */
 
 /* notation */
+
+#define NAME_OFFSET(de) ((int) ((de)->d_name - (char *) (de)))
+#define ROUND_UP(x) (((x)+3) & ~3)
 
 #define little_ushort(x) (*(unsigned short *) &(x))
 typedef void nonconst;
@@ -242,7 +246,7 @@ static secno bplus_lookup(struct inode *inode, struct bplus_header *b,
 static struct hpfs_dirent *map_dirent(struct inode *inode, dnode_secno dno,
 				    const unsigned char *name, unsigned len,
 				      struct quad_buffer_head *qbh);
-static struct hpfs_dirent *map_pos_dirent(struct inode *inode, off_t *posp,
+static struct hpfs_dirent *map_pos_dirent(struct inode *inode, loff_t *posp,
 					  struct quad_buffer_head *qbh);
 static void write_one_dirent(struct dirent *dirent, const unsigned char *name,
 			     unsigned namelen, ino_t ino, int lowercase);
@@ -720,7 +724,7 @@ static void hpfs_put_super(struct super_block *s)
 
 /*
  * statfs.  For free inode counts we report the count of dnodes in the
- * directory band -- not exactly right but pretty analagous.
+ * directory band -- not exactly right but pretty analogous.
  */
 
 static void hpfs_statfs(struct super_block *s, struct statfs *buf)
@@ -874,7 +878,7 @@ static int hpfs_file_read(struct inode *inode, struct file *filp,
 	/*
 	 * truncate count at EOF
 	 */
-	if (count > inode->i_size - filp->f_pos)
+	if (count > inode->i_size - (off_t) filp->f_pos)
 		count = inode->i_size - filp->f_pos;
 
 	start = buf;
@@ -920,7 +924,7 @@ static int hpfs_file_read(struct inode *inode, struct file *filp,
 			 * squeeze out \r, output length varies
 			 */
 			n0 = convcpy_tofs(buf, block + r, n);
-			if (count > inode->i_size - filp->f_pos - n + n0)
+			if (count > inode->i_size - (off_t) filp->f_pos - n + n0)
 				count = inode->i_size - filp->f_pos - n + n0;
 		}
 
@@ -1206,12 +1210,8 @@ static inline int memcasecmp(const unsigned char *s1, const unsigned char *s2,
 
 	if (n != 0)
 		do {
-			unsigned c1 = *s1++;
-			unsigned c2 = *s2++;
-			if (c1 - 'a' < 26)
-				c1 -= 040;
-			if (c2 - 'a' < 26)
-				c2 -= 040;
+			unsigned c1 = linux_char_to_upper_linux (*s1++);
+			unsigned c2 = hpfs_char_to_upper_linux (*s2++);
 			if ((t = c1 - c2) != 0)
 				return t;
 		} while (--n != 0);
@@ -1341,17 +1341,17 @@ static int hpfs_readdir(struct inode *inode, struct file *filp,
 
 	lc = inode->i_sb->s_hpfs_lowercase;
 
-	switch (filp->f_pos) {
+	switch ((off_t) filp->f_pos) {
 	case 0:
 		write_one_dirent(dirent, ".", 1, inode->i_ino, lc);
 		filp->f_pos = -1;
-		return 1;
+		return ROUND_UP(NAME_OFFSET(dirent) + 2);
 
 	case -1:
 		write_one_dirent(dirent, "..", 2,
 				 inode->i_hpfs_parent_dir, lc);
 		filp->f_pos = 1;
-		return 2;
+		return ROUND_UP(NAME_OFFSET(dirent) + 3);
 
 	case -2:
 		return 0;
@@ -1371,7 +1371,7 @@ static int hpfs_readdir(struct inode *inode, struct file *filp,
 		write_one_dirent(dirent, de->name, namelen, ino, lc);
 		brelse4(&qbh);
 
-		return namelen;
+		return ROUND_UP(NAME_OFFSET(dirent) + namelen + 1);
 	}
 }
 
@@ -1391,15 +1391,14 @@ static void write_one_dirent(struct dirent *dirent, const unsigned char *name,
 	put_fs_long(ino, &dirent->d_ino);
 	put_fs_word(namelen, &dirent->d_reclen);
 
-	if (lowercase)
-		for (n = namelen; n != 0;) {
-			unsigned t = name[--n];
-			if (t - 'A' < 26)
-				t += 040;
-			put_fs_byte(t, &dirent->d_name[n]);
-		}
-	else
-		memcpy_tofs(dirent->d_name, name, namelen);
+	for (n = namelen; n != 0;) {
+		unsigned t = name[--n];
+		if (lowercase)
+			t = hpfs_char_to_lower_linux (t);
+		else
+			t = hpfs_char_to_linux (t);
+		put_fs_byte(t, &dirent->d_name[n]);
+	}
 
 	put_fs_byte(0, &dirent->d_name[namelen]);
 }
@@ -1409,7 +1408,7 @@ static void write_one_dirent(struct dirent *dirent, const unsigned char *name,
  * increment *posp to point to the following dir entry. 
  */
 
-static struct hpfs_dirent *map_pos_dirent(struct inode *inode, off_t *posp,
+static struct hpfs_dirent *map_pos_dirent(struct inode *inode, loff_t *posp,
 					  struct quad_buffer_head *qbh)
 {
 	unsigned pos, q, r;

@@ -6,7 +6,7 @@
  *	( as close as different hardware allows on a lowlevel-driver :-) )
  *
  *  Revised (and renamed) by John Boyd <boyd@cis.ohio-state.edu> to
- *  accomodate Eric Youngdale's modifications to scsi.c.  Nov 1992.
+ *  accommodate Eric Youngdale's modifications to scsi.c.  Nov 1992.
  *
  *  Additional changes to support scatter/gather.  Dec. 1992.  tw/jb
  *
@@ -115,6 +115,7 @@
 #include "../block/blk.h"
 #include "scsi.h"
 #include "hosts.h"
+#include "sd.h"
 
 #define ANY2SCSI_INLINE    /* undef this to use old macros */
 #undef DEBUG
@@ -155,7 +156,6 @@ typedef volatile struct mailbox{
  *
  */
 typedef struct adapter {
-  int num;                          /* Index into Scsi_hosts array */
   struct Scsi_Host *sh;             /* Pointer to Scsi_Host structure */
   int iobase;                       /* This adapter's I/O base address */
   int irq;                          /* This adapter's IRQ level */
@@ -172,9 +172,8 @@ typedef struct adapter {
 /*
  * The following is set up by wd7000_detect, and used thereafter by
  * wd7000_intr_handle to map the irq level to the corresponding Adapter.
- * Note that if request_irq instead of irqaction to allocate the IRQ,
- * or if SA_INTERRUPT is not used, wd7000_intr_handle must be changed 
- * to pick up the IRQ level correctly.
+ * Note that if SA_INTERRUPT is not used, wd7000_intr_handle must be
+ * changed to pick up the IRQ level correctly.
  */
 Adapter *irq2host[16] = {NULL};  /* Possible IRQs are 0-15 */
 
@@ -235,7 +234,7 @@ static const Signature signatures[] = {
  *  Unfortunately, I have no idea how to properly use some of these commands,
  *  as the OEM manual does not make it clear.  I have not been able to use
  *  enable/disable unsolicited interrupts or the reset commands with any
- *  discernable effect whatsoever.  I think they may be related to certain
+ *  discernible effect whatsoever.  I think they may be related to certain
  *  ICB commands, but again, the OEM manual doesn't make that clear.
  */
 #define NO_OP             0     /* NO-OP toggles CMD_RDY bit in ASC_STAT */
@@ -607,7 +606,7 @@ static inline Scb *alloc_scbs(int needed)
     save_flags(flags);
     cli();
     while (busy)  { /* someone else is allocating */
-        sti();
+        sti();	/* Yes this is really needed here */
 	now = jiffies;  while (jiffies == now)  /* wait a jiffy */;
 	cli();
     }
@@ -616,7 +615,7 @@ static inline Scb *alloc_scbs(int needed)
     while (freescbs < needed)  {
         timeout = jiffies + WAITnexttimeout;
 	do {
-	    sti();
+	    sti();	/* Yes this is really needed here */
 	    now = jiffies;   while (jiffies == now) /* wait a jiffy */;
 	    cli();
 	}  while (freescbs < needed && jiffies <= timeout);
@@ -798,15 +797,8 @@ static void wd7000_scsi_done(Scsi_Cmnd * SCpnt)
 
 #define wd7000_intr_ack(host)  outb(0,host->iobase+ASC_INTR_ACK)
 
-void wd7000_intr_handle(int irq)
+void wd7000_intr_handle(int irq, struct pt_regs * regs)
 {
-#ifdef 0
-    /*
-     * Use irqp as the parm, and the following declaration, if request_irq
-     * is used or if SA_INTERRUPT is not used.
-     */
-    register int irq = *(((int *)irqp)-2);
-#endif
     register int flag, icmb, errstatus, icmb_status;
     register int host_error, scsi_error;
     register Scb *scb;             /* for SCSI commands */
@@ -901,7 +893,7 @@ int wd7000_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
     register short cdblen;
     Adapter *host = (Adapter *) SCpnt->host->hostdata;
 
-    cdblen = COMMAND_SIZE(cdb[0]);
+    cdblen = SCpnt->cmd_len;
     idlun = ((SCpnt->target << 5) & 0xe0) | (SCpnt->lun & 7);
     SCpnt->scsi_done = done;
     SCpnt->SCp.phase = 1;
@@ -993,7 +985,6 @@ int wd7000_init( Adapter *host )
     InitCmd init_cmd = {
         INITIALIZATION, 7, BUS_ON, BUS_OFF, 0, 0,0,0, OGMB_CNT, ICMB_CNT
     };
-    struct sigaction sa = {wd7000_intr_handle, 0, SA_INTERRUPT, NULL};
     int diag;
 
     /*
@@ -1045,11 +1036,11 @@ int wd7000_init( Adapter *host )
     }
     WAIT(host->iobase+ASC_STAT, ASC_STATMASK, ASC_INIT, 0);
 
-    if (irqaction(host->irq, &sa))  {
+    if (request_irq(host->irq, wd7000_intr_handle, SA_INTERRUPT, "wd7000")) {
         printk("wd7000_init: can't get IRQ %d.\n", host->irq);
 	return 0;
     }
-    if (request_dma(host->dma))  {
+    if (request_dma(host->dma,"wd7000"))  {
         printk("wd7000_init: can't get DMA channel %d.\n", host->dma);
 	free_irq(host->irq);
 	return 0;
@@ -1089,7 +1080,7 @@ void wd7000_revision(Adapter *host)
 }
 
 
-int wd7000_detect(int hostnum)
+int wd7000_detect(Scsi_Host_Template * tpnt)
 /* 
  *  Returns the number of adapters this driver is supporting.
  *
@@ -1136,21 +1127,21 @@ int wd7000_detect(int hostnum)
 		 *  Scsi_Host structure (sh), and is located by the empty
 		 *  array hostdata.
 		 */
-		sh = scsi_register( hostnum, sizeof(Adapter) );
+		sh = scsi_register(tpnt, sizeof(Adapter) );
 		host = (Adapter *) sh->hostdata;
 #ifdef DEBUG
 		printk("wd7000_detect: adapter allocated at %06x\n",
 		       (int)host);
 #endif
 		memset( host, 0, sizeof(Adapter) );
-	        host->num = hostnum;  host->sh = sh;
+	        host->sh = sh;
 		host->irq = cfg->irq;
 		host->iobase = cfg->iobase;
 		host->dma = cfg->dma;
 		irq2host[host->irq] = host;
 
 		if (!wd7000_init(host))  {  /* Initialization failed */
-		    scsi_unregister( sh, sizeof(Adapter) );
+		    scsi_unregister (sh);
 		    continue;
 		}
 
@@ -1164,7 +1155,7 @@ int wd7000_detect(int hostnum)
                 printk("using IO %xh IRQ %d DMA %d.\n",
 		       host->iobase, host->irq, host->dma);
 
-		snarf_region(host->iobase, 4); /* Register our ports */
+		request_region(host->iobase, 4,"wd7000"); /* Register our ports */
 		/*
 		 *  For boards before rev 6.0, scatter/gather isn't supported.
 		 */
@@ -1185,18 +1176,17 @@ int wd7000_detect(int hostnum)
 /*
  *  I have absolutely NO idea how to do an abort with the WD7000...
  */
-int wd7000_abort(Scsi_Cmnd * SCpnt, int i)
+int wd7000_abort(Scsi_Cmnd * SCpnt)
 {
-#ifdef DEBUG
-    printk("wd7000_abort: Scsi_Cmnd = 0x%06x, code = %d ", (int) SCpnt, i);
-    printk("id %d lun %d cdb", SCpnt->target, SCpnt->lun);
-    {
-        int j;  unchar *cdbj = (unchar *) SCpnt->cmnd;
-	for (j=0; j < COMMAND_SIZE(*cdbj);  j++)  printk(" %02x", *(cdbj++));
-	printk(" result %08x\n", SCpnt->result);
+    Adapter *host = (Adapter *) SCpnt->host->hostdata;
+
+    if (inb(host->iobase+ASC_STAT) & INT_IM)  {
+        printk("wd7000_abort: lost interrupt\n");
+	wd7000_intr_handle(host->irq, NULL);
+	return SCSI_ABORT_SUCCESS;
     }
-#endif
-    return 0;
+
+    return SCSI_ABORT_SNOOZE;
 }
 
 
@@ -1205,33 +1195,7 @@ int wd7000_abort(Scsi_Cmnd * SCpnt, int i)
  */
 int wd7000_reset(Scsi_Cmnd * SCpnt)
 {
-#ifdef DEBUG
-    printk("wd7000_reset: Scsi_Cmnd = 0x%06x ", (int) SCpnt);
-    if (SCpnt)  {
-        printk("id %d lun %d cdb", SCpnt->target, SCpnt->lun);
-	{
-	    int j;  unchar *cdbj = (unchar *) SCpnt->cmnd;
-	    for (j=0; j < COMMAND_SIZE(*cdbj);  j++)
-	        printk(" %02x", *(cdbj++));
-	    printk(" result %08x", SCpnt->result);
-	}
-    }
-    printk("\n");
-#endif
-    if (SCpnt) SCpnt->flags |= NEEDS_JUMPSTART;
-    return 0;
-}
-
-
-/*
- *  The info routine in the WD7000 structure isn't per-adapter, so it can't
- *  really return any useful information about an adapter.  Because of this,
- *  I'm no longer using it to return rev. level.
- */
-const char *wd7000_info(void)
-{
-    static char info[] = "Western Digital WD-7000";
-    return info;
+    return SCSI_RESET_PUNT;
 }
 
 
@@ -1240,8 +1204,9 @@ const char *wd7000_info(void)
  *  this way, so I think it will work OK.  Someone who is ambitious can
  *  borrow a newer or more complete version from another driver.
  */
-int wd7000_biosparam(int size, int dev, int* ip)
+int wd7000_biosparam(Disk * disk, int dev, int* ip)
 {
+  int size = disk->capacity;
   ip[0] = 64;
   ip[1] = 32;
   ip[2] = size >> 11;

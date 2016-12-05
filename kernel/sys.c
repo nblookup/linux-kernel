@@ -4,7 +4,6 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -17,12 +16,13 @@
 #include <linux/ptrace.h>
 #include <linux/stat.h>
 #include <linux/mman.h>
+#include <linux/mm.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
 
 /*
- * this indicates wether you can reboot with ctrl-alt-del: the default is yes
+ * this indicates whether you can reboot with ctrl-alt-del: the default is yes
  */
 static int C_A_D = 1;
 
@@ -32,24 +32,7 @@ extern void adjust_clock(void);
 
 asmlinkage int sys_ni_syscall(void)
 {
-	return -EINVAL;
-}
-
-asmlinkage int sys_idle(void)
-{
-	int i;
-
-	/* Map out the low memory: it's no longer needed */
-	for (i = 0 ; i < 768 ; i++)
-		swapper_pg_dir[i] = 0;
-
-	/* endless idle loop with no priority at all */
-	current->counter = -100;
-	for (;;) {
-		if (!need_resched)
-			__asm__("hlt");
-		schedule();
-	}
+	return -ENOSYS;
 }
 
 static int proc_sel(struct task_struct *p, int which, int who)
@@ -149,6 +132,7 @@ asmlinkage int sys_prof(void)
 }
 
 extern void hard_reset_now(void);
+extern asmlinkage sys_kill(int, int);
 
 /*
  * Reboot system call: for obvious reasons only root may call it,
@@ -170,7 +154,11 @@ asmlinkage int sys_reboot(int magic, int magic_too, int flag)
 		C_A_D = 1;
 	else if (!flag)
 		C_A_D = 0;
-	else
+	else if (flag == 0xCDEF0123) {
+		printk(KERN_EMERG "System halted\n");
+		sys_kill(-1, SIGKILL);
+		do_exit(0);
+	} else
 		return -EINVAL;
 	return (0);
 }
@@ -178,7 +166,7 @@ asmlinkage int sys_reboot(int magic, int magic_too, int flag)
 /*
  * This function gets called by ctrl-alt-del - ie the keyboard interrupt.
  * As it's called within an interrupt, it may NOT sync: the only choice
- * is wether to reboot at once, or just ignore the ctrl-alt-del.
+ * is whether to reboot at once, or just ignore the ctrl-alt-del.
  */
 void ctrl_alt_del(void)
 {
@@ -209,8 +197,8 @@ asmlinkage int sys_setregid(gid_t rgid, gid_t egid)
 	int old_rgid = current->gid;
 
 	if (rgid != (gid_t) -1) {
-		if ((current->egid==rgid) ||
-		    (old_rgid == rgid) || 
+		if ((old_rgid == rgid) ||
+		    (current->egid==rgid) ||
 		    suser())
 			current->gid = rgid;
 		else
@@ -219,6 +207,7 @@ asmlinkage int sys_setregid(gid_t rgid, gid_t egid)
 	if (egid != (gid_t) -1) {
 		if ((old_rgid == egid) ||
 		    (current->egid == egid) ||
+		    (current->sgid == egid) ||
 		    suser())
 			current->egid = egid;
 		else {
@@ -229,18 +218,19 @@ asmlinkage int sys_setregid(gid_t rgid, gid_t egid)
 	if (rgid != (gid_t) -1 ||
 	    (egid != (gid_t) -1 && egid != old_rgid))
 		current->sgid = current->egid;
+	current->fsgid = current->egid;
 	return 0;
 }
 
 /*
- * setgid() is implemeneted like SysV w/ SAVED_IDS 
+ * setgid() is implemented like SysV w/ SAVED_IDS 
  */
 asmlinkage int sys_setgid(gid_t gid)
 {
 	if (suser())
-		current->gid = current->egid = current->sgid = gid;
+		current->gid = current->egid = current->sgid = current->fsgid = gid;
 	else if ((gid == current->gid) || (gid == current->sgid))
-		current->egid = gid;
+		current->egid = current->fsgid = gid;
 	else
 		return -EPERM;
 	return 0;
@@ -296,8 +286,8 @@ asmlinkage int sys_setreuid(uid_t ruid, uid_t euid)
 	int old_ruid = current->uid;
 
 	if (ruid != (uid_t) -1) {
-		if ((current->euid==ruid) ||
-		    (old_ruid == ruid) || 
+		if ((old_ruid == ruid) || 
+		    (current->euid==ruid) ||
 		    suser())
 			current->uid = ruid;
 		else
@@ -306,6 +296,7 @@ asmlinkage int sys_setreuid(uid_t ruid, uid_t euid)
 	if (euid != (uid_t) -1) {
 		if ((old_ruid == euid) ||
 		    (current->euid == euid) ||
+		    (current->suid == euid) ||
 		    suser())
 			current->euid = euid;
 		else {
@@ -316,29 +307,59 @@ asmlinkage int sys_setreuid(uid_t ruid, uid_t euid)
 	if (ruid != (uid_t) -1 ||
 	    (euid != (uid_t) -1 && euid != old_ruid))
 		current->suid = current->euid;
+	current->fsuid = current->euid;
 	return 0;
 }
 
 /*
- * setuid() is implemeneted like SysV w/ SAVED_IDS 
+ * setuid() is implemented like SysV w/ SAVED_IDS 
  * 
  * Note that SAVED_ID's is deficient in that a setuid root program
  * like sendmail, for example, cannot set its uid to be a normal 
  * user and then switch back, because if you're root, setuid() sets
  * the saved uid too.  If you don't like this, blame the bright people
- * in the POSIX commmittee and/or USG.  Note that the BSD-style setreuid()
+ * in the POSIX committee and/or USG.  Note that the BSD-style setreuid()
  * will allow a root program to temporarily drop privileges and be able to
  * regain them by swapping the real and effective uid.  
  */
 asmlinkage int sys_setuid(uid_t uid)
 {
 	if (suser())
-		current->uid = current->euid = current->suid = uid;
+		current->uid = current->euid = current->suid = current->fsuid = uid;
 	else if ((uid == current->uid) || (uid == current->suid))
-		current->euid = uid;
+		current->fsuid = current->euid = uid;
 	else
 		return -EPERM;
 	return(0);
+}
+
+/*
+ * "setfsuid()" sets the fsuid - the uid used for filesystem checks. This
+ * is used for "access()" and for the NFS daemon (letting nfsd stay at
+ * whatever uid it wants to). It normally shadows "euid", except when
+ * explicitly set by setfsuid() or for access..
+ */
+asmlinkage int sys_setfsuid(uid_t uid)
+{
+	int old_fsuid = current->fsuid;
+
+	if (uid == current->uid || uid == current->euid ||
+	    uid == current->suid || uid == current->fsuid || suser())
+		current->fsuid = uid;
+	return old_fsuid;
+}
+
+/*
+ * Samma på svenska..
+ */
+asmlinkage int sys_setfsgid(gid_t gid)
+{
+	int old_fsgid = current->fsgid;
+
+	if (gid == current->gid || gid == current->egid ||
+	    gid == current->sgid || gid == current->fsgid || suser())
+		current->fsgid = gid;
+	return old_fsgid;
 }
 
 asmlinkage int sys_times(struct tms * tbuf)
@@ -384,6 +405,11 @@ asmlinkage int sys_brk(unsigned long brk)
 		rlim = ~0;
 	if (brk - current->mm->end_code > rlim ||
 	    brk >= current->mm->start_stack - 16384)
+		return current->mm->brk;
+	/*
+	 * Check against existing mmap mappings.
+	 */
+	if (find_vma_intersection(current, oldbrk, newbrk))
 		return current->mm->brk;
 	/*
 	 * stupid algorithm to decide if we have enough memory: while
@@ -491,6 +517,7 @@ asmlinkage int sys_setsid(void)
 	current->leader = 1;
 	current->session = current->pgrp = current->pid;
 	current->tty = NULL;
+	current->tty_old_pgrp = 0;
 	return current->pgrp;
 }
 
@@ -537,7 +564,7 @@ int in_group_p(gid_t grp)
 {
 	int	i;
 
-	if (grp == current->egid)
+	if (grp == current->fsgid)
 		return 1;
 
 	for (i = 0; i < NGROUPS; i++) {
@@ -661,22 +688,29 @@ asmlinkage int sys_getrlimit(unsigned int resource, struct rlimit *rlim)
 asmlinkage int sys_setrlimit(unsigned int resource, struct rlimit *rlim)
 {
 	struct rlimit new_rlim, *old_rlim;
+	int err;
 
 	if (resource >= RLIM_NLIMITS)
 		return -EINVAL;
+	err = verify_area(VERIFY_READ, rlim, sizeof(*rlim));
+	if (err)
+		return err;
+	memcpy_fromfs(&new_rlim, rlim, sizeof(*rlim));
 	old_rlim = current->rlim + resource;
-	new_rlim.rlim_cur = get_fs_long((unsigned long *) rlim);
-	new_rlim.rlim_max = get_fs_long(((unsigned long *) rlim)+1);
 	if (((new_rlim.rlim_cur > old_rlim->rlim_max) ||
 	     (new_rlim.rlim_max > old_rlim->rlim_max)) &&
 	    !suser())
 		return -EPERM;
+	if (resource == RLIMIT_NOFILE) {
+		if (new_rlim.rlim_cur > NR_OPEN || new_rlim.rlim_max > NR_OPEN)
+			return -EPERM;
+	}
 	*old_rlim = new_rlim;
 	return 0;
 }
 
 /*
- * It would make sense to put struct rusuage in the task_struct,
+ * It would make sense to put struct rusage in the task_struct,
  * except that would make the task_struct be *really big*.  After
  * task_struct gets moved into malloc'ed memory, it would
  * make sense to do this.  It will make moving the rest of the information
@@ -687,7 +721,6 @@ int getrusage(struct task_struct *p, int who, struct rusage *ru)
 {
 	int error;
 	struct rusage r;
-	unsigned long	*lp, *lpend, *dest;
 
 	error = verify_area(VERIFY_WRITE, ru, sizeof *ru);
 	if (error)
@@ -719,11 +752,7 @@ int getrusage(struct task_struct *p, int who, struct rusage *ru)
 			r.ru_majflt = p->mm->maj_flt + p->mm->cmaj_flt;
 			break;
 	}
-	lp = (unsigned long *) &r;
-	lpend = (unsigned long *) (&r+1);
-	dest = (unsigned long *) ru;
-	for (; lp < lpend; lp++, dest++) 
-		put_fs_long(*lp, dest);
+	memcpy_tofs(ru, &r, sizeof(r));
 	return 0;
 }
 

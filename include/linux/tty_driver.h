@@ -42,7 +42,7 @@
  * int  (*write_room)(struct tty_struct *tty);
  *
  * 	This routine returns the numbers of characters the tty driver
- * 	will accept for queueing to be writen.  This number is subject
+ * 	will accept for queuing to be written.  This number is subject
  * 	to change as output buffers get emptied, or if the output flow
  *	control is acted.
  * 
@@ -50,29 +50,36 @@
  * 	    unsigned int cmd, unsigned long arg);
  *
  * 	This routine allows the tty driver to implement
- *	device-specific iotctl's.  If the ioctl number passed in cmd
+ *	device-specific ioctl's.  If the ioctl number passed in cmd
  * 	is not recognized by the driver, it should return ENOIOCTLCMD.
  * 
  * void (*set_termios)(struct tty_struct *tty, struct termios * old);
  *
  * 	This routine allows the tty driver to be notified when
- * 	device's termios settings have changed.  
+ * 	device's termios settings have changed.  Note that a
+ * 	well-designed tty driver should be prepared to accept the case
+ * 	where old == NULL, and try to do something rational.
+ *
+ * void (*set_ldisc)(struct tty_struct *tty);
+ *
+ * 	This routine allows the tty driver to be notified when the
+ * 	device's termios settings have changed.
  * 
  * void (*throttle)(struct tty_struct * tty);
  *
  * 	This routine notifies the tty driver that input buffers for
- * 	the line discpline are close to full, and it should somehow
+ * 	the line discipline are close to full, and it should somehow
  * 	signal that no more characters should be sent to the tty.
  * 
  * void (*unthrottle)(struct tty_struct * tty);
  *
  * 	This routine notifies the tty drivers that it should signals
  * 	that characters can now be sent to the tty without fear of
- * 	overrunning the input buffers of the line discplines.
+ * 	overrunning the input buffers of the line disciplines.
  * 
  * void (*stop)(struct tty_struct *tty);
  *
- * 	This routine notfies the tty driver that it should stop
+ * 	This routine notifies the tty driver that it should stop
  * 	outputting characters to the tty device.  
  * 
  * void (*start)(struct tty_struct *tty);
@@ -86,6 +93,8 @@
  * 	tty device.
  * 
  */
+
+#include <linux/fs.h>
 
 struct tty_driver {
 	int	magic;		/* magic number for this structure */
@@ -129,6 +138,7 @@ struct tty_driver {
 	void (*start)(struct tty_struct *tty);
 	void (*hangup)(struct tty_struct *tty);
 	void (*flush_buffer)(struct tty_struct *tty);
+	void (*set_ldisc)(struct tty_struct *tty);
 
 	/*
 	 * linked list pointers

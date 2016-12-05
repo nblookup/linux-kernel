@@ -17,13 +17,14 @@
  *		Alan Cox	:	To avoid destroying a wait queue as we use it
  *					we defer destruction until the destroy timer goes
  *					off.
- *		Alan Cox	:	Destroy socket doesnt write a status value to the
+ *		Alan Cox	:	Destroy socket doesn't write a status value to the
  *					socket buffer _AFTER_ freeing it! Also sock ensures
  *					the socket will get removed BEFORE this is called
  *					otherwise if the timer TIME_DESTROY occurs inside
  *					of inet_bh() with this socket being handled it goes
  *					BOOM! Have to stop timer going off if net_bh is
  *					active or the destroy causes crashes.
+ *		Alan Cox	:	Cleaned up unused code.
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -86,7 +87,10 @@ void net_timer (unsigned long data)
 {
 	struct sock *sk = (struct sock*)data;
 	int why = sk->timeout;
-	/* timeout is overwritten by 'delete_timer' and 'reset_timer' */
+
+	/* 
+	 * only process if socket is not in use
+	 */
 
 	cli();
 	if (sk->inuse || in_bh) 
@@ -100,18 +104,9 @@ void net_timer (unsigned long data)
 	sk->inuse = 1;
 	sti();
 
-	if (skb_peek(&sk->write_queue) && 
-	      before(sk->window_seq, sk->write_queue.next->h.seq) &&
-	      sk->send_head == NULL &&
-	      sk->ack_backlog == 0 &&
-	      sk->state != TCP_TIME_WAIT)
-		reset_timer(sk, TIME_PROBE0, sk->rto);
-	else if (sk->keepopen)
-		reset_timer (sk, TIME_KEEPOPEN, TCP_TIMEOUT_LEN);
-
 	/* Always see if we need to send an ack. */
 
-	if (sk->ack_backlog) 
+	if (sk->ack_backlog && !sk->zapped) 
 	{
 		sk->prot->read_wakeup (sk);
 		if (! sk->dead)
@@ -139,13 +134,13 @@ void net_timer (unsigned long data)
 		 */
 			if(sk->wmem_alloc!=0 || sk->rmem_alloc!=0)
 			{
-				sk->wmem_alloc++;	/* So it DOESNT go away */
+				sk->wmem_alloc++;	/* So it DOESN'T go away */
 				destroy_sock (sk);
 				sk->wmem_alloc--;	/* Might now have hit 0 - fall through and do it again if so */
 				sk->inuse = 0;	/* This will be ok, the destroy won't totally work */
 			}
 			if(sk->wmem_alloc==0 && sk->rmem_alloc==0)
-				destroy_sock(sk);	/* Socket gone, DONT update sk->inuse! */
+				destroy_sock(sk);	/* Socket gone, DON'T update sk->inuse! */
 				break;
 		case TIME_CLOSE:
 			/* We've waited long enough, close the socket. */
@@ -159,6 +154,7 @@ void net_timer (unsigned long data)
 			reset_timer (sk, TIME_DESTROY, TCP_DONE_TIME);
 			release_sock (sk);
 			break;
+#if 0
 		case TIME_PROBE0:
 			tcp_send_probe0(sk);
 			release_sock (sk);
@@ -216,7 +212,13 @@ void net_timer (unsigned long data)
 			break;
 		}
 		case TIME_KEEPOPEN:
-		/* Send something to keep the connection open. */
+			/* 
+			 * this reset_timer() call is a hack, this is not
+			 * how KEEPOPEN is supposed to work.
+			 */
+			reset_timer (sk, TIME_KEEPOPEN, TCP_TIMEOUT_LEN);
+
+			/* Send something to keep the connection open. */
 			if (sk->prot->write_wakeup)
 				  sk->prot->write_wakeup (sk);
 			sk->retransmits++;
@@ -252,8 +254,9 @@ void net_timer (unsigned long data)
 			}
 			release_sock (sk);
 			break;
+#endif
 		default:
-			printk ("net_timer: timer expired - reason unknown\n");
+			printk ("net_timer: timer expired - reason %d is unknown\n", why);
 			release_sock (sk);
 			break;
 	}

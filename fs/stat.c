@@ -10,6 +10,8 @@
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
+#include <linux/mm.h>
+
 #include <asm/segment.h>
 
 static void cp_old_stat(struct inode * inode, struct old_stat * statbuf)
@@ -26,6 +28,8 @@ static void cp_old_stat(struct inode * inode, struct old_stat * statbuf)
 	tmp.st_gid = inode->i_gid;
 	tmp.st_rdev = inode->i_rdev;
 	tmp.st_size = inode->i_size;
+	if (inode->i_pipe)
+		tmp.st_size = PIPE_SIZE(*inode);
 	tmp.st_atime = inode->i_atime;
 	tmp.st_mtime = inode->i_mtime;
 	tmp.st_ctime = inode->i_ctime;
@@ -46,6 +50,8 @@ static void cp_new_stat(struct inode * inode, struct new_stat * statbuf)
 	tmp.st_gid = inode->i_gid;
 	tmp.st_rdev = inode->i_rdev;
 	tmp.st_size = inode->i_size;
+	if (inode->i_pipe)
+		tmp.st_size = PIPE_SIZE(*inode);
 	tmp.st_atime = inode->i_atime;
 	tmp.st_mtime = inode->i_mtime;
 	tmp.st_ctime = inode->i_ctime;

@@ -16,7 +16,7 @@
 
    Flags for this module (any combination is acceptable for testing.):
 
-   NET02D	      -	Define if using Net-2-Debugged in kernels earler
+   NET02D	      -	Define if using Net-2-Debugged in kernels earlier
    			than v1.1.4.
 
    NEW_TTY_DRIVERS    -	Define if using new Ted Ts'o's alpha TTY drivers
@@ -31,6 +31,11 @@
 /* #define NET02D				-* */
 #define NEW_TTY_DRIVERS				/* */
 #define OPTIMIZE_FLAG_TIME  ((HZ * 3)/2)	/* */
+
+#ifdef MODULE
+#include <linux/module.h>
+#include <linux/version.h>
+#endif
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -63,8 +68,8 @@
 
 #include <linux/ppp.h>
 
-#include <ip.h>
-#include <tcp.h>
+#include <linux/ip.h>
+#include <linux/tcp.h>
 
 #include "slhc.h"
 
@@ -88,12 +93,13 @@
 int ppp_debug = 2;
 int ppp_debug_netpackets = 0;
 
-/* Define this string only once for all macro envocations */
+/* Define this string only once for all macro invocations */
 static char ppp_warning[] = KERN_WARNING "PPP: ALERT! not INUSE! %d\n";
 
 int ppp_init(struct device *);
 static void ppp_init_ctrl_blk(struct ppp *);
 static int ppp_dev_open(struct device *);
+static int ppp_dev_ioctl(struct device *dev, struct ifreq *ifr, int cmd);
 static int ppp_dev_close(struct device *);
 static void ppp_kick_tty(struct ppp *);
 
@@ -145,6 +151,7 @@ static int ppp_open(struct tty_struct *);
 static void ppp_close(struct tty_struct *);
 
 #ifdef NEW_TTY_DRIVERS
+static int ppp_receive_room(struct tty_struct *tty);
 static void ppp_receive_buf(struct tty_struct *tty, unsigned char *cp,
 			    char *fp, int count);
 static void ppp_write_wakeup(struct tty_struct *tty);
@@ -238,6 +245,7 @@ ppp_init(struct device *dev)
 
 #ifdef NEW_TTY_DRIVERS
     ppp_ldisc.magic       = TTY_LDISC_MAGIC;
+    ppp_ldisc.receive_room = ppp_receive_room;
     ppp_ldisc.receive_buf = ppp_receive_buf;
     ppp_ldisc.write_wakeup = ppp_write_wakeup;
 #else
@@ -276,6 +284,8 @@ ppp_init(struct device *dev)
 #ifdef NET02D
   dev->add_arp         = ppp_add_arp;
   dev->queue_xmit      = dev_queue_xmit;
+#else
+  dev->do_ioctl        = ppp_dev_ioctl;
 #endif
 
   for (i = 0; i < DEV_NUMBUFFS; i++)
@@ -377,9 +387,9 @@ ppp_changedmtu (struct ppp *ppp, int new_mtu, int new_mru)
   PRINTKN (2,(KERN_INFO "ppp: channel %s mtu = %d, mru = %d\n",
 	      dev->name, new_mtu, new_mru));
 	
-  new_xbuff = (unsigned char *) kmalloc(mtu + 4, GFP_KERNEL);
-  new_rbuff = (unsigned char *) kmalloc(mru + 4, GFP_KERNEL);
-  new_cbuff = (unsigned char *) kmalloc(mru + 4, GFP_KERNEL);
+  new_xbuff = (unsigned char *) kmalloc(mtu + 4, GFP_ATOMIC);
+  new_rbuff = (unsigned char *) kmalloc(mru + 4, GFP_ATOMIC);
+  new_cbuff = (unsigned char *) kmalloc(mru + 4, GFP_ATOMIC);
 /*
  *  If the buffers failed to allocate then complain.
  */
@@ -545,7 +555,7 @@ ppp_open(struct tty_struct *tty)
   }
 
   /* Allocate a user-level receive buffer */
-  ppp->us_rbuff = kmalloc (RBUFSIZE, GFP_KERNEL);
+  ppp->us_rbuff = (unsigned char *) kmalloc (RBUFSIZE, GFP_KERNEL);
   if (ppp->us_rbuff == NULL) {
     PRINTKN (1,(KERN_ERR "ppp: no space for user receive buffer\n"));
     ppp_release (ppp);
@@ -558,11 +568,11 @@ ppp_open(struct tty_struct *tty)
 
   PRINTKN (2,(KERN_INFO "ppp: channel %s open\n", ppp->dev->name));
 
-#ifdef NEW_TTY_DRIVERS
-  return (0);
-#else
-  return (ppp->line);
+#ifdef MODULE
+  MOD_INC_USE_COUNT;
 #endif
+
+  return (ppp->line);
 }
 
 /* called when ppp interface goes "up".  here this just means we start
@@ -602,8 +612,39 @@ ppp_dev_close(struct device *dev)
   PRINTKN (2,(KERN_INFO "ppp: channel %s going down for IP packets!\n",
 	      dev->name));
   CHECK_PPP(-ENXIO);
+#ifdef MODULE
+  MOD_DEC_USE_COUNT;
+#endif
   return 0;
 }
+
+#ifndef NET02D
+static int ppp_dev_ioctl(struct device *dev, struct ifreq *ifr, int cmd)
+{
+  struct ppp *ppp = &ppp_ctrl[dev->base_addr];
+  int    error;
+
+  struct stats
+  {
+    struct ppp_stats  ppp_stats;
+    struct slcompress slhc;
+  } *result;
+
+  error = verify_area (VERIFY_READ,
+		       ifr->ifr_ifru.ifru_data,
+		       sizeof (struct stats));
+
+  if (error == 0) {
+    result = (struct stats *) ifr->ifr_ifru.ifru_data;
+
+    memcpy_tofs (&result->ppp_stats, &ppp->stats, sizeof (struct ppp_stats));
+    if (ppp->slcomp)
+      memcpy_tofs (&result->slhc,    ppp->slcomp, sizeof (struct slcompress));
+  }
+
+  return error;
+}
+#endif
 
 /*************************************************************
  * TTY OUTPUT
@@ -624,7 +665,11 @@ ppp_output_done (void *ppp)
   /* If the device is still up then enable the transmitter of the
      next frame. */
   if (((struct ppp *) ppp)->dev->flags & IFF_UP)
+#ifndef NET02D
+    mark_bh (NET_BH);
+#else
     dev_tint (((struct ppp *) ppp)->dev);
+#endif
 
   /* enable any blocked process pending transmission */
   wake_up_interruptible (&((struct ppp *) ppp)->write_wait);
@@ -685,12 +730,14 @@ static void ppp_write_wakeup(struct tty_struct *tty)
 		return;
 	}
 
-	if (!ppp->xtail || (ppp->flags & SC_XMIT_BUSY))
+	if (!ppp->xtail)
 		return;
 
 	cli();
-	if (ppp->flags & SC_XMIT_BUSY)
+	if (ppp->flags & SC_XMIT_BUSY) {
+		sti();
 		return;
+	}
 	ppp->flags |= SC_XMIT_BUSY;
 	sti();
 	
@@ -720,7 +767,7 @@ static void ppp_write_wakeup(struct tty_struct *tty)
 
 /* stuff a single character into the receive buffer */
 
-inline void
+static inline void
 ppp_enqueue(struct ppp *ppp, unsigned char c)
 {
   unsigned long flags;
@@ -867,6 +914,12 @@ ppp_unesc(struct ppp *ppp, unsigned char *c, int n)
 }
 
 #else
+static int ppp_receive_room(struct tty_struct *tty)
+{
+	return 65536;  /* We can handle an infinite amount of data. :-) */
+}
+
+
 static void ppp_receive_buf(struct tty_struct *tty, unsigned char *cp,
 			    char *fp, int count)
 {
@@ -886,6 +939,8 @@ static void ppp_receive_buf(struct tty_struct *tty, unsigned char *cp,
   if (ppp_debug >= 5) {
     ppp_print_buffer ("receive buffer", cp, count, KERNEL_DS);
   }
+
+  ppp->stats.rbytes += count;
  
   while (count-- > 0) {
     c = *cp++;
@@ -1088,9 +1143,7 @@ ppp_do_ip (struct ppp *ppp, unsigned short proto, unsigned char *c,
   }
 
   /* receive the frame through the network software */
-  while ((dev_rint(c, count, 0, ppp->dev) & ~1) != 0)
-    ;
-
+  (void) dev_rint (c, count, 0, ppp->dev);
   return 1;
 }
 
@@ -1177,7 +1230,7 @@ ppp_read(struct tty_struct *tty, struct file *file, unsigned char *buf, unsigned
   int len, i;
 
   if (!ppp || ppp->magic != PPP_MAGIC) {
-    PRINTKN (1,(KERN_ERR "ppp_read: cannnot find ppp channel\n"));
+    PRINTKN (1,(KERN_ERR "ppp_read: cannot find ppp channel\n"));
     return -EIO;
   }
 
@@ -1368,10 +1421,10 @@ ppp_ioctl(struct tty_struct *tty, struct file *file, unsigned int i,
   case PPPIOCSMRU:
     error = verify_area (VERIFY_READ, (void *) l, sizeof (temp_i));
     if (error == 0) {
-      PRINTKN (3,(KERN_INFO "ppp_ioctl: set mru to %x\n", temp_i));
       temp_i = (int) get_fs_long (l);
+      PRINTKN (3,(KERN_INFO "ppp_ioctl: set mru to %d\n", temp_i));
       if (ppp->mru != temp_i)
-	ppp_changedmtu (ppp, ppp->mtu, temp_i);
+	ppp_changedmtu (ppp, ppp->dev->mtu, temp_i);
     }
     break;
 
@@ -1410,7 +1463,6 @@ ppp_ioctl(struct tty_struct *tty, struct file *file, unsigned int i,
   case PPPIOCSASYNCMAP:
     error = verify_area (VERIFY_READ, (void *) l, sizeof (temp_i));
     if (error == 0) {
-      memset (ppp->xmit_async_map, 0, sizeof (ppp->xmit_async_map));
       ppp->xmit_async_map[0] = get_fs_long (l);
       bset (ppp->xmit_async_map, PPP_FLAG);
       bset (ppp->xmit_async_map, PPP_ESC);
@@ -1432,7 +1484,7 @@ ppp_ioctl(struct tty_struct *tty, struct file *file, unsigned int i,
     error = verify_area (VERIFY_WRITE, (void *) l, sizeof (temp_i));
     if (error == 0) {
       put_fs_long (ppp->dev->base_addr, l);
-      PRINTKN (3,(KERN_INFO "ppp_ioctl: get unit: %d", ppp->dev->base_addr));
+      PRINTKN (3,(KERN_INFO "ppp_ioctl: get unit: %ld", ppp->dev->base_addr));
     }
     break;
 
@@ -1764,8 +1816,7 @@ ppp_xmit(struct sk_buff *skb, struct device *dev)
   ppp_kick_tty(ppp);
 
  done:
-  if (skb->free) 
-    kfree_skb(skb, FREE_WRITE);
+  dev_kfree_skb(skb, FREE_WRITE);
   return 0;
 }
   
@@ -1933,8 +1984,7 @@ ppp_check_fcs(struct ppp *ppp)
 
 static char hex[] = "0123456789ABCDEF";
 
-inline void ppp_print_hex (register char *out, char *in, int count);
-inline void ppp_print_hex (register char *out, char *in, int count)
+static inline void ppp_print_hex (register char *out, char *in, int count)
 {
   register unsigned char next_ch;
 
@@ -1948,8 +1998,7 @@ inline void ppp_print_hex (register char *out, char *in, int count)
   }
 }
 
-inline void ppp_print_char (register char *out, char *in, int count);
-inline void ppp_print_char (register char *out, char *in, int count)
+static inline void ppp_print_char (register char *out, char *in, int count)
 {
   register unsigned char next_ch;
 
@@ -1975,7 +2024,7 @@ static void ppp_print_buffer(const char *name, char *buf, int count, int seg)
 
   set_fs (seg);
 
-  if (name != (char *) NULL)
+  if (name != NULL)
     PRINTK ((KERN_DEBUG "ppp: %s, count = %d\n", name, count));
 
   while (count > 8) {
@@ -1996,3 +2045,54 @@ static void ppp_print_buffer(const char *name, char *buf, int count, int seg)
 
   set_fs (old_fs);
 }
+
+#ifdef MODULE
+char kernel_version[] = UTS_RELEASE;
+
+static struct device dev_ppp[PPP_NRUNIT] = {
+	{
+		"ppp0",		/* ppp */
+		0, 0, 0, 0,	/* memory */
+		0, 0,		/* base, irq */
+		0, 0, 0, NULL, ppp_init,
+	},
+	{ "ppp1" , 0, 0, 0, 0,  1, 0, 0, 0, 0, NULL, ppp_init },
+	{ "ppp2" , 0, 0, 0, 0,  2, 0, 0, 0, 0, NULL, ppp_init },
+	{ "ppp3" , 0, 0, 0, 0,  3, 0, 0, 0, 0, NULL, ppp_init },
+};
+
+int
+init_module(void)
+{
+	int err;
+	int i;
+
+	for (i = 0; i < PPP_NRUNIT; i++)  {
+		if ((err = register_netdev(&dev_ppp[i])))  {
+			if (err == -EEXIST)  {
+				printk("PPP: devices already present. Module not loaded.\n");
+			}
+			return err;
+		}
+	}
+	return 0;
+}
+
+void
+cleanup_module(void)
+{
+	int i;
+
+	if (MOD_IN_USE)  {
+		printk("PPP: device busy, remove delayed\n");
+		return;
+	}
+	for (i = 0; i < PPP_NRUNIT; i++)  {
+		unregister_netdev(&dev_ppp[i]);
+	}
+	if ((i = tty_register_ldisc(N_PPP, NULL)))  {
+		printk("PPP: can't unregister line discipline (err = %d)\n", i);
+	}
+}
+
+#endif

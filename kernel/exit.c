@@ -17,7 +17,6 @@
 #include <linux/malloc.h>
 
 #include <asm/segment.h>
-extern void shm_exit (void);
 extern void sem_exit (void);
 
 int getrusage(struct task_struct *, int, struct rusage *);
@@ -121,7 +120,7 @@ int bad_task_ptr(struct task_struct *p)
 }
 	
 /*
- * This routine scans the pid tree and make sure the rep invarient still
+ * This routine scans the pid tree and makes sure the rep invariant still
  * holds.  Used for debugging only, since it's very slow....
  *
  * It looks a lot scarier than it really is.... we're doing nothing more
@@ -198,7 +197,7 @@ void audit_ptree(void)
 
 /*
  * This checks not only the pgrp, but falls back on the pid if no
- * satisfactory prgp is found. I dunno - gdb doesn't work correctly
+ * satisfactory pgrp is found. I dunno - gdb doesn't work correctly
  * without this...
  */
 int session_of_pgrp(int pgrp)
@@ -355,34 +354,6 @@ static void forget_original_parent(struct task_struct * father)
 	}
 }
 
-static void exit_mm(void)
-{
-	struct vm_area_struct * mpnt;
-
-	mpnt = current->mm->mmap;
-	current->mm->mmap = NULL;
-	while (mpnt) {
-		struct vm_area_struct * next = mpnt->vm_next;
-		if (mpnt->vm_ops && mpnt->vm_ops->close)
-			mpnt->vm_ops->close(mpnt);
-		kfree(mpnt);
-		mpnt = next;
-	}
-
-	/* forget local segments */
-	__asm__ __volatile__("mov %w0,%%fs ; mov %w0,%%gs ; lldt %w0"
-		: /* no outputs */
-		: "r" (0));
-	current->tss.ldt = 0;
-	if (current->ldt) {
-		void * ldt = current->ldt;
-		current->ldt = NULL;
-		vfree(ldt);
-	}
-
-	free_page_tables(current);
-}
-
 static void exit_files(void)
 {
 	int i;
@@ -398,8 +369,6 @@ static void exit_fs(void)
 	current->fs->pwd = NULL;
 	iput(current->fs->root);
 	current->fs->root = NULL;
-	iput(current->executable);
-	current->executable = NULL;
 }
 
 NORET_TYPE void do_exit(long code)
@@ -411,13 +380,13 @@ NORET_TYPE void do_exit(long code)
 		intr_count = 0;
 	}
 fake_volatile:
-	if (current->semun)
-		sem_exit();
-	if (current->shm)
-		shm_exit();
-	exit_mm();
+	current->flags |= PF_EXITING;
+	sem_exit();
+	exit_mmap(current);
+	free_page_tables(current);
 	exit_files();
 	exit_fs();
+	exit_thread();
 	forget_original_parent(current);
 	/* 
 	 * Check to see if any process groups have become orphaned
@@ -483,6 +452,10 @@ fake_volatile:
 #ifdef DEBUG_PROC_TREE
 	audit_ptree();
 #endif
+	if (current->exec_domain && current->exec_domain->use_count)
+		(*current->exec_domain->use_count)--;
+	if (current->binfmt && current->binfmt->use_count)
+		(*current->binfmt->use_count)--;
 	schedule();
 /*
  * In order to get rid of the "volatile function does return" message

@@ -37,13 +37,6 @@
 #include <linux/string.h>
 #include <linux/locks.h>
 
-#define clear_block(addr) \
-__asm__("cld\n\t" \
-        "rep\n\t" \
-        "stosl" \
-        : \
-        :"a" (0),"c" (BLOCK_SIZE/4),"D" ((long) (addr)):"cx","di")
-
 void ext_free_block(struct super_block * sb, int block)
 {
 	struct buffer_head * bh;
@@ -133,7 +126,7 @@ printk("ext_new_block: block empty, skipping to %d\n", efb->next);
 		printk("new_block: cannot get block");
 		return 0;
 	}
-	clear_block(bh->b_data);
+	memset(bh->b_data, 0, BLOCK_SIZE);
 	bh->b_uptodate = 1;
 	mark_buffer_dirty(bh, 1);
 	brelse(bh);
@@ -270,7 +263,7 @@ printk("ext_free_inode: inode empty, skipping to %d\n", efi->next);
 #endif
 		j = sb->u.ext_sb.s_firstfreeinodenumber;
 		if (efi->next > sb->u.ext_sb.s_ninodes) {
-			printk ("efi->next = %d\n", efi->next);
+			printk ("efi->next = %ld\n", efi->next);
 			panic ("ext_new_inode: bad inode number in free list\n");
 		}
 		sb->u.ext_sb.s_firstfreeinodenumber = efi->next;
@@ -289,8 +282,8 @@ printk("ext_free_inode: inode empty, skipping to %d\n", efi->next);
 	inode->i_count = 1;
 	inode->i_nlink = 1;
 	inode->i_dev = sb->s_dev;
-	inode->i_uid = current->euid;
-	inode->i_gid = (dir->i_mode & S_ISGID) ? dir->i_gid : current->egid;
+	inode->i_uid = current->fsuid;
+	inode->i_gid = (dir->i_mode & S_ISGID) ? dir->i_gid : current->fsgid;
 	inode->i_dirt = 1;
 	inode->i_ino = j;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;

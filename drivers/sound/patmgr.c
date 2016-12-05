@@ -1,7 +1,7 @@
 /*
  * sound/patmgr.c
  *
- * The patch maneger interface for the /dev/sequencer
+ * The patch manager interface for the /dev/sequencer
  *
  * Copyright by Hannu Savolainen 1993
  *
@@ -67,7 +67,9 @@ void
 pmgr_release (int dev)
 {
 
-  if (mbox[dev])		/* Killed in action. Inform the client */
+  if (mbox[dev])		/*
+				 * Killed in action. Inform the client
+				 */
     {
 
       mbox[dev]->key = PM_ERROR;

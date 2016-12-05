@@ -45,6 +45,8 @@
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/errno.h>
+#include <linux/config.h>
+
 #include "arp.h"
 
 void eth_setup(char *str, int *ints)
@@ -73,7 +75,7 @@ void eth_setup(char *str, int *ints)
 
 
 /*
- *	 Create the Ethernet MAC header for an arbitary protocol layer 
+ *	 Create the Ethernet MAC header for an arbitrary protocol layer 
  *
  *	saddr=NULL	means use device source address
  *	daddr=NULL	means leave destination address (eg unresolved arp)
@@ -141,7 +143,7 @@ int eth_rebuild_header(void *buff, struct device *dev, unsigned long dst,
 	 
 	if(eth->h_proto != htons(ETH_P_IP)) 
 	{
-		printk("eth_rebuild_header: Don't know how to resolve type %d addreses?\n",(int)eth->h_proto);
+		printk("eth_rebuild_header: Don't know how to resolve type %d addresses?\n",(int)eth->h_proto);
 		memcpy(eth->h_source, dev->dev_addr, dev->addr_len);
 		return 0;
 	}
@@ -166,8 +168,22 @@ int eth_rebuild_header(void *buff, struct device *dev, unsigned long dst,
 unsigned short eth_type_trans(struct sk_buff *skb, struct device *dev)
 {
 	struct ethhdr *eth = (struct ethhdr *) skb->data;
-	char *rawp;
-
+	unsigned char *rawp;
+	
+	if(*eth->h_dest&1)
+	{
+		if(memcmp(eth->h_dest,dev->broadcast, ETH_ALEN)==0)
+			skb->pkt_type=PACKET_BROADCAST;
+		else
+			skb->pkt_type=PACKET_MULTICAST;
+	}
+	
+	if(dev->flags&IFF_PROMISC)
+	{
+		if(memcmp(eth->h_dest,dev->dev_addr, ETH_ALEN))
+			skb->pkt_type=PACKET_OTHERHOST;
+	}
+	
 	if (ntohs(eth->h_proto) >= 1536)
 		return eth->h_proto;
 		
@@ -175,8 +191,6 @@ unsigned short eth_type_trans(struct sk_buff *skb, struct device *dev)
 	
 	if (*(unsigned short *)rawp == 0xFFFF)
 		return htons(ETH_P_802_3);
-	if (*(unsigned short *)rawp == 0xAAAA)
-		return htons(ETH_P_SNAP);
 		
 	return htons(ETH_P_802_2);
 }

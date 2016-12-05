@@ -21,7 +21,12 @@
  *		Alan Cox	:	Uses the improved datagram code.
  *		Alan Cox	:	Added NULL's for socket options.
  *		Alan Cox	:	Re-commented the code.
- *
+ *		Alan Cox	:	Use new kernel side addressing
+ *		Rob Janssen	:	Correct MTU usage.
+ *		Dave Platt	:	Counter leaks caused by incorrect
+ *					interrupt locking and some slightly
+ *					dubious gcc output. Can you read
+ *					compiler: it said _VOLATILE_
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -32,6 +37,7 @@
  
 #include <linux/types.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 #include <linux/fcntl.h>
 #include <linux/socket.h>
 #include <linux/in.h>
@@ -65,9 +71,10 @@ static unsigned long min(unsigned long a, unsigned long b)
 int packet_rcv(struct sk_buff *skb, struct device *dev,  struct packet_type *pt)
 {
 	struct sock *sk;
+	unsigned long flags;
 	
 	/*
-	 *	When we registered the protcol we saved the socket in the data
+	 *	When we registered the protocol we saved the socket in the data
 	 *	field for just this event.
 	 */
 
@@ -82,19 +89,28 @@ int packet_rcv(struct sk_buff *skb, struct device *dev,  struct packet_type *pt)
 	skb->dev = dev;
 	skb->len += dev->hard_header_len;
 
-	skb->sk = sk;
-
 	/*
-	 *	Charge the memory to the socket. This is done specificially
+	 *	Charge the memory to the socket. This is done specifically
 	 *	to prevent sockets using all the memory up.
 	 */
 	 
+	if (sk->rmem_alloc & 0xFF000000) {
+		printk("packet_rcv: sk->rmem_alloc = %ld\n", sk->rmem_alloc);
+		sk->rmem_alloc = 0;
+	}
+
 	if (sk->rmem_alloc + skb->mem_len >= sk->rcvbuf) 
 	{
+/*	        printk("packet_rcv: drop, %d+%d>%d\n", sk->rmem_alloc, skb->mem_len, sk->rcvbuf); */
 		skb->sk = NULL;
 		kfree_skb(skb, FREE_READ);
 		return(0);
 	}
+
+	save_flags(flags);
+	cli();
+
+	skb->sk = sk;
 	sk->rmem_alloc += skb->mem_len;	
 
 	/*
@@ -102,7 +118,10 @@ int packet_rcv(struct sk_buff *skb, struct device *dev,  struct packet_type *pt)
 	 */
 
 	skb_queue_tail(&sk->receive_queue,skb);
-	wake_up_interruptible(sk->sleep);
+	if(!sk->dead)
+		sk->data_ready(sk,skb->len);
+		
+	restore_flags(flags);
 
 	/*
 	 *	Processing complete.
@@ -124,16 +143,13 @@ static int packet_sendto(struct sock *sk, unsigned char *from, int len,
 {
 	struct sk_buff *skb;
 	struct device *dev;
-	struct sockaddr saddr;
-	int err;
+	struct sockaddr *saddr=(struct sockaddr *)usin;
 
 	/*
 	 *	Check the flags. 
 	 */
 
 	if (flags) 
-		return(-EINVAL);
-	if (len < 0) 
 		return(-EINVAL);
 
 	/*
@@ -142,31 +158,18 @@ static int packet_sendto(struct sock *sk, unsigned char *from, int len,
 	 
 	if (usin) 
 	{
-		if (addr_len < sizeof(saddr)) 
+		if (addr_len < sizeof(*saddr)) 
 			return(-EINVAL);
-		err=verify_area(VERIFY_READ, usin, sizeof(saddr));
-		if(err)
-			return err;
-		memcpy_fromfs(&saddr, usin, sizeof(saddr));
 	} 
 	else
 		return(-EINVAL);	/* SOCK_PACKET must be sent giving an address */
 	
-
-	/*
-	 *	Check the buffer is readable.
-	 */
-
-	err=verify_area(VERIFY_READ,from,len);
-	if(err)
-		return(err);
-		
 	/*
 	 *	Find the device first to size check it 
 	 */
 
-	saddr.sa_data[13] = 0;
-	dev = dev_get(saddr.sa_data);
+	saddr->sa_data[13] = 0;
+	dev = dev_get(saddr->sa_data);
 	if (dev == NULL) 
 	{
 		return(-ENXIO);
@@ -177,18 +180,14 @@ static int packet_sendto(struct sock *sk, unsigned char *from, int len,
 	 *	raw protocol and you must do your own fragmentation at this level.
 	 */
 	 
-	if(len>dev->mtu)
+	if(len>dev->mtu+dev->hard_header_len)
   		return -EMSGSIZE;
 
-	/*
-	 *	Now allocate the buffer, knowing 4K pagelimits wont break this line.
-	 */  
-	 
 	skb = sk->prot->wmalloc(sk, len, 0, GFP_KERNEL);
 
 	/*
 	 *	If the write buffer is full, then tough. At this level the user gets to
-	 *	deal with the problem.
+	 *	deal with the problem - do your own algorithmic backoffs.
 	 */
 	 
 	if (skb == NULL) 
@@ -264,6 +263,7 @@ static int packet_init(struct sock *sk)
 	p->func = packet_rcv;
 	p->type = sk->num;
 	p->data = (void *)sk;
+	p->dev = NULL;
 	dev_add_pack(p);
    
 	/*
@@ -278,7 +278,7 @@ static int packet_init(struct sock *sk)
 
 /*
  *	Pull a packet from our receive queue and hand it to the user.
- *	If neccessary we block.
+ *	If necessary we block.
  */
  
 int packet_recvfrom(struct sock *sk, unsigned char *to, int len,
@@ -289,12 +289,9 @@ int packet_recvfrom(struct sock *sk, unsigned char *to, int len,
 	struct sk_buff *skb;
 	struct sockaddr *saddr;
 	int err;
+	int truesize;
 
 	saddr = (struct sockaddr *)sin;
-	if (len == 0) 
-		return(0);
-	if (len < 0)
-		return(-EINVAL);
 
 	if (sk->shutdown & RCV_SHUTDOWN) 
 		return(0);
@@ -305,28 +302,8 @@ int packet_recvfrom(struct sock *sk, unsigned char *to, int len,
 	 */
 
 	if (addr_len) 
-	{
-		err=verify_area(VERIFY_WRITE, addr_len, sizeof(*addr_len));
-		if(err)
-			return err;
-		put_fs_long(sizeof(*saddr), addr_len);
-	}
+		*addr_len=sizeof(*saddr);
 	
-	if(saddr)
-	{
-		err=verify_area(VERIFY_WRITE, saddr, sizeof(*saddr));		
-		if(err)
-			return err;
-  	}
-	
-	/*
-	 *	Check the user given area can be written to.
-	 */
-	 
-	err=verify_area(VERIFY_WRITE,to,len);
-	if(err)
-		return err;
-		
 	/*
 	 *	Call the generic datagram receiver. This handles all sorts
 	 *	of horrible races and re-entrancy so we can forget about it
@@ -336,7 +313,7 @@ int packet_recvfrom(struct sock *sk, unsigned char *to, int len,
 	skb=skb_recv_datagram(sk,flags,noblock,&err);
 	
 	/*
-	 *	An error occured so return it. Because skb_recv_datagram() 
+	 *	An error occurred so return it. Because skb_recv_datagram() 
 	 *	handles the blocking we don't see and worry about blocking
 	 *	retries.
 	 */
@@ -349,7 +326,8 @@ int packet_recvfrom(struct sock *sk, unsigned char *to, int len,
 	 *	user program they can ask the device for its MTU anyway.
 	 */
 	 
-	copied = min(len, skb->len);
+	truesize = skb->len;
+	copied = min(len, truesize);
 
 	memcpy_tofs(to, skb->data, copied);	/* We can't use skb_copy_datagram here */
 
@@ -359,11 +337,8 @@ int packet_recvfrom(struct sock *sk, unsigned char *to, int len,
 	 
 	if (saddr) 
 	{
-		struct sockaddr addr;
-
-		addr.sa_family = skb->dev->type;
-		memcpy(addr.sa_data,skb->dev->name, 14);
-		memcpy_tofs(saddr, &addr, sizeof(*saddr));
+		saddr->sa_family = skb->dev->type;
+		memcpy(saddr->sa_data,skb->dev->name, 14);
 	}
 	
 	/*
@@ -378,7 +353,7 @@ int packet_recvfrom(struct sock *sk, unsigned char *to, int len,
 	 */
 	 
 	release_sock(sk);
-	return(copied);
+	return(truesize);
 }
 
 
@@ -417,7 +392,7 @@ struct proto packet_prot =
 	NULL,
 	NULL,
 	ip_queue_xmit,		/* These two are not actually used */
-	ip_retransmit,
+	NULL,
 	NULL,
 	NULL,
 	NULL, 
@@ -430,5 +405,6 @@ struct proto packet_prot =
 	128,
 	0,
 	{NULL,},
-	"PACKET"
+	"PACKET",
+	0, 0
 };

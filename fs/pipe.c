@@ -12,10 +12,11 @@
 #include <linux/signal.h>
 #include <linux/fcntl.h>
 #include <linux/termios.h>
+#include <linux/mm.h>
 
 
 /* We don't use the head/tail construction any more. Now we use the start/len*/
-/* contruction providing full use of PIPE_BUF (multiple of PAGE_SIZE) */
+/* construction providing full use of PIPE_BUF (multiple of PAGE_SIZE) */
 /* Florian Coosmann (FGC)                                ^ current = 1       */
 /* Additionally, we now use locking technique. This prevents race condition  */
 /* in case of paging and multiple read/write on the same pipe. (FGC)         */
@@ -393,7 +394,7 @@ asmlinkage int sys_pipe(unsigned long * fildes)
 	if (j<2)
 		return -ENFILE;
 	j=0;
-	for(i=0;j<2 && i<NR_OPEN;i++)
+	for(i=0;j<2 && i<NR_OPEN && i<current->rlim[RLIMIT_NOFILE].rlim_cur;i++)
 		if (!current->files->fd[i]) {
 			current->files->fd[ fd[j]=i ] = f[j];
 			j++;

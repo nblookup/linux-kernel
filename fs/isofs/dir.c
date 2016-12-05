@@ -8,6 +8,10 @@
  *  isofs directory handling functions
  */
 
+#ifdef MODULE
+#include <linux/module.h>
+#endif
+
 #include <linux/errno.h>
 
 #include <asm/segment.h>
@@ -21,6 +25,9 @@
 #include <linux/malloc.h>
 #include <linux/sched.h>
 #include <linux/locks.h>
+
+#define NAME_OFFSET(de) ((int) ((de)->d_name - (char *) (de)))
+#define ROUND_UP(x) (((x)+3) & ~3)
 
 static int isofs_readdir(struct inode *, struct file *, struct dirent *, int);
 
@@ -57,12 +64,6 @@ struct inode_operations isofs_dir_inode_operations = {
 	NULL			/* permission */
 };
 
-/* This is used to speed up lookup.  Without this we would need to
-make a linear search of the directory to find the file that the
-directory read just returned.  This is a single element cache. */
-
-struct lookup_cache cache = {0,};
-
 static int isofs_readdir(struct inode * inode, struct file * filp,
 	struct dirent * dirent, int count)
 {
@@ -75,9 +76,11 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 	void * cpnt = NULL;
 	unsigned int old_offset;
 	int dlen, rrflag;
-	char * dpnt;
+	int high_sierra = 0;
+	char * dpnt, *dpnt1;
 	struct iso_directory_record * de;
 	
+	dpnt1 = NULL;
 	if (!inode || !S_ISDIR(inode->i_mode))
 		return -EBADF;
 	
@@ -91,7 +94,7 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 
 	while (filp->f_pos < inode->i_size) {
 #ifdef DEBUG
-		printk("Block, offset: %x %x %x\n",
+		printk("Block, offset, f_pos: %x %x %x\n",
 		       block, offset, filp->f_pos);
 #endif
 		de = (struct iso_directory_record *) (bh->b_data + offset);
@@ -123,21 +126,23 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 		offset += *((unsigned char *) de);
 		filp->f_pos += *((unsigned char *) de);
 
-		if (offset >=  bufsize) {
-			cpnt = kmalloc(1 << ISOFS_BLOCK_BITS, GFP_KERNEL);
-			memcpy(cpnt, bh->b_data, bufsize);
-			de = (struct iso_directory_record *)
-				((char *)cpnt + old_offset);
+		if (offset > bufsize) {
+		        unsigned int frag1;
+			frag1 = bufsize - old_offset;
+			cpnt = kmalloc(*((unsigned char *) de),GFP_KERNEL);
+			if (!cpnt) return 0;
+			memcpy(cpnt, bh->b_data + old_offset, frag1);
+			de = (struct iso_directory_record *) ((char *)cpnt);
 			brelse(bh);
 			offset = filp->f_pos & (bufsize - 1);
 			block = isofs_bmap(inode,(filp->f_pos)>> bufbits);
 			if (!block
 			    || !(bh = breada(inode->i_dev, block, bufsize,
 					     filp->f_pos, inode->i_size))) {
-			        kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+			        kfree(cpnt);
 				return 0;
 			};
-			memcpy((char *)cpnt+bufsize, bh->b_data, bufsize);
+			memcpy((char *)cpnt+frag1, bh->b_data, offset);
 		}
 		
 		/* Handle the case of the '.' directory */
@@ -157,8 +162,7 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 			put_fs_byte('.',dirent->d_name+1);
 			i = 2;
 			dpnt = "..";
-			if((inode->i_sb->u.isofs_sb.s_firstdatazone
-			    << bufbits) != inode->i_ino)
+			if((inode->i_sb->u.isofs_sb.s_firstdatazone) != inode->i_ino)
 				inode_number = inode->u.isofs_i.i_backlink;
 			else
 				inode_number = inode->i_ino;
@@ -179,6 +183,18 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 		   is no Rock Ridge NM field. */
 		
 		else {
+			if (inode->i_sb->u.isofs_sb.s_unhide=='n')
+                        {
+		  		/* Do not report hidden or associated files */
+		        	high_sierra = inode->i_sb->u.isofs_sb.s_high_sierra;
+		        	if (de->flags[-high_sierra] & 5) {
+				  if (cpnt) {
+				    kfree(cpnt);
+				    cpnt = NULL;
+				  };
+				  continue;
+				}
+			}
 			dlen = de->name_len[0];
 			dpnt = de->name;
 			i = dlen;
@@ -186,7 +202,7 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 			if (rrflag) {
 			  if (rrflag == -1) {  /* This is a rock ridge reloc dir */
 			    if (cpnt) {
-				kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+				kfree(cpnt);
 				cpnt = NULL;
 			    };
 			    continue;
@@ -194,9 +210,12 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 			  i = dlen;
 			}
 			else
-			  if(inode->i_sb->u.isofs_sb.s_mapping == 'n')
+			  if(inode->i_sb->u.isofs_sb.s_mapping == 'n') {
+			    dpnt1 = dpnt;
+			    dpnt = kmalloc(dlen, GFP_KERNEL);
+			    if (!dpnt) goto out;
 			    for (i = 0; i < dlen && i < NAME_MAX; i++) {
-			      if (!(c = dpnt[i])) break;
+			      if (!(c = dpnt1[i])) break;
 			      if (c >= 'A' && c <= 'Z') c |= 0x20;  /* lower case */
 			      if (c == '.' && i == dlen-3 && de->name[i+1] == ';' && de->name[i+2] == '1')
 				break;  /* Drop trailing '.;1' (ISO9660:1988 7.5.1 requires period) */
@@ -204,26 +223,24 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 				break;  /* Drop trailing ';1' */
 			      if (c == ';') c = '.';  /* Convert remaining ';' to '.' */
 			      dpnt[i] = c;
-			  };
-			
+			    }
+			  }
 			for(j=0; j<i; j++)
 			  put_fs_byte(dpnt[j],j+dirent->d_name); /* And save it */
+			if(dpnt1) {
+			  kfree(dpnt);
+			  dpnt = dpnt1;
+			}
+			
+			dcache_add(inode, dpnt, i, inode_number);
 		      };
 #if 0
 		printk("Nchar: %d\n",i);
 #endif
 
-		if (i && i+1 < sizeof(cache.filename)) {
-			cache.ino = inode_number;
-			cache.dir = inode->i_ino;
-			cache.dev = inode->i_dev;
-			strncpy(cache.filename, dpnt, i);
-			cache.dlen = dlen;
-		      };
-
 		if (rrflag) kfree(dpnt);
 		if (cpnt) {
-			kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+			kfree(cpnt);
 			cpnt = NULL;
 		};
 		
@@ -232,14 +249,14 @@ static int isofs_readdir(struct inode * inode, struct file * filp,
 			put_fs_byte(0,i+dirent->d_name);
 			put_fs_word(i,&dirent->d_reclen);
 			brelse(bh);
-			return i;
+			return ROUND_UP(NAME_OFFSET(dirent) + i + 1);
 		}
 	      }
 	/* We go here for any condition we cannot handle.  We also drop through
 	   to here at the end of the directory. */
  out:
 	if (cpnt)
-		kfree_s(cpnt, 1 << ISOFS_BLOCK_BITS);
+		kfree(cpnt);
 	brelse(bh);
 	return 0;
 }

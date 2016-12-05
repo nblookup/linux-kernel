@@ -26,7 +26,7 @@
 #define FIOGETOWN	0x8903
 #define SIOCGPGRP	0x8904
 #define SIOCATMARK	0x8905
-#define SIOCGSTAMP	0x8096		/* Get stamp */
+#define SIOCGSTAMP	0x8906		/* Get stamp */
 
 /* Routing table calls. */
 #define SIOCADDRT	0x890B		/* add routing table entry	*/
@@ -59,6 +59,10 @@
 #define SIOCGIFHWADDR	0x8927		/* Get hardware address		*/
 #define SIOCGIFSLAVE	0x8929		/* Driver slaving support	*/
 #define SIOCSIFSLAVE	0x8930
+/* begin multicast support change */
+#define SIOCADDMULTI  0x8931
+#define SIOCDELMULTI  0x8932
+/* end multicast support change */
 
 /* Routing table calls (oldrtent - don't use) */
 #define SIOCADDRTOLD	0x8940		/* add routing table entry	*/
@@ -84,11 +88,15 @@
 /*
  *	These 16 ioctls are available to devices via the do_ioctl() device
  *	vector. Each device should include this file and redefine these names
- *	as their own. Because these are device dependant it is a good idea
+ *	as their own. Because these are device dependent it is a good idea
  *	_NOT_ to issue them to random objects and hope.
  */
  
 #define SIOCDEVPRIVATE	0x89F0	/* to 89FF */
 
-
+/*
+ *	These 16 ioctl calls are protocol private
+ */
+ 
+#define SIOCPROTOPRIVATE 0x89E0 /* to 89EF */
 #endif	/* _LINUX_SOCKIOS_H */

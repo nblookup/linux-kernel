@@ -21,6 +21,7 @@
 
 
 #include <linux/ip.h>
+#include <linux/config.h>
 
 #ifndef _SNMP_H
 #include "snmp.h"
@@ -36,6 +37,13 @@
 
 #define IP_FRAG_TIME	(30 * HZ)		/* fragment lifetime	*/
 
+#ifdef CONFIG_IP_MULTICAST
+extern void		ip_mc_dropsocket(struct sock *);
+extern void		ip_mc_dropdevice(struct device *dev);
+extern int		ip_mc_procinfo(char *, char **, off_t, int);
+#define MULTICAST(x)	(IN_MULTICAST(htonl(x)))
+#endif
+ 
 
 /* Describe an IP fragment. */
 struct ipfrag {
@@ -78,14 +86,45 @@ extern int		ip_build_header(struct sk_buff *skb,
 extern unsigned short	ip_compute_csum(unsigned char * buff, int len);
 extern int		ip_rcv(struct sk_buff *skb, struct device *dev,
 			       struct packet_type *pt);
+extern void		ip_send_check(struct iphdr *ip);
+extern int		ip_id_count;			  
 extern void		ip_queue_xmit(struct sock *sk,
 				      struct device *dev, struct sk_buff *skb,
 				      int free);
-extern void		ip_retransmit(struct sock *sk, int all);
-extern void		ip_do_retransmit(struct sock *sk, int all);
 extern int 		ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int optlen);
 extern int 		ip_getsockopt(struct sock *sk, int level, int optname, char *optval, int *optlen);
 extern void		ip_init(void);
 
 extern struct ip_mib	ip_statistics;
+
+/*
+ *	This is a version of ip_compute_csum() optimized for IP headers, which
+ *	always checksum on 4 octet boundaries.
+ *	Used by ip.c and slhc.c (the net driver module)
+ *	(Moved to here by bj0rn@blox.se)
+ */
+
+static inline unsigned short ip_fast_csum(unsigned char * buff, int wlen)
+{
+	unsigned long sum = 0;
+
+	if (wlen)
+	{
+	unsigned long bogus;
+	 __asm__("clc\n"
+		"1:\t"
+		"lodsl\n\t"
+		"adcl %3, %0\n\t"
+		"decl %2\n\t"
+		"jne 1b\n\t"
+		"adcl $0, %0\n\t"
+		"movl %0, %3\n\t"
+		"shrl $16, %3\n\t"
+		"addw %w3, %w0\n\t"
+		"adcw $0, %w0"
+	    : "=r" (sum), "=S" (buff), "=r" (wlen), "=a" (bogus)
+	    : "0"  (sum),  "1" (buff),  "2" (wlen));
+	}
+	return (~sum) & 0xffff;
+}
 #endif	/* _IP_H */

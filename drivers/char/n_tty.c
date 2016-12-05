@@ -1,5 +1,5 @@
 /*
- * n_tty.c --- implements the N_TTY line discpline.
+ * n_tty.c --- implements the N_TTY line discipline.
  * 
  * This code used to be in tty_io.c, but things are getting hairy
  * enough that it made sense to split things off.  (The N_TTY
@@ -8,7 +8,7 @@
  *
  * Note that the open routine for N_TTY is guaranteed never to return
  * an error.  This is because Linux will fall back to setting a line
- * to N_TTY if it can not switch to any other line discpline.  
+ * to N_TTY if it can not switch to any other line discipline.  
  *
  * Written by Theodore Ts'o, Copyright 1994.
  * 
@@ -76,7 +76,8 @@ void n_tty_flush_buffer(struct tty_struct * tty)
 	if (!tty->link)
 		return;
 
-	wake_up_interruptible(&tty->link->write_wait);
+	if (tty->driver.unthrottle)
+		(tty->driver.unthrottle)(tty);
 	if (tty->link->packet) {
 		tty->ctrl_status |= TIOCPKT_FLUSHREAD;
 		wake_up_interruptible(&tty->link->read_wait);
@@ -84,7 +85,7 @@ void n_tty_flush_buffer(struct tty_struct * tty)
 }
 
 /*
- * Return number of characters buffered to be delievered to user
+ * Return number of characters buffered to be delivered to user
  */
 int n_tty_chars_in_buffer(struct tty_struct *tty)
 {
@@ -111,7 +112,7 @@ static int opost(unsigned char c, struct tty_struct *tty)
 			if (O_ONLCR(tty)) {
 				if (space < 2)
 					return -1;
-				tty->driver.write(tty, 0, "\r", 1);
+				tty->driver.put_char(tty, '\r');
 				tty->column = 0;
 			}
 			tty->canon_column = tty->column;
@@ -344,7 +345,7 @@ static inline void n_tty_receive_char(struct tty_struct *tty, unsigned char c)
 		return;
 	}
 	
-	if (tty->stopped && I_IXON(tty) && I_IXANY(tty) && L_IEXTEN(tty)) {
+	if (tty->stopped && I_IXON(tty) && I_IXANY(tty)) {
 		start_tty(tty);
 		return;
 	}
@@ -353,6 +354,16 @@ static inline void n_tty_receive_char(struct tty_struct *tty, unsigned char c)
 		c &= 0x7f;
 	if (I_IUCLC(tty) && L_IEXTEN(tty))
 		c=tolower(c);
+
+	if (tty->closing) {
+		if (I_IXON(tty)) {
+			if (c == START_CHAR(tty))
+				start_tty(tty);
+			else if (c == STOP_CHAR(tty))
+				stop_tty(tty);
+		}
+		return;
+	}
 
 	/*
 	 * If the previous character was LNEXT, or we know that this
@@ -452,6 +463,8 @@ static inline void n_tty_receive_char(struct tty_struct *tty, unsigned char c)
 			goto handle_newline;
 		}
 		if (c == EOF_CHAR(tty)) {
+		        if (tty->canon_head != tty->read_head)
+			        set_bit(TTY_PUSH, &tty->flags);
 			c = __DISABLED_CHAR;
 			goto handle_newline;
 		}
@@ -482,6 +495,10 @@ static inline void n_tty_receive_char(struct tty_struct *tty, unsigned char c)
 			put_tty_queue(c, tty);
 			tty->canon_head = tty->read_head;
 			tty->canon_data++;
+			if (tty->fasync)
+				kill_fasync(tty->fasync, SIGIO);
+			if (tty->read_wait)
+				wake_up_interruptible(&tty->read_wait);
 			return;
 		}
 	}
@@ -560,8 +577,7 @@ static void n_tty_receive_buf(struct tty_struct *tty, unsigned char *cp,
 			tty->driver.flush_chars(tty);
 	}
 
-	if (tty->icanon ? tty->canon_data :
-	    (tty->read_cnt >= tty->minimum_to_wake)) {
+	if (!tty->icanon && (tty->read_cnt >= tty->minimum_to_wake)) {
 		if (tty->fasync)
 			kill_fasync(tty->fasync, SIGIO);
 		if (tty->read_wait)
@@ -578,6 +594,15 @@ static int n_tty_receive_room(struct tty_struct *tty)
 {
 	int	left = N_TTY_BUF_SIZE - tty->read_cnt - 1;
 
+	/*
+	 * If we are doing input canonicalization, and there are no
+	 * pending newlines, let characters through without limit, so
+	 * that erase characters will be handled.  Other excess
+	 * characters will be beeped.
+	 */
+	if (tty->icanon && !tty->canon_data)
+		return N_TTY_BUF_SIZE;
+
 	if (left > 0)
 		return left;
 	return 0;
@@ -591,6 +616,9 @@ int is_ignored(int sig)
 
 static void n_tty_set_termios(struct tty_struct *tty, struct termios * old)
 {
+	if (!tty)
+		return;
+	
 	tty->icanon = (L_ICANON(tty) != 0);
 	if (I_ISTRIP(tty) || I_IUCLC(tty) || I_IGNCR(tty) ||
 	    I_ICRNL(tty) || I_INLCR(tty) || L_ICANON(tty) ||
@@ -648,7 +676,7 @@ static void n_tty_set_termios(struct tty_struct *tty, struct termios * old)
 
 static void n_tty_close(struct tty_struct *tty)
 {
-	wait_until_sent(tty, 0);
+	tty_wait_until_sent(tty, 0);
 	n_tty_flush_buffer(tty);
 	if (tty->read_buf) {
 		free_page((unsigned long) tty->read_buf);
@@ -658,6 +686,9 @@ static void n_tty_close(struct tty_struct *tty)
 
 static int n_tty_open(struct tty_struct *tty)
 {
+	if (!tty)
+		return -EINVAL;
+
 	if (!tty->read_buf) {
 		tty->read_buf = (unsigned char *)
 			get_free_page(intr_count ? GFP_ATOMIC : GFP_KERNEL);
@@ -669,6 +700,7 @@ static int n_tty_open(struct tty_struct *tty)
 	memset(tty->read_flags, 0, sizeof(tty->read_flags));
 	n_tty_set_termios(tty, 0);
 	tty->minimum_to_wake = 1;
+	tty->closing = 0;
 	return 0;
 }
 
@@ -708,24 +740,6 @@ static inline void copy_from_read_buf(struct tty_struct *tty,
 	*nr -= n;
 }
 
-/*
- * Called to gobble up an immediately following EOF when there is no
- * more room in buf (this can happen if the user "pushes" some
- * characters using ^D).  This prevents the next read() from falsely
- * returning EOF.
- */
-static inline void gobble_eof(struct tty_struct *tty)
-{
-	cli();
-	if ((tty->read_cnt) &&
-	    (tty->read_buf[tty->read_tail] == __DISABLED_CHAR) &&
-	    clear_bit(tty->read_tail, &tty->read_flags)) {
-		tty->read_tail = (tty->read_tail+1) & (N_TTY_BUF_SIZE-1);
-		tty->read_cnt--;
-	}
-	sti();
-}
-
 static int read_chan(struct tty_struct *tty, struct file *file,
 		     unsigned char *buf, unsigned int nr)
 {
@@ -734,6 +748,9 @@ static int read_chan(struct tty_struct *tty, struct file *file,
 	unsigned char *b = buf;
 	int minimum, time;
 	int retval = 0;
+	int size;
+
+do_it_again:
 
 	if (!tty->read_buf) {
 		printk("n_tty_read_chan: called with read_buf == NULL?!?\n");
@@ -848,7 +865,6 @@ static int read_chan(struct tty_struct *tty, struct file *file,
 					put_fs_byte(c, b++);
 					if (--nr)
 						continue;
-					gobble_eof(tty);
 					break;
 				}
 				if (--tty->canon_data < 0) {
@@ -886,13 +902,14 @@ static int read_chan(struct tty_struct *tty, struct file *file,
 
 	current->state = TASK_RUNNING;
 	current->timeout = 0;
-	/*
-	 * Hack for PTY's; we need to wake up the other tty if there's
-	 * enough space.
-	 */
-	if (tty->link && tty->read_cnt <= TTY_THRESHOLD_UNTHROTTLE)
-		wake_up_interruptible(&tty->link->write_wait);
-	return (b - buf) ? b - buf : retval;
+	size = b - buf;
+	if (size && nr)
+	        clear_bit(TTY_PUSH, &tty->flags);
+        if (!size && clear_bit(TTY_PUSH, &tty->flags))
+                goto do_it_again;
+	if (!size && !retval)
+	        clear_bit(TTY_PUSH, &tty->flags);
+        return (size ? size : retval);
 }
 
 static int write_chan(struct tty_struct * tty, struct file * file,
@@ -927,9 +944,9 @@ static int write_chan(struct tty_struct * tty, struct file * file,
 				if (opost(c, tty) < 0)
 					break;
 				b++; nr--;
-				if (tty->driver.flush_chars)
-					tty->driver.flush_chars(tty);
 			}
+			if (tty->driver.flush_chars)
+				tty->driver.flush_chars(tty);
 		} else {
 			c = tty->driver.write(tty, 1, b, nr);
 			b += c;
@@ -953,7 +970,8 @@ static int normal_select(struct tty_struct * tty, struct inode * inode,
 {
 	switch (sel_type) {
 		case SEL_IN:
-			if (input_available_p(tty, MIN_CHAR(tty)))
+			if (input_available_p(tty, TIME_CHAR(tty) ? 0 :
+					      MIN_CHAR(tty)))
 				return 1;
 			/* fall through */
 		case SEL_EX:
@@ -963,9 +981,12 @@ static int normal_select(struct tty_struct * tty, struct inode * inode,
 				return 1;
 			if (tty_hung_up_p(file))
 				return 1;
-			if (!tty->read_wait)
-				tty->minimum_to_wake = MIN_CHAR(tty) ?
-					MIN_CHAR(tty) : 1;
+			if (!tty->read_wait) {
+				if (MIN_CHAR(tty) && !TIME_CHAR(tty))
+					tty->minimum_to_wake = MIN_CHAR(tty);
+				else
+					tty->minimum_to_wake = 1;
+			}
 			select_wait(&tty->read_wait, wait);
 			return 0;
 		case SEL_OUT:

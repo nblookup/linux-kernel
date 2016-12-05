@@ -9,7 +9,7 @@
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
- *		Donald Becker, <becker@super.org>
+ *		Donald Becker, <becker@cesdis.gsfc.nasa.gov>
  *
  *		Alan Cox	:	Fixed oddments for NET3.014
  *
@@ -21,6 +21,7 @@
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/interrupt.h>
 #include <linux/fs.h>
 #include <linux/types.h>
 #include <linux/string.h>
@@ -56,9 +57,12 @@ loopback_xmit(struct sk_buff *skb, struct device *dev)
   }
   dev->tbusy = 1;
   sti();
+  
+  /* FIXME: Optimise so buffers with skb->free=1 are not copied but
+     instead are lobbed from tx queue to rx queue */
 
   done = dev_rint(skb->data, skb->len, 0, dev);
-  if (skb->free) kfree_skb(skb, FREE_WRITE);
+  dev_kfree_skb(skb, FREE_WRITE);
 
   while (done != 1) {
 	done = dev_rint(NULL, 0, 0, dev);
@@ -67,20 +71,11 @@ loopback_xmit(struct sk_buff *skb, struct device *dev)
 
   dev->tbusy = 0;
 
-#if 1
-	__asm__("cmpl $0,_intr_count\n\t"
-		"jne 1f\n\t"
-		"movl _bh_active,%%eax\n\t"
-		"testl _bh_mask,%%eax\n\t"
-		"je 1f\n\t"
-		"incl _intr_count\n\t"
-		"call _do_bottom_half\n\t"
-		"decl _intr_count\n"
-		"1:"
-		:
-		:
-		: "ax", "dx", "cx");
-#endif
+  if (!intr_count && (bh_active & bh_mask)) {
+	start_bh_atomic();
+	do_bottom_half();
+	end_bh_atomic();
+  }
 
   return(0);
 }
@@ -125,7 +120,7 @@ loopback_init(struct device *dev)
 #endif
 
   /* New-style flags. */
-  dev->flags		= IFF_LOOPBACK;
+  dev->flags		= IFF_LOOPBACK|IFF_BROADCAST;
   dev->family		= AF_INET;
 #ifdef CONFIG_INET    
   dev->pa_addr		= in_aton("127.0.0.1");

@@ -22,7 +22,7 @@
  *					select and read wake correctly on errors
  *		Alan Cox	:	udp_send verify_area moved to avoid mem leak
  *		Alan Cox	:	UDP can count its memory
- *		Alan Cox	:	send to an uknown connection causes
+ *		Alan Cox	:	send to an unknown connection causes
  *					an ECONNREFUSED off the icmp, but
  *					does NOT close.
  *		Alan Cox	:	Switched to new sk_buff handlers. No more backlog!
@@ -38,6 +38,8 @@
  *		Alan Cox	:	MSG_DONTROUTE, and 0.0.0.0 support.
  *		Matt Dillon	:	UDP length checks.
  *		Alan Cox	:	Smarter af_inet used properly.
+ *		Alan Cox	:	Use new kernel side addressing.
+ *		Alan Cox	:	Incorrect return on truncated datagram receive.
  *
  *
  *		This program is free software; you can redistribute it and/or
@@ -58,6 +60,7 @@
 #include <linux/timer.h>
 #include <linux/termios.h>
 #include <linux/mm.h>
+#include <linux/config.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include "snmp.h"
@@ -68,6 +71,7 @@
 #include "sock.h"
 #include "udp.h"
 #include "icmp.h"
+#include "route.h"
 
 /*
  *	SNMP MIB for the UDP layer
@@ -76,7 +80,7 @@
 struct udp_mib		udp_statistics;
 
 
-
+static int udp_deliver(struct sock *sk, struct udphdr *uh, struct sk_buff *skb, struct device *dev, long saddr, long daddr, int len);
 
 #define min(a,b)	((a)<(b)?(a):(b))
 
@@ -102,8 +106,9 @@ void udp_err(int err, unsigned char *header, unsigned long daddr,
 	header += 4*ip->ihl;
 
 	/*
-	 *	Find the 8 bytes of post IP header ICMP included for usA
+	 *	Find the 8 bytes of post IP header ICMP included for us
 	 */  
+	
 	th = (struct udphdr *)header;  
    
 	sk = get_sock(&udp_prot, th->source, daddr, th->dest, saddr);
@@ -119,6 +124,15 @@ void udp_err(int err, unsigned char *header, unsigned long daddr,
 	}
 
 	/*
+	 *	Various people wanted BSD UDP semantics. Well they've come 
+	 *	back out because they slow down response to stuff like dead
+	 *	or unreachable name servers and they screw term users something
+	 *	chronic. Oh and it violates RFC1122. So basically fix your 
+	 *	client code people.
+	 */
+	 
+#ifdef CONFIG_I_AM_A_BROKEN_BSD_WEENIE
+	/*
 	 *	It's only fatal if we have connected to them. I'm not happy
 	 *	with this code. Some BSD comparisons need doing.
 	 */
@@ -126,10 +140,15 @@ void udp_err(int err, unsigned char *header, unsigned long daddr,
 	if (icmp_err_convert[err & 0xff].fatal && sk->state == TCP_ESTABLISHED) 
 	{
 		sk->err = icmp_err_convert[err & 0xff].errno;
-/*		sk->err=ECONNREFUSED;*/
+		sk->error_report(sk);
  	}
-	
-	sk->error_report(sk);
+#else
+	if (icmp_err_convert[err & 0xff].fatal)
+	{
+		sk->err = icmp_err_convert[err & 0xff].errno;
+		sk->error_report(sk);
+	}
+#endif
 }
 
 
@@ -238,17 +257,18 @@ static int udp_send(struct sock *sk, struct sockaddr_in *sin,
 	unsigned char *buff;
 	unsigned long saddr;
 	int size, tmp;
+	int ttl;
   
 	/* 
 	 *	Allocate an sk_buff copy of the packet.
 	 */
 	 
 	size = sk->prot->max_header + len;
-	skb = sk->prot->wmalloc(sk, size, 0, GFP_KERNEL);
+	skb = sock_alloc_send_skb(sk, size, 0, &tmp);
 
 
 	if (skb == NULL) 
-		return(-ENOBUFS);
+		return tmp;
 
 	skb->sk       = NULL;	/* to avoid changing sk->saddr */
 	skb->free     = 1;
@@ -259,10 +279,16 @@ static int udp_send(struct sock *sk, struct sockaddr_in *sin,
 	 */
 	 
 	buff = skb->data;
-	saddr = 0;
+	saddr = sk->saddr;
 	dev = NULL;
+	ttl = sk->ip_ttl;
+#ifdef CONFIG_IP_MULTICAST
+	if (MULTICAST(sin->sin_addr.s_addr))
+		ttl = sk->ip_mc_ttl;
+#endif
 	tmp = sk->prot->build_header(skb, saddr, sin->sin_addr.s_addr,
-			&dev, IPPROTO_UDP, sk->opt, skb->mem_len,sk->ip_tos,sk->ip_ttl);
+			&dev, IPPROTO_UDP, sk->opt, skb->mem_len,sk->ip_tos,ttl);
+
 	skb->sk=sk;	/* So memory is freed correctly */
 	
 	/*
@@ -318,7 +344,6 @@ static int udp_sendto(struct sock *sk, unsigned char *from, int len, int noblock
 {
 	struct sockaddr_in sin;
 	int tmp;
-	int err;
 
 	/* 
 	 *	Check the flags. We support no flags for UDP sending
@@ -333,10 +358,7 @@ static int udp_sendto(struct sock *sk, unsigned char *from, int len, int noblock
 	{
 		if (addr_len < sizeof(sin)) 
 			return(-EINVAL);
-		err=verify_area(VERIFY_READ, usin, sizeof(sin));
-		if(err)
-			return err;
-		memcpy_fromfs(&sin, usin, sizeof(sin));
+		memcpy(&sin,usin,sizeof(sin));
 		if (sin.sin_family && sin.sin_family != AF_INET) 
 			return(-EINVAL);
 		if (sin.sin_port == 0) 
@@ -447,6 +469,7 @@ int udp_recvfrom(struct sock *sk, unsigned char *to, int len,
 	     int *addr_len)
 {
   	int copied = 0;
+  	int truesize;
   	struct sk_buff *skb;
   	int er;
 
@@ -455,20 +478,8 @@ int udp_recvfrom(struct sock *sk, unsigned char *to, int len,
 	 */
 	 
   	if (addr_len) 
-  	{
-		er=verify_area(VERIFY_WRITE, addr_len, sizeof(*addr_len));
-		if(er)
-			return(er);
-		put_fs_long(sizeof(*sin), addr_len);
-  	}
+  		*addr_len=sizeof(*sin);
   
-  	if(sin)
-  	{
-  		er=verify_area(VERIFY_WRITE, sin, sizeof(*sin));
-  		if(er)
-  			return(er);
-  	}
-  	
 	/*
 	 *	From here the generic datagram does a lot of the work. Come
 	 *	the finished NET3, it will do _ALL_ the work!
@@ -478,7 +489,8 @@ int udp_recvfrom(struct sock *sk, unsigned char *to, int len,
 	if(skb==NULL)
   		return er;
   
-  	copied = min(len, skb->len);
+  	truesize = skb->len;
+  	copied = min(len, truesize);
 
   	/*
   	 *	FIXME : should use udp header size info value 
@@ -490,17 +502,14 @@ int udp_recvfrom(struct sock *sk, unsigned char *to, int len,
 	/* Copy the address. */
 	if (sin) 
 	{
-		struct sockaddr_in addr;
-
-		addr.sin_family = AF_INET;
-		addr.sin_port = skb->h.uh->source;
-		addr.sin_addr.s_addr = skb->daddr;
-		memcpy_tofs(sin, &addr, sizeof(*sin));
+		sin->sin_family = AF_INET;
+		sin->sin_port = skb->h.uh->source;
+		sin->sin_addr.s_addr = skb->daddr;
   	}
   
   	skb_free_datagram(skb);
   	release_sock(sk);
-  	return(copied);
+  	return(truesize);
 }
 
 /*
@@ -514,42 +523,40 @@ int udp_read(struct sock *sk, unsigned char *buff, int len, int noblock,
 }
 
 
-int
-udp_connect(struct sock *sk, struct sockaddr_in *usin, int addr_len)
+int udp_connect(struct sock *sk, struct sockaddr_in *usin, int addr_len)
 {
-	struct sockaddr_in sin;
-	int er;
-  
-	if (addr_len < sizeof(sin)) 
+	struct rtable *rt;
+	unsigned long sa;
+	if (addr_len < sizeof(*usin)) 
 	  	return(-EINVAL);
 
-	er=verify_area(VERIFY_READ, usin, sizeof(sin));
-	if(er)
-		return er;
-
-	memcpy_fromfs(&sin, usin, sizeof(sin));
-	if (sin.sin_family && sin.sin_family != AF_INET) 
+	if (usin->sin_family && usin->sin_family != AF_INET) 
 	  	return(-EAFNOSUPPORT);
-	if (sin.sin_addr.s_addr==INADDR_ANY)
-		sin.sin_addr.s_addr=ip_my_addr();
+	if (usin->sin_addr.s_addr==INADDR_ANY)
+		usin->sin_addr.s_addr=ip_my_addr();
 
-	if(!sk->broadcast && ip_chk_addr(sin.sin_addr.s_addr)==IS_BROADCAST)
+	if(!sk->broadcast && ip_chk_addr(usin->sin_addr.s_addr)==IS_BROADCAST)
 		return -EACCES;			/* Must turn broadcast on first */
   	
-	sk->daddr = sin.sin_addr.s_addr;
-	sk->dummy_th.dest = sin.sin_port;
+  	rt=ip_rt_route(usin->sin_addr.s_addr, NULL, &sa);
+  	if(rt==NULL)
+  		return -ENETUNREACH;
+  	sk->saddr = sa;		/* Update source address */
+	sk->daddr = usin->sin_addr.s_addr;
+	sk->dummy_th.dest = usin->sin_port;
 	sk->state = TCP_ESTABLISHED;
 	return(0);
 }
 
 
-static void
-udp_close(struct sock *sk, int timeout)
+static void udp_close(struct sock *sk, int timeout)
 {
-  sk->inuse = 1;
-  sk->state = TCP_CLOSE;
-  if (sk->dead) destroy_sock(sk);
-    else release_sock(sk);
+	sk->inuse = 1;
+	sk->state = TCP_CLOSE;
+	if (sk->dead) 
+		destroy_sock(sk);
+	else
+		release_sock(sk);
 }
 
 
@@ -564,6 +571,10 @@ int udp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
   	struct sock *sk;
   	struct udphdr *uh;
 	unsigned short ulen;
+	int addr_type = IS_MYADDR;
+	
+	if(!dev || dev->pa_addr!=daddr)
+		addr_type=ip_chk_addr(daddr);
 		
 	/*
 	 *	Get the header.
@@ -585,15 +596,61 @@ int udp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 		kfree_skb(skb, FREE_WRITE);
 		return(0);
 	}
+
+	if (uh->check && udp_check(uh, len, saddr, daddr)) 
+	{
+		/* <mea@utu.fi> wants to know, who sent it, to
+		   go and stomp on the garbage sender... */
+		printk("UDP: bad checksum. From %08lX:%d to %08lX:%d ulen %d\n",
+		       ntohl(saddr),ntohs(uh->source),
+		       ntohl(daddr),ntohs(uh->dest),
+		       ulen);
+		udp_statistics.UdpInErrors++;
+		kfree_skb(skb, FREE_WRITE);
+		return(0);
+	}
+
+
 	len=ulen;
 
+#ifdef CONFIG_IP_MULTICAST
+	if (addr_type!=IS_MYADDR)
+	{
+		/*
+		 *	Multicasts and broadcasts go to each listener.
+		 */
+		struct sock *sknext=NULL;
+		sk=get_sock_mcast(udp_prot.sock_array[ntohs(uh->dest)&(SOCK_ARRAY_SIZE-1)], uh->dest,
+				saddr, uh->source, daddr);
+		if(sk)
+		{		
+			do
+			{
+				struct sk_buff *skb1;
+
+				sknext=get_sock_mcast(sk->next, uh->dest, saddr, uh->source, daddr);
+				if(sknext)
+					skb1=skb_clone(skb,GFP_ATOMIC);
+				else
+					skb1=skb;
+				if(skb1)
+					udp_deliver(sk, uh, skb1, dev,saddr,daddr,len);
+				sk=sknext;
+			}
+			while(sknext!=NULL);
+		}
+		else
+			kfree_skb(skb, FREE_READ);
+		return 0;
+	}	
+#endif
   	sk = get_sock(&udp_prot, uh->dest, saddr, uh->source, daddr);
 	if (sk == NULL) 
   	{
   		udp_statistics.UdpNoPorts++;
-		if (ip_chk_addr(daddr) == IS_MYADDR) 
+		if (addr_type == IS_MYADDR) 
 		{
-			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, dev);
+			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PORT_UNREACH, 0, dev);
 		}
 		/*
 		 * Hmm.  We got an UDP broadcast to a port to which we
@@ -604,14 +661,11 @@ int udp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 		return(0);
   	}
 
-	if (uh->check && udp_check(uh, len, saddr, daddr)) 
-	{
-		printk("UDP: bad checksum.\n");
-		udp_statistics.UdpInErrors++;
-		kfree_skb(skb, FREE_WRITE);
-		return(0);
-	}
+	return udp_deliver(sk,uh,skb,dev, saddr, daddr, len);
+}
 
+static int udp_deliver(struct sock *sk, struct udphdr *uh, struct sk_buff *skb, struct device *dev, long saddr, long daddr, int len)
+{
 	skb->sk = sk;
 	skb->dev = dev;
 	skb->len = len;
@@ -627,8 +681,10 @@ int udp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 	/*
 	 *	Charge it to the socket, dropping if the queue is full.
 	 */
+
+	skb->len = len - sizeof(*uh);  
 	 
-	if (sk->rmem_alloc + skb->mem_len >= sk->rcvbuf) 
+	if (sock_queue_rcv_skb(sk,skb)<0) 
 	{
 		udp_statistics.UdpInErrors++;
 		ip_statistics.IpInDiscards++;
@@ -638,53 +694,42 @@ int udp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
 		release_sock(sk);
 		return(0);
 	}
-	sk->rmem_alloc += skb->mem_len;
   	udp_statistics.UdpInDatagrams++;
-
-	/*
-	 *	Now add it to the data chain and wake things up. 
-	 */
-  
-	skb->len = len - sizeof(*uh);  
-	skb_queue_tail(&sk->receive_queue,skb);
-
-
-	if (!sk->dead) 
-	  	sk->data_ready(sk,skb->len);
-  	
 	release_sock(sk);
 	return(0);
 }
 
 
 struct proto udp_prot = {
-  sock_wmalloc,
-  sock_rmalloc,
-  sock_wfree,
-  sock_rfree,
-  sock_rspace,
-  sock_wspace,
-  udp_close,
-  udp_read,
-  udp_write,
-  udp_sendto,
-  udp_recvfrom,
-  ip_build_header,
-  udp_connect,
-  NULL,
-  ip_queue_xmit,
-  ip_retransmit,
-  NULL,
-  NULL,
-  udp_rcv,
-  datagram_select,
-  udp_ioctl,
-  NULL,
-  NULL,
-  ip_setsockopt,
-  ip_getsockopt,
-  128,
-  0,
-  {NULL,},
-  "UDP"
+	sock_wmalloc,
+	sock_rmalloc,
+	sock_wfree,
+	sock_rfree,
+	sock_rspace,
+	sock_wspace,
+	udp_close,
+	udp_read,
+	udp_write,
+	udp_sendto,
+	udp_recvfrom,
+	ip_build_header,
+	udp_connect,
+	NULL,
+	ip_queue_xmit,
+	NULL,
+	NULL,
+	NULL,
+	udp_rcv,
+	datagram_select,
+	udp_ioctl,
+	NULL,
+	NULL,
+	ip_setsockopt,
+	ip_getsockopt,
+	128,
+	0,
+	{NULL,},
+	"UDP",
+	0, 0
 };
+

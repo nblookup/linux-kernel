@@ -22,8 +22,17 @@ struct serial_struct {
 	unsigned short	close_delay;
 	char	reserved_char[2];
 	int	hub6;
-	int	reserved[5];
+	unsigned short	closing_wait; /* time to wait before closing */
+	unsigned short	closing_wait2; /* no longer used... */
+	int	reserved[4];
 };
+
+/*
+ * For the close wait times, 0 means wait forever for serial port to
+ * flush its output.  65535 means don't wait at all.
+ */
+#define ASYNC_CLOSING_WAIT_INF	0
+#define ASYNC_CLOSING_WAIT_NONE	65535
 
 /*
  * These are the supported serial types.
@@ -33,7 +42,9 @@ struct serial_struct {
 #define PORT_16450	2
 #define PORT_16550	3
 #define PORT_16550A	4
-#define PORT_MAX	4
+#define PORT_CIRRUS     5
+#define PORT_16650	6
+#define PORT_MAX	6
 
 /*
  * Definitions for async_struct (and serial_struct) flags field
@@ -69,6 +80,23 @@ struct serial_struct {
 #define ASYNC_CTS_FLOW		0x04000000 /* Do CTS flow control */
 #define ASYNC_CHECK_CD		0x02000000 /* i.e., CLOCAL */
 
+/*
+ * Multiport serial configuration structure --- external structure
+ */
+struct serial_multiport_struct {
+	int		irq;
+	int		port1;
+	unsigned char	mask1, match1;
+	int		port2;
+	unsigned char	mask2, match2;
+	int		port3;
+	unsigned char	mask3, match3;
+	int		port4;
+	unsigned char	mask4, match4;
+	int		port_monitor;
+	int	reserved[32];
+};
+
 #ifdef __KERNEL__
 /*
  * This is our internal structure for each serial port's state.
@@ -93,12 +121,15 @@ struct async_struct {
 	int			timeout;
 	int			xmit_fifo_size;
 	int			custom_divisor;
-	int			x_char;	/* xon/xoff characater */
+	int			x_char;	/* xon/xoff character */
 	int			close_delay;
+	unsigned short		closing_wait;
+	unsigned short		closing_wait2;
 	int			IER; 	/* Interrupt Enable Register */
 	int			MCR; 	/* Modem control register */
 	int			MCR_noint; /* MCR with interrupts off */
 	int			event;
+	unsigned long		last_active;
 	int			line;
 	int			count;	    /* # of fd on device */
 	int			blocked_open; /* # of blocked opens */
@@ -131,5 +162,23 @@ struct async_struct {
 #define RS_EVENT_WRITE_WAKEUP	0
 #define RS_EVENT_HANGUP		1
 
+/*
+ * Multiport serial configuration structure --- internal structure
+ */
+struct rs_multiport_struct {
+	int		port1;
+	unsigned char	mask1, match1;
+	int		port2;
+	unsigned char	mask2, match2;
+	int		port3;
+	unsigned char	mask3, match3;
+	int		port4;
+	unsigned char	mask4, match4;
+	int		port_monitor;
+};
+
+/* Export to allow PCMCIA to use this - Dave Hinds */
+extern int register_serial(struct serial_struct *req);
+extern void unregister_serial(int line);
 #endif /* __KERNEL__ */
 #endif /* _LINUX_SERIAL_H */

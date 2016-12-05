@@ -31,6 +31,7 @@
 #include <linux/string.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 #include <linux/config.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
@@ -74,28 +75,6 @@ struct rarp_table
 
 struct rarp_table *rarp_tables = NULL;
 
-/*
- * This structure defines an ethernet arp header, which is the same header
- * that is used for rarp.
- */
-
-struct arphdr
-{
-	unsigned short  ar_hrd;               /* format of hardware address  */
-	unsigned short  ar_pro;               /* format of protocol address  */
-	unsigned char   ar_hln;               /* length of hardware address  */
-	unsigned char   ar_pln;               /* length of protocol address  */
-	unsigned short  ar_op;                /* ARP opcode (command)        */
-#if 0
-  /*
-   *	Ethernet looks like this : This bit is variable sized however...
-   */
-	unsigned char   ar_sha[ETH_ALEN];     /* sender hardware address     */
-	unsigned char   ar_sip[4];            /* sender IP address           */
-	unsigned char   ar_tha[ETH_ALEN];     /* target hardware address     */
-	unsigned char   ar_tip[4];            /* target IP address           */
-#endif
-};
 
 static struct packet_type rarp_packet_type =
 {
@@ -173,7 +152,7 @@ int rarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	unsigned char *sha,*tha;            /* s for "source", t for "target" */
   
 /*
- *	If this test doesn't pass, its not IP, or we should ignore it anyway
+ *	If this test doesn't pass, it's not IP, or we should ignore it anyway
  */
 
 	if (rarp->ar_hln != dev->addr_len || dev->type != ntohs(rarp->ar_hrd) 
@@ -223,13 +202,13 @@ int rarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 	memcpy(&tip,rarp_ptr,4);
 
 /*
- *	Process entry
+ *	Process entry. Use tha for table lookup according to RFC903.
  */
   
 	cli();
 	for (entry = rarp_tables; entry != NULL; entry = entry->next)
-	if (!memcmp(entry->ha, sha, rarp->ar_hln))
-		break;
+		if (!memcmp(entry->ha, tha, rarp->ar_hln))
+			break;
   
 	if (entry != NULL)
 	{

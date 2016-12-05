@@ -21,6 +21,9 @@
  *		Alan Cox	:	Added BSD route gw semantics
  *		Alan Cox	:	Super /proc >4K 
  *		Alan Cox	:	MTU in route table
+ *		Alan Cox	: 	MSS actually. Also added the window
+ *					clamper.
+ *		Sam Lantinga	:	Fixed route matching in rt_del()
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -33,6 +36,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
@@ -64,7 +68,7 @@ static struct rtable *rt_loopback = NULL;
  *	Remove a routing table entry.
  */
 
-static void rt_del(unsigned long dst)
+static void rt_del(unsigned long dst, char *devname)
 {
 	struct rtable *r, **rp;
 	unsigned long flags;
@@ -80,7 +84,9 @@ static void rt_del(unsigned long dst)
 	cli();
 	while((r = *rp) != NULL) 
 	{
-		if (r->rt_dst != dst) 
+		/* Make sure both the destination and the device match */
+		if ( r->rt_dst != dst ||
+		(devname != NULL && strcmp((r->rt_dev)->name,devname) != 0) )
 		{
 			rp = &r->rt_next;
 			continue;
@@ -111,8 +117,8 @@ void ip_rt_flush(struct device *dev)
 	unsigned long flags;
 
 	rp = &rt_base;
-	cli();
 	save_flags(flags);
+	cli();
 	while ((r = *rp) != NULL) {
 		if (r->rt_dev != dev) {
 			rp = &r->rt_next;
@@ -195,7 +201,7 @@ static inline struct device * get_gw_dev(unsigned long gw)
  */
  
 void ip_rt_add(short flags, unsigned long dst, unsigned long mask,
-	unsigned long gw, struct device *dev, unsigned short mtu)
+	unsigned long gw, struct device *dev, unsigned short mtu, unsigned long window)
 {
 	struct rtable *r, *rt;
 	struct rtable **rp;
@@ -267,12 +273,16 @@ void ip_rt_add(short flags, unsigned long dst, unsigned long mask,
 	rt->rt_dev = dev;
 	rt->rt_gateway = gw;
 	rt->rt_mask = mask;
-	rt->rt_mtu = dev->mtu;
+	rt->rt_mss = dev->mtu - HEADER_SIZE;
+	rt->rt_window = 0;	/* Default is no clamping */
 
 	/* Are the MSS/Window valid ? */
 
-	if(rt->rt_flags & RTF_MTU)
-		rt->rt_mtu = mtu;
+	if(rt->rt_flags & RTF_MSS)
+		rt->rt_mss = mtu;
+		
+	if(rt->rt_flags & RTF_WINDOW)
+		rt->rt_window = window;
 
 	/*
 	 *	What we have to do is loop though this until we have
@@ -291,7 +301,8 @@ void ip_rt_add(short flags, unsigned long dst, unsigned long mask,
 	rp = &rt_base;
 	while ((r = *rp) != NULL) 
 	{
-		if (r->rt_dst != dst) 
+		if (r->rt_dst != dst || 
+		    r->rt_mask != mask) 
 		{
 			rp = &r->rt_next;
 			continue;
@@ -319,7 +330,7 @@ void ip_rt_add(short flags, unsigned long dst, unsigned long mask,
 	 *	Update the loopback route
 	 */
 	 
-	if (rt->rt_dev->flags & IFF_LOOPBACK)
+	if ((rt->rt_dev->flags & IFF_LOOPBACK) && !rt_loopback)
 		rt_loopback = rt;
 		
 	/*
@@ -449,7 +460,7 @@ static int rt_new(struct rtentry *r)
 	 *	Add the route
 	 */
 	 
-	ip_rt_add(flags, daddr, mask, gw, dev, r->rt_mtu);
+	ip_rt_add(flags, daddr, mask, gw, dev, r->rt_mss, r->rt_window);
 	return 0;
 }
 
@@ -461,9 +472,19 @@ static int rt_new(struct rtentry *r)
 static int rt_kill(struct rtentry *r)
 {
 	struct sockaddr_in *trg;
+	char *devname;
+	int err;
 
 	trg = (struct sockaddr_in *) &r->rt_dst;
-	rt_del(trg->sin_addr.s_addr);
+	if ((devname = r->rt_dev) != NULL) 
+	{
+		err = getname(devname, &devname);
+		if (err)
+			return err;
+	}
+	rt_del(trg->sin_addr.s_addr, devname);
+	if ( devname != NULL )
+		putname(devname);
 	return 0;
 }
 
@@ -481,7 +502,7 @@ int rt_get_info(char *buffer, char **start, off_t offset, int length)
 	int size;
 
 	len += sprintf(buffer,
-		 "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\n");
+		 "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\n");
 	pos=len;
   
 	/*
@@ -490,10 +511,10 @@ int rt_get_info(char *buffer, char **start, off_t offset, int length)
 	 
 	for (r = rt_base; r != NULL; r = r->rt_next) 
 	{
-        	size = sprintf(buffer+len, "%s\t%08lX\t%08lX\t%02X\t%d\t%lu\t%d\t%08lX\t%d\n",
+        	size = sprintf(buffer+len, "%s\t%08lX\t%08lX\t%02X\t%d\t%lu\t%d\t%08lX\t%d\t%lu\n",
 			r->rt_dev->name, r->rt_dst, r->rt_gateway,
 			r->rt_flags, r->rt_refcnt, r->rt_use, r->rt_metric,
-			r->rt_mask, (int)r->rt_mtu);
+			r->rt_mask, (int)r->rt_mss, r->rt_window);
 		len+=size;
 		pos+=size;
 		if(pos<offset)
@@ -536,9 +557,10 @@ struct rtable * ip_rt_route(unsigned long daddr, struct options *opt, unsigned l
 		/*
 		 *	broadcast addresses can be special cases.. 
 		 */
-		 
+		if (rt->rt_flags & RTF_GATEWAY)
+			continue;		 
 		if ((rt->rt_dev->flags & IFF_BROADCAST) &&
-		     rt->rt_dev->pa_brdaddr == daddr)
+		    (rt->rt_dev->pa_brdaddr == daddr))
 			break;
 	}
 	

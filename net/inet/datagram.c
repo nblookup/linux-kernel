@@ -17,11 +17,10 @@
  *		Florian  La Roche:	Changed for my new skbuff handling.
  *
  *	Note:
- *		A lot of this will change when the protocol/socket seperation
+ *		A lot of this will change when the protocol/socket separation
  *	occurs. Using this will make things reasonably clean.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <asm/segment.h>
@@ -53,8 +52,10 @@
 struct sk_buff *skb_recv_datagram(struct sock *sk, unsigned flags, int noblock, int *err)
 {
 	struct sk_buff *skb;
+	unsigned long intflags;
 
 	/* Socket is inuse - so the timer doesn't attack it */
+	save_flags(intflags);
 restart:
 	sk->inuse = 1;
 	while(skb_peek(&sk->receive_queue) == NULL)	/* No data */
@@ -101,25 +102,25 @@ restart:
 			/* Signals may need a restart of the syscall */
 			if (current->signal & ~current->blocked)
 			{
-				sti();
+				restore_flags(intflags);;
 				*err=-ERESTARTSYS;
 				return(NULL);
 			}
 			if(sk->err != 0)	/* Error while waiting for packet
 						   eg an icmp sent earlier by the
-						   peer has finaly turned up now */
+						   peer has finally turned up now */
 			{
 				*err = -sk->err;
-				sti();
 				sk->err=0;
+				restore_flags(intflags);
 				return NULL;
 			}
 		}
 		sk->inuse = 1;
-		sti();
+		restore_flags(intflags);
 	  }
 	  /* Again only user level code calls this function, so nothing interrupt level
-	     will suddenely eat the receive_queue */
+	     will suddenly eat the receive_queue */
 	  if (!(flags & MSG_PEEK))
 	  {
 		skb=skb_dequeue(&sk->receive_queue);
@@ -134,7 +135,7 @@ restart:
 		skb=skb_peek(&sk->receive_queue);
 		if(skb!=NULL)
 			skb->users++;
-		sti();
+		restore_flags(intflags);
 		if(skb==NULL)	/* shouldn't happen but .. */
 			*err=-EAGAIN;
 	  }
@@ -154,7 +155,7 @@ void skb_free_datagram(struct sk_buff *skb)
 		return;
 	}
 	/* See if it needs destroying */
-	if(!skb->next && !skb->prev)	/* Been dequeued by someone - ie its read */
+	if(!skb->next && !skb->prev)	/* Been dequeued by someone - ie it's read */
 		kfree_skb(skb,FREE_READ);
 	restore_flags(flags);
 }

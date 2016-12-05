@@ -1,5 +1,5 @@
 #
-# Makefile for the Linix TCP/IP (INET) layer.
+# Makefile for the Linux TCP/IP (INET) layer.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
@@ -8,26 +8,26 @@
 # Note 2! The CFLAGS definition is now in the main makefile...
 
 .c.o:
-	$(CC) $(CFLAGS) -c -o $*.o $<
+	$(CC) $(CFLAGS) -c $<
 .s.o:
 	$(AS) -o $*.o $<
 .c.s:
-	$(CC) $(CFLAGS) -S -o $*.s $<
+	$(CC) $(CFLAGS) -S $<
 
 
-OBJS	:= sock.o eth.o dev.o skbuff.o datagram.o
+OBJS	:= sock.o eth.o dev.o dev_mcast.o skbuff.o datagram.o
 
 ifdef CONFIG_INET
 
 OBJS	:= $(OBJS) utils.o route.o proc.o timer.o protocol.o packet.o \
-		   arp.o ip.o raw.o icmp.o tcp.o udp.o devinet.o af_inet.o
-
-endif
+		   arp.o ip.o raw.o icmp.o tcp.o udp.o devinet.o af_inet.o \
+		   igmp.o ip_fw.o 
 
 ifdef CONFIG_INET_RARP
 
 OBJS	:= $(OBJS) rarp.o
 
+endif
 endif
 
 ifdef CONFIG_AX25
@@ -39,8 +39,17 @@ endif
 ifdef CONFIG_IPX
 
 OBJS	:= $(OBJS) ipx.o pe2.o p8022.o p8023.o
+SNAPO	:= psnap.o
 
 endif
+
+ifdef CONFIG_ATALK
+
+OBJS	:= $(OBJS) aarp.o ddp.o
+SNAPO	:= psnap.o
+endif
+
+OBJS	:= $(OBJS) $(SNAPO)
 
 ifdef CONFIG_NET
 
@@ -50,7 +59,7 @@ inet.o:		$(OBJS)
 else
 
 inet.o:
-		echo | $(AS) -o inet.o
+		$(AR) rcs inet.o
 
 endif
 

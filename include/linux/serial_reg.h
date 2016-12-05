@@ -16,11 +16,13 @@
 
 #define UART_RX		0	/* In:  Receive buffer (DLAB=0) */
 #define UART_TX		0	/* Out: Transmit buffer (DLAB=0) */
-#define UART_DLL	0	/* Out: Devisor Latch Low (DLAB=1) */
-#define UART_DLM	1	/* Out: Devisor Latch High (DLAB=1) */
+#define UART_DLL	0	/* Out: Divisor Latch Low (DLAB=1) */
+#define UART_DLM	1	/* Out: Divisor Latch High (DLAB=1) */
 #define UART_IER	1	/* Out: Interrupt Enable Register */
 #define UART_IIR	2	/* In:  Interrupt ID Register */
 #define UART_FCR	2	/* Out: FIFO Control Register */
+#define UART_EFR	2	/* I/O: Extended Features Register */
+				/* (DLAB=1, 16C660 only) */
 #define UART_LCR	3	/* Out: Line Control Register */
 #define UART_MCR	4	/* Out: Modem Control Register */
 #define UART_LSR	5	/* In:  Line Status Register */
@@ -29,6 +31,7 @@
 
 /*
  * These are the definitions for the FIFO Control Register
+ * (16650 only)
  */
 #define UART_FCR_ENABLE_FIFO	0x01 /* Enable the FIFO */
 #define UART_FCR_CLEAR_RCVR	0x02 /* Clear the RCVR FIFO */
@@ -39,6 +42,15 @@
 #define UART_FCR_TRIGGER_4	0x40 /* Mask for trigger set at 4 */
 #define UART_FCR_TRIGGER_8	0x80 /* Mask for trigger set at 8 */
 #define UART_FCR_TRIGGER_14	0xC0 /* Mask for trigger set at 14 */
+/* 16650 redefinitions */
+#define UART_FCR6_R_TRIGGER_8	0x00 /* Mask for receive trigger set at 1 */
+#define UART_FCR6_R_TRIGGER_16	0x40 /* Mask for receive trigger set at 4 */
+#define UART_FCR6_R_TRIGGER_24  0x80 /* Mask for receive trigger set at 8 */
+#define UART_FCR6_R_TRIGGER_28	0xC0 /* Mask for receive trigger set at 14 */
+#define UART_FCR6_T_TRIGGER_16	0x00 /* Mask for transmit trigger set at 16 */
+#define UART_FCR6_T_TRIGGER_8	0x10 /* Mask for transmit trigger set at 8 */
+#define UART_FCR6_T_TRIGGER_24  0x20 /* Mask for transmit trigger set at 24 */
+#define UART_FCR6_T_TRIGGER_30	0x30 /* Mask for transmit trigger set at 30 */
 
 /*
  * These are the definitions for the Line Control Register
@@ -46,10 +58,10 @@
  * Note: if the word length is 5 bits (UART_LCR_WLEN5), then setting 
  * UART_LCR_STOP will select 1.5 stop bits, not 2 stop bits.
  */
-#define UART_LCR_DLAB	0x80	/* Devisor latch access bit */
+#define UART_LCR_DLAB	0x80	/* Divisor latch access bit */
 #define UART_LCR_SBC	0x40	/* Set break control */
 #define UART_LCR_SPAR	0x20	/* Stick parity (?) */
-#define UART_LCR_EPAR	0x10	/* Even paraity select */
+#define UART_LCR_EPAR	0x10	/* Even parity select */
 #define UART_LCR_PARITY	0x08	/* Parity Enable */
 #define UART_LCR_STOP	0x04	/* Stop bits: 0=1 stop bit, 1= 2 stop bits */
 #define UART_LCR_WLEN5  0x00	/* Wordlength: 5 bits */
@@ -69,7 +81,7 @@
 #define UART_LSR_DR	0x01	/* Receiver data ready */
 
 /*
- * These are the definitions for the Interrupt Indentification Register
+ * These are the definitions for the Interrupt Identification Register
  */
 #define UART_IIR_NO_INT	0x01	/* No interrupts pending */
 #define UART_IIR_ID	0x06	/* Mask for the interrupt ID */
@@ -108,6 +120,18 @@
 #define UART_MSR_DDSR	0x02	/* Delta DSR */
 #define UART_MSR_DCTS	0x01	/* Delta CTS */
 #define UART_MSR_ANY_DELTA 0x0F	/* Any of the delta bits! */
+
+/*
+ * These are the definitions for the Extended Features Register
+ * (StarTech 16C660 only, when DLAB=1)
+ */
+#define UART_EFR_CTS	0x80	/* CTS flow control */
+#define UART_EFR_RTS	0x40	/* RTS flow control */
+#define UART_EFR_SCD	0x20	/* Special character detect */
+#define UART_EFR_ENI	0x10	/* Enhanced Interrupt */
+/*
+ * the low four bits control software flow control
+ */
 
 #endif /* _LINUX_SERIAL_REG_H */
 

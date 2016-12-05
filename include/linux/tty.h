@@ -5,6 +5,8 @@
  * 'tty.h' defines some structures used by tty_io.c and some defines.
  */
 
+#ifdef __KERNEL__
+#include <linux/fs.h>
 #include <linux/termios.h>
 #include <linux/tqueue.h>
 #include <linux/tty_driver.h>
@@ -12,11 +14,18 @@
 
 #include <asm/system.h>
 
+
 /*
  * Note: don't mess with NR_PTYS until you understand the tty minor 
  * number allocation game...
+ * (Note: the *_driver.minor_start values 1, 64, 128, 192 are
+ * hardcoded at present.)
  */
-#define NR_CONSOLES	8
+#define MIN_NR_CONSOLES	1	/* must be at least 1 */
+#define MAX_NR_CONSOLES	63	/* serial lines start at 64 */
+#define MAX_NR_USER_CONSOLES 63	/* must be root to allocate above this */
+		/* Note: the ioctl VT_GETSTATE does not work for
+		   consoles 16 and higher (since it returns a short) */
 #define NR_PTYS		64
 #define NR_LDISCS	16
 
@@ -57,14 +66,14 @@ extern struct screen_info screen_info;
 /*
  * This character is the same as _POSIX_VDISABLE: it cannot be used as
  * a c_cc[] character, but indicates that a particular special character
- * isn't in use (eg VINTR ahs no character etc)
+ * isn't in use (eg VINTR has no character etc)
  */
 #define __DISABLED_CHAR '\0'
 
 /*
  * This is the flip buffer used for the tty driver.  The buffer is
  * located in the tty structure, and is used as a high speed interface
- * between the tty driver and the tty line discpline.
+ * between the tty driver and the tty line discipline.
  */
 #define TTY_FLIPBUF_SIZE 512
 
@@ -190,7 +199,7 @@ struct tty_struct {
 	int pgrp;
 	int session;
 	dev_t	device;
-	int flags;
+	unsigned long flags;
 	int count;
 	struct winsize winsize;
 	unsigned char stopped:1, hw_stopped:1, packet:1;
@@ -208,11 +217,12 @@ struct tty_struct {
 #define N_TTY_BUF_SIZE 4096
 	
 	/*
-	 * The following is data for the N_TTY line discpline.  For
+	 * The following is data for the N_TTY line discipline.  For
 	 * historical reasons, this is included in the tty structure.
 	 */
 	unsigned int column;
 	unsigned char lnext:1, erasing:1, raw:1, real_raw:1, icanon:1;
+	unsigned char closing:1;
 	unsigned short minimum_to_wake;
 	unsigned overrun_time;
 	int num_overrun;
@@ -221,7 +231,7 @@ struct tty_struct {
 	int read_head;
 	int read_tail;
 	int read_cnt;
-	int read_flags[N_TTY_BUF_SIZE/32];
+	unsigned long read_flags[N_TTY_BUF_SIZE/(8*sizeof(unsigned long))];
 	int canon_data;
 	unsigned long canon_head;
 	unsigned int canon_column;
@@ -234,7 +244,7 @@ struct tty_struct {
  * These bits are used in the flags field of the tty structure.
  * 
  * So that interrupts won't be able to mess up the queues,
- * copy_to_cooked must be atomic with repect to itself, as must
+ * copy_to_cooked must be atomic with respect to itself, as must
  * tty->write.  Thus, you must use the inline functions set_bit() and
  * clear_bit() to make things atomic.
  */
@@ -244,6 +254,7 @@ struct tty_struct {
 #define TTY_EXCLUSIVE 3
 #define TTY_DEBUG 4
 #define TTY_DO_WRITE_WAKEUP 5
+#define TTY_PUSH 6
 
 #define TTY_WRITE_FLUSH(tty) tty_write_flush((tty))
 
@@ -253,8 +264,6 @@ extern struct termios tty_std_termios;
 extern struct tty_struct * redirect;
 extern struct tty_ldisc ldiscs[];
 extern int fg_console;
-extern unsigned long video_num_columns;
-extern unsigned long video_num_lines;
 extern struct wait_queue * keypress_wait;
 
 /*	intr=^C		quit=^|		erase=del	kill=^U
@@ -270,17 +279,22 @@ extern long lp_init(long);
 extern long con_init(long);
 extern long pty_init(long);
 extern long tty_init(long);
+extern long vcs_init(long);
+#ifdef CONFIG_CYCLADES
+extern long cy_init(long);
+#endif
 
 extern int tty_paranoia_check(struct tty_struct *tty, dev_t device,
 			      const char *routine);
 extern char *_tty_name(struct tty_struct *tty, char *buf);
 extern char *tty_name(struct tty_struct *tty);
-extern void wait_until_sent(struct tty_struct * tty, int timeout);
+extern void tty_wait_until_sent(struct tty_struct * tty, int timeout);
 extern int tty_check_change(struct tty_struct * tty);
 extern void stop_tty(struct tty_struct * tty);
 extern void start_tty(struct tty_struct * tty);
 extern int tty_register_ldisc(int disc, struct tty_ldisc *new_ldisc);
 extern int tty_register_driver(struct tty_driver *driver);
+extern int tty_unregister_driver(struct tty_driver *driver);
 extern int tty_read_raw_data(struct tty_struct *tty, unsigned char *bufp,
 			     int buflen);
 
@@ -313,12 +327,11 @@ extern int  pty_open(struct tty_struct * tty, struct file * filp);
 
 extern int con_open(struct tty_struct * tty, struct file * filp);
 extern void update_screen(int new_console);
-extern void blank_screen(void);
-extern void unblank_screen(void);
 
 /* vt.c */
 
 extern int vt_ioctl(struct tty_struct *tty, struct file * file,
 		    unsigned int cmd, unsigned long arg);
 
+#endif /* __KERNEL__ */
 #endif

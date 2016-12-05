@@ -1,5 +1,5 @@
 /*
- *  linux/kernel/chr_drv/pty.c
+ *  linux/drivers/char/pty.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
@@ -20,6 +20,7 @@
 #include <linux/fcntl.h>
 #include <linux/string.h>
 #include <linux/major.h>
+#include <linux/mm.h>
 
 #include <asm/segment.h>
 #include <asm/system.h>
@@ -32,9 +33,19 @@ struct pty_struct {
 
 #define PTY_MAGIC 0x5001
 
-#define PTY_BUF_SIZE 1024
+#define PTY_BUF_SIZE PAGE_SIZE/2
 
-static unsigned char tmp_buf[PTY_BUF_SIZE];
+/*
+ * tmp_buf is used as a temporary buffer by pty_write.  We need to
+ * lock it in case the memcpy_fromfs blocks while swapping in a page,
+ * and some other program tries to do a pty write at the same time.
+ * Since the lock will only come under contention when the system is
+ * swapping and available memory is low, it makes sense to share one
+ * buffer across all the PTY's, since it significantly saves memory if
+ * large numbers of PTY's are open.
+ */
+static unsigned char *tmp_buf;
+static struct semaphore tmp_buf_sem = MUTEX;
 
 struct tty_driver pty_driver, pty_slave_driver;
 static int pty_refcount;
@@ -74,28 +85,62 @@ static void pty_close(struct tty_struct * tty, struct file * filp)
 	}
 }
 
+/*
+ * The unthrottle routine is called by the line discipline to signal
+ * that it can receive more characters.  For PTY's, the TTY_THROTTLED
+ * flag is always set, to force the line discipline to always call the
+ * unthrottle routine when there are fewer than TTY_THRESHOLD_UNTHROTTLE 
+ * characters in the queue.  This is necessary since each time this
+ * happens, we need to wake up any sleeping processes that could be
+ * (1) trying to send data to the pty, or (2) waiting in wait_until_sent()
+ * for the pty buffer to be drained.
+ */
+static void pty_unthrottle(struct tty_struct * tty)
+{
+	struct tty_struct *o_tty = tty->link;
+
+	if (!o_tty)
+		return;
+
+	if ((o_tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
+	    o_tty->ldisc.write_wakeup)
+		(o_tty->ldisc.write_wakeup)(o_tty);
+	wake_up_interruptible(&o_tty->write_wait);
+	set_bit(TTY_THROTTLED, &tty->flags);
+}
+
 static int pty_write(struct tty_struct * tty, int from_user,
 		       unsigned char *buf, int count)
 {
 	struct tty_struct *to = tty->link;
-	int	c, n;
+	int	c=0, n, r;
+	char	*temp_buffer;
 
 	if (!to || tty->stopped)
 		return 0;
 	
-	count = MIN(count, to->ldisc.receive_room(to));
-
 	if (from_user) {
-		for (c = count; c > 0; c -= n) {
-			n = MIN(c, PTY_BUF_SIZE);
-			memcpy_fromfs(tmp_buf, buf, n);
-			to->ldisc.receive_buf(to, tmp_buf, 0, n);
-			buf += n;
+		down(&tmp_buf_sem);
+		temp_buffer = tmp_buf +
+			((tty->driver.subtype-1) * PTY_BUF_SIZE);
+		while (count > 0) {
+			n = MIN(count, PTY_BUF_SIZE);
+			memcpy_fromfs(temp_buffer, buf, n);
+			r = to->ldisc.receive_room(to);
+			if (r <= 0)
+				break;
+			n = MIN(n, r);
+			to->ldisc.receive_buf(to, temp_buffer, 0, n);
+			buf += n;  c+= n;
+			count -= n;
 		}
-	} else
-		to->ldisc.receive_buf(to, buf, 0, count);
+		up(&tmp_buf_sem);
+	} else {
+		c = MIN(count, to->ldisc.receive_room(to));
+		to->ldisc.receive_buf(to, buf, 0, c);
+	}
 	
-	return count;
+	return c;
 }
 
 static int pty_write_room(struct tty_struct *tty)
@@ -112,7 +157,7 @@ static int pty_chars_in_buffer(struct tty_struct *tty)
 {
 	struct tty_struct *to = tty->link;
 
-	if (!to)
+	if (!to || !to->ldisc.chars_in_buffer)
 		return 0;
 
 	return to->ldisc.chars_in_buffer(to);
@@ -146,10 +191,17 @@ int pty_open(struct tty_struct *tty, struct file * filp)
 		return -ENODEV;
 	pty = pty_state + line;
 	tty->driver_data = pty;
-	
+
+	if (!tmp_buf) {
+		tmp_buf = (unsigned char *) get_free_page(GFP_KERNEL);
+		if (!tmp_buf)
+			return -ENOMEM;
+	}
+
 	if (tty->driver.subtype == PTY_TYPE_SLAVE)
 		clear_bit(TTY_SLAVE_CLOSED, &tty->link->flags);
 	wake_up_interruptible(&pty->open_wait);
+	set_bit(TTY_THROTTLED, &tty->flags);
 	if (filp->f_flags & O_NDELAY)
 		return 0;
 	while (!tty->link->count && !(current->signal & ~current->blocked))
@@ -173,7 +225,7 @@ long pty_init(long kmem_start)
 	pty_driver.init_termios = tty_std_termios;
 	pty_driver.init_termios.c_iflag = 0;
 	pty_driver.init_termios.c_oflag = 0;
-	pty_driver.init_termios.c_cflag = B9600 | CS8 | CREAD;
+	pty_driver.init_termios.c_cflag = B38400 | CS8 | CREAD;
 	pty_driver.init_termios.c_lflag = 0;
 	pty_driver.flags = TTY_DRIVER_RESET_TERMIOS | TTY_DRIVER_REAL_RAW;
 	pty_driver.refcount = &pty_refcount;
@@ -188,23 +240,25 @@ long pty_init(long kmem_start)
 	pty_driver.write_room = pty_write_room;
 	pty_driver.flush_buffer = pty_flush_buffer;
 	pty_driver.chars_in_buffer = pty_chars_in_buffer;
+	pty_driver.unthrottle = pty_unthrottle;
 
 	pty_slave_driver = pty_driver;
 	pty_slave_driver.name = "ttyp";
 	pty_slave_driver.subtype = PTY_TYPE_SLAVE;
 	pty_slave_driver.minor_start = 192;
 	pty_slave_driver.init_termios = tty_std_termios;
+	pty_slave_driver.init_termios.c_cflag = B38400 | CS8 | CREAD;
 	pty_slave_driver.table = ttyp_table;
 	pty_slave_driver.termios = ttyp_termios;
 	pty_slave_driver.termios_locked = ttyp_termios_locked;
 	pty_slave_driver.other = &pty_driver;
 
+	tmp_buf = 0;
+
 	if (tty_register_driver(&pty_driver))
-		panic("Couldn't register pty driver\n");
+		panic("Couldn't register pty driver");
 	if (tty_register_driver(&pty_slave_driver))
-		panic("Couldn't register pty slave driver\n");
+		panic("Couldn't register pty slave driver");
 	
 	return kmem_start;
 }
-
-	

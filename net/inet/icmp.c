@@ -11,6 +11,7 @@
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *		Mark Evans, <evansmp@uhura.aston.ac.uk>
  *		Alan Cox, <gw4pts@gw4pts.ampr.org>
+ *		Stefan Becker, <stefanb@yello.ping.de>
  *
  * Fixes:	
  *		Alan Cox	:	Generic queue usage.
@@ -21,6 +22,14 @@
  *		Alan Cox	:	Routing errors
  *		Alan Cox	:	Changes for newer routing code
  *		Alan Cox	:	Removed old debugging junk
+ *		Alan Cox	:	Fixed the ICMP error status of net/host unreachable
+ *	Gerhard Koerting	:	Fixed broadcast ping properly
+ *		Ulrich Kunitz	:	Fixed ICMP timestamp reply
+ *		A.N.Kuznetsov	:	Multihoming fixes.
+ *		Laco Rusnak	:	Multihoming fixes.
+ *		Alan Cox	:	Tightened up icmp_send().
+ *		Alan Cox	:	Multicasts.
+ *		Stefan Becker   :       ICMP redirects in icmp_send().
  *
  * 
  *
@@ -65,8 +74,8 @@ struct icmp_mib	icmp_statistics={0,};
 
 /* An array of errno for error messages from dest unreach. */
 struct icmp_err icmp_err_convert[] = {
-  { ENETUNREACH,	1 },	/*	ICMP_NET_UNREACH	*/
-  { EHOSTUNREACH,	1 },	/*	ICMP_HOST_UNREACH	*/
+  { ENETUNREACH,	0 },	/*	ICMP_NET_UNREACH	*/
+  { EHOSTUNREACH,	0 },	/*	ICMP_HOST_UNREACH	*/
   { ENOPROTOOPT,	1 },	/*	ICMP_PROT_UNREACH	*/
   { ECONNREFUSED,	1 },	/*	ICMP_PORT_UNREACH	*/
   { EOPNOTSUPP,		0 },	/*	ICMP_FRAG_NEEDED	*/
@@ -87,7 +96,7 @@ struct icmp_err icmp_err_convert[] = {
  *	Fixme: Fragment handling is wrong really.
  */
  
-void icmp_send(struct sk_buff *skb_in, int type, int code, struct device *dev)
+void icmp_send(struct sk_buff *skb_in, int type, int code, unsigned long info, struct device *dev)
 {
 	struct sk_buff *skb;
 	struct iphdr *iph;
@@ -95,7 +104,9 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, struct device *dev)
 	struct icmphdr *icmph;
 	int len;
 	struct device *ndev=NULL;	/* Make this =dev to force replies on the same interface */
-
+	unsigned long our_addr;
+	int atype;
+	
 	/*
 	 *	Find the original IP header.
 	 */
@@ -103,14 +114,54 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, struct device *dev)
 	iph = (struct iphdr *) (skb_in->data + dev->hard_header_len);
 	
 	/*
+	 *	No replies to MAC multicast
+	 */
+	 
+	if(skb_in->pkt_type!=PACKET_HOST)
+		return;
+		
+	/*
+	 *	No replies to IP multicasting
+	 */
+	 
+	atype=ip_chk_addr(iph->daddr);
+	if(atype==IS_BROADCAST || IN_MULTICAST(iph->daddr))
+		return;
+
+	/*
+	 *	Only reply to first fragment.
+	 */
+	 
+	if(ntohs(iph->frag_off)&IP_OFFSET)
+		return;
+	 		
+	/*
 	 *	We must NEVER NEVER send an ICMP error to an ICMP error message
 	 */
 	 
 	if(type==ICMP_DEST_UNREACH||type==ICMP_REDIRECT||type==ICMP_SOURCE_QUENCH||type==ICMP_TIME_EXCEEDED)
 	{
-		if(iph->protocol==IPPROTO_ICMP)
-			return;
 
+		/*
+		 *	Is the original packet an ICMP packet?
+		 */
+
+		if(iph->protocol==IPPROTO_ICMP)
+		{
+			icmph = (struct icmphdr *) ((char *) iph +
+                                                    4 * iph->ihl);
+			/*
+			 *	Check for ICMP error packets (Must never reply to
+			 *	an ICMP error).
+			 */
+	
+			if (icmph->type == ICMP_DEST_UNREACH ||
+				icmph->type == ICMP_SOURCE_QUENCH ||
+				icmph->type == ICMP_REDIRECT ||
+				icmph->type == ICMP_TIME_EXCEEDED ||
+				icmph->type == ICMP_PARAMETERPROB)
+				return;
+		}
 	}
 	icmp_statistics.IcmpOutMsgs++;
 	
@@ -173,9 +224,12 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, struct device *dev)
 	 *	Build Layer 2-3 headers for message back to source. 
 	 */
 
-	offset = ip_build_header(skb, dev->pa_addr, iph->saddr,
-			   &ndev, IPPROTO_ICMP, NULL, len, skb_in->ip_hdr->tos,255);
-
+	our_addr = dev->pa_addr;
+	if (iph->daddr != our_addr && ip_chk_addr(iph->daddr) == IS_MYADDR)
+		our_addr = iph->daddr;
+	offset = ip_build_header(skb, our_addr, iph->saddr,
+			   &ndev, IPPROTO_ICMP, NULL, len,
+			   skb_in->ip_hdr->tos,255);
 	if (offset < 0) 
 	{
 		icmp_statistics.IcmpOutErrors++;
@@ -198,7 +252,9 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, struct device *dev)
 	icmph->type = type;
 	icmph->code = code;
 	icmph->checksum = 0;
-	icmph->un.gateway = 0;
+	icmph->un.gateway = info;	/* This might not be meant for 
+					   this form of the union but it will
+					   be right anyway */
 	memcpy(icmph + 1, iph, sizeof(struct iphdr) + 8);
 
 	icmph->checksum = ip_compute_csum((unsigned char *)icmph,
@@ -207,7 +263,7 @@ void icmp_send(struct sk_buff *skb_in, int type, int code, struct device *dev)
 	/*
 	 *	Send it and free it once sent.
 	 */
-	ip_queue_xmit(NULL, dev, skb, 1);
+	ip_queue_xmit(NULL, ndev, skb, 1);
 }
 
 
@@ -308,7 +364,7 @@ static void icmp_redirect(struct icmphdr *icmph, struct sk_buff *skb,
 			 */
 #ifdef not_a_good_idea
 			ip_rt_add((RTF_DYNAMIC | RTF_MODIFIED | RTF_GATEWAY),
-				ip, 0, icmph->un.gateway, dev,0);
+				ip, 0, icmph->un.gateway, dev,0, 0);
 			break;
 #endif
 		case ICMP_REDIR_HOST:
@@ -316,15 +372,18 @@ static void icmp_redirect(struct icmphdr *icmph, struct sk_buff *skb,
 			 *	Add better route to host.
 			 *	But first check that the redirect
 			 *	comes from the old gateway..
+			 *	And make sure it's an ok host address
+			 *	(not some confused thing sending our
+			 *	address)
 			 */
 			rt = ip_rt_route(ip, NULL, NULL);
 			if (!rt)
 				break;
-			if (rt->rt_gateway != source)
+			if (rt->rt_gateway != source || ip_chk_addr(icmph->un.gateway))
 				break;
-			printk("redirect from %08lx\n", source);
+			printk("redirect from %s\n", in_ntoa(source));
 			ip_rt_add((RTF_DYNAMIC | RTF_MODIFIED | RTF_HOST | RTF_GATEWAY),
-				ip, 0, icmph->un.gateway, dev,0);
+				ip, 0, icmph->un.gateway, dev,0, 0);
 			break;
 		case ICMP_REDIR_NETTOS:
 		case ICMP_REDIR_HOSTTOS:
@@ -400,7 +459,7 @@ static void icmp_echo(struct icmphdr *icmph, struct sk_buff *skb, struct device 
 	/*
 	 *	Ship it out - free it when done 
 	 */
-	ip_queue_xmit((struct sock *)NULL, dev, skb2, 1);
+	ip_queue_xmit((struct sock *)NULL, ndev, skb2, 1);
 
 	/*
 	 *	Free the received frame
@@ -421,10 +480,22 @@ static void icmp_timestamp(struct icmphdr *icmph, struct sk_buff *skb, struct de
 	struct sk_buff *skb2;
 	int size, offset;
 	unsigned long *timeptr, midtime;
-	extern struct timeval xtime;			/* kernel/time.c */
 	struct device *ndev=NULL;
- 
-	size = dev->hard_header_len + 64 + len;
+
+        if (len != 20)
+	{
+		printk(
+		  "ICMP: Size (%d) of ICMP_TIMESTAMP request should be 20!\n",
+		  len);
+		icmp_statistics.IcmpInErrors++;		
+#if 1
+                /* correct answers are possible for everything >= 12 */
+	  	if (len < 12)
+#endif
+			return;
+	}
+
+	size = dev->hard_header_len + 84;
 
 	if (! (skb2 = alloc_skb(size, GFP_ATOMIC))) 
 	{
@@ -453,14 +524,14 @@ static void icmp_timestamp(struct icmphdr *icmph, struct sk_buff *skb, struct de
 	/*
 	 *	Re-adjust length according to actual IP header size. 
 	 */
-	skb2->len = offset + len;
+	skb2->len = offset + 20;
  
 	/*
 	 *	Build ICMP_TIMESTAMP Response message. 
 	 */
 
 	icmphr = (struct icmphdr *) ((char *) (skb2 + 1) + offset);
-	memcpy((char *) icmphr, (char *) icmph, len);
+	memcpy((char *) icmphr, (char *) icmph, 12);
 	icmphr->type = ICMP_TIMESTAMPREPLY;
 	icmphr->code = icmphr->checksum = 0;
 
@@ -472,13 +543,13 @@ static void icmp_timestamp(struct icmphdr *icmph, struct sk_buff *skb, struct de
 	 */
 	timeptr [1] = timeptr [2] = htonl(midtime);
 
-	icmphr->checksum = ip_compute_csum((unsigned char *) icmphr, len);
+	icmphr->checksum = ip_compute_csum((unsigned char *) icmphr, 20);
 
 	/*
 	 *	Ship it out - free it when done 
 	 */
 
-	ip_queue_xmit((struct sock *) NULL, dev, skb2, 1);
+	ip_queue_xmit((struct sock *) NULL, ndev, skb2, 1);
 	icmp_statistics.IcmpOutTimestampReps++;
 	kfree_skb(skb, FREE_READ);
 }
@@ -500,7 +571,7 @@ static void icmp_info(struct icmphdr *icmph, struct sk_buff *skb, struct device 
 
 
 /* 
- *	Handle ICMP_ADRESS_MASK requests. 
+ *	Handle ICMP_ADDRESS_MASK requests. 
  */
  
 static void icmp_address(struct icmphdr *icmph, struct sk_buff *skb, struct device *dev,
@@ -561,7 +632,7 @@ static void icmp_address(struct icmphdr *icmph, struct sk_buff *skb, struct devi
 	icmphr->checksum = ip_compute_csum((unsigned char *)icmphr, len);
 
 	/* Ship it out - free it when done */
-	ip_queue_xmit((struct sock *)NULL, dev, skb2, 1);
+	ip_queue_xmit((struct sock *)NULL, ndev, skb2, 1);
 
 	skb->sk = NULL;
 	kfree_skb(skb, FREE_READ);
@@ -586,12 +657,6 @@ int icmp_rcv(struct sk_buff *skb1, struct device *dev, struct options *opt,
 	
 	icmp_statistics.IcmpInMsgs++;
 	 
-	if (ip_chk_addr(daddr) == IS_BROADCAST) 
-	{
-		icmp_statistics.IcmpInErrors++;
-		kfree_skb(skb1, FREE_READ);
-		return(0);
-  	}
   	
   	/*
   	 *	Grab the packet as an icmp object
@@ -616,6 +681,17 @@ int icmp_rcv(struct sk_buff *skb1, struct device *dev, struct options *opt,
 	/*
 	 *	Parse the ICMP message 
 	 */
+
+	if (ip_chk_addr(daddr) != IS_MYADDR)
+	{
+		if (icmph->type != ICMP_ECHO) 
+		{
+			icmp_statistics.IcmpInErrors++;
+			kfree_skb(skb1, FREE_READ);
+			return(0);
+  		}
+		daddr=dev->pa_addr;
+	}
 
 	switch(icmph->type) 
 	{
@@ -666,7 +742,7 @@ int icmp_rcv(struct sk_buff *skb1, struct device *dev, struct options *opt,
 		case ICMP_ADDRESSREPLY:
 			/*
 			 *	We ought to set our netmask on receiving this, but 
-			 *	experience shows its a waste of effort.
+			 *	experience shows it's a waste of effort.
 			 */
 			icmp_statistics.IcmpInAddrMaskReps++;
 			kfree_skb(skb1, FREE_READ);

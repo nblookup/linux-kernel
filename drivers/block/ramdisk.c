@@ -8,12 +8,14 @@
  */
 
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/minix_fs.h>
+#include <linux/ext2_fs.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
+#include <linux/mm.h>
+
 #include <asm/system.h>
 #include <asm/segment.h>
 
@@ -22,6 +24,7 @@
 
 #define RAMDISK_MINOR	1
 
+extern void wait_for_keypress(void);
 
 char	*rd_start;
 int	rd_length = 0;
@@ -94,33 +97,30 @@ long rd_init(long mem_start, int length)
 	return(length);
 }
 
-/*
- * If the root device is the RAM disk, try to load it.
- * In order to do this, the root device is originally set to the
- * floppy, and we later change it to be RAM disk.
- */
-void rd_load(void)
+static void do_load(void)
 {
 	struct buffer_head *bh;
-	struct minix_super_block s;
+	struct super_block {
+	  union
+	  {
+	    char minix [sizeof (struct minix_super_block)];
+	    char ext2 [sizeof (struct ext2_super_block)];
+	  } record;
+	} sb;
+	struct minix_super_block *minixsb =
+		(struct minix_super_block *)&sb;
+	struct ext2_super_block *ext2sb =
+		(struct ext2_super_block *)&sb;
 	int		block, tries;
 	int		i = 1;
 	int		nblocks;
 	char		*cp;
-
-	/* If no RAM disk specified, give up early. */
-	if (!rd_length) return;
-	printk("RAMDISK: %d bytes, starting at 0x%x\n",
-					rd_length, (int) rd_start);
-
-	/* If we are doing a diskette boot, we might have to pre-load it. */
-	if (MAJOR(ROOT_DEV) != FLOPPY_MAJOR) return;
-
+	
 	/*
 	 * Check for a super block on the diskette.
 	 * The old-style boot/root diskettes had their RAM image
 	 * starting at block 512 of the boot diskette.  LINUX/Pro
-	 * uses the enire diskette as a file system, so in that
+	 * uses the entire diskette as a file system, so in that
 	 * case, we have to look at block 0.  Be intelligent about
 	 * this, and check both... - FvK
 	 */
@@ -133,12 +133,32 @@ void rd_load(void)
 		}
 
 		/* This is silly- why do we require it to be a MINIX FS? */
-		*((struct minix_super_block *) &s) =
-			*((struct minix_super_block *) bh->b_data);
+		*((struct super_block *) &sb) =
+			*((struct super_block *) bh->b_data);
 		brelse(bh);
-		nblocks = s.s_nzones << s.s_log_zone_size;
-		if (s.s_magic != MINIX_SUPER_MAGIC &&
-		    s.s_magic != MINIX_SUPER_MAGIC2) {
+
+
+		/* Try Minix */
+		nblocks = -1;
+		if (minixsb->s_magic == MINIX_SUPER_MAGIC ||
+		    minixsb->s_magic == MINIX_SUPER_MAGIC2) {
+			printk("RAMDISK: Minix filesystem found at block %d\n",
+				block);
+			nblocks = minixsb->s_nzones << minixsb->s_log_zone_size;
+		}
+
+		/* Try ext2 */
+		if (nblocks == -1 && (ext2sb->s_magic ==
+			EXT2_PRE_02B_MAGIC ||
+			ext2sb->s_magic == EXT2_SUPER_MAGIC))
+	        {
+			printk("RAMDISK: Ext2 filesystem found at block %d\n",
+				block);
+			nblocks = ext2sb->s_blocks_count;
+		}
+
+		if (nblocks == -1)
+		{
 			printk("RAMDISK: trying old-style RAM image.\n");
 			continue;
 		}
@@ -174,5 +194,41 @@ void rd_load(void)
 		/* We loaded the file system image.  Prepare for mounting it. */
 		ROOT_DEV = ((MEM_MAJOR << 8) | RAMDISK_MINOR);
 		return;
+	}
+}
+
+/*
+ * If the root device is the RAM disk, try to load it.
+ * In order to do this, the root device is originally set to the
+ * floppy, and we later change it to be RAM disk.
+ */
+void rd_load(void)
+{
+	struct inode inode;
+	struct file filp;
+
+	/* If no RAM disk specified, give up early. */
+	if (!rd_length)
+		return;
+	printk("RAMDISK: %d bytes, starting at 0x%p\n",
+			rd_length, rd_start);
+
+	/* If we are doing a diskette boot, we might have to pre-load it. */
+	if (MAJOR(ROOT_DEV) != FLOPPY_MAJOR)
+		return;
+
+	/* for Slackware install disks */
+	printk(KERN_NOTICE "VFS: Insert ramdisk floppy and press ENTER\n");
+	wait_for_keypress();
+
+	memset(&filp, 0, sizeof(filp));
+	memset(&inode, 0, sizeof(inode));
+	inode.i_rdev = ROOT_DEV;
+	filp.f_mode = 1; /* read only */
+	filp.f_inode = &inode;
+	if(blkdev_open(&inode, &filp) == 0 ){
+		do_load();
+		if(filp.f_op && filp.f_op->release)
+			filp.f_op->release(&inode,&filp);
 	}
 }
