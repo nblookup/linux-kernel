@@ -157,7 +157,7 @@ static int UMSDOS_rrmdir ( struct inode *dir, struct dentry *dentry)
 		goto out;
 
 	ret = -EBUSY;
-	if (!list_empty(&dentry->d_hash))
+	if (!d_unhashed(dentry))
 		goto out;
 
 	ret = msdos_rmdir (dir, dentry);
@@ -218,41 +218,20 @@ out:
  * have a "r" prefix (r for real) such as UMSDOS_rlookup, to differentiate
  * from the one with full UMSDOS semantics.
  */
-static struct file_operations umsdos_rdir_operations =
+struct file_operations umsdos_rdir_operations =
 {
-	NULL,			/* lseek - default */
-	dummy_dir_read,		/* read */
-	NULL,			/* write - bad */
-	UMSDOS_rreaddir,	/* readdir */
-	NULL,			/* poll - default */
-	UMSDOS_ioctl_dir,	/* ioctl - default */
-	NULL,			/* mmap */
-	NULL,			/* no special open code */
-	NULL,			/* flush */
-	NULL,			/* no special release code */
-	NULL			/* fsync */
+	read:		generic_read_dir,
+	readdir:	UMSDOS_rreaddir,
+	ioctl:		UMSDOS_ioctl_dir,
 };
 
 struct inode_operations umsdos_rdir_inode_operations =
 {
-	&umsdos_rdir_operations,	/* default directory file-ops */
-	msdos_create,		/* create */
-	UMSDOS_rlookup,		/* lookup */
-	NULL,			/* link */
-	msdos_unlink,		/* unlink */
-	NULL,			/* symlink */
-	msdos_mkdir,		/* mkdir */
-	UMSDOS_rrmdir,		/* rmdir */
-	NULL,			/* mknod */
-	msdos_rename,		/* rename */
-	NULL,			/* readlink */
-	NULL,			/* followlink */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* bmap */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL,			/* updatepage */
-	NULL,			/* revalidate */
+	create:		msdos_create,
+	lookup:		UMSDOS_rlookup,
+	unlink:		msdos_unlink,
+	mkdir:		msdos_mkdir,
+	rmdir:		UMSDOS_rrmdir,
+	rename:		msdos_rename,
+	setattr:	UMSDOS_notify_change,
 };

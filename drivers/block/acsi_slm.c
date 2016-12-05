@@ -65,6 +65,7 @@ not be guaranteed. There are several ways to assure this:
 #include <linux/time.h>
 #include <linux/mm.h>
 #include <linux/malloc.h>
+#include <linux/devfs_fs_kernel.h>
 
 #include <asm/pgtable.h>
 #include <asm/system.h>
@@ -143,8 +144,8 @@ static unsigned long	SLMSliceSize;	/* size of one DMA chunk */
 static int				SLMError;
 
 /* wait queues */
-static struct wait_queue *slm_wait;		/* waiting for buffer */
-static struct wait_queue *print_wait;	/* waiting for printing finished */
+static DECLARE_WAIT_QUEUE_HEAD(slm_wait);	/* waiting for buffer */
+static DECLARE_WAIT_QUEUE_HEAD(print_wait);	/* waiting for printing finished */
 
 /* status codes */
 #define	SLMSTAT_OK		0x00
@@ -271,17 +272,11 @@ static int slm_get_pagesize( int device, int *w, int *h );
 static struct timer_list slm_timer = { NULL, NULL, 0, 0, slm_test_ready };
 
 static struct file_operations slm_fops = {
-	NULL,			/* lseek - default */
-	slm_read,		/* read - status reading */
-	slm_write,		/* write - printing data write */
-	NULL,			/* readdir - bad */
-	NULL,			/* poll */
-	slm_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	slm_open,		/* open */
-	NULL,			/* flush */
-	slm_release,		/* release */
-	NULL			/* fsync */
+	read:		slm_read,
+	write:		slm_write,
+	ioctl:		slm_ioctl,
+	open:		slm_open,
+	release:	slm_release,
 };
 
 
@@ -413,8 +408,8 @@ static void start_print( int device )
 
 	CMDSET_TARG_LUN( slmprint_cmd, sip->target, sip->lun );
 	cmd = slmprint_cmd;
-	paddr = VTOP( SLMBuffer );
-	dma_cache_maintenance( paddr, VTOP(BufferP)-paddr, 1 );
+	paddr = virt_to_phys( SLMBuffer );
+	dma_cache_maintenance( paddr, virt_to_phys(BufferP)-paddr, 1 );
 	DISABLE_IRQ();
 
 	/* Low on A1 */
@@ -466,7 +461,7 @@ static void slm_interrupt(int irc, void *data, struct pt_regs *fp)
 	addr = get_dma_addr();
 	stat = acsi_getstatus();
 	SLMError = (stat < 0)             ? SLMSTAT_ACSITO :
-		       (addr < VTOP(BufferP)) ? SLMSTAT_NOTALL :
+		       (addr < virt_to_phys(BufferP)) ? SLMSTAT_NOTALL :
 									    stat;
 
 	dma_wd.dma_mode_status = 0x80;
@@ -993,23 +988,28 @@ int attach_slm( int target, int lun )
 	return( 1 );
 }
 
+static devfs_handle_t devfs_handle = NULL;
 
 int slm_init( void )
 
 {
-	if (register_chrdev( MAJOR_NR, "slm", &slm_fops )) {
+	if (devfs_register_chrdev( MAJOR_NR, "slm", &slm_fops )) {
 		printk( KERN_ERR "Unable to get major %d for ACSI SLM\n", MAJOR_NR );
 		return -EBUSY;
 	}
 	
 	if (!(SLMBuffer = atari_stram_alloc( SLM_BUFFER_SIZE, NULL, "SLM" ))) {
 		printk( KERN_ERR "Unable to get SLM ST-Ram buffer.\n" );
-		unregister_chrdev( MAJOR_NR, "slm" );
+		devfs_unregister_chrdev( MAJOR_NR, "slm" );
 		return -ENOMEM;
 	}
 	BufferP = SLMBuffer;
 	SLMState = IDLE;
 	
+	devfs_handle = devfs_mk_dir (NULL, "slm", 3, NULL);
+	devfs_register_series (devfs_handle, "%u", MAX_SLM, DEVFS_FL_DEFAULT,
+			       MAJOR_NR, 0, S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			       &slm_fops, NULL);
 	return 0;
 }
 
@@ -1032,7 +1032,8 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-	if (unregister_chrdev( MAJOR_NR, "slm" ) != 0)
+	devfs_unregister (devfs_handle);
+	if (devfs_unregister_chrdev( MAJOR_NR, "slm" ) != 0)
 		printk( KERN_ERR "acsi_slm: cleanup_module failed\n");
 	atari_stram_free( SLMBuffer );
 }

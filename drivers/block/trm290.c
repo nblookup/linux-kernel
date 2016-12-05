@@ -1,5 +1,5 @@
 /*
- *  linux/drivers/block/trm290.c	Version 1.01  December 5, 1997
+ *  linux/drivers/block/trm290.c		Version 1.01	December 5, 1997
  *
  *  Copyright (c) 1997-1998  Mark Lord
  *  May be copied or modified under the terms of the GNU General Public License
@@ -134,10 +134,9 @@
 #include <linux/hdreg.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
+#include <linux/ide.h>
 
 #include <asm/io.h>
-
-#include "ide.h"
 
 static void trm290_prepare_drive (ide_drive_t *drive, unsigned int use_dma)
 {
@@ -185,21 +184,22 @@ static int trm290_dmaproc (ide_dma_action_t func, ide_drive_t *drive)
 			break;	/* always use PIO for writes */
 #endif
 		case ide_dma_read:
-			if (!(count = ide_build_dmatable(drive)))
+			if (!(count = ide_build_dmatable(drive, func)))
 				break;		/* try PIO instead of DMA */
 			trm290_prepare_drive(drive, 1);	/* select DMA xfer */
-			outl(virt_to_bus(hwif->dmatable)|reading|writing, hwif->dma_base);
+			outl(hwif->dmatable_dma|reading|writing, hwif->dma_base);
 			drive->waiting_for_dma = 1;
 			outw((count * 2) - 1, hwif->dma_base+2); /* start DMA */
 			if (drive->media != ide_disk)
 				return 0;
-			ide_set_handler(drive, &ide_dma_intr, WAIT_CMD);
+			ide_set_handler(drive, &ide_dma_intr, WAIT_CMD, NULL);
 			OUT_BYTE(reading ? WIN_READDMA : WIN_WRITEDMA, IDE_COMMAND_REG);
 			return 0;
 		case ide_dma_begin:
 			return 0;
 		case ide_dma_end:
 			drive->waiting_for_dma = 0;
+			ide_destroy_dmatable(drive);		/* purge DMA mappings */
 			return (inw(hwif->dma_base+2) != 0x00ff);
 		case ide_dma_test_irq:
 			return (inw(hwif->dma_base+2) == 0x00ff);
@@ -213,7 +213,7 @@ static int trm290_dmaproc (ide_dma_action_t func, ide_drive_t *drive)
 /*
  * Invoked from ide-dma.c at boot time.
  */
-__initfunc(void ide_init_trm290 (ide_hwif_t *hwif))
+void __init ide_init_trm290 (ide_hwif_t *hwif)
 {
 	unsigned int cfgbase = 0;
 	unsigned long flags;
@@ -221,7 +221,7 @@ __initfunc(void ide_init_trm290 (ide_hwif_t *hwif))
 	struct pci_dev *dev = hwif->pci_dev;
 
 	hwif->chipset = ide_trm290;
-	cfgbase = dev->base_address[4];
+	cfgbase = dev->resource[4].start;
 	if ((dev->class & 5) && cfgbase)
 	{
 		hwif->config_data = cfgbase & PCI_BASE_ADDRESS_IO_MASK;
@@ -264,7 +264,16 @@ __initfunc(void ide_init_trm290 (ide_hwif_t *hwif))
 		old = inw(hwif->config_data) & ~1;
 		if (old != compat && inb(old+2) == 0xff) {
 			compat += (next_offset += 0x400);	/* leave lower 10 bits untouched */
-			hwif->io_ports[IDE_CONTROL_OFFSET] = compat + 2;	/* FIXME: should do a check_region */
+#if 1
+			if (ide_check_region(compat + 2, 1))
+				printk("Aieee %s: ide_check_region failure at 0x%04x\n", hwif->name, (compat + 2));
+			/*
+			 * The region check is not needed; however.........
+			 * Since this is the checked in ide-probe.c,
+			 * this is only an assignment.
+			 */
+#endif
+			hwif->io_ports[IDE_CONTROL_OFFSET] = compat + 2;
 			outw(compat|1, hwif->config_data);
 			printk("%s: control basereg workaround: old=0x%04x, new=0x%04x\n", hwif->name, old, inw(hwif->config_data) & ~1);
 		}

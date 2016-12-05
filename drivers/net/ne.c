@@ -28,7 +28,8 @@
     rjohnson@analogic.com : Changed init order so an interrupt will only
     occur after memory is allocated for dev->priv. Deallocated memory
     last in cleanup_modue()
-
+    Richard Guenther    : Added support for ISAPnP cards
+    
 */
 
 /* Routines for the NatSemi-based designs (NE[12]000). */
@@ -43,6 +44,7 @@ static const char *version =
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
+#include <linux/isapnp.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <asm/system.h>
@@ -90,6 +92,13 @@ pci_clone_list[] __initdata = {
 static int probe_pci = 1;
 #endif
 
+static struct { unsigned short vendor, function; char *name; }
+isapnp_clone_list[] __initdata = {
+	{ISAPNP_VENDOR('E','D','I'), ISAPNP_FUNCTION(0x0216),		"NN NE2000" },
+	{ISAPNP_VENDOR('P','N','P'), ISAPNP_FUNCTION(0x80d6),		"Generic PNP" },
+	{0,}
+};
+
 #ifdef SUPPORT_NE_BAD_CLONES
 /* A list of bad clones that we none-the-less recognize. */
 static struct { const char *name8, *name16; unsigned char SAprefix[4];}
@@ -126,21 +135,22 @@ bad_clone_list[] __initdata = {
 /* Non-zero only if the current card is a PCI with BIOS-set IRQ. */
 static unsigned int pci_irq_line = 0;
 
-int ne_probe(struct device *dev);
-static int ne_probe1(struct device *dev, int ioaddr);
+int ne_probe(struct net_device *dev);
+static int ne_probe1(struct net_device *dev, int ioaddr);
+static int ne_probe_isapnp(struct net_device *dev);
 #ifdef CONFIG_PCI
-static int ne_probe_pci(struct device *dev);
+static int ne_probe_pci(struct net_device *dev);
 #endif
 
-static int ne_open(struct device *dev);
-static int ne_close(struct device *dev);
+static int ne_open(struct net_device *dev);
+static int ne_close(struct net_device *dev);
 
-static void ne_reset_8390(struct device *dev);
-static void ne_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
+static void ne_reset_8390(struct net_device *dev);
+static void ne_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 			  int ring_page);
-static void ne_block_input(struct device *dev, int count,
+static void ne_block_input(struct net_device *dev, int count,
 			  struct sk_buff *skb, int ring_offset);
-static void ne_block_output(struct device *dev, const int count,
+static void ne_block_output(struct net_device *dev, const int count,
 		const unsigned char *buf, const int start_page);
 
 
@@ -177,7 +187,7 @@ struct netdev_entry netcard_drv =
  * the card.
  */
 
-__initfunc(int ne_probe(struct device *dev))
+int __init ne_probe(struct net_device *dev)
 {
 	int base_addr = dev ? dev->base_addr : 0;
 
@@ -192,6 +202,10 @@ __initfunc(int ne_probe(struct device *dev))
 	if (probe_pci && pci_present() && (ne_probe_pci(dev) == 0))
 		return 0;
 #endif
+
+	/* Then look for any installed ISAPnP clones */
+	if (isapnp_present() && (ne_probe_isapnp(dev) == 0))
+		return 0;
 
 #ifndef MODULE
 	/* Last resort. The semi-risky ISA auto-probe. */
@@ -209,7 +223,7 @@ __initfunc(int ne_probe(struct device *dev))
 #endif
 
 #ifdef CONFIG_PCI
-__initfunc(static int ne_probe_pci(struct device *dev))
+static int __init ne_probe_pci(struct net_device *dev)
 {
 	int i;
 
@@ -218,7 +232,7 @@ __initfunc(static int ne_probe_pci(struct device *dev))
 		unsigned int pci_ioaddr;
 
 		while ((pdev = pci_find_device(pci_clone_list[i].vendor, pci_clone_list[i].dev_id, pdev))) {
-			pci_ioaddr = pdev->base_address[0] & PCI_BASE_ADDRESS_IO_MASK;
+			pci_ioaddr = pdev->resource[0].start;
 			/* Avoid already found cards from previous calls */
 			if (check_region(pci_ioaddr, NE_IO_EXTENT))
 				continue;
@@ -243,7 +257,47 @@ __initfunc(static int ne_probe_pci(struct device *dev))
 }
 #endif  /* CONFIG_PCI */
 
-__initfunc(static int ne_probe1(struct device *dev, int ioaddr))
+static int __init ne_probe_isapnp(struct net_device *dev)
+{
+	int i;
+	
+	for (i = 0; isapnp_clone_list[i].vendor != 0; i++) {
+		struct pci_dev *idev = NULL;
+
+		while ((idev = isapnp_find_dev(NULL,
+					       isapnp_clone_list[i].vendor,
+					       isapnp_clone_list[i].function,
+					       idev))) {
+			/* Avoid already found cards from previous calls */
+			if (idev->prepare(idev))
+				continue;
+			if (idev->activate(idev))
+				continue;
+			pci_irq_line = idev->irq_resource[0].start;
+			/* if no irq, search for next */
+			if (!pci_irq_line)
+				continue;
+			/* found it */
+			if (ne_probe1(dev, idev->resource[0].start) != 0) {	/* Shouldn't happen. */
+				printk(KERN_ERR "ne.c: Probe of ISAPnP card at %#lx failed.\n",
+				       idev->resource[0].start);
+				return -ENXIO;
+			}
+			ei_status.priv = (unsigned long)idev;
+			break;
+		}
+		if (!idev)
+			continue;
+		printk(KERN_INFO "ne.c: ISAPnP reports %s at i/o %#lx, irq %d.\n",
+				isapnp_clone_list[i].name,
+				dev->base_addr, dev->irq);
+		return 0;
+	}
+
+	return -ENODEV;
+}
+
+static int __init ne_probe1(struct net_device *dev, int ioaddr)
 {
 	int i;
 	unsigned char SA_prom[32];
@@ -491,20 +545,21 @@ __initfunc(static int ne_probe1(struct device *dev, int ioaddr))
 	ei_status.block_input = &ne_block_input;
 	ei_status.block_output = &ne_block_output;
 	ei_status.get_8390_hdr = &ne_get_8390_hdr;
+	ei_status.priv = 0;
 	dev->open = &ne_open;
 	dev->stop = &ne_close;
 	NS8390_init(dev, 0);
 	return 0;
 }
 
-static int ne_open(struct device *dev)
+static int ne_open(struct net_device *dev)
 {
 	ei_open(dev);
 	MOD_INC_USE_COUNT;
 	return 0;
 }
 
-static int ne_close(struct device *dev)
+static int ne_close(struct net_device *dev)
 {
 	if (ei_debug > 1)
 		printk(KERN_DEBUG "%s: Shutting down ethercard.\n", dev->name);
@@ -516,7 +571,7 @@ static int ne_close(struct device *dev)
 /* Hard reset the card.  This used to pause for the same period that a
    8390 reset command required, but that shouldn't be necessary. */
 
-static void ne_reset_8390(struct device *dev)
+static void ne_reset_8390(struct net_device *dev)
 {
 	unsigned long reset_start_time = jiffies;
 
@@ -542,7 +597,7 @@ static void ne_reset_8390(struct device *dev)
    we don't need to be concerned with ring wrap as the header will be at
    the start of a page, so we optimize accordingly. */
 
-static void ne_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
+static void ne_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
 	int nic_base = dev->base_addr;
 
@@ -551,9 +606,8 @@ static void ne_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int r
 	if (ei_status.dmaing) 
 	{
 		printk(KERN_EMERG "%s: DMAing conflict in ne_get_8390_hdr "
-			"[DMAstat:%d][irqlock:%d][intr:%ld].\n",
-			dev->name, ei_status.dmaing, ei_status.irqlock,
-			dev->interrupt);
+			"[DMAstat:%d][irqlock:%d].\n",
+			dev->name, ei_status.dmaing, ei_status.irqlock);
 		return;
 	}
 
@@ -579,7 +633,7 @@ static void ne_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int r
    The NEx000 doesn't share the on-board packet memory -- you have to put
    the packet out through the "remote DMA" dataport using outb. */
 
-static void ne_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_offset)
+static void ne_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset)
 {
 #ifdef NE_SANITY_CHECK
 	int xfer_count = count;
@@ -591,9 +645,8 @@ static void ne_block_input(struct device *dev, int count, struct sk_buff *skb, i
 	if (ei_status.dmaing) 
 	{
 		printk(KERN_EMERG "%s: DMAing conflict in ne_block_input "
-			"[DMAstat:%d][irqlock:%d][intr:%ld].\n",
-			dev->name, ei_status.dmaing, ei_status.irqlock,
-			dev->interrupt);
+			"[DMAstat:%d][irqlock:%d].\n",
+			dev->name, ei_status.dmaing, ei_status.irqlock);
 		return;
 	}
 	ei_status.dmaing |= 0x01;
@@ -646,7 +699,7 @@ static void ne_block_input(struct device *dev, int count, struct sk_buff *skb, i
 	ei_status.dmaing &= ~0x01;
 }
 
-static void ne_block_output(struct device *dev, int count,
+static void ne_block_output(struct net_device *dev, int count,
 		const unsigned char *buf, const int start_page)
 {
 	int nic_base = NE_BASE;
@@ -666,9 +719,8 @@ static void ne_block_output(struct device *dev, int count,
 	if (ei_status.dmaing) 
 	{
 		printk(KERN_EMERG "%s: DMAing conflict in ne_block_output."
-			"[DMAstat:%d][irqlock:%d][intr:%ld]\n",
-			dev->name, ei_status.dmaing, ei_status.irqlock,
-			dev->interrupt);
+			"[DMAstat:%d][irqlock:%d]\n",
+			dev->name, ei_status.dmaing, ei_status.irqlock);
 		return;
 	}
 	ei_status.dmaing |= 0x01;
@@ -756,7 +808,7 @@ retry:
 #define MAX_NE_CARDS	4	/* Max number of NE cards per module */
 #define NAMELEN		8	/* # of chars for storing dev->name */
 static char namelist[NAMELEN * MAX_NE_CARDS] = { 0, };
-static struct device dev_ne[MAX_NE_CARDS] = {
+static struct net_device dev_ne[MAX_NE_CARDS] = {
 	{
 		NULL,		/* assign a chunk of namelist[] below */
 		0, 0, 0, 0,
@@ -787,7 +839,7 @@ int init_module(void)
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_NE_CARDS; this_dev++) {
-		struct device *dev = &dev_ne[this_dev];
+		struct net_device *dev = &dev_ne[this_dev];
 		dev->name = namelist+(NAMELEN*this_dev);
 		dev->irq = irq[this_dev];
 		dev->mem_end = bad[this_dev];
@@ -816,9 +868,12 @@ void cleanup_module(void)
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_NE_CARDS; this_dev++) {
-		struct device *dev = &dev_ne[this_dev];
+		struct net_device *dev = &dev_ne[this_dev];
 		if (dev->priv != NULL) {
 			void *priv = dev->priv;
+			struct pci_dev *idev = (struct pci_dev *)ei_status.priv;
+			if (idev)
+				idev->deactivate(idev);
 			free_irq(dev->irq, dev);
 			release_region(dev->base_addr, NE_IO_EXTENT);
 			unregister_netdev(dev);

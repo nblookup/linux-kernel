@@ -54,7 +54,7 @@ int ftape_motor = 0;
 volatile int ftape_current_cylinder = -1;
 volatile fdc_mode_enum fdc_mode = fdc_idle;
 fdc_config_info fdc = {0};
-struct wait_queue *ftape_wait_intr = NULL;
+DECLARE_WAIT_QUEUE_HEAD(ftape_wait_intr);
 
 unsigned int ft_fdc_base       = CONFIG_FT_FDC_BASE;
 unsigned int ft_fdc_irq        = CONFIG_FT_FDC_IRQ;
@@ -385,7 +385,7 @@ int fdc_issue_command(const __u8 * out_data, int out_count,
  */
 int fdc_interrupt_wait(unsigned int time)
 {
-	struct wait_queue wait = {current, NULL};
+	DECLARE_WAITQUEUE(wait,current);
 	sigset_t old_sigmask;	
 	static int resetting = 0;
 	long timeout;
@@ -1323,11 +1323,7 @@ static int fdc_config(void)
 	TRACE_EXIT 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VER(1,3,70)
 static void ftape_interrupt(int irq, void *dev_id, struct pt_regs *regs)
-#else
-static void ftape_interrupt(int irq, struct pt_regs *regs)
-#endif
 {
 	void (*handler) (void) = *fdc.hook;
 	TRACE_FUN(ft_t_any);
@@ -1355,11 +1351,7 @@ int fdc_grab_irq_and_dma(void)
 				    fdc.irq);
 		}
 		if (request_dma(fdc.dma, ftape_id)) {
-#if LINUX_VERSION_CODE >= KERNEL_VER(1,3,70)
 			free_irq(fdc.irq, ftape_id);
-#else
-			free_irq(fdc.irq);
-#endif
 			TRACE_ABORT(-EIO, ft_t_bug,
 			      "Unable to grab DMA%d for ftape driver",
 			      fdc.dma);

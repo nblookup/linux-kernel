@@ -15,11 +15,9 @@
 /*
  * Thomas Sailer   : ioctl code reworked (vmalloc/vfree removed)
  */
-#include <linux/config.h>
-
 #include "sound_config.h"
 
-#ifdef CONFIG_PAS
+#include "pas2.h"
 
 #ifndef DEB
 #define DEB(what)		/* (what) */
@@ -332,5 +330,3 @@ pas_init_mixer(void)
 	  }
 	return 1;
 }
-
-#endif

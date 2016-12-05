@@ -183,7 +183,7 @@ failed:
 	return NULL;
 }
 
-struct dentry *ufs_lookup(struct inode * dir, struct dentry *dentry)
+static struct dentry *ufs_lookup(struct inode * dir, struct dentry *dentry)
 {
 	struct super_block * sb;
 	struct inode * inode;
@@ -403,7 +403,7 @@ static int ufs_delete_entry (struct inode * inode, struct ufs_dir_entry * dir,
  * If the create succeeds, we fill in the inode information
  * with d_instantiate(). 
  */
-int ufs_create (struct inode * dir, struct dentry * dentry, int mode)
+static int ufs_create (struct inode * dir, struct dentry * dentry, int mode)
 {
 	struct super_block * sb;
 	struct inode * inode;
@@ -424,6 +424,8 @@ int ufs_create (struct inode * dir, struct dentry * dentry, int mode)
 	if (!inode)
 		return err;
 	inode->i_op = &ufs_file_inode_operations;
+	inode->i_fop = &ufs_file_operations;
+	inode->i_mapping->a_ops = &ufs_aops;
 	inode->i_mode = mode;
 	mark_inode_dirty(inode);
 	bh = ufs_add_entry (dir, dentry->d_name.name, dentry->d_name.len, &de, &err);
@@ -449,7 +451,7 @@ int ufs_create (struct inode * dir, struct dentry * dentry, int mode)
 	return 0;
 }
 
-int ufs_mknod (struct inode * dir, struct dentry *dentry, int mode, int rdev)
+static int ufs_mknod (struct inode * dir, struct dentry *dentry, int mode, int rdev)
 {
 	struct super_block * sb;
 	struct inode * inode;
@@ -467,18 +469,7 @@ int ufs_mknod (struct inode * dir, struct dentry *dentry, int mode, int rdev)
 		goto out;
 
 	inode->i_uid = current->fsuid;
-	inode->i_mode = mode;
-	inode->i_op = NULL;
-	if (S_ISREG(inode->i_mode))
-		inode->i_op = &ufs_file_inode_operations;
-	else if (S_ISCHR(inode->i_mode))
-		inode->i_op = &chrdev_inode_operations;
-	else if (S_ISBLK(inode->i_mode))
-		inode->i_op = &blkdev_inode_operations;
-	else if (S_ISFIFO(inode->i_mode)) 
-		init_fifo(inode);
-	if (S_ISBLK(mode) || S_ISCHR(mode))
-		inode->i_rdev = to_kdev_t(rdev);
+	init_special_inode(inode, mode, rdev);
 	mark_inode_dirty(inode);
 	bh = ufs_add_entry (dir, dentry->d_name.name, dentry->d_name.len, &de, &err);
 	if (!bh)
@@ -504,7 +495,7 @@ out_no_entry:
 	goto out;
 }
 
-int ufs_mkdir(struct inode * dir, struct dentry * dentry, int mode)
+static int ufs_mkdir(struct inode * dir, struct dentry * dentry, int mode)
 {
 	struct super_block * sb;
 	struct inode * inode;
@@ -526,6 +517,7 @@ int ufs_mkdir(struct inode * dir, struct dentry * dentry, int mode)
 		goto out;
 
 	inode->i_op = &ufs_dir_inode_operations;
+	inode->i_fop = &ufs_dir_operations;
 	inode->i_size = UFS_SECTOR_SIZE;
 	dir_block = ufs_bread (inode, 0, 1, &err);
 	if (!dir_block) {
@@ -550,7 +542,7 @@ int ufs_mkdir(struct inode * dir, struct dentry * dentry, int mode)
 	inode->i_nlink = 2;
 	mark_buffer_dirty(dir_block, 1);
 	brelse (dir_block);
-	inode->i_mode = S_IFDIR | (mode & (S_IRWXUGO|S_ISVTX) & ~current->fs->umask);
+	inode->i_mode = S_IFDIR | mode;
 	if (dir->i_mode & S_ISGID)
 		inode->i_mode |= S_ISGID;
 	mark_inode_dirty(inode);
@@ -641,7 +633,7 @@ static int ufs_empty_dir (struct inode * inode)
 	return 1;
 }
 
-int ufs_rmdir (struct inode * dir, struct dentry *dentry)
+static int ufs_rmdir (struct inode * dir, struct dentry *dentry)
 {
 	struct super_block *sb;
 	int retval;
@@ -700,7 +692,7 @@ end_rmdir:
 	return retval;
 }
 
-int ufs_unlink(struct inode * dir, struct dentry *dentry)
+static int ufs_unlink(struct inode * dir, struct dentry *dentry)
 {
 	struct super_block * sb;
 	int retval;
@@ -759,58 +751,45 @@ end_unlink:
 /*
  * Create symbolic link. We use only slow symlinks at this time.
  */
-int ufs_symlink (struct inode * dir, struct dentry * dentry,
+static int ufs_symlink (struct inode * dir, struct dentry * dentry,
 	const char * symname)
 {
-	struct super_block * sb;
+	struct super_block * sb = dir->i_sb;
 	struct ufs_dir_entry * de;
 	struct inode * inode;
-	struct buffer_head * bh, * name_block;
-	char * link;
-	unsigned i, l;
+	struct buffer_head * bh = NULL;
+	unsigned l;
 	int err;
-	char c;
-	unsigned swab;
+	unsigned swab = sb->u.ufs_sb.s_swab;
 	
 	UFSD(("ENTER\n"))
 	
-	sb = dir->i_sb;
-	swab = sb->u.ufs_sb.s_swab;
-	bh = name_block = NULL;
+
+	err = -ENAMETOOLONG;
+	l = strlen(symname)+1;
+	if (l > sb->s_blocksize)
+		goto out;
+
 	err = -EIO;
 	
 	if (!(inode = ufs_new_inode (dir, S_IFLNK, &err))) {
 		return err;
 	}
 	inode->i_mode = S_IFLNK | S_IRWXUGO;
-	inode->i_op = &ufs_symlink_inode_operations;
-	for (l = 0; l < sb->s_blocksize - 1 && symname [l]; l++);
 
-	/***if (l >= sizeof (inode->u.ufs_i.i_data)) {***/
-	if (1) {
+	if (l > sb->u.ufs_sb.s_uspi->s_maxsymlinklen) {
 		/* slow symlink */
-		name_block = ufs_bread (inode, 0, 1, &err);
-		if (!name_block) {
-			inode->i_nlink--;
-			mark_inode_dirty(inode);
-			iput (inode);
-			return err;
-		}
-		link = name_block->b_data;
-		
+		inode->i_op = &page_symlink_inode_operations;
+		inode->i_mapping->a_ops = &ufs_aops;
+		err = block_symlink(inode, symname, l);
+		if (err)
+			goto out_no_entry;
 	} else {
 		/* fast symlink */
-		link = (char *) inode->u.ufs_i.i_u1.i_data;
+		inode->i_op = &ufs_fast_symlink_inode_operations;
+		memcpy((char*)&inode->u.ufs_i.i_u1.i_data,symname,l);
+		inode->i_size = l-1;
 	}
-	i = 0;
-	while (i < sb->s_blocksize - 1 && (c = *(symname++)))
-		link[i++] = c;
-	link[i] = 0;
-	if (name_block) {
-		mark_buffer_dirty(name_block, 1);
-		brelse (name_block);
-	}
-	inode->i_size = i;
 	mark_inode_dirty(inode);
 
 	bh = ufs_add_entry (dir, dentry->d_name.name, dentry->d_name.len, &de, &err);
@@ -836,19 +815,15 @@ out_no_entry:
 	goto out;
 }
 
-int ufs_link (struct dentry * old_dentry, struct inode * dir,
+static int ufs_link (struct dentry * old_dentry, struct inode * dir,
 	struct dentry *dentry)
 {
-	struct super_block * sb;
 	struct inode *inode = old_dentry->d_inode;
+	struct super_block * sb = inode->i_sb;
 	struct ufs_dir_entry * de;
 	struct buffer_head * bh;
 	int err;
-	unsigned swab;
-
-	inode = old_dentry->d_inode;
-	sb = inode->i_sb;
-	swab = sb->u.ufs_sb.s_swab;
+	unsigned swab = sb->u.ufs_sb.s_swab;
 	
 	if (S_ISDIR(inode->i_mode))
 		return -EPERM;
@@ -884,7 +859,7 @@ int ufs_link (struct dentry * old_dentry, struct inode * dir,
  * Anybody can rename anything with this: the permission checks are left to the
  * higher-level routines.
  */
-int ufs_rename (struct inode * old_dir, struct dentry * old_dentry,
+static int ufs_rename (struct inode * old_dir, struct dentry * old_dentry,
 	struct inode * new_dir,	struct dentry * new_dentry )
 {
 	struct super_block * sb;
@@ -1000,3 +975,15 @@ end_rename:
 	
 	return retval;
 }
+
+struct inode_operations ufs_dir_inode_operations = {
+	create:		ufs_create,
+	lookup:		ufs_lookup,
+	link:		ufs_link,
+	unlink:		ufs_unlink,
+	symlink:	ufs_symlink,
+	mkdir:		ufs_mkdir,
+	rmdir:		ufs_rmdir,
+	mknod:		ufs_mknod,
+	rename:		ufs_rename,
+};

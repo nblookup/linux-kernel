@@ -102,10 +102,15 @@ void cleanup_module(void)
 }
 
 #else
-void pcbit_setup(char *str, int *ints)
+#define MAX_PARA	(MAX_PCBIT_CARDS * 2)
+#include <linux/init.h>
+static int __init pcbit_setup(char *line)
 {
 	int i, j, argc;
+	char *str;
+	int ints[MAX_PARA+1];
 
+	str = get_options(line, MAX_PARA, ints);
 	argc = ints[0];
 	i = 0;
 	j = 1;
@@ -124,7 +129,9 @@ void pcbit_setup(char *str, int *ints)
 
 		i++;
 	}
+	return(1);
 }
+__setup("pcbit=", pcbit_setup);
 #endif
 
 

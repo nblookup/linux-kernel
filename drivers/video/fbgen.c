@@ -4,7 +4,7 @@
  *  Created 3 Jan 1998 by Geert Uytterhoeven
  *
  * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file README.legal in the main directory of this archive
+ * License.  See the file COPYING in the main directory of this archive
  * for more details.
  */
 
@@ -17,6 +17,7 @@
 #include <asm/uaccess.h>
 #include <asm/io.h>
 
+#include <video/fbcon.h>
 
 static int currcon = 0;
 

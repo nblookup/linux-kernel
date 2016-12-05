@@ -7,8 +7,35 @@
  *  and Martin Mares, November 1997.
  *
  *  Force Cyrix 6x86(MX) and M II processors to report MTRR capability
- *  and fix against Cyrix "coma bug" by
- *      Zoltan Boszormenyi <zboszor@mol.hu> February 1999.
+ *  and Cyrix "coma bug" recognition by
+ *      Zoltán Böszörményi <zboszor@mail.externet.hu> February 1999.
+ * 
+ *  Force Centaur C6 processors to report MTRR capability.
+ *      Bart Hartgers <bart@etpmod.phys.tue.nl>, May 1999.
+ *
+ *  Intel Mobile Pentium II detection fix. Sean Gilley, June 1999.
+ *
+ *  IDT Winchip tweaks, misc clean ups.
+ *	Dave Jones <dave@powertweak.com>, August 1999
+ *
+ *  Support of BIGMEM added by Gerhard Wichert, Siemens AG, July 1999
+ *
+ *  Better detection of Centaur/IDT WinChip models.
+ *      Bart Hartgers <bart@etpmod.phys.tue.nl>, August 1999.
+ *
+ *  Memory region support
+ *	David Parsons <orc@pell.chi.il.us>, July-August 1999
+ *
+ *  Cleaned up cache-detection code
+ *	Dave Jones <dave@powertweak.com>, October 1999
+ *
+ *	Added proper L2 cache detection for Coppermine
+ *	Dragan Stancevic <visitor@valinux.com>, October 1999
+ *
+ *  Added the origninal array for capability flags but forgot to credit 
+ *  myself :) (~1998) Fixed/cleaned up some cpu_model_info and other stuff
+ *  	Jauder Ho <jauderho@carumba.com>, January 2000
+ *  	
  */
 
 /*
@@ -30,12 +57,12 @@
 #include <linux/delay.h>
 #include <linux/config.h>
 #include <linux/init.h>
-#ifdef CONFIG_APM
 #include <linux/apm_bios.h>
-#endif
 #ifdef CONFIG_BLK_DEV_RAM
 #include <linux/blk.h>
 #endif
+#include <linux/highmem.h>
+#include <linux/bootmem.h>
 #include <asm/processor.h>
 #include <linux/console.h>
 #include <asm/uaccess.h>
@@ -44,13 +71,19 @@
 #include <asm/smp.h>
 #include <asm/cobalt.h>
 #include <asm/msr.h>
-
+#include <asm/desc.h>
+#include <asm/e820.h>
+#include <asm/dma.h>
+#include <asm/mpspec.h>
+#include <asm/mmu_context.h>
 /*
  * Machine setup..
  */
 
 char ignore_irq13 = 0;		/* set if exception 16 works */
 struct cpuinfo_x86 boot_cpu_data = { 0, 0, 0, 0, -1, 1, 0, 0, -1 };
+
+unsigned long mmu_cr4_features = 0;
 
 /*
  * Bus types ..
@@ -69,13 +102,13 @@ unsigned int mca_pentium_flag = 0;
  */
 struct drive_info_struct { char dummy[32]; } drive_info;
 struct screen_info screen_info;
-#ifdef CONFIG_APM
 struct apm_bios_info apm_bios_info;
-#endif
 struct sys_desc_table_struct {
 	unsigned short length;
 	unsigned char table[0];
 };
+
+struct e820map e820 = { 0 };
 
 unsigned char aux_device_present;
 
@@ -86,7 +119,7 @@ extern int rd_image_start;	/* starting block # of image */
 #endif
 
 extern int root_mountflags;
-extern int _etext, _edata, _end;
+extern char _text, _etext, _edata, _end;
 extern unsigned long cpu_hz;
 
 /*
@@ -96,6 +129,8 @@ extern unsigned long cpu_hz;
 #define SCREEN_INFO (*(struct screen_info *) (PARAM+0))
 #define EXT_MEM_K (*(unsigned short *) (PARAM+2))
 #define ALT_MEM_K (*(unsigned long *) (PARAM+0x1e0))
+#define E820_MAP_NR (*(char*) (PARAM+E820NR))
+#define E820_MAP    ((unsigned long *) (PARAM+E820MAP))
 #define APM_BIOS_INFO (*(struct apm_bios_info *) (PARAM+0x40))
 #define DRIVE_INFO (*(struct drive_info_struct *) (PARAM+0x80))
 #define SYS_DESC_TABLE (*(struct sys_desc_table_struct*)(PARAM+0xa0))
@@ -244,53 +279,203 @@ visws_get_board_type_and_rev(void)
 static char command_line[COMMAND_LINE_SIZE] = { 0, };
        char saved_command_line[COMMAND_LINE_SIZE];
 
-__initfunc(void setup_arch(char **cmdline_p,
-	unsigned long * memory_start_p, unsigned long * memory_end_p))
+struct resource standard_io_resources[] = {
+	{ "dma1", 0x00, 0x1f, IORESOURCE_BUSY },
+	{ "pic1", 0x20, 0x3f, IORESOURCE_BUSY },
+	{ "timer", 0x40, 0x5f, IORESOURCE_BUSY },
+	{ "keyboard", 0x60, 0x6f, IORESOURCE_BUSY },
+	{ "dma page reg", 0x80, 0x8f, IORESOURCE_BUSY },
+	{ "pic2", 0xa0, 0xbf, IORESOURCE_BUSY },
+	{ "dma2", 0xc0, 0xdf, IORESOURCE_BUSY },
+	{ "fpu", 0xf0, 0xff, IORESOURCE_BUSY }
+};
+
+#define STANDARD_IO_RESOURCES (sizeof(standard_io_resources)/sizeof(struct resource))
+
+static struct resource code_resource = { "Kernel code", 0x100000, 0 };
+static struct resource data_resource = { "Kernel data", 0, 0 };
+static struct resource vram_resource = { "Video RAM area", 0xa0000, 0xbffff, IORESOURCE_BUSY };
+
+/* System ROM resources */
+#define MAXROMS 6
+static struct resource rom_resources[MAXROMS] = {
+	{ "System ROM", 0xF0000, 0xFFFFF, IORESOURCE_BUSY },
+	{ "Video ROM", 0xc0000, 0xc7fff, IORESOURCE_BUSY }
+};
+
+#define romsignature(x) (*(unsigned short *)(x) == 0xaa55)
+
+static void __init probe_roms(void)
 {
-	unsigned long memory_start, memory_end;
+	int roms = 1;
+	unsigned long base;
+	unsigned char *romstart;
+
+	request_resource(&iomem_resource, rom_resources+0);
+
+	/* Video ROM is standard at C000:0000 - C7FF:0000, check signature */
+	for (base = 0xC0000; base < 0xE0000; base += 2048) {
+		romstart = bus_to_virt(base);
+		if (!romsignature(romstart))
+			continue;
+		request_resource(&iomem_resource, rom_resources + roms);
+		roms++;
+		break;
+	}
+
+	/* Extension roms at C800:0000 - DFFF:0000 */
+	for (base = 0xC8000; base < 0xE0000; base += 2048) {
+		unsigned long length;
+
+		romstart = bus_to_virt(base);
+		if (!romsignature(romstart))
+			continue;
+		length = romstart[2] * 512;
+		if (length) {
+			unsigned int i;
+			unsigned char chksum;
+
+			chksum = 0;
+			for (i = 0; i < length; i++)
+				chksum += romstart[i];
+
+			/* Good checksum? */
+			if (!chksum) {
+				rom_resources[roms].start = base;
+				rom_resources[roms].end = base + length - 1;
+				rom_resources[roms].name = "Extension ROM";
+				rom_resources[roms].flags = IORESOURCE_BUSY;
+
+				request_resource(&iomem_resource, rom_resources + roms);
+				roms++;
+				if (roms >= MAXROMS)
+					return;
+			}
+		}
+	}
+
+	/* Final check for motherboard extension rom at E000:0000 */
+	base = 0xE0000;
+	romstart = bus_to_virt(base);
+
+	if (romsignature(romstart)) {
+		rom_resources[roms].start = base;
+		rom_resources[roms].end = base + 65535;
+		rom_resources[roms].name = "Extension ROM";
+		rom_resources[roms].flags = IORESOURCE_BUSY;
+
+		request_resource(&iomem_resource, rom_resources + roms);
+	}
+}
+
+unsigned long __init memparse(char *ptr, char **retptr)
+{
+	unsigned long ret;
+
+	ret = simple_strtoul(ptr, retptr, 0);
+
+	if (**retptr == 'K' || **retptr == 'k') {
+		ret <<= 10;
+		(*retptr)++;
+	}
+	else if (**retptr == 'M' || **retptr == 'm') {
+		ret <<= 20;
+		(*retptr)++;
+	}
+	return ret;
+} /* memparse */
+
+
+void __init add_memory_region(unsigned long start,
+                                  unsigned long size, int type)
+{
+	int x = e820.nr_map;
+
+	if (x == E820MAX) {
+	    printk("Ooops! Too many entries in the memory map!\n");
+	    return;
+	}
+
+	e820.map[x].addr = start;
+	e820.map[x].size = size;
+	e820.map[x].type = type;
+	e820.nr_map++;
+} /* add_memory_region */
+
+
+/*
+ * Do NOT EVER look at the BIOS memory size location.
+ * It does not work on many machines.
+ */
+#define LOWMEMSIZE()	(0x9f000)
+
+void __init setup_memory_region(void)
+{
+#define E820_DEBUG	1
+#ifdef E820_DEBUG
+	int i;
+#endif
+
+	/*
+	 * If we're lucky and live on a modern system, the setup code
+	 * will have given us a memory map that we can use to properly
+	 * set up memory.  If we aren't, we'll fake a memory map.
+	 *
+	 * We check to see that the memory map contains at least 2 elements
+	 * before we'll use it, because the detection code in setup.S may
+	 * not be perfect and most every PC known to man has two memory
+	 * regions: one from 0 to 640k, and one from 1mb up.  (The IBM
+	 * thinkpad 560x, for example, does not cooperate with the memory
+	 * detection code.)
+	 */
+	if (E820_MAP_NR > 1) {
+		/* got a memory map; copy it into a safe place.
+		 */
+		e820.nr_map = E820_MAP_NR;
+		if (e820.nr_map > E820MAX)
+			e820.nr_map = E820MAX;
+		memcpy(e820.map, E820_MAP, e820.nr_map * sizeof e820.map[0]);
+#ifdef E820_DEBUG
+		for (i=0; i < e820.nr_map; i++) {
+			printk("e820: %08x @ %08x ", (int)e820.map[i].size,
+						(int)e820.map[i].addr);
+			switch (e820.map[i].type) {
+			case E820_RAM:	printk("(usable)\n");
+					break;
+			case E820_RESERVED:
+					printk("(reserved)\n");
+					break;
+			case E820_ACPI:
+					printk("(ACPI data)\n");
+					break;
+			case E820_NVS:
+					printk("(ACPI NVS)\n");
+					break;
+			default:	printk("type %lu\n", e820.map[i].type);
+					break;
+			}
+		}
+#endif
+	}
+	else {
+		/* otherwise fake a memory map; one section from 0k->640k,
+		 * the next section from 1mb->appropriate_mem_k
+		 */
+		unsigned long mem_size;
+
+		mem_size = (ALT_MEM_K < EXT_MEM_K) ? EXT_MEM_K : ALT_MEM_K;
+
+		add_memory_region(0, LOWMEMSIZE(), E820_RAM);
+		add_memory_region(HIGH_MEMORY, mem_size << 10, E820_RAM);
+  	}
+} /* setup_memory_region */
+
+
+static inline void parse_mem_cmdline (char ** cmdline_p)
+{
 	char c = ' ', *to = command_line, *from = COMMAND_LINE;
 	int len = 0;
-
-#ifdef CONFIG_VISWS
-	visws_get_board_type_and_rev();
-#endif
-
- 	ROOT_DEV = to_kdev_t(ORIG_ROOT_DEV);
- 	drive_info = DRIVE_INFO;
- 	screen_info = SCREEN_INFO;
-#ifdef CONFIG_APM
-	apm_bios_info = APM_BIOS_INFO;
-#endif
-	if( SYS_DESC_TABLE.length != 0 ) {
-		MCA_bus = SYS_DESC_TABLE.table[3] &0x2;
-		machine_id = SYS_DESC_TABLE.table[0];
-		machine_submodel_id = SYS_DESC_TABLE.table[1];
-		BIOS_revision = SYS_DESC_TABLE.table[2];
-	}
-	aux_device_present = AUX_DEVICE_INFO;
-	memory_end = (1<<20) + (EXT_MEM_K<<10);
-#ifndef STANDARD_MEMORY_BIOS_CALL
-	{
-		unsigned long memory_alt_end = (1<<20) + (ALT_MEM_K<<10);
-		/* printk(KERN_DEBUG "Memory sizing: %08x %08x\n", memory_end, memory_alt_end); */
-		if (memory_alt_end > memory_end)
-			memory_end = memory_alt_end;
-	}
-#endif
-
-	memory_end &= PAGE_MASK;
-#ifdef CONFIG_BLK_DEV_RAM
-	rd_image_start = RAMDISK_FLAGS & RAMDISK_IMAGE_START_MASK;
-	rd_prompt = ((RAMDISK_FLAGS & RAMDISK_PROMPT_FLAG) != 0);
-	rd_doload = ((RAMDISK_FLAGS & RAMDISK_LOAD_FLAG) != 0);
-#endif
-	if (!MOUNT_ROOT_RDONLY)
-		root_mountflags &= ~MS_RDONLY;
-	memory_start = (unsigned long) &_end;
-	init_task.mm->start_code = PAGE_OFFSET;
-	init_task.mm->end_code = (unsigned long) &_etext;
-	init_task.mm->end_data = (unsigned long) &_edata;
-	init_task.mm->brk = (unsigned long) &_end;
+	int usermem = 0;
 
 	/* Save unparsed command line copy for /proc/cmdline */
 	memcpy(saved_command_line, COMMAND_LINE, COMMAND_LINE_SIZE);
@@ -299,23 +484,41 @@ __initfunc(void setup_arch(char **cmdline_p,
 	for (;;) {
 		/*
 		 * "mem=nopentium" disables the 4MB page tables.
-		 * "mem=XXX[kKmM]" overrides the BIOS-reported
-		 * memory size
+		 * "mem=XXX[kKmM]" defines a memory region from HIGH_MEM
+		 * to <mem>, overriding the bios size.
+		 * "mem=XXX[KkmM]@XXX[KkmM]" defines a memory region from
+		 * <start> to <start>+<mem>, overriding the bios size.
 		 */
-		if (c == ' ' && *(const unsigned long *)from == *(const unsigned long *)"mem=") {
-			if (to != command_line) to--;
+		if (c == ' ' && !memcmp(from, "mem=", 4)) {
+			if (to != command_line)
+				to--;
 			if (!memcmp(from+4, "nopentium", 9)) {
 				from += 9+4;
 				boot_cpu_data.x86_capability &= ~X86_FEATURE_PSE;
 			} else {
-				memory_end = simple_strtoul(from+4, &from, 0);
-				if ( *from == 'K' || *from == 'k' ) {
-					memory_end = memory_end << 10;
-					from++;
-				} else if ( *from == 'M' || *from == 'm' ) {
-					memory_end = memory_end << 20;
-					from++;
+				/* If the user specifies memory size, we
+				 * blow away any automatically generated
+				 * size
+				 */
+				unsigned long start_at, mem_size;
+ 
+				if (usermem == 0) {
+					/* first time in: zap the whitelist
+					 * and reinitialize it with the
+					 * standard low-memory region.
+					 */
+					e820.nr_map = 0;
+					usermem = 1;
+					add_memory_region(0, LOWMEMSIZE(), E820_RAM);
 				}
+				mem_size = memparse(from+4, &from);
+				if (*from == '@')
+					start_at = memparse(from+1, &from);
+				else {
+					start_at = HIGH_MEMORY;
+					mem_size -= HIGH_MEMORY;
+				}
+				add_memory_region(start_at, mem_size, E820_RAM);
 			}
 		}
 		c = *(from++);
@@ -327,47 +530,254 @@ __initfunc(void setup_arch(char **cmdline_p,
 	}
 	*to = '\0';
 	*cmdline_p = command_line;
+}
 
-#define VMALLOC_RESERVE	(64 << 20)	/* 64MB for vmalloc */
-#define MAXMEM	((unsigned long)(-PAGE_OFFSET-VMALLOC_RESERVE))
+void __init setup_arch(char **cmdline_p)
+{
+	unsigned long bootmap_size;
+	unsigned long start_pfn, max_pfn, max_low_pfn;
+	int i;
 
-	if (memory_end > MAXMEM)
-	{
-		memory_end = MAXMEM;
-		printk(KERN_WARNING "Warning only %ldMB will be used.\n",
-			MAXMEM>>20);
+#ifdef CONFIG_VISWS
+	visws_get_board_type_and_rev();
+#endif
+
+ 	ROOT_DEV = to_kdev_t(ORIG_ROOT_DEV);
+ 	drive_info = DRIVE_INFO;
+ 	screen_info = SCREEN_INFO;
+	apm_bios_info = APM_BIOS_INFO;
+	if( SYS_DESC_TABLE.length != 0 ) {
+		MCA_bus = SYS_DESC_TABLE.table[3] &0x2;
+		machine_id = SYS_DESC_TABLE.table[0];
+		machine_submodel_id = SYS_DESC_TABLE.table[1];
+		BIOS_revision = SYS_DESC_TABLE.table[2];
+	}
+	aux_device_present = AUX_DEVICE_INFO;
+
+#ifdef CONFIG_BLK_DEV_RAM
+	rd_image_start = RAMDISK_FLAGS & RAMDISK_IMAGE_START_MASK;
+	rd_prompt = ((RAMDISK_FLAGS & RAMDISK_PROMPT_FLAG) != 0);
+	rd_doload = ((RAMDISK_FLAGS & RAMDISK_LOAD_FLAG) != 0);
+#endif
+	setup_memory_region();
+
+	if (!MOUNT_ROOT_RDONLY)
+		root_mountflags &= ~MS_RDONLY;
+	init_mm.start_code = (unsigned long) &_text;
+	init_mm.end_code = (unsigned long) &_etext;
+	init_mm.end_data = (unsigned long) &_edata;
+	init_mm.brk = (unsigned long) &_end;
+
+	code_resource.start = virt_to_bus(&_text);
+	code_resource.end = virt_to_bus(&_etext)-1;
+	data_resource.start = virt_to_bus(&_etext);
+	data_resource.end = virt_to_bus(&_edata)-1;
+
+	parse_mem_cmdline(cmdline_p);
+
+#define PFN_UP(x)	(((x) + PAGE_SIZE-1) >> PAGE_SHIFT)
+#define PFN_DOWN(x)	((x) >> PAGE_SHIFT)
+#define PFN_PHYS(x)	((x) << PAGE_SHIFT)
+
+/*
+ * 128MB for vmalloc and initrd
+ */
+#define VMALLOC_RESERVE	(unsigned long)(128 << 20)
+#define MAXMEM		(unsigned long)(-PAGE_OFFSET-VMALLOC_RESERVE)
+#define MAXMEM_PFN	PFN_DOWN(MAXMEM)
+#define MAX_NONPAE_PFN	(1 << 20)
+
+	/*
+	 * partially used pages are not usable - thus
+	 * we are rounding upwards:
+	 */
+	start_pfn = PFN_UP(__pa(&_end));
+
+	/*
+	 * Find the highest page frame number we have available
+	 */
+	max_pfn = 0;
+	for (i = 0; i < e820.nr_map; i++) {
+		unsigned long start, end;
+		/* RAM? */
+		if (e820.map[i].type != E820_RAM)
+			continue;
+		start = PFN_UP(e820.map[i].addr);
+		end = PFN_DOWN(e820.map[i].addr + e820.map[i].size);
+		if (start >= end)
+			continue;
+		if (end > max_pfn)
+			max_pfn = end;
 	}
 
-	memory_end += PAGE_OFFSET;
-	*memory_start_p = memory_start;
-	*memory_end_p = memory_end;
-
-#ifdef __SMP__
 	/*
-	 *	Save possible boot-time SMP configuration:
+	 * Determine low and high memory ranges:
 	 */
-	init_smp_config();
+	max_low_pfn = max_pfn;
+	if (max_low_pfn > MAXMEM_PFN) {
+		max_low_pfn = MAXMEM_PFN;
+#ifndef CONFIG_HIGHMEM
+		/* Maximum memory usable is what is directly addressable */
+		printk(KERN_WARNING "Warning only %ldMB will be used.\n",
+					MAXMEM>>20);
+		if (max_pfn > MAX_NONPAE_PFN)
+			printk(KERN_WARNING "Use a PAE enabled kernel.\n");
+		else
+			printk(KERN_WARNING "Use a HIGHMEM enabled kernel.\n");
+#else /* !CONFIG_HIGHMEM */
+#ifndef CONFIG_X86_PAE
+		if (max_pfn > MAX_NONPAE_PFN) {
+			max_pfn = MAX_NONPAE_PFN;
+			printk(KERN_WARNING "Warning only 4GB will be used.\n");
+			printk(KERN_WARNING "Use a PAE enabled kernel.\n");
+		}
+#endif /* !CONFIG_X86_PAE */
+#endif /* !CONFIG_HIGHMEM */
+	}
+
+#ifdef CONFIG_HIGHMEM
+	highstart_pfn = highend_pfn = max_pfn;
+	if (max_pfn > MAXMEM_PFN) {
+		highstart_pfn = MAXMEM_PFN;
+		printk(KERN_NOTICE "%ldMB HIGHMEM available.\n",
+			pages_to_mb(highend_pfn - highstart_pfn));
+	}
+#endif
+	/*
+	 * Initialize the boot-time allocator (with low memory only):
+	 */
+	bootmap_size = init_bootmem(start_pfn, max_low_pfn);
+
+	/*
+	 * Register fully available low RAM pages with the bootmem allocator.
+	 */
+	for (i = 0; i < e820.nr_map; i++) {
+		unsigned long curr_pfn, last_pfn, size;
+ 		/*
+		 * Reserve usable low memory
+		 */
+		if (e820.map[i].type != E820_RAM)
+			continue;
+		/*
+		 * We are rounding up the start address of usable memory:
+		 */
+		curr_pfn = PFN_UP(e820.map[i].addr);
+		if (curr_pfn >= max_low_pfn)
+			continue;
+		/*
+		 * ... and at the end of the usable range downwards:
+		 */
+		last_pfn = PFN_DOWN(e820.map[i].addr + e820.map[i].size);
+
+		if (last_pfn > max_low_pfn)
+			last_pfn = max_low_pfn;
+
+		/*
+		 * .. finally, did all the rounding and playing
+		 * around just make the area go away?
+		 */
+		if (last_pfn <= curr_pfn)
+			continue;
+
+		size = last_pfn - curr_pfn;
+		free_bootmem(PFN_PHYS(curr_pfn), PFN_PHYS(size));
+	}
+	/*
+	 * Reserve the bootmem bitmap itself as well. We do this in two
+	 * steps (first step was init_bootmem()) because this catches
+	 * the (very unlikely) case of us accidentally initializing the
+	 * bootmem allocator with an invalid RAM area.
+	 */
+	reserve_bootmem(HIGH_MEMORY, (PFN_PHYS(start_pfn) +
+			 bootmap_size + PAGE_SIZE-1) - (HIGH_MEMORY));
+
+	/*
+	 * reserve physical page 0 - it's a special BIOS page on many boxes,
+	 * enabling clean reboots, SMP operation, laptop functions.
+	 */
+	reserve_bootmem(0, PAGE_SIZE);
+
+#ifdef CONFIG_SMP
+	/*
+	 * But first pinch a few for the stack/trampoline stuff
+	 * FIXME: Don't need the extra page at 4K, but need to fix
+	 * trampoline before removing it. (see the GDT stuff)
+	 */
+	reserve_bootmem(PAGE_SIZE, PAGE_SIZE);
+	smp_alloc_memory(); /* AP processor realmode stacks in low memory*/
+#endif
+
+#ifdef CONFIG_X86_IO_APIC
+	/*
+	 * Find and reserve possible boot-time SMP configuration:
+	 */
+	find_smp_config();
+#endif
+	paging_init();
+#ifdef CONFIG_X86_IO_APIC
+	/*
+	 * get boot-time SMP configuration:
+	 */
+	if (smp_found_config)
+		get_smp_config();
+#endif
+#ifdef CONFIG_X86_LOCAL_APIC
+	init_apic_mappings();
 #endif
 
 #ifdef CONFIG_BLK_DEV_INITRD
-	if (LOADER_TYPE) {
-		initrd_start = INITRD_START ? INITRD_START + PAGE_OFFSET : 0;
-		initrd_end = initrd_start+INITRD_SIZE;
-		if (initrd_end > memory_end) {
+	if (LOADER_TYPE && INITRD_START) {
+		if (INITRD_START + INITRD_SIZE < (max_low_pfn << PAGE_SHIFT)) {
+			reserve_bootmem(INITRD_START, INITRD_SIZE);
+			initrd_start =
+				INITRD_START ? INITRD_START + PAGE_OFFSET : 0;
+			initrd_end = initrd_start+INITRD_SIZE;
+		}
+		else {
 			printk("initrd extends beyond end of memory "
 			    "(0x%08lx > 0x%08lx)\ndisabling initrd\n",
-			    initrd_end,memory_end);
+			    INITRD_START + INITRD_SIZE,
+			    max_low_pfn << PAGE_SHIFT);
 			initrd_start = 0;
 		}
 	}
 #endif
 
+	/*
+	 * Request address space for all standard RAM and ROM resources
+	 * and also for regions reported as reserved by the e820.
+	 */
+	probe_roms();
+	for (i = 0; i < e820.nr_map; i++) {
+		struct resource *res;
+		if (e820.map[i].addr + e820.map[i].size > 0x100000000ULL)
+			continue;
+		res = alloc_bootmem_low(sizeof(struct resource));
+		switch (e820.map[i].type) {
+		case E820_RAM:	res->name = "System RAM"; break;
+		case E820_ACPI:	res->name = "ACPI Tables"; break;
+		case E820_NVS:	res->name = "ACPI Non-volatile Storage"; break;
+		default:	res->name = "reserved";
+		}
+		res->start = e820.map[i].addr;
+		res->end = res->start + e820.map[i].size - 1;
+		res->flags = IORESOURCE_MEM | IORESOURCE_BUSY;
+		request_resource(&iomem_resource, res);
+		if (e820.map[i].type == E820_RAM) {
+			/*
+			 *  We dont't know which RAM region contains kernel data,
+			 *  so we try it repeatedly and let the resource manager
+			 *  test it.
+			 */
+			request_resource(res, &code_resource);
+			request_resource(res, &data_resource);
+		}
+	}
+	request_resource(&iomem_resource, &vram_resource);
+
 	/* request I/O space for devices used on all i[345]86 PCs */
-	request_region(0x00,0x20,"dma1");
-	request_region(0x40,0x20,"timer");
-	request_region(0x80,0x10,"dma page reg");
-	request_region(0xc0,0x20,"dma2");
-	request_region(0xf0,0x10,"fpu");
+	for (i = 0; i < STANDARD_IO_RESOURCES; i++)
+		request_resource(&ioport_resource, standard_io_resources+i);
 
 #ifdef CONFIG_VT
 #if defined(CONFIG_VGA_CONSOLE)
@@ -376,13 +786,9 @@ __initfunc(void setup_arch(char **cmdline_p,
 	conswitchp = &dummy_con;
 #endif
 #endif
-	/*
-	 *	Check the bugs that will bite us before we get booting
-	 */
-
 }
 
-__initfunc(static int get_model_name(struct cpuinfo_x86 *c))
+static int __init get_model_name(struct cpuinfo_x86 *c)
 {
 	unsigned int n, dummy, *v;
 
@@ -410,7 +816,7 @@ __initfunc(static int get_model_name(struct cpuinfo_x86 *c))
 	return 1;
 }
 
-__initfunc(static int amd_model(struct cpuinfo_x86 *c))
+static int __init amd_model(struct cpuinfo_x86 *c)
 {
 	u32 l, h;
 	unsigned long flags;
@@ -475,6 +881,19 @@ __initfunc(static int amd_model(struct cpuinfo_x86 *c))
 				break;
 			}
 			break;
+		case 6:	/* An Athlon. We can trust the BIOS probably */
+		{
+			
+			u32 ecx, edx, dummy;
+			cpuid(0x80000005, &dummy, &dummy, &ecx, &edx);
+			printk("L1 I Cache: %dK  L1 D Cache: %dK\n",
+				ecx>>24, edx>>24);
+			cpuid(0x80000006, &dummy, &dummy, &ecx, &edx);
+			printk("L2 Cache: %dK\n", ecx>>16);
+			c->x86_cache_size = ecx>>16;
+			break;
+		}
+		
 	}
 	return r;
 }
@@ -539,7 +958,7 @@ static char Cx86_cb[] __initdata = "?.5x Core/Bus Clock";
 static char cyrix_model_mult1[] __initdata = "12??43";
 static char cyrix_model_mult2[] __initdata = "12233445";
 
-__initfunc(static void cyrix_model(struct cpuinfo_x86 *c))
+static void __init cyrix_model(struct cpuinfo_x86 *c)
 {
 	unsigned char dir0, dir0_msn, dir0_lsn, dir1 = 0;
 	char *buf = c->x86_model_id;
@@ -598,6 +1017,15 @@ __initfunc(static void cyrix_model(struct cpuinfo_x86 *c))
 		 *	on the MediaGX. So we turn it off for now. 
 		 */
 		
+#ifdef CONFIG_PCI
+		/* It isnt really a PCI quirk directly, but the cure is the
+		   same. The MediaGX has deep magic SMM stuff that handles the
+		   SB emulation. It thows away the fifo on disable_dma() which
+		   is wrong and ruins the audio. */
+		
+		printk(KERN_INFO "Working around Cyrix MediaGX virtual DMA bug.\n");
+		isa_dma_bridge_buggy = 1;
+#endif		
 		/* GXm supports extended cpuid levels 'ala' AMD */
 		if (c->cpuid_level == 2) {
 			get_model_name(c);  /* get CPU marketing name */
@@ -635,8 +1063,8 @@ __initfunc(static void cyrix_model(struct cpuinfo_x86 *c))
 			dir0_msn = 0;
 			p = Cx486S_name[0];
 			break;
-		break;
 		}
+		break;
 
 	default:  /* unknown (shouldn't happen, we know everyone ;-) */
 		dir0_msn = 7;
@@ -647,7 +1075,99 @@ __initfunc(static void cyrix_model(struct cpuinfo_x86 *c))
 	return;
 }
 
-__initfunc(void get_cpu_vendor(struct cpuinfo_x86 *c))
+static void __init centaur_model(struct cpuinfo_x86 *c)
+{
+	enum {
+		ECX8=1<<1,
+		EIERRINT=1<<2,
+		DPM=1<<3,
+		DMCE=1<<4,
+		DSTPCLK=1<<5,
+		ELINEAR=1<<6,
+		DSMC=1<<7,
+		DTLOCK=1<<8,
+		EDCTLB=1<<8,
+		EMMX=1<<9,
+		DPDC=1<<11,
+		EBRPRED=1<<12,
+		DIC=1<<13,
+		DDC=1<<14,
+		DNA=1<<15,
+		ERETSTK=1<<16,
+		E2MMX=1<<19,
+		EAMD3D=1<<20,
+	};
+
+	char *name;
+	u32  fcr_set=0;
+	u32  fcr_clr=0;
+	u32  lo,hi,newlo;
+	u32  aa,bb,cc,dd;
+
+	switch(c->x86_model) {
+	case 4:
+		name="C6";
+		fcr_set=ECX8|DSMC|EDCTLB|EMMX|ERETSTK;
+		fcr_clr=DPDC;
+		break;
+	case 8:
+		switch(c->x86_mask) {
+		default:
+			name="2";
+			break;
+		case 7 ... 9:
+			name="2A";
+			break;
+		case 10 ... 15:
+			name="2B";
+			break;
+		}
+		fcr_set=ECX8|DSMC|DTLOCK|EMMX|EBRPRED|ERETSTK|E2MMX|EAMD3D;
+		fcr_clr=DPDC;
+		break;
+	case 9:
+		name="3";
+		fcr_set=ECX8|DSMC|DTLOCK|EMMX|EBRPRED|ERETSTK|E2MMX|EAMD3D;
+		fcr_clr=DPDC;
+		break;
+	case 10:
+		name="4";
+		/* no info on the WC4 yet */
+		break;
+	default:
+		name="??";
+	}
+
+	/* get FCR  */
+	rdmsr(0x107, lo, hi);
+
+	newlo=(lo|fcr_set) & (~fcr_clr);
+
+	if (newlo!=lo) {
+		printk("Centaur FCR was 0x%X now 0x%X\n", lo, newlo );
+		wrmsr(0x107, newlo, hi );
+	} else {
+		printk("Centaur FCR is 0x%X\n",lo);
+	}
+
+	/* Emulate MTRRs using Centaur's MCR. */
+	c->x86_capability |= X86_FEATURE_MTRR;
+	/* Report CX8 */
+	c->x86_capability |= X86_FEATURE_CX8;
+	/* Set 3DNow! on Winchip 2 and above. */
+	if (c->x86_model >=8)
+		c->x86_capability |= X86_FEATURE_AMD3D;
+	/* See if we can find out some more. */
+	cpuid(0x80000000,&aa,&bb,&cc,&dd);
+	if (aa>=0x80000005) { /* Yes, we can. */
+		cpuid(0x80000005,&aa,&bb,&cc,&dd);
+		/* Add L1 data and code cache sizes. */
+		c->x86_cache_size = (cc>>24)+(dd>>24);
+	}
+	sprintf( c->x86_model_id, "WinChip %s", name );
+}
+
+void __init get_cpu_vendor(struct cpuinfo_x86 *c)
 {
 	char *v = c->x86_vendor_id;
 
@@ -663,6 +1183,8 @@ __initfunc(void get_cpu_vendor(struct cpuinfo_x86 *c))
 		c->x86_vendor = X86_VENDOR_CENTAUR;
 	else if (!strcmp(v, "NexGenDriven"))
 		c->x86_vendor = X86_VENDOR_NEXGEN;
+	else if (!strcmp(v, "RiseRiseRise"))
+		c->x86_vendor = X86_VENDOR_RISE;
 	else
 		c->x86_vendor = X86_VENDOR_UNKNOWN;
 }
@@ -673,6 +1195,7 @@ struct cpu_model_info {
 	char *model_names[16];
 };
 
+/* Naming convention should be: <Name> [(<Codename>)] */
 static struct cpu_model_info cpu_models[] __initdata = {
 	{ X86_VENDOR_INTEL,	4,
 	  { "486 DX-25/33", "486 DX-50", "486 SX", "486 DX/2", "486 SL", 
@@ -685,8 +1208,9 @@ static struct cpu_model_info cpu_models[] __initdata = {
 	    NULL, NULL, NULL, NULL }},
 	{ X86_VENDOR_INTEL,	6,
 	  { "Pentium Pro A-step", "Pentium Pro", NULL, "Pentium II (Klamath)", 
-	    NULL, "Pentium II (Deschutes)", "Celeron (Mendocino)", NULL,
-	    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL }},
+	    NULL, "Pentium II (Deschutes)", "Mobile Pentium II",
+	    "Pentium III (Katmai)", "Pentium III (Coppermine)", NULL, NULL, 
+	    NULL, NULL, NULL, NULL }},
 	{ X86_VENDOR_AMD,	4,
 	  { NULL, NULL, NULL, "486 DX/2", NULL, NULL, NULL, "486 DX/2-WB",
 	    "486 DX/4", "486 DX/4-WB", NULL, NULL, NULL, NULL, "Am5x86-WT",
@@ -696,18 +1220,23 @@ static struct cpu_model_info cpu_models[] __initdata = {
 	    "K5", "K5", NULL, NULL,
 	    "K6", "K6", "K6-2",
 	    "K6-3", NULL, NULL, NULL, NULL, NULL, NULL }},
+	{ X86_VENDOR_AMD,	6,
+	  { "Athlon", "Athlon",
+	    NULL, NULL, NULL, NULL,
+	    NULL, NULL, NULL,
+	    NULL, NULL, NULL, NULL, NULL, NULL, NULL }},
 	{ X86_VENDOR_UMC,	4,
 	  { NULL, "U5D", "U5S", NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	    NULL, NULL, NULL, NULL, NULL, NULL }},
-	{ X86_VENDOR_CENTAUR,	5,
-	  { NULL, NULL, NULL, NULL, "C6", NULL, NULL, NULL, "C6-2", NULL, NULL,
-	    NULL, NULL, NULL, NULL, NULL }},
 	{ X86_VENDOR_NEXGEN,	5,
 	  { "Nx586", NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
 	    NULL, NULL, NULL, NULL, NULL, NULL, NULL }},
+	{ X86_VENDOR_RISE,	5,
+	  { "mP6", "mP6", NULL, NULL, NULL, NULL, NULL,
+	    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL }},
 };
 
-__initfunc(void identify_cpu(struct cpuinfo_x86 *c))
+void __init identify_cpu(struct cpuinfo_x86 *c)
 {
 	int i;
 	char *p = NULL;
@@ -728,6 +1257,11 @@ __initfunc(void identify_cpu(struct cpuinfo_x86 *c))
 
 	if (c->x86_vendor == X86_VENDOR_AMD && amd_model(c))
 		return;
+
+	if (c->x86_vendor == X86_VENDOR_CENTAUR) {
+		centaur_model(c);
+		return;
+	}
 		
 	if (c->cpuid_level > 0 && c->x86_vendor == X86_VENDOR_INTEL)
 	{
@@ -743,63 +1277,67 @@ __initfunc(void identify_cpu(struct cpuinfo_x86 *c))
 		}
 	}
 
-	for (i = 0; i < sizeof(cpu_models)/sizeof(struct cpu_model_info); i++) {
-		if (c->cpuid_level > 1) {
-			/* supports eax=2  call */
-			int edx, cache_size, dummy;
-			
-			cpuid(2, &dummy, &dummy, &dummy, &edx);
+	if (c->cpuid_level > 1) {
+		/* supports eax=2  call */
+		int edx, dummy;
 
-			/* We need only the LSB */
-			edx &= 0xff;
+		cpuid(2, &dummy, &dummy, &dummy, &edx);
 
-			switch (edx) {
-				case 0x40:
-					cache_size = 0;
-					break;
+		/* We need only the LSB */
+		edx &= 0xff;
 
-				case 0x41:
-					cache_size = 128;
-					break;
+		switch (edx) {
+			case 0x40:
+				c->x86_cache_size = 0;
+				break;
 
-				case 0x42:
-					cache_size = 256;
-					break;
+			case 0x41:
+				c->x86_cache_size = 128;
+				break;
 
-				case 0x43:
-					cache_size = 512;
-					break;
+			case 0x42:
+			case 0x82: /*Detect 256-Kbyte cache on Coppermine*/
+				c->x86_cache_size = 256;
+				break;
 
-				case 0x44:
-					cache_size = 1024;
-					break;
+			case 0x43:
+				c->x86_cache_size = 512;
+				break;
 
-				case 0x45:
-					cache_size = 2048;
-					break;
+			case 0x44:
+				c->x86_cache_size = 1024;
+				break;
 
-				default:
-					cache_size = 0;
-					break;
-			}
+			case 0x45:
+				c->x86_cache_size = 2048;
+				break;
 
-			c->x86_cache_size = cache_size; 
+			default:
+				c->x86_cache_size = 0;
+				break;
 		}
+	}
 
+	for (i = 0; i < sizeof(cpu_models)/sizeof(struct cpu_model_info); i++) {
 		if (cpu_models[i].vendor == c->x86_vendor &&
 		    cpu_models[i].x86 == c->x86) {
 			if (c->x86_model <= 16)
 				p = cpu_models[i].model_names[c->x86_model];
 
-			/* Names for the Pentium II processors */
+			/* Names for the Pentium II/Celeron processors 
+                           detectable only by also checking the cache size.
+			   Dixon is NOT a Celeron. */
 			if ((cpu_models[i].vendor == X86_VENDOR_INTEL)
-			    && (cpu_models[i].x86 == 6) 
-			    && (c->x86_model == 5)
-			    && (c->x86_cache_size == 0)) {
-				p = "Celeron (Covington)";
+			    && (cpu_models[i].x86 == 6))
+			{
+			 	if(c->x86_model == 5 &&  c->x86_cache_size == 0)
+					p = "Celeron (Covington)";						
+				else if(c->x86_model == 6 && c->x86_cache_size == 128)
+                            		p = "Celeron (Mendocino)"; 
+ 			  	else if(c->x86_model == 5 && c->x86_cache_size == 256)
+					p = "Mobile Pentium II (Dixon)";
 			}
 		}
-			
 	}
 
 	if (p) {
@@ -814,7 +1352,7 @@ __initfunc(void identify_cpu(struct cpuinfo_x86 *c))
  *	Perform early boot up checks for a valid TSC. See arch/i386/kernel/time.c
  */
  
-__initfunc(void dodgy_tsc(void))
+void __init dodgy_tsc(void)
 {
 	get_cpu_vendor(&boot_cpu_data);
 	
@@ -828,10 +1366,10 @@ __initfunc(void dodgy_tsc(void))
 	
 
 static char *cpu_vendor_names[] __initdata = {
-	"Intel", "Cyrix", "AMD", "UMC", "NexGen", "Centaur" };
+	"Intel", "Cyrix", "AMD", "UMC", "NexGen", "Centaur", "Rise" };
 
 
-__initfunc(void print_cpu_info(struct cpuinfo_x86 *c))
+void __init print_cpu_info(struct cpuinfo_x86 *c)
 {
 	char *vendor = NULL;
 
@@ -849,20 +1387,7 @@ __initfunc(void print_cpu_info(struct cpuinfo_x86 *c))
 		printk("%s", c->x86_model_id);
 
 	if (c->x86_mask || c->cpuid_level>=0) 
-		printk(" stepping %02x", c->x86_mask);
-
-	if(c->x86_vendor == X86_VENDOR_CENTAUR)
-	{
-		u32 hv,lv;
-		rdmsr(0x107, lv, hv);
-		printk("\nCentaur FSR was 0x%X ",lv);
-		lv|=(1<<8);
-		lv|=(1<<7);
-		/* lv|=(1<<6);	- may help too if the board can cope */
-		printk("now 0x%X", lv);
-		wrmsr(0x107, lv, hv);
-	}
-	printk("\n");
+		printk(" stepping %02x\n", c->x86_mask);
 }
 
 /*
@@ -873,17 +1398,28 @@ int get_cpuinfo(char * buffer)
 {
 	char *p = buffer;
 	int sep_bug;
+
+	/* 
+	 * Flags should be entered into the array ONLY if there is no overlap.
+	 * Else a number should be used and then overridden in the case 
+	 * statement below. --Jauder <jauderho@carumba.com>
+	 *
+	 * NOTE: bits 10, 19-22, 26-31 are reserved.
+	 *
+	 * Data courtesy of http://www.sandpile.org/arch/cpuid.htm
+	 * Thanks to the Greasel!
+	 */
 	static char *x86_cap_flags[] = {
-	        "fpu", "vme", "de", "pse", "tsc", "msr", "6", "mce",
-	        "cx8", "9", "10", "sep", "mtrr", "pge", "14", "cmov",
-	        "16", "17", "psn", "19", "20", "21", "22", "mmx",
-	        "24", "kni", "26", "27", "28", "29", "30", "31"
+	        "fpu", "vme", "de", "pse", "tsc", "msr", "pae", "mce",
+	        "cx8", "apic", "10", "sep", "mtrr", "pge", "mca", "cmov",
+	        "16", "pse36", "psn", "19", "20", "21", "22", "mmx",
+	        "24", "xmm", "26", "27", "28", "29", "30", "31"
 	};
 	struct cpuinfo_x86 *c = cpu_data;
 	int i, n;
 
-	for(n=0; n<NR_CPUS; n++, c++) {
-#ifdef __SMP__
+	for (n = 0; n < NR_CPUS; n++, c++) {
+#ifdef CONFIG_SMP
 		if (!(cpu_online_map & (1<<n)))
 			continue;
 #endif
@@ -897,7 +1433,7 @@ int get_cpuinfo(char * buffer)
 			       c->x86 + '0',
 			       c->x86_model,
 			       c->x86_model_id[0] ? c->x86_model_id : "unknown");
-		
+
 		if (c->x86_mask || c->cpuid_level >= 0)
 			p += sprintf(p, "stepping\t: %d\n", c->x86_mask);
 		else
@@ -913,21 +1449,35 @@ int get_cpuinfo(char * buffer)
 			p += sprintf(p, "cache size\t: %d KB\n", c->x86_cache_size);
 		
 		/* Modify the capabilities according to chip type */
-		if (c->x86_vendor == X86_VENDOR_CYRIX) {
+		switch (c->x86_vendor) {
+
+		    case X86_VENDOR_CYRIX:
 			x86_cap_flags[24] = "cxmmx";
-		} else if (c->x86_vendor == X86_VENDOR_AMD) {
-			x86_cap_flags[16] = "fcmov";
-			x86_cap_flags[31] = "3dnow";
+			break;
+
+		    case X86_VENDOR_AMD:
 			if (c->x86 == 5 && c->x86_model == 6)
 				x86_cap_flags[10] = "sep";
-		} else if (c->x86_vendor == X86_VENDOR_INTEL) {
-			x86_cap_flags[6] = "pae";
-			x86_cap_flags[9] = "apic";
-			x86_cap_flags[14] = "mca";
+			if (c->x86 < 6)
+				x86_cap_flags[16] = "fcmov";
+			x86_cap_flags[22] = "mmxext";
+			x86_cap_flags[30] = "3dnowext";
+			x86_cap_flags[31] = "3dnow";
+			break;
+
+		    case X86_VENDOR_INTEL:
 			x86_cap_flags[16] = "pat";
-			x86_cap_flags[17] = "pse36";
-			x86_cap_flags[18] = "psn";
-			x86_cap_flags[24] = "osfxsr";
+			x86_cap_flags[24] = "fxsr";
+			break;
+
+		    case X86_VENDOR_CENTAUR:
+			if (c->x86_model >=8)	/* Only Winchip2 and above */
+			    x86_cap_flags[31] = "3dnow";
+			break;
+
+		    default:
+			/* Unknown CPU manufacturer. Transmeta ? :-) */
+			break;
 		}
 
 		sep_bug = c->x86_vendor == X86_VENDOR_INTEL &&
@@ -965,4 +1515,69 @@ int get_cpuinfo(char * buffer)
 			     ((c->loops_per_sec+2500)/5000) % 100);
 	}
 	return p - buffer;
+}
+
+int cpus_initialized = 0;
+unsigned long cpu_initialized = 0;
+
+/*
+ * cpu_init() initializes state that is per-CPU. Some data is already
+ * initialized (naturally) in the bootstrap process, such as the GDT
+ * and IDT. We reload them nevertheless, this function acts as a
+ * 'CPU state barrier', nothing should get across.
+ */
+void __init cpu_init (void)
+{
+	int nr = smp_processor_id();
+	struct tss_struct * t = &init_tss[nr];
+
+	if (test_and_set_bit(nr, &cpu_initialized)) {
+		printk("CPU#%d already initialized!\n", nr);
+		for (;;) __sti();
+	}
+	cpus_initialized++;
+	printk("Initializing CPU#%d\n", nr);
+
+	if (cpu_has_pse)
+		clear_in_cr4(X86_CR4_VME|X86_CR4_PVI|X86_CR4_TSD|X86_CR4_DE);
+
+	__asm__ __volatile__("lgdt %0": "=m" (gdt_descr));
+	__asm__ __volatile__("lidt %0": "=m" (idt_descr));
+
+	/*
+	 * Delete NT
+	 */
+	__asm__("pushfl ; andl $0xffffbfff,(%esp) ; popfl");
+
+	/*
+	 * set up and load the per-CPU TSS and LDT
+	 */
+	atomic_inc(&init_mm.mm_count);
+	current->active_mm = &init_mm;
+	if(current->mm)
+		BUG();
+	enter_lazy_tlb(&init_mm, current, nr);
+
+	t->esp0 = current->thread.esp0;
+	set_tss_desc(nr,t);
+	gdt_table[__TSS(nr)].b &= 0xfffffdff;
+	load_TR(nr);
+	load_LDT(&init_mm);
+
+	/*
+	 * Clear all 6 debug registers:
+	 */
+
+#define CD(register) __asm__("movl %0,%%db" #register ::"r"(0) );
+
+	CD(0); CD(1); CD(2); CD(3); /* no db4 and db5 */; CD(6); CD(7);
+
+#undef CD
+
+	/*
+	 * Force FPU initialization:
+	 */
+	current->flags &= ~PF_USEDFPU;
+	current->used_math = 0;
+	stts();
 }

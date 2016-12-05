@@ -47,13 +47,8 @@
 #include <linux/modversions.h>
 #endif
 
-#ifdef MODULE
 #include <linux/module.h>
 #include <linux/version.h>
-#else
-#define MOD_INC_USE_COUNT
-#define MOD_DEC_USE_COUNT
-#endif
 
 #define KERNEL
 #include <linux/types.h>
@@ -66,9 +61,10 @@
 #include <asm/io.h>		/* for inb_p, outb_p, inb, outb, etc. */
 #include <asm/uaccess.h>	/* for get_user, etc. */
 #include <linux/wait.h>		/* for wait_queue */
-#include <linux/init.h>		/* for __init */
+#include <linux/init.h>		/* for __init, module_{init,exit} */
 #include <linux/poll.h>		/* for POLLIN, etc. */
 #include <linux/dtlk.h>		/* local header file for DoubleTalk values */
+#include <linux/devfs_fs_kernel.h>
 
 #ifdef TRACING
 #define TRACE_TEXT(str) printk(str);
@@ -87,7 +83,7 @@ static int dtlk_timer_active;
 static int dtlk_has_indexing;
 static unsigned int dtlk_portlist[] =
 {0x25e, 0x29e, 0x2de, 0x31e, 0x35e, 0x39e, 0};
-static struct wait_queue *dtlk_process_list = NULL;
+static wait_queue_head_t dtlk_process_list;
 static struct timer_list dtlk_timer;
 
 /* prototypes for file_operations struct */
@@ -103,21 +99,12 @@ static int dtlk_ioctl(struct inode *inode, struct file *file,
 
 static struct file_operations dtlk_fops =
 {
-	NULL,			/* lseek */
-	dtlk_read,
-	dtlk_write,
-	NULL,			/* readdir */
-	dtlk_poll,
-	dtlk_ioctl,
-	NULL,			/* mmap */
-	dtlk_open,
-	NULL,			/* flush */
-	dtlk_release,
-	NULL,			/* fsync */
-	NULL,			/* fasync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
-	NULL			/* lock */
+	read:		dtlk_read,
+	write:		dtlk_write,
+	poll:		dtlk_poll,
+	ioctl:		dtlk_ioctl,
+	open:		dtlk_open,
+	release:	dtlk_release,
 };
 
 /* local prototypes */
@@ -366,34 +353,34 @@ static int dtlk_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-int __init dtlk_init(void)
+static devfs_handle_t devfs_handle;
+
+static int __init dtlk_init(void)
 {
 	dtlk_port_lpc = 0;
 	dtlk_port_tts = 0;
 	dtlk_busy = 0;
 	dtlk_timer_active = 0;
-	dtlk_major = register_chrdev(0, "dtlk", &dtlk_fops);
+	dtlk_major = devfs_register_chrdev(0, "dtlk", &dtlk_fops);
 	if (dtlk_major == 0) {
 		printk(KERN_ERR "DoubleTalk PC - cannot register device\n");
 		return 0;
 	}
 	if (dtlk_dev_probe() == 0)
 		printk(", MAJOR %d\n", dtlk_major);
+	devfs_handle = devfs_register (NULL, "dtlk", 0, DEVFS_FL_NONE,
+				       dtlk_major, DTLK_MINOR,
+				       S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+				       &dtlk_fops, NULL);
 
 	init_timer(&dtlk_timer);
 	dtlk_timer.function = dtlk_timer_tick;
-	dtlk_process_list = NULL;
+	init_waitqueue_head(&dtlk_process_list);
 
 	return 0;
 }
 
-#ifdef MODULE
-int init_module(void)
-{
-	return dtlk_init();
-}
-
-void cleanup_module(void)
+static void __exit dtlk_cleanup (void)
 {
 	dtlk_write_bytes("goodbye", 8);
 	current->state = TASK_INTERRUPTIBLE;
@@ -403,11 +390,13 @@ void cleanup_module(void)
 						   signals... */
 
 	dtlk_write_tts(DTLK_CLEAR);
-	unregister_chrdev(dtlk_major, "dtlk");
+	devfs_unregister_chrdev(dtlk_major, "dtlk");
+	devfs_unregister(devfs_handle);
 	release_region(dtlk_port_lpc, DTLK_IO_EXTENT);
 }
 
-#endif
+module_init(dtlk_init);
+module_exit(dtlk_cleanup);
 
 /* ------------------------------------------------------------------------ */
 

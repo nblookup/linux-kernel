@@ -1,0 +1,111 @@
+-------------------------------------------------------------------------------
+Readme for Linux device driver for the OmniVision OV511 USB to camera bridge IC
+-------------------------------------------------------------------------------
+
+Author: Mark McClelland
+Homepage: http://people.delphi.com/mmcclelland/linux/
+
+INTRODUCTION:
+
+This is a preliminary version of my OV511 Linux device driver. Currently, it can
+grab a frame in color (YUV420) at 640x480 or 320x240 using either vidcat or
+xawtv. Other utilities may work but have not yet been tested.
+
+SUPPORTED CAMERAS:
+________________________________________________________
+Manufacturer     | Model          | Custom ID | Status
+-----------------+----------------+-----------+---------
+MediaForte       | MV300          | 0         | Working
+D-Link           | DSB-C300       | 3         | Working
+Puretek          | PT-6007        | 5         | Untested
+Creative Labs    | WebCam 3       | 21        | Working
+Lifeview         | RoboCam        | 100       | Untested
+AverMedia        | InterCam Elite | 102       | Working
+MediaForte       | MV300          | 112       | Working
+--------------------------------------------------------
+
+Any camera using the OV511 and the OV7610 CCD should work with this driver. The
+driver only detects known cameras though, based on their custom id number. If
+you have a currently unsupported camera, the ID number should be reported to you
+in the kernel logs. If you have an unsupported camera, please send me the model,
+manufacturer and ID number and I will add it to the detection code. In the
+meantime, you can add to the code yourself in the function ov511_probe()
+
+WHAT YOU NEED:
+
+- If you want to help with the development, get the chip's specification docs at
+  http://www.ovt.com/omniusbp.html
+
+- A Video4Linux compatible frame grabber program (I recommend vidcat and xawtv)
+    vidcat is part of the w3cam package:  http://www.hdk-berlin.de/~rasca/w3cam/
+    xawtv is available at:  http://www.in-berlin.de/User/kraxel/xawtv.html
+
+HOW TO USE IT:
+
+You must have first compiled USB support, support for your specific USB host
+controller (UHCI or OHCI), and Video4Linux support for your kernel (I recommend
+making them modules.) 
+
+Next, (as root) from your appropriate modules directory (lib/modules/2.3.XX):
+
+	insmod usb/usbcore.o
+	insmod usb/usb-uhci.o  <OR>  insmod usb/ohci-hcd.o
+	insmod misc/videodev.o
+	insmod usb/ov511.o
+
+If it is not already there (it usually is), create the video device:
+
+	mknod /dev/video c 81 0
+	
+Now you are ready to run a video app! Both vidcat and xawtv work well for me
+at 640x480.
+	
+[Using vidcat:]
+
+	vidcat -s 640x480 > test.jpg
+	xview test.jpg
+	
+[Using xawtv:]
+
+You must make some modifications to the source and compile it before you use it.
+(Note: this may not be applicable to versions other than 3.06)
+
+In src/Xawtv.ad, change xawtv.tv.width to 640 and xawtv.tv.height to 480. Next,
+in src/grab-v4l.c, change SYNC_TIMEOUT from 1 to 2. Then, from the main xawtv
+directory:
+
+	make clean
+	./configure
+	make
+	make install
+
+Now you should be able to run xawtv. Right click for the options dialog. If
+you get a scrambled image it is likely that you made a mistake in Xawtv.ad.
+Try setting the size to 320x240 if all else fails.
+
+WORKING FEATURES:
+ o Color streaming/capture at 640x480 and 320x240
+ o YUV420 color
+ o Setting/getting of saturation, contrast and brightness (no color yet)
+
+WHAT NEEDS TO BE DONE:
+
+The rest of the work will involve implementing support for all the different
+resolutions, color depths, etc. Also, while support for the OV511's proprietary
+lossy compression is apparently not necessary (the code currently disables it,)
+it would be a nice addition as it improves performance quite a bit. OmniVision
+wouldn't tell me how the algorithm works, so we can't really work on that yet.
+Please kindly inform OmniVision that you would like them to release their
+specifications to the Linux community.
+
+HOW TO CONTACT ME:
+
+You can email me at mmcclelland@delphi.com . Please prefix the subject line
+with "OV511: " so that I am certain to notice your message.
+
+CREDITS:
+
+The code is based in no small part on the CPiA driver by Johannes Erdfelt,
+Randy Dunlap, and others. Big thanks to them for their pioneering work on that
+and the USB stack. Thanks to Bret Wallach for getting camera reg IO , ISOC, and
+image capture working.

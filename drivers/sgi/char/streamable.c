@@ -1,4 +1,5 @@
-/*
+/* $Id: streamable.c,v 1.11 2000/02/23 00:41:21 ralf Exp $
+ *
  * streamable.c: streamable devices. /dev/gfx
  * (C) 1997 Miguel de Icaza (miguel@nuclecu.unam.mx)
  *
@@ -51,14 +52,14 @@ get_sioc (struct strioctl *sioc, unsigned long arg)
 static int
 sgi_gfx_open (struct inode *inode, struct file *file)
 {
-	printk ("GFX: Opened by %d\n", current->pid);
+	printk ("GFX: Opened by %ld\n", current->pid);
 	return 0;
 }
 
 static int
 sgi_gfx_close (struct inode *inode, struct file *file)
 {
-	printk ("GFX: Closed by %d\n", current->pid);
+	printk ("GFX: Closed by %ld\n", current->pid);
 	return 0;
 }
 
@@ -71,20 +72,9 @@ sgi_gfx_ioctl (struct inode *inode, struct file *file, unsigned int cmd, unsigne
 }
 
 struct file_operations sgi_gfx_fops = {
-	NULL,			/* llseek */
-	NULL,			/* read */
-	NULL,			/* write */
-	NULL,			/* readdir */
-	NULL,			/* poll */
-	sgi_gfx_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	sgi_gfx_open,		/* open */
-	NULL,			/* flush */
-	sgi_gfx_close,		/* release */
-	NULL,			/* fsync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
-	NULL			/* lock */
+	ioctl:		sgi_gfx_ioctl,
+	open:		sgi_gfx_open,
+	release:	sgi_gfx_close,
 };
  
 static struct miscdevice dev_gfx = {
@@ -192,20 +182,8 @@ sgi_keyb_open (struct inode *inode, struct file *file)
 }
 
 struct file_operations sgi_keyb_fops = {
-	NULL,			/* llseek */
-	NULL,			/* read */
-	NULL,			/* write */
-	NULL,			/* readdir */
-	NULL,			/* poll */
-	sgi_keyb_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	sgi_keyb_open,		/* open */
-	NULL,			/* flush */
-	NULL,			/* release */
-	NULL,			/* fsync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
-	NULL			/* lock */
+	ioctl:		sgi_keyb_ioctl,
+	open:		sgi_keyb_open,
 };
 
 static struct miscdevice dev_input_keyboard = {
@@ -333,20 +311,9 @@ sgi_mouse_ioctl (struct inode *inode, struct file *file, unsigned int cmd, unsig
 }
 
 struct file_operations sgi_mouse_fops = {
-	NULL,			/* llseek */
-	NULL,			/* read */
-	NULL,			/* write */
-	NULL,			/* readdir */
-	NULL,			/* poll */
-	sgi_mouse_ioctl,	/* ioctl */
-	NULL,			/* mmap */
-	sgi_mouse_open,		/* open */
-	NULL,			/* flush */
-	sgi_mouse_close,	/* release */
-	NULL,			/* fsync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
-	NULL			/* lock */
+	ioctl:		sgi_mouse_ioctl,
+	open:		sgi_mouse_open,
+	release:	sgi_mouse_close,
 };
 
 /* /dev/input/mouse */

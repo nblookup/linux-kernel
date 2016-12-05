@@ -1,4 +1,4 @@
-/* $Id: siginfo.h,v 1.4 1999/04/28 19:45:20 davem Exp $
+/* $Id: siginfo.h,v 1.7 2000/01/29 07:41:51 davem Exp $
  * siginfo.c:
  */
 
@@ -26,7 +26,7 @@ typedef struct siginfo {
 		/* kill() */
 		struct {
 			pid_t _pid;		/* sender's pid */
-			uid_t _uid;		/* sender's uid */
+			unsigned int _uid;	/* sender's uid */
 		} _kill;
 
 		/* POSIX.1b timers */
@@ -38,20 +38,20 @@ typedef struct siginfo {
 		/* POSIX.1b signals */
 		struct {
 			pid_t _pid;		/* sender's pid */
-			uid_t _uid;		/* sender's uid */
+			unsigned int _uid;	/* sender's uid */
 			sigval_t _sigval;
 		} _rt;
 
 		/* SIGCHLD */
 		struct {
 			pid_t _pid;		/* which child */
-			uid_t _uid;		/* sender's uid */
+			unsigned int _uid;	/* sender's uid */
 			int _status;		/* exit code */
 			clock_t _utime;
 			clock_t _stime;
 		} _sigchld;
 
-		/* SIGILL, SIGFPE, SIGSEGV, SIGBUS */
+		/* SIGILL, SIGFPE, SIGSEGV, SIGBUS, SIGEMT */
 		struct {
 			void *_addr;	/* faulting insn/memory ref. */
 			int  _trapno;	/* TRAP # which caused the signal */
@@ -81,10 +81,16 @@ typedef struct siginfo {
 #define si_band		_sifields._sigpoll._band
 #define si_fd		_sifields._sigpoll._fd
 
+#ifdef __KERNEL__
+#define __SI_MASK	0
+#define __SI_FAULT	0
+#endif
+
 /*
  * si_code values
  * Digital reserves positive values for kernel-generated signals.
  */
+#define SI_NOINFO	32767	/* no information in siginfo_t */
 #define SI_USER		0	/* sent by kill, sigsend, raise */
 #define SI_KERNEL	0x80	/* sent by the kernel from somewhere */
 #define SI_QUEUE	-1	/* sent by sigqueue */
@@ -126,7 +132,7 @@ typedef struct siginfo {
  * SIGSEGV si_codes
  */
 #define SEGV_MAPERR	1	/* address not mapped to object */
-#define SRGV_ACCERR	2	/* invalid permissions for mapped object */
+#define SEGV_ACCERR	2	/* invalid permissions for mapped object */
 #define NSIGSEGV	2
 
 /*
@@ -153,7 +159,7 @@ typedef struct siginfo {
 #define CLD_TRAPPED	4	/* traced child has trapped */
 #define CLD_STOPPED	5	/* child has stopped */
 #define CLD_CONTINUED	6	/* stopped child has continued */
-#define NSIGCHLD
+#define NSIGCHLD	6
 
 /*
  * SIGPOLL si_codes
@@ -165,6 +171,12 @@ typedef struct siginfo {
 #define POLL_PRI	5	/* high priority input available */
 #define POLL_HUP	6	/* device disconnected */
 #define NSIGPOLL	6
+
+/*
+ * SIGEMT si_codes
+ */
+#define EMT_TAGOVF	1	/* tag overflow */
+#define NSIGEMT		1
 
 /*
  * sigevent definitions

@@ -13,9 +13,9 @@
 #ifndef _LINUX_TQUEUE_H
 #define _LINUX_TQUEUE_H
 
+#include <linux/spinlock.h>
 #include <asm/bitops.h>
 #include <asm/system.h>
-#include <asm/spinlock.h>
 
 /*
  * New proposed "bottom half" handlers:
@@ -116,7 +116,8 @@ extern __inline__ void run_task_queue(task_queue *list)
 			p      = p -> next;
 			mb();
 			save_p -> sync = 0;
-			(*f)(arg);
+			if (f)
+				(*f)(arg);
 		}
 	}
 }

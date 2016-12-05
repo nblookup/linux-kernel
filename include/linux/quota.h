@@ -44,8 +44,8 @@
 /*
  * Convert diskblocks to blocks and the other way around.
  */
-#define dbtob(num) (num << 10)
-#define btodb(num) (num >> 10)
+#define dbtob(num) (num << BLOCK_SIZE_BITS)
+#define btodb(num) (num >> BLOCK_SIZE_BITS)
 
 /*
  * Convert count of filesystem blocks to diskquota blocks, meant
@@ -170,7 +170,7 @@ struct dquot {
 	struct list_head dq_free;	/* free list element */
 	struct dquot *dq_hash_next;	/* Pointer to next in dquot_hash */
 	struct dquot **dq_hash_pprev;	/* Pointer to previous in dquot_hash */
-	struct wait_queue *dq_wait;	/* Pointer to waitqueue */
+	wait_queue_head_t dq_wait;	/* Pointer to waitqueue */
 	int dq_count;			/* Reference count */
 
 	/* fields after this point are cleared when invalidating */
@@ -202,7 +202,7 @@ struct dquot {
 # /* nodep */ include <sys/cdefs.h>
 
 __BEGIN_DECLS
-int quotactl __P ((int, const char *, int, caddr_t));
+long quotactl __P ((int, const char *, int, caddr_t));
 __END_DECLS
 
 #endif /* __KERNEL__ */

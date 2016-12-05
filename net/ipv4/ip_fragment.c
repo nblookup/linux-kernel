@@ -5,7 +5,7 @@
  *
  *		The IP fragmentation functionality.
  *		
- * Version:	$Id: ip_fragment.c,v 1.40 1999/03/20 23:58:34 davem Exp $
+ * Version:	$Id: ip_fragment.c,v 1.47 2000/02/09 21:11:33 davem Exp $
  *
  * Authors:	Fred N. van Kempen <waltje@uWalt.NL.Mugnet.ORG>
  *		Alan Cox <Alan.Cox@linux.org>
@@ -20,6 +20,7 @@
  *		John McDonald	:	0 length frag bug.
  */
 
+#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
@@ -33,8 +34,7 @@
 #include <linux/tcp.h>
 #include <linux/udp.h>
 #include <linux/inet.h>
-#include <linux/firewall.h>
-#include <linux/ip_fw.h>
+#include <linux/netfilter_ipv4.h>
 
 /* Fragment cache limits. We will commit 256K at one time. Should we
  * cross that limit we will prune down to 192K. This should cope with
@@ -66,17 +66,18 @@ struct ipq {
 	short		ihlen;		/* length of the IP header		*/	
 	struct timer_list timer;	/* when will this queue expire?		*/
 	struct ipq	**pprev;
-	struct device	*dev;		/* Device - for icmp replies */
+	struct net_device	*dev;		/* Device - for icmp replies */
 };
 
 #define IPQ_HASHSZ	64
 
-struct ipq *ipq_hash[IPQ_HASHSZ];
+static struct ipq *ipq_hash[IPQ_HASHSZ];
+static spinlock_t ipfrag_lock = SPIN_LOCK_UNLOCKED;
 
 #define ipqhashfn(id, saddr, daddr, prot) \
 	((((id) >> 1) ^ (saddr) ^ (daddr) ^ (prot)) & (IPQ_HASHSZ - 1))
 
-atomic_t ip_frag_mem = ATOMIC_INIT(0);		/* Memory used for fragments */
+static atomic_t ip_frag_mem = ATOMIC_INIT(0);	/* Memory used for fragments */
 
 /* Memory Tracking Functions. */
 extern __inline__ void frag_kfree_skb(struct sk_buff *skb)
@@ -141,7 +142,9 @@ static inline struct ipq *ip_find(struct iphdr *iph, struct dst_entry *dst)
 	unsigned int hash = ipqhashfn(id, saddr, daddr, protocol);
 	struct ipq *qp;
 
-	/* Always, we are in a BH context, so no locking.  -DaveM */
+	/* We are always in BH context, and protected by the
+	 * ipfrag lock.
+	 */
 	for(qp = ipq_hash[hash]; qp; qp = qp->next) {
 		if(qp->iph->id == id		&&
 		   qp->iph->saddr == saddr	&&
@@ -158,8 +161,9 @@ static inline struct ipq *ip_find(struct iphdr *iph, struct dst_entry *dst)
  * because we completed, reassembled and processed it, or because
  * it timed out.
  *
- * This is called _only_ from BH contexts, on packet reception
- * processing and from frag queue expiration timers.  -DaveM
+ * This is called _only_ from BH contexts with the ipfrag lock held,
+ * on packet reception processing and from frag queue expiration
+ * timers.  -DaveM
  */
 static void ip_free(struct ipq *qp)
 {
@@ -197,6 +201,7 @@ static void ip_expire(unsigned long arg)
 {
 	struct ipq *qp = (struct ipq *) arg;
 
+	spin_lock(&ipfrag_lock);
   	if(!qp->fragments)
         {	
 #ifdef IP_EXPIRE_DEBUG
@@ -206,17 +211,20 @@ static void ip_expire(unsigned long arg)
   	}
   
 	/* Send an ICMP "Fragment Reassembly Timeout" message. */
-	ip_statistics.IpReasmTimeout++;
-	ip_statistics.IpReasmFails++;   
+	IP_INC_STATS_BH(IpReasmTimeout);
+	IP_INC_STATS_BH(IpReasmFails);
 	icmp_send(qp->fragments->skb, ICMP_TIME_EXCEEDED, ICMP_EXC_FRAGTIME, 0);
 
 out:
 	/* Nuke the fragment queue. */
 	ip_free(qp);
+	spin_unlock(&ipfrag_lock);
 }
 
 /* Memory limiting on fragments.  Evictor trashes the oldest 
  * fragment queue until we are back under the low threshold.
+ *
+ * We are always called in BH with the ipfrag lock held.
  */
 static void ip_evictor(void)
 {
@@ -229,9 +237,6 @@ restart:
 		struct ipq *qp;
 		if (atomic_read(&ip_frag_mem) <= sysctl_ipfrag_low_thresh)
 			return;
-		/* We are in a BH context, so these queue
-		 * accesses are safe.  -DaveM
-		 */
 		qp = ipq_hash[i];
 		if (qp) {
 			/* find the oldest queue for this hash bucket */
@@ -283,7 +288,7 @@ static struct ipq *ip_create(struct sk_buff *skb, struct iphdr *iph)
 	/* Add this entry to the queue. */
 	hash = ipqhashfn(iph->id, iph->saddr, iph->daddr, iph->protocol);
 
-	/* We are in a BH context, no locking necessary.  -DaveM */
+	/* In a BH context and ipfrag lock is held.  -DaveM */
 	if((qp->next = ipq_hash[hash]) != NULL)
 		qp->next->pprev = &qp->next;
 	ipq_hash[hash] = qp;
@@ -382,11 +387,15 @@ static struct sk_buff *ip_glue(struct ipq *qp)
 	*/
 	skb->security = qp->fragments->skb->security;
 
+#ifdef CONFIG_NETFILTER_DEBUG
+	skb->nf_debug = qp->fragments->skb->nf_debug;
+#endif
+
 	/* Done with all fragments. Fixup the new IP header. */
 	iph = skb->nh.iph;
 	iph->frag_off = 0;
 	iph->tot_len = htons(count);
-	ip_statistics.IpReasmOKs++;
+	IP_INC_STATS_BH(IpReasmOKs);
 	return skb;
 
 out_invalid:
@@ -405,7 +414,7 @@ out_oversize:
 			"Oversized IP packet from %d.%d.%d.%d.\n",
 			NIPQUAD(qp->iph->saddr));
 out_fail:
-	ip_statistics.IpReasmFails++;
+	IP_INC_STATS_BH(IpReasmFails);
 	return NULL;
 }
 
@@ -419,7 +428,9 @@ struct sk_buff *ip_defrag(struct sk_buff *skb)
 	int flags, offset;
 	int i, ihl, end;
 	
-	ip_statistics.IpReasmReqds++;
+	IP_INC_STATS_BH(IpReasmReqds);
+
+	spin_lock(&ipfrag_lock);
 
 	/* Start by cleaning up the memory. */
 	if (atomic_read(&ip_frag_mem) > sysctl_ipfrag_high_thresh)
@@ -565,6 +576,7 @@ struct sk_buff *ip_defrag(struct sk_buff *skb)
 out_freequeue:
 		ip_free(qp);
 out_skb:
+		spin_unlock(&ipfrag_lock);
 		return skb;
 	}
 
@@ -574,6 +586,7 @@ out_skb:
 out_timer:
 	mod_timer(&qp->timer, jiffies + sysctl_ipfrag_time); /* ~ 30 seconds */
 out:
+	spin_unlock(&ipfrag_lock);
 	return NULL;
 
 	/*
@@ -586,7 +599,7 @@ out_oversize:
 	/* the skb isn't in a fragment, so fall through to free it */
 out_freeskb:
 	kfree_skb(skb);
-	ip_statistics.IpReasmFails++;
+	IP_INC_STATS_BH(IpReasmFails);
 	if (qp)
 		goto out_timer;
 	goto out;

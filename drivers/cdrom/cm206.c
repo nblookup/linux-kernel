@@ -151,6 +151,11 @@ History:
 
 24 jan 1998   Removed the cm206_disc_status() function, as it was now dead
               code.  The Uniform CDROM driver now provides this functionality.
+	      
+9 Nov. 1999   Make kernel-parameter implementation work with 2.3.x 
+	      Removed init_module & cleanup_module in favor of 
+	      module_init & module_exit.
+	      Torben Mathiasen <tmm@image.dk>
  * 
  * Parts of the code are based upon lmscd.c written by Kai Petzke,
  * sbpcd.c written by Eberhard Moenkeberg, and mcd.c by Martin
@@ -182,6 +187,7 @@ History:
 #include <linux/interrupt.h>
 #include <linux/timer.h>
 #include <linux/cdrom.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/ioport.h>
 #include <linux/mm.h>
 #include <linux/malloc.h>
@@ -209,6 +215,8 @@ static int auto_probe=1;	/* Yes, why not? */
 
 static int cm206_base = CM206_BASE;
 static int cm206_irq = CM206_IRQ; 
+static int cm206[2] = {0,0};	/* for compatible `insmod' parameter passing */
+
 MODULE_PARM(cm206_base, "i");	/* base */
 MODULE_PARM(cm206_irq, "i");	/* irq */
 MODULE_PARM(cm206, "1-2i");	/* base,irq or irq,base */
@@ -262,8 +270,8 @@ struct cm206_struct {
   int openfiles;
   ush sector[READ_AHEAD*RAW_SECTOR_SIZE/2]; /* buffered cd-sector */
   int sector_first, sector_last; /* range of these sectors */
-  struct wait_queue * uart;	/* wait queues for interrupt */
-  struct wait_queue * data;
+  wait_queue_head_t uart;	/* wait queues for interrupt */
+  wait_queue_head_t data;
   struct timer_list timer;	/* time-out */
   char timed_out;
   signed char max_sectors;	/* number of sectors that fit in adapter mem */
@@ -360,7 +368,7 @@ static void cm206_interrupt(int sig, void *dev_id, struct pt_regs * regs)
     debug(("receiving #%d: 0x%x\n", cd->ur_w, cd->ur[cd->ur_w]));
     cd->ur_w++; cd->ur_w %= UR_SIZE;
     if (cd->ur_w == cd->ur_r) debug(("cd->ur overflow!\n"));
-    if (cd->uart && cd->background < 2) { 
+    if (waitqueue_active(&cd->uart) && cd->background < 2) { 
       del_timer(&cd->timer);
       wake_up_interruptible(&cd->uart);
     }
@@ -368,7 +376,7 @@ static void cm206_interrupt(int sig, void *dev_id, struct pt_regs * regs)
   /* data ready in fifo? */
   else if (cd->intr_ds & ds_data_ready) { 
     if (cd->background) ++cd->adapter_last;
-    if (cd->data && (cd->wait_back || !cd->background)) {
+    if (waitqueue_active(&cd->data) && (cd->wait_back || !cd->background)) {
       del_timer(&cd->timer);
       wake_up_interruptible(&cd->data);
     }
@@ -419,12 +427,12 @@ void cm206_timeout(unsigned long who)
 {
   cd->timed_out = 1;
   debug(("Timing out\n"));
-  wake_up_interruptible((struct wait_queue **) who);
+  wake_up_interruptible((wait_queue_head_t *)who);
 }
 
 /* This function returns 1 if a timeout occurred, 0 if an interrupt
    happened */
-int sleep_or_timeout(struct wait_queue ** wait, int timeout)
+int sleep_or_timeout(wait_queue_head_t *wait, int timeout)
 {
   cd->timed_out=0;
   cd->timer.data=(unsigned long) wait;
@@ -442,7 +450,7 @@ int sleep_or_timeout(struct wait_queue ** wait, int timeout)
 
 void cm206_delay(int nr_jiffies) 
 {
-  struct wait_queue * wait = NULL;
+  DECLARE_WAIT_QUEUE_HEAD(wait);
   sleep_or_timeout(&wait, nr_jiffies);
 }
 
@@ -801,7 +809,7 @@ int try_adapter(int sector)
 /* This is not a very smart implementation. We could optimize for 
    consecutive block numbers. I'm not convinced this would really
    bring down the processor load. */
-static void do_cm206_request(void)
+static void do_cm206_request(request_queue_t * q)
 {
   long int i, cd_sec_no;
   int quarter, error; 
@@ -809,7 +817,7 @@ static void do_cm206_request(void)
   
   while(1) {	 /* repeat until all requests have been satisfied */
     INIT_REQUEST;
-    if (CURRENT == NULL || CURRENT->rq_status == RQ_INACTIVE)
+    if (QUEUE_EMPTY || CURRENT->rq_status == RQ_INACTIVE)
       return;
     if (CURRENT->cmd != READ) {
       debug(("Non-read command %d on cdrom\n", CURRENT->cmd));
@@ -1270,7 +1278,7 @@ static void cleanup(int level)
       printk("Can't unregister cdrom cm206\n");
       return;
     }
-    if (unregister_blkdev(MAJOR_NR, "cm206")) {
+    if (devfs_unregister_blkdev(MAJOR_NR, "cm206")) {
       printk("Can't unregister major cm206\n");
       return;
     }
@@ -1294,7 +1302,7 @@ static void cleanup(int level)
    check_region, 15 bits of one port and 6 of another make things
    likely enough to accept the region on the first hit...
  */
-__initfunc(int probe_base_port(int base))
+int __init probe_base_port(int base)
 {
   int b=0x300, e=0x370;		/* this is the range of start addresses */
   volatile int fool, i;
@@ -1314,7 +1322,7 @@ __initfunc(int probe_base_port(int base))
 
 #if !defined(MODULE) || defined(AUTO_PROBE_MODULE)
 /* Probe for irq# nr. If nr==0, probe for all possible irq's. */
-__initfunc(int probe_irq(int nr)) {
+int __init probe_irq(int nr){
   int irqs, irq;
   outw(dc_normal | READ_AHEAD, r_data_control);	/* disable irq-generation */
   sti(); 
@@ -1328,7 +1336,7 @@ __initfunc(int probe_irq(int nr)) {
 }
 #endif
 
-__initfunc(int cm206_init(void))
+int __init cm206_init(void)
 {
   uch e=0;
   long int size=sizeof(struct cm206_struct);
@@ -1383,7 +1391,7 @@ __initfunc(int cm206_init(void))
     return -EIO;
   }
   printk(".\n");
-  if (register_blkdev(MAJOR_NR, "cm206", &cdrom_fops) != 0) {
+  if (devfs_register_blkdev(MAJOR_NR, "cm206", &cdrom_fops) != 0) {
     printk(KERN_INFO "Cannot register for major %d!\n", MAJOR_NR);
     cleanup(3);
     return -EIO;
@@ -1394,7 +1402,7 @@ __initfunc(int cm206_init(void))
     cleanup(3);
     return -EIO;
   }    
-  blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+  blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
   blksize_size[MAJOR_NR] = cm206_blocksizes;
   read_ahead[MAJOR_NR] = 16;	/* reads ahead what? */
   init_bh(CM206_BH, cm206_bh);
@@ -1411,9 +1419,8 @@ __initfunc(int cm206_init(void))
 
 #ifdef MODULE
 
-static int cm206[2] = {0,0};	/* for compatible `insmod' parameter passing */
 
-__initfunc(void parse_options(void))
+void __init parse_options(void)
 {
   int i;
   for (i=0; i<2; i++) {
@@ -1428,7 +1435,7 @@ __initfunc(void parse_options(void))
   }
 }
 
-int init_module(void)
+int __cm206_init(void)
 {
 	parse_options();
 #if !defined(AUTO_PROBE_MODULE)
@@ -1437,19 +1444,26 @@ int init_module(void)
 	return cm206_init();
 }
 
-void cleanup_module(void)
+void __exit cm206_exit(void)
 {
   cleanup(4);
   printk(KERN_INFO "cm206 removed\n");
 }
+
+module_init(__cm206_init);
+module_exit(cm206_exit);
       
 #else /* !MODULE */
 
 /* This setup function accepts either `auto' or numbers in the range
  * 3--11 (for irq) or 0x300--0x370 (for base port) or both. */
-__initfunc(void cm206_setup(char *s, int *p))
+
+static int __init cm206_setup(char *s)
 {
-  int i;
+  int i, p[4];
+  
+  (void)get_options(s, ARRAY_SIZE(p), p);
+  
   if (!strcmp(s, "auto")) auto_probe=1;
   for(i=1; i<=p[0]; i++) {
     if (0x300 <= p[i] && i<= 0x370 && p[i] % 0x10 == 0) {
@@ -1461,8 +1475,12 @@ __initfunc(void cm206_setup(char *s, int *p))
       auto_probe = 0;
     }
   }
+ return 1;
 }
-#endif /* MODULE */
+
+__setup("cm206=", cm206_setup);
+
+#endif /* !MODULE */
 /*
  * Local variables:
  * compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/include -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer -D__SMP__ -pipe -fno-strength-reduce -m486 -DCPU=486 -D__SMP__ -DMODULE -DMODVERSIONS -include /usr/src/linux/include/linux/modversions.h  -c -o cm206.o cm206.c"

@@ -188,13 +188,13 @@
  * undef  : traditional save_flags; cli; restore_flags;
  */
 
-//#define DEBUG_SPINLOCKS 2	/* Set to 0, 1 or 2 in include/asm/spinlock.h */
+//#define DEBUG_SPINLOCKS 2	/* Set to 0, 1 or 2 in include/linux/spinlock.h */
 
 #define LinuxVersionCode(v, p, s) (((v)<<16)+((p)<<8)+(s))
 
 #if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,30)
 # include <linux/init.h>
-# include <asm/spinlock.h>
+# include <linux/spinlock.h>
 #endif
 
 
@@ -319,7 +319,7 @@
 # define PCI_PRESENT pci_present ()
 # define PCI_SET_MASTER pci_set_master (pdev)
 # define PCI_FIND_DEVICE(vend, id) (pdev = pci_find_device (vend, id, pdev))
-# define PCI_GET_IO_AND_IRQ io_port = pdev->base_address[0] & PCI_BASE_ADDRESS_IO_MASK; irq = pdev->irq
+# define PCI_GET_IO_AND_IRQ io_port = pdev->resource[0].start; irq = pdev->irq
 #else
 # include <linux/bios32.h>
 # define PDEV pbus, pdevfn
@@ -481,12 +481,6 @@ UCHAR  dc390_baddevname1[2][28] ={
 static char*  dc390_adapname = "DC390";
 UCHAR  dc390_eepromBuf[MAX_ADAPTER_NUM][EE_LEN];
 UCHAR  dc390_clock_period1[] = {4, 5, 6, 7, 8, 10, 13, 20};
-
-struct proc_dir_entry	DC390_proc_scsi_tmscsim ={
-       PROC_SCSI_DC390T, 7 ,"tmscsim",
-       S_IFDIR | S_IRUGO | S_IXUGO, 2
-       };
-
 
 /***********************************************************************
  * Functions for access to DC390 EEPROM
@@ -2024,7 +2018,7 @@ int __init DC390_detect (Scsi_Host_Template *psht)
 	printk (KERN_ERR "DC390: No PCI BIOS found!\n");
    
     if (dc390_adapterCnt)
-	psht->proc_dir = &DC390_proc_scsi_tmscsim;
+	psht->proc_name = "tmscsim";
 
     printk(KERN_INFO "DC390: %i adapters found\n", dc390_adapterCnt);
     DC390_UNLOCK_DRV;

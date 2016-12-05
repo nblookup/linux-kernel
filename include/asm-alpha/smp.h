@@ -1,29 +1,12 @@
 #ifndef __ASM_SMP_H
 #define __ASM_SMP_H
 
-#ifdef __SMP__
-
-#include <linux/tasks.h>
 #include <asm/pal.h>
-
-struct cpuinfo_alpha {
-	unsigned long loops_per_sec;
-	unsigned int next;
-	unsigned long *pgd_cache;
-	unsigned long *pte_cache;
-	unsigned long pgtable_cache_sz;
-	unsigned long ipi_count;
-} __attribute__((aligned(32)));
-
-extern struct cpuinfo_alpha cpu_data[NR_CPUS];
-
-#define PROC_CHANGE_PENALTY     20
-
-extern __volatile__ int cpu_number_map[NR_CPUS];
 
 /* HACK: Cabrio WHAMI return value is bogus if more than 8 bits used.. :-( */
 
-static __inline__ unsigned char hard_smp_processor_id(void)
+static __inline__ unsigned char
+__hard_smp_processor_id(void)
 {
 	register unsigned char __r0 __asm__("$0");
 	__asm__ __volatile__(
@@ -34,8 +17,45 @@ static __inline__ unsigned char hard_smp_processor_id(void)
 	return __r0;
 }
 
+#ifdef __SMP__
+
+#include <linux/threads.h>
+#include <asm/irq.h>
+
+struct cpuinfo_alpha {
+	unsigned long loops_per_sec;
+	unsigned long last_asn;
+	unsigned long *pgd_cache;
+	unsigned long *pte_cache;
+	unsigned long pgtable_cache_sz;
+	unsigned long ipi_count;
+	unsigned long irq_attempt[NR_IRQS];
+	unsigned long smp_local_irq_count;
+	unsigned long prof_multiplier;
+	unsigned long prof_counter;
+	int irq_count, bh_count;
+	unsigned char mcheck_expected;
+	unsigned char mcheck_taken;
+	unsigned char mcheck_extra;
+} __attribute__((aligned(64)));
+
+extern struct cpuinfo_alpha cpu_data[NR_CPUS];
+
+#define PROC_CHANGE_PENALTY     20
+
+/* Map from cpu id to sequential logical cpu number.  This will only
+   not be idempotent when cpus failed to come on-line.  */
+extern int __cpu_number_map[NR_CPUS];
+#define cpu_number_map(cpu)  __cpu_number_map[cpu]
+
+/* The reverse map from sequential logical cpu number to cpu id.  */
+extern int __cpu_logical_map[NR_CPUS];
+#define cpu_logical_map(cpu)  __cpu_logical_map[cpu]
+
+#define hard_smp_processor_id()	__hard_smp_processor_id()
 #define smp_processor_id()	(current->processor)
-#define cpu_logical_map(cpu)	(cpu)
+
+extern unsigned long cpu_present_mask;
 
 #endif /* __SMP__ */
 

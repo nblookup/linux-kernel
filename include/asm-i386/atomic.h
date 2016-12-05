@@ -46,6 +46,17 @@ static __inline__ void atomic_sub(int i, volatile atomic_t *v)
 		:"ir" (i), "m" (__atomic_fool_gcc(v)));
 }
 
+static __inline__ int atomic_sub_and_test(int i, volatile atomic_t *v)
+{
+	unsigned char c;
+
+	__asm__ __volatile__(
+		LOCK "subl %2,%0; sete %1"
+		:"=m" (__atomic_fool_gcc(v)), "=qm" (c)
+		:"ir" (i), "m" (__atomic_fool_gcc(v)));
+	return c;
+}
+
 static __inline__ void atomic_inc(volatile atomic_t *v)
 {
 	__asm__ __volatile__(
@@ -71,6 +82,28 @@ static __inline__ int atomic_dec_and_test(volatile atomic_t *v)
 		:"=m" (__atomic_fool_gcc(v)), "=qm" (c)
 		:"m" (__atomic_fool_gcc(v)));
 	return c != 0;
+}
+
+static __inline__ int atomic_inc_and_test(volatile atomic_t *v)
+{
+	unsigned char c;
+
+	__asm__ __volatile__(
+		LOCK "incl %0; sete %1"
+		:"=m" (__atomic_fool_gcc(v)), "=qm" (c)
+		:"m" (__atomic_fool_gcc(v)));
+	return c != 0;
+}
+
+extern __inline__ int atomic_add_negative(int i, volatile atomic_t *v)
+{
+	unsigned char c;
+
+	__asm__ __volatile__(
+		LOCK "addl %2,%0; sets %1"
+		:"=m" (__atomic_fool_gcc(v)), "=qm" (c)
+		:"ir" (i), "m" (__atomic_fool_gcc(v)));
+	return c;
 }
 
 /* These are x86-specific, used by some header files */

@@ -71,12 +71,12 @@
 #define RXFIFOH 0x08
 #define TXFIFOE 0x20
 
-static int dmascc_dev_init(struct device *dev)
+static int dmascc_dev_init(struct net_device *dev)
 {
   return 0;
 }
 
-static void dev_init_buffers(struct device *dev)
+static void dev_init_buffers(struct net_device *dev)
 {
   int i;
 
@@ -239,7 +239,7 @@ struct scc_info {
   int scc_base;
   int tmr_base;
   int twin_serial_cfg;
-  struct device dev[2];
+  struct net_device dev[2];
   struct scc_priv priv[2];
   struct scc_info *next;
 };
@@ -252,21 +252,21 @@ static int setup_adapter(int io, int h, int n) __init;
 
 static inline void write_scc(int ctl, int reg, int val);
 static inline int read_scc(int ctl, int reg);
-static int scc_open(struct device *dev);
-static int scc_close(struct device *dev);
-static int scc_ioctl(struct device *dev, struct ifreq *ifr, int cmd);
-static int scc_send_packet(struct sk_buff *skb, struct device *dev);
-static struct enet_statistics *scc_get_stats(struct device *dev);
-static int scc_set_mac_address(struct device *dev, void *sa);
+static int scc_open(struct net_device *dev);
+static int scc_close(struct net_device *dev);
+static int scc_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
+static int scc_send_packet(struct sk_buff *skb, struct net_device *dev);
+static struct enet_statistics *scc_get_stats(struct net_device *dev);
+static int scc_set_mac_address(struct net_device *dev, void *sa);
 static void scc_isr(int irq, void *dev_id, struct pt_regs * regs);
 static inline void z8530_isr(struct scc_info *info);
-static void rx_isr(struct device *dev);
-static void special_condition(struct device *dev, int rc);
+static void rx_isr(struct net_device *dev);
+static void special_condition(struct net_device *dev, int rc);
 static void rx_bh(void *arg);
-static void tx_isr(struct device *dev);
-static void es_isr(struct device *dev);
-static void tm_isr(struct device *dev);
-static inline void delay(struct device *dev, int t);
+static void tx_isr(struct net_device *dev);
+static void es_isr(struct net_device *dev);
+static void tm_isr(struct net_device *dev);
+static inline void delay(struct net_device *dev, int t);
 static inline unsigned char random(void);
 
 
@@ -336,7 +336,7 @@ void cleanup_module(void)
 #else
 
 
-__initfunc(void dmascc_setup(char *str, int *ints))
+void __init dmascc_setup(char *str, int *ints)
 {
    int i;
 
@@ -350,7 +350,7 @@ __initfunc(void dmascc_setup(char *str, int *ints))
 
 /* Initialization functions */
 
-__initfunc(int dmascc_init(void))
+int __init dmascc_init(void)
 {
   int h, i, j, n;
   int base[MAX_NUM_DEVS], tcmd[MAX_NUM_DEVS], t0[MAX_NUM_DEVS],
@@ -453,12 +453,11 @@ __initfunc(int dmascc_init(void))
   return -EIO;
 }
 
-
-__initfunc(int setup_adapter(int io, int h, int n))
+int __init setup_adapter(int io, int h, int n)
 {
   int i, irq, chip;
   struct scc_info *info;
-  struct device *dev;
+  struct net_device *dev;
   struct scc_priv *priv;
   unsigned long time;
   unsigned int irqs;
@@ -624,7 +623,7 @@ static inline int read_scc(int ctl, int reg)
 }
 
 
-static int scc_open(struct device *dev)
+static int scc_open(struct net_device *dev)
 {
   struct scc_priv *priv = dev->priv;
   struct scc_info *info = priv->info;
@@ -644,7 +643,6 @@ static int scc_open(struct device *dev)
   }
 
   /* Initialize local variables */
-  dev->tbusy = 0;
   priv->rx_ptr = 0;
   priv->rx_over = 0;
   priv->rx_head = priv->rx_tail = priv->rx_count = 0;
@@ -733,7 +731,7 @@ static int scc_open(struct device *dev)
   /* Configure PI2 DMA */
   if (info->type <= TYPE_PI2) outb_p(1, io + PI_DREQ_MASK);
 
-  dev->start = 1;
+  netif_start_queue(dev);
   info->open++;
   MOD_INC_USE_COUNT;
 
@@ -741,16 +739,15 @@ static int scc_open(struct device *dev)
 }
 
 
-static int scc_close(struct device *dev)
+static int scc_close(struct net_device *dev)
 {
   struct scc_priv *priv = dev->priv;
   struct scc_info *info = priv->info;
   int io = dev->base_addr;
   int cmd = priv->cmd;
 
-  dev->start = 0;
+  netif_stop_queue(dev);
   info->open--;
-  MOD_DEC_USE_COUNT;
 
   if (info->type == TYPE_TWIN)
     /* Drop DTR */
@@ -769,27 +766,28 @@ static int scc_close(struct device *dev)
     if (info->type <= TYPE_PI2) outb_p(0, io + PI_DREQ_MASK);
     free_irq(dev->irq, info);
   }
+  MOD_DEC_USE_COUNT;
   return 0;
 }
 
 
-static int scc_ioctl(struct device *dev, struct ifreq *ifr, int cmd)
+static int scc_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
   int rc;
   struct scc_priv *priv = dev->priv;
   
   switch (cmd) {
   case SIOCGSCCPARAM:
-    rc = verify_area(VERIFY_WRITE, ifr->ifr_data, sizeof(struct scc_param));
-    if (rc) return rc;
-    copy_to_user(ifr->ifr_data, &priv->param, sizeof(struct scc_param));
+    if(copy_to_user(ifr->ifr_data, &priv->param, sizeof(struct scc_param)))
+    	return -EFAULT;
     return 0;
   case SIOCSSCCPARAM:
-    if (!suser()) return -EPERM;
-    rc = verify_area(VERIFY_READ, ifr->ifr_data, sizeof(struct scc_param));
-    if (rc) return rc;
-    if (dev->start) return -EAGAIN;
-    copy_from_user(&priv->param, ifr->ifr_data, sizeof(struct scc_param));
+    if (!capable(CAP_NET_ADMIN)) 
+    	return -EPERM;
+    if (netif_running(dev))
+    	return -EAGAIN;
+    if(copy_from_user(&priv->param, ifr->ifr_data, sizeof(struct scc_param)))
+    	return -EFAULT;
     dev->dma = priv->param.dma;
     return 0;
   default:
@@ -798,7 +796,7 @@ static int scc_ioctl(struct device *dev, struct ifreq *ifr, int cmd)
 }
 
 
-static int scc_send_packet(struct sk_buff *skb, struct device *dev)
+static int scc_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
   struct scc_priv *priv = dev->priv;
   struct scc_info *info = priv->info;
@@ -807,18 +805,8 @@ static int scc_send_packet(struct sk_buff *skb, struct device *dev)
   int i;
 
   /* Block a timer-based transmit from overlapping */
-  if (test_and_set_bit(0, (void *) &priv->tx_sem) != 0) {
-    atomic_inc((void *) &priv->stats.tx_dropped);
-    dev_kfree_skb(skb);
-    return 0;
-  }
-
-  /* Return with an error if we cannot accept more data */
-  if (dev->tbusy) {
-    priv->tx_sem = 0;
-    return -1;
-  }
-
+  netif_stop_queue(dev);
+  
   /* Transfer data to DMA buffer */
   i = priv->tx_head;
   memcpy(priv->tx_buf[i], skb->data+1, skb->len-1);
@@ -830,7 +818,8 @@ static int scc_send_packet(struct sk_buff *skb, struct device *dev)
   /* Set the busy flag if we just filled up the last buffer */
   priv->tx_head = (i + 1) % NUM_TX_BUF;
   priv->tx_count++;
-  if (priv->tx_count == NUM_TX_BUF) dev->tbusy = 1;
+  if (priv->tx_count != NUM_TX_BUF)
+  	netif_wake_queue(dev);
 
   /* Set new TX state */
   if (priv->tx_state == TX_IDLE) {
@@ -852,7 +841,7 @@ static int scc_send_packet(struct sk_buff *skb, struct device *dev)
 }
 
 
-static struct enet_statistics *scc_get_stats(struct device *dev)
+static struct enet_statistics *scc_get_stats(struct net_device *dev)
 {
   struct scc_priv *priv = dev->priv;
 
@@ -860,7 +849,7 @@ static struct enet_statistics *scc_get_stats(struct device *dev)
 }
 
 
-static int scc_set_mac_address(struct device *dev, void *sa)
+static int scc_set_mac_address(struct net_device *dev, void *sa)
 {
   memcpy(dev->dev_addr, ((struct sockaddr *)sa)->sa_data, dev->addr_len);
   return 0;
@@ -935,7 +924,7 @@ static inline void z8530_isr(struct scc_info *info)
 }
 
 
-static void rx_isr(struct device *dev)
+static void rx_isr(struct net_device *dev)
 {
   struct scc_priv *priv = dev->priv;
   int cmd = priv->cmd;
@@ -962,7 +951,7 @@ static void rx_isr(struct device *dev)
 }
 
 
-static void special_condition(struct device *dev, int rc)
+static void special_condition(struct net_device *dev, int rc)
 {
   struct scc_priv *priv = dev->priv;
   int cb, cmd = priv->cmd;
@@ -1033,7 +1022,7 @@ static void special_condition(struct device *dev, int rc)
 
 static void rx_bh(void *arg)
 {
-  struct device *dev = arg;
+  struct net_device *dev = arg;
   struct scc_priv *priv = dev->priv;
   struct scc_info *info = priv->info;
   int cmd = priv->cmd;
@@ -1082,7 +1071,7 @@ static void rx_bh(void *arg)
 }
 
 
-static void tx_isr(struct device *dev)
+static void tx_isr(struct net_device *dev)
 {
   struct scc_priv *priv = dev->priv;
   int cmd = priv->cmd;
@@ -1104,7 +1093,7 @@ static void tx_isr(struct device *dev)
 }
 
 
-static void es_isr(struct device *dev)
+static void es_isr(struct net_device *dev)
 {
   struct scc_priv *priv = dev->priv;
   struct scc_info *info = priv->info;
@@ -1140,7 +1129,6 @@ static void es_isr(struct device *dev)
     /* Remove frame from FIFO */
     priv->tx_tail = (i + 1) % NUM_TX_BUF;
     priv->tx_count--;
-    dev->tbusy = 0;
     /* Check if another frame is available and we are allowed to transmit */
     if (priv->tx_count && (jiffies - priv->tx_start) < priv->param.txtime) {
       if (dev->dma) {
@@ -1172,7 +1160,7 @@ static void es_isr(struct device *dev)
       priv->stats.tx_packets++;
     }
     /* Inform upper layers */
-    mark_bh(NET_BH);
+    netif_wake_queue(dev);
   }
 
   /* DCD transition */
@@ -1262,7 +1250,7 @@ static void es_isr(struct device *dev)
 }
 
 
-static void tm_isr(struct device *dev)
+static void tm_isr(struct net_device *dev)
 {
   struct scc_priv *priv = dev->priv;
   struct scc_info *info = priv->info;
@@ -1327,7 +1315,7 @@ static void tm_isr(struct device *dev)
 }
 
 
-static inline void delay(struct device *dev, int t)
+static inline void delay(struct net_device *dev, int t)
 {
   struct scc_priv *priv = dev->priv;
   int tmr = priv->tmr;

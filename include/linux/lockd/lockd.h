@@ -11,12 +11,16 @@
 
 #ifdef __KERNEL__
 
+#include <linux/config.h>
 #include <linux/in.h>
 #include <linux/fs.h>
 #include <linux/utsname.h>
 #include <linux/nfsd/nfsfh.h>
 #include <linux/lockd/bind.h>
 #include <linux/lockd/xdr.h>
+#ifdef CONFIG_LOCKD_V4
+#include <linux/lockd/xdr4.h>
+#endif
 #include <linux/lockd/debug.h>
 
 /*
@@ -44,7 +48,7 @@ struct nlm_host {
 	unsigned short		h_reclaiming : 1,
 				h_inuse      : 1,
 				h_monitored  : 1;
-	struct wait_queue *	h_gracewait;	/* wait while reclaiming */
+	wait_queue_head_t	h_gracewait;	/* wait while reclaiming */
 	u32			h_state;	/* pseudo-state counter */
 	u32			h_nsmstate;	/* true remote NSM state */
 	unsigned int		h_count;	/* reference count */
@@ -71,13 +75,14 @@ struct nlm_rqst {
  */
 struct nlm_file {
 	struct nlm_file *	f_next;		/* linked list */
-	struct knfs_fh		f_handle;	/* NFS file handle */
+	struct nfs_fh		f_handle;	/* NFS file handle */
 	struct file		f_file;		/* VFS file pointer */
 	struct nlm_share *	f_shares;	/* DOS shares */
 	struct nlm_block *	f_blocks;	/* blocked locks */
 	unsigned int		f_locks;	/* guesstimate # of locks */
 	unsigned int		f_count;	/* reference count */
 	struct semaphore	f_sema;		/* avoid concurrent access */
+	int		       	f_hash;		/* hash of f_handle */
 };
 
 /*
@@ -112,6 +117,9 @@ struct nlm_block {
  */
 extern struct rpc_program	nlm_program;
 extern struct svc_procedure	nlmsvc_procedures[];
+#ifdef CONFIG_LOCKD_V4
+extern struct svc_procedure	nlmsvc_procedures4[];
+#endif
 extern unsigned long		nlmsvc_grace_period;
 extern unsigned long		nlmsvc_timeout;
 

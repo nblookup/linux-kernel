@@ -6,45 +6,16 @@
  */
 #include <linux/config.h>
 
-extern void die(char *msg, struct pt_regs *regs, unsigned int err);
+extern void die(const char *msg, struct pt_regs *regs, int err);
 
-void __bad_pmd(pmd_t *pmd)
+/*
+ * This is useful to dump out the page tables associated with
+ * 'addr' in mm 'mm'.
+ */
+static void show_pte(struct mm_struct *mm, unsigned long addr)
 {
-	printk("Bad pmd in pte_alloc: %08lx\n", pmd_val(*pmd));
-#ifdef CONFIG_DEBUG_ERRORS
-	__backtrace();
-#endif
-	set_pmd(pmd, mk_user_pmd(BAD_PAGETABLE));
-}
-
-void __bad_pmd_kernel(pmd_t *pmd)
-{
-	printk("Bad pmd in pte_alloc_kernel: %08lx\n", pmd_val(*pmd));
-#ifdef CONFIG_DEBUG_ERRORS
-	__backtrace();
-#endif
-	set_pmd(pmd, mk_kernel_pmd(BAD_PAGETABLE));
-}
-
-static void
-kernel_page_fault(unsigned long addr, int mode, struct pt_regs *regs,
-		  struct task_struct *tsk, struct mm_struct *mm)
-{
-	char *reason;
-	/*
-	 * Oops. The kernel tried to access some bad page. We'll have to
-	 * terminate things with extreme prejudice.
-	 */
 	pgd_t *pgd;
 
-	if (addr < PAGE_SIZE)
-		reason = "NULL pointer dereference";
-	else
-		reason = "paging request";
-
-	printk(KERN_ALERT "Unable to handle kernel %s at virtual address %08lx\n",
-		reason, addr);
-	printk(KERN_ALERT "memmap = %08lX, pgd = %p\n", tsk->tss.memmap, mm->pgd);
 	pgd = pgd_offset(mm, addr);
 	printk(KERN_ALERT "*pgd = %08lx", pgd_val(*pgd));
 
@@ -73,16 +44,42 @@ kernel_page_fault(unsigned long addr, int mode, struct pt_regs *regs,
 
 		pte = pte_offset(pmd, addr);
 		printk(", *pte = %08lx", pte_val(*pte));
+#ifdef CONFIG_CPU_32
 		printk(", *ppte = %08lx", pte_val(pte[-PTRS_PER_PTE]));
+#endif
 	} while(0);
 
 	printk("\n");
-	die("Oops", regs, mode);
+}
+
+/*
+ * Oops. The kernel tried to access some bad page. We'll have to
+ * terminate things with extreme prejudice.
+ */
+static void
+kernel_page_fault(unsigned long addr, int write_access, struct pt_regs *regs,
+		  struct task_struct *tsk, struct mm_struct *mm)
+{
+	char *reason;
+
+	if (addr < PAGE_SIZE)
+		reason = "NULL pointer dereference";
+	else
+		reason = "paging request";
+
+	printk(KERN_ALERT "Unable to handle kernel %s at virtual address %08lx\n",
+		reason, addr);
+	if (!mm)
+		mm = &init_mm;
+
+	printk(KERN_ALERT "pgd = %p\n", mm->pgd);
+	show_pte(mm, addr);
+	die("Oops", regs, write_access);
 
 	do_exit(SIGKILL);
 }
 
-static void do_page_fault(unsigned long addr, int mode, struct pt_regs *regs)
+static int do_page_fault(unsigned long addr, int mode, struct pt_regs *regs)
 {
 	struct task_struct *tsk;
 	struct mm_struct *mm;
@@ -96,7 +93,7 @@ static void do_page_fault(unsigned long addr, int mode, struct pt_regs *regs)
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-	if (in_interrupt() || mm == &init_mm)
+	if (in_interrupt() || !mm)
 		goto no_context;
 
 	down(&mm->mmap_sem);
@@ -130,7 +127,7 @@ good_area:
 		goto do_sigbus;
 
 	up(&mm->mmap_sem);
-	return;
+	return 0;
 
 	/*
 	 * Something tried to access memory that isn't in our memory map..
@@ -140,15 +137,16 @@ bad_area:
 	up(&mm->mmap_sem);
 
 	/* User mode accesses just cause a SIGSEGV */
-	if (mode & FAULT_CODE_USER) {
-		tsk->tss.error_code = mode;
-		tsk->tss.trap_no = 14;
+	if (user_mode(regs)) {
+		tsk->thread.address = addr;
+		tsk->thread.error_code = mode;
+		tsk->thread.trap_no = 14;
 #ifdef CONFIG_DEBUG_USER
 		printk("%s: memory violation at pc=0x%08lx, lr=0x%08lx (bad address=0x%08lx, code %d)\n",
 			tsk->comm, regs->ARM_pc, regs->ARM_lr, addr, mode);
 #endif
 		force_sig(SIGSEGV, tsk);
-		return;
+		return 0;
 	}
 
 no_context:
@@ -159,11 +157,11 @@ no_context:
 			tsk->comm, regs->ARM_pc, addr, fixup);
 #endif
 		regs->ARM_pc = fixup;
-		return;
+		return 0;
 	}
 
 	kernel_page_fault(addr, mode, regs, tsk, mm);
-	return;
+	return 0;
 
 do_sigbus:
 	/*
@@ -176,13 +174,15 @@ do_sigbus:
 	 * Send a sigbus, regardless of whether we were in kernel
 	 * or user mode.
 	 */
-	tsk->tss.error_code = mode;
-	tsk->tss.trap_no = 14;
+	tsk->thread.address = addr;
+	tsk->thread.error_code = mode;
+	tsk->thread.trap_no = 14;
 	force_sig(SIGBUS, tsk);
 
 	/* Kernel mode? Handle exceptions or die */
-	if (!(mode & FAULT_CODE_USER))
+	if (!user_mode(regs))
 		goto no_context;
+	return 0;
 }
 
 

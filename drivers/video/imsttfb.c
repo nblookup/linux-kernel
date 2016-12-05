@@ -354,9 +354,12 @@ struct fb_info_imstt {
 	} palette[256];
 	struct imstt_regvals init;
 	struct imstt_cursor cursor;
-	__u8 *frame_buffer_phys, *frame_buffer;
-	__u32 *dc_regs_phys, *dc_regs;
-	__u8 *cmap_regs_phys, *cmap_regs;
+	unsigned long frame_buffer_phys;
+	__u8 *frame_buffer;
+	unsigned long dc_regs_phys;
+	__u32 *dc_regs;
+	unsigned long cmap_regs_phys;
+	__u8 *cmap_regs;
 	__u32 total_vram;
 	__u32 ramdac;
 };
@@ -380,9 +383,7 @@ static char noaccel __initdata = 0;
 #if defined(CONFIG_PPC)
 static signed char init_vmode __initdata = -1, init_cmode __initdata = -1;
 #endif
-#ifdef MODULE
 static struct fb_info_imstt *fb_info_imstt_p[FB_MAX] = { 0, 0, 0, 0, 0, 0, 0, 0 };
-#endif
 
 static struct imstt_regvals tvp_reg_init_2 = {
 	512,
@@ -967,8 +968,8 @@ out:
 	add_timer(&c->timer);
 }
 
-__initfunc(static void
-imstt_cursor_init (struct fb_info_imstt *p))
+static void __init 
+imstt_cursor_init (struct fb_info_imstt *p)
 {
 	struct imstt_cursor *c = &p->cursor;
 
@@ -1079,7 +1080,7 @@ imsttfbcon_clear (struct vc_data *conp, struct display *disp,
 	out_le32(&p->dc_regs[BI], 0xffffffff);
 	out_le32(&p->dc_regs[MBC], 0xffffffff);
 	out_le32(&p->dc_regs[CLR], bgc);
-	out_le32(&p->dc_regs[BLTCTL], 0x200000);
+	out_le32(&p->dc_regs[BLTCTL], 0x840); /* 0x200000 */
 	while(in_le32(&p->dc_regs[SSTATUS]) & 0x80);
 	while(in_le32(&p->dc_regs[SSTATUS]) & 0x40);
 }
@@ -1728,8 +1729,8 @@ imsttfbcon_blank (int blank, struct fb_info *info)
 	out_le32(&p->dc_regs[STGCTL], ctrl);
 }
 
-__initfunc(static void
-init_imstt(struct fb_info_imstt *p))
+static void __init 
+init_imstt(struct fb_info_imstt *p)
 {
 	__u32 i, tmp;
 	__u32 *ip, *end;
@@ -1799,10 +1800,10 @@ init_imstt(struct fb_info_imstt *p))
 	}
 
 	sprintf(p->fix.id, "IMS TT (%s)", p->ramdac == IBM ? "IBM" : "TVP");
-	p->fix.smem_start = (__u8 *)p->frame_buffer_phys;
+	p->fix.smem_start = p->frame_buffer_phys;
 	p->fix.smem_len = p->total_vram;
-	p->fix.mmio_start = (__u8 *)p->dc_regs_phys;
-	p->fix.mmio_len = 0x40000;
+	p->fix.mmio_start = p->dc_regs_phys;
+	p->fix.mmio_len = 0x1000;
 	p->fix.accel = FB_ACCEL_IMS_TWINTURBO;
 	p->fix.type = FB_TYPE_PACKED_PIXELS;
 	p->fix.visual = p->disp.var.bits_per_pixel == 8 ? FB_VISUAL_PSEUDOCOLOR
@@ -1853,23 +1854,21 @@ init_imstt(struct fb_info_imstt *p))
 	printk("fb%u: %s frame buffer; %uMB vram; chip version %u\n",
 		i, p->fix.id, p->total_vram >> 20, tmp);
 
-#ifdef MODULE
 	fb_info_imstt_p[i] = p;
-#endif
 #ifdef CONFIG_FB_COMPAT_XPMAC
 	strncpy(display_info.name, "IMS,tt128mb", sizeof(display_info.name));
-	display_info.fb_address = (__u32)p->frame_buffer_phys;
-	display_info.cmap_adr_address = (__u32)&p->cmap_regs_phys[PADDRW];
-	display_info.cmap_data_address = (__u32)&p->cmap_regs_phys[PDATA];
-	display_info.disp_reg_address = (__u32)p->dc_regs_phys;
+	display_info.fb_address = p->frame_buffer_phys;
+	display_info.cmap_adr_address = p->cmap_regs_phys + PADDRW;
+	display_info.cmap_data_address = p->cmap_regs_phys + PDATA;
+	display_info.disp_reg_address = p->dc_regs_phys;
 	if (!console_fb_info)
 		console_fb_info = &p->info;
 #endif /* CONFIG_FB_COMPAT_XPMAC */
 }
 
 #if defined(CONFIG_FB_OF) && !defined(MODULE)
-__initfunc(void
-imsttfb_of_init(struct device_node *dp))
+void __init 
+imsttfb_of_init(struct device_node *dp)
 {
 	struct fb_info_imstt *p;
 	int i;
@@ -1901,47 +1900,42 @@ imsttfb_of_init(struct device_node *dp))
 	else
 		p->ramdac = IBM;
 
-	p->frame_buffer_phys = (__u8 *)addr;
+	p->frame_buffer_phys = addr;
 	p->frame_buffer = (__u8 *)ioremap(addr, p->ramdac == IBM ? 0x400000 : 0x800000);
-	p->dc_regs_phys = (__u32 *)(addr + 0x800000);
+	p->dc_regs_phys = addr + 0x800000;
 	p->dc_regs = (__u32 *)ioremap(addr + 0x800000, 0x1000);
-	p->cmap_regs_phys = (__u8 *)(addr + 0x840000);
+	p->cmap_regs_phys = addr + 0x840000;
 	p->cmap_regs = (__u8 *)ioremap(addr + 0x840000, 0x1000);
 
 	init_imstt(p);
 }
 #endif
 
-__initfunc(void
-imsttfb_init(void))
+int __init 
+imsttfb_init(void)
 {
+	int i;
 #if defined(CONFIG_FB_OF) && !defined(MODULE)
 	/* We don't want to be called like this. */
 	/* We rely on Open Firmware (offb) instead. */
 #elif defined(CONFIG_PCI)
-	struct pci_dev *pdev;
+	struct pci_dev *pdev = NULL;
 	struct fb_info_imstt *p;
 	__u32 addr;
 	__u16 cmd;
 
-	for (pdev = pci_devices; pdev; pdev = pdev->next) {
-		if (!(((pdev->class >> 16) == PCI_BASE_CLASS_DISPLAY)
-		      && (pdev->vendor == PCI_VENDOR_ID_IMS)))
+	while ((pdev = pci_find_device(PCI_VENDOR_ID_IMS, PCI_ANY_ID, pdev))) {
+		if ((pdev->class >> 16) != PCI_BASE_CLASS_DISPLAY)
 			continue;
+		pci_enable_device(pdev);
 
-		pci_read_config_word(pdev, PCI_COMMAND, &cmd);
-		if (!(cmd & PCI_COMMAND_MEMORY)) {
-			cmd |= PCI_COMMAND_MEMORY;
-			pci_write_config_word(pdev, PCI_COMMAND, cmd);
-		}
-
-		addr = pdev->base_address[0] & PCI_BASE_ADDRESS_MEM_MASK;
+		addr = pdev->resource[0].start;
 		if (!addr)
 			continue;
 
 		p = kmalloc(sizeof(struct fb_info_imstt), GFP_ATOMIC);
 		if (!p)
-			return;
+			continue;
 		memset(p, 0, sizeof(struct fb_info_imstt));
 
 		printk("imsttfb: device=%04x\n", pdev->device);
@@ -1956,26 +1950,31 @@ imsttfb_init(void))
 				break;
 		}
 
-		p->frame_buffer_phys = (__u8 *)addr;
+		p->frame_buffer_phys = addr;
 		p->frame_buffer = (__u8 *)ioremap(addr, p->ramdac == IBM ? 0x400000 : 0x800000);
-		p->dc_regs_phys = (__u32 *)(addr + 0x800000);
+		p->dc_regs_phys = addr + 0x800000;
 		p->dc_regs = (__u32 *)ioremap(addr + 0x800000, 0x1000);
-		p->cmap_regs_phys = (__u8 *)(addr + 0x840000);
+		p->cmap_regs_phys = addr + 0x840000;
 		p->cmap_regs = (__u8 *)ioremap(addr + 0x840000, 0x1000);
 
 		init_imstt(p);
 	}
 #endif /* CONFIG_PCI */
+	for (i = 0; i < FB_MAX; i++) {
+		if (fb_info_imstt_p[i])
+			return 0;
+	}
+	return -ENXIO;
 }
 
 #ifndef MODULE
-__initfunc(void
-imsttfb_setup(char *options, int *ints))
+int __init 
+imsttfb_setup(char *options)
 {
 	char *this_opt;
 
 	if (!options || !*options)
-		return;
+		return 0;
 
 	for (this_opt = strtok(options, ","); this_opt;
 	     this_opt = strtok(NULL, ",")) {
@@ -2020,25 +2019,16 @@ imsttfb_setup(char *options, int *ints))
 		}
 #endif
 	}
+	return 0;
 }
 
 #else /* MODULE */
 
-int
+int __init
 init_module (void)
 {
-	struct fb_info_imstt *p;
-	__u32 i;
 
-	imsttfb_init();
-
-	for (i = 0; i < FB_MAX; i++) {
-		p = fb_info_imstt_p[i];
-		if (p)
-			return 0;
-	}
-
-	return -ENXIO;
+	return imsttfb_init();
 }
 
 void

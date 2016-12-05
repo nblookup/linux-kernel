@@ -12,7 +12,7 @@
 typedef struct kmem_cache_s kmem_cache_t;
 
 #include	<linux/mm.h>
-#include	<asm/cache.h>
+#include	<linux/cache.h>
 
 /* flags for kmem_cache_alloc() */
 #define	SLAB_BUFFER		GFP_BUFFER
@@ -22,7 +22,7 @@ typedef struct kmem_cache_s kmem_cache_t;
 #define	SLAB_NFS		GFP_NFS
 #define	SLAB_DMA		GFP_DMA
 
-#define SLAB_LEVEL_MASK		0x0000007fUL
+#define SLAB_LEVEL_MASK		(__GFP_WAIT|__GFP_HIGH|__GFP_IO|__GFP_HIGHMEM)
 #define	SLAB_NO_GROW		0x00001000UL	/* don't grow a cache */
 
 /* flags to pass to kmem_cache_create().
@@ -45,12 +45,13 @@ typedef struct kmem_cache_s kmem_cache_t;
 #define	SLAB_CTOR_VERIFY	0x004UL		/* tell constructor it's a verify call */
 
 /* prototypes */
-extern long kmem_cache_init(long, long);
+extern void kmem_cache_init(void);
 extern void kmem_cache_sizes_init(void);
 extern kmem_cache_t *kmem_find_general_cachep(size_t);
 extern kmem_cache_t *kmem_cache_create(const char *, size_t, size_t, unsigned long,
 				       void (*)(void *, kmem_cache_t *, unsigned long),
 				       void (*)(void *, kmem_cache_t *, unsigned long));
+extern int kmem_cache_destroy(kmem_cache_t *);
 extern int kmem_cache_shrink(kmem_cache_t *);
 extern void *kmem_cache_alloc(kmem_cache_t *, int);
 extern void kmem_cache_free(kmem_cache_t *, void *);

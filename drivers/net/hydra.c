@@ -3,7 +3,7 @@
 /* also some code & lots of fixes by Timo Rossi (trossi@cc.jyu.fi)          */
 
 /* The code is mostly based on the linux/68k Ariadne driver                 */
-/* copyrighted by Geert Uytterhoeven (Geert.Uytterhoeven@cs.kuleuven.ac.be) */
+/* copyrighted by Geert Uytterhoeven (geert@linux-m68k.org)                 */
 /* and Peter De Schrijver (Peter.DeSchrijver@linux.cc.kuleuven.ac.be)       */
 
 /* This file is subject to the terms and conditions of the GNU General      */
@@ -80,24 +80,21 @@
  */
 struct hydra_private
 {
-	u8 *hydra_base;
-	u8 *hydra_nic_base;
 	u16 tx_page_start;
 	u16 rx_page_start;
 	u16 rx_page_stop;
 	u16 next_pkt;
 	struct net_device_stats stats;
-	unsigned int key;
 };
 
-static int hydra_open(struct device *dev);
-static int hydra_start_xmit(struct sk_buff *skb, struct device *dev);
+static int hydra_open(struct net_device *dev);
+static int hydra_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static void hydra_interrupt(int irq, void *data, struct pt_regs *fp);
-static void __inline__ hydra_rx(struct device *dev, struct hydra_private *priv, volatile u8 *nicbase);
-static int hydra_close(struct device *dev);
-static struct net_device_stats *hydra_get_stats(struct device *dev);
+static void __inline__ hydra_rx(struct net_device *dev, struct hydra_private *priv, volatile u8 *nicbase);
+static int hydra_close(struct net_device *dev);
+static struct net_device_stats *hydra_get_stats(struct net_device *dev);
 #ifdef HAVE_MULTICAST
-static void set_multicast_list(struct device *dev, int num_addrs, void *addrs);
+static void set_multicast_list(struct net_device *dev, int num_addrs, void *addrs);
 #endif
 
 
@@ -157,63 +154,63 @@ static void memcpyw(u16 *dest, u16 *src, int len)
 
 #endif
 
-__initfunc(int hydra_probe(struct device *dev))
+int __init hydra_probe(struct net_device *dev)
 {
-	struct hydra_private *priv;
-	u32 board;
-	unsigned int key;
-	const struct ConfigDev *cd;
+	struct zorro_dev *z = NULL;
 	int j;
 
 #ifdef HYDRA_DEBUG
  printk("hydra_probe(%x)\n", dev);
 #endif
 
-	if ((key = zorro_find(ZORRO_PROD_HYDRA_SYSTEMS_AMIGANET, 0, 0))) 
-	{
-		cd = zorro_get_board(key);
-		if((board = (u32) cd->cd_BoardAddr))
-		{
-			for(j = 0; j < ETHER_ADDR_LEN; j++)
-				dev->dev_addr[j] = *((u8 *)ZTWO_VADDR(board + HYDRA_ADDRPROM + 2*j));
-	    
-			printk("%s: hydra at 0x%08x, address %02x:%02x:%02x:%02x:%02x:%02x (hydra.c " HYDRA_VERSION ")\n",
-				dev->name, (int)board, dev->dev_addr[0], dev->dev_addr[1], dev->dev_addr[2],
-				dev->dev_addr[3], dev->dev_addr[4], dev->dev_addr[5]);
-			init_etherdev(dev, 0);
-	    
-			dev->priv = kmalloc(sizeof(struct hydra_private), GFP_KERNEL);
-			priv = (struct hydra_private *)dev->priv;
-			memset(priv, 0, sizeof(struct hydra_private));
-	    
-			priv->hydra_base = (u8 *) ZTWO_VADDR(board);
-			priv->hydra_nic_base = (u8 *) ZTWO_VADDR(board) + HYDRA_NIC_BASE;
-			priv->key = key;
-	    
-			dev->open = &hydra_open;
-			dev->stop = &hydra_close;
-			dev->hard_start_xmit = &hydra_start_xmit;
-			dev->get_stats = &hydra_get_stats;
-#ifdef HAVE_MULTICAST
-	 		dev->set_multicast_list = &set_multicast_list;
-#endif
-	 		
-	 		/*
-	 		 *	Cannot yet do multicast
-	 		 */
-	 		dev->flags&=~IFF_MULTICAST;
-			zorro_config_board(key, 0);
-			return(0);
+	while ((z = zorro_find_device(ZORRO_PROD_HYDRA_SYSTEMS_AMIGANET, z))) {
+		unsigned long board = z->resource.start;
+		unsigned long base_addr = board+HYDRA_NIC_BASE;
+
+		if (!request_mem_region(base_addr, 0x20, "NS8390"))
+			continue;
+		if (!request_mem_region(board, 0x4000, "RAM")) {
+		    release_mem_region(base_addr, 0x20);
+		    continue;
 		}
+		strcpy(z->name, "Hydra Ethernet Card");
+
+		dev = init_etherdev(NULL, sizeof(struct hydra_private));
+		memset(dev->priv, 0, sizeof(struct hydra_private));
+    
+		for(j = 0; j < ETHER_ADDR_LEN; j++)
+			dev->dev_addr[j] = *((u8 *)ZTWO_VADDR(board + HYDRA_ADDRPROM + 2*j));
+    
+		printk("%s: hydra at 0x%08x, address %02x:%02x:%02x:%02x:%02x:%02x (hydra.c " HYDRA_VERSION ")\n",
+			dev->name, (int)board, dev->dev_addr[0], dev->dev_addr[1], dev->dev_addr[2],
+			dev->dev_addr[3], dev->dev_addr[4], dev->dev_addr[5]);
+
+		dev->base_addr = ZTWO_VADDR(base_addr);
+		dev->mem_start = ZTWO_VADDR(board);
+		dev->mem_end = dev->mem_start+0x4000;
+
+		dev->open = &hydra_open;
+		dev->stop = &hydra_close;
+		dev->hard_start_xmit = &hydra_start_xmit;
+		dev->get_stats = &hydra_get_stats;
+#ifdef HAVE_MULTICAST
+		dev->set_multicast_list = &set_multicast_list;
+#endif
+		
+		/*
+		 *	Cannot yet do multicast
+		 */
+		dev->flags&=~IFF_MULTICAST;
+		return(0);
 	}
 	return(-ENODEV);
 }
 
 
-static int hydra_open(struct device *dev)
+static int hydra_open(struct net_device *dev)
 {
 	struct hydra_private *priv = (struct hydra_private *)dev->priv;
-	volatile u8 *nicbase = priv->hydra_nic_base;
+	volatile u8 *nicbase = (u8 *)dev->base_addr;
 	int i;
     
 #ifdef HYDRA_DEBUG
@@ -282,7 +279,8 @@ static int hydra_open(struct device *dev)
 	dev->interrupt = 0;
 	dev->start = 1;
     
-	if(request_irq(IRQ_AMIGA_PORTS, hydra_interrupt, 0, "Hydra Ethernet", dev))
+	if(request_irq(IRQ_AMIGA_PORTS, hydra_interrupt, SA_SHIRQ,
+		       "Hydra Ethernet", dev))
 		return(-EAGAIN);
 
 	MOD_INC_USE_COUNT;
@@ -291,10 +289,10 @@ static int hydra_open(struct device *dev)
 }
 
 
-static int hydra_close(struct device *dev)
+static int hydra_close(struct net_device *dev)
 {
 	struct hydra_private *priv = (struct hydra_private *)dev->priv;
-	volatile u8 *nicbase = priv->hydra_nic_base;
+	volatile u8 *nicbase = (u8 *)dev->base_addr;
 	int n = 5000;
 
 	dev->start = 0;
@@ -322,7 +320,7 @@ static void hydra_interrupt(int irq, void *data, struct pt_regs *fp)
 {
 	volatile u8 *nicbase;
   
-	struct device *dev = (struct device *) data;
+	struct net_device *dev = (struct net_device *) data;
 	struct hydra_private *priv;
 	u16 intbits;
 
@@ -339,7 +337,7 @@ static void hydra_interrupt(int irq, void *data, struct pt_regs *fp)
 	dev->interrupt = 1;
 
 	priv = (struct hydra_private *) dev->priv;
-	nicbase = (u8 *) priv->hydra_nic_base;
+	nicbase = (u8 *)dev->base_addr;
 
 	/* select page 0 */
 	WRITE_REG(NIC_CR, CR_PAGE0 | CR_START | CR_NODMA);
@@ -433,10 +431,10 @@ static void hydra_interrupt(int irq, void *data, struct pt_regs *fp)
  * packet transmit routine
  */
 
-static int hydra_start_xmit(struct sk_buff *skb, struct device *dev)
+static int hydra_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct hydra_private *priv = (struct hydra_private *)dev->priv;
-	volatile u8 *nicbase = priv->hydra_nic_base;
+	volatile u8 *nicbase = (u8 *)dev->base_addr;
 	int len, len1;
 
 	/* Transmitter timeout, serious problems. */
@@ -490,16 +488,17 @@ static int hydra_start_xmit(struct sk_buff *skb, struct device *dev)
 	/* make sure we've got an even number of bytes to copy to hydra's mem */
 	if(len & 1) len++;
 
-	if((u32)(priv->hydra_base + (priv->tx_page_start << 8)) < 0x80000000)
-		printk("weirdness: memcpyw(txbuf, skbdata, len): txbuf = 0x%x\n", (u_int)(priv->hydra_base+(priv->tx_page_start<<8)));
+	if((u32)(dev->mem_start + (priv->tx_page_start << 8)) < 0x80000000)
+		printk("weirdness: memcpyw(txbuf, skbdata, len): txbuf = 0x%x\n", (u_int)(dev->mem_start+(priv->tx_page_start<<8)));
 
 	/* copy the packet data to the transmit buffer 
 	   in the ethernet card RAM */
-	memcpyw((u16 *)(priv->hydra_base + (priv->tx_page_start << 8)),
+	memcpyw((u16 *)(dev->mem_start + (priv->tx_page_start << 8)),
 		(u16 *)skb->data, len);
 	/* clear the unused space */
 	for(; len1<len; len1++)
-		(u16)*(priv->hydra_base + (priv->tx_page_start<<8) + len1) = 0;
+		(u16)*((u8 *)dev->mem_start + (priv->tx_page_start<<8) + len1)
+		    = 0;
 	dev_kfree_skb(skb);
 
 	priv->stats.tx_packets++;
@@ -524,7 +523,7 @@ static int hydra_start_xmit(struct sk_buff *skb, struct device *dev)
 }
 
 
-static void __inline__ hydra_rx(struct device *dev, struct hydra_private *priv, volatile u8 *nicbase)
+static void __inline__ hydra_rx(struct net_device *dev, struct hydra_private *priv, volatile u8 *nicbase)
 {
 	volatile u16 *board_ram_ptr;
 	struct sk_buff *skb;
@@ -535,7 +534,7 @@ static void __inline__ hydra_rx(struct device *dev, struct hydra_private *priv, 
 	WRITE_REG(NIC_CR, CR_PAGE1 | CR_NODMA | CR_START); /* page 1 */
 	while(priv->next_pkt != READ_REG(NIC_CURR)) /* should read this only once? */
 	{
-		board_ram_ptr = (u16 *)(priv->hydra_base + (priv->next_pkt << 8));
+		board_ram_ptr = (u16 *)(dev->mem_start + (priv->next_pkt << 8));
 	
 #ifdef HYDRA_DEBUG
 		printk("next_pkt = 0x%x, board_ram_ptr = 0x%x\n", priv->next_pkt, board_ram_ptr);
@@ -576,7 +575,7 @@ static void __inline__ hydra_rx(struct device *dev, struct hydra_private *priv, 
 					len1 = ((priv->rx_page_stop - priv->next_pkt)<<8)-4;
 			
 					memcpyw((u16 *)skb_put(skb, len1), (u16 *)(board_ram_ptr+2), len1);
-					memcpyw((u16 *)skb_put(skb, pkt_len-len1),  (u16 *)(priv->hydra_base+(priv->rx_page_start<<8)), pkt_len-len1);
+					memcpyw((u16 *)skb_put(skb, pkt_len-len1),  (u16 *)(dev->mem_start+(priv->rx_page_start<<8)), pkt_len-len1);
 			
 #ifdef HYDRA_DEBUG
 					printk("wrapped packet: %d/%d bytes\n", len1, pkt_len-len1);
@@ -633,11 +632,11 @@ note-for-v2.1: not really problem anymore. hasn't been for a long time.
 }
     
 
-static struct net_device_stats *hydra_get_stats(struct device *dev)
+static struct net_device_stats *hydra_get_stats(struct net_device *dev)
 {
 	struct hydra_private *priv = (struct hydra_private *)dev->priv;
 #if 0
-	u8 *board = priv->hydra_base; 
+	u8 *board = (u8 *)dev->mem_start; 
 
 	short saved_addr;
 #endif
@@ -647,10 +646,10 @@ static struct net_device_stats *hydra_get_stats(struct device *dev)
 }
 
 #ifdef HAVE_MULTICAST
-static void set_multicast_list(struct device *dev, int num_addrs, void *addrs)
+static void set_multicast_list(struct net_device *dev, int num_addrs, void *addrs)
 {
 	struct hydra_private *priv = (struct hydra_private *)dev->priv;
-	u8 *board = priv->hydra_base;
+	u8 *board = (u8 *)dev->mem_start;
 
 	/* yes, this code is also waiting for someone to complete.. :) */
 	/* (personally i don't care about multicasts at all :) */
@@ -662,7 +661,7 @@ static void set_multicast_list(struct device *dev, int num_addrs, void *addrs)
 #ifdef MODULE
 static char devicename[9] = { 0, };
 
-static struct device hydra_dev =
+static struct net_device hydra_dev =
 {
 	devicename,			/* filled in by register_netdev() */
 	0, 0, 0, 0,			/* memory */
@@ -687,7 +686,8 @@ void cleanup_module(void)
 	struct hydra_private *priv = (struct hydra_private *)hydra_dev.priv;
 
 	unregister_netdev(&hydra_dev);
-	zorro_unconfig_board(priv->key, 0);
+	release_mem_region(ZTWO_PADDR(hydra_dev.base_addr), 0x20);
+	release_mem_region(ZTWO_PADDR(hydra_dev.mem_start), 0x4000);
 	kfree(priv);
 }
 

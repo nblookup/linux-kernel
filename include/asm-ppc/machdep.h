@@ -9,10 +9,10 @@
 #endif
 
 struct pt_regs;
+struct pci_bus;	
 
 struct machdep_calls {
-	void		(*setup_arch)(unsigned long * memory_start_p,
-				unsigned long * memory_end_p);
+	void		(*setup_arch)(void);
 	/* Optional, may be NULL. */
 	int		(*setup_residual)(char *buffer);
 	/* Optional, may be NULL. */
@@ -20,8 +20,9 @@ struct machdep_calls {
 	/* Optional, may be NULL. */
 	unsigned int	(*irq_cannonicalize)(unsigned int irq);
 	void		(*init_IRQ)(void);
-	void		(*do_IRQ)(struct pt_regs *regs, int cpu, int isfake);
-
+	int		(*get_irq)(struct pt_regs *);
+	void		(*post_irq)( struct pt_regs *, int );
+	
 	/* A general init function, called by ppc_init in init/main.c.
 	   May be NULL. */
 	void		(*init)(void);
@@ -34,6 +35,12 @@ struct machdep_calls {
 	int		(*set_rtc_time)(unsigned long nowtime);
 	unsigned long	(*get_rtc_time)(void);
 	void		(*calibrate_decr)(void);
+
+	void		(*heartbeat)(void);
+	unsigned long	heartbeat_reset;
+	unsigned long	heartbeat_count;
+
+  	void		(*progress)(char *, unsigned short);
 
 	unsigned char 	(*nvram_read_val)(int addr);
 	void		(*nvram_write_val)(int addr, unsigned char val);
@@ -49,7 +56,7 @@ struct machdep_calls {
 	void		(*kbd_leds)(unsigned char leds);
 	void		(*kbd_init_hw)(void);
 #ifdef CONFIG_MAGIC_SYSRQ
-	unsigned char 	*kbd_sysrq_xlate;
+	unsigned char 	*ppc_kbd_sysrq_xlate;
 #endif
 
 	/* PCI interfaces */
@@ -66,11 +73,23 @@ struct machdep_calls {
 	int (*pcibios_write_config_dword)(unsigned char bus,
 		unsigned char dev_fn, unsigned char offset, unsigned int val);
 	void (*pcibios_fixup)(void);
+	void (*pcibios_fixup_bus)(struct pci_bus *);
+	/* this is for modules, since _machine can be a define -- Cort */
+	int ppc_machine;
 };
 
 extern struct machdep_calls ppc_md;
 extern char cmd_line[512];
 
 extern void setup_pci_ptrs(void);
+
+/*
+ * Power macintoshes have either a CUDA or a PMU controlling
+ * system reset, power, NVRAM, RTC.
+ */
+enum sys_ctrler_kind {
+	SYS_CTRLER_CUDA = 1,
+	SYS_CTRLER_PMU = 2,
+} sys_ctrler;
 
 #endif /* _PPC_MACHDEP_H */

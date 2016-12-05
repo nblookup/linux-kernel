@@ -151,22 +151,12 @@ struct dev_priv {
 	unsigned int config1;
 	unsigned int config2;
     } regs;
-    unsigned int tx_head;		/* address to insert next packet	 */
-    unsigned int tx_tail;		/* address of transmitting packet	 */
-    unsigned int tx_used;		/* number of 'slots' used		 */
+    unsigned char tx_head;		/* buffer nr to insert next packet	 */
+    unsigned char tx_tail;		/* buffer nr of transmitting packet	 */
     unsigned int rx_head;		/* address to fetch next packet from	 */
     struct enet_statistics stats;
     struct timer_list timer;
     int broken;				/* 0 = ok, 1 = something went wrong	 */
 };
-
-extern int	ether3_probe (struct device *dev);
-static int	ether3_probe1 (struct device *dev);
-static int	ether3_open (struct device *dev);
-static int	ether3_sendpacket (struct sk_buff *skb, struct device *dev);
-static void	ether3_interrupt (int irq, void *dev_id, struct pt_regs *regs);
-static int	ether3_close (struct device *dev);
-static struct enet_statistics *ether3_getstats (struct device *dev);
-static void	ether3_setmulticastlist (struct device *dev);
 
 #endif

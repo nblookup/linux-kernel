@@ -1,7 +1,6 @@
 #ifndef __LINUX_RTNETLINK_H
 #define __LINUX_RTNETLINK_H
 
-#include <linux/config.h>
 #include <linux/netlink.h>
 
 #define RTNL_DEBUG 1
@@ -249,6 +248,11 @@ struct rta_cacheinfo
 	__s32	rta_expires;
 	__u32	rta_error;
 	__u32	rta_used;
+
+#define RTNETLINK_HAVE_PEERINFO 1
+	__u32	rta_id;
+	__u32	rta_ts;
+	__u32	rta_tsage;
 };
 
 /* RTM_METRICS --- array of struct rtattr with types of RTAX_* */
@@ -256,16 +260,26 @@ struct rta_cacheinfo
 enum
 {
 	RTAX_UNSPEC,
+#define RTAX_UNSPEC RTAX_UNSPEC
 	RTAX_LOCK,
+#define RTAX_LOCK RTAX_LOCK
 	RTAX_MTU,
+#define RTAX_MTU RTAX_MTU
 	RTAX_WINDOW,
+#define RTAX_WINDOW RTAX_WINDOW
 	RTAX_RTT,
-	RTAX_HOPS,
+#define RTAX_RTT RTAX_RTT
+	RTAX_RTTVAR,
+#define RTAX_RTTVAR RTAX_RTTVAR
 	RTAX_SSTHRESH,
+#define RTAX_SSTHRESH RTAX_SSTHRESH
 	RTAX_CWND,
+#define RTAX_CWND RTAX_CWND
+	RTAX_ADVMSS,
+#define RTAX_ADVMSS RTAX_ADVMSS
 };
 
-#define RTAX_MAX RTAX_CWND
+#define RTAX_MAX RTAX_ADVMSS
 
 
 
@@ -418,11 +432,17 @@ enum
 	IFLA_MTU,
 	IFLA_LINK,
 	IFLA_QDISC,
-	IFLA_STATS
+	IFLA_STATS,
+	IFLA_COST,
+#define IFLA_COST IFLA_COST
+	IFLA_PRIORITY,
+#define IFLA_PRIORITY IFLA_PRIORITY
+	IFLA_MASTER
+#define IFLA_MASTER IFLA_MASTER
 };
 
 
-#define IFLA_MAX IFLA_STATS
+#define IFLA_MAX IFLA_MASTER
 
 #define IFLA_RTA(r)  ((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct ifinfomsg))))
 #define IFLA_PAYLOAD(n) NLMSG_PAYLOAD(n,sizeof(struct ifinfomsg))
@@ -448,7 +468,7 @@ enum
    IFF_BROADCAST devices are able to use multicasts too.
  */
 
-/* ifi_link.
+/* IFLA_LINK.
    For usual devices it is equal ifi_index.
    If it is a "virtual interface" (f.e. tunnel), ifi_link
    can point to real physical interface (f.e. for bandwidth calculations),
@@ -506,12 +526,14 @@ enum
 #define RTMGRP_IPV6_MROUTE	0x200
 #define RTMGRP_IPV6_ROUTE	0x400
 
+#define RTMGRP_DECnet_IFADDR    0x1000
+#define RTMGRP_DECnet_ROUTE     0x4000
+
 /* End of information exported to user level */
 
 #ifdef __KERNEL__
 
-extern atomic_t rtnl_rlockct;
-extern struct wait_queue *rtnl_wait;
+#include <linux/config.h>
 
 extern __inline__ int rtattr_strcmp(struct rtattr *rta, char *str)
 {
@@ -533,6 +555,7 @@ struct rtnetlink_link
 extern struct rtnetlink_link * rtnetlink_links[NPROTO];
 extern int rtnetlink_dump_ifinfo(struct sk_buff *skb, struct netlink_callback *cb);
 extern int rtnetlink_send(struct sk_buff *skb, u32 pid, u32 group, int echo);
+extern int rtnetlink_put_metrics(struct sk_buff *skb, unsigned *metrics);
 
 extern void __rta_fill(struct sk_buff *skb, int attrtype, int attrlen, const void *data);
 
@@ -540,126 +563,41 @@ extern void __rta_fill(struct sk_buff *skb, int attrtype, int attrlen, const voi
 ({ if (skb_tailroom(skb) < (int)RTA_SPACE(attrlen)) goto rtattr_failure; \
    __rta_fill(skb, attrtype, attrlen, data); })
 
-extern unsigned long rtnl_wlockct;
+extern void rtmsg_ifinfo(int type, struct net_device *dev, unsigned change);
 
-/* NOTE: these locks are not interrupt safe, are not SMP safe,
- * they are even not atomic. 8)8)8) ... and it is not a bug.
- * Really, if these locks will be programmed correctly,
- * all the addressing/routing machine would become SMP safe,
- * but is absolutely useless at the moment, because all the kernel
- * is not reenterable in any case. --ANK
- *
- * Well, atomic_* and set_bit provide the only thing here:
- * gcc is confused not to overoptimize them, that's all.
- * I remember as gcc splitted ++ operation, but cannot reproduce
- * it with gcc-2.7.*. --ANK
- *
- * One more note: rwlock facility should be written and put
- * to a kernel wide location: f.e. current implementation of semaphores
- * (especially, for x86) looks like a wonder. It would be good
- * to have something similar for rwlock. Recursive lock could be also
- * useful thing. --ANK
- */
-
-extern __inline__ int rtnl_shlock_nowait(void)
-{
-	atomic_inc(&rtnl_rlockct);
-	if (test_bit(0, &rtnl_wlockct)) {
-		atomic_dec(&rtnl_rlockct);
-		return -EAGAIN;
-	}
-	return 0;
-}
-
-extern __inline__ void rtnl_shlock(void)
-{
-	while (rtnl_shlock_nowait())
-		sleep_on(&rtnl_wait);
-}
-
-/* Check for possibility to PROMOTE shared lock to exclusive.
-   Shared lock must be already grabbed with rtnl_shlock*().
- */
-
-extern __inline__ int rtnl_exlock_nowait(void)
-{
-	if (atomic_read(&rtnl_rlockct) > 1)
-		return -EAGAIN;
-	if (test_and_set_bit(0, &rtnl_wlockct))
-		return -EAGAIN;
-	return 0;
-}
-
-extern __inline__ void rtnl_exlock(void)
-{
-	while (rtnl_exlock_nowait())
-		sleep_on(&rtnl_wait);
-}
-
-#if 0
-extern __inline__ void rtnl_shunlock(void)
-{
-	atomic_dec(&rtnl_rlockct);
-	if (atomic_read(&rtnl_rlockct) <= 1) {
-		wake_up(&rtnl_wait);
-		if (rtnl && rtnl->receive_queue.qlen)
-			rtnl->data_ready(rtnl, 0);
-	}
-}
 #else
 
-/* The problem: inline requires to include <net/sock.h> and, hence,
-   almost all of net includes :-(
- */
+#define rtmsg_ifinfo(a,b,c) do { } while (0)
 
-#define rtnl_shunlock() ({ \
-	atomic_dec(&rtnl_rlockct); \
-	if (atomic_read(&rtnl_rlockct) <= 1) { \
-		wake_up(&rtnl_wait); \
-		if (rtnl && rtnl->receive_queue.qlen) \
-			rtnl->data_ready(rtnl, 0); \
-	} \
-})
 #endif
 
-/* Release exclusive lock. Note, that we do not wake up rtnetlink socket,
- * it will be done later after releasing shared lock.
- */
+extern struct semaphore rtnl_sem;
 
-extern __inline__ void rtnl_exunlock(void)
-{
-	clear_bit(0, &rtnl_wlockct);
-	wake_up(&rtnl_wait);
-}
+#define rtnl_exlock()		do { } while(0)
+#define rtnl_exunlock()		do { } while(0)
+#define rtnl_exlock_nowait()	(0)
 
+#define rtnl_shlock()		down(&rtnl_sem)
+#define rtnl_shlock_nowait()	down_trylock(&rtnl_sem)
+
+#ifndef CONFIG_RTNETLINK
+#define rtnl_shunlock()	up(&rtnl_sem)
 #else
-
-extern __inline__ void rtnl_shlock(void)
-{
-	while (atomic_read(&rtnl_rlockct))
-		sleep_on(&rtnl_wait);
-	atomic_inc(&rtnl_rlockct);
-}
-
-extern __inline__ void rtnl_shunlock(void)
-{
-	if (atomic_dec_and_test(&rtnl_rlockct))
-		wake_up(&rtnl_wait);
-}
-
-extern __inline__ void rtnl_exlock(void)
-{
-}
-
-extern __inline__ void rtnl_exunlock(void)
-{
-}
-
+#define rtnl_shunlock()	do { up(&rtnl_sem); \
+		             if (rtnl && rtnl->receive_queue.qlen) \
+				     rtnl->data_ready(rtnl, 0); \
+		        } while(0)
 #endif
 
 extern void rtnl_lock(void);
 extern void rtnl_unlock(void);
 extern void rtnetlink_init(void);
+
+#define ASSERT_RTNL() do { if (down_trylock(&rtnl_sem) == 0)  { up(&rtnl_sem); \
+printk("RTNL: assertion failed at " __FILE__ "(%d):" __FUNCTION__ "\n", __LINE__); } \
+		   } while(0);
+#define BUG_TRAP(x) if (!(x)) { printk("KERNEL: assertion (" #x ") failed at " __FILE__ "(%d):" __FUNCTION__ "\n", __LINE__); }
+
 
 #endif /* __KERNEL__ */
 

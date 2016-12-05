@@ -13,6 +13,7 @@
  *		RMK	1.03	Added support for EtherLan500 cards
  *  23-11-1997	RMK	1.04	Added media autodetection
  *  16-04-1998	RMK	1.05	Improved media autodetection
+ *  10-02-2000	RMK	1.06	Updated for 2.3.43
  *
  * Insmod Module Parameters
  * ------------------------
@@ -37,6 +38,7 @@
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/delay.h>
+#include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -50,14 +52,17 @@
 #define DEBUG_INIT 2
 
 static unsigned int net_debug = NET_DEBUG;
-static const card_ids etherh_cids[] = {
+static const card_ids __init etherh_cids[] = {
 	{ MANU_I3, PROD_I3_ETHERLAN500 },
 	{ MANU_I3, PROD_I3_ETHERLAN600 },
 	{ MANU_I3, PROD_I3_ETHERLAN600A },
 	{ 0xffff, 0xffff }
 };
 
-static char *version = "etherh [500/600/600A] ethernet driver (c) 1998 R.M.King v1.05\n";
+MODULE_AUTHOR("Russell King");
+MODULE_DESCRIPTION("i3 EtherH driver");
+
+static char *version = "etherh [500/600/600A] ethernet driver (c) 2000 R.M.King v1.06\n";
 
 #define ETHERH500_DATAPORT	0x200	/* MEMC */
 #define ETHERH500_NS8390	0x000	/* MEMC */
@@ -80,7 +85,7 @@ static char *version = "etherh [500/600/600A] ethernet driver (c) 1998 R.M.King 
  * Read the ethernet address string from the on board rom.
  * This is an ascii string...
  */
-static int
+static int __init
 etherh_addr(char *addr, struct expansion_card *ec)
 {
 	struct in_chunk_dir cd;
@@ -100,7 +105,7 @@ etherh_addr(char *addr, struct expansion_card *ec)
 }
 
 static void
-etherh_setif(struct device *dev)
+etherh_setif(struct net_device *dev)
 {
 	unsigned long addr;
 	unsigned long flags;
@@ -136,7 +141,7 @@ etherh_setif(struct device *dev)
 }
 
 static int
-etherh_getifstat(struct device *dev)
+etherh_getifstat(struct net_device *dev)
 {
 	int stat;
 
@@ -168,7 +173,7 @@ etherh_getifstat(struct device *dev)
  * Reset the 8390 (hard reset)
  */
 static void
-etherh_reset(struct device *dev)
+etherh_reset(struct net_device *dev)
 {
 	outb_p(E8390_NODMA+E8390_PAGE0+E8390_STOP, dev->base_addr);
 
@@ -179,15 +184,15 @@ etherh_reset(struct device *dev)
  * Write a block of data out to the 8390
  */
 static void
-etherh_block_output (struct device *dev, int count, const unsigned char *buf, int start_page)
+etherh_block_output (struct net_device *dev, int count, const unsigned char *buf, int start_page)
 {
 	unsigned int addr, dma_addr;
 	unsigned long dma_start;
 	
 	if (ei_status.dmaing) {
 		printk ("%s: DMAing conflict in etherh_block_input: "
-			" DMAstat %d irqlock %d intr %ld\n", dev->name,
-			ei_status.dmaing, ei_status.irqlock, dev->interrupt);
+			" DMAstat %d irqlock %d\n", dev->name,
+			ei_status.dmaing, ei_status.irqlock);
 		return;
 	}
 
@@ -216,10 +221,8 @@ etherh_block_output (struct device *dev, int count, const unsigned char *buf, in
 
 	if (ei_status.word16)
 		outsw (dma_addr, buf, count >> 1);
-#ifdef BIT8
 	else
 		outsb (dma_addr, buf, count);
-#endif
 
 	dma_start = jiffies;
 
@@ -239,15 +242,15 @@ etherh_block_output (struct device *dev, int count, const unsigned char *buf, in
  * Read a block of data from the 8390
  */
 static void
-etherh_block_input (struct device *dev, int count, struct sk_buff *skb, int ring_offset)
+etherh_block_input (struct net_device *dev, int count, struct sk_buff *skb, int ring_offset)
 {
 	unsigned int addr, dma_addr;
 	unsigned char *buf;
 
 	if (ei_status.dmaing) {
 		printk ("%s: DMAing conflict in etherh_block_input: "
-			" DMAstat %d irqlock %d intr %ld\n", dev->name,
-			ei_status.dmaing, ei_status.irqlock, dev->interrupt);
+			" DMAstat %d irqlock %d\n", dev->name,
+			ei_status.dmaing, ei_status.irqlock);
 		return;
 	}
 
@@ -268,11 +271,8 @@ etherh_block_input (struct device *dev, int count, struct sk_buff *skb, int ring
 		insw (dma_addr, buf, count >> 1);
 		if (count & 1)
 			buf[count - 1] = inb (dma_addr);
-	}
-#ifdef BIT8
-	else
+	} else
 		insb (dma_addr, buf, count);
-#endif
 
 	outb (ENISR_RDC, addr + EN0_ISR);
 	ei_status.dmaing &= ~1;
@@ -282,14 +282,14 @@ etherh_block_input (struct device *dev, int count, struct sk_buff *skb, int ring
  * Read a header from the 8390
  */
 static void
-etherh_get_header (struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
+etherh_get_header (struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
 	unsigned int addr, dma_addr;
 
 	if (ei_status.dmaing) {
 		printk ("%s: DMAing conflict in etherh_get_header: "
-			" DMAstat %d irqlock %d intr %ld\n", dev->name,
-			ei_status.dmaing, ei_status.irqlock, dev->interrupt);
+			" DMAstat %d irqlock %d\n", dev->name,
+			ei_status.dmaing, ei_status.irqlock);
 		return;
 	}
 
@@ -307,10 +307,8 @@ etherh_get_header (struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 
 	if (ei_status.word16)
 		insw (dma_addr, hdr, sizeof (*hdr) >> 1);
-#ifdef BIT8
 	else
 		insb (dma_addr, hdr, sizeof (*hdr));
-#endif
 
 	outb (ENISR_RDC, addr + EN0_ISR);
 	ei_status.dmaing &= ~1;
@@ -325,7 +323,7 @@ etherh_get_header (struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
  * there is non-reboot way to recover if something goes wrong.
  */
 static int
-etherh_open(struct device *dev)
+etherh_open(struct net_device *dev)
 {
 	MOD_INC_USE_COUNT;
 
@@ -343,7 +341,7 @@ etherh_open(struct device *dev)
  * The inverse routine to etherh_open().
  */
 static int
-etherh_close(struct device *dev)
+etherh_close(struct net_device *dev)
 {
 	ei_close (dev);
 	free_irq (dev->irq, dev);
@@ -355,13 +353,14 @@ etherh_close(struct device *dev)
 /*
  * This is the real probe routine.
  */
-static int
-etherh_probe1(struct device *dev)
+static int __init
+etherh_probe1(struct net_device *dev)
 {
 	static int version_printed;
 	unsigned int addr, i, reg0, tmp;
 	const char *dev_type;
 	const char *if_type;
+	const char *name = "etherh";
 
 	addr = dev->base_addr;
 
@@ -370,13 +369,13 @@ etherh_probe1(struct device *dev)
 
 	switch (dev->mem_end) {
 	case PROD_I3_ETHERLAN500:
-		dev_type = "500 ";
+		dev_type = "500";
 		break;
 	case PROD_I3_ETHERLAN600:
-		dev_type = "600 ";
+		dev_type = "600";
 		break;
 	case PROD_I3_ETHERLAN600A:
-		dev_type = "600A ";
+		dev_type = "600A";
 		break;
 	default:
 		dev_type = "";
@@ -385,7 +384,8 @@ etherh_probe1(struct device *dev)
 	reg0 = inb (addr);
 	if (reg0 == 0xff) {
 		if (net_debug & DEBUG_INIT)
-			printk ("%s: etherh error: NS8390 command register wrong\n", dev->name);
+			printk("%s: %s error: NS8390 command register wrong\n",
+				dev->name, name);
 		return -ENODEV;
 	}
 
@@ -396,34 +396,35 @@ etherh_probe1(struct device *dev)
 	inb (addr + EN0_COUNTER0);
 	if (inb (addr + EN0_COUNTER0) != 0) {
 		if (net_debug & DEBUG_INIT)
-			printk ("%s: etherh error: NS8390 not found\n", dev->name);
+			printk("%s: %s error: NS8390 not found\n",
+				dev->name, name);
 		outb (reg0, addr);
 		outb (tmp, addr + 13);
 		return -ENODEV;
 	}
 
-	if (ethdev_init (dev))
+	if (ethdev_init(dev))
 		return -ENOMEM;
 
-	request_region (addr, 16, "etherh");
+	request_region(addr, 16, name);
 
-	printk("%s: etherh %sfound at %lx, IRQ%d, ether address ",
-		dev->name, dev_type, dev->base_addr, dev->irq);
+	printk("%s: %s %s at %lx, IRQ%d, ether address ",
+		dev->name, name, dev_type, dev->base_addr, dev->irq);
 
 	for (i = 0; i < 6; i++)
 		printk (i == 5 ? "%2.2x " : "%2.2x:", dev->dev_addr[i]);
 
-	ei_status.name = "etherh";
-	ei_status.word16 = 1;
-	ei_status.tx_start_page = ETHERH_TX_START_PAGE;
-	ei_status.rx_start_page = ei_status.tx_start_page + TX_PAGES;
-	ei_status.stop_page = ETHERH_STOP_PAGE;
-	ei_status.reset_8390 = etherh_reset;
-	ei_status.block_input = etherh_block_input;
-	ei_status.block_output = etherh_block_output;
-	ei_status.get_8390_hdr = etherh_get_header;
-	dev->open = etherh_open;
-	dev->stop = etherh_close;
+	ei_status.name		= name;
+	ei_status.word16	= 1;
+	ei_status.tx_start_page	= ETHERH_TX_START_PAGE;
+	ei_status.rx_start_page	= ei_status.tx_start_page + TX_PAGES;
+	ei_status.stop_page	= ETHERH_STOP_PAGE;
+	ei_status.reset_8390	= etherh_reset;
+	ei_status.block_input	= etherh_block_input;
+	ei_status.block_output	= etherh_block_output;
+	ei_status.get_8390_hdr	= etherh_get_header;
+	dev->open		= etherh_open;
+	dev->stop		= etherh_close;
 
 	/* select 10bT */
 	ei_status.interface_num = 0;
@@ -461,10 +462,13 @@ static expansioncard_ops_t etherh_ops = {
 	etherh_irq_enable,
 	etherh_irq_disable,
 	NULL,
+	NULL,
+	NULL,
 	NULL
 };
 
-static void etherh_initdev (ecard_t *ec, struct device *dev)
+static void __init
+etherh_initdev(ecard_t *ec, struct net_device *dev)
 {
 	ecard_claim (ec);
 	
@@ -492,27 +496,27 @@ static void etherh_initdev (ecard_t *ec, struct device *dev)
 	}
 	ec->ops = &etherh_ops;
 
-	etherh_addr (dev->dev_addr, ec);
+	etherh_addr(dev->dev_addr, ec);
 }
 
 #ifndef MODULE
-int
-etherh_probe(struct device *dev)
+int __init
+etherh_probe(struct net_device *dev)
 {
 	if (!dev)
 		return ENODEV;
 
-	ecard_startfind ();
-
-	if (!dev->base_addr) {
+	if (!dev->base_addr || dev->base_addr == 0xffe0) {
 		struct expansion_card *ec;
+
+		ecard_startfind();
 
 		if ((ec = ecard_find (0, etherh_cids)) == NULL)
 			return ENODEV;
 
-		etherh_initdev (ec, dev);
+		etherh_initdev(ec, dev);
 	}
-	return etherh_probe1 (dev);
+	return etherh_probe1(dev);
 }
 #endif
 
@@ -522,19 +526,17 @@ etherh_probe(struct device *dev)
 static int io[MAX_ETHERH_CARDS];
 static int irq[MAX_ETHERH_CARDS];
 static char ethernames[MAX_ETHERH_CARDS][9];
-static struct device *my_ethers[MAX_ETHERH_CARDS];
+static struct net_device *my_ethers[MAX_ETHERH_CARDS];
 static struct expansion_card *ec[MAX_ETHERH_CARDS];
 
 static int
 init_all_cards(void)
 {
-	struct device *dev = NULL;
-	struct expansion_card *boguscards[MAX_ETHERH_CARDS];
+	struct net_device *dev = NULL;
 	int i, found = 0;
 
 	for (i = 0; i < MAX_ETHERH_CARDS; i++) {
 		my_ethers[i] = NULL;
-		boguscards[i] = NULL;
 		ec[i] = NULL;
 		strcpy (ethernames[i], "        ");
 	}
@@ -543,9 +545,9 @@ init_all_cards(void)
 
 	for (i = 0; i < MAX_ETHERH_CARDS; i++) {
 		if (!dev)
-			dev = (struct device *)kmalloc (sizeof (struct device), GFP_KERNEL);
+			dev = (struct net_device *)kmalloc (sizeof (struct net_device), GFP_KERNEL);
 		if (dev)
-			memset (dev, 0, sizeof (struct device));
+			memset (dev, 0, sizeof (struct net_device));
 
 		if (!io[i]) {
 			if ((ec[i] = ecard_find (0, etherh_cids)) == NULL)
@@ -569,9 +571,10 @@ init_all_cards(void)
 		my_ethers[i] = dev;
 
 		if (register_netdev(dev) != 0) {
-			printk (KERN_WARNING "No etherh card found at %08lX\n", dev->base_addr);
+			printk(KERN_ERR "No etherh card found at %08lX\n",
+				dev->base_addr);
 			if (ec[i]) {
-				boguscards[i] = ec[i];
+				ecard_release(ec[i]);
 				ec[i] = NULL;
 			}
 			continue;
@@ -582,12 +585,6 @@ init_all_cards(void)
 
 	if (dev)
 		kfree (dev);
-
-	for (i = 0; i < MAX_ETHERH_CARDS; i++)
-		if (boguscards[i]) {
-			boguscards[i]->ops = NULL;
-			ecard_release (boguscards[i]);
-		}
 
 	return found ? 0 : -ENODEV;
 }

@@ -1,8 +1,8 @@
-/* $Id: rawhdlc.c,v 1.2 1998/02/09 10:53:51 keil Exp $
+/* $Id: rawhdlc.c,v 1.4 1999/12/23 15:09:32 keil Exp $
 
  * rawhdlc.c     support routines for cards that don't support HDLC
  *
- * Author     Karsten Keil (keil@temic-ech.spacenet.de)
+ * Author     Karsten Keil (keil@isdn4linux.de)
  *            Brent Baccala <baccala@FreeSoft.org>
  *
  *

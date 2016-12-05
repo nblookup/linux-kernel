@@ -14,6 +14,7 @@
 #include <linux/msdos_fs.h>
 #include <linux/umsdos_fs.h>
 #include <linux/proc_fs.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/nfs_fs.h>
 #include <linux/iso_fs.h>
 #include <linux/sysv_fs.h>
@@ -22,12 +23,16 @@
 #include <linux/ncp_fs.h>
 #include <linux/affs_fs.h>
 #include <linux/ufs_fs.h>
+#include <linux/efs_fs.h>
 #include <linux/romfs_fs.h>
 #include <linux/auto_fs.h>
 #include <linux/qnx4_fs.h>
+#include <linux/udf_fs.h>
 #include <linux/ntfs_fs.h>
 #include <linux/hfs_fs.h>
 #include <linux/devpts_fs.h>
+#include <linux/bfs_fs.h>
+#include <linux/openprom_fs.h>
 #include <linux/major.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
@@ -47,12 +52,12 @@ extern int init_coda(void);
 extern int init_devpts_fs(void);
 #endif
 
-void __init filesystem_setup(void)
-{
-#ifdef CONFIG_EXT2_FS
-	init_ext2_fs();
+#ifdef CONFIG_SUN_OPENPROMFS
+extern int init_openprom_fs(void);
 #endif
 
+void __init filesystem_setup(void)
+{
 #ifdef CONFIG_MINIX_FS
 	init_minix_fs();
 #endif
@@ -81,9 +86,7 @@ void __init filesystem_setup(void)
 	init_proc_fs();
 #endif
 
-#ifdef CONFIG_LOCKD
-	nlmxdr_init();
-#endif
+	init_devfs_fs();  /*  Header file may make this empty  */
 
 #ifdef CONFIG_NFS_FS
 	init_nfs_fs();
@@ -129,12 +132,8 @@ void __init filesystem_setup(void)
 	init_ufs_fs();
 #endif
 
-#ifdef CONFIG_AUTOFS_FS
-	init_autofs_fs();
-#endif
-
-#ifdef CONFIG_ADFS_FS
-	init_adfs_fs();
+#ifdef CONFIG_EFS_FS
+	init_efs_fs();
 #endif
 
 #ifdef CONFIG_DEVPTS_FS
@@ -143,6 +142,18 @@ void __init filesystem_setup(void)
 
 #ifdef CONFIG_QNX4FS_FS
 	init_qnx4_fs();
+#endif
+
+#ifdef CONFIG_UDF_FS
+	init_udf_fs();
+#endif
+
+#ifdef CONFIG_BFS_FS
+	init_bfs_fs();
+#endif
+
+#ifdef CONFIG_SUN_OPENPROMFS
+	init_openprom_fs();
 #endif
    
 #ifdef CONFIG_NLS

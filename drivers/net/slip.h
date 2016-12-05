@@ -52,7 +52,9 @@ struct slip {
 
   /* Various fields. */
   struct tty_struct	*tty;		/* ptr to TTY structure		*/
-  struct device		*dev;		/* easy for intr handling	*/
+  struct net_device	*dev;		/* easy for intr handling	*/
+  spinlock_t		lock;
+
 #ifdef SL_INCLUDE_CSLIP
   struct slcompress	*slcomp;	/* for header compression 	*/
   unsigned char		*cbuff;		/* compression buffer		*/
@@ -118,6 +120,6 @@ struct slip {
 
 #define SLIP_MAGIC 0x5302
 
-extern int slip_init(struct device *dev);
+extern int slip_init(struct net_device *dev);
 
 #endif	/* _LINUX_SLIP.H */

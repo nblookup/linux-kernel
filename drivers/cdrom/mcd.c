@@ -68,6 +68,13 @@
 
 	November 1997 -- ported to the Uniform CD-ROM driver by Erik Andersen.
 	March    1999 -- made io base and irq CONFIG_ options (Tigran Aivazian).
+	
+	November 1999 -- Make kernel-parameter implementation work with 2.3.x 
+	                 Removed init_module & cleanup_module in favor of 
+			 module_init & module_exit.
+			 Torben Mathiasen <tmm@image.dk>
+		
+			 
 */
 
 #include <linux/module.h>
@@ -79,6 +86,7 @@
 #include <linux/timer.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/cdrom.h>
 #include <linux/ioport.h>
 #include <linux/string.h>
@@ -127,7 +135,7 @@ static int mcdPresent = 0;
 /* #define DOUBLE_QUICK_ONLY */
 
 #define CURRENT_VALID \
-(CURRENT && MAJOR(CURRENT -> rq_dev) == MAJOR_NR && CURRENT -> cmd == READ \
+(!QUEUE_EMPTY && MAJOR(CURRENT -> rq_dev) == MAJOR_NR && CURRENT -> cmd == READ \
 && CURRENT -> sector != -1)
 
 #define MFL_STATUSorDATA (MFL_STATUS | MFL_DATA)
@@ -162,7 +170,7 @@ static int   mcd_irq  = CONFIG_MCD_IRQ; /* must directly follow mcd_port */
 MODULE_PARM(mcd, "1-2i");
 
 static int McdTimeout, McdTries;
-static struct wait_queue *mcd_waitq = NULL;
+static DECLARE_WAIT_QUEUE_HEAD(mcd_waitq);
 
 static struct mcd_DiskInfo DiskInfo;
 static struct mcd_Toc Toc[MAX_TRACKS];
@@ -229,10 +237,13 @@ static struct cdrom_device_info mcd_info = {
   "mcd",                         /* name of the device type */
 };
 
-
-
-__initfunc(void mcd_setup(char *str, int *ints))
+#ifndef MODULE
+static int __init mcd_setup(char *str)
 {
+   int ints[9];
+   
+   (void)get_options(str, ARRAY_SIZE(ints), ints);
+   
    if (ints[0] > 0)
       mcd_port = ints[1];
    if (ints[0] > 1)      
@@ -241,8 +252,13 @@ __initfunc(void mcd_setup(char *str, int *ints))
    if (ints[0] > 2)
       mitsumi_bug_93_wait = ints[3];
 #endif /* WORK_AROUND_MITSUMI_BUG_93 */
+
+ return 1;
 }
 
+__setup("mcd=", mcd_setup);
+
+#endif /* MODULE */ 
 
 static int mcd_media_changed(struct cdrom_device_info * cdi, int disc_nr)
 {
@@ -649,7 +665,7 @@ mcd_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 
 
 static void
-do_mcd_request(void)
+do_mcd_request(request_queue_t * q)
 {
 #ifdef TEST2
   printk(" do_mcd_request(%ld+%ld)\n", CURRENT -> sector, CURRENT -> nr_sectors);
@@ -1128,7 +1144,7 @@ static void mcd_release(struct cdrom_device_info * cdi)
 
 
 /* This routine gets called during initialization if things go wrong,
- * and is used in cleanup_module as well. */
+ * and is used in mcd_exit as well. */
 static void cleanup(int level)
 {
   switch (level) {
@@ -1141,7 +1157,7 @@ static void cleanup(int level)
   case 2:
     release_region(mcd_port,4);
   case 1:
-    if (unregister_blkdev(MAJOR_NR, "mcd")) {
+    if (devfs_unregister_blkdev(MAJOR_NR, "mcd")) {
       printk(KERN_WARNING "Can't unregister major mcd\n");
       return;
     }
@@ -1155,7 +1171,7 @@ static void cleanup(int level)
  * Test for presence of drive and initialize it.  Called at boot time.
  */
 
-__initfunc(int mcd_init(void))
+int __init mcd_init(void)
 {
 	int count;
 	unsigned char result[3];
@@ -1166,7 +1182,7 @@ __initfunc(int mcd_init(void))
           return -EIO;
 	}
 
-	if (register_blkdev(MAJOR_NR, "mcd", &cdrom_fops) != 0)
+	if (devfs_register_blkdev(MAJOR_NR, "mcd", &cdrom_fops) != 0)
 	{
 		printk("Unable to get major %d for Mitsumi CD-ROM\n",
 		       MAJOR_NR);
@@ -1180,7 +1196,7 @@ __initfunc(int mcd_init(void))
 	}
 
 	blksize_size[MAJOR_NR] = mcd_blocksizes;
-	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
 	read_ahead[MAJOR_NR] = 4;
 
 	/* check for card */
@@ -1232,18 +1248,13 @@ __initfunc(int mcd_init(void))
 
         if (result[1] == 'D') 
 	{
-		sprintf(msg, " mcd: Mitsumi Double Speed CD-ROM at port=0x%x,"
-			     " irq=%d\n", mcd_port, mcd_irq);
 		MCMD_DATA_READ = MCMD_2X_READ;
-
-		mcd_info.speed = 2;
 		/* Added flag to drop to 1x speed if too many errors */
 		mcdDouble = 1;
-        } else {
-		sprintf(msg, " mcd: Mitsumi Single Speed CD-ROM at port=0x%x,"
-			     " irq=%d\n", mcd_port, mcd_irq);
-		mcd_info.speed = 2;
-	}
+        } else 
+		mcd_info.speed = 1;
+	sprintf(msg, " mcd: Mitsumi %s Speed CD-ROM at port=0x%x,"
+		     " irq=%d\n", mcd_info.speed == 1 ?  "Single" : "Double", mcd_port, mcd_irq);
 
 	request_region(mcd_port, 4, "mcd");
 
@@ -1636,14 +1647,15 @@ Toc[i].diskTime.min, Toc[i].diskTime.sec, Toc[i].diskTime.frame);
 	return limit > 0 ? 0 : -1;
 }
 
-#ifdef MODULE
-int init_module(void)
-{
-	return mcd_init();
-}
 
-void cleanup_module(void)
+void __exit mcd_exit(void)
 {
   cleanup(3);
 }
-#endif MODULE
+
+#ifdef MODULE
+module_init(mcd_init);
+#endif 
+module_exit(mcd_exit);
+
+

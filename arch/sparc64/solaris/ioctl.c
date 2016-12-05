@@ -1,4 +1,4 @@
-/* $Id: ioctl.c,v 1.10 1998/03/29 10:11:00 davem Exp $
+/* $Id: ioctl.c,v 1.14 1999/09/22 09:28:50 davem Exp $
  * ioctl.c: Solaris ioctl emulation.
  *
  * Copyright (C) 1997 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -7,6 +7,9 @@
  * Streams & timod emulation based on code
  * Copyright (C) 1995, 1996 Mike Jagdis (jaggy@purplet.demon.co.uk)
  *
+ * 1999-08-19 Implemented solaris 'm' (mag tape) and
+ *            'O' (openprom) ioctls, by Jason Rappleye
+ *             (rappleye@ccr.buffalo.edu)
  */
 
 #include <linux/types.h>
@@ -18,9 +21,12 @@
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/netdevice.h>
+#include <linux/mtio.h>
+#include <linux/time.h>
 
 #include <asm/uaccess.h>
 #include <asm/termios.h>
+#include <asm/openpromio.h>
 
 #include "conv.h"
 #include "socksys.h"
@@ -367,15 +373,7 @@ static inline int solaris_sockmod(unsigned int fd, unsigned int cmd, u32 arg)
 static inline int solaris_timod(unsigned int fd, unsigned int cmd, u32 arg,
                                     int len, int *len_p)
 {
-        struct file *filp;
-        struct inode *ino;
 	int ret;
-
-        filp = current->files->fd[fd];
-        if (! filp ||
-	    ! (ino = filp->f_dentry->d_inode) ||
-	    ! ino->i_sock)
-		return TBADF;
 		
 	switch (cmd & 0xff) {
 	case 141: /* TI_OPTMGMT */
@@ -459,20 +457,17 @@ static inline int solaris_timod(unsigned int fd, unsigned int cmd, u32 arg,
 	return TNOTSUPPORT;
 }
 
-static inline int solaris_S(unsigned int fd, unsigned int cmd, u32 arg)
+static inline int solaris_S(struct file *filp, unsigned int fd, unsigned int cmd, u32 arg)
 {
 	char *p;
 	int ret;
 	mm_segment_t old_fs;
 	struct strioctl si;
 	struct inode *ino;
-        struct file *filp;
         struct sol_socket_struct *sock;
         struct module_info *mi;
 
-        filp = current->files->fd[fd];
-        if (! filp ||
-	    ! (ino = filp->f_dentry->d_inode) ||
+        if (! (ino = filp->f_dentry->d_inode) ||
 	    ! ino->i_sock)
 		return -EBADF;
         sock = filp->private_data;
@@ -674,16 +669,103 @@ static inline int solaris_i(unsigned int fd, unsigned int cmd, u32 arg)
 #endif		
 	case 87: /* SIOCGIFNUM */
 		{
-			struct device *d;
+			struct net_device *d;
 			int i = 0;
 			
+			read_lock_bh(&dev_base_lock);
 			for (d = dev_base; d; d = d->next) i++;
+			read_unlock_bh(&dev_base_lock);
+
 			if (put_user (i, (int *)A(arg)))
 				return -EFAULT;
 			return 0;
 		}
 	}
 	return -ENOSYS;
+}
+
+static int solaris_m(unsigned int fd, unsigned int cmd, u32 arg)
+{
+	int ret;
+
+	switch (cmd & 0xff) {
+	case 1: /* MTIOCTOP */
+		ret = sys_ioctl(fd, MTIOCTOP, (unsigned long)&arg);
+		break;
+	case 2: /* MTIOCGET */
+		ret = sys_ioctl(fd, MTIOCGET, (unsigned long)&arg);
+		break;
+	case 3: /* MTIOCGETDRIVETYPE */
+	case 4: /* MTIOCPERSISTENT */
+	case 5: /* MTIOCPERSISTENTSTATUS */
+	case 6: /* MTIOCLRERR */
+	case 7: /* MTIOCGUARANTEEDORDER */
+	case 8: /* MTIOCRESERVE */
+	case 9: /* MTIOCRELEASE */
+	case 10: /* MTIOCFORCERESERVE */
+	case 13: /* MTIOCSTATE */
+	case 14: /* MTIOCREADIGNOREILI */
+	case 15: /* MTIOCREADIGNOREEOFS */
+	case 16: /* MTIOCSHORTFMK */
+	default:
+		ret = -ENOSYS; /* linux doesn't support these */
+		break;
+	};
+
+	return ret;
+}
+
+static int solaris_O(unsigned int fd, unsigned int cmd, u32 arg)
+{
+	int ret = -EINVAL;
+
+	switch (cmd & 0xff) {
+	case 1: /* OPROMGETOPT */
+		ret = sys_ioctl(fd, OPROMGETOPT, arg);
+		break;
+	case 2: /* OPROMSETOPT */
+		ret = sys_ioctl(fd, OPROMSETOPT, arg);
+		break;
+	case 3: /* OPROMNXTOPT */
+		ret = sys_ioctl(fd, OPROMNXTOPT, arg);
+		break;
+	case 4: /* OPROMSETOPT2 */
+		ret = sys_ioctl(fd, OPROMSETOPT2, arg);
+		break;
+	case 5: /* OPROMNEXT */
+		ret = sys_ioctl(fd, OPROMNEXT, arg);
+		break;
+	case 6: /* OPROMCHILD */
+		ret = sys_ioctl(fd, OPROMCHILD, arg);
+		break;
+	case 7: /* OPROMGETPROP */
+		ret = sys_ioctl(fd, OPROMGETPROP, arg);
+		break;
+	case 8: /* OPROMNXTPROP */
+		ret = sys_ioctl(fd, OPROMNXTPROP, arg);
+		break;
+	case 9: /* OPROMU2P */
+		ret = sys_ioctl(fd, OPROMU2P, arg);
+		break;
+	case 10: /* OPROMGETCONS */
+		ret = sys_ioctl(fd, OPROMGETCONS, arg);
+		break;
+	case 11: /* OPROMGETFBNAME */
+		ret = sys_ioctl(fd, OPROMGETFBNAME, arg);
+		break;
+	case 12: /* OPROMGETBOOTARGS */
+		ret = sys_ioctl(fd, OPROMGETBOOTARGS, arg);
+		break;
+	case 13: /* OPROMGETVERSION */
+	case 14: /* OPROMPATH2DRV */
+	case 15: /* OPROMDEV2PROMNAME */
+	case 16: /* OPROMPROM2DEVNAME */
+	case 17: /* OPROMGETPROPLEN */
+	default:
+		ret = -EINVAL;
+		break;
+	};
+	return ret;
 }
 
 /* }}} */
@@ -693,24 +775,28 @@ asmlinkage int solaris_ioctl(unsigned int fd, unsigned int cmd, u32 arg)
 	struct file *filp;
 	int error = -EBADF;
 
-	lock_kernel();
-	filp = fcheck(fd);
+	filp = fget(fd);
 	if (!filp)
 		goto out;
 
+	lock_kernel();
 	error = -EFAULT;
 	switch ((cmd >> 8) & 0xff) {
-	case 'S': error = solaris_S(fd, cmd, arg); break;
+	case 'S': error = solaris_S(filp, fd, cmd, arg); break;
 	case 'T': error = solaris_T(fd, cmd, arg); break;
 	case 'i': error = solaris_i(fd, cmd, arg); break;
 	case 'r': error = solaris_r(fd, cmd, arg); break;
 	case 's': error = solaris_s(fd, cmd, arg); break;
 	case 't': error = solaris_t(fd, cmd, arg); break;
 	case 'f': error = sys_ioctl(fd, cmd, arg); break;
+	case 'm': error = solaris_m(fd, cmd, arg); break;
+	case 'O': error = solaris_O(fd, cmd, arg); break;
 	default:
 		error = -ENOSYS;
 		break;
 	}
+	unlock_kernel();
+	fput(filp);
 out:
 	if (error == -ENOSYS) {
 		unsigned char c = cmd>>8;
@@ -720,6 +806,5 @@ out:
 		       (int)fd, (unsigned int)cmd, c, (unsigned int)arg);
 		error = -EINVAL;
 	}
-	unlock_kernel();
 	return error;
 }

@@ -4,15 +4,14 @@
 
 struct net_local 
 {
-#ifdef __KERNEL__
 	struct net_device_stats stats;
-#endif
 	ushort saved_tx_size;
 	unsigned char
 	re_tx,			/* Number of packet retransmissions. */
 	tx_unit_busy,
 	addr_mode,		/* Current Rx filter e.g. promiscuous, etc. */
 	pac_cnt_in_tx_buf;
+	spinlock_t lock;		/* Safety lock */
 };
 
 struct rx_header {
@@ -52,8 +51,7 @@ enum page0_regs
 	CMR2_h = 0x1d, 
 };
 
-enum eepage_regs
-{ PROM_CMD = 6, PROM_DATA = 7 };	/* Note that PROM_CMD is in the "high" bits. */
+enum eepage_regs { PROM_CMD = 6, PROM_DATA = 7 };	/* Note that PROM_CMD is in the "high" bits. */
 
 
 #define ISR_TxOK	0x01
@@ -260,10 +258,6 @@ extern inline void write_word_mode0(short ioaddr, unsigned short value)
 #define EE_CLK_LOW	0x16
 #define EE_DATA_WRITE	0x01	/* EEPROM chip data in. */
 #define EE_DATA_READ	0x08	/* EEPROM chip data out. */
-
-/* Delay between EEPROM clock transitions. */
-#define eeprom_delay(ticks) \
-do { int _i = 40; while (--_i > 0) { __SLOW_DOWN_IO; }} while (0)
 
 /* The EEPROM commands include the alway-set leading bit. */
 #define EE_WRITE_CMD(offset)	(((5 << 6) + (offset)) << 17)

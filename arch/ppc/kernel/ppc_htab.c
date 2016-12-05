@@ -1,5 +1,5 @@
 /*
- * $Id: ppc_htab.c,v 1.26 1998/12/10 00:24:23 cort Exp $
+ * $Id: ppc_htab.c,v 1.29 1999/09/10 05:05:50 paulus Exp $
  *
  * PowerPC hash table management proc entry.  Will show information
  * about the current hash table and will allow changes to it.
@@ -44,43 +44,6 @@ extern unsigned long htab_evicts;
 extern unsigned long pte_misses;
 extern unsigned long pte_errors;
 
-static struct file_operations ppc_htab_operations = {
-    ppc_htab_lseek,	/* lseek   */
-    ppc_htab_read,	/* read	   */
-    ppc_htab_write,	/* write   */
-    NULL,		/* readdir */
-    NULL,		/* poll    */
-    NULL,		/* ioctl   */
-    NULL,		/* mmap	   */
-    NULL,		/* no special open code	   */
-    NULL,		/* flush */
-    NULL,		/* no special release code */
-    NULL		/* can't fsync */
-};
-
-/*
- * proc files can do almost nothing..
- */
-struct inode_operations proc_ppc_htab_inode_operations = {
-    &ppc_htab_operations,  /* default proc file-ops */
-    NULL,	    /* create	   */
-    NULL,	    /* lookup	   */
-    NULL,	    /* link	   */
-    NULL,	    /* unlink	   */
-    NULL,	    /* symlink	   */
-    NULL,	    /* mkdir	   */
-    NULL,	    /* rmdir	   */
-    NULL,	    /* mknod	   */
-    NULL,	    /* rename	   */
-    NULL,	    /* readlink	   */
-    NULL,	    /* follow_link */
-    NULL,	    /* readpage	   */
-    NULL,	    /* writepage   */
-    NULL,	    /* bmap	   */
-    NULL,	    /* truncate	   */
-    NULL	    /* permission  */
-};
-
 /* these will go into processor.h when I'm done debugging -- Cort */
 #define MMCR0 952
 #define MMCR0_PMC1_CYCLES (0x1<<7)
@@ -93,6 +56,12 @@ struct inode_operations proc_ppc_htab_inode_operations = {
 
 #define PMC1 953
 #define PMC2 954
+
+struct file_operations ppc_htab_operations = {
+        llseek:         ppc_htab_lseek,
+        read:           ppc_htab_read,
+        write:          ppc_htab_write,
+};
 
 char *pmc1_lookup(unsigned long mmcr0)
 {
@@ -253,6 +222,8 @@ return_string:
 		return 0;
 	if (n > strlen(buffer) - *ppos)
 		n = strlen(buffer) - *ppos;
+	if (n > count)
+		n = count;
 	copy_to_user(buf, buffer + *ppos, n);
 	*ppos += n;
 	return n;
@@ -530,8 +501,23 @@ int proc_dol2crvec(ctl_table *table, int write, struct file *filp,
 	int vleft, first=1, len, left, val;
 	#define TMPBUFLEN 256
 	char buf[TMPBUFLEN], *p;
-	
-	if ( (_get_PVR() >> 16) != 8) return -EFAULT;
+	static const char *sizestrings[4] = {
+		"unknown size", "256KB", "512KB", "1MB"
+	};
+	static const char *clockstrings[8] = {
+		"clock disabled", "+1 clock", "+1.5 clock", "reserved(3)",
+		"+2 clock", "+2.5 clock", "+3 clock", "reserved(7)"
+	};
+	static const char *typestrings[4] = {
+		"flow-through burst SRAM", "reserved SRAM",
+		"pipelined burst SRAM", "pipelined late-write SRAM"
+	};
+	static const char *holdstrings[4] = {
+		"0.5", "1.0", "(reserved2)", "(reserved3)"
+	};
+
+	if ( ((_get_PVR() >> 16) != 8) && ((_get_PVR() >> 16) != 12))
+		return -EFAULT;
 	
 	if ( /*!table->maxlen ||*/ (filp->f_pos && !write)) {
 		*lenp = 0;
@@ -583,55 +569,13 @@ int proc_dol2crvec(ctl_table *table, int write, struct file *filp,
 			p += sprintf(p, " %s",
 				     (val&0x80000000)?"enabled":"disabled");
 			p += sprintf(p,",%sparity",(val&0x40000000)?"":"no ");
-			
-			switch( (val >> 28) & 0x3 )
-			{
-			case 1: p += sprintf(p,",256Kb");
-				break;
-			case 2: p += sprintf(p,",512Kb");
-				break;
-			case 3: p += sprintf(p,",1M");
-				break;
-			default: p += sprintf(p,",unknown size");
-				break;
-			}
-
-			
-			switch( (val >> 25) & 0x7 )
-			{
-			case 0: p += sprintf(p,",clock disabled");
-				break;
-			case 1: p += sprintf(p,",+1 clock");
-				break;
-			case 2: p += sprintf(p,",+1.5 clock");
-				break;
-			case 7:
-			case 3: p += sprintf(p,",reserved clock");
-				break;
-			case 4: p += sprintf(p,",+2 clock");
-				break;
-			case 5: p += sprintf(p,",+2.5 clock");
-				break;
-			case 6: p += sprintf(p,",+3 clock");
-				break;
-			}
-			
-			switch( (val >> 23) & 0x2 )
-			{
-			case 0: p += sprintf(p,",flow-through burst SRAM");
-				break;
-			case 1: p += sprintf(p,",reserved SRAM");
-				break;
-			case 2: p += sprintf(p,",pipelined burst SRAM");
-				break;
-			case 3: p += sprintf(p,",pipelined late-write SRAM");
-				break;
-			}
-			
-			p += sprintf(p,"%s",(val>>22)?"":",data only");
-			p += sprintf(p,"%s",(val>>20)?",ZZ enabled":"");
-			p += sprintf(p,",%s",(val>>19)?"write-through":"copy-back");
-			p += sprintf(p,",%sns hold",(val>>16)?"1.0":"0.5");
+			p += sprintf(p, ",%s", sizestrings[(val >> 28) & 3]);
+			p += sprintf(p, ",%s", clockstrings[(val >> 25) & 7]);
+			p += sprintf(p, ",%s", typestrings[(val >> 23) & 0x2]);
+			p += sprintf(p,"%s",(val>>22)&1?"":",data only");
+			p += sprintf(p,"%s",(val>>20)&1?",ZZ enabled":"");
+			p += sprintf(p,",%s",(val>>19)&1?"write-through":"copy-back");
+			p += sprintf(p,",%sns hold", holdstrings[(val>>16)&3]);
 			
 			p += sprintf(p,"\n");
 			

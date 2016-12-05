@@ -21,17 +21,18 @@
  *  Removed 99% of above. Use Mark's ide driver for those options.
  *  This is now a lightweight ST-506 driver. (Paul Gortmaker)
  *
+ *  Modified 1995 Russell King for ARM processor.
  */
   
 /* Uncomment the following if you want verbose error reports. */
 /* #define VERBOSE_ERRORS */
   
-#include <asm/irq.h>
 #include <linux/errno.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/fs.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/kernel.h>
 #include <linux/hdreg.h>
 #include <linux/genhd.h>
@@ -40,6 +41,7 @@
 #include <linux/ioport.h>
 #include <linux/mc146818rtc.h> /* CMOS defines */
 #include <linux/init.h>
+#include <linux/blkpg.h>
 
 #define REALLY_SLOW_IO
 #include <asm/system.h>
@@ -48,6 +50,14 @@
 
 #define MAJOR_NR HD_MAJOR
 #include <linux/blk.h>
+
+#ifdef __arm__
+#undef  HD_IRQ
+#endif
+#include <asm/irq.h>
+#ifdef __arm__
+#define HD_IRQ IRQ_HARDDISK
+#endif
 
 static int revalidate_hddisk(kdev_t, int);
 
@@ -64,14 +74,14 @@ static int revalidate_hddisk(kdev_t, int);
 static void recal_intr(void);
 static void bad_rw_intr(void);
 
-static char recalibrate[MAX_HD] = { 0, };
-static char special_op[MAX_HD] = { 0, };
-static int access_count[MAX_HD] = {0, };
-static char busy[MAX_HD] = {0, };
-static struct wait_queue * busy_wait = NULL;
+static char recalibrate[MAX_HD];
+static char special_op[MAX_HD];
+static int access_count[MAX_HD];
+static char busy[MAX_HD];
+static DECLARE_WAIT_QUEUE_HEAD(busy_wait);
 
-static int reset = 0;
-static int hd_error = 0;
+static int reset;
+static int hd_error;
 
 #define SUBSECTOR(block) (CURRENT->current_nr_sectors > 0)
 
@@ -86,13 +96,14 @@ struct hd_i_struct {
 static struct hd_i_struct hd_info[] = { HD_TYPE };
 static int NR_HD = ((sizeof (hd_info))/(sizeof (struct hd_i_struct)));
 #else
-static struct hd_i_struct hd_info[] = { {0,0,0,0,0,0},{0,0,0,0,0,0} };
-static int NR_HD = 0;
+static struct hd_i_struct hd_info[MAX_HD];
+static int NR_HD;
 #endif
 
-static struct hd_struct hd[MAX_HD<<6]={{0,0},};
-static int hd_sizes[MAX_HD<<6] = {0, };
-static int hd_blocksizes[MAX_HD<<6] = {0, };
+static struct hd_struct hd[MAX_HD<<6];
+static int hd_sizes[MAX_HD<<6];
+static int hd_blocksizes[MAX_HD<<6];
+static int hd_hardsectsizes[MAX_HD<<6];
 
 #if (HD_DELAY > 0)
 unsigned long last_req;
@@ -113,7 +124,7 @@ unsigned long read_timer(void)
 }
 #endif
 
-__initfunc(void hd_setup(char *str, int *ints))
+void __init hd_setup(char *str, int *ints)
 {
 	int hdind = 0;
 
@@ -135,7 +146,7 @@ static void dump_status (const char *msg, unsigned int stat)
 	unsigned long flags;
 	char devc;
 
-	devc = CURRENT ? 'a' + DEVICE_NR(CURRENT->rq_dev) : '?';
+	devc = !QUEUE_EMPTY ? 'a' + DEVICE_NR(CURRENT->rq_dev) : '?';
 	save_flags (flags);
 	sti();
 #ifdef VERBOSE_ERRORS
@@ -164,7 +175,7 @@ static void dump_status (const char *msg, unsigned int stat)
 		if (hd_error & (BBD_ERR|ECC_ERR|ID_ERR|MARK_ERR)) {
 			printk(", CHS=%d/%d/%d", (inb(HD_HCYL)<<8) + inb(HD_LCYL),
 				inb(HD_CURRENT) & 0xf, inb(HD_SECTOR));
-			if (CURRENT)
+			if (!QUEUE_EMPTY)
 				printk(", sector=%ld", CURRENT->sector);
 		}
 		printk("\n");
@@ -341,7 +352,7 @@ static void bad_rw_intr(void)
 {
 	int dev;
 
-	if (!CURRENT)
+	if (QUEUE_EMPTY)
 		return;
 	dev = DEVICE_NR(CURRENT->rq_dev);
 	if (++CURRENT->errors >= MAX_ERRORS || (hd_error & BBD_ERR)) {
@@ -404,7 +415,7 @@ ok_to_read:
 #if (HD_DELAY > 0)
 	last_req = read_timer();
 #endif
-	if (CURRENT)
+	if (!QUEUE_EMPTY)
 		hd_request();
 	return;
 }
@@ -465,7 +476,7 @@ static void hd_times_out(void)
 	unsigned int dev;
 
 	DEVICE_INTR = NULL;
-	if (!CURRENT)
+	if (QUEUE_EMPTY)
 		return;
 	disable_irq(HD_IRQ);
 	sti();
@@ -512,7 +523,7 @@ static void hd_request(void)
 {
 	unsigned int dev, block, nsect, sec, track, head, cyl;
 
-	if (CURRENT && CURRENT->rq_status == RQ_INACTIVE) return;
+	if (!QUEUE_EMPTY && CURRENT->rq_status == RQ_INACTIVE) return;
 	if (DEVICE_INTR)
 		return;
 repeat:
@@ -575,7 +586,7 @@ repeat:
 	panic("unknown hd-command");
 }
 
-static void do_hd_request (void)
+static void do_hd_request (request_queue_t * q)
 {
 	disable_irq(HD_IRQ);
 	hd_request();
@@ -604,31 +615,25 @@ static int hd_ioctl(struct inode * inode, struct file * file,
 			g.start = hd[MINOR(inode->i_rdev)].start_sect;
 			return copy_to_user(loc, &g, sizeof g) ? -EFAULT : 0; 
 		}
-		case BLKRASET:
-			if(!capable(CAP_SYS_ADMIN))  return -EACCES;
-			if(arg > 0xff) return -EINVAL;
-			read_ahead[MAJOR(inode->i_rdev)] = arg;
-			return 0;
-		case BLKRAGET:
-			if (!arg)  return -EINVAL;
-			return put_user(read_ahead[MAJOR(inode->i_rdev)],
-					(long *) arg); 
+
          	case BLKGETSIZE:   /* Return device size */
 			if (!arg)  return -EINVAL;
 			return put_user(hd[MINOR(inode->i_rdev)].nr_sects, 
 					(long *) arg);
-		case BLKFLSBUF:
-			if(!capable(CAP_SYS_ADMIN))  return -EACCES;
-			fsync_dev(inode->i_rdev);
-			invalidate_buffers(inode->i_rdev);
-			return 0;
 
 		case BLKRRPART: /* Re-read partition tables */
-			if (!capable(CAP_SYS_ADMIN)) 
+			if (!capable(CAP_SYS_ADMIN))
 				return -EACCES;
 			return revalidate_hddisk(inode->i_rdev, 1);
 
-		RO_IOCTLS(inode->i_rdev,arg);
+		case BLKROSET:
+		case BLKROGET:
+		case BLKRASET:
+		case BLKRAGET:
+		case BLKFLSBUF:
+		case BLKPG:
+			return blk_ioctl(inode->i_rdev, cmd, arg);
+
 		default:
 			return -EINVAL;
 	}
@@ -653,28 +658,24 @@ static int hd_open(struct inode * inode, struct file * filp)
  */
 static int hd_release(struct inode * inode, struct file * file)
 {
-        int target;
-	sync_dev(inode->i_rdev);
-
-	target =  DEVICE_NR(inode->i_rdev);
+        int target =  DEVICE_NR(inode->i_rdev);
 	access_count[target]--;
 	return 0;
 }
 
-static void hd_geninit(struct gendisk *);
+extern struct block_device_operations hd_fops;
 
 static struct gendisk hd_gendisk = {
 	MAJOR_NR,	/* Major number */	
 	"hd",		/* Major name */
 	6,		/* Bits to shift to get real from partition */
 	1 << 6,		/* Number of partitions per real */
-	MAX_HD,		/* maximum number of real */
-	hd_geninit,	/* init function */
 	hd,		/* hd struct */
 	hd_sizes,	/* block sizes */
 	0,		/* number */
 	NULL,		/* internal use, not presently used */
-	NULL		/* next */
+	NULL,		/* next */
+	&hd_fops,       /* file operations */
 };
 	
 static void hd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
@@ -689,6 +690,12 @@ static void hd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	sti();
 }
 
+static struct block_device_operations hd_fops = {
+	open:		hd_open,
+	release:	hd_release,
+	ioctl:		hd_ioctl,
+};
+
 /*
  * This is the hard disk IRQ description. The SA_INTERRUPT in sa_flags
  * means we run the IRQ-handler with interrupts disabled:  this is bad for
@@ -698,9 +705,16 @@ static void hd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
  * We enable interrupts in some of the routines after making sure it's
  * safe.
  */
-static void hd_geninit(struct gendisk *ignored)
+static void hd_geninit(void)
 {
 	int drive;
+
+	for(drive=0; drive < (MAX_HD << 6); drive++) {
+		hd_blocksizes[drive] = 1024;
+		hd_hardsectsizes[drive] = 512;
+	}
+	blksize_size[MAJOR_NR] = hd_blocksizes;
+	hardsect_size[MAJOR_NR] = hd_hardsectsizes;
 
 #ifdef __i386__
 	if (!NR_HD) {
@@ -752,54 +766,54 @@ static void hd_geninit(struct gendisk *ignored)
 		}
 	}
 #endif /* __i386__ */
+#ifdef __arm__
+	if (!NR_HD) {
+		/* We don't know anything about the drive.  This means
+		 * that you *MUST* specify the drive parameters to the
+		 * kernel yourself.
+		 */
+		printk("hd: no drives specified - use hd=cyl,head,sectors"
+			" on kernel command line\n");
+	}
+#endif
+
 	for (drive=0 ; drive < NR_HD ; drive++) {
-		hd[drive<<6].nr_sects = hd_info[drive].head *
-			hd_info[drive].sect * hd_info[drive].cyl;
 		printk ("hd%c: %ldMB, CHS=%d/%d/%d\n", drive+'a',
 			hd[drive<<6].nr_sects / 2048, hd_info[drive].cyl,
 			hd_info[drive].head, hd_info[drive].sect);
 	}
-	if (NR_HD) {
-		if (request_irq(HD_IRQ, hd_interrupt, SA_INTERRUPT, "hd", NULL)) {
-			printk("hd: unable to get IRQ%d for the hard disk driver\n",HD_IRQ);
-			NR_HD = 0;
-		} else {
-			request_region(HD_DATA, 8, "hd");
-			request_region(HD_CMD, 1, "hd(cmd)");
-		}
+	if (!NR_HD)
+		return;
+
+	if (request_irq(HD_IRQ, hd_interrupt, SA_INTERRUPT, "hd", NULL)) {
+		printk("hd: unable to get IRQ%d for the hard disk driver\n",
+			HD_IRQ);
+		NR_HD = 0;
+		return;
 	}
+	request_region(HD_DATA, 8, "hd");
+	request_region(HD_CMD, 1, "hd(cmd)");
+
 	hd_gendisk.nr_real = NR_HD;
 
-	for(drive=0; drive < (MAX_HD << 6); drive++)
-		hd_blocksizes[drive] = 1024;
-	blksize_size[MAJOR_NR] = hd_blocksizes;
+	for(drive=0; drive < NR_HD; drive++)
+		register_disk(&hd_gendisk, MKDEV(MAJOR_NR,drive<<6), 1<<6,
+			&hd_fops, hd_info[drive].head * hd_info[drive].sect *
+			hd_info[drive].cyl);
 }
 
-static struct file_operations hd_fops = {
-	NULL,			/* lseek - default */
-	block_read,		/* read - general block-dev read */
-	block_write,		/* write - general block-dev write */
-	NULL,			/* readdir - bad */
-	NULL,			/* poll */
-	hd_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	hd_open,		/* open */
-	NULL,			/* flush */
-	hd_release,		/* release */
-	block_fsync		/* fsync */
-};
-
-__initfunc(int hd_init(void))
+int __init hd_init(void)
 {
-	if (register_blkdev(MAJOR_NR,"hd",&hd_fops)) {
+	if (devfs_register_blkdev(MAJOR_NR,"hd",&hd_fops)) {
 		printk("hd: unable to get major %d for hard disk\n",MAJOR_NR);
 		return -1;
 	}
-	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
 	read_ahead[MAJOR_NR] = 8;		/* 8 sector (4kB) read-ahead */
 	hd_gendisk.next = gendisk_head;
 	gendisk_head = &hd_gendisk;
 	timer_table[HD_TIMER].fn = hd_times_out;
+	hd_geninit();
 	return 0;
 }
 
@@ -836,7 +850,7 @@ static int revalidate_hddisk(kdev_t dev, int maxusage)
 	if (DEVICE_BUSY || USAGE > maxusage) {
 		restore_flags(flags);
 		return -EBUSY;
-	};
+	}
 	DEVICE_BUSY = 1;
 	restore_flags(flags);
 
@@ -854,14 +868,13 @@ static int revalidate_hddisk(kdev_t dev, int maxusage)
 		invalidate_buffers(devi);
 		gdev->part[minor].start_sect = 0;
 		gdev->part[minor].nr_sects = 0;
-	};
+	}
 
 #ifdef MAYBE_REINIT
 	MAYBE_REINIT;
 #endif
 
-	gdev->part[start].nr_sects = CAPACITY;
-	resetup_one_dev(gdev, target);
+	grok_partitions(gdev, target, 1<<6, CAPACITY);
 
 	DEVICE_BUSY = 0;
 	wake_up(&busy_wait);

@@ -42,12 +42,14 @@
 #include <linux/init.h>
 #include <linux/smp.h>
 
-#include <asm/processor.h>
-#include <asm/uaccess.h>
 #include <asm/io.h>
+#include <asm/smp.h>
 #include <asm/irq.h>
-#include <asm/delay.h>
 #include <asm/msr.h>
+#include <asm/delay.h>
+#include <asm/mpspec.h>
+#include <asm/uaccess.h>
+#include <asm/processor.h>
 
 #include <linux/mc146818rtc.h>
 #include <linux/timex.h>
@@ -59,7 +61,7 @@
 /*
  * for x86_do_profile()
  */
-#include "irq.h"
+#include <linux/irq.h>
 
 
 unsigned long cpu_hz;	/* Detected as we calibrate the TSC */
@@ -74,14 +76,13 @@ static unsigned long last_tsc_low; /* lsb 32 bits of Time Stamp Counter */
  * Equal to 2^32 * (1 / (clocks per usec) ).
  * Initialized in time_init.
  */
-static unsigned long fast_gettimeoffset_quotient=0;
+unsigned long fast_gettimeoffset_quotient=0;
 
 extern rwlock_t xtime_lock;
 
 static inline unsigned long do_fast_gettimeoffset(void)
 {
-	register unsigned long eax asm("ax");
-	register unsigned long edx asm("dx");
+	register unsigned long eax, edx;
 
 	/* Read the Time Stamp Counter */
 
@@ -369,7 +370,7 @@ static inline void do_timer_interrupt(int irq, void *dev_id, struct pt_regs *reg
  * profiling, except when we simulate SMP mode on a uniprocessor
  * system, in that case we have to call the local interrupt handler.
  */
-#ifndef __SMP__
+#ifndef CONFIG_X86_LOCAL_APIC
 	if (!user_mode(regs))
 		x86_do_profile(regs->eip);
 #else
@@ -547,7 +548,7 @@ static struct irqaction irq0  = { timer_interrupt, SA_INTERRUPT, 0, "timer", NUL
 #define CALIBRATE_LATCH	(5 * LATCH)
 #define CALIBRATE_TIME	(5 * 1000020/HZ)
 
-__initfunc(static unsigned long calibrate_tsc(void))
+static unsigned long __init calibrate_tsc(void)
 {
        /* Set the Gate high, disable speaker */
 	outb((inb(0x61) & ~0x02) | 0x01, 0x61);
@@ -612,7 +613,7 @@ bad_ctc:
 	return 0;
 }
 
-__initfunc(void time_init(void))
+void __init time_init(void)
 {
 	xtime.tv_sec = get_cmos_time();
 	xtime.tv_usec = 0;
@@ -681,8 +682,8 @@ __initfunc(void time_init(void))
 	co_cpu_write(CO_CPU_CTRL, co_cpu_read(CO_CPU_CTRL) & ~CO_CTRL_TIMEMASK);
 
 	/* Wire cpu IDT entry to s/w handler (and Cobalt APIC to IDT) */
-	setup_x86_irq(CO_IRQ_TIMER, &irq0);
+	setup_irq(CO_IRQ_TIMER, &irq0);
 #else
-	setup_x86_irq(0, &irq0);
+	setup_irq(0, &irq0);
 #endif
 }

@@ -11,6 +11,11 @@
  *        David S. Miller (davem@caip.rutgers.edu), 1995
  */
 
+#include <linux/fs.h>
+#include <linux/locks.h>
+#include <linux/quotaops.h>
+
+
 /*
  * balloc.c contains the blocks allocation and deallocation routines
  */
@@ -26,16 +31,6 @@
  * when a file system is mounted (see ext2_read_super).
  */
 
-#include <linux/fs.h>
-#include <linux/ext2_fs.h>
-#include <linux/stat.h>
-#include <linux/sched.h>
-#include <linux/string.h>
-#include <linux/locks.h>
-#include <linux/quotaops.h>
-
-#include <asm/bitops.h>
-#include <asm/byteorder.h>
 
 #define in_range(b, first, len)		((b) >= (first) && (b) <= (first) + (len) - 1)
 
@@ -123,8 +118,8 @@ error_out:
  * 
  * Return the slot used to store the bitmap, or a -ve error code.
  */
-static int load__block_bitmap (struct super_block * sb,
-			       unsigned int block_group)
+static int __load_block_bitmap (struct super_block * sb,
+			        unsigned int block_group)
 {
 	int i, j, retval = 0;
 	unsigned long block_bitmap_number;
@@ -141,7 +136,7 @@ static int load__block_bitmap (struct super_block * sb,
 			if (sb->u.ext2_sb.s_block_bitmap_number[block_group] ==
 			    block_group)
 				return block_group;
-			ext2_error (sb, "load_block_bitmap",
+			ext2_error (sb, "__load_block_bitmap",
 				    "block_group != block_bitmap_number");
 		}
 		retval = read_block_bitmap (sb, block_group, block_group);
@@ -197,7 +192,7 @@ static int load__block_bitmap (struct super_block * sb,
  * Return the slot number of the group in the superblock bitmap cache's on
  * success, or a -ve error code.
  *
- * There is still one inconsistancy here --- if the number of groups in this
+ * There is still one inconsistency here --- if the number of groups in this
  * filesystems is <= EXT2_MAX_GROUP_LOADED, then we have no way of 
  * differentiating between a group for which we have never performed a bitmap
  * IO request, and a group for which the last bitmap read request failed.
@@ -229,7 +224,7 @@ static inline int load_block_bitmap (struct super_block * sb,
 	 * If not, then do a full lookup for this block group.
 	 */
 	else {
-		slot = load__block_bitmap (sb, block_group);
+		slot = __load_block_bitmap (sb, block_group);
 	}
 
 	/*
@@ -358,7 +353,7 @@ error_return:
  * bitmap, and then for any free bit if that fails.
  */
 int ext2_new_block (const struct inode * inode, unsigned long goal,
-		    u32 * prealloc_count, u32 * prealloc_block, int * err)
+    u32 * prealloc_count, u32 * prealloc_block, int * err)
 {
 	struct buffer_head * bh;
 	struct buffer_head * bh2;
@@ -368,11 +363,10 @@ int ext2_new_block (const struct inode * inode, unsigned long goal,
 	struct super_block * sb;
 	struct ext2_group_desc * gdp;
 	struct ext2_super_block * es;
-
-	*err = -ENOSPC;
 #ifdef EXT2FS_DEBUG
 	static int goal_hits = 0, goal_attempts = 0;
 #endif
+	*err = -ENOSPC;
 	sb = inode->i_sb;
 	if (!sb) {
 		printk ("ext2_new_block: nonexistent device");
@@ -594,20 +588,12 @@ got_block:
 
 	if (j >= le32_to_cpu(es->s_blocks_count)) {
 		ext2_error (sb, "ext2_new_block",
-			    "block >= blocks count - "
-			    "block_group = %d, block=%d", i, j);
+			    "block(%d) >= blocks count(%d) - "
+			    "block_group = %d, es == %p ",j,
+			le32_to_cpu(es->s_blocks_count), i, es);
 		unlock_super (sb);
 		return 0;
 	}
-	if (!(bh = getblk (sb->s_dev, j, sb->s_blocksize))) {
-		ext2_error (sb, "ext2_new_block", "cannot get block %d", j);
-		unlock_super (sb);
-		return 0;
-	}
-	memset(bh->b_data, 0, sb->s_blocksize);
-	mark_buffer_uptodate(bh, 1);
-	mark_buffer_dirty(bh, 1);
-	brelse (bh);
 
 	ext2_debug ("allocating block %d. "
 		    "Goal hits %d of %d.\n", j, goal_hits, goal_attempts);
@@ -693,6 +679,7 @@ int ext2_group_sparse(int group)
 		test_root(group, 7));
 }
 
+/* Called at mount-time, super-block is locked */
 void ext2_check_blocks_bitmap (struct super_block * sb)
 {
 	struct buffer_head * bh;
@@ -703,7 +690,6 @@ void ext2_check_blocks_bitmap (struct super_block * sb)
 	struct ext2_group_desc * gdp;
 	int i, j;
 
-	lock_super (sb);
 	es = sb->u.ext2_sb.s_es;
 	desc_count = 0;
 	bitmap_count = 0;
@@ -766,5 +752,4 @@ void ext2_check_blocks_bitmap (struct super_block * sb)
 			    "Wrong free blocks count in super block, "
 			    "stored = %lu, counted = %lu",
 			    (unsigned long) le32_to_cpu(es->s_free_blocks_count), bitmap_count);
-	unlock_super (sb);
 }

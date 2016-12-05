@@ -15,12 +15,7 @@
  * Thomas Sailer   : ioctl code reworked (vmalloc/vfree removed)
  * Andrew Veliath  : adapted tmr2ticks from level 1 sequencer (avoid overflow)
  */
-#include <linux/config.h>
-
-
 #include "sound_config.h"
-
-#ifdef CONFIG_SEQUENCER
 
 static volatile int opened = 0, tmr_running = 0;
 static volatile time_t tmr_offs, tmr_ctr;
@@ -289,5 +284,3 @@ struct sound_timer_operations default_sound_timer =
 	def_tmr_ioctl,
 	def_tmr_arm
 };
-
-#endif

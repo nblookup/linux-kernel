@@ -35,6 +35,7 @@
 #endif
 #include <linux/fcntl.h>
 #include <linux/wrapper.h>
+#include <linux/devfs_fs_kernel.h>
 
 #include <linux/zftape.h>
 #if LINUX_VERSION_CODE >=KERNEL_VER(2,1,16)
@@ -115,28 +116,18 @@ static long zft_write(struct inode *ino, struct file *fp, const char *buff,
 #else
 static int  zft_read (struct inode *ino, struct file *fp, char *buff,
 		      int req_len); 
-#if LINUX_VERSION_CODE >= KERNEL_VER(1,3,0)
 static int  zft_write(struct inode *ino, struct file *fp, const char *buff,
 		      int req_len);
-#else
-static int  zft_write(struct inode *ino, struct file *fp, char *buff,
-		      int req_len);
-#endif
 #endif
 
 static struct file_operations zft_cdev =
 {
-	NULL,			/* llseek */
-	zft_read,		/* read */
-	zft_write,		/* write */
-	NULL,			/* readdir */
-	NULL,		       	/* select */
-	zft_ioctl,		/* ioctl */
-	zft_mmap,		/* mmap */
-	zft_open,		/* open */
-	NULL,			/* flush */
-	zft_close,		/* release */
-	NULL,			/* fsync */
+	read:		zft_read,
+	write:		zft_write,
+	ioctl:		zft_ioctl,
+	mmap:		zft_mmap,
+	open:		zft_open,
+	release:	zft_close,
 };
 
 /*      Open floppy tape device
@@ -326,11 +317,8 @@ static ssize_t zft_write(struct file *fp, const char *buff,
 #elif LINUX_VERSION_CODE >= KERNEL_VER(2,1,0)
 static long zft_write(struct inode *ino, struct file *fp, const char *buff,
 		      unsigned long req_len)
-#elif LINUX_VERSION_CODE >= KERNEL_VER(1,3,0)
-static int  zft_write(struct inode *ino, struct file *fp, const char *buff,
-		      int req_len)
 #else
-static int  zft_write(struct inode *ino, struct file *fp, char *buff,
+static int  zft_write(struct inode *ino, struct file *fp, const char *buff,
 		      int req_len)
 #endif
 {
@@ -414,8 +402,9 @@ extern int zft_compressor_init(void);
 /*  Called by modules package when installing the driver or by kernel
  *  during the initialization phase
  */
-__initfunc(int zft_init(void))
+int __init zft_init(void)
 {
+	int i;
 	TRACE_FUN(ft_t_flow);
 
 #ifdef MODULE
@@ -444,11 +433,45 @@ KERN_INFO
 	TRACE(ft_t_info, "zft_init @ 0x%p", zft_init);
 	TRACE(ft_t_info,
 	      "installing zftape VFS interface for ftape driver ...");
-	TRACE_CATCH(register_chrdev(QIC117_TAPE_MAJOR, "zft", &zft_cdev),);
-#if LINUX_VERSION_CODE >= KERNEL_VER(1,2,0) 
-# if LINUX_VERSION_CODE < KERNEL_VER(2,1,18)
+	TRACE_CATCH(devfs_register_chrdev(QIC117_TAPE_MAJOR, "zft", &zft_cdev),);
+
+	for (i = 0; i < 4; i++) {
+		char devname[9];
+
+		sprintf (devname, "qft%i", i);
+		devfs_register (NULL, devname, 0, DEVFS_FL_NONE,
+			        QIC117_TAPE_MAJOR, i,
+				S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+				&zft_cdev, NULL);
+		sprintf (devname, "nqft%i", i);
+		devfs_register (NULL, devname, 0, DEVFS_FL_NONE,
+				QIC117_TAPE_MAJOR, i + 4,
+				S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+				&zft_cdev, NULL);
+		sprintf (devname, "zqft%i", i);
+		devfs_register (NULL, devname, 0, DEVFS_FL_NONE,
+				QIC117_TAPE_MAJOR, i + 16,
+				S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+				&zft_cdev, NULL);
+		sprintf (devname, "nzqft%i", i);
+		devfs_register (NULL, devname, 0, DEVFS_FL_NONE,
+				QIC117_TAPE_MAJOR, i + 20,
+				S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+				&zft_cdev, NULL);
+		sprintf (devname, "rawqft%i", i);
+		devfs_register (NULL, devname, 0, DEVFS_FL_NONE,
+				QIC117_TAPE_MAJOR, i + 32,
+				S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+				&zft_cdev, NULL);
+		sprintf (devname, "nrawqft%i", i);
+		devfs_register (NULL, devname, 0, DEVFS_FL_NONE,
+				QIC117_TAPE_MAJOR, i + 36,
+				S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+				&zft_cdev, NULL);
+	}
+
+#if LINUX_VERSION_CODE < KERNEL_VER(2,1,18)
 	register_symtab(&zft_symbol_table); /* add global zftape symbols */
-# endif
 #endif
 #ifdef CONFIG_ZFT_COMPRESSOR
 	(void)zft_compressor_init();
@@ -461,9 +484,6 @@ KERN_INFO
 
 
 #ifdef MODULE
-#if LINUX_VERSION_CODE <= KERNEL_VER(1,2,13) && defined(MODULE)
-char kernel_version[] = UTS_RELEASE;
-#endif
 #if LINUX_VERSION_CODE >= KERNEL_VER(2,1,18)
 /* Called by modules package before trying to unload the module
  */
@@ -489,12 +509,29 @@ int init_module(void)
  */
 void cleanup_module(void)
 {
+	int i;
+	char devname[9];
+
 	TRACE_FUN(ft_t_flow);
 
-	if (unregister_chrdev(QIC117_TAPE_MAJOR, "zft") != 0) {
+	if (devfs_unregister_chrdev(QIC117_TAPE_MAJOR, "zft") != 0) {
 		TRACE(ft_t_warn, "failed");
 	} else {
 		TRACE(ft_t_info, "successful");
+	}
+        for (i = 0; i < 4; i++) {
+		sprintf(devname, "qft%i", i);
+		devfs_unregister(devfs_find_handle(NULL, devname, 0, QIC117_TAPE_MAJOR, i, DEVFS_SPECIAL_CHR, 0));
+		sprintf(devname, "nqft%i", i);
+		devfs_unregister(devfs_find_handle(NULL, devname, 0, QIC117_TAPE_MAJOR, i + 4, DEVFS_SPECIAL_CHR, 0));
+		sprintf(devname, "zqft%i", i);
+		devfs_unregister(devfs_find_handle(NULL, devname, 0, QIC117_TAPE_MAJOR, i + 16, DEVFS_SPECIAL_CHR, 0));
+		sprintf(devname, "nzqft%i", i);
+		devfs_unregister(devfs_find_handle(NULL, devname, 0, QIC117_TAPE_MAJOR, i + 20, DEVFS_SPECIAL_CHR, 0));
+		sprintf(devname, "rawqft%i", i);
+		devfs_unregister(devfs_find_handle(NULL, devname, 0, QIC117_TAPE_MAJOR, i + 32, DEVFS_SPECIAL_CHR, 0));
+		sprintf(devname, "nrawqft%i", i);
+		devfs_unregister(devfs_find_handle(NULL, devname, 0, QIC117_TAPE_MAJOR, i + 36, DEVFS_SPECIAL_CHR, 0));
 	}
 	zft_uninit_mem(); /* release remaining memory, if any */
         printk(KERN_INFO "zftape successfully unloaded.\n");

@@ -17,12 +17,6 @@
 
 #define NVRAM_SIZE	8192
 
-/* when building as a module, __openfirmware is both unavailable
- * and unnecessary. */
-#ifndef MODULE
-__openfirmware
-#endif
-
 static long long nvram_llseek(struct file *file, loff_t offset, int origin)
 {
 	switch (origin) {
@@ -89,17 +83,11 @@ static int nvram_release(struct inode *inode, struct file *file)
 }
 
 struct file_operations nvram_fops = {
-	nvram_llseek,
-	read_nvram,
-	write_nvram,
-	NULL,		/* nvram_readdir */
-	NULL,		/* nvram_select */
-	NULL,		/* nvram_ioctl */
-	NULL,		/* nvram_mmap */
-	nvram_open,
-	NULL,		/* flush */
-	nvram_release,
-	NULL		/* fsync */
+	llseek:		nvram_llseek,
+	read:		read_nvram,
+	write:		write_nvram,
+	open:		nvram_open,
+	release:	nvram_release,
 };
 
 static struct miscdevice nvram_dev = {
@@ -108,7 +96,7 @@ static struct miscdevice nvram_dev = {
 	&nvram_fops
 };
 
-__initfunc(int nvram_init(void))
+int nvram_init(void)
 {
 	printk(KERN_INFO "Macintosh non-volatile memory driver v%s\n",
 		NVRAM_VERSION);

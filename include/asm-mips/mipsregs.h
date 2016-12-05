@@ -1,4 +1,4 @@
-/* $Id: mipsregs.h,v 1.6 1998/08/17 11:27:08 ralf Exp $
+/* $Id: mipsregs.h,v 1.6 1999/07/26 19:42:43 harald Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -103,7 +103,10 @@
 #define read_32bit_cp0_register(source)                         \
 ({ int __res;                                                   \
         __asm__ __volatile__(                                   \
-        "mfc0\t%0,"STR(source)                                  \
+	".set\tpush\n\t"					\
+	".set\treorder\n\t"					\
+        "mfc0\t%0,"STR(source)"\n\t"                            \
+	".set\tpop"						\
         : "=r" (__res));                                        \
         __res;})
 
@@ -121,7 +124,8 @@
 
 #define write_32bit_cp0_register(register,value)                \
         __asm__ __volatile__(                                   \
-        "mtc0\t%0,"STR(register)                                \
+        "mtc0\t%0,"STR(register)"\n\t"				\
+	"nop"							\
         : : "r" (value));
 
 #define write_64bit_cp0_register(register,value)                \
@@ -233,11 +237,12 @@ __BUILD_SET_CP0(config,CP0_CONFIG)
 /*
  * Bitfields in the R[23]000 cp0 status register.
  */
-#define ST0_KUC			0x00000001
-#define ST0_IEP			0x00000002
-#define ST0_KUP			0x00000004
-#define ST0_IEO			0x00000008
-#define ST0_KUO			0x00000010
+#define ST0_IEC                 0x00000001
+#define ST0_KUC			0x00000002
+#define ST0_IEP			0x00000004
+#define ST0_KUP			0x00000008
+#define ST0_IEO			0x00000010
+#define ST0_KUO			0x00000020
 /* bits 6 & 7 are reserved on R[23]000 */
 
 /*

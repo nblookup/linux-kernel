@@ -18,61 +18,15 @@
  *        David S. Miller (davem@caip.rutgers.edu), 1995
  */
 
-#include <asm/uaccess.h>
-
-#include <linux/errno.h>
 #include <linux/fs.h>
-#include <linux/ext2_fs.h>
-#include <linux/sched.h>
-#include <linux/stat.h>
-
-static ssize_t ext2_dir_read (struct file * filp, char * buf,
-			      size_t count, loff_t *ppos)
-{
-	return -EISDIR;
-}
 
 static int ext2_readdir(struct file *, void *, filldir_t);
 
-static struct file_operations ext2_dir_operations = {
-	NULL,			/* lseek - default */
-	ext2_dir_read,		/* read */
-	NULL,			/* write - bad */
-	ext2_readdir,		/* readdir */
-	NULL,			/* poll - default */
-	ext2_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	NULL,			/* no special open code */
-	NULL,			/* flush */
-	NULL,			/* no special release code */
-	ext2_sync_file,		/* fsync */
-	NULL,			/* fasync */
-	NULL,			/* check_media_change */
-	NULL			/* revalidate */
-};
-
-/*
- * directories can handle most operations...
- */
-struct inode_operations ext2_dir_inode_operations = {
-	&ext2_dir_operations,	/* default directory file-ops */
-	ext2_create,		/* create */
-	ext2_lookup,		/* lookup */
-	ext2_link,		/* link */
-	ext2_unlink,		/* unlink */
-	ext2_symlink,		/* symlink */
-	ext2_mkdir,		/* mkdir */
-	ext2_rmdir,		/* rmdir */
-	ext2_mknod,		/* mknod */
-	ext2_rename,		/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* bmap */
-	NULL,			/* truncate */
-	ext2_permission,	/* permission */
-	NULL			/* smap */
+struct file_operations ext2_dir_operations = {
+	read:		generic_read_dir,
+	readdir:	ext2_readdir,
+	ioctl:		ext2_ioctl,
+	fsync:		ext2_sync_file,
 };
 
 int ext2_check_dir_entry (const char * function, struct inode * dir,

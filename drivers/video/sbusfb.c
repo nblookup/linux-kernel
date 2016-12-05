@@ -53,8 +53,8 @@
      *  Interface used by the world
      */
 
-void sbusfb_init(void);
-void sbusfb_setup(char *options, int *ints);
+int sbusfb_init(void);
+int sbusfb_setup(char*);
 
 static int currcon;
 static int defx_margin = -1, defy_margin = -1;
@@ -175,12 +175,15 @@ static int sbusfb_mmap(struct fb_info *info, struct file *file,
 	struct fb_info_sbusfb *fb = sbusfbinfo(info);
 	unsigned int size, page, r, map_size;
 	unsigned long map_offset = 0;
+	unsigned long off;
 	int i;
                                         
 	size = vma->vm_end - vma->vm_start;
-	if (vma->vm_offset & ~PAGE_MASK)
-		return -ENXIO;
-		
+	if (vma->vm_pgoff > (~0UL >> PAGE_SHIFT))
+		return -EINVAL;
+
+	off = vma->vm_pgoff << PAGE_SHIFT;
+
 	/* To stop the swapper from even considering these pages */
 	vma->vm_flags |= (VM_SHM| VM_LOCKED);
 	
@@ -190,9 +193,9 @@ static int sbusfb_mmap(struct fb_info *info, struct file *file,
 		unsigned long j, alignment, s = 0;
 		int max = -1;
 		
-		map_offset = vma->vm_offset+size;
+		map_offset = (vma->vm_pgoff << PAGE_SHIFT) + size;
 		for (i = 0; fb->mmap_map[i].size; i++) {
-			if (fb->mmap_map[i].voff < vma->vm_offset)
+			if (fb->mmap_map[i].voff < off)
 				continue;
 			if (fb->mmap_map[i].voff >= map_offset)
 				break;
@@ -210,7 +213,7 @@ static int sbusfb_mmap(struct fb_info *info, struct file *file,
 					break;
 			if (alignment > PAGE_SIZE) {
 				j = alignment;
-				alignment = j - ((vma->vm_start + fb->mmap_map[max].voff - vma->vm_offset) & (j - 1));
+				alignment = j - ((vma->vm_start + fb->mmap_map[max].voff - off) & (j - 1));
 				if (alignment != j) {
 					struct vm_area_struct *vmm = find_vma(current->mm, vma->vm_start);
 					if (!vmm || vmm->vm_start >= vma->vm_end + alignment) {
@@ -227,7 +230,7 @@ static int sbusfb_mmap(struct fb_info *info, struct file *file,
 	for (page = 0; page < size; ){
 		map_size = 0;
 		for (i = 0; fb->mmap_map[i].size; i++)
-			if (fb->mmap_map[i].voff == vma->vm_offset+page) {
+			if (fb->mmap_map[i].voff == off+page) {
 				map_size = sbusfb_mmapsize(fb,fb->mmap_map[i].size);
 #ifdef __sparc_v9__
 #define POFF_MASK	(PAGE_MASK|0x1UL)
@@ -304,13 +307,13 @@ static void sbusfb_clear_margin(struct display *p, int s)
 			fb_base -= (skip_bytes + fb->x_margin) / 8;
 			skip_bytes /= 8;
 			scr_size /= 8;
-			mymemset (fb_base, skip_bytes - fb->x_margin / 8);
-			mymemset (fb_base + scr_size - skip_bytes + fb->x_margin / 8, skip_bytes - fb->x_margin / 8);
+			fb_memset255 (fb_base, skip_bytes - fb->x_margin / 8);
+			fb_memset255 (fb_base + scr_size - skip_bytes + fb->x_margin / 8, skip_bytes - fb->x_margin / 8);
 			incr = fb->var.xres_virtual / 8;
 			size = fb->x_margin / 8 * 2;
 			for (q = fb_base + skip_bytes - fb->x_margin / 8, h = 0;
 			     h <= he; q += incr, h++)
-				mymemset (q, size);
+				fb_memset255 (q, size);
 		} else {
 			fb_base -= (skip_bytes + fb->x_margin);
 			memset (fb_base, attr_bgcol(p,s), skip_bytes - fb->x_margin);
@@ -364,9 +367,29 @@ static int sbusfb_get_var(struct fb_var_screeninfo *var, int con,
      */
 
 static int sbusfb_set_var(struct fb_var_screeninfo *var, int con,
-			struct fb_info *info)
+			  struct fb_info *info)
 {
-	return -EINVAL;
+       struct display *display;
+       int activate = var->activate;
+
+       if(con >= 0)
+               display = &fb_display[con];
+       else
+               display = info->disp;
+
+       /* simple check for equality until fully implemented -E */
+       if ((activate & FB_ACTIVATE_MASK) == FB_ACTIVATE_NOW) {
+               if (display->var.xres != var->xres ||
+                       display->var.yres != var->yres ||
+                       display->var.xres_virtual != var->xres_virtual ||
+                       display->var.yres_virtual != var->yres_virtual ||
+                       display->var.bits_per_pixel != var->bits_per_pixel ||
+                       display->var.accel_flags != var->accel_flags) {
+                       return -EINVAL;
+               }
+       }
+       return 0;
+
 }
 
     /*
@@ -723,7 +746,7 @@ static int sbusfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
      *  Setup: parse used options
      */
 
-__initfunc(void sbusfb_setup(char *options, int *ints))
+int __init sbusfb_setup(char *options)
 {
 	char *p;
 	
@@ -755,6 +778,7 @@ __initfunc(void sbusfb_setup(char *options, int *ints))
 		if (*p != ',') break;
 		p++;
 	}
+	return 0;
 }
 
 static int sbusfbcon_switch(int con, struct fb_info *info)
@@ -940,8 +964,8 @@ void sbusfb_palette(int enter)
      
 extern void (*prom_palette)(int);
 
-__initfunc(static void sbusfb_init_fb(int node, int parent, int fbtype,
-				      struct linux_sbus_device *sbdp))
+static void __init sbusfb_init_fb(int node, int parent, int fbtype,
+				  struct sbus_dev *sbdp)
 {
 	struct fb_fix_screeninfo *fix;
 	struct fb_var_screeninfo *var;
@@ -967,6 +991,7 @@ __initfunc(static void sbusfb_init_fb(int node, int parent, int fbtype,
 	disp = &fb->disp;
 	type = &fb->type;
 	
+	spin_lock_init(&fb->lock);
 	fb->prom_node = node;
 	fb->prom_parent = parent;
 	fb->sbdp = sbdp;
@@ -1065,6 +1090,11 @@ sizechange:
 	case FBTYPE_MDICOLOR:
 		p = cgfourteenfb_init(fb); break;
 #endif
+#ifdef CONFIG_FB_P9100
+	case FBTYPE_P9100COLOR:
+		/* Temporary crock. For now we are a cg3 */
+		p = p9100fb_init(fb); type->fb_type = FBTYPE_SUN3COLOR; break;
+#endif
 	}
 	
 	if (!p) {
@@ -1108,7 +1138,7 @@ sizechange:
 		kfree(fb);
 		return;
 	}
-	printk("fb%d: %s\n", GET_FB_IDX(fb->info.node), p);
+	printk(KERN_INFO "fb%d: %s\n", GET_FB_IDX(fb->info.node), p);
 }
 
 static inline int known_card(char *name)
@@ -1128,18 +1158,20 @@ static inline int known_card(char *name)
 		return FBTYPE_SUN2BW;
 	if (!strcmp(name, "tcx"))
 		return FBTYPE_TCXCOLOR;
+	if (!strcmp(name, "p9100"))
+		return FBTYPE_P9100COLOR;
 	return FBTYPE_NOTYPE;
 }
 
-__initfunc(void sbusfb_init(void))
+int __init sbusfb_init(void)
 {
 	int type;
-	struct linux_sbus_device *sbdp;
-	struct linux_sbus *sbus;
+	struct sbus_dev *sbdp;
+	struct sbus_bus *sbus;
 	char prom_name[40];
 	extern int con_is_present(void);
 	
-	if (!con_is_present()) return;
+	if (!con_is_present()) return -ENXIO;
 	
 #ifdef CONFIG_FB_CREATOR
 	{
@@ -1167,16 +1199,19 @@ __initfunc(void sbusfb_init(void))
 		}
 	}
 #endif
-	if (!SBus_chain) return;
+	if (sbus_root == NULL)
+		return 0;
 	for_all_sbusdev(sbdp, sbus) {
 		type = known_card(sbdp->prom_name);
-		if (type == FBTYPE_NOTYPE) continue;
-		if (prom_getproperty(sbdp->prom_node, "emulation", prom_name, sizeof(prom_name)) > 0) {
+		if (type == FBTYPE_NOTYPE)
+			continue;
+		if (prom_getproperty(sbdp->prom_node, "emulation",
+				     prom_name, sizeof(prom_name)) > 0) {
 			type = known_card(prom_name);
-			if (type == FBTYPE_NOTYPE) type = known_card(sbdp->prom_name);
+			if (type == FBTYPE_NOTYPE)
+				type = known_card(sbdp->prom_name);
 		}
-		prom_apply_sbus_ranges(sbdp->my_bus, &sbdp->reg_addrs[0],
-				       sbdp->num_registers, sbdp);
-		sbusfb_init_fb(sbdp->prom_node, sbdp->my_bus->prom_node, type, sbdp);
+		sbusfb_init_fb(sbdp->prom_node, sbdp->bus->prom_node, type, sbdp);
 	}
+	return 0;
 }	

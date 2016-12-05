@@ -604,8 +604,8 @@ send_signal:
 			tty->canon_head = tty->read_head;
 			tty->canon_data++;
 			if (tty->fasync)
-				kill_fasync(tty->fasync, SIGIO);
-			if (tty->read_wait)
+				kill_fasync(tty->fasync, SIGIO, POLL_IN);
+			if (waitqueue_active(&tty->read_wait))
 				wake_up_interruptible(&tty->read_wait);
 			return;
 		}
@@ -706,8 +706,8 @@ static void n_tty_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 
 	if (!tty->icanon && (tty->read_cnt >= tty->minimum_to_wake)) {
 		if (tty->fasync)
-			kill_fasync(tty->fasync, SIGIO);
-		if (tty->read_wait)
+			kill_fasync(tty->fasync, SIGIO, POLL_IN);
+		if (waitqueue_active(&tty->read_wait))
 			wake_up_interruptible(&tty->read_wait);
 	}
 
@@ -811,7 +811,7 @@ static int n_tty_open(struct tty_struct *tty)
 
 	if (!tty->read_buf) {
 		tty->read_buf = (unsigned char *)
-			get_free_page(in_interrupt() ? GFP_ATOMIC : GFP_KERNEL);
+			get_zeroed_page(in_interrupt() ? GFP_ATOMIC : GFP_KERNEL);
 		if (!tty->read_buf)
 			return -ENOMEM;
 	}
@@ -854,6 +854,7 @@ static inline int copy_from_read_buf(struct tty_struct *tty,
 	retval = 0;
 	n = MIN(*nr, MIN(tty->read_cnt, N_TTY_BUF_SIZE - tty->read_tail));
 	if (n) {
+		mb();
 		retval = copy_to_user(*b, &tty->read_buf[tty->read_tail], n);
 		n -= retval;
 		tty->read_tail = (tty->read_tail + n) & (N_TTY_BUF_SIZE-1);
@@ -868,7 +869,7 @@ static ssize_t read_chan(struct tty_struct *tty, struct file *file,
 			 unsigned char *buf, size_t nr)
 {
 	unsigned char *b = buf;
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	int c;
 	int minimum, time;
 	ssize_t retval = 0;
@@ -948,7 +949,7 @@ do_it_again:
 		/* This statement must be first before checking for input
 		   so that any interrupt will set the state back to
 		   TASK_RUNNING. */
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		
 		if (((minimum - (b - buf)) < tty->minimum_to_wake) &&
 		    ((minimum - (b - buf)) >= 1))
@@ -1058,7 +1059,7 @@ static ssize_t write_chan(struct tty_struct * tty, struct file * file,
 			  const unsigned char * buf, size_t nr)
 {
 	const unsigned char *b = buf;
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	int c;
 	ssize_t retval = 0;
 
@@ -1073,7 +1074,7 @@ static ssize_t write_chan(struct tty_struct * tty, struct file * file,
 
 	add_wait_queue(&tty->write_wait, &wait);
 	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (signal_pending(current)) {
 			retval = -ERESTARTSYS;
 			break;

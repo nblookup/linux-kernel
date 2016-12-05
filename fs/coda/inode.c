@@ -22,8 +22,6 @@
 #include <asm/uaccess.h>
 
 #include <linux/fs.h>
-#include <linux/stat.h>
-#include <asm/uaccess.h>
 #include <linux/vmalloc.h>
 #include <asm/segment.h>
 
@@ -36,25 +34,19 @@
 /* VFS super_block ops */
 static struct super_block *coda_read_super(struct super_block *, void *, int);
 static void coda_read_inode(struct inode *);
-static int  coda_notify_change(struct dentry *dentry, struct iattr *attr);
 static void coda_put_inode(struct inode *);
 static void coda_delete_inode(struct inode *);
 static void coda_put_super(struct super_block *);
-static int coda_statfs(struct super_block *sb, struct statfs *buf, 
-		       int bufsiz);
+static int coda_statfs(struct super_block *sb, struct statfs *buf);
 
 /* exported operations */
 struct super_operations coda_super_operations =
 {
-	coda_read_inode,        /* read_inode */
-	NULL,                   /* write_inode */
-	coda_put_inode,	        /* put_inode */
-	coda_delete_inode,      /* delete_inode */
-	coda_notify_change,	/* notify_change */
-	coda_put_super,	        /* put_super */
-	NULL,			/* write_super */
-	coda_statfs,   		/* statfs */
-	NULL			/* remount_fs */
+	read_inode:	coda_read_inode,
+	put_inode:	coda_put_inode,
+	delete_inode:	coda_delete_inode,
+	put_super:	coda_put_super,
+	statfs:		coda_statfs,
 };
 
 static struct super_block * coda_read_super(struct super_block *sb, 
@@ -68,13 +60,13 @@ static struct super_block * coda_read_super(struct super_block *sb,
         int error;
 
 	ENTRY;
-        MOD_INC_USE_COUNT; 
 
         vc = &coda_upc_comm;
 	sbi = &coda_super_info;
 
         if ( sbi->sbi_sb ) {
 		printk("Already mounted\n");
+		EXIT;  
 		return NULL;
 	}
 
@@ -84,7 +76,6 @@ static struct super_block * coda_read_super(struct super_block *sb,
 	INIT_LIST_HEAD(&(sbi->sbi_cchead));
 	INIT_LIST_HEAD(&(sbi->sbi_volroothead));
 
-        lock_super(sb);
         sb->u.generic_sbp = sbi;
         sb->s_blocksize = 1024;	/* XXXXX  what do we put here?? */
         sb->s_blocksize_bits = 10;
@@ -97,8 +88,6 @@ static struct super_block * coda_read_super(struct super_block *sb,
 	if ( error ) {
 	        printk("coda_read_super: coda_get_rootfid failed with %d\n",
 		       error);
-		sb->s_dev = 0;
-	        unlock_super(sb);
 		goto error;
 	}	  
 	printk("coda_read_super: rootfid is %s\n", coda_f2s(&fid));
@@ -107,22 +96,18 @@ static struct super_block * coda_read_super(struct super_block *sb,
         error = coda_cnode_make(&root, &fid, sb);
         if ( error || !root ) {
 	    printk("Failure of coda_cnode_make for root: error %d\n", error);
-	    sb->s_dev = 0;
-	    unlock_super(sb);
 	    goto error;
 	} 
 
 	printk("coda_read_super: rootinode is %ld dev %d\n", 
 	       root->i_ino, root->i_dev);
 	sbi->sbi_root = root;
-	sb->s_root = d_alloc_root(root, NULL);
-	unlock_super(sb);
+	sb->s_root = d_alloc_root(root);
 	EXIT;  
         return sb;
 
  error:
 	EXIT;  
-	MOD_DEC_USE_COUNT;
 	if (sbi) {
 		sbi->sbi_vcomm = NULL;
 		sbi->sbi_root = NULL;
@@ -131,7 +116,6 @@ static struct super_block * coda_read_super(struct super_block *sb,
         if (root) {
                 iput(root);
         }
-        sb->s_dev = 0;
         return NULL;
 }
 
@@ -141,16 +125,12 @@ static void coda_put_super(struct super_block *sb)
 
         ENTRY;
 
-
-        sb->s_dev = 0;
 	coda_cache_clear_all(sb);
 	sb_info = coda_sbp(sb);
-	sb_info->sbi_vcomm->vc_inuse = 0;
 	coda_super_info.sbi_sb = NULL;
 	printk("Coda: Bye bye.\n");
 	memset(sb_info, 0, sizeof(* sb_info));
 
-        MOD_DEC_USE_COUNT;
 	EXIT;
 }
 
@@ -164,15 +144,16 @@ static void coda_read_inode(struct inode *inode)
 	return;
 }
 
-static void coda_put_inode(struct inode *in) 
+static void coda_put_inode(struct inode *inode) 
 {
 	ENTRY;
 
-        CDEBUG(D_INODE,"ino: %ld, count %d\n", in->i_ino, in->i_count);
-
-	if ( in->i_count == 1 ) 
-		in->i_nlink = 0;
+	CDEBUG(D_INODE,"ino: %ld, count %d\n", inode->i_ino, inode->i_count);
 		
+	if ( inode->i_count == 1 ) {
+                write_inode_now(inode);
+		inode->i_nlink = 0;
+        }
 }
 
 static void coda_delete_inode(struct inode *inode)
@@ -190,26 +171,28 @@ static void coda_delete_inode(struct inode *inode)
 		return;
 	}
 
-
-	if ( ! list_empty(&cii->c_volrootlist) )
+	if ( ! list_empty(&cii->c_volrootlist) ) {
 		list_del(&cii->c_volrootlist);
+		INIT_LIST_HEAD(&cii->c_volrootlist);
+        }
 
         open_inode = cii->c_ovp;
         if ( open_inode ) {
                 CDEBUG(D_SUPER, "DELINO cached file: ino %ld count %d.\n",  
 		       open_inode->i_ino,  open_inode->i_count);
                 cii->c_ovp = NULL;
+		inode->i_mapping = &inode->i_data;
                 iput(open_inode);
         }
 	
 	coda_cache_clear_inode(inode);
 	CDEBUG(D_DOWNCALL, "clearing inode: %ld, %x\n", inode->i_ino, cii->c_flags);
-	inode->u.generic_ip = NULL;
+	inode->u.coda_i.c_magic = 0;
         clear_inode(inode);
 	EXIT;
 }
 
-static int  coda_notify_change(struct dentry *de, struct iattr *iattr)
+int coda_notify_change(struct dentry *de, struct iattr *iattr)
 {
 	struct inode *inode = de->d_inode;
         struct coda_inode_info *cii;
@@ -238,30 +221,33 @@ static int  coda_notify_change(struct dentry *de, struct iattr *iattr)
         return error;
 }
 
-/*  we need _something_ for this routine. Let's mimic AFS */
-static int coda_statfs(struct super_block *sb, struct statfs *buf, 
-		       int bufsiz)
+static int coda_statfs(struct super_block *sb, struct statfs *buf)
 {
-	struct statfs tmp;
+	int error;
 
-	tmp.f_type = CODA_SUPER_MAGIC;
-	tmp.f_bsize = 1024;
-	tmp.f_blocks = 9000000;
-	tmp.f_bfree = 9000000;
-	tmp.f_bavail = 9000000 ;
-	tmp.f_files = 9000000;
-	tmp.f_ffree = 9000000;
-	tmp.f_namelen = 0;
-	copy_to_user(buf, &tmp, bufsiz);
+	error = venus_statfs(sb, buf);
+
+	if (error) {
+		/* fake something like AFS does */
+		buf->f_blocks = 9000000;
+		buf->f_bfree  = 9000000;
+		buf->f_bavail = 9000000;
+		buf->f_files  = 9000000;
+		buf->f_ffree  = 9000000;
+	}
+
+	/* and fill in the rest */
+	buf->f_type = CODA_SUPER_MAGIC;
+	buf->f_bsize = 1024;
+	buf->f_namelen = CODA_MAXNAMLEN;
+
 	return 0; 
 }
 
 
 /* init_coda: used by filesystems.c to register coda */
 
-struct file_system_type coda_fs_type = {
-   "coda", 0, coda_read_super, NULL
-};
+DECLARE_FSTYPE( coda_fs_type, "coda", coda_read_super, 0);
 
 int init_coda_fs(void)
 {

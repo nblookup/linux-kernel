@@ -26,35 +26,37 @@ static void release(struct task_struct * p)
 {
 	if (p != current) {
 #ifdef __SMP__
+		int has_cpu;
+
 		/*
-		 * Wait to make sure the process isn't active on any
-		 * other CPU
+		 * Wait to make sure the process isn't on the
+		 * runqueue (active on some other CPU still)
 		 */
-		for (;;)  {
-			int has_cpu;
+		do {
 			spin_lock_irq(&runqueue_lock);
 			has_cpu = p->has_cpu;
 			spin_unlock_irq(&runqueue_lock);
-			if (!has_cpu)
-				break;
-			do {
-				barrier();
-			} while (p->has_cpu);
-		}
+		} while (has_cpu);
 #endif
 		free_uid(p);
-		nr_tasks--;
-		add_free_taskslot(p->tarray_ptr);
-
-		write_lock_irq(&tasklist_lock);
-		unhash_pid(p);
-		REMOVE_LINKS(p);
-		write_unlock_irq(&tasklist_lock);
+		unhash_process(p);
 
 		release_thread(p);
 		current->cmin_flt += p->min_flt + p->cmin_flt;
 		current->cmaj_flt += p->maj_flt + p->cmaj_flt;
 		current->cnswap += p->nswap + p->cnswap;
+		/*
+		 * Potentially available timeslices are retrieved
+		 * here - this way the parent does not get penalized
+		 * for creating too many processes.
+		 *
+		 * (this cannot be used to artificially 'generate'
+		 * timeslices, because any timeslice recovered here
+		 * was given away by the parent in the first place.)
+		 */
+		current->counter += p->counter;
+		if (current->counter > current->priority)
+			current->counter = current->priority;
 		free_task_struct(p);
 	} else {
 		printk("task releasing itself\n");
@@ -145,7 +147,9 @@ static inline void forget_original_parent(struct task_struct * father)
 	read_lock(&tasklist_lock);
 	for_each_task(p) {
 		if (p->p_opptr == father) {
+			/* We dont want people slaying init */
 			p->exit_signal = SIGCHLD;
+			p->self_exec_id++;
 			p->p_opptr = child_reaper; /* init */
 			if (p->pdeath_signal) send_sig(p->pdeath_signal, p, 0);
 		}
@@ -159,18 +163,16 @@ static inline void close_files(struct files_struct * files)
 
 	j = 0;
 	for (;;) {
-		unsigned long set = files->open_fds.fds_bits[j];
+		unsigned long set;
 		i = j * __NFDBITS;
-		j++;
-		if (i >= files->max_fds)
+		if (i >= files->max_fdset || i >= files->max_fds)
 			break;
+		set = files->open_fds->fds_bits[j++];
 		while (set) {
 			if (set & 1) {
-				struct file * file = files->fd[i];
-				if (file) {
-					files->fd[i] = NULL;
+				struct file * file = xchg(&files->fd[i], NULL);
+				if (file)
 					filp_close(file, files);
-				}
 			}
 			i++;
 			set >>= 1;
@@ -182,19 +184,20 @@ extern kmem_cache_t *files_cachep;
 
 static inline void __exit_files(struct task_struct *tsk)
 {
-	struct files_struct * files = tsk->files;
+	struct files_struct * files = xchg(&tsk->files, NULL);
 
 	if (files) {
-		tsk->files = NULL;
 		if (atomic_dec_and_test(&files->count)) {
 			close_files(files);
 			/*
-			 * Free the fd array as appropriate ...
+			 * Free the fd and fdset arrays if we expanded them.
 			 */
-			if (NR_OPEN * sizeof(struct file *) == PAGE_SIZE)
-				free_page((unsigned long) files->fd);
-			else
-				kfree(files->fd);
+			if (files->fd != &files->fd_array[0])
+				free_fd_array(files->fd, files->max_fds);
+			if (files->max_fdset > __FD_SETSIZE) {
+				free_fdset(files->open_fds, files->max_fdset);
+				free_fdset(files->close_on_exec, files->max_fdset);
+			}
 			kmem_cache_free(files_cachep, files);
 		}
 	}
@@ -246,19 +249,46 @@ void exit_sighand(struct task_struct *tsk)
 	__exit_sighand(tsk);
 }
 
+/*
+ * We can use these to temporarily drop into
+ * "lazy TLB" mode and back.
+ */
+struct mm_struct * start_lazy_tlb(void)
+{
+	struct mm_struct *mm = current->mm;
+	current->mm = NULL;
+	/* active_mm is still 'mm' */
+	atomic_inc(&mm->mm_count);
+	enter_lazy_tlb(mm, current, smp_processor_id());
+	return mm;
+}
+
+void end_lazy_tlb(struct mm_struct *mm)
+{
+	struct mm_struct *active_mm = current->active_mm;
+
+	current->mm = mm;
+	if (mm != active_mm) {
+		current->active_mm = mm;
+		activate_mm(active_mm, mm);
+	}
+	mmdrop(active_mm);
+}
+
+/*
+ * Turn us into a lazy TLB process if we
+ * aren't already..
+ */
 static inline void __exit_mm(struct task_struct * tsk)
 {
 	struct mm_struct * mm = tsk->mm;
 
-	/* Set us up to use the kernel mm state */
-	if (mm != &init_mm) {
-		flush_cache_mm(mm);
-		flush_tlb_mm(mm);
-		destroy_context(mm);
-		tsk->mm = &init_mm;
-		tsk->swappable = 0;
-		SET_PAGE_DIR(tsk, swapper_pg_dir);
+	if (mm) {
+		atomic_inc(&mm->mm_count);
 		mm_release();
+		if (mm != tsk->active_mm) BUG();
+		tsk->mm = NULL;
+		enter_lazy_tlb(mm, current, smp_processor_id());
 		mmput(mm);
 	}
 }
@@ -274,7 +304,7 @@ void exit_mm(struct task_struct *tsk)
  */
 static void exit_notify(void)
 {
-	struct task_struct * p;
+	struct task_struct * p, *t;
 
 	forget_original_parent(current);
 	/*
@@ -286,15 +316,39 @@ static void exit_notify(void)
 	 * and we were the only connection outside, so our pgrp
 	 * is about to become orphaned.
 	 */
-	if ((current->p_pptr->pgrp != current->pgrp) &&
-	    (current->p_pptr->session == current->session) &&
+	 
+	t = current->p_pptr;
+	
+	if ((t->pgrp != current->pgrp) &&
+	    (t->session == current->session) &&
 	    will_become_orphaned_pgrp(current->pgrp, current) &&
 	    has_stopped_jobs(current->pgrp)) {
 		kill_pg(current->pgrp,SIGHUP,1);
 		kill_pg(current->pgrp,SIGCONT,1);
 	}
 
-	/* Let father know we died */
+	/* Let father know we died 
+	 *
+	 * Thread signals are configurable, but you aren't going to use
+	 * that to send signals to arbitary processes. 
+	 * That stops right now.
+	 *
+	 * If the parent exec id doesn't match the exec id we saved
+	 * when we started then we know the parent has changed security
+	 * domain.
+	 *
+	 * If our self_exec id doesn't match our parent_exec_id then
+	 * we have changed execution domain as these two values started
+	 * the same after a fork.
+	 *	
+	 */
+	
+	if(current->exit_signal != SIGCHLD &&
+	    ( current->parent_exec_id != t->self_exec_id  ||
+	      current->self_exec_id != current->parent_exec_id) 
+	    && !capable(CAP_KILL))
+		current->exit_signal = SIGCHLD;
+
 	notify_parent(current, current->exit_signal);
 
 	/*
@@ -353,20 +407,16 @@ NORET_TYPE void do_exit(long code)
 	if (!tsk->pid)
 		panic("Attempted to kill the idle task!");
 	tsk->flags |= PF_EXITING;
-	start_bh_atomic();
-	del_timer(&tsk->real_timer);
-	end_bh_atomic();
+	del_timer_sync(&tsk->real_timer);
 
 	lock_kernel();
 fake_volatile:
 #ifdef CONFIG_BSD_PROCESS_ACCT
 	acct_process(code);
 #endif
+	task_lock(tsk);
 	sem_exit();
 	__exit_mm(tsk);
-#if CONFIG_AP1000
-	exit_msc(tsk);
-#endif
 	__exit_files(tsk);
 	__exit_fs(tsk);
 	__exit_sighand(tsk);
@@ -374,9 +424,7 @@ fake_volatile:
 	tsk->state = TASK_ZOMBIE;
 	tsk->exit_code = code;
 	exit_notify();
-#ifdef DEBUG_PROC_TREE
-	audit_ptree();
-#endif
+	task_unlock(tsk);
 	if (tsk->exec_domain && tsk->exec_domain->module)
 		__MOD_DEC_USE_COUNT(tsk->exec_domain->module);
 	if (tsk->binfmt && tsk->binfmt->module)
@@ -398,23 +446,24 @@ fake_volatile:
 	goto fake_volatile;
 }
 
-asmlinkage int sys_exit(int error_code)
+asmlinkage long sys_exit(int error_code)
 {
 	do_exit((error_code&0xff)<<8);
 }
 
-asmlinkage int sys_wait4(pid_t pid,unsigned int * stat_addr, int options, struct rusage * ru)
+asmlinkage long sys_wait4(pid_t pid,unsigned int * stat_addr, int options, struct rusage * ru)
 {
 	int flag, retval;
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	struct task_struct *p;
 
-	if (options & ~(WNOHANG|WUNTRACED|__WCLONE))
+	if (options & ~(WNOHANG|WUNTRACED|__WCLONE|__WALL))
 		return -EINVAL;
 
 	add_wait_queue(&current->wait_chldexit,&wait);
 repeat:
 	flag = 0;
+	current->state = TASK_INTERRUPTIBLE;
 	read_lock(&tasklist_lock);
  	for (p = current->p_cptr ; p ; p = p->p_osptr) {
 		if (pid>0) {
@@ -427,8 +476,13 @@ repeat:
 			if (p->pgrp != -pid)
 				continue;
 		}
-		/* wait for cloned processes iff the __WCLONE flag is set */
-		if ((p->exit_signal != SIGCHLD) ^ ((options & __WCLONE) != 0))
+		/* Wait for all children (clone and not) if __WALL is set;
+		 * otherwise, wait for clone children *only* if __WCLONE is
+		 * set; otherwise, wait for non-clone children *only*.  (Note:
+		 * A "clone" child here is one that reports to its parent
+		 * using a signal other than SIGCHLD.) */
+		if (((p->exit_signal != SIGCHLD) ^ ((options & __WCLONE) != 0))
+		    && !(options & __WALL))
 			continue;
 		flag = 1;
 		switch (p->state) {
@@ -465,9 +519,6 @@ repeat:
 					notify_parent(p, SIGCHLD);
 				} else
 					release(p);
-#ifdef DEBUG_PROC_TREE
-				audit_ptree();
-#endif
 				goto end_wait4;
 			default:
 				continue;
@@ -481,23 +532,23 @@ repeat:
 		retval = -ERESTARTSYS;
 		if (signal_pending(current))
 			goto end_wait4;
-		current->state=TASK_INTERRUPTIBLE;
 		schedule();
 		goto repeat;
 	}
 	retval = -ECHILD;
 end_wait4:
+	current->state = TASK_RUNNING;
 	remove_wait_queue(&current->wait_chldexit,&wait);
 	return retval;
 }
 
-#ifndef __alpha__
+#if !defined(__alpha__) && !defined(__ia64__)
 
 /*
  * sys_waitpid() remains for compatibility. waitpid() should be
  * implemented by calling sys_wait4() from libc.a.
  */
-asmlinkage int sys_waitpid(pid_t pid,unsigned int * stat_addr, int options)
+asmlinkage long sys_waitpid(pid_t pid,unsigned int * stat_addr, int options)
 {
 	return sys_wait4(pid, stat_addr, options, NULL);
 }

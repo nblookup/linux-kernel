@@ -1,4 +1,4 @@
-/*  $Id: irq.c,v 1.93 1999/04/21 06:15:45 anton Exp $
+/*  $Id: irq.c,v 1.102 2000/02/25 05:44:35 davem Exp $
  *  arch/sparc/kernel/irq.c:  Interrupt request handling routines. On the
  *                            Sparc the IRQ's are basically 'cast in stone'
  *                            and you are supposed to probe the prom's device
@@ -25,7 +25,8 @@
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/delay.h>
-#include <linux/tasks.h>
+#include <linux/threads.h>
+#include <linux/spinlock.h>
 
 #include <asm/ptrace.h>
 #include <asm/processor.h>
@@ -39,8 +40,8 @@
 #include <asm/traps.h>
 #include <asm/irq.h>
 #include <asm/io.h>
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
-#include <asm/spinlock.h>
 #include <asm/hardirq.h>
 #include <asm/softirq.h>
 #include <asm/pcic.h>
@@ -204,9 +205,6 @@ unsigned int local_irq_count;
 unsigned int local_bh_count[NR_CPUS];
 unsigned int local_irq_count[NR_CPUS];
 
-atomic_t global_bh_lock = ATOMIC_INIT(0);
-spinlock_t global_bh_count = SPIN_LOCK_UNLOCKED;
-
 /* Who has global_irq_lock. */
 unsigned char global_irq_holder = NO_PROC_ID;
 
@@ -215,9 +213,6 @@ spinlock_t global_irq_lock = SPIN_LOCK_UNLOCKED;
 
 /* Global IRQ locking depth. */
 atomic_t global_irq_count = ATOMIC_INIT(0);
-
-/* This protects BH software state (masks, things like that). */
-spinlock_t sparc_bh_lock = SPIN_LOCK_UNLOCKED;
 
 void smp_show_backtrace_all_cpus(void);
 void show_backtrace(void);
@@ -238,7 +233,7 @@ static void show(char * str)
 	}
 	printk("]\n");
 
-	printk("bh:   %d [ ", (spin_is_locked(&global_bh_count) ? 1 : 0));
+	printk("bh:   %d [ ", (spin_is_locked(&global_bh_lock) ? 1 : 0));
 
 	for (i = 0; i < NR_CPUS; i++) {
 		printk("%d ", local_bh_count[cpu]);
@@ -250,18 +245,6 @@ static void show(char * str)
 #else
 	show_backtrace();
 #endif
-}
-
-static inline void wait_on_bh(void)
-{
-	int count = MAXCOUNT;
-	do {
-		if(!--count) {
-			show("wait_on_bh");
-			count = 0;
-		}
-		barrier();
-	} while(spin_is_locked(&global_bh_count));
 }
 
 /*
@@ -280,7 +263,7 @@ static inline void wait_on_irq(int cpu)
 		 * already executing in one..
 		 */
 		if (!atomic_read(&global_irq_count)) {
-			if (local_bh_count[cpu] || !spin_is_locked(&global_bh_count))
+			if (local_bh_count[cpu] || !spin_is_locked(&global_bh_lock))
 				break;
 		}
 
@@ -299,26 +282,12 @@ static inline void wait_on_irq(int cpu)
 				continue;
 			if (spin_is_locked (&global_irq_lock))
 				continue;
-			if (!local_bh_count[cpu] && spin_is_locked(&global_bh_count))
+			if (!local_bh_count[cpu] && spin_is_locked(&global_bh_lock))
 				continue;
 			if (spin_trylock(&global_irq_lock))
 				break;
 		}
 	}
-}
-
-/*
- * This is called when we want to synchronize with
- * bottom half handlers. We need to wait until
- * no other CPU is executing any bottom half handler.
- *
- * Don't wait if we're already running in an interrupt
- * context or are inside a bh handler. 
- */
-void synchronize_bh(void)
-{
-        if (spin_is_locked (&global_bh_count) && !in_interrupt())
-                wait_on_bh();
 }
 
 /*
@@ -491,15 +460,13 @@ void handler_irq(int irq, struct pt_regs * regs)
 	extern void smp4m_irq_rotate(int cpu);
 #endif
 
+	irq_enter(cpu, irq);
 	disable_pil_irq(irq);
-#if 0 /* FIXME: rotating IRQs halts the machine during SCSI probe. -ecd */
 #ifdef __SMP__
 	/* Only rotate on lower priority IRQ's (scsi, ethernet, etc.). */
 	if(irq < 10)
 		smp4m_irq_rotate(cpu);
 #endif
-#endif
-	irq_enter(cpu, irq);
 	action = *(irq + irq_action);
 	kstat.irqs[cpu][irq]++;
 	do {
@@ -508,8 +475,8 @@ void handler_irq(int irq, struct pt_regs * regs)
 		action->handler(irq, action->dev_id, regs);
 		action = action->next;
 	} while (action);
-	irq_exit(cpu, irq);
 	enable_pil_irq(irq);
+	irq_exit(cpu, irq);
 }
 
 #ifdef CONFIG_BLK_DEV_FD
@@ -713,7 +680,7 @@ int probe_irq_off(unsigned long mask)
  *
  */
 
-__initfunc(void init_IRQ(void))
+void __init init_IRQ(void)
 {
 	extern void sun4c_init_IRQ( void );
 	extern void sun4m_init_IRQ( void );
@@ -728,7 +695,7 @@ __initfunc(void init_IRQ(void))
 	case sun4m:
 #ifdef CONFIG_PCI
 		pcic_probe();
-		if (pci_present()) {
+		if (pcic_present()) {
 			sun4m_pci_init_IRQ();
 			break;
 		}
@@ -740,15 +707,14 @@ __initfunc(void init_IRQ(void))
 		sun4d_init_IRQ();
 		break;
 
-	case ap1000:
-#if CONFIG_AP1000
-		ap_init_IRQ();;
-		break;
-#endif
-
 	default:
 		prom_printf("Cannot initialize IRQ's on this Sun machine...");
 		break;
 	}
 	btfixup();
+}
+
+void init_irq_proc(void)
+{
+	/* For now, nothing... */
 }

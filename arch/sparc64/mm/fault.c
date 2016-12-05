@@ -1,4 +1,4 @@
-/* $Id: fault.c,v 1.34 1999/03/16 12:12:28 jj Exp $
+/* $Id: fault.c,v 1.42 2000/01/21 11:39:13 jj Exp $
  * arch/sparc64/mm/fault.c: Page fault handlers for the 64-bit Sparc.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -84,10 +84,11 @@ void unhandled_fault(unsigned long address, struct task_struct *tsk,
 		printk(KERN_ALERT "Unable to handle kernel paging request "
 		       "at virtual address %016lx\n", (unsigned long)address);
 	}
-	printk(KERN_ALERT "tsk->mm->context = %016lx\n",
-	       (unsigned long) tsk->mm->context);
-	printk(KERN_ALERT "tsk->mm->pgd = %016lx\n",
-	       (unsigned long) tsk->mm->pgd);
+	printk(KERN_ALERT "tsk->{mm,active_mm}->context = %016lx\n",
+	       (tsk->mm ? tsk->mm->context : tsk->active_mm->context));
+	printk(KERN_ALERT "tsk->{mm,active_mm}->pgd = %016lx\n",
+	       (tsk->mm ? (unsigned long) tsk->mm->pgd :
+		          (unsigned long) tsk->active_mm->pgd));
 	die_if_kernel("Oops", regs);
 }
 
@@ -112,7 +113,9 @@ static inline u32 get_user_insn(unsigned long tpc)
 	ptep = pte_offset(pmdp, tpc);
 	if(!pte_present(*ptep))
 		return 0;
-	insn = *(unsigned int *)(pte_page(*ptep) + (tpc & ~PAGE_MASK));
+	insn = *(unsigned int *)
+		((unsigned long)__va(pte_pagenr(*ptep) << PAGE_SHIFT) +
+		 (tpc & ~PAGE_MASK));
 #else
 	register unsigned long pte asm("l1");
 
@@ -146,24 +149,56 @@ asmlinkage void do_sparc64_fault(struct pt_regs *regs, unsigned long address, in
 	struct mm_struct *mm = current->mm;
 	struct vm_area_struct *vma;
 	unsigned int insn = 0;
+	siginfo_t info;
 #ifdef DEBUG_LOCKUPS
 	static unsigned long lastaddr, lastpc;
 	static int lastwrite, lockcnt;
 #endif
+
+	info.si_code = SEGV_MAPERR;
 	/*
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-	if (in_interrupt() || mm == &init_mm)
+	if (in_interrupt() || !mm)
 		goto do_kernel_fault;
 
 	down(&mm->mmap_sem);
 #ifdef DEBUG_LOCKUPS
-	if (regs->tpc == lastpc && address == lastaddr && write == lastwrite) {
+	if (regs->tpc == lastpc &&
+	    address == lastaddr &&
+	    write == lastwrite) {
 		lockcnt++;
 		if (lockcnt == 100000) {
-			printk("do_sparc64_fault: possible fault loop for %016lx %s\n", address, write ? "write" : "read");
+			unsigned char tmp;
+			register unsigned long tmp1 asm("o5");
+			register unsigned long tmp2 asm("o4");
+
+			printk("do_sparc64_fault[%s:%d]: possible fault loop for %016lx %s\n",
+			       current->comm, current->pid,
+			       address, write ? "write" : "read");
+			printk("do_sparc64_fault: CHECK[papgd[%016lx],pcac[%016lx]]\n",
+			       __pa(mm->pgd), pgd_val(mm->pgd[0])<<11UL);
+			__asm__ __volatile__(
+				"wrpr	%%g0, 0x494, %%pstate\n\t"
+				"mov	%3, %%g4\n\t"
+				"mov	%%g7, %0\n\t"
+				"ldxa	[%%g4] %2, %1\n\t"
+				"wrpr	%%g0, 0x096, %%pstate"
+				: "=r" (tmp1), "=r" (tmp2)
+				: "i" (ASI_DMMU), "i" (TSB_REG));
+			printk("do_sparc64_fault:    IS[papgd[%016lx],pcac[%016lx]]\n",
+			       tmp1, tmp2);
+			printk("do_sparc64_fault: CHECK[ctx(%016lx)] IS[ctx(%016lx)]\n",
+			       mm->context, spitfire_get_secondary_context());
+			__asm__ __volatile__("rd	%%asi, %0"
+					     : "=r" (tmp));
+			printk("do_sparc64_fault: CHECK[seg(%02x)] IS[seg(%02x)]\n",
+			       current->thread.current_ds.seg, tmp);
 			show_regs(regs);
+			__sti();
+			while(1)
+				barrier();
 		}
 	} else {
 		lastpc = regs->tpc;
@@ -201,6 +236,7 @@ asmlinkage void do_sparc64_fault(struct pt_regs *regs, unsigned long address, in
 	 * we can handle it..
 	 */
 good_area:
+	info.si_code = SEGV_ACCERR;
 	if(write) {
 		if(!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
@@ -210,8 +246,14 @@ good_area:
 			goto bad_area;
 	}
 	current->mm->segments = (void *) (address & PAGE_SIZE);
-	if (!handle_mm_fault(current, vma, address, write))
-		goto do_sigbus;
+	{
+		int fault = handle_mm_fault(current, vma, address, write);
+
+		if (fault < 0)
+			goto out_of_memory;
+		if (!fault)
+			goto do_sigbus;
+	}
 	up(&mm->mmap_sem);
 	return;
 	/*
@@ -282,20 +324,55 @@ do_kernel_fault:
 				return;
 			}
 		} else {
-			current->tss.sig_address = address;
-			current->tss.sig_desc = SUBSIG_NOMAPPING;
-			force_sig(SIGSEGV, current);
+#if 0
+			extern void __show_regs(struct pt_regs *);
+			printk("SHIT(%s:%d:cpu(%d)): PC[%016lx] ADDR[%016lx]\n",
+			       current->comm, current->pid, smp_processor_id(),
+			       regs->tpc, address);
+			__show_regs(regs);
+			__sti();
+			while(1)
+				barrier();
+#endif
+			info.si_signo = SIGSEGV;
+			info.si_errno = 0;
+			/* info.si_code set above to make clear whether
+			   this was a SEGV_MAPERR or SEGV_ACCERR fault.  */
+			info.si_addr = (void *)address;
+			info.si_trapno = 0;
+			force_sig_info (SIGSEGV, &info, current);
 			return;
 		}
 		unhandled_fault (address, current, regs);
 	}
 	return;
 
+/*
+ * We ran out of memory, or some other thing happened to us that made
+ * us unable to handle the page fault gracefully.
+ */
+out_of_memory:
+	up(&mm->mmap_sem);
+	printk("VM: killing process %s\n", current->comm);
+	if (!(regs->tstate & TSTATE_PRIV))
+		do_exit(SIGKILL);
+	goto do_kernel_fault;
+
 do_sigbus:
 	up(&mm->mmap_sem);
-	current->tss.sig_address = address;
-	current->tss.sig_desc = SUBSIG_MISCERROR;
-	force_sig(SIGBUS, current);
+
+	/*
+	 * Send a sigbus, regardless of whether we were in kernel
+	 * or user mode.
+	 */
+	info.si_signo = SIGBUS;
+	info.si_errno = 0;
+	info.si_code = BUS_ADRERR;
+	info.si_addr = (void *)address;
+	info.si_trapno = 0;
+	force_sig_info (SIGBUS, &info, current);
+
+	/* Kernel mode? Handle exceptions or die */
 	if (regs->tstate & TSTATE_PRIV)
 		goto do_kernel_fault;
 }

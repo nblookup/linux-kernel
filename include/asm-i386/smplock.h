@@ -4,7 +4,9 @@
  * i386 SMP lock implementation
  */
 #include <linux/interrupt.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
+#include <linux/sched.h>
+#include <asm/current.h>
 
 extern spinlock_t kernel_flag;
 
@@ -38,6 +40,10 @@ do { \
  */
 extern __inline__ void lock_kernel(void)
 {
+#if 1
+	if (!++current->lock_depth)
+		spin_lock(&kernel_flag);
+#else
 	__asm__ __volatile__(
 		"incl %1\n\t"
 		"jne 9f"
@@ -45,10 +51,17 @@ extern __inline__ void lock_kernel(void)
 		"\n9:"
 		:"=m" (__dummy_lock(&kernel_flag)),
 		 "=m" (current->lock_depth));
+#endif
 }
 
 extern __inline__ void unlock_kernel(void)
 {
+	if (current->lock_depth < 0)
+		BUG();
+#if 1
+	if (--current->lock_depth < 0)
+		spin_unlock(&kernel_flag);
+#else
 	__asm__ __volatile__(
 		"decl %1\n\t"
 		"jns 9f\n\t"
@@ -56,4 +69,5 @@ extern __inline__ void unlock_kernel(void)
 		"\n9:"
 		:"=m" (__dummy_lock(&kernel_flag)),
 		 "=m" (current->lock_depth));
+#endif
 }

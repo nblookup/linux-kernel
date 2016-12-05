@@ -11,10 +11,11 @@
 #include <linux/malloc.h>
 #include <linux/binfmts.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 
 static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 {
-	char *cp, *i_name, *i_name_start, *i_arg;
+	char *cp, *i_name, *i_arg;
 	struct dentry * dentry;
 	char interp[128];
 	int retval;
@@ -27,7 +28,9 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	 */
 
 	bprm->sh_bang++;
+	lock_kernel();
 	dput(bprm->dentry);
+	unlock_kernel();
 	bprm->dentry = NULL;
 
 	bprm->buf[127] = '\0';
@@ -44,17 +47,15 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	for (cp = bprm->buf+2; (*cp == ' ') || (*cp == '\t'); cp++);
 	if (*cp == '\0') 
 		return -ENOEXEC; /* No interpreter name found */
-	i_name_start = i_name = cp;
+	i_name = cp;
 	i_arg = 0;
-	for ( ; *cp && (*cp != ' ') && (*cp != '\t'); cp++) {
- 		if (*cp == '/')
-			i_name = cp+1;
-	}
+	for ( ; *cp && (*cp != ' ') && (*cp != '\t'); cp++)
+		/* nothing */ ;
 	while ((*cp == ' ') || (*cp == '\t'))
 		*cp++ = '\0';
 	if (*cp)
 		i_arg = cp;
-	strcpy (interp, i_name_start);
+	strcpy (interp, i_name);
 	/*
 	 * OK, we've parsed out the interpreter name and
 	 * (optional) argument.
@@ -66,20 +67,23 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	 * user environment and arguments are stored.
 	 */
 	remove_arg_zero(bprm);
-	bprm->p = copy_strings(1, &bprm->filename, bprm->page, bprm->p, 2);
+	retval = copy_strings_kernel(1, &bprm->filename, bprm);
+	if (retval < 0) return retval; 
 	bprm->argc++;
 	if (i_arg) {
-		bprm->p = copy_strings(1, &i_arg, bprm->page, bprm->p, 2);
+		retval = copy_strings_kernel(1, &i_arg, bprm);
+		if (retval < 0) return retval; 
 		bprm->argc++;
 	}
-	bprm->p = copy_strings(1, &i_name, bprm->page, bprm->p, 2);
+	retval = copy_strings_kernel(1, &i_name, bprm);
+	if (retval) return retval; 
 	bprm->argc++;
-	if (!bprm->p) 
-		return -E2BIG;
 	/*
 	 * OK, now restart the process with the interpreter's dentry.
 	 */
+	lock_kernel();
 	dentry = open_namei(interp, 0, 0);
+	unlock_kernel();
 	if (IS_ERR(dentry))
 		return PTR_ERR(dentry);
 
@@ -100,25 +104,18 @@ static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 }
 
 struct linux_binfmt script_format = {
-#ifndef MODULE
-	NULL, 0, load_script, NULL, NULL
-#else
-	NULL, &__this_module, load_script, NULL, NULL
-#endif
+	NULL, THIS_MODULE, load_script, NULL, NULL, 0
 };
 
-int __init init_script_binfmt(void)
+static int __init init_script_binfmt(void)
 {
 	return register_binfmt(&script_format);
 }
 
-#ifdef MODULE
-int init_module(void)
+static void __exit exit_script_binfmt(void)
 {
-	return init_script_binfmt();
-}
-
-void cleanup_module( void) {
 	unregister_binfmt(&script_format);
 }
-#endif
+
+module_init(init_script_binfmt)
+module_exit(exit_script_binfmt)

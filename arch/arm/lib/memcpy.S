@@ -1,20 +1,17 @@
 /*
- * linux/arch/arm/lib/segment.S
+ * linux/arch/arm/lib/memcpy.S
  *
- * Copyright (C) 1995, 1996 Russell King
- * Except memcpy/memmove routine.
+ * Copyright (C) 1995-1999 Russell King
+ *
+ * ASM optimised string functions
+ *
  */
-
-#include <asm/assembler.h>
 #include <linux/linkage.h>
-
-#ifndef ENTRY
-#define ENTRY(x...)				\
-		.globl	_##x;			\
-_##x:
-#endif
+#include <asm/assembler.h>
+#include "constants.h"
 
 		.text
+
 #define ENTER	\
 		mov	ip,sp	;\
 		stmfd	sp!,{r4-r9,fp,ip,lr,pc}	;\
@@ -26,9 +23,10 @@ _##x:
 #define EXITEQ	\
 		LOADREGS(eqea, fp, {r4 - r9, fp, sp, pc})
 
-# Prototype: void memcpy(void *to,const void *from,unsigned long n);
-# ARM3: cant use memcopy here!!!
-
+/*
+ * Prototype: void memcpy(void *to,const void *from,unsigned long n);
+ * ARM3: cant use memcopy here!!!
+ */
 ENTRY(memcpy)
 ENTRY(memmove)
 		ENTER
@@ -62,30 +60,30 @@ ENTRY(memmove)
 		blt	6f
 		subs	r2, r2, #4
 		ldrlt	r3, [r1], #4
+		ldmgeia	r1!, {r4, r5}
 		strlt	r3, [r0], #4
-		ldmgeia	r1!, {r3, r4}
-		stmgeia	r0!, {r3, r4}
+		stmgeia	r0!, {r4, r5}
 		subge	r2, r2, #4
 
 6:		adds	r2, r2, #4
 		EXITEQ
 		cmp	r2, #2
 		ldrb	r3, [r1], #1
+		ldrgeb	r4, [r1], #1
+		ldrgtb	r5, [r1], #1
 		strb	r3, [r0], #1
-		ldrgeb	r3, [r1], #1
-		strgeb	r3, [r0], #1
-		ldrgtb	r3, [r1], #1
-		strgtb	r3, [r0], #1
+		strgeb	r4, [r0], #1
+		strgtb	r5, [r0], #1
 		EXIT
 
 7:		rsb	ip, ip, #4
 		cmp	ip, #2
 		ldrb	r3, [r1], #1
+		ldrgeb	r4, [r1], #1
+		ldrgtb	r5, [r1], #1
 		strb	r3, [r0], #1
-		ldrgeb	r3, [r1], #1
-		strgeb	r3, [r0], #1
-		ldrgtb	r3, [r1], #1
-		strgtb	r3, [r0], #1
+		strgeb	r4, [r0], #1
+		strgtb	r5, [r0], #1
 		subs	r2, r2, ip
 		blt	6b
 		ands	ip, r1, #3
@@ -115,9 +113,9 @@ ENTRY(memmove)
 		blt	100f
 10:		mov	r3, r7, lsr #8
 		ldr	r7, [r1], #4
+		subs	r2, r2, #4
 		orr	r3, r3, r7, lsl #24
 		str	r3, [r0], #4
-		subs	r2, r2, #4
 		bge	10b
 100:		sub	r1, r1, #3
 		b	6b
@@ -141,9 +139,9 @@ ENTRY(memmove)
 		blt	14f
 13:		mov	r3, r7, lsr #16
 		ldr	r7, [r1], #4
+		subs	r2, r2, #4
 		orr	r3, r3, r7, lsl #16
 		str	r3, [r0], #4
-		subs	r2, r2, #4
 		bge	13b
 14:		sub	r1, r1, #2
 		b	6b
@@ -167,9 +165,9 @@ ENTRY(memmove)
 		blt	18f
 17:		mov	r3, r7, lsr #24
 		ldr	r7, [r1], #4
+		subs	r2, r2, #4
 		orr	r3, r3, r7, lsl#8
 		str	r3, [r0], #4
-		subs	r2, r2, #4
 		bge	17b
 18:		sub	r1, r1, #1
 		b	6b
@@ -204,29 +202,29 @@ ENTRY(memmove)
 		blt	24f
 		subs	r2, r2, #4
 		ldrlt	r3, [r1, #-4]!
+		ldmgedb	r1!, {r4, r5}
 		strlt	r3, [r0, #-4]!
-		ldmgedb	r1!, {r3, r4}
-		stmgedb	r0!, {r3, r4}
+		stmgedb	r0!, {r4, r5}
 		subge	r2, r2, #4
 
 24:		adds	r2, r2, #4
 		EXITEQ
 		cmp	r2, #2
 		ldrb	r3, [r1, #-1]!
+		ldrgeb	r4, [r1, #-1]!
+		ldrgtb	r5, [r1, #-1]!
 		strb	r3, [r0, #-1]!
-		ldrgeb	r3, [r1, #-1]!
-		strgeb	r3, [r0, #-1]!
-		ldrgtb	r3, [r1, #-1]!
-		strgtb	r3, [r0, #-1]!
+		strgeb	r4, [r0, #-1]!
+		strgtb	r5, [r0, #-1]!
 		EXIT
 
 25:		cmp	ip, #2
 		ldrb	r3, [r1, #-1]!
+		ldrgeb	r4, [r1, #-1]!
+		ldrgtb	r5, [r1, #-1]!
 		strb	r3, [r0, #-1]!
-		ldrgeb	r3, [r1, #-1]!
-		strgeb	r3, [r0, #-1]!
-		ldrgtb	r3, [r1, #-1]!
-		strgtb	r3, [r0, #-1]!
+		strgeb	r4, [r0, #-1]!
+		strgtb	r5, [r0, #-1]!
 		subs	r2, r2, ip
 		blt	24b
 		ands	ip, r1, #3
@@ -256,9 +254,9 @@ ENTRY(memmove)
 		blt	29f
 28:		mov	ip, r3, lsl #8
 		ldr	r3, [r1, #-4]!
+		subs	r2, r2, #4
 		orr	ip, ip, r3, lsr #24
 		str	ip, [r0, #-4]!
-		subs	r2, r2, #4
 		bge	28b
 29:		add	r1, r1, #3
 		b	24b
@@ -282,9 +280,9 @@ ENTRY(memmove)
 		blt	33f
 32:		mov	ip, r3, lsl #16
 		ldr	r3, [r1, #-4]!
+		subs	r2, r2, #4
 		orr	ip, ip, r3, lsr #16
 		str	ip, [r0, #-4]!
-		subs	r2, r2, #4
 		bge	32b
 33:		add	r1, r1, #2
 		b	24b
@@ -308,12 +306,13 @@ ENTRY(memmove)
 		blt	37f
 36:		mov	ip, r3, lsl #24
 		ldr	r3, [r1, #-4]!
+		subs	r2, r2, #4
 		orr	ip, ip, r3, lsr #8
 		str	ip, [r0, #-4]!
-		subs	r2, r2, #4
 		bge	36b
 37:		add	r1, r1, #1
 		b	24b
 
 		.align
+
 

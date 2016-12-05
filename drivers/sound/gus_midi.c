@@ -2,23 +2,18 @@
  * sound/gus2_midi.c
  *
  * The low level driver for the GUS Midi Interface.
- */
-/*
+ *
+ *
  * Copyright (C) by Hannu Savolainen 1993-1997
  *
  * OSS/Free for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
  * Version 2 (June 1991). See the "COPYING" file distributed with this software
  * for more info.
  */
-#include <linux/config.h>
-
-
 #include "sound_config.h"
 
+#include "gus.h"
 #include "gus_hw.h"
-
-#ifdef CONFIG_GUS
-#ifdef CONFIG_MIDI
 
 static int      midi_busy = 0, input_opened = 0;
 static int      my_dev;
@@ -265,6 +260,3 @@ void gus_midi_interrupt(int dummy)
 	}
 	restore_flags(flags);
 }
-
-#endif
-#endif

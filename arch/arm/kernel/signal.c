@@ -16,10 +16,12 @@
 #include <linux/ptrace.h>
 #include <linux/unistd.h>
 #include <linux/stddef.h>
+#include <linux/binfmts.h>
+#include <linux/tty.h>
 
 #include <asm/ucontext.h>
 #include <asm/uaccess.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 
 #define _BLOCKABLE (~(sigmask(SIGKILL) | sigmask(SIGSTOP)))
 
@@ -28,7 +30,7 @@
 
 asmlinkage int sys_wait4(pid_t pid, unsigned long * stat_addr,
 			 int options, unsigned long *ru);
-asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs);
+asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs, int syscall);
 extern int ptrace_cancel_bpt (struct task_struct *);
 extern int ptrace_set_bpt (struct task_struct *);
 
@@ -50,7 +52,7 @@ asmlinkage int sys_sigsuspend(int restart, unsigned long oldmask, old_sigset_t m
 	while (1) {
 		current->state = TASK_INTERRUPTIBLE;
 		schedule();
-		if (do_signal(&saveset, regs))
+		if (do_signal(&saveset, regs, 0))
 			return regs->ARM_r0;
 	}
 }
@@ -78,7 +80,7 @@ sys_rt_sigsuspend(sigset_t *unewset, size_t sigsetsize, struct pt_regs *regs)
 	while (1) {
 		current->state = TASK_INTERRUPTIBLE;
 		schedule();
-		if (do_signal(&saveset, regs))
+		if (do_signal(&saveset, regs, 0))
 			return regs->ARM_r0;
 	}
 }
@@ -158,12 +160,8 @@ restore_sigcontext(struct pt_regs *regs, struct sigcontext *sc)
 #ifdef CONFIG_CPU_32
 	err |= __get_user(regs->ARM_cpsr, &sc->arm_cpsr);
 #endif
-	if (!valid_user_regs(regs))
-		return 1;
 
-	/* send SIGTRAP if we're single-stepping */
-	if (ptrace_cancel_bpt (current))
-		send_sig (SIGTRAP, current, 1);
+	err |= !valid_user_regs(regs);
 
 	return err;
 }
@@ -172,6 +170,14 @@ asmlinkage int sys_sigreturn(struct pt_regs *regs)
 {
 	struct sigframe *frame;
 	sigset_t set;
+
+	/*
+	 * Since we stacked the signal on a word boundary,
+	 * then 'sp' should be word aligned here.  If it's
+	 * not, then the user is trying to mess with us.
+	 */
+	if (regs->ARM_sp & 3)
+		goto badframe;
 
 	frame = (struct sigframe *)regs->ARM_sp;
 
@@ -192,6 +198,10 @@ asmlinkage int sys_sigreturn(struct pt_regs *regs)
 	if (restore_sigcontext(regs, &frame->sc))
 		goto badframe;
 
+	/* Send SIGTRAP if we're single-stepping */
+	if (ptrace_cancel_bpt (current))
+		send_sig(SIGTRAP, current, 1);
+
 	return regs->ARM_r0;
 
 badframe:
@@ -203,6 +213,14 @@ asmlinkage int sys_rt_sigreturn(struct pt_regs *regs)
 {
 	struct rt_sigframe *frame;
 	sigset_t set;
+
+	/*
+	 * Since we stacked the signal on a word boundary,
+	 * then 'sp' should be word aligned here.  If it's
+	 * not, then the user is trying to mess with us.
+	 */
+	if (regs->ARM_sp & 3)
+		goto badframe;
 
 	frame = (struct rt_sigframe *)regs->ARM_sp;
 
@@ -219,6 +237,10 @@ asmlinkage int sys_rt_sigreturn(struct pt_regs *regs)
 
 	if (restore_sigcontext(regs, &frame->uc.uc_mcontext))
 		goto badframe;
+
+	/* Send SIGTRAP if we're single-stepping */
+	if (ptrace_cancel_bpt (current))
+		send_sig(SIGTRAP, current, 1);
 
 	return regs->ARM_r0;
 
@@ -253,11 +275,32 @@ setup_sigcontext(struct sigcontext *sc, /*struct _fpstate *fpstate,*/
 	err |= __put_user (regs->ARM_cpsr, &sc->arm_cpsr);
 #endif
 
-	err |= __put_user (current->tss.trap_no, &sc->trap_no);
-	err |= __put_user (current->tss.error_code, &sc->error_code);
+	err |= __put_user (current->thread.trap_no, &sc->trap_no);
+	err |= __put_user (current->thread.error_code, &sc->error_code);
+	err |= __put_user (current->thread.address, &sc->fault_address);
 	err |= __put_user (mask, &sc->oldmask);
 
 	return err;
+}
+
+static inline void *get_sigframe(struct k_sigaction *ka, struct pt_regs *regs,
+				 unsigned long framesize)
+{
+	unsigned long sp = regs->ARM_sp;
+
+	/*
+	 * This is the X/Open sanctioned signal stack switching.
+	 */
+	if ((ka->sa.sa_flags & SA_ONSTACK) && ! on_sig_stack(sp))
+		sp = current->sas_ss_sp + current->sas_ss_size;
+
+	/*
+	 * No matter what happens, 'sp' must be word
+	 * aligned otherwise nasty things could happen
+	 */
+	sp &= ~3;
+
+	return (void *)(sp - framesize);
 }
 
 static void setup_frame(int sig, struct k_sigaction *ka,
@@ -267,9 +310,9 @@ static void setup_frame(int sig, struct k_sigaction *ka,
 	unsigned long retcode;
 	int err = 0;
 
-	frame = (struct sigframe *)regs->ARM_sp - 1;
+	frame = get_sigframe(ka, regs, sizeof(*frame));
 
-	if (!access_ok(VERIFT_WRITE, frame, sizeof (*frame)))
+	if (!access_ok(VERIFY_WRITE, frame, sizeof (*frame)))
 		goto segv_and_exit;
 
 	err |= setup_sigcontext(&frame->sc, /*&frame->fpstate,*/ regs, set->sig[0]);
@@ -286,7 +329,7 @@ static void setup_frame(int sig, struct k_sigaction *ka,
 	} else {
 		retcode = (unsigned long)&frame->retcode;
 		err |= __put_user(SWI_SYS_SIGRETURN, &frame->retcode);
-		__flush_entry_to_ram (&frame->retcode);
+		flush_icache_range(retcode, retcode + 4);
 	}
 
 	if (err)
@@ -299,6 +342,11 @@ static void setup_frame(int sig, struct k_sigaction *ka,
 	regs->ARM_sp = (unsigned long)frame;
 	regs->ARM_lr = retcode;
 	regs->ARM_pc = (unsigned long)ka->sa.sa_handler;
+#if defined(CONFIG_CPU_32)
+	/* Maybe we need to deliver a 32-bit signal to a 26-bit task. */
+	if (ka->sa.sa_flags & SA_THIRTYTWO)
+		regs->ARM_cpsr = USR_MODE;
+#endif
 	if (valid_user_regs(regs))
 		return;
 
@@ -315,7 +363,8 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	unsigned long retcode;
 	int err = 0;
 
-	frame = (struct rt_sigframe *)regs->ARM_sp - 1;
+	frame = get_sigframe(ka, regs, sizeof(struct rt_sigframe));
+
 	if (!access_ok(VERIFY_WRITE, frame, sizeof (*frame)))
 		goto segv_and_exit;
 
@@ -337,7 +386,7 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	} else {
 		retcode = (unsigned long)&frame->retcode;
 		err |= __put_user(SWI_SYS_RT_SIGRETURN, &frame->retcode);
-		__flush_entry_to_ram (&frame->retcode);
+		flush_icache_range(retcode, retcode + 4);
 	}
 
 	if (err)
@@ -350,6 +399,11 @@ static void setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	regs->ARM_sp = (unsigned long)frame;
 	regs->ARM_lr = retcode;
 	regs->ARM_pc = (unsigned long)ka->sa.sa_handler;
+#if defined(CONFIG_CPU_32)
+	/* Maybe we need to deliver a 32-bit signal to a 26-bit task. */
+	if (ka->sa.sa_flags & SA_THIRTYTWO)
+		regs->ARM_cpsr = USR_MODE;
+#endif
 	if (valid_user_regs(regs))
 		return;
 
@@ -393,18 +447,25 @@ handle_signal(unsigned long sig, struct k_sigaction *ka,
  * the kernel can handle, and then we build all the user-level signal handling
  * stack-frames in one go after that.
  */
-asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs)
+asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs, int syscall)
 {
-	unsigned long instr, *pc = (unsigned long *)(instruction_pointer(regs)-4);
 	struct k_sigaction *ka;
 	siginfo_t info;
-	int single_stepping, swi_instr;
+	int single_stepping;
+
+	/*
+	 * We want the common case to go fast, which
+	 * is why we may in certain cases get here from
+	 * kernel mode. Just return without doing anything
+	 * if so.
+	 */
+	if (!user_mode(regs))
+		return 0;
 
 	if (!oldset)
 		oldset = &current->blocked;
 
 	single_stepping = ptrace_cancel_bpt (current);
-	swi_instr = (!get_user (instr, pc) && (instr & 0x0f000000) == 0x0f000000);
 
 	for (;;) {
 		unsigned long signr;
@@ -485,17 +546,15 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs)
 
 			case SIGQUIT: case SIGILL: case SIGTRAP:
 			case SIGABRT: case SIGFPE: case SIGSEGV:
-				lock_kernel();
-				if (current->binfmt
-				    && current->binfmt->core_dump
-				    && current->binfmt->core_dump(signr, regs))
+			case SIGBUS: case SIGSYS: case SIGXCPU: case SIGXFSZ:
+				if (do_coredump(signr, regs))
 					exit_code |= 0x80;
-				unlock_kernel();
 				/* FALLTHRU */
 
 			default:
 				lock_kernel();
 				sigaddset(&current->signal, signr);
+				recalc_sigpending(current);
 				current->flags |= PF_SIGNALED;
 				do_exit(exit_code);
 				/* NOTREACHED */
@@ -503,7 +562,7 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs)
 		}
 
 		/* Are we from a system call? */
-		if (swi_instr) {
+		if (syscall) {
 			switch (regs->ARM_r0) {
 			case -ERESTARTNOHAND:
 				regs->ARM_r0 = -EINTR;
@@ -527,7 +586,7 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs *regs)
 		return 1;
 	}
 
-	if (swi_instr &&
+	if (syscall &&
 	    (regs->ARM_r0 == -ERESTARTNOHAND ||
 	     regs->ARM_r0 == -ERESTARTSYS ||
 	     regs->ARM_r0 == -ERESTARTNOINTR)) {

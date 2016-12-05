@@ -21,6 +21,7 @@
  *  the superblock.
  */
 
+#include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/sched.h>
@@ -31,6 +32,8 @@
 #include <linux/string.h>
 #include <linux/locks.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
+#include <linux/highuid.h>
 #include <asm/byteorder.h>
 #include <asm/uaccess.h>
 
@@ -62,17 +65,18 @@ static void sysv_delete_inode(struct inode *inode)
 	sysv_free_inode(inode);
 }
 
+static void sysv_put_super(struct super_block *);
+static void sysv_write_super(struct super_block *);
+static void sysv_read_inode(struct inode *);
+static int sysv_statfs(struct super_block *, struct statfs *);
 
 static struct super_operations sysv_sops = {
-	sysv_read_inode,
-	sysv_write_inode,
-	NULL,			/* nothing special on put_inode() */
-	sysv_delete_inode,
-	sysv_notify_change,
-	sysv_put_super,
-	sysv_write_super,
-	sysv_statfs,
-	NULL			/* remount_fs */
+	read_inode:	sysv_read_inode,
+	write_inode:	sysv_write_inode,
+	delete_inode:	sysv_delete_inode,
+	put_super:	sysv_put_super,
+	write_super:	sysv_write_super,
+	statfs:		sysv_statfs,
 };
 
 /* The following functions try to recognize specific filesystems.
@@ -338,8 +342,8 @@ static struct super_block * detected_coherent (struct super_block *sb, struct bu
 	return sb;
 }
 
-struct super_block *sysv_read_super(struct super_block *sb,void *data,
-				     int silent)
+static struct super_block *sysv_read_super(struct super_block *sb,
+					   void *data, int silent)
 {
 	struct buffer_head *bh;
 	const char *found;
@@ -356,8 +360,6 @@ struct super_block *sysv_read_super(struct super_block *sb,void *data,
 		panic("Coherent FS: bad super-block size");
 	if (64 != sizeof (struct sysv_inode))
 		panic("sysv fs: bad i-node size");
-	MOD_INC_USE_COUNT;
-	lock_super(sb);
 	set_blocksize(dev,BLOCK_SIZE);
 	sb->sv_block_base = 0;
 
@@ -403,13 +405,10 @@ struct super_block *sysv_read_super(struct super_block *sb,void *data,
 			}
 	}
 	bad_shift:
-	sb->s_dev = 0;
-	unlock_super(sb);
 	if (!silent)
 		printk("VFS: unable to read Xenix/SystemV/Coherent superblock on device "
 		       "%s\n", kdevname(dev));
 	failed:
-	MOD_DEC_USE_COUNT;
 	return NULL;
 
 	ok:
@@ -438,8 +437,6 @@ struct super_block *sysv_read_super(struct super_block *sb,void *data,
 		goto superblock_ok;
 		bad_superblock:
 			brelse(bh);
-			sb->s_dev = 0;
-			unlock_super(sb);
 			printk("SysV FS: cannot read superblock in %d byte mode\n", sb->sv_block_size);
 			goto failed;
 		superblock_ok:
@@ -485,8 +482,6 @@ struct super_block *sysv_read_super(struct super_block *sb,void *data,
 				brelse(bh1);
 				brelse(bh2);
 				set_blocksize(sb->s_dev,BLOCK_SIZE);
-				sb->s_dev = 0;
-				unlock_super(sb);
 				printk("SysV FS: cannot read superblock in 512 byte mode\n");
 				goto failed;
 		}
@@ -503,15 +498,15 @@ struct super_block *sysv_read_super(struct super_block *sb,void *data,
 	sb->s_dev = dev;
 	sb->s_op = &sysv_sops;
 	root_inode = iget(sb,SYSV_ROOT_INO);
-	sb->s_root = d_alloc_root(root_inode, NULL);
+	sb->s_root = d_alloc_root(root_inode);
 	if (!sb->s_root) {
 		printk("SysV FS: get root inode failed\n");
 		sysv_put_super(sb);
-		sb->s_dev = 0;
-		unlock_super(sb);
 		return NULL;
 	}
-	unlock_super(sb);
+#ifndef CONFIG_SYSV_FS_WRITE
+	sb->s_flags |= MS_RDONLY;
+#endif
 	sb->s_dirt = 1;
 	/* brelse(bh);  resp.  brelse(bh1); brelse(bh2);
 	   occurs when the disk is unmounted. */
@@ -519,7 +514,7 @@ struct super_block *sysv_read_super(struct super_block *sb,void *data,
 }
 
 /* This is only called on sync() and umount(), when s_dirt=1. */
-void sysv_write_super (struct super_block *sb)
+static void sysv_write_super(struct super_block *sb)
 {
 	lock_super(sb);
 	if (buffer_dirty(sb->sv_bh1) || buffer_dirty(sb->sv_bh2)) {
@@ -542,7 +537,7 @@ void sysv_write_super (struct super_block *sb)
 	unlock_super(sb);
 }
 
-void sysv_put_super(struct super_block *sb)
+static void sysv_put_super(struct super_block *sb)
 {
 	/* we can assume sysv_write_super() has already been called,
 	   and that the superblock is locked */
@@ -551,24 +546,20 @@ void sysv_put_super(struct super_block *sb)
 	/* switch back to default block size */
 	if (sb->s_blocksize != BLOCK_SIZE)
 		set_blocksize(sb->s_dev,BLOCK_SIZE);
-
-	MOD_DEC_USE_COUNT;
 }
 
-int sysv_statfs(struct super_block *sb, struct statfs *buf, int bufsiz)
+static int sysv_statfs(struct super_block *sb, struct statfs *buf)
 {
-	struct statfs tmp;
-
-	tmp.f_type = sb->s_magic;			/* type of filesystem */
-	tmp.f_bsize = sb->sv_block_size;		/* block size */
-	tmp.f_blocks = sb->sv_ndatazones;		/* total data blocks in file system */
-	tmp.f_bfree = sysv_count_free_blocks(sb);	/* free blocks in fs */
-	tmp.f_bavail = tmp.f_bfree;			/* free blocks available to non-superuser */
-	tmp.f_files = sb->sv_ninodes;			/* total file nodes in file system */
-	tmp.f_ffree = sysv_count_free_inodes(sb);	/* free file nodes in fs */
-	tmp.f_namelen = SYSV_NAMELEN;
-	/* Don't know what value to put in tmp.f_fsid */ /* file system id */
-	return copy_to_user(buf, &tmp, bufsiz) ? -EFAULT : 0;
+	buf->f_type = sb->s_magic;			/* type of filesystem */
+	buf->f_bsize = sb->sv_block_size;		/* block size */
+	buf->f_blocks = sb->sv_ndatazones;		/* total data blocks in file system */
+	buf->f_bfree = sysv_count_free_blocks(sb);	/* free blocks in fs */
+	buf->f_bavail = buf->f_bfree;			/* free blocks available to non-superuser */
+	buf->f_files = sb->sv_ninodes;			/* total file nodes in file system */
+	buf->f_ffree = sysv_count_free_inodes(sb);	/* free file nodes in fs */
+	buf->f_namelen = SYSV_NAMELEN;
+	/* Don't know what value to put in buf->f_fsid */ /* file system id */
+	return 0;
 }
 
 
@@ -597,59 +588,72 @@ static int block_bmap(struct super_block * sb, struct buffer_head * bh, int nr, 
 	return tmp + sb->sv_block_base;
 }
 
-int sysv_bmap(struct inode * inode,int block_nr)
+static unsigned int sysv_block_map(struct inode *inode, unsigned int block)
 {
-	unsigned int block = block_nr;
-	struct super_block * sb = inode->i_sb;
-	int convert;
-	int i;
-	struct buffer_head * bh;
+	struct super_block *sb;
+	int i, ret, convert;
 
-	if (block < 10)
-		return inode_bmap(sb,inode,block);
+	ret = 0;
+	lock_kernel();
+	sb = inode->i_sb;
+	if (block < 10) {
+		ret = inode_bmap(sb, inode, block);
+		goto out;
+	}
 	block -= 10;
 	convert = sb->sv_convert;
 	if (block < sb->sv_ind_per_block) {
-		i = inode_bmap(sb,inode,10);
+		i = inode_bmap(sb, inode, 10);
 		if (!i)
-			return 0;
-		bh = bread(inode->i_dev,i,sb->sv_block_size);
-		return block_bmap(sb, bh, block, convert);
+			goto out;
+		ret = block_bmap(sb,
+				 bread(inode->i_dev, i, sb->sv_block_size),
+				 block, convert);
+		goto out;
 	}
 	block -= sb->sv_ind_per_block;
 	if (block < sb->sv_ind_per_block_2) {
-		i = inode_bmap(sb,inode,11);
+		i = inode_bmap(sb, inode, 11);
 		if (!i)
-			return 0;
-		bh = bread(inode->i_dev,i,sb->sv_block_size);
-		i = block_bmap(sb, bh, block >> sb->sv_ind_per_block_bits, convert);
+			goto out;
+		i = block_bmap(sb,
+			       bread(inode->i_dev, i, sb->sv_block_size),
+			       (block >> sb->sv_ind_per_block_bits), convert);
 		if (!i)
-			return 0;
-		bh = bread(inode->i_dev,i,sb->sv_block_size);
-		return block_bmap(sb, bh, block & sb->sv_ind_per_block_1, convert);
+			goto out;
+		ret = block_bmap(sb,
+				 bread(inode->i_dev, i, sb->sv_block_size),
+				 (block & sb->sv_ind_per_block_1), convert);
+		goto out;
 	}
 	block -= sb->sv_ind_per_block_2;
 	if (block < sb->sv_ind_per_block_3) {
-		i = inode_bmap(sb,inode,12);
+		i = inode_bmap(sb, inode, 12);
 		if (!i)
-			return 0;
-		bh = bread(inode->i_dev,i,sb->sv_block_size);
-		i = block_bmap(sb, bh, block >> sb->sv_ind_per_block_2_bits, convert);
+			goto out;
+		i = block_bmap(sb,
+			       bread(inode->i_dev, i, sb->sv_block_size),
+			       (block >> sb->sv_ind_per_block_2_bits), convert);
 		if (!i)
-			return 0;
-		bh = bread(inode->i_dev,i,sb->sv_block_size);
-		i = block_bmap(sb, bh, (block >> sb->sv_ind_per_block_bits) & sb->sv_ind_per_block_1,convert);
+			goto out;
+		ret = block_bmap(sb,
+				 bread(inode->i_dev, i, sb->sv_block_size),
+				 ((block >> sb->sv_ind_per_block_bits) &
+				  sb->sv_ind_per_block_1), convert);
 		if (!i)
-			return 0;
-		bh = bread(inode->i_dev,i,sb->sv_block_size);
-		return block_bmap(sb, bh, block & sb->sv_ind_per_block_1, convert);
+			goto out;
+		ret = block_bmap(sb,
+				 bread(inode->i_dev, i, sb->sv_block_size),
+				 (block & sb->sv_ind_per_block_1), convert);
+		goto out;
 	}
-	if ((int)block<0) {
-		printk("sysv_bmap: block<0");
-		return 0;
-	}
-	printk("sysv_bmap: block>big");
-	return 0;
+	if ((int)block < 0)
+		printk("sysv_block_map: block < 0\n");
+	else
+		printk("sysv_block_map: block > big\n");
+out:
+	unlock_kernel();
+	return ret;
 }
 
 /* End of bmap support. */
@@ -657,7 +661,8 @@ int sysv_bmap(struct inode * inode,int block_nr)
 
 /* Access selected blocks of regular files (or directories) */
 
-static struct buffer_head * inode_getblk(struct inode * inode, int nr, int create)
+static struct buffer_head *inode_getblk(struct inode *inode, int nr, int new_block,
+	int *err, int metadata, long *phys, int *new)
 {
 	struct super_block *sb;
 	u32 tmp;
@@ -669,46 +674,84 @@ static struct buffer_head * inode_getblk(struct inode * inode, int nr, int creat
 repeat:
 	tmp = *p;
 	if (tmp) {
-		result = sv_getblk(sb, inode->i_dev, tmp);
-		if (tmp == *p)
-			return result;
-		brelse(result);
-		goto repeat;
+		if (metadata) {
+			result = sv_getblk(sb, inode->i_dev, tmp);
+			if (tmp == *p)
+				return result;
+			brelse(result);
+			goto repeat;
+		} else {
+			*phys = tmp;
+			return NULL;
+		}
 	}
-	if (!create)
-		return NULL;
+	*err = -EFBIG;
+
+	/* Check file limits.. */
+	{
+		unsigned long limit = current->rlim[RLIMIT_FSIZE].rlim_cur;
+		if (limit < RLIM_INFINITY) {
+			limit >>= sb->sv_block_size_bits;
+			if (new_block >= limit) {
+				send_sig(SIGXFSZ, current, 0);
+				*err = -EFBIG;
+				return NULL;
+			}
+		}
+	}
+
 	tmp = sysv_new_block(sb);
-	if (!tmp)
+	if (!tmp) {
+		*err = -ENOSPC;
 		return NULL;
-	result = sv_getblk(sb, inode->i_dev, tmp);
-	if (*p) {
-		sysv_free_block(sb,tmp);
-		brelse(result);
-		goto repeat;
+	}
+	if (metadata) {
+		result = sv_getblk(sb, inode->i_dev, tmp);
+		if (*p) {
+			sysv_free_block(sb, tmp);
+			brelse(result);
+			goto repeat;
+		}
+	} else {
+		if (*p) {
+			/*
+			 * Nobody is allowed to change block allocation
+			 * state from under us:
+			 */
+			BUG();
+			sysv_free_block(sb, tmp);
+			goto repeat;
+		}
+		*phys = tmp;
+		result = NULL;
+		*err = 0;
+		*new = 1;
 	}
 	*p = tmp;
+
 	inode->i_ctime = CURRENT_TIME;
 	mark_inode_dirty(inode);
 	return result;
 }
 
-static struct buffer_head * block_getblk(struct inode * inode,
-	struct buffer_head * bh, int nr, int create)
+static struct buffer_head *block_getblk(struct inode *inode,
+	struct buffer_head *bh, int nr, int new_block, int *err,
+	int metadata, long *phys, int *new)
 {
 	struct super_block *sb;
 	u32 tmp, block;
 	sysv_zone_t *p;
 	struct buffer_head * result;
+	unsigned long limit;
 
+	result = NULL;
 	if (!bh)
-		return NULL;
+		goto out;
 	if (!buffer_uptodate(bh)) {
 		ll_rw_block(READ, 1, &bh);
 		wait_on_buffer(bh);
-		if (!buffer_uptodate(bh)) {
-			brelse(bh);
-			return NULL;
-		}
+		if (!buffer_uptodate(bh))
+			goto out;
 	}
 	sb = inode->i_sb;
 	p = nr + (sysv_zone_t *) bh->b_data;
@@ -717,73 +760,177 @@ repeat:
 	if (sb->sv_convert)
 		block = from_coh_ulong(block);
 	if (tmp) {
-		result = sv_getblk(sb, bh->b_dev, block);
-		if (tmp == *p) {
-			brelse(bh);
-			return result;
+		if (metadata) {
+			result = sv_getblk(sb, bh->b_dev, block);
+			if (tmp == *p)
+				goto out;
+			brelse(result);
+			goto repeat;
+		} else {
+			*phys = tmp;
+			goto out;
 		}
-		brelse(result);
-		goto repeat;
 	}
-	if (!create) {
-		brelse(bh);
-		return NULL;
+	*err = -EFBIG;
+
+	limit = current->rlim[RLIMIT_FSIZE].rlim_cur;
+	if (limit < RLIM_INFINITY) {
+		limit >>= sb->sv_block_size_bits;
+		if (new_block >= limit) {
+			send_sig(SIGXFSZ, current, 0);
+			goto out;
+		}
 	}
+
 	block = sysv_new_block(sb);
-	if (!block) {
-		brelse(bh);
-		return NULL;
+	if (!block)
+		goto out;
+	if (metadata) {
+		result = sv_getblk(sb, bh->b_dev, block);
+		if (*p) {
+			sysv_free_block(sb, block);
+			brelse(result);
+			goto repeat;
+		}
+		memset(result->b_data, 0, sb->sv_block_size);
+		mark_buffer_uptodate(result, 1);
+		mark_buffer_dirty(result, 1);
+	} else {
+		*phys = tmp;
+		*new = 1;
 	}
-	result = sv_getblk(sb, bh->b_dev, block);
 	if (*p) {
-		sysv_free_block(sb,block);
+		sysv_free_block(sb, block);
 		brelse(result);
 		goto repeat;
 	}
 	*p = (sb->sv_convert ? to_coh_ulong(block) : block);
 	mark_buffer_dirty(bh, 1);
+	*err = 0;
+out:
 	brelse(bh);
 	return result;
 }
 
-struct buffer_head * sysv_getblk(struct inode * inode, unsigned int block, int create)
+static int sysv_get_block(struct inode *inode, long iblock, struct buffer_head *bh_result, int create)
 {
-	struct super_block * sb = inode->i_sb;
-	struct buffer_head * bh;
+	struct super_block *sb;
+	int ret, err, new;
+	struct buffer_head *bh;
+	unsigned long ptr, phys;
 
-	if (block < 10)
-		return inode_getblk(inode,block,create);
-	block -= 10;
-	if (block < sb->sv_ind_per_block) {
-		bh = inode_getblk(inode,10,create);
-		return block_getblk(inode, bh, block, create);
+	if (!create) {
+		phys = sysv_block_map(inode, iblock);
+		if (phys) {
+			bh_result->b_dev = inode->i_dev;
+			bh_result->b_blocknr = phys;
+			bh_result->b_state |= (1UL << BH_Mapped);
+		}
+		return 0;
 	}
-	block -= sb->sv_ind_per_block;
-	if (block < sb->sv_ind_per_block_2) {
-		bh = inode_getblk(inode,11,create);
-		bh = block_getblk(inode, bh, block >> sb->sv_ind_per_block_bits, create);
-		return block_getblk(inode, bh, block & sb->sv_ind_per_block_1, create);
+
+	err = -EIO;
+	new = 0;
+	ret = 0;
+	bh = NULL;
+
+	lock_kernel();
+	sb = inode->i_sb;
+	if (iblock < 0)
+		goto abort_negative;
+	if (iblock > sb->sv_ind_per_block_3)
+		goto abort_too_big;
+
+	err = 0;
+	ptr = iblock;
+
+	/*
+	 * ok, these macros clean the logic up a bit and make
+	 * it much more readable:
+	 */
+#define GET_INODE_DATABLOCK(x) \
+		inode_getblk(inode, x, iblock, &err, 0, &phys, &new)
+#define GET_INODE_PTR(x) \
+		inode_getblk(inode, x, iblock, &err, 1, NULL, NULL)
+#define GET_INDIRECT_DATABLOCK(x) \
+		block_getblk (inode, bh, x, iblock, &err, 0, &phys, &new);
+#define GET_INDIRECT_PTR(x) \
+		block_getblk (inode, bh, x, iblock, &err, 1, NULL, NULL);
+
+	if (ptr < 10) {
+		bh = GET_INODE_DATABLOCK(ptr);
+		goto out;
 	}
-	block -= sb->sv_ind_per_block_2;
-	if (block < sb->sv_ind_per_block_3) {
-		bh = inode_getblk(inode,12,create);
-		bh = block_getblk(inode, bh, block >> sb->sv_ind_per_block_2_bits, create);
-		bh = block_getblk(inode, bh, (block >> sb->sv_ind_per_block_bits) & sb->sv_ind_per_block_1, create);
-		return block_getblk(inode, bh, block & sb->sv_ind_per_block_1, create);
+	ptr -= 10;
+	if (ptr < sb->sv_ind_per_block) {
+		bh = GET_INODE_PTR(10);
+		goto get_indirect;
 	}
-	if ((int)block<0) {
-		printk("sysv_getblk: block<0");
-		return NULL;
+	ptr -= sb->sv_ind_per_block;
+	if (ptr < sb->sv_ind_per_block_2) {
+		bh = GET_INODE_PTR(11);
+		goto get_double;
 	}
-	printk("sysv_getblk: block>big");
+	ptr -= sb->sv_ind_per_block_2;
+	bh = GET_INODE_PTR(12);
+	bh = GET_INDIRECT_PTR(ptr >> sb->sv_ind_per_block_2_bits);
+get_double:
+	bh = GET_INDIRECT_PTR((ptr >> sb->sv_ind_per_block_bits) & sb->sv_ind_per_block_1);
+get_indirect:
+	bh = GET_INDIRECT_DATABLOCK(ptr & sb->sv_ind_per_block_1);
+
+#undef GET_INODE_DATABLOCK
+#undef GET_INODE_PTR
+#undef GET_INDIRECT_DATABLOCK
+#undef GET_INDIRECT_PTR
+
+out:
+	if (err)
+		goto abort;
+	bh_result->b_dev = inode->i_dev;
+	bh_result->b_blocknr = phys;
+	bh_result->b_state |= (1UL << BH_Mapped);
+	if (new)
+		bh_result->b_state |= (1UL << BH_New);
+abort:
+	unlock_kernel();
+	return err;
+
+abort_negative:
+	printk("sysv_get_block: block < 0\n");
+	goto abort;
+
+abort_too_big:
+	printk("sysv_get_block: block > big\n");
+	goto abort;
+}
+
+static struct buffer_head *sysv_getblk(struct inode *inode, unsigned int block, int create)
+{
+	struct buffer_head dummy;
+	int error;
+
+	dummy.b_state = 0;
+	dummy.b_blocknr = -1000;
+	error = sysv_get_block(inode, block, &dummy, create);
+	if (!error && buffer_mapped(&dummy)) {
+		struct buffer_head *bh;
+		bh = getblk(dummy.b_dev, dummy.b_blocknr, inode->i_sb->sv_block_size);
+		if (buffer_new(&dummy)) {
+			memset(bh->b_data, 0, inode->i_sb->sv_block_size);
+			mark_buffer_uptodate(bh, 1);
+			mark_buffer_dirty(bh, 1);
+		}
+		return bh;
+	}
 	return NULL;
 }
 
-struct buffer_head * sysv_file_bread(struct inode * inode, int block, int create)
+struct buffer_head *sysv_file_bread(struct inode *inode, int block, int create)
 {
-	struct buffer_head * bh;
+	struct buffer_head *bh;
 
-	bh = sysv_getblk(inode,block,create);
+	bh = sysv_getblk(inode, block, create);
 	if (!bh || buffer_uptodate(bh))
 		return bh;
 	ll_rw_block(READ, 1, &bh);
@@ -793,6 +940,30 @@ struct buffer_head * sysv_file_bread(struct inode * inode, int block, int create
 	brelse(bh);
 	return NULL;
 }
+
+static int sysv_writepage(struct dentry *dentry, struct page *page)
+{
+	return block_write_full_page(page,sysv_get_block);
+}
+static int sysv_readpage(struct dentry *dentry, struct page *page)
+{
+	return block_read_full_page(page,sysv_get_block);
+}
+static int sysv_prepare_write(struct page *page, unsigned from, unsigned to)
+{
+	return block_prepare_write(page,from,to,sysv_get_block);
+}
+static int sysv_bmap(struct address_space *mapping, long block)
+{
+	return generic_block_bmap(mapping,block,sysv_get_block);
+}
+struct address_space_operations sysv_aops = {
+	readpage: sysv_readpage,
+	writepage: sysv_writepage,
+	prepare_write: sysv_prepare_write,
+	commit_write: generic_commit_write,
+	bmap: sysv_bmap
+};
 
 #ifdef __BIG_ENDIAN
 
@@ -836,7 +1007,13 @@ static inline void coh_write3byte (unsigned char * p, unsigned long val)
 	*(unsigned short *)(p+1) = (unsigned short) val;
 }
 
-void sysv_read_inode(struct inode * inode)
+struct inode_operations sysv_symlink_inode_operations = {
+	readlink:	page_readlink,
+	follow_link:	page_follow_link,
+	setattr:	sysv_notify_change,
+};
+
+static void sysv_read_inode(struct inode *inode)
 {
 	struct super_block * sb = inode->i_sb;
 	struct buffer_head * bh;
@@ -845,7 +1022,6 @@ void sysv_read_inode(struct inode * inode)
 	umode_t mode;
 
 	ino = inode->i_ino;
-	inode->i_op = NULL;
 	inode->i_mode = 0;
 	if (!ino || ino > sb->sv_ninodes) {
 		printk("Bad inode number on dev %s"
@@ -866,8 +1042,8 @@ void sysv_read_inode(struct inode * inode)
 		mode = from_coh_imode(mode);
 	/* SystemV FS: kludge permissions if ino==SYSV_ROOT_INO ?? */
 	inode->i_mode = mode;
-	inode->i_uid = raw_inode->i_uid;
-	inode->i_gid = raw_inode->i_gid;
+	inode->i_uid = (uid_t)raw_inode->i_uid;
+	inode->i_gid = (gid_t)raw_inode->i_gid;
 	inode->i_nlink = raw_inode->i_nlink;
 	if (sb->sv_convert) {
 		inode->i_size = from_coh_ulong(raw_inode->i_size);
@@ -882,7 +1058,7 @@ void sysv_read_inode(struct inode * inode)
 	}
 	inode->i_blocks = inode->i_blksize = 0;
 	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode))
-		inode->i_rdev = to_kdev_t(raw_inode->i_a.i_rdev);
+		;
 	else
 	if (sb->sv_convert)
 		for (block = 0; block < 10+1+1+1; block++)
@@ -892,19 +1068,19 @@ void sysv_read_inode(struct inode * inode)
 		for (block = 0; block < 10+1+1+1; block++)
 			inode->u.sysv_i.i_data[block] =
 				read3byte(&raw_inode->i_a.i_addb[3*block]);
-	brelse(bh);
-	if (S_ISREG(inode->i_mode))
+	if (S_ISREG(inode->i_mode)) {
 		inode->i_op = &sysv_file_inode_operations;
-	else if (S_ISDIR(inode->i_mode))
+		inode->i_fop = &sysv_file_operations;
+		inode->i_mapping->a_ops = &sysv_aops;
+	} else if (S_ISDIR(inode->i_mode)) {
 		inode->i_op = &sysv_dir_inode_operations;
-	else if (S_ISLNK(inode->i_mode))
+		inode->i_fop = &sysv_dir_operations;
+	} else if (S_ISLNK(inode->i_mode)) {
 		inode->i_op = &sysv_symlink_inode_operations;
-	else if (S_ISCHR(inode->i_mode))
-		inode->i_op = &chrdev_inode_operations;
-	else if (S_ISBLK(inode->i_mode))
-		inode->i_op = &blkdev_inode_operations;
-	else if (S_ISFIFO(inode->i_mode))
-		init_fifo(inode);
+		inode->i_mapping->a_ops = &sysv_aops;
+	} else
+		init_special_inode(inode, inode->i_mode,raw_inode->i_a.i_rdev);
+	brelse(bh);
 }
 
 /* To avoid inconsistencies between inodes in memory and inodes on disk. */
@@ -951,8 +1127,8 @@ static struct buffer_head * sysv_update_inode(struct inode * inode)
 	if (sb->sv_kludge_symlinks)
 		mode = to_coh_imode(mode);
 	raw_inode->i_mode = mode;
-	raw_inode->i_uid = inode->i_uid;
-	raw_inode->i_gid = inode->i_gid;
+	raw_inode->i_uid = fs_high2lowuid(inode->i_uid);
+	raw_inode->i_gid = fs_high2lowgid(inode->i_gid);
 	raw_inode->i_nlink = inode->i_nlink;
 	if (sb->sv_convert) {
 		raw_inode->i_size = to_coh_ulong(inode->i_size);
@@ -1010,22 +1186,11 @@ int sysv_sync_inode(struct inode * inode)
 
 /* Every kernel module contains stuff like this. */
 
-static struct file_system_type sysv_fs_type[3] = {
-	{"xenix",    FS_REQUIRES_DEV, sysv_read_super, NULL},
-	{"sysv",     FS_REQUIRES_DEV, sysv_read_super, NULL},
-	{"coherent", FS_REQUIRES_DEV, sysv_read_super, NULL}
-};
+static DECLARE_FSTYPE_DEV(sysv_fs_type, "sysv", sysv_read_super);
 
-__initfunc(int init_sysv_fs(void))
+int __init init_sysv_fs(void)
 {
-	int i;
-	int ouch;
-
-	for (i = 0; i < 3; i++) {
-		if ((ouch = register_filesystem(&sysv_fs_type[i])) != 0)
-			break;
-	}
-        return ouch;
+	return register_filesystem(&sysv_fs_type);
 }
 
 #ifdef MODULE
@@ -1038,11 +1203,7 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-	int i;
-
-	for (i = 0; i < 3; i++)
-		/* No error message if this breaks... that's OK... */
-		unregister_filesystem(&sysv_fs_type[i]);
+	unregister_filesystem(&sysv_fs_type);
 }
 
 #endif

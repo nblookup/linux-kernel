@@ -164,11 +164,13 @@ static int pg_drive_count;
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/malloc.h>
 #include <linux/mtio.h>
 #include <linux/pg.h>
+#include <linux/wait.h>
 
 #include <asm/uaccess.h>
 
@@ -259,20 +261,10 @@ static char pg_scratch[512];            /* scratch block buffer */
 /* kernel glue structures */
 
 static struct file_operations pg_fops = {
-	NULL,                   /* lseek - default */
-	pg_read,                /* read */
-	pg_write,               /* write */
-	NULL,                   /* readdir - bad */
-	NULL,                   /* select */
-	NULL,                   /* ioctl */
-	NULL,                   /* mmap */
-	pg_open,                /* open */
-	NULL,			/* flush */
-	pg_release,             /* release */
-	NULL,                   /* fsync */
-	NULL,                   /* fasync */
-	NULL,                   /* media change ? */
-	NULL                    /* revalidate new media */
+	read:		pg_read,
+	write:		pg_write,
+	open:		pg_open,
+	release:	pg_release,
 };
 
 void pg_init_units( void )
@@ -295,6 +287,8 @@ void pg_init_units( void )
 	}
 } 
 
+static devfs_handle_t devfs_handle = NULL;
+
 int pg_init (void)      /* preliminary initialisation */
 
 {       int unit;
@@ -305,14 +299,17 @@ int pg_init (void)      /* preliminary initialisation */
 
 	if (pg_detect()) return -1;
 
-	if (register_chrdev(major,name,&pg_fops)) {
+	if (devfs_register_chrdev(major,name,&pg_fops)) {
 		printk("pg_init: unable to get major number %d\n",
 			major);
 		for (unit=0;unit<PG_UNITS;unit++)
 		  if (PG.present) pi_release(PI);
 		return -1;
 	}
-
+	devfs_handle = devfs_mk_dir (NULL, "pg", 2, NULL);
+	devfs_register_series (devfs_handle, "%u", 4, DEVFS_FL_DEFAULT,
+			       major, 0, S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			       &pg_fops, NULL);
 	return 0;
 }
 
@@ -341,7 +338,8 @@ void    cleanup_module(void)
 
 {       int unit;
 
-	unregister_chrdev(major,name);
+	devfs_unregister (devfs_handle);
+	devfs_unregister_chrdev(major,name);
 
 	for (unit=0;unit<PG_UNITS;unit++)
 	  if (PG.present) pi_release(PI);
@@ -463,7 +461,7 @@ static int pg_reset( int unit )
 	WR(0,6,DRIVE);
 	WR(0,7,8);
 
-	pg_sleep(2);
+	pg_sleep(20*HZ/1000);
 
 	k = 0;
 	while ((k++ < PG_RESET_TMO) && (RR(1,6)&STAT_BUSY))

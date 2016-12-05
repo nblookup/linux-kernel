@@ -1,4 +1,4 @@
-/* $Id: socksys.c,v 1.8 1998/08/26 10:28:28 davem Exp $
+/* $Id: socksys.c,v 1.12 2000/02/17 05:50:11 davem Exp $
  * socksys.c: /dev/inet/ stuff for Solaris emulation.
  *
  * Copyright (C) 1997 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -16,8 +16,8 @@
 #include <linux/file.h>
 #include <linux/init.h>
 #include <linux/poll.h>
-#include <linux/file.h>
 #include <linux/malloc.h>
+#include <linux/devfs_fs_kernel.h>
 
 #include <asm/uaccess.h>
 #include <asm/termios.h>
@@ -49,16 +49,7 @@ extern void mykfree(void *);
 static unsigned int (*sock_poll)(struct file *, poll_table *);
 
 static struct file_operations socksys_file_ops = {
-	NULL,		/* lseek */
-	NULL,		/* read */
-	NULL,		/* write */
-	NULL,		/* readdir */
-	NULL,		/* poll */
-	NULL,		/* ioctl */
-	NULL,		/* mmap */
-	NULL,		/* open */
-	NULL,		/* flush */
-	NULL,		/* release */
+	/* Currently empty */
 };
 
 static int socksys_open(struct inode * inode, struct file * filp)
@@ -163,20 +154,14 @@ static unsigned int socksys_poll(struct file * filp, poll_table * wait)
 }
 	
 static struct file_operations socksys_fops = {
-	NULL,		/* lseek */
-	NULL,		/* read */
-	NULL,		/* write */
-	NULL,		/* readdir */
-	NULL,		/* poll */
-	NULL,		/* ioctl */
-	NULL,		/* mmap */
-	socksys_open,	/* open */
-	NULL,		/* flush */
-	socksys_release,/* release */
+	open:		socksys_open,
+	release:	socksys_release,
 };
 
-__initfunc(int
-init_socksys(void))
+static devfs_handle_t devfs_handle = NULL;
+
+int __init
+init_socksys(void)
 {
 	int ret;
 	struct file * file;
@@ -185,7 +170,7 @@ init_socksys(void))
 	int (*sys_close)(unsigned int) = 
 		(int (*)(unsigned int))SYS(close);
 	
-	ret = register_chrdev (30, "socksys", &socksys_fops);
+	ret = devfs_register_chrdev (30, "socksys", &socksys_fops);
 	if (ret < 0) {
 		printk ("Couldn't register socksys character device\n");
 		return ret;
@@ -195,6 +180,10 @@ init_socksys(void))
 		printk ("Couldn't create socket\n");
 		return ret;
 	}
+	devfs_handle = devfs_register (NULL, "socksys", 0, DEVFS_FL_NONE,
+				       30, 0,
+				       S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+				       &socksys_fops, NULL);
 	file = fcheck(ret);
 	/* N.B. Is this valid? Suppose the f_ops are in a module ... */
 	socksys_file_ops = *file->f_op;
@@ -208,6 +197,7 @@ init_socksys(void))
 void
 cleanup_socksys(void)
 {
-	if (unregister_chrdev (30, "socksys"))
+	if (devfs_unregister_chrdev(30, "socksys"))
 		printk ("Couldn't unregister socksys character device\n");
+	devfs_unregister (devfs_handle);
 }

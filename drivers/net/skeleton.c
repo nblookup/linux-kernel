@@ -53,6 +53,7 @@ static const char *version =
 #include <linux/string.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
+#include <linux/spinlock.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <linux/errno.h>
@@ -83,10 +84,19 @@ static unsigned int net_debug = NET_DEBUG;
 /* The number of low I/O ports used by the ethercard. */
 #define NETCARD_IO_EXTENT	32
 
+#define MY_TX_TIMEOUT  ((400*HZ)/1000)
+
 /* Information that need to be kept for each board. */
 struct net_local {
 	struct net_device_stats stats;
 	long open_time;			/* Useless example local info. */
+
+	/* Tx control lock.  This protects the transmit buffer ring
+	 * state along with the "tx full" state of the driver.  This
+	 * means all netif_queue flow control actions are protected
+	 * by this lock as well.
+	 */
+	spinlock_t lock;
 };
 
 /* The station (ethernet) address prefix, used for IDing the board. */
@@ -96,21 +106,23 @@ struct net_local {
 
 /* Index to functions, as function prototypes. */
 
-extern int netcard_probe(struct device *dev);
+extern int netcard_probe(struct net_device *dev);
 
-static int	netcard_probe1(struct device *dev, int ioaddr);
-static int	net_open(struct device *dev);
-static int	net_send_packet(struct sk_buff *skb, struct device *dev);
+static int	netcard_probe1(struct net_device *dev, int ioaddr);
+static int	net_open(struct net_device *dev);
+static int	net_send_packet(struct sk_buff *skb, struct net_device *dev);
 static void	net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-static void	net_rx(struct device *dev);
-static int	net_close(struct device *dev);
-static struct	net_device_stats *net_get_stats(struct device *dev);
-static void	set_multicast_list(struct device *dev);
+static void	net_rx(struct net_device *dev);
+static int	net_close(struct net_device *dev);
+static struct	net_device_stats *net_get_stats(struct net_device *dev);
+static void	set_multicast_list(struct net_device *dev);
+static void     net_tx_timeout(struct net_device *dev);
+
 
 /* Example routines you must write ;->. */
 #define tx_done(dev) 1
 extern void	hardware_send_packet(short ioaddr, char *buf, int length);
-extern void 	chipset_init(struct device *dev, int startp);
+extern void 	chipset_init(struct net_device *dev, int startp);
 
 /*
  * Check for a network adaptor of this type, and return '0' iff one exists.
@@ -127,8 +139,8 @@ extern void 	chipset_init(struct device *dev, int startp);
 struct netdev_entry netcard_drv =
 {cardname, netcard_probe1, NETCARD_IO_EXTENT, netcard_portlist};
 #else
-__initfunc(int
-netcard_probe(struct device *dev))
+int __init 
+netcard_probe(struct net_device *dev)
 {
 	int i;
 	int base_addr = dev ? dev->base_addr : 0;
@@ -155,8 +167,9 @@ netcard_probe(struct device *dev))
  * probes on the ISA bus. A good device probes avoids doing writes, and
  * verifies that the correct device exists and functions.
  */
-__initfunc(static int netcard_probe1(struct device *dev, int ioaddr))
+static int __init netcard_probe1(struct net_device *dev, int ioaddr)
 {
+	struct net_local *np;
 	static unsigned version_printed = 0;
 	int i;
 
@@ -282,6 +295,9 @@ __initfunc(static int netcard_probe1(struct device *dev, int ioaddr))
 
 	memset(dev->priv, 0, sizeof(struct net_local));
 
+	np = (struct net_local *)dev->priv;
+	spin_lock_init(&np->lock);
+
 	/* Grab the region so that no one else tries to probe our ioports. */
 	request_region(ioaddr, NETCARD_IO_EXTENT, cardname);
 
@@ -291,10 +307,39 @@ __initfunc(static int netcard_probe1(struct device *dev, int ioaddr))
 	dev->get_stats		= net_get_stats;
 	dev->set_multicast_list = &set_multicast_list;
 
+        dev->tx_timeout		= &net_tx_timeout;
+        dev->watchdog_timeo	= MY_TX_TIMEOUT; 
+
 	/* Fill in the fields of the device structure with ethernet values. */
 	ether_setup(dev);
 
 	return 0;
+}
+
+static void net_tx_timeout(struct net_device *dev)
+{
+	struct net_local *np = (struct net_local *)dev->priv;
+
+	printk(KERN_WARNING "%s: transmit timed out, %s?\n", dev->name,
+	       tx_done(dev) ? "IRQ conflict" : "network cable problem");
+
+	/* Try to restart the adaptor. */
+	chipset_init(dev, 1);
+
+	np->stats.tx_errors++;
+
+	/* If we have space available to accept new transmit
+	 * requests, wake up the queueing layer.  This would
+	 * be the case if the chipset_init() call above just
+	 * flushes out the tx queue and empties it.
+	 *
+	 * If instead, the tx queue is retained then the
+	 * netif_wake_queue() call should be placed in the
+	 * TX completion interrupt handler of the driver instead
+	 * of here.
+	 */
+	if (!tx_full(dev))
+		netif_wake_queue(dev);
 }
 
 /*
@@ -306,9 +351,9 @@ __initfunc(static int netcard_probe1(struct device *dev, int ioaddr))
  * there is non-reboot way to recover if something goes wrong.
  */
 static int
-net_open(struct device *dev)
+net_open(struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *np = (struct net_local *)dev->priv;
 	int ioaddr = dev->base_addr;
 	/*
 	 * This is used if the interrupt line can turned off (shared).
@@ -327,105 +372,159 @@ net_open(struct device *dev)
 	}
 
 	/* Reset the hardware here. Don't forget to set the station address. */
-	/*chipset_init(dev, 1);*/
+	chipset_init(dev, 1);
 	outb(0x00, ioaddr);
-	lp->open_time = jiffies;
+	np->open_time = jiffies;
 
-	dev->tbusy = 0;
-	dev->interrupt = 0;
-	dev->start = 1;
+	/* We are now ready to accept transmit requeusts from
+	 * the queueing layer of the networking.
+	 */
+	netif_start_queue(dev);
 
 	MOD_INC_USE_COUNT;
 
 	return 0;
 }
 
-static int net_send_packet(struct sk_buff *skb, struct device *dev)
+/* This will only be invoked if your driver is _not_ in XOFF state.
+ * What this means is that you need not check it, and that this
+ * invariant will hold if you make sure that the netif_*_queue()
+ * calls are done at the proper times.
+ */
+static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *np = (struct net_local *)dev->priv;
 	int ioaddr = dev->base_addr;
+	short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+	unsigned char *buf = skb->data;
 
-	if (dev->tbusy) {
-		/*
-		 * If we get here, some higher level has decided we are broken.
-		 * There should really be a "kick me" function call instead.
-		 */
-		int tickssofar = jiffies - dev->trans_start;
-		if (tickssofar < 5)
-			return 1;
-		printk(KERN_WARNING "%s: transmit timed out, %s?\n", dev->name,
-			   tx_done(dev) ? "IRQ conflict" : "network cable problem");
-		/* Try to restart the adaptor. */
-		chipset_init(dev, 1);
-		dev->tbusy=0;
-		dev->trans_start = jiffies;
-	}
-
-	/*
-	 * Block a timer-based transmit from overlapping. This could better be
-	 * done with atomic_swap(1, dev->tbusy), but set_bit() works as well.
+	/* If some error occurs while trying to transmit this
+	 * packet, you should return '1' from this function.
+	 * In such a case you _may not_ do anything to the
+	 * SKB, it is still owned by the network queueing
+	 * layer when an error is returned.  This means you
+	 * may not modify any SKB fields, you may not free
+	 * the SKB, etc.
 	 */
-	if (test_and_set_bit(0, (void*)&dev->tbusy) != 0)
-		printk(KERN_WARNING "%s: Transmitter access conflict.\n", dev->name);
-	else {
-		short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
-		unsigned char *buf = skb->data;
-		lp->stats.tx_bytes+=skb->len;
-		hardware_send_packet(ioaddr, buf, length);
-		dev->trans_start = jiffies;
-	}
-	dev_kfree_skb (skb);
+
+#if TX_RING
+	/* This is the most common case for modern hardware.
+	 * The spinlock protects this code from the TX complete
+	 * hardware interrupt handler.  Queue flow control is
+	 * thus managed under this lock as well.
+	 */
+	spin_lock_irq(&np->lock);
+
+	add_to_tx_ring(np, skb, length);
+	dev->trans_start = jiffies;
+
+	/* If we just used up the very last entry in the
+	 * TX ring on this device, tell the queueing
+	 * layer to send no more.
+	 */
+	if (tx_full(dev))
+		netif_stop_queue(dev);
+
+	/* When the TX completion hw interrupt arrives, this
+	 * is when the transmit statistics are updated.
+	 */
+
+	spin_unlock_irq(&np->lock);
+#else
+	/* This is the case for older hardware which takes
+	 * a single transmit buffer at a time, and it is
+	 * just written to the device via PIO.
+	 *
+	 * No spin locking is needed since there is no TX complete
+	 * event.  If by chance your card does have a TX complete
+	 * hardware IRQ then you may need to utilize np->lock here.
+	 */
+	hardware_send_packet(ioaddr, buf, length);
+	np->stats.tx_bytes += skb->len;
+
+	dev->trans_start = jiffies;
 
 	/* You might need to clean up and record Tx statistics here. */
 	if (inw(ioaddr) == /*RU*/81)
-		lp->stats.tx_aborted_errors++;
+		np->stats.tx_aborted_errors++;
+	dev_kfree_skb (skb);
+#endif
 
 	return 0;
 }
 
+#if TX_RING
+/* This handles TX complete events posted by the device
+ * via interrupts.
+ */
+void net_tx(struct net_device *dev)
+{
+	struct net_local *np = (struct net_local *)dev->priv;
+	int entry;
+
+	/* This protects us from concurrent execution of
+	 * our dev->hard_start_xmit function above.
+	 */
+	spin_lock(&np->lock);
+
+	entry = np->tx_old;
+	while (tx_entry_is_sent(np, entry)) {
+		struct sk_buff *skb = np->skbs[entry];
+
+		np->stats.tx_bytes += skb->len;
+		dev_kfree_skb_irq (skb);
+
+		entry = next_tx_entry(np, entry);
+	}
+	np->tx_old = entry;
+
+	/* If we had stopped the queue due to a "tx full"
+	 * condition, and space has now been made available,
+	 * wake up the queue.
+	 */
+	if (netif_queue_stopped(dev) && ! tx_full(dev))
+		netif_wake_queue(dev);
+
+	spin_unlock(&np->lock);
+}
+#endif
+
 /*
  * The typical workload of the driver:
- *   Handle the network interface interrupts.
+ * Handle the network interface interrupts.
  */
 static void net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-	struct device *dev = dev_id;
-	struct net_local *lp;
-	int ioaddr, status, boguscount = 0;
-
-	if (dev == NULL) {
-		printk(KERN_WARNING "%s: irq %d for unknown device.\n", cardname, irq);
-		return;
-	}
-	dev->interrupt = 1;
+	struct net_device *dev = dev_id;
+	struct net_local *np;
+	int ioaddr, status;
 
 	ioaddr = dev->base_addr;
-	lp = (struct net_local *)dev->priv;
+
+	np = (struct net_local *)dev->priv;
 	status = inw(ioaddr + 0);
 
-	do {
-		if (status /*& RX_INTR*/) {
-			/* Got a packet(s). */
-			net_rx(dev);
-		}
-		if (status /*& TX_INTR*/) {
-			lp->stats.tx_packets++;
-			dev->tbusy = 0;
-			mark_bh(NET_BH);	/* Inform upper layers. */
-		}
-		if (status /*& COUNTERS_INTR*/) {
-			/* Increment the appropriate 'localstats' field. */
-			lp->stats.tx_window_errors++;
-		}
-	} while (++boguscount < 20) ;
-
-	dev->interrupt = 0;
-	return;
+	if (status & RX_INTR) {
+		/* Got a packet(s). */
+		net_rx(dev);
+	}
+#if TX_RING
+	if (status & TX_INTR) {
+		/* Transmit complete. */
+		net_tx(dev);
+		np->stats.tx_packets++;
+		netif_wake_queue(dev);
+	}
+#endif
+	if (status & COUNTERS_INTR) {
+		/* Increment the appropriate 'localstats' field. */
+		np->stats.tx_window_errors++;
+	}
 }
 
 /* We have a good packet(s), get it/them out of the buffers. */
 static void
-net_rx(struct device *dev)
+net_rx(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	int ioaddr = dev->base_addr;
@@ -470,25 +569,19 @@ net_rx(struct device *dev)
 		}
 	} while (--boguscount);
 
-	/*
-	 * If any worth-while packets have been received, dev_rint()
-	 * has done a mark_bh(NET_BH) for us and will work on them
-	 * when we get to the bottom-half routine.
-	 */
 	return;
 }
 
 /* The inverse routine to net_open(). */
 static int
-net_close(struct device *dev)
+net_close(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	int ioaddr = dev->base_addr;
 
 	lp->open_time = 0;
 
-	dev->tbusy = 1;
-	dev->start = 0;
+	netif_stop_queue(dev);
 
 	/* Flush the Tx and disable Rx here. */
 
@@ -512,7 +605,7 @@ net_close(struct device *dev)
  * Get the current statistics.
  * This may be called with the card open or closed.
  */
-static struct net_device_stats *net_get_stats(struct device *dev)
+static struct net_device_stats *net_get_stats(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	short ioaddr = dev->base_addr;
@@ -533,7 +626,7 @@ static struct net_device_stats *net_get_stats(struct device *dev)
  *			and do best-effort filtering.
  */
 static void
-set_multicast_list(struct device *dev)
+set_multicast_list(struct net_device *dev)
 {
 	short ioaddr = dev->base_addr;
 	if (dev->flags&IFF_PROMISC)
@@ -562,7 +655,7 @@ set_multicast_list(struct device *dev)
 #ifdef MODULE
 
 static char devicename[9] = { 0, };
-static struct device this_device = {
+static struct net_device this_device = {
 	devicename, /* will be inserted by linux/drivers/net/net_init.c */
 	0, 0, 0, 0,
 	0, 0,  /* I/O address, IRQ */

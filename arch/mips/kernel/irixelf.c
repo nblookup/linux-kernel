@@ -1,4 +1,5 @@
-/*
+/* $Id: irixelf.c,v 1.24 2000/02/04 07:40:23 ralf Exp $
+ *
  * irixelf.c: Code to load IRIX ELF executables which conform to
  *            the MIPS ABI.
  *
@@ -21,6 +22,7 @@
 #include <linux/signal.h>
 #include <linux/binfmts.h>
 #include <linux/string.h>
+#include <linux/file.h>
 #include <linux/fcntl.h>
 #include <linux/ptrace.h>
 #include <linux/malloc.h>
@@ -29,7 +31,7 @@
 #include <linux/elfcore.h>
 
 #include <asm/uaccess.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 #include <asm/mipsregs.h>
 #include <asm/prctl.h>
 
@@ -43,15 +45,13 @@
 
 static int load_irix_binary(struct linux_binprm * bprm, struct pt_regs * regs);
 static int load_irix_library(int fd);
-static int irix_core_dump(long signr, struct pt_regs * regs);
+static int irix_core_dump(long signr, struct pt_regs * regs,
+                          struct file *file);
 extern int dump_fpu (elf_fpregset_t *);
 
 static struct linux_binfmt irix_format = {
-#ifndef MODULE
-	NULL, NULL, load_irix_binary, load_irix_library, irix_core_dump
-#else
-	NULL, &__this_module.usecount, load_irix_binary, load_irix_library, irix_core_dump
-#endif
+	NULL, THIS_MODULE, load_irix_binary, load_irix_library,
+	irix_core_dump, PAGE_SIZE
 };
 
 #ifndef elf_addr_t
@@ -132,9 +132,7 @@ static void set_brk(unsigned long start, unsigned long end)
 	end = PAGE_ALIGN(end);
 	if (end <= start) 
 		return;
-	do_mmap(NULL, start, end - start,
-		PROT_READ | PROT_WRITE | PROT_EXEC,
-		MAP_FIXED | MAP_PRIVATE, 0);
+	do_brk(start, end - start);
 }
 
 
@@ -262,8 +260,8 @@ static unsigned int load_irix_interp(struct elfhdr * interp_elf_ex,
 	if((interp_elf_ex->e_type != ET_EXEC &&
 	    interp_elf_ex->e_type != ET_DYN) ||
 	    !elf_check_arch(interp_elf_ex->e_machine) ||
-	   (!interpreter_dentry->d_inode->i_op ||
-	    !interpreter_dentry->d_inode->i_op->default_file_ops->mmap)) {
+	   (!interpreter_dentry->d_inode->i_fop ||
+	    !interpreter_dentry->d_inode->i_fop->mmap)) {
 		printk("IRIX interp has bad e_type %d\n", interp_elf_ex->e_type);
 		return 0xffffffff;
 	}
@@ -309,7 +307,7 @@ static unsigned int load_irix_interp(struct elfhdr * interp_elf_ex,
 		return 0xffffffff;
 	}
 
-	file = current->files->fd[elf_exec_fileno];
+	file = fget(elf_exec_fileno);
 
 	eppnt = elf_phdata;
 	for(i=0; i<interp_elf_ex->e_phnum; i++, eppnt++) {
@@ -367,6 +365,7 @@ static unsigned int load_irix_interp(struct elfhdr * interp_elf_ex,
 	}
 
 	/* Now use mmap to map the library into memory. */
+	fput(file);
 	sys_close(elf_exec_fileno);
 	if(error < 0 && error > -1024) {
 #ifdef DEBUG_ELF
@@ -394,9 +393,7 @@ static unsigned int load_irix_interp(struct elfhdr * interp_elf_ex,
 
 	/* Map the last of the bss segment */
 	if (last_bss > len) {
-		do_mmap(NULL, len, (last_bss - len),
-			PROT_READ|PROT_WRITE|PROT_EXEC,
-			MAP_FIXED|MAP_PRIVATE, 0);
+		do_brk(len, (last_bss - len));
 	}
 	kfree(elf_phdata);
 
@@ -407,16 +404,14 @@ static unsigned int load_irix_interp(struct elfhdr * interp_elf_ex,
 /* Check sanity of IRIX elf executable header. */
 static int verify_binary(struct elfhdr *ehp, struct linux_binprm *bprm)
 {
-	if (ehp->e_ident[0] != 0x7f || strncmp(&ehp->e_ident[1], "ELF", 3)) {
-		return  -ENOEXEC;
-	}
+	if (memcmp(ehp->e_ident, ELFMAG, SELFMAG) != 0)
+		return -ENOEXEC;
 
 	/* First of all, some simple consistency checks */
 	if((ehp->e_type != ET_EXEC && ehp->e_type != ET_DYN) || 
 	    !elf_check_arch(ehp->e_machine) ||
-	   (!bprm->dentry->d_inode->i_op ||
-	    !bprm->dentry->d_inode->i_op->default_file_ops ||
-	    !bprm->dentry->d_inode->i_op->default_file_ops->mmap)) {
+	   (!bprm->dentry->d_inode->i_fop ||
+	    !bprm->dentry->d_inode->i_fop->mmap)) {
 		return -ENOEXEC;
 	}
 
@@ -498,7 +493,7 @@ out:
 
 static inline int verify_irix_interpreter(struct elfhdr *ihp)
 {
-	if(ihp->e_ident[0] != 0x7f || strncmp(&ihp->e_ident[1], "ELF", 3))
+	if (memcmp(ihp->e_ident, ELFMAG, SELFMAG) != 0)
 		return -ELIBBAD;
 	return 0;
 }
@@ -589,8 +584,7 @@ void irix_map_prda_page (void)
 	unsigned long v;
 	struct prda *pp;
 
-	v =  do_mmap (NULL, PRDA_ADDRESS, PAGE_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC,
-		      MAP_FIXED | MAP_PRIVATE, 0);
+	v =  do_brk (PRDA_ADDRESS, PAGE_SIZE);
 	
 	if (v < 0)
 		return;
@@ -617,35 +611,39 @@ static inline int do_load_irix_binary(struct linux_binprm * bprm,
 	unsigned int load_addr, elf_bss, elf_brk;
 	unsigned int elf_entry, interp_load_addr = 0;
 	unsigned int start_code, end_code, end_data, elf_stack;
-	int elf_exec_fileno, retval, has_interp, has_ephdr, i;
+	int elf_exec_fileno, retval, has_interp, has_ephdr, size, i;
 	char *elf_interpreter;
+	struct file *file;
 	mm_segment_t old_fs;
 	
 	load_addr = 0;
 	has_interp = has_ephdr = 0;
 	elf_ihdr = elf_ephdr = 0;
 	elf_ex = *((struct elfhdr *) bprm->buf);
-	
-	if(verify_binary(&elf_ex, bprm))
-		return -ENOEXEC;
+	retval = -ENOEXEC;
+
+	if (verify_binary(&elf_ex, bprm))
+		goto out;
 
 #ifdef DEBUG_ELF
 	print_elfhdr(&elf_ex);
 #endif
 
 	/* Now read in all of the header information */
-	elf_phdata = (struct elf_phdr *) kmalloc(elf_ex.e_phentsize * 
-						 elf_ex.e_phnum, GFP_KERNEL);
-	if (elf_phdata == NULL)
-		return -ENOMEM;
-	
-	retval = read_exec(bprm->dentry, elf_ex.e_phoff, (char *) elf_phdata,
-			   elf_ex.e_phentsize * elf_ex.e_phnum, 1);
-	if (retval < 0) {
-		kfree (elf_phdata);
-		return retval;
+	size = elf_ex.e_phentsize * elf_ex.e_phnum;
+	if (size > 65536)
+		goto out;
+	elf_phdata = (struct elf_phdr *) kmalloc(size, GFP_KERNEL);
+	if (elf_phdata == NULL) {
+		retval = -ENOMEM;
+		goto out;
 	}
-	
+
+	retval = read_exec(bprm->dentry, elf_ex.e_phoff,
+	                   (char *) elf_phdata, size, 1);
+	if (retval < 0)
+		goto out_free_ph;
+
 #ifdef DEBUG_ELF
 	dump_phdrs(elf_phdata, elf_ex.e_phnum);
 #endif
@@ -669,57 +667,41 @@ static inline int do_load_irix_binary(struct linux_binprm * bprm,
 
 	elf_bss = 0;
 	elf_brk = 0;
-	elf_exec_fileno = open_dentry(bprm->dentry, O_RDONLY);
+	retval = open_dentry(bprm->dentry, O_RDONLY);
+	if (retval < 0)
+		goto out_free_ph;
+	file = fget(elf_exec_fileno = retval);
 
-	if (elf_exec_fileno < 0) {
-		kfree (elf_phdata);
-		return elf_exec_fileno;
-	}
-	
 	elf_stack = 0xffffffff;
 	elf_interpreter = NULL;
 	start_code = 0xffffffff;
 	end_code = 0;
 	end_data = 0;
-	
+
 	retval = look_for_irix_interpreter(&elf_interpreter,
 	                                   &interpreter_dentry,
 					   &interp_elf_ex, elf_phdata, bprm,
 					   elf_ex.e_phnum);
-	if(retval) {
-		kfree(elf_phdata);
-		sys_close(elf_exec_fileno);
-		return retval;
-	}
-	
+	if(retval)
+		goto out_free_file;
+
 	if(elf_interpreter) {
 		retval = verify_irix_interpreter(&interp_elf_ex);
-		if(retval) {
-			kfree(elf_interpreter);
-			kfree(elf_phdata);
-			sys_close(elf_exec_fileno);
-			return retval;
-		}
+		if(retval)
+			goto out_free_interp;
 	}
-	
+
 	/* OK, we are done with that, now set up the arg stuff,
 	 * and then start this sucker up.
 	 */
-	if (!bprm->sh_bang) {
-		if (!bprm->p) {
-			if(elf_interpreter) {
-			      kfree(elf_interpreter);
-			}
-			kfree (elf_phdata);
-			sys_close(elf_exec_fileno);
-			return -E2BIG;
-		}
-	}
-	
+	retval = -E2BIG;
+	if (!bprm->sh_bang && !bprm->p)
+		goto out_free_interp;
+
 	/* Flush all traces of the currently running executable */
 	retval = flush_old_exec(bprm);
 	if (retval)
-		return retval;
+		goto out_free_dentry;
 
 	/* OK, This is the point of no return */
 	current->mm->end_data = 0;
@@ -732,18 +714,18 @@ static inline int do_load_irix_binary(struct linux_binprm * bprm,
 	 * change some of these later.
 	 */
 	current->mm->rss = 0;
-	bprm->p = setup_arg_pages(bprm->p, bprm);
+	setup_arg_pages(bprm);
 	current->mm->start_stack = bprm->p;
-	
+
 	/* At this point, we assume that the image should be loaded at
 	 * fixed address, not at a variable address.
 	 */
 	old_fs = get_fs();
 	set_fs(get_ds());
-	
-	map_executable(current->files->fd[elf_exec_fileno], elf_phdata,
-		       elf_ex.e_phnum, &elf_stack, &load_addr,
-		       &start_code, &elf_bss, &end_code, &end_data, &elf_brk);
+
+	map_executable(file, elf_phdata, elf_ex.e_phnum, &elf_stack,
+	               &load_addr, &start_code, &elf_bss, &end_code,
+	               &end_data, &elf_brk);
 
 	if(elf_interpreter) {
 		retval = map_interpreter(elf_phdata, &interp_elf_ex,
@@ -753,15 +735,16 @@ static inline int do_load_irix_binary(struct linux_binprm * bprm,
 		if(retval) {
 			set_fs(old_fs);
 			printk("Unable to load IRIX ELF interpreter\n");
-			kfree(elf_phdata);
 			send_sig(SIGSEGV, current, 0);
-			return 0;
+			retval = 0;
+			goto out_free_file;
 		}
 	}
 
 	set_fs(old_fs);
-	
+
 	kfree(elf_phdata);
+	fput(file);
 	sys_close(elf_exec_fileno);
 	current->personality = PER_IRIX32;
 
@@ -802,12 +785,12 @@ static inline int do_load_irix_binary(struct linux_binprm * bprm,
 	padzero(elf_bss);
 
 #ifdef DEBUG_ELF
-	printk("(start_brk) %08lx\n" , current->mm->start_brk);
-	printk("(end_code) %08lx\n" , current->mm->end_code);
-	printk("(start_code) %08lx\n" , current->mm->start_code);
-	printk("(end_data) %08lx\n" , current->mm->end_data);
-	printk("(start_stack) %08lx\n" , current->mm->start_stack);
-	printk("(brk) %08lx\n" , current->mm->brk);
+	printk("(start_brk) %lx\n" , (long) current->mm->start_brk);
+	printk("(end_code) %lx\n" , (long) current->mm->end_code);
+	printk("(start_code) %lx\n" , (long) current->mm->start_code);
+	printk("(end_data) %lx\n" , (long) current->mm->end_data);
+	printk("(start_stack) %lx\n" , (long) current->mm->start_stack);
+	printk("(brk) %lx\n" , (long) current->mm->brk);
 #endif
 
 #if 0 /* XXX No fucking way dude... */
@@ -824,6 +807,20 @@ static inline int do_load_irix_binary(struct linux_binprm * bprm,
 	if (current->flags & PF_PTRACED)
 		send_sig(SIGTRAP, current, 0);
 	return 0;
+out:
+	return retval;
+
+out_free_dentry:
+	dput(interpreter_dentry);
+out_free_interp:
+	if (elf_interpreter)
+		kfree(elf_interpreter);
+out_free_file:
+	fput(file);
+	sys_close(elf_exec_fileno);
+out_free_ph:
+	kfree (elf_phdata);
+	goto out;
 }
 
 static int load_irix_binary(struct linux_binprm * bprm, struct pt_regs * regs)
@@ -839,9 +836,8 @@ static int load_irix_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 /* This is really simpleminded and specialized - we are loading an
  * a.out library that is given an ELF header.
  */
-static inline int do_load_irix_library(int fd)
+static inline int do_load_irix_library(struct file *file)
 {
-	struct file * file;
 	struct elfhdr elf_ex;
 	struct elf_phdr *elf_phdata  =  NULL;
 	struct dentry *dentry;
@@ -854,14 +850,12 @@ static inline int do_load_irix_library(int fd)
 	int i,j, k;
 
 	len = 0;
-	file = current->files->fd[fd];
+	if (!file->f_op)
+		return -EACCES;
 	dentry = file->f_dentry;
 	inode = dentry->d_inode;
 	elf_bss = 0;
 	
-	if (!file || !file->f_op)
-		return -EACCES;
-
 	/* Seek to the beginning of the file. */
 	if (file->f_op->llseek) {
 		if ((error = file->f_op->llseek(file, 0, 0)) != 0)
@@ -876,15 +870,14 @@ static inline int do_load_irix_library(int fd)
 	if (error != sizeof(elf_ex))
 		return -ENOEXEC;
 
-	if (elf_ex.e_ident[0] != 0x7f ||
-	    strncmp(&elf_ex.e_ident[1], "ELF",3) != 0)
+	if (memcmp(elf_ex.e_ident, ELFMAG, SELFMAG) != 0)
 		return -ENOEXEC;
 
 	/* First of all, some simple consistency checks. */
 	if(elf_ex.e_type != ET_EXEC || elf_ex.e_phnum > 2 ||
 	   !elf_check_arch(elf_ex.e_machine) ||
-	   (!dentry->d_inode->i_op ||
-	    !dentry->d_inode->i_op->default_file_ops->mmap))
+	   (!dentry->d_inode->i_fop ||
+	    !dentry->d_inode->i_fop->mmap))
 		return -ENOEXEC;
 	
 	/* Now read in all of the header information. */
@@ -931,19 +924,22 @@ static inline int do_load_irix_library(int fd)
 	len = (elf_phdata->p_filesz + elf_phdata->p_vaddr+ 0xfff) & 0xfffff000;
 	bss = elf_phdata->p_memsz + elf_phdata->p_vaddr;
 	if (bss > len)
-	  do_mmap(NULL, len, bss-len,
-		  PROT_READ|PROT_WRITE|PROT_EXEC,
-		  MAP_FIXED|MAP_PRIVATE, 0);
+	  do_brk(len, bss-len);
 	kfree(elf_phdata);
 	return 0;
 }
 
 static int load_irix_library(int fd)
 {
-	int retval;
+	int retval = -EACCES;
+	struct file *file;
 
 	MOD_INC_USE_COUNT;
-	retval = do_load_irix_library(fd);
+	file = fget(fd);
+	if (file) {
+		retval = do_load_irix_library(file);
+		fput(file);
+	}
 	MOD_DEC_USE_COUNT;
 	return retval;
 }
@@ -984,9 +980,12 @@ unsigned long irix_mapelf(int fd, struct elf_phdr *user_phdrp, int cnt)
 			return -ENOEXEC;
 		}
 
-	filp = current->files->fd[fd];
-	if(!filp || !filp->f_op) {
+	filp = fget(fd);
+	if (!filp)
+		return -EACCES;
+	if(!filp->f_op) {
 		printk("irix_mapelf: Bogon filp!\n");
+		fput(filp);
 		return -EACCES;
 	}
 
@@ -1004,6 +1003,7 @@ unsigned long irix_mapelf(int fd, struct elf_phdr *user_phdrp, int cnt)
 
 		if(retval != (hp->p_vaddr & 0xfffff000)) {
 			printk("irix_mapelf: do_mmap fails with %d!\n", retval);
+			fput(filp);
 			return retval;
 		}
 	}
@@ -1011,6 +1011,7 @@ unsigned long irix_mapelf(int fd, struct elf_phdr *user_phdrp, int cnt)
 #ifdef DEBUG_ELF
 	printk("irix_mapelf: Success, returning %08lx\n", user_phdrp->p_vaddr);
 #endif
+	fput(filp);
 	return user_phdrp->p_vaddr;
 }
 
@@ -1072,20 +1073,22 @@ struct memelfnote
 static int notesize(struct memelfnote *en)
 {
 	int sz;
-	
+
 	sz = sizeof(struct elf_note);
 	sz += roundup(strlen(en->name), 4);
 	sz += roundup(en->datasz, 4);
-	
+
 	return sz;
 }
 
 /* #define DEBUG */
 
 #define DUMP_WRITE(addr, nr)	\
-	do { if (!dump_write(file, (addr), (nr))) return 0; } while(0)
+	if (!dump_write(file, (addr), (nr))) \
+		goto end_coredump;
 #define DUMP_SEEK(off)	\
-	do { if (!dump_seek(file, (off))) return 0; } while(0)
+	if (!dump_seek(file, (off))) \
+		goto end_coredump;
 
 static int writenote(struct memelfnote *men, struct file *file)
 {
@@ -1103,30 +1106,30 @@ static int writenote(struct memelfnote *men, struct file *file)
 	DUMP_SEEK(roundup((unsigned long)file->f_pos, 4));	/* XXX */
 	
 	return 1;
+
+end_coredump:
+	return 0;
 }
 #undef DUMP_WRITE
 #undef DUMP_SEEK
 
 #define DUMP_WRITE(addr, nr)	\
-	if (!dump_write(&file, (addr), (nr))) \
-		goto close_coredump;
+	if (!dump_write(file, (addr), (nr))) \
+		goto end_coredump;
 #define DUMP_SEEK(off)	\
-	if (!dump_seek(&file, (off))) \
-		goto close_coredump;
+	if (!dump_seek(file, (off))) \
+		goto end_coredump;
+
 /* Actual dumper.
  *
  * This is a two-pass process; first we find the offsets of the bits,
  * and then they are actually written out.  If we run out of core limit
  * we just truncate.
  */
-static int irix_core_dump(long signr, struct pt_regs * regs)
+static int irix_core_dump(long signr, struct pt_regs * regs, struct file *file)
 {
 	int has_dumped = 0;
-	struct file file;
-	struct dentry *dentry;
-	struct inode *inode;
 	mm_segment_t fs;
-	char corefile[6+sizeof(current->comm)];
 	int segs;
 	int i;
 	size_t size;
@@ -1139,10 +1142,6 @@ static int irix_core_dump(long signr, struct pt_regs * regs)
 	struct elf_prstatus prstatus;	/* NT_PRSTATUS */
 	elf_fpregset_t fpu;		/* NT_PRFPREG */
 	struct elf_prpsinfo psinfo;	/* NT_PRPSINFO */
-	
-	if (!current->dumpable || limit < PAGE_SIZE)
-		return 0;
-	current->dumpable = 0;
 
 #ifndef CONFIG_BINFMT_IRIX
 	MOD_INC_USE_COUNT;
@@ -1174,7 +1173,7 @@ static int irix_core_dump(long signr, struct pt_regs * regs)
 	elf.e_ident[EI_DATA] = ELFDATA2LSB;
 	elf.e_ident[EI_VERSION] = EV_CURRENT;
 	memset(elf.e_ident+EI_PAD, 0, EI_NIDENT-EI_PAD);
-	
+
 	elf.e_type = ET_CORE;
 	elf.e_machine = ELF_ARCH;
 	elf.e_version = EV_CURRENT;
@@ -1191,26 +1190,7 @@ static int irix_core_dump(long signr, struct pt_regs * regs)
 	
 	fs = get_fs();
 	set_fs(KERNEL_DS);
-	memcpy(corefile,"core.", 5);
-#if 0
-	memcpy(corefile+5,current->comm,sizeof(current->comm));
-#else
-	corefile[4] = '\0';
-#endif
-	dentry = open_namei(corefile, O_CREAT | 2 | O_TRUNC | O_NOFOLLOW, 0600);
-	if (IS_ERR(dentry)) {
-		inode = NULL;
-		goto end_coredump;
-	}
-	inode = dentry->d_inode;
-	if (!S_ISREG(inode->i_mode))
-		goto end_coredump;
-	if (!inode->i_op || !inode->i_op->default_file_ops)
-		goto end_coredump;
-	if (init_private_file(&file, dentry, 3))
-		goto end_coredump;
-	if (!file.f_op->write)
-		goto close_coredump;
+
 	has_dumped = 1;
 	current->flags |= PF_DUMPCORE;
 
@@ -1284,7 +1264,7 @@ static int irix_core_dump(long signr, struct pt_regs * regs)
 	notes[2].type = NT_TASKSTRUCT;
 	notes[2].datasz = sizeof(*current);
 	notes[2].data = current;
-	
+
 	/* Try to dump the FPU. */
 	prstatus.pr_fpvalid = dump_fpu (&fpu);
 	if (!prstatus.pr_fpvalid) {
@@ -1295,7 +1275,7 @@ static int irix_core_dump(long signr, struct pt_regs * regs)
 		notes[3].datasz = sizeof(fpu);
 		notes[3].data = &fpu;
 	}
-	
+
 	/* Write notes phdr entry. */
 	{
 		struct elf_phdr phdr;
@@ -1346,8 +1326,8 @@ static int irix_core_dump(long signr, struct pt_regs * regs)
 	}
 
 	for(i = 0; i < numnote; i++)
-		if (!writenote(&notes[i], &file))
-			goto close_coredump;
+		if (!writenote(&notes[i], file))
+			goto end_coredump;
 	
 	set_fs(fs);
 
@@ -1368,45 +1348,30 @@ static int irix_core_dump(long signr, struct pt_regs * regs)
 		DUMP_WRITE((void *)addr, len);
 	}
 
-	if ((off_t) file.f_pos != offset) {
+	if ((off_t) file->f_pos != offset) {
 		/* Sanity check. */
-		printk("elf_core_dump: file.f_pos (%ld) != offset (%ld)\n",
-		       (off_t) file.f_pos, offset);
+		printk("elf_core_dump: file->f_pos (%ld) != offset (%ld)\n",
+		       (off_t) file->f_pos, offset);
 	}
 
- close_coredump:
-	if (file.f_op->release)
-		file.f_op->release(inode, &file);
-
- end_coredump:
+end_coredump:
 	set_fs(fs);
-	dput(dentry);
-#ifndef CONFIG_BINFMT_ELF
+#ifndef CONFIG_BINFMT_IRIX
 	MOD_DEC_USE_COUNT;
 #endif
 	return has_dumped;
 }
 
-int __init init_irix_binfmt(void)
+static int __init init_irix_binfmt(void)
 {
 	return register_binfmt(&irix_format);
 }
 
-#ifdef MODULE
-
-int init_module(void)
-{
-	/* Install the COFF, ELF and XOUT loaders.
-	 * N.B. We *rely* on the table being the right size with the
-	 * right number of free slots...
-	 */
-	return init_irix_binfmt();
-}
-
-
-void cleanup_module( void)
+static void __exit cleanup_module(void)
 {
 	/* Remove the IRIX ELF loaders. */
 	unregister_binfmt(&irix_format);
 }
-#endif
+
+module_init(init_irix_binfmt)
+module_exit(exit_irix_binfmt)

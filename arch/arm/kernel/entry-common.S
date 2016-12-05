@@ -1,289 +1,212 @@
+#include <linux/config.h>
 /*============================================================================
  * All exits to user mode from the kernel go through this code.
  */
 
-#include <linux/config.h>
+#define S_OFF		8
+
+		.macro	get_softirq, rd
+#ifdef __SMP__
+#error SMP not supported
+#else
+		ldr	\rd, __softirq_state
+#endif
+		.endm
 
 		.globl	ret_from_sys_call
 
-ret_from_exception:
-		adr	r0, 1f
+		.align	5
+fast_syscall_return:
+		str	r0, [sp, #S_R0 + S_OFF]	@ returned r0
+slow_syscall_return:
+		add	sp, sp, #S_OFF
+ret_from_sys_call:				@ external entry
+		get_softirq r0
 		ldmia	r0, {r0, r1}
-		ldr	r0, [r0]
-		ldr	r1, [r1]
+		mov	r4, #1			@ flag this as being syscall return
 		tst	r0, r1
-		blne	SYMBOL_NAME(do_bottom_half)
-ret_from_intr:	ldr	r0, [sp, #S_PSR]
-		tst	r0, #3
+		blne	SYMBOL_NAME(do_softirq)
+ret_with_reschedule:				@ external entry (__irq_usr)
+		get_current_task r5
+		ldr	r0, [r5, #TSK_NEED_RESCHED]
+		ldr	r1, [r5, #TSK_SIGPENDING]
+		teq	r0, #0
+		bne	ret_reschedule
+		teq	r1, #0			@ check for signals
+		bne	ret_signal
+
+ret_from_all:	restore_user_regs		@ internal
+
+ret_signal:	mov	r1, sp			@ internal
+		adrsvc	al, lr, ret_from_all
+		mov	r2, r4
+		b	SYMBOL_NAME(do_signal)
+
+ret_reschedule:	adrsvc	al, lr, ret_with_reschedule	@ internal
+		b	SYMBOL_NAME(schedule)
+
+		.globl	ret_from_exception
+ret_from_exception:				@ external entry
+		get_softirq r0
+		ldmia	r0, {r0, r1}
+		mov	r4, #0
+		tst	r0, r1
+		blne	SYMBOL_NAME(do_softirq)
+		ldr	r0, [sp, #S_PSR]
+		tst	r0, #3			@ returning to user mode?
 		beq	ret_with_reschedule
 		b	ret_from_all
 
-ret_signal:	mov	r1, sp
-		adrsvc	al, lr, ret_from_all
-		b	SYMBOL_NAME(do_signal)
-
-2:		bl	SYMBOL_NAME(schedule)
-
-ret_from_sys_call:
-		adr	r0, 1f
-		ldmia	r0, {r0, r1}
-		ldr	r0, [r0]
-		ldr	r1, [r1]
-		tst	r0, r1
-		adrsvc	ne, lr, ret_from_intr
-		bne	SYMBOL_NAME(do_bottom_half)
-
-ret_with_reschedule:
-		get_current_task r1
-		ldr	r0, [r1, #TSK_NEED_RESCHED]
-		teq	r0, #0
-		bne	2b
-		ldr	r1, [r1, #TSK_SIGPENDING]
-		teq	r1, #0
-		bne	ret_signal
-
-ret_from_all:	restore_user_regs
-
-1:		.word	SYMBOL_NAME(bh_mask)
-		.word	SYMBOL_NAME(bh_active)
+#include "calls.S"
 
 /*=============================================================================
  * SWI handler
  *-----------------------------------------------------------------------------
- *
- * We now handle sys-call tracing, and the errno in the task structure.
- * Still have a problem with >4 arguments for functions.  Theres only
- * a couple of functions in the code that have 5 arguments, so Im not
- * too worried.
  */
 
-#include "calls.S"
+/*
+ * Create some aliases for some registers.  These should allow
+ * us to have in theory up to 7 arguments to a function.
+ */
+scno		.req	r9			@ syscall number
+tbl		.req	r8			@ syscall table pointer
+tip		.req	r7			@ temporary IP
 
+		.align	5
 vector_swi:	save_user_regs
-		mov	fp, #0
 		mask_pc	lr, lr
-		ldr	r6, [lr, #-4]!		@ get SWI instruction
-		arm700_bug_check r6, r7
-		enable_irqs r7
-		
-		bic	r6, r6, #0xff000000	@ mask off SWI op-code
-		eor	r6, r6, #OS_NUMBER<<20	@ check OS number
-		cmp	r6, #NR_syscalls	@ check upper syscall limit
+		zero_fp
+		ldr	scno, [lr, #-4]		@ get SWI instruction
+		arm700_bug_check scno, ip
+#ifdef CONFIG_ALIGNMENT_TRAP
+		ldr	ip, .LCswi
+		ldr	ip, [ip]
+		mcr	p15, 0, ip, c1, c0
+#endif
+		enable_irqs ip
+
+		str	r4, [sp, #-S_OFF]!	@ push fifth arg
+		adrsvc	al, lr, fast_syscall_return
+
+		bic	scno, scno, #0xff000000	@ mask off SWI op-code
+		eor	scno, scno, #OS_NUMBER<<20	@ check OS number
+		cmp	scno, #NR_syscalls	@ check upper syscall limit
 		bcs	2f
 
-		get_current_task r5
-		ldr	ip, [r5, #TSK_FLAGS]	@ check for syscall tracing
+		get_current_task ip
+		ldr	ip, [ip, #TSK_FLAGS]	@ check for syscall tracing
+		adr	tbl, SYMBOL_NAME(sys_call_table)
 		tst	ip, #PF_TRACESYS
-		bne	1f
+		ldreq	pc, [tbl, scno, lsl #2]	@ call sys routine
 
-		adr	ip, SYMBOL_NAME(sys_call_table)
-		str	r4, [sp, #-4]!		@ new style: (r0 = arg1, r5 = arg5)
-		mov	lr, pc
-		ldr	pc, [ip, r6, lsl #2]	@ call sys routine
-		add	sp, sp, #4
-		str	r0, [sp, #S_R0]		@ returned r0
-		b	ret_from_sys_call
-
-1:		ldr	r7, [sp, #S_IP]		@ save old IP
-		mov	r0, #0
-		str	r0, [sp, #S_IP]		@ trace entry [IP = 0]
+		ldr	tip, [sp, #S_IP + S_OFF]	@ save old IP
+		mov	ip, #0
+		str	ip, [sp, #S_IP + S_OFF]	@ trace entry [IP = 0]
 		bl	SYMBOL_NAME(syscall_trace)
-		str	r7, [sp, #S_IP]
-		ldmia	sp, {r0 - r3}		@ have to reload r0 - r3
-		adr	ip, SYMBOL_NAME(sys_call_table)
-		str	r4, [sp, #-4]!		@ new style: (r0 = arg1, r5 = arg5)
-		mov	lr, pc
-		ldr	pc, [ip, r6, lsl #2]	@ call sys routine
-		add	sp, sp, #4
-		str	r0, [sp, #S_R0]		@ returned r0
-		mov	r0, #1
-		str	r0, [sp, #S_IP]		@ trace exit [IP = 1]
-		bl	SYMBOL_NAME(syscall_trace)
-		str	r7, [sp, #S_IP]
-		b	ret_from_sys_call
+		str	tip, [sp, #S_IP + S_OFF]
 
-2:		tst	r6, #0x00f00000		@ is it a Unix SWI?
+		add	ip, sp, #S_OFF
+		ldmia	ip, {r0 - r3}		@ have to reload r0 - r3
+		mov	lr, pc
+		ldr	pc, [tbl, scno, lsl #2]	@ call sys routine
+		str	r0, [sp, #S_R0 + S_OFF]	@ returned r0
+
+		mov	ip, #1
+		str	ip, [sp, #S_IP + S_OFF]	@ trace exit [IP = 1]
+		bl	SYMBOL_NAME(syscall_trace)
+		str	tip, [sp, #S_IP + S_OFF]
+		b	slow_syscall_return
+
+2:		add	r1, sp, #S_OFF
+		tst	scno, #0x00f00000	@ is it a Unix SWI?
 		bne	3f
-		cmp	r6, #(KSWI_SYS_BASE - KSWI_BASE)
-		bcc	4f			@ not private func
-		bic	r0, r6, #0x000f0000
-		mov	r1, sp
-		bl	SYMBOL_NAME(arm_syscall)
-		b	ret_from_sys_call
+		subs	r0, scno, #(KSWI_SYS_BASE - KSWI_BASE)
+		bcs	SYMBOL_NAME(arm_syscall)
+		b	SYMBOL_NAME(sys_ni_syscall) @ not private func
 
-3:		eor	r0, r6, #OS_NUMBER<<20	@ Put OS number back
-		mov	r1, sp
-		bl	SYMBOL_NAME(deferred)
-		ldmfd	sp, {r0 - r3}
-		b	ret_from_sys_call
+3:		eor	r0, scno, #OS_NUMBER <<20	@ Put OS number back
+		adrsvc	al, lr, slow_syscall_return
+		b	SYMBOL_NAME(deferred)
 
-4:		bl	SYMBOL_NAME(sys_ni_syscall)
-		str	r0, [sp, #0]		@ returned r0
-		b	ret_from_sys_call
+		.align	5
+		.type	__softirq_state, #object
+__softirq_state:
+		.word	SYMBOL_NAME(softirq_state)
 
-@ r0 = syscall number
-@ r1 = syscall r0
-@ r5 = syscall r4
-@ ip = syscall table
-SYMBOL_NAME(sys_syscall):
-		mov	r6, r0
-		eor	r6, r6, #OS_NUMBER << 20
-		cmp	r6, #NR_syscalls		@ check range
-		movgt	r0, #-ENOSYS
-		movgt	pc, lr
-		add	sp, sp, #4			@ take of the save of our r4
-		ldmib	sp, {r0 - r4}			@ get our args
-		str	r4, [sp, #-4]!			@ Put our arg on the stack
-		ldr	pc, [ip, r6, lsl #2]
-
+		.type	sys_call_table, #object
 ENTRY(sys_call_table)
 #include "calls.S"
 
 /*============================================================================
  * Special system call wrappers
  */
+@ r0 = syscall number
+@ r5 = syscall table
+		.type	sys_syscall, #function
+SYMBOL_NAME(sys_syscall):
+		eor	scno, r0, #OS_NUMBER << 20
+		cmp	scno, #NR_syscalls	@ check range
+		add	ip, sp, #S_OFF
+		stmleia	sp, {r5, r6}		@ shuffle args
+		movle	r0, r1
+		movle	r1, r2
+		movle	r2, r3
+		movle	r3, r4
+		ldrle	pc, [tbl, scno, lsl #2]
+		b	sys_ni_syscall
+
 sys_fork_wrapper:
-		add	r0, sp, #4
+		add	r0, sp, #S_OFF
 		b	SYMBOL_NAME(sys_fork)
 
+sys_vfork_wrapper:
+		add	r0, sp, #S_OFF
+		b	SYMBOL_NAME(sys_vfork)
+
 sys_execve_wrapper:
-		add	r3, sp, #4
+		add	r3, sp, #S_OFF
 		b	SYMBOL_NAME(sys_execve)
 
-sys_mount_wrapper:
-		mov	r6, lr
-		add	r5, sp, #4
-		str	r5, [sp]
-		str	r4, [sp, #-4]!
-		bl	SYMBOL_NAME(sys_compat_mount)
-		add	sp, sp, #4
-		RETINSTR(mov,pc,r6)
-
 sys_clone_wapper:
-		add	r2, sp, #4
+		add	r2, sp, #S_OFF
 		b	SYMBOL_NAME(sys_clone)
 
-sys_llseek_wrapper:
-		mov	r6, lr
-		add	r5, sp, #4
-		str	r5, [sp]
-		str	r4, [sp, #-4]!
-		bl	SYMBOL_NAME(sys_compat_llseek)
-		add	sp, sp, #4
-		RETINSTR(mov,pc,r6)
-
 sys_sigsuspend_wrapper:
-		add	r3, sp, #4
+		add	r3, sp, #S_OFF
 		b	SYMBOL_NAME(sys_sigsuspend)
 
 sys_rt_sigsuspend_wrapper:
-		add	r2, sp, #4
+		add	r2, sp, #S_OFF
 		b	SYMBOL_NAME(sys_rt_sigsuspend)
 
 sys_sigreturn_wrapper:
-		add	r0, sp, #4
+		add	r0, sp, #S_OFF
 		b	SYMBOL_NAME(sys_sigreturn)
 
 sys_rt_sigreturn_wrapper:
-		add	r0, sp, #4
+		add	r0, sp, #S_OFF
 		b	SYMBOL_NAME(sys_rt_sigreturn)
 
 sys_sigaltstack_wrapper:
-		ldr	r2, [sp, #4 + S_SP]
+		ldr	r2, [sp, #S_OFF + S_SP]
 		b	do_sigaltstack
 
 /*
- *=============================================================================
- *		Low-level interface code
- *-----------------------------------------------------------------------------
- *		Trap initialisation
- *-----------------------------------------------------------------------------
- *
- * Note - FIQ code has changed.  The default is a couple of words in 0x1c, 0x20
- * that call _unexp_fiq.  Nowever, we now copy the FIQ routine to 0x1c (removes
- * some excess cycles).
- *
- * What we need to put into 0-0x1c are ldrs to branch to 0xC0000000
- * (the kernel).
- * 0x1c onwards is reserved for FIQ, so I think that I will allocate 0xe0 onwards for
- * the actual address to jump to.
+ * Note: off_4k (r5) is always units of 4K.  If we can't do the requested
+ * offset, we return EINVAL.
  */
-
-		.section ".text.init",#alloc,#execinstr
-
-#if defined(CONFIG_CPU_32)
-/*
- * these go into 0x00
- */
-.Lbranches:	swi	SYS_ERROR0
-		ldr	pc, .Lbranches + 0xe4
-		ldr	pc, .Lbranches + 0xe8
-		ldr	pc, .Lbranches + 0xec
-		ldr	pc, .Lbranches + 0xf0
-		ldr	pc, .Lbranches + 0xf4
-		ldr	pc, .Lbranches + 0xf8
-		ldr	pc, .Lbranches + 0xfc
-/*
- * this is put into 0xe4 and above
- */
-.Ljump_addresses:
-		.word	vector_undefinstr	@ 0xe4
-		.word	vector_swi		@ 0xe8
-		.word	vector_prefetch		@ 0xec
-		.word	vector_data		@ 0xf0
-		.word	vector_addrexcptn	@ 0xf4
-		.word	vector_IRQ		@ 0xf8
-		.word	_unexp_fiq		@ 0xfc
-/*
- * initialise the trap system
- */
-ENTRY(trap_init)
-		stmfd	sp!, {r4 - r7, lr}
-		initialise_traps_extra
-		mov	r0, #0xe4
-		adr	r1, .Ljump_addresses
-		ldmia	r1, {r1 - r7}
-		stmia	r0, {r1 - r7}
-		mov	r0, #0
-		adr	r1, .Lbranches
-		ldmia	r1, {r1 - r7}
-		stmia	r0, {r1 - r7}
-		LOADREGS(fd, sp!, {r4 - r7, pc})
-#elif defined(CONFIG_CPU_26)
-.Ljump_addresses:
-		swi	SYS_ERROR0
-		.word	vector_undefinstr	- 12
-		.word	vector_swi		- 16
-		.word	vector_prefetch		- 20
-		.word	vector_data		- 24
-		.word	vector_addrexcptn	- 28
-		.word	vector_IRQ		- 32
-		.word	_unexp_fiq		- 36
-		b	. + 8
-/*
- * initialise the trap system
- */
-ENTRY(trap_init)
-		stmfd	sp!, {r4 - r7, lr}
-		adr	r1, .Ljump_addresses
-		ldmia	r1, {r1 - r7, ip, lr}
-		orr	r2, lr, r2, lsr #2
-		orr	r3, lr, r3, lsr #2
-		orr	r4, lr, r4, lsr #2
-		orr	r5, lr, r5, lsr #2
-		orr	r6, lr, r6, lsr #2
-		orr	r7, lr, r7, lsr #2
-		orr	ip, lr, ip, lsr #2
-		mov	r0, #0
-		stmia	r0, {r1 - r7, ip}
-		ldmfd	sp!, {r4 - r7, pc}^
+sys_mmap2:
+#if PAGE_SHIFT > 12
+		tst	r5, #PGOFF_MASK
+		moveq	r5, r5, lsr #PGOFF_SHIFT
+		streq	r5, [sp, #4]
+		beq	do_mmap2
+		mov	r0, #-EINVAL
+		RETINSTR(mov,pc, lr)
+#else
+		str	r5, [sp, #4]
+		b	do_mmap2
 #endif
-
-		.previous
-
-/*============================================================================
- * FP support
- */
 
 		.data
 

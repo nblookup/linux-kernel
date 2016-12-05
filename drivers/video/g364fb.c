@@ -112,7 +112,7 @@ static int g364fb_ioctl(struct inode *inode, struct file *file, u_int cmd,
 /*
  *  Interface to the low level console driver
  */
-void g364fb_init(void);
+int g364fb_init(void);
 static int g364fbcon_switch(int con, struct fb_info *info);
 static int g364fbcon_updatevar(int con, struct fb_info *info);
 static void g364fbcon_blank(int blank, struct fb_info *info);
@@ -144,7 +144,7 @@ void fbcon_g364fb_cursor(struct display *p, int mode, int x, int y)
      case CM_MOVE:
      case CM_DRAW:
 	*(unsigned int *) CTLA_REG &= ~CURS_TOGGLE;
-	*(unsigned int *) CURS_POS_REG = ((x * p->fontwidth) << 12) | ((y * p->fontheight)-p->var.yoffset);
+	*(unsigned int *) CURS_POS_REG = ((x * fontwidth(p)) << 12) | ((y * fontheight(p))-p->var.yoffset);
 	break;
     }
 }
@@ -297,7 +297,7 @@ static int g364fb_ioctl(struct inode *inode, struct file *file, u_int cmd,
 /*
  *  Initialisation
  */
-__initfunc(void g364fb_init(void))
+int __init g364fb_init(void)
 {
     int i,j;
     volatile unsigned int *pal_ptr = (volatile unsigned int *) CLR_PAL_REG;
@@ -345,7 +345,7 @@ __initfunc(void g364fb_init(void))
     fb_var.yres = yres;
 
     fb_fix.line_length = (xres / 8) * fb_var.bits_per_pixel;
-    fb_fix.smem_start = (char *)0x40000000; /* physical address */
+    fb_fix.smem_start = 0x40000000; /* physical address */
     /* get size of video memory; this is special for the JAZZ hardware */
     mem = (r4030_read_reg32(JAZZ_R4030_CONFIG) >> 8) & 3;
     fb_fix.smem_len = (1 << (mem*2)) * 512 * 1024;
@@ -355,7 +355,7 @@ __initfunc(void g364fb_init(void))
     fb_fix.xpanstep = 0;
     fb_fix.ypanstep = 1;
     fb_fix.ywrapstep = 0;
-    fb_fix.mmio_start = NULL;
+    fb_fix.mmio_start = 0;
     fb_fix.mmio_len = 0;
     fb_fix.accel = FB_ACCEL_NONE;
     
@@ -413,10 +413,11 @@ __initfunc(void g364fb_init(void))
     g364fb_set_var(&fb_var, -1, &fb_info);
 
     if (register_framebuffer(&fb_info) < 0)
-	return;
+	return -EINVAL;
 
     printk("fb%d: %s frame buffer device\n", GET_FB_IDX(fb_info.node),
 	   fb_fix.id);
+    return 0;
 }
 
 
@@ -485,7 +486,7 @@ static int g364fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
     if (regno > 255)
 	return 1;
 
-    red >> = 8;
+    red >>= 8;
     green >>= 8;
     blue >>=8;
     palette[regno].red = red;

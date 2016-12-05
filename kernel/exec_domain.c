@@ -2,7 +2,7 @@
 #include <linux/smp_lock.h>
 #include <linux/module.h>
 
-static asmlinkage void no_lcall7(struct pt_regs * regs);
+static asmlinkage void no_lcall7(int segment, struct pt_regs * regs);
 
 
 static unsigned long ident_map[32] = {
@@ -25,9 +25,8 @@ struct exec_domain default_exec_domain = {
 static struct exec_domain *exec_domains = &default_exec_domain;
 
 
-static asmlinkage void no_lcall7(struct pt_regs * regs)
+static asmlinkage void no_lcall7(int segment, struct pt_regs * regs)
 {
-
   /*
    * This may have been a static linked SVr4 binary, so we would have the
    * personality set incorrectly.  Check to see whether SVr4 is available,
@@ -44,7 +43,7 @@ static asmlinkage void no_lcall7(struct pt_regs * regs)
 
 	if (current->exec_domain && current->exec_domain->handler
 	&& current->exec_domain->handler != no_lcall7) {
-		current->exec_domain->handler(regs);
+		current->exec_domain->handler(segment, regs);
 		return;
 	}
 
@@ -98,18 +97,17 @@ int unregister_exec_domain(struct exec_domain *it)
 	return -EINVAL;
 }
 
-asmlinkage int sys_personality(unsigned long personality)
+asmlinkage long sys_personality(unsigned long personality)
 {
 	struct exec_domain *it;
 	unsigned long old_personality;
 	int ret;
 
-	lock_kernel();
-	ret = current->personality;
 	if (personality == 0xffffffff)
-		goto out;
+		return current->personality;
 
 	ret = -EINVAL;
+	lock_kernel();
 	it = lookup_exec_domain(personality);
 	if (!it)
 		goto out;
@@ -125,4 +123,16 @@ asmlinkage int sys_personality(unsigned long personality)
 out:
 	unlock_kernel();
 	return ret;
+}
+
+int get_exec_domain_list(char * page)
+{
+	int len = 0;
+	struct exec_domain * e;
+
+	for (e=exec_domains; e && len < PAGE_SIZE - 80; e=e->next)
+		len += sprintf(page+len, "%d-%d\t%-16s\t[%s]\n",
+			e->pers_low, e->pers_high, e->name,
+			e->module ? e->module->name : "kernel");
+	return len;
 }

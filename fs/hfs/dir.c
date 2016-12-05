@@ -157,19 +157,6 @@ static inline void mark_inodes_deleted(struct hfs_cat_entry *entry,
 /*================ Global functions ================*/
 
 /*
- * hfs_dir_read()
- *
- * This is the read() entry in the file_operations structure for HFS
- * directories.	 It simply returns an error code, since reading is not
- * supported.
- */
-hfs_rwret_t hfs_dir_read(struct file * filp, char *buf,
-			 hfs_rwarg_t count, loff_t *ppos)
-{
-	return -EISDIR;
-}
-
-/*
  * hfs_create()
  *
  * This is the create() entry in the inode_operations structure for
@@ -255,31 +242,6 @@ int hfs_mkdir(struct inode * parent, struct dentry *dentry, int mode)
 }
 
 /*
- * hfs_mknod()
- *
- * This is the mknod() entry in the inode_operations structure for
- * regular HFS directories.  The purpose is to create a new entry
- * in a directory, given the inode for the parent directory and the
- * name (and its length) and the mode of the new entry (and the device
- * number if the entry is to be a device special file).
- *
- * HFS only supports regular files and directories and Linux disallows
- * using mknod() to create directories.  Thus we just check the arguments
- * and call hfs_create().
- */
-int hfs_mknod(struct inode *dir, struct dentry *dentry, int mode, int rdev)
-{
-	if (!dir) 
-		return -ENOENT;
-
-	/* the only thing we currently do. */
-	if (S_ISREG(mode)) 
-		return hfs_create(dir, dentry, mode);
-
-	return -EPERM;
-}
-
-/*
  * hfs_unlink()
  *
  * This is the unlink() entry in the inode_operations structure for
@@ -349,7 +311,7 @@ int hfs_rmdir(struct inode * parent, struct dentry *dentry)
 		goto hfs_rmdir_put;
 
 	error = -EBUSY;
-	if (!list_empty(&dentry->d_hash))
+	if (!d_unhashed(dentry))
 		goto hfs_rmdir_put;
 
 	if (/* we only have to worry about 2 and 3 for mount points */

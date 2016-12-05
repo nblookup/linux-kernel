@@ -26,7 +26,9 @@
 extern struct inode_operations coda_dir_inode_operations;
 extern struct inode_operations coda_file_inode_operations;
 extern struct inode_operations coda_ioctl_inode_operations;
-extern struct inode_operations coda_symlink_inode_operations;
+
+extern struct address_space_operations coda_file_aops;
+extern struct address_space_operations coda_symlink_aops;
 
 extern struct file_operations coda_dir_operations;
 extern struct file_operations coda_file_operations;
@@ -37,6 +39,7 @@ int coda_open(struct inode *i, struct file *f);
 int coda_release(struct inode *i, struct file *f);
 int coda_permission(struct inode *inode, int mask);
 int coda_revalidate_inode(struct dentry *);
+int coda_notify_change(struct dentry *, struct iattr *);
 
 /* global variables */
 extern int coda_debug;
@@ -113,10 +116,10 @@ void coda_sysctl_clean(void);
 do {                                                                      \
     if (size < 3000) {                                                    \
         ptr = (cast)kmalloc((unsigned long) size, GFP_KERNEL);            \
-                CDEBUG(D_MALLOC, "kmalloced: %x at %x.\n", (int) size, (int) ptr);\
+                CDEBUG(D_MALLOC, "kmalloced: %lx at %p.\n", (long)size, ptr);\
      }  else {                                                             \
         ptr = (cast)vmalloc((unsigned long) size);                        \
-	CDEBUG(D_MALLOC, "vmalloced: %x at %x.\n", (int) size, (int) ptr);}\
+	CDEBUG(D_MALLOC, "vmalloced: %lx at %p .\n", (long)size, ptr);}\
     if (ptr == 0) {                                                       \
         printk("kernel malloc returns 0 at %s:%d\n", __FILE__, __LINE__);  \
     }                                                                     \
@@ -124,7 +127,7 @@ do {                                                                      \
 } while (0)
 
 
-#define CODA_FREE(ptr,size) do {if (size < 3000) { kfree_s((ptr), (size)); CDEBUG(D_MALLOC, "kfreed: %x at %x.\n", (int) size, (int) ptr); } else { vfree((ptr)); CDEBUG(D_MALLOC, "vfreed: %x at %x.\n", (int) size, (int) ptr);} } while (0)
+#define CODA_FREE(ptr,size) do {if (size < 3000) { kfree_s((ptr), (size)); CDEBUG(D_MALLOC, "kfreed: %lx at %p.\n", (long) size, ptr); } else { vfree((ptr)); CDEBUG(D_MALLOC, "vfreed: %lx at %p.\n", (long) size, ptr);} } while (0)
 
 /* inode to cnode */
 

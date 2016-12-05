@@ -1,5 +1,5 @@
 /*
- * $Id: time.c,v 1.47 1999/03/18 05:11:11 cort Exp $
+ * $Id: time.c,v 1.57 1999/10/21 03:08:16 cort Exp $
  * Common time routines among all ppc machines.
  *
  * Written by Cort Dougan (cort@cs.nmt.edu) to merge
@@ -52,7 +52,7 @@
 void smp_local_timer_interrupt(struct pt_regs *);
 
 /* keep track of when we need to update the rtc */
-unsigned long last_rtc_update = 0;
+time_t last_rtc_update = 0;
 
 /* The decrementer counts down by 128 every 128ns on a 601. */
 #define DECREMENTER_COUNT_601	(1000000000 / HZ)
@@ -68,7 +68,7 @@ unsigned count_period_den;	/* count_period_num / count_period_den us */
  * with interrupts disabled.
  * We set it up to overflow again in 1/HZ seconds.
  */
-void timer_interrupt(struct pt_regs * regs)
+int timer_interrupt(struct pt_regs * regs)
 {
 	int dval, d;
 	unsigned long cpu = smp_processor_id();
@@ -95,45 +95,53 @@ void timer_interrupt(struct pt_regs * regs)
 	}
 #endif /* __SMP__ */			
 	
-	while ((dval = get_dec()) < 0) {
+	dval = get_dec();
+	/*
+	 * Wait for the decrementer to change, then jump
+	 * in and add decrementer_count to its value
+	 * (quickly, before it changes again!)
+	 */
+	while ((d = get_dec()) == dval)
+		;
+	/*
+	 * Don't play catchup between the call to time_init()
+	 * and sti() in init/main.c.
+	 *
+	 * This also means if we're delayed for > HZ
+	 * we lose those ticks.  If we're delayed for > HZ
+	 * then we have something wrong anyway, though.
+	 *
+	 * -- Cort
+	 */
+	if ( d < (-1*decrementer_count) )
+		d = 0;
+	set_dec(d + decrementer_count);
+	if ( !smp_processor_id() )
+	{
+		do_timer(regs);
 		/*
-		 * Wait for the decrementer to change, then jump
-		 * in and add decrementer_count to its value
-		 * (quickly, before it changes again!)
+		 * update the rtc when needed
 		 */
-		while ((d = get_dec()) == dval)
-			;
-		set_dec(d + decrementer_count);
-		if ( !smp_processor_id() )
+		if ( (time_status & STA_UNSYNC) &&
+		     ((xtime.tv_sec > last_rtc_update + 60) ||
+		      (xtime.tv_sec < last_rtc_update)) )
 		{
-			do_timer(regs);
-			/*
-			 * update the rtc when needed
-			 */
-			if ( xtime.tv_sec > last_rtc_update + 660 )
-			{
-				if (ppc_md.set_rtc_time(xtime.tv_sec) == 0) {
-					last_rtc_update = xtime.tv_sec;
-				}
-				else {
-					/* do it again in 60 s */
-					last_rtc_update = xtime.tv_sec - 60;
-				}
-			}
+			if (ppc_md.set_rtc_time(xtime.tv_sec) == 0)
+				last_rtc_update = xtime.tv_sec;
+			else
+				/* do it again in 60 s */
+				last_rtc_update = xtime.tv_sec;
 		}
 	}
 #ifdef __SMP__
 	smp_local_timer_interrupt(regs);
 #endif		
-
-	/* Fixme - make this more generic - Corey */
-#ifdef CONFIG_APUS
-	{
-		extern void apus_heartbeat (void);
-		apus_heartbeat ();
-	}
-#endif
+	
+	if ( ppc_md.heartbeat && !ppc_md.heartbeat_count--)
+		ppc_md.heartbeat();
+	
 	hardirq_exit(cpu);
+	return 1; /* lets ret_from_int know we can do checks */
 }
 
 /*
@@ -180,7 +188,7 @@ void do_settimeofday(struct timeval *tv)
 }
 
 
-__initfunc(void time_init(void))
+void __init time_init(void)
 {
         if (ppc_md.time_init != NULL)
         {
@@ -200,10 +208,8 @@ __initfunc(void time_init(void))
         xtime.tv_usec = 0;
 
 	set_dec(decrementer_count);
-	/* mark the rtc/on-chip timer as in sync
-	 * so we don't update right away
-	 */
-	last_rtc_update = xtime.tv_sec;
+	/* allow setting the time right away */
+	last_rtc_update = 0;
 }
 
 /* Converts Gregorian date to seconds since 1970-01-01 00:00:00.

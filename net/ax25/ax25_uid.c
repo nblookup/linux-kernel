@@ -39,7 +39,7 @@
 #include <linux/notifier.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
-#include <linux/firewall.h>
+#include <linux/netfilter.h>
 #include <linux/sysctl.h>
 #include <net/ip.h>
 #include <net/arp.h>
@@ -129,7 +129,7 @@ int ax25_uid_ioctl(int cmd, struct sockaddr_ax25 *sax)
 	return -EINVAL;	/*NOTREACHED */
 }
 
-int ax25_uid_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
+int ax25_uid_get_info(char *buffer, char **start, off_t offset, int length)
 {
 	ax25_uid_assoc *pt;
 	int len     = 0;

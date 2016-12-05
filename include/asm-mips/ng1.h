@@ -1,28 +1,34 @@
-/*
- * SGI/Newport video card ioctl definitions
+/* $Id: ng1.h,v 1.4 1999/08/19 22:56:33 ralf Exp $
  *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
+ *
+ * SGI/Newport video card ioctl definitions
  */
+#ifndef _ASM_NG1_H
+#define _ASM_NG1_H
 
 typedef struct {
         int flags;
-        u16 w, h;
-        u16 fields_sec;
+        __u16 w, h;
+        __u16 fields_sec;
 } ng1_vof_info_t;
 
 struct ng1_info {
 	struct gfx_info gfx_info;
-	u8 boardrev;
-        u8 rex3rev;
-        u8 vc2rev;
-        u8 monitortype;
-        u8 videoinstalled;
-        u8 mcrev;
-        u8 bitplanes;
-        u8 xmap9rev;
-        u8 cmaprev;
+	__u8 boardrev;
+        __u8 rex3rev;
+        __u8 vc2rev;
+        __u8 monitortype;
+        __u8 videoinstalled;
+        __u8 mcrev;
+        __u8 bitplanes;
+        __u8 xmap9rev;
+        __u8 cmaprev;
         ng1_vof_info_t ng1_vof_info;
-        u8 bt445rev;
-        u8 paneltype;
+        __u8 bt445rev;
+        __u8 paneltype;
 };
 
 #define GFX_NAME_NEWPORT "NG1"
@@ -47,4 +53,4 @@ struct ng1_setgammaramp_args {
         unsigned char blue  [256];
 };
 
-
+#endif /* _ASM_NG1_H */

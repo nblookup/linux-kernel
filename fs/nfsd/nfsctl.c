@@ -18,7 +18,6 @@
 #include <linux/fcntl.h>
 #include <linux/net.h>
 #include <linux/in.h>
-#include <linux/version.h>
 #include <linux/unistd.h>
 #include <linux/malloc.h>
 #include <linux/proc_fs.h>
@@ -30,17 +29,10 @@
 #include <linux/nfsd/xdr.h>
 #include <linux/nfsd/syscall.h>
 
-#if LINUX_VERSION_CODE >= 0x020100
 #include <asm/uaccess.h>
-#else
-# define copy_from_user		memcpy_fromfs
-# define copy_to_user		memcpy_tofs
-# define access_ok		!verify_area
-#endif
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 
-extern void nfsd_fh_init(void);
 extern long sys_call_table[];
 
 static int	nfsctl_svc(struct nfsctl_svc *data);
@@ -48,8 +40,9 @@ static int	nfsctl_addclient(struct nfsctl_client *data);
 static int	nfsctl_delclient(struct nfsctl_client *data);
 static int	nfsctl_export(struct nfsctl_export *data);
 static int	nfsctl_unexport(struct nfsctl_export *data);
-static int	nfsctl_getfh(struct nfsctl_fhparm *, struct knfs_fh *);
-static int	nfsctl_getfd(struct nfsctl_fdparm *, struct knfs_fh *);
+static int	nfsctl_getfh(struct nfsctl_fhparm *, __u8 *);
+static int	nfsctl_getfd(struct nfsctl_fdparm *, __u8 *);
+static int	nfsctl_getfs(struct nfsctl_fsparm *, struct knfsd_fh *);
 /* static int	nfsctl_ugidupdate(struct nfsctl_ugidmap *data); */
 
 static int	initialized = 0;
@@ -59,13 +52,9 @@ int exp_procfs_exports(char *buffer, char **start, off_t offset,
 
 void proc_export_init(void)
 {
-	struct proc_dir_entry *nfs_export_ent = NULL;
-
-	if (!(nfs_export_ent = create_proc_entry("fs/nfs", S_IFDIR, 0)))
+	if (!proc_mkdir("fs/nfs", 0))
 		return;
-	if (!(nfs_export_ent = create_proc_entry("fs/nfs/exports", 0, 0)))
-		return;
-	nfs_export_ent->read_proc = exp_procfs_exports;
+	create_proc_read_entry("fs/nfs/exports", 0, 0, exp_procfs_exports,NULL);
 }
 
 
@@ -75,12 +64,10 @@ void proc_export_init(void)
 static void
 nfsd_init(void)
 {
-	nfsd_xdr_init();	/* XDR */
 	nfsd_stat_init();	/* Statistics */
 	nfsd_cache_init();	/* RPC reply cache */
 	nfsd_export_init();	/* Exports table */
 	nfsd_lockd_init();	/* lockd->nfsd callbacks */
-	nfsd_fh_init();		/* FH table */
 	proc_export_init();
 	initialized = 1;
 }
@@ -123,12 +110,37 @@ nfsctl_ugidupdate(nfs_ugidmap *data)
 }
 #endif
 
+#ifdef notyet
 static inline int
-nfsctl_getfd(struct nfsctl_fdparm *data, struct knfs_fh *res)
+nfsctl_getfs(struct nfsctl_fsparm *data, struct knfsd_fh *res)
 {
 	struct sockaddr_in	*sin;
 	struct svc_client	*clp;
 	int			err = 0;
+
+	if (data->gd_addr.sa_family != AF_INET)
+		return -EPROTONOSUPPORT;
+	sin = (struct sockaddr_in *)&data->gd_addr;
+	if (data->gd_maxlen > NFS3_FHSIZE)
+		data->gd_maxlen = NFS3_FHSIZE;
+	exp_readlock();
+	if (!(clp = exp_getclient(sin)))
+		err = -EPERM;
+	else
+		err = exp_rootfh(clp, 0, 0, data->gd_path, res, data->gd_maxlen);
+	exp_unlock();
+
+	return err;
+}
+#endif
+
+static inline int
+nfsctl_getfd(struct nfsctl_fdparm *data, __u8 *res)
+{
+	struct sockaddr_in	*sin;
+	struct svc_client	*clp;
+	int			err = 0;
+	struct	knfsd_fh	fh;
 
 	if (data->gd_addr.sa_family != AF_INET)
 		return -EPROTONOSUPPORT;
@@ -140,18 +152,28 @@ nfsctl_getfd(struct nfsctl_fdparm *data, struct knfs_fh *res)
 	if (!(clp = exp_getclient(sin)))
 		err = -EPERM;
 	else
-		err = exp_rootfh(clp, 0, 0, data->gd_path, res);
+		err = exp_rootfh(clp, 0, 0, data->gd_path, &fh, NFS_FHSIZE);
 	exp_unlock();
+
+	if (err == 0) {
+		if (fh.fh_size > NFS_FHSIZE)
+			err = -EINVAL;
+		else {
+			memset(res,0, NFS_FHSIZE);
+			memcpy(res, fh.fh_base.fh_pad, fh.fh_size);
+		}
+	}
 
 	return err;
 }
 
 static inline int
-nfsctl_getfh(struct nfsctl_fhparm *data, struct knfs_fh *res)
+nfsctl_getfh(struct nfsctl_fhparm *data, __u8 *res)
 {
 	struct sockaddr_in	*sin;
 	struct svc_client	*clp;
 	int			err = 0;
+	struct knfsd_fh		fh;
 
 	if (data->gf_addr.sa_family != AF_INET)
 		return -EPROTONOSUPPORT;
@@ -163,8 +185,17 @@ nfsctl_getfh(struct nfsctl_fhparm *data, struct knfs_fh *res)
 	if (!(clp = exp_getclient(sin)))
 		err = -EPERM;
 	else
-		err = exp_rootfh(clp, to_kdev_t(data->gf_dev), data->gf_ino, NULL, res);
+		err = exp_rootfh(clp, to_kdev_t(data->gf_dev), data->gf_ino, NULL, &fh, NFS_FHSIZE);
 	exp_unlock();
+
+	if (err == 0) {
+		if (fh.fh_size > NFS_FHSIZE)
+			err = -EINVAL;
+		else {
+			memset(res,0, NFS_FHSIZE);
+			memcpy(res, fh.fh_base.fh_pad, fh.fh_size);
+		}
+	}
 
 	return err;
 }
@@ -231,11 +262,15 @@ asmlinkage handle_sys_nfsservctl(int cmd, void *opaque_argp, void *opaque_resp)
 		break;
 #endif
 	case NFSCTL_GETFH:
-		err = nfsctl_getfh(&arg->ca_getfh, &res->cr_getfh);
+		err = nfsctl_getfh(&arg->ca_getfh, res->cr_getfh);
 		break;
 	case NFSCTL_GETFD:
-		err = nfsctl_getfd(&arg->ca_getfd, &res->cr_getfh);
+		err = nfsctl_getfd(&arg->ca_getfd, res->cr_getfh);
 		break;
+#ifdef notyet
+	case NFSCTL_GETFS:
+		err = nfsctl_getfs(&arg->ca_getfs, &res->cr_getfs);
+#endif
 	default:
 		err = -EINVAL;
 	}
@@ -256,27 +291,10 @@ done:
 
 #ifdef MODULE
 /* New-style module support since 2.1.18 */
-#if LINUX_VERSION_CODE >= 131346
 EXPORT_NO_SYMBOLS;
 MODULE_AUTHOR("Olaf Kirch <okir@monad.swb.de>");
-#endif
 
 extern int (*do_nfsservctl)(int, void *, void *);
-
-/*
- * This is called as the fill_inode function when an inode
- * is going into (fill = 1) or out of service (fill = 0).
- *
- * We use it here to make sure the module can't be unloaded
- * while a /proc inode is in use.
- */
-void nfsd_modcount(struct inode *inode, int fill)
-{
-	if (fill)
-		MOD_INC_USE_COUNT;
-	else
-		MOD_DEC_USE_COUNT;
-}
 
 /*
  * Initialize the module
@@ -284,7 +302,7 @@ void nfsd_modcount(struct inode *inode, int fill)
 int
 init_module(void)
 {
-	printk("Installing knfsd (copyright (C) 1996 okir@monad.swb.de).\n");
+	printk(KERN_INFO "Installing knfsd (copyright (C) 1996 okir@monad.swb.de).\n");
 	do_nfsservctl = handle_sys_nfsservctl;
 	return 0;
 }
@@ -302,7 +320,6 @@ cleanup_module(void)
 	do_nfsservctl = NULL;
 	nfsd_export_shutdown();
 	nfsd_cache_shutdown();
-	nfsd_fh_free();
 	remove_proc_entry("fs/nfs/exports", NULL);
 	remove_proc_entry("fs/nfs", NULL);
 	nfsd_stat_shutdown();

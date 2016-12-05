@@ -11,7 +11,6 @@
  */
 
 #include <linux/config.h>
-#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -32,34 +31,30 @@
 #include <linux/console.h>
 #include <linux/pci.h>
 #include <linux/openpic.h>
+#include <linux/version.h>
+#include <linux/adb.h>
+#include <linux/module.h>
+#include <linux/delay.h>
+#include <linux/ide.h>
 
 #include <asm/mmu.h>
 #include <asm/processor.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
-#include <asm/ide.h>
 #include <asm/prom.h>
 #include <asm/gg2.h>
 #include <asm/pci-bridge.h>
 #include <asm/dma.h>
 #include <asm/machdep.h>
 #include <asm/irq.h>
-#include <asm/adb.h>
 #include <asm/hydra.h>
+#include <asm/keyboard.h>
 
 #include "time.h"
 #include "local_irq.h"
 #include "i8259.h"
 #include "open_pic.h"
 
-/* Fixme - need to move these into their own .c and .h file */
-extern void i8259_mask_and_ack_irq(unsigned int irq_nr);
-extern void i8259_set_irq_mask(unsigned int irq_nr);
-extern void i8259_mask_irq(unsigned int irq_nr);
-extern void i8259_unmask_irq(unsigned int irq_nr);
-extern void i8259_init(void);
-
-/* Fixme - remove this when it is fixed. - Corey */
 extern volatile unsigned char *chrp_int_ack_special;
 
 unsigned long chrp_get_rtc_time(void);
@@ -68,6 +63,8 @@ void chrp_calibrate_decr(void);
 void chrp_time_init(void);
 
 void chrp_setup_pci_ptrs(void);
+extern void chrp_progress(char *, unsigned short);
+void chrp_event_scan(void);
 
 extern int pckbd_setkeycode(unsigned int scancode, unsigned int keycode);
 extern int pckbd_getkeycode(unsigned int scancode);
@@ -86,7 +83,6 @@ extern void mackbd_leds(unsigned char leds);
 extern void mackbd_init_hw(void);
 extern unsigned char mackbd_sysrq_xlate[128];
 
-/* for the mac fs */
 kdev_t boot_dev;
 
 extern PTE *Hash, *Hash_end;
@@ -130,7 +126,7 @@ chrp_get_cpuinfo(char *buffer)
 	len = sprintf(buffer,"machine\t\t: CHRP %s\n", model);
 
 	/* longtrail (goldengate) stuff */
-	if ( !strncmp( model, "IBM,LongTrail", 9 ) )
+	if ( !strncmp( model, "IBM,LongTrail", 13 ) )
 	{
 		/* VLSI VAS96011/12 `Golden Gate 2' */
 		/* Memory banks */
@@ -180,48 +176,53 @@ chrp_get_cpuinfo(char *buffer)
 }
 
 /*
-     *  Fixes for the National Semiconductor PC78308VUL SuperI/O
-     *
-     *  Some versions of Open Firmware incorrectly initialize the IRQ settings
-     *  for keyboard and mouse
-     */
-
-__initfunc(static inline void sio_write(u8 val, u8 index))
+ *  Fixes for the National Semiconductor PC78308VUL SuperI/O
+ *
+ *  Some versions of Open Firmware incorrectly initialize the IRQ settings
+ *  for keyboard and mouse
+ */
+static inline void __init sio_write(u8 val, u8 index)
 {
 	outb(index, 0x15c);
 	outb(val, 0x15d);
 }
 
-__initfunc(static inline u8 sio_read(u8 index))
+static inline u8 __init sio_read(u8 index)
 {
 	outb(index, 0x15c);
 	return inb(0x15d);
 }
 
-__initfunc(static void sio_fixup_irq(const char *name, u8 device, u8 level,
-				     u8 type))
+static void __init sio_fixup_irq(const char *name, u8 device, u8 level,
+				     u8 type)
 {
 	u8 level0, type0, active;
-
-	/* select logical device */
-	sio_write(device, 0x07);
-	active = sio_read(0x30);
-	level0 = sio_read(0x70);
-	type0 = sio_read(0x71);
-	printk("sio: %s irq level %d, type %d, %sactive: ", name, level0, type0,
-	       !active ? "in" : "");
-	if (level0 == level && type0 == type && active)
-		printk("OK\n");
-	else {
-		printk("remapping to level %d, type %d, active\n", level, type);
-		sio_write(0x01, 0x30);
-		sio_write(level, 0x70);
-		sio_write(type, 0x71);
+	struct device_node *root;
+	
+	root = find_path_device("/");
+	if (root &&
+	    !strncmp(get_property(root, "model", NULL), "IBM,LongTrail", 13 ) )
+	{
+		/* select logical device */
+		sio_write(device, 0x07);
+		active = sio_read(0x30);
+		level0 = sio_read(0x70);
+		type0 = sio_read(0x71);
+		printk("sio: %s irq level %d, type %d, %sactive: ", name, level0, type0,
+		       !active ? "in" : "");
+		if (level0 == level && type0 == type && active)
+			printk("OK\n");
+		else {
+			printk("remapping to level %d, type %d, active\n", level, type);
+			sio_write(0x01, 0x30);
+			sio_write(level, 0x70);
+			sio_write(type, 0x71);
+		}
 	}
 
 }
 
-__initfunc(static void sio_init(void))
+static void __init sio_init(void)
 {
 	/* logical device 0 (KBC/Keyboard) */
 	sio_fixup_irq("keyboard", 0, 1, 2);
@@ -230,10 +231,11 @@ __initfunc(static void sio_init(void))
 }
 
 
-__initfunc(void
-	   chrp_setup_arch(unsigned long * memory_start_p, unsigned long * memory_end_p))
+void __init
+chrp_setup_arch(void)
 {
 	extern char cmd_line[];
+	struct device_node *device;
 
 	/* init to some ~sane value until calibrate_delay() runs */
 	loops_per_sec = 50000000;
@@ -247,7 +249,6 @@ __initfunc(void
 	else
 #endif
 		ROOT_DEV = to_kdev_t(0x0802); /* sda2 (sda1 is for the kernel) */
-	
 	printk("Boot arguments: %s\n", cmd_line);
 	
 	request_region(0x20,0x20,"pic1");
@@ -273,7 +274,7 @@ __initfunc(void
 			find_path_device("/"), "platform-open-pic", NULL);
 		OpenPIC = ioremap((unsigned long)OpenPIC, sizeof(struct OpenPIC));
 	}
-	
+
 	/*
 	 *  Fix the Super I/O configuration
 	 */
@@ -281,72 +282,62 @@ __initfunc(void
 #ifdef CONFIG_DUMMY_CONSOLE
 	conswitchp = &dummy_con;
 #endif
-	/* my starmax 6000 needs this but the longtrail shouldn't do it -- Cort */
-	if ( !strncmp("MOT", get_property(find_path_device("/"),
-					  "model", NULL),3) )
-		*memory_start_p = pmac_find_bridges(*memory_start_p, *memory_end_p);
-	/*
-	 * The f50 has a lot of IO space - we need to map some in that
-	 * isn't covered by the BAT mappings in MMU_init() -- Cort
+	pmac_find_bridges();
+
+	/* Get the event scan rate for the rtas so we know how
+	 * often it expects a heartbeat. -- Cort
 	 */
-	if ( !strncmp("F5", get_property(find_path_device("/"),
-					 "ibm,model-class", NULL),2) )
+	if ( rtas_data )
 	{
-#if 0		
-		/*
-		 * This ugly hack allows us to force ioremap() to
-		 * create a 1-to-1 mapping for us, even though
-		 * the address is < ioremap_base.  This is necessary
-		 * since we want our PCI IO space to have contiguous
-		 * virtual addresses and I think it's worse to have
-		 * calls to map_page() here.
-		 * -- Cort
-		 */
-		unsigned long hold = ioremap_base;
-		ioremap_base = 0;
-		__ioremap(0x90000000, 0x10000000, _PAGE_NO_CACHE);
-		ioremap_base = hold;
-#endif		
+		struct property *p;
+		device = find_devices("rtas");
+		for ( p = device->properties;
+		      p && strncmp(p->name, "rtas-event-scan-rate", 20);
+		      p = p->next )
+			/* nothing */ ;
+		if ( p && *(unsigned long *)p->value )
+		{
+			ppc_md.heartbeat = chrp_event_scan;
+			ppc_md.heartbeat_reset = (HZ/(*(unsigned long *)p->value)*30)-1;
+			ppc_md.heartbeat_count = 1;
+			printk("RTAS Event Scan Rate: %lu (%lu jiffies)\n",
+			       *(unsigned long *)p->value, ppc_md.heartbeat_reset );
+		}
 	}
 }
 
 void
+chrp_event_scan(void)
+{
+	unsigned char log[1024];
+	unsigned long ret = 0;
+	/* XXX: we should loop until the hardware says no more error logs -- Cort */
+	call_rtas( "event-scan", 4, 1, &ret, 0xffffffff, 0,
+		   __pa(log), 1024 );
+	ppc_md.heartbeat_count = ppc_md.heartbeat_reset;
+}
+	
+void
 chrp_restart(char *cmd)
 {
-#if 0
-	extern unsigned int rtas_entry, rtas_data, rtas_size;
 	printk("RTAS system-reboot returned %d\n",
 	       call_rtas("system-reboot", 0, 1, NULL));
-	printk("rtas_entry: %08lx rtas_data: %08lx rtas_size: %08lx\n",
-	       rtas_entry,rtas_data,rtas_size);
 	for (;;);
-#else
-	printk("System Halted\n");
-	while(1);
-#endif
 }
 
 void
 chrp_power_off(void)
 {
-	/* RTAS doesn't seem to work on Longtrail.
-	   For now, do it the same way as the PReP. */
-#if 0
-	extern unsigned int rtas_entry, rtas_data, rtas_size;
+	/* allow power on only with power button press */
 	printk("RTAS power-off returned %d\n",
-	       call_rtas("power-off", 2, 1, NULL, 0, 0));
-	printk("rtas_entry: %08lx rtas_data: %08lx rtas_size: %08lx\n",
-	       rtas_entry,rtas_data,rtas_size);
+	       call_rtas("power-off", 2, 1, NULL,0xffffffff,0xffffffff));
 	for (;;);
-#else
-	chrp_restart(NULL);
-#endif
 }
 
 void
 chrp_halt(void)
 {
-	chrp_restart(NULL);
+	chrp_power_off();
 }
 
 u_int
@@ -362,83 +353,51 @@ chrp_irq_cannonicalize(u_int irq)
 	}
 }
 
-void
-chrp_do_IRQ(struct pt_regs *regs,
-	    int            cpu,
-            int            isfake)
+int chrp_get_irq( struct pt_regs *regs )
 {
         int irq;
-        unsigned long bits = 0;
-        int openpic_eoi_done = 0;
 
-#ifdef __SMP__
-        {
-                unsigned int loops = 1000000;
-                while (test_bit(0, &global_irq_lock)) {
-                        if (smp_processor_id() == global_irq_holder) {
-                                printk("uh oh, interrupt while we hold global irq lock!\n");
-#ifdef CONFIG_XMON
-                                xmon(0);
-#endif
-                                break;
-                        }
-                        if (loops-- == 0) {
-                                printk("do_IRQ waiting for irq lock (holder=%d)\n", global_irq_holder);
-#ifdef CONFIG_XMON
-                                xmon(0);
-#endif
-                        }
-                }
-        }
-#endif /* __SMP__ */
-
-        irq = openpic_irq(0);
+        irq = openpic_irq( smp_processor_id() );
         if (irq == IRQ_8259_CASCADE)
         {
                 /*
                  * This magic address generates a PCI IACK cycle.
-                 *
-                 * This should go in the above mask/ack code soon. -- Cort
                  */
 		if ( chrp_int_ack_special )
 			irq = *chrp_int_ack_special;
 		else
-			irq = i8259_irq(0);
-                /*
-                 * Acknowledge as soon as possible to allow i8259
-                 * interrupt nesting                         */
-                openpic_eoi(0);
-                openpic_eoi_done = 1;
+			irq = i8259_irq( smp_processor_id() );
+		openpic_eoi( smp_processor_id() );
         }
         if (irq == OPENPIC_VEC_SPURIOUS)
-        {
                 /*
                  * Spurious interrupts should never be
                  * acknowledged
                  */
-                ppc_spurious_interrupts++;
-                openpic_eoi_done = 1;
-		goto out;
-        }
-        bits = 1UL << irq;
-
-        if (irq < 0)
-        {
-                printk(KERN_DEBUG "Bogus interrupt %d from PC = %lx\n",
-                       irq, regs->nip);
-                ppc_spurious_interrupts++;
-        }
-	else
-        {
-		ppc_irq_dispatch_handler( regs, irq );
-	}
-out:
-        if (!openpic_eoi_done)
-                openpic_eoi(0);
+		irq = -1;
+	/*
+	 * I would like to openpic_eoi here but there seem to be timing problems
+	 * between the openpic ack and the openpic eoi.
+	 *   -- Cort
+	 */
+	return irq;
 }
 
-__initfunc(void
-	   chrp_init_IRQ(void))
+void chrp_post_irq(struct pt_regs* regs, int irq)
+{
+	/*
+	 * If it's an i8259 irq then we've already done the
+	 * openpic irq.  So we just check to make sure the controller
+	 * is an openpic and if it is then eoi
+	 *
+	 * We do it this way since our irq_desc[irq].handler can change
+	 * with RTL and no longer be open_pic -- Cort
+	 */
+	if ( irq >= open_pic_irq_offset)
+		openpic_eoi( smp_processor_id() );
+}
+
+void __init chrp_init_IRQ(void)
 {
 	struct device_node *np;
 	int i;
@@ -451,15 +410,13 @@ __initfunc(void
 			(*(unsigned long *)get_property(np,
 							"8259-interrupt-acknowledge", NULL));
 	}
+	open_pic_irq_offset = 16;
 	for ( i = 16 ; i < NR_IRQS ; i++ )
-		irq_desc[i].ctl = &open_pic;
-	/* openpic knows that it's at irq 16 offset
-	 * so we don't need to set it in the pic structure
-	 * -- Cort
-	 */
+		irq_desc[i].handler = &open_pic;
 	openpic_init(1);
+	enable_irq(IRQ_8259_CASCADE);
 	for ( i = 0 ; i < 16  ; i++ )
-		irq_desc[i].ctl = &i8259_pic;
+		irq_desc[i].handler = &i8259_pic;
 	i8259_init();
 #ifdef CONFIG_XMON
 	request_irq(openpic_to_irq(HYDRA_INT_ADB_NMI),
@@ -471,13 +428,12 @@ __initfunc(void
 #endif	/* __SMP__ */
 }
 
-__initfunc(void
-	   chrp_init2(void))
+void __init
+chrp_init2(void)
 {
-	adb_init();
-
-	/* Should this be here? - Corey */
+#ifdef CONFIG_NVRAM  
 	pmac_nvram_init();
+#endif
 }
 
 #if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
@@ -489,19 +445,17 @@ int chrp_ide_ports_known = 0;
 ide_ioreg_t chrp_ide_regbase[MAX_HWIFS];
 ide_ioreg_t chrp_idedma_regbase;
 
-void chrp_ide_probe(void) {
-
+void
+chrp_ide_probe(void)
+{
         struct pci_dev *pdev = pci_find_device(PCI_VENDOR_ID_WINBOND, PCI_DEVICE_ID_WINBOND_82C105, NULL);
 
         chrp_ide_ports_known = 1;
 
         if(pdev) {
-                chrp_ide_regbase[0]=pdev->base_address[0] &
-                        PCI_BASE_ADDRESS_IO_MASK;
-                chrp_ide_regbase[1]=pdev->base_address[2] &
-                        PCI_BASE_ADDRESS_IO_MASK;
-                chrp_idedma_regbase=pdev->base_address[4] &
-                        PCI_BASE_ADDRESS_IO_MASK;
+                chrp_ide_regbase[0]=pdev->resource[0].start;
+                chrp_ide_regbase[1]=pdev->resource[2].start;
+                chrp_idedma_regbase=pdev->resource[4].start;
                 chrp_ide_irq=pdev->irq;
         }
 }
@@ -561,36 +515,38 @@ chrp_ide_fix_driveid(struct hd_driveid *id)
         ppc_generic_ide_fix_driveid(id);
 }
 
-void chrp_ide_init_hwif_ports (ide_ioreg_t *p, ide_ioreg_t base, int *irq)
+void
+chrp_ide_init_hwif_ports(hw_regs_t *hw, ide_ioreg_t data_port, ide_ioreg_t ctrl_port, int *irq)
 {
-        ide_ioreg_t port = base;
-        int i = 8;
+	ide_ioreg_t reg = data_port;
+	int i;
 
-        while (i--)
-                *p++ = port++;
-        *p++ = port;
-        if (irq != NULL)
-                *irq = chrp_ide_irq;
+	for (i = IDE_DATA_OFFSET; i <= IDE_STATUS_OFFSET; i++) {
+		hw->io_ports[i] = reg;
+		reg += 1;
+	}
+	if (ctrl_port) {
+		hw->io_ports[IDE_CONTROL_OFFSET] = ctrl_port;
+	} else {
+		hw->io_ports[IDE_CONTROL_OFFSET] = 0;
+	}
+	if (irq != NULL)
+		hw->irq = chrp_ide_irq;
 }
-
-EXPORT_SYMBOL(chrp_ide_irq);
-EXPORT_SYMBOL(chrp_ide_ports_known);
-EXPORT_SYMBOL(chrp_ide_regbase);
-EXPORT_SYMBOL(chrp_ide_probe);
 
 #endif
 
-__initfunc(void
+void __init
 	   chrp_init(unsigned long r3, unsigned long r4, unsigned long r5,
-		     unsigned long r6, unsigned long r7))
+		     unsigned long r6, unsigned long r7)
 {
 	chrp_setup_pci_ptrs();
 #ifdef CONFIG_BLK_DEV_INITRD
 	/* take care of initrd if we have one */
-	if ( r3 )
+	if ( r6 )
 	{
-		initrd_start = r3 + KERNELBASE;
-		initrd_end = r3 + r4 + KERNELBASE;
+		initrd_start = r6 + KERNELBASE;
+		initrd_end = r6 + r7 + KERNELBASE;
 	}
 #endif /* CONFIG_BLK_DEV_INITRD */
 
@@ -604,7 +560,8 @@ __initfunc(void
 	ppc_md.get_cpuinfo    = chrp_get_cpuinfo;
 	ppc_md.irq_cannonicalize = chrp_irq_cannonicalize;
 	ppc_md.init_IRQ       = chrp_init_IRQ;
-	ppc_md.do_IRQ         = chrp_do_IRQ;
+	ppc_md.get_irq        = chrp_get_irq;
+	ppc_md.post_irq	      = chrp_post_irq;
 		
 	ppc_md.init           = chrp_init2;
 
@@ -618,9 +575,10 @@ __initfunc(void
 	ppc_md.calibrate_decr = chrp_calibrate_decr;
 
 #ifdef CONFIG_VT
-#ifdef CONFIG_MAC_KEYBOAD
-	if ( adb_hardware == ADB_NONE )
+#ifdef CONFIG_MAC_KEYBOARD
+	if (adb_driver == NULL)
 	{
+#endif /* CONFIG_MAC_KEYBOAD */
 		ppc_md.kbd_setkeycode    = pckbd_setkeycode;
 		ppc_md.kbd_getkeycode    = pckbd_getkeycode;
 		ppc_md.kbd_translate     = pckbd_translate;
@@ -628,8 +586,10 @@ __initfunc(void
 		ppc_md.kbd_leds          = pckbd_leds;
 		ppc_md.kbd_init_hw       = pckbd_init_hw;
 #ifdef CONFIG_MAGIC_SYSRQ
-		ppc_md.kbd_sysrq_xlate	 = pckbd_sysrq_xlate;
-#endif		
+		ppc_md.ppc_kbd_sysrq_xlate	 = pckbd_sysrq_xlate;
+		SYSRQ_KEY = 0x54;
+#endif /* CONFIG_MAGIC_SYSRQ */
+#ifdef CONFIG_MAC_KEYBOARD
 	}
 	else
 	{
@@ -640,33 +600,75 @@ __initfunc(void
 		ppc_md.kbd_leds          = mackbd_leds;
 		ppc_md.kbd_init_hw       = mackbd_init_hw;
 #ifdef CONFIG_MAGIC_SYSRQ
-		ppc_md.kbd_sysrq_xlate	 = mackbd_sysrq_xlate;
-#endif		
+		ppc_md.ppc_kbd_sysrq_xlate	 = mackbd_sysrq_xlate;
+		SYSRQ_KEY = 0x69;
+#endif /* CONFIG_MAGIC_SYSRQ */
 	}
-#else
-	ppc_md.kbd_setkeycode    = pckbd_setkeycode;
-	ppc_md.kbd_getkeycode    = pckbd_getkeycode;
-	ppc_md.kbd_translate     = pckbd_translate;
-	ppc_md.kbd_unexpected_up = pckbd_unexpected_up;
-	ppc_md.kbd_leds          = pckbd_leds;
-	ppc_md.kbd_init_hw       = pckbd_init_hw;
-#ifdef CONFIG_MAGIC_SYSRQ
-	ppc_md.kbd_sysrq_xlate	 = pckbd_sysrq_xlate;
-#endif
-#endif
-#endif
-
+#endif /* CONFIG_MAC_KEYBOARD */
+#endif /* CONFIG_VT */
+	if ( rtas_data )
+		ppc_md.progress = chrp_progress;
+	
 #if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
         ppc_ide_md.insw = chrp_ide_insw;
         ppc_ide_md.outsw = chrp_ide_outsw;
         ppc_ide_md.default_irq = chrp_ide_default_irq;
         ppc_ide_md.default_io_base = chrp_ide_default_io_base;
-        ppc_ide_md.check_region = chrp_ide_check_region;
-        ppc_ide_md.request_region = chrp_ide_request_region;
-        ppc_ide_md.release_region = chrp_ide_release_region;
+        ppc_ide_md.ide_check_region = chrp_ide_check_region;
+        ppc_ide_md.ide_request_region = chrp_ide_request_region;
+        ppc_ide_md.ide_release_region = chrp_ide_release_region;
         ppc_ide_md.fix_driveid = chrp_ide_fix_driveid;
         ppc_ide_md.ide_init_hwif = chrp_ide_init_hwif_ports;
 
         ppc_ide_md.io_base = _IO_BASE;
-#endif		
+#endif
+	/*
+	 * Print the banner, then scroll down so boot progress
+	 * can be printed.  -- Cort 
+	 */
+	if ( ppc_md.progress ) ppc_md.progress("Linux/PPC "UTS_RELEASE"\n", 0x0);
 }
+
+void
+chrp_progress(char *s, unsigned short hex)
+{
+	extern unsigned int rtas_data;
+	int max_width, width;
+	struct device_node *root;
+	char *os = s;
+	unsigned long *p;
+
+	if ( (root = find_path_device("/rtas")) &&
+	     (p = (unsigned long *)get_property(root,
+						"ibm,display-line-length",
+						NULL)) )
+		max_width = *p;
+	else
+		max_width = 0x10;
+
+	if ( (_machine != _MACH_chrp) || !rtas_data )
+		return;
+	if ( call_rtas( "display-character", 1, 1, NULL, '\r' ) )
+	{
+		/* assume no display-character RTAS method - use hex display */
+		return;
+	}
+
+	width = max_width;
+	while ( *os )
+	{
+		if ( (*os == '\n') || (*os == '\r') )
+			width = max_width;
+		else
+			width--;
+		call_rtas( "display-character", 1, 1, NULL, *os++ );
+		/* if we overwrite the screen length */
+		if ( width == 0 )
+			while ( (*os != 0) && (*os != '\n') && (*os != '\r') )
+				os++;
+	}
+
+	/*while ( width-- > 0 )*/
+	call_rtas( "display-character", 1, 1, NULL, ' ' );
+}
+

@@ -12,6 +12,7 @@
 #include <linux/major.h>
 #include <linux/poll.h>
 #include <linux/init.h>
+#include <linux/devfs_fs_kernel.h>
 
 #include <asm/atarikb.h>
 #include <asm/atari_joystick.h>
@@ -118,26 +119,25 @@ static unsigned int joystick_poll(struct file *file, poll_table *wait)
 }
 
 struct file_operations atari_joystick_fops = {
-	NULL,		/* joystick_seek */
-	read_joystick,
-	write_joystick,
-	NULL,		/* joystick_readdir */
-	joystick_poll,
-	NULL,		/* joystick_ioctl */
-	NULL,		/* joystick_mmap */
-	open_joystick,
-	NULL,		/* flush */
-	release_joystick
+	read:		read_joystick,
+	write:		write_joystick,
+	poll:		joystick_poll,
+	open:		open_joystick,
+	release:	release_joystick,
 };
 
-__initfunc(int atari_joystick_init(void))
+int __init atari_joystick_init(void)
 {
     joystick[0].active = joystick[1].active = 0;
     joystick[0].ready = joystick[1].ready = 0;
-    joystick[0].wait = joystick[1].wait = NULL;
+    init_waitqueue_head(&joystick[0].wait);
+    init_waitqueue_head(&joystick[1].wait);
 
-    if (register_chrdev(MAJOR_NR, "Joystick", &atari_joystick_fops))
+    if (devfs_register_chrdev(MAJOR_NR, "Joystick", &atari_joystick_fops))
 	printk("unable to get major %d for joystick devices\n", MAJOR_NR);
+    devfs_register_series (NULL, "joysticks/digital%u", 2, DEVFS_FL_DEFAULT,
+			   MAJOR_NR, 128, S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			   &atari_joystick_fops, NULL);
 
     return 0;
 }

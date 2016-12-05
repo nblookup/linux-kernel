@@ -1,4 +1,4 @@
-/* $Id: indy_sc.c,v 1.9 1998/08/17 12:14:55 ralf Exp $
+/* $Id: indy_sc.c,v 1.13 1999/12/04 03:59:00 ralf Exp $
  *
  * indy_sc.c: Indy cache managment functions.
  *
@@ -9,11 +9,10 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
-#include <linux/autoconf.h>
 
 #include <asm/bcache.h>
-#include <asm/sgi.h>
-#include <asm/sgimc.h>
+#include <asm/sgi/sgi.h>
+#include <asm/sgi/sgimc.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
@@ -38,6 +37,7 @@ static inline void indy_sc_wipe(unsigned long first, unsigned long last)
 		.set	noreorder
 		.set	mips3
 		.set	noat
+		mfc0	$2, $12
 		li	$1, 0x80	# Go 64 bit
 		mtc0	$1, $12
 
@@ -50,12 +50,12 @@ static inline void indy_sc_wipe(unsigned long first, unsigned long last)
 		bne	%0, %1, 1b
 		daddu	%0, 32
 
-		mtc0	$0, $12		# Back to 32 bit
+		mtc0	$2, $12		# Back to 32 bit
 		nop; nop; nop; nop;
 		.set mips0
 		.set reorder"
-		: "=r" (first), "=r" (last)
-		: "0" (first), "1" (last)
+		: /* no output */
+		: "r" (first), "r" (last)
 		: "$1");
 }
 
@@ -69,7 +69,10 @@ static void indy_sc_wback_invalidate(unsigned long addr, unsigned long size)
 #endif
 	/* Which lines to flush?  */
 	first_line = SC_INDEX(addr);
-	last_line = SC_INDEX(SC_ROUND(addr + size));
+	if (size <= SC_LINE)
+		last_line = SC_INDEX(addr);
+	else
+		last_line = SC_INDEX(addr + size - 1);
 
 	__save_and_cli(flags);
 	if (first_line <= last_line) {
@@ -80,8 +83,8 @@ static void indy_sc_wback_invalidate(unsigned long addr, unsigned long size)
 	/* Cache index wrap around.  Due to the way the buddy system works
 	   this case should not happen.  We're prepared to handle it,
 	   though. */
-	indy_sc_wipe(last_line, SC_SIZE);
-	indy_sc_wipe(0, first_line);
+	indy_sc_wipe(first_line, SC_SIZE - SC_LINE);
+	indy_sc_wipe(0, last_line);
 out:
 	__restore_flags(flags);
 }
@@ -147,7 +150,7 @@ static void indy_sc_disable(void)
         " : "=r" (tmp1), "=r" (tmp2), "=r" (tmp3));
 }
 
-__initfunc(static inline int indy_sc_probe(void))
+static inline int __init indy_sc_probe(void)
 {
 	volatile unsigned int *cpu_control;
 	unsigned short cmd = 0xc220;
@@ -216,8 +219,9 @@ struct bcache_ops indy_sc_ops = {
 	indy_sc_wback_invalidate
 };
 
-__initfunc(void indy_sc_init(void))
+void __init indy_sc_init(void)
 {
+return;
 	if (indy_sc_probe()) {
 		indy_sc_enable();
 		bcops = &indy_sc_ops;

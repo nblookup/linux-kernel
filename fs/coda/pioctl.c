@@ -34,40 +34,14 @@ static int coda_pioctl(struct inode * inode, struct file * filp,
 /* exported from this file */
 struct inode_operations coda_ioctl_inode_operations =
 {
-	&coda_ioctl_operations,
-	NULL,	                /* create */
-	NULL,	                /* lookup */
-	NULL,	                /* link */
-	NULL,	                /* unlink */
-	NULL,	                /* symlink */
-	NULL,	                /* mkdir */
-	NULL,	                /* rmdir */
-	NULL,		        /* mknod */
-	NULL,		        /* rename */
-	NULL,	                /* readlink */
-	NULL,	                /* follow_link */
-	NULL,	                /* readpage */
-	NULL,		        /* writepage */
-	NULL,		        /* bmap */
-	NULL,	                /* truncate */
-	coda_ioctl_permission,  /* permission */
-	NULL,                   /* smap */
-	NULL,                   /* update page */
-        NULL                    /* revalidate */
+	permission:	coda_ioctl_permission,
+	setattr:	coda_notify_change,
 };
 
 struct file_operations coda_ioctl_operations = {
-	NULL,		        /* lseek - default should work for coda */
-	NULL,                   /* read */
-	NULL,                   /* write */
-	NULL,          		/* readdir */
-	NULL,			/* select - default */
-	coda_pioctl,	        /* ioctl */
-	NULL,                   /* mmap */
-	coda_ioctl_open,        /* open */
-	NULL,
-	coda_ioctl_release,     /* release */
-	NULL,		        /* fsync */
+	ioctl:		coda_pioctl,
+	open:		coda_ioctl_open,
+	release:	coda_ioctl_release,
 };
 
 /* the coda pioctl inode ops */
@@ -81,7 +55,6 @@ static int coda_ioctl_permission(struct inode *inode, int mask)
 /* The pioctl file ops*/
 int coda_ioctl_open(struct inode *i, struct file *f)
 {
-
         ENTRY;
 
         CDEBUG(D_PIOCTL, "File inode number: %ld\n", 

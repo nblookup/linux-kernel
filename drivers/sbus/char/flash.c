@@ -1,4 +1,4 @@
-/* $Id: flash.c,v 1.11 1999/03/09 14:06:45 davem Exp $
+/* $Id: flash.c,v 1.17 2000/02/10 02:51:35 davem Exp $
  * flash.c: Allow mmap access to the OBP Flash, for OBP updates.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -22,11 +22,11 @@
 #include <asm/ebus.h>
 
 static struct {
-	unsigned long read_base;
-	unsigned long write_base;
-	unsigned long read_size;
-	unsigned long write_size;
-	unsigned long busy;
+	unsigned long read_base;	/* Physical read address */
+	unsigned long write_base;	/* Physical write address */
+	unsigned long read_size;	/* Size of read area */
+	unsigned long write_size;	/* Size of write area */
+	unsigned long busy;		/* In use? */
 } flash;
 
 #define FLASH_MINOR	152
@@ -37,11 +37,8 @@ flash_mmap(struct file *file, struct vm_area_struct *vma)
 	unsigned long addr;
 	unsigned long size;
 
-	if (vma->vm_offset & ~(PAGE_MASK))
-		return -ENXIO;
-
 	if (flash.read_base == flash.write_base) {
-		addr = __pa(flash.read_base);
+		addr = flash.read_base;
 		size = flash.read_size;
 	} else {
 		if ((vma->vm_flags & VM_READ) &&
@@ -49,21 +46,21 @@ flash_mmap(struct file *file, struct vm_area_struct *vma)
 			return -EINVAL;
 
 		if (vma->vm_flags & VM_READ) {
-			addr = __pa(flash.read_base);
+			addr = flash.read_base;
 			size = flash.read_size;
 		} else if (vma->vm_flags & VM_WRITE) {
-			addr = __pa(flash.write_base);
+			addr = flash.write_base;
 			size = flash.write_size;
 		} else
 			return -ENXIO;
 	}
 
-	if (vma->vm_offset > size)
+	if ((vma->vm_pgoff << PAGE_SHIFT) > size)
 		return -ENXIO;
-	addr += vma->vm_offset;
+	addr += (vma->vm_pgoff << PAGE_SHIFT);
 
-	if (vma->vm_end - (vma->vm_start + vma->vm_offset) > size)
-		size = vma->vm_end - (vma->vm_start + vma->vm_offset);
+	if (vma->vm_end - (vma->vm_start + (vma->vm_pgoff << PAGE_SHIFT)) > size)
+		size = vma->vm_end - (vma->vm_start + (vma->vm_pgoff << PAGE_SHIFT));
 
 	pgprot_val(vma->vm_page_prot) &= ~(_PAGE_CACHE);
 	pgprot_val(vma->vm_page_prot) |= _PAGE_E;
@@ -131,18 +128,14 @@ flash_release(struct inode *inode, struct file *file)
 }
 
 static struct file_operations flash_fops = {
-	flash_llseek,
-	flash_read,
-	NULL,		/* no write to the Flash, use mmap
-			 * and play flash dependent tricks.
-			 */
-	NULL,		/* readdir */
-	NULL,		/* poll */
-	NULL,		/* ioctl */
-	flash_mmap,
-	flash_open,
-	NULL,		/* flush */
-	flash_release
+	/* no write to the Flash, use mmap
+	 * and play flash dependent tricks.
+	 */
+	llseek:		flash_llseek,
+	read:		flash_read,
+	mmap:		flash_mmap,
+	open:		flash_open,
+	release:	flash_release,
 };
 
 static struct miscdevice flash_dev = { FLASH_MINOR, "flash", &flash_fops };
@@ -152,11 +145,11 @@ EXPORT_NO_SYMBOLS;
 #ifdef MODULE
 int init_module(void)
 #else
-__initfunc(int flash_init(void))
+int __init flash_init(void)
 #endif
 {
-	struct linux_sbus *sbus;
-	struct linux_sbus_device *sdev = 0;
+	struct sbus_bus *sbus;
+	struct sbus_dev *sdev = 0;
 	struct linux_ebus *ebus;
 	struct linux_ebus_device *edev = 0;
 	struct linux_prom_registers regs[2];
@@ -164,23 +157,18 @@ __initfunc(int flash_init(void))
 
 	for_all_sbusdev(sdev, sbus) {
 		if (!strcmp(sdev->prom_name, "flashprom")) {
-			prom_apply_sbus_ranges(sdev->my_bus, &sdev->reg_addrs[0],
-					       sdev->num_registers, sdev);
 			if (sdev->reg_addrs[0].phys_addr == sdev->reg_addrs[1].phys_addr) {
-				flash.read_base = (unsigned long)sparc_alloc_io(sdev->reg_addrs[0].phys_addr, 0,
-								 sdev->reg_addrs[0].reg_size, "flashprom",
-								 sdev->reg_addrs[0].which_io, 0);
+				flash.read_base = ((unsigned long)sdev->reg_addrs[0].phys_addr) |
+					(((unsigned long)sdev->reg_addrs[0].which_io)<<32UL);
 				flash.read_size = sdev->reg_addrs[0].reg_size;
 				flash.write_base = flash.read_base;
 				flash.write_size = flash.read_size;
 			} else {
-				flash.read_base = (unsigned long)sparc_alloc_io(sdev->reg_addrs[0].phys_addr, 0,
-								 sdev->reg_addrs[0].reg_size, "flashprom",
-								 sdev->reg_addrs[0].which_io, 0);
+				flash.read_base = ((unsigned long)sdev->reg_addrs[0].phys_addr) |
+					(((unsigned long)sdev->reg_addrs[0].which_io)<<32UL);
 				flash.read_size = sdev->reg_addrs[0].reg_size;
-				flash.write_base = (unsigned long)sparc_alloc_io(sdev->reg_addrs[1].phys_addr, 0,
-								 sdev->reg_addrs[1].reg_size, "flashprom",
-								 sdev->reg_addrs[1].which_io, 0);
+				flash.write_base = ((unsigned long)sdev->reg_addrs[1].phys_addr) |
+					(((unsigned long)sdev->reg_addrs[1].which_io)<<32UL);
 				flash.write_size = sdev->reg_addrs[1].reg_size;
 			}
 			flash.busy = 0;
@@ -207,14 +195,14 @@ __initfunc(int flash_init(void))
 
 		nregs = len / sizeof(regs[0]);
 
-		flash.read_base = edev->base_address[0];
+		flash.read_base = edev->resource[0].start;
 		flash.read_size = regs[0].reg_size;
 
 		if (nregs == 1) {
-			flash.write_base = edev->base_address[0];
+			flash.write_base = edev->resource[0].start;
 			flash.write_size = regs[0].reg_size;
 		} else if (nregs == 2) {
-			flash.write_base = edev->base_address[1];
+			flash.write_base = edev->resource[1].start;
 			flash.write_size = regs[1].reg_size;
 		} else {
 			printk("flash: Strange number of regs %d\n", nregs);
@@ -229,8 +217,8 @@ __initfunc(int flash_init(void))
 	}
 
 	printk("OBP Flash: RD %lx[%lx] WR %lx[%lx]\n",
-	       __pa(flash.read_base), flash.read_size,
-	       __pa(flash.write_base), flash.write_size);
+	       flash.read_base, flash.read_size,
+	       flash.write_base, flash.write_size);
 
 	err = misc_register(&flash_dev);
 	if (err) {

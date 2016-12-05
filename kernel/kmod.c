@@ -7,6 +7,10 @@
 
 	Modified to avoid chroot and file sharing problems.
 	Mikael Pettersson
+
+	Limit the concurrent number of kmod modprobes to catch loops from
+	"modprobe needs a service that is in a module".
+	Keith Owens <kaos@ocs.com.au> December 1999
 */
 
 #define __KERNEL_SYSCALLS__
@@ -22,34 +26,51 @@
 */
 char modprobe_path[256] = "/sbin/modprobe";
 
-static inline void
-use_init_file_context(void)
-{
-	struct fs_struct * fs;
+extern int max_threads;
 
-	lock_kernel();
+static inline void
+use_init_fs_context(void)
+{
+	struct fs_struct *our_fs, *init_fs;
 
 	/*
-	 * Don't use the user's root, use init's root instead.
-	 * Note that we can use "init_task" (which is not actually
-	 * the same as the user-level "init" process) because we
-	 * started "init" with a CLONE_FS
+	 * Make modprobe's fs context be a copy of init's.
+	 *
+	 * We cannot use the user's fs context, because it
+	 * may have a different root than init.
+	 * Since init was created with CLONE_FS, we can grab
+	 * its fs context from "init_task".
+	 *
+	 * The fs context has to be a copy. If it is shared
+	 * with init, then any chdir() call in modprobe will
+	 * also affect init and the other threads sharing
+	 * init_task's fs context.
+	 *
+	 * We created the exec_modprobe thread without CLONE_FS,
+	 * so we can update the fields in our fs context freely.
 	 */
-	exit_fs(current);	/* current->fs->count--; */
-	fs = init_task.fs;
-	current->fs = fs;
-	atomic_inc(&fs->count);
+	lock_kernel();
+
+	our_fs = current->fs;
+	dput(our_fs->root);
+	dput(our_fs->pwd);
+
+	init_fs = init_task.fs;
+	our_fs->umask = init_fs->umask;
+	our_fs->root = dget(init_fs->root);
+	our_fs->pwd = dget(init_fs->pwd);
 
 	unlock_kernel();
 }
 
-static int exec_modprobe(void * module_name)
+int exec_usermodehelper(char *program_path, char *argv[], char *envp[])
 {
-	static char * envp[] = { "HOME=/", "TERM=linux", "PATH=/sbin:/usr/sbin:/bin:/usr/bin", NULL };
-	char *argv[] = { modprobe_path, "-s", "-k", (char*)module_name, NULL };
 	int i;
 
-	use_init_file_context();
+	current->session = 1;
+	current->pgrp = 1;
+
+	use_init_fs_context();
 
 	/* Prevent parent user process from sending signals to child.
 	   Otherwise, if the modprobe program does not exist, it might
@@ -78,13 +99,24 @@ static int exec_modprobe(void * module_name)
 	set_fs(KERNEL_DS);
 
 	/* Go, go, go... */
-	if (execve(modprobe_path, argv, envp) < 0) {
+	if (execve(program_path, argv, envp) < 0)
+		return -errno;
+	return 0;
+}
+
+static int exec_modprobe(void * module_name)
+{
+	static char * envp[] = { "HOME=/", "TERM=linux", "PATH=/sbin:/usr/sbin:/bin:/usr/bin", NULL };
+	char *argv[] = { modprobe_path, "-s", "-k", (char*)module_name, NULL };
+	int ret;
+
+	ret = exec_usermodehelper(modprobe_path, argv, envp);
+	if (ret) {
 		printk(KERN_ERR
 		       "kmod: failed to exec %s -s -k %s, errno = %d\n",
 		       modprobe_path, (char*) module_name, errno);
-		return -errno;
 	}
-	return 0;
+	return ret;
 }
 
 /*
@@ -96,6 +128,10 @@ int request_module(const char * module_name)
 	int pid;
 	int waitpid_result;
 	sigset_t tmpsig;
+	int i;
+	static atomic_t kmod_concurrent = ATOMIC_INIT(0);
+#define MAX_KMOD_CONCURRENT 50	/* Completely arbitrary value - KAO */
+	static int kmod_loop_msg;
 
 	/* Don't allow request_module() before the root fs is mounted!  */
 	if ( ! current->fs->root ) {
@@ -104,9 +140,31 @@ int request_module(const char * module_name)
 		return -EPERM;
 	}
 
-	pid = kernel_thread(exec_modprobe, (void*) module_name, CLONE_FS);
+	/* If modprobe needs a service that is in a module, we get a recursive
+	 * loop.  Limit the number of running kmod threads to max_threads/2 or
+	 * MAX_KMOD_CONCURRENT, whichever is the smaller.  A cleaner method
+	 * would be to run the parents of this process, counting how many times
+	 * kmod was invoked.  That would mean accessing the internals of the
+	 * process tables to get the command line, proc_pid_cmdline is static
+	 * and it is not worth changing the proc code just to handle this case. 
+	 * KAO.
+	 */
+	i = max_threads/2;
+	if (i > MAX_KMOD_CONCURRENT)
+		i = MAX_KMOD_CONCURRENT;
+	atomic_inc(&kmod_concurrent);
+	if (atomic_read(&kmod_concurrent) > i) {
+		if (kmod_loop_msg++ < 5)
+			printk(KERN_ERR
+			       "kmod: runaway modprobe loop assumed and stopped\n");
+		atomic_dec(&kmod_concurrent);
+		return -ENOMEM;
+	}
+
+	pid = kernel_thread(exec_modprobe, (void*) module_name, 0);
 	if (pid < 0) {
 		printk(KERN_ERR "request_module[%s]: fork failed, errno %d\n", module_name, -pid);
+		atomic_dec(&kmod_concurrent);
 		return pid;
 	}
 
@@ -118,6 +176,7 @@ int request_module(const char * module_name)
 	spin_unlock_irq(&current->sigmask_lock);
 
 	waitpid_result = waitpid(pid, NULL, __WCLONE);
+	atomic_dec(&kmod_concurrent);
 
 	/* Allow signals again.. */
 	spin_lock_irq(&current->sigmask_lock);
@@ -126,8 +185,8 @@ int request_module(const char * module_name)
 	spin_unlock_irq(&current->sigmask_lock);
 
 	if (waitpid_result != pid) {
-		printk (KERN_ERR "kmod: waitpid(%d,NULL,0) failed, returning %d.\n",
-			pid, waitpid_result);
+		printk(KERN_ERR "request_module[%s]: waitpid(%d,...) failed, errno %d\n",
+		       module_name, pid, -waitpid_result);
 	}
 	return 0;
 }

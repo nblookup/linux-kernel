@@ -7,7 +7,7 @@
  *	Andi Kleen		<ak@muc.de>
  *	Alexey Kuznetsov	<kuznet@ms2.inr.ac.ru>
  *
- *	$Id: exthdrs.c,v 1.8 1998/10/03 09:38:27 davem Exp $
+ *	$Id: exthdrs.c,v 1.10 2000/01/09 02:19:55 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -198,7 +198,7 @@ static u8* ipv6_routing_header(struct sk_buff **skb_ptr, u8 *nhptr)
 	struct rt0_hdr *rthdr;
 
 	if (((hdr->hdrlen+1)<<3) > skb->tail - skb->h.raw) {
-		ipv6_statistics.Ip6InHdrErrors++;
+		IP6_INC_STATS_BH(Ip6InHdrErrors);
 		kfree_skb(skb);
 		return NULL;
 	}
@@ -369,7 +369,7 @@ ipv6_invert_rthdr(struct sock *sk, struct ipv6_rt_hdr *hdr)
    Certainly, it is possible only for udp and raw sockets, but not for tcp.
 
    AUTH header has 4byte granular length, which kills all the idea
-   behind AUTOMATIC 64bit alignment of IPv6. Now we will loose
+   behind AUTOMATIC 64bit alignment of IPv6. Now we will lose
    cpu ticks, checking that sender did not something stupid
    and opt->hdrlen is even. Shit!		--ANK (980730)
  */
@@ -468,7 +468,7 @@ static int ipv6_hop_jumbo(struct sk_buff *skb, u8 *ptr)
 	}
 
 	if (pkt_len > skb->len - sizeof(struct ipv6hdr)) {
-		ipv6_statistics.Ip6InTruncatedPkts++;
+		IP6_INC_STATS_BH(Ip6InTruncatedPkts);
 		goto drop;
 	}
 	skb_trim(skb, pkt_len + sizeof(struct ipv6hdr));

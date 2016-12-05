@@ -95,6 +95,7 @@
  *	AX.25 037	Jonathan(G4KLX)		New timer architecture.
  *      AX.25 038       Matthias(DG2FEF)        Small fixes to the syscall interface to make kernel
  *                                              independent of AX25_MAX_DIGIS used by applications.
+ *                      Tomi(OH2BNS)            Fixed ax25_getname().
  */
 
 #include <linux/config.h>
@@ -125,7 +126,7 @@
 #include <linux/notifier.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
-#include <linux/firewall.h>
+#include <linux/netfilter.h>
 #include <linux/sysctl.h>
 #include <linux/init.h>
 #include <net/ip.h>
@@ -188,7 +189,7 @@ static void ax25_remove_socket(ax25_cb *ax25)
 /*
  *	Kill all bound sockets on a dropped device.
  */
-static void ax25_kill_by_device(struct device *dev)
+static void ax25_kill_by_device(struct net_device *dev)
 {
 	ax25_dev *ax25_dev;
 	ax25_cb *s;
@@ -209,7 +210,7 @@ static void ax25_kill_by_device(struct device *dev)
  */
 static int ax25_device_event(struct notifier_block *this,unsigned long event, void *ptr)
 {
-	struct device *dev = (struct device *)ptr;
+	struct net_device *dev = (struct net_device *)ptr;
 
 	/* Reject non AX.25 devices */
 	if (dev->type != ARPHRD_AX25)
@@ -251,7 +252,7 @@ void ax25_insert_socket(ax25_cb *ax25)
  *	Find a socket that wants to accept the SABM we have just
  *	received.
  */
-struct sock *ax25_find_listener(ax25_address *addr, int digi, struct device *dev, int type)
+struct sock *ax25_find_listener(ax25_address *addr, int digi, struct net_device *dev, int type)
 {
 	unsigned long flags;
 	ax25_cb *s;
@@ -302,7 +303,7 @@ struct sock *ax25_find_socket(ax25_address *my_addr, ax25_address *dest_addr, in
  *	Find an AX.25 control block given both ends. It will only pick up
  *	floating AX.25 control blocks or non Raw socket bound control blocks.
  */
-ax25_cb *ax25_find_cb(ax25_address *src_addr, ax25_address *dest_addr, ax25_digi *digi, struct device *dev)
+ax25_cb *ax25_find_cb(ax25_address *src_addr, ax25_address *dest_addr, ax25_digi *digi, struct net_device *dev)
 {
 	ax25_cb *s;
 	unsigned long flags;
@@ -461,6 +462,9 @@ static int ax25_ctl_ioctl(const unsigned int cmd, void *arg)
 
 	if ((ax25_dev = ax25_addr_ax25dev(&ax25_ctl.port_addr)) == NULL)
 		return -ENODEV;
+
+	if (ax25_ctl.digi_count > AX25_MAX_DIGIS)
+		return -EINVAL;
 
 	digi.ndigi = ax25_ctl.digi_count;
 	for (k = 0; k < digi.ndigi; k++)
@@ -925,7 +929,7 @@ struct sock *ax25_make_new(struct sock *osk, struct ax25_dev *ax25_dev)
 	return sk;
 }
 
-static int ax25_release(struct socket *sock, struct socket *peer)
+static int ax25_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
 
@@ -1223,15 +1227,6 @@ static int ax25_accept(struct socket *sock, struct socket *newsock, int flags)
 	if (sock->state != SS_UNCONNECTED)
 		return -EINVAL;
 
-	/*
-	 * sys_accept has already allocated a struct sock. we need to free it, 
-	 * since we want to use the one provided by ax25_make_new.
-	 */
-	if (newsock->sk != NULL) {
-		sk_free(newsock->sk);
-		newsock->sk = NULL;
-	}
-
 	if ((sk = sock->sk) == NULL)
 		return -EINVAL;
 
@@ -1262,8 +1257,6 @@ static int ax25_accept(struct socket *sock, struct socket *newsock, int flags)
 	newsk->sleep = &newsock->wait;
 
 	/* Now attach up the new socket */
-	skb->sk = NULL;
-	skb->destructor = NULL;
 	kfree_skb(skb);
 	sk->ack_backlog--;
 	newsock->sk    = newsk;
@@ -1275,37 +1268,34 @@ static int ax25_accept(struct socket *sock, struct socket *newsock, int flags)
 static int ax25_getname(struct socket *sock, struct sockaddr *uaddr, int *uaddr_len, int peer)
 {
 	struct sock *sk = sock->sk;
+	struct full_sockaddr_ax25 *fsa = (struct full_sockaddr_ax25 *)uaddr;
 	unsigned char ndigi, i;
-	struct full_sockaddr_ax25 fsa;
 
 	if (peer != 0) {
 		if (sk->state != TCP_ESTABLISHED)
 			return -ENOTCONN;
 
-		fsa.fsa_ax25.sax25_family = AF_AX25;
-		fsa.fsa_ax25.sax25_call   = sk->protinfo.ax25->dest_addr;
-		fsa.fsa_ax25.sax25_ndigis = 0;
+		fsa->fsa_ax25.sax25_family = AF_AX25;
+		fsa->fsa_ax25.sax25_call   = sk->protinfo.ax25->dest_addr;
+		fsa->fsa_ax25.sax25_ndigis = 0;
 
 		if (sk->protinfo.ax25->digipeat != NULL) {
 			ndigi = sk->protinfo.ax25->digipeat->ndigi;
-			fsa.fsa_ax25.sax25_ndigis = ndigi;
+			fsa->fsa_ax25.sax25_ndigis = ndigi;
 			for (i = 0; i < ndigi; i++)
-				fsa.fsa_digipeater[i] = sk->protinfo.ax25->digipeat->calls[i];
+				fsa->fsa_digipeater[i] = sk->protinfo.ax25->digipeat->calls[i];
 		}
 	} else {
-		fsa.fsa_ax25.sax25_family = AF_AX25;
-		fsa.fsa_ax25.sax25_call   = sk->protinfo.ax25->source_addr;
-		fsa.fsa_ax25.sax25_ndigis = 1;
+		fsa->fsa_ax25.sax25_family = AF_AX25;
+		fsa->fsa_ax25.sax25_call   = sk->protinfo.ax25->source_addr;
+		fsa->fsa_ax25.sax25_ndigis = 1;
 		if (sk->protinfo.ax25->ax25_dev != NULL) {
-			memcpy(&fsa.fsa_digipeater[0], sk->protinfo.ax25->ax25_dev->dev->dev_addr, AX25_ADDR_LEN);
+			memcpy(&fsa->fsa_digipeater[0], sk->protinfo.ax25->ax25_dev->dev->dev_addr, AX25_ADDR_LEN);
 		} else {
-			fsa.fsa_digipeater[0] = null_ax25_address;
+			fsa->fsa_digipeater[0] = null_ax25_address;
 		}
 	}
-	if (*uaddr_len > sizeof (struct full_sockaddr_ax25))
-		*uaddr_len = sizeof (struct full_sockaddr_ax25);
-	memcpy(uaddr, &fsa, *uaddr_len);
-
+	*uaddr_len = sizeof (struct full_sockaddr_ax25);
 	return 0;
 }
 
@@ -1323,7 +1313,7 @@ static int ax25_sendmsg(struct socket *sock, struct msghdr *msg, int len, struct
 	int lv;
 	int addr_len = msg->msg_namelen;
 
-	if (msg->msg_flags & ~MSG_DONTWAIT)
+	if (msg->msg_flags & ~(MSG_DONTWAIT|MSG_EOR))
 		return -EINVAL;
 
 	if (sk->zapped)
@@ -1584,8 +1574,10 @@ static int ax25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 				return -EPERM;
 			return ax25_ctl_ioctl(cmd, (void *)arg);
 
-		case SIOCAX25GETINFO: {
+		case SIOCAX25GETINFO: 
+		case SIOCAX25GETINFOOLD: {
 			struct ax25_info_struct ax25_info;
+
 			ax25_info.t1        = sk->protinfo.ax25->t1   / HZ;
 			ax25_info.t2        = sk->protinfo.ax25->t2   / HZ;
 			ax25_info.t3        = sk->protinfo.ax25->t3   / HZ;
@@ -1599,8 +1591,28 @@ static int ax25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			ax25_info.state     = sk->protinfo.ax25->state;
 			ax25_info.rcv_q     = atomic_read(&sk->rmem_alloc);
 			ax25_info.snd_q     = atomic_read(&sk->wmem_alloc);
-			if (copy_to_user((void *)arg, &ax25_info, sizeof(ax25_info)))
-				return -EFAULT;
+			ax25_info.vs        = sk->protinfo.ax25->vs;
+			ax25_info.vr        = sk->protinfo.ax25->vr;
+			ax25_info.va        = sk->protinfo.ax25->va;
+			ax25_info.vs_max    = sk->protinfo.ax25->vs; /* reserved */
+			ax25_info.paclen    = sk->protinfo.ax25->paclen;
+			ax25_info.window    = sk->protinfo.ax25->window;
+
+			/* old structure? */
+			if (cmd == SIOCAX25GETINFOOLD) {
+				static int warned = 0;
+				if (!warned) {
+					printk(KERN_INFO "%s uses old SIOCAX25GETINFO\n",
+						current->comm);
+					warned=1;
+				}
+
+				if (copy_to_user((void *)arg, &ax25_info, sizeof(struct ax25_info_struct_depreciated)))
+					return -EFAULT;
+			} else {
+				if (copy_to_user((void *)arg, &ax25_info, sizeof(struct ax25_info_struct)))
+					return -EINVAL;
+			} 
 			return 0;
 		}
 
@@ -1634,7 +1646,7 @@ static int ax25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	return 0;
 }
 
-static int ax25_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
+static int ax25_get_info(char *buffer, char **start, off_t offset, int length)
 {
 	ax25_cb *ax25;
 	int k;
@@ -1713,10 +1725,9 @@ static struct net_proto_family ax25_family_ops =
 	ax25_create
 };
 
-static struct proto_ops ax25_proto_ops = {
+static struct proto_ops SOCKOPS_WRAPPED(ax25_proto_ops) = {
 	PF_AX25,
 
-	sock_no_dup,
 	ax25_release,
 	ax25_bind,
 	ax25_connect,
@@ -1731,8 +1742,12 @@ static struct proto_ops ax25_proto_ops = {
 	ax25_getsockopt,
 	sock_no_fcntl,
 	ax25_sendmsg,
-	ax25_recvmsg
+	ax25_recvmsg,
+	sock_no_mmap
 };
+
+#include <linux/smp_lock.h>
+SOCKOPS_WRAP(ax25_proto, PF_AX25);
 
 /*
  *	Called by socket.c on kernel start up
@@ -1769,28 +1784,7 @@ EXPORT_SYMBOL(asc2ax);
 EXPORT_SYMBOL(null_ax25_address);
 EXPORT_SYMBOL(ax25_display_timer);
 
-#ifdef CONFIG_PROC_FS
-static struct proc_dir_entry proc_ax25_route = {
-	PROC_NET_AX25_ROUTE, 10, "ax25_route",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_net_inode_operations,
-	ax25_rt_get_info
-};
-static struct proc_dir_entry proc_ax25 = {
-	PROC_NET_AX25, 4, "ax25",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_net_inode_operations,
-	ax25_get_info
-};
-static struct proc_dir_entry proc_ax25_calls = {
-	PROC_NET_AX25_CALLS, 10, "ax25_calls",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_net_inode_operations,
-	ax25_uid_get_info
-};
-#endif
-
-__initfunc(void ax25_proto_init(struct net_proto *pro))
+void __init ax25_proto_init(struct net_proto *pro)
 {
 	sock_register(&ax25_family_ops);
 	ax25_packet_type.type = htons(ETH_P_AX25);
@@ -1801,9 +1795,9 @@ __initfunc(void ax25_proto_init(struct net_proto *pro))
 #endif
 
 #ifdef CONFIG_PROC_FS
-	proc_net_register(&proc_ax25_route);
-	proc_net_register(&proc_ax25);
-	proc_net_register(&proc_ax25_calls);
+	proc_net_create("ax25_route", 0, ax25_rt_get_info);
+	proc_net_create("ax25", 0, ax25_get_info);
+	proc_net_create("ax25_calls", 0, ax25_uid_get_info);
 #endif
 
 	printk(KERN_INFO "NET4: G4KLX/GW4PTS AX.25 for Linux. Version 0.37 for Linux NET4.0\n");
@@ -1823,10 +1817,9 @@ int init_module(void)
 void cleanup_module(void)
 {
 #ifdef CONFIG_PROC_FS
-	proc_net_unregister(PROC_NET_AX25_ROUTE);
-	proc_net_unregister(PROC_NET_AX25);
-	proc_net_unregister(PROC_NET_AX25_CALLS);
-	proc_net_unregister(PROC_NET_AX25_ROUTE);
+	proc_net_remove("ax25_route");
+	proc_net_remove("ax25");
+	proc_net_remove("ax25_calls");
 #endif
 	ax25_rt_free();
 	ax25_uid_free();

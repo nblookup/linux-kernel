@@ -24,7 +24,8 @@
 #include <linux/kernel.h>
 #include <linux/ioport.h>
 #include <linux/string.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
+#include <linux/wait.h>
 
 #ifdef CONFIG_PARPORT_MODULE
 #define CONFIG_PARPORT
@@ -247,7 +248,7 @@ static void pi_register_parport( PIA *pi, int verbose)
 	pi->pardev = (void *) parport_register_device(
 	      pp,pi->device,NULL,pi_wake_up,NULL,0,(void *)pi);
 
-	pi->parq = NULL;
+	init_waitqueue_head(&pi->parq);
 
 	if (verbose) printk("%s: 0x%x is %s\n",pi->device,pi->port,pp->name);
 	
@@ -357,7 +358,7 @@ int pi_init(PIA *pi, int autoprobe, int port, int mode,
 
 		pi->parname = NULL;
 		pi->pardev = NULL;
-		pi->parq = NULL;
+		init_waitqueue_head(&pi->parq);
 		pi->claimed = 0;
 		pi->claim_cont = NULL;
 	        

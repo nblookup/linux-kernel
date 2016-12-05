@@ -16,13 +16,15 @@
 #include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
-#include <linux/signal.h>
 #include <linux/stddef.h>
 
 #include <asm/bitops.h>
 #include <asm/uaccess.h>
 #include <asm/sigcontext.h>
 #include <asm/ucontext.h>
+
+#include "proto.h"
+
 
 #define DEBUG_SIG 0
 
@@ -435,6 +437,8 @@ setup_frame(int sig, struct k_sigaction *ka, sigset_t *set,
 		err |= __copy_to_user(frame->extramask, &set->sig[1], 
 				      sizeof(frame->extramask));
 	}
+	if (err)
+		goto give_sigsegv;
 
 	/* Set up to return from userspace.  If provided, use a stub
 	   already in userspace.  */
@@ -497,6 +501,8 @@ setup_rt_frame(int sig, struct k_sigaction *ka, siginfo_t *info,
 	err |= setup_sigcontext(&frame->uc.uc_mcontext, regs, sw,
 				set->sig[0], oldsp);
 	err |= __copy_to_user(&frame->uc.uc_sigmask, set, sizeof(*set));
+	if (err)
+		goto give_sigsegv;
 
 	/* Set up to return from userspace.  If provided, use a stub
 	   already in userspace.  */
@@ -686,12 +692,9 @@ do_signal(sigset_t *oldset, struct pt_regs * regs, struct switch_stack * sw,
 
 			case SIGQUIT: case SIGILL: case SIGTRAP:
 			case SIGABRT: case SIGFPE: case SIGSEGV:
-				lock_kernel();
-				if (current->binfmt
-				    && current->binfmt->core_dump
-				    && current->binfmt->core_dump(signr, regs))
+			case SIGBUS: case SIGSYS: case SIGXCPU: case SIGXFSZ:
+				if (do_coredump(signr, regs))
 					exit_code |= 0x80;
-				unlock_kernel();
 				/* FALLTHRU */
 
 			default:

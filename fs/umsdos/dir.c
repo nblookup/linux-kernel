@@ -46,24 +46,9 @@ static void umsdos_dentry_dput(struct dentry *dentry)
 
 struct dentry_operations umsdos_dentry_operations =
 {
-	umsdos_dentry_validate,	/* d_revalidate(struct dentry *, int) */
-	NULL,			/* d_hash */
-	NULL,			/* d_compare */
-	umsdos_dentry_dput,	/* d_delete(struct dentry *) */
-	NULL,
-	NULL,
+	d_revalidate:	umsdos_dentry_validate,
+	d_delete:	umsdos_dentry_dput,
 };
-
-
-/*
- * So  grep *  doesn't complain in the presence of directories.
- */
- 
-int dummy_dir_read (struct file *filp, char *buff, size_t size, loff_t *count)
-{
-	return -EISDIR;
-}
-
 
 struct UMSDOS_DIR_ONCE {
 	void *dirbuf;
@@ -393,7 +378,6 @@ void umsdos_lookup_patch_new(struct dentry *dentry, struct umsdos_info *info)
 	inode->i_uid = entry->uid;
 	inode->i_gid = entry->gid;
 
-	MSDOS_I (inode)->i_binary = 1;
 	/* #Specification: umsdos / i_nlink
 	 * The nlink field of an inode is maintained by the MSDOS file system
 	 * for directory and by UMSDOS for other files.  The logic is that
@@ -670,10 +654,20 @@ char * umsdos_d_path(struct dentry *dentry, char * buffer, int len)
 	/* N.B. not safe -- fix this soon! */
 	current->fs->root = dentry->d_sb->s_root;
 	path = d_path(dentry, buffer, len);
+
+	if (*path == '/')
+		path++; /* skip leading '/' */
+
+	if (old_root->d_inode == pseudo_root)
+	{
+		*(path-1) = '/';
+		path -= (UMSDOS_PSDROOT_LEN+1);
+		memcpy(path, UMSDOS_PSDROOT_NAME, UMSDOS_PSDROOT_LEN);
+	}
+
 	current->fs->root = old_root;
 	return path;
 }
-	
 
 /*
  * Return the dentry which points to a pseudo-hardlink.
@@ -718,7 +712,14 @@ hlink->d_parent->d_name.name, hlink->d_name.name, path);
 	/* start at root dentry */
 	dentry_dst = dget(base);
 	path[len] = '\0';
-	pt = path + 1; /* skip leading '/' */
+	
+	pt = path;
+	if (*path == '/')
+		pt++; /* skip leading '/' */
+	
+	if (base->d_inode == pseudo_root)
+		pt += (UMSDOS_PSDROOT_LEN + 1);
+	
 	while (1) {
 		struct dentry *dir = dentry_dst, *demd;
 		char *start = pt;
@@ -741,6 +742,7 @@ printk ("umsdos_solve_hlink: dir %s/%s, name=%s, real=%d\n",
 dir->d_parent->d_name.name, dir->d_name.name, start, real);
 #endif
 		dentry_dst = umsdos_lookup_dentry(dir, start, len, real);
+/* XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX */
 		if (real)
 			d_drop(dir);
 		dput (dir);
@@ -785,41 +787,23 @@ out_noread:
 }	
 
 
-static struct file_operations umsdos_dir_operations =
+struct file_operations umsdos_dir_operations =
 {
-	NULL,			/* lseek - default */
-	dummy_dir_read,		/* read */
-	NULL,			/* write - bad */
-	UMSDOS_readdir,		/* readdir */
-	NULL,			/* poll - default */
-	UMSDOS_ioctl_dir,	/* ioctl - default */
-	NULL,			/* mmap */
-	NULL,			/* no special open code */
-	NULL,			/* flush */
-	NULL,			/* no special release code */
-	NULL			/* fsync */
+	read:		generic_read_dir,
+	readdir:	UMSDOS_readdir,
+	ioctl:		UMSDOS_ioctl_dir,
 };
 
 struct inode_operations umsdos_dir_inode_operations =
 {
-	&umsdos_dir_operations,	/* default directory file-ops */
-	UMSDOS_create,		/* create */
-	UMSDOS_lookup,		/* lookup */
-	UMSDOS_link,		/* link */
-	UMSDOS_unlink,		/* unlink */
-	UMSDOS_symlink,		/* symlink */
-	UMSDOS_mkdir,		/* mkdir */
-	UMSDOS_rmdir,		/* rmdir */
-	UMSDOS_mknod,		/* mknod */
-	UMSDOS_rename,		/* rename */
-	NULL,			/* readlink */
-	NULL,			/* followlink */
-	generic_readpage,	/* readpage */
-	NULL,			/* writepage */
-	fat_bmap,		/* bmap */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL,			/* updatepage */
-	NULL,			/* revalidate */
+	create:		UMSDOS_create,
+	lookup:		UMSDOS_lookup,
+	link:		UMSDOS_link,
+	unlink:		UMSDOS_unlink,
+	symlink:	UMSDOS_symlink,
+	mkdir:		UMSDOS_mkdir,
+	rmdir:		UMSDOS_rmdir,
+	mknod:		UMSDOS_mknod,
+	rename:		UMSDOS_rename,
+	setattr:	UMSDOS_notify_change,
 };

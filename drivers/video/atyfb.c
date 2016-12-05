@@ -1,4 +1,4 @@
-/*  $Id: atyfb.c,v 1.106 1999/04/16 11:20:49 geert Exp $
+/*  $Id: atyfb.c,v 1.140 2000/02/25 05:46:27 davem Exp $
  *  linux/drivers/video/atyfb.c -- Frame buffer device for ATI Mach64
  *
  *	Copyright (C) 1997-1998  Geert Uytterhoeven
@@ -52,7 +52,6 @@
 #include <linux/console.h>
 #include <linux/init.h>
 #include <linux/pci.h>
-#include <linux/nvram.h>
 #include <linux/kd.h>
 #include <linux/vt_kern.h>
 
@@ -62,18 +61,23 @@
 
 #include <asm/io.h>
 
-#if defined(CONFIG_PPC)
+#ifdef __powerpc__
+#include <linux/adb.h>
 #include <asm/prom.h>
 #include <asm/pci-bridge.h>
 #include <video/macmodes.h>
-#include <asm/adb.h>
-#include <asm/pmu.h>
+#endif
+#ifdef CONFIG_ADB_PMU
+#include <linux/pmu.h>
+#endif
+#ifdef CONFIG_NVRAM
+#include <linux/nvram.h>
 #endif
 #ifdef __sparc__
 #include <asm/pbm.h>
 #include <asm/fbio.h>
-#include <asm/uaccess.h>
 #endif
+#include <asm/uaccess.h>
 
 #include <video/fbcon.h>
 #include <video/fbcon-cfb8.h>
@@ -89,13 +93,35 @@
  */
 #undef DEBUG
 
+/* Definitions for the ICS 2595 == ATI 18818_1 Clockchip */
 
-#define GUI_RESERVE	0x00001000
+#define REF_FREQ_2595       1432  /*  14.33 MHz  (exact   14.31818) */
+#define REF_DIV_2595          46  /* really 43 on ICS 2595 !!!  */
+                                  /* ohne Prescaler */
+#define MAX_FREQ_2595      15938  /* 159.38 MHz  (really 170.486) */
+#define MIN_FREQ_2595       8000  /*  80.00 MHz  (        85.565) */
+                                  /* mit Prescaler 2, 4, 8 */
+#define ABS_MIN_FREQ_2595   1000  /*  10.00 MHz  (really  10.697) */
+#define N_ADJ_2595           257
+
+#define STOP_BITS_2595     0x1800
 
 
-#ifndef __powerpc__
-#define eieio()		/* Enforce In-order Execution of I/O */
-#endif
+#define MIN_N_408		2
+
+#define MIN_N_1703		6
+
+#define MIN_M		2
+#define MAX_M		30
+#define MIN_N		35
+#define MAX_N		255-8
+
+
+/* Make sure n * PAGE_SIZE is protected at end of Aperture for GUI-regs */
+/*  - must be large enough to catch all GUI-Regs   */
+/*  - must be aligned to a PAGE boundary           */
+#define GUI_RESERVE	(1 * PAGE_SIZE)
+
 
 /* FIXME: remove the FAIL definition */
 #define FAIL(x) do { printk(x "\n"); return -EINVAL; } while (0)
@@ -126,6 +152,14 @@ struct pll_gx {
     u8 n;
 };
 
+struct pll_18818
+{
+    u32 program_bits;
+    u32 locationAddr;
+    u32 period_in_ps;
+    u32 post_divider;
+};
+
 struct pll_ct {
     u8 pll_ref_div;
     u8 pll_gen_cntl;
@@ -136,6 +170,8 @@ struct pll_ct {
     u8 pll_ext_cntl;
     u32 dsp_config;	/* Mach64 GTB DSP */
     u32 dsp_on_off;	/* Mach64 GTB DSP */
+    u8 mclk_post_div_real;
+    u8 vclk_post_div_real;
 };
 
 
@@ -148,6 +184,7 @@ struct atyfb_par {
     union {
 	struct pll_gx gx;
 	struct pll_ct ct;
+	struct pll_18818 ics2595;
     } pll;
     u32 accel_flags;
 };
@@ -189,10 +226,12 @@ struct aty_cursor {
 
 struct fb_info_aty {
     struct fb_info fb_info;
+    struct fb_info_aty *next;
     unsigned long ati_regbase_phys;
     unsigned long ati_regbase;
     unsigned long frame_buffer_phys;
     unsigned long frame_buffer;
+    unsigned long clk_wr_offset;
     struct pci_mmap_map *mmap_map;
     struct aty_cursor *cursor;
     struct aty_cmap_regs *aty_cmap_regs;
@@ -200,6 +239,7 @@ struct fb_info_aty {
     struct atyfb_par default_par;
     struct atyfb_par current_par;
     u32 total_vram;
+    u32 ref_clk_per;
     u32 pll_per;
     u32 mclk_per;
     u16 chip_type;
@@ -209,6 +249,7 @@ struct fb_info_aty {
     u8 bus_type;
     u8 ram_type;
     u8 dac_type;
+    u8 dac_subtype;
     u8 clk_type;
     u8 mem_refresh_rate;
     struct display disp;
@@ -226,12 +267,24 @@ struct fb_info_aty {
     } fbcon_cmap;
     u8 blitter_may_be_busy;
 #ifdef __sparc__
-    u8 open;
     u8 mmaped;
+    int open;
     int vtconsole;
     int consolecnt;
 #endif
+#ifdef CONFIG_PMAC_PBOOK
+    unsigned char *save_framebuffer;
+    unsigned long save_pll[64];
+#endif
 };
+
+#ifdef CONFIG_PMAC_PBOOK
+  int aty_sleep_notify(struct pmu_sleep_notifier *self, int when);
+  static struct pmu_sleep_notifier aty_sleep_notifier = {
+  	aty_sleep_notify, SLEEP_LEVEL_VIDEO,
+  };
+  static struct fb_info_aty* first_display = NULL;
+#endif
 
 
     /*
@@ -258,6 +311,7 @@ static int atyfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
 static int atyfb_mmap(struct fb_info *info, struct file *file,
 		      struct vm_area_struct *vma);
 #endif
+static int atyfb_rasterimg(struct fb_info *info, int start);
 
 
     /*
@@ -324,11 +378,10 @@ static char *strtoke(char *s, const char *ct);
 
 static void reset_engine(const struct fb_info_aty *info);
 static void init_engine(const struct atyfb_par *par, struct fb_info_aty *info);
+
 static void aty_st_514(int offset, u8 val, const struct fb_info_aty *info);
 static void aty_st_pll(int offset, u8 val, const struct fb_info_aty *info);
-#if defined(__sparc__) || defined(DEBUG)
 static u8 aty_ld_pll(int offset, const struct fb_info_aty *info);
-#endif
 static void aty_set_crtc(const struct fb_info_aty *info,
 			 const struct crtc *crtc);
 static int aty_var_to_crtc(const struct fb_info_aty *info,
@@ -339,17 +392,52 @@ static int aty_crtc_to_var(const struct crtc *crtc,
 			   struct fb_var_screeninfo *var);
 static void aty_set_pll_gx(const struct fb_info_aty *info,
 			   const struct pll_gx *pll);
-static int aty_var_to_pll_18818(u32 vclk_per, struct pll_gx *pll);
+
+static int aty_set_dac_ATI68860_B(const struct fb_info_aty *info, u32 bpp,
+				  u32 AccelMode);
+static int aty_set_dac_ATT21C498(const struct fb_info_aty *info,
+				 const struct pll_18818 *pll, u32 bpp);
+void aty_dac_waste4(const struct fb_info_aty *info);
+
+static int aty_var_to_pll_18818(u32 period_in_ps, struct pll_18818 *pll);
+static u32 aty_pll_18818_to_var(const struct pll_18818 *pll);
+static void aty_set_pll18818(const struct fb_info_aty *info,
+			     const struct pll_18818 *pll);
+
+static void aty_StrobeClock(const struct fb_info_aty *info);
+
+static void aty_ICS2595_put1bit(u8 data, const struct fb_info_aty *info);
+
+static int aty_var_to_pll_408(u32 period_in_ps, struct pll_18818 *pll);
+static u32 aty_pll_408_to_var(const struct pll_18818 *pll);
+static void aty_set_pll_408(const struct fb_info_aty *info,
+			    const struct pll_18818 *pll);
+
+static int aty_var_to_pll_1703(u32 period_in_ps, struct pll_18818 *pll);
+static u32 aty_pll_1703_to_var(const struct pll_18818 *pll);
+static void aty_set_pll_1703(const struct fb_info_aty *info,
+			     const struct pll_18818 *pll);
+
+static int aty_var_to_pll_8398(u32 period_in_ps, struct pll_18818 *pll);
+static u32 aty_pll_8398_to_var(const struct pll_18818 *pll);
+static void aty_set_pll_8398(const struct fb_info_aty *info,
+			     const struct pll_18818 *pll);
+
 static int aty_var_to_pll_514(u32 vclk_per, struct pll_gx *pll);
-static int aty_pll_gx_to_var(const struct pll_gx *pll, u32 *vclk_per);
+static u32 aty_pll_gx_to_var(const struct pll_gx *pll,
+			     const struct fb_info_aty *info);
 static void aty_set_pll_ct(const struct fb_info_aty *info,
 			   const struct pll_ct *pll);
-static int aty_dsp_gt(const struct fb_info_aty *info, u8 mclk_fb_div,
-		      u8 mclk_post_div, u8 vclk_fb_div, u8 vclk_post_div,
-		      u8 bpp, struct pll_ct *pll);
+static int aty_valid_pll_ct(const struct fb_info_aty *info, u32 vclk_per,
+			    struct pll_ct *pll);
+static int aty_dsp_gt(const struct fb_info_aty *info, u8 bpp,
+		      struct pll_ct *pll);
+static void aty_calc_pll_ct(const struct fb_info_aty *info,
+			    struct pll_ct *pll);
 static int aty_var_to_pll_ct(const struct fb_info_aty *info, u32 vclk_per,
 			     u8 bpp, struct pll_ct *pll);
-static int aty_pll_ct_to_var(const struct pll_ct *pll, u32 *vclk_per);
+static u32 aty_pll_ct_to_var(const struct pll_ct *pll,
+			     const struct fb_info_aty *info);
 static void atyfb_set_par(const struct atyfb_par *par,
 			  struct fb_info_aty *info);
 static int atyfb_decode_var(const struct fb_var_screeninfo *var,
@@ -370,7 +458,7 @@ static int atyfb_getcolreg(u_int regno, u_int *red, u_int *green, u_int *blue,
 static int atyfb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 			 u_int transp, struct fb_info *fb);
 static void do_install_cmap(int con, struct fb_info *info);
-#if defined(CONFIG_PPC)
+#ifdef CONFIG_PPC
 static int read_aty_sense(const struct fb_info_aty *info);
 #endif
 
@@ -379,11 +467,10 @@ static int read_aty_sense(const struct fb_info_aty *info);
      *  Interface used by the world
      */
 
-void atyfb_init(void);
-#ifdef CONFIG_FB_OF
-void atyfb_of_init(struct device_node *dp);
+int atyfb_init(void);
+#ifndef MODULE
+int atyfb_setup(char*);
 #endif
-void atyfb_setup(char *options, int *ints);
 
 static int currcon = 0;
 
@@ -391,10 +478,11 @@ static struct fb_ops atyfb_ops = {
     atyfb_open, atyfb_release, atyfb_get_fix, atyfb_get_var, atyfb_set_var,
     atyfb_get_cmap, atyfb_set_cmap, atyfb_pan_display, atyfb_ioctl,
 #ifdef __sparc__
-    atyfb_mmap
+    atyfb_mmap,
 #else
-    NULL
+    NULL,
 #endif
+    atyfb_rasterimg
 };
 
 static char atyfb_name[16] = "ATY Mach64";
@@ -405,11 +493,18 @@ static u32 default_vram __initdata = 0;
 static int default_pll __initdata = 0;
 static int default_mclk __initdata = 0;
 
-static const u32 ref_clk_per = 1000000000000ULL/14318180;
+#ifndef MODULE
+static const char *mode_option __initdata = NULL;
+#endif
 
-#if defined(CONFIG_PPC)
+#ifdef CONFIG_PPC
+#ifdef CONFIG_NVRAM_NOT_DEFINED
 static int default_vmode __initdata = VMODE_NVRAM;
 static int default_cmode __initdata = CMODE_NVRAM;
+#else
+static int default_vmode __initdata = VMODE_CHOOSE;
+static int default_cmode __initdata = CMODE_CHOOSE;
+#endif
 #endif
 
 #ifdef CONFIG_ATARI
@@ -466,53 +561,49 @@ static const char *aty_ct_ram[8] __initdata = {
 };
 
 
-static inline u32 aty_ld_le32(volatile unsigned int regindex,
+static inline u32 aty_ld_le32(unsigned int regindex,
 			      const struct fb_info_aty *info)
 {
+#if defined(__powerpc__)
     unsigned long temp;
     u32 val;
 
-#if defined(__powerpc__)
     temp = info->ati_regbase;
-    asm("lwbrx %0,%1,%2" : "=r"(val) : "r" (regindex), "r" (temp));
-#elif defined(__sparc_v9__)
-    temp = info->ati_regbase + regindex;
-    asm("lduwa [%1] %2, %0" : "=r" (val) : "r" (temp), "i" (ASI_PL));
-#else
-    temp = info->ati_regbase+regindex;
-    val = le32_to_cpu(*((volatile u32 *)(temp)));
-#endif
+    asm volatile("lwbrx %0,%1,%2;eieio" : "=r"(val) : "b" (regindex), "r" (temp));
     return val;
+#elif defined(__mc68000__)
+    return le32_to_cpu(*((volatile u32 *)(info->ati_regbase+regindex)));
+#else
+    return readl (info->ati_regbase + regindex);
+#endif
 }
 
-static inline void aty_st_le32(volatile unsigned int regindex, u32 val,
+static inline void aty_st_le32(unsigned int regindex, u32 val,
 			       const struct fb_info_aty *info)
 {
+#if defined(__powerpc__)
     unsigned long temp;
 
-#if defined(__powerpc__)
     temp = info->ati_regbase;
-    asm("stwbrx %0,%1,%2" : : "r" (val), "r" (regindex), "r" (temp) :
+    asm volatile("stwbrx %0,%1,%2;eieio" : : "r" (val), "b" (regindex), "r" (temp) :
 	"memory");
-#elif defined(__sparc_v9__)
-    temp = info->ati_regbase + regindex;
-    asm("stwa %0, [%1] %2" : : "r" (val), "r" (temp), "i" (ASI_PL) : "memory");
+#elif defined(__mc68000__)
+    *((volatile u32 *)(info->ati_regbase+regindex)) = cpu_to_le32(val);
 #else
-    temp = info->ati_regbase+regindex;
-    *((volatile u32 *)(temp)) = cpu_to_le32(val);
+    writel (val, info->ati_regbase + regindex);
 #endif
 }
 
-static inline u8 aty_ld_8(volatile unsigned int regindex,
+static inline u8 aty_ld_8(unsigned int regindex,
 			  const struct fb_info_aty *info)
 {
-    return *(volatile u8 *)(info->ati_regbase+regindex);
+    return readb (info->ati_regbase + regindex);
 }
 
-static inline void aty_st_8(volatile unsigned int regindex, u8 val,
+static inline void aty_st_8(unsigned int regindex, u8 val,
 			    const struct fb_info_aty *info)
 {
-    *(volatile u8 *)(info->ati_regbase+regindex) = val;
+    writeb (val, info->ati_regbase + regindex);
 }
 
 
@@ -672,9 +763,7 @@ static void aty_st_514(int offset, u8 val, const struct fb_info_aty *info)
     aty_st_8(DAC_W_INDEX, offset & 0xff, info);
     /* left addr byte */
     aty_st_8(DAC_DATA, (offset >> 8) & 0xff, info);
-    eieio();
     aty_st_8(DAC_MASK, val, info);
-    eieio();
     aty_st_8(DAC_CNTL, 0, info);
 }
 
@@ -682,27 +771,21 @@ static void aty_st_pll(int offset, u8 val, const struct fb_info_aty *info)
 {
     /* write addr byte */
     aty_st_8(CLOCK_CNTL + 1, (offset << 2) | PLL_WR_EN, info);
-    eieio();
     /* write the register value */
     aty_st_8(CLOCK_CNTL + 2, val, info);
-    eieio();
     aty_st_8(CLOCK_CNTL + 1, (offset << 2) & ~PLL_WR_EN, info);
 }
 
-#if defined(__sparc__) || defined(DEBUG)
 static u8 aty_ld_pll(int offset, const struct fb_info_aty *info)
 {
     u8 res;
 
     /* write addr byte */
     aty_st_8(CLOCK_CNTL + 1, (offset << 2), info);
-    eieio();
     /* read the register value */
     res = aty_ld_8(CLOCK_CNTL + 2, info);
-    eieio();
     return res;
 }
-#endif
 
 #if defined(CONFIG_PPC)
 
@@ -816,17 +899,19 @@ aty_set_cursor_shape(struct fb_info_aty *fb)
 		for (x = 0; x < c->size.x >> 2; x++) {
 			m = c->mask[x][y];
 			b = c->bits[x][y];
-			*ram++ = cursor_mask_lookup[m >> 4] |
-				 cursor_bits_lookup[(b & m) >> 4];
-			*ram++ = cursor_mask_lookup[m & 0x0f] |
-				 cursor_bits_lookup[(b & m) & 0x0f];
+			fb_writeb (cursor_mask_lookup[m >> 4] |
+				   cursor_bits_lookup[(b & m) >> 4],
+				   ram++);
+			fb_writeb (cursor_mask_lookup[m & 0x0f] |
+				   cursor_bits_lookup[(b & m) & 0x0f],
+				   ram++);
 		}
 		for ( ; x < 8; x++) {
-			*ram++ = 0xaa;
-			*ram++ = 0xaa;
+			fb_writeb (0xaa, ram++);
+			fb_writeb (0xaa, ram++);
 		}
 	}
-	memset(ram, 0xaa, (64 - c->size.y) * 16);
+	fb_memset (ram, 0xaa, (64 - c->size.y) * 16);
 }
 
 static void
@@ -944,8 +1029,10 @@ atyfb_cursor(struct display *p, int mode, int x, int y)
 	}
 }
 
-__initfunc(static struct aty_cursor *
-aty_init_cursor(struct fb_info_aty *fb))
+static struct fb_info_aty *fb_list = NULL;
+
+static struct aty_cursor * __init 
+aty_init_cursor(struct fb_info_aty *fb)
 {
 	struct aty_cursor *cursor;
 	unsigned long addr;
@@ -1172,6 +1259,124 @@ static int aty_var_to_crtc(const struct fb_info_aty *info,
     return 0;
 }
 
+
+static int aty_set_dac_ATI68860_B(const struct fb_info_aty *info, u32 bpp,
+				  u32 AccelMode)
+{
+    u32 gModeReg, devSetupRegA, temp, mask;
+
+    gModeReg = 0;
+    devSetupRegA = 0;
+    
+    switch (bpp) {
+	case 8:
+	    gModeReg = 0x83;
+	    devSetupRegA = 0x60 | 0x00 /*(info->mach64DAC8Bit ? 0x00 : 0x01) */;
+	    break;
+	case 15:
+	    gModeReg = 0xA0;
+	    devSetupRegA = 0x60;
+	    break;
+	case 16:
+	    gModeReg = 0xA1;
+	    devSetupRegA = 0x60;
+	    break;
+	case 24:
+	    gModeReg = 0xC0;
+	    devSetupRegA = 0x60;
+	    break;
+	case 32:
+	    gModeReg = 0xE3;
+	    devSetupRegA = 0x60;
+	    break;
+    }
+
+    if (!AccelMode) {
+	gModeReg = 0x80;
+	devSetupRegA = 0x61;
+    }
+
+    temp = aty_ld_8(DAC_CNTL, info);
+    aty_st_8(DAC_CNTL, (temp & ~DAC_EXT_SEL_RS2) | DAC_EXT_SEL_RS3, info);
+
+    aty_st_8(DAC_REGS + 2, 0x1D, info);
+    aty_st_8(DAC_REGS + 3, gModeReg, info);
+    aty_st_8(DAC_REGS, 0x02, info);
+
+    temp = aty_ld_8(DAC_CNTL, info);
+    aty_st_8(DAC_CNTL, temp | DAC_EXT_SEL_RS2 | DAC_EXT_SEL_RS3, info);
+
+    if (info->total_vram < MEM_SIZE_1M)
+	mask = 0x04;
+    else if (info->total_vram == MEM_SIZE_1M)
+	mask = 0x08;
+    else
+	mask = 0x0C;
+
+    /* The following assumes that the BIOS has correctly set R7 of the
+     * Device Setup Register A at boot time.
+     */
+#define A860_DELAY_L	0x80
+
+    temp = aty_ld_8(DAC_REGS, info);
+    aty_st_8(DAC_REGS, (devSetupRegA | mask) | (temp & A860_DELAY_L), info);
+    temp = aty_ld_8(DAC_CNTL, info);
+    aty_st_8(DAC_CNTL, (temp & ~(DAC_EXT_SEL_RS2 | DAC_EXT_SEL_RS3)), info);
+
+    return 0;
+}
+
+static int aty_set_dac_ATT21C498(const struct fb_info_aty *info,
+				 const struct pll_18818 *pll, u32 bpp)
+{
+    u32 dotClock;
+    int muxmode = 0;
+    int DACMask = 0;
+
+    dotClock = 100000000 / pll->period_in_ps;
+
+    switch (bpp) {
+	case 8:
+	    if (dotClock > 8000) {
+		DACMask = 0x24;
+		muxmode = 1;
+	    } else
+		DACMask = 0x04;
+	    break;
+	case 15:
+	    DACMask = 0x16;
+	    break;
+	case 16:
+	    DACMask = 0x36;
+	    break;
+	case 24:
+	    DACMask = 0xE6;
+	    break;
+	case 32:
+	    DACMask = 0xE6;
+	    break;
+    }
+
+    if (1 /* info->mach64DAC8Bit */)
+	DACMask |= 0x02;
+
+    aty_dac_waste4(info);
+    aty_st_8(DAC_REGS + 2, DACMask, info);
+
+    return muxmode;
+}
+
+void aty_dac_waste4(const struct fb_info_aty *info)
+{
+  (void)aty_ld_8(DAC_REGS, info);
+
+  (void)aty_ld_8(DAC_REGS + 2, info);
+  (void)aty_ld_8(DAC_REGS + 2, info);
+  (void)aty_ld_8(DAC_REGS + 2, info);
+  (void)aty_ld_8(DAC_REGS + 2, info);
+}
+
+
 static void aty_set_dac_514(const struct fb_info_aty *info, u32 bpp)
 {
     static struct {
@@ -1369,59 +1574,476 @@ static void aty_set_pll_gx(const struct fb_info_aty *info,
     }
 }
 
-static int aty_var_to_pll_18818(u32 vclk_per, struct pll_gx *pll)
-{
-    /*
-     *  FIXME: use real calculations instead of using fixed values from the old
-     *	       driver
-     */
-    static struct {
-	u32 ps_lim;	/* pixclock period rounding limit (arbitrary) */
-	u8 mode;	/* (prescsaler << 4) | Select */
-	u8 prog;	/* ref_div_count */
-    } ATI18818_clocks[] = {
-	{  7500, 0x0B, 1 },	/*  7407.4 ps = 135.00 MHz */
-	{  9000, 0x0A, 1 },	/*  7936.5 ps = 126.00 MHz */
-	{ 11000, 0x09, 1 },	/* 10000.0 ps = 100.00 MHz */
-	{ 12800, 0x0D, 1 },	/* 12500.0 ps =  80.00 MHz */
-	{ 13500, 0x0E, 1 },	/* 13333.3 ps =  75.00 MHz */
-/*	{ 14000, 0x03, 2 },*/	/* 13888.8 ps =  72.00 MHz */
-	{ 15000, 0x1B, 1 },	/* 14814.8 ps =  67.50 MHz */
-	{ 15500, 0x0F, 1 },	/* 15384.6 ps =  65.00 MHz */
-	{ 16000, 0x1A, 1 },	/* 15873.0 ps =  63.00 MHz */
-/*	{ 16000, 0x02, 2 },*/	/* 15873.0 ps =  63.00 MHz */
-/*	{ 18000, 0x01, 2 },*/	/* 17655.4 ps =  56.64 MHz */
-/*	{ 19900, 0x00, 2 },*/	/* 19860.9 ps =  50.35 MHz */
-	{ 20000, 0x07, 1 },	/* 20000.0 ps =  50.00 MHz */
-	{ 20300, 0x06, 1 },	/* 20202.0 ps =  49.50 MHz */
-	{ 22500, 0x05, 1 },	/* 22271.2 ps =  44.90 MHz */
-	{ 25000, 0x04, 1 },	/* 25000.0 ps =  40.00 MHz */
-/*	{ 28000, 0x03, 1 },*/	/* 27777.8 ps =  36.00 MHz */
-	{ 30000, 0x2B, 1 },	/* 29629,6 ps =  33.75 MHz */
-	{ 31000, 0x1F, 1 },	/* 30769.2 ps =  32.50 MHz */
-	{ 32000, 0x2A, 1 },	/* 31746.0 ps =  31.50 MHz */
-/*	{ 32000, 0x02, 1 },*/	/* 31746.0 ps =  31.50 MHz */
-/*	{ 36000, 0x01, 1 },*/	/* 35310.7 ps =  28.32 MHz */
-/*	{ 39900, 0x00, 1 },*/	/* 39714.1 ps =  25.18 MHz */
-	{ 40000, 0x17, 1 },	/* 40000.0 ps =  25.00 MHz */
-	{ 40600, 0x16, 1 },	/* 40404.0 ps =  24.75 MHz */
-	{ 45000, 0x15, 1 },	/* 44543.4 ps =  22.45 MHz */
-	{ 50000, 0x14, 1 },	/* 50000.0 ps =  20.00 MHz */
-/*	{ 56000, 0x13, 1 },*/	/* 55555.5 ps =  18.00 MHz */
-	{ 62000, 0x2F, 1 },	/* 61538.8 ps =  16.25 MHz */
-/*	{ 64000, 0x12, 1 },*/	/* 63492.0 ps =  15.75 MHz */
-    };
-    int set;
 
-    for (set = 0; set < sizeof(ATI18818_clocks)/sizeof(*ATI18818_clocks);
-	 set++)
-	if (vclk_per <= ATI18818_clocks[set].ps_lim) {
-	    pll->m = ATI18818_clocks[set].mode;
-	    pll->n = ATI18818_clocks[set].prog;
-	    return 0;
+static int aty_var_to_pll_18818(u32 period_in_ps, struct pll_18818 *pll)
+{
+    u32 MHz100;		/* in 0.01 MHz */
+    u32 program_bits;
+    u32 post_divider;
+
+    /* Calculate the programming word */
+    MHz100 = 100000000 / period_in_ps;
+    
+    program_bits = -1;
+    post_divider = 1;
+
+    if (MHz100 > MAX_FREQ_2595) {
+	MHz100 = MAX_FREQ_2595;
+	return -EINVAL;
+    } else if (MHz100 < ABS_MIN_FREQ_2595) {
+	program_bits = 0;	/* MHz100 = 257 */
+	return -EINVAL;
+    } else {
+	while (MHz100 < MIN_FREQ_2595) {
+	    MHz100 *= 2;
+	    post_divider *= 2;
 	}
-    return -EINVAL;
+    }
+    MHz100 *= 1000;
+    MHz100 = (REF_DIV_2595 * MHz100) / REF_FREQ_2595;
+
+    MHz100 += 500;    /* + 0.5 round */
+    MHz100 /= 1000;
+
+    if (program_bits == -1) {
+	program_bits = MHz100 - N_ADJ_2595;
+	switch (post_divider) {
+	    case 1:
+		program_bits |= 0x0600;
+		break;
+	    case 2:
+		program_bits |= 0x0400;
+		break;
+	    case 4:
+		program_bits |= 0x0200;
+		break;
+	    case 8:
+	    default:
+		break;
+	}
+    }
+
+    program_bits |= STOP_BITS_2595;
+
+    pll->program_bits = program_bits;
+    pll->locationAddr = 0;
+    pll->post_divider = post_divider;
+    pll->period_in_ps = period_in_ps;
+
+    return 0;
 }
+
+static u32 aty_pll_18818_to_var(const struct pll_18818 *pll)
+{
+    return(pll->period_in_ps);  /* default for now */
+}
+
+static void aty_set_pll18818(const struct fb_info_aty *info,
+			     const struct pll_18818 *pll)
+{
+    u32 program_bits;
+    u32 locationAddr;
+
+    u32 i;
+
+    u8 old_clock_cntl;
+    u8 old_crtc_ext_disp;
+
+    old_clock_cntl = aty_ld_8(CLOCK_CNTL, info);
+    aty_st_8(CLOCK_CNTL + info->clk_wr_offset, 0, info);
+
+    old_crtc_ext_disp = aty_ld_8(CRTC_GEN_CNTL + 3, info);
+    aty_st_8(CRTC_GEN_CNTL + 3, old_crtc_ext_disp | (CRTC_EXT_DISP_EN >> 24),
+	     info);
+
+    udelay(15000); /* delay for 50 (15) ms */
+
+    program_bits = pll->program_bits;
+    locationAddr = pll->locationAddr;
+
+    /* Program the clock chip */
+    aty_st_8(CLOCK_CNTL + info->clk_wr_offset, 0, info);  /* Strobe = 0 */
+    aty_StrobeClock(info);
+    aty_st_8(CLOCK_CNTL + info->clk_wr_offset, 1, info);  /* Strobe = 0 */
+    aty_StrobeClock(info);
+
+    aty_ICS2595_put1bit(1, info);    /* Send start bits */
+    aty_ICS2595_put1bit(0, info);    /* Start bit */
+    aty_ICS2595_put1bit(0, info);    /* Read / ~Write */
+
+    for (i = 0; i < 5; i++) {	/* Location 0..4 */
+	aty_ICS2595_put1bit(locationAddr & 1, info);
+	locationAddr >>= 1;
+    }
+
+    for (i = 0; i < 8 + 1 + 2 + 2; i++) {
+	aty_ICS2595_put1bit(program_bits & 1, info);
+	program_bits >>= 1;
+    }
+
+    udelay(1000); /* delay for 1 ms */
+
+    (void)aty_ld_8(DAC_REGS, info); /* Clear DAC Counter */
+    aty_st_8(CRTC_GEN_CNTL + 3, old_crtc_ext_disp, info);
+    aty_st_8(CLOCK_CNTL + info->clk_wr_offset, old_clock_cntl | CLOCK_STROBE,
+	     info);
+
+    udelay(50000); /* delay for 50 (15) ms */
+    aty_st_8(CLOCK_CNTL + info->clk_wr_offset,
+	     ((pll->locationAddr & 0x0F) | CLOCK_STROBE), info);
+   
+    return;
+}
+
+
+static int aty_var_to_pll_408(u32 period_in_ps, struct pll_18818 *pll)
+{
+    u32 mhz100;		/* in 0.01 MHz */
+    u32 program_bits;
+    /* u32 post_divider; */
+    u32 mach64MinFreq, mach64MaxFreq, mach64RefFreq;
+    u32 temp, tempB;
+    u16 remainder, preRemainder;
+    short divider = 0, tempA;
+
+    /* Calculate the programming word */
+    mhz100 = 100000000 / period_in_ps;
+    mach64MinFreq = MIN_FREQ_2595;
+    mach64MaxFreq = MAX_FREQ_2595;
+    mach64RefFreq = REF_FREQ_2595;	/* 14.32 MHz */
+    
+    /* Calculate program word */
+    if (mhz100 == 0)
+	program_bits = 0xFF;
+    else {
+	if (mhz100 < mach64MinFreq)
+	    mhz100 = mach64MinFreq;
+	if (mhz100 > mach64MaxFreq)
+	    mhz100 = mach64MaxFreq;
+
+	while (mhz100 < (mach64MinFreq << 3)) {
+	    mhz100 <<= 1;
+	    divider += 0x40;
+	}
+
+	temp = (unsigned int)mhz100;
+	temp = (unsigned int)(temp * (MIN_N_408 + 2));
+	temp -= ((short)(mach64RefFreq << 1));
+
+	tempA = MIN_N_408;
+	preRemainder = 0xFFFF;
+
+	do {
+	    tempB = temp;
+	    remainder = tempB % mach64RefFreq;
+	    tempB = tempB / mach64RefFreq;
+	    if (((tempB & 0xFFFF) <= 255) && (remainder <= preRemainder)) {
+		preRemainder = remainder;
+		divider &= ~0x3f;
+		divider |= tempA;
+		divider = (divider & 0x00FF) + ((tempB & 0xFF) << 8);
+	    }
+	    temp += mhz100;
+	    tempA++;
+	} while(tempA <= 32);
+
+	program_bits = divider;
+    }
+
+    pll->program_bits = program_bits;
+    pll->locationAddr = 0;
+    pll->post_divider = divider;	/* fuer nix */
+    pll->period_in_ps = period_in_ps;
+
+    return 0;
+}
+
+static u32 aty_pll_408_to_var(const struct pll_18818 *pll)
+{
+    return(pll->period_in_ps);  /* default for now */
+}
+
+static void aty_set_pll_408(const struct fb_info_aty *info,
+			    const struct pll_18818 *pll)
+{
+    u32 program_bits;
+    u32 locationAddr;
+
+    u8 tmpA, tmpB, tmpC;
+    char old_crtc_ext_disp;
+
+    old_crtc_ext_disp = aty_ld_8(CRTC_GEN_CNTL + 3, info);
+    aty_st_8(CRTC_GEN_CNTL + 3, old_crtc_ext_disp | (CRTC_EXT_DISP_EN >> 24),
+	     info);
+
+    program_bits = pll->program_bits;
+    locationAddr = pll->locationAddr;
+
+    /* Program clock */
+    aty_dac_waste4(info);
+    tmpB = aty_ld_8(DAC_REGS + 2, info) | 1;
+    aty_dac_waste4(info);
+    aty_st_8(DAC_REGS + 2, tmpB, info);
+
+    tmpA = tmpB;
+    tmpC = tmpA;
+    tmpA |= 8;
+    tmpB = 1;
+
+    aty_st_8(DAC_REGS, tmpB, info);
+    aty_st_8(DAC_REGS + 2, tmpA, info);
+
+    udelay(400); /* delay for 400 us */
+
+    locationAddr = (locationAddr << 2) + 0x40;
+    tmpB = locationAddr;
+    tmpA = program_bits >> 8;
+
+    aty_st_8(DAC_REGS, tmpB, info);
+    aty_st_8(DAC_REGS + 2, tmpA, info);
+
+    tmpB = locationAddr + 1;
+    tmpA = (u8)program_bits;
+
+    aty_st_8(DAC_REGS, tmpB, info);
+    aty_st_8(DAC_REGS + 2, tmpA, info);
+
+    tmpB = locationAddr + 2;
+    tmpA = 0x77;
+
+    aty_st_8(DAC_REGS, tmpB, info);
+    aty_st_8(DAC_REGS + 2, tmpA, info);
+
+    udelay(400); /* delay for 400 us */
+    tmpA = tmpC & (~(1 | 8));
+    tmpB = 1;
+
+    aty_st_8(DAC_REGS, tmpB, info);
+    aty_st_8(DAC_REGS + 2, tmpA, info);
+
+    (void)aty_ld_8(DAC_REGS, info); /* Clear DAC Counter */
+    aty_st_8(CRTC_GEN_CNTL + 3, old_crtc_ext_disp, info);
+
+    return;
+}
+
+
+static int aty_var_to_pll_1703(u32 period_in_ps, struct pll_18818 *pll)
+{
+    u32 mhz100;			/* in 0.01 MHz */
+    u32 program_bits;
+    /* u32 post_divider; */
+    u32 mach64MinFreq, mach64MaxFreq, mach64RefFreq;
+    u32 temp, tempB;
+    u16 remainder, preRemainder;
+    short divider = 0, tempA;
+
+    /* Calculate the programming word */
+    mhz100 = 100000000 / period_in_ps;
+    mach64MinFreq = MIN_FREQ_2595;
+    mach64MaxFreq = MAX_FREQ_2595;
+    mach64RefFreq = REF_FREQ_2595;	/* 14.32 MHz */
+    
+    /* Calculate program word */
+    if (mhz100 == 0)
+	program_bits = 0xE0;
+    else {
+	if (mhz100 < mach64MinFreq)
+	    mhz100 = mach64MinFreq;
+	if (mhz100 > mach64MaxFreq)
+	    mhz100 = mach64MaxFreq;
+
+	divider = 0;
+	while (mhz100 < (mach64MinFreq << 3)) {
+	    mhz100 <<= 1;
+	    divider += 0x20;
+	}
+
+	temp = (unsigned int)(mhz100);
+	temp = (unsigned int)(temp * (MIN_N_1703 + 2));
+	temp -= (short)(mach64RefFreq << 1);
+
+	tempA = MIN_N_1703;
+	preRemainder = 0xffff;
+
+	do {
+	    tempB = temp;
+	    remainder = tempB % mach64RefFreq;
+	    tempB = tempB / mach64RefFreq;
+
+	    if ((tempB & 0xffff) <= 127 && (remainder <= preRemainder)) {
+		preRemainder = remainder;
+		divider &= ~0x1f;
+		divider |= tempA;
+		divider = (divider & 0x00ff) + ((tempB & 0xff) << 8);
+	    }
+
+	    temp += mhz100;
+	    tempA++;
+	} while (tempA <= (MIN_N_1703 << 1));
+
+	program_bits = divider;
+    }
+
+      pll->program_bits = program_bits;
+      pll->locationAddr = 0;
+      pll->post_divider = divider;  /* fuer nix */
+      pll->period_in_ps = period_in_ps;
+
+      return 0;
+}
+
+static u32 aty_pll_1703_to_var(const struct pll_18818 *pll)
+{
+    return(pll->period_in_ps);  /* default for now */
+}
+
+static void aty_set_pll_1703(const struct fb_info_aty *info,
+			     const struct pll_18818 *pll)
+{
+    u32 program_bits;
+    u32 locationAddr;
+
+    char old_crtc_ext_disp;
+
+    old_crtc_ext_disp = aty_ld_8(CRTC_GEN_CNTL + 3, info);
+    aty_st_8(CRTC_GEN_CNTL + 3, old_crtc_ext_disp | (CRTC_EXT_DISP_EN >> 24),
+	     info);
+
+    program_bits = pll->program_bits;
+    locationAddr = pll->locationAddr;
+
+    /* Program clock */
+    aty_dac_waste4(info);
+
+    (void)aty_ld_8(DAC_REGS + 2, info);
+    aty_st_8(DAC_REGS+2, (locationAddr << 1) + 0x20, info);
+    aty_st_8(DAC_REGS+2, 0, info);
+    aty_st_8(DAC_REGS+2, (program_bits & 0xFF00) >> 8, info);
+    aty_st_8(DAC_REGS+2, (program_bits & 0xFF), info);
+
+    (void)aty_ld_8(DAC_REGS, info); /* Clear DAC Counter */
+    aty_st_8(CRTC_GEN_CNTL + 3, old_crtc_ext_disp, info);
+
+    return;
+}
+
+
+static int aty_var_to_pll_8398(u32 period_in_ps, struct pll_18818 *pll)
+{
+
+    u32 tempA, tempB, fOut, longMHz100, diff, preDiff;
+
+    u32 mhz100;				/* in 0.01 MHz */
+    u32 program_bits;
+    /* u32 post_divider; */
+    u32 mach64MinFreq, mach64MaxFreq, mach64RefFreq;
+    u16 m, n, k=0, save_m, save_n, twoToKth;
+
+    /* Calculate the programming word */
+    mhz100 = 100000000 / period_in_ps;
+    mach64MinFreq = MIN_FREQ_2595;
+    mach64MaxFreq = MAX_FREQ_2595;
+    mach64RefFreq = REF_FREQ_2595;	/* 14.32 MHz */
+    
+    save_m = 0;
+    save_n = 0;
+
+    /* Calculate program word */
+    if (mhz100 == 0)
+	program_bits = 0xE0;
+    else
+    {
+	if (mhz100 < mach64MinFreq)
+	    mhz100 = mach64MinFreq;
+	if (mhz100 > mach64MaxFreq)
+	    mhz100 = mach64MaxFreq;
+
+	longMHz100 = mhz100 * 256 / 100;   /* 8 bit scale this */
+
+	while (mhz100 < (mach64MinFreq << 3))
+        {
+	    mhz100 <<= 1;
+	    k++;
+	}
+
+	twoToKth = 1 << k;
+	diff = 0;
+	preDiff = 0xFFFFFFFF;
+
+	for (m = MIN_M; m <= MAX_M; m++)
+        {
+	    for (n = MIN_N; n <= MAX_N; n++)
+            {
+		tempA = (14.31818 * 65536);
+		tempA *= (n + 8);  /* 43..256 */
+		tempB = twoToKth * 256;
+		tempB *= (m + 2);  /* 4..32 */
+		fOut = tempA / tempB;  /* 8 bit scale */
+
+		if (longMHz100 > fOut)
+		    diff = longMHz100 - fOut;
+		else
+		    diff = fOut - longMHz100;
+
+		if (diff < preDiff)
+                {
+		    save_m = m;
+		    save_n = n;
+		    preDiff = diff;
+		}
+	    }
+	}
+
+	program_bits = (k << 6) + (save_m) + (save_n << 8);
+    }
+
+    pll->program_bits = program_bits;
+    pll->locationAddr = 0;
+    pll->post_divider = 0;
+    pll->period_in_ps = period_in_ps;
+
+    return 0;
+}
+
+static u32 aty_pll_8398_to_var(const struct pll_18818 *pll)
+{
+    return(pll->period_in_ps);  /* default for now */
+}
+
+static void aty_set_pll_8398(const struct fb_info_aty *info,
+			     const struct pll_18818 *pll)
+{
+    u32 program_bits;
+    u32 locationAddr;
+
+    char old_crtc_ext_disp;
+    char tmp;
+
+    old_crtc_ext_disp = aty_ld_8(CRTC_GEN_CNTL + 3, info);
+    aty_st_8(CRTC_GEN_CNTL + 3, old_crtc_ext_disp | (CRTC_EXT_DISP_EN >> 24),
+	     info);
+
+    program_bits = pll->program_bits;
+    locationAddr = pll->locationAddr;
+
+    /* Program clock */
+    tmp = aty_ld_8(DAC_CNTL, info);
+    aty_st_8(DAC_CNTL, tmp | DAC_EXT_SEL_RS2 | DAC_EXT_SEL_RS3, info);
+
+    aty_st_8(DAC_REGS, locationAddr, info);
+    aty_st_8(DAC_REGS+1, (program_bits & 0xff00) >> 8, info);
+    aty_st_8(DAC_REGS+1, (program_bits & 0xff), info);
+
+    tmp = aty_ld_8(DAC_CNTL, info);
+    aty_st_8(DAC_CNTL, (tmp & ~DAC_EXT_SEL_RS2) | DAC_EXT_SEL_RS3, info);
+
+    (void)aty_ld_8(DAC_REGS, info); /* Clear DAC Counter */
+    aty_st_8(CRTC_GEN_CNTL + 3, old_crtc_ext_disp, info);
+
+    return;
+}
+
 
 static int aty_var_to_pll_514(u32 vclk_per, struct pll_gx *pll)
 {
@@ -1453,9 +2075,45 @@ static int aty_var_to_pll_514(u32 vclk_per, struct pll_gx *pll)
     return -EINVAL;
 }
 
-    /* FIXME: ATI18818?? */
 
-static int aty_pll_gx_to_var(const struct pll_gx *pll, u32 *vclk_per)
+static void aty_StrobeClock(const struct fb_info_aty *info)
+{
+    u8 tmp;
+
+    udelay(26);
+
+    tmp = aty_ld_8(CLOCK_CNTL, info);
+    aty_st_8(CLOCK_CNTL + info->clk_wr_offset, tmp | CLOCK_STROBE, info);
+
+    return;
+}
+
+
+static void aty_ICS2595_put1bit(u8 data, const struct fb_info_aty *info)
+{
+    u8 tmp;
+
+    data &= 0x01;
+    tmp = aty_ld_8(CLOCK_CNTL, info);
+    aty_st_8(CLOCK_CNTL + info->clk_wr_offset, (tmp & ~0x04) | (data << 2),
+	     info);
+
+    tmp = aty_ld_8(CLOCK_CNTL, info);
+    aty_st_8(CLOCK_CNTL + info->clk_wr_offset, (tmp & ~0x08) | (0 << 3), info);
+
+    aty_StrobeClock(info);
+
+    tmp = aty_ld_8(CLOCK_CNTL, info);
+    aty_st_8(CLOCK_CNTL + info->clk_wr_offset, (tmp & ~0x08) | (1 << 3), info);
+
+    aty_StrobeClock(info);
+
+    return;
+}
+
+
+static u32 aty_pll_gx_to_var(const struct pll_gx *pll,
+			     const struct fb_info_aty *info)
 {
     u8 df, vco_div_count, ref_div_count;
 
@@ -1463,9 +2121,7 @@ static int aty_pll_gx_to_var(const struct pll_gx *pll, u32 *vclk_per)
     vco_div_count = pll->m & 0x3f;
     ref_div_count = pll->n;
 
-    *vclk_per = ((ref_clk_per*ref_div_count)<<(3-df))/(vco_div_count+65);
-
-    return 0;
+    return ((info->ref_clk_per*ref_div_count)<<(3-df))/(vco_div_count+65);
 }
 
 
@@ -1497,16 +2153,15 @@ static void aty_set_pll_ct(const struct fb_info_aty *info,
     }
 }
 
-static int aty_dsp_gt(const struct fb_info_aty *info, u8 mclk_fb_div,
-		      u8 mclk_post_div, u8 vclk_fb_div, u8 vclk_post_div,
-		      u8 bpp, struct pll_ct *pll)
+static int aty_dsp_gt(const struct fb_info_aty *info, u8 bpp,
+		      struct pll_ct *pll)
 {
     u32 dsp_xclks_per_row, dsp_loop_latency, dsp_precision, dsp_off, dsp_on;
     u32 xclks_per_row, fifo_off, fifo_on, y, fifo_size, page_size;
 
     /* xclocks_per_row<<11 */
-    xclks_per_row = (mclk_fb_div*vclk_post_div*64<<11)/
-		    (vclk_fb_div*mclk_post_div*bpp);
+    xclks_per_row = (pll->mclk_fb_div*pll->vclk_post_div_real*64<<11)/
+		    (pll->vclk_fb_div*pll->mclk_post_div_real*bpp);
     if (xclks_per_row < (1<<11))
 	FAIL("Dotclock to high");
     if (Gx == GT_CHIP_ID || Gx == GU_CHIP_ID || Gx == VT_CHIP_ID ||
@@ -1526,7 +2181,7 @@ static int aty_dsp_gt(const struct fb_info_aty *info, u8 mclk_fb_div,
     }
     dsp_precision -= 5;
     /* fifo_off<<6 */
-    fifo_off = ((xclks_per_row*(fifo_size-1))>>5)+(1<<6);
+    fifo_off = ((xclks_per_row*(fifo_size-1))>>5)+(3<<6);
 
     if (info->total_vram > 1*1024*1024) {
 	if (info->ram_type >= SDRAM) {
@@ -1553,7 +2208,7 @@ static int aty_dsp_gt(const struct fb_info_aty *info, u8 mclk_fb_div,
     if (xclks_per_row >= (page_size<<11))
 	fifo_on = ((2*page_size+1)<<6)+(xclks_per_row>>5);
     else
-	fifo_on = (3*page_size)<<6;
+	fifo_on = (3*page_size+2)<<6;
 
     dsp_xclks_per_row = xclks_per_row>>dsp_precision;
     dsp_on = fifo_on>>dsp_precision;
@@ -1566,63 +2221,59 @@ static int aty_dsp_gt(const struct fb_info_aty *info, u8 mclk_fb_div,
     return 0;
 }
 
-static int aty_var_to_pll_ct(const struct fb_info_aty *info, u32 vclk_per,
-			     u8 bpp, struct pll_ct *pll)
+static int aty_valid_pll_ct(const struct fb_info_aty *info, u32 vclk_per,
+			    struct pll_ct *pll)
 {
     u32 q, x;			/* x is a workaround for sparc64-linux-gcc */
-    u8 pll_ref_div, pll_gen_cntl, pll_ext_cntl;
-    u8 mclk_fb_div, mclk_post_div, mpostdiv = 0;
-    u8 vclk_fb_div, vclk_post_div, vpostdiv = 0;
-    int err;
-
     x = x;			/* x is a workaround for sparc64-linux-gcc */
 
-    pll->pll_vclk_cntl = 0x03;	/* VCLK = PLL_VCLK/VCLKx_POST */
-
-    pll_ref_div = info->pll_per*2*255/ref_clk_per;
+    pll->pll_ref_div = info->pll_per*2*255/info->ref_clk_per;
 
     /* FIXME: use the VTB/GTB /3 post divider if it's better suited */
-    q = ref_clk_per*pll_ref_div*4/info->mclk_per;	/* actually 8*q */
+    q = info->ref_clk_per*pll->pll_ref_div*4/info->mclk_per;	/* actually 8*q */
     if (q < 16*8 || q > 255*8)
 	FAIL("mclk out of range");
     else if (q < 32*8)
-	mclk_post_div = 8;
+	pll->mclk_post_div_real = 8;
     else if (q < 64*8)
-	mclk_post_div = 4;
+	pll->mclk_post_div_real = 4;
     else if (q < 128*8)
-	mclk_post_div = 2;
+	pll->mclk_post_div_real = 2;
     else
-	mclk_post_div = 1;
-    mclk_fb_div = q*mclk_post_div/8;
+	pll->mclk_post_div_real = 1;
+    pll->mclk_fb_div = q*pll->mclk_post_div_real/8;
 
     /* FIXME: use the VTB/GTB /{3,6,12} post dividers if they're better suited */
-    q = ref_clk_per*pll_ref_div*4/vclk_per;	/* actually 8*q */
+    q = info->ref_clk_per*pll->pll_ref_div*4/vclk_per;	/* actually 8*q */
     if (q < 16*8 || q > 255*8)
 	FAIL("vclk out of range");
     else if (q < 32*8)
-	vclk_post_div = 8;
+	pll->vclk_post_div_real = 8;
     else if (q < 64*8)
-	vclk_post_div = 4;
+	pll->vclk_post_div_real = 4;
     else if (q < 128*8)
-	vclk_post_div = 2;
+	pll->vclk_post_div_real = 2;
     else
-	vclk_post_div = 1;
-    vclk_fb_div = q*vclk_post_div/8;
+	pll->vclk_post_div_real = 1;
+    pll->vclk_fb_div = q*pll->vclk_post_div_real/8;
+    return 0;
+}
 
-    if ((err = aty_dsp_gt(info, mclk_fb_div, mclk_post_div, vclk_fb_div,
-			  vclk_post_div, bpp, pll)))
-	return err;
+static void aty_calc_pll_ct(const struct fb_info_aty *info, struct pll_ct *pll)
+{
+    u8 mpostdiv = 0;
+    u8 vpostdiv = 0;
 
     if ((((Gx == GT_CHIP_ID) && (Rev & 0x03)) || (Gx == GU_CHIP_ID) ||
 	 (Gx == GV_CHIP_ID) || (Gx == GW_CHIP_ID) || (Gx == GZ_CHIP_ID) ||
 	 (Gx == LG_CHIP_ID) || (Gx == GB_CHIP_ID) || (Gx == GD_CHIP_ID) ||
 	 (Gx == GI_CHIP_ID) || (Gx == GP_CHIP_ID) || (Gx == GQ_CHIP_ID) ||
 	 (Gx == VU_CHIP_ID)) && (info->ram_type >= SDRAM))
-	pll_gen_cntl = 0x04;
+	pll->pll_gen_cntl = 0x04;
     else
-	pll_gen_cntl = 0x84;
+	pll->pll_gen_cntl = 0x84;
 
-    switch (mclk_post_div) {
+    switch (pll->mclk_post_div_real) {
 	case 1:
 	    mpostdiv = 0;
 	    break;
@@ -1639,60 +2290,64 @@ static int aty_var_to_pll_ct(const struct fb_info_aty *info, u32 vclk_per,
 	    mpostdiv = 3;
 	    break;
     }
-    pll_gen_cntl |= mpostdiv<<4;	/* mclk */
+    pll->pll_gen_cntl |= mpostdiv<<4;	/* mclk */
 
     if (Gx == VT_CHIP_ID && (Rev == 0x40 || Rev == 0x48))
-	pll_ext_cntl = 0;
+	pll->pll_ext_cntl = 0;
     else
-    	pll_ext_cntl = mpostdiv;	/* xclk == mclk */
+    	pll->pll_ext_cntl = mpostdiv;	/* xclk == mclk */
 
-    switch (vclk_post_div) {
+    switch (pll->vclk_post_div_real) {
 	case 2:
 	    vpostdiv = 1;
 	    break;
 	case 3:
-	    pll_ext_cntl |= 0x10;
+	    pll->pll_ext_cntl |= 0x10;
 	case 1:
 	    vpostdiv = 0;
 	    break;
 	case 6:
-	    pll_ext_cntl |= 0x10;
+	    pll->pll_ext_cntl |= 0x10;
 	case 4:
 	    vpostdiv = 2;
 	    break;
 	case 12:
-	    pll_ext_cntl |= 0x10;
+	    pll->pll_ext_cntl |= 0x10;
 	case 8:
 	    vpostdiv = 3;
 	    break;
     }
-    vclk_post_div = vpostdiv;
 
-    pll->pll_ref_div = pll_ref_div;
-    pll->pll_gen_cntl = pll_gen_cntl;
-    pll->mclk_fb_div = mclk_fb_div;
-    pll->vclk_post_div = vclk_post_div;
-    pll->vclk_fb_div = vclk_fb_div;
-    pll->pll_ext_cntl = pll_ext_cntl;
+    pll->pll_vclk_cntl = 0x03;	/* VCLK = PLL_VCLK/VCLKx_POST */
+    pll->vclk_post_div = vpostdiv;
+}
+
+static int aty_var_to_pll_ct(const struct fb_info_aty *info, u32 vclk_per,
+			     u8 bpp, struct pll_ct *pll)
+{
+    int err;
+
+    if ((err = aty_valid_pll_ct(info, vclk_per, pll)))
+	return err;
+    if (!(Gx == GX_CHIP_ID || Gx == CX_CHIP_ID || Gx == CT_CHIP_ID ||
+	  Gx == ET_CHIP_ID ||
+	  ((Gx == VT_CHIP_ID || Gx == GT_CHIP_ID) && !(Rev & 0x07)))) {
+	if ((err = aty_dsp_gt(info, bpp, pll)))
+	    return err;
+    }
+    aty_calc_pll_ct(info, pll);
     return 0;
 }
 
-static int aty_pll_ct_to_var(const struct pll_ct *pll, u32 *vclk_per)
+static u32 aty_pll_ct_to_var(const struct pll_ct *pll,
+			     const struct fb_info_aty *info)
 {
+    u32 ref_clk_per = info->ref_clk_per;
     u8 pll_ref_div = pll->pll_ref_div;
     u8 vclk_fb_div = pll->vclk_fb_div;
-    u8 vclk_post_div = pll->vclk_post_div;
-    u8 pll_ext_cntl = pll->pll_ext_cntl;
-    static u8 vclk_post_div_tab[] = {
-	1, 2, 4, 8,
-	3, 0, 6, 12
-    };
-    u8 vpostdiv = vclk_post_div_tab[((pll_ext_cntl & 0x10) >> 2) |
-				    (vclk_post_div & 3)];
-    if (vpostdiv == 0)
-	return -EINVAL;
-    *vclk_per = pll_ref_div*vpostdiv*ref_clk_per/vclk_fb_div/2;
-    return 0;
+    u8 vclk_post_div = pll->vclk_post_div_real;
+
+    return ref_clk_per*pll_ref_div*vclk_post_div/vclk_fb_div/2;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1701,27 +2356,76 @@ static void atyfb_set_par(const struct atyfb_par *par,
 			  struct fb_info_aty *info)
 {
     u32 i;
+    int accelmode;
+    int muxmode;
+    u8 tmp;
+    
+    accelmode = par->accel_flags;  /* hack */
 
     info->current_par = *par;
 
     if (info->blitter_may_be_busy)
 	wait_for_idle(info);
+    tmp = aty_ld_8(CRTC_GEN_CNTL + 3, info);
     aty_set_crtc(info, &par->crtc);
-    aty_st_8(CLOCK_CNTL, 0, info);
-    aty_st_8(CLOCK_CNTL, CLOCK_STROBE, info);
+    aty_st_8(CLOCK_CNTL + info->clk_wr_offset, 0, info);
+					/* better call aty_StrobeClock ?? */
+    aty_st_8(CLOCK_CNTL + info->clk_wr_offset, CLOCK_STROBE, info);
 
     if ((Gx == GX_CHIP_ID) || (Gx == CX_CHIP_ID)) {
-	switch (info->dac_type) {
+	switch (info->dac_subtype) {
 	    case DAC_IBMRGB514:
 		aty_set_dac_514(info, par->crtc.bpp);
 		break;
 	    case DAC_ATI68860_B:
-		/* FIXME */
+	    case DAC_ATI68860_C:
+		muxmode = aty_set_dac_ATI68860_B(info, par->crtc.bpp,
+						 accelmode);
+		aty_st_le32(BUS_CNTL, 0x890e20f1, info);
+		aty_st_le32(DAC_CNTL, 0x47052100, info);
 		break;
-	}
-	aty_set_pll_gx(info, &par->pll.gx);
+	    case DAC_ATT20C408:
+		muxmode = aty_set_dac_ATT21C498(info, &par->pll.ics2595,
+						par->crtc.bpp);
+		aty_st_le32(BUS_CNTL, 0x890e20f1, info);
+		aty_st_le32(DAC_CNTL, 0x00072000, info);
+		break;
+	    case DAC_ATT21C498:
+		muxmode = aty_set_dac_ATT21C498(info, &par->pll.ics2595,
+						par->crtc.bpp);
+		aty_st_le32(BUS_CNTL, 0x890e20f1, info);
+		aty_st_le32(DAC_CNTL, 0x00072000, info);
+		break;
+	    default:
+		printk(" atyfb_set_par: DAC type not implemented yet!\n");
+		aty_st_le32(BUS_CNTL, 0x890e20f1, info);
+		aty_st_le32(DAC_CNTL, 0x47052100, info);
+	/* new in 2.2.3p1 from Geert. ???????? */
 	aty_st_le32(BUS_CNTL, 0x590e10ff, info);
 	aty_st_le32(DAC_CNTL, 0x47012100, info);
+		break;
+	}
+
+	switch (info->clk_type) {
+	    case CLK_ATI18818_1:
+		aty_set_pll18818(info, &par->pll.ics2595);
+		break;
+	    case CLK_STG1703:
+		aty_set_pll_1703(info, &par->pll.ics2595);
+		break;
+	    case CLK_CH8398:
+		aty_set_pll_8398(info, &par->pll.ics2595);
+		break;
+	    case CLK_ATT20C408:
+		aty_set_pll_408(info, &par->pll.ics2595);
+		break;
+	    case CLK_IBMRGB514:
+		aty_set_pll_gx(info, &par->pll.gx);
+		break;
+	    default:
+		printk(" atyfb_set_par: CLK type not implemented yet!");
+		break;
+	}
 
 	/* Don't forget MEM_CNTL */
 	i = aty_ld_le32(MEM_CNTL, info) & 0xf0ffffff;
@@ -1740,7 +2444,7 @@ static void atyfb_set_par(const struct atyfb_par *par,
 					
     } else {
 	aty_set_pll_ct(info, &par->pll.ct);
-	i = aty_ld_le32(MEM_CNTL, info) & 0xf30fffff;
+	i = aty_ld_le32(MEM_CNTL, info) & 0xf00fffff;
 	if (!(Gx == VT_CHIP_ID && (Rev == 0x40 || Rev == 0x48)))
 	    i |= info->mem_refresh_rate << 20;
 	switch (par->crtc.bpp) {
@@ -1777,7 +2481,7 @@ static void atyfb_set_par(const struct atyfb_par *par,
 	init_engine(par, info);
 
 #ifdef CONFIG_FB_COMPAT_XPMAC
-    if (console_fb_info == &info->fb_info) {
+    if (!console_fb_info || console_fb_info == &info->fb_info) {
 	struct fb_var_screeninfo var;
 	int vmode, cmode;
 	display_info.height = ((par->crtc.v_tot_disp>>16) & 0x7ff)+1;
@@ -1809,7 +2513,16 @@ static int atyfb_decode_var(const struct fb_var_screeninfo *var,
     if ((Gx == GX_CHIP_ID) || (Gx == CX_CHIP_ID))
 	switch (info->clk_type) {
 	    case CLK_ATI18818_1:
-		err = aty_var_to_pll_18818(var->pixclock, &par->pll.gx);
+		err = aty_var_to_pll_18818(var->pixclock, &par->pll.ics2595);
+		break;
+	    case CLK_STG1703:
+		err = aty_var_to_pll_1703(var->pixclock, &par->pll.ics2595);
+		break;
+	    case CLK_CH8398:
+		err = aty_var_to_pll_8398(var->pixclock, &par->pll.ics2595);
+		break;
+	    case CLK_ATT20C408:
+		err = aty_var_to_pll_408(var->pixclock, &par->pll.ics2595);
 		break;
 	    case CLK_IBMRGB514:
 		err = aty_var_to_pll_514(var->pixclock, &par->pll.gx);
@@ -1845,11 +2558,25 @@ static int atyfb_encode_var(struct fb_var_screeninfo *var,
     if ((err = aty_crtc_to_var(&par->crtc, var)))
 	return err;
     if ((Gx == GX_CHIP_ID) || (Gx == CX_CHIP_ID))
-	err = aty_pll_gx_to_var(&par->pll.gx, &var->pixclock);
+	switch (info->clk_type) {
+	    case CLK_ATI18818_1:
+		var->pixclock = aty_pll_18818_to_var(&par->pll.ics2595);
+		break;
+	    case CLK_STG1703:
+		var->pixclock = aty_pll_1703_to_var(&par->pll.ics2595);
+		break;
+	    case CLK_CH8398:
+		var->pixclock = aty_pll_8398_to_var(&par->pll.ics2595);
+		break;
+	    case CLK_ATT20C408:
+		var->pixclock = aty_pll_408_to_var(&par->pll.ics2595);
+		break;
+	    case CLK_IBMRGB514:
+	        var->pixclock = aty_pll_gx_to_var(&par->pll.gx, info);
+		break;
+	}
     else
-	err = aty_pll_ct_to_var(&par->pll.ct, &var->pixclock);
-    if (err)
-	return err;
+	var->pixclock = aty_pll_ct_to_var(&par->pll.ct, info);
 
     var->height = -1;
     var->width = -1;
@@ -1884,10 +2611,8 @@ static int atyfb_open(struct fb_info *info, int user)
     struct fb_info_aty *fb = (struct fb_info_aty *)info;
 
     if (user) {
-	if (fb->open)
-	    return -EBUSY;
+	fb->open++;
 	fb->mmaped = 0;
-	fb->open = 1;
 	fb->vtconsole = -1;
     } else {
 	fb->consolecnt++;
@@ -1897,17 +2622,54 @@ static int atyfb_open(struct fb_info *info, int user)
     return(0);
 }
 
+struct fb_var_screeninfo default_var = {
+    /* 640x480, 60 Hz, Non-Interlaced (25.175 MHz dotclock) */
+    640, 480, 640, 480, 0, 0, 8, 0,
+    {0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+    0, 0, -1, -1, 0, 39722, 48, 16, 33, 10, 96, 2,
+    0, FB_VMODE_NONINTERLACED
+};
+
 static int atyfb_release(struct fb_info *info, int user)
 {
 #ifdef __sparc__
     struct fb_info_aty *fb = (struct fb_info_aty *)info;
 
     if (user) {
-	if (fb->vtconsole != -1)
-	    vt_cons[fb->vtconsole]->vc_mode = KD_TEXT;
-	fb->open = 0;
-	fb->mmaped = 0;
-	fb->vtconsole = -1;
+	fb->open--;
+	udelay(1000);
+	wait_for_idle(fb);
+	if (!fb->open) {
+		int was_mmaped = fb->mmaped;
+
+		fb->mmaped = 0;
+		if (fb->vtconsole != -1)
+			vt_cons[fb->vtconsole]->vc_mode = KD_TEXT;
+		fb->vtconsole = -1;
+
+		if (was_mmaped) {
+			struct fb_var_screeninfo var;
+
+			/* Now reset the default display config, we have no
+			 * idea what the program(s) which mmap'd the chip did
+			 * to the configuration, nor whether it restored it
+			 * correctly.
+			 */
+			var = default_var;
+			if (noaccel)
+				var.accel_flags &= ~FB_ACCELF_TEXT;
+			else
+				var.accel_flags |= FB_ACCELF_TEXT;
+			if (var.yres == var.yres_virtual) {
+				u32 vram = (fb->total_vram - (PAGE_SIZE << 2));
+				var.yres_virtual = ((vram * 8) / var.bits_per_pixel) /
+					var.xres_virtual;
+				if (var.yres_virtual < var.yres)
+					var.yres_virtual = var.yres;
+			}
+			atyfb_set_var(&var, -1, &fb->fb_info);
+		}
+	}
     } else {
 	fb->consolecnt--;
     }
@@ -1924,36 +2686,27 @@ static int encode_fix(struct fb_fix_screeninfo *fix,
     memset(fix, 0, sizeof(struct fb_fix_screeninfo));
 
     strcpy(fix->id, atyfb_name);
-    fix->smem_start = (char *)info->frame_buffer_phys;
+    fix->smem_start = info->frame_buffer_phys;
     fix->smem_len = (u32)info->total_vram;
 
-#ifdef __LITTLE_ENDIAN
-    /*
-     *  Last page of 8 MB little-endian aperture is MMIO
-     *  FIXME: we should use the auxiliary aperture instead so we can acces the
-     *  full 8 MB of video RAM on 8 MB boards
-     */
-    if (fix->smem_len > 0x800000-GUI_RESERVE)
-	fix->smem_len = 0x800000-GUI_RESERVE;
-#endif
     /*
      *  Reg Block 0 (CT-compatible block) is at ati_regbase_phys
      *  Reg Block 1 (multimedia extensions) is at ati_regbase_phys-0x400
      */
     if (Gx == GX_CHIP_ID || Gx == CX_CHIP_ID) {
-	fix->mmio_start = (char *)info->ati_regbase_phys;
+	fix->mmio_start = info->ati_regbase_phys;
 	fix->mmio_len = 0x400;
 	fix->accel = FB_ACCEL_ATI_MACH64GX;
     } else if (Gx == CT_CHIP_ID || Gx == ET_CHIP_ID) {
-	fix->mmio_start = (char *)info->ati_regbase_phys;
+	fix->mmio_start = info->ati_regbase_phys;
 	fix->mmio_len = 0x400;
 	fix->accel = FB_ACCEL_ATI_MACH64CT;
     } else if (Gx == VT_CHIP_ID || Gx == VU_CHIP_ID || Gx == VV_CHIP_ID) {
-	fix->mmio_start = (char *)(info->ati_regbase_phys-0x400);
+	fix->mmio_start = info->ati_regbase_phys-0x400;
 	fix->mmio_len = 0x800;
 	fix->accel = FB_ACCEL_ATI_MACH64VT;
     } else {
-	fix->mmio_start = (char *)(info->ati_regbase_phys-0x400);
+	fix->mmio_start = info->ati_regbase_phys-0x400;
 	fix->mmio_len = 0x800;
 	fix->accel = FB_ACCEL_ATI_MACH64GT;
     }
@@ -1968,15 +2721,6 @@ static int encode_fix(struct fb_fix_screeninfo *fix,
 
     return 0;
 }
-
-
-struct fb_var_screeninfo default_var = {
-    /* 640x480, 60 Hz, Non-Interlaced (25.175 MHz dotclock) */
-    640, 480, 640, 480, 0, 0, 8, 0,
-    {0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
-    0, 0, -1, -1, 0, 39722, 48, 16, 33, 10, 96, 2,
-    0, FB_VMODE_NONINTERLACED
-};
 
 
     /*
@@ -2195,36 +2939,112 @@ static int atyfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 }
 
 
+#ifdef DEBUG
+#define ATYIO_CLKR		0x41545900	/* ATY\00 */
+#define ATYIO_CLKW		0x41545901	/* ATY\01 */
+
+struct atyclk {
+    u32 ref_clk_per;
+    u8 pll_ref_div;
+    u8 mclk_fb_div;
+    u8 mclk_post_div;		/* 1,2,3,4,8 */
+    u8 vclk_fb_div;
+    u8 vclk_post_div;		/* 1,2,3,4,6,8,12 */
+    u32 dsp_xclks_per_row;	/* 0-16383 */
+    u32 dsp_loop_latency;	/* 0-15 */
+    u32 dsp_precision;		/* 0-7 */
+    u32 dsp_on;			/* 0-2047 */
+    u32 dsp_off;		/* 0-2047 */
+};
+#endif
+
 static int atyfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-		       u_long arg, int con, struct fb_info *info)
+		       u_long arg, int con, struct fb_info *info2)
 {
+#if defined(__sparc__) || defined(DEBUG)
+    struct fb_info_aty *info = (struct fb_info_aty *)info2;
+#endif /* __sparc__ || DEBUG */
 #ifdef __sparc__
-    struct fb_info_aty *fb = (struct fb_info_aty *)info;
     struct fbtype fbtyp;
     struct display *disp;
     
     if (con >= 0)
     	disp = &fb_display[con];
     else
-        disp = info->disp;
+        disp = info2->disp;
+#endif
 
     switch (cmd) {
+#ifdef __sparc__
     case FBIOGTYPE:
 	fbtyp.fb_type = FBTYPE_PCI_GENERIC;
-	fbtyp.fb_width = fb->current_par.crtc.vxres;
-	fbtyp.fb_height = fb->current_par.crtc.vyres;
-	fbtyp.fb_depth = fb->current_par.crtc.bpp;
+	fbtyp.fb_width = info->current_par.crtc.vxres;
+	fbtyp.fb_height = info->current_par.crtc.vyres;
+	fbtyp.fb_depth = info->current_par.crtc.bpp;
 	fbtyp.fb_cmsize = disp->cmap.len;
-	fbtyp.fb_size = fb->total_vram;
+	fbtyp.fb_size = info->total_vram;
 	copy_to_user_ret((struct fbtype *)arg, &fbtyp, sizeof(fbtyp), -EFAULT);
 	break;
+#endif /* __sparc__ */
+#ifdef DEBUG
+    case ATYIO_CLKR:
+	if ((Gx != GX_CHIP_ID) && (Gx != CX_CHIP_ID)) {
+	    struct atyclk clk;
+	    struct pll_ct *pll = &info->current_par.pll.ct;
+	    u32 dsp_config = pll->dsp_config;
+	    u32 dsp_on_off = pll->dsp_on_off;
+	    clk.ref_clk_per = info->ref_clk_per;
+	    clk.pll_ref_div = pll->pll_ref_div;
+	    clk.mclk_fb_div = pll->mclk_fb_div;
+	    clk.mclk_post_div = pll->mclk_post_div_real;
+	    clk.vclk_fb_div = pll->vclk_fb_div;
+	    clk.vclk_post_div = pll->vclk_post_div_real;
+	    clk.dsp_xclks_per_row = dsp_config & 0x3fff;
+	    clk.dsp_loop_latency = (dsp_config>>16) & 0xf;
+	    clk.dsp_precision = (dsp_config>>20) & 7;
+	    clk.dsp_on = dsp_on_off & 0x7ff;
+	    clk.dsp_off = (dsp_on_off>>16) & 0x7ff;
+	    copy_to_user_ret((struct atyclk *)arg, &clk, sizeof(clk),
+			     -EFAULT);
+	} else
+	    return -EINVAL;
+	break;
+    case ATYIO_CLKW:
+	if ((Gx != GX_CHIP_ID) && (Gx != CX_CHIP_ID)) {
+	    struct atyclk clk;
+	    struct pll_ct *pll = &info->current_par.pll.ct;
+	    copy_from_user_ret(&clk, (struct atyclk *)arg, sizeof(clk),
+			       -EFAULT);
+	    info->ref_clk_per = clk.ref_clk_per;
+	    pll->pll_ref_div = clk.pll_ref_div;
+	    pll->mclk_fb_div = clk.mclk_fb_div;
+	    pll->mclk_post_div_real = clk.mclk_post_div;
+	    pll->vclk_fb_div = clk.vclk_fb_div;
+	    pll->vclk_post_div_real = clk.vclk_post_div;
+	    pll->dsp_config = (clk.dsp_xclks_per_row & 0x3fff) |
+			      ((clk.dsp_loop_latency & 0xf)<<16) |
+			      ((clk.dsp_precision & 7)<<20);
+	    pll->dsp_on_off = (clk.dsp_on & 0x7ff) |
+			      ((clk.dsp_off & 0x7ff)<<16);
+	    aty_calc_pll_ct(info, pll);
+	    aty_set_pll_ct(info, pll);
+	} else
+	    return -EINVAL;
+	break;
+#endif /* DEBUG */
     default:
 	return -EINVAL;
     }
     return 0;
-#else
-    return -EINVAL;
-#endif
+}
+
+static int atyfb_rasterimg(struct fb_info *info, int start)
+{
+    struct fb_info_aty *fb = (struct fb_info_aty *)info;
+
+    if (fb->blitter_may_be_busy)
+	wait_for_idle(fb);
+    return 0;
 }
 
 #ifdef __sparc__
@@ -2234,21 +3054,26 @@ static int atyfb_mmap(struct fb_info *info, struct file *file,
 	struct fb_info_aty *fb = (struct fb_info_aty *)info;
 	unsigned int size, page, map_size = 0;
 	unsigned long map_offset = 0;
+	unsigned long off;
 	int i;
 
 	if (!fb->mmap_map)
 		return -ENXIO;
 
+	if (vma->vm_pgoff > (~0UL >> PAGE_SHIFT))
+		return -EINVAL;
+
+	off = vma->vm_pgoff << PAGE_SHIFT;
 	size = vma->vm_end - vma->vm_start;
-	if (vma->vm_offset & ~PAGE_MASK)
-		return -ENXIO;
 
 	/* To stop the swapper from even considering these pages. */
 	vma->vm_flags |= (VM_SHM | VM_LOCKED);
 
-	if (((vma->vm_offset == 0) && (size == fb->total_vram)) ||
-	    ((vma->vm_offset == fb->total_vram) && (size == PAGE_SIZE)))
-		vma->vm_offset += 0x8000000000000000UL;
+	if (((vma->vm_pgoff == 0) && (size == fb->total_vram)) ||
+	    ((off == fb->total_vram) && (size == PAGE_SIZE)))
+		off += 0x8000000000000000UL;
+
+	vma->vm_pgoff = off >> PAGE_SHIFT;	/* propagate off changes */
 
 #ifdef __sparc_v9__
 	/* Align it as much as desirable */
@@ -2256,9 +3081,9 @@ static int atyfb_mmap(struct fb_info *info, struct file *file,
 		unsigned long j, align;
 		int max = -1;
 		
-		map_offset = vma->vm_offset+size;
+		map_offset = off + size;
 		for (i = 0; fb->mmap_map[i].size; i++) {
-			if (fb->mmap_map[i].voff < vma->vm_offset)
+			if (fb->mmap_map[i].voff < off)
 				continue;
 			if (fb->mmap_map[i].voff >= map_offset)
 				break;
@@ -2278,7 +3103,7 @@ static int atyfb_mmap(struct fb_info *info, struct file *file,
 				j = align;
 				align = j - ((vma->vm_start
 					      + fb->mmap_map[max].voff
-					      - vma->vm_offset) & (j - 1));
+					      - off) & (j - 1));
 				if (align != j) {
 					struct vm_area_struct *vmm;
 
@@ -2301,7 +3126,7 @@ static int atyfb_mmap(struct fb_info *info, struct file *file,
 		for (i = 0; fb->mmap_map[i].size; i++) {
 			unsigned long start = fb->mmap_map[i].voff;
 			unsigned long end = start + fb->mmap_map[i].size;
-			unsigned long offset = vma->vm_offset + page;
+			unsigned long offset = off + page;
 
 			if (start > offset)
 				continue;
@@ -2369,25 +3194,18 @@ static void atyfb_save_palette(struct fb_info *fb, int enter)
 			tmp |= 0x2;
 		aty_st_8(DAC_CNTL, tmp, info);
 		aty_st_8(DAC_MASK, 0xff, info);
-		eieio();
+
 		scale = ((Gx != GX_CHIP_ID) && (Gx != CX_CHIP_ID) &&
 			(info->current_par.crtc.bpp == 16)) ? 3 : 0;
-		info->aty_cmap_regs->rindex = i << scale;
-		eieio();
-		atyfb_save.r[enter][i] = info->aty_cmap_regs->lut;
-		eieio();
-		atyfb_save.g[enter][i] = info->aty_cmap_regs->lut;
-		eieio();
-		atyfb_save.b[enter][i] = info->aty_cmap_regs->lut;
-		eieio();
-		info->aty_cmap_regs->windex = i << scale;
-		eieio();
-		info->aty_cmap_regs->lut = atyfb_save.r[1-enter][i];
-		eieio();
-		info->aty_cmap_regs->lut = atyfb_save.g[1-enter][i];
-		eieio();
-		info->aty_cmap_regs->lut = atyfb_save.b[1-enter][i];
-		eieio();
+		writeb(i << scale, &info->aty_cmap_regs->rindex);
+
+		atyfb_save.r[enter][i] = readb(&info->aty_cmap_regs->lut);
+		atyfb_save.g[enter][i] = readb(&info->aty_cmap_regs->lut);
+		atyfb_save.b[enter][i] = readb(&info->aty_cmap_regs->lut);
+		writeb(i << scale, &info->aty_cmap_regs->windex);
+		writeb(atyfb_save.r[1-enter][i], &info->aty_cmap_regs->lut);
+		writeb(atyfb_save.g[1-enter][i], &info->aty_cmap_regs->lut);
+		writeb(atyfb_save.b[1-enter][i], &info->aty_cmap_regs->lut);
 	}
 }
 
@@ -2425,18 +3243,19 @@ static void atyfb_palette(int enter)
      *  Initialisation
      */
 
-__initfunc(static int aty_init(struct fb_info_aty *info, const char *name))
+static int __init aty_init(struct fb_info_aty *info, const char *name)
 {
     u32 chip_id;
     u32 i;
     int j, k;
     struct fb_var_screeninfo var;
     struct display *disp;
-    const char *chipname = NULL, *ramname = NULL;
+    const char *chipname = NULL, *ramname = NULL, *xtal;
     int pll, mclk, gtb_memsize;
 #if defined(CONFIG_PPC)
     int sense;
 #endif
+    u8 pll_ref_div;
 
     info->aty_cmap_regs = (struct aty_cmap_regs *)(info->ati_regbase+0xc0);
     chip_id = aty_ld_le32(CONFIG_CHIP_ID, info);
@@ -2445,6 +3264,7 @@ __initfunc(static int aty_init(struct fb_info_aty *info, const char *name))
     for (j = 0; j < (sizeof(aty_features)/sizeof(*aty_features)); j++)
 	if (aty_features[j].chip_type == Gx) {
 	    chipname = aty_features[j].name;
+	    info->dac_type = (aty_ld_le32(DAC_CNTL, info) >> 16) & 0x07;
 	    break;
 	}
     if (!chipname) {
@@ -2458,10 +3278,16 @@ __initfunc(static int aty_init(struct fb_info_aty *info, const char *name))
 	ramname = aty_gx_ram[info->ram_type];
 	/* FIXME: clockchip/RAMDAC probing? */
 #ifdef CONFIG_ATARI
-	info->dac_type = DAC_ATI68860_B;
 	info->clk_type = CLK_ATI18818_1;
+	info->dac_type = (aty_ld_le32(CONFIG_STAT0, info) >> 9) & 0x07;
+	if (info->dac_type == 0x07)
+	    info->dac_subtype = DAC_ATT20C408;
+	else
+	    info->dac_subtype = (aty_ld_8(SCRATCH_REG1 + 1, info) & 0xF0) |
+				info->dac_type;
 #else
 	info->dac_type = DAC_IBMRGB514;
+	info->dac_subtype = DAC_IBMRGB514;
 	info->clk_type = CLK_IBMRGB514;
 #endif
 	/* FIXME */
@@ -2472,6 +3298,7 @@ __initfunc(static int aty_init(struct fb_info_aty *info, const char *name))
 	info->ram_type = (aty_ld_le32(CONFIG_STAT0, info) & 0x07);
 	ramname = aty_ct_ram[info->ram_type];
 	info->dac_type = DAC_INTERNAL;
+	info->dac_subtype = DAC_INTERNAL;
 	info->clk_type = CLK_INTERNAL;
 	if ((Gx == CT_CHIP_ID) || (Gx == ET_CHIP_ID)) {
 	    pll = 135;
@@ -2511,16 +3338,39 @@ __initfunc(static int aty_init(struct fb_info_aty *info, const char *name))
 	    } else if (Gx == GB_CHIP_ID || Gx == GD_CHIP_ID ||
 		       Gx == GI_CHIP_ID || Gx == GP_CHIP_ID ||
 		       Gx == GQ_CHIP_ID || Gx == LB_CHIP_ID ||
-		       Gx == LD_CHIP_ID || Gx == LG_CHIP_ID ||
+		       Gx == LD_CHIP_ID ||
 		       Gx == LI_CHIP_ID || Gx == LP_CHIP_ID) {
 		/* RAGE PRO or LT PRO */
 		pll = 230;
 		mclk = 100;
+	    } else if (Gx == LG_CHIP_ID) {
+		/* Rage LT */
+		pll = 230;
+		mclk = 63;
 	    } else {
 		/* other RAGE */
 		pll = 135;
 		mclk = 63;
 	    }
+	}
+    }
+
+    info->ref_clk_per = 1000000000000ULL/14318180;
+    xtal = "14.31818";
+    if (!(Gx == GX_CHIP_ID || Gx == CX_CHIP_ID || Gx == CT_CHIP_ID ||
+	  Gx == ET_CHIP_ID ||
+	  ((Gx == VT_CHIP_ID || Gx == GT_CHIP_ID) && !(Rev & 0x07))) &&
+	(pll_ref_div = aty_ld_pll(PLL_REF_DIV, info))) {
+	int diff1, diff2;
+	diff1 = 510*14/pll_ref_div-pll;
+	diff2 = 510*29/pll_ref_div-pll;
+	if (diff1 < 0)
+	    diff1 = -diff1;
+	if (diff2 < 0)
+	    diff2 = -diff2;
+	if (diff2 < diff1) {
+	    info->ref_clk_per = 1000000000000ULL/29498928;
+	    xtal = "29.498928";
 	}
     }
 
@@ -2602,9 +3452,9 @@ __initfunc(static int aty_init(struct fb_info_aty *info, const char *name))
     if (default_mclk)
 	mclk = default_mclk;
 
-    printk("%d%c %s, %d MHz PLL, %d Mhz MCLK\n", 
+    printk("%d%c %s, %s MHz XTAL, %d MHz PLL, %d Mhz MCLK\n", 
     	   info->total_vram == 0x80000 ? 512 : (info->total_vram >> 20), 
-    	   info->total_vram == 0x80000 ? 'K' : 'M', ramname, pll, mclk);
+    	   info->total_vram == 0x80000 ? 'K' : 'M', ramname, xtal, pll, mclk);
 
     if (mclk < 44)
 	info->mem_refresh_rate = 0;	/* 000 = 10 Mhz - 43 Mhz */
@@ -2642,38 +3492,88 @@ __initfunc(static int aty_init(struct fb_info_aty *info, const char *name))
     }
 #endif
 
-    if (info->bus_type == ISA)
-	if ((info->total_vram == 0x400000) || (info->total_vram == 0x800000)) {
-	    /* protect GUI-regs if complete Aperture is VRAM */
+    /*
+     *  Last page of 8 MB (4 MB on ISA) aperture is MMIO
+     *  FIXME: we should use the auxiliary aperture instead so we can acces the
+     *  full 8 MB of video RAM on 8 MB boards
+     */
+    if (info->total_vram == 0x800000 ||
+	(info->bus_type == ISA && info->total_vram == 0x400000))
 	    info->total_vram -= GUI_RESERVE;
-	}
 
-#if defined(CONFIG_PPC)
-    if (default_vmode == VMODE_NVRAM) {
-	default_vmode = nvram_read_byte(NV_VMODE);
-	if (default_vmode <= 0 || default_vmode > VMODE_MAX)
-	    default_vmode = VMODE_CHOOSE;
+    /* Clear the video memory */
+    fb_memset((void *)info->frame_buffer, 0, info->total_vram);
+
+    disp = &info->disp;
+
+    strcpy(info->fb_info.modename, atyfb_name);
+    info->fb_info.node = -1;
+    info->fb_info.fbops = &atyfb_ops;
+    info->fb_info.disp = disp;
+    strcpy(info->fb_info.fontname, fontname);
+    info->fb_info.changevar = NULL;
+    info->fb_info.switch_con = &atyfbcon_switch;
+    info->fb_info.updatevar = &atyfbcon_updatevar;
+    info->fb_info.blank = &atyfbcon_blank;
+    info->fb_info.flags = FBINFO_FLAG_DEFAULT;
+
+#ifdef MODULE
+    var = default_var;
+#else /* !MODULE */
+    memset(&var, 0, sizeof(var));
+#ifdef CONFIG_PPC
+    if (_machine == _MACH_Pmac) {
+	    /*
+	     *  FIXME: The NVRAM stuff should be put in a Mac-specific file, as it
+	     *         applies to all Mac video cards
+	     */
+	    if (mode_option) {
+		if (!mac_find_mode(&var, &info->fb_info, mode_option, 8))
+		    var = default_var;
+	    } else {
+#ifdef CONFIG_NVRAM
+		if (default_vmode == VMODE_NVRAM) {
+		    default_vmode = nvram_read_byte(NV_VMODE);
+		    if (default_vmode <= 0 || default_vmode > VMODE_MAX)
+			default_vmode = VMODE_CHOOSE;
+		}
+#endif
+		if (default_vmode == VMODE_CHOOSE) {
+		    if (Gx == LG_CHIP_ID)
+			/* G3 PowerBook with 1024x768 LCD */
+			default_vmode = VMODE_1024_768_60;
+		    else {
+			sense = read_aty_sense(info);
+			default_vmode = mac_map_monitor_sense(sense);
+		    }
+		}
+		if (default_vmode <= 0 || default_vmode > VMODE_MAX)
+		    default_vmode = VMODE_640_480_60;
+#ifdef CONFIG_NVRAM
+		if (default_cmode == CMODE_NVRAM)
+		    default_cmode = nvram_read_byte(NV_CMODE);
+#endif
+		if (default_cmode < CMODE_8 || default_cmode > CMODE_32)
+		    default_cmode = CMODE_8;
+		if (mac_vmode_to_var(default_vmode, default_cmode, &var))
+		    var = default_var;
+	    }
     }
-    if (default_vmode == VMODE_CHOOSE) {
-	if (Gx == LG_CHIP_ID)
-	    /* G3 PowerBook with 1024x768 LCD */
-	    default_vmode = VMODE_1024_768_60;
-	else {
-	    sense = read_aty_sense(info);
-	    default_vmode = mac_map_monitor_sense(sense);
-	}
-    }
-    if (default_vmode <= 0 || default_vmode > VMODE_MAX)
-	default_vmode = VMODE_640_480_60;
-    if (default_cmode == CMODE_NVRAM)
-	default_cmode = nvram_read_byte(NV_CMODE);
-    if (default_cmode < CMODE_8 || default_cmode > CMODE_32)
-	default_cmode = CMODE_8;
-    if (mac_vmode_to_var(default_vmode, default_cmode, &var))
+    else if (!fb_find_mode(&var, &info->fb_info, mode_option, NULL, 0, NULL, 8))
 	var = default_var;
 #else /* !CONFIG_PPC */
-    var = default_var;
+#ifdef __sparc__
+    if (mode_option) {
+    	if (!fb_find_mode(&var, &info->fb_info, mode_option, NULL, 0, NULL, 8))
+	    var = default_var;
+    } else
+	var = default_var;
+#else
+    if (!fb_find_mode(&var, &info->fb_info, mode_option, NULL, 0, NULL, 8))
+	var = default_var;
+#endif /* !__sparc__ */
 #endif /* !CONFIG_PPC */
+#endif /* !MODULE */
     if (noaccel)
         var.accel_flags &= ~FB_ACCELF_TEXT;
     else
@@ -2690,19 +3590,6 @@ __initfunc(static int aty_init(struct fb_info_aty *info, const char *name))
 	printk("atyfb: can't set default video mode\n");
 	return 0;
     }
-
-    disp = &info->disp;
-
-    strcpy(info->fb_info.modename, atyfb_name);
-    info->fb_info.node = -1;
-    info->fb_info.fbops = &atyfb_ops;
-    info->fb_info.disp = disp;
-    strcpy(info->fb_info.fontname, fontname);
-    info->fb_info.changevar = NULL;
-    info->fb_info.switch_con = &atyfbcon_switch;
-    info->fb_info.updatevar = &atyfbcon_updatevar;
-    info->fb_info.blank = &atyfbcon_blank;
-    info->fb_info.flags = FBINFO_FLAG_DEFAULT;
 
 #ifdef __sparc__
     atyfb_save_palette(&info->fb_info, 0);
@@ -2727,72 +3614,83 @@ __initfunc(static int aty_init(struct fb_info_aty *info, const char *name))
     if (register_framebuffer(&info->fb_info) < 0)
 	return 0;
 
+    info->next = fb_list;
+    fb_list = info;
+
     printk("fb%d: %s frame buffer device on %s\n",
 	   GET_FB_IDX(info->fb_info.node), atyfb_name, name);
     return 1;
 }
 
-__initfunc(void atyfb_init(void))
+int __init atyfb_init(void)
 {
-#if defined(CONFIG_FB_OF)
-    /* We don't want to be called like this. */
-    /* We rely on Open Firmware (offb) instead. */
-#elif defined(CONFIG_PCI)
-    struct pci_dev *pdev;
+#if defined(CONFIG_PCI)
+    struct pci_dev *pdev = NULL;
     struct fb_info_aty *info;
-    unsigned long addr;
+    unsigned long addr, res_start, res_size;
+    int i;
 #ifdef __sparc__
     extern void (*prom_palette) (int);
     extern int con_is_present(void);
     struct pcidev_cookie *pcp;
     char prop[128];
-    int node, len;
+    int node, len, j;
     u32 mem, chip_id;
-    int i, j;
 
     /* Do not attach when we have a serial console. */
     if (!con_is_present())
-	return;
+	return -ENXIO;
 #else
     u16 tmp;
 #endif
 
-    for (pdev = pci_devices; pdev; pdev = pdev->next) {
-	if (((pdev->class >> 16) == PCI_BASE_CLASS_DISPLAY) &&
-	    (pdev->vendor == PCI_VENDOR_ID_ATI)) {
+    while ((pdev = pci_find_device(PCI_VENDOR_ID_ATI, PCI_ANY_ID, pdev))) {
+	if ((pdev->class >> 16) == PCI_BASE_CLASS_DISPLAY) {
+	    struct resource *rp;
 
+	    for (i = sizeof(aty_features)/sizeof(*aty_features)-1; i >= 0; i--)
+		if (pdev->device == aty_features[i].pci_id)
+		    break;
+	    if (i < 0)
+		continue;
+	    
 	    info = kmalloc(sizeof(struct fb_info_aty), GFP_ATOMIC);
 	    if (!info) {
 		printk("atyfb_init: can't alloc fb_info_aty\n");
-		return;
+		return -ENXIO;
 	    }
 	    memset(info, 0, sizeof(struct fb_info_aty));
 
-	    addr = pdev->base_address[0];
-	    if ((addr & PCI_BASE_ADDRESS_SPACE) == PCI_BASE_ADDRESS_SPACE_IO)
-		addr = pdev->base_address[1];
+	    rp = &pdev->resource[0];
+	    if (rp->flags & IORESOURCE_IO)
+		    rp = &pdev->resource[1];
+	    addr = rp->start;
 	    if (!addr)
 		continue;
-	    addr &= PCI_BASE_ADDRESS_MEM_MASK;
+
+	    res_start = rp->start;
+	    res_size = rp->end-rp->start+1;
+	    if (!request_mem_region(res_start, res_size, "atyfb"))
+		continue;
 
 #ifdef __sparc__
 	    /*
 	     * Map memory-mapped registers.
 	     */
-	    info->ati_regbase = addr + 0x7ffc00;
-	    info->ati_regbase_phys = __pa(addr + 0x7ffc00);
+	    info->ati_regbase = addr + 0x7ffc00UL;
+	    info->ati_regbase_phys = addr + 0x7ffc00UL;
 
 	    /*
 	     * Map in big-endian aperture.
 	     */
-	    info->frame_buffer = (unsigned long)(addr + 0x800000);
-	    info->frame_buffer_phys = __pa(addr + 0x800000);
+	    info->frame_buffer = (unsigned long) addr + 0x800000UL;
+	    info->frame_buffer_phys = addr + 0x800000UL;
 
 	    /*
 	     * Figure mmap addresses from PCI config space.
 	     * Split Framebuffer in big- and little-endian halfs.
 	     */
-	    for (i = 0; i < 6 && pdev->base_address[i]; i++)
+	    for (i = 0; i < 6 && pdev->resource[i].start; i++)
 		/* nothing */;
 	    j = i + 4;
 
@@ -2800,27 +3698,27 @@ __initfunc(void atyfb_init(void))
 	    if (!info->mmap_map) {
 		printk("atyfb_init: can't alloc mmap_map\n");
 		kfree(info);
-		return;
+		release_mem_region(res_start, res_size);
+		return -ENXIO;
 	    }
 	    memset(info->mmap_map, 0, j * sizeof(*info->mmap_map));
 
-	    for (i = 0, j = 2; i < 6 && pdev->base_address[i]; i++) {
+	    for (i = 0, j = 2; i < 6 && pdev->resource[i].start; i++) {
+		struct resource *rp = &pdev->resource[i];
 		int io, breg = PCI_BASE_ADDRESS_0 + (i << 2);
 		unsigned long base;
 		u32 size, pbase;
 
-		base = pdev->base_address[i];
+		base = rp->start;
 
-		io = (base & PCI_BASE_ADDRESS_SPACE)==PCI_BASE_ADDRESS_SPACE_IO;
+		io = (rp->flags & IORESOURCE_IO);
 
+		size = rp->end - base + 1;
+		
 		pci_read_config_dword(pdev, breg, &pbase);
-		pci_write_config_dword(pdev, breg, 0xffffffff);
-		pci_read_config_dword(pdev, breg, &size);
-		pci_write_config_dword(pdev, breg, pbase);
 
 		if (io)
 			size &= ~1;
-		size = ~(size) + 1;
 
 		/*
 		 * Map the framebuffer a second time, this time without
@@ -2830,7 +3728,7 @@ __initfunc(void atyfb_init(void))
 		 */
 		if (base == addr) {
 		    info->mmap_map[j].voff = (pbase + 0x10000000) & PAGE_MASK;
-		    info->mmap_map[j].poff = __pa(base & PAGE_MASK);
+		    info->mmap_map[j].poff = base & PAGE_MASK;
 		    info->mmap_map[j].size = (size + ~PAGE_MASK) & PAGE_MASK;
 		    info->mmap_map[j].prot_mask = _PAGE_CACHE;
 		    info->mmap_map[j].prot_flag = _PAGE_E;
@@ -2843,7 +3741,7 @@ __initfunc(void atyfb_init(void))
 		 */
 		if (base == addr) {
 		    info->mmap_map[j].voff = (pbase + 0x800000) & PAGE_MASK;
-		    info->mmap_map[j].poff = __pa((base+0x800000) & PAGE_MASK);
+		    info->mmap_map[j].poff = (base+0x800000) & PAGE_MASK;
 		    info->mmap_map[j].size = 0x800000;
 		    info->mmap_map[j].prot_mask = _PAGE_CACHE;
 		    info->mmap_map[j].prot_flag = _PAGE_E|_PAGE_IE;
@@ -2852,7 +3750,7 @@ __initfunc(void atyfb_init(void))
 		}
 
 		info->mmap_map[j].voff = pbase & PAGE_MASK;
-		info->mmap_map[j].poff = __pa(base & PAGE_MASK);
+		info->mmap_map[j].poff = base & PAGE_MASK;
 		info->mmap_map[j].size = (size + ~PAGE_MASK) & PAGE_MASK;
 		info->mmap_map[j].prot_mask = _PAGE_CACHE;
 		info->mmap_map[j].prot_flag = _PAGE_E;
@@ -2980,7 +3878,8 @@ __initfunc(void atyfb_init(void))
 
 	    if(!info->ati_regbase) {
 		    kfree(info);
-		    return;
+		    release_mem_region(res_start, res_size);
+		    return -ENOMEM;
 	    }
 
 	    info->ati_regbase_phys += 0xc00;
@@ -3007,7 +3906,8 @@ __initfunc(void atyfb_init(void))
 
 	    if(!info->frame_buffer) {
 		    kfree(info);
-		    return;
+		    release_mem_region(res_start, res_size);
+		    return -ENXIO;
 	    }
 
 #endif /* __sparc__ */
@@ -3016,7 +3916,8 @@ __initfunc(void atyfb_init(void))
 		if (info->mmap_map)
 		    kfree(info->mmap_map);
 		kfree(info);
-		return;
+		release_mem_region(res_start, res_size);
+		return -ENXIO;
 	    }
 
 #ifdef __sparc__
@@ -3027,19 +3928,33 @@ __initfunc(void atyfb_init(void))
 	     * Add /dev/fb mmap values.
 	     */
 	    info->mmap_map[0].voff = 0x8000000000000000UL;
-	    info->mmap_map[0].poff = __pa(info->frame_buffer & PAGE_MASK);
+	    info->mmap_map[0].poff = info->frame_buffer & PAGE_MASK;
 	    info->mmap_map[0].size = info->total_vram;
 	    info->mmap_map[0].prot_mask = _PAGE_CACHE;
 	    info->mmap_map[0].prot_flag = _PAGE_E;
 	    info->mmap_map[1].voff = info->mmap_map[0].voff + info->total_vram;
-	    info->mmap_map[1].poff = __pa(info->ati_regbase & PAGE_MASK);
+	    info->mmap_map[1].poff = info->ati_regbase & PAGE_MASK;
 	    info->mmap_map[1].size = PAGE_SIZE;
 	    info->mmap_map[1].prot_mask = _PAGE_CACHE;
 	    info->mmap_map[1].prot_flag = _PAGE_E;
 #endif /* __sparc__ */
+
+#ifdef CONFIG_PMAC_PBOOK
+	    if (first_display == NULL)
+		pmu_register_sleep_notifier(&aty_sleep_notifier);
+	    info->next = first_display;
+	    first_display = info;
+#endif
+
+#ifdef CONFIG_FB_COMPAT_XPMAC
+	    if (!console_fb_info)
+		console_fb_info = &info->fb_info;
+#endif /* CONFIG_FB_COMPAT_XPMAC */
 	}
     }
+
 #elif defined(CONFIG_ATARI)
+  u32   clock_r;
     int m64_num;
     struct fb_info_aty *info;
 
@@ -3054,7 +3969,7 @@ __initfunc(void atyfb_init(void))
 	info = kmalloc(sizeof(struct fb_info_aty), GFP_ATOMIC);
 	if (!info) {
 	    printk("atyfb_init: can't alloc fb_info_aty\n");
-	    return;
+	    return -ENOMEM;
 	}
 	memset(info, 0, sizeof(struct fb_info_aty));
 
@@ -3063,110 +3978,45 @@ __initfunc(void atyfb_init(void))
 	 *  kernel address space.
 	 */
 	info->frame_buffer = ioremap(phys_vmembase[m64_num], phys_size[m64_num]);
-	info->frame_buffer_phys = info->frame_buffer;
+	info->frame_buffer_phys = info->frame_buffer;  /* Fake! */
 	info->ati_regbase = ioremap(phys_guiregbase[m64_num], 0x10000)+0xFC00ul;
-	info->ati_regbase_phys = info->ati_regbase;
+	info->ati_regbase_phys = info->ati_regbase;  /* Fake! */
+
+	aty_st_le32(CLOCK_CNTL, 0x12345678, info);
+	clock_r = aty_ld_le32(CLOCK_CNTL, info);
+
+	switch (clock_r & 0x003F) {
+	    case 0x12:
+		info->clk_wr_offset = 3;  /*  */
+		break;
+	    case 0x34:
+		info->clk_wr_offset = 2;  /* Medusa ST-IO ISA Adapter etc. */
+		break;
+	    case 0x16:
+		info->clk_wr_offset = 1;  /*  */
+		break;
+	    case 0x38:
+		info->clk_wr_offset = 0;  /* Panther 1 ISA Adapter (Gerald) */
+		break;
+	}
 
 	if (!aty_init(info, "ISA bus")) {
 	    kfree(info);
 	    /* This is insufficient! kernel_map has added two large chunks!! */
-	    return;
+	    return -ENXIO;
 	}
     }
-#endif
+#endif /* CONFIG_ATARI */
+    return 0;
 }
 
-#ifdef CONFIG_FB_OF
-__initfunc(void atyfb_of_init(struct device_node *dp))
-{
-    unsigned long addr;
-    u8 bus, devfn;
-    u16 cmd;
-    struct fb_info_aty *info;
-    int i;
-
-    switch (dp->n_addrs) {
-	case 1:
-	case 2:
-	case 3:
-	    addr = dp->addrs[0].address;
-	    break;
-	case 4:
-	    addr = dp->addrs[1].address;
-	    break;
-	default:
-	    printk("Warning: got %d adresses for ATY:\n", dp->n_addrs);
-	    for (i = 0; i < dp->n_addrs; i++)
-		printk(" %08x-%08x", dp->addrs[i].address,
-		       dp->addrs[i].address+dp->addrs[i].size-1);
-	    if (dp->n_addrs)
-		printk("\n");
-	    return;
-    }
-
-    info = kmalloc(sizeof(struct fb_info_aty), GFP_ATOMIC);
-    if (!info) {
-	printk("atyfb_of_init: can't alloc fb_info_aty\n");
-	return;
-    }
-    memset(info, 0, sizeof(struct fb_info_aty));
-
-    info->ati_regbase_phys = 0x7ff000+addr;
-    info->ati_regbase = (unsigned long)ioremap(info->ati_regbase_phys,
-						   0x1000);
-
-    if(! info->ati_regbase) {
-	    printk("atyfb_init: ioremap() returned NULL\n");
-	    kfree(info);
-	    return;
-    }
-
-    info->ati_regbase_phys += 0xc00;
-    info->ati_regbase += 0xc00;
-
-    /* enable memory-space accesses using config-space command register */
-    if (pci_device_loc(dp, &bus, &devfn) == 0) {
-	pcibios_read_config_word(bus, devfn, PCI_COMMAND, &cmd);
-	if (cmd != 0xffff) {
-	    cmd |= PCI_COMMAND_MEMORY;
-	    pcibios_write_config_word(bus, devfn, PCI_COMMAND, cmd);
-	}
-    }
-
-#ifdef __BIG_ENDIAN
-    /* Use the big-endian aperture */
-    addr += 0x800000;
-#endif
-
-    /* Map in frame buffer */
-    info->frame_buffer_phys = addr;
-    info->frame_buffer = (unsigned long)ioremap(addr, 0x800000);
-
-    if(! info->frame_buffer) {
-	    printk("atyfb_init: ioremap() returned NULL\n");
-	    kfree(info);
-	    return;
-    }
-
-    if (!aty_init(info, dp->full_name)) {
-	kfree(info);
-	return;
-    }
-
-#ifdef CONFIG_FB_COMPAT_XPMAC
-    if (!console_fb_info)
-	console_fb_info = &info->fb_info;
-#endif /* CONFIG_FB_COMPAT_XPMAC */
-}
-#endif /* CONFIG_FB_OF */
-
-
-__initfunc(void atyfb_setup(char *options, int *ints))
+#ifndef MODULE
+int __init atyfb_setup(char *options)
 {
     char *this_opt;
 
     if (!options || !*options)
-	return;
+	return 0;
 
     for (this_opt = strtok(options, ","); this_opt;
 	 this_opt = strtok(NULL, ",")) {
@@ -3190,7 +4040,7 @@ __initfunc(void atyfb_setup(char *options, int *ints))
 		default_pll = simple_strtoul(this_opt+4, NULL, 0);
 	else if (!strncmp(this_opt, "mclk:", 5))
 		default_mclk = simple_strtoul(this_opt+5, NULL, 0);
-#if defined(CONFIG_PPC)
+#ifdef CONFIG_PPC
 	else if (!strncmp(this_opt, "vmode:", 6)) {
 	    unsigned int vmode = simple_strtoul(this_opt+6, NULL, 0);
 	    if (vmode > 0 && vmode <= VMODE_MAX)
@@ -3228,11 +4078,15 @@ __initfunc(void atyfb_setup(char *options, int *ints))
 	    }
 	}
 #endif
+	else
+	    mode_option = this_opt;
     }
+    return 0;
 }
+#endif /* !MODULE */
 
 #ifdef CONFIG_ATARI
-__initfunc(static int store_video_par(char *video_str, unsigned char m64_num))
+static int __init store_video_par(char *video_str, unsigned char m64_num)
 {
     char *p;
     unsigned long vmembase, size, guiregbase;
@@ -3261,7 +4115,7 @@ mach64_invalid:
     return -1;
 }
 
-__initfunc(static char *strtoke(char *s, const char *ct))
+static char __init *strtoke(char *s, const char *ct)
 {
     static char *ssave = NULL;
     char *sbegin, *send;
@@ -3323,7 +4177,7 @@ static void atyfbcon_blank(int blank, struct fb_info *fb)
     struct fb_info_aty *info = (struct fb_info_aty *)fb;
     u8 gen_cntl;
 
-#if defined(CONFIG_PPC)
+#ifdef CONFIG_ADB_PMU
     if ((_machine == _MACH_Pmac) && blank)
     	pmu_enable_backlight(0);
 #endif
@@ -3348,7 +4202,7 @@ static void atyfbcon_blank(int blank, struct fb_info *fb)
 	gen_cntl &= ~(0x4c);
     aty_st_8(CRTC_GEN_CNTL, gen_cntl, info);
 
-#if defined(CONFIG_PPC)
+#ifdef CONFIG_ADB_PMU
     if ((_machine == _MACH_Pmac) && !blank)
     	pmu_enable_backlight(1);
 #endif
@@ -3403,17 +4257,12 @@ static int atyfb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 	i |= 0x2;	/*DAC_CNTL|0x2 turns off the extra brightness for gt*/
     aty_st_8(DAC_CNTL, i, info);
     aty_st_8(DAC_MASK, 0xff, info);
-    eieio();
     scale = ((Gx != GX_CHIP_ID) && (Gx != CX_CHIP_ID) &&
 	     (info->current_par.crtc.bpp == 16)) ? 3 : 0;
-    info->aty_cmap_regs->windex = regno << scale;
-    eieio();
-    info->aty_cmap_regs->lut = red;
-    eieio();
-    info->aty_cmap_regs->lut = green;
-    eieio();
-    info->aty_cmap_regs->lut = blue;
-    eieio();
+    writeb(regno << scale, &info->aty_cmap_regs->windex);
+    writeb(red, &info->aty_cmap_regs->lut);
+    writeb(green, &info->aty_cmap_regs->lut);
+    writeb(blue, &info->aty_cmap_regs->lut);
     if (regno < 16)
 	switch (info->current_par.crtc.bpp) {
 #ifdef FBCON_HAS_CFB16
@@ -3850,4 +4699,137 @@ static struct display_switch fbcon_aty32 = {
     fbcon_aty32_putcs, fbcon_cfb32_revc, NULL, NULL, fbcon_aty32_clear_margins,
     FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
 };
+#endif
+
+#ifdef CONFIG_PMAC_PBOOK
+/*
+ * Save the contents of the frame buffer when we go to sleep,
+ * and restore it when we wake up again.
+ */
+int
+aty_sleep_notify(struct pmu_sleep_notifier *self, int when)
+{
+	struct fb_info_aty *info;
+ 	unsigned int pm;
+ 	
+	for (info = first_display; info != NULL; info = info->next) {
+		struct fb_fix_screeninfo fix;
+		int nb;
+		
+		atyfb_get_fix(&fix, fg_console, (struct fb_info *)info);
+		nb = fb_display[fg_console].var.yres * fix.line_length;
+
+		switch (when) {
+		case PBOOK_SLEEP_NOW:
+			/* Stop accel engine (stop bus mastering) */
+			if (info->current_par.accel_flags & FB_ACCELF_TEXT)
+				reset_engine(info);
+#if 1
+			/* Backup fb content */	
+			info->save_framebuffer = vmalloc(nb);
+			if (info->save_framebuffer)
+				memcpy(info->save_framebuffer,
+				       (void *)info->frame_buffer, nb);
+#endif
+			/* Blank display and LCD */				       
+			atyfbcon_blank(VESA_POWERDOWN+1, (struct fb_info *)info);			
+			
+			/* Set chip to "suspend" mode. Note: There's an HW bug in the
+			   chip which prevents proper resync on wakeup with automatic
+			   power management, we handle suspend manually using the
+			   following (weird) sequence described by ATI. Note2:
+			   We could enable this for all Rage LT Pro chip ids */
+			if ((Gx == LG_CHIP_ID) || (Gx == LT_CHIP_ID) || (Gx == LP_CHIP_ID)) {
+				pm = aty_ld_le32(POWER_MANAGEMENT, info);
+				pm &= ~PWR_MGT_ON;
+				aty_st_le32(POWER_MANAGEMENT, pm, info);
+				pm = aty_ld_le32(POWER_MANAGEMENT, info);
+				pm &= ~(PWR_BLON | AUTO_PWR_UP);
+				pm |= SUSPEND_NOW;
+				aty_st_le32(POWER_MANAGEMENT, pm, info);
+				pm = aty_ld_le32(POWER_MANAGEMENT, info);
+				pm |= PWR_MGT_ON;
+				aty_st_le32(POWER_MANAGEMENT, pm, info);
+				do {
+					pm = aty_ld_le32(POWER_MANAGEMENT, info);
+				} while ((pm & PWR_MGT_STATUS_MASK) != PWR_MGT_STATUS_SUSPEND);
+				mdelay(500);
+			}
+			break;
+		case PBOOK_WAKE:
+			/* Wakeup chip */
+			if ((Gx == LG_CHIP_ID) || (Gx == LT_CHIP_ID) || (Gx == LP_CHIP_ID)) {
+				pm = aty_ld_le32(POWER_MANAGEMENT, info);
+				pm &= ~PWR_MGT_ON;
+				aty_st_le32(POWER_MANAGEMENT, pm, info);
+				pm = aty_ld_le32(POWER_MANAGEMENT, info);
+				pm |=  (PWR_BLON | AUTO_PWR_UP);
+				pm &= ~SUSPEND_NOW;
+				aty_st_le32(POWER_MANAGEMENT, pm, info);
+				pm = aty_ld_le32(POWER_MANAGEMENT, info);
+				pm |= PWR_MGT_ON;
+				aty_st_le32(POWER_MANAGEMENT, pm, info);
+				do {
+					pm = aty_ld_le32(POWER_MANAGEMENT, info);
+				} while ((pm & PWR_MGT_STATUS_MASK) != 0);
+				mdelay(500);
+			}
+#if 1
+			/* Restore fb content */			
+			if (info->save_framebuffer) {
+				memcpy((void *)info->frame_buffer,
+				       info->save_framebuffer, nb);
+				vfree(info->save_framebuffer);
+				info->save_framebuffer = 0;
+			}
+#endif
+			/* Restore display */			
+			atyfb_set_par(&info->current_par, info);
+			atyfbcon_blank(0, (struct fb_info *)info);
+			break;
+		}
+	}
+	return PBOOK_SLEEP_OK;
+}
+#endif /* CONFIG_PMAC_PBOOK */
+
+#ifdef MODULE
+int __init init_module(void)
+{
+    atyfb_init();
+    return fb_list ? 0 : -ENXIO;
+}
+
+void cleanup_module(void)
+{
+    while (fb_list) {
+	struct fb_info_aty *info = fb_list;
+	fb_list = info->next;
+
+	unregister_framebuffer(&info->fb_info);
+
+#ifndef __sparc__
+	if (info->ati_regbase)
+	    iounmap((void *)info->ati_regbase);
+	if (info->frame_buffer)
+	    iounmap((void *)info->frame_buffer);
+#ifdef __BIG_ENDIAN
+	if (info->cursor && info->cursor->ram)
+	    iounmap(info->cursor->ram);
+#endif
+#endif
+
+	if (info->cursor) {
+	    if (info->cursor->timer)
+		kfree(info->cursor->timer);
+	    kfree(info->cursor);
+	}
+#ifdef __sparc__
+	if (info->mmap_map)
+	    kfree(info->mmap_map);
+#endif
+	kfree(info);
+    }
+}
+
 #endif

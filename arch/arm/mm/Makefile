@@ -7,26 +7,34 @@
 #
 # Note 2! The CFLAGS definition is now in the main makefile...
 
-all:	lib first_rule
+O_TARGET	:= mm.o
+O_OBJS		:= consistent.o extable.o fault-$(PROCESSOR).o init.o \
+		   mm-$(PROCESSOR).o small_page.o
 
-O_TARGET := mm.o
-O_OBJS   := init.o extable.o fault-$(PROCESSOR).o small_page.o
-
-ifeq ($(PROCESSOR),armo)
- O_OBJS += proc-arm2,3.o
+ifeq ($(CONFIG_CPU_26),y)
+  O_OBJS	+= proc-arm2,3.o
 endif
 
-ifeq ($(PROCESSOR),armv)
- O_OBJS += mm-$(MACHINE).o proc-arm6,7.o proc-sa110.o ioremap.o
+ifeq ($(CONFIG_CPU_32),y)
+  ifeq ($(CONFIG_CPU_ARM6),y)
+    P_OBJS	+= proc-arm6,7.o
+  endif
+  ifeq ($(CONFIG_CPU_ARM7),y)
+    P_OBJS	+= proc-arm6,7.o
+  endif
+  ifeq ($(CONFIG_CPU_SA110),y)
+    P_OBJS	+= proc-sa110.o
+  endif
+  ifeq ($(CONFIG_CPU_SA1100),y)
+    P_OBJS	+= proc-sa110.o
+  endif
+  O_OBJS	+= mm-$(MACHINE).o ioremap.o $(sort $(P_OBJS))
 endif
 
 include $(TOPDIR)/Rules.make
 
-%.o: %.S
-	$(CC) $(CFLAGS) -D__ASSEMBLY__ -c -o $@ $<
-
-.PHONY:	lib
-lib:;	@$(MAKE) -C ../lib constants.h
+.S.o:
+	$(CC) -D__ASSEMBLY__ $(AFLAGS) $(AFLAGS_$@) -traditional -c -o $*.o $<
 
 # Special dependencies
 fault-armv.o: fault-common.c

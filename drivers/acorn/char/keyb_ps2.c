@@ -25,8 +25,10 @@
 #include <asm/irq.h>
 #include <asm/hardware.h>
 #include <asm/io.h>
+#include <asm/iomd.h>
 #include <asm/system.h>
 
+extern struct tasklet_struct keyboard_tasklet;
 extern void kbd_reset_kdown(void);
 int kbd_read_mask;
 
@@ -221,14 +223,7 @@ unsigned char ps2kbd_sysrq_xlate[] =
 };
 #endif
 
-int ps2kbd_translate(unsigned char scancode, unsigned char *keycode_p, char *uf_p)
-{
-	*uf_p = scancode & 0200;
-	*keycode_p = scancode & 0x7f;
-	return 1;
-}
-
-static void ps2kbd_key(unsigned int keycode, unsigned int up_flag)
+static inline void ps2kbd_key(unsigned int keycode, unsigned int up_flag)
 {
 	handle_scancode(keycode, !up_flag);
 }
@@ -324,14 +319,14 @@ static void ps2kbd_rx(int irq, void *dev_id, struct pt_regs *regs)
 
 	while (inb(IOMD_KCTRL) & (1 << 5))
 		handle_rawcode(inb(IOMD_KARTRX));
-	mark_bh(KEYBOARD_BH);
+	tasklet_schedule(&keyboard_tasklet);
 }
 
 static void ps2kbd_tx(int irq, void *dev_id, struct pt_regs *regs)
 {
 }
 
-__initfunc(int ps2kbd_init_hw(void))
+int __init ps2kbd_init_hw(void)
 {
 	unsigned long flags;
 

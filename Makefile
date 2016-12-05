@@ -1,6 +1,6 @@
 VERSION = 2
 PATCHLEVEL = 3
-SUBLEVEL = 0
+SUBLEVEL = 51
 EXTRAVERSION =
 
 ARCH := $(shell uname -m | sed -e s/i.86/i386/ -e s/sun4u/sparc64/ -e s/arm.*/arm/ -e s/sa110/arm/)
@@ -22,11 +22,12 @@ CROSS_COMPILE 	=
 
 AS	=$(CROSS_COMPILE)as
 LD	=$(CROSS_COMPILE)ld
-CC	=$(CROSS_COMPILE)gcc -D__KERNEL__ -I$(HPATH)
+CC	=$(CROSS_COMPILE)gcc
 CPP	=$(CC) -E
 AR	=$(CROSS_COMPILE)ar
 NM	=$(CROSS_COMPILE)nm
 STRIP	=$(CROSS_COMPILE)strip
+OBJCOPY	=$(CROSS_COMPILE)objcopy
 OBJDUMP	=$(CROSS_COMPILE)objdump
 MAKE	=make
 GENKSYMS=/sbin/genksyms
@@ -86,12 +87,14 @@ SVGA_MODE=	-DSVGA_MODE=NORMAL_VGA
 # standard CFLAGS
 #
 
-CFLAGS = -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer
+CPPFLAGS := -D__KERNEL__ -I$(HPATH)
 
 ifdef CONFIG_SMP
-CFLAGS += -D__SMP__
-AFLAGS += -D__SMP__
+CPPFLAGS += -D__SMP__
 endif
+
+CFLAGS := $(CPPFLAGS) -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer
+AFLAGS := $(CPPFLAGS)
 
 #
 # if you want the RAM disk device, define this to be the
@@ -104,13 +107,22 @@ endif
 #
 
 CORE_FILES	=kernel/kernel.o mm/mm.o fs/fs.o ipc/ipc.o
-FILESYSTEMS	=fs/filesystems.a
 NETWORKS	=net/network.a
 DRIVERS		=drivers/block/block.a \
-		 drivers/char/char.a \
-	         drivers/misc/misc.a
+		 drivers/char/char.o \
+		 drivers/misc/misc.o \
+		 drivers/net/net.o \
+	         drivers/parport/parport.a
 LIBS		=$(TOPDIR)/lib/lib.a
 SUBDIRS		=kernel drivers mm fs net ipc lib
+
+ifdef CONFIG_DRM
+DRIVERS += drivers/char/drm/drm.o
+endif
+
+ifeq ($(CONFIG_AGP),y)
+DRIVERS += drivers/char/agp/agp.o
+endif
 
 ifdef CONFIG_NUBUS
 DRIVERS := $(DRIVERS) drivers/nubus/nubus.a
@@ -120,10 +132,36 @@ ifeq ($(CONFIG_ISDN),y)
 DRIVERS := $(DRIVERS) drivers/isdn/isdn.a
 endif
 
-DRIVERS := $(DRIVERS) drivers/net/net.a
+ifdef CONFIG_NET_FC
+DRIVERS := $(DRIVERS) drivers/net/fc/fc.a
+endif
+
+ifdef CONFIG_ATALK
+DRIVERS := $(DRIVERS) drivers/net/appletalk/appletalk.a
+endif
+
+ifdef CONFIG_TR
+DRIVERS := $(DRIVERS) drivers/net/tokenring/tr.a
+endif
+
+ifdef CONFIG_WAN
+DRIVERS := $(DRIVERS) drivers/net/wan/wan.a
+endif
+
+ifeq ($(CONFIG_ARCNET),y)
+DRIVERS := $(DRIVERS) drivers/net/arcnet/arcnet.a
+endif
+
+ifdef CONFIG_ATM
+DRIVERS := $(DRIVERS) drivers/atm/atm.a
+endif
 
 ifeq ($(CONFIG_SCSI),y)
 DRIVERS := $(DRIVERS) drivers/scsi/scsi.a
+endif
+
+ifeq ($(CONFIG_IEEE1394),y)
+DRIVERS := $(DRIVERS) drivers/ieee1394/ieee1394.a
 endif
 
 ifneq ($(CONFIG_CD_NO_IDESCSI)$(CONFIG_BLK_DEV_IDECD)$(CONFIG_BLK_DEV_SR)$(CONFIG_PARIDE_PCD),)
@@ -131,11 +169,23 @@ DRIVERS := $(DRIVERS) drivers/cdrom/cdrom.a
 endif
 
 ifeq ($(CONFIG_SOUND),y)
-DRIVERS := $(DRIVERS) drivers/sound/sound.a
+DRIVERS := $(DRIVERS) drivers/sound/sounddrivers.o
 endif
 
 ifdef CONFIG_PCI
 DRIVERS := $(DRIVERS) drivers/pci/pci.a
+endif
+
+ifeq ($(CONFIG_PCMCIA),y)
+DRIVERS := $(DRIVERS) drivers/pcmcia/pcmcia.o
+endif
+
+ifeq ($(CONFIG_PCMCIA_NETCARD),y)
+DRIVERS := $(DRIVERS) drivers/net/pcmcia/pcmcia_net.o
+endif
+
+ifeq ($(CONFIG_PCMCIA_CHRDEV),y)
+DRIVERS := $(DRIVERS) drivers/char/pcmcia/pcmcia_char.o
 endif
 
 ifdef CONFIG_DIO
@@ -158,12 +208,20 @@ ifdef CONFIG_PPC
 DRIVERS := $(DRIVERS) drivers/macintosh/macintosh.a
 endif
 
-ifdef CONFIG_PNP
-DRIVERS := $(DRIVERS) drivers/pnp/pnp.a
+ifdef CONFIG_MAC
+DRIVERS := $(DRIVERS) drivers/macintosh/macintosh.a
+endif
+
+ifeq ($(CONFIG_ISAPNP),y)
+DRIVERS := $(DRIVERS) drivers/pnp/pnp.o
+endif
+
+ifdef CONFIG_SGI_IP22
+DRIVERS := $(DRIVERS) drivers/sgi/sgi.a
 endif
 
 ifdef CONFIG_VT
-DRIVERS := $(DRIVERS) drivers/video/video.a
+DRIVERS := $(DRIVERS) drivers/video/video.o
 endif
 
 ifeq ($(CONFIG_PARIDE),y)
@@ -171,11 +229,15 @@ DRIVERS := $(DRIVERS) drivers/block/paride/paride.a
 endif
 
 ifdef CONFIG_HAMRADIO
-DRIVERS := $(DRIVERS) drivers/net/hamradio/hamradio.a
+DRIVERS := $(DRIVERS) drivers/net/hamradio/hamradio.o
+endif
+
+ifeq ($(CONFIG_TC),y)
+DRIVERS := $(DRIVERS) drivers/tc/tc.a
 endif
 
 ifeq ($(CONFIG_USB),y)
-DRIVERS := $(DRIVERS) drivers/usb/usb.a
+DRIVERS := $(DRIVERS) drivers/usb/usbdrv.o
 endif
 
 ifeq ($(CONFIG_I2O),y)
@@ -186,7 +248,18 @@ ifeq ($(CONFIG_IRDA),y)
 DRIVERS := $(DRIVERS) drivers/net/irda/irda_drivers.a
 endif
 
+ifeq ($(CONFIG_I2C),y)
+DRIVERS := $(DRIVERS) drivers/i2c/i2c.a
+endif
+
+ifeq ($(CONFIG_PHONE),y)
+DRIVERS := $(DRIVERS) drivers/telephony/telephony.a
+endif
+
 include arch/$(ARCH)/Makefile
+
+# use '-fno-strict-aliasing', but only if the compiler can take it
+CFLAGS += $(shell if $(CC) -fno-strict-aliasing -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-fno-strict-aliasing"; fi)
 
 .S.s:
 	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -E -o $*.s $<
@@ -203,9 +276,8 @@ vmlinux: $(CONFIGURATION) init/main.o init/version.o linuxsubdirs
 	$(LD) $(LINKFLAGS) $(HEAD) init/main.o init/version.o \
 		--start-group \
 		$(CORE_FILES) \
-		$(FILESYSTEMS) \
-		$(NETWORKS) \
 		$(DRIVERS) \
+		$(NETWORKS) \
 		$(LIBS) \
 		--end-group \
 		-o vmlinux
@@ -214,9 +286,6 @@ vmlinux: $(CONFIGURATION) init/main.o init/version.o linuxsubdirs
 symlinks:
 	rm -f include/asm
 	( cd include ; ln -sf asm-$(ARCH) asm)
-	@if [ ! -d modules ]; then \
-		mkdir modules; \
-	fi
 	@if [ ! -d include/linux/modules ]; then \
 		mkdir include/linux/modules; \
 	fi
@@ -287,7 +356,19 @@ init/main.o: init/main.c include/config/MARKER
 fs lib mm ipc kernel drivers net: dummy
 	$(MAKE) $(subst $@, _dir_$@, $@)
 
-MODFLAGS = -DMODULE
+TAGS: dummy
+	etags `find include/asm-$(ARCH) -name '*.h'`
+	find include -type d \( -name "asm-*" -o -name config \) -prune -o -name '*.h' -print | xargs etags -a
+	find $(SUBDIRS) init -name '*.c' | xargs etags -a
+
+# Exuberant ctags works better with -I 
+tags: dummy
+	CTAGSF=`ctags --version | grep -i exuberant >/dev/null && echo "-I __initdata,__initlocaldata,__exitdata,EXPORT_SYMBOL,EXPORT_SYMBOL_NOVERS"`; \
+	ctags $$CTAGSF `find include/asm-$(ARCH) -name '*.h'` && \
+	find include -type d \( -name "asm-*" -o -name config \) -prune -o -name '*.h' -print | xargs ctags $$CTAGSF -a && \
+	find $(SUBDIRS) init -name '*.c' | xargs ctags $$CTAGSF -a
+
+MODFLAGS += -DMODULE
 ifdef CONFIG_MODULES
 ifdef CONFIG_MODVERSIONS
 MODFLAGS += -DMODVERSIONS -include $(HPATH)/linux/modversions.h
@@ -295,7 +376,11 @@ endif
 
 modules: $(patsubst %, _mod_%, $(SUBDIRS))
 
-$(patsubst %, _mod_%, $(SUBDIRS)) : include/linux/version.h
+modules/MARKER:
+	mkdir -p modules
+	touch modules/MARKER
+
+$(patsubst %, _mod_%, $(SUBDIRS)) : include/linux/version.h include/config/MARKER modules/MARKER
 	$(MAKE) -C $(patsubst _mod_%, %, $@) CFLAGS="$(CFLAGS) $(MODFLAGS)" MAKING_MODULES=1 modules
 
 modules_install:
@@ -313,6 +398,7 @@ modules_install:
 	if [ -f NET_MODULES   ]; then inst_mod NET_MODULES   net;   fi; \
 	if [ -f IPV4_MODULES  ]; then inst_mod IPV4_MODULES  ipv4;  fi; \
 	if [ -f IPV6_MODULES  ]; then inst_mod IPV6_MODULES  ipv6;  fi; \
+	if [ -f ATM_MODULES   ]; then inst_mod ATM_MODULES   atm;   fi; \
 	if [ -f SCSI_MODULES  ]; then inst_mod SCSI_MODULES  scsi;  fi; \
 	if [ -f FS_MODULES    ]; then inst_mod FS_MODULES    fs;    fi; \
 	if [ -f NLS_MODULES   ]; then inst_mod NLS_MODULES   fs;    fi; \
@@ -322,8 +408,16 @@ modules_install:
 	if [ -f VIDEO_MODULES ]; then inst_mod VIDEO_MODULES video; fi; \
 	if [ -f FC4_MODULES   ]; then inst_mod FC4_MODULES   fc4;   fi; \
 	if [ -f IRDA_MODULES  ]; then inst_mod IRDA_MODULES  net;   fi; \
+	if [ -f SK98LIN_MODULES ]; then inst_mod SK98LIN_MODULES  net;   fi; \
+	if [ -f SKFP_MODULES ]; then inst_mod SKFP_MODULES   net;   fi; \
+	if [ -f USB_MODULES   ]; then inst_mod USB_MODULES   usb;   fi; \
+	if [ -f IEEE1394_MODULES ]; then inst_mod IEEE1394_MODULES ieee1394; fi; \
+	if [ -f PCMCIA_MODULES ]; then inst_mod PCMCIA_MODULES pcmcia; fi; \
+	if [ -f PCMCIA_NET_MODULES ]; then inst_mod PCMCIA_NET_MODULES pcmcia; fi; \
+	if [ -f PCMCIA_CHAR_MODULES ]; then inst_mod PCMCIA_CHAR_MODULES pcmcia; fi; \
+	if [ -f PCMCIA_SCSI_MODULES ]; then inst_mod PCMCIA_SCSI_MODULES pcmcia; fi; \
 	\
-	ls *.o > $$MODLIB/.allmods; \
+	ls -1 -U *.o | sort > $$MODLIB/.allmods; \
 	echo $$MODULES | tr ' ' '\n' | sort | comm -23 $$MODLIB/.allmods - > $$MODLIB/.misc; \
 	if [ -s $$MODLIB/.misc ]; then inst_mod $$MODLIB/.misc misc; fi; \
 	rm -f $$MODLIB/.misc $$MODLIB/.allmods; \
@@ -343,19 +437,19 @@ endif
 
 clean:	archclean
 	rm -f kernel/ksyms.lst include/linux/compile.h
-	rm -f core `find . -name '*.[oas]' ! -regex '.*lxdialog/.*' \
-		! -regex '.*ksymoops/.*' -print`
+	find . -name '*.[oas]' -type f -print | grep -v lxdialog/ | xargs rm -f
 	rm -f core `find . -type f -name 'core' -print`
-	rm -f core `find . -name '.*.flags' -print`
+	rm -f core `find . -type f -name '.*.flags' -print`
 	rm -f vmlinux System.map
 	rm -f .tmp*
 	rm -f drivers/char/consolemap_deftbl.c drivers/video/promcon_tbl.c
 	rm -f drivers/char/conmakehash
+	rm -f drivers/pci/devlist.h drivers/pci/classlist.h drivers/pci/gen-devlist
 	rm -f drivers/sound/bin2hex drivers/sound/hex2hex
-	if [ -d modules ]; then \
-		rm -f core `find modules/ -type f -print`; \
-	fi
+	rm -f net/khttpd/make_times_h
+	rm -f net/khttpd/times.h
 	rm -f submenu*
+	rm -rf modules
 
 mrproper: clean archmrproper
 	rm -f include/linux/autoconf.h include/linux/version.h
@@ -365,24 +459,26 @@ mrproper: clean archmrproper
 	rm -f drivers/net/hamradio/soundmodem/gentbl
 	rm -f drivers/char/hfmodem/gentbl drivers/char/hfmodem/tables.h
 	rm -f drivers/sound/*_boot.h drivers/sound/.*.boot
+	rm -f drivers/sound/msndinit.c
+	rm -f drivers/sound/msndperm.c
+	rm -f drivers/sound/pndsperm.c
+	rm -f drivers/sound/pndspini.c
 	rm -f .version .config* config.in config.old
 	rm -f scripts/tkparse scripts/kconfig.tk scripts/kconfig.tmp
 	rm -f scripts/lxdialog/*.o scripts/lxdialog/lxdialog
-	rm -f scripts/ksymoops/*.o scripts/ksymoops/ksymoops
 	rm -f .menuconfig.log
 	rm -f include/asm
 	rm -rf include/config
-	rm -f .depend `find . -name .depend -print`
-	rm -f core `find . -size 0 -print`
+	rm -f .depend `find . -type f -name .depend -print`
+	rm -f core `find . -type f -size 0 -print`
 	rm -f .hdepend scripts/mkdep scripts/split-include
 	rm -f $(TOPDIR)/include/linux/modversions.h
 	rm -rf $(TOPDIR)/include/linux/modules
-	rm -rf modules
 
 distclean: mrproper
 	rm -f core `find . \( -name '*.orig' -o -name '*.rej' -o -name '*~' \
 		-o -name '*.bak' -o -name '#*#' -o -name '.*.orig' \
-		-o -name '.*.rej' -o -name '.SUMS' -o -size 0 \) -print` TAGS
+		-o -name '.*.rej' -o -name '.SUMS' -o -size 0 \) -print` TAGS tags
 
 backup: mrproper
 	cd .. && tar cf - linux/ | gzip -9 > backup.gz
@@ -394,8 +490,6 @@ sums:
 dep-files: scripts/mkdep archdep include/linux/version.h
 	scripts/mkdep init/*.c > .depend
 	scripts/mkdep `find $(FINDHPATH) -follow -name \*.h ! -name modversions.h -print` > .hdepend
-#	set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i fastdep ;done
-# let this be made through the fastdep rule in Rules.make
 	$(MAKE) $(patsubst %,_sfdep_%,$(SUBDIRS)) _FASTDEP_ALL_SUB_DIRS="$(SUBDIRS)"
 
 MODVERFILE :=
@@ -408,7 +502,7 @@ depend dep: dep-files $(MODVERFILE)
 
 # make checkconfig: Prune 'scripts' directory to avoid "false positives".
 checkconfig:
-	perl -w scripts/checkconfig.pl `find * -path 'scripts' -prune -o -name '*.[hcS]' -print | sort`
+	find * -name '*.[hcS]' -type f -print | grep -v scripts/ | sort | xargs perl -w scripts/checkconfig.pl
 
 checkhelp:
 	perl -w scripts/checkhelp.pl `find * -name [cC]onfig.in -print`

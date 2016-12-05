@@ -42,7 +42,7 @@
 #include <asm/system.h>
 #include <asm/semaphore.h>
 
-#include "pc_keyb.h"		/* mouse enable command.. */
+#include <linux/pc_keyb.h>		/* mouse enable command.. */
 
 
 /*
@@ -55,7 +55,7 @@
 struct qp_queue {
 	unsigned long head;
 	unsigned long tail;
-	struct wait_queue *proc_list;
+	wait_queue_head_t proc_list;
 	struct fasync_struct *fasync;
 	unsigned char buf[QP_BUF_SIZE];
 };
@@ -134,7 +134,7 @@ static void qp_interrupt(int cpl, void *dev_id, struct pt_regs * regs)
 	}
 	queue->head = head;
 	if (queue->fasync)
-		kill_fasync(queue->fasync, SIGIO);
+		kill_fasync(queue->fasync, SIGIO, POLL_IN);
 	wake_up_interruptible(&queue->proc_list);
 }
 
@@ -258,7 +258,7 @@ static int poll_qp_status(void)
 static ssize_t read_qp(struct file * file, char * buffer,
 			size_t count, loff_t *ppos)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	ssize_t i = count;
 	unsigned char c;
 
@@ -267,7 +267,7 @@ static ssize_t read_qp(struct file * file, char * buffer,
 			return -EAGAIN;
 		add_wait_queue(&queue->proc_list, &wait);
 repeat:
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (queue_empty() && !signal_pending(current)) {
 			schedule();
 			goto repeat;
@@ -290,18 +290,12 @@ repeat:
 }
 
 struct file_operations qp_fops = {
-	NULL,		/* seek */
-	read_qp,
-	write_qp,
-	NULL, 		/* readdir */
-	poll_qp,
-	NULL, 		/* ioctl */
-	NULL,		/* mmap */
-	open_qp,
-	NULL,		/* flush */
-	release_qp,
-	NULL,
-	fasync_qp,
+	read:		read_qp,
+	write:		write_qp,
+	poll:		poll_qp,
+	open:		open_qp,
+	release:	release_qp,
+	fasync:		fasync_qp,
 };
 
 /*
@@ -354,7 +348,7 @@ int __init qpmouse_init(void)
 	queue = (struct qp_queue *) kmalloc(sizeof(*queue), GFP_KERNEL);
 	memset(queue, 0, sizeof(*queue));
 	queue->head = queue->tail = 0;
-	queue->proc_list = NULL;
+	init_waitqueue_head(&queue->proc_list);
 
 	return 0;
 }

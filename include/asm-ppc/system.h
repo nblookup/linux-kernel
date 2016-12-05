@@ -1,9 +1,16 @@
+/*
+ * $Id: system.h,v 1.49 1999/09/11 18:37:54 cort Exp $
+ *
+ * Copyright (C) 1999 Cort Dougan <cort@cs.nmt.edu>
+ */
 #ifndef __PPC_SYSTEM_H
 #define __PPC_SYSTEM_H
 
 #include <linux/kdev_t.h>
+
 #include <asm/processor.h>
 #include <asm/atomic.h>
+#include <asm/hw_irq.h>
 
 /*
  * Memory barrier.
@@ -25,12 +32,13 @@
 #define rmb()  __asm__ __volatile__ ("sync" : : : "memory")
 #define wmb()  __asm__ __volatile__ ("eieio" : : : "memory")
 
+#define set_mb(var, value)	do { var = value; mb(); } while (0)
+#define set_rmb(var, value)	do { var = value; rmb(); } while (0)
+#define set_wmb(var, value)	do { var = value; wmb(); } while (0)
+
 extern void xmon_irq(int, void *, struct pt_regs *);
 extern void xmon(struct pt_regs *excp);
 
-#define __save_flags(flags)	({\
-	__asm__ __volatile__ ("mfmsr %0" : "=r" ((flags)) : : "memory"); })
-#define __save_and_cli(flags)	({__save_flags(flags);__cli();})
 
 /* Data cache block flush - write out the cache line containing the
    specified address and then invalidate it in the cache. */
@@ -39,26 +47,6 @@ extern __inline__ void dcbf(void *line)
 	asm("dcbf %0,%1; sync" : : "r" (line), "r" (0));
 }
 
-extern __inline__ void __restore_flags(unsigned long flags)
-{
-        extern atomic_t ppc_n_lost_interrupts;
-	extern void do_lost_interrupts(unsigned long);
-
-        if ((flags & MSR_EE) && atomic_read(&ppc_n_lost_interrupts) != 0) {
-                do_lost_interrupts(flags);
-        } else {
-                __asm__ __volatile__ ("sync; mtmsr %0; isync"
-                              : : "r" (flags) : "memory");
-        }
-}
-
-
-extern void __sti(void);
-extern void __cli(void);
-extern int _disable_interrupts(void);
-extern void _enable_interrupts(int);
-
-extern void instruction_dump(unsigned long *);
 extern void print_backtrace(unsigned long *);
 extern void show_regs(struct pt_regs * regs);
 extern void flush_instruction_cache(void);
@@ -73,21 +61,27 @@ extern void read_rtc_time(void);
 extern void pmac_find_display(void);
 extern void giveup_fpu(struct task_struct *);
 extern void enable_kernel_fp(void);
+extern void giveup_altivec(struct task_struct *);
+extern void load_up_altivec(struct task_struct *);
 extern void cvt_fd(float *from, double *to, unsigned long *fpscr);
 extern void cvt_df(double *from, float *to, unsigned long *fpscr);
+extern int call_rtas(const char *, int, int, unsigned long *, ...);
+extern int abs(int);
 
 struct device_node;
 extern void note_scsi_host(struct device_node *, void *);
 
 struct task_struct;
+#define prepare_to_switch()	do { } while(0)
 #define switch_to(prev,next,last) _switch_to((prev),(next),&(last))
 extern void _switch_to(struct task_struct *, struct task_struct *,
 		       struct task_struct **);
 
 struct thread_struct;
 extern struct task_struct *_switch(struct thread_struct *prev,
-				     struct thread_struct *next,
-				     unsigned long context);
+				   struct thread_struct *next);
+
+extern unsigned int rtas_data;
 
 struct pt_regs;
 extern void dump_regs(struct pt_regs *);
@@ -112,6 +106,11 @@ extern void __global_restore_flags(unsigned long);
 #define restore_flags(x) __global_restore_flags(x)
 
 #endif /* !__SMP__ */
+
+#define local_irq_disable()		__cli()
+#define local_irq_enable()		__sti()
+#define local_irq_save(flags)		__save_and_cli(flags)
+#define local_irq_restore(flags)	__restore_flags(flags)
 
 #define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
 

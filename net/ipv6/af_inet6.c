@@ -7,7 +7,10 @@
  *
  *	Adapted from linux/net/ipv4/af_inet.c
  *
- *	$Id: af_inet6.c,v 1.43 1999/04/22 10:07:39 davem Exp $
+ *	$Id: af_inet6.c,v 1.55 2000/02/27 19:51:47 davem Exp $
+ *
+ * 	Fixes:
+ * 	Hideaki YOSHIFUJI	:	sin6_scope_id support
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -40,6 +43,7 @@
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/icmpv6.h>
+#include <linux/smp_lock.h>
 
 #include <net/ip.h>
 #include <net/ipv6.h>
@@ -72,17 +76,31 @@ extern struct proto_ops inet6_dgram_ops;
 /* IPv6 procfs goodies... */
 
 #ifdef CONFIG_PROC_FS
-extern int raw6_get_info(char *, char **, off_t, int, int);
-extern int tcp6_get_info(char *, char **, off_t, int, int);
-extern int udp6_get_info(char *, char **, off_t, int, int);
-extern int afinet6_get_info(char *, char **, off_t, int, int);
-extern int afinet6_get_snmp(char *, char **, off_t, int, int);
+extern int raw6_get_info(char *, char **, off_t, int);
+extern int tcp6_get_info(char *, char **, off_t, int);
+extern int udp6_get_info(char *, char **, off_t, int);
+extern int afinet6_get_info(char *, char **, off_t, int);
+extern int afinet6_get_snmp(char *, char **, off_t, int);
 #endif
 
 #ifdef CONFIG_SYSCTL
 extern void ipv6_sysctl_register(void);
 extern void ipv6_sysctl_unregister(void);
 #endif
+
+#ifdef INET_REFCNT_DEBUG
+atomic_t inet6_sock_nr;
+#endif
+
+static void inet6_sock_destruct(struct sock *sk)
+{
+	inet_sock_destruct(sk);
+
+#ifdef INET_REFCNT_DEBUG
+	atomic_dec(&inet6_sock_nr);
+#endif
+	MOD_DEC_USE_COUNT;
+}
 
 static int inet6_create(struct socket *sock, int protocol)
 {
@@ -103,7 +121,7 @@ static int inet6_create(struct socket *sock, int protocol)
 		if (protocol && protocol != IPPROTO_UDP) 
 			goto free_and_noproto;
 		protocol = IPPROTO_UDP;
-		sk->no_check = UDP_NO_CHECK;
+		sk->no_check = UDP_CSUM_DEFAULT;
 		prot=&udpv6_prot;
 		sock->ops = &inet6_dgram_ops;
 	} else if(sock->type == SOCK_RAW) {
@@ -121,16 +139,13 @@ static int inet6_create(struct socket *sock, int protocol)
 	
 	sock_init_data(sock, sk);
 
-	sk->destruct            = NULL;
+	sk->destruct            = inet6_sock_destruct;
 	sk->zapped		= 0;
 	sk->family		= PF_INET6;
 	sk->protocol		= protocol;
 
 	sk->prot		= prot;
 	sk->backlog_rcv		= prot->backlog_rcv;
-
-	sk->timer.data		= (unsigned long)sk;
-	sk->timer.function	= &net_timer;
 
 	sk->net_pinfo.af_inet6.hop_limit  = -1;
 	sk->net_pinfo.af_inet6.mcast_hops = -1;
@@ -140,15 +155,27 @@ static int inet6_create(struct socket *sock, int protocol)
 	/* Init the ipv4 part of the socket since we can have sockets
 	 * using v6 API for ipv4.
 	 */
-	sk->ip_ttl	= 64;
+	sk->protinfo.af_inet.ttl	= 64;
 
-	sk->ip_mc_loop	= 1;
-	sk->ip_mc_ttl	= 1;
-	sk->ip_mc_index	= 0;
-	sk->ip_mc_list	= NULL;
+	sk->protinfo.af_inet.mc_loop	= 1;
+	sk->protinfo.af_inet.mc_ttl	= 1;
+	sk->protinfo.af_inet.mc_index	= 0;
+	sk->protinfo.af_inet.mc_list	= NULL;
+
+	if (ipv4_config.no_pmtu_disc)
+		sk->protinfo.af_inet.pmtudisc = IP_PMTUDISC_DONT;
+	else
+		sk->protinfo.af_inet.pmtudisc = IP_PMTUDISC_WANT;
+
+
+#ifdef INET_REFCNT_DEBUG
+	atomic_inc(&inet6_sock_nr);
+	atomic_inc(&inet_sock_nr);
+#endif
+	MOD_INC_USE_COUNT;
 
 	if (sk->type==SOCK_RAW && protocol==IPPROTO_RAW)
-		sk->ip_hdrincl=1;
+		sk->protinfo.af_inet.hdrincl=1;
 
 	if (sk->num) {
 		/* It assumes that any protocol which allows
@@ -157,17 +184,16 @@ static int inet6_create(struct socket *sock, int protocol)
 		 */
 		sk->sport = ntohs(sk->num);
 		sk->prot->hash(sk);
-		add_to_prot_sklist(sk);
 	}
 
 	if (sk->prot->init) {
 		int err = sk->prot->init(sk);
 		if (err != 0) {
-			destroy_sock(sk);
+			sk->dead = 1;
+			inet_sock_release(sk);
 			return(err);
 		}
 	}
-	MOD_INC_USE_COUNT;
 	return(0);
 
 free_and_badtype:
@@ -196,22 +222,18 @@ static int inet6_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	/* If the socket has its own bind function then use it. */
 	if(sk->prot->bind)
 		return sk->prot->bind(sk, uaddr, addr_len);
-		
-	/* Check these errors (active socket, bad address length, double bind). */
-	if ((sk->state != TCP_CLOSE)			||
-	    (addr_len < sizeof(struct sockaddr_in6))	||
-	    (sk->num != 0))
+
+	if (addr_len < SIN6_LEN_RFC2133)
 		return -EINVAL;
-		
 	addr_type = ipv6_addr_type(&addr->sin6_addr);
 	if ((addr_type & IPV6_ADDR_MULTICAST) && sock->type == SOCK_STREAM)
-		return(-EINVAL);
+		return -EINVAL;
 
 	/* Check if the address belongs to the host. */
 	if (addr_type == IPV6_ADDR_MAPPED) {
 		v4addr = addr->sin6_addr.s6_addr32[3];
 		if (inet_addr_type(v4addr) != RTN_LOCAL)
-			return(-EADDRNOTAVAIL);
+			return -EADDRNOTAVAIL;
 	} else {
 		if (addr_type != IPV6_ADDR_ANY) {
 			/* ipv4 addr of the socket is invalid.  Only the
@@ -219,43 +241,70 @@ static int inet6_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 			 */
 			v4addr = LOOPBACK4_IPV6;
 			if (!(addr_type & IPV6_ADDR_MULTICAST))	{
-				if (ipv6_chk_addr(&addr->sin6_addr, NULL, 0) == NULL)
-					return(-EADDRNOTAVAIL);
+				if (!ipv6_chk_addr(&addr->sin6_addr, NULL))
+					return -EADDRNOTAVAIL;
 			}
+		}
+	}
+
+	snum = ntohs(addr->sin6_port);
+	if (snum && snum < PROT_SOCK && !capable(CAP_NET_BIND_SERVICE))
+		return -EACCES;
+
+	lock_sock(sk);
+
+	/* Check these errors (active socket, double bind). */
+	if ((sk->state != TCP_CLOSE)			||
+	    (sk->num != 0)) {
+		release_sock(sk);
+		return -EINVAL;
+	}
+
+	if (addr_type & IPV6_ADDR_LINKLOCAL) {
+		if (addr_len >= sizeof(struct sockaddr_in6) &&
+		    addr->sin6_scope_id) {
+			/* Override any existing binding, if another one
+			 * is supplied by user.
+			 */
+			sk->bound_dev_if = addr->sin6_scope_id;
+		}
+
+		/* Binding to link-local address requires an interface */
+		if (sk->bound_dev_if == 0) {
+			release_sock(sk);
+			return -EINVAL;
 		}
 	}
 
 	sk->rcv_saddr = v4addr;
 	sk->saddr = v4addr;
-		
-	memcpy(&sk->net_pinfo.af_inet6.rcv_saddr, &addr->sin6_addr, 
-	       sizeof(struct in6_addr));
+
+	ipv6_addr_copy(&sk->net_pinfo.af_inet6.rcv_saddr, &addr->sin6_addr);
 		
 	if (!(addr_type & IPV6_ADDR_MULTICAST))
-		memcpy(&sk->net_pinfo.af_inet6.saddr, &addr->sin6_addr, 
-		       sizeof(struct in6_addr));
-
-	snum = ntohs(addr->sin6_port);
-	if (snum == 0) 
-		snum = sk->prot->good_socknum();
-	if (snum < PROT_SOCK && !capable(CAP_NET_BIND_SERVICE))
-		return(-EACCES);
+		ipv6_addr_copy(&sk->net_pinfo.af_inet6.saddr, &addr->sin6_addr);
 
 	/* Make sure we are allowed to bind here. */
-	if(sk->prot->verify_bind(sk, snum))
-		return -EADDRINUSE;
+	if (sk->prot->get_port(sk, snum) != 0) {
+		sk->rcv_saddr = 0;
+		sk->saddr = 0;
+		memset(&sk->net_pinfo.af_inet6.rcv_saddr, 0, sizeof(struct in6_addr));
+		memset(&sk->net_pinfo.af_inet6.saddr, 0, sizeof(struct in6_addr));
 
-	sk->num = snum;
+		release_sock(sk);
+		return -EADDRINUSE;
+	}
+
 	sk->sport = ntohs(sk->num);
 	sk->dport = 0;
 	sk->daddr = 0;
-	sk->prot->rehash(sk);
-	add_to_prot_sklist(sk);
+	sk->prot->hash(sk);
+	release_sock(sk);
 
-	return(0);
+	return 0;
 }
 
-static int inet6_release(struct socket *sock, struct socket *peer)
+static int inet6_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
 
@@ -265,15 +314,7 @@ static int inet6_release(struct socket *sock, struct socket *peer)
 	/* Free mc lists */
 	ipv6_sock_mc_close(sk);
 
-	/* Huh! MOD_DEC_USE_COUNT was here :-(
-	   It is impossible by two reasons: socket destroy
-	   may be delayed and inet_release may sleep and
-	   return to nowhere then. It should be moved to
-	   inet6_destroy_sock(), but we have no explicit constructor :-(
-	                                    --ANK (980802)
-	 */
-	MOD_DEC_USE_COUNT;
-	return inet_release(sock, peer);
+	return inet_release(sock);
 }
 
 int inet6_destroy_sock(struct sock *sk)
@@ -285,7 +326,7 @@ int inet6_destroy_sock(struct sock *sk)
 	 *	Release destination entry
 	 */
 
-	dst_release(xchg(&sk->dst_cache,NULL));
+	sk_dst_reset(sk);
 
 	/* Release rx options */
 
@@ -311,14 +352,16 @@ static int inet6_getname(struct socket *sock, struct sockaddr *uaddr,
 		 int *uaddr_len, int peer)
 {
 	struct sockaddr_in6 *sin=(struct sockaddr_in6 *)uaddr;
-	struct sock *sk;
+	struct sock *sk = sock->sk;
   
 	sin->sin6_family = AF_INET6;
 	sin->sin6_flowinfo = 0;
-	sk = sock->sk;
+	sin->sin6_scope_id = 0;
 	if (peer) {
-		if (!tcp_connected(sk->state))
-			return(-ENOTCONN);
+		if (!sk->dport)
+			return -ENOTCONN;
+		if (((1<<sk->state)&(TCPF_CLOSE|TCPF_SYN_SENT)) && peer == 1)
+			return -ENOTCONN;
 		sin->sin6_port = sk->dport;
 		memcpy(&sin->sin6_addr, &sk->net_pinfo.af_inet6.daddr,
 		       sizeof(struct in6_addr));
@@ -336,7 +379,9 @@ static int inet6_getname(struct socket *sock, struct sockaddr *uaddr,
 
 		sin->sin6_port = sk->sport;
 	}
-	*uaddr_len = sizeof(*sin);	
+	if (ipv6_addr_type(&sin->sin6_addr) & IPV6_ADDR_LINKLOCAL)
+		sin->sin6_scope_id = sk->bound_dev_if;
+	*uaddr_len = sizeof(*sin);
 	return(0);
 }
 
@@ -402,14 +447,13 @@ static int inet6_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 struct proto_ops inet6_stream_ops = {
 	PF_INET6,
 
-	sock_no_dup,
 	inet6_release,
 	inet6_bind,
 	inet_stream_connect,		/* ok		*/
 	sock_no_socketpair,		/* a do nothing	*/
 	inet_accept,			/* ok		*/
 	inet6_getname, 
-	inet_poll,			/* ok		*/
+	tcp_poll,			/* ok		*/
 	inet6_ioctl,			/* must change  */
 	inet_listen,			/* ok		*/
 	inet_shutdown,			/* ok		*/
@@ -417,18 +461,18 @@ struct proto_ops inet6_stream_ops = {
 	inet_getsockopt,		/* ok		*/
 	sock_no_fcntl,			/* ok		*/
 	inet_sendmsg,			/* ok		*/
-	inet_recvmsg			/* ok		*/
+	inet_recvmsg,			/* ok		*/
+	sock_no_mmap
 };
 
 struct proto_ops inet6_dgram_ops = {
 	PF_INET6,
 
-	sock_no_dup,
 	inet6_release,
 	inet6_bind,
 	inet_dgram_connect,		/* ok		*/
 	sock_no_socketpair,		/* a do nothing	*/
-	inet_accept,			/* ok		*/
+	sock_no_accept,			/* a do nothing	*/
 	inet6_getname, 
 	datagram_poll,			/* ok		*/
 	inet6_ioctl,			/* must change  */
@@ -438,46 +482,14 @@ struct proto_ops inet6_dgram_ops = {
 	inet_getsockopt,		/* ok		*/
 	sock_no_fcntl,			/* ok		*/
 	inet_sendmsg,			/* ok		*/
-	inet_recvmsg			/* ok		*/
+	inet_recvmsg,			/* ok		*/
+	sock_no_mmap,
 };
 
 struct net_proto_family inet6_family_ops = {
 	PF_INET6,
 	inet6_create
 };
-
-#ifdef CONFIG_PROC_FS
-static struct proc_dir_entry proc_net_raw6 = {
-	PROC_NET_RAW6, 4, "raw6",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_net_inode_operations,
-	raw6_get_info
-};
-static struct proc_dir_entry proc_net_tcp6 = {
-	PROC_NET_TCP6, 4, "tcp6",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_net_inode_operations,
-	tcp6_get_info
-};
-static struct proc_dir_entry proc_net_udp6 = {
-	PROC_NET_RAW6, 4, "udp6",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_net_inode_operations,
-	udp6_get_info
-};
-static struct proc_dir_entry proc_net_sockstat6 = {
-	PROC_NET_SOCKSTAT6, 9, "sockstat6",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_net_inode_operations,
-	afinet6_get_info
-};
-static struct proc_dir_entry proc_net_snmp6 = {
-	PROC_NET_SNMP6, 5, "snmp6",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_net_inode_operations,
-	afinet6_get_snmp
-};
-#endif	/* CONFIG_PROC_FS */
 
 #ifdef MODULE
 int ipv6_unload(void)
@@ -496,7 +508,7 @@ extern void ipv6_sysctl_unregister(void);
 #ifdef MODULE
 int init_module(void)
 #else
-__initfunc(void inet6_proto_init(struct net_proto *pro))
+void __init inet6_proto_init(struct net_proto *pro)
 #endif
 {
 	struct sk_buff *dummy_skb;
@@ -553,11 +565,11 @@ __initfunc(void inet6_proto_init(struct net_proto *pro))
 
 	/* Create /proc/foo6 entries. */
 #ifdef CONFIG_PROC_FS
-	proc_net_register(&proc_net_raw6);
-	proc_net_register(&proc_net_tcp6);
-	proc_net_register(&proc_net_udp6);
-	proc_net_register(&proc_net_sockstat6);
-	proc_net_register(&proc_net_snmp6);
+	proc_net_create("raw6", 0, raw6_get_info);
+	proc_net_create("tcp6", 0, tcp6_get_info);
+	proc_net_create("udp6", 0, udp6_get_info);
+	proc_net_create("sockstat6", 0, afinet6_get_info);
+	proc_net_create("snmp6", 0, afinet6_get_snmp);
 #endif
 
 	/* Now the userspace is allowed to create INET6 sockets. */
@@ -590,11 +602,11 @@ void cleanup_module(void)
 	/* First of all disallow new sockets creation. */
 	sock_unregister(PF_INET6);
 #ifdef CONFIG_PROC_FS
-	proc_net_unregister(proc_net_raw6.low_ino);
-	proc_net_unregister(proc_net_tcp6.low_ino);
-	proc_net_unregister(proc_net_udp6.low_ino);
-	proc_net_unregister(proc_net_sockstat6.low_ino);
-	proc_net_unregister(proc_net_snmp6.low_ino);
+	proc_net_remove("raw6");
+	proc_net_remove("tcp6");
+	proc_net_remove("udp6");
+	proc_net_remove("sockstat6");
+	proc_net_remove("snmp6");
 #endif
 	/* Cleanup code parts. */
 	sit_cleanup();

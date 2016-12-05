@@ -143,7 +143,7 @@ xdr_encode_mon(struct rpc_rqst *rqstp, u32 *p, struct nsm_args *argp)
 	char	buffer[20];
 	u32	addr = ntohl(argp->addr);
 
-	dprintk("nsm: xdr_encode_mon(%08lx, %ld, %ld, %ld)\n",
+	dprintk("nsm: xdr_encode_mon(%08x, %d, %d, %d)\n",
 			htonl(argp->addr), htonl(argp->proc),
 			htonl(argp->vers), htonl(argp->proc));
 
@@ -195,6 +195,12 @@ xdr_decode_stat(struct rpc_rqst *rqstp, u32 *p, struct nsm_res *resp)
 #define SM_my_id_sz	(3+1+SM_my_name_sz)
 #define SM_mon_id_sz	(1+XDR_QUADLEN(20)+SM_my_id_sz)
 #define SM_mon_sz	(SM_mon_id_sz+4)
+#define SM_monres_sz	2
+#define SM_unmonres_sz	1
+
+#ifndef MAX
+# define MAX(a, b)	(((a) > (b))? (a) : (b))
+#endif
 
 static struct rpc_procinfo	nsm_procedures[] = {
         { "sm_null",
@@ -205,10 +211,10 @@ static struct rpc_procinfo	nsm_procedures[] = {
 		(kxdrproc_t) xdr_error, 0, 0 },
         { "sm_mon",
 		(kxdrproc_t) xdr_encode_mon,
-		(kxdrproc_t) xdr_decode_stat_res, SM_mon_sz, 2 },
+		(kxdrproc_t) xdr_decode_stat_res, MAX(SM_mon_sz, SM_monres_sz) << 2, 0 },
         { "sm_unmon",
 		(kxdrproc_t) xdr_encode_mon,
-		(kxdrproc_t) xdr_decode_stat, SM_mon_id_sz, 1 },
+		(kxdrproc_t) xdr_decode_stat, MAX(SM_mon_id_sz, SM_unmonres_sz) << 2, 0 },
         { "sm_unmon_all",
 		(kxdrproc_t) xdr_error,
 		(kxdrproc_t) xdr_error, 0, 0 },

@@ -79,7 +79,6 @@ _exception(int signr, struct pt_regs *regs)
 		debugger(regs);
 #endif
 		print_backtrace((unsigned long *)regs->gpr[1]);
-		instruction_dump((unsigned long *)regs->nip);
 		panic("Exception in kernel pc %lx signal %d",regs->nip,signr);
 	}
 	force_sig(signr, current);
@@ -90,11 +89,11 @@ MachineCheckException(struct pt_regs *regs)
 {
 	if ( !user_mode(regs) )
 	{
-#ifdef CONFIG_MBX
-		/* the mbx pci read routines can cause machine checks -- Cort */
+#if defined(CONFIG_8xx) && defined(CONFIG_PCI)
+		/* the qspan pci read routines can cause machine checks -- Cort */
 		bad_page_fault(regs,regs->dar);
 		return;
-#endif /* CONFIG_MBX */
+#endif
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
 		if (debugger_fault_handler) {
 			debugger_fault_handler(regs);
@@ -102,35 +101,45 @@ MachineCheckException(struct pt_regs *regs)
 		}
 #endif
 		printk("Machine check in kernel mode.\n");
-		printk("Caused by (from msr): ");
-		printk("regs %p ",regs);
-		switch( regs->msr & 0x0000F000)
-		{
-		case (1<<12) :
-			printk("Machine check signal - probably due to mm fault\n"
-				"with mmu off\n");
+		printk("Caused by (from SRR1=%lx): ", regs->msr);
+		switch (regs->msr & 0xF0000) {
+		case 0x80000:
+			printk("Machine check signal\n");
 			break;
-		case (1<<13) :
+		case 0x40000:
 			printk("Transfer error ack signal\n");
 			break;
-		case (1<<14) :
-			printk("Data parity signal\n");
+		case 0x20000:
+			printk("Data parity error signal\n");
 			break;
-		case (1<<15) :
-			printk("Address parity signal\n");
+		case 0x10000:
+			printk("Address parity error signal\n");
 			break;
 		default:
 			printk("Unknown values in msr\n");
 		}
 		show_regs(regs);
+		print_backtrace((unsigned long *)regs->gpr[1]);
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
 		debugger(regs);
 #endif
-		print_backtrace((unsigned long *)regs->gpr[1]);
-		instruction_dump((unsigned long *)regs->nip);
 		panic("machine check");
 	}
 	_exception(SIGSEGV, regs);	
+}
+
+void
+SMIException(struct pt_regs *regs)
+{
+#if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
+	{
+		debugger(regs);
+		return;
+	}
+#endif
+	show_regs(regs);
+	print_backtrace((unsigned long *)regs->gpr[1]);
+	panic("System Management Interrupt");
 }
 
 void
@@ -160,6 +169,19 @@ RunModeException(struct pt_regs *regs)
 void
 ProgramCheckException(struct pt_regs *regs)
 {
+#if defined(CONFIG_4xx)
+	unsigned int esr = mfspr(SPRN_ESR);
+
+	if (esr & ESR_PTR) {
+#if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
+		if (debugger_bpt(regs))
+			return;
+#endif
+		_exception(SIGTRAP, regs);
+	} else {
+		_exception(SIGILL, regs);
+	}
+#else
 	if (regs->msr & 0x100000) {
 		/* IEEE FP exception */
 		_exception(SIGFPE, regs);
@@ -173,6 +195,7 @@ ProgramCheckException(struct pt_regs *regs)
 	} else {
 		_exception(SIGILL, regs);
 	}
+#endif
 }
 
 void
@@ -216,7 +239,6 @@ StackOverflow(struct pt_regs *regs)
 #endif
 	show_regs(regs);
 	print_backtrace((unsigned long *)regs->gpr[1]);
-	instruction_dump((unsigned long *)regs->nip);
 	panic("kernel stack overflow");
 }
 
@@ -232,25 +254,29 @@ trace_syscall(struct pt_regs *regs)
 void
 SoftwareEmulation(struct pt_regs *regs)
 {
-	int	errcode;
-	extern int	Soft_emulate_8xx (struct pt_regs *regs);
-	extern void print_8xx_pte(struct mm_struct *, unsigned long);	
+	extern int do_mathemu(struct pt_regs *);
+	int errcode;
 
-	if (user_mode(regs))
-	{
-		if ((errcode = Soft_emulate_8xx(regs))) {
-printk("Software Emulation %s/%d NIP: %lx *NIP: 0x%x code: %x",
-       current->comm,current->pid,
-       regs->nip, *((uint *)regs->nip), errcode);
-/*print_8xx_pte(current->mm, regs->nip);*/
-			if (errcode == EFAULT)
-				_exception(SIGBUS, regs);
-			else
-				_exception(SIGILL, regs);
-		}
-	}
-	else {
+	if (!user_mode(regs)) {
+		show_regs(regs);
+#if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
+		debugger(regs);
+#endif
+		print_backtrace((unsigned long *)regs->gpr[1]);
 		panic("Kernel Mode Software FPU Emulation");
+	}
+
+#ifdef CONFIG_MATH_EMULATION
+	if ((errcode = do_mathemu(regs))) {
+#else
+	if ((errcode = Soft_emulate_8xx(regs))) {
+#endif
+		if (errcode > 0)
+			_exception(SIGFPE, regs);
+		else if (errcode == -EFAULT)
+			_exception(SIGSEGV, regs);
+		else
+			_exception(SIGILL, regs);
 	}
 }
 #endif
@@ -262,6 +288,6 @@ TAUException(struct pt_regs *regs)
 	       regs->nip, regs->msr, regs->trap);
 }
 
-__initfunc(void trap_init(void))
+void __init trap_init(void)
 {
 }

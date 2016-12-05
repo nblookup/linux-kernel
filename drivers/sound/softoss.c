@@ -11,9 +11,12 @@
  * for more info.
  *
  *
- * Thomas Sailer   : ioctl code reworked (vmalloc/vfree removed)
+ * Thomas Sailer	: ioctl code reworked (vmalloc/vfree removed)
+ * Christoph Hellwig	: adapted to module_init/module_exit
  */
+
 #include <linux/config.h>
+#include <linux/init.h>
 #include <linux/module.h>
 
 /*
@@ -30,8 +33,6 @@
 
 #include "sound_config.h"
 #include "soundmodule.h"
-
-#ifdef CONFIG_SOFTOSS
 #include "softoss.h"
 #include <linux/ultrasound.h>
 
@@ -1447,7 +1448,7 @@ static struct sound_lowlev_timer soft_tmr =
 	soft_tmr_restart
 };
 
-int probe_softsyn(struct address_info *hw_config)
+static int __init probe_softsyn(struct address_info *hw_config)
 {
 	int i;
 
@@ -1486,7 +1487,7 @@ int probe_softsyn(struct address_info *hw_config)
 	return 1;
 }
 
-void attach_softsyn_card(struct address_info *hw_config)
+static void __init attach_softsyn_card(struct address_info *hw_config)
 {
 	voice_alloc = &softsyn_operations.alloc;
 	synth_devs[devc->synthdev = num_synths++] = &softsyn_operations;
@@ -1499,7 +1500,7 @@ void attach_softsyn_card(struct address_info *hw_config)
 #endif
 }
 
-void unload_softsyn(struct address_info *hw_config)
+static void __exit unload_softsyn(struct address_info *hw_config)
 {
 	if (!softsynth_loaded)
 		return;
@@ -1508,26 +1509,25 @@ void unload_softsyn(struct address_info *hw_config)
 	reset_samples(devc);
 }
 
-#ifdef MODULE
+static struct address_info cfg;
 
-static struct address_info config;
-
-int init_module(void)
+static int __init init_softoss(void)
 {
 	printk(KERN_INFO "SoftOSS driver Copyright (C) by Hannu Savolainen 1993-1997\n");
-	if (!probe_softsyn(&config))
+	if (!probe_softsyn(&cfg))
 		return -ENODEV;
-	attach_softsyn_card(&config);
+	attach_softsyn_card(&cfg);
 	SOUND_LOCK;
 	return 0;
 }
 
-void cleanup_module(void)
+static void __exit cleanup_softoss(void)
 {
-	unload_softsyn(&config);
+	unload_softsyn(&cfg);
 	sound_unload_synthdev(devc->synthdev);
 	sound_unload_timerdev(devc->timerdev);
 	SOUND_LOCK_END;
 }
-#endif
-#endif
+
+module_init(init_softoss);
+module_exit(cleanup_softoss);

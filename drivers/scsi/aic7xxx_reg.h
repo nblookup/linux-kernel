@@ -63,6 +63,16 @@
 
 #define	STCNT           		0x08
 
+#define	OPTIONMODE      		0x08
+#define		AUTORATEEN      	0x80
+#define		AUTOACKEN       	0x40
+#define		ATNMGMNTEN      	0x20
+#define		BUSFREEREV      	0x10
+#define		EXPPHASEDIS     	0x08
+#define		SCSIDATL_IMGEN  	0x04
+#define		AUTO_MSGOUT_DE  	0x02
+#define		DIS_MSGIN_DUALEDGE	0x01
+
 #define	CLRSINT0        		0x0b
 #define		CLRSELDO        	0x40
 #define		CLRSELDI        	0x20
@@ -102,8 +112,14 @@
 
 #define	SSTAT2          		0x0d
 #define		OVERRUN         	0x80
+#define		SHVALID         	0x40
+#define		WIDE_RES        	0x20
 #define		SFCNT           	0x1f
 #define		EXP_ACTIVE      	0x10
+#define		CRCVALERR       	0x08
+#define		CRCENDERR       	0x04
+#define		CRCREQERR       	0x02
+#define		DUAL_EDGE_ERROR 	0x01
 
 #define	SSTAT3          		0x0e
 #define		SCSICNT         	0xf0
@@ -172,8 +188,8 @@
 #define		BRDRW           	0x04
 #define		BRDRW_ULTRA2    	0x02
 #define		BRDCTL1         	0x02
-#define		BRDSTB_ULTRA2   	0x01
 #define		BRDCTL0         	0x01
+#define		BRDSTB_ULTRA2   	0x01
 
 #define	SEECTL          		0x1e
 #define		EXTARBACK       	0x80
@@ -386,7 +402,7 @@
 #define		RESIDUAL        	0x81
 #define		BAD_STATUS      	0x71
 #define		REJECT_MSG      	0x61
-#define		ABORT_REQUESTED 	0x51
+#define		WIDE_RESIDUE    	0x51
 #define		EXTENDED_MSG    	0x41
 #define		NO_MATCH        	0x31
 #define		NO_IDENT        	0x21
@@ -412,6 +428,7 @@
 #define		DPARERR         	0x10
 #define		SQPARERR        	0x08
 #define		ILLOPCODE       	0x04
+#define		DSCTMOUT        	0x02
 #define		ILLSADDR        	0x02
 #define		ILLHADDR        	0x01
 
@@ -436,11 +453,30 @@
 
 #define	QINCNT          		0x9c
 
+#define	SCSIDATL_IMG    		0x9c
+
 #define	QOUTFIFO        		0x9d
+
+#define	CRCCONTROL1     		0x9d
+#define		CRCONSEEN       	0x80
+#define		CRCVALCHKEN     	0x40
+#define		CRCENDCHKEN     	0x20
+#define		CRCREQCHKEN     	0x10
+#define		TARGCRCENDEN    	0x08
+#define		TARGCRCCNTEN    	0x04
 
 #define	QOUTCNT         		0x9e
 
+#define	SCSIPHASE       		0x9e
+#define		SP_STATUS       	0x20
+#define		SP_COMMAND      	0x10
+#define		SP_MSG_IN       	0x08
+#define		SP_MSG_OUT      	0x04
+#define		SP_DATA_IN      	0x02
+#define		SP_DATA_OUT     	0x01
+
 #define	SFUNCT          		0x9f
+#define		ALT_MODE        	0x80
 
 #define	SCB_CONTROL     		0xa0
 #define		MK_MESSAGE      	0x80
@@ -525,14 +561,20 @@
 
 #define	HNSCB_QOFF      		0xf4
 
+#define	HESCB_QOFF      		0xf5
+
 #define	SNSCB_QOFF      		0xf6
+
+#define	SESCB_QOFF      		0xf7
 
 #define	SDSCB_QOFF      		0xf8
 
 #define	QOFF_CTLSTA     		0xfa
+#define		ESTABLISH_SCB_AVAIL	0x80
 #define		SCB_AVAIL       	0x40
 #define		SNSCB_ROLLOVER  	0x20
 #define		SDSCB_ROLLOVER  	0x10
+#define		SESCB_ROLLOVER  	0x08
 #define		SCB_QSIZE       	0x07
 #define		SCB_QSIZE_256   	0x06
 
@@ -553,8 +595,8 @@
 #define		RD_DFTHRSH_63   	0x03
 #define		RD_DFTHRSH_50   	0x02
 #define		RD_DFTHRSH_25   	0x01
-#define		WR_DFTHRSH_MIN  	0x00
 #define		RD_DFTHRSH_MIN  	0x00
+#define		WR_DFTHRSH_MIN  	0x00
 
 #define	SG_CACHEPTR     		0xfc
 #define		SG_USER_DATA    	0xfc
@@ -562,18 +604,18 @@
 #define		LAST_SEG_DONE   	0x01
 
 
+#define	CMD_GROUP_CODE_SHIFT	0x05
+#define	BUS_8_BIT	0x00
+#define	QOUTFIFO_OFFSET	0x01
+#define	CCSGRAM_MAXSEGS	0x10
 #define	CMD_GROUP2_BYTE_DELTA	0xfa
 #define	MAX_OFFSET_8BIT	0x0f
 #define	BUS_16_BIT	0x01
 #define	QINFIFO_OFFSET	0x02
 #define	CMD_GROUP5_BYTE_DELTA	0x0b
-#define	CMD_GROUP_CODE_SHIFT	0x05
 #define	MAX_OFFSET_ULTRA2	0x7f
 #define	MAX_OFFSET_16BIT	0x08
-#define	BUS_8_BIT	0x00
-#define	QOUTFIFO_OFFSET	0x01
 #define	UNTAGGEDSCB_OFFSET	0x00
-#define	CCSGRAM_MAXSEGS	0x10
 #define	SCB_LIST_NULL	0xff
 #define	SG_SIZEOF	0x08
 #define	CMD_GROUP4_BYTE_DELTA	0x04

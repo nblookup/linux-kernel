@@ -56,8 +56,8 @@ struct sockaddr_in6 {
 	__u16			sin6_port;      /* Transport layer port # */
 	__u32			sin6_flowinfo;  /* IPv6 flow information */
 	struct in6_addr		sin6_addr;      /* IPv6 address */
+	__u32			sin6_scope_id;  /* scope id (new in RFC2553) */
 };
-
 
 struct ipv6_mreq {
 	/* IPv6 multicast address of group */
@@ -129,8 +129,6 @@ struct in6_flowlabel_req
 #define IPPROTO_HOPOPTS		0	/* IPv6 hop-by-hop options	*/
 #define IPPROTO_ROUTING		43	/* IPv6 routing header		*/
 #define IPPROTO_FRAGMENT	44	/* IPv6 fragmentation header	*/
-#define IPPROTO_ESP		50	/* encapsulating security payload */
-#define IPPROTO_AH		51	/* authentication header	*/
 #define IPPROTO_ICMPV6		58	/* ICMPv6			*/
 #define IPPROTO_NONE		59	/* IPv6 no next header		*/
 #define IPPROTO_DSTOPTS		60	/* IPv6 destination options	*/
@@ -158,18 +156,6 @@ struct in6_flowlabel_req
 #define IPV6_NEXTHOP		9
 #define IPV6_AUTHHDR		10
 #define IPV6_FLOWINFO		11
-
-#if 0
-/* Aliases for obsolete names */
-#define IPV6_RXHOPOPTS		IPV6_HOPOPTS
-#define IPV6_RXDSTOPTS		IPV6_DSTOPTS
-#define IPV6_RXSRCRT		IPV6_RTHDR
-#endif
-
-/*
- *	Alternative names
- */
-#define SCM_SRCRT		IPV6_RXSRCRT
 
 #define IPV6_UNICAST_HOPS	16
 #define IPV6_MULTICAST_IF	17

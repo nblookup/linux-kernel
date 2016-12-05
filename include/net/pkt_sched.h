@@ -7,8 +7,13 @@
 
 #define PSCHED_CLOCK_SOURCE	PSCHED_JIFFIES
 
+#include <linux/config.h>
 #include <linux/pkt_sched.h>
 #include <net/pkt_cls.h>
+
+#ifdef CONFIG_X86_TSC
+#include <asm/msr.h>
+#endif
 
 struct rtattr;
 struct Qdisc;
@@ -63,31 +68,24 @@ struct Qdisc_ops
 	int			(*dump)(struct Qdisc *, struct sk_buff *);
 };
 
-struct Qdisc_head
-{
-	struct Qdisc_head *forw;
-};
-
-extern struct Qdisc_head qdisc_head;
+extern rwlock_t qdisc_tree_lock;
 
 struct Qdisc
 {
-	struct Qdisc_head	h;
 	int 			(*enqueue)(struct sk_buff *skb, struct Qdisc *dev);
 	struct sk_buff *	(*dequeue)(struct Qdisc *dev);
 	unsigned		flags;
 #define TCQ_F_BUILTIN	1
 #define TCQ_F_THROTTLED	2
+#define TCQ_F_INGRES	4
 	struct Qdisc_ops	*ops;
 	struct Qdisc		*next;
 	u32			handle;
 	atomic_t		refcnt;
 	struct sk_buff_head	q;
-	struct device 		*dev;
+	struct net_device	*dev;
 
 	struct tc_stats		stats;
-	unsigned long		tx_timeo;
-	unsigned long		tx_last;
 	int			(*reshape_fail)(struct sk_buff *skb, struct Qdisc *q);
 
 	/* This field is deprecated, but it is still used by CBQ
@@ -105,6 +103,53 @@ struct qdisc_rate_table
 	struct qdisc_rate_table *next;
 	int		refcnt;
 };
+
+extern __inline__ void sch_tree_lock(struct Qdisc *q)
+{
+	write_lock(&qdisc_tree_lock);
+	spin_lock_bh(&q->dev->queue_lock);
+}
+
+extern __inline__ void sch_tree_unlock(struct Qdisc *q)
+{
+	spin_unlock_bh(&q->dev->queue_lock);
+	write_unlock(&qdisc_tree_lock);
+}
+
+extern __inline__ void tcf_tree_lock(struct tcf_proto *tp)
+{
+	write_lock(&qdisc_tree_lock);
+	spin_lock_bh(&tp->q->dev->queue_lock);
+}
+
+extern __inline__ void tcf_tree_unlock(struct tcf_proto *tp)
+{
+	spin_unlock_bh(&tp->q->dev->queue_lock);
+	write_unlock(&qdisc_tree_lock);
+}
+
+
+extern __inline__ unsigned long
+cls_set_class(struct tcf_proto *tp, unsigned long *clp, unsigned long cl)
+{
+	unsigned long old_cl;
+
+	tcf_tree_lock(tp);
+	old_cl = *clp;
+	*clp = cl;
+	tcf_tree_unlock(tp);
+	return old_cl;
+}
+
+extern __inline__ unsigned long
+__cls_set_class(unsigned long *clp, unsigned long cl)
+{
+	unsigned long old_cl;
+
+	old_cl = *clp;
+	*clp = cl;
+	return old_cl;
+}
 
 
 /* 
@@ -207,11 +252,11 @@ extern int psched_clock_scale;
 
 #define PSCHED_US2JIFFIE(delay) (((delay)+psched_clock_per_hz-1)/psched_clock_per_hz)
 
-#if CPU == 586 || CPU == 686
+#ifdef CONFIG_X86_TSC
 
 #define PSCHED_GET_TIME(stamp) \
 ({ u64 __cur; \
-   __asm__ __volatile__ (".byte 0x0f,0x31" :"=A" (__cur)); \
+   rdtscll(__cur); \
    (stamp) = __cur>>psched_clock_scale; \
 })
 
@@ -343,12 +388,14 @@ struct tcf_police
 	u32		toks;
 	u32		ptoks;
 	psched_time_t	t_c;
+	spinlock_t	lock;
 	struct qdisc_rate_table *R_tab;
 	struct qdisc_rate_table *P_tab;
 
 	struct tc_stats	stats;
 };
 
+extern int qdisc_copy_stats(struct sk_buff *skb, struct tc_stats *st);
 extern void tcf_police_destroy(struct tcf_police *p);
 extern struct tcf_police * tcf_police_locate(struct rtattr *rta, struct rtattr *est);
 extern int tcf_police_dump(struct sk_buff *skb, struct tcf_police *p);
@@ -367,15 +414,15 @@ extern struct Qdisc_ops bfifo_qdisc_ops;
 
 int register_qdisc(struct Qdisc_ops *qops);
 int unregister_qdisc(struct Qdisc_ops *qops);
-struct Qdisc *qdisc_lookup(struct device *dev, u32 handle);
-struct Qdisc *qdisc_lookup_class(struct device *dev, u32 handle);
-void dev_init_scheduler(struct device *dev);
-void dev_shutdown(struct device *dev);
-void dev_activate(struct device *dev);
-void dev_deactivate(struct device *dev);
+struct Qdisc *qdisc_lookup(struct net_device *dev, u32 handle);
+struct Qdisc *qdisc_lookup_class(struct net_device *dev, u32 handle);
+void dev_init_scheduler(struct net_device *dev);
+void dev_shutdown(struct net_device *dev);
+void dev_activate(struct net_device *dev);
+void dev_deactivate(struct net_device *dev);
 void qdisc_reset(struct Qdisc *qdisc);
 void qdisc_destroy(struct Qdisc *qdisc);
-struct Qdisc * qdisc_create_dflt(struct device *dev, struct Qdisc_ops *ops);
+struct Qdisc * qdisc_create_dflt(struct net_device *dev, struct Qdisc_ops *ops);
 int qdisc_new_estimator(struct tc_stats *stats, struct rtattr *opt);
 void qdisc_kill_estimator(struct tc_stats *stats);
 struct qdisc_rate_table *qdisc_get_rtab(struct tc_ratespec *r, struct rtattr *tab);
@@ -384,21 +431,19 @@ int teql_init(void);
 int tc_filter_init(void);
 int pktsched_init(void);
 
-void qdisc_run_queues(void);
-int qdisc_restart(struct device *dev);
+extern int qdisc_restart(struct net_device *dev);
 
-extern __inline__ void qdisc_wakeup(struct device *dev)
+extern __inline__ void qdisc_run(struct net_device *dev)
 {
-	if (!dev->tbusy) {
-		struct Qdisc *q = dev->qdisc;
-		if (qdisc_restart(dev) && q->h.forw == NULL) {
-			q->h.forw = qdisc_head.forw;
-			qdisc_head.forw = &q->h;
-		}
-	}
+	while (!netif_queue_stopped(dev) &&
+	       qdisc_restart(dev)<0)
+		/* NOTHING */;
 }
 
-extern __inline__ unsigned psched_mtu(struct device *dev)
+/* Calculate maximal size of packet seen by hard_start_xmit
+   routine of this device.
+ */
+extern __inline__ unsigned psched_mtu(struct net_device *dev)
 {
 	unsigned mtu = dev->mtu;
 	return dev->hard_header ? mtu + dev->hard_header_len : mtu;

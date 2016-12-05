@@ -34,7 +34,7 @@ static int			reclaimer(void *ptr);
  */
 struct nlm_wait {
 	struct nlm_wait *	b_next;		/* linked list */
-	struct wait_queue *	b_wait;		/* where to wait on */
+	wait_queue_head_t	b_wait;		/* where to wait on */
 	struct nlm_host *	b_host;
 	struct file_lock *	b_lock;		/* local file lock */
 	unsigned short		b_reclaim;	/* got to reclaim lock */
@@ -55,7 +55,7 @@ nlmclnt_block(struct nlm_host *host, struct file_lock *fl, u32 *statp)
 
 	block.b_host   = host;
 	block.b_lock   = fl;
-	block.b_wait   = NULL;
+	init_waitqueue_head(&block.b_wait);
 	block.b_status = NLM_LCK_BLOCKED;
 	block.b_next   = nlm_blocked;
 	nlm_blocked    = &block;
@@ -172,7 +172,7 @@ reclaimer(void *ptr)
 
 	/* First, reclaim all locks that have been granted previously. */
 	do {
-		for (fl = file_lock_table; fl; fl = fl->fl_next) {
+		for (fl = file_lock_table; fl; fl = fl->fl_nextlink) {
 			inode = fl->fl_file->f_dentry->d_inode;
 			if (inode->i_sb->s_magic == NFS_SUPER_MAGIC
 			 && nlm_cmp_addr(NFS_ADDR(inode), &host->h_addr)

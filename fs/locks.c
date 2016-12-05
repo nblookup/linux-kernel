@@ -193,6 +193,14 @@ static void locks_insert_block(struct file_lock *blocker,
 {
 	struct file_lock *prevblock;
 
+	if (waiter->fl_prevblock) {
+		printk(KERN_ERR "locks_insert_block: remove duplicated lock "
+			"(pid=%d %ld-%ld type=%d)\n",
+			waiter->fl_pid, waiter->fl_start,
+			waiter->fl_end, waiter->fl_type);
+		locks_delete_block(waiter->fl_prevblock, waiter);
+	}
+
 	if (blocker->fl_prevblock == NULL)
 		/* No previous waiters - list is empty */
 		prevblock = blocker;
@@ -282,7 +290,7 @@ static void locks_wake_up_blocks(struct file_lock *blocker, unsigned int wait)
 /* flock() system call entry point. Apply a FL_FLOCK style lock to
  * an open file descriptor.
  */
-asmlinkage int sys_flock(unsigned int fd, unsigned int cmd)
+asmlinkage long sys_flock(unsigned int fd, unsigned int cmd)
 {
 	struct file_lock file_lock;
 	struct file *filp;
@@ -341,7 +349,11 @@ int fcntl_getlk(unsigned int fd, struct flock *l)
 		error = filp->f_op->lock(filp, F_GETLK, &file_lock);
 		if (error < 0)
 			goto out_putf;
-		fl = &file_lock;
+		else if (error == LOCK_USE_CLNT)
+		  /* Bypass for NFS with no locking - 2.0.36 compat */
+		  fl = posix_test_lock(filp, &file_lock);
+		else
+		  fl = (file_lock.fl_type == F_UNLCK ? NULL : &file_lock);
 	} else {
 		fl = posix_test_lock(filp, &file_lock);
 	}
@@ -402,14 +414,18 @@ int fcntl_setlk(unsigned int fd, unsigned int cmd, struct flock *l)
 	 * and shared.
 	 */
 	if (IS_MANDLOCK(inode) &&
-	    (inode->i_mode & (S_ISGID | S_IXGRP)) == S_ISGID &&
-	    inode->i_mmap) {
-		struct vm_area_struct *vma = inode->i_mmap;
-		error = -EAGAIN;
-		do {
-			if (vma->vm_flags & VM_MAYSHARE)
-				goto out_putf;
-		} while ((vma = vma->vm_next_share) != NULL);
+	    (inode->i_mode & (S_ISGID | S_IXGRP)) == S_ISGID) {
+		struct vm_area_struct *vma;
+		struct address_space *mapping = inode->i_mapping;
+		spin_lock(&mapping->i_shared_lock);
+		for(vma = mapping->i_mmap;vma;vma = vma->vm_next_share) {
+			if (!(vma->vm_flags & VM_MAYSHARE))
+				continue;
+			spin_unlock(&mapping->i_shared_lock);
+			error = -EAGAIN;
+			goto out_putf;
+		}
+		spin_unlock(&mapping->i_shared_lock);
 	}
 
 	error = -EINVAL;
@@ -512,7 +528,9 @@ repeat:
 	while ((fl = *before) != NULL) {
 		if ((fl->fl_flags & FL_FLOCK) && fl->fl_file == filp) {
 			int (*lock)(struct file *, int, struct file_lock *);
-			lock = filp->f_op->lock;
+			lock = NULL;
+			if (filp->f_op)
+				lock = filp->f_op->lock;
 			if (lock) {
 				file_lock = *fl;
 				file_lock.fl_type = F_UNLCK;
@@ -544,44 +562,23 @@ posix_test_lock(struct file *filp, struct file_lock *fl)
 	return (cfl);
 }
 
-int locks_verify_locked(struct inode *inode)
-{
-	/* Candidates for mandatory locking have the setgid bit set
-	 * but no group execute bit -  an otherwise meaningless combination.
-	 */
-	if (IS_MANDLOCK(inode) &&
-	    (inode->i_mode & (S_ISGID | S_IXGRP)) == S_ISGID)
-		return (locks_mandatory_locked(inode));
-	return (0);
-}
-
-int locks_verify_area(int read_write, struct inode *inode, struct file *filp,
-		      loff_t offset, size_t count)
-{
-	/* Candidates for mandatory locking have the setgid bit set
-	 * but no group execute bit -  an otherwise meaningless combination.
-	 */
-	if (IS_MANDLOCK(inode) &&
-	    (inode->i_mode & (S_ISGID | S_IXGRP)) == S_ISGID)
-		return (locks_mandatory_area(read_write, inode, filp, offset,
-					     count));
-	return (0);
-}
-
 int locks_mandatory_locked(struct inode *inode)
 {
 	fl_owner_t owner = current->files;
 	struct file_lock *fl;
 
-	/* Search the lock list for this inode for any POSIX locks.
+	/*
+	 * Search the lock list for this inode for any POSIX locks.
 	 */
+	lock_kernel();
 	for (fl = inode->i_flock; fl != NULL; fl = fl->fl_next) {
 		if (!(fl->fl_flags & FL_POSIX))
 			continue;
 		if (fl->fl_owner != owner)
-			return (-EAGAIN);
+			break;
 	}
-	return (0);
+	unlock_kernel();
+	return fl ? -EAGAIN : 0;
 }
 
 int locks_mandatory_area(int read_write, struct inode *inode,
@@ -590,6 +587,7 @@ int locks_mandatory_area(int read_write, struct inode *inode,
 {
 	struct file_lock *fl;
 	struct file_lock tfl;
+	int error;
 
 	memset(&tfl, 0, sizeof(tfl));
 
@@ -597,35 +595,44 @@ int locks_mandatory_area(int read_write, struct inode *inode,
 	tfl.fl_flags = FL_POSIX | FL_ACCESS;
 	tfl.fl_owner = current->files;
 	tfl.fl_pid = current->pid;
+	init_waitqueue_head(&tfl.fl_wait);
 	tfl.fl_type = (read_write == FLOCK_VERIFY_WRITE) ? F_WRLCK : F_RDLCK;
 	tfl.fl_start = offset;
 	tfl.fl_end = offset + count - 1;
+
+	error = 0;
+	lock_kernel();
 
 repeat:
 	/* Search the lock list for this inode for locks that conflict with
 	 * the proposed read/write.
 	 */
-	for (fl = inode->i_flock; fl != NULL; fl = fl->fl_next) {
+	for (fl = inode->i_flock; ; fl = fl->fl_next) {
+		error = 0;
+		if (!fl)
+			break;
 		if (!(fl->fl_flags & FL_POSIX))
 			continue;
 		/* Block for writes against a "read" lock,
 		 * and both reads and writes against a "write" lock.
 		 */
 		if (posix_locks_conflict(fl, &tfl)) {
+			error = -EAGAIN;
 			if (filp && (filp->f_flags & O_NONBLOCK))
-				return (-EAGAIN);
+				break;
+			error = -ERESTARTSYS;
 			if (signal_pending(current))
-				return (-ERESTARTSYS);
+				break;
+			error = -EDEADLK;
 			if (posix_locks_deadlock(&tfl, fl))
-				return (-EDEADLK);
+				break;
 
 			locks_insert_block(fl, &tfl);
 			interruptible_sleep_on(&tfl.fl_wait);
 			locks_delete_block(fl, &tfl);
 
-			if (signal_pending(current))
-				return (-ERESTARTSYS);
-			/* If we've been sleeping someone might have
+			/*
+			 * If we've been sleeping someone might have
 			 * changed the permissions behind our back.
 			 */
 			if ((inode->i_mode & (S_ISGID | S_IXGRP)) != S_ISGID)
@@ -633,7 +640,8 @@ repeat:
 			goto repeat;
 		}
 	}
-	return (0);
+	unlock_kernel();
+	return error;
 }
 
 /* Verify a "struct flock" and copy it to a "struct file_lock" as a POSIX
@@ -646,6 +654,7 @@ static int posix_make_lock(struct file *filp, struct file_lock *fl,
 
 	memset(fl, 0, sizeof(*fl));
 	
+	init_waitqueue_head(&fl->fl_wait);
 	fl->fl_flags = FL_POSIX;
 
 	switch (l->l_type) {
@@ -693,6 +702,7 @@ static int flock_make_lock(struct file *filp, struct file_lock *fl,
 {
 	memset(fl, 0, sizeof(*fl));
 
+	init_waitqueue_head(&fl->fl_wait);
 	if (!filp->f_dentry)	/* just in case */
 		return (0);
 
@@ -1111,6 +1121,7 @@ static struct file_lock *locks_init_lock(struct file_lock *new,
 		memset(new, 0, sizeof(*new));
 		new->fl_owner = fl->fl_owner;
 		new->fl_pid = fl->fl_pid;
+		init_waitqueue_head(&new->fl_wait);
 		new->fl_file = fl->fl_file;
 		new->fl_flags = fl->fl_flags;
 		new->fl_type = fl->fl_type;

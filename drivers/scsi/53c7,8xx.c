@@ -213,24 +213,7 @@
  * without warnings.
  */
 
-#if !defined(LINUX_1_2) && !defined(LINUX_1_3)
 #include <linux/version.h>
-#if LINUX_VERSION_CODE > 65536 + 3 * 256
-#define LINUX_1_3
-#else
-#define LINUX_1_2
-#endif
-#endif
-
-#ifdef LINUX_1_2
-#define u32 bogus_u32
-#define s32 bogus_s32
-#include <asm/types.h>
-#undef u32
-#undef s32
-typedef __signed__ int s32;
-typedef unsigned int  u32;
-#endif /* def LINUX_1_2 */
 
 #ifdef MODULE
 #include <linux/module.h>
@@ -253,7 +236,7 @@ typedef unsigned int  u32;
 #include <linux/time.h>
 #include <linux/blk.h>
 #include <linux/init.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
 
 #include "scsi.h"
 #include "hosts.h"
@@ -262,13 +245,6 @@ typedef unsigned int  u32;
 #include "sd.h"
 #include <linux/stat.h>
 #include <linux/stddef.h>
-
-#ifndef LINUX_1_2
-struct proc_dir_entry proc_scsi_ncr53c7xx = {
-    PROC_SCSI_NCR53C7xx, 9, "ncr53c7xx",
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
-#endif
 
 static int check_address (unsigned long addr, int size);
 static void dump_events (struct Scsi_Host *host, int count);
@@ -723,13 +699,11 @@ request_synchronous (int host, int target) {
 	printk (KERN_ALERT "target %d is host ID\n", target);
 	return -1;
     } 
-#ifndef LINUX_1_2
     else if (target > h->max_id) {
 	printk (KERN_ALERT "target %d exceeds maximum of %d\n", target,
 	    h->max_id);
 	return -1;
     }
-#endif
     hostdata = (struct NCR53c7x0_hostdata *)h->hostdata;
 
     save_flags(flags);
@@ -1198,10 +1172,10 @@ NCR53c7x0_init (struct Scsi_Host *host) {
  *
  */
 
-__initfunc(static int 
+static int  __init 
 normal_init (Scsi_Host_Template *tpnt, int board, int chip, 
     u32 base, int io_port, int irq, int dma, int pci_valid, 
-    unsigned char pci_bus, unsigned char pci_device_fn, long long options)) {
+    unsigned char pci_bus, unsigned char pci_device_fn, long long options){
     struct Scsi_Host *instance;
     struct NCR53c7x0_hostdata *hostdata;
     char chip_str[80];
@@ -1319,7 +1293,7 @@ normal_init (Scsi_Host_Template *tpnt, int board, int chip,
      */
 
     if (base) {
-	instance->base = (unsigned char *) (unsigned long) base;
+	instance->base = (unsigned long) base;
 	/* Check for forced I/O mapping */
     	if (!(options & OPTION_IO_MAPPED)) {
 	    options |= OPTION_MEMORY_MAPPED;
@@ -1411,16 +1385,11 @@ normal_init (Scsi_Host_Template *tpnt, int board, int chip,
  *
  */
 
-__initfunc(static int 
+static int  __init 
 ncr_pci_init (Scsi_Host_Template *tpnt, int board, int chip, 
-    unsigned char bus, unsigned char device_fn, long long options)) {
+    unsigned char bus, unsigned char device_fn, long long options){
     unsigned short command;
-#ifdef LINUX_1_2
-    unsigned long
-#else
-    unsigned int 
-#endif
-	base, io_port; 
+    unsigned int base, io_port; 
     unsigned char revision;
     int error, expected_chip;
     int expected_id = -1, max_revision = -1, min_revision = -1;
@@ -1445,8 +1414,8 @@ ncr_pci_init (Scsi_Host_Template *tpnt, int board, int chip,
 		"	 perhaps you specified an incorrect PCI bus, device, or function.\n", error);
 	return -1;
     }
-    io_port = pdev->base_address[0];
-    base = pdev->base_address[1];
+    io_port = pdev->resource[0].start;
+    base = pdev->resource[1].start;
     irq = pdev->irq;
 
     /* If any one ever clones the NCR chips, this will have to change */
@@ -1560,17 +1529,15 @@ ncr_pci_init (Scsi_Host_Template *tpnt, int board, int chip,
  *
  */
 
-__initfunc(int 
-NCR53c7xx_detect(Scsi_Host_Template *tpnt)) {
+int __init 
+NCR53c7xx_detect(Scsi_Host_Template *tpnt){
     int i;
     int current_override;
     int count;			/* Number of boards detected */
     unsigned char pci_bus, pci_device_fn;
     static short pci_index=0;	/* Device index to PCI BIOS calls */
 
-#ifndef LINUX_1_2
-    tpnt->proc_dir = &proc_scsi_ncr53c7xx;
-#endif
+    tpnt->proc_name = "ncr53c7xx";
 
     for (current_override = count = 0; current_override < OVERRIDE_LIMIT; 
 	 ++current_override) {
@@ -1698,7 +1665,7 @@ NCR53c8x0_init_fixup (struct Scsi_Host *host) {
     	memory_to_ncr = tmp|DMODE_800_DIOM;
     	ncr_to_memory = tmp|DMODE_800_SIOM;
     } else {
-    	base = virt_to_bus(host->base);
+    	base = virt_to_bus((void *)host->base);
 	memory_to_ncr = ncr_to_memory = tmp;
     }
 
@@ -3489,11 +3456,7 @@ allocate_cmd (Scsi_Cmnd *cmd) {
  * 1.2.x), do so now.
  */
     if (!(hostdata->cmd_allocated[cmd->target] & (1 << cmd->lun)) &&
-#ifdef LINUX_1_2
-				!in_scan_scsis
-#else
 				cmd->device && cmd->device->has_cmdblocks
-#endif
 	) {
 	if ((hostdata->extra_allocate + hostdata->num_cmds) < host->can_queue) 
 	    hostdata->extra_allocate += host->cmd_per_lun;
@@ -3516,11 +3479,7 @@ allocate_cmd (Scsi_Cmnd *cmd) {
 	tmp = ROUNDUP(real, void *);
 	tmp->real = real;
 	tmp->size = size;			
-#ifdef LINUX_1_2
-	tmp->free = ((void (*)(void *, int)) kfree_s);
-#else
 	tmp->free = ((void (*)(void *, int)) kfree);
-#endif
 	save_flags (flags);
 	cli();
 	tmp->next = hostdata->free;
@@ -3940,11 +3899,7 @@ NCR53c7xx_queue_command (Scsi_Cmnd *cmd, void (* done)(Scsi_Cmnd *)) {
     if ((hostdata->options & (OPTION_DEBUG_INIT_ONLY|OPTION_DEBUG_PROBE_ONLY)) 
 	|| ((hostdata->options & OPTION_DEBUG_TARGET_LIMIT) &&
 	    !(hostdata->debug_lun_limit[cmd->target] & (1 << cmd->lun))) 
-#ifdef LINUX_1_2
-	|| cmd->target > 7
-#else
 	|| cmd->target > host->max_id
-#endif
 	|| cmd->target == host->this_id
 	|| hostdata->state == STATE_DISABLED) {
 	printk("scsi%d : disabled or bad target %d lun %d\n", host->host_no,

@@ -1,5 +1,5 @@
 /*
- * $Id: irq.c,v 1.105 1999/03/25 19:51:51 cort Exp $
+ * $Id: irq.c,v 1.113 1999/09/17 17:22:56 cort Exp $
  *
  *  arch/ppc/kernel/irq.c
  *
@@ -31,6 +31,7 @@
 
 #include <linux/ptrace.h>
 #include <linux/errno.h>
+#include <linux/threads.h>
 #include <linux/kernel_stat.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -43,14 +44,16 @@
 #include <linux/openpic.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
+#include <linux/irq.h>
+#include <linux/proc_fs.h>
 
+#include <asm/uaccess.h>
 #include <asm/bitops.h>
 #include <asm/hydra.h>
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/irq.h>
-#include <asm/bitops.h>
 #include <asm/gg2.h>
 #include <asm/cache.h>
 #include <asm/prom.h>
@@ -65,38 +68,27 @@ extern volatile unsigned long ipi_count;
 void enable_irq(unsigned int irq_nr);
 void disable_irq(unsigned int irq_nr);
 
-/* Fixme - Need to figure out a way to get rid of this - Corey */
 volatile unsigned char *chrp_int_ack_special;
-
-#ifdef CONFIG_APUS
-/* Rename a few functions. Requires the CONFIG_APUS protection. */
-#define request_irq nop_ppc_request_irq
-#define free_irq nop_ppc_free_irq
-#define get_irq_list nop_get_irq_list
-#define VEC_SPUR    (24)
-#endif
 
 #define MAXCOUNT 10000000
 
-#define NR_MASK_WORDS	((NR_IRQS + 31) / 32)
-
+irq_desc_t irq_desc[NR_IRQS];
 int ppc_spurious_interrupts = 0;
-
-unsigned int ppc_local_bh_count[NR_CPUS];
-unsigned int ppc_local_irq_count[NR_CPUS];
+unsigned int local_bh_count[NR_CPUS];
+unsigned int local_irq_count[NR_CPUS];
 struct irqaction *ppc_irq_action[NR_IRQS];
 unsigned int ppc_cached_irq_mask[NR_MASK_WORDS];
 unsigned int ppc_lost_interrupts[NR_MASK_WORDS];
 atomic_t ppc_n_lost_interrupts;
-
 
 /* nasty hack for shared irq's since we need to do kmalloc calls but
  * can't very early in the boot when we need to do a request irq.
  * this needs to be removed.
  * -- Cort
  */
-static char cache_bitmask = 0;
-static struct irqaction malloc_cache[8];
+#define IRQ_KMALLOC_ENTRIES 8
+static int cache_bitmask = 0;
+static struct irqaction malloc_cache[IRQ_KMALLOC_ENTRIES];
 extern int mem_init_done;
 
 void *irq_kmalloc(size_t size, int pri)
@@ -104,7 +96,7 @@ void *irq_kmalloc(size_t size, int pri)
 	unsigned int i;
 	if ( mem_init_done )
 		return kmalloc(size,pri);
-	for ( i = 0; i <= 3 ; i++ )
+	for ( i = 0; i < IRQ_KMALLOC_ENTRIES ; i++ )
 		if ( ! ( cache_bitmask & (1<<i) ) )
 		{
 			cache_bitmask |= (1<<i);
@@ -116,7 +108,7 @@ void *irq_kmalloc(size_t size, int pri)
 void irq_kfree(void *ptr)
 {
 	unsigned int i;
-	for ( i = 0 ; i <= 3 ; i++ )
+	for ( i = 0 ; i < IRQ_KMALLOC_ENTRIES ; i++ )
 		if ( ptr == &malloc_cache[i] )
 		{
 			cache_bitmask &= ~(1<<i);
@@ -125,9 +117,18 @@ void irq_kfree(void *ptr)
 	kfree(ptr);
 }
 
-struct irqdesc irq_desc[NR_IRQS] = {{0, 0}, };
-
+#ifdef CONFIG_8xx
+/* Name change so we can catch standard drivers that potentially mess up
+ * the internal interrupt controller on 8xx and 82xx.  Just bear with me,
+ * I don't like this either and I am searching a better solution.  For
+ * now, this is what I need. -- Dan
+ */
+int request_8xxirq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
+#elif defined(CONFIG_APUS)
+int request_sysirq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
+#else
 int request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
+#endif
 	unsigned long irqflags, const char * devname, void *dev_id)
 {
 	struct irqaction *old, **p, *action;
@@ -185,9 +186,26 @@ int request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *)
 	return 0;
 }
 
+#ifdef CONFIG_APUS
+void sys_free_irq(unsigned int irq, void *dev_id)
+{
+	sys_request_irq(irq, NULL, 0, NULL, dev_id);
+}
+#else
 void free_irq(unsigned int irq, void *dev_id)
 {
+#ifndef CONFIG_8xx
 	request_irq(irq, NULL, 0, NULL, dev_id);
+#else
+	request_8xxirq(irq, NULL, 0, NULL, dev_id);
+#endif
+}
+#endif
+
+/* XXX should implement irq disable depth like on intel */
+void disable_irq_nosync(unsigned int irq_nr)
+{
+	mask_irq(irq_nr);
 }
 
 void disable_irq(unsigned int irq_nr)
@@ -203,6 +221,9 @@ void enable_irq(unsigned int irq_nr)
 
 int get_irq_list(char *buf)
 {
+#ifdef CONFIG_APUS
+	return apus_get_irq_list (buf);
+#else
 	int i, len = 0, j;
 	struct irqaction * action;
 
@@ -223,8 +244,10 @@ int get_irq_list(char *buf)
 #else		
 		len += sprintf(buf+len, "%10u ", kstat_irqs(i));
 #endif /* __SMP__ */
-		if ( irq_desc[i].ctl )		
-			len += sprintf(buf+len, " %s ", irq_desc[i].ctl->typename );
+		if ( irq_desc[i].handler )		
+			len += sprintf(buf+len, " %s ", irq_desc[i].handler->typename );
+		else
+			len += sprintf(buf+len, "  None      ");
 		len += sprintf(buf+len, "    %s",action->name);
 		for (action=action->next; action; action = action->next) {
 			len += sprintf(buf+len, ", %s", action->name);
@@ -237,6 +260,7 @@ int get_irq_list(char *buf)
 #endif		
 	len += sprintf(buf+len, "BAD: %10u\n", ppc_spurious_interrupts);
 	return len;
+#endif /* CONFIG_APUS */
 }
 
 /*
@@ -248,7 +272,7 @@ void ppc_irq_dispatch_handler(struct pt_regs *regs, int irq)
 	int status;
 	struct irqaction *action;
 	int cpu = smp_processor_id();
-	
+
 	mask_and_ack_irq(irq);
 	status = 0;
 	action = irq_desc[irq].action;
@@ -269,13 +293,32 @@ void ppc_irq_dispatch_handler(struct pt_regs *regs, int irq)
 	}
 }
 
-asmlinkage void do_IRQ(struct pt_regs *regs, int isfake)
+asmlinkage int do_IRQ(struct pt_regs *regs, int isfake)
 {
 	int cpu = smp_processor_id();
+	int irq;
+        hardirq_enter( cpu );
 
-        hardirq_enter(cpu);
-        ppc_md.do_IRQ(regs, cpu, isfake);
-        hardirq_exit(cpu);
+	/* every arch is required to have a get_irq -- Cort */
+	irq = ppc_md.get_irq( regs );
+	if ( irq < 0 )
+	{
+		/* -2 means ignore, already handled */
+		if (irq != -2)
+		{
+			printk(KERN_DEBUG "Bogus interrupt %d from PC = %lx\n",
+			       irq, regs->nip);
+			ppc_spurious_interrupts++;
+		}
+		goto out;
+	}
+	ppc_irq_dispatch_handler( regs, irq );
+	if ( ppc_md.post_irq )
+		ppc_md.post_irq( regs, irq );
+
+ out:	
+        hardirq_exit( cpu );
+	return 1; /* lets ret_from_int know we can do checks */
 }
 
 unsigned long probe_irq_on (void)
@@ -306,7 +349,6 @@ unsigned volatile int global_irq_lock;
 atomic_t global_irq_count;
 
 atomic_t global_bh_count;
-atomic_t global_bh_lock;
 
 static void show(char * str)
 {
@@ -317,12 +359,12 @@ static void show(char * str)
 	printk("\n%s, CPU %d:\n", str, cpu);
 	printk("irq:  %d [%d %d]\n",
 	       atomic_read(&global_irq_count),
-	       ppc_local_irq_count[0],
-	       ppc_local_irq_count[1]);
+	       local_irq_count[0],
+	       local_irq_count[1]);
 	printk("bh:   %d [%d %d]\n",
 	       atomic_read(&global_bh_count),
-	       ppc_local_bh_count[0],
-	       ppc_local_bh_count[1]);
+	       local_bh_count[0],
+	       local_bh_count[1]);
 	stack = (unsigned long *) &str;
 	for (i = 40; i ; i--) {
 		unsigned long x = *++stack;
@@ -357,7 +399,7 @@ static inline void wait_on_irq(int cpu)
 		 * already executing in one..
 		 */
 		if (!atomic_read(&global_irq_count)) {
-			if (ppc_local_bh_count[cpu]
+			if (local_bh_count[cpu]
 			    || !atomic_read(&global_bh_count))
 				break;
 		}
@@ -379,7 +421,7 @@ static inline void wait_on_irq(int cpu)
 				continue;
 			if (global_irq_lock)
 				continue;
-			if (!ppc_local_bh_count[cpu]
+			if (!local_bh_count[cpu]
 			    && atomic_read(&global_bh_count))
 				continue;
 			if (!test_and_set_bit(0,&global_irq_lock))
@@ -464,13 +506,13 @@ static inline void get_irqlock(int cpu)
  */
 void __global_cli(void)
 {
-	unsigned int flags;
+	unsigned long flags;
 	
 	__save_flags(flags);
 	if (flags & (1 << 15)) {
 		int cpu = smp_processor_id();
 		__cli();
-		if (!ppc_local_irq_count[cpu])
+		if (!local_irq_count[cpu])
 			get_irqlock(cpu);
 	}
 }
@@ -479,7 +521,7 @@ void __global_sti(void)
 {
 	int cpu = smp_processor_id();
 
-	if (!ppc_local_irq_count[cpu])
+	if (!local_irq_count[cpu])
 		release_irqlock(cpu);
 	__sti();
 }
@@ -503,7 +545,7 @@ unsigned long __global_save_flags(void)
 	retval = 2 + local_enabled;
 
 	/* check for global flags if we're not in an interrupt */
-	if (!ppc_local_irq_count[smp_processor_id()]) {
+	if (!local_irq_count[smp_processor_id()]) {
 		if (local_enabled)
 			retval = 1;
 		if (global_irq_holder == (unsigned char) smp_processor_id())
@@ -571,3 +613,160 @@ void __global_restore_flags(unsigned long flags)
 }
 #endif /* __SMP__ */
 
+static struct proc_dir_entry * root_irq_dir;
+static struct proc_dir_entry * irq_dir [NR_IRQS];
+static struct proc_dir_entry * smp_affinity_entry [NR_IRQS];
+
+unsigned int irq_affinity [NR_IRQS] = { [0 ... NR_IRQS-1] = 0xffffffff};
+
+#define HEX_DIGITS 8
+
+static int irq_affinity_read_proc (char *page, char **start, off_t off,
+			int count, int *eof, void *data)
+{
+	if (count < HEX_DIGITS+1)
+		return -EINVAL;
+	return sprintf (page, "%08x\n", irq_affinity[(int)data]);
+}
+
+static unsigned int parse_hex_value (const char *buffer,
+		unsigned long count, unsigned long *ret)
+{
+	unsigned char hexnum [HEX_DIGITS];
+	unsigned long value;
+	int i;
+
+	if (!count)
+		return -EINVAL;
+	if (count > HEX_DIGITS)
+		count = HEX_DIGITS;
+	if (copy_from_user(hexnum, buffer, count))
+		return -EFAULT;
+
+	/*
+	 * Parse the first 8 characters as a hex string, any non-hex char
+	 * is end-of-string. '00e1', 'e1', '00E1', 'E1' are all the same.
+	 */
+	value = 0;
+
+	for (i = 0; i < count; i++) {
+		unsigned int c = hexnum[i];
+
+		switch (c) {
+			case '0' ... '9': c -= '0'; break;
+			case 'a' ... 'f': c -= 'a'-10; break;
+			case 'A' ... 'F': c -= 'A'-10; break;
+		default:
+			goto out;
+		}
+		value = (value << 4) | c;
+	}
+out:
+	*ret = value;
+	return 0;
+}
+
+static int irq_affinity_write_proc (struct file *file, const char *buffer,
+					unsigned long count, void *data)
+{
+	int irq = (int) data, full_count = count, err;
+	unsigned long new_value;
+
+	if (!irq_desc[irq].handler->set_affinity)
+		return -EIO;
+
+	err = parse_hex_value(buffer, count, &new_value);
+
+#if 0/*CONFIG_SMP*/
+	/*
+	 * Do not allow disabling IRQs completely - it's a too easy
+	 * way to make the system unusable accidentally :-) At least
+	 * one online CPU still has to be targeted.
+	 */
+	if (!(new_value & cpu_online_map))
+		return -EINVAL;
+#endif
+
+	irq_affinity[irq] = new_value;
+	irq_desc[irq].handler->set_affinity(irq, new_value);
+
+	return full_count;
+}
+
+static int prof_cpu_mask_read_proc (char *page, char **start, off_t off,
+			int count, int *eof, void *data)
+{
+	unsigned long *mask = (unsigned long *) data;
+	if (count < HEX_DIGITS+1)
+		return -EINVAL;
+	return sprintf (page, "%08lx\n", *mask);
+}
+
+static int prof_cpu_mask_write_proc (struct file *file, const char *buffer,
+					unsigned long count, void *data)
+{
+	unsigned long *mask = (unsigned long *) data, full_count = count, err;
+	unsigned long new_value;
+
+	err = parse_hex_value(buffer, count, &new_value);
+	if (err)
+		return err;
+
+	*mask = new_value;
+	return full_count;
+}
+
+#define MAX_NAMELEN 10
+
+static void register_irq_proc (unsigned int irq)
+{
+	struct proc_dir_entry *entry;
+	char name [MAX_NAMELEN];
+
+	if (!root_irq_dir || (irq_desc[irq].handler == NULL))
+		return;
+
+	memset(name, 0, MAX_NAMELEN);
+	sprintf(name, "%d", irq);
+
+	/* create /proc/irq/1234 */
+	irq_dir[irq] = proc_mkdir(name, root_irq_dir);
+
+	/* create /proc/irq/1234/smp_affinity */
+	entry = create_proc_entry("smp_affinity", 0700, irq_dir[irq]);
+
+	entry->nlink = 1;
+	entry->data = (void *)irq;
+	entry->read_proc = irq_affinity_read_proc;
+	entry->write_proc = irq_affinity_write_proc;
+
+	smp_affinity_entry[irq] = entry;
+}
+
+unsigned long prof_cpu_mask = -1;
+
+void init_irq_proc (void)
+{
+	struct proc_dir_entry *entry;
+	int i;
+
+	/* create /proc/irq */
+	root_irq_dir = proc_mkdir("irq", 0);
+
+	/* create /proc/irq/prof_cpu_mask */
+	entry = create_proc_entry("prof_cpu_mask", 0700, root_irq_dir);
+
+	entry->nlink = 1;
+	entry->data = (void *)&prof_cpu_mask;
+	entry->read_proc = prof_cpu_mask_read_proc;
+	entry->write_proc = prof_cpu_mask_write_proc;
+
+	/*
+	 * Create entries for all existing IRQs.
+	 */
+	for (i = 0; i < NR_IRQS; i++) {
+		if (irq_desc[i].handler == NULL)
+			continue;
+		register_irq_proc(i);
+	}
+}

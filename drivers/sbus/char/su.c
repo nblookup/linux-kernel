@@ -1,8 +1,8 @@
-/* $Id: su.c,v 1.18 1999/01/02 16:47:37 davem Exp $
+/* $Id: su.c,v 1.36 2000/02/09 21:11:22 davem Exp $
  * su.c: Small serial driver for keyboard/mouse interface on sparc32/PCI
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
- * Coypright (C) 1998  Pete Zaitcev   (zaitcev@metabyte.com)
+ * Copyright (C) 1998-1999  Pete Zaitcev   (zaitcev@metabyte.com)
  *
  * This is mainly a variation of drivers/char/serial.c,
  * credits go to authors mentioned therein.
@@ -54,6 +54,7 @@ do {									\
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
 #include <linux/serial.h>
+#include <linux/serialP.h>
 #include <linux/serial_reg.h>
 #include <linux/string.h>
 #include <linux/fcntl.h>
@@ -62,6 +63,7 @@ do {									\
 #include <linux/mm.h>
 #include <linux/malloc.h>
 #include <linux/init.h>
+#include <linux/bootmem.h>
 #include <linux/delay.h>
 #ifdef CONFIG_SERIAL_CONSOLE
 #include <linux/console.h>
@@ -92,6 +94,11 @@ static struct console sercons;
 int su_serial_console_init(void);
 #endif
 
+enum su_type { SU_PORT_NONE, SU_PORT_MS, SU_PORT_KBD, SU_PORT_PORT };
+static char *su_typev[] = { "???", "mouse", "kbd", "serial" };
+
+#define SU_PROPSIZE	128
+
 /*
  * serial.c saves memory when it allocates async_info upon first open.
  * We have parts of state structure together because we do call startup
@@ -107,8 +114,8 @@ struct su_struct {
 	int		 line;
 	int		 cflag;
 
-	int		 kbd_node;
-	int		 ms_node;
+	enum su_type	 port_type;	/* Hookup type: e.g. mouse */
+	int		 is_console;
 	int		 port_node;
 
 	char		 name[16];
@@ -135,14 +142,26 @@ struct su_struct {
 	int			xmit_tail;
 	int			xmit_cnt;
 	struct tq_struct	tqueue;
-	struct wait_queue	*open_wait;
-	struct wait_queue	*close_wait;
-	struct wait_queue	*delta_msr_wait;
+	wait_queue_head_t	open_wait;
+	wait_queue_head_t	close_wait;
+	wait_queue_head_t	delta_msr_wait;
 
 	int			count;
 	struct async_icount	icount;
 	struct termios		normal_termios, callout_termios;
 	unsigned long		last_active;	/* For async_struct, to be */
+};
+
+/*
+ * Scan status structure.
+ * "prop" is a local variable but it eats stack to keep it in each
+ * stack frame of a recursive procedure.
+ */
+struct su_probe_scan {
+	int msnode, kbnode;	/* PROM nodes for mouse and keyboard */
+	int msx, kbx;		/* minors for mouse and keyboard */
+	int devices;		/* scan index */
+	char prop[SU_PROPSIZE];
 };
 
 static char *serial_name = "PCIO serial driver";
@@ -200,7 +219,7 @@ static struct termios *serial_termios_locked[NR_PORTS];
  * memory if large numbers of serial ports are open.
  */
 static unsigned char *tmp_buf;
-static struct semaphore tmp_buf_sem = MUTEX;
+static DECLARE_MUTEX(tmp_buf_sem);
 
 static inline int serial_paranoia_check(struct su_struct *info,
 					kdev_t device, const char *routine)
@@ -223,8 +242,6 @@ static inline int serial_paranoia_check(struct su_struct *info,
 	return 0;
 }
 
-#ifdef __sparc_v9__
-
 static inline
 unsigned int su_inb(struct su_struct *info, unsigned long offset)
 {
@@ -234,20 +251,7 @@ unsigned int su_inb(struct su_struct *info, unsigned long offset)
 static inline void
 su_outb(struct su_struct *info, unsigned long offset, int value)
 {
-	outb(value, info->port + offset);
-}
-
-#else
-
-static inline
-unsigned int su_inb(struct su_struct *info, unsigned long offset)
-{
-	return (unsigned int)(*(volatile unsigned char *)(info->port + offset));
-}
-
-static inline void
-su_outb(struct su_struct *info, unsigned long offset, int value)
-{
+#ifndef __sparc_v9__
 	/*
 	 * MrCoffee has weird schematics: IRQ4 & P10(?) pins of SuperIO are
 	 * connected with a gate then go to SlavIO. When IRQ4 goes tristated
@@ -257,10 +261,9 @@ su_outb(struct su_struct *info, unsigned long offset, int value)
 	 * This problem is similar to what Alpha people suffer, see serial.c.
 	 */
 	if (offset == UART_MCR) value |= UART_MCR_OUT2;
-	*(volatile unsigned char *)(info->port + offset) = value;
-}
-
 #endif
+	outb(value, info->port + offset);
+}
 
 #define serial_in(info, off)		su_inb(info, off)
 #define serial_inp(info, off)		su_inb(info, off)
@@ -341,14 +344,14 @@ su_sched_event(struct su_struct *info, int event)
 }
 
 static __inline__ void
-receive_kbd_ms_chars(struct su_struct *info, struct pt_regs *regs)
+receive_kbd_ms_chars(struct su_struct *info, struct pt_regs *regs, int is_brk)
 {
 	unsigned char status = 0;
 	unsigned char ch;
 
 	do {
 		ch = serial_inp(info, UART_RX);
-		if (info->kbd_node) {
+		if (info->port_type == SU_PORT_KBD) {
 			if(ch == SUNKBD_RESET) {
                         	l1a_state.kbd_id = 1;
                         	l1a_state.l1_down = 0;
@@ -368,7 +371,7 @@ receive_kbd_ms_chars(struct su_struct *info, struct pt_regs *regs)
                 	}
                 	sunkbd_inchar(ch, regs);
 		} else {
-			sun_mouse_inbyte(ch);
+			sun_mouse_inbyte(ch, is_brk);
 		}
 
 		status = su_inb(info, UART_LSR);
@@ -380,12 +383,15 @@ receive_serial_chars(struct su_struct *info, int *status, struct pt_regs *regs)
 {
 	struct tty_struct *tty = info->tty;
 	unsigned char ch;
-	int ignored = 0;
+	int ignored = 0, saw_console_brk = 0;
 	struct	async_icount *icount;
 
 	icount = &info->icount;
 	do {
 		ch = serial_inp(info, UART_RX);
+		if (info->is_console &&
+		    (ch == 0 || (*status &UART_LSR_BI)))
+			saw_console_brk = 1;
 		if (tty->flip.count >= TTY_FLIPBUF_SIZE)
 			break;
 		*tty->flip.char_buf_ptr = ch;
@@ -461,6 +467,8 @@ receive_serial_chars(struct su_struct *info, int *status, struct pt_regs *regs)
 	printk("E%02x.R%d", *status, tty->flip.count);
 #endif
 	tty_flip_buffer_push(tty);
+	if (saw_console_brk != 0)
+		batten_down_hatches();
 }
 
 static __inline__ void
@@ -529,7 +537,7 @@ check_modem_status(struct su_struct *info)
 			    (status & UART_MSR_DCD))
 				hardpps();
 #endif
-	}
+		}
 		if (status & UART_MSR_DCTS)
 			icount->cts++;
 		wake_up_interruptible(&info->delta_msr_wait);
@@ -598,8 +606,9 @@ su_kbd_ms_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 #ifdef SERIAL_DEBUG_INTR
 	printk("status = %x...", status);
 #endif
-	if (status & UART_LSR_DR)
-		receive_kbd_ms_chars(info, regs);
+	if ((status & UART_LSR_DR) || (status & UART_LSR_BI))
+		receive_kbd_ms_chars(info, regs,
+				     (status & UART_LSR_BI) != 0);
 
 #ifdef SERIAL_DEBUG_INTR
 	printk("end.\n");
@@ -775,7 +784,7 @@ startup(struct su_struct *info)
 	/*
 	 * Allocate the IRQ if necessary
 	 */
-	if (info->kbd_node || info->ms_node) {
+	if (info->port_type != SU_PORT_PORT) {
 		retval = request_irq(info->irq, su_kbd_ms_interrupt,
 				     SA_SHIRQ, info->name, info);
 	} else {
@@ -956,7 +965,7 @@ change_speed(struct su_struct *info,
 	int		bits;
 	unsigned long	flags;
 
-	if (!info->kbd_node && !info->ms_node) {
+	if (info->port_type == SU_PORT_PORT) {
 		if (!info->tty || !info->tty->termios)
 			return;
 		if (!info->port)
@@ -1133,9 +1142,9 @@ static void su_put_char_kbd(unsigned char c)
 	struct su_struct *info = su_table;
 	int lsr;
 
-	if (!info->kbd_node)
+	if (info->port_type != SU_PORT_KBD)
 		++info;
-	if (!info)
+	if (info->port_type != SU_PORT_KBD)
 		return;
 
 	do {
@@ -1151,9 +1160,9 @@ su_change_mouse_baud(int baud)
 {
 	struct su_struct *info = su_table;
 
-	if (!info->ms_node)
+	if (info->port_type != SU_PORT_MS)
 		++info;
-	if (!info)
+	if (info->port_type != SU_PORT_MS)
 		return;
 
 	info->cflag &= ~(CBAUDEX | CBAUD);
@@ -1836,7 +1845,6 @@ su_wait_until_sent(struct tty_struct *tty, int timeout)
 		printk("lsr = %d (jiff=%lu)...", lsr, jiffies);
 #endif
 		current->state = TASK_INTERRUPTIBLE;
-		current->counter = 0;	/* make us low-priority */
 		schedule_timeout(char_time);
 		if (signal_pending(current))
 			break;
@@ -1878,7 +1886,7 @@ static int
 block_til_ready(struct tty_struct *tty, struct file * filp,
 		struct su_struct *info)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	int		  retval;
 	int		  do_clocal = 0, extra_count = 0;
 	unsigned long	  flags;
@@ -1966,7 +1974,7 @@ block_til_ready(struct tty_struct *tty, struct file * filp,
 				   serial_inp(info, UART_MCR) |
 				   (UART_MCR_DTR | UART_MCR_RTS));
 		restore_flags(flags);
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
 		    !(info->flags & ASYNC_INITIALIZED)) {
 #ifdef SERIAL_DO_RESTART
@@ -2202,9 +2210,9 @@ done:
 
 /*
  * ---------------------------------------------------------------------
- * su_init() and friends
+ * su_XXX_init() and friends
  *
- * su_init() is called at boot-time to initialize the serial driver.
+ * su_XXX_init() is called at boot-time to initialize the serial driver.
  * ---------------------------------------------------------------------
  */
 
@@ -2213,9 +2221,9 @@ done:
  * number, and identifies which options were configured into this
  * driver.
  */
-__initfunc(static __inline__ void show_su_version(void))
+static __inline__ void __init show_su_version(void)
 {
-	char *revision = "$Revision: 1.18 $";
+	char *revision = "$Revision: 1.36 $";
 	char *version, *p;
 
 	version = strchr(revision, ' ');
@@ -2226,8 +2234,8 @@ __initfunc(static __inline__ void show_su_version(void))
 }
 
 /*
- * This routine is called by su_init() to initialize a specific serial
- * port.  It determines what type of UART chip this serial port is
+ * This routine is called by su_{serial|kbd_ms}_init() to initialize a specific
+ * serial port.  It determines what type of UART chip this serial port is
  * using: 8250, 16450, 16550, 16550A.  The important question is
  * whether or not this UART is a 16550A, since this will determine
  * whether or not we can use its FIFO features.
@@ -2236,64 +2244,72 @@ static void
 autoconfig(struct su_struct *info)
 {
 	unsigned char status1, status2, scratch, scratch2;
-#ifdef __sparc_v9__
 	struct linux_ebus_device *dev = 0;
 	struct linux_ebus *ebus;
-#else
+#ifndef __sparc_v9__
 	struct linux_prom_registers reg0;
 #endif
 	unsigned long flags;
 
-#ifdef __sparc_v9__
+	if (!info->port_node || !info->port_type)
+		return;
+
+	/*
+	 * First we look for Ebus-bases su's
+	 */
 	for_each_ebus(ebus) {
 		for_each_ebusdev(dev, ebus) {
-			if (!strncmp(dev->prom_name, "su", 2)) {
-				if (dev->prom_node == info->kbd_node)
-					goto ebus_done;
-				if (dev->prom_node == info->ms_node)
-					goto ebus_done;
+			if (dev->prom_node == info->port_node) {
+				info->port = dev->resource[0].start;
+				info->irq = dev->irqs[0];
+				goto ebus_done;
 			}
 		}
 	}
-ebus_done:
-	if (!dev)
-		return;
 
-	info->port = dev->base_address[0];
-	if (check_region(info->port, 8))
-		return;
-
-	info->irq = dev->irqs[0];
+#ifdef __sparc_v9__
+	/*
+	 * Not on Ebus, bailing.
+	 */
+	return;
 #else
-	if (!info->port_node)
-		return;
-
+	/*
+	 * Not on Ebus, must be OBIO.
+	 */
 	if (prom_getproperty(info->port_node, "reg",
 	    (char *)&reg0, sizeof(reg0)) == -1) {
 		prom_printf("su: no \"reg\" property\n");
 		return;
 	}
 	prom_apply_obio_ranges(&reg0, 1);
-	if ((info->port = (unsigned long) sparc_alloc_io(reg0.phys_addr,
-	    0, reg0.reg_size, "su-regs", reg0.which_io, 0)) == 0) {
+	if (reg0.which_io != 0) {	/* Just in case... */
+		prom_printf("su: bus number nonzero: 0x%x:%x\n",
+		    reg0.which_io, reg0.phys_addr);
+		return;
+	}
+	if ((info->port = (unsigned long) ioremap(reg0.phys_addr,
+	    reg0.reg_size)) == 0) {
 		prom_printf("su: cannot map\n");
 		return;
 	}
+
 	/*
-	 * There is no intr property on MrCoffee, so hardwire it. Krups?
+	 * There is no intr property on MrCoffee, so hardwire it.
 	 */
 	info->irq = IRQ_4M(13);
 #endif
 
-#ifdef DEBUG_SERIAL_OPEN
-	printk("Found 'su' at %016lx IRQ %s\n", dev->base_address[0],
-	       __irq_itoa(dev->irqs[0]));
+ebus_done:
+
+#ifdef SERIAL_DEBUG_OPEN
+	printk("Found 'su' at %016lx IRQ %s\n", info->port,
+		__irq_itoa(info->irq));
 #endif
 
 	info->magic = SERIAL_MAGIC;
 
 	save_flags(flags); cli();
-	
+
 	/*
 	 * Do a simple existence test first; if we fail this, there's
 	 * no point trying anything else.
@@ -2312,17 +2328,20 @@ ebus_done:
 		return;		/* We failed; there's nothing here */
 	}
 
-#if 0 /* P3: This does not work on MrCoffee. OUT2 is 0x80 - should work... */
 	scratch = serial_inp(info, UART_MCR);
 	serial_outp(info, UART_MCR, UART_MCR_LOOP | scratch);
 	serial_outp(info, UART_MCR, UART_MCR_LOOP | 0x0A);
 	status1 = serial_inp(info, UART_MSR) & 0xF0;
 	serial_outp(info, UART_MCR, scratch);
 	if (status1 != 0x90) {
+		/*
+		 * This code fragment used to fail, now it fixed itself.
+		 * We keep the printout for a case.
+		 */
+		printk("su: loopback returned status 0x%02x\n", status1);
 		restore_flags(flags);
 		return;
 	} 
-#endif
 
 	scratch2 = serial_in(info, UART_LCR);
 	serial_outp(info, UART_LCR, 0xBF);	/* set up for StarTech test */
@@ -2389,14 +2408,7 @@ ebus_done:
 		return;
 	}
 
-	if (info->kbd_node || info->ms_node)
-		sprintf(info->name, "su(%s)", info->ms_node ? "mouse" : "kbd");
-	else
-		strcpy(info->name, "su(serial)");
-
-#ifdef __sparc_v9__
-	request_region(info->port, 8, info->name);
-#endif
+	sprintf(info->name, "su(%s)", su_typev[info->port_type]);
 
 	/*
 	 * Reset the UART.
@@ -2409,10 +2421,15 @@ ebus_done:
 	restore_flags(flags);
 }
 
+/* This is used by the SAB driver to adjust where its minor
+ * numbers start, we always are probed for first.
+ */
+int su_num_ports = 0;
+
 /*
  * The serial driver boot-time initialization code!
  */
-__initfunc(int su_serial_init(void))
+int __init su_serial_init(void)
 {
 	int i;
 	struct su_struct *info;
@@ -2494,20 +2511,30 @@ __initfunc(int su_serial_init(void))
 		info->tqueue.routine = do_softint;
 		info->tqueue.data = info;
 		info->cflag = serial_driver.init_termios.c_cflag;
+		init_waitqueue_head(&info->open_wait);
+		init_waitqueue_head(&info->close_wait);
+		init_waitqueue_head(&info->delta_msr_wait);
 
 		autoconfig(info);
 		if (info->type == PORT_UNKNOWN)
 			continue;
 
-		printk(KERN_INFO "%s at %16lx (irq = %s) is a %s\n",
-		       info->name, info->port, __irq_itoa(info->irq),
+		printk(KERN_INFO "%s at 0x%lx (tty %d irq %s) is a %s\n",
+		       info->name, (long)info->port, i, __irq_itoa(info->irq),
 		       uart_config[info->type].name);
 	}
+
+	for (i = 0, info = su_table; i < NR_PORTS; i++, info++)
+		if (info->type == PORT_UNKNOWN)
+			break;
+
+	su_num_ports = i;
+	serial_driver.num = callout_driver.num = i;
 
 	return 0;
 }
 
-__initfunc(int su_kbd_ms_init(void))
+int __init su_kbd_ms_init(void)
 {
 	int i;
 	struct su_struct *info;
@@ -2519,21 +2546,25 @@ __initfunc(int su_kbd_ms_init(void))
 		info->type = PORT_UNKNOWN;
 		info->baud_base = BAUD_BASE;
 
-		if (info->kbd_node)
+		if (info->port_type == SU_PORT_KBD)
 			info->cflag = B1200 | CS8 | CLOCAL | CREAD;
 		else
 			info->cflag = B4800 | CS8 | CLOCAL | CREAD;
+
+		init_waitqueue_head(&info->open_wait);
+		init_waitqueue_head(&info->close_wait);
+		init_waitqueue_head(&info->delta_msr_wait);
 
 		autoconfig(info);
 		if (info->type == PORT_UNKNOWN)
 			continue;
 
-		printk(KERN_INFO "%s at %16lx (irq = %s) is a %s\n",
+		printk(KERN_INFO "%s at 0x%lx (irq = %s) is a %s\n",
 		       info->name, info->port, __irq_itoa(info->irq),
 		       uart_config[info->type].name);
 
 		startup(info);
-		if (info->kbd_node)
+		if (info->port_type == SU_PORT_KBD)
 			keyboard_zsinit(su_put_char_kbd);
 		else
 			sun_mouse_zsinit();
@@ -2541,154 +2572,129 @@ __initfunc(int su_kbd_ms_init(void))
 	return 0;
 }
 
-__initfunc(int su_probe (unsigned long *memory_start))
+/*
+ * We got several platforms which present 'su' in different parts
+ * of device tree. 'su' may be found under obio, ebus, isa and pci.
+ * We walk over the tree and find them wherever PROM hides them.
+ */
+void __init su_probe_any(struct su_probe_scan *t, int sunode)
 {
-	struct su_struct *info = su_table;
-        int node, enode, tnode, sunode;
-	int kbnode = 0, msnode = 0;
-	int devices = 0;
-	char prop[128];
+	struct su_struct *info;
 	int len;
 
-	/*
-	 * Find su on MrCoffee. We return OK code if find any.
-	 * Then su_init finds every one and initializes them.
-	 * We do this early because MrCoffee got no aliases.
-	 */
-	node = prom_getchild(prom_root_node);
-	if ((node = prom_searchsiblings(node, "obio")) != 0) {
-		if ((sunode = prom_getchild(node)) != 0) {
-			if ((sunode = prom_searchsiblings(sunode, "su")) != 0) {
-				info->port_node = sunode;
-#ifdef CONFIG_SERIAL_CONSOLE
-				/*
-				 * Console must be initiated after the generic
-				 * initialization.
-				 * sunserial_setinitfunc inverts order, so
-				 * call this before next one.
-				 */
-				sunserial_setinitfunc(memory_start,
-						      su_serial_console_init);
-#endif
-        			sunserial_setinitfunc(memory_start,
-						      su_serial_init);
-				return 0;
+	if (t->devices >= NR_PORTS) return;
+
+	for (; sunode != 0; sunode = prom_getsibling(sunode)) {
+		len = prom_getproperty(sunode, "name", t->prop, SU_PROPSIZE);
+		if (len <= 1) continue;		/* Broken PROM node */
+		if (strncmp(t->prop, "su", len) == 0 ||
+		    strncmp(t->prop, "serial", len) == 0 ||
+		    strncmp(t->prop, "su_pnp", len) == 0) {
+			info = &su_table[t->devices];
+			if (t->kbnode != 0 && sunode == t->kbnode) {
+				t->kbx = t->devices;
+				info->port_type = SU_PORT_KBD;
+			} else if (t->msnode != 0 && sunode == t->msnode) {
+				t->msx = t->devices;
+				info->port_type = SU_PORT_MS;
+			} else {
+				info->port_type = SU_PORT_PORT;
 			}
+			info->is_console = 0;
+			info->port_node = sunode;
+			++t->devices;
+		} else {
+			su_probe_any(t, prom_getchild(sunode));
 		}
 	}
+}
+
+int __init su_probe(void)
+{
+	int node;
+	int len;
+	struct su_probe_scan scan;
+
+	/*
+	 * First, we scan the tree.
+	 */
+	scan.devices = 0;
+	scan.msx = -1;
+	scan.kbx = -1;
+	scan.kbnode = 0;
+	scan.msnode = 0;
 
 	/*
 	 * Get the nodes for keyboard and mouse from 'aliases'...
 	 */
         node = prom_getchild(prom_root_node);
 	node = prom_searchsiblings(node, "aliases");
-	if (!node)
-		return -ENODEV;
+	if (node != 0) {
 
-	len = prom_getproperty(node, "keyboard", prop, sizeof(prop));
-	if (len > 0) {
-		prop[len] = 0;
-		kbnode = prom_finddevice(prop);
-	}
-	if (!kbnode)
-		return -ENODEV;
-
-	len = prom_getproperty(node, "mouse", prop, sizeof(prop));
-	if (len > 0) {
-		prop[len] = 0;
-		msnode = prom_finddevice(prop);
-	}
-	if (!msnode)
-		return -ENODEV;
-
-	/*
-	 * Find matching EBus nodes...
-	 */
-        node = prom_getchild(prom_root_node);
-	if ((node = prom_searchsiblings(node, "pci")) == 0) {
-		return -ENODEV;		/* Plain sparc */
-	}
-
-	/*
-	 * Check for SUNW,sabre on Ultra 5/10/AXi.
-	 */
-	len = prom_getproperty(node, "model", prop, sizeof(prop));
-	if ((len > 0) && !strncmp(prop, "SUNW,sabre", len)) {
-        	node = prom_getchild(node);
-		node = prom_searchsiblings(node, "pci");
-	}
-
-	/*
-	 * For each PCI bus...
-	 */
-	while (node) {
-		enode = prom_getchild(node);
-		enode = prom_searchsiblings(enode, "ebus");
-
-		/*
-		 * For each EBus on this PCI...
-		 */
-		while (enode) {
-			sunode = prom_getchild(enode);
-			tnode = prom_searchsiblings(sunode, "su");
-			if (!tnode)
-				tnode = prom_searchsiblings(sunode, "su_pnp");
-			sunode = tnode;
-
-			/*
-			 * For each 'su' on this EBus...
-			 */
-			while (sunode) {
-				/*
-				 * Does it match?
-				 */
-				if (sunode == kbnode) {
-					info->kbd_node = sunode;
-					++info;
-					++devices;
-				}
-				if (sunode == msnode) {
-					info->ms_node = sunode;
-					++info;
-					++devices;
-				}
-
-				/*
-				 * Found everything we need?
-				 */
-				if (devices == 2)
-					goto found;
-
-				sunode = prom_getsibling(sunode);
-				tnode = prom_searchsiblings(sunode, "su");
-				if (!tnode)
-					tnode = prom_searchsiblings(sunode,
-								    "su_pnp");
-				sunode = tnode;
-			}
-			enode = prom_getsibling(enode);
-			enode = prom_searchsiblings(enode, "ebus");
+		len = prom_getproperty(node, "keyboard", scan.prop,SU_PROPSIZE);
+		if (len > 0) {
+			scan.prop[len] = 0;
+			scan.kbnode = prom_finddevice(scan.prop);
 		}
-		node = prom_getsibling(node);
-		node = prom_searchsiblings(node, "pci");
-	}
-	return -ENODEV;
 
-found:
-        sunserial_setinitfunc(memory_start, su_kbd_ms_init);
-        rs_ops.rs_change_mouse_baud = su_change_mouse_baud;
-	sunkbd_setinitfunc(memory_start, sun_kbd_init);
-	kbd_ops.compute_shiftstate = sun_compute_shiftstate;
-	kbd_ops.setledstate = sun_setledstate;
-	kbd_ops.getledstate = sun_getledstate;
-	kbd_ops.setkeycode = sun_setkeycode;
-	kbd_ops.getkeycode = sun_getkeycode;
+		len = prom_getproperty(node, "mouse", scan.prop, SU_PROPSIZE);
+		if (len > 0) {
+			scan.prop[len] = 0;
+			scan.msnode = prom_finddevice(scan.prop);
+		}
+	}
+
+	su_probe_any(&scan, prom_getchild(prom_root_node));
+
+	/*
+	 * Second, we process the special case of keyboard and mouse.
+	 *
+	 * Currently if we got keyboard and mouse hooked to "su" ports
+	 * we do not use any possible remaining "su" as a serial port.
+	 * Thus, we ignore values of .msx and .kbx, then compact ports.
+	 * Those who want to address this issue need to merge
+	 * su_serial_init() and su_ms_kbd_init().
+	 */
+	if (scan.msx != -1 && scan.kbx != -1) {
+		su_table[0].port_type = SU_PORT_MS;
+		su_table[0].is_console = 0;
+		su_table[0].port_node = scan.msnode;
+		su_table[1].port_type = SU_PORT_KBD;
+		su_table[1].is_console = 0;
+		su_table[1].port_node = scan.kbnode;
+
+        	sunserial_setinitfunc(su_kbd_ms_init);
+        	rs_ops.rs_change_mouse_baud = su_change_mouse_baud;
+		sunkbd_setinitfunc(sun_kbd_init);
+		kbd_ops.compute_shiftstate = sun_compute_shiftstate;
+		kbd_ops.setledstate = sun_setledstate;
+		kbd_ops.getledstate = sun_getledstate;
+		kbd_ops.setkeycode = sun_setkeycode;
+		kbd_ops.getkeycode = sun_getkeycode;
 #ifdef CONFIG_PCI
-	sunkbd_install_keymaps(memory_start, sun_key_maps, sun_keymap_count,
-			       sun_func_buf, sun_func_table,
-			       sun_funcbufsize, sun_funcbufleft,
-			       sun_accent_table, sun_accent_table_size);
+		sunkbd_install_keymaps(sun_key_maps,
+		    sun_keymap_count, sun_func_buf, sun_func_table,
+		    sun_funcbufsize, sun_funcbufleft,
+		    sun_accent_table, sun_accent_table_size);
 #endif
+		return 0;
+	}
+	if (scan.msx != -1 || scan.kbx != -1) {
+		printk("su_probe: cannot match keyboard and mouse, confused\n");
+		return -ENODEV;
+	}
+
+	if (scan.devices == 0)
+		return -ENODEV;
+
+#ifdef CONFIG_SERIAL_CONSOLE
+	/*
+	 * Console must be initiated after the generic initialization.
+	 * sunserial_setinitfunc inverts order, so call this before next one.
+	 */
+	sunserial_setinitfunc(su_serial_console_init);
+#endif
+       	sunserial_setinitfunc(su_serial_init);
 	return 0;
 }
 
@@ -2807,7 +2813,7 @@ serial_console_device(struct console *c)
  *	- initialize the serial port
  *	Return non-zero if we didn't find a serial port.
  */
-__initfunc(static int serial_console_setup(struct console *co, char *options))
+static int __init serial_console_setup(struct console *co, char *options)
 {
 	struct su_struct *info;
 	unsigned cval;
@@ -2910,6 +2916,8 @@ __initfunc(static int serial_console_setup(struct console *co, char *options))
 	if (su_inb(info, UART_LSR) == 0xff)
 		return -1;
 
+	info->is_console = 1;
+
 	return 0;
 }
 
@@ -2927,10 +2935,12 @@ static struct console sercons = {
 	NULL
 };
 
+int su_console_registered = 0;
+
 /*
  *	Register console.
  */
-__initfunc(int su_serial_console_init(void))
+int __init su_serial_console_init(void)
 {
 	extern int con_is_present(void);
 
@@ -2942,6 +2952,7 @@ __initfunc(int su_serial_console_init(void))
 		return 0;
 	sercons.index = 0;
 	register_console(&sercons);
+	su_console_registered = 1;
 	return 0;
 }
 

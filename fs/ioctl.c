@@ -18,14 +18,20 @@ static int file_ioctl(struct file *filp,unsigned int cmd,unsigned long arg)
 
 	switch (cmd) {
 		case FIBMAP:
-			if (inode->i_op == NULL)
-				return -EBADF;
-		    	if (inode->i_op->bmap == NULL)
+		{
+			struct address_space *mapping = inode->i_mapping;
+			int res;
+			/* do we support this mess? */
+			if (!mapping->a_ops->bmap)
 				return -EINVAL;
+			if (!capable(CAP_SYS_RAWIO))
+				return -EPERM;
 			if ((error = get_user(block, (int *) arg)) != 0)
 				return error;
-			block = inode->i_op->bmap(inode,block);
-			return put_user(block, (int *) arg);
+
+			res = mapping->a_ops->bmap(mapping, block);
+			return put_user(res, (int *) arg);
+		}
 		case FIGETBSZ:
 			if (inode->i_sb == NULL)
 				return -EBADF;
@@ -39,24 +45,24 @@ static int file_ioctl(struct file *filp,unsigned int cmd,unsigned long arg)
 }
 
 
-asmlinkage int sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
+asmlinkage long sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 {	
 	struct file * filp;
 	unsigned int flag;
 	int on, error = -EBADF;
 
-	lock_kernel();
 	filp = fget(fd);
 	if (!filp)
 		goto out;
 	error = 0;
+	lock_kernel();
 	switch (cmd) {
 		case FIOCLEX:
-			FD_SET(fd, &current->files->close_on_exec);
+			FD_SET(fd, current->files->close_on_exec);
 			break;
 
 		case FIONCLEX:
-			FD_CLR(fd, &current->files->close_on_exec);
+			FD_CLR(fd, current->files->close_on_exec);
 			break;
 
 		case FIONBIO:
@@ -100,8 +106,8 @@ asmlinkage int sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 				error = filp->f_op->ioctl(filp->f_dentry->d_inode, filp, cmd, arg);
 	}
 	fput(filp);
+	unlock_kernel();
 
 out:
-	unlock_kernel();
 	return error;
 }

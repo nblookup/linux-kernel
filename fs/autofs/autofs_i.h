@@ -66,7 +66,7 @@ struct autofs_dirhash {
 };
 
 struct autofs_wait_queue {
-	struct wait_queue *queue;
+	wait_queue_head_t queue;
 	struct autofs_wait_queue *next;
 	autofs_wqt_t wait_queue_token;
 	/* We use the following to see what we are waiting for */
@@ -140,6 +140,8 @@ struct autofs_dir_ent *autofs_expire(struct super_block *,struct autofs_sb_info 
 extern struct inode_operations autofs_root_inode_operations;
 extern struct inode_operations autofs_symlink_inode_operations;
 extern struct inode_operations autofs_dir_inode_operations;
+extern struct file_operations autofs_root_operations;
+extern struct file_operations autofs_dir_operations;
 
 /* Initializing function */
 

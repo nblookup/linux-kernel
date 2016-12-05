@@ -28,6 +28,7 @@
 #include <linux/sunrpc/stats.h>
 #include <linux/nfs_fs.h>
 #include <linux/lockd/bind.h>
+#include <linux/smp_lock.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -37,29 +38,23 @@
 #define NFS_PARANOIA 1
 
 static struct inode * __nfs_fhget(struct super_block *, struct nfs_fattr *);
-static void nfs_zap_caches(struct inode *);
+void nfs_zap_caches(struct inode *);
 static void nfs_invalidate_inode(struct inode *);
 
 static void nfs_read_inode(struct inode *);
 static void nfs_put_inode(struct inode *);
 static void nfs_delete_inode(struct inode *);
-static int  nfs_notify_change(struct dentry *, struct iattr *);
 static void nfs_put_super(struct super_block *);
 static void nfs_umount_begin(struct super_block *);
-static int  nfs_statfs(struct super_block *, struct statfs *, int);
+static int  nfs_statfs(struct super_block *, struct statfs *);
 
 static struct super_operations nfs_sops = { 
-	nfs_read_inode,		/* read inode */
-	NULL,			/* write inode */
-	nfs_put_inode,		/* put inode */
-	nfs_delete_inode,	/* delete inode */
-	nfs_notify_change,	/* notify change */
-	nfs_put_super,		/* put superblock */
-	NULL,			/* write superblock */
-	nfs_statfs,		/* stat filesystem */
-	NULL,			/* no remount */
-	NULL,			/* no clear inode */
-	nfs_umount_begin	/* umount attempt begin */
+	read_inode:	nfs_read_inode,
+	put_inode:	nfs_put_inode,
+	delete_inode:	nfs_delete_inode,
+	put_super:	nfs_put_super,
+	statfs:		nfs_statfs,
+	umount_begin:	nfs_umount_begin,
 };
 
 struct rpc_stat			nfs_rpcstat = { &nfs_program };
@@ -77,7 +72,8 @@ nfs_read_inode(struct inode * inode)
 	inode->i_blksize = inode->i_sb->s_blocksize;
 	inode->i_mode = 0;
 	inode->i_rdev = 0;
-	inode->i_op = NULL;
+	NFS_FILEID(inode) = 0;
+	NFS_FSID(inode) = 0;
 	NFS_CACHEINV(inode);
 	NFS_ATTRTIMEO(inode) = NFS_MINATTRTIMEO(inode);
 }
@@ -99,29 +95,37 @@ nfs_delete_inode(struct inode * inode)
 	int failed;
 
 	dprintk("NFS: delete_inode(%x/%ld)\n", inode->i_dev, inode->i_ino);
-	/*
-	 * Flush out any pending write requests ...
-	 */
-	if (NFS_WRITEBACK(inode) != NULL) {
-		unsigned long timeout = jiffies + 5*HZ;
+
+	lock_kernel();
+	if (S_ISDIR(inode->i_mode)) {
+		nfs_free_dircache(inode);
+	} else {
+		/*
+		 * Flush out any pending write requests ...
+		 */
+		if (NFS_WRITEBACK(inode) != NULL) {
+			unsigned long timeout = jiffies + 5*HZ;
 #ifdef NFS_DEBUG_VERBOSE
 printk("nfs_delete_inode: inode %ld has pending RPC requests\n", inode->i_ino);
 #endif
-		nfs_inval(inode);
-		while (NFS_WRITEBACK(inode) != NULL &&
-		       time_before(jiffies, timeout)) {
-			current->state = TASK_INTERRUPTIBLE;
-			schedule_timeout(HZ/10);
+			nfs_inval(inode);
+			while (NFS_WRITEBACK(inode) != NULL &&
+			       time_before(jiffies, timeout)) {
+				current->state = TASK_INTERRUPTIBLE;
+				schedule_timeout(HZ/10);
+			}
+			current->state = TASK_RUNNING;
+			if (NFS_WRITEBACK(inode) != NULL)
+				printk("NFS: Arghhh, stuck RPC requests!\n");
 		}
-		current->state = TASK_RUNNING;
-		if (NFS_WRITEBACK(inode) != NULL)
-			printk("NFS: Arghhh, stuck RPC requests!\n");
 	}
 
 	failed = nfs_check_failed_request(inode);
 	if (failed)
 		printk("NFS: inode %ld had %d failed requests\n",
 			inode->i_ino, failed);
+	unlock_kernel();
+
 	clear_inode(inode);
 }
 
@@ -137,14 +141,8 @@ nfs_put_super(struct super_block *sb)
 	if (!(server->flags & NFS_MOUNT_NONLM))
 		lockd_down();	/* release rpc.lockd */
 	rpciod_down();		/* release rpciod */
-	/*
-	 * Invalidate the dircache for this superblock.
-	 */
-	nfs_invalidate_dircache_sb(sb);
 
 	kfree(server->hostname);
-
-	MOD_DEC_USE_COUNT;
 }
 
 void
@@ -185,6 +183,9 @@ nfs_block_size(unsigned int bsize, unsigned char *nrbitsp)
 	return bsize;
 }
 
+extern struct nfs_fh *nfs_fh_alloc(void);
+extern void nfs_fh_free(struct nfs_fh *p);
+
 /*
  * The way this works is that the mount process passes a structure
  * in the data argument which contains the server's IP address
@@ -206,7 +207,6 @@ nfs_read_super(struct super_block *sb, void *raw_data, int silent)
 	struct rpc_timeout	timeparms;
 	struct nfs_fattr	fattr;
 
-	MOD_INC_USE_COUNT;
 	if (!data)
 		goto out_miss_args;
 
@@ -223,8 +223,6 @@ nfs_read_super(struct super_block *sb, void *raw_data, int silent)
 	memcpy(&srvaddr, &data->addr, sizeof(srvaddr));
 	if (srvaddr.sin_addr.s_addr == INADDR_ANY)
 		goto out_no_remote;
-
-	lock_super(sb);
 
 	sb->s_flags |= MS_ODD_RENAME; /* This should go away */
 
@@ -291,7 +289,7 @@ nfs_read_super(struct super_block *sb, void *raw_data, int silent)
 	 * Keep the super block locked while we try to get 
 	 * the root fh attributes.
 	 */
-	root_fh = kmalloc(sizeof(struct nfs_fh), GFP_KERNEL);
+	root_fh = nfs_fh_alloc();
 	if (!root_fh)
 		goto out_no_fh;
 	*root_fh = data->root;
@@ -302,14 +300,13 @@ nfs_read_super(struct super_block *sb, void *raw_data, int silent)
 	root_inode = __nfs_fhget(sb, &fattr);
 	if (!root_inode)
 		goto out_no_root;
-	sb->s_root = d_alloc_root(root_inode, NULL);
+	sb->s_root = d_alloc_root(root_inode);
 	if (!sb->s_root)
 		goto out_no_root;
 	sb->s_root->d_op = &nfs_dentry_operations;
 	sb->s_root->d_fsdata = root_fh;
 
 	/* We're airborne */
-	unlock_super(sb);
 
 	/* Check whether to start the lockd process */
 	if (!(server->flags & NFS_MOUNT_NONLM))
@@ -325,7 +322,7 @@ out_no_root:
 out_no_fattr:
 	printk("nfs_read_super: get root fattr failed\n");
 out_free_fh:
-	kfree(root_fh);
+	nfs_fh_free(root_fh);
 out_no_fh:
 	rpciod_down();
 	goto out_shutdown;
@@ -347,7 +344,6 @@ out_no_xprt:
 out_free_host:
 	kfree(server->hostname);
 out_unlock:
-	unlock_super(sb);
 	goto out_fail;
 
 out_no_remote:
@@ -358,33 +354,28 @@ out_miss_args:
 	printk("nfs_read_super: missing data argument\n");
 
 out_fail:
-	sb->s_dev = 0;
-	MOD_DEC_USE_COUNT;
 	return NULL;
 }
 
 static int
-nfs_statfs(struct super_block *sb, struct statfs *buf, int bufsiz)
+nfs_statfs(struct super_block *sb, struct statfs *buf)
 {
 	int error;
 	struct nfs_fsinfo res;
-	struct statfs tmp;
 
 	error = nfs_proc_statfs(&sb->u.nfs_sb.s_server, &sb->u.nfs_sb.s_root,
 		&res);
 	if (error) {
 		printk("nfs_statfs: statfs error = %d\n", -error);
-		res.bsize = res.blocks = res.bfree = res.bavail = 0;
+		res.bsize = res.blocks = res.bfree = res.bavail = -1;
 	}
-	tmp.f_type = NFS_SUPER_MAGIC;
-	tmp.f_bsize = res.bsize;
-	tmp.f_blocks = res.blocks;
-	tmp.f_bfree = res.bfree;
-	tmp.f_bavail = res.bavail;
-	tmp.f_files = 0;
-	tmp.f_ffree = 0;
-	tmp.f_namelen = NAME_MAX;
-	return copy_to_user(buf, &tmp, bufsiz) ? -EFAULT : 0;
+	buf->f_type = NFS_SUPER_MAGIC;
+	buf->f_bsize = res.bsize;
+	buf->f_blocks = res.blocks;
+	buf->f_bfree = res.bfree;
+	buf->f_bavail = res.bavail;
+	buf->f_namelen = NAME_MAX;
+	return 0;
 }
 
 /*
@@ -410,14 +401,16 @@ restart:
 		struct dentry *dentry = list_entry(tmp, struct dentry, d_alias);
 		dprintk("nfs_free_dentries: found %s/%s, d_count=%d, hashed=%d\n",
 			dentry->d_parent->d_name.name, dentry->d_name.name,
-			dentry->d_count, !list_empty(&dentry->d_hash));
+			dentry->d_count, !d_unhashed(dentry));
+		if (!list_empty(&dentry->d_subdirs))
+			shrink_dcache_parent(dentry);
 		if (!dentry->d_count) {
 			dget(dentry);
 			d_drop(dentry);
 			dput(dentry);
 			goto restart;
 		}
-		if (!list_empty(&dentry->d_hash))
+		if (d_unhashed(dentry))
 			unhashed++;
 	}
 	return unhashed;
@@ -426,16 +419,15 @@ restart:
 /*
  * Invalidate the local caches
  */
-static void
+void
 nfs_zap_caches(struct inode *inode)
 {
 	NFS_ATTRTIMEO(inode) = NFS_MINATTRTIMEO(inode);
 	NFS_CACHEINV(inode);
 
+	invalidate_inode_pages(inode);
 	if (S_ISDIR(inode->i_mode))
-		nfs_invalidate_dircache(inode);
-	else
-		invalidate_inode_pages(inode);
+		nfs_flush_dircache(inode);
 }
 
 /*
@@ -463,23 +455,23 @@ nfs_fill_inode(struct inode *inode, struct nfs_fattr *fattr)
 	 * do this once. (We don't allow inodes to change types.)
 	 */
 	if (inode->i_mode == 0) {
+		NFS_FILEID(inode) = fattr->fileid;
+		NFS_FSID(inode) = fattr->fsid;
 		inode->i_mode = fattr->mode;
-		if (S_ISREG(inode->i_mode))
-			inode->i_op = &nfs_file_inode_operations;
-		else if (S_ISDIR(inode->i_mode))
+		/* Why so? Because we want revalidate for devices/FIFOs, and
+		 * that's precisely what we have in nfs_file_inode_operations.
+		 */
+		inode->i_op = &nfs_file_inode_operations;
+		if (S_ISREG(inode->i_mode)) {
+			inode->i_fop = &nfs_file_operations;
+			inode->i_data.a_ops = &nfs_file_aops;
+		} else if (S_ISDIR(inode->i_mode)) {
 			inode->i_op = &nfs_dir_inode_operations;
-		else if (S_ISLNK(inode->i_mode))
+			inode->i_fop = &nfs_dir_operations;
+		} else if (S_ISLNK(inode->i_mode))
 			inode->i_op = &nfs_symlink_inode_operations;
-		else if (S_ISCHR(inode->i_mode)) {
-			inode->i_op = &chrdev_inode_operations;
-			inode->i_rdev = to_kdev_t(fattr->rdev);
-		} else if (S_ISBLK(inode->i_mode)) {
-			inode->i_op = &blkdev_inode_operations;
-			inode->i_rdev = to_kdev_t(fattr->rdev);
-		} else if (S_ISFIFO(inode->i_mode))
-			init_fifo(inode);
 		else
-			inode->i_op = NULL;
+			init_special_inode(inode, inode->i_mode, fattr->rdev);
 		/*
 		 * Preset the size and mtime, as there's no need
 		 * to invalidate the caches.
@@ -489,6 +481,54 @@ nfs_fill_inode(struct inode *inode, struct nfs_fattr *fattr)
 		NFS_OLDMTIME(inode) = fattr->mtime.seconds;
 	}
 	nfs_refresh_inode(inode, fattr);
+}
+
+/*
+ * In NFSv3 we can have 64bit inode numbers. In order to support
+ * this, and re-exported directories (also seen in NFSv2)
+ * we are forced to allow 2 different inodes to have the same
+ * i_ino.
+ */
+static int
+nfs_find_actor(struct inode *inode, unsigned long ino, void *opaque)
+{
+	struct nfs_fattr *fattr = (struct nfs_fattr *)opaque;
+	if (NFS_FSID(inode) != fattr->fsid)
+		return 0;
+	if (NFS_FILEID(inode) != fattr->fileid)
+		return 0;
+	return 1;
+}
+
+static int
+nfs_inode_is_stale(struct inode *inode, struct nfs_fattr *fattr)
+{
+	int unhashed;
+	int is_stale = 0;
+
+	if (inode->i_mode &&
+	    (fattr->mode & S_IFMT) != (inode->i_mode & S_IFMT))
+		is_stale = 1;
+
+	if (is_bad_inode(inode))
+		is_stale = 1;
+
+	/*
+	 * If the inode seems stale, free up cached dentries.
+	 */
+	unhashed = nfs_free_dentries(inode);
+
+	/* Assume we're holding an i_count
+	 *
+	 * NB: sockets sometimes have volatile file handles
+	 *     don't invalidate their inodes even if all dentries are
+	 *     unhashed.
+	 */
+	if (unhashed && inode->i_count == unhashed + 1
+	    && !S_ISSOCK(inode->i_mode) && !S_ISFIFO(inode->i_mode))
+		is_stale = 1;
+
+	return is_stale;
 }
 
 /*
@@ -550,54 +590,40 @@ nfs_fhget(struct dentry *dentry, struct nfs_fh *fhandle,
 static struct inode *
 __nfs_fhget(struct super_block *sb, struct nfs_fattr *fattr)
 {
-	struct inode *inode;
-	int max_count, stale_inode, unhashed = 0;
+	struct inode *inode = NULL;
+	unsigned long ino;
 
-retry:
-	inode = iget(sb, fattr->fileid);
+	if (!fattr->nlink) {
+		printk("NFS: Buggy server - nlink == 0!\n");
+		goto out_no_inode;
+	}
+
+	ino = fattr->fileid;
+
+	while((inode = iget4(sb, ino, nfs_find_actor, fattr)) != NULL) {
+
+		/*
+		 * Check for busy inodes, and attempt to get rid of any
+		 * unused local references. If successful, we release the
+		 * inode and try again.
+		 *
+		 * Note that the busy test uses the values in the fattr,
+		 * as the inode may have become a different object.
+		 * (We can probably handle modes changes here, too.)
+		 */
+		if (!nfs_inode_is_stale(inode,fattr))
+			break;
+
+		dprintk("__nfs_fhget: inode %ld still busy, i_count=%d\n",
+		       inode->i_ino, inode->i_count);
+		nfs_zap_caches(inode);
+		remove_inode_hash(inode);
+		iput(inode);
+	}
+
 	if (!inode)
 		goto out_no_inode;
-	/* N.B. This should be impossible ... */
-	if (inode->i_ino != fattr->fileid)
-		goto out_bad_id;
 
-	/*
-	 * Check for busy inodes, and attempt to get rid of any
-	 * unused local references. If successful, we release the
-	 * inode and try again.
-	 *
-	 * Note that the busy test uses the values in the fattr,
-	 * as the inode may have become a different object.
-	 * (We can probably handle modes changes here, too.)
-	 */
-	stale_inode = inode->i_mode &&
-		      ((fattr->mode ^ inode->i_mode) & S_IFMT);
-	stale_inode |= inode->i_count && inode->i_count == unhashed;
-	max_count = S_ISDIR(fattr->mode) ? 1 : fattr->nlink;
-	if (stale_inode || inode->i_count > max_count + unhashed) {
-		dprintk("__nfs_fhget: inode %ld busy, i_count=%d, i_nlink=%d\n",
-			inode->i_ino, inode->i_count, inode->i_nlink);
-		unhashed = nfs_free_dentries(inode);
-		if (stale_inode || inode->i_count > max_count + unhashed) {
-			printk("__nfs_fhget: inode %ld still busy, i_count=%d\n",
-				inode->i_ino, inode->i_count);
-			if (!list_empty(&inode->i_dentry)) {
-				struct dentry *dentry;
-				dentry = list_entry(inode->i_dentry.next,
-						 struct dentry, d_alias);
-				printk("__nfs_fhget: killing %s/%s filehandle\n",
-					dentry->d_parent->d_name.name,
-					dentry->d_name.name);
-				memset(dentry->d_fsdata, 0,
-					sizeof(struct nfs_fh));
-			}
-			remove_inode_hash(inode);
-			nfs_invalidate_inode(inode);
-			unhashed = 0;
-		}
-		iput(inode);
-		goto retry;
-	}
 	nfs_fill_inode(inode, fattr);
 	dprintk("NFS: __nfs_fhget(%x/%ld ct=%d)\n",
 		inode->i_dev, inode->i_ino, inode->i_count);
@@ -608,18 +634,14 @@ out:
 out_no_inode:
 	printk("__nfs_fhget: iget failed\n");
 	goto out;
-out_bad_id:
-	printk("__nfs_fhget: unexpected inode from iget\n");
-	goto out;
 }
 
 int
 nfs_notify_change(struct dentry *dentry, struct iattr *attr)
 {
 	struct inode *inode = dentry->d_inode;
-	int error;
-	struct nfs_sattr sattr;
 	struct nfs_fattr fattr;
+	int error;
 
 	/*
 	 * Make sure the inode is up-to-date.
@@ -632,57 +654,60 @@ printk("nfs_notify_change: revalidate failed, error=%d\n", error);
 		goto out;
 	}
 
-	sattr.mode = (u32) -1;
-	if (attr->ia_valid & ATTR_MODE) 
-		sattr.mode = attr->ia_mode;
-
-	sattr.uid = (u32) -1;
-	if (attr->ia_valid & ATTR_UID)
-		sattr.uid = attr->ia_uid;
-
-	sattr.gid = (u32) -1;
-	if (attr->ia_valid & ATTR_GID)
-		sattr.gid = attr->ia_gid;
-
-	sattr.size = (u32) -1;
-	if ((attr->ia_valid & ATTR_SIZE) && S_ISREG(inode->i_mode))
-		sattr.size = attr->ia_size;
-
-	sattr.mtime.seconds = sattr.mtime.useconds = (u32) -1;
-	if (attr->ia_valid & ATTR_MTIME) {
-		sattr.mtime.seconds = attr->ia_mtime;
-		sattr.mtime.useconds = 0;
-	}
-
-	sattr.atime.seconds = sattr.atime.useconds = (u32) -1;
-	if (attr->ia_valid & ATTR_ATIME) {
-		sattr.atime.seconds = attr->ia_atime;
-		sattr.atime.useconds = 0;
-	}
+	if (!S_ISREG(inode->i_mode))
+		attr->ia_valid &= ~ATTR_SIZE;
 
 	error = nfs_wb_all(inode);
 	if (error)
 		goto out;
 
 	error = nfs_proc_setattr(NFS_DSERVER(dentry), NFS_FH(dentry),
-				&sattr, &fattr);
+				&fattr, attr);
 	if (error)
 		goto out;
 	/*
 	 * If we changed the size or mtime, update the inode
 	 * now to avoid invalidating the page cache.
 	 */
-	if (sattr.size != (u32) -1) {
-		if (sattr.size != fattr.size)
-			printk("nfs_notify_change: sattr=%d, fattr=%d??\n",
-				sattr.size, fattr.size);
-		inode->i_size  = sattr.size;
+	if (attr->ia_valid & ATTR_SIZE) {
+		if (attr->ia_size != fattr.size)
+			printk("nfs_notify_change: attr=%Ld, fattr=%d??\n",
+			       (long long) attr->ia_size, fattr.size);
 		inode->i_mtime = fattr.mtime.seconds;
+		vmtruncate(inode, attr->ia_size);
 	}
-	if (sattr.mtime.seconds != (u32) -1)
+	if (attr->ia_valid & ATTR_MTIME)
 		inode->i_mtime = fattr.mtime.seconds;
 	error = nfs_refresh_inode(inode, &fattr);
 out:
+	return error;
+}
+
+/*
+ * Wait for the inode to get unlocked.
+ * (Used for NFS_INO_LOCKED and NFS_INO_REVALIDATING).
+ */
+int
+nfs_wait_on_inode(struct inode *inode, int flag)
+{
+	struct task_struct	*tsk = current;
+	DECLARE_WAITQUEUE(wait, tsk);
+	int			intr, error = 0;
+
+	intr = NFS_SERVER(inode)->flags & NFS_MOUNT_INTR;
+	add_wait_queue(&inode->i_wait, &wait);
+	for (;;) {
+		set_task_state(tsk, (intr ? TASK_INTERRUPTIBLE : TASK_UNINTERRUPTIBLE));
+		error = 0;
+		if (!(NFS_FLAGS(inode) & flag))
+			break;
+		error = -ERESTARTSYS;
+		if (intr && signalled())
+			break;
+		schedule();
+	}
+	set_task_state(tsk, TASK_RUNNING);
+	remove_wait_queue(&inode->i_wait, &wait);
 	return error;
 }
 
@@ -716,7 +741,7 @@ int nfs_release(struct inode *inode, struct file *filp)
  * the cached attributes have to be refreshed.
  */
 int
-_nfs_revalidate_inode(struct nfs_server *server, struct dentry *dentry)
+__nfs_revalidate_inode(struct nfs_server *server, struct dentry *dentry)
 {
 	struct inode	*inode = dentry->d_inode;
 	int		 status = 0;
@@ -725,6 +750,19 @@ _nfs_revalidate_inode(struct nfs_server *server, struct dentry *dentry)
 	dfprintk(PAGECACHE, "NFS: revalidating %s/%s, ino=%ld\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name,
 		inode->i_ino);
+
+	if (!inode || is_bad_inode(inode))
+		return -ESTALE;
+
+	while (NFS_REVALIDATING(inode)) {
+		status = nfs_wait_on_inode(inode, NFS_INO_REVALIDATING);
+		if (status < 0)
+			return status;
+		if (time_before(jiffies,NFS_READTIME(inode)+NFS_ATTRTIMEO(inode)))
+			return 0;
+	}
+	NFS_FLAGS(inode) |= NFS_INO_REVALIDATING;
+
 	status = nfs_proc_getattr(server, NFS_FH(dentry), &fattr);
 	if (status) {
 		int error;
@@ -764,6 +802,8 @@ _nfs_revalidate_inode(struct nfs_server *server, struct dentry *dentry)
 	dfprintk(PAGECACHE, "NFS: %s/%s revalidation complete\n",
 		dentry->d_parent->d_name.name, dentry->d_name.name);
 out:
+	NFS_FLAGS(inode) &= ~NFS_INO_REVALIDATING;
+	wake_up(&inode->i_wait);
 	return status;
 }
 
@@ -882,12 +922,10 @@ printk("nfs_refresh_inode: invalidating %ld pages\n", inode->i_nrpages);
 /*
  * File system information
  */
-static struct file_system_type nfs_fs_type = {
-	"nfs",
-	0 /* FS_NO_DCACHE - this doesn't work right now*/,
-	nfs_read_super,
-	NULL
-};
+static DECLARE_FSTYPE(nfs_fs_type, "nfs", nfs_read_super, 0);
+
+extern int nfs_init_fhcache(void);
+extern int nfs_init_wreqcache(void);
 
 /*
  * Initialize NFS
@@ -895,9 +933,17 @@ static struct file_system_type nfs_fs_type = {
 int
 init_nfs_fs(void)
 {
+	int err;
+
+	err = nfs_init_fhcache();
+	if (err)
+		return err;
+
+	err = nfs_init_wreqcache();
+	if (err)
+		return err;
+
 #ifdef CONFIG_PROC_FS
-	rpc_register_sysctl();
-	rpc_proc_init();
 	rpc_proc_register(&nfs_rpcstat);
 #endif
         return register_filesystem(&nfs_fs_type);
@@ -925,6 +971,5 @@ cleanup_module(void)
 	rpc_proc_unregister("nfs");
 #endif
 	unregister_filesystem(&nfs_fs_type);
-	nfs_free_dircache();
 }
 #endif

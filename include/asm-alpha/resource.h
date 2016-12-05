@@ -18,6 +18,13 @@
 
 #define RLIM_NLIMITS	10
 
+/*
+ * SuS says limits have to be unsigned.  Fine, it's unsigned, but
+ * we retain the old value for compatibility, especially with DU. 
+ * When you run into the 2^63 barrier, you call me.
+ */
+#define RLIM_INFINITY	0x7ffffffffffffffful
+
 #ifdef __KERNEL__
 
 #define INIT_RLIMITS							\
@@ -25,12 +32,12 @@
     {LONG_MAX, LONG_MAX},			/* RLIMIT_CPU */	\
     {LONG_MAX, LONG_MAX},			/* RLIMIT_FSIZE */	\
     {LONG_MAX, LONG_MAX},			/* RLIMIT_DATA */	\
-    {_STK_LIM, _STK_LIM},			/* RLIMIT_STACK */	\
+    {_STK_LIM, LONG_MAX},			/* RLIMIT_STACK */	\
     {       0, LONG_MAX},			/* RLIMIT_CORE */	\
     {LONG_MAX, LONG_MAX},			/* RLIMIT_RSS */	\
-    { NR_OPEN,  NR_OPEN},			/* RLIMIT_NOFILE */	\
+    {INR_OPEN, INR_OPEN},			/* RLIMIT_NOFILE */	\
     {LONG_MAX, LONG_MAX},			/* RLIMIT_AS */		\
-    {MAX_TASKS_PER_USER, MAX_TASKS_PER_USER},	/* RLIMIT_NPROC */	\
+    {LONG_MAX, LONG_MAX},			/* RLIMIT_NPROC */	\
     {LONG_MAX, LONG_MAX},			/* RLIMIT_MEMLOCK */	\
 }
 

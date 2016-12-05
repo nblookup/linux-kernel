@@ -13,13 +13,19 @@
 all: kernel.o head.o init_task.o
 
 O_TARGET := kernel.o
-O_OBJS   := process.o signal.o entry.o traps.o irq.o vm86.o \
-            ptrace.o ioport.o ldt.o setup.o time.o sys_i386.o
+O_OBJS   := process.o semaphore.o signal.o entry.o traps.o irq.o vm86.o \
+	    ptrace.o i8259.o ioport.o ldt.o setup.o time.o sys_i386.o \
+	    pci-dma.o
 OX_OBJS  := i386_ksyms.o
 MX_OBJS  :=
 
 ifdef CONFIG_PCI
-O_OBJS += bios32.o
+O_OBJS += pci-i386.o
+ifdef CONFIG_VISWS
+O_OBJS += pci-visws.o
+else
+O_OBJS += pci-pc.o
+endif
 endif
 
 ifdef CONFIG_MCA
@@ -34,23 +40,44 @@ else
   endif
 endif
 
-ifdef CONFIG_APM
-OX_OBJS += apm.o
+ifeq ($(CONFIG_MICROCODE),y)
+OX_OBJS += microcode.o
+else
+  ifeq ($(CONFIG_MICROCODE),m)
+  MX_OBJS += microcode.o
+  endif
+endif
+
+ifeq ($(CONFIG_ACPI),y)
+O_OBJS += acpi.o
+else
+  ifeq ($(CONFIG_ACPI),m)
+  M_OBJS += acpi.o
+  endif
+endif
+
+ifeq ($(CONFIG_APM),y)
+O_OBJS += apm.o
+else
+  ifeq ($(CONFIG_APM),m)
+  M_OBJS += apm.o
+  endif
 endif
 
 ifdef CONFIG_SMP
-O_OBJS += smp.o trampoline.o
+O_OBJS += smp.o smpboot.o trampoline.o
+endif
+
+ifdef CONFIG_X86_LOCAL_APIC
+O_OBJS += apic.o
 endif
 
 ifdef CONFIG_X86_IO_APIC
-O_OBJS += io_apic.o
+O_OBJS += io_apic.o mpparse.o
 endif
 
 ifdef CONFIG_X86_VISWS_APIC
 O_OBJS += visws_apic.o
 endif
-
-head.o: head.S $(TOPDIR)/include/linux/tasks.h
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c $*.S -o $*.o
 
 include $(TOPDIR)/Rules.make

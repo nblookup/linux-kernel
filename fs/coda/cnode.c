@@ -3,6 +3,7 @@
    */
 
 #include <linux/types.h>
+#include <linux/string.h>
 #include <linux/time.h>
 
 #include <linux/coda.h>
@@ -12,6 +13,23 @@
 
 extern int coda_debug;
 extern int coda_print_entry;
+
+inline int coda_fideq(ViceFid *fid1, ViceFid *fid2)
+{
+	if (fid1->Vnode != fid2->Vnode)
+		return 0;
+	if (fid1->Volume != fid2->Volume)
+		return 0;
+	if (fid1->Unique != fid2->Unique)
+		return 0;
+	return 1;
+}
+
+static struct inode_operations coda_symlink_inode_operations = {
+	readlink:	page_readlink,
+	follow_link:	page_follow_link,
+	setattr:	coda_notify_change,
+};
 
 /* cnode.c */
 static void coda_fill_inode(struct inode *inode, struct coda_vattr *attr)
@@ -23,27 +41,66 @@ static void coda_fill_inode(struct inode *inode, struct coda_vattr *attr)
 
         coda_vattr_to_iattr(inode, attr);
 
-        if (S_ISREG(inode->i_mode))
+        if (S_ISREG(inode->i_mode)) {
                 inode->i_op = &coda_file_inode_operations;
-        else if (S_ISDIR(inode->i_mode))
+                inode->i_fop = &coda_file_operations;
+        } else if (S_ISDIR(inode->i_mode)) {
                 inode->i_op = &coda_dir_inode_operations;
-        else if (S_ISLNK(inode->i_mode))
-                inode->i_op = &coda_symlink_inode_operations;
-        else if (S_ISCHR(inode->i_mode)) {
-                inode->i_op = &chrdev_inode_operations;
-                inode->i_rdev = to_kdev_t(attr->va_rdev);
-        } else if (S_ISBLK(inode->i_mode)) {
-                inode->i_op = &blkdev_inode_operations;
-                inode->i_rdev = to_kdev_t(attr->va_rdev);
-        } else if (S_ISFIFO(inode->i_mode))
-                init_fifo(inode);
-	else if (S_ISSOCK(inode->i_mode))
-		inode->i_op = NULL;
-        else {
-                printk ("coda_fill_inode: what's this? i_mode = %o\n", 
-			inode->i_mode);
-                inode->i_op = NULL;
-        }
+                inode->i_fop = &coda_dir_operations;
+        } else if (S_ISLNK(inode->i_mode)) {
+		inode->i_op = &coda_symlink_inode_operations;
+		inode->i_data.a_ops = &coda_symlink_aops;
+	} else
+                init_special_inode(inode, inode->i_mode, attr->va_rdev);
+}
+
+struct inode * coda_iget(struct super_block * sb, ViceFid * fid,
+			 struct coda_vattr * attr)
+{
+	struct inode *inode;
+	struct coda_sb_info *sbi= coda_sbp(sb);
+	struct coda_inode_info *cii;
+	ino_t ino = attr->va_fileid;
+
+	inode = iget(sb, ino);
+	if ( !inode ) { 
+		CDEBUG(D_CNODE, "coda_iget: no inode\n");
+		return NULL;
+	}
+
+	/* check if the inode is already initialized */
+	cii = ITOC(inode);
+	if (cii->c_magic == CODA_CNODE_MAGIC)
+		goto out;
+
+	/* Initialize the Coda inode info structure */
+	memset(cii, 0, (int) sizeof(struct coda_inode_info));
+	cii->c_magic = CODA_CNODE_MAGIC;
+	cii->c_fid   = *fid;
+	cii->c_flags = 0;
+	cii->c_vnode = inode;
+	INIT_LIST_HEAD(&(cii->c_cnhead));
+	INIT_LIST_HEAD(&(cii->c_volrootlist));
+
+	coda_fill_inode(inode, attr);
+
+	/* check if it is a weird fid (hashed fid != ino), f.i mountpoints
+	   repair object, expanded local-global conflict trees, etc.
+	 */
+	if ( coda_f2i(fid) == ino )
+		goto out;
+
+	/* check if we expect this weird fid */
+	if ( !coda_fid_is_weird(fid) )
+		printk("Coda: unknown weird fid: ino %ld, fid %s."
+		       "Tell Peter.\n", (long)ino, coda_f2s(&cii->c_fid));
+
+	/* add the inode to a global list so we can find it back later */
+	list_add(&cii->c_volrootlist, &sbi->sbi_volroothead);
+	CDEBUG(D_CNODE, "Added %ld, %s to volroothead\n",
+	       (long)ino, coda_f2s(&cii->c_fid));
+out:
+	return inode;
 }
 
 /* this is effectively coda_iget:
@@ -55,16 +112,12 @@ static void coda_fill_inode(struct inode *inode, struct coda_vattr *attr)
 int coda_cnode_make(struct inode **inode, ViceFid *fid, struct super_block *sb)
 {
         struct coda_inode_info *cnp;
-	struct coda_sb_info *sbi= coda_sbp(sb);
         struct coda_vattr attr;
         int error;
-	ino_t ino;
         
         ENTRY;
 
-        /* 
-	 * We get inode numbers from Venus -- see venus source
-	 */
+	/* We get inode numbers from Venus -- see venus source */
 
 	error = venus_getattr(sb, fid, &attr);
 	if ( error ) {
@@ -75,57 +128,31 @@ int coda_cnode_make(struct inode **inode, ViceFid *fid, struct super_block *sb)
 	    return error;
 	} 
 
-	ino = attr.va_fileid;
-        *inode = iget(sb, ino);
-        if ( !*inode ) {
-                printk("coda_cnode_make: iget failed\n");
+	*inode = coda_iget(sb, fid, &attr);
+	if ( !(*inode) ) {
+		printk("coda_cnode_make: coda_iget failed\n");
                 return -ENOMEM;
         }
 
 	cnp = ITOC(*inode);
-       if  ( cnp->c_magic != 0 ) {
-               printk("coda_cnode make on initialized inode %ld, old %s new
-%s!\n",
-                      (*inode)->i_ino, coda_f2s(&cnp->c_fid), coda_f2s2(fid));
-               iput(*inode);
-               return -ENOENT;
-        }
- 
-       memset(cnp, 0, (int) sizeof(struct coda_inode_info));
-       cnp->c_fid = *fid;
-       cnp->c_magic = CODA_CNODE_MAGIC;
-       cnp->c_flags = 0;
-       cnp->c_vnode = *inode;
-       INIT_LIST_HEAD(&(cnp->c_cnhead));
-       INIT_LIST_HEAD(&(cnp->c_volrootlist));
-
-	/* fill in the inode attributes */
-	if ( coda_f2i(fid) != ino ) {
-	        if ( !coda_fid_is_weird(fid) ) 
-		        printk("Coda: unknown weird fid: ino %ld, fid %s."
-			       "Tell Peter.\n", ino, coda_f2s(&cnp->c_fid));
-		list_add(&cnp->c_volrootlist, &sbi->sbi_volroothead);
-		CDEBUG(D_UPCALL, "Added %ld ,%s to volroothead\n",
-		       ino, coda_f2s(&cnp->c_fid));
+	/* see if it is the right one (we might have an inode collision) */
+	if  ( coda_fideq(fid, &cnp->c_fid) ) {
+		CDEBUG(D_DOWNCALL,
+		       "Done making inode: ino %ld, count %d with %s\n",
+		       (*inode)->i_ino, (*inode)->i_count, 
+		       coda_f2s(&cnp->c_fid));
+		EXIT;
+		return 0;
 	}
 
-        coda_fill_inode(*inode, &attr);
-	CDEBUG(D_DOWNCALL, "Done making inode: ino %ld,  count %d with %s\n",
-	        (*inode)->i_ino, (*inode)->i_count, 
-	       coda_f2s(&cnp->c_fid));
-
+	/* collision */
+	printk("coda_cnode_make on initialized inode %ld, old %s new %s!\n",
+                      (*inode)->i_ino, coda_f2s(&cnp->c_fid), coda_f2s2(fid));
+               iput(*inode);
         EXIT;
-        return 0;
+	return -ENOENT;
 }
 
-inline int coda_fideq(ViceFid *fid1, ViceFid *fid2)
-{
-	int eq;
-	eq =   ( (fid1->Vnode == fid2->Vnode) &&
-		 (fid1->Volume == fid2->Volume) &&
-		 (fid1->Unique == fid2->Unique) );
-	return eq;
-}
 
 void coda_replace_fid(struct inode *inode, struct ViceFid *oldfid, 
 		      struct ViceFid *newfid)
@@ -186,11 +213,13 @@ struct inode *coda_fid_to_inode(ViceFid *fid, struct super_block *sb)
 			       coda_f2s(&cii->c_fid), cii->c_vnode->i_ino);
 			if ( coda_fideq(&cii->c_fid, fid) ) {
 				inode = cii->c_vnode;
-				CDEBUG(D_INODE, "volume root, found %ld\n", cii->c_vnode->i_ino);
+				CDEBUG(D_INODE, "volume root, found %ld\n", inode->i_ino);
 				if ( cii->c_magic != CODA_CNODE_MAGIC )
 					printk("%s: Bad magic in inode, tell Peter.\n", 
 					       __FUNCTION__);
-				return cii->c_vnode;
+
+				iget(sb, inode->i_ino);
+				return inode;
 			}
 			
 		}
@@ -202,7 +231,7 @@ struct inode *coda_fid_to_inode(ViceFid *fid, struct super_block *sb)
 	inode = iget(sb, nr);
 	if ( !inode ) {
 		printk("coda_fid_to_inode: null from iget, sb %p, nr %ld.\n",
-		       sb, nr);
+		       sb, (long)nr);
 		return NULL;
 	}
 
@@ -227,7 +256,6 @@ struct inode *coda_fid_to_inode(ViceFid *fid, struct super_block *sb)
 	}
 
 	CDEBUG(D_INODE, "found %ld\n", inode->i_ino);
-	iput(inode);	
 	return inode;
 }
 
@@ -239,6 +267,7 @@ int coda_cnode_makectl(struct inode **inode, struct super_block *sb)
     *inode = iget(sb, CTL_INO);
     if ( *inode ) {
 	(*inode)->i_op = &coda_ioctl_inode_operations;
+	(*inode)->i_fop = &coda_ioctl_operations;
 	(*inode)->i_mode = 00444;
 	error = 0;
     } else { 

@@ -2,15 +2,15 @@
  * sound/gus_wave.c
  *
  * Driver for the Gravis UltraSound wave table synth.
- */
-/*
+ *
+ *
  * Copyright (C) by Hannu Savolainen 1993-1997
  *
  * OSS/Free for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
  * Version 2 (June 1991). See the "COPYING" file distributed with this software
  * for more info.
- */
-/*
+ *
+ *
  * Thomas Sailer    : ioctl code reworked (vmalloc/vfree removed)
  * Frank van de Pol : Fixed GUS MAX interrupt handling. Enabled simultanious
  *                    usage of CS4231A codec, GUS wave and MIDI for GUS MAX.
@@ -23,9 +23,9 @@
 
 #include "sound_config.h"
 #include <linux/ultrasound.h>
-#include "gus_hw.h"
 
-#ifdef CONFIG_GUS
+#include "gus.h"
+#include "gus_hw.h"
 
 #define GUS_BANK_SIZE (((iw_mode) ? 256*1024*1024 : 256*1024))
 
@@ -118,7 +118,7 @@ static int      gus_audio_bits;
 static int      gus_audio_bsize;
 static char     bounce_buf[8 * 1024];	/* Must match value set to max_fragment */
 
-static struct wait_queue *dram_sleeper = NULL;
+static DECLARE_WAIT_QUEUE_HEAD(dram_sleeper);
 
 /*
  * Variables and buffers for PCM output
@@ -1663,7 +1663,7 @@ static int guswave_open(int dev, int mode)
 			gus_no_dma = 0;
 	}
 
-	init_waitqueue(&dram_sleeper);
+	init_waitqueue_head(&dram_sleeper);
 	gus_busy = 1;
 	active_device = GUS_DEV_WAVE;
 
@@ -3014,7 +3014,7 @@ void gus_wave_init(struct address_info *hw_config)
 			model_num = "MAX";
 			gus_type = 0x40;
 			mixer_type = CS4231;
-#ifdef CONFIG_GUSMAX
+#ifdef CONFIG_SOUND_GUSMAX
 			{
 				unsigned char   max_config = 0x40;	/* Codec enable */
 
@@ -3111,9 +3111,7 @@ void gus_wave_init(struct address_info *hw_config)
 		hw_config->slots[0] = sdev;
 		synth_devs[sdev] = &guswave_operations;
 		sequencer_init();
-#ifdef CONFIG_SEQUENCER
 		gus_tmr_install(gus_base + 8);
-#endif
 	}
 
 	reset_sample_memory();
@@ -3168,7 +3166,7 @@ void gus_wave_init(struct address_info *hw_config)
 
 void gus_wave_unload(struct address_info *hw_config)
 {
-#ifdef CONFIG_GUSMAX
+#ifdef CONFIG_SOUND_GUSMAX
 	if (have_gus_max)
 	{
 		ad1848_unload(gus_base + 0x10c,
@@ -3433,8 +3431,6 @@ void guswave_dma_irq(void)
 	}
 }
 
-#ifdef CONFIG_SEQUENCER
-
 /*
  * Timer stuff
  */
@@ -3535,6 +3531,3 @@ static void gus_tmr_install(int io_base)
 	sound_timer_init(&gus_tmr, "GUS");
 #endif
 }
-#endif
-
-#endif

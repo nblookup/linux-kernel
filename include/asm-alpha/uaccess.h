@@ -23,9 +23,9 @@
 #define VERIFY_READ	0
 #define VERIFY_WRITE	1
 
-#define get_fs()  (current->tss.fs)
+#define get_fs()  (current->thread.fs)
 #define get_ds()  (KERNEL_DS)
-#define set_fs(x) (current->tss.fs = (x))
+#define set_fs(x) (current->thread.fs = (x))
 
 #define segment_eq(a,b)	((a).seg == (b).seg)
 
@@ -485,6 +485,15 @@ extern long __strlen_user(const char *);
 extern inline long strlen_user(const char *str)
 {
 	return access_ok(VERIFY_READ,str,0) ? __strlen_user(str) : 0;
+}
+
+/* Returns: 0 if exception before NUL or reaching the supplied limit (N),
+ * a value greater than N if the limit would be exceeded, else strlen.  */
+extern long __strnlen_user(const char *, long);
+
+extern inline long strnlen_user(const char *str, long n)
+{
+	return access_ok(VERIFY_READ,str,0) ? __strnlen_user(str, n) : 0;
 }
 
 /*

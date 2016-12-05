@@ -40,14 +40,14 @@
 
 extern struct svc_program	nlmsvc_program;
 struct nlmsvc_binding *		nlmsvc_ops = NULL;
-static struct semaphore 	nlmsvc_sema = MUTEX;
+static DECLARE_MUTEX(nlmsvc_sema);
 static unsigned int		nlmsvc_users = 0;
 static pid_t			nlmsvc_pid = 0;
 unsigned long			nlmsvc_grace_period = 0;
 unsigned long			nlmsvc_timeout = 0;
 
-static struct semaphore lockd_start = MUTEX_LOCKED;
-static struct wait_queue *	lockd_exit = NULL;
+static DECLARE_MUTEX_LOCKED(lockd_start);
+static DECLARE_WAIT_QUEUE_HEAD(lockd_exit);
 
 /*
  * Currently the following can be set only at insmod time.
@@ -308,22 +308,20 @@ out:
 
 #ifdef MODULE
 /* New module support in 2.1.18 */
-#if LINUX_VERSION_CODE >= 0x020112
-  EXPORT_NO_SYMBOLS;
-  MODULE_AUTHOR("Olaf Kirch <okir@monad.swb.de>");
-  MODULE_DESCRIPTION("NFS file locking service version " LOCKD_VERSION ".");
-  MODULE_PARM(nlm_grace_period, "10-240l");
-  MODULE_PARM(nlm_timeout, "3-20l");
-#endif
+
+EXPORT_NO_SYMBOLS;
+MODULE_AUTHOR("Olaf Kirch <okir@monad.swb.de>");
+MODULE_DESCRIPTION("NFS file locking service version " LOCKD_VERSION ".");
+MODULE_PARM(nlm_grace_period, "10-240l");
+MODULE_PARM(nlm_timeout, "3-20l");
+
 int
 init_module(void)
 {
 	/* Init the static variables */
-	nlmsvc_sema = MUTEX;
+	init_MUTEX(&nlmsvc_sema);
 	nlmsvc_users = 0;
 	nlmsvc_pid = 0;
-	lockd_exit = NULL;
-	nlmxdr_init();
 	return 0;
 }
 
@@ -344,7 +342,7 @@ static struct svc_version	nlmsvc_version1 = {
 static struct svc_version	nlmsvc_version3 = {
 	3, 24, nlmsvc_procedures, NULL
 };
-#ifdef CONFIG_NFSD_NFS3
+#ifdef CONFIG_LOCKD_V4
 static struct svc_version	nlmsvc_version4 = {
 	4, 24, nlmsvc_procedures4, NULL
 };
@@ -354,7 +352,7 @@ static struct svc_version *	nlmsvc_version[] = {
 	&nlmsvc_version1,
 	NULL,
 	&nlmsvc_version3,
-#ifdef CONFIG_NFSD_NFS3
+#ifdef CONFIG_LOCKD_V4
 	&nlmsvc_version4,
 #endif
 };

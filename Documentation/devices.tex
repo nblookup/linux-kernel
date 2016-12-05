@@ -254,9 +254,13 @@ Your cooperation is appreciated.
 \major{86}{}{char }{SCSI media changer}
 \major{87}{}{char }{Sony Control-A1 stereo control bus}
 \major{88}{}{char }{COMX synchronous serial card}
+\major{  }{}{block}{Seventh IDE hard disk/CD-ROM interface}
 \major{89}{}{char }{I$^2$C bus interface}
+\major{  }{}{block}{Eighth IDE hard disk/CD-ROM interface}
 \major{90}{}{char }{Memory Technology Device (RAM, ROM, Flash)}
+\major{  }{}{block}{Ninth IDE hard disk/CD-ROM interface}
 \major{91}{}{char }{CAN-Bus controller}
+\major{  }{}{block}{Tenth IDE hard disk/CD-ROM interface}
 \major{92}{}{char }{Reserved for ith Kommunikationstechnik MIC ISDN card}
 \major{93}{}{char }{IBM Smart Capture Card frame grabber}
 \major{94}{}{char }{miroVIDEO DC10/30 capture/playback device}
@@ -922,10 +926,10 @@ disk (same as SCSI.)
 \begin{devicelist}
 \major{29}{}{char }{Universal frame buffer}
 	\minor{0}{/dev/fb0}{First frame buffer}
-	\minor{32}{/dev/fb1}{Second frame buffer}
-	\minor{64}{/dev/fb2}{Third frame buffer}
+	\minor{1}{/dev/fb1}{Second frame buffer}
+	\minor{2}{/dev/fb2}{Third frame buffer}
 	\minordots
-	\minor{224}{/dev/fb7}{Eighth frame buffer}
+	\minor{31}{/dev/fb31}{32nd frame buffer}
 \end{devicelist}
 
 \noindent
@@ -1746,11 +1750,31 @@ on {\url http://home.pages.de/~videotext/\/}.
 \end{devicelist}
 
 \begin{devicelist}
+\major{  }{}{block}{Seventh IDE hard disk/CD-ROM interface}
+        \minor{0}{/dev/hdm}{Master: whole disk (or CD-ROM)}
+        \minor{64}{/dev/hdn}{Slave: whole disk (or CD-ROM)}
+\end{devicelist}
+
+\noindent
+Partitions are handled the same way as for the first interface (see
+major number 3).
+
+\begin{devicelist}
 \major{89}{}{char }{I$^2$C bus interface}
 	\minor{0}{/dev/i2c0}{First I$^2$C adapter}
 	\minor{1}{/dev/i2c1}{Second I$^2$C adapter}
 	\minordots
 \end{devicelist}
+
+\begin{devicelist}
+\major{  }{}{block}{Eighth IDE hard disk/CD-ROM interface}
+        \minor{0}{/dev/hdo}{Master: whole disk (or CD-ROM)}
+        \minor{64}{/dev/hdp}{Slave: whole disk (or CD-ROM)}
+\end{devicelist}
+
+\noindent
+Partitions are handled the same way as for the first interface (see
+major number 3).
 
 \begin{devicelist}
 \major{90}{}{char }{Memory Technology Device (RAM, ROM, Flash)}
@@ -1762,11 +1786,31 @@ on {\url http://home.pages.de/~videotext/\/}.
 \end{devicelist}
 
 \begin{devicelist}
+\major{  }{}{block}{Ninth IDE hard disk/CD-ROM interface}
+	\minor{0}{/dev/hdq}{Master: whole disk (or CD-ROM)}
+	\minor{64}{/dev/hdr}{Slave: whole disk (or CD-ROM)}
+\end{devicelist}
+
+\noindent
+Partitions are handled the same way as for the first interface (see
+major number 3).
+
+\begin{devicelist}
 \major{91}{}{char }{CAN-Bus controller}
 	\minor{0}{/dev/can0}{First CAN-Bus controller}
 	\minor{1}{/dev/can1}{Second CAN-Bus controller}
 	\minordots
 \end{devicelist}
+
+\begin{devicelist}
+\major{  }{}{block}{Tenth IDE hard disk/CD-ROM interface}
+	\minor{0}{/dev/hds}{Master: whole disk (or CD-ROM)}
+	\minor{64}{/dev/hdt}{Slave: whole disk (or CD-ROM)}
+\end{devicelist}
+
+\noindent
+Partitions are handled the same way as for the first interface (see
+major number 3).
 
 \begin{devicelist}
 \major{92}{}{char }{Reserved for ith Kommunikationstechnik MIC ISDN card}

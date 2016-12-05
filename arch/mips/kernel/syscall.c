@@ -1,10 +1,10 @@
-/* $Id: syscall.c,v 1.10 1998/08/20 14:38:40 ralf Exp $
+/* $Id: syscall.c,v 1.13 2000/02/04 07:40:23 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995 - 1998 by Ralf Baechle
+ * Copyright (C) 1995 - 1999 by Ralf Baechle
  *
  * TODO:  Implement the compatibility syscalls.
  *        Don't waste that much memory for empty entries in the syscall
@@ -55,65 +55,46 @@ out:
 	return res;
 }
 
-asmlinkage unsigned long sys_mmap(unsigned long addr, size_t len, int prot,
-                                  int flags, int fd, off_t offset)
+/* common code for old and new mmaps */
+static inline long
+do_mmap2(unsigned long addr, unsigned long len, unsigned long prot,
+        unsigned long flags, unsigned long fd, unsigned long pgoff)
 {
+	int error = -EBADF;
 	struct file * file = NULL;
-	unsigned long error = -EFAULT;
 
-	lock_kernel();
+	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	if (!(flags & MAP_ANONYMOUS)) {
-		error = -EBADF;
 		file = fget(fd);
 		if (!file)
 			goto out;
 	}
-        flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
-        error = do_mmap(file, addr, len, prot, flags, offset);
-        if (file)
-                fput(file);
-out:
+
+	down(&current->mm->mmap_sem);
+	lock_kernel();
+
+	error = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
+
 	unlock_kernel();
+	up(&current->mm->mmap_sem);
+
+	if (file)
+		fput(file);
+out:
 	return error;
 }
 
-asmlinkage int sys_idle(void)
+asmlinkage unsigned long old_mmap(unsigned long addr, size_t len, int prot,
+                                  int flags, int fd, off_t offset)
 {
-	unsigned long start_idle = 0;
-        int ret = -EPERM;
+	return do_mmap2(addr, len, prot, flags, fd, offset >> PAGE_SHIFT);
+}
 
-	lock_kernel();
-	if (current->pid != 0)
-		goto out;
-	/* endless idle loop with no priority at all */
-	current->priority = 0;
-	current->counter = 0;
-	for (;;) {
-		/*
-		 * R4[36]00 have wait, R4[04]00 don't.
-		 * FIXME: We should save power by reducing the clock where
-		 *        possible.  Thiss will cut down the power consuption
-		 *        of R4200 systems to about 1/16th of normal, the
-		 *        same for logic clocked with the processor generated
-		 *        clocks.
-		 */
-		if (!start_idle) {
-			check_pgt_cache();
-			start_idle = jiffies;
-		}
-		if (wait_available && !current->need_resched)
-			__asm__(".set\tmips3\n\t"
-				"wait\n\t"
-				".set\tmips0");
-		run_task_queue(&tq_scheduler);
-		if (current->need_resched)
-			start_idle = 0;
-		schedule();
-	}
-	ret = 0;
-out:
-	unlock_kernel();
-	return ret;
+asmlinkage long
+sys_mmap2(unsigned long addr, unsigned long len, unsigned long prot,
+          unsigned long flags, unsigned long fd, unsigned long pgoff)
+{
+	return do_mmap2(addr, len, prot, flags, fd, pgoff);
 }
 
 asmlinkage int sys_fork(struct pt_regs regs)
@@ -121,9 +102,7 @@ asmlinkage int sys_fork(struct pt_regs regs)
 	int res;
 
 	save_static(&regs);
-	lock_kernel();
 	res = do_fork(SIGCHLD, regs.regs[29], &regs);
-	unlock_kernel();
 	return res;
 }
 
@@ -134,13 +113,11 @@ asmlinkage int sys_clone(struct pt_regs regs)
 	int res;
 
 	save_static(&regs);
-	lock_kernel();
 	clone_flags = regs.regs[4];
 	newsp = regs.regs[5];
 	if (!newsp)
 		newsp = regs.regs[29];
 	res = do_fork(clone_flags, newsp, &regs);
-	unlock_kernel();
 	return res;
 }
 

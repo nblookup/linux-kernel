@@ -7,23 +7,42 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile.
 
-L_TARGET := filesystems.a
-L_OBJS    = $(join $(SUB_DIRS),$(SUB_DIRS:%=/%.o))
+FILESYSTEMS = $(join $(SUB_DIRS),$(SUB_DIRS:%=/%.o))
 O_TARGET := fs.o
 O_OBJS    = open.o read_write.o devices.o file_table.o buffer.o \
 		super.o  block_dev.o stat.o exec.o pipe.o namei.o fcntl.o \
 		ioctl.o readdir.o select.o fifo.o locks.o filesystems.o \
-		dcache.o inode.o attr.o bad_inode.o $(BINFMTS) 
+		dcache.o inode.o attr.o bad_inode.o file.o iobuf.o \
+		$(BINFMTS) $(FILESYSTEMS)
 
 MOD_LIST_NAME := FS_MODULES
 ALL_SUB_DIRS = coda minix ext2 fat msdos vfat proc isofs nfs umsdos ntfs \
-		hpfs sysv smbfs ncpfs ufs affs romfs autofs hfs lockd nfsd \
-		nls devpts adfs qnx4
+		hpfs sysv smbfs ncpfs ufs efs affs romfs autofs hfs lockd \
+		nfsd nls devpts devfs adfs partitions qnx4 udf bfs cramfs \
+		openpromfs autofs4
+
+SUB_DIRS := partitions
 
 ifeq ($(CONFIG_QUOTA),y)
 O_OBJS += dquot.o
 else
 O_OBJS += noquot.o
+endif
+
+ifeq ($(CONFIG_EXT2_FS),y)
+SUB_DIRS += ext2
+else
+  ifeq ($(CONFIG_EXT2_FS),m)
+  MOD_SUB_DIRS += ext2
+  endif
+endif
+
+ifeq ($(CONFIG_CRAMFS),y)
+SUB_DIRS += cramfs
+else
+  ifeq ($(CONFIG_CRAMFS),m)
+  MOD_SUB_DIRS += cramfs
+  endif
 endif
 
 ifeq ($(CONFIG_CODA_FS),y)
@@ -39,14 +58,6 @@ SUB_DIRS += minix
 else
   ifeq ($(CONFIG_MINIX_FS),m)
   MOD_SUB_DIRS += minix
-  endif
-endif
-
-ifeq ($(CONFIG_EXT2_FS),y)
-SUB_DIRS += ext2
-else
-  ifeq ($(CONFIG_EXT2_FS),m)
-  MOD_SUB_DIRS += ext2
   endif
 endif
 
@@ -76,18 +87,26 @@ endif
 
 ifdef CONFIG_PROC_FS
 SUB_DIRS += proc
-ifeq ($(CONFIG_SUN_OPENPROMFS),m)
-MOD_IN_SUB_DIRS += proc
-MOD_TO_LIST += openpromfs.o
-endif
 endif
 
+ifeq ($(CONFIG_BFS_FS),y)
+SUB_DIRS += bfs
+else
+  ifeq ($(CONFIG_BFS_FS),m)
+  MOD_SUB_DIRS += bfs
+  endif
+endif
+ 
 ifeq ($(CONFIG_ISO9660_FS),y)
 SUB_DIRS += isofs
 else
   ifeq ($(CONFIG_ISO9660_FS),m)
   MOD_SUB_DIRS += isofs
   endif
+endif
+
+ifdef CONFIG_DEVFS_FS
+SUB_DIRS += devfs
 endif
 
 ifeq ($(CONFIG_HFS_FS),y)
@@ -191,6 +210,14 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_EFS_FS),y)
+SUB_DIRS += efs
+else
+  ifeq ($(CONFIG_EFS_FS),m)
+  MOD_SUB_DIRS += efs
+  endif
+endif
+
 ifeq ($(CONFIG_AFFS_FS),y)
 SUB_DIRS += affs
 else
@@ -215,11 +242,27 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_UDF_FS),y)
+SUB_DIRS += udf
+else
+  ifeq ($(CONFIG_UDF_FS),m)
+  MOD_SUB_DIRS += udf
+  endif
+endif
+
 ifeq ($(CONFIG_AUTOFS_FS),y)
 SUB_DIRS += autofs
 else
   ifeq ($(CONFIG_AUTOFS_FS),m)
   MOD_SUB_DIRS += autofs
+  endif
+endif
+
+ifeq ($(CONFIG_AUTOFS4_FS),y)
+SUB_DIRS += autofs4
+else
+  ifeq ($(CONFIG_AUTOFS4_FS),m)
+  MOD_SUB_DIRS += autofs4
   endif
 endif
 
@@ -239,11 +282,11 @@ else
   endif
 endif
 
-ifeq ($(CONFIG_BINFMT_ELF),y)
-BINFMTS += binfmt_elf.o
+ifeq ($(CONFIG_SUN_OPENPROMFS),y)
+SUB_DIRS += openpromfs
 else
-  ifeq ($(CONFIG_BINFMT_ELF),m)
-  M_OBJS += binfmt_elf.o
+  ifeq ($(CONFIG_SUN_OPENPROMFS),m)
+  MOD_SUB_DIRS += openpromfs
   endif
 endif
 
@@ -255,14 +298,6 @@ else
   endif
 endif
 
-ifeq ($(CONFIG_BINFMT_JAVA),y)
-BINFMTS += binfmt_java.o
-else
-  ifeq ($(CONFIG_BINFMT_JAVA),m)
-  M_OBJS += binfmt_java.o
-  endif
-endif
-
 ifeq ($(CONFIG_BINFMT_EM86),y)
 BINFMTS += binfmt_em86.o
 else
@@ -270,7 +305,6 @@ else
   M_OBJS += binfmt_em86.o
   endif
 endif
-
 
 ifeq ($(CONFIG_BINFMT_MISC),y)
 BINFMTS += binfmt_misc.o
@@ -282,5 +316,13 @@ endif
 
 # binfmt_script is always there
 BINFMTS += binfmt_script.o
+
+ifeq ($(CONFIG_BINFMT_ELF),y)
+BINFMTS += binfmt_elf.o
+else
+  ifeq ($(CONFIG_BINFMT_ELF),m)
+  M_OBJS += binfmt_elf.o
+  endif
+endif
 
 include $(TOPDIR)/Rules.make

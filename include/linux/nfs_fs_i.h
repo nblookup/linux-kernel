@@ -9,11 +9,10 @@
  */
 struct nfs_inode_info {
 	/*
-	 * This is a place holder so named pipes on NFS filesystems
-	 * work (more or less correctly). This must be first in the
-	 * struct because the data is really accessed via inode->u.pipe_i.
+	 * The 64bit 'inode number'
 	 */
-	struct pipe_inode_info	pipeinfo;
+	__u32 fsid;
+	__u32 fileid;
 
 	/*
 	 * Various flags
@@ -47,12 +46,16 @@ struct nfs_inode_info {
 	 * pages.
 	 */
 	struct nfs_wreq *	writeback;
+
+	/* Readdir caching information. */
+	void *cookies;
+	u32 direof;
 };
 
 /*
  * Legal inode flag values
  */
-#define NFS_INO_REVALIDATE	0x0001		/* revalidating attrs */
+#define NFS_INO_REVALIDATING	0x0001		/* revalidating attrs */
 #define NFS_IS_SNAPSHOT		0x0010		/* a snapshot file */
 
 /*

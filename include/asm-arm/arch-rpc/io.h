@@ -9,11 +9,7 @@
 #ifndef __ASM_ARM_ARCH_IO_H
 #define __ASM_ARM_ARCH_IO_H
 
-/*
- * This architecture does not require any delayed IO, and
- * has the constant-optimised IO
- */
-#undef	ARCH_IO_DELAY
+#define IO_SPACE_LIMIT 0xffffffff
 
 /*
  * We use two different types of addressing - PC style addresses, and ARM
@@ -25,21 +21,45 @@
 #define __PORT_PCIO(x)	(!((x) & 0x80000000))
 
 /*
- * Dynamic IO functions - let the compiler
- * optimize the expressions
+ * Dynamic IO functions.
  */
-#define DECLARE_DYN_OUT(fnsuffix,instr)						\
-extern __inline__ void __out##fnsuffix (unsigned int value, unsigned int port)	\
-{										\
-	unsigned long temp;							\
-	__asm__ __volatile__(							\
-	"tst	%2, #0x80000000\n\t"						\
-	"mov	%0, %4\n\t"							\
-	"addeq	%0, %0, %3\n\t"							\
-	"str" ##instr## "	%1, [%0, %2, lsl #2]	@ out"###fnsuffix	\
-	: "=&r" (temp)								\
-	: "r" (value), "r" (port), "Ir" (PCIO_BASE - IO_BASE), "Ir" (IO_BASE)	\
-	: "cc");								\
+extern __inline__ void __outb (unsigned int value, unsigned int port)
+{
+	unsigned long temp;
+	__asm__ __volatile__(
+	"tst	%2, #0x80000000\n\t"
+	"mov	%0, %4\n\t"
+	"addeq	%0, %0, %3\n\t"
+	"strb	%1, [%0, %2, lsl #2]	@ outb"
+	: "=&r" (temp)
+	: "r" (value), "r" (port), "Ir" (PCIO_BASE - IO_BASE), "Ir" (IO_BASE)
+	: "cc");
+}
+
+extern __inline__ void __outw (unsigned int value, unsigned int port)
+{
+	unsigned long temp;
+	__asm__ __volatile__(
+	"tst	%2, #0x80000000\n\t"
+	"mov	%0, %4\n\t"
+	"addeq	%0, %0, %3\n\t"
+	"str	%1, [%0, %2, lsl #2]	@ outw"
+	: "=&r" (temp)
+	: "r" (value|value<<16), "r" (port), "Ir" (PCIO_BASE - IO_BASE), "Ir" (IO_BASE)
+	: "cc");
+}
+
+extern __inline__ void __outl (unsigned int value, unsigned int port)
+{
+	unsigned long temp;
+	__asm__ __volatile__(
+	"tst	%2, #0x80000000\n\t"
+	"mov	%0, %4\n\t"
+	"addeq	%0, %0, %3\n\t"
+	"str	%1, [%0, %2, lsl #2]	@ outl"
+	: "=&r" (temp)
+	: "r" (value), "r" (port), "Ir" (PCIO_BASE - IO_BASE), "Ir" (IO_BASE)
+	: "cc");
 }
 
 #define DECLARE_DYN_IN(sz,fnsuffix,instr)					\
@@ -66,15 +86,13 @@ extern __inline__ unsigned int __ioaddr (unsigned int port)			\
 }
 
 #define DECLARE_IO(sz,fnsuffix,instr)	\
-	DECLARE_DYN_OUT(fnsuffix,instr)	\
 	DECLARE_DYN_IN(sz,fnsuffix,instr)
 
 DECLARE_IO(char,b,"b")
 DECLARE_IO(short,w,"")
-DECLARE_IO(long,l,"")
+DECLARE_IO(int,l,"")
 
 #undef DECLARE_IO
-#undef DECLARE_DYN_OUT
 #undef DECLARE_DYN_IN
 
 /*
@@ -165,6 +183,14 @@ DECLARE_IO(long,l,"")
 
 #define __ioaddrc(port)								\
 	(__PORT_PCIO((port)) ? PCIO_BASE + ((port) << 2) : IO_BASE + ((port) << 2))
+
+#define inb(p)	 	(__builtin_constant_p((p)) ? __inbc(p)    : __inb(p))
+#define inw(p)	 	(__builtin_constant_p((p)) ? __inwc(p)    : __inw(p))
+#define inl(p)	 	(__builtin_constant_p((p)) ? __inlc(p)    : __inl(p))
+#define outb(v,p)	(__builtin_constant_p((p)) ? __outbc(v,p) : __outb(v,p))
+#define outw(v,p)	(__builtin_constant_p((p)) ? __outwc(v,p) : __outw(v,p))
+#define outl(v,p)	(__builtin_constant_p((p)) ? __outlc(v,p) : __outl(v,p))
+#define __ioaddr(p)	(__builtin_constant_p((p)) ? __ioaddr(p)  : __ioaddrc(p))
 
 /*
  * Translated address IO functions

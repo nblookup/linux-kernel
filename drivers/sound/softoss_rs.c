@@ -13,12 +13,7 @@
  * Version 2 (June 1991). See the "COPYING" file distributed with this software
  * for more info.
  */
-#include <linux/config.h>
-
-
 #include "sound_config.h"
-
-#ifdef CONFIG_SOFTOSS
 #include "softoss.h"
 
 void softsynth_resample_loop(short *buf, int loops)
@@ -130,4 +125,3 @@ void softsynth_resample_loop(short *buf, int loops)
 		}
 	}			/* Mix one sample */
 }
-#endif

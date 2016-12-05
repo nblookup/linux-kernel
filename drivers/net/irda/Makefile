@@ -20,11 +20,19 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_IRPORT_SIR),y)
+LX_OBJS += irport.o
+else
+  ifeq ($(CONFIG_IRPORT_SIR),m)
+  MX_OBJS += irport.o
+  endif
+endif
+
 ifeq ($(CONFIG_NSC_FIR),y)
-L_OBJS += pc87108.o
+L_OBJS += nsc-ircc.o
 else
   ifeq ($(CONFIG_NSC_FIR),m)
-  M_OBJS += pc87108.o
+  M_OBJS += nsc-ircc.o
   endif
 endif
 
@@ -36,11 +44,37 @@ else
   endif
 endif
 
-ifeq ($(CONFIG_SHARP_FIR),y)
-L_OBJS += uircc.o irport.o
+ifeq ($(CONFIG_TOSHIBA_FIR),y)
+L_OBJS += toshoboe.o
 else
-  ifeq ($(CONFIG_SHARP_FIR),m)
-  M_OBJS += uircc.o irport.o
+  ifeq ($(CONFIG_TOSHIBA_FIR),m)
+  M_OBJS += toshoboe.o
+  endif
+endif
+
+ifeq ($(CONFIG_TOSHIBA_FIR),y)
+L_OBJS += toshoboe.o
+else
+  ifeq ($(CONFIG_TOSHIBA_FIR),m)
+  M_OBJS += toshoboe.o
+  endif
+endif
+
+ifeq ($(CONFIG_TOSHIBA_FIR),y)
+L_OBJS += toshoboe.o
+else
+  ifeq ($(CONFIG_TOSHIBA_FIR),m)
+  M_OBJS += toshoboe.o
+  endif
+endif
+
+ifeq ($(CONFIG_SMC_IRCC_FIR),y)
+L_OBJS += smc-ircc.o
+LX_OBJS += irport.o
+else
+  ifeq ($(CONFIG_SMC_IRCC_FIR),m)
+  M_OBJS += smc-ircc.o
+  MX_OBJS += irport.o
   endif
 endif
 
@@ -73,6 +107,22 @@ L_OBJS += girbil.o
 else
   ifeq ($(CONFIG_GIRBIL_DONGLE),m)
   M_OBJS += girbil.o
+  endif
+endif
+
+ifeq ($(CONFIG_LITELINK_DONGLE),y)
+L_OBJS += litelink.o
+else
+  ifeq ($(CONFIG_LITELINK_DONGLE),m)
+  M_OBJS += litelink.o
+  endif
+endif
+
+ifeq ($(CONFIG_OLD_BELKIN_DONGLE),y)
+L_OBJS += old_belkin.o
+else
+  ifeq ($(CONFIG_OLD_BELKIN_DONGLE),m)
+  M_OBJS += old_belkin.o
   endif
 endif
 

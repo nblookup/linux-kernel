@@ -34,6 +34,7 @@
 
 /* Eventually we may need a look-up table, but this works for now.
 */
+#define LFS	48
 #define LFD	50
 #define LFDU	51
 #define STFD	54
@@ -63,7 +64,7 @@ Soft_emulate_8xx(struct pt_regs *regs)
 	disp = instword & 0xffff;
 
 	ea = (uint *)(regs->gpr[idxreg] + disp);
-	ip = (uint *)&current->tss.fpr[flreg];
+	ip = (uint *)&current->thread.fpr[flreg];
 
 	switch ( inst )
 	{
@@ -83,6 +84,12 @@ Soft_emulate_8xx(struct pt_regs *regs)
 		else
 			regs->gpr[idxreg] = (uint)ea;
 		break;
+	case LFS:
+		sdisp = (instword & 0xffff);
+		ea = (uint *)(regs->gpr[idxreg] + sdisp);
+		if (copy_from_user(ip, ea, sizeof(float)))
+			retval = EFAULT;
+		break;
 	case STFD:
 		/* this is a 16 bit quantity that is sign extended
 		 * so use a signed short here -- Cort
@@ -101,7 +108,7 @@ Soft_emulate_8xx(struct pt_regs *regs)
 		break;
 	case FMR:
 		/* assume this is a fp move -- Cort */
-		memcpy( ip, &current->tss.fpr[(instword>>11)&0x1f],
+		memcpy( ip, &current->thread.fpr[(instword>>11)&0x1f],
 			sizeof(double) );
 		break;
 	default:

@@ -16,8 +16,8 @@ trivial patch so apply some common sense.
 	SMC etherpower for that.)
 
 3.	Make sure your changes compile correctly in multiple
-	configurations. In paticular check changes work both as a module
-	and built into the kernel.
+	configurations. In particular check that changes work both as a
+	module and built into the kernel.
 
 4.	When you are happy with a change make it generally available for
 	testing and await feedback.
@@ -28,8 +28,8 @@ trivial patch so apply some common sense.
 	and variable names.  These aren't as silly as they seem. One
 	job the maintainers (and especially Linus) do is to keep things
 	looking the same. Sometimes this means that the clever hack in
-	your driver to get around a problem actual needs to become a
-	generalized kernel feature ready for next time. See 
+	your driver to get around a problem actually needs to become a
+	generalized kernel feature ready for next time. See
 	Documentation/CodingStyle for guidance here.
 
 	PLEASE try to include any credit lines you want added with the
@@ -49,8 +49,8 @@ trivial patch so apply some common sense.
 
 Maintainers List (try to look for most precise areas first)
 
-Note: For the hard of thinking, this list is meant to remain in Alphabetical
-order. If you could add yourselves to it in Alphabetical order that would
+Note: For the hard of thinking, this list is meant to remain in alphabetical
+order. If you could add yourselves to it in alphabetical order that would
 so much easier [Ed]
 
 P: Person
@@ -63,7 +63,7 @@ S: Status, one of the following:
 	Maintained:	Someone actually looks after it.
 	Odd Fixes:	It has a maintainer but they don't have time to do
 			much other than throw the odd patch in. See below..
-	Orphan:		No current maintainer [but maybe you could take the 
+	Orphan:		No current maintainer [but maybe you could take the
 			role as you write your new code].
 	Obsolete:	Old code. Something tagged obsolete generally means
 			it has been replaced by a better system and you
@@ -89,10 +89,16 @@ S:	Maintained
 
 8390 NETWORK DRIVERS [WD80x3/SMC-ELITE, SMC-ULTRA, NE2000, 3C503, etc.]
 P:	Paul Gortmaker
-M:	gpg109@rsphy1.anu.edu.au
+M:	p_gortmaker@yahoo.com
 L:	linux-net@vger.rutgers.edu
 S:	Maintained
-W:	http://rsphy1.anu.edu.au/~gpg109/ne2000.html
+
+ACPI
+P:	Andrew Henroid
+M:	andy_henroid@yahoo.com
+L:	acpi@phobos.fs.tum.de
+W:	http://phobos.fs.tum.de/acpi/index.html
+S:	Maintained
 
 AD1816 SOUND DRIVER
 P:	Thorsten Knabe
@@ -104,8 +110,9 @@ S:	Maintained
 
 ADVANSYS SCSI DRIVER
 P:	Bob Frey
-M:	Bob Frey <bobf@advansys.com>
-W:	http://www.advansys.com/linux
+M:	linux@advansys.com
+W:	http://www.advansys.com/linux.html
+L:	linux-scsi@vger.rutgers.edu
 S:	Maintained
 
 AEDSP16 DRIVER
@@ -115,26 +122,21 @@ S:	Maintained
 
 AHA152X SCSI DRIVER
 P:	Juergen E. Fischer
-M:	Juergen Fischer <fischer@et-inf.fho-emden.de>
+M:	Juergen Fischer <fischer@norbit.de>
 L:	linux-scsi@vger.rutgers.edu
 S:	Maintained
 
 APM DRIVER
 P:	Stephen Rothwell
-M:	Stephen.Rothwell@canb.auug.org.au
+M:	apm@linuxcare.com.au
 L:	linux-laptop@vger.rutgers.edu
-S:	Maintained
+W:	http://linuxcare.com.au/apm/
+S:	Supported
 
 APPLETALK NETWORK LAYER
 P:	Jay Schulist
-M:	Jay.Schulist@spacs.k12.wi.us
+M:	jschlst@turbolinux.com
 L:	linux-atalk@netspace.org
-S:	Maintained
-
-ARPD SUPPORT
-P:	Jonathan Layes
-M:	layes@loran.com
-L:	linux-net@vger.rutgers.edu
 S:	Maintained
 
 ARM MFM AND FLOPPY DRIVERS
@@ -144,10 +146,15 @@ S:	Maintained
 
 ARM PORT
 P:	Russell King
-M:	linux@arm.uk.linux.org
+M:	linux@arm.linux.org.uk
 L:	linux-arm@vger.rutgers.edu
-L:	arm-linux@tardis.ed.ac.uk
-W:	http://www.arm.uk.linux.org/~rmk/armlinux.html
+W:	http://www.arm.linux.org.uk/
+S:	Maintained
+
+ARPD SUPPORT
+P:	Jonathan Layes
+M:	layes@loran.com
+L:	linux-net@vger.rutgers.edu
 S:	Maintained
 
 AX.25 NETWORK LAYER
@@ -163,12 +170,47 @@ L:	linux-hams@vger.rutgers.edu
 W:	http://www.ife.ee.ethz.ch/~sailer/ham/ham.html
 S:	Maintained
 
+BERKSHIRE PRODUCTS PC WATCHDOG DRIVER
+P:	Kenji Hollis
+M:	kenji@bitgate.com
+W:	http://ftp.bitgate.com/pcwd/
+S:	Maintained
+
+BFS FILE SYSTEM
+P:	Tigran A. Aivazian
+M:	tigran@ocston.org
+L:	linux-kernel@vger.rutgers.edu
+W:	http://www.ocston.org/~tigran/patches/bfs
+S:	Maintained
+
 BUSLOGIC SCSI DRIVER
 P:	Leonard N. Zubkoff
 M:	Leonard N. Zubkoff <lnz@dandelion.com>
 L:	linux-scsi@vger.rutgers.edu
 W:	http://www.dandelion.com/Linux/
 S:	Maintained
+
+CIRRUS LOGIC GENERIC FBDEV DRIVER
+P:	Jeff Garzik
+M:	jgarzik@mandrakesoft.com
+L:	linux-fbdev@vuser.vu.union.edu
+S:	Maintained
+
+COMPAQ SMART2 RAID DRIVER
+P:	Charles White	
+M:	Charles White <arrays@compaq.com>
+L:	compaqandlinux@yps.org	
+S:	Maintained
+
+COMPUTONE INTELLIPORT MULTIPORT CARD
+P:     Doug McNash
+P:     Michael H. Warfield
+M:     Doug McNash <dmcnash@computone.com>
+M:     Michael H. Warfield <mhw@wittsend.com>
+W:     http://www.computone.com/
+W:     http://www.wittsend.com/computone.html
+L:     linux-computone@lazuli.wittsend.com
+S:     Supported
 
 CONFIGURE, MENUCONFIG, XCONFIG
 P:	Michael Elizabeth Chastain
@@ -192,9 +234,22 @@ P:	John A. Martin
 M:	jam@acm.org
 S:	Maintained
 
+CYBERPRO FB DRIVER
+P:	Russell King
+M:	linux@arm.linux.org.uk
+W:	http://www.arm.linux.org.uk/
+S:	Maintained
+
+CYCLADES 2X SYNC CARD DRIVER
+P:	Arnaldo Carvalho de Melo
+M:	acme@conectiva.com.br
+W:	http://www.conectiva.com.br/~acme
+L:	cycsyn-devel@bazar.conectiva.com.br
+S:	Maintained
+
 CYCLADES ASYNC MUX DRIVER
 P:	Ivan Passos
-M:	Ivan Passos <ivan@cyclades.com>
+M:	ivan@cyclades.com
 W:	http://www.cyclades.com/
 S:	Supported
 
@@ -215,9 +270,8 @@ S:	Maintained
 DECnet NETWORK LAYER
 P:	Steven Whitehouse
 M:	SteveW@ACM.org
-W:	http://www.sucs.swan.ac.uk/~rohan/
-W:	http://www-sigproc.eng.cam.ac.uk/~sjw44/
-L:	netdev@roxanne.nuclecu.unam.mx
+W:	http://www.sucs.swan.ac.uk/~rohan/DECnet/index.html
+L:	linux-decnet@dreamtime.org
 S:	Maintained
 
 DEVICE NUMBER REGISTRY
@@ -226,10 +280,16 @@ M:	hpa@zytor.com
 L:	linux-kernel@vger.rutgers.edu
 S:	Maintained
 
+DEVICE FILESYSTEM
+P:	Richard Gooch
+M:	rgooch@atnf.csiro.au
+L:	linux-kernel@vger.rutgers.edu
+S:	Maintained
+
 DIGI INTL. EPCA DRIVER
-P:      Daniel Taylor
+P:	 Chad Schwartz
 M:      support@dgii.com
-M:      danielt@dgii.com
+M:      chads@dgii.com
 L:      digilnux@dgii.com
 S:      Maintained
 
@@ -274,6 +334,13 @@ ETHEREXPRESS-16 NETWORK DRIVER
 P:	Philip Blundell
 M:	Philip.Blundell@pobox.com
 L:	linux-net@vger.rutgers.edu
+S:	Maintained
+
+ETHERNET BRIDGE
+P:	Lennert Buytenhek
+M:	buytenh@openrock.net
+L:	bridge@openrock.net
+W:	http://openrock.net/bridge
 S:	Maintained
 
 ETHERTEAM 16I DRIVER
@@ -334,7 +401,7 @@ S:	Maintained
 
 HFS FILESYSTEM
 P:      Adrian Sun
-M:      asun@u.washington.edu
+M:      asun@cobaltnet.com
 L:      linux-kernel@vger.rutgers.edu
 S:      Maintained
 
@@ -344,6 +411,13 @@ M:	oe1kib@oe1kib.ampr.org
 L:	linux-hams@vger.rutgers.edu
 S:	Maintained
 
+LOGICAL VOLUME MANAGER
+P:     Heinz Mauelshagen
+M:     linux-LVM@EZ-Darmstadt.Telekom.de
+L:     linux-LVM@msede.com
+W:     http://linux.msede.com/lvm
+S:     Maintained 
+
 HIPPI
 P:	Jes Sorensen
 M:	Jes.Sorensen@cern.ch
@@ -352,7 +426,28 @@ S:	Maintained
 
 HP100:	Driver for HP 10/100 Mbit/s Voice Grade Network Adapter Series
 P:	Jaroslav Kysela
-M:	perex@jcu.cz
+M:	perex@suse.cz
+S:	Maintained
+
+HPFS FILESYSTEM
+P:	Mikulas Patocka
+M:	mikulas@artax.karlin.mff.cuni.cz
+W:	http://artax.karlin.mff.cuni.cz/~mikulas/vyplody/hpfs/index-e.cgi
+S:	Maintained
+
+I2C DRIVERS
+P:	Simon Vogl
+M:	simon@tk.uni-linz.ac.at
+P:	Frodo Looijaard
+M:	frodol@dds.nl
+L:	linux-i2c@pelican.tk.uni-linz.ac.at
+W:	http://www.tk.uni-linz.ac.at/~simon/private/i2c
+S:	Maintained
+
+i386 BOOT CODE
+P:	Riley H. Williams
+M:	rhw@memalpha.cx
+L:	Linux-Kernel@vger.rutgers.edu
 S:	Maintained
 
 IBM MCA SCSI SUBSYSTEM DRIVER
@@ -361,16 +456,24 @@ M:	langa2@kph.uni-mainz.de
 W:	http://www.uni-mainz.de/~langm000/linux.html
 S:	Maintained
 
+IBM ServeRAID RAID DRIVER
+P:      Keith Mitchell
+M:      ipslinux@us.ibm.com
+W:      http://www.developer.ibm.com/welcome/netfinity/serveraid_beta.html
+S:      Supported 
+
 IDE DRIVER [GENERAL]
 P:	Andre Hedrick
-M:	hedrick@astro.dyer.vanderbilt.edu
+M:	andre@suse.com
 L:	linux-kernel@vger.rutgers.edu
-S:	Maintained
+W:	http://linux.kernel.org/pub/linux/kernel/people/hedrick/
+S:	Supported
 
-IDE/ATAPI CDROM DRIVER 
+IDE/ATAPI CDROM DRIVER
 P:	Jens Axboe
 M:	axboe@image.dk
 L:	linux-kernel@vger.rutgers.edu
+W:	http://www.kernel.dk
 S:	Maintained
 
 IDE/ATAPI TAPE/FLOPPY DRIVERS
@@ -379,37 +482,94 @@ M:	Gadi Oxman <gadio@netvision.net.il>
 L:	linux-kernel@vger.rutgers.edu
 S:	Maintained
 
-IP FIREWALL
-P:	Paul Russell
-M:	Paul.Russell@rustcorp.com.au
-W:	http://www.rustcorp.com/linux/ipchains
-S:	Supported
+IEEE 1394 SUBSYSTEM
+P:	Andreas Bombe
+M:	andreas.bombe@munich.netsurf.de
+L:	linux1394-devel@eclipt.uni-klu.ac.at
+W:	http://eclipt.uni-klu.ac.at/ieee1394
+S:	Maintained
+
+IEEE 1394 AIC5800 DRIVER
+P:	Emanuel Pirker
+M:	epirker@edu.uni-klu.ac.at
+L:	linux1394-devel@eclipt.uni-klu.ac.at
+W:	http://eclipt.uni-klu.ac.at/ieee1394
+S:	Maintained
+
+IEEE 1394 OHCI DRIVER
+P:	Sebastien Rougeaux
+M:	sebastien.rougeaux@anu.edu.au
+L:	linux1394-devel@eclipt.uni-klu.ac.at
+W:	http://eclipt.uni-klu.ac.at/ieee1394
+S:	Maintained
+
+IEEE 1394 PCILYNX DRIVER
+P:	Andreas Bombe
+M:	andreas.bombe@munich.netsurf.de
+L:	linux1394-devel@eclipt.uni-klu.ac.at
+W:	http://eclipt.uni-klu.ac.at/ieee1394
+S:	Maintained
+
+IEEE 1394 RAW I/O DRIVER
+P:	Andreas Bombe
+M:	andreas.bombe@munich.netsurf.de
+L:	linux1394-devel@eclipt.uni-klu.ac.at
+W:	http://eclipt.uni-klu.ac.at/ieee1394
+S:	Maintained
+
+INTEL APIC/IOAPIC, LOWLEVEL X86 SMP SUPPORT
+P:	Ingo Molnar
+M:	mingo@redhat.com
+S:	Maintained
+
+INTEL P6 MICROCODE UPDATE SUPPORT
+P:	Tigran Aivazian
+M:	tigran@sco.com
+S:	Maintained
+
+IP MASQUERADING:
+P:	Juanjo Ciarlante
+M:	jjciarla@raiz.uncu.edu.ar
+S:	Maintained
 
 IPX/SPX NETWORK LAYER
 P:	Jay Schulist
-M:	Jay Schulist <Jay.Schulist@spacs.k12.wi.us>
+M:	jschlst@turbolinux.com
 L:	linux-net@vger.rutgers.edu
 S:	Maintained
 
 IRDA SUBSYSTEM
 P:      Dag Brattli
 M:      Dag Brattli <dagb@cs.uit.no>
-L:      linux-irda@list.uit.no
+L:      linux-irda@pasta.cs.uit.no
 W:      http://www.cs.uit.no/linux-irda/
 S:      Maintained
 
-ISDN SUBSYSTEM
+ISAPNP
+P:	Jaroslav Kysela
+M:	perex@suse.cz
+S:	Maintained
+
+ISDN SUBSYSTEM (general)
 P:	Fritz Elfert
-M:	fritz@wuemaus.franken.de
-L:	isdn4linux@hub-wue.franken.de
+M:	fritz@isdn4linux.de
+L:	isdn4linux@listserv.isdn4linux.de
+W:	http://www.isdn4linux.de
+S:	Maintained
+
+ISDN SUBSYSTEM (card drivers)
+P:	Karsten Keil
+M:	kkeil@suse.de
+L:	isdn4linux@listserv.isdn4linux.de
+W:	http://www.isdn4linux.de
 S:	Maintained
 
 JOYSTICK DRIVER
 P:	Vojtech Pavlik
-M:	vojtech@ucw.cz
+M:	vojtech@suse.cz
 L:	linux-joystick@atrey.karlin.mff.cuni.cz
-W:	http://atrey.karlin.mff.cuni.cz/~vojtech/joystick/
-S:	Maintained
+W:	http://www.suse.cz/development/joystick/
+S:	Supported
 
 KERNEL AUTOMOUNTER (AUTOFS)
 P:	H. Peter Anvin
@@ -430,17 +590,24 @@ M:	eis@baty.hanse.de
 L:	linux-x25@vger.rutgers.edu
 S:	Maintained
 
-LINUX FOR POWERPC (PREP)
+LINUX FOR POWERPC
 P:	Cort Dougan
-M:	cort@cs.nmt.edu
-W:	http://linuxppc.cs.nmt.edu/
+M:	cort@fsmlabs.com
+W:	http://www.ppc.kernel.org/
 S:	Maintained
 
 LINUX FOR POWER MACINTOSH
 P:	Paul Mackerras
-M:	paulus@cs.anu.edu.au
-L:	linux-pmac@samba.anu.edu.au
+M:	paulus@linuxcare.com
+W:	http://www.linuxppc.org/
+L:	linuxppc-dev@lists.linuxppc.org
 S:	Maintained
+
+MAESTRO PCI SOUND DRIVER
+P:	Zach Brown
+M:	zab@redhat.com
+W:	http://people.redhat.com/zab/maestro/
+S:	Supported
 
 M68K
 P:	Jes Sorensen
@@ -450,11 +617,11 @@ L:	linux-m68k@lists.linux-m68k.org
 S:	Maintained
 
 M68K ON APPLE MACINTOSH
-P:	Alan Cox
-M:	Alan.Cox@linux.org
-W:	http://www.mac.linux-m68k.org/home.html
-L:	linux-mac68k@wave.lm.com
-S:	As time permits [Michael confess, you are the mac68k maintainer 8)]
+P:	Joshua Thompson
+M:	funaho@jurai.org
+W:	http://www.mac.linux-m68k.org/
+L:	linux-mac68k@mac.linux-m68k.org
+S:	Maintained
 
 M68K ON HP9000/300
 P:	Philip Blundell
@@ -471,14 +638,15 @@ S:	Maintained
 
 MISCELLANEOUS MCA-SUPPORT
 P:	David Weinehall
-M:	mcalinux@acc.umu.se (project MCA-team)
 M:	tao@acc.umu.se (personal)
+W:	http://www.acc.umu.se/~tao/
+W:	http://www.acc.umu.se/~mcalinux/
 L:	linux-kernel@vger.rutgers.edu
 S:	Maintained
 
 MODULE SUPPORT [GENERAL], KERNELD
-P:	Richard Henderson
-M:	richard@gnu.ai.mit.edu
+P:	Keith Owens
+M:	kaos@ocs.com.au
 L:	linux-kernel@vger.rutgers.edu
 S:	Maintained
 
@@ -508,8 +676,17 @@ M:	vl@kki.org
 L:	linware@sh.cvut.cz
 S:	Maintained
 
+NETFILTER
+P:	Rusty Russell
+M:	Rusty.Russell@rustcorp.com.au
+W:	http://www.samba.org/netfilter/
+W:	http://netfilter.kernelnotes.org
+W:	http://antarctica.penguincomputing.com/~netfilter/
+L:	netfilter@lists.samba.org
+S:	Supported
+
 NETROM NETWORK LAYER
-P:	Tomi Manninen 
+P:	Tomi Manninen
 M:	Tomi.Manninen@hut.fi
 L:	linux-hams@vger.rutgers.edu
 S:	Maintained
@@ -520,8 +697,8 @@ M:	pavel@atrey.karlin.mff.cuni.cz
 S:	Maintained
 
 NETWORKING [GENERAL]
-P:	Networking Teak
-M:	netdev@nuclecu.unam.mx
+P:	Networking Team
+M:	netdev@oss.sgi.com
 L:	linux-net@vger.rutgers.edu
 W:	http://www.uk.linux.org/NetNews.html (2.0 only)
 S:	Maintained
@@ -533,7 +710,7 @@ P:	Andi Kleen
 M:	ak@muc.de
 P:	Alexey Kuznetsov
 M:	kuznet@ms2.inr.ac.ru
-L:	netdev@roxanne.nuclecu.unam.mx
+L:	netdev@oss.sgi.com
 S:	Maintained
 
 NFS CLIENT
@@ -553,6 +730,22 @@ NON-IDE/NON-SCSI CDROM DRIVERS [GENERAL] (come on, crew - mark your responsibili
 P:	Eberhard Moenkeberg
 M:	emoenke@gwdg.de
 L:	linux-kernel@vger.rutgers.edu
+S:	Maintained
+
+NVIDIA (RIVA) FRAMEBUFFER DRIVER
+P:	Jeff Garzik
+M:	jgarzik@mandrakesoft.com
+L:	linux-nvidia@lists.surfsouth.com
+S:	Maintained
+
+OLYMPIC NETWORK DRIVER
+P:	Peter De Shrijver
+M:	p2@ace.ulyssis.sutdent.kuleuven.ac.be	
+P:	Mike Phillips
+M:	phillim@amtrak.com
+L:	linux-net@vger.rutgers.edu
+L:	linux-tr@emissary.aus-etc.com
+W:	http://www.linuxtr.net
 S:	Maintained
 
 OPL3-SA2, SA3, and SAx DRIVER
@@ -586,17 +779,24 @@ P:	Jens Maurer
 M:	jmaurer@cck.uni-kl.de
 S:	Maintained
 
-PCI SUBSYSTEM
-P:	Martin Mares
-M:	mj@atrey.karlin.mff.cuni.cz
-L:	linux-kernel@vger.rutgers.edu
-S:	Maintained
-
 PCI SOUND DRIVERS (ES1370, ES1371 and SONICVIBES)
 P:	Thomas Sailer
 M:	sailer@ife.ee.ethz.ch
 L:	linux-sound@vger.rutgers.edu
 W:	http://www.ife.ee.ethz.ch/~sailer/linux/pciaudio.html
+S:	Maintained
+
+PCI SUBSYSTEM
+P:	Martin Mares
+M:	mj@suse.cz
+L:	linux-kernel@vger.rutgers.edu
+S:	Supported
+
+PCMCIA SUBSYSTEM
+P:	David Hinds
+M:	dhinds@zen.stanford.edu
+L:	linux-kernel@vger.rutgers.edu
+W:	http://pcmcia.sourceforge.org
 S:	Maintained
 
 PCNET32 NETWORK DRIVER
@@ -619,9 +819,36 @@ M:	longyear@pobox.com
 L:	linux-ppp@vger.rutgers.edu
 S:	Maintained
 
+PROMISE DC4030 CACHING DISK CONTROLLER DRIVER
+P:	Peter Denison
+M:	promise@pnd-pc.demon.co.uk
+W:	http://www.pnd-pc.demon.co.uk/promise/
+S:	Maintained
+
+RAGE128 FRAMEBUFFER DISPLAY DRIVER
+P:	Brad Douglas
+M:	brad@neruo.com
+P:	Anthony Tong
+M:	atong@uiuc.edu
+L:	linux-fbdev@vcuser.vc.union.edu
+S:	Maintained
+
+RAYLINK/WEBGEAR 802.11 WIRELESS LAN DRIVER
+P:	Corey Thomas
+M:	corey@world.std.com
+L:	linux-kernel@vger.rutgers.edu
+S:	Maintained
+
+QNX4 FILESYSTEM
+P:	Anders Larsen
+M:	al@alarsen.net
+L:	linux-kernel@vger.rutgers.edu
+W:	http://www.alarsen.net/linux/qnx4fs/
+S:	Maintained
+
 REAL TIME CLOCK DRIVER
 P:	Paul Gortmaker
-M	gpg109@rsphy1.anu.edu.au
+M:	p_gortmaker@yahoo.com
 L:	linux-kernel@vger.rutgers.edu
 S:	Maintained
 
@@ -637,10 +864,23 @@ M:	pgmdsg@ibi.com
 L:	linux-kernel@vger.rutgers.edu
 S:	Maintained
 
+SA1100 SUPPORT
+P:	Nicolas Pitre
+M:	nico@cam.org
+L:	sa1100-linux@pa.dec.com
+S:	Maintained
+
 SBPCD CDROM DRIVER
 P:	Eberhard Moenkeberg
 M:	emoenke@gwdg.de
 L:	linux-kernel@vger.rutgers.edu
+S:	Maintained
+
+SCSI CDROM DRIVER
+P:	Jens Axboe
+M:	axboe@image.dk
+L:	linux-scsi@vger.rutgers.edu
+W:	http://www.kernel.dk
 S:	Maintained
 
 SCSI SG DRIVER
@@ -648,11 +888,6 @@ P:	Doug Gilbert
 M:	dgilbert@interlog.com
 L:	linux-scsi@vger.rutgers.edu
 W:	http://www.torque.net/sg
-S:	Maintained
-
-SCSI GENERIC
-L:	linux-scsi@vger.rutgers.edu
-M:	douglas.gilbert@rbcds.com
 S:	Maintained
 
 SCSI SUBSYSTEM
@@ -672,16 +907,28 @@ P:	Ingo Molnar
 M:	mingo@redhat.com
 S:	Maintained
 
+SIS 900/7016 FAST ETHERNET DRIVER
+P:	Ollie Lho
+M:	ollie@sis.com.tw
+L:	linux-net@vger.rutgers.edu
+S:	Supported
+
 SMB FILESYSTEM
-P:	Volker Lendecke
-M:	vl@kki.org
-L:	samba@listproc.anu.edu.au
+P:	Andrew Tridgell
+M:	tridge@samba.org
+W:	http://samba.org/
+L:	samba@samba.org
 S:	Maintained
 
 SMP: (except SPARC)
 P:	Linus Torvalds
 M:	torvalds@transmeta.com
 L:	linux-smp@vger.rutgers.edu
+S:	Maintained
+
+SOFTWARE RAID (Multiple Disks) SUPPORT
+P:	Ingo Molnar
+M:	mingo@redhat.com
 S:	Maintained
 
 SONIC NETWORK DRIVER
@@ -691,7 +938,7 @@ L:	linux-net@vger.rutgers.edu
 S:	Maintained
 
 SOUND
-P:	Alan Cox 
+P:	Alan Cox
 M:	alan@redhat.com
 S:	Supported
 
@@ -719,14 +966,19 @@ S:	Supported
 
 SPX NETWORK LAYER
 P:	Jay Schulist
-M:	Jay.Schulist@spacs.k12.wi.us
+M:	jschlst@turbolinux.com
 L:	linux-net@vger.rutgers.edu
 S:	Supported
 
+SNA NETWORK LAYER
+P:	Jay Schulist
+M:	jschlst@turbolinux.com
+L:	linux-sna@turbolinux.com
+W:	http://www.linux-sna.org
+S:	Supported
+
 STALLION TECHNOLOGIES MULTIPORT SERIAL BOARDS
-P:	Greg Ungerer
 M:	support@stallion.oz.au
-M:	gerg@stallion.com
 W:	http://www.stallion.com
 S:	Supported
 
@@ -734,9 +986,19 @@ STARMODE RADIO IP (STRIP) PROTOCOL DRIVER
 W:	http://mosquitonet.Stanford.EDU/strip.html
 S:	Unsupported ?
 
+SUPERH
+P:	Niibe Yutaka
+M:	gniibe@chroot.org
+P:	Kazumoto Kojima
+M:	kkojima@rr.iij4u.or.jp
+L:	linux-sh@m17n.org
+W:	http://www.m17n.org/linux-sh/
+W:	http://www.rr.iij4u.or.jp/~kkojima/linux-sh4.html
+S:	Maintained
+
 SVGA HANDLING
 P:	Martin Mares
-M:	mj@atrey.karlin.mff.cuni.cz
+M:	mj@suse.cz
 L:	linux-video@atrey.karlin.mff.cuni.cz
 S:	Maintained
 
@@ -746,8 +1008,8 @@ M:	kgb@manjak.knm.org.pl
 S:	Maintained
 
 TLAN NETWORK DRIVER
-P:	James Banks
-M:	james@sovereign.org
+P:	Torben Mathiasen
+M:	torben.mathiasen@compaq.com
 L:	tlan@vuser.vu.union.edu
 S:	Maintained
 
@@ -755,7 +1017,26 @@ TOKEN-RING NETWORK DRIVER
 P:	Paul Norton
 M:	pnorton@ieee.org
 L:	linux-net@vger.rutgers.edu
-L:	linux-tr@emissary.aus-etc.com
+L:	linux-tr@linuxtr.net
+S:	Maintained
+
+TRIDENT 4DWAVE/SIS 7018 PCI AUDIO CORE
+P:      Ollie Lho  
+M:      ollie@sis.com.tw
+L:	linux-kernel@vger.rutgers.edu
+S:      Supported
+
+TMS380 TOKEN-RING NETWORK DRIVER
+P:	Adam Fritzler
+M:	mid@auk.cx
+L:	linux-tr@linuxtr.net
+W:	http://www.auk.cx/tms380tr/
+S:	Maintained
+
+TULIP NETWORK DRIVER
+P:	Jeff Garzik
+M:	jgarzik@mandrakesoft.com
+L:	linux-tulip@cesdis.gsfc.nasa.gov
 S:	Maintained
 
 U14-34F SCSI DRIVER
@@ -764,37 +1045,99 @@ M:	dario@milano.europe.dg.com
 L:	linux-scsi@vger.rutgers.edu
 S:	Maintained
 
-UMSDOS FILESYSTEM
-P:	Matija Nalis
-M:	mnalis@jagor.srce.hr
-L:	linux-kernel@vger.rutgers.edu
+UDF FILESYSTEM
+P:	Ben Fennema
+M:	bfennema@falcon.csc.calpoly.edu
+P:	Dave Boynton
+M:	dave@trylinux.com
+L:	linux_udf@hootie.lvld.hp.com
+W:	http://www.trylinux.com/projects/udf/index.html
 S:	Maintained
 
-UNIFORM CDROM DRIVER 
+UMSDOS FILESYSTEM
+P:	Matija Nalis
+M:	Matija Nalis <mnalis-umsdos@voyager.hr>
+L:	linux-kernel@vger.rutgers.edu
+W:	http://www.voyager.hr/~mnalis/umsdos/
+S:	Maintained
+
+UNIFORM CDROM DRIVER
 P:	Jens Axboe
 M:	axboe@image.dk
 L:	linux-kernel@vger.rutgers.edu
+W:	http://www.kernel.dk
 S:	Maintained
 
-USB HUB AND UHCI DRIVERS
+USB SUBSYSTEM
+P:	Randy Dunlap
+M:	randy.dunlap@intel.com
+L:	linux-usb@suse.com
+W:	http://www.linux-usb.org
+S:	Supported
+
+USB ACM DRIVER
+P:	Vojtech Pavlik
+M:	vojtech@suse.cz
+L:	linux-usb@suse.com
+S:	Supported
+
+USB HID/HIDBP/INPUT DRIVERS
+P:	Vojtech Pavlik
+M:	vojtech@suse.cz
+L:	linux-usb@suse.com
+W:	http://www.suse.cz/development/input/
+S:	Supported
+
+USB HUB
 P:	Johannes Erdfelt
 M:	jerdfelt@sventech.com
 L:	linux-usb@suse.com
 S:	Maintained
 
 USB OHCI DRIVER
-P:	Gregory P. Smith
-M:	greg@electricrain.com
-M:	greg@suitenine.com
+P:	Roman Weissgaerber
+M:	weissg@vienna.at
 L:	linux-usb@suse.com
-S:	Maintained (not yet usable)
-W:	http://suitenine.com/usb/
+S:	Maintained
 
+USB PRINTER DRIVER
+P:	Vojtech Pavlik
+M:	vojtech@suse.cz
+L:	linux-usb@suse.com
+S:	Supported
+
+USB SERIAL DRIVER
+P:	Greg Kroah-Hartman
+M:	greg@kroah.com
+L:	linux-usb@suse.com
+S:	Maintained
+W:	http://www.kroah.com/linux-usb/
+
+USB UHCI DRIVER
+P:	Georg Acher
+M:	usb@in.tum.de
+L:	linux-usb@suse.com 
+W:	http://usb.in.tum.de
+S:	Maintained
+	
 VFAT FILESYSTEM:
 P:	Gordon Chaffee
 M:	chaffee@cs.berkeley.edu
 L:	linux-kernel@vger.rutgers.edu
 W:	http://bmrc.berkeley.edu/people/chaffee
+S:	Maintained
+
+VIA 82Cxxx AUDIO DRIVER
+P:	Jeff Garzik
+M:	jgarzik@mandrakesoft.com
+L:	linux-via@gtf.org
+S:	Maintained
+
+USB DIAMOND RIO500 DRIVER
+P:	Cesar Miquel
+M:	miquel@df.uba.ar
+L:	rio500-users@lists.sourceforge.net
+W:	http://rio500.sourceforge.net
 S:	Maintained
 
 VIDEO FOR LINUX
@@ -812,7 +1155,8 @@ S:     Supported
 
 WAVELAN NETWORK DRIVER & WIRELESS EXTENSIONS
 P:	Jean Tourrilhes
-M:	jt@hplb.hpl.hp.com
+M:	jt@hpl.hp.com
+W:	http://www.hpl.hp.com/personal/Jean_Tourrilhes/Linux/
 S:	Maintained
 
 WD7000 SCSI DRIVER
@@ -827,6 +1171,13 @@ M:	eis@baty.hanse.de
 L:	linux-x25@vger.rutgers.edu
 S:	Maintained
 
+RTLINUX  REALTIME  LINUX
+P:	Victor Yodaiken
+M:	yodaiken@fsmlabs.com
+L:	rtl@rtlinux.org
+W:	www.rtlinux.org
+S:	Maintained
+
 Z85230 SYNCHRONOUS DRIVER
 P:	Alan Cox
 M:	alan@redhat.com
@@ -839,6 +1190,13 @@ M:	jreuter@poboxes.com
 W:	http://poboxes.com/jreuter/
 W:	http://qsl.net/dl1bke/
 L:	linux-hams@vger.rutgers.edu
+S:	Maintained
+
+ZR36120 VIDEO FOR LINUX DRIVER
+P:	Pauline Middelink
+M:	middelin@polyware.nl
+W:	http://www.polyware.nl/~middelin/En/hobbies.html
+W:	http://www.polyware.nl/~middelin/hobbies.html
 S:	Maintained
 
 THE REST

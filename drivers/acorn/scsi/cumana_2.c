@@ -4,12 +4,12 @@
  * Copyright (C) 1997-1998 Russell King
  *
  * Changelog:
- *  30-08-1997	RMK	0.0.0	Created, READONLY version
- *  22-01-1998	RMK	0.0.1	Updated to 2.1.80
+ *  30-08-1997	RMK	0.0.0	Created, READONLY version.
+ *  22-01-1998	RMK	0.0.1	Updated to 2.1.80.
  *  15-04-1998	RMK	0.0.1	Only do PIO if FAS216 will allow it.
- *  02-05-1998	RMK	0.0.2	Updated & added DMA support
+ *  02-05-1998	RMK	0.0.2	Updated & added DMA support.
  *  27-06-1998	RMK		Changed asm/delay.h to linux/delay.h
- *  18-08-1998	RMK	0.0.3	Fixed synchronous transfer depth
+ *  18-08-1998	RMK	0.0.3	Fixed synchronous transfer depth.
  */
 
 #include <linux/module.h>
@@ -84,11 +84,6 @@ MODULE_PARM_DESC(term, "SCSI bus termination");
  */
 int term[MAX_ECARDS] = { 1, 1, 1, 1, 1, 1, 1, 1 };
 
-static struct proc_dir_entry proc_scsi_cumanascsi_2 = {
-	PROC_SCSI_QLOGICFAS, 6, "cumanascs2",
-	S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
-
 /* Prototype: void cumanascsi_2_irqenable(ec, irqnr)
  * Purpose  : Enable interrupts on Cumana SCSI 2 card
  * Params   : ec    - expansion card structure
@@ -116,6 +111,8 @@ cumanascsi_2_irqdisable(struct expansion_card *ec, int irqnr)
 static const expansioncard_ops_t cumanascsi_2_ops = {
 	cumanascsi_2_irqenable,
 	cumanascsi_2_irqdisable,
+	NULL,
+	NULL,
 	NULL,
 	NULL
 };
@@ -327,7 +324,7 @@ cumanascsi_2_detect(Scsi_Host_Template *tpnt)
 	int count = 0;
 	struct Scsi_Host *host;
   
-	tpnt->proc_dir = &proc_scsi_cumanascsi_2;
+	tpnt->proc_name = "cumanascs2";
 	memset(ecs, 0, sizeof (ecs));
 
 	ecard_startfind();
@@ -364,6 +361,7 @@ cumanascsi_2_detect(Scsi_Host_Template *tpnt)
 		info->info.ifcfg.sync_max_depth	= CUMANASCSI2_SYNC_DEPTH;
 		info->info.ifcfg.cntl3		= CNTL3_BS8 | CNTL3_FASTSCSI | CNTL3_FASTCLK;
 		info->info.ifcfg.disconnect_ok	= 1;
+		info->info.ifcfg.wide_max_size	= 0;
 		info->info.dma.setup		= cumanascsi_2_dma_setup;
 		info->info.dma.pseudo		= cumanascsi_2_dma_pseudo;
 		info->info.dma.stop		= cumanascsi_2_dma_stop;

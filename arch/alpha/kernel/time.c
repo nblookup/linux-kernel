@@ -1,7 +1,7 @@
 /*
  *  linux/arch/alpha/kernel/time.c
  *
- *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
+ *  Copyright (C) 1991, 1992, 1995, 1999  Linus Torvalds
  *
  * This file contains the PC-specific time handling details:
  * reading the RTC at bootup, etc..
@@ -22,7 +22,6 @@
  *	fixed algorithm in do_gettimeofday() for calculating the precise time
  *	from processor cycle counter (now taking lost_ticks into account)
  */
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -31,6 +30,8 @@
 #include <linux/mm.h>
 #include <linux/delay.h>
 #include <linux/ioport.h>
+#include <linux/irq.h>
+#include <linux/interrupt.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -40,7 +41,10 @@
 #include <linux/timex.h>
 
 #include "proto.h"
-#include "irq.h"
+#include "irq_impl.h"
+
+extern rwlock_t xtime_lock;
+extern volatile unsigned long lost_ticks;	/* kernel/sched.c */
 
 static int set_rtc_mmss(unsigned long);
 
@@ -85,15 +89,13 @@ void timer_interrupt(int irq, void *dev, struct pt_regs * regs)
 	__u32 now;
 	long nticks;
 
-#ifdef __SMP__
-	extern void smp_percpu_timer_interrupt(struct pt_regs *);
-	extern unsigned int boot_cpu_id;
-	/* when SMP, do this for *all* CPUs, 
-	   but only do the rest for the boot CPU */
-	smp_percpu_timer_interrupt(regs);
-	if (smp_processor_id() != boot_cpu_id)
-	  return;
+#ifndef __SMP__
+	/* Not SMP, do kernel PC profiling here.  */
+	if (!user_mode(regs))
+		alpha_do_profile(regs->pc);
 #endif
+
+	write_lock(&xtime_lock);
 
 	/*
 	 * Calculate how many ticks have passed since the last update,
@@ -124,6 +126,8 @@ void timer_interrupt(int irq, void *dev, struct pt_regs * regs)
 		int tmp = set_rtc_mmss(xtime.tv_sec);
 		state.last_rtc_update = xtime.tv_sec - (tmp ? 600 : 0);
 	}
+
+	write_unlock(&xtime_lock);
 }
 
 /*
@@ -158,38 +162,8 @@ static inline unsigned long mktime(unsigned int year, unsigned int mon,
 	  )*60 + sec; /* finally seconds */
 }
 
-/*
- * Initialize Programmable Interval Timers with standard values.  Some
- * drivers depend on them being initialized (e.g., joystick driver).
- */
-
-#ifdef CONFIG_RTC
 void
-rtc_init_pit (void)
-{
-	unsigned char control;
-
-	/* Turn off RTC interrupts before /dev/rtc is initialized */
-	control = CMOS_READ(RTC_CONTROL);
-	control &= ~(RTC_PIE | RTC_AIE | RTC_UIE);
-	CMOS_WRITE(control, RTC_CONTROL);
-	(void) CMOS_READ(RTC_INTR_FLAGS);
-
-	request_region(0x40, 0x20, "timer"); /* reserve pit */
-
-	/* Setup interval timer.  */
-	outb(0x34, 0x43);		/* binary, mode 2, LSB/MSB, ch 0 */
-	outb(LATCH & 0xff, 0x40);	/* LSB */
-	outb(LATCH >> 8, 0x40);		/* MSB */
-
-	outb(0xb6, 0x43);	/* pit counter 2: speaker */
-	outb(0x31, 0x42);
-	outb(0x13, 0x42);
-}
-#endif
-
-void
-generic_init_pit (void)
+common_init_rtc()
 {
 	unsigned char x;
 
@@ -210,8 +184,6 @@ generic_init_pit (void)
 	}
 	(void) CMOS_READ(RTC_INTR_FLAGS);
 
-	request_region(RTC_PORT(0), 0x10, "timer"); /* reserve rtc */
-
 	outb(0x36, 0x43);	/* pit counter 0: system timer */
 	outb(0x00, 0x40);
 	outb(0x00, 0x40);
@@ -219,14 +191,16 @@ generic_init_pit (void)
 	outb(0xb6, 0x43);	/* pit counter 2: speaker */
 	outb(0x31, 0x42);
 	outb(0x13, 0x42);
+
+	init_rtc_irq();
 }
 
 void
 time_init(void)
 {
-	void (*irq_handler)(int, void *, struct pt_regs *);
 	unsigned int year, mon, day, hour, min, sec, cc1, cc2;
-	unsigned long cycle_freq, diff, one_percent;
+	unsigned long cycle_freq, one_percent;
+	long diff;
 
 	/*
 	 * The Linux interpretation of the CMOS clock register contents:
@@ -242,7 +216,7 @@ time_init(void)
 
 	if (!est_cycle_freq) {
 		/* Sometimes the hwrpb->cycle_freq value is bogus. 
-	   	Go another round to check up on it and see.  */
+		   Go another round to check up on it and see.  */
 		do { } while (!(CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP));
 		do { } while (CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP);
 		cc2 = rpcc();
@@ -279,8 +253,7 @@ time_init(void)
 	mon = CMOS_READ(RTC_MONTH);
 	year = CMOS_READ(RTC_YEAR);
 
-	if (!(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY) || RTC_ALWAYS_BCD)
-	{
+	if (!(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY) || RTC_ALWAYS_BCD) {
 		BCD_TO_BIN(sec);
 		BCD_TO_BIN(min);
 		BCD_TO_BIN(hour);
@@ -312,10 +285,10 @@ time_init(void)
 	state.last_rtc_update = 0;
 	state.partial_tick = 0L;
 
-	/* setup timer */ 
-	irq_handler = timer_interrupt;
-	if (request_irq(TIMER_IRQ, irq_handler, 0, "timer", NULL))
-		panic("Could not allocate timer IRQ!");
+	/* Startup the timer source. */
+	alpha_mv.init_rtc();
+
+	do_get_fast_time = do_gettimeofday;
 }
 
 /*
@@ -328,18 +301,24 @@ time_init(void)
 void
 do_gettimeofday(struct timeval *tv)
 {
-	unsigned long flags, delta_cycles, delta_usec;
-	unsigned long sec, usec;
-	__u32 now;
-	extern volatile unsigned long lost_ticks;	/*kernel/sched.c*/
+	unsigned long sec, usec, lost, flags;
+	unsigned long delta_cycles, delta_usec, partial_tick;
 
-	now = rpcc();
-	save_and_cli(flags);
+	read_lock_irqsave(&xtime_lock, flags);
+
+	delta_cycles = rpcc() - state.last_time;
 	sec = xtime.tv_sec;
 	usec = xtime.tv_usec;
-	delta_cycles = now - state.last_time;
-	restore_flags(flags);
+	partial_tick = state.partial_tick;
+	lost = lost_ticks;
 
+	read_unlock_irqrestore(&xtime_lock, flags);
+
+#ifdef __SMP__
+	/* Until and unless we figure out how to get cpu cycle counters
+	   in sync and keep them there, we can't use the rpcc tricks.  */
+	delta_usec = lost * (1000000 / HZ);
+#else
 	/*
 	 * usec = cycles * ticks_per_cycle * 2**48 * 1e6 / (2**48 * ticks)
 	 *	= cycles * (s_t_p_c) * 1e6 / (2**48 * ticks)
@@ -354,13 +333,10 @@ do_gettimeofday(struct timeval *tv)
 	 */
 
 	delta_usec = (delta_cycles * state.scaled_ticks_per_cycle 
-			+ state.partial_tick
-			+ (lost_ticks << FIX_SHIFT) ) * 15625;
+		      + partial_tick
+		      + (lost << FIX_SHIFT)) * 15625;
 	delta_usec = ((delta_usec / ((1UL << (FIX_SHIFT-6-1)) * HZ)) + 1) / 2;
-
-	/* the 'lost_tics' term above implements this:	
-	 * delta_usec += lost_ticks * (1000000 / HZ);
-	 */
+#endif
 
 	usec += delta_usec;
 	if (usec >= 1000000) {
@@ -375,13 +351,41 @@ do_gettimeofday(struct timeval *tv)
 void
 do_settimeofday(struct timeval *tv)
 {
-	cli();
-	xtime = *tv;
+	unsigned long delta_usec;
+	long sec, usec;
+	
+	write_lock_irq(&xtime_lock);
+
+	/* The offset that is added into time in do_gettimeofday above
+	   must be subtracted out here to keep a coherent view of the
+	   time.  Without this, a full-tick error is possible.  */
+
+#ifdef __SMP__
+	delta_usec = lost_ticks * (1000000 / HZ);
+#else
+	delta_usec = rpcc() - state.last_time;
+	delta_usec = (delta_usec * state.scaled_ticks_per_cycle 
+		      + state.partial_tick
+		      + (lost_ticks << FIX_SHIFT)) * 15625;
+	delta_usec = ((delta_usec / ((1UL << (FIX_SHIFT-6-1)) * HZ)) + 1) / 2;
+#endif
+
+	sec = tv->tv_sec;
+	usec = tv->tv_usec;
+	usec -= delta_usec;
+	if (usec < 0) {
+		usec += 1000000;
+		sec -= 1;
+	}
+
+	xtime.tv_sec = sec;
+	xtime.tv_usec = usec;
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
-	sti();
+
+	write_unlock_irq(&xtime_lock);
 }
 
 

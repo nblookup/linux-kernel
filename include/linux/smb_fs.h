@@ -14,8 +14,11 @@
 /*
  * ioctl commands
  */
-#define	SMB_IOC_GETMOUNTUID		_IOR('u', 1, __kernel_uid_t)
+#define	SMB_IOC_GETMOUNTUID		_IOR('u', 1, __kernel_old_uid_t)
 #define SMB_IOC_NEWCONN                 _IOW('u', 2, struct smb_conn_opt)
+
+/* __kernel_uid_t can never change, so we have to use __kernel_uid32_t */
+#define	SMB_IOC_GETMOUNTUID32		_IOR('u', 3, __kernel_uid32_t)
 
 #ifdef __KERNEL__
 
@@ -77,14 +80,33 @@ smb_vfree(void *obj)
 #define SMB_FIX_OLDATTR	0x0002	/* Use core getattr (Win 95 speedup) */
 #define SMB_FIX_DIRATTR	0x0004	/* Use find_first for getattr */
 
+
+/* NT1 protocol capability bits */
+#define SMB_CAP_RAW_MODE         0x0001
+#define SMB_CAP_MPX_MODE         0x0002
+#define SMB_CAP_UNICODE          0x0004
+#define SMB_CAP_LARGE_FILES      0x0008
+#define SMB_CAP_NT_SMBS          0x0010
+#define SMB_CAP_RPC_REMOTE_APIS  0x0020
+#define SMB_CAP_STATUS32         0x0040
+#define SMB_CAP_LEVEL_II_OPLOCKS 0x0080
+#define SMB_CAP_LOCK_AND_READ    0x0100
+#define SMB_CAP_NT_FIND          0x0200
+#define SMB_CAP_DFS              0x1000
+#define SMB_CAP_LARGE_READX      0x4000
+
+
 /* linux/fs/smbfs/mmap.c */
 int smb_mmap(struct file *, struct vm_area_struct *);
 
 /* linux/fs/smbfs/file.c */
 extern struct inode_operations smb_file_inode_operations;
+extern struct file_operations smb_file_operations;
+extern struct address_space_operations smb_file_aops;
 
 /* linux/fs/smbfs/dir.c */
 extern struct inode_operations smb_dir_inode_operations;
+extern struct file_operations smb_dir_operations;
 void smb_renew_times(struct dentry *);
 
 /* linux/fs/smbfs/ioctl.c */

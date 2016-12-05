@@ -20,6 +20,7 @@
 #include <linux/malloc.h>
 #include <linux/slab.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 
 #include <asm/uaccess.h>
 
@@ -41,7 +42,7 @@ kmem_cache_t *dentry_cache;
  * This hash-function tries to avoid losing too many bits of hash
  * information, yet avoid using a prime hash-size or similar.
  */
-#define D_HASHBITS     10
+#define D_HASHBITS     14
 #define D_HASHSIZE     (1UL << D_HASHBITS)
 #define D_HASHMASK     (D_HASHSIZE-1)
 
@@ -168,6 +169,11 @@ out:
 int d_invalidate(struct dentry * dentry)
 {
 	/*
+	 * If it's already been dropped, return OK.
+	 */
+	if (list_empty(&dentry->d_hash))
+		return 0;
+	/*
 	 * Check whether to do a partial shrink_dcache
 	 * to get rid of unused child entries.
 	 */
@@ -195,72 +201,6 @@ int d_invalidate(struct dentry * dentry)
 }
 
 /*
- * Select less valuable dentries to be pruned when we need
- * inodes or memory. The selected dentries are moved to the
- * old end of the list where prune_dcache() can find them.
- * 
- * Negative dentries are included in the selection so that
- * they don't accumulate at the end of the list. The count
- * returned is the total number of dentries selected, which
- * may be much larger than the requested number of inodes.
- */
-int select_dcache(int inode_count, int page_count)
-{
-	struct list_head *next, *tail = &dentry_unused;
-	int found = 0;
-	int depth = dentry_stat.nr_unused >> 1;
-	unsigned long max_value = 4;
-
-	if (page_count)
-		max_value = -1;
-
-	next = tail->prev;
-	while (next != &dentry_unused && depth--) {
-		struct list_head *tmp = next;
-		struct dentry *dentry = list_entry(tmp, struct dentry, d_lru);
-		struct inode *inode = dentry->d_inode;
-		unsigned long value = 0;	
-
-		next = tmp->prev;
-		if (dentry->d_count) {
-			dentry_stat.nr_unused--;
-			list_del(tmp);
-			INIT_LIST_HEAD(tmp);
-			continue;
-		}
-
-		/*
-		 * Select dentries based on the page cache count ...
-		 * should factor in number of uses as well. We take
-		 * all negative dentries so that they don't accumulate.
-		 * (We skip inodes that aren't immediately available.)
-		 */
-		if (inode) {
-			value = inode->i_nrpages;	
-			if (value >= max_value)
-				continue;
-			if (inode->i_state || inode->i_count > 1)
-				continue;
-		}
-
-		/*
-		 * Move the selected dentries behind the tail.
-		 */
-		if (tmp != tail->prev) {
-			list_del(tmp);
-			list_add(tmp, tail->prev);
-		}
-		tail = tmp;
-		found++;
-		if (inode && --inode_count <= 0)
-			break;
-		if (page_count && (page_count -= value) <= 0)
-			break;
-	}
-	return found;
-}
-
-/*
  * Throw away a dentry - free the inode, dput the parent.
  * This requires that the LRU list has already been
  * removed.
@@ -274,7 +214,8 @@ static inline void prune_one_dentry(struct dentry * dentry)
 	dentry_iput(dentry);
 	parent = dentry->d_parent;
 	d_free(dentry);
-	dput(parent);
+	if (parent != dentry)
+		dput(parent);
 }
 
 /*
@@ -469,14 +410,22 @@ void shrink_dcache_parent(struct dentry * parent)
  *  ...
  *   6 - base-level: try to shrink a bit.
  */
-void shrink_dcache_memory(int priority, unsigned int gfp_mask)
+int shrink_dcache_memory(int priority, unsigned int gfp_mask, zone_t * zone)
 {
-	if (gfp_mask & __GFP_IO) {
-		int count = 0;
-		if (priority)
-			count = dentry_stat.nr_unused / priority;
-		prune_dcache(count);
-	}
+	int count = 0;
+	lock_kernel();
+	if (priority)
+		count = dentry_stat.nr_unused / priority;
+	prune_dcache(count);
+	unlock_kernel();
+	/* FIXME: kmem_cache_shrink here should tell us
+	   the number of pages freed, and it should
+	   work in a __GFP_DMA/__GFP_HIGHMEM behaviour
+	   to free only the interesting pages in
+	   function of the needs of the current allocation. */
+	kmem_cache_shrink(dentry_cache);
+
+	return 0;
 }
 
 #define NAME_ALLOC_LEN(len)	((len+16) & ~15)
@@ -546,7 +495,7 @@ void d_instantiate(struct dentry *entry, struct inode * inode)
 	entry->d_inode = inode;
 }
 
-struct dentry * d_alloc_root(struct inode * root_inode, struct dentry *old_root)
+struct dentry * d_alloc_root(struct inode * root_inode)
 {
 	struct dentry *res = NULL;
 
@@ -602,8 +551,7 @@ struct dentry * d_lookup(struct dentry * parent, struct qstr * name)
 /*
  * An insecure source has sent us a dentry, here we verify it.
  *
- * This is just to make knfsd able to have the dentry pointer
- * in the NFS file handle.
+ * This is used by ncpfs in its readdir implementation.
  *
  * NOTE! Do _not_ dereference the pointers before we have
  * validated them. We can test the pointer values, but we
@@ -762,7 +710,7 @@ char * d_path(struct dentry *dentry, char *buffer, int buflen)
 
 	*--end = '\0';
 	buflen--;
-	if (dentry->d_parent != dentry && list_empty(&dentry->d_hash)) {
+	if (!IS_ROOT(dentry) && list_empty(&dentry->d_hash)) {
 		buflen -= 10;
 		end -= 10;
 		memcpy(end, " (deleted)", 10);
@@ -813,7 +761,7 @@ char * d_path(struct dentry *dentry, char *buffer, int buflen)
  *		return NULL;
  *	}
  */
-asmlinkage int sys_getcwd(char *buf, unsigned long size)
+asmlinkage long sys_getcwd(char *buf, unsigned long size)
 {
 	int error;
 	struct dentry *pwd = current->fs->pwd; 

@@ -2,14 +2,16 @@
  *  linux/mm/vmalloc.c
  *
  *  Copyright (C) 1993  Linus Torvalds
+ *  Support of BIGMEM added by Gerhard Wichert, Siemens AG, July 1999
  */
 
 #include <linux/malloc.h>
 #include <linux/vmalloc.h>
 
 #include <asm/uaccess.h>
+#include <asm/pgalloc.h>
 
-static struct vm_struct * vmlist = NULL;
+struct vm_struct * vmlist = NULL;
 
 static inline void free_area_pte(pmd_t * pmd, unsigned long address, unsigned long size)
 {
@@ -19,7 +21,7 @@ static inline void free_area_pte(pmd_t * pmd, unsigned long address, unsigned lo
 	if (pmd_none(*pmd))
 		return;
 	if (pmd_bad(*pmd)) {
-		printk("free_area_pte: bad pmd (%08lx)\n", pmd_val(*pmd));
+		pmd_ERROR(*pmd);
 		pmd_clear(pmd);
 		return;
 	}
@@ -28,7 +30,7 @@ static inline void free_area_pte(pmd_t * pmd, unsigned long address, unsigned lo
 	end = address + size;
 	if (end > PMD_SIZE)
 		end = PMD_SIZE;
-	while (address < end) {
+	do {
 		pte_t page = *pte;
 		pte_clear(pte);
 		address += PAGE_SIZE;
@@ -36,11 +38,13 @@ static inline void free_area_pte(pmd_t * pmd, unsigned long address, unsigned lo
 		if (pte_none(page))
 			continue;
 		if (pte_present(page)) {
-			free_page(pte_page(page));
+			unsigned long map_nr = pte_pagenr(page);
+			if (map_nr < max_mapnr)
+				__free_page(mem_map + map_nr);
 			continue;
 		}
-		printk("Whee.. Swapped out page in kernel page table\n");
-	}
+		printk(KERN_CRIT "Whee.. Swapped out page in kernel page table\n");
+	} while (address < end);
 }
 
 static inline void free_area_pmd(pgd_t * dir, unsigned long address, unsigned long size)
@@ -51,7 +55,7 @@ static inline void free_area_pmd(pgd_t * dir, unsigned long address, unsigned lo
 	if (pgd_none(*dir))
 		return;
 	if (pgd_bad(*dir)) {
-		printk("free_area_pmd: bad pgd (%08lx)\n", pgd_val(*dir));
+		pgd_ERROR(*dir);
 		pgd_clear(dir);
 		return;
 	}
@@ -60,11 +64,11 @@ static inline void free_area_pmd(pgd_t * dir, unsigned long address, unsigned lo
 	end = address + size;
 	if (end > PGDIR_SIZE)
 		end = PGDIR_SIZE;
-	while (address < end) {
+	do {
 		free_area_pte(pmd, address, end - address);
 		address = (address + PMD_SIZE) & PMD_MASK;
 		pmd++;
-	}
+	} while (address < end);
 }
 
 void vmfree_area_pages(unsigned long address, unsigned long size)
@@ -74,11 +78,11 @@ void vmfree_area_pages(unsigned long address, unsigned long size)
 
 	dir = pgd_offset_k(address);
 	flush_cache_all();
-	while (address < end) {
+	do {
 		free_area_pmd(dir, address, end - address);
 		address = (address + PGDIR_SIZE) & PGDIR_MASK;
 		dir++;
-	}
+	} while (address && (address < end));
 	flush_tlb_all();
 }
 
@@ -90,17 +94,17 @@ static inline int alloc_area_pte(pte_t * pte, unsigned long address, unsigned lo
 	end = address + size;
 	if (end > PMD_SIZE)
 		end = PMD_SIZE;
-	while (address < end) {
-		unsigned long page;
+	do {
+		struct page * page;
 		if (!pte_none(*pte))
-			printk("alloc_area_pte: page already exists\n");
-		page = __get_free_page(GFP_KERNEL);
+			printk(KERN_ERR "alloc_area_pte: page already exists\n");
+		page = alloc_page(GFP_KERNEL|__GFP_HIGHMEM);
 		if (!page)
 			return -ENOMEM;
 		set_pte(pte, mk_pte(page, PAGE_KERNEL));
 		address += PAGE_SIZE;
 		pte++;
-	}
+	} while (address < end);
 	return 0;
 }
 
@@ -112,7 +116,7 @@ static inline int alloc_area_pmd(pmd_t * pmd, unsigned long address, unsigned lo
 	end = address + size;
 	if (end > PGDIR_SIZE)
 		end = PGDIR_SIZE;
-	while (address < end) {
+	do {
 		pte_t * pte = pte_alloc_kernel(pmd, address);
 		if (!pte)
 			return -ENOMEM;
@@ -120,7 +124,7 @@ static inline int alloc_area_pmd(pmd_t * pmd, unsigned long address, unsigned lo
 			return -ENOMEM;
 		address = (address + PMD_SIZE) & PMD_MASK;
 		pmd++;
-	}
+	} while (address < end);
 	return 0;
 }
 
@@ -131,7 +135,7 @@ int vmalloc_area_pages(unsigned long address, unsigned long size)
 
 	dir = pgd_offset_k(address);
 	flush_cache_all();
-	while (address < end) {
+	do {
 		pmd_t *pmd;
 		pgd_t olddir = *dir;
 		
@@ -144,12 +148,12 @@ int vmalloc_area_pages(unsigned long address, unsigned long size)
 			set_pgdir(address, *dir);
 		address = (address + PGDIR_SIZE) & PGDIR_MASK;
 		dir++;
-	}
+	} while (address && (address < end));
 	flush_tlb_all();
 	return 0;
 }
 
-struct vm_struct * get_vm_area(unsigned long size)
+struct vm_struct * get_vm_area(unsigned long size, unsigned long flags)
 {
 	unsigned long addr;
 	struct vm_struct **p, *tmp, *area;
@@ -167,6 +171,7 @@ struct vm_struct * get_vm_area(unsigned long size)
 			return NULL;
 		}
 	}
+	area->flags = flags;
 	area->addr = (void *)addr;
 	area->size = size + PAGE_SIZE;
 	area->next = *p;
@@ -181,7 +186,7 @@ void vfree(void * addr)
 	if (!addr)
 		return;
 	if ((PAGE_SIZE-1) & (unsigned long) addr) {
-		printk("Trying to vfree() bad address (%p)\n", addr);
+		printk(KERN_ERR "Trying to vfree() bad address (%p)\n", addr);
 		return;
 	}
 	for (p = &vmlist ; (tmp = *p) ; p = &tmp->next) {
@@ -192,7 +197,7 @@ void vfree(void * addr)
 			return;
 		}
 	}
-	printk("Trying to vfree() nonexistent vm area (%p)\n", addr);
+	printk(KERN_ERR "Trying to vfree() nonexistent vm area (%p)\n", addr);
 }
 
 void * vmalloc(unsigned long size)
@@ -201,14 +206,19 @@ void * vmalloc(unsigned long size)
 	struct vm_struct *area;
 
 	size = PAGE_ALIGN(size);
-	if (!size || size > (max_mapnr << PAGE_SHIFT))
+	if (!size || (size >> PAGE_SHIFT) > max_mapnr) {
+		BUG();
 		return NULL;
-	area = get_vm_area(size);
-	if (!area)
+	}
+	area = get_vm_area(size, VM_ALLOC);
+	if (!area) {
+		BUG();
 		return NULL;
+	}
 	addr = area->addr;
 	if (vmalloc_area_pages(VMALLOC_VMADDR(addr), size)) {
 		vfree(addr);
+		BUG();
 		return NULL;
 	}
 	return addr;

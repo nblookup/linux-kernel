@@ -160,7 +160,7 @@ static int pf_drive_count;
 #include <linux/genhd.h>
 #include <linux/hdreg.h>
 #include <linux/cdrom.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
 
 #include <asm/uaccess.h>
 
@@ -205,6 +205,7 @@ MODULE_PARM(drive3,"1-7i");
 #define DEVICE_OFF(device)
 
 #include <linux/blk.h>
+#include <linux/blkpg.h>
 
 #include "pseudo.h"
 
@@ -245,7 +246,7 @@ int pf_init(void);
 void cleanup_module( void );
 #endif
 static int pf_open(struct inode *inode, struct file *file);
-static void do_pf_request(void);
+static void do_pf_request(request_queue_t * q);
 static int pf_ioctl(struct inode *inode,struct file *file,
                     unsigned int cmd, unsigned long arg);
 
@@ -310,21 +311,11 @@ static char * pf_buf;                   /* buffer for request in progress */
 
 /* kernel glue structures */
 
-static struct file_operations pf_fops = {
-        NULL,                   /* lseek - default */
-        block_read,             /* read - general block-dev read */
-        block_write,            /* write - general block-dev write */
-        NULL,                   /* readdir - bad */
-        NULL,                   /* select */
-        pf_ioctl,               /* ioctl */
-        NULL,                   /* mmap */
-        pf_open,                /* open */
-	NULL,			/* flush */
-        pf_release,             /* release */
-        block_fsync,            /* fsync */
-        NULL,                   /* fasync */
-        pf_check_media,         /* media change ? */
-        NULL                    /* revalidate new media */
+static struct block_device_operations pf_fops = {
+	open:			pf_open,
+	release:		pf_release,
+	ioctl:			pf_ioctl,
+	check_media_change:	pf_check_media,
 };
 
 void pf_init_units( void )
@@ -364,11 +355,13 @@ int pf_init (void)      /* preliminary initialisation */
                         major);
                 return -1;
         }
-        blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
         read_ahead[MAJOR_NR] = 8;       /* 8 sector (4kB) read ahead */
         
 	for (i=0;i<PF_UNITS;i++) pf_blocksizes[i] = 1024;
 	blksize_size[MAJOR_NR] = pf_blocksizes;
+	for (i=0;i<PF_UNITS;i++)
+		register_disk(NULL, MKDEV(MAJOR_NR, i), 1, &pf_fops, 0);
 
         return 0;
 }
@@ -433,31 +426,18 @@ static int pf_ioctl(struct inode *inode,struct file *file,
                 }
                 put_user(0,(long *)&geo->start);
                 return 0;
-            case BLKRASET:
-                if(!capable(CAP_SYS_ADMIN)) return -EACCES;
-                if(!(inode->i_rdev)) return -EINVAL;
-                if(arg > 0xff) return -EINVAL;
-                read_ahead[MAJOR(inode->i_rdev)] = arg;
-                return 0;
-            case BLKRAGET:
-                if (!arg) return -EINVAL;
-                err = verify_area(VERIFY_WRITE,(long *) arg,sizeof(long));
-                if (err) return (err);
-                put_user(read_ahead[MAJOR(inode->i_rdev)],(long *) arg);
-                return (0);
             case BLKGETSIZE:
                 if (!arg) return -EINVAL;
                 err = verify_area(VERIFY_WRITE,(long *) arg,sizeof(long));
                 if (err) return (err);
                 put_user(PF.capacity,(long *) arg);
                 return (0);
-            case BLKFLSBUF:
-                if(!capable(CAP_SYS_ADMIN))  return -EACCES;
-                if(!(inode->i_rdev)) return -EINVAL;
-                fsync_dev(inode->i_rdev);
-                invalidate_buffers(inode->i_rdev);
-                return 0;
-            RO_IOCTLS(inode->i_rdev,arg);
+	    case BLKROSET:
+	    case BLKROGET:
+	    case BLKRASET:
+	    case BLKRAGET:
+	    case BLKFLSBUF:
+		return blk_ioctl(inode->i_rdev, cmd, arg);
             default:
                 return -EINVAL;
         }
@@ -469,8 +449,6 @@ static int pf_release (struct inode *inode, struct file *file)
 {       kdev_t devp;
 	int	unit;
 
-	struct super_block *sb;
-
         devp = inode->i_rdev;
         unit = DEVICE_NR(devp);
 
@@ -479,15 +457,8 @@ static int pf_release (struct inode *inode, struct file *file)
 
 	PF.access--;
 
-	if (!PF.access) {
-                fsync_dev(devp);
-
-		sb = get_super(devp);
-		if (sb) invalidate_inodes(sb);
-
-                invalidate_buffers(devp);
-		if (PF.removable) pf_lock(unit,0);
-        }
+	if (!PF.access && PF.removable)
+		pf_lock(unit,0);
 
         MOD_DEC_USE_COUNT;
 
@@ -678,11 +649,11 @@ static int pf_reset( int unit )
 	WR(0,6,DRIVE);
 	WR(0,7,8);
 
-	pf_sleep(2);
+	pf_sleep(20*HZ/1000);
 
         k = 0;
         while ((k++ < PF_RESET_TMO) && (RR(1,6)&STAT_BUSY))
-                pf_sleep(10);
+                pf_sleep(HZ/10);
 
 	flg = 1;
 	for(i=0;i<5;i++) flg &= (RR(0,i+1) == expect[i]);
@@ -875,7 +846,7 @@ static int pf_ready( void )
 	return (((RR(1,6)&(STAT_BUSY|pf_mask)) == pf_mask));
 }
 
-static void do_pf_request (void)
+static void do_pf_request (request_queue_t * q)
 
 {       struct buffer_head * bh;
 	struct request * req;
@@ -883,7 +854,7 @@ static void do_pf_request (void)
 
         if (pf_busy) return;
 repeat:
-        if ((!CURRENT) || (CURRENT->rq_status == RQ_INACTIVE)) return;
+        if (QUEUE_EMPTY || (CURRENT->rq_status == RQ_INACTIVE)) return;
         INIT_REQUEST;
 
         pf_unit = unit = DEVICE_NR(CURRENT->rq_dev);
@@ -903,7 +874,7 @@ repeat:
 	pf_cmd = CURRENT->cmd;
 	pf_run = pf_count;
         while ((pf_run <= cluster) &&
-	       (req = req->next) && 
+	       (req = blkdev_next_request(req)) && 
 	       (pf_block+pf_run == req->sector) &&
 	       (pf_cmd == req->cmd) &&
 	       (pf_unit == DEVICE_NR(req->rq_dev)))
@@ -933,7 +904,7 @@ static void pf_next_buf( int unit )
 	
 /* paranoia */
 
-	if ((!CURRENT) ||
+	if (QUEUE_EMPTY ||
 	    (CURRENT->cmd != pf_cmd) ||
 	    (DEVICE_NR(CURRENT->rq_dev) != pf_unit) ||
 	    (CURRENT->rq_status == RQ_INACTIVE) ||
@@ -970,7 +941,7 @@ static void do_pf_read_start( void )
 		spin_lock_irqsave(&io_request_lock,saved_flags);
                 end_request(0);
                 pf_busy = 0;
-                do_pf_request();
+		do_pf_request(NULL);
 		spin_unlock_irqrestore(&io_request_lock,saved_flags);
                 return;
         }
@@ -996,7 +967,7 @@ static void do_pf_read_drq( void )
 		spin_lock_irqsave(&io_request_lock,saved_flags);
                 end_request(0);
                 pf_busy = 0;
-                do_pf_request();
+		do_pf_request(NULL);
 		spin_unlock_irqrestore(&io_request_lock,saved_flags);
                 return;
             }
@@ -1011,7 +982,7 @@ static void do_pf_read_drq( void )
 	spin_lock_irqsave(&io_request_lock,saved_flags); 
         end_request(1);
         pf_busy = 0;
-        do_pf_request();
+	do_pf_request(NULL);
 	spin_unlock_irqrestore(&io_request_lock,saved_flags);
 }
 
@@ -1037,7 +1008,7 @@ static void do_pf_write_start( void )
 		spin_lock_irqsave(&io_request_lock,saved_flags);
                 end_request(0);
                 pf_busy = 0;
-                do_pf_request();
+		do_pf_request(NULL);
 		spin_unlock_irqrestore(&io_request_lock,saved_flags);
                 return;
         }
@@ -1054,7 +1025,7 @@ static void do_pf_write_start( void )
 		spin_lock_irqsave(&io_request_lock,saved_flags);
                 end_request(0);
                 pf_busy = 0;
-                do_pf_request();
+		do_pf_request(NULL);
 		spin_unlock_irqrestore(&io_request_lock,saved_flags);
                 return;
             }
@@ -1084,7 +1055,7 @@ static void do_pf_write_done( void )
 		spin_lock_irqsave(&io_request_lock,saved_flags);
                 end_request(0);
                 pf_busy = 0;
-                do_pf_request();
+		do_pf_request(NULL);
 		spin_unlock_irqrestore(&io_request_lock,saved_flags);
                 return;
         }
@@ -1092,7 +1063,7 @@ static void do_pf_write_done( void )
 	spin_lock_irqsave(&io_request_lock,saved_flags);
         end_request(1);
         pf_busy = 0;
-        do_pf_request();
+	do_pf_request(NULL);
 	spin_unlock_irqrestore(&io_request_lock,saved_flags);
 }
 

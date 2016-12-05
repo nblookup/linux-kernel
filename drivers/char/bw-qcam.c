@@ -76,17 +76,18 @@ OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/sched.h>
 #include <linux/version.h>
 #include <linux/videodev.h>
+#include <asm/semaphore.h>
 #include <asm/uaccess.h>
 
 #include "bw-qcam.h"
+
+static unsigned int maxpoll=250;   /* Maximum busy-loop count for qcam I/O */
+static unsigned int yieldlines=4;  /* Yield after this many during capture */
 
 #if LINUX_VERSION_CODE >= 0x020117
 MODULE_PARM(maxpoll,"i");
 MODULE_PARM(yieldlines,"i");   
 #endif
-
-static unsigned int maxpoll=250;   /* Maximum busy-loop count for qcam I/O */
-static unsigned int yieldlines=4;  /* Yield after this many during capture */
 
 extern __inline__ int read_lpstatus(struct qcam_device *q)
 {
@@ -159,6 +160,8 @@ static struct qcam_device *qcam_init(struct parport *port)
 	struct qcam_device *q;
 	
 	q = kmalloc(sizeof(struct qcam_device), GFP_KERNEL);
+	if(q==NULL)
+		return NULL;
 
 	q->pport = port;
 	q->pdev = parport_register_device(port, "bw-qcam", NULL, NULL,
@@ -172,6 +175,8 @@ static struct qcam_device *qcam_init(struct parport *port)
 	}
 	
 	memcpy(&q->vdev, &qcam_template, sizeof(qcam_template));
+	
+	init_MUTEX(&q->lock);
 
 	q->port_mode = (QC_ANY | QC_NOTSET);
 	q->width = 320;
@@ -815,14 +820,12 @@ static int qcam_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 			qcam->contrast = p.contrast>>8;
 			qcam->whitebal = p.whiteness>>8;
 			qcam->bpp = p.depth;
-			
+
+			down(&qcam->lock);			
 			qc_setscanmode(qcam);
+			up(&qcam->lock);
 			qcam->status |= QC_PARAM_CHANGE;
 
-/*			parport_claim_or_block(qcam->pdev);
-			qc_set(qcam);
-			parport_release(qcam->pdev);
-*/
 			return 0;
 		}
 		case VIDIOCSWIN:
@@ -853,7 +856,9 @@ static int qcam_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 				qcam->height = 240;
 				qcam->transfer_scale = 1;
 			}
+			down(&qcam->lock);
 			qc_setscanmode(qcam);
+			up(&qcam->lock);
 			
 			/* We must update the camera before we grab. We could
 			   just have changed the grab size */
@@ -902,7 +907,9 @@ static long qcam_read(struct video_device *v, char *buf, unsigned long count,  i
 	struct qcam_device *qcam=(struct qcam_device *)v;
 	int len;
 	parport_claim_or_block(qcam->pdev);
-	/* Probably should have a semaphore against multiple users */
+	
+	down(&qcam->lock);
+	
 	qc_reset(qcam);
 
 	/* Update the camera parameters if we need to */
@@ -910,6 +917,9 @@ static long qcam_read(struct video_device *v, char *buf, unsigned long count,  i
 		qc_set(qcam);
 
 	len=qc_capture(qcam, buf,count);
+	
+	up(&qcam->lock);
+	
 	parport_release(qcam->pdev);
 	return len;
 }
@@ -1045,7 +1055,7 @@ void cleanup_module(void)
 		close_bwqcam(qcams[i]);
 }
 #else
-__initfunc(int init_bw_qcams(struct video_init *unused))
+int __init init_bw_qcams(struct video_init *unused)
 {
 	struct parport *port;
 

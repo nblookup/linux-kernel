@@ -2,7 +2,7 @@
  * NETLINK	An implementation of a loadable kernel mode driver providing
  *		multiple kernel/user space bidirectional communications links.
  *
- * 		Author: 	Alan Cox <alan@cymru.net>
+ * 		Author: 	Alan Cox <alan@redhat.com>
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -25,6 +25,7 @@
 #include <linux/netlink.h>
 #include <linux/poll.h>
 #include <linux/init.h>
+#include <linux/devfs_fs_kernel.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -106,7 +107,7 @@ static int netlink_open(struct inode * inode, struct file * file)
 	struct socket *sock;
 	struct sockaddr_nl nladdr;
 	int err;
-	
+
 	if (minor>=MAX_LINKS)
 		return -ENODEV;
 	if (open_map&(1<<minor))
@@ -114,22 +115,10 @@ static int netlink_open(struct inode * inode, struct file * file)
 
 	open_map |= (1<<minor);
 	MOD_INC_USE_COUNT;
-	
-	err = -EINVAL;
-	if (net_families[PF_NETLINK]==NULL)
-  		goto out;
 
-	err = -ENFILE;
-	if (!(sock = sock_alloc())) 
+	err = sock_create(PF_NETLINK, SOCK_RAW, minor, &sock);
+	if (err < 0)
 		goto out;
-
-	sock->type = SOCK_RAW;
-
-	if ((err = net_families[PF_NETLINK]->create(sock, minor)) < 0) 
-	{
-		sock_release(sock);
-		goto out;
-	}
 
 	memset(&nladdr, 0, sizeof(nladdr));
 	nladdr.nl_family = AF_NETLINK;
@@ -178,24 +167,44 @@ static int netlink_ioctl(struct inode *inode, struct file *file,
 
 
 static struct file_operations netlink_fops = {
-	netlink_lseek,
-	netlink_read,
-	netlink_write,
-	NULL,		/* netlink_readdir */
-	netlink_poll,
-	netlink_ioctl,
-	NULL,		/* netlink_mmap */
-	netlink_open,
-	NULL,		/* flush */
-	netlink_release
+	llseek:		netlink_lseek,
+	read:		netlink_read,
+	write:		netlink_write,
+	poll:		netlink_poll,
+	ioctl:		netlink_ioctl,
+	open:		netlink_open,
+	release:	netlink_release,
 };
 
-__initfunc(int init_netlink(void))
+static devfs_handle_t devfs_handle = NULL;
+
+static void __init make_devfs_entries (const char *name, int minor)
 {
-	if (register_chrdev(NETLINK_MAJOR,"netlink", &netlink_fops)) {
+	devfs_register (devfs_handle, name, 0, DEVFS_FL_DEFAULT,
+			NETLINK_MAJOR, minor,
+			S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			&netlink_fops, NULL);
+}
+
+int __init init_netlink(void)
+{
+	if (devfs_register_chrdev(NETLINK_MAJOR,"netlink", &netlink_fops)) {
 		printk(KERN_ERR "netlink: unable to get major %d\n", NETLINK_MAJOR);
 		return -EIO;
 	}
+	devfs_handle = devfs_mk_dir (NULL, "netlink", 7, NULL);
+	/*  Someone tell me the official names for the uppercase ones  */
+	make_devfs_entries ("route", 0);
+	make_devfs_entries ("skip", 1);
+	make_devfs_entries ("USERSOCK", 2);
+	make_devfs_entries ("fwmonitor", 3);
+	make_devfs_entries ("ARPD", 8);
+	make_devfs_entries ("ROUTE6", 11);
+	make_devfs_entries ("IP6_FW", 13);
+	devfs_register_series (devfs_handle, "tap%u", 16, DEVFS_FL_DEFAULT,
+			       NETLINK_MAJOR, 16,
+			       S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			       &netlink_fops, NULL);
 	return 0;
 }
 
@@ -209,7 +218,8 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-	unregister_chrdev(NET_MAJOR,"netlink");
+	devfs_unregister (devfs_handle);
+	devfs_unregister_chrdev(NETLINK_MAJOR, "netlink");
 }
 
 #endif

@@ -9,6 +9,8 @@
  *  <drew@colorado.edu>
  *
  *  Jiffies wrap fixes (host->resetting), 3 Dec 1998 Andrea Arcangeli
+ *  Added QLOGIC QLA1280 SCSI controller kernel host support. 
+ *     August 4, 1999 Fred Lewis, Intel DuPont
  */
 
 
@@ -47,7 +49,7 @@
     defined(CONFIG_WARPENGINE_SCSI) || \
     defined(CONFIG_A4091_SCSI) || \
     defined (CONFIG_GVP_TURBO_SCSI) || \
-    defined (CONFIG_BLZ603E)
+    defined (CONFIG_BLZ603EPLUS_SCSI)
 #define AMIGA7XXCONFIG
 #endif
 
@@ -61,6 +63,10 @@
 
 #ifdef CONFIG_BVME6000_SCSI
 #include "bvme6000.h"
+#endif
+
+#ifdef CONFIG_SCSI_SIM710
+#include "sim710.h"
 #endif
 
 #ifdef CONFIG_A3000_SCSI
@@ -95,16 +101,20 @@
 #include "fastlane.h"
 #endif
 
+#ifdef CONFIG_OKTAGON_SCSI
+#include "oktagon_esp.h"
+#endif
+
 #ifdef CONFIG_ATARI_SCSI
 #include "atari_scsi.h"
 #endif
 
-#ifdef CONFIG_MAC_SCSI_OLD
+#if defined(CONFIG_MAC_SCSI) || defined(CONFIG_MAC_SCSI_OLD)
 #include "mac_scsi.h"
 #endif
 
-#ifdef CONFIG_MAC_SCSI
-#include "mac_scsinew.h"
+#ifdef CONFIG_SUN3_SCSI
+#include "sun3_scsi.h"
 #endif
 
 #ifdef CONFIG_SCSI_MAC_ESP
@@ -129,6 +139,10 @@
 
 #ifdef CONFIG_SCSI_AIC7XXX
 #include "aic7xxx.h"
+#endif
+
+#ifdef CONFIG_SCSI_IPS
+#include "ips.h"
 #endif
 
 #ifdef CONFIG_SCSI_BUSLOGIC
@@ -177,6 +191,10 @@
 
 #ifdef CONFIG_SCSI_QLOGIC_FC
 #include "qlogicfc.h"
+#endif
+
+#ifdef CONFIG_SCSI_QLOGIC_1280
+#include "qla1280.h"
 #endif
 
 #ifdef CONFIG_SCSI_SEAGATE
@@ -327,6 +345,22 @@
 #include "jazz_esp.h"
 #endif
 
+#ifdef CONFIG_SCSI_DECNCR
+#include "dec_esp.h"
+#endif
+
+#ifdef CONFIG_SUN3X_ESP
+#include "sun3x_esp.h"
+#endif
+
+#ifdef CONFIG_IPHASE5526
+#include "../net/fc/iph5526_scsi.h"
+#endif
+
+#ifdef CONFIG_BLK_DEV_3W_XXXX_RAID
+#include "3w-xxxx.h"
+#endif
+
 /*
  * Moved ppa driver to the end of the probe list
  * since it is a removable host adapter.
@@ -402,6 +436,9 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #ifdef CONFIG_FASTLANE_SCSI
 	SCSI_FASTLANE,
 #endif
+#ifdef CONFIG_OKTAGON_SCSI
+	SCSI_OKTAGON_ESP,
+#endif
 #endif
 
 #ifdef CONFIG_ATARI
@@ -422,11 +459,18 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #endif
 #endif
 
+#ifdef CONFIG_SUN3_SCSI
+	SUN3_NCR5380,
+#endif
+
 #ifdef CONFIG_MVME16x_SCSI
 	MVME16x_SCSI,
 #endif
 #ifdef CONFIG_BVME6000_SCSI
 	BVME6000_SCSI,
+#endif
+#ifdef CONFIG_SCSI_SIM710
+	SIM710_SCSI,
 #endif
 #ifdef CONFIG_SCSI_ADVANSYS
 	ADVANSYS,
@@ -464,6 +508,9 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #ifdef CONFIG_SCSI_AIC7XXX
     AIC7XXX,
 #endif
+#ifdef CONFIG_SCSI_IPS
+    IPS,
+#endif
 #ifdef CONFIG_SCSI_FD_MCS
    FD_MCS,
 #endif
@@ -490,6 +537,9 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #endif
 #ifdef CONFIG_SCSI_QLOGIC_FC
     QLOGICFC,
+#endif
+#ifdef CONFIG_SCSI_QLOGIC_1280
+    QLA1280_LINUX_TEMPLATE, 
 #endif
 #ifdef CONFIG_SCSI_PAS16
     MV_PAS16,
@@ -589,6 +639,15 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
     POWERTECSCSI,
 #endif
 #endif
+#ifdef CONFIG_IPHASE5526
+	IPH5526_SCSI_FC,
+#endif
+#ifdef CONFIG_SCSI_DECNCR	
+    SCSI_DEC_ESP,
+#endif
+#ifdef CONFIG_BLK_DEV_3W_XXXX_RAID
+	TWXXXX,
+#endif
 /* "Removable host adapters" below this line (Parallel Port/USB/other) */
 #ifdef CONFIG_SCSI_PPA
     PPA,
@@ -596,6 +655,9 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
 #ifdef CONFIG_SCSI_IMM
     IMM,
 #endif
+#ifdef CONFIG_SUN3X_ESP  
+    SCSI_SUN3X_ESP,
+#endif  
 #ifdef CONFIG_SCSI_DEBUG
     SCSI_DEBUG,
 #endif
@@ -609,6 +671,7 @@ static Scsi_Host_Template builtin_scsi_hosts[] =
  *      MAX_SCSI_HOSTS here.
  */
 
+Scsi_Host_Name * scsi_host_no_list = NULL;
 struct Scsi_Host * scsi_hostlist = NULL;
 struct Scsi_Device_Template * scsi_devicelist = NULL;
 
@@ -618,7 +681,8 @@ int next_scsi_host = 0;
 void
 scsi_unregister(struct Scsi_Host * sh){
     struct Scsi_Host * shpnt;
-    
+    Scsi_Host_Name *shn;
+        
     if(scsi_hostlist == sh)
 	scsi_hostlist = sh->next;
     else {
@@ -626,6 +690,16 @@ scsi_unregister(struct Scsi_Host * sh){
 	while(shpnt->next != sh) shpnt = shpnt->next;
 	shpnt->next = shpnt->next->next;
     }
+
+    /*
+     * We have to unregister the host from the scsi_host_no_list as well.
+     * Decide by the host_no not by the name because most host drivers are
+     * able to handle more than one adapters from the same kind (or family).
+     */
+    for ( shn=scsi_host_no_list; shn && (sh->host_no != shn->host_no);
+	  shn=shn->next);
+    if (shn) shn->host_registered = 0;
+    /* else {} : This should not happen, we should panic here... */
     
     /* If we are removing the last host registered, it is safe to reuse
      * its host number (this avoids "holes" at boot time) (DB) 
@@ -642,7 +716,7 @@ scsi_unregister(struct Scsi_Host * sh){
 	}
     }
     next_scsi_host--;
-    scsi_init_free((char *) sh, sizeof(struct Scsi_Host) + sh->extra_bytes);
+    kfree((char *) sh);
 }
 
 /* We call this when we come across a new host adapter. We only do this
@@ -652,20 +726,53 @@ scsi_unregister(struct Scsi_Host * sh){
 
 struct Scsi_Host * scsi_register(Scsi_Host_Template * tpnt, int j){
     struct Scsi_Host * retval, *shpnt;
-    retval = (struct Scsi_Host *)scsi_init_malloc(sizeof(struct Scsi_Host) + j,
-						  (tpnt->unchecked_isa_dma && j ? GFP_DMA : 0) | GFP_ATOMIC);
+    Scsi_Host_Name *shn, *shn2;
+    int new = 1;
+    retval = (struct Scsi_Host *)kmalloc(sizeof(struct Scsi_Host) + j,
+					 (tpnt->unchecked_isa_dma && j ? GFP_DMA : 0) | GFP_ATOMIC);
+    memset(retval, 0, sizeof(struct Scsi_Host) + j);
+
+    /* trying to find a reserved entry (host_no) */
+    for (shn = scsi_host_no_list;shn;shn = shn->next)
+	if (!(shn->host_registered) && shn->loaded_as_module && tpnt->proc_dir &&
+		tpnt->proc_dir->name && !strncmp(tpnt->proc_dir->name, shn->name, strlen(tpnt->proc_dir->name))) {
+	    new = 0;
+	    retval->host_no = shn->host_no;
+	    shn->host_registered = 1;
+	    shn->loaded_as_module = scsi_loadable_module_flag;
+	    break;
+	}
     atomic_set(&retval->host_active,0);
     retval->host_busy = 0;
     retval->host_failed = 0;
-    retval->block = NULL;
-    retval->wish_block = 0;
     if(j > 0xffff) panic("Too many extra bytes requested\n");
     retval->extra_bytes = j;
     retval->loaded_as_module = scsi_loadable_module_flag;
-    retval->host_no = max_scsi_hosts++; /* never reuse host_no (DB) */
+    if (new) {
+	int len = 0;
+	shn = (Scsi_Host_Name *) kmalloc(sizeof(Scsi_Host_Name), GFP_ATOMIC);
+	if (tpnt->proc_dir)
+	    len = strlen(tpnt->proc_dir->name);
+	shn->name = kmalloc(len+1, GFP_ATOMIC);
+	if (tpnt->proc_dir)
+	    strncpy(shn->name, tpnt->proc_dir->name, len);
+	shn->name[len] = 0;
+	shn->host_no = max_scsi_hosts++;
+	shn->host_registered = 1;
+	shn->loaded_as_module = scsi_loadable_module_flag;
+	shn->next = NULL;
+	if (scsi_host_no_list) {
+	    for (shn2 = scsi_host_no_list;shn2->next;shn2 = shn2->next)
+		;
+	    shn2->next = shn;
+	}
+	else
+	    scsi_host_no_list = shn;
+	retval->host_no = shn->host_no;
+    }
     next_scsi_host++;
     retval->host_queue = NULL;
-    retval->host_wait = NULL;
+    init_waitqueue_head(&retval->host_wait);
     retval->resetting = 0;
     retval->last_reset = 0;
     retval->irq = 0;
@@ -676,6 +783,14 @@ struct Scsi_Host * scsi_register(Scsi_Host_Template * tpnt, int j){
     retval->max_id = 8;      
     retval->max_lun = 8;
 
+    /*
+     * All drivers right now should be able to handle 12 byte commands.
+     * Every so often there are requests for 16 byte commands, but individual
+     * low-level drivers need to certify that they actually do something
+     * sensible with such commands.
+     */
+    retval->max_cmd_len = 12;
+
     retval->unique_id = 0;
     retval->io_port = 0;
     retval->hostt = tpnt;
@@ -684,11 +799,9 @@ struct Scsi_Host * scsi_register(Scsi_Host_Template * tpnt, int j){
     retval->ehandler = NULL;    /* Initial value until the thing starts up. */
     retval->eh_notify   = NULL;    /* Who we notify when we exit. */
 
-    /*
-     * Initialize the fields used for mid-level queueing.
-     */
-    retval->pending_commands = NULL;
-    retval->host_busy = FALSE;
+
+    retval->host_blocked = FALSE;
+    retval->host_self_blocked = FALSE;
 
 #ifdef DEBUG
     printk("Register %x %x: %d\n", (int)retval, (int)retval->hostt, j);
@@ -703,7 +816,7 @@ struct Scsi_Host * scsi_register(Scsi_Host_Template * tpnt, int j){
     retval->unchecked_isa_dma = tpnt->unchecked_isa_dma;
     retval->use_clustering = tpnt->use_clustering;   
 
-    retval->select_queue_depths = NULL;
+    retval->select_queue_depths = tpnt->select_queue_depths;
 
     if(!scsi_hostlist)
 	scsi_hostlist = retval;
@@ -730,20 +843,21 @@ scsi_register_device(struct Scsi_Device_Template * sdpnt)
  * Why is this a separate function?  Because the kernel_thread code
  * effectively does a fork, and there is a builtin exit() call when
  * the child returns.   The difficulty is that scsi_init() is
- * marked __initfunc(), which means the memory is unmapped after bootup
+ * marked __init, which means the memory is unmapped after bootup
  * is complete, which means that the thread's exit() call gets wiped.
  *
  * The lesson is to *NEVER*, *NEVER* call kernel_thread() from an
- * __initfunc() function, if that function could ever return.
+ * __init function, if that function could ever return.
  */
 static void launch_error_handler_thread(struct Scsi_Host * shpnt)
 {
-            struct semaphore sem = MUTEX_LOCKED;
+            DECLARE_MUTEX_LOCKED(sem);
             
             shpnt->eh_notify = &sem;
 
             kernel_thread((int (*)(void *))scsi_error_handler, 
                           (void *) shpnt, 0);
+
             /*
              * Now wait for the kernel error thread to initialize itself
              * as it might be needed when we scan the bus.
@@ -752,7 +866,7 @@ static void launch_error_handler_thread(struct Scsi_Host * shpnt)
             shpnt->eh_notify = NULL;
 }
 
-__initfunc(unsigned int scsi_init(void))
+unsigned int __init scsi_init(void)
 {
     static int called = 0;
     int i, pcount;
@@ -833,8 +947,6 @@ __initfunc(unsigned int scsi_init(void))
     
     printk ("scsi : %d host%s.\n", next_scsi_host,
 	    (next_scsi_host == 1) ? "" : "s");
-    
-    scsi_make_blocked_list();
     
     /* Now attach the high level drivers */
 #ifdef CONFIG_BLK_DEV_SD

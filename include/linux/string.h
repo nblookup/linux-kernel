@@ -2,10 +2,7 @@
 #define _LINUX_STRING_H_
 
 #include <linux/types.h>	/* for size_t */
-
-#ifndef NULL
-#define NULL ((void *) 0)
-#endif
+#include <linux/stddef.h>	/* for NULL */
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,6 +17,7 @@ extern char * strchr(const char *,int);
 extern char * strrchr(const char *,int);
 extern char * strpbrk(const char *,const char *);
 extern char * strtok(char *,const char *);
+extern char * strsep(char **,const char *);
 extern char * strstr(const char *,const char *);
 extern __kernel_size_t strlen(const char *);
 extern __kernel_size_t strnlen(const char *,__kernel_size_t);

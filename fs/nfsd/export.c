@@ -64,10 +64,8 @@ static int			initialized = 0;
 static int			hash_lock = 0;
 static int			want_lock = 0;
 static int			hash_count = 0;
-static struct wait_queue *	hash_wait = NULL;
+static DECLARE_WAIT_QUEUE_HEAD(	hash_wait );
 
-#define READLOCK		0
-#define WRITELOCK		1
 
 /*
  * Find a client's export for a device.
@@ -105,20 +103,6 @@ out:
 	return exp;
 }
 
-/*
- * Check whether there are any exports for a device.
- */
-static int
-exp_device_in_use(kdev_t dev)
-{
-	struct svc_client *clp;
-
-	for (clp = clients; clp; clp = clp->cl_next) {
-		if (exp_find(clp, dev))
-			return 1;
-	}
-	return 0;
-}
 
 /*
  * Look up the device of the parent fs.
@@ -168,9 +152,8 @@ else
 					}
 				} while (NULL != (exp = exp->ex_next));
 		} while (nfsd_parentdev(&xdev));
-		if (xdentry == xdentry->d_parent) {
+		if (IS_ROOT(xdentry))
 			break;
-		}
 	} while ((xdentry = xdentry->d_parent));
 	exp = NULL;
 out:
@@ -204,7 +187,7 @@ dprintk("nfsd: exp_child mount under submount.\n");
 #endif
 						goto out;
 					}
-					if (ndentry == ndentry->d_parent)
+					if (IS_ROOT(ndentry))
 						break;
 				}
 		} while (NULL != (exp = exp->ex_next));
@@ -236,7 +219,7 @@ exp_export(struct nfsctl_export *nxp)
 
 	dprintk("exp_export called for %s:%s (%x/%ld fl %x).\n",
 			nxp->ex_client, nxp->ex_path,
-			nxp->ex_dev, nxp->ex_ino, nxp->ex_flags);
+			nxp->ex_dev, (long) nxp->ex_ino, nxp->ex_flags);
 	dev = to_kdev_t(nxp->ex_dev);
 	ino = nxp->ex_ino;
 
@@ -287,6 +270,12 @@ exp_export(struct nfsctl_export *nxp)
 		goto finish;
 
 	err = -EINVAL;
+	if (!(inode->i_sb->s_type->fs_flags & FS_REQUIRES_DEV) ||
+	    inode->i_sb->s_op->read_inode == NULL) {
+		dprintk("exp_export: export of invalid fs type.\n");
+		goto finish;
+	}
+
 	if ((parent = exp_child(clp, dev, dentry)) != NULL) {
 		dprintk("exp_export: export not valid (Rule 3).\n");
 		goto finish;
@@ -364,16 +353,6 @@ exp_do_unexport(svc_export *unexp)
 		for (exp = clp->cl_export[i]; exp; exp = exp->ex_next)
 			if (exp->ex_parent == unexp)
 				exp->ex_parent = unexp->ex_parent;
-	}
-
-	/*
-	 * Check whether this is the last export for this device,
-	 * and if so flush any cached dentries.
-	 */
-	if (!exp_device_in_use(unexp->ex_dev)) {
-printk("exp_do_unexport: %s last use, flushing cache\n",
-	kdevname(unexp->ex_dev));
-		nfsd_fh_flush(unexp->ex_dev);
 	}
 
 	dentry = unexp->ex_dentry;
@@ -454,7 +433,7 @@ out:
  */
 int
 exp_rootfh(struct svc_client *clp, kdev_t dev, ino_t ino,
-	   char *path, struct knfs_fh *f)
+	   char *path, struct knfsd_fh *f, int maxsize)
 {
 	struct svc_export	*exp;
 	struct dentry		*dentry = NULL;
@@ -472,11 +451,11 @@ exp_rootfh(struct svc_client *clp, kdev_t dev, ino_t ino,
 		ino = dentry->d_inode->i_ino;
 	
 		dprintk("nfsd: exp_rootfh(%s [%p] %s:%x/%ld)\n",
-		         path, dentry, clp->cl_ident, dev, ino);
+		         path, dentry, clp->cl_ident, dev, (long) ino);
 		exp = exp_parent(clp, dev, dentry);
 	} else {
 		dprintk("nfsd: exp_rootfh(%s:%x/%ld)\n",
-		         clp->cl_ident, dev, ino);
+		         clp->cl_ident, dev, (long) ino);
 		if ((exp = exp_get(clp, dev, ino)))
 			if (!(dentry = dget(exp->ex_dentry))) {
 				printk("exp_rootfh: Aieee, NULL dentry\n");
@@ -497,17 +476,17 @@ exp_rootfh(struct svc_client *clp, kdev_t dev, ino_t ino,
 		printk("exp_rootfh: Aieee, ino/dev mismatch\n");
 		printk("exp_rootfh: arg[dev(%x):ino(%ld)]"
 		       " inode[dev(%x):ino(%ld)]\n",
-		       dev, ino, inode->i_dev, inode->i_ino);
+		       dev, (long) ino, inode->i_dev, (long) inode->i_ino);
 	}
 
 	/*
 	 * fh must be initialized before calling fh_compose
 	 */
-	fh_init(&fh);
-	fh_compose(&fh, exp, dentry);
-	memcpy(f, &fh.fh_handle, sizeof(struct knfs_fh));
+	fh_init(&fh, maxsize);
+	err = fh_compose(&fh, exp, dentry);
+	memcpy(f, &fh.fh_handle, sizeof(struct knfsd_fh));
 	fh_put(&fh);
-	return 0;
+	return err;
 
 out:
 	dput(dentry);
@@ -628,7 +607,9 @@ struct flags {
 	{ NFSEXP_UIDMAP, {"uidmap", ""}},
 	{ NFSEXP_KERBEROS, { "kerberos", ""}},
 	{ NFSEXP_SUNSECURE, { "sunsecure", ""}},
-	{ NFSEXP_CROSSMNT, {"crossmnt", ""}},
+	{ NFSEXP_CROSSMNT, {"nohide", ""}},
+	{ NFSEXP_NOSUBTREECHECK, {"no_subtree_check", ""}},
+	{ NFSEXP_NOAUTHNLM, {"insecure_locks", ""}},
 	{ 0, {"", ""}}
 };
 
@@ -685,7 +666,7 @@ exp_procfs_exports(char *buffer, char **start, off_t offset,
 							if (first++) len += sprintf(buffer+len, "%s", " ");
 							if (tmp->h_client != clp)
 								len += sprintf(buffer+len, "(");
-							len += sprintf(buffer+len, "%ld.%ld.%ld.%ld",
+							len += sprintf(buffer+len, "%d.%d.%d.%d",
 									htonl(addr.s_addr) >> 24 & 0xff,
 									htonl(addr.s_addr) >> 16 & 0xff,
 									htonl(addr.s_addr) >>  8 & 0xff,

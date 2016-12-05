@@ -39,11 +39,6 @@
 #define PLND(x)
 #endif
 
-struct proc_dir_entry proc_scsi_pluto = {
-	PROC_SCSI_PLUTO, 5, "pluto",
-	S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
-
 static struct ctrl_inquiry {
 	struct Scsi_Host host;
 	struct pluto pluto;
@@ -54,22 +49,22 @@ static struct ctrl_inquiry {
 static int fcscount __initdata = 0;
 static atomic_t fcss __initdata = ATOMIC_INIT(0);
 static struct timer_list fc_timer __initdata = { 0 };
-struct semaphore fc_sem __initdata = MUTEX_LOCKED;
+DECLARE_MUTEX_LOCKED(fc_sem);
 
 static int pluto_encode_addr(Scsi_Cmnd *SCpnt, u16 *addr, fc_channel *fc, fcp_cmnd *fcmd);
 
-__initfunc(static void pluto_detect_timeout(unsigned long data))
+static void __init pluto_detect_timeout(unsigned long data)
 {
 	PLND(("Timeout\n"))
 	up(&fc_sem);
 }
 
-__initfunc(static void pluto_detect_done(Scsi_Cmnd *SCpnt))
+static void __init pluto_detect_done(Scsi_Cmnd *SCpnt)
 {
 	/* Do nothing */
 }
 
-__initfunc(static void pluto_detect_scsi_done(Scsi_Cmnd *SCpnt))
+static void __init pluto_detect_scsi_done(Scsi_Cmnd *SCpnt)
 {
 	SCpnt->request.rq_status = RQ_SCSI_DONE;
 	PLND(("Detect done %08lx\n", (long)SCpnt))
@@ -92,13 +87,13 @@ static void pluto_select_queue_depths(struct Scsi_Host *host, Scsi_Device *devli
 
 /* Detect all SSAs attached to the machine.
    To be fast, do it on all online FC channels at the same time. */
-__initfunc(int pluto_detect(Scsi_Host_Template *tpnt))
+int __init pluto_detect(Scsi_Host_Template *tpnt)
 {
 	int i, retry, nplutos;
 	fc_channel *fc;
 	Scsi_Device dev;
 
-	tpnt->proc_dir = &proc_scsi_pluto;
+	tpnt->proc_name = "pluto";
 	fcscount = 0;
 	for_each_online_fc_channel(fc) {
 		if (!fc->posmap)
@@ -117,7 +112,7 @@ __initfunc(int pluto_detect(Scsi_Host_Template *tpnt))
 #endif
 			return 0;
 	}
-	fcs = (struct ctrl_inquiry *) scsi_init_malloc (sizeof (struct ctrl_inquiry) * fcscount, GFP_DMA);
+	fcs = (struct ctrl_inquiry *) kmalloc (sizeof (struct ctrl_inquiry) * fcscount, GFP_DMA);
 	if (!fcs) {
 		printk ("PLUTO: Not enough memory to probe\n");
 		return 0;
@@ -270,7 +265,7 @@ __initfunc(int pluto_detect(Scsi_Host_Template *tpnt))
 		} else
 			fc->fcp_register(fc, TYPE_SCSI_FCP, 1);
 	}
-	scsi_init_free((char *)fcs, sizeof (struct ctrl_inquiry) * fcscount);
+	kfree((char *)fcs);
 	if (nplutos)
 		printk ("PLUTO: Total of %d SparcSTORAGE Arrays found\n", nplutos);
 	return nplutos;
@@ -292,12 +287,16 @@ int pluto_release(struct Scsi_Host *host)
 
 const char *pluto_info(struct Scsi_Host *host)
 {
-	static char buf[80];
+	static char buf[128], *p;
 	struct pluto *pluto = (struct pluto *) host->hostdata;
 
 	sprintf(buf, "SUN SparcSTORAGE Array %s fw %s serial %s %dx%d on %s",
 		pluto->rev_str, pluto->fw_rev_str, pluto->serial_str,
 		host->max_channel, host->max_id, pluto->fc->name);
+#ifdef __sparc__
+	p = strchr(buf, 0);
+	sprintf(p, " PROM node %x", pluto->fc->dev->prom_node);
+#endif	
 	return buf;
 }
 

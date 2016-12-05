@@ -12,35 +12,62 @@
 #
 # Copyright (C) 1994 by Linus Torvalds
 #
+# 19990713  Artur Skawina <skawina@geocities.com>
+#           Added '-march' and '-mpreferred-stack-boundary' support
+#
 
 LD=$(CROSS_COMPILE)ld -m elf_i386
-CPP=$(CC) -E
 OBJCOPY=$(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -S
 LDFLAGS=-e stext
 LINKFLAGS =-T $(TOPDIR)/arch/i386/vmlinux.lds $(LDFLAGS)
 
-CFLAGS_PIPE := -pipe
-CFLAGS_NSR  := -fno-strength-reduce
-CFLAGS := $(CFLAGS) $(CFLAGS_PIPE) $(CFLAGS_NSR)
+CFLAGS += -pipe
+
+# only work around strength reduction bug(s) on older gcc versions
+CFLAGS += $(shell if ! $(CC) -march=i486 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-fno-strength-reduce"; fi)
+
+# prevent gcc from keeping the stack 16 byte aligned
+CFLAGS += $(shell if $(CC) -mpreferred-stack-boundary=2 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-mpreferred-stack-boundary=2"; fi)
 
 ifdef CONFIG_M386
 CFLAGS := $(CFLAGS) -m386 -DCPU=386
+AFLAGS := $(AFLAGS) -DCPU=386
 endif
 
 ifdef CONFIG_M486
-CFLAGS := $(CFLAGS) -m486 -DCPU=486
+CFLAGS := $(CFLAGS) -DCPU=486
+CFLAGS += $(shell if $(CC) -march=i486 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=i486"; else echo "-m486"; fi)
+AFLAGS := $(AFLAGS) -DCPU=486
 endif
 
 ifdef CONFIG_M586
-CFLAGS := $(CFLAGS) -m486 -malign-loops=2 -malign-jumps=2 -malign-functions=2 -DCPU=586
+CFLAGS := $(CFLAGS) -DCPU=586
+CFLAGS += $(shell if $(CC) -march=i586 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=i586"; fi)
+AFLAGS := $(AFLAGS) -DCPU=586
 endif
 
 ifdef CONFIG_M586TSC
-CFLAGS := $(CFLAGS) -m486 -malign-loops=2 -malign-jumps=2 -malign-functions=2 -DCPU=586
+CFLAGS := $(CFLAGS) -DCPU=586
+CFLAGS += $(shell if $(CC) -march=i586 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=i586"; fi)
+AFLAGS := $(AFLAGS) -DCPU=586
 endif
 
 ifdef CONFIG_M686
-CFLAGS := $(CFLAGS) -m486 -malign-loops=2 -malign-jumps=2 -malign-functions=2 -DCPU=686
+CFLAGS := $(CFLAGS) -DCPU=686
+CFLAGS += $(shell if $(CC) -march=i686 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=i686"; fi)
+AFLAGS := $(AFLAGS) -DCPU=686
+endif
+
+ifdef CONFIG_MK6
+CFLAGS := $(CFLAGS) -DCPU=586
+CFLAGS += $(shell if $(CC) -march=k6 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=k6"; fi)
+AFLAGS := $(AFLAGS) -DCPU=586
+endif
+
+ifdef CONFIG_MK7
+CFLAGS := $(CFLAGS) -DCPU=686 -march=pentiumpro -mpentiumpro -malign-functions=4 -fschedule-insns2 -mwide-multiply -fexpensive-optimizations
+CFLAGS += $(shell if $(CC) -march=i686 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=i686"; fi)
+AFLAGS := $(AFLAGS) -DCPU=686
 endif
 
 HEAD := arch/i386/kernel/head.o arch/i386/kernel/init_task.o
@@ -61,6 +88,13 @@ arch/i386/mm: dummy
 	$(MAKE) linuxsubdirs SUBDIRS=arch/i386/mm
 
 MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
+
+vmlinux: arch/i386/vmlinux.lds
+
+FORCE: ;
+
+.PHONY: zImage bzImage compressed zlilo bzlilo zdisk bzdisk install \
+		clean archclean archmrproper archdep
 
 zImage: vmlinux
 	@$(MAKEBOOT) zImage

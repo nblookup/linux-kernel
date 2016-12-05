@@ -20,6 +20,7 @@
  * Copyright (C) 1996, Olaf Kirch <okir@monad.swb.de>
  */
 
+#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -98,9 +99,10 @@ nlmsvc_lookup_block(struct nlm_file *file, struct nlm_lock *lock, int remove)
 				lock->fl.fl_end, lock->fl.fl_type);
 	for (head = &nlm_blocked; (block = *head); head = &block->b_next) {
 		fl = &block->b_call.a_args.lock.fl;
-		dprintk("       check f=%p pd=%d %ld-%ld ty=%d\n",
+		dprintk("lockd: check f=%p pd=%d %ld-%ld ty=%d cookie=%x\n",
 				block->b_file, fl->fl_pid, fl->fl_start,
-				fl->fl_end, fl->fl_type);
+				fl->fl_end, fl->fl_type,
+				*(unsigned int*)(block->b_call.a_args.cookie.data));
 		if (block->b_file == file && nlm_compare_locks(fl, &lock->fl)) {
 			if (remove)
 				*head = block->b_next;
@@ -129,6 +131,8 @@ nlmsvc_find_block(struct nlm_cookie *cookie)
 	struct nlm_block *block;
 
 	for (block = nlm_blocked; block; block = block->b_next) {
+		dprintk("cookie: head of blocked queue %p, block %p\n", 
+			nlm_blocked, block);
 		if (nlm_cookie_match(&block->b_call.a_args.cookie,cookie))
 			break;
 	}
@@ -310,7 +314,13 @@ again:
 		switch(-error) {
 		case 0:
 			return nlm_granted;
-		case EDEADLK:			/* no applicable NLM status */
+		case EDEADLK:
+#ifdef CONFIG_LOCKD_V4
+			return nlm4_deadlock; /* will be downgraded to lck_deined if this
+					       * is a NLMv1,3 request */
+#else
+			/* no applicable NLM status */
+#endif
 		case EAGAIN:
 			return nlm_lck_denied;
 		default:			/* includes ENOLCK */
@@ -335,9 +345,12 @@ again:
 	/* Append to list of blocked */
 	nlmsvc_insert_block(block, NLM_NEVER);
 
-	/* Now add block to block list of the conflicting lock */
-	dprintk("lockd: blocking on this lock.\n");
-	posix_block_lock(conflock, &block->b_call.a_args.lock.fl);
+	if (!block->b_call.a_args.lock.fl.fl_prevblock) {
+		/* Now add block to block list of the conflicting lock
+		   if we haven't done so. */
+		dprintk("lockd: blocking on this lock.\n");
+		posix_block_lock(conflock, &block->b_call.a_args.lock.fl);
+	}
 
 	up(&file->f_sema);
 	return nlm_lck_blocked;
@@ -440,7 +453,7 @@ nlmsvc_notify_blocked(struct file_lock *fl)
 	dprintk("lockd: VFS unblock notification for block %p\n", fl);
 	posix_unblock_lock(fl);
 	for (bp = &nlm_blocked; (block = *bp); bp = &block->b_next) {
-		if (&block->b_call.a_args.lock.fl == fl) {
+		if (nlm_compare_locks(&block->b_call.a_args.lock.fl, fl)) {
 			svc_wake_up(block->b_daemon);
 			nlmsvc_insert_block(block, 0);
 			return;
@@ -538,6 +551,8 @@ nlmsvc_grant_callback(struct rpc_task *task)
 	unsigned long		timeout;
 
 	dprintk("lockd: GRANT_MSG RPC callback\n");
+	dprintk("callback: looking for cookie %x \n", 
+		*(unsigned int *)(call->a_args.cookie.data));
 	if (!(block = nlmsvc_find_block(&call->a_args.cookie))) {
 		dprintk("lockd: no block for cookie %x\n", *(u32 *)(call->a_args.cookie.data));
 		return;
@@ -614,7 +629,7 @@ nlmsvc_retry_blocked(void)
 	dprintk("nlmsvc_retry_blocked(%p, when=%ld)\n",
 			nlm_blocked,
 			nlm_blocked? nlm_blocked->b_when : 0);
-	while ((block = nlm_blocked) && block->b_when < jiffies) {
+	while ((block = nlm_blocked) && block->b_when <= jiffies) {
 		dprintk("nlmsvc_retry_blocked(%p, when=%ld, done=%d)\n",
 			block, block->b_when, block->b_done);
 		if (block->b_done)

@@ -1,5 +1,5 @@
 /*
- *  linux/drivers/block/ali14xx.c       Version 0.03  Feb 09, 1996
+ *  linux/drivers/block/ali14xx.c		Version 0.03	Feb 09, 1996
  *
  *  Copyright (C) 1996  Linus Torvalds & author (see below)
  */
@@ -47,18 +47,20 @@
 #include <linux/ioport.h>
 #include <linux/blkdev.h>
 #include <linux/hdreg.h>
+#include <linux/ide.h>
+
 #include <asm/io.h>
-#include "ide.h"
+
 #include "ide_modes.h"
 
 /* port addresses for auto-detection */
 #define ALI_NUM_PORTS 4
-static int ports[ALI_NUM_PORTS] = {0x074, 0x0f4, 0x034, 0x0e4};
+static int ports[ALI_NUM_PORTS] __initdata = {0x074, 0x0f4, 0x034, 0x0e4};
 
 /* register initialization data */
 typedef struct { byte reg, data; } RegInitializer;
 
-static RegInitializer initData[] = {
+static RegInitializer initData[] __initdata = {
 	{0x01, 0x0f}, {0x02, 0x00}, {0x03, 0x00}, {0x04, 0x00},
 	{0x05, 0x00}, {0x06, 0x00}, {0x07, 0x2b}, {0x0a, 0x0f},
 	{0x25, 0x00}, {0x26, 0x00}, {0x27, 0x00}, {0x28, 0x00},
@@ -148,7 +150,7 @@ static void ali14xx_tune_drive (ide_drive_t *drive, byte pio)
 /*
  * Auto-detect the IDE controller port.
  */
-static int findPort (void)
+static int __init findPort (void)
 {
 	int i;
 	byte t;
@@ -181,7 +183,7 @@ static int findPort (void)
 /*
  * Initialize controller registers with default values.
  */
-static int initRegisters (void) {
+static int __init initRegisters (void) {
 	RegInitializer *p;
 	byte t;
 	unsigned long flags;
@@ -198,15 +200,15 @@ static int initRegisters (void) {
 	return t;
 }
 
-void init_ali14xx (void)
+void __init init_ali14xx (void)
 {
 	/* auto-detect IDE controller port */
 	if (!findPort()) {
-		printk("ali14xx: not found\n");
+		printk("\nali14xx: not found");
 		return;
 	}
 
-	printk("ali14xx: base= 0x%03x, regOn = 0x%02x\n", basePort, regOn);
+	printk("\nali14xx: base= 0x%03x, regOn = 0x%02x", basePort, regOn);
 	ide_hwifs[0].chipset = ide_ali14xx;
 	ide_hwifs[1].chipset = ide_ali14xx;
 	ide_hwifs[0].tuneproc = &ali14xx_tune_drive;
@@ -217,7 +219,7 @@ void init_ali14xx (void)
 
 	/* initialize controller registers */
 	if (!initRegisters()) {
-		printk("ali14xx: Chip initialization failed\n");
+		printk("\nali14xx: Chip initialization failed");
 		return;
 	}
 }

@@ -29,6 +29,7 @@
 
 
 #include <linux/types.h>
+#include <linux/kdev_t.h>
 #include <linux/genhd.h>
 #include <linux/sched.h>
 #include <linux/init.h>
@@ -43,7 +44,7 @@ static int stdma_locked = 0;			/* the semaphore */
 						/* int func to be called */
 static void (*stdma_isr)(int, void *, struct pt_regs *) = NULL;
 static void	*stdma_isr_data = NULL;		/* data passed to isr */
-static struct wait_queue *stdma_wait = NULL;	/* wait queue for ST-DMA */
+static DECLARE_WAIT_QUEUE_HEAD(stdma_wait);	/* wait queue for ST-DMA */
 
 
 
@@ -171,7 +172,7 @@ int stdma_islocked(void)
  *
  */
 
-__initfunc(void stdma_init(void))
+void __init stdma_init(void)
 {
 	stdma_isr = NULL;
 	request_irq(IRQ_MFP_FDC, stdma_int, IRQ_TYPE_SLOW,

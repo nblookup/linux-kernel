@@ -12,8 +12,11 @@
 #define _VIDEO_FBCON_H
 
 #include <linux/config.h>
+#include <linux/types.h>
 #include <linux/console_struct.h>
 #include <linux/vt_buffer.h>
+
+#include <asm/io.h>
 
 
     /*                                  
@@ -40,6 +43,67 @@ struct display_switch {
 }; 
 
 extern struct display_switch fbcon_dummy;
+
+   /*
+    *    This is the interface between the low-level console driver and the
+    *    low-level frame buffer device
+    */
+
+struct display {
+    /* Filled in by the frame buffer device */
+
+    struct fb_var_screeninfo var;   /* variable infos. yoffset and vmode */
+                                    /* are updated by fbcon.c */
+    struct fb_cmap cmap;            /* colormap */
+    char *screen_base;              /* pointer to top of virtual screen */    
+                                    /* (virtual address) */
+    int visual;
+    int type;                       /* see FB_TYPE_* */
+    int type_aux;                   /* Interleave for interleaved Planes */
+    u_short ypanstep;               /* zero if no hardware ypan */
+    u_short ywrapstep;              /* zero if no hardware ywrap */
+    u_long line_length;             /* length of a line in bytes */
+    u_short can_soft_blank;         /* zero if no hardware blanking */
+    u_short inverse;                /* != 0 text black on white as default */
+    struct display_switch *dispsw;  /* low level operations */
+    void *dispsw_data;              /* optional dispsw helper data */
+
+#if 0
+    struct fb_fix_cursorinfo fcrsr;
+    struct fb_var_cursorinfo *vcrsr;
+    struct fb_cursorstate crsrstate;
+#endif
+
+    /* Filled in by the low-level console driver */
+
+    struct vc_data *conp;           /* pointer to console data */
+    struct fb_info *fb_info;        /* frame buffer for this console */
+    int vrows;                      /* number of virtual rows */
+    unsigned short cursor_x;        /* current cursor position */
+    unsigned short cursor_y;
+    int fgcol;                      /* text colors */
+    int bgcol;
+    u_long next_line;               /* offset to one line below */
+    u_long next_plane;              /* offset to next plane */
+    u_char *fontdata;               /* Font associated to this display */
+    unsigned short _fontheightlog;
+    unsigned short _fontwidthlog;
+    unsigned short _fontheight;
+    unsigned short _fontwidth;
+    int userfont;                   /* != 0 if fontdata kmalloc()ed */
+    u_short scrollmode;             /* Scroll Method */
+    short yscroll;                  /* Hardware scrolling */
+    unsigned char fgshift, bgshift;
+    unsigned short charmask;        /* 0xff or 0x1ff */
+};
+
+/* drivers/video/fbcon.c */
+extern struct display fb_display[MAX_NR_CONSOLES];
+extern char con2fb_map[MAX_NR_CONSOLES];
+extern int PROC_CONSOLE(const struct fb_info *info);
+extern void set_con2fb_map(int unit, int newidx);
+extern int set_all_vcs(int fbidx, struct fb_ops *fb,
+		       struct fb_var_screeninfo *var, struct fb_info *info);
 
 #define fontheight(p) ((p)->_fontheight)
 #define fontheightlog(p) ((p)->_fontheightlog)
@@ -178,7 +242,7 @@ extern void fbcon_redraw_bmove(struct display *, int, int, int, int, int, int);
    movep is rather expensive compared to ordinary move's
    some functions rewritten in C for clarity, no speed loss */
 
-static __inline__ void *mymemclear_small(void *s, size_t count)
+static __inline__ void *fb_memclear_small(void *s, size_t count)
 {
    if (!count)
       return(0);
@@ -201,7 +265,7 @@ static __inline__ void *mymemclear_small(void *s, size_t count)
 }
 
 
-static __inline__ void *mymemclear(void *s, size_t count)
+static __inline__ void *fb_memclear(void *s, size_t count)
 {
    if (!count)
       return(0);
@@ -243,7 +307,7 @@ static __inline__ void *mymemclear(void *s, size_t count)
 }
 
 
-static __inline__ void *mymemset(void *s, size_t count)
+static __inline__ void *fb_memset255(void *s, size_t count)
 {
    if (!count)
       return(0);
@@ -266,7 +330,7 @@ static __inline__ void *mymemset(void *s, size_t count)
 }
 
 
-static __inline__ void *mymemmove(void *d, const void *s, size_t count)
+static __inline__ void *fb_memmove(void *d, const void *s, size_t count)
 {
    if (d < s) {
       if (count < 16) {
@@ -388,17 +452,17 @@ static __inline__ void *sun4_memset(void *s, char val, size_t count)
     return s;
 }
 
-static __inline__ void *mymemset(void *s, size_t count)
+static __inline__ void *fb_memset255(void *s, size_t count)
 {
     return sun4_memset(s, 255, count);
 }
 
-static __inline__ void *mymemclear(void *s, size_t count)
+static __inline__ void *fb_memclear(void *s, size_t count)
 {
     return sun4_memset(s, 0, count);
 }
 
-static __inline__ void *mymemclear_small(void *s, size_t count)
+static __inline__ void *fb_memclear_small(void *s, size_t count)
 {
     return sun4_memset(s, 0, count);
 }
@@ -415,7 +479,7 @@ static __inline__ void fast_memmove(void *d, const void *s, size_t count)
 	    ((char *) d)[count-i-1] = ((char *) s)[count-i-1];
 }
 
-static __inline__ void *mymemmove(char *dst, const char *src, size_t size)
+static __inline__ void *fb_memmove(char *dst, const char *src, size_t size)
 {
     fast_memmove(dst, src, size);
     return dst;
@@ -423,17 +487,17 @@ static __inline__ void *mymemmove(char *dst, const char *src, size_t size)
 
 #else
 
-static __inline__ void *mymemclear_small(void *s, size_t count)
+static __inline__ void *fb_memclear_small(void *s, size_t count)
 {
     return(memset(s, 0, count));
 }
 
-static __inline__ void *mymemclear(void *s, size_t count)
+static __inline__ void *fb_memclear(void *s, size_t count)
 {
     return(memset(s, 0, count));
 }
 
-static __inline__ void *mymemset(void *s, size_t count)
+static __inline__ void *fb_memset255(void *s, size_t count)
 {
     return(memset(s, 255, count));
 }
@@ -483,7 +547,7 @@ __asm__ __volatile__ (
     }
 }
 
-static __inline__ void *mymemmove(char *dst, const char *src, size_t size)
+static __inline__ void *fb_memmove(char *dst, const char *src, size_t size)
 {
     fast_memmove(dst, src, size);
     return dst;
@@ -496,7 +560,7 @@ static __inline__ void *mymemmove(char *dst, const char *src, size_t size)
      *   (Why are these functions better than those from include/asm/string.h?)
      */
 
-static __inline__ void *mymemmove(void *d, const void *s, size_t count)
+static __inline__ void *fb_memmove(void *d, const void *s, size_t count)
 {
     return(memmove(d, s, count));
 }
@@ -507,6 +571,43 @@ static __inline__ void fast_memmove(char *dst, const char *src, size_t size)
 }
 
 #endif /* !i386 */
+
+#endif
+
+
+#if defined(__sparc__)
+
+/* We map all of our framebuffers such that big-endian accesses
+ * are what we want, so the following is sufficient.
+ */
+
+#define fb_readb sbus_readb
+#define fb_readw sbus_readw
+#define fb_readl sbus_readl
+#define fb_writeb sbus_writeb
+#define fb_writew sbus_writew
+#define fb_writel sbus_writel
+#define fb_memset sbus_memset_io
+
+#elif defined(__i386__) || defined(__alpha__)
+
+#define fb_readb __raw_readb
+#define fb_readw __raw_readw
+#define fb_readl __raw_readl
+#define fb_writeb __raw_writeb
+#define fb_writew __raw_writew
+#define fb_writel __raw_writel
+#define fb_memset memset_io
+
+#else
+
+#define fb_readb(addr) (*(volatile u8 *) (addr))
+#define fb_readw(addr) (*(volatile u16 *) (addr))
+#define fb_readl(addr) (*(volatile u32 *) (addr))
+#define fb_writeb(b,addr) (*(volatile u8 *) (addr) = (b))
+#define fb_writew(b,addr) (*(volatile u16 *) (addr) = (b))
+#define fb_writel(b,addr) (*(volatile u32 *) (addr) = (b))
+#define fb_memset memset
 
 #endif
 

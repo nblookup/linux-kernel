@@ -1,5 +1,5 @@
 /*
- *  $Id: ipconfig.c,v 1.20 1999/03/28 10:18:28 davem Exp $
+ *  $Id: ipconfig.c,v 1.27 2000/02/21 15:51:41 davem Exp $
  *
  *  Automatic Configuration of IP -- use BOOTP or RARP or user-supplied
  *  information to configure own IP address and routes.
@@ -12,6 +12,10 @@
  *  BOOTP rewritten to construct and analyse packets itself instead
  *  of misusing the IP layer. num_bugs_causing_wrong_arp_replies--;
  *					     -- MJ, December 1998
+ *  
+ *  Fixed ip_auto_config_setup calling at startup in the new "Linker Magic"
+ *  initialization scheme.
+ *	- Arnaldo Carvalho de Melo <acme@conectiva.com.br>, 08/11/1999
  */
 
 #include <linux/config.h>
@@ -97,22 +101,23 @@ static int ic_proto_have_if __initdata = 0;
 
 struct ic_device {
 	struct ic_device *next;
-	struct device *dev;
+	struct net_device *dev;
 	unsigned short flags;
 	int able;
 };
 
 static struct ic_device *ic_first_dev __initdata = NULL;/* List of open device */
-static struct device *ic_dev __initdata = NULL;		/* Selected device */
+static struct net_device *ic_dev __initdata = NULL;		/* Selected device */
 
 static int __init ic_open_devs(void)
 {
 	struct ic_device *d, **last;
-	struct device *dev;
+	struct net_device *dev;
 	unsigned short oflags;
 
 	last = &ic_first_dev;
-	for (dev = dev_base; dev; dev = dev->next)
+	rtnl_shlock();
+	for (dev = dev_base; dev; dev = dev->next) {
 		if (user_dev_name[0] ? !strcmp(dev->name, user_dev_name) :
 		    (!(dev->flags & IFF_LOOPBACK) &&
 		     (dev->flags & (IFF_POINTOPOINT|IFF_BROADCAST)) &&
@@ -142,6 +147,9 @@ static int __init ic_open_devs(void)
 			ic_proto_have_if |= able;
 			DBG(("IP-Config: Opened %s (able=%d)\n", dev->name, able));
 		}
+	}
+	rtnl_shunlock();
+
 	*last = NULL;
 
 	if (!ic_first_dev) {
@@ -157,7 +165,7 @@ static int __init ic_open_devs(void)
 static void __init ic_close_devs(void)
 {
 	struct ic_device *d, *next;
-	struct device *dev;
+	struct net_device *dev;
 
 	next = ic_first_dev;
 	while ((d = next)) {
@@ -301,7 +309,7 @@ static int __init ic_defaults(void)
 
 #ifdef CONFIG_IP_PNP_RARP
 
-static int ic_rarp_recv(struct sk_buff *skb, struct device *dev, struct packet_type *pt);
+static int ic_rarp_recv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt);
 
 static struct packet_type rarp_packet_type __initdata = {
 	__constant_htons(ETH_P_RARP),
@@ -325,7 +333,7 @@ static inline void ic_rarp_cleanup(void)
  *  Process received RARP packet.
  */
 static int __init
-ic_rarp_recv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
+ic_rarp_recv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 {
 	struct arphdr *rarp = (struct arphdr *)skb->h.raw;
 	unsigned char *rarp_ptr = (unsigned char *) (rarp + 1);
@@ -390,7 +398,7 @@ static void __init ic_rarp_send(void)
 
 	for (d=ic_first_dev; d; d=d->next)
 		if (d->able & IC_RARP) {
-			struct device *dev = d->dev;
+			struct net_device *dev = d->dev;
 			arp_send(ARPOP_RREQUEST, ETH_P_RARP, 0, dev, 0, NULL,
 				 dev->dev_addr, dev->dev_addr);
 		}
@@ -429,7 +437,7 @@ struct bootp_pkt {		/* BOOTP packet format */
 
 static u32 ic_bootp_xid;
 
-static int ic_bootp_recv(struct sk_buff *skb, struct device *dev, struct packet_type *pt);
+static int ic_bootp_recv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt);
 
 static struct packet_type bootp_packet_type __initdata = {
 	__constant_htons(ETH_P_IP),
@@ -493,7 +501,7 @@ static inline void ic_bootp_cleanup(void)
  */
 static void __init ic_bootp_send_if(struct ic_device *d, u32 jiffies)
 {
-	struct device *dev = d->dev;
+	struct net_device *dev = d->dev;
 	struct sk_buff *skb;
 	struct bootp_pkt *b;
 	int hh_len = (dev->hard_header_len + 15) & ~15;
@@ -526,7 +534,14 @@ static void __init ic_bootp_send_if(struct ic_device *d, u32 jiffies)
 
 	/* Construct BOOTP header */
 	b->op = BOOTP_REQUEST;
-	b->htype = dev->type;
+	if (dev->type < 256) /* check for false types */
+		b->htype = dev->type;
+	else if (dev->type == ARPHRD_IEEE802_TR) /* fix for token ring */
+		b->htype = ARPHRD_IEEE802;
+	else {
+		printk("Unknown ARP type 0x%04x for device %s\n", dev->type, dev->name);
+		b->htype = dev->type; /* can cause undefined behavior */
+	}
 	b->hlen = dev->addr_len;
 	memcpy(b->hw_addr, dev->dev_addr, dev->addr_len);
 	b->secs = htons(jiffies / HZ);
@@ -612,7 +627,7 @@ static void __init ic_do_bootp_ext(u8 *ext)
 /*
  *  Receive BOOTP reply.
  */
-static int __init ic_bootp_recv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
+static int __init ic_bootp_recv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 {
 	struct bootp_pkt *b = (struct bootp_pkt *) skb->nh.iph;
 	struct iphdr *h = &b->iph;
@@ -662,7 +677,7 @@ static int __init ic_bootp_recv(struct sk_buff *skb, struct device *dev, struct 
 	    b->vendor_area[2] == 83 &&
 	    b->vendor_area[3] == 99) {
 		u8 *ext = &b->vendor_area[4];
-		u8 *end = (u8 *) b + len;
+                u8 *end = (u8 *) b + ntohs(b->iph.tot_len);
 		while (ext < end && *ext != 0xff) {
 			if (*ext == 0)		/* Padding */
 				ext++;
@@ -806,7 +821,7 @@ static int __init ic_dynamic(void)
  *	IP Autoconfig dispatcher.
  */
 
-int __init ip_auto_config(void)
+static int __init ip_auto_config(void)
 {
 	if (!ic_enable)
 		return 0;
@@ -864,6 +879,9 @@ int __init ip_auto_config(void)
 	return 0;
 }
 
+module_init(ip_auto_config);
+
+
 /*
  *  Decode any IP configuration options in the "ip=" or "nfsaddrs=" kernel
  *  command line parameter. It consists of option fields separated by colons in
@@ -908,7 +926,7 @@ static int __init ic_proto_name(char *name)
 	return 0;
 }
 
-void __init ip_auto_config_setup(char *addrs, int *ints)
+static int __init ip_auto_config_setup(char *addrs)
 {
 	char *cp, *ip, *dp;
 	int num = 0;
@@ -916,10 +934,10 @@ void __init ip_auto_config_setup(char *addrs, int *ints)
 	ic_set_manually = 1;
 	if (!strcmp(addrs, "off")) {
 		ic_enable = 0;
-		return;
+		return 1;
 	}
 	if (ic_proto_name(addrs))
-		return;
+		return 1;
 
 	/* Parse the whole string */
 	ip = addrs;
@@ -967,4 +985,14 @@ void __init ip_auto_config_setup(char *addrs, int *ints)
 		ip = cp;
 		num++;
 	}
+
+	return 0;
 }
+
+static int __init nfsaddrs_config_setup(char *addrs)
+{
+	return ip_auto_config_setup(addrs);
+}
+
+__setup("ip=", ip_auto_config_setup);
+__setup("nfsaddrs=", nfsaddrs_config_setup);

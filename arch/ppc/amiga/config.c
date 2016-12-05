@@ -1,11 +1,9 @@
 #define m68k_debug_device debug_device
-#define m68k_num_memory num_memory
-#define m68k_memory memory
 
 #include <linux/init.h>
 
 /* machine dependent "kbd-reset" setup function */
-void (*kbd_reset_setup) (char *, int) __initdata = 0;
+void (*mach_kbd_reset_setup) (char *, int) __initdata = 0;
 
 #include <asm/io.h>
 
@@ -30,7 +28,6 @@ void (*kbd_reset_setup) (char *, int) __initdata = 0;
 #include <linux/kd.h>
 #include <linux/tty.h>
 #include <linux/console.h>
-#include <linux/init.h>
 
 #include <asm/bootinfo.h>
 #include <asm/setup.h>
@@ -42,6 +39,7 @@ void (*kbd_reset_setup) (char *, int) __initdata = 0;
 #include <asm/machdep.h>
 #include <linux/zorro.h>
 
+unsigned long powerup_PCI_present;
 unsigned long amiga_model;
 unsigned long amiga_eclock;
 unsigned long amiga_masterclock;
@@ -62,7 +60,6 @@ static void amiga_sched_init(void (*handler)(int, void *, struct pt_regs *));
 /* amiga specific keyboard functions */
 extern int amiga_keyb_init(void);
 extern int amiga_kbdrate (struct kbd_repeat *);
-extern void amiga_kbd_reset_setup(char*, int);
 /* amiga specific irq functions */
 extern void amiga_init_IRQ (void);
 extern void (*amiga_default_handler[]) (int, void *, struct pt_regs *);
@@ -138,8 +135,13 @@ int amiga_parse_bootinfo(const struct bi_record *record)
 
     switch (record->tag) {
 	case BI_AMIGA_MODEL:
-	    amiga_model = *data;
-	    break;
+	{
+		unsigned long d = *data;
+
+		powerup_PCI_present = d & 0x100;
+		amiga_model = d & 0xff;
+	}
+	break;
 
 	case BI_AMIGA_ECLOCK:
 	    amiga_eclock = *data;
@@ -184,7 +186,7 @@ int amiga_parse_bootinfo(const struct bi_record *record)
      *  Identify builtin hardware
      */
 
-__initfunc(static void amiga_identify(void))
+static void __init amiga_identify(void)
 {
   /* Fill in some default values, if necessary */
   if (amiga_eclock == 0)
@@ -345,7 +347,7 @@ __initfunc(static void amiga_identify(void))
      *  Setup the Amiga configuration info
      */
 
-__initfunc(void config_amiga(void))
+void __init config_amiga(void)
 {
   amiga_debug_init();
   amiga_identify();
@@ -353,7 +355,6 @@ __initfunc(void config_amiga(void))
   mach_sched_init      = amiga_sched_init;
   mach_keyb_init       = amiga_keyb_init;
   mach_kbdrate         = amiga_kbdrate;
-  kbd_reset_setup      = amiga_kbd_reset_setup;
   mach_init_IRQ        = amiga_init_IRQ;
   mach_default_handler = &amiga_default_handler;
 #ifndef CONFIG_APUS
@@ -438,8 +439,8 @@ __initfunc(void config_amiga(void))
 
 static unsigned short jiffy_ticks;
 
-__initfunc(static void amiga_sched_init(void (*timer_routine)(int, void *,
-					struct pt_regs *)))
+static void __init amiga_sched_init(void (*timer_routine)(int, void *,
+					struct pt_regs *))
 {
 	jiffy_ticks = (amiga_eclock+HZ/2)/HZ;
 
@@ -452,13 +453,14 @@ __initfunc(static void amiga_sched_init(void (*timer_routine)(int, void *,
 	 * Please don't change this to use ciaa, as it interferes with the
 	 * SCSI code. We'll have to take a look at this later
 	 */
-	request_irq(IRQ_AMIGA_CIAB_TA, timer_routine, IRQ_FLG_LOCK,
-		    "timer", NULL);
+	request_irq(IRQ_AMIGA_CIAB_TA, timer_routine, 0, "timer", NULL);
 	/* start timer */
 	ciab.cra |= 0x11;
 }
 
 #define TICK_SIZE 10000
+
+extern unsigned char cia_get_irq_mask(unsigned int irq);
 
 /* This is always executed with interrupts disabled.  */
 static unsigned long amiga_gettimeoffset (void)
@@ -480,7 +482,7 @@ static unsigned long amiga_gettimeoffset (void)
 
 	if (ticks > jiffy_ticks / 2)
 		/* check for pending interrupt */
-		if (cia_set_irq(&ciab_base, 0) & CIA_ICR_TA)
+		if (cia_get_irq_mask(IRQ_AMIGA_CIAB) & CIA_ICR_TA)
 			offset = 10000;
 
 	ticks = jiffy_ticks - ticks;
@@ -742,7 +744,7 @@ static void amiga_savekmsg_init(void)
 static void amiga_serial_putc(char c)
 {
     custom.serdat = (unsigned char)c | 0x100;
-    iobarrier_rw ();
+    mb();
     while (!(custom.serdatr & 0x2000))
        ;
 }
@@ -820,7 +822,7 @@ void amiga_serial_gets(struct console *co, char *s, int len)
 }
 #endif
 
-__initfunc(static void amiga_debug_init(void))
+static void __init amiga_debug_init(void)
 {
 	if (!strcmp( m68k_debug_device, "ser" )) {
 		/* no initialization required (?) */
@@ -922,3 +924,30 @@ static int amiga_get_hardware_list(char *buffer)
 
     return(len);
 }
+
+#ifdef CONFIG_APUS
+int get_hardware_list(char *buffer)
+{
+	extern int get_cpuinfo(char *buffer);
+	int len = 0;
+	char model[80];
+	u_long mem;
+	int i;
+
+	if (mach_get_model)
+		mach_get_model(model);
+	else
+		strcpy(model, "Unknown PowerPC");
+	
+	len += sprintf(buffer+len, "Model:\t\t%s\n", model);
+	len += get_cpuinfo(buffer+len);
+	for (mem = 0, i = 0; i < m68k_realnum_memory; i++)
+		mem += m68k_memory[i].size;
+	len += sprintf(buffer+len, "System Memory:\t%ldK\n", mem>>10);
+
+	if (mach_get_hardware_list)
+		len += mach_get_hardware_list(buffer+len);
+
+	return(len);
+}
+#endif

@@ -159,7 +159,7 @@ void raid1_end_request (struct buffer_head *bh, int uptodate)
 	}
 
 	/*
-	 * WRITE or WRITEA.
+	 * WRITE.
 	 */
 	PRINTK(("raid1_end_request(), write branch.\n"));
 
@@ -211,19 +211,22 @@ raid1_make_request (struct md_dev *mddev, int rw, struct buffer_head * bh)
 	while (!( /* FIXME: now we are rather fault tolerant than nice */
 	r1_bh = kmalloc (sizeof (struct raid1_bh), GFP_KERNEL)
 	) )
+	{
 		printk ("raid1_make_request(#1): out of memory\n");
+		current->policy |= SCHED_YIELD;
+		schedule();
+	}
 	memset (r1_bh, 0, sizeof (struct raid1_bh));
 
 /*
- * make_request() can abort the operation when READA or WRITEA are being
+ * make_request() can abort the operation when READA is being
  * used and no empty request is available.
  *
  * Currently, just replace the command with READ/WRITE.
  */
 	if (rw == READA) rw = READ;
-	if (rw == WRITEA) rw = WRITE;
 
-	if (rw == WRITE || rw == WRITEA)
+	if (rw == WRITE)
 		mark_buffer_clean(bh);		/* Too early ? */
 
 /*
@@ -269,7 +272,7 @@ raid1_make_request (struct md_dev *mddev, int rw, struct buffer_head * bh)
 	}
 
 	/*
-	 * WRITE or WRITEA.
+	 * WRITE.
 	 */
 	PRINTK(("raid1_make_request(n=%d), write branch.\n",n));
 
@@ -299,7 +302,11 @@ raid1_make_request (struct md_dev *mddev, int rw, struct buffer_head * bh)
 		while (!( /* FIXME: now we are rather fault tolerant than nice */
 		mirror_bh[i] = kmalloc (sizeof (struct buffer_head), GFP_KERNEL)
 		) )
+		{
 			printk ("raid1_make_request(#2): out of memory\n");
+			current->policy |= SCHED_YIELD;
+			schedule();
+		}
 		memset (mirror_bh[i], 0, sizeof (struct buffer_head));
 
 	/*
@@ -310,7 +317,7 @@ raid1_make_request (struct md_dev *mddev, int rw, struct buffer_head * bh)
 		mirror_bh [i]->b_rdev 	    = raid_conf->mirrors [i].dev;
 		mirror_bh [i]->b_rsector    = bh->b_rsector;
 		mirror_bh [i]->b_state      = (1<<BH_Req) | (1<<BH_Dirty);
-		mirror_bh [i]->b_count      = 1;
+		atomic_set(&mirror_bh [i]->b_count, 1);
 		mirror_bh [i]->b_size       = bh->b_size;
 		mirror_bh [i]->b_data       = bh->b_data;
 		mirror_bh [i]->b_list       = BUF_LOCKED;
@@ -711,7 +718,11 @@ static int raid1_run (int minor, struct md_dev *mddev)
 	while (!( /* FIXME: now we are rather fault tolerant than nice */
 	mddev->private = kmalloc (sizeof (struct raid1_data), GFP_KERNEL)
 	) )
+	{
 		printk ("raid1_run(): out of memory\n");
+		current->policy |= SCHED_YIELD;
+		schedule();
+	}
 	raid_conf = mddev->private;
 	memset(raid_conf, 0, sizeof(*raid_conf));
 

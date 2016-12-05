@@ -83,13 +83,13 @@
 
 #include <asm/io.h>
 #include <asm/system.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/proc_fs.h>
 #include <linux/init.h>
-
+#include <linux/delay.h>
 #include <linux/blk.h>
 #include "scsi.h"
 #include "hosts.h"
@@ -99,7 +99,6 @@
 #include <asm/uaccess.h>
 #include "sd.h"
 #include <scsi/scsi_ioctl.h>
-#include <asm/delay.h>
 
 #ifdef DEBUG
 #define DPRINTK( when, msg... ) do { if ( (DEBUG & (when)) == (when) ) printk( msg ); } while (0)
@@ -107,12 +106,6 @@
 #define DPRINTK( when, msg... ) do { } while (0)
 #endif
 #define DANY( msg... ) DPRINTK( 0xffff, msg );
-
-static struct proc_dir_entry proc_scsi_seagate =
-{
-  PROC_SCSI_SEAGATE, 7, "seagate",
-  S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 
 #ifndef IRQ
 #define IRQ 5
@@ -250,11 +243,15 @@ static unsigned char controller_type = 0;       /* set to SEAGATE for ST0x
                                                    boards */
 static int irq = IRQ;
 
+MODULE_PARM(base_address, "i");
+MODULE_PARM(controller_type, "b");
+MODULE_PARM(irq, "i");
+
 #define retcode(result) (((result) << 16) | (message << 8) | status)
-#define STATUS ((u8) readb(st0x_cr_sr))
-#define DATA ((u8) readb(st0x_dr))
-#define WRITE_CONTROL(d) { writeb((d), st0x_cr_sr); }
-#define WRITE_DATA(d) { writeb((d), st0x_dr); }
+#define STATUS ((u8) isa_readb(st0x_cr_sr))
+#define DATA ((u8) isa_readb(st0x_dr))
+#define WRITE_CONTROL(d) { isa_writeb((d), st0x_cr_sr); }
+#define WRITE_DATA(d) { isa_writeb((d), st0x_dr); }
 
 void st0x_setup (char *str, int *ints)
 {
@@ -418,7 +415,7 @@ int __init seagate_st0x_detect (Scsi_Host_Template * tpnt)
   struct Scsi_Host *instance;
   int i, j;
 
-  tpnt->proc_dir = &proc_scsi_seagate;
+  tpnt->proc_name = "seagate";
 /*
  *    First, we try for the manual override.  */
   DANY ("Autodetecting ST0x / TMC-8xx\n");
@@ -453,7 +450,7 @@ int __init seagate_st0x_detect (Scsi_Host_Template * tpnt)
     for (i = 0; i < (sizeof (seagate_bases) / sizeof (unsigned int)); ++i)
 
       for (j = 0; !base_address && j < NUM_SIGNATURES; ++j)
-        if (check_signature (seagate_bases[i] + signatures[j].offset,
+        if (isa_check_signature (seagate_bases[i] + signatures[j].offset,
                              signatures[j].signature, signatures[j].length))
         {
           base_address = seagate_bases[i];
@@ -1216,6 +1213,9 @@ static int internal_command (unsigned char target, unsigned char lun,
 
 /* SJT: Start. Slow Write. */
 #ifdef SEAGATE_USE_ASM
+
+int __dummy_1,__dummy_2;
+
 /*
  *      We loop as long as we are in a data out phase, there is data to send, 
  *      and BSY is still active.
@@ -1246,9 +1246,9 @@ static int internal_command (unsigned char target, unsigned char lun,
                     "movb %%al, (%%edi)\n\t"
                     "loop 1b\n\t"
                 "2:\n"
-/* output */    : "=S" (data), "=c" (len) 
-/* input */     : "0" (data), "1" (len), "b" (phys_to_virt(st0x_cr_sr)), "D" (phys_to_virt(st0x_dr)) 
-/* clobbered */ : "eax", "ebx", "edi"); 
+/* output */    : "=S" (data), "=c" (len)  ,"=b" (__dummy_1) ,"=D" (__dummy_2)
+/* input */     : "0" (data), "1" (len), "2" (phys_to_virt(st0x_cr_sr)), "3" (phys_to_virt(st0x_dr)) 
+/* clobbered */ : "eax"); 
 #else /* SEAGATE_USE_ASM */
             while (len)
             {
@@ -1374,6 +1374,11 @@ static int internal_command (unsigned char target, unsigned char lun,
 
 /* SJT: Start. */
 #ifdef SEAGATE_USE_ASM
+
+int __dummy_3,__dummy_4;
+
+/* Dummy clobbering variables for the new gcc-2.95 */
+
 /*
  *      We loop as long as we are in a data in phase, there is room to read, 
  *      and BSY is still active
@@ -1405,9 +1410,9 @@ static int internal_command (unsigned char target, unsigned char lun,
                 "stosb\n\t"   
                 "loop 1b\n\t"
             "2:\n"
-/* output */    : "=D" (data), "=c" (len) 
-/* input */     : "0" (data), "1" (len), "S" (phys_to_virt(st0x_cr_sr)), "b" (phys_to_virt(st0x_dr)) 
-/* clobbered */ : "eax","ebx", "esi"); 
+/* output */    : "=D" (data), "=c" (len) ,"=S" (__dummy_3) ,"=b" (__dummy_4)
+/* input */     : "0" (data), "1" (len), "2" (phys_to_virt(st0x_cr_sr)), "3" (phys_to_virt(st0x_dr)) 
+/* clobbered */ : "eax" ); 
 #else /* SEAGATE_USE_ASM */
             while (len)
             {

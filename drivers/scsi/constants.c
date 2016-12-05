@@ -1,6 +1,8 @@
 /* 
  * ASCII values for a number of symbolic constants, printing functions,
  * etc.
+ * Additions for SCSI 2 and Linux 2.2.x by D. Gilbert (990422)
+ *
  */
 
 #define __NO_VERSION__
@@ -37,7 +39,7 @@ static const char * group_0_commands[] = {
 /* 04-07 */ "Format Unit", "Read Block Limits", unknown, "Reasssign Blocks",
 /* 08-0d */ "Read (6)", unknown, "Write (6)", "Seek (6)", unknown, unknown,
 /* 0e-12 */ unknown, "Read Reverse", "Write Filemarks", "Space", "Inquiry",  
-/* 13-16 */ unknown, "Recover Buffered Data", "Mode Select", "Reserve",
+/* 13-16 */ "Verify", "Recover Buffered Data", "Mode Select", "Reserve",
 /* 17-1b */ "Release", "Copy", "Erase", "Mode Sense", "Start/Stop Unit",
 /* 1c-1d */ "Receive Diagnostic", "Send Diagnostic", 
 /* 1e-1f */ "Prevent/Allow Medium Removal", unknown,
@@ -46,23 +48,44 @@ static const char * group_0_commands[] = {
 
 static const char *group_1_commands[] = {
 /* 20-22 */  unknown, unknown, unknown,
-/* 23-28 */ unknown, unknown, "Read Capacity", unknown, unknown, "Read (10)", 
-/* 29-2d */ unknown, "Write (10)", "Seek (10)", unknown, unknown, 
+/* 23-28 */ unknown, "Define window parameters", "Read Capacity", 
+            unknown, unknown, "Read (10)", 
+/* 29-2d */ "Read Generation", "Write (10)", "Seek (10)", "Erase", 
+            "Read updated block", 
 /* 2e-31 */ "Write Verify","Verify", "Search High", "Search Equal", 
 /* 32-34 */ "Search Low", "Set Limits", "Prefetch or Read Position", 
 /* 35-37 */ "Synchronize Cache","Lock/Unlock Cache", "Read Defect Data", 
-/* 38-3c */ "Medium Scan", "Compare","Copy Verify", "Write Buffer", "Read Buffer", 
+/* 38-3c */ "Medium Scan", "Compare", "Copy Verify", "Write Buffer", 
+            "Read Buffer", 
 /* 3d-3f */ "Update Block", "Read Long",  "Write Long",
 };
 
 
 static const char *group_2_commands[] = {
 /* 40-41 */ "Change Definition", "Write Same", 
-/* 42-48 */ unknown, "Read TOC", unknown, unknown, unknown, unknown, unknown, 
-/* 49-4f */ unknown, unknown, unknown, "Log Select", "Log Sense", unknown, unknown,
+/* 42-48 */ "Read sub-channel", "Read TOC", "Read header", 
+            "Play audio (10)", unknown, "Play audio msf",
+            "Play audio track/index", 
+/* 49-4f */ "Play track relative (10)", unknown, "Pause/resume", 
+            "Log Select", "Log Sense", unknown, unknown,
 /* 50-55 */ unknown, unknown, unknown, unknown, unknown, "Mode Select (10)",
 /* 56-5b */ unknown, unknown, unknown, unknown, "Mode Sense (10)", unknown,
 /* 5c-5f */ unknown, unknown, unknown,
+};
+
+
+/* The following are 12 byte commands in group 5 */
+static const char *group_5_commands[] = {
+/* a0-a5 */ unknown, unknown, unknown, unknown, unknown,
+            "Move medium/play audio(12)",
+/* a6-a9 */ "Exchange medium", unknown, "Read(12)", "Play track relative(12)", 
+/* aa-ae */ "Write(12)", unknown, "Erase(12)", unknown, 
+            "Write and verify(12)", 
+/* af-b1 */ "Verify(12)", "Search data high(12)", "Search data equal(12)",
+/* b2-b4 */ "Search data low(12)", "Set limits(12)", unknown,
+/* b5-b6 */ "Request volume element address", "Send volume tag",
+/* b7-b9 */ "Read defect data(12)", "Read element status", unknown,
+/* ba-bf */ unknown, unknown, unknown, unknown, unknown, unknown,
 };
 
 
@@ -71,12 +94,11 @@ static const char *group_2_commands[] = {
 
 #define RESERVED_GROUP  0
 #define VENDOR_GROUP    1
-#define NOTEXT_GROUP    2
 
 static const char **commands[] = {
     group_0_commands, group_1_commands, group_2_commands, 
     (const char **) RESERVED_GROUP, (const char **) RESERVED_GROUP, 
-    (const char **) NOTEXT_GROUP, (const char **) VENDOR_GROUP, 
+    group_5_commands, (const char **) VENDOR_GROUP, 
     (const char **) VENDOR_GROUP
 };
 
@@ -88,9 +110,6 @@ static void print_opcode(int opcode) {
     switch ((unsigned long) table) {
     case RESERVED_GROUP:
 	printk("%s(0x%02x) ", reserved, opcode); 
-	break;
-    case NOTEXT_GROUP:
-	printk("%s(0x%02x) ", unknown, opcode); 
 	break;
     case VENDOR_GROUP:
 	printk("%s(0x%02x) ", vendor, opcode); 
@@ -119,15 +138,18 @@ void print_command (unsigned char *command) {
 
 #if (CONSTANTS & CONST_STATUS)
 static const char * statuses[] = {
-/* 0-4 */ "Good", "Check Condition", "Condition Good", unknown, "Busy", 
-/* 5-9 */ unknown, unknown, unknown, "Intermediate Good", unknown, 
-/* a-d */ "Intermediate Good", unknown, "Reservation Conflict", unknown,
-/* e-f */ unknown, unknown,
+/* 0-4 */ "Good", "Check Condition", "Condition Met", unknown, "Busy", 
+/* 5-9 */ unknown, unknown, unknown, "Intermediate", unknown, 
+/* a-c */ "Intermediate-Condition Met", unknown, "Reservation Conflict",
+/* d-10 */ unknown, unknown, unknown, unknown,
+/* 11-14 */ "Command Terminated", unknown, unknown, "Queue Full",
+/* 15-1a */ unknown, unknown, unknown, unknown, unknown, unknown,
+/* 1b-1f */ unknown, unknown, unknown, unknown, unknown,
 };
 #endif
 
 void print_status (int status) {
-    status = (status >> 1) & 0xf;
+    status = (status >> 1) & 0x1f;
 #if (CONSTANTS & CONST_STATUS)
     printk("%s ",statuses[status]);
 #else
@@ -388,11 +410,13 @@ static const char *snstext[] = {
 #endif
 
 /* Print sense information */
-void print_sense(const char * devclass, Scsi_Cmnd * SCpnt)
+static 
+void print_sense_internal(const char * devclass, 
+			  const unsigned char * sense_buffer,
+			  kdev_t dev)
 {
     int i, s;
     int sense_class, valid, code;
-    unsigned char * sense_buffer = SCpnt->sense_buffer;
     const char * error = NULL;
     
     sense_class = (sense_buffer[0] >> 4) & 0x07;
@@ -401,12 +425,14 @@ void print_sense(const char * devclass, Scsi_Cmnd * SCpnt)
     
     if (sense_class == 7) {	/* extended sense data */
 	s = sense_buffer[7] + 8;
-	if(s > sizeof(SCpnt->sense_buffer))
-           s = sizeof(SCpnt->sense_buffer);
+	if(s > SCSI_SENSE_BUFFERSIZE)
+	   s = SCSI_SENSE_BUFFERSIZE;
 	
 	if (!valid)
-	    printk("extra data not valid ");
-	
+	    printk("[valid=0] ");
+	printk("Info fld=0x%x, ", (int)((sense_buffer[3] << 24) |
+	       (sense_buffer[4] << 16) | (sense_buffer[5] << 8) |
+	       sense_buffer[6]));
 	if (sense_buffer[2] & 0x80)
            printk( "FMK ");	/* current command has read a filemark */
 	if (sense_buffer[2] & 0x40)
@@ -427,14 +453,14 @@ void print_sense(const char * devclass, Scsi_Cmnd * SCpnt)
 	    error = "Invalid";
 	}
 	
-	printk("%s error ", error);
+	printk("%s ", error);
 	
 #if (CONSTANTS & CONST_SENSE)
 	printk( "%s%s: sense key %s\n", devclass,
-	       kdevname(SCpnt->request.rq_dev), snstext[sense_buffer[2] & 0x0f]);
+	       kdevname(dev), snstext[sense_buffer[2] & 0x0f]);
 #else
 	printk("%s%s: sns = %2x %2x\n", devclass,
-	       kdevname(SCpnt->request.rq_dev), sense_buffer[0], sense_buffer[2]);
+	       kdevname(dev), sense_buffer[0], sense_buffer[2]);
 #endif
 	
 	/* Check to see if additional sense information is available */
@@ -471,11 +497,11 @@ void print_sense(const char * devclass, Scsi_Cmnd * SCpnt)
 #if (CONSTANTS & CONST_SENSE)
 	if (sense_buffer[0] < 15)
 	    printk("%s%s: old sense key %s\n", devclass,
-	      kdevname(SCpnt->request.rq_dev), snstext[sense_buffer[0] & 0x0f]);
+	      kdevname(dev), snstext[sense_buffer[0] & 0x0f]);
 	else
 #endif
 	    printk("%s%s: sns = %2x %2x\n", devclass,
-	      kdevname(SCpnt->request.rq_dev), sense_buffer[0], sense_buffer[2]);
+	      kdevname(dev), sense_buffer[0], sense_buffer[2]);
 	
 	printk("Non-extended sense class %d code 0x%0x ", sense_class, code);
 	s = 4;
@@ -489,6 +515,18 @@ void print_sense(const char * devclass, Scsi_Cmnd * SCpnt)
     printk("\n");
 #endif
     return;
+}
+
+void print_sense(const char * devclass, Scsi_Cmnd * SCpnt)
+{
+	print_sense_internal(devclass, SCpnt->sense_buffer,
+			     SCpnt->request.rq_dev);
+}
+
+void print_req_sense(const char * devclass, Scsi_Request * SRpnt)
+{
+	print_sense_internal(devclass, SRpnt->sr_sense_buffer,
+			     SRpnt->sr_request.rq_dev);
 }
 
 #if (CONSTANTS & CONST_MSG) 
@@ -603,7 +641,8 @@ void print_Scsi_Cmnd (Scsi_Cmnd *cmd) {
 #if (CONSTANTS & CONST_HOST)
 static const char * hostbyte_table[]={
 "DID_OK", "DID_NO_CONNECT", "DID_BUS_BUSY", "DID_TIME_OUT", "DID_BAD_TARGET", 
-"DID_ABORT", "DID_PARITY", "DID_ERROR", "DID_RESET", "DID_BAD_INTR",NULL};
+"DID_ABORT", "DID_PARITY", "DID_ERROR", "DID_RESET", "DID_BAD_INTR",
+"DID_PASSTHROUGH", "DID_SOFT_ERROR", NULL};
 
 void print_hostbyte(int scsiresult)
 {   static int maxcode=0;

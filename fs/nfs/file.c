@@ -26,7 +26,9 @@
 #include <linux/malloc.h>
 #include <linux/pagemap.h>
 #include <linux/lockd/bind.h>
+#include <linux/smp_lock.h>
 
+#include <asm/uaccess.h>
 #include <asm/segment.h>
 #include <asm/system.h>
 
@@ -38,45 +40,20 @@ static ssize_t nfs_file_write(struct file *, const char *, size_t, loff_t *);
 static int  nfs_file_flush(struct file *);
 static int  nfs_fsync(struct file *, struct dentry *dentry);
 
-static struct file_operations nfs_file_operations = {
-	NULL,			/* lseek - default */
-	nfs_file_read,		/* read */
-	nfs_file_write,		/* write */
-	NULL,			/* readdir - bad */
-	NULL,			/* select - default */
-	NULL,			/* ioctl - default */
-	nfs_file_mmap,		/* mmap */
-	nfs_open,		/* open */
-	nfs_file_flush,		/* flush */
-	nfs_release,		/* release */
-	nfs_fsync,		/* fsync */
-	NULL,			/* fasync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
-	nfs_lock,		/* lock */
+struct file_operations nfs_file_operations = {
+	read:		nfs_file_read,
+	write:		nfs_file_write,
+	mmap:		nfs_file_mmap,
+	open:		nfs_open,
+	flush:		nfs_file_flush,
+	release:	nfs_release,
+	fsync:		nfs_fsync,
+	lock:		nfs_lock,
 };
 
 struct inode_operations nfs_file_inode_operations = {
-	&nfs_file_operations,	/* default file operations */
-	NULL,			/* create */
-	NULL,			/* lookup */
-	NULL,			/* link */
-	NULL,			/* unlink */
-	NULL,			/* symlink */
-	NULL,			/* mkdir */
-	NULL,			/* rmdir */
-	NULL,			/* mknod */
-	NULL,			/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	nfs_readpage,		/* readpage */
-	nfs_writepage,		/* writepage */
-	NULL,			/* bmap */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	nfs_updatepage,		/* updatepage */
-	nfs_revalidate,		/* revalidate */
+	revalidate:	nfs_revalidate,
+	setattr:	nfs_notify_change,
 };
 
 /* Hack for future NFS swap support */
@@ -148,14 +125,52 @@ nfs_fsync(struct file *file, struct dentry *dentry)
 
 	dfprintk(VFS, "nfs: fsync(%x/%ld)\n", inode->i_dev, inode->i_ino);
 
+	lock_kernel();
 	status = nfs_wb_file(inode, file);
 	if (!status) {
 		status = file->f_error;
 		file->f_error = 0;
 	}
+	unlock_kernel();
 	return status;
 }
 
+/*
+ * This does the "real" work of the write. The generic routine has
+ * allocated the page, locked it, done all the page alignment stuff
+ * calculations etc. Now we should just copy the data from user
+ * space and write it back to the real medium..
+ *
+ * If the writer ends up delaying the write, the writer needs to
+ * increment the page use counts until he is done with the page.
+ */
+static int nfs_prepare_write(struct page *page, unsigned offset, unsigned to)
+{
+	kmap(page);
+	return 0;
+}
+static int nfs_commit_write(struct file *file, struct page *page, unsigned offset, unsigned to)
+{
+	long status;
+	loff_t pos = ((loff_t)page->index<<PAGE_CACHE_SHIFT) + to;
+	struct inode *inode = (struct inode*)page->mapping->host;
+
+	kunmap(page);
+	lock_kernel();
+	status = nfs_updatepage(file, page, offset, to-offset);
+	unlock_kernel();
+	/* most likely it's already done. CHECKME */
+	if (pos > inode->i_size)
+		inode->i_size = pos;
+	return status;
+}
+
+struct address_space_operations nfs_file_aops = {
+	readpage: nfs_readpage,
+	writepage: nfs_writepage,
+	prepare_write: nfs_prepare_write,
+	commit_write: nfs_commit_write
+};
 
 /* 
  * Write to a file (through the page cache).
@@ -198,7 +213,7 @@ int
 nfs_lock(struct file *filp, int cmd, struct file_lock *fl)
 {
 	struct inode * inode = filp->f_dentry->d_inode;
-	int	status;
+	int	status = 0;
 
 	dprintk("NFS: nfs_lock(f=%4x/%ld, t=%x, fl=%x, r=%ld:%ld)\n",
 			inode->i_dev, inode->i_ino,
@@ -213,8 +228,11 @@ nfs_lock(struct file *filp, int cmd, struct file_lock *fl)
 		return -ENOLCK;
 
 	/* Fake OK code if mounted without NLM support */
-	if (NFS_SERVER(inode)->flags & NFS_MOUNT_NONLM)
-		return 0;
+	if (NFS_SERVER(inode)->flags & NFS_MOUNT_NONLM) {
+		if (cmd == F_GETLK)
+			status = LOCK_USE_CLNT;
+		goto out_ok;
+	}
 
 	/*
 	 * No BSD flocks over NFS allowed.
@@ -236,11 +254,14 @@ nfs_lock(struct file *filp, int cmd, struct file_lock *fl)
 
 	if ((status = nlmclnt_proc(inode, cmd, fl)) < 0)
 		return status;
+	else
+		status = 0;
 
 	/*
 	 * Make sure we re-validate anything we've got cached.
 	 * This makes locking act as a cache coherency point.
 	 */
+ out_ok:
 	NFS_CACHEINV(inode);
-	return 0;
+	return status;
 }

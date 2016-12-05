@@ -60,6 +60,14 @@ void check_page_tables (void)
 
 #if UMS_DEBUG
 /*
+ * check for wait queue in 2.3.x
+ */
+inline void uq_log (char *txt, struct inode *inode)
+{
+	printk (KERN_ERR "%s: (%lu) magic=%lu creator=%lu lock=%u\n", txt, inode->i_ino, inode->u.umsdos_i.dir_info.p.__magic, inode->u.umsdos_i.dir_info.p.__creator, inode->u.umsdos_i.dir_info.p.lock.lock);
+}
+
+/*
  * check a superblock
  */
 
@@ -76,7 +84,6 @@ void check_sb (struct super_block *sb, const char c)
 /*
  * check an inode
  */
-extern struct inode_operations umsdos_rdir_inode_operations;
 
 void check_inode (struct inode *inode)
 {
@@ -92,24 +99,7 @@ void check_inode (struct inode *inode)
 		}
 		
 		printk (" (i_patched=%d)", inode->u.umsdos_i.i_patched);
-		
-		if (inode->i_op == NULL) {
-			printk (" (i_op is NULL)\n");
-		} else if (inode->i_op == &umsdos_dir_inode_operations) {
-			printk (" (i_op is umsdos_dir_inode_operations)\n");
-		} else if (inode->i_op == &umsdos_file_inode_operations) {
-			printk (" (i_op is umsdos_file_inode_operations)\n");
-		} else if (inode->i_op == &umsdos_file_inode_operations_no_bmap) {
-			printk (" (i_op is umsdos_file_inode_operations_no_bmap)\n");
-		} else if (inode->i_op == &umsdos_file_inode_operations_readpage) {
-			printk (" (i_op is umsdos_file_inode_operations_readpage)\n");
-		} else if (inode->i_op == &umsdos_rdir_inode_operations) {
-			printk (" (i_op is umsdos_rdir_inode_operations)\n");
-		} else if (inode->i_op == &umsdos_symlink_inode_operations) {
-			printk (" (i_op is umsdos_symlink_inode_operations)\n");
-		} else {
-			printk (" (i_op is UNKNOWN: %p)\n", inode->i_op);
-		}
+
 	} else {
 		printk (KERN_DEBUG "*   inode is NULL\n");
 	}
@@ -212,7 +202,7 @@ void check_dentry_path (struct dentry *dentry, const char *desc)
 	
 	while (dentry && count < 10) {
 		check_dent_int (dentry, count++);
-		if (dentry == dentry->d_parent) {
+		if (IS_ROOT(dentry)) {
 			printk (KERN_DEBUG "*** end checking dentry (root reached ok)\n");
 			break;
 		}
@@ -230,6 +220,7 @@ void check_dentry_path (struct dentry *dentry, const char *desc)
 	}
 }
 #else
+inline void uq_log (char *txt, struct inode *inode) {};
 void check_sb (struct super_block *sb, const char c) {};
 void check_inode (struct inode *inode) {};
 void checkd_inode (struct inode *inode) {};

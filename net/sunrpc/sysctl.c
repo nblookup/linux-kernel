@@ -14,6 +14,8 @@
 #include <linux/ctype.h>
 #include <linux/fs.h>
 #include <linux/sysctl.h>
+#define __NO_VERSION__
+#include <linux/module.h>
 
 #include <asm/uaccess.h>
 #include <linux/sunrpc/types.h>
@@ -38,11 +40,9 @@ rpc_register_sysctl(void)
 {
 	if (!sunrpc_table_header) {
 		sunrpc_table_header = register_sysctl_table(sunrpc_table, 1);
-#ifdef MODULE
 #ifdef CONFIG_PROC_FS
 		if (sunrpc_table[0].de)
-			sunrpc_table[0].de->fill_inode = rpc_modcount;
-#endif
+			sunrpc_table[0].de->owner = THIS_MODULE;
 #endif
 	}
 			
@@ -76,13 +76,8 @@ proc_dodebug(ctl_table *table, int write, struct file *file,
 		if (!access_ok(VERIFY_READ, buffer, left))
 			return -EFAULT;
 		p = (char *) buffer;
-#if LINUX_VERSION_CODE >= 0x020100
 		while (left && __get_user(c, p) >= 0 && isspace(c))
 			left--, p++;
-#else
-		while (left && (c = get_fs_byte(p)) >= 0 && isspace(c))
-			left--, p++;
-#endif
 		if (!left)
 			goto done;
 

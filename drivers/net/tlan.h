@@ -8,11 +8,16 @@
  *  by James Banks
  *
  *  (C) 1997-1998 Caldera, Inc.
- *
+ *  (C) 1999-2000 Torben Mathiasen
+ * 
  *  This software may be used and distributed according to the terms
  *  of the GNU Public License, incorporated herein by reference.
  *
  ** This file is best viewed/edited with tabstop=4, colums>=132
+ *
+ *  
+ *  Dec 10, 1999	Torben Mathiasen <torben.mathiasen@compaq.com>
+ *			New Maintainer
  *
  ********************************************************************/
 
@@ -20,11 +25,6 @@
 #include <asm/io.h>
 #include <asm/types.h>
 #include <linux/netdevice.h>
-
-#if LINUX_VERSION_CODE <= 0x20100
-#define net_device_stats	enet_statistics
-#endif
-
 
 
 
@@ -45,7 +45,7 @@
 #define TLAN_IGNORE		0
 #define TLAN_RECORD		1
 
-#define TLAN_DBG(lvl, format, args...)	if (debug&lvl) printk( format, ##args );
+#define TLAN_DBG(lvl, format, args...)	if (debug&lvl) printk(KERN_DEBUG "TLAN: " format, ##args );
 #define TLAN_DEBUG_GNRL		0x0001
 #define TLAN_DEBUG_TX		0x0002
 #define TLAN_DEBUG_RX		0x0004 
@@ -156,7 +156,7 @@ typedef u8 TLanBuffer[TLAN_MAX_FRAME_SIZE];
 	 ****************************************************************/
 
 typedef struct tlan_private_tag {
-	struct device           *nextDevice;
+	struct net_device           *nextDevice;
 	void			*dmaStorage;
 	u8			*padBuffer;
 	TLanList                *rxList;
@@ -182,11 +182,11 @@ typedef struct tlan_private_tag {
 	u32			duplex;
 	u32			phy[2];
 	u32			phyNum;
-	u32			sa_int;
 	u32			speed;
 	u8			tlanRev;
 	u8			tlanFullDuplex;
 	char                    devName[8];
+	spinlock_t		lock;
 } TLanPrivateInfo;
 
 
@@ -206,7 +206,7 @@ typedef struct tlan_private_tag {
 #define TLAN_TIMER_PHY_FINISH_AN	7
 #define TLAN_TIMER_FINISH_RESET		8
 
-#define TLAN_TIMER_ACT_DELAY		10
+#define TLAN_TIMER_ACT_DELAY		(HZ/10)
 
 
 

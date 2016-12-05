@@ -1,4 +1,4 @@
-/* $Id: sys32.S,v 1.8 1998/10/28 08:10:37 jj Exp $
+/* $Id: sys32.S,v 1.11 2000/01/11 17:33:29 jj Exp $
  * sys32.S: I-cache tricks for 32-bit compatability layer simple
  *          conversions.
  *
@@ -20,7 +20,7 @@ sys32_mmap:
 
 	.align		32
 	.globl		sys32_lseek
-	.globl		sys32_chmod, sys32_chown, sys32_lchown, sys32_mknod
+	.globl		sys32_chmod, sys32_mknod
 sys32_lseek:
 	sra		%o1, 0, %o1
 	sethi		%hi(sys_lseek), %g1
@@ -32,20 +32,6 @@ sys32_chmod:
 	orcc		%g2, %lo(0xffff), %g2
 	jmpl		%g1 + %lo(sys_chmod), %g0
 	 and		%o1, %g2, %o1
-sys32_chown:
-	sethi		%hi(0xffff), %g2
-	sethi		%hi(sys_chown), %g1
-	orcc		%g2, %lo(0xffff), %g2
-	and		%o1, %g2, %o1
-	jmpl		%g1 + %lo(sys_chown), %g0
-	 and		%o2, %g2, %o2
-sys32_lchown:
-	sethi		%hi(0xffff), %g2
-	sethi		%hi(sys_lchown), %g1
-	orcc		%g2, %lo(0xffff), %g2
-	and		%o1, %g2, %o1
-	jmpl		%g1 + %lo(sys_lchown), %g0
-	 and		%o2, %g2, %o2
 sys32_mknod:
 	sethi		%hi(0xffff), %g2
 	sethi		%hi(sys_mknod), %g1
@@ -74,3 +60,12 @@ sys32_bdflush:
 	sethi		%hi(sys_bdflush), %g1
 	jmpl		%g1 + %lo(sys_bdflush), %g0
 	 sra		%o1, 0, %o1
+
+	.align		32
+	.globl		sys32_mmap2
+sys32_mmap2:
+	srl		%o4, 0, %o4
+	sethi		%hi(sys_mmap), %g1
+	srl		%o5, 0, %o5
+	jmpl		%g1 + %lo(sys_mmap), %g0
+	 sllx		%o5, 12, %o5

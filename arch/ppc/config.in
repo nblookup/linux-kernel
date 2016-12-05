@@ -1,93 +1,153 @@
-# $Id: config.in,v 1.92 1999/04/30 05:41:43 cort Exp $
+# $Id: config.in,v 1.106 1999/09/14 19:21:18 cort Exp $
 # For a description of the syntax of this configuration file,
 # see the Configure script.
 #
+define_bool CONFIG_UID16 n
+
 mainmenu_name "Linux/PowerPC Kernel Configuration"
+
+mainmenu_option next_comment
+comment 'Code maturity level options'
+bool 'Prompt for development and/or incomplete code/drivers' CONFIG_EXPERIMENTAL
+endmenu
 
 mainmenu_option next_comment
 comment 'Platform support'
 define_bool CONFIG_PPC y
-choice 'Processor type' \
-	"6xx/7xx	CONFIG_6xx \
-	 860/821	CONFIG_8xx" 6xx/7xx
+choice 'Processor Type'	\
+	"6xx/7xx/7400		CONFIG_6xx	\
+	 4xx			CONFIG_4xx	\
+	 630/Power3(64-Bit)	CONFIG_PPC64	\
+	 82xx			CONFIG_82xx	\
+	 8xx			CONFIG_8xx"	6xx/7xx
 
-choice 'Machine Type' \
-	"PowerMac	CONFIG_PMAC \
-	 PReP/MTX	CONFIG_PREP \
-	 CHRP		CONFIG_CHRP \
-	 PowerMac/PReP/CHRP	CONFIG_ALL_PPC \
-  	 APUS           CONFIG_APUS \
-	 MBX		CONFIG_MBX" PowerMac
+if [ "$CONFIG_4xx" = "y" ]; then
+    choice 'Machine Type'			\
+	"Oak			CONFIG_OAK 	\
+	 Walnut			CONFIG_WALNUT"	Oak
+fi
+
+if [ "$CONFIG_8xx" = "y" ]; then
+  define_bool CONFIG_SERIAL_CONSOLE y
+
+  choice 'Processor Model'	\
+	"821		CONFIG_MPC821		\
+	 823		CONFIG_MPC823		\
+	 850		CONFIG_MPC850		\
+	 855		CONFIG_MPC855		\
+	 860		CONFIG_MPC860		\
+	 860T		CONFIG_MPC860T"		860
+
+  choice 'Machine Type'		\
+	"RPX-Lite	CONFIG_RPXLITE		\
+	 RPX-Classic	CONFIG_RPXCLASSIC	\
+	 BSE-IP		CONFIG_BSEIP		\
+	 MBX		CONFIG_MBX		\
+	 WinCept	CONFIG_WINCEPT"		RPX-Lite
+fi
+if [ "$CONFIG_6xx" = "y" ]; then
+  choice 'Machine Type'		\
+	"PowerMac/PReP/MTX/CHRP	CONFIG_ALL_PPC	\
+	 Gemini		CONFIG_GEMINI		\
+	 APUS		CONFIG_APUS"		PowerMac/PReP/MTX/CHRP
+fi
+
+if [ "$CONFIG_PPC64" = "y" ]; then
+  define_bool CONFIG_ALL_PPC y
+fi
 
 bool 'Symmetric multi-processing support' CONFIG_SMP
+if [ "$CONFIG_6xx" = "y" ];then
+  bool 'AltiVec Support' CONFIG_ALTIVEC
+fi
+
 if [ "$CONFIG_ALL_PPC" != "y" ];then
   define_bool CONFIG_MACH_SPECIFIC y
 fi
+
+if [ "$CONFIG_4xx" = "y" -o "$CONFIG_8xx" = "y" ]; then
+  bool 'Math emulation' CONFIG_MATH_EMULATION
+fi
 endmenu
 
-if [ "$CONFIG_MBX" = "y" ];then
-  define_bool CONFIG_SERIAL_CONSOLE y
+mainmenu_option next_comment
+comment 'Loadable module support'
+bool 'Enable loadable module support' CONFIG_MODULES
+if [ "$CONFIG_MODULES" = "y" ]; then
+   bool '  Set version information on all module symbols' CONFIG_MODVERSIONS
+   bool '  Kernel module loader' CONFIG_KMOD
 fi
+endmenu
 
 mainmenu_option next_comment
 comment 'General setup'
 
-bool 'Prompt for development and/or incomplete code/drivers' CONFIG_EXPERIMENTAL
-bool 'Enable loadable module support' CONFIG_MODULES
-if [ "$CONFIG_MODULES" = "y" ]; then
-  bool 'Set version information on all symbols for modules' CONFIG_MODVERSIONS
-  bool 'Kernel module loader' CONFIG_KMOD
-fi
-
 if [ "$CONFIG_APUS" = "y" ]; then
   define_bool CONFIG_PCI n
-else
-  define_bool CONFIG_PCI y
+fi
+if [ "$CONFIG_OAK" = "y" ]; then
+  define_bool CONFIG_PCI n
+fi
+if [ "$CONFIG_8xx" = "y" ]; then
+    bool 'QSpan PCI' CONFIG_PCI
+fi
+if [ "$CONFIG_6xx" = "y" -a "$CONFIG_APUS" != "y" ]; then
+    define_bool CONFIG_PCI y
+fi
+if [ "$CONFIG_PREP" = "y" -o "$CONFIG_PMAC" = "y" -o "$CONFIG_CHRP" = "y" -o "$CONFIG_ALL_PPC" = "y" ]; then
+    define_bool CONFIG_PCI y
 fi
 
-bool 'PCI quirks' CONFIG_PCI_QUIRKS
-if [ "$CONFIG_PCI_QUIRKS" = "y" ]; then
-  bool '   PCI bridge optimization' CONFIG_PCI_OPTIMIZE
-fi
-
-bool 'Backward-compatible /proc/pci' CONFIG_PCI_OLD_PROC
 bool 'Networking support' CONFIG_NET
 bool 'Sysctl support' CONFIG_SYSCTL
 bool 'System V IPC' CONFIG_SYSVIPC
 bool 'BSD Process Accounting' CONFIG_BSD_PROCESS_ACCT
 
 # only elf supported, a.out is not -- Cort
+if [ "$CONFIG_PROC_FS" = "y" ]; then
+   define_bool CONFIG_KCORE_ELF y
+fi
 define_bool CONFIG_BINFMT_ELF y
 define_bool CONFIG_KERNEL_ELF y
 tristate 'Kernel support for MISC binaries' CONFIG_BINFMT_MISC
-tristate 'Kernel support for JAVA binaries (obsolete)' CONFIG_BINFMT_JAVA
 
-tristate 'Parallel port support' CONFIG_PARPORT
-if [ "$CONFIG_PARPORT" != "n" ]; then
-  dep_tristate '   PC-style hardware' CONFIG_PARPORT_PC $CONFIG_PARPORT
-  if [ "$CONFIG_PARPORT_PC" != "n" ]; then
-    bool '   Support foreign hardware' CONFIG_PARPORT_OTHER
+source drivers/pci/Config.in
+
+bool 'Support for hot-pluggable devices' CONFIG_HOTPLUG
+
+if [ "$CONFIG_HOTPLUG" = "y" ]; then
+   source drivers/pcmcia/Config.in
+fi
+
+source drivers/parport/Config.in
+
+if [ "$CONFIG_4xx" != "y" -a "$CONFIG_8xx" != "y" ]; then
+  bool 'Support for VGA Console' CONFIG_VGA_CONSOLE
+  bool 'Support for frame buffer devices' CONFIG_FB
+  if [ "$CONFIG_FB" = "y" ]; then
+    bool 'Backward compatibility mode for Xpmac' CONFIG_FB_COMPAT_XPMAC
   fi
+
+  bool 'Power management support for PowerBooks' CONFIG_PMAC_PBOOK
+  bool 'Support for PowerMac floppy' CONFIG_MAC_FLOPPY
+  tristate 'Support for PowerMac serial ports' CONFIG_MAC_SERIAL
+  if [ "$CONFIG_MAC_SERIAL" = "y" ]; then
+     bool '   Support for console on serial port' CONFIG_SERIAL_CONSOLE
+  fi
+  bool 'Apple Desktop Bus (ADB) support' CONFIG_ADB
+  if [ "$CONFIG_ADB" = "y" ]; then
+     bool '   Include CUDA ADB driver' CONFIG_ADB_CUDA
+     bool '   Include MacIO ADB driver' CONFIG_ADB_MACIO
+     bool '   Include PMU (Powerbook) ADB driver' CONFIG_ADB_PMU
+     bool 'Support for ADB keyboard' CONFIG_ADB_KEYBOARD 
+     bool 'Support for ADB mouse' CONFIG_ADBMOUSE
+  fi
+  bool 'Support for Open Firmware device tree in /proc' CONFIG_PROC_DEVICETREE
+  bool 'Support for TotalImpact TotalMP' CONFIG_TOTALMP
+  bool 'Support for early boot text console (BootX only)' CONFIG_BOOTX_TEXT
+  bool 'Support for Motorola Hot Swap' CONFIG_MOTOROLA_HOTSWAP
 fi
 
-bool 'Support for VGA Console' CONFIG_VGA_CONSOLE
-bool 'Support for frame buffer devices' CONFIG_FB
-if [ "$CONFIG_FB" = "y" ]; then
-  bool 'Backward compatibility mode for Xpmac' CONFIG_FB_COMPAT_XPMAC
-fi
-
-bool 'Power management support for PowerBook 3400/2400' CONFIG_PMAC_PBOOK
-bool 'Support for PowerMac keyboard' CONFIG_MAC_KEYBOARD
-bool 'Support for PowerMac floppy' CONFIG_MAC_FLOPPY
-bool 'Support for PowerMac serial ports' CONFIG_MAC_SERIAL
-if [ "$CONFIG_MAC_SERIAL" = "y" ]; then
-   bool '   Support for console on serial port' CONFIG_SERIAL_CONSOLE
-fi
-bool 'Support for PowerMac ADB mouse' CONFIG_ADBMOUSE
-bool 'Support for Open Firmware device tree in /proc' CONFIG_PROC_DEVICETREE
-bool 'Support for TotalImpact TotalMP' CONFIG_TOTALMP
-bool 'Support for early boot text console (BootX only)' CONFIG_BOOTX_TEXT
-bool 'Support for Motorola Hot Swap' CONFIG_MOTOROLA_HOTSWAP
 if [ "$CONFIG_PREP" = "y" -o "$CONFIG_ALL_PPC" = "y" ]; then
   bool 'PReP bootloader kernel arguments' CONFIG_CMDLINE_BOOL y
   if [ "$CONFIG_CMDLINE_BOOL" = "y" ] ; then
@@ -134,6 +194,8 @@ if [ "$CONFIG_SCSI" != "n" ]; then
 fi
 endmenu
 
+source drivers/ieee1394/Config.in
+
 if [ "$CONFIG_NET" = "y" ]; then
   mainmenu_option next_comment
   comment 'Network device support'
@@ -141,6 +203,9 @@ if [ "$CONFIG_NET" = "y" ]; then
   bool 'Network device support' CONFIG_NETDEVICES
   if [ "$CONFIG_NETDEVICES" = "y" ]; then
     source drivers/net/Config.in
+    if [ "$CONFIG_ATM" = "y" ]; then
+      source drivers/atm/Config.in
+    fi
   fi
   endmenu
 fi
@@ -171,6 +236,7 @@ source drivers/video/Config.in
 endmenu
 
 source drivers/char/Config.in
+source drivers/usb/Config.in
 source fs/Config.in
 
 mainmenu_option next_comment
@@ -182,6 +248,10 @@ if [ "$CONFIG_SOUND" != "n" ]; then
 fi
 
 endmenu
+
+if [ "$CONFIG_8xx" = "y" ]; then
+source arch/ppc/8xx_io/Config.in
+fi
 
 mainmenu_option next_comment
 comment 'Kernel hacking'

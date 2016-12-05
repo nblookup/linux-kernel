@@ -6,10 +6,10 @@
  * Status:        Experimental.
  * Author:        Dag Brattli <dagb@cs.uit.no>
  * Created at:    Fri Jan 29 11:16:38 1999
- * Modified at:   Thu Feb 25 15:10:54 1999
+ * Modified at:   Sat Oct 30 12:58:45 1999
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * 
- *     Copyright (c) 1998 Dag Brattli, All Rights Reserved.
+ *     Copyright (c) 1998-1999 Dag Brattli, All Rights Reserved.
  *      
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -23,6 +23,7 @@
  ********************************************************************/
 
 #include <linux/skbuff.h>
+#include <linux/random.h>
 
 #include <net/irda/irlan_common.h>
 
@@ -40,37 +41,37 @@ void handle_filter_request(struct irlan_cb *self, struct sk_buff *skb)
 	if ((self->provider.filter_type == IRLAN_DIRECTED) && 
 	    (self->provider.filter_operation == DYNAMIC))
 	{
-		DEBUG(0, "Giving peer a dynamic Ethernet address\n");
-
+		IRDA_DEBUG(0, "Giving peer a dynamic Ethernet address\n");
 		self->provider.mac_address[0] = 0x40;
 		self->provider.mac_address[1] = 0x00;
 		self->provider.mac_address[2] = 0x00;
 		self->provider.mac_address[3] = 0x00;
 		
 		/* Use arbitration value to generate MAC address */
-		if (self->access_type == ACCESS_PEER) {
+		if (self->provider.access_type == ACCESS_PEER) {
 			self->provider.mac_address[4] = 
 				self->provider.send_arb_val & 0xff;
 			self->provider.mac_address[5] = 
 				(self->provider.send_arb_val >> 8) & 0xff;;
 		} else {
 			/* Just generate something for now */
-			self->provider.mac_address[4] = jiffies & 0xff;
-			self->provider.mac_address[5] = (jiffies >> 8) & 0xff;
+			get_random_bytes(self->provider.mac_address+4, 1);
+			get_random_bytes(self->provider.mac_address+5, 1);
 		}
 
 		skb->data[0] = 0x00; /* Success */
 		skb->data[1] = 0x03;
 		irlan_insert_string_param(skb, "FILTER_MODE", "NONE");
 		irlan_insert_short_param(skb, "MAX_ENTRY", 0x0001);
-		irlan_insert_array_param(skb, "FILTER_ENTRY", self->provider.mac_address, 6);
+		irlan_insert_array_param(skb, "FILTER_ENTRY", 
+					 self->provider.mac_address, 6);
 		return;
 	}
 	
 	if ((self->provider.filter_type == IRLAN_DIRECTED) && 
 	    (self->provider.filter_mode == FILTER))
 	{
-		DEBUG(0, "Directed filter on\n");
+		IRDA_DEBUG(0, "Directed filter on\n");
 		skb->data[0] = 0x00; /* Success */
 		skb->data[1] = 0x00;
 		return;
@@ -78,7 +79,7 @@ void handle_filter_request(struct irlan_cb *self, struct sk_buff *skb)
 	if ((self->provider.filter_type == IRLAN_DIRECTED) && 
 	    (self->provider.filter_mode == NONE))
 	{
-		DEBUG(0, "Directed filter off\n");
+		IRDA_DEBUG(0, "Directed filter off\n");
 		skb->data[0] = 0x00; /* Success */
 		skb->data[1] = 0x00;
 		return;
@@ -87,7 +88,7 @@ void handle_filter_request(struct irlan_cb *self, struct sk_buff *skb)
 	if ((self->provider.filter_type == IRLAN_BROADCAST) && 
 	    (self->provider.filter_mode == FILTER))
 	{
-		DEBUG(0, "Broadcast filter on\n");
+		IRDA_DEBUG(0, "Broadcast filter on\n");
 		skb->data[0] = 0x00; /* Success */
 		skb->data[1] = 0x00;
 		return;
@@ -95,7 +96,7 @@ void handle_filter_request(struct irlan_cb *self, struct sk_buff *skb)
 	if ((self->provider.filter_type == IRLAN_BROADCAST) && 
 	    (self->provider.filter_mode == NONE))
 	{
-		DEBUG(0, "Broadcast filter off\n");
+		IRDA_DEBUG(0, "Broadcast filter off\n");
 		skb->data[0] = 0x00; /* Success */
 		skb->data[1] = 0x00;
 		return;
@@ -103,7 +104,7 @@ void handle_filter_request(struct irlan_cb *self, struct sk_buff *skb)
 	if ((self->provider.filter_type == IRLAN_MULTICAST) && 
 	    (self->provider.filter_mode == FILTER))
 	{
-		DEBUG(0, "Multicast filter on\n");
+		IRDA_DEBUG(0, "Multicast filter on\n");
 		skb->data[0] = 0x00; /* Success */
 		skb->data[1] = 0x00;
 		return;
@@ -111,7 +112,7 @@ void handle_filter_request(struct irlan_cb *self, struct sk_buff *skb)
 	if ((self->provider.filter_type == IRLAN_MULTICAST) && 
 	    (self->provider.filter_mode == NONE))
 	{
-		DEBUG(0, "Multicast filter off\n");
+		IRDA_DEBUG(0, "Multicast filter off\n");
 		skb->data[0] = 0x00; /* Success */
 		skb->data[1] = 0x00;
 		return;
@@ -119,7 +120,7 @@ void handle_filter_request(struct irlan_cb *self, struct sk_buff *skb)
 	if ((self->provider.filter_type == IRLAN_MULTICAST) && 
 	    (self->provider.filter_operation == GET))
 	{
-		DEBUG(0, "Multicast filter get\n");
+		IRDA_DEBUG(0, "Multicast filter get\n");
 		skb->data[0] = 0x00; /* Success? */
 		skb->data[1] = 0x02;
 		irlan_insert_string_param(skb, "FILTER_MODE", "NONE");
@@ -129,7 +130,7 @@ void handle_filter_request(struct irlan_cb *self, struct sk_buff *skb)
 	skb->data[0] = 0x00; /* Command not supported */
 	skb->data[1] = 0x00;
 
-	DEBUG(0, "Not implemented!\n");
+	IRDA_DEBUG(0, "Not implemented!\n");
 }
 
 /*
@@ -138,25 +139,24 @@ void handle_filter_request(struct irlan_cb *self, struct sk_buff *skb)
  *    Check parameters in request from peer device
  *
  */
-void irlan_check_command_param(struct irlan_cb *self, char *param, 
-			       char *value)
+void irlan_check_command_param(struct irlan_cb *self, char *param, char *value)
 {
 	__u8 *bytes;
 
-	DEBUG(4, __FUNCTION__ "()\n");
+	IRDA_DEBUG(4, __FUNCTION__ "()\n");
 
 	bytes = value;
 
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == IRLAN_MAGIC, return;);
 
-	DEBUG(4, "%s, %s\n", param, value);
+	IRDA_DEBUG(4, "%s, %s\n", param, value);
 
 	/*
 	 *  This is experimental!! DB.
 	 */
 	 if (strcmp(param, "MODE") == 0) {
-		DEBUG(0, __FUNCTION__ "()\n");
+		IRDA_DEBUG(0, __FUNCTION__ "()\n");
 		self->use_udata = TRUE;
 		return;
 	}
@@ -210,6 +210,12 @@ void irlan_check_command_param(struct irlan_cb *self, char *param,
 	}
 }
 
+/*
+ * Function irlan_print_filter (filter_type, buf)
+ *
+ *    Print status of filter. Used by /proc file system
+ *
+ */
 int irlan_print_filter(int filter_type, char *buf)
 {
 	int len = 0;

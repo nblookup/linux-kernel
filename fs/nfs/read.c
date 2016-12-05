@@ -26,6 +26,7 @@
 #include <linux/pagemap.h>
 #include <linux/sunrpc/clnt.h>
 #include <linux/nfs_fs.h>
+#include <linux/smp_lock.h>
 
 #include <asm/segment.h>
 #include <asm/system.h>
@@ -69,15 +70,20 @@ static int
 nfs_readpage_sync(struct dentry *dentry, struct inode *inode, struct page *page)
 {
 	struct nfs_rreq	rqst;
-	unsigned long	offset = page->offset;
-	char		*buffer = (char *) page_address(page);
+	unsigned long	offset = page->index << PAGE_CACHE_SHIFT;
+	char		*buffer;
 	int		rsize = NFS_SERVER(inode)->rsize;
 	int		result, refresh = 0;
 	int		count = PAGE_SIZE;
 	int		flags = IS_SWAPFILE(inode)? NFS_RPC_SWAPFLAGS : 0;
 
 	dprintk("NFS: nfs_readpage_sync(%p)\n", page);
-	clear_bit(PG_error, &page->flags);
+
+	/*
+	 * This works now because the socket layer never tries to DMA
+	 * into this buffer directly.
+	 */
+	buffer = (char *) kmap(page);	
 
 	do {
 		if (count < rsize)
@@ -90,8 +96,9 @@ nfs_readpage_sync(struct dentry *dentry, struct inode *inode, struct page *page)
 
 		/* Set up arguments and perform rpc call */
 		nfs_readreq_setup(&rqst, NFS_FH(dentry), offset, buffer, rsize);
-		result = rpc_call(NFS_CLIENT(inode), NFSPROC_READ,
-					&rqst.ra_args, &rqst.ra_res, flags);
+		lock_kernel();
+		result = rpc_call(NFS_CLIENT(inode), NFSPROC_READ, &rqst.ra_args, &rqst.ra_res, flags);
+		unlock_kernel();
 
 		/*
 		 * Even if we had a partial success we can't mark the page
@@ -111,16 +118,15 @@ nfs_readpage_sync(struct dentry *dentry, struct inode *inode, struct page *page)
 	} while (count);
 
 	memset(buffer, 0, count);
-	set_bit(PG_uptodate, &page->flags);
+	SetPageUptodate(page);
 	result = 0;
 
 io_error:
+	kunmap(page);
+	UnlockPage(page);
 	/* Note: we don't refresh if the call returned error */
 	if (refresh && result >= 0)
 		nfs_refresh_inode(inode, &rqst.ra_fattr);
-	/* N.B. Use nfs_unlock_page here? */
-	clear_bit(PG_locked, &page->flags);
-	wake_up(&page->wait);
 	return result;
 }
 
@@ -146,17 +152,15 @@ nfs_readpage_result(struct rpc_task *task)
 			memset((char *) address + result, 0, PAGE_SIZE - result);
 		}
 		nfs_refresh_inode(req->ra_inode, &req->ra_fattr);
-		set_bit(PG_uptodate, &page->flags);
+		SetPageUptodate(page);
 		succ++;
 	} else {
-		set_bit(PG_error, &page->flags);
+		SetPageError(page);
 		fail++;
 		dprintk("NFS: %d successful reads, %d failures\n", succ, fail);
 	}
-	/* N.B. Use nfs_unlock_page here? */
-	clear_bit(PG_locked, &page->flags);
-	wake_up(&page->wait);
-
+	kunmap(page);
+	UnlockPage(page);
 	free_page(address);
 
 	rpc_release_task(task);
@@ -167,7 +171,7 @@ static inline int
 nfs_readpage_async(struct dentry *dentry, struct inode *inode,
 			struct page *page)
 {
-	unsigned long address = page_address(page);
+	unsigned long address;
 	struct nfs_rreq	*req;
 	int		result = -1, flags;
 
@@ -181,9 +185,10 @@ nfs_readpage_async(struct dentry *dentry, struct inode *inode,
 	if (!req)
 		goto out_defer;
 
+	address = kmap(page);	
 	/* Initialize request */
 	/* N.B. Will the dentry remain valid for life of request? */
-	nfs_readreq_setup(req, NFS_FH(dentry), page->offset,
+	nfs_readreq_setup(req, NFS_FH(dentry), page->index << PAGE_CACHE_SHIFT,
 				(void *) address, PAGE_SIZE);
 	req->ra_inode = inode;
 	req->ra_page = page; /* count has been incremented by caller */
@@ -204,6 +209,7 @@ out_defer:
 	goto out;
 out_free:
 	dprintk("NFS: failed to enqueue async READ request.\n");
+	kunmap(page);
 	kfree(req);
 	goto out;
 }
@@ -221,16 +227,15 @@ out_free:
  *  -	The server is congested.
  */
 int
-nfs_readpage(struct file *file, struct page *page)
+nfs_readpage(struct dentry *dentry, struct page *page)
 {
-	struct dentry *dentry = file->f_dentry;
 	struct inode *inode = dentry->d_inode;
 	int		error;
 
-	dprintk("NFS: nfs_readpage (%p %ld@%ld)\n",
-		page, PAGE_SIZE, page->offset);
-	atomic_inc(&page->count);
-	set_bit(PG_locked, &page->flags);
+	lock_kernel();
+	dprintk("NFS: nfs_readpage (%p %ld@%lu)\n",
+		page, PAGE_SIZE, page->index);
+	get_page(page);
 
 	/*
 	 * Try to flush any pending writes to the file..
@@ -256,9 +261,10 @@ nfs_readpage(struct file *file, struct page *page)
 	goto out_free;
 
 out_error:
-	clear_bit(PG_locked, &page->flags);
+	UnlockPage(page);
 out_free:
-	free_page(page_address(page));
+	__free_page(page);
 out:
+	unlock_kernel();
 	return error;
 }

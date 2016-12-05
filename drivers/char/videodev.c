@@ -9,7 +9,7 @@
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  *
- * Author:	Alan Cox, <alan@cymru.net>
+ * Author:	Alan Cox, <alan@redhat.com>
  *
  * Fixes:
  */
@@ -45,41 +45,14 @@ static struct video_device *video_device[VIDEO_NUM_DEVICES];
 extern int init_bttv_cards(struct video_init *);
 extern int i2c_tuner_init(struct video_init *);
 #endif
-#ifdef CONFIG_VIDEO_SAA5249
-extern int init_saa_5249(struct video_init *);
-#endif	
-#ifdef CONFIG_VIDEO_CQCAM
-extern int init_colour_qcams(struct video_init *);
-#endif
 #ifdef CONFIG_VIDEO_BWQCAM
 extern int init_bw_qcams(struct video_init *);
 #endif
 #ifdef CONFIG_VIDEO_PLANB
 extern int init_planbs(struct video_init *);
 #endif
-#ifdef CONFIG_RADIO_AZTECH
-extern int aztech_init(struct video_init *);
-#endif
-#ifdef CONFIG_RADIO_RTRACK
-extern int rtrack_init(struct video_init *);
-#endif
-#ifdef CONFIG_RADIO_SF16FMI
-extern int fmi_init(struct video_init *);
-#endif
-#ifdef CONFIG_RADIO_MIROPCM20
-extern int pcm20_init(struct video_init *);
-#endif
-#ifdef CONFIG_RADIO_GEMTEK
-extern int gemtek_init(struct video_init *);
-#endif
-#ifdef CONFIG_RADIO_TYPHOON
-extern int typhoon_init(struct video_init *);
-#endif
-#ifdef CONFIG_RADIO_CADET
-extern int cadet_init(struct video_init *);
-#endif
-#ifdef CONFIG_VIDEO_PMS
-extern int init_pms_cards(struct video_init *);
+#ifdef CONFIG_VIDEO_ZORAN
+extern int init_zoran_cards(struct video_init *);
 #endif
 
 static struct video_init video_init_list[]={
@@ -87,46 +60,18 @@ static struct video_init video_init_list[]={
 	{"i2c-tuner", i2c_tuner_init},
 	{"bttv", init_bttv_cards},
 #endif	
-#ifdef CONFIG_VIDEO_SAA5249
-	{"saa5249", init_saa_5249},
-#endif	
-#ifdef CONFIG_VIDEO_CQCAM
-	{"c-qcam", init_colour_qcams},
-#endif	
 #ifdef CONFIG_VIDEO_BWQCAM
 	{"bw-qcam", init_bw_qcams},
-#endif	
-#ifdef CONFIG_VIDEO_PMS
-	{"PMS", init_pms_cards}, 
 #endif	
 #ifdef CONFIG_VIDEO_PLANB
 	{"planb", init_planbs},
 #endif
-#ifdef CONFIG_RADIO_AZTECH
-	{"Aztech", aztech_init}, 
+#ifdef CONFIG_VIDEO_ZORAN
+	{"zoran", init_zoran_cards},
 #endif	
-#ifdef CONFIG_RADIO_RTRACK
-	{"RTrack", rtrack_init}, 
-#endif 
-#ifdef CONFIG_RADIO_SF16FMI
-	{"SF16FMI", fmi_init}, 
-#endif	
-#ifdef CONFIG_RADIO_MIROPCM20
-	{"PCM20", pcm20_init}, 
-#endif
-#ifdef CONFIG_RADIO_CADET
-	{"Cadet", cadet_init},
-#endif
-#ifdef CONFIG_RADIO_GEMTEK
-	{"GemTek", gemtek_init},
-#endif
-#ifdef CONFIG_RADIO_TYPHOON
-	{"radio-typhoon", typhoon_init},
-#endif
 	{"end", NULL}
 };
 
-#if LINUX_VERSION_CODE >= 0x020100
 /*
  *	Read will do some smarts later on. Buffer pin etc.
  */
@@ -140,7 +85,6 @@ static ssize_t video_read(struct file *file,
 	else
 		return -EINVAL;
 }
-
 
 
 /*
@@ -172,31 +116,6 @@ static unsigned int video_poll(struct file *file, poll_table * wait)
 		return 0;
 }
 
-
-#else
-static int video_read(struct inode *ino,struct file *file,
-			  char *buf, int count)
-{
-         int err;
-	 struct video_device *vfl=video_device[MINOR(ino->i_rdev)];
-	 if (vfl->read)
-	   return vfl->read(vfl, buf, count, file->f_flags&O_NONBLOCK);
-	 else
-	   return -EINVAL;
-}
-
-static int video_write(struct inode *ino,struct file *file, const char *buf, 
-			int count)
-{
-	int err;
-	struct video_device *vfl=video_device[MINOR(ino->i_rdev)];
-	if (vfl->write)
-	  return vfl->write(vfl, buf, count, file->f_flags&O_NONBLOCK);
-	else
-	  return 0;
-}
-
-#endif
 
 /*
  *	Open a video device.
@@ -307,6 +226,8 @@ static int video_mmap(struct inode * ino, struct file * file,
 	return -EINVAL;
 }
 
+extern struct file_operations video_fops;
+
 /*
  *	Video For Linux device drivers request registration here.
  */
@@ -317,24 +238,29 @@ int video_register_device(struct video_device *vfd, int type)
 	int base;
 	int err;
 	int end;
+	char *name_base;
 	
 	switch(type)
 	{
 		case VFL_TYPE_GRABBER:
 			base=0;
 			end=64;
+			name_base = "video";
 			break;
 		case VFL_TYPE_VTX:
 			base=192;
 			end=224;
+			name_base = "vtx";
 			break;
 		case VFL_TYPE_VBI:
 			base=224;
 			end=240;
+			name_base = "vbi";
 			break;
 		case VFL_TYPE_RADIO:
 			base=64;
 			end=128;
+			name_base = "radio";
 			break;
 		default:
 			return -1;
@@ -344,6 +270,8 @@ int video_register_device(struct video_device *vfd, int type)
 	{
 		if(video_device[i]==NULL)
 		{
+			char name[16];
+
 			video_device[i]=vfd;
 			vfd->minor=i;
 			/* The init call may sleep so we book the slot out
@@ -359,6 +287,12 @@ int video_register_device(struct video_device *vfd, int type)
 					return err;
 				}
 			}
+			sprintf (name, "v4l/%s%d", name_base, i - base);
+			vfd->devfs_handle =
+			    devfs_register (NULL, name, 0, DEVFS_FL_DEFAULT,
+					    VIDEO_MAJOR, vfd->minor,
+					    S_IFCHR | S_IRUGO | S_IWUGO, 0, 0,
+					    &video_fops, NULL);
 			return 0;
 		}
 	}
@@ -373,6 +307,7 @@ void video_unregister_device(struct video_device *vfd)
 {
 	if(video_device[vfd->minor]!=vfd)
 		panic("vfd: bad unregister");
+	devfs_unregister (vfd->devfs_handle);
 	video_device[vfd->minor]=NULL;
 	MOD_DEC_USE_COUNT;
 }
@@ -380,22 +315,16 @@ void video_unregister_device(struct video_device *vfd)
 
 static struct file_operations video_fops=
 {
-	video_lseek,
-	video_read,
-	video_write,
-	NULL,	/* readdir */
-#if LINUX_VERSION_CODE >= 0x020100
-	video_poll,	/* poll */
-#else
-	NULL,
+	llseek:		video_lseek,
+	read:		video_read,
+	write:		video_write,
+	ioctl:		video_ioctl,
+	mmap:		video_mmap,
+	open:		video_open,
+	release:	video_release,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,0)
+	poll:		video_poll,
 #endif
-	video_ioctl,
-	video_mmap,
-	video_open,
-#if LINUX_VERSION_CODE >= 0x020100
-	NULL,		/* flush */
-#endif
-	video_release
 };
 
 /*
@@ -407,7 +336,7 @@ int videodev_init(void)
 	struct video_init *vfli = video_init_list;
 	
 	printk(KERN_INFO "Linux video capture interface: v1.00\n");
-	if(register_chrdev(VIDEO_MAJOR,"video_capture", &video_fops))
+	if(devfs_register_chrdev(VIDEO_MAJOR,"video_capture", &video_fops))
 	{
 		printk("video_dev: unable to get major %d\n", VIDEO_MAJOR);
 		return -EIO;
@@ -433,7 +362,7 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-	unregister_chrdev(VIDEO_MAJOR, "video_capture");
+	devfs_unregister_chrdev(VIDEO_MAJOR, "video_capture");
 }
 
 

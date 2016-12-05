@@ -10,6 +10,21 @@
 #ifndef _LINUX_SERIAL_H
 #define _LINUX_SERIAL_H
 
+/*
+ * Counters of the input lines (CTS, DSR, RI, CD) interrupts
+ */
+
+struct async_icount {
+	__u32	cts, dsr, rng, dcd, tx, rx;
+	__u32	frame, parity, overrun, brk;
+	__u32	buf_overrun;
+};
+
+/*
+ * The size of the serial xmit buffer is 1 page, or 4096 bytes
+ */
+#define SERIAL_XMIT_SIZE 4096
+
 struct serial_struct {
 	int	type;
 	int	line;
@@ -20,11 +35,14 @@ struct serial_struct {
 	int	custom_divisor;
 	int	baud_base;
 	unsigned short	close_delay;
-	char	reserved_char[2];
+	char	io_type;
+	char	reserved_char[1];
 	int	hub6;
 	unsigned short	closing_wait; /* time to wait before closing */
 	unsigned short	closing_wait2; /* no longer used... */
-	int	reserved[4];
+	unsigned char	*iomem_base;
+	unsigned short	iomem_reg_shift;
+	int	reserved[2];
 };
 
 /*
@@ -47,7 +65,15 @@ struct serial_struct {
 #define PORT_16650V2	7
 #define PORT_16750	8
 #define PORT_STARTECH	9	/* usurped by cyclades.c */
-#define PORT_MAX	9
+#define PORT_16C950	10	/* Oxford Semiconductor */
+#define PORT_16654	11
+#define PORT_16850	12
+#define PORT_MAX	12
+
+#define SERIAL_IO_PORT	0
+#define SERIAL_IO_HUB6	1
+#define SERIAL_IO_MEM	2
+#define SERIAL_IO_GSC	3
 
 struct serial_uart_config {
 	char	*name;

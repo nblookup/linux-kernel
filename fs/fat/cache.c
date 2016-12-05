@@ -2,6 +2,10 @@
  *  linux/fs/fat/cache.c
  *
  *  Written 1992,1993 by Werner Almesberger
+ *
+ *  Mar 1999. AV. Changed cache, so that it uses the starting cluster instead
+ *	of inode number.
+ *  May 1999. AV. Fixed the bogosity with FAT32 (read "FAT28"). Fscking lusers.
  */
 
 #include <linux/msdos_fs.h>
@@ -26,13 +30,19 @@ static struct fat_cache *fat_cache,cache[FAT_CACHE];
 
 int fat_access(struct super_block *sb,int nr,int new_value)
 {
+	return MSDOS_SB(sb)->cvf_format->fat_access(sb,nr,new_value);
+}
+
+int fat_bmap(struct inode *inode,int sector)
+{
+	return MSDOS_SB(inode->i_sb)->cvf_format->cvf_bmap(inode,sector);
+}
+
+int default_fat_access(struct super_block *sb,int nr,int new_value)
+{
 	struct buffer_head *bh,*bh2,*c_bh,*c_bh2;
 	unsigned char *p_first,*p_last;
 	int copy,first,last,next,b;
-
-	if (MSDOS_SB(sb)->cvf_format &&
-	    MSDOS_SB(sb)->cvf_format->fat_access)
-		return MSDOS_SB(sb)->cvf_format->fat_access(sb,nr,new_value);
 
 	if ((unsigned) (nr-2) >= MSDOS_SB(sb)->clusters)
 		return 0;
@@ -62,6 +72,8 @@ int fat_access(struct super_block *sb,int nr,int new_value)
 		p_first = p_last = NULL; /* GCC needs that stuff */
 		next = CF_LE_L(((unsigned long *) bh->b_data)[(first &
 		    (SECTOR_SIZE-1)) >> 2]);
+		/* Fscking Microsoft marketing department. Their "32" is 28. */
+		next &= 0xfffffff;
 		if (next >= 0xffffff7) next = -1;
 		PRINTK(("fat_bread: 0x%x, nr=0x%x, first=0x%x, next=0x%d\n", b, nr, first, next));
 
@@ -141,14 +153,13 @@ void fat_cache_init(void)
 void fat_cache_lookup(struct inode *inode,int cluster,int *f_clu,int *d_clu)
 {
 	struct fat_cache *walk;
+	int first = MSDOS_I(inode)->i_start;
 
-#ifdef DEBUG
-printk("cache lookup: <%s,%d> %d (%d,%d) -> ", kdevname(inode->i_dev),
-       inode->i_ino, cluster, *f_clu, *d_clu);
-#endif
+	if (!first)
+		return;
 	for (walk = fat_cache; walk; walk = walk->next)
 		if (inode->i_dev == walk->device
-		    && walk->ino == inode->i_ino
+		    && walk->start_cluster == first
 		    && walk->file_cluster <= cluster
 		    && walk->file_cluster > *f_clu) {
 			*d_clu = walk->disk_cluster;
@@ -171,7 +182,8 @@ static void list_cache(void)
 	for (walk = fat_cache; walk; walk = walk->next) {
 		if (walk->device)
 			printk("<%s,%d>(%d,%d) ", kdevname(walk->device),
-			       walk->ino, walk->file_cluster, walk->disk_cluster);
+			       walk->start_cluster, walk->file_cluster,
+			       walk->disk_cluster);
 		else printk("-- ");
 	}
 	printk("\n");
@@ -182,15 +194,12 @@ static void list_cache(void)
 void fat_cache_add(struct inode *inode,int f_clu,int d_clu)
 {
 	struct fat_cache *walk,*last;
+	int first = MSDOS_I(inode)->i_start;
 
-#ifdef DEBUG
-printk("cache add: <%s,%d> %d (%d)\n", kdevname(inode->i_dev),
-       inode->i_ino, f_clu, d_clu);
-#endif
 	last = NULL;
 	for (walk = fat_cache; walk->next; walk = (last = walk)->next)
 		if (inode->i_dev == walk->device
-		    && walk->ino == inode->i_ino
+		    && walk->start_cluster == first
 		    && walk->file_cluster == f_clu) {
 			if (walk->disk_cluster != d_clu) {
 				printk("FAT cache corruption inode=%ld\n",
@@ -209,7 +218,7 @@ list_cache();
 			return;
 		}
 	walk->device = inode->i_dev;
-	walk->ino = inode->i_ino;
+	walk->start_cluster = first;
 	walk->file_cluster = f_clu;
 	walk->disk_cluster = d_clu;
 	last->next = NULL;
@@ -227,10 +236,11 @@ list_cache();
 void fat_cache_inval_inode(struct inode *inode)
 {
 	struct fat_cache *walk;
+	int first = MSDOS_I(inode)->i_start;
 
 	for (walk = fat_cache; walk; walk = walk->next)
 		if (walk->device == inode->i_dev
-		    && walk->ino == inode->i_ino)
+		    && walk->start_cluster == first)
 			walk->device = 0;
 }
 
@@ -261,14 +271,11 @@ int fat_get_cluster(struct inode *inode,int cluster)
 	return nr;
 }
 
-int fat_smap(struct inode *inode,int sector)
+int default_fat_bmap(struct inode *inode,int sector)
 {
-	struct msdos_sb_info *sb;
+	struct msdos_sb_info *sb=MSDOS_SB(inode->i_sb);
 	int cluster,offset;
 
-	sb = MSDOS_SB(inode->i_sb);
-	if (sb->cvf_format && sb->cvf_format->cvf_smap)
-		return sb->cvf_format->cvf_smap(inode,sector);
 	if ((sb->fat_bits != 32) &&
 	    (inode->i_ino == MSDOS_ROOT_INO || (S_ISDIR(inode->i_mode) &&
 	     !MSDOS_I(inode)->i_start))) {
@@ -276,6 +283,8 @@ int fat_smap(struct inode *inode,int sector)
 			return 0;
 		return sector+sb->dir_start;
 	}
+	if (sector >= (MSDOS_I(inode)->mmu_private+511)>>9)
+		return 0;
 	cluster = sector/sb->cluster_size;
 	offset = sector % sb->cluster_size;
 	if (!(cluster = fat_get_cluster(inode,cluster))) return 0;
@@ -300,9 +309,11 @@ int fat_free(struct inode *inode,int skip)
 			return -EIO;
 		}
 	}
-	if (last)
+	if (last) {
 		fat_access(inode->i_sb,last,EOF_FAT(inode->i_sb));
-	else {
+		fat_cache_inval_inode(inode);
+	} else {
+		fat_cache_inval_inode(inode);
 		MSDOS_I(inode)->i_start = 0;
 		MSDOS_I(inode)->i_logstart = 0;
 		mark_inode_dirty(inode);
@@ -322,6 +333,5 @@ int fat_free(struct inode *inode,int skip)
 		inode->i_blocks -= MSDOS_SB(inode->i_sb)->cluster_size;
 	}
 	unlock_fat(inode->i_sb);
-	fat_cache_inval_inode(inode);
 	return 0;
 }

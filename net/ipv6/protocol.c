@@ -5,7 +5,7 @@
  *
  *		PF_INET6 protocol dispatch tables.
  *
- * Version:	$Id: protocol.c,v 1.6 1998/05/03 14:31:09 alan Exp $
+ * Version:	$Id: protocol.c,v 1.8 2000/02/22 23:54:29 davem Exp $
  *
  * Authors:	Pedro Roque	<roque@di.fc.ul.pt>
  *
@@ -24,6 +24,7 @@
 #include <linux/in6.h>
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
+#include <linux/brlock.h>
 
 #include <net/sock.h>
 #include <net/snmp.h>
@@ -37,26 +38,13 @@ struct inet6_protocol *inet6_protos[MAX_INET_PROTOS] =
 	NULL
 };
 
-
-struct inet6_protocol *inet6_get_protocol(unsigned char prot)
-{
-	unsigned char hash;
-	struct inet6_protocol *p;
-
-	hash = prot & (MAX_INET_PROTOS - 1);
-	for (p = inet6_protos[hash] ; p != NULL; p=p->next) {
-		if (p->protocol == prot) 
-			return((struct inet6_protocol *) p);
-	}
-	return(NULL);
-}
-
 void inet6_add_protocol(struct inet6_protocol *prot)
 {
 	unsigned char hash;
 	struct inet6_protocol *p2;
 
 	hash = prot->protocol & (MAX_INET_PROTOS - 1);
+	br_write_lock_bh(BR_NETPROTO_LOCK);
 	prot->next = inet6_protos[hash];
 	inet6_protos[hash] = prot;
 	prot->copy = 0;
@@ -73,6 +61,7 @@ void inet6_add_protocol(struct inet6_protocol *prot)
 		}
 		p2 = (struct inet6_protocol *) p2->next;
 	}
+	br_write_unlock_bh(BR_NETPROTO_LOCK);
 }
 
 /*
@@ -86,8 +75,10 @@ int inet6_del_protocol(struct inet6_protocol *prot)
 	unsigned char hash;
 
 	hash = prot->protocol & (MAX_INET_PROTOS - 1);
+	br_write_lock_bh(BR_NETPROTO_LOCK);
 	if (prot == inet6_protos[hash]) {
 		inet6_protos[hash] = (struct inet6_protocol *) inet6_protos[hash]->next;
+		br_write_unlock_bh(BR_NETPROTO_LOCK);
 		return(0);
 	}
 
@@ -106,6 +97,7 @@ int inet6_del_protocol(struct inet6_protocol *prot)
 			if (p->copy == 0 && lp != NULL) 
 				lp->copy = 0;
 			p->next = prot->next;
+			br_write_unlock_bh(BR_NETPROTO_LOCK);
 			return(0);
 		}
 		if (p->next != NULL && p->next->protocol == prot->protocol) 
@@ -113,5 +105,6 @@ int inet6_del_protocol(struct inet6_protocol *prot)
 
 		p = (struct inet6_protocol *) p->next;
 	}
+	br_write_unlock_bh(BR_NETPROTO_LOCK);
 	return(-1);
 }

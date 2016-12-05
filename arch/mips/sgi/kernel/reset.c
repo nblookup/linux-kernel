@@ -1,4 +1,4 @@
-/* $Id: reset.c,v 1.6 1998/07/09 19:57:47 ralf Exp $
+/* $Id: reset.c,v 1.8 1999/10/21 00:23:05 ralf Exp $
  *
  * Reset a SGI.
  *
@@ -17,8 +17,8 @@
 #include <asm/system.h>
 #include <asm/reboot.h>
 #include <asm/sgialib.h>
-#include <asm/sgihpc.h>
-#include <asm/sgint23.h>
+#include <asm/sgi/sgihpc.h>
+#include <asm/sgi/sgint23.h>
 
 /*
  * Just powerdown if init hasn't done after POWERDOWN_TIMEOUT seconds.
@@ -33,7 +33,9 @@
 #define POWERDOWN_FREQ		(HZ / 4)
 #define PANIC_FREQ		(HZ / 8)
 
-static struct timer_list power_timer, blink_timer, debounce_timer;
+static unsigned char sgi_volume;
+
+static struct timer_list power_timer, blink_timer, debounce_timer, volume_timer;
 static int shuting_down, has_paniced;
 
 static void sgi_machine_restart(char *command) __attribute__((noreturn));
@@ -106,7 +108,7 @@ static void debounce(unsigned long data)
 	if (has_paniced)
 		prom_reboot();
 
-	enable_irq(9);
+	enable_irq(SGI_PANEL_IRQ);
 }
 
 static inline void power_button(void)
@@ -129,14 +131,50 @@ static inline void power_button(void)
 	add_timer(&power_timer);
 }
 
-static inline void volume_up_button(void)
+void inline sgi_volume_set(unsigned char volume)
 {
-	/* Later when we have sound support ... */
+	sgi_volume = volume;
+
+	hpc3c0->pbus_extregs[2][0] = sgi_volume;
+	hpc3c0->pbus_extregs[2][1] = sgi_volume;
 }
 
-static inline void volume_down_button(void)
+void inline sgi_volume_get(unsigned char *volume)
 {
-	/* Later when we have sound support ... */
+	*volume = sgi_volume;
+}
+
+static inline void volume_up_button(unsigned long data)
+{
+	del_timer(&volume_timer);
+
+	if (sgi_volume < 0xff)
+		sgi_volume++;
+
+	hpc3c0->pbus_extregs[2][0] = sgi_volume;
+	hpc3c0->pbus_extregs[2][1] = sgi_volume;
+
+	if (ioc_icontrol->istat1 & 2) {
+		volume_timer.expires = jiffies + 1;
+		add_timer(&volume_timer);
+	}
+
+}
+
+static inline void volume_down_button(unsigned long data)
+{
+	del_timer(&volume_timer);
+
+	if (sgi_volume > 0)
+		sgi_volume--;
+
+	hpc3c0->pbus_extregs[2][0] = sgi_volume;
+	hpc3c0->pbus_extregs[2][1] = sgi_volume;
+
+	if (ioc_icontrol->istat1 & 2) {
+		volume_timer.expires = jiffies + 1;
+		add_timer(&volume_timer);
+	}
 }
 
 static void panel_int(int irq, void *dev_id, struct pt_regs *regs)
@@ -147,7 +185,7 @@ static void panel_int(int irq, void *dev_id, struct pt_regs *regs)
 	hpc3mregs->panel = 3; /* power_interrupt | power_supply_on */
 
 	if (ioc_icontrol->istat1 & 2) { /* Wait until interrupt goes away */
-		disable_irq(9);
+		disable_irq(SGI_PANEL_IRQ);
 		init_timer(&debounce_timer);
 		debounce_timer.function = debounce;
 		debounce_timer.expires = jiffies + 5;
@@ -156,10 +194,18 @@ static void panel_int(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (!(buttons & 2))		/* Power button was pressed */
 		power_button();
-	if (!(buttons & 0x40))		/* Volume up button was pressed */
-		volume_up_button();
-	if (!(buttons & 0x10))		/* Volume down button was pressed */
-		volume_down_button();
+	if (!(buttons & 0x40)) {	/* Volume up button was pressed */
+		init_timer(&volume_timer);
+		volume_timer.function = volume_up_button;
+		volume_timer.expires = jiffies + 1;
+		add_timer(&volume_timer);
+	}
+	if (!(buttons & 0x10)) {	/* Volume down button was pressed */
+		init_timer(&volume_timer);
+		volume_timer.function = volume_down_button;
+		volume_timer.expires = jiffies + 1;
+		add_timer(&volume_timer);
+	}
 }
 
 static int panic_event(struct notifier_block *this, unsigned long event,
@@ -193,7 +239,7 @@ void indy_reboot_setup(void)
 	_machine_halt = sgi_machine_halt;
 	_machine_power_off = sgi_machine_power_off;
 
-	request_irq(9, panel_int, 0, "Front Panel", NULL);
+	request_irq(SGI_PANEL_IRQ, panel_int, 0, "Front Panel", NULL);
 	init_timer(&blink_timer);
 	blink_timer.function = blink_timeout;
 	notifier_chain_register(&panic_notifier_list, &panic_block);

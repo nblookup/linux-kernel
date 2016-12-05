@@ -24,222 +24,6 @@
 
 #define MAGIC_CONSTANT 0x80000000
 
-/*
- * This routine gets a long from any process space by following the page
- * tables. NOTE! You should check that the long isn't on a page boundary,
- * and that it is in the task area before calling this: this routine does
- * no checking.
- */
-static unsigned long get_long(struct task_struct * tsk,
-	struct vm_area_struct * vma, unsigned long addr)
-{
-	pgd_t * pgdir;
-	pmd_t * pgmiddle;
-	pte_t * pgtable;
-	unsigned long page, retval;
-
-repeat:
-	pgdir = pgd_offset(vma->vm_mm, addr);
-	if (pgd_none(*pgdir)) {
-		handle_mm_fault(tsk, vma, addr, 0);
-		goto repeat;
-	}
-	if (pgd_bad(*pgdir)) {
-		printk("ptrace: bad page directory %08lx\n", pgd_val(*pgdir));
-		pgd_clear(pgdir);
-		return 0;
-	}
-	pgmiddle = pmd_offset(pgdir, addr);
-	if (pmd_none(*pgmiddle)) {
-		handle_mm_fault(tsk, vma, addr, 0);
-		goto repeat;
-	}
-	if (pmd_bad(*pgmiddle)) {
-		printk("ptrace: bad page middle %08lx\n", pmd_val(*pgmiddle));
-		pmd_clear(pgmiddle);
-		return 0;
-	}
-	pgtable = pte_offset(pgmiddle, addr);
-	if (!pte_present(*pgtable)) {
-		handle_mm_fault(tsk, vma, addr, 0);
-		goto repeat;
-	}
-	page = pte_page(*pgtable);
-/* this is a hack for non-kernel-mapped video buffers and similar */
-	if (MAP_NR(page) >= max_mapnr)
-		return 0;
-	page += addr & ~PAGE_MASK;
-	retval = *(unsigned long *) page;
-	flush_page_to_ram(page);
-	return retval;
-}
-
-/*
- * This routine puts a long into any process space by following the page
- * tables. NOTE! You should check that the long isn't on a page boundary,
- * and that it is in the task area before calling this: this routine does
- * no checking.
- *
- * Now keeps R/W state of page so that a text page stays readonly
- * even if a debugger scribbles breakpoints into it.  -M.U-
- */
-static void put_long(struct task_struct * tsk, struct vm_area_struct * vma,
-	unsigned long addr, unsigned long data)
-{
-	pgd_t *pgdir;
-	pmd_t *pgmiddle;
-	pte_t *pgtable;
-	unsigned long page;
-
-repeat:
-	pgdir = pgd_offset(vma->vm_mm, addr);
-	if (!pgd_present(*pgdir)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
-	}
-	if (pgd_bad(*pgdir)) {
-		printk("ptrace: bad page directory %08lx\n", pgd_val(*pgdir));
-		pgd_clear(pgdir);
-		return;
-	}
-	pgmiddle = pmd_offset(pgdir, addr);
-	if (pmd_none(*pgmiddle)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
-	}
-	if (pmd_bad(*pgmiddle)) {
-		printk("ptrace: bad page middle %08lx\n", pmd_val(*pgmiddle));
-		pmd_clear(pgmiddle);
-		return;
-	}
-	pgtable = pte_offset(pgmiddle, addr);
-	if (!pte_present(*pgtable)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
-	}
-	page = pte_page(*pgtable);
-	if (!pte_write(*pgtable)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
-	}
-/* this is a hack for non-kernel-mapped video buffers and similar */
-	flush_cache_page(vma, addr);
-	if (MAP_NR(page) < max_mapnr) {
-		*(unsigned long *) (page + (addr & ~PAGE_MASK)) = data;
-		flush_page_to_ram(page);
-	}
-/* we're bypassing pagetables, so we have to set the dirty bit ourselves */
-/* this should also re-instate whatever read-only mode there was before */
-	set_pte(pgtable, pte_mkdirty(mk_pte(page, vma->vm_page_prot)));
-	flush_tlb_page(vma, addr);
-}
-
-static struct vm_area_struct * find_extend_vma(struct task_struct * tsk,
-					       unsigned long addr)
-{
-	struct vm_area_struct * vma;
-
-	addr &= PAGE_MASK;
-	vma = find_vma(tsk->mm,addr);
-	if (!vma)
-		return NULL;
-	if (vma->vm_start <= addr)
-		return vma;
-	if (!(vma->vm_flags & VM_GROWSDOWN))
-		return NULL;
-	if (vma->vm_end - addr > tsk->rlim[RLIMIT_STACK].rlim_cur)
-		return NULL;
-	vma->vm_offset -= vma->vm_start - addr;
-	vma->vm_start = addr;
-	return vma;
-}
-
-/*
- * This routine checks the page boundaries, and that the offset is
- * within the task area. It then calls get_long() to read a long.
- */
-static int read_long(struct task_struct * tsk, unsigned long addr,
-		     unsigned long * result)
-{
-	struct vm_area_struct * vma = find_extend_vma(tsk, addr);
-
-	if (!vma)
-		return -EIO;
-	*result = get_long(tsk, vma, addr);
-	return 0;
-}
-
-static int read_byte(struct task_struct *tsk, unsigned long addr,
-		     unsigned char *result)
-{
-	struct vm_area_struct *vma = find_extend_vma(tsk, addr&~3);
-	unsigned long tmp;
-
-	if(!vma)
-		return -EIO;
-	tmp = get_long(tsk, vma, (addr & ~3));
-	switch(addr & 3) {
-	case 0:
-		*result = (tmp & 0xff000000)>>24;
-		break;
-	case 1:
-		*result = (tmp & 0x00ff0000)>>16;
-		break;
-	case 2:
-		*result = (tmp & 0x0000ff00)>>8;
-		break;
-	case 3:
-		*result = (tmp & 0x000000ff);
-		break;
-	}
-	return 0;
-}
-
-/*
- * This routine checks the page boundaries, and that the offset is
- * within the task area. It then calls put_long() to write a long.
- */
-static int write_long(struct task_struct * tsk, unsigned long addr,
-		      unsigned long data)
-{
-	struct vm_area_struct * vma = find_extend_vma(tsk, addr);
-
-	if (!vma)
-		return -EIO;
-	put_long(tsk, vma, addr, data);
-	return 0;
-}
-
-static int write_byte(struct task_struct * tsk, unsigned long addr,
-		      unsigned char data)
-{
-	struct vm_area_struct * vma = find_extend_vma(tsk, (addr & ~3));
-	unsigned long tmp;
-
-	if (!vma)
-		return -EIO;
-	tmp = get_long(tsk, vma, (addr & ~3));
-	switch(addr & 3) {
-	case 0:
-		tmp &= 0x00ffffff;
-		tmp |= (data << 24);
-		break;
-	case 1:
-		tmp &= 0xff00ffff;
-		tmp |= ((data << 16) & 0x00ff0000);
-		break;
-	case 2:
-		tmp &= 0xffff00ff;
-		tmp |= ((data << 8) & 0x0000ff00);
-		break;
-	case 3:
-		tmp &= 0xffffff00;
-		tmp |= (data & 0x000000ff);
-		break;
-	}
-	put_long(tsk, vma, (addr & ~3), tmp);
-	return 0;
-}
 
 /* Returning from ptrace is a bit tricky because the syscall return
  * low level code assumes any value returned which is negative and
@@ -286,8 +70,8 @@ pt_os_succ_return (struct pt_regs *regs, unsigned long val, long *addr)
 static inline void read_sunos_user(struct pt_regs *regs, unsigned long offset,
 				   struct task_struct *tsk, long *addr)
 {
-	struct pt_regs *cregs = tsk->tss.kregs;
-	struct thread_struct *t = &tsk->tss;
+	struct pt_regs *cregs = tsk->thread.kregs;
+	struct thread_struct *t = &tsk->thread;
 	int v;
 	
 	if(offset >= 1024)
@@ -344,7 +128,7 @@ static inline void read_sunos_user(struct pt_regs *regs, unsigned long offset,
 		v = cregs->u_regs[UREG_I6];
 		break;
 	case 924:
-		if(tsk->tss.flags & MAGIC_CONSTANT)
+		if(tsk->thread.flags & MAGIC_CONSTANT)
 			v = cregs->u_regs[UREG_G1];
 		else
 			v = 0;
@@ -381,8 +165,8 @@ static inline void read_sunos_user(struct pt_regs *regs, unsigned long offset,
 static inline void write_sunos_user(struct pt_regs *regs, unsigned long offset,
 				    struct task_struct *tsk)
 {
-	struct pt_regs *cregs = tsk->tss.kregs;
-	struct thread_struct *t = &tsk->tss;
+	struct pt_regs *cregs = tsk->thread.kregs;
+	struct thread_struct *t = &tsk->thread;
 	unsigned long value = regs->u_regs[UREG_I3];
 
 	if(offset >= 1024)
@@ -540,6 +324,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 		if((!child->dumpable ||
 		    (current->uid != child->euid) ||
 		    (current->uid != child->uid) ||
+		    (current->uid != child->suid) ||
 		    (current->gid != child->egid) ||
 		    (current->gid != child->sgid) || 
 	 	    (!cap_issubset(child->cap_permitted, current->cap_permitted)) ||
@@ -584,24 +369,12 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 	case PTRACE_PEEKTEXT: /* read word at location addr. */ 
 	case PTRACE_PEEKDATA: {
 		unsigned long tmp;
-		int res;
 
-		/* XXX Find out what is really going on. */
-		flush_cache_all();
-
-		/* Non-word alignment _not_ allowed on Sparc. */
-		if(addr & (sizeof(unsigned long) - 1)) {
-			pt_error_return(regs, EINVAL);
-			goto out;
-		}
-		down(&child->mm->mmap_sem);
-		res = read_long(child, addr, &tmp);
-		up(&child->mm->mmap_sem);
-		if (res < 0) {
-			pt_error_return(regs, -res);
-			goto out;
-		}
-		pt_os_succ_return(regs, tmp, (long *) data);
+		if (access_process_vm(child, addr,
+				      &tmp, sizeof(tmp), 0) == sizeof(tmp))
+			pt_os_succ_return(regs, tmp, (long *)data);
+		else
+			pt_error_return(regs, EIO);
 		goto out;
 	}
 
@@ -615,28 +388,17 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 
 	case PTRACE_POKETEXT: /* write the word at location addr. */
 	case PTRACE_POKEDATA: {
-		struct vm_area_struct *vma;
-		int res;
-
-		/* Non-word alignment _not_ allowed on Sparc. */
-		if(addr & (sizeof(unsigned long) - 1)) {
-			pt_error_return(regs, EINVAL);
-			goto out;
-		}
-		down(&child->mm->mmap_sem);
-		vma = find_extend_vma(child, addr);
-		res = write_long(child, addr, data);
-		up(&child->mm->mmap_sem);
-		if(res < 0)
-			pt_error_return(regs, -res);
+		if (access_process_vm(child, addr,
+				      &data, sizeof(data), 1) == sizeof(data))
+			pt_succ_return(regs, 0);
 		else
-			pt_succ_return(regs, res);
+			pt_error_return(regs, EIO);
 		goto out;
 	}
 
 	case PTRACE_GETREGS: {
 		struct pt_regs *pregs = (struct pt_regs *) addr;
-		struct pt_regs *cregs = child->tss.kregs;
+		struct pt_regs *cregs = child->thread.kregs;
 		int rval;
 
 		rval = verify_area(VERIFY_WRITE, pregs, sizeof(struct pt_regs));
@@ -659,7 +421,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 
 	case PTRACE_SETREGS: {
 		struct pt_regs *pregs = (struct pt_regs *) addr;
-		struct pt_regs *cregs = child->tss.kregs;
+		struct pt_regs *cregs = child->thread.kregs;
 		unsigned long psr, pc, npc, y;
 		int i;
 
@@ -709,15 +471,15 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 			goto out;
 		}
 		for(i = 0; i < 32; i++)
-			__put_user(child->tss.float_regs[i], (&fps->regs[i]));
-		__put_user(child->tss.fsr, (&fps->fsr));
-		__put_user(child->tss.fpqdepth, (&fps->fpqd));
+			__put_user(child->thread.float_regs[i], (&fps->regs[i]));
+		__put_user(child->thread.fsr, (&fps->fsr));
+		__put_user(child->thread.fpqdepth, (&fps->fpqd));
 		__put_user(0, (&fps->flags));
 		__put_user(0, (&fps->extra));
 		for(i = 0; i < 16; i++) {
-			__put_user(child->tss.fpqueue[i].insn_addr,
+			__put_user(child->thread.fpqueue[i].insn_addr,
 				   (&fps->fpq[i].insnaddr));
-			__put_user(child->tss.fpqueue[i].insn, (&fps->fpq[i].insn));
+			__put_user(child->thread.fpqueue[i].insn, (&fps->fpq[i].insn));
 		}
 		pt_succ_return(regs, 0);
 		goto out;
@@ -742,13 +504,13 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 			pt_error_return(regs, -i);
 			goto out;
 		}
-		copy_from_user(&child->tss.float_regs[0], &fps->regs[0], (32 * sizeof(unsigned long)));
-		__get_user(child->tss.fsr, (&fps->fsr));
-		__get_user(child->tss.fpqdepth, (&fps->fpqd));
+		copy_from_user(&child->thread.float_regs[0], &fps->regs[0], (32 * sizeof(unsigned long)));
+		__get_user(child->thread.fsr, (&fps->fsr));
+		__get_user(child->thread.fpqdepth, (&fps->fpqd));
 		for(i = 0; i < 16; i++) {
-			__get_user(child->tss.fpqueue[i].insn_addr,
+			__get_user(child->thread.fpqueue[i].insn_addr,
 				   (&fps->fpq[i].insnaddr));
-			__get_user(child->tss.fpqueue[i].insn, (&fps->fpq[i].insn));
+			__get_user(child->thread.fpqueue[i].insn, (&fps->fpq[i].insn));
 		}
 		pt_succ_return(regs, 0);
 		goto out;
@@ -756,56 +518,31 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 
 	case PTRACE_READTEXT:
 	case PTRACE_READDATA: {
-		unsigned char *dest = (unsigned char *) addr2;
-		unsigned long src = addr;
-		unsigned char tmp;
-		int res, len = data;
+		int res = ptrace_readdata(child, addr, (void *) addr2, data);
 
-		res = verify_area(VERIFY_WRITE, dest, len);
-		if(res) {
-			pt_error_return(regs, -res);
+		if (res == data) {
+			pt_succ_return(regs, 0);
 			goto out;
 		}
-		while(len) {
-			down(&child->mm->mmap_sem);
-			res = read_byte(child, src, &tmp);
-			up(&child->mm->mmap_sem);
-			if(res < 0) {
-				pt_error_return(regs, -res);
-				goto out;
-			}
-			__put_user(tmp, dest);
-			src++; dest++; len--;
-		}
-		pt_succ_return(regs, 0);
+		/* Partial read is an IO failure */
+		if (res >= 0)
+			res = -EIO;
+		pt_error_return(regs, -res);
 		goto out;
 	}
 
 	case PTRACE_WRITETEXT:
 	case PTRACE_WRITEDATA: {
-		unsigned char *src = (unsigned char *) addr2;
-		unsigned long dest = addr;
-		int res, len = data;
+		int res = ptrace_writedata(child, (void *) addr2, addr, data);
 
-		res = verify_area(VERIFY_READ, src, len);
-		if(res) {
-			pt_error_return(regs, -res);
+		if (res == data) {
+			pt_succ_return(regs, 0);
 			goto out;
 		}
-		while(len) {
-			unsigned long tmp;
-
-			__get_user(tmp, src);
-			down(&child->mm->mmap_sem);
-			res = write_byte(child, dest, tmp);
-			up(&child->mm->mmap_sem);
-			if(res < 0) {
-				pt_error_return(regs, -res);
-				goto out;
-			}
-			src++; dest++; len--;
-		}
-		pt_succ_return(regs, 0);
+		/* Partial write is an IO failure */
+		if (res >= 0)
+			res = -EIO;
+		pt_error_return(regs, -res);
 		goto out;
 	}
 
@@ -823,11 +560,11 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 				goto out;
 			}
 #ifdef DEBUG_PTRACE
-			printk ("Original: %08lx %08lx\n", child->tss.kregs->pc, child->tss.kregs->npc);
+			printk ("Original: %08lx %08lx\n", child->thread.kregs->pc, child->thread.kregs->npc);
 			printk ("Continuing with %08lx %08lx\n", addr, addr+4);
 #endif
-			child->tss.kregs->pc = addr;
-			child->tss.kregs->npc = addr + 4;
+			child->thread.kregs->pc = addr;
+			child->thread.kregs->npc = addr + 4;
 		}
 
 		if (request == PTRACE_SYSCALL)
@@ -839,8 +576,8 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 #ifdef DEBUG_PTRACE
 		printk("CONT: %s [%d]: set exit_code = %x %x %x\n", child->comm,
 			child->pid, child->exit_code,
-			child->tss.kregs->pc,
-			child->tss.kregs->npc);
+			child->thread.kregs->pc,
+			child->thread.kregs->npc);
 		       
 #endif
 		wake_up_process(child);
@@ -902,7 +639,7 @@ asmlinkage void syscall_trace(void)
 		return;
 	current->exit_code = SIGTRAP;
 	current->state = TASK_STOPPED;
-	current->tss.flags ^= MAGIC_CONSTANT;
+	current->thread.flags ^= MAGIC_CONSTANT;
 	notify_parent(current, SIGCHLD);
 	schedule();
 	/*

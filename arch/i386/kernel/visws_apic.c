@@ -23,7 +23,6 @@
 #include <linux/malloc.h>
 #include <linux/random.h>
 #include <linux/smp.h>
-#include <linux/tasks.h>
 #include <linux/smp_lock.h>
 #include <linux/init.h>
 
@@ -38,7 +37,7 @@
 
 #include <asm/cobalt.h>
 
-#include "irq.h"
+#include <linux/irq.h>
 
 /*
  * This is the PIIX4-based 8259 that is wired up indirectly to Cobalt
@@ -103,9 +102,9 @@ static struct hw_interrupt_type cobalt_irq_type = {
 
 
 /*
- * Not an initfunc, needed by the reboot code
+ * Not an __init, needed by the reboot code
  */
-void init_pic_mode(void)
+void disable_IO_APIC(void)
 {
 	/* Nop on Cobalt */
 } 

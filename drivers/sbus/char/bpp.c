@@ -19,11 +19,12 @@
 #include <linux/timer.h>
 #include <linux/ioport.h>
 #include <linux/major.h>
+#include <linux/devfs_fs_kernel.h>
 
-#include  <asm/uaccess.h>
+#include <asm/uaccess.h>
+#include <asm/io.h>
 
 #if defined(__i386__)
-# include <asm/io.h>
 # include <asm/system.h>
 # include <asm/segment.h>
 #endif
@@ -33,8 +34,7 @@
 # include <linux/delay.h>         /* udelay() */
 
 # include <asm/oplib.h>           /* OpenProm Library */
-# include <asm/sbus.h>            /* struct linux_sbus *SBus_chain */
-# include <asm/io.h>              /* sparc_alloc_io() */
+# include <asm/sbus.h>
 #endif
 
 #include <asm/bpp.h>
@@ -81,7 +81,7 @@ struct inst {
       unsigned char repeat_byte;
 
       /* These members manage timeouts for programmed delays */
-      struct wait_queue *wait_queue;
+      wait_queue_head_t wait_queue;
       struct timer_list timer_list;
 };
 
@@ -147,23 +147,22 @@ static unsigned short get_pins(unsigned minor)
 /*
  * Register block
  */
-struct bpp_regs {
       /* DMA registers */
-      __u32 p_csr;		/* DMA Control/Status Register */
-      __u32 p_addr;		/* Address Register */
-      __u32 p_bcnt;		/* Byte Count Register */
-      __u32 p_tst_csr;		/* Test Control/Status (DMA2 only) */
+#define BPP_CSR      0x00
+#define BPP_ADDR     0x04
+#define BPP_BCNT     0x08
+#define BPP_TST_CSR  0x0C
       /* Parallel Port registers */
-      __u16 p_hcr;		/* Hardware Configuration Register */
-      __u16 p_ocr;		/* Operation Configuration Register */
-      __u8 p_dr;		/* Parallel Data Register */
-      __u8 p_tcr;		/* Transfer Control Register */
-      __u8 p_or;		/* Output Register */
-      __u8 p_ir;		/* Input Register */
-      __u16 p_icr;		/* Interrupt Control Register */
-};
+#define BPP_HCR      0x10
+#define BPP_OCR      0x12
+#define BPP_DR       0x14
+#define BPP_TCR      0x15
+#define BPP_OR       0x16
+#define BPP_IR       0x17
+#define BPP_ICR      0x18
+#define BPP_SIZE     0x1A
 
-/* P_CSR.  Bits of type RW1 are cleared with writting '1'. */
+/* BPP_CSR.  Bits of type RW1 are cleared with writting '1'. */
 #define P_DEV_ID_MASK   0xf0000000      /* R   */
 #define P_DEV_ID_ZEBRA  0x40000000
 #define P_DEV_ID_L64854 0xa0000000      /*      == NCR 89C100+89C105. Pity. */
@@ -191,12 +190,12 @@ struct bpp_regs {
 #define P_ERR_PEND      0x00000002      /* R    */
 #define P_INT_PEND      0x00000001      /* R    */
 
-/* P_HCR. Time is in increments of SBus clock. */
+/* BPP_HCR. Time is in increments of SBus clock. */
 #define P_HCR_TEST      0x8000      /* Allows buried counters to be read */
 #define P_HCR_DSW       0x7f00      /* Data strobe width (in ticks) */
 #define P_HCR_DDS       0x007f      /* Data setup before strobe (in ticks) */
 
-/* P_OCR. */
+/* BPP_OCR. */
 #define P_OCR_MEM_CLR   0x8000
 #define P_OCR_DATA_SRC  0x4000      /* )                  */
 #define P_OCR_DS_DSEL   0x2000      /* )  Bidirectional      */
@@ -210,13 +209,13 @@ struct bpp_regs {
 #define P_OCR_V_ILCK    0x0002      /* Versatec faded. Zebra only. */
 #define P_OCR_EN_VER    0x0001      /* Enable Versatec (0 - enable). Zebra only. */
 
-/* P_TCR */
+/* BPP_TCR */
 #define P_TCR_DIR       0x08
 #define P_TCR_BUSY      0x04
 #define P_TCR_ACK       0x02
 #define P_TCR_DS        0x01        /* Strobe */
 
-/* P_OR */
+/* BPP_OR */
 #define P_OR_V3         0x20        /* )                 */
 #define P_OR_V2         0x10        /* ) on Zebra only   */
 #define P_OR_V1         0x08        /* )                 */
@@ -224,12 +223,12 @@ struct bpp_regs {
 #define P_OR_AFXN       0x02        /* Auto Feed */
 #define P_OR_SLCT_IN    0x01
 
-/* P_IR */
+/* BPP_IR */
 #define P_IR_PE         0x04
 #define P_IR_SLCT       0x02
 #define P_IR_ERR        0x01
 
-/* P_ICR */
+/* BPP_ICR */
 #define P_DS_IRQ        0x8000      /* RW1  */
 #define P_ACK_IRQ       0x4000      /* RW1  */
 #define P_BUSY_IRQ      0x2000      /* RW1  */
@@ -247,22 +246,15 @@ struct bpp_regs {
 #define P_ERR_IRP       0x0002      /* RW1  1= rising edge */
 #define P_ERR_IRQ_EN    0x0001      /* RW   */
 
-volatile struct bpp_regs *base_addrs[BPP_NO];
+unsigned long base_addrs[BPP_NO];
 
-static inline void bpp_outb_p(__u8 data, volatile struct bpp_regs *base){
-      base->p_dr = data;
-}
-
-#define bpp_inb_p(base)  bpp_inb(base)
-
-static inline __u8 bpp_inb(volatile struct bpp_regs *base){
-      return base->p_dr;
-}
-
+#define bpp_outb_p(data, base)	sbus_writeb(data, (base) + BPP_DR)
+#define bpp_inb_p(base)		sbus_readb((base) + BPP_DR)
+#define bpp_inb(base)		sbus_readb((base) + BPP_DR)
 
 static void set_pins(unsigned short pins, unsigned minor)
 {
-      volatile struct bpp_regs *base = base_addrs[minor];
+      unsigned long base = base_addrs[minor];
       unsigned char bits_tcr = 0, bits_or = 0;
 
       if (instances[minor].direction & 0x20) bits_tcr |= P_TCR_DIR;
@@ -272,8 +264,8 @@ static void set_pins(unsigned short pins, unsigned minor)
       if (! (pins & BPP_PP_nInit))           bits_or |= P_OR_INIT;
       if (! (pins & BPP_PP_nSelectIn))       bits_or |= P_OR_SLCT_IN;
 
-      base->p_or = bits_or;
-      base->p_tcr = bits_tcr;
+      sbus_writeb(bits_or, base + BPP_OR);
+      sbus_writeb(bits_tcr, base + BPP_TCR);
 }
 
 /*
@@ -283,11 +275,11 @@ static void set_pins(unsigned short pins, unsigned minor)
  */
 static unsigned short get_pins(unsigned minor)
 {
-      volatile struct bpp_regs *base = base_addrs[minor];
+      unsigned long base = base_addrs[minor];
       unsigned short bits = 0;
-      unsigned value_tcr = base->p_tcr;
-      unsigned value_ir = base->p_ir;
-      unsigned value_or = base->p_or;
+      unsigned value_tcr = sbus_readb(base + BPP_TCR);
+      unsigned value_ir = sbus_readb(base + BPP_IR);
+      unsigned value_or = sbus_readb(base + BPP_OR);
 
       if (value_tcr & P_TCR_DS)         bits |= BPP_PP_nStrobe;
       if (value_or & P_OR_AFXN)         bits |= BPP_PP_nAutoFd;
@@ -302,15 +294,6 @@ static unsigned short get_pins(unsigned minor)
 
       return bits;
 }
-
-#if 0
-/* P3 */
-static inline void bpp_snap(const char *msg, unsigned minor)
-{
-	volatile struct bpp_regs *r = base_addrs[minor];
-	printk("bpp.%s: c=%02x o=%02x i=%02x\n", msg, r->p_tcr, r->p_or, r->p_ir);
-}
-#endif
 
 #endif /* __sparc__ */
 
@@ -852,21 +835,11 @@ static int bpp_ioctl(struct inode *inode, struct file *f, unsigned int cmd,
 }
 
 static struct file_operations bpp_fops = {
-	NULL,		/* bpp_lseek */
-	bpp_read,
-	bpp_write,
-	NULL,		/* bpp_readdir */
-	NULL,		/* bpp_select */
-	bpp_ioctl,
-	NULL,		/* bpp_mmap */
-	bpp_open,
-	NULL,		/* flush */
-	bpp_release,
-  NULL,   /* fsync */
-  NULL,   /* fasync */
-  NULL,   /* check media change */
-  NULL,   /* revalidate */
-  NULL,   /* lock */
+	read:		bpp_read,
+	write:		bpp_write,
+	ioctl:		bpp_ioctl,
+	open:		bpp_open,
+	release:	bpp_release,
 };
 
 #if defined(__i386__)
@@ -941,34 +914,15 @@ static inline void freeLptPort(int idx)
 
 #if defined(__sparc__)
 
-static volatile struct bpp_regs *map_bpp(struct linux_sbus_device *dev, int idx)
+static unsigned long map_bpp(struct sbus_dev *dev, int idx)
 {
-      volatile struct bpp_regs *regs;
-
-      /*
-       * PROM reports different numbers on Zebra and on DMA2.
-       * We need to figure out when to apply parent ranges.
-       * printk will show this on different machines.
-       */
-
-      /* IPC Zebra   1.fa200000[1c] i=2  */
-      prom_apply_sbus_ranges(dev->my_bus, &dev->reg_addrs[0],
-			     dev->num_registers, dev);
-
-      regs = sparc_alloc_io(dev->reg_addrs[0].phys_addr, 0,
-			    dev->reg_addrs[0].reg_size, "bpp",
-			    dev->reg_addrs[0].which_io, 0x0);
-      printk("bpp%d.map_bpp: 0x%x.%p[0x%x] i=%d\n", idx,
-	     dev->reg_addrs[0].which_io, dev->reg_addrs[0].phys_addr,
-	     dev->reg_addrs[0].reg_size, dev->irqs[0]);
-
-      return regs;
+      return sbus_ioremap(&dev->resource[0], 0, BPP_SIZE, "bpp");
 }
 
 static int collectLptPorts(void)
 {
-	struct linux_sbus *bus;
-	struct linux_sbus_device *dev;
+	struct sbus_bus *bus;
+	struct sbus_dev *dev;
 	int count;
 
 	count = 0;
@@ -989,7 +943,7 @@ static int collectLptPorts(void)
 
 static void probeLptPort(unsigned idx)
 {
-      volatile struct bpp_regs *rp = base_addrs[idx];
+      unsigned long rp = base_addrs[idx];
       __u32 csr;
       char *brand;
 
@@ -997,7 +951,7 @@ static void probeLptPort(unsigned idx)
       instances[idx].enhanced = 0;
       instances[idx].direction = 0;
       instances[idx].mode = COMPATIBILITY;
-      instances[idx].wait_queue = 0;
+      init_waitqueue_head(&instances[idx].wait_queue);
       instances[idx].run_length = 0;
       instances[idx].run_flag = 0;
       init_timer(&instances[idx].timer_list);
@@ -1008,20 +962,23 @@ static void probeLptPort(unsigned idx)
       instances[idx].present = 1;
       instances[idx].enhanced = 1;   /* Sure */
 
-      if (((csr = rp->p_csr) & P_DRAINING) != 0 && (csr & P_ERR_PEND) == 0) {
+      csr = sbus_readl(rp + BPP_CSR);
+      if ((csr & P_DRAINING) != 0 && (csr & P_ERR_PEND) == 0) {
             udelay(20);
-            csr = rp->p_csr;
+            csr = sbus_readl(rp + BPP_CSR);
             if ((csr & P_DRAINING) != 0 && (csr & P_ERR_PEND) == 0) {
                   printk("bpp%d: DRAINING still active (0x%08x)\n", idx, csr);
             }
       }
       printk("bpp%d: reset with 0x%08x ..", idx, csr);
-      rp->p_csr = (csr | P_RESET) & ~P_INT_EN;
+      sbus_writel((csr | P_RESET) & ~P_INT_EN, rp + BPP_CSR);
       udelay(500);
-      rp->p_csr &= ~P_RESET;
-      printk(" done with csr=0x%08x ocr=0x%04x\n", rp->p_csr, rp->p_ocr);
+      sbus_writel(sbus_readl(rp + BPP_CSR) & ~P_RESET, rp + BPP_CSR);
+      csr = sbus_readl(rp + BPP_CSR);
+      printk(" done with csr=0x%08x ocr=0x%04x\n",
+         csr, sbus_readw(rp + BPP_OCR));
 
-      switch (rp->p_csr & P_DEV_ID_MASK) {
+      switch (csr & P_DEV_ID_MASK) {
       case P_DEV_ID_ZEBRA:
             brand = "Zebra";
             break;
@@ -1031,7 +988,7 @@ static void probeLptPort(unsigned idx)
       default:
             brand = "Unknown";
       }
-      printk("bpp%d: %s at 0x%p\n", idx, brand, rp);
+      printk("bpp%d: %s at 0x%lx\n", idx, brand, rp);
 
       /*
        * Leave the port in compat idle mode.
@@ -1043,15 +1000,17 @@ static void probeLptPort(unsigned idx)
 
 static inline void freeLptPort(int idx)
 {
-      sparc_free_io ((void *)base_addrs[idx], sizeof(struct bpp_regs));
+      sbus_iounmap(base_addrs[idx], BPP_SIZE);
 }
 
 #endif
 
+static devfs_handle_t devfs_handle = NULL;
+
 #ifdef MODULE
 int init_module(void)
 #else
-__initfunc(int bpp_init(void))
+int __init bpp_init(void)
 #endif
 {
 	int rc;
@@ -1061,7 +1020,7 @@ __initfunc(int bpp_init(void))
 	if (rc == 0)
 		return -ENODEV;
 
-	rc = register_chrdev(BPP_MAJOR, dev_name, &bpp_fops);
+	rc = devfs_register_chrdev(BPP_MAJOR, dev_name, &bpp_fops);
 	if (rc < 0)
 		return rc;
 
@@ -1069,6 +1028,10 @@ __initfunc(int bpp_init(void))
 		instances[idx].opened = 0;
 		probeLptPort(idx);
 	}
+	devfs_handle = devfs_mk_dir (NULL, "bpp", 3, NULL);
+	devfs_register_series (devfs_handle, "%u", BPP_NO, DEVFS_FL_DEFAULT,
+			       BPP_MAJOR, 0, S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			       &bpp_fops, NULL);
 
 	return 0;
 }
@@ -1078,7 +1041,8 @@ void cleanup_module(void)
 {
 	unsigned idx;
 
-	unregister_chrdev(BPP_MAJOR, dev_name);
+	devfs_unregister (devfs_handle);
+	devfs_unregister_chrdev(BPP_MAJOR, dev_name);
 
 	for (idx = 0 ;  idx < BPP_NO ;  idx += 1) {
 		if (instances[idx].present)

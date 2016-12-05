@@ -21,26 +21,67 @@
 #ifndef _BTTV_H_
 #define _BTTV_H_
 
-#define BTTV_VERSION_CODE 0x000523
+#define BTTV_VERSION_CODE KERNEL_VERSION(0,7,21) 
 
 #include <linux/types.h>
 #include <linux/wait.h>
-
-#include <linux/i2c.h>
-#include "msp3400.h"
-#include "bt848.h"
 #include <linux/videodev.h>
+#include <linux/i2c.h>
+#include <linux/i2c-algo-bit.h>
+
+#include "audiochip.h"
+#include "bt848.h"
+
+#define WAIT_QUEUE                 wait_queue_head_t
+
+/* returns card type, 
+   for possible values see lines below beginning with #define BTTV_UNKNOWN
+   returns negative value if error ocurred 
+*/
+extern int bttv_get_id(unsigned int card);
+
+/* sets GPOE register (BT848_GPIO_OUT_EN) to new value:
+   data | (current_GPOE_value & ~mask)
+   returns negative value if error ocurred
+*/
+extern int bttv_gpio_enable(unsigned int card,
+			    unsigned long mask, unsigned long data);
+
+/* fills data with GPDATA register contents
+   returns negative value if error ocurred
+*/
+extern int bttv_read_gpio(unsigned int card, unsigned long *data);
+
+/* sets GPDATA register to new value:
+  (data & mask) | (current_GPDATA_value & ~mask)
+  returns negative value if error ocurred 
+*/
+extern int bttv_write_gpio(unsigned int card, 
+			    unsigned long mask, unsigned long data);
+
+/* returns pointer to task queue which can be used as parameter to 
+   interruptible_sleep_on
+   in interrupt handler if BT848_INT_GPINT bit is set - this queue is activated
+   (wake_up_interruptible) and following call to the function bttv_read_gpio 
+   should return new value of GPDATA,
+   returns NULL value if error ocurred or queue is not available
+   WARNING: because there is no buffer for GPIO data, one MUST 
+   process data ASAP
+*/
+extern WAIT_QUEUE* bttv_get_gpio_queue(unsigned int card);
+
 
 #ifndef O_NONCAP  
 #define O_NONCAP	O_TRUNC
 #endif
 
-#define MAX_GBUFFERS	2
+#define MAX_GBUFFERS	64
 #define RISCMEM_LEN	(32744*2)
-#define VBIBUF_SIZE     65536
+#define VBI_MAXLINES    16
+#define VBIBUF_SIZE     (2048*VBI_MAXLINES*2)
 
-/* maximum needed buffer size for extended VBI frame mode capturing */
-#define BTTV_MAX_FBUF	0x190000
+#define BTTV_MAX_FBUF	0x208000
+#define I2C_CLIENTS_MAX 8
 
 #ifdef __KERNEL__
 
@@ -50,8 +91,6 @@ struct bttv_window
 	ushort width, height;
 	ushort bpp, bpl;
 	ushort swidth, sheight;
-	short cropx, cropy;
-	ushort cropwidth, cropheight;
 	unsigned long vidadr;
 	ushort freq;
 	int norm;
@@ -67,16 +106,23 @@ struct bttv_pll_info {
 	unsigned int pll_current;  /* Currently programmed ofreq */
 };
 
-/*  Per-open data for handling multiple opens on one device */
-struct device_open
-{
-	int	     isopen;
-	int	     noncapturing;
-	struct bttv  *dev;
-};
-#define MAX_OPENS 3
+struct bttv_gbuf {
+	int stat;
+#define GBUFFER_UNUSED       0
+#define GBUFFER_GRABBING     1
+#define GBUFFER_DONE         2
+#define GBUFFER_ERROR        3
 
-struct bttv 
+	u16 width;
+	u16 height;
+	u16 fmt;
+	
+	u32 *risc;
+	unsigned long ro;
+	unsigned long re;
+};
+
+struct bttv
 {
 	struct video_device video_dev;
 	struct video_device radio_dev;
@@ -84,37 +130,36 @@ struct bttv
 	struct video_picture picture;		/* Current picture params */
 	struct video_audio audio_dev;		/* Current audio params */
 
+        struct semaphore lock;
 	int user;
 	int capuser;
-	struct device_open open_data[MAX_OPENS];
-	
-	struct i2c_bus i2c;
-	int have_msp3400;
-	int have_tuner;
+
+	/* i2c */
+	struct i2c_adapter         i2c_adap;
+	struct i2c_algo_bit_data   i2c_algo;
+	struct i2c_client          i2c_client;
+	int                        i2c_state;
+	struct i2c_client         *i2c_clients[I2C_CLIENTS_MAX];
+
         int tuner_type;
         int channel;
         
         unsigned int nr;
 	unsigned short id;
-#if LINUX_VERSION_CODE < 0x020100
-	unsigned char bus;          /* PCI bus the Bt848 is on */
-	unsigned char devfn;
-#else
 	struct pci_dev *dev;
-#endif
-	unsigned char irq;          /* IRQ used by Bt848 card */
+	unsigned int irq;          /* IRQ used by Bt848 card */
 	unsigned char revision;
-	unsigned int bt848_adr;      /* bus address of IO mem returned by PCI BIOS */
+	unsigned long bt848_adr;      /* bus address of IO mem returned by PCI BIOS */
 	unsigned char *bt848_mem;   /* pointer to mapped IO memory */
 	unsigned long busriscmem; 
 	u32 *riscmem;
   
 	unsigned char *vbibuf;
 	struct bttv_window win;
+	int fb_color_ctl;
 	int type;            /* card type  */
 	int audio;           /* audio mode */
-	int audio_chip;
-	int fader_chip;
+	int audio_chip;      /* set to one of the chips supported by bttv.c */
 	int radio;
 
 	u32 *risc_jmp;
@@ -122,40 +167,24 @@ struct bttv
 	u32 *vbi_even;
 	u32 bus_vbi_even;
 	u32 bus_vbi_odd;
-	struct wait_queue *vbiq;
-	struct wait_queue *capq;
-	struct wait_queue *capqo;
-	struct wait_queue *capqe;
+        WAIT_QUEUE vbiq;
+	WAIT_QUEUE capq;
+	WAIT_QUEUE capqo;
+	WAIT_QUEUE capqe;
 	int vbip;
 
-	u32 *risc_odd;
-	u32 *risc_even;
-	int cap;
+	u32 *risc_scr_odd;
+	u32 *risc_scr_even;
+	u32 risc_cap_odd;
+	u32 risc_cap_even;
+	int scr_on;
+	int vbi_on;
 	struct video_clip *cliprecs;
 
-	struct gbuffer *ogbuffers;
-	struct gbuffer *egbuffers;
-	u16 gwidth, gheight, gfmt;
-	u16 gwidth_next, gheight_next, gfmt_next;
-	u32 *grisc;
-	
-	unsigned long gro;
-	unsigned long gre;
-	unsigned long gro_next;
-	unsigned long gre_next;
-
-        int grf,grf_next;  /* frame numbers in grab queue */
-        int frame_stat[MAX_GBUFFERS];
-#define GBUFFER_UNUSED       0
-#define GBUFFER_GRABBING     1
-#define GBUFFER_DONE         2
-
+	struct bttv_gbuf *gbuf;
+	int gqueue[MAX_GBUFFERS];
+	int gq_in,gq_out,gq_grab;
         char *fbuffer;
-	int gmode;
-	int grabbing;
-	int lastgrab;
-	int grab;
-	int grabcount;
 
 	struct bttv_pll_info pll;
 	unsigned int Fsc;
@@ -163,15 +192,22 @@ struct bttv
 	unsigned int last_field; /* number of last grabbed field */
 	int i2c_command;
 	int triton1;
+
+	WAIT_QUEUE gpioq;
+	int shutdown;
 };
 #endif
 
-/*The following should be done in more portable way. It depends on define
-  of _ALPHA_BTTV in the Makefile.*/
+#if defined(__powerpc__) /* big-endian */
+extern __inline__ void io_st_le32(volatile unsigned *addr, unsigned val)
+{
+        __asm__ __volatile__ ("stwbrx %1,0,%2" : \
+                            "=m" (*addr) : "r" (val), "r" (addr));
+      __asm__ __volatile__ ("eieio" : : : "memory");
+}
 
-#ifdef _ALPHA_BTTV
-#define btwrite(dat,adr)    writel((dat),(char *) (btv->bt848_adr+(adr)))
-#define btread(adr)         readl(btv->bt848_adr+(adr))
+#define btwrite(dat,adr)  io_st_le32((unsigned *)(btv->bt848_mem+(adr)),(dat))
+#define btread(adr)       ld_le32((unsigned *)(btv->bt848_mem+(adr)))
 #else
 #define btwrite(dat,adr)    writel((dat), (char *) (btv->bt848_mem+(adr)))
 #define btread(adr)         readl(btv->bt848_mem+(adr))
@@ -191,7 +227,7 @@ struct bttv
 #define BTTV_BURST_OFF     	_IOR('v' , BASE_VIDIOCPRIVATE+5, int)
 #define BTTV_VERSION  	        _IOR('v' , BASE_VIDIOCPRIVATE+6, int)
 #define BTTV_PICNR		_IOR('v' , BASE_VIDIOCPRIVATE+7, int)
-
+#define BTTV_VBISIZE            _IOR('v' , BASE_VIDIOCPRIVATE+8, int)
 
 #define BTTV_UNKNOWN       0x00
 #define BTTV_MIRO          0x01
@@ -210,6 +246,28 @@ struct bttv
 #define BTTV_VHX           0x0e
 #define BTTV_ZOLTRIX       0x0f
 #define BTTV_PIXVIEWPLAYTV 0x10
+#define BTTV_WINVIEW_601   0x11
+#define BTTV_AVEC_INTERCAP 0x12
+#define BTTV_LIFE_FLYKIT   0x13
+#define BTTV_CEI_RAFFLES   0x14
+#define BTTV_CONFERENCETV  0x15
+#define BTTV_PHOEBE_TVMAS  0x16
+#define BTTV_MODTEC_205    0x17
+#define BTTV_MAGICTVIEW061 0x18
+#define BTTV_VOBIS_BOOSTAR 0x19
+#define BTTV_HAUPPAUG_WCAM 0x1a
+#define BTTV_MAXI          0x1b
+#define BTTV_TERRATV       0x1c
+#define BTTV_PXC200        0x1d
+#define BTTV_FLYVIDEO_98   0x1e
+#define BTTV_IPROTV        0x1f
+#define BTTV_INTEL_C_S_PCI 0x20
+#define BTTV_TERRATVALUE   0x21
+#define BTTV_WINFAST2000   0x22
+#define BTTV_CHRONOS_VS2   0x23
+#define BTTV_TYPHOON_TVIEW 0x24
+#define BTTV_PXELVWPLTVPRO 0x25
+
 
 #define AUDIO_TUNER        0x00
 #define AUDIO_RADIO        0x01
@@ -221,43 +279,38 @@ struct bttv
 #define AUDIO_UNMUTE       0x81
 
 #define TDA9850            0x01
-#define TDA8425            0x02
-#define TDA9840            0x03
+#define TDA9840            0x02
+#define TDA8425            0x03
 #define TEA6300            0x04
 
 #define I2C_TSA5522        0xc2
-#define I2C_TDA9840	   0x84
+#define I2C_TDA9840        0x84
 #define I2C_TDA9850        0xb6
 #define I2C_TDA8425        0x82
 #define I2C_HAUPEE         0xa0
 #define I2C_STBEE          0xae
-#define I2C_VHX 	   0xc0
+#define I2C_VHX            0xc0
+#define I2C_MSP3400        0x80
 #define I2C_TEA6300        0x80
+#define I2C_DPL3518	   0x84
 
-#define TDA9840_SW	   0x00
-#define TDA9840_LVADJ	   0x02
-#define TDA9840_STADJ	   0x03
-#define TDA9840_TEST	   0x04
+#define TDA9840_SW         0x00
+#define TDA9840_LVADJ      0x02
+#define TDA9840_STADJ      0x03
+#define TDA9840_TEST       0x04
 
-#define TDA9850_CON1       0x04
-#define TDA9850_CON2       0x05
-#define TDA9850_CON3       0x06
-#define TDA9850_CON4       0x07
-#define TDA9850_ALI1       0x08
-#define TDA9850_ALI2       0x09
-#define TDA9850_ALI3       0x0a
-
-#define TDA8425_VL         0x00
-#define TDA8425_VR         0x01
-#define TDA8425_BA         0x02
-#define TDA8425_TR         0x03
-#define TDA8425_S1         0x08
-
-#define TEA6300_VL         0x00		/* volume control left */
-#define TEA6300_VR         0x01		/* volume control right */
-#define TEA6300_BA         0x02		/* bass control */
-#define TEA6300_TR         0x03		/* treble control */
-#define TEA6300_FA         0x04		/* fader control */
-#define TEA6300_SW         0x05		/* mute and source switch */
+#define PT2254_L_CHANEL 0x10
+#define PT2254_R_CHANEL 0x08
+#define PT2254_DBS_IN_2 0x400
+#define PT2254_DBS_IN_10 0x20000
+#define WINVIEW_PT2254_CLK  0x40
+#define WINVIEW_PT2254_DATA 0x20
+#define WINVIEW_PT2254_STROBE 0x80
 
 #endif
+
+/*
+ * Local variables:
+ * c-basic-offset: 8
+ * End:
+ */

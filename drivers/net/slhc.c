@@ -77,7 +77,6 @@
 #include <linux/timer.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
-#include <linux/mm.h>
 #include <linux/init.h>
 #include <net/checksum.h>
 #include <net/slhc_vj.h>
@@ -753,19 +752,14 @@ void cleanup_module(void)
 }
 
 #else /* MODULE */
-
-__initfunc(void slhc_install(void))
+int __init slhc_install(void)
 {
+	return 0;
 }
 
 #endif /* MODULE */
 #else /* CONFIG_INET */
-EXPORT_SYMBOL(slhc_init);
-EXPORT_SYMBOL(slhc_free);
-EXPORT_SYMBOL(slhc_remember);
-EXPORT_SYMBOL(slhc_compress);
-EXPORT_SYMBOL(slhc_uncompress);
-EXPORT_SYMBOL(slhc_toss);
+
 
 int
 slhc_toss(struct slcompress *comp)
@@ -806,5 +800,11 @@ slhc_init(int rslots, int tslots)
   printk(KERN_DEBUG "Called IP function on non IP-system: slhc_init");
   return NULL;
 }
+EXPORT_SYMBOL(slhc_init);
+EXPORT_SYMBOL(slhc_free);
+EXPORT_SYMBOL(slhc_remember);
+EXPORT_SYMBOL(slhc_compress);
+EXPORT_SYMBOL(slhc_uncompress);
+EXPORT_SYMBOL(slhc_toss);
 
 #endif /* CONFIG_INET */

@@ -1,4 +1,4 @@
-/* $Id: unaligned.c,v 1.18 1999/04/03 11:36:17 anton Exp $
+/* $Id: unaligned.c,v 1.20 2000/01/21 11:38:42 jj Exp $
  * unaligned.c: Unaligned load/store trap handling with special
  *              cases for the kernel to do them more quickly.
  *
@@ -61,7 +61,7 @@ static inline int decode_access_size(unsigned int insn)
 		return 2;
 	else {
 		printk("Impossible unaligned trap. insn=%08x\n", insn);
-		die_if_kernel("Byte sized unaligned access?!?!", current->tss.kregs);
+		die_if_kernel("Byte sized unaligned access?!?!", current->thread.kregs);
 		return 4; /* just to keep gcc happy. */
 	}
 }
@@ -422,9 +422,14 @@ void user_mna_trap_fault(struct pt_regs *regs, unsigned int insn) __asm__ ("user
 
 void user_mna_trap_fault(struct pt_regs *regs, unsigned int insn)
 {
-	current->tss.sig_address = regs->pc;
-	current->tss.sig_desc = SUBSIG_PRIVINST;
-	send_sig(SIGBUS, current, 1);
+	siginfo_t info;
+
+	info.si_signo = SIGBUS;
+	info.si_errno = 0;
+	info.si_code = BUS_ADRALN;
+	info.si_addr = (void *)compute_effective_address(regs, insn);
+	info.si_trapno = 0;
+	send_sig_info(SIGBUS, &info, current);
 }
 
 asmlinkage void user_unaligned_trap(struct pt_regs *regs, unsigned int insn)
@@ -432,7 +437,7 @@ asmlinkage void user_unaligned_trap(struct pt_regs *regs, unsigned int insn)
 	enum direction dir;
 
 	lock_kernel();
-	if(!(current->tss.flags & SPARC_FLAG_UNALIGNED) ||
+	if(!(current->thread.flags & SPARC_FLAG_UNALIGNED) ||
 	   (((insn >> 30) & 3) != 3))
 		goto kill_user;
 	dir = decode_direction(insn);
@@ -487,9 +492,7 @@ asmlinkage void user_unaligned_trap(struct pt_regs *regs, unsigned int insn)
 	}
 
 kill_user:
-	current->tss.sig_address = regs->pc;
-	current->tss.sig_desc = SUBSIG_PRIVINST;
-	send_sig(SIGBUS, current, 1);
+	user_mna_trap_fault(regs, insn);
 out:
 	unlock_kernel();
 }

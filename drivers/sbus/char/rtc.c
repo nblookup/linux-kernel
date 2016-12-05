@@ -1,4 +1,4 @@
-/* $Id: rtc.c,v 1.13 1998/08/26 10:29:44 davem Exp $
+/* $Id: rtc.c,v 1.19 2000/02/09 22:33:26 davem Exp $
  *
  * Linux/SPARC Real Time Clock Driver
  * Copyright (C) 1996 Thomas K. Dyas (tdyas@eden.rutgers.edu)
@@ -29,12 +29,16 @@ static int rtc_busy = 0;
 /* Retrieve the current date and time from the real time clock. */
 void get_rtc_time(struct rtc_time *t)
 {
-	register struct mostek48t02 *regs = mstk48t02_regs;
+	unsigned long regs = mstk48t02_regs;
 	unsigned long flags;
+	u8 tmp;
 
 	save_flags(flags);
 	cli();
-	regs->creg |= MSTK_CREG_READ;
+
+	tmp = mostek_read(regs + MOSTEK_CREG);
+	tmp |= MSTK_CREG_READ;
+	mostek_write(regs + MOSTEK_CREG, tmp);
 
 	t->sec = MSTK_REG_SEC(regs);
 	t->min = MSTK_REG_MIN(regs);
@@ -44,19 +48,24 @@ void get_rtc_time(struct rtc_time *t)
 	t->month = MSTK_REG_MONTH(regs);
 	t->year = MSTK_CVT_YEAR( MSTK_REG_YEAR(regs) );
 
-	regs->creg &= ~MSTK_CREG_READ;
+	tmp = mostek_read(regs + MOSTEK_CREG);
+	tmp &= ~MSTK_CREG_READ;
+	mostek_write(regs + MOSTEK_CREG, tmp);
 	restore_flags(flags);
 }
 
 /* Set the current date and time inthe real time clock. */
 void set_rtc_time(struct rtc_time *t)
 {
-	register struct mostek48t02 *regs = mstk48t02_regs;
+	unsigned long regs = mstk48t02_regs;
 	unsigned long flags;
+	u8 tmp;
 
 	save_flags(flags);
 	cli();
-	regs->creg |= MSTK_CREG_WRITE;
+	tmp = mostek_read(regs + MOSTEK_CREG);
+	tmp |= MSTK_CREG_WRITE;
+	mostek_write(regs + MOSTEK_CREG, tmp);
 
 	MSTK_SET_REG_SEC(regs,t->sec);
 	MSTK_SET_REG_MIN(regs,t->min);
@@ -66,7 +75,9 @@ void set_rtc_time(struct rtc_time *t)
 	MSTK_SET_REG_MONTH(regs,t->month);
 	MSTK_SET_REG_YEAR(regs,t->year - MSTK_YEAR_ZERO);
 
-	regs->creg &= ~MSTK_CREG_WRITE;
+	tmp = mostek_read(regs + MOSTEK_CREG);
+	tmp &= ~MSTK_CREG_WRITE;
+	mostek_write(regs + MOSTEK_CREG, tmp);
 	restore_flags(flags);
 }
 
@@ -107,6 +118,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 
 static int rtc_open(struct inode *inode, struct file *file)
 {
+
 	if (rtc_busy)
 		return -EBUSY;
 
@@ -125,16 +137,10 @@ static int rtc_release(struct inode *inode, struct file *file)
 }
 
 static struct file_operations rtc_fops = {
-	rtc_lseek,
-	NULL,		/* rtc_read */
-	NULL,		/* rtc_write */
-	NULL,		/* rtc_readdir */
-	NULL,		/* rtc_poll */
-	rtc_ioctl,
-	NULL,		/* rtc_mmap */
-	rtc_open,
-	NULL,		/* flush */
-	rtc_release
+	llseek:		rtc_lseek,
+	ioctl:		rtc_ioctl,
+	open:		rtc_open,
+	release:	rtc_release,
 };
 
 static struct miscdevice rtc_dev = { RTC_MINOR, "rtc", &rtc_fops };
@@ -144,14 +150,20 @@ EXPORT_NO_SYMBOLS;
 #ifdef MODULE
 int init_module(void)
 #else
-__initfunc(int rtc_init(void))
+int __init rtc_sun_init(void)
 #endif
 {
 	int error;
 
+	if (mstk48t02_regs == 0) {
+		/* This diagnostic is a debugging aid... But a useful one. */
+		printk(KERN_ERR "rtc: no Mostek in this computer\n");
+		return -ENODEV;
+	}
+
 	error = misc_register(&rtc_dev);
 	if (error) {
-		printk(KERN_ERR "rtc: unable to get misc minor\n");
+		printk(KERN_ERR "rtc: unable to get misc minor for Mostek\n");
 		return error;
 	}
 

@@ -55,10 +55,8 @@ ufs_readdir (struct file * filp, void * dirent, filldir_t filldir)
 
 	while (!error && !stored && filp->f_pos < inode->i_size) {
 		lblk = (filp->f_pos) >> sb->s_blocksize_bits;
-		/* XXX - ufs_bmap() call needs error checking */
-		blk = ufs_bmap(inode, lblk);
-		bh = bread (sb->s_dev, blk, sb->s_blocksize);
-		if (!bh) {
+		blk = ufs_frag_map(inode, lblk);
+		if (!blk || !(bh = bread (sb->s_dev, blk, sb->s_blocksize))) {
 			/* XXX - error - skip to the next block */
 			printk("ufs_readdir: "
 			       "dir inode %lu has a hole at offset %lu\n",
@@ -170,7 +168,7 @@ int ufs_check_dir_entry (const char * function,	struct inode * dir,
 		error_msg = "inode out of bounds";
 
 	if (error_msg != NULL)
-		ufs_error (sb, function, "bad entry in directory #%lu, size %lu: %s - "
+		ufs_error (sb, function, "bad entry in directory #%lu, size %Lu: %s - "
 			    "offset=%lu, inode=%lu, reclen=%d, namlen=%d",
 			    dir->i_ino, dir->i_size, error_msg, offset,
 			    (unsigned long) SWAB32(de->d_ino),
@@ -179,40 +177,8 @@ int ufs_check_dir_entry (const char * function,	struct inode * dir,
 	return (error_msg == NULL ? 1 : 0);
 }
 
-static struct file_operations ufs_dir_operations = {
-	NULL,			/* lseek */
-	NULL,			/* read */
-	NULL,			/* write */
-	ufs_readdir,		/* readdir */
-	NULL,			/* select */
-	NULL,			/* ioctl */
-	NULL,			/* mmap */
-	NULL,			/* open */
-	NULL,			/* flush */
-	NULL,			/* release */
-	file_fsync,		/* fsync */
-	NULL,			/* fasync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
-};
-
-struct inode_operations ufs_dir_inode_operations = {
-	&ufs_dir_operations,	/* default directory file operations */
-	ufs_create,		/* create */
-	ufs_lookup,		/* lookup */
-	ufs_link,		/* link */
-	ufs_unlink,		/* unlink */
-	ufs_symlink,		/* symlink */
-	ufs_mkdir,		/* mkdir */
-	ufs_rmdir,		/* rmdir */
-	ufs_mknod,		/* mknod */
-	ufs_rename,		/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* bmap */
-	NULL,			/* truncate */
-	ufs_permission,		/* permission */
-	NULL,			/* smap */
+struct file_operations ufs_dir_operations = {
+	read:		generic_read_dir,
+	readdir:	ufs_readdir,
+	fsync:		file_fsync,
 };

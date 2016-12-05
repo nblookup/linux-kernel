@@ -6,6 +6,7 @@
  * Copyright (C) 1995, 1996 Olaf Kirch <okir@monad.swb.de>
  */
 
+#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/utsname.h>
@@ -19,36 +20,7 @@
 #include <linux/lockd/sm_inter.h>
 
 #define NLMDBG_FACILITY		NLMDBG_XDR
-#define NLM_MAXSTRLEN		1024
 
-#define QUADLEN(len)		(((len) + 3) >> 2)
-
-
-u32	nlm_granted, nlm_lck_denied, nlm_lck_denied_nolocks,
-	nlm_lck_blocked, nlm_lck_denied_grace_period;
-
-
-typedef struct nlm_args	nlm_args;
-
-/*
- * Initialization of NFS status variables
- */
-void
-nlmxdr_init(void)
-{
-	static int	inited = 0;
-
-	if (inited)
-		return;
-
-	nlm_granted = htonl(NLM_LCK_GRANTED);
-	nlm_lck_denied = htonl(NLM_LCK_DENIED);
-	nlm_lck_denied_nolocks = htonl(NLM_LCK_DENIED_NOLOCKS);
-	nlm_lck_blocked = htonl(NLM_LCK_BLOCKED);
-	nlm_lck_denied_grace_period = htonl(NLM_LCK_DENIED_GRACE_PERIOD);
-
-	inited = 1;
-}
 
 /*
  * XDR functions for basic NLM types
@@ -95,7 +67,7 @@ nlm_decode_fh(u32 *p, struct nfs_fh *f)
 
 	if ((len = ntohl(*p++)) != sizeof(*f)) {
 		printk(KERN_NOTICE
-			"lockd: bad fhandle size %x (should be %d)\n",
+			"lockd: bad fhandle size %x (should be %Zu)\n",
 			len, sizeof(*f));
 		return NULL;
 	}
@@ -541,7 +513,8 @@ nlmclt_decode_res(struct rpc_rqst *req, u32 *p, struct nlm_res *resp)
     { "nlm_" #proc,						\
       (kxdrproc_t) nlmclt_encode_##argtype,			\
       (kxdrproc_t) nlmclt_decode_##restype,			\
-      MAX(NLM_##argtype##_sz, NLM_##restype##_sz) << 2		\
+      MAX(NLM_##argtype##_sz, NLM_##restype##_sz) << 2,		\
+      0								\
     }
 
 static struct rpc_procinfo	nlm_procedures[] = {
@@ -586,11 +559,18 @@ static struct rpc_version	nlm_version3 = {
 	3, 24, nlm_procedures,
 };
 
+#ifdef 	CONFIG_LOCKD_V4
+extern struct rpc_version nlm_version4;
+#endif
+
 static struct rpc_version *	nlm_versions[] = {
 	NULL,
 	&nlm_version1,
 	NULL,
 	&nlm_version3,
+#ifdef 	CONFIG_LOCKD_V4
+	&nlm_version4,
+#endif
 };
 
 static struct rpc_stat		nlm_stats;

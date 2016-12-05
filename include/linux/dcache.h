@@ -12,8 +12,6 @@
  * with heavy changes by Linus Torvalds
  */
 
-#define D_MAXLEN 1024
-
 #define IS_ROOT(x) ((x) == (x)->d_parent)
 
 /*
@@ -100,6 +98,12 @@ struct dentry_operations {
 					 * renamed" and has to be
 					 * deleted on the last dput()
 					 */
+#define	DCACHE_NFSD_DISCONNECTED 0x0004	/* This dentry is not currently connected to the
+					 * dcache tree. Its parent will either be itself,
+					 * or will have this flag as well.
+					 * If this dentry points to a directory, then
+					 * s_nfsd_free_path semaphore will be down
+					 */
 
 /*
  * d_drop() unhashes the entry from the parent
@@ -132,22 +136,23 @@ extern void d_instantiate(struct dentry *, struct inode *);
 extern void d_delete(struct dentry *);
 
 /* allocate/de-allocate */
-extern struct dentry * d_alloc(struct dentry * parent, const struct qstr *name);
-extern void prune_dcache(int);
+extern struct dentry * d_alloc(struct dentry *, const struct qstr *);
 extern void shrink_dcache_sb(struct super_block *);
 extern void shrink_dcache_parent(struct dentry *);
 extern int d_invalidate(struct dentry *);
 
 #define shrink_dcache() prune_dcache(0)
-
+struct zone_struct;
 /* dcache memory management */
-extern int  select_dcache(int, int);
-extern void shrink_dcache_memory(int, unsigned int);
-extern void check_dcache_memory(void);
-extern void free_inode_memory(int);	/* defined in fs/inode.c */
+extern int shrink_dcache_memory(int, unsigned int, struct zone_struct *);
+extern void prune_dcache(int);
+
+/* icache memory management (defined in linux/fs/inode.c) */
+extern int shrink_icache_memory(int, int, struct zone_struct *);
+extern void prune_icache(int);
 
 /* only used at mount-time */
-extern struct dentry * d_alloc_root(struct inode * root_inode, struct dentry * old_root);
+extern struct dentry * d_alloc_root(struct inode *);
 
 /* test whether root is busy without destroying dcache */
 extern int is_root_busy(struct dentry *);
@@ -155,7 +160,7 @@ extern int is_root_busy(struct dentry *);
 /*
  * This adds the entry to the hash queues.
  */
-extern void d_rehash(struct dentry * entry);
+extern void d_rehash(struct dentry *);
 /*
  * This adds the entry to the hash queues and initializes "d_inode".
  * The entry was actually filled in earlier during "d_alloc()"
@@ -167,17 +172,16 @@ static __inline__ void d_add(struct dentry * entry, struct inode * inode)
 }
 
 /* used for rename() and baskets */
-extern void d_move(struct dentry * entry, struct dentry * newdentry);
+extern void d_move(struct dentry *, struct dentry *);
 
 /* appendix may either be NULL or be used for transname suffixes */
-extern struct dentry * d_lookup(struct dentry * dir, struct qstr * name);
+extern struct dentry * d_lookup(struct dentry *, struct qstr *);
 
 /* validate "insecure" dentry pointer */
-extern int d_validate(struct dentry *dentry, struct dentry *dparent,
-		      unsigned int hash, unsigned int len);
+extern int d_validate(struct dentry *, struct dentry *, unsigned int, unsigned int);
 
 /* write full pathname into buffer and return start of pathname */
-extern char * d_path(struct dentry * entry, char * buf, int buflen);
+extern char * d_path(struct dentry *, char *, int);
 
 /* Allocation counts.. */
 static __inline__ struct dentry * dget(struct dentry *dentry)
@@ -185,6 +189,11 @@ static __inline__ struct dentry * dget(struct dentry *dentry)
 	if (dentry)
 		dentry->d_count++;
 	return dentry;
+}
+
+static __inline__ int d_unhashed(struct dentry *dentry)
+{
+	return list_empty(&dentry->d_hash);
 }
 
 extern void dput(struct dentry *);

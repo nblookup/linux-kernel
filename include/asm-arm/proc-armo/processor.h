@@ -10,11 +10,11 @@
  *  28-09-1996	RMK	Moved start_thread into the processor dependencies
  *  11-01-1998	RMK	Added new uaccess_t
  *  09-09-1998	PJB	Delete redundant `wp_works_ok'
+ *  30-05-1999	PJB	Save sl across context switches
  */
 #ifndef __ASM_PROC_PROCESSOR_H
 #define __ASM_PROC_PROCESSOR_H
 
-#include <asm/assembler.h>
 #include <linux/string.h>
 
 #define KERNEL_STACK_SIZE 4096
@@ -26,11 +26,12 @@ struct context_save_struct {
 	unsigned long r7;
 	unsigned long r8;
 	unsigned long r9;
+	unsigned long sl;
 	unsigned long fp;
 	unsigned long pc;
 };
 
-#define INIT_CSS (struct context_save_struct){ 0, 0, 0, 0, 0, 0, 0, SVC26_MODE }
+#define INIT_CSS (struct context_save_struct){ 0, 0, 0, 0, 0, 0, 0, 0, SVC26_MODE }
 
 typedef struct {
 	void (*put_byte)(void);			/* Special calling convention */
@@ -43,20 +44,16 @@ typedef struct {
 	unsigned long (*copy_to_user)(void *to, const void *from, unsigned long sz);
 	unsigned long (*clear_user)(void *addr, unsigned long sz);
 	unsigned long (*strncpy_from_user)(char *to, const char *from, unsigned long sz);
-	unsigned long (*strlen_user)(const char *s);
+	unsigned long (*strnlen_user)(const char *s, long n);
 } uaccess_t;
 
 extern uaccess_t uaccess_user, uaccess_kernel;
 
 #define EXTRA_THREAD_STRUCT							\
-	uaccess_t	*uaccess;		/* User access functions*/	\
-	unsigned long	memcmap[256];
+	uaccess_t	*uaccess;		/* User access functions*/
 
 #define EXTRA_THREAD_STRUCT_INIT		\
-	,&uaccess_kernel,			\
-	{ 0, }
-
-#define SWAPPER_PG_DIR ((unsigned long)swapper_pg_dir)
+	,&uaccess_kernel
 
 #define start_thread(regs,pc,sp)					\
 ({									\
@@ -69,6 +66,9 @@ extern uaccess_t uaccess_user, uaccess_kernel;
 	regs->ARM_r1 = stack[1];	/* r1 (argv) */			\
 	regs->ARM_r0 = stack[0];	/* r0 (argc) */			\
 })
+
+#define KSTK_EIP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)))[1022])
+#define KSTK_ESP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)))[1020])
 
 /* Allocation and freeing of basic task resources. */
 /*

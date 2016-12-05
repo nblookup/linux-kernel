@@ -5,7 +5,7 @@
  *
  *		IPv4 FIB: lookup engine and maintenance routines.
  *
- * Version:	$Id: fib_hash.c,v 1.8 1999/03/25 10:04:17 davem Exp $
+ * Version:	$Id: fib_hash.c,v 1.12 1999/08/31 07:03:27 davem Exp $
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
@@ -47,6 +47,8 @@
 /*
    printk(KERN_DEBUG a)
  */
+
+static kmem_cache_t * fn_hash_kmem;
 
 /*
    These bizarre types are just to force strict type checking.
@@ -145,13 +147,16 @@ extern __inline__ int fn_key_leq(fn_key_t a, fn_key_t b)
 	return a.datum <= b.datum;
 }
 
+static rwlock_t fib_hash_lock = RW_LOCK_UNLOCKED;
+
 #define FZ_MAX_DIVISOR 1024
 
 #ifdef CONFIG_IP_ROUTE_LARGE_TABLES
 
+/* The fib hash lock must be held when this is called. */
 static __inline__ void fn_rebuild_zone(struct fn_zone *fz,
-					struct fib_node **old_ht,
-					int old_divisor)
+				       struct fib_node **old_ht,
+				       int old_divisor)
 {
 	int i;
 	struct fib_node *f, **fp, *next;
@@ -198,13 +203,13 @@ static void fn_rehash_zone(struct fn_zone *fz)
 
 	if (ht)	{
 		memset(ht, 0, new_divisor*sizeof(struct fib_node*));
-		start_bh_atomic();
+		write_lock_bh(&fib_hash_lock);
 		old_ht = fz->fz_hash;
 		fz->fz_hash = ht;
 		fz->fz_hashmask = new_hashmask;
 		fz->fz_divisor = new_divisor;
 		fn_rebuild_zone(fz, old_ht, old_divisor);
-		end_bh_atomic();
+		write_unlock_bh(&fib_hash_lock);
 		kfree(old_ht);
 	}
 }
@@ -213,7 +218,7 @@ static void fn_rehash_zone(struct fn_zone *fz)
 static void fn_free_node(struct fib_node * f)
 {
 	fib_release_info(FIB_INFO(f));
-	kfree_s(f, sizeof(struct fib_node));
+	kmem_cache_free(fn_hash_kmem, f);
 }
 
 
@@ -246,6 +251,7 @@ fn_new_zone(struct fn_hash *table, int z)
 	for (i=z+1; i<=32; i++)
 		if (table->fn_zones[i])
 			break;
+	write_lock_bh(&fib_hash_lock);
 	if (i>32) {
 		/* No more specific masks, we are the first. */
 		fz->fz_next = table->fn_zone_list;
@@ -255,6 +261,7 @@ fn_new_zone(struct fn_hash *table, int z)
 		table->fn_zones[i]->fz_next = fz;
 	}
 	table->fn_zones[z] = fz;
+	write_unlock_bh(&fib_hash_lock);
 	return fz;
 }
 
@@ -265,6 +272,7 @@ fn_hash_lookup(struct fib_table *tb, const struct rt_key *key, struct fib_result
 	struct fn_zone *fz;
 	struct fn_hash *t = (struct fn_hash*)tb->tb_data;
 
+	read_lock(&fib_hash_lock);
 	for (fz = t->fn_zone_list; fz; fz = fz->fz_next) {
 		struct fib_node *f;
 		fn_key_t k = fz_key(key->dst, fz);
@@ -292,14 +300,16 @@ fn_hash_lookup(struct fib_table *tb, const struct rt_key *key, struct fib_result
 				res->type = f->fn_type;
 				res->scope = f->fn_scope;
 				res->prefixlen = fz->fz_order;
-				res->prefix = &fz_prefix(f->fn_key, fz);
-				return 0;
+				goto out;
 			}
 			if (err < 0)
-				return err;
+				goto out;
 		}
 	}
-	return 1;
+	err = 1;
+out:
+	read_unlock(&fib_hash_lock);
+	return err;
 }
 
 static int fn_hash_last_dflt=-1;
@@ -344,6 +354,7 @@ fn_hash_select_default(struct fib_table *tb, const struct rt_key *key, struct fi
 	last_resort = NULL;
 	order = -1;
 
+	read_lock(&fib_hash_lock);
 	for (f = fz->fz_hash[0]; f; f = f->fn_next) {
 		struct fib_info *next_fi = FIB_INFO(f);
 
@@ -362,9 +373,12 @@ fn_hash_select_default(struct fib_table *tb, const struct rt_key *key, struct fi
 			if (next_fi != res->fi)
 				break;
 		} else if (!fib_detect_death(fi, order, &last_resort, &last_idx)) {
+			if (res->fi)
+				fib_info_put(res->fi);
 			res->fi = fi;
+			atomic_inc(&fi->fib_clntref);
 			fn_hash_last_dflt = order;
-			return;
+			goto out;
 		}
 		fi = next_fi;
 		order++;
@@ -372,18 +386,28 @@ fn_hash_select_default(struct fib_table *tb, const struct rt_key *key, struct fi
 
 	if (order<=0 || fi==NULL) {
 		fn_hash_last_dflt = -1;
-		return;
+		goto out;
 	}
 
 	if (!fib_detect_death(fi, order, &last_resort, &last_idx)) {
+		if (res->fi)
+			fib_info_put(res->fi);
 		res->fi = fi;
+		atomic_inc(&fi->fib_clntref);
 		fn_hash_last_dflt = order;
-		return;
+		goto out;
 	}
 
-	if (last_idx >= 0)
+	if (last_idx >= 0) {
+		if (res->fi)
+			fib_info_put(res->fi);
 		res->fi = last_resort;
+		if (last_resort)
+			atomic_inc(&last_resort->fib_clntref);
+	}
 	fn_hash_last_dflt = last_idx;
+out:
+	read_unlock(&fib_hash_lock);
 }
 
 #define FIB_SCAN(f, fp) \
@@ -456,6 +480,7 @@ rta->rta_prefsrc ? *(u32*)rta->rta_prefsrc : 0);
 #endif
 
 	fp = fz_chain_p(key, fz);
+
 
 	/*
 	 * Scan list to find the first route with the same destination
@@ -541,7 +566,7 @@ create:
 
 replace:
 	err = -ENOBUFS;
-	new_f = (struct fib_node *) kmalloc(sizeof(struct fib_node), GFP_KERNEL);
+	new_f = kmem_cache_alloc(fn_hash_kmem, SLAB_KERNEL);
 	if (new_f == NULL)
 		goto out;
 
@@ -560,14 +585,17 @@ replace:
 	 */
 
 	new_f->fn_next = f;
+	write_lock_bh(&fib_hash_lock);
 	*fp = new_f;
+	write_unlock_bh(&fib_hash_lock);
 	fz->fz_nent++;
 
 	if (del_fp) {
 		f = *del_fp;
 		/* Unlink replaced node */
+		write_lock_bh(&fib_hash_lock);
 		*del_fp = f->fn_next;
-		synchronize_bh();
+		write_unlock_bh(&fib_hash_lock);
 
 		if (!(f->fn_state&FN_S_ZOMBIE))
 			rtmsg_fib(RTM_DELROUTE, f, z, tb->tb_id, n, req);
@@ -619,11 +647,13 @@ FTprint("tb(%d)_delete: %d %08x/%d %d\n", tb->tb_id, r->rtm_type, rta->rta_dst ?
 
 	fp = fz_chain_p(key, fz);
 
+
 	FIB_SCAN(f, fp) {
 		if (fn_key_eq(f->fn_key, key))
 			break;
-		if (fn_key_leq(key, f->fn_key))
+		if (fn_key_leq(key, f->fn_key)) {
 			return -ESRCH;
+		}
 	}
 #ifdef CONFIG_IP_ROUTE_TOS
 	FIB_SCAN_KEY(f, fp, key) {
@@ -637,9 +667,9 @@ FTprint("tb(%d)_delete: %d %08x/%d %d\n", tb->tb_id, r->rtm_type, rta->rta_dst ?
 	FIB_SCAN_TOS(f, fp, key, tos) {
 		struct fib_info * fi = FIB_INFO(f);
 
-		if (f->fn_state&FN_S_ZOMBIE)
+		if (f->fn_state&FN_S_ZOMBIE) {
 			return -ESRCH;
-
+		}
 		matched++;
 
 		if (del_fp == NULL &&
@@ -655,8 +685,9 @@ FTprint("tb(%d)_delete: %d %08x/%d %d\n", tb->tb_id, r->rtm_type, rta->rta_dst ?
 		rtmsg_fib(RTM_DELROUTE, f, z, tb->tb_id, n, req);
 
 		if (matched != 1) {
+			write_lock_bh(&fib_hash_lock);
 			*del_fp = f->fn_next;
-			synchronize_bh();
+			write_unlock_bh(&fib_hash_lock);
 
 			if (f->fn_state&FN_S_ACCESSED)
 				rt_cache_flush(-1);
@@ -687,8 +718,9 @@ fn_flush_list(struct fib_node ** fp, int z, struct fn_hash *table)
 		struct fib_info *fi = FIB_INFO(f);
 
 		if (fi && ((f->fn_state&FN_S_ZOMBIE) || (fi->fib_flags&RTNH_F_DEAD))) {
+			write_lock_bh(&fib_hash_lock);
 			*fp = f->fn_next;
-			synchronize_bh();
+			write_unlock_bh(&fib_hash_lock);
 
 			fn_free_node(f);
 			found++;
@@ -727,6 +759,7 @@ static int fn_hash_get_info(struct fib_table *tb, char *buffer, int first, int c
 	int pos = 0;
 	int n = 0;
 
+	read_lock(&fib_hash_lock);
 	for (fz=table->fn_zone_list; fz; fz = fz->fz_next) {
 		int i;
 		struct fib_node *f;
@@ -752,10 +785,12 @@ static int fn_hash_get_info(struct fib_table *tb, char *buffer, int first, int c
 						  FZ_MASK(fz), buffer);
 				buffer += 128;
 				if (++n >= count)
-					return n;
+					goto out;
 			}
 		}
 	}
+out:
+	read_unlock(&fib_hash_lock);
   	return n;
 }
 #endif
@@ -818,15 +853,18 @@ static int fn_hash_dump(struct fib_table *tb, struct sk_buff *skb, struct netlin
 	struct fn_hash *table = (struct fn_hash*)tb->tb_data;
 
 	s_m = cb->args[1];
+	read_lock(&fib_hash_lock);
 	for (fz = table->fn_zone_list, m=0; fz; fz = fz->fz_next, m++) {
 		if (m < s_m) continue;
 		if (m > s_m)
 			memset(&cb->args[2], 0, sizeof(cb->args) - 2*sizeof(cb->args[0]));
 		if (fn_hash_dump_zone(skb, cb, tb, fz) < 0) {
 			cb->args[1] = m;
+			read_unlock(&fib_hash_lock);
 			return -1;
 		}
 	}
+	read_unlock(&fib_hash_lock);
 	cb->args[1] = m;
 	return skb->len;
 }
@@ -861,13 +899,21 @@ static void rtmsg_fib(int event, struct fib_node* f, int z, int tb_id,
 #ifdef CONFIG_IP_MULTIPLE_TABLES
 struct fib_table * fib_hash_init(int id)
 #else
-__initfunc(struct fib_table * fib_hash_init(int id))
+struct fib_table * __init fib_hash_init(int id)
 #endif
 {
 	struct fib_table *tb;
+
+	if (fn_hash_kmem == NULL)
+		fn_hash_kmem = kmem_cache_create("ip_fib_hash",
+						 sizeof(struct fib_node),
+						 0, SLAB_HWCACHE_ALIGN,
+						 NULL, NULL);
+
 	tb = kmalloc(sizeof(struct fib_table) + sizeof(struct fn_hash), GFP_KERNEL);
 	if (tb == NULL)
 		return NULL;
+
 	tb->tb_id = id;
 	tb->tb_lookup = fn_hash_lookup;
 	tb->tb_insert = fn_hash_insert;

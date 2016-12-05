@@ -37,6 +37,7 @@
 #include <linux/isdnif.h>
 #include <asm/string.h>
 #include <asm/io.h>
+#include <linux/ioport.h>
 
 #include "pcbit.h"
 #include "edss1.h"
@@ -86,10 +87,23 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 
 	dev_pcbit[board] = dev;
 	memset(dev, 0, sizeof(struct pcbit_dev));
+	init_waitqueue_head(&dev->set_running_wq);
 
-	if (mem_base >= 0xA0000 && mem_base <= 0xFFFFF )
-		dev->sh_mem = (unsigned char*) mem_base;
-	else
+	if (mem_base >= 0xA0000 && mem_base <= 0xFFFFF ) {
+		dev->ph_mem = mem_base;
+		if (check_mem_region(dev->ph_mem, 4096)) {
+			printk(KERN_WARNING
+				"PCBIT: memory region %lx-%lx already in use\n",
+				dev->ph_mem, dev->ph_mem + 4096);
+			kfree(dev);
+			dev_pcbit[board] = NULL;
+			return -EACCES;
+		} else {
+			request_mem_region(dev->ph_mem, 4096, "PCBIT mem");
+		}
+		dev->sh_mem = (unsigned char*)ioremap(dev->ph_mem, 4096);
+	}
+	else 
 	{
 		printk("memory address invalid");
 		kfree(dev);
@@ -101,6 +115,8 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 	if (!dev->b1) {
 		printk("pcbit_init: couldn't malloc pcbit_chan struct\n");
 		kfree(dev);
+		iounmap((unsigned char*)dev->sh_mem);
+		release_mem_region(dev->ph_mem, 4096);
 		return -ENOMEM;
 	}
     
@@ -109,6 +125,8 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 		printk("pcbit_init: couldn't malloc pcbit_chan struct\n");
 		kfree(dev->b1);
 		kfree(dev);
+		iounmap((unsigned char*)dev->sh_mem);
+		release_mem_region(dev->ph_mem, 4096);
 		return -ENOMEM;
 	}
 
@@ -131,6 +149,8 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 		kfree(dev->b1);
 		kfree(dev->b2);
 		kfree(dev);
+		iounmap((unsigned char*)dev->sh_mem);
+		release_mem_region(dev->ph_mem, 4096);
 		dev_pcbit[board] = NULL;
 		return -EIO;
 	}
@@ -151,6 +171,8 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 		kfree(dev->b1);
 		kfree(dev->b2);
 		kfree(dev);
+		iounmap((unsigned char*)dev->sh_mem);
+		release_mem_region(dev->ph_mem, 4096);
 		dev_pcbit[board] = NULL;
 		return -EIO;
 	}
@@ -180,6 +202,8 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 		kfree(dev->b1);
 		kfree(dev->b2);
 		kfree(dev);
+		iounmap((unsigned char*)dev->sh_mem);
+		release_mem_region(dev->ph_mem, 4096);
 		dev_pcbit[board] = NULL;
 		return -EIO;
 	}
@@ -216,6 +240,8 @@ void pcbit_terminate(int board)
 		kfree(dev->b1);
 		kfree(dev->b2);
 		kfree(dev);
+		iounmap((unsigned char*)dev->sh_mem);
+		release_mem_region(dev->ph_mem, 4096);
 	}
 }
 #endif
@@ -590,20 +616,6 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 		       dev->b1->s_refnum, 
 		       dev->b2->s_refnum);
 #endif
-#if 0	
-		if (dev->b1->s_refnum == refnum)
-			chan = dev->b1;
-		else { 
-		   
-			if (dev->b2->s_refnum == refnum)
-				chan = dev->b2;
-			else {
-				chan = NULL;
-				printk(KERN_WARNING "Connection Confirm - refnum doesn't match chan\n");
-				break;
-			}
-		}
-#else
 		/* We just try to find a channel in the right state */
 
 		if (dev->b1->fsm_state == ST_CALL_INIT)
@@ -617,7 +629,6 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 				break;
 			}
 		}
-#endif
 		if (capi_decode_conn_conf(chan, skb, &complete)) {
 			printk(KERN_DEBUG "conn_conf indicates error\n");
 			pcbit_fsm_event(dev, chan, EV_ERROR, NULL);

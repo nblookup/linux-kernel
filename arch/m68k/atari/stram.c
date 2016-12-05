@@ -200,7 +200,7 @@ static struct swap_info_struct *stram_swap_info;
 static int stram_swap_type;
 
 /* Semaphore for get_stram_region.  */
-static struct semaphore stram_swap_sem = MUTEX;
+static DECLARE_MUTEX(stram_swap_sem);
 
 /* major and minor device number of the ST-RAM device; for the major, we use
  * the same as Amiga z2ram, which is really similar and impossible on Atari,
@@ -346,12 +346,11 @@ void __init atari_stram_reserve_pages(unsigned long start_mem)
 				 "swap=%08lx-%08lx\n", swap_start, swap_end );
 		
 		/* reserve some amount of memory for maintainance of
-		 * swapping itself: 1 page for the lockmap, and one page
-		 * for each 2048 (PAGE_SIZE/2) swap pages. (2 bytes for
-		 * each page) */
+		 * swapping itself: one page for each 2048 (PAGE_SIZE/2)
+		 * swap pages. (2 bytes for each page) */
 		swap_data = start_mem;
-		start_mem += (((SWAP_NR(swap_end) + PAGE_SIZE/2 - 1)
-			       >> (PAGE_SHIFT-1)) + 1) << PAGE_SHIFT;
+		start_mem += ((SWAP_NR(swap_end) + PAGE_SIZE/2 - 1)
+			      >> (PAGE_SHIFT-1)) << PAGE_SHIFT;
 		/* correct swap_start if necessary */
 		if (swap_start == swap_data)
 			swap_start = start_mem;
@@ -610,8 +609,7 @@ static int __init swap_init(unsigned long start_mem, unsigned long swap_data)
 	p->flags        = SWP_USED;
 	p->swap_file    = &fake_dentry[0];
 	p->swap_device  = 0;
-	p->swap_lockmap = (unsigned char *)(swap_data);
-	p->swap_map	= (unsigned short *)(swap_data + PAGE_SIZE);
+	p->swap_map	= (unsigned short *)swap_data;
 	p->cluster_nr   = 0;
 	p->next         = -1;
 	p->prio         = 0x7ff0;	/* a rather high priority, but not the higest
@@ -623,9 +621,6 @@ static int __init swap_init(unsigned long start_mem, unsigned long swap_data)
 	swap_inode.i_rdev = p->swap_device;
 	stram_open( &swap_inode, MAGIC_FILE_P );
 	p->max = SWAP_NR(swap_end);
-
-	/* initialize lockmap */
-	memset( p->swap_lockmap, 0, PAGE_SIZE );
 
 	/* initialize swap_map: set regions that are already allocated or belong
 	 * to kernel data space to SWAP_MAP_BAD, otherwise to free */
@@ -654,6 +649,7 @@ static int __init swap_init(unsigned long start_mem, unsigned long swap_data)
 
 	/* now swapping to this device ok */
 	p->pages = j + k;
+	swap_list_lock();
 	nr_swap_pages += j;
 	p->flags = SWP_WRITEOK;
 
@@ -671,6 +667,7 @@ static int __init swap_init(unsigned long start_mem, unsigned long swap_data)
 	} else {
 		swap_info[prev].next = p - swap_info;
 	}
+	swap_list_unlock();
 
 	printk( KERN_INFO "Using %dk (%d pages) of ST-RAM as swap space.\n",
 			p->pages << 2, p->pages );
@@ -718,7 +715,7 @@ static inline void unswap_pte(struct vm_area_struct * vma, unsigned long
 	else {
 		DPRINTK( "unswap_pte: replacing entry %08lx by new page %08lx",
 				 entry, page );
-		set_pte(dir, pte_mkdirty(mk_pte(page,vma->vm_page_prot)));
+		set_pte(dir, pte_mkdirty(__mk_pte(page,vma->vm_page_prot)));
 		atomic_inc(&mem_map[MAP_NR(page)].count);
 		++vma->vm_mm->rss;
 	}
@@ -805,7 +802,7 @@ static void unswap_process(struct mm_struct * mm, unsigned long entry,
 	/*
 	 * Go through process' page directory.
 	 */
-	if (!mm || mm == &init_mm)
+	if (!mm)
 		return;
 	for (vma = mm->mmap; vma; vma = vma->vm_next) {
 		pgd_t * pgd = pgd_offset(mm, vma->vm_start);
@@ -929,6 +926,9 @@ static int unswap_by_read(unsigned short *map, unsigned long max,
 			DPRINTK("unswap: map[i=%lu]=%u nr_swap=%u\n",
 				i, map[i], nr_swap_pages);
 
+			swap_device_lock(stram_swap_info);
+			map[i]++;
+			swap_device_unlock(stram_swap_info);
 			/* Get a page for the entry, using the existing
 			   swap cache page if there is one.  Otherwise,
 			   get a clean page and read the swap into it. */
@@ -950,18 +950,24 @@ static int unswap_by_read(unsigned short *map, unsigned long max,
 				stat_swap_force++;
 	#endif
 			}
-			else if (map[i])
+			else {
+				swap_free(entry);
 				return -ENOMEM;
+			}
 		}
 
 		DPRINTK( "unswap: map[i=%lu]=%u nr_swap=%u\n",
 				 i, map[i], nr_swap_pages );
+		swap_list_lock();
+		swap_device_lock(stram_swap_info);
 		map[i] = SWAP_MAP_BAD;
 		if (stram_swap_info->lowest_bit == i)
 			stram_swap_info->lowest_bit++;
 		if (stram_swap_info->highest_bit == i)
 			stram_swap_info->highest_bit--;
 		--nr_swap_pages;
+		swap_device_unlock(stram_swap_info);
+		swap_list_unlock();
 	}
 
 	return 0;
@@ -1027,6 +1033,8 @@ static void free_stram_region( unsigned long offset, unsigned long n_pages )
 		return;
 	}
 
+	swap_list_lock();
+	swap_device_lock(stram_swap_info);
 	/* un-reserve the freed pages */
 	for( ; n_pages > 0; ++offset, --n_pages ) {
 		if (map[offset] != SWAP_MAP_BAD)
@@ -1043,6 +1051,8 @@ static void free_stram_region( unsigned long offset, unsigned long n_pages )
 	if (stram_swap_info->prio > swap_info[swap_list.next].prio)
 		swap_list.next = swap_list.head;
 	nr_swap_pages += n_pages;
+	swap_device_unlock(stram_swap_info);
+	swap_list_unlock();
 }
 
 
@@ -1158,7 +1168,7 @@ static void do_stram_request( void )
 {
 	unsigned long start, len;
 
-	while( CURRENT ) {
+	while( !QUEUE_EMPTY ) {
 		if (MAJOR(CURRENT->rq_dev) != MAJOR_NR)
 			panic("stram: request list destroyed");
 		if (CURRENT->bh) {
@@ -1220,18 +1230,9 @@ static int stram_release( struct inode *inode, struct file *filp )
 }
 
 
-static struct file_operations stram_fops = {
-	NULL,                   /* lseek - default */
-	block_read,             /* read - general block-dev read */
-	block_write,            /* write - general block-dev write */
-	NULL,                   /* readdir - bad */
-	NULL,                   /* select */
-	NULL,                   /* ioctl */
-	NULL,                   /* mmap */
-	stram_open,             /* open */
-	NULL,			/* flush */
-	stram_release,          /* release */
-	block_fsync             /* fsync */
+static struct block_device_operations stram_fops = {
+	open:		stram_open,
+	release:	stram_release,
 };
 
 int __init stram_device_init(void)
@@ -1254,6 +1255,8 @@ int __init stram_device_init(void)
     blksize_size[STRAM_MAJOR] = stram_blocksizes;
 	stram_sizes[STRAM_MINOR] = (swap_end - swap_start)/1024;
     blk_size[STRAM_MAJOR] = stram_sizes;
+	register_disk(NULL, MKDEV(STRAM_MAJOR, STRAM_MINOR), 1, &stram_fops,
+			(swap_end-swap_start)>>9);
 	do_z2_request(); /* to avoid warning */
 	return( 0 );
 }

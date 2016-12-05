@@ -11,13 +11,10 @@
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/reboot.h>
+#include <linux/notifier.h>
 #include <linux/init.h>
 #include <linux/sysrq.h>
 #include <linux/interrupt.h>
-
-#ifdef __alpha__
-#include <asm/machvec.h>
-#endif
 
 asmlinkage void sys_sync(void);	/* it's really int */
 extern void unblank_console(void);
@@ -25,11 +22,15 @@ extern int C_A_D;
 
 int panic_timeout = 0;
 
-void __init panic_setup(char *str, int *ints)
+struct notifier_block *panic_notifier_list = NULL;
+
+static int __init panic_setup(char *str)
 {
-	if (ints[0] == 1)
-		panic_timeout = ints[1];
+	panic_timeout = simple_strtoul(str, NULL, 0);
+	return 1;
 }
+
+__setup("panic=", panic_setup);
 
 NORET_TYPE void panic(const char * fmt, ...)
 {
@@ -40,10 +41,10 @@ NORET_TYPE void panic(const char * fmt, ...)
 	vsprintf(buf, fmt, args);
 	va_end(args);
 	printk(KERN_EMERG "Kernel panic: %s\n",buf);
-	if (current == task[0])
-		printk(KERN_EMERG "In swapper task - not syncing\n");
-	else if (in_interrupt())
+	if (in_interrupt())
 		printk(KERN_EMERG "In interrupt handler - not syncing\n");
+	else if (!current->pid)
+		printk(KERN_EMERG "In idle task - not syncing\n");
 	else
 		sys_sync();
 
@@ -52,6 +53,9 @@ NORET_TYPE void panic(const char * fmt, ...)
 #ifdef __SMP__
 	smp_send_stop();
 #endif
+
+	notifier_call_chain(&panic_notifier_list, 0, NULL);
+
 	if (panic_timeout > 0)
 	{
 		/*
@@ -68,11 +72,12 @@ NORET_TYPE void panic(const char * fmt, ...)
 		machine_restart(NULL);
 	}
 #ifdef __sparc__
-	printk("Press L1-A to return to the boot prom\n");
-#endif
-#ifdef __alpha__
-	if (alpha_using_srm)
-		halt();
+	{
+		extern int stop_a_enabled;
+		/* Make sure the user can actually press L1-A */
+		stop_a_enabled = 1;
+		printk("Press L1-A to return to the boot prom\n");
+	}
 #endif
 	sti();
 	for(;;) {

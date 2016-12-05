@@ -27,9 +27,7 @@
 #include <linux/poll.h>
 #include <linux/file.h>
 
-#include <linux/ncp.h>
 #include <linux/ncp_fs.h>
-#include <linux/ncp_fs_sb.h>
 
 #ifdef CONFIG_NCPFS_PACKET_SIGNING
 #include "ncpsign_kernel.h"
@@ -83,7 +81,8 @@ static int _send(struct socket *sock, const void *buff, int len)
 
 #define NCP_SLACK_SPACE 1024
 
-static int do_ncp_rpc_call(struct ncp_server *server, int size)
+static int do_ncp_rpc_call(struct ncp_server *server, int size,
+		struct ncp_reply_header* reply_buf, int max_reply_size)
 {
 	struct file *file;
 	struct inode *inode;
@@ -145,7 +144,7 @@ static int do_ncp_rpc_call(struct ncp_server *server, int size)
 	set_fs(get_ds());
 	for (n = 0, timeout = init_timeout;; n++, timeout <<= 1) {
 		/*
-		DDPRINTK(KERN_DEBUG "ncpfs: %08lX:%02X%02X%02X%02X%02X%02X:%04X\n",
+		DDPRINTK("ncpfs: %08lX:%02X%02X%02X%02X%02X%02X:%04X\n",
 			 htonl(server->m.serv_addr.sipx_network),
 			 server->m.serv_addr.sipx_node[0],
 			 server->m.serv_addr.sipx_node[1],
@@ -155,12 +154,12 @@ static int do_ncp_rpc_call(struct ncp_server *server, int size)
 			 server->m.serv_addr.sipx_node[5],
 			 ntohs(server->m.serv_addr.sipx_port));
 		*/
-		DDPRINTK(KERN_DEBUG "ncpfs: req.typ: %04X, con: %d, "
+		DDPRINTK("ncpfs: req.typ: %04X, con: %d, "
 			 "seq: %d",
 			 request.type,
 			 (request.conn_high << 8) + request.conn_low,
 			 request.sequence);
-		DDPRINTK(KERN_DEBUG " func: %d\n",
+		DDPRINTK(" func: %d\n",
 			 request.function);
 
 		result = _send(sock, (void *) start, size);
@@ -171,8 +170,11 @@ static int do_ncp_rpc_call(struct ncp_server *server, int size)
 	      re_select:
 		wait_table.nr = 0;
 		wait_table.entry = &entry;
-		current->state = TASK_INTERRUPTIBLE;
-		if (!(file->f_op->poll(file, &wait_table) & POLLIN)) {
+		/* mb() is not necessary because ->poll() will serialize
+		   instructions adding the wait_table waitqueues in the
+		   waitqueue-head before going to calculate the mask-retval. */
+		__set_current_state(TASK_INTERRUPTIBLE);
+		if (!(sock->ops->poll(file, sock, &wait_table) & POLLIN)) {
 			int timed_out;
 			if (timeout > max_timeout) {
 				/* JEJB/JSP 2/7/94
@@ -201,7 +203,8 @@ static int do_ncp_rpc_call(struct ncp_server *server, int size)
 				}
 				n = 0;
 				timeout = init_timeout;
-				init_timeout <<= 1;
+				if (init_timeout < max_timeout)
+					init_timeout <<= 1;
 				if (!major_timeout_seen) {
 					printk(KERN_WARNING "NCP server not responding\n");
 				}
@@ -221,11 +224,11 @@ static int do_ncp_rpc_call(struct ncp_server *server, int size)
 			       MSG_PEEK | MSG_DONTWAIT);
 		if (result < 0) {
 			if (result == -EAGAIN) {
-				DDPRINTK(KERN_DEBUG "ncp_rpc_call: bad select ready\n");
+				DDPRINTK("ncp_rpc_call: bad select ready\n");
 				goto re_select;
 			}
 			if (result == -ECONNREFUSED) {
-				DPRINTK(KERN_WARNING "ncp_rpc_call: server playing coy\n");
+				DPRINTK("ncp_rpc_call: server playing coy\n");
 				goto re_select;
 			}
 			if (result != -ERESTARTSYS) {
@@ -237,7 +240,7 @@ static int do_ncp_rpc_call(struct ncp_server *server, int size)
 		if ((result == sizeof(reply))
 		    && (reply.type == NCP_POSITIVE_ACK)) {
 			/* Throw away the packet */
-			DPRINTK(KERN_DEBUG "ncp_rpc_call: got positive acknowledge\n");
+			DPRINTK("ncp_rpc_call: got positive acknowledge\n");
 			_recv(sock, (void *) &reply, sizeof(reply),
 			      MSG_DONTWAIT);
 			n = 0;
@@ -245,7 +248,7 @@ static int do_ncp_rpc_call(struct ncp_server *server, int size)
 			acknowledge_seen = 1;
 			goto re_select;
 		}
-		DDPRINTK(KERN_DEBUG "ncpfs: rep.typ: %04X, con: %d, tsk: %d,"
+		DDPRINTK("ncpfs: rep.typ: %04X, con: %d, tsk: %d,"
 			 "seq: %d\n",
 			 reply.type,
 			 (reply.conn_high << 8) + reply.conn_low,
@@ -269,14 +272,14 @@ static int do_ncp_rpc_call(struct ncp_server *server, int size)
 		 * a null buffer yet. */
 		_recv(sock, (void *) &reply, sizeof(reply), MSG_DONTWAIT);
 
-		DPRINTK(KERN_WARNING "ncp_rpc_call: reply mismatch\n");
+		DPRINTK("ncp_rpc_call: reply mismatch\n");
 		goto re_select;
 	}
 	/* 
 	 * we have the correct reply, so read into the correct place and
 	 * return it
 	 */
-	result = _recv(sock, (void *) start, server->packet_size, MSG_DONTWAIT);
+	result = _recv(sock, (void *)reply_buf, max_reply_size, MSG_DONTWAIT);
 	if (result < 0) {
 		printk(KERN_WARNING "NCP: notice message: result=%d\n", result);
 	} else if (result < sizeof(struct ncp_reply_header)) {
@@ -299,7 +302,8 @@ static int do_ncp_rpc_call(struct ncp_server *server, int size)
  * We need the server to be locked here, so check!
  */
 
-static int ncp_do_request(struct ncp_server *server, int size)
+static int ncp_do_request(struct ncp_server *server, int size,
+		void* reply, int max_reply_size)
 {
 	int result;
 
@@ -316,9 +320,9 @@ static int ncp_do_request(struct ncp_server *server, int size)
 		sign_packet(server, &size);
 	}
 #endif /* CONFIG_NCPFS_PACKET_SIGNING */
-	result = do_ncp_rpc_call(server, size);
+	result = do_ncp_rpc_call(server, size, reply, max_reply_size);
 
-	DDPRINTK(KERN_DEBUG "do_ncp_rpc_call returned %d\n", result);
+	DDPRINTK("do_ncp_rpc_call returned %d\n", result);
 
 	if (result < 0) {
 		/* There was a problem with I/O, so the connections is
@@ -332,10 +336,11 @@ static int ncp_do_request(struct ncp_server *server, int size)
  * received. It assumes that server->current_size contains the ncp
  * request size
  */
-int ncp_request(struct ncp_server *server, int function)
+int ncp_request2(struct ncp_server *server, int function, 
+		void* rpl, int size)
 {
 	struct ncp_request_header *h;
-	struct ncp_reply_header *reply;
+	struct ncp_reply_header* reply = rpl;
 	int request_size = server->current_size
 			 - sizeof(struct ncp_request_header);
 	int result;
@@ -357,12 +362,11 @@ int ncp_request(struct ncp_server *server, int function)
 	h->task = 2; /* (current->pid) & 0xff; */
 	h->function = function;
 
-	result = ncp_do_request(server, request_size + sizeof(*h));
+	result = ncp_do_request(server, request_size + sizeof(*h), reply, size);
 	if (result < 0) {
-		DPRINTK(KERN_WARNING "ncp_request_error: %d\n", result);
+		DPRINTK("ncp_request_error: %d\n", result);
 		goto out;
 	}
-	reply = (struct ncp_reply_header *) (server->packet);
 	server->completion = reply->completion_code;
 	server->conn_status = reply->connection_state;
 	server->reply_size = result;
@@ -370,10 +374,8 @@ int ncp_request(struct ncp_server *server, int function)
 
 	result = reply->completion_code;
 
-#ifdef NCPFS_PARANOIA
-if (result != 0)
-printk(KERN_DEBUG "ncp_request: completion code=%x\n", result);
-#endif
+	if (result != 0)
+		PPRINTK("ncp_request: completion code=%x\n", result);
 out:
 	return result;
 }
@@ -393,7 +395,7 @@ int ncp_connect(struct ncp_server *server)
 	h->task		= 2; /* see above */
 	h->function	= 0;
 
-	result = ncp_do_request(server, sizeof(*h));
+	result = ncp_do_request(server, sizeof(*h), server->packet, server->packet_size);
 	if (result < 0)
 		goto out;
 	server->sequence = 0;
@@ -417,7 +419,7 @@ int ncp_disconnect(struct ncp_server *server)
 	h->task		= 2; /* see above */
 	h->function	= 0;
 
-	return ncp_do_request(server, sizeof(*h));
+	return ncp_do_request(server, sizeof(*h), server->packet, server->packet_size);
 }
 
 void ncp_lock_server(struct ncp_server *server)
@@ -425,19 +427,21 @@ void ncp_lock_server(struct ncp_server *server)
 #if 0
 	/* For testing, only 1 process */
 	if (server->lock != 0) {
-		DPRINTK(KERN_WARNING "ncpfs: server locked!!!\n");
+		DPRINTK("ncpfs: server locked!!!\n");
 	}
 #endif
-	while (server->lock)
-		sleep_on(&server->wait);
+	down(&server->sem);
+	if (server->lock)
+		printk(KERN_WARNING "ncp_lock_server: was locked!\n");
 	server->lock = 1;
 }
 
 void ncp_unlock_server(struct ncp_server *server)
 {
-	if (server->lock != 1) {
+	if (!server->lock) {
 		printk(KERN_WARNING "ncp_unlock_server: was not locked!\n");
+		return;
 	}
 	server->lock = 0;
-	wake_up(&server->wait);
+	up(&server->sem);
 }

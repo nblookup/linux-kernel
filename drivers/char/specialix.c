@@ -59,11 +59,14 @@
  * Revision 1.8:  Jul 1  1997
  *                port to linux-2.1.43 kernel.
  * Revision 1.9:  Oct 9  1998
- *                Added stuff for the IO8+/PCI version. . 
+ *                Added stuff for the IO8+/PCI version.
+ * Revision 1.10: Oct 22  1999 / Jan 21 2000. 
+ *                Added stuff for setserial. 
+ *                Nicolas Mailhot (Nicolas.Mailhot@email.enst.fr)
  * 
  */
 
-#define VERSION "1.8"
+#define VERSION "1.10"
 
 
 /*
@@ -171,7 +174,8 @@
 
 DECLARE_TASK_QUEUE(tq_specialix);
 
-
+#undef RS_EVENT_WRITE_WAKEUP
+#define RS_EVENT_WRITE_WAKEUP	0
 
 #define SPECIALIX_TYPE_NORMAL	1
 #define SPECIALIX_TYPE_CALLOUT	2
@@ -182,7 +186,7 @@ static struct tty_struct * specialix_table[SX_NBOARD * SX_NPORT] = { NULL, };
 static struct termios * specialix_termios[SX_NBOARD * SX_NPORT] = { NULL, };
 static struct termios * specialix_termios_locked[SX_NBOARD * SX_NPORT] = { NULL, };
 static unsigned char * tmp_buf = NULL;
-static struct semaphore tmp_buf_sem = MUTEX;
+static DECLARE_MUTEX(tmp_buf_sem);
 
 static unsigned long baud_table[] =  {
 	0, 50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800,
@@ -1069,10 +1073,17 @@ static void sx_change_speed(struct specialix_board *bp, struct specialix_port *p
 	/*
 	 * Now we must calculate some speed depended things 
 	 */
-	
+
 	/* Set baud rate for port */
-	tmp = (((SX_OSCFREQ + baud_table[baud]/2) / baud_table[baud] +
-		CD186x_TPC/2) / CD186x_TPC);
+	tmp = port->custom_divisor ;
+	if ( tmp )
+		printk (KERN_INFO "sx%d: Using custom baud rate divisor %ld. \n"
+		                  "This is an untested option, please be carefull.\n",
+		                  port_No (port), tmp);
+	else
+		tmp = (((SX_OSCFREQ + baud_table[baud]/2) / baud_table[baud] +
+		         CD186x_TPC/2) / CD186x_TPC);
+
 	if ((tmp < 0x10) && time_before(again, jiffies)) { 
 		again = jiffies + HZ * 60;
 		/* Page 48 of version 2.0 of the CL-CD1865 databook */
@@ -1094,9 +1105,13 @@ static void sx_change_speed(struct specialix_board *bp, struct specialix_port *p
 	sx_out(bp, CD186x_TBPRH, (tmp >> 8) & 0xff); 
 	sx_out(bp, CD186x_RBPRL, tmp & 0xff); 
 	sx_out(bp, CD186x_TBPRL, tmp & 0xff);
-	
-	baud = (baud_table[baud] + 5) / 10;   /* Estimated CPS */
-	
+
+	if (port->custom_divisor) {
+		baud = (SX_OSCFREQ + port->custom_divisor/2) / port->custom_divisor;
+		baud = ( baud + 5 ) / 10;
+	} else 
+		baud = (baud_table[baud] + 5) / 10;   /* Estimated CPS */
+
 	/* Two timer ticks seems enough to wakeup something like SLIP driver */
 	tmp = ((baud + HZ/2) / HZ) * 2 - CD186x_NFIFO;		
 	port->wakeup_chars = (tmp < 0) ? 0 : ((tmp >= SERIAL_XMIT_SIZE) ?
@@ -1311,7 +1326,7 @@ static void sx_shutdown_port(struct specialix_board *bp, struct specialix_port *
 static int block_til_ready(struct tty_struct *tty, struct file * filp,
                            struct specialix_port *port)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait,  current);
 	struct specialix_board *bp = port_Board(port);
 	int    retval;
 	int    do_clocal = 0;
@@ -1398,7 +1413,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			} 
 		}
 		sti();
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
 		    !(port->flags & ASYNC_INITIALIZED)) {
 			if (port->flags & ASYNC_HUP_NOTIFY)
@@ -1755,7 +1770,7 @@ static int sx_get_modem_info(struct specialix_port * port, unsigned int *value)
 		          |/* ((status & MSVR_DSR) ? */ TIOCM_DSR /* : 0) */
 		          |   ((status & MSVR_CTS) ? TIOCM_CTS : 0);
 	}
-	put_user(result,(unsigned long *) value);
+	put_user(result,(unsigned int *) value);
 	return 0;
 }
 
@@ -1859,7 +1874,8 @@ extern inline int sx_set_serial_info(struct specialix_port * port,
 	if (error)
 		return error;
 
-	copy_from_user(&tmp, newinfo, sizeof(tmp));
+	if (copy_from_user(&tmp, newinfo, sizeof(tmp)))
+		return -EFAULT;
 	
 #if 0	
 	if ((tmp.irq != bp->irq) ||
@@ -1874,6 +1890,7 @@ extern inline int sx_set_serial_info(struct specialix_port * port,
 
 	change_speed = ((port->flags & ASYNC_SPD_MASK) !=
 			(tmp.flags & ASYNC_SPD_MASK));
+	change_speed |= (tmp.custom_divisor != port->custom_divisor);
 	
 	if (!capable(CAP_SYS_ADMIN)) {
 		if ((tmp.close_delay != port->close_delay) ||
@@ -1883,11 +1900,13 @@ extern inline int sx_set_serial_info(struct specialix_port * port,
 			return -EPERM;
 		port->flags = ((port->flags & ~ASYNC_USR_MASK) |
 		                  (tmp.flags & ASYNC_USR_MASK));
+		port->custom_divisor = tmp.custom_divisor;
 	} else {
 		port->flags = ((port->flags & ~ASYNC_FLAGS) |
 		                  (tmp.flags & ASYNC_FLAGS));
 		port->close_delay = tmp.close_delay;
 		port->closing_wait = tmp.closing_wait;
+		port->custom_divisor = tmp.custom_divisor;
 	}
 	if (change_speed) {
 		save_flags(flags); cli();
@@ -1918,8 +1937,10 @@ extern inline int sx_get_serial_info(struct specialix_port * port,
 	tmp.baud_base = (SX_OSCFREQ + CD186x_TPC/2) / CD186x_TPC;
 	tmp.close_delay = port->close_delay * HZ/100;
 	tmp.closing_wait = port->closing_wait * HZ/100;
+	tmp.custom_divisor =  port->custom_divisor;
 	tmp.xmit_fifo_size = CD186x_NFIFO;
-	copy_to_user(retinfo, &tmp, sizeof(tmp));
+	if (copy_to_user(retinfo, &tmp, sizeof(tmp)))
+		return -EFAULT;
 	return 0;
 }
 
@@ -2248,6 +2269,8 @@ static int sx_init_drivers(void)
 		sx_port[i].tqueue_hangup.data = &sx_port[i];
 		sx_port[i].close_delay = 50 * HZ/100;
 		sx_port[i].closing_wait = 3000 * HZ/100;
+		init_waitqueue_head(&sx_port[i].open_wait);
+		init_waitqueue_head(&sx_port[i].close_wait);
 	}
 	
 	return 0;

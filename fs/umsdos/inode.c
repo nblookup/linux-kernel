@@ -20,8 +20,6 @@
 #include <linux/list.h>
 
 extern struct dentry_operations umsdos_dentry_operations;
-extern struct inode_operations umsdos_rdir_inode_operations;
-
 
 struct dentry *saved_root = NULL;	/* Original root if changed */
 struct inode *pseudo_root = NULL;	/* Useful to simulate the pseudo DOS */
@@ -42,7 +40,7 @@ void fill_new_filp (struct file *filp, struct dentry *dentry)
 	filp->f_reada = 1;
 	filp->f_flags = O_RDWR;
 	filp->f_dentry = dentry;
-	filp->f_op = &umsdos_file_operations;
+	filp->f_op = dentry->d_inode->i_fop;
 }
 
 
@@ -60,8 +58,8 @@ void UMSDOS_put_inode (struct inode *inode)
 			" Notify jacques@solucorp.qc.ca\n");
 	}
 
-	inode->u.umsdos_i.i_patched = 0;
-	fat_put_inode (inode);
+	if (inode->i_count == 1)
+		inode->u.umsdos_i.i_patched = 0;
 }
 
 
@@ -77,7 +75,6 @@ saved_root->d_count);
 		pseudo_root = NULL;
 	}
 	msdos_put_super (sb);
-	MOD_DEC_USE_COUNT;
 }
 
 
@@ -94,11 +91,18 @@ void umsdos_setup_dir(struct dentry *dir)
 		printk(KERN_ERR "umsdos_setup_dir: %s/%s not a dir!\n",
 			dir->d_parent->d_name.name, dir->d_name.name);
 
+	init_waitqueue_head (&inode->u.umsdos_i.dir_info.p);
+	inode->u.umsdos_i.dir_info.looking = 0;
+	inode->u.umsdos_i.dir_info.creating = 0;
+	inode->u.umsdos_i.dir_info.pid = 0;
+
 	inode->i_op = &umsdos_rdir_inode_operations;
+	inode->i_fop = &umsdos_rdir_operations;
 	if (umsdos_have_emd(dir)) {
 Printk((KERN_DEBUG "umsdos_setup_dir: %s/%s using EMD\n",
 dir->d_parent->d_name.name, dir->d_name.name));
 		inode->i_op = &umsdos_dir_inode_operations;
+		inode->i_fop = &umsdos_dir_operations;
 	}
 }
 
@@ -121,7 +125,16 @@ void umsdos_set_dirinfo_new (struct dentry *dentry, off_t f_pos)
 	return;
 }
 
+static struct inode_operations umsdos_file_inode_operations = {
+	truncate:	fat_truncate,
+	setattr:	UMSDOS_notify_change,
+};
 
+static struct inode_operations umsdos_symlink_inode_operations = {
+	readlink:	page_readlink,
+	follow_link:	page_follow_link,
+	setattr:	UMSDOS_notify_change,
+};
 
 /*
  * Connect the proper tables in the inode and add some info.
@@ -145,54 +158,17 @@ PRINTK (("umsdos_patch_inode: call umsdos_set_dirinfo_new(%p,%lu)\n",
 dentry, f_pos));
 	umsdos_set_dirinfo_new(dentry, f_pos);
 
+	inode->i_op = &umsdos_file_inode_operations;
 	if (S_ISREG (inode->i_mode)) {
-		if (MSDOS_SB (inode->i_sb)->cvf_format) {
-			if (MSDOS_SB (inode->i_sb)->cvf_format->flags & CVF_USE_READPAGE) {
-				inode->i_op = &umsdos_file_inode_operations_readpage;
-			} else {
-				inode->i_op = &umsdos_file_inode_operations_no_bmap;
-			}
-		} else {
-			if (inode->i_op->bmap != NULL) {
-				inode->i_op = &umsdos_file_inode_operations;
-			} else {
-				inode->i_op = &umsdos_file_inode_operations_no_bmap;
-			}
-		}
+		/* address_space operations already set */
 	} else if (S_ISDIR (inode->i_mode)) {
 		umsdos_setup_dir(dentry);
 	} else if (S_ISLNK (inode->i_mode)) {
+		/* address_space operations already set */
 		inode->i_op = &umsdos_symlink_inode_operations;
-	} else if (S_ISCHR (inode->i_mode)) {
-		inode->i_op = &chrdev_inode_operations;
-	} else if (S_ISBLK (inode->i_mode)) {
-		inode->i_op = &blkdev_inode_operations;
-	} else if (S_ISFIFO (inode->i_mode)) {
-		init_fifo (inode);
-	}
-}
-
-
-/*
- * Load an inode from disk.
- */
-/* #Specification: Inode / post initialisation
- * To completely initialise an inode, we need access to the owner
- * directory, so we can locate more info in the EMD file. This is
- * not available the first time the inode is accessed, so we use
- * a value in the inode to tell if it has been finally initialised.
- * 
- * New inodes are obtained by the lookup and create routines, and
- * each of these must ensure that the inode gets patched.
- */
-void UMSDOS_read_inode (struct inode *inode)
-{
-	Printk ((KERN_DEBUG "UMSDOS_read_inode %p ino = %lu ",
-		inode, inode->i_ino));
-	msdos_read_inode (inode);
-
-	/* inode needs patching */
-	inode->u.umsdos_i.i_patched = 0;
+	} else
+		init_special_inode(inode, inode->i_mode,
+					kdev_t_to_nr(inode->i_rdev));
 }
 
 
@@ -203,11 +179,19 @@ int umsdos_notify_change_locked(struct dentry *, struct iattr *);
 int UMSDOS_notify_change (struct dentry *dentry, struct iattr *attr)
 {
 	struct inode *dir = dentry->d_parent->d_inode;
+	struct inode *inode = dentry->d_inode;
 	int ret;
+
+	ret = inode_change_ok (inode, attr);
+	if (ret)
+		goto out;
 
 	down(&dir->i_sem);
 	ret = umsdos_notify_change_locked(dentry, attr);
 	up(&dir->i_sem);
+	if (ret == 0)
+		inode_setattr (inode, attr);
+out:
 	return ret;
 }
 
@@ -218,19 +202,12 @@ int umsdos_notify_change_locked(struct dentry *dentry, struct iattr *attr)
 {
 	struct inode *inode = dentry->d_inode;
 	struct dentry *demd;
-	int ret;
+	int ret = 0;
 	struct file filp;
 	struct umsdos_dirent entry;
 
 Printk(("UMSDOS_notify_change: entering for %s/%s (%d)\n",
 dentry->d_parent->d_name.name, dentry->d_name.name, inode->u.umsdos_i.i_patched));
-
-	ret = inode_change_ok (inode, attr);
-	if (ret) {
-printk("UMSDOS_notify_change: %s/%s change not OK, ret=%d\n",
-dentry->d_parent->d_name.name, dentry->d_name.name, ret);
-		goto out;
-	}
 
 	if (inode->i_nlink == 0)
 		goto out;
@@ -309,8 +286,6 @@ dentry->d_parent->d_name.name, dentry->d_name.name, entry.nlink, ret);
 out_dput:
 	dput(demd);
 out:
-	if (ret == 0)
-		inode_setattr (inode, attr);
 	return ret;
 }
 
@@ -341,15 +316,12 @@ void UMSDOS_write_inode (struct inode *inode)
 
 static struct super_operations umsdos_sops =
 {
-	UMSDOS_read_inode,	/* read_inode */
-	UMSDOS_write_inode,	/* write_inode */
-	UMSDOS_put_inode,	/* put_inode */
-	fat_delete_inode,	/* delete_inode */
-	UMSDOS_notify_change,	/* notify_change */
-	UMSDOS_put_super,	/* put_super */
-	NULL,			/* write_super */
-	fat_statfs,		/* statfs */
-	NULL			/* remount_fs */
+	write_inode:	UMSDOS_write_inode,
+	put_inode:	UMSDOS_put_inode,
+	delete_inode:	fat_delete_inode,
+	put_super:	UMSDOS_put_super,
+	statfs:		fat_statfs,
+	clear_inode:	fat_clear_inode,
 };
 
 /*
@@ -361,7 +333,6 @@ struct super_block *UMSDOS_read_super (struct super_block *sb, void *data,
 	struct super_block *res;
 	struct dentry *new_root;
 
-	MOD_INC_USE_COUNT;
 	MSDOS_SB(sb)->options.isvfat = 0;
 	/*
 	 * Call msdos-fs to mount the disk.
@@ -371,7 +342,7 @@ struct super_block *UMSDOS_read_super (struct super_block *sb, void *data,
 	if (!res)
 		goto out_fail;
 
-	printk (KERN_INFO "UMSDOS dentry-pre 0.84 "
+	printk (KERN_INFO "UMSDOS 0.86 "
 		"(compatibility level %d.%d, fast msdos)\n", 
 		UMSDOS_VERSION, UMSDOS_RELEASE);
 
@@ -408,24 +379,26 @@ struct super_block *UMSDOS_read_super (struct super_block *sb, void *data,
 
 out_fail:
 	printk(KERN_INFO "UMSDOS: msdos_read_super failed, mount aborted.\n");
-	sb->s_dev = 0;
-	MOD_DEC_USE_COUNT;
 	return NULL;
 }
 
 /*
  * Check for an alternate root if we're the root device.
  */
+
+extern kdev_t ROOT_DEV;
 static struct dentry *check_pseudo_root(struct super_block *sb)
 {
 	struct dentry *root, *init;
 
 	/*
 	 * Check whether we're mounted as the root device.
-	 * If so, this should be the only superblock.
+	 * must check like this, because we can be used with initrd
 	 */
-	if (sb->s_list.next->next != &sb->s_list)
+		
+	if (sb->s_dev != ROOT_DEV)
 		goto out_noroot;
+		
 printk("check_pseudo_root: mounted as root\n");
 
 	root = lookup_dentry(UMSDOS_PSDROOT_NAME, dget(sb->s_root), 0); 
@@ -460,15 +433,9 @@ out_noroot:
 }
 
 
-static struct file_system_type umsdos_fs_type =
-{
-	"umsdos",
-	FS_REQUIRES_DEV,
-	UMSDOS_read_super,
-	NULL
-};
+static DECLARE_FSTYPE_DEV(umsdos_fs_type, "umsdos", UMSDOS_read_super);
 
-__initfunc (int init_umsdos_fs (void))
+int __init init_umsdos_fs (void)
 {
 	return register_filesystem (&umsdos_fs_type);
 }

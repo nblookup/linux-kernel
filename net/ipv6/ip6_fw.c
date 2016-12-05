@@ -5,7 +5,7 @@
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>	
  *
- *	$Id: ip6_fw.c,v 1.10 1998/08/26 12:04:57 davem Exp $
+ *	$Id: ip6_fw.c,v 1.15 1999/08/31 07:04:03 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -16,6 +16,7 @@
 #include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/types.h>
+#include <linux/string.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
@@ -59,31 +60,34 @@ static struct fib6_node ip6_fw_fib = {
 	0, RTN_ROOT|RTN_TL_ROOT, 0
 };
 
+rwlock_t ip6_fw_lock = RW_LOCK_UNLOCKED;
+
+
 static void ip6_rule_add(struct ip6_fw_rule *rl)
 {
 	struct ip6_fw_rule *next;
 
-	start_bh_atomic();
+	write_lock_bh(&ip6_fw_lock);
 	ip6_fw_rule_cnt++;
 	next = &ip6_fw_rule_list;
 	rl->next = next;
 	rl->prev = next->prev;
 	rl->prev->next = rl;
 	next->prev = rl;
-	end_bh_atomic();
+	write_unlock_bh(&ip6_fw_lock);
 }
 
 static void ip6_rule_del(struct ip6_fw_rule *rl)
 {
 	struct ip6_fw_rule *next, *prev;
 
-	start_bh_atomic();
+	write_lock_bh(&ip6_fw_lock);
 	ip6_fw_rule_cnt--;
 	next = rl->next;
 	prev = rl->prev;
 	next->prev = prev;
 	prev->next = next;
-	end_bh_atomic();
+	write_unlock_bh(&ip6_fw_lock);
 }
 
 static __inline__ struct ip6_fw_rule * ip6_fwrule_alloc(void)
@@ -91,12 +95,11 @@ static __inline__ struct ip6_fw_rule * ip6_fwrule_alloc(void)
 	struct ip6_fw_rule *rl;
 
 	rl = kmalloc(sizeof(struct ip6_fw_rule), GFP_ATOMIC);
-
-	memset(rl, 0, sizeof(struct ip6_fw_rule));
-
 	if (rl)
+	{
+		memset(rl, 0, sizeof(struct ip6_fw_rule));
 		rl->flowr.ops = &ip6_fw_ops;
-
+	}
 	return rl;
 }
 
@@ -374,7 +377,7 @@ static void ip6_fw_destroy(struct flow_rule *rl)
 #define ip6_fw_init module_init
 #endif
 
-__initfunc(void ip6_fw_init(void))
+void __init ip6_fw_init(void)
 {
 #ifdef CONFIG_NETLINK
 	netlink_attach(NETLINK_IP6_FW, ip6_fw_msgrcv);
@@ -382,7 +385,7 @@ __initfunc(void ip6_fw_init(void))
 }
 
 #ifdef MODULE
-void module_cleanup(void)
+void cleanup_module(void)
 {
 #ifdef CONFIG_NETLINK
 	netlink_detach(NETLINK_IP6_FW);

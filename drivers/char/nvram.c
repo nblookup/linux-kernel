@@ -38,7 +38,7 @@
 /* select machine configuration */
 #if defined(CONFIG_ATARI)
 #define MACH ATARI
-#elif defined(__i386__) /* and others?? */
+#elif defined(__i386__) || defined(__arm__) /* and others?? */
 #define MACH PC
 #else
 #error Cannot build nvram driver for this machine configuration.
@@ -95,9 +95,7 @@
 #include <linux/mc146818rtc.h>
 #include <linux/nvram.h>
 #include <linux/init.h>
-#ifdef CONFIG_PROC_FS
 #include <linux/proc_fs.h>
-#endif
 
 #include <asm/io.h>
 #include <asm/uaccess.h>
@@ -351,9 +349,10 @@ static int nvram_release( struct inode *inode, struct file *file )
 }
 
 
-#ifdef CONFIG_PROC_FS
-
-struct proc_dir_entry *proc_nvram;
+#ifndef CONFIG_PROC_FS
+static int nvram_read_proc( char *buffer, char **start, off_t offset,
+			    int size, int *eof, void *data) { return 0; }
+#else
 
 static int nvram_read_proc( char *buffer, char **start, off_t offset,
 							int size, int *eof, void *data )
@@ -391,19 +390,15 @@ static int nvram_read_proc( char *buffer, char **start, off_t offset,
 		}												\
 	} while(0)
 
-#endif
+#endif /* CONFIG_PROC_FS */
 
 static struct file_operations nvram_fops = {
-	nvram_llseek,
-	nvram_read,
-	nvram_write,
-	NULL,			/* No readdir */
-	NULL,			/* No poll */
-	nvram_ioctl,
-	NULL,			/* No mmap */
-	nvram_open,
-	NULL,			/* flush */
-	nvram_release
+	llseek:		nvram_llseek,
+	read:		nvram_read,
+	write:		nvram_write,
+	ioctl:		nvram_ioctl,
+	open:		nvram_open,
+	release:	nvram_release,
 };
 
 static struct miscdevice nvram_dev = {
@@ -413,7 +408,7 @@ static struct miscdevice nvram_dev = {
 };
 
 
-__initfunc(int nvram_init(void))
+static int __init nvram_init(void)
 {
 	/* First test whether the driver should init at all */
 	if (!CHECK_DRIVER_INIT())
@@ -421,29 +416,18 @@ __initfunc(int nvram_init(void))
 
 	printk(KERN_INFO "Non-volatile memory driver v%s\n", NVRAM_VERSION );
 	misc_register( &nvram_dev );
-#ifdef CONFIG_PROC_FS
-	if ((proc_nvram = create_proc_entry( "nvram", 0, 0 )))
-		proc_nvram->read_proc = nvram_read_proc;
-#endif
-	
+	create_proc_read_entry("driver/nvram",0,0,nvram_read_proc,NULL);
 	return( 0 );
 }
 
-#ifdef MODULE
-int init_module (void)
+static void __exit nvram_cleanup_module (void)
 {
-	return( nvram_init() );
-}
-
-void cleanup_module (void)
-{
-#ifdef CONFIG_PROC_FS
-	if (proc_nvram)
-		remove_proc_entry( "nvram", 0 );
-#endif
+	remove_proc_entry( "driver/nvram", 0 );
 	misc_deregister( &nvram_dev );
 }
-#endif
+
+module_init(nvram_init);
+module_exit(nvram_cleanup_module);
 
 
 /*
@@ -479,7 +463,7 @@ static void pc_set_checksum( void )
 #ifdef CONFIG_PROC_FS
 
 static char *floppy_types[] = {
-	"none", "5.25'' 360k", "5.25'' 1.2M", "3.5'' 720k", "3.5'' 1.44M"
+	"none", "5.25'' 360k", "5.25'' 1.2M", "3.5'' 720k", "3.5'' 1.44M", "3.5'' 2.88M"
 };
 
 static char *gfx_types[] = {
@@ -521,14 +505,14 @@ static int pc_proc_infos( unsigned char *nvram, char *buffer, int *len,
 	PRINT_PROC( "HD 0 type      : " );
 	type = nvram[4] >> 4;
 	if (type)
-		PRINT_PROC( " %02x\n", type == 0x0f ? nvram[11] : type );
+		PRINT_PROC( "%02x\n", type == 0x0f ? nvram[11] : type );
 	else
 		PRINT_PROC( "none\n" );
 
 	PRINT_PROC( "HD 1 type      : " );
 	type = nvram[4] & 0x0f;
 	if (type)
-		PRINT_PROC( " %02x\n", type == 0x0f ? nvram[12] : type );
+		PRINT_PROC( "%02x\n", type == 0x0f ? nvram[12] : type );
 	else
 		PRINT_PROC( "none\n" );
 

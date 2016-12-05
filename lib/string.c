@@ -9,6 +9,10 @@
  * as inline code in <asm-xx/string.h>
  *
  * These are buggy as well..
+ *
+ * * Fri Jun 25 1999, Ingo Oeser <ioe@informatik.tu-chemnitz.de>
+ * -  Added strsep() which will replace strtok() soon (because strsep() is
+ *    reentrant and should be faster). Use only strsep() in new code, please.
  */
  
 #include <linux/types.h>
@@ -232,6 +236,25 @@ char * strtok(char * s,const char * ct)
 }
 #endif
 
+#ifndef __HAVE_ARCH_STRSEP
+
+char * strsep(char **s, const char * ct)
+{
+	char *sbegin=*s;
+	if (!sbegin) 
+		return NULL;
+	
+	sbegin += strspn(sbegin,ct);
+	if (*sbegin == '\0') 
+		return NULL;
+	
+	*s = strpbrk( sbegin, ct);
+	if (*s && **s != '\0')
+		**s++ = '\0';
+	return (sbegin);
+}
+#endif
+
 #ifndef __HAVE_ARCH_MEMSET
 void * memset(void * s,char c,size_t count)
 {
@@ -338,4 +361,18 @@ char * strstr(const char * s1,const char * s2)
 	}
 	return NULL;
 }
+#endif
+
+#ifndef __HAVE_ARCH_MEMCHR
+void *memchr(const void *s, int c, size_t n)
+{
+	const unsigned char *p = s;
+	while (n-- != 0) {
+        	if ((unsigned char)c == *p++) {
+			return (void *)(p-1);
+		}
+	}
+	return NULL;
+}
+
 #endif

@@ -8,8 +8,8 @@
 #ifndef _NCP_FS_SB
 #define _NCP_FS_SB
 
-#include <linux/ncp_mount.h>
 #include <linux/types.h>
+#include <linux/ncp_mount.h>
 
 #ifdef __KERNEL__
 
@@ -18,7 +18,7 @@
 
 struct ncp_server {
 
-	struct ncp_mount_data m;	/* Nearly all of the mount data is of
+	struct ncp_mount_data_kernel m;	/* Nearly all of the mount data is of
 					   interest for us later, so we store
 					   it completely. */
 
@@ -44,40 +44,51 @@ struct ncp_server {
 				   receive replies */
 
 	int lock;		/* To prevent mismatch in protocols. */
-	struct wait_queue *wait;
+	struct semaphore sem;
 
 	int current_size;	/* for packet preparation */
 	int has_subfunction;
 	int ncp_reply_size;
 
-	struct ncp_inode_info root;
-	struct dentry* root_dentry;
-
 	int root_setuped;
 
-/* info for packet signing */
-	int sign_wanted;        /* 1=Server needs signed packets */
-	int sign_active;        /* 0=don't do signing, 1=do */
+	/* info for packet signing */
+	int sign_wanted;	/* 1=Server needs signed packets */
+	int sign_active;	/* 0=don't do signing, 1=do */
 	char sign_root[8];	/* generated from password and encr. key */
 	char sign_last[16];	
 
 	/* Authentication info: NDS or BINDERY, username */
 	struct {
-		int    auth_type;
-		size_t object_name_len;
-		void*  object_name;
-		int    object_type;
+		int	auth_type;
+		size_t	object_name_len;
+		void*	object_name;
+		int	object_type;
 	} auth;
 	/* Password info */
 	struct {
-		size_t len;
-		void*  data;
+		size_t	len;
+		void*	data;
 	} priv;
 
-	struct ncp_nls_ioctl nls_charsets;	/* NLS user data */
-	struct nls_table *nls_vol;    /* codepage used on volume */
-	struct nls_table *nls_io;     /* charset used for input and display */
+	/* nls info: codepage for volume and charset for I/O */
+	struct nls_table *nls_vol;
+	struct nls_table *nls_io;
+
+	/* maximum age in jiffies */
+	int dentry_ttl;
+
+	/* miscellaneous */
+	unsigned int flags;
 };
+
+#define ncp_sb_info	ncp_server
+
+#define NCP_FLAG_UTF8	1
+
+#define NCP_CLR_FLAG(server, flag)	((server)->flags &= ~(flag))
+#define NCP_SET_FLAG(server, flag)	((server)->flags |= (flag))
+#define NCP_IS_FLAG(server, flag)	((server)->flags & (flag))
 
 static inline int ncp_conn_valid(struct ncp_server *server)
 {

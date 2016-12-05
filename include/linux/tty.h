@@ -23,7 +23,6 @@
 #include <linux/tqueue.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_ldisc.h>
-#include <linux/serialP.h>
 
 #include <asm/system.h>
 
@@ -117,6 +116,9 @@ extern struct screen_info screen_info;
 #define VIDEO_TYPE_SUNPCI       0x51    /* Sun PCI based frame buffer. */
 
 #define VIDEO_TYPE_PMAC		0x60	/* PowerMacintosh frame buffer. */
+
+#define VIDEO_TYPE_SGI          0x70    /* Various SGI graphics hardware */
+#define VIDEO_TYPE_MIPS_G364	0x71    /* MIPS Magnum 4000 G364 video  */
 
 /*
  * This character is the same as _POSIX_VDISABLE: it cannot be used as
@@ -272,11 +274,12 @@ struct tty_struct {
 	struct tty_flip_buffer flip;
 	int max_flip_cnt;
 	int alt_speed;		/* For magic substitution of 38400 bps */
-	struct wait_queue *write_wait;
-	struct wait_queue *read_wait;
+	wait_queue_head_t write_wait;
+	wait_queue_head_t read_wait;
 	struct tq_struct tq_hangup;
 	void *disc_data;
 	void *driver_data;
+	struct list_head tty_files;
 
 #define N_TTY_BUF_SIZE 4096
 	
@@ -325,6 +328,7 @@ struct tty_struct {
 #define TTY_HW_COOK_OUT 14
 #define TTY_HW_COOK_IN 15
 #define TTY_PTY_LOCK 16
+#define TTY_NO_WRITE_SPLIT 17
 
 #define TTY_WRITE_FLUSH(tty) tty_write_flush((tty))
 
@@ -337,12 +341,16 @@ extern int fg_console, last_console, want_console;
 
 extern int kmsg_redirect;
 
-extern unsigned long con_init(unsigned long);
+extern void con_init(void);
+extern void console_init(void);
 
 extern int rs_init(void);
 extern int lp_init(void);
 extern int pty_init(void);
-extern int tty_init(void);
+extern void tty_init(void);
+extern int mxser_init(void);
+extern int moxa_init(void);
+extern int ip2_init(void);
 extern int pcxe_init(void);
 extern int pc_init(void);
 extern int vcs_init(void);
@@ -390,7 +398,7 @@ extern int n_tty_ioctl(struct tty_struct * tty, struct file * file,
 
 /* serial.c */
 
-extern long serial_console_init(long kmem_start, long kmem_end);
+extern void serial_console_init(void);
  
 /* pcxx.c */
 

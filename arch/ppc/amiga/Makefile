@@ -9,7 +9,12 @@
 
 O_TARGET := amiga.o
 O_OBJS   := config.o amiints.o cia.o time.o \
-            bootinfo.o amisound.o chipram.o ints.o
+            bootinfo.o amisound.o chipram.o 
+
 OX_OBJS  := amiga_ksyms.o
+
+ifdef CONFIG_AMIGA_PCMCIA
+O_OBJS := $(O_OBJS) pcmcia.o
+endif
 
 include $(TOPDIR)/Rules.make

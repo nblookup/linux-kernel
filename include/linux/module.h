@@ -8,6 +8,7 @@
 #define _LINUX_MODULE_H
 
 #include <linux/config.h>
+#include <linux/spinlock.h>
 
 #ifdef __GENKSYMS__
 #  define _set_ver(sym) sym
@@ -101,6 +102,7 @@ struct module_info
 #define MOD_VISITED  		8
 #define MOD_USED_ONCE		16
 #define MOD_JUST_FREED		32
+#define MOD_INITIALIZING	64
 
 /* Values for query_module's which.  */
 
@@ -109,6 +111,9 @@ struct module_info
 #define QM_REFS		3
 #define QM_SYMBOLS	4
 #define QM_INFO		5
+
+/* Can the module be queried? */
+#define MOD_CAN_QUERY(mod) (((mod)->flags & (MOD_RUNNING | MOD_INITIALIZING)) && !((mod)->flags & MOD_DELETED))
 
 /* When struct module is extended, we must test whether the new member
    is present in the header received from insmod before we can use it.  
@@ -139,6 +144,8 @@ struct module_info
 
 /* Find a symbol exported by the kernel or another module */
 extern unsigned long get_module_symbol(char *, char *);
+
+extern int try_inc_mod_count(struct module *mod);
 
 #if defined(MODULE) && !defined(__GENKSYMS__)
 
@@ -183,6 +190,10 @@ const char __module_parm_desc_##var[]		\
 __attribute__((section(".modinfo"))) =		\
 "parm_desc_" __MODULE_STRING(var) "=" desc
 
+#define MODULE_DEVICE_TABLE(type,name)	\
+const struct type##_device_id * __module_##type##_device_table = name
+/* not put to .modinfo section to avoid section type conflicts */
+
 /* The attributes of a section are set the first time the section is
    seen; we want .modinfo to not be allocated.  */
 
@@ -191,9 +202,10 @@ __asm__(".section .modinfo\n\t.previous");
 /* Define the module variable, and usage macros.  */
 extern struct module __this_module;
 
-#define MOD_INC_USE_COUNT	__MOD_INC_USE_COUNT(&__this_module)
-#define MOD_DEC_USE_COUNT	__MOD_DEC_USE_COUNT(&__this_module)
-#define MOD_IN_USE		__MOD_IN_USE(&__this_module)
+#define THIS_MODULE		(&__this_module)
+#define MOD_INC_USE_COUNT	__MOD_INC_USE_COUNT(THIS_MODULE)
+#define MOD_DEC_USE_COUNT	__MOD_DEC_USE_COUNT(THIS_MODULE)
+#define MOD_IN_USE		__MOD_IN_USE(THIS_MODULE)
 
 #ifndef __NO_VERSION__
 #include <linux/version.h>
@@ -212,9 +224,11 @@ const char __module_using_checksums[] __attribute__((section(".modinfo"))) =
 #define MODULE_SUPPORTED_DEVICE(name)
 #define MODULE_PARM(var,type)
 #define MODULE_PARM_DESC(var,desc)
+#define MODULE_DEVICE_TABLE(type,name)
 
 #ifndef __GENKSYMS__
 
+#define THIS_MODULE		NULL
 #define MOD_INC_USE_COUNT	do { } while (0)
 #define MOD_DEC_USE_COUNT	do { } while (0)
 #define MOD_IN_USE		1

@@ -1,5 +1,5 @@
 /*
- * kernel/traps.c
+ * arch/alpha/kernel/traps.c
  *
  * (C) Copyright 1994 Linus Torvalds
  */
@@ -22,7 +22,7 @@
 
 #include "proto.h"
 
-static void
+void
 dik_show_regs(struct pt_regs *regs, unsigned long *r9_15)
 {
 	printk("pc = [<%016lx>]  ra = [<%016lx>]  ps = %04lx\n",
@@ -95,22 +95,25 @@ die_if_kernel(char * str, struct pt_regs *regs, long err, unsigned long *r9_15)
 {
 	if (regs->ps & 8)
 		return;
+#ifdef __SMP__
+	printk("CPU %d ", hard_smp_processor_id());
+#endif
 	printk("%s(%d): %s %ld\n", current->comm, current->pid, str, err);
 	dik_show_regs(regs, r9_15);
 	dik_show_code((unsigned int *)regs->pc);
 	dik_show_trace((unsigned long *)(regs+1));
 
-	if (current->tss.flags & (1UL << 63)) {
+	if (current->thread.flags & (1UL << 63)) {
 		printk("die_if_kernel recursion detected.\n");
 		sti();
 		while (1);
 	}
-	current->tss.flags |= (1UL << 63);
+	current->thread.flags |= (1UL << 63);
 	do_exit(SIGSEGV);
 }
 
 #ifndef CONFIG_MATHEMU
-static long dummy_emul() { return 0; }
+static long dummy_emul(void) { return 0; }
 long (*alpha_fp_emul_imprecise)(struct pt_regs *regs, unsigned long writemask)
   = (void *)dummy_emul;
 long (*alpha_fp_emul) (unsigned long pc)
@@ -128,8 +131,8 @@ do_entArith(unsigned long summary, unsigned long write_mask,
 	if (summary & 1) {
 		/* Software-completion summary bit is set, so try to
 		   emulate the instruction.  */
-		if (implver() == IMPLVER_EV6) {
-			/* Whee!  EV6 has precice exceptions.  */
+		if (!amask(AMASK_PRECISE_TRAP)) {
+			/* 21264 (except pass 1) has precise exceptions.  */
 			if (alpha_fp_emul(regs.pc - 4))
 				return;
 		} else {
@@ -138,14 +141,12 @@ do_entArith(unsigned long summary, unsigned long write_mask,
 		}
 	}
 
-	lock_kernel();
 #if 0
 	printk("%s: arithmetic trap at %016lx: %02lx %016lx\n",
 		current->comm, regs.pc, summary, write_mask);
 #endif
 	die_if_kernel("Arithmetic fault", &regs, 0, 0);
 	send_sig(SIGFPE, current, 1);
-	unlock_kernel();
 }
 
 asmlinkage void
@@ -153,7 +154,9 @@ do_entIF(unsigned long type, unsigned long a1,
 	 unsigned long a2, unsigned long a3, unsigned long a4,
 	 unsigned long a5, struct pt_regs regs)
 {
-	die_if_kernel("Instruction fault", &regs, type, 0);
+	die_if_kernel((type == 1 ? "Kernel Bug" : "Instruction fault"),
+		      &regs, type, 0);
+
 	switch (type) {
 	      case 0: /* breakpoint */
 		if (ptrace_cancel_bpt(current)) {
@@ -212,8 +215,10 @@ do_entIF(unsigned long type, unsigned long a1,
 			/* EV4 does not implement anything except normal
 			   rounding.  Everything else will come here as
 			   an illegal instruction.  Emulate them.  */
-			if (alpha_fp_emul(regs.pc - 4))
+			if (alpha_fp_emul(regs.pc)) {
+				regs.pc += 4;
 				return;
+			}
 		}
 		send_sig(SIGILL, current, 1);
 		break;
@@ -235,10 +240,8 @@ do_entDbg(unsigned long type, unsigned long a1,
 	  unsigned long a2, unsigned long a3, unsigned long a4,
 	  unsigned long a5, struct pt_regs regs)
 {
-	lock_kernel();
 	die_if_kernel("Instruction fault", &regs, type, 0);
 	force_sig(SIGILL, current);
-	unlock_kernel();
 }
 
 
@@ -453,10 +456,8 @@ got_exception:
 		unsigned long newpc;
 		newpc = fixup_exception(una_reg, fixup, pc);
 
-		lock_kernel();
 		printk("Forwarding unaligned exception at %lx (%lx)\n",
 		       pc, newpc);
-		unlock_kernel();
 
 		(&regs)->pc = newpc;
 		return;
@@ -497,12 +498,12 @@ got_exception:
 	dik_show_code((unsigned int *)pc);
 	dik_show_trace((unsigned long *)(&regs+1));
 
-	if (current->tss.flags & (1UL << 63)) {
+	if (current->thread.flags & (1UL << 63)) {
 		printk("die_if_kernel recursion detected.\n");
 		sti();
 		while (1);
 	}
-	current->tss.flags |= (1UL << 63);
+	current->thread.flags |= (1UL << 63);
 	do_exit(SIGSEGV);
 }
 
@@ -604,17 +605,15 @@ do_entUnaUser(void * va, unsigned long opcode,
 	/* Check the UAC bits to decide what the user wants us to do
 	   with the unaliged access.  */
 
-	uac_bits = (current->tss.flags >> UAC_SHIFT) & UAC_BITMASK;
+	uac_bits = (current->thread.flags >> UAC_SHIFT) & UAC_BITMASK;
 	if (!(uac_bits & UAC_NOPRINT)) {
 		if (cnt >= 5 && jiffies - last_time > 5*HZ) {
 			cnt = 0;
 		}
 		if (++cnt < 5) {
-			lock_kernel();
 			printk("%s(%d): unaligned trap at %016lx: %p %lx %ld\n",
 			       current->comm, current->pid,
 			       regs->pc - 4, va, opcode, reg);
-			unlock_kernel();
 		}
 		last_time = jiffies;
 	}
@@ -868,16 +867,12 @@ do_entUnaUser(void * va, unsigned long opcode,
 
 give_sigsegv:
 	regs->pc -= 4;  /* make pc point to faulting insn */
-	lock_kernel();
 	send_sig(SIGSEGV, current, 1);
-	unlock_kernel();
 	return;
 
 give_sigbus:
 	regs->pc -= 4;
-	lock_kernel();
 	send_sig(SIGBUS, current, 1);
-	unlock_kernel();
 	return;
 }
 

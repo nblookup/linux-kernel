@@ -6,7 +6,7 @@
 #ifndef __SPARC64_HARDIRQ_H
 #define __SPARC64_HARDIRQ_H
 
-#include <linux/tasks.h>
+#include <linux/threads.h>
 
 #ifndef __SMP__
 extern unsigned int local_irq_count;
@@ -16,24 +16,27 @@ extern unsigned int local_irq_count;
 
 /*
  * Are we in an interrupt context? Either doing bottom half
- * or hardware interrupt processing?
+ * or hardware interrupt processing?  On any cpu?
  */
 #define in_interrupt() ((local_irq_count + local_bh_count) != 0)
 
+/* This tests only the local processors hw IRQ context disposition.  */
+#define in_irq() (local_irq_count != 0)
+
 #ifndef __SMP__
 
-#define hardirq_trylock(cpu)	(local_irq_count == 0)
-#define hardirq_endlock(cpu)	do { } while(0)
+#define hardirq_trylock(cpu)	((void)(cpu), local_irq_count == 0)
+#define hardirq_endlock(cpu)	do { (void)(cpu); } while(0)
 
-#define hardirq_enter(cpu)	(local_irq_count++)
-#define hardirq_exit(cpu)	(local_irq_count--)
+#define hardirq_enter(cpu)	((void)(cpu), local_irq_count++)
+#define hardirq_exit(cpu)	((void)(cpu), local_irq_count--)
 
 #define synchronize_irq()	barrier()
 
 #else /* (__SMP__) */
 
 #include <asm/atomic.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
 #include <asm/system.h>
 #include <asm/smp.h>
 
@@ -70,7 +73,7 @@ static inline int hardirq_trylock(int cpu)
 		! spin_is_locked (&global_irq_lock));
 }
 
-#define hardirq_endlock(cpu)	do { } while (0)
+#define hardirq_endlock(cpu)	do { (void)(cpu); } while (0)
 
 extern void synchronize_irq(void);
 

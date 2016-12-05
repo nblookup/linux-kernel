@@ -12,6 +12,11 @@
  *        David S. Miller (davem@caip.rutgers.edu), 1995
  */
 
+#include <linux/fs.h>
+#include <linux/locks.h>
+#include <linux/quotaops.h>
+
+
 /*
  * ialloc.c contains the inodes allocation and deallocation routines
  */
@@ -27,16 +32,6 @@
  * when a file system is mounted (see ext2_read_super).
  */
 
-#include <linux/fs.h>
-#include <linux/ext2_fs.h>
-#include <linux/sched.h>
-#include <linux/stat.h>
-#include <linux/string.h>
-#include <linux/locks.h>
-#include <linux/quotaops.h>
-
-#include <asm/bitops.h>
-#include <asm/byteorder.h>
 
 /*
  * Read the inode allocation bitmap for a given block_group, reading
@@ -268,21 +263,6 @@ error_return:
 }
 
 /*
- * This function increments the inode version number
- *
- * This may be used one day by the NFS server
- */
-static void inc_inode_version (struct inode * inode,
-			       struct ext2_group_desc *gdp,
-			       int mode)
-{
-	inode->u.ext2_i.i_version++;
-	mark_inode_dirty(inode);
-
-	return;
-}
-
-/*
  * There are two policies for allocating an inode.  If the new inode is
  * a directory, then a forward search is made for a block group with both
  * free space and a low directory-to-inode ratio; if that fails, then of
@@ -489,12 +469,11 @@ repeat:
 	inode->u.ext2_i.i_dir_acl = 0;
 	inode->u.ext2_i.i_dtime = 0;
 	inode->u.ext2_i.i_block_group = i;
-	inode->i_op = NULL;
 	if (inode->u.ext2_i.i_flags & EXT2_SYNC_FL)
 		inode->i_flags |= MS_SYNCHRONOUS;
 	insert_inode_hash(inode);
+	inode->i_generation = event++;
 	mark_inode_dirty(inode);
-	inc_inode_version (inode, gdp, mode);
 
 	unlock_super (sb);
 	if(DQUOT_ALLOC_INODE(sb, inode)) {
@@ -548,6 +527,7 @@ unsigned long ext2_count_free_inodes (struct super_block * sb)
 #endif
 }
 
+/* Called at mount-time, super-block is locked */
 void ext2_check_inodes_bitmap (struct super_block * sb)
 {
 	struct ext2_super_block * es;
@@ -556,7 +536,6 @@ void ext2_check_inodes_bitmap (struct super_block * sb)
 	struct ext2_group_desc * gdp;
 	int i;
 
-	lock_super (sb);
 	es = sb->u.ext2_sb.s_es;
 	desc_count = 0;
 	bitmap_count = 0;
@@ -585,5 +564,4 @@ void ext2_check_inodes_bitmap (struct super_block * sb)
 			    "stored = %lu, counted = %lu",
 			    (unsigned long) le32_to_cpu(es->s_free_inodes_count),
 			    bitmap_count);
-	unlock_super (sb);
 }

@@ -5,7 +5,7 @@
  *
  *		RAW - implementation of IP "raw" sockets.
  *
- * Version:	$Id: raw.c,v 1.39 1998/11/08 11:17:04 davem Exp $
+ * Version:	$Id: raw.c,v 1.48 2000/01/18 08:24:15 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -60,87 +60,113 @@
 #include <net/icmp.h>
 #include <net/udp.h>
 #include <net/raw.h>
+#include <net/inet_common.h>
 #include <net/checksum.h>
 
-#ifdef CONFIG_IP_MROUTE
-struct sock *mroute_socket=NULL;
-#endif
-
 struct sock *raw_v4_htable[RAWV4_HTABLE_SIZE];
+rwlock_t raw_v4_lock = RW_LOCK_UNLOCKED;
 
 static void raw_v4_hash(struct sock *sk)
 {
-	struct sock **skp;
-	int num = sk->num;
+	struct sock **skp = &raw_v4_htable[sk->num & (RAWV4_HTABLE_SIZE - 1)];
 
-	num &= (RAWV4_HTABLE_SIZE - 1);
-	skp = &raw_v4_htable[num];
-	SOCKHASH_LOCK();
-	sk->next = *skp;
+	write_lock_bh(&raw_v4_lock);
+	if ((sk->next = *skp) != NULL)
+		(*skp)->pprev = &sk->next;
 	*skp = sk;
-	sk->hashent = num;
-	SOCKHASH_UNLOCK();
+	sk->pprev = skp;
+	sock_prot_inc_use(sk->prot);
+ 	sock_hold(sk);
+	write_unlock_bh(&raw_v4_lock);
 }
 
 static void raw_v4_unhash(struct sock *sk)
 {
-	struct sock **skp;
-	int num = sk->num;
-
-	num &= (RAWV4_HTABLE_SIZE - 1);
-	skp = &raw_v4_htable[num];
-
-	SOCKHASH_LOCK();
-	while(*skp != NULL) {
-		if(*skp == sk) {
-			*skp = sk->next;
-			break;
-		}
-		skp = &((*skp)->next);
+ 	write_lock_bh(&raw_v4_lock);
+	if (sk->pprev) {
+		if (sk->next)
+			sk->next->pprev = sk->pprev;
+		*sk->pprev = sk->next;
+		sk->pprev = NULL;
+		sock_prot_dec_use(sk->prot);
+		__sock_put(sk);
 	}
-	SOCKHASH_UNLOCK();
+	write_unlock_bh(&raw_v4_lock);
 }
 
-static void raw_v4_rehash(struct sock *sk)
-{
-	struct sock **skp;
-	int num = sk->num;
-	int oldnum = sk->hashent;
-
-	num &= (RAWV4_HTABLE_SIZE - 1);
-	skp = &raw_v4_htable[oldnum];
-
-	SOCKHASH_LOCK();
-	while(*skp != NULL) {
-		if(*skp == sk) {
-			*skp = sk->next;
-			break;
-		}
-		skp = &((*skp)->next);
-	}
-	sk->next = raw_v4_htable[num];
-	raw_v4_htable[num] = sk;
-	sk->hashent = num;
-	SOCKHASH_UNLOCK();
-}
-
-/* Grumble... icmp and ip_input want to get at this... */
-struct sock *raw_v4_lookup(struct sock *sk, unsigned short num,
-			   unsigned long raddr, unsigned long laddr, int dif)
+struct sock *__raw_v4_lookup(struct sock *sk, unsigned short num,
+			     unsigned long raddr, unsigned long laddr,
+			     int dif)
 {
 	struct sock *s = sk;
 
-	SOCKHASH_LOCK();
 	for(s = sk; s; s = s->next) {
 		if((s->num == num) 				&&
-		   !(s->dead && (s->state == TCP_CLOSE))	&&
 		   !(s->daddr && s->daddr != raddr) 		&&
 		   !(s->rcv_saddr && s->rcv_saddr != laddr)	&&
 		   !(s->bound_dev_if && s->bound_dev_if != dif))
 			break; /* gotcha */
 	}
-	SOCKHASH_UNLOCK();
 	return s;
+}
+
+/*
+ *	0 - deliver
+ *	1 - block
+ */
+static __inline__ int icmp_filter(struct sock *sk, struct sk_buff *skb)
+{
+	int    type;
+
+	type = skb->h.icmph->type;
+	if (type < 32)
+		return test_bit(type, &sk->tp_pinfo.tp_raw4.filter);
+
+	/* Do not block unknown ICMP types */
+	return 0;
+}
+
+/* IP input processing comes here for RAW socket delivery.
+ * This is fun as to avoid copies we want to make no surplus
+ * copies.
+ *
+ * RFC 1122: SHOULD pass TOS value up to the transport layer.
+ * -> It does. And not only TOS, but all IP header.
+ */
+struct sock *raw_v4_input(struct sk_buff *skb, struct iphdr *iph, int hash)
+{
+	struct sock *sk;
+
+	read_lock(&raw_v4_lock);
+	if ((sk = raw_v4_htable[hash]) == NULL)
+		goto out;
+	sk = __raw_v4_lookup(sk, iph->protocol,
+			     iph->saddr, iph->daddr,
+			     skb->dev->ifindex);
+
+	while(sk != NULL) {
+		struct sock *sknext = __raw_v4_lookup(sk->next, iph->protocol,
+						      iph->saddr, iph->daddr,
+						      skb->dev->ifindex);
+		if (iph->protocol != IPPROTO_ICMP ||
+		    ! icmp_filter(sk, skb)) {
+			struct sk_buff *clone;
+
+			if(sknext == NULL)
+				break;
+			clone = skb_clone(skb, GFP_ATOMIC);
+			/* Not releasing hash table! */
+			if(clone)
+				raw_rcv(sk, clone);
+		}
+		sk = sknext;
+	}
+out:
+	if (sk)
+		sock_hold(sk);
+	read_unlock(&raw_v4_lock);
+
+	return sk;
 }
 
 void raw_err (struct sock *sk, struct sk_buff *skb)
@@ -156,7 +182,7 @@ void raw_err (struct sock *sk, struct sk_buff *skb)
 	   2. Socket is connected (otherwise the error indication
 	      is useless without ip_recverr and error is hard.
 	 */
-	if (!sk->ip_recverr && sk->state != TCP_ESTABLISHED)
+	if (!sk->protinfo.af_inet.recverr && sk->state != TCP_ESTABLISHED)
 		return;
 
 	switch (type) {
@@ -178,16 +204,16 @@ void raw_err (struct sock *sk, struct sk_buff *skb)
 		err = icmp_err_convert[code].errno;
 		harderr = icmp_err_convert[code].fatal;
 		if (code == ICMP_FRAG_NEEDED) {
-			harderr = (sk->ip_pmtudisc != IP_PMTUDISC_DONT);
+			harderr = (sk->protinfo.af_inet.pmtudisc != IP_PMTUDISC_DONT);
 			err = EMSGSIZE;
 			info = ntohs(skb->h.icmph->un.frag.mtu);
 		}
 	}
 
-	if (sk->ip_recverr)
+	if (sk->protinfo.af_inet.recverr)
 		ip_icmp_error(sk, skb, err, 0, info, (u8 *)(skb->h.icmph + 1));
-		
-	if (sk->ip_recverr || harderr) {
+
+	if (sk->protinfo.af_inet.recverr || harderr) {
 		sk->err = err;
 		sk->error_report(sk);
 	}
@@ -199,12 +225,12 @@ static int raw_rcv_skb(struct sock * sk, struct sk_buff * skb)
 	
 	if (sock_queue_rcv_skb(sk,skb)<0)
 	{
-		ip_statistics.IpInDiscards++;
+		IP_INC_STATS(IpInDiscards);
 		kfree_skb(skb);
 		return -1;
 	}
 
-	ip_statistics.IpInDelivers++;
+	IP_INC_STATS(IpInDelivers);
 	return 0;
 }
 
@@ -229,6 +255,7 @@ struct rawfakehdr
 {
 	struct  iovec *iov;
 	u32	saddr;
+	struct dst_entry *dst;
 };
 
 /*
@@ -268,7 +295,7 @@ static int raw_getrawfrag(const void *p, char *to, unsigned int offset, unsigned
 	 	 *	ip_build_xmit clean (well less messy).
 		 */
 		if (!iph->id)
-			iph->id = htons(ip_id_count++);
+			ip_select_ident(iph, rfh->dst);
 		iph->check=ip_fast_csum((unsigned char *)iph, iph->ihl);
 	}
 	return 0;
@@ -305,9 +332,6 @@ static int raw_sendmsg(struct sock *sk, struct msghdr *msg, int len)
 	if (msg->msg_flags & MSG_OOB)		/* Mirror BSD error message compatibility */
 		return -EOPNOTSUPP;
 			 
-	if (msg->msg_flags & ~(MSG_DONTROUTE|MSG_DONTWAIT))
-		return(-EINVAL);
-
 	/*
 	 *	Get and verify the address. 
 	 */
@@ -350,14 +374,14 @@ static int raw_sendmsg(struct sock *sk, struct msghdr *msg, int len)
 	ipc.addr = daddr;
 
 	if (!ipc.opt)
-		ipc.opt = sk->opt;
+		ipc.opt = sk->protinfo.af_inet.opt;
 
 	if (ipc.opt) {
 		err = -EINVAL;
 		/* Linux does not mangle headers on raw sockets,
 		 * so that IP options + IP_HDRINCL is non-sense.
 		 */
-		if (sk->ip_hdrincl)
+		if (sk->protinfo.af_inet.hdrincl)
 			goto done;
 		if (ipc.opt->srr) {
 			if (!daddr)
@@ -365,15 +389,15 @@ static int raw_sendmsg(struct sock *sk, struct msghdr *msg, int len)
 			daddr = ipc.opt->faddr;
 		}
 	}
-	tos = RT_TOS(sk->ip_tos) | sk->localroute;
+	tos = RT_TOS(sk->protinfo.af_inet.tos) | sk->localroute;
 	if (msg->msg_flags&MSG_DONTROUTE)
 		tos |= RTO_ONLINK;
 
 	if (MULTICAST(daddr)) {
 		if (!ipc.oif)
-			ipc.oif = sk->ip_mc_index;
+			ipc.oif = sk->protinfo.af_inet.mc_index;
 		if (!rfh.saddr)
-			rfh.saddr = sk->ip_mc_addr;
+			rfh.saddr = sk->protinfo.af_inet.mc_addr;
 	}
 
 	err = ip_route_output(&rt, daddr, rfh.saddr, tos, ipc.oif);
@@ -385,11 +409,16 @@ static int raw_sendmsg(struct sock *sk, struct msghdr *msg, int len)
 	if (rt->rt_flags&RTCF_BROADCAST && !sk->broadcast)
 		goto done;
 
+	if (msg->msg_flags&MSG_CONFIRM)
+		goto do_confirm;
+back_from_confirm:
+
 	rfh.iov = msg->msg_iov;
 	rfh.saddr = rt->rt_src;
+	rfh.dst = &rt->u.dst;
 	if (!ipc.addr)
 		ipc.addr = rt->rt_dst;
-	err=ip_build_xmit(sk, sk->ip_hdrincl ? raw_getrawfrag : raw_getfrag,
+	err=ip_build_xmit(sk, sk->protinfo.af_inet.hdrincl ? raw_getrawfrag : raw_getfrag,
 			  &rfh, len, &ipc, rt, msg->msg_flags);
 
 done:
@@ -398,37 +427,23 @@ done:
 	ip_rt_put(rt);
 
 	return err<0 ? err : len;
+
+do_confirm:
+	dst_confirm(&rt->u.dst);
+	if (!(msg->msg_flags&MSG_PROBE) || len)
+		goto back_from_confirm;
+	err = 0;
+	goto done;
 }
 
 static void raw_close(struct sock *sk, long timeout)
 {
-	/* Observation: when raw_close is called, processes have
-	   no access to socket anymore. But net still has.
-	   Step one, detach it from networking:
-
-	   A. Remove from hash tables.
-	 */
-	sk->state = TCP_CLOSE;
-	raw_v4_unhash(sk);
         /*
-	   B. Raw sockets may have direct kernel refereneces. Kill them.
+	 * Raw sockets may have direct kernel refereneces. Kill them.
 	 */
 	ip_ra_control(sk, 0, NULL);
 
-	/* In this point socket cannot receive new packets anymore */
-
-
-	/* But we still have packets pending on receive
-	   queue and probably, our own packets waiting in device queues.
-	   sock_destroy will drain receive queue, but transmitted
-	   packets will delay socket destruction.
-	   Set sk->dead=1 in order to prevent wakeups, when these
-	   packet will be freed.
-	 */
-	sk->dead=1;
-	destroy_sock(sk);
-
-	/* That's all. No races here. */
+	inet_sock_release(sk);
 }
 
 /* This gets rid of all the nasties in af_inet. -DaveM */
@@ -441,17 +456,12 @@ static int raw_bind(struct sock *sk, struct sockaddr *uaddr, int addr_len)
 		return -EINVAL;
 	chk_addr_ret = inet_addr_type(addr->sin_addr.s_addr);
 	if(addr->sin_addr.s_addr != 0 && chk_addr_ret != RTN_LOCAL &&
-	   chk_addr_ret != RTN_MULTICAST && chk_addr_ret != RTN_BROADCAST) {
-#ifdef CONFIG_IP_TRANSPARENT_PROXY
-		/* Superuser may bind to any address to allow transparent proxying. */
-		if(chk_addr_ret != RTN_UNICAST || !capable(CAP_NET_ADMIN))
-#endif
-			return -EADDRNOTAVAIL;
-	}
+	   chk_addr_ret != RTN_MULTICAST && chk_addr_ret != RTN_BROADCAST)
+		return -EADDRNOTAVAIL;
 	sk->rcv_saddr = sk->saddr = addr->sin_addr.s_addr;
 	if(chk_addr_ret == RTN_MULTICAST || chk_addr_ret == RTN_BROADCAST)
 		sk->saddr = 0;  /* Use device */
-	dst_release(xchg(&sk->dst_cache, NULL));
+	sk_dst_reset(sk);
 	return 0;
 }
 
@@ -499,7 +509,7 @@ int raw_recvmsg(struct sock *sk, struct msghdr *msg, int len,
 		sin->sin_family = AF_INET;
 		sin->sin_addr.s_addr = skb->nh.iph->saddr;
 	}
-	if (sk->ip_cmsg_flags)
+	if (sk->protinfo.af_inet.cmsg_flags)
 		ip_cmsg_recv(msg, skb);
 done:
 	skb_free_datagram(sk, skb);
@@ -570,16 +580,74 @@ static int raw_getsockopt(struct sock *sk, int level, int optname,
 	return -ENOPROTOOPT;
 }
 
+static void get_raw_sock(struct sock *sp, char *tmpbuf, int i)
+{
+	unsigned int dest, src;
+	__u16 destp, srcp;
+	int timer_active;
+	unsigned long timer_expires;
+
+	dest  = sp->daddr;
+	src   = sp->rcv_saddr;
+	destp = 0;
+	srcp  = sp->num;
+	timer_active = (sp->timer.prev != NULL) ? 2 : 0;
+	timer_expires = (timer_active == 2 ? sp->timer.expires : jiffies);
+	sprintf(tmpbuf, "%4d: %08X:%04X %08X:%04X"
+		" %02X %08X:%08X %02X:%08lX %08X %5d %8d %ld %d %p",
+		i, src, srcp, dest, destp, sp->state, 
+		atomic_read(&sp->wmem_alloc), atomic_read(&sp->rmem_alloc),
+		timer_active, timer_expires-jiffies, 0,
+		sp->socket->inode->i_uid, 0,
+		sp->socket ? sp->socket->inode->i_ino : 0,
+		atomic_read(&sp->refcnt), sp);
+}
+
+int raw_get_info(char *buffer, char **start, off_t offset, int length)
+{
+	int len = 0, num = 0, i;
+	off_t pos = 0;
+	off_t begin;
+	char tmpbuf[129];
+
+	if (offset < 128) 
+		len += sprintf(buffer, "%-127s\n",
+			       "  sl  local_address rem_address   st tx_queue "
+			       "rx_queue tr tm->when retrnsmt   uid  timeout inode");
+	pos = 128;
+	read_lock(&raw_v4_lock);
+	for (i = 0; i < RAWV4_HTABLE_SIZE; i++) {
+		struct sock *sk;
+
+		for (sk = raw_v4_htable[i]; sk; sk = sk->next, num++) {
+			if (sk->family != PF_INET)
+				continue;
+			pos += 128;
+			if (pos < offset)
+				continue;
+			get_raw_sock(sk, tmpbuf, i);
+			len += sprintf(buffer+len, "%-127s\n", tmpbuf);
+			if(len >= length)
+				goto out;
+		}
+	}
+out:
+	read_unlock(&raw_v4_lock);
+	begin = len - (pos - offset);
+	*start = buffer + begin;
+	len -= begin;
+	if(len > length)
+		len = length;
+	if (len < 0)
+		len = 0; 
+	return len;
+}
+
 struct proto raw_prot = {
-	(struct sock *)&raw_prot,	/* sklist_next */
-	(struct sock *)&raw_prot,	/* sklist_prev */
 	raw_close,			/* close */
 	udp_connect,			/* connect */
+	udp_disconnect,			/* disconnect */
 	NULL,				/* accept */
-	NULL,				/* retransmit */
-	NULL,				/* write_wakeup */
-	NULL,				/* read_wakeup */
-	datagram_poll,			/* poll */
 #ifdef CONFIG_IP_MROUTE
 	ipmr_ioctl,			/* ioctl */
 #else
@@ -596,12 +664,6 @@ struct proto raw_prot = {
 	raw_rcv_skb,			/* backlog_rcv */
 	raw_v4_hash,			/* hash */
 	raw_v4_unhash,			/* unhash */
-	raw_v4_rehash,			/* rehash */
-	NULL,				/* good_socknum */
-	NULL,				/* verify_bind */
-	128,				/* max_header */
-	0,				/* retransmits */
+	NULL,				/* get_port */
 	"RAW",				/* name */
-	0,				/* inuse */
-	0				/* highestinuse */
 };

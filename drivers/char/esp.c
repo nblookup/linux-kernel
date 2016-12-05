@@ -169,7 +169,7 @@ static struct termios *serial_termios_locked[NR_PORTS];
  * memory if large numbers of serial ports are open.
  */
 static unsigned char *tmp_buf = 0;
-static struct semaphore tmp_buf_sem = MUTEX;
+static DECLARE_MUTEX(tmp_buf_sem);
 
 static inline int serial_paranoia_check(struct esp_struct *info,
 					kdev_t device, const char *routine)
@@ -201,20 +201,6 @@ static inline void serial_out(struct esp_struct *info, int offset,
 			      unsigned char value)
 {
 	outb(value, info->port+offset);
-}
-
-static inline int __get_order(unsigned long size)
-{
-	int order;
-
-	size = (size + PAGE_SIZE -1) >> PAGE_SHIFT;
-	order = -1;
-	do {
-		size >>= 1;
-		order++;
-	} while (size);
-
-	return order;
 }
 
 /*
@@ -965,14 +951,14 @@ static int startup(struct esp_struct * info)
 
 	if (!(info->stat_flags & ESP_STAT_USE_PIO) && !dma_buffer) {
 		dma_buffer = (char *)__get_dma_pages(
-			GFP_KERNEL, __get_order(DMA_BUFFER_SZ));
+			GFP_KERNEL, get_order(DMA_BUFFER_SZ));
 
 		/* use PIO mode if DMA buf/chan cannot be allocated */
 		if (!dma_buffer)
 			info->stat_flags |= ESP_STAT_USE_PIO;
 		else if (request_dma(dma, "esp serial")) {
 			free_pages((unsigned int)dma_buffer,
-				   __get_order(DMA_BUFFER_SZ));
+				   get_order(DMA_BUFFER_SZ));
 			dma_buffer = 0;
 			info->stat_flags |= ESP_STAT_USE_PIO;
 		}
@@ -1076,7 +1062,7 @@ static void shutdown(struct esp_struct * info)
 		if (!current_port) {
 			free_dma(dma);
 			free_pages((unsigned int)dma_buffer,
-				   __get_order(DMA_BUFFER_SZ));
+				   get_order(DMA_BUFFER_SZ));
 			dma_buffer = 0;
 		}		
 	}
@@ -2180,7 +2166,6 @@ static void rs_wait_until_sent(struct tty_struct *tty, int timeout)
 	while ((serial_in(info, UART_ESI_STAT1) != 0x03) ||
 		(serial_in(info, UART_ESI_STAT2) != 0xff)) {
 		current->state = TASK_INTERRUPTIBLE;
-		current->counter = 0;
 		schedule_timeout(char_time);
 
 		if (signal_pending(current))
@@ -2224,7 +2209,7 @@ static void esp_hangup(struct tty_struct *tty)
 static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			   struct esp_struct *info)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	int		retval;
 	int		do_clocal = 0;
 
@@ -2318,7 +2303,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 				scratch | UART_MCR_DTR | UART_MCR_RTS);
 		}
 		sti();
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
 		    !(info->flags & ASYNC_INITIALIZED)) {
 #ifdef SERIAL_DO_RESTART
@@ -2526,7 +2511,7 @@ static _INLINE_ int autoconfig(struct esp_struct * info, int *region_start)
 /*
  * The serial driver boot-time initialization code!
  */
-__initfunc(int espserial_init(void))
+int __init espserial_init(void)
 {
 	int i, offset;
 	int region_start;
@@ -2676,6 +2661,10 @@ __initfunc(int espserial_init(void))
 		info->config.flow_off = flow_off;
 		info->config.pio_threshold = pio_threshold;
 		info->next_port = ports;
+		init_waitqueue_head(&info->open_wait);
+		init_waitqueue_head(&info->close_wait);
+		init_waitqueue_head(&info->delta_msr_wait);
+		init_waitqueue_head(&info->break_wait);
 		ports = info;
 		printk(KERN_INFO "ttyP%d at 0x%04x (irq = %d) is an ESP ",
 			info->line, info->port, info->irq);
@@ -2782,7 +2771,7 @@ void cleanup_module(void)
 
 	if (dma_buffer)
 		free_pages((unsigned int)dma_buffer,
-			__get_order(DMA_BUFFER_SZ));
+			get_order(DMA_BUFFER_SZ));
 
 	if (tmp_buf)
 		free_page((unsigned long)tmp_buf);

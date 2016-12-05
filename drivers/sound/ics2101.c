@@ -2,24 +2,22 @@
  * sound/ics2101.c
  *
  * Driver for the ICS2101 mixer of GUS v3.7.
- */
-/*
+ *
+ *
  * Copyright (C) by Hannu Savolainen 1993-1997
  *
  * OSS/Free for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
  * Version 2 (June 1991). See the "COPYING" file distributed with this software
  * for more info.
- */
-/*
+ *
+ *
  * Thomas Sailer   : ioctl code reworked (vmalloc/vfree removed)
  */
-#include <linux/config.h>
-
-
 #include "sound_config.h"
-#ifdef CONFIG_GUS
 
 #include <linux/ultrasound.h>
+
+#include "gus.h"
 #include "gus_hw.h"
 
 #define MIX_DEVS	(SOUND_MASK_MIC|SOUND_MASK_LINE| \
@@ -244,5 +242,3 @@ ics2101_mixer_init(void)
 	}
 	return n;
 }
-
-#endif

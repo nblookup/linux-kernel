@@ -16,6 +16,7 @@
 #include <linux/stat.h>
 #include <linux/fcntl.h>
 #include <linux/locks.h>
+#include <linux/smp_lock.h>
 
 #include <linux/fs.h>
 #include <linux/qnx4_fs.h>
@@ -55,7 +56,7 @@ static int sync_block(struct inode *inode, unsigned short *block, int wait)
 		return 0;
 	}
 	ll_rw_block(WRITE, 1, &bh);
-	bh->b_count--;
+	atomic_dec(&bh->b_count);
 	return 0;
 }
 
@@ -156,10 +157,12 @@ int qnx4_sync_file(struct file *file, struct dentry *dentry)
 	      S_ISLNK(inode->i_mode)))
 		return -EINVAL;
 
+	lock_kernel();
 	for (wait = 0; wait <= 1; wait++) {
 		err |= sync_direct(inode, wait);
 	}
 	err |= qnx4_sync_inode(inode);
+	unlock_kernel();
 	return (err < 0) ? -EIO : 0;
 }
 

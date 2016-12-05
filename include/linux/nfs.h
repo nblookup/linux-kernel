@@ -1,5 +1,8 @@
 /*
  * NFS protocol definitions
+ *
+ * This file contains constants mostly for Version 2 of the protocol,
+ * but also has a couple of NFSv3 bits in (notably the error codes).
  */
 #ifndef _LINUX_NFS_H
 #define _LINUX_NFS_H
@@ -24,30 +27,50 @@
 #define NFSMODE_FIFO	0010000
 
 	
-enum nfs_stat {
-	NFS_OK = 0,
-	NFSERR_PERM = 1,
-	NFSERR_NOENT = 2,
-	NFSERR_IO = 5,
-	NFSERR_NXIO = 6,
-	NFSERR_EAGAIN = 11,
-	NFSERR_ACCES = 13,
-	NFSERR_EXIST = 17,
-	NFSERR_XDEV = 18,
-	NFSERR_NODEV = 19,
-	NFSERR_NOTDIR = 20,
-	NFSERR_ISDIR = 21,
-	NFSERR_INVAL = 22,	/* that Sun forgot */
-	NFSERR_FBIG = 27,
-	NFSERR_NOSPC = 28,
-	NFSERR_ROFS = 30,
-	NFSERR_OPNOTSUPP = 45,
-	NFSERR_NAMETOOLONG = 63,
-	NFSERR_NOTEMPTY = 66,
-	NFSERR_DQUOT = 69,
-	NFSERR_STALE = 70,
-	NFSERR_WFLUSH = 99
-};
+/*
+ * NFS stats. The good thing with these values is that NFSv3 errors are
+ * a superset of NFSv2 errors (with the exception of NFSERR_WFLUSH which
+ * no-one uses anyway), so we can happily mix code as long as we make sure
+ * no NFSv3 errors are returned to NFSv2 clients.
+ * Error codes that have a `--' in the v2 column are not part of the
+ * standard, but seem to be widely used nevertheless.
+ */
+ enum nfs_stat {
+	NFS_OK = 0,			/* v2 v3 */
+	NFSERR_PERM = 1,		/* v2 v3 */
+	NFSERR_NOENT = 2,		/* v2 v3 */
+	NFSERR_IO = 5,			/* v2 v3 */
+	NFSERR_NXIO = 6,		/* v2 v3 */
+	NFSERR_EAGAIN = 11,		/* v2 v3 */
+	NFSERR_ACCES = 13,		/* v2 v3 */
+	NFSERR_EXIST = 17,		/* v2 v3 */
+	NFSERR_XDEV = 18,		/*    v3 */
+	NFSERR_NODEV = 19,		/* v2 v3 */
+	NFSERR_NOTDIR = 20,		/* v2 v3 */
+	NFSERR_ISDIR = 21,		/* v2 v3 */
+	NFSERR_INVAL = 22,		/* v2 v3 that Sun forgot */
+	NFSERR_FBIG = 27,		/* v2 v3 */
+	NFSERR_NOSPC = 28,		/* v2 v3 */
+	NFSERR_ROFS = 30,		/* v2 v3 */
+	NFSERR_MLINK = 31,		/*    v3 */
+	NFSERR_OPNOTSUPP = 45,		/* v2 v3 */
+	NFSERR_NAMETOOLONG = 63,	/* v2 v3 */
+	NFSERR_NOTEMPTY = 66,		/* v2 v3 */
+	NFSERR_DQUOT = 69,		/* v2 v3 */
+	NFSERR_STALE = 70,		/* v2 v3 */
+	NFSERR_REMOTE = 71,		/* v2 v3 */
+	NFSERR_WFLUSH = 99,		/* v2    */
+	NFSERR_BADHANDLE = 10001,	/*    v3 */
+	NFSERR_NOT_SYNC = 10002,	/*    v3 */
+	NFSERR_BAD_COOKIE = 10003,	/*    v3 */
+	NFSERR_NOTSUPP = 10004,		/*    v3 */
+	NFSERR_TOOSMALL = 10005,	/*    v3 */
+	NFSERR_SERVERFAULT = 10006,	/*    v3 */
+	NFSERR_BADTYPE = 10007,		/*    v3 */
+	NFSERR_JUKEBOX = 10008		/*    v3 */
+ };
+ 
+/* NFSv2 file types - beware, these are not the same in NFSv3 */
 
 enum nfs_ftype {
 	NFNON = 0,
@@ -93,7 +116,14 @@ struct nfs_fh {
 #define NFS_MNT_PORT		627
 #define NFS_MNTPROC_MNT		1
 #define NFS_MNTPROC_UMNT	3
-#endif
+
+/*
+ * This is really a general kernel constant, but since nothing like
+ * this is defined in the kernel headers, I have to do it here.
+ */
+#define NFS_OFFSET_MAX		((__s64)((~(__u64)0) >> 1))
+
+#endif /* __KERNEL__ */
 
 #if defined(__KERNEL__) || defined(NFS_NEED_KERNEL_TYPES)
 
@@ -122,15 +152,6 @@ struct nfs_fattr {
 	struct nfs_time		ctime;
 };
 
-struct nfs_sattr {
-	__u32			mode;
-	__u32			uid;
-	__u32			gid;
-	__u32			size;
-	struct nfs_time		atime;
-	struct nfs_time		mtime;
-};
-
 struct nfs_fsinfo {
 	__u32			tsize;
 	__u32			bsize;
@@ -150,12 +171,17 @@ struct nfs_writeargs {
 
 struct nfs_sattrargs {
 	struct nfs_fh *		fh;
-	struct nfs_sattr *	sattr;
+	struct iattr *		sattr;
 };
 
 struct nfs_diropargs {
 	struct nfs_fh *		fh;
 	const char *		name;
+};
+
+struct nfs_readlinkargs {
+	struct nfs_fh *		fh;
+	const void *		buffer;
 };
 
 struct nfs_readargs {
@@ -168,7 +194,7 @@ struct nfs_readargs {
 struct nfs_createargs {
 	struct nfs_fh *		fh;
 	const char *		name;
-	struct nfs_sattr *	sattr;
+	struct iattr *		sattr;
 };
 
 struct nfs_renameargs {
@@ -188,14 +214,14 @@ struct nfs_symlinkargs {
 	struct nfs_fh *		fromfh;
 	const char *		fromname;
 	const char *		topath;
-	struct nfs_sattr *	sattr;
+	struct iattr *		sattr;
 };
 
 struct nfs_readdirargs {
 	struct nfs_fh *		fh;
 	__u32			cookie;
 	void *			buffer;
-	unsigned int		bufsiz;
+	int			bufsiz;
 };
 
 struct nfs_diropok {
@@ -208,16 +234,10 @@ struct nfs_readres {
 	unsigned int		count;
 };
 
-struct nfs_readlinkres {
-	char **			string;
-	unsigned int *		lenp;
-	unsigned int		maxlen;
-	void *			buffer;
-};
-
 struct nfs_readdirres {
 	void *			buffer;
-	unsigned int		bufsiz;
+	int			bufsiz;
+	u32			cookie;
 };
 
 #endif /* NFS_NEED_XDR_TYPES */

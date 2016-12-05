@@ -7,7 +7,7 @@
 #ifndef __SPARC_HARDIRQ_H
 #define __SPARC_HARDIRQ_H
 
-#include <linux/tasks.h>
+#include <linux/threads.h>
 
 #ifndef __SMP__
 extern unsigned int local_irq_count;
@@ -18,18 +18,20 @@ extern unsigned int local_irq_count;
  */
 #define in_interrupt()  ((local_irq_count + local_bh_count) != 0)
 
-#define hardirq_trylock(cpu)	(local_irq_count == 0)
-#define hardirq_endlock(cpu)	do { } while (0)
+#define hardirq_trylock(cpu)	((void)(cpu), local_irq_count == 0)
+#define hardirq_endlock(cpu)	do { (void)(cpu); } while (0)
 
 #define hardirq_enter(cpu)	(local_irq_count++)
 #define hardirq_exit(cpu)	(local_irq_count--)
 
 #define synchronize_irq()	barrier()
 
+#define in_irq() (local_irq_count != 0)
+
 #else
 
 #include <asm/atomic.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
 #include <asm/system.h>
 #include <asm/smp.h>
 
@@ -44,6 +46,9 @@ extern atomic_t global_irq_count;
  */
 #define in_interrupt() ({ int __cpu = smp_processor_id(); \
 	(local_irq_count[__cpu] + local_bh_count[__cpu] != 0); })
+
+#define in_irq() ({ int __cpu = smp_processor_id(); \
+	(local_irq_count[__cpu] != 0); })
 
 static inline void release_irqlock(int cpu)
 {

@@ -3,7 +3,7 @@
  *
  *  Copyright (C) 1995, 1996 by Volker Lendecke
  *  Modified 1997 Peter Waltenberg, Bill Hawes, David Woodhouse for 2.1 dcache
- *  Modified 1998 Wolfram Pienkoss for NLS
+ *  Modified 1998, 1999 Wolfram Pienkoss for NLS
  *
  */
 
@@ -15,8 +15,8 @@
 #include <linux/ioctl.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/highuid.h>
 
-#include <linux/ncp.h>
 #include <linux/ncp_fs.h>
 
 #include "ncplib_kernel.h"
@@ -32,23 +32,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 	struct ncp_server *server = NCP_SERVER(inode);
 	int result;
 	struct ncp_ioctl_request request;
-	struct ncp_fs_info info;
-
-#ifdef NCP_IOC_GETMOUNTUID_INT
-	/* remove after ncpfs-2.0.13/2.2.0 gets released */
-	if ((NCP_IOC_GETMOUNTUID != NCP_IOC_GETMOUNTUID_INT) &&
-             (cmd == NCP_IOC_GETMOUNTUID_INT)) {
-		int tmp = server->m.mounted_uid;
-
-		if (   (permission(inode, MAY_READ) != 0)
-		    && (current->uid != server->m.mounted_uid))
-		{
-			return -EACCES;
-		}
-		if (put_user(tmp, (unsigned int*) arg)) return -EFAULT;
-		return 0;
-	}
-#endif	/* NCP_IOC_GETMOUNTUID_INT */
+	char* bouncebuffer;
 
 	switch (cmd) {
 	case NCP_IOC_NCPREQUEST:
@@ -57,21 +41,21 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		    && (current->uid != server->m.mounted_uid)) {
 			return -EACCES;
 		}
-		if ((result = verify_area(VERIFY_READ, (char *) arg,
-					  sizeof(request))) != 0) {
-			return result;
-		}
-		copy_from_user(&request, (struct ncp_ioctl_request *) arg,
-			       sizeof(request));
+		if (copy_from_user(&request, (struct ncp_ioctl_request *) arg,
+			       sizeof(request)))
+			return -EFAULT;
 
 		if ((request.function > 255)
 		    || (request.size >
 		  NCP_PACKET_SIZE - sizeof(struct ncp_request_header))) {
 			return -EINVAL;
 		}
-		if ((result = verify_area(VERIFY_WRITE, (char *) request.data,
-					  NCP_PACKET_SIZE)) != 0) {
-			return result;
+		bouncebuffer = kmalloc(NCP_PACKET_SIZE, GFP_NFS);
+		if (!bouncebuffer)
+			return -ENOMEM;
+		if (copy_from_user(bouncebuffer, request.data, request.size)) {
+			kfree(bouncebuffer);
+			return -EFAULT;
 		}
 		ncp_lock_server(server);
 
@@ -80,17 +64,22 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 
 		server->has_subfunction = 0;
 		server->current_size = request.size;
-		copy_from_user(server->packet, request.data, request.size);
+		memcpy(server->packet, bouncebuffer, request.size);
 
-		ncp_request(server, request.function);
-
-		DPRINTK(KERN_DEBUG "ncp_ioctl: copy %d bytes\n",
-			server->reply_size);
-		copy_to_user(request.data, server->packet, server->reply_size);
-
+		result = ncp_request2(server, request.function, 
+			bouncebuffer, NCP_PACKET_SIZE);
+		if (result < 0)
+			result = -EIO;
+		else
+			result = server->reply_size;
 		ncp_unlock_server(server);
-
-		return server->reply_size;
+		DPRINTK("ncp_ioctl: copy %d bytes\n",
+			result);
+		if (result >= 0)
+			if (copy_to_user(request.data, bouncebuffer, result))
+				result = -EFAULT;
+		kfree(bouncebuffer);
+		return result;
 
 	case NCP_IOC_CONN_LOGGED_IN:
 
@@ -98,48 +87,82 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		    && (current->uid != server->m.mounted_uid)) {
 			return -EACCES;
 		}
-		if (server->root_setuped) return -EBUSY;
+		if (!(server->m.int_flags & NCP_IMOUNT_LOGGEDIN_POSSIBLE))
+			return -EINVAL;
+		if (server->root_setuped)
+			return -EBUSY;
 		server->root_setuped = 1;
-		return ncp_conn_logged_in(server);
+		return ncp_conn_logged_in(inode->i_sb);
 
 	case NCP_IOC_GET_FS_INFO:
+		{
+			struct ncp_fs_info info;
 
-		if ((permission(inode, MAY_WRITE) != 0)
-		    && (current->uid != server->m.mounted_uid)) {
-			return -EACCES;
-		}
-		if ((result = verify_area(VERIFY_WRITE, (char *) arg,
-					  sizeof(info))) != 0) {
-			return result;
-		}
-		copy_from_user(&info, (struct ncp_fs_info *) arg, sizeof(info));
+			if ((permission(inode, MAY_WRITE) != 0)
+			    && (current->uid != server->m.mounted_uid)) {
+				return -EACCES;
+			}
+			if (copy_from_user(&info, (struct ncp_fs_info *) arg, 
+				sizeof(info)))
+				return -EFAULT;
 
-		if (info.version != NCP_GET_FS_INFO_VERSION) {
-			DPRINTK(KERN_DEBUG "info.version invalid: %d\n", info.version);
-			return -EINVAL;
-		}
-		/* TODO: info.addr = server->m.serv_addr; */
-		info.mounted_uid	= server->m.mounted_uid;
-		info.connection		= server->connection;
-		info.buffer_size	= server->buffer_size;
-		info.volume_number	= NCP_FINFO(inode)->volNumber;
-		info.directory_id	= NCP_FINFO(inode)->DosDirNum;
+			if (info.version != NCP_GET_FS_INFO_VERSION) {
+				DPRINTK("info.version invalid: %d\n", info.version);
+				return -EINVAL;
+			}
+			/* TODO: info.addr = server->m.serv_addr; */
+			info.mounted_uid	= NEW_TO_OLD_UID(server->m.mounted_uid);
+			info.connection		= server->connection;
+			info.buffer_size	= server->buffer_size;
+			info.volume_number	= NCP_FINFO(inode)->volNumber;
+			info.directory_id	= NCP_FINFO(inode)->DosDirNum;
 
-		copy_to_user((struct ncp_fs_info *) arg, &info, sizeof(info));
-		return 0;
-
-	case NCP_IOC_GETMOUNTUID:
-
-		if ((permission(inode, MAY_READ) != 0)
-		    && (current->uid != server->m.mounted_uid)) {
-			return -EACCES;
+			if (copy_to_user((struct ncp_fs_info *) arg, &info, 
+				sizeof(info))) return -EFAULT;
+			return 0;
 		}
-		if ((result = verify_area(VERIFY_WRITE, (uid_t *) arg,
-					  sizeof(uid_t))) != 0) {
-			return result;
+
+	case NCP_IOC_GET_FS_INFO_V2:
+		{
+			struct ncp_fs_info_v2 info2;
+
+			if ((permission(inode, MAY_WRITE) != 0)
+			    && (current->uid != server->m.mounted_uid)) {
+				return -EACCES;
+			}
+			if (copy_from_user(&info2, (struct ncp_fs_info_v2 *) arg, 
+				sizeof(info2)))
+				return -EFAULT;
+
+			if (info2.version != NCP_GET_FS_INFO_VERSION_V2) {
+				DPRINTK("info.version invalid: %d\n", info2.version);
+				return -EINVAL;
+			}
+			info2.mounted_uid   = server->m.mounted_uid;
+			info2.connection    = server->connection;
+			info2.buffer_size   = server->buffer_size;
+			info2.volume_number = NCP_FINFO(inode)->volNumber;
+			info2.directory_id  = NCP_FINFO(inode)->DosDirNum;
+			info2.dummy1 = info2.dummy2 = info2.dummy3 = 0;
+
+			if (copy_to_user((struct ncp_fs_info_v2 *) arg, &info2, 
+				sizeof(info2))) return -EFAULT;
+			return 0;
 		}
-		put_user(server->m.mounted_uid, (uid_t *) arg);
-		return 0;
+
+	case NCP_IOC_GETMOUNTUID2:
+		{
+			unsigned long tmp = server->m.mounted_uid;
+
+			if (   (permission(inode, MAY_READ) != 0)
+			    && (current->uid != server->m.mounted_uid))
+			{
+				return -EACCES;
+			}
+			if (put_user(tmp, (unsigned long*) arg)) 
+				return -EFAULT;
+			return 0;
+		}
 
 #ifdef CONFIG_NCPFS_MOUNT_SUBDIR
 	case NCP_IOC_GETROOT:
@@ -152,9 +175,19 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 				return -EACCES;
 			}
 			if (server->m.mounted_vol[0]) {
-				sr.volNumber = server->root.finfo.i.volNumber;
-				sr.dirEntNum = server->root.finfo.i.dirEntNum;
-				sr.namespace = server->name_space[sr.volNumber];
+				struct dentry* dentry = inode->i_sb->s_root;
+
+				if (dentry) {
+					struct inode* inode = dentry->d_inode;
+				
+					if (inode) {
+						sr.volNumber = NCP_FINFO(inode)->volNumber;
+						sr.dirEntNum = NCP_FINFO(inode)->dirEntNum;
+						sr.namespace = server->name_space[sr.volNumber];
+					} else
+						DPRINTK("ncpfs: s_root->d_inode==NULL\n");
+				} else
+					DPRINTK("ncpfs: s_root==NULL\n");
 			} else {
 				sr.volNumber = -1;
 				sr.namespace = 0;
@@ -168,6 +201,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 	case NCP_IOC_SETROOT:
 		{
 			struct ncp_setroot_ioctl sr;
+			struct nw_info_struct i;
 			struct dentry* dentry;
 
 			if (   (permission(inode, MAY_WRITE) != 0)
@@ -181,31 +215,30 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 					   sizeof(sr))) return -EFAULT;
 			if (sr.volNumber < 0) {
 				server->m.mounted_vol[0] = 0;
-				server->root.finfo.i.volNumber = NCP_NUMBER_OF_VOLUMES + 1;
-				server->root.finfo.i.dirEntNum = 0;
-				server->root.finfo.i.DosDirNum = 0;
+				i.volNumber = NCP_NUMBER_OF_VOLUMES + 1;
+				i.dirEntNum = 0;
+				i.DosDirNum = 0;
 			} else if (sr.volNumber >= NCP_NUMBER_OF_VOLUMES) {
 				return -EINVAL;
-			} else {
-				if (ncp_mount_subdir(server, sr.volNumber, sr.namespace, sr.dirEntNum)) {
+			} else
+				if (ncp_mount_subdir(server, &i, sr.volNumber,
+						sr.namespace, sr.dirEntNum))
 					return -ENOENT;
-				}
-			}
-			dentry = server->root_dentry;
+
+			dentry = inode->i_sb->s_root;
 			server->root_setuped = 1;
 			if (dentry) {
 				struct inode* inode = dentry->d_inode;
 				
 				if (inode) {
-					NCP_FINFO(inode)->volNumber = server->root.finfo.i.volNumber;
-					NCP_FINFO(inode)->dirEntNum = server->root.finfo.i.dirEntNum;
-					NCP_FINFO(inode)->DosDirNum = server->root.finfo.i.DosDirNum;
-				} else {
-					DPRINTK(KERN_DEBUG "ncpfs: root_dentry->d_inode==NULL\n");
-				}
-			} else {
-				DPRINTK(KERN_DEBUG "ncpfs: root_dentry==NULL\n");
-			}
+					NCP_FINFO(inode)->volNumber = i.volNumber;
+					NCP_FINFO(inode)->dirEntNum = i.dirEntNum;
+					NCP_FINFO(inode)->DosDirNum = i.DosDirNum;
+				} else
+					DPRINTK("ncpfs: s_root->d_inode==NULL\n");
+			} else
+				DPRINTK("ncpfs: s_root==NULL\n");
+
 			return 0;
 		}
 #endif	/* CONFIG_NCPFS_MOUNT_SUBDIR */
@@ -297,6 +330,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 				default:
 						return -EINVAL;
 			}
+			/* locking needs both read and write access */
 			if ((result = ncp_make_open(inode, O_RDWR)) != 0)
 			{
 				return result;
@@ -345,19 +379,13 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 
 #ifdef CONFIG_NCPFS_NDS_DOMAINS
 	case NCP_IOC_GETOBJECTNAME:
-		if (   (permission(inode, MAY_READ) != 0)
-		    && (current->uid != server->m.mounted_uid)) {
+		if (current->uid != server->m.mounted_uid) {
 			return -EACCES;
 		}
 		{
 			struct ncp_objectname_ioctl user;
 			int outl;
 
-			if ((result = verify_area(VERIFY_WRITE,
-					   (struct ncp_objectname_ioctl*)arg,
-					   sizeof(user))) != 0) {
-				return result;
-			}
 			if (copy_from_user(&user, 
 					   (struct ncp_objectname_ioctl*)arg,
 					   sizeof(user))) return -EFAULT;
@@ -377,8 +405,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 			return 0;
 		}
 	case NCP_IOC_SETOBJECTNAME:
-		if (   (permission(inode, MAY_WRITE) != 0)
-		    && (current->uid != server->m.mounted_uid)) {
+		if (current->uid != server->m.mounted_uid) {
 			return -EACCES;
 		}
 		{
@@ -422,19 +449,13 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 			return 0;
 		}
 	case NCP_IOC_GETPRIVATEDATA:
-		if (   (permission(inode, MAY_READ) != 0)
-		    && (current->uid != server->m.mounted_uid)) {
+		if (current->uid != server->m.mounted_uid) {
 			return -EACCES;
 		}
 		{
 			struct ncp_privatedata_ioctl user;
 			int outl;
 
-			if ((result = verify_area(VERIFY_WRITE,
-					   (struct ncp_privatedata_ioctl*)arg,
-					   sizeof(user))) != 0) {
-				return result;
-			}
 			if (copy_from_user(&user, 
 					   (struct ncp_privatedata_ioctl*)arg,
 					   sizeof(user))) return -EFAULT;
@@ -452,8 +473,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 			return 0;
 		}
 	case NCP_IOC_SETPRIVATEDATA:
-		if (   (permission(inode, MAY_WRITE) != 0)
-		    && (current->uid != server->m.mounted_uid)) {
+		if (current->uid != server->m.mounted_uid) {
 			return -EACCES;
 		}
 		{
@@ -493,12 +513,12 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
  * Thanks Petr Vandrovec for idea and many hints.
  */
 	case NCP_IOC_SETCHARSETS:
-		if (   (permission(inode, MAY_WRITE) != 0)
-		    && (current->uid != server->m.mounted_uid))
-		{
+		if ((permission(inode, MAY_WRITE) != 0) &&
+				 (current->uid != server->m.mounted_uid))
 			return -EACCES;
-		}
-		if (server->root_setuped) return -EBUSY;
+		if (server->root_setuped)
+			return -EBUSY;
+
 		{
 			struct ncp_nls_ioctl user;
 			struct nls_table *codepage;
@@ -506,30 +526,39 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 			struct nls_table *oldset_io;
 			struct nls_table *oldset_cp;
 			
-			if (copy_from_user(&user, 
-					   (struct ncp_nls_ioctl*)arg,
-					    sizeof(user))) return -EFAULT;
+			if (copy_from_user(&user, (struct ncp_nls_ioctl*)arg,
+					sizeof(user)))
+				return -EFAULT;
 
 			codepage = NULL;
-			if (!user.codepage[0]) {
+			user.codepage[NCP_IOCSNAME_LEN] = 0;
+			if (!user.codepage[0] ||
+					!strcmp(user.codepage, "default"))
 				codepage = load_nls_default();
-			}
 			else {
 				codepage = load_nls(user.codepage);
-				if (! codepage) {
+				if (!codepage) {
 					return -EBADRQC;
 				}
 			}
 
 			iocharset = NULL;
-			if (user.iocharset[0] == 0) {
+			user.iocharset[NCP_IOCSNAME_LEN] = 0;
+			if (!user.iocharset[0] ||
+					!strcmp(user.iocharset, "default")) {
 				iocharset = load_nls_default();
-			}
-			else {
-				iocharset = load_nls(user.iocharset);
-				if (! iocharset) {
-					unload_nls(codepage);
-					return -EBADRQC;
+				NCP_CLR_FLAG(server, NCP_FLAG_UTF8);
+			} else {
+				if (!strcmp(user.iocharset, "utf8")) {
+					iocharset = load_nls_default();
+					NCP_SET_FLAG(server, NCP_FLAG_UTF8);
+				} else {
+					iocharset = load_nls(user.iocharset);
+					if (!iocharset) {
+						unload_nls(codepage);
+						return -EBADRQC;
+					}
+					NCP_CLR_FLAG(server, NCP_FLAG_UTF8);
 				}
 			}
 
@@ -537,20 +566,87 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 			server->nls_vol = codepage;
 			oldset_io = server->nls_io;
 			server->nls_io = iocharset;
-			server->nls_charsets = user;
-			if (oldset_cp) unload_nls(oldset_cp);
-			if (oldset_io) unload_nls(oldset_io);
+
+			if (oldset_cp)
+				unload_nls(oldset_cp);
+			if (oldset_io)
+				unload_nls(oldset_io);
+
 			return 0;
 		}
 		
 	case NCP_IOC_GETCHARSETS: /* not tested */
-		if (copy_to_user((struct ncp_nls_ioctl*)arg,
-				&(server->nls_charsets),
-				sizeof(server->nls_charsets))) return -EFAULT;
-		return 0;
-#endif /* CONFIG_NCPFS_NLS */
+		{
+			struct ncp_nls_ioctl user;
+			int len;
 
-	default:
-		return -EINVAL;
+			memset(&user, 0, sizeof(user));
+			if (server->nls_vol && server->nls_vol->charset) {
+				len = strlen(server->nls_vol->charset);
+				if (len > NCP_IOCSNAME_LEN)
+					len = NCP_IOCSNAME_LEN;
+				strncpy(user.codepage,
+						server->nls_vol->charset, len);
+				user.codepage[len] = 0;
+			}
+
+			if (NCP_IS_FLAG(server, NCP_FLAG_UTF8))
+				strcpy(user.iocharset, "utf8");
+			else
+				if (server->nls_io && server->nls_io->charset) {
+					len = strlen(server->nls_io->charset);
+					if (len > NCP_IOCSNAME_LEN)
+						len = NCP_IOCSNAME_LEN;
+					strncpy(user.iocharset,
+						server->nls_io->charset, len);
+					user.iocharset[len] = 0;
+				}
+
+			if (copy_to_user((struct ncp_nls_ioctl*)arg, &user,
+					sizeof(user)))
+				return -EFAULT;
+
+			return 0;
+		}
+#endif /* CONFIG_NCPFS_NLS */
+	case NCP_IOC_SETDENTRYTTL:
+		if ((permission(inode, MAY_WRITE) != 0) &&
+				 (current->uid != server->m.mounted_uid))
+			return -EACCES;
+		{
+			u_int32_t user;
+
+			if (copy_from_user(&user, (u_int32_t*)arg, sizeof(user)))
+				return -EFAULT;
+			/* 20 secs at most... */
+			if (user > 20000)
+				return -EINVAL;
+			user = (user * HZ) / 1000;
+			server->dentry_ttl = user;
+			return 0;
+		}
+		
+	case NCP_IOC_GETDENTRYTTL:
+		{
+			u_int32_t user = (server->dentry_ttl * 1000) / HZ;
+			if (copy_to_user((u_int32_t*)arg, &user, sizeof(user)))
+				return -EFAULT;
+			return 0;
+		}
+
 	}
+/* #ifdef CONFIG_UID16 */
+	/* NCP_IOC_GETMOUNTUID may be same as NCP_IOC_GETMOUNTUID2,
+           so we have this out of switch */
+	if (cmd == NCP_IOC_GETMOUNTUID) {
+		if ((permission(inode, MAY_READ) != 0)
+		    && (current->uid != server->m.mounted_uid)) {
+			return -EACCES;
+		}
+		if (put_user(NEW_TO_OLD_UID(server->m.mounted_uid), (__kernel_uid_t *) arg))
+			return -EFAULT;
+		return 0;
+	}
+/* #endif */
+	return -EINVAL;
 }

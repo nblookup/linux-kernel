@@ -4,7 +4,7 @@
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>
  *
- *	$Id: ipv6.h,v 1.16 1999/04/22 10:07:27 davem Exp $
+ *	$Id: ipv6.h,v 1.20 2000/02/27 19:51:38 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -19,6 +19,8 @@
 #include <asm/hardirq.h>
 #include <net/ndisc.h>
 #include <net/flow.h>
+
+#define SIN6_LEN_RFC2133	24
 
 /*
  *	NextHeader field of IPv6 header
@@ -86,9 +88,19 @@ struct frag_hdr {
 
 #include <net/sock.h>
 
-extern struct ipv6_mib		ipv6_statistics;
-extern struct icmpv6_mib	icmpv6_statistics;
-extern struct udp_mib		udp_stats_in6;
+extern struct ipv6_mib		ipv6_statistics[NR_CPUS*2];
+#define IP6_INC_STATS(field)		SNMP_INC_STATS(ipv6_statistics, field)
+#define IP6_INC_STATS_BH(field)		SNMP_INC_STATS_BH(ipv6_statistics, field)
+#define IP6_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(ipv6_statistics, field)
+extern struct icmpv6_mib	icmpv6_statistics[NR_CPUS*2];
+#define ICMP6_INC_STATS(field)		SNMP_INC_STATS(icmpv6_statistics, field)
+#define ICMP6_INC_STATS_BH(field)	SNMP_INC_STATS_BH(icmpv6_statistics, field)
+#define ICMP6_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(icmpv6_statistics, field)
+extern struct udp_mib		udp_stats_in6[NR_CPUS*2];
+#define UDP6_INC_STATS(field)		SNMP_INC_STATS(udp_stats_in6, field)
+#define UDP6_INC_STATS_BH(field)	SNMP_INC_STATS_BH(udp_stats_in6, field)
+#define UDP6_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(udp_stats_in6, field)
+extern atomic_t			inet6_sock_nr;
 
 struct ip6_ra_chain
 {
@@ -99,6 +111,7 @@ struct ip6_ra_chain
 };
 
 extern struct ip6_ra_chain	*ip6_ra_chain;
+extern rwlock_t ip6_ra_lock;
 
 /*
    This structure is prepared by protocol, when parsing
@@ -232,7 +245,7 @@ extern __inline__ int ipv6_addr_any(struct in6_addr *a)
  */
 
 extern int			ipv6_rcv(struct sk_buff *skb, 
-					 struct device *dev, 
+					 struct net_device *dev, 
 					 struct packet_type *pt);
 
 /*
@@ -245,7 +258,7 @@ extern int			ip6_xmit(struct sock *sk,
 
 extern int			ip6_nd_hdr(struct sock *sk,
 					   struct sk_buff *skb,
-					   struct device *dev,
+					   struct net_device *dev,
 					   struct in6_addr *saddr,
 					   struct in6_addr *daddr,
 					   int proto, int len);

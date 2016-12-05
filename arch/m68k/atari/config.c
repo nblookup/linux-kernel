@@ -30,6 +30,7 @@
 #include <linux/console.h>
 #include <linux/init.h>
 #include <linux/delay.h>
+#include <linux/ioport.h>
 
 #include <asm/bootinfo.h>
 #include <asm/setup.h>
@@ -111,8 +112,8 @@ extern void (*kd_mksound)(unsigned int, unsigned int);
  */
   
 #if 0
-__initfunc(static int
-hwreg_present_bywrite(volatile void *regp, unsigned char val))
+static int __init
+hwreg_present_bywrite(volatile void *regp, unsigned char val)
 {
     int		ret;
     long	save_sp, save_vbr;
@@ -150,7 +151,7 @@ hwreg_present_bywrite(volatile void *regp, unsigned char val))
  * should be readable without trouble (from channel A!).
  */
 
-__initfunc(static int scc_test( volatile char *ctla ))
+static int __init scc_test( volatile char *ctla )
 {
 	if (!hwreg_present( ctla ))
 		return( 0 );
@@ -177,7 +178,7 @@ __initfunc(static int scc_test( volatile char *ctla ))
      *  Parse an Atari-specific record in the bootinfo
      */
 
-__initfunc(int atari_parse_bootinfo(const struct bi_record *record))
+int __init atari_parse_bootinfo(const struct bi_record *record)
 {
     int unknown = 0;
     const u_long *data = record->data;
@@ -197,7 +198,7 @@ __initfunc(int atari_parse_bootinfo(const struct bi_record *record))
 
 
 /* Parse the Atari-specific switches= option. */
-__initfunc(void atari_switches_setup( const char *str, unsigned len ))
+void __init atari_switches_setup( const char *str, unsigned len )
 {
     char switches[len+1];
     char *p;
@@ -238,13 +239,16 @@ __initfunc(void atari_switches_setup( const char *str, unsigned len ))
      *  Setup the Atari configuration info
      */
 
-__initfunc(void config_atari(void))
+void __init config_atari(void)
 {
     unsigned short tos_version;
 
     memset(&atari_hw_present, 0, sizeof(atari_hw_present));
 
     atari_debug_init();
+
+    ioport_resource.end  = 0xFFFFFFFF;  /* Change size of I/O space from 64KB
+                                           to 4GB. */
 
     mach_sched_init      = atari_sched_init;
     mach_keyb_init       = atari_keyb_init;
@@ -506,24 +510,6 @@ __initfunc(void config_atari(void))
                                          * serialized, writable */
               : "d0" );
 
-    }
-
-    /*
-     * On the Hades map the PCI memory, I/O and configuration areas
-     * (0x80000000 - 0xbfffffff).
-     *
-     * Settings: supervisor only, non-cacheable, serialized, read and write.
-     */
-
-    if (MACH_IS_HADES) {
-        __asm__ __volatile__ ("movel %0,%/d0\n\t"
-                              ".chip 68040\n\t"
-                              "movec %%d0,%%itt0\n\t"
-                              "movec %%d0,%%dtt0\n\t"
-                              ".chip 68k\n\t"
-                              : /* no outputs */
-                              : "g" (0x803fa040)
-                              : "d0");
     }
 
     /* Fetch tos version at Physical 2 */

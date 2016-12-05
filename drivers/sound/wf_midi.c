@@ -42,21 +42,20 @@
  * Copyright (C) by Paul Barton-Davis 1998
  * Some portions of this file are derived from work that is:
  *
- *    Copyright (C) by Hannu Savolainen 1993-1996
+ *    CopyriGht (C) by Hannu Savolainen 1993-1996
  *
  * USS/Lite for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
  * Version 2 (June 1991). See the "COPYING" file distributed with this software
  * for more info.
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include "sound_config.h"
 #include "soundmodule.h"
 
 #include <linux/wavefront.h>
 
-#if defined(CONFIG_SOUND_WAVEFRONT_MODULE) && defined(MODULE)
+#ifdef MODULE
 
 struct wf_mpu_config {
 	int             base;
@@ -87,37 +86,27 @@ static void start_uart_mode (void);
 #define	MPU_ACK		0xFE
 #define	UART_MODE_ON	0x3F
 
-static inline int 
-wf_mpu_status (void)
-
+static inline int wf_mpu_status (void)
 {
 	return inb (STATPORT (phys_dev));
 }
 
-static inline int 
-input_avail (void)
-
+static inline int input_avail (void)
 {
 	return !(wf_mpu_status() & INPUT_AVAIL);
 }
 
-static inline int
-output_ready (void)
-
+static inline int output_ready (void)
 {
 	return !(wf_mpu_status() & OUTPUT_READY);
 }
 
-static inline int 
-read_data (void)
-
+static inline int  read_data (void)
 {
 	return inb (DATAPORT (phys_dev));
 }
 
-static inline void 
-write_data (unsigned char byte)
-
+static inline void write_data (unsigned char byte)
 {
 	outb (byte, DATAPORT (phys_dev));
 }
@@ -536,28 +525,22 @@ wf_mpu_out (int dev, unsigned char midi_byte)
 	return 1;
 }
 
-static int
-wf_mpu_start_read (int dev)
-{
+static inline int wf_mpu_start_read (int dev) {
 	return 0;
 }
 
-static int
-wf_mpu_end_read (int dev)
-{
+static inline int wf_mpu_end_read (int dev) {
 	return 0;
 }
 
-static int
-wf_mpu_ioctl (int dev, unsigned cmd, caddr_t arg)
+static int wf_mpu_ioctl (int dev, unsigned cmd, caddr_t arg)
 {
 	printk (KERN_WARNING
 		"WF-MPU: Intelligent mode not supported by hardware.\n");
 	return -(EINVAL);
 }
 
-static int
-wf_mpu_buffer_status (int dev)
+static int wf_mpu_buffer_status (int dev)
 {
 	return 0;
 }
@@ -803,7 +786,7 @@ virtual_midi_disable (void)
 	return 0;
 }
 
-__initfunc (static int detect_wf_mpu (int irq, int io_base))
+static int __init detect_wf_mpu (int irq, int io_base)
 
 {
 	if (check_region (io_base, 2)) {
@@ -820,8 +803,7 @@ __initfunc (static int detect_wf_mpu (int irq, int io_base))
 	return 0;
 }
 
-__initfunc (int install_wf_mpu (void)) 
-
+int __init install_wf_mpu (void)
 {
 	if ((phys_dev->devno = sound_alloc_mididev()) < 0){
 
@@ -902,31 +884,4 @@ start_uart_mode (void)
 
 	restore_flags (flags);
 }
-
-#ifdef OSS_SUPPORT
-
-int
-probe_wf_mpu (struct address_info *hw_config)
-
-{
-	return !detect_wf_mpu (hw_config->irq, hw_config->io_base);
-}
-
-void
-attach_wf_mpu (struct address_info *hw_config)
-
-{
-	(void) install_wf_mpu ();
-}
-
-void
-unload_wf_mpu (void)
-{
-	uninstall_wf_mpu ();
-}
-
-#endif OSS_SUPPORT
-
-#endif CONFIG_SOUND_WAVEFRONT_MODULE_AND_MODULE
-
-
+#endif

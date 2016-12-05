@@ -14,6 +14,10 @@
  *		1994/03/15 by Alberto Vignani/Davide Parodi @crf.it
  *
  *	Split into 2 CPU specific files by Alan Cox to keep #ifdef noise down.
+ *
+ *	1999/10/5	Proper register args for newer GCCs and minor bugs
+ *			fixed - Petko Manolov (petkan@spct.net)
+ *	1999/10/14	3DNow memscpy() added - Petkan
  */
 
 #define __HAVE_ARCH_STRCPY
@@ -101,7 +105,7 @@ __asm__ __volatile__(
 	"incl %1\n\t"
 	"testb %b0,%b0\n\t"
 	"jne 2b\n"
-	"3:\txorl %0,%0\n\t"
+	"3:\txorb %0,%0\n\t"
 	"movb %b0,(%1)\n\t"
 	:"=q" (dummy), "=r" (tmp), "=r" (src), "=r" (count)
 	:"1"  (tmp), "2"  (src), "3"  (count)
@@ -180,9 +184,9 @@ return __res;
 #define __HAVE_ARCH_STRRCHR
 extern inline char * strrchr(const char * s, int c)
 {
+int	d0, d1;
 register char * __res;
 __asm__ __volatile__(
-	"cld\n\t"
 	"movb %%al,%%ah\n"
 	"1:\tlodsb\n\t"
 	"cmpb %%ah,%%al\n\t"
@@ -190,17 +194,18 @@ __asm__ __volatile__(
 	"leal -1(%%esi),%0\n"
 	"2:\ttestb %%al,%%al\n\t"
 	"jne 1b"
-	:"=d" (__res):"0" (0),"S" (s),"a" (c):"ax","si");
+	:"=d" (__res), "=&S" (d0), "=&a" (d1)
+	:"0" (0), "1" (s), "2" (c));
 return __res;
 }
 
 #define __HAVE_ARCH_STRSPN
 extern inline size_t strspn(const char * cs, const char * ct)
 {
+int	d0, d1;
 register char * __res;
 __asm__ __volatile__(
-	"cld\n\t"
-	"movl %4,%%edi\n\t"
+	"movl %6,%%edi\n\t"
 	"repne\n\t"
 	"scasb\n\t"
 	"notl %%ecx\n\t"
@@ -209,24 +214,25 @@ __asm__ __volatile__(
 	"1:\tlodsb\n\t"
 	"testb %%al,%%al\n\t"
 	"je 2f\n\t"
-	"movl %4,%%edi\n\t"
+	"movl %6,%%edi\n\t"
 	"movl %%edx,%%ecx\n\t"
 	"repne\n\t"
 	"scasb\n\t"
 	"je 1b\n"
 	"2:\tdecl %0"
-	:"=S" (__res):"a" (0),"c" (0xffffffff),"0" (cs),"g" (ct)
-	:"ax","cx","dx","di");
+	:"=S" (__res), "=&a" (d0), "=&c" (d1)
+	:"0" (cs), "1" (0), "2" (0xffffffff), "g" (ct)
+	:"dx", "di");
 return __res-cs;
 }
 
 #define __HAVE_ARCH_STRCSPN
 extern inline size_t strcspn(const char * cs, const char * ct)
 {
+int	d0, d1;
 register char * __res;
 __asm__ __volatile__(
-	"cld\n\t"
-	"movl %4,%%edi\n\t"
+	"movl %6,%%edi\n\t"
 	"repne\n\t"
 	"scasb\n\t"
 	"notl %%ecx\n\t"
@@ -235,24 +241,26 @@ __asm__ __volatile__(
 	"1:\tlodsb\n\t"
 	"testb %%al,%%al\n\t"
 	"je 2f\n\t"
-	"movl %4,%%edi\n\t"
+	"movl %6,%%edi\n\t"
 	"movl %%edx,%%ecx\n\t"
 	"repne\n\t"
 	"scasb\n\t"
 	"jne 1b\n"
 	"2:\tdecl %0"
-	:"=S" (__res):"a" (0),"c" (0xffffffff),"0" (cs),"g" (ct)
-	:"ax","cx","dx","di");
+	:"=S" (__res), "=&a" (d0), "=&c" (d1)
+	:"0" (cs), "1" (0), "2" (0xffffffff), "g" (ct)
+	:"dx", "di");
 return __res-cs;
 }
 
+#if 0
 #define __HAVE_ARCH_STRPBRK
 extern inline char * strpbrk(const char * cs,const char * ct)
 {
+int	d0, d1;
 register char * __res;
 __asm__ __volatile__(
-	"cld\n\t"
-	"movl %4,%%edi\n\t"
+	"movl %6,%%edi\n\t"
 	"repne\n\t"
 	"scasb\n\t"
 	"notl %%ecx\n\t"
@@ -261,7 +269,7 @@ __asm__ __volatile__(
 	"1:\tlodsb\n\t"
 	"testb %%al,%%al\n\t"
 	"je 2f\n\t"
-	"movl %4,%%edi\n\t"
+	"movl %6,%%edi\n\t"
 	"movl %%edx,%%ecx\n\t"
 	"repne\n\t"
 	"scasb\n\t"
@@ -270,24 +278,27 @@ __asm__ __volatile__(
 	"jmp 3f\n"
 	"2:\txorl %0,%0\n"
 	"3:"
-	:"=S" (__res):"a" (0),"c" (0xffffffff),"0" (cs),"g" (ct)
-	:"ax","cx","dx","di");
+	:"=S" (__res), "=&a" (d0), "=&c" (d1)
+	:"0" (cs), "1" (0), "2" (0xffffffff), "g" (ct)
+	:"dx", "di");
 return __res;
 }
+#endif
 
+#if 0
 #define __HAVE_ARCH_STRSTR
 extern inline char * strstr(const char * cs,const char * ct)
 {
+int	d0, d1;
 register char * __res;
 __asm__ __volatile__(
-	"cld\n\t" \
-	"movl %4,%%edi\n\t"
+	"movl %6,%%edi\n\t"
 	"repne\n\t"
 	"scasb\n\t"
 	"notl %%ecx\n\t"
 	"decl %%ecx\n\t"	/* NOTE! This also sets Z if searchstring='' */
 	"movl %%ecx,%%edx\n"
-	"1:\tmovl %4,%%edi\n\t"
+	"1:\tmovl %6,%%edi\n\t"
 	"movl %%esi,%%eax\n\t"
 	"movl %%edx,%%ecx\n\t"
 	"repe\n\t"
@@ -299,10 +310,12 @@ __asm__ __volatile__(
 	"jne 1b\n\t"
 	"xorl %%eax,%%eax\n\t"
 	"2:"
-	:"=a" (__res):"0" (0),"c" (0xffffffff),"S" (cs),"g" (ct)
-	:"cx","dx","di","si");
+	:"=a" (__res), "=&c" (d0), "=&S" (d1)
+	:"0" (0), "1" (0xffffffff), "2" (cs), "g" (ct)
+	:"dx", "di");
 return __res;
 }
+#endif
 
 #define __HAVE_ARCH_STRLEN
 extern inline size_t strlen(const char * s)
@@ -328,9 +341,10 @@ return (tmp-s-1);
 #define __HAVE_ARCH_STRNLEN
 extern inline size_t strnlen(const char * s, size_t count)
 {
+int	d0;
 register int __res;
 __asm__ __volatile__(
-	"movl %1,%0\n\t"
+	"movl %3,%0\n\t"
 	"jmp 2f\n"
 	"1:\tcmpb $0,(%0)\n\t"
 	"je 3f\n\t"
@@ -338,14 +352,14 @@ __asm__ __volatile__(
 	"2:\tdecl %2\n\t"
 	"cmpl $-1,%2\n\t"
 	"jne 1b\n"
-	"3:\tsubl %1,%0"
-	:"=a" (__res)
-	:"c" (s),"d" (count)
-	:"dx");
+	"3:\tsubl %3,%0"
+	:"=a" (__res), "=&d" (d0)
+	:"1" (count), "c" (s));
 return __res;
 }
 /* end of additional stuff */
 
+#if 0
 #define __HAVE_ARCH_STRTOK
 extern inline char * strtok(char * s,const char * ct)
 {
@@ -359,7 +373,6 @@ __asm__ __volatile__(
 	"1:\txorl %0,%0\n\t"
 	"movl $-1,%%ecx\n\t"
 	"xorl %%eax,%%eax\n\t"
-	"cld\n\t"
 	"movl %4,%%edi\n\t"
 	"repne\n\t"
 	"scasb\n\t"
@@ -406,19 +419,7 @@ __asm__ __volatile__(
 	:"ax","cx","dx","di","memory");
 return __res;
 }
-
-#define __memcpy_c(d,s,count) \
-((count%4==0) ? \
- __memcpy_by4((d),(s),(count)) : \
- ((count%2==0) ? \
-  __memcpy_by2((d),(s),(count)) : \
-  __memcpy_g((d),(s),(count))))
-
-#define __HAVE_ARCH_MEMCPY
-#define memcpy(d,s,count) \
-(__builtin_constant_p(count) ? \
- __memcpy_c((d),(s),(count)) : \
- __memcpy_g((d),(s),(count)))
+#endif
 
 /*
  *	These ought to get tweaked to do some cache priming.
@@ -464,9 +465,9 @@ return (to);
 
 extern inline void * __memcpy_g(void * to, const void * from, size_t n)
 {
+int	d0, d1, d2;
 register void *tmp = (void *)to;
 __asm__ __volatile__ (
-	"cld\n\t"
 	"shrl $1,%%ecx\n\t"
 	"jnc 1f\n\t"
 	"movsb\n"
@@ -475,68 +476,125 @@ __asm__ __volatile__ (
 	"movsw\n"
 	"2:\trep\n\t"
 	"movsl"
-	: /* no output */
-	:"c" (n),"D" ((long) tmp),"S" ((long) from)
-	:"cx","di","si","memory");
+	:"=&c" (d0), "=&D" (d1), "=&S" (d2)
+	:"0" (n), "1" ((long) tmp), "2" ((long) from)
+	:"memory");
 return (to);
 }
 
+#define __memcpy_c(d,s,count) \
+((count%4==0) ? \
+ __memcpy_by4((d),(s),(count)) : \
+ ((count%2==0) ? \
+  __memcpy_by2((d),(s),(count)) : \
+  __memcpy_g((d),(s),(count))))
+  
+#define __memcpy(d,s,count) \
+(__builtin_constant_p(count) ? \
+ __memcpy_c((d),(s),(count)) : \
+ __memcpy_g((d),(s),(count)))
+ 
+#define __HAVE_ARCH_MEMCPY
+
+#include <linux/config.h>
+
+#ifdef CONFIG_X86_USE_3DNOW
+
+#include <linux/spinlock.h>
+#include <asm/system.h>
+#include <asm/ptrace.h>
+#include <linux/smp.h>
+#include <linux/interrupt.h>
+#include <asm/mmx.h>
+
+/*
+**      This CPU favours 3DNow strongly (eg AMD K6-II, K6-III, Athlon)
+*/
+
+extern inline void * __constant_memcpy3d(void * to, const void * from, size_t len)
+{
+	if(len<512 || in_interrupt())
+		return __memcpy_c(to, from, len);
+	return _mmx_memcpy(to, from, len);
+}
+
+extern __inline__ void *__memcpy3d(void *to, const void *from, size_t len)
+{
+	if(len<512 || in_interrupt())
+		return __memcpy_g(to, from, len);
+	return _mmx_memcpy(to, from, len);
+}
+
+#define memcpy(d, s, count) \
+(__builtin_constant_p(count) ? \
+ __constant_memcpy3d((d),(s),(count)) : \
+ __memcpy3d((d),(s),(count)))
+ 
+#else /* CONFIG_X86_USE_3DNOW */
+
+/*
+**	Generic routines
+*/
+
+#define memcpy(d, s, count) __memcpy(d, s, count)
+
+#endif /* CONFIG_X86_USE_3DNOW */ 
 
 #define __HAVE_ARCH_MEMMOVE
 extern inline void * memmove(void * dest,const void * src, size_t n)
 {
+int	d0, d1, d2;
 register void *tmp = (void *)dest;
 if (dest<src)
 __asm__ __volatile__ (
-	"cld\n\t"
 	"rep\n\t"
 	"movsb"
-	: /* no output */
-	:"c" (n),"S" (src),"D" (tmp)
-	:"cx","si","di");
+	:"=&c" (d0), "=&S" (d1), "=&D" (d2)
+	:"0" (n), "1" (src), "2" (tmp)
+	:"memory");
 else
 __asm__ __volatile__ (
 	"std\n\t"
 	"rep\n\t"
 	"movsb\n\t"
 	"cld"
-	: /* no output */
-	:"c" (n), "S" (n-1+(const char *)src), "D" (n-1+(char *)tmp)
-	:"cx","si","di","memory");
+	:"=&c" (d0), "=&S" (d1), "=&D" (d2)
+	:"0" (n), "1" (n-1+(const char *)src), "2" (n-1+(char *)tmp)
+	:"memory");
 return dest;
 }
 
 extern inline int memcmp(const void * cs,const void * ct,size_t count)
 {
+int	d0, d1, d2;
 register int __res;
 __asm__ __volatile__(
-	"cld\n\t"
 	"repe\n\t"
 	"cmpsb\n\t"
 	"je 1f\n\t"
 	"sbbl %0,%0\n\t"
 	"orb $1,%b0\n"
 	"1:"
-	:"=abd" (__res):"0" (0),"S" (cs),"D" (ct),"c" (count)
-	:"si","di","cx");
+	:"=a" (__res), "=&S" (d0), "=&D" (d1), "=&c" (d2)
+	:"0" (0), "1" (cs), "2" (ct), "3" (count));
 return __res;
 }
 
 #define __HAVE_ARCH_MEMCHR
 extern inline void * memchr(const void * cs,int c,size_t count)
 {
+int	d0;
 register void * __res;
 if (!count)
 	return NULL;
 __asm__ __volatile__(
-	"cld\n\t"
 	"repne\n\t"
 	"scasb\n\t"
 	"je 1f\n\t"
 	"movl $1,%0\n"
 	"1:\tdecl %0"
-	:"=D" (__res):"a" (c),"D" (cs),"c" (count)
-	:"cx");
+	:"=D" (__res), "=&c" (d0)
+	:"a" (c), "0" (cs), "1" (count));
 return __res;
 }
 
@@ -643,6 +701,7 @@ return s;
 
 extern inline void * __memset_cg(void * s, char c, size_t count)
 {
+int	d0, d1;
 register void *tmp = (void *)s;
 __asm__ __volatile__ (
 	"shrl $1,%%ecx\n\t"
@@ -651,14 +710,15 @@ __asm__ __volatile__ (
 	"jnc 1f\n\t"
 	"movb %%al,(%%edi)\n"
 	"1:"
-	: /* no output */
-	:"c" (count),"D" (tmp), "a" (0x0101U * (unsigned char) c)
-	:"cx","di","memory");
+	:"=&c" (d0), "=&D" (d1) 
+	:"a" (0x0101U * (unsigned char) c), "0" (count), "1" (tmp)
+	:"memory");
 return s;
 }
 
 extern inline void * __memset_gg(void * s,char c,size_t count)
 {
+int	d0, d1, d2;
 register void *tmp = (void *)s;
 __asm__ __volatile__ (
 	"movb %%al,%%ah\n\t"
@@ -668,9 +728,9 @@ __asm__ __volatile__ (
 	"jnc 1f\n\t"
 	"movb %%al,(%%edi)\n"
 	"1:"
-	: /* no output */
-	:"c" (count),"D" (tmp), "a" (c)
-	:"cx","di","memory");
+	:"=&c" (d0), "=&D" (d1), "=&D" (d2)
+	:"0" (count), "1" (tmp), "2" (c)
+	:"memory");
 return s;
 }
 
@@ -683,8 +743,7 @@ extern inline void * memscan(void * addr, int c, size_t size)
 {
 	if (!size)
 		return addr;
-	__asm__("cld
-		repnz; scasb
+	__asm__("repnz; scasb
 		jnz 1f
 		dec %%edi
 1:		"

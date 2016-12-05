@@ -1,7 +1,20 @@
 /*
  *	Video4Linux Colour QuickCam driver
- *	Copyright 1997-1998 Philip Blundell <philb@gnu.org>
+ *	Copyright 1997-2000 Philip Blundell <philb@gnu.org>
  *
+ *    Module parameters:
+ *
+ *	parport=auto      -- probe all parports (default)
+ *	parport=0         -- parport0 becomes qcam1
+ *	parport=2,0,1     -- parports 2,0,1 are tried in that order
+ *
+ *	probe=0		  -- do no probing, assume camera is present
+ *	probe=1		  -- use IEEE-1284 autoprobe data only (default)
+ *	probe=2		  -- probe aggressively for cameras
+ *
+ * The parport parameter controls which parports will be scanned.
+ * Scanning all parports causes some printers to print a garbage page.
+ *       -- March 14, 1999  Billy Donahue <billy@escape.com> 
  */
 
 #include <linux/module.h>
@@ -16,6 +29,7 @@
 #include <linux/sched.h>
 #include <linux/version.h>
 #include <linux/videodev.h>
+#include <asm/semaphore.h>
 #include <asm/uaccess.h>
 
 struct qcam_device {
@@ -28,7 +42,11 @@ struct qcam_device {
 	int contrast, brightness, whitebal;
 	int top, left;
 	unsigned int bidirectional;
+	struct semaphore lock;
 };
+
+/* cameras maximum */
+#define MAX_CAMS 4
 
 /* The three possible QuickCam modes */
 #define QC_MILLIONS	0x18
@@ -39,6 +57,11 @@ struct qcam_device {
 #define QC_DECIMATION_1		0
 #define QC_DECIMATION_2		2
 #define QC_DECIMATION_4		4
+
+#define BANNER "Colour QuickCam for Video4Linux v0.05"
+
+static int parport[MAX_CAMS] = { [1 ... MAX_CAMS-1] = -1 };
+static int probe = 2;
 
 static inline void qcam_set_ack(struct qcam_device *qcam, unsigned int i)
 {
@@ -157,9 +180,45 @@ static int qc_detect(struct qcam_device *qcam)
 {
 	unsigned int stat, ostat, i, count = 0;
 
+	/* The probe routine below is not very reliable.  The IEEE-1284
+	   probe takes precedence. */
+	/* XXX Currently parport provides no way to distinguish between
+	   "the IEEE probe was not done" and "the probe was done, but
+	   no device was found".  Fix this one day. */
+	if (qcam->pport->probe_info[0].class == PARPORT_CLASS_MEDIA
+	    && qcam->pport->probe_info[0].model
+	    && !strcmp(qcam->pdev->port->probe_info[0].model, 
+		       "Color QuickCam 2.0")) {
+		printk(KERN_DEBUG "QuickCam: Found by IEEE1284 probe.\n");
+		return 1;
+	}
+	
+	if (probe < 2)
+		return 0;
+
 	parport_write_control(qcam->pport, 0xc);
 
 	/* look for a heartbeat */
+	ostat = stat = parport_read_status(qcam->pport);
+	for (i=0; i<250; i++) 
+	{
+		mdelay(1);
+		stat = parport_read_status(qcam->pport);
+		if (ostat != stat) 
+		{
+			if (++count >= 3) return 1;
+			ostat = stat;
+		}
+	}
+
+	/* Reset the camera and try again */
+	parport_write_control(qcam->pport, 0xc);
+	parport_write_control(qcam->pport, 0x8);
+	mdelay(1);
+	parport_write_control(qcam->pport, 0xc);
+	mdelay(1);
+	count = 0;
+
 	ostat = stat = parport_read_status(qcam->pport);
 	for (i=0; i<250; i++) 
 	{
@@ -294,7 +353,7 @@ static long qc_capture(struct qcam_device *q, char *buf, unsigned long len)
 	if (is_bi_dir)
 	{
 		/* Turn the port around */
-		parport_frob_control(q->pport, 0x20, 0x20);
+		parport_data_reverse(q->pport);
 		mdelay(3);
 		qcam_set_ack(q, 0);
 		if (qcam_await_ready1(q, 1)) {
@@ -336,7 +395,7 @@ static long qc_capture(struct qcam_device *q, char *buf, unsigned long len)
 	{
 		printk("qcam: short read.\n");
 		if (is_bi_dir)
-			parport_frob_control(q->pport, 0x20, 0);
+			parport_data_forward(q->pport);
 		qc_setup(q);
 		return len;
 	}
@@ -355,11 +414,11 @@ static long qc_capture(struct qcam_device *q, char *buf, unsigned long len)
 		if (qcam_await_ready1(q, 1))
 		{
 			printk("qcam: no ack after EOF\n");
-			parport_frob_control(q->pport, 0x20, 0);
+			parport_data_forward(q->pport);
 			qc_setup(q);
 			return len;
 		}
-		parport_frob_control(q->pport, 0x20, 0);
+		parport_data_forward(q->pport);
 		mdelay(3);
 		qcam_set_ack(q, 1);
 		if (qcam_await_ready1(q, 0))
@@ -516,10 +575,12 @@ static int qcam_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 			qcam->brightness = p.brightness>>8;
 			qcam->contrast = p.contrast>>8;
 			qcam->whitebal = p.whiteness>>8;
-			
+
+			down(&qcam->lock);			
 			parport_claim_or_block(qcam->pdev);
 			qc_setup(qcam); 
 			parport_release(qcam->pdev);
+			up(&qcam->lock);
 			return 0;
 		}
 		case VIDIOCSWIN:
@@ -564,9 +625,11 @@ static int qcam_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 #endif
 			/* Ok we figured out what to use from our 
 			   wide choice */
+			down(&qcam->lock);
 			parport_claim_or_block(qcam->pdev);
 			qc_setup(qcam);
 			parport_release(qcam->pdev);
+			up(&qcam->lock);
 			return 0;
 		}
 		case VIDIOCGWIN:
@@ -608,17 +671,20 @@ static long qcam_read(struct video_device *v, char *buf, unsigned long count,  i
 {
 	struct qcam_device *qcam=(struct qcam_device *)v;
 	int len;
+
+	down(&qcam->lock);
 	parport_claim_or_block(qcam->pdev);
 	/* Probably should have a semaphore against multiple users */
 	len = qc_capture(qcam, buf,count); 
 	parport_release(qcam->pdev);
+	up(&qcam->lock);
 	return len;
 }
 
 /* video device template */
 static struct video_device qcam_template=
 {
-	"Colour Quickcam",
+	"Colour QuickCam",
 	VID_TYPE_CAPTURE,
 	VID_HARDWARE_QCAM_C,
 	qcam_open,
@@ -641,12 +707,14 @@ static struct qcam_device *qcam_init(struct parport *port)
 	struct qcam_device *q;
 	
 	q = kmalloc(sizeof(struct qcam_device), GFP_KERNEL);
+	if(q==NULL)
+		return NULL;
 
 	q->pport = port;
 	q->pdev = parport_register_device(port, "c-qcam", NULL, NULL,
 					  NULL, 0, NULL);
 
-	q->bidirectional = (q->pport->modes & PARPORT_MODE_PCPS2)?1:0;
+	q->bidirectional = (q->pport->modes & PARPORT_MODE_TRISTATE)?1:0;
 
 	if (q->pdev == NULL) 
 	{
@@ -658,6 +726,7 @@ static struct qcam_device *qcam_init(struct parport *port)
 	
 	memcpy(&q->vdev, &qcam_template, sizeof(qcam_template));
 
+	init_MUTEX(&q->lock);
 	q->width = q->ccd_width = 320;
 	q->height = q->ccd_height = 240;
 	q->mode = QC_MILLIONS | QC_DECIMATION_1;
@@ -669,7 +738,6 @@ static struct qcam_device *qcam_init(struct parport *port)
 	return q;
 }
 
-#define MAX_CAMS 4
 static struct qcam_device *qcams[MAX_CAMS];
 static unsigned int num_cams = 0;
 
@@ -677,11 +745,21 @@ int init_cqcam(struct parport *port)
 {
 	struct qcam_device *qcam;
 
-	if (num_cams == MAX_CAMS)
+	if (parport[0] != -1)
 	{
-		printk(KERN_ERR "Too many Quickcams (max %d)\n", MAX_CAMS);
-		return -ENOSPC;
+		/* The user gave specific instructions */
+		int i, found = 0;
+		for (i = 0; i < MAX_CAMS && parport[i] != -1; i++)
+		{
+			if (parport[0] == port->number)
+				found = 1;
+		}
+		if (!found)
+			return -ENODEV;
 	}
+
+	if (num_cams == MAX_CAMS)
+		return -ENOSPC;
 
 	qcam = qcam_init(port);
 	if (qcam==NULL)
@@ -691,7 +769,7 @@ int init_cqcam(struct parport *port)
 
 	qc_reset(qcam);
 	
-	if (qc_detect(qcam)==0)
+	if (probe && qc_detect(qcam)==0)
 	{
 		parport_release(qcam->pdev);
 		parport_unregister_device(qcam->pdev);
@@ -703,16 +781,18 @@ int init_cqcam(struct parport *port)
 
 	parport_release(qcam->pdev);
 	
-	printk(KERN_INFO "Colour Quickcam found on %s\n", 
-	       qcam->pport->name);
-	
 	if (video_register_device(&qcam->vdev, VFL_TYPE_GRABBER)==-1)
 	{
+		printk(KERN_ERR "Unable to register Colour QuickCam on %s\n",
+		       qcam->pport->name);
 		parport_unregister_device(qcam->pdev);
 		kfree(qcam);
 		return -ENODEV;
 	}
 
+	printk(KERN_INFO "video%d: Colour QuickCam found on %s\n", 
+	       qcam->vdev.minor, qcam->pport->name);
+	
 	qcams[num_cams++] = qcam;
 
 	return 0;
@@ -725,36 +805,43 @@ void close_cqcam(struct qcam_device *qcam)
 	kfree(qcam);
 }
 
-#define BANNER "Connectix Colour Quickcam driver v0.02\n"
-
-#ifdef MODULE
-int init_module(void)
+static void cq_attach(struct parport *port)
 {
-	struct parport *port;
-
-	printk(BANNER);
-
-	for (port = parport_enumerate(); port; port=port->next)
-		init_cqcam(port);
-
-	return (num_cams)?0:-ENODEV;
+	init_cqcam(port);
 }
 
-void cleanup_module(void)
+static void cq_detach(struct parport *port)
+{
+	/* Write this some day. */
+}
+
+static struct parport_driver cqcam_driver = {
+	"cqcam",
+	cq_attach,
+	cq_detach,
+	NULL
+};
+
+static int __init cqcam_init (void)
+{
+	printk(BANNER "\n");
+
+	return parport_register_driver(&cqcam_driver);
+}
+
+MODULE_AUTHOR("Philip Blundell <philb@gnu.org>");
+MODULE_DESCRIPTION(BANNER);
+MODULE_PARM_DESC(parport ,"parport=<auto|n[,n]...> for port detection method \n\
+probe=<0|1|2>  # for camera detection method");
+MODULE_PARM(parport, "1-" __MODULE_STRING(MAX_CAMS) "i");
+MODULE_PARM(probe, "i");
+
+static void __exit cqcam_cleanup (void)
 {
 	unsigned int i;
 	for (i = 0; i < num_cams; i++)
 		close_cqcam(qcams[i]);
 }
-#else
-__initfunc(int init_colour_qcams(struct video_init *unused))
-{
-	struct parport *port;
 
-	printk(BANNER);
-
-	for (port = parport_enumerate(); port; port=port->next)
-		init_cqcam(port);
-	return 0;
-}
-#endif
+module_init(cqcam_init);
+module_exit(cqcam_cleanup);

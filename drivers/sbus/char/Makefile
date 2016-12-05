@@ -87,6 +87,29 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_SUN_AURORA),y)
+O_OBJS += aurora.o
+else
+  ifeq ($(CONFIG_SUN_AURORA),m)
+  M_OBJS += aurora.o
+  endif
+endif
+
+ifeq ($(CONFIG_TADPOLE_TS102_UCTRL),y)
+O_OBJS += uctrl.o
+else
+  ifeq ($(CONFIG_TADPOLE_TS102_UCTRL),m)
+  M_OBJS += uctrl.o
+  endif
+endif
+
+ifeq ($(CONFIG_SUN_JSFLASH),y)
+O_OBJS += jsflash.o
+endif
+ifeq ($(CONFIG_SUN_JSFLASH),m)
+M_OBJS += jsflash.o
+endif
+
 include $(TOPDIR)/Rules.make
 
 sunkbdmap.o: sunkeymap.c

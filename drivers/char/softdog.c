@@ -1,8 +1,8 @@
 /*
  *	SoftDog	0.05:	A Software Watchdog Device
  *
- *	(c) Copyright 1996 Alan Cox <alan@cymru.net>, All Rights Reserved.
- *				http://www.cymru.net
+ *	(c) Copyright 1996 Alan Cox <alan@redhat.com>, All Rights Reserved.
+ *				http://www.redhat.com
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -23,6 +23,9 @@
  *	Added soft_margin; use upon insmod to change the timer delay.
  *	NB: uses same minor as wdt (WATCHDOG_MINOR); we could use separate
  *	    minors.
+ *
+ *  19980911 Alan Cox
+ *	Made SMP safe for 2.3.x
  */
  
 #include <linux/module.h>
@@ -106,10 +109,8 @@ static void softdog_ping(void)
 	/*
 	 *	Refresh the timer.
 	 */
-	del_timer(&watchdog_ticktock);
-	watchdog_ticktock.expires=jiffies + (soft_margin * HZ);
-	add_timer(&watchdog_ticktock);
-	return;
+
+	mod_timer(&watchdog_ticktock, jiffies + (soft_margin * HZ));
 }
 
 static ssize_t softdog_write(struct file *file, const char *data, size_t len, loff_t *ppos)
@@ -157,18 +158,10 @@ static int softdog_ioctl(struct inode *inode, struct file *file,
 
 static struct file_operations softdog_fops=
 {
-	NULL,		/* Seek */
-	NULL,		/* Read */
-	softdog_write,	/* Write */
-	NULL,		/* Readdir */
-	NULL,		/* Select */
-	softdog_ioctl,	/* Ioctl */
-	NULL,		/* MMap */
-	softdog_open,
-	NULL,		/* flush */
-	softdog_release,
-	NULL,		
-	NULL		/* Fasync */
+	write:		softdog_write,
+	ioctl:		softdog_ioctl,
+	open:		softdog_open,
+	release:	softdog_release,
 };
 
 static struct miscdevice softdog_miscdev=
@@ -178,7 +171,7 @@ static struct miscdevice softdog_miscdev=
 	&softdog_fops
 };
 
-__initfunc(void watchdog_init(void))
+void __init watchdog_init(void)
 {
 	misc_register(&softdog_miscdev);
 	init_timer(&watchdog_ticktock);

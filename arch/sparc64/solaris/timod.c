@@ -1,4 +1,4 @@
-/* $Id: timod.c,v 1.1 1998/03/26 08:46:18 jj Exp $
+/* $Id: timod.c,v 1.5 1999/11/23 08:55:24 davem Exp $
  * timod.c: timod emulation.
  *
  * Copyright (C) 1998 Patrik Rak (prak3264@ss1000.ms.mff.cuni.cz)
@@ -33,9 +33,7 @@ extern asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd,
 	u32 arg);
 asmlinkage int solaris_ioctl(unsigned int fd, unsigned int cmd, u32 arg);
 
-#ifdef __SMP__
 spinlock_t timod_pagelock = SPIN_LOCK_UNLOCKED;
-#endif
 static char * page = NULL ;
 
 #ifndef DEBUG_SOLARIS_KMALLOC
@@ -76,7 +74,7 @@ void mykfree(void *p)
 
 #define BUF_SIZE	PAGE_SIZE
 #define PUT_MAGIC(a,m)
-#define CHECK_MAGIC(a,m)
+#define SCHECK_MAGIC(a,m)
 #define BUF_OFFSET	0
 #define MKCTL_TRAILER	0
 
@@ -86,7 +84,7 @@ void mykfree(void *p)
 #define BUFPAGE_MAGIC	0xBADC0DEDDEADBABEL
 #define MKCTL_MAGIC	0xDEADBABEBADC0DEDL
 #define PUT_MAGIC(a,m)	do{(*(u64*)(a))=(m);}while(0)
-#define CHECK_MAGIC(a,m)	do{if((*(u64*)(a))!=(m))printk("%s,%u,%s(): magic %08x at %p corrupted!\n",\
+#define SCHECK_MAGIC(a,m)	do{if((*(u64*)(a))!=(m))printk("%s,%u,%s(): magic %08x at %p corrupted!\n",\
 				__FILE__,__LINE__,__FUNCTION__,(m),(a));}while(0)
 #define BUF_OFFSET	sizeof(u64)
 #define MKCTL_TRAILER	sizeof(u64)
@@ -117,8 +115,8 @@ static void putpage(char *p)
 {
 	SOLD("putting page");
 	p = p - BUF_OFFSET;
-	CHECK_MAGIC(p,BUFPAGE_MAGIC);
-	CHECK_MAGIC(p+PAGE_SIZE-sizeof(u64),BUFPAGE_MAGIC);
+	SCHECK_MAGIC(p,BUFPAGE_MAGIC);
+	SCHECK_MAGIC(p+PAGE_SIZE-sizeof(u64),BUFPAGE_MAGIC);
 	spin_lock(&timod_pagelock);
 	if (page) {
 		spin_unlock(&timod_pagelock);
@@ -154,7 +152,7 @@ static void timod_wake_socket(unsigned int fd)
 	sock = &current->files->fd[fd]->f_dentry->d_inode->u.socket_i;
 	wake_up_interruptible(&sock->wait);
 	if (sock->fasync_list && !(sock->flags & SO_WAITDATA))
-		kill_fasync(sock->fasync_list, SIGIO);
+		kill_fasync(sock->fasync_list, SIGIO, POLL_IN);
 	SOLD("done");
 }
 
@@ -679,7 +677,7 @@ int timod_getmsg(unsigned int fd, char *ctl_buf, int ctl_maxlen, s32 *ctl_len,
 		wait = &wait_table;
 		for(;;) {
 			SOLD("loop");
-			current->state = TASK_INTERRUPTIBLE;
+			set_current_state(TASK_INTERRUPTIBLE);
 			/* ! ( l<0 || ( l>=0 && ( ! pfirst || (flags == HIPRI && pri != HIPRI) ) ) ) */ 
 			/* ( ! l<0 && ! ( l>=0 && ( ! pfirst || (flags == HIPRI && pri != HIPRI) ) ) ) */ 
 			/* ( l>=0 && ( ! l>=0 || ! ( ! pfirst || (flags == HIPRI && pri != HIPRI) ) ) ) */ 
@@ -721,7 +719,7 @@ int timod_getmsg(unsigned int fd, char *ctl_buf, int ctl_maxlen, s32 *ctl_len,
 #define min(a,b) ((a)<(b)?(a):(b))
 #endif
 		int l = min(ctl_maxlen, it->length);
-		CHECK_MAGIC((char*)((u64)(((char *)&it->type)+sock->offset+it->length+7)&~7),MKCTL_MAGIC);
+		SCHECK_MAGIC((char*)((u64)(((char *)&it->type)+sock->offset+it->length+7)&~7),MKCTL_MAGIC);
 		SOLD("purting ctl data");
 		if(copy_to_user(ctl_buf,
 			(char*)&it->type + sock->offset, l))

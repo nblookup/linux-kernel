@@ -49,19 +49,11 @@
 #include "scsi.h"
 #include "hosts.h"
 #include <linux/stat.h>
+#include <linux/spinlock.h>
 
 #include "pci2000.h"
 #include "psi_roy.h"
 
-#if LINUX_VERSION_CODE >= LINUXVERSION(2,1,95)
-#include <asm/spinlock.h>
-#endif
-#if LINUX_VERSION_CODE < LINUXVERSION(2,1,93)
-#include <linux/bios32.h>
-#endif
-
-struct proc_dir_entry Proc_Scsi_Pci2000 =
-	{ PROC_SCSI_PCI2000, 7, "pci2000", S_IFDIR | S_IRUGO | S_IXUGO, 2 };
 
 //#define DEBUG 1
 
@@ -120,6 +112,28 @@ static int WaitReady (PADAPTER2000 padapter)
 	ULONG	z;
 
 	for ( z = 0;  z < (TIMEOUT_COMMAND * 4);  z++ )
+		{
+		if ( !inb_p (padapter->cmd) )
+			return FALSE;
+		udelay (250);
+		};								
+	return TRUE;
+	}
+/****************************************************************
+ *	Name:			WaitReadyLong	:LOCAL
+ *
+ *	Description:	Wait for controller ready.
+ *
+ *	Parameters:		padapter - Pointer adapter data structure.
+ *
+ *	Returns:		TRUE on not ready.
+ *
+ ****************************************************************/
+static int WaitReadyLong (PADAPTER2000 padapter)
+	{
+	ULONG	z;
+
+	for ( z = 0;  z < (5000 * 4);  z++ )
 		{
 		if ( !inb_p (padapter->cmd) )
 			return FALSE;
@@ -212,7 +226,7 @@ static int PsiRaidCmd (PADAPTER2000 padapter, char cmd)
 	if ( WaitReady (padapter) )						// test for command register ready
 		return DID_TIME_OUT;
 	outb_p (cmd, padapter->cmd);					// issue command
-	if ( WaitReady (padapter) )						// wait for adapter ready
+	if ( WaitReadyLong (padapter) )					// wait for adapter ready
 		return DID_TIME_OUT;
 	return DID_OK;
 	}
@@ -641,7 +655,7 @@ int Pci2000_Detect (Scsi_Host_Template *tpnt)
 		padapter = HOSTDATA(pshost);
 
 #if LINUX_VERSION_CODE > LINUXVERSION(2,1,92)
-		padapter->basePort = pdev->base_address[1] & 0xFFFE;
+		padapter->basePort = pci_resource_start (pdev, 1);
 #else
 		pcibios_read_config_word (pci_bus, pci_device_fn, PCI_BASE_ADDRESS_1, &padapter->basePort);
 		padapter->basePort &= 0xFFFE;
@@ -810,4 +824,3 @@ Scsi_Host_Template driver_template = PCI2000;
 
 #include "scsi_module.c"
 #endif
-

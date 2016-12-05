@@ -25,6 +25,7 @@
 
 #include <linux/config.h>
 #include <net/dst.h>
+#include <net/inetpeer.h>
 #include <linux/in_route.h>
 #include <linux/rtnetlink.h>
 #include <linux/route.h>
@@ -33,23 +34,10 @@
 #warning This file is not supposed to be used outside of kernel.
 #endif
 
-#define RT_HASH_DIVISOR	    	256
-
-/*
- * Prevents LRU trashing, entries considered equivalent,
- * if the difference between last use times is less then this number.
- */
-#define RT_CACHE_BUBBLE_THRESHOLD	(5*HZ)
-
-
 #define RTO_ONLINK	0x01
 #define RTO_TPROXY	0x80000000
 
-#ifdef CONFIG_IP_TRANSPARENT_PROXY
-#define RTO_CONN	RTO_TPROXY
-#else
 #define RTO_CONN	0
-#endif
 
 struct rt_key
 {
@@ -64,6 +52,7 @@ struct rt_key
 	__u8			scope;
 };
 
+struct inet_peer;
 struct rtable
 {
 	union
@@ -87,14 +76,13 @@ struct rtable
 
 	/* Miscellaneous cached information */
 	__u32			rt_spec_dst; /* RFC1122 specific destination */
+	struct inet_peer	*peer; /* long-living peer info */
 
 #ifdef CONFIG_IP_ROUTE_NAT
 	__u32			rt_src_map;
 	__u32			rt_dst_map;
 #endif
 };
-
-extern struct rtable 	*rt_hash_table[RT_HASH_DIVISOR];
 
 struct ip_rt_acct
 {
@@ -104,15 +92,15 @@ struct ip_rt_acct
 	__u32 	i_packets;
 };
 
-extern struct ip_rt_acct ip_rt_acct[256];
+extern struct ip_rt_acct *ip_rt_acct;
 
 extern void		ip_rt_init(void);
 extern void		ip_rt_redirect(u32 old_gw, u32 dst, u32 new_gw,
-				       u32 src, u8 tos, struct device *dev);
+				       u32 src, u8 tos, struct net_device *dev);
 extern void		ip_rt_advice(struct rtable **rp, int advice);
 extern void		rt_cache_flush(int how);
 extern int		ip_route_output(struct rtable **, u32 dst, u32 src, u32 tos, int oif);
-extern int		ip_route_input(struct sk_buff*, u32 dst, u32 src, u8 tos, struct device *devin);
+extern int		ip_route_input(struct sk_buff*, u32 dst, u32 src, u8 tos, struct net_device *devin);
 extern unsigned short	ip_rt_frag_needed(struct iphdr *iph, unsigned short new_mtu);
 extern void		ip_rt_update_pmtu(struct dst_entry *dst, unsigned mtu);
 extern void		ip_rt_send_redirect(struct sk_buff *skb);
@@ -148,6 +136,17 @@ extern __inline__ int ip_route_connect(struct rtable **rp, u32 dst, u32 src, u32
 	ip_rt_put(*rp);
 	*rp = NULL;
 	return ip_route_output(rp, dst, src, tos, oif);
+}
+
+extern void rt_bind_peer(struct rtable *rt, int create);
+
+extern __inline__ struct inet_peer *rt_get_peer(struct rtable *rt)
+{
+	if (rt->peer)
+		return rt->peer;
+
+	rt_bind_peer(rt, 0);
+	return rt->peer;
 }
 
 #endif	/* _ROUTE_H */

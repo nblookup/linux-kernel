@@ -60,18 +60,18 @@ static const char *version = "smc-ultra32.c: 06/97 v1.00\n";
 #include <linux/etherdevice.h>
 #include "8390.h"
 
-int ultra32_probe(struct device *dev);
-int ultra32_probe1(struct device *dev, int ioaddr);
-static int ultra32_open(struct device *dev);
-static void ultra32_reset_8390(struct device *dev);
-static void ultra32_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
+int ultra32_probe(struct net_device *dev);
+int ultra32_probe1(struct net_device *dev, int ioaddr);
+static int ultra32_open(struct net_device *dev);
+static void ultra32_reset_8390(struct net_device *dev);
+static void ultra32_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 				 int ring_page);
-static void ultra32_block_input(struct device *dev, int count,
+static void ultra32_block_input(struct net_device *dev, int count,
 				struct sk_buff *skb, int ring_offset);
-static void ultra32_block_output(struct device *dev, int count,
+static void ultra32_block_output(struct net_device *dev, int count,
 				 const unsigned char *buf,
 				 const int start_page);
-static int ultra32_close(struct device *dev);
+static int ultra32_close(struct net_device *dev);
 
 #define ULTRA32_CMDREG	0	/* Offset to ASIC command register. */
 #define	 ULTRA32_RESET	0x80	/* Board reset, in ULTRA32_CMDREG. */
@@ -103,7 +103,7 @@ static int ultra32_close(struct device *dev);
 	following.
 */
 
-__initfunc(int ultra32_probe(struct device *dev))
+int __init ultra32_probe(struct net_device *dev)
 {
 	const char *ifmap[] = {"UTP No Link", "", "UTP/AUI", "UTP/BNC"};
 	int ioaddr, edge, media;
@@ -126,7 +126,7 @@ __initfunc(int ultra32_probe(struct device *dev))
 	return ENODEV;
 }
 
-__initfunc(int ultra32_probe1(struct device *dev, int ioaddr))
+int __init ultra32_probe1(struct net_device *dev, int ioaddr)
 {
 	int i;
 	int checksum = 0;
@@ -240,7 +240,7 @@ __initfunc(int ultra32_probe1(struct device *dev, int ioaddr))
 	return 0;
 }
 
-static int ultra32_open(struct device *dev)
+static int ultra32_open(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - ULTRA32_NIC_OFFSET; /* ASIC addr */
 	int irq_flags = (inb(ioaddr + ULTRA32_CFG5) & 0x08) ? 0 : SA_SHIRQ;
@@ -261,13 +261,12 @@ static int ultra32_open(struct device *dev)
 	return 0;
 }
 
-static int ultra32_close(struct device *dev)
+static int ultra32_close(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - ULTRA32_NIC_OFFSET; /* CMDREG */
 
-	dev->start = 0;
-	dev->tbusy = 1;
-
+	netif_stop_queue(dev);
+	
 	if (ei_debug > 1)
 		printk("%s: Shutting down ethercard.\n", dev->name);
 
@@ -282,7 +281,7 @@ static int ultra32_close(struct device *dev)
 	return 0;
 }
 
-static void ultra32_reset_8390(struct device *dev)
+static void ultra32_reset_8390(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - ULTRA32_NIC_OFFSET; /* ASIC base addr */
 
@@ -302,7 +301,7 @@ static void ultra32_reset_8390(struct device *dev)
    we don't need to be concerned with ring wrap as the header will be at
    the start of a page, so we optimize accordingly. */
 
-static void ultra32_get_8390_hdr(struct device *dev,
+static void ultra32_get_8390_hdr(struct net_device *dev,
 				 struct e8390_pkt_hdr *hdr,
 				 int ring_page)
 {
@@ -314,9 +313,9 @@ static void ultra32_get_8390_hdr(struct device *dev,
 
 #ifdef notdef
 	/* Officially this is what we are doing, but the readl() is faster */
-	memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
 #else
-	((unsigned int*)hdr)[0] = readl(hdr_start);
+	((unsigned int*)hdr)[0] = isa_readl(hdr_start);
 #endif
 }
 
@@ -325,7 +324,7 @@ static void ultra32_get_8390_hdr(struct device *dev,
    packet spans an 8KB boundary. Note that the current 8KB segment is
    already set by the get_8390_hdr routine. */
 
-static void ultra32_block_input(struct device *dev,
+static void ultra32_block_input(struct net_device *dev,
 				int count,
 				struct sk_buff *skb,
 				int ring_offset)
@@ -335,25 +334,25 @@ static void ultra32_block_input(struct device *dev,
 
 	if ((ring_offset & ~0x1fff) != ((ring_offset + count - 1) & ~0x1fff)) {
 		int semi_count = 8192 - (ring_offset & 0x1FFF);
-		memcpy_fromio(skb->data, xfer_start, semi_count);
+		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
 		if (ring_offset < 96*256) {
 			/* Select next 8KB Window. */
 			ring_offset += semi_count;
 			outb(ei_status.reg0 | ((ring_offset & 0x6000) >> 13), RamReg);
-			memcpy_fromio(skb->data + semi_count, dev->mem_start, count);
+			isa_memcpy_fromio(skb->data + semi_count, dev->mem_start, count);
 		} else {
 			/* Select first 8KB Window. */
 			outb(ei_status.reg0, RamReg);
-			memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+			isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
 		}
 	} else {
 		/* Packet is in one chunk -- we can copy + cksum. */
-		eth_io_copy_and_sum(skb, xfer_start, count, 0);
+		isa_eth_io_copy_and_sum(skb, xfer_start, count, 0);
 	}
 }
 
-static void ultra32_block_output(struct device *dev,
+static void ultra32_block_output(struct net_device *dev,
 				 int count,
 				 const unsigned char *buf,
 				 int start_page)
@@ -364,14 +363,14 @@ static void ultra32_block_output(struct device *dev,
 	/* Select first 8KB Window. */
 	outb(ei_status.reg0, RamReg);
 
-	memcpy_toio(xfer_start, buf, count);
+	isa_memcpy_toio(xfer_start, buf, count);
 }
 
 #ifdef MODULE
 #define MAX_ULTRA32_CARDS   4	/* Max number of Ultra cards per module */
 #define NAMELEN		    8	/* # of chars for storing dev->name */
 static char namelist[NAMELEN * MAX_ULTRA32_CARDS] = { 0, };
-static struct device dev_ultra[MAX_ULTRA32_CARDS] = {
+static struct net_device dev_ultra[MAX_ULTRA32_CARDS] = {
 	{
 		NULL,		/* assign a chunk of namelist[] below */
 		0, 0, 0, 0,
@@ -385,7 +384,7 @@ int init_module(void)
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_ULTRA32_CARDS; this_dev++) {
-		struct device *dev = &dev_ultra[this_dev];
+		struct net_device *dev = &dev_ultra[this_dev];
 		dev->name = namelist+(NAMELEN*this_dev);
 		dev->init = ultra32_probe;
 		if (register_netdev(dev) != 0) {
@@ -407,7 +406,7 @@ void cleanup_module(void)
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_ULTRA32_CARDS; this_dev++) {
-		struct device *dev = &dev_ultra[this_dev];
+		struct net_device *dev = &dev_ultra[this_dev];
 		if (dev->priv != NULL) {
 			int ioaddr = dev->base_addr - ULTRA32_NIC_OFFSET;
 			void *priv = dev->priv;

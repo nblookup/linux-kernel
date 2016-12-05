@@ -31,6 +31,11 @@
 #define TUNER_TEMIC_NTSC    6
 #define TUNER_TEMIC_PAL_I   7
 #define TUNER_TEMIC_4036FY5_NTSC	8
+#define TUNER_ALPS_TSBH1_NTSC 	9
+#define TUNER_ALPS_TSBE1_PAL 	10
+#define TUNER_ALPS_TSBB5_PAL_I 	11
+#define TUNER_ALPS_TSBE5_PAL 	12
+#define TUNER_ALPS_TSBC5_PAL 	13
 
 #define NOTUNER 0
 #define PAL     1
@@ -42,9 +47,11 @@
 #define Philips 1
 #define TEMIC   2
 #define Sony    3
+#define Alps    4
 
 #define TUNER_SET_TYPE               _IOW('t',1,int)    /* set tuner type */
 #define TUNER_SET_TVFREQ             _IOW('t',2,int)    /* set tv freq */
 #define TUNER_SET_RADIOFREQ          _IOW('t',3,int)    /* set radio freq */
+#define TUNER_SET_MODE               _IOW('t',4,int)    /* set tuner mode */
 
 #endif

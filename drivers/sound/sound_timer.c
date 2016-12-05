@@ -11,12 +11,10 @@
 /*
  * Thomas Sailer   : ioctl code reworked (vmalloc/vfree removed)
  */
-#include <linux/config.h>
+#include <linux/string.h>
 
 
 #include "sound_config.h"
-
-#if defined(CONFIG_SEQUENCER)
 
 static volatile int initialized = 0, opened = 0, tmr_running = 0;
 static volatile time_t tmr_offs, tmr_ctr;
@@ -317,5 +315,3 @@ void  sound_timer_init(struct sound_lowlev_timer *t, char *name)
 	strcpy(sound_timer.info.name, name);
 	sound_timer_devs[n] = &sound_timer;
 }
-
-#endif

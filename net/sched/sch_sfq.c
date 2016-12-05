@@ -278,11 +278,11 @@ sfq_enqueue(struct sk_buff *skb, struct Qdisc* sch)
 	if (++sch->q.qlen < SFQ_DEPTH-1) {
 		sch->stats.bytes += skb->len;
 		sch->stats.packets++;
-		return 1;
+		return 0;
 	}
 
 	sfq_drop(sch);
-	return 0;
+	return NET_XMIT_CN;
 }
 
 static int
@@ -311,11 +311,11 @@ sfq_requeue(struct sk_buff *skb, struct Qdisc* sch)
 		}
 	}
 	if (++sch->q.qlen < SFQ_DEPTH-1)
-		return 1;
+		return 0;
 
 	sch->stats.drops++;
 	sfq_drop(sch);
-	return 0;
+	return NET_XMIT_CN;
 }
 
 
@@ -387,7 +387,7 @@ static int sfq_change(struct Qdisc *sch, struct rtattr *opt)
 	if (opt->rta_len < RTA_LENGTH(sizeof(*ctl)))
 		return -EINVAL;
 
-	start_bh_atomic();
+	sch_tree_lock(sch);
 	q->quantum = ctl->quantum ? : psched_mtu(sch->dev);
 	q->perturb_period = ctl->perturb_period*HZ;
 
@@ -396,7 +396,7 @@ static int sfq_change(struct Qdisc *sch, struct rtattr *opt)
 		q->perturb_timer.expires = jiffies + q->perturb_period;
 		add_timer(&q->perturb_timer);
 	}
-	end_bh_atomic();
+	sch_tree_unlock(sch);
 	return 0;
 }
 

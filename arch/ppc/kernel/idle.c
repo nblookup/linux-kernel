@@ -1,5 +1,5 @@
 /*
- * $Id: idle.c,v 1.61 1999/03/18 04:15:45 cort Exp $
+ * $Id: idle.c,v 1.68 1999/10/15 18:16:03 cort Exp $
  *
  * Idle daemon for PowerPC.  Idle daemon will handle any action
  * that needs to be taken when the system becomes idle.
@@ -40,23 +40,24 @@ unsigned long zero_paged_on = 0;
 unsigned long powersave_nap = 0;
 
 unsigned long *zero_cache;    /* head linked list of pre-zero'd pages */
-unsigned long zero_sz;	      /* # currently pre-zero'd pages */
-unsigned long zeropage_hits;  /* # zero'd pages request that we've done */
-unsigned long zeropage_calls; /* # zero'd pages request that've been made */
-unsigned long zerototal;      /* # pages zero'd over time */
+atomic_t zerototal;      /* # pages zero'd over time */
+atomic_t zeropage_hits;  /* # zero'd pages request that we've done */
+atomic_t zero_sz;	      /* # currently pre-zero'd pages */
+atomic_t zeropage_calls; /* # zero'd pages request that've been made */
 
-int idled(void *unused)
+int idled(void)
 {
 	/* endless loop with no priority at all */
 	current->priority = 0;
 	current->counter = -100;
+	init_idle();	
 	for (;;)
 	{
 		__sti();
 		
 		check_pgt_cache();
 
-		if ( !current->need_resched && zero_paged_on ) zero_paged();
+		/*if ( !current->need_resched && zero_paged_on ) zero_paged();*/
 		if ( !current->need_resched && htab_reclaim_on ) htab_reclaim();
 		if ( !current->need_resched ) power_save();
 
@@ -68,28 +69,14 @@ int idled(void *unused)
 	return 0;
 }
 
-#ifdef __SMP__
 /*
  * SMP entry into the idle task - calls the same thing as the
  * non-smp versions. -- Cort
  */
-int cpu_idle(void *unused)
+int cpu_idle(void)
 {
-	idled(unused);
+	idled();
 	return 0; 
-}
-#endif /* __SMP__ */
-
-/*
- * Syscall entry into the idle task. -- Cort
- */
-asmlinkage int sys_idle(void)
-{
-	if(current->pid != 0)
-		return -EPERM;
-
-	idled(NULL);
-	return 0; /* should never execute this but it makes gcc happy -- Cort */
 }
 
 /*
@@ -154,6 +141,7 @@ out:
 #endif /* CONFIG_8xx */
 }
 
+#if 0
 /*
  * Returns a pre-zero'd page from the list otherwise returns
  * NULL.
@@ -162,15 +150,16 @@ unsigned long get_zero_page_fast(void)
 {
 	unsigned long page = 0;
 
-	atomic_inc((atomic_t *)&zero_cache_calls);
+	atomic_inc(&zero_cache_calls);
 	if ( zero_quicklist )
 	{
 		/* atomically remove this page from the list */
-		asm (	"101:lwarx  %1,0,%2\n"  /* reserve zero_cache */
+		register unsigned long tmp;
+		asm (	"101:lwarx  %1,0,%3\n"  /* reserve zero_cache */
 			"    lwz    %0,0(%1)\n" /* get next -- new zero_cache */
-			"    stwcx. %0,0,%2\n"  /* update zero_cache */
+			"    stwcx. %0,0,%3\n"  /* update zero_cache */
 			"    bne-   101b\n"     /* if lost reservation try again */
-			: "=&r" (zero_quicklist), "=&r" (page)
+			: "=&r" (tmp), "=&r" (page), "+m" (zero_cache)
 			: "r" (&zero_quicklist)
 			: "cc" );
 #ifdef __SMP__
@@ -205,11 +194,12 @@ void zero_paged(void)
 {
 	unsigned long pageptr = 0;	/* current page being zero'd */
 	unsigned long bytecount = 0;  
+        register unsigned long tmp;
 	pte_t *pte;
 
-	if ( zero_cache_sz >= zero_cache_water[0] )
+	if ( atomic_read(&zero_cache_sz) >= zero_cache_water[0] )
 		return;
-	while ( (zero_cache_sz < zero_cache_water[1]) && (!current->need_resched) )
+	while ( (atomic_read(&zero_cache_sz) < zero_cache_water[1]) && (!current->need_resched) )
 	{
 		/*
 		 * Mark a page as reserved so we can mess with it
@@ -226,7 +216,7 @@ void zero_paged(void)
 		/*
 		 * Make the page no cache so we don't blow our cache with 0's
 		 */
-		pte = find_pte(init_task.mm, pageptr);
+		pte = find_pte(&init_mm, pageptr);
 		if ( !pte )
 		{
 			printk("pte NULL in zero_paged()\n");
@@ -234,7 +224,7 @@ void zero_paged(void)
 		}
 		
 		pte_uncache(*pte);
-		flush_tlb_page(find_vma(init_task.mm,pageptr),pageptr);
+		flush_tlb_page(find_vma(&init_mm,pageptr),pageptr);
 		/*
 		 * Important here to not take time away from real processes.
 		 */
@@ -259,17 +249,16 @@ void zero_paged(void)
 		
 		/* turn cache on for this page */
 		pte_cache(*pte);
-		flush_tlb_page(find_vma(init_task.mm,pageptr),pageptr);
+		flush_tlb_page(find_vma(&init_mm,pageptr),pageptr);
 		/* atomically add this page to the list */
-		asm (	"101:lwarx  %0,0,%1\n"  /* reserve zero_cache */
-			"    stw    %0,0(%2)\n" /* update *pageptr */
+		asm (	"101:lwarx  %0,0,%2\n"  /* reserve zero_cache */
+			"    stw    %0,0(%3)\n" /* update *pageptr */
 #ifdef __SMP__
 			"    sync\n"            /* let store settle */
 #endif			
-			"    mr     %0,%2\n"    /* update zero_cache in reg */
-			"    stwcx. %2,0,%1\n"  /* update zero_cache in mem */
+			"    stwcx. %3,0,%2\n"  /* update zero_cache in mem */
 			"    bne-   101b\n"     /* if lost reservation try again */
-			: "=&r" (zero_quicklist)
+			: "=&r" (tmp), "+m" (zero_quicklist)
 			: "r" (&zero_quicklist), "r" (pageptr)
 			: "cc" );
 		/*
@@ -285,6 +274,7 @@ void zero_paged(void)
 		atomic_inc((atomic_t *)&zero_cache_total);
 	}
 }
+#endif
 
 void power_save(void)
 {
@@ -297,7 +287,7 @@ void power_save(void)
 	case 7:			/* 603ev */
 	case 8:			/* 750 */
 		save_flags(msr);
-		cli();
+		__cli();
 		if (!current->need_resched) {
 			asm("mfspr %0,1008" : "=r" (hid0) :);
 			hid0 &= ~(HID0_NAP | HID0_SLEEP | HID0_DOZE);
@@ -306,11 +296,8 @@ void power_save(void)
 		
 			/* set the POW bit in the MSR, and enable interrupts
 			 * so we wake up sometime! */
+			__sti(); /* this keeps rtl from getting confused -- Cort */
 			_nmask_and_or_msr(0, MSR_POW | MSR_EE);
-
-			/* Disable interrupts again so restore_flags will
-			 * work. */
-			_nmask_and_or_msr(MSR_EE, 0);
 		}
 		restore_flags(msr);
 	default:

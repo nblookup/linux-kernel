@@ -1,8 +1,13 @@
-/* $Id: r2300.c,v 1.7 1998/10/16 19:22:43 ralf Exp $
- *
+/*
  * r2300.c: R2000 and R3000 specific mmu/cache code.
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ *
+ * with a lot of changes to make this thing work for R3000s
+ * Copyright (C) 1998, 2000 Harald Koerfgen
+ * Copyright (C) 1998 Gleb Raiko & Vladimir Roganov
+ *
+ * $Id: r2300.c,v 1.15 2000/02/24 00:12:40 ralf Exp $
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -11,14 +16,31 @@
 
 #include <asm/page.h>
 #include <asm/pgtable.h>
+#include <asm/mmu_context.h>
 #include <asm/system.h>
 #include <asm/sgialib.h>
-#include <asm/mmu_context.h>
+#include <asm/isadep.h>
+#include <asm/io.h>
+#include <asm/wbflush.h>
 
-extern unsigned long mips_tlb_entries;
+/*
+ * According to the paper written by D. Miller about Linux cache & TLB
+ * flush implementation, DMA/Driver coherence should be done at the 
+ * driver layer.  Thus, normally, we don't need flush dcache for R3000.
+ * Define this if driver does not handle cache consistency during DMA ops.
+ */
+
+/* Primary cache parameters. */
+static int icache_size, dcache_size; /* Size in bytes */
+/* the linesizes are usually fixed on R3000s */
+
+#undef DEBUG_TLB
+#undef DEBUG_CACHE
+
+#define NTLB_ENTRIES       64  /* Fixed on all R23000 variants... */
 
 /* page functions */
-void r2300_clear_page(unsigned long page)
+void r3k_clear_page(void * page)
 {
 	__asm__ __volatile__(
 		".set\tnoreorder\n\t"
@@ -42,7 +64,7 @@ void r2300_clear_page(unsigned long page)
 		:"$1","memory");
 }
 
-static void r2300_copy_page(unsigned long to, unsigned long from)
+static void r3k_copy_page(void * to, void * from)
 {
 	unsigned long dummy1, dummy2;
 	unsigned long reg1, reg2, reg3, reg4;
@@ -94,86 +116,396 @@ static void r2300_copy_page(unsigned long to, unsigned long from)
 		 "I" (PAGE_SIZE));
 }
 
-/* Cache operations. */
-static inline void r2300_flush_cache_all(void) { }
-static void r2300_flush_cache_mm(struct mm_struct *mm) { }
-static void r2300_flush_cache_range(struct mm_struct *mm,
+static unsigned long __init size_cache(unsigned long ca_flags)
+{
+	unsigned long flags, status, dummy, size;
+	volatile unsigned long *p;
+
+	p = (volatile unsigned long *) KSEG0;
+
+	save_and_cli(flags);
+
+	/* isolate cache space */
+	write_32bit_cp0_register(CP0_STATUS, (ca_flags|flags)&~ST0_IEC);
+
+	*p = 0xa5a55a5a;
+	dummy = *p;
+	status = read_32bit_cp0_register(CP0_STATUS);
+
+	if (dummy != 0xa5a55a5a || (status & (1<<19))) {
+		size = 0;
+	} else {
+		for (size = 512; size <= 0x40000; size <<= 1)
+			*(p + size) = 0;
+		*p = -1;
+		for (size = 512; 
+		     (size <= 0x40000) && (*(p + size) == 0); 
+		     size <<= 1)
+			;
+		if (size > 0x40000)
+			size = 0;
+	}
+	restore_flags(flags);
+
+	return size * sizeof(*p);
+}
+
+static void __init probe_dcache(void)
+{
+	dcache_size = size_cache(ST0_DE);
+	printk("Primary data cache %dkb, linesize 4 bytes\n",
+		dcache_size >> 10);
+}
+
+static void __init probe_icache(void)
+{
+	icache_size = size_cache(ST0_DE|ST0_CE);
+	printk("Primary instruction cache %dkb, linesize 8 bytes\n",
+		icache_size >> 10);
+}
+
+static void r3k_flush_icache_range(unsigned long start, unsigned long size)
+{
+	unsigned long i, flags;
+	volatile unsigned char *p = (char *)start;
+
+	if (size > icache_size)
+		size = icache_size;
+
+	save_and_cli(flags);
+
+	/* isolate cache space */
+	write_32bit_cp0_register(CP0_STATUS, (ST0_DE|ST0_CE|flags)&~ST0_IEC);
+
+	for (i = 0; i < size; i += 0x100) {
+		asm ( 	"sb\t$0,0x000(%0)\n\t"
+			"sb\t$0,0x008(%0)\n\t"
+			"sb\t$0,0x010(%0)\n\t"
+			"sb\t$0,0x018(%0)\n\t"
+			"sb\t$0,0x020(%0)\n\t"
+			"sb\t$0,0x028(%0)\n\t"
+			"sb\t$0,0x030(%0)\n\t"
+			"sb\t$0,0x038(%0)\n\t"
+		 	"sb\t$0,0x040(%0)\n\t"
+			"sb\t$0,0x048(%0)\n\t"
+			"sb\t$0,0x050(%0)\n\t"
+			"sb\t$0,0x058(%0)\n\t"
+			"sb\t$0,0x060(%0)\n\t"
+			"sb\t$0,0x068(%0)\n\t"
+			"sb\t$0,0x070(%0)\n\t"
+			"sb\t$0,0x078(%0)\n\t"
+			"sb\t$0,0x080(%0)\n\t"
+			"sb\t$0,0x088(%0)\n\t"
+			"sb\t$0,0x090(%0)\n\t"
+			"sb\t$0,0x098(%0)\n\t"
+			"sb\t$0,0x0a0(%0)\n\t"
+			"sb\t$0,0x0a8(%0)\n\t"
+			"sb\t$0,0x0b0(%0)\n\t"
+			"sb\t$0,0x0b8(%0)\n\t"
+		 	"sb\t$0,0x0c0(%0)\n\t"
+			"sb\t$0,0x0c8(%0)\n\t"
+			"sb\t$0,0x0d0(%0)\n\t"
+			"sb\t$0,0x0d8(%0)\n\t"
+			"sb\t$0,0x0e0(%0)\n\t"
+			"sb\t$0,0x0e8(%0)\n\t"
+			"sb\t$0,0x0f0(%0)\n\t"
+			"sb\t$0,0x0f8(%0)\n\t"
+			: : "r" (p) );
+		p += 0x100;
+	}
+
+	restore_flags(flags);
+}
+
+static void r3k_flush_dcache_range(unsigned long start, unsigned long size)
+{
+	unsigned long i, flags;
+	volatile unsigned char *p = (char *)start;
+
+	if (size > icache_size)
+		size = icache_size;
+
+	save_and_cli(flags);
+
+	/* isolate cache space */
+	write_32bit_cp0_register(CP0_STATUS, (ST0_DE|flags)&~ST0_IEC);
+
+	for (i = 0; i < size; i += 0x080) {
+		asm ( 	"sb\t$0,0x000(%0)\n\t"
+			"sb\t$0,0x004(%0)\n\t"
+			"sb\t$0,0x008(%0)\n\t"
+			"sb\t$0,0x00c(%0)\n\t"
+		 	"sb\t$0,0x010(%0)\n\t"
+			"sb\t$0,0x014(%0)\n\t"
+			"sb\t$0,0x018(%0)\n\t"
+			"sb\t$0,0x01c(%0)\n\t"
+		 	"sb\t$0,0x020(%0)\n\t"
+			"sb\t$0,0x024(%0)\n\t"
+			"sb\t$0,0x028(%0)\n\t"
+			"sb\t$0,0x02c(%0)\n\t"
+		 	"sb\t$0,0x030(%0)\n\t"
+			"sb\t$0,0x034(%0)\n\t"
+			"sb\t$0,0x038(%0)\n\t"
+			"sb\t$0,0x03c(%0)\n\t"
+		 	"sb\t$0,0x040(%0)\n\t"
+			"sb\t$0,0x044(%0)\n\t"
+			"sb\t$0,0x048(%0)\n\t"
+			"sb\t$0,0x04c(%0)\n\t"
+		 	"sb\t$0,0x050(%0)\n\t"
+			"sb\t$0,0x054(%0)\n\t"
+			"sb\t$0,0x058(%0)\n\t"
+			"sb\t$0,0x05c(%0)\n\t"
+		 	"sb\t$0,0x060(%0)\n\t"
+			"sb\t$0,0x064(%0)\n\t"
+			"sb\t$0,0x068(%0)\n\t"
+			"sb\t$0,0x06c(%0)\n\t"
+		 	"sb\t$0,0x070(%0)\n\t"
+			"sb\t$0,0x074(%0)\n\t"
+			"sb\t$0,0x078(%0)\n\t"
+			"sb\t$0,0x07c(%0)\n\t"
+			: : "r" (p) );
+		p += 0x080;
+	}
+
+	restore_flags(flags);
+}
+
+static inline unsigned long get_phys_page (unsigned long addr,
+					   struct mm_struct *mm)
+{
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *pte;
+	unsigned long physpage;
+
+	pgd = pgd_offset(mm, addr);
+	pmd = pmd_offset(pgd, addr);
+	pte = pte_offset(pmd, addr);
+
+	if((physpage = pte_val(*pte)) & _PAGE_VALID)
+		return KSEG1ADDR(physpage & PAGE_MASK);
+	else
+		return 0;
+}
+
+static inline void r3k_flush_cache_all(void)
+{
+	r3k_flush_icache_range(KSEG0, icache_size);
+}
+ 
+static void r3k_flush_cache_mm(struct mm_struct *mm)
+{
+	if(mm->context != 0) {
+
+#ifdef DEBUG_CACHE
+		printk("cmm[%d]", (int)mm->context);
+#endif
+		r3k_flush_cache_all();
+	}
+}
+
+static void r3k_flush_cache_range(struct mm_struct *mm,
 				    unsigned long start,
 				    unsigned long end)
 {
+	struct vm_area_struct *vma;
+
+	if(mm->context == 0) 
+		return;
+
+	start &= PAGE_MASK;
+#ifdef DEBUG_CACHE
+	printk("crange[%d,%08lx,%08lx]", (int)mm->context, start, end);
+#endif
+	vma = find_vma(mm, start);
+	if(vma) {
+		if(mm->context != current->mm->context) {
+			flush_cache_all();
+		} else {
+			unsigned long flags, physpage;
+
+			save_and_cli(flags);
+			while(start < end) {
+				if((physpage = get_phys_page(start, mm)))
+					r3k_flush_icache_range(physpage, PAGE_SIZE);
+		
+				start += PAGE_SIZE;
+			}
+			restore_flags(flags);
+		}
+	}
 }
 
-static void r2300_flush_cache_page(struct vm_area_struct *vma,
+static void r3k_flush_cache_page(struct vm_area_struct *vma,
 				   unsigned long page)
 {
+	struct mm_struct *mm = vma->vm_mm;
+
+	if(mm->context == 0)
+		return;
+
+#ifdef DEBUG_CACHE
+	printk("cpage[%d,%08lx]", (int)mm->context, page);
+#endif
+	if (vma->vm_flags & VM_EXEC) {
+		unsigned long physpage;
+
+		if((physpage = get_phys_page(page, vma->vm_mm)))
+			r3k_flush_icache_range(physpage, PAGE_SIZE);
+
+	}
 }
 
-static void r2300_flush_page_to_ram(unsigned long page)
+static void r3k_flush_page_to_ram(struct page * page)
 {
-	/* XXX What we want to do here is perform a displacement
-	 * XXX flush because there are circumstances where you do
-	 * XXX indeed want to remove stale data from the cache.
-	 * XXX (DMA operations for example, where the cache cannot
-	 * XXX  "see" this data get changed.)
+	/*
+	 * Nothing to be done
 	 */
 }
 
-static void r2300_flush_cache_sigtramp(unsigned long page)
+static void r3k_flush_cache_sigtramp(unsigned long addr)
 {
+	unsigned long flags;
+
+#ifdef DEBUG_CACHE
+	printk("csigtramp[%08lx]", addr);
+#endif
+	/*
+	 * I am assuming an 8 Byte cacheline here. HK
+	 */
+	addr &= ~7;
+
+	save_and_cli(flags);
+
+	write_32bit_cp0_register(CP0_STATUS, (ST0_DE|ST0_CE|flags)&~ST0_IEC);
+
+	asm ( 	"sb\t$0,0x000(%0)\n\t"
+		"sb\t$0,0x008(%0)\n\t"
+		: : "r" (addr) );
+
+	restore_flags(flags);
+}
+
+static void r3k_dma_cache_wback_inv(unsigned long start, unsigned long size)
+{
+	wbflush();
+	r3k_flush_dcache_range(start, size);
 }
 
 /* TLB operations. */
-static inline void r2300_flush_tlb_all(void)
+void flush_tlb_all(void)
 {
 	unsigned long flags;
+	unsigned long old_ctx;
 	int entry;
 
+#ifdef DEBUG_TLB
+	printk("[tlball]");
+#endif
+
 	save_and_cli(flags);
+	old_ctx = (get_entryhi() & 0xfc0);
 	write_32bit_cp0_register(CP0_ENTRYLO0, 0);
-	for(entry = 0; entry < mips_tlb_entries; entry++) {
-		write_32bit_cp0_register(CP0_INDEX, entry);
-		write_32bit_cp0_register(CP0_ENTRYHI, ((entry | 0x8) << 12));
+	for(entry = 0; entry < NTLB_ENTRIES; entry++) {
+		write_32bit_cp0_register(CP0_INDEX, entry << 8);
+		write_32bit_cp0_register(CP0_ENTRYHI, ((entry | 0x80000) << 12));
 		__asm__ __volatile__("tlbwi");
 	}
+	set_entryhi(old_ctx);
 	restore_flags(flags);
 }
 
-static void r2300_flush_tlb_mm(struct mm_struct *mm)
+void flush_tlb_mm(struct mm_struct *mm)
 {
-	if(mm == current->mm)
-		r2300_flush_tlb_all();
+	if(mm->context != 0) {
+		unsigned long flags;
+
+#ifdef DEBUG_TLB
+		printk("[tlbmm<%d>]", mm->context);
+#endif
+		save_and_cli(flags);
+		get_new_mmu_context(mm, asid_cache);
+		if (mm == current->active_mm)
+			set_entryhi(mm->context & 0xfc0);
+		restore_flags(flags);
+	}
 }
 
-static void r2300_flush_tlb_range(struct mm_struct *mm, unsigned long start,
+void flush_tlb_range(struct mm_struct *mm, unsigned long start,
 				  unsigned long end)
 {
-	if(mm == current->mm)
-		r2300_flush_tlb_all();
+	if (mm->context != 0) {
+		unsigned long flags;
+		int size;
+
+#ifdef DEBUG_TLB
+		printk("[tlbrange<%02x,%08lx,%08lx>]", (mm->context & 0xfc0),
+		       start, end);
+#endif
+		save_and_cli(flags);
+		size = (end - start + (PAGE_SIZE - 1)) >> PAGE_SHIFT;
+		if(size <= NTLB_ENTRIES) {
+			int oldpid = (get_entryhi() & 0xfc0);
+			int newpid = (mm->context & 0xfc0);
+
+			start &= PAGE_MASK;
+			end += (PAGE_SIZE - 1);
+			end &= PAGE_MASK;
+			while(start < end) {
+				int idx;
+
+				set_entryhi(start | newpid);
+				start += PAGE_SIZE;
+				tlb_probe();
+				idx = get_index();
+				set_entrylo0(0);
+				set_entryhi(KSEG0);
+				if(idx < 0)
+					continue;
+				tlb_write_indexed();
+			}
+			set_entryhi(oldpid);
+		} else {
+			get_new_mmu_context(mm, asid_cache);
+			if (mm == current->active_mm)
+				set_entryhi(mm->context & 0xfc0);
+		}
+		restore_flags(flags);
+	}
 }
 
-static void r2300_flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
+void flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 {
-	if(vma->vm_mm == current->mm)
-		r2300_flush_tlb_all();
-}
+	if(vma->vm_mm->context != 0) {
+		unsigned long flags;
+		int oldpid, newpid, idx;
 
-/* Load a new root pointer into the TLB. */
-static void r2300_load_pgd(unsigned long pg_dir)
-{
-	unsigned long flags;
+#ifdef DEBUG_TLB
+		printk("[tlbpage<%d,%08lx>]", vma->vm_mm->context, page);
+#endif
+		newpid = (vma->vm_mm->context & 0xfc0);
+		page &= PAGE_MASK;
+		save_and_cli(flags);
+		oldpid = (get_entryhi() & 0xfc0);
+		set_entryhi(page | newpid);
+		tlb_probe();
+		idx = get_index();
+		set_entrylo0(0);
+		set_entryhi(KSEG0);
+		if(idx < 0)
+			goto finish;
+		tlb_write_indexed();
 
-	save_and_cli(flags);
-	write_32bit_cp0_register(CP0_ENTRYHI, TLB_ROOT);
-	write_32bit_cp0_register(CP0_INDEX, 0);
-	write_32bit_cp0_register(CP0_ENTRYLO0, ((pg_dir >> 6) | 0x00e0));
-	__asm__ __volatile__("tlbwi");
-	restore_flags(flags);
+finish:
+		set_entryhi(oldpid);
+		restore_flags(flags);
+	}
 }
 
 /*
  * Initialize new page directory with pointers to invalid ptes
  */
-static void r2300_pgd_init(unsigned long page)
+void pgd_init(unsigned long page)
 {
 	unsigned long dummy1, dummy2;
 
@@ -199,20 +531,66 @@ static void r2300_pgd_init(unsigned long page)
 		 "=r" (dummy2)
 		:"r" ((unsigned long) invalid_pte_table),
 		 "0" (page),
-		 "1" (USER_PTRS_PER_PGD/8));
+		 "1" (PAGE_SIZE/(sizeof(pmd_t)*8)));
 }
 
-static void r2300_update_mmu_cache(struct vm_area_struct * vma,
+void update_mmu_cache(struct vm_area_struct * vma,
 				   unsigned long address, pte_t pte)
 {
-	r2300_flush_tlb_page(vma, address);
-	/*
-	 * FIXME: We should also reload a new entry into the TLB to
-	 * avoid unnecessary exceptions.
-	 */
+	unsigned long flags;
+	pgd_t *pgdp;
+	pmd_t *pmdp;
+	pte_t *ptep;
+	int idx, pid;
+
+	pid = (get_entryhi() & 0xfc0);
+
+#ifdef DEBUG_TLB
+	if((pid != (vma->vm_mm->context & 0xfc0)) || (vma->vm_mm->context == 0)) {
+		printk("update_mmu_cache: Wheee, bogus tlbpid mmpid=%d tlbpid=%d\n",
+		       (int) (vma->vm_mm->context & 0xfc0), pid);
+	}
+#endif
+
+	save_and_cli(flags);
+	address &= PAGE_MASK;
+	set_entryhi(address | (pid));
+	pgdp = pgd_offset(vma->vm_mm, address);
+	tlb_probe();
+	pmdp = pmd_offset(pgdp, address);
+	idx = get_index();
+	ptep = pte_offset(pmdp, address);
+	set_entrylo0(pte_val(*ptep));
+	set_entryhi(address | (pid));
+	if(idx < 0) {
+		tlb_write_random();
+#if 0
+		printk("[MISS]");
+#endif
+	} else {
+		tlb_write_indexed();
+#if 0
+		printk("[HIT]");
+#endif
+	}
+#if 0
+	if(!strcmp(current->comm, "args")) {
+		printk("<");
+		for(idx = 0; idx < NTLB_ENTRIES; idx++) {
+			set_index(idx);
+			tlb_read();
+			address = get_entryhi();
+			if((address & 0xfc0) != 0)
+				printk("[%08lx]", address);
+		}
+		printk(">\n");
+	}
+#endif
+	set_entryhi(pid);
+	restore_flags(flags);
 }
 
-static void r2300_show_regs(struct pt_regs * regs)
+void show_regs(struct pt_regs * regs)
 {
 	/*
 	 * Saved main processor registers
@@ -245,45 +623,33 @@ static void r2300_show_regs(struct pt_regs * regs)
 	       (unsigned int) regs->cp0_cause);
 }
 
-static void r2300_add_wired_entry(unsigned long entrylo0, unsigned long entrylo1,
+void add_wired_entry(unsigned long entrylo0, unsigned long entrylo1,
 				  unsigned long entryhi, unsigned long pagemask)
 {
+printk("r3k_add_wired_entry");
         /*
 	 * FIXME, to be done
 	 */
 }
 
-static int r2300_user_mode(struct pt_regs *regs)
+void __init ld_mmu_r2300(void)
 {
-	return !(regs->cp0_status & 0x4);
-}
+	printk("CPU revision is: %08x\n", read_32bit_cp0_register(CP0_PRID));
 
-__initfunc(void ld_mmu_r2300(void))
-{
-	clear_page = r2300_clear_page;
-	copy_page = r2300_copy_page;
+	_clear_page = r3k_clear_page;
+	_copy_page = r3k_copy_page;
 
-	flush_cache_all = r2300_flush_cache_all;
-	flush_cache_mm = r2300_flush_cache_mm;
-	flush_cache_range = r2300_flush_cache_range;
-	flush_cache_page = r2300_flush_cache_page;
-	flush_cache_sigtramp = r2300_flush_cache_sigtramp;
-	flush_page_to_ram = r2300_flush_page_to_ram;
+	probe_icache();
+	probe_dcache();
 
-	flush_tlb_all = r2300_flush_tlb_all;
-	flush_tlb_mm = r2300_flush_tlb_mm;
-	flush_tlb_range = r2300_flush_tlb_range;
-	flush_tlb_page = r2300_flush_tlb_page;
-	r3000_asid_setup();
+	_flush_cache_all = r3k_flush_cache_all;
+	_flush_cache_mm = r3k_flush_cache_mm;
+	_flush_cache_range = r3k_flush_cache_range;
+	_flush_cache_page = r3k_flush_cache_page;
+	_flush_cache_sigtramp = r3k_flush_cache_sigtramp;
+	_flush_page_to_ram = r3k_flush_page_to_ram;
 
-	load_pgd = r2300_load_pgd;
-	pgd_init = r2300_pgd_init;
-	update_mmu_cache = r2300_update_mmu_cache;
+        _dma_cache_wback_inv = r3k_dma_cache_wback_inv;
 
-	show_regs = r2300_show_regs;
-    
-        add_wired_entry = r2300_add_wired_entry;
-
-	user_mode = r2300_user_mode;
 	flush_tlb_all();
 }

@@ -1,4 +1,4 @@
-/* $Id: sys_sparc.c,v 1.26 1999/01/07 19:07:01 jj Exp $
+/* $Id: sys_sparc.c,v 1.36 2000/02/16 07:31:35 davem Exp $
  * linux/arch/sparc64/kernel/sys_sparc.c
  *
  * This file contains various random system calls that
@@ -6,6 +6,7 @@
  * platform.
  */
 
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/sched.h>
@@ -21,6 +22,7 @@
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/malloc.h>
+#include <linux/ipc.h>
 
 #include <asm/uaccess.h>
 #include <asm/ipc.h>
@@ -37,15 +39,49 @@ asmlinkage unsigned long sys_getpagesize(void)
 	return PAGE_SIZE;
 }
 
+unsigned long get_unmapped_area(unsigned long addr, unsigned long len)
+{
+	struct vm_area_struct * vmm;
+	unsigned long task_size = TASK_SIZE;
+
+	if (current->thread.flags & SPARC_FLAG_32BIT)
+		task_size = 0xf0000000UL;
+	if (len > task_size || len > -PAGE_OFFSET)
+		return 0;
+	if (!addr)
+		addr = TASK_UNMAPPED_BASE;
+	addr = PAGE_ALIGN(addr);
+
+	task_size -= len;
+
+	for (vmm = find_vma(current->mm, addr); ; vmm = vmm->vm_next) {
+		/* At this point:  (!vmm || addr < vmm->vm_end). */
+		if (addr < PAGE_OFFSET && -PAGE_OFFSET - len < addr) {
+			addr = PAGE_OFFSET;
+			vmm = find_vma(current->mm, PAGE_OFFSET);
+		}
+		if (task_size < addr)
+			return 0;
+		if (!vmm || addr + len <= vmm->vm_start)
+			return addr;
+		addr = vmm->vm_end;
+	}
+}
+
 extern asmlinkage unsigned long sys_brk(unsigned long brk);
 
 asmlinkage unsigned long sparc_brk(unsigned long brk)
 {
-	if(brk >= 0x80000000000UL)	/* VM hole */
+	/* People could try to be nasty and use ta 0x6d in 32bit programs */
+	if ((current->thread.flags & SPARC_FLAG_32BIT) &&
+	    brk >= 0xf0000000UL)
+		return current->mm->brk;
+
+	if ((current->mm->brk & PAGE_OFFSET) != (brk & PAGE_OFFSET))
 		return current->mm->brk;
 	return sys_brk(brk);
 }
-
+                                                                
 /*
  * sys_pipe() is the normal C calling standard for creating
  * a pipe. It's not the way unix traditionally does this, though.
@@ -95,7 +131,7 @@ asmlinkage int sys_ipc (unsigned call, int first, int second, unsigned long thir
 			err = -EFAULT;
 			if(get_user(fourth.__pad, (void **)ptr))
 				goto out;
-			err = sys_semctl (first, second, (int)third, fourth);
+			err = sys_semctl (first, second | IPC_64, (int)third, fourth);
 			goto out;
 			}
 		default:
@@ -115,7 +151,7 @@ asmlinkage int sys_ipc (unsigned call, int first, int second, unsigned long thir
 			err = sys_msgget ((key_t) first, second);
 			goto out;
 		case MSGCTL:
-			err = sys_msgctl (first, second, (struct msqid_ds *) ptr);
+			err = sys_msgctl (first, second | IPC_64, (struct msqid_ds *) ptr);
 			goto out;
 		default:
 			err = -EINVAL;
@@ -133,7 +169,7 @@ asmlinkage int sys_ipc (unsigned call, int first, int second, unsigned long thir
 			err = sys_shmget (first, second, (int)third);
 			goto out;
 		case SHMCTL:
-			err = sys_shmctl (first, second, (struct shmid_ds *) ptr);
+			err = sys_shmctl (first, second | IPC_64, (struct shmid_ds *) ptr);
 			goto out;
 		default:
 			err = -EINVAL;
@@ -154,47 +190,87 @@ asmlinkage unsigned long sys_mmap(unsigned long addr, unsigned long len,
 	struct file * file = NULL;
 	unsigned long retval = -EBADF;
 
-	down(&current->mm->mmap_sem);
-	lock_kernel();
 	if (!(flags & MAP_ANONYMOUS)) {
 		file = fget(fd);
 		if (!file)
 			goto out;
 	}
-	retval = -ENOMEM;
+	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	len = PAGE_ALIGN(len);
-	if(!(flags & MAP_FIXED) && !addr) {
-		addr = get_unmapped_area(addr, len);
-		if(!addr)
-			goto out_putf;
-	}
-
 	retval = -EINVAL;
-	if (current->tss.flags & SPARC_FLAG_32BIT) {
-		if (len > 0xf0000000UL || addr > 0xf0000000UL - len)
+
+	down(&current->mm->mmap_sem);
+	lock_kernel();
+
+	if (current->thread.flags & SPARC_FLAG_32BIT) {
+		if (len > 0xf0000000UL ||
+		    ((flags & MAP_FIXED) && addr > 0xf0000000UL - len))
 			goto out_putf;
 	} else {
-		if (len >= 0x80000000000UL || 
-		    (addr < 0x80000000000UL &&
-		     addr > 0x80000000000UL-len))
+		if (len > -PAGE_OFFSET ||
+		    ((flags & MAP_FIXED) &&
+		     addr < PAGE_OFFSET && addr + len > -PAGE_OFFSET))
 			goto out_putf;
-		if (addr >= 0x80000000000ULL && addr < 0xfffff80000000000UL) {
-			/* VM hole */
-			retval = current->mm->brk;
-			goto out_putf;
-		}
 	}
 
-	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	retval = do_mmap(file, addr, len, prot, flags, off);
 
 out_putf:
+	unlock_kernel();
+	up(&current->mm->mmap_sem);
 	if (file)
 		fput(file);
 out:
-	unlock_kernel();
-	up(&current->mm->mmap_sem);
 	return retval;
+}
+
+asmlinkage long sys64_munmap(unsigned long addr, size_t len)
+{
+	long ret;
+
+	if (len > -PAGE_OFFSET ||
+	    (addr < PAGE_OFFSET && addr + len > -PAGE_OFFSET))
+		return -EINVAL;
+	down(&current->mm->mmap_sem);
+	ret = do_munmap(addr, len);
+	up(&current->mm->mmap_sem);
+	return ret;
+}
+
+extern unsigned long do_mremap(unsigned long addr,
+	unsigned long old_len, unsigned long new_len,
+	unsigned long flags, unsigned long new_addr);
+                
+asmlinkage unsigned long sys64_mremap(unsigned long addr,
+	unsigned long old_len, unsigned long new_len,
+	unsigned long flags, unsigned long new_addr)
+{
+	unsigned long ret = -EINVAL;
+	if (current->thread.flags & SPARC_FLAG_32BIT)
+		goto out;
+	if (old_len > -PAGE_OFFSET || new_len > -PAGE_OFFSET)
+		goto out;
+	if (addr < PAGE_OFFSET && addr + old_len > -PAGE_OFFSET)
+		goto out;
+	down(&current->mm->mmap_sem);
+	if (flags & MREMAP_FIXED) {
+		if (new_addr < PAGE_OFFSET &&
+		    new_addr + new_len > -PAGE_OFFSET)
+			goto out_sem;
+	} else if (addr < PAGE_OFFSET && addr + new_len > -PAGE_OFFSET) {
+		ret = -ENOMEM;
+		if (!(flags & MREMAP_MAYMOVE))
+			goto out_sem;
+		new_addr = get_unmapped_area (addr, new_len);
+		if (!new_addr)
+			goto out_sem;
+		flags |= MREMAP_FIXED;
+	}
+	ret = do_mremap(addr, old_len, new_len, flags, new_addr);
+out_sem:
+	up(&current->mm->mmap_sem);
+out:
+	return ret;       
 }
 
 /* we come to here via sys_nis_syscall so it can setup the regs argument */
@@ -219,11 +295,18 @@ c_sys_nis_syscall (struct pt_regs *regs)
 asmlinkage void
 sparc_breakpoint (struct pt_regs *regs)
 {
+	siginfo_t info;
+
 	lock_kernel();
 #ifdef DEBUG_SPARC_BREAKPOINT
         printk ("TRAP: Entering kernel PC=%lx, nPC=%lx\n", regs->tpc, regs->tnpc);
 #endif
-	force_sig(SIGTRAP, current);
+	info.si_signo = SIGTRAP;
+	info.si_errno = 0;
+	info.si_code = TRAP_BRKPT;
+	info.si_addr = (void *)regs->tpc;
+	info.si_trapno = 0;
+	force_sig_info(SIGTRAP, &info, current);
 #ifdef DEBUG_SPARC_BREAKPOINT
 	printk ("TRAP: Returning to space: PC=%lx nPC=%lx\n", regs->tpc, regs->tnpc);
 #endif
@@ -237,7 +320,7 @@ asmlinkage int sys_getdomainname(char *name, int len)
         int nlen;
 	int err = -EFAULT;
 
- 	down(&uts_sem);
+ 	down_read(&uts_sem);
  	
 	nlen = strlen(system_utsname.domainname) + 1;
 
@@ -249,7 +332,7 @@ asmlinkage int sys_getdomainname(char *name, int len)
 		goto done;
 	err = 0;
 done:
-	up(&uts_sem);
+	up_read(&uts_sem);
 	return err;
 }
 
@@ -273,6 +356,21 @@ asmlinkage int solaris_syscall(struct pt_regs *regs)
 	return -ENOSYS;
 }
 
+#ifndef CONFIG_SUNOS_EMUL
+asmlinkage int sunos_syscall(struct pt_regs *regs)
+{
+	static int count = 0;
+	lock_kernel();
+	regs->tpc = regs->tnpc;
+	regs->tnpc += 4;
+	if(++count <= 20)
+		printk ("SunOS binary emulation not compiled in\n");
+	force_sig(SIGSEGV, current);
+	unlock_kernel();
+	return -ENOSYS;
+}
+#endif
+
 asmlinkage int sys_utrap_install(utrap_entry_t type, utrap_handler_t new_p,
 				 utrap_handler_t new_d,
 				 utrap_handler_t *old_p, utrap_handler_t *old_d)
@@ -281,40 +379,40 @@ asmlinkage int sys_utrap_install(utrap_entry_t type, utrap_handler_t new_p,
 		return -EINVAL;
 	if (new_p == (utrap_handler_t)(long)UTH_NOCHANGE) {
 		if (old_p) {
-			if (!current->tss.utraps)
+			if (!current->thread.utraps)
 				put_user_ret(NULL, old_p, -EFAULT);
 			else
-				put_user_ret((utrap_handler_t)(current->tss.utraps[type]), old_p, -EFAULT);
+				put_user_ret((utrap_handler_t)(current->thread.utraps[type]), old_p, -EFAULT);
 		}
 		if (old_d)
 			put_user_ret(NULL, old_d, -EFAULT);
 		return 0;
 	}
 	lock_kernel();
-	if (!current->tss.utraps) {
-		current->tss.utraps = kmalloc((UT_TRAP_INSTRUCTION_31+1)*sizeof(long), GFP_KERNEL);
-		if (!current->tss.utraps) return -ENOMEM;
-		current->tss.utraps[0] = 1;
-		memset(current->tss.utraps+1, 0, UT_TRAP_INSTRUCTION_31*sizeof(long));
+	if (!current->thread.utraps) {
+		current->thread.utraps = kmalloc((UT_TRAP_INSTRUCTION_31+1)*sizeof(long), GFP_KERNEL);
+		if (!current->thread.utraps) return -ENOMEM;
+		current->thread.utraps[0] = 1;
+		memset(current->thread.utraps+1, 0, UT_TRAP_INSTRUCTION_31*sizeof(long));
 	} else {
-		if ((utrap_handler_t)current->tss.utraps[type] != new_p && current->tss.utraps[0] > 1) {
-			long *p = current->tss.utraps;
+		if ((utrap_handler_t)current->thread.utraps[type] != new_p && current->thread.utraps[0] > 1) {
+			long *p = current->thread.utraps;
 			
-			current->tss.utraps = kmalloc((UT_TRAP_INSTRUCTION_31+1)*sizeof(long), GFP_KERNEL);
-			if (!current->tss.utraps) {
-				current->tss.utraps = p;
+			current->thread.utraps = kmalloc((UT_TRAP_INSTRUCTION_31+1)*sizeof(long), GFP_KERNEL);
+			if (!current->thread.utraps) {
+				current->thread.utraps = p;
 				return -ENOMEM;
 			}
 			p[0]--;
-			current->tss.utraps[0] = 1;
-			memcpy(current->tss.utraps+1, p+1, UT_TRAP_INSTRUCTION_31*sizeof(long));
+			current->thread.utraps[0] = 1;
+			memcpy(current->thread.utraps+1, p+1, UT_TRAP_INSTRUCTION_31*sizeof(long));
 		}
 	}
 	if (old_p)
-		put_user_ret((utrap_handler_t)(current->tss.utraps[type]), old_p, -EFAULT);
+		put_user_ret((utrap_handler_t)(current->thread.utraps[type]), old_p, -EFAULT);
 	if (old_d)
 		put_user_ret(NULL, old_d, -EFAULT);
-	current->tss.utraps[type] = (long)new_p;
+	current->thread.utraps[type] = (long)new_p;
 	unlock_kernel();
 	return 0;
 }
@@ -325,39 +423,6 @@ long sparc_memory_ordering(unsigned long model, struct pt_regs *regs)
 		return -EINVAL;
 	regs->tstate = (regs->tstate & ~TSTATE_MM) | (model << 14);
 	return 0;
-}
-
-asmlinkage int
-sys_sigaction(int sig, const struct old_sigaction *act,
-	      struct old_sigaction *oact)
-{
-	struct k_sigaction new_ka, old_ka;
-	int ret;
-
-	if (act) {
-		old_sigset_t mask;
-		if (verify_area(VERIFY_READ, act, sizeof(*act)) ||
-		    __get_user(new_ka.sa.sa_handler, &act->sa_handler) ||
-		    __get_user(new_ka.sa.sa_restorer, &act->sa_restorer))
-			return -EFAULT;
-		__get_user(new_ka.sa.sa_flags, &act->sa_flags);
-		__get_user(mask, &act->sa_mask);
-		siginitset(&new_ka.sa.sa_mask, mask);
-		new_ka.ka_restorer = NULL;
-	}
-
-	ret = do_sigaction(sig, act ? &new_ka : NULL, oact ? &old_ka : NULL);
-
-	if (!ret && oact) {
-		if (verify_area(VERIFY_WRITE, oact, sizeof(*oact)) ||
-		    __put_user(old_ka.sa.sa_handler, &oact->sa_handler) ||
-		    __put_user(old_ka.sa.sa_restorer, &oact->sa_restorer))
-			return -EFAULT;
-		__put_user(old_ka.sa.sa_flags, &oact->sa_flags);
-		__put_user(old_ka.sa.sa_mask.sig[0], &oact->sa_mask);
-	}
-
-	return ret;
 }
 
 asmlinkage int
@@ -396,10 +461,10 @@ update_perfctrs(void)
 	unsigned long pic, tmp;
 
 	read_pic(pic);
-	tmp = (current->tss.kernel_cntd0 += (unsigned int)pic);
-	__put_user(tmp, current->tss.user_cntd0);
-	tmp = (current->tss.kernel_cntd1 += (pic >> 32));
-	__put_user(tmp, current->tss.user_cntd1);
+	tmp = (current->thread.kernel_cntd0 += (unsigned int)pic);
+	__put_user(tmp, current->thread.user_cntd0);
+	tmp = (current->thread.kernel_cntd1 += (pic >> 32));
+	__put_user(tmp, current->thread.user_cntd1);
 	reset_pic();
 }
 
@@ -410,24 +475,24 @@ sys_perfctr(int opcode, unsigned long arg0, unsigned long arg1, unsigned long ar
 
 	switch(opcode) {
 	case PERFCTR_ON:
-		current->tss.pcr_reg = arg2;
-		current->tss.user_cntd0 = (u64 *) arg0;
-		current->tss.user_cntd1 = (u64 *) arg1;
-		current->tss.kernel_cntd0 =
-			current->tss.kernel_cntd1 = 0;
+		current->thread.pcr_reg = arg2;
+		current->thread.user_cntd0 = (u64 *) arg0;
+		current->thread.user_cntd1 = (u64 *) arg1;
+		current->thread.kernel_cntd0 =
+			current->thread.kernel_cntd1 = 0;
 		write_pcr(arg2);
 		reset_pic();
-		current->tss.flags |= SPARC_FLAG_PERFCTR;
+		current->thread.flags |= SPARC_FLAG_PERFCTR;
 		break;
 
 	case PERFCTR_OFF:
 		err = -EINVAL;
-		if ((current->tss.flags & SPARC_FLAG_PERFCTR) != 0) {
-			current->tss.user_cntd0 =
-				current->tss.user_cntd1 = NULL;
-			current->tss.pcr_reg = 0;
+		if ((current->thread.flags & SPARC_FLAG_PERFCTR) != 0) {
+			current->thread.user_cntd0 =
+				current->thread.user_cntd1 = NULL;
+			current->thread.pcr_reg = 0;
 			write_pcr(0);
-			current->tss.flags &= ~(SPARC_FLAG_PERFCTR);
+			current->thread.flags &= ~(SPARC_FLAG_PERFCTR);
 			err = 0;
 		}
 		break;
@@ -435,50 +500,50 @@ sys_perfctr(int opcode, unsigned long arg0, unsigned long arg1, unsigned long ar
 	case PERFCTR_READ: {
 		unsigned long pic, tmp;
 
-		if (!(current->tss.flags & SPARC_FLAG_PERFCTR)) {
+		if (!(current->thread.flags & SPARC_FLAG_PERFCTR)) {
 			err = -EINVAL;
 			break;
 		}
 		read_pic(pic);
-		tmp = (current->tss.kernel_cntd0 += (unsigned int)pic);
-		err |= __put_user(tmp, current->tss.user_cntd0);
-		tmp = (current->tss.kernel_cntd1 += (pic >> 32));
-		err |= __put_user(tmp, current->tss.user_cntd1);
+		tmp = (current->thread.kernel_cntd0 += (unsigned int)pic);
+		err |= __put_user(tmp, current->thread.user_cntd0);
+		tmp = (current->thread.kernel_cntd1 += (pic >> 32));
+		err |= __put_user(tmp, current->thread.user_cntd1);
 		reset_pic();
 		break;
 	}
 
 	case PERFCTR_CLRPIC:
-		if (!(current->tss.flags & SPARC_FLAG_PERFCTR)) {
+		if (!(current->thread.flags & SPARC_FLAG_PERFCTR)) {
 			err = -EINVAL;
 			break;
 		}
-		current->tss.kernel_cntd0 =
-			current->tss.kernel_cntd1 = 0;
+		current->thread.kernel_cntd0 =
+			current->thread.kernel_cntd1 = 0;
 		reset_pic();
 		break;
 
 	case PERFCTR_SETPCR: {
 		u64 *user_pcr = (u64 *)arg0;
-		if (!(current->tss.flags & SPARC_FLAG_PERFCTR)) {
+		if (!(current->thread.flags & SPARC_FLAG_PERFCTR)) {
 			err = -EINVAL;
 			break;
 		}
-		err |= __get_user(current->tss.pcr_reg, user_pcr);
-		write_pcr(current->tss.pcr_reg);
-		current->tss.kernel_cntd0 =
-			current->tss.kernel_cntd1 = 0;
+		err |= __get_user(current->thread.pcr_reg, user_pcr);
+		write_pcr(current->thread.pcr_reg);
+		current->thread.kernel_cntd0 =
+			current->thread.kernel_cntd1 = 0;
 		reset_pic();
 		break;
 	}
 
 	case PERFCTR_GETPCR: {
 		u64 *user_pcr = (u64 *)arg0;
-		if (!(current->tss.flags & SPARC_FLAG_PERFCTR)) {
+		if (!(current->thread.flags & SPARC_FLAG_PERFCTR)) {
 			err = -EINVAL;
 			break;
 		}
-		err |= __put_user(current->tss.pcr_reg, user_pcr);
+		err |= __put_user(current->thread.pcr_reg, user_pcr);
 		break;
 	}
 

@@ -10,7 +10,7 @@
  *	14478 Potsdam, Germany
  *
  *	Most of this code is directly derived from his userspace driver.
- *	His driver works so send any reports to alan@cymru.net unless the
+ *	His driver works so send any reports to alan@redhat.com unless the
  *	userspace driver also doesnt work for you...
  */
 
@@ -22,6 +22,7 @@
 #include <linux/malloc.h>
 #include <linux/mm.h>
 #include <linux/ioport.h>
+#include <linux/init.h>
 #include <asm/io.h>
 #include <linux/sched.h>
 #include <linux/videodev.h>
@@ -623,7 +624,7 @@ static int pms_capture(struct pms_device *dev, char *buf, int rgb555, int count)
 {
 	int y;
 	int dw = 2*dev->width;
-	char *src = (char *)bus_to_virt(mem_base);
+	u32 src = mem_base;
 
 	char tmp[dw+32]; /* using a temp buffer is faster than direct  */
 	int cnt = 0;
@@ -638,8 +639,14 @@ static int pms_capture(struct pms_device *dev, char *buf, int rgb555, int count)
   
 	for (y = 0; y < dev->height; y++ ) 
 	{
-		*src = 0;  /* synchronisiert neue Zeile */
-		memcpy(tmp, src, dw+32); /* discard 16 word   */
+		isa_writeb(0, src);  /* synchronisiert neue Zeile */
+		
+		/*
+		 *	This is in truth a fifo, be very careful as if you
+		 *	forgot this odd things will occur 8)
+		 */
+		 
+		isa_memcpy_fromio(tmp, src, dw+32); /* discard 16 word   */
 		cnt -= dev->height;
 		while (cnt <= 0) 
 		{ 
@@ -1024,21 +1031,11 @@ static int init_mediavision(void)
 	return 0;
 }
 
-static void shutdown_mediavision(void)
-{
-	release_region(io_port,3);
-	release_region(0x9A01, 1);
-}
-
 /*
- *	Module stuff
+ *	Initialization and module stuff
  */
  
-#ifdef MODULE
-int init_module(void)
-#else
-int init_pms_cards(struct video_init *v)
-#endif
+static int __init init_pms_cards(void)
 {
 	printk(KERN_INFO "Mediavision Pro Movie Studio driver 0.02\n");
 	
@@ -1057,15 +1054,21 @@ int init_pms_cards(struct video_init *v)
 	return video_register_device((struct video_device *)&pms_device, VFL_TYPE_GRABBER);
 }
 
-#ifdef MODULE
-
 MODULE_PARM(io_port,"i");
 MODULE_PARM(mem_base,"i");
 
-void cleanup_module(void)
+static void __exit shutdown_mediavision(void)
+{
+	release_region(io_port,3);
+	release_region(0x9A01, 1);
+}
+
+static void __exit cleanup_pms_module(void)
 {
 	shutdown_mediavision();
 	video_unregister_device((struct video_device *)&pms_device);
 }
 
-#endif
+module_init(init_pms_cards);
+module_exit(cleanup_pms_module);
+

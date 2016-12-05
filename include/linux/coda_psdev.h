@@ -23,7 +23,7 @@ struct coda_sb_info
 /* communication pending/processing queues */
 struct venus_comm {
 	u_long		    vc_seq;
-	struct wait_queue  *vc_waitq; /* Venus wait queue */
+	wait_queue_head_t   vc_waitq; /* Venus wait queue */
 	struct list_head    vc_pending;
 	struct list_head    vc_processing;
 	int                 vc_inuse;
@@ -80,6 +80,7 @@ int venus_pioctl(struct super_block *sb, struct ViceFid *fid,
 		 unsigned int cmd, struct PioctlData *data);
 int coda_downcall(int opcode, union outputArgs *out, struct super_block *sb);
 int venus_fsync(struct super_block *sb, struct ViceFid *fid);
+int venus_statfs(struct super_block *sb, struct statfs *sfs);
 
 
 /* messages between coda filesystem in kernel and Venus */
@@ -93,13 +94,14 @@ struct upc_req {
 	u_short	            uc_outSize;
 	u_short	            uc_opcode;  /* copied from data to save lookup */
 	int		    uc_unique;
-	struct wait_queue  *uc_sleep;   /* process' wait queue */
+	wait_queue_head_t   uc_sleep;   /* process' wait queue */
 	unsigned long       uc_posttime;
 };
 
 #define REQ_ASYNC  0x1
 #define REQ_READ   0x2
 #define REQ_WRITE  0x4
+#define REQ_ABORT  0x8
 
 
 /*

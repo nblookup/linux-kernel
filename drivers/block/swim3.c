@@ -193,7 +193,7 @@ struct floppy_state {
 	struct timer_list timeout;
 	int	timeout_pending;
 	int	ejected;
-	struct wait_queue *wait;
+	wait_queue_head_t wait;
 	int	wanted;
 	struct device_node*	media_bay; /* NULL when not in bay */
 	char	dbdma_cmd_space[5 * sizeof(struct dbdma_cmd)];
@@ -219,7 +219,7 @@ static unsigned short write_postamble[] = {
 static void swim3_select(struct floppy_state *fs, int sel);
 static void swim3_action(struct floppy_state *fs, int action);
 static int swim3_readbit(struct floppy_state *fs, int bit);
-static void do_fd_request(void);
+static void do_fd_request(request_queue_t * q);
 static void start_request(struct floppy_state *fs);
 static void set_timeout(struct floppy_state *fs, int nticks,
 			void (*proc)(unsigned long));
@@ -241,17 +241,10 @@ static int floppy_ioctl(struct inode *inode, struct file *filp,
 			unsigned int cmd, unsigned long param);
 static int floppy_open(struct inode *inode, struct file *filp);
 static int floppy_release(struct inode *inode, struct file *filp);
-static ssize_t floppy_read(struct file *filp, char *buf,
-			   size_t count, loff_t *ppos);
-static ssize_t floppy_write(struct file *filp, const char *buf,
-			    size_t count, loff_t *ppos);
 static int floppy_check_change(kdev_t dev);
 static int floppy_revalidate(kdev_t dev);
 static int swim3_add_device(struct device_node *swims);
 int swim3_init(void);
-
-#define IOCTL_MODE_BIT	8
-#define OPEN_WRITE_BIT	16
 
 static void swim3_select(struct floppy_state *fs, int sel)
 {
@@ -290,7 +283,7 @@ static int swim3_readbit(struct floppy_state *fs, int bit)
 	return (stat & DATA) == 0;
 }
 
-static void do_fd_request(void)
+static void do_fd_request(request_queue_t * q)
 {
 	int i;
 	for(i=0;i<floppy_count;i++)
@@ -312,7 +305,7 @@ static void start_request(struct floppy_state *fs)
 		wake_up(&fs->wait);
 		return;
 	}
-	while (CURRENT && fs->state == idle) {
+	while (!QUEUE_EMPTY && fs->state == idle) {
 		if (MAJOR(CURRENT->rq_dev) != MAJOR_NR)
 			panic(DEVICE_NAME ": request list destroyed");
 		if (CURRENT->bh && !buffer_locked(CURRENT->bh))
@@ -821,8 +814,7 @@ static int floppy_ioctl(struct inode *inode, struct file *filp,
 	if (devnum >= floppy_count)
 		return -ENODEV;
 		
-	if (((cmd & 0x40) && !(filp && (filp->f_mode & IOCTL_MODE_BIT))) ||
-	    ((cmd & 0x80) && !suser()))
+	if ((cmd & 0x80) && !suser())
 		return -EPERM;
 
 	fs = &floppy_states[devnum];
@@ -916,12 +908,6 @@ static int floppy_open(struct inode *inode, struct file *filp)
 	else
 		++fs->ref_count;
 
-	/* Allow ioctls if we have write-permissions even if read-only open */
-	if ((filp->f_mode & 2) || (permission(inode, 2) == 0))
-		filp->f_mode |= IOCTL_MODE_BIT;
-	if (filp->f_mode & 2)
-		filp->f_mode |= OPEN_WRITE_BIT;
-
 	return 0;
 }
 
@@ -933,15 +919,6 @@ static int floppy_release(struct inode *inode, struct file *filp)
 
 	if (devnum >= floppy_count)
 		return -ENODEV;
-
-	/*
-	 * If filp is NULL, we're being called from blkdev_release
-	 * or after a failed mount attempt.  In the former case the
-	 * device has already been sync'ed, and in the latter no
-	 * sync is required.  Otherwise, sync if filp is writable.
-	 */
-	if (filp && (filp->f_mode & (2 | OPEN_WRITE_BIT)))
-		block_fsync (filp, filp->f_dentry);
 
 	fs = &floppy_states[devnum];
 	sw = fs->swim3;
@@ -1007,61 +984,16 @@ static int floppy_revalidate(kdev_t dev)
 	return ret;
 }
 
-static ssize_t floppy_read(struct file *filp, char *buf,
-			   size_t count, loff_t *ppos)
-{
-	struct inode *inode = filp->f_dentry->d_inode;
-	struct floppy_state *fs;
-	int devnum = MINOR(inode->i_rdev);
-
-	if (devnum >= floppy_count)
-		return -ENODEV;
-		
-	fs = &floppy_states[devnum];
-	if (fs->ejected)
-		return -ENXIO;
-	return block_read(filp, buf, count, ppos);
-}
-
-static ssize_t floppy_write(struct file * filp, const char * buf,
-			    size_t count, loff_t *ppos)
-{
-	struct inode * inode = filp->f_dentry->d_inode;
-	struct floppy_state *fs;
-	int devnum = MINOR(inode->i_rdev);
-
-	if (devnum >= floppy_count)
-		return -ENODEV;
-	check_disk_change(inode->i_rdev);
-	fs = &floppy_states[devnum];
-	if (fs->ejected)
-		return -ENXIO;
-	if (fs->write_prot < 0)
-		fs->write_prot = swim3_readbit(fs, WRITE_PROT);
-	if (fs->write_prot)
-		return -EROFS;
-	return block_write(filp, buf, count, ppos);
-}
-
 static void floppy_off(unsigned int nr)
 {
 }
 
-static struct file_operations floppy_fops = {
-	NULL,			/* lseek */
-	floppy_read,		/* read */
-	floppy_write,		/* write */
-	NULL,			/* readdir */
-	NULL,			/* poll */
-	floppy_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	floppy_open,		/* open */
-	NULL,			/* flush */
-	floppy_release,		/* release */
-	block_fsync,		/* fsync */
-	NULL,			/* fasync */
-	floppy_check_change,	/* check_media_change */
-	floppy_revalidate,	/* revalidate */
+static struct block_device_operations floppy_fops = {
+	open:			floppy_open,
+	release:		floppy_release,
+	ioctl:			floppy_ioctl,
+	check_media_change:	floppy_check_change,
+	revalidate:		floppy_revalidate,
 };
 
 int swim3_init(void)
@@ -1089,7 +1021,7 @@ int swim3_init(void)
 			       MAJOR_NR);
 			return -EBUSY;
 		}
-		blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+		blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
 		blksize_size[MAJOR_NR] = floppy_blocksizes;
 		blk_size[MAJOR_NR] = floppy_sizes;
 	}
@@ -1132,6 +1064,7 @@ static int swim3_add_device(struct device_node *swim)
 	fs->secpertrack = 18;
 	fs->total_secs = 2880;
 	fs->media_bay = mediabay;
+	init_waitqueue_head(&fs->wait);
 
 	fs->dma_cmd = (struct dbdma_cmd *) DBDMA_ALIGN(fs->dbdma_cmd_space);
 	memset(fs->dma_cmd, 0, 2 * sizeof(struct dbdma_cmd));

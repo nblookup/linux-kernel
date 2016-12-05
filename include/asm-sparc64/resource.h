@@ -1,4 +1,4 @@
-/* $Id: resource.h,v 1.4 1998/11/19 20:01:49 davem Exp $
+/* $Id: resource.h,v 1.7 1999/12/15 17:52:08 jj Exp $
  * resource.h: Resource definitions.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -24,14 +24,24 @@
 
 #define RLIM_NLIMITS	10
 
+/*
+ * SuS says limits have to be unsigned.
+ * Which makes a ton more sense anyway.
+ */
+#define RLIM_INFINITY	(~0UL)
+
 #ifdef __KERNEL__
-#define INIT_RLIMITS							\
-{									\
-    {LONG_MAX, LONG_MAX}, {LONG_MAX, LONG_MAX},				\
-    {LONG_MAX, LONG_MAX}, {_STK_LIM, LONG_MAX},				\
-    {       0, LONG_MAX}, {LONG_MAX, LONG_MAX},				\
-    {NR_OPEN, NR_OPEN}, {MAX_TASKS_PER_USER, MAX_TASKS_PER_USER},	\
-    {LONG_MAX, LONG_MAX}, {LONG_MAX, LONG_MAX}                          \
+#define INIT_RLIMITS			\
+{					\
+    {RLIM_INFINITY, RLIM_INFINITY},	\
+    {RLIM_INFINITY, RLIM_INFINITY},	\
+    {RLIM_INFINITY, RLIM_INFINITY},	\
+    {_STK_LIM, RLIM_INFINITY},		\
+    {       0, RLIM_INFINITY},		\
+    {RLIM_INFINITY, RLIM_INFINITY},	\
+    {INR_OPEN, INR_OPEN}, {0, 0},	\
+    {RLIM_INFINITY, RLIM_INFINITY},	\
+    {RLIM_INFINITY, RLIM_INFINITY}	\
 }
 
 #endif /* __KERNEL__ */

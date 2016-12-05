@@ -21,10 +21,7 @@
  *                       the same.
  */
 
-#include <linux/config.h>
 #include "sound_config.h"
-
-#ifdef CONFIG_SBDSP
 
 #include "sb_mixer.h"
 #include "sb.h"
@@ -460,7 +457,7 @@ static int sb201_audio_set_speed(int dev, int speed)
 			speed = 44100;
 		if (devc->opened & OPEN_READ && speed > 15000)
 			speed = 15000;
-		devc->tconst = ((65536 - ((256000000 + s / 2) / s)) >> 8) & 0xff;
+		devc->tconst = (256 - ((1000000 + s / 2) / s)) & 0xff;
 		tmp = 256 - devc->tconst;
 		speed = ((1000000 + tmp / 2) / tmp) / devc->channels;
 
@@ -591,7 +588,7 @@ static int jazz16_audio_set_speed(int dev, int speed)
 		if (speed > 44100)
 			speed = 44100;
 
-		devc->tconst = ((65536 - ((256000000 + s / 2) / s)) >> 8) & 0xff;
+		devc->tconst = (256 - ((1000000 + s / 2) / s)) & 0xff;
 
 		tmp = 256 - devc->tconst;
 		speed = ((1000000 + tmp / 2) / tmp) / devc->channels;
@@ -742,6 +739,14 @@ static void sb16_audio_output_block(int dev, unsigned long buf, int count,
 	restore_flags(flags);
 }
 
+
+/*
+ *	This fails on the Cyrix MediaGX. If you don't have the DMA enabled
+ *	before the first sample arrives it locks up. However even if you
+ *	do enable the DMA in time you just get DMA timeouts and missing
+ *	interrupts and stuff, so for now I've not bothered fixing this either.
+ */
+ 
 static void sb16_audio_start_input(int dev, unsigned long buf, int count, int intrflag)
 {
 	unsigned long   flags, cnt;
@@ -1118,5 +1123,3 @@ void sb_audio_init(sb_devc * devc, char *name)
 	audio_devs[devc->dev]->mixer_dev = devc->my_mixerdev;
 	audio_devs[devc->dev]->min_fragment = 5;
 }
-
-#endif

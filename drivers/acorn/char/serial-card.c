@@ -1,7 +1,7 @@
 /*
  * linux/arch/arm/drivers/char/serial-card.c
  *
- * Copyright (c) 1996 Russell King.
+ * Copyright (c) 1996-1999 Russell King.
  *
  * A generic handler of serial expansion cards that use 16550s or
  * the like.
@@ -22,9 +22,13 @@
  *  22-04-1998	RMK	Removed old register_pre_init_serial
  */
 #include <linux/module.h>
+#include <linux/types.h>
 #include <linux/serial.h>
 #include <linux/errno.h>
+#include <linux/init.h>
+
 #include <asm/ecard.h>
+#include <asm/string.h>
 
 #ifndef NUM_SERIALS
 #define NUM_SERIALS	MY_NUMPORTS * MAX_ECARDS
@@ -33,14 +37,18 @@
 #ifdef MODULE
 static int __serial_ports[NUM_SERIALS];
 static int __serial_pcount;
+static int __serial_addr[NUM_SERIALS];
 static struct expansion_card *expcard[MAX_ECARDS];
 #define ADD_ECARD(ec,card) expcard[(card)] = (ec)
-#define ADD_PORT(port) __serial_ports[__serial_pcount++] = (port)
-#undef MY_INIT
-#define MY_INIT init_module
+#define ADD_PORT(port,addr)					\
+	do {							\
+		__serial_ports[__serial_pcount] = (port);	\
+		__serial_addr[__serial_pcount] = (addr);	\
+		__serial_pcount += 1;				\
+	} while (0)
 #else
 #define ADD_ECARD(ec,card)
-#define ADD_PORT(port)
+#define ADD_PORT(port,addr)
 #endif
 
 static const card_ids serial_cids[] = { MY_CARD_LIST, { 0xffff, 0xffff } };
@@ -49,6 +57,7 @@ static inline int serial_register_onedev (unsigned long port, int irq)
 {
     struct serial_struct req;
 
+    memset(&req, 0, sizeof(req));
     req.baud_base = MY_BAUD_BASE;
     req.irq = irq;
     req.port = port;
@@ -57,7 +66,7 @@ static inline int serial_register_onedev (unsigned long port, int irq)
     return register_serial(&req);
 }
 
-int MY_INIT (void)
+static int __init INIT (void)
 {
     int card = 0;
 
@@ -75,12 +84,15 @@ int MY_INIT (void)
 	cardaddr = MY_BASE_ADDRESS(ec);
 
 	for (port = 0; port < MY_NUMPORTS; port ++) {
+	    unsigned long address;
 	    int line;
 
-	    line = serial_register_onedev (MY_PORT_ADDRESS(port, cardaddr), ec->irq);
+	    address = MY_PORT_ADDRESS(port, cardaddr);
+
+	    line = serial_register_onedev (address, ec->irq);
 	    if (line < 0)
 		break;
-	    ADD_PORT(line);
+	    ADD_PORT(line, address);
 	}
 
 	if (port) {
@@ -92,16 +104,23 @@ int MY_INIT (void)
     return card ? 0 : -ENODEV;
 }
 
-#ifdef MODULE
-void cleanup_module (void)
+static void __exit EXIT (void)
 {
+#ifdef MODULE
     int i;
 
-    for (i = 0; i < __serial_pcount; i++)
-	unregister_serial (__serial_ports[i]);
+    for (i = 0; i < __serial_pcount; i++) {
+	unregister_serial(__serial_ports[i]);
+	release_region(__serial_addr[i], 8);
+    }
 
     for (i = 0; i < MAX_ECARDS; i++)
 	if (expcard[i])
 	    ecard_release (expcard[i]);
-}
 #endif
+}
+
+EXPORT_NO_SYMBOLS;
+
+module_init(INIT);
+module_exit(EXIT);

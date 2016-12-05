@@ -33,11 +33,13 @@
  *				packet starts two bytes from the end of the
  *				buffer, it corrupts the receiver chain, and
  *				never updates the transmit status correctly.
- * TODO:
- *  When we detect a fatal error on the interface, we should restart it.
+ * 1.14	RMK	07/01/1998	Added initial code for ETHERB addressing.
+ * 1.15	RMK	30/04/1999	More fixes to the transmit routine for buggy
+ *				hardware.
+ * 1.16	RMK	10/02/2000	Updated for 2.3.43
  */
 
-static char *version = "ether3 ethernet driver (c) 1995-1998 R.M.King v1.13\n";
+static char *version = "ether3 ethernet driver (c) 1995-2000 R.M.King v1.16\n";
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -66,19 +68,24 @@ static char *version = "ether3 ethernet driver (c) 1995-1998 R.M.King v1.13\n";
 #include "ether3.h"
 
 static unsigned int net_debug = NET_DEBUG;
-static const card_ids ether3_cids[] = {
+static const card_ids __init ether3_cids[] = {
 	{ MANU_ANT2, PROD_ANT_ETHER3 },
 	{ MANU_ANT,  PROD_ANT_ETHER3 },
 	{ MANU_ANT,  PROD_ANT_ETHERB }, /* trial - will etherb work? */
 	{ 0xffff, 0xffff }
 };
 
-static void ether3_setmulticastlist(struct device *dev);
-static int  ether3_rx(struct device *dev, struct dev_priv *priv, unsigned int maxcnt);
-static void ether3_tx(struct device *dev, struct dev_priv *priv);
-
-extern int inswb(int reg, void *buffer, int len);
-extern int outswb(int reg, void *buffer, int len);
+static void	ether3_setmulticastlist(struct net_device *dev);
+static int	ether3_rx(struct net_device *dev, struct dev_priv *priv, unsigned int maxcnt);
+static void	ether3_tx(struct net_device *dev, struct dev_priv *priv);
+static int	ether3_probe1 (struct net_device *dev);
+static int	ether3_open (struct net_device *dev);
+static int	ether3_sendpacket (struct sk_buff *skb, struct net_device *dev);
+static void	ether3_interrupt (int irq, void *dev_id, struct pt_regs *regs);
+static int	ether3_close (struct net_device *dev);
+static struct enet_statistics *ether3_getstats (struct net_device *dev);
+static void	ether3_setmulticastlist (struct net_device *dev);
+static void	ether3_timeout(struct net_device *dev);
 
 #define BUS_16		2
 #define BUS_8		1
@@ -88,7 +95,7 @@ extern int outswb(int reg, void *buffer, int len);
  * I'm not sure what address we should default to if the internal one
  * is corrupted...
  */
-unsigned char def_eth_addr[6] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05};
+unsigned char def_eth_addr[6] = {0x00, 'L', 'i', 'n', 'u', 'x'};
 
 /* --------------------------------------------------------------------------- */
 
@@ -99,15 +106,25 @@ typedef enum {
 
 /*
  * ether3 read/write.  Slow things down a bit...
+ * The SEEQ8005 doesn't like us writing to it's registers
+ * too quickly.
  */
-#define ether3_outb(v,r)	{ outb((v),(r)); udelay(1); }
-#define ether3_outw(v,r)	{ outw((v),(r)); udelay(1); }
+static inline void ether3_outb(int v, const int r)
+{
+	outb(v, r);
+	udelay(1);
+}
 
+static inline void ether3_outw(int v, const int r)
+{
+	outw(v, r);
+	udelay(1);
+}
 #define ether3_inb(r)		({ unsigned int __v = inb((r)); udelay(1); __v; })
 #define ether3_inw(r)		({ unsigned int __v = inw((r)); udelay(1); __v; })
 
 static int
-ether3_setbuffer(struct device *dev, buffer_rw_t read, int start)
+ether3_setbuffer(struct net_device *dev, buffer_rw_t read, int start)
 {
 	struct dev_priv *priv = (struct dev_priv *)dev->priv;
 	int timeout = 1000;
@@ -138,7 +155,7 @@ ether3_setbuffer(struct device *dev, buffer_rw_t read, int start)
  * write data to the buffer memory
  */
 #define ether3_writebuffer(dev,data,length)			\
-	outswb(REG_BUFWIN, (data), (length))
+	outsw(REG_BUFWIN, (data), (length) >> 1)
 
 #define ether3_writeword(dev,data)				\
 	outw((data), REG_BUFWIN)
@@ -153,7 +170,7 @@ ether3_setbuffer(struct device *dev, buffer_rw_t read, int start)
  * read data from the buffer memory
  */
 #define ether3_readbuffer(dev,data,length)			\
-	inswb(REG_BUFWIN, (data), (length))
+	insw(REG_BUFWIN, (data), (length) >> 1)
 
 #define ether3_readword(dev)					\
 	inw(REG_BUFWIN)
@@ -167,7 +184,7 @@ ether3_setbuffer(struct device *dev, buffer_rw_t read, int start)
 static void
 ether3_ledoff(unsigned long data)
 {
-	struct device *dev = (struct device *)data;
+	struct net_device *dev = (struct net_device *)data;
 	struct dev_priv *priv = (struct dev_priv *)dev->priv;
 	ether3_outw(priv->regs.config2 |= CFG2_CTRLO, REG_CONFIG2);
 }
@@ -176,7 +193,7 @@ ether3_ledoff(unsigned long data)
  * switch LED on...
  */
 static inline void
-ether3_ledon(struct device *dev, struct dev_priv *priv)
+ether3_ledon(struct net_device *dev, struct dev_priv *priv)
 {
 	del_timer(&priv->timer);
 	priv->timer.expires = jiffies + HZ / 50; /* leave on for 1/50th second */
@@ -191,8 +208,8 @@ ether3_ledon(struct device *dev, struct dev_priv *priv)
  * Read the ethernet address string from the on board rom.
  * This is an ascii string!!!
  */
-__initfunc(static void
-ether3_addr(char *addr, struct expansion_card *ec))
+static void __init
+ether3_addr(char *addr, struct expansion_card *ec)
 {
 	struct in_chunk_dir cd;
 	char *s;
@@ -216,8 +233,8 @@ ether3_addr(char *addr, struct expansion_card *ec))
 
 /* --------------------------------------------------------------------------- */
 
-__initfunc(static int
-ether3_ramtest(struct device *dev, unsigned char byte))
+static int __init
+ether3_ramtest(struct net_device *dev, unsigned char byte)
 {
 	unsigned char *buffer = kmalloc(RX_END, GFP_KERNEL);
 	int i,ret = 0;
@@ -249,7 +266,7 @@ ether3_ramtest(struct device *dev, unsigned char byte))
 			}
 		} else {
 			if (bad != -1) {
-			    	if (bad != i - 1)
+				if (bad != i - 1)
 					printk(" - 0x%04X\n", i - 1);
 				printk("\n");
 				bad = -1;
@@ -265,8 +282,8 @@ ether3_ramtest(struct device *dev, unsigned char byte))
 
 /* ------------------------------------------------------------------------------- */
 
-__initfunc(static int
-ether3_init_2(struct device *dev))
+static int __init
+ether3_init_2(struct net_device *dev)
 {
 	struct dev_priv *priv = (struct dev_priv *)dev->priv;
 	int i;
@@ -316,7 +333,7 @@ ether3_init_2(struct device *dev))
 }
 
 static void
-ether3_init_for_open(struct device *dev)
+ether3_init_for_open(struct net_device *dev)
 {
 	struct dev_priv *priv = (struct dev_priv *)dev->priv;
 	int i;
@@ -335,7 +352,6 @@ ether3_init_for_open(struct device *dev)
 	for (i = 0; i < 6; i++)
 		ether3_outb(dev->dev_addr[i], REG_BUFWIN);
 
-	priv->tx_used	= 0;
 	priv->tx_head	= 0;
 	priv->tx_tail	= 0;
 	priv->regs.config2 |= CFG2_CTRLO;
@@ -357,7 +373,7 @@ ether3_init_for_open(struct device *dev)
 }
 
 static inline int
-ether3_probe_bus_8(struct device *dev, int val)
+ether3_probe_bus_8(struct net_device *dev, int val)
 {
 	int write_low, write_high, read_low, read_high;
 
@@ -378,7 +394,7 @@ ether3_probe_bus_8(struct device *dev, int val)
 }
 
 static inline int
-ether3_probe_bus_16(struct device *dev, int val)
+ether3_probe_bus_16(struct net_device *dev, int val)
 {
 	int read_val;
 
@@ -393,12 +409,13 @@ ether3_probe_bus_16(struct device *dev, int val)
 /*
  * This is the real probe routine.
  */
-__initfunc(static int
-ether3_probe1(struct device *dev))
+static int __init
+ether3_probe1(struct net_device *dev)
 {
 	static unsigned version_printed = 0;
 	struct dev_priv *priv;
 	unsigned int i, bus_type, error = ENODEV;
+	const char *name = "ether3";
 
 	if (net_debug && version_printed++ == 0)
 		printk(version);
@@ -414,7 +431,7 @@ ether3_probe1(struct device *dev))
 	priv = (struct dev_priv *) dev->priv;
 	memset(priv, 0, sizeof(struct dev_priv));
 
-	request_region(dev->base_addr, 128, "ether3");
+	request_region(dev->base_addr, 128, name);
 
 	/* Reset card...
 	 */
@@ -436,33 +453,38 @@ ether3_probe1(struct device *dev))
 
 	switch (bus_type) {
 	case BUS_UNKNOWN:
-		printk(KERN_ERR "%s: unable to identify podule bus width\n", dev->name);
+		printk(KERN_ERR "%s: unable to identify bus width\n", dev->name);
 		goto failed;
 
 	case BUS_8:
-		printk(KERN_ERR "%s: ether3 found, but is an unsupported 8-bit card\n", dev->name);
+		printk(KERN_ERR "%s: %s found, but is an unsupported "
+			"8-bit card\n", dev->name, name);
 		goto failed;
 
 	default:
 		break;
 	}
 
-	printk("%s: ether3 found at %lx, IRQ%d, ether address ", dev->name, dev->base_addr, dev->irq);
+	printk("%s: %s at %lx, IRQ%d, ether address ",
+		dev->name, name, dev->base_addr, dev->irq);
 	for (i = 0; i < 6; i++)
 		printk(i == 5 ? "%2.2x\n" : "%2.2x:", dev->dev_addr[i]);
 
-	if (!ether3_init_2(dev)) {
-		dev->open = ether3_open;
-		dev->stop = ether3_close;
-		dev->hard_start_xmit = ether3_sendpacket;
-		dev->get_stats = ether3_getstats;
-		dev->set_multicast_list = ether3_setmulticastlist;
+	if (ether3_init_2(dev))
+		goto failed;
 
-		/* Fill in the fields of the device structure with ethernet values. */
-		ether_setup(dev);
+	dev->open		= ether3_open;
+	dev->stop		= ether3_close;
+	dev->hard_start_xmit	= ether3_sendpacket;
+	dev->get_stats		= ether3_getstats;
+	dev->set_multicast_list	= ether3_setmulticastlist;
+	dev->tx_timeout		= ether3_timeout;
+	dev->watchdog_timeo	= 5 * HZ / 100;
 
-		return 0;
-	}
+	/* Fill in the fields of the device structure with ethernet values. */
+	ether_setup(dev);
+
+	return 0;
 
 failed:
 	kfree(dev->priv);
@@ -471,9 +493,28 @@ failed:
 	return error;
 }
 
+static void __init
+ether3_get_dev(struct net_device *dev, struct expansion_card *ec)
+{
+	ecard_claim(ec);
+
+	dev->base_addr = ecard_address(ec, ECARD_MEMC, 0);
+	dev->irq = ec->irq;
+
+	if (ec->cid.manufacturer == MANU_ANT &&
+	    ec->cid.product == PROD_ANT_ETHERB) {
+		dev->base_addr += 0x200;
+	}
+
+	ec->irqaddr = (volatile unsigned char *)ioaddr(dev->base_addr);
+	ec->irqmask = 0xf0;
+
+	ether3_addr(dev->dev_addr, ec);
+}
+
 #ifndef MODULE
-__initfunc(int
-ether3_probe(struct device *dev))
+int __init
+ether3_probe(struct net_device *dev)
 {
 	struct expansion_card *ec;
 
@@ -485,12 +526,8 @@ ether3_probe(struct device *dev))
 	if ((ec = ecard_find(0, ether3_cids)) == NULL)
 		return ENODEV;
 
-	dev->base_addr = ecard_address(ec, ECARD_MEMC, 0);
-	dev->irq = ec->irq;
+	ether3_get_dev(dev, ec);
 
-	ecard_claim(ec);
-
-	ether3_addr(dev->dev_addr, ec);
 	return ether3_probe1(dev);
 }
 #endif
@@ -504,7 +541,7 @@ ether3_probe(struct device *dev))
  * there is non-reboot way to recover if something goes wrong.
  */
 static int
-ether3_open(struct device *dev)
+ether3_open(struct net_device *dev)
 {
 	MOD_INC_USE_COUNT;
 
@@ -513,11 +550,9 @@ ether3_open(struct device *dev)
 		return -EAGAIN;
 	}
 
-	dev->tbusy = 0;
-	dev->interrupt = 0;
-	dev->start = 1;
-
 	ether3_init_for_open(dev);
+
+	netif_start_queue(dev);
 
 	return 0;
 }
@@ -526,12 +561,11 @@ ether3_open(struct device *dev)
  * The inverse routine to ether3_open().
  */
 static int
-ether3_close(struct device *dev)
+ether3_close(struct net_device *dev)
 {
 	struct dev_priv *priv = (struct dev_priv *)dev->priv;
 
-	dev->tbusy = 1;
-	dev->start = 0;
+	netif_stop_queue(dev);
 
 	disable_irq(dev->irq);
 
@@ -551,7 +585,7 @@ ether3_close(struct device *dev)
  * Get the current statistics.	This may be called with the card open or
  * closed.
  */
-static struct enet_statistics *ether3_getstats(struct device *dev)
+static struct enet_statistics *ether3_getstats(struct net_device *dev)
 {
 	struct dev_priv *priv = (struct dev_priv *)dev->priv;
 	return &priv->stats;
@@ -563,7 +597,7 @@ static struct enet_statistics *ether3_getstats(struct device *dev)
  * We don't attempt any packet filtering.  The card may have a SEEQ 8004
  * in which does not have the other ethernet address registers present...
  */
-static void ether3_setmulticastlist(struct device *dev)
+static void ether3_setmulticastlist(struct net_device *dev)
 {
 	struct dev_priv *priv = (struct dev_priv *)dev->priv;
 
@@ -580,134 +614,102 @@ static void ether3_setmulticastlist(struct device *dev)
 	ether3_outw(priv->regs.config1 | CFG1_LOCBUFMEM, REG_CONFIG1);
 }
 
-/*
- * Allocate memory in transmitter ring buffer.
- */
-static int
-ether3_alloc_tx(struct dev_priv *priv, int length, int alloc)
+static void
+ether3_timeout(struct net_device *dev)
 {
-	int start, head, tail;
+	struct dev_priv *priv = (struct dev_priv *)dev->priv;
+	unsigned long flags;
 
-	tail = priv->tx_tail;
-	start = priv->tx_head;
-	head = start + length + 4;
+	del_timer(&priv->timer);
 
-	if (head >= TX_END) {
-		if (tail > priv->tx_head)
-			return -1;
-		head -= TX_END - TX_START;
-		if (tail < head)
-			return -1;
-	} else if (start < tail && tail < head)
-		return -1;
+	save_flags_cli(flags);
+	printk(KERN_ERR "%s: transmit timed out, network cable problem?\n", dev->name);
+	printk(KERN_ERR "%s: state: { status=%04X cfg1=%04X cfg2=%04X }\n", dev->name,
+		ether3_inw(REG_STATUS), ether3_inw(REG_CONFIG1), ether3_inw(REG_CONFIG2));
+	printk(KERN_ERR "%s: { rpr=%04X rea=%04X tpr=%04X }\n", dev->name,
+		ether3_inw(REG_RECVPTR), ether3_inw(REG_RECVEND), ether3_inw(REG_TRANSMITPTR));
+	printk(KERN_ERR "%s: tx head=%X tx tail=%X\n", dev->name,
+		priv->tx_head, priv->tx_tail);
+	ether3_setbuffer(dev, buffer_read, priv->tx_tail);
+	printk(KERN_ERR "%s: packet status = %08X\n", dev->name, ether3_readlong(dev));
+	restore_flags(flags);
 
-	if (alloc)
-		priv->tx_head = head;
+	priv->regs.config2 |= CFG2_CTRLO;
+	priv->stats.tx_errors += 1;
+	ether3_outw(priv->regs.config2, REG_CONFIG2);
+	priv->tx_head = priv->tx_tail = 0;
 
-	return start;
+	netif_wake_queue(dev);
 }
 
 /*
  * Transmit a packet
  */
 static int
-ether3_sendpacket(struct sk_buff *skb, struct device *dev)
+ether3_sendpacket(struct sk_buff *skb, struct net_device *dev)
 {
 	struct dev_priv *priv = (struct dev_priv *)dev->priv;
-retry:
-	if (!dev->tbusy) {
-		/* Block a timer-based transmit from overlapping.  This could better be
-		 * done with atomic_swap(1, dev->tbusy), but set_bit() works as well.
-		 */
-		if (!test_and_set_bit(0, (void *)&dev->tbusy)) {
-			unsigned long flags;
-			unsigned int length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
-			int ptr;
+	unsigned long flags;
+	unsigned int length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+	unsigned int ptr, next_ptr;
 
-			length = (length + 1) & ~1;
+	length = (length + 1) & ~1;
 
-			if (priv->broken) {
-				dev_kfree_skb(skb);
-				priv->stats.tx_dropped ++;
-				dev->tbusy = 0;
-				return 0;
-			}
+	if (priv->broken) {
+		dev_kfree_skb(skb);
+		priv->stats.tx_dropped ++;
+		netif_start_queue(dev);
+		return 0;
+	}
 
-			save_flags_cli(flags);
+	next_ptr = (priv->tx_head + 1) & 15;
 
-			ptr = ether3_alloc_tx(priv, length, 1);
-			if (ptr == -1)
-				return 1;	/* unable to queue */
+	save_flags_cli(flags);
+
+	if (priv->tx_tail == next_ptr) {
+		restore_flags(flags);
+		return 1;	/* unable to queue */
+	}
+
+	dev->trans_start = jiffies;
+	ptr		 = 0x600 * priv->tx_head;
+	priv->tx_head	 = next_ptr;
+	next_ptr	*= 0x600;
 
 #define TXHDR_FLAGS (TXHDR_TRANSMIT|TXHDR_CHAINCONTINUE|TXHDR_DATAFOLLOWS|TXHDR_ENSUCCESS)
 
-			ether3_setbuffer(dev, buffer_write, priv->tx_head);
-			ether3_writelong(dev, 0);
+	ether3_setbuffer(dev, buffer_write, next_ptr);
+	ether3_writelong(dev, 0);
+	ether3_setbuffer(dev, buffer_write, ptr);
+	ether3_writelong(dev, 0);
+	ether3_writebuffer(dev, skb->data, length);
+	ether3_writeword(dev, htons(next_ptr));
+	ether3_writeword(dev, TXHDR_CHAINCONTINUE >> 16);
+	ether3_setbuffer(dev, buffer_write, ptr);
+	ether3_writeword(dev, htons((ptr + length + 4)));
+	ether3_writeword(dev, TXHDR_FLAGS >> 16);
+	ether3_ledon(dev, priv);
 
-			ether3_setbuffer(dev, buffer_write, ptr);
-			ether3_writelong(dev, 0);
-			ether3_writebuffer(dev, skb->data, length);
-
-			ether3_setbuffer(dev, buffer_write, ptr);
-			ether3_writeword(dev, htons(priv->tx_head));
-			ether3_writeword(dev, TXHDR_FLAGS >> 16);
-			ether3_ledon(dev, priv);
-
-			if (!(ether3_inw(REG_STATUS) & STAT_TXON)) {
-				ether3_outw(ptr, REG_TRANSMITPTR);
-				ether3_outw(priv->regs.command | CMD_TXON, REG_COMMAND);
-			}
-
-			if (ether3_alloc_tx(priv, 2044, 0) != -1)
-				dev->tbusy = 0;
-
-			dev->trans_start = jiffies;
-
-			restore_flags(flags);
-
-			dev_kfree_skb(skb);
-
-			return 0;
-		} else {
-			printk("%s: transmitter access conflict.\n", dev->name);
-			return 1;
-		}
-	} else {
-		/* If we get here, some higher level has decided we are broken.
-		 * There should really be a "kick me" function call instead.
-		 */
-		int tickssofar = jiffies - dev->trans_start;
-		unsigned long flags;
-
-		if (tickssofar < 5)
-			return 1;
-		del_timer(&priv->timer);
-
-		save_flags_cli(flags);
-		printk(KERN_ERR "%s: transmit timed out, network cable problem?\n", dev->name);
-		printk(KERN_ERR "%s: state: { status=%04X cfg1=%04X cfg2=%04X }\n", dev->name,
-			ether3_inw(REG_STATUS), ether3_inw(REG_CONFIG1), ether3_inw(REG_CONFIG2));
-		printk(KERN_ERR "%s: { rpr=%04X rea=%04X tpr=%04X }\n", dev->name,
-			ether3_inw(REG_RECVPTR), ether3_inw(REG_RECVEND), ether3_inw(REG_TRANSMITPTR));
-		printk(KERN_ERR "%s: tx head=%04X tx tail=%04X\n", dev->name,
-			priv->tx_head, priv->tx_tail);
-		ether3_setbuffer(dev, buffer_read, priv->tx_tail);
-		printk(KERN_ERR "%s: packet status = %08X\n", dev->name, ether3_readlong(dev));
-		restore_flags(flags);
-
-		dev->tbusy = 0;
-		priv->regs.config2 |= CFG2_CTRLO;
-		priv->stats.tx_errors += 1;
-		ether3_outw(priv->regs.config2 , REG_CONFIG2);
-		dev->trans_start = jiffies;
-		goto retry;
+	if (!(ether3_inw(REG_STATUS) & STAT_TXON)) {
+		ether3_outw(ptr, REG_TRANSMITPTR);
+		ether3_outw(priv->regs.command | CMD_TXON, REG_COMMAND);
 	}
+
+	next_ptr = (priv->tx_head + 1) & 15;
+	restore_flags(flags);
+
+	dev_kfree_skb(skb);
+
+	if (priv->tx_tail == next_ptr)
+		netif_stop_queue(dev);
+
+	return 0;
 }
 
 static void
 ether3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-	struct device *dev = (struct device *)dev_id;
+	struct net_device *dev = (struct net_device *)dev_id;
 	struct dev_priv *priv;
 	unsigned int status;
 
@@ -717,8 +719,6 @@ ether3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 #endif
 
 	priv = (struct dev_priv *)dev->priv;
-
-	dev->interrupt = 1;
 
 	status = ether3_inw(REG_STATUS);
 
@@ -732,8 +732,6 @@ ether3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		ether3_tx(dev, priv);
 	}
 
-	dev->interrupt = 0;
-
 #if NET_DEBUG > 1
 	if(net_debug & DEBUG_INT)
 		printk("done\n");
@@ -744,7 +742,7 @@ ether3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
  * If we have a good packet(s), get it/them out of the buffers.
  */
 static int
-ether3_rx(struct device *dev, struct dev_priv *priv, unsigned int maxcnt)
+ether3_rx(struct net_device *dev, struct dev_priv *priv, unsigned int maxcnt)
 {
 	unsigned int next_ptr = priv->rx_head, received = 0;
 	ether3_ledon(dev, priv);
@@ -864,9 +862,10 @@ dropping:{
  * Update stats for the transmitted packet(s)
  */
 static void
-ether3_tx(struct device *dev, struct dev_priv *priv)
+ether3_tx(struct net_device *dev, struct dev_priv *priv)
 {
 	unsigned int tx_tail = priv->tx_tail;
+	int max_work = 14;
 
 	do {
 	    	unsigned long status;
@@ -874,7 +873,7 @@ ether3_tx(struct device *dev, struct dev_priv *priv)
     		/*
 	    	 * Read the packet header
     		 */
-	    	ether3_setbuffer(dev, buffer_read, tx_tail);
+	    	ether3_setbuffer(dev, buffer_read, tx_tail * 0x600);
     		status = ether3_readlong(dev);
 
 		/*
@@ -895,95 +894,71 @@ ether3_tx(struct device *dev, struct dev_priv *priv)
 			if (status & TXSTAT_BABBLED) priv->stats.tx_fifo_errors ++;
 		}
 
-		tx_tail = htons(status & TX_NEXT);
-		if (tx_tail < TX_START || tx_tail >= TX_END) {
-			printk("%s: transmit error: next pointer = %04X\n", dev->name, tx_tail);
-			tx_tail = TX_START;
-			priv->tx_head = TX_START;
-			priv->tx_tail = TX_END;
-		}
-	} while (1);
+		tx_tail = (tx_tail + 1) & 15;
+	} while (--max_work);
 
 	if (priv->tx_tail != tx_tail) {
 		priv->tx_tail = tx_tail;
-		if (priv->tx_used <= MAX_TX_BUFFERED) {
-			dev->tbusy = 0;
-			mark_bh(NET_BH);	/* Inform upper layers. */
-		}
+		netif_wake_queue(dev);
 	}
 }
 
 #ifdef MODULE
 
-char ethernames[MAX_ECARDS][9];
-
-static struct device *my_ethers[MAX_ECARDS];
-static struct expansion_card *ec[MAX_ECARDS];
+static struct ether_dev {
+	struct expansion_card	*ec;
+	char			name[9];
+	struct net_device	dev;
+} ether_devs[MAX_ECARDS];
 
 int
 init_module(void)
 {
-	int i;
+	struct expansion_card *ec;
+	int i, ret = -ENODEV;
 
-	for(i = 0; i < MAX_ECARDS; i++) {
-		my_ethers[i] = NULL;
-		ec[i] = NULL;
-		strcpy(ethernames[i], "        ");
-	}
+	memset(ether_devs, 0, sizeof(ether_devs));
 
+	ecard_startfind ();
+	ec = ecard_find(0, ether3_cids);
 	i = 0;
 
-	ecard_startfind();
+	while (ec && i < MAX_ECARDS) {
+		ecard_claim(ec);
 
-	do {
-		if ((ec[i] = ecard_find(0, ether3_cids)) == NULL)
-			break;
+		ether_devs[i].ec	    = ec;
+		ether_devs[i].dev.init	    = ether3_probe1;
+		ether_devs[i].dev.name	    = ether_devs[i].name;
+		ether3_get_dev(&ether_devs[i].dev, ec);
 
-		my_ethers[i] = (struct device *)kmalloc(sizeof(struct device), GFP_KERNEL);
-		memset(my_ethers[i], 0, sizeof(struct device));
+		ret = register_netdev(&ether_devs[i].dev);
 
-		my_ethers[i]->irq = ec[i]->irq;
-		my_ethers[i]->base_addr= ecard_address(ec[i], ECARD_MEMC, 0);
-		my_ethers[i]->init = ether3_probe1;
-		my_ethers[i]->name = ethernames[i];
+		if (ret) {
+			ecard_release(ec);
+			ether_devs[i].ec = NULL;
+		} else
+			i += 1;
 
-		ether3_addr(my_ethers[i]->dev_addr, ec[i]);
-
-		ecard_claim(ec[i]);
-
-		if(register_netdev(my_ethers[i]) != 0) {
-			for (i = 0; i < 4; i++) {
-				if(my_ethers[i]) {
-					kfree(my_ethers[i]);
-					my_ethers[i] = NULL;
-				}
-				if(ec[i]) {
-					ecard_release(ec[i]);
-					ec[i] = NULL;
-				}
-			}
-			return -EIO;
-		}
-		i++;
+		ec = ecard_find(0, ether3_cids);
 	}
-	while(i < MAX_ECARDS);
 
-	return i != 0 ? 0 : -ENODEV;
+	return i != 0 ? 0 : ret;
 }
 
 void
 cleanup_module(void)
 {
 	int i;
+
 	for (i = 0; i < MAX_ECARDS; i++) {
-		if (my_ethers[i]) {
-		  	release_region(my_ethers[i]->base_addr, 128);
-			unregister_netdev(my_ethers[i]);
-			my_ethers[i] = NULL;
-		}
-		if (ec[i]) {
-			ecard_release(ec[i]);
-			ec[i] = NULL;
+		if (ether_devs[i].ec) {
+			unregister_netdev(&ether_devs[i].dev);
+
+			release_region(ether_devs[i].dev.base_addr, 128);
+
+			ecard_release(ether_devs[i].ec);
+
+			ether_devs[i].ec = NULL;
 		}
 	}
 }

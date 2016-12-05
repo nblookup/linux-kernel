@@ -1,4 +1,4 @@
-/*  $Id: sun4d_irq.c,v 1.18 1999/04/20 13:22:30 anton Exp $
+/*  $Id: sun4d_irq.c,v 1.24 1999/12/27 06:08:34 anton Exp $
  *  arch/sparc/kernel/sun4d_irq.c:
  *			SS1000/SC2000 interrupt handling.
  *
@@ -18,6 +18,7 @@
 #include <linux/init.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
+#include <linux/spinlock.h>
 
 #include <asm/ptrace.h>
 #include <asm/processor.h>
@@ -31,8 +32,8 @@
 #include <asm/traps.h>
 #include <asm/irq.h>
 #include <asm/io.h>
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
-#include <asm/spinlock.h>
 #include <asm/sbus.h>
 #include <asm/sbi.h>
 
@@ -237,12 +238,12 @@ void sun4d_handler_irq(int irq, struct pt_regs * regs)
 	irq_exit(cpu, irq);
 }
 
-unsigned int sun4d_build_irq(struct linux_sbus_device *sdev, int irq)
+unsigned int sun4d_build_irq(struct sbus_dev *sdev, int irq)
 {
 	int sbusl = pil_to_sbus[irq];
-	
+
 	if (sbusl)
-		return ((sdev->my_bus->board + 1) << 5) + (sbusl << 2) + sdev->slot;
+		return ((sdev->bus->board + 1) << 5) + (sbusl << 2) + sdev->slot;
 	else
 		return irq;
 }
@@ -366,10 +367,10 @@ static void sun4d_set_udt(int cpu)
 }
 
 /* Setup IRQ distribution scheme. */
-__initfunc(void sun4d_distribute_irqs(void))
+void __init sun4d_distribute_irqs(void)
 {
 #ifdef DISTRIBUTE_IRQS
-	struct linux_sbus *sbus;
+	struct sbus_bus *sbus;
 	unsigned long sbus_serving_map;
 
 	sbus_serving_map = cpu_present_map;
@@ -401,7 +402,7 @@ __initfunc(void sun4d_distribute_irqs(void))
 		set_sbi_tid(sbus->devid, sbus_tid[sbus->board] << 3);
 	}
 #else
-	struct linux_sbus *sbus;
+	struct sbus_bus *sbus;
 	int cpuid = cpu_logical_map(1);
 
 	if (cpuid == -1)
@@ -431,21 +432,24 @@ static void sun4d_load_profile_irq(int cpu, unsigned int limit)
 	bw_set_prof_limit(cpu, limit);
 }
 
-__initfunc(static void sun4d_init_timers(void (*counter_fn)(int, void *, struct pt_regs *)))
+static void __init sun4d_init_timers(void (*counter_fn)(int, void *, struct pt_regs *))
 {
 	int irq;
 	extern struct prom_cpuinfo linux_cpus[NR_CPUS];
 	int cpu;
+	struct resource r;
 
 	/* Map the User Timer registers. */
+	memset(&r, 0, sizeof(r));
 #ifdef __SMP__
-	sun4d_timers = sparc_alloc_io(CSR_BASE(boot_cpu_id)+BW_TIMER_LIMIT, 0,
-				      PAGE_SIZE, "user timer", 0xf, 0x0);
+	r.start = CSR_BASE(boot_cpu_id)+BW_TIMER_LIMIT;
 #else
-	sun4d_timers = sparc_alloc_io(CSR_BASE(0)+BW_TIMER_LIMIT, 0,
-				      PAGE_SIZE, "user timer", 0xf, 0x0);
+	r.start = CSR_BASE(0)+BW_TIMER_LIMIT;
 #endif
-    
+	r.flags = 0xf;
+	sun4d_timers = (struct sun4d_timer_regs *) sbus_ioremap(&r, 0,
+	    PAGE_SIZE, "user timer");
+
 	sun4d_timers->l10_timer_limit =  (((1000000/HZ) + 1) << 10);
 	master_l10_counter = &sun4d_timers->l10_cur_count;
 	master_l10_limit = &sun4d_timers->l10_timer_limit;
@@ -492,9 +496,9 @@ __initfunc(static void sun4d_init_timers(void (*counter_fn)(int, void *, struct 
 #endif
 }
 
-__initfunc(void sun4d_init_sbi_irq(void))
+void __init sun4d_init_sbi_irq(void)
 {
-	struct linux_sbus *sbus;
+	struct sbus_bus *sbus;
 	unsigned mask;
 
 	nsbi = 0;
@@ -529,7 +533,7 @@ static char *sun4d_irq_itoa(unsigned int irq)
 	return buff;
 }
 
-__initfunc(void sun4d_init_IRQ(void))
+void __init sun4d_init_IRQ(void)
 {
 	__cli();
 

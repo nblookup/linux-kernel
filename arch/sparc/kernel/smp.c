@@ -8,12 +8,14 @@
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
-#include <linux/tasks.h>
+#include <linux/threads.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
 #include <linux/init.h>
+#include <linux/spinlock.h>
+#include <linux/mm.h>
 
 #include <asm/ptrace.h>
 #include <asm/atomic.h>
@@ -21,10 +23,10 @@
 #include <asm/delay.h>
 #include <asm/irq.h>
 #include <asm/page.h>
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/oplib.h>
 #include <asm/atops.h>
-#include <asm/spinlock.h>
 #include <asm/hardirq.h>
 #include <asm/softirq.h>
 
@@ -50,7 +52,7 @@ unsigned long cpu_offset[NR_CPUS];
 unsigned char boot_cpu_id = 0;
 unsigned char boot_cpu_id4 = 0; /* boot_cpu_id << 2 */
 int smp_activated = 0;
-volatile int cpu_number_map[NR_CPUS];
+volatile int __cpu_number_map[NR_CPUS];
 volatile int __cpu_logical_map[NR_CPUS];
 cycles_t cacheflush_time = 0; /* XXX */
 
@@ -74,7 +76,7 @@ volatile int smp_process_available=0;
 volatile int smp_commenced = 0;
 
 /* Not supported on Sparc yet. */
-__initfunc(void smp_setup(char *str, int *ints))
+void __init smp_setup(char *str, int *ints)
 {
 }
 
@@ -83,12 +85,12 @@ __initfunc(void smp_setup(char *str, int *ints))
  *	a given CPU
  */
 
-__initfunc(void smp_store_cpu_info(int id))
+void __init smp_store_cpu_info(int id)
 {
 	cpu_data[id].udelay_val = loops_per_sec; /* this is it on sparc. */
 }
 
-__initfunc(void smp_commence(void))
+void __init smp_commence(void)
 {
 	/*
 	 *	Lets the callin's below out of their loop.
@@ -103,17 +105,17 @@ __initfunc(void smp_commence(void))
 /* Only broken Intel needs this, thus it should not even be referenced
  * globally...
  */
-__initfunc(void initialize_secondary(void))
+void __init initialize_secondary(void)
 {
 }
 
-extern int cpu_idle(void *unused);
+extern int cpu_idle(void);
 
 /* Activate a secondary processor. */
 int start_secondary(void *unused)
 {
 	prom_printf("Start secondary called. Should not happen\n");
-	return cpu_idle(NULL);
+	return cpu_idle();
 }
 
 void cpu_panic(void)
@@ -129,7 +131,7 @@ void cpu_panic(void)
 extern struct prom_cpuinfo linux_cpus[NR_CPUS];
 struct linux_prom_registers smp_penguin_ctable __initdata = { 0 };
 
-__initfunc(void smp_boot_cpus(void))
+void __init smp_boot_cpus(void)
 {
 	extern void smp4m_boot_cpus(void);
 	extern void smp4d_boot_cpus(void);
@@ -163,7 +165,7 @@ void smp_flush_tlb_mm(struct mm_struct *mm)
 			local_flush_tlb_mm(mm);
 		} else {
 			xc1((smpfunc_t) BTFIXUP_CALL(local_flush_tlb_mm), (unsigned long) mm);
-			if(atomic_read(&mm->count) == 1 && current->mm == mm)
+			if(atomic_read(&mm->mm_users) == 1 && current->active_mm == mm)
 				mm->cpu_vm_mask = (1 << smp_processor_id());
 		}
 	}

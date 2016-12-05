@@ -173,6 +173,8 @@ void ufs_print_cylinder_stuff(struct ufs_cylinder_group *cg, unsigned swab)
 }
 #endif /* UFS_SUPER_DEBUG_MORE */
 
+static struct super_operations ufs_super_ops;
+
 static char error_buf[1024];
 
 void ufs_error (struct super_block * sb, const char * function,
@@ -271,6 +273,8 @@ static int ufs_parse_options (char * options, unsigned * mount_options)
 				ufs_set_opt (*mount_options, UFSTYPE_44BSD);
 			else if (!strcmp (value, "nextstep"))
 				ufs_set_opt (*mount_options, UFSTYPE_NEXTSTEP);
+			else if (!strcmp (value, "nextstep-cd"))
+				ufs_set_opt (*mount_options, UFSTYPE_NEXTSTEP_CD);
 			else if (!strcmp (value, "openstep"))
 				ufs_set_opt (*mount_options, UFSTYPE_OPENSTEP);
 			else if (!strcmp (value, "sunx86"))
@@ -326,7 +330,7 @@ int ufs_read_cylinder_structures (struct super_block * sb) {
 	 * on the device. 
 	 */
 	size = uspi->s_cssize;
-	blks = howmany(size, uspi->s_fsize);
+	blks = (size + uspi->s_fsize - 1) >> uspi->s_fshift;
 	base = space = kmalloc(size, GFP_KERNEL);
 	if (!base)
 		goto failed; 
@@ -403,7 +407,7 @@ void ufs_put_cylinder_structures (struct super_block * sb) {
 	uspi = sb->u.ufs_sb.s_uspi;
 
 	size = uspi->s_cssize;
-	blks = howmany(size, uspi->s_fsize);
+	blks = (size + uspi->s_fsize - 1) >> uspi->s_fshift;
 	base = space = (char*) sb->u.ufs_sb.s_csp[0];
 	for (i = 0; i < blks; i += uspi->s_fpb) {
 		size = uspi->s_bsize;
@@ -447,11 +451,14 @@ struct super_block * ufs_read_super (struct super_block * sb, void * data,
 	
 	UFSD(("ENTER\n"))
 		
-	MOD_INC_USE_COUNT;
-	lock_super (sb);
-
+	UFSD(("flag %u\n", (int)(sb->s_flags & MS_RDONLY)))
+	
 #ifndef CONFIG_UFS_FS_WRITE
-	sb->s_flags |= MS_RDONLY;
+	if (!(sb->s_flags & MS_RDONLY)) {
+		printk("ufs was compiled with read-only support, "
+		"can't be mounted as read-write\n");
+		goto failed;
+	}
 #endif
 	/*
 	 * Set default mount options
@@ -465,7 +472,8 @@ struct super_block * ufs_read_super (struct super_block * sb, void * data,
 	}
 	if (!(sb->u.ufs_sb.s_mount_opt & UFS_MOUNT_UFSTYPE)) {
 		printk("You didn't specify the type of your ufs filesystem\n\n"
-		"       mount -t ufs -o ufstype=sun|sunx86|44bsd|old|nextstep|openstep ....\n\n"
+		"mount -t ufs -o ufstype="
+		"sun|sunx86|44bsd|old|nextstep|netxstep-cd|openstep ...\n\n"
 		">>>WARNING<<< Wrong ufstype may corrupt your filesystem, "
 		"default is ufstype=old\n");
 		ufs_set_opt (sb->u.ufs_sb.s_mount_opt, UFSTYPE_OLD);
@@ -494,6 +502,7 @@ struct super_block * ufs_read_super (struct super_block * sb, void * data,
 		uspi->s_fshift = 10;
 		uspi->s_sbsize = super_block_size = 2048;
 		uspi->s_sbbase = 0;
+		uspi->s_maxsymlinklen = 56;
 		flags |= UFS_DE_OLD | UFS_UID_EFT | UFS_ST_SUN | UFS_CG_SUN;
 		break;
 
@@ -504,6 +513,7 @@ struct super_block * ufs_read_super (struct super_block * sb, void * data,
 		uspi->s_fshift = 10;
 		uspi->s_sbsize = super_block_size = 2048;
 		uspi->s_sbbase = 0;
+		uspi->s_maxsymlinklen = 56;
 		flags |= UFS_DE_OLD | UFS_UID_EFT | UFS_ST_SUNx86 | UFS_CG_SUN;
 		break;
 
@@ -531,6 +541,20 @@ struct super_block * ufs_read_super (struct super_block * sb, void * data,
 		flags |= UFS_DE_OLD | UFS_UID_OLD | UFS_ST_OLD | UFS_CG_OLD;
 		if (!(sb->s_flags & MS_RDONLY)) {
 			printk(KERN_INFO "ufstype=nextstep is supported read-only\n");
+			sb->s_flags |= MS_RDONLY;
+		}
+		break;
+	
+	case UFS_MOUNT_UFSTYPE_NEXTSTEP_CD:
+		UFSD(("ufstype=nextstep-cd\n"))
+		uspi->s_fsize = block_size = 2048;
+		uspi->s_fmask = ~(2048 - 1);
+		uspi->s_fshift = 11;
+		uspi->s_sbsize = super_block_size = 2048;
+		uspi->s_sbbase = 0;
+		flags |= UFS_DE_OLD | UFS_UID_OLD | UFS_ST_OLD | UFS_CG_OLD;
+		if (!(sb->s_flags & MS_RDONLY)) {
+			printk(KERN_INFO "ufstype=nextstep-cd is supported read-only\n");
 			sb->s_flags |= MS_RDONLY;
 		}
 		break;
@@ -592,6 +616,7 @@ again:
 #endif
 
 	if ((((sb->u.ufs_sb.s_mount_opt & UFS_MOUNT_UFSTYPE) == UFS_MOUNT_UFSTYPE_NEXTSTEP) 
+	  || ((sb->u.ufs_sb.s_mount_opt & UFS_MOUNT_UFSTYPE) == UFS_MOUNT_UFSTYPE_NEXTSTEP_CD) 
 	  || ((sb->u.ufs_sb.s_mount_opt & UFS_MOUNT_UFSTYPE) == UFS_MOUNT_UFSTYPE_OPENSTEP)) 
 	  && uspi->s_sbbase < 256) {
 		ubh_brelse_uspi(uspi);
@@ -612,12 +637,14 @@ magic_found:
 	uspi->s_fmask = SWAB32(usb1->fs_fmask);
 	uspi->s_fshift = SWAB32(usb1->fs_fshift);
 
-	if (uspi->s_bsize != 4096 && uspi->s_bsize != 8192) {
-		printk("ufs_read_super: fs_bsize %u != {4096, 8192}\n", uspi->s_bsize);
+	if (uspi->s_bsize != 4096 && uspi->s_bsize != 8192 
+	  && uspi->s_bsize != 32768) {
+		printk("ufs_read_super: fs_bsize %u != {4096, 8192, 32768}\n", uspi->s_bsize);
 		goto failed;
 	}
-	if (uspi->s_fsize != 512 && uspi->s_fsize != 1024) {
-		printk("ufs_read_super: fs_fsize %u != {512, 1024}\n", uspi->s_fsize);
+	if (uspi->s_fsize != 512 && uspi->s_fsize != 1024 
+	  && uspi->s_fsize != 2048 && uspi->s_fsize != 4096) {
+		printk("ufs_read_super: fs_fsize %u != {512, 1024, 2048. 4096}\n", uspi->s_fsize);
 		goto failed;
 	}
 	if (uspi->s_fsize != block_size || uspi->s_sbsize != super_block_size) {
@@ -742,11 +769,15 @@ magic_found:
 	uspi->s_bpf = uspi->s_fsize << 3;
 	uspi->s_bpfshift = uspi->s_fshift + 3;
 	uspi->s_bpfmask = uspi->s_bpf - 1;
+	if ((sb->u.ufs_sb.s_mount_opt & UFS_MOUNT_UFSTYPE) ==
+	    UFS_MOUNT_UFSTYPE_44BSD)
+		uspi->s_maxsymlinklen =
+		    SWAB32(usb3->fs_u2.fs_44.fs_maxsymlinklen);
 	
 	sb->u.ufs_sb.s_flags = flags;
 	sb->u.ufs_sb.s_swab = swab;
 	 	                                                          
-	sb->s_root = d_alloc_root(iget(sb, UFS_ROOTINO), NULL);
+	sb->s_root = d_alloc_root(iget(sb, UFS_ROOTINO));
 
 
 	/*
@@ -756,16 +787,12 @@ magic_found:
 		if (!ufs_read_cylinder_structures(sb))
 			goto failed;
 
-	unlock_super(sb);
 	UFSD(("EXIT\n"))
 	return(sb);
 
 failed:
 	if (ubh) ubh_brelse_uspi (uspi);
 	if (uspi) kfree (uspi);
-	sb->s_dev = 0;
-	unlock_super (sb);
-	MOD_DEC_USE_COUNT;
 	UFSD(("EXIT (FAILED)\n"))
 	return(NULL);
 }
@@ -809,8 +836,6 @@ void ufs_put_super (struct super_block * sb)
 	
 	ubh_brelse_uspi (uspi);
 	kfree (sb->u.ufs_sb.s_uspi);
-	sb->s_dev = 0;
-	MOD_DEC_USE_COUNT;
 	return;
 }
 
@@ -845,10 +870,15 @@ int ufs_remount (struct super_block * sb, int * mount_flags, char * data)
 		printk("ufstype can't be changed during remount\n");
 		return -EINVAL;
 	}
-	sb->u.ufs_sb.s_mount_opt = new_mount_opt;
 
-	if ((*mount_flags & MS_RDONLY) == (sb->s_flags & MS_RDONLY))
+	if ((*mount_flags & MS_RDONLY) == (sb->s_flags & MS_RDONLY)) {
+		sb->u.ufs_sb.s_mount_opt = new_mount_opt;
 		return 0;
+	}
+	
+	/*
+	 * fs was mouted as rw, remounting ro
+	 */
 	if (*mount_flags & MS_RDONLY) {
 		ufs_put_cylinder_structures(sb);
 		usb1->fs_time = SWAB32(CURRENT_TIME);
@@ -859,65 +889,69 @@ int ufs_remount (struct super_block * sb, int * mount_flags, char * data)
 		sb->s_dirt = 0;
 		sb->s_flags |= MS_RDONLY;
 	}
+	/*
+	 * fs was mounted as ro, remounting rw
+	 */
 	else {
+#ifndef CONFIG_UFS_FS_WRITE
+		printk("ufs was compiled with read-only support, "
+		"can't be mounted as read-write\n");
+		return -EINVAL;
+#else
 		if (ufstype != UFS_MOUNT_UFSTYPE_SUN && 
-		    ufstype != UFS_MOUNT_UFSTYPE_44BSD) {
+		    ufstype != UFS_MOUNT_UFSTYPE_44BSD &&
+		    ufstype != UFS_MOUNT_UFSTYPE_SUNx86) {
 			printk("this ufstype is read-only supported\n");
-			return 0;
+			return -EINVAL;
 		}
 		if (!ufs_read_cylinder_structures (sb)) {
 			printk("failed during remounting\n");
-			return 0;
+			return -EPERM;
 		}
 		sb->s_flags &= ~MS_RDONLY;
+#endif
 	}
+	sb->u.ufs_sb.s_mount_opt = new_mount_opt;
 	return 0;
 }
 
-int ufs_statfs (struct super_block * sb, struct statfs * buf, int bufsiz)
+int ufs_statfs (struct super_block * sb, struct statfs * buf)
 {
 	struct ufs_sb_private_info * uspi;
 	struct ufs_super_block_first * usb1;
-	struct statfs tmp;
 	unsigned swab;
 
 	swab = sb->u.ufs_sb.s_swab;
 	uspi = sb->u.ufs_sb.s_uspi;
 	usb1 = ubh_get_usb_first (USPI_UBH);
 	
-	tmp.f_type = UFS_MAGIC;
-	tmp.f_bsize = sb->s_blocksize;
-	tmp.f_blocks = uspi->s_dsize;
-	tmp.f_bfree = ufs_blkstofrags(SWAB32(usb1->fs_cstotal.cs_nbfree)) +
+	buf->f_type = UFS_MAGIC;
+	buf->f_bsize = sb->s_blocksize;
+	buf->f_blocks = uspi->s_dsize;
+	buf->f_bfree = ufs_blkstofrags(SWAB32(usb1->fs_cstotal.cs_nbfree)) +
 		SWAB32(usb1->fs_cstotal.cs_nffree);
-	tmp.f_bavail = (tmp.f_bfree > ((tmp.f_blocks / 100) * uspi->s_minfree))
-		? (tmp.f_bfree - ((tmp.f_blocks / 100) * uspi->s_minfree)) : 0;
-	tmp.f_files = uspi->s_ncg * uspi->s_ipg;
-	tmp.f_ffree = SWAB32(usb1->fs_cstotal.cs_nifree);
-	tmp.f_namelen = UFS_MAXNAMLEN;
-	return copy_to_user(buf, &tmp, bufsiz) ? -EFAULT : 0;
+	buf->f_bavail = (buf->f_bfree > ((buf->f_blocks / 100) * uspi->s_minfree))
+		? (buf->f_bfree - ((buf->f_blocks / 100) * uspi->s_minfree)) : 0;
+	buf->f_files = uspi->s_ncg * uspi->s_ipg;
+	buf->f_ffree = SWAB32(usb1->fs_cstotal.cs_nifree);
+	buf->f_namelen = UFS_MAXNAMLEN;
+	return 0;
 }
 
 static struct super_operations ufs_super_ops = {
-	ufs_read_inode,
-	ufs_write_inode,
-	ufs_put_inode,
-	ufs_delete_inode,
-	NULL,			/* notify_change() */
-	ufs_put_super,
-	ufs_write_super,
-	ufs_statfs,
-	ufs_remount
+	read_inode:	ufs_read_inode,
+	write_inode:	ufs_write_inode,
+	put_inode:	ufs_put_inode,
+	delete_inode:	ufs_delete_inode,
+	put_super:	ufs_put_super,
+	write_super:	ufs_write_super,
+	statfs:		ufs_statfs,
+	remount_fs:	ufs_remount,
 };
 
-static struct file_system_type ufs_fs_type = {
-	"ufs", 
-	FS_REQUIRES_DEV,
-	ufs_read_super,
-	NULL
-};
+static DECLARE_FSTYPE_DEV(ufs_fs_type, "ufs", ufs_read_super);
 
-__initfunc(int init_ufs_fs(void))
+int __init init_ufs_fs(void)
 {
 	return register_filesystem(&ufs_fs_type);
 }

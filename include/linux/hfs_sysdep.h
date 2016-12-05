@@ -93,10 +93,10 @@ extern inline hfs_u32 hfs_time(void) {
 /*
  * hfs_wait_queue 
  */
-typedef struct wait_queue *hfs_wait_queue;
+typedef wait_queue_head_t hfs_wait_queue;
 
 extern inline void hfs_init_waitqueue(hfs_wait_queue *queue) {
-        init_waitqueue(queue);
+        init_waitqueue_head(queue);
 }
 
 extern inline void hfs_sleep_on(hfs_wait_queue *queue) {
@@ -121,7 +121,7 @@ extern inline void hfs_mdb_dirty(hfs_sysmdb sys_mdb) {
 	sys_mdb->s_dirt = 1;
 }
 
-extern inline char *hfs_mdb_name(hfs_sysmdb sys_mdb) {
+extern inline const char *hfs_mdb_name(hfs_sysmdb sys_mdb) {
 	return kdevname(sys_mdb->s_dev);
 }
 

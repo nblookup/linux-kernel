@@ -11,6 +11,7 @@
  */
 
 #define __HAVE_ARCH_MEMCPY
+#define __HAVE_ARCH_MEMMOVE
 /* For backward compatibility with modules.  Unused otherwise.  */
 extern void * __memcpy(void *, const void *, size_t);
 
@@ -43,6 +44,7 @@ extern void * __memset(void *, int, size_t);
 #define __HAVE_ARCH_STRCHR
 #define __HAVE_ARCH_STRRCHR
 #define __HAVE_ARCH_STRLEN
+#define __HAVE_ARCH_MEMCHR
 
 /* The following routine is like memset except that it writes 16-bit
    aligned values.  The DEST and COUNT parameters must be even for 

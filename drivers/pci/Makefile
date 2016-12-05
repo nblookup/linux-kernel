@@ -11,27 +11,28 @@
 
 L_TARGET := pci.a
 
-# Nasty trick as nobody references pcisyms.o, but we still want it linked.
-ifeq ($(CONFIG_MODULES),y)
-O_TARGET = pci_syms.o
-OX_OBJS  = pcisyms.o
-O_OBJS   = pci.o
-L_OBJS   := pci_syms.o
-else
-L_OBJS   := pci.o
-endif
+# Nasty trick as we need to link files with no references from the outside.
+O_TARGET := pci_core.o
+L_OBJS	 := pci_core.o
+O_OBJS   := quirks.o
+OX_OBJS   := pci.o
 
 ifdef CONFIG_PROC_FS
-L_OBJS   += proc.o
-ifdef CONFIG_PCI_OLD_PROC
-L_OBJS   += oldproc.o
-endif
+O_OBJS   += proc.o
 endif
 
-ifdef CONFIG_PCI_QUIRKS
-L_OBJS   += quirks.o
-endif
+L_OBJS   += compat.o names.o setup-res.o setup-bus.o setup-irq.o
 
-L_OBJS   += compat.o
+ifndef CONFIG_X86
+L_OBJS   += syscall.o
+endif
 
 include $(TOPDIR)/Rules.make
+
+names.o: names.c devlist.h classlist.h
+
+devlist.h classlist.h: pci.ids gen-devlist
+	./gen-devlist <pci.ids
+
+gen-devlist: gen-devlist.c
+	$(HOSTCC) $(HOSTCFLAGS) -o gen-devlist gen-devlist.c

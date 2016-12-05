@@ -5,14 +5,25 @@
 #ifndef _PPC_MMU_H_
 #define _PPC_MMU_H_
 
+#include <linux/config.h>
+
 #ifndef __ASSEMBLY__
 /* Hardware Page Table Entry */
 typedef struct _PTE {
+#ifdef CONFIG_PPC64
+	unsigned long long vsid:52;
+	unsigned long api:5;
+	unsigned long :5;
+	unsigned long h:1;
+	unsigned long v:1;
+	unsigned long long rpn:52;
+#else /* CONFIG_PPC64 */
 	unsigned long v:1;	/* Entry is valid */
 	unsigned long vsid:24;	/* Virtual segment identifier */
 	unsigned long h:1;	/* Hash algorithm indicator */
 	unsigned long api:6;	/* Abbreviated page index */
 	unsigned long rpn:20;	/* Real (physical) page number */
+#endif /* CONFIG_PPC64 */
 	unsigned long    :3;	/* Unused */
 	unsigned long r:1;	/* Referenced */
 	unsigned long c:1;	/* Changed */
@@ -53,7 +64,11 @@ typedef struct _P601_BATU {	/* Upper part of BAT for 601 processor */
 } P601_BATU;
 
 typedef struct _BATU {		/* Upper part of BAT (all except 601) */
+#ifdef CONFIG_PPC64
+	unsigned long long bepi:47;
+#else /* CONFIG_PPC64 */
 	unsigned long bepi:15;	/* Effective page index (virtual address) */
+#endif /* CONFIG_PPC64 */
 	unsigned long :4;	/* Unused */
 	unsigned long bl:11;	/* Block size mask */
 	unsigned long vs:1;	/* Supervisor valid */
@@ -68,7 +83,11 @@ typedef struct _P601_BATL {	/* Lower part of BAT for 601 processor */
 } P601_BATL;
 
 typedef struct _BATL {		/* Lower part of BAT (all except 601) */
+#ifdef CONFIG_PPC64
+	unsigned long long brpn:47;
+#else /* CONFIG_PPC64 */
 	unsigned long brpn:15;	/* Real page index (physical address) */
+#endif /* CONFIG_PPC64 */
 	unsigned long :10;	/* Unused */
 	unsigned long w:1;	/* Write-thru cache */
 	unsigned long i:1;	/* Cache inhibit */
@@ -291,4 +310,61 @@ extern void _tlbia(void);		/* invalidate all TLB entries */
  * a processor working register during a tablewalk.
  */
 #define M_TW		799
+
+/*
+ * At present, all PowerPC 400-class processors share a similar TLB
+ * architecture. The instruction and data sides share a unified,
+ * 64-entry, fully-associative TLB which is maintained totally under
+ * software control. In addition, the instruction side has a
+ * hardware-managed, 4-entry, fully- associative TLB which serves as a
+ * first level to the shared TLB. These two TLBs are known as the UTLB
+ * and ITLB, respectively.
+ */
+
+#define        PPC4XX_TLB_SIZE 64
+
+/*
+ * TLB entries are defined by a "high" tag portion and a "low" data
+ * portion.  On all architectures, the data portion is 32-bits.
+ *
+ * TLB entries are managed entirely under software control by reading,
+ * writing, and searchoing using the 4xx-specific tlbre, tlbwr, and tlbsx
+ * instructions.
+ */
+
+#define	TLB_LO          1
+#define	TLB_HI          0
+       
+#define	TLB_DATA        TLB_LO
+#define	TLB_TAG         TLB_HI
+
+/* Tag portion */
+
+#define TLB_EPN_MASK    0xFFFFFC00      /* Effective Page Number */
+#define TLB_PAGESZ_MASK 0x00000380
+#define TLB_PAGESZ(x)   (((x) & 0x7) << 7)
+#define   PAGESZ_1K		0
+#define   PAGESZ_4K             1
+#define   PAGESZ_16K            2
+#define   PAGESZ_64K            3
+#define   PAGESZ_256K           4
+#define   PAGESZ_1M             5
+#define   PAGESZ_4M             6
+#define   PAGESZ_16M            7
+#define TLB_VALID       0x00000040      /* Entry is valid */
+
+/* Data portion */
+                 
+#define TLB_RPN_MASK    0xFFFFFC00      /* Real Page Number */
+#define TLB_PERM_MASK   0x00000300
+#define TLB_EX          0x00000200      /* Instruction execution allowed */
+#define TLB_WR          0x00000100      /* Writes permitted */
+#define TLB_ZSEL_MASK   0x000000F0
+#define TLB_ZSEL(x)     (((x) & 0xF) << 4)
+#define TLB_ATTR_MASK   0x0000000F
+#define TLB_W           0x00000008      /* Caching is write-through */
+#define TLB_I           0x00000004      /* Caching is inhibited */
+#define TLB_M           0x00000002      /* Memory is coherent */
+#define TLB_G           0x00000001      /* Memory is guarded from prefetch */
+
 #endif /* _PPC_MMU_H_ */

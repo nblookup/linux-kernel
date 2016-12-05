@@ -31,7 +31,7 @@ static int nvram_as1 = NVRAM_AS1;
 static int nvram_as0 = NVRAM_AS0;
 static int nvram_data = NVRAM_DATA;
 
-__initfunc(void chrp_time_init(void))
+void __init chrp_time_init(void)
 {
 	struct device_node *rtcs;
 	int base;
@@ -151,7 +151,7 @@ unsigned long chrp_get_rtc_time(void)
 }
 
 
-__initfunc(void chrp_calibrate_decr(void))
+void __init chrp_calibrate_decr(void)
 {
 	struct device_node *cpu;
 	int *fp, divisor;
@@ -171,9 +171,10 @@ __initfunc(void chrp_calibrate_decr(void))
 		if (fp != 0)
 			freq = *fp;
 	}
-	freq *= 60;	/* try to make freq/1e6 an integer */
-        divisor = 60;
-        printk("time_init: decrementer frequency = %lu/%d\n", freq, divisor);
+	freq *= 30;
+	divisor = 30; 
+        printk("time_init: decrementer frequency = %lu/%d (%ld MHz)\n", freq,
+	       divisor, (freq/divisor)>>20);
         decrementer_count = freq / HZ / divisor;
         count_period_num = divisor;
         count_period_den = freq / 1000000;

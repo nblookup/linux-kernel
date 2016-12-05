@@ -1,4 +1,4 @@
-/* $Id: indy_timer.c,v 1.9 1998/06/25 20:15:02 ralf Exp $
+/* $Id: indy_timer.c,v 1.18 2000/02/04 07:40:23 ralf Exp $
  *
  * indy_timer.c: Setting up the clock on the INDY 8254 controller.
  *
@@ -21,10 +21,10 @@
 #include <asm/irq.h>
 #include <asm/ptrace.h>
 #include <asm/system.h>
-#include <asm/sgi.h>
 #include <asm/sgialib.h>
-#include <asm/sgihpc.h>
-#include <asm/sgint23.h>
+#include <asm/sgi/sgi.h>
+#include <asm/sgi/sgihpc.h>
+#include <asm/sgi/sgint23.h>
 
 
 /* Because of a bug in the i8254 timer we need to use the onchip r4k
@@ -32,6 +32,8 @@
  */
 static unsigned long r4k_offset; /* Amount to increment compare reg each time */
 static unsigned long r4k_cur;    /* What counter should be at next timer irq */
+
+extern rwlock_t xtime_lock;
 
 static inline void ack_r4ktimer(unsigned long newval)
 {
@@ -85,6 +87,7 @@ void indy_timer_interrupt(struct pt_regs *regs)
 	unsigned long count;
 	int irq = 7;
 
+	write_lock(&xtime_lock);
 	/* Ack timer and compute new compare. */
 	count = read_32bit_cp0_register(CP0_COUNT);
 	/* This has races.  */
@@ -107,11 +110,14 @@ void indy_timer_interrupt(struct pt_regs *regs)
 	if ((time_status & STA_UNSYNC) == 0 &&
 	    xtime.tv_sec > last_rtc_update + 660 &&
 	    xtime.tv_usec >= 500000 - (tick >> 1) &&
-	    xtime.tv_usec <= 500000 + (tick >> 1))
-	  if (set_rtc_mmss(xtime.tv_sec) == 0)
-	    last_rtc_update = xtime.tv_sec;
-	  else
-	    last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
+	    xtime.tv_usec <= 500000 + (tick >> 1)) {
+		if (set_rtc_mmss(xtime.tv_sec) == 0)
+			last_rtc_update = xtime.tv_sec;
+		else
+			/* do it again in 60 s */
+			last_rtc_update = xtime.tv_sec - 600;
+	}
+	write_unlock(&xtime_lock);
 }
 
 static unsigned long dosample(volatile unsigned char *tcwp,
@@ -176,7 +182,7 @@ static inline unsigned long mktime(unsigned int year, unsigned int mon,
 	  )*60 + sec; /* finally seconds */
 }
 
-__initfunc(static unsigned long get_indy_time(void))
+static unsigned long __init get_indy_time(void)
 {
 	struct indy_clock *clock = (struct indy_clock *)INDY_CLOCK_REGS;
 	unsigned int year, mon, day, hour, min, sec;
@@ -221,7 +227,7 @@ __initfunc(static unsigned long get_indy_time(void))
 
 #define ALLINTS (IE_IRQ0 | IE_IRQ1 | IE_IRQ2 | IE_IRQ3 | IE_IRQ4 | IE_IRQ5)
 
-__initfunc(void indy_timer_init(void))
+void __init indy_timer_init(void)
 {
 	struct sgi_ioc_timers *p;
 	volatile unsigned char *tcwp, *tc2p;
@@ -252,9 +258,10 @@ __initfunc(void indy_timer_init(void))
 	set_cp0_status(ST0_IM, ALLINTS);
 	sti();
 
-	/* Read time from the dallas chipset. */
-	xtime.tv_sec = get_indy_time();
+	write_lock_irq(&xtime_lock);
+	xtime.tv_sec = get_indy_time();		/* Read time from RTC. */
 	xtime.tv_usec = 0;
+	write_unlock_irq(&xtime_lock);
 }
 
 void indy_8254timer_irq(void)
@@ -262,29 +269,29 @@ void indy_8254timer_irq(void)
 	int cpu = smp_processor_id();
 	int irq = 4;
 
-	irq_enter(cpu, irq);
+	irq_enter(cpu);
 	kstat.irqs[0][irq]++;
 	printk("indy_8254timer_irq: Whoops, should not have gotten this IRQ\n");
 	prom_getchar();
 	prom_imode();
-	irq_exit(cpu, irq);
+	irq_exit(cpu);
 }
 
 void do_gettimeofday(struct timeval *tv)
 {
 	unsigned long flags;
 
-	save_and_cli(flags);
+	read_lock_irqsave(&xtime_lock, flags);
 	*tv = xtime;
-	restore_flags(flags);
+	read_unlock_irqrestore(&xtime_lock, flags);
 }
 
 void do_settimeofday(struct timeval *tv)
 {
-	cli();
+	write_lock_irq(&xtime_lock);
 	xtime = *tv;
 	time_state = TIME_BAD;
 	time_maxerror = MAXPHASE;
 	time_esterror = MAXPHASE;
-	sti();
+	write_unlock_irq(&xtime_lock);
 }

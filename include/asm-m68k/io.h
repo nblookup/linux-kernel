@@ -14,6 +14,10 @@
 #include <asm/virtconvert.h>
 
 /*
+ * These are for ISA/PCI shared memory _only_ and should never be used
+ * on any other type of memory, including Zorro memory. They are meant to
+ * access the bus in the bus byte order which is little-endian!.
+ *
  * readX/writeX() are used to access memory mapped devices. On some
  * architectures the memory mapped IO stuff needs to be accessed
  * differently. On the m68k architecture, we just read/write the
@@ -43,6 +47,8 @@
 #define outb(x,addr) ((void) writeb(x,addr))
 #define outb_p(x,addr) outb(x,addr)
 
+#define IO_SPACE_LIMIT 0xffff
+
 
 /* Values for nocacheflag and cmode */
 #define IOMAP_FULL_CACHING		0
@@ -71,6 +77,12 @@ extern inline void *ioremap_fullcache(unsigned long physaddr, unsigned long size
 }
 
 extern void iounmap(void *addr);
+
+/* Nothing to do */
+
+#define dma_cache_inv(_start,_size)		do { } while (0)
+#define dma_cache_wback(_start,_size)		do { } while (0)
+#define dma_cache_wback_inv(_start,_size)	do { } while (0)
 
 #endif /* __KERNEL__ */
 

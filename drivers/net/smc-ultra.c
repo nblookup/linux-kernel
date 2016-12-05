@@ -66,24 +66,24 @@ static const char *version =
 static unsigned int ultra_portlist[] __initdata =
 {0x200, 0x220, 0x240, 0x280, 0x300, 0x340, 0x380, 0};
 
-int ultra_probe(struct device *dev);
-int ultra_probe1(struct device *dev, int ioaddr);
+int ultra_probe(struct net_device *dev);
+int ultra_probe1(struct net_device *dev, int ioaddr);
 
-static int ultra_open(struct device *dev);
-static void ultra_reset_8390(struct device *dev);
-static void ultra_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
+static int ultra_open(struct net_device *dev);
+static void ultra_reset_8390(struct net_device *dev);
+static void ultra_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 						int ring_page);
-static void ultra_block_input(struct device *dev, int count,
+static void ultra_block_input(struct net_device *dev, int count,
 						  struct sk_buff *skb, int ring_offset);
-static void ultra_block_output(struct device *dev, int count,
+static void ultra_block_output(struct net_device *dev, int count,
 							const unsigned char *buf, const int start_page);
-static void ultra_pio_get_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
+static void ultra_pio_get_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 						int ring_page);
-static void ultra_pio_input(struct device *dev, int count,
+static void ultra_pio_input(struct net_device *dev, int count,
 						  struct sk_buff *skb, int ring_offset);
-static void ultra_pio_output(struct device *dev, int count,
+static void ultra_pio_output(struct net_device *dev, int count,
 							 const unsigned char *buf, const int start_page);
-static int ultra_close_card(struct device *dev);
+static int ultra_close_card(struct net_device *dev);
 
 
 #define START_PG		0x00	/* First page of TX buffer */
@@ -106,7 +106,7 @@ struct netdev_entry ultra_drv =
 {"ultra", ultra_probe1, NETCARD_IO_EXTENT, netcard_portlist};
 #else
 
-__initfunc(int ultra_probe(struct device *dev))
+int __init ultra_probe(struct net_device *dev)
 {
 	int i;
 	int base_addr = dev ? dev->base_addr : 0;
@@ -128,7 +128,7 @@ __initfunc(int ultra_probe(struct device *dev))
 }
 #endif
 
-__initfunc(int ultra_probe1(struct device *dev, int ioaddr))
+int __init ultra_probe1(struct net_device *dev, int ioaddr)
 {
 	int i;
 	int checksum = 0;
@@ -250,7 +250,7 @@ __initfunc(int ultra_probe1(struct device *dev, int ioaddr))
 }
 
 static int
-ultra_open(struct device *dev)
+ultra_open(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - ULTRA_NIC_OFFSET; /* ASIC addr */
 	unsigned char irq2reg[] = {0, 0, 0x04, 0x08, 0, 0x0C, 0, 0x40,
@@ -281,7 +281,7 @@ ultra_open(struct device *dev)
 }
 
 static void
-ultra_reset_8390(struct device *dev)
+ultra_reset_8390(struct net_device *dev)
 {
 	int cmd_port = dev->base_addr - ULTRA_NIC_OFFSET; /* ASIC base addr */
 
@@ -305,16 +305,16 @@ ultra_reset_8390(struct device *dev)
    the start of a page, so we optimize accordingly. */
 
 static void
-ultra_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
+ultra_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
 	unsigned long hdr_start = dev->mem_start + ((ring_page - START_PG)<<8);
 
 	outb(ULTRA_MEMENB, dev->base_addr - ULTRA_NIC_OFFSET);	/* shmem on */
 #ifdef notdef
 	/* Officially this is what we are doing, but the readl() is faster */
-	memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
 #else
-	((unsigned int*)hdr)[0] = readl(hdr_start);
+	((unsigned int*)hdr)[0] = isa_readl(hdr_start);
 #endif
 	outb(0x00, dev->base_addr - ULTRA_NIC_OFFSET); /* shmem off */
 }
@@ -323,7 +323,7 @@ ultra_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
    complication is when the ring buffer wraps. */
 
 static void
-ultra_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_offset)
+ultra_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset)
 {
 	unsigned long xfer_start = dev->mem_start + ring_offset - (START_PG<<8);
 
@@ -333,19 +333,19 @@ ultra_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_o
 	if (xfer_start + count > dev->rmem_end) {
 		/* We must wrap the input move. */
 		int semi_count = dev->rmem_end - xfer_start;
-		memcpy_fromio(skb->data, xfer_start, semi_count);
+		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
-		memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+		isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
 	} else {
 		/* Packet is in one chunk -- we can copy + cksum. */
-		eth_io_copy_and_sum(skb, xfer_start, count, 0);
+		isa_eth_io_copy_and_sum(skb, xfer_start, count, 0);
 	}
 
 	outb(0x00, dev->base_addr - ULTRA_NIC_OFFSET);	/* Disable memory. */
 }
 
 static void
-ultra_block_output(struct device *dev, int count, const unsigned char *buf,
+ultra_block_output(struct net_device *dev, int count, const unsigned char *buf,
 				int start_page)
 {
 	unsigned long shmem = dev->mem_start + ((start_page - START_PG)<<8);
@@ -353,7 +353,7 @@ ultra_block_output(struct device *dev, int count, const unsigned char *buf,
 	/* Enable shared memory. */
 	outb(ULTRA_MEMENB, dev->base_addr - ULTRA_NIC_OFFSET);
 
-	memcpy_toio(shmem, buf, count);
+	isa_memcpy_toio(shmem, buf, count);
 
 	outb(0x00, dev->base_addr - ULTRA_NIC_OFFSET); /* Disable memory. */
 }
@@ -366,7 +366,7 @@ ultra_block_output(struct device *dev, int count, const unsigned char *buf,
    and must be always be rewritten between each read/write direction change.
    This is no problem for us, as the 8390 code ensures that we are single
    threaded. */
-static void ultra_pio_get_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
+static void ultra_pio_get_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 						int ring_page)
 {
 	int ioaddr = dev->base_addr - ULTRA_NIC_OFFSET; /* ASIC addr */
@@ -375,7 +375,7 @@ static void ultra_pio_get_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
 	insw(ioaddr + IOPD, hdr, sizeof(struct e8390_pkt_hdr)>>1);
 }
 
-static void ultra_pio_input(struct device *dev, int count,
+static void ultra_pio_input(struct net_device *dev, int count,
 						  struct sk_buff *skb, int ring_offset)
 {
 	int ioaddr = dev->base_addr - ULTRA_NIC_OFFSET; /* ASIC addr */
@@ -388,7 +388,7 @@ static void ultra_pio_input(struct device *dev, int count,
 	insw(ioaddr + IOPD, buf, (count+1)>>1);
 }
 
-static void ultra_pio_output(struct device *dev, int count,
+static void ultra_pio_output(struct net_device *dev, int count,
 							const unsigned char *buf, const int start_page)
 {
 	int ioaddr = dev->base_addr - ULTRA_NIC_OFFSET; /* ASIC addr */
@@ -399,12 +399,11 @@ static void ultra_pio_output(struct device *dev, int count,
 }
 
 static int
-ultra_close_card(struct device *dev)
+ultra_close_card(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - ULTRA_NIC_OFFSET; /* CMDREG */
 
-	dev->start = 0;
-	dev->tbusy = 1;
+	netif_stop_queue(dev);
 
 	if (ei_debug > 1)
 		printk("%s: Shutting down ethercard.\n", dev->name);
@@ -427,7 +426,7 @@ ultra_close_card(struct device *dev)
 #define MAX_ULTRA_CARDS	4	/* Max number of Ultra cards per module */
 #define NAMELEN		8	/* # of chars for storing dev->name */
 static char namelist[NAMELEN * MAX_ULTRA_CARDS] = { 0, };
-static struct device dev_ultra[MAX_ULTRA_CARDS] = {
+static struct net_device dev_ultra[MAX_ULTRA_CARDS] = {
 	{
 		NULL,		/* assign a chunk of namelist[] below */
 		0, 0, 0, 0,
@@ -452,7 +451,7 @@ init_module(void)
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_ULTRA_CARDS; this_dev++) {
-		struct device *dev = &dev_ultra[this_dev];
+		struct net_device *dev = &dev_ultra[this_dev];
 		dev->name = namelist+(NAMELEN*this_dev);
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
@@ -478,16 +477,16 @@ cleanup_module(void)
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_ULTRA_CARDS; this_dev++) {
-		struct device *dev = &dev_ultra[this_dev];
+		struct net_device *dev = &dev_ultra[this_dev];
 		if (dev->priv != NULL) {
-			/* NB: ultra_close_card() does free_irq + irq2dev */
+			/* NB: ultra_close_card() does free_irq */
 			int ioaddr = dev->base_addr - ULTRA_NIC_OFFSET;
-			kfree(dev->priv);
-			dev->priv = NULL;
-			release_region(ioaddr, ULTRA_IO_EXTENT);
 			unregister_netdev(dev);
+			release_region(ioaddr, ULTRA_IO_EXTENT);
+			kfree(dev->priv);
 		}
 	}
+	unlock_8390_module();
 }
 #endif /* MODULE */
 

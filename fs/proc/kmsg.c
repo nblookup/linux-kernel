@@ -15,7 +15,7 @@
 #include <asm/io.h>
 
 extern unsigned long log_size;
-extern struct wait_queue * log_wait;
+extern wait_queue_head_t log_wait;
 
 extern int do_syslog(int type, char * bug, int count);
 
@@ -45,36 +45,9 @@ static unsigned int kmsg_poll(struct file *file, poll_table * wait)
 }
 
 
-static struct file_operations proc_kmsg_operations = {
-	NULL,		/* kmsg_lseek */
-	kmsg_read,
-	NULL,		/* kmsg_write */
-	NULL,		/* kmsg_readdir */
-	kmsg_poll,	/* kmsg_poll */
-	NULL,		/* kmsg_ioctl */
-	NULL,		/* mmap */
-	kmsg_open,
-	NULL,		/* flush */
-	kmsg_release,
-	NULL		/* can't fsync */
-};
-
-struct inode_operations proc_kmsg_inode_operations = {
-	&proc_kmsg_operations,	/* default base directory file-ops */
-	NULL,			/* create */
-	NULL,			/* lookup */
-	NULL,			/* link */
-	NULL,			/* unlink */
-	NULL,			/* symlink */
-	NULL,			/* mkdir */
-	NULL,			/* rmdir */
-	NULL,			/* mknod */
-	NULL,			/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* bmap */
-	NULL,			/* truncate */
-	NULL			/* permission */
+struct file_operations proc_kmsg_operations = {
+	read:		kmsg_read,
+	poll:		kmsg_poll,
+	open:		kmsg_open,
+	release:	kmsg_release,
 };

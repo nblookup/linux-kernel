@@ -33,9 +33,11 @@
 #include <linux/sys.h>
 #include <linux/ipc.h>
 #include <linux/utsname.h>
+#include <linux/file.h>
 
 #include <asm/uaccess.h>
 #include <asm/ipc.h>
+#include <asm/semaphore.h>
 
 void
 check_bugs(void)
@@ -182,18 +184,14 @@ asmlinkage int sys_pipe(int *fildes)
 	int fd[2];
 	int error;
 
-	error = verify_area(VERIFY_WRITE, fildes, 8);
-	if (error)
-		return error;
 	lock_kernel();
 	error = do_pipe(fd);
 	unlock_kernel();
-	if (error)
-		return error;
-	if (__put_user(fd[0],0+fildes)
-	    || __put_user(fd[1],1+fildes))
-		return -EFAULT;	/* should we close the fds? */
-	return 0;
+	if (!error) {
+		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+			error = -EFAULT;
+	}
+	return error;
 }
 
 asmlinkage unsigned long sys_mmap(unsigned long addr, size_t len,
@@ -205,13 +203,14 @@ asmlinkage unsigned long sys_mmap(unsigned long addr, size_t len,
 
 	lock_kernel();
 	if (!(flags & MAP_ANONYMOUS)) {
-		file = fget(fd);
-		if (!file)
+		if (!(file = fget(fd)))
 			goto out;
 	}
 	
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+	down(&current->mm->mmap_sem);
 	ret = do_mmap(file, addr, len, prot, flags, offset);
+	up(&current->mm->mmap_sem);
 	if (file)
 		fput(file);
 out:
@@ -253,9 +252,13 @@ asmlinkage int sys_pause(void)
 
 asmlinkage int sys_uname(struct old_utsname * name)
 {
+	int err = -EFAULT;
+
+	down_read(&uts_sem);
 	if (name && !copy_to_user(name, &system_utsname, sizeof (*name)))
-		return 0;
-	return -EFAULT;
+		err = 0;
+	up_read(&uts_sem);
+	return err;
 }
 
 asmlinkage int sys_olduname(struct oldold_utsname * name)
@@ -267,6 +270,7 @@ asmlinkage int sys_olduname(struct oldold_utsname * name)
 	if (!access_ok(VERIFY_WRITE,name,sizeof(struct oldold_utsname)))
 		return -EFAULT;
   
+	down_read(&uts_sem);
 	error = __copy_to_user(&name->sysname,&system_utsname.sysname,__OLD_UTS_LEN);
 	error -= __put_user(0,name->sysname+__OLD_UTS_LEN);
 	error -= __copy_to_user(&name->nodename,&system_utsname.nodename,__OLD_UTS_LEN);
@@ -277,7 +281,8 @@ asmlinkage int sys_olduname(struct oldold_utsname * name)
 	error -= __put_user(0,name->version+__OLD_UTS_LEN);
 	error -= __copy_to_user(&name->machine,&system_utsname.machine,__OLD_UTS_LEN);
 	error = __put_user(0,name->machine+__OLD_UTS_LEN);
-	error = error ? -EFAULT : 0;
+	up_read(&uts_sem);
 
+	error = error ? -EFAULT : 0;
 	return error;
 }

@@ -76,6 +76,7 @@ sigpending	=  8
 addr_limit	= 12
 exec_domain	= 16
 need_resched	= 20
+processor	= 56
 
 ENOSYS = 38
 
@@ -92,8 +93,8 @@ ENOSYS = 38
 	pushl %ecx; \
 	pushl %ebx; \
 	movl $(__KERNEL_DS),%edx; \
-	movl %dx,%ds; \
-	movl %dx,%es;
+	movl %edx,%ds; \
+	movl %edx,%es;
 
 #define RESTORE_ALL	\
 	popl %ebx;	\
@@ -145,7 +146,30 @@ ENTRY(lcall7)
 	andl $-8192,%ebx	# GET_CURRENT
 	movl exec_domain(%ebx),%edx	# Get the execution domain
 	movl 4(%edx),%edx	# Get the lcall7 handler for the domain
+	pushl $0x7
 	call *%edx
+	addl $4, %esp
+	popl %eax
+	jmp ret_from_sys_call
+
+ENTRY(lcall27)
+	pushfl			# We get a different stack layout with call gates,
+	pushl %eax		# which has to be cleaned up later..
+	SAVE_ALL
+	movl EIP(%esp),%eax	# due to call gates, this is eflags, not eip..
+	movl CS(%esp),%edx	# this is eip..
+	movl EFLAGS(%esp),%ecx	# and this is cs..
+	movl %eax,EFLAGS(%esp)	#
+	movl %edx,EIP(%esp)	# Now we move them to their "normal" places
+	movl %ecx,CS(%esp)	#
+	movl %esp,%ebx
+	pushl %ebx
+	andl $-8192,%ebx	# GET_CURRENT
+	movl exec_domain(%ebx),%edx	# Get the execution domain
+	movl 4(%edx),%edx	# Get the lcall7 handler for the domain
+	pushl $0x27
+	call *%edx
+	addl $4, %esp
 	popl %eax
 	jmp ret_from_sys_call
 
@@ -153,12 +177,12 @@ ENTRY(lcall7)
 	ALIGN
 	.globl	ret_from_fork
 ret_from_fork:
-#ifdef __SMP__
 	pushl %ebx
 	call SYMBOL_NAME(schedule_tail)
 	addl $4, %esp
-#endif /* __SMP__ */
 	GET_CURRENT(%ebx)
+	testb $0x20,flags(%ebx)		# PF_TRACESYS
+	jne tracesys_exit
 	jmp	ret_from_sys_call
 
 /*
@@ -182,9 +206,17 @@ ENTRY(system_call)
 	.globl ret_from_sys_call
 	.globl ret_from_intr
 ret_from_sys_call:
-	movl SYMBOL_NAME(bh_mask),%eax
-	andl SYMBOL_NAME(bh_active),%eax
-	jne handle_bottom_half
+#ifdef __SMP__
+	movl processor(%ebx),%eax
+	shll $5,%eax
+	movl SYMBOL_NAME(softirq_state)(,%eax),%ecx
+	testl SYMBOL_NAME(softirq_state)+4(,%eax),%ecx
+#else
+	movl SYMBOL_NAME(softirq_state),%ecx
+	testl SYMBOL_NAME(softirq_state)+4,%ecx
+#endif
+	jne   handle_softirq
+	
 ret_with_reschedule:
 	cmpl $0,need_resched(%ebx)
 	jne reschedule
@@ -216,8 +248,11 @@ tracesys:
 	movl $-ENOSYS,EAX(%esp)
 	call SYMBOL_NAME(syscall_trace)
 	movl ORIG_EAX(%esp),%eax
+	cmpl $(NR_syscalls),%eax
+	jae tracesys_exit
 	call *SYMBOL_NAME(sys_call_table)(,%eax,4)
 	movl %eax,EAX(%esp)		# save the return value
+tracesys_exit:
 	call SYMBOL_NAME(syscall_trace)
 	jmp ret_from_sys_call
 badsys:
@@ -226,9 +261,18 @@ badsys:
 
 	ALIGN
 ret_from_exception:
-	movl SYMBOL_NAME(bh_mask),%eax
-	andl SYMBOL_NAME(bh_active),%eax
-	jne handle_bottom_half
+#ifdef __SMP__
+	GET_CURRENT(%ebx)
+	movl processor(%ebx),%eax
+	shll $5,%eax
+	movl SYMBOL_NAME(softirq_state)(,%eax),%ecx
+	testl SYMBOL_NAME(softirq_state)+4(,%eax),%ecx
+#else
+	movl SYMBOL_NAME(softirq_state),%ecx
+	testl SYMBOL_NAME(softirq_state)+4,%ecx
+#endif
+	jne   handle_softirq
+
 	ALIGN
 ret_from_intr:
 	GET_CURRENT(%ebx)
@@ -239,10 +283,10 @@ ret_from_intr:
 	jmp restore_all
 
 	ALIGN
-handle_bottom_half:
-	call SYMBOL_NAME(do_bottom_half)
+handle_softirq:
+	call SYMBOL_NAME(do_softirq)
 	jmp ret_from_intr
-
+	
 	ALIGN
 reschedule:
 	call SYMBOL_NAME(schedule)    # test
@@ -264,15 +308,15 @@ error_code:
 	pushl %ecx
 	pushl %ebx
 	cld
-	movl %es,%cx
+	movl %es,%ecx
 	xchgl %eax, ORIG_EAX(%esp)	# orig_eax (get the error code. )
 	movl %esp,%edx
 	xchgl %ecx, ES(%esp)		# get the address and save es.
 	pushl %eax			# push the error code
 	pushl %edx
 	movl $(__KERNEL_DS),%edx
-	movl %dx,%ds
-	movl %dx,%es
+	movl %edx,%ds
+	movl %edx,%es
 	GET_CURRENT(%ebx)
 	call *%ecx
 	addl $8,%esp
@@ -302,9 +346,14 @@ ENTRY(debug)
 	jmp error_code
 
 ENTRY(nmi)
+	pushl %eax
+	SAVE_ALL
+	movl %esp,%edx
 	pushl $0
-	pushl $ SYMBOL_NAME(do_nmi)
-	jmp error_code
+	pushl %edx
+	call SYMBOL_NAME(do_nmi)
+	addl $8,%esp
+	RESTORE_ALL
 
 ENTRY(int3)
 	pushl $0
@@ -387,15 +436,15 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_time)
 	.long SYMBOL_NAME(sys_mknod)
 	.long SYMBOL_NAME(sys_chmod)		/* 15 */
-	.long SYMBOL_NAME(sys_lchown)
+	.long SYMBOL_NAME(sys_lchown16)
 	.long SYMBOL_NAME(sys_ni_syscall)				/* old break syscall holder */
 	.long SYMBOL_NAME(sys_stat)
 	.long SYMBOL_NAME(sys_lseek)
 	.long SYMBOL_NAME(sys_getpid)		/* 20 */
 	.long SYMBOL_NAME(sys_mount)
 	.long SYMBOL_NAME(sys_oldumount)
-	.long SYMBOL_NAME(sys_setuid)
-	.long SYMBOL_NAME(sys_getuid)
+	.long SYMBOL_NAME(sys_setuid16)
+	.long SYMBOL_NAME(sys_getuid16)
 	.long SYMBOL_NAME(sys_stime)		/* 25 */
 	.long SYMBOL_NAME(sys_ptrace)
 	.long SYMBOL_NAME(sys_alarm)
@@ -417,11 +466,11 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_times)
 	.long SYMBOL_NAME(sys_ni_syscall)				/* old prof syscall holder */
 	.long SYMBOL_NAME(sys_brk)		/* 45 */
-	.long SYMBOL_NAME(sys_setgid)
-	.long SYMBOL_NAME(sys_getgid)
+	.long SYMBOL_NAME(sys_setgid16)
+	.long SYMBOL_NAME(sys_getgid16)
 	.long SYMBOL_NAME(sys_signal)
-	.long SYMBOL_NAME(sys_geteuid)
-	.long SYMBOL_NAME(sys_getegid)		/* 50 */
+	.long SYMBOL_NAME(sys_geteuid16)
+	.long SYMBOL_NAME(sys_getegid16)	/* 50 */
 	.long SYMBOL_NAME(sys_acct)
 	.long SYMBOL_NAME(sys_umount)					/* recycled never used phys() */
 	.long SYMBOL_NAME(sys_ni_syscall)				/* old lock syscall holder */
@@ -441,18 +490,18 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_sigaction)
 	.long SYMBOL_NAME(sys_sgetmask)
 	.long SYMBOL_NAME(sys_ssetmask)
-	.long SYMBOL_NAME(sys_setreuid)		/* 70 */
-	.long SYMBOL_NAME(sys_setregid)
+	.long SYMBOL_NAME(sys_setreuid16)	/* 70 */
+	.long SYMBOL_NAME(sys_setregid16)
 	.long SYMBOL_NAME(sys_sigsuspend)
 	.long SYMBOL_NAME(sys_sigpending)
 	.long SYMBOL_NAME(sys_sethostname)
 	.long SYMBOL_NAME(sys_setrlimit)	/* 75 */
-	.long SYMBOL_NAME(sys_getrlimit)
+	.long SYMBOL_NAME(sys_old_getrlimit)
 	.long SYMBOL_NAME(sys_getrusage)
 	.long SYMBOL_NAME(sys_gettimeofday)
 	.long SYMBOL_NAME(sys_settimeofday)
-	.long SYMBOL_NAME(sys_getgroups)	/* 80 */
-	.long SYMBOL_NAME(sys_setgroups)
+	.long SYMBOL_NAME(sys_getgroups16)	/* 80 */
+	.long SYMBOL_NAME(sys_setgroups16)
 	.long SYMBOL_NAME(old_select)
 	.long SYMBOL_NAME(sys_symlink)
 	.long SYMBOL_NAME(sys_lstat)
@@ -466,7 +515,7 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_truncate)
 	.long SYMBOL_NAME(sys_ftruncate)
 	.long SYMBOL_NAME(sys_fchmod)
-	.long SYMBOL_NAME(sys_fchown)		/* 95 */
+	.long SYMBOL_NAME(sys_fchown16)		/* 95 */
 	.long SYMBOL_NAME(sys_getpriority)
 	.long SYMBOL_NAME(sys_setpriority)
 	.long SYMBOL_NAME(sys_ni_syscall)				/* old profil syscall holder */
@@ -483,7 +532,7 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_uname)
 	.long SYMBOL_NAME(sys_iopl)		/* 110 */
 	.long SYMBOL_NAME(sys_vhangup)
-	.long SYMBOL_NAME(sys_idle)
+	.long SYMBOL_NAME(sys_ni_syscall)	/* old "idle" system call */
 	.long SYMBOL_NAME(sys_vm86old)
 	.long SYMBOL_NAME(sys_wait4)
 	.long SYMBOL_NAME(sys_swapoff)		/* 115 */
@@ -509,8 +558,8 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_sysfs)		/* 135 */
 	.long SYMBOL_NAME(sys_personality)
 	.long SYMBOL_NAME(sys_ni_syscall)	/* for afs_syscall */
-	.long SYMBOL_NAME(sys_setfsuid)
-	.long SYMBOL_NAME(sys_setfsgid)
+	.long SYMBOL_NAME(sys_setfsuid16)
+	.long SYMBOL_NAME(sys_setfsgid16)
 	.long SYMBOL_NAME(sys_llseek)		/* 140 */
 	.long SYMBOL_NAME(sys_getdents)
 	.long SYMBOL_NAME(sys_select)
@@ -535,14 +584,14 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_sched_rr_get_interval)
 	.long SYMBOL_NAME(sys_nanosleep)
 	.long SYMBOL_NAME(sys_mremap)
-	.long SYMBOL_NAME(sys_setresuid)
-	.long SYMBOL_NAME(sys_getresuid)	/* 165 */
+	.long SYMBOL_NAME(sys_setresuid16)
+	.long SYMBOL_NAME(sys_getresuid16)	/* 165 */
 	.long SYMBOL_NAME(sys_vm86)
 	.long SYMBOL_NAME(sys_query_module)
 	.long SYMBOL_NAME(sys_poll)
 	.long SYMBOL_NAME(sys_nfsservctl)
-	.long SYMBOL_NAME(sys_setresgid)	/* 170 */
-	.long SYMBOL_NAME(sys_getresgid)
+	.long SYMBOL_NAME(sys_setresgid16)	/* 170 */
+	.long SYMBOL_NAME(sys_getresgid16)
 	.long SYMBOL_NAME(sys_prctl)
 	.long SYMBOL_NAME(sys_rt_sigreturn)
 	.long SYMBOL_NAME(sys_rt_sigaction)
@@ -553,7 +602,7 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_rt_sigsuspend)
 	.long SYMBOL_NAME(sys_pread)		/* 180 */
 	.long SYMBOL_NAME(sys_pwrite)
-	.long SYMBOL_NAME(sys_chown)
+	.long SYMBOL_NAME(sys_chown16)
 	.long SYMBOL_NAME(sys_getcwd)
 	.long SYMBOL_NAME(sys_capget)
 	.long SYMBOL_NAME(sys_capset)           /* 185 */
@@ -562,6 +611,34 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_ni_syscall)		/* streams1 */
 	.long SYMBOL_NAME(sys_ni_syscall)		/* streams2 */
 	.long SYMBOL_NAME(sys_vfork)            /* 190 */
+	.long SYMBOL_NAME(sys_getrlimit)
+	.long SYMBOL_NAME(sys_mmap2)
+	.long SYMBOL_NAME(sys_truncate64)
+	.long SYMBOL_NAME(sys_ftruncate64)
+	.long SYMBOL_NAME(sys_stat64)		/* 195 */
+	.long SYMBOL_NAME(sys_lstat64)
+	.long SYMBOL_NAME(sys_fstat64)
+	.long SYMBOL_NAME(sys_lchown)
+	.long SYMBOL_NAME(sys_getuid)
+	.long SYMBOL_NAME(sys_getgid)		/* 200 */
+	.long SYMBOL_NAME(sys_geteuid)
+	.long SYMBOL_NAME(sys_getegid)
+	.long SYMBOL_NAME(sys_setreuid)
+	.long SYMBOL_NAME(sys_setregid)
+	.long SYMBOL_NAME(sys_getgroups)	/* 205 */
+	.long SYMBOL_NAME(sys_setgroups)
+	.long SYMBOL_NAME(sys_fchown)
+	.long SYMBOL_NAME(sys_setresuid)
+	.long SYMBOL_NAME(sys_getresuid)
+	.long SYMBOL_NAME(sys_setresgid)	/* 210 */
+	.long SYMBOL_NAME(sys_getresgid)
+	.long SYMBOL_NAME(sys_chown)
+	.long SYMBOL_NAME(sys_setuid)
+	.long SYMBOL_NAME(sys_setgid)
+	.long SYMBOL_NAME(sys_setfsuid)		/* 215 */
+	.long SYMBOL_NAME(sys_setfsgid)
+	.long SYMBOL_NAME(sys_pivot_root)
+
 
 	/*
 	 * NOTE!! This doesn't have to be exact - we just have
@@ -569,6 +646,6 @@ ENTRY(sys_call_table)
 	 * entries. Don't panic if you notice that this hasn't
 	 * been shrunk every time we add a new system call.
 	 */
-	.rept NR_syscalls-190
+	.rept NR_syscalls-217
 		.long SYMBOL_NAME(sys_ni_syscall)
 	.endr

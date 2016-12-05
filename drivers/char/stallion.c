@@ -4,7 +4,7 @@
  *	stallion.c  -- stallion multiport serial driver.
  *
  *	Copyright (C) 1996-1999  Stallion Technologies (support@stallion.oz.au).
- *	Copyright (C) 1994-1996  Greg Ungerer (gerg@stallion.oz.au).
+ *	Copyright (C) 1994-1996  Greg Ungerer.
  *
  *	This code is loosely based on the Linux serial driver, written by
  *	Linus Torvalds, Theodore T'so and others.
@@ -28,6 +28,7 @@
 
 #include <linux/config.h>
 #include <linux/module.h>
+#include <linux/version.h> /* for linux/stallion.h */
 #include <linux/malloc.h>
 #include <linux/interrupt.h>
 #include <linux/tty_flip.h>
@@ -39,6 +40,7 @@
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/smp_lock.h>
+#include <linux/devfs_fs_kernel.h>
 
 #include <asm/io.h>
 #include <asm/uaccess.h>
@@ -135,7 +137,7 @@ static int	stl_nrbrds = sizeof(stl_brdconf) / sizeof(stlconf_t);
  */
 static char	*stl_drvtitle = "Stallion Multiport Serial Driver";
 static char	*stl_drvname = "stallion";
-static char	*stl_drvversion = "5.5.1";
+static char	*stl_drvversion = "5.6.0";
 static char	*stl_serialname = "ttyE";
 static char	*stl_calloutname = "cue";
 
@@ -154,7 +156,7 @@ static int			stl_refcount = 0;
  *	is already swapping a shared buffer won't make things any worse.
  */
 static char			*stl_tmpwritebuf;
-static struct semaphore		stl_tmpwritesem = MUTEX;
+static DECLARE_MUTEX(stl_tmpwritesem);
 
 /*
  *	Define a local default termios struct. All ports will be created
@@ -742,24 +744,14 @@ static unsigned int	sc26198_baudtable[] = {
  *	to get at port stats - only not using the port device itself.
  */
 static struct file_operations	stl_fsiomem = {
-	NULL,		/* llseek */
-	NULL,		/* read */
-	NULL,		/* write */
-	NULL,		/* readdir */
-	NULL,		/* poll */
-	stl_memioctl,	/* ioctl */
-	NULL,		/* mmap */
-	stl_memopen,	/* open */
-	NULL,		/* flush */
-	stl_memclose,	/* release */
-	NULL,		/* fsync */
-	NULL,		/* fasync */
-	NULL,		/* check_media_change */
-	NULL,		/* revalidate */
-	NULL		/* lock */
+	ioctl:		stl_memioctl,
+	open:		stl_memopen,
+	release:	stl_memclose,
 };
 
 /*****************************************************************************/
+
+static devfs_handle_t devfs_handle = NULL;
 
 #ifdef MODULE
 
@@ -791,7 +783,7 @@ void cleanup_module()
 	stlpanel_t	*panelp;
 	stlport_t	*portp;
 	unsigned long	flags;
-	int		i, j, k;
+	int		i, j, k, l;
 
 #if DEBUG
 	printk("cleanup_module()\n");
@@ -817,7 +809,8 @@ void cleanup_module()
 		restore_flags(flags);
 		return;
 	}
-	if ((i = unregister_chrdev(STL_SIOMEMMAJOR, "staliomem")))
+	devfs_unregister (devfs_handle);
+	if ((i = devfs_unregister_chrdev(STL_SIOMEMMAJOR, "staliomem")))
 		printk("STALLION: failed to un-register serial memory device, "
 			"errno=%d\n", -i);
 
@@ -2280,7 +2273,7 @@ static void stl_offintr(void *private)
  *	interrupt across multiple boards.
  */
 
-__initfunc(static int stl_mapirq(int irq, char *name))
+static int __init stl_mapirq(int irq, char *name)
 {
 	int	rc, i;
 
@@ -2294,7 +2287,7 @@ __initfunc(static int stl_mapirq(int irq, char *name))
 			break;
 	}
 	if (i >= stl_numintrs) {
-		if (request_irq(irq, stl_intr, SA_INTERRUPT, name, NULL) != 0) {
+		if (request_irq(irq, stl_intr, SA_SHIRQ, name, NULL) != 0) {
 			printk("STALLION: failed to register interrupt "
 				"routine for %s irq=%d\n", name, irq);
 			rc = -ENODEV;
@@ -2311,7 +2304,7 @@ __initfunc(static int stl_mapirq(int irq, char *name))
  *	Initialize all the ports on a panel.
  */
 
-__initfunc(static int stl_initports(stlbrd_t *brdp, stlpanel_t *panelp))
+static int __init stl_initports(stlbrd_t *brdp, stlpanel_t *panelp)
 {
 	stlport_t	*portp;
 	int		chipmask, i;
@@ -2348,6 +2341,8 @@ __initfunc(static int stl_initports(stlbrd_t *brdp, stlpanel_t *panelp))
 		portp->callouttermios = stl_deftermios;
 		portp->tqueue.routine = stl_offintr;
 		portp->tqueue.data = portp;
+		init_waitqueue_head(&portp->open_wait);
+		init_waitqueue_head(&portp->close_wait);
 		portp->stats.brd = portp->brdnr;
 		portp->stats.panel = portp->panelnr;
 		portp->stats.port = portp->portnr;
@@ -2700,7 +2695,7 @@ static int inline stl_initech(stlbrd_t *brdp)
  *	since the initial search and setup is very different.
  */
 
-__initfunc(static int stl_brdinit(stlbrd_t *brdp))
+static int __init stl_brdinit(stlbrd_t *brdp)
 {
 	int	i;
 
@@ -2780,7 +2775,7 @@ static inline int stl_initpcibrd(int brdtype, struct pci_dev *devp)
 
 #if DEBUG
 	printk("stl_initpcibrd(brdtype=%d,busnr=%x,devnr=%x)\n", brdtype,
-		dev->bus->number, dev->devfn);
+		devp->bus->number, devp->devfn);
 #endif
 
 	if ((brdp = stl_allocbrd()) == (stlbrd_t *) NULL)
@@ -2798,8 +2793,8 @@ static inline int stl_initpcibrd(int brdtype, struct pci_dev *devp)
  */
 #if DEBUG
 	printk("%s(%d): BAR[]=%x,%x,%x,%x IRQ=%x\n", __FILE__, __LINE__,
-		devp->base_address[0], devp->base_address[1],
-		devp->base_address[2], devp->base_address[3], devp->irq);
+		devp->resource[0].start, devp->resource[1].start,
+		devp->resource[2].start, devp->resource[3].start, devp->irq);
 #endif
 
 /*
@@ -2808,21 +2803,21 @@ static inline int stl_initpcibrd(int brdtype, struct pci_dev *devp)
  */
 	switch (brdtype) {
 	case BRD_ECHPCI:
-		brdp->ioaddr2 = (devp->base_address[0] &
+		brdp->ioaddr2 = (devp->resource[0].start &
 			PCI_BASE_ADDRESS_IO_MASK);
-		brdp->ioaddr1 = (devp->base_address[1] &
+		brdp->ioaddr1 = (devp->resource[1].start &
 			PCI_BASE_ADDRESS_IO_MASK);
 		break;
 	case BRD_ECH64PCI:
-		brdp->ioaddr2 = (devp->base_address[2] &
+		brdp->ioaddr2 = (devp->resource[2].start &
 			PCI_BASE_ADDRESS_IO_MASK);
-		brdp->ioaddr1 = (devp->base_address[1] &
+		brdp->ioaddr1 = (devp->resource[1].start &
 			PCI_BASE_ADDRESS_IO_MASK);
 		break;
 	case BRD_EASYIOPCI:
-		brdp->ioaddr1 = (devp->base_address[2] &
+		brdp->ioaddr1 = (devp->resource[2].start &
 			PCI_BASE_ADDRESS_IO_MASK);
-		brdp->ioaddr2 = (devp->base_address[1] &
+		brdp->ioaddr2 = (devp->resource[1].start &
 			PCI_BASE_ADDRESS_IO_MASK);
 		break;
 	default:
@@ -3204,7 +3199,7 @@ static int stl_memioctl(struct inode *ip, struct file *fp, unsigned int cmd, uns
 
 /*****************************************************************************/
 
-__initfunc(int stl_init(void))
+int __init stl_init(void)
 {
 	printk(KERN_INFO "%s: version %s\n", stl_drvtitle, stl_drvversion);
 
@@ -3222,8 +3217,13 @@ __initfunc(int stl_init(void))
  *	Set up a character driver for per board stuff. This is mainly used
  *	to do stats ioctls on the ports.
  */
-	if (register_chrdev(STL_SIOMEMMAJOR, "staliomem", &stl_fsiomem))
+	if (devfs_register_chrdev(STL_SIOMEMMAJOR, "staliomem", &stl_fsiomem))
 		printk("STALLION: failed to register serial board device\n");
+	devfs_handle = devfs_mk_dir (NULL, "staliomem", 9, NULL);
+	devfs_register_series (devfs_handle, "%u", 4, DEVFS_FL_DEFAULT,
+			       STL_SIOMEMMAJOR, 0,
+			       S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			       &stl_fsiomem, NULL);
 
 /*
  *	Set up the tty driver structure and register us as a driver.
@@ -4209,6 +4209,7 @@ static void stl_cd1400rxisr(stlpanel_t *panelp, int ioaddr)
 		if ((tty == (struct tty_struct *) NULL) ||
 		    (tty->flip.char_buf_ptr == (char *) NULL) ||
 		    ((buflen = TTY_FLIPBUF_SIZE - tty->flip.count) == 0)) {
+			len = MIN(len, sizeof(stl_unwanted));
 			outb((RDSR + portp->uartaddr), ioaddr);
 			insb((ioaddr + EREG_DATA), &stl_unwanted[0], len);
 			portp->stats.rxlost += len;
@@ -5175,6 +5176,7 @@ static void stl_sc26198rxisr(stlport_t *portp, unsigned int iack)
 		if ((tty == (struct tty_struct *) NULL) ||
 		    (tty->flip.char_buf_ptr == (char *) NULL) ||
 		    ((buflen = TTY_FLIPBUF_SIZE - tty->flip.count) == 0)) {
+			len = MIN(len, sizeof(stl_unwanted));
 			outb(GRXFIFO, (ioaddr + XP_ADDR));
 			insb((ioaddr + XP_DATA), &stl_unwanted[0], len);
 			portp->stats.rxlost += len;

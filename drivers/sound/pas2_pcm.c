@@ -14,12 +14,9 @@
  *		     more things module options.
  */
 
-#include <linux/config.h>
-
 #include "sound_config.h"
 
-#ifdef CONFIG_PAS
-#ifdef CONFIG_AUDIO
+#include "pas2.h"
 
 #ifndef DEB
 #define DEB(WHAT)
@@ -440,6 +437,3 @@ void pas_pcm_interrupt(unsigned char status, int cause)
 		}
 	}
 }
-
-#endif
-#endif

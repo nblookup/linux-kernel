@@ -40,9 +40,9 @@ u_short amiga_audio_period = MAX_PERIOD;
 
 static u_long clock_constant;
 
-__initfunc(void amiga_init_sound(void))
+void __init amiga_init_sound(void)
 {
-	snd_data = amiga_chip_alloc(sizeof(sine_data));
+	snd_data = amiga_chip_alloc(sizeof(sine_data), "Beep");
 	if (!snd_data) {
 		printk (KERN_CRIT "amiga init_sound: failed to allocate chipmem\n");
 		return;

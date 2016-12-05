@@ -52,9 +52,9 @@ static const char *version =
 #include "3c503.h"
 #define WRD_COUNT 4
 
-int el2_probe(struct device *dev);
-int el2_pio_probe(struct device *dev);
-int el2_probe1(struct device *dev, int ioaddr);
+int el2_probe(struct net_device *dev);
+int el2_pio_probe(struct net_device *dev);
+int el2_probe1(struct net_device *dev, int ioaddr);
 
 /* A zero-terminated list of I/O addresses to be probed in PIO mode. */
 static unsigned int netcard_portlist[] __initdata =
@@ -71,15 +71,15 @@ struct netdev_entry el2pio_drv =
 {"3c503pio", el2_pioprobe1, EL1_IO_EXTENT, netcard_portlist};
 #endif
 
-static int el2_open(struct device *dev);
-static int el2_close(struct device *dev);
-static void el2_reset_8390(struct device *dev);
-static void el2_init_card(struct device *dev);
-static void el2_block_output(struct device *dev, int count,
+static int el2_open(struct net_device *dev);
+static int el2_close(struct net_device *dev);
+static void el2_reset_8390(struct net_device *dev);
+static void el2_init_card(struct net_device *dev);
+static void el2_block_output(struct net_device *dev, int count,
 			     const unsigned char *buf, int start_page);
-static void el2_block_input(struct device *dev, int count, struct sk_buff *skb,
+static void el2_block_input(struct net_device *dev, int count, struct sk_buff *skb,
 			   int ring_offset);
-static void el2_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
+static void el2_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 			 int ring_page);
 
 
@@ -90,8 +90,8 @@ static void el2_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
    If the ethercard isn't found there is an optional probe for
    ethercard jumpered to programmed-I/O mode.
    */
-__initfunc(int
-el2_probe(struct device *dev))
+int __init 
+el2_probe(struct net_device *dev)
 {
     int *addr, addrs[] = { 0xddffe, 0xd9ffe, 0xcdffe, 0xc9ffe, 0};
     int base_addr = dev->base_addr;
@@ -103,7 +103,7 @@ el2_probe(struct device *dev))
 
     for (addr = addrs; *addr; addr++) {
 	int i;
-	unsigned int base_bits = readb(*addr);
+	unsigned int base_bits = isa_readb(*addr);
 	/* Find first set bit. */
 	for(i = 7; i >= 0; i--, base_bits >>= 1)
 	    if (base_bits & 0x1)
@@ -125,8 +125,8 @@ el2_probe(struct device *dev))
 #ifndef HAVE_DEVLIST
 /*  Try all of the locations that aren't obviously empty.  This touches
     a lot of locations, and is much riskier than the code above. */
-__initfunc(int
-el2_pio_probe(struct device *dev))
+int __init 
+el2_pio_probe(struct net_device *dev)
 {
     int i;
     int base_addr = dev ? dev->base_addr : 0;
@@ -151,8 +151,8 @@ el2_pio_probe(struct device *dev))
 /* Probe for the Etherlink II card at I/O port base IOADDR,
    returning non-zero on success.  If found, set the station
    address and memory parameters in DEVICE. */
-__initfunc(int
-el2_probe1(struct device *dev, int ioaddr))
+int __init 
+el2_probe1(struct net_device *dev, int ioaddr)
 {
     int i, iobase_reg, membase_reg, saved_406, wordlength;
     static unsigned version_printed = 0;
@@ -251,18 +251,18 @@ el2_probe1(struct device *dev, int ioaddr))
 	{			/* Check the card's memory. */
 	    unsigned long mem_base = dev->mem_start;
 	    unsigned int test_val = 0xbbadf00d;
-	    writel(0xba5eba5e, mem_base);
+	    isa_writel(0xba5eba5e, mem_base);
 	    for (i = sizeof(test_val); i < EL2_MEMSIZE; i+=sizeof(test_val)) {
-		writel(test_val, mem_base + i);
-		if (readl(mem_base) != 0xba5eba5e
-		    || readl(mem_base + i) != test_val) {
+		isa_writel(test_val, mem_base + i);
+		if (isa_readl(mem_base) != 0xba5eba5e
+		    || isa_readl(mem_base + i) != test_val) {
 		    printk("3c503: memory failure or memory address conflict.\n");
 		    dev->mem_start = 0;
 		    ei_status.name = "3c503-PIO";
 		    break;
 		}
 		test_val += 0x55555555;
-		writel(0, mem_base + i);
+		isa_writel(0, mem_base + i);
 	    }
 	}
 #endif  /* EL2MEMTEST */
@@ -314,7 +314,6 @@ el2_probe1(struct device *dev, int ioaddr))
 
     ei_status.saved_irq = dev->irq;
 
-    dev->start = 0;
     dev->open = &el2_open;
     dev->stop = &el2_close;
 
@@ -334,7 +333,7 @@ el2_probe1(struct device *dev, int ioaddr))
 }
 
 static int
-el2_open(struct device *dev)
+el2_open(struct net_device *dev)
 {
 
     if (dev->irq < 2) {
@@ -370,7 +369,7 @@ el2_open(struct device *dev)
 }
 
 static int
-el2_close(struct device *dev)
+el2_close(struct net_device *dev)
 {
     free_irq(dev->irq, dev);
     dev->irq = ei_status.saved_irq;
@@ -386,7 +385,7 @@ el2_close(struct device *dev)
        Bad ring buffer packet header
  */
 static void
-el2_reset_8390(struct device *dev)
+el2_reset_8390(struct net_device *dev)
 {
     if (ei_debug > 1) {
 	printk("%s: Resetting the 3c503 board...", dev->name);
@@ -402,7 +401,7 @@ el2_reset_8390(struct device *dev)
 
 /* Initialize the 3c503 GA registers after a reset. */
 static void
-el2_init_card(struct device *dev)
+el2_init_card(struct net_device *dev)
 {
     /* Unmap the station PROM and select the DIX or BNC connector. */
     outb_p(ei_status.interface_num==0 ? ECNTRL_THIN : ECNTRL_AUI, E33G_CNTRL);
@@ -434,7 +433,7 @@ el2_init_card(struct device *dev)
  * out through the ASIC FIFO.
  */
 static void
-el2_block_output(struct device *dev, int count,
+el2_block_output(struct net_device *dev, int count,
 		 const unsigned char *buf, int start_page)
 {
     unsigned short int *wrd;
@@ -449,7 +448,7 @@ el2_block_output(struct device *dev, int count,
     if (dev->mem_start) {	/* Shared memory transfer */
 	unsigned long dest_addr = dev->mem_start +
 	    ((start_page - ei_status.tx_start_page) << 8);
-	memcpy_toio(dest_addr, buf, count);
+	isa_memcpy_toio(dest_addr, buf, count);
 	outb(EGACFR_NORM, E33G_GACFR);	/* Back to bank1 in case on bank0 */
 	return;
     }
@@ -507,14 +506,14 @@ el2_block_output(struct device *dev, int count,
 
 /* Read the 4 byte, page aligned 8390 specific header. */
 static void
-el2_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
+el2_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
     int boguscount;
     unsigned long hdr_start = dev->mem_start + ((ring_page - EL2_MB1_START_PG)<<8);
     unsigned short word;
 
     if (dev->mem_start) {       /* Use the shared memory. */
-	memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
 	return;
     }
 
@@ -546,7 +545,7 @@ el2_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 
 
 static void
-el2_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_offset)
+el2_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset)
 {
     int boguscount = 0;
     unsigned short int *buf;
@@ -560,12 +559,12 @@ el2_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_off
 	if (dev->mem_start + ring_offset + count > end_of_ring) {
 	    /* We must wrap the input move. */
 	    int semi_count = end_of_ring - (dev->mem_start + ring_offset);
-	    memcpy_fromio(skb->data, dev->mem_start + ring_offset, semi_count);
+	    isa_memcpy_fromio(skb->data, dev->mem_start + ring_offset, semi_count);
 	    count -= semi_count;
-	    memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+	    isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
 	} else {
 		/* Packet is in one chunk -- we can copy + cksum. */
-		eth_io_copy_and_sum(skb, dev->mem_start + ring_offset, count, 0);
+		isa_eth_io_copy_and_sum(skb, dev->mem_start + ring_offset, count, 0);
 	}
 	return;
     }
@@ -625,7 +624,7 @@ el2_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_off
 #define NAMELEN 	8	/* #of chars for storing dev->name */
 
 static char namelist[NAMELEN * MAX_EL2_CARDS] = { 0, };
-static struct device dev_el2[MAX_EL2_CARDS] = {
+static struct net_device dev_el2[MAX_EL2_CARDS] = {
 	{
 		NULL,		/* assign a chunk of namelist[] below */
 		0, 0, 0, 0,
@@ -649,7 +648,7 @@ init_module(void)
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_EL2_CARDS; this_dev++) {
-		struct device *dev = &dev_el2[this_dev];
+		struct net_device *dev = &dev_el2[this_dev];
 		dev->name = namelist+(NAMELEN*this_dev);
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
@@ -679,7 +678,7 @@ cleanup_module(void)
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_EL2_CARDS; this_dev++) {
-		struct device *dev = &dev_el2[this_dev];
+		struct net_device *dev = &dev_el2[this_dev];
 		if (dev->priv != NULL) {
 			void *priv = dev->priv;
 			/* NB: el2_close() handles free_irq */

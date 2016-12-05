@@ -14,16 +14,12 @@
  * Thomas Sailer   : ioctl code reworked (vmalloc/vfree removed)
  * Alan Cox	   : reformatted and fixed a pair of null pointer bugs
  */
-#include <linux/config.h>
-
 #include <linux/kmod.h>
-
 
 #define SEQUENCER_C
 #include "sound_config.h"
-
-#ifdef CONFIG_SEQUENCER
 #include "softoss.h"
+
 int             (*softsynthp) (int cmd, int parm1, int parm2, unsigned long parm3) = NULL;
 
 #include "midi_ctrl.h"
@@ -53,8 +49,8 @@ static int      max_synthdev = 0;
 #define SEQ_2	2
 static int      seq_mode = SEQ_1;
 
-static struct wait_queue *seq_sleeper = NULL;
-static struct wait_queue *midi_sleeper = NULL;
+static DECLARE_WAIT_QUEUE_HEAD(seq_sleeper);
+static DECLARE_WAIT_QUEUE_HEAD(midi_sleeper);
 
 static int      midi_opened[MAX_MIDI_DEV] = {
 	0
@@ -719,9 +715,7 @@ static void seq_local_event(unsigned char *event_rec)
 	switch (cmd)
 	{
 		case LOCL_STARTAUDIO:
-#ifdef CONFIG_AUDIO
 			DMAbuf_start_devices(parm);
-#endif
 			break;
 
 		default:
@@ -1117,8 +1111,8 @@ int sequencer_open(int dev, struct file *file)
 	if (seq_mode == SEQ_2)
 		tmr->open(tmr_no, seq_mode);
 
- 	init_waitqueue(&seq_sleeper);
- 	init_waitqueue(&midi_sleeper);
+ 	init_waitqueue_head(&seq_sleeper);
+ 	init_waitqueue_head(&midi_sleeper);
 	output_threshold = SEQ_MAX_QUEUE / 2;
 
 	return 0;
@@ -1692,9 +1686,7 @@ void sequencer_init(void)
 
 	if (sequencer_ok)
 		return;
-#ifdef CONFIG_MIDI
 	MIDIbuf_init();
-#endif
 	queue = (unsigned char *)vmalloc(SEQ_MAX_QUEUE * EV_SZ);
 	if (queue == NULL)
 	{
@@ -1724,5 +1716,3 @@ void sequencer_unload(void)
 		iqueue=NULL;
 	}
 }
-
-#endif

@@ -7,7 +7,6 @@
 #define _PPC_SMP_H
 
 #include <linux/kernel.h>
-#include <linux/tasks.h>
 
 #ifdef __SMP__
 
@@ -22,19 +21,19 @@ struct cpuinfo_PPC {
 };
 extern struct cpuinfo_PPC cpu_data[NR_CPUS];
 
-extern int first_cpu_booted;
 extern unsigned long smp_proc_in_lock[NR_CPUS];
 
 extern void smp_message_pass(int target, int msg, unsigned long data, int wait);
 extern void smp_store_cpu_info(int id);
-extern void smp_message_recv(void);
+extern void smp_message_recv(int);
+void smp_send_tlb_invalidate(int);
 
 #define NO_PROC_ID		0xFF            /* No processor magic marker */
 #define PROC_CHANGE_PENALTY	20
 
 /* 1 to 1 mapping on PPC -- Cort */
 #define cpu_logical_map(cpu) (cpu)
-extern int cpu_number_map[NR_CPUS];
+#define cpu_number_map(x) (x)
 extern volatile unsigned long cpu_callin_map[NR_CPUS];
 
 #define hard_smp_processor_id() (0)

@@ -5,7 +5,7 @@
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>	
  *
- *	$Id: reassembly.c,v 1.11 1998/08/26 12:05:16 davem Exp $
+ *	$Id: reassembly.c,v 1.16 2000/01/09 02:19:51 davem Exp $
  *
  *	Based on: net/ipv4/ip_fragment.c
  *
@@ -19,9 +19,12 @@
  *	Fixes:	
  *	Andi Kleen	Make it work with multiple hosts.
  *			More RFC compliance.
+ *
+ *      Horst von Brand Add missing #include <linux/string.h>
  */
 #include <linux/errno.h>
 #include <linux/types.h>
+#include <linux/string.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
 #include <linux/sched.h>
@@ -47,6 +50,8 @@ int sysctl_ip6frag_time = IPV6_FRAG_TIMEOUT;
 
 atomic_t ip6_frag_mem = ATOMIC_INIT(0);
 
+static spinlock_t ip6_frag_lock = SPIN_LOCK_UNLOCKED;
+
 struct ipv6_frag {
 	__u16			offset;
 	__u16			len;
@@ -71,7 +76,7 @@ struct frag_queue {
 	struct in6_addr		daddr;
 	struct timer_list	timer;		/* expire timer		*/
 	struct ipv6_frag	*fragments;
-	struct device		*dev;
+	struct net_device		*dev;
 	int			iif;
 	__u8			last_in;	/* has first/last segment arrived? */
 #define FIRST_IN		2
@@ -128,15 +133,19 @@ static void frag_prune(void)
 {
 	struct frag_queue *fq;
 
+	spin_lock(&ip6_frag_lock);
 	while ((fq = ipv6_frag_queue.next) != &ipv6_frag_queue) {
-		ipv6_statistics.Ip6ReasmFails++;
+		IP6_INC_STATS_BH(Ip6ReasmFails);
 		fq_free(fq);
-		if (atomic_read(&ip6_frag_mem) <= sysctl_ip6frag_low_thresh)
+		if (atomic_read(&ip6_frag_mem) <= sysctl_ip6frag_low_thresh) {
+			spin_unlock(&ip6_frag_lock);
 			return;
+		}
 	}
 	if (atomic_read(&ip6_frag_mem))
 		printk(KERN_DEBUG "IPv6 frag_prune: memleak\n");
 	atomic_set(&ip6_frag_mem, 0);
+	spin_unlock(&ip6_frag_lock);
 }
 
 
@@ -149,7 +158,7 @@ u8* ipv6_reassembly(struct sk_buff **skbp, __u8 *nhptr)
 
 	hdr = skb->nh.ipv6h;
 
-	ipv6_statistics.Ip6ReasmReqds++;
+	IP6_INC_STATS_BH(Ip6ReasmReqds);
 
 	/* Jumbo payload inhibits frag. header */
 	if (hdr->payload_len==0) {
@@ -163,21 +172,25 @@ u8* ipv6_reassembly(struct sk_buff **skbp, __u8 *nhptr)
 	if (atomic_read(&ip6_frag_mem) > sysctl_ip6frag_high_thresh)
 		frag_prune();
 
+	spin_lock(&ip6_frag_lock);
 	for (fq = ipv6_frag_queue.next; fq != &ipv6_frag_queue; fq = fq->next) {
 		if (fq->id == fhdr->identification && 
 		    !ipv6_addr_cmp(&hdr->saddr, &fq->saddr) &&
 		    !ipv6_addr_cmp(&hdr->daddr, &fq->daddr)) {
+			u8 *ret = NULL;
 
 			reasm_queue(fq, skb, fhdr, nhptr);
 
 			if (fq->last_in == (FIRST_IN|LAST_IN))
-				return reasm_frag(fq, skbp);
+				ret = reasm_frag(fq, skbp);
 
-			return NULL;
+			spin_unlock(&ip6_frag_lock);
+			return ret;
 		}
 	}
 
 	create_frag_entry(skb, nhptr, fhdr);
+	spin_unlock(&ip6_frag_lock);
 
 	return NULL;
 }
@@ -211,12 +224,15 @@ static void frag_expire(unsigned long data)
 
 	fq = (struct frag_queue *) data;
 
+	spin_lock(&ip6_frag_lock);
+
 	frag = fq->fragments;
 
-	ipv6_statistics.Ip6ReasmTimeout++;
-	ipv6_statistics.Ip6ReasmFails++;
+	IP6_INC_STATS_BH(Ip6ReasmTimeout);
+	IP6_INC_STATS_BH(Ip6ReasmFails);
 
 	if (frag == NULL) {
+		spin_unlock(&ip6_frag_lock);
 		printk(KERN_DEBUG "invalid fragment queue\n");
 		return;
 	}
@@ -225,7 +241,7 @@ static void frag_expire(unsigned long data)
 	   (fixed --ANK (980728))
 	 */
 	if (fq->last_in&FIRST_IN) {
-		struct device *dev = dev_get_by_index(fq->iif);
+		struct net_device *dev = dev_get_by_index(fq->iif);
 
 		/*
 		   But use as source device on which LAST ARRIVED
@@ -236,10 +252,12 @@ static void frag_expire(unsigned long data)
 			frag->skb->dev = dev;
 			icmpv6_send(frag->skb, ICMPV6_TIME_EXCEED, ICMPV6_EXC_FRAGTIME, 0,
 				    dev);
+			dev_put(dev);
 		}
 	}
 	
 	fq_free(fq);
+	spin_unlock(&ip6_frag_lock);
 }
 
 
@@ -254,7 +272,7 @@ static void create_frag_entry(struct sk_buff *skb,
 						GFP_ATOMIC);
 
 	if (fq == NULL) {
-		ipv6_statistics.Ip6ReasmFails++;
+		IP6_INC_STATS_BH(Ip6ReasmFails);
 		kfree_skb(skb);
 		return;
 	}
@@ -432,7 +450,7 @@ static u8* reasm_frag(struct frag_queue *fq, struct sk_buff **skb_in)
 	if (payload_len > 65535) {
 		if (net_ratelimit())
 			printk(KERN_DEBUG "reasm_frag: payload len = %d\n", payload_len);
-		ipv6_statistics.Ip6ReasmFails++;
+		IP6_INC_STATS_BH(Ip6ReasmFails);
 		fq_free(fq);
 		return NULL;
 	}
@@ -440,7 +458,7 @@ static u8* reasm_frag(struct frag_queue *fq, struct sk_buff **skb_in)
 	if ((skb = dev_alloc_skb(sizeof(struct ipv6hdr) + payload_len))==NULL) {
 		if (net_ratelimit())
 			printk(KERN_DEBUG "reasm_frag: no memory for reassembly\n");
-		ipv6_statistics.Ip6ReasmFails++;
+		IP6_INC_STATS_BH(Ip6ReasmFails);
 		fq_free(fq);
 		return NULL;
 	}
@@ -487,6 +505,6 @@ static u8* reasm_frag(struct frag_queue *fq, struct sk_buff **skb_in)
 
 	frag_kfree_s(fq, sizeof(*fq));
 
-	ipv6_statistics.Ip6ReasmOKs++;
+	IP6_INC_STATS_BH(Ip6ReasmOKs);
 	return nhptr;
 }

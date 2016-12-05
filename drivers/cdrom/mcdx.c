@@ -44,6 +44,10 @@
  *  Marcin Dalecki (improved performance, shortened code)
  *  ... somebody forgotten?
  *
+ *  9 November 1999 -- Make kernel-parameter implementation work with 2.3.x 
+ *	               Removed init_module & cleanup_module in favor of 
+ *		       module_init & module_exit.
+ *		       Torben Mathiasen <tmm@image.dk>
  */
 
 
@@ -70,6 +74,7 @@ static const char *mcdx_c_version
 #include <linux/major.h>
 #define MAJOR_NR MITSUMI_X_CDROM_MAJOR
 #include <linux/blk.h>
+#include <linux/devfs_fs_kernel.h>
 
 /* for compatible parameter passing with "insmod" */
 #define	mcdx_drive_map mcdx
@@ -150,9 +155,9 @@ struct s_version {
 
 struct s_drive_stuff {
 	/* waitqueues */
-    struct wait_queue *busyq;
-    struct wait_queue *lockq;
-    struct wait_queue *sleepq;
+    wait_queue_head_t busyq;
+    wait_queue_head_t lockq;
+    wait_queue_head_t sleepq;
 
  	/* flags */
     volatile int introk;	/* status of last irq operation */
@@ -208,10 +213,8 @@ struct s_drive_stuff {
 
 /* declared in blk.h */
 int mcdx_init(void);
-void do_mcdx_request(void);
+void do_mcdx_request(request_queue_t * q);
 
-/* already declared in init/main */
-void mcdx_setup(char *, int *);
 
 /*	Indirect exported functions. These functions are exported by their
 	addresses, such as mcdx_open and mcdx_close in the
@@ -521,14 +524,14 @@ static int mcdx_audio_ioctl(struct cdrom_device_info * cdi, unsigned int cmd,
 	}
 }
 
-void do_mcdx_request()
+void do_mcdx_request(request_queue_t * q)
 {
     int dev;
     struct s_drive_stuff *stuffp;
 
   again:
 
-	if (CURRENT == NULL) {
+	if (QUEUE_EMPTY) {
 		xtrace(REQUEST, "end_request(0): CURRENT == NULL\n");
 		return;
 	}
@@ -770,11 +773,20 @@ static int mcdx_media_changed(struct cdrom_device_info * cdi, int disc_nr)
 	return 1;
 }
 
-__initfunc(void mcdx_setup(char *str, int *pi))
+#ifndef MODULE
+static int __init mcdx_setup(char *str)
 {
+	int pi[4];
+	(void)get_options(str, ARRAY_SIZE(pi), pi);
+	
 	if (pi[0] > 0) mcdx_drive_map[0][0] = pi[1];
 	if (pi[0] > 1) mcdx_drive_map[0][1] = pi[2];
+	return 1;
 }
+
+__setup("mcdx=", mcdx_setup);
+
+#endif
 
 /* DIRTY PART ******************************************************/
 
@@ -953,10 +965,10 @@ mcdx_talk (
 }
 
 /* MODULE STUFF ***********************************************************/
-#ifdef MODULE
+
 EXPORT_NO_SYMBOLS;
 
-int init_module(void)
+int __mcdx_init(void)
 {
 	int i;
 	int drives = 0;
@@ -976,7 +988,7 @@ int init_module(void)
     return 0;
 }
 
-void cleanup_module(void)
+void __exit mcdx_exit(void)
 {
     int i;
 
@@ -984,7 +996,7 @@ void cleanup_module(void)
 
     for (i = 0; i < MCDX_NDRIVES; i++) {
 		struct s_drive_stuff *stuffp;
-        if (unregister_cdrom(&mcdx_info)) {
+        	if (unregister_cdrom(&mcdx_info)) {
 			printk(KERN_WARNING "Can't unregister cdrom mcdx\n");
 			return;
 		}
@@ -1001,7 +1013,7 @@ void cleanup_module(void)
 		kfree(stuffp);
     }
 
-    if (unregister_blkdev(MAJOR_NR, "mcdx") != 0) {
+    if (devfs_unregister_blkdev(MAJOR_NR, "mcdx") != 0) {
         xwarn("cleanup() unregister_blkdev() failed\n");
     }
 #if !MCDX_QUIET
@@ -1009,11 +1021,15 @@ void cleanup_module(void)
 #endif
 }
 
-#endif MODULE
+#ifdef MODULE
+module_init(__mcdx_init);
+#endif
+module_exit(mcdx_exit);
+
 
 /* Support functions ************************************************/
 
-__initfunc(int mcdx_init_drive(int drive))
+int __init mcdx_init_drive(int drive)
 {
 	struct s_version version;
 	struct s_drive_stuff* stuffp;
@@ -1046,6 +1062,10 @@ __initfunc(int mcdx_init_drive(int drive))
 	stuffp->wreg_reset = stuffp->rreg_status = stuffp->wreg_data + 1;
 	stuffp->wreg_hcon = stuffp->wreg_reset + 1;
 	stuffp->wreg_chn = stuffp->wreg_hcon + 1;
+	
+	init_waitqueue_head(&stuffp->busyq);
+	init_waitqueue_head(&stuffp->lockq);
+	init_waitqueue_head(&stuffp->sleepq);
 
 	/* check if i/o addresses are available */
 	if (check_region((unsigned int) stuffp->wreg_data, MCDX_IO_SIZE)) {
@@ -1104,7 +1124,7 @@ __initfunc(int mcdx_init_drive(int drive))
 	}
 
 	xtrace(INIT, "init() register blkdev\n");
-	if (register_blkdev(MAJOR_NR, "mcdx", &cdrom_fops) != 0) {
+	if (devfs_register_blkdev(MAJOR_NR, "mcdx", &cdrom_fops) != 0) {
 		xwarn("%s=0x%3p,%d: Init failed. Can't get major %d.\n",
 		      MCDX,
 		      stuffp->wreg_data, stuffp->irq, MAJOR_NR);
@@ -1112,7 +1132,7 @@ __initfunc(int mcdx_init_drive(int drive))
 		return 1;
 	}
 
-	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
 	read_ahead[MAJOR_NR] = READ_AHEAD;
 	blksize_size[MAJOR_NR] = mcdx_blocksizes;
 
@@ -1162,7 +1182,7 @@ __initfunc(int mcdx_init_drive(int drive))
 			       MCDX_IO_SIZE);
 		free_irq(stuffp->irq, NULL);
 		kfree(stuffp);
-		if (unregister_blkdev(MAJOR_NR, "mcdx") != 0)
+		if (devfs_unregister_blkdev(MAJOR_NR, "mcdx") != 0)
         		xwarn("cleanup() unregister_blkdev() failed\n");
 		return 2;
         }
@@ -1170,7 +1190,7 @@ __initfunc(int mcdx_init_drive(int drive))
 	return 0;
 }
 
-__initfunc(int mcdx_init(void))
+int __init mcdx_init(void)
 {
 	int drive;
 #ifdef MODULE

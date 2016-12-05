@@ -1,5 +1,5 @@
 /*
- *  linux/drivers/block/umc8672.c	Version 0.05  Jul 31, 1996
+ *  linux/drivers/block/umc8672.c		Version 0.05	Jul 31, 1996
  *
  *  Copyright (C) 1995-1996  Linus Torvalds & author (see below)
  */
@@ -47,8 +47,10 @@
 #include <linux/ioport.h>
 #include <linux/blkdev.h>
 #include <linux/hdreg.h>
+#include <linux/ide.h>
+
 #include <asm/io.h>
-#include "ide.h"
+
 #include "ide_modes.h"
 
 /*
@@ -74,7 +76,7 @@ static void out_umc (char port,char wert)
 	outb_p (wert,0x109);
 }
 
-static byte in_umc (char port)
+static inline byte in_umc (char port)
 {
 	outb_p (port,0x108);
 	return inb_p (0x109);
@@ -123,7 +125,7 @@ static void tune_umc (ide_drive_t *drive, byte pio)
 	restore_flags(flags);	/* all CPUs */
 }
 
-void init_umc8672 (void)	/* called from ide.c */
+void __init init_umc8672 (void)	/* called from ide.c */
 {
 	unsigned long flags;
 

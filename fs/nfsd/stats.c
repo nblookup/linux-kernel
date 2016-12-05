@@ -17,6 +17,8 @@
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
+#define __NO_VERSION__
+#include <linux/module.h>
 
 #include <linux/sunrpc/svc.h>
 #include <linux/sunrpc/stats.h>
@@ -36,11 +38,12 @@ nfsd_proc_read(char *buffer, char **start, off_t offset, int count,
 			nfsdstats.rchits,
 			nfsdstats.rcmisses,
 			nfsdstats.rcnocache,
-			nfsdstats.fh_cached,
-			nfsdstats.fh_valid,
-			nfsdstats.fh_fixup,
+			nfsdstats.fh_stale,
 			nfsdstats.fh_lookup,
-			nfsdstats.fh_stale);
+		        nfsdstats.fh_anon,
+			nfsdstats.fh_nocache_dir,
+			nfsdstats.fh_nocache_nondir);
+
 
 	/* Assume we haven't hit EOF yet. Will be set by svc_proc_read. */
 	*eof = 0;
@@ -77,9 +80,7 @@ nfsd_stat_init(void)
 
 	if ((ent = svc_proc_register(&nfsd_svcstats)) != 0) {
 		ent->read_proc = nfsd_proc_read;
-#ifdef MODULE
-		ent->fill_inode = nfsd_modcount;
-#endif
+		ent->owner = THIS_MODULE;
 	}
 }
 

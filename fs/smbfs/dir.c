@@ -18,7 +18,6 @@
 /* #define pr_debug printk */
 #define SMBFS_MAX_AGE 5*HZ
 
-static ssize_t smb_dir_read(struct file *, char *, size_t, loff_t *);
 static int smb_readdir(struct file *, void *, filldir_t);
 static int smb_dir_open(struct inode *, struct file *);
 
@@ -30,50 +29,25 @@ static int smb_unlink(struct inode *, struct dentry *);
 static int smb_rename(struct inode *, struct dentry *,
 		      struct inode *, struct dentry *);
 
-static struct file_operations smb_dir_operations =
+struct file_operations smb_dir_operations =
 {
-	NULL,			/* lseek - default */
-	smb_dir_read,		/* read - bad */
-	NULL,			/* write - bad */
-	smb_readdir,		/* readdir */
-	NULL,			/* poll - default */
-	smb_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	smb_dir_open,		/* open(struct inode *, struct file *) */
-	NULL,			/* flush */
-	NULL,			/* no special release code */
-	NULL			/* fsync */
+	read:		generic_read_dir,
+	readdir:	smb_readdir,
+	ioctl:		smb_ioctl,
+	open:		smb_dir_open,
 };
 
 struct inode_operations smb_dir_inode_operations =
 {
-	&smb_dir_operations,	/* default directory file ops */
-	smb_create,		/* create */
-	smb_lookup,		/* lookup */
-	NULL,			/* link */
-	smb_unlink,		/* unlink */
-	NULL,			/* symlink */
-	smb_mkdir,		/* mkdir */
-	smb_rmdir,		/* rmdir */
-	NULL,			/* mknod */
-	smb_rename,		/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* bmap */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL,			/* updatepage */
-	smb_revalidate_inode,	/* revalidate */
+	create:		smb_create,
+	lookup:		smb_lookup,
+	unlink:		smb_unlink,
+	mkdir:		smb_mkdir,
+	rmdir:		smb_rmdir,
+	rename:		smb_rename,
+	revalidate:	smb_revalidate_inode,
+	setattr:	smb_notify_change,
 };
-
-static ssize_t
-smb_dir_read(struct file *filp, char *buf, size_t count, loff_t *ppos)
-{
-	return -EISDIR;
-}
 
 static int 
 smb_readdir(struct file *filp, void *dirent, filldir_t filldir)
@@ -198,10 +172,10 @@ static void smb_delete_dentry(struct dentry *);
 
 static struct dentry_operations smbfs_dentry_operations =
 {
-	smb_lookup_validate,	/* d_revalidate(struct dentry *) */
-	smb_hash_dentry,	/* d_hash */
-	smb_compare_dentry,	/* d_compare */
-	smb_delete_dentry	/* d_delete(struct dentry *) */
+	d_revalidate:	smb_lookup_validate,
+	d_hash:		smb_hash_dentry,
+	d_compare:	smb_compare_dentry,
+	d_delete:	smb_delete_dentry,
 };
 
 /*
@@ -318,7 +292,7 @@ smb_renew_times(struct dentry * dentry)
 	for (;;)
 	{
 		dentry->d_time = jiffies;
-		if (dentry == dentry->d_parent)
+		if (IS_ROOT(dentry))
 			break;
 		dentry = dentry->d_parent;
 	}
@@ -469,7 +443,7 @@ smb_rmdir(struct inode *dir, struct dentry *dentry)
 	 * Check that nobody else is using the directory..
 	 */
 	error = -EBUSY;
-	if (!list_empty(&dentry->d_hash))
+	if (!d_unhashed(dentry))
 		goto out;
 
 	smb_invalid_dir_cache(dir);

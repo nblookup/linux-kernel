@@ -8,6 +8,7 @@
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/openpic.h>
+#include <linux/ide.h>
 
 #include <asm/io.h>
 #include <asm/pgtable.h>
@@ -15,7 +16,6 @@
 #include <asm/hydra.h>
 #include <asm/prom.h>
 #include <asm/gg2.h>
-#include <asm/ide.h>
 #include <asm/machdep.h>
 
 #include "pci.h"
@@ -96,7 +96,7 @@ int gg2_pcibios_write_config_dword(unsigned char bus, unsigned char dev_fn,
 #define python_config_data(bus) ((0xfef00000+0xf8010)-(bus*0x100000))
 #define PYTHON_CFA(b, d, o)	(0x80 | ((b<<6) << 8) | ((d) << 16) \
 				 | (((o) & ~3) << 24))
-unsigned int python_busnr = 1;
+unsigned int python_busnr = 0;
 
 int python_pcibios_read_config_byte(unsigned char bus, unsigned char dev_fn,
 				    unsigned char offset, unsigned char *val)
@@ -166,6 +166,62 @@ int python_pcibios_write_config_dword(unsigned char bus, unsigned char dev_fn,
 	return PCIBIOS_SUCCESSFUL;
 }
 
+
+int rtas_pcibios_read_config_byte(unsigned char bus, unsigned char dev_fn,
+				    unsigned char offset, unsigned char *val)
+{
+	unsigned long addr = (offset&0xff) | ((dev_fn&0xff)<<8) | ((bus & 0xff)<<16);
+	if ( call_rtas( "read-pci-config", 2, 2, (ulong *)&val, addr, 1 ) != 0 )
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	return PCIBIOS_SUCCESSFUL;
+}
+
+int rtas_pcibios_read_config_word(unsigned char bus, unsigned char dev_fn,
+				    unsigned char offset, unsigned short *val)
+{
+	unsigned long addr = (offset&0xff) | ((dev_fn&0xff)<<8) | ((bus & 0xff)<<16);
+	if ( call_rtas( "read-pci-config", 2, 2, (ulong *)&val, addr, 2 ) != 0 )
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	return PCIBIOS_SUCCESSFUL;
+}
+
+
+int rtas_pcibios_read_config_dword(unsigned char bus, unsigned char dev_fn,
+				     unsigned char offset, unsigned int *val)
+{
+	unsigned long addr = (offset&0xff) | ((dev_fn&0xff)<<8) | ((bus & 0xff)<<16);
+	if ( call_rtas( "read-pci-config", 2, 2, (ulong *)&val, addr, 4 ) != 0 )
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	return PCIBIOS_SUCCESSFUL;
+}
+
+int rtas_pcibios_write_config_byte(unsigned char bus, unsigned char dev_fn,
+				     unsigned char offset, unsigned char val)
+{
+	unsigned long addr = (offset&0xff) | ((dev_fn&0xff)<<8) | ((bus & 0xff)<<16);
+	if ( call_rtas( "write-pci-config", 3, 1, NULL, addr, 1, (ulong)val ) != 0 )
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	return PCIBIOS_SUCCESSFUL;
+}
+
+int rtas_pcibios_write_config_word(unsigned char bus, unsigned char dev_fn,
+				     unsigned char offset, unsigned short val)
+{
+	unsigned long addr = (offset&0xff) | ((dev_fn&0xff)<<8) | ((bus & 0xff)<<16);
+	if ( call_rtas( "write-pci-config", 3, 1, NULL, addr, 2, (ulong)val ) != 0 )
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	return PCIBIOS_SUCCESSFUL;
+}
+
+int rtas_pcibios_write_config_dword(unsigned char bus, unsigned char dev_fn,
+				      unsigned char offset, unsigned int val)
+{
+	unsigned long addr = (offset&0xff) | ((dev_fn&0xff)<<8) | ((bus & 0xff)<<16);
+	if ( call_rtas( "write-pci-config", 3, 1, NULL, addr, 4, (ulong)val ) != 0 )
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	return PCIBIOS_SUCCESSFUL;
+}
+
     /*
      *  Temporary fixes for PCI devices. These should be replaced by OF query
      *  code -- Geert
@@ -217,44 +273,43 @@ void __init
 chrp_pcibios_fixup(void)
 {
 	struct pci_dev *dev;
-	
-	/* some of IBM chrps have > 1 bus */
-	if ( !strncmp("IBM", get_property(find_path_device("/"),
-					 "name", NULL),3) )
-	{
-		pci_scan_peer_bridge(1);
-		pci_scan_peer_bridge(2);
-	}
-	
+	int i;
+	extern struct pci_ops generic_pci_ops;
+
+	/* Some IBM's with the python have >1 bus, this finds them */
+	for ( i = 0; i < python_busnr ; i++ )
+		pci_scan_bus(i+1, &generic_pci_ops, NULL);
+
 	/* PCI interrupts are controlled by the OpenPIC */
-	for( dev=pci_devices ; dev; dev=dev->next )
-	{
+	pci_for_each_dev(dev) {
 		if ( dev->irq )
 			dev->irq = openpic_to_irq( dev->irq );
-		/* adjust the io_port for the NCR cards for busses other than 0 -- Cort */
-		if ( (dev->bus->number > 0) && (dev->vendor == PCI_VENDOR_ID_NCR) )
-			dev->base_address[0] += (dev->bus->number*0x08000000);
 		/* these need to be absolute addrs for OF and Matrox FB -- Cort */
 		if ( dev->vendor == PCI_VENDOR_ID_MATROX )
 		{
-			if ( dev->base_address[0] < isa_mem_base )
-				dev->base_address[0] += isa_mem_base;
-			if ( dev->base_address[1] < isa_mem_base )
-				dev->base_address[1] += isa_mem_base;
+			if ( dev->resource[0].start < isa_mem_base )
+				dev->resource[0].start += isa_mem_base;
+			if ( dev->resource[1].start < isa_mem_base )
+				dev->resource[1].start += isa_mem_base;
 		}
 		/* the F50 identifies the amd as a trident */
 		if ( (dev->vendor == PCI_VENDOR_ID_TRIDENT) &&
-		      (dev->class == PCI_CLASS_NETWORK_ETHERNET) )
+		      (dev->class>>8 == PCI_CLASS_NETWORK_ETHERNET) )
 		{
 			dev->vendor = PCI_VENDOR_ID_AMD;
-			pcibios_write_config_word(dev->bus->number, dev->devfn,
-						   PCI_VENDOR_ID, PCI_VENDOR_ID_AMD);
+			pcibios_write_config_word(dev->bus->number,
+			  dev->devfn, PCI_VENDOR_ID, PCI_VENDOR_ID_AMD);
 		}
+		if ( (dev->bus->number > 0) &&
+		     ((dev->vendor == PCI_VENDOR_ID_NCR) ||
+		      (dev->vendor == PCI_VENDOR_ID_AMD)))
+			dev->resource[0].start += (dev->bus->number*0x08000000);
 	}
 }
 
 decl_config_access_method(grackle);
 decl_config_access_method(indirect);
+decl_config_access_method(rtas);
 
 void __init
 chrp_setup_pci_ptrs(void)
@@ -275,7 +330,7 @@ chrp_setup_pci_ptrs(void)
 		{
 			/* find out how many pythons */
 			while ( (py = py->next) ) python_busnr++;
-                        set_config_access_method(python);
+			set_config_access_method(python);
 			/*
 			 * We base these values on the machine type but should
 			 * try to read them from the python controller itself.
@@ -289,17 +344,31 @@ chrp_setup_pci_ptrs(void)
 			} else if ( !strncmp("IBM,7043-260",
 			   get_property(find_path_device("/"), "name", NULL),12) )
 			{
-				pci_dram_offset = 0x80000000;
+				pci_dram_offset = 0x0;
 				isa_mem_base = 0xc0000000;
 				isa_io_base = 0xf8000000;
 			}
                 }
                 else
                 {
-			pci_dram_offset = 0;
-			isa_mem_base = 0xf7000000;
-			isa_io_base = 0xf8000000;
-			set_config_access_method(gg2);
+			if ( !strncmp("IBM,7043-150", get_property(find_path_device("/"), "name", NULL),12) ||
+			     !strncmp("IBM,7046-155", get_property(find_path_device("/"), "name", NULL),12) ||
+			     !strncmp("IBM,7046-B50", get_property(find_path_device("/"), "name", NULL),12) )
+			{
+				pci_dram_offset = 0;
+				isa_mem_base = 0x80000000;
+				isa_io_base = 0xfe000000;
+				pci_config_address = (unsigned int *)0xfec00000;
+				pci_config_data = (unsigned char *)0xfee00000;
+				set_config_access_method(indirect);
+			}
+			else
+			{
+				pci_dram_offset = 0;
+				isa_mem_base = 0xf7000000;
+				isa_io_base = 0xf8000000;
+				set_config_access_method(gg2);
+			}
                 }
         }
 	

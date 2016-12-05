@@ -88,24 +88,16 @@ void acct_timeout(unsigned long unused)
  */
 static int check_free_space(struct file *file)
 {
-	mm_segment_t fs;
 	struct statfs sbuf;
-	struct super_block *sb;
 	int res = acct_active;
 	int act;
 
 	if (!file || !acct_needcheck)
 		return res;
 
-	sb = file->f_dentry->d_inode->i_sb;
-	if (!sb->s_op || !sb->s_op->statfs)
-		return res;
-
-	fs = get_fs();
-	set_fs(KERNEL_DS);
 	/* May block */
-	sb->s_op->statfs(sb, &sbuf, sizeof(struct statfs));
-	set_fs(fs);
+	if (vfs_statfs(file->f_dentry->d_inode->i_sb, &sbuf))
+		return res;
 
 	if (sbuf.f_bavail <= SUSPEND * sbuf.f_blocks / 100)
 		act = -1;
@@ -146,16 +138,16 @@ static int check_free_space(struct file *file)
  *  should be written. If the filename is NULL, accounting will be
  *  shutdown.
  */
-asmlinkage int sys_acct(const char *name)
+asmlinkage long sys_acct(const char *name)
 {
 	struct file *file = NULL, *old_acct = NULL;
 	char *tmp;
-	int error = -EPERM;
+	int error;
+
+	if (!capable(CAP_SYS_PACCT))
+		return -EPERM;
 
 	lock_kernel();
-	if (!capable(CAP_SYS_PACCT))
-		goto out;
-
 	if (name) {
 		tmp = getname(name);
 		error = PTR_ERR(tmp);
@@ -257,8 +249,6 @@ static comp_t encode_comp_t(unsigned long value)
  *  into the accounting file. This function should only be called from
  *  do_exit().
  */
-#define KSTK_EIP(stack) (((unsigned long *)(stack))[1019])
-#define KSTK_ESP(stack) (((unsigned long *)(stack))[1022])
 
 /*
  *  do_acct_process does all actual work.
@@ -276,7 +266,7 @@ static int do_acct_process(long exitcode, struct file *file)
 	 */
 	if (!file)
 		return 0;
-	file->f_count++;
+	get_file(file);
 	if (!check_free_space(file)) {
 		fput(file);
 		return 0;
@@ -333,10 +323,8 @@ static int do_acct_process(long exitcode, struct file *file)
 	fs = get_fs();
 	set_fs(KERNEL_DS);
 	inode = file->f_dentry->d_inode;
-	down(&inode->i_sem);
 	file->f_op->write(file, (char *)&ac,
 			       sizeof(struct acct), &file->f_pos);
-	up(&inode->i_sem);
 	set_fs(fs);
 	fput(file);
 	return 0;
@@ -356,7 +344,7 @@ int acct_process(long exitcode)
  * into the kernel.
  */
 
-asmlinkage int sys_acct(const char * filename)
+asmlinkage long sys_acct(const char * filename)
 {
 	return -ENOSYS;
 }

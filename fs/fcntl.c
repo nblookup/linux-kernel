@@ -8,69 +8,140 @@
 #include <linux/file.h>
 #include <linux/smp_lock.h>
 
+#include <asm/poll.h>
+#include <asm/siginfo.h>
 #include <asm/uaccess.h>
 
 extern int sock_fcntl (struct file *, unsigned int cmd, unsigned long arg);
 
-static inline int dupfd(unsigned int fd, unsigned int arg)
+/*
+ * locate_fd finds a free file descriptor in the open_fds fdset,
+ * expanding the fd arrays if necessary.  The files write lock will be
+ * held on exit to ensure that the fd can be entered atomically.
+ */
+
+static inline int locate_fd(struct files_struct *files, 
+			    struct file *file, int start)
 {
-	struct files_struct * files = current->files;
-	struct file * file;
+	unsigned int newfd;
 	int error;
 
-	error = -EINVAL;
-	if (arg >= NR_OPEN)
-		goto out;
-
-	error = -EBADF;
-	file = fget(fd);
-	if (!file)
-		goto out;
+	write_lock(&files->file_lock);
+	
+repeat:
+	error = -EMFILE;
+	if (start < files->next_fd)
+		start = files->next_fd;
+	if (start >= files->max_fdset) {
+	expand:
+		error = expand_files(files, start);
+		if (error < 0)
+			goto out;
+		goto repeat;
+	}
+	
+	newfd = find_next_zero_bit(files->open_fds->fds_bits, 
+				   files->max_fdset, start);
 
 	error = -EMFILE;
-	arg = find_next_zero_bit(&files->open_fds, NR_OPEN, arg);
-	if (arg >= current->rlim[RLIMIT_NOFILE].rlim_cur)
-		goto out_putf;
-	FD_SET(arg, &files->open_fds);
-	FD_CLR(arg, &files->close_on_exec);
-	fd_install(arg, file);
-	error = arg;
+	if (newfd >= current->rlim[RLIMIT_NOFILE].rlim_cur)
+		goto out;
+	if (newfd >= files->max_fdset) 
+		goto expand;
+
+	error = expand_files(files, newfd);
+	if (error < 0)
+		goto out;
+	if (error) /* If we might have blocked, try again. */
+		goto repeat;
+
+	if (start <= files->next_fd)
+		files->next_fd = newfd + 1;
+	
+	error = newfd;
+	
 out:
 	return error;
+}
+
+static inline void allocate_fd(struct files_struct *files, 
+					struct file *file, int fd)
+{
+	FD_SET(fd, files->open_fds);
+	FD_CLR(fd, files->close_on_exec);
+	write_unlock(&files->file_lock);
+	fd_install(fd, file);
+}
+
+static int dupfd(struct file *file, int start)
+{
+	struct files_struct * files = current->files;
+	int ret;
+
+	ret = locate_fd(files, file, start);
+	if (ret < 0) 
+		goto out_putf;
+	allocate_fd(files, file, ret);
+	return ret;
 
 out_putf:
+	write_unlock(&files->file_lock);
 	fput(file);
+	return ret;
+}
+
+asmlinkage long sys_dup2(unsigned int oldfd, unsigned int newfd)
+{
+	int err = -EBADF;
+	struct file * file;
+	struct files_struct * files = current->files;
+
+	write_lock(&current->files->file_lock);
+	if (!(file = fcheck(oldfd)))
+		goto out_unlock;
+	err = newfd;
+	if (newfd == oldfd)
+		goto out_unlock;
+	err = -EBADF;
+	if (newfd >= NR_OPEN)
+		goto out_unlock;	/* following POSIX.1 6.2.1 */
+	get_file(file);			/* We are now finished with oldfd */
+
+	err = expand_files(files, newfd);
+	if (err < 0) {
+		write_unlock(&files->file_lock);
+		fput(file);
+		goto out;
+	}
+
+	/* To avoid races with open() and dup(), we will mark the fd as
+	 * in-use in the open-file bitmap throughout the entire dup2()
+	 * process.  This is quite safe: do_close() uses the fd array
+	 * entry, not the bitmap, to decide what work needs to be
+	 * done.  --sct */
+	FD_SET(newfd, files->open_fds);
+	write_unlock(&files->file_lock);
+	
+	do_close(newfd, 0);
+
+	write_lock(&files->file_lock);
+	allocate_fd(files, file, newfd);
+	err = newfd;
+
+out:
+	return err;
+out_unlock:
+	write_unlock(&current->files->file_lock);
 	goto out;
 }
 
-asmlinkage int sys_dup2(unsigned int oldfd, unsigned int newfd)
+asmlinkage long sys_dup(unsigned int fildes)
 {
-	int err = -EBADF;
+	int ret = -EBADF;
+	struct file * file = fget(fildes);
 
-	lock_kernel();
-	if (!fcheck(oldfd))
-		goto out;
-	err = newfd;
-	if (newfd == oldfd)
-		goto out;
-	err = -EBADF;
-	if (newfd >= NR_OPEN)
-		goto out;	/* following POSIX.1 6.2.1 */
-
-	sys_close(newfd);
-	err = dupfd(oldfd, newfd);
-out:
-	unlock_kernel();
-	return err;
-}
-
-asmlinkage int sys_dup(unsigned int fildes)
-{
-	int ret;
-
-	lock_kernel();
-	ret = dupfd(fildes, 0);
-	unlock_kernel();
+	if (file)
+		ret = dupfd(file, 0);
 	return ret;
 }
 
@@ -107,23 +178,27 @@ asmlinkage long sys_fcntl(unsigned int fd, unsigned int cmd, unsigned long arg)
 	struct file * filp;
 	long err = -EBADF;
 
-	lock_kernel();
 	filp = fget(fd);
 	if (!filp)
 		goto out;
 	err = 0;
+	lock_kernel();
 	switch (cmd) {
 		case F_DUPFD:
-			err = dupfd(fd, arg);
+			err = -EINVAL;
+			if (arg < NR_OPEN) {
+				get_file(filp);
+				err = dupfd(filp, arg);
+			}
 			break;
 		case F_GETFD:
-			err = FD_ISSET(fd, &current->files->close_on_exec);
+			err = FD_ISSET(fd, current->files->close_on_exec);
 			break;
 		case F_SETFD:
 			if (arg&1)
-				FD_SET(fd, &current->files->close_on_exec);
+				FD_SET(fd, current->files->close_on_exec);
 			else
-				FD_CLR(fd, &current->files->close_on_exec);
+				FD_CLR(fd, current->files->close_on_exec);
 			break;
 		case F_GETFL:
 			err = filp->f_flags;
@@ -151,7 +226,6 @@ asmlinkage long sys_fcntl(unsigned int fd, unsigned int cmd, unsigned long arg)
 			err = filp->f_owner.pid;
 			break;
 		case F_SETOWN:
-			err = 0;
 			filp->f_owner.pid = arg;
 			filp->f_owner.uid = current->uid;
 			filp->f_owner.euid = current->euid;
@@ -162,7 +236,8 @@ asmlinkage long sys_fcntl(unsigned int fd, unsigned int cmd, unsigned long arg)
 			err = filp->f_owner.signum;
 			break;
 		case F_SETSIG:
-			if (arg <= 0 || arg > _NSIG) {
+			/* arg == 0 restores default behaviour. */
+			if (arg < 0 || arg > _NSIG) {
 				err = -EINVAL;
 				break;
 			}
@@ -171,38 +246,40 @@ asmlinkage long sys_fcntl(unsigned int fd, unsigned int cmd, unsigned long arg)
 			break;
 		default:
 			/* sockets need a few special fcntls. */
+			err = -EINVAL;
 			if (S_ISSOCK (filp->f_dentry->d_inode->i_mode))
 				err = sock_fcntl (filp, cmd, arg);
-			else
-				err = -EINVAL;
 			break;
 	}
 	fput(filp);
-out:
 	unlock_kernel();
+out:
 	return err;
 }
 
-static void send_sigio(struct fown_struct *fown, struct fasync_struct *fa)
+/* Table to convert sigio signal codes into poll band bitmaps */
+
+static long band_table[NSIGPOLL+1] = {
+	~0,
+	POLLIN | POLLRDNORM,			/* POLL_IN */
+	POLLOUT | POLLWRNORM | POLLWRBAND,	/* POLL_OUT */
+	POLLIN | POLLRDNORM | POLLMSG,		/* POLL_MSG */
+	POLLERR,				/* POLL_ERR */
+	POLLPRI | POLLRDBAND,			/* POLL_PRI */
+	POLLHUP | POLLERR			/* POLL_HUP */
+};
+
+static void send_sigio_to_task(struct task_struct *p,
+			       struct fown_struct *fown, 
+			       struct fasync_struct *fa,
+			       int reason)
 {
-	struct task_struct * p;
-	int   pid	= fown->pid;
-	uid_t uid	= fown->uid;
-	uid_t euid	= fown->euid;
-	
-	read_lock(&tasklist_lock);
-	for_each_task(p) {
-		int match = p->pid;
-		if (pid < 0)
-			match = -p->pgrp;
-		if (pid != match)
-			continue;
-		if ((euid != 0) &&
-		    (euid ^ p->suid) && (euid ^ p->uid) &&
-		    (uid ^ p->suid) && (uid ^ p->uid))
-			continue;
-		switch (fown->signum) {
-			siginfo_t si;
+	if ((fown->euid != 0) &&
+	    (fown->euid ^ p->suid) && (fown->euid ^ p->uid) &&
+	    (fown->uid ^ p->suid) && (fown->uid ^ p->uid))
+		return;
+	switch (fown->signum) {
+		siginfo_t si;
 		default:
 			/* Queue a rt signal with the appropriate fd as its
 			   value.  We use SI_SIGIO as the source, not 
@@ -212,21 +289,44 @@ static void send_sigio(struct fown_struct *fown, struct fasync_struct *fa)
 			   back to SIGIO in that case. --sct */
 			si.si_signo = fown->signum;
 			si.si_errno = 0;
-		        si.si_code  = SI_SIGIO;
-			si.si_pid   = pid;
-			si.si_uid   = uid;
+		        si.si_code  = reason;
+			if (reason < 0 || reason > NSIGPOLL)
+				si.si_band  = ~0L;
+			else
+				si.si_band = band_table[reason];
 			si.si_fd    = fa->fa_fd;
 			if (!send_sig_info(fown->signum, &si, p))
 				break;
 		/* fall-through: fall back on the old plain SIGIO signal */
 		case 0:
 			send_sig(SIGIO, p, 1);
-		}
 	}
+}
+
+static void send_sigio(struct fown_struct *fown, struct fasync_struct *fa, 
+		       int band)
+{
+	struct task_struct * p;
+	int   pid	= fown->pid;
+	
+	read_lock(&tasklist_lock);
+	if ( (pid > 0) && (p = find_task_by_pid(pid)) ) {
+		send_sigio_to_task(p, fown, fa, band);
+		goto out;
+	}
+	for_each_task(p) {
+		int match = p->pid;
+		if (pid < 0)
+			match = -p->pgrp;
+		if (pid != match)
+			continue;
+		send_sigio_to_task(p, fown, fa, band);
+	}
+out:
 	read_unlock(&tasklist_lock);
 }
 
-void kill_fasync(struct fasync_struct *fa, int sig)
+void kill_fasync(struct fasync_struct *fa, int sig, int band)
 {
 	while (fa) {
 		struct fown_struct * fown;
@@ -236,8 +336,11 @@ void kill_fasync(struct fasync_struct *fa, int sig)
 			return;
 		}
 		fown = &fa->fa_file->f_owner;
-		if (fown->pid)
-			send_sigio(fown, fa);
+		/* Don't send SIGURG to processes which have not set a
+		   queued signum: SIGURG has its own default signalling
+		   mechanism. */
+		if (fown->pid && !(sig == SIGURG && fown->signum == 0))
+			send_sigio(fown, fa, band);
 		fa = fa->fa_next;
 	}
 }

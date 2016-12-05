@@ -18,6 +18,12 @@
 
 #define RLIM_NLIMITS	10
 
+/*
+ * SuS says limits have to be unsigned.
+ * Which makes a ton more sense anyway.
+ */
+#define RLIM_INFINITY	(~0UL)
+
 #ifdef __KERNEL__
 
 #define INIT_RLIMITS	\
@@ -28,8 +34,8 @@
   {_STK_LIM, LONG_MAX}, \
   {       0, LONG_MAX}, \
   {LONG_MAX, LONG_MAX}, \
-  {MAX_TASKS_PER_USER, MAX_TASKS_PER_USER}, \
-  {NR_OPEN, NR_OPEN},   \
+  {0, 0},		\
+  {INR_OPEN, INR_OPEN}, \
   {LONG_MAX, LONG_MAX}, \
   {LONG_MAX, LONG_MAX}  \
 }

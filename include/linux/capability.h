@@ -89,9 +89,9 @@ typedef __u32 kernel_cap_t;
 /* Overrides the following restrictions that the effective user ID
    shall match the file owner ID when setting the S_ISUID and S_ISGID
    bits on that file; that the effective group ID (or one of the
-   supplementary group IDs shall match the file owner ID when setting
+   supplementary group IDs) shall match the file owner ID when setting
    the S_ISGID bit on that file; that the S_ISUID and S_ISGID bits are
-   cleared on successful return from chown(2). */
+   cleared on successful return from chown(2) (not implemented). */
 
 #define CAP_FSETID           4
 
@@ -131,6 +131,7 @@ typedef __u32 kernel_cap_t;
 #define CAP_LINUX_IMMUTABLE  9
 
 /* Allows binding to TCP/UDP sockets below 1024 */
+/* Allows binding to ATM VCIs below 32 */
 
 #define CAP_NET_BIND_SERVICE 10
 
@@ -150,6 +151,7 @@ typedef __u32 kernel_cap_t;
 /* Allow clearing driver statistics */
 /* Allow multicasting */
 /* Allow read/write of device-specific registers */
+/* Allow activation of ATM control sockets */
 
 #define CAP_NET_ADMIN        12
 
@@ -173,6 +175,7 @@ typedef __u32 kernel_cap_t;
 #define CAP_SYS_MODULE       16
 
 /* Allow ioperm/iopl access */
+/* Allow sending USB messages to any device via /proc/bus/usb */
 
 #define CAP_SYS_RAWIO        17
 
@@ -190,7 +193,6 @@ typedef __u32 kernel_cap_t;
 
 /* Allow configuration of the secure attention key */
 /* Allow administration of the random device */
-/* Allow device administration (mknod)*/
 /* Allow examination and configuration of disk quotas */
 /* Allow configuring the kernel's syslog (printk behaviour) */
 /* Allow setting the domainname */
@@ -263,7 +265,15 @@ typedef __u32 kernel_cap_t;
 
 #define CAP_SYS_TTY_CONFIG   26
 
+/* Allow the privileged aspects of mknod() */
+
+#define CAP_MKNOD            27
+
 #ifdef __KERNEL__
+/* 
+ * Bounding set
+ */
+extern kernel_cap_t cap_bset;
 
 /*
  * Internal kernel functions only
@@ -289,7 +299,7 @@ typedef __u32 kernel_cap_t;
 #define CAP_TO_MASK(x) (1 << (x))
 #define cap_raise(c, flag)   (cap_t(c) |=  CAP_TO_MASK(flag))
 #define cap_lower(c, flag)   (cap_t(c) &= ~CAP_TO_MASK(flag))
-#define cap_raised(c, flag)  (cap_t(c) &   CAP_TO_MASK(flag))
+#define cap_raised(c, flag)  (cap_t(c) & CAP_TO_MASK(flag) & cap_bset)
 
 static inline kernel_cap_t cap_combine(kernel_cap_t a, kernel_cap_t b)
 {

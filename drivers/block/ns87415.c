@@ -1,5 +1,5 @@
 /*
- * linux/drivers/block/ns87415.c	Version 1.00  December 7, 1997
+ * linux/drivers/block/ns87415.c		Version 1.00  December 7, 1997
  *
  * Copyright (C) 1997-1998  Mark Lord
  * Copyright (C) 1998       Eddie C. Dost  (ecd@skynet.be)
@@ -17,9 +17,9 @@
 #include <linux/hdreg.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
-#include <asm/io.h>
-#include "ide.h"
+#include <linux/ide.h>
 
+#include <asm/io.h>
 
 static unsigned int ns87415_count = 0, ns87415_control[MAX_HWIFS] = { 0 };
 
@@ -49,8 +49,25 @@ static void ns87415_prepare_drive (ide_drive_t *drive, unsigned int use_dma)
 	new = use_dma ? ((new & ~other) | bit) : (new & ~bit);
 
 	if (new != *old) {
+		unsigned char stat;
+
+		/*
+		 * Don't change DMA engine settings while Write Buffers
+		 * are busy.
+		 */
+		(void) pci_read_config_byte(dev, 0x43, &stat);
+		while (stat & 0x03) {
+			udelay(1);
+			(void) pci_read_config_byte(dev, 0x43, &stat);
+		}
+
 		*old = new;
 		(void) pci_write_config_dword(dev, 0x40, new);
+
+		/*
+		 * And let things settle...
+		 */
+		udelay(10);
 	}
 
 	__restore_flags(flags);	/* local CPU only */
@@ -72,6 +89,7 @@ static int ns87415_dmaproc(ide_dma_action_t func, ide_drive_t *drive)
 			dma_stat = inb(hwif->dma_base+2);
 			outb(inb(hwif->dma_base)&~1, hwif->dma_base);	/* stop DMA */
 			outb(inb(hwif->dma_base)|6, hwif->dma_base);	/* from ERRATA: clear the INTR & ERROR bits */
+			ide_destroy_dmatable(drive);			/* and free any DMA resources */
 			return (dma_stat & 7) != 4;		/* verify good DMA status */
 		case ide_dma_write:
 		case ide_dma_read:
@@ -80,12 +98,16 @@ static int ns87415_dmaproc(ide_dma_action_t func, ide_drive_t *drive)
 				return 0;
 			ns87415_prepare_drive(drive, 0);	/* DMA failed: select PIO xfer */
 			return 1;
+		case ide_dma_check:
+			if (drive->media != ide_disk)
+				return ide_dmaproc(ide_dma_off_quietly, drive);
+			/* Fallthrough... */
 		default:
 			return ide_dmaproc(func, drive);	/* use standard DMA stuff */
 	}
 }
 
-__initfunc(void ide_init_ns87415 (ide_hwif_t *hwif))
+void __init ide_init_ns87415 (ide_hwif_t *hwif)
 {
 	struct pci_dev *dev = hwif->pci_dev;
 	unsigned int ctrl, using_inta;
@@ -149,13 +171,15 @@ __initfunc(void ide_init_ns87415 (ide_hwif_t *hwif))
 #endif
 	}
 
-	outb(0x60, hwif->dma_base + 2);
+	if (hwif->dma_base)
+		outb(0x60, hwif->dma_base + 2);
 
 	if (!using_inta)
 		hwif->irq = hwif->channel ? 15 : 14;	/* legacy mode */
 	else if (!hwif->irq && hwif->mate && hwif->mate->irq)
 		hwif->irq = hwif->mate->irq;	/* share IRQ with mate */
 
-	hwif->dmaproc = &ns87415_dmaproc;
+	if (hwif->dma_base)
+		hwif->dmaproc = &ns87415_dmaproc;
 	hwif->selectproc = &ns87415_selectproc;
 }

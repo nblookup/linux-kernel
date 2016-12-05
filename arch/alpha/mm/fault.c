@@ -7,10 +7,11 @@
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <asm/io.h>
 
 #define __EXTERN_INLINE inline
 #include <asm/mmu_context.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 #undef  __EXTERN_INLINE
 
 #include <linux/signal.h>
@@ -21,6 +22,7 @@
 #include <linux/mman.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
+#include <linux/interrupt.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -28,65 +30,28 @@
 extern void die_if_kernel(char *,struct pt_regs *,long, unsigned long *);
 
 
-#ifdef __SMP__
-unsigned long last_asn[NR_CPUS] = { /* gag */
-  ASN_FIRST_VERSION +  (0 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION +  (1 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION +  (2 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION +  (3 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION +  (4 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION +  (5 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION +  (6 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION +  (7 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION +  (8 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION +  (9 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (10 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (11 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (12 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (13 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (14 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (15 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (16 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (17 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (18 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (19 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (20 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (21 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (22 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (23 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (24 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (25 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (26 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (27 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (28 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (29 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (30 << WIDTH_HARDWARE_ASN),
-  ASN_FIRST_VERSION + (31 << WIDTH_HARDWARE_ASN)
-};
-#else
-unsigned long asn_cache = ASN_FIRST_VERSION;
-#endif /* __SMP__ */
-
 /*
- * Select a new ASN for a task.
+ * Force a new ASN for a task.
  */
 
-void
-get_new_mmu_context(struct task_struct *p, struct mm_struct *mm)
-{
-	unsigned long asn = asn_cache;
+#ifndef __SMP__
+unsigned long last_asn = ASN_FIRST_VERSION;
+#endif
 
-	if ((asn & HARDWARE_ASN_MASK) < MAX_ASN)
-		++asn;
-	else {
-		tbiap();
-		imb();
-		asn = (asn & ~HARDWARE_ASN_MASK) + ASN_FIRST_VERSION;
-	}
-	asn_cache = asn;
-	mm->context = asn;			/* full version + asn */
-	p->tss.asn = asn & HARDWARE_ASN_MASK;	/* just asn */
+extern void
+__load_new_mm_context(struct mm_struct *next_mm)
+{
+	unsigned long mmc;
+
+	mmc = __get_new_mm_context(next_mm, smp_processor_id());
+	next_mm->context = mmc;
+	current->thread.asn = mmc & HARDWARE_ASN_MASK;
+        current->thread.ptbr
+	  = ((unsigned long) next_mm->pgd - IDENT_ADDR) >> PAGE_SHIFT;
+
+	__reload_thread(&current->thread);
 }
+
 
 /*
  * This routine handles page faults.  It determines the address,
@@ -120,7 +85,8 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
 {
 	struct vm_area_struct * vma;
 	struct mm_struct *mm = current->mm;
-	unsigned fixup;
+	unsigned int fixup;
+	int fault;
 
 	/* As of EV6, a load into $31/$f31 is a prefetch, and never faults
 	   (or is suppressed by the PALcode).  Support that for older CPUs
@@ -136,8 +102,12 @@ do_page_fault(unsigned long address, unsigned long mmcsr,
 		}
 	}
 
+	/* If we're in an interrupt context, or have no user context,
+	   we must not take the fault.  */
+	if (!mm || in_interrupt())
+		goto no_context;
+
 	down(&mm->mmap_sem);
-	lock_kernel();
 	vma = find_vma(mm, address);
 	if (!vma)
 		goto bad_area;
@@ -163,9 +133,21 @@ good_area:
 		if (!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
 	}
-	handle_mm_fault(current, vma, address, cause > 0);
+
+	/*
+	 * If for any reason at all we couldn't handle the fault,
+	 * make sure we exit gracefully rather than endlessly redo
+	 * the fault.
+	 */
+	fault = handle_mm_fault(current, vma, address, cause > 0);
 	up(&mm->mmap_sem);
-	goto out;
+
+	if (fault < 0)
+		goto out_of_memory;
+	if (fault == 0)
+		goto do_sigbus;
+
+	return;
 
 /*
  * Something tried to access memory that isn't in our memory map..
@@ -176,9 +158,10 @@ bad_area:
 
 	if (user_mode(regs)) {
 		force_sig(SIGSEGV, current);
-		goto out;
+		return;
 	}
 
+no_context:
 	/* Are we prepared to handle this fault as an exception?  */
 	if ((fixup = search_exception_table(regs->pc)) != 0) {
 		unsigned long newpc;
@@ -186,7 +169,7 @@ bad_area:
 		printk("%s: Exception at [<%lx>] (%lx)\n",
 		       current->comm, regs->pc, newpc);
 		regs->pc = newpc;
-		goto out;
+		return;
 	}
 
 /*
@@ -197,7 +180,25 @@ bad_area:
 	       "virtual address %016lx\n", address);
 	die_if_kernel("Oops", regs, cause, (unsigned long*)regs - 16);
 	do_exit(SIGKILL);
- out:
-	unlock_kernel();
-}
 
+/*
+ * We ran out of memory, or some other thing happened to us that made
+ * us unable to handle the page fault gracefully.
+ */
+out_of_memory:
+	printk(KERN_ALERT "VM: killing process %s(%d)\n",
+	       current->comm, current->pid);
+	if (!user_mode(regs))
+		goto no_context;
+	do_exit(SIGKILL);
+
+do_sigbus:
+	/*
+	 * Send a sigbus, regardless of whether we were in kernel
+	 * or user mode.
+	 */
+	force_sig(SIGBUS, current);
+	if (!user_mode(regs))
+		goto no_context;
+	return;
+}

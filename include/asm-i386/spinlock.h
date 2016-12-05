@@ -1,135 +1,41 @@
 #ifndef __ASM_SPINLOCK_H
 #define __ASM_SPINLOCK_H
 
-#ifndef __SMP__
+#include <asm/atomic.h>
+#include <asm/rwlock.h>
+#include <asm/page.h>
 
-#define DEBUG_SPINLOCKS	0	/* 0 == no debugging, 1 == maintain lock state, 2 == full debug */
+extern int printk(const char * fmt, ...)
+	__attribute__ ((format (printf, 1, 2)));
 
-#if (DEBUG_SPINLOCKS < 1)
+/* It seems that people are forgetting to
+ * initialize their spinlocks properly, tsk tsk.
+ * Remember to turn this off in 2.4. -ben
+ */
+#define SPINLOCK_DEBUG	1
 
 /*
- * Your basic spinlocks, allowing only a single CPU anywhere
- *
- * Gcc-2.7.x has a nasty bug with empty initializers.
+ * Your basic SMP spinlocks, allowing only a single CPU anywhere
  */
-#if (__GNUC__ > 2) || (__GNUC__ == 2 && __GNUC_MINOR__ >= 8)
-  typedef struct { } spinlock_t;
-  #define SPIN_LOCK_UNLOCKED (spinlock_t) { }
+
+typedef struct {
+	volatile unsigned int lock;
+#if SPINLOCK_DEBUG
+	unsigned magic;
+#endif
+} spinlock_t;
+
+#define SPINLOCK_MAGIC	0xdead4ead
+
+#if SPINLOCK_DEBUG
+#define SPINLOCK_MAGIC_INIT	, SPINLOCK_MAGIC
 #else
-  typedef struct { int gcc_is_buggy; } spinlock_t;
-  #define SPIN_LOCK_UNLOCKED (spinlock_t) { 0 }
+#define SPINLOCK_MAGIC_INIT	/* */
 #endif
 
-#define spin_lock_init(lock)	do { } while(0)
-#define spin_lock(lock)		do { } while(0)
-#define spin_trylock(lock)	(1)
-#define spin_unlock_wait(lock)	do { } while(0)
-#define spin_unlock(lock)	do { } while(0)
-#define spin_lock_irq(lock)	cli()
-#define spin_unlock_irq(lock)	sti()
+#define SPIN_LOCK_UNLOCKED (spinlock_t) { 0 SPINLOCK_MAGIC_INIT }
 
-#define spin_lock_irqsave(lock, flags) \
-	do { save_flags(flags); cli(); } while (0)
-#define spin_unlock_irqrestore(lock, flags) \
-	restore_flags(flags)
-
-#elif (DEBUG_SPINLOCKS < 2)
-
-typedef struct {
-	volatile unsigned int lock;
-} spinlock_t;
-#define SPIN_LOCK_UNLOCKED (spinlock_t) { 0 }
-
-#define spin_lock_init(x)	do { (x)->lock = 0; } while (0)
-#define spin_trylock(lock)	(!test_and_set_bit(0,(lock)))
-
-#define spin_lock(x)		do { (x)->lock = 1; } while (0)
-#define spin_unlock_wait(x)	do { } while (0)
-#define spin_unlock(x)		do { (x)->lock = 0; } while (0)
-#define spin_lock_irq(x)	do { cli(); spin_lock(x); } while (0)
-#define spin_unlock_irq(x)	do { spin_unlock(x); sti(); } while (0)
-
-#define spin_lock_irqsave(x, flags) \
-	do { save_flags(flags); spin_lock_irq(x); } while (0)
-#define spin_unlock_irqrestore(x, flags) \
-	do { spin_unlock(x); restore_flags(flags); } while (0)
-
-#else /* (DEBUG_SPINLOCKS >= 2) */
-
-typedef struct {
-	volatile unsigned int lock;
-	volatile unsigned int babble;
-	const char *module;
-} spinlock_t;
-#define SPIN_LOCK_UNLOCKED (spinlock_t) { 0, 25, __BASE_FILE__ }
-
-#include <linux/kernel.h>
-
-#define spin_lock_init(x)	do { (x)->lock = 0; } while (0)
-#define spin_trylock(lock)	(!test_and_set_bit(0,(lock)))
-
-#define spin_lock(x)		do {unsigned long __spinflags; save_flags(__spinflags); cli(); if ((x)->lock&&(x)->babble) {printk("%s:%d: spin_lock(%s:%p) already locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 1; restore_flags(__spinflags);} while (0)
-#define spin_unlock_wait(x)	do {unsigned long __spinflags; save_flags(__spinflags); cli(); if ((x)->lock&&(x)->babble) {printk("%s:%d: spin_unlock_wait(%s:%p) deadlock\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} restore_flags(__spinflags);} while (0)
-#define spin_unlock(x)		do {unsigned long __spinflags; save_flags(__spinflags); cli(); if (!(x)->lock&&(x)->babble) {printk("%s:%d: spin_unlock(%s:%p) not locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 0; restore_flags(__spinflags);} while (0)
-#define spin_lock_irq(x)	do {cli(); if ((x)->lock&&(x)->babble) {printk("%s:%d: spin_lock_irq(%s:%p) already locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 1;} while (0)
-#define spin_unlock_irq(x)	do {cli(); if (!(x)->lock&&(x)->babble) {printk("%s:%d: spin_lock(%s:%p) not locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 0; sti();} while (0)
-
-#define spin_lock_irqsave(x,flags)      do {save_flags(flags); cli(); if ((x)->lock&&(x)->babble) {printk("%s:%d: spin_lock_irqsave(%s:%p) already locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 1;} while (0)
-#define spin_unlock_irqrestore(x,flags) do {cli(); if (!(x)->lock&&(x)->babble) {printk("%s:%d: spin_unlock_irqrestore(%s:%p) not locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 0; restore_flags(flags);} while (0)
-
-#endif	/* DEBUG_SPINLOCKS */
-
-/*
- * Read-write spinlocks, allowing multiple readers
- * but only one writer.
- *
- * NOTE! it is quite common to have readers in interrupts
- * but no interrupt writers. For those circumstances we
- * can "mix" irq-safe locks - any writer needs to get a
- * irq-safe write-lock, but readers can get non-irqsafe
- * read-locks.
- *
- * Gcc-2.7.x has a nasty bug with empty initializers.
- */
-#if (__GNUC__ > 2) || (__GNUC__ == 2 && __GNUC_MINOR__ >= 8)
-  typedef struct { } rwlock_t;
-  #define RW_LOCK_UNLOCKED (rwlock_t) { }
-#else
-  typedef struct { int gcc_is_buggy; } rwlock_t;
-  #define RW_LOCK_UNLOCKED (rwlock_t) { 0 }
-#endif
-
-#define read_lock(lock)		do { } while(0)
-#define read_unlock(lock)	do { } while(0)
-#define write_lock(lock)	do { } while(0)
-#define write_unlock(lock)	do { } while(0)
-#define read_lock_irq(lock)	cli()
-#define read_unlock_irq(lock)	sti()
-#define write_lock_irq(lock)	cli()
-#define write_unlock_irq(lock)	sti()
-
-#define read_lock_irqsave(lock, flags)	\
-	do { save_flags(flags); cli(); } while (0)
-#define read_unlock_irqrestore(lock, flags) \
-	restore_flags(flags)
-#define write_lock_irqsave(lock, flags)	\
-	do { save_flags(flags); cli(); } while (0)
-#define write_unlock_irqrestore(lock, flags) \
-	restore_flags(flags)
-
-#else	/* __SMP__ */
-
-/*
- * Your basic spinlocks, allowing only a single CPU anywhere
- */
-
-typedef struct {
-	volatile unsigned int lock;
-} spinlock_t;
-
-#define SPIN_LOCK_UNLOCKED (spinlock_t) { 0 }
-
-#define spin_lock_init(x)	do { (x)->lock = 0; } while(0)
+#define spin_lock_init(x)	do { *(x) = SPIN_LOCK_UNLOCKED; } while(0)
 /*
  * Simple spin lock operations.  There are two variants, one clears IRQ's
  * on the local processor, one does not.
@@ -138,9 +44,7 @@ typedef struct {
  */
 
 #define spin_unlock_wait(x)	do { barrier(); } while(((volatile spinlock_t *)(x))->lock)
-
-typedef struct { unsigned long a[100]; } __dummy_lock_t;
-#define __dummy_lock(lock) (*(__dummy_lock_t *)(lock))
+#define spin_is_locked(x)	((x)->lock != 0)
 
 #define spin_lock_string \
 	"\n1:\t" \
@@ -149,36 +53,52 @@ typedef struct { unsigned long a[100]; } __dummy_lock_t;
 	".section .text.lock,\"ax\"\n" \
 	"2:\t" \
 	"testb $1,%0\n\t" \
+	"rep;nop\n\t" \
 	"jne 2b\n\t" \
 	"jmp 1b\n" \
 	".previous"
 
+/*
+ * Sadly, some early PPro chips require the locked access,
+ * otherwise we could just always simply do
+ *
+ * 	#define spin_unlock_string \
+ *		"movb $0,%0"
+ *
+ * Which is noticeably faster.
+ */
 #define spin_unlock_string \
 	"lock ; btrl $0,%0"
 
-#define spin_lock(lock) \
-__asm__ __volatile__( \
-	spin_lock_string \
-	:"=m" (__dummy_lock(lock)))
+extern inline void spin_lock(spinlock_t *lock)
+{
+#if SPINLOCK_DEBUG
+	__label__ here;
+here:
+	if (lock->magic != SPINLOCK_MAGIC) {
+printk("eip: %p\n", &&here);
+		BUG();
+	}
+#endif
+	__asm__ __volatile__(
+		spin_lock_string
+		:"=m" (__dummy_lock(lock)));
+}
 
-#define spin_unlock(lock) \
-__asm__ __volatile__( \
-	spin_unlock_string \
-	:"=m" (__dummy_lock(lock)))
+extern inline void spin_unlock(spinlock_t *lock)
+{
+#if SPINLOCK_DEBUG
+	if (lock->magic != SPINLOCK_MAGIC)
+		BUG();
+	if (!lock->lock)
+		BUG();
+#endif
+	__asm__ __volatile__(
+		spin_unlock_string
+		:"=m" (__dummy_lock(lock)));
+}
 
-#define spin_trylock(lock) (!test_and_set_bit(0,(lock)))
-
-#define spin_lock_irq(lock) \
-	do { __cli(); spin_lock(lock); } while (0)
-
-#define spin_unlock_irq(lock) \
-	do { spin_unlock(lock); __sti(); } while (0)
-
-#define spin_lock_irqsave(lock, flags) \
-	do { __save_flags(flags); __cli(); spin_lock(lock); } while (0)
-
-#define spin_unlock_irqrestore(lock, flags) \
-	do { spin_unlock(lock); __restore_flags(flags); } while (0)
+#define spin_trylock(lock) ({ !test_and_set_bit(0,(lock)); })
 
 /*
  * Read-write spinlocks, allowing multiple readers
@@ -192,63 +112,60 @@ __asm__ __volatile__( \
  */
 typedef struct {
 	volatile unsigned int lock;
-	unsigned long previous;
+#if SPINLOCK_DEBUG
+	unsigned magic;
+#endif
 } rwlock_t;
 
-#define RW_LOCK_UNLOCKED (rwlock_t) { 0, 0 }
+#define RWLOCK_MAGIC	0xdeaf1eed
+
+#if SPINLOCK_DEBUG
+#define RWLOCK_MAGIC_INIT	, RWLOCK_MAGIC
+#else
+#define RWLOCK_MAGIC_INIT	/* */
+#endif
+
+#define RW_LOCK_UNLOCKED (rwlock_t) { RW_LOCK_BIAS RWLOCK_MAGIC_INIT }
 
 /*
  * On x86, we implement read-write locks as a 32-bit counter
- * with the high bit (sign) being the "write" bit.
+ * with the high bit (sign) being the "contended" bit.
  *
  * The inline assembly is non-obvious. Think about it.
+ *
+ * Changed to use the same technique as rw semaphores.  See
+ * semaphore.h for details.  -ben
  */
-#define read_lock(rw)	\
-	asm volatile("\n1:\t" \
-		     "lock ; incl %0\n\t" \
-		     "js 2f\n" \
-		     ".section .text.lock,\"ax\"\n" \
-		     "2:\tlock ; decl %0\n" \
-		     "3:\tcmpl $0,%0\n\t" \
-		     "js 3b\n\t" \
-		     "jmp 1b\n" \
-		     ".previous" \
-		     :"=m" (__dummy_lock(&(rw)->lock)))
+/* the spinlock helpers are in arch/i386/kernel/semaphore.S */
 
-#define read_unlock(rw) \
-	asm volatile("lock ; decl %0" \
-		:"=m" (__dummy_lock(&(rw)->lock)))
+extern inline void read_lock(rwlock_t *rw)
+{
+#if SPINLOCK_DEBUG
+	if (rw->magic != RWLOCK_MAGIC)
+		BUG();
+#endif
+	__build_read_lock(rw, "__read_lock_failed");
+}
 
-#define write_lock(rw) \
-	asm volatile("\n1:\t" \
-		     "lock ; btsl $31,%0\n\t" \
-		     "jc 4f\n" \
-		     "2:\ttestl $0x7fffffff,%0\n\t" \
-		     "jne 3f\n" \
-		     ".section .text.lock,\"ax\"\n" \
-		     "3:\tlock ; btrl $31,%0\n" \
-		     "4:\tcmp $0,%0\n\t" \
-		     "jne 4b\n\t" \
-		     "jmp 1b\n" \
-		     ".previous" \
-		     :"=m" (__dummy_lock(&(rw)->lock)))
+extern inline void write_lock(rwlock_t *rw)
+{
+#if SPINLOCK_DEBUG
+	if (rw->magic != RWLOCK_MAGIC)
+		BUG();
+#endif
+	__build_write_lock(rw, "__write_lock_failed");
+}
 
-#define write_unlock(rw) \
-	asm volatile("lock ; btrl $31,%0":"=m" (__dummy_lock(&(rw)->lock)))
+#define read_unlock(rw)		asm volatile("lock ; incl %0" :"=m" (__dummy_lock(&(rw)->lock)))
+#define write_unlock(rw)	asm volatile("lock ; addl $" RW_LOCK_BIAS_STR ",%0":"=m" (__dummy_lock(&(rw)->lock)))
 
-#define read_lock_irq(lock)	do { __cli(); read_lock(lock); } while (0)
-#define read_unlock_irq(lock)	do { read_unlock(lock); __sti(); } while (0)
-#define write_lock_irq(lock)	do { __cli(); write_lock(lock); } while (0)
-#define write_unlock_irq(lock)	do { write_unlock(lock); __sti(); } while (0)
+extern inline int write_trylock(rwlock_t *lock)
+{
+	atomic_t *count = (atomic_t *)lock;
+	if (atomic_sub_and_test(RW_LOCK_BIAS, count))
+		return 1;
+	atomic_add(RW_LOCK_BIAS, count);
+	return 0;
+}
 
-#define read_lock_irqsave(lock, flags)	\
-	do { __save_flags(flags); __cli(); read_lock(lock); } while (0)
-#define read_unlock_irqrestore(lock, flags) \
-	do { read_unlock(lock); __restore_flags(flags); } while (0)
-#define write_lock_irqsave(lock, flags)	\
-	do { __save_flags(flags); __cli(); write_lock(lock); } while (0)
-#define write_unlock_irqrestore(lock, flags) \
-	do { write_unlock(lock); __restore_flags(flags); } while (0)
-
-#endif /* __SMP__ */
 #endif /* __ASM_SPINLOCK_H */

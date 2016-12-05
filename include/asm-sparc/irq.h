@@ -1,4 +1,4 @@
-/* $Id: irq.h,v 1.26 1999/04/20 13:22:44 anton Exp $
+/* $Id: irq.h,v 1.28 2000/01/22 06:06:58 zaitcev Exp $
  * irq.h: IRQ registers on the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -8,7 +8,7 @@
 #define _SPARC_IRQ_H
 
 #include <linux/linkage.h>
-#include <linux/tasks.h>     /* For NR_CPUS */
+#include <linux/threads.h>     /* For NR_CPUS */
 
 #include <asm/system.h>     /* For SUN4M_NCPUS */
 #include <asm/btfixup.h>
@@ -49,6 +49,7 @@ BTFIXUPDEF_CALL(void, clear_clock_irq, void)
 BTFIXUPDEF_CALL(void, clear_profile_irq, int)
 BTFIXUPDEF_CALL(void, load_profile_irq, int, unsigned int)
 
+#define disable_irq_nosync disable_irq
 #define disable_irq(irq) BTFIXUP_CALL(disable_irq)(irq)
 #define enable_irq(irq) BTFIXUP_CALL(enable_irq)(irq)
 #define disable_pil_irq(irq) BTFIXUP_CALL(disable_pil_irq)(irq)

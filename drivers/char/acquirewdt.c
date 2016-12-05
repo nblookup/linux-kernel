@@ -3,8 +3,8 @@
  *
  *      Based on wdt.c. Original copyright messages:
  *
- *	(c) Copyright 1996 Alan Cox <alan@cymru.net>, All Rights Reserved.
- *				http://www.cymru.net
+ *	(c) Copyright 1996 Alan Cox <alan@redhat.com>, All Rights Reserved.
+ *				http://www.redhat.com
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -15,7 +15,7 @@
  *	warranty for any of this software. This material is provided 
  *	"AS-IS" and at no charge.	
  *
- *	(c) Copyright 1995    Alan Cox <alan@lxorguk.ukuu.org.uk>
+ *	(c) Copyright 1995    Alan Cox <alan@redhat.com>
  *
  */
 
@@ -166,16 +166,11 @@ static int acq_notify_sys(struct notifier_block *this, unsigned long code,
  
  
 static struct file_operations acq_fops = {
-	NULL,
-	acq_read,
-	acq_write,
-	NULL,		/* No Readdir */
-	NULL,		/* No Select */
-	acq_ioctl,
-	NULL,		/* No mmap */
-	acq_open,
-	NULL,		/* flush */
-	acq_close
+	read:		acq_read,
+	write:		acq_write,
+	ioctl:		acq_ioctl,
+	open:		acq_open,
+	release:	acq_close,
 };
 
 static struct miscdevice acq_miscdev=
@@ -212,14 +207,14 @@ void cleanup_module(void)
 
 #endif
 
-__initfunc(int acq_init(void))
+int __init acq_init(void)
 {
 	printk("WDT driver for Acquire single board computer initialising.\n");
 
 	misc_register(&acq_miscdev);
 	request_region(WDT_STOP, 1, "Acquire WDT");
 	request_region(WDT_START, 1, "Acquire WDT");
-	unregister_reboot_notifier(&acq_notifier);
+	register_reboot_notifier(&acq_notifier);
 	return 0;
 }
 

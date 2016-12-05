@@ -7,20 +7,15 @@
 
 #include <linux/config.h>
 
-#define __ebsa285_data		__attribute__((__section__(".data.ebsa285")))
-#define __netwinder_data	__attribute__((__section__(".data.netwinder")))
-
-#ifdef CONFIG_TEXT_SECTIONS
-#define __ebsa285_text		__attribute__((__section__(".text.ebsa285")))
-#define __netwinder_text	__attribute__((__section__(".text.netwinder")))
-#else
-#define __ebsa285_text
-#define __netwinder_text
-#endif
+/* information about the system we're running on */
+extern unsigned int system_rev;
+extern unsigned int system_serial_low;
+extern unsigned int system_serial_high;
 
 /* The type of machine we're running on */
 extern unsigned int __machine_arch_type;
 
+/* see arch/arm/kernel/setup.c for a description of these */
 #define MACH_TYPE_EBSA110	0
 #define MACH_TYPE_RISCPC	1
 #define MACH_TYPE_NEXUSPCI	3
@@ -32,10 +27,15 @@ extern unsigned int __machine_arch_type;
 #define MACH_TYPE_CLPS7110	9
 #define MACH_TYPE_ARCHIMEDES	10
 #define MACH_TYPE_A5K		11
+#define MACH_TYPE_ETOILE	12
+#define MACH_TYPE_LACIE_NAS	13
+#define MACH_TYPE_CLPS7500	14
+#define MACH_TYPE_SHARK		15
+#define MACH_TYPE_SA1100	16
 
 /*
  * Sort out a definition for machine_arch_type
- * The rules basically are:
+ * The rules are:
  * 1. If one architecture is selected, then all machine_is_xxx()
  *    are constant.
  * 2. If two or more architectures are selected, then the selected
@@ -114,45 +114,56 @@ extern unsigned int __machine_arch_type;
 # define machine_is_co285()	(0)
 #endif
 
+#ifdef CONFIG_ARCH_SA1100
+# ifdef machine_arch_type
+#  undef machine_arch_type
+#  define machine_arch_type	__machine_arch_type
+# else
+#  define machine_arch_type	MACH_TYPE_SA1100
+# endif
+# define machine_is_sa1100()	(machine_arch_type == MACH_TYPE_SA1100
+#else
+# define machine_is_sa1100()	(0)
+#endif
+
 #ifndef machine_arch_type
 #define machine_arch_type	__machine_arch_type
 #endif
 
-/*
- * task_struct isn't always declared - forward-declare it here.
- */
-struct task_struct;
-
 #include <asm/proc-fns.h>
-
-extern void arm_malalignedptr(const char *, void *, volatile void *);
-extern void arm_invalidptr(const char *, int);
 
 #define xchg(ptr,x) \
 	((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
 
 #define tas(ptr) (xchg((ptr),1))
 
-/*
- * switch_to(prev, next) should switch from task `prev' to `next'
- * `prev' will never be the same as `next'.
- *
- * `next' and `prev' should be struct task_struct, but it isn't always defined
- */
-#define switch_to(prev,next,last) do { last = processor._switch_to(prev,next); } while (0)
+extern void arm_malalignedptr(const char *, void *, volatile void *);
+extern asmlinkage void __backtrace(void);
 
 /*
  * Include processor dependent parts
  */
 #include <asm/proc/system.h>
-#include <asm/arch/system.h>
 
 #define mb() __asm__ __volatile__ ("" : : : "memory")
 #define rmb() mb()
 #define wmb() mb()
 #define nop() __asm__ __volatile__("mov\tr0,r0\t@ nop\n\t");
 
-extern asmlinkage void __backtrace(void);
+#define prepare_to_switch()    do { } while(0)
+
+/*
+ * switch_to(prev, next) should switch from task `prev' to `next'
+ * `prev' will never be the same as `next'.
+ * The `mb' is to tell GCC not to cache `current' across this call.
+ */
+extern struct task_struct *__switch_to(struct task_struct *prev, struct task_struct *next);
+
+#define switch_to(prev,next,last)		\
+	do {			 		\
+		last = __switch_to(prev,next);	\
+		mb();				\
+	} while (0)
 
 #endif
 

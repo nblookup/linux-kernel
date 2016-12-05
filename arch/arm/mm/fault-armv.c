@@ -25,78 +25,13 @@
 #include <asm/unaligned.h>
 
 #define FAULT_CODE_READ		0x02
-#define FAULT_CODE_USER		0x01
 
 #define DO_COW(m)		(!((m) & FAULT_CODE_READ))
 #define READ_FAULT(m)		((m) & FAULT_CODE_READ)
 
+extern void die_if_kernel(const char *str, struct pt_regs *regs, int err);
+
 #include "fault-common.c"
-
-pgd_t *get_pgd_slow(void)
-{
-	/*
-	 * need to get a 16k page for level 1
-	 */
-	pgd_t *pgd = (pgd_t *)__get_free_pages(GFP_KERNEL,2);
-	pgd_t *init;
-
-	if (pgd) {
-		init = pgd_offset(&init_mm, 0);
-		memzero(pgd, USER_PTRS_PER_PGD * BYTES_PER_PTR);
-		memcpy(pgd + USER_PTRS_PER_PGD, init + USER_PTRS_PER_PGD,
-			(PTRS_PER_PGD - USER_PTRS_PER_PGD) * BYTES_PER_PTR);
-		clean_cache_area(pgd, PTRS_PER_PGD * BYTES_PER_PTR);
-	}
-	return pgd;
-}
-
-pte_t *get_pte_slow(pmd_t *pmd, unsigned long offset)
-{
-	pte_t *pte;
-
-	pte = (pte_t *)get_page_2k(GFP_KERNEL);
-	if (pmd_none(*pmd)) {
-		if (pte) {
-			memzero(pte, 2 * PTRS_PER_PTE * BYTES_PER_PTR);
-			clean_cache_area(pte, PTRS_PER_PTE * BYTES_PER_PTR);
-			pte += PTRS_PER_PTE;
-			set_pmd(pmd, mk_user_pmd(pte));
-			return pte + offset;
-		}
-		set_pmd(pmd, mk_user_pmd(BAD_PAGETABLE));
-		return NULL;
-	}
-	free_page_2k((unsigned long)pte);
-	if (pmd_bad(*pmd)) {
-		__bad_pmd(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + offset;
-}
-
-pte_t *get_pte_kernel_slow(pmd_t *pmd, unsigned long offset)
-{
-	pte_t *pte;
-
-	pte = (pte_t *)get_page_2k(GFP_KERNEL);
-	if (pmd_none(*pmd)) {
-		if (pte) {
-			memzero(pte, 2 * PTRS_PER_PTE * BYTES_PER_PTR);
-			clean_cache_area(pte, PTRS_PER_PTE * BYTES_PER_PTR);
-			pte += PTRS_PER_PTE;
-			set_pmd(pmd, mk_kernel_pmd(pte));
-			return pte + offset;
-		}
-		set_pmd(pmd, mk_kernel_pmd(BAD_PAGETABLE));
-		return NULL;
-	}
-	free_page_2k((unsigned long)pte);
-	if (pmd_bad(*pmd)) {
-		__bad_pmd_kernel(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + offset;
-}
 
 #ifdef DEBUG
 static int sp_valid(unsigned long *sp)
@@ -157,6 +92,7 @@ static unsigned long ai_half;
 static unsigned long ai_word;
 static unsigned long ai_multi;
 
+#ifdef CONFIG_SYSCTL
 static int proc_alignment_read(char *page, char **start, off_t off,
 			       int count, int *eof, void *data)
 {
@@ -184,18 +120,18 @@ static int proc_alignment_read(char *page, char **start, off_t off,
  * This needs to be done after sysctl_init, otherwise sys/
  * will be overwritten.
  */
-void __init alignment_init(void)
+static int __init alignment_init(void)
 {
-	struct proc_dir_entry *e;
-
-	e = create_proc_entry("sys/debug/alignment", S_IFREG | S_IRUGO, NULL);
-
-	if (e)
-		e->read_proc = proc_alignment_read;
+	create_proc_read_entry("sys/debug/alignment", 0, NULL,
+				proc_alignment_read, NULL);
+	return 0;
 }
 
+__initcall(alignment_init);
+#endif /* CONFIG_SYSCTL */
+
 static int
-do_alignment_exception(struct pt_regs *regs)
+do_alignment(unsigned long addr, int error_code, struct pt_regs *regs)
 {
 	unsigned int instr, rd, rn, correction, nr_regs, regbits;
 	unsigned long eaddr;
@@ -375,107 +311,105 @@ do_alignment_exception(struct pt_regs *regs)
 	return 0;
 }
 
+#else
+
+#define do_alignment NULL
+
 #endif
+
+#ifdef CONFIG_DEBUG_USER
+
+static int
+do_sect_fault(unsigned long addr, int error_code, struct pt_regs *regs)
+{
+	if (user_mode(regs)) {
+		printk("%s: permission fault on section, "
+		       "address=0x%08lx, code %d\n",
+		       current->comm, addr, error_code);
+#ifdef DEBUG
+		{
+			unsigned int i, j;
+			unsigned long *sp;
+
+			sp = (unsigned long *) (regs->ARM_sp - 128);
+			for (j = 0; j < 20 && sp_valid(sp); j++) {
+				printk("%p: ", sp);
+				for (i = 0; i < 8 && sp_valid(sp); i += 1, sp++)
+					printk("%08lx ", *sp);
+				printk("\n");
+			}
+			show_regs(regs);
+			c_backtrace(regs->ARM_fp, regs->ARM_cpsr);
+		}
+#endif
+	}
+	return 1;	/* not fixed up */
+}
+#else
+
+#define do_sect_fault NULL
+
+#endif
+
+static const struct fsr_info {
+	int	(*fn)(unsigned long addr, int error_code, struct pt_regs *regs);
+	int	sig;
+	char	*name;
+} fsr_info[] = {
+	{ NULL,			SIGSEGV, "vector exception"		   },
+	{ do_alignment,		SIGBUS,	 "alignment exception"		   },
+	{ NULL,			SIGKILL, "terminal exception"		   },
+	{ do_alignment,		SIGBUS,	 "alignment exception"		   },
+	{ NULL,			SIGBUS,	 "external abort on linefetch"	   },
+	{ do_page_fault,	SIGSEGV, "page fault"			   },
+	{ NULL,			SIGBUS,	 "external abort on linefetch"	   },
+	{ do_page_fault,	SIGSEGV, "page fault"			   },
+	{ NULL,			SIGBUS,	 "external abort on non-linefetch" },
+	{ NULL,			SIGSEGV, "domain fault"			   },
+	{ NULL,			SIGBUS,	 "external abort on non-linefetch" },
+	{ NULL,			SIGSEGV, "domain fault"			   },
+	{ NULL,			SIGBUS,	 "external abort on translation"   },
+	{ do_sect_fault,	SIGSEGV, "section permission fault"	   },
+	{ NULL,			SIGBUS,	 "external abort on translation"   },
+	{ do_page_fault,	SIGSEGV, "page permission fault"	   }
+};
+
+/*
+ * Currently dropped down to debug level
+ */
+#define BUG_PROC_MSG \
+  KERN_DEBUG "Weird data abort (%08X).\n" \
+  KERN_DEBUG "Please see http://www.arm.linux.org.uk/state.html for more information"
 
 asmlinkage void
 do_DataAbort(unsigned long addr, int fsr, int error_code, struct pt_regs *regs)
 {
-	if (user_mode(regs))
-		error_code |= FAULT_CODE_USER;
+	const struct fsr_info *inf;
 
-#define DIE(signr,nam)\
-		force_sig(signr, current);\
-		die(nam, regs, fsr);\
-		do_exit(signr);\
-		break
-
-	switch (fsr & 15) {
-	/*
-	 *  0 - vector exception
-	 */
-	case 0:
-		force_sig(SIGSEGV, current);
-		if (!user_mode(regs)) {
-			die("vector exception", regs, fsr);
-			do_exit(SIGSEGV);
+	if (user_mode(regs) && addr == regs->ARM_pc) {
+		static int first = 1;
+		if (first) {
+			/*
+			 * I want statistical information on this problem,
+			 * but we don't want to hastle the users too much.
+			 */
+			printk(BUG_PROC_MSG, fsr);
+			first = 0;
 		}
-		break;
+		return;
+	}
 
-	/*
-	 * 15 - permission fault on page
-	 *  5 - page-table entry descriptor fault
-	 *  7 - first-level descriptor fault
-	 */
-	case 15: case 5: case 7:
-		do_page_fault(addr, error_code, regs);
-		break;
+	inf = fsr_info + (fsr & 15);
 
-	/*
-	 * 13 - permission fault on section
-	 */
-	case 13:
-		force_sig(SIGSEGV, current);
-		if (!user_mode(regs)) {
-			die("section permission fault", regs, fsr);
-			do_exit(SIGSEGV);
-		} else {
-#ifdef CONFIG_DEBUG_USER
-			printk("%s: permission fault on section, "
-			       "address=0x%08lx, code %d\n",
-			       current->comm, addr, error_code);
-#ifdef DEBUG
-			{
-				unsigned int i, j;
-				unsigned long *sp;
-
-				sp = (unsigned long *) (regs->ARM_sp - 128);
-				for (j = 0; j < 20 && sp_valid(sp); j++) {
-					printk("%p: ", sp);
-					for (i = 0; i < 8 && sp_valid(sp); i += 1, sp++)
-						printk("%08lx ", *sp);
-					printk("\n");
-				}
-				show_regs(regs);
-				c_backtrace(regs->ARM_fp, regs->ARM_cpsr);
-			}
-#endif
-#endif
-		}
-		break;
-
-	case 1:
-	case 3:
-#ifdef CONFIG_ALIGNMENT_TRAP
-		if (!do_alignment_exception(regs))
-			break;
-#endif
-		/*
-		 * this should never happen
-		 */
-		DIE(SIGBUS, "Alignment exception");
-		break;
-
-	case 2:
-		DIE(SIGKILL, "Terminal exception");
-	case 12:
-	case 14:
-		DIE(SIGBUS, "External abort on translation");
-	case 9:
-	case 11:
-		DIE(SIGSEGV, "Domain fault");
-
-	case 4:
-	case 6:
-		DIE(SIGBUS, "External abort on linefetch");
-	case 8:
-	case 10:
-		DIE(SIGBUS, "External abort on non-linefetch");
+	if (!inf->fn || inf->fn(addr, error_code, regs)) {
+		force_sig(inf->sig, current);
+		die_if_kernel(inf->name, regs, fsr);
 	}
 }
 
 asmlinkage int
 do_PrefetchAbort(unsigned long addr, struct pt_regs *regs)
 {
-	do_page_fault(addr, FAULT_CODE_USER|FAULT_CODE_READ, regs);
+	do_page_fault(addr, FAULT_CODE_READ, regs);
 	return 1;
 }

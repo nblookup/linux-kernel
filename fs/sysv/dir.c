@@ -19,51 +19,12 @@
 #include <linux/stat.h>
 #include <linux/string.h>
 
-#include <asm/uaccess.h>
-
-static ssize_t sysv_dir_read(struct file * filp, char * buf,
-			     size_t count, loff_t *ppos)
-{
-	return -EISDIR;
-}
-
 static int sysv_readdir(struct file *, void *, filldir_t);
 
-static struct file_operations sysv_dir_operations = {
-	NULL,			/* lseek - default */
-	sysv_dir_read,		/* read */
-	NULL,			/* write - bad */
-	sysv_readdir,		/* readdir */
-	NULL,			/* poll - default */
-	NULL,			/* ioctl - default */
-	NULL,			/* mmap */
-	NULL,			/* no special open code */
-	NULL,			/* flush */
-	NULL,			/* no special release code */
-	file_fsync		/* default fsync */
-};
-
-/*
- * directories can handle most operations...
- */
-struct inode_operations sysv_dir_inode_operations = {
-	&sysv_dir_operations,	/* default directory file-ops */
-	sysv_create,		/* create */
-	sysv_lookup,		/* lookup */
-	sysv_link,		/* link */
-	sysv_unlink,		/* unlink */
-	sysv_symlink,		/* symlink */
-	sysv_mkdir,		/* mkdir */
-	sysv_rmdir,		/* rmdir */
-	sysv_mknod,		/* mknod */
-	sysv_rename,		/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* bmap */
-	NULL,			/* truncate */
-	NULL			/* permission */
+struct file_operations sysv_dir_operations = {
+	read:		generic_read_dir,
+	readdir:	sysv_readdir,
+	fsync:		file_fsync,
 };
 
 static int sysv_readdir(struct file * filp, void * dirent, filldir_t filldir)

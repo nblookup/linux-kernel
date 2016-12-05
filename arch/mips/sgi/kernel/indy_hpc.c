@@ -1,4 +1,4 @@
-/* $Id: indy_hpc.c,v 1.4 1998/07/14 09:12:27 ralf Exp $
+/* $Id: indy_hpc.c,v 1.9 1999/12/04 03:59:00 ralf Exp $
  *
  * indy_hpc.c: Routines for generic manipulation of the HPC controllers.
  *
@@ -8,8 +8,8 @@
 #include <linux/init.h>
 
 #include <asm/addrspace.h>
-#include <asm/sgihpc.h>
-#include <asm/sgint23.h>
+#include <asm/sgi/sgihpc.h>
+#include <asm/sgi/sgint23.h>
 #include <asm/sgialib.h>
 
 /* #define DEBUG_SGIHPC */
@@ -18,14 +18,14 @@ struct hpc3_regs *hpc3c0, *hpc3c1;
 struct hpc3_miscregs *hpc3mregs;
 
 /* We need software copies of these because they are write only. */
-unsigned long sgi_hpc_write1, sgi_hpc_write2;
+unsigned int sgi_hpc_write1, sgi_hpc_write2;
 
 /* Machine specific identifier knobs. */
 int sgi_has_ioc2 = 0;
 int sgi_guiness = 0;
 int sgi_boardid;
 
-__initfunc(void sgihpc_init(void))
+void __init sgihpc_init(void)
 {
 	unsigned long sid, crev, brev;
 
@@ -43,7 +43,8 @@ __initfunc(void sgihpc_init(void))
 	prom_printf("sgihpc_init: ");
 #endif
 
-	if(sid & 1) {
+	/* This test works now thanks to William J. Earl */
+	if ((sid & 1) == 0 ) {
 #ifdef DEBUG_SGIHPC
 		prom_printf("GUINESS ");
 #endif

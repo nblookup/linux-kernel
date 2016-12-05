@@ -18,7 +18,6 @@
 #include <linux/fs.h>
 #include <linux/sound.h>
 
-#include "legacy.h"
 #include "os.h"
 #include "soundvers.h"
 
@@ -45,18 +44,6 @@
 
 #ifndef CONFIG_PAS_BASE
 #define CONFIG_PAS_BASE	0x388
-#endif
-
-#if defined(CONFIG_SB16_DMA) && !defined(CONFIG_SB_DMA2)
-#  define CONFIG_SB_DMA2 CONFIG_SB16_DMA
-#endif
-
-#if defined(SB16MIDI_BASE) && !defined(CONFIG_SB_MPU_BASE)
-#   define CONFIG_SB_MPU_BASE SB16MIDI_BASE
-#endif
-
-#ifndef CONFIG_SB_MPU_IRQ
-#  define CONFIG_SB_MPU_IRQ CONFIG_SB_IRQ
 #endif
 
 /* SEQ_MAX_QUEUE is the maximum number of sequencer events buffered by the

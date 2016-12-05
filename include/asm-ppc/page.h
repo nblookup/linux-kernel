@@ -14,6 +14,19 @@
 #ifndef __ASSEMBLY__
 #ifdef __KERNEL__
 
+#ifdef CONFIG_XMON
+#define BUG() do { \
+	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
+	xmon(0); \
+} while (0)
+#else
+#define BUG() do { \
+	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
+	__asm__ __volatile__(".long 0x0"); \
+} while (0)
+#endif
+#define PAGE_BUG(page) do { BUG(); } while (0)
+
 #define STRICT_MM_TYPECHECKS
 
 #ifdef STRICT_MM_TYPECHECKS
@@ -63,24 +76,58 @@ typedef unsigned long pgprot_t;
 /* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
-extern void clear_page(unsigned long page);
-#define copy_page(to,from)	memcpy((void *)(to), (void *)(from), PAGE_SIZE)
+extern void clear_page(void *page);
+extern void copy_page(void *to, void *from);
 
 /* map phys->virtual and virtual->phys for RAM pages */
-#ifdef CONFIG_APUS
-#include <asm/amigappc.h>
-/* Word at CYBERBASEp has the value (-KERNELBASE+CYBERBASE). */
-#define __pa(x)			((unsigned long)(x)+(*(unsigned long*)CYBERBASEp))
-#define __va(x)			((void *)((unsigned long)(x)-(*(unsigned long*)CYBERBASEp)))
-#else
-#define __pa(x)			((unsigned long)(x)-PAGE_OFFSET)
-#define __va(x)			((void *)((unsigned long)(x)+PAGE_OFFSET))
-#endif
+static inline unsigned long ___pa(unsigned long v)
+{ 
+	unsigned long p;
+	asm volatile ("1: addis %0, %1, %2;" 
+		      ".section \".vtop_fixup\",\"aw\";"
+		      ".align  1;"
+		      ".long   1b;"
+		      ".previous;"
+		      : "=r" (p) 
+		      : "b" (v), "K" (((-PAGE_OFFSET) >> 16) & 0xffff));
+
+	return p;
+}
+static inline void* ___va(unsigned long p)
+{ 
+	unsigned long v;
+	asm volatile ("1: addis %0, %1, %2;" 
+		      ".section \".ptov_fixup\",\"aw\";"
+		      ".align  1;"
+		      ".long   1b;"
+		      ".previous;"
+		      : "=r" (v) 
+		      : "b" (p), "K" (((PAGE_OFFSET) >> 16) & 0xffff));
+
+	return (void*) v;
+}
+#define __pa(x) ___pa ((unsigned long)(x))
+#define __va(x) ___va ((unsigned long)(x))
 
 #define MAP_NR(addr)		(((unsigned long)addr-PAGE_OFFSET) >> PAGE_SHIFT)
 #define MAP_PAGE_RESERVED	(1<<15)
 
 extern unsigned long get_zero_page_fast(void);
+
+/* Pure 2^n version of get_order */
+extern __inline__ int get_order(unsigned long size)
+{
+	int order;
+
+	size = (size-1) >> (PAGE_SHIFT-1);
+	order = -1;
+	do {
+		size >>= 1;
+		order++;
+	} while (size);
+	return order;
+}
+
 #endif /* __KERNEL__ */
 #endif /* __ASSEMBLY__ */
 #endif /* _PPC_PAGE_H */

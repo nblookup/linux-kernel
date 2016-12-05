@@ -1,4 +1,4 @@
-/* $Id: sunos_ioctl.c,v 1.31 1998/10/25 19:31:04 davem Exp $
+/* $Id: sunos_ioctl.c,v 1.33 1999/07/28 12:59:03 anton Exp $
  * sunos_ioctl.c: The Linux Operating system: SunOS ioctl compatibility.
  * 
  * Copyright (C) 1995 Miguel de Icaza (miguel@nuclecu.unam.mx)
@@ -21,6 +21,7 @@
 #include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
+#include <linux/file.h>
 #include <asm/kbio.h>
 
 #if 0
@@ -36,11 +37,10 @@ extern asmlinkage int sys_setsid(void);
 
 asmlinkage int sunos_ioctl (int fd, unsigned long cmd, unsigned long arg)
 {
-	struct file *filp;
 	int ret = -EBADF;
 
 	lock_kernel();
-	if (fd >= SUNOS_NR_OPEN || !(filp = current->files->fd [fd]))
+	if (fd >= SUNOS_NR_OPEN || !fcheck(fd))
 		goto out;
 
 	/* First handle an easy compat. case for tty ldisc. */

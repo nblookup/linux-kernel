@@ -26,6 +26,7 @@
 #include <linux/fb.h>
 #include <linux/selection.h>
 #include <linux/init.h>
+#include <linux/ioport.h>
 #ifdef CONFIG_FB_COMPAT_XPMAC
 #include <asm/vc_ioctl.h>
 #endif
@@ -50,6 +51,7 @@ struct fb_info_offb {
     struct { u_char red, green, blue, pad; } palette[256];
     volatile unsigned char *cmap_adr;
     volatile unsigned char *cmap_data;
+    int is_rage_128;
     union {
 #ifdef FBCON_HAS_CFB16
 	u16 cfb16[16];
@@ -72,8 +74,8 @@ static int ofonly = 0;
      *  Interface used by the world
      */
 
-void offb_init(void);
-void offb_setup(char *options, int *ints);
+int offb_init(void);
+int offb_setup(char*);
 
 static int offb_open(struct fb_info *info, int user);
 static int offb_release(struct fb_info *info, int user);
@@ -106,7 +108,8 @@ extern boot_infos_t *boot_infos;
 static int offb_init_driver(struct device_node *);
 static void offb_init_nodriver(struct device_node *);
 static void offb_init_fb(const char *name, const char *full_name, int width,
-		      int height, int depth, int pitch, unsigned long address);
+		      int height, int depth, int pitch, unsigned long address,
+		      struct device_node *dp);
 
     /*
      *  Interface to the low level console driver
@@ -290,9 +293,6 @@ static int offb_ioctl(struct inode *inode, struct file *file, u_int cmd,
 }
 
 
-#ifdef CONFIG_FB_ATY
-extern void atyfb_of_init(struct device_node *dp);
-#endif /* CONFIG_FB_ATY */
 #ifdef CONFIG_FB_S3TRIO
 extern void s3triofb_init_of(struct device_node *dp);
 #endif /* CONFIG_FB_S3TRIO */
@@ -314,13 +314,16 @@ extern void valkyrie_of_init(struct device_node *dp);
 #ifdef CONFIG_FB_PLATINUM
 extern void platinum_of_init(struct device_node *dp);
 #endif /* CONFIG_FB_PLATINUM */
+#ifdef CONFIG_FB_CLGEN
+extern void clgen_of_init(struct device_node *dp);
+#endif /* CONFIG_FB_CLGEN */
 
 
     /*
      *  Initialisation
      */
 
-__initfunc(void offb_init(void))
+int __init offb_init(void)
 {
     struct device_node *dp;
     unsigned int dpy;
@@ -346,6 +349,21 @@ __initfunc(void offb_init(void))
 		    dp->addrs[0].size = 0x01000000;
 		}
 	    }
+
+	    /*
+	     * The LTPro on the Lombard powerbook has no addresses
+	     * on the display nodes, they are on their parent.
+	     */
+	    if (dp->n_addrs == 0 && device_is_compatible(dp, "ATY,264LTPro")) {
+		int na;
+		unsigned int *ap = (unsigned int *)
+		    get_property(dp, "AAPL,address", &na);
+		if (ap != 0)
+		    for (na /= sizeof(unsigned int); na > 0; --na, ++ap)
+			if (*ap <= addr && addr < *ap + 0x1000000)
+			    goto foundit;
+	    }
+
 	    /*
 	     * See if the display address is in one of the address
 	     * ranges for this display.
@@ -356,6 +374,7 @@ __initfunc(void offb_init(void))
 		    break;
 	    }
 	    if (i < dp->n_addrs) {
+	    foundit:
 		printk(KERN_INFO "MacOS display is %s\n", dp->full_name);
 		macos_display = dp;
 		break;
@@ -370,7 +389,7 @@ __initfunc(void offb_init(void))
 			 boot_infos->dispDeviceRect[2],
 			 boot_infos->dispDeviceRect[3],
 			 boot_infos->dispDeviceDepth,
-			 boot_infos->dispDeviceRowBytes, addr);
+			 boot_infos->dispDeviceRowBytes, addr, NULL);
 	}
     }
 
@@ -389,16 +408,18 @@ __initfunc(void offb_init(void))
 		offb_init_driver(dp);
 	}
     }
+    return 0;
 }
 
-__initfunc(static int offb_init_driver(struct device_node *dp))
+
+    /*
+     *  This function is intended to go away as soon as all OF-aware frame
+     *  buffer device drivers have been converted to use PCI probing and PCI
+     *  resources. [ Geert ]
+     */
+
+static int __init offb_init_driver(struct device_node *dp)
 {
-#ifdef CONFIG_FB_ATY
-    if (!strncmp(dp->name, "ATY", 3)) {
-	atyfb_of_init(dp);
-	return 1;
-    }
-#endif /* CONFIG_FB_ATY */
 #ifdef CONFIG_FB_S3TRIO
     if (!strncmp(dp->name, "S3Trio", 6)) {
     	s3triofb_init_of(dp);
@@ -441,10 +462,16 @@ __initfunc(static int offb_init_driver(struct device_node *dp))
 	return 1;
     }
 #endif /* CONFIG_FB_PLATINUM */
+#ifdef CONFIG_FB_CLGEN
+    if (!strncmp(dp->name, "MacPicasso",10) || !strncmp(dp->name, "54m30",5)) {
+       clgen_of_init(dp);
+       return 1;
+    }
+#endif /* CONFIG_FB_CLGEN */
     return 0;
 }
 
-__initfunc(static void offb_init_nodriver(struct device_node *dp))
+static void __init offb_init_nodriver(struct device_node *dp)
 {
     int *pp, i;
     unsigned int len;
@@ -470,10 +497,10 @@ __initfunc(static void offb_init_nodriver(struct device_node *dp))
 	address = (u_long)*up;
     else {
 	for (i = 0; i < dp->n_addrs; ++i)
-	    if (dp->addrs[i].size >= len)
+	    if (dp->addrs[i].size >= pitch*height*depth/8)
 		break;
 	if (i >= dp->n_addrs) {
-	    printk("no framebuffer address found for %s\n", dp->full_name);
+	    printk(KERN_ERR "no framebuffer address found for %s\n", dp->full_name);
 	    return;
 	}
 
@@ -484,30 +511,39 @@ __initfunc(static void offb_init_nodriver(struct device_node *dp))
 	    address += 0x1000;
     }
     offb_init_fb(dp->name, dp->full_name, width, height, depth,
-		 pitch, address);
+		 pitch, address, dp);
     
 }
 
-__initfunc(static void offb_init_fb(const char *name, const char *full_name,
+static void offb_init_fb(const char *name, const char *full_name,
 				    int width, int height, int depth,
-				    int pitch, unsigned long address))
+				    int pitch, unsigned long address,
+				    struct device_node *dp)
 {
     int i;
     struct fb_fix_screeninfo *fix;
     struct fb_var_screeninfo *var;
     struct display *disp;
     struct fb_info_offb *info;
+    unsigned long res_start = address;
+    unsigned long res_size = pitch*height*depth/8;
+
+    if (!request_mem_region(res_start, res_size, "offb"))
+	return;
 
     printk(KERN_INFO "Using unsupported %dx%d %s at %lx, depth=%d, pitch=%d\n",
 	   width, height, name, address, depth, pitch);
     if (depth != 8 && depth != 16 && depth != 32) {
-	printk("%s: can't use depth = %d\n", full_name, depth);
+	printk(KERN_ERR "%s: can't use depth = %d\n", full_name, depth);
+	release_mem_region(res_start, res_size);
 	return;
     }
 
     info = kmalloc(sizeof(struct fb_info_offb), GFP_ATOMIC);
-    if (info == 0)
+    if (info == 0) {
+	release_mem_region(res_start, res_size);
 	return;
+    }
     memset(info, 0, sizeof(*info));
 
     fix = &info->fix;
@@ -522,15 +558,23 @@ __initfunc(static void offb_init_fb(const char *name, const char *full_name,
     var->yres = var->yres_virtual = height;
     fix->line_length = pitch;
 
-    fix->smem_start = (char *)address;
+    fix->smem_start = address;
     fix->smem_len = pitch * height;
     fix->type = FB_TYPE_PACKED_PIXELS;
     fix->type_aux = 0;
 
+    info->is_rage_128 = 0;
     if (depth == 8)
     {
     	/* XXX kludge for ati */
-    	if (strncmp(name, "ATY,", 4) == 0) {
+	if (strncmp(name, "ATY,Rage128", 11) == 0) {
+	    if (dp) {
+		unsigned long regbase = dp->addrs[2].address;
+		info->cmap_adr = ioremap(regbase, 0x1FFF) + 0x00b0;
+		info->cmap_data = info->cmap_adr + 4;
+		info->is_rage_128 = 1;
+	    }
+	} else if (strncmp(name, "ATY,", 4) == 0) {
 		unsigned long base = address & 0xff000000UL;
 		info->cmap_adr = ioremap(base + 0x7ff000, 0x1000) + 0xcc0;
 		info->cmap_data = info->cmap_adr + 1;
@@ -671,10 +715,11 @@ __initfunc(static void offb_init_fb(const char *name, const char *full_name,
 
     if (register_framebuffer(&info->info) < 0) {
 	kfree(info);
+	release_mem_region(res_start, res_size);
 	return;
     }
 
-    printk("fb%d: Open Firmware frame buffer device on %s\n",
+    printk(KERN_INFO "fb%d: Open Firmware frame buffer device on %s\n",
 	   GET_FB_IDX(info->info.node), full_name);
 
 #ifdef CONFIG_FB_COMPAT_XPMAC
@@ -706,13 +751,14 @@ __initfunc(static void offb_init_fb(const char *name, const char *full_name,
      *  Setup: parse used options
      */
 
-void offb_setup(char *options, int *ints)
+int offb_setup(char *options)
 {
     if (!options || !*options)
-	return;
+	return 0;
 
     if (!strcmp(options, "ofonly"))
 	ofonly = 1;
+    return 0;
 }
 
 
@@ -809,12 +855,17 @@ static int offb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 
     *info2->cmap_adr = regno;/* On some chipsets, add << 3 in 15 bits */
     mach_eieio();
-    *info2->cmap_data = red;
-    mach_eieio();
-    *info2->cmap_data = green;
-    mach_eieio();
-    *info2->cmap_data = blue;
-    mach_eieio();
+    if (info2->is_rage_128) {
+    	out_le32((unsigned int *)info2->cmap_data,
+    		(red << 16 | green << 8 | blue));
+    } else {
+	*info2->cmap_data = red;
+    	mach_eieio();
+    	*info2->cmap_data = green;
+    	mach_eieio();
+    	*info2->cmap_data = blue;
+    	mach_eieio();
+    }
 
     if (regno < 16)
 	switch (info2->var.bits_per_pixel) {

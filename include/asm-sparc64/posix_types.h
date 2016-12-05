@@ -9,11 +9,12 @@
 
 #if (__GNUC__ > 2) || (__GNUC_MINOR__ >= 8)
 typedef unsigned long int      __kernel_size_t;
+typedef long int               __kernel_ssize_t;
 #else
 typedef unsigned long long     __kernel_size_t;
+typedef long long              __kernel_ssize_t;
 #endif
 
-typedef long long              __kernel_ssize_t;
 typedef long                   __kernel_ptrdiff_t;
 typedef long                   __kernel_time_t;
 typedef long                   __kernel_clock_t;
@@ -29,6 +30,13 @@ typedef unsigned int           __kernel_nlink_t;
 typedef int                    __kernel_daddr_t;
 typedef long                   __kernel_off_t;
 typedef char *                 __kernel_caddr_t;
+typedef unsigned short	       __kernel_uid16_t;
+typedef unsigned short	       __kernel_gid16_t;
+
+typedef __kernel_uid_t 	       __kernel_old_uid_t;
+typedef __kernel_gid_t         __kernel_old_gid_t;
+typedef __kernel_uid_t	       __kernel_uid32_t;
+typedef __kernel_gid_t	       __kernel_gid32_t;
 
 /* Note this piece of asymmetry from the v9 ABI.  */
 typedef int		       __kernel_suseconds_t;

@@ -98,6 +98,7 @@ struct coda_cache_inv_stats
 extern struct coda_vfs_stats		coda_vfs_stat;
 extern struct coda_permission_stats	coda_permission_stat;
 extern struct coda_cache_inv_stats	coda_cache_inv_stat;
+extern int				coda_upcall_timestamping;
 
 /* reset statistics to 0 */
 void reset_coda_vfs_stats( void );
@@ -132,13 +133,13 @@ int do_reset_coda_cache_inv_stats( ctl_table * table, int write,
 
 /* these functions are called to form the content of /proc/fs/coda/... files */
 int coda_vfs_stats_get_info( char * buffer, char ** start, off_t offset,
-			     int length, int dummy );
+			     int length);
 int coda_upcall_stats_get_info( char * buffer, char ** start, off_t offset,
-				int length, int dummy );
+				int length);
 int coda_permission_stats_get_info( char * buffer, char ** start, off_t offset,
-				    int length, int dummy );
+				    int length);
 int coda_cache_inv_stats_get_info( char * buffer, char ** start, off_t offset,
-				   int length, int dummy );
+				   int length);
 
 
 #endif /* _CODA_PROC_H */

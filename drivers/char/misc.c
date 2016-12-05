@@ -28,7 +28,9 @@
  *  corrected by Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
  * Changes for kmod (from kerneld):
- 	Cyrus Durgin <cider@speakeasy.org>
+ *	Cyrus Durgin <cider@speakeasy.org>
+ *
+ * Added devfs support. Richard Gooch <rgooch@atnf.csiro.au>  10-Jan-1998
  */
 
 #include <linux/module.h>
@@ -41,15 +43,15 @@
 #include <linux/major.h>
 #include <linux/malloc.h>
 #include <linux/proc_fs.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/stat.h>
 #include <linux/init.h>
-#ifdef CONFIG_APM
-#include <linux/apm_bios.h>
-#endif
 
 #include <linux/tty.h>
 #include <linux/selection.h>
 #include <linux/kmod.h>
+
+#include "busmouse.h"
 
 /*
  * Head entry for the doubly linked miscdevice list
@@ -62,28 +64,21 @@ static struct miscdevice misc_list = { 0, "head", NULL, &misc_list, &misc_list }
 #define DYNAMIC_MINORS 64 /* like dynamic majors */
 static unsigned char misc_minors[DYNAMIC_MINORS / 8];
 
-extern int bus_mouse_init(void);
-extern int qpmouse_init(void);
-extern int ms_bus_mouse_init(void);
-extern int atixl_busmouse_init(void);
-extern int amiga_mouse_init(void);
-extern int atari_mouse_init(void);
-extern int sun_mouse_init(void);
-extern int adb_mouse_init(void);
+extern int psaux_init(void);
+#ifdef CONFIG_SGI_NEWPORT_GFX
+extern void gfx_register(void);
+#endif
+extern void streamable_init(void);
 extern void watchdog_init(void);
-extern void wdt_init(void);
-extern void acq_init(void);
-extern void dtlk_init(void);
 extern void pcwatchdog_init(void);
-extern int rtc_init(void);
+extern int rtc_sun_init(void);		/* Combines MK48T02 and MK48T08 */
 extern int rtc_DP8570A_init(void);
 extern int rtc_MK48T08_init(void);
 extern int dsp56k_init(void);
-extern int nvram_init(void);
 extern int radio_init(void);
-extern void hfmodem_init(void);
 extern int pc110pad_init(void);
 extern int pmu_device_init(void);
+extern int qpmouse_init(void);
 
 static int misc_read_proc(char *buf, char **start, off_t offset,
 			  int len, int *eof, void *private)
@@ -124,20 +119,13 @@ static int misc_open(struct inode * inode, struct file * file)
 }
 
 static struct file_operations misc_fops = {
-        NULL,		/* seek */
-	NULL,		/* read */
-	NULL,		/* write */
-	NULL,		/* readdir */
-	NULL,		/* poll */
-	NULL,		/* ioctl */
-	NULL,		/* mmap */
-        misc_open,
-	NULL,		/* flush */
-        NULL		/* release */
+	open:		misc_open,
 };
 
 int misc_register(struct miscdevice * misc)
 {
+	static devfs_handle_t devfs_handle = NULL;
+
 	if (misc->next || misc->prev)
 		return -EBUSY;
 	if (misc->minor == MISC_DYNAMIC_MINOR) {
@@ -150,6 +138,13 @@ int misc_register(struct miscdevice * misc)
 	}
 	if (misc->minor < DYNAMIC_MINORS)
 		misc_minors[misc->minor >> 3] |= 1 << (misc->minor & 7);
+	if (!devfs_handle)
+		devfs_handle = devfs_mk_dir (NULL, "misc", 4, NULL);
+	misc->devfs_handle =
+	    devfs_register (devfs_handle, misc->name, 0, DEVFS_FL_NONE,
+			    MISC_MAJOR, misc->minor,
+			    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP, 0, 0,
+			    misc->fops, NULL);
 
 	/*
 	 * Add it to the front, so that later devices can "override"
@@ -171,6 +166,7 @@ int misc_deregister(struct miscdevice * misc)
 	misc->next->prev = misc->prev;
 	misc->next = NULL;
 	misc->prev = NULL;
+	devfs_unregister (misc->devfs_handle);
 	if (i < DYNAMIC_MINORS && i>0) {
 		misc_minors[i>>3] &= ~(1 << (misc->minor & 7));
 	}
@@ -180,36 +176,14 @@ int misc_deregister(struct miscdevice * misc)
 EXPORT_SYMBOL(misc_register);
 EXPORT_SYMBOL(misc_deregister);
 
-static struct proc_dir_entry *proc_misc;	
-
 int __init misc_init(void)
 {
-	proc_misc = create_proc_entry("misc", 0, 0);
-	if (proc_misc)
-		proc_misc->read_proc = misc_read_proc;
+	create_proc_read_entry("misc", 0, 0, misc_read_proc, NULL);
 #ifdef CONFIG_BUSMOUSE
 	bus_mouse_init();
 #endif
 #if defined CONFIG_82C710_MOUSE
 	qpmouse_init();
-#endif
-#ifdef CONFIG_MS_BUSMOUSE
-	ms_bus_mouse_init();
-#endif
-#ifdef CONFIG_ATIXL_BUSMOUSE
- 	atixl_busmouse_init();
-#endif
-#ifdef CONFIG_AMIGAMOUSE
-	amiga_mouse_init();
-#endif
-#ifdef CONFIG_ATARIMOUSE
-	atari_mouse_init();
-#endif
-#ifdef CONFIG_SUN_MOUSE
-	sun_mouse_init();
-#endif
-#ifdef CONFIG_ADBMOUSE
-	adb_mouse_init();
 #endif
 #ifdef CONFIG_PC110_PAD
 	pc110pad_init();
@@ -223,23 +197,8 @@ int __init misc_init(void)
 #ifdef CONFIG_PCWATCHDOG
 	pcwatchdog_init();
 #endif
-#ifdef CONFIG_WDT
-	wdt_init();
-#endif
-#ifdef CONFIG_ACQUIRE_WDT
-	acq_init();
-#endif
 #ifdef CONFIG_SOFT_WATCHDOG
 	watchdog_init();
-#endif
-#ifdef CONFIG_DTLK
-	dtlk_init();
-#endif
-#ifdef CONFIG_APM
-	apm_bios_init();
-#endif
-#ifdef CONFIG_H8
-	h8_init();
 #endif
 #ifdef CONFIG_MVME16x
 	rtc_MK48T08_init();
@@ -247,32 +206,37 @@ int __init misc_init(void)
 #ifdef CONFIG_BVME6000
 	rtc_DP8570A_init();
 #endif
-#if defined(CONFIG_RTC) || defined(CONFIG_SUN_MOSTEK_RTC)
-	rtc_init();
+#if defined(CONFIG_SUN_MOSTEK_RTC)
+	rtc_sun_init();
+#endif
+#ifdef CONFIG_SGI_DS1286
+	ds1286_init();
 #endif
 #ifdef CONFIG_ATARI_DSP56K
 	dsp56k_init();
 #endif
-#ifdef CONFIG_HFMODEM
-	hfmodem_init();
-#endif
-#ifdef CONFIG_NVRAM
-	nvram_init();
-#endif
 #ifdef CONFIG_MISC_RADIO
 	radio_init();
-#endif
-#ifdef CONFIG_HFMODEM
-	hfmodem_init();
 #endif
 #ifdef CONFIG_PMAC_PBOOK
 	pmu_device_init();
 #endif
-	if (register_chrdev(MISC_MAJOR,"misc",&misc_fops)) {
+#ifdef CONFIG_SGI_NEWPORT_GFX
+	gfx_register ();
+#endif
+#ifdef CONFIG_SGI_IP22
+	streamable_init ();
+#endif
+#ifdef CONFIG_SGI_NEWPORT_GFX
+	gfx_register ();
+#endif
+#ifdef CONFIG_SGI
+	streamable_init ();
+#endif
+	if (devfs_register_chrdev(MISC_MAJOR,"misc",&misc_fops)) {
 		printk("unable to get major %d for misc devices\n",
 		       MISC_MAJOR);
 		return -EIO;
 	}
-
 	return 0;
 }

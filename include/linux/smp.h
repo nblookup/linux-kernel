@@ -3,7 +3,7 @@
 
 /*
  *	Generic SMP support
- *		Alan Cox. <alan@cymru.net>
+ *		Alan Cox. <alan@redhat.com>
  */
 
 #ifdef __SMP__
@@ -80,7 +80,8 @@ extern volatile int smp_msg_id;
 #define smp_threads_ready			1
 #define kernel_lock()
 #define cpu_logical_map(cpu)			0
-#define smp_call_function(func,info,retry,wait)
+#define cpu_number_map(cpu)			0
+#define smp_call_function(func,info,retry,wait)	({ 0; })
 
 #endif
 #endif

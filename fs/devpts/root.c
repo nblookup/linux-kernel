@@ -20,51 +20,17 @@ static int devpts_root_readdir(struct file *,void *,filldir_t);
 static struct dentry *devpts_root_lookup(struct inode *,struct dentry *);
 static int devpts_revalidate(struct dentry *, int);
 
-static struct file_operations devpts_root_operations = {
-	NULL,                   /* llseek */
-	NULL,                   /* read */
-	NULL,                   /* write */
-	devpts_root_readdir,    /* readdir */
-	NULL,                   /* poll */
-	NULL,			/* ioctl */
-	NULL,                   /* mmap */
-	NULL,                   /* open */
-	NULL,			/* flush */
-	NULL,                   /* release */
-	NULL,			/* fsync */
-	NULL,			/* fasync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
-	NULL			/* lock */
+struct file_operations devpts_root_operations = {
+	read:		generic_read_dir,
+	readdir:	devpts_root_readdir,
 };
 
 struct inode_operations devpts_root_inode_operations = {
-	&devpts_root_operations, /* file operations */
-	NULL,                   /* create */
-	devpts_root_lookup,     /* lookup */
-	NULL,                   /* link */
-	NULL,			/* unlink */
-	NULL,			/* symlink */
-	NULL,			/* mkdir */
-	NULL,			/* rmdir */
-	NULL,                   /* mknod */
-	NULL,                   /* rename */
-	NULL,                   /* readlink */
-	NULL,                   /* follow_link */
-	NULL,                   /* readpage */
-	NULL,                   /* writepage */
-	NULL,                   /* bmap */
-	NULL,                   /* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL,			/* updatepage */
-	NULL			/* revalidate */
+	lookup:		devpts_root_lookup,
 };
 
 static struct dentry_operations devpts_dentry_operations = {
-	devpts_revalidate,	/* d_revalidate */
-	NULL,			/* d_hash */
-	NULL,			/* d_compare */
+	d_revalidate:	devpts_revalidate,
 };
 
 /*
@@ -152,10 +118,9 @@ static struct dentry *devpts_root_lookup(struct inode * dir, struct dentry * den
 			unsigned int nentry = *p++ - '0';
 			if ( nentry > 9 )
 				return NULL;
-			nentry += entry * 10;
-			if (nentry < entry)
+			if ( entry >= ~0U/10 )
 				return NULL;
-			entry = nentry;
+			entry = nentry + entry * 10;
 		}
 	}
 

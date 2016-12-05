@@ -20,15 +20,14 @@
  * Thomas Sailer   : use more logical O_NONBLOCK semantics
  * Daniel Rodriksson: reworked the use of the device specific copy_user
  *                    still generic
+ * Horst von Brand:  Add missing #include <linux/string.h>
  */
 
-#include <linux/config.h>
 #include <linux/stddef.h>
+#include <linux/string.h>
 #include <linux/kmod.h>
 
 #include "sound_config.h"
-
-#ifdef CONFIG_AUDIO
 #include "ulaw.h"
 #include "coproc.h"
 
@@ -226,7 +225,7 @@ int audio_write(int dev, struct file *file, const char *buf, int count)
 		{
 			    /* Handle nonblocking mode */
 			if ((file->f_flags & O_NONBLOCK) && err == -EAGAIN)
-				return p;	/* No more space. Return # of accepted bytes */
+				return p? p : -EAGAIN;	/* No more space. Return # of accepted bytes */
 			return err;
 		}
 		l = c;
@@ -306,11 +305,11 @@ int audio_read(int dev, struct file *file, char *buf, int count)
 			 *	Nonblocking mode handling. Return current # of bytes
 			 */
 
-			if ((file->f_flags & O_NONBLOCK) && buf_no == -EAGAIN)
-				return p;
-
 			if (p > 0) 		/* Avoid throwing away data */
 				return p;	/* Return it instead */
+
+			if ((file->f_flags & O_NONBLOCK) && buf_no == -EAGAIN)
+				return -EAGAIN;
 
 			return buf_no;
 		}
@@ -514,8 +513,6 @@ void audio_init_devices(void)
 	 * NOTE! This routine could be called several times during boot.
 	 */
 }
-
-#endif
 
 void reorganize_buffers(int dev, struct dma_buffparms *dmap, int recording)
 {

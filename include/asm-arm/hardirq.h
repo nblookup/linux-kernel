@@ -1,7 +1,7 @@
 #ifndef __ASM_HARDIRQ_H
 #define __ASM_HARDIRQ_H
 
-#include <linux/tasks.h>
+#include <linux/threads.h>
 
 extern unsigned int local_irq_count[NR_CPUS];
 
@@ -9,7 +9,10 @@ extern unsigned int local_irq_count[NR_CPUS];
  * Are we in an interrupt context? Either doing bottom half
  * or hardware interrupt processing?
  */
-#define in_interrupt() (local_irq_count[smp_processor_id()] + local_bh_count[smp_processor_id()] != 0)
+#define in_interrupt() ({ const int __cpu = smp_processor_id(); \
+	(local_irq_count[__cpu] + local_bh_count[__cpu] != 0); })
+
+#define in_irq() (local_irq_count[smp_processor_id()] != 0)
 
 #ifndef __SMP__
 

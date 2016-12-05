@@ -142,6 +142,11 @@
  *                   <kodis@jagunet.com>.  Work begun on fixing driver to
  *                   work under 2.1.X.  Added temporary extra printks
  *                   which seem to slow it down enough to work.
+ *
+ *  9 November 1999 -- Make kernel-parameter implementation work with 2.3.x 
+ *	               Removed init_module & cleanup_module in favor of 
+ *		       module_init & module_exit.
+ *		       Torben Mathiasen <tmm@image.dk>
 */
 
 #include <linux/major.h>
@@ -157,6 +162,7 @@
 #include <linux/hdreg.h>
 #include <linux/genhd.h>
 #include <linux/ioport.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/string.h>
 #include <linux/malloc.h>
 #include <linux/init.h>
@@ -278,7 +284,7 @@ static struct s_sony_subcode last_sony_subcode; /* Points to the last
 static volatile int sony_inuse = 0;  /* Is the drive in use?  Only one operation
 					at a time allowed */
 
-static struct wait_queue * sony_wait = NULL;	/* Things waiting for the drive */
+static DECLARE_WAIT_QUEUE_HEAD(sony_wait);	/* Things waiting for the drive */
 
 static struct task_struct *has_cd_task = NULL;  /* The task that is currently
 						   using the CDROM drive, or
@@ -311,7 +317,7 @@ MODULE_PARM(cdu31a_irq, "i");
 
 /* The interrupt handler will wake this queue up when it gets an
    interrupts. */
-static struct wait_queue *cdu31a_irq_wait = NULL;
+DECLARE_WAIT_QUEUE_HEAD(cdu31a_irq_wait);
 
 static int curr_control_reg = 0; /* Current value of the control register */
 
@@ -577,13 +583,13 @@ cdu31a_interrupt(int irq, void *dev_id, struct pt_regs *regs)
       abort_read_started = 0;
 
       /* If something was waiting, wake it up now. */
-      if (cdu31a_irq_wait != NULL)
+      if (waitqueue_active(&cdu31a_irq_wait))
       {
          disable_interrupts();
          wake_up(&cdu31a_irq_wait);
       }
    }
-   else if (cdu31a_irq_wait != NULL)
+   else if (waitqueue_active(&cdu31a_irq_wait))
    {
       disable_interrupts();
       wake_up(&cdu31a_irq_wait);
@@ -1641,7 +1647,7 @@ read_data_block(char          *buffer,
  * data access on a CD is done sequentially, this saves a lot of operations.
  */
 static void
-do_cdu31a_request(void)
+do_cdu31a_request(request_queue_t * q)
 {
    int block;
    int nblock;
@@ -1667,7 +1673,7 @@ do_cdu31a_request(void)
       if (signal_pending(current))
       {
          restore_flags(flags);
-         if (CURRENT && CURRENT->rq_status != RQ_INACTIVE)
+         if (!QUEUE_EMPTY && CURRENT->rq_status != RQ_INACTIVE)
          {
             end_request(0);
          }
@@ -1700,7 +1706,7 @@ cdu31a_request_startover:
        * The beginning here is stolen from the hard disk driver.  I hope
        * it's right.
        */
-      if (!(CURRENT) || CURRENT->rq_status == RQ_INACTIVE)
+      if (QUEUE_EMPTY || CURRENT->rq_status == RQ_INACTIVE)
       {
          goto end_do_cdu31a_request;
       }
@@ -3251,10 +3257,10 @@ static struct cdrom_device_info scd_info = {
 /* The different types of disc loading mechanisms supported */
 static const char *load_mech[] __initdata = { "caddy", "tray", "pop-up", "unknown" };
 
-__initfunc(static void
+static void __init 
 get_drive_configuration(unsigned short base_io,
                         unsigned char res_reg[],
-                        unsigned int *res_size))
+                        unsigned int *res_size)
 {
    int retry_count;
 
@@ -3317,11 +3323,15 @@ get_drive_configuration(unsigned short base_io,
 #ifndef MODULE
 /*
  * Set up base I/O and interrupts, called from main.c.
+ 
  */
-__initfunc(void
-cdu31a_setup(char *strings,
-	     int  *ints))
+
+static int __init cdu31a_setup(char *strings)	     
 {
+    int ints[4];
+    
+    (void)get_options(strings, ARRAY_SIZE(ints), ints);
+
    if (ints[0] > 0)
    {
       cdu31a_port = ints[1];
@@ -3341,7 +3351,12 @@ cdu31a_setup(char *strings,
 	 printk("CDU31A: Unknown interface type: %s\n", strings);
       }
    }
+   
+   return 1;
 }
+
+__setup("cdu31a=", cdu31a_setup);
+
 #endif
 
 static int cdu31a_block_size;
@@ -3349,8 +3364,8 @@ static int cdu31a_block_size;
 /*
  * Initialize the driver.
  */
-__initfunc(int
-cdu31a_init(void))
+int __init 
+cdu31a_init(void)
 {
    struct s_sony_drive_config drive_config;
    unsigned int res_size;
@@ -3427,7 +3442,7 @@ cdu31a_init(void))
 
       request_region(cdu31a_port, 4,"cdu31a");
       
-      if (register_blkdev(MAJOR_NR,"cdu31a",&cdrom_fops))
+      if (devfs_register_blkdev(MAJOR_NR,"cdu31a",&cdrom_fops))
       {
 	 printk("Unable to get major %d for CDU-31a\n", MAJOR_NR);
          goto errout2;
@@ -3497,7 +3512,7 @@ cdu31a_init(void))
 
       is_a_cdu31a = strcmp("CD-ROM CDU31A", drive_config.product_id) == 0;
 
-      blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+      blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
       read_ahead[MAJOR_NR] = CDU31A_READAHEAD;
       cdu31a_block_size = 1024; /* 1kB default block size */
       /* use 'mount -o block=2048' */
@@ -3529,7 +3544,7 @@ cdu31a_init(void))
    }
 errout0:
    printk("Unable to register CDU-31a with Uniform cdrom driver\n");
-   if (unregister_blkdev(MAJOR_NR, "cdu31a"))    
+   if (devfs_unregister_blkdev(MAJOR_NR, "cdu31a"))    
    {
       printk("Can't unregister block device for cdu31a\n");
    }
@@ -3539,23 +3554,16 @@ errout3:
    return -EIO;
 }
 
-#ifdef MODULE
 
-int
-init_module(void)
-{
-	return cdu31a_init();
-}
-
-void
-cleanup_module(void)
+void __exit
+cdu31a_exit(void)
 {
    if (unregister_cdrom(&scd_info))    
    {
       printk("Can't unregister cdu31a from Uniform cdrom driver\n");
       return;
    }
-   if ((unregister_blkdev(MAJOR_NR, "cdu31a") == -EINVAL))    
+   if ((devfs_unregister_blkdev(MAJOR_NR, "cdu31a") == -EINVAL))    
    {
       printk("Can't unregister cdu31a\n");
       return;
@@ -3567,4 +3575,9 @@ cleanup_module(void)
    release_region(cdu31a_port,4);
    printk(KERN_INFO "cdu31a module released.\n");
 }   
-#endif MODULE
+
+#ifdef MODULE
+module_init(cdu31a_init);
+#endif
+module_exit(cdu31a_exit);
+

@@ -367,16 +367,6 @@ sv_bread (struct super_block *sb, kdev_t dev, unsigned int block)
  * Function prototypes
  */
 
-extern struct dentry *sysv_lookup(struct inode * dir, struct dentry * dentry);
-extern int sysv_create(struct inode * dir, struct dentry * dentry, int mode);
-extern int sysv_mkdir(struct inode * dir, struct dentry * dentry, int mode);
-extern int sysv_rmdir(struct inode * dir, struct dentry * dentry);
-extern int sysv_unlink(struct inode * dir, struct dentry * dentry);
-extern int sysv_symlink(struct inode * inode, struct dentry * dentry, const char * symname);
-extern int sysv_link(struct dentry * old_dentry, struct inode * dir, struct dentry * dentry);
-extern int sysv_mknod(struct inode * dir, struct dentry * dentry, int mode, int rdev);
-extern int sysv_rename(struct inode * old_dir, struct dentry * old_dentry,
-		       struct inode * new_dir, struct dentry * new_dentry);
 extern struct inode * sysv_new_inode(const struct inode * dir);
 extern void sysv_free_inode(struct inode * inode);
 extern unsigned long sysv_count_free_inodes(struct super_block *sb);
@@ -384,29 +374,21 @@ extern int sysv_new_block(struct super_block * sb);
 extern void sysv_free_block(struct super_block * sb, unsigned int block);
 extern unsigned long sysv_count_free_blocks(struct super_block *sb);
 
-extern int sysv_bmap(struct inode *,int);
-
-extern struct buffer_head * sysv_getblk(struct inode *, unsigned int, int);
 extern struct buffer_head * sysv_file_bread(struct inode *, int, int);
-extern ssize_t sysv_file_read(struct file *, char *, size_t, loff_t *);
 
 extern void sysv_truncate(struct inode *);
-extern void sysv_put_super(struct super_block *);
-extern struct super_block *sysv_read_super(struct super_block *,void *,int);
 extern int init_sysv_fs(void);
-extern void sysv_write_super(struct super_block *);
-extern void sysv_read_inode(struct inode *);
-extern int sysv_notify_change(struct dentry *, struct iattr *);
 extern void sysv_write_inode(struct inode *);
-extern int sysv_statfs(struct super_block *, struct statfs *, int);
 extern int sysv_sync_inode(struct inode *);
 extern int sysv_sync_file(struct file *, struct dentry *);
-extern int sysv_mmap(struct file *, struct vm_area_struct *);
+extern int sysv_notify_change(struct dentry *, struct iattr *);
 
 extern struct inode_operations sysv_file_inode_operations;
-extern struct inode_operations sysv_file_inode_operations_with_bmap;
-extern struct inode_operations sysv_dir_inode_operations;
 extern struct inode_operations sysv_symlink_inode_operations;
+extern struct inode_operations sysv_dir_inode_operations;
+extern struct file_operations sysv_file_operations;
+extern struct file_operations sysv_dir_operations;
+extern struct address_space_operations sysv_aops;
 
 #endif /* __KERNEL__ */
 

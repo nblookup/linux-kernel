@@ -7,7 +7,7 @@
  *		handler for protocols to use and generic option handler.
  *
  *
- * Version:	$Id: sock.c,v 1.80 1999/05/08 03:04:34 davem Exp $
+ * Version:	$Id: sock.c,v 1.90 2000/02/27 19:48:11 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -116,7 +116,6 @@
 #include <net/ip.h>
 #include <net/protocol.h>
 #include <net/arp.h>
-#include <net/rarp.h>
 #include <net/route.h>
 #include <net/tcp.h>
 #include <net/udp.h>
@@ -140,6 +139,23 @@ __u32 sysctl_rmem_default = SK_RMEM_MAX;
 
 /* Maximal space eaten by iovec or ancilliary data plus some space */
 int sysctl_optmem_max = sizeof(unsigned long)*(2*UIO_MAXIOV + 512);
+
+static int sock_set_timeout(long *timeo_p, char *optval, int optlen)
+{
+	struct timeval tv;
+
+	if (optlen < sizeof(tv))
+		return -EINVAL;
+	if (copy_from_user(&tv, optval, sizeof(tv)))
+		return -EFAULT;
+
+	*timeo_p = MAX_SCHEDULE_TIMEOUT;
+	if (tv.tv_sec == 0 && tv.tv_usec == 0)
+		return 0;
+	if (tv.tv_sec < (MAX_SCHEDULE_TIMEOUT/HZ - 1))
+		*timeo_p = tv.tv_sec*HZ + (tv.tv_usec+(1000000/HZ-1))/(1000000/HZ);
+	return 0;
+}
 
 /*
  *	This is meant for all protocols to use and covers goings on
@@ -180,7 +196,9 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 		return err;
 	
   	valbool = val?1:0;
-  	
+
+	lock_sock(sk);
+
   	switch(optname) 
   	{
 		case SO_DEBUG:	
@@ -213,7 +231,7 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 			if (val > sysctl_wmem_max)
 				val = sysctl_wmem_max;
 
-			sk->sndbuf = max(val*2,2048);
+			sk->sndbuf = max(val*2,SOCK_MIN_SNDBUF);
 
 			/*
 			 *	Wake up sending tasks if we
@@ -232,7 +250,7 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 				val = sysctl_rmem_max;
 
 			/* FIXME: is this lower bound the right one? */
-			sk->rcvbuf = max(val*2,256);
+			sk->rcvbuf = max(val*2,SOCK_MIN_RCVBUF);
 			break;
 
 		case SO_KEEPALIVE:
@@ -257,23 +275,27 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 			if ((val >= 0 && val <= 6) || capable(CAP_NET_ADMIN)) 
 				sk->priority = val;
 			else
-				return(-EPERM);
+				ret = -EPERM;
 			break;
 
 		case SO_LINGER:
-			if(optlen<sizeof(ling))
-				return -EINVAL;	/* 1003.1g */
-			err = copy_from_user(&ling,optval,sizeof(ling));
-			if (err)
-			{
+			if(optlen<sizeof(ling)) {
+				ret = -EINVAL;	/* 1003.1g */
+				break;
+			}
+			if (copy_from_user(&ling,optval,sizeof(ling))) {
 				ret = -EFAULT;
 				break;
 			}
-			if(ling.l_onoff==0)
+			if(ling.l_onoff==0) {
 				sk->linger=0;
-			else
-			{
-				sk->lingertime=ling.l_linger;
+			} else {
+#if (BITS_PER_LONG == 32)
+				if (ling.l_linger >= MAX_SCHEDULE_TIMEOUT/HZ)
+					sk->lingertime=MAX_SCHEDULE_TIMEOUT;
+				else
+#endif
+					sk->lingertime=ling.l_linger*HZ;
 				sk->linger=1;
 			}
 			break;
@@ -285,16 +307,31 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 		case SO_PASSCRED:
 			sock->passcred = valbool;
 			break;
-			
-			
+
+		case SO_RCVLOWAT:
+			if (val < 0)
+				val = INT_MAX;
+			sk->rcvlowat = val ? : 1;
+			break;
+
+		case SO_RCVTIMEO:
+			ret = sock_set_timeout(&sk->rcvtimeo, optval, optlen);
+			break;
+
+		case SO_SNDTIMEO:
+			ret = sock_set_timeout(&sk->sndtimeo, optval, optlen);
+			break;
+
 #ifdef CONFIG_NETDEVICES
 		case SO_BINDTODEVICE:
 		{
 			char devname[IFNAMSIZ]; 
 
 			/* Sorry... */ 
-			if (!capable(CAP_NET_RAW)) 
-				return -EPERM; 
+			if (!capable(CAP_NET_RAW)) {
+				ret = -EPERM;
+				break;
+			}
 
 			/* Bind this socket to a particular device like "eth0",
 			 * as specified in the passed interface name. If the
@@ -307,24 +344,27 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 			} else {
 				if (optlen > IFNAMSIZ) 
 					optlen = IFNAMSIZ; 
-				if (copy_from_user(devname, optval, optlen))
-					return -EFAULT;
+				if (copy_from_user(devname, optval, optlen)) {
+					ret = -EFAULT;
+					break;
+				}
 
 				/* Remove any cached route for this socket. */
-				lock_sock(sk);
-				dst_release(xchg(&sk->dst_cache, NULL));
-				release_sock(sk);
+				sk_dst_reset(sk);
 
 				if (devname[0] == '\0') {
 					sk->bound_dev_if = 0;
 				} else {
-					struct device *dev = dev_get(devname);
-					if (!dev)
-						return -EINVAL;
+					struct net_device *dev = dev_get_by_name(devname);
+					if (!dev) {
+						ret = -ENODEV;
+						break;
+					}
 					sk->bound_dev_if = dev->ifindex;
+					dev_put(dev);
 				}
-				return 0;
 			}
+			break;
 		}
 #endif
 
@@ -344,20 +384,25 @@ int sock_setsockopt(struct socket *sock, int level, int optname,
 			break;
 
 		case SO_DETACH_FILTER:
+			spin_lock_bh(&sk->lock.slock);
 			filter = sk->filter;
-                        if(filter) {
+                        if (filter) {
 				sk->filter = NULL;
-				synchronize_bh();
+				spin_unlock_bh(&sk->lock.slock);
 				sk_filter_release(sk, filter);
-				return 0;
+				break;
 			}
-			return -ENOENT;
+			spin_unlock_bh(&sk->lock.slock);
+			ret = -ENONET;
+			break;
 #endif
 		/* We implement the SO_SNDLOWAT etc to
 		   not be settable (1003.1g 5.3) */
 		default:
-		  	return(-ENOPROTOOPT);
+		  	ret = -ENOPROTOOPT;
+			break;
   	}
+	release_sock(sk);
 	return ret;
 }
 
@@ -434,7 +479,7 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 		case SO_LINGER:	
 			lv=sizeof(v.ling);
 			v.ling.l_onoff=sk->linger;
- 			v.ling.l_linger=sk->lingertime;
+ 			v.ling.l_linger=sk->lingertime/HZ;
 			break;
 					
 		case SO_BSDCOMPAT:
@@ -442,13 +487,31 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 			break;
 			
 		case SO_RCVTIMEO:
+			lv=sizeof(struct timeval);
+			if (sk->rcvtimeo == MAX_SCHEDULE_TIMEOUT) {
+				v.tm.tv_sec = 0;
+				v.tm.tv_usec = 0;
+			} else {
+				v.tm.tv_sec = sk->rcvtimeo/HZ;
+				v.tm.tv_usec = ((sk->rcvtimeo%HZ)*1000)/HZ;
+			}
+			break;
+
 		case SO_SNDTIMEO:
 			lv=sizeof(struct timeval);
-			v.tm.tv_sec=0;
-			v.tm.tv_usec=0;
+			if (sk->sndtimeo == MAX_SCHEDULE_TIMEOUT) {
+				v.tm.tv_sec = 0;
+				v.tm.tv_usec = 0;
+			} else {
+				v.tm.tv_sec = sk->sndtimeo/HZ;
+				v.tm.tv_usec = ((sk->sndtimeo%HZ)*1000)/HZ;
+			}
 			break;
 
 		case SO_RCVLOWAT:
+			v.val = sk->rcvlowat;
+			break;
+
 		case SO_SNDLOWAT:
 			v.val=1;
 			break; 
@@ -463,7 +526,20 @@ int sock_getsockopt(struct socket *sock, int level, int optname,
 			if(copy_to_user((void*)optval, &sk->peercred, len))
 				return -EFAULT;
 			goto lenout;
-			
+
+		case SO_PEERNAME:
+		{
+			char address[128];
+
+			if (sock->ops->getname(sock, (struct sockaddr *)address, &lv, 2))
+				return -ENOTCONN;
+			if (lv < len)
+				return -EINVAL;
+			if(copy_to_user((void*)optval, address, len))
+				return -EFAULT;
+			goto lenout;
+		}
+
 		default:
 			return(-ENOPROTOOPT);
 	}
@@ -487,10 +563,10 @@ struct sock *sk_alloc(int family, int priority, int zero_it)
 {
 	struct sock *sk = kmem_cache_alloc(sk_cachep, priority);
 
-	if(sk) {
-		if (zero_it) 
-			memset(sk, 0, sizeof(struct sock));
+	if(sk && zero_it) {
+		memset(sk, 0, sizeof(struct sock));
 		sk->family = family;
+		sock_lock_init(sk);
 	}
 
 	return sk;
@@ -501,6 +577,7 @@ void sk_free(struct sock *sk)
 #ifdef CONFIG_FILTER
 	struct sk_filter *filter;
 #endif
+
 	if (sk->destruct)
 		sk->destruct(sk);
 
@@ -540,6 +617,7 @@ void sock_wfree(struct sk_buff *skb)
 	/* In case it might be waiting for more memory. */
 	atomic_sub(skb->truesize, &sk->wmem_alloc);
 	sk->write_space(sk);
+	sock_put(sk);
 }
 
 /* 
@@ -552,6 +630,10 @@ void sock_rfree(struct sk_buff *skb)
 	atomic_sub(skb->truesize, &sk->rmem_alloc);
 }
 
+void sock_cfree(struct sk_buff *skb)
+{
+	sock_put(skb->sk);
+}
 
 /*
  * Allocate a skb from the socket's send buffer.
@@ -561,9 +643,7 @@ struct sk_buff *sock_wmalloc(struct sock *sk, unsigned long size, int force, int
 	if (force || atomic_read(&sk->wmem_alloc) < sk->sndbuf) {
 		struct sk_buff * skb = alloc_skb(size, priority);
 		if (skb) {
-			atomic_add(skb->truesize, &sk->wmem_alloc);
-			skb->destructor = sock_wfree;
-			skb->sk = sk;
+			skb_set_owner_w(skb, sk);
 			return skb;
 		}
 	}
@@ -578,9 +658,7 @@ struct sk_buff *sock_rmalloc(struct sock *sk, unsigned long size, int force, int
 	if (force || atomic_read(&sk->rmem_alloc) < sk->rcvbuf) {
 		struct sk_buff *skb = alloc_skb(size, priority);
 		if (skb) {
-			atomic_add(skb->truesize, &sk->rmem_alloc);
-			skb->destructor = sock_rfree;
-			skb->sk = sk;
+			skb_set_owner_r(skb, sk);
 			return skb;
 		}
 	}
@@ -592,7 +670,8 @@ struct sk_buff *sock_rmalloc(struct sock *sk, unsigned long size, int force, int
  */ 
 void *sock_kmalloc(struct sock *sk, int size, int priority)
 {
-	if (atomic_read(&sk->omem_alloc)+size < sysctl_optmem_max) {
+	if ((unsigned)size <= sysctl_optmem_max &&
+	    atomic_read(&sk->omem_alloc)+size < sysctl_optmem_max) {
 		void *mem;
 		/* First do the add, to avoid the race if kmalloc
  		 * might sleep.
@@ -648,26 +727,27 @@ unsigned long sock_rspace(struct sock *sk)
 /* It is almost wait_for_tcp_memory minus release_sock/lock_sock.
    I think, these locks should be removed for datagram sockets.
  */
-static void sock_wait_for_wmem(struct sock * sk)
+static long sock_wait_for_wmem(struct sock * sk, long timeo)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 
 	sk->socket->flags &= ~SO_NOSPACE;
 	add_wait_queue(sk->sleep, &wait);
 	for (;;) {
 		if (signal_pending(current))
 			break;
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (atomic_read(&sk->wmem_alloc) < sk->sndbuf)
 			break;
 		if (sk->shutdown & SEND_SHUTDOWN)
 			break;
 		if (sk->err)
 			break;
-		schedule();
+		timeo = schedule_timeout(timeo);
 	}
-	current->state = TASK_RUNNING;
+	__set_current_state(TASK_RUNNING);
 	remove_wait_queue(sk->sleep, &wait);
+	return timeo;
 }
 
 
@@ -680,6 +760,9 @@ struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size,
 {
 	int err;
 	struct sk_buff *skb;
+	long timeo;
+
+	timeo = sock_sndtimeo(sk, noblock);
 
 	while (1) {
 		unsigned long try_size = size;
@@ -721,12 +804,12 @@ struct sk_buff *sock_alloc_send_skb(struct sock *sk, unsigned long size,
 
 		sk->socket->flags |= SO_NOSPACE;
 		err = -EAGAIN;
-		if (noblock)
+		if (!timeo)
 			goto failure;
 		err = -ERESTARTSYS;
 		if (signal_pending(current))
 			goto failure;
-		sock_wait_for_wmem(sk);
+		timeo = sock_wait_for_wmem(sk, timeo);
 	}
 
 	return skb;
@@ -736,42 +819,65 @@ failure:
 	return NULL;
 }
 
+void __lock_sock(struct sock *sk)
+{
+	DECLARE_WAITQUEUE(wait, current);
+
+	add_wait_queue_exclusive(&sk->lock.wq, &wait);
+	for(;;) {
+		current->state = TASK_EXCLUSIVE | TASK_UNINTERRUPTIBLE;
+		spin_unlock_bh(&sk->lock.slock);
+		schedule();
+		spin_lock_bh(&sk->lock.slock);
+		if(!sk->lock.users)
+			break;
+	}
+	current->state = TASK_RUNNING;
+	remove_wait_queue(&sk->lock.wq, &wait);
+}
 
 void __release_sock(struct sock *sk)
 {
-#ifdef CONFIG_INET
-	if (!sk->prot || !sk->backlog_rcv)
-		return;
-		
-	/* See if we have any packets built up. */
-	start_bh_atomic();
-	while (!skb_queue_empty(&sk->back_log)) {
-		struct sk_buff * skb = sk->back_log.next;
-		__skb_unlink(skb, &sk->back_log);
-		sk->backlog_rcv(sk, skb);
-	}
-	end_bh_atomic();
-#endif  
-}
+	struct sk_buff *skb = sk->backlog.head;
 
+	do {
+		sk->backlog.head = sk->backlog.tail = NULL;
+		bh_unlock_sock(sk);
+
+		do {
+			struct sk_buff *next = skb->next;
+
+			skb->next = NULL;
+			sk->backlog_rcv(sk, skb);
+			skb = next;
+		} while (skb != NULL);
+
+		bh_lock_sock(sk);
+	} while((skb = sk->backlog.head) != NULL);
+}
 
 /*
  *	Generic socket manager library. Most simpler socket families
  *	use this to manage their socket lists. At some point we should
  *	hash these. By making this generic we get the lot hashed for free.
+ *
+ *	It is broken by design. All the protocols using it must be fixed. --ANK
  */
+
+rwlock_t net_big_sklist_lock = RW_LOCK_UNLOCKED;
  
 void sklist_remove_socket(struct sock **list, struct sock *sk)
 {
 	struct sock *s;
 
-	start_bh_atomic();
+	write_lock_bh(&net_big_sklist_lock);
 
 	s= *list;
 	if(s==sk)
 	{
 		*list = s->next;
-		end_bh_atomic();
+		write_unlock_bh(&net_big_sklist_lock);
+		sock_put(sk);
 		return;
 	}
 	while(s && s->next)
@@ -783,15 +889,16 @@ void sklist_remove_socket(struct sock **list, struct sock *sk)
 		}
 		s=s->next;
 	}
-	end_bh_atomic();
+	write_unlock_bh(&net_big_sklist_lock);
 }
 
 void sklist_insert_socket(struct sock **list, struct sock *sk)
 {
-	start_bh_atomic();
+	write_lock_bh(&net_big_sklist_lock);
 	sk->next= *list;
 	*list=sk;
-	end_bh_atomic();
+	sock_hold(sk);
+	write_unlock_bh(&net_big_sklist_lock);
 }
 
 /*
@@ -833,7 +940,7 @@ void sklist_destroy_socket(struct sock **list,struct sock *sk)
 	   atomic_read(&sk->rmem_alloc) == 0 &&
 	   sk->dead)
 	{
-		sk_free(sk);
+		sock_put(sk);
 	}
 	else
 	{
@@ -855,14 +962,7 @@ void sklist_destroy_socket(struct sock **list,struct sock *sk)
  * function, some default processing is provided.
  */
 
-int sock_no_dup(struct socket *newsock, struct socket *oldsock)
-{
-	struct sock *sk = oldsock->sk;
-
-	return net_families[sk->family]->create(newsock, sk->protocol);
-}
-
-int sock_no_release(struct socket *sock, struct socket *peersock)
+int sock_no_release(struct socket *sock)
 {
 	return 0;
 }
@@ -966,7 +1066,11 @@ int sock_no_recvmsg(struct socket *sock, struct msghdr *m, int flags,
 	return -EOPNOTSUPP;
 }
 
-
+int sock_no_mmap(struct file *file, struct socket *sock, struct vm_area_struct *vma)
+{
+	/* Mirror missing mmap method error code */
+	return -ENODEV;
+}
 
 /*
  *	Default Socket Callbacks
@@ -974,28 +1078,36 @@ int sock_no_recvmsg(struct socket *sock, struct msghdr *m, int flags,
 
 void sock_def_wakeup(struct sock *sk)
 {
+	read_lock(&sk->callback_lock);
 	if(!sk->dead)
-		wake_up_interruptible(sk->sleep);
+		wake_up_interruptible_all(sk->sleep);
+	read_unlock(&sk->callback_lock);
 }
 
 void sock_def_error_report(struct sock *sk)
 {
+	read_lock(&sk->callback_lock);
 	if (!sk->dead) {
 		wake_up_interruptible(sk->sleep);
-		sock_wake_async(sk->socket,0); 
+		sock_wake_async(sk->socket,0,POLL_ERR); 
 	}
+	read_unlock(&sk->callback_lock);
 }
 
 void sock_def_readable(struct sock *sk, int len)
 {
+	read_lock(&sk->callback_lock);
 	if(!sk->dead) {
 		wake_up_interruptible(sk->sleep);
-		sock_wake_async(sk->socket,1);
+		sock_wake_async(sk->socket,1,POLL_IN);
 	}
+	read_unlock(&sk->callback_lock);
 }
 
 void sock_def_write_space(struct sock *sk)
 {
+	read_lock(&sk->callback_lock);
+
 	/* Do not wake up a writer until he can make "significant"
 	 * progress.  --DaveM
 	 */
@@ -1005,8 +1117,9 @@ void sock_def_write_space(struct sock *sk)
 
 		/* Should agree with poll, otherwise some programs break */
 		if (sock_writeable(sk))
-			sock_wake_async(sk->socket, 2);
+			sock_wake_async(sk->socket, 2, POLL_OUT);
 	}
+	read_unlock(&sk->callback_lock);
 }
 
 void sock_def_destruct(struct sock *sk)
@@ -1019,9 +1132,9 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 {
 	skb_queue_head_init(&sk->receive_queue);
 	skb_queue_head_init(&sk->write_queue);
-	skb_queue_head_init(&sk->back_log);
 	skb_queue_head_init(&sk->error_queue);
-	
+
+	spin_lock_init(&sk->timer_lock);
 	init_timer(&sk->timer);
 	
 	sk->allocation	=	GFP_KERNEL;
@@ -1036,7 +1149,10 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 		sk->type	=	sock->type;
 		sk->sleep	=	&sock->wait;
 		sock->sk	=	sk;
-	}
+	} else
+		sk->sleep	=	NULL;
+
+	sk->callback_lock	=	RW_LOCK_UNLOCKED;
 
 	sk->state_change	=	sock_def_wakeup;
 	sk->data_ready		=	sock_def_readable;
@@ -1047,5 +1163,9 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 	sk->peercred.pid 	=	0;
 	sk->peercred.uid	=	-1;
 	sk->peercred.gid	=	-1;
+	sk->rcvlowat		=	1;
+	sk->rcvtimeo		=	MAX_SCHEDULE_TIMEOUT;
+	sk->sndtimeo		=	MAX_SCHEDULE_TIMEOUT;
 
+	atomic_set(&sk->refcnt, 1);
 }

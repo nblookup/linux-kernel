@@ -6,9 +6,7 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
-
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -31,23 +29,18 @@
 #define SMBFS_PARANOIA 1
 /* #define SMBFS_DEBUG_VERBOSE 1 */
 
-static void smb_read_inode(struct inode *);
 static void smb_put_inode(struct inode *);
 static void smb_delete_inode(struct inode *);
 static void smb_put_super(struct super_block *);
-static int  smb_statfs(struct super_block *, struct statfs *, int);
+static int  smb_statfs(struct super_block *, struct statfs *);
+static void smb_set_inode_attr(struct inode *, struct smb_fattr *);
 
 static struct super_operations smb_sops =
 {
-	smb_read_inode,		/* read inode */
-	NULL,			/* write inode */
-	smb_put_inode,		/* put inode */
-	smb_delete_inode,	/* delete inode */
-	smb_notify_change,	/* notify change */
-	smb_put_super,		/* put superblock */
-	NULL,			/* write superblock */
-	smb_statfs,		/* stat filesystem */
-	NULL			/* remount filesystem */
+	put_inode:	smb_put_inode,
+	delete_inode:	smb_delete_inode,
+	put_super:	smb_put_super,
+	statfs:		smb_statfs,
 };
 
 /* FIXME: Look at all inodes whether so that we do not get duplicate
@@ -67,9 +60,7 @@ smb_invent_inos(unsigned long n)
 	return ino;
 }
 
-static struct smb_fattr *read_fattr = NULL;
-static struct semaphore read_semaphore = MUTEX;
-
+/* We are always generating a new inode here */
 struct inode *
 smb_iget(struct super_block *sb, struct smb_fattr *fattr)
 {
@@ -77,11 +68,23 @@ smb_iget(struct super_block *sb, struct smb_fattr *fattr)
 
 	pr_debug("smb_iget: %p\n", fattr);
 
-	down(&read_semaphore);
-	read_fattr = fattr;
-	result = iget(sb, fattr->f_ino);
-	read_fattr = NULL;
-	up(&read_semaphore);
+	result = get_empty_inode();
+	if (!result)
+		return result;
+	result->i_sb = sb;
+	result->i_dev = sb->s_dev;
+	result->i_ino = fattr->f_ino;
+	memset(&(result->u.smbfs_i), 0, sizeof(result->u.smbfs_i));
+	smb_set_inode_attr(result, fattr);
+	if (S_ISREG(result->i_mode)) {
+		result->i_op = &smb_file_inode_operations;
+		result->i_fop = &smb_file_operations;
+		result->i_data.a_ops = &smb_file_aops;
+	} else if (S_ISDIR(result->i_mode)) {
+		result->i_op = &smb_dir_inode_operations;
+		result->i_fop = &smb_dir_operations;
+	}
+	insert_inode_hash(result);
 	return result;
 }
 
@@ -142,29 +145,6 @@ smb_set_inode_attr(struct inode *inode, struct smb_fattr *fattr)
 	 * Update the "last time refreshed" field for revalidation.
 	 */
 	inode->u.smbfs_i.oldmtime = jiffies;
-}
-
-static void
-smb_read_inode(struct inode *inode)
-{
-	pr_debug("smb_iget: %p\n", read_fattr);
-
-	if (!read_fattr || inode->i_ino != read_fattr->f_ino)
-	{
-		printk("smb_read_inode called from invalid point\n");
-		return;
-	}
-
-	inode->i_dev = inode->i_sb->s_dev;
-	memset(&(inode->u.smbfs_i), 0, sizeof(inode->u.smbfs_i));
-	smb_set_inode_attr(inode, read_fattr);
-
-	if (S_ISREG(inode->i_mode))
-		inode->i_op = &smb_file_inode_operations;
-	else if (S_ISDIR(inode->i_mode))
-		inode->i_op = &smb_dir_inode_operations;
-	else
-		inode->i_op = NULL;
 }
 
 /*
@@ -335,8 +315,6 @@ smb_put_super(struct super_block *sb)
 	kfree(sb->u.smbfs_sb.temp_buf);
 	if (server->packet)
 		smb_vfree(server->packet);
-
-	MOD_DEC_USE_COUNT;
 }
 
 struct super_block *
@@ -346,14 +324,10 @@ smb_read_super(struct super_block *sb, void *raw_data, int silent)
 	struct inode *root_inode;
 	struct smb_fattr root;
 
-	MOD_INC_USE_COUNT;
-
 	if (!raw_data)
 		goto out_no_data;
 	if (((struct smb_mount_data *) raw_data)->version != SMB_MOUNT_VERSION)
 		goto out_wrong_data;
-
-	lock_super(sb);
 
 	sb->s_blocksize = 1024;	/* Eh...  Is this correct? */
 	sb->s_blocksize_bits = 10;
@@ -362,8 +336,8 @@ smb_read_super(struct super_block *sb, void *raw_data, int silent)
 	sb->s_op = &smb_sops;
 
 	sb->u.smbfs_sb.sock_file = NULL;
-	sb->u.smbfs_sb.sem = MUTEX;
-	sb->u.smbfs_sb.wait = NULL;
+	init_MUTEX(&sb->u.smbfs_sb.sem);
+	init_waitqueue_head(&sb->u.smbfs_sb.wait);
 	sb->u.smbfs_sb.conn_pid = 0;
 	sb->u.smbfs_sb.state = CONN_INVALID; /* no connection yet */
 	sb->u.smbfs_sb.generation = 0;
@@ -384,9 +358,6 @@ smb_read_super(struct super_block *sb, void *raw_data, int silent)
 	*mnt = *((struct smb_mount_data *) raw_data);
 	/* ** temp ** pass config flags in file mode */
 	mnt->version = (mnt->file_mode >> 9);
-#ifdef CONFIG_SMB_WIN95
-	mnt->version |= SMB_FIX_WIN95;
-#endif
 	mnt->file_mode &= (S_IRWXU | S_IRWXG | S_IRWXO);
 	mnt->file_mode |= S_IFREG;
 	mnt->dir_mode  &= (S_IRWXU | S_IRWXG | S_IRWXO);
@@ -395,8 +366,6 @@ smb_read_super(struct super_block *sb, void *raw_data, int silent)
 	/*
 	 * Display the enabled options
 	 */
-	if (mnt->version & SMB_FIX_WIN95)
-		printk("SMBFS: Win 95 bug fixes enabled\n");
 	if (mnt->version & SMB_FIX_OLDATTR)
 		printk("SMBFS: Using core getattr (Win 95 speedup)\n");
 	else if (mnt->version & SMB_FIX_DIRATTR)
@@ -410,11 +379,10 @@ smb_read_super(struct super_block *sb, void *raw_data, int silent)
 	if (!root_inode)
 		goto out_no_root;
 
-	sb->s_root = d_alloc_root(root_inode, NULL);
+	sb->s_root = d_alloc_root(root_inode);
 	if (!sb->s_root)
 		goto out_no_root;
 
-	unlock_super(sb);
 	return sb;
 
 out_no_root:
@@ -426,7 +394,6 @@ out_no_temp:
 	smb_vfree(sb->u.smbfs_sb.packet);
 out_no_mem:
 	printk(KERN_ERR "smb_read_super: allocation failure\n");
-	unlock_super(sb);
 	goto out_fail;
 out_wrong_data:
 	printk(KERN_ERR "SMBFS: need mount version %d\n", SMB_MOUNT_VERSION);
@@ -434,25 +401,17 @@ out_wrong_data:
 out_no_data:
 	printk("smb_read_super: missing data argument\n");
 out_fail:
-	sb->s_dev = 0;
-	MOD_DEC_USE_COUNT;
 	return NULL;
 }
 
 static int
-smb_statfs(struct super_block *sb, struct statfs *buf, int bufsiz)
+smb_statfs(struct super_block *sb, struct statfs *buf)
 {
-	struct statfs attr;
+	smb_proc_dskattr(sb, buf);
 
-	memset(&attr, 0, sizeof(attr));
-
-	smb_proc_dskattr(sb, &attr);
-
-	attr.f_type = SMB_SUPER_MAGIC;
-	attr.f_files = -1;
-	attr.f_ffree = -1;
-	attr.f_namelen = SMB_MAXPATHLEN;
-	return copy_to_user(buf, &attr, bufsiz) ? -EFAULT : 0;
+	buf->f_type = SMB_SUPER_MAGIC;
+	buf->f_namelen = SMB_MAXPATHLEN;
+	return 0;
 }
 
 int
@@ -495,15 +454,7 @@ dentry->d_parent->d_name.name, dentry->d_name.name,
 					 attr->ia_size);
 		if (error)
 			goto out;
-		/*
-		 * We don't implement an i_op->truncate operation,
-		 * so we have to update the page cache here.
-		 */
-		if (attr->ia_size < inode->i_size)
-		{
-			truncate_inode_pages(inode, attr->ia_size);
-			inode->i_size = attr->ia_size;
-		}
+		vmtruncate(inode, attr->ia_size);
 		refresh = 1;
 	}
 
@@ -583,14 +534,9 @@ int smb_current_kmalloced;
 int smb_current_vmalloced;
 #endif
 
-static struct file_system_type smb_fs_type = {
-	"smbfs",
-	0 /* FS_NO_DCACHE doesn't work correctly */,
-	smb_read_super,
-	NULL
-};
+static DECLARE_FSTYPE( smb_fs_type, "smbfs", smb_read_super, 0);
 
-__initfunc(int init_smb_fs(void))
+int __init init_smb_fs(void)
 {
 	return register_filesystem(&smb_fs_type);
 }
@@ -608,8 +554,6 @@ init_module(void)
 	smb_current_kmalloced = 0;
 	smb_current_vmalloced = 0;
 #endif
-
-	read_semaphore = MUTEX;
 
 	return init_smb_fs();
 }

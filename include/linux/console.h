@@ -14,6 +14,10 @@
 #ifndef _LINUX_CONSOLE_H_
 #define _LINUX_CONSOLE_H_ 1
 
+#include <linux/types.h>
+#include <linux/kdev_t.h>
+#include <linux/spinlock.h>
+
 struct vc_data;
 struct console_font_op;
 
@@ -51,6 +55,7 @@ extern struct consw *conswitchp;
 extern struct consw dummy_con;	/* dummy console buffer */
 extern struct consw fb_con;	/* frame buffer based console */
 extern struct consw vga_con;	/* VGA text console */
+extern struct consw newport_con;	/* SGI Newport console  */
 extern struct consw prom_con;	/* SPARC PROM console */
 
 void take_over_console(struct consw *sw, int first, int last, int deflt);
@@ -85,6 +90,8 @@ extern struct console_cmdline console_list[MAX_CMDLINECONSOLES];
 #define CON_PRINTBUFFER	(1)
 #define CON_CONSDEV	(2) /* Last on the command line */
 #define CON_ENABLED	(4)
+
+extern spinlock_t console_lock;
 
 struct console
 {

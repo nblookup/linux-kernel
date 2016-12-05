@@ -1,4 +1,4 @@
-/* $Id: ptrace.h,v 1.3 1998/07/09 21:45:21 ralf Exp $
+/* $Id: ptrace.h,v 1.8 1999/10/12 17:33:50 harald Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -12,16 +12,18 @@
 #ifndef __ASM_MIPS_PTRACE_H
 #define __ASM_MIPS_PTRACE_H
 
+#include <asm/isadep.h>
 #include <linux/types.h>
 
 /* 0 - 31 are integer registers, 32 - 63 are fp registers.  */
+#define FPR_BASE	32
 #define PC		64
 #define CAUSE		65
-#define MMLO		66
+#define BADVADDR	66
 #define MMHI		67
-#define FPC_CSR		68	/* XXX */
-#define FPC_EIR		69	/* XXX */
-#define FPR_BASE	70	/* XXX */
+#define MMLO		68
+#define FPC_CSR		69
+#define FPC_EIR		70
 
 #ifndef __ASSEMBLY__
 /*
@@ -58,11 +60,11 @@ struct pt_regs {
 /*
  * Does the process account for user or for system time?
  */
-#define user_mode(regs) ((regs)->cp0_status & 0x10)
+#define user_mode(regs) (((regs)->cp0_status & KU_MASK) == KU_USER)
 
 #define instruction_pointer(regs) ((regs)->cp0_epc)
 
-extern void (*show_regs)(struct pt_regs *);
+extern void show_regs(struct pt_regs *);
 #endif /* !(__ASSEMBLY__) */
 
 #endif

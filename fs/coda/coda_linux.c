@@ -102,7 +102,6 @@ int coda_fid_is_weird(struct ViceFid *fid)
 	        return 1;
 
 	return 0;
-
 }
 
 
@@ -215,6 +214,8 @@ void coda_vattr_to_iattr(struct inode *inode, struct coda_vattr *attr)
         if (attr->va_ctime.tv_sec != -1)
 	        inode->i_ctime = attr->va_ctime.tv_sec;
 }
+
+
 /* 
  * BSD sets attributes that need not be modified to -1. 
  * Linux uses the valid field to indicate what should be
@@ -288,7 +289,6 @@ void coda_iattr_to_vattr(struct iattr *iattr, struct coda_vattr *vattr)
                 vattr->va_ctime.tv_sec = iattr->ia_ctime;
                 vattr->va_ctime.tv_nsec = 0;
 	}
-        
 }
 
 void print_vattr(struct coda_vattr *attr)

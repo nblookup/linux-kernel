@@ -22,6 +22,7 @@
 #include <linux/malloc.h>
 #include <linux/major.h>
 #include <linux/fs.h>
+#include <linux/console.h>
 
 #include <asm/io.h>
 #include <asm/uaccess.h>
@@ -61,8 +62,8 @@ struct vt_struct *vt_cons[MAX_NR_CONSOLES];
  */
 unsigned char keyboard_type = KB_101;
 
-#ifndef __alpha__
-asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int on);
+#if !defined(__alpha__) && !defined(__mips__) && !defined(__arm__)
+asmlinkage long sys_ioperm(unsigned long from, unsigned long num, int on);
 #endif
 
 unsigned int video_font_height;
@@ -88,7 +89,9 @@ unsigned int video_scan_lines;
  * comments - KDMKTONE doesn't put the process to sleep.
  */
 
-#if defined(__i386__) || defined(__alpha__) || defined(__powerpc__) || defined(__mips__)
+#if defined(__i386__) || defined(__alpha__) || defined(__powerpc__) \
+    || (defined(__mips__) && !defined(CONFIG_SGI_IP22)) \
+    || (defined(__arm__) && defined(CONFIG_HOST_FOOTBRIDGE))
 
 static void
 kd_nosound(unsigned long ignored)
@@ -103,12 +106,13 @@ _kd_mksound(unsigned int hz, unsigned int ticks)
 {
 	static struct timer_list sound_timer = { NULL, NULL, 0, 0,
 						 kd_nosound };
-
 	unsigned int count = 0;
+	unsigned long flags;
 
 	if (hz > 20 && hz < 32767)
 		count = 1193180 / hz;
 	
+	save_flags(flags);
 	cli();
 	del_timer(&sound_timer);
 	if (count) {
@@ -126,7 +130,7 @@ _kd_mksound(unsigned int hz, unsigned int ticks)
 		}
 	} else
 		kd_nosound(0);
-	sti();
+	restore_flags(flags);
 	return;
 }
 
@@ -199,7 +203,7 @@ do_kdsk_ioctl(int cmd, struct kbentry *user_kbe, int perm, struct kbd_struct *kb
 		if (!(key_map = key_maps[s])) {
 			int j;
 
-			if (keymap_count >= MAX_NR_OF_USER_KEYMAPS && 
+			if (keymap_count >= MAX_NR_OF_USER_KEYMAPS &&
 			    !capable(CAP_SYS_RESOURCE))
 				return -EPERM;
 
@@ -469,7 +473,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		ucval = keyboard_type;
 		goto setchar;
 
-#ifndef __alpha__
+#if !defined(__alpha__) && !defined(__mips__) && !defined(__arm__)
 		/*
 		 * These cannot be implemented on any machine that implements
 		 * ioperm() in user level (such as Alpha PCs).
@@ -669,7 +673,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 	case KDSIGACCEPT:
 	{
 		extern int spawnpid, spawnsig;
-		if (!perm)
+		if (!perm || !capable(CAP_KILL))
 		  return -EPERM;
 		if (arg < 1 || arg > _NSIG || arg == SIGKILL)
 		  return -EINVAL;
@@ -803,9 +807,9 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 				 * make sure we are atomic with respect to
 				 * other console switches..
 				 */
-				start_bh_atomic();
+				spin_lock_irq(&console_lock);
 				complete_change_console(newvt);
-				end_bh_atomic();
+				spin_unlock_irq(&console_lock);
 			}
 		}
 
@@ -1099,7 +1103,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
  * while those not ready go back to sleep. Seems overkill to add a wait
  * to each vt just for this - usually this does nothing!
  */
-static struct wait_queue *vt_activate_queue = NULL;
+static DECLARE_WAIT_QUEUE_HEAD(vt_activate_queue);
 
 /*
  * Sleeps until a vt is activated, or the task is interrupted. Returns
@@ -1108,11 +1112,11 @@ static struct wait_queue *vt_activate_queue = NULL;
 int vt_waitactive(int vt)
 {
 	int retval;
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 
 	add_wait_queue(&vt_activate_queue, &wait);
 	for (;;) {
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		retval = 0;
 		if (vt == fg_console)
 			break;

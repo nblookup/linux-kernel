@@ -1,5 +1,5 @@
 /*
- *  linux/drivers/block/qd6580.c       Version 0.02  Feb 09, 1996
+ *  linux/drivers/block/qd6580.c		Version 0.02	Feb 09, 1996
  *
  *  Copyright (C) 1996  Linus Torvalds & author (see below)
  */
@@ -19,8 +19,10 @@
 #include <linux/ioport.h>
 #include <linux/blkdev.h>
 #include <linux/hdreg.h>
+#include <linux/ide.h>
+
 #include <asm/io.h>
-#include "ide.h"
+
 #include "ide_modes.h"
 
 /*
@@ -58,7 +60,7 @@ static void tune_qd6580 (ide_drive_t *drive, byte pio)
 	restore_flags(flags);	/* all CPUs */
 }
 
-void init_qd6580 (void)
+void __init init_qd6580 (void)
 {
 	ide_hwifs[0].chipset = ide_qd6580;
 	ide_hwifs[1].chipset = ide_qd6580;

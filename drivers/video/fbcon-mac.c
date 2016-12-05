@@ -62,7 +62,7 @@ void fbcon_mac_bmove(struct display *p, int sy, int sx, int dy, int dx,
 
    if( sx == 0 && width == p->conp->vc_cols) {
      s = height * fontheight(p) * p->next_line;
-     mymemmove(dest, src, s);
+     fb_memmove(dest, src, s);
      return;
    }
    
@@ -158,7 +158,7 @@ void fbcon_mac_bmove(struct display *p, int sy, int sx, int dy, int dx,
 	 plot_pixel_mac(p, get_pixel_mac(p, j+(dx-sx), i+(dy-sy)), j, i);
 
        if (j < r) {
-	 mymemmove(dest, src, s);
+	 fb_memmove(dest, src, s);
 	 if (move_up) {
 	   dest += p->next_line;
 	   src += p->next_line;
@@ -202,9 +202,9 @@ void fbcon_mac_clear(struct vc_data *conp, struct display *p, int sy, int sx,
    if( sx == 0 && width == p->conp->vc_cols) {
      s = height * fontheight(p) * p->next_line;
      if (inverse)
-       mymemclear(dest, s);
+       fb_memclear(dest, s);
      else
-       mymemset(dest, s);
+       fb_memset255(dest, s);
    }
    
    l = sx * fontwidth(p);
@@ -251,9 +251,9 @@ void fbcon_mac_clear(struct vc_data *conp, struct display *p, int sy, int sx,
 
      if (j < r) {
        if (PIXEL_WHITE_MAC == pixel)
-	 mymemclear(dest, s);
+	 fb_memclear(dest, s);
        else
-	 mymemset(dest, s);
+	 fb_memset255(dest, s);
        dest += p->next_line;
        j += w;
      }
@@ -331,7 +331,8 @@ static void plot_pixel_mac(struct display *p, int bw, int pixel_x, int pixel_y)
   u16 *dest16, pix16;
   u32 *dest32, pix32;
 
-  if (pixel_x < 0 || pixel_y < 0 || pixel_x >= 832 || pixel_y >= 624) {
+  /* There *are* 68k Macs that support more than 832x624, you know :-) */
+  if (pixel_x < 0 || pixel_y < 0 || pixel_x >= p->var.xres || pixel_y >= p->var.yres) {
     int cnt;
     printk ("ERROR: pixel_x == %d, pixel_y == %d", pixel_x, pixel_y);
     for(cnt = 0; cnt < 100000; cnt++)
@@ -455,7 +456,7 @@ static int get_pixel_mac(struct display *p, int pixel_x, int pixel_y)
   u8 *dest, bit;
   u16 *dest16;
   u32 *dest32;
-  u8 pixel;
+  u8 pixel=0;
 
   switch (p->var.bits_per_pixel) {
   case 1:

@@ -1,12 +1,14 @@
-/* $Id: indy_int.c,v 1.9 1998/05/28 03:18:00 ralf Exp $
+/* $Id: indy_int.c,v 1.17 2000/02/04 07:40:23 ralf Exp $
  *
  * indy_int.c: Routines for generic manipulation of the INT[23] ASIC
  *             found on INDY workstations..
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
  * Copyright (C) 1997, 1998 Ralf Baechle (ralf@gnu.org)
+ * Copyright (C) 1999 Andrew R. Baker (andrewb@uab.edu) 
+ *                    - Indigo2 changes
+ *                    - Interrupt handling fixes
  */
-#include <linux/config.h>
 #include <linux/init.h>
 
 #include <linux/errno.h>
@@ -31,10 +33,11 @@
 
 #include <asm/ptrace.h>
 #include <asm/processor.h>
-#include <asm/sgi.h>
-#include <asm/sgihpc.h>
-#include <asm/sgint23.h>
+#include <asm/sgi/sgi.h>
+#include <asm/sgi/sgihpc.h>
+#include <asm/sgi/sgint23.h>
 #include <asm/sgialib.h>
+#include <asm/gdb-stub.h>
 
 /* #define DEBUG_SGINT */
 
@@ -50,10 +53,6 @@ static char lc2msk_to_irqnr[256];
 static char lc3msk_to_irqnr[256];
 
 extern asmlinkage void indyIRQ(void);
-
-#ifdef CONFIG_REMOTE_DEBUG
-extern void rs_kgdb_hook(int);
-#endif
 
 unsigned int local_bh_count[NR_CPUS];
 unsigned int local_irq_count[NR_CPUS];
@@ -259,8 +258,6 @@ int get_irq_list(char *buf)
 	return len;
 }
 
-atomic_t __mips_bh_counter;
-
 /*
  * do_IRQ handles IRQ's that have been installed without the
  * SA_INTERRUPT flag: it uses the full signal-handling return
@@ -274,7 +271,7 @@ asmlinkage void do_IRQ(int irq, struct pt_regs * regs)
 	int do_random, cpu;
 
 	cpu = smp_processor_id();
-	irq_enter(cpu, irq);
+	irq_enter(cpu);
 	kstat.irqs[0][irq]++;
 
 	printk("Got irq %d, press a key.", irq);
@@ -310,7 +307,7 @@ asmlinkage void do_IRQ(int irq, struct pt_regs * regs)
 			add_interrupt_randomness(irq);
 		__cli();
 	}
-	irq_exit(cpu, irq);
+	irq_exit(cpu);
 
 	/* unmasking and bottom half handling is done magically for us. */
 }
@@ -424,7 +421,7 @@ static int indy_irq_cannonicalize(int irq)
 	return irq;	/* Sane hardware, sane code ... */
 }
 
-__initfunc(void init_IRQ(void))
+void __init init_IRQ(void)
 {
 	irq_cannonicalize = indy_irq_cannonicalize;
 	irq_setup();
@@ -448,10 +445,23 @@ void indy_local0_irqdispatch(struct pt_regs *regs)
 		action = local_irq_action[irq];
 	}
 
-	irq_enter(cpu, irq);
+	/* if irq == 0, then the interrupt has already been cleared */
+	if ( irq == 0 ) { goto end; }
+	/* if action == NULL, then we do have a handler for the irq */
+	if ( action == NULL ) { goto no_handler; }
+	
+	irq_enter(cpu);
 	kstat.irqs[0][irq + 16]++;
 	action->handler(irq, action->dev_id, regs);
-	irq_exit(cpu, irq);
+	irq_exit(cpu);
+	goto end;
+
+no_handler:
+	printk("No handler for local0 irq: %i\n", irq);
+
+end:	
+	return;	
+	
 }
 
 void indy_local1_irqdispatch(struct pt_regs *regs)
@@ -472,10 +482,23 @@ void indy_local1_irqdispatch(struct pt_regs *regs)
 		irq = lc1msk_to_irqnr[mask];
 		action = local_irq_action[irq];
 	}
-	irq_enter(cpu, irq);
+	/* if irq == 0, then the interrupt has already been cleared */
+	/* not sure if it is needed here, but it is needed for local0 */
+	if ( irq == 0 ) { goto end; }
+	/* if action == NULL, then we do have a handler for the irq */
+	if ( action == NULL ) { goto no_handler; }
+	
+	irq_enter(cpu);
 	kstat.irqs[0][irq + 24]++;
 	action->handler(irq, action->dev_id, regs);
-	irq_exit(cpu, irq);
+	irq_exit(cpu);
+	goto end;
+	
+no_handler:
+	printk("No handler for local1 irq: %i\n", irq);
+
+end:	
+	return;	
 }
 
 void indy_buserror_irq(struct pt_regs *regs)
@@ -483,13 +506,13 @@ void indy_buserror_irq(struct pt_regs *regs)
 	int cpu = smp_processor_id();
 	int irq = 6;
 
-	irq_enter(cpu, irq);
+	irq_enter(cpu);
 	kstat.irqs[0][irq]++;
 	printk("Got a bus error IRQ, shouldn't happen yet\n");
 	show_regs(regs);
 	printk("Spinning...\n");
 	while(1);
-	irq_exit(cpu, irq);
+	irq_exit(cpu);
 }
 
 /* Misc. crap just to keep the kernel linking... */
@@ -503,12 +526,9 @@ int probe_irq_off (unsigned long irqs)
 	return 0;
 }
 
-__initfunc(void sgint_init(void))
+void __init sgint_init(void)
 {
 	int i;
-#ifdef CONFIG_REMOTE_DEBUG
-	char *ctype;
-#endif
 
 	sgi_i2regs = (struct sgi_int2_regs *) (KSEG1 + SGI_INT2_BASE);
 	sgi_i3regs = (struct sgi_int3_regs *) (KSEG1 + SGI_INT3_BASE);
@@ -563,9 +583,16 @@ __initfunc(void sgint_init(void))
 		}
 	}
 
-	ioc_icontrol = &sgi_i3regs->ints;
-	ioc_timers = &sgi_i3regs->timers;
-	ioc_tclear = &sgi_i3regs->tclear;
+	/* Indy uses an INT3, Indigo2 uses an INT2 */
+	if (sgi_guiness) {
+		ioc_icontrol = &sgi_i3regs->ints;
+		ioc_timers = &sgi_i3regs->timers;
+		ioc_tclear = &sgi_i3regs->tclear;
+	} else {
+		ioc_icontrol = &sgi_i2regs->ints;
+		ioc_timers = &sgi_i2regs->timers;
+		ioc_tclear = &sgi_i2regs->tclear;
+	}
 
 	/* Mask out all interrupts. */
 	ioc_icontrol->imask0 = 0;
@@ -575,28 +602,4 @@ __initfunc(void sgint_init(void))
 
 	/* Now safe to set the exception vector. */
 	set_except_vector(0, indyIRQ);
-
-#ifdef CONFIG_REMOTE_DEBUG
-	ctype = prom_getcmdline();
-	for(i = 0; i < strlen(ctype); i++) {
-		if(ctype[i]=='k' && ctype[i+1]=='g' &&
-		   ctype[i+2]=='d' && ctype[i+3]=='b' &&
-		   ctype[i+4]=='=' && ctype[i+5]=='t' &&
-		   ctype[i+6]=='t' && ctype[i+7]=='y' &&
-		   ctype[i+8]=='d' &&
-		   (ctype[i+9] == '1' || ctype[i+9] == '2')) {
-			printk("KGDB: Using serial line /dev/ttyd%d for "
-			       "session\n", (ctype[i+9] - '0'));
-				if(ctype[i+9]=='1')
-					rs_kgdb_hook(1);
-				else if(ctype[i+9]=='2')
-					rs_kgdb_hook(0);
-				else {
-					printk("KGDB: whoops bogon tty line "
-					       "requested, disabling session\n");
-				}
-
-		}
-	}
-#endif
 }
