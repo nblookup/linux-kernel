@@ -736,7 +736,7 @@ static void snd_pmac_sound_feature(pmac_t *chip, int enable)
 		pmu_suspend();
 		feature_clear(chip->node, FEATURE_Sound_power);
 		feature_clear(chip->node, FEATURE_Sound_CLK_enable);
-		mdelay(1000); /* XXX */
+		big_mdelay(1000); /* XXX */
 		pmu_resume();
 	}
 	if (chip->is_pbook_3400) {
@@ -923,8 +923,6 @@ static int __init snd_pmac_detect(pmac_t *chip)
 	}
 	if (device_is_compatible(sound, "snapper")) {
 		chip->model = PMAC_SNAPPER;
-		chip->can_capture = 0;  /* no capture */
-		chip->can_duplex = 0;
 		// chip->can_byte_swap = 0; /* FIXME: check this */
 		chip->num_freqs = 2;
 		chip->freq_table = tumbler_freqs;

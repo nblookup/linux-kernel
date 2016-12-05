@@ -313,7 +313,7 @@ static struct tty_operations pty_ops = {
 	.set_termios = pty_set_termios,
 };
 
-int __init pty_init(void)
+static int __init pty_init(void)
 {
 	/* Traditional BSD devices */
 
@@ -354,7 +354,7 @@ int __init pty_init(void)
 	pty_slave_driver->init_termios = tty_std_termios;
 	pty_slave_driver->init_termios.c_cflag = B38400 | CS8 | CREAD;
 	pty_slave_driver->flags = TTY_DRIVER_RESET_TERMIOS |
-			TTY_DRIVER_REAL_RAW | TTY_DRIVER_NO_DEVFS;
+					TTY_DRIVER_REAL_RAW;
 	pty_slave_driver->other = pty_driver;
 	tty_set_operations(pty_slave_driver, &pty_ops);
 
@@ -414,3 +414,4 @@ int __init pty_init(void)
 #endif
 	return 0;
 }
+module_init(pty_init);

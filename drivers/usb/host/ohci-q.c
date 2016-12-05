@@ -43,6 +43,16 @@ finish_urb (struct ohci_hcd *ohci, struct urb *urb, struct pt_regs *regs)
 	spin_lock (&urb->lock);
 	if (likely (urb->status == -EINPROGRESS))
 		urb->status = 0;
+	/* report short control reads right even though the data TD always
+	 * has TD_R set.  (much simpler, but creates the 1-td limit.)
+	 */
+	if (unlikely (urb->transfer_flags & URB_SHORT_NOT_OK)
+			&& unlikely (usb_pipecontrol (urb->pipe))
+			&& urb->actual_length < urb->transfer_buffer_length
+			&& usb_pipein (urb->pipe)
+			&& urb->status == 0) {
+		urb->status = -EREMOTEIO;
+	}
 	spin_unlock (&urb->lock);
 
 	// what lock protects these?
@@ -439,7 +449,7 @@ static void start_urb_unlink (struct ohci_hcd *ohci, struct ed *ed)
 	ohci->ed_rm_list = ed;
 
 	/* enable SOF interrupt */
-	if (!ohci->sleeping) {
+	if (HCD_IS_RUNNING (ohci->hcd.state)) {
 		writel (OHCI_INTR_SF, &ohci->regs->intrstatus);
 		writel (OHCI_INTR_SF, &ohci->regs->intrenable);
 		// flush those pci writes
@@ -784,7 +794,16 @@ ed_halted (struct ohci_hcd *ohci, struct td *td, int cc, struct td *rev)
 	 * looks odd ... that doesn't include protocol stalls
 	 * (or maybe some other things)
 	 */
-	if (cc != TD_CC_STALL || !usb_pipecontrol (urb->pipe))
+	switch (cc) {
+	case TD_DATAUNDERRUN:
+		if ((urb->transfer_flags & URB_SHORT_NOT_OK) == 0)
+			break;
+		/* fallthrough */
+	case TD_CC_STALL:
+		if (usb_pipecontrol (urb->pipe))
+			break;
+		/* fallthrough */
+	default:
 		ohci_dbg (ohci,
 			"urb %p path %s ep%d%s %08x cc %d --> status %d\n",
 			urb, urb->dev->devpath,
@@ -792,6 +811,7 @@ ed_halted (struct ohci_hcd *ohci, struct td *td, int cc, struct td *rev)
 			usb_pipein (urb->pipe) ? "in" : "out",
 			le32_to_cpu (td->hwINFO),
 			cc, cc_to_error [cc]);
+	}
 
 	return rev;
 }
@@ -861,7 +881,8 @@ rescan_all:
 		/* only take off EDs that the HC isn't using, accounting for
 		 * frame counter wraps.
 		 */
-		if (tick_before (tick, ed->tick) && !ohci->disabled) {
+		if (tick_before (tick, ed->tick)
+				&& HCD_IS_RUNNING(ohci->hcd.state)) {
 			last = &ed->ed_next;
 			continue;
 		}
@@ -891,7 +912,7 @@ rescan_this:
 			urb = td->urb;
 			urb_priv = td->urb->hcpriv;
 
-			if (urb_priv->state != URB_DEL) {
+			if (urb->status == -EINPROGRESS) {
 				prev = &td->hwNextTD;
 				continue;
 			}
@@ -928,7 +949,7 @@ rescan_this:
 
 		/* but if there's work queued, reschedule */
 		if (!list_empty (&ed->td_list)) {
-			if (!ohci->disabled && !ohci->sleeping)
+			if (HCD_IS_RUNNING(ohci->hcd.state))
 				ed_schedule (ohci, ed);
 		}
 
@@ -937,7 +958,7 @@ rescan_this:
    	}
 
 	/* maybe reenable control and bulk lists */ 
-	if (!ohci->disabled && !ohci->ed_rm_list) {
+	if (HCD_IS_RUNNING(ohci->hcd.state) && !ohci->ed_rm_list) {
 		u32	command = 0, control = 0;
 
 		if (ohci->ed_controltail) {
@@ -1003,10 +1024,22 @@ dl_done_list (struct ohci_hcd *ohci, struct td *td, struct pt_regs *regs)
 		if (list_empty (&ed->td_list))
 			ed_deschedule (ohci, ed);
 		/* ... reenabling halted EDs only after fault cleanup */
-		else if (!(ed->hwINFO & ED_DEQUEUE)) {
+		else if ((ed->hwINFO & (ED_SKIP | ED_DEQUEUE)) == ED_SKIP) {
 			td = list_entry (ed->td_list.next, struct td, td_list);
-			if (!(td->hwINFO & TD_DONE))
+			if (!(td->hwINFO & TD_DONE)) {
 				ed->hwINFO &= ~ED_SKIP;
+				/* ... hc may need waking-up */
+				switch (ed->type) {
+				case PIPE_CONTROL:
+					writel (OHCI_CLF,
+						&ohci->regs->cmdstatus);   
+					break;
+				case PIPE_BULK:
+					writel (OHCI_BLF,
+						&ohci->regs->cmdstatus);   
+					break;
+				}
+			}
 		}
 
     		td = td_next;

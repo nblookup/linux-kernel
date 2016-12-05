@@ -19,13 +19,11 @@
 #include <linux/threads.h>
 #include <linux/param.h>
 #include <linux/string.h>
-#include <linux/blk.h>
 #include <linux/pci.h>
 #include <linux/rtc.h>
 
 #include <asm/system.h>
 #include <asm/pci-bridge.h>
-#include <asm/processor.h>
 #include <asm/machdep.h>
 #include <asm/page.h>
 #include <asm/time.h>

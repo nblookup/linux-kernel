@@ -44,12 +44,12 @@ MODULE_DEVICE_TABLE(pci, i82092aa_pci_ids);
 
 static int i82092aa_socket_suspend (struct pci_dev *dev, u32 state)
 {
-	return pcmcia_socket_dev_suspend(&dev->dev, state, 0);
+	return pcmcia_socket_dev_suspend(&dev->dev, state);
 }
 
 static int i82092aa_socket_resume (struct pci_dev *dev)
 {
-	return pcmcia_socket_dev_resume(&dev->dev, RESUME_RESTORE_STATE);
+	return pcmcia_socket_dev_resume(&dev->dev);
 }
 
 static struct pci_driver i82092aa_pci_drv = {
@@ -92,7 +92,7 @@ static struct socket_info sockets[MAX_SOCKETS];
 static int socket_count;  /* shortcut */                                  	                                	
 
 
-static int __init i82092aa_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
+static int __devinit i82092aa_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 {
 	unsigned char configbyte;
 	int i, ret;
@@ -161,7 +161,7 @@ static int __init i82092aa_pci_probe(struct pci_dev *dev, const struct pci_devic
 
 	for (i = 0; i<socket_count; i++) {
 		sockets[i].socket.dev.dev = &dev->dev;
-		sockets[i].socket.ss_entry = &i82092aa_operations;
+		sockets[i].socket.ops = &i82092aa_operations;
 		ret = pcmcia_register_socket(&sockets[i].socket);
 		if (ret) {
 			goto err_out_free_sockets;
@@ -426,7 +426,6 @@ static int i82092aa_init(struct pcmcia_socket *sock)
         enter("i82092aa_init");
                         
         mem.sys_stop = 0x0fff;
-        i82092aa_set_socket(sock, &dead_socket);
         for (i = 0; i < 2; i++) {
         	io.map = i;
                 i82092aa_set_io_map(sock, &io);

@@ -15,7 +15,6 @@
 #include <linux/mtd/blktrans.h>
 #include <linux/mtd/mtd.h>
 #include <linux/blkdev.h>
-#include <linux/blk.h>
 #include <linux/blkpg.h>
 #include <linux/spinlock.h>
 #include <linux/hdreg.h>
@@ -33,7 +32,7 @@ struct mtd_blkcore_priv {
 	struct completion thread_dead;
 	int exiting;
 	wait_queue_head_t thread_wq;
-	struct request_queue rq;
+	struct request_queue *rq;
 	spinlock_t queue_lock;
 };
 
@@ -79,7 +78,7 @@ static int do_blktrans_request(struct mtd_blktrans_ops *tr,
 static int mtd_blktrans_thread(void *arg)
 {
 	struct mtd_blktrans_ops *tr = arg;
-	struct request_queue *rq = &tr->blkcore_priv->rq;
+	struct request_queue *rq = tr->blkcore_priv->rq;
 
 	/* we might get involved when memory gets low, so use PF_MEMALLOC */
 	current->flags |= PF_MEMALLOC;
@@ -297,7 +296,7 @@ int add_mtd_blktrans_dev(struct mtd_blktrans_dev *new)
 	set_capacity(gd, new->size);
 	gd->private_data = new;
 	new->blkcore_priv = gd;
-	gd->queue = &tr->blkcore_priv->rq;
+	gd->queue = tr->blkcore_priv->rq;
 
 	if (new->readonly)
 		set_disk_ro(gd, 1);
@@ -388,14 +387,19 @@ int register_mtd_blktrans(struct mtd_blktrans_ops *tr)
 	init_completion(&tr->blkcore_priv->thread_dead);
 	init_waitqueue_head(&tr->blkcore_priv->thread_wq);
 
-	blk_init_queue(&tr->blkcore_priv->rq, mtd_blktrans_request, 
-		       &tr->blkcore_priv->queue_lock);
-	tr->blkcore_priv->rq.queuedata = tr;
+	tr->blkcore_priv->rq = blk_init_queue(mtd_blktrans_request, &tr->blkcore_priv->queue_lock);
+	if (!tr->blkcore_priv->rq) {
+		unregister_blkdev(tr->major, tr->name);
+		kfree(tr->blkcore_priv);
+		up(&mtd_table_mutex);
+		return -ENOMEM;
+	}
 
-	ret = kernel_thread(mtd_blktrans_thread, tr, 
-			    CLONE_FS|CLONE_FILES|CLONE_SIGHAND);
+	tr->blkcore_priv->rq->queuedata = tr;
+
+	ret = kernel_thread(mtd_blktrans_thread, tr, CLONE_KERNEL);
 	if (ret < 0) {
-		blk_cleanup_queue(&tr->blkcore_priv->rq);
+		blk_cleanup_queue(tr->blkcore_priv->rq);
 		unregister_blkdev(tr->major, tr->name);
 		kfree(tr->blkcore_priv);
 		up(&mtd_table_mutex);
@@ -437,7 +441,7 @@ int deregister_mtd_blktrans(struct mtd_blktrans_ops *tr)
 	}
 
 	devfs_remove(tr->name);
-	blk_cleanup_queue(&tr->blkcore_priv->rq);
+	blk_cleanup_queue(tr->blkcore_priv->rq);
 	unregister_blkdev(tr->major, tr->name);
 
 	up(&mtd_table_mutex);

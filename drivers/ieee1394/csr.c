@@ -20,6 +20,8 @@
 #include <linux/string.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/param.h>
+#include <linux/spinlock.h>
 
 #include "ieee1394_types.h"
 #include "hosts.h"
@@ -89,6 +91,37 @@ static void host_reset(struct hpsb_host *host)
                                                          0x3f1));
 }
 
+/* 
+ * HI == seconds (bits 0:2)
+ * LO == fraction units of 1/8000 of a second, as per 1394 (bits 19:31)
+ *
+ * Convert to units and then to HZ, for comparison to jiffies.
+ *
+ * By default this will end up being 800 units, or 100ms (125usec per
+ * unit).
+ *
+ * NOTE: The spec says 1/8000, but also says we can compute based on 1/8192
+ * like CSR specifies. Should make our math less complex.
+ */
+static inline void calculate_expire(struct csr_control *csr)
+{
+	unsigned long units;
+	
+	/* Take the seconds, and convert to units */
+	units = (unsigned long)(csr->split_timeout_hi & 0x07) << 13;
+
+	/* Add in the fractional units */
+	units += (unsigned long)(csr->split_timeout_lo >> 19);
+
+	/* Convert to jiffies */
+	csr->expire = (unsigned long)(units * HZ) >> 13UL;
+
+	/* Just to keep from rounding low */
+	csr->expire++;
+
+	HPSB_VERBOSE("CSR: setting expire to %lu, HZ=%u", csr->expire, HZ);
+}
+
 
 static void add_host(struct hpsb_host *host)
 {
@@ -100,6 +133,7 @@ static void add_host(struct hpsb_host *host)
         host->csr.node_ids              = 0;
         host->csr.split_timeout_hi      = 0;
         host->csr.split_timeout_lo      = 800 << 19;
+	calculate_expire(&host->csr);
         host->csr.cycle_time            = 0;
         host->csr.bus_time              = 0;
         host->csr.bus_manager_id        = 0x3f;
@@ -158,7 +192,7 @@ int hpsb_get_config_rom(struct hpsb_host *host, quadlet_t *buffer,
 
 /* Read topology / speed maps and configuration ROM */
 static int read_maps(struct hpsb_host *host, int nodeid, quadlet_t *buffer,
-                     u64 addr, unsigned int length, u16 fl)
+                     u64 addr, size_t length, u16 fl)
 {
 	unsigned long flags;
         int csraddr = addr - CSR_REGISTER_BASE;
@@ -168,6 +202,7 @@ static int read_maps(struct hpsb_host *host, int nodeid, quadlet_t *buffer,
 
         if (csraddr < CSR_TOPOLOGY_MAP) {
                 if (csraddr + length > CSR_CONFIG_ROM + host->csr.rom_size) {
+                        spin_unlock_irqrestore(&host->csr.lock, flags);
                         return RCODE_ADDRESS_ERROR;
                 }
                 src = ((char *)host->csr.rom) + csraddr - CSR_CONFIG_ROM;
@@ -187,7 +222,7 @@ static int read_maps(struct hpsb_host *host, int nodeid, quadlet_t *buffer,
 #define out if (--length == 0) break
 
 static int read_regs(struct hpsb_host *host, int nodeid, quadlet_t *buf,
-                     u64 addr, unsigned int length, u16 flags)
+                     u64 addr, size_t length, u16 flags)
 {
         int csraddr = addr - CSR_REGISTER_BASE;
         int oldcycle;
@@ -301,7 +336,7 @@ static int read_regs(struct hpsb_host *host, int nodeid, quadlet_t *buf,
 }
 
 static int write_regs(struct hpsb_host *host, int nodeid, int destid,
-		      quadlet_t *data, u64 addr, unsigned int length, u16 flags)
+		      quadlet_t *data, u64 addr, size_t length, u16 flags)
 {
         int csraddr = addr - CSR_REGISTER_BASE;
         
@@ -336,10 +371,12 @@ static int write_regs(struct hpsb_host *host, int nodeid, int destid,
         case CSR_SPLIT_TIMEOUT_HI:
                 host->csr.split_timeout_hi = 
                         be32_to_cpu(*(data++)) & 0x00000007;
+		calculate_expire(&host->csr);
                 out;
         case CSR_SPLIT_TIMEOUT_LO:
                 host->csr.split_timeout_lo = 
                         be32_to_cpu(*(data++)) & 0xfff80000;
+		calculate_expire(&host->csr);
                 out;
 
                 /* address gap */
@@ -410,7 +447,7 @@ static int lock_regs(struct hpsb_host *host, int nodeid, quadlet_t *store,
 		 * eventually. */
 		HPSB_WARN("Node [" NODE_BUS_FMT "] wants to release "
 			  "broadcast channel 31.  Ignoring.",
-			  NODE_BUS_ARGS(nodeid));
+			  NODE_BUS_ARGS(host, nodeid));
 
 		data &= ~0x1;	/* keep broadcast channel allocated */
 	}
@@ -556,7 +593,7 @@ static int lock64_regs(struct hpsb_host *host, int nodeid, octlet_t * store,
                  * eventually. */
 		HPSB_WARN("Node [" NODE_BUS_FMT "] wants to release "
 			  "broadcast channel 31.  Ignoring.",
-			  NODE_BUS_ARGS(nodeid));
+			  NODE_BUS_ARGS(host, nodeid));
 
 		data &= ~0x100000000ULL;	/* keep broadcast channel allocated */
 	}
@@ -625,7 +662,7 @@ static int lock64_regs(struct hpsb_host *host, int nodeid, octlet_t * store,
 }
 
 static int write_fcp(struct hpsb_host *host, int nodeid, int dest,
-		     quadlet_t *data, u64 addr, unsigned int length, u16 flags)
+		     quadlet_t *data, u64 addr, size_t length, u16 flags)
 {
         int csraddr = addr - CSR_REGISTER_BASE;
 

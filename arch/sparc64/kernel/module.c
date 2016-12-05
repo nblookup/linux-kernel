@@ -14,6 +14,9 @@
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 
+#include <asm/processor.h>
+#include <asm/spitfire.h>
+
 static struct vm_struct * modvmlist = NULL;
 
 static void module_unmap(void * addr)
@@ -243,6 +246,12 @@ int apply_relocate_add(Elf64_Shdr *sechdrs,
 				((v >> 2) & 0x3fffff);
 			break;
 
+		case R_SPARC_WDISP19:
+			v -= (Elf64_Addr) location;
+			*loc32 = (*loc32 & ~0x7ffff) |
+				((v >> 2) & 0x7ffff);
+			break;
+
 		case R_SPARC_LO10:
 			*loc32 = (*loc32 & ~0x3ff) | (v & 0x3ff);
 			break;
@@ -273,6 +282,16 @@ int module_finalize(const Elf_Ehdr *hdr,
 		    const Elf_Shdr *sechdrs,
 		    struct module *me)
 {
+	/* Cheetah's I-cache is fully coherent.  */
+	if (tlb_type == spitfire) {
+		unsigned long va;
+
+		flushw_all();
+		for (va =  0; va < (PAGE_SIZE << 1); va += 32)
+			spitfire_put_icache_tag(va, 0x0);
+		__asm__ __volatile__("flush %g6");
+	}
+
 	return 0;
 }
 

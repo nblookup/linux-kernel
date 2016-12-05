@@ -16,7 +16,6 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/fs.h>
-#include <linux/blk.h>
 #include <linux/kmod.h>
 #include <linux/ctype.h>
 #include <linux/devfs_fs_kernel.h>
@@ -112,7 +111,7 @@ static int (*check_part[])(struct parsed_partitions *, struct block_device *) = 
 };
  
 /*
- * disk_name() is used by partition check code and the md driver.
+ * disk_name() is used by partition check code and the genhd driver.
  * It formats the devicename of the indicated disk into
  * the supplied buffer (of size at least 32), and returns
  * a pointer to that same buffer (for convenience).
@@ -136,6 +135,8 @@ const char *bdevname(struct block_device *bdev, char *buf)
 	return disk_name(bdev->bd_disk, part, buf);
 }
 
+EXPORT_SYMBOL(bdevname);
+
 /*
  * NOTE: this cannot be called from interrupt context.
  *
@@ -158,6 +159,8 @@ const char *__bdevname(dev_t dev, char *buffer)
 
 	return buffer;
 }
+
+EXPORT_SYMBOL(__bdevname);
 
 static struct parsed_partitions *
 check_partition(struct gendisk *hd, struct block_device *bdev)
@@ -224,9 +227,8 @@ static struct sysfs_ops part_sysfs_ops = {
 static ssize_t part_dev_read(struct hd_struct * p, char *page)
 {
 	struct gendisk *disk = container_of(p->kobj.parent,struct gendisk,kobj);
-	int part = p->partno;
-	dev_t base = MKDEV(disk->major, disk->first_minor); 
-	return sprintf(page, "%04x\n", (unsigned)(base + part));
+	dev_t dev = MKDEV(disk->major, disk->first_minor + p->partno); 
+	return print_dev_t(page, dev);
 }
 static ssize_t part_start_read(struct hd_struct * p, char *page)
 {
@@ -269,7 +271,14 @@ static struct attribute * default_attrs[] = {
 
 extern struct subsystem block_subsys;
 
+static void part_release(struct kobject *kobj)
+{
+	struct hd_struct * p = container_of(kobj,struct hd_struct,kobj);
+	kfree(p);
+}
+
 struct kobj_type ktype_part = {
+	.release	= part_release,
 	.default_attrs	= default_attrs,
 	.sysfs_ops	= &part_sysfs_ops,
 };
@@ -281,13 +290,12 @@ void delete_partition(struct gendisk *disk, int part)
 		return;
 	if (!p->nr_sects)
 		return;
+	disk->part[part-1] = NULL;
 	p->start_sect = 0;
 	p->nr_sects = 0;
 	p->reads = p->writes = p->read_sectors = p->write_sectors = 0;
 	devfs_remove("%s/part%d", disk->devfs_name, part);
 	kobject_unregister(&p->kobj);
-	disk->part[part-1] = NULL;
-	kfree(p);
 }
 
 void add_partition(struct gendisk *disk, int part, sector_t start, sector_t len)
@@ -302,7 +310,6 @@ void add_partition(struct gendisk *disk, int part, sector_t start, sector_t len)
 	p->start_sect = start;
 	p->nr_sects = len;
 	p->partno = part;
-	disk->part[part-1] = p;
 
 	devfs_mk_bdev(MKDEV(disk->major, disk->first_minor + part),
 			S_IFBLK|S_IRUSR|S_IWUSR,
@@ -312,6 +319,7 @@ void add_partition(struct gendisk *disk, int part, sector_t start, sector_t len)
 	p->kobj.parent = &disk->kobj;
 	p->kobj.ktype = &ktype_part;
 	kobject_register(&p->kobj);
+	disk->part[part-1] = p;
 }
 
 static void disk_sysfs_symlinks(struct gendisk *disk)
@@ -348,6 +356,9 @@ void register_disk(struct gendisk *disk)
 		return;
 	}
 
+	/* always add handle for the whole disk */
+	devfs_add_partitioned(disk);
+
 	/* No such device (e.g., media were just removed) */
 	if (!get_capacity(disk))
 		return;
@@ -356,7 +367,6 @@ void register_disk(struct gendisk *disk)
 	if (blkdev_get(bdev, FMODE_READ, 0, BDEV_RAW) < 0)
 		return;
 	state = check_partition(disk, bdev);
-	devfs_add_partitioned(disk);
 	if (state) {
 		for (j = 1; j < state->limit; j++) {
 			sector_t size = state->parts[j].size;
@@ -428,6 +438,8 @@ fail:
 	p->v = NULL;
 	return NULL;
 }
+
+EXPORT_SYMBOL(read_dev_sector);
 
 void del_gendisk(struct gendisk *disk)
 {

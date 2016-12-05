@@ -47,6 +47,7 @@ struct usbtest_info {
 	const char		*name;
 	u8			ep_in;		/* bulk/intr source */
 	u8			ep_out;		/* bulk/intr sink */
+	unsigned		autoconf : 1;
 	int			alt;
 };
 
@@ -75,6 +76,61 @@ static struct usb_device *testdev_to_usbdev (struct usbtest_dev *test)
 
 /* set up all urbs so they can be used with either bulk or interrupt */
 #define	INTERRUPT_RATE		1	/* msec/transfer */
+
+/*-------------------------------------------------------------------------*/
+
+static int
+get_endpoints (struct usbtest_dev *dev, struct usb_interface *intf)
+{
+	int				tmp;
+	struct usb_host_interface	*alt;
+	struct usb_host_endpoint	*in, *out;
+	struct usb_device		*udev;
+
+	for (tmp = 0; tmp < intf->num_altsetting; tmp++) {
+		unsigned	ep;
+
+		in = out = 0;
+		alt = intf->altsetting + tmp;
+
+		/* take the first altsetting with in-bulk + out-bulk;
+		 * ignore other endpoints and altsetttings.
+		 */
+		for (ep = 0; ep < alt->desc.bNumEndpoints; ep++) {
+			struct usb_host_endpoint	*e;
+
+			e = alt->endpoint + ep;
+			if (e->desc.bmAttributes != USB_ENDPOINT_XFER_BULK)
+				continue;
+			if (e->desc.bEndpointAddress & USB_DIR_IN) {
+				if (!in)
+					in = e;
+			} else {
+				if (!out)
+					out = e;
+			}
+			if (in && out)
+				goto found;
+		}
+	}
+	return -EINVAL;
+
+found:
+	udev = testdev_to_usbdev (dev);
+	if (alt->desc.bAlternateSetting != 0) {
+		tmp = usb_set_interface (udev,
+				alt->desc.bInterfaceNumber,
+				alt->desc.bAlternateSetting);
+		if (tmp < 0)
+			return tmp;
+	}
+
+	dev->in_pipe = usb_rcvbulkpipe (udev,
+			in->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
+	dev->out_pipe = usb_sndbulkpipe (udev,
+			out->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
+	return 0;
+}
 
 /*-------------------------------------------------------------------------*/
 
@@ -215,7 +271,7 @@ alloc_sglist (int nents, int max, int vary)
 
 		/* kmalloc pages are always physically contiguous! */
 		sg [i].page = virt_to_page (buf);
-		sg [i].offset = ((unsigned) buf) & ~PAGE_MASK;
+		sg [i].offset = offset_in_page (buf);
 		sg [i].length = size;
 
 		if (vary) {
@@ -379,7 +435,7 @@ static int is_good_config (char *buf, int len)
 		return 0;
 	}
 
-	le32_to_cpus (&config->wTotalLength);
+	le16_to_cpus (&config->wTotalLength);
 	if (config->wTotalLength == len)		/* read it all */
 		return 1;
 	return config->wTotalLength >= TBUF_SIZE;	/* max partial read */
@@ -415,7 +471,7 @@ static int ch9_postconfig (struct usbtest_dev *dev)
 		 * they're ordered meaningfully in this array
 		 */
 		if (iface->altsetting [i].desc.bAlternateSetting != i) {
-			dbg ("%s, illegal alt [%d].bAltSetting = %d",
+			dbg ("%s, invalid alt [%d].bAltSetting = %d",
 					dev->id, i, 
 					iface->altsetting [i].desc
 						.bAlternateSetting);
@@ -639,8 +695,9 @@ error:
 			 */
 
 			/* unlink whatever's still pending */
-			for (i = 0; i < ctx->param->sglen; i++) {
-				struct urb	*u = ctx->urb [i];
+			for (i = 1; i < ctx->param->sglen; i++) {
+				struct urb	*u = ctx->urb [
+	(i + subcase->number) % ctx->param->sglen];
 
 				if (u == urb || !u->dev)
 					continue;
@@ -837,7 +894,8 @@ test_ctrl_queue (struct usbtest_dev *dev, struct usbtest_param *param)
 	/* FIXME  set timer and time out; provide a disconnect hook */
 
 	/* wait for the last one to complete */
-	wait_for_completion (&context.complete);
+	if (context.pending > 0)
+		wait_for_completion (&context.complete);
 
 cleanup:
 	for (i = 0; i < param->sglen; i++) {
@@ -1275,14 +1333,26 @@ usbtest_probe (struct usb_interface *intf, const struct usb_device_id *id)
 			wtest = " intr-out";
 		}
 	} else {
-		if (info->ep_in) {
-			dev->in_pipe = usb_rcvbulkpipe (udev, info->ep_in);
+		if (info->autoconf) {
+			int status;
+
+			status = get_endpoints (dev, intf);
+			if (status < 0) {
+				dbg ("couldn't get endpoints, %d\n", status);
+				return status;
+			}
+		} else {
+			if (info->ep_in)
+				dev->in_pipe = usb_rcvbulkpipe (udev,
+							info->ep_in);
+			if (info->ep_out)
+				dev->out_pipe = usb_sndbulkpipe (udev,
+							info->ep_out);
+		}
+		if (dev->in_pipe)
 			rtest = " bulk-in";
-		}
-		if (info->ep_out) {
-			dev->out_pipe = usb_sndbulkpipe (udev, info->ep_out);
+		if (dev->out_pipe)
 			wtest = " bulk-out";
-		}
 	}
 
 	usb_set_intfdata (intf, dev);
@@ -1306,6 +1376,7 @@ static void usbtest_disconnect (struct usb_interface *intf)
 
 	usb_set_intfdata (intf, NULL);
 	info ("unbound %s", dev->id);
+	kfree (dev);
 }
 
 /* Basic testing only needs a device that can source or sink bulk traffic.
@@ -1336,11 +1407,6 @@ static struct usbtest_info ez2_info = {
 };
 
 /* ezusb family device with dedicated usb test firmware,
- * or a peripheral running Linux and 'zero.c' test firmware.
- *
- * FIXME usbtest should read the descriptors, since compatible
- * test firmware might run on hardware (pxa250 for one) that
- * can't configure an ep2in-bulk.
  */
 static struct usbtest_info fw_info = {
 	.name		= "usb test device",
@@ -1349,10 +1415,20 @@ static struct usbtest_info fw_info = {
 	.alt		= 0,
 };
 
+/* peripheral running Linux and 'zero.c' test firmware, or
+ * its user-mode cousin. different versions of this use
+ * different hardware with the same vendor/product codes.
+ * host side MUST rely on the endpoint descriptors.
+ */
+static struct usbtest_info gz_info = {
+	.name		= "Linux gadget zero",
+	.autoconf	= 1,
+	.alt		= 0,
+};
+
 static struct usbtest_info um_info = {
-	.name		= "user mode test driver",
-	.ep_in		= 7,
-	.ep_out		= 3,
+	.name		= "Linux user mode test driver",
+	.autoconf	= 1,
 	.alt		= -1,
 };
 
@@ -1418,7 +1494,7 @@ static struct usb_device_id id_table [] = {
 
 	/* "Gadget Zero" firmware runs under Linux */
 	{ USB_DEVICE (0x0525, 0xa4a0),
-		.driver_info = (unsigned long) &fw_info,
+		.driver_info = (unsigned long) &gz_info,
 		},
 
 	/* so does a user-mode variant */

@@ -4,7 +4,7 @@
  * Changes:
  *	Mitsuru KANDA @USAGI
  * 	Kazunori MIYAZAWA @USAGI
- * 	Kunihiro Ishiguro
+ * 	Kunihiro Ishiguro <kunihiro@ipinfusion.com>
  * 		IPv6 support
  * 	Kazunori MIYAZAWA @USAGI
  * 	YOSHIFUJI Hideaki
@@ -519,7 +519,6 @@ static struct xfrm_policy *__xfrm_policy_unlink(struct xfrm_policy *pol,
 	     *polp != NULL; polp = &(*polp)->next) {
 		if (*polp == pol) {
 			*polp = pol->next;
-			atomic_dec(&pol->refcnt);
 			return pol;
 		}
 	}
@@ -574,6 +573,7 @@ static struct xfrm_policy *clone_policy(struct xfrm_policy *old, int dir)
 		write_lock_bh(&xfrm_policy_lock);
 		__xfrm_policy_link(newp, XFRM_POLICY_MAX+dir);
 		write_unlock_bh(&xfrm_policy_lock);
+		xfrm_pol_put(newp);
 	}
 	return newp;
 }
@@ -853,22 +853,34 @@ static inline int
 xfrm_state_ok(struct xfrm_tmpl *tmpl, struct xfrm_state *x, 
 	      unsigned short family)
 {
+	if (xfrm_state_kern(x))
+		return tmpl->optional && !xfrm_state_addr_cmp(tmpl, x, family);
 	return	x->id.proto == tmpl->id.proto &&
 		(x->id.spi == tmpl->id.spi || !tmpl->id.spi) &&
+		(x->props.reqid == tmpl->reqid || !tmpl->reqid) &&
 		x->props.mode == tmpl->mode &&
 		(tmpl->aalgos & (1<<x->props.aalgo)) &&
 		!(x->props.mode && xfrm_state_addr_cmp(tmpl, x, family));
 }
 
 static inline int
-xfrm_policy_ok(struct xfrm_tmpl *tmpl, struct sec_path *sp, int idx,
+xfrm_policy_ok(struct xfrm_tmpl *tmpl, struct sec_path *sp, int start,
 	       unsigned short family)
 {
+	int idx = start;
+
+	if (tmpl->optional) {
+		if (!tmpl->mode)
+			return start;
+	} else
+		start = -1;
 	for (; idx < sp->len; idx++) {
 		if (xfrm_state_ok(tmpl, sp->x[idx].xvec, family))
 			return ++idx;
+		if (sp->x[idx].xvec->props.mode)
+			break;
 	}
-	return -1;
+	return start;
 }
 
 static int
@@ -921,32 +933,35 @@ int __xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb,
 					xfrm_policy_lookup);
 
 	if (!pol)
-		return 1;
+		return !skb->sp;
 
 	pol->curlft.use_time = (unsigned long)xtime.tv_sec;
 
 	if (pol->action == XFRM_POLICY_ALLOW) {
-		if (pol->xfrm_nr != 0) {
-			struct sec_path *sp;
-			static struct sec_path dummy;
-			int i, k;
+		struct sec_path *sp;
+		static struct sec_path dummy;
+		int i, k;
 
-			if ((sp = skb->sp) == NULL)
-				sp = &dummy;
+		if ((sp = skb->sp) == NULL)
+			sp = &dummy;
 
-			/* For each tmpl search corresponding xfrm.
-			 * Order is _important_. Later we will implement
-			 * some barriers, but at the moment barriers
-			 * are implied between each two transformations.
-			 */
-			for (i = pol->xfrm_nr-1, k = 0; i >= 0; i--) {
-				if (pol->xfrm_vec[i].optional)
-					continue;
-				k = xfrm_policy_ok(pol->xfrm_vec+i, sp, k, family);
-				if (k < 0)
-					goto reject;
-			}
+		/* For each tunnel xfrm, find the first matching tmpl.
+		 * For each tmpl before that, find corresponding xfrm.
+		 * Order is _important_. Later we will implement
+		 * some barriers, but at the moment barriers
+		 * are implied between each two transformations.
+		 */
+		for (i = pol->xfrm_nr-1, k = 0; i >= 0; i--) {
+			k = xfrm_policy_ok(pol->xfrm_vec+i, sp, k, family);
+			if (k < 0)
+				goto reject;
 		}
+
+		for (; k < sp->len; k++) {
+			if (sp->x[k].xvec->props.mode)
+				goto reject;
+		}
+
 		xfrm_pol_put(pol);
 		return 1;
 	}
@@ -1217,5 +1232,6 @@ void __init xfrm_init(void)
 {
 	xfrm_state_init();
 	xfrm_policy_init();
+	xfrm_input_init();
 }
 

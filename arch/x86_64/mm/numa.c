@@ -8,7 +8,6 @@
 #include <linux/init.h>
 #include <linux/bootmem.h>
 #include <linux/mmzone.h>
-#include <linux/blk.h>
 #include <linux/ctype.h>
 #include <asm/e820.h>
 #include <asm/proto.h>
@@ -26,8 +25,6 @@ u8  memnodemap[NODEMAPSIZE];
 static int numa_off __initdata; 
 
 unsigned long nodes_present; 
-
-static int emunodes __initdata;
 
 int __init compute_hash_shift(struct node *nodes)
 {
@@ -104,12 +101,10 @@ void __init setup_node_bootmem(int nodeid, unsigned long start, unsigned long en
 
 	reserve_bootmem_node(NODE_DATA(nodeid), nodedata_phys, pgdat_size); 
 	reserve_bootmem_node(NODE_DATA(nodeid), bootmap_start, bootmap_pages<<PAGE_SHIFT);
-	if (nodeid + 1 > numnodes) { 
+	if (nodeid + 1 > numnodes)
 		numnodes = nodeid + 1;
-		printk(KERN_INFO 
-		       "setup_node_bootmem: enlarging numnodes to %d\n", numnodes);
-	}
 	nodes_present |= (1UL << nodeid); 
+	node_set_online(nodeid);
 } 
 
 /* Initialize final allocator for a zone */
@@ -150,26 +145,6 @@ int __init numa_initmem_init(unsigned long start_pfn, unsigned long end_pfn)
 	printk(KERN_INFO "%s\n",
 	       numa_off ? "NUMA turned off" : "No NUMA configuration found");
 
-	if (!numa_off && emunodes > 0) { 
-		struct node nodes[MAXNODE]; 
-		unsigned long nodesize = (end_pfn << PAGE_SHIFT) / emunodes;
-		int i;
-		if (emunodes > MAXNODE) 
-			emunodes = MAXNODE; 
-		memset(&nodes, 0, sizeof(nodes)); 
-		printk(KERN_INFO "Faking %d nodes of size %ld MB\n", emunodes, nodesize>>20); 
-		for (i = 0; i < emunodes; i++) { 
-			unsigned long end = (i+1)*nodesize; 
-			if (i == emunodes-1) 
-				end = end_pfn << PAGE_SHIFT;
-			nodes[i].start = i * nodesize;
-			nodes[i].end = end; 
-			setup_node_bootmem(i, nodes[i].start, nodes[i].end);
-		}
-		memnode_shift = compute_hash_shift(nodes); 
-		return 0;
-	} 
-
 	printk(KERN_INFO "Faking a node at %016lx-%016lx\n", 
 	       start_pfn << PAGE_SHIFT,
 	       end_pfn << PAGE_SHIFT); 
@@ -177,6 +152,7 @@ int __init numa_initmem_init(unsigned long start_pfn, unsigned long end_pfn)
 	fake_node = 1; 	
 	memnode_shift = 63; 
 	memnodemap[0] = 0;
+	numnodes = 1;
 	setup_node_bootmem(0, start_pfn<<PAGE_SHIFT, end_pfn<<PAGE_SHIFT);
 	return -1; 
 } 
@@ -200,13 +176,10 @@ void __init paging_init(void)
 } 
 
 /* [numa=off] */
-/* [numa=emunodes] */
 __init int numa_setup(char *opt) 
 { 
 	if (!strncmp(opt,"off",3))
 		numa_off = 1;
-	if (isdigit(opt[0]))
-		emunodes = simple_strtoul(opt, NULL, 10); 
 	return 1;
 } 
 

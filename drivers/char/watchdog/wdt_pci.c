@@ -38,6 +38,7 @@
 #include <linux/config.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/types.h>
 #include <linux/miscdevice.h>
 #include <linux/watchdog.h>
@@ -88,7 +89,7 @@ static int nowayout = 1;
 static int nowayout = 0;
 #endif
 
-MODULE_PARM(nowayout,"i");
+module_param(nowayout, int, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default=CONFIG_WATCHDOG_NOWAYOUT)");
 
 /*
@@ -275,7 +276,7 @@ static ssize_t wdtpci_read(struct file *file, char *buf, size_t count, loff_t *p
 	if (ptr != &file->f_pos)
 		return -ESPIPE;
 
-	switch(minor(file->f_dentry->d_inode->i_rdev))
+	switch(iminor(file->f_dentry->d_inode))
 	{
 		case TEMP_MINOR:
 			c*=11;
@@ -360,14 +361,14 @@ static int wdtpci_open(struct inode *inode, struct file *file)
 {
 	unsigned long flags;
 
-	switch(minor(inode->i_rdev))
+	switch(iminor(inode))
 	{
 		case WATCHDOG_MINOR:
 			if (down_trylock(&open_sem))
 				return -EBUSY;
 
 			if (nowayout) {
-				MOD_INC_USE_COUNT;
+				__module_get(THIS_MODULE);
 			}
 			/*
 			 *	Activate 
@@ -422,7 +423,7 @@ static int wdtpci_open(struct inode *inode, struct file *file)
 static int wdtpci_release(struct inode *inode, struct file *file)
 {
 
-	if (minor(inode->i_rdev)==WATCHDOG_MINOR) {
+	if (iminor(inode)==WATCHDOG_MINOR) {
 		unsigned long flags;
 		if (expect_close) {
 			spin_lock_irqsave(&wdtpci_lock, flags);
@@ -486,7 +487,7 @@ static struct miscdevice wdtpci_miscdev = {
 	.fops	= &wdtpci_fops,
 };
 
-#ifdef CONFIG_WDT_501
+#ifdef CONFIG_WDT_501_PCI
 static struct miscdevice temp_miscdev = {
 	.minor	= TEMP_MINOR,
 	.name	= "temperature",
@@ -504,7 +505,7 @@ static struct notifier_block wdtpci_notifier = {
 };
 
 
-static int __init wdtpci_init_one (struct pci_dev *dev,
+static int __devinit wdtpci_init_one (struct pci_dev *dev,
 				   const struct pci_device_id *ent)
 {
 	static int dev_count = 0;
@@ -550,7 +551,7 @@ static int __init wdtpci_init_one (struct pci_dev *dev,
 		printk (KERN_ERR PFX "can't misc_register on minor=%d\n", WATCHDOG_MINOR);
 		goto out_misc;
 	}
-#ifdef CONFIG_WDT_501
+#ifdef CONFIG_WDT_501_PCI
 	ret = misc_register (&temp_miscdev);
 	if (ret) {
 		printk (KERN_ERR PFX "can't misc_register (temp) on minor=%d\n", TEMP_MINOR);
@@ -562,7 +563,7 @@ static int __init wdtpci_init_one (struct pci_dev *dev,
 out:
 	return ret;
 
-#ifdef CONFIG_WDT_501
+#ifdef CONFIG_WDT_501_PCI
 out_rbt:
 	unregister_reboot_notifier(&wdtpci_notifier);
 #endif
@@ -590,7 +591,7 @@ static void __devexit wdtpci_remove_one (struct pci_dev *pdev)
 }
 
 
-static struct pci_device_id wdtpci_pci_tbl[] __initdata = {
+static struct pci_device_id wdtpci_pci_tbl[] = {
 	{
 		.vendor	   = PCI_VENDOR_ID_ACCESSIO,
 		.device	   = PCI_DEVICE_ID_WDG_CSM,

@@ -41,13 +41,35 @@ static int amba_match(struct device *dev, struct device_driver *drv)
 	return amba_lookup(pcdrv->id_table, pcdev) != NULL;
 }
 
+static int amba_suspend(struct device *dev, u32 state)
+{
+	struct amba_driver *drv = to_amba_driver(dev->driver);
+	int ret = 0;
+
+	if (dev->driver && drv->suspend)
+		ret = drv->suspend(to_amba_device(dev), state);
+	return ret;
+}
+
+static int amba_resume(struct device *dev)
+{
+	struct amba_driver *drv = to_amba_driver(dev->driver);
+	int ret = 0;
+
+	if (dev->driver && drv->resume)
+		ret = drv->resume(to_amba_device(dev));
+	return ret;
+}
+
 /*
  * Primecells are part of the Advanced Microcontroller Bus Architecture,
  * so we call the bus "amba".
  */
-struct bus_type amba_bustype = {
-	.name	= "amba",
-	.match	= amba_match,
+static struct bus_type amba_bustype = {
+	.name		= "amba",
+	.match		= amba_match,
+	.suspend	= amba_suspend,
+	.resume		= amba_resume,
 };
 
 static int __init amba_init(void)
@@ -84,18 +106,6 @@ static void amba_shutdown(struct device *dev)
 	drv->shutdown(to_amba_device(dev));
 }
 
-static int amba_suspend(struct device *dev, u32 state, u32 level)
-{
-	struct amba_driver *drv = to_amba_driver(dev->driver);
-	return drv->suspend(to_amba_device(dev), state, level);
-}
-
-static int amba_resume(struct device *dev, u32 level)
-{
-	struct amba_driver *drv = to_amba_driver(dev->driver);
-	return drv->resume(to_amba_device(dev), level);
-}
-
 /**
  *	amba_driver_register - register an AMBA device driver
  *	@drv: amba device driver structure
@@ -112,8 +122,6 @@ int amba_driver_register(struct amba_driver *drv)
 	SETFN(probe);
 	SETFN(remove);
 	SETFN(shutdown);
-	SETFN(suspend);
-	SETFN(resume);
 
 	return driver_register(&drv->drv);
 }
@@ -180,7 +188,7 @@ int amba_device_register(struct amba_device *dev, struct resource *parent)
 
 	dev->dev.release = amba_device_release;
 	dev->dev.bus = &amba_bustype;
-	dev->res.name = dev->dev.name;
+	dev->res.name = dev->dev.bus_id;
 
 	ret = request_resource(parent, &dev->res);
 	if (ret == 0) {
@@ -199,14 +207,6 @@ int amba_device_register(struct amba_device *dev, struct resource *parent)
 
 		if (cid == 0xb105f00d)
 			dev->periphid = pid;
-
-		if (dev->periphid)
-			snprintf(dev->dev.name, sizeof(dev->dev.name),
-				 "AMBA PL%03X",
-				 dev->periphid & 0xfff);
-		else
-			strlcpy(dev->dev.name, "AMBA unknown",
-				sizeof(dev->dev.name));
 
 		ret = device_register(&dev->dev);
 		if (ret == 0) {

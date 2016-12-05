@@ -51,9 +51,11 @@ struct _lowcore *lowcore_ptr[NR_CPUS];
 cycles_t         cacheflush_time=0;
 int              smp_threads_ready=0;      /* Set when the idlers are all forked. */
 
-volatile unsigned long cpu_online_map;
-volatile unsigned long cpu_possible_map;
+cpumask_t cpu_online_map;
+cpumask_t cpu_possible_map;
 unsigned long    cache_decay_ticks = 0;
+
+EXPORT_SYMBOL(cpu_online_map);
 
 /*
  * Reboot, halt and power_off routines for SMP.
@@ -138,11 +140,11 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
 
 	/* Wait for response */
 	while (atomic_read(&data.started) != cpus)
-		barrier();
+		cpu_relax();
 
 	if (wait)
 		while (atomic_read(&data.finished) != cpus)
-			barrier();
+			cpu_relax();
 	spin_unlock(&call_lock);
 
 	return 0;
@@ -200,14 +202,15 @@ void smp_send_stop(void)
 /*
  * Reboot, halt and power_off routines for SMP.
  */
-static volatile unsigned long cpu_restart_map;
+static cpumask_t cpu_restart_map;
 
 static void do_machine_restart(void * __unused)
 {
-	clear_bit(smp_processor_id(), &cpu_restart_map);
+	cpu_clear(smp_processor_id(), cpu_restart_map);
 	if (smp_processor_id() == 0) {
 		/* Wait for all other cpus to enter do_machine_restart. */
-		while (cpu_restart_map != 0);
+		while (!cpus_empty(cpu_restart_map))
+			cpu_relax();
 		/* Store status of other cpus. */
 		do_store_status();
 		/*
@@ -231,6 +234,18 @@ void machine_restart_smp(char * __unused)
         on_each_cpu(do_machine_restart, NULL, 0, 0);
 }
 
+static void do_wait_for_stop(void)
+{
+	unsigned long cr[16];
+
+	__ctl_store(cr, 0, 15);
+	cr[0] &= ~0xffff;
+	cr[6] = 0;
+	__ctl_load(cr, 0, 15);
+	for (;;)
+		enabled_wait();
+}
+
 static void do_machine_halt(void * __unused)
 {
 	if (smp_processor_id() == 0) {
@@ -240,8 +255,7 @@ static void do_machine_halt(void * __unused)
 		signal_processor(smp_processor_id(),
 				 sigp_stop_and_store_status);
 	}
-	for (;;)
-		enabled_wait();
+	do_wait_for_stop();
 }
 
 void machine_halt_smp(void)
@@ -258,8 +272,7 @@ static void do_machine_power_off(void * __unused)
 		signal_processor(smp_processor_id(),
 				 sigp_stop_and_store_status);
 	}
-	for (;;)
-		enabled_wait();
+	do_wait_for_stop();
 }
 
 void machine_power_off_smp(void)
@@ -427,7 +440,7 @@ void __init smp_check_cpus(unsigned int max_cpus)
                 if (signal_processor(num_cpus, sigp_sense) ==
                     sigp_not_operational)
                         continue;
-		set_bit(num_cpus, &cpu_possible_map);
+		cpu_set(num_cpus, cpu_possible_map);
                 num_cpus++;
         }
         printk("Detected %d CPU's\n",(int) num_cpus);
@@ -452,7 +465,7 @@ int __devinit start_secondary(void *cpuvoid)
 	pfault_init();
 #endif
 	/* Mark this cpu as online */
-	set_bit(smp_processor_id(), &cpu_online_map);
+	cpu_set(smp_processor_id(), cpu_online_map);
 	/* Switch on interrupts */
 	local_irq_enable();
         /* Print info about this processor */
@@ -514,8 +527,11 @@ int __cpu_up(unsigned int cpu)
 	__asm__ __volatile__("stam  0,15,0(%0)"
 			     : : "a" (&cpu_lowcore->access_regs_save_area)
 			     : "memory");
-        eieio();
-        signal_processor(cpu,sigp_restart);
+	cpu_lowcore->percpu_offset = __per_cpu_offset[cpu];
+        cpu_lowcore->current_task = (unsigned long) idle;
+        cpu_lowcore->cpu_data.cpu_nr = cpu;
+	eieio();
+	signal_processor(cpu,sigp_restart);
 
 	while (!cpu_online(cpu));
 	return 0;
@@ -558,8 +574,9 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 
 void __devinit smp_prepare_boot_cpu(void)
 {
-	set_bit(smp_processor_id(), &cpu_online_map);
-	set_bit(smp_processor_id(), &cpu_possible_map);
+	cpu_set(smp_processor_id(), cpu_online_map);
+	cpu_set(smp_processor_id(), cpu_possible_map);
+	S390_lowcore.percpu_offset = __per_cpu_offset[smp_processor_id()];
 }
 
 void smp_cpus_done(unsigned int max_cpus)
@@ -577,6 +594,7 @@ int setup_profiling_timer(unsigned int multiplier)
         return 0;
 }
 
+EXPORT_SYMBOL(cpu_possible_map);
 EXPORT_SYMBOL(lowcore_ptr);
 EXPORT_SYMBOL(smp_ctl_set_bit);
 EXPORT_SYMBOL(smp_ctl_clear_bit);

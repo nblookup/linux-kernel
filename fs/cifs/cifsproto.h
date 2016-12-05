@@ -57,7 +57,7 @@ extern void header_assemble(struct smb_hdr *, char /* command */ ,
 			const struct cifsTconInfo *, int
 			/* length of fixed section (word count) in two byte units  */
 			);
-struct oplock_q_entry * AllocOplockQEntry(struct file *,struct cifsTconInfo *);
+struct oplock_q_entry * AllocOplockQEntry(struct inode *, u16, struct cifsTconInfo *);
 void DeleteOplockQEntry(struct oplock_q_entry *);
 extern struct timespec cifs_NTtimeToUnix(u64 /* utc nanoseconds since 1601 */ );
 extern u64 cifs_UnixTimeToNT(struct timespec);
@@ -68,7 +68,8 @@ extern void RevUcode_to_Ucode_with_Len(char *revUnicode, char *UnicodeName,
 extern void Ucode_to_RevUcode_with_Len(char *Unicode, char *revUnicodeName,
 			int Len);
 extern int cifs_get_inode_info(struct inode **pinode,
-			const unsigned char *search_path,
+			const unsigned char *search_path, 
+			FILE_ALL_INFO * pfile_info,
 			struct super_block *sb);
 extern int cifs_get_inode_info_unix(struct inode **pinode,
 			const unsigned char *search_path,
@@ -88,8 +89,7 @@ extern int CIFSNTLMSSPNegotiateSessSetup(unsigned int xid,
 			const struct nls_table *);
 extern int CIFSNTLMSSPAuthSessSetup(unsigned int xid,
 			struct cifsSesInfo *ses, char *ntlm_session_key,
-			char *lanman_session_key,int ntlmv2_flag,
-			const struct nls_table *);
+			int ntlmv2_flag, const struct nls_table *);
 
 extern int CIFSTCon(unsigned int xid, struct cifsSesInfo *ses,
 			const char *tree, struct cifsTconInfo *tcon,
@@ -156,7 +156,7 @@ extern int CIFSSMBSetFileSize(const int xid, struct cifsTconInfo *tcon,
 			 __u64 size, __u16 fileHandle,__u32 opener_pid, int AllocSizeFlag);
 extern int CIFSSMBUnixSetPerms(const int xid, struct cifsTconInfo *pTcon,
 			char *full_path, __u64 mode, __u64 uid,
-			__u64 gid, const struct nls_table *nls_codepage);
+			__u64 gid, dev_t dev, const struct nls_table *nls_codepage);
 
 extern int CIFSSMBMkDir(const int xid, struct cifsTconInfo *tcon,
 			const char *newName,
@@ -170,6 +170,8 @@ extern int CIFSSMBDelFile(const int xid, struct cifsTconInfo *tcon,
 extern int CIFSSMBRename(const int xid, struct cifsTconInfo *tcon,
 			const char *fromName, const char *toName,
 			const struct nls_table *nls_codepage);
+extern int CIFSSMBRenameOpenFile(const int xid,struct cifsTconInfo *pTcon,
+			int netfid, char * target_name, const struct nls_table *nls_codepage);
 extern int CIFSCreateHardLink(const int xid,
 			struct cifsTconInfo *tcon,
 			const char *fromName, const char *toName,
@@ -196,7 +198,7 @@ extern int CIFSSMBQueryReparseLinkInfo(const int xid,
 extern int CIFSSMBOpen(const int xid, struct cifsTconInfo *tcon,
 			const char *fileName, const int disposition,
 			const int access_flags, const int omode,
-			__u16 * netfid, int *pOplock,
+			__u16 * netfid, int *pOplock, FILE_ALL_INFO *,
 			const struct nls_table *nls_codepage);
 extern int CIFSSMBClose(const int xid, struct cifsTconInfo *tcon,
 			const int smb_file_id);
@@ -229,8 +231,8 @@ extern int cifs_sign_smb(struct smb_hdr *, struct cifsSesInfo *,__u32 *);
 extern int cifs_verify_signature(const struct smb_hdr *, const char * mac_key,
 	__u32 expected_sequence_number);
 extern int cifs_calculate_mac_key(char * key,const char * rn,const char * pass);
-
-/* BB routines below not implemented yet BB */
+extern void CalcNTLMv2_partial_mac_key(struct cifsSesInfo *, struct nls_table *);
+extern void CalcNTLMv2_response(const struct cifsSesInfo *,char * );
 
 extern int CIFSBuildServerList(int xid, char *serverBufferList,
 			int recordlength, int *entries,

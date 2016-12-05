@@ -1,7 +1,7 @@
 /*
  *   fs/cifs/misc.c
  *
- *   Copyright (c) International Business Machines  Corp., 2002
+ *   Copyright (C) International Business Machines  Corp., 2002,2003
  *   Author(s): Steve French (sfrench@us.ibm.com)
  *
  *   This library is free software; you can redistribute it and/or modify
@@ -42,21 +42,23 @@ _GetXid(void)
 {
 	unsigned int xid;
 
-	write_lock(&GlobalMid_Lock);
+	spin_lock(&GlobalMid_Lock);
 	GlobalTotalActiveXid++;
 	if (GlobalTotalActiveXid > GlobalMaxActiveXid)
 		GlobalMaxActiveXid = GlobalTotalActiveXid;	/* keep high water mark for number of simultaneous vfs ops in our filesystem */
 	xid = GlobalCurrentXid++;
-	write_unlock(&GlobalMid_Lock);
+	spin_unlock(&GlobalMid_Lock);
 	return xid;
 }
 
 void
 _FreeXid(unsigned int xid)
 {
-	write_lock(&GlobalMid_Lock);
+	spin_lock(&GlobalMid_Lock);
+	/* if(GlobalTotalActiveXid == 0)
+		BUG(); */
 	GlobalTotalActiveXid--;
-	write_unlock(&GlobalMid_Lock);
+	spin_unlock(&GlobalMid_Lock);
 }
 
 struct cifsSesInfo *
@@ -190,6 +192,8 @@ header_assemble(struct smb_hdr *buffer, char smb_command /* command */ ,
 {
 	int i;
 	__u32 tmp;
+	struct list_head* temp_item;
+	struct cifsSesInfo * ses;
 	char *temp = (char *) buffer;
 
 	for (i = 0; i < MAX_CIFS_HDR_SIZE; i++) {
@@ -209,14 +213,14 @@ header_assemble(struct smb_hdr *buffer, char smb_command /* command */ ,
 	buffer->Command = smb_command;
 	buffer->Flags = 0x00;	/* case sensitive */
 	buffer->Flags2 = SMBFLG2_KNOWS_LONG_NAMES;
-	tmp = cpu_to_le32(current->pid);
+	tmp = cpu_to_le32(current->tgid);
 	buffer->Pid = tmp & 0xFFFF;
 	tmp >>= 16;
 	buffer->PidHigh = tmp & 0xFFFF;
-	write_lock(&GlobalMid_Lock);
+	spin_lock(&GlobalMid_Lock);
 	GlobalMid++;
 	buffer->Mid = GlobalMid;
-	write_unlock(&GlobalMid_Lock);
+	spin_unlock(&GlobalMid_Lock);
 	if (treeCon) {
 		buffer->Tid = treeCon->tid;
 		if (treeCon->ses) {
@@ -225,7 +229,52 @@ header_assemble(struct smb_hdr *buffer, char smb_command /* command */ ,
 			if (treeCon->ses->capabilities & CAP_STATUS32) {
 				buffer->Flags2 |= SMBFLG2_ERR_STATUS;
 			}
+
 			buffer->Uid = treeCon->ses->Suid;	/* always in LE format */
+			if(multiuser_mount != 0) {
+		/* For the multiuser case, there are few obvious technically  */
+		/* possible mechanisms to match the local linux user (uid)    */
+		/* to a valid remote smb user (smb_uid):		      */
+		/* 	1) Query Winbind (or other local pam/nss daemon       */
+		/* 	  for userid/password/logon_domain or credential      */
+		/*      2) Query Winbind for uid to sid to username mapping   */
+		/* 	   and see if we have a matching password for existing*/
+		/*         session for that user perhas getting password by   */
+		/*         adding a new pam_cifs module that stores passwords */
+		/*         so that the cifs vfs can get at that for all logged*/
+		/*	   on users					      */
+		/*	3) (Which is the mechanism we have chosen)	      */
+		/*	   Search through sessions to the same server for a   */
+		/*	   a match on the uid that was passed in on mount     */
+		/*         with the current processes uid (or euid?) and use  */
+		/* 	   that smb uid.   If no existing smb session for     */
+		/* 	   that uid found, use the default smb session ie     */
+		/*         the smb session for the volume mounted which is    */
+		/* 	   the same as would be used if the multiuser mount   */
+		/* 	   flag were disabled.  */
+
+		/*  BB Add support for establishing new tCon and SMB Session  */
+		/*      with userid/password pairs found on the smb session   */ 
+		/*	for other target tcp/ip addresses 		BB    */
+				if(current->uid != treeCon->ses->linux_uid) {
+					cFYI(1,("Multiuser mode and UID did not match tcon uid "));
+					read_lock(&GlobalSMBSeslock);
+					list_for_each(temp_item, &GlobalSMBSessionList) {
+						ses = list_entry(temp_item, struct cifsSesInfo, cifsSessionList);
+						if(ses->linux_uid == current->uid) {
+							if(ses->server == treeCon->ses->server) {
+								cFYI(1,("found matching uid substitute right smb_uid"));  
+								buffer->Uid = ses->Suid;
+								break;
+							} else {
+								/* BB eventually call setup_session here */
+								cFYI(1,("local UID found but smb sess with this server does not exist"));  
+							}
+						}
+					}
+					read_unlock(&GlobalSMBSeslock);
+				}
+			}
 		}
 		if (treeCon->Flags & SMB_SHARE_IS_IN_DFS)
 			buffer->Flags2 |= SMBFLG2_DFS;
@@ -338,23 +387,18 @@ is_valid_oplock_break(struct smb_hdr *buf)
 				netfile = list_entry(tmp1,struct cifsFileInfo,tlist);
 				if(pSMB->Fid == netfile->netfid) {
 					struct cifsInodeInfo *pCifsInode;
-			/* BB Add following logic: 
-			  2) look up inode from tcon->openFileList->file->f_dentry->d_inode
-			  3) flush dirty pages and cached byte range locks and mark inode
-			  4) depending on break type change to r/o caching or no caching
-                  cifsinode->clientCanCacheAll = 0
-              5)  inode->i_data.a_ops = &cifs_addr_ops_writethrough;
-			  6) send oplock break response to server */
+			/* BB Add following logic to mark inode for write through 
+              		    inode->i_data.a_ops = &cifs_addr_ops_writethrough; */
 					read_unlock(&GlobalSMBSeslock);
 					cFYI(1,("Matching file id, processing oplock break"));
 					pCifsInode = 
-						CIFS_I(netfile->pfile->f_dentry->d_inode);
+						CIFS_I(netfile->pInode);
 					pCifsInode->clientCanCacheAll = FALSE;
 					if(pSMB->OplockLevel == 0)
 						pCifsInode->clientCanCacheRead = FALSE;
 					pCifsInode->oplockPending = TRUE;
-					AllocOplockQEntry(netfile->pfile, tcon);
-                    cFYI(1,("about to wake up oplock thd"));
+					AllocOplockQEntry(netfile->pInode, netfile->netfid, tcon);
+					cFYI(1,("about to wake up oplock thd"));
 					wake_up_process(oplockThread);               
 					return TRUE;
 				}

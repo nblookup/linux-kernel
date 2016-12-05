@@ -16,6 +16,7 @@
 #include <linux/init.h>
 #include <linux/string.h>
 #include "base.h"
+#include "power/power.h"
 
 #define to_dev(node) container_of(node,struct device,bus_list)
 #define to_drv(node) container_of(node,struct device_driver,kobj.entry)
@@ -240,7 +241,8 @@ void device_bind_driver(struct device * dev)
 	pr_debug("bound device '%s' to driver '%s'\n",
 		 dev->bus_id,dev->driver->name);
 	list_add_tail(&dev->driver_list,&dev->driver->devices);
-	sysfs_create_link(&dev->driver->kobj,&dev->kobj,dev->kobj.name);
+	sysfs_create_link(&dev->driver->kobj,&dev->kobj,
+			  kobject_name(&dev->kobj));
 }
 
 
@@ -287,6 +289,7 @@ static int device_attach(struct device * dev)
 {
  	struct bus_type * bus = dev->bus;
 	struct list_head * entry;
+	int error;
 
 	if (dev->driver) {
 		device_bind_driver(dev);
@@ -296,8 +299,15 @@ static int device_attach(struct device * dev)
 	if (bus->match) {
 		list_for_each(entry,&bus->drivers.list) {
 			struct device_driver * drv = to_drv(entry);
-			if (!bus_match(dev,drv))
-				return 1;
+			error = bus_match(dev,drv);
+			if (!error )  
+				/* success, driver matched */
+				return 1; 
+			if (error != -ENODEV) 
+				/* driver matched but the probe failed */
+				printk(KERN_WARNING 
+				    "%s: probe of %s failed with error %d\n",
+				    drv->name, dev->bus_id, error);
 		}
 	}
 
@@ -314,13 +324,14 @@ static int device_attach(struct device * dev)
  *	If bus_match() returns 0 and the @dev->driver is set, we've found
  *	a compatible pair.
  *
- *	Note that we ignore the error from bus_match(), since it's perfectly
- *	valid for a driver not to bind to any devices.
+ *	Note that we ignore the -ENODEV error from bus_match(), since it's 
+ *	perfectly valid for a driver not to bind to any devices.
  */
 void driver_attach(struct device_driver * drv)
 {
 	struct bus_type * bus = drv->bus;
 	struct list_head * entry;
+	int error;
 
 	if (!bus->match)
 		return;
@@ -328,7 +339,12 @@ void driver_attach(struct device_driver * drv)
 	list_for_each(entry,&bus->devices.list) {
 		struct device * dev = container_of(entry,struct device,bus_list);
 		if (!dev->driver) {
-			bus_match(dev,drv);
+			error = bus_match(dev,drv);
+			if (error && (error != -ENODEV))
+				/* driver matched but the probe failed */
+				printk(KERN_WARNING 
+				    "%s: probe of %s failed with error %d\n",
+				    drv->name, dev->bus_id, error);
 		}
 	}
 }
@@ -348,8 +364,9 @@ void device_release_driver(struct device * dev)
 {
 	struct device_driver * drv = dev->driver;
 	if (drv) {
-		sysfs_remove_link(&drv->kobj,dev->kobj.name);
+		sysfs_remove_link(&drv->kobj,kobject_name(&dev->kobj));
 		list_del_init(&dev->driver_list);
+		device_detach_shutdown(dev);
 		if (drv->remove)
 			drv->remove(dev);
 		dev->driver = NULL;
@@ -431,10 +448,8 @@ int bus_add_driver(struct device_driver * drv)
 
 	if (bus) {
 		pr_debug("bus %s: add driver %s\n",bus->name,drv->name);
-
-		strlcpy(drv->kobj.name,drv->name,KOBJ_NAME_LEN);
+		kobject_set_name(&drv->kobj,drv->name);
 		drv->kobj.kset = &bus->drivers;
-
 		if ((error = kobject_register(&drv->kobj))) {
 			put_bus(bus);
 			return error;
@@ -444,10 +459,6 @@ int bus_add_driver(struct device_driver * drv)
 		driver_attach(drv);
 		up_write(&bus->subsys.rwsem);
 
-		if (error) {
-			kobject_unregister(&drv->kobj);
-			put_bus(bus);
-		}
 	}
 	return error;
 }
@@ -541,15 +552,15 @@ struct bus_type * find_bus(char * name)
  */
 int bus_register(struct bus_type * bus)
 {
-	strlcpy(bus->subsys.kset.kobj.name,bus->name,KOBJ_NAME_LEN);
+	kobject_set_name(&bus->subsys.kset.kobj,bus->name);
 	subsys_set_kset(bus,bus_subsys);
 	subsystem_register(&bus->subsys);
 
-	strlcpy(bus->devices.kobj.name, "devices", KOBJ_NAME_LEN);
+	kobject_set_name(&bus->devices.kobj, "devices");
 	bus->devices.subsys = &bus->subsys;
 	kset_register(&bus->devices);
 
-	strlcpy(bus->drivers.kobj.name, "drivers", KOBJ_NAME_LEN);
+	kobject_set_name(&bus->drivers.kobj, "drivers");
 	bus->drivers.subsys = &bus->subsys;
 	bus->drivers.ktype = &ktype_driver;
 	kset_register(&bus->drivers);

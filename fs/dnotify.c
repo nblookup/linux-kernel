@@ -14,13 +14,12 @@
  * General Public License for more details.
  */
 #include <linux/fs.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/dnotify.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
 #include <linux/slab.h>
-
-extern void send_sigio(struct fown_struct *fown, int fd, int band);
 
 int dir_notify_enable = 1;
 
@@ -94,7 +93,7 @@ int fcntl_dirnotify(int fd, struct file *filp, unsigned long arg)
 		prev = &odn->dn_next;
 	}
 
-	error = f_setown(filp, current->pid, 1);
+	error = f_setown(filp, current->pid, 0);
 	if (error)
 		goto out_free;
 
@@ -141,6 +140,8 @@ void __inode_dir_notify(struct inode *inode, unsigned long event)
 		redo_inode_mask(inode);
 	write_unlock(&dn_lock);
 }
+
+EXPORT_SYMBOL(__inode_dir_notify);
 
 /*
  * This is hopelessly wrong, but unfixable without API changes.  At

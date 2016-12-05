@@ -3,6 +3,7 @@
  *	Library for filesystems writers.
  */
 
+#include <linux/module.h>
 #include <linux/pagemap.h>
 #include <linux/mount.h>
 #include <linux/vfs.h>
@@ -31,6 +32,8 @@ int simple_statfs(struct super_block *sb, struct kstatfs *buf)
 
 struct dentry *simple_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
 {
+	if (dentry->d_name.len > NAME_MAX)
+		return ERR_PTR(-ENAMETOOLONG);
 	d_add(dentry, NULL);
 	return NULL;
 }
@@ -76,6 +79,7 @@ loff_t dcache_dir_lseek(struct file *file, loff_t offset, int origin)
 			loff_t n = file->f_pos - 2;
 
 			spin_lock(&dcache_lock);
+			list_del(&cursor->d_child);
 			p = file->f_dentry->d_subdirs.next;
 			while (n && p != &file->f_dentry->d_subdirs) {
 				struct dentry *next;
@@ -84,7 +88,6 @@ loff_t dcache_dir_lseek(struct file *file, loff_t offset, int origin)
 					n--;
 				p = p->next;
 			}
-			list_del(&cursor->d_child);
 			list_add_tail(&cursor->d_child, p);
 			spin_unlock(&dcache_lock);
 		}
@@ -328,8 +331,12 @@ int simple_commit_write(struct file *file, struct page *page,
 	struct inode *inode = page->mapping->host;
 	loff_t pos = ((loff_t)page->index << PAGE_CACHE_SHIFT) + to;
 
+	/*
+	 * No need to use i_size_read() here, the i_size
+	 * cannot change under us because we hold the i_sem.
+	 */
 	if (pos > inode->i_size)
-		inode->i_size = pos;
+		i_size_write(inode, pos);
 	set_page_dirty(page);
 	return 0;
 }
@@ -424,3 +431,26 @@ void simple_release_fs(struct vfsmount **mount, int *count)
 	spin_unlock(&pin_fs_lock);
 	mntput(mnt);
 }
+
+EXPORT_SYMBOL(dcache_dir_close);
+EXPORT_SYMBOL(dcache_dir_lseek);
+EXPORT_SYMBOL(dcache_dir_open);
+EXPORT_SYMBOL(dcache_readdir);
+EXPORT_SYMBOL(generic_read_dir);
+EXPORT_SYMBOL(simple_commit_write);
+EXPORT_SYMBOL(simple_dir_inode_operations);
+EXPORT_SYMBOL(simple_dir_operations);
+EXPORT_SYMBOL(simple_empty);
+EXPORT_SYMBOL(simple_fill_super);
+EXPORT_SYMBOL(simple_getattr);
+EXPORT_SYMBOL(simple_link);
+EXPORT_SYMBOL(simple_lookup);
+EXPORT_SYMBOL(simple_pin_fs);
+EXPORT_SYMBOL(simple_prepare_write);
+EXPORT_SYMBOL(simple_readpage);
+EXPORT_SYMBOL(simple_release_fs);
+EXPORT_SYMBOL(simple_rename);
+EXPORT_SYMBOL(simple_rmdir);
+EXPORT_SYMBOL(simple_statfs);
+EXPORT_SYMBOL(simple_sync_file);
+EXPORT_SYMBOL(simple_unlink);

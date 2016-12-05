@@ -55,7 +55,7 @@ DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE " tsbogend@alpha.franken.de\n";
 /*
  * PCI device identifiers for "new style" Linux PCI Device Drivers
  */
-static struct pci_device_id pcnet32_pci_tbl[] __devinitdata = {
+static struct pci_device_id pcnet32_pci_tbl[] = {
     { PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_LANCE_HOME, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
     { PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_LANCE, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
     { 0, }
@@ -529,6 +529,7 @@ pcnet32_probe1(unsigned long ioaddr, unsigned int irq_line, int shared,
     struct net_device *dev;
     struct pcnet32_access *a = NULL;
     u8 promaddr[6];
+    int ret = -ENODEV;
 
     /* reset the chip */
     pcnet32_wio_reset(ioaddr);
@@ -540,19 +541,15 @@ pcnet32_probe1(unsigned long ioaddr, unsigned int irq_line, int shared,
 	pcnet32_dwio_reset(ioaddr);
 	if (pcnet32_dwio_read_csr(ioaddr, 0) == 4 && pcnet32_dwio_check(ioaddr)) {
 	    a = &pcnet32_dwio;
-	} else {
-		release_region(ioaddr, PCNET32_TOTAL_SIZE);
-		return -ENODEV;
-	}
+	} else
+		goto err_release_region;
     }
 
     chip_version = a->read_csr(ioaddr, 88) | (a->read_csr(ioaddr,89) << 16);
     if (pcnet32_debug > 2)
 	printk(KERN_INFO "  PCnet chip version is %#x.\n", chip_version);
-    if ((chip_version & 0xfff) != 0x003) {
-	    release_region(ioaddr, PCNET32_TOTAL_SIZE);
-	    return -ENODEV;
-    }
+    if ((chip_version & 0xfff) != 0x003)
+	    goto err_release_region;
     
     /* initialize variables */
     fdx = mii = fset = dxsuflo = ltint = 0;
@@ -614,8 +611,7 @@ pcnet32_probe1(unsigned long ioaddr, unsigned int irq_line, int shared,
     default:
 	printk(KERN_INFO PFX "PCnet version %#x, no PCnet32 chip.\n",
 			chip_version);
-	release_region(ioaddr, PCNET32_TOTAL_SIZE);
-	return -ENODEV;
+	goto err_release_region;
     }
 
     /*
@@ -635,8 +631,8 @@ pcnet32_probe1(unsigned long ioaddr, unsigned int irq_line, int shared,
     
     dev = alloc_etherdev(0);
     if(!dev) {
-	    release_region(ioaddr, PCNET32_TOTAL_SIZE);
-	    return -ENOMEM;
+	    ret = -ENOMEM;
+	    goto err_release_region;
     }
     SET_NETDEV_DEV(dev, &pdev->dev);
 
@@ -708,8 +704,8 @@ pcnet32_probe1(unsigned long ioaddr, unsigned int irq_line, int shared,
     dev->base_addr = ioaddr;
     /* pci_alloc_consistent returns page-aligned memory, so we do not have to check the alignment */
     if ((lp = pci_alloc_consistent(pdev, sizeof(*lp), &lp_dma_addr)) == NULL) {
-	release_region(ioaddr, PCNET32_TOTAL_SIZE);
-	return -ENOMEM;
+	ret = -ENOMEM;
+	goto err_free_netdev;
     }
 
     memset(lp, 0, sizeof(*lp));
@@ -741,9 +737,8 @@ pcnet32_probe1(unsigned long ioaddr, unsigned int irq_line, int shared,
     
     if (!a) {
       printk(KERN_ERR PFX "No access methods\n");
-      pci_free_consistent(lp->pci_dev, sizeof(*lp), lp, lp->dma_addr);
-      release_region(ioaddr, PCNET32_TOTAL_SIZE);
-      return -ENODEV;
+      ret = -ENODEV;
+      goto err_free_consistent;
     }
     lp->a = *a;
     
@@ -785,14 +780,12 @@ pcnet32_probe1(unsigned long ioaddr, unsigned int irq_line, int shared,
 	mdelay (1);
 	
 	dev->irq = probe_irq_off (irq_mask);
-	if (dev->irq)
-	    printk(", probed IRQ %d.\n", dev->irq);
-	else {
+	if (!dev->irq) {
 	    printk(", failed to detect IRQ line.\n");
-	    pci_free_consistent(lp->pci_dev, sizeof(*lp), lp, lp->dma_addr);
-	    release_region(ioaddr, PCNET32_TOTAL_SIZE);
-	    return -ENODEV;
+	    ret = -ENODEV;
+	    goto err_free_consistent;
 	}
+	printk(", probed IRQ %d.\n", dev->irq);
     }
 
     /* Set the mii phy_id so that we can query the link state */
@@ -821,6 +814,14 @@ pcnet32_probe1(unsigned long ioaddr, unsigned int irq_line, int shared,
     printk(KERN_INFO "%s: registered as %s\n",dev->name, lp->name);
     cards_found++;
     return 0;
+
+err_free_consistent:
+    pci_free_consistent(lp->pci_dev, sizeof(*lp), lp, lp->dma_addr);
+err_free_netdev:
+    free_netdev(dev);
+err_release_region:
+    release_region(ioaddr, PCNET32_TOTAL_SIZE);
+    return ret;
 }
 
 
@@ -1375,6 +1376,10 @@ pcnet32_rx(struct net_device *dev)
 		if (!rx_in_place) {
 		    skb_reserve(skb,2); /* 16 byte align */
 		    skb_put(skb,pkt_len);	/* Make room */
+		    pci_dma_sync_single(lp->pci_dev,
+		                        lp->rx_dma_addr[entry],
+		                        PKT_BUF_SZ,
+		                        PCI_DMA_FROMDEVICE);
 		    eth_copy_and_sum(skb,
 				     (unsigned char *)(lp->rx_skbuff[entry]->tail),
 				     pkt_len,0);
@@ -1588,7 +1593,7 @@ static int pcnet32_ethtool_ioctl (struct net_device *dev, void *useraddr)
 		strcpy (info.driver, DRV_NAME);
 		strcpy (info.version, DRV_VERSION);
 		if (lp->pci_dev)
-			strcpy (info.bus_info, lp->pci_dev->slot_name);
+			strcpy (info.bus_info, pci_name(lp->pci_dev));
 		else
 			sprintf(info.bus_info, "VLB 0x%lx", dev->base_addr);
 		if (copy_to_user (useraddr, &info, sizeof (info)))
@@ -1726,6 +1731,7 @@ MODULE_LICENSE("GPL");
 /* An additional parameter that may be passed in... */
 static int debug = -1;
 static int tx_start_pt = -1;
+static int pcnet32_have_pci;
 
 static int __init pcnet32_init_module(void)
 {
@@ -1738,7 +1744,8 @@ static int __init pcnet32_init_module(void)
 	tx_start = tx_start_pt;
 
     /* find the PCI devices */
-    pci_module_init(&pcnet32_driver);
+    if (!pci_module_init(&pcnet32_driver))
+	pcnet32_have_pci = 1;
 
     /* should we find any remaining VLbus devices ? */
     if (pcnet32vlb)
@@ -1747,7 +1754,7 @@ static int __init pcnet32_init_module(void)
     if (cards_found)
 	printk(KERN_INFO PFX "%d cards_found.\n", cards_found);
     
-    return cards_found ? 0 : -ENODEV;
+    return (pcnet32_have_pci + cards_found) ? 0 : -ENODEV;
 }
 
 static void __exit pcnet32_cleanup_module(void)
@@ -1759,12 +1766,13 @@ static void __exit pcnet32_cleanup_module(void)
 	next_dev = lp->next;
 	unregister_netdev(pcnet32_dev);
 	release_region(pcnet32_dev->base_addr, PCNET32_TOTAL_SIZE);
-	if (lp->pci_dev)
-	    pci_unregister_driver(&pcnet32_driver);
 	pci_free_consistent(lp->pci_dev, sizeof(*lp), lp, lp->dma_addr);
-	kfree(pcnet32_dev);
+	free_netdev(pcnet32_dev);
 	pcnet32_dev = next_dev;
     }
+
+    if (pcnet32_have_pci)
+	pci_unregister_driver(&pcnet32_driver);
 }
 
 module_init(pcnet32_init_module);

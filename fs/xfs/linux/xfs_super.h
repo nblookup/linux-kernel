@@ -66,6 +66,16 @@
 # define XFS_REALTIME_STRING
 #endif
 
+#if XFS_BIG_BLKNOS
+# if XFS_BIG_INUMS
+#  define XFS_BIGFS_STRING	"large block/inode numbers, "
+# else
+#  define XFS_BIGFS_STRING	"large block numbers, "
+# endif
+#else
+# define XFS_BIGFS_STRING
+#endif
+
 #ifdef CONFIG_XFS_VNODE_TRACING
 # define XFS_VNTRACE_STRING	"VN-trace, "
 #else
@@ -80,6 +90,7 @@
 
 #define XFS_BUILD_OPTIONS	XFS_ACL_STRING \
 				XFS_REALTIME_STRING \
+				XFS_BIGFS_STRING \
 				XFS_VNTRACE_STRING \
 				XFS_DBG_STRING /* DBG must be last */
 
@@ -91,6 +102,8 @@
 struct xfs_mount;
 struct pb_target;
 struct block_device;
+
+extern __uint64_t xfs_max_file_offset(unsigned int);
 
 extern void xfs_initialize_vnode(bhv_desc_t *, vnode_t *, bhv_desc_t *, int);
 

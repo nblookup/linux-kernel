@@ -53,6 +53,7 @@
 #include <linux/skbuff.h>
 #include <linux/timer.h>
 #include <linux/init.h>
+#include <linux/delay.h>
 
 #include <net/arp.h>
 
@@ -140,6 +141,7 @@ static void  change_level( struct net_device * );
 static void  timeout_change_level( struct net_device * );
 static u32   calc_crc32( u32, u8 *, u32 );
 static struct sk_buff *  get_rx_buf( struct net_device * );
+static int  sbni_init( struct net_device * );
 
 #ifdef CONFIG_SBNI_MULTILINE
 static int  enslave( struct net_device *, struct net_device * );
@@ -205,23 +207,46 @@ sbni_isa_probe( struct net_device  *dev )
 	}
 }
 
-
-int __init
-sbni_probe( struct net_device  *dev )
+static void __init sbni_devsetup(struct net_device *dev)
 {
-	int  i;
-
-	static unsigned  version_printed __initdata = 0;
-	if( version_printed++ == 0 )
-		printk( KERN_INFO "%s", version );
-
-	if( !dev ) {	/* simple sanity check */
-		printk( KERN_ERR "sbni: NULL device!\n" );
-		return  -ENODEV;
-	}
+	ether_setup( dev );
+	dev->init 		= &sbni_init;
+	dev->open		= &sbni_open;
+	dev->stop		= &sbni_close;
+	dev->hard_start_xmit	= &sbni_start_xmit;
+	dev->get_stats		= &sbni_get_stats;
+	dev->set_multicast_list	= &set_multicast_list;
+	dev->do_ioctl		= &sbni_ioctl;
 
 	SET_MODULE_OWNER( dev );
+}
 
+int __init sbni_probe(int unit)
+{
+	struct net_device *dev;
+	static unsigned  version_printed __initdata = 0;
+	int err;
+
+	dev = alloc_netdev(sizeof(struct net_local), "sbni", sbni_devsetup);
+	if (!dev)
+		return -ENOMEM;
+
+	sprintf(dev->name, "sbni%d", unit);
+	netdev_boot_setup_check(dev);
+
+	err = register_netdev(dev);
+	if (err) {
+		free_netdev(dev);
+		return err;
+	}
+	if( version_printed++ == 0 )
+		printk( KERN_INFO "%s", version );
+	return 0;
+}
+
+static int __init sbni_init(struct net_device *dev)
+{
+	int  i;
 	if( dev->base_addr )
 		return  sbni_isa_probe( dev );
 	/* otherwise we have to perform search our adapter */
@@ -277,7 +302,7 @@ sbni_pci_probe( struct net_device  *dev )
 		pci_irq_line = pdev->irq;
 
 		/* Avoid already found cards from previous calls */
-		if( !pci_request_region( pci_ioaddr, SBNI_IO_EXTENT, dev->name ) ) {
+		if( !request_region( pci_ioaddr, SBNI_IO_EXTENT, dev->name ) ) {
 			pci_read_config_word( pdev, PCI_SUBSYSTEM_ID, &subsys );
 			if( subsys != 2  ||	/* Dual adapter is present */
 			    check_region( pci_ioaddr += 4, SBNI_IO_EXTENT ) )
@@ -315,13 +340,12 @@ sbni_probe1( struct net_device  *dev,  unsigned long  ioaddr,  int  irq )
 	outb( 0, ioaddr + CSR0 );
 
 	if( irq < 2 ) {
-		unsigned long irq_mask, delay;
+		unsigned long irq_mask;
 
 		irq_mask = probe_irq_on();
 		outb( EN_INT | TR_REQ, ioaddr + CSR0 );
 		outb( PR_RES, ioaddr + CSR1 );
-		delay = jiffies + HZ/20;
-		while (time_before(jiffies, delay)) ;
+		mdelay(50);
 		irq = probe_irq_off(irq_mask);
 		outb( 0, ioaddr + CSR0 );
 
@@ -338,7 +362,7 @@ sbni_probe1( struct net_device  *dev,  unsigned long  ioaddr,  int  irq )
 	dev->base_addr = ioaddr;
 
 	/* Allocate dev->priv and fill in sbni-specific dev fields. */
-	nl = (struct net_local *) kmalloc(sizeof(struct net_local), GFP_KERNEL);
+	nl = dev->priv;
 	if( !nl ) {
 		printk( KERN_ERR "%s: unable to get memory!\n", dev->name );
 		release_region( ioaddr, SBNI_IO_EXTENT );
@@ -389,14 +413,6 @@ sbni_probe1( struct net_device  *dev,  unsigned long  ioaddr,  int  irq )
 	nl->link   = NULL;
 #endif
    
-	dev->open		= &sbni_open;
-	dev->stop		= &sbni_close;
-	dev->hard_start_xmit	= &sbni_start_xmit;
-	dev->get_stats		= &sbni_get_stats;
-	dev->set_multicast_list	= &set_multicast_list;
-	dev->do_ioctl		= &sbni_ioctl;
-	ether_setup( dev );
-
 	sbni_cards[ num++ ] = dev;
 	return  dev;
 }
@@ -1284,11 +1300,9 @@ sbni_ioctl( struct net_device  *dev,  struct ifreq  *ifr,  int  cmd )
   
 	switch( cmd ) {
 	case  SIOCDEVGETINSTATS :
-		error = verify_area( VERIFY_WRITE, ifr->ifr_data,
-				     sizeof(struct sbni_in_stats) );
-		if( !error )
-			copy_to_user( ifr->ifr_data, &nl->in_stats,
-				      sizeof(struct sbni_in_stats) );
+		if (copy_to_user( ifr->ifr_data, &nl->in_stats,
+					sizeof(struct sbni_in_stats) ))
+			error = -EFAULT;
 		break;
 
 	case  SIOCDEVRESINSTATS :
@@ -1304,10 +1318,8 @@ sbni_ioctl( struct net_device  *dev,  struct ifreq  *ifr,  int  cmd )
 		flags.rxl	= nl->cur_rxl_index;
 		flags.fixed_rxl	= nl->delta_rxl == 0;
 
-		error = verify_area( VERIFY_WRITE, ifr->ifr_data,
-				     sizeof flags );
-		if( !error )
-			copy_to_user( ifr->ifr_data, &flags, sizeof flags );
+		if (copy_to_user( ifr->ifr_data, &flags, sizeof flags ))
+			error = -EFAULT;
 		break;
 
 	case  SIOCDEVSHWSTATE :
@@ -1335,11 +1347,8 @@ sbni_ioctl( struct net_device  *dev,  struct ifreq  *ifr,  int  cmd )
 		if( current->euid != 0 )	/* root only */
 			return  -EPERM;
 
-		if( (error = verify_area( VERIFY_READ, ifr->ifr_data,
-					  sizeof slave_name )) != 0 )
-			return  error;
-
-		copy_from_user( slave_name, ifr->ifr_data, sizeof slave_name );
+		if (copy_from_user( slave_name, ifr->ifr_data, sizeof slave_name ))
+			return -EFAULT;
 		slave_dev = dev_get_by_name( slave_name );
 		if( !slave_dev  ||  !(slave_dev->flags & IFF_UP) ) {
 			printk( KERN_ERR "%s: trying to enslave non-active "
@@ -1475,15 +1484,15 @@ init_module( void )
 	struct net_device  *dev;
 
 	while( num < SBNI_MAX_NUM_CARDS ) {
-		if( !(dev = kmalloc(sizeof(struct net_device), GFP_KERNEL)) ){
+		dev = alloc_netdev(sizeof(struct net_local), 
+				   "sbni%d", sbni_devsetup);
+		if( !dev) {
 			printk( KERN_ERR "sbni: unable to allocate device!\n" );
 			return  -ENOMEM;
 		}
 
-		memset( dev, 0, sizeof(struct net_device) );
 		sprintf( dev->name, "sbni%d", num );
 
-		dev->init = sbni_probe;
 		if( register_netdev( dev ) ) {
 			kfree( dev );
 			break;
@@ -1503,8 +1512,7 @@ cleanup_module( void )
 		if( (dev = sbni_cards[ num ]) != NULL ) {
 			unregister_netdev( dev );
 			release_region( dev->base_addr, SBNI_IO_EXTENT );
-			kfree( dev->priv );
-			kfree( dev );
+			free_netdev( dev );
 		}
 }
 
@@ -1546,13 +1554,13 @@ __setup( "sbni=", sbni_setup );
 static u32
 calc_crc32( u32  crc,  u8  *p,  u32  len )
 {
-	register u32  _crc __asm ( "ax" );
+	register u32  _crc;
 	_crc = crc;
 	
 	__asm __volatile (
 		"xorl	%%ebx, %%ebx\n"
-		"movl	%1, %%esi\n" 
-		"movl	%2, %%ecx\n" 
+		"movl	%2, %%esi\n" 
+		"movl	%3, %%ecx\n" 
 		"movl	$crc32tab, %%edi\n"
 		"shrl	$2, %%ecx\n"
 		"jz	1f\n"
@@ -1588,7 +1596,7 @@ calc_crc32( u32  crc,  u8  *p,  u32  len )
 		"jnz	0b\n"
 
 	"1:\n"
-		"movl	%2, %%ecx\n"
+		"movl	%3, %%ecx\n"
 		"andl	$3, %%ecx\n"
 		"jz	2f\n"
 
@@ -1613,9 +1621,9 @@ calc_crc32( u32  crc,  u8  *p,  u32  len )
 		"xorb	2(%%esi), %%bl\n"
 		"xorl	(%%edi,%%ebx,4), %%eax\n"
 	"2:\n"
-		:
-		: "a" (_crc), "g" (p), "g" (len)
-		: "ax", "bx", "cx", "dx", "si", "di"
+		: "=a" (_crc)
+		: "0" (_crc), "g" (p), "g" (len)
+		: "bx", "cx", "dx", "si", "di"
 	);
 
 	return  _crc;

@@ -17,7 +17,6 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/fs.h>
 #include <linux/errno.h>
 #include <linux/major.h>
@@ -295,7 +294,7 @@ static inline int wd_opt_timeout(void)
 
 static int wd_open(struct inode *inode, struct file *f)
 {
-	switch(minor(inode->i_rdev))
+	switch(iminor(inode))
 	{
 		case WD0_MINOR:
 			f->private_data = &wd_dev.watchdog[WD0_ID];
@@ -540,7 +539,7 @@ static void wd_toggleintr(struct wd_timer* pTimer, int enable)
 static void wd_pingtimer(struct wd_timer* pTimer)
 {
 	if(wd_readb(&pTimer->regs->status) & WD_S_RUNNING) {
-		wd_readb(&pTimer->regs->dcntr);
+		wd_readw(&pTimer->regs->dcntr);
 	}
 }
 

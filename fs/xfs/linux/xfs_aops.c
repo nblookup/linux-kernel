@@ -67,7 +67,7 @@ linvfs_unwritten_done(
 	bh->b_end_io = NULL;
 	clear_buffer_unwritten(bh);
 	if (!uptodate)
-		pagebuf_ioerror(pb, -EIO);
+		pagebuf_ioerror(pb, EIO);
 	if (atomic_dec_and_test(&pb->pb_io_remaining) == 1) {
 		pagebuf_iodone(pb, 1, 1);
 	}
@@ -76,10 +76,10 @@ linvfs_unwritten_done(
 
 /*
  * Issue transactions to convert a buffer range from unwritten
- * to written extents.
+ * to written extents (buffered IO).
  */
 STATIC void
-linvfs_unwritten_conv(
+linvfs_unwritten_convert(
 	xfs_buf_t	*bp)
 {
 	vnode_t		*vp = XFS_BUF_FSPRIVATE(bp, vnode_t *);
@@ -93,7 +93,32 @@ linvfs_unwritten_conv(
 	XFS_BUF_SET_FSPRIVATE(bp, NULL);
 	XFS_BUF_CLR_IODONE_FUNC(bp);
 	XFS_BUF_UNDATAIO(bp);
+	iput(LINVFS_GET_IP(vp));
 	pagebuf_iodone(bp, 0, 0);
+}
+
+/*
+ * Issue transactions to convert a buffer range from unwritten
+ * to written extents (direct IO).
+ */
+STATIC void
+linvfs_unwritten_convert_direct(
+	struct inode	*inode,
+	loff_t		offset,
+	ssize_t		size,
+	void		*private)
+{
+	ASSERT(!private || inode == (struct inode *)private);
+
+	/* private indicates an unwritten extent lay beneath this IO,
+	 * see linvfs_get_block_core.
+	 */
+	if (private && size > 0) {
+		vnode_t	*vp = LINVFS_GET_VP(inode);
+		int	error;
+
+		VOP_BMAP(vp, offset, size, BMAP_UNWRITTEN, NULL, NULL, error);
+	}
 }
 
 STATIC int
@@ -108,7 +133,7 @@ map_blocks(
 	int			error, nmaps = 1;
 
 	if (((flags & (BMAP_DIRECT|BMAP_SYNC)) == BMAP_DIRECT) &&
-	    (offset >= inode->i_size))
+	    (offset >= i_size_read(inode)))
 		count = max_t(ssize_t, count, XFS_WRITE_IO_LOG);
 retry:
 	VOP_BMAP(vp, offset, count, flags, pbmapp, &nmaps, error);
@@ -200,7 +225,8 @@ probe_unwritten_page(
 	page_buf_bmap_t		*mp,
 	page_buf_t		*pb,
 	unsigned long		max_offset,
-	unsigned long		*fsbs)
+	unsigned long		*fsbs,
+	unsigned int            bbits)
 {
 	struct page		*page;
 
@@ -223,6 +249,7 @@ probe_unwritten_page(
 				break;
 			if (p_offset >= max_offset)
 				break;
+			map_buffer_at_offset(page, bh, p_offset, bbits, mp);
 			set_buffer_unwritten_io(bh);
 			bh->b_private = pb;
 			p_offset += bh->b_size;
@@ -285,7 +312,7 @@ probe_unmapped_cluster(
 	struct buffer_head	*bh,
 	struct buffer_head	*head)
 {
-	unsigned long		tindex, tlast;
+	unsigned long		tindex, tlast, tloff;
 	unsigned int		len, total = 0;
 	struct address_space	*mapping = inode->i_mapping;
 
@@ -300,20 +327,19 @@ probe_unmapped_cluster(
 	 * following pages.
 	 */
 	if (bh == head) {
-		tlast = inode->i_size >> PAGE_CACHE_SHIFT;
+		tlast = i_size_read(inode) >> PAGE_CACHE_SHIFT;
 		/* Prune this back to avoid pathological behavior */
-		tlast = min(tlast, startpage->index + 64);
-		for (tindex = startpage->index + 1; tindex < tlast; tindex++) {
+		tloff = min(tlast, startpage->index + 64);
+		for (tindex = startpage->index + 1; tindex < tloff; tindex++) {
 			len = probe_unmapped_page(mapping, tindex,
 							PAGE_CACHE_SIZE);
 			if (!len)
-				break;
+				return total;
 			total += len;
 		}
-		if ((tindex == tlast) && (inode->i_size & ~PAGE_CACHE_MASK)) {
-			len = probe_unmapped_page(mapping, tindex,
-					inode->i_size & ~PAGE_CACHE_MASK);
-			total += len;
+		if (tindex == tlast &&
+		    (tloff = i_size_read(inode) & (PAGE_CACHE_SIZE - 1))) {
+			total += probe_unmapped_page(mapping, tindex, tloff);
 		}
 	}
 	return total;
@@ -384,7 +410,16 @@ map_unwritten(
 	pb = pagebuf_lookup(mp->pbm_target,
 			    mp->pbm_offset, mp->pbm_bsize, 0);
 	if (!pb)
-		return -ENOMEM;
+		return -EAGAIN;
+
+	/* Take a reference to the inode to prevent it from
+	 * being reclaimed while we have outstanding unwritten
+	 * extent IO on it.
+	 */
+	if ((igrab(inode)) != inode) {
+		pagebuf_free(pb);
+		return -EAGAIN;
+	}
 
 	/* Set the count to 1 initially, this will stop an I/O
 	 * completion callout which happens before we have started
@@ -421,14 +456,16 @@ map_unwritten(
 	 */
 	if (bh == head) {
 		struct address_space	*mapping = inode->i_mapping;
-		unsigned long		tindex, tlast, bs;
+		unsigned long		tindex, tloff, tlast, bs;
+		unsigned int		bbits = inode->i_blkbits;
 		struct page		*page;
 
-		tlast = inode->i_size >> PAGE_CACHE_SHIFT;
-		tlast = min(tlast, start_page->index + pb->pb_page_count - 1);
-		for (tindex = start_page->index + 1; tindex < tlast; tindex++) {
+		tlast = i_size_read(inode) >> PAGE_CACHE_SHIFT;
+		tloff = (mp->pbm_offset + mp->pbm_bsize) >> PAGE_CACHE_SHIFT;
+		tloff = min(tlast, tloff);
+		for (tindex = start_page->index + 1; tindex < tloff; tindex++) {
 			page = probe_unwritten_page(mapping, tindex, mp, pb,
-					PAGE_CACHE_SIZE, &bs);
+						PAGE_CACHE_SIZE, &bs, bbits);
 			if (!page)
 				break;
 			nblocks += bs;
@@ -436,14 +473,14 @@ map_unwritten(
 			convert_page(inode, page, mp, pb, 1, all_bh);
 		}
 
-		if ((tindex == tlast) && (inode->i_size & ~PAGE_CACHE_MASK)) {
+		if (tindex == tlast &&
+		    (tloff = (i_size_read(inode) & (PAGE_CACHE_SIZE - 1)))) {
 			page = probe_unwritten_page(mapping, tindex, mp, pb,
-					inode->i_size & ~PAGE_CACHE_MASK, &bs);
+							tloff, &bs, bbits);
 			if (page) {
 				nblocks += bs;
 				atomic_add(bs, &pb->pb_io_remaining);
-				convert_page(inode, page,
-							mp, pb, 1, all_bh);
+				convert_page(inode, page, mp, pb, 1, all_bh);
 			}
 		}
 	}
@@ -456,7 +493,7 @@ map_unwritten(
 	XFS_BUF_SET_SIZE(pb, size);
 	XFS_BUF_SET_OFFSET(pb, offset);
 	XFS_BUF_SET_FSPRIVATE(pb, LINVFS_GET_VP(inode));
-	XFS_BUF_SET_IODONE_FUNC(pb, linvfs_unwritten_conv);
+	XFS_BUF_SET_IODONE_FUNC(pb, linvfs_unwritten_convert);
 
 	if (atomic_dec_and_test(&pb->pb_io_remaining) == 1) {
 		pagebuf_iodone(pb, 1, 1);
@@ -516,18 +553,19 @@ convert_page(
 	int			i = 0, index = 0;
 	int			bbits = inode->i_blkbits;
 
-	end_index = inode->i_size >> PAGE_CACHE_SHIFT;
+	end_index = i_size_read(inode) >> PAGE_CACHE_SHIFT;
 	if (page->index < end_index) {
 		end = PAGE_CACHE_SIZE;
 	} else {
-		end = inode->i_size & (PAGE_CACHE_SIZE-1);
+		end = i_size_read(inode) & (PAGE_CACHE_SIZE-1);
 	}
 	bh = head = page_buffers(page);
 	do {
 		offset = i << bbits;
 		if (!(PageUptodate(page) || buffer_uptodate(bh)))
 			continue;
-		if (buffer_mapped(bh) && !buffer_delay(bh) && all_bh) {
+		if (buffer_mapped(bh) && all_bh &&
+		    !buffer_unwritten(bh) && !buffer_delay(bh)) {
 			if (startio && (offset < end)) {
 				lock_buffer(bh);
 				bh_arr[index++] = bh;
@@ -548,7 +586,7 @@ convert_page(
 			ASSERT(tmp->pbm_flags & PBMF_UNWRITTEN);
 			map_unwritten(inode, page, head, bh,
 						offset, bbits, tmp, all_bh);
-		} else {
+		} else if (! (buffer_unwritten(bh) && buffer_locked(bh))) {
 			map_buffer_at_offset(page, bh, offset, bbits, tmp);
 			if (buffer_unwritten(bh)) {
 				set_buffer_unwritten_io(bh);
@@ -617,11 +655,11 @@ cluster_write(
 
 STATIC int
 page_state_convert(
+	struct inode	*inode,
 	struct page	*page,
 	int		startio,
 	int		unmapped) /* also implies page uptodate */
 {
-	struct inode		*inode = page->mapping->host;
 	struct buffer_head	*bh_arr[MAX_BUF_PER_PAGE], *bh, *head;
 	page_buf_bmap_t		*mp, map;
 	unsigned long		p_offset = 0, end_index;
@@ -632,9 +670,9 @@ page_state_convert(
 
 
 	/* Are we off the end of the file ? */
-	end_index = inode->i_size >> PAGE_CACHE_SHIFT;
+	end_index = i_size_read(inode) >> PAGE_CACHE_SHIFT;
 	if (page->index >= end_index) {
-		unsigned remaining = inode->i_size & (PAGE_CACHE_SIZE-1);
+		unsigned remaining = i_size_read(inode) & (PAGE_CACHE_SIZE-1);
 		if ((page->index >= end_index+1) || !remaining) {
 			return -EIO;
 		}
@@ -642,8 +680,8 @@ page_state_convert(
 
 	offset = (loff_t)page->index << PAGE_CACHE_SHIFT;
 	end_offset = offset + PAGE_CACHE_SIZE;
-	if (end_offset > inode->i_size)
-		end_offset = inode->i_size;
+	if (end_offset > i_size_read(inode))
+		end_offset = i_size_read(inode);
 
 	bh = head = page_buffers(page);
 	mp = NULL;
@@ -770,7 +808,7 @@ next_bh:
 		bh = bh->b_this_page;
 	} while (offset < end_offset);
 
-	if (uptodate)
+	if (uptodate && bh == head)
 		SetPageUptodate(page);
 
 	if (startio)
@@ -804,7 +842,7 @@ STATIC int
 linvfs_get_block_core(
 	struct inode		*inode,
 	sector_t		iblock,
-	int			blocks,
+	unsigned long		blocks,
 	struct buffer_head	*bh_result,
 	int			create,
 	int			direct,
@@ -822,7 +860,7 @@ linvfs_get_block_core(
 	 */
 	if (blocks)
 		size = blocks << inode->i_blkbits;
-	else if (create && (offset >= inode->i_size))
+	else if (create && (offset >= i_size_read(inode)))
 		size = 1 << XFS_WRITE_IO_LOG;
 	else
 		size = 1 << inode->i_blkbits;
@@ -854,8 +892,11 @@ linvfs_get_block_core(
 			set_buffer_mapped(bh_result);
 		}
 		if (pbmap.pbm_flags & PBMF_UNWRITTEN) {
-			if (create)
+			if (create) {
+				if (direct)
+					bh_result->b_private = inode;
 				set_buffer_mapped(bh_result);
+			}
 			set_buffer_unwritten(bh_result);
 			set_buffer_delay(bh_result);
 		}
@@ -867,7 +908,7 @@ linvfs_get_block_core(
 	 */
 	if (create &&
 	    ((!buffer_mapped(bh_result) && !buffer_uptodate(bh_result)) ||
-	     (offset >= inode->i_size))) {
+	     (offset >= i_size_read(inode)) || (pbmap.pbm_flags & PBMF_NEW))) {
 		set_buffer_new(bh_result);
 	}
 
@@ -932,11 +973,21 @@ linvfs_direct_IO(
 	loff_t			offset,
 	unsigned long		nr_segs)
 {
-	struct file *file = iocb->ki_filp;
-	struct inode *inode = file->f_dentry->d_inode->i_mapping->host;
+	struct file	*file = iocb->ki_filp;
+	struct inode	*inode = file->f_dentry->d_inode->i_mapping->host;
+	vnode_t		*vp = LINVFS_GET_VP(inode);
+	page_buf_bmap_t	pbmap;
+	int		maps = 1;
+	int		error;
 
-        return blockdev_direct_IO(rw, iocb, inode, NULL,
-			iov, offset, nr_segs, linvfs_get_blocks_direct);
+	VOP_BMAP(vp, offset, 0, BMAP_DEVICE, &pbmap, &maps, error);
+	if (error)
+		return -error;
+
+        return blockdev_direct_IO(rw, iocb, inode, pbmap.pbm_target->pbr_bdev,
+		iov, offset, nr_segs,
+		linvfs_get_blocks_direct,
+		linvfs_unwritten_convert_direct);
 }
 
 
@@ -948,11 +999,6 @@ linvfs_bmap(
 	struct inode		*inode = (struct inode *)mapping->host;
 	vnode_t			*vp = LINVFS_GET_VP(inode);
 	int			error;
-
-	/* block	     - Linux disk blocks    512b */
-	/* bmap input offset - bytes		      1b */
-	/* bmap output bn    - XFS BBs		    512b */
-	/* bmap output delta - bytes		      1b */
 
 	vn_trace_entry(vp, "linvfs_bmap", (inst_t *)__return_address);
 
@@ -995,6 +1041,8 @@ count_page_state(
 	do {
 		if (buffer_uptodate(bh) && !buffer_mapped(bh))
 			(*unmapped) = 1;
+		else if (buffer_unwritten(bh) && !buffer_delay(bh))
+			clear_buffer_unwritten(bh);
 		else if (buffer_unwritten(bh))
 			(*unwritten) = 1;
 		else if (buffer_delay(bh))
@@ -1021,7 +1069,6 @@ count_page_state(
  * the page, we have to check the process flags first, if we
  * are already in a transaction or disk I/O during allocations
  * is off, we need to fail the writepage and redirty the page.
- * We also need to set PF_NOIO ourselves.
  */
 
 STATIC int
@@ -1057,7 +1104,7 @@ linvfs_writepage(
 	 * then mark the page dirty again and leave the page
 	 * as is.
 	 */
-	if ((current->flags & (PF_FSTRANS)) && need_trans)
+	if (PFLAGS_TEST_FSTRANS() && need_trans)
 		goto out_fail;
 
 	/*
@@ -1071,7 +1118,7 @@ linvfs_writepage(
 	 * Convert delayed allocate, unwritten or unmapped space
 	 * to real space and flush out to disk.
 	 */
-	error = page_state_convert(page, 1, unmapped);
+	error = page_state_convert(inode, page, 1, unmapped);
 	if (error == -EAGAIN)
 		goto out_fail;
 	if (unlikely(error < 0))
@@ -1112,6 +1159,7 @@ linvfs_release_page(
 	struct page		*page,
 	int			gfp_mask)
 {
+	struct inode		*inode = page->mapping->host;
 	int			delalloc, unmapped, unwritten;
 
 	count_page_state(page, &delalloc, &unmapped, &unwritten);
@@ -1127,7 +1175,7 @@ linvfs_release_page(
 	 * Never need to allocate space here - we will always
 	 * come back to writepage in that case.
 	 */
-	if (page_state_convert(page, 0, 0) == 0)
+	if (page_state_convert(inode, page, 0, 0) == 0)
 		goto free_buffers;
 	return 0;
 

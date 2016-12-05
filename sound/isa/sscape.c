@@ -5,10 +5,6 @@
  *   This driver was written in part using information obtained from
  *   the OSS/Free SoundScape driver, written by Hannu Savolainen.
  *
- *   FIXME (deadlock for alsa-kernel):
- *     - use ISA PnP scheme used by all ALSA ISA drivers
- *     - add non-MODULE build option
- *
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -78,7 +74,7 @@ MODULE_PARM_DESC(dma, "DMA # for SoundScape driver.");
 MODULE_PARM_SYNTAX(dma, SNDRV_DMA8_DESC);
   
 #ifdef CONFIG_PNP
-static struct pnp_card_device_id sscape_pnpids[] __devinitdata = {
+static struct pnp_card_device_id sscape_pnpids[] = {
 	{ .id = "ENS3081", .devs = { { "ENS0000" } } },
 	{ .id = "" }	/* end */
 };
@@ -455,14 +451,14 @@ static int host_startup_ack(struct soundscape *s, unsigned timeout)
  * Upload a byte-stream into the SoundScape using DMA channel A.
  */
 static int upload_dma_data(struct soundscape *s,
-                           const unsigned char *data, size_t size,
-                           size_t dmasize)
+                           const unsigned char *data,
+                           size_t size)
 {
 	unsigned long flags;
 	struct dmabuf dma;
 	int ret;
 
-	if (!get_dmabuf(&dma, dmasize))
+	if (!get_dmabuf(&dma, PAGE_ALIGN(size)))
 		return -ENOMEM;
 
 	spin_lock_irqsave(&s->lock, flags);
@@ -575,7 +571,7 @@ static int sscape_upload_bootblock(struct soundscape *sscape, struct sscape_boot
 	int data = 0;
 	int ret;
 
-	ret = upload_dma_data(sscape, bb->code, sizeof(bb->code), PAGE_SIZE);
+	ret = upload_dma_data(sscape, bb->code, sizeof(bb->code));
 
 	spin_lock_irqsave(&sscape->lock, flags);
 	if (ret == 0) {
@@ -602,17 +598,28 @@ static int sscape_upload_bootblock(struct soundscape *sscape, struct sscape_boot
  * it into a local variable then we will SMASH THE
  * KERNEL'S STACK! We therefore leave it in USER
  * SPACE, and save ourselves from copying it at all.
- *
- * We assume that the caller has already verified the
- * userspace memory addresses.
  */
 static int sscape_upload_microcode(struct soundscape *sscape,
                                    const struct sscape_microcode *mc)
 {
 	unsigned long flags;
-	int ret;
+	char *code;
+	int err, ret;
 
-	if ((ret = upload_dma_data(sscape, mc->code, sizeof(mc->code), PAGE_SIZE * 16)) == 0) {
+	/*
+	 * We are going to have to copy this data into a special
+	 * DMA-able buffer before we can upload it. We shall therefore
+	 * just check that the data pointer is valid for now.
+	 *
+	 * NOTE: This buffer is 64K long! That's WAY too big to
+	 *       copy into a stack-temporary anyway.
+	 */
+	if (get_user(code, &mc->code))
+		return -EFAULT;
+	if ((err = verify_area(VERIFY_READ, code, 65536)) != 0)
+		return err;
+
+	if ((ret = upload_dma_data(sscape, code, 65536)) == 0) {
 		snd_printk(KERN_INFO "sscape: MIDI firmware loaded\n");
 	}
 
@@ -695,17 +702,6 @@ static int sscape_hw_ioctl(snd_hwdep_t * hw, struct file *file,
 	case SND_SSCAPE_LOAD_MCODE:
 		{
 			register const struct sscape_microcode *mc = (const struct sscape_microcode *) arg;
-
-			/*
-			 * We are going to have to copy this data into a special
-			 * DMA-able buffer before we can upload it. We shall therefore
-			 * just check that the data pointer is valid for now.
-			 *
-			 * NOTE: This buffer is 64K long! That's WAY too big to
-			 *       copy into a stack-temporary anyway.
-			 */
-			if ((err = verify_area(VERIFY_READ, mc->code, sizeof(mc->code))) != 0)
-				return err;
 
 			err = sscape_upload_microcode(sscape, mc);
 		}
@@ -809,7 +805,7 @@ static snd_kcontrol_new_t midi_mixer_ctl = {
  */
 static unsigned __devinit get_irq_config(int irq)
 {
-	static const int valid_irq[] __devinitdata = { 9, 5, 7, 10 };
+	static const int valid_irq[] = { 9, 5, 7, 10 };
 	unsigned cfg;
 
 	for (cfg = 0; cfg < ARRAY_SIZE(valid_irq); ++cfg) {

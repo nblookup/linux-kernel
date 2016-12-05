@@ -58,7 +58,6 @@ static struct serio i8042_kbd_port;
 static struct serio i8042_aux_port;
 static unsigned char i8042_initial_ctr;
 static unsigned char i8042_ctr;
-static unsigned char i8042_last_e0;
 static unsigned char i8042_mux_open;
 struct timer_list i8042_timer;
 
@@ -67,18 +66,6 @@ struct timer_list i8042_timer;
  * multiple devices
  */
 #define i8042_request_irq_cookie (&i8042_timer)
-
-static unsigned long i8042_unxlate_seen[256 / BITS_PER_LONG];
-static unsigned char i8042_unxlate_table[128] = {
-	  0,118, 22, 30, 38, 37, 46, 54, 61, 62, 70, 69, 78, 85,102, 13,
-	 21, 29, 36, 45, 44, 53, 60, 67, 68, 77, 84, 91, 90, 20, 28, 27,
-	 35, 43, 52, 51, 59, 66, 75, 76, 82, 14, 18, 93, 26, 34, 33, 42,
-	 50, 49, 58, 65, 73, 74, 89,124, 17, 41, 88,  5,  6,  4, 12,  3,
-	 11,  2, 10,  1,  9,119,126,108,117,125,123,107,115,116,121,105,
-	114,122,112,113,127, 96, 97,120,  7, 15, 23, 31, 39, 47, 55, 63,
-	 71, 79, 86, 94,  8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 87,111,
-	 19, 25, 57, 81, 83, 92, 95, 98, 99,100,101,103,104,106,109,110
-};
 
 static irqreturn_t i8042_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 
@@ -300,7 +287,7 @@ static struct i8042_values i8042_kbd_values = {
 
 static struct serio i8042_kbd_port =
 {
-	.type =		SERIO_8042,
+	.type =		SERIO_8042_XL,
 	.write =	i8042_kbd_write,
 	.open =		i8042_open,
 	.close =	i8042_close,
@@ -399,31 +386,10 @@ static irqreturn_t i8042_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		if (!i8042_kbd_values.exists)
 			continue;
 
-		if (i8042_direct) {
-			serio_interrupt(&i8042_kbd_port, data, dfl, regs);
-			continue;
-		}
-
-		if (data > 0x7f) {
-			unsigned char index = (data & 0x7f) | (i8042_last_e0 << 7);
-			if (index == 0xaa || index == 0xb6)
-				set_bit(index, i8042_unxlate_seen);
-			if (test_and_clear_bit(index, i8042_unxlate_seen)) {
-				serio_interrupt(&i8042_kbd_port, 0xf0, dfl, regs);
-				data = i8042_unxlate_table[data & 0x7f];
-			}
-		} else {
-			set_bit(data | (i8042_last_e0 << 7), i8042_unxlate_seen);
-			data = i8042_unxlate_table[data];
-		}
-
-		i8042_last_e0 = (data == 0xe0);
-
 		serio_interrupt(&i8042_kbd_port, data, dfl, regs);
 	}
 
-	/* FIXME - was it really ours? */
-	return IRQ_HANDLED;
+	return IRQ_RETVAL(j);
 }
 
 /*
@@ -502,8 +468,10 @@ static int __init i8042_controller_init(void)
  * BIOSes.
  */
 
-	if (i8042_direct)
+	if (i8042_direct) {
 		i8042_ctr &= ~I8042_CTR_XLATE;
+		i8042_kbd_port.type = SERIO_8042;
+	}
 
 /*
  * Write CTR back.
@@ -573,6 +541,7 @@ void i8042_controller_cleanup(void)
 static int __init i8042_check_mux(struct i8042_values *values)
 {
 	unsigned char param;
+	static int i8042_check_mux_cookie;
 	int i;
 
 /*
@@ -580,9 +549,9 @@ static int __init i8042_check_mux(struct i8042_values *values)
  */
 
 	if (request_irq(values->irq, i8042_interrupt, SA_SHIRQ,
-				"i8042", i8042_request_irq_cookie))
+				"i8042", &i8042_check_mux_cookie))
                 return -1;
-	free_irq(values->irq, i8042_request_irq_cookie);
+	free_irq(values->irq, &i8042_check_mux_cookie);
 
 /*
  * Get rid of bytes in the queue.
@@ -610,16 +579,10 @@ static int __init i8042_check_mux(struct i8042_values *values)
 		(~param >> 4) & 0xf, ~param & 0xf);
 
 /*
- * In MUX mode the keyboard translation seems to be always off.
- */
- 
-	i8042_direct = 1;
-
-/*
  * Disable all muxed ports by disabling AUX.
  */
 
-	i8042_ctr &= I8042_CTR_AUXDIS;
+	i8042_ctr |= I8042_CTR_AUXDIS;
 	i8042_ctr &= ~I8042_CTR_AUXINT;
 
 	if (i8042_command(&i8042_ctr, I8042_CMD_CTL_WCTR))
@@ -645,6 +608,7 @@ static int __init i8042_check_mux(struct i8042_values *values)
 static int __init i8042_check_aux(struct i8042_values *values)
 {
 	unsigned char param;
+	static int i8042_check_aux_cookie;
 
 /*
  * Check if AUX irq is available. If it isn't, then there is no point
@@ -652,9 +616,9 @@ static int __init i8042_check_aux(struct i8042_values *values)
  */
 
 	if (request_irq(values->irq, i8042_interrupt, SA_SHIRQ,
-				"i8042", i8042_request_irq_cookie))
+				"i8042", &i8042_check_aux_cookie))
                 return -1;
-	free_irq(values->irq, i8042_request_irq_cookie);
+	free_irq(values->irq, &i8042_check_aux_cookie);
 
 /*
  * Get rid of bytes in the queue.

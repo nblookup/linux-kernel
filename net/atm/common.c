@@ -9,9 +9,6 @@
 #include <linux/net.h>		/* struct socket, struct proto_ops */
 #include <linux/atm.h>		/* ATM stuff */
 #include <linux/atmdev.h>
-#include <linux/atmclip.h>	/* CLIP_*ENCAP */
-#include <linux/atmarp.h>	/* manifest constants */
-#include <linux/sonet.h>	/* for ioctls */
 #include <linux/socket.h>	/* SOL_SOCKET */
 #include <linux/errno.h>	/* error codes */
 #include <linux/capability.h>
@@ -26,127 +23,12 @@
 #include <asm/uaccess.h>
 #include <asm/atomic.h>
 #include <asm/poll.h>
-#include <asm/ioctls.h>
 
-#if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
-#include <linux/atmlec.h>
-#include "lec.h"
-#include "lec_arpc.h"
-struct atm_lane_ops *atm_lane_ops;
-static DECLARE_MUTEX(atm_lane_ops_mutex);
-
-void atm_lane_ops_set(struct atm_lane_ops *hook)
-{
-	down(&atm_lane_ops_mutex);
-	atm_lane_ops = hook;
-	up(&atm_lane_ops_mutex);
-}
-
-int try_atm_lane_ops(void)
-{
-	down(&atm_lane_ops_mutex);
-	if (atm_lane_ops && try_module_get(atm_lane_ops->owner)) {
-		up(&atm_lane_ops_mutex);
-		return 1;
-	}
-	up(&atm_lane_ops_mutex);
-	return 0;
-}
-
-#if defined(CONFIG_ATM_LANE_MODULE) || defined(CONFIG_ATM_MPOA_MODULE)
-EXPORT_SYMBOL(atm_lane_ops);
-EXPORT_SYMBOL(try_atm_lane_ops);
-EXPORT_SYMBOL(atm_lane_ops_set);
-#endif
-#endif
-
-#if defined(CONFIG_ATM_MPOA) || defined(CONFIG_ATM_MPOA_MODULE)
-#include <linux/atmmpc.h>
-#include "mpc.h"
-struct atm_mpoa_ops *atm_mpoa_ops;
-static DECLARE_MUTEX(atm_mpoa_ops_mutex);
-
-void atm_mpoa_ops_set(struct atm_mpoa_ops *hook)
-{
-	down(&atm_mpoa_ops_mutex);
-	atm_mpoa_ops = hook;
-	up(&atm_mpoa_ops_mutex);
-}
-
-int try_atm_mpoa_ops(void)
-{
-	down(&atm_mpoa_ops_mutex);
-	if (atm_mpoa_ops && try_module_get(atm_mpoa_ops->owner)) {
-		up(&atm_mpoa_ops_mutex);
-		return 1;
-	}
-	up(&atm_mpoa_ops_mutex);
-	return 0;
-}
-#ifdef CONFIG_ATM_MPOA_MODULE
-EXPORT_SYMBOL(atm_mpoa_ops);
-EXPORT_SYMBOL(try_atm_mpoa_ops);
-EXPORT_SYMBOL(atm_mpoa_ops_set);
-#endif
-#endif
-
-#if defined(CONFIG_ATM_TCP) || defined(CONFIG_ATM_TCP_MODULE)
-#include <linux/atm_tcp.h>
-#ifdef CONFIG_ATM_TCP_MODULE
-struct atm_tcp_ops atm_tcp_ops;
-EXPORT_SYMBOL(atm_tcp_ops);
-#endif
-#endif
-
-#if defined(CONFIG_ATM_CLIP) || defined(CONFIG_ATM_CLIP_MODULE)
-#include <net/atmclip.h>
-struct atm_clip_ops *atm_clip_ops;
-static DECLARE_MUTEX(atm_clip_ops_mutex);
-
-void atm_clip_ops_set(struct atm_clip_ops *hook)
-{
-	down(&atm_clip_ops_mutex);
-	atm_clip_ops = hook;
-	up(&atm_clip_ops_mutex);
-}
-
-int try_atm_clip_ops(void)
-{
-	down(&atm_clip_ops_mutex);
-	if (atm_clip_ops && try_module_get(atm_clip_ops->owner)) {
-		up(&atm_clip_ops_mutex);
-		return 1;
-	}
-	up(&atm_clip_ops_mutex);
-	return 0;
-}
-
-#ifdef CONFIG_ATM_CLIP_MODULE
-EXPORT_SYMBOL(atm_clip_ops);
-EXPORT_SYMBOL(try_atm_clip_ops);
-EXPORT_SYMBOL(atm_clip_ops_set);
-#endif
-#endif
-
-#if defined(CONFIG_PPPOATM) || defined(CONFIG_PPPOATM_MODULE)
-int (*pppoatm_ioctl_hook)(struct atm_vcc *, unsigned int, unsigned long);
-EXPORT_SYMBOL(pppoatm_ioctl_hook);
-#endif
-
-#if defined(CONFIG_ATM_BR2684) || defined(CONFIG_ATM_BR2684_MODULE)
-int (*br2684_ioctl_hook)(struct atm_vcc *, unsigned int, unsigned long);
-#ifdef CONFIG_ATM_BR2684_MODULE
-EXPORT_SYMBOL(br2684_ioctl_hook);
-#endif
-#endif
 
 #include "resources.h"		/* atm_find_dev */
 #include "common.h"		/* prototypes */
 #include "protocols.h"		/* atm_init_<transport> */
 #include "addr.h"		/* address registry */
-#ifdef CONFIG_ATM_CLIP
-#include <net/atmclip.h>	/* for clip_create */
-#endif
 #include "signaling.h"		/* for WAITING and sigd_attach */
 
 
@@ -156,13 +38,16 @@ EXPORT_SYMBOL(br2684_ioctl_hook);
 #define DPRINTK(format,args...)
 #endif
 
-
-HLIST_HEAD(vcc_sklist);
+struct hlist_head vcc_hash[VCC_HTABLE_SIZE];
 rwlock_t vcc_sklist_lock = RW_LOCK_UNLOCKED;
 
 void __vcc_insert_socket(struct sock *sk)
 {
-	sk_add_node(sk, &vcc_sklist);
+	struct atm_vcc *vcc = atm_sk(sk);
+	struct hlist_head *head = &vcc_hash[vcc->vci &
+					(VCC_HTABLE_SIZE - 1)];
+	sk->sk_hashent = vcc->vci & (VCC_HTABLE_SIZE - 1);
+	sk_add_node(sk, head);
 }
 
 void vcc_insert_socket(struct sock *sk)
@@ -198,7 +83,7 @@ static struct sk_buff *alloc_tx(struct atm_vcc *vcc,unsigned int size)
 }
 
 
-EXPORT_SYMBOL(vcc_sklist);
+EXPORT_SYMBOL(vcc_hash);
 EXPORT_SYMBOL(vcc_sklist_lock);
 EXPORT_SYMBOL(vcc_insert_socket);
 EXPORT_SYMBOL(vcc_remove_socket);
@@ -215,6 +100,37 @@ static void vcc_sock_destruct(struct sock *sk)
 
 	kfree(sk->sk_protinfo);
 }
+
+static void vcc_def_wakeup(struct sock *sk)
+{
+	read_lock(&sk->sk_callback_lock);
+	if (sk->sk_sleep && waitqueue_active(sk->sk_sleep))
+		wake_up(sk->sk_sleep);
+	read_unlock(&sk->sk_callback_lock);
+}
+
+static inline int vcc_writable(struct sock *sk)
+{
+	struct atm_vcc *vcc = atm_sk(sk);
+
+	return (vcc->qos.txtp.max_sdu +
+	        atomic_read(&sk->sk_wmem_alloc)) <= sk->sk_sndbuf;
+}
+
+static void vcc_write_space(struct sock *sk)
+{       
+	read_lock(&sk->sk_callback_lock);
+
+	if (vcc_writable(sk)) {
+		if (sk->sk_sleep && waitqueue_active(sk->sk_sleep))
+			wake_up_interruptible(sk->sk_sleep);
+
+		sk_wake_async(sk, 2, POLL_OUT);
+	}
+
+	read_unlock(&sk->sk_callback_lock);
+}
+
  
 int vcc_create(struct socket *sock, int protocol, int family)
 {
@@ -227,7 +143,10 @@ int vcc_create(struct socket *sock, int protocol, int family)
 	sk = sk_alloc(family, GFP_KERNEL, 1, NULL);
 	if (!sk)
 		return -ENOMEM;
-	sock_init_data(NULL, sk);
+	sock_init_data(sock, sk);
+	sk_set_owner(sk, THIS_MODULE);
+	sk->sk_state_change = vcc_def_wakeup;
+	sk->sk_write_space = vcc_write_space;
 
 	vcc = atm_sk(sk) = kmalloc(sizeof(*vcc), GFP_KERNEL);
 	if (!vcc) {
@@ -238,7 +157,6 @@ int vcc_create(struct socket *sock, int protocol, int family)
 	memset(vcc, 0, sizeof(*vcc));
 	vcc->sk = sk;
 	vcc->dev = NULL;
-	vcc->callback = NULL;
 	memset(&vcc->local,0,sizeof(struct sockaddr_atmsvc));
 	memset(&vcc->remote,0,sizeof(struct sockaddr_atmsvc));
 	vcc->qos.txtp.max_sdu = 1 << 16; /* for meta VCs */
@@ -249,8 +167,6 @@ int vcc_create(struct socket *sock, int protocol, int family)
 	vcc->push_oam = NULL;
 	vcc->vpi = vcc->vci = 0; /* no VCI/VPI yet */
 	vcc->atm_options = vcc->aal_options = 0;
-	init_waitqueue_head(&vcc->sleep);
-	sk->sk_sleep = &vcc->sleep;
 	sk->sk_destruct = vcc_sock_destruct;
 	sock->sk = sk;
 	return 0;
@@ -300,9 +216,9 @@ int vcc_release(struct socket *sock)
 void vcc_release_async(struct atm_vcc *vcc, int reply)
 {
 	set_bit(ATM_VF_CLOSE, &vcc->flags);
-	vcc->reply = reply;
 	vcc->sk->sk_err = -reply;
-	wake_up(&vcc->sleep);
+	clear_bit(ATM_VF_WAITING, &vcc->flags);
+	vcc->sk->sk_state_change(vcc->sk);
 }
 
 
@@ -335,7 +251,80 @@ static int adjust_tp(struct atm_trafprm *tp,unsigned char aal)
 }
 
 
-static int __vcc_connect(struct atm_vcc *vcc, struct atm_dev *dev, int vpi,
+static int check_ci(struct atm_vcc *vcc, short vpi, int vci)
+{
+	struct hlist_head *head = &vcc_hash[vci &
+					(VCC_HTABLE_SIZE - 1)];
+	struct hlist_node *node;
+	struct sock *s;
+	struct atm_vcc *walk;
+
+	sk_for_each(s, node, head) {
+		walk = atm_sk(s);
+		if (walk->dev != vcc->dev)
+			continue;
+		if (test_bit(ATM_VF_ADDR, &walk->flags) && walk->vpi == vpi &&
+		    walk->vci == vci && ((walk->qos.txtp.traffic_class !=
+		    ATM_NONE && vcc->qos.txtp.traffic_class != ATM_NONE) ||
+		    (walk->qos.rxtp.traffic_class != ATM_NONE &&
+		    vcc->qos.rxtp.traffic_class != ATM_NONE)))
+			return -EADDRINUSE;
+	}
+
+	/* allow VCCs with same VPI/VCI iff they don't collide on
+	   TX/RX (but we may refuse such sharing for other reasons,
+	   e.g. if protocol requires to have both channels) */
+
+	return 0;
+}
+
+
+static int find_ci(struct atm_vcc *vcc, short *vpi, int *vci)
+{
+	static short p;        /* poor man's per-device cache */
+	static int c;
+	short old_p;
+	int old_c;
+	int err;
+
+	if (*vpi != ATM_VPI_ANY && *vci != ATM_VCI_ANY) {
+		err = check_ci(vcc, *vpi, *vci);
+		return err;
+	}
+	/* last scan may have left values out of bounds for current device */
+	if (*vpi != ATM_VPI_ANY)
+		p = *vpi;
+	else if (p >= 1 << vcc->dev->ci_range.vpi_bits)
+		p = 0;
+	if (*vci != ATM_VCI_ANY)
+		c = *vci;
+	else if (c < ATM_NOT_RSV_VCI || c >= 1 << vcc->dev->ci_range.vci_bits)
+			c = ATM_NOT_RSV_VCI;
+	old_p = p;
+	old_c = c;
+	do {
+		if (!check_ci(vcc, p, c)) {
+			*vpi = p;
+			*vci = c;
+			return 0;
+		}
+		if (*vci == ATM_VCI_ANY) {
+			c++;
+			if (c >= 1 << vcc->dev->ci_range.vci_bits)
+				c = ATM_NOT_RSV_VCI;
+		}
+		if ((c == ATM_NOT_RSV_VCI || *vci != ATM_VCI_ANY) &&
+		    *vpi == ATM_VPI_ANY) {
+			p++;
+			if (p >= 1 << vcc->dev->ci_range.vpi_bits) p = 0;
+		}
+	}
+	while (old_p != p || old_c != c);
+	return -EADDRINUSE;
+}
+
+
+static int __vcc_connect(struct atm_vcc *vcc, struct atm_dev *dev, short vpi,
 			 int vci)
 {
 	int error;
@@ -347,8 +336,18 @@ static int __vcc_connect(struct atm_vcc *vcc, struct atm_dev *dev, int vpi,
 	if (vci > 0 && vci < ATM_NOT_RSV_VCI && !capable(CAP_NET_BIND_SERVICE))
 		return -EPERM;
 	error = 0;
+	if (!try_module_get(dev->ops->owner))
+		return -ENODEV;
 	vcc->dev = dev;
-	vcc_insert_socket(vcc->sk);
+	write_lock_irq(&vcc_sklist_lock);
+	if ((error = find_ci(vcc, &vpi, &vci))) {
+		write_unlock_irq(&vcc_sklist_lock);
+		goto fail_module_put;
+	}
+	vcc->vpi = vpi;
+	vcc->vci = vci;
+	__vcc_insert_socket(vcc->sk);
+	write_unlock_irq(&vcc_sklist_lock);
 	switch (vcc->qos.aal) {
 		case ATM_AAL0:
 			error = atm_init_aal0(vcc);
@@ -371,26 +370,27 @@ static int __vcc_connect(struct atm_vcc *vcc, struct atm_dev *dev, int vpi,
 	}
 	if (!error) error = adjust_tp(&vcc->qos.txtp,vcc->qos.aal);
 	if (!error) error = adjust_tp(&vcc->qos.rxtp,vcc->qos.aal);
-	if (error) {
-		vcc_remove_socket(vcc->sk);
-		return error;
-	}
+	if (error)
+		goto fail;
 	DPRINTK("VCC %d.%d, AAL %d\n",vpi,vci,vcc->qos.aal);
 	DPRINTK("  TX: %d, PCR %d..%d, SDU %d\n",vcc->qos.txtp.traffic_class,
 	    vcc->qos.txtp.min_pcr,vcc->qos.txtp.max_pcr,vcc->qos.txtp.max_sdu);
 	DPRINTK("  RX: %d, PCR %d..%d, SDU %d\n",vcc->qos.rxtp.traffic_class,
 	    vcc->qos.rxtp.min_pcr,vcc->qos.rxtp.max_pcr,vcc->qos.rxtp.max_sdu);
-	if (!try_module_get(dev->ops->owner))
-		return -ENODEV;
+
 	if (dev->ops->open) {
-		error = dev->ops->open(vcc,vpi,vci);
-		if (error) {
-			module_put(dev->ops->owner);
-			vcc_remove_socket(vcc->sk);
-			return error;
-		}
+		if ((error = dev->ops->open(vcc)))
+			goto fail;
 	}
 	return 0;
+
+fail:
+	vcc_remove_socket(vcc->sk);
+fail_module_put:
+	module_put(dev->ops->owner);
+	/* ensure we get dev module ref count correct */
+	vcc->dev = NULL;
+	return error;
 }
 
 
@@ -428,6 +428,8 @@ int vcc_connect(struct socket *sock, int itf, short vpi, int vci)
 		return -EINVAL;
 	if (itf != ATM_ITF_ANY) {
 		dev = atm_dev_lookup(itf);
+		if (!dev)
+			return -ENODEV;
 		error = __vcc_connect(vcc, dev, vpi, vci);
 		if (error) {
 			atm_dev_put(dev);
@@ -475,7 +477,7 @@ int vcc_recvmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
 	vcc = ATM_SD(sock);
 	if (test_bit(ATM_VF_RELEASED,&vcc->flags) ||
 	    test_bit(ATM_VF_CLOSE,&vcc->flags))
-		return vcc->reply;
+		return -sk->sk_err;
 	if (!test_bit(ATM_VF_READY, &vcc->flags))
 		return 0;
 
@@ -493,9 +495,6 @@ int vcc_recvmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *msg,
         if (error)
                 return error;
         sock_recv_timestamp(msg, sk, skb);
-        if (vcc->dev->ops->feedback)
-                vcc->dev->ops->feedback(vcc, skb, (unsigned long) skb->data,
-                    (unsigned long) msg->msg_iov->iov_base, copied);
         DPRINTK("RcvM %d -= %d\n", atomic_read(&vcc->sk->rmem_alloc), skb->truesize);
         atm_return(vcc, skb->truesize);
         skb_free_datagram(sk, skb);
@@ -532,7 +531,7 @@ int vcc_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *m,
 	vcc = ATM_SD(sock);
 	if (test_bit(ATM_VF_RELEASED, &vcc->flags) ||
 	    test_bit(ATM_VF_CLOSE, &vcc->flags)) {
-		error = vcc->reply;
+		error = -sk->sk_err;
 		goto out;
 	}
 	if (!test_bit(ATM_VF_READY, &vcc->flags)) {
@@ -549,7 +548,7 @@ int vcc_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *m,
 	}
 	/* verify_area is done by net/socket.c */
 	eff = (size+3) & ~3; /* align to word boundary */
-	prepare_to_wait(&vcc->sleep, &wait, TASK_INTERRUPTIBLE);
+	prepare_to_wait(sk->sk_sleep, &wait, TASK_INTERRUPTIBLE);
 	error = 0;
 	while (!(skb = alloc_tx(vcc,eff))) {
 		if (m->msg_flags & MSG_DONTWAIT) {
@@ -563,16 +562,16 @@ int vcc_sendmsg(struct kiocb *iocb, struct socket *sock, struct msghdr *m,
 		}
 		if (test_bit(ATM_VF_RELEASED,&vcc->flags) ||
 		    test_bit(ATM_VF_CLOSE,&vcc->flags)) {
-			error = vcc->reply;
+			error = -sk->sk_err;
 			break;
 		}
 		if (!test_bit(ATM_VF_READY,&vcc->flags)) {
 			error = -EPIPE;
 			break;
 		}
-		prepare_to_wait(&vcc->sleep, &wait, TASK_INTERRUPTIBLE);
+		prepare_to_wait(sk->sk_sleep, &wait, TASK_INTERRUPTIBLE);
 	}
-	finish_wait(&vcc->sleep, &wait);
+	finish_wait(sk->sk_sleep, &wait);
 	if (error)
 		goto out;
 	skb->dev = NULL; /* for paths shared with net_device interfaces */
@@ -591,293 +590,39 @@ out:
 }
 
 
-unsigned int atm_poll(struct file *file,struct socket *sock,poll_table *wait)
+unsigned int vcc_poll(struct file *file, struct socket *sock, poll_table *wait)
 {
+	struct sock *sk = sock->sk;
 	struct atm_vcc *vcc;
 	unsigned int mask;
 
-	vcc = ATM_SD(sock);
-	poll_wait(file,&vcc->sleep,wait);
+	poll_wait(file, sk->sk_sleep, wait);
 	mask = 0;
-	if (skb_peek(&vcc->sk->sk_receive_queue))
-		mask |= POLLIN | POLLRDNORM;
-	if (test_bit(ATM_VF_RELEASED,&vcc->flags) ||
-	    test_bit(ATM_VF_CLOSE,&vcc->flags))
-		mask |= POLLHUP;
-	if (sock->state != SS_CONNECTING) {
-		if (vcc->qos.txtp.traffic_class != ATM_NONE &&
-		    vcc->qos.txtp.max_sdu +
-		    atomic_read(&vcc->sk->sk_wmem_alloc) <= vcc->sk->sk_sndbuf)
-			mask |= POLLOUT | POLLWRNORM;
-	}
-	else if (vcc->reply != WAITING) {
-			mask |= POLLOUT | POLLWRNORM;
-			if (vcc->reply) mask |= POLLERR;
-		}
-	return mask;
-}
-
-
-int vcc_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
-{
-	struct atm_vcc *vcc;
-	int error;
 
 	vcc = ATM_SD(sock);
-	switch (cmd) {
-		case SIOCOUTQ:
-			if (sock->state != SS_CONNECTED ||
-			    !test_bit(ATM_VF_READY, &vcc->flags)) {
-				error =  -EINVAL;
-				goto done;
-			}
-			error = put_user(vcc->sk->sk_sndbuf -
-					 atomic_read(&vcc->sk->sk_wmem_alloc),
-					 (int *) arg) ? -EFAULT : 0;
-			goto done;
-		case SIOCINQ:
-			{
-				struct sk_buff *skb;
 
-				if (sock->state != SS_CONNECTED) {
-					error = -EINVAL;
-					goto done;
-				}
-				skb = skb_peek(&vcc->sk->sk_receive_queue);
-				error = put_user(skb ? skb->len : 0,
-					 	 (int *) arg) ? -EFAULT : 0;
-				goto done;
-			}
-		case SIOCGSTAMP: /* borrowed from IP */
-			if (!vcc->sk->sk_stamp.tv_sec) {
-				error = -ENOENT;
-				goto done;
-			}
-			error = copy_to_user((void *)arg, &vcc->sk->sk_stamp,
-					     sizeof(struct timeval)) ? -EFAULT : 0;
-			goto done;
-		case ATM_SETSC:
-			printk(KERN_WARNING "ATM_SETSC is obsolete\n");
-			error = 0;
-			goto done;
-		case ATMSIGD_CTRL:
-			if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-			/*
-			 * The user/kernel protocol for exchanging signalling
-			 * info uses kernel pointers as opaque references,
-			 * so the holder of the file descriptor can scribble
-			 * on the kernel... so we should make sure that we
-			 * have the same privledges that /proc/kcore needs
-			 */
-			if (!capable(CAP_SYS_RAWIO)) {
-				error = -EPERM;
-				goto done;
-			}
-			error = sigd_attach(vcc);
-			if (!error)
-				sock->state = SS_CONNECTED;
-			goto done;
-#if defined(CONFIG_ATM_CLIP) || defined(CONFIG_ATM_CLIP_MODULE)
-		case SIOCMKCLIP:
-			if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-			if (try_atm_clip_ops()) {
-				error = atm_clip_ops->clip_create(arg);
-				module_put(atm_clip_ops->owner);
-			} else
-				error = -ENOSYS;
-			goto done;
-		case ATMARPD_CTRL:
-			if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-#if defined(CONFIG_ATM_CLIP_MODULE)
-			if (!atm_clip_ops)
-				request_module("clip");
-#endif
-			if (try_atm_clip_ops()) {
-				error = atm_clip_ops->atm_init_atmarp(vcc);
-				if (!error)
-					sock->state = SS_CONNECTED;
-			} else
-				error = -ENOSYS;
-			goto done;
-		case ATMARP_MKIP:
-			if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-			if (try_atm_clip_ops()) {
-				error = atm_clip_ops->clip_mkip(vcc, arg);
-				module_put(atm_clip_ops->owner);
-			} else
-				error = -ENOSYS;
-			goto done;
-		case ATMARP_SETENTRY:
-			if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-			if (try_atm_clip_ops()) {
-				error = atm_clip_ops->clip_setentry(vcc, arg);
-				module_put(atm_clip_ops->owner);
-			} else
-				error = -ENOSYS;
-			goto done;
-		case ATMARP_ENCAP:
-			if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-			if (try_atm_clip_ops()) {
-				error = atm_clip_ops->clip_encap(vcc, arg);
-				module_put(atm_clip_ops->owner);
-			} else
-				error = -ENOSYS;
-			goto done;
-#endif
-#if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
-                case ATMLEC_CTRL:
-                        if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-#if defined(CONFIG_ATM_LANE_MODULE)
-                        if (!atm_lane_ops)
-				request_module("lec");
-#endif
-			if (try_atm_lane_ops()) {
-				error = atm_lane_ops->lecd_attach(vcc, (int) arg);
-				module_put(atm_lane_ops->owner);
-				if (error >= 0)
-					sock->state = SS_CONNECTED;
-			} else
-				error = -ENOSYS;
-			goto done;
-                case ATMLEC_MCAST:
-			if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-			if (try_atm_lane_ops()) {
-				error = atm_lane_ops->mcast_attach(vcc, (int) arg);
-				module_put(atm_lane_ops->owner);
-			} else
-				error = -ENOSYS;
-			goto done;
-                case ATMLEC_DATA:
-			if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-			if (try_atm_lane_ops()) {
-				error = atm_lane_ops->vcc_attach(vcc, (void *) arg);
-				module_put(atm_lane_ops->owner);
-			} else
-				error = -ENOSYS;
-			goto done;
-#endif
-#if defined(CONFIG_ATM_MPOA) || defined(CONFIG_ATM_MPOA_MODULE)
-		case ATMMPC_CTRL:
-			if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-#if defined(CONFIG_ATM_MPOA_MODULE)
-			if (!atm_mpoa_ops)
-                                request_module("mpoa");
-#endif
-			if (try_atm_mpoa_ops()) {
-				error = atm_mpoa_ops->mpoad_attach(vcc, (int) arg);
-				module_put(atm_mpoa_ops->owner);
-				if (error >= 0)
-					sock->state = SS_CONNECTED;
-			} else
-				error = -ENOSYS;
-			goto done;
-		case ATMMPC_DATA:
-			if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-			if (try_atm_mpoa_ops()) {
-				error = atm_mpoa_ops->vcc_attach(vcc, arg);
-				module_put(atm_mpoa_ops->owner);
-			} else
-				error = -ENOSYS;
-			goto done;
-#endif
-#if defined(CONFIG_ATM_TCP) || defined(CONFIG_ATM_TCP_MODULE)
-		case SIOCSIFATMTCP:
-			if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-			if (!atm_tcp_ops.attach) {
-				error = -ENOPKG;
-				goto done;
-			}
-			fops_get(&atm_tcp_ops);
-			error = atm_tcp_ops.attach(vcc, (int) arg);
-			if (error >= 0)
-				sock->state = SS_CONNECTED;
-			else
-				fops_put (&atm_tcp_ops);
-			goto done;
-		case ATMTCP_CREATE:
-			if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-			if (!atm_tcp_ops.create_persistent) {
-				error = -ENOPKG;
-				goto done;
-			}
-			error = atm_tcp_ops.create_persistent((int) arg);
-			if (error < 0)
-				fops_put (&atm_tcp_ops);
-			goto done;
-		case ATMTCP_REMOVE:
-			if (!capable(CAP_NET_ADMIN)) {
-				error = -EPERM;
-				goto done;
-			}
-			if (!atm_tcp_ops.remove_persistent) {
-				error = -ENOPKG;
-				goto done;
-			}
-			error = atm_tcp_ops.remove_persistent((int) arg);
-			fops_put(&atm_tcp_ops);
-			goto done;
-#endif
-		default:
-			break;
-	}
-#if defined(CONFIG_PPPOATM) || defined(CONFIG_PPPOATM_MODULE)
-	if (pppoatm_ioctl_hook) {
-		error = pppoatm_ioctl_hook(vcc, cmd, arg);
-		if (error != -ENOIOCTLCMD)
-			goto done;
-	}
-#endif
-#if defined(CONFIG_ATM_BR2684) || defined(CONFIG_ATM_BR2684_MODULE)
-	if (br2684_ioctl_hook) {
-		error = br2684_ioctl_hook(vcc, cmd, arg);
-		if (error != -ENOIOCTLCMD)
-			goto done;
-	}
-#endif
+	/* exceptional events */
+	if (sk->sk_err)
+		mask = POLLERR;
 
-	error = atm_dev_ioctl(cmd, arg);
+	if (test_bit(ATM_VF_RELEASED, &vcc->flags) ||
+	    test_bit(ATM_VF_CLOSE, &vcc->flags))
+		mask |= POLLHUP;
 
-done:
-	return error;
+	/* readable? */
+	if (!skb_queue_empty(&sk->sk_receive_queue))
+		mask |= POLLIN | POLLRDNORM;
+
+	/* writable? */
+	if (sock->state == SS_CONNECTING &&
+	    test_bit(ATM_VF_WAITING, &vcc->flags))
+		return mask;
+
+	if (vcc->qos.txtp.traffic_class != ATM_NONE &&
+	    vcc_writable(vcc->sk))
+		mask |= POLLOUT | POLLWRNORM | POLLWRBAND;
+
+	return mask;
 }
 
 
@@ -1024,6 +769,7 @@ int vcc_getsockopt(struct socket *sock, int level, int optname,
 
 #if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
 #if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+struct net_bridge;
 struct net_bridge_fdb_entry *(*br_fdb_get_hook)(struct net_bridge *br,
 						unsigned char *addr) = NULL;
 void (*br_fdb_put_hook)(struct net_bridge_fdb_entry *ent) = NULL;
@@ -1047,12 +793,10 @@ static int __init atm_init(void)
 		printk(KERN_ERR "atmsvc_init() failed with %d\n", error);
 		goto failure;
 	}
-#ifdef CONFIG_PROC_FS
         if ((error = atm_proc_init()) < 0) {
 		printk(KERN_ERR "atm_proc_init() failed with %d\n",error);
 		goto failure;
 	}
-#endif
 	return 0;
 
 failure:
@@ -1063,9 +807,7 @@ failure:
 
 static void __exit atm_exit(void)
 {
-#ifdef CONFIG_PROC_FS
 	atm_proc_exit();
-#endif
 	atmsvc_exit();
 	atmpvc_exit();
 }
@@ -1074,3 +816,5 @@ module_init(atm_init);
 module_exit(atm_exit);
 
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_NETPROTO(PF_ATMPVC);
+MODULE_ALIAS_NETPROTO(PF_ATMSVC);

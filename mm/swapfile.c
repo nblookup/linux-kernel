@@ -25,6 +25,7 @@
 #include <linux/security.h>
 
 #include <asm/pgtable.h>
+#include <asm/tlbflush.h>
 #include <linux/swapops.h>
 
 spinlock_t swaplock = SPIN_LOCK_UNLOCKED;
@@ -926,7 +927,7 @@ static int setup_swap_extents(struct swap_info_struct *sis)
 	 */
 	probe_block = 0;
 	page_no = 0;
-	last_block = inode->i_size >> blkbits;
+	last_block = i_size_read(inode) >> blkbits;
 	while ((probe_block + blocks_per_page) <= last_block &&
 			page_no < sis->max) {
 		unsigned block_in_page;
@@ -1222,7 +1223,7 @@ asmlinkage long sys_swapon(const char __user * specialfile, int swap_flags)
 	unsigned int type;
 	int i, prev;
 	int error;
-	static int least_priority = 0;
+	static int least_priority;
 	union swap_header *swap_header = 0;
 	int swap_header_version;
 	int nr_good_pages = 0;
@@ -1312,11 +1313,15 @@ asmlinkage long sys_swapon(const char __user * specialfile, int swap_flags)
 		goto bad_swap;
 	}
 
-	swapfilesize = mapping->host->i_size >> PAGE_SHIFT;
+	swapfilesize = i_size_read(mapping->host) >> PAGE_SHIFT;
 
 	/*
 	 * Read the swap header.
 	 */
+	if (!mapping->a_ops->readpage) {
+		error = -EINVAL;
+		goto bad_swap;
+	}
 	page = read_cache_page(mapping, 0,
 			(filler_t *)mapping->a_ops->readpage, swap_file);
 	if (IS_ERR(page)) {
@@ -1403,7 +1408,8 @@ asmlinkage long sys_swapon(const char __user * specialfile, int swap_flags)
 	p->max = maxpages;
 	p->pages = nr_good_pages;
 
-	if (setup_swap_extents(p))
+	error = setup_swap_extents(p);
+	if (error)
 		goto bad_swap;
 
 	swap_list_lock();

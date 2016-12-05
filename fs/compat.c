@@ -27,7 +27,6 @@
 #include <linux/ioctl32.h>
 #include <linux/init.h>
 #include <linux/sockios.h>	/* for SIOCDEVPRIVATE */
-#include <linux/fs.h>
 #include <linux/smp_lock.h>
 #include <linux/ctype.h>
 #include <linux/module.h>
@@ -53,6 +52,19 @@ asmlinkage long compat_sys_utime(char *filename, struct compat_utimbuf *t)
 	return do_utimes(filename, t ? tv : NULL);
 }
 
+asmlinkage long compat_sys_utimes(char *filename, struct compat_timeval *t)
+{
+	struct timeval tv[2];
+
+	if (t) { 
+		if (get_user(tv[0].tv_sec, &t[0].tv_sec) ||
+		    get_user(tv[0].tv_usec, &t[0].tv_usec) ||
+		    get_user(tv[1].tv_sec, &t[1].tv_sec) ||
+		    get_user(tv[1].tv_usec, &t[1].tv_usec))
+			return -EFAULT; 
+	} 
+	return do_utimes(filename, t ? tv : NULL);
+}
 
 asmlinkage long compat_sys_newstat(char * filename,
 		struct compat_stat *statbuf)
@@ -107,7 +119,12 @@ static int put_compat_statfs(struct compat_statfs *ubuf, struct kstatfs *kbuf)
 	    __put_user(kbuf->f_namelen, &ubuf->f_namelen) ||
 	    __put_user(kbuf->f_fsid.val[0], &ubuf->f_fsid.val[0]) ||
 	    __put_user(kbuf->f_fsid.val[1], &ubuf->f_fsid.val[1]) ||
-	    __put_user(kbuf->f_frsize, &ubuf->f_frsize))
+	    __put_user(kbuf->f_frsize, &ubuf->f_frsize) ||
+	    __put_user(0, &ubuf->f_spare[0]) || 
+	    __put_user(0, &ubuf->f_spare[1]) || 
+	    __put_user(0, &ubuf->f_spare[2]) || 
+	    __put_user(0, &ubuf->f_spare[3]) || 
+	    __put_user(0, &ubuf->f_spare[4]))
 		return -EFAULT;
 	return 0;
 }
@@ -150,13 +167,77 @@ out:
 	return error;
 }
 
+static int put_compat_statfs64(struct compat_statfs64 *ubuf, struct kstatfs *kbuf)
+{
+	if (sizeof ubuf->f_blocks == 4) {
+		if ((kbuf->f_blocks | kbuf->f_bfree |
+		     kbuf->f_bavail | kbuf->f_files | kbuf->f_ffree) &
+		    0xffffffff00000000ULL)
+			return -EOVERFLOW;
+	}
+	if (verify_area(VERIFY_WRITE, ubuf, sizeof(*ubuf)) ||
+	    __put_user(kbuf->f_type, &ubuf->f_type) ||
+	    __put_user(kbuf->f_bsize, &ubuf->f_bsize) ||
+	    __put_user(kbuf->f_blocks, &ubuf->f_blocks) ||
+	    __put_user(kbuf->f_bfree, &ubuf->f_bfree) ||
+	    __put_user(kbuf->f_bavail, &ubuf->f_bavail) ||
+	    __put_user(kbuf->f_files, &ubuf->f_files) ||
+	    __put_user(kbuf->f_ffree, &ubuf->f_ffree) ||
+	    __put_user(kbuf->f_namelen, &ubuf->f_namelen) ||
+	    __put_user(kbuf->f_fsid.val[0], &ubuf->f_fsid.val[0]) ||
+	    __put_user(kbuf->f_fsid.val[1], &ubuf->f_fsid.val[1]) ||
+	    __put_user(kbuf->f_frsize, &ubuf->f_frsize))
+		return -EFAULT;
+	return 0;
+}
+
+asmlinkage long compat_statfs64(const char *path, compat_size_t sz, struct compat_statfs64 *buf)
+{
+	struct nameidata nd;
+	int error;
+
+	if (sz != sizeof(*buf))
+		return -EINVAL;
+
+	error = user_path_walk(path, &nd);
+	if (!error) {
+		struct kstatfs tmp;
+		error = vfs_statfs(nd.dentry->d_inode->i_sb, &tmp);
+		if (!error && put_compat_statfs64(buf, &tmp))
+			error = -EFAULT;
+		path_release(&nd);
+	}
+	return error;
+}
+
+asmlinkage long compat_fstatfs64(unsigned int fd, compat_size_t sz, struct compat_statfs64 *buf)
+{
+	struct file * file;
+	struct kstatfs tmp;
+	int error;
+
+	if (sz != sizeof(*buf))
+		return -EINVAL;
+
+	error = -EBADF;
+	file = fget(fd);
+	if (!file)
+		goto out;
+	error = vfs_statfs(file->f_dentry->d_inode->i_sb, &tmp);
+	if (!error && put_compat_statfs64(buf, &tmp))
+		error = -EFAULT;
+	fput(file);
+out:
+	return error;
+}
 
 /* ioctl32 stuff, used by sparc64, parisc, s390x, ppc64, x86_64 */
 
 #define IOCTL_HASHSIZE 256
 struct ioctl_trans *ioctl32_hash_table[IOCTL_HASHSIZE];
 
-extern struct ioctl_trans ioctl_start[], ioctl_end[]; 
+extern struct ioctl_trans ioctl_start[];
+extern int ioctl_table_size;
 
 static inline unsigned long ioctl32_hash(unsigned long cmd)
 {
@@ -184,7 +265,7 @@ static int __init init_sys32_ioctl(void)
 {
 	int i;
 
-	for (i = 0; &ioctl_start[i] < &ioctl_end[0]; i++) {
+	for (i = 0; i < ioctl_table_size; i++) {
 		if (ioctl_start[i].next != 0) { 
 			printk("ioctl translation %d bad\n",i); 
 			return -1;
@@ -247,8 +328,7 @@ int register_ioctl32_conversion(unsigned int cmd, int (*handler)(unsigned int, u
 
 static inline int builtin_ioctl(struct ioctl_trans *t)
 { 
-	return t >= (struct ioctl_trans *)ioctl_start &&
-	       t < (struct ioctl_trans *)ioctl_end; 
+	return t >= ioctl_start && t < (ioctl_start + ioctl_table_size);
 } 
 
 /* Problem: 

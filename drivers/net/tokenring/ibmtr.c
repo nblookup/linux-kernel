@@ -109,7 +109,8 @@ in the event that chatty debug messages are desired - jjs 12/30/98 */
 
 #include <linux/module.h>
 
-#ifdef PCMCIA
+#ifdef PCMCIA		/* required for ibmtr_cs.c to build */
+#undef MODULE		/* yes, really */
 #undef ENABLE_PAGING
 #else
 #define ENABLE_PAGING 1		
@@ -151,7 +152,7 @@ static char version[] __initdata =
 
 /* this allows displaying full adapter information */
 
-char *channel_def[] __initdata = { "ISA", "MCA", "ISA P&P" };
+char *channel_def[] __devinitdata = { "ISA", "MCA", "ISA P&P" };
 
 static char pcchannelid[] __devinitdata = {
 	0x05, 0x00, 0x04, 0x09,
@@ -863,7 +864,8 @@ static int tok_open(struct net_device *dev)
 	ti->sram_virt &= ~1; /* to reverse what we do in tok_close */
 	/* init the spinlock */
 	ti->lock = (spinlock_t) SPIN_LOCK_UNLOCKED;
-
+	init_timer(&ti->tr_timer);
+	
 	i = tok_init_card(dev);
 	if (i) return i;
 
@@ -875,7 +877,6 @@ static int tok_open(struct net_device *dev)
 		if (i==0) break;
 		if (ti->open_status == OPEN && ti->sap_status==OPEN) {
 			netif_start_queue(dev);
-			MOD_INC_USE_COUNT;
 			DPRINTK("Adapter is up and running\n");
 			return 0;
 		}
@@ -1033,14 +1034,13 @@ static int tok_close(struct net_device *dev)
 
 	/* Important for PCMCIA hot unplug, otherwise, we'll pull the card, */
 	/* unloading the module from memory, and then if a timer pops, ouch */
-	del_timer(&ti->tr_timer);
+	del_timer_sync(&ti->tr_timer);
 	outb(0, dev->base_addr + ADAPTRESET);
 	ti->sram_virt |= 1;
 	ti->open_status = CLOSED;
 
 	netif_stop_queue(dev);
 	DPRINTK("Adapter is closed.\n");
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -1917,7 +1917,7 @@ MODULE_PARM(io, "1-" __MODULE_STRING(IBMTR_MAX_ADAPTERS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(IBMTR_MAX_ADAPTERS) "i");
 MODULE_PARM(mem, "1-" __MODULE_STRING(IBMTR_MAX_ADAPTERS) "i");
 
-int init_module(void)
+static int __init ibmtr_init(void)
 {
 	int i;
 	int count=0;
@@ -1947,21 +1947,24 @@ int init_module(void)
 	if (count) return 0;
 	printk("ibmtr: register_netdev() returned non-zero.\n");
 	return -EIO;
-}				/*init_module */
+}
+module_init(ibmtr_init);
 
-void cleanup_module(void)
+static void __exit ibmtr_cleanup(void)
 {
-	int i,j;
+	int i;
 
 	for (i = 0; i < IBMTR_MAX_ADAPTERS; i++){
 		if (!dev_ibmtr[i])
 			continue;
 		if (dev_ibmtr[i]->base_addr) {
 			outb(0,dev_ibmtr[i]->base_addr+ADAPTRESET);
-			for(j=jiffies+TR_RST_TIME;
-				time_before_eq(jiffies,j);) ;
+			
+			schedule_timeout(TR_RST_TIME); /* wait 50ms */
+
                         outb(0,dev_ibmtr[i]->base_addr+ADAPTRESETREL);
                 }
+
 		unregister_netdev(dev_ibmtr[i]);
 		free_irq(dev_ibmtr[i]->irq, dev_ibmtr[i]);
 		release_region(dev_ibmtr[i]->base_addr, IBMTR_IO_EXTENT);
@@ -1973,8 +1976,9 @@ void cleanup_module(void)
 			iounmap((u32 *)ti->sram_virt);
 		}
 #endif		
-		kfree(dev_ibmtr[i]);
+		free_netdev(dev_ibmtr[i]);
 		dev_ibmtr[i] = NULL;
 	}
 }
-#endif				/* MODULE */
+module_exit(ibmtr_cleanup);
+#endif

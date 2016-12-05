@@ -438,7 +438,7 @@ struct rx_info {
 
 
 struct ns83820 {
-	struct net_device	net_dev;
+	struct net_device	net_dev;	/* must be first */
 	struct net_device_stats	stats;
 	u8			*base;
 
@@ -1186,7 +1186,7 @@ static int ns83820_ethtool_ioctl (struct ns83820 *dev, void *useraddr)
 			struct ethtool_drvinfo info = { ETHTOOL_GDRVINFO };
 			strcpy(info.driver, "ns83820");
 			strcpy(info.version, VERSION);
-			strcpy(info.bus_info, dev->pci_dev->slot_name);
+			strcpy(info.bus_info, pci_name(dev->pci_dev));
 			if (copy_to_user(useraddr, &info, sizeof (info)))
 				return -EFAULT;
 			return 0;
@@ -1833,13 +1833,13 @@ static int __devinit ns83820_init_one(struct pci_dev *pci_dev, const struct pci_
 	if (err) {
 		printk(KERN_INFO "ns83820: unable to register irq %d\n",
 			pci_dev->irq);
-		goto out_unmap;
+		goto out_disable;
 	}
 
 	err = register_netdev(&dev->net_dev);
 	if (err) {
 		printk(KERN_INFO "ns83820: unable to register netdev: %d\n", err);
-		goto out_unmap;
+		goto out_free_irq;
 	}
 
 	printk("%s: ns83820.c: 0x22c: %08x, subsystem: %04x:%04x\n",
@@ -2025,9 +2025,11 @@ static int __devinit ns83820_init_one(struct pci_dev *pci_dev, const struct pci_
 
 	return 0;
 
-out_unmap:
-	iounmap(dev->base);
+out_free_irq:
+	free_irq(pci_dev->irq, dev);
 out_disable:
+	if (dev->base)
+		iounmap(dev->base);
 	pci_free_consistent(pci_dev, 4 * DESC_SIZE * NR_TX_DESC, dev->tx_descs, dev->tx_phy_descs);
 	pci_free_consistent(pci_dev, 4 * DESC_SIZE * NR_RX_DESC, dev->rx_info.descs, dev->rx_info.phy_descs);
 	pci_disable_device(pci_dev);
@@ -2057,11 +2059,11 @@ static void __devexit ns83820_remove_one(struct pci_dev *pci_dev)
 	pci_free_consistent(dev->pci_dev, 4 * DESC_SIZE * NR_RX_DESC,
 			dev->rx_info.descs, dev->rx_info.phy_descs);
 	pci_disable_device(dev->pci_dev);
-	kfree(dev);
+	free_netdev(&dev->net_dev);
 	pci_set_drvdata(pci_dev, NULL);
 }
 
-static struct pci_device_id ns83820_pci_tbl[] __devinitdata = {
+static struct pci_device_id ns83820_pci_tbl[] = {
 	{ 0x100b, 0x0022, PCI_ANY_ID, PCI_ANY_ID, 0, .driver_data = 0, },
 	{ 0, },
 };

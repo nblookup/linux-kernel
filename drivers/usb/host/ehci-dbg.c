@@ -465,7 +465,7 @@ show_periodic (struct class_device *class_dev, char *buf)
 	spin_lock_irqsave (&ehci->lock, flags);
 	for (i = 0; i < ehci->periodic_size; i++) {
 		p = ehci->pshadow [i];
-		if (!p.ptr)
+		if (likely (!p.ptr))
 			continue;
 		tag = Q_NEXT_TYPE (ehci->periodic [i]);
 
@@ -476,35 +476,62 @@ show_periodic (struct class_device *class_dev, char *buf)
 		do {
 			switch (tag) {
 			case Q_TYPE_QH:
-				temp = snprintf (next, size, " qh%d/%p",
-						p.qh->period, p.qh);
+				temp = snprintf (next, size, " qh%d-%04x/%p",
+						p.qh->period,
+						le32_to_cpup (&p.qh->hw_info2)
+							/* uframe masks */
+							& 0xffff,
+						p.qh);
 				size -= temp;
 				next += temp;
+				/* don't repeat what follows this qh */
 				for (temp = 0; temp < seen_count; temp++) {
-					if (seen [temp].ptr == p.ptr)
-						break;
+					if (seen [temp].ptr != p.ptr)
+						continue;
+					if (p.qh->qh_next.ptr)
+						temp = snprintf (next, size,
+							" ...");
+					p.ptr = 0;
+					break;
 				}
 				/* show more info the first time around */
-				if (temp == seen_count) {
+				if (temp == seen_count && p.ptr) {
 					u32	scratch = cpu_to_le32p (
 							&p.qh->hw_info1);
+					struct ehci_qtd	*qtd;
+					char		*type = "";
+
+					/* count tds, get ep direction */
+					temp = 0;
+					list_for_each_entry (qtd,
+							&p.qh->qtd_list,
+							qtd_list) {
+						temp++;
+						switch (0x03 & (le32_to_cpu (
+							qtd->hw_token) >> 8)) {
+						case 0: type = "out"; continue;
+						case 1: type = "in"; continue;
+						}
+					}
 
 					temp = snprintf (next, size,
-						" (%cs dev%d ep%d [%d/%d] %d)",
+						" (%c%d ep%d%s "
+						"[%d/%d] q%d p%d)",
 						speed_char (scratch),
 						scratch & 0x007f,
-						(scratch >> 8) & 0x000f,
+						(scratch >> 8) & 0x000f, type,
 						p.qh->usecs, p.qh->c_usecs,
+						temp,
 						0x7ff & (scratch >> 16));
-
-					/* FIXME TD info too */
 
 					if (seen_count < DBG_SCHED_LIMIT)
 						seen [seen_count++].qh = p.qh;
 				} else
 					temp = 0;
-				tag = Q_NEXT_TYPE (p.qh->hw_next);
-				p = p.qh->qh_next;
+				if (p.qh) {
+					tag = Q_NEXT_TYPE (p.qh->hw_next);
+					p = p.qh->qh_next;
+				}
 				break;
 			case Q_TYPE_FSTN:
 				temp = snprintf (next, size,
@@ -566,8 +593,8 @@ show_registers (struct class_device *class_dev, char *buf)
 	/* Capability Registers */
 	i = readw (&ehci->caps->hci_version);
 	temp = snprintf (next, size,
-		"%s\nEHCI %x.%02x, hcd state %d (driver " DRIVER_VERSION ")\n",
-		hcd->pdev->dev.name,
+		"PCI device %s\nEHCI %x.%02x, hcd state %d (driver " DRIVER_VERSION ")\n",
+		pci_name(hcd->pdev),
 		i >> 8, i & 0x0ff, ehci->hcd.state);
 	size -= temp;
 	next += temp;

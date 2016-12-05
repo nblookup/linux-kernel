@@ -197,7 +197,7 @@ pte_t *find_linux_pte(pgd_t *pgdir, unsigned long ea)
 	if (!pgd_none(*pg)) {
 
 		pm = pmd_offset(pg, ea);
-		if (!pmd_none(*pm)) { 
+		if (pmd_present(*pm)) { 
 			pt = pte_offset_kernel(pm, ea);
 			pte = *pt;
 			if (!pte_present(pte))
@@ -377,6 +377,7 @@ int hash_page(unsigned long ea, unsigned long access, unsigned long trap)
 	int ret;
 	int user_region = 0;
 	int local = 0;
+	cpumask_t tmp;
 
 	/* Check for invalid addresses. */
 	if (!IS_VALID_EA(ea))
@@ -431,11 +432,16 @@ int hash_page(unsigned long ea, unsigned long access, unsigned long trap)
 	 */
 	spin_lock(&mm->page_table_lock);
 
-	if (user_region && (mm->cpu_vm_mask == (1 << smp_processor_id())))
+	tmp = cpumask_of_cpu(smp_processor_id());
+	if (user_region && cpus_equal(mm->cpu_vm_mask, tmp))
 		local = 1;
 
-	ptep = find_linux_pte(pgdir, ea);
-	ret = __hash_page(ea, access, vsid, ptep, trap, local);
+	ret = hash_huge_page(mm, access, ea, vsid, local);
+	if (ret < 0) {
+		ptep = find_linux_pte(pgdir, ea);
+		ret = __hash_page(ea, access, vsid, ptep, trap, local);
+	}
+
 	spin_unlock(&mm->page_table_lock);
 
 	return ret;

@@ -10,19 +10,15 @@
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License.
  */
-
 #include <linux/config.h>
 #include <linux/init.h>
-#include <linux/pm.h>
-#include <linux/slab.h>
-#include <linux/interrupt.h>
-#include <linux/sysctl.h>
+#include <linux/suspend.h>
 #include <linux/errno.h>
+#include <linux/time.h>
 
 #include <asm/hardware.h>
 #include <asm/memory.h>
 #include <asm/system.h>
-#include <asm/leds.h>
 
 
 /*
@@ -65,23 +61,22 @@ enum {	SLEEP_SAVE_START = 0,
 };
 
 
-int pm_do_suspend(void)
+static int pxa_pm_enter(u32 state)
 {
 	unsigned long sleep_save[SLEEP_SAVE_SIZE];
 	unsigned long checksum = 0;
+	unsigned long delta;
 	int i;
 
-	cli();
-	clf();
-
-	leds_event(led_stop);
+	if (state != PM_SUSPEND_MEM)
+		return -EINVAL;
 
 	/* preserve current time */
-	RCNR = xtime.tv_sec;
+	delta = xtime.tv_sec - RCNR;
 
 	/*
 	 * Temporary solution.  This won't be necessary once
-	 * we move pxa support into the serial/* driver
+	 * we move pxa support into the serial driver
 	 * Save the FF UART
 	 */
 	SAVE(FFIER);
@@ -175,7 +170,7 @@ int pm_do_suspend(void)
 
 	/*
 	 * Temporary solution.  This won't be necessary once
-	 * we move pxa support into the serial/* driver.
+	 * we move pxa support into the serial driver.
 	 * Restore the FF UART.
 	 */
 	RESTORE(FFMCR);
@@ -190,15 +185,11 @@ int pm_do_suspend(void)
 	RESTORE(FFIER);
 
 	/* restore current time */
-	xtime.tv_sec = RCNR;
+	xtime.tv_sec = RCNR + delta;
 
 #ifdef DEBUG
 	printk(KERN_DEBUG "*** made it back from resume\n");
 #endif
-
-	leds_event(led_start);
-
-	sti();
 
 	return 0;
 }
@@ -208,57 +199,36 @@ unsigned long sleep_phys_sp(void *sp)
 	return virt_to_phys(sp);
 }
 
-#ifdef CONFIG_SYSCTL
 /*
- * ARGH!  ACPI people defined CTL_ACPI in linux/acpi.h rather than
- * linux/sysctl.h.
- *
- * This means our interface here won't survive long - it needs a new
- * interface.  Quick hack to get this working - use sysctl id 9999.
+ * Called after processes are frozen, but before we shut down devices.
  */
-#warning ACPI broke the kernel, this interface needs to be fixed up.
-#define CTL_ACPI 9999
-#define ACPI_S1_SLP_TYP 19
-
-/*
- * Send us to sleep.
- */
-static int sysctl_pm_do_suspend(void)
+static int pxa_pm_prepare(u32 state)
 {
-	int retval;
-
-	retval = pm_send_all(PM_SUSPEND, (void *)3);
-
-	if (retval == 0) {
-		retval = pm_do_suspend();
-
-		pm_send_all(PM_RESUME, (void *)0);
-	}
-
-	return retval;
-}
-
-static struct ctl_table pm_table[] =
-{
-	{ACPI_S1_SLP_TYP, "suspend", NULL, 0, 0600, NULL, (proc_handler *)&sysctl_pm_do_suspend},
-	{0}
-};
-
-static struct ctl_table pm_dir_table[] =
-{
-	{CTL_ACPI, "pm", NULL, 0, 0555, pm_table},
-	{0}
-};
-
-/*
- * Initialize power interface
- */
-static int __init pm_init(void)
-{
-	register_sysctl_table(pm_dir_table, 1);
 	return 0;
 }
 
-__initcall(pm_init);
+/*
+ * Called after devices are re-setup, but before processes are thawed.
+ */
+static int pxa_pm_finish(u32 state)
+{
+	return 0;
+}
 
-#endif
+/*
+ * Set to PM_DISK_FIRMWARE so we can quickly veto suspend-to-disk.
+ */
+static struct pm_ops pxa_pm_ops = {
+	.pm_disk_mode	= PM_DISK_FIRMWARE,
+	.prepare	= pxa_pm_prepare,
+	.enter		= pxa_pm_enter,
+	.finish		= pxa_pm_finish,
+};
+
+static int __init pxa_pm_init(void)
+{
+	pm_set_ops(&pxa_pm_ops);
+	return 0;
+}
+
+late_initcall(pxa_pm_init);

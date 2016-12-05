@@ -14,19 +14,16 @@
 
 #include <linux/config.h>
 #include <linux/init.h>
-#ifdef CONFIG_PROC_FS
 #include <linux/kernel.h>
 #include <linux/proc_fs.h>
 #include <linux/errno.h>
 #include <linux/seq_file.h>
 #include <net/sock.h>
+#include <net/llc.h>
 #include <net/llc_c_ac.h>
 #include <net/llc_c_ev.h>
 #include <net/llc_c_st.h>
 #include <net/llc_conn.h>
-#include <net/llc_mac.h>
-#include <net/llc_main.h>
-#include <net/llc_sap.h>
 
 static void llc_ui_format_mac(struct seq_file *seq, unsigned char *mac)
 {
@@ -41,21 +38,16 @@ static struct sock *llc_get_sk_idx(loff_t pos)
 	struct hlist_node *node;
 	struct sock *sk = NULL;
 
-	list_for_each(sap_entry, &llc_main_station.sap_list.list) {
+	list_for_each(sap_entry, &llc_sap_list) {
 		sap = list_entry(sap_entry, struct llc_sap, node);
 
 		read_lock_bh(&sap->sk_list.lock);
 		sk_for_each(sk, node, &sap->sk_list.list) {
 			if (!pos)
-				break;
+				goto found;
 			--pos;
 		}
 		read_unlock_bh(&sap->sk_list.lock);
-		if (!pos) {
-			if (node)
-				goto found;
-			break;
-		}
 	}
 	sk = NULL;
 found:
@@ -66,8 +58,8 @@ static void *llc_seq_start(struct seq_file *seq, loff_t *pos)
 {
 	loff_t l = *pos;
 
-	read_lock_bh(&llc_main_station.sap_list.lock);
-	return l ? llc_get_sk_idx(--l) : (void *)1;
+	read_lock_bh(&llc_sap_list_lock);
+	return l ? llc_get_sk_idx(--l) : SEQ_START_TOKEN;
 }
 
 static void *llc_seq_next(struct seq_file *seq, void *v, loff_t *pos)
@@ -77,7 +69,7 @@ static void *llc_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 	struct llc_sap *sap;
 
 	++*pos;
-	if (v == (void *)1) {
+	if (v == SEQ_START_TOKEN) {
 		sk = llc_get_sk_idx(0);
 		goto out;
 	}
@@ -92,7 +84,7 @@ static void *llc_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 	read_unlock_bh(&sap->sk_list.lock);
 	sk = NULL;
 	for (;;) {
-		if (sap->node.next == &llc_main_station.sap_list.list)
+		if (sap->node.next == &llc_sap_list)
 			break;
 		sap = list_entry(sap->node.next, struct llc_sap, node);
 		read_lock_bh(&sap->sk_list.lock);
@@ -108,14 +100,14 @@ out:
 
 static void llc_seq_stop(struct seq_file *seq, void *v)
 {
-	if (v) {
+	if (v && v != SEQ_START_TOKEN) {
 		struct sock *sk = v;
 		struct llc_opt *llc = llc_sk(sk);
 		struct llc_sap *sap = llc->sap;
 
 		read_unlock_bh(&sap->sk_list.lock);
 	}
-	read_unlock_bh(&llc_main_station.sap_list.lock);
+	read_unlock_bh(&llc_sap_list_lock);
 }
 
 static int llc_seq_socket_show(struct seq_file *seq, void *v)
@@ -123,7 +115,7 @@ static int llc_seq_socket_show(struct seq_file *seq, void *v)
 	struct sock* sk;
 	struct llc_opt *llc;
 
-	if (v == (void *)1) {
+	if (v == SEQ_START_TOKEN) {
 		seq_puts(seq, "SKt Mc local_mac_sap        remote_mac_sap   "
 			      "    tx_queue rx_queue st uid link\n");
 		goto out;
@@ -131,18 +123,16 @@ static int llc_seq_socket_show(struct seq_file *seq, void *v)
 	sk = v;
 	llc = llc_sk(sk);
 
-	seq_printf(seq, "%2X  %2X ", sk->sk_type,
-		   !llc_mac_null(llc->addr.sllc_mmac));
+	/* FIXME: check if the address is multicast */
+	seq_printf(seq, "%2X  %2X ", sk->sk_type, 0);
 
-	if (llc->dev && llc_mac_null(llc->addr.sllc_mmac))
+	if (llc->dev)
 		llc_ui_format_mac(seq, llc->dev->dev_addr);
-	else if (!llc_mac_null(llc->addr.sllc_mmac))
-		llc_ui_format_mac(seq, llc->addr.sllc_mmac);
 	else
 		seq_printf(seq, "00:00:00:00:00:00");
 	seq_printf(seq, "@%02X ", llc->sap->laddr.lsap);
-	llc_ui_format_mac(seq, llc->addr.sllc_dmac);
-	seq_printf(seq, "@%02X %8d %8d %2d %3d %4d\n", llc->addr.sllc_dsap,
+	llc_ui_format_mac(seq, llc->daddr.mac);
+	seq_printf(seq, "@%02X %8d %8d %2d %3d %4d\n", llc->daddr.lsap,
 		   atomic_read(&sk->sk_wmem_alloc),
 		   atomic_read(&sk->sk_rmem_alloc),
 		   sk->sk_state,
@@ -172,7 +162,7 @@ static int llc_seq_core_show(struct seq_file *seq, void *v)
 	struct sock* sk;
 	struct llc_opt *llc;
 
-	if (v == (void *)1) {
+	if (v == SEQ_START_TOKEN) {
 		seq_puts(seq, "Connection list:\n"
 			      "dsap state      retr txw rxw pf ff sf df rs cs "
 			      "tack tpfc trs tbs blog busr\n");
@@ -245,6 +235,7 @@ int __init llc_proc_init(void)
 	llc_proc_dir = proc_mkdir("llc", proc_net);
 	if (!llc_proc_dir)
 		goto out;
+	llc_proc_dir->owner = THIS_MODULE;
 
 	p = create_proc_entry("socket", S_IRUGO, llc_proc_dir);
 	if (!p)
@@ -274,13 +265,3 @@ void llc_proc_exit(void)
 	remove_proc_entry("core", llc_proc_dir);
 	remove_proc_entry("llc", proc_net);
 }
-#else /* CONFIG_PROC_FS */
-int __init llc_proc_init(void)
-{
-	return 0;
-}
-
-void llc_proc_exit(void)
-{
-}
-#endif /* CONFIG_PROC_FS */

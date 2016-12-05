@@ -25,6 +25,7 @@
 #include <linux/serial.h>
 #include <linux/mm.h>
 #include <linux/generic_serial.h>
+#include <linux/interrupt.h>
 #include <asm/semaphore.h>
 #include <asm/uaccess.h>
 
@@ -347,7 +348,7 @@ int gs_real_chars_in_buffer(struct tty_struct *tty)
 static int gs_wait_tx_flushed (void * ptr, int timeout) 
 {
 	struct gs_port *port = ptr;
-	long end_jiffies;
+	unsigned long end_jiffies;
 	int jiffies_to_transmit, charsleft = 0, rv = 0;
 	int rcib;
 

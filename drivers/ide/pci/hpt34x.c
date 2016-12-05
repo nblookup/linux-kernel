@@ -42,7 +42,6 @@
 #include <asm/io.h>
 #include <asm/irq.h>
 
-#include "ide_modes.h"
 #include "hpt34x.h"
 
 #if defined(DISPLAY_HPT34X_TIMINGS) && defined(CONFIG_PROC_FS)
@@ -216,17 +215,19 @@ try_dma_modes:
 		} else {
 			goto fast_ata_pio;
 		}
+#ifndef CONFIG_HPT34X_AUTODMA
+		return hwif->ide_dma_off_quietly(drive);
+#else
+		return hwif->ide_dma_on(drive);
+#endif
 	} else if ((id->capability & 8) || (id->field_valid & 2)) {
 fast_ata_pio:
 no_dma_set:
 		hpt34x_tune_drive(drive, 255);
 		return hwif->ide_dma_off_quietly(drive);
 	}
-
-#ifndef CONFIG_HPT34X_AUTODMA
-	return hwif->ide_dma_off_quietly(drive);
-#endif /* CONFIG_HPT34X_AUTODMA */
-	return hwif->ide_dma_on(drive);
+	/* IORDY not supported */
+	return 0;
 }
 
 /*
@@ -316,11 +317,6 @@ static void __init init_hwif_hpt34x (ide_hwif_t *hwif)
 	hwif->drives[1].autodma = hwif->autodma;
 }
 
-static void __init init_dma_hpt34x (ide_hwif_t *hwif, unsigned long dmabase)
-{
-	ide_setup_dma(hwif, dmabase, 8);
-}
-
 extern void ide_setup_pci_device(struct pci_dev *, ide_pci_device_t *);
 
 static int __devinit hpt34x_init_one(struct pci_dev *dev, const struct pci_device_id *id)
@@ -339,7 +335,7 @@ static int __devinit hpt34x_init_one(struct pci_dev *dev, const struct pci_devic
 	return 0;
 }
 
-static struct pci_device_id hpt34x_pci_tbl[] __devinitdata = {
+static struct pci_device_id hpt34x_pci_tbl[] = {
 	{ PCI_VENDOR_ID_TTI, PCI_DEVICE_ID_TTI_HPT343, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ 0, },
 };

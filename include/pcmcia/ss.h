@@ -51,6 +51,7 @@
 #define SS_3VCARD	0x1000
 #define SS_XVCARD	0x2000
 #define SS_PENDING	0x4000
+#define SS_ZVCARD	0x8000
 
 /* InquireSocket capabilities */
 #define SS_CAP_PAGE_REGS	0x0001
@@ -77,7 +78,6 @@ extern socket_state_t dead_socket;
 #define SS_DMA_MODE	0x0080
 #define SS_SPKR_ENA	0x0100
 #define SS_OUTPUT_ENA	0x0200
-#define SS_DEBOUNCED	0x0400	/* Tell driver that the debounce delay has ended */
 
 /* Flags for I/O port and memory windows */
 #define MAP_ACTIVE	0x01
@@ -170,13 +170,11 @@ struct region_t;
 struct pcmcia_socket {
 	struct module			*owner;
 	spinlock_t			lock;
-	struct pccard_operations *	ss_entry;
 	socket_state_t			socket;
 	u_int				state;
 	u_short				functions;
 	u_short				lock_count;
 	client_handle_t			clients;
-	u_int				real_clients;
 	pccard_mem_map			cis_mem;
 	u_char				*cis_virt;
 	struct config_t			*config;
@@ -207,6 +205,13 @@ struct pcmcia_socket {
 	u_char				pci_irq;
 	struct pci_dev *		cb_dev;
 
+	/* socket operations */
+	struct pccard_operations *	ops;
+
+	/* Zoom video behaviour is so chip specific its not worth adding
+	   this to _ops */
+	void 				(*zoom_video)(struct pcmcia_socket *, int);
+                           
 	/* state thread */
 	struct semaphore		skt_sem;	/* protects socket h/w state */
 
@@ -242,7 +247,7 @@ extern void pcmcia_unregister_socket(struct pcmcia_socket *socket);
 extern struct class pcmcia_socket_class;
 
 /* socket drivers are expected to use these callbacks in their .drv struct */
-extern int pcmcia_socket_dev_suspend(struct device *dev, u32 state, u32 level);
-extern int pcmcia_socket_dev_resume(struct device *dev, u32 level);
+extern int pcmcia_socket_dev_suspend(struct device *dev, u32 state);
+extern int pcmcia_socket_dev_resume(struct device *dev);
 
 #endif /* _LINUX_SS_H */

@@ -99,7 +99,6 @@
 #include <linux/divert.h>
 #include <net/dst.h>
 #include <net/pkt_sched.h>
-#include <net/profile.h>
 #include <net/checksum.h>
 #include <linux/highmem.h>
 #include <linux/init.h>
@@ -110,10 +109,6 @@
 #include <linux/wireless.h>		/* Note : will define WIRELESS_EXT */
 #include <net/iw_handler.h>
 #endif	/* CONFIG_NET_RADIO */
-#ifdef CONFIG_PLIP
-extern int plip_init(void);
-#endif
-
 #include <asm/current.h>
 
 /* This define, if set, will randomly drop a packet when congestion
@@ -127,9 +122,6 @@ extern int plip_init(void);
  * via a timer instead of as each packet is received.
  */
 #undef OFFLINE_SAMPLE
-
-NET_PROFILE_DEFINE(dev_queue_xmit)
-NET_PROFILE_DEFINE(softnet_process)
 
 /*
  *	The list of packet types we will receive (as opposed to discard)
@@ -178,7 +170,7 @@ static struct notifier_block *netdev_chain;
  *	Device drivers call our routines to queue packets here. We empty the
  *	queue in the local softnet handler.
  */
-struct softnet_data softnet_data[NR_CPUS] __cacheline_aligned;
+DEFINE_PER_CPU(struct softnet_data, softnet_data) = { 0, };
 
 #ifdef CONFIG_NET_FASTROUTE
 int netdev_fastroute;
@@ -187,7 +179,7 @@ int netdev_fastroute_obstacles;
 
 extern int netdev_sysfs_init(void);
 extern int netdev_register_sysfs(struct net_device *);
-extern void netdev_unregister_sysfs(struct net_device *);
+extern int netdev_unregister_sysfs(struct net_device *);
 
 
 /*******************************************************************************
@@ -237,8 +229,7 @@ void dev_add_pack(struct packet_type *pt)
 
 	spin_lock_bh(&ptype_lock);
 #ifdef CONFIG_NET_FASTROUTE
-	/* Hack to detect packet socket */
-	if (pt->data && (long)(pt->data) != 1) {
+	if (pt->af_packet_priv) {
 		netdev_fastroute_obstacles++;
 		dev_clear_fastroute(pt->dev);
 	}
@@ -286,7 +277,7 @@ void __dev_remove_pack(struct packet_type *pt)
 	list_for_each_entry(pt1, head, list) {
 		if (pt == pt1) {
 #ifdef CONFIG_NET_FASTROUTE
-			if (pt->data)
+			if (pt->af_packet_priv)
 				netdev_fastroute_obstacles--;
 #endif
 			list_del_rcu(&pt->list);
@@ -475,10 +466,10 @@ struct net_device *dev_get_by_name(const char *name)
  *	to be sure the name is not allocated or removed during the test the
  *	caller must hold the rtnl semaphore.
  *
- *	This function primarily exists for back compatibility with older
+ *	This function exists only for back compatibility with older
  *	drivers.
  */
-int dev_get(const char *name)
+int __dev_get(const char *name)
 {
 	struct net_device *dev;
 
@@ -558,6 +549,32 @@ struct net_device *dev_getbyhwaddr(unsigned short type, char *ha)
 			break;
 	return dev;
 }
+
+struct net_device *__dev_getfirstbyhwtype(unsigned short type)
+{
+	struct net_device *dev;
+
+	for (dev = dev_base; dev; dev = dev->next)
+		if (dev->type == type)
+			break;
+	return dev;
+}
+
+EXPORT_SYMBOL(__dev_getfirstbyhwtype);
+
+struct net_device *dev_getfirstbyhwtype(unsigned short type)
+{
+	struct net_device *dev;
+
+	rtnl_lock();
+	dev = __dev_getfirstbyhwtype(type);
+	if (dev)
+		dev_hold(dev);
+	rtnl_unlock();
+	return dev;
+}
+
+EXPORT_SYMBOL(dev_getfirstbyhwtype);
 
 /**
  *	dev_get_by_flags - find any device with given flags
@@ -655,11 +672,12 @@ int dev_alloc_name(struct net_device *dev, const char *name)
  *	failed. The cause of an error is returned as a negative errno code
  *	in the variable @err points to.
  *
- *	The caller must hold the @dev_base or RTNL locks when doing this in
+ *	This call is deprecated in favor of alloc_netdev because
+ *	the caller must hold the @dev_base or RTNL locks when doing this in
  *	order to avoid duplicate name allocations.
  */
 
-struct net_device *dev_alloc(const char *name, int *err)
+struct net_device *__dev_alloc(const char *name, int *err)
 {
 	struct net_device *dev = kmalloc(sizeof(*dev), GFP_KERNEL);
 
@@ -703,7 +721,13 @@ void netdev_state_change(struct net_device *dev)
 
 void dev_load(const char *name)
 {
-	if (!dev_get(name) && capable(CAP_SYS_MODULE))
+	struct net_device *dev;  
+
+	read_lock(&dev_base_lock);
+	dev = __dev_get_by_name(name);
+	read_unlock(&dev_base_lock);
+
+	if (!dev && capable(CAP_SYS_MODULE))
 		request_module("%s", name);
 }
 
@@ -713,6 +737,19 @@ static int default_rebuild_header(struct sk_buff *skb)
 	       skb->dev ? skb->dev->name : "NULL!!!");
 	kfree_skb(skb);
 	return 1;
+}
+
+
+/*
+ * Some old buggy device drivers change get_stats after registering
+ * the device.  Try and trap them here.
+ * This can be elimnated when all devices are known fixed.
+ */
+static inline int get_stats_changed(struct net_device *dev)
+{
+	int changed = dev->last_stats != dev->get_stats;
+	dev->last_stats = dev->get_stats;
+	return changed;
 }
 
 /**
@@ -739,6 +776,14 @@ int dev_open(struct net_device *dev)
 		return 0;
 
 	/*
+	 *	 Check for broken device drivers.
+	 */
+	if (get_stats_changed(dev) && net_ratelimit()) {
+		printk(KERN_ERR "%s: driver changed get_stats after register\n",
+		       dev->name);
+	}
+
+	/*
 	 *	Is it even present?
 	 */
 	if (!netif_device_present(dev))
@@ -755,6 +800,14 @@ int dev_open(struct net_device *dev)
 	}
 
 	/*
+	 * 	Check for more broken device drivers.
+	 */
+	if (get_stats_changed(dev) && net_ratelimit()) {
+		printk(KERN_ERR "%s: driver changed get_stats in open\n",
+		       dev->name);
+	}
+
+ 	/*
 	 *	If it went open OK then:
 	 */
 
@@ -917,6 +970,8 @@ int unregister_netdevice_notifier(struct notifier_block *nb)
 
 /**
  *	call_netdevice_notifiers - call all network notifier blocks
+ *      @val: value passed unmodified to notifier function
+ *      @v:   pointer passed unmodified to notifier function
  *
  *	Call all network notifier blocks.  Parameters and return value
  *	are as for notifier_call_chain().
@@ -943,7 +998,8 @@ void dev_queue_xmit_nit(struct sk_buff *skb, struct net_device *dev)
 		 * they originated from - MvS (miquels@drinkel.ow.org)
 		 */
 		if ((ptype->dev == dev || !ptype->dev) &&
-		    (struct sock *)ptype->data != skb->sk) {
+		    (ptype->af_packet_priv == NULL ||
+		     (struct sock *)ptype->af_packet_priv != skb->sk)) {
 			struct sk_buff *skb2= skb_clone(skb, GFP_ATOMIC);
 			if (!skb2)
 				break;
@@ -1211,7 +1267,7 @@ int no_cong = 20;
 int lo_cong = 100;
 int mod_cong = 290;
 
-struct netif_rx_stats netdev_rx_stat[NR_CPUS];
+DEFINE_PER_CPU(struct netif_rx_stats, netdev_rx_stat) = { 0, };
 
 
 #ifdef CONFIG_NET_HW_FLOWCONTROL
@@ -1280,34 +1336,35 @@ static void get_sample_stats(int cpu)
 	unsigned long rd;
 	int rq;
 #endif
-	int blog = softnet_data[cpu].input_pkt_queue.qlen;
-	int avg_blog = softnet_data[cpu].avg_blog;
+	struct softnet_data *sd = &per_cpu(softnet_data, cpu);
+	int blog = sd->input_pkt_queue.qlen;
+	int avg_blog = sd->avg_blog;
 
 	avg_blog = (avg_blog >> 1) + (blog >> 1);
 
 	if (avg_blog > mod_cong) {
 		/* Above moderate congestion levels. */
-		softnet_data[cpu].cng_level = NET_RX_CN_HIGH;
+		sd->cng_level = NET_RX_CN_HIGH;
 #ifdef RAND_LIE
 		rd = net_random();
 		rq = rd % netdev_max_backlog;
 		if (rq < avg_blog) /* unlucky bastard */
-			softnet_data[cpu].cng_level = NET_RX_DROP;
+			sd->cng_level = NET_RX_DROP;
 #endif
 	} else if (avg_blog > lo_cong) {
-		softnet_data[cpu].cng_level = NET_RX_CN_MOD;
+		sd->cng_level = NET_RX_CN_MOD;
 #ifdef RAND_LIE
 		rd = net_random();
 		rq = rd % netdev_max_backlog;
 			if (rq < avg_blog) /* unlucky bastard */
-				softnet_data[cpu].cng_level = NET_RX_CN_HIGH;
+				sd->cng_level = NET_RX_CN_HIGH;
 #endif
 	} else if (avg_blog > no_cong)
-		softnet_data[cpu].cng_level = NET_RX_CN_LOW;
+		sd->cng_level = NET_RX_CN_LOW;
 	else  /* no congestion */
-		softnet_data[cpu].cng_level = NET_RX_SUCCESS;
+		sd->cng_level = NET_RX_SUCCESS;
 
-	softnet_data[cpu].avg_blog = avg_blog;
+	sd->avg_blog = avg_blog;
 }
 
 #ifdef OFFLINE_SAMPLE
@@ -1357,9 +1414,9 @@ int netif_rx(struct sk_buff *skb)
 	 */
 	local_irq_save(flags);
 	this_cpu = smp_processor_id();
-	queue = &softnet_data[this_cpu];
+	queue = &__get_cpu_var(softnet_data);
 
-	netdev_rx_stat[this_cpu].total++;
+	__get_cpu_var(netdev_rx_stat).total++;
 	if (queue->input_pkt_queue.qlen <= netdev_max_backlog) {
 		if (queue->input_pkt_queue.qlen) {
 			if (queue->throttle)
@@ -1389,48 +1446,18 @@ enqueue:
 
 	if (!queue->throttle) {
 		queue->throttle = 1;
-		netdev_rx_stat[this_cpu].throttled++;
+		__get_cpu_var(netdev_rx_stat).throttled++;
 #ifdef CONFIG_NET_HW_FLOWCONTROL
 		atomic_inc(&netdev_dropping);
 #endif
 	}
 
 drop:
-	netdev_rx_stat[this_cpu].dropped++;
+	__get_cpu_var(netdev_rx_stat).dropped++;
 	local_irq_restore(flags);
 
 	kfree_skb(skb);
 	return NET_RX_DROP;
-}
-
-/* Deliver skb to an old protocol, which is not threaded well
-   or which do not understand shared skbs.
- */
-static int deliver_to_old_ones(struct packet_type *pt,
-			       struct sk_buff *skb, int last)
-{
-	int ret = NET_RX_DROP;
-
-	if (!last) {
-		skb = skb_clone(skb, GFP_ATOMIC);
-		if (!skb)
-			goto out;
-	}
-	if (skb_is_nonlinear(skb) && __skb_linearize(skb, GFP_ATOMIC))
-		goto out_kfree;
-
-#ifdef CONFIG_SMP
-	/* Old protocols did not depened on BHs different of NET_BH and
-	   TIMER_BH - they need to be fixed for the new assumptions.
-	 */
-	print_symbol("fix old protocol handler %s!\n", (unsigned long)pt->func);
-#endif
-	ret = pt->func(skb, skb->dev, pt);
-out:
-	return ret;
-out_kfree:
-	kfree_skb(skb);
-	goto out;
 }
 
 static __inline__ void skb_bond(struct sk_buff *skb)
@@ -1445,14 +1472,14 @@ static __inline__ void skb_bond(struct sk_buff *skb)
 
 static void net_tx_action(struct softirq_action *h)
 {
-	int cpu = smp_processor_id();
+	struct softnet_data *sd = &__get_cpu_var(softnet_data);
 
-	if (softnet_data[cpu].completion_queue) {
+	if (sd->completion_queue) {
 		struct sk_buff *clist;
 
 		local_irq_disable();
-		clist = softnet_data[cpu].completion_queue;
-		softnet_data[cpu].completion_queue = NULL;
+		clist = sd->completion_queue;
+		sd->completion_queue = NULL;
 		local_irq_enable();
 
 		while (clist) {
@@ -1464,12 +1491,12 @@ static void net_tx_action(struct softirq_action *h)
 		}
 	}
 
-	if (softnet_data[cpu].output_queue) {
+	if (sd->output_queue) {
 		struct net_device *head;
 
 		local_irq_disable();
-		head = softnet_data[cpu].output_queue;
-		softnet_data[cpu].output_queue = NULL;
+		head = sd->output_queue;
+		sd->output_queue = NULL;
 		local_irq_enable();
 
 		while (head) {
@@ -1489,6 +1516,14 @@ static void net_tx_action(struct softirq_action *h)
 	}
 }
 
+static __inline__ int deliver_skb(struct sk_buff *skb,
+				  struct packet_type *pt_prev, int last)
+{
+	atomic_inc(&skb->users);
+	return pt_prev->func(skb, skb->dev, pt_prev);
+}
+
+
 #if defined(CONFIG_BRIDGE) || defined (CONFIG_BRIDGE_MODULE)
 int (*br_handle_frame_hook)(struct sk_buff *skb);
 
@@ -1496,15 +1531,8 @@ static __inline__ int handle_bridge(struct sk_buff *skb,
 				     struct packet_type *pt_prev)
 {
 	int ret = NET_RX_DROP;
-
-	if (pt_prev) {
-		if (!pt_prev->data)
-			ret = deliver_to_old_ones(pt_prev, skb, 0);
-		else {
-			atomic_inc(&skb->users);
-			ret = pt_prev->func(skb, skb->dev, pt_prev);
-		}
-	}
+	if (pt_prev)
+		ret = deliver_skb(skb, pt_prev, 0);
 
 	return ret;
 }
@@ -1537,11 +1565,11 @@ int netif_receive_skb(struct sk_buff *skb)
 
 	skb_bond(skb);
 
-	netdev_rx_stat[smp_processor_id()].total++;
+	__get_cpu_var(netdev_rx_stat).total++;
 
 #ifdef CONFIG_NET_FASTROUTE
 	if (skb->pkt_type == PACKET_FASTROUTE) {
-		netdev_rx_stat[smp_processor_id()].fastroute_deferred_out++;
+		__get_cpu_var(netdev_rx_stat).fastroute_deferred_out++;
 		return dev_queue_xmit(skb);
 	}
 #endif
@@ -1552,16 +1580,8 @@ int netif_receive_skb(struct sk_buff *skb)
 	rcu_read_lock();
 	list_for_each_entry_rcu(ptype, &ptype_all, list) {
 		if (!ptype->dev || ptype->dev == skb->dev) {
-			if (pt_prev) {
-				if (!pt_prev->data) {
-					ret = deliver_to_old_ones(pt_prev,
-								  skb, 0);
-				} else {
-					atomic_inc(&skb->users);
-					ret = pt_prev->func(skb, skb->dev,
-							    pt_prev);
-				}
-			}
+			if (pt_prev) 
+				ret = deliver_skb(skb, pt_prev, 0);
 			pt_prev = ptype;
 		}
 	}
@@ -1574,26 +1594,14 @@ int netif_receive_skb(struct sk_buff *skb)
 	list_for_each_entry_rcu(ptype, &ptype_base[ntohs(type)&15], list) {
 		if (ptype->type == type &&
 		    (!ptype->dev || ptype->dev == skb->dev)) {
-			if (pt_prev) {
-				if (!pt_prev->data) {
-					ret = deliver_to_old_ones(pt_prev,
-								  skb, 0);
-				} else {
-					atomic_inc(&skb->users);
-					ret = pt_prev->func(skb, skb->dev,
-							    pt_prev);
-				}
-			}
+			if (pt_prev) 
+				ret = deliver_skb(skb, pt_prev, 0);
 			pt_prev = ptype;
 		}
 	}
 
 	if (pt_prev) {
-		if (!pt_prev->data) {
-			ret = deliver_to_old_ones(pt_prev, skb, 1);
-		} else {
-			ret = pt_prev->func(skb, skb->dev, pt_prev);
-		}
+		ret = pt_prev->func(skb, skb->dev, pt_prev);
 	} else {
 		kfree_skb(skb);
 		/* Jamal, now you will not able to escape explaining
@@ -1611,8 +1619,7 @@ static int process_backlog(struct net_device *backlog_dev, int *budget)
 {
 	int work = 0;
 	int quota = min(backlog_dev->quota, *budget);
-	int this_cpu = smp_processor_id();
-	struct softnet_data *queue = &softnet_data[this_cpu];
+	struct softnet_data *queue = &__get_cpu_var(softnet_data);
 	unsigned long start_time = jiffies;
 
 	for (;;) {
@@ -1639,8 +1646,8 @@ static int process_backlog(struct net_device *backlog_dev, int *budget)
 #ifdef CONFIG_NET_HW_FLOWCONTROL
 		if (queue->throttle &&
 		    queue->input_pkt_queue.qlen < no_cong_thresh ) {
+			queue->throttle = 0;
 			if (atomic_dec_and_test(&netdev_dropping)) {
-				queue->throttle = 0;
 				netdev_wakeup();
 				break;
 			}
@@ -1657,7 +1664,8 @@ job_done:
 	*budget -= work;
 
 	list_del(&backlog_dev->poll_list);
-	clear_bit(__LINK_STATE_RX_SCHED, &backlog_dev->state);
+	smp_mb__before_clear_bit();
+	netif_poll_enable(backlog_dev);
 
 	if (queue->throttle) {
 		queue->throttle = 0;
@@ -1672,8 +1680,7 @@ job_done:
 
 static void net_rx_action(struct softirq_action *h)
 {
-	int this_cpu = smp_processor_id();
-	struct softnet_data *queue = &softnet_data[this_cpu];
+	struct softnet_data *queue = &__get_cpu_var(softnet_data);
 	unsigned long start_time = jiffies;
 	int budget = netdev_max_backlog;
 
@@ -1711,7 +1718,7 @@ out:
 	return;
 
 softnet_break:
-	netdev_rx_stat[this_cpu].time_squeeze++;
+	__get_cpu_var(netdev_rx_stat).time_squeeze++;
 	__raise_softirq_irqoff(NET_RX_SOFTIRQ);
 	goto out;
 }
@@ -1836,8 +1843,7 @@ static int dev_ifconf(char *arg)
  *	This is invoked by the /proc filesystem handler to display a device
  *	in detail.
  */
-static __inline__ struct net_device *dev_get_idx(struct seq_file *seq,
-						 loff_t pos)
+static __inline__ struct net_device *dev_get_idx(loff_t pos)
 {
 	struct net_device *dev;
 	loff_t i;
@@ -1850,13 +1856,13 @@ static __inline__ struct net_device *dev_get_idx(struct seq_file *seq,
 void *dev_seq_start(struct seq_file *seq, loff_t *pos)
 {
 	read_lock(&dev_base_lock);
-	return *pos ? dev_get_idx(seq, *pos - 1) : (void *)1;
+	return *pos ? dev_get_idx(*pos - 1) : SEQ_START_TOKEN;
 }
 
 void *dev_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
 	++*pos;
-	return v == (void *)1 ? dev_base : ((struct net_device *)v)->next;
+	return v == SEQ_START_TOKEN ? dev_base : ((struct net_device *)v)->next;
 }
 
 void dev_seq_stop(struct seq_file *seq, void *v)
@@ -1896,7 +1902,7 @@ static void dev_seq_printf_stats(struct seq_file *seq, struct net_device *dev)
  */
 static int dev_seq_show(struct seq_file *seq, void *v)
 {
-	if (v == (void *)1)
+	if (v == SEQ_START_TOKEN)
 		seq_puts(seq, "Inter-|   Receive                            "
 			      "                    |  Transmit\n"
 			      " face |bytes    packets errs drop fifo frame "
@@ -1913,7 +1919,7 @@ static struct netif_rx_stats *softnet_get_online(loff_t *pos)
 
 	while (*pos < NR_CPUS)
 	       	if (cpu_online(*pos)) {
-			rc = &netdev_rx_stat[*pos];
+			rc = &per_cpu(netdev_rx_stat, *pos);
 			break;
 		} else
 			++*pos;
@@ -2000,26 +2006,21 @@ extern int wireless_proc_init(void);
 
 static int __init dev_proc_init(void)
 {
-	struct proc_dir_entry *p;
 	int rc = -ENOMEM;
 
-	p = create_proc_entry("dev", S_IRUGO, proc_net);
-	if (!p)
+	if (!proc_net_fops_create("dev", S_IRUGO, &dev_seq_fops))
 		goto out;
-	p->proc_fops = &dev_seq_fops;
-	p = create_proc_entry("softnet_stat", S_IRUGO, proc_net);
-	if (!p)
+	if (!proc_net_fops_create("softnet_stat", S_IRUGO, &softnet_seq_fops))
 		goto out_dev;
-	p->proc_fops = &softnet_seq_fops;
 	if (wireless_proc_init())
 		goto out_softnet;
 	rc = 0;
 out:
 	return rc;
 out_softnet:
-	remove_proc_entry("softnet_stat", proc_net);
+	proc_net_remove("softnet_stat");
 out_dev:
-	remove_proc_entry("dev", proc_net);
+	proc_net_remove("dev");
 	goto out;
 }
 #else
@@ -2342,14 +2343,18 @@ static int dev_ifsioc(struct ifreq *ifr, unsigned int cmd)
 		case SIOCSIFNAME:
 			if (dev->flags & IFF_UP)
 				return -EBUSY;
+			ifr->ifr_newname[IFNAMSIZ-1] = '\0';
 			if (__dev_get_by_name(ifr->ifr_newname))
 				return -EEXIST;
-			memcpy(dev->name, ifr->ifr_newname, IFNAMSIZ);
-			dev->name[IFNAMSIZ - 1] = 0;
-			strlcpy(dev->class_dev.class_id, dev->name, BUS_ID_SIZE);
-			notifier_call_chain(&netdev_chain,
-					    NETDEV_CHANGENAME, dev);
-			return 0;
+			err = class_device_rename(&dev->class_dev, 
+						  ifr->ifr_newname);
+			if (!err) {
+				strlcpy(dev->name, ifr->ifr_newname, IFNAMSIZ);
+
+				notifier_call_chain(&netdev_chain,
+						    NETDEV_CHANGENAME, dev);
+			}
+			return err;
 
 		/*
 		 *	Unknown or private ioctl
@@ -2364,7 +2369,6 @@ static int dev_ifsioc(struct ifreq *ifr, unsigned int cmd)
 			    cmd == SIOCBONDSLAVEINFOQUERY ||
 			    cmd == SIOCBONDINFOQUERY ||
 			    cmd == SIOCBONDCHANGEACTIVE ||
-			    cmd == SIOCETHTOOL ||
 			    cmd == SIOCGMIIPHY ||
 			    cmd == SIOCGMIIREG ||
 			    cmd == SIOCSMIIREG ||
@@ -2461,13 +2465,26 @@ int dev_ioctl(unsigned int cmd, void *arg)
 			}
 			return ret;
 
+		case SIOCETHTOOL:
+			dev_load(ifr.ifr_name);
+			rtnl_lock();
+			ret = dev_ethtool(&ifr);
+			rtnl_unlock();
+			if (!ret) {
+				if (colon)
+					*colon = ':';
+				if (copy_to_user(arg, &ifr,
+						 sizeof(struct ifreq)))
+					ret = -EFAULT;
+			}
+			return ret;
+
 		/*
 		 *	These ioctl calls:
 		 *	- require superuser power.
 		 *	- require strict serialization.
 		 *	- return a value
 		 */
-		case SIOCETHTOOL:
 		case SIOCGMIIPHY:
 		case SIOCGMIIREG:
 			if (!capable(CAP_NET_ADMIN))
@@ -2627,7 +2644,7 @@ int register_netdevice(struct net_device *dev)
 	ASSERT_RTNL();
 
 	/* When net_device's are persistent, this will be fatal. */
-	WARN_ON(dev->reg_state != NETREG_UNINITIALIZED);
+	BUG_ON(dev->reg_state != NETREG_UNINITIALIZED);
 
 	spin_lock_init(&dev->queue_lock);
 	spin_lock_init(&dev->xmit_lock);
@@ -2643,9 +2660,14 @@ int register_netdevice(struct net_device *dev)
 	dev->iflink = -1;
 
 	/* Init, if this function is available */
-	ret = -EIO;
-	if (dev->init && dev->init(dev))
-		goto out_err;
+	if (dev->init) {
+		ret = dev->init(dev);
+		if (ret) {
+			if (ret > 0)
+				ret = -EIO;
+			goto out_err;
+		}
+	}
 
 	dev->ifindex = dev_new_index();
 	if (dev->iflink == -1)
@@ -2705,38 +2727,17 @@ out_err:
 	goto out;
 }
 
-/**
- *	netdev_finish_unregister - complete unregistration
- *	@dev: device
+/*
+ * netdev_wait_allrefs - wait until all references are gone.
  *
- *	Destroy and free a dead device. A value of zero is returned on
- *	success.
+ * This is called when unregistering network devices.
+ *
+ * Any protocol or device that holds a reference should register
+ * for netdevice notification, and cleanup and put back the
+ * reference if they receive an UNREGISTER event.
+ * We can get stuck here if buggy protocols don't correctly
+ * call dev_put. 
  */
-static int netdev_finish_unregister(struct net_device *dev)
-{
-	BUG_TRAP(!dev->ip_ptr);
-	BUG_TRAP(!dev->ip6_ptr);
-	BUG_TRAP(!dev->dn_ptr);
-
-	if (dev->reg_state != NETREG_UNREGISTERED) {
-		printk(KERN_ERR "Freeing alive device %p, %s\n",
-		       dev, dev->name);
-		return 0;
-	}
-#ifdef NET_REFCNT_DEBUG
-	printk(KERN_DEBUG "netdev_finish_unregister: %s%s.\n", dev->name,
-	       (dev->destructor != NULL)?"":", old style");
-#endif
-
-	/* It must be the very last action, after this 'dev' may point
-	 * to freed up memory.
-	 */
-	if (dev->destructor)
-		dev->destructor(dev);
-
-	return 0;
-}
-
 static void netdev_wait_allrefs(struct net_device *dev)
 {
 	unsigned long rebroadcast_time, warning_time;
@@ -2770,7 +2771,6 @@ static void netdev_wait_allrefs(struct net_device *dev)
 
 		current->state = TASK_INTERRUPTIBLE;
 		schedule_timeout(HZ / 4);
-		current->state = TASK_RUNNING;
 
 		if (time_after(jiffies, warning_time + 10 * HZ)) {
 			printk(KERN_EMERG "unregister_netdevice: "
@@ -2793,6 +2793,8 @@ static void netdev_wait_allrefs(struct net_device *dev)
  *	unregister_netdevice(y2);
  *      ...
  *	rtnl_unlock();
+ *	free_netdev(y1);
+ *	free_netdev(y2);
  *
  * We are invoked by rtnl_unlock() after it drops the semaphore.
  * This allows us to deal with problems:
@@ -2836,9 +2838,19 @@ void netdev_run_todo(void)
 			dev->reg_state = NETREG_UNREGISTERED;
 
 			netdev_wait_allrefs(dev);
+
+			/* paranoia */
 			BUG_ON(atomic_read(&dev->refcnt));
-				
-			netdev_finish_unregister(dev);
+			BUG_TRAP(!dev->ip_ptr);
+			BUG_TRAP(!dev->ip6_ptr);
+			BUG_TRAP(!dev->dn_ptr);
+
+
+			/* It must be the very last action, 
+			 * after this 'dev' may point to freed up memory.
+			 */
+			if (dev->destructor)
+				dev->destructor(dev);
 			break;
 
 		default:
@@ -2851,6 +2863,29 @@ void netdev_run_todo(void)
 	up(&net_todo_run_mutex);
 }
 
+/**
+ *	free_netdev - free network device
+ *	@dev: device
+ *
+ *	This function does the last stage of destroying an allocated device 
+ * 	interface. The reference to the device object is released.  
+ *	If this is the last reference then it will be freed.
+ */
+void free_netdev(struct net_device *dev)
+{
+	/*  Compatiablity with error handling in drivers */
+	if (dev->reg_state == NETREG_UNINITIALIZED) {
+		kfree(dev);
+		return;
+	}
+
+	BUG_ON(dev->reg_state != NETREG_UNREGISTERED);
+	dev->reg_state = NETREG_RELEASED;
+
+	/* will free via class release */
+	class_device_put(&dev->class_dev);
+}
+ 
 /* Synchronize with packet receive processing. */
 void synchronize_net(void) 
 {
@@ -2957,7 +2992,6 @@ int unregister_netdevice(struct net_device *dev)
  */
 static int __init net_dev_init(void)
 {
-	struct net_device *dev, **dp;
 	int i, rc = -ENOMEM;
 
 	BUG_ON(!dev_boot_phase);
@@ -2979,7 +3013,7 @@ static int __init net_dev_init(void)
 	for (i = 0; i < NR_CPUS; i++) {
 		struct softnet_data *queue;
 
-		queue = &softnet_data[i];
+		queue = &per_cpu(softnet_data, i);
 		skb_queue_head_init(&queue->input_pkt_queue);
 		queue->throttle = 0;
 		queue->cng_level = 0;
@@ -2992,85 +3026,10 @@ static int __init net_dev_init(void)
 		atomic_set(&queue->backlog_dev.refcnt, 1);
 	}
 
-#ifdef CONFIG_NET_PROFILE
-	net_profile_init();
-	NET_PROFILE_REGISTER(dev_queue_xmit);
-	NET_PROFILE_REGISTER(softnet_process);
-#endif
-
 #ifdef OFFLINE_SAMPLE
 	samp_timer.expires = jiffies + (10 * HZ);
 	add_timer(&samp_timer);
 #endif
-
-	/*
-	 *	Add the devices.
-	 *	If the call to dev->init fails, the dev is removed
-	 *	from the chain disconnecting the device until the
-	 *	next reboot.
-	 *
-	 *	NB At boot phase networking is dead. No locking is required.
-	 *	But we still preserve dev_base_lock for sanity.
-	 */
-
-	dp = &dev_base;
-	while ((dev = *dp) != NULL) {
-		spin_lock_init(&dev->queue_lock);
-		spin_lock_init(&dev->xmit_lock);
-#ifdef CONFIG_NET_FASTROUTE
-		dev->fastpath_lock = RW_LOCK_UNLOCKED;
-#endif
-		dev->xmit_lock_owner = -1;
-		dev->iflink = -1;
-		dev_hold(dev);
-
-		/*
-		 * Allocate name. If the init() fails
-		 * the name will be reissued correctly.
-		 */
-		if (strchr(dev->name, '%'))
-			dev_alloc_name(dev, dev->name);
-
-		/*
-		 * Check boot time settings for the device.
-		 */
-		netdev_boot_setup_check(dev);
-
-		if ( (dev->init && dev->init(dev)) ||
-		     netdev_register_sysfs(dev) ) {
-			/*
-			 * It failed to come up. It will be unhooked later.
-			 * dev_alloc_name can now advance to next suitable
-			 * name that is checked next.
-			 */
-			dp = &dev->next;
-		} else {
-			dp = &dev->next;
-			dev->ifindex = dev_new_index();
-			dev->reg_state = NETREG_REGISTERED;
-			if (dev->iflink == -1)
-				dev->iflink = dev->ifindex;
-			if (!dev->rebuild_header)
-				dev->rebuild_header = default_rebuild_header;
-			dev_init_scheduler(dev);
-			set_bit(__LINK_STATE_PRESENT, &dev->state);
-		}
-	}
-
-	/*
-	 * Unhook devices that failed to come up
-	 */
-	dp = &dev_base;
-	while ((dev = *dp) != NULL) {
-		if (dev->reg_state != NETREG_REGISTERED) {
-			write_lock_bh(&dev_base_lock);
-			*dp = dev->next;
-			write_unlock_bh(&dev_base_lock);
-			dev_put(dev);
-		} else {
-			dp = &dev->next;
-		}
-	}
 
 	dev_boot_phase = 0;
 
@@ -3089,3 +3048,63 @@ out:
 }
 
 subsys_initcall(net_dev_init);
+
+EXPORT_SYMBOL(__dev_get);
+EXPORT_SYMBOL(__dev_get_by_flags);
+EXPORT_SYMBOL(__dev_get_by_index);
+EXPORT_SYMBOL(__dev_get_by_name);
+EXPORT_SYMBOL(__dev_remove_pack);
+EXPORT_SYMBOL(__skb_linearize);
+EXPORT_SYMBOL(call_netdevice_notifiers);
+EXPORT_SYMBOL(dev_add_pack);
+EXPORT_SYMBOL(__dev_alloc);
+EXPORT_SYMBOL(dev_alloc_name);
+EXPORT_SYMBOL(dev_close);
+EXPORT_SYMBOL(dev_get_by_flags);
+EXPORT_SYMBOL(dev_get_by_index);
+EXPORT_SYMBOL(dev_get_by_name);
+EXPORT_SYMBOL(dev_getbyhwaddr);
+EXPORT_SYMBOL(dev_ioctl);
+EXPORT_SYMBOL(dev_new_index);
+EXPORT_SYMBOL(dev_open);
+EXPORT_SYMBOL(dev_queue_xmit);
+EXPORT_SYMBOL(dev_queue_xmit_nit);
+EXPORT_SYMBOL(dev_remove_pack);
+EXPORT_SYMBOL(dev_set_allmulti);
+EXPORT_SYMBOL(dev_set_promiscuity);
+EXPORT_SYMBOL(free_netdev);
+EXPORT_SYMBOL(netdev_boot_setup_check);
+EXPORT_SYMBOL(netdev_set_master);
+EXPORT_SYMBOL(netdev_state_change);
+EXPORT_SYMBOL(netif_receive_skb);
+EXPORT_SYMBOL(netif_rx);
+EXPORT_SYMBOL(register_gifconf);
+EXPORT_SYMBOL(register_netdevice);
+EXPORT_SYMBOL(register_netdevice_notifier);
+EXPORT_SYMBOL(skb_checksum_help);
+EXPORT_SYMBOL(synchronize_net);
+EXPORT_SYMBOL(unregister_netdevice);
+EXPORT_SYMBOL(unregister_netdevice_notifier);
+
+#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+EXPORT_SYMBOL(br_handle_frame_hook);
+#endif
+/* for 801q VLAN support */
+#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
+EXPORT_SYMBOL(dev_change_flags);
+#endif
+#ifdef CONFIG_KMOD
+EXPORT_SYMBOL(dev_load);
+#endif
+#ifdef CONFIG_NET_HW_FLOWCONTROL
+EXPORT_SYMBOL(netdev_dropping);
+EXPORT_SYMBOL(netdev_fc_xoff);
+EXPORT_SYMBOL(netdev_register_fc);
+EXPORT_SYMBOL(netdev_unregister_fc);
+#endif
+#ifdef CONFIG_NET_FASTROUTE
+EXPORT_SYMBOL(netdev_fastroute);
+EXPORT_SYMBOL(netdev_fastroute_obstacles);
+#endif
+
+EXPORT_PER_CPU_SYMBOL(softnet_data);

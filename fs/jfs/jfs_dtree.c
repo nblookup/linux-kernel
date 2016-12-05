@@ -1,5 +1,5 @@
 /*
- *   Copyright (c) International Business Machines Corp., 2000-2002
+ *   Copyright (C) International Business Machines Corp., 2000-2003
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -130,9 +130,8 @@ struct dtsplit {
 		if (((P)->header.nextindex > (((BN)==0)?DTROOTMAXSLOT:(P)->header.maxslot)) ||\
 		    ((BN) && ((P)->header.maxslot > DTPAGEMAXSLOT)))\
 		{\
-			jfs_err("DT_GETPAGE: dtree page corrupt");\
 			BT_PUTPAGE(MP);\
-			updateSuper((IP)->i_sb, FM_DIRTY);\
+			jfs_error((IP)->i_sb, "DT_GETPAGE: dtree page corrupt");\
 			MP = NULL;\
 			RC = -EIO;\
 		}\
@@ -768,8 +767,7 @@ int dtSearch(struct inode *ip, struct component_name * key, ino_t * data,
 			/* Something's corrupted, mark filesytem dirty so
 			 * chkdsk will fix it.
 			 */
-			jfs_err("stack overrun in dtSearch!");
-			updateSuper(sb, FM_DIRTY);
+			jfs_error(sb, "stack overrun in dtSearch!");
 			rc = -EIO;
 			goto out;
 		}
@@ -1328,7 +1326,7 @@ static int dtSplitPage(tid_t tid, struct inode *ip, struct dtsplit * split,
 	rbn = addressPXD(pxd);
 	rmp = get_metapage(ip, rbn, PSIZE, 1);
 	if (rmp == NULL)
-		return EIO;
+		return -EIO;
 
 	jfs_info("dtSplitPage: ip:0x%p smp:0x%p rmp:0x%p", ip, smp, rmp);
 
@@ -3204,11 +3202,12 @@ int jfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 				d_namleft -= len;
 				/* Sanity Check */
 				if (d_namleft == 0) {
-					jfs_err("JFS:Dtree error: ino = "
-						"%ld, bn=%Ld, index = %d",
-						(long)ip->i_ino,(long long)bn,
-						i);
-					updateSuper(ip->i_sb, FM_DIRTY);
+					jfs_error(ip->i_sb,
+						  "JFS:Dtree error: ino = "
+						  "%ld, bn=%Ld, index = %d",
+						  (long)ip->i_ino,
+						  (long long)bn,
+						  i);
 					goto skip_one;
 				}
 				len = min(d_namleft, DTSLOTDATALEN);

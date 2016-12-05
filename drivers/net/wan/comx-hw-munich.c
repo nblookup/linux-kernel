@@ -30,7 +30,6 @@
 #include <linux/config.h>
 #include <linux/ctype.h>
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
@@ -1850,7 +1849,7 @@ static int MUNICH_open(struct net_device *dev)
     if (board->isx21)
     {
 	init_timer(&board->modemline_timer);
-	board->modemline_timer.data = (unsigned int)board;
+	board->modemline_timer.data = (unsigned long)board;
 	board->modemline_timer.function = pcicom_modemline;
 	board->modemline_timer.expires = jiffies + HZ;
 	add_timer((struct timer_list *)&board->modemline_timer);
@@ -2414,7 +2413,10 @@ static int munich_write_proc(struct file *file, const char *buffer,
 	return -ENOMEM;
 
     /* Copy user data and cut trailing \n */
-    copy_from_user(page, buffer, count = min(count, PAGE_SIZE));
+    if (copy_from_user(page, buffer, count = min(count, PAGE_SIZE))) {
+	    free_page((unsigned long)page);
+	    return -EFAULT;
+    }
     if (*(page + count - 1) == '\n')
 	*(page + count - 1) = 0;
     *(page + PAGE_SIZE - 1) = 0;
@@ -2820,7 +2822,7 @@ static struct comx_hardware pcicomhw =
 
 /* Module management */
 
-int __init init_mister(void)
+static int __init init_mister(void)
 {
     printk(VERSIONSTR);
     comx_register_hardware(&slicecomhw);

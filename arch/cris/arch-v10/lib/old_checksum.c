@@ -19,6 +19,7 @@
  */
 
 #include <net/checksum.h>
+#include <net/module.h>
 
 #undef PROFILE_CHECKSUM
 
@@ -75,8 +76,10 @@ unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum)
     sum += *((unsigned short *)buff)++;
   }
   if(endMarker - buff > 0) {
-    sum += *buff;                 /* add extra byte seperately */
+    sum += *buff;                 /* add extra byte separately */
   }
   BITOFF;
   return(sum);
 }
+
+EXPORT_SYMBOL(csum_partial);

@@ -194,7 +194,10 @@ extern inline xfs_caddr_t xfs_buf_offset(page_buf_t *bp, size_t offset)
 	(bp)->pb_target = (target)
 
 #define XFS_BUF_TARGET(bp)	((bp)->pb_target)
-#define XFS_BUF_TARGET_DEV(bp)	((bp)->pb_target->pbr_dev)
+
+#define XFS_BUFTARG_NAME(target) \
+	({ char __b[BDEVNAME_SIZE]; bdevname((target->pbr_bdev), __b); __b; })
+	
 #define XFS_BUF_SET_VTYPE_REF(bp, type, ref)
 #define XFS_BUF_SET_VTYPE(bp, type)
 #define XFS_BUF_SET_REF(bp, ref)
@@ -215,21 +218,16 @@ extern inline xfs_caddr_t xfs_buf_offset(page_buf_t *bp, size_t offset)
 
 static inline int	xfs_bawrite(void *mp, page_buf_t *bp)
 {
-	int ret;
-
 	bp->pb_fspriv3 = mp;
 	bp->pb_strat = xfs_bdstrat_cb;
 	xfs_buf_undelay(bp);
-	if ((ret = pagebuf_iostart(bp, PBF_WRITE | PBF_ASYNC)) == 0)
-		pagebuf_run_queues(bp);
-	return ret;
+	return pagebuf_iostart(bp, PBF_WRITE | PBF_ASYNC | PBF_RUN_QUEUES);
 }
 
 static inline void	xfs_buf_relse(page_buf_t *bp)
 {
 	if ((bp->pb_flags & _PBF_LOCKABLE) && !bp->pb_relse)
 		pagebuf_unlock(bp);
-
 	pagebuf_rele(bp);
 }
 
@@ -263,23 +261,19 @@ static inline void	xfs_buf_relse(page_buf_t *bp)
 
 static inline int	XFS_bwrite(page_buf_t *pb)
 {
-	int	sync = (pb->pb_flags & PBF_ASYNC) == 0;
-	int	error;
+	int	iowait = (pb->pb_flags & PBF_ASYNC) == 0;
+	int	error = 0;
 
 	pb->pb_flags |= PBF_SYNC;
+	if (!iowait)
+		pb->pb_flags |= PBF_RUN_QUEUES;
 
 	xfs_buf_undelay(pb);
-
-	__pagebuf_iorequest(pb);
-
-	if (sync) {
+	pagebuf_iostrategy(pb);
+	if (iowait) {
 		error = pagebuf_iowait(pb);
 		xfs_buf_relse(pb);
-	} else {
-		pagebuf_run_queues(pb);
-		error = 0;
 	}
-
 	return error;
 }
 
@@ -316,11 +310,8 @@ static inline int xfs_bdwrite(void *mp, page_buf_t *bp)
 #define xfs_baread(target, rablkno, ralen)  \
 	pagebuf_readahead((target), (rablkno), (ralen), PBF_DONT_BLOCK)
 
-#define XFS_getrbuf(sleep,mp)	\
-	pagebuf_get_empty((mp)->m_ddev_targp)
-#define XFS_ngetrbuf(len,mp)	\
-	pagebuf_get_no_daddr(len,(mp)->m_ddev_targp)
-#define XFS_freerbuf(bp)	pagebuf_free(bp)
-#define XFS_nfreerbuf(bp)	pagebuf_free(bp)
+#define xfs_buf_get_empty(len, target)	pagebuf_get_empty((len), (target))
+#define xfs_buf_get_noaddr(len, target)	pagebuf_get_no_daddr((len), (target))
+#define xfs_buf_free(bp)		pagebuf_free(bp)
 
-#endif
+#endif	/* __XFS_BUF_H__ */

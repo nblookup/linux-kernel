@@ -64,11 +64,7 @@ static inline int level_to_pers (int level)
 typedef struct mddev_s mddev_t;
 typedef struct mdk_rdev_s mdk_rdev_t;
 
-#if (MINORBITS != 8)
-#error MD does not handle bigger kdev yet
-#endif
-
-#define MAX_MD_DEVS  (1<<MINORBITS)	/* Max number of md dev */
+#define MAX_MD_DEVS  256	/* Max number of md dev */
 
 /*
  * options passed in raidrun:
@@ -247,7 +243,7 @@ struct mddev_s
 	unsigned int			safemode_delay;
 	struct timer_list		safemode_timer;
 	atomic_t			writes_pending; 
-	request_queue_t			queue;	/* for plugging ... */
+	request_queue_t			*queue;	/* for plugging ... */
 
 	struct list_head		all_mddevs;
 };

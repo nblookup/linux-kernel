@@ -83,6 +83,7 @@
 #include <asm/ioctls.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
+#include <linux/module.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
 #include <linux/in.h>
@@ -175,7 +176,9 @@ gotit:
 			if (inet2->num == snum &&
 			    sk2 != sk &&
 			    !ipv6_only_sock(sk2) &&
-			    sk2->sk_bound_dev_if == sk->sk_bound_dev_if &&
+			    (!sk2->sk_bound_dev_if ||
+			     !sk->sk_bound_dev_if ||
+			     sk2->sk_bound_dev_if == sk->sk_bound_dev_if) &&
 			    (!inet2->rcv_saddr ||
 			     !inet->rcv_saddr ||
 			     inet2->rcv_saddr == inet->rcv_saddr) &&
@@ -384,6 +387,7 @@ static void udp_flush_pending_frames(struct sock *sk)
 	struct udp_opt *up = udp_sk(sk);
 
 	if (up->pending) {
+		up->len = 0;
 		up->pending = 0;
 		ip_flush_pending_frames(sk);
 	}
@@ -394,6 +398,8 @@ static void udp_flush_pending_frames(struct sock *sk)
  */
 static int udp_push_pending_frames(struct sock *sk, struct udp_opt *up)
 {
+	struct inet_opt *inet = inet_sk(sk);
+	struct flowi *fl = &inet->cork.fl;
 	struct sk_buff *skb;
 	struct udphdr *uh;
 	int err = 0;
@@ -406,8 +412,8 @@ static int udp_push_pending_frames(struct sock *sk, struct udp_opt *up)
 	 * Create a UDP header
 	 */
 	uh = skb->h.uh;
-	uh->source = up->sport;
-	uh->dest = up->dport;
+	uh->source = fl->fl_ip_sport;
+	uh->dest = fl->fl_ip_dport;
 	uh->len = htons(up->len);
 	uh->check = 0;
 
@@ -422,12 +428,12 @@ static int udp_push_pending_frames(struct sock *sk, struct udp_opt *up)
 		 */
 		if (skb->ip_summed == CHECKSUM_HW) {
 			skb->csum = offsetof(struct udphdr, check);
-			uh->check = ~csum_tcpudp_magic(up->saddr, up->daddr,
+			uh->check = ~csum_tcpudp_magic(fl->fl4_src, fl->fl4_dst,
 					up->len, IPPROTO_UDP, 0);
 		} else {
 			skb->csum = csum_partial((char *)uh,
 					sizeof(struct udphdr), skb->csum);
-			uh->check = csum_tcpudp_magic(up->saddr, up->daddr,
+			uh->check = csum_tcpudp_magic(fl->fl4_src, fl->fl4_dst,
 					up->len, IPPROTO_UDP, skb->csum);
 			if (uh->check == 0)
 				uh->check = -1;
@@ -452,7 +458,7 @@ static int udp_push_pending_frames(struct sock *sk, struct udp_opt *up)
 		skb_queue_walk(&sk->sk_write_queue, skb) {
 			csum = csum_add(csum, skb->csum);
 		}
-		uh->check = csum_tcpudp_magic(up->saddr, up->daddr,
+		uh->check = csum_tcpudp_magic(fl->fl4_src, fl->fl4_dst,
 				up->len, IPPROTO_UDP, csum);
 		if (uh->check == 0)
 			uh->check = -1;
@@ -516,8 +522,13 @@ int udp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 	 	 * The socket lock must be held while it's corked.
 		 */
 		lock_sock(sk);
-		if (likely(up->pending))
+		if (likely(up->pending)) {
+			if (unlikely(up->pending != AF_INET)) {
+				release_sock(sk);
+				return -EINVAL;
+			}
  			goto do_append_data;
+		}
 		release_sock(sk);
 	}
 	ulen += sizeof(struct udphdr);
@@ -540,7 +551,7 @@ int udp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
 			return -EINVAL;
 	} else {
 		if (sk->sk_state != TCP_ESTABLISHED)
-			return -ENOTCONN;
+			return -EDESTADDRREQ;
 		daddr = inet->daddr;
 		dport = inet->dport;
 		/* Open fast path for connected socket.
@@ -632,11 +643,11 @@ back_from_confirm:
 	/*
 	 *	Now cork the socket to pend data.
 	 */
-	up->daddr = daddr;
-	up->dport = dport;
-	up->saddr = saddr;
-	up->sport = inet->sport;
-	up->pending = 1;
+	inet->cork.fl.fl4_dst = daddr;
+	inet->cork.fl.fl_ip_dport = dport;
+	inet->cork.fl.fl4_src = saddr;
+	inet->cork.fl.fl_ip_sport = inet->sport;
+	up->pending = AF_INET;
 
 do_append_data:
 	up->len += ulen;
@@ -938,6 +949,9 @@ static void udp_close(struct sock *sk, long timeout)
  */
 static int udp_encap_rcv(struct sock * sk, struct sk_buff *skb)
 {
+#ifndef CONFIG_XFRM
+	return 1; 
+#else
 	struct udp_opt *up = udp_sk(sk);
   	struct udphdr *uh = skb->h.uh;
 	struct iphdr *iph;
@@ -997,10 +1011,12 @@ static int udp_encap_rcv(struct sock * sk, struct sk_buff *skb)
 		return -1;
 
 	default:
-		printk(KERN_INFO "udp_encap_rcv(): Unhandled UDP encap type: %u\n",
-		       encap_type);
+		if (net_ratelimit())
+			printk(KERN_INFO "udp_encap_rcv(): Unhandled UDP encap type: %u\n",
+			       encap_type);
 		return 1;
 	}
+#endif
 }
 
 /* returns:
@@ -1344,64 +1360,65 @@ struct proto udp_prot = {
 /* ------------------------------------------------------------------------ */
 #ifdef CONFIG_PROC_FS
 
-static __inline__ struct sock *udp_get_bucket(struct seq_file *seq, loff_t *pos)
+static struct sock *udp_get_first(struct seq_file *seq)
 {
-	int i;
 	struct sock *sk;
-	struct hlist_node *node;
-	loff_t l = *pos;
 	struct udp_iter_state *state = seq->private;
 
-	for (; state->bucket < UDP_HTABLE_SIZE; ++state->bucket) {
-		i = 0;
+	for (state->bucket = 0; state->bucket < UDP_HTABLE_SIZE; ++state->bucket) {
+		struct hlist_node *node;
 		sk_for_each(sk, node, &udp_hash[state->bucket]) {
-			if (sk->sk_family != state->family) {
-				++i;
-				continue;
-			}
-			if (l--) {
-				++i;
-				continue;
-			}
-			*pos = i;
-			goto out;
+			if (sk->sk_family == state->family)
+				goto found;
 		}
 	}
 	sk = NULL;
-out:
+found:
 	return sk;
+}
+
+static struct sock *udp_get_next(struct seq_file *seq, struct sock *sk)
+{
+	struct udp_iter_state *state = seq->private;
+
+	do {
+		sk = sk_next(sk);
+try_again:
+		;
+	} while (sk && sk->sk_family != state->family);
+
+	if (!sk && ++state->bucket < UDP_HTABLE_SIZE) {
+		sk = sk_head(&udp_hash[state->bucket]);
+		goto try_again;
+	}
+	return sk;
+}
+
+static struct sock *udp_get_idx(struct seq_file *seq, loff_t pos)
+{
+	struct sock *sk = udp_get_first(seq);
+
+	if (sk)
+		while(pos && (sk = udp_get_next(seq, sk)) != NULL)
+			--pos;
+	return pos ? NULL : sk;
 }
 
 static void *udp_seq_start(struct seq_file *seq, loff_t *pos)
 {
 	read_lock(&udp_hash_lock);
-	return *pos ? udp_get_bucket(seq, pos) : (void *)1;
+	return *pos ? udp_get_idx(seq, *pos-1) : (void *)1;
 }
 
 static void *udp_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
 	struct sock *sk;
-	struct hlist_node *node;
-	struct udp_iter_state *state;
 
-	if (v == (void *)1) {
-		sk = udp_get_bucket(seq, pos);
-		goto out;
-	}
+	if (v == (void *)1)
+		sk = udp_get_idx(seq, 0);
+	else
+		sk = udp_get_next(seq, v);
 
-	state = seq->private;
-
-	sk = v;
-	sk_for_each_continue(sk, node)
-		if (sk->sk_family == state->family)
-			goto out;
-
-	if (++state->bucket >= UDP_HTABLE_SIZE) 
-		goto out;
-
-	*pos = 0;
-	sk = udp_get_bucket(seq, pos);
-out:
 	++*pos;
 	return sk;
 }
@@ -1454,11 +1471,10 @@ int udp_proc_register(struct udp_seq_afinfo *afinfo)
 	afinfo->seq_fops->llseek	= seq_lseek;
 	afinfo->seq_fops->release	= seq_release_private;
 
-	p = create_proc_entry(afinfo->name, S_IRUGO, proc_net);
-	if (p) {
+	p = proc_net_fops_create(afinfo->name, S_IRUGO, afinfo->seq_fops);
+	if (p)
 		p->data = afinfo;
-		p->proc_fops = afinfo->seq_fops;
-	} else
+	else
 		rc = -ENOMEM;
 	return rc;
 }
@@ -1467,7 +1483,7 @@ void udp_proc_unregister(struct udp_seq_afinfo *afinfo)
 {
 	if (!afinfo)
 		return;
-	remove_proc_entry(afinfo->name, proc_net);
+	proc_net_remove(afinfo->name);
 	memset(afinfo->seq_fops, 0, sizeof(*afinfo->seq_fops));
 }
 
@@ -1491,7 +1507,7 @@ static void udp4_format_sock(struct sock *sp, char *tmpbuf, int bucket)
 
 static int udp4_seq_show(struct seq_file *seq, void *v)
 {
-	if (v == (void *)1)
+	if (v == SEQ_START_TOKEN)
 		seq_printf(seq, "%-127s\n",
 			   "  sl  local_address rem_address   st tx_queue "
 			   "rx_queue tr tm->when retrnsmt   uid  timeout "
@@ -1526,3 +1542,17 @@ void udp4_proc_exit(void)
 	udp_proc_unregister(&udp4_seq_afinfo);
 }
 #endif /* CONFIG_PROC_FS */
+
+EXPORT_SYMBOL(udp_connect);
+EXPORT_SYMBOL(udp_disconnect);
+EXPORT_SYMBOL(udp_hash);
+EXPORT_SYMBOL(udp_hash_lock);
+EXPORT_SYMBOL(udp_ioctl);
+EXPORT_SYMBOL(udp_port_rover);
+EXPORT_SYMBOL(udp_prot);
+EXPORT_SYMBOL(udp_sendmsg);
+
+#ifdef CONFIG_PROC_FS
+EXPORT_SYMBOL(udp_proc_register);
+EXPORT_SYMBOL(udp_proc_unregister);
+#endif

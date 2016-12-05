@@ -99,7 +99,6 @@ MODULE_PARM_DESC(force_addr,
 		 "Forcibly enable the PIIX4 at the given address. "
 		 "EXTREMELY DANGEROUS!");
 
-static void piix4_do_pause(unsigned int amount);
 static int piix4_transaction(void);
 
 
@@ -128,7 +127,7 @@ static int piix4_setup(struct pci_dev *PIIX4_dev, const struct pci_device_id *id
 	if (PCI_FUNC(PIIX4_dev->devfn) != id->driver_data)
 		return -ENODEV;
 
-	dev_info(&PIIX4_dev->dev, "Found %s device\n", PIIX4_dev->dev.name);
+	dev_info(&PIIX4_dev->dev, "Found %s device\n", pci_name(PIIX4_dev));
 
 	if(ibm_dmi_probe()) {
 		dev_err(&PIIX4_dev->dev, "IBM Laptop detected; this module "
@@ -161,6 +160,15 @@ static int piix4_setup(struct pci_dev *PIIX4_dev, const struct pci_device_id *id
 	}
 
 	pci_read_config_byte(PIIX4_dev, SMBHSTCFG, &temp);
+
+	/* Some BIOS will set up the chipset incorrectly and leave a register
+	   in an undefined state (causing I2C to act very strangely). */
+	if (temp & 0x02) {
+		dev_info(&PIIX4_dev->dev, "Worked around buggy BIOS (I2C)\n");
+		temp = temp & 0xfd;
+		pci_write_config_byte(PIIX4_dev, SMBHSTCFG, temp);
+	}
+ 
 	/* If force_addr is set, we program the new address here. Just to make
 	   sure, we disable the PIIX4 first. */
 	if (force_addr) {
@@ -208,13 +216,6 @@ END:
 	return error_return;
 }
 
-/* Internally used pause function */
-static void piix4_do_pause(unsigned int amount)
-{
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(amount);
-}
-
 /* Another internally used function */
 static int piix4_transaction(void)
 {
@@ -245,7 +246,7 @@ static int piix4_transaction(void)
 
 	/* We will always wait for a fraction of a second! (See PIIX4 docs errata) */
 	do {
-		piix4_do_pause(1);
+		i2c_delay(1);
 		temp = inb_p(SMBHSTSTS);
 	} while ((temp & 0x01) && (timeout++ < MAX_TIMEOUT));
 
@@ -394,15 +395,12 @@ static struct i2c_algorithm smbus_algorithm = {
 
 static struct i2c_adapter piix4_adapter = {
 	.owner		= THIS_MODULE,
-	.id		= I2C_ALGO_SMBUS | I2C_HW_SMBUS_PIIX4,
 	.class		= I2C_ADAP_CLASS_SMBUS,
 	.algo		= &smbus_algorithm,
-	.dev		= {
-		.name	= "unset",
-	},
+	.name		= "unset",
 };
 
-static struct pci_device_id piix4_ids[] __devinitdata = {
+static struct pci_device_id piix4_ids[] = {
 	{
 		.vendor =	PCI_VENDOR_ID_INTEL,
 		.device =	PCI_DEVICE_ID_INTEL_82371AB_3,
@@ -452,7 +450,7 @@ static int __devinit piix4_probe(struct pci_dev *dev, const struct pci_device_id
 	/* set up the driverfs linkage to our parent device */
 	piix4_adapter.dev.parent = &dev->dev;
 
-	snprintf(piix4_adapter.dev.name, DEVICE_NAME_SIZE,
+	snprintf(piix4_adapter.name, I2C_NAME_SIZE,
 		"SMBus PIIX4 adapter at %04x", piix4_smba);
 
 	retval = i2c_add_adapter(&piix4_adapter);
@@ -475,7 +473,6 @@ static struct pci_driver piix4_driver = {
 
 static int __init i2c_piix4_init(void)
 {
-	printk(KERN_INFO "i2c-piix4 version %s (%s)\n", I2C_VERSION, I2C_DATE);
 	return pci_module_init(&piix4_driver);
 }
 

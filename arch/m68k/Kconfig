@@ -67,11 +67,8 @@ config PCMCIA
 	  for location).  Please also read the PCMCIA-HOWTO, available from
 	  <http://www.tldp.org/docs.html#howto>.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  When compiled this way, there will be modules called pcmcia_core
-	  and ds.  If you want to compile it as a module, say M here and
-	  read <file:Documentation/modules.txt>.
+	  To compile this driver as modules, choose M here: the
+	  modules will be called pcmcia_core and ds.
 
 config AMIGA
 	bool "Amiga support"
@@ -90,7 +87,7 @@ config ATARI
 
 config HADES
 	bool "Hades support"
-	depends on ATARI
+	depends on ATARI && BROKEN
 	help
 	  This option enables support for the Hades Atari clone. If you plan
 	  to use this kernel on a Hades, say Y here; otherwise say N.
@@ -342,40 +339,6 @@ endmenu
 
 menu "General setup"
 
-choice
-	prompt "Kernel core (/proc/kcore) format"
-	depends on PROC_FS
-	default KCORE_ELF
-
-config KCORE_ELF
-	bool "ELF"
-	---help---
-	  If you enabled support for /proc file system then the file
-	  /proc/kcore will contain the kernel core image. This can be used
-	  in gdb:
-
-	  $ cd /usr/src/linux ; gdb vmlinux /proc/kcore
-
-	  You have two choices here: ELF and A.OUT. Selecting ELF will make
-	  /proc/kcore appear in ELF core format as defined by the Executable
-	  and Linking Format specification. Selecting A.OUT will choose the
-	  old "a.out" format which may be necessary for some old versions
-	  of binutils or on some architectures.
-
-	  This is especially useful if you have compiled the kernel with the
-	  "-g" option to preserve debugging information. It is mainly used
-	  for examining kernel data structures on the live kernel so if you
-	  don't understand what this means or are not a kernel hacker, just
-	  leave it at its default value ELF.
-
-config KCORE_AOUT
-	bool "A.OUT"
-	help
-	  Not necessary unless you're using a very out-of-date binutils
-	  version.  You probably want KCORE_ELF.
-
-endchoice
-
 source "fs/Kconfig.binfmt"
 
 config ZORRO
@@ -398,7 +361,7 @@ config AMIGA_PCMCIA
 
 config STRAM_SWAP
 	bool "Support for ST-RAM as swap space"
-	depends on ATARI
+	depends on ATARI && BROKEN
 	---help---
 	  Some Atari 68k macines (including the 520STF and 1020STE) divide
 	  their addressible memory into ST and TT sections.  The TT section
@@ -459,13 +422,11 @@ config PARPORT
 
 	  It is possible to share a single parallel port among several devices
 	  and it is safe to compile all the corresponding drivers into the
-	  kernel.  If you want to compile parallel port support as a module
-	  ( = code which can be inserted in and removed from the running
-	  kernel whenever you want), say M here and read
-	  <file:Documentation/modules.txt>.  The module will be called
-	  parport.  If you have more than one parallel port and want to
-	  specify which port and IRQ to be used by this driver at module load
-	  time, take a look at <file:Documentation/parport.txt>.
+	  kernel. To compile parallel port support as a module, choose M here:
+	  the module will be called parport.
+	  If you have more than one parallel port and want to specify which
+	  port and IRQ to be used by this driver at module load time, take a
+	  look at <file:Documentation/parport.txt>.
 
 	  If unsure, say Y.
 
@@ -494,11 +455,8 @@ config PARPORT_PC
 	  PC compatible computers and some Alphas have PC-style parallel
 	  ports.
 
-	  This code is also available as a module.  If you want to compile it
-	  as a module ( = code which can be inserted in and removed from the
-	  running kernel whenever you want), say M here and read
-	  <file:Documentation/modules.txt>.  The module will be called
-	  parport_pc.
+	  To compile this driver as a module, choose M here: the
+	  module will be called parport_pc.
 
 	  If unsure, say Y.
 
@@ -522,10 +480,8 @@ config PRINTER
 
 	  It is possible to share one parallel port among several devices
 	  (e.g. printer and ZIP drive) and it is safe to compile the
-	  corresponding drivers into the kernel.  If you want to compile this
-	  driver as a module however ( = code which can be inserted in and
-	  removed from the running kernel whenever you want), say M here and
-	  read <file:Documentation/modules.txt> and
+	  corresponding drivers into the kernel.
+	  To compile this driver as a module, choose M here and read
 	  <file:Documentation/parport.txt>.  The module will be called lp.
 
 	  If you have several parallel ports, you can specify which ports to
@@ -605,9 +561,8 @@ config SERIAL
 	  serial port drivers do not need this driver built in for them to
 	  work.)
 
-	  If you want to compile this driver as a module, say M here and read
-	  <file:Documentation/modules.txt>.  The module will be called
-	  serial.
+	  To compile this driver as a module, choose M here: the
+	  module will be called serial.
 	  [WARNING: Do not compile this driver as a module if you are using
 	  non-standard serial ports, since the configuration information will
 	  be lost when the driver is unloaded.  This limitation may be lifted
@@ -751,10 +706,8 @@ config NVRAM
 	  On Atari machines, /dev/nvram is always configured and does not need
 	  to be selected.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called nvram. If you want to compile it as a
-	  module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called nvram.
 
 config ATARI_MFPSER
 	tristate "Atari MFP serial support"
@@ -764,10 +717,7 @@ config ATARI_MFPSER
 	  Linux, say Y. The driver equally supports all kinds of MFP serial
 	  ports and automatically detects whether Serial1 is available.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  If you want to compile it as a module, say M here and read
-	  <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here.
 
 	  Note for Falcon users: You also have an MFP port, it's just not
 	  wired to the outside... But you could use the port under Linux.
@@ -782,10 +732,7 @@ config ATARI_SCC
 	  two connectors for channel A (Serial2 and LAN), they are visible as
 	  two separate devices.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  If you want to compile it as a module, say M here and read
-	  <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here.
 
 config ATARI_SCC_DMA
 	bool "Atari SCC serial DMA support"
@@ -803,10 +750,7 @@ config ATARI_MIDI
 	help
 	  If you want to use your Atari's MIDI port in Linux, say Y.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you
-	  want). If you want to compile it as a module, say M here and read
-	  <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here.
 
 config ATARI_DSP56K
 	tristate "Atari DSP56k support (EXPERIMENTAL)"
@@ -816,10 +760,7 @@ config ATARI_DSP56K
 	  driver is still experimental, and if you don't know what it is, or
 	  if you don't have this processor, just say N.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  If you want to compile it as a module, say M here and read
-	  <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here.
 
 config AMIGA_BUILTIN_SERIAL
 	tristate "Amiga builtin serial support"
@@ -828,10 +769,7 @@ config AMIGA_BUILTIN_SERIAL
 	  If you want to use your Amiga's built-in serial port in Linux,
 	  answer Y.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you
-	  want). If you want to compile it as a module, say M here and read
-	  <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here.
 
 config WHIPPET_SERIAL
 	tristate "Hisoft Whippet PCMCIA serial support"
@@ -847,10 +785,7 @@ config MULTIFACE_III_TTY
 	  If you want to use a Multiface III card's serial port in Linux,
 	  answer Y.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  If you want to compile it as a module, say M here and read
-	  <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here.
 
 config A2232
 	tristate "Commodore A2232 serial support (EXPERIMENTAL)"
@@ -866,8 +801,7 @@ config A2232
 
 	  This driver can be built as a module; but then "generic_serial"
 	  will also be built as a module. This has to be loaded before
-	  "ser_a2232". If you want to do this, answer M here and read
-	  "<file:Documentation/modules.txt>".
+	  "ser_a2232". If you want to do this, answer M here.
 
 config GVPIOEXT
 	tristate "GVP IO-Extender support"
@@ -1027,7 +961,7 @@ config MVME147_SCC
 
 config SERIAL167
 	bool "CD2401 support for MVME166/7 serial ports"
-	depends on MVME16x
+	depends on MVME16x && BROKEN
 	help
 	  This is the driver for the serial ports on the Motorola MVME166,
 	  167, and 172 boards.  Everyone using one of these boards should say
@@ -1120,43 +1054,11 @@ config SOFT_WATCHDOG
 	  from some situations that the hardware watchdog will recover
 	  from. Equally it's a lot cheaper to install.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  If you want to compile it as a module, say M here and read
-	  <file:Documentation/modules.txt>. The module will be called
-	  softdog.
-
-config RTC
-	bool "Enhanced Real Time Clock Support"
-	depends on ATARI
-	---help---
-	  If you say Y here and create a character special file /dev/rtc with
-	  major number 10 and minor number 135 using mknod ("man mknod"), you
-	  will get access to the real time clock (or hardware clock) built
-	  into your computer.
-
-	  Every PC has such a clock built in. It can be used to generate
-	  signals from as low as 1Hz up to 8192Hz, and can also be used
-	  as a 24 hour alarm. It reports status information via the file
-	  /proc/driver/rtc and its behaviour is set by various ioctls on
-	  /dev/rtc.
-
-	  If you run Linux on a multiprocessor machine and said Y to
-	  "Symmetric Multi Processing" above, you should say Y here to read
-	  and set the RTC in an SMP compatible fashion.
-
-	  If you think you have a use for such a device (such as periodic data
-	  sampling), then say Y here, and read <file:Documentation/rtc.txt>
-	  for details.
-
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module is called rtc. If you want to compile it as a module,
-	  say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called softdog.
 
 config GEN_RTC
 	tristate "Generic /dev/rtc emulation" if !SUN3
-	depends on !ATARI
 	default y if SUN3
 	---help---
 	  If you say Y here and create a character special file /dev/rtc with
@@ -1170,12 +1072,9 @@ config GEN_RTC
 	  for RTC_UIE which is required by some programs and may improve
 	  precision in some cases.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module is called genrtc. If you want to compile it as a module,
-	  say M here and read <file:Documentation/modules.txt>. To load the
-	  module automatically add 'alias char-major-10-135 genrtc' to your
-	  /etc/modules.conf
+	  To compile this driver as a module, choose M here: the
+	  module will be called genrtc. To load the module automatically
+	  add 'alias char-major-10-135 genrtc' to your /etc/modules.conf
 
 config GEN_RTC_X
 	bool "Extended RTC operation"
@@ -1228,15 +1127,7 @@ config UNIX98_PTY_COUNT
 
 endmenu
 
-
-menu "Sound support"
-
-config SOUND
-	tristate "Sound card support"
-
-source "sound/oss/dmasound/Kconfig"
-
-endmenu
+source "sound/Kconfig"
 
 source "fs/Kconfig"
 
@@ -1269,6 +1160,15 @@ config DEBUG_BUGVERBOSE
 	bool "Verbose BUG() reporting"
 	depends on DEBUG_KERNEL
 
+config DEBUG_INFO
+	bool "Compile the kernel with debug info"
+	depends on DEBUG_KERNEL
+	help
+          If you say Y here the resulting kernel image will include
+	  debugging info resulting in a larger kernel image.
+	  Say Y here only if you plan to use gdb to debug the kernel.
+	  If you don't debug the kernel, you can say N.
+	  
 endmenu
 
 source "security/Kconfig"

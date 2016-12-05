@@ -66,6 +66,7 @@
 #include <linux/delay.h>
 #include <sound/driver.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/slab.h>
 #include <linux/time.h>
 #include <linux/wait.h>
@@ -77,8 +78,8 @@
 #include <sound/initval.h>
 #include <sound/info.h>
 #include <asm/hardware.h>
-#include <asm/gsc.h>
 #include <asm/io.h>
+#include <asm/parisc-device.h>
 
 MODULE_AUTHOR("Laurent Canet <canetl@esiee.fr>");
 MODULE_DESCRIPTION("ALSA Harmony sound driver");
@@ -709,8 +710,8 @@ static int snd_card_harmony_playback_open(snd_pcm_substream_t * substream)
 	 * harmony is not "real" pci, but we need a pci_dev
 	 * to alloc PCI DMA pages
 	 */
-	substream->dma_private = harmony->fake_pci_dev;
-	substream->dma_type = SNDRV_PCM_DMA_TYPE_PCI;
+	substream->runtime->dma_private = harmony->fake_pci_dev;
+//	substream->dma_type = SNDRV_PCM_DMA_TYPE_PCI;
 	
 	harmony->playback_substream = substream;
 	runtime->hw = snd_card_harmony_playback;
@@ -733,8 +734,8 @@ static int snd_card_harmony_capture_open(snd_pcm_substream_t * substream)
 	 * harmony is not "real" pci, but we need a pci_dev
 	 * to alloc PCI DMA pages
 	 */
-	substream->dma_private = harmony->fake_pci_dev;
-	substream->dma_type = SNDRV_PCM_DMA_TYPE_PCI;
+	substream->runtime->dma_private = harmony->fake_pci_dev;
+//	substream->dma_type = SNDRV_PCM_DMA_TYPE_PCI;
 
 	harmony->capture_substream = substream;
 	runtime->hw = snd_card_harmony_capture;
@@ -1107,9 +1108,9 @@ MODULE_DEVICE_TABLE(parisc, snd_card_harmony_devicetbl);
  */
 
 static struct parisc_driver snd_card_harmony_driver = {
-	name:		"Lasi ALSA Harmony",
-	id_table:	snd_card_harmony_devicetbl,
-	probe:		snd_card_harmony_probe,
+	.name		= "Lasi ALSA Harmony",
+	.id_table	= snd_card_harmony_devicetbl,
+	.probe		= snd_card_harmony_probe,
 };
 
 static int __init alsa_card_harmony_init(void)

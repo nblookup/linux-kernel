@@ -57,7 +57,7 @@
 #define PORT_SUNSAB	39
 
 /* NEC v850.  */
-#define PORT_NB85E_UART	40
+#define PORT_V850E_UART	40
 
 /* NEC PC-9800 */
 #define PORT_8251_PC98	41
@@ -67,6 +67,15 @@
 #define PORT_PC9861	45
 #define PORT_PC9801_101	46
 
+/* DZ */
+#define PORT_DZ		47
+
+/* Parisc type numbers. */
+#define PORT_MUX	48
+
+/* Macintosh Zilog type numbers */
+#define PORT_MAC_ZILOG	50	/* m68k : not yet implemented */
+#define PORT_PMAC_ZILOG	51
 
 #ifdef __KERNEL__
 
@@ -316,8 +325,8 @@ int uart_remove_one_port(struct uart_driver *reg, struct uart_port *port);
 /*
  * Power Management
  */
-int uart_suspend_port(struct uart_driver *reg, struct uart_port *port, u32 level);
-int uart_resume_port(struct uart_driver *reg, struct uart_port *port, u32 level);
+int uart_suspend_port(struct uart_driver *reg, struct uart_port *port);
+int uart_resume_port(struct uart_driver *reg, struct uart_port *port);
 
 #define uart_circ_empty(circ)		((circ)->head == (circ)->tail)
 #define uart_circ_clear(circ)		((circ)->head = (circ)->tail = 0)

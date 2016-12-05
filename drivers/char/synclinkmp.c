@@ -1,5 +1,5 @@
 /*
- * $Id: synclinkmp.c,v 4.12 2003/06/18 15:29:33 paulkf Exp $
+ * $Id: synclinkmp.c,v 4.14 2003/09/05 15:26:03 paulkf Exp $
  *
  * Device driver for Microgate SyncLink Multiport
  * high speed multiprotocol serial adapter.
@@ -36,7 +36,6 @@
 
 #include <linux/config.h>
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -496,12 +495,12 @@ MODULE_PARM(maxframe,"1-" __MODULE_STRING(MAX_DEVICES) "i");
 MODULE_PARM(dosyncppp,"1-" __MODULE_STRING(MAX_DEVICES) "i");
 
 static char *driver_name = "SyncLink MultiPort driver";
-static char *driver_version = "$Revision: 4.12 $";
+static char *driver_version = "$Revision: 4.14 $";
 
 static int synclinkmp_init_one(struct pci_dev *dev,const struct pci_device_id *ent);
 static void synclinkmp_remove_one(struct pci_dev *dev);
 
-static struct pci_device_id synclinkmp_pci_tbl[] __devinitdata = {
+static struct pci_device_id synclinkmp_pci_tbl[] = {
 	{ PCI_VENDOR_ID_MICROGATE, PCI_DEVICE_ID_MICROGATE_SCA, PCI_ANY_ID, PCI_ANY_ID, },
 	{ 0, }, /* terminate list */
 };
@@ -713,6 +712,9 @@ static inline int sanity_check(SLMP_INFO *info,
 		printk(badmagic, name, routine);
 		return 1;
 	}
+#else
+	if (!info)
+		return 1;
 #endif
 	return 0;
 }
@@ -729,7 +731,7 @@ static int open(struct tty_struct *tty, struct file *filp)
 
 	line = tty->index;
 	if ((line < 0) || (line >= synclinkmp_device_count)) {
-		printk("%s(%d): open with illegal line #%d.\n",
+		printk("%s(%d): open with invalid line #%d.\n",
 			__FILE__,__LINE__,line);
 		return -ENODEV;
 	}
@@ -1651,7 +1653,7 @@ static void sppp_init(SLMP_INFO *info)
 	d->tx_timeout = sppp_cb_tx_timeout;
 	d->watchdog_timeo = 10*HZ;
 
-	if (register_netdev(d) == -1) {
+	if (register_netdev(d)) {
 		printk(KERN_WARNING "%s: register_netdev failed.\n", d->name);
 		sppp_detach(info->netdev);
 		return;
@@ -5449,8 +5451,8 @@ void write_control_reg(SLMP_INFO * info)
 }
 
 
-static int __init synclinkmp_init_one (struct pci_dev *dev,
-				       const struct pci_device_id *ent)
+static int __devinit synclinkmp_init_one (struct pci_dev *dev,
+					  const struct pci_device_id *ent)
 {
 	if (pci_enable_device(dev)) {
 		printk("error enabling pci device %p\n", dev);

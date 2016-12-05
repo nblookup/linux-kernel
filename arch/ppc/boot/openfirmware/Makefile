@@ -22,7 +22,7 @@ of1275	:= $(boot)/of1275
 images	:= $(boot)/images
 
 OBJCOPY_ARGS	:= -O aixcoff-rs6000 -R .stab -R .stabstr -R .comment
-COFF_LD_ARGS	:= -T $(boot)/ld.script -e _start -Ttext 0x00700000 -Bstatic
+COFF_LD_ARGS	:= -T $(boot)/ld.script -e _start -Ttext 0x00500000 -Bstatic
 CHRP_LD_ARGS	:= -T $(boot)/ld.script -e _start -Ttext 0x00800000
 NEWWORLD_LD_ARGS:= -T $(boot)/ld.script -e _start -Ttext 0x01000000
 
@@ -50,7 +50,7 @@ endif
 
 $(images)/ramdisk.image.gz:
 	@echo '  MISSING $@'
-	@echo '          RAM disk image must be provided seperatly'
+	@echo '          RAM disk image must be provided separately'
 	@/bin/false
 
 objcpxmon-$(CONFIG_XMON) := --add-section=.sysmap=System.map \

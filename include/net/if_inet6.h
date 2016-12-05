@@ -16,7 +16,12 @@
 #define _NET_IF_INET6_H
 
 #include <net/snmp.h>
+#include <linux/ipv6.h>
 
+/* inet6_dev.if_flags */
+
+#define IF_RA_OTHERCONF	0x80
+#define IF_RA_MANAGED	0x40
 #define IF_RA_RCVD	0x20
 #define IF_RS_SENT	0x10
 
@@ -29,7 +34,8 @@ struct inet6_ifaddr
 	
 	__u32			valid_lft;
 	__u32			prefered_lft;
-	unsigned long		tstamp;
+	unsigned long		cstamp;	/* created timestamp */
+	unsigned long		tstamp; /* updated timestamp */
 	atomic_t		refcnt;
 	spinlock_t		lock;
 
@@ -106,6 +112,8 @@ struct ifmcaddr6
 	atomic_t		mca_refcnt;
 	spinlock_t		mca_lock;
 	unsigned char		mca_crcount;
+	unsigned long		mca_cstamp;
+	unsigned long		mca_tstamp;
 };
 
 /* Anycast stuff */
@@ -125,34 +133,14 @@ struct ifacaddr6
 	int			aca_users;
 	atomic_t		aca_refcnt;
 	spinlock_t		aca_lock;
+	unsigned long		aca_cstamp;
+	unsigned long		aca_tstamp;
 };
 
 #define	IFA_HOST	IPV6_ADDR_LOOPBACK
 #define	IFA_LINK	IPV6_ADDR_LINKLOCAL
 #define	IFA_SITE	IPV6_ADDR_SITELOCAL
 #define	IFA_GLOBAL	0x0000U
-
-struct ipv6_devconf
-{
-	int		forwarding;
-	int		hop_limit;
-	int		mtu6;
-	int		accept_ra;
-	int		accept_redirects;
-	int		autoconf;
-	int		dad_transmits;
-	int		rtr_solicits;
-	int		rtr_solicit_interval;
-	int		rtr_solicit_delay;
-#ifdef CONFIG_IPV6_PRIVACY
-	int		use_tempaddr;
-	int		temp_valid_lft;
-	int		temp_prefered_lft;
-	int		regen_max_retry;
-	int		max_desync_factor;
-#endif
-	void		*sysctl;
-};
 
 struct ipv6_devstat {
 	struct proc_dir_entry	*proc_dir_entry;
@@ -187,6 +175,8 @@ struct inet6_dev
 	u8			entropy[8];
 	struct timer_list	regen_timer;
 	struct inet6_ifaddr	*tempaddr_list;
+	__u8			work_eui64[8];
+	__u8			work_digest[16];
 #endif
 
 	struct neigh_parms	*nd_parms;

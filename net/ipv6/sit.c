@@ -49,6 +49,7 @@
 #include <net/icmp.h>
 #include <net/ipip.h>
 #include <net/inet_ecn.h>
+#include <net/xfrm.h>
 
 /*
    This version of net/ipv6/sit.c is cloned of net/ipv4/ip_gre.c
@@ -376,6 +377,7 @@ static int ipip6_rcv(struct sk_buff *skb)
 
 	read_lock(&ipip6_lock);
 	if ((tunnel = ipip6_tunnel_lookup(iph->saddr, iph->daddr)) != NULL) {
+		secpath_reset(skb);
 		skb->mac.raw = skb->nh.raw;
 		skb->nh.raw = skb->data;
 		memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
@@ -530,8 +532,6 @@ static int ipip6_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			tunnel->err_count = 0;
 	}
 
-	skb->h.raw = skb->nh.raw;
-
 	/*
 	 * Okay, now see if we can stuff it in the buffer as-is.
 	 */
@@ -550,8 +550,10 @@ static int ipip6_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			skb_set_owner_w(new_skb, skb->sk);
 		dev_kfree_skb(skb);
 		skb = new_skb;
+		iph6 = skb->nh.ipv6h;
 	}
 
+	skb->h.raw = skb->nh.raw;
 	skb->nh.raw = skb_push(skb, sizeof(struct iphdr));
 	memset(&(IPCB(skb)->opt), 0, sizeof(IPCB(skb)->opt));
 	dst_release(skb->dst);
@@ -721,7 +723,7 @@ static void ipip6_tunnel_setup(struct net_device *dev)
 {
 	SET_MODULE_OWNER(dev);
 	dev->uninit		= ipip6_tunnel_uninit;
-	dev->destructor 	= (void (*)(struct net_device *))kfree;
+	dev->destructor 	= free_netdev;
 	dev->hard_start_xmit	= ipip6_tunnel_xmit;
 	dev->get_stats		= ipip6_tunnel_get_stats;
 	dev->do_ioctl		= ipip6_tunnel_ioctl;

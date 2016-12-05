@@ -48,7 +48,6 @@ static const char *version =
 #include <linux/timer.h>
 #include <linux/spinlock.h>
 #include <linux/netdevice.h>
-#include <linux/blk.h>
 #include <linux/fcdevice.h> /* had the declarations for init_fcdev among
 			       others + includes if_fcdevice.h */
 
@@ -111,7 +110,7 @@ static const char *version =
 #define ALIGNED_ADDR(addr, len) ((((unsigned long)(addr) + (len - 1)) & ~(len - 1)) - (unsigned long)(addr))
 
 
-static struct pci_device_id iph5526_pci_tbl[] __initdata = {
+static struct pci_device_id iph5526_pci_tbl[] = {
 	{ PCI_VENDOR_ID_INTERPHASE, PCI_DEVICE_ID_INTERPHASE_5526, PCI_ANY_ID, PCI_ANY_ID, },
 	{ PCI_VENDOR_ID_INTERPHASE, PCI_DEVICE_ID_INTERPHASE_55x6, PCI_ANY_ID, PCI_ANY_ID, },
 	{ }			/* Terminating entry */
@@ -4528,7 +4527,7 @@ static void __exit iph5526_exit(void)
 		clean_up_memory(fc[i]);
 		if (dev->priv)
 			kfree(priv);
-		kfree(dev);
+		free_netdev(dev);
 		dev = NULL;
 		i++;
 	}

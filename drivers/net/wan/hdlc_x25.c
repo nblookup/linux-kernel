@@ -9,7 +9,6 @@
  * as published by the Free Software Foundation.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
@@ -69,7 +68,12 @@ static int x25_data_indication(void *token, struct sk_buff *skb)
 	hdlc_device *hdlc = token;
 	unsigned char *ptr;
 
-	ptr = skb_push(skb, 1);
+	skb_push(skb, 1);
+
+	if (skb_cow(skb, 1))
+		return NET_RX_DROP;
+
+	ptr  = skb->data;
 	*ptr = 0;
 
 	skb->dev = hdlc_to_dev(hdlc);
@@ -165,14 +169,21 @@ static void x25_close(hdlc_device *hdlc)
 
 
 
-static void x25_rx(struct sk_buff *skb)
+static int x25_rx(struct sk_buff *skb)
 {
 	hdlc_device *hdlc = dev_to_hdlc(skb->dev);
 
+	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL) {
+		hdlc->stats.rx_dropped++;
+		return NET_RX_DROP;
+	}
+
 	if (lapb_data_received(hdlc, skb) == LAPB_OK)
-		return;
+		return NET_RX_SUCCESS;
+
 	hdlc->stats.rx_errors++;
 	dev_kfree_skb_any(skb);
+	return NET_RX_DROP;
 }
 
 
@@ -199,12 +210,13 @@ int hdlc_x25_ioctl(hdlc_device *hdlc, struct ifreq *ifr)
 			return result;
 
 		hdlc_proto_detach(hdlc);
+		memset(&hdlc->proto, 0, sizeof(hdlc->proto));
 
-		hdlc->open = x25_open;
-		hdlc->stop = x25_close;
-		hdlc->netif_rx = x25_rx;
-		hdlc->type_trans = NULL;
-		hdlc->proto = IF_PROTO_X25;
+		hdlc->proto.open = x25_open;
+		hdlc->proto.close = x25_close;
+		hdlc->proto.netif_rx = x25_rx;
+		hdlc->proto.type_trans = NULL;
+		hdlc->proto.id = IF_PROTO_X25;
 		dev->hard_start_xmit = x25_xmit;
 		dev->hard_header = NULL;
 		dev->type = ARPHRD_X25;

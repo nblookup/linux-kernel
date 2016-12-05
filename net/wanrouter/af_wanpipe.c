@@ -32,7 +32,6 @@
 *
 ******************************************************************************/
 
-#include <linux/version.h>
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/sched.h>
@@ -635,11 +634,8 @@ static int wanpipe_sendmsg(struct kiocb *iocb, struct socket *sock,
 	skb_queue_tail(&sk->sk_write_queue,skb);
 	atomic_inc(&wp->packet_sent);
 
-	if (!(test_and_set_bit(0, &wp->timer))){
-		del_timer(&wp->tx_timer);
-		wp->tx_timer.expires = jiffies + 1;
-		add_timer(&wp->tx_timer);
-	}	
+	if (!(test_and_set_bit(0, &wp->timer)))
+		mod_timer(&wp->tx_timer, jiffies + 1);
 	
 	return(len);
 
@@ -2600,3 +2596,4 @@ int init_module(void)
 }
 #endif
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_NETPROTO(PF_WANPIPE);

@@ -139,7 +139,7 @@
 #endif
 
 #include <linux/mm.h>		/* For fetching system memory size */
-#include <linux/blk.h>		/* For block_size() */
+#include <linux/blkdev.h>		/* For block_size() */
 
 /*
  * Lock protecting manipulation of the ahc softc list.
@@ -1307,33 +1307,9 @@ Scsi_Host_Template aic7xxx_driver_template = {
 	.this_id		= -1,
 	.cmd_per_lun		= 2,
 	.use_clustering		= ENABLE_CLUSTERING,
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,7)
-	/*
-	 * We can only map 16MB per-SG
-	 * so create a sector limit of
-	 * "16MB" in 2K sectors.
-	 */
-	.max_sectors		= 8192,
-#endif
-#if defined CONFIG_HIGHIO || LINUX_VERSION_CODE >= KERNEL_VERSION(2,5,0)
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,10)
-/* Assume RedHat Distribution with its different HIGHIO conventions. */
-	.can_dma_32		= 1,
-	.single_sg_okay		= 1,
-#else
-	.highmem_io		= 1,
-#endif
-#endif
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,5,0)
 	.slave_alloc		= ahc_linux_slave_alloc,
 	.slave_configure	= ahc_linux_slave_configure,
 	.slave_destroy		= ahc_linux_slave_destroy,
-#else
-	.detect			= ahc_linux_detect,
-	.release		= ahc_linux_release,
-	.select_queue_depths	= ahc_linux_select_queue_depth,
-	.use_new_eh_code	= 1,
-#endif
 };
 
 /**************************** Tasklet Handler *********************************/
@@ -1811,7 +1787,8 @@ ahc_linux_register_host(struct ahc_softc *ahc, Scsi_Host_Template *template)
 	ahc_unlock(ahc, &s);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,5,0)
-	scsi_add_host(host, (ahc->dev_softc ? &ahc->dev_softc->dev : NULL));
+	scsi_add_host(host, (ahc->dev_softc ? &ahc->dev_softc->dev : NULL)); /* XXX handle failure */
+	scsi_scan_host(host);
 #endif
 	return (0);
 }

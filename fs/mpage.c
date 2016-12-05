@@ -227,7 +227,7 @@ do_mpage_readpage(struct bio *bio, struct page *page, unsigned nr_pages,
 		goto confused;
 
 	block_in_file = page->index << (PAGE_CACHE_SHIFT - blkbits);
-	last_block = (inode->i_size + blocksize - 1) >> blkbits;
+	last_block = (i_size_read(inode) + blocksize - 1) >> blkbits;
 
 	bh.b_page = page;
 	for (page_block = 0; page_block < blocks_per_page;
@@ -388,6 +388,7 @@ static struct bio *
 mpage_writepage(struct bio *bio, struct page *page, get_block_t get_block,
 	sector_t *last_block_in_bio, int *ret, struct writeback_control *wbc)
 {
+	struct address_space *mapping = page->mapping;
 	struct inode *inode = page->mapping->host;
 	const unsigned blkbits = inode->i_blkbits;
 	unsigned long end_index;
@@ -459,7 +460,7 @@ mpage_writepage(struct bio *bio, struct page *page, get_block_t get_block,
 	 */
 	BUG_ON(!PageUptodate(page));
 	block_in_file = page->index << (PAGE_CACHE_SHIFT - blkbits);
-	last_block = (inode->i_size - 1) >> blkbits;
+	last_block = (i_size_read(inode) - 1) >> blkbits;
 	map_bh.b_page = page;
 	for (page_block = 0; page_block < blocks_per_page; ) {
 
@@ -489,9 +490,9 @@ mpage_writepage(struct bio *bio, struct page *page, get_block_t get_block,
 
 	first_unmapped = page_block;
 
-	end_index = inode->i_size >> PAGE_CACHE_SHIFT;
+	end_index = i_size_read(inode) >> PAGE_CACHE_SHIFT;
 	if (page->index >= end_index) {
-		unsigned offset = inode->i_size & (PAGE_CACHE_SIZE - 1);
+		unsigned offset = i_size_read(inode) & (PAGE_CACHE_SIZE - 1);
 		char *kaddr;
 
 		if (page->index > end_index || !offset)
@@ -562,6 +563,15 @@ confused:
 	if (bio)
 		bio = mpage_bio_submit(WRITE, bio);
 	*ret = page->mapping->a_ops->writepage(page, wbc);
+	/*
+	 * The caller has a ref on the inode, so *mapping is stable
+	 */
+	if (*ret) {
+		if (*ret == -ENOSPC)
+			set_bit(AS_ENOSPC, &mapping->flags);
+		else
+			set_bit(AS_EIO, &mapping->flags);
+	}
 out:
 	return bio;
 }
@@ -614,7 +624,6 @@ mpage_writepages(struct address_space *mapping,
 	sector_t last_block_in_bio = 0;
 	int ret = 0;
 	int done = 0;
-	struct pagevec pvec;
 	int (*writepage)(struct page *page, struct writeback_control *wbc);
 
 	if (wbc->nonblocking && bdi_write_congested(bdi)) {
@@ -626,7 +635,6 @@ mpage_writepages(struct address_space *mapping,
 	if (get_block == NULL)
 		writepage = mapping->a_ops->writepage;
 
-	pagevec_init(&pvec, 0);
 	spin_lock(&mapping->page_lock);
 	while (!list_empty(&mapping->io_pages) && !done) {
 		struct page *page = list_entry(mapping->io_pages.prev,
@@ -665,6 +673,14 @@ mpage_writepages(struct address_space *mapping,
 					test_clear_page_dirty(page)) {
 			if (writepage) {
 				ret = (*writepage)(page, wbc);
+				if (ret) {
+					if (ret == -ENOSPC)
+						set_bit(AS_ENOSPC,
+							&mapping->flags);
+					else
+						set_bit(AS_EIO,
+							&mapping->flags);
+				}
 			} else {
 				bio = mpage_writepage(bio, page, get_block,
 					&last_block_in_bio, &ret, wbc);

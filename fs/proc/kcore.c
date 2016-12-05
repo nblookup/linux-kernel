@@ -1,5 +1,5 @@
 /*
- *	fs/proc/kcore.c kernel ELF/AOUT core dumper
+ *	fs/proc/kcore.c kernel ELF core dumper
  *
  *	Modelled on fs/exec.c:aout_core_dump()
  *	Jeremy Fitzhardinge <jeremy@sw.oz.au>
@@ -27,77 +27,12 @@ static int open_kcore(struct inode * inode, struct file * filp)
 	return capable(CAP_SYS_RAWIO) ? 0 : -EPERM;
 }
 
-static ssize_t read_kcore(struct file *, char *, size_t, loff_t *);
+static ssize_t read_kcore(struct file *, char __user *, size_t, loff_t *);
 
 struct file_operations proc_kcore_operations = {
 	.read		= read_kcore,
 	.open		= open_kcore,
 };
-
-#ifdef CONFIG_KCORE_AOUT
-static ssize_t read_kcore(struct file *file, char *buf, size_t count, loff_t *ppos)
-{
-	unsigned long long p = *ppos, memsize;
-	ssize_t read;
-	ssize_t count1;
-	char * pnt;
-	struct user dump;
-#if defined (__i386__) || defined (__mc68000__) || defined(__x86_64__)
-#	define FIRST_MAPPED	PAGE_SIZE	/* we don't have page 0 mapped on x86.. */
-#else
-#	define FIRST_MAPPED	0
-#endif
-
-	memset(&dump, 0, sizeof(struct user));
-	dump.magic = CMAGIC;
-	dump.u_dsize = (virt_to_phys(high_memory) >> PAGE_SHIFT);
-#if defined (__i386__) || defined(__x86_64__)
-	dump.start_code = PAGE_OFFSET;
-#endif
-#ifdef __alpha__
-	dump.start_data = PAGE_OFFSET;
-#endif
-
-	memsize = virt_to_phys(high_memory);
-	if (p >= memsize)
-		return 0;
-	if (count > memsize - p)
-		count = memsize - p;
-	read = 0;
-
-	if (p < sizeof(struct user) && count > 0) {
-		count1 = count;
-		if (p + count1 > sizeof(struct user))
-			count1 = sizeof(struct user)-p;
-		pnt = (char *) &dump + p;
-		if (copy_to_user(buf,(void *) pnt, count1))
-			return -EFAULT;
-		buf += count1;
-		p += count1;
-		count -= count1;
-		read += count1;
-	}
-
-	if (count > 0 && p < PAGE_SIZE + FIRST_MAPPED) {
-		count1 = PAGE_SIZE + FIRST_MAPPED - p;
-		if (count1 > count)
-			count1 = count;
-		if (clear_user(buf, count1))
-			return -EFAULT;
-		buf += count1;
-		p += count1;
-		count -= count1;
-		read += count1;
-	}
-	if (count > 0) {
-		if (copy_to_user(buf, (void *) (PAGE_OFFSET+p-PAGE_SIZE), count))
-			return -EFAULT;
-		read += count;
-	}
-	*ppos += read;
-	return read;
-}
-#else /* CONFIG_KCORE_AOUT */
 
 #ifndef kc_vaddr_to_offset
 #define	kc_vaddr_to_offset(v) ((v) - PAGE_OFFSET)
@@ -240,6 +175,7 @@ static void elf_kcore_store_hdr(char *bufp, int nphdr, int dataoff)
 	elf->e_ident[EI_CLASS]	= ELF_CLASS;
 	elf->e_ident[EI_DATA]	= ELF_DATA;
 	elf->e_ident[EI_VERSION]= EV_CURRENT;
+	elf->e_ident[EI_OSABI] = ELF_OSABI;
 	memset(elf->e_ident+EI_PAD, 0, EI_NIDENT-EI_PAD);
 	elf->e_type	= ET_CORE;
 	elf->e_machine	= ELF_ARCH;
@@ -332,7 +268,8 @@ static void elf_kcore_store_hdr(char *bufp, int nphdr, int dataoff)
 /*
  * read from the ELF header and then kernel memory
  */
-static ssize_t read_kcore(struct file *file, char *buffer, size_t buflen, loff_t *fpos)
+static ssize_t
+read_kcore(struct file *file, char __user *buffer, size_t buflen, loff_t *fpos)
 {
 	ssize_t acc = 0;
 	size_t size, tsz;
@@ -480,4 +417,3 @@ static ssize_t read_kcore(struct file *file, char *buffer, size_t buflen, loff_t
 
 	return acc;
 }
-#endif /* CONFIG_KCORE_AOUT */

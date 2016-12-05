@@ -1,6 +1,4 @@
 /*
- *  $Id: longrun.c,v 1.25 2003/02/28 16:03:50 db Exp $
- *
  * (C) 2002 - 2003  Dominik Brodowski <linux@brodo.de>
  *
  *  Licensed under the terms of the GNU GPL License version 2.
@@ -122,8 +120,9 @@ static int longrun_verify_policy(struct cpufreq_policy *policy)
 		policy->cpuinfo.min_freq, 
 		policy->cpuinfo.max_freq);
 
-	if (policy->policy == CPUFREQ_POLICY_GOVERNOR)
-		policy->policy = longrun_driver.policy[0].policy;
+	if ((policy->policy != CPUFREQ_POLICY_POWERSAVE) &&
+	    (policy->policy != CPUFREQ_POLICY_PERFORMANCE))
+		return -EINVAL;
 
 	return 0;
 }

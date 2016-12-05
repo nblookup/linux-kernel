@@ -29,8 +29,6 @@
 #include <linux/sched.h>
 #include <linux/init.h>
 #include <linux/slab.h>
-#include <linux/version.h>
-#include <asm/semaphore.h>
 
 #include "dvbdev.h"
 #include "dvb_functions.h"
@@ -75,7 +73,7 @@ static int dvb_device_open(struct inode *inode, struct file *file)
 {
 	struct dvb_device *dvbdev;
 	
-	dvbdev = dvbdev_find_device (minor(inode->i_rdev));
+	dvbdev = dvbdev_find_device (iminor(inode));
 
 	if (dvbdev && dvbdev->fops) {
 		int err = 0;
@@ -114,7 +112,11 @@ int dvb_generic_open(struct inode *inode, struct file *file)
 	if (!dvbdev->users)
                 return -EBUSY;
 
-	if ((file->f_flags & O_ACCMODE) != O_RDONLY) {
+	if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
+                if (!dvbdev->readers)
+		        return -EBUSY;
+		dvbdev->readers--;
+	} else {
                 if (!dvbdev->writers)
 		        return -EBUSY;
 		dvbdev->writers--;
@@ -132,8 +134,11 @@ int dvb_generic_release(struct inode *inode, struct file *file)
 	if (!dvbdev)
                 return -ENODEV;
 
-	if ((file->f_flags & O_ACCMODE) != O_RDONLY)
+	if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
+		dvbdev->readers++;
+	} else {
 		dvbdev->writers++;
+	}
 
 	dvbdev->users++;
 	return 0;
@@ -301,14 +306,14 @@ int dvb_unregister_adapter(struct dvb_adapter *adap)
 
 static int __init init_dvbdev(void)
 {
+	int retval;
 	devfs_mk_dir("dvb");
 
-	if(register_chrdev(DVB_MAJOR,"DVB", &dvb_device_fops)) {
+	retval = register_chrdev(DVB_MAJOR,"DVB", &dvb_device_fops);
+	if (retval)
 		printk("video_dev: unable to get major %d\n", DVB_MAJOR);
-		return -EIO;
-	}
 
-	return 0;
+	return retval;
 }
 
 

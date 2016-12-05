@@ -23,7 +23,7 @@
 #include <linux/buffer_head.h>
 #include <linux/vfs.h>
 
-static struct file_system_type reiserfs_fs_type;
+struct file_system_type reiserfs_fs_type;
 
 const char reiserfs_3_5_magic_string[] = REISERFS_SUPER_MAGIC_STRING;
 const char reiserfs_3_6_magic_string[] = REISER2FS_SUPER_MAGIC_STRING;
@@ -54,11 +54,6 @@ static int is_any_reiserfs_magic_string (struct reiserfs_super_block * rs)
 {
   return (is_reiserfs_3_5 (rs) || is_reiserfs_3_6 (rs) ||
 	  is_reiserfs_jr (rs));
-}
-
-int is_reiserfs_super (struct super_block *s)
-{
-	return s -> s_type == & reiserfs_fs_type ;
 }
 
 static int reiserfs_remount (struct super_block * s, int * flags, char * data);
@@ -298,7 +293,7 @@ void add_save_link (struct reiserfs_transaction_handle * th,
     }
 
     /* body of "save" link */
-    link = cpu_to_le32 (INODE_PKEY (inode)->k_dir_id);
+    link = INODE_PKEY (inode)->k_dir_id;
 
     /* put "save" link inot tree */
     retval = reiserfs_insert_item (th, &path, &key, &ih, (char *)&link);
@@ -391,13 +386,6 @@ static void reiserfs_put_super (struct super_block * s)
 		      REISERFS_SB(s)->reserved_blocks);
   }
 
-  reiserfs_proc_unregister( s, "journal" );
-  reiserfs_proc_unregister( s, "oidmap" );
-  reiserfs_proc_unregister( s, "on-disk-super" );
-  reiserfs_proc_unregister( s, "bitmap" );
-  reiserfs_proc_unregister( s, "per-level" );
-  reiserfs_proc_unregister( s, "super" );
-  reiserfs_proc_unregister( s, "version" );
   reiserfs_proc_info_done( s );
 
   kfree(s->s_fs_info);
@@ -954,6 +942,7 @@ static int read_super_block (struct super_block * s, int offset)
 {
     struct buffer_head * bh;
     struct reiserfs_super_block * rs;
+    int fs_blocksize;
  
 
     bh = sb_bread (s, offset / s->s_blocksize);
@@ -973,8 +962,9 @@ static int read_super_block (struct super_block * s, int offset)
     //
     // ok, reiserfs signature (old or new) found in at the given offset
     //    
-    sb_set_blocksize (s, sb_blocksize(rs));
+    fs_blocksize = sb_blocksize(rs);
     brelse (bh);
+    sb_set_blocksize (s, fs_blocksize);
     
     bh = sb_bread (s, offset / s->s_blocksize);
     if (!bh) {
@@ -1264,6 +1254,18 @@ static int reiserfs_fill_super (struct super_block * s, void * data, int silent)
       printk("sh-2021: reiserfs_fill_super: can not find reiserfs on %s\n", reiserfs_bdevname (s));
       goto error;    
     }
+
+    rs = SB_DISK_SUPER_BLOCK (s);
+    /* Let's do basic sanity check to verify that underlying device is not
+       smaller than the filesystem. If the check fails then abort and scream,
+       because bad stuff will happen otherwise. */
+    if ( s->s_bdev && s->s_bdev->bd_inode && i_size_read(s->s_bdev->bd_inode) < sb_block_count(rs)*sb_blocksize(rs) ) {
+	printk("Filesystem on %s cannot be mounted because it is bigger than the device\n", reiserfs_bdevname(s));
+	printk("You may need to run fsck or increase size of your LVM partition\n");
+	printk("Or may be you forgot to reboot after fdisk when it told you to\n");
+	goto error;
+    }
+
     sbi->s_mount_state = SB_REISERFS_STATE(s);
     sbi->s_mount_state = REISERFS_VALID_FS ;
 
@@ -1324,7 +1326,6 @@ static int reiserfs_fill_super (struct super_block * s, void * data, int silent)
       goto error ;
     }
 
-    rs = SB_DISK_SUPER_BLOCK (s);
     if (is_reiserfs_3_5 (rs) || (is_reiserfs_jr (rs) && SB_VERSION (s) == REISERFS_VERSION_1))
 	set_bit(REISERFS_3_5, &(sbi->s_properties));
     else
@@ -1378,13 +1379,7 @@ static int reiserfs_fill_super (struct super_block * s, void * data, int silent)
     handle_attrs( s );
 
     reiserfs_proc_info_init( s );
-    reiserfs_proc_register( s, "version", reiserfs_version_in_proc );
-    reiserfs_proc_register( s, "super", reiserfs_super_in_proc );
-    reiserfs_proc_register( s, "per-level", reiserfs_per_level_in_proc );
-    reiserfs_proc_register( s, "bitmap", reiserfs_bitmap_in_proc );
-    reiserfs_proc_register( s, "on-disk-super", reiserfs_on_disk_super_in_proc );
-    reiserfs_proc_register( s, "oidmap", reiserfs_oidmap_in_proc );
-    reiserfs_proc_register( s, "journal", reiserfs_journal_in_proc );
+
     init_waitqueue_head (&(sbi->s_wait));
     sbi->bitmap_lock = SPIN_LOCK_UNLOCKED;
 
@@ -1469,7 +1464,7 @@ exit_reiserfs_fs ( void )
 	destroy_inodecache ();
 }
 
-static struct file_system_type reiserfs_fs_type = {
+struct file_system_type reiserfs_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "reiserfs",
 	.get_sb		= get_super_block,

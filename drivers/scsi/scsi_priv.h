@@ -1,6 +1,17 @@
 #ifndef _SCSI_PRIV_H
 #define _SCSI_PRIV_H
 
+#include <linux/config.h>
+#include <linux/device.h>
+
+struct request_queue;
+struct scsi_cmnd;
+struct scsi_device;
+struct scsi_host_template;
+struct scsi_request;
+struct Scsi_Host;
+
+
 /*
  * These are the values that the owner field can take.
  * They are used as an indication of who the command belongs to.
@@ -42,6 +53,12 @@
 	(((scmd)->sense_buffer[0] & 0x70) == 0x70)
 
 /*
+ * Special value for scanning to specify scanning or rescanning of all
+ * possible channels, (target) ids, or luns on a given shost.
+ */
+#define SCAN_WILD_CARD	~0
+
+/*
  * scsi_target: representation of a scsi target, for now, this is only
  * used for single_lun devices. If no one has active IO to the target,
  * starget_sdev_user is NULL, else it points to the active sdev.
@@ -51,6 +68,9 @@ struct scsi_target {
 	unsigned int		starget_refcnt;
 };
 
+/* hosts.c */
+extern int scsi_init_hosts(void);
+extern void scsi_exit_hosts(void);
 
 /* scsi.c */
 extern int scsi_dispatch_cmd(struct scsi_cmnd *cmd);
@@ -65,13 +85,14 @@ extern void scsi_init_cmd_from_req(struct scsi_cmnd *cmd,
 extern void __scsi_release_request(struct scsi_request *sreq);
 
 /* scsi_devinfo.c */
-extern int scsi_get_device_flags(unsigned char *vendor, unsigned char *model);
+extern int scsi_get_device_flags(struct scsi_device *sdev,
+				 unsigned char *vendor, unsigned char *model);
 extern int scsi_init_devinfo(void);
 extern void scsi_exit_devinfo(void);
 
 /* scsi_error.c */
 extern void scsi_times_out(struct scsi_cmnd *cmd);
-extern void scsi_error_handler(void *host);
+extern int scsi_error_handler(void *host);
 extern int scsi_decide_disposition(struct scsi_cmnd *cmd);
 extern void scsi_eh_wakeup(struct Scsi_Host *shost);
 extern int scsi_eh_scmd_add(struct scsi_cmnd *, int);
@@ -89,12 +110,16 @@ extern int scsi_init_queue(void);
 extern void scsi_exit_queue(void);
 
 /* scsi_proc.c */
-#ifdef CONFIG_PROC_FS
+#ifdef CONFIG_SCSI_PROC_FS
+extern void scsi_proc_hostdir_add(struct scsi_host_template *);
+extern void scsi_proc_hostdir_rm(struct scsi_host_template *);
 extern void scsi_proc_host_add(struct Scsi_Host *);
 extern void scsi_proc_host_rm(struct Scsi_Host *);
 extern int scsi_init_procfs(void);
 extern void scsi_exit_procfs(void);
 #else
+# define scsi_proc_hostdir_add(sht)	do { } while (0)
+# define scsi_proc_hostdir_rm(sht)	do { } while (0)
 # define scsi_proc_host_add(shost)	do { } while (0)
 # define scsi_proc_host_rm(shost)	do { } while (0)
 # define scsi_init_procfs()		(0)
@@ -102,27 +127,28 @@ extern void scsi_exit_procfs(void);
 #endif /* CONFIG_PROC_FS */
 
 /* scsi_scan.c */
-extern void scsi_scan_host(struct Scsi_Host *);
+extern int scsi_scan_host_selected(struct Scsi_Host *, unsigned int,
+				   unsigned int, unsigned int, int);
 extern void scsi_forget_host(struct Scsi_Host *);
-extern void scsi_free_sdev(struct scsi_device *);
-extern void scsi_free_shost(struct Scsi_Host *);
 extern void scsi_rescan_device(struct device *);
 
+/* scsi_sysctl.c */
+#ifdef CONFIG_SYSCTL
+extern int scsi_init_sysctl(void);
+extern void scsi_exit_sysctl(void);
+#else
+# define scsi_init_sysctl()		(0)
+# define scsi_exit_sysctl()		do { } while (0)
+#endif /* CONFIG_SYSCTL */
+
 /* scsi_sysfs.c */
-extern int scsi_device_register(struct scsi_device *);
-extern void scsi_device_unregister(struct scsi_device *);
-extern void scsi_sysfs_init_host(struct Scsi_Host *);
-extern int scsi_sysfs_add_host(struct Scsi_Host *, struct device *);
-extern void scsi_sysfs_remove_host(struct Scsi_Host *);
+extern void scsi_device_dev_release(struct device *);
+extern int scsi_sysfs_add_sdev(struct scsi_device *);
+extern int scsi_sysfs_add_host(struct Scsi_Host *);
 extern int scsi_sysfs_register(void);
 extern void scsi_sysfs_unregister(void);
 
-/* definitions for the linker default sections covering the host
- * class and device attributes */
-extern struct class_device_attribute *scsi_sysfs_shost_attrs[];
-extern struct device_attribute *scsi_sysfs_sdev_attrs[];
-
-extern struct class shost_class;
+extern struct class sdev_class;
 extern struct bus_type scsi_bus_type;
 
 #endif /* _SCSI_PRIV_H */

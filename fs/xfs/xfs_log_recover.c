@@ -54,7 +54,6 @@
 #include "xfs_inode.h"
 #include "xfs_ialloc_btree.h"
 #include "xfs_ialloc.h"
-#include "xfs_error.h"
 #include "xfs_log_priv.h"
 #include "xfs_buf_item.h"
 #include "xfs_alloc_btree.h"
@@ -99,14 +98,14 @@ xlog_get_bp(
 			num_bblks += XLOG_SECTOR_ROUNDUP_BBCOUNT(log, 1);
 		num_bblks = XLOG_SECTOR_ROUNDUP_BBCOUNT(log, num_bblks);
 	}
-	return XFS_ngetrbuf(BBTOB(num_bblks), log->l_mp);
+	return xfs_buf_get_noaddr(BBTOB(num_bblks), log->l_mp->m_logdev_targp);
 }
 
 void
 xlog_put_bp(
 	xfs_buf_t	*bp)
 {
-	XFS_nfreerbuf(bp);
+	xfs_buf_free(bp);
 }
 
 
@@ -449,7 +448,7 @@ xlog_find_verify_log_record(
 
 	for (i = (*last_blk) - 1; i >= 0; i--) {
 		if (i < start_blk) {
-			/* legal log record not found */
+			/* valid log record not found */
 			xlog_warn(
 		"XFS: Log inconsistent (didn't find previous header)");
 			ASSERT(0);
@@ -582,7 +581,7 @@ xlog_find_head(
 	 * then the entire log is stamped with the same cycle number.  In this
 	 * case, head_blk can't be set to zero (which makes sense).  The below
 	 * math doesn't work out properly with head_blk equal to zero.  Instead,
-	 * we set it to log_bbnum which is an illegal block number, but this
+	 * we set it to log_bbnum which is an invalid block number, but this
 	 * value makes the math correct.  If head_blk doesn't changed through
 	 * all the tests below, *head_blk is set to zero at the very end rather
 	 * than log_bbnum.  In a sense, log_bbnum and zero are the same block
@@ -1360,7 +1359,7 @@ xlog_recover_add_item(
 {
 	xlog_recover_item_t	*item;
 
-	item = kmem_zalloc(sizeof(xlog_recover_item_t), 0);
+	item = kmem_zalloc(sizeof(xlog_recover_item_t), KM_SLEEP);
 	xlog_recover_insert_item_backq(itemq, item);
 }
 
@@ -1444,7 +1443,7 @@ xlog_recover_add_to_trans(
 		item->ri_total	= in_f->ilf_size;
 		ASSERT(item->ri_total <= XLOG_MAX_REGIONS_IN_ITEM);
 		item->ri_buf = kmem_zalloc((item->ri_total *
-					    sizeof(xfs_log_iovec_t)), 0);
+					    sizeof(xfs_log_iovec_t)), KM_SLEEP);
 	}
 	ASSERT(item->ri_total > item->ri_cnt);
 	/* Description region is ri_buf[0] */
@@ -1530,17 +1529,35 @@ xlog_recover_reorder_trans(
 	xlog_recover_t		*trans)
 {
 	xlog_recover_item_t	*first_item, *itemq, *itemq_next;
+	xfs_buf_log_format_t	*buf_f;
+	xfs_buf_log_format_v1_t	*obuf_f;
+	ushort			flags;
 
 	first_item = itemq = trans->r_itemq;
 	trans->r_itemq = NULL;
 	do {
 		itemq_next = itemq->ri_next;
+		buf_f = (xfs_buf_log_format_t *)itemq->ri_buf[0].i_addr;
+		switch (ITEM_TYPE(itemq)) {
+		case XFS_LI_BUF:
+			flags = buf_f->blf_flags;
+			break;
+		case XFS_LI_6_1_BUF:
+		case XFS_LI_5_3_BUF:
+			obuf_f = (xfs_buf_log_format_v1_t*)buf_f;
+			flags = obuf_f->blf_flags;
+			break;
+		}
+
 		switch (ITEM_TYPE(itemq)) {
 		case XFS_LI_BUF:
 		case XFS_LI_6_1_BUF:
 		case XFS_LI_5_3_BUF:
-			xlog_recover_insert_item_frontq(&trans->r_itemq, itemq);
-			break;
+			if ((!flags & XFS_BLI_CANCEL)) {
+				xlog_recover_insert_item_frontq(&trans->r_itemq,
+								itemq);
+				break;
+			}
 		case XFS_LI_INODE:
 		case XFS_LI_6_1_INODE:
 		case XFS_LI_5_3_INODE:
@@ -1669,32 +1686,16 @@ xlog_recover_do_buffer_pass1(
  * made at that point.
  */
 STATIC int
-xlog_recover_do_buffer_pass2(
+xlog_check_buffer_cancelled(
 	xlog_t			*log,
-	xfs_buf_log_format_t	*buf_f)
+	xfs_daddr_t		blkno,
+	uint			len,
+	ushort			flags)
 {
 	xfs_buf_cancel_t	*bcp;
 	xfs_buf_cancel_t	*prevp;
 	xfs_buf_cancel_t	**bucket;
-	xfs_buf_log_format_v1_t	*obuf_f;
-	xfs_daddr_t		blkno = 0;
-	ushort			flags = 0;
-	uint			len = 0;
 
-	switch (buf_f->blf_type) {
-	case XFS_LI_BUF:
-		blkno = buf_f->blf_blkno;
-		flags = buf_f->blf_flags;
-		len = buf_f->blf_len;
-		break;
-	case XFS_LI_6_1_BUF:
-	case XFS_LI_5_3_BUF:
-		obuf_f = (xfs_buf_log_format_v1_t*)buf_f;
-		blkno = (xfs_daddr_t) obuf_f->blf_blkno;
-		flags = obuf_f->blf_flags;
-		len = (xfs_daddr_t) obuf_f->blf_len;
-		break;
-	}
 	if (log->l_buf_cancel_table == NULL) {
 		/*
 		 * There is nothing in the table built in pass one,
@@ -1754,6 +1755,34 @@ xlog_recover_do_buffer_pass2(
 	 */
 	ASSERT(!(flags & XFS_BLI_CANCEL));
 	return 0;
+}
+
+STATIC int
+xlog_recover_do_buffer_pass2(
+	xlog_t			*log,
+	xfs_buf_log_format_t	*buf_f)
+{
+	xfs_buf_log_format_v1_t	*obuf_f;
+	xfs_daddr_t		blkno = 0;
+	ushort			flags = 0;
+	uint			len = 0;
+
+	switch (buf_f->blf_type) {
+	case XFS_LI_BUF:
+		blkno = buf_f->blf_blkno;
+		flags = buf_f->blf_flags;
+		len = buf_f->blf_len;
+		break;
+	case XFS_LI_6_1_BUF:
+	case XFS_LI_5_3_BUF:
+		obuf_f = (xfs_buf_log_format_v1_t*)buf_f;
+		blkno = (xfs_daddr_t) obuf_f->blf_blkno;
+		flags = obuf_f->blf_flags;
+		len = (xfs_daddr_t) obuf_f->blf_len;
+		break;
+	}
+
+	return xlog_check_buffer_cancelled(log, blkno, len, flags);
 }
 
 /*
@@ -2010,7 +2039,7 @@ xfs_qm_dqcheck(
 	if (id != -1 && id != INT_GET(ddq->d_id, ARCH_CONVERT)) {
 		if (flags & XFS_QMOPT_DOWARN)
 			cmn_err(CE_ALERT,
-			"%s : ondisk-dquot 0x%x, ID mismatch: "
+			"%s : ondisk-dquot 0x%p, ID mismatch: "
 			"0x%x expected, found id 0x%x",
 			str, ddq, id, INT_GET(ddq->d_id, ARCH_CONVERT));
 		errs++;
@@ -2024,7 +2053,7 @@ xfs_qm_dqcheck(
 			    !INT_ISZERO(ddq->d_id, ARCH_CONVERT)) {
 				if (flags & XFS_QMOPT_DOWARN)
 					cmn_err(CE_ALERT,
-					"%s : Dquot ID 0x%x (0x%x) "
+					"%s : Dquot ID 0x%x (0x%p) "
 					"BLK TIMER NOT STARTED",
 					str, (int)
 					INT_GET(ddq->d_id, ARCH_CONVERT), ddq);
@@ -2038,7 +2067,7 @@ xfs_qm_dqcheck(
 			    !INT_ISZERO(ddq->d_id, ARCH_CONVERT)) {
 				if (flags & XFS_QMOPT_DOWARN)
 					cmn_err(CE_ALERT,
-					"%s : Dquot ID 0x%x (0x%x) "
+					"%s : Dquot ID 0x%x (0x%p) "
 					"INODE TIMER NOT STARTED",
 					str, (int)
 					INT_GET(ddq->d_id, ARCH_CONVERT), ddq);
@@ -2180,8 +2209,8 @@ xlog_recover_do_buffer_trans(
 		break;
 	default:
 		xfs_fs_cmn_err(CE_ALERT, log->l_mp,
-			"xfs_log_recover: unknown buffer type 0x%x, dev 0x%x",
-			buf_f->blf_type, log->l_dev);
+			"xfs_log_recover: unknown buffer type 0x%x, dev %s",
+			buf_f->blf_type, XFS_BUFTARG_NAME(log->l_targ));
 		XFS_ERROR_REPORT("xlog_recover_do_buffer_trans",
 				 XFS_ERRLEVEL_LOW, log->l_mp);
 		return XFS_ERROR(EFSCORRUPTED);
@@ -2290,6 +2319,14 @@ xlog_recover_do_inode_trans(
 		imap.im_blkno = 0;
 		xfs_imap(log->l_mp, 0, ino, &imap, 0);
 	}
+
+	/*
+	 * Inode buffers can be freed, look out for it,
+	 * and do not replay the inode.
+	 */
+	if (xlog_check_buffer_cancelled(log, imap.im_blkno, imap.im_len, 0))
+		return 0;
+
 	bp = xfs_buf_read_flags(mp->m_ddev_targp, imap.im_blkno, imap.im_len,
 								XFS_BUF_LOCK);
 	if (XFS_BUF_ISERROR(bp)) {
@@ -2326,7 +2363,27 @@ xlog_recover_do_inode_trans(
 				 XFS_ERRLEVEL_LOW, mp);
 		return XFS_ERROR(EFSCORRUPTED);
 	}
-	if (unlikely((dicp->di_mode & IFMT) == IFREG)) {
+
+	/* Skip replay when the on disk inode is newer than the log one */
+	if (dicp->di_flushiter <
+	    INT_GET(dip->di_core.di_flushiter, ARCH_CONVERT)) {
+		/*
+		 * Deal with the wrap case, DI_MAX_FLUSH is less
+		 * than smaller numbers
+		 */
+		if ((INT_GET(dip->di_core.di_flushiter, ARCH_CONVERT)
+							== DI_MAX_FLUSH) &&
+		    (dicp->di_flushiter < (DI_MAX_FLUSH>>1))) {
+			/* do nothing */
+		} else {
+			xfs_buf_relse(bp);
+			return 0;
+		}
+	}
+	/* Take the opportunity to reset the flush iteration count */
+	dicp->di_flushiter = 0;
+
+	if (unlikely((dicp->di_mode & S_IFMT) == S_IFREG)) {
 		if ((dicp->di_format != XFS_DINODE_FMT_EXTENTS) &&
 		    (dicp->di_format != XFS_DINODE_FMT_BTREE)) {
 			XFS_CORRUPTION_ERROR("xlog_recover_do_inode_trans(3)",
@@ -2337,7 +2394,7 @@ xlog_recover_do_inode_trans(
 				item, dip, bp, ino);
 			return XFS_ERROR(EFSCORRUPTED);
 		}
-	} else if (unlikely((dicp->di_mode & IFMT) == IFDIR)) {
+	} else if (unlikely((dicp->di_mode & S_IFMT) == S_IFDIR)) {
 		if ((dicp->di_format != XFS_DINODE_FMT_EXTENTS) &&
 		    (dicp->di_format != XFS_DINODE_FMT_BTREE) &&
 		    (dicp->di_format != XFS_DINODE_FMT_LOCAL)) {
@@ -2462,7 +2519,7 @@ xlog_recover_do_inode_trans(
 			break;
 
 		default:
-			xlog_warn("XFS: xlog_recover_do_inode_trans: Illegal flag");
+			xlog_warn("XFS: xlog_recover_do_inode_trans: Invalid flag");
 			ASSERT(0);
 			xfs_buf_relse(bp);
 			return XFS_ERROR(EIO);
@@ -3870,9 +3927,8 @@ xlog_recover(
 		}
 
 		cmn_err(CE_NOTE,
-			"Starting XFS recovery on filesystem: %s (dev: %d/%d)",
-			log->l_mp->m_fsname, MAJOR(log->l_dev),
-			MINOR(log->l_dev));
+			"Starting XFS recovery on filesystem: %s (dev: %s)",
+			log->l_mp->m_fsname, XFS_BUFTARG_NAME(log->l_targ));
 
 		error = xlog_do_recover(log, head_blk, tail_blk);
 		log->l_flags |= XLOG_RECOVERY_NEEDED;
@@ -3920,10 +3976,8 @@ xlog_recover_finish(
 		xlog_recover_check_summary(log);
 
 		cmn_err(CE_NOTE,
-			"Ending XFS recovery on filesystem: %s (dev: %d/%d)",
-			log->l_mp->m_fsname, MAJOR(log->l_dev),
-			MINOR(log->l_dev));
-
+			"Ending XFS recovery on filesystem: %s (dev: %s)",
+			log->l_mp->m_fsname, XFS_BUFTARG_NAME(log->l_targ));
 		log->l_flags &= ~XLOG_RECOVERY_NEEDED;
 	} else {
 		cmn_err(CE_DEBUG,

@@ -33,7 +33,6 @@
 #include <linux/mm.h>
 #include <linux/parport.h>
 #include <linux/sched.h>
-#include <linux/version.h>
 #include <linux/videodev.h>
 #include <asm/semaphore.h>
 #include <asm/uaccess.h>
@@ -668,8 +667,8 @@ static int qcam_ioctl(struct inode *inode, struct file *file,
 	return video_usercopy(inode, file, cmd, arg, qcam_do_ioctl);
 }
 
-static int qcam_read(struct file *file, char *buf,
-		     size_t count, loff_t *ppos)
+static ssize_t qcam_read(struct file *file, char *buf,
+			 size_t count, loff_t *ppos)
 {
 	struct video_device *v = video_devdata(file);
 	struct qcam_device *qcam=(struct qcam_device *)v;

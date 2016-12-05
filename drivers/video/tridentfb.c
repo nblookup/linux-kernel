@@ -28,7 +28,7 @@
 
 struct tridentfb_par {
 	int vclk;		//in MHz
-	unsigned int io_virt;	//iospace virtual memory address
+	unsigned long io_virt;	//iospace virtual memory address
 };
 
 unsigned char eng_oper;		//engine operation...
@@ -454,9 +454,10 @@ static struct accel_switch accel_image = {
 static void tridentfb_fillrect(struct fb_info * info, const struct fb_fillrect *fr)
 {
 	int bpp = info->var.bits_per_pixel;
-	int dx,dy,w,h,col;
+	int col;
 	
 	switch (bpp) {
+		default:
 		case 8: col = fr->color;
 			break;
 		case 16: col = ((u16 *)(info->pseudo_palette))[fr->color];
@@ -1101,7 +1102,7 @@ static int __devinit trident_pci_probe(struct pci_dev * dev, const struct pci_de
 		return -1;
 	}
 
-	default_par.io_virt = (unsigned int)ioremap_nocache(tridentfb_fix.mmio_start, tridentfb_fix.mmio_len);
+	default_par.io_virt = (unsigned long)ioremap_nocache(tridentfb_fix.mmio_start, tridentfb_fix.mmio_len);
 
 	if (!default_par.io_virt) {
 		release_region(tridentfb_fix.mmio_start, tridentfb_fix.mmio_len);
@@ -1129,7 +1130,7 @@ static int __devinit trident_pci_probe(struct pci_dev * dev, const struct pci_de
 		return -1;
 	}
 
-	output("%s board found\n", dev->dev.name);
+	output("%s board found\n", pci_name(dev));
 #if 0	
 	output("Trident board found : mem = %X,io = %X, mem_v = %X, io_v = %X\n",
 		tridentfb_fix.smem_start, tridentfb_fix.mmio_start, fb_info.screen_base, default_par.io_virt);
@@ -1176,7 +1177,7 @@ static void __devexit trident_pci_remove(struct pci_dev * dev)
 }
 
 /* List of boards that we are trying to support */
-static struct pci_device_id trident_devices[] __devinitdata = {
+static struct pci_device_id trident_devices[] = {
 	{PCI_VENDOR_ID_TRIDENT,	BLADE3D, PCI_ANY_ID,PCI_ANY_ID,0,0,0},
 	{PCI_VENDOR_ID_TRIDENT,	CYBERBLADEi7, PCI_ANY_ID,PCI_ANY_ID,0,0,0},
 	{PCI_VENDOR_ID_TRIDENT,	CYBERBLADEi7D, PCI_ANY_ID,PCI_ANY_ID,0,0,0},

@@ -5,6 +5,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/list.h>
 #include <linux/jhash.h>
 #include <linux/interrupt.h>
@@ -18,6 +19,7 @@
 #include <linux/bitops.h>
 #include <linux/notifier.h>
 #include <linux/cpu.h>
+#include <linux/cpumask.h>
 #include <net/flow.h>
 #include <asm/atomic.h>
 #include <asm/semaphore.h>
@@ -64,7 +66,7 @@ static struct timer_list flow_hash_rnd_timer;
 
 struct flow_flush_info {
 	atomic_t cpuleft;
-	unsigned long cpumap;
+	cpumask_t cpumap;
 	struct completion completion;
 };
 static DEFINE_PER_CPU(struct tasklet_struct, flow_flush_tasklets) = { NULL };
@@ -72,7 +74,7 @@ static DEFINE_PER_CPU(struct tasklet_struct, flow_flush_tasklets) = { NULL };
 #define flow_flush_tasklet(cpu) (&per_cpu(flow_flush_tasklets, cpu))
 
 static DECLARE_MUTEX(flow_cache_cpu_sem);
-static unsigned long flow_cache_cpu_map;
+static cpumask_t flow_cache_cpu_map;
 static unsigned int flow_cache_cpu_count;
 
 static void flow_cache_new_hashrnd(unsigned long arg)
@@ -80,7 +82,7 @@ static void flow_cache_new_hashrnd(unsigned long arg)
 	int i;
 
 	for (i = 0; i < NR_CPUS; i++)
-		if (test_bit(i, &flow_cache_cpu_map))
+		if (cpu_isset(i, flow_cache_cpu_map))
 			flow_hash_rnd_recalc(i) = 1;
 
 	flow_hash_rnd_timer.expires = jiffies + FLOW_HASH_RND_PERIOD;
@@ -177,7 +179,7 @@ void *flow_cache_lookup(struct flowi *key, u16 family, u8 dir,
 	cpu = smp_processor_id();
 
 	fle = NULL;
-	if (!test_bit(cpu, &flow_cache_cpu_map))
+	if (!cpu_isset(cpu, flow_cache_cpu_map))
 		goto nocache;
 
 	if (flow_hash_rnd_recalc(cpu))
@@ -276,7 +278,7 @@ static void flow_cache_flush_per_cpu(void *data)
 	struct tasklet_struct *tasklet;
 
 	cpu = smp_processor_id();
-	if (!test_bit(cpu, &info->cpumap))
+	if (!cpu_isset(cpu, info->cpumap))
 		return;
 
 	tasklet = flow_flush_tasklet(cpu);
@@ -300,7 +302,7 @@ void flow_cache_flush(void)
 
 	local_bh_disable();
 	smp_call_function(flow_cache_flush_per_cpu, &info, 1, 0);
-	if (test_bit(smp_processor_id(), &info.cpumap))
+	if (cpu_isset(smp_processor_id(), info.cpumap))
 		flow_cache_flush_tasklet((unsigned long)&info);
 	local_bh_enable();
 
@@ -340,7 +342,7 @@ static int __devinit flow_cache_cpu_prepare(int cpu)
 static int __devinit flow_cache_cpu_online(int cpu)
 {
 	down(&flow_cache_cpu_sem);
-	set_bit(cpu, &flow_cache_cpu_map);
+	cpu_set(cpu, flow_cache_cpu_map);
 	flow_cache_cpu_count++;
 	up(&flow_cache_cpu_sem);
 
@@ -401,3 +403,6 @@ static int __init flow_cache_init(void)
 }
 
 module_init(flow_cache_init);
+
+EXPORT_SYMBOL(flow_cache_genid);
+EXPORT_SYMBOL(flow_cache_lookup);

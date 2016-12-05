@@ -111,6 +111,7 @@ get_dirty_limits(struct page_state *ps, long *pbackground, long *pdirty)
 	int unmapped_ratio;
 	long background;
 	long dirty;
+	struct task_struct *tsk;
 
 	get_page_state(ps);
 
@@ -129,7 +130,8 @@ get_dirty_limits(struct page_state *ps, long *pbackground, long *pdirty)
 
 	background = (background_ratio * total_pages) / 100;
 	dirty = (dirty_ratio * total_pages) / 100;
-	if (current->flags & PF_LESS_THROTTLE) {
+	tsk = current;
+	if (tsk->flags & PF_LESS_THROTTLE || rt_task(tsk)) {
 		background += background / 4;
 		dirty += dirty / 4;
 	}
@@ -144,7 +146,7 @@ get_dirty_limits(struct page_state *ps, long *pbackground, long *pdirty)
  * If we're over `background_thresh' then pdflush is woken to perform some
  * writeout.
  */
-void balance_dirty_pages(struct address_space *mapping)
+static void balance_dirty_pages(struct address_space *mapping)
 {
 	struct page_state ps;
 	long nr_reclaimable;
@@ -219,6 +221,10 @@ void balance_dirty_pages_ratelimited(struct address_space *mapping)
 	if (dirty_exceeded)
 		ratelimit = 8;
 
+	/*
+	 * Check the rate limiting. Also, we do not want to throttle real-time
+	 * tasks in balance_dirty_pages(). Period.
+	 */
 	if (get_cpu_var(ratelimits)++ >= ratelimit) {
 		__get_cpu_var(ratelimits) = 0;
 		put_cpu_var(ratelimits);
@@ -345,7 +351,7 @@ static void wb_kupdate(unsigned long arg)
  * sysctl handler for /proc/sys/vm/dirty_writeback_centisecs
  */
 int dirty_writeback_centisecs_handler(ctl_table *table, int write,
-		struct file *file, void *buffer, size_t *length)
+		struct file *file, void __user *buffer, size_t *length)
 {
 	proc_dointvec(table, write, file, buffer, length);
 	if (dirty_writeback_centisecs) {
@@ -543,6 +549,7 @@ int set_page_dirty_lock(struct page *page)
 	unlock_page(page);
 	return ret;
 }
+EXPORT_SYMBOL(set_page_dirty_lock);
 
 /*
  * Clear a page's dirty flag, while caring for dirty memory accounting. 

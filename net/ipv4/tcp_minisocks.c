@@ -22,6 +22,7 @@
 
 #include <linux/config.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/sysctl.h>
 #include <linux/workqueue.h>
 #include <net/tcp.h>
@@ -367,6 +368,11 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 
 			ipv6_addr_copy(&tw->tw_v6_daddr, &np->daddr);
 			ipv6_addr_copy(&tw->tw_v6_rcv_saddr, &np->rcv_saddr);
+			tw->tw_v6_ipv6only = np->ipv6only;
+		} else {
+			memset(&tw->tw_v6_daddr, 0, sizeof(tw->tw_v6_daddr));
+			memset(&tw->tw_v6_rcv_saddr, 0, sizeof(tw->tw_v6_rcv_saddr));
+			tw->tw_v6_ipv6only = 0;
 		}
 #endif
 		/* Linkage updates. */
@@ -1053,3 +1059,13 @@ int tcp_child_process(struct sock *parent, struct sock *child,
 	sock_put(child);
 	return ret;
 }
+
+EXPORT_SYMBOL(tcp_check_req);
+EXPORT_SYMBOL(tcp_child_process);
+EXPORT_SYMBOL(tcp_create_openreq_child);
+EXPORT_SYMBOL(tcp_timewait_state_process);
+EXPORT_SYMBOL(tcp_tw_deschedule);
+
+#ifdef CONFIG_SYSCTL
+EXPORT_SYMBOL(sysctl_tcp_tw_recycle);
+#endif

@@ -43,6 +43,7 @@
 #include <linux/nfsd/xdr.h>
 #include <linux/nfsd/syscall.h>
 #include <linux/poll.h>
+#include <linux/eventpoll.h>
 #include <linux/personality.h>
 #include <linux/ptrace.h>
 #include <linux/stat.h>
@@ -50,9 +51,10 @@
 #include <linux/compat.h>
 #include <linux/vfs.h>
 
+#include <asm/intrinsics.h>
+#include <asm/semaphore.h>
 #include <asm/types.h>
 #include <asm/uaccess.h>
-#include <asm/semaphore.h>
 
 #include "ia32priv.h"
 
@@ -74,7 +76,7 @@
 
 #define OFFSET4K(a)		((a) & 0xfff)
 #define PAGE_START(addr)	((addr) & PAGE_MASK)
-#define PAGE_OFF(addr)		((addr) & ~PAGE_MASK)
+#define MINSIGSTKSZ_IA32	2048
 
 #define high2lowuid(uid) ((uid) > 65535 ? 65534 : (uid))
 #define high2lowgid(gid) ((gid) > 65535 ? 65534 : (gid))
@@ -168,9 +170,9 @@ sys32_execve (char *filename, unsigned int argv, unsigned int envp,
 		current->thread.map_base  = old_map_base;
 		current->thread.task_size = old_task_size;
 		set_fs(USER_DS);	/* establish new task-size as the address-limit */
-	  out:
-		kfree(av);
 	}
+  out:
+	kfree(av);
 	return r;
 }
 
@@ -178,19 +180,21 @@ int cp_compat_stat(struct kstat *stat, struct compat_stat *ubuf)
 {
 	int err;
 
-	if ((u64) stat->size > MAX_NON_LFS)
+	if ((u64) stat->size > MAX_NON_LFS ||
+	    !old_valid_dev(stat->dev) ||
+	    !old_valid_dev(stat->rdev))
 		return -EOVERFLOW;
 
 	if (clear_user(ubuf, sizeof(*ubuf)))
 		return -EFAULT;
 
-	err  = __put_user(stat->dev, &ubuf->st_dev);
+	err  = __put_user(old_encode_dev(stat->dev), &ubuf->st_dev);
 	err |= __put_user(stat->ino, &ubuf->st_ino);
 	err |= __put_user(stat->mode, &ubuf->st_mode);
 	err |= __put_user(stat->nlink, &ubuf->st_nlink);
 	err |= __put_user(high2lowuid(stat->uid), &ubuf->st_uid);
 	err |= __put_user(high2lowgid(stat->gid), &ubuf->st_gid);
-	err |= __put_user(stat->rdev, &ubuf->st_rdev);
+	err |= __put_user(old_encode_dev(stat->rdev), &ubuf->st_rdev);
 	err |= __put_user(stat->size, &ubuf->st_size);
 	err |= __put_user(stat->atime.tv_sec, &ubuf->st_atime);
 	err |= __put_user(stat->atime.tv_nsec, &ubuf->st_atime_nsec);
@@ -269,11 +273,11 @@ mmap_subpage (struct file *file, unsigned long start, unsigned long end, int pro
 
 	if (old_prot) {
 		/* copy back the old page contents.  */
-		if (PAGE_OFF(start))
-			copy_to_user((void *) PAGE_START(start), page, PAGE_OFF(start));
-		if (PAGE_OFF(end))
-			copy_to_user((void *) end, page + PAGE_OFF(end),
-				     PAGE_SIZE - PAGE_OFF(end));
+		if (offset_in_page(start))
+			copy_to_user((void *) PAGE_START(start), page, offset_in_page(start));
+		if (offset_in_page(end))
+			copy_to_user((void *) end, page + offset_in_page(end),
+				     PAGE_SIZE - offset_in_page(end));
 	}
 
 	if (!(flags & MAP_ANONYMOUS)) {
@@ -328,7 +332,7 @@ emulate_mmap (struct file *file, unsigned long start, unsigned long len, int pro
 				       "%s(%d): emulate_mmap() can't share tail (end=0x%lx)\n",
 				       current->comm, current->pid, end);
 			ret = mmap_subpage(file, max(start, PAGE_START(end)), end, prot, flags,
-					   (off + len) - PAGE_OFF(end));
+					   (off + len) - offset_in_page(end));
 			if (IS_ERR((void *) ret))
 				return ret;
 			pend -= PAGE_SIZE;
@@ -345,14 +349,14 @@ emulate_mmap (struct file *file, unsigned long start, unsigned long len, int pro
 		tmp = arch_get_unmapped_area(file, pstart - fudge, pend - pstart, 0, flags);
 		if (tmp != pstart) {
 			pstart = tmp;
-			start = pstart + PAGE_OFF(off);	/* make start congruent with off */
+			start = pstart + offset_in_page(off);	/* make start congruent with off */
 			end = start + len;
 			pend = PAGE_ALIGN(end);
 		}
 	}
 
 	poff = off + (pstart - start);	/* note: (pstart - start) may be negative */
-	is_congruent = (flags & MAP_ANONYMOUS) || (PAGE_OFF(poff) == 0);
+	is_congruent = (flags & MAP_ANONYMOUS) || (offset_in_page(poff) == 0);
 
 	if ((flags & MAP_SHARED) && !is_congruent)
 		printk(KERN_INFO "%s(%d): emulate_mmap() can't share contents of incongruent mmap "
@@ -586,7 +590,7 @@ sys32_mprotect (unsigned int start, unsigned int len, int prot)
 
 	down(&ia32_mmap_sem);
 	{
-		if (PAGE_OFF(start)) {
+		if (offset_in_page(start)) {
 			/* start address is 4KB aligned but not page aligned. */
 			retval = mprotect_subpage(PAGE_START(start), prot);
 			if (retval < 0)
@@ -597,7 +601,7 @@ sys32_mprotect (unsigned int start, unsigned int len, int prot)
 				goto out;	/* retval is already zero... */
 		}
 
-		if (PAGE_OFF(end)) {
+		if (offset_in_page(end)) {
 			/* end address is 4KB aligned but not page aligned. */
 			retval = mprotect_subpage(PAGE_START(end), prot);
 			if (retval < 0)
@@ -703,8 +707,8 @@ sys32_settimeofday (struct compat_timeval *tv, struct timezone *tz)
 }
 
 struct getdents32_callback {
-	struct linux32_dirent * current_dir;
-	struct linux32_dirent * previous;
+	struct compat_dirent * current_dir;
+	struct compat_dirent * previous;
 	int count;
 	int error;
 };
@@ -718,7 +722,7 @@ static int
 filldir32 (void *__buf, const char *name, int namlen, loff_t offset, ino_t ino,
 	   unsigned int d_type)
 {
-	struct linux32_dirent * dirent;
+	struct compat_dirent * dirent;
 	struct getdents32_callback * buf = (struct getdents32_callback *) __buf;
 	int reclen = ROUND_UP(NAME_OFFSET(dirent) + namlen + 1, 4);
 
@@ -744,10 +748,10 @@ filldir32 (void *__buf, const char *name, int namlen, loff_t offset, ino_t ino,
 }
 
 asmlinkage long
-sys32_getdents (unsigned int fd, struct linux32_dirent *dirent, unsigned int count)
+sys32_getdents (unsigned int fd, struct compat_dirent *dirent, unsigned int count)
 {
 	struct file * file;
-	struct linux32_dirent * lastdirent;
+	struct compat_dirent * lastdirent;
 	struct getdents32_callback buf;
 	int error;
 
@@ -1373,7 +1377,7 @@ msgctl32 (int first, int second, void *uptr)
 			break;
 		old_fs = get_fs();
 		set_fs(KERNEL_DS);
-		err = sys_msgctl(first, second, &m64);
+		err = sys_msgctl(first, second, (struct msqid_ds *)&m64);
 		set_fs(old_fs);
 		break;
 
@@ -1381,7 +1385,7 @@ msgctl32 (int first, int second, void *uptr)
 	      case MSG_STAT:
 		old_fs = get_fs();
 		set_fs(KERNEL_DS);
-		err = sys_msgctl(first, second, (void *) &m64);
+		err = sys_msgctl(first, second, (struct msqid_ds *)&m64);
 		set_fs(old_fs);
 
 		if (version == IPC_64) {
@@ -1517,7 +1521,7 @@ shmctl32 (int first, int second, void *uptr)
 			break;
 		old_fs = get_fs();
 		set_fs(KERNEL_DS);
-		err = sys_shmctl(first, second, &s64);
+		err = sys_shmctl(first, second, (struct shmid_ds *)&s64);
 		set_fs(old_fs);
 		break;
 
@@ -1525,7 +1529,7 @@ shmctl32 (int first, int second, void *uptr)
 	      case SHM_STAT:
 		old_fs = get_fs();
 		set_fs(KERNEL_DS);
-		err = sys_shmctl(first, second, (void *) &s64);
+		err = sys_shmctl(first, second, (struct shmid_ds *)&s64);
 		set_fs(old_fs);
 		if (err < 0)
 			break;
@@ -1692,6 +1696,10 @@ sys32_time (int *tloc)
 	}
 	return i;
 }
+
+asmlinkage long
+compat_sys_wait4 (compat_pid_t pid, compat_uint_t * stat_addr, int options,
+		 struct compat_rusage *ru);
 
 asmlinkage long
 sys32_waitpid (int pid, unsigned int *stat_addr, int options)
@@ -1866,7 +1874,7 @@ get_fpreg (int regno, struct _fpreg_ia32 *reg, struct pt_regs *ptp, struct switc
 	return;
 }
 
-static int
+int
 save_ia32_fpstate (struct task_struct *tsk, struct ia32_user_i387_struct *save)
 {
 	struct switch_stack *swp;
@@ -1928,7 +1936,7 @@ restore_ia32_fpstate (struct task_struct *tsk, struct ia32_user_i387_struct *sav
 	return 0;
 }
 
-static int
+int
 save_ia32_fpxstate (struct task_struct *tsk, struct ia32_user_fxsr_struct *save)
 {
 	struct switch_stack *swp;
@@ -2187,7 +2195,7 @@ sys32_iopl (int level)
 	if (level != 3)
 		return(-EINVAL);
 	/* Trying to gain more privileges? */
-	asm volatile ("mov %0=ar.eflag ;;" : "=r"(old));
+	old = ia64_getreg(_IA64_REG_AR_EFLAG);
 	if ((unsigned int) level > ((old >> 12) & 3)) {
 		if (!capable(CAP_SYS_RAWIO))
 			return -EPERM;
@@ -2211,7 +2219,7 @@ sys32_iopl (int level)
 
 	if (addr >= 0) {
 		old = (old & ~0x3000) | (level << 12);
-		asm volatile ("mov ar.eflag=%0;;" :: "r"(old));
+		ia64_setreg(_IA64_REG_AR_EFLAG, old);
 	}
 
 	fput(file);
@@ -2257,10 +2265,18 @@ sys32_sigaltstack (ia32_stack_t *uss32, ia32_stack_t *uoss32,
 			return -EFAULT;
 	uss.ss_sp = (void *) (long) buf32.ss_sp;
 	uss.ss_flags = buf32.ss_flags;
-	uss.ss_size = buf32.ss_size;
+	/* MINSIGSTKSZ is different for ia32 vs ia64. We lie here to pass the 
+           check and set it to the user requested value later */
+	if (buf32.ss_size < MINSIGSTKSZ_IA32) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	uss.ss_size = MINSIGSTKSZ;
 	set_fs(KERNEL_DS);
 	ret = do_sigaltstack(uss32 ? &uss : NULL, &uoss, pt->r12);
+ 	current->sas_ss_size = buf32.ss_size;	
 	set_fs(old_fs);
+out:
 	if (ret < 0)
 		return(ret);
 	if (uoss32) {
@@ -2470,11 +2486,14 @@ static int
 putstat64 (struct stat64 *ubuf, struct kstat *kbuf)
 {
 	int err;
+	u64 hdev;
 
 	if (clear_user(ubuf, sizeof(*ubuf)))
 		return -EFAULT;
 
-	err  = __put_user(kbuf->dev, &ubuf->st_dev);
+	hdev = huge_encode_dev(kbuf->dev);
+	err  = __put_user(hdev, (u32*)&ubuf->st_dev);
+	err |= __put_user(hdev >> 32, ((u32*)&ubuf->st_dev) + 1);
 	err |= __put_user(kbuf->ino, &ubuf->__st_ino);
 	err |= __put_user(kbuf->ino, &ubuf->st_ino_lo);
 	err |= __put_user(kbuf->ino >> 32, &ubuf->st_ino_hi);
@@ -2482,7 +2501,9 @@ putstat64 (struct stat64 *ubuf, struct kstat *kbuf)
 	err |= __put_user(kbuf->nlink, &ubuf->st_nlink);
 	err |= __put_user(kbuf->uid, &ubuf->st_uid);
 	err |= __put_user(kbuf->gid, &ubuf->st_gid);
-	err |= __put_user(kbuf->rdev, &ubuf->st_rdev);
+	hdev = huge_encode_dev(kbuf->rdev);
+	err  = __put_user(hdev, (u32*)&ubuf->st_rdev);
+	err |= __put_user(hdev >> 32, ((u32*)&ubuf->st_rdev) + 1);
 	err |= __put_user(kbuf->size, &ubuf->st_size_lo);
 	err |= __put_user((kbuf->size >> 32), &ubuf->st_size_hi);
 	err |= __put_user(kbuf->atime.tv_sec, &ubuf->st_atime);
@@ -2702,6 +2723,206 @@ out_error:
 	put_unused_fd(fd);
 	fd = error;
 	goto out;
+}
+
+/* Structure for ia32 emulation on ia64 */
+struct epoll_event32
+{
+	u32 events;
+	u32 data[2];
+}; 
+
+asmlinkage long
+sys32_epoll_ctl(int epfd, int op, int fd, struct epoll_event32 *event)
+{
+	mm_segment_t old_fs = get_fs();
+	struct epoll_event event64;
+	int error = -EFAULT;
+	u32 data_halfword;
+
+	if ((error = verify_area(VERIFY_READ, event,
+				 sizeof(struct epoll_event32))))
+		return error;
+
+	__get_user(event64.events, &event->events);
+	__get_user(data_halfword, &event->data[0]);
+	event64.data = data_halfword;
+	__get_user(data_halfword, &event->data[1]);
+ 	event64.data |= (u64)data_halfword << 32;
+
+	set_fs(KERNEL_DS);
+	error = sys_epoll_ctl(epfd, op, fd, &event64);
+	set_fs(old_fs);
+
+	return error;
+}
+
+asmlinkage long
+sys32_epoll_wait(int epfd, struct epoll_event32 *events, int maxevents,
+		 int timeout)
+{
+	struct epoll_event *events64 = NULL;
+	mm_segment_t old_fs = get_fs();
+	int error, numevents, size;
+	int evt_idx;
+	int do_free_pages = 0;
+
+	if (maxevents <= 0) {
+		return -EINVAL;
+	}
+
+	/* Verify that the area passed by the user is writeable */
+	if ((error = verify_area(VERIFY_WRITE, events,
+				 maxevents * sizeof(struct epoll_event32))))
+		return error;
+
+	/* 
+ 	 * Allocate space for the intermediate copy.  If the space needed 
+	 * is large enough to cause kmalloc to fail, then try again with
+	 * __get_free_pages.
+	 */
+	size = maxevents * sizeof(struct epoll_event);
+	events64 = kmalloc(size, GFP_KERNEL);
+	if (events64 == NULL) {
+		events64 = (struct epoll_event *)
+				__get_free_pages(GFP_KERNEL, get_order(size));
+		if (events64 == NULL) 
+			return -ENOMEM;
+		do_free_pages = 1;
+	}
+
+	/* Do the system call */
+	set_fs(KERNEL_DS); /* copy_to/from_user should work on kernel mem*/
+	numevents = sys_epoll_wait(epfd, events64, maxevents, timeout);
+	set_fs(old_fs);
+
+	/* Don't modify userspace memory if we're returning an error */
+	if (numevents > 0) {
+		/* Translate the 64-bit structures back into the 32-bit
+		   structures */
+		for (evt_idx = 0; evt_idx < numevents; evt_idx++) {
+			__put_user(events64[evt_idx].events,
+				   &events[evt_idx].events);
+			__put_user((u32)events64[evt_idx].data,
+				   &events[evt_idx].data[0]);
+			__put_user((u32)(events64[evt_idx].data >> 32),
+				   &events[evt_idx].data[1]);
+		}
+	}
+
+	if (do_free_pages)
+		free_pages((unsigned long) events64, get_order(size));
+	else
+		kfree(events64);
+	return numevents;
+}
+
+/*
+ * Get a yet unused TLS descriptor index.
+ */
+static int
+get_free_idx (void)
+{
+	struct thread_struct *t = &current->thread;
+	int idx;
+
+	for (idx = 0; idx < GDT_ENTRY_TLS_ENTRIES; idx++)
+		if (desc_empty(t->tls_array + idx))
+			return idx + GDT_ENTRY_TLS_MIN;
+	return -ESRCH;
+}
+
+/*
+ * Set a given TLS descriptor:
+ */
+asmlinkage int
+sys32_set_thread_area (struct ia32_user_desc *u_info)
+{
+	struct thread_struct *t = &current->thread;
+	struct ia32_user_desc info;
+	struct desc_struct *desc;
+	int cpu, idx;
+
+	if (copy_from_user(&info, u_info, sizeof(info)))
+		return -EFAULT;
+	idx = info.entry_number;
+
+	/*
+	 * index -1 means the kernel should try to find and allocate an empty descriptor:
+	 */
+	if (idx == -1) {
+		idx = get_free_idx();
+		if (idx < 0)
+			return idx;
+		if (put_user(idx, &u_info->entry_number))
+			return -EFAULT;
+	}
+
+	if (idx < GDT_ENTRY_TLS_MIN || idx > GDT_ENTRY_TLS_MAX)
+		return -EINVAL;
+
+	desc = t->tls_array + idx - GDT_ENTRY_TLS_MIN;
+
+	cpu = smp_processor_id();
+
+	if (LDT_empty(&info)) {
+		desc->a = 0;
+		desc->b = 0;
+	} else {
+		desc->a = LDT_entry_a(&info);
+		desc->b = LDT_entry_b(&info);
+	}
+	load_TLS(t, cpu);
+	return 0;
+}
+
+/*
+ * Get the current Thread-Local Storage area:
+ */
+
+#define GET_BASE(desc) (			\
+	(((desc)->a >> 16) & 0x0000ffff) |	\
+	(((desc)->b << 16) & 0x00ff0000) |	\
+	( (desc)->b        & 0xff000000)   )
+
+#define GET_LIMIT(desc) (			\
+	((desc)->a & 0x0ffff) |			\
+	 ((desc)->b & 0xf0000) )
+
+#define GET_32BIT(desc)		(((desc)->b >> 23) & 1)
+#define GET_CONTENTS(desc)	(((desc)->b >> 10) & 3)
+#define GET_WRITABLE(desc)	(((desc)->b >>  9) & 1)
+#define GET_LIMIT_PAGES(desc)	(((desc)->b >> 23) & 1)
+#define GET_PRESENT(desc)	(((desc)->b >> 15) & 1)
+#define GET_USEABLE(desc)	(((desc)->b >> 20) & 1)
+
+asmlinkage int
+sys32_get_thread_area (struct ia32_user_desc *u_info)
+{
+	struct ia32_user_desc info;
+	struct desc_struct *desc;
+	int idx;
+
+	if (get_user(idx, &u_info->entry_number))
+		return -EFAULT;
+	if (idx < GDT_ENTRY_TLS_MIN || idx > GDT_ENTRY_TLS_MAX)
+		return -EINVAL;
+
+	desc = current->thread.tls_array + idx - GDT_ENTRY_TLS_MIN;
+
+	info.entry_number = idx;
+	info.base_addr = GET_BASE(desc);
+	info.limit = GET_LIMIT(desc);
+	info.seg_32bit = GET_32BIT(desc);
+	info.contents = GET_CONTENTS(desc);
+	info.read_exec_only = !GET_WRITABLE(desc);
+	info.limit_in_pages = GET_LIMIT_PAGES(desc);
+	info.seg_not_present = !GET_PRESENT(desc);
+	info.useable = GET_USEABLE(desc);
+
+	if (copy_to_user(u_info, &info, sizeof(info)))
+		return -EFAULT;
+	return 0;
 }
 
 #ifdef	NOTYET  /* UNTESTED FOR IA64 FROM HERE DOWN */

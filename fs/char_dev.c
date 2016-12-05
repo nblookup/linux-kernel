@@ -11,7 +11,6 @@
 #include <linux/string.h>
 
 #include <linux/major.h>
-#include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/module.h>
 #include <linux/smp_lock.h>
@@ -265,7 +264,7 @@ int chrdev_open(struct inode * inode, struct file * filp)
 		struct kobject *kobj;
 		int idx;
 		spin_unlock(&cdev_lock);
-		kobj = kobj_lookup(cdev_map, kdev_t_to_nr(inode->i_rdev), &idx);
+		kobj = kobj_lookup(cdev_map, inode->i_rdev, &idx);
 		if (!kobj)
 			return -ENODEV;
 		new = container_of(kobj, struct cdev, kobj);
@@ -327,27 +326,6 @@ void cdev_purge(struct cdev *cdev)
 struct file_operations def_chr_fops = {
 	.open = chrdev_open,
 };
-
-const char *cdevname(kdev_t dev)
-{
-	static char buffer[40];
-	const char *name = "unknown-char";
-	unsigned int major = major(dev);
-	unsigned int minor = minor(dev);
-	int i = major_to_index(major);
-	struct char_device_struct *cd;
-
-	read_lock(&chrdevs_lock);
-	for (cd = chrdevs[i]; cd; cd = cd->next)
-		if (cd->major == major)
-			break;
-	if (cd)
-		name = cd->name;
-	sprintf(buffer, "%s(%d,%d)", name, major, minor);
-	read_unlock(&chrdevs_lock);
-
-	return buffer;
-}
 
 static struct kobject *exact_match(dev_t dev, int *part, void *data)
 {
@@ -456,9 +434,7 @@ void cdev_init(struct cdev *cdev, struct file_operations *fops)
 
 static struct kobject *base_probe(dev_t dev, int *part, void *data)
 {
-	char name[30];
-	sprintf(name, "char-major-%d", MAJOR(dev));
-	request_module(name);
+	request_module("char-major-%d-%d", MAJOR(dev), MINOR(dev));
 	return NULL;
 }
 
@@ -468,3 +444,18 @@ void __init chrdev_init(void)
 	kset_register(&kset_dynamic);
 	cdev_map = kobj_map_init(base_probe, &cdev_subsys);
 }
+
+
+/* Let modules do char dev stuff */
+EXPORT_SYMBOL(register_chrdev_region);
+EXPORT_SYMBOL(unregister_chrdev_region);
+EXPORT_SYMBOL(alloc_chrdev_region);
+EXPORT_SYMBOL(cdev_init);
+EXPORT_SYMBOL(cdev_alloc);
+EXPORT_SYMBOL(cdev_get);
+EXPORT_SYMBOL(cdev_put);
+EXPORT_SYMBOL(cdev_del);
+EXPORT_SYMBOL(cdev_add);
+EXPORT_SYMBOL(cdev_unmap);
+EXPORT_SYMBOL(register_chrdev);
+EXPORT_SYMBOL(unregister_chrdev);

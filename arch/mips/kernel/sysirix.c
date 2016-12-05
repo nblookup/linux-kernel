@@ -636,9 +636,6 @@ asmlinkage int irix_stime(int value)
 	return 0;
 }
 
-extern int do_setitimer(int which, struct itimerval *value,
-                        struct itimerval *ovalue);
-
 static inline void jiffiestotv(unsigned long jiffies, struct timeval *value)
 {
 	value->tv_usec = (jiffies % HZ) * (1000000 / HZ);
@@ -721,7 +718,7 @@ asmlinkage int irix_statfs(const char *path, struct irix_statfs *buf,
 			   int len, int fs_type)
 {
 	struct nameidata nd;
-	struct statfs kbuf;
+	struct kstatfs kbuf;
 	int error, i;
 
 	/* We don't support this feature yet. */
@@ -761,7 +758,7 @@ out:
 
 asmlinkage int irix_fstatfs(unsigned int fd, struct irix_statfs *buf)
 {
-	struct statfs kbuf;
+	struct kstatfs kbuf;
 	struct file *file;
 	int error, i;
 
@@ -806,11 +803,11 @@ asmlinkage int irix_setpgrp(int flags)
 	printk("[%s:%d] setpgrp(%d) ", current->comm, current->pid, flags);
 #endif
 	if(!flags)
-		error = current->pgrp;
+		error = process_group(current);
 	else
 		error = sys_setsid();
 #ifdef DEBUG_PROCGRPS
-	printk("returning %d\n", current->pgrp);
+	printk("returning %d\n", process_group(current));
 #endif
 
 	return error;
@@ -1190,13 +1187,7 @@ asmlinkage int irix_uname(struct iuname *buf)
 
 #undef DEBUG_XSTAT
 
-static inline u32
-linux_to_irix_dev_t (dev_t t)
-{
-	return MAJOR (t) << 18 | MINOR (t);
-}
-
-static inline int irix_xstat32_xlate(struct kstat *stat, void *ubuf)
+static int irix_xstat32_xlate(struct kstat *stat, void *ubuf)
 {
 	struct xstat32 {
 		u32 st_dev, st_pad1[3], st_ino, st_mode, st_nlink, st_uid, st_gid;
@@ -1209,13 +1200,15 @@ static inline int irix_xstat32_xlate(struct kstat *stat, void *ubuf)
 		u32 st_pad4[8];
 	} ub;
 
-	ub.st_dev     = linux_to_irix_dev_t(stat->dev);
+	if (!sysv_valid_dev(stat->dev) || !sysv_valid_dev(stat->rdev))
+		return -EOVERFLOW;
+	ub.st_dev     = sysv_encode_dev(stat->dev);
 	ub.st_ino     = stat->ino;
 	ub.st_mode    = stat->mode;
 	ub.st_nlink   = stat->nlink;
 	SET_STAT_UID(ub, stat->uid);
 	SET_STAT_GID(ub, stat->gid);
-	ub.st_rdev    = linux_to_irix_dev_t(stat->rdev);
+	ub.st_rdev    = sysv_encode_dev(stat->rdev);
 #if BITS_PER_LONG == 32
 	if (stat->size > MAX_NON_LFS)
 		return -EOVERFLOW;
@@ -1234,7 +1227,7 @@ static inline int irix_xstat32_xlate(struct kstat *stat, void *ubuf)
 	return copy_to_user(ubuf, &ub, sizeof(ub)) ? -EFAULT : 0;
 }
 
-static inline void irix_xstat64_xlate(struct kstat *stat, void *ubuf)
+static int irix_xstat64_xlate(struct kstat *stat, void *ubuf)
 {
 	struct xstat64 {
 		u32 st_dev; s32 st_pad1[3];
@@ -1251,14 +1244,17 @@ static inline void irix_xstat64_xlate(struct kstat *stat, void *ubuf)
 		s32 st_pad4[8];
 	} ks;
 
-	ks.st_dev = linux_to_irix_dev_t(stat->dev);
+	if (!sysv_valid_dev(stat->dev) || !sysv_valid_dev(stat->rdev))
+		return -EOVERFLOW;
+
+	ks.st_dev = sysv_encode_dev(stat->dev);
 	ks.st_pad1[0] = ks.st_pad1[1] = ks.st_pad1[2] = 0;
 	ks.st_ino = (unsigned long long) stat->ino;
 	ks.st_mode = (u32) stat->mode;
 	ks.st_nlink = (u32) stat->nlink;
 	ks.st_uid = (s32) stat->uid;
 	ks.st_gid = (s32) stat->gid;
-	ks.st_rdev = linux_to_irix_dev_t (stat->rdev);
+	ks.st_rdev = sysv_encode_dev (stat->rdev);
 	ks.st_pad2[0] = ks.st_pad2[1] = 0;
 	ks.st_size = (long long) stat->size;
 	ks.st_pad3 = 0;
@@ -1278,7 +1274,7 @@ static inline void irix_xstat64_xlate(struct kstat *stat, void *ubuf)
 	ks.st_pad4[4] = ks.st_pad4[5] = ks.st_pad4[6] = ks.st_pad4[7] = 0;
 
 	/* Now write it all back. */
-	copy_to_user(ubuf, &ks, sizeof(struct xstat64));
+	return copy_to_user(ubuf, &ks, sizeof(ks)) ? -EFAULT : 0;
 }
 
 asmlinkage int irix_xstat(int version, char *filename, struct stat *statbuf)
@@ -1298,8 +1294,7 @@ asmlinkage int irix_xstat(int version, char *filename, struct stat *statbuf)
 				retval = irix_xstat32_xlate(&stat, statbuf);
 				break;
 			case 3:
-				irix_xstat64_xlate(&stat, statbuf);
-				retval = 0; /* Really? */
+				retval = irix_xstat64_xlate(&stat, statbuf);
 				break;
 			default:
 				retval = -EINVAL;
@@ -1326,8 +1321,7 @@ asmlinkage int irix_lxstat(int version, char *filename, struct stat *statbuf)
 				error = irix_xstat32_xlate(&stat, statbuf);
 				break;
 			case 3:
-				irix_xstat64_xlate(&stat, statbuf);
-				error = 0;
+				error = irix_xstat64_xlate(&stat, statbuf);
 				break;
 			default:
 				error = -EINVAL;
@@ -1353,8 +1347,7 @@ asmlinkage int irix_fxstat(int version, int fd, struct stat *statbuf)
 				error = irix_xstat32_xlate(&stat, statbuf);
 				break;
 			case 3:
-				irix_xstat64_xlate(&stat, statbuf);
-				error = 0;
+				error = irix_xstat64_xlate(&stat, statbuf);
 				break;
 			default:
 				error = -EINVAL;
@@ -1363,17 +1356,17 @@ asmlinkage int irix_fxstat(int version, int fd, struct stat *statbuf)
 	return error;
 }
 
-extern asmlinkage int sys_mknod(const char * filename, int mode, dev_t dev);
+extern asmlinkage int sys_mknod(const char * filename, int mode, unsigned dev);
 
-asmlinkage int irix_xmknod(int ver, char *filename, int mode, dev_t dev)
+asmlinkage int irix_xmknod(int ver, char *filename, int mode, unsigned dev)
 {
 	int retval;
-
 	printk("[%s:%d] Wheee.. irix_xmknod(%d,%s,%x,%x)\n",
-	       current->comm, current->pid, ver, filename, mode, (int) dev);
+	       current->comm, current->pid, ver, filename, mode, dev);
 
 	switch(ver) {
 	case 2:
+		/* shouldn't we convert here as well as on stat()? */
 		retval = sys_mknod(filename, mode, dev);
 		break;
 
@@ -1404,7 +1397,7 @@ struct irix_statvfs {
 asmlinkage int irix_statvfs(char *fname, struct irix_statvfs *buf)
 {
 	struct nameidata nd;
-	struct statfs kbuf;
+	struct kstatfs kbuf;
 	int error, i;
 
 	printk("[%s:%d] Wheee.. irix_statvfs(%s,%p)\n",
@@ -1449,7 +1442,7 @@ out:
 
 asmlinkage int irix_fstatvfs(int fd, struct irix_statvfs *buf)
 {
-	struct statfs kbuf;
+	struct kstatfs kbuf;
 	struct file *file;
 	int error, i;
 
@@ -1665,7 +1658,7 @@ struct irix_statvfs64 {
 asmlinkage int irix_statvfs64(char *fname, struct irix_statvfs64 *buf)
 {
 	struct nameidata nd;
-	struct statfs kbuf;
+	struct kstatfs kbuf;
 	int error, i;
 
 	printk("[%s:%d] Wheee.. irix_statvfs(%s,%p)\n",
@@ -1710,7 +1703,7 @@ out:
 
 asmlinkage int irix_fstatvfs64(int fd, struct irix_statvfs *buf)
 {
-	struct statfs kbuf;
+	struct kstatfs kbuf;
 	struct file *file;
 	int error, i;
 

@@ -20,6 +20,7 @@
 #include <asm/semaphore.h>
 
 #include "base.h"
+#include "power/power.h"
 
 int (*platform_notify)(struct device * dev) = NULL;
 int (*platform_notify_remove)(struct device * dev) = NULL;
@@ -75,8 +76,18 @@ static struct sysfs_ops dev_sysfs_ops = {
 static void device_release(struct kobject * kobj)
 {
 	struct device * dev = to_dev(kobj);
+	struct completion * c = dev->complete;
+
 	if (dev->release)
 		dev->release(dev);
+	else {
+		printk(KERN_ERR "Device '%s' does not have a release() function, "
+			"it is broken and must be fixed.\n",
+			dev->bus_id);
+		WARN_ON(1);
+	}
+	if (c)
+		complete(c);
 }
 
 static struct kobj_type ktype_device = {
@@ -210,35 +221,38 @@ int device_add(struct device *dev)
 
 	parent = get_device(dev->parent);
 
-	pr_debug("DEV: registering device: ID = '%s', name = %s\n",
-		 dev->bus_id, dev->name);
+	pr_debug("DEV: registering device: ID = '%s'\n", dev->bus_id);
 
 	/* first, register with generic layer. */
-	strlcpy(dev->kobj.name,dev->bus_id,KOBJ_NAME_LEN);
+	kobject_set_name(&dev->kobj,dev->bus_id);
 	if (parent)
 		dev->kobj.parent = &parent->kobj;
 
 	if ((error = kobject_add(&dev->kobj)))
-		goto register_done;
-
-	/* now take care of our own registration */
-
+		goto Error;
+	if ((error = device_pm_add(dev)))
+		goto PMError;
+	if ((error = bus_add_device(dev)))
+		goto BusError;
 	down_write(&devices_subsys.rwsem);
 	if (parent)
 		list_add_tail(&dev->node,&parent->children);
 	up_write(&devices_subsys.rwsem);
 
-	bus_add_device(dev);
-
 	/* notify platform of device entry */
 	if (platform_notify)
 		platform_notify(dev);
-
- register_done:
-	if (error && parent)
-		put_device(parent);
+ Done:
 	put_device(dev);
 	return error;
+ BusError:
+	device_pm_remove(dev);
+ PMError:
+	kobject_unregister(&dev->kobj);
+ Error:
+	if (parent)
+		put_device(parent);
+	goto Done;
 }
 
 
@@ -314,14 +328,11 @@ void device_del(struct device * dev)
 	 */
 	if (platform_notify_remove)
 		platform_notify_remove(dev);
-
 	bus_remove_device(dev);
-
+	device_pm_remove(dev);
 	kobject_del(&dev->kobj);
-
 	if (parent)
 		put_device(parent);
-
 }
 
 /**
@@ -337,10 +348,29 @@ void device_del(struct device * dev)
  */
 void device_unregister(struct device * dev)
 {
-	pr_debug("DEV: Unregistering device. ID = '%s', name = '%s'\n",
-		 dev->bus_id,dev->name);
+	pr_debug("DEV: Unregistering device. ID = '%s'\n", dev->bus_id);
 	device_del(dev);
 	put_device(dev);
+}
+
+
+/**
+ *	device_unregister_wait - Unregister device and wait for it to be freed.
+ *	@dev: Device to unregister.
+ *
+ *	For the cases where the caller needs to wait for all references to
+ *	be dropped from the device before continuing (e.g. modules with
+ *	statically allocated devices), this function uses a completion struct
+ *	to wait, along with a matching complete() in device_release() above.
+ */
+
+void device_unregister_wait(struct device * dev)
+{
+	struct completion c;
+	init_completion(&c);
+	dev->complete = &c;
+	device_unregister(dev);
+	wait_for_completion(&c);
 }
 
 /**
@@ -383,6 +413,7 @@ EXPORT_SYMBOL(device_register);
 
 EXPORT_SYMBOL(device_del);
 EXPORT_SYMBOL(device_unregister);
+EXPORT_SYMBOL(device_unregister_wait);
 EXPORT_SYMBOL(get_device);
 EXPORT_SYMBOL(put_device);
 

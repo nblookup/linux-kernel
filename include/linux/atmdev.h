@@ -214,6 +214,8 @@ struct atm_cirange {
 
 #ifdef CONFIG_PROC_FS
 #include <linux/proc_fs.h>
+
+extern struct proc_dir_entry *atm_proc_root;
 #endif
 
 
@@ -252,6 +254,8 @@ enum {
 	ATM_VF_SESSION,		/* VCC is p2mp session control descriptor */
 	ATM_VF_HASSAP,		/* SAP has been set */
 	ATM_VF_CLOSE,		/* asynchronous close - treat like VF_RELEASED*/
+	ATM_VF_WAITING,		/* waiting for reply from sigd */
+	ATM_VF_IS_CLIP,		/* in use by CLIP protocol */
 };
 
 
@@ -291,14 +295,11 @@ struct atm_vcc {
 	void		*dev_data;	/* per-device data */
 	void		*proto_data;	/* per-protocol data */
 	struct k_atm_aal_stats *stats;	/* pointer to AAL stats group */
-	wait_queue_head_t sleep;	/* if socket is busy */
 	struct sock	*sk;		/* socket backpointer */
 	/* SVC part --- may move later ------------------------------------- */
 	short		itf;		/* interface number */
 	struct sockaddr_atmsvc local;
 	struct sockaddr_atmsvc remote;
-	void (*callback)(struct atm_vcc *vcc);
-	int		reply;		/* also used by ATMTCP */
 	/* Multipoint part ------------------------------------------------- */
 	struct atm_vcc	*session;	/* session VCC descriptor */
 	/* Other stuff ----------------------------------------------------- */
@@ -337,19 +338,20 @@ struct atm_dev {
 	struct list_head dev_list;	/* linkage */
 };
 
-
-/*
- * ioctl, getsockopt, setsockopt, and sg_send are optional and can be set to
- * NULL. */
-
+ 
 /* OF: send_Oam Flags */
 
-#define ATM_OF_IMMED	1	/* Attempt immediate delivery */
-#define ATM_OF_INRATE	2	/* Attempt in-rate delivery */
+#define ATM_OF_IMMED  1		/* Attempt immediate delivery */
+#define ATM_OF_INRATE 2		/* Attempt in-rate delivery */
+
+
+/*
+ * ioctl, getsockopt, and setsockopt are optional and can be set to NULL.
+ */
 
 struct atmdev_ops { /* only send is required */
 	void (*dev_close)(struct atm_dev *dev);
-	int (*open)(struct atm_vcc *vcc,short vpi,int vci);
+	int (*open)(struct atm_vcc *vcc);
 	void (*close)(struct atm_vcc *vcc);
 	int (*ioctl)(struct atm_dev *dev,unsigned int cmd,void *arg);
 	int (*getsockopt)(struct atm_vcc *vcc,int level,int optname,
@@ -357,23 +359,14 @@ struct atmdev_ops { /* only send is required */
 	int (*setsockopt)(struct atm_vcc *vcc,int level,int optname,
 	    void *optval,int optlen);
 	int (*send)(struct atm_vcc *vcc,struct sk_buff *skb);
-	int (*sg_send)(struct atm_vcc *vcc,unsigned long start,
-	    unsigned long size);
-#if 0 /* keep the current hack for now */
-	int (*send_iovec)(struct atm_vcc *vcc,struct iovec *iov,int size,
-	    void (*discard)(struct atm_vcc *vcc,void *user),void *user);
-#endif
 	int (*send_oam)(struct atm_vcc *vcc,void *cell,int flags);
 	void (*phy_put)(struct atm_dev *dev,unsigned char value,
 	    unsigned long addr);
 	unsigned char (*phy_get)(struct atm_dev *dev,unsigned long addr);
-	void (*feedback)(struct atm_vcc *vcc,struct sk_buff *skb,
-	    unsigned long start,unsigned long dest,int len);
 	int (*change_qos)(struct atm_vcc *vcc,struct atm_qos *qos,int flags);
 	int (*proc_read)(struct atm_dev *dev,loff_t *pos,char *page);
 	struct module *owner;
 };
-
 
 struct atmphy_ops {
 	int (*start)(struct atm_dev *dev);
@@ -387,7 +380,9 @@ struct atm_skb_data {
 	unsigned long	atm_options;	/* ATM layer options */
 };
 
-extern struct hlist_head vcc_sklist;
+#define VCC_HTABLE_SIZE 32
+
+extern struct hlist_head vcc_hash[VCC_HTABLE_SIZE];
 extern rwlock_t vcc_sklist_lock;
 
 #define ATM_SKB(skb) (((struct atm_skb_data *) (skb)->cb))
@@ -450,10 +445,31 @@ static inline void atm_dev_put(struct atm_dev *dev)
 int atm_charge(struct atm_vcc *vcc,int truesize);
 struct sk_buff *atm_alloc_charge(struct atm_vcc *vcc,int pdu_size,
     int gfp_flags);
-int atm_find_ci(struct atm_vcc *vcc,short *vpi,int *vci);
 int atm_pcr_goal(struct atm_trafprm *tp);
 
 void vcc_release_async(struct atm_vcc *vcc, int reply);
+
+struct atm_ioctl {
+	struct module *owner;
+	/* A module reference is kept if appropriate over this call.
+	 * Return -ENOIOCTLCMD if you don't handle it. */
+	int (*ioctl)(struct socket *, unsigned int cmd, unsigned long arg);
+	struct list_head list;
+};
+
+/**
+ * register_atm_ioctl - register handler for ioctl operations
+ *
+ * Special (non-device) handlers of ioctl's should
+ * register here. If you're a normal device, you should
+ * set .ioctl in your atmdev_ops instead.
+ */
+void register_atm_ioctl(struct atm_ioctl *);
+
+/**
+ * deregister_atm_ioctl - remove the ioctl handler
+ */
+void deregister_atm_ioctl(struct atm_ioctl *);
 
 #endif /* __KERNEL__ */
 

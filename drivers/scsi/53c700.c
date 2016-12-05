@@ -115,7 +115,6 @@
 #define NCR_700_VERSION "2.8"
 
 #include <linux/config.h>
-#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/string.h>
@@ -131,7 +130,7 @@
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/byteorder.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/module.h>
 #include <linux/interrupt.h>
 
@@ -172,7 +171,7 @@ STATIC void NCR_700_chip_reset(struct Scsi_Host *host);
 STATIC int NCR_700_slave_configure(Scsi_Device *SDpnt);
 STATIC void NCR_700_slave_destroy(Scsi_Device *SDpnt);
 
-static struct device_attribute **NCR_700_dev_attrs = NULL;
+STATIC struct device_attribute *NCR_700_dev_attrs[];
 
 static char *NCR_700_phase[] = {
 	"",
@@ -281,8 +280,6 @@ NCR_700_detect(Scsi_Host_Template *tpnt,
 	tpnt->use_clustering = DISABLE_CLUSTERING;
 	tpnt->slave_configure = NCR_700_slave_configure;
 	tpnt->slave_destroy = NCR_700_slave_destroy;
-	tpnt->use_blk_tcq = 1;
-	tpnt->highmem_io = 1;
 	
 	if(tpnt->name == NULL)
 		tpnt->name = "53c700";
@@ -1068,7 +1065,7 @@ process_script_interrupt(__u32 dsps, __u32 dsp, Scsi_Cmnd *SCp,
 		DEBUG(("scsi%d: (%d:%d) RESELECTED!\n",
 		       host->host_no, reselection_id, lun));
 		/* clear the reselection indicator */
-		SDp = scsi_find_device(host, 0, reselection_id, lun);
+		SDp = __scsi_device_lookup(host, 0, reselection_id, lun);
 		if(unlikely(SDp == NULL)) {
 			printk(KERN_ERR "scsi%d: (%d:%d) HAS NO device\n",
 			       host->host_no, reselection_id, lun);
@@ -1501,7 +1498,7 @@ NCR_700_intr(int irq, void *dev_id, struct pt_regs *regs)
 			       host->host_no, SCp, SCp == NULL ? NULL : SCp->host_scribble, dsp, dsp - hostdata->pScript);
 
 			/* clear all the negotiated parameters */
-	    		list_for_each_entry(SDp, &host->my_devices, siblings)
+			__shost_for_each_device(SDp, host)
 				SDp->hostdata = 0;
 			
 			/* clear all the slots and their pending commands */
@@ -1759,7 +1756,7 @@ NCR_700_queuecommand(Scsi_Cmnd *SCp, void (*done)(Scsi_Cmnd *))
 	printk("53c700: scsi%d, command ", SCp->device->host->host_no);
 	print_command(SCp->cmnd);
 #endif
-	if(SCp->device->tagged_supported && !SCp->device->tagged_queue
+	if(SCp->device->tagged_supported && !SCp->device->simple_tags
 	   && (hostdata->tag_negotiated &(1<<SCp->device->id)) == 0
 	   && NCR_700_is_flag_clear(SCp->device, NCR_700_DEV_BEGIN_TAG_QUEUEING)) {
 		/* upper layer has indicated tags are supported.  We don't
@@ -2027,25 +2024,12 @@ static struct device_attribute NCR_700_active_tags_attr = {
 	.show = NCR_700_show_active_tags,
 };
 
-STATIC int __init
-NCR_700_init(void)
-{
-	scsi_sysfs_modify_sdev_attribute(&NCR_700_dev_attrs,
-					 &NCR_700_queue_depth_attr);
-	scsi_sysfs_modify_sdev_attribute(&NCR_700_dev_attrs,
-					 &NCR_700_active_tags_attr);
-	return 0;
-}
-
-/* NULL exit routine to keep modutils happy */
-STATIC void __exit
-NCR_700_exit(void)
-{
-}
+STATIC struct device_attribute *NCR_700_dev_attrs[] = {
+	&NCR_700_queue_depth_attr,
+	&NCR_700_active_tags_attr,
+	NULL,
+};
 
 EXPORT_SYMBOL(NCR_700_detect);
 EXPORT_SYMBOL(NCR_700_release);
 EXPORT_SYMBOL(NCR_700_intr);
-
-module_init(NCR_700_init);
-module_exit(NCR_700_exit);

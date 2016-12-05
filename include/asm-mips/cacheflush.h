@@ -6,8 +6,8 @@
  * Copyright (C) 1994, 95, 96, 97, 98, 99, 2000, 01, 02, 03 by Ralf Baechle
  * Copyright (C) 1999, 2000, 2001 Silicon Graphics, Inc.
  */
-#ifndef __ASM_CACHEFLUSH_H
-#define __ASM_CACHEFLUSH_H
+#ifndef _ASM_CACHEFLUSH_H
+#define _ASM_CACHEFLUSH_H
 
 #include <linux/config.h>
 
@@ -43,7 +43,15 @@ extern void (*flush_icache_page)(struct vm_area_struct *vma,
 extern void (*flush_icache_range)(unsigned long start, unsigned long end);
 #define flush_icache_user_range(vma, page, addr, len)   \
 					flush_icache_page(vma, page)
+#define flush_cache_vmap(start, end)		flush_cache_all()
+#define flush_cache_vunmap(start, end)		flush_cache_all()
 
+#define copy_to_user_page(vma, page, vaddr, dst, src, len) \
+do { memcpy(dst, src, len); \
+     flush_icache_user_range(vma, page, vaddr, len); \
+} while (0)
+#define copy_from_user_page(vma, page, vaddr, dst, src, len) \
+	memcpy(dst, src, len)
 
 extern void (*flush_cache_sigtramp)(unsigned long addr);
 extern void (*flush_icache_all)(void);
@@ -62,4 +70,4 @@ extern void (*flush_data_cache_page)(unsigned long addr);
 #define ClearPageDcacheDirty(page)	\
 	clear_bit(PG_dcache_dirty, &(page)->flags)
 
-#endif /* __ASM_CACHEFLUSH_H */
+#endif /* _ASM_CACHEFLUSH_H */

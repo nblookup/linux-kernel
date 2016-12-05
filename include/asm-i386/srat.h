@@ -27,9 +27,11 @@
 #ifndef _ASM_SRAT_H_
 #define _ASM_SRAT_H_
 
-#define MAX_NUMNODES		8
-extern void get_memcfg_from_srat(void);
+#ifndef CONFIG_ACPI_SRAT
+#error CONFIG_ACPI_SRAT not defined, and srat.h header has been included
+#endif
+
+extern int get_memcfg_from_srat(void);
 extern unsigned long *get_zholes_size(int);
-#define get_memcfg_numa() get_memcfg_from_srat()
 
 #endif /* _ASM_SRAT_H_ */

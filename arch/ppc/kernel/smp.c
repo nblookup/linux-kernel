@@ -10,6 +10,7 @@
 
 #include <linux/config.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
@@ -47,10 +48,12 @@ atomic_t ipi_sent;
 DEFINE_PER_CPU(unsigned int, prof_multiplier);
 DEFINE_PER_CPU(unsigned int, prof_counter);
 unsigned long cache_decay_ticks = HZ/100;
-unsigned long cpu_online_map = 1UL;
-unsigned long cpu_possible_map = 1UL;
+cpumask_t cpu_online_map;
+cpumask_t cpu_possible_map;
 int smp_hw_index[NR_CPUS];
 struct thread_info *secondary_ti;
+
+EXPORT_SYMBOL(cpu_online_map);
 
 /* SMP operations for this machine */
 static struct smp_ops_t *smp_ops;
@@ -72,7 +75,7 @@ static int __smp_call_function(void (*func) (void *info), void *info,
 extern void __save_cpu_setup(void);
 
 /* Since OpenPIC has only 4 IPIs, we use slightly different message numbers.
- * 
+ *
  * Make sure this matches openpic_request_IPIs in open_pic.c, or what shows up
  * in /proc/interrupts will be wrong!!! --Troy */
 #define PPC_MSG_CALL_FUNCTION	0
@@ -86,7 +89,7 @@ extern void __save_cpu_setup(void);
 	     smp_ops->message_pass((t),(m),(d),(w)); \
        } while(0)
 
-/* 
+/*
  * Common functions
  */
 void smp_local_timer_interrupt(struct pt_regs * regs)
@@ -102,12 +105,12 @@ void smp_local_timer_interrupt(struct pt_regs * regs)
 void smp_message_recv(int msg, struct pt_regs *regs)
 {
 	atomic_inc(&ipi_recv);
-	
+
 	switch( msg ) {
 	case PPC_MSG_CALL_FUNCTION:
 		smp_call_function_interrupt();
 		break;
-	case PPC_MSG_RESCHEDULE: 
+	case PPC_MSG_RESCHEDULE:
 		set_need_resched();
 		break;
 	case PPC_MSG_INVALIDATE_TLB:
@@ -336,7 +339,7 @@ static void __devinit smp_store_cpu_info(int id)
 
 void __init smp_prepare_cpus(unsigned int max_cpus)
 {
-	int num_cpus;
+	int num_cpus, i;
 
 	/* Fixup boot cpu */
         smp_store_cpu_info(smp_processor_id());
@@ -350,7 +353,8 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 
 	/* Probe platform for CPUs: always linear. */
 	num_cpus = smp_ops->probe();
-	cpu_possible_map = (1 << num_cpus)-1;
+	for (i = 0; i < num_cpus; ++i)
+		cpu_set(i, cpu_possible_map);
 
 	/* Backup CPU 0 state */
 	__save_cpu_setup();
@@ -361,8 +365,8 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 
 void __devinit smp_prepare_boot_cpu(void)
 {
-	set_bit(smp_processor_id(), &cpu_online_map);
-	set_bit(smp_processor_id(), &cpu_possible_map);
+	cpu_set(smp_processor_id(), cpu_online_map);
+	cpu_set(smp_processor_id(), cpu_possible_map);
 }
 
 int __init setup_profiling_timer(unsigned int multiplier)
@@ -423,7 +427,7 @@ int __cpu_up(unsigned int cpu)
 
 	/* wake up cpu */
 	smp_ops->kick_cpu(cpu);
-		
+	
 	/*
 	 * wait to see if the cpu made a callin (is actually up).
 	 * use this value that I found through experimentation.
@@ -444,7 +448,7 @@ int __cpu_up(unsigned int cpu)
 	printk("Processor %d found.\n", cpu);
 
 	smp_ops->give_timebase();
-	set_bit(cpu, &cpu_online_map);
+	cpu_set(cpu, cpu_online_map);
 	return 0;
 }
 

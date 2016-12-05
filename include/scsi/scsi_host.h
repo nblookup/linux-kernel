@@ -262,6 +262,12 @@ struct scsi_host_template {
 	unsigned short max_sectors;
 
 	/*
+	 * dma scatter gather segment boundary limit. a segment crossing this
+	 * boundary will be split in two.
+	 */
+	unsigned long dma_boundary;
+
+	/*
 	 * This specifies "machine infinity" for host templates which don't
 	 * limit the transfer size.  Note this limit represents an absolute
 	 * maximum, and may be over the transfer limits allowed for
@@ -306,14 +312,6 @@ struct scsi_host_template {
 	 */
 	unsigned emulated:1;
 
-	unsigned highmem_io:1;
-
-	/* 
-	 * True if the driver wishes to use the generic block layer
-	 * tag queueing functions
-	 */
-	unsigned use_blk_tcq:1;
-
 	/*
 	 * Countdown for host blocking with no commands outstanding
 	 */
@@ -329,12 +327,12 @@ struct scsi_host_template {
 #define SCSI_DEFAULT_HOST_BLOCKED	7
 
 	/*
-	 * Pointer to the sysfs class properties for this host
+	 * Pointer to the sysfs class properties for this host, NULL terminated.
 	 */
 	struct class_device_attribute **shost_attrs;
 
 	/*
-	 * Pointer to the SCSI device properties for this host
+	 * Pointer to the SCSI device properties for this host, NULL terminated.
 	 */
 	struct device_attribute **sdev_attrs;
 
@@ -346,22 +344,49 @@ struct scsi_host_template {
 	 * module_init/module_exit.
 	 */
 	struct list_head legacy_hosts;
+
+	/*
+	 * Default flags settings, these modify the setting of scsi_device
+	 * bits.
+	 */
+	unsigned int flags;
+};
+
+/*
+ * shost states
+ */
+enum {
+	SHOST_ADD,
+	SHOST_DEL,
+	SHOST_CANCEL,
+	SHOST_RECOVERY,
 };
 
 struct Scsi_Host {
-	struct list_head	my_devices;
+	/*
+	 * __devices is protected by the host_lock, but you should
+	 * usually use scsi_device_lookup / shost_for_each_device
+	 * to access it and don't care about locking yourself.
+	 * In the rare case of beeing in irq context you can use
+	 * their __ prefixed variants with the lock held. NEVER
+	 * access this list directly from a driver.
+	 */
+	struct list_head	__devices;
+	
 	struct scsi_host_cmd_pool *cmd_pool;
 	spinlock_t		free_list_lock;
-	struct list_head	free_list;   /* backup store of cmd structs */
+	struct list_head	free_list; /* backup store of cmd structs */
 	struct list_head	starved_list;
 
 	spinlock_t		default_lock;
 	spinlock_t		*host_lock;
 
+	struct semaphore	scan_mutex;/* serialize scanning activity */
+
 	struct list_head	eh_cmd_q;
 	struct task_struct    * ehandler;  /* Error recovery thread. */
-	struct semaphore      * eh_wait;   /* The error recovery thread waits on
-                                          this. */
+	struct semaphore      * eh_wait;   /* The error recovery thread waits
+					      on this. */
 	struct completion     * eh_notify; /* wait for eh to begin or end */
 	struct semaphore      * eh_action; /* Wait for specific actions on the
                                           host. */
@@ -412,11 +437,10 @@ struct Scsi_Host {
 	short cmd_per_lun;
 	short unsigned int sg_tablesize;
 	short unsigned int max_sectors;
+	unsigned long dma_boundary;
 
-	unsigned in_recovery:1;
 	unsigned unchecked_isa_dma:1;
 	unsigned use_clustering:1;
-	unsigned highmem_io:1;
 	unsigned use_blk_tcq:1;
 
 	/*
@@ -442,19 +466,19 @@ struct Scsi_Host {
 	 */
 	unsigned int max_host_blocked;
 
-	/* 
-	 * Support for sysfs
-	 */
-	struct device host_gendev;
-	struct class_device class_dev;
-
 	/* legacy crap */
 	unsigned long base;
 	unsigned long io_port;
 	unsigned char n_io_port;
 	unsigned char dma_channel;
 	unsigned int  irq;
+	
 
+	unsigned long shost_state;
+
+	/* ldm bits */
+	struct device		shost_gendev;
+	struct class_device	shost_classdev;
 
 	/*
 	 * List of hosts per template.
@@ -474,14 +498,15 @@ struct Scsi_Host {
 		__attribute__ ((aligned (sizeof(unsigned long))));
 };
 #define		dev_to_shost(d)		\
-	container_of(d, struct Scsi_Host, host_gendev)
+	container_of(d, struct Scsi_Host, shost_gendev)
 #define		class_to_shost(d)	\
-	container_of(d, struct Scsi_Host, class_dev)
+	container_of(d, struct Scsi_Host, shost_classdev)
 
 extern struct Scsi_Host *scsi_host_alloc(struct scsi_host_template *, int);
 extern int scsi_add_host(struct Scsi_Host *, struct device *);
-extern int scsi_remove_host(struct Scsi_Host *);
-extern void scsi_host_get(struct Scsi_Host *);
+extern void scsi_scan_host(struct Scsi_Host *);
+extern void scsi_remove_host(struct Scsi_Host *);
+extern struct Scsi_Host *scsi_host_get(struct Scsi_Host *);
 extern void scsi_host_put(struct Scsi_Host *t);
 extern struct Scsi_Host *scsi_host_lookup(unsigned short);
 
@@ -495,15 +520,13 @@ static inline void scsi_assign_lock(struct Scsi_Host *shost, spinlock_t *lock)
 static inline void scsi_set_device(struct Scsi_Host *shost,
                                    struct device *dev)
 {
-        shost->host_gendev.parent = dev;
+        shost->shost_gendev.parent = dev;
 }
 
 static inline struct device *scsi_get_device(struct Scsi_Host *shost)
 {
-        return shost->host_gendev.parent;
+        return shost->shost_gendev.parent;
 }
-
-extern void scsi_sysfs_release_attributes(struct scsi_host_template *);
 
 extern void scsi_unblock_requests(struct Scsi_Host *);
 extern void scsi_block_requests(struct Scsi_Host *);

@@ -1543,7 +1543,7 @@ lan_init_chip(struct parisc_device *dev)
 	retval = register_netdev(netdevice);
 	if (retval) {
 		printk(KERN_WARNING __FILE__ ": register_netdevice ret'd %d\n", retval);
-		kfree(netdevice);
+		free_netdev(netdevice);
 		return -ENODEV;
 	};
 	if (dev->id.sversion == 0x72) {
@@ -1596,7 +1596,7 @@ static void __exit lasi_82596_exit(void)
 		lp = (struct i596_private *) netdevice->priv;
 		dma_free_noncoherent(lp->dev, sizeof(struct i596_private), 
 				       (void *)netdevice->mem_start, lp->dma_addr);
-		netdevice->priv = NULL;
+		free_netdev(netdevice);
 	}
 
 	unregister_parisc_driver(&lan_driver);

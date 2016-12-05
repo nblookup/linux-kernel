@@ -260,11 +260,6 @@ static inline void clear_in_cr4 (unsigned long mask)
  * Bus types (default is ISA, but people can check others with these..)
  * pc98 indicates PC98 systems (CBUS)
  */
-#ifdef CONFIG_EISA
-extern int EISA_bus;
-#else
-#define EISA_bus (0)
-#endif
 extern int MCA_bus;
 #ifdef CONFIG_X86_PC9800
 #define pc98 1
@@ -272,6 +267,22 @@ extern int MCA_bus;
 #define pc98 0
 #endif
 
+static inline void __monitor(const void *eax, unsigned long ecx,
+		unsigned long edx)
+{
+	/* "monitor %eax,%ecx,%edx;" */
+	asm volatile(
+		".byte 0x0f,0x01,0xc8;"
+		: :"a" (eax), "c" (ecx), "d"(edx));
+}
+
+static inline void __mwait(unsigned long eax, unsigned long ecx)
+{
+	/* "mwait %eax,%ecx;" */
+	asm volatile(
+		".byte 0x0f,0x01,0xc9;"
+		: :"a" (eax), "c" (ecx));
+}
 
 /* from system description table in BIOS.  Mostly for MCA use, but
 others may find it useful. */
@@ -291,10 +302,11 @@ extern unsigned int mca_pentium_flag;
 #define TASK_UNMAPPED_BASE	(PAGE_ALIGN(TASK_SIZE / 3))
 
 /*
- * Size of io_bitmap in longwords: 32 is ports 0-0x3ff.
+ * Size of io_bitmap, covering ports 0 to 0x3ff.
  */
-#define IO_BITMAP_SIZE	32
-#define IO_BITMAP_BYTES	(IO_BITMAP_SIZE * 4)
+#define IO_BITMAP_BITS  1024
+#define IO_BITMAP_BYTES (IO_BITMAP_BITS/8)
+#define IO_BITMAP_LONGS (IO_BITMAP_BYTES/sizeof(long))
 #define IO_BITMAP_OFFSET offsetof(struct tss_struct,io_bitmap)
 #define INVALID_IO_BITMAP_OFFSET 0x8000
 
@@ -373,8 +385,14 @@ struct tss_struct {
 	unsigned short	fs, __fsh;
 	unsigned short	gs, __gsh;
 	unsigned short	ldt, __ldth;
-	unsigned short	trace, bitmap;
-	unsigned long	io_bitmap[IO_BITMAP_SIZE+1];
+	unsigned short	trace, io_bitmap_base;
+	/*
+	 * The extra 1 is there because the CPU will access an
+	 * additional byte beyond the end of the IO permission
+	 * bitmap. The extra byte must be all 1 bits, and must
+	 * be within the limit.
+	 */
+	unsigned long	io_bitmap[IO_BITMAP_LONGS + 1];
 	/*
 	 * pads the TSS to be cacheline-aligned (size is 0x100)
 	 */
@@ -383,7 +401,7 @@ struct tss_struct {
 	 * .. and then another 0x100 bytes for emergency kernel stack
 	 */
 	unsigned long stack[64];
-};
+} __attribute__((packed));
 
 struct thread_struct {
 /* cached TLS descriptors. */
@@ -405,22 +423,28 @@ struct thread_struct {
 	unsigned long		v86flags, v86mask, saved_esp0;
 	unsigned int		saved_fs, saved_gs;
 /* IO permissions */
-	unsigned long	*ts_io_bitmap;
+	unsigned long	*io_bitmap_ptr;
 };
 
 #define INIT_THREAD  {							\
 	.vm86_info = NULL,						\
-	.ts_io_bitmap = NULL,						\
+	.io_bitmap_ptr = NULL,						\
 }
 
+/*
+ * Note that the .io_bitmap member must be extra-big. This is because
+ * the CPU will access an additional byte beyond the end of the IO
+ * permission bitmap. The extra byte must be all 1 bits, and must
+ * be within the limit.
+ */
 #define INIT_TSS  {							\
 	.esp0		= sizeof(init_stack) + (long)&init_stack,	\
 	.ss0		= __KERNEL_DS,					\
 	.esp1		= sizeof(init_tss[0]) + (long)&init_tss[0],	\
 	.ss1		= __KERNEL_CS,					\
 	.ldt		= GDT_ENTRY_LDT,				\
-	.bitmap		= INVALID_IO_BITMAP_OFFSET,			\
-	.io_bitmap	= { [ 0 ... IO_BITMAP_SIZE ] = ~0 },		\
+	.io_bitmap_base	= INVALID_IO_BITMAP_OFFSET,			\
+	.io_bitmap	= { [ 0 ... IO_BITMAP_LONGS] = ~0 },		\
 }
 
 static inline void load_esp0(struct tss_struct *tss, unsigned long esp0)
@@ -474,7 +498,7 @@ unsigned long get_wchan(struct task_struct *p);
 #define KSTK_EIP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)->thread_info))[1019])
 #define KSTK_ESP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)->thread_info))[1022])
 
-struct microcode {
+struct microcode_header {
 	unsigned int hdrver;
 	unsigned int rev;
 	unsigned int date;
@@ -482,10 +506,32 @@ struct microcode {
 	unsigned int cksum;
 	unsigned int ldrver;
 	unsigned int pf;
-	unsigned int reserved[5];
-	unsigned int bits[500];
+	unsigned int datasize;
+	unsigned int totalsize;
+	unsigned int reserved[3];
 };
 
+struct microcode {
+	struct microcode_header hdr;
+	unsigned int bits[0];
+};
+
+typedef struct microcode microcode_t;
+typedef struct microcode_header microcode_header_t;
+
+/* microcode format is extended from prescott processors */
+struct extended_signature {
+	unsigned int sig;
+	unsigned int pf;
+	unsigned int cksum;
+};
+
+struct extended_sigtable {
+	unsigned int count;
+	unsigned int cksum;
+	unsigned int reserved[3];
+	struct extended_signature sigs[0];
+};
 /* '6' because it used to be for P6 only (but now covers Pentium 4 as well) */
 #define MICROCODE_IOCFREE	_IO('6',0)
 
@@ -561,7 +607,9 @@ static inline void rep_nop(void)
 
 /* Prefetch instructions for Pentium III and AMD Athlon */
 /* It's not worth to care about 3dnow! prefetches for the K6
-   because they are microcoded there and very slow. */
+   because they are microcoded there and very slow.
+   However we don't do prefetches for pre XP Athlons currently
+   That should be fixed. */
 #define ARCH_HAS_PREFETCH
 extern inline void prefetch(const void *x)
 {
@@ -585,5 +633,7 @@ extern inline void prefetchw(const void *x)
 			  "r" (x));
 }
 #define spin_lock_prefetch(x)	prefetchw(x)
+
+extern void select_idle_routine(const struct cpuinfo_x86 *c);
 
 #endif /* __ASM_I386_PROCESSOR_H */

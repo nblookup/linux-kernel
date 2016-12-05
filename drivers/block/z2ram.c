@@ -28,11 +28,10 @@
 #define DEVICE_NAME "Z2RAM"
 
 #include <linux/major.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
-#include <linux/blk.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/blkdev.h>
 
 #include <asm/setup.h>
 #include <asm/bitops.h>
@@ -151,7 +150,7 @@ z2_open( struct inode *inode, struct file *filp )
 	sizeof( z2ram_map[0] );
     int rc = -ENOMEM;
 
-    device = minor( inode->i_rdev );
+    device = iminor(inode);
 
     if ( current_device != -1 && current_device != device )
     {
@@ -328,35 +327,48 @@ static struct kobject *z2_find(dev_t dev, int *part, void *data)
 	return get_disk(z2ram_gendisk);
 }
 
-static struct request_queue z2_queue;
+static struct request_queue *z2_queue;
 
 int __init 
 z2_init(void)
 {
+    int ret;
 
     if (!MACH_IS_AMIGA)
 	return -ENXIO;
 
+    ret = -EBUSY;
     if (register_blkdev(Z2RAM_MAJOR, DEVICE_NAME))
-	return -EBUSY;
+	goto err;
 
+    ret = -ENOMEM;
     z2ram_gendisk = alloc_disk(1);
-    if (!z2ram_gendisk) {
-	unregister_blkdev(Z2RAM_MAJOR, DEVICE_NAME);
-	return -ENOMEM;
-    }
+    if (!z2ram_gendisk)
+	goto out_disk;
+
+    z2_queue = blk_init_queue(do_z2_request, &z2ram_lock);
+    if (!z2_queue)
+	goto out_queue;
+
     z2ram_gendisk->major = Z2RAM_MAJOR;
     z2ram_gendisk->first_minor = 0;
     z2ram_gendisk->fops = &z2_fops;
     sprintf(z2ram_gendisk->disk_name, "z2ram");
+    strcpy(z2ram_gendisk->devfs_name, z2ram_gendisk->disk_name);
 
-    blk_init_queue(&z2_queue, do_z2_request, &z2ram_lock);
-    z2ram_gendisk->queue = &z2_queue;
+    z2ram_gendisk->queue = z2_queue;
     add_disk(z2ram_gendisk);
     blk_register_region(MKDEV(Z2RAM_MAJOR, 0), Z2MINOR_COUNT, THIS_MODULE,
 				z2_find, NULL, NULL);
 
     return 0;
+
+out_queue:
+    put_disk(z2ram_gendisk);
+out_disk:
+    unregister_blkdev(Z2RAM_MAJOR, DEVICE_NAME);
+err:
+    return ret;
 }
 
 #if defined(MODULE)
@@ -387,7 +399,7 @@ cleanup_module( void )
 
     del_gendisk(z2ram_gendisk);
     put_disk(z2ram_gendisk);
-    blk_cleanup_queue(&z2_queue);
+    blk_cleanup_queue(z2_queue);
 
     if ( current_device != -1 )
     {

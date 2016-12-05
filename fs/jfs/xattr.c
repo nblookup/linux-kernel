@@ -1,6 +1,6 @@
 /*
- *   Copyright (c) International Business Machines  Corp., 2000-2002
- *   Copyright (c) Christoph Hellwig, 2002
+ *   Copyright (C) International Business Machines  Corp., 2000-2003
+ *   Copyright (C) Christoph Hellwig, 2002
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -20,6 +20,7 @@
 #include <linux/fs.h>
 #include <linux/xattr.h>
 #include "jfs_incore.h"
+#include "jfs_superblock.h"
 #include "jfs_dmap.h"
 #include "jfs_debug.h"
 #include "jfs_dinode.h"
@@ -381,7 +382,10 @@ static int ea_read(struct inode *ip, struct jfs_ea_list *ealist)
 		return ea_read_inline(ip, ealist);
 
 	nbytes = sizeDXD(&ji->ea);
-	assert(nbytes);
+	if (!nbytes) {
+		jfs_error(sb, "ea_read: nbytes is 0");
+		return -EIO;
+	}
 
 	/* 
 	 * Figure out how many blocks were allocated when this EA list was
@@ -477,7 +481,10 @@ static int ea_get(struct inode *inode, struct ea_buffer *ea_buf, int min_size)
 		}
 		current_blocks = 0;
 	} else {
-		assert(ji->ea.flag & DXD_EXTENT);
+		if (!(ji->ea.flag & DXD_EXTENT)) {
+			jfs_error(sb, "ea_get: invalid ea.flag)");
+			return -EIO;
+		}
 		current_blocks = (ea_size + sb->s_blocksize - 1) >>
 		    sb->s_blocksize_bits;
 	}
@@ -729,7 +736,7 @@ static int can_set_xattr(struct inode *inode, const char *name,
 		return -EPERM;
 
 #ifdef CONFIG_JFS_POSIX_ACL
-	return jfs_permission_have_sem(inode, MAY_WRITE);
+	return jfs_permission(inode, MAY_WRITE, NULL);
 #else
 	return permission(inode, MAY_WRITE, NULL);
 #endif
@@ -762,6 +769,8 @@ int __jfs_setxattr(struct inode *inode, const char *name, const void *value,
 		name = os2name;
 		namelen -= XATTR_OS2_PREFIX_LEN;
 	}
+
+	down_write(&JFS_IP(inode)->xattr_sem);
 
 	xattr_size = ea_get(inode, &ea_buf, 0);
 	if (xattr_size < 0) {
@@ -868,6 +877,8 @@ int __jfs_setxattr(struct inode *inode, const char *name, const void *value,
       release:
 	ea_release(inode, &ea_buf);
       out:
+	up_write(&JFS_IP(inode)->xattr_sem);
+
 	if (os2name)
 		kfree(os2name);
 
@@ -890,8 +901,7 @@ static int can_get_xattr(struct inode *inode, const char *name)
 #ifdef CONFIG_JFS_POSIX_ACL
 	if(strncmp(name, XATTR_SYSTEM_PREFIX, XATTR_SYSTEM_PREFIX_LEN) == 0)
 		return 0;
-	else
-		return jfs_permission_have_sem(inode, MAY_READ);
+	return jfs_permission(inode, MAY_READ, NULL);
 #else
 	return permission(inode, MAY_READ, NULL);
 #endif
@@ -923,7 +933,10 @@ ssize_t __jfs_getxattr(struct inode *inode, const char *name, void *data,
 		namelen -= XATTR_OS2_PREFIX_LEN;
 	}
 
+	down_read(&JFS_IP(inode)->xattr_sem);
+
 	xattr_size = ea_get(inode, &ea_buf, 0);
+
 	if (xattr_size < 0) {
 		size = xattr_size;
 		goto out;
@@ -955,6 +968,8 @@ ssize_t __jfs_getxattr(struct inode *inode, const char *name, void *data,
       release:
 	ea_release(inode, &ea_buf);
       out:
+	up_read(&JFS_IP(inode)->xattr_sem);
+
 	if (os2name)
 		kfree(os2name);
 
@@ -966,15 +981,12 @@ ssize_t jfs_getxattr(struct dentry *dentry, const char *name, void *data,
 {
 	int err;
 
-	down(&dentry->d_inode->i_sem);
 	err = __jfs_getxattr(dentry->d_inode, name, data, buf_size);
-	up(&dentry->d_inode->i_sem);
 
 	return err;
 }
 
-static ssize_t __jfs_listxattr(struct dentry * dentry, char *data,
-			       size_t buf_size)
+ssize_t jfs_listxattr(struct dentry * dentry, char *data, size_t buf_size)
 {
 	struct inode *inode = dentry->d_inode;
 	char *buffer;
@@ -983,6 +995,8 @@ static ssize_t __jfs_listxattr(struct dentry * dentry, char *data,
 	struct jfs_ea_list *ealist;
 	struct jfs_ea *ea;
 	struct ea_buffer ea_buf;
+
+	down_read(&JFS_IP(inode)->xattr_sem);
 
 	xattr_size = ea_get(inode, &ea_buf, 0);
 	if (xattr_size < 0) {
@@ -1017,18 +1031,8 @@ static ssize_t __jfs_listxattr(struct dentry * dentry, char *data,
       release:
 	ea_release(inode, &ea_buf);
       out:
+	up_read(&JFS_IP(inode)->xattr_sem);
 	return size;
-}
-
-ssize_t jfs_listxattr(struct dentry * dentry, char *data, size_t buf_size)
-{
-	int err;
-
-	down(&dentry->d_inode->i_sem);
-	err = __jfs_listxattr(dentry, data, buf_size);
-	up(&dentry->d_inode->i_sem);
-
-	return err;
 }
 
 int jfs_removexattr(struct dentry *dentry, const char *name)

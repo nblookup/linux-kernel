@@ -9,6 +9,7 @@
  * to indicate a major problem.
  */
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/reboot.h>
@@ -16,6 +17,7 @@
 #include <linux/init.h>
 #include <linux/sysrq.h>
 #include <linux/interrupt.h>
+#include <linux/nmi.h>
 
 asmlinkage void sys_sync(void);	/* it's really int */
 
@@ -23,7 +25,11 @@ int panic_timeout;
 int panic_on_oops;
 int tainted;
 
+EXPORT_SYMBOL(panic_timeout);
+
 struct notifier_block *panic_notifier_list;
+
+EXPORT_SYMBOL(panic_notifier_list);
 
 static int __init panic_setup(char *str)
 {
@@ -71,12 +77,16 @@ NORET_TYPE void panic(const char * fmt, ...)
 
 	if (panic_timeout > 0)
 	{
+		int i;
 		/*
 	 	 * Delay timeout seconds before rebooting the machine. 
 		 * We can't use the "normal" timers since we just panicked..
 	 	 */
 		printk(KERN_EMERG "Rebooting in %d seconds..",panic_timeout);
-		mdelay(panic_timeout*1000);
+		for (i = 0; i < panic_timeout; i++) {
+			touch_nmi_watchdog();
+			mdelay(1000);
+		}
 		/*
 		 *	Should we run the reboot notifier. For the moment Im
 		 *	choosing not too. It might crash, be corrupt or do
@@ -99,6 +109,8 @@ NORET_TYPE void panic(const char * fmt, ...)
 	for (;;)
 		;
 }
+
+EXPORT_SYMBOL(panic);
 
 /**
  *	print_tainted - return a string to represent the kernel taint state.

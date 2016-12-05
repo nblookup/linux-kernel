@@ -4,7 +4,7 @@
  *	inode.c  --  Inode/Dentry functions for the USB device file system.
  *
  *	Copyright (C) 2000 Thomas Sailer (sailer@ife.ee.ethz.ch)
- *	Copyright (c) 2001,2002 Greg Kroah-Hartman (greg@kroah.com)
+ *	Copyright (C) 2001,2002 Greg Kroah-Hartman (greg@kroah.com)
  *
  *	This program is free software; you can redistribute it and/or modify
  *	it under the terms of the GNU General Public License as published by
@@ -38,6 +38,7 @@
 #include <linux/namei.h>
 #include <linux/usbdevice_fs.h>
 #include <linux/smp_lock.h>
+#include <linux/parser.h>
 #include <asm/byteorder.h>
 
 static struct super_operations usbfs_ops;
@@ -62,85 +63,93 @@ static umode_t devmode = S_IWUSR | S_IRUGO;
 static umode_t busmode = S_IXUGO | S_IRUGO;
 static umode_t listmode = S_IRUGO;
 
+enum {
+	Opt_devuid, Opt_devgid, Opt_devmode,
+	Opt_busuid, Opt_busgid, Opt_busmode,
+	Opt_listuid, Opt_listgid, Opt_listmode,
+	Opt_err,
+};
+
+static match_table_t tokens = {
+	{Opt_devuid, "devuid=%u"},
+	{Opt_devgid, "devgid=%u"},
+	{Opt_devmode, "devmode=%o"},
+	{Opt_busuid, "busuid=%u"},
+	{Opt_busgid, "busgid=%u"},
+	{Opt_busmode, "busmode=%o"},
+	{Opt_listuid, "listuid=%u"},
+	{Opt_listgid, "listgid=%u"},
+	{Opt_listmode, "listmode=%o"},
+	{Opt_err, NULL}
+};
+
 static int parse_options(struct super_block *s, char *data)
 {
-	char *curopt = NULL, *value;
+	char *p;
+	int option;
 
-	while ((curopt = strsep(&data, ",")) != NULL) {
-		if (!*curopt)
+	while ((p = strsep(&data, ",")) != NULL) {
+		substring_t args[MAX_OPT_ARGS];
+		int token;
+		if (!*p)
 			continue;
-		if ((value = strchr(curopt, '=')) != NULL)
-			*value++ = 0;
-		if (!strcmp(curopt, "devuid")) {
-			if (!value || !value[0])
+
+		token = match_token(p, tokens, args);
+		switch (token) {
+		case Opt_devuid:
+			if (match_int(&args[0], &option))
+			       return -EINVAL;
+			devuid = option;
+			break;
+		case Opt_devgid:
+			if (match_int(&args[0], &option))
+			       return -EINVAL;
+			devgid = option;
+			break;
+		case Opt_devmode:
+			if (match_octal(&args[0], &option))
 				return -EINVAL;
-			devuid = simple_strtoul(value, &value, 0);
-			if (*value)
+			devmode = option & S_IRWXUGO;
+			break;
+		case Opt_busuid:
+			if (match_int(&args[0], &option))
+			       return -EINVAL;
+			busuid = option;
+			break;
+		case Opt_busgid:
+			if (match_int(&args[0], &option))
+			       return -EINVAL;
+			busgid = option;
+			break;
+		case Opt_busmode:
+			if (match_octal(&args[0], &option))
 				return -EINVAL;
-		}
-		if (!strcmp(curopt, "devgid")) {
-			if (!value || !value[0])
+			busmode = option & S_IRWXUGO;
+			break;
+		case Opt_listuid:
+			if (match_int(&args[0], &option))
+			       return -EINVAL;
+			listuid = option;
+			break;
+		case Opt_listgid:
+			if (match_int(&args[0], &option))
+			       return -EINVAL;
+			listgid = option;
+			break;
+		case Opt_listmode:
+			if (match_octal(&args[0], &option))
 				return -EINVAL;
-			devgid = simple_strtoul(value, &value, 0);
-			if (*value)
-				return -EINVAL;
-		}
-		if (!strcmp(curopt, "devmode")) {
-			if (!value || !value[0])
-				return -EINVAL;
-			devmode = simple_strtoul(value, &value, 0) & S_IRWXUGO;
-			if (*value)
-				return -EINVAL;
-		}
-		if (!strcmp(curopt, "busuid")) {
-			if (!value || !value[0])
-				return -EINVAL;
-			busuid = simple_strtoul(value, &value, 0);
-			if (*value)
-				return -EINVAL;
-		}
-		if (!strcmp(curopt, "busgid")) {
-			if (!value || !value[0])
-				return -EINVAL;
-			busgid = simple_strtoul(value, &value, 0);
-			if (*value)
-				return -EINVAL;
-		}
-		if (!strcmp(curopt, "busmode")) {
-			if (!value || !value[0])
-				return -EINVAL;
-			busmode = simple_strtoul(value, &value, 0) & S_IRWXUGO;
-			if (*value)
-				return -EINVAL;
-		}
-		if (!strcmp(curopt, "listuid")) {
-			if (!value || !value[0])
-				return -EINVAL;
-			listuid = simple_strtoul(value, &value, 0);
-			if (*value)
-				return -EINVAL;
-		}
-		if (!strcmp(curopt, "listgid")) {
-			if (!value || !value[0])
-				return -EINVAL;
-			listgid = simple_strtoul(value, &value, 0);
-			if (*value)
-				return -EINVAL;
-		}
-		if (!strcmp(curopt, "listmode")) {
-			if (!value || !value[0])
-				return -EINVAL;
-			listmode = simple_strtoul(value, &value, 0) & S_IRWXUGO;
-			if (*value)
-				return -EINVAL;
+			listmode = option & S_IRWXUGO;
+			break;
+		default:
+			err("usbfs: unrecognised mount option \"%s\" "
+			    "or missing value\n", p);
+			return -EINVAL;
 		}
 	}
 
 	return 0;
 }
-
-
-/* --------------------------------------------------------------------- */
 
 static struct inode *usbfs_get_inode (struct super_block *sb, int mode, dev_t dev)
 {
@@ -152,7 +161,6 @@ static struct inode *usbfs_get_inode (struct super_block *sb, int mode, dev_t de
 		inode->i_gid = current->fsgid;
 		inode->i_blksize = PAGE_CACHE_SIZE;
 		inode->i_blocks = 0;
-		inode->i_rdev = NODEV;
 		inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 		switch (mode & S_IFMT) {
 		default:
@@ -491,10 +499,6 @@ static struct file_system_type usbdevice_fs_type;
 static struct super_block *usb_get_sb(struct file_system_type *fs_type,
 	int flags, const char *dev_name, void *data)
 {
-	if (fs_type == &usbdevice_fs_type)
-		printk (KERN_INFO "Please use the 'usbfs' filetype instead, "
-				"the 'usbdevfs' name is deprecated.\n");
-
 	return get_sb_single(fs_type, flags, data, usbfs_fill_super);
 }
 

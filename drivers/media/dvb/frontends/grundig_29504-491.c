@@ -179,10 +179,7 @@ static fe_code_rate_t tda8083_get_fec (struct dvb_i2c_bus *i2c)
 	static fe_code_rate_t fec_tab [] = { FEC_8_9, FEC_1_2, FEC_2_3, FEC_3_4,
 				       FEC_4_5, FEC_5_6, FEC_6_7, FEC_7_8 };
 
-	index = tda8083_readreg (i2c, 0x0e) & 0x3;
-
-	if (index > 7)
-		return FEC_NONE;
+	index = tda8083_readreg(i2c, 0x0e) & 0x07;
 
 	return fec_tab [index];
 }
@@ -436,19 +433,17 @@ static int grundig_29504_491_ioctl (struct dvb_frontend *fe, unsigned int cmd,
 } 
 
 
-static int tda8083_attach (struct dvb_i2c_bus *i2c)
+static int tda8083_attach (struct dvb_i2c_bus *i2c, void **data)
 {
 	if ((tda8083_readreg (i2c, 0x00)) != 0x05)
 		return -ENODEV;
 
-	dvb_register_frontend (grundig_29504_491_ioctl, i2c, NULL,
+	return dvb_register_frontend (grundig_29504_491_ioctl, i2c, NULL,
 			       &grundig_29504_491_info);
-
-	return 0;
 }
 
 
-static void tda8083_detach (struct dvb_i2c_bus *i2c)
+static void tda8083_detach (struct dvb_i2c_bus *i2c, void *data)
 {
 	dvb_unregister_frontend (grundig_29504_491_ioctl, i2c);
 }

@@ -50,7 +50,7 @@
 #include <linux/completion.h>
 #include <linux/interrupt.h>
 #include <asm/semaphore.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include "scsi.h"
 #include "hosts.h"
 #include <scsi/scsicam.h>
@@ -295,7 +295,6 @@ static int aac_detect(Scsi_Host_Template *template)
 			printk(KERN_WARNING "aacraid: unable to register \"aac\" device.\n");
 	}
 
-	template->present = aac_count; /* # of cards of this type found */
 	return aac_count;
 }
 
@@ -566,7 +565,7 @@ static int aac_ioctl(Scsi_Device * scsi_dev_ptr, int cmd, void * arg)
 
 static int aac_cfg_open(struct inode * inode, struct file * file )
 {
-	unsigned minor_number = minor(inode->i_rdev);
+	unsigned minor_number = iminor(inode);
 	if(minor_number >= aac_count)
 		return -ENODEV;
 	return 0;
@@ -602,7 +601,7 @@ static int aac_cfg_release(struct inode * inode, struct file * file )
  
 static int aac_cfg_ioctl(struct inode * inode,  struct file * file, unsigned int cmd, unsigned long arg )
 {
-	struct aac_dev *dev = aac_devices[minor(inode->i_rdev)];
+	struct aac_dev *dev = aac_devices[iminor(inode)];
 	return aac_do_ioctl(dev, cmd, (void *)arg);
 }
 

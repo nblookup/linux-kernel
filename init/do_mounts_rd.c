@@ -5,6 +5,7 @@
 #include <linux/ext2_fs.h>
 #include <linux/romfs_fs.h>
 #include <linux/initrd.h>
+#include <linux/string.h>
 
 #include "do_mounts.h"
 
@@ -184,7 +185,7 @@ int __init rd_load_image(char *from)
 	else
 		devblocks >>= 1;
 
-	if (strcmp(from, "/dev/initrd") == 0)
+	if (strcmp(from, "/initrd.image") == 0)
 		devblocks = nblocks;
 
 	if (devblocks == 0) {
@@ -331,7 +332,7 @@ static int __init fill_inbuf(void)
 	
 	insize = read(crd_infd, inbuf, INBUFSIZ);
 	if (insize == 0) {
-		error("RAMDISK: ran out of compressed data\n");
+		error("RAMDISK: ran out of compressed data");
 		return -1;
 	}
 
@@ -368,7 +369,7 @@ static void __init flush_window(void)
 
 static void __init error(char *x)
 {
-	printk(KERN_ERR "%s", x);
+	printk(KERN_ERR "%s\n", x);
 	exit_code = 1;
 	unzip_error = 1;
 }

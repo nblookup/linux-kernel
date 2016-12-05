@@ -25,6 +25,8 @@
  * - reorganize kmallocs in ray_attach, checking all for failure
  *   and releasing the previous allocations if one fails
  *
+ * Daniele Bellucci <bellucda@tiscali.it> - 07/10/2003
+ * - Audit copy_to_user in ioctl(SIOCGIWESSID)
  * 
 =============================================================================*/
 
@@ -92,7 +94,7 @@ MODULE_PARM(pc_debug, "i");
 #endif
 /** Prototypes based on PCMCIA skeleton driver *******************************/
 static void ray_config(dev_link_t *link);
-static void ray_release(u_long arg);
+static void ray_release(dev_link_t *link);
 static int ray_event(event_t event, int priority, event_callback_args_t *args);
 static dev_link_t *ray_attach(void);
 static void ray_detach(dev_link_t *);
@@ -103,6 +105,9 @@ static int ray_dev_config(struct net_device *dev, struct ifmap *map);
 static struct net_device_stats *ray_get_stats(struct net_device *dev);
 static int ray_dev_init(struct net_device *dev);
 static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
+
+static struct ethtool_ops netdev_ethtool_ops;
+
 static int ray_open(struct net_device *dev);
 static int ray_dev_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
@@ -133,7 +138,7 @@ static void ray_update_parm(struct net_device *dev, UCHAR objid, UCHAR *value, i
 static void verify_dl_startup(u_long);
 
 /* Prototypes for interrpt time functions **********************************/
-static void ray_interrupt (int reg, void *dev_id, struct pt_regs *regs);
+static irqreturn_t ray_interrupt (int reg, void *dev_id, struct pt_regs *regs);
 static void clear_interrupt(ray_dev_t *local);
 static void rx_deauthenticate(ray_dev_t *local, struct rcs *prcs, 
                        unsigned int pkt_addr, int rx_len);
@@ -314,24 +319,6 @@ static char hop_pattern_length[] = { 1,
 
 static char rcsid[] = "Raylink/WebGear wireless LAN - Corey <Thomas corey@world.std.com>";
 
-/*======================================================================
-
-    This bit of code is used to avoid unregistering network devices
-    at inappropriate times.  2.2 and later kernels are fairly picky
-    about when this can happen.
-    
-======================================================================*/
-
-static void flush_stale_links(void)
-{
-    dev_link_t *link, *next;
-    for (link = dev_list; link; link = next) {
-	next = link->next;
-	if (link->state & DEV_STALE_LINK)
-	    ray_detach(link);
-    }
-}
-
 /*=============================================================================
     ray_attach() creates an "instance" of the driver, allocating
     local data structures for one device.  The device is registered
@@ -349,7 +336,6 @@ static dev_link_t *ray_attach(void)
     struct net_device *dev;
     
     DEBUG(1, "ray_attach()\n");
-    flush_stale_links();
 
     /* Initialize the dev_link_t structure */
     link = kmalloc(sizeof(struct dev_link_t), GFP_KERNEL);
@@ -371,10 +357,6 @@ static dev_link_t *ray_attach(void)
     memset(link, 0, sizeof(struct dev_link_t));
     memset(dev, 0, sizeof(struct net_device));
     memset(local, 0, sizeof(ray_dev_t));
-
-    init_timer(&link->release);
-    link->release.function = &ray_release;
-    link->release.data = (u_long)link;
 
     /* The io structure describes IO port mapping. None used here */
     link->io.NumPorts1 = 0;
@@ -410,6 +392,7 @@ static dev_link_t *ray_attach(void)
     dev->set_config = &ray_dev_config;
     dev->get_stats  = &ray_get_stats;
     dev->do_ioctl = &ray_dev_ioctl;
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 #if WIRELESS_EXT > 7	/* If wireless extension exist in the kernel */
     dev->get_wireless_stats = ray_get_wireless_stats;
 #endif
@@ -480,13 +463,10 @@ static void ray_detach(dev_link_t *link)
       the release() function is called, that will trigger a proper
       detach().
     */
-    del_timer(&link->release);
     if (link->state & DEV_CONFIG) {
-        ray_release((u_long)link);
-        if(link->state & DEV_STALE_CONFIG) {
-            link->state |= DEV_STALE_LINK;
+        ray_release(link);
+        if(link->state & DEV_STALE_CONFIG)
             return;
-        }
     }
 
     /* Break the link with Card Services */
@@ -600,14 +580,14 @@ static void ray_config(dev_link_t *link)
     DEBUG(3,"ray_config rmem=%p\n",local->rmem);
     DEBUG(3,"ray_config amem=%p\n",local->amem);
     if (ray_init(dev) < 0) {
-        ray_release((u_long)link);
+        ray_release(link);
         return;
     }
 
     i = register_netdev(dev);
     if (i != 0) {
         printk("ray_config register_netdev() failed\n");
-        ray_release((u_long)link);
+        ray_release(link);
         return;
     }
 
@@ -625,7 +605,7 @@ static void ray_config(dev_link_t *link)
 cs_failed:
     cs_error(link->handle, last_fn, last_ret);
 
-    ray_release((u_long)link);
+    ray_release(link);
 } /* ray_config */
 /*===========================================================================*/
 static int ray_init(struct net_device *dev)
@@ -896,9 +876,8 @@ static void join_net(u_long data)
     device, and release the PCMCIA configuration.  If the device is
     still open, this will be postponed until it is closed.
 =============================================================================*/
-static void ray_release(u_long arg)
+static void ray_release(dev_link_t *link)
 {
-    dev_link_t *link = (dev_link_t *)arg;
     struct net_device *dev = link->priv; 
     ray_dev_t *local = dev->priv;
     int i;
@@ -932,7 +911,11 @@ static void ray_release(u_long arg)
     if ( i != CS_SUCCESS ) DEBUG(0,"ReleaseIRQ ret = %x\n",i);
 
     DEBUG(2,"ray_release ending\n");
-} /* ray_release */
+
+    if (link->state & DEV_STALE_CONFIG)
+	    ray_detach(link);
+}
+
 /*=============================================================================
     The card status event handler.  Mostly, this schedules other
     stuff to run after an event is received.  A CARD_REMOVAL event
@@ -957,7 +940,7 @@ static int ray_event(event_t event, int priority,
         link->state &= ~DEV_PRESENT;
         netif_device_detach(dev);
         if (link->state & DEV_CONFIG) {
-            mod_timer(&link->release, jiffies + HZ/20);
+	    ray_release(link);
             del_timer(&local->timer);
         }
         break;
@@ -1230,25 +1213,15 @@ AP to AP        1    1        dest AP    src AP          dest     source
 
 /*===========================================================================*/
 
-static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
 {
-	u32 ethcmd;
-		
-	if (copy_from_user(&ethcmd, useraddr, sizeof(ethcmd)))
-		return -EFAULT;
-	
-	switch (ethcmd) {
-	case ETHTOOL_GDRVINFO: {
-		struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
-		strncpy(info.driver, "ray_cs", sizeof(info.driver)-1);
-		if (copy_to_user(useraddr, &info, sizeof(info)))
-			return -EFAULT;
-		return 0;
-	}
-	}
-	
-	return -EOPNOTSUPP;
+	strcpy(info->driver, "ray_cs");
 }
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
 
 /*====================================================================*/
 
@@ -1269,10 +1242,6 @@ static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
     /* Validate the command */
     switch (cmd)
     {
-    case SIOCETHTOOL:
-      err = netdev_ethtool_ioctl(dev, (void *) ifr->ifr_data);
-      break;
-
 #if WIRELESS_EXT > 7
       /* --------------- WIRELESS EXTENSIONS --------------- */
       /* Get name */
@@ -1315,7 +1284,8 @@ static int ray_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	  /* Push it out ! */
 	  wrq->u.data.length = strlen(essid) + 1;
 	  wrq->u.data.flags = 1; /* active */
-	  copy_to_user(wrq->u.data.pointer, essid, sizeof(essid));
+	  if (copy_to_user(wrq->u.data.pointer, essid, sizeof(essid)))
+		  err = -EFAULT;
 	}
       break;
 
@@ -1766,7 +1736,7 @@ static int ray_dev_close(struct net_device *dev)
     link->open--;
     netif_stop_queue(dev);
     if (link->state & DEV_STALE_CONFIG)
-	mod_timer(&link->release, jiffies + HZ/20);
+	    ray_release(link);
 
     /* In here, we should stop the hardware (stop card from beeing active)
      * and set local->card_status to CARD_AWAITING_PARAM, so that while the
@@ -2063,7 +2033,7 @@ static void set_multicast_list(struct net_device *dev)
 /*=============================================================================
  * All routines below here are run at interrupt time.
 =============================================================================*/
-static void ray_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t ray_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
     struct net_device *dev = (struct net_device *)dev_id;
     dev_link_t *link;
@@ -2076,7 +2046,7 @@ static void ray_interrupt(int irq, void *dev_id, struct pt_regs * regs)
     UCHAR status;
 
     if (dev == NULL) /* Note that we want interrupts with dev->start == 0 */
-    return;
+	return IRQ_NONE;
 
     DEBUG(4,"ray_cs: interrupt for *dev=%p\n",dev);
 
@@ -2084,7 +2054,7 @@ static void ray_interrupt(int irq, void *dev_id, struct pt_regs * regs)
     link = (dev_link_t *)local->finder;
     if ( ! (link->state & DEV_PRESENT) || link->state & DEV_SUSPEND ) {
         DEBUG(2,"ray_cs interrupt from device not present or suspended.\n");
-        return;
+        return IRQ_NONE;
     }
     rcsindex = readb(&((struct scb *)(local->sram))->rcs_index);
 
@@ -2092,7 +2062,7 @@ static void ray_interrupt(int irq, void *dev_id, struct pt_regs * regs)
     {
         DEBUG(1,"ray_cs interrupt bad rcsindex = 0x%x\n",rcsindex);
         clear_interrupt(local);
-        return;
+        return IRQ_HANDLED;
     }
     if (rcsindex < NUMBER_OF_CCS) /* If it's a returned CCS */
     {
@@ -2248,6 +2218,7 @@ static void ray_interrupt(int irq, void *dev_id, struct pt_regs * regs)
         writeb(CCS_BUFFER_FREE, &prcs->buffer_status);
     }
     clear_interrupt(local);
+    return IRQ_HANDLED;
 } /* ray_interrupt */
 /*===========================================================================*/
 static void ray_rx(struct net_device *dev, ray_dev_t *local, struct rcs *prcs)

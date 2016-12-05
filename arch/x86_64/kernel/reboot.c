@@ -1,4 +1,5 @@
 /* Various gunk just to reboot the machine. */ 
+#include <linux/module.h>
 #include <linux/reboot.h>
 #include <linux/init.h>
 #include <linux/smp.h>
@@ -110,7 +111,7 @@ static void smp_halt(void)
 	}
 
 	/* Wait for all other CPUs to have run smp_stop_cpu */
-	while (cpu_online_map) 
+	while (!cpus_empty(cpu_online_map))
 		rep_nop(); 
 }
 #endif
@@ -160,7 +161,7 @@ void machine_restart(char * __unused)
 		}
 
 		case BOOT_TRIPLE: 
-		__asm__ __volatile__("lidt %0": :"m" (no_idt));
+		__asm__ __volatile__("lidt (%0)": :"r" (&no_idt));
 		__asm__ __volatile__("int3");
 
 			reboot_type = BOOT_KBD;
@@ -169,12 +170,18 @@ void machine_restart(char * __unused)
 	}      
 }
 
+EXPORT_SYMBOL(machine_restart);
+
 void machine_halt(void)
 {
 }
+
+EXPORT_SYMBOL(machine_halt);
 
 void machine_power_off(void)
 {
 	if (pm_power_off)
 		pm_power_off();
 }
+
+EXPORT_SYMBOL(machine_power_off);

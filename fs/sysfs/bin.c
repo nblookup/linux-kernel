@@ -47,8 +47,8 @@ read(struct file * file, char __user * userbuf, size_t count, loff_t * off)
 		return ret;
 	count = ret;
 
-	if (copy_to_user(userbuf, buffer + offs, count) != 0)
-		return -EINVAL;
+	if (copy_to_user(userbuf, buffer, count))
+		return -EFAULT;
 
 	pr_debug("offs = %lld, *off = %lld, count = %zd\n", offs, *off, count);
 
@@ -83,7 +83,7 @@ static ssize_t write(struct file * file, const char __user * userbuf,
 			count = size - offs;
 	}
 
-	if (copy_from_user(buffer + offs, userbuf, count))
+	if (copy_from_user(buffer, userbuf, count))
 		return -EFAULT;
 
 	count = flush_write(dentry, buffer, offs, count);
@@ -168,6 +168,7 @@ int sysfs_create_bin_file(struct kobject * kobj, struct bin_attribute * attr)
 			dentry->d_inode->i_size = attr->size;
 			dentry->d_inode->i_fop = &bin_fops;
 		}
+		dput(dentry);
 	} else
 		error = PTR_ERR(dentry);
 	up(&parent->d_inode->i_sem);

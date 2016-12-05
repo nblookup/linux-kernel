@@ -16,7 +16,6 @@
  * initialization stuff for PXA machines which can be overridden later if
  * need be.
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -103,7 +102,7 @@ EXPORT_SYMBOL(get_lclk_frequency_10khz);
 
 void pxa_gpio_mode(int gpio_mode)
 {
-	long flags;
+	unsigned long flags;
 	int gpio = gpio_mode & GPIO_MD_MASK_NR;
 	int fn = (gpio_mode & GPIO_MD_MASK_FN) >> 8;
 	int gafr;

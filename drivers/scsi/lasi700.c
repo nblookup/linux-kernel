@@ -59,7 +59,7 @@ MODULE_AUTHOR("James Bottomley");
 MODULE_DESCRIPTION("lasi700 SCSI Driver");
 MODULE_LICENSE("GPL");
 
-static struct parisc_device_id lasi700_scsi_tbl[] = {
+static struct parisc_device_id lasi700_ids[] = {
 	LASI700_ID_TABLE,
 	LASI710_ID_TABLE,
 	{ 0 }
@@ -69,32 +69,22 @@ static Scsi_Host_Template lasi700_template = {
 	.name		= "LASI SCSI 53c700",
 	.proc_name	= "lasi700",
 	.this_id	= 7,
+	.module		= THIS_MODULE,
 };
-MODULE_DEVICE_TABLE(parisc, lasi700_scsi_tbl);
-
-static struct parisc_driver lasi700_driver = {
-	.name =		"Lasi SCSI",
-	.id_table =	lasi700_scsi_tbl,
-	.probe =	lasi700_driver_callback,
-	.remove =	__devexit_p(lasi700_driver_remove),
-};
+MODULE_DEVICE_TABLE(parisc, lasi700_ids);
 
 static int __init
-lasi700_driver_callback(struct parisc_device *dev)
+lasi700_probe(struct parisc_device *dev)
 {
 	unsigned long base = dev->hpa + LASI_SCSI_CORE_OFFSET;
 	struct NCR_700_Host_Parameters *hostdata;
 	struct Scsi_Host *host;
 
-	snprintf(dev->dev.name, sizeof(dev->dev.name), "%s",
-		 (dev->id.sversion == LASI_700_SVERSION) ?
-		  "lasi700" : "lasi710");
-
 	hostdata = kmalloc(sizeof(*hostdata), GFP_KERNEL);
 	if (!hostdata) {
 		printk(KERN_ERR "%s: Failed to allocate host data\n",
-		       dev->dev.name);
-		return 1;
+		       dev->dev.bus_id);
+		return -ENOMEM;
 	}
 	memset(hostdata, 0, sizeof(struct NCR_700_Host_Parameters));
 
@@ -121,20 +111,23 @@ lasi700_driver_callback(struct parisc_device *dev)
 
 	host->irq = dev->irq;
 	if (request_irq(dev->irq, NCR_700_intr, SA_SHIRQ,
-				dev->dev.name, host)) {
+				dev->dev.bus_id, host)) {
 		printk(KERN_ERR "%s: irq problem, detaching\n",
-		       dev->dev.name);
+		       dev->dev.bus_id);
 		goto out_put_host;
 	}
 
+	if (scsi_add_host(host, &dev->dev))
+		goto out_free_irq;
 	dev_set_drvdata(&dev->dev, host);
-	scsi_add_host(host, &dev->dev);
+	scsi_scan_host(host);
 
 	return 0;
 
+ out_free_irq:
+	free_irq(host->irq, host);
  out_put_host:
 	scsi_host_put(host);
-
  out_kfree:
 	kfree(hostdata);
 	return -ENODEV;
@@ -155,6 +148,13 @@ lasi700_driver_remove(struct parisc_device *dev)
 	return 0;
 }
 
+static struct parisc_driver lasi700_driver = {
+	.name =		"Lasi SCSI",
+	.id_table =	lasi700_ids,
+	.probe =	lasi700_probe,
+	.remove =	__devexit_p(lasi700_driver_remove),
+};
+
 static int __init
 lasi700_init(void)
 {
@@ -165,7 +165,6 @@ static void __exit
 lasi700_exit(void)
 {
 	unregister_parisc_driver(&lasi700_driver);
-	scsi_sysfs_release_attributes(&lasi700_template);
 }
 
 module_init(lasi700_init);

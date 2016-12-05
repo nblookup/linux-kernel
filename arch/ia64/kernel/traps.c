@@ -7,6 +7,20 @@
  * 05/12/00 grao <goutham.rao@intel.com> : added isr in siginfo for SIGFPE
  */
 
+#include <linux/config.h>
+#include <linux/kernel.h>
+#include <linux/init.h>
+#include <linux/sched.h>
+#include <linux/tty.h>
+#include <linux/vt_kern.h>		/* For unblank_screen() */
+
+#include <asm/fpswa.h>
+#include <asm/hardirq.h>
+#include <asm/ia32.h>
+#include <asm/intrinsics.h>
+#include <asm/processor.h>
+#include <asm/uaccess.h>
+
 /*
  * fp_emulate() needs to be able to access and update all floating point registers.  Those
  * saved in pt_regs can be accessed through that structure, but those not saved, will be
@@ -15,6 +29,7 @@
  * by declaring preserved registers that are not marked as "fixed" as global register
  * variables.
  */
+#ifdef ASM_SUPPORTED
 register double f2 asm ("f2"); register double f3 asm ("f3");
 register double f4 asm ("f4"); register double f5 asm ("f5");
 
@@ -27,20 +42,7 @@ register double f24 asm ("f24"); register double f25 asm ("f25");
 register double f26 asm ("f26"); register double f27 asm ("f27");
 register double f28 asm ("f28"); register double f29 asm ("f29");
 register double f30 asm ("f30"); register double f31 asm ("f31");
-
-#include <linux/config.h>
-#include <linux/kernel.h>
-#include <linux/init.h>
-#include <linux/sched.h>
-#include <linux/tty.h>
-#include <linux/vt_kern.h>		/* For unblank_screen() */
-
-#include <asm/hardirq.h>
-#include <asm/ia32.h>
-#include <asm/processor.h>
-#include <asm/uaccess.h>
-
-#include <asm/fpswa.h>
+#endif
 
 extern spinlock_t timerlist_lock;
 
@@ -217,16 +219,14 @@ ia64_bad_break (unsigned long break_num, struct pt_regs *regs)
  * Unimplemented system calls.  This is called only for stuff that
  * we're supposed to implement but haven't done so yet.  Everything
  * else goes to sys_ni_syscall.
+ *
+ * XXX Remove this for v2.6.1.
  */
 asmlinkage long
 ia64_ni_syscall (unsigned long arg0, unsigned long arg1, unsigned long arg2, unsigned long arg3,
 		 unsigned long arg4, unsigned long arg5, unsigned long arg6, unsigned long arg7,
 		 unsigned long stack)
 {
-	struct pt_regs *regs = (struct pt_regs *) &stack;
-
-	printk(KERN_DEBUG "%s(%d): <sc%ld(%lx,%lx,%lx,%lx)>\n", current->comm, current->pid,
-	       regs->r15, arg0, arg1, arg2, arg3);
 	return -ENOSYS;
 }
 
@@ -333,7 +333,8 @@ handle_fpu_swa (int fp_fault, struct pt_regs *regs, unsigned long isr)
 	if ((fpu_swa_count < 4) && !(current->thread.flags & IA64_THREAD_FPEMU_NOPRINT)) {
 		last_time = jiffies;
 		++fpu_swa_count;
-		printk(KERN_WARNING "%s(%d): floating-point assist fault at ip %016lx, isr %016lx\n",
+		printk(KERN_WARNING
+		       "%s(%d): floating-point assist fault at ip %016lx, isr %016lx\n",
 		       current->comm, current->pid, regs->cr_iip + ia64_psr(regs)->ri, isr);
 	}
 
@@ -357,6 +358,10 @@ handle_fpu_swa (int fp_fault, struct pt_regs *regs, unsigned long isr)
 			siginfo.si_addr = (void *) (regs->cr_iip + ia64_psr(regs)->ri);
 			if (isr & 0x11) {
 				siginfo.si_code = FPE_FLTINV;
+			} else if (isr & 0x22) {
+				/* denormal operand gets the same si_code as underflow 
+				* see arch/i386/kernel/traps.c:math_error()  */
+				siginfo.si_code = FPE_FLTUND;
 			} else if (isr & 0x44) {
 				siginfo.si_code = FPE_FLTDIV;
 			}
@@ -562,10 +567,10 @@ ia64_fault (unsigned long vector, unsigned long isr, unsigned long ifa,
 		}
 		siginfo.si_signo = SIGTRAP;
 		siginfo.si_errno = 0;
-		siginfo.si_flags = 0;
-		siginfo.si_isr = 0;
-		siginfo.si_addr = (void *) ifa;
-		siginfo.si_imm = 0;
+		siginfo.si_addr  = (void *) ifa;
+		siginfo.si_imm   = 0;
+		siginfo.si_flags = __ISR_VALID;
+		siginfo.si_isr   = isr;
 		force_sig_info(SIGTRAP, &siginfo, current);
 		return;
 

@@ -34,7 +34,6 @@
 #include <linux/fs.h>
 #include <linux/poll.h>
 #include <linux/smp_lock.h>
-#include <linux/proc_fs.h>
 #include <linux/delay.h>
 #include <linux/devfs_fs_kernel.h>
 #include <linux/bitops.h>
@@ -47,7 +46,6 @@
 
 #include "ieee1394.h"
 #include "ieee1394_types.h"
-#include "nodemgr.h"
 #include "hosts.h"
 #include "ieee1394_core.h"
 #include "highlevel.h"

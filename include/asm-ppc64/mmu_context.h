@@ -127,7 +127,8 @@ destroy_context(struct mm_struct *mm)
 #endif
 
 	mmu_context_queue.size++;
-	mmu_context_queue.elements[index] = mm->context;
+	mmu_context_queue.elements[index] =
+		mm->context & ~CONTEXT_LOW_HPAGES;
 
 	spin_unlock_irqrestore(&mmu_context_queue.lock, flags);
 }
@@ -143,7 +144,7 @@ switch_mm(struct mm_struct *prev, struct mm_struct *next,
 	  struct task_struct *tsk)
 {
 	flush_stab(tsk, next);
-	set_bit(smp_processor_id(), &next->cpu_vm_mask);
+	cpu_set(smp_processor_id(), next->cpu_vm_mask);
 }
 
 #define deactivate_mm(tsk,mm)	do { } while (0)
@@ -188,6 +189,8 @@ static inline unsigned long
 get_vsid( unsigned long context, unsigned long ea )
 {
 	unsigned long ordinal, vsid;
+
+	context &= ~CONTEXT_LOW_HPAGES;
 
 	ordinal = (((ea >> 28) & 0x1fffff) * LAST_USER_CONTEXT) | context;
 	vsid = (ordinal * VSID_RANDOMIZER) & VSID_MASK;

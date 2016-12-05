@@ -126,11 +126,13 @@ pci_find_capability(struct pci_dev *dev, int cap)
 
 /**
  * pci_bus_find_capability - query for devices' capabilities 
- * @dev: PCI device to query
- * @cap: capability code
+ * @bus:   the PCI bus to query
+ * @devfn: PCI device to query
+ * @cap:   capability code
  *
  * Like pci_find_capability() but works for pci devices that do not have a
  * pci_dev structure set up yet. 
+ *
  * Returns the address of the requested capability structure within the
  * device's PCI configuration space or 0 in case the device does not
  * support it.
@@ -359,7 +361,7 @@ pci_enable_device_bars(struct pci_dev *dev, int bars)
 int
 pci_enable_device(struct pci_dev *dev)
 {
-	return pci_enable_device_bars(dev, 0x3F);
+	return pci_enable_device_bars(dev, (1 << PCI_NUM_RESOURCES) - 1);
 }
 
 /**
@@ -506,7 +508,7 @@ err_out:
 		pci_resource_flags(pdev, bar) & IORESOURCE_IO ? "I/O" : "mem",
 		bar + 1, /* PCI BAR # */
 		pci_resource_len(pdev, bar), pci_resource_start(pdev, bar),
-		pdev->slot_name);
+		pci_name(pdev));
 	return -EBUSY;
 }
 
@@ -555,7 +557,7 @@ err_out:
 		pci_resource_flags(pdev, i) & IORESOURCE_IO ? "I/O" : "mem",
 		i + 1, /* PCI BAR # */
 		pci_resource_len(pdev, i), pci_resource_start(pdev, i),
-		pdev->slot_name);
+		pci_name(pdev));
 	while(--i >= 0)
 		pci_release_region(pdev, i);
 		
@@ -576,7 +578,7 @@ pci_set_master(struct pci_dev *dev)
 
 	pci_read_config_word(dev, PCI_COMMAND, &cmd);
 	if (! (cmd & PCI_COMMAND_MASTER)) {
-		DBG("PCI: Enabling bus mastering for device %s\n", dev->slot_name);
+		DBG("PCI: Enabling bus mastering for device %s\n", pci_name(dev));
 		cmd |= PCI_COMMAND_MASTER;
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
 	}
@@ -620,7 +622,7 @@ pci_generic_prep_mwi(struct pci_dev *dev)
 		return 0;
 
 	printk(KERN_WARNING "PCI: cache line size of %d is not supported "
-	       "by device %s\n", pci_cache_line_size << 2, dev->slot_name);
+	       "by device %s\n", pci_cache_line_size << 2, pci_name(dev));
 
 	return -EINVAL;
 }
@@ -653,7 +655,7 @@ pci_set_mwi(struct pci_dev *dev)
 
 	pci_read_config_word(dev, PCI_COMMAND, &cmd);
 	if (! (cmd & PCI_COMMAND_INVALIDATE)) {
-		DBG("PCI: Enabling Mem-Wr-Inval for device %s\n", dev->slot_name);
+		DBG("PCI: Enabling Mem-Wr-Inval for device %s\n", pci_name(dev));
 		cmd |= PCI_COMMAND_INVALIDATE;
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
 	}

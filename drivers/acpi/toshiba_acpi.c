@@ -33,7 +33,7 @@
  *
  */
 
-#define TOSHIBA_ACPI_VERSION	"0.15"
+#define TOSHIBA_ACPI_VERSION	"0.16"
 #define PROC_INTERFACE_VERSION	1
 
 #include <linux/kernel.h>
@@ -41,7 +41,6 @@
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/proc_fs.h>
-#include <linux/version.h>
 
 #include <acpi/acpi_drivers.h>
 
@@ -108,7 +107,9 @@ snscanf(const char* str, int n, const char* format, ...)
 	int result;
 	char* str2 = kmalloc(n + 1, GFP_KERNEL);
 	if (str2 == 0) return 0;
-	strlcpy(str2, str, n);
+	/* NOTE: don't even _think_ about replacing this with strlcpy */
+	strncpy(str2, str, n);
+	str2[n] = 0;
 	va_start(args, format);
 	result = vsscanf(str2, format, args);
 	va_end(args);

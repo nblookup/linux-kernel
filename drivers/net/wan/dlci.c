@@ -40,7 +40,6 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
@@ -55,66 +54,11 @@
 #include <asm/dma.h>
 #include <asm/uaccess.h>
 
-static const char devname[] = "dlci";
 static const char version[] = "DLCI driver v0.35, 4 Jan 1997, mike.mclagan@linux.org";
 
-static struct net_device *open_dev[CONFIG_DLCI_COUNT];
+static LIST_HEAD(dlci_devs);
 
-static char *basename[16];
-
-int dlci_init(struct net_device *dev);
-
-/* allow FRAD's to register their name as a valid FRAD */
-int register_frad(const char *name)
-{
-	int i;
-
-	if (!name)
-		return(-EINVAL);
-
-	for (i=0;i<sizeof(basename) / sizeof(char *);i++)
-	{
-		if (!basename[i])
-			break;
-
-		/* take care of multiple registrations */
-		if (strcmp(basename[i], name) == 0)
-			return(0);
-	}
-
-	if (i == sizeof(basename) / sizeof(char *))
-		return(-EMLINK);
-
-	basename[i] = kmalloc(strlen(name) + 1, GFP_KERNEL);
-	if (!basename[i])
-		return(-ENOMEM);
-
-	strcpy(basename[i], name);
-
-	return(0);
-}
-
-EXPORT_SYMBOL(register_frad);
-
-int unregister_frad(const char *name)
-{
-	int i;
-
-	if (!name)
-		return(-EINVAL);
-
-	for (i=0;i<sizeof(basename) / sizeof(char *);i++)
-		if (basename[i] && (strcmp(basename[i], name) == 0))
-			break;
-
-	if (i == sizeof(basename) / sizeof(char *))
-		return(-EINVAL);
-
-	kfree(basename[i]);
-	basename[i] = NULL;
-
-	return(0);
-}
+static void dlci_setup(struct net_device *);
 
 /* 
  * these encapsulate the RFC 1490 requirements as well as 
@@ -168,6 +112,14 @@ static void dlci_receive(struct sk_buff *skb, struct net_device *dev)
 	int					process, header;
 
 	dlp = dev->priv;
+	if (!pskb_may_pull(skb, sizeof(*hdr))) {
+		printk(KERN_NOTICE "%s: invalid data no header\n",
+		       dev->name);
+		dlp->stats.rx_errors++;
+		kfree_skb(skb);
+		return;
+	}
+
 	hdr = (struct frhdr *) skb->data;
 	process = 0;
 	header = 0;
@@ -277,7 +229,7 @@ static int dlci_transmit(struct sk_buff *skb, struct net_device *dev)
 	return(ret);
 }
 
-int dlci_config(struct net_device *dev, struct dlci_conf *conf, int get)
+static int dlci_config(struct net_device *dev, struct dlci_conf *conf, int get)
 {
 	struct dlci_conf	config;
 	struct dlci_local	*dlp;
@@ -311,7 +263,7 @@ int dlci_config(struct net_device *dev, struct dlci_conf *conf, int get)
 	return(0);
 }
 
-int dlci_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
+static int dlci_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
 	struct dlci_local *dlp;
 
@@ -401,122 +353,108 @@ static struct net_device_stats *dlci_get_stats(struct net_device *dev)
 	return(&dlp->stats);
 }
 
-int dlci_add(struct dlci_add *dlci)
+static int dlci_add(struct dlci_add *dlci)
 {
-	struct net_device		*master, *slave;
+	struct net_device	*master, *slave;
 	struct dlci_local	*dlp;
 	struct frad_local	*flp;
-	int			err, i;
-	char			buf[10];
+	int			err = -EINVAL;
+
 
 	/* validate slave device */
-	slave = __dev_get_by_name(dlci->devname);
+	slave = dev_get_by_name(dlci->devname);
 	if (!slave)
-		return(-ENODEV);
+		return -ENODEV;
 
-	if (slave->type != ARPHRD_FRAD)
-		return(-EINVAL);
-
-	/* check for registration */
-	for (i=0;i<sizeof(basename) / sizeof(char *); i++)
-		if ((basename[i]) && 
-			 (strncmp(dlci->devname, basename[i], strlen(basename[i])) == 0) && 
-			 (strlen(dlci->devname) > strlen(basename[i])))
-			break;
-
-	if (i == sizeof(basename) / sizeof(char *))
-		return(-EINVAL);
-
-	/* check for too many open devices : should this be dynamic ? */
-	for(i=0;i<CONFIG_DLCI_COUNT;i++)
-		if (!open_dev[i])
-			break;
-
-	if (i == CONFIG_DLCI_COUNT)
-		return(-ENOSPC);  /*  #### Alan: Comments on this?? */
+	if (slave->type != ARPHRD_FRAD || slave->priv == NULL)
+		goto err1;
 
 	/* create device name */
-	sprintf(buf, "%s%02i", devname, i);
-
-	master = kmalloc(sizeof(*master), GFP_KERNEL);
-	if (!master)
-		return(-ENOMEM);
-
-	memset(master, 0, sizeof(*master));
-
-	strcpy(master->name, buf);
-	master->init = dlci_init;
-	master->flags = 0;
-
-	err = register_netdev(master);
-	if (err < 0)
-	{
-		kfree(master);
-		return(err);
+	master = alloc_netdev( sizeof(struct dlci_local), "dlci%d",
+			      dlci_setup);
+	if (!master) {
+		err = -ENOMEM;
+		goto err1;
 	}
+
+	/* make sure same slave not already registered */
+	rtnl_lock();
+	list_for_each_entry(dlp, &dlci_devs, list) {
+		if (dlp->slave == slave) {
+			err = -EBUSY;
+			goto err2;
+		}
+	}
+
+	err = dev_alloc_name(master, master->name);
+	if (err < 0)
+		goto err2;
 
 	*(short *)(master->dev_addr) = dlci->dlci;
 
 	dlp = (struct dlci_local *) master->priv;
 	dlp->slave = slave;
+	dlp->master = master;
 
 	flp = slave->priv;
-	err = flp ? (*flp->assoc)(slave, master) : -EINVAL;
+	err = (*flp->assoc)(slave, master);
 	if (err < 0)
-	{
-		unregister_netdev(master);
-		kfree(master->priv);
-		kfree(master);
-		return(err);
-	}
+		goto err2;
 
-	strcpy(dlci->devname, buf);
-	open_dev[i] = master;
-	MOD_INC_USE_COUNT;
+	err = register_netdevice(master);
+	if (err < 0) 
+		goto err2;
+
+	strcpy(dlci->devname, master->name);
+
+	list_add(&dlp->list, &dlci_devs);
+	rtnl_unlock();
+
 	return(0);
+
+ err2:
+	rtnl_unlock();
+	kfree(master);
+ err1:
+	dev_put(slave);
+	return(err);
 }
 
-int dlci_del(struct dlci_add *dlci)
+static int dlci_del(struct dlci_add *dlci)
 {
 	struct dlci_local	*dlp;
 	struct frad_local	*flp;
-	struct net_device		*master, *slave;
-	int			i, err;
+	struct net_device	*master, *slave;
+	int			err;
 
 	/* validate slave device */
 	master = __dev_get_by_name(dlci->devname);
 	if (!master)
 		return(-ENODEV);
 
-	if (netif_running(master))
+	if (netif_running(master)) {
 		return(-EBUSY);
+	}
 
 	dlp = master->priv;
 	slave = dlp->slave;
 	flp = slave->priv;
 
+	rtnl_lock();
 	err = (*flp->deassoc)(slave, master);
-	if (err)
-		return(err);
+	if (!err) {
+		list_del(&dlp->list);
 
-	unregister_netdev(master);
+		unregister_netdevice(master);
 
-	for(i=0;i<CONFIG_DLCI_COUNT;i++)
-		if (master == open_dev[i])
-			break;
+		dev_put(slave);
+	}
+	rtnl_unlock();
 
-	if (i<CONFIG_DLCI_COUNT)
-		open_dev[i] = NULL;
-
-	kfree(master->priv);
-	kfree(master);
-
-	MOD_DEC_USE_COUNT;
-
-	return(0);
+	return(err);
 }
 
-int dlci_ioctl(unsigned int cmd, void *arg)
+static int dlci_ioctl(unsigned int cmd, void *arg)
 {
 	struct dlci_add add;
 	int err;
@@ -548,16 +486,9 @@ int dlci_ioctl(unsigned int cmd, void *arg)
 	return(err);
 }
 
-int dlci_init(struct net_device *dev)
+static void dlci_setup(struct net_device *dev)
 {
-	struct dlci_local *dlp;
-
-	dev->priv = kmalloc(sizeof(struct dlci_local), GFP_KERNEL);
-	if (!dev->priv)
-		return(-ENOMEM);
-
-	memset(dev->priv, 0, sizeof(struct dlci_local));
-	dlp = dev->priv;
+	struct dlci_local *dlp = dev->priv;
 
 	dev->flags		= 0;
 	dev->open		= dlci_open;
@@ -567,36 +498,64 @@ int dlci_init(struct net_device *dev)
 	dev->hard_header	= dlci_header;
 	dev->get_stats		= dlci_get_stats;
 	dev->change_mtu		= dlci_change_mtu;
+	dev->destructor		= free_netdev;
 
 	dlp->receive		= dlci_receive;
 
 	dev->type		= ARPHRD_DLCI;
 	dev->hard_header_len	= sizeof(struct frhdr);
 	dev->addr_len		= sizeof(short);
-	memset(dev->dev_addr, 0, sizeof(dev->dev_addr));
 
-	return(0);
 }
 
-int __init init_dlci(void)
+/* if slave is unregistering, then cleanup master */
+static int dlci_dev_event(struct notifier_block *unused,
+			  unsigned long event, void *ptr)
 {
-	int i;
+	struct net_device *dev = (struct net_device *) ptr;
+
+	if (event == NETDEV_UNREGISTER) {
+		struct dlci_local *dlp;
+
+		list_for_each_entry(dlp, &dlci_devs, list) {
+			if (dlp->slave == dev) {
+				list_del(&dlp->list);
+				unregister_netdevice(dlp->master);
+				dev_put(dlp->slave);
+				break;
+			}
+		}
+	}
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block dlci_notifier = {
+	.notifier_call = dlci_dev_event,
+};
+
+static int __init init_dlci(void)
+{
 	dlci_ioctl_set(dlci_ioctl);
+	register_netdevice_notifier(&dlci_notifier);
 
 	printk("%s.\n", version);
-	
-	for(i=0;i<CONFIG_DLCI_COUNT;i++)
-		open_dev[i] = NULL;
-
-	for(i=0;i<sizeof(basename) / sizeof(char *);i++)
-		basename[i] = NULL;
 
 	return 0;
 }
 
-void __exit dlci_exit(void)
+static void __exit dlci_exit(void)
 {
+	struct dlci_local	*dlp, *nxt;
+	
 	dlci_ioctl_set(NULL);
+	unregister_netdevice_notifier(&dlci_notifier);
+
+	rtnl_lock();
+	list_for_each_entry_safe(dlp, nxt, &dlci_devs, list) {
+		unregister_netdevice(dlp->master);
+		dev_put(dlp->slave);
+	}
+	rtnl_unlock();
 }
 
 module_init(init_dlci);

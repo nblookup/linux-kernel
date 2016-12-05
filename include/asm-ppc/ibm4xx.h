@@ -16,48 +16,6 @@
 
 #include <linux/config.h>
 
-#ifdef CONFIG_4xx
-
-#ifndef __ASSEMBLY__
-
-/* Device Control Registers */
-
-#define stringify(s)	tostring(s)
-#define tostring(s)	#s
-
-#define mfdcr(rn) mfdcr_or_dflt(rn, 0)
-
-#define mfdcr_or_dflt(rn,default_rval) \
-	({unsigned int rval;						\
-	if (rn == 0)							\
-		rval = default_rval;					\
-	else								\
-		asm volatile("mfdcr %0," stringify(rn) : "=r" (rval));	\
-	rval;})
-
-#define mtdcr(rn, v)  \
-do {                  \
-	if (rn != 0) \
-		asm volatile("mtdcr " stringify(rn) ",%0" : : "r" (v));	\
-} while (0)
-
-/* R/W of indirect DCRs make use of standard naming conventions for DCRs */
-
-#define mfdcri(base, reg)			\
-({						\
-     mtdcr(base##_CFGADDR, base##_##reg);	\
-     mfdcr(base##_CFGDATA);			\
-})
-
-#define mtdcri(base, reg, data)			\
-do {						\
-     mtdcr(base##_CFGADDR, base##_##reg);	\
-     mtdcr(base##_CFGDATA, data);		\
-} while (0)
-#endif /* __ASSEMBLY__ */
-
-#endif /* CONFIG_4xx */
-
 #ifdef CONFIG_40x
 
 #if defined(CONFIG_ASH)
@@ -122,7 +80,25 @@ void ppc4xx_init(unsigned long r3, unsigned long r4, unsigned long r5,
 #define PCI_DRAM_OFFSET	0
 #endif
 
+#elif CONFIG_44x
+
+#if defined(CONFIG_EBONY)
+#include <platforms/4xx/ebony.h>
+#endif
+
+#if defined(CONFIG_OCOTEA)
+#include <platforms/4xx/ocotea.h>
+#endif
 
 #endif /* CONFIG_40x */
+
+#ifndef __ASSEMBLY__
+/*
+ * The "residual" board information structure the boot loader passes
+ * into the kernel.
+ */
+extern bd_t __res;
+#endif
+
 #endif /* __ASM_IBM4XX_H__ */
 #endif /* __KERNEL__ */

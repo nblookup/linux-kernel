@@ -98,6 +98,17 @@ int init_module(void)
 }
 EXPORT_SYMBOL(init_module);
 
+/* A thread that wants to hold a reference to a module only while it
+ * is running can call ths to safely exit.
+ * nfsd and lockd use this.
+ */
+void __module_put_and_exit(struct module *mod, long code)
+{
+	module_put(mod);
+	do_exit(code);
+}
+EXPORT_SYMBOL(__module_put_and_exit);
+	
 /* Find a module section: 0 means not found. */
 static unsigned int find_sec(Elf_Ehdr *hdr,
 			     Elf_Shdr *sechdrs,
@@ -374,9 +385,9 @@ static void module_unload_init(struct module *mod)
 
 	INIT_LIST_HEAD(&mod->modules_which_use_me);
 	for (i = 0; i < NR_CPUS; i++)
-		atomic_set(&mod->ref[i].count, 0);
+		local_set(&mod->ref[i].count, 0);
 	/* Hold reference count during initialization. */
-	atomic_set(&mod->ref[smp_processor_id()].count, 1);
+	local_set(&mod->ref[smp_processor_id()].count, 1);
 	/* Backwards compatibility macros put refcount during init. */
 	mod->waiter = current;
 }
@@ -471,9 +482,10 @@ static int stopref(void *cpu)
 	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
 	setscheduler(current->pid, SCHED_FIFO, &param);
 #endif
-	set_cpus_allowed(current, 1UL << (unsigned long)cpu);
+	set_cpus_allowed(current, cpumask_of_cpu((int)(long)cpu));
 
 	/* Ack: we are alive */
+	mb(); /* Theoretically the ack = 0 might not be on this CPU yet. */
 	atomic_inc(&stopref_thread_ack);
 
 	/* Simple state machine */
@@ -482,11 +494,13 @@ static int stopref(void *cpu)
 			local_irq_disable();
 			irqs_disabled = 1;
 			/* Ack: irqs disabled. */
+			mb(); /* Must read state first. */
 			atomic_inc(&stopref_thread_ack);
 		} else if (stopref_state == STOPREF_PREPARE && !prepared) {
 			/* Everyone is in place, hold CPU. */
 			preempt_disable();
 			prepared = 1;
+			mb(); /* Must read state first. */
 			atomic_inc(&stopref_thread_ack);
 		}
 		if (irqs_disabled || prepared)
@@ -496,6 +510,7 @@ static int stopref(void *cpu)
 	}
 
 	/* Ack: we are exiting. */
+	mb(); /* Must read state first. */
 	atomic_inc(&stopref_thread_ack);
 
 	if (irqs_disabled)
@@ -524,7 +539,7 @@ static void stopref_set_state(enum stopref_state state, int sleep)
 static int stop_refcounts(void)
 {
 	unsigned int i, cpu;
-	unsigned long old_allowed;
+	cpumask_t old_allowed;
 	int ret = 0;
 
 	/* One thread per cpu.  We'll do our own. */
@@ -532,7 +547,7 @@ static int stop_refcounts(void)
 
 	/* FIXME: racy with set_cpus_allowed. */
 	old_allowed = current->cpus_allowed;
-	set_cpus_allowed(current, 1UL << (unsigned long)cpu);
+	set_cpus_allowed(current, cpumask_of_cpu(cpu));
 
 	atomic_set(&stopref_thread_ack, 0);
 	stopref_num_threads = 0;
@@ -599,7 +614,7 @@ unsigned int module_refcount(struct module *mod)
 	unsigned int i, total = 0;
 
 	for (i = 0; i < NR_CPUS; i++)
-		total += atomic_read(&mod->ref[i].count);
+		total += local_read(&mod->ref[i].count);
 	return total;
 }
 EXPORT_SYMBOL(module_refcount);
@@ -610,7 +625,10 @@ static void free_module(struct module *mod);
 #ifdef CONFIG_MODULE_FORCE_UNLOAD
 static inline int try_force(unsigned int flags)
 {
-	return (flags & O_TRUNC);
+	int ret = (flags & O_TRUNC);
+	if (ret)
+		tainted |= TAINT_FORCED_MODULE;
+	return ret;
 }
 #else
 static inline int try_force(unsigned int flags)
@@ -830,6 +848,7 @@ int set_obsolete(const char *val, struct kernel_param *kp)
 {
 	unsigned int min, max;
 	unsigned int size, maxsize;
+	int dummy;
 	char *endp;
 	const char *p;
 	struct obsolete_modparm *obsparm = kp->arg;
@@ -852,19 +871,19 @@ int set_obsolete(const char *val, struct kernel_param *kp)
 	switch (*endp) {
 	case 'b':
 		return param_array(kp->name, val, min, max, obsparm->addr,
-				   1, param_set_byte);
+				   1, param_set_byte, &dummy);
 	case 'h':
 		return param_array(kp->name, val, min, max, obsparm->addr,
-				   sizeof(short), param_set_short);
+				   sizeof(short), param_set_short, &dummy);
 	case 'i':
 		return param_array(kp->name, val, min, max, obsparm->addr,
-				   sizeof(int), param_set_int);
+				   sizeof(int), param_set_int, &dummy);
 	case 'l':
 		return param_array(kp->name, val, min, max, obsparm->addr,
-				   sizeof(long), param_set_long);
+				   sizeof(long), param_set_long, &dummy);
 	case 's':
 		return param_array(kp->name, val, min, max, obsparm->addr,
-				   sizeof(char *), param_set_charp);
+				   sizeof(char *), param_set_charp, &dummy);
 
 	case 'c':
 		/* Undocumented: 1-5c50 means 1-5 strings of up to 49 chars,
@@ -881,7 +900,7 @@ int set_obsolete(const char *val, struct kernel_param *kp)
 		if (size >= maxsize) 
 			goto oversize;
 		return param_array(kp->name, val, min, max, obsparm->addr,
-				   maxsize, obsparm_copy_string);
+				   maxsize, obsparm_copy_string, &dummy);
 	}
 	printk(KERN_ERR "Unknown obsolete parameter type %s\n", obsparm->type);
 	return -EINVAL;
@@ -1197,7 +1216,8 @@ static void layout_sections(struct module *mod,
 			if ((s->sh_flags & masks[m][0]) != masks[m][0]
 			    || (s->sh_flags & masks[m][1])
 			    || s->sh_entsize != ~0UL
-			    || strstr(secstrings + s->sh_name, ".init"))
+			    || strncmp(secstrings + s->sh_name,
+				       ".init", 5) == 0)
 				continue;
 			s->sh_entsize = get_offset(&mod->core_size, s);
 			DEBUGP("\t%s\n", secstrings + s->sh_name);
@@ -1214,7 +1234,8 @@ static void layout_sections(struct module *mod,
 			if ((s->sh_flags & masks[m][0]) != masks[m][0]
 			    || (s->sh_flags & masks[m][1])
 			    || s->sh_entsize != ~0UL
-			    || !strstr(secstrings + s->sh_name, ".init"))
+			    || strncmp(secstrings + s->sh_name,
+				       ".init", 5) != 0)
 				continue;
 			s->sh_entsize = (get_offset(&mod->init_size, s)
 					 | INIT_OFFSET_MASK);
@@ -1420,7 +1441,7 @@ static struct module *load_module(void __user *umod,
 		}
 #ifndef CONFIG_MODULE_UNLOAD
 		/* Don't load .exit sections */
-		if (strstr(secstrings+sechdrs[i].sh_name, ".exit"))
+		if (strncmp(secstrings+sechdrs[i].sh_name, ".exit", 5) == 0)
 			sechdrs[i].sh_flags &= ~(unsigned long)SHF_ALLOC;
 #endif
 	}
@@ -1637,7 +1658,7 @@ static struct module *load_module(void __user *umod,
 				 NULL);
 	}
 	if (err < 0)
-		goto cleanup;
+		goto arch_cleanup;
 
 	/* Get rid of temporary copy */
 	vfree(hdr);
@@ -1645,6 +1666,8 @@ static struct module *load_module(void __user *umod,
 	/* Done! */
 	return mod;
 
+ arch_cleanup:
+	module_arch_cleanup(mod);
  cleanup:
 	module_unload_free(mod);
 	module_free(mod, mod->module_init);

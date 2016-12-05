@@ -36,6 +36,10 @@
  *	            module_init & module_exit.
  *                  Torben Mathiasen <tmm@image.dk>
  *
+ * September 2003 - Fix SMP support by removing cli/sti calls.
+ *                  Using spinlocks with a wait_queue instead.
+ *                  Felipe Damasio <felipewd@terra.com.br>
+ *
  * Things to do:
  *  - handle errors and status better, put everything into a single word
  *  - use interrupts (code mostly there, but a big hole still missing)
@@ -134,7 +138,7 @@
 #include <linux/cdrom.h>
 
 #define MAJOR_NR CDU535_CDROM_MAJOR
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 
 #define sony535_cd_base_io sonycd535 /* for compatible parameter passing with "insmod" */
 #include "sonycd535.h"
@@ -219,7 +223,7 @@ static unsigned short read_status_reg;
 static unsigned short data_reg;
 
 static spinlock_t sonycd535_lock = SPIN_LOCK_UNLOCKED; /* queue lock */
-static struct request_queue sonycd535_queue;
+static struct request_queue *sonycd535_queue;
 
 static int initialized;			/* Has the drive been initialized? */
 static int sony_disc_changed = 1;	/* Has the disk been changed
@@ -340,10 +344,14 @@ sony_sleep(void)
 	if (sony535_irq_used <= 0) {	/* poll */
 		yield();
 	} else {	/* Interrupt driven */
-		cli();
+		DEFINE_WAIT(wait);
+		
+		spin_lock_irq(&sonycd535_lock);
 		enable_interrupts();
-		interruptible_sleep_on(&cdu535_irq_wait);
-		sti();
+		prepare_to_wait(&cdu535_irq_wait, &wait, TASK_INTERRUPTIBLE);
+		spin_unlock_irq(&sonycd535_lock);
+		schedule();
+		finish_wait(&cdu535_irq_wait, &wait);
 	}
 }
 
@@ -804,14 +812,14 @@ do_cdu535_request(request_queue_t * q)
 
 		block = req->sector;
 		nsect = req->nr_sectors;
-		if (!(req->flags & REQ_CMD))
-			continue;	/* FIXME */
+		if (!blk_fs_request(req)) {
+			end_request(req, 0);
+			continue;
+		}
 		if (rq_data_dir(req) == WRITE) {
 			end_request(req, 0);
 			continue;
 		}
-		if (rq_data_dir(req) != READ)
-			panic("Unknown SONY CD cmd");
 		/*
 		 * If the block address is invalid or the request goes beyond
 		 * the end of the media, return an error.
@@ -888,8 +896,10 @@ do_cdu535_request(request_queue_t * q)
 					}
 					if (readStatus == BAD_STATUS) {
 						/* Sleep for a while, then retry */
-						current->state = TASK_INTERRUPTIBLE;
+						set_current_state(TASK_INTERRUPTIBLE);
+						spin_unlock_irq(&sonycd535_lock);
 						schedule_timeout(RETRY_FOR_BAD_STATUS*HZ/10);
+						spin_lock_irq(&sonycd535_lock);
 					}
 #if DEBUG > 0
 					printk(CDU535_MESSAGE_NAME
@@ -1060,7 +1070,6 @@ cdu_ioctl(struct inode *inode,
 	Byte cmd_buff[10], params[10];
 	int  i;
 	int  dsc_status;
-	int  err;
 
 	if (check_drive_status() != 0)
 		return -EIO;
@@ -1143,12 +1152,10 @@ cdu_ioctl(struct inode *inode,
 		break;
 
 	case CDROMPLAYMSF:			/* Play starting at the given MSF address. */
-		err = verify_area(VERIFY_READ, (char *)arg, 6);
-		if (err)
-			return err;
+		if (copy_from_user(params, (void *)arg, 6))
+			return -EFAULT;
 		spin_up_drive(status);
 		set_drive_mode(SONY535_AUDIO_DRIVE_MODE, status);
-		copy_from_user(params, (void *)arg, 6);
 
 		/* The parameters are given in int, must be converted */
 		for (i = 0; i < 3; i++) {
@@ -1473,7 +1480,7 @@ static int __init sony535_init(void)
 	/* look for the CD-ROM, follows the procedure in the DOS driver */
 	inb(select_unit_reg);
 	/* wait for 40 18 Hz ticks (reverse-engineered from DOS driver) */
-	current->state = TASK_INTERRUPTIBLE;
+	set_current_state(TASK_INTERRUPTIBLE);
 	schedule_timeout((HZ+17)*40/18);
 	inb(result_reg);
 
@@ -1551,8 +1558,13 @@ static int __init sony535_init(void)
 		err = -EIO;
 		goto out1;
 	}
-	blk_init_queue(&sonycd535_queue, do_cdu535_request, &sonycd535_lock);
-	blk_queue_hardsect_size(&sonycd535_queue, CDU535_BLOCK_SIZE);
+	sonycd535_queue = blk_init_queue(do_cdu535_request, &sonycd535_lock);
+	if (!sonycd535_queue) {
+		err = -ENOMEM;
+		goto out1a;
+	}
+
+	blk_queue_hardsect_size(sonycd535_queue, CDU535_BLOCK_SIZE);
 	sony_toc = kmalloc(sizeof(struct s535_sony_toc), GFP_KERNEL);
 	err = -ENOMEM;
 	if (!sony_toc)
@@ -1587,7 +1599,7 @@ static int __init sony535_init(void)
 			sony535_cd_base_io);
 		goto out7;
 	}
-	cdu_disk->queue = &sonycd535_queue;
+	cdu_disk->queue = sonycd535_queue;
 	add_disk(cdu_disk);
 	return 0;
 
@@ -1604,7 +1616,8 @@ out4:
 out3:
 	kfree(sony_toc);
 out2:
-	blk_cleanup_queue(&sonycd535_queue);
+	blk_cleanup_queue(sonycd535_queue);
+out1a:
 	unregister_blkdev(MAJOR_NR, CDU535_HANDLE);
 out1:
 	if (sony535_irq_used)
@@ -1666,7 +1679,7 @@ sony535_exit(void)
 	kfree(sony_toc);
 	del_gendisk(cdu_disk);
 	put_disk(cdu_disk);
-	blk_cleanup_queue(&sonycd535_queue);
+	blk_cleanup_queue(sonycd535_queue);
 	if (unregister_blkdev(MAJOR_NR, CDU535_HANDLE) == -EINVAL)
 		printk("Uh oh, couldn't unregister " CDU535_HANDLE "\n");
 	else
@@ -1678,3 +1691,4 @@ module_exit(sony535_exit);
 
 
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_BLOCKDEV_MAJOR(CDU535_CDROM_MAJOR);

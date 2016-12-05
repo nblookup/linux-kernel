@@ -71,7 +71,6 @@ struct proc_dir_entry {
 	write_proc_t *write_proc;
 	atomic_t count;		/* use count */
 	int deleted;		/* delete flag */
-	kdev_t	rdev;
 };
 
 struct kcore_list {
@@ -141,8 +140,6 @@ extern void proc_rtas_init(void);
 
 extern struct proc_dir_entry *proc_symlink(const char *,
 		struct proc_dir_entry *, const char *);
-extern struct proc_dir_entry *proc_mknod(const char *,mode_t,
-		struct proc_dir_entry *,kdev_t);
 extern struct proc_dir_entry *proc_mkdir(const char *,struct proc_dir_entry *);
 
 static inline struct proc_dir_entry *create_proc_read_entry(const char *name,
@@ -185,18 +182,13 @@ static inline void proc_net_remove(const char *name)
 	remove_proc_entry(name,proc_net);
 }
 
-/*
- * fs/proc/kcore.c
- */
-extern void kclist_add(struct kcore_list *, void *, size_t);
-extern struct kcore_list *kclist_del(void *);
-
 #else
 
 #define proc_root_driver NULL
-#define proc_net_fops_create(name,mode,fops) do {} while(0)
-static inline struct proc_dir_entry *proc_net_create(const char *name, mode_t mode, 
-	get_info_t *get_info) {return NULL;}
+#define proc_net NULL
+
+#define proc_net_fops_create(name, mode, fops)  ({ (void)(mode), NULL; })
+#define proc_net_create(name, mode, info)	({ (void)(mode), NULL; })
 static inline void proc_net_remove(const char *name) {}
 
 static inline struct dentry *proc_pid_unhash(struct task_struct *p) { return NULL; }
@@ -209,8 +201,6 @@ static inline struct proc_dir_entry *create_proc_entry(const char *name,
 
 static inline struct proc_dir_entry *proc_symlink(const char *name,
 		struct proc_dir_entry *parent,char *dest) {return NULL;}
-static inline struct proc_dir_entry *proc_mknod(const char *name,mode_t mode,
-		struct proc_dir_entry *parent,kdev_t rdev) {return NULL;}
 static inline struct proc_dir_entry *proc_mkdir(const char *name,
 	struct proc_dir_entry *parent) {return NULL;}
 
@@ -228,6 +218,9 @@ static inline void proc_tty_unregister_driver(struct tty_driver *driver) {};
 
 extern struct proc_dir_entry proc_root;
 
+#endif /* CONFIG_PROC_FS */
+
+#if !defined(CONFIG_PROC_FS)
 static inline void kclist_add(struct kcore_list *new, void *addr, size_t size)
 {
 }
@@ -235,8 +228,10 @@ static inline struct kcore_list * kclist_del(void *addr)
 {
 	return NULL;
 }
-
-#endif /* CONFIG_PROC_FS */
+#else
+extern void kclist_add(struct kcore_list *, void *, size_t);
+extern struct kcore_list *kclist_del(void *);
+#endif
 
 struct proc_inode {
 	struct task_struct *task;

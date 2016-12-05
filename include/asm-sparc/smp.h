@@ -12,6 +12,9 @@
 #include <asm/btfixup.h>
 
 #ifndef __ASSEMBLY__
+
+#include <linux/cpumask.h>
+
 /* PROM provided per-processor information we need
  * to start them all up.
  */

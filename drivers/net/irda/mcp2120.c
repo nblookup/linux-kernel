@@ -25,7 +25,6 @@
 
 #include <net/irda/irda.h>
 #include <net/irda/irda_device.h>
-#include <net/irda/irtty.h>
 
 static int  mcp2120_reset(struct irda_task *task);
 static void mcp2120_open(dongle_t *self, struct qos_info *qos);
@@ -41,12 +40,12 @@ static int  mcp2120_change_speed(struct irda_task *task);
 #define MCP2120_COMMIT  0x11
 
 static struct dongle_reg dongle = {
-	Q_NULL,
-	IRDA_MCP2120_DONGLE,
-	mcp2120_open,
-	mcp2120_close,
-	mcp2120_reset,
-	mcp2120_change_speed,
+	.type = IRDA_MCP2120_DONGLE,
+	.open = mcp2120_open,
+	.close = mcp2120_close,
+	.reset = mcp2120_reset,
+	.change_speed = mcp2120_change_speed,
+	.owner = THIS_MODULE,
 };
 
 int __init mcp2120_init(void)
@@ -63,8 +62,6 @@ static void mcp2120_open(dongle_t *self, struct qos_info *qos)
 {
 	qos->baud_rate.bits &= IR_9600|IR_19200|IR_38400|IR_57600|IR_115200;
 	qos->min_turn_time.bits = 0x01;
-
-	MOD_INC_USE_COUNT;
 }
 
 static void mcp2120_close(dongle_t *self)
@@ -73,8 +70,6 @@ static void mcp2120_close(dongle_t *self)
         /* reset and inhibit mcp2120 */
 	self->set_dtr_rts(self->dev, TRUE, TRUE);
 	//self->set_dtr_rts(self->dev, FALSE, FALSE);
-
-	MOD_DEC_USE_COUNT;
 }
 
 /*
@@ -223,7 +218,7 @@ static int mcp2120_reset(struct irda_task *task)
 MODULE_AUTHOR("Felix Tang <tangf@eyetap.org>");
 MODULE_DESCRIPTION("Microchip MCP2120");
 MODULE_LICENSE("GPL");
-
+MODULE_ALIAS("irda-dongle-9"); /* IRDA_MCP2120_DONGLE */
 	
 /*
  * Function init_module (void)

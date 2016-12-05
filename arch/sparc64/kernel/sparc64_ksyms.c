@@ -21,6 +21,7 @@
 #include <linux/fs_struct.h>
 #include <linux/mm.h>
 #include <linux/socket.h>
+#include <linux/percpu.h>
 #include <net/compat.h>
 
 #include <asm/oplib.h>
@@ -55,6 +56,7 @@
 #include <asm/a.out.h>
 #include <asm/ns87303.h>
 #include <asm/timer.h>
+#include <asm/cpudata.h>
 
 struct poll {
 	int fd;
@@ -66,7 +68,6 @@ extern void die_if_kernel(char *str, struct pt_regs *regs);
 extern pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 void _sigpause_common (unsigned int set, struct pt_regs *);
 extern void *__bzero(void *, size_t);
-extern void *__bzero_noasi(void *, size_t);
 extern void *__memscan_zero(void *, size_t);
 extern void *__memscan_generic(void *, int, size_t);
 extern int __memcmp(const void *, const void *, __kernel_size_t);
@@ -124,6 +125,9 @@ extern void xor_vis_4(unsigned long, unsigned long *, unsigned long *,
 extern void xor_vis_5(unsigned long, unsigned long *, unsigned long *,
 		      unsigned long *, unsigned long *, unsigned long *);
 
+/* Per-CPU information table */
+EXPORT_PER_CPU_SYMBOL(__cpu_data);
+
 /* used by various drivers */
 #ifdef CONFIG_SMP
 #ifndef CONFIG_DEBUG_SPINLOCK
@@ -132,6 +136,7 @@ EXPORT_SYMBOL(__read_lock);
 EXPORT_SYMBOL(__read_unlock);
 EXPORT_SYMBOL(__write_lock);
 EXPORT_SYMBOL(__write_unlock);
+EXPORT_SYMBOL(__write_trylock);
 #endif
 
 /* Hard IRQ locking */
@@ -142,12 +147,8 @@ extern void mcount(void);
 EXPORT_SYMBOL_NOVERS(mcount);
 #endif
 
-/* Per-CPU information table */
-EXPORT_SYMBOL(cpu_data);
-
 /* CPU online map and active count.  */
 EXPORT_SYMBOL(cpu_online_map);
-EXPORT_SYMBOL(sparc64_num_cpus_online);
 EXPORT_SYMBOL(phys_cpu_present_map);
 EXPORT_SYMBOL(sparc64_num_cpus_possible);
 
@@ -176,6 +177,8 @@ EXPORT_SYMBOL(up);
 /* Atomic counter implementation. */
 EXPORT_SYMBOL(__atomic_add);
 EXPORT_SYMBOL(__atomic_sub);
+EXPORT_SYMBOL(__atomic64_add);
+EXPORT_SYMBOL(__atomic64_sub);
 #ifdef CONFIG_SMP
 EXPORT_SYMBOL(atomic_dec_and_lock);
 #endif
@@ -219,16 +222,16 @@ EXPORT_SYMBOL(sbus_unmap_sg);
 EXPORT_SYMBOL(sbus_dma_sync_single);
 EXPORT_SYMBOL(sbus_dma_sync_sg);
 #endif
-#ifdef CONFIG_PCI
-EXPORT_SYMBOL(ebus_chain);
-EXPORT_SYMBOL(isa_chain);
-EXPORT_SYMBOL(pci_memspace_mask);
 EXPORT_SYMBOL(outsb);
 EXPORT_SYMBOL(outsw);
 EXPORT_SYMBOL(outsl);
 EXPORT_SYMBOL(insb);
 EXPORT_SYMBOL(insw);
 EXPORT_SYMBOL(insl);
+#ifdef CONFIG_PCI
+EXPORT_SYMBOL(ebus_chain);
+EXPORT_SYMBOL(isa_chain);
+EXPORT_SYMBOL(pci_memspace_mask);
 EXPORT_SYMBOL(pci_alloc_consistent);
 EXPORT_SYMBOL(pci_free_consistent);
 EXPORT_SYMBOL(pci_map_single);
@@ -247,7 +250,6 @@ EXPORT_SYMBOL(io_remap_page_range);
 EXPORT_SYMBOL(_sigpause_common);
 EXPORT_SYMBOL(verify_compat_iovec);
 
-/* Should really be in linux/kernel/ksyms.c */
 EXPORT_SYMBOL(dump_thread);
 EXPORT_SYMBOL(dump_fpu);
 EXPORT_SYMBOL(pte_alloc_one_kernel);
@@ -319,7 +321,6 @@ EXPORT_SYMBOL(sys_getegid);
 EXPORT_SYMBOL(sys_getgid);
 EXPORT_SYMBOL(svr4_getcontext);
 EXPORT_SYMBOL(svr4_setcontext);
-EXPORT_SYMBOL(prom_cpu_nodes);
 EXPORT_SYMBOL(sys_ioctl);
 EXPORT_SYMBOL(compat_sys_ioctl);
 EXPORT_SYMBOL(sparc32_open);
@@ -339,6 +340,7 @@ EXPORT_SYMBOL(__strncmp);
 EXPORT_SYMBOL(__memmove);
 EXPORT_SYMBOL(memchr);
 
+EXPORT_SYMBOL(csum_partial);
 EXPORT_SYMBOL(csum_partial_copy_sparc64);
 EXPORT_SYMBOL(ip_fast_csum);
 

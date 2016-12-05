@@ -17,6 +17,7 @@
  */
 #include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
@@ -46,6 +47,8 @@
 extern unsigned long wall_jiffies;
 
 u64 jiffies_64 = INITIAL_JIFFIES;
+
+EXPORT_SYMBOL(jiffies_64);
 
 spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
 enum sparc_clock_type sp_clock_typ;
@@ -408,9 +411,9 @@ void __init sbus_time_init(void)
 	mon = MSTK_REG_MONTH(mregs);
 	year = MSTK_CVT_YEAR( MSTK_REG_YEAR(mregs) );
 	xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
-	wall_to_monotonic.tv_sec = -xtime.tv_sec;
 	xtime.tv_nsec = (INITIAL_JIFFIES % HZ) * (NSEC_PER_SEC / HZ);
-	wall_to_monotonic.tv_nsec = -xtime.tv_nsec;
+        set_normalized_timespec(&wall_to_monotonic,
+                                -xtime.tv_sec, -xtime.tv_nsec);
 	mregs->creg &= ~MSTK_CREG_READ;
 	spin_unlock_irq(&mostek_lock);
 #ifdef CONFIG_SUN4
@@ -441,9 +444,9 @@ void __init sbus_time_init(void)
 		intersil_start(iregs);
 
 		xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
-		wall_to_monotonic.tv_sec = -xtime.tv_sec;
 		xtime.tv_nsec = (INITIAL_JIFFIES % HZ) * (NSEC_PER_SEC / HZ);
-		wall_to_monotonic.tv_nsec = -xtime.tv_nsec;
+	        set_normalized_timespec(&wall_to_monotonic,
+ 	                               -xtime.tv_sec, -xtime.tv_nsec);
 		printk("%u/%u/%u %u:%u:%u\n",day,mon,year,hour,min,sec);
 	}
 #endif
@@ -469,6 +472,15 @@ extern __inline__ unsigned long do_gettimeoffset(void)
 	return (*master_l10_counter >> 10) & 0x1fffff;
 }
 
+/*
+ * Returns nanoseconds
+ * XXX This is a suboptimal implementation.
+ */
+unsigned long long sched_clock(void)
+{
+	return (unsigned long long)jiffies * (1000000000 / HZ);
+}
+
 /* Ok, my cute asm atomicity trick doesn't work anymore.
  * There are just too many variables that need to be protected
  * now (both members of xtime, wall_jiffies, et al.)
@@ -478,15 +490,29 @@ void do_gettimeofday(struct timeval *tv)
 	unsigned long flags;
 	unsigned long seq;
 	unsigned long usec, sec;
+	unsigned long max_ntp_tick = tick_usec - tickadj;
 
 	do {
+		unsigned long lost;
+
 		seq = read_seqbegin_irqsave(&xtime_lock, flags);
 		usec = do_gettimeoffset();
-		{
-			unsigned long lost = jiffies - wall_jiffies;
+		lost = jiffies - wall_jiffies;
+
+		/*
+		 * If time_adjust is negative then NTP is slowing the clock
+		 * so make sure not to go into next possible interval.
+		 * Better to lose some accuracy than have time go backwards..
+		 */
+		if (unlikely(time_adjust < 0)) {
+			usec = min(usec, max_ntp_tick);
+
 			if (lost)
-				usec += lost * (1000000 / HZ);
+				usec += lost * max_ntp_tick;
 		}
+		else if (unlikely(lost))
+			usec += lost * tick_usec;
+
 		sec = xtime.tv_sec;
 		usec += (xtime.tv_nsec / 1000);
 	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
@@ -500,6 +526,8 @@ void do_gettimeofday(struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
+EXPORT_SYMBOL(do_gettimeofday);
+
 int do_settimeofday(struct timespec *tv)
 {
 	int ret;
@@ -510,8 +538,13 @@ int do_settimeofday(struct timespec *tv)
 	return ret;
 }
 
+EXPORT_SYMBOL(do_settimeofday);
+
 static int sbus_do_settimeofday(struct timespec *tv)
 {
+	time_t wtm_sec, sec = tv->tv_sec;
+	long wtm_nsec, nsec = tv->tv_nsec;
+
 	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
 		return -EINVAL;
 
@@ -521,28 +554,15 @@ static int sbus_do_settimeofday(struct timespec *tv)
 	 * wall time.  Discover what correction gettimeofday() would have
 	 * made, and then undo it!
 	 */
-	tv->tv_nsec -= 1000 * (do_gettimeoffset() +
+	nsec -= 1000 * (do_gettimeoffset() +
 			(jiffies - wall_jiffies) * (USEC_PER_SEC / HZ));
 
-	while (tv->tv_nsec < 0) {
-		tv->tv_nsec += NSEC_PER_SEC;
-		tv->tv_sec--;
-	}
+	wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
+	wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
 
-	wall_to_monotonic.tv_sec += xtime.tv_sec - tv->tv_sec;
-	wall_to_monotonic.tv_nsec += xtime.tv_nsec - tv->tv_nsec;
+	set_normalized_timespec(&xtime, sec, nsec);
+	set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
 
-	if (wall_to_monotonic.tv_nsec > NSEC_PER_SEC) {
-		wall_to_monotonic.tv_nsec -= NSEC_PER_SEC;
-		wall_to_monotonic.tv_sec++;
-	}
-	if (wall_to_monotonic.tv_nsec < 0) {
-		wall_to_monotonic.tv_nsec += NSEC_PER_SEC;
-		wall_to_monotonic.tv_sec--;
-	}
-
-	xtime.tv_sec = tv->tv_sec;
-	xtime.tv_nsec = tv->tv_nsec;
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;

@@ -80,7 +80,7 @@ struct usb_host_interface {
  * @act_altsetting: index of current altsetting.  this number is always
  *	less than num_altsetting.  after the device is configured, each
  *	interface uses its default setting of zero.
- * @max_altsetting:
+ * @driver: the USB driver that is bound to this interface.
  * @minor: the minor number assigned to this interface, if this
  *	interface is bound to a driver that uses the USB major number.
  *	If this interface does not use the USB major, this field should
@@ -117,15 +117,13 @@ struct usb_interface {
 
 	unsigned act_altsetting;	/* active alternate setting */
 	unsigned num_altsetting;	/* number of alternate settings */
-	unsigned max_altsetting;	/* total memory allocated */
 
 	struct usb_driver *driver;	/* driver */
 	int minor;			/* minor number this interface is bound to */
 	struct device dev;		/* interface specific device info */
-	struct class_device class_dev;
+	struct class_device *class_dev;
 };
 #define	to_usb_interface(d) container_of(d, struct usb_interface, dev)
-#define class_dev_to_usb_interface(d) container_of(d, struct usb_interface, class_dev)
 #define	interface_to_usbdev(intf) \
 	container_of(intf->dev.parent, struct usb_device, dev)
 
@@ -138,6 +136,9 @@ static inline void usb_set_intfdata (struct usb_interface *intf, void *data)
 {
 	dev_set_drvdata(&intf->dev, data);
 }
+
+/* this maximum is arbitrary */
+#define USB_MAXINTERFACES	32
 
 /* USB_DT_CONFIG: Configuration descriptor information.
  *
@@ -152,7 +153,7 @@ struct usb_host_config {
 	/* the interfaces associated with this configuration
 	 * these will be in numeric order, 0..desc.bNumInterfaces
 	 */
-	struct usb_interface *interface;
+	struct usb_interface *interface[USB_MAXINTERFACES];
 
 	unsigned char *extra;   /* Extra descriptors */
 	int extralen;
@@ -286,7 +287,7 @@ extern struct usb_device *usb_find_device(u16 vendor_id, u16 product_id);
 extern int usb_get_current_frame_number (struct usb_device *usb_dev);
 
 /* used these for multi-interface device registration */
-extern void usb_driver_claim_interface(struct usb_driver *driver,
+extern int usb_driver_claim_interface(struct usb_driver *driver,
 			struct usb_interface *iface, void* priv);
 extern int usb_interface_claimed(struct usb_interface *iface);
 extern void usb_driver_release_interface(struct usb_driver *driver,
@@ -326,7 +327,7 @@ static inline int usb_make_path (struct usb_device *dev, char *buf, size_t size)
 {
 	int actual;
 	actual = snprintf (buf, size, "usb-%s-%s", dev->bus->bus_name, dev->devpath);
-	return (actual >= size) ? -1 : actual;
+	return (actual >= (int)size) ? -1 : actual;
 }
 
 /*-------------------------------------------------------------------------*/
@@ -407,9 +408,15 @@ static inline int usb_make_path (struct usb_device *dev, char *buf, size_t size)
  *	the "usbfs" filesystem.  This lets devices provide ways to
  *	expose information to user space regardless of where they
  *	do (or don't) show up otherwise in the filesystem.
+ * @suspend: Called when the device is going to be suspended by the system.
+ * @resume: Called when the device is being resumed by the system.
  * @id_table: USB drivers use ID table to support hotplugging.
  *	Export this with MODULE_DEVICE_TABLE(usb,...).  This must be set
- *	or your driver's probe function will never get called. 
+ *	or your driver's probe function will never get called.
+ * @driver: the driver model core driver structure.
+ * @serialize: a semaphore used to serialize access to this driver.  Used
+ * 	in the probe and disconnect functions.  Only the USB core should use
+ * 	this lock.
  *
  * USB drivers must provide a name, probe() and disconnect() methods,
  * and an id_table.  Other driver fields are optional.
@@ -437,6 +444,9 @@ struct usb_driver {
 	void (*disconnect) (struct usb_interface *intf);
 
 	int (*ioctl) (struct usb_interface *intf, unsigned int code, void *buf);
+
+	int (*suspend) (struct usb_interface *intf, u32 state);
+	int (*resume) (struct usb_interface *intf);
 
 	const struct usb_device_id *id_table;
 
@@ -479,8 +489,6 @@ extern int usb_register_dev(struct usb_interface *intf,
 extern void usb_deregister_dev(struct usb_interface *intf,
 			       struct usb_class_driver *class_driver);
 
-extern int usb_device_probe(struct device *dev);
-extern int usb_device_remove(struct device *dev);
 extern int usb_disabled(void);
 
 /* -------------------------------------------------------------------------- */
@@ -575,6 +583,8 @@ typedef void (*usb_complete_t)(struct urb *, struct pt_regs *);
  *	it likes with the URB, including resubmitting or freeing it.
  * @iso_frame_desc: Used to provide arrays of ISO transfer buffers and to 
  *	collect the transfer status for each buffer.
+ * @timeout: If set to zero, the urb will never timeout.  Otherwise this is
+ *	the time in jiffies that this urb will timeout in.
  *
  * This structure identifies USB transfer requests.  URBs must be allocated by
  * calling usb_alloc_urb() and freed with a call to usb_free_urb().
@@ -677,10 +687,14 @@ typedef void (*usb_complete_t)(struct urb *, struct pt_regs *);
  */
 struct urb
 {
+	/* private, usb core and host controller only fields in the urb */
 	spinlock_t lock;		/* lock for the URB */
 	atomic_t count;			/* reference count of the URB */
 	void *hcpriv;			/* private data for host controller */
 	struct list_head urb_list;	/* list pointer to all active urbs */
+	int bandwidth;			/* bandwidth for INT/ISO request */
+
+	/* public, documented fields in the urb that can be used by drivers */
 	struct usb_device *dev; 	/* (in) pointer to associated device */
 	unsigned int pipe;		/* (in) pipe information */
 	int status;			/* (return) non-ISO status */
@@ -689,7 +703,6 @@ struct urb
 	dma_addr_t transfer_dma;	/* (in) dma addr for transfer_buffer */
 	int transfer_buffer_length;	/* (in) data buffer length */
 	int actual_length;		/* (return) actual transfer length */
-	int bandwidth;			/* bandwidth for INT/ISO request */
 	unsigned char *setup_packet;	/* (in) setup packet (control only) */
 	dma_addr_t setup_dma;		/* (in) dma addr for setup_packet */
 	int start_frame;		/* (modify) start frame (INT/ISO) */
@@ -858,6 +871,7 @@ extern int usb_string(struct usb_device *dev, int index,
 
 /* wrappers that also update important state inside usbcore */
 extern int usb_clear_halt(struct usb_device *dev, int pipe);
+extern int usb_reset_configuration(struct usb_device *dev);
 extern int usb_set_configuration(struct usb_device *dev, int configuration);
 extern int usb_set_interface(struct usb_device *dev, int ifnum, int alternate);
 
@@ -891,8 +905,10 @@ struct usb_sg_request {
 	int			status;
 	size_t			bytes;
 
-	// members not documented above are private to usbcore,
-	// and are not provided for driver access!
+	/* 
+	 * members below are private to usbcore,
+	 * and are not provided for driver access!
+	 */
 	spinlock_t		lock;
 
 	struct usb_device	*dev;
@@ -1022,9 +1038,9 @@ void usb_show_string(struct usb_device *dev, char *id, int index);
 #define dbg(format, arg...) do {} while (0)
 #endif
 
-#define err(format, arg...) printk(KERN_ERR __FILE__ ": " format "\n" , ## arg)
-#define info(format, arg...) printk(KERN_INFO __FILE__ ": " format "\n" , ## arg)
-#define warn(format, arg...) printk(KERN_WARNING __FILE__ ": " format "\n" , ## arg)
+#define err(format, arg...) printk(KERN_ERR "%s: " format "\n" , __FILE__ , ## arg)
+#define info(format, arg...) printk(KERN_INFO "%s: " format "\n" , __FILE__ , ## arg)
+#define warn(format, arg...) printk(KERN_WARNING "%s: " format "\n" , __FILE__ , ## arg)
 
 
 #endif  /* __KERNEL__ */

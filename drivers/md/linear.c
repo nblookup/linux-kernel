@@ -25,7 +25,6 @@
 #define MAJOR_NR MD_MAJOR
 #define MD_DRIVER
 #define MD_PERSONALITY
-#define DEVICE_NR(device) (minor(device))
 
 /*
  * find which device holds a particular offset 
@@ -114,6 +113,8 @@ static int linear_run (mddev_t *mddev)
 		}
 
 		disk->rdev = rdev;
+		blk_queue_stack_limits(mddev->queue,
+				       rdev->bdev->bd_disk->queue);
 		disk->size = rdev->size;
 		mddev->array_size += rdev->size;
 
@@ -173,7 +174,7 @@ static int linear_run (mddev_t *mddev)
 	if (table-conf->hash_table != nb_zone)
 		BUG();
 
-	blk_queue_merge_bvec(&mddev->queue, linear_mergeable_bvec);
+	blk_queue_merge_bvec(mddev->queue, linear_mergeable_bvec);
 	return 0;
 
 out:
@@ -294,3 +295,4 @@ static void linear_exit (void)
 module_init(linear_init);
 module_exit(linear_exit);
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("md-personality-1"); /* LINEAR */

@@ -55,7 +55,7 @@
 #if defined(CONFIG_PPC_PMAC)
 #include <asm/prom.h>
 #include <asm/pci-bridge.h>
-#include <video/macmodes.h>
+#include "../macmodes.h"
 #endif
 
 /* always compile support for 32MB... It cost almost nothing */
@@ -457,6 +457,7 @@ struct matrox_fb_info {
 		struct matrox_vsync	vsync;
 		unsigned int	pixclock;
 		int		mnp;
+		int		panpos;
 			      } crtc1;
 	struct {
 		struct matrox_vsync	vsync;
@@ -595,7 +596,6 @@ struct matrox_fb_info {
 					dll:1;
 				      } memory;
 			      } values;
-	struct { unsigned red, green, blue, transp; } palette[256];
 	u_int32_t cmap[17];
 };
 

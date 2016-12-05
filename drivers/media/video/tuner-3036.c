@@ -21,7 +21,6 @@
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
-#include <linux/version.h>
 #include <linux/init.h>
 
 #include <linux/i2c.h>
@@ -135,7 +134,6 @@ tuner_attach(struct i2c_adapter *adap, int addr, int kind)
 	printk("tuner: SAB3036 found, status %02x\n", tuner_getstatus(client));
 
         i2c_attach_client(client);
-	MOD_INC_USE_COUNT;
 
 	if (i2c_master_send(client, buffer, 2) != 2)
 		printk("tuner: i2c i/o error 1\n");
@@ -149,7 +147,6 @@ tuner_attach(struct i2c_adapter *adap, int addr, int kind)
 static int 
 tuner_detach(struct i2c_client *c)
 {
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -197,9 +194,7 @@ static struct i2c_client client_template =
 {
         .id 		= -1,
         .driver		= &i2c_driver_tuner,
-        .dev		= {
-		.name	= "SAB3036",
-	},
+	.name		= "SAB3036",
 };
 
 int __init

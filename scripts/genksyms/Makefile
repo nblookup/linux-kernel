@@ -4,12 +4,14 @@ always		:= $(host-progs)
 
 genksyms-objs	:= genksyms.o parse.o lex.o
 
-HOSTCFLAGS_parse.o := -Wno-uninitialized
+# -I needed for generated C source (shipped source)
+HOSTCFLAGS_parse.o := -Wno-uninitialized -I$(src)
 
 # dependencies on generated files need to be listed explicitly
-
 $(obj)/lex.o: $(obj)/parse.h $(obj)/keywords.c
 
+# -I needed for generated C source (shipped source)
+HOSTCFLAGS_lex.o := -I$(src)
 
 ifdef GENERATE_PARSER
 
@@ -44,4 +46,4 @@ clean-files	+= parse.output
 
 endif
 
-targets += $(obj)/keywords.c $(obj)/lex.c $(obj)/parse.c $(obj)/parse.h
+targets += keywords.c lex.c parse.c parse.h

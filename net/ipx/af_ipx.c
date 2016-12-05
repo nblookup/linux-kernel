@@ -326,7 +326,6 @@ void __ipxitf_down(struct ipx_interface *intrfc)
 	if (intrfc->if_dev)
 		dev_put(intrfc->if_dev);
 	kfree(intrfc);
-	module_put(THIS_MODULE);
 }
 
 void ipxitf_down(struct ipx_interface *intrfc)
@@ -356,6 +355,17 @@ static int ipxitf_device_event(struct notifier_block *notifier,
 	spin_unlock_bh(&ipx_interfaces_lock);
 out:
 	return NOTIFY_DONE;
+}
+
+
+static __exit void ipxitf_cleanup(void)
+{
+	struct ipx_interface *i, *tmp;
+
+	spin_lock_bh(&ipx_interfaces_lock);
+	list_for_each_entry_safe(i, tmp, &ipx_interfaces, node) 
+		__ipxitf_put(i);
+	spin_unlock_bh(&ipx_interfaces_lock);
 }
 
 static void ipxitf_def_skb_handler(struct sock *sock, struct sk_buff *skb)
@@ -888,7 +898,6 @@ static struct ipx_interface *ipxitf_alloc(struct net_device *dev, __u32 netnum,
 		INIT_HLIST_HEAD(&intrfc->if_sklist);
 		atomic_set(&intrfc->refcnt, 1);
 		spin_lock_init(&intrfc->if_sklist_lock);
-		__module_get(THIS_MODULE);
 	}
 
 	return intrfc;
@@ -1365,6 +1374,7 @@ static int ipx_create(struct socket *sock, int protocol)
 			atomic_read(&ipx_sock_nr));
 #endif
 	sock_init_data(sock, sk);
+	sk_set_owner(sk, THIS_MODULE);
 	sk->sk_no_check = 1;		/* Checksum off by default */
 	rc = 0;
 out:
@@ -1919,13 +1929,11 @@ SOCKOPS_WRAP(ipx_dgram, PF_IPX);
 static struct packet_type ipx_8023_packet_type = {
 	.type		= __constant_htons(ETH_P_802_3),
 	.func		= ipx_rcv,
-	.data		= (void *)1,	/* yap, I understand shared skbs :-) */
 };
 
 static struct packet_type ipx_dix_packet_type = {
 	.type		= __constant_htons(ETH_P_IPX),
 	.func		= ipx_rcv,
-	.data		= (void *)1,	/* yap, I understand shared skbs :-) */
 };
 
 static struct notifier_block ipx_dev_notifier = {
@@ -1939,10 +1947,6 @@ extern void destroy_8023_client(struct datalink_proto *);
 
 static unsigned char ipx_8022_type = 0xE0;
 static unsigned char ipx_snap_id[5] = { 0x0, 0x0, 0x0, 0x81, 0x37 };
-static char ipx_banner[] __initdata =
-	KERN_INFO "NET4: Linux IPX 0.51 for NET4.0\n"
-	KERN_INFO "IPX Portions Copyright (c) 1995 Caldera, Inc.\n" \
-	KERN_INFO "IPX Portions Copyright (c) 2000-2003 Conectiva, Inc.\n";
 static char ipx_EII_err_msg[] __initdata =
 	KERN_CRIT "IPX: Unable to register with Ethernet II\n";
 static char ipx_8023_err_msg[] __initdata =
@@ -1979,26 +1983,17 @@ static int __init ipx_init(void)
 	register_netdevice_notifier(&ipx_dev_notifier);
 	ipx_register_sysctl();
 	ipx_proc_init();
-	printk(ipx_banner);
 	return 0;
 }
 
 static void __exit ipx_proto_finito(void)
 {
-	/*
-	 * No need to worry about having anything on the ipx_interfaces list,
-	 * when a interface is created we increment the module usage count, so
-	 * the module will only be unloaded when there are no more interfaces
-	 */
-	if (unlikely(!list_empty(&ipx_interfaces)))
-		BUG();
-	if (unlikely(!list_empty(&ipx_routes)))
-		BUG();
-
 	ipx_proc_exit();
 	ipx_unregister_sysctl();
 
 	unregister_netdevice_notifier(&ipx_dev_notifier);
+
+	ipxitf_cleanup();
 
 	unregister_snap_client(pSNAP_datalink);
 	pSNAP_datalink = NULL;
@@ -2020,3 +2015,4 @@ static void __exit ipx_proto_finito(void)
 module_init(ipx_init);
 module_exit(ipx_proto_finito);
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_NETPROTO(PF_IPX);

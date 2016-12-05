@@ -139,34 +139,42 @@ int saa7146_pgtable_alloc(struct pci_dev *pci, struct saa7146_pgtable *pt)
 	return 0;
 }
 
-void saa7146_pgtable_build_single(struct pci_dev *pci, struct saa7146_pgtable *pt, struct scatterlist *list, int length )
+void saa7146_pgtable_build_single(struct pci_dev *pci, struct saa7146_pgtable *pt,
+	struct scatterlist *list, int sglen  )
 {
 	u32   *ptr, fill;
+	int nr_pages = 0;
 	int   i,p;
 
-//fm	DEB_EE(("pci:%p, pt:%p, sl:%p, len:%d\n",pci,pt,list,length));
+	BUG_ON( 0 == sglen);
 
 	/* if we have a user buffer, the first page may not be
 	   aligned to a page boundary. */
 	pt->offset = list->offset;
 
 	ptr = pt->cpu;
-	for (i = 0; i < length; i++, list++) {
+	for (i = 0; i < sglen; i++, list++) {
+/*
+		printk("i:%d, adr:0x%08x, len:%d, offset:%d\n", i,sg_dma_address(list), sg_dma_len(list), list->offset);
+*/
 		for (p = 0; p * 4096 < list->length; p++, ptr++) {
-			*ptr = sg_dma_address(list) - list->offset;
+			*ptr = sg_dma_address(list) + p * 4096;
+			nr_pages++;
 		}
 	}
 
 
 	/* safety; fill the page table up with the last valid page */
 	fill = *(ptr-1);
-	for(;i<1024;i++) {
+	for(i=nr_pages;i<1024;i++) {
 		*ptr++ = fill;
 	}
+
 /*
 	ptr = pt->cpu;
-	for(j=0;j<60;j++) {
-		printk("ptr1 %d: 0x%08x\n",j,ptr[j]);
+	printk("offset: %d\n",pt->offset);
+	for(i=0;i<5;i++) {
+		printk("ptr1 %d: 0x%08x\n",i,ptr[i]);
 	}
 */
 }
@@ -373,6 +381,9 @@ static int saa7146_init_one(struct pci_dev *pci, const struct pci_device_id *ent
 	dev->module = THIS_MODULE;
 	init_waitqueue_head(&dev->i2c_wq);
 
+	/* set some default values */
+	saa7146_write(dev, BCS_CTRL, 0x80400040);
+
 	if( 0 != ext->probe) {
 		if( 0 != ext->probe(dev) ) {
 			DEB_D(("ext->probe() failed for %p. skipping device.\n",dev));
@@ -390,9 +401,6 @@ static int saa7146_init_one(struct pci_dev *pci, const struct pci_device_id *ent
 	INIT_LIST_HEAD(&dev->item);
 	list_add_tail(&dev->item,&saa7146_devices);
 	saa7146_num++;
-
-	/* set some default values */
-	saa7146_write(dev, BCS_CTRL, 0x80400040);
 
 	err = 0;
 	goto out;

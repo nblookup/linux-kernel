@@ -45,7 +45,7 @@ struct scsi_request {
  					   level driver) of this request */
 };
 
-extern struct scsi_request *scsi_allocate_request(struct scsi_device *);
+extern struct scsi_request *scsi_allocate_request(struct scsi_device *, int);
 extern void scsi_release_request(struct scsi_request *);
 extern void scsi_wait_req(struct scsi_request *, const void *cmnd,
 			  void *buffer, unsigned bufflen,
@@ -56,7 +56,7 @@ extern void scsi_do_req(struct scsi_request *, const void *cmnd,
 			int timeout, int retries);
 
 struct scsi_mode_data {
-	__u16	length;
+	__u32	length;
 	__u16	block_descriptor_length;
 	__u8	medium_type;
 	__u8	device_specific;

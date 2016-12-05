@@ -18,6 +18,7 @@
 
 #include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/socket.h>
 #include <linux/kernel.h>
@@ -191,9 +192,18 @@ static int rtnetlink_fill_ifinfo(struct sk_buff *skb, struct net_device *dev,
 	if (dev->master)
 		RTA_PUT(skb, IFLA_MASTER, sizeof(int), &dev->master->ifindex);
 	if (dev->get_stats) {
-		struct net_device_stats *stats = dev->get_stats(dev);
-		if (stats)
-			RTA_PUT(skb, IFLA_STATS, sizeof(*stats), stats);
+		unsigned long *stats = (unsigned long*)dev->get_stats(dev);
+		if (stats) {
+			struct rtattr  *a;
+			__u32	       *s;
+			int		i;
+			int		n = sizeof(struct rtnl_link_stats)/4;
+
+			a = __RTA_PUT(skb, IFLA_STATS, n*4);
+			s = RTA_DATA(a);
+			for (i=0; i<n; i++)
+				s[i] = stats[i];
+		}
 	}
 	nlh->nlmsg_len = skb->tail - b;
 	return skb->len;
@@ -547,12 +557,8 @@ struct notifier_block rtnetlink_dev_notifier = {
 	.notifier_call	= rtnetlink_event,
 };
 
-
 void __init rtnetlink_init(void)
 {
-#ifdef RTNL_DEBUG
-	printk("Initializing RT netlink socket\n");
-#endif
 	rtnl = netlink_kernel_create(NETLINK_ROUTE, rtnetlink_rcv);
 	if (rtnl == NULL)
 		panic("rtnetlink_init: cannot initialize rtnetlink\n");
@@ -561,3 +567,13 @@ void __init rtnetlink_init(void)
 	rtnetlink_links[PF_UNSPEC] = link_rtnetlink_table;
 	rtnetlink_links[PF_PACKET] = link_rtnetlink_table;
 }
+
+EXPORT_SYMBOL(__rta_fill);
+EXPORT_SYMBOL(rtattr_parse);
+EXPORT_SYMBOL(rtnetlink_dump_ifinfo);
+EXPORT_SYMBOL(rtnetlink_links);
+EXPORT_SYMBOL(rtnetlink_put_metrics);
+EXPORT_SYMBOL(rtnl);
+EXPORT_SYMBOL(rtnl_lock);
+EXPORT_SYMBOL(rtnl_sem);
+EXPORT_SYMBOL(rtnl_unlock);

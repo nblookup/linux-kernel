@@ -116,7 +116,7 @@ MODULE_PARM_DESC(message_level, "3c359: Level of reported messages \n") ;
 
 #include "3c359_microcode.h" 
 
-static struct pci_device_id xl_pci_tbl[] __devinitdata =
+static struct pci_device_id xl_pci_tbl[] =
 {
 	{PCI_VENDOR_ID_3COM,PCI_DEVICE_ID_3COM_3C359, PCI_ANY_ID, PCI_ANY_ID, },
 	{ }			/* terminate list */
@@ -315,7 +315,7 @@ int __devinit xl_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	dev->irq=pdev->irq;
 	dev->base_addr=pci_resource_start(pdev,0) ; 
 	dev->init=NULL ; /* Must be null with new api, otherwise get called twice */
-	xl_priv->xl_card_name = (char *)pdev->dev.name ; 
+	xl_priv->xl_card_name = pci_name(pdev);
 	xl_priv->xl_mmio=ioremap(pci_resource_start(pdev,1), XL_IO_SPACE);
 	xl_priv->pdev = pdev ; 
 		
@@ -464,7 +464,7 @@ static int xl_hw_reset(struct net_device *dev)
 		
 		printk(KERN_INFO "3C359: Uploading Microcode: "); 
 		
-		for (i = start,j=0; (j < mc_size && i <= 0xffff) ; i++,j++) { 
+		for (i = start, j = 0; j < mc_size; i++, j++) { 
 			writel(MEM_BYTE_WRITE | 0XD0000 | i, xl_mmio + MMIO_MAC_ACCESS_CMD) ; 
 			writeb(microcode[j],xl_mmio + MMIO_MACDATA) ; 
 			if (j % 1024 == 0)
@@ -1123,7 +1123,7 @@ static irqreturn_t xl_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 				if (macstatus & (1<<3))
 					printk(KERN_WARNING "eint error: Internal watchdog timer expired \n") ;
 				if (macstatus & (1<<2))
-					printk(KERN_WARNING "aint error: Host tried to perform illegal operation \n") ; 
+					printk(KERN_WARNING "aint error: Host tried to perform invalid operation \n") ; 
 				printk(KERN_WARNING "Instatus = %02x, macstatus = %02x\n",intstatus,macstatus) ; 
 				printk(KERN_WARNING "%s: Resetting hardware: \n", dev->name); 
 				netif_stop_queue(dev) ;
@@ -1787,7 +1787,7 @@ static void __devexit xl_remove_one (struct pci_dev *pdev)
 	iounmap(xl_priv->xl_mmio) ; 
 	pci_release_regions(pdev) ; 
 	pci_set_drvdata(pdev,NULL) ; 
-	kfree(dev);
+	free_netdev(dev);
 	return ; 
 }
 

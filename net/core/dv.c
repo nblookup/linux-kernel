@@ -10,6 +10,7 @@
  * 		Dave Miller:	improvement on the code (correctness, performance and source files)
  *
  */
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -40,7 +41,6 @@ const char sysctl_divert_version[32]="0.46";	/* Current version */
 
 static int __init dv_init(void)
 {
-	printk(KERN_INFO "NET4: Frame Diverter %s\n", sysctl_divert_version);
 	return 0;
 }
 module_init(dv_init);
@@ -238,7 +238,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 		default:
 			return -EINVAL;
-		};
+		}
 
 		break;
 
@@ -282,7 +282,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -302,7 +302,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -322,7 +322,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -338,7 +338,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -354,7 +354,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -374,7 +374,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -390,7 +390,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -406,7 +406,7 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
@@ -426,19 +426,19 @@ int divert_ioctl(unsigned int cmd, struct divert_cf *arg)
 
 			default:
 				return -EINVAL;
-			};
+			}
 
 			break;
 
 		default:
 			return -EINVAL;
-		};
+		}
 
 		break;
 
 	default:
 		return -EINVAL;
-	};
+	}
 
 	return 0;
 }
@@ -551,8 +551,8 @@ void divert_frame(struct sk_buff *skb)
 			}
 		}
 		break;
-	};
-
-	return;
+	}
 }
 
+EXPORT_SYMBOL(alloc_divert_blk);
+EXPORT_SYMBOL(free_divert_blk);

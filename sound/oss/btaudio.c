@@ -150,9 +150,9 @@ struct cardinfo {
 	int rate;
 };
 
-static struct btaudio *btaudios = NULL;
-static unsigned int debug = 0;
-static unsigned int irq_debug = 0;
+static struct btaudio *btaudios;
+static unsigned int debug;
+static unsigned int irq_debug;
 
 /* -------------------------------------------------------------- */
 
@@ -177,8 +177,11 @@ static int alloc_buffer(struct btaudio *bta)
 		bta->risc_size = PAGE_SIZE;
 		bta->risc_cpu = pci_alloc_consistent
 			(bta->pci, bta->risc_size, &bta->risc_dma);
-		if (NULL == bta->risc_cpu)
+		if (NULL == bta->risc_cpu) {
+			pci_free_consistent(bta->pci, bta->buf_size, bta->buf_cpu, bta->buf_dma);
+			bta->buf_cpu = NULL;
 			return -ENOMEM;
+		}
 	}
 	return 0;
 }
@@ -299,7 +302,7 @@ static void stop_recording(struct btaudio *bta)
 
 static int btaudio_mixer_open(struct inode *inode, struct file *file)
 {
-	int minor = minor(inode->i_rdev);
+	int minor = iminor(inode);
 	struct btaudio *bta;
 
 	for (bta = btaudios; bta != NULL; bta = bta->next)
@@ -458,7 +461,7 @@ static int btaudio_dsp_open(struct inode *inode, struct file *file,
 
 static int btaudio_dsp_open_digital(struct inode *inode, struct file *file)
 {
-	int minor = minor(inode->i_rdev);
+	int minor = iminor(inode);
 	struct btaudio *bta;
 
 	for (bta = btaudios; bta != NULL; bta = bta->next)
@@ -474,7 +477,7 @@ static int btaudio_dsp_open_digital(struct inode *inode, struct file *file)
 
 static int btaudio_dsp_open_analog(struct inode *inode, struct file *file)
 {
-	int minor = minor(inode->i_rdev);
+	int minor = iminor(inode);
 	struct btaudio *bta;
 
 	for (bta = btaudios; bta != NULL; bta = bta->next)
@@ -876,7 +879,7 @@ static unsigned int mixer = -1;
 static int latency = -1;
 static int digital = 1;
 static int analog = 1;
-static int rate = 0;
+static int rate;
 
 #define BTA_OSPREY200 1
 
@@ -1060,7 +1063,7 @@ static void __devexit btaudio_remove(struct pci_dev *pci_dev)
 
 /* -------------------------------------------------------------- */
 
-static struct pci_device_id btaudio_pci_tbl[] __devinitdata = {
+static struct pci_device_id btaudio_pci_tbl[] = {
         {
 		.vendor		= PCI_VENDOR_ID_BROOKTREE,
 		.device		= 0x0878,

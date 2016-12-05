@@ -670,7 +670,6 @@ static char rcsid[] =
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
-#include <linux/version.h>
 
 #include <linux/stat.h>
 #include <linux/proc_fs.h>
@@ -1050,14 +1049,14 @@ detect_isa_irq (volatile ucchar *address)
     udelay(5000L);
 
     /* Enable the Tx interrupts on the CD1400 */
-    save_flags(flags); cli();
+    local_irq_save(flags);
 	cy_writeb((u_long)address + (CyCAR<<index), 0);
 	cyy_issue_cmd(address, CyCHAN_CTL|CyENB_XMTR, index);
 
 	cy_writeb((u_long)address + (CyCAR<<index), 0);
 	cy_writeb((u_long)address + (CySRER<<index), 
 		cy_readb(address + (CySRER<<index)) | CyTxRdy);
-    restore_flags(flags);
+    local_irq_restore(flags);
 
     /* Wait ... */
     udelay(5000L);
@@ -2724,7 +2723,6 @@ cy_wait_until_sent(struct tty_struct *tty, int timeout)
     /* Run one more char cycle */
     current->state = TASK_INTERRUPTIBLE;
     schedule_timeout(char_time * 5);
-    current->state = TASK_RUNNING;
 #ifdef CY_DEBUG_WAIT_UNTIL_SENT
     printk("Clean (jiff=%lu)...done\n", jiffies);
 #endif
@@ -5433,7 +5431,7 @@ static struct tty_operations cy_ops = {
     .read_proc = cyclades_get_proc_info,
 };
 
-int __init
+static int __init
 cy_init(void)
 {
   struct cyclades_port  *info;
@@ -5660,13 +5658,10 @@ cy_init(void)
     
 } /* cy_init */
 
-#ifdef MODULE
-void
+static void __exit
 cy_cleanup_module(void)
 {
-    int i;
-    int e1, e2;
-    unsigned long flags;
+    int i, e1;
 
 #ifndef CONFIG_CYZ_INTR
     if (cyz_timeron){
@@ -5675,13 +5670,10 @@ cy_cleanup_module(void)
     }
 #endif /* CONFIG_CYZ_INTR */
 
-    save_flags(flags); cli();
-
     if ((e1 = tty_unregister_driver(cy_serial_driver)))
             printk("cyc: failed to unregister Cyclades serial driver(%d)\n",
 		e1);
 
-    restore_flags(flags);
     put_tty_driver(cy_serial_driver);
 
     for (i = 0; i < NR_CARDS; i++) {
@@ -5705,11 +5697,10 @@ cy_cleanup_module(void)
     }
 } /* cy_cleanup_module */
 
-/* Module entry-points */
 module_init(cy_init);
 module_exit(cy_cleanup_module);
 
-#else /* MODULE */
+#ifndef MODULE
 /* called by linux/init/main.c to parse command line options */
 void
 cy_setup(char *str, int *ints)

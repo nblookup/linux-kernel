@@ -218,7 +218,7 @@
 *    interrupt time.
 *  - digi_write_bulk_callback() and digi_read_bulk_callback() are
 *    called directly from interrupts.  Hence spin_lock_irqsave()
-*    and spin_lock_irqrestore() are used in the rest of the code
+*    and spin_unlock_irqrestore() are used in the rest of the code
 *    for any locks they acquire.
 *  - digi_write_bulk_callback() gets the port lock before waking up
 *    processes sleeping on the port write_wait.  It also schedules
@@ -444,7 +444,7 @@ struct digi_port {
 /* Local Function Declarations */
 
 static void digi_wakeup_write( struct usb_serial_port *port );
-static void digi_wakeup_write_lock( struct usb_serial_port *port );
+static void digi_wakeup_write_lock(void *);
 static int digi_write_oob_command( struct usb_serial_port *port,
 	unsigned char *buf, int count, int interruptible );
 static int digi_write_inb_command( struct usb_serial_port *port,
@@ -571,7 +571,7 @@ static struct usb_serial_device_type digi_acceleport_4_device = {
 *
 *  Do spin_unlock_irqrestore and interruptible_sleep_on_timeout
 *  so that wake ups are not lost if they occur between the unlock
-*  and the sleep.  In other words, spin_lock_irqrestore and
+*  and the sleep.  In other words, spin_unlock_irqrestore and
 *  interruptible_sleep_on_timeout are "atomic" with respect to
 *  wake ups.  This is used to implement condition variables.
 */
@@ -594,8 +594,6 @@ static inline long cond_wait_interruptible_timeout_irqrestore(
 
 	timeout = schedule_timeout(timeout);
 
-	set_current_state( TASK_RUNNING );
-
 	remove_wait_queue( q, &wait );
 
 	return( timeout );
@@ -610,9 +608,9 @@ static inline long cond_wait_interruptible_timeout_irqrestore(
 *  on writes.
 */
 
-static void digi_wakeup_write_lock( struct usb_serial_port *port )
+static void digi_wakeup_write_lock(void *arg)
 {
-
+	struct usb_serial_port *port = arg;
 	unsigned long flags;
 	struct digi_port *priv = usb_get_serial_port_data(port);
 
@@ -1675,7 +1673,7 @@ static int digi_startup_device( struct usb_serial *serial )
 	/* set USB_DISABLE_SPD flag for write bulk urbs */
 	for( i=0; i<serial->type->num_ports+1; i++ ) {
 
-		port = &serial->port[i];
+		port = serial->port[i];
 
 		port->write_urb->dev = port->serial->dev;
 
@@ -1711,7 +1709,7 @@ dbg( "digi_startup: TOP" );
 			GFP_KERNEL );
 		if( priv == (struct digi_port *)0 ) {
 			while( --i >= 0 )
-				kfree( usb_get_serial_port_data(&serial->port[i]) );
+				kfree( usb_get_serial_port_data(serial->port[i]) );
 			return( 1 );			/* error */
 		}
 
@@ -1730,13 +1728,13 @@ dbg( "digi_startup: TOP" );
 		init_waitqueue_head( &priv->dp_flush_wait );
 		priv->dp_in_close = 0;
 		init_waitqueue_head( &priv->dp_close_wait );
-		INIT_WORK(&priv->dp_wakeup_work, (void *)digi_wakeup_write_lock,
-				(void *)(&serial->port[i]));
+		INIT_WORK(&priv->dp_wakeup_work,
+				digi_wakeup_write_lock, serial->port[i]);
 
 		/* initialize write wait queue for this port */
-		init_waitqueue_head( &serial->port[i].write_wait );
+		init_waitqueue_head( &serial->port[i]->write_wait );
 
-		usb_set_serial_port_data(&serial->port[i], priv);
+		usb_set_serial_port_data(serial->port[i], priv);
 	}
 
 	/* allocate serial private structure */
@@ -1744,14 +1742,14 @@ dbg( "digi_startup: TOP" );
 		GFP_KERNEL );
 	if( serial_priv == (struct digi_serial *)0 ) {
 		for( i=0; i<serial->type->num_ports+1; i++ )
-			kfree( usb_get_serial_port_data(&serial->port[i]) );
+			kfree( usb_get_serial_port_data(serial->port[i]) );
 		return( 1 );			/* error */
 	}
 
 	/* initialize serial private structure */
 	spin_lock_init( &serial_priv->ds_serial_lock );
 	serial_priv->ds_oob_port_num = serial->type->num_ports;
-	serial_priv->ds_oob_port = &serial->port[serial_priv->ds_oob_port_num];
+	serial_priv->ds_oob_port = serial->port[serial_priv->ds_oob_port_num];
 	serial_priv->ds_device_started = 0;
 	usb_set_serial_data(serial, serial_priv);
 
@@ -1770,14 +1768,14 @@ dbg( "digi_shutdown: TOP, in_interrupt()=%ld", in_interrupt() );
 
 	/* stop reads and writes on all ports */
 	for( i=0; i<serial->type->num_ports+1; i++ ) {
-		usb_unlink_urb( serial->port[i].read_urb );
-		usb_unlink_urb( serial->port[i].write_urb );
+		usb_unlink_urb( serial->port[i]->read_urb );
+		usb_unlink_urb( serial->port[i]->write_urb );
 	}
 
 	/* free the private data structures for all ports */
 	/* number of regular ports + 1 for the out-of-band port */
 	for( i=0; i<serial->type->num_ports+1; i++ )
-		kfree( usb_get_serial_port_data(&serial->port[i]) );
+		kfree( usb_get_serial_port_data(serial->port[i]) );
 	kfree( usb_get_serial_data(serial) );
 }
 
@@ -1980,7 +1978,7 @@ opcode, line, status, val );
 		if( status != 0 || line >= serial->type->num_ports )
 			continue;
 
-		port = &serial->port[line];
+		port = serial->port[line];
 
 		if( port_paranoia_check( port, __FUNCTION__ )
 		|| (priv=usb_get_serial_port_data(port)) == NULL )
@@ -2045,11 +2043,24 @@ opcode, line, status, val );
 
 static int __init digi_init (void)
 {
-	usb_serial_register (&digi_acceleport_2_device);
-	usb_serial_register (&digi_acceleport_4_device);
-	usb_register (&digi_driver);
+	int retval;
+	retval = usb_serial_register(&digi_acceleport_2_device);
+	if (retval)
+		goto failed_acceleport_2_device;
+	retval = usb_serial_register(&digi_acceleport_4_device);
+	if (retval) 
+		goto failed_acceleport_4_device;
+	retval = usb_register(&digi_driver);
+	if (retval)
+		goto failed_usb_register;
 	info(DRIVER_VERSION ":" DRIVER_DESC);
 	return 0;
+failed_usb_register:
+	usb_serial_deregister(&digi_acceleport_4_device);
+failed_acceleport_4_device:
+	usb_serial_deregister(&digi_acceleport_2_device);
+failed_acceleport_2_device:
+	return retval;
 }
 
 

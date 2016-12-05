@@ -41,6 +41,13 @@
 		return -ENOEXEC;			\
 	}
 
+/* Maximum number of GOT entries. We use a long displacement ldd from
+ * the bottom of the table, which has a maximum signed displacement of
+ * 0x3fff; however, since we're only going forward, this becomes
+ * 0x1fff, and thus, since each GOT entry is 8 bytes long we can have
+ * at most 1023 entries */
+#define MAX_GOTS	1023
+
 /* three functions to determine where in the module core
  * or init pieces the location is */
 static inline int is_init(struct module *me, void *loc)
@@ -66,10 +73,7 @@ struct got_entry {
 	Elf32_Addr addr;
 };
 
-struct fdesc_entry {
-	Elf32_Addr addr;
-	Elf32_Addr gp;
-};
+#define Elf_Fdesc	Elf32_Fdesc
 
 struct stub_entry {
 	Elf32_Word insns[2]; /* each stub entry has two insns */
@@ -79,11 +83,7 @@ struct got_entry {
 	Elf64_Addr addr;
 };
 
-struct fdesc_entry {
-	Elf64_Addr dummy[2];
-	Elf64_Addr addr;
-	Elf64_Addr gp;
-};
+#define Elf_Fdesc	Elf64_Fdesc
 
 struct stub_entry {
 	Elf64_Word insns[4]; /* each stub entry has four insns */
@@ -269,7 +269,7 @@ int module_frob_arch_sections(CONST Elf_Ehdr *hdr,
 
 	me->core_size = ALIGN(me->core_size, 16);
 	me->arch.fdesc_offset = me->core_size;
-	me->core_size += fdescs * sizeof(struct fdesc_entry);
+	me->core_size += fdescs * sizeof(Elf_Fdesc);
 
 	me->core_size = ALIGN(me->core_size, 16);
 	me->arch.stub_offset = me->core_size;
@@ -300,11 +300,14 @@ static Elf64_Word get_got(struct module *me, unsigned long value, long addend)
 	got = me->module_core + me->arch.got_offset;
 	for (i = 0; got[i].addr; i++)
 		if (got[i].addr == value)
-			return i * sizeof(struct got_entry);
+			goto out;
 
 	BUG_ON(++me->arch.got_count > me->arch.got_max);
 
 	got[i].addr = value;
+ out:
+	DEBUGP("GOT ENTRY %d[%x] val %lx\n", i, i*sizeof(struct got_entry),
+	       value);
 	return i * sizeof(struct got_entry);
 }
 #endif /* __LP64__ */
@@ -312,7 +315,7 @@ static Elf64_Word get_got(struct module *me, unsigned long value, long addend)
 #ifdef __LP64__
 static Elf_Addr get_fdesc(struct module *me, unsigned long value)
 {
-	struct fdesc_entry *fdesc = me->module_core + me->arch.fdesc_offset;
+	Elf_Fdesc *fdesc = me->module_core + me->arch.fdesc_offset;
 
 	if (!value) {
 		printk(KERN_ERR "%s: zero OPD requested!\n", me->name);
@@ -387,7 +390,7 @@ static Elf_Addr get_stub(struct module *me, unsigned long value, long addend,
 		stub->insns[2] = 0xe820d000;	/* bve (%r1)		*/
 		stub->insns[3] = 0x537b0030;	/* ldd 18(%dp),%dp	*/
 
-		stub->insns[0] |= reassemble_14(rrsel(get_got(me, value, addend),0));
+		stub->insns[0] |= reassemble_14(get_got(me, value, addend) & 0x3fff);
 	}
 	else
 	{
@@ -516,6 +519,9 @@ int apply_relocate_add(Elf_Shdr *sechdrs,
 		case R_PARISC_PCREL22F:
 			/* 22-bit PC relative address; only defined for pa20 */
 			val = get_stub(me, val, addend, 0, is_init(me, loc));
+			DEBUGP("STUB FOR %s loc %lx+%lx at %lx\n", 
+			       strtab + sym->st_name, (unsigned long)loc, addend, 
+			       val)
 			val = (val - dot - 8)/4;
 			CHECK_RELOC(val, 22);
 			*loc = (*loc & ~0x3ff1ffd) | reassemble_22(val);
@@ -618,6 +624,9 @@ int apply_relocate_add(Elf_Shdr *sechdrs,
 					val = get_stub(me, val, addend, 0,
 						       is_init(me, loc));
 			}
+			DEBUGP("STUB FOR %s loc %lx, val %lx+%lx at %lx\n", 
+			       strtab + sym->st_name, loc, sym->st_value,
+			       addend, val);
 			/* FIXME: local symbols work as long as the
 			 * core and init pieces aren't separated too
 			 * far.  If this is ever broken, you will trip
@@ -646,6 +655,9 @@ int apply_relocate_add(Elf_Shdr *sechdrs,
 			/* 64-bit function address */
 			if(is_local(me, (void *)(val + addend))) {
 				*loc64 = get_fdesc(me, val+addend);
+				DEBUGP("FDESC for %s at %p points to %lx\n",
+				       strtab + sym->st_name, *loc64,
+				       ((Elf_Fdesc *)*loc64)->addr);
 			} else {
 				/* if the symbol is not local to this
 				 * module then val+addend is a pointer
@@ -671,11 +683,16 @@ int module_finalize(const Elf_Ehdr *hdr,
 		    const Elf_Shdr *sechdrs,
 		    struct module *me)
 {
+	int i;
+	unsigned long nsyms;
+	const char *strtab = NULL;
+	Elf_Sym *newptr, *oldptr;
+	Elf_Shdr *symhdr = NULL;
 #ifdef DEBUG
-	struct fdesc_entry *entry;
+	Elf_Fdesc *entry;
 	u32 *addr;
 
-	entry = (struct fdesc_entry *)me->init;
+	entry = (Elf_Fdesc *)me->init;
 	printk("FINALIZE, ->init FPTR is %p, GP %lx ADDR %lx\n", entry,
 	       entry->gp, entry->addr);
 	addr = (u32 *)entry->addr;
@@ -690,7 +707,54 @@ int module_finalize(const Elf_Ehdr *hdr,
 	       me->arch.got_count, me->arch.got_max,
 	       me->arch.fdesc_count, me->arch.fdesc_max);
 #endif
-		
+
+	/* haven't filled in me->symtab yet, so have to find it
+	 * ourselves */
+	for (i = 1; i < hdr->e_shnum; i++) {
+		if(sechdrs[i].sh_type == SHT_SYMTAB
+		   && (sechdrs[i].sh_type & SHF_ALLOC)) {
+			int strindex = sechdrs[i].sh_link;
+			/* FIXME: AWFUL HACK
+			 * The cast is to drop the const from
+			 * the sechdrs pointer */
+			symhdr = (Elf_Shdr *)&sechdrs[i];
+			strtab = (char *)sechdrs[strindex].sh_addr;
+			break;
+		}
+	}
+
+	DEBUGP("module %s: strtab %p, symhdr %p\n",
+	       me->name, strtab, symhdr);
+
+	if(me->arch.got_count > MAX_GOTS) {
+		printk(KERN_ERR "%s: Global Offset Table overflow (used %ld, allowed %d\n", me->name, me->arch.got_count, MAX_GOTS);
+		return -EINVAL;
+	}
+	
+	/* no symbol table */
+	if(symhdr == NULL)
+		return 0;
+
+	oldptr = (void *)symhdr->sh_addr;
+	newptr = oldptr + 1;	/* we start counting at 1 */
+	nsyms = symhdr->sh_size / sizeof(Elf_Sym);
+	DEBUGP("OLD num_symtab %lu\n", nsyms);
+
+	for (i = 1; i < nsyms; i++) {
+		oldptr++;	/* note, count starts at 1 so preincrement */
+		if(strncmp(strtab + oldptr->st_name,
+			      ".L", 2) == 0)
+			continue;
+
+		if(newptr != oldptr)
+			*newptr++ = *oldptr;
+		else
+			newptr++;
+
+	}
+	nsyms = newptr - (Elf_Sym *)symhdr->sh_addr;
+	DEBUGP("NEW num_symtab %lu\n", nsyms);
+	symhdr->sh_size = nsyms * sizeof(Elf_Sym);
 	return 0;
 }
 

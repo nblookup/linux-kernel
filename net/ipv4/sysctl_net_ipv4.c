@@ -8,6 +8,7 @@
  */
 
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/sysctl.h>
 #include <linux/config.h>
 #include <net/snmp.h>
@@ -109,6 +110,7 @@ static int ipv4_sysctl_forward_strategy(ctl_table *table, int *name, int nlen,
 		}
 	}
 
+	*valp = new;
 	inet_forward_change();
 	return 1;
 }
@@ -586,3 +588,5 @@ ctl_table ipv4_table[] = {
 };
 
 #endif /* CONFIG_SYSCTL */
+
+EXPORT_SYMBOL(ipv4_config);

@@ -35,7 +35,6 @@
 #include <linux/timer.h>
 #include <linux/mm.h>
 #include <linux/proc_fs.h>
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/vmalloc.h>
 
@@ -136,24 +135,16 @@ static spinlock_t pcmcia_lock = SPIN_LOCK_UNLOCKED;
 
 static int __init au1000_pcmcia_driver_init(void)
 {
-	servinfo_t info;
 	struct pcmcia_init pcmcia_init;
 	struct pcmcia_state state;
 	unsigned int i;
 
-	printk("\nAu1x00 PCMCIA (CS release %s)\n", CS_RELEASE);
+	printk("\nAu1x00 PCMCIA\n");
 
 #ifndef CONFIG_64BIT_PHYS_ADDR
 	printk(KERN_ERR "Au1x00 PCMCIA 36 bit IO support not enabled\n");
 	return -1;
 #endif
-
-	CardServices(GetCardServicesInfo, &info);
-
-	if(info.Revision!=CS_RELEASE_CODE){
-		printk(KERN_ERR "Card Services release codes do not match\n");
-		return -1;
-	}
 
 #if defined(CONFIG_MIPS_PB1000) || defined(CONFIG_MIPS_PB1100) || defined(CONFIG_MIPS_PB1500)
 	pcmcia_low_level=&pb1x00_pcmcia_ops;

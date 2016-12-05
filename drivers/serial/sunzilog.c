@@ -112,6 +112,7 @@ struct uart_sunzilog_port {
 
 #ifdef CONFIG_SERIO
 	struct serio			serio;
+	int				serio_open;
 #endif
 };
 
@@ -1311,12 +1312,13 @@ static int sunzilog_serio_write(struct serio *serio, unsigned char ch)
 
 static int sunzilog_serio_open(struct serio *serio)
 {
+	struct uart_sunzilog_port *up = serio->driver;
 	unsigned long flags;
 	int ret;
 
 	spin_lock_irqsave(&sunzilog_serio_lock, flags);
-	if (serio->private == NULL) {
-		serio->private = (void *) -1L;
+	if (!up->serio_open) {
+		up->serio_open = 1;
 		ret = 0;
 	} else
 		ret = -EBUSY;
@@ -1327,10 +1329,11 @@ static int sunzilog_serio_open(struct serio *serio)
 
 static void sunzilog_serio_close(struct serio *serio)
 {
+	struct uart_sunzilog_port *up = serio->driver;
 	unsigned long flags;
 
 	spin_lock_irqsave(&sunzilog_serio_lock, flags);
-	serio->private = NULL;
+	up->serio_open = 0;
 	spin_unlock_irqrestore(&sunzilog_serio_lock, flags);
 }
 
@@ -1556,7 +1559,7 @@ static void __init sunzilog_init_kbdms(struct uart_sunzilog_port *up, int channe
 		up->serio.type |= SERIO_SUNKBD;
 		up->serio.name = "zskbd";
 	} else {
-		up->serio.type |= SERIO_SUN;
+		up->serio.type |= (SERIO_SUN | (1 << 16));
 		up->serio.name = "zsms";
 	}
 	up->serio.phys = (channel == KEYBOARD_LINE ?

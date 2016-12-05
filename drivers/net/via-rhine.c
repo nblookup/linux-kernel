@@ -122,11 +122,14 @@
 	- No filtering multicast in promisc mode (Edward Peng)
 	- Fix for Rhine-I Tx timeouts
 
+	LK1.1.19 (Roger Luethi)
+	- Increase Tx threshold for unspecified errors
+
 */
 
 #define DRV_NAME	"via-rhine"
-#define DRV_VERSION	"1.1.18-2.5"
-#define DRV_RELDATE	"July-4-2003"
+#define DRV_VERSION	"1.1.19-2.5"
+#define DRV_RELDATE	"July-12-2003"
 
 
 /* A few user-configurable values.
@@ -398,7 +401,7 @@ static struct via_rhine_chip_info via_rhine_chip_info[] __devinitdata =
 	  CanHaveMII | HasWOL },
 };
 
-static struct pci_device_id via_rhine_pci_tbl[] __devinitdata =
+static struct pci_device_id via_rhine_pci_tbl[] =
 {
 	{0x1106, 0x3043, PCI_ANY_ID, PCI_ANY_ID, 0, 0, VT86C100A},
 	{0x1106, 0x3065, PCI_ANY_ID, PCI_ANY_ID, 0, 0, VT6102},
@@ -544,6 +547,7 @@ static void via_rhine_error(struct net_device *dev, int intr_status);
 static void via_rhine_set_rx_mode(struct net_device *dev);
 static struct net_device_stats *via_rhine_get_stats(struct net_device *dev);
 static int netdev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
+static struct ethtool_ops netdev_ethtool_ops;
 static int  via_rhine_close(struct net_device *dev);
 
 static inline u32 get_intr_status(struct net_device *dev)
@@ -679,7 +683,7 @@ static int __devinit via_rhine_init_one (struct pci_dev *pdev,
 	ioaddr = (long) ioremap (memaddr, io_size);
 	if (!ioaddr) {
 		printk (KERN_ERR "ioremap failed for device %s, region 0x%X @ 0x%lX\n",
-				pdev->slot_name, io_size, memaddr);
+				pci_name(pdev), io_size, memaddr);
 		goto err_out_free_res;
 	}
 
@@ -777,6 +781,7 @@ static int __devinit via_rhine_init_one (struct pci_dev *pdev,
 	dev->get_stats = via_rhine_get_stats;
 	dev->set_multicast_list = via_rhine_set_rx_mode;
 	dev->do_ioctl = netdev_ioctl;
+	dev->ethtool_ops = &netdev_ethtool_ops;
 	dev->tx_timeout = via_rhine_tx_timeout;
 	dev->watchdog_timeo = TX_TIMEOUT;
 	if (np->drv_flags & ReqTxAlign)
@@ -863,7 +868,7 @@ err_out_free_res:
 #endif
 	pci_release_regions(pdev);
 err_out_free_netdev:
-	kfree (dev);
+	free_netdev (dev);
 err_out:
 	return -ENODEV;
 }
@@ -1152,7 +1157,7 @@ static int via_rhine_open(struct net_device *dev)
 
 	/* Set the timer to check for link beat. */
 	init_timer(&np->timer);
-	np->timer.expires = jiffies + 2;
+	np->timer.expires = jiffies + 2 * HZ/100;
 	np->timer.data = (unsigned long)dev;
 	np->timer.function = &via_rhine_timer;				/* timer handler */
 	add_timer(&np->timer);
@@ -1664,9 +1669,13 @@ static void via_rhine_error(struct net_device *dev, int intr_status)
 	}
 	if ((intr_status & IntrTxError) && ~( IntrTxAborted | IntrTxUnderrun |
 										   IntrTxDescRace )) {
-		if (debug > 2)
-			printk(KERN_INFO "%s: Unspecified error.\n",
-				   dev->name);
+		if (np->tx_thresh < 0xE0) {
+			writeb(np->tx_thresh += 0x20, ioaddr + TxConfig);
+		}
+		if (debug > 1)
+			printk(KERN_INFO "%s: Unspecified error. Tx "
+				   "threshold now %2.2x.\n",
+				   dev->name, np->tx_thresh);
 	}
 	if (intr_status & ( IntrTxAborted | IntrTxUnderrun | IntrTxDescRace |
 						IntrTxError ))
@@ -1734,89 +1743,86 @@ static void via_rhine_set_rx_mode(struct net_device *dev)
 	writeb(np->rx_thresh | rx_mode, ioaddr + RxConfig);
 }
 
-static int netdev_ethtool_ioctl (struct net_device *dev, void *useraddr)
+static void netdev_get_drvinfo (struct net_device *dev, struct ethtool_drvinfo *info)
 {
 	struct netdev_private *np = dev->priv;
-	u32 ethcmd;
 
-	if (get_user(ethcmd, (u32 *)useraddr))
-		return -EFAULT;
-
-	switch (ethcmd) {
-	case ETHTOOL_GDRVINFO: {
-		struct ethtool_drvinfo info = { ETHTOOL_GDRVINFO };
-		strcpy (info.driver, DRV_NAME);
-		strcpy (info.version, DRV_VERSION);
-		strcpy (info.bus_info, np->pdev->slot_name);
-		if (copy_to_user (useraddr, &info, sizeof (info)))
-			return -EFAULT;
-		return 0;
-	}
-
-	/* get settings */
-	case ETHTOOL_GSET: {
-		struct ethtool_cmd ecmd = { ETHTOOL_GSET };
-		if (!(np->drv_flags & CanHaveMII))
-			break;
-		spin_lock_irq(&np->lock);
-		mii_ethtool_gset(&np->mii_if, &ecmd);
-		spin_unlock_irq(&np->lock);
-		if (copy_to_user(useraddr, &ecmd, sizeof(ecmd)))
-			return -EFAULT;
-		return 0;
-	}
-	/* set settings */
-	case ETHTOOL_SSET: {
-		int r;
-		struct ethtool_cmd ecmd;
-		if (!(np->drv_flags & CanHaveMII))
-			break;
-		if (copy_from_user(&ecmd, useraddr, sizeof(ecmd)))
-			return -EFAULT;
-		spin_lock_irq(&np->lock);
-		r = mii_ethtool_sset(&np->mii_if, &ecmd);
-		spin_unlock_irq(&np->lock);
-		return r;
-	}
-	/* restart autonegotiation */
-	case ETHTOOL_NWAY_RST: {
-		if (!(np->drv_flags & CanHaveMII))
-			break;
-		return mii_nway_restart(&np->mii_if);
-	}
-	/* get link status */
-	case ETHTOOL_GLINK: {
-		struct ethtool_value edata = {ETHTOOL_GLINK};
-		if (!(np->drv_flags & CanHaveMII))
-			break;
-		edata.data = mii_link_ok(&np->mii_if);
-		if (copy_to_user(useraddr, &edata, sizeof(edata)))
-			return -EFAULT;
-		return 0;
-	}
-
-	/* get message-level */
-	case ETHTOOL_GMSGLVL: {
-		struct ethtool_value edata = {ETHTOOL_GMSGLVL};
-		edata.data = debug;
-		if (copy_to_user(useraddr, &edata, sizeof(edata)))
-			return -EFAULT;
-		return 0;
-	}
-	/* set message-level */
-	case ETHTOOL_SMSGLVL: {
-		struct ethtool_value edata;
-		if (copy_from_user(&edata, useraddr, sizeof(edata)))
-			return -EFAULT;
-		debug = edata.data;
-		return 0;
-	}
-	default:
-		break;
-	}
-
-	return -EOPNOTSUPP;
+	strcpy (info->driver, DRV_NAME);
+	strcpy (info->version, DRV_VERSION);
+	strcpy (info->bus_info, pci_name(np->pdev));
 }
+
+static int netdev_get_settings(struct net_device *dev, struct ethtool_cmd *cmd)
+{
+	struct netdev_private *np = dev->priv;
+	int rc;
+
+	if (!(np->drv_flags & CanHaveMII))
+		return -EINVAL;
+
+	spin_lock_irq(&np->lock);
+	rc = mii_ethtool_gset(&np->mii_if, cmd);
+	spin_unlock_irq(&np->lock);
+
+	return rc;
+}
+
+static int netdev_set_settings(struct net_device *dev, struct ethtool_cmd *cmd)
+{
+	struct netdev_private *np = dev->priv;
+	int rc;
+
+	if (!(np->drv_flags & CanHaveMII))
+		return -EINVAL;
+
+	spin_lock_irq(&np->lock);
+	rc = mii_ethtool_sset(&np->mii_if, cmd);
+	spin_unlock_irq(&np->lock);
+
+	return rc;
+}
+
+static int netdev_nway_reset(struct net_device *dev)
+{
+	struct netdev_private *np = dev->priv;
+
+	if (!(np->drv_flags & CanHaveMII))
+		return -EINVAL;
+
+	return mii_nway_restart(&np->mii_if);
+}
+
+static u32 netdev_get_link(struct net_device *dev)
+{
+	struct netdev_private *np = dev->priv;
+
+	if (!(np->drv_flags & CanHaveMII))
+		return 0;	/* -EINVAL */
+
+	return mii_link_ok(&np->mii_if);
+}
+
+static u32 netdev_get_msglevel(struct net_device *dev)
+{
+	return debug;
+}
+
+static void netdev_set_msglevel(struct net_device *dev, u32 value)
+{
+	debug = value;
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+	.get_settings		= netdev_get_settings,
+	.set_settings		= netdev_set_settings,
+	.nway_reset		= netdev_nway_reset,
+	.get_link		= netdev_get_link,
+	.get_msglevel		= netdev_get_msglevel,
+	.set_msglevel		= netdev_set_msglevel,
+	.get_sg			= ethtool_op_get_sg,
+	.get_tx_csum		= ethtool_op_get_tx_csum,
+};
 
 static int netdev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
@@ -1827,14 +1833,9 @@ static int netdev_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	if (!netif_running(dev))
 		return -EINVAL;
 
-	if (cmd == SIOCETHTOOL)
-		rc = netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
-
-	else {
-		spin_lock_irq(&np->lock);
-		rc = generic_mii_ioctl(&np->mii_if, data, cmd, NULL);
-		spin_unlock_irq(&np->lock);
-	}
+	spin_lock_irq(&np->lock);
+	rc = generic_mii_ioctl(&np->mii_if, data, cmd, NULL);
+	spin_unlock_irq(&np->lock);
 
 	return rc;
 }
@@ -1886,7 +1887,7 @@ static void __devexit via_rhine_remove_one (struct pci_dev *pdev)
 	iounmap((char *)(dev->base_addr));
 #endif
 
-	kfree(dev);
+	free_netdev(dev);
 	pci_disable_device(pdev);
 	pci_set_drvdata(pdev, NULL);
 }

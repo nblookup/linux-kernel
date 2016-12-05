@@ -33,7 +33,7 @@ static void __devinit quirk_passive_release(struct pci_dev *dev)
 	while ((d = pci_find_device(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371SB_0, d))) {
 		pci_read_config_byte(d, 0x82, &dlc);
 		if (!(dlc & 1<<1)) {
-			printk(KERN_ERR "PCI: PIIX3: Enabling Passive Release on %s\n", d->slot_name);
+			printk(KERN_ERR "PCI: PIIX3: Enabling Passive Release on %s\n", pci_name(d));
 			dlc |= 1<<1;
 			pci_write_config_byte(d, 0x82, dlc);
 		}
@@ -219,7 +219,7 @@ static void __devinit quirk_io_region(struct pci_dev *dev, unsigned region, unsi
 	if (region) {
 		struct resource *res = dev->resource + nr;
 
-		res->name = dev->dev.name;
+		res->name = pci_name(dev);
 		res->start = region;
 		res->end = region + size - 1;
 		res->flags = IORESOURCE_IO;
@@ -274,6 +274,22 @@ static void __devinit quirk_piix4_acpi(struct pci_dev *dev)
 	quirk_io_region(dev, region, 64, PCI_BRIDGE_RESOURCES);
 	pci_read_config_dword(dev, 0x90, &region);
 	quirk_io_region(dev, region, 32, PCI_BRIDGE_RESOURCES+1);
+}
+
+/*
+ * ICH4, ICH4-M, ICH5, ICH5-M ACPI: Three IO regions pointed to by longwords at
+ *	0x40 (128 bytes of ACPI, GPIO & TCO registers)
+ *	0x58 (64 bytes of GPIO I/O space)
+ */
+static void __devinit quirk_ich4_lpc_acpi(struct pci_dev *dev)
+{
+	u32 region;
+
+	pci_read_config_dword(dev, 0x40, &region);
+	quirk_io_region(dev, region, 128, PCI_BRIDGE_RESOURCES);
+
+	pci_read_config_dword(dev, 0x58, &region);
+	quirk_io_region(dev, region, 64, PCI_BRIDGE_RESOURCES+1);
 }
 
 /*
@@ -437,7 +453,7 @@ static void __devinit quirk_via_irqpic(struct pci_dev *dev)
 
 	if (new_irq != irq) {
 		printk(KERN_INFO "PCI: Via IRQ fixup for %s, from %d to %d\n",
-		       dev->slot_name, irq, new_irq);
+		       pci_name(dev), irq, new_irq);
 
 		udelay(15);
 		pci_write_config_byte(dev, PCI_INTERRUPT_LINE, new_irq);
@@ -598,7 +614,7 @@ static void __devinit quirk_ide_bases(struct pci_dev *dev)
                return;
 
        printk(KERN_INFO "PCI: Ignoring BAR%d-%d of IDE controller %s\n",
-              first_bar, last_bar, dev->slot_name);
+              first_bar, last_bar, pci_name(dev));
 }
 
 /*
@@ -630,7 +646,7 @@ static void __init quirk_disable_pxb(struct pci_dev *pdev)
  
 int interrupt_line_quirk;
 
-static void __init quirk_via_bridge(struct pci_dev *pdev)
+static void __devinit quirk_via_bridge(struct pci_dev *pdev)
 {
 	if(pdev->devfn == 0)
 		interrupt_line_quirk = 1;
@@ -681,9 +697,12 @@ static void __init asus_hides_smbus_hostbridge(struct pci_dev *dev)
 	if (likely(dev->subsystem_vendor != PCI_VENDOR_ID_ASUSTEK))
 		return;
 
-	if ((dev->device == PCI_DEVICE_ID_INTEL_82845_HB) && 
-	    (dev->subsystem_device == 0x8088)) /* P4B533 */
-		asus_hides_smbus = 1;
+	if (dev->device == PCI_DEVICE_ID_INTEL_82845_HB)
+		switch(dev->subsystem_device) {
+		case 0x8070: /* P4B */
+	    	case 0x8088: /* P4B533 */
+			asus_hides_smbus = 1;
+		}
 	if ((dev->device == PCI_DEVICE_ID_INTEL_82845G_HB) &&
 	    (dev->subsystem_device == 0x80b2)) /* P4PE */
 		asus_hides_smbus = 1;
@@ -731,13 +750,35 @@ static void __init quirk_sis_96x_smbus(struct pci_dev *dev)
  * bridges pretend to be 85C503/5513 instead.  In that case see if we
  * spotted a compatible north bridge to make sure.
  * (pci_find_device doesn't work yet)
+ *
+ * We can also enable the sis96x bit in the discovery register..
  */
 static int __devinitdata sis_96x_compatible = 0;
 
+#define SIS_DETECT_REGISTER 0x40
+
 static void __init quirk_sis_503_smbus(struct pci_dev *dev)
 {
-	if (sis_96x_compatible)
-		quirk_sis_96x_smbus(dev);
+	u8 reg;
+	u16 devid;
+
+	pci_read_config_byte(dev, SIS_DETECT_REGISTER, &reg);
+	pci_write_config_byte(dev, SIS_DETECT_REGISTER, reg | (1 << 6));
+	pci_read_config_word(dev, PCI_DEVICE_ID, &devid);
+	if ((devid & 0xfff0) != 0x0960) {
+		pci_write_config_byte(dev, SIS_DETECT_REGISTER, reg);
+		return;
+	}
+
+	/* Make people aware that we changed the config.. */
+	printk(KERN_WARNING "Uncovering SIS%x that hid as a SIS503 (compatible=%d)\n", devid, sis_96x_compatible);
+
+	/*
+	 * Ok, it now shows up as a 96x.. The 96x quirks are after
+	 * the 503 quirk in the quirk table, so they'll automatically
+	 * run and enable things like the SMBus device
+	 */
+	dev->device = devid;
 }
 
 static void __init quirk_sis_96x_compatible(struct pci_dev *dev)
@@ -745,8 +786,65 @@ static void __init quirk_sis_96x_compatible(struct pci_dev *dev)
 	sis_96x_compatible = 1;
 }
 
+#ifdef CONFIG_SCSI_SATA
+static void __init quirk_intel_ide_combined(struct pci_dev *pdev)
+{
+	u8 prog, comb, tmp;
+
+	/*
+	 * Narrow down to Intel SATA PCI devices.
+	 */
+	switch (pdev->device) {
+	/* PCI ids taken from drivers/scsi/ata_piix.c */
+	case 0x24d1:
+	case 0x24df:
+	case 0x25a3:
+	case 0x25b0:
+		break;
+	default:
+		/* we do not handle this PCI device */
+		return;
+	}
+
+	/*
+	 * Read combined mode register.
+	 */
+	pci_read_config_byte(pdev, 0x90, &tmp);	/* combined mode reg */
+	tmp &= 0x6;     /* interesting bits 2:1, PATA primary/secondary */
+	if (tmp == 0x4)		/* bits 10x */
+		comb = (1 << 0);		/* SATA port 0, PATA port 1 */
+	else if (tmp == 0x6)	/* bits 11x */
+		comb = (1 << 2);		/* PATA port 0, SATA port 1 */
+	else
+		return;				/* not in combined mode */
+
+	/*
+	 * Read programming interface register.
+	 * (Tells us if it's legacy or native mode)
+	 */
+	pci_read_config_byte(pdev, PCI_CLASS_PROG, &prog);
+
+	/* if SATA port is in native mode, we're ok. */
+	if (prog & comb)
+		return;
+
+	/* SATA port is in legacy mode.  Reserve port so that
+	 * IDE driver does not attempt to use it.  If request_region
+	 * fails, it will be obvious at boot time, so we don't bother
+	 * checking return values.
+	 */
+	if (comb == (1 << 0))
+		request_region(0x1f0, 8, "libata");	/* port 0 */
+	else
+		request_region(0x170, 8, "libata");	/* port 1 */
+}
+#endif /* CONFIG_SCSI_SATA */
+
 /*
  *  The main table of quirks.
+ *
+ *  Note: any hooks for hotpluggable devices in this table must _NOT_
+ *        be declared __init.
  */
 
 static struct pci_fixup pci_fixups[] __devinitdata = {
@@ -798,6 +896,7 @@ static struct pci_fixup pci_fixups[] __devinitdata = {
 	{ PCI_FIXUP_HEADER,	PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C586_3,	quirk_vt82c586_acpi },
 	{ PCI_FIXUP_HEADER,	PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C686_4,	quirk_vt82c686_acpi },
 	{ PCI_FIXUP_HEADER,	PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82371AB_3,	quirk_piix4_acpi },
+	{ PCI_FIXUP_HEADER,	PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801DB_12,	quirk_ich4_lpc_acpi },
 	{ PCI_FIXUP_HEADER,	PCI_VENDOR_ID_AL,	PCI_DEVICE_ID_AL_M7101,		quirk_ali7101_acpi },
  	{ PCI_FIXUP_HEADER,	PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82371SB_2,	quirk_piix3_usb },
 	{ PCI_FIXUP_HEADER,	PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82371AB_2,	quirk_piix3_usb },
@@ -819,7 +918,7 @@ static struct pci_fixup pci_fixups[] __devinitdata = {
 	{ PCI_FIXUP_FINAL,	PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C686_6,	quirk_via_irqpic },
 
 	{ PCI_FIXUP_FINAL,	PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_FE_GATE_700C, quirk_amd_ordering },
-	{ PCI_FIXUP_FINAL,	PCI_VENDOR_ID_ATI,	PCI_DEVICE_ID_ATI_RADEON_IGP,   quirk_ati_exploding_mce },
+	{ PCI_FIXUP_FINAL,	PCI_VENDOR_ID_ATI,	PCI_DEVICE_ID_ATI_RS100,   quirk_ati_exploding_mce },
 	/*
 	 * i82380FB mobile docking controller: its PCI-to-PCI bridge
 	 * is subtractive decoding (transparent), and does indicate this
@@ -845,6 +944,14 @@ static struct pci_fixup pci_fixups[] __devinitdata = {
 	{ PCI_FIXUP_HEADER,	PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801DB_0,	asus_hides_smbus_lpc },
 	{ PCI_FIXUP_HEADER,	PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801BA_0,	asus_hides_smbus_lpc },
 
+#ifdef CONFIG_SCSI_SATA
+	/* Fixup BIOSes that configure Parallel ATA (PATA / IDE) and
+	 * Serial ATA (SATA) into the same PCI ID.
+	 */
+	{ PCI_FIXUP_FINAL,      PCI_VENDOR_ID_INTEL,    PCI_ANY_ID,
+	  quirk_intel_ide_combined },
+#endif /* CONFIG_SCSI_SATA */
+
 	{ 0 }
 };
 
@@ -856,7 +963,7 @@ static void pci_do_fixups(struct pci_dev *dev, int pass, struct pci_fixup *f)
  		    (f->vendor == dev->vendor || f->vendor == (u16) PCI_ANY_ID) &&
  		    (f->device == dev->device || f->device == (u16) PCI_ANY_ID)) {
 #ifdef DEBUG
-			printk(KERN_INFO "PCI: Calling quirk %p for %s\n", f->hook, dev->slot_name);
+			printk(KERN_INFO "PCI: Calling quirk %p for %s\n", f->hook, pci_name(dev));
 #endif
 			f->hook(dev);
 		}

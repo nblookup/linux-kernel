@@ -366,7 +366,7 @@ static struct {
 	{ "NatSemi DP8381[56]", PCI_IOTYPE },
 };
 
-static struct pci_device_id natsemi_pci_tbl[] __devinitdata = {
+static struct pci_device_id natsemi_pci_tbl[] = {
 	{ PCI_VENDOR_ID_NS, PCI_DEVICE_ID_NS_83815, PCI_ANY_ID, PCI_ANY_ID, },
 	{ 0, },
 };
@@ -766,7 +766,7 @@ static int __devinit natsemi_probe1 (struct pci_dev *pdev,
 
 	i = pci_request_regions(pdev, dev->name);
 	if (i) {
-		kfree(dev);
+		free_netdev(dev);
 		return i;
 	}
 
@@ -774,7 +774,7 @@ static int __devinit natsemi_probe1 (struct pci_dev *pdev,
 		void *mmio = ioremap (ioaddr, iosize);
 		if (!mmio) {
 			pci_release_regions(pdev);
-			kfree(dev);
+			free_netdev(dev);
 			return -ENOMEM;
 		}
 		ioaddr = (unsigned long) mmio;
@@ -838,7 +838,7 @@ static int __devinit natsemi_probe1 (struct pci_dev *pdev,
 	if (i) {
 		pci_release_regions(pdev);
 		unregister_netdev(dev);
-		kfree(dev);
+		free_netdev(dev);
 		pci_set_drvdata(pdev, NULL);
 		return i;
 	}
@@ -1530,7 +1530,7 @@ static void drain_tx(struct net_device *dev)
 	for (i = 0; i < TX_RING_SIZE; i++) {
 		if (np->tx_skbuff[i]) {
 			pci_unmap_single(np->pci_dev,
-				np->rx_dma[i], np->rx_skbuff[i]->len,
+				np->tx_dma[i], np->tx_skbuff[i]->len,
 				PCI_DMA_TODEVICE);
 			dev_kfree_skb(np->tx_skbuff[i]);
 			np->stats.tx_dropped++;
@@ -1967,7 +1967,7 @@ static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
 		strncpy(info.driver, DRV_NAME, ETHTOOL_BUSINFO_LEN);
 		strncpy(info.version, DRV_VERSION, ETHTOOL_BUSINFO_LEN);
 		info.fw_version[0] = '\0';
-		strncpy(info.bus_info, np->pci_dev->slot_name,
+		strncpy(info.bus_info, pci_name(np->pci_dev),
 			ETHTOOL_BUSINFO_LEN);
 		info.eedump_len = NATSEMI_EEPROM_SIZE;
 		info.regdump_len = NATSEMI_REGS_SIZE;
@@ -2552,7 +2552,7 @@ static void __devexit natsemi_remove1 (struct pci_dev *pdev)
 	unregister_netdev (dev);
 	pci_release_regions (pdev);
 	iounmap ((char *) dev->base_addr);
-	kfree (dev);
+	free_netdev (dev);
 	pci_set_drvdata(pdev, NULL);
 }
 

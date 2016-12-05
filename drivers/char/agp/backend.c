@@ -26,7 +26,6 @@
  * TODO: 
  * - Allocate more than order 0 pages to avoid too much linear map splitting.
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/init.h>
@@ -34,6 +33,7 @@
 #include <linux/miscdevice.h>
 #include <linux/pm.h>
 #include <linux/agp_backend.h>
+#include <linux/agpgart.h>
 #include <linux/vmalloc.h>
 #include <asm/io.h>
 #include "agp.h"
@@ -106,7 +106,11 @@ static int agp_find_max(void)
 {
 	long memory, index, result;
 
-	memory = (num_physpages << PAGE_SHIFT) >> 20;
+#if PAGE_SHIFT < 20
+	memory = num_physpages >> (20 - PAGE_SHIFT);
+#else
+	memory = num_physpages << (PAGE_SHIFT - 20);
+#endif
 	index = 1;
 
 	while ((memory > maxes_table[index].mem) && (index < 8))
@@ -297,9 +301,14 @@ void agp_remove_bridge(struct agp_bridge_data *bridge)
 }
 EXPORT_SYMBOL_GPL(agp_remove_bridge);
 
+int agp_off;
+int agp_try_unsupported_boot;
+EXPORT_SYMBOL(agp_off);
+EXPORT_SYMBOL(agp_try_unsupported_boot);
 
 static int __init agp_init(void)
 {
+	if (!agp_off) 
 	printk(KERN_INFO "Linux agpgart interface v%d.%d (c) Dave Jones\n",
 	       AGPGART_VERSION_MAJOR, AGPGART_VERSION_MINOR);
 	return 0;
@@ -309,10 +318,22 @@ void __exit agp_exit(void)
 {
 }
 
+#ifndef MODULE
+static __init int agp_setup(char *s)
+{
+	if (!strcmp(s,"off"))
+		agp_off = 1;
+	if (!strcmp(s,"try_unsupported"))
+		agp_try_unsupported_boot = 1;
+	return 1;	
+}
+__setup("agp=", agp_setup);
+#endif
 
 MODULE_AUTHOR("Dave Jones <davej@codemonkey.org.uk>");
 MODULE_DESCRIPTION("AGP GART driver");
 MODULE_LICENSE("GPL and additional rights");
+MODULE_ALIAS_MISCDEV(AGPGART_MINOR);
 
 module_init(agp_init);
 module_exit(agp_exit);

@@ -82,7 +82,7 @@ static void speedstep_set_state (unsigned int state, unsigned int notify)
 		return;
 
 	freqs.old = speedstep_get_processor_frequency(speedstep_processor);
-	freqs.new = speedstep_freqs[SPEEDSTEP_LOW].frequency;
+	freqs.new = speedstep_freqs[state].frequency;
 	freqs.cpu = 0; /* speedstep.c is UP only driver */
 	
 	if (notify)
@@ -137,7 +137,7 @@ static void speedstep_set_state (unsigned int state, unsigned int notify)
 	dprintk(KERN_DEBUG "cpufreq: read at pmbase 0x%x + 0x50 returned 0x%x\n", pmbase, value);
 
 	if (state == (value & 0x1)) {
-		dprintk (KERN_INFO "cpufreq: change to %u MHz succeeded\n", (freqs.new / 1000));
+		dprintk (KERN_INFO "cpufreq: change to %u MHz succeeded\n", (speedstep_get_processor_frequency(speedstep_processor) / 1000));
 	} else {
 		printk (KERN_ERR "cpufreq: change failed - I/O error\n");
 	}
@@ -295,12 +295,11 @@ static int speedstep_cpu_init(struct cpufreq_policy *policy)
 		return -EIO;
 
 	dprintk(KERN_INFO "cpufreq: currently at %s speed setting - %i MHz\n", 
-		(speed == speedstep_low_freq) ? "low" : "high",
+		(speed == speedstep_freqs[SPEEDSTEP_LOW].frequency) ? "low" : "high",
 		(speed / 1000));
 
 	/* cpuinfo and default policy values */
-	policy->policy = (speed == speedstep_freqs[SPEEDSTEP_LOW].frequency) ? 
-		CPUFREQ_POLICY_POWERSAVE : CPUFREQ_POLICY_PERFORMANCE;
+	policy->governor = CPUFREQ_DEFAULT_GOVERNOR;
 	policy->cpuinfo.transition_latency = CPUFREQ_ETERNAL;
 	policy->cur = speed;
 
@@ -309,7 +308,7 @@ static int speedstep_cpu_init(struct cpufreq_policy *policy)
 
 
 static struct cpufreq_driver speedstep_driver = {
-	.name		= "speedstep",
+	.name		= "speedstep-ich",
 	.verify 	= speedstep_verify,
 	.target 	= speedstep_target,
 	.init		= speedstep_cpu_init,
@@ -356,7 +355,7 @@ static void __exit speedstep_exit(void)
 }
 
 
-MODULE_AUTHOR ("Dave Jones <davej@suse.de>, Dominik Brodowski <linux@brodo.de>");
+MODULE_AUTHOR ("Dave Jones <davej@codemonkey.org.uk>, Dominik Brodowski <linux@brodo.de>");
 MODULE_DESCRIPTION ("Speedstep driver for Intel mobile processors on chipsets with ICH-M southbridges.");
 MODULE_LICENSE ("GPL");
 

@@ -890,7 +890,7 @@ stifb_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 {
 	unsigned long p = *ppos;
 	struct inode *inode = file->f_dentry->d_inode;
-	int fbidx = minor(inode->i_rdev);
+	int fbidx = iminor(inode);
 	struct fb_info *info = registered_fb[fbidx];
 	char tmpbuf[TMPBUFLEN];
 
@@ -922,7 +922,7 @@ static ssize_t
 stifb_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 {
 	struct inode *inode = file->f_dentry->d_inode;
-	int fbidx = minor(inode->i_rdev);
+	int fbidx = iminor(inode);
 	struct fb_info *info = registered_fb[fbidx];
 	unsigned long p = *ppos;
 	size_t c;
@@ -1238,7 +1238,7 @@ stifb_init_fb(struct sti_struct *sti, int force_bpp)
 
 
 	/* get framebuffer physical and virtual base addr & len (64bit ready) */
-	fix->smem_start = fb->sti->regions_phys[1] | 0xffffffff00000000;
+	fix->smem_start = F_EXTEND(fb->sti->regions_phys[1]);
 	fix->smem_len = fb->sti->regions[1].region_desc.length * 4096;
 
 	fix->line_length = (fb->sti->glob_cfg->total_x * bpp) / 8;

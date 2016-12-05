@@ -32,12 +32,14 @@
 #define AT_SYSINFO 32
 #define AT_SYSINFO_EHDR		33
 
-#if 0 /* disabled for now because the code has still problems */
+int sysctl_vsyscall32;
+
 #define ARCH_DLINFO do {  \
+	if (sysctl_vsyscall32) { \
 	NEW_AUX_ENT(AT_SYSINFO, (u32)(u64)VSYSCALL32_VSYSCALL); \
 	NEW_AUX_ENT(AT_SYSINFO_EHDR, VSYSCALL32_BASE);    \
+	}	\
 } while(0)
-#endif
 
 struct file;
 struct elf_phdr; 
@@ -80,9 +82,12 @@ do {									      \
 	int i;								      \
 	Elf32_Off ofs = 0;						      \
 	for (i = 0; i < VSYSCALL32_EHDR->e_phnum; ++i) {		      \
-		struct elf_phdr phdr = vsyscall_phdrs[i];		      \
+		struct elf32_phdr phdr = vsyscall_phdrs[i];		      \
 		if (phdr.p_type == PT_LOAD) {				      \
+			BUG_ON(ofs != 0);				      \
 			ofs = phdr.p_offset = offset;			      \
+			phdr.p_memsz = PAGE_ALIGN(phdr.p_memsz);	      \
+			phdr.p_filesz = phdr.p_memsz;			      \
 			offset += phdr.p_filesz;			      \
 		}							      \
 		else							      \
@@ -100,7 +105,7 @@ do {									      \
 	for (i = 0; i < VSYSCALL32_EHDR->e_phnum; ++i) {		      \
 		if (vsyscall_phdrs[i].p_type == PT_LOAD)		      \
 			DUMP_WRITE((void *) (u64) vsyscall_phdrs[i].p_vaddr,	      \
-				   vsyscall_phdrs[i].p_filesz);		      \
+				   PAGE_ALIGN(vsyscall_phdrs[i].p_memsz));    \
 	}								      \
 } while (0)
 
@@ -202,10 +207,9 @@ static inline int elf_core_copy_task_regs(struct task_struct *t, elf_gregset_t* 
 }
 
 static inline int 
-elf_core_copy_task_fpregs(struct task_struct *tsk, elf_fpregset_t *fpu)
+elf_core_copy_task_fpregs(struct task_struct *tsk, struct pt_regs *regs, elf_fpregset_t *fpu)
 {
 	struct _fpstate_ia32 *fpstate = (void*)fpu; 
-	struct pt_regs *regs = (struct pt_regs *)(tsk->thread.rsp0); 
 	mm_segment_t oldfs = get_fs();
 
 	if (!tsk->used_math) 

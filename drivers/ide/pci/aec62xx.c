@@ -16,7 +16,6 @@
 
 #include <asm/io.h>
 
-#include "ide_modes.h"
 #include "aec62xx.h"
 
 #if defined(DISPLAY_AEC62XX_TIMINGS) && defined(CONFIG_PROC_FS)
@@ -356,13 +355,15 @@ try_dma_modes:
 		} else {
 			goto fast_ata_pio;
 		}
+		return hwif->ide_dma_on(drive);
 	} else if ((id->capability & 8) || (id->field_valid & 2)) {
 fast_ata_pio:
 no_dma_set:
 		aec62xx_tune_drive(drive, 5);
 		return hwif->ide_dma_off_quietly(drive);
 	}
-	return hwif->ide_dma_on(drive);
+	/* IORDY not supported */
+	return 0;
 }
 
 static int aec62xx_irq_timeout (ide_drive_t *drive)
@@ -533,7 +534,7 @@ static int __devinit aec62xx_init_one(struct pci_dev *dev, const struct pci_devi
 	return 0;
 }
 
-static struct pci_device_id aec62xx_pci_tbl[] __devinitdata = {
+static struct pci_device_id aec62xx_pci_tbl[] = {
 	{ PCI_VENDOR_ID_ARTOP, PCI_DEVICE_ID_ARTOP_ATP850UF, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_ARTOP, PCI_DEVICE_ID_ARTOP_ATP860,   PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1 },
 	{ PCI_VENDOR_ID_ARTOP, PCI_DEVICE_ID_ARTOP_ATP860R,  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 2 },

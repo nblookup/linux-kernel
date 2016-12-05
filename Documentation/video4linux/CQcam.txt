@@ -50,8 +50,7 @@ configuration.  The appropriate flags are:
   With these flags, the kernel should compile and install the modules.
 To record and monitor the compilation, I use:
 
- (make dep; \
-  make zlilo ; \
+ (make zlilo ; \
   make modules; \
   make modules_install ; 
   depmod -a ) &>log &
@@ -72,8 +71,7 @@ these procedures.
 2.1 Module Configuration  
 
   Using modules requires a bit of work to install and pass the
-parameters.  Do read ../modules.txt, and understand that entries
-in /etc/modules.conf of:
+parameters.  Understand that entries in /etc/modules.conf of:
 
    alias parport_lowlevel parport_pc
    options parport_pc io=0x378 irq=none

@@ -11,6 +11,7 @@
 
 #include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
@@ -41,6 +42,8 @@
 #include <asm/isa.h>
 #include <asm/starfire.h>
 #include <asm/smp.h>
+#include <asm/sections.h>
+#include <asm/cpudata.h>
 
 spinlock_t mostek_lock = SPIN_LOCK_UNLOCKED;
 spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
@@ -52,6 +55,8 @@ unsigned long ds1287_regs = 0UL;
 extern unsigned long wall_jiffies;
 
 u64 jiffies_64 = INITIAL_JIFFIES;
+
+EXPORT_SYMBOL(jiffies_64);
 
 static unsigned long mstk48t08_regs = 0UL;
 static unsigned long mstk48t59_regs = 0UL;
@@ -414,6 +419,7 @@ unsigned long timer_tick_offset;
 unsigned long timer_tick_compare;
 
 static unsigned long timer_ticks_per_usec_quotient;
+static unsigned long timer_ticks_per_nsec_quotient;
 
 #define TICK_SIZE (tick_nsec / 1000)
 
@@ -449,7 +455,6 @@ void sparc64_do_profile(struct pt_regs *regs)
 		return;
 
 	{
-		extern int _stext;
 		extern int rwlock_impl_begin, rwlock_impl_end;
 		extern int atomic_impl_begin, atomic_impl_end;
 		extern int __memcpy_begin, __memcpy_end;
@@ -468,7 +473,7 @@ void sparc64_do_profile(struct pt_regs *regs)
 		     pc < (unsigned long) &__bitops_end))
 			pc = o7;
 
-		pc -= (unsigned long) &_stext;
+		pc -= (unsigned long) _stext;
 		pc >>= prof_shift;
 
 		if(pc >= prof_len)
@@ -703,9 +708,9 @@ static void __init set_system_time(void)
 	}
 
 	xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
-	wall_to_monotonic.tv_sec = -xtime.tv_sec;
 	xtime.tv_nsec = (INITIAL_JIFFIES % HZ) * (NSEC_PER_SEC / HZ);
-	wall_to_monotonic.tv_nsec = -xtime.tv_nsec;
+	set_normalized_timespec(&wall_to_monotonic,
+ 	                        -xtime.tv_sec, -xtime.tv_nsec);
 
 	if (mregs) {
 		tmp = mostek_read(mregs + MOSTEK_CREG);
@@ -743,9 +748,9 @@ void __init clock_probe(void)
 			(unsigned int) (long) &unix_tod);
 		prom_feval(obp_gettod);
 		xtime.tv_sec = unix_tod;
-		wall_to_monotonic.tv_sec = -xtime.tv_sec;
 		xtime.tv_nsec = (INITIAL_JIFFIES % HZ) * (NSEC_PER_SEC / HZ);
-		wall_to_monotonic.tv_nsec = -xtime.tv_nsec;
+		set_normalized_timespec(&wall_to_monotonic,
+		                        -xtime.tv_sec, -xtime.tv_nsec);
 		return;
 	}
 
@@ -792,6 +797,7 @@ void __init clock_probe(void)
 		    strcmp(model, "mk48t08") &&
 		    strcmp(model, "mk48t59") &&
 		    strcmp(model, "m5819") &&
+		    strcmp(model, "m5819p") &&
 		    strcmp(model, "ds1287")) {
 			if (cbus != NULL) {
 				prom_printf("clock_probe: Central bus lacks timer chip.\n");
@@ -850,7 +856,8 @@ void __init clock_probe(void)
 			}
 
 			if (!strcmp(model, "ds1287") ||
-			    !strcmp(model, "m5819")) {
+			    !strcmp(model, "m5819") ||
+			    !strcmp(model, "m5819p")) {
 				ds1287_regs = edev->resource[0].start;
 			} else {
 				mstk48t59_regs = edev->resource[0].start;
@@ -870,7 +877,8 @@ try_isa_clock:
 				prom_halt();
 			}
 			if (!strcmp(model, "ds1287") ||
-			    !strcmp(model, "m5819")) {
+			    !strcmp(model, "m5819") ||
+			    !strcmp(model, "m5819p")) {
 				ds1287_regs = isadev->resource.start;
 			} else {
 				mstk48t59_regs = isadev->resource.start;
@@ -953,7 +961,7 @@ static unsigned long sparc64_init_timers(irqreturn_t (*cfunc)(int, void *, struc
 			clock = prom_getint(node, "stick-frequency");
 		} else {
 			tick_ops = &tick_operations;
-			node = linux_cpus[0].prom_node;
+			cpu_find_by_instance(0, &node, NULL);
 			clock = prom_getint(node, "clock-frequency");
 		}
 	} else {
@@ -1009,11 +1017,7 @@ unsigned long sparc64_get_clock_tick(unsigned int cpu)
 
 	if (ft->clock_tick_ref)
 		return ft->clock_tick_ref;
-#ifdef CONFIG_SMP
-	return cpu_data[cpu].clock_tick;
-#else
-	return up_clock_tick;
-#endif
+	return cpu_data(cpu).clock_tick;
 }
 
 #ifdef CONFIG_CPU_FREQ
@@ -1025,35 +1029,22 @@ static int sparc64_cpufreq_notifier(struct notifier_block *nb, unsigned long val
 	unsigned int cpu = freq->cpu;
 	struct freq_table *ft = &per_cpu(sparc64_freq_table, cpu);
 
-#ifdef CONFIG_SMP
 	if (!ft->ref_freq) {
 		ft->ref_freq = freq->old;
-		ft->udelay_val_ref = cpu_data[cpu].udelay_val;
-		ft->clock_tick_ref = cpu_data[cpu].clock_tick;
+		ft->udelay_val_ref = cpu_data(cpu).udelay_val;
+		ft->clock_tick_ref = cpu_data(cpu).clock_tick;
 	}
 	if ((val == CPUFREQ_PRECHANGE  && freq->old < freq->new) ||
 	    (val == CPUFREQ_POSTCHANGE && freq->old > freq->new)) {
-		cpu_data[cpu].udelay_val =
+		cpu_data(cpu).udelay_val =
 			cpufreq_scale(ft->udelay_val_ref,
 				      ft->ref_freq,
 				      freq->new);
-		cpu_data[cpu].clock_tick =
+		cpu_data(cpu).clock_tick =
 			cpufreq_scale(ft->clock_tick_ref,
 				      ft->ref_freq,
 				      freq->new);
 	}
-#else
-	/* In the non-SMP case, kernel/cpufreq.c takes care of adjusting
-	 * loops_per_jiffy.
-	 */
-	if (!ft->ref_freq) {
-		ft->ref_freq = freq->old;
-		ft->clock_tick_ref = up_clock_tick;
-	}
-	if ((val == CPUFREQ_PRECHANGE  && freq->old < freq->new) ||
-	    (val == CPUFREQ_POSTCHANGE && freq->old > freq->new))
-		up_clock_tick = cpufreq_scale(ft->clock_tick_ref, ft->ref_freq, freq->new);
-#endif
 
 	return 0;
 }
@@ -1064,12 +1055,18 @@ static struct notifier_block sparc64_cpufreq_notifier_block = {
 #endif
 
 /* The quotient formula is taken from the IA64 port. */
+#define SPARC64_USEC_PER_CYC_SHIFT	30UL
+#define SPARC64_NSEC_PER_CYC_SHIFT	30UL
 void __init time_init(void)
 {
 	unsigned long clock = sparc64_init_timers(timer_interrupt);
 
 	timer_ticks_per_usec_quotient =
-		(((1000000UL << 30) +
+		(((1000000UL << SPARC64_USEC_PER_CYC_SHIFT) +
+		  (clock / 2)) / clock);
+
+	timer_ticks_per_nsec_quotient =
+		(((NSEC_PER_SEC << SPARC64_NSEC_PER_CYC_SHIFT) +
 		  (clock / 2)) / clock);
 
 #ifdef CONFIG_CPU_FREQ
@@ -1085,11 +1082,23 @@ static __inline__ unsigned long do_gettimeoffset(void)
 	ticks += timer_tick_offset;
 	ticks -= timer_tick_compare;
 
-	return (ticks * timer_ticks_per_usec_quotient) >> 30UL;
+	return (ticks * timer_ticks_per_usec_quotient)
+		>> SPARC64_USEC_PER_CYC_SHIFT;
+}
+
+unsigned long long sched_clock(void)
+{
+	unsigned long ticks = tick_ops->get_tick();
+
+	return (ticks * timer_ticks_per_nsec_quotient)
+		>> SPARC64_NSEC_PER_CYC_SHIFT;
 }
 
 int do_settimeofday(struct timespec *tv)
 {
+	time_t wtm_sec, sec = tv->tv_sec;
+	long wtm_nsec, nsec = tv->tv_nsec;
+
 	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
 		return -EINVAL;
 
@@ -1103,28 +1112,15 @@ int do_settimeofday(struct timespec *tv)
 	 * wall time.  Discover what correction gettimeofday() would have
 	 * made, and then undo it!
 	 */
-	tv->tv_nsec -= do_gettimeoffset() * 1000;
-	tv->tv_nsec -= (jiffies - wall_jiffies) * (NSEC_PER_SEC / HZ);
+	nsec -= do_gettimeoffset() * 1000;
+	nsec -= (jiffies - wall_jiffies) * (NSEC_PER_SEC / HZ);
 
-	while (tv->tv_nsec < 0) {
-		tv->tv_nsec += NSEC_PER_SEC;
-		tv->tv_sec--;
-	}
+	wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
+	wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
 
-	wall_to_monotonic.tv_sec += xtime.tv_sec - tv->tv_sec;
-	wall_to_monotonic.tv_nsec += xtime.tv_nsec - tv->tv_nsec;
+	set_normalized_timespec(&xtime, sec, nsec);
+	set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
 
-	if (wall_to_monotonic.tv_nsec > NSEC_PER_SEC) {
-		wall_to_monotonic.tv_nsec -= NSEC_PER_SEC;
-		wall_to_monotonic.tv_sec++;
-	}
-	if (wall_to_monotonic.tv_nsec < 0) {
-		wall_to_monotonic.tv_nsec += NSEC_PER_SEC;
-		wall_to_monotonic.tv_sec--;
-	}
-
-	xtime.tv_sec = tv->tv_sec;
-	xtime.tv_nsec = tv->tv_nsec;
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
@@ -1132,6 +1128,8 @@ int do_settimeofday(struct timespec *tv)
 	write_sequnlock_irq(&xtime_lock);
 	return 0;
 }
+
+EXPORT_SYMBOL(do_settimeofday);
 
 /* Ok, my cute asm atomicity trick doesn't work anymore.
  * There are just too many variables that need to be protected
@@ -1142,15 +1140,29 @@ void do_gettimeofday(struct timeval *tv)
 	unsigned long flags;
 	unsigned long seq;
 	unsigned long usec, sec;
+	unsigned long max_ntp_tick = tick_usec - tickadj;
 
 	do {
+		unsigned long lost;
+
 		seq = read_seqbegin_irqsave(&xtime_lock, flags);
 		usec = do_gettimeoffset();
-		{
-			unsigned long lost = jiffies - wall_jiffies;
+		lost = jiffies - wall_jiffies;
+
+		/*
+		 * If time_adjust is negative then NTP is slowing the clock
+		 * so make sure not to go into next possible interval.
+		 * Better to lose some accuracy than have time go backwards..
+		 */
+		if (unlikely(time_adjust < 0)) {
+			usec = min(usec, max_ntp_tick);
+
 			if (lost)
-				usec += lost * (1000000 / HZ);
+				usec += lost * max_ntp_tick;
 		}
+		else if (unlikely(lost))
+			usec += lost * tick_usec;
+
 		sec = xtime.tv_sec;
 		usec += (xtime.tv_nsec / 1000);
 	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
@@ -1163,6 +1175,8 @@ void do_gettimeofday(struct timeval *tv)
 	tv->tv_sec = sec;
 	tv->tv_usec = usec;
 }
+
+EXPORT_SYMBOL(do_gettimeofday);
 
 static int set_rtc_mmss(unsigned long nowtime)
 {

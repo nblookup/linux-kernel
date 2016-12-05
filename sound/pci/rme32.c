@@ -223,7 +223,7 @@ typedef struct snd_rme32 {
 	snd_kcontrol_t *spdif_ctl;
 } rme32_t;
 
-static struct pci_device_id snd_rme32_ids[] __devinitdata = {
+static struct pci_device_id snd_rme32_ids[] = {
 	{PCI_VENDOR_ID_XILINX_RME, PCI_DEVICE_ID_DIGI32,
 	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0,},
 	{PCI_VENDOR_ID_XILINX_RME, PCI_DEVICE_ID_DIGI32_8,
@@ -1926,7 +1926,7 @@ static void snd_rme32_card_free(snd_card_t * card)
 static int __devinit
 snd_rme32_probe(struct pci_dev *pci, const struct pci_device_id *pci_id)
 {
-	static int dev = 0;
+	static int dev;
 	rme32_t *rme32;
 	snd_card_t *card;
 	int err;

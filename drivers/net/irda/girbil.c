@@ -29,7 +29,6 @@
 
 #include <net/irda/irda.h>
 #include <net/irda/irda_device.h>
-#include <net/irda/irtty.h>
 
 static int  girbil_reset(struct irda_task *task);
 static void girbil_open(dongle_t *self, struct qos_info *qos);
@@ -64,12 +63,12 @@ static int  girbil_change_speed(struct irda_task *task);
 #define GIRBIL_LOAD    0x51 /* Load the new baud rate value */
 
 static struct dongle_reg dongle = {
-	Q_NULL,
-	IRDA_GIRBIL_DONGLE,
-	girbil_open,
-	girbil_close,
-	girbil_reset,
-	girbil_change_speed,
+	.type = IRDA_GIRBIL_DONGLE,
+	.open = girbil_open,
+	.close = girbil_close,
+	.reset = girbil_reset,
+	.change_speed = girbil_change_speed,
+	.owner = THIS_MODULE,
 };
 
 int __init girbil_init(void)
@@ -86,16 +85,12 @@ static void girbil_open(dongle_t *self, struct qos_info *qos)
 {
 	qos->baud_rate.bits &= IR_9600|IR_19200|IR_38400|IR_57600|IR_115200;
 	qos->min_turn_time.bits = 0x03;
-
-	MOD_INC_USE_COUNT;
 }
 
 static void girbil_close(dongle_t *self)
 {
 	/* Power off dongle */
 	self->set_dtr_rts(self->dev, FALSE, FALSE);
-
-	MOD_DEC_USE_COUNT;
 }
 
 /*
@@ -232,7 +227,7 @@ static int girbil_reset(struct irda_task *task)
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("Greenwich GIrBIL dongle driver");
 MODULE_LICENSE("GPL");
-
+MODULE_ALIAS("irda-dongle-4"); /* IRDA_GIRBIL_DONGLE */
 	
 /*
  * Function init_module (void)

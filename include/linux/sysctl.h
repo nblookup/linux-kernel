@@ -6,16 +6,10 @@
  ****************************************************************
  ****************************************************************
  **
- **  WARNING:  
  **  The values in this file are exported to user space via 
- **  the sysctl() binary interface.  Do *NOT* change the 
- **  numbering of any existing values here, and do not change
- **  any numbers within any one set of values.  If you have
- **  to redefine an existing interface, use a new number for it.
- **  The kernel will then return ENOTDIR to any application using
- **  the old binary interface.
- **
- **  --sct
+ **  the sysctl() binary interface.  However this interface
+ **  is unstable and deprecated and will be removed in the future. 
+ **  For a stable interface use /proc/sys.
  **
  ****************************************************************
  ****************************************************************
@@ -27,6 +21,7 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/list.h>
+#include <linux/compiler.h>
 
 struct file;
 
@@ -130,6 +125,8 @@ enum
 	KERN_PIDMAX=55,		/* int: PID # limit */
   	KERN_CORE_PATTERN=56,	/* string: pattern for core-file names */
 	KERN_PANIC_ON_OOPS=57,  /* int: whether we will panic on an oops */
+	KERN_HPPA_PWRSW=58,	/* int: hppa soft-power enable */
+	KERN_HPPA_UNALIGNED=59,	/* int: hppa unaligned-trap enable */
 };
 
 
@@ -220,7 +217,8 @@ enum
 	NET_CORE_NO_CONG=14,
 	NET_CORE_LO_CONG=15,
 	NET_CORE_MOD_CONG=16,
-	NET_CORE_DEV_WEIGHT=17
+	NET_CORE_DEV_WEIGHT=17,
+	NET_CORE_SOMAXCONN=18,
 };
 
 /* /proc/sys/net/ethernet */
@@ -247,6 +245,7 @@ enum
 	NET_IPV4_NEIGH=17,
 	NET_IPV4_ROUTE=18,
 	NET_IPV4_FIB_HASH=19,
+	NET_IPV4_NETFILTER=20,
 
 	NET_IPV4_TCP_TIMESTAMPS=33,
 	NET_IPV4_TCP_WINDOW_SCALING=34,
@@ -361,6 +360,24 @@ enum
 	NET_IPV4_CONF_NOPOLICY=16,
 };
 
+/* /proc/sys/net/ipv4/netfilter */
+enum
+{
+	NET_IPV4_NF_CONNTRACK_MAX=1,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_SYN_SENT=2,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_SYN_RECV=3,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_ESTABLISHED=4,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_FIN_WAIT=5,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_CLOSE_WAIT=6,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_LAST_ACK=7,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_TIME_WAIT=8,
+	NET_IPV4_NF_CONNTRACK_TCP_TIMEOUT_CLOSE=9,
+	NET_IPV4_NF_CONNTRACK_UDP_TIMEOUT=10,
+	NET_IPV4_NF_CONNTRACK_UDP_TIMEOUT_STREAM=11,
+	NET_IPV4_NF_CONNTRACK_ICMP_TIMEOUT=12,
+	NET_IPV4_NF_CONNTRACK_GENERIC_TIMEOUT=13,
+};
+ 
 /* /proc/sys/net/ipv6 */
 enum {
 	NET_IPV6_CONF=16,
@@ -606,7 +623,8 @@ enum {
 	DEV_HWMON=2,
 	DEV_PARPORT=3,
 	DEV_RAID=4,
-	DEV_MAC_HID=5
+	DEV_MAC_HID=5,
+	DEV_SCSI=6,
 };
 
 /* /proc/sys/dev/cdrom */
@@ -665,6 +683,11 @@ enum {
 	DEV_MAC_HID_MOUSE_BUTTON2_KEYCODE=4,
 	DEV_MAC_HID_MOUSE_BUTTON3_KEYCODE=5,
 	DEV_MAC_HID_ADB_MOUSE_SENDS_KEYCODES=6
+};
+
+/* /proc/sys/dev/scsi */
+enum {
+	DEV_SCSI_LOGGING_LEVEL=1,
 };
 
 /* /proc/sys/abi */

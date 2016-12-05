@@ -96,7 +96,7 @@ enum {
 	USB_FEATURE_AGC,
 	USB_FEATURE_DELAY,
 	USB_FEATURE_BASSBOOST,
-	FSB_FEATURE_LOUDNESS
+	USB_FEATURE_LOUDNESS
 };
 
 enum {
@@ -1358,13 +1358,16 @@ static int parse_audio_selector_unit(mixer_build_t *state, int unitid, unsigned 
 		return -EINVAL;
 	}
 
-	if (check_ignored_ctl(state, unitid, 0))
-		return 0;
-
 	for (i = 0; i < num_ins; i++) {
 		if ((err = parse_audio_unit(state, desc[5 + i])) < 0)
 			return err;
 	}
+
+	if (num_ins == 1) /* only one ? nonsense! */
+		return 0;
+
+	if (check_ignored_ctl(state, unitid, 0))
+		return 0;
 
 	cval = snd_magic_kcalloc(usb_mixer_elem_info_t, 0, GFP_KERNEL);
 	if (! cval) {
@@ -1490,7 +1493,7 @@ int snd_usb_create_mixer(snd_usb_audio_t *chip, int ctrlif)
 	int err;
 	const struct usbmix_ctl_map *map;
 	struct usb_device_descriptor *dev = &chip->dev->descriptor;
-	struct usb_host_interface *hostif = &chip->dev->actconfig->interface[ctrlif].altsetting[0];
+	struct usb_host_interface *hostif = &get_iface(chip->dev->actconfig, ctrlif)->altsetting[0];
 
 	strcpy(chip->card->mixername, "USB Mixer");
 

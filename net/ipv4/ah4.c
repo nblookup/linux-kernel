@@ -1,5 +1,6 @@
 #include <linux/config.h>
 #include <linux/module.h>
+#include <net/inet_ecn.h>
 #include <net/ip.h>
 #include <net/xfrm.h>
 #include <net/ah.h>
@@ -123,6 +124,8 @@ static int ah_output(struct sk_buff *skb)
 	top_iph->tos = iph->tos;
 	top_iph->ttl = iph->ttl;
 	if (x->props.mode) {
+		if (x->props.flags & XFRM_STATE_NOECN)
+			IP_ECN_clear(top_iph);
 		top_iph->frag_off = iph->frag_off&~htons(IP_MF|IP_OFFSET);
 		memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
 	} else {
@@ -232,7 +235,7 @@ void ah4_err(struct sk_buff *skb, u32 info)
 	x = xfrm_state_lookup((xfrm_address_t *)&iph->daddr, ah->spi, IPPROTO_AH, AF_INET);
 	if (!x)
 		return;
-	printk(KERN_DEBUG "pmtu discvovery on SA AH/%08x/%08x\n",
+	printk(KERN_DEBUG "pmtu discovery on SA AH/%08x/%08x\n",
 	       ntohl(ah->spi), ntohl(iph->daddr));
 	xfrm_state_put(x);
 }
@@ -241,6 +244,9 @@ static int ah_init_state(struct xfrm_state *x, void *args)
 {
 	struct ah_data *ahp = NULL;
 	struct xfrm_algo_desc *aalg_desc;
+
+	if (!x->aalg)
+		goto error;
 
 	/* null auth can use a zero length key */
 	if (x->aalg->alg_key_len > 512)
@@ -304,6 +310,9 @@ error:
 static void ah_destroy(struct xfrm_state *x)
 {
 	struct ah_data *ahp = x->data;
+
+	if (!ahp)
+		return;
 
 	if (ahp->work_icv) {
 		kfree(ahp->work_icv);

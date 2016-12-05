@@ -24,7 +24,6 @@
 #define MAJOR_NR MD_MAJOR
 #define MD_DRIVER
 #define MD_PERSONALITY
-#define DEVICE_NR(device) (minor(device))
 
 static int create_strip_zones (mddev_t *mddev)
 {
@@ -113,6 +112,8 @@ static int create_strip_zones (mddev_t *mddev)
 			goto abort;
 		}
 		zone->dev[j] = rdev1;
+		blk_queue_stack_limits(mddev->queue,
+				       rdev1->bdev->bd_disk->queue);
 		if (!smallest || (rdev1->size <smallest->size))
 			smallest = rdev1;
 		cnt++;
@@ -229,6 +230,13 @@ static int raid0_run (mddev_t *mddev)
 	mdk_rdev_t *rdev;
 	struct list_head *tmp;
 
+	printk("md%d: setting max_sectors to %d, segment boundary to %d\n",
+	       mdidx(mddev),
+	       mddev->chunk_size >> 9,
+	       (mddev->chunk_size>>1)-1);
+	blk_queue_max_sectors(mddev->queue, mddev->chunk_size >> 9);
+	blk_queue_segment_boundary(mddev->queue, (mddev->chunk_size>>1) - 1);
+
 	conf = kmalloc(sizeof (raid0_conf_t), GFP_KERNEL);
 	if (!conf)
 		goto out;
@@ -293,8 +301,7 @@ static int raid0_run (mddev_t *mddev)
 		conf->hash_spacing++;
 	}
 
-	blk_queue_max_sectors(&mddev->queue, mddev->chunk_size >> 9);
-	blk_queue_merge_bvec(&mddev->queue, raid0_mergeable_bvec);
+	blk_queue_merge_bvec(mddev->queue, raid0_mergeable_bvec);
 	return 0;
 
 out_free_conf:
@@ -325,7 +332,7 @@ static int raid0_stop (mddev_t *mddev)
 static int raid0_make_request (request_queue_t *q, struct bio *bio)
 {
 	mddev_t *mddev = q->queuedata;
-	unsigned int sect_in_chunk, chunksize_bits,  chunk_size;
+	unsigned int sect_in_chunk, chunksize_bits,  chunk_size, chunk_sects;
 	raid0_conf_t *conf = mddev_to_conf(mddev);
 	struct strip_zone *zone;
 	mdk_rdev_t *tmp_dev;
@@ -333,11 +340,12 @@ static int raid0_make_request (request_queue_t *q, struct bio *bio)
 	sector_t block, rsect;
 
 	chunk_size = mddev->chunk_size >> 10;
+	chunk_sects = mddev->chunk_size >> 9;
 	chunksize_bits = ffz(~chunk_size);
 	block = bio->bi_sector >> 1;
 	
 
-	if (unlikely(chunk_size < (block & (chunk_size - 1)) + (bio->bi_size >> 10))) {
+	if (unlikely(chunk_sects < (bio->bi_sector & (chunk_sects - 1)) + (bio->bi_size >> 9))) {
 		struct bio_pair *bp;
 		/* Sanity check -- queue functions should prevent this happening */
 		if (bio->bi_vcnt != 1 ||
@@ -346,7 +354,7 @@ static int raid0_make_request (request_queue_t *q, struct bio *bio)
 		/* This is a one page bio that upper layers
 		 * refuse to split for us, so we need to split it.
 		 */
-		bp = bio_split(bio, bio_split_pool, (chunk_size - (block & (chunk_size - 1)))<<1 );
+		bp = bio_split(bio, bio_split_pool, chunk_sects - (bio->bi_sector & (chunk_sects - 1)) );
 		if (raid0_make_request(q, &bp->bio1))
 			generic_make_request(&bp->bio1);
 		if (raid0_make_request(q, &bp->bio2))
@@ -453,3 +461,4 @@ static void raid0_exit (void)
 module_init(raid0_init);
 module_exit(raid0_exit);
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("md-personality-2"); /* RAID0 */

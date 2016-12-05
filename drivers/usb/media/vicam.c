@@ -539,6 +539,7 @@ vicam_ioctl(struct inode *inode, struct file *file, unsigned int ioctlnr, unsign
 			struct video_capability b;
 
 			DBG("VIDIOCGCAP\n");
+			memset(&b, 0, sizeof(b));
 			strcpy(b.name, "ViCam-based Camera");
 			b.type = VID_TYPE_CAPTURE;
 			b.channels = 1;
@@ -1292,7 +1293,7 @@ vicam_probe( struct usb_interface *intf, const struct usb_device_id *id)
 	interface = &intf->altsetting[0];
 
 	DBG(KERN_DEBUG "Interface %d. has %u. endpoints!\n",
-	       ifnum, (unsigned) (interface->desc.bNumEndpoints));
+	       interface->desc.bInterfaceNumber, (unsigned) (interface->desc.bNumEndpoints));
 	endpoint = &interface->endpoint[0].desc;
 
 	if ((endpoint->bEndpointAddress & 0x80) &&
@@ -1388,11 +1389,13 @@ vicam_disconnect(struct usb_interface *intf)
 static int __init
 usb_vicam_init(void)
 {
+	int retval;
 	DBG(KERN_INFO "ViCam-based WebCam driver startup\n");
 	vicam_create_proc_root();
-	if (usb_register(&vicam_driver) != 0)
+	retval = usb_register(&vicam_driver);
+	if (retval)
 		printk(KERN_WARNING "usb_register failed!\n");
-	return 0;
+	return retval;
 }
 
 static void __exit

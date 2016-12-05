@@ -37,9 +37,6 @@
 #include <linux/bootmem.h>
 #include <linux/highmem.h>
 #include <linux/proc_fs.h>
-#ifdef CONFIG_BLK_DEV_INITRD
-#include <linux/blk.h>		/* for initrd_* */
-#endif
 
 #include <asm/pgalloc.h>
 #include <asm/page.h>
@@ -60,8 +57,8 @@
 #include <asm/processor.h>
 #include <asm/mmzone.h>
 #include <asm/cputable.h>
-
 #include <asm/ppcdebug.h>
+#include <asm/sections.h>
 
 #ifdef CONFIG_PPC_ISERIES
 #include <asm/iSeries/iSeries_dma.h>
@@ -72,9 +69,6 @@ int mem_init_done;
 unsigned long ioremap_bot = IMALLOC_BASE;
 
 extern pgd_t swapper_pg_dir[];
-extern char __init_begin, __init_end;
-extern char _start[], _end[];
-extern char _stext[], etext[];
 extern struct task_struct *current_set[NR_CPUS];
 
 extern pgd_t ioremap_dir[];
@@ -253,7 +247,7 @@ flush_tlb_mm(struct mm_struct *mm)
 		__flush_tlb_range(mm, mp->vm_start, mp->vm_end);
 
 	/* XXX are there races with checking cpu_vm_mask? - Anton */
-	mm->cpu_vm_mask = 0;
+	cpus_clear(mm->cpu_vm_mask);
 
 	spin_unlock(&mm->page_table_lock);
 }
@@ -270,6 +264,7 @@ flush_tlb_page(struct vm_area_struct *vma, unsigned long vmaddr)
 	pte_t *ptep;
 	pte_t pte;
 	int local = 0;
+	cpumask_t tmp;
 
 	switch( REGION_ID(vmaddr) ) {
 	case VMALLOC_REGION_ID:
@@ -283,7 +278,8 @@ flush_tlb_page(struct vm_area_struct *vma, unsigned long vmaddr)
 		context = vma->vm_mm->context;
 
 		/* XXX are there races with checking cpu_vm_mask? - Anton */
-		if (vma->vm_mm->cpu_vm_mask == (1 << smp_processor_id()))
+		tmp = cpumask_of_cpu(smp_processor_id());
+		if (cpus_equal(vma->vm_mm->cpu_vm_mask, tmp))
 			local = 1;
 
 		break;
@@ -294,7 +290,7 @@ flush_tlb_page(struct vm_area_struct *vma, unsigned long vmaddr)
 
 	if (!pgd_none(*pgd)) {
 		pmd = pmd_offset(pgd, vmaddr);
-		if (!pmd_none(*pmd)) {
+		if (pmd_present(*pmd)) {
 			ptep = pte_offset_kernel(pmd, vmaddr);
 			/* Check if HPTE might exist and flush it if so */
 			pte = __pte(pte_update(ptep, _PAGE_HPTEFLAGS, 0));
@@ -302,6 +298,7 @@ flush_tlb_page(struct vm_area_struct *vma, unsigned long vmaddr)
 				flush_hash_page(context, vmaddr, pte, local);
 			}
 		}
+		WARN_ON(pmd_hugepage(*pmd));
 	}
 }
 
@@ -319,6 +316,7 @@ __flush_tlb_range(struct mm_struct *mm, unsigned long start, unsigned long end)
 	struct ppc64_tlb_batch *batch = &ppc64_tlb_batch[smp_processor_id()];
 	unsigned long i = 0;
 	int local = 0;
+	cpumask_t tmp;
 
 	switch(REGION_ID(start)) {
 	case VMALLOC_REGION_ID:
@@ -332,7 +330,8 @@ __flush_tlb_range(struct mm_struct *mm, unsigned long start, unsigned long end)
 		context = mm->context;
 
 		/* XXX are there races with checking cpu_vm_mask? - Anton */
-		if (mm->cpu_vm_mask == (1 << smp_processor_id()))
+		tmp = cpumask_of_cpu(smp_processor_id());
+		if (cpus_equal(mm->cpu_vm_mask, tmp))
 			local = 1;
 
 		break;
@@ -350,7 +349,7 @@ __flush_tlb_range(struct mm_struct *mm, unsigned long start, unsigned long end)
 				pmd_end = (start + PMD_SIZE) & PMD_MASK;
 				if (pmd_end > end)
 					pmd_end = end;
-				if (!pmd_none(*pmd)) {
+				if (pmd_present(*pmd)) {
 					ptep = pte_offset_kernel(pmd, start);
 					do {
 						if (pte_val(*ptep) & _PAGE_HASHPTE) {
@@ -369,6 +368,7 @@ __flush_tlb_range(struct mm_struct *mm, unsigned long start, unsigned long end)
 						++ptep;
 					} while (start < pmd_end);
 				} else {
+					WARN_ON(pmd_hugepage(*pmd));
 					start = pmd_end;
 				}
 				++pmd;
@@ -387,15 +387,15 @@ void free_initmem(void)
 {
 	unsigned long addr;
 
-	addr = (unsigned long)(&__init_begin);
-	for (; addr < (unsigned long)(&__init_end); addr += PAGE_SIZE) {
+	addr = (unsigned long)__init_begin;
+	for (; addr < (unsigned long)__init_end; addr += PAGE_SIZE) {
 		ClearPageReserved(virt_to_page(addr));
 		set_page_count(virt_to_page(addr), 1);
 		free_page(addr);
 		totalram_pages++;
 	}
 	printk ("Freeing unused kernel memory: %luk freed\n",
-		(&__init_end - &__init_begin) >> 10);
+		((unsigned long)__init_end - (unsigned long)__init_begin) >> 10);
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
@@ -542,8 +542,6 @@ static int __init setup_kcore(void)
 }
 module_init(setup_kcore);
 
-void initialize_paca_hardware_interrupt_stack(void);
-
 void __init mem_init(void)
 {
 #ifndef CONFIG_DISCONTIGMEM
@@ -592,11 +590,11 @@ void __init mem_init(void)
 	     addr += PAGE_SIZE) {
 		if (!PageReserved(virt_to_page(addr)))
 			continue;
-		if (addr < (ulong) etext)
+		if (addr < (unsigned long)_etext)
 			codepages++;
 
-		else if (addr >= (unsigned long)&__init_begin
-			 && addr < (unsigned long)&__init_end)
+		else if (addr >= (unsigned long)__init_begin
+			 && addr < (unsigned long)__init_end)
 			initpages++;
 		else if (addr < klimit)
 			datapages++;
@@ -609,9 +607,6 @@ void __init mem_init(void)
 	       PAGE_OFFSET, (unsigned long)__va(lmb_end_of_DRAM()));
 #endif
 	mem_init_done = 1;
-
-	/* set the last page of each hardware interrupt stack to be protected */
-	initialize_paca_hardware_interrupt_stack();
 
 #ifdef CONFIG_PPC_ISERIES
 	create_virtual_bus_tce_table();
@@ -698,6 +693,7 @@ void update_mmu_cache(struct vm_area_struct *vma, unsigned long ea,
 	void *pgdir;
 	pte_t *ptep;
 	int local = 0;
+	cpumask_t tmp;
 
 	/* handle i-cache coherency */
 	if (!(cur_cpu_spec->cpu_features & CPU_FTR_NOEXECUTE)) {
@@ -723,9 +719,29 @@ void update_mmu_cache(struct vm_area_struct *vma, unsigned long ea,
 	ptep = find_linux_pte(pgdir, ea);
 	vsid = get_vsid(vma->vm_mm->context, ea);
 
-	if (vma->vm_mm->cpu_vm_mask == (1 << smp_processor_id()))
+	tmp = cpumask_of_cpu(smp_processor_id());
+	if (cpus_equal(vma->vm_mm->cpu_vm_mask, tmp))
 		local = 1;
 
 	__hash_page(ea, pte_val(pte) & (_PAGE_USER|_PAGE_RW), vsid, ptep,
 		    0x300, local);
+}
+
+kmem_cache_t *zero_cache;
+
+static void zero_ctor(void *pte, kmem_cache_t *cache, unsigned long flags)
+{
+	memset(pte, 0, PAGE_SIZE);
+}
+
+void pgtable_cache_init(void)
+{
+	zero_cache = kmem_cache_create("zero",
+				PAGE_SIZE,
+				0,
+				SLAB_HWCACHE_ALIGN | SLAB_MUST_HWCACHE_ALIGN,
+				zero_ctor,
+				NULL);
+	if (!zero_cache)
+		panic("pgtable_cache_init(): could not create zero_cache!\n");
 }

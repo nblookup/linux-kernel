@@ -39,7 +39,7 @@ static int get_mca_info_helper(struct mca_device *mca_dev, char *page, int len)
 	for(j=0; j<8; j++)
 		len += sprintf(page+len, "%02x ",
 			       mca_dev ? mca_dev->pos[j] : 0xff);
-	len += sprintf(page+len, " %s\n", mca_dev ? mca_dev->dev.name : "");
+	len += sprintf(page+len, " %s\n", mca_dev ? mca_dev->name : "");
 	return len;
 }
 
@@ -108,24 +108,25 @@ static int mca_default_procfn(char* buf, struct mca_device *mca_dev)
 	} else if(slot == MCA_MOTHERBOARD) {
 		len += sprintf(buf+len, "Motherboard\n");
 	}
-	if(mca_dev->dev.name[0]) {
+	if (mca_dev->name[0]) {
 
 		/* Drivers might register a name without /proc handler... */
 
 		len += sprintf(buf+len, "Adapter Name: %s\n",
-			       mca_dev->dev.name);
+			       mca_dev->name);
 	} else {
 		len += sprintf(buf+len, "Adapter Name: Unknown\n");
 	}
 	len += sprintf(buf+len, "Id: %02x%02x\n",
 		mca_dev->pos[1], mca_dev->pos[0]);
 	len += sprintf(buf+len, "Enabled: %s\nPOS: ",
-		mca_isenabled(slot) ? "Yes" : "No");
+		mca_device_status(mca_dev) == MCA_ADAPTER_NORMAL ?
+			"Yes" : "No");
 	for(i=0; i<8; i++) {
 		len += sprintf(buf+len, "%02x ", mca_dev->pos[i]);
 	}
 	len += sprintf(buf+len, "\nDriver Installed: %s",
-		mca_is_adapter_used(slot) ? "Yes" : "No");
+		mca_device_claimed(mca_dev) ? "Yes" : "No");
 	buf[len++] = '\n';
 	buf[len] = 0;
 
@@ -189,6 +190,7 @@ void __init mca_do_proc_init(void)
 	/* Initialize /proc/mca entries for existing adapters */
 
 	for(i = 0; i < MCA_NUMADAPTERS; i++) {
+		enum MCA_AdapterStatus status;
 		mca_dev = mca_find_device_by_slot(i);
 		if(!mca_dev)
 			continue;
@@ -200,7 +202,10 @@ void __init mca_do_proc_init(void)
 		else if(i == MCA_INTEGSCSI) sprintf(mca_dev->procname,"scsi");
 		else if(i == MCA_MOTHERBOARD) sprintf(mca_dev->procname,"planar");
 
-		if(!mca_isadapter(i)) continue;
+		status = mca_device_status(mca_dev);
+		if (status != MCA_ADAPTER_NORMAL &&
+		    status != MCA_ADAPTER_DISABLED)
+			continue;
 
 		node = create_proc_read_entry(mca_dev->procname, 0, proc_mca,
 					      mca_read_proc, (void *)mca_dev);

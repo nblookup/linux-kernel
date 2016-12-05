@@ -41,7 +41,6 @@
 
 #include <net/irda/irda.h>
 #include <net/irda/irda_device.h>
-#include <net/irda/irtty.h>
 
 #ifndef NDEBUG
 	#undef IRDA_DEBUG
@@ -75,12 +74,12 @@ static int  ma600_reset(struct irda_task *task);
 #define MA600_2400	0x08
 
 static struct dongle_reg dongle = {
-	Q_NULL,
-	IRDA_MA600_DONGLE,
-	ma600_open,
-	ma600_close,
-	ma600_reset,
-	ma600_change_speed,
+	.type = IRDA_MA600_DONGLE,
+	.open = ma600_open,
+	.close = ma600_close,
+	.reset = ma600_reset,
+	.change_speed = ma600_change_speed,
+	.owner = THIS_MODULE,
 };
 
 int __init ma600_init(void)
@@ -116,8 +115,6 @@ static void ma600_open(dongle_t *self, struct qos_info *qos)
 
 	self->set_dtr_rts(self->dev, TRUE, TRUE);
 	// should wait 1 second
-
-	MOD_INC_USE_COUNT;
 }
 
 static void ma600_close(dongle_t *self)
@@ -126,8 +123,6 @@ static void ma600_close(dongle_t *self)
 
 	/* Power off dongle */
 	self->set_dtr_rts(self->dev, FALSE, FALSE);
-
-	MOD_DEC_USE_COUNT;
 }
 
 static __u8 get_control_byte(__u32 speed)
@@ -336,6 +331,7 @@ int ma600_reset(struct irda_task *task)
 MODULE_AUTHOR("Leung <95Etwl@alumni.ee.ust.hk> http://www.engsvr.ust/~eetwl95");
 MODULE_DESCRIPTION("MA600 dongle driver version 0.1");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("irda-dongle-11"); /* IRDA_MA600_DONGLE */
 		
 /*
  * Function init_module (void)

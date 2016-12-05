@@ -43,8 +43,7 @@ void br_stp_enable_bridge(struct net_bridge *br)
 	struct net_bridge_port *p;
 
 	spin_lock_bh(&br->lock);
-	br->hello_timer.expires = jiffies + br->hello_time;
-	add_timer(&br->hello_timer);
+	mod_timer(&br->hello_timer, jiffies + br->hello_time);
 	br_config_bpdu_generation(br);
 
 	list_for_each_entry(p, &br->port_list, list) {
@@ -74,8 +73,6 @@ void br_stp_disable_bridge(struct net_bridge *br)
 	del_timer_sync(&br->hello_timer);
 	del_timer_sync(&br->topology_change_timer);
 	del_timer_sync(&br->tcn_timer);
-	del_timer_sync(&br->gc_timer);
-
 }
 
 /* called under bridge lock */
@@ -141,7 +138,7 @@ static void br_stp_change_bridge_id(struct net_bridge *br, unsigned char *addr)
 		br_become_root_bridge(br);
 }
 
-static unsigned char br_mac_zero[6] = {0,0,0,0,0,0};
+static unsigned char br_mac_zero[6];
 
 /* called under bridge lock */
 void br_stp_recalculate_bridge_id(struct net_bridge *br)

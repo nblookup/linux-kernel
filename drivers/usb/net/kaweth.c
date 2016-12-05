@@ -1120,11 +1120,15 @@ static int kaweth_probe(
 
 	usb_set_intfdata(intf, kaweth);
 
+#if 0
+// dma_supported() is deeply broken on almost all architectures
 	if (dma_supported (&intf->dev, 0xffffffffffffffffULL))
 		kaweth->net->features |= NETIF_F_HIGHDMA;
+#endif
 
+	SET_NETDEV_DEV(netdev, &intf->dev);
 	if (register_netdev(netdev) != 0) {
-		kaweth_err("Error calling init_etherdev.");
+		kaweth_err("Error registering netdev.");
 		goto err_intfdata;
 	}
 
@@ -1188,7 +1192,7 @@ static void kaweth_disconnect(struct usb_interface *intf)
 
 		kaweth_dbg("Unregistering net device");
 		unregister_netdev(kaweth->net);
-		kfree(kaweth->net);
+		free_netdev(kaweth->net);
 	}
 
 	usb_free_urb(kaweth->rx_urb);

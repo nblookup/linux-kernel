@@ -1453,7 +1453,7 @@ static int __devinit ioc3_probe(struct pci_dev *pdev,
 	ioc3 = (struct ioc3 *) ioremap(ioc3_base, ioc3_size);
 	if (!ioc3) {
 		printk(KERN_CRIT "ioc3eth(%s): ioremap failed, goodbye.\n",
-		       pdev->slot_name);
+		       pci_name(pdev));
 		err = -ENOMEM;
 		goto out_res;
 	}
@@ -1473,7 +1473,7 @@ static int __devinit ioc3_probe(struct pci_dev *pdev,
 
 	if (ip->phy == -1) {
 		printk(KERN_CRIT "ioc3-eth(%s): Didn't find a PHY, goodbye.\n",
-		       pdev->slot_name);
+		       pci_name(pdev));
 		err = -ENODEV;
 		goto out_stop;
 	}
@@ -1512,7 +1512,7 @@ out_stop:
 out_res:
 	pci_release_regions(pdev);
 out_free:
-	kfree(dev);
+	free_netdev(dev);
 	return err;
 }
 
@@ -1525,10 +1525,10 @@ static void __devexit ioc3_remove_one (struct pci_dev *pdev)
 	unregister_netdev(dev);
 	iounmap(ioc3);
 	pci_release_regions(pdev);
-	kfree(dev);
+	free_netdev(dev);
 }
 
-static struct pci_device_id ioc3_pci_tbl[] __devinitdata = {
+static struct pci_device_id ioc3_pci_tbl[] = {
 	{ PCI_VENDOR_ID_SGI, PCI_DEVICE_ID_SGI_IOC3, PCI_ANY_ID, PCI_ANY_ID },
 	{ 0 }
 };

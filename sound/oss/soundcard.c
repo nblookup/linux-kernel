@@ -65,7 +65,7 @@ int             sound_dmap_flag = 1;
 int             sound_dmap_flag = 0;
 #endif
 
-static char     dma_alloc_map[MAX_DMA_CHANNELS] = {0};
+static char     dma_alloc_map[MAX_DMA_CHANNELS];
 
 #define DMA_MAP_UNAVAIL		0
 #define DMA_MAP_FREE		1
@@ -78,7 +78,7 @@ unsigned long seq_time = 0;	/* Time for /dev/sequencer */
  * Table for configurable mixer volume handling
  */
 static mixer_vol_table mixer_vols[MAX_MIXER_DEV];
-static int num_mixer_volumes = 0;
+static int num_mixer_volumes;
 
 int *load_mixer_volumes(char *name, int *levels, int present)
 {
@@ -144,7 +144,7 @@ static int get_mixer_levels(caddr_t arg)
 
 static ssize_t sound_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 {
-	int dev = minor(file->f_dentry->d_inode->i_rdev);
+	int dev = iminor(file->f_dentry->d_inode);
 	int ret = -EINVAL;
 
 	/*
@@ -177,7 +177,7 @@ static ssize_t sound_read(struct file *file, char *buf, size_t count, loff_t *pp
 
 static ssize_t sound_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 {
-	int dev = minor(file->f_dentry->d_inode->i_rdev);
+	int dev = iminor(file->f_dentry->d_inode);
 	int ret = -EINVAL;
 	
 	lock_kernel();
@@ -204,7 +204,7 @@ static ssize_t sound_write(struct file *file, const char *buf, size_t count, lof
 
 static int sound_open(struct inode *inode, struct file *file)
 {
-	int dev = minor(inode->i_rdev);
+	int dev = iminor(inode);
 	int retval;
 
 	DEB(printk("sound_open(dev=%d)\n", dev));
@@ -253,7 +253,7 @@ static int sound_open(struct inode *inode, struct file *file)
 
 static int sound_release(struct inode *inode, struct file *file)
 {
-	int dev = minor(inode->i_rdev);
+	int dev = iminor(inode);
 
 	lock_kernel();
 	DEB(printk("sound_release(dev=%d)\n", dev));
@@ -288,7 +288,7 @@ static int sound_release(struct inode *inode, struct file *file)
 static int get_mixer_info(int dev, caddr_t arg)
 {
 	mixer_info info;
-
+	memset(&info, 0, sizeof(info));
 	strlcpy(info.id, mixer_devs[dev]->id, sizeof(info.id));
 	strlcpy(info.name, mixer_devs[dev]->name, sizeof(info.name));
 	info.modify_counter = mixer_devs[dev]->modify_counter;
@@ -300,7 +300,7 @@ static int get_mixer_info(int dev, caddr_t arg)
 static int get_old_mixer_info(int dev, caddr_t arg)
 {
 	_old_mixer_info info;
-
+	memset(&info, 0, sizeof(info));
  	strlcpy(info.id, mixer_devs[dev]->id, sizeof(info.id));
  	strlcpy(info.name, mixer_devs[dev]->name, sizeof(info.name));
  	if (copy_to_user(arg, &info,  sizeof(info)))
@@ -333,7 +333,7 @@ static int sound_ioctl(struct inode *inode, struct file *file,
 		       unsigned int cmd, unsigned long arg)
 {
 	int err, len = 0, dtype;
-	int dev = minor(inode->i_rdev);
+	int dev = iminor(inode);
 
 	if (_SIOC_DIR(cmd) != _SIOC_NONE && _SIOC_DIR(cmd) != 0) {
 		/*
@@ -396,7 +396,7 @@ static int sound_ioctl(struct inode *inode, struct file *file,
 static unsigned int sound_poll(struct file *file, poll_table * wait)
 {
 	struct inode *inode = file->f_dentry->d_inode;
-	int dev = minor(inode->i_rdev);
+	int dev = iminor(inode);
 
 	DEB(printk("sound_poll(dev=%d)\n", dev));
 	switch (dev & 0x0f) {
@@ -420,7 +420,7 @@ static int sound_mmap(struct file *file, struct vm_area_struct *vma)
 	int dev_class;
 	unsigned long size;
 	struct dma_buffparms *dmap = NULL;
-	int dev = minor(file->f_dentry->d_inode->i_rdev);
+	int dev = iminor(file->f_dentry->d_inode);
 
 	dev_class = dev & 0x0f;
 	dev >>= 4;
@@ -534,8 +534,8 @@ static const struct {
 	 &num_audiodevs},
 };
 
-static int dmabuf = 0;
-static int dmabug = 0;
+static int dmabuf;
+static int dmabug;
 
 MODULE_PARM(dmabuf, "i");
 MODULE_PARM(dmabug, "i");
@@ -592,7 +592,7 @@ static void __exit oss_cleanup(void)
 	int i, j;
 
 	for (i = 0; i < sizeof (dev_list) / sizeof *dev_list; i++) {
-		devfs_remove("snd/%s", dev_list[i].name);
+		devfs_remove("sound/%s", dev_list[i].name);
 		if (!dev_list[i].num)
 			continue;
 		for (j = 1; j < *dev_list[i].num; j++)

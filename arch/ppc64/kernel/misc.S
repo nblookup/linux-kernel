@@ -359,7 +359,7 @@ _GLOBAL(_outsl)
 	bdnz	00b
 	blr	
 
-_GLOBAL(ide_insw)
+/* _GLOBAL(ide_insw) now in drivers/ide/ide-iops.c */
 _GLOBAL(_insw_ns)
 	cmpwi	0,r5,0
 	mtctr	r5
@@ -371,7 +371,7 @@ _GLOBAL(_insw_ns)
 	bdnz	00b
 	blr
 
-_GLOBAL(ide_outsw)
+/* _GLOBAL(ide_outsw) now in drivers/ide/ide-iops.c */
 _GLOBAL(_outsw_ns)
 	cmpwi	0,r5,0
 	mtctr	r5
@@ -742,7 +742,7 @@ _GLOBAL(sys_call_table32)
         .llong .sys32_getdents
 	.llong .ppc32_select
 	.llong .sys_flock
-	.llong .sys32_msync
+	.llong .sys_msync
 	.llong .sys32_readv		/* 145 */
 	.llong .sys32_writev
 	.llong .sys32_getsid
@@ -750,7 +750,7 @@ _GLOBAL(sys_call_table32)
 	.llong .sys32_sysctl
 	.llong .sys_mlock		/* 150 */
 	.llong .sys_munlock
-	.llong .sys32_mlockall
+	.llong .sys_mlockall
 	.llong .sys_munlockall
 	.llong .sys32_sched_setparam
 	.llong .sys32_sched_getparam	/* 155 */
@@ -838,6 +838,20 @@ _GLOBAL(sys_call_table32)
 	.llong .sys_epoll_ctl
 	.llong .sys_epoll_wait
 	.llong .sys_remap_file_pages
+	.llong .sys_ni_syscall		/* 240 */
+	.llong .sys_ni_syscall
+	.llong .sys_ni_syscall
+	.llong .sys_ni_syscall
+	.llong .sys_ni_syscall
+	.llong .sys_ni_syscall		/* 245 */
+	.llong .sys_ni_syscall
+	.llong .sys_ni_syscall
+	.llong .sys_ni_syscall
+	.llong .sys_ni_syscall
+	.llong .sys32_tgkill		/* 250 */
+	.llong .sys32_utimes
+	.llong .sys_statfs64
+	.llong .sys_fstatfs64
 
 	.balign 8
 _GLOBAL(sys_call_table)
@@ -1081,3 +1095,17 @@ _GLOBAL(sys_call_table)
 	.llong .sys_epoll_ctl
 	.llong .sys_epoll_wait
 	.llong .sys_remap_file_pages
+	.llong .sys_timer_create	/* 240 */
+	.llong .sys_timer_settime
+	.llong .sys_timer_gettime
+	.llong .sys_timer_getoverrun
+	.llong .sys_timer_delete
+	.llong .sys_clock_settime	/* 245 */
+	.llong .sys_clock_gettime
+	.llong .sys_clock_getres
+	.llong .sys_clock_nanosleep
+	.llong .sys_ni_syscall
+	.llong .sys_tgkill		/* 250 */
+	.llong .sys_utimes
+	.llong .sys_statfs64
+	.llong .sys_fstatfs64

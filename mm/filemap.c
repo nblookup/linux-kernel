@@ -60,16 +60,31 @@
  *      ->swap_list_lock
  *        ->swap_device_lock	(exclusive_swap_page, others)
  *          ->mapping->page_lock
+ *
+ *  ->i_sem
+ *    ->i_shared_sem		(truncate->invalidate_mmap_range)
+ *
  *  ->mmap_sem
  *    ->i_shared_sem		(various places)
+ *
+ *  ->mmap_sem
+ *    ->lock_page		(access_process_vm)
+ *
+ *  ->mmap_sem
+ *    ->i_sem			(msync)
  *
  *  ->inode_lock
  *    ->sb_lock			(fs/fs-writeback.c)
  *    ->mapping->page_lock	(__sync_single_inode)
+ *
  *  ->page_table_lock
  *    ->swap_device_lock	(try_to_unmap_one)
  *    ->private_lock		(try_to_unmap_one)
  *    ->page_lock		(try_to_unmap_one)
+ *    ->zone.lru_lock		(follow_page->mark_page_accessed)
+ *
+ *  ->task->proc_lock
+ *    ->dcache_lock		(proc_pid_lookup)
  */
 
 /*
@@ -142,6 +157,8 @@ int filemap_fdatawrite(struct address_space *mapping)
 	return __filemap_fdatawrite(mapping, WB_SYNC_ALL);
 }
 
+EXPORT_SYMBOL(filemap_fdatawrite);
+
 /*
  * This is a mostly non-blocking flush.  Not suitable for data-integrity
  * purposes.
@@ -197,8 +214,17 @@ restart:
 		spin_lock(&mapping->page_lock);
 	}
 	spin_unlock(&mapping->page_lock);
+
+	/* Check for outstanding write errors */
+	if (test_and_clear_bit(AS_ENOSPC, &mapping->flags))
+		ret = -ENOSPC;
+	if (test_and_clear_bit(AS_EIO, &mapping->flags))
+		ret = -EIO;
+
 	return ret;
 }
+
+EXPORT_SYMBOL(filemap_fdatawait);
 
 /*
  * This adds a page to the page cache, starting out as locked, unreferenced,
@@ -237,6 +263,7 @@ int add_to_page_cache(struct page *page, struct address_space *mapping,
 	}
 	return error;
 }
+
 EXPORT_SYMBOL(add_to_page_cache);
 
 int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
@@ -279,6 +306,7 @@ void wait_on_page_bit(struct page *page, int bit_nr)
 	} while (test_bit(bit_nr, &page->flags));
 	finish_wait(waitqueue, &wait);
 }
+
 EXPORT_SYMBOL(wait_on_page_bit);
 
 /**
@@ -307,6 +335,9 @@ void unlock_page(struct page *page)
 		wake_up_all(waitqueue);
 }
 
+EXPORT_SYMBOL(unlock_page);
+EXPORT_SYMBOL(lock_page);
+
 /*
  * End writeback against a page.
  */
@@ -323,6 +354,7 @@ void end_page_writeback(struct page *page)
 	if (waitqueue_active(waitqueue))
 		wake_up_all(waitqueue);
 }
+
 EXPORT_SYMBOL(end_page_writeback);
 
 /*
@@ -347,6 +379,7 @@ void __lock_page(struct page *page)
 	}
 	finish_wait(wqh, &wait);
 }
+
 EXPORT_SYMBOL(__lock_page);
 
 /*
@@ -369,6 +402,8 @@ struct page * find_get_page(struct address_space *mapping, unsigned long offset)
 	return page;
 }
 
+EXPORT_SYMBOL(find_get_page);
+
 /*
  * Same as above, but trylock it instead of incrementing the count.
  */
@@ -383,6 +418,8 @@ struct page *find_trylock_page(struct address_space *mapping, unsigned long offs
 	spin_unlock(&mapping->page_lock);
 	return page;
 }
+
+EXPORT_SYMBOL(find_trylock_page);
 
 /**
  * find_lock_page - locate, pin and lock a pagecache page
@@ -421,6 +458,8 @@ repeat:
 	spin_unlock(&mapping->page_lock);
 	return page;
 }
+
+EXPORT_SYMBOL(find_lock_page);
 
 /**
  * find_or_create_page - locate or add a pagecache page
@@ -465,6 +504,8 @@ repeat:
 		page_cache_release(cached_page);
 	return page;
 }
+
+EXPORT_SYMBOL(find_or_create_page);
 
 /**
  * find_get_pages - gang pagecache lookup
@@ -518,7 +559,7 @@ grab_cache_page_nowait(struct address_space *mapping, unsigned long index)
 		page_cache_release(page);
 		return NULL;
 	}
-	gfp_mask = mapping->gfp_mask & ~__GFP_FS;
+	gfp_mask = mapping_gfp_mask(mapping) & ~__GFP_FS;
 	page = alloc_pages(gfp_mask, 0);
 	if (page && add_to_page_cache_lru(page, mapping, index, gfp_mask)) {
 		page_cache_release(page);
@@ -526,6 +567,8 @@ grab_cache_page_nowait(struct address_space *mapping, unsigned long index)
 	}
 	return page;
 }
+
+EXPORT_SYMBOL(grab_cache_page_nowait);
 
 /*
  * This is a generic file read routine, and uses the
@@ -555,14 +598,15 @@ void do_generic_mapping_read(struct address_space *mapping,
 	for (;;) {
 		struct page *page;
 		unsigned long end_index, nr, ret;
+		loff_t isize = i_size_read(inode);
 
-		end_index = inode->i_size >> PAGE_CACHE_SHIFT;
+		end_index = isize >> PAGE_CACHE_SHIFT;
 			
 		if (index > end_index)
 			break;
 		nr = PAGE_CACHE_SIZE;
 		if (index == end_index) {
-			nr = inode->i_size & ~PAGE_CACHE_MASK;
+			nr = isize & ~PAGE_CACHE_MASK;
 			if (nr <= offset)
 				break;
 		}
@@ -682,6 +726,8 @@ no_cached_page:
 	update_atime(inode);
 }
 
+EXPORT_SYMBOL(do_generic_mapping_read);
+
 int file_read_actor(read_descriptor_t *desc, struct page *page,
 			unsigned long offset, unsigned long size)
 {
@@ -723,7 +769,7 @@ success:
  * This is the "read()" routine for all filesystems
  * that can use the page cache directly.
  */
-static ssize_t
+ssize_t
 __generic_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
 		unsigned long nr_segs, loff_t *ppos)
 {
@@ -763,7 +809,7 @@ __generic_file_aio_read(struct kiocb *iocb, const struct iovec *iov,
 		retval = 0;
 		if (!count)
 			goto out; /* skip atime */
-		size = inode->i_size;
+		size = i_size_read(inode);
 		if (pos < size) {
 			retval = generic_file_direct_IO(READ, iocb,
 						iov, pos, nr_segs);
@@ -799,6 +845,8 @@ out:
 	return retval;
 }
 
+EXPORT_SYMBOL(__generic_file_aio_read);
+
 ssize_t
 generic_file_aio_read(struct kiocb *iocb, char __user *buf, size_t count, loff_t pos)
 {
@@ -807,6 +855,7 @@ generic_file_aio_read(struct kiocb *iocb, char __user *buf, size_t count, loff_t
 	BUG_ON(iocb->ki_pos != pos);
 	return __generic_file_aio_read(iocb, &local_iov, 1, &iocb->ki_pos);
 }
+
 EXPORT_SYMBOL(generic_file_aio_read);
 
 ssize_t
@@ -822,6 +871,8 @@ generic_file_read(struct file *filp, char __user *buf, size_t count, loff_t *ppo
 		ret = wait_on_sync_kiocb(&kiocb);
 	return ret;
 }
+
+EXPORT_SYMBOL(generic_file_read);
 
 int file_send_actor(read_descriptor_t * desc, struct page *page, unsigned long offset, unsigned long size)
 {
@@ -862,6 +913,8 @@ ssize_t generic_file_sendfile(struct file *in_file, loff_t *ppos,
 	return desc.error;
 }
 
+EXPORT_SYMBOL(generic_file_sendfile);
+
 static ssize_t
 do_readahead(struct address_space *mapping, struct file *filp,
 	     unsigned long index, unsigned long nr)
@@ -869,7 +922,8 @@ do_readahead(struct address_space *mapping, struct file *filp,
 	if (!mapping || !mapping->a_ops || !mapping->a_ops->readpage)
 		return -EINVAL;
 
-	do_page_cache_readahead(mapping, filp, index, max_sane_readahead(nr));
+	force_page_cache_readahead(mapping, filp, index,
+					max_sane_readahead(nr));
 	return 0;
 }
 
@@ -951,7 +1005,7 @@ struct page * filemap_nopage(struct vm_area_struct * area, unsigned long address
 	endoff = ((area->vm_end - area->vm_start) >> PAGE_CACHE_SHIFT) + area->vm_pgoff;
 
 retry_all:
-	size = (inode->i_size + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
+	size = (i_size_read(inode) + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
 	if (pgoff >= size)
 		goto outside_data_content;
 
@@ -995,7 +1049,8 @@ retry_find:
 			goto no_cached_page;
 
 		did_readaround = 1;
-		do_page_cache_readahead(mapping, file, pgoff & ~(MMAP_READAROUND-1), MMAP_READAROUND);
+		do_page_cache_readahead(mapping, file,
+				pgoff & ~(MMAP_READAROUND-1), MMAP_READAROUND);
 		goto retry_find;
 	}
 
@@ -1105,6 +1160,8 @@ page_not_uptodate:
 	page_cache_release(page);
 	return NULL;
 }
+
+EXPORT_SYMBOL(filemap_nopage);
 
 static struct page * filemap_getpage(struct file *file, unsigned long pgoff,
 					int nonblock)
@@ -1229,11 +1286,11 @@ static int filemap_populate(struct vm_area_struct *vma,
 	int err;
 
 	if (!nonblock)
-		do_page_cache_readahead(mapping, vma->vm_file,
+		force_page_cache_readahead(mapping, vma->vm_file,
 					pgoff, len >> PAGE_CACHE_SHIFT);
 
 repeat:
-	size = (inode->i_size + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
+	size = (i_size_read(inode) + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
 	if (pgoff + (len >> PAGE_CACHE_SHIFT) > size)
 		return -EINVAL;
 
@@ -1245,6 +1302,20 @@ repeat:
 		if (err) {
 			page_cache_release(page);
 			return err;
+		}
+	} else {
+	    	/*
+		 * If a nonlinear mapping then store the file page offset
+		 * in the pte.
+		 */
+	    	unsigned long pgidx;
+		pgidx = (addr - vma->vm_start) >> PAGE_SHIFT;
+		pgidx += vma->vm_pgoff;
+		pgidx >>= PAGE_CACHE_SHIFT - PAGE_SHIFT;
+		if (pgoff != pgidx) {
+	    		err = install_file_pte(mm, vma, addr, pgoff, prot);
+			if (err)
+		    		return err;
 		}
 	}
 
@@ -1295,6 +1366,9 @@ int generic_file_readonly_mmap(struct file * file, struct vm_area_struct * vma)
 	return -ENOSYS;
 }
 #endif /* CONFIG_MMU */
+
+EXPORT_SYMBOL(generic_file_mmap);
+EXPORT_SYMBOL(generic_file_readonly_mmap);
 
 static inline struct page *__read_cache_page(struct address_space *mapping,
 				unsigned long index,
@@ -1372,6 +1446,8 @@ retry:
 	return page;
 }
 
+EXPORT_SYMBOL(read_cache_page);
+
 /*
  * If the page was newly created, increment its refcount and add it to the
  * caller's lru-buffering pagevec.  This function is specifically for
@@ -1415,12 +1491,14 @@ void remove_suid(struct dentry *dentry)
 	if (!(mode & S_IXGRP))
 		mode &= S_ISUID;
 
-	/* was any of the uid bits set? */
+	/* were any of the uid bits set? */
 	if (mode && !capable(CAP_FSETID)) {
-		newattrs.ia_valid = ATTR_KILL_SUID | ATTR_KILL_SGID;
+		newattrs.ia_valid = ATTR_KILL_SUID|ATTR_KILL_SGID|ATTR_FORCE;
 		notify_change(dentry, &newattrs);
 	}
 }
+
+EXPORT_SYMBOL(remove_suid);
 
 /*
  * Copy as much as we can into the page and return the number of bytes which
@@ -1544,7 +1622,7 @@ inline int generic_write_checks(struct inode *inode,
 	if (!isblk) {
 		/* FIXME: this is for backwards compatibility with 2.4 */
 		if (file->f_flags & O_APPEND)
-                        *pos = inode->i_size;
+                        *pos = i_size_read(inode);
 
 		if (limit != RLIM_INFINITY) {
 			if (*pos >= limit) {
@@ -1590,18 +1668,21 @@ inline int generic_write_checks(struct inode *inode,
 		if (unlikely(*pos + *count > inode->i_sb->s_maxbytes))
 			*count = inode->i_sb->s_maxbytes - *pos;
 	} else {
+		loff_t isize;
 		if (bdev_read_only(inode->i_bdev))
 			return -EPERM;
-		if (*pos >= inode->i_size) {
-			if (*count || *pos > inode->i_size)
+		isize = i_size_read(inode);
+		if (*pos >= isize) {
+			if (*count || *pos > isize)
 				return -ENOSPC;
 		}
 
-		if (*pos + *count > inode->i_size)
-			*count = inode->i_size - *pos;
+		if (*pos + *count > isize)
+			*count = isize - *pos;
 	}
 	return 0;
 }
+
 EXPORT_SYMBOL(generic_write_checks);
 
 /*
@@ -1685,8 +1766,8 @@ generic_file_aio_write_nolock(struct kiocb *iocb, const struct iovec *iov,
 					iov, pos, nr_segs);
 		if (written > 0) {
 			loff_t end = pos + written;
-			if (end > inode->i_size && !isblk) {
-				inode->i_size = end;
+			if (end > i_size_read(inode) && !isblk) {
+				i_size_write(inode,  end);
 				mark_inode_dirty(inode);
 			}
 			*ppos = end;
@@ -1730,14 +1811,15 @@ generic_file_aio_write_nolock(struct kiocb *iocb, const struct iovec *iov,
 
 		status = a_ops->prepare_write(file, page, offset, offset+bytes);
 		if (unlikely(status)) {
+			loff_t isize = i_size_read(inode);
 			/*
 			 * prepare_write() may have instantiated a few blocks
 			 * outside i_size.  Trim these off again.
 			 */
 			unlock_page(page);
 			page_cache_release(page);
-			if (pos + bytes > inode->i_size)
-				vmtruncate(inode, inode->i_size);
+			if (pos + bytes > isize)
+				vmtruncate(inode, isize);
 			break;
 		}
 		if (likely(nr_segs == 1))
@@ -1765,10 +1847,8 @@ generic_file_aio_write_nolock(struct kiocb *iocb, const struct iovec *iov,
 		if (unlikely(copied != bytes))
 			if (status >= 0)
 				status = -EFAULT;
-
-		if (!PageReferenced(page))
-			SetPageReferenced(page);
 		unlock_page(page);
+		mark_page_accessed(page);
 		page_cache_release(page);
 		if (status < 0)
 			break;
@@ -1797,6 +1877,8 @@ out:
 	return err;
 }
 
+EXPORT_SYMBOL(generic_file_aio_write_nolock);
+
 ssize_t
 generic_file_write_nolock(struct file *file, const struct iovec *iov,
 				unsigned long nr_segs, loff_t *ppos)
@@ -1810,6 +1892,8 @@ generic_file_write_nolock(struct file *file, const struct iovec *iov,
 		ret = wait_on_sync_kiocb(&kiocb);
 	return ret;
 }
+
+EXPORT_SYMBOL(generic_file_write_nolock);
 
 ssize_t generic_file_aio_write(struct kiocb *iocb, const char __user *buf,
 			       size_t count, loff_t pos)
@@ -1828,8 +1912,8 @@ ssize_t generic_file_aio_write(struct kiocb *iocb, const char __user *buf,
 
 	return err;
 }
+
 EXPORT_SYMBOL(generic_file_aio_write);
-EXPORT_SYMBOL(generic_file_aio_write_nolock);
 
 ssize_t generic_file_write(struct file *file, const char __user *buf,
 			   size_t count, loff_t *ppos)
@@ -1845,6 +1929,8 @@ ssize_t generic_file_write(struct file *file, const char __user *buf,
 	return err;
 }
 
+EXPORT_SYMBOL(generic_file_write);
+
 ssize_t generic_file_readv(struct file *filp, const struct iovec *iov,
 			unsigned long nr_segs, loff_t *ppos)
 {
@@ -1858,6 +1944,8 @@ ssize_t generic_file_readv(struct file *filp, const struct iovec *iov,
 	return ret;
 }
 
+EXPORT_SYMBOL(generic_file_readv);
+
 ssize_t generic_file_writev(struct file *file, const struct iovec *iov,
 			unsigned long nr_segs, loff_t * ppos) 
 {
@@ -1869,6 +1957,8 @@ ssize_t generic_file_writev(struct file *file, const struct iovec *iov,
 	up(&inode->i_sem);
 	return ret;
 }
+
+EXPORT_SYMBOL(generic_file_writev);
 
 ssize_t
 generic_file_direct_IO(int rw, struct kiocb *iocb, const struct iovec *iov,
@@ -1892,3 +1982,5 @@ generic_file_direct_IO(int rw, struct kiocb *iocb, const struct iovec *iov,
 out:
 	return retval;
 }
+
+EXPORT_SYMBOL_GPL(generic_file_direct_IO);

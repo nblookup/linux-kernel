@@ -72,9 +72,9 @@ struct usb_request {
 	unsigned		length;
 	dma_addr_t		dma;
 
-	unsigned		no_interrupt : 1,
-				zero : 1,
-				short_not_ok : 1;
+	unsigned		no_interrupt:1;
+	unsigned		zero:1;
+	unsigned		short_not_ok:1;
 
 	void			(*complete)(struct usb_ep *ep,
 					struct usb_request *req);
@@ -122,9 +122,11 @@ struct usb_ep_ops {
 /**
  * struct usb_ep - device side representation of USB endpoint
  * @name:identifier for the endpoint, such as "ep-a" or "ep9in-bulk"
+ * @ops: Function pointers used to access hardware-specific operations.
  * @ep_list:the gadget's ep_list holds all of its endpoints
- * @maxpacket:the maximum packet size used on this endpoint, as
- * 	configured when the endpoint was enabled.
+ * @maxpacket:The maximum packet size used on this endpoint.  The initial
+ *	value can sometimes be reduced (hardware allowing), according to
+ *      the endpoint descriptor used to configure the endpoint.
  * @driver_data:for use by the gadget driver.  all other fields are
  * 	read-only to gadget drivers.
  *
@@ -138,7 +140,7 @@ struct usb_ep {
 	const char		*name;
 	const struct usb_ep_ops	*ops;
 	struct list_head	ep_list;
-	unsigned		maxpacket : 16;
+	unsigned		maxpacket:16;
 };
 
 /*-------------------------------------------------------------------------*/
@@ -301,16 +303,20 @@ usb_ep_free_buffer (struct usb_ep *ep, void *buf, dma_addr_t dma, unsigned len)
  * toggle differently.
  *
  * Control endpoints ... after getting a setup() callback, the driver queues
- * one response (optional if it would be zero length).  That enables the
+ * one response (even if it would be zero length).  That enables the
  * status ack, after transfering data as specified in the response.  Setup
  * functions may return negative error codes to generate protocol stalls.
+ * (Note that some USB device controllers disallow protocol stall responses
+ * in some cases.)  When control responses are deferred (the response is
+ * written after the setup callback returns), then usb_ep_set_halt() may be
+ * used on ep0 to trigger protocol stalls.
  *
  * For periodic endpoints, like interrupt or isochronous ones, the usb host
  * arranges to poll once per interval, and the gadget driver usually will
  * have queued some data to transfer at that time.
  *
- * Returns zero, or a negative error code.  Endpoints that are not enabled,
- * or which are enabled but halted, report errors; errors will also be
+ * Returns zero, or a negative error code.  Endpoints that are not enabled
+ * report errors; errors will also be
  * reported when the usb peripheral is disconnected.
  */
 static inline int
@@ -348,6 +354,11 @@ static inline int usb_ep_dequeue (struct usb_ep *ep, struct usb_request *req)
  * clears this feature; drivers may need to empty the endpoint's request
  * queue first, to make sure no inappropriate transfers happen.
  *
+ * Note that while an endpoint CLEAR_FEATURE will be invisible to the
+ * gadget driver, a SET_INTERFACE will not be.  To reset endpoints for the
+ * current altsetting, see usb_ep_clear_halt().  When switching altsettings,
+ * it's simplest to use usb_ep_enable() or usb_ep_disable() for the endpoints.
+ *
  * Returns zero, or a negative error code.  On success, this call sets
  * underlying hardware state that blocks data transfers.
  */
@@ -361,12 +372,14 @@ usb_ep_set_halt (struct usb_ep *ep)
  * usb_ep_clear_halt - clears endpoint halt, and resets toggle
  * @ep:the bulk or interrupt endpoint being reset
  *
- * use this when responding to the standard usb "set interface" request,
+ * Use this when responding to the standard usb "set interface" request,
  * for endpoints that aren't reconfigured, after clearing any other state
  * in the endpoint's i/o queue.
  *
- * returns zero, or a negative error code.  on success, this call clears
+ * Returns zero, or a negative error code.  On success, this call clears
  * the underlying hardware state reflecting endpoint halt and data toggle.
+ * Note that some hardware can't support this request (like pxa2xx_udc),
+ * and accordingly can't correctly implement interface altsettings.
  */
 static inline int
 usb_ep_clear_halt (struct usb_ep *ep)
@@ -432,18 +445,21 @@ struct usb_gadget_ops {
 
 /**
  * struct usb_gadget - represents a usb slave device
+ * @ops: Function pointers used to access hardware-specific operations.
  * @ep0: Endpoint zero, used when reading or writing responses to
  * 	driver setup() requests
  * @ep_list: List of other endpoints supported by the device.
  * @speed: Speed of current connection to USB host.
  * @name: Identifies the controller hardware type.  Used in diagnostics
  * 	and sometimes configuration.
+ * @dev: Driver model state for this abstract device.
  *
  * Gadgets have a mostly-portable "gadget driver" implementing device
- * functions, handling all usb configurations and interfaces.  They
- * also have a hardware-specific driver (accessed through ops vectors),
- * which insulates the gadget driver from hardware details and packages
- * the hardware endpoints through generic i/o queues.
+ * functions, handling all usb configurations and interfaces.  Gadget
+ * drivers talk to hardware-specific code indirectly, through ops vectors.
+ * That insulates the gadget driver from hardware details, and packages
+ * the hardware endpoints through generic i/o queues.  The "usb_gadget"
+ * and "usb_ep" interfaces provide that insulation from the hardware.
  *
  * Except for the driver data, all fields in this structure are
  * read-only to the gadget driver.  That driver data is part of the
@@ -458,10 +474,6 @@ struct usb_gadget {
 	struct list_head		ep_list;	/* of usb_ep */
 	enum usb_device_speed		speed;
 	const char			*name;
-
-	/* use this to allocate dma-coherent buffers or set up
-	 * dma mappings.  or print diagnostics, etc.
-	 */
 	struct device			dev;
 };
 
@@ -558,12 +570,14 @@ usb_gadget_clear_selfpowered (struct usb_gadget *gadget)
  *	queues a response to ep0, or returns negative to stall.
  * @disconnect: Invoked after all transfers have been stopped,
  * 	when the host is disconnected.  May be called in_interrupt; this
- * 	may not sleep.
+ * 	may not sleep.  Some devices can't detect disconnect, so this might
+ *	not be called except as part of controller shutdown.
  * @unbind: Invoked when the driver is unbound from a gadget,
  * 	usually from rmmod (after a disconnect is reported).
  * 	Called in a context that permits sleeping.
  * @suspend: Invoked on USB suspend.  May be called in_interrupt.
  * @resume: Invoked on USB resume.  May be called in_interrupt.
+ * @driver: Driver model state for this driver.
  *
  * Devices are disabled till a gadget driver successfully bind()s, which
  * means the driver will handle setup() requests needed to enumerate (and
@@ -599,7 +613,9 @@ usb_gadget_clear_selfpowered (struct usb_gadget *gadget)
  * not provide those callbacks.  However, some may need to change modes
  * when the host is not longer directing those activities.  For example,
  * local controls (buttons, dials, etc) may need to be re-enabled since
- * the (remote) host can't do that any longer. 
+ * the (remote) host can't do that any longer; or an error state might
+ * be cleared, to make the device behave identically whether or not
+ * power is maintained.
  */
 struct usb_gadget_driver {
 	char			*function;

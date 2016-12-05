@@ -15,7 +15,7 @@
 /* The following #define is to avoid a clash with hosts.c */
 #define PPA_CODE 1
 
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <asm/io.h>
 #include <linux/parport.h>
 #include <linux/workqueue.h>
@@ -76,6 +76,7 @@ int ppa_release(struct Scsi_Host *host)
     int host_no = host->unique_id;
 
     printk("Releasing ppa%i\n", host_no);
+    scsi_unregister(host);
     parport_unregister_device(ppa_hosts[host_no].dev);
     return 0;
 }

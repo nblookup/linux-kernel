@@ -63,7 +63,6 @@
 #include "xfs_dir2_leaf.h"
 #include "xfs_dir2_block.h"
 #include "xfs_dir2_node.h"
-#include "xfs_dir2_sf.h"
 #include "xfs_dir2_trace.h"
 #include "xfs_error.h"
 #include "xfs_bit.h"
@@ -156,7 +155,7 @@ xfs_dir2_isempty(
 {
 	xfs_dir2_sf_t	*sfp;		/* shortform directory structure */
 
-	ASSERT((dp->i_d.di_mode & IFMT) == IFDIR);
+	ASSERT((dp->i_d.di_mode & S_IFMT) == S_IFDIR);
 	/*
 	 * Might happen during shutdown.
 	 */
@@ -184,7 +183,7 @@ xfs_dir2_init(
 	memset((char *)&args, 0, sizeof(args));
 	args.dp = dp;
 	args.trans = tp;
-	ASSERT((dp->i_d.di_mode & IFMT) == IFDIR);
+	ASSERT((dp->i_d.di_mode & S_IFMT) == S_IFDIR);
 	if ((error = xfs_dir_ino_validate(tp->t_mountp, pdp->i_ino))) {
 		return error;
 	}
@@ -209,11 +208,11 @@ xfs_dir2_createname(
 	int			rval;		/* return value */
 	int			v;		/* type-checking value */
 
-	ASSERT((dp->i_d.di_mode & IFMT) == IFDIR);
+	ASSERT((dp->i_d.di_mode & S_IFMT) == S_IFDIR);
 	if ((rval = xfs_dir_ino_validate(tp->t_mountp, inum))) {
 		return rval;
 	}
-	XFS_STATS_INC(xfsstats.xs_dir_create);
+	XFS_STATS_INC(xs_dir_create);
 	/*
 	 * Fill in the arg structure for this request.
 	 */
@@ -262,8 +261,8 @@ xfs_dir2_lookup(
 	int		rval;		/* return value */
 	int		v;		/* type-checking value */
 
-	ASSERT((dp->i_d.di_mode & IFMT) == IFDIR);
-	XFS_STATS_INC(xfsstats.xs_dir_lookup);
+	ASSERT((dp->i_d.di_mode & S_IFMT) == S_IFDIR);
+	XFS_STATS_INC(xs_dir_lookup);
 
 	/*
 	 * Fill in the arg structure for this request.
@@ -320,8 +319,8 @@ xfs_dir2_removename(
 	int		rval;		/* return value */
 	int		v;		/* type-checking value */
 
-	ASSERT((dp->i_d.di_mode & IFMT) == IFDIR);
-	XFS_STATS_INC(xfsstats.xs_dir_remove);
+	ASSERT((dp->i_d.di_mode & S_IFMT) == S_IFDIR);
+	XFS_STATS_INC(xs_dir_remove);
 	/*
 	 * Fill in the arg structure for this request.
 	 */
@@ -370,8 +369,8 @@ xfs_dir2_getdents(
 	int		rval;		/* return value */
 	int		v;		/* type-checking value */
 
-	ASSERT((dp->i_d.di_mode & IFMT) == IFDIR);
-	XFS_STATS_INC(xfsstats.xs_dir_getdents);
+	ASSERT((dp->i_d.di_mode & S_IFMT) == S_IFDIR);
+	XFS_STATS_INC(xs_dir_getdents);
 	/*
 	 * If our caller has given us a single contiguous aligned memory buffer,
 	 * just work directly within that buffer.  If it's in user memory,
@@ -423,7 +422,7 @@ xfs_dir2_replace(
 	int		rval;		/* return value */
 	int		v;		/* type-checking value */
 
-	ASSERT((dp->i_d.di_mode & IFMT) == IFDIR);
+	ASSERT((dp->i_d.di_mode & S_IFMT) == S_IFDIR);
 
 	if ((rval = xfs_dir_ino_validate(tp->t_mountp, inum))) {
 		return rval;
@@ -474,7 +473,7 @@ xfs_dir2_canenter(
 	int		rval;		/* return value */
 	int		v;		/* type-checking value */
 
-	ASSERT((dp->i_d.di_mode & IFMT) == IFDIR);
+	ASSERT((dp->i_d.di_mode & S_IFMT) == S_IFDIR);
 	/*
 	 * Fill in the arg structure for this request.
 	 */
@@ -774,7 +773,7 @@ xfs_dir2_put_dirent64_uio(
 	idbp->d_off = pa->cook;
 	idbp->d_name[namelen] = '\0';
 	memcpy(idbp->d_name, pa->name, namelen);
-	rval = uiomove((caddr_t)idbp, reclen, UIO_READ, uio);
+	rval = uio_read((caddr_t)idbp, reclen, uio);
 	pa->done = (rval == 0);
 	return rval;
 }

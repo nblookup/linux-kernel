@@ -1,7 +1,7 @@
 /* SCTP kernel reference Implementation
+ * (C) Copyright IBM Corp. 2001, 2003
  * Copyright (c) 1999 Cisco, Inc.
  * Copyright (c) 1999-2001 Motorola, Inc.
- * Copyright (c) 2001-2002 International Business Machines Corp.
  *
  * This file is part of the SCTP kernel reference Implementation
  *
@@ -294,6 +294,12 @@ void sctp_generate_t2_shutdown_event(unsigned long data)
 	sctp_generate_timeout_event(asoc, SCTP_EVENT_TIMEOUT_T2_SHUTDOWN);
 }
 
+void sctp_generate_t4_rto_event(unsigned long data)
+{
+	struct sctp_association *asoc = (struct sctp_association *) data;
+	sctp_generate_timeout_event(asoc, SCTP_EVENT_TIMEOUT_T4_RTO);
+}
+
 void sctp_generate_t5_shutdown_guard_event(unsigned long data)
 {
         struct sctp_association *asoc = (struct sctp_association *)data;
@@ -359,6 +365,7 @@ sctp_timer_event_t *sctp_timer_events[SCTP_NUM_TIMEOUT_TYPES] = {
 	sctp_generate_t1_init_event,
 	sctp_generate_t2_shutdown_event,
 	NULL,
+	sctp_generate_t4_rto_event,
 	sctp_generate_t5_shutdown_guard_event,
 	sctp_generate_heartbeat_event,
 	sctp_generate_sack_event,
@@ -666,6 +673,61 @@ static void sctp_cmd_delete_tcb(sctp_cmd_seq_t *cmds,
 	sctp_association_free(asoc);
 }
 
+/*
+ * ADDIP Section 4.1 ASCONF Chunk Procedures
+ * A4) Start a T-4 RTO timer, using the RTO value of the selected
+ * destination address (normally the primary path; see RFC2960
+ * section 6.4 for details).
+ */
+static void sctp_cmd_setup_t4(sctp_cmd_seq_t *cmds,
+				struct sctp_association *asoc,
+				struct sctp_chunk *chunk)
+{
+	struct sctp_transport *t;
+
+	t = asoc->peer.primary_path;
+	asoc->timeouts[SCTP_EVENT_TIMEOUT_T4_RTO] = t->rto;
+	chunk->transport = t;
+}
+
+/* Process an incoming Operation Error Chunk. */ 
+static void sctp_cmd_process_operr(sctp_cmd_seq_t *cmds,
+				   struct sctp_association *asoc,
+				   struct sctp_chunk *chunk)
+{
+	struct sctp_operr_chunk *operr_chunk;
+	struct sctp_errhdr *err_hdr;
+
+	operr_chunk = (struct sctp_operr_chunk *)chunk->chunk_hdr;
+	err_hdr = &operr_chunk->err_hdr;
+
+	switch (err_hdr->cause) {
+	case SCTP_ERROR_UNKNOWN_CHUNK:
+	{
+		struct sctp_chunkhdr *unk_chunk_hdr;
+
+		unk_chunk_hdr = (struct sctp_chunkhdr *)err_hdr->variable;
+		switch (unk_chunk_hdr->type) {
+		/* ADDIP 4.1 A9) If the peer responds to an ASCONF with an
+		 * ERROR chunk reporting that it did not recognized the ASCONF
+		 * chunk type, the sender of the ASCONF MUST NOT send any
+		 * further ASCONF chunks and MUST stop its T-4 timer.
+		 */
+		case SCTP_CID_ASCONF:
+			asoc->peer.asconf_capable = 0;
+			sctp_add_cmd_sf(cmds, SCTP_CMD_TIMER_STOP,
+					SCTP_TO(SCTP_EVENT_TIMEOUT_T4_RTO));
+			break;
+		default:
+			break;
+		}
+		break;
+	}
+	default:
+		break;
+	}
+}
+
 /* These three macros allow us to pull the debugging code out of the
  * main flow of sctp_do_sm() to keep attention focused on the real
  * functionality there.
@@ -962,7 +1024,7 @@ int sctp_cmd_interpreter(sctp_event_t event_type, sctp_subtype_t subtype,
 			asoc->overall_error_count = 0;
 
 			/* Generate a SHUTDOWN chunk.  */
-			new_obj = sctp_make_shutdown(asoc);
+			new_obj = sctp_make_shutdown(asoc, chunk);
 			if (!new_obj)
 				goto nomem;
 			sctp_add_cmd_sf(commands, SCTP_CMD_REPLY,
@@ -1177,6 +1239,13 @@ int sctp_cmd_interpreter(sctp_event_t event_type, sctp_subtype_t subtype,
 					 GFP_ATOMIC);
 			break;
 
+		case SCTP_CMD_SETUP_T4:
+			sctp_cmd_setup_t4(commands, asoc, cmd->obj.ptr);
+			break;
+
+		case SCTP_CMD_PROCESS_OPERR:
+			sctp_cmd_process_operr(commands, asoc, chunk);
+			break;
 		default:
 			printk(KERN_WARNING "Impossible command: %u, %p\n",
 			       cmd->verb, cmd->obj.ptr);

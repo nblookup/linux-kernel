@@ -191,7 +191,8 @@ int snd_rawmidi_kernel_open(int cardnum, int device, int subdevice,
 		err = -EFAULT;
 		goto __error1;
 	}
-	down(&rmidi->open_mutex);
+	if (!(mode & SNDRV_RAWMIDI_LFLG_NOOPENLOCK))
+		down(&rmidi->open_mutex);
 	if (mode & SNDRV_RAWMIDI_LFLG_INPUT) {
 		if (!(rmidi->info_flags & SNDRV_RAWMIDI_INFO_INPUT)) {
 			err = -ENXIO;
@@ -320,7 +321,8 @@ int snd_rawmidi_kernel_open(int cardnum, int device, int subdevice,
 	} else {
 		soutput = NULL;
 	}
-	up(&rmidi->open_mutex);
+	if (!(mode & SNDRV_RAWMIDI_LFLG_NOOPENLOCK))
+		up(&rmidi->open_mutex);
 	if (rfile) {
 		rfile->rmidi = rmidi;
 		rfile->input = sinput;
@@ -338,14 +340,15 @@ int snd_rawmidi_kernel_open(int cardnum, int device, int subdevice,
 		kfree(output);
 	}
 	module_put(rmidi->card->module);
-	up(&rmidi->open_mutex);
+	if (!(mode & SNDRV_RAWMIDI_LFLG_NOOPENLOCK))
+		up(&rmidi->open_mutex);
       __error1:
 	return err;
 }
 
 static int snd_rawmidi_open(struct inode *inode, struct file *file)
 {
-	int maj = major(inode->i_rdev);
+	int maj = imajor(inode);
 	int cardnum;
 	snd_card_t *card;
 	int device, subdevice;
@@ -359,16 +362,16 @@ static int snd_rawmidi_open(struct inode *inode, struct file *file)
 
 	switch (maj) {
 	case CONFIG_SND_MAJOR:
-		cardnum = SNDRV_MINOR_CARD(minor(inode->i_rdev));
+		cardnum = SNDRV_MINOR_CARD(iminor(inode));
 		cardnum %= SNDRV_CARDS;
-		device = SNDRV_MINOR_DEVICE(minor(inode->i_rdev)) - SNDRV_MINOR_RAWMIDI;
+		device = SNDRV_MINOR_DEVICE(iminor(inode)) - SNDRV_MINOR_RAWMIDI;
 		device %= SNDRV_MINOR_RAWMIDIS;
 		break;
 #ifdef CONFIG_SND_OSSEMUL
 	case SOUND_MAJOR:
-		cardnum = SNDRV_MINOR_OSS_CARD(minor(inode->i_rdev));
+		cardnum = SNDRV_MINOR_OSS_CARD(iminor(inode));
 		cardnum %= SNDRV_CARDS;
-		device = SNDRV_MINOR_OSS_DEVICE(minor(inode->i_rdev)) == SNDRV_MINOR_OSS_MIDI ?
+		device = SNDRV_MINOR_OSS_DEVICE(iminor(inode)) == SNDRV_MINOR_OSS_MIDI ?
 			midi_map[cardnum] : amidi_map[cardnum];
 		break;
 #endif
@@ -392,6 +395,7 @@ static int snd_rawmidi_open(struct inode *inode, struct file *file)
 	fflags = snd_rawmidi_file_flags(file);
 	if ((file->f_flags & O_APPEND) || maj != CONFIG_SND_MAJOR) /* OSS emul? */
 		fflags |= SNDRV_RAWMIDI_LFLG_APPEND;
+	fflags |= SNDRV_RAWMIDI_LFLG_NOOPENLOCK;
 	rawmidi_file = snd_magic_kmalloc(snd_rawmidi_file_t, 0, GFP_KERNEL);
 	if (rawmidi_file == NULL) {
 		snd_card_file_remove(card, file);
@@ -399,6 +403,7 @@ static int snd_rawmidi_open(struct inode *inode, struct file *file)
 	}
 	init_waitqueue_entry(&wait, current);
 	add_wait_queue(&rmidi->open_wait, &wait);
+	down(&rmidi->open_mutex);
 	while (1) {
 		subdevice = -1;
 		down_read(&card->controls_rwsem);
@@ -421,7 +426,9 @@ static int snd_rawmidi_open(struct inode *inode, struct file *file)
 		} else
 			break;
 		set_current_state(TASK_INTERRUPTIBLE);
+		up(&rmidi->open_mutex);
 		schedule();
+		down(&rmidi->open_mutex);
 		if (signal_pending(current)) {
 			err = -ERESTARTSYS;
 			break;
@@ -433,7 +440,6 @@ static int snd_rawmidi_open(struct inode *inode, struct file *file)
 	if (rawmidi_file->output && rawmidi_file->output->runtime)
 		rawmidi_file->output->runtime->oss = (maj == SOUND_MAJOR);
 #endif
-	set_current_state(TASK_RUNNING);
 	remove_wait_queue(&rmidi->open_wait, &wait);
 	if (err >= 0) {
 		file->private_data = rawmidi_file;
@@ -441,6 +447,7 @@ static int snd_rawmidi_open(struct inode *inode, struct file *file)
 		snd_card_file_remove(card, file);
 		snd_magic_kfree(rawmidi_file);
 	}
+	up(&rmidi->open_mutex);
 	return err;
 }
 
@@ -950,10 +957,9 @@ static ssize_t snd_rawmidi_read(struct file *file, char *buf, size_t count, loff
 			}
 			init_waitqueue_entry(&wait, current);
 			add_wait_queue(&runtime->sleep, &wait);
-			spin_unlock_irq(&runtime->lock);
 			set_current_state(TASK_INTERRUPTIBLE);
+			spin_unlock_irq(&runtime->lock);
 			schedule();
-			set_current_state(TASK_RUNNING);
 			remove_wait_queue(&runtime->sleep, &wait);
 			if (signal_pending(current))
 				return result > 0 ? result : -ERESTARTSYS;
@@ -1179,10 +1185,9 @@ static ssize_t snd_rawmidi_write(struct file *file, const char *buf, size_t coun
 			}
 			init_waitqueue_entry(&wait, current);
 			add_wait_queue(&runtime->sleep, &wait);
-			spin_unlock_irq(&runtime->lock);
 			set_current_state(TASK_INTERRUPTIBLE);
+			spin_unlock_irq(&runtime->lock);
 			timeout = schedule_timeout(30 * HZ);
-			set_current_state(TASK_RUNNING);
 			remove_wait_queue(&runtime->sleep, &wait);
 			if (signal_pending(current))
 				return result > 0 ? result : -ERESTARTSYS;
@@ -1207,10 +1212,9 @@ static ssize_t snd_rawmidi_write(struct file *file, const char *buf, size_t coun
 			unsigned int last_avail = runtime->avail;
 			init_waitqueue_entry(&wait, current);
 			add_wait_queue(&runtime->sleep, &wait);
-			spin_unlock_irq(&runtime->lock);
 			set_current_state(TASK_INTERRUPTIBLE);
+			spin_unlock_irq(&runtime->lock);
 			timeout = schedule_timeout(30 * HZ);
-			set_current_state(TASK_RUNNING);
 			remove_wait_queue(&runtime->sleep, &wait);
 			if (signal_pending(current))
 				return result > 0 ? result : -ERESTARTSYS;
@@ -1437,7 +1441,7 @@ static int snd_rawmidi_dev_free(snd_device_t *device)
 	return snd_rawmidi_free(rmidi);
 }
 
-#if defined(CONFIG_SND_SEQUENCER) || defined(CONFIG_SND_SEQUENCER_MODULE)
+#if defined(CONFIG_SND_SEQUENCER) || (defined(MODULE) && defined(CONFIG_SND_SEQUENCER_MODULE))
 static void snd_rawmidi_dev_seq_free(snd_seq_device_t *device)
 {
 	snd_rawmidi_t *rmidi = snd_magic_cast(snd_rawmidi_t, device->private_data, return);
@@ -1513,7 +1517,7 @@ static int snd_rawmidi_dev_register(snd_device_t *device)
 		}
 	}
 	rmidi->proc_entry = entry;
-#if defined(CONFIG_SND_SEQUENCER) || defined(CONFIG_SND_SEQUENCER_MODULE)
+#if defined(CONFIG_SND_SEQUENCER) || (defined(MODULE) && defined(CONFIG_SND_SEQUENCER_MODULE))
 	if (!rmidi->ops || !rmidi->ops->dev_register) { /* own registration mechanism */
 		if (snd_seq_device_new(rmidi->card, rmidi->device, SNDRV_SEQ_DEV_ID_MIDISYNTH, 0, &rmidi->seq_dev) >= 0) {
 			rmidi->seq_dev->private_data = rmidi;
@@ -1568,7 +1572,7 @@ static int snd_rawmidi_dev_unregister(snd_device_t *device)
 		rmidi->ops->dev_unregister(rmidi);
 	snd_unregister_device(SNDRV_DEVICE_TYPE_RAWMIDI, rmidi->card, rmidi->device);
 	up(&register_mutex);
-#if defined(CONFIG_SND_SEQUENCER) || defined(CONFIG_SND_SEQUENCER_MODULE)
+#if defined(CONFIG_SND_SEQUENCER) || (defined(MODULE) && defined(CONFIG_SND_SEQUENCER_MODULE))
 	if (rmidi->seq_dev) {
 		snd_device_free(rmidi->card, rmidi->seq_dev);
 		rmidi->seq_dev = NULL;
@@ -1629,6 +1633,26 @@ static void __exit alsa_rawmidi_exit(void)
 
 module_init(alsa_rawmidi_init)
 module_exit(alsa_rawmidi_exit)
+
+#ifndef MODULE
+#ifdef CONFIG_SND_OSSEMUL
+/* format is: snd-rawmidi=midi_map,amidi_map */
+
+static int __init alsa_rawmidi_setup(char *str)
+{
+	static unsigned __initdata nr_dev = 0;
+
+	if (nr_dev >= SNDRV_CARDS)
+		return 0;
+	(void)(get_option(&str,&midi_map[nr_dev]) == 2 &&
+	       get_option(&str,&amidi_map[nr_dev]) == 2);
+	nr_dev++;
+	return 1;
+}
+
+__setup("snd-rawmidi=", alsa_rawmidi_setup);
+#endif /* CONFIG_SND_OSSEMUL */
+#endif /* ifndef MODULE */
 
 EXPORT_SYMBOL(snd_rawmidi_output_params);
 EXPORT_SYMBOL(snd_rawmidi_input_params);

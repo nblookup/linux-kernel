@@ -55,6 +55,8 @@ int strnicmp(const char *s1, const char *s2, size_t len)
 	}
 	return (int)c1 - (int)c2;
 }
+
+EXPORT_SYMBOL(strnicmp);
 #endif
 
 #ifndef __HAVE_ARCH_STRCPY
@@ -80,18 +82,19 @@ char * strcpy(char * dest,const char *src)
  * @src: Where to copy the string from
  * @count: The maximum number of bytes to copy
  *
- * Note that unlike userspace strncpy, this does not %NUL-pad the buffer.
- * However, the result is not %NUL-terminated if the source exceeds
+ * The result is not %NUL-terminated if the source exceeds
  * @count bytes.
  */
 char * strncpy(char * dest,const char *src,size_t count)
 {
 	char *tmp = dest;
 
-	while (count-- && (*dest++ = *src++) != '\0')
-		/* nothing */;
-
-	return tmp;
+	while (count) {
+		if ((*tmp = *src) != 0) src++;
+		tmp++;
+		count--;
+	}
+	return dest;
 }
 #endif
 
@@ -324,6 +327,8 @@ size_t strspn(const char *s, const char *accept)
 
 	return count;
 }
+
+EXPORT_SYMBOL(strspn);
 #endif
 
 /**
@@ -395,6 +400,8 @@ char * strsep(char **s, const char *ct)
 
 	return sbegin;
 }
+
+EXPORT_SYMBOL(strsep);
 #endif
 
 #ifndef __HAVE_ARCH_MEMSET
@@ -430,14 +437,12 @@ void * memset(void * s,int c,size_t count)
  * You should not use this function to access IO space, use memcpy_toio()
  * or memcpy_fromio() instead.
  */
-char * bcopy(const char * src, char * dest, int count)
+void bcopy(const char * src, char * dest, int count)
 {
 	char *tmp = dest;
 
 	while (count--)
 		*tmp++ = *src++;
-
-	return dest;
 }
 #endif
 

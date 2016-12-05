@@ -40,7 +40,7 @@
 
 #include "tms380tr.h"
 
-static char version[] __initdata =
+static char version[] __devinitdata =
 "tmspci.c: v1.02 23/11/2000 by Adam Fritzler\n";
 
 #define TMS_PCI_IO_EXTENT 32
@@ -57,7 +57,7 @@ static struct card_info card_info_table[] = {
 	{ {0x03, 0x01}, "3Com Token Link Velocity"},
 };
 
-static struct pci_device_id tmspci_pci_tbl[] __initdata = {
+static struct pci_device_id tmspci_pci_tbl[] = {
 	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_TOKENRING, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_SYSKONNECT, PCI_DEVICE_ID_SYSKONNECT_TR, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1 },
 	{ PCI_VENDOR_ID_TCONRAD, PCI_DEVICE_ID_TCONRAD_TOKENRING, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 2 },
@@ -91,7 +91,7 @@ static void tms_pci_sifwritew(struct net_device *dev, unsigned short val, unsign
 	outw(val, dev->base_addr + reg);
 }
 
-static int __init tms_pci_attach(struct pci_dev *pdev, const struct pci_device_id *ent)
+static int __devinit tms_pci_attach(struct pci_dev *pdev, const struct pci_device_id *ent)
 {	
 	static int versionprinted;
 	struct net_device *dev;
@@ -229,7 +229,7 @@ static void __devexit tms_pci_detach (struct pci_dev *pdev)
 	release_region(dev->base_addr, TMS_PCI_IO_EXTENT);
 	free_irq(dev->irq, dev);
 	tmsdev_term(dev);
-	kfree(dev);
+	free_netdev(dev);
 	pci_set_drvdata(pdev, NULL);
 }
 

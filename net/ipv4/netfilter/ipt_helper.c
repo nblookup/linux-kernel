@@ -9,12 +9,16 @@
  */
 #include <linux/module.h>
 #include <linux/skbuff.h>
+#include <linux/netfilter.h>
 #include <linux/netfilter_ipv4/ip_conntrack.h>
+#include <linux/netfilter_ipv4/ip_conntrack_core.h>
 #include <linux/netfilter_ipv4/ip_conntrack_helper.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netfilter_ipv4/ipt_helper.h>
 
 MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Martin Josefsson <gandalf@netfilter.org>");
+MODULE_DESCRIPTION("iptables helper match module");
 
 #if 0
 #define DEBUGP printk
@@ -34,6 +38,7 @@ match(const struct sk_buff *skb,
 	struct ip_conntrack_expect *exp;
 	struct ip_conntrack *ct;
 	enum ip_conntrack_info ctinfo;
+	int ret = 0;
 	
 	ct = ip_conntrack_get((struct sk_buff *)skb, &ctinfo);
 	if (!ct) {
@@ -47,23 +52,27 @@ match(const struct sk_buff *skb,
 	}
 
 	exp = ct->master;
+	READ_LOCK(&ip_conntrack_lock);
 	if (!exp->expectant) {
 		DEBUGP("ipt_helper: expectation %p without expectant !?!\n", 
 			exp);
-		return 0;
+		goto out_unlock;
 	}
 
 	if (!exp->expectant->helper) {
 		DEBUGP("ipt_helper: master ct %p has no helper\n", 
 			exp->expectant);
-		return 0;
+		goto out_unlock;
 	}
 
 	DEBUGP("master's name = %s , info->name = %s\n", 
 		exp->expectant->helper->name, info->name);
 
-	return !strncmp(exp->expectant->helper->name, info->name, 
-			strlen(exp->expectant->helper->name)) ^ info->invert;
+	ret = !strncmp(exp->expectant->helper->name, info->name, 
+	               strlen(exp->expectant->helper->name)) ^ info->invert;
+out_unlock:
+	READ_UNLOCK(&ip_conntrack_lock);
+	return ret;
 }
 
 static int check(const char *tablename,

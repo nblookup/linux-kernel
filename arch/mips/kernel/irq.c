@@ -344,13 +344,12 @@ asmlinkage unsigned int do_IRQ(int irq, struct pt_regs *regs)
 	 * 0 return value means that this irq is already being
 	 * handled by some other CPU. (or is disabled)
 	 */
-	int cpu = smp_processor_id();
 	irq_desc_t *desc = irq_desc + irq;
 	struct irqaction * action;
 	unsigned int status;
 
 	irq_enter();
-	kstat_cpu(cpu).irqs[irq]++;
+	kstat_this_cpu.irqs[irq]++;
 	spin_lock(&desc->lock);
 	desc->handler->ack(irq);
 	/*
@@ -395,7 +394,7 @@ asmlinkage unsigned int do_IRQ(int irq, struct pt_regs *regs)
 		irqreturn_t action_ret;
 
 		spin_unlock(&desc->lock);
-		action_ret = handle_IRQ_event(irq, &regs, action);
+		action_ret = handle_IRQ_event(irq, regs, action);
 		spin_lock(&desc->lock);
 		if (!noirqdebug)
 			note_interrupt(irq, desc, action_ret);
@@ -495,6 +494,8 @@ int request_irq(unsigned int irq,
 	return retval;
 }
 
+EXPORT_SYMBOL(request_irq);
+
 /**
  *	free_irq - free an interrupt
  *	@irq: Interrupt line to free
@@ -548,6 +549,8 @@ void free_irq(unsigned int irq, void *dev_id)
 		return;
 	}
 }
+
+EXPORT_SYMBOL(free_irq);
 
 /*
  * IRQ autodetection code..
@@ -641,6 +644,8 @@ unsigned long probe_irq_on(void)
 
 	return val;
 }
+
+EXPORT_SYMBOL(probe_irq_on);
 
 /*
  * Return a mask of triggered interrupts (this
@@ -739,6 +744,8 @@ int probe_irq_off(unsigned long val)
 		irq_found = -irq_found;
 	return irq_found;
 }
+
+EXPORT_SYMBOL(probe_irq_off);
 
 /* this was setup_x86_irq but it seems pretty generic */
 int setup_irq(unsigned int irq, struct irqaction * new)
@@ -861,20 +868,30 @@ out:
 
 static struct proc_dir_entry * smp_affinity_entry [NR_IRQS];
 
-static unsigned long irq_affinity [NR_IRQS] = { [0 ... NR_IRQS-1] = ~0UL };
+static cpumask_t irq_affinity [NR_IRQS] = { [0 ... NR_IRQS-1] = ~0UL };
 static int irq_affinity_read_proc (char *page, char **start, off_t off,
 			int count, int *eof, void *data)
 {
+	int len, k;
+	cpumask_t tmp = irq_affinity[(long)data];
+
 	if (count < HEX_DIGITS+1)
 		return -EINVAL;
-	return sprintf (page, "%08lx\n", irq_affinity[(long)data]);
+	for (k = 0; k < sizeof(cpumask_t)/sizeof(u16); ++k) {
+		int j = sprintf(page, "%04hx", cpus_coerce(tmp));
+		len += j;
+		page += j;
+		cpus_shift_right(tmp, tmp, 16);
+	}
+	len += sprintf(page, "\n");
+	return len;
 }
 
 static int irq_affinity_write_proc (struct file *file, const char *buffer,
 					unsigned long count, void *data)
 {
 	int irq = (long) data, full_count = count, err;
-	unsigned long new_value;
+	cpumask_t new_value, tmp;
 
 	if (!irq_desc[irq].handler->set_affinity)
 		return -EIO;
@@ -886,7 +903,8 @@ static int irq_affinity_write_proc (struct file *file, const char *buffer,
 	 * way to make the system unusable accidentally :-) At least
 	 * one online CPU still has to be targeted.
 	 */
-	if (!(new_value & cpu_online_map))
+	cpus_and(tmp, tmp, cpu_online_map);
+	if (cpus_empty(tmp))
 		return -EINVAL;
 
 	irq_affinity[irq] = new_value;
@@ -900,17 +918,28 @@ static int irq_affinity_write_proc (struct file *file, const char *buffer,
 static int prof_cpu_mask_read_proc (char *page, char **start, off_t off,
 			int count, int *eof, void *data)
 {
-	unsigned long *mask = (unsigned long *) data;
+	int len, k;
+	cpumask_t *mask = (cpumask_t *)data, tmp;
+
 	if (count < HEX_DIGITS+1)
 		return -EINVAL;
-	return sprintf (page, "%08lx\n", *mask);
+	tmp = *mask;
+
+	for (k = 0; k < sizeof(cpumask_t)/sizeof(u16); ++k) {
+		int j = sprintf(page, "%04hx", cpus_coerce(tmp));
+		len += j;
+		page += j;
+		cpus_shift_right(tmp, tmp, 16);
+	}
+	len += sprintf(page, "\n");
+	return len;
 }
 
 static int prof_cpu_mask_write_proc (struct file *file, const char *buffer,
 					unsigned long count, void *data)
 {
-	unsigned long *mask = (unsigned long *) data, full_count = count, err;
-	unsigned long new_value;
+	cpumask_t *mask = (cpumask_t *)data, new_value;
+	unsigned long full_count = count, err;
 
 	err = parse_hex_value(buffer, count, &new_value);
 	if (err)

@@ -10,6 +10,8 @@
 #include <linux/binfmts.h>
 #include <linux/compat.h>
 
+#include <asm/processor.h>
+
 /*
  * 32 bit structures for IA32 support.
  */
@@ -168,15 +170,15 @@ struct ucontext_ia32 {
 };
 
 struct stat64 {
-	unsigned short	st_dev;
-	unsigned char	__pad0[10];
+	unsigned long long	st_dev;
+	unsigned char	__pad0[4];
 	unsigned int	__st_ino;
 	unsigned int	st_mode;
 	unsigned int	st_nlink;
 	unsigned int	st_uid;
 	unsigned int	st_gid;
-	unsigned short	st_rdev;
-	unsigned char	__pad3[10];
+	unsigned long long	st_rdev;
+	unsigned char	__pad3[4];
 	unsigned int	st_size_lo;
 	unsigned int	st_size_hi;
 	unsigned int	st_blksize;
@@ -249,13 +251,6 @@ typedef struct siginfo32 {
 	} _sifields;
 } siginfo_t32;
 
-struct linux32_dirent {
-	u32	d_ino;
-	u32	d_off;
-	u16	d_reclen;
-	char	d_name[256];
-};
-
 struct old_linux32_dirent {
 	u32	d_ino;
 	u32	d_offset;
@@ -295,7 +290,6 @@ struct old_linux32_dirent {
 #define IA32_TSS_OFFSET		(IA32_PAGE_OFFSET + PAGE_SIZE)
 #define IA32_LDT_OFFSET		(IA32_PAGE_OFFSET + 2*PAGE_SIZE)
 
-#define USE_ELF_CORE_DUMP
 #define ELF_EXEC_PAGESIZE	IA32_PAGE_SIZE
 
 /*
@@ -311,20 +305,6 @@ void ia64_elf32_init(struct pt_regs *regs);
 #define ELF_PLAT_INIT(_r, load_addr)	ia64_elf32_init(_r)
 
 #define elf_addr_t	u32
-
-/* ELF register definitions.  This is needed for core dump support.  */
-
-#define ELF_NGREG	128			/* XXX fix me */
-#define ELF_NFPREG	128			/* XXX fix me */
-
-typedef unsigned long elf_greg_t;
-typedef elf_greg_t elf_gregset_t[ELF_NGREG];
-
-typedef struct {
-	unsigned long w0;
-	unsigned long w1;
-} elf_fpreg_t;
-typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 
 /* This macro yields a bitmask that programs can use to figure out
    what instruction set this CPU supports.  */
@@ -349,14 +329,22 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 #define __USER_CS      0x23
 #define __USER_DS      0x2B
 
-#define FIRST_TSS_ENTRY 6
-#define FIRST_LDT_ENTRY (FIRST_TSS_ENTRY+1)
-#define _TSS(n) ((((unsigned long) n)<<4)+(FIRST_TSS_ENTRY<<3))
-#define _LDT(n) ((((unsigned long) n)<<4)+(FIRST_LDT_ENTRY<<3))
+/*
+ * The per-cpu GDT has 32 entries: see <asm-i386/segment.h>
+ */
+#define GDT_ENTRIES 32
+
+#define GDT_SIZE	(GDT_ENTRIES * 8)
+
+#define TSS_ENTRY 14
+#define LDT_ENTRY	(TSS_ENTRY + 1)
 
 #define IA32_SEGSEL_RPL		(0x3 << 0)
 #define IA32_SEGSEL_TI		(0x1 << 2)
 #define IA32_SEGSEL_INDEX_SHIFT	3
+
+#define _TSS			((unsigned long) TSS_ENTRY << IA32_SEGSEL_INDEX_SHIFT)
+#define _LDT			((unsigned long) LDT_ENTRY << IA32_SEGSEL_INDEX_SHIFT)
 
 #define IA32_SEG_BASE		16
 #define IA32_SEG_TYPE		40
@@ -441,7 +429,42 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 #define IA32_LDT_ENTRIES	8192		/* Maximum number of LDT entries supported. */
 #define IA32_LDT_ENTRY_SIZE	8		/* The size of each LDT entry. */
 
-struct ia32_modify_ldt_ldt_s {
+#define LDT_entry_a(info) \
+	((((info)->base_addr & 0x0000ffff) << 16) | ((info)->limit & 0x0ffff))
+
+#define LDT_entry_b(info)				\
+	(((info)->base_addr & 0xff000000) |		\
+	(((info)->base_addr & 0x00ff0000) >> 16) |	\
+	((info)->limit & 0xf0000) |			\
+	(((info)->read_exec_only ^ 1) << 9) |		\
+	((info)->contents << 10) |			\
+	(((info)->seg_not_present ^ 1) << 15) |		\
+	((info)->seg_32bit << 22) |			\
+	((info)->limit_in_pages << 23) |		\
+	((info)->useable << 20) |			\
+	0x7100)
+
+#define LDT_empty(info) (			\
+	(info)->base_addr	== 0	&&	\
+	(info)->limit		== 0	&&	\
+	(info)->contents	== 0	&&	\
+	(info)->read_exec_only	== 1	&&	\
+	(info)->seg_32bit	== 0	&&	\
+	(info)->limit_in_pages	== 0	&&	\
+	(info)->seg_not_present	== 1	&&	\
+	(info)->useable		== 0	)
+
+static inline void
+load_TLS (struct thread_struct *t, unsigned int cpu)
+{
+	extern unsigned long *cpu_gdt_table[NR_CPUS];
+
+	memcpy(cpu_gdt_table[cpu] + GDT_ENTRY_TLS_MIN + 0, &t->tls_array[0], sizeof(long));
+	memcpy(cpu_gdt_table[cpu] + GDT_ENTRY_TLS_MIN + 1, &t->tls_array[1], sizeof(long));
+	memcpy(cpu_gdt_table[cpu] + GDT_ENTRY_TLS_MIN + 2, &t->tls_array[2], sizeof(long));
+}
+
+struct ia32_user_desc {
 	unsigned int entry_number;
 	unsigned int base_addr;
 	unsigned int limit;
@@ -460,17 +483,33 @@ extern int ia32_setup_arg_pages (struct linux_binprm *bprm);
 extern unsigned long ia32_do_mmap (struct file *, unsigned long, unsigned long, int, int, loff_t);
 extern void ia32_load_segment_descriptors (struct task_struct *task);
 
-#define ia32f2ia64f(dst,src) \
-	do { \
-	register double f6 asm ("f6"); \
-	asm volatile ("ldfe f6=[%2];; stf.spill [%1]=f6" : "=f"(f6): "r"(dst), "r"(src) : "memory"); \
-	} while(0)
+#define ia32f2ia64f(dst,src)			\
+do {						\
+	ia64_ldfe(6,src);			\
+	ia64_stop();				\
+	ia64_stf_spill(dst, 6);			\
+} while(0)
 
-#define ia64f2ia32f(dst,src) \
-	do { \
-	register double f6 asm ("f6"); \
-	asm volatile ("ldf.fill f6=[%2];; stfe [%1]=f6" : "=f"(f6): "r"(dst),  "r"(src) : "memory"); \
-	} while(0)
+#define ia64f2ia32f(dst,src)			\
+do {						\
+	ia64_ldf_fill(6, src);			\
+	ia64_stop();				\
+	ia64_stfe(dst, 6);			\
+} while(0)
+
+struct user_regs_struct32 {
+	__u32 ebx, ecx, edx, esi, edi, ebp, eax;
+	unsigned short ds, __ds, es, __es;
+	unsigned short fs, __fs, gs, __gs;
+	__u32 orig_eax, eip;
+	unsigned short cs, __cs;
+	__u32 eflags, esp;
+	unsigned short ss, __ss;
+};
+
+/* Prototypes for use in elfcore32.h */
+extern int save_ia32_fpstate (struct task_struct *tsk, struct ia32_user_i387_struct *save);
+extern int save_ia32_fpxstate (struct task_struct *tsk, struct ia32_user_fxsr_struct *save);
 
 #endif /* !CONFIG_IA32_SUPPORT */
 

@@ -43,7 +43,6 @@ struct
  * BIOS32-style PCI interface:
  */
 
-#define DEBUG_MCHECK 0  /* 0 = minimum, 1 = debug, 2 = dump+dump */
 #define DEBUG_CONFIG 0
 
 #if DEBUG_CONFIG
@@ -123,7 +122,7 @@ mk_conf_addr(struct pci_bus *pbus, unsigned int device_fn, int where,
 		 "pci_addr=0x%p, type1=0x%p)\n",
 		 bus, device_fn, where, pci_addr, type1));
 
-        if (hose->first_busno == bus)
+	if (!pbus->parent) /* No parent means peer PCI bus. */
 		bus = 0;
         *type1 = (bus != 0);
 
@@ -535,7 +534,7 @@ titan_ioremap(unsigned long addr, unsigned long size)
 			}
 			pfn >>= 1;	/* make it a true pfn */
 			
-			if (__alpha_remap_area_pages(VMALLOC_VMADDR(vaddr), 
+			if (__alpha_remap_area_pages(vaddr,
 						     pfn << PAGE_SHIFT, 
 						     PAGE_SIZE, 0)) {
 				printk("FAILED to map...\n");
@@ -718,12 +717,12 @@ titan_agp_translate(alpha_agp_info *agp, dma_addr_t addr)
 
 struct alpha_agp_ops titan_agp_ops =
 {
-	setup:		titan_agp_setup,
-	cleanup:	titan_agp_cleanup,
-	configure:	titan_agp_configure,
-	bind:		titan_agp_bind_memory,
-	unbind:		titan_agp_unbind_memory,
-	translate:	titan_agp_translate
+	.setup		= titan_agp_setup,
+	.cleanup	= titan_agp_cleanup,
+	.configure	= titan_agp_configure,
+	.bind		= titan_agp_bind_memory,
+	.unbind		= titan_agp_unbind_memory,
+	.translate	= titan_agp_translate
 };
 
 alpha_agp_info *

@@ -55,7 +55,6 @@
 
 #include <linux/mm.h>
 #include <linux/proc_fs.h>
-#include <linux/smp_lock.h>
 #include <linux/quotaops.h>
 
 #include <asm/uaccess.h>
@@ -66,7 +65,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/namei.h>
-#include <linux/blk.h>
+#include <linux/genhd.h>
 
 #include "intermezzo_fs.h"
 #include "intermezzo_psdev.h"
@@ -290,7 +289,7 @@ int presto_settime(struct presto_file_set *fset,
 void izo_get_rollback_data(struct inode *inode, struct izo_rollback_data *rb)
 {
         rb->rb_mode = (__u32)inode->i_mode;
-        rb->rb_rdev = (__u32)kdev_t_to_nr(inode->i_rdev);
+        rb->rb_rdev = (__u32)old_encode_dev(inode->i_rdev);
         rb->rb_uid  = (__u64)inode->i_uid;
         rb->rb_gid  = (__u64)inode->i_gid;
 }
@@ -664,28 +663,6 @@ int presto_do_create(struct presto_file_set *fset, struct dentry *dir,
         return error;
 }
 
-/* from namei.c */
-static struct dentry *lookup_create(struct nameidata *nd, int is_dir)
-{
-        struct dentry *dentry;
-
-        down(&nd->dentry->d_inode->i_sem);
-        dentry = ERR_PTR(-EEXIST);
-        if (nd->last_type != LAST_NORM)
-                goto fail;
-        dentry = lookup_hash(&nd->last, nd->dentry);
-        if (IS_ERR(dentry))
-                goto fail;
-        if (!is_dir && nd->last.name[nd->last.len] && !dentry->d_inode)
-                goto enoent;
-        return dentry;
-enoent:
-        dput(dentry);
-        dentry = ERR_PTR(-ENOENT);
-fail:
-        return dentry;
-}
-
 int lento_create(const char *name, int mode, struct lento_vfs_context *info)
 {
         int error;
@@ -765,7 +742,7 @@ int presto_do_link(struct presto_file_set *fset, struct dentry *old_dentry,
                 goto exit_lock;
 
         error = -EXDEV;
-        if (dir->d_inode->i_sb->s_dev != inode->i_sb->s_dev)
+        if (dir->d_inode->i_sb != inode->i_sb)
                 goto exit_lock;
 
         /*
@@ -1822,7 +1799,7 @@ int presto_rename_dir(struct presto_file_set *fset, struct dentry *old_parent,
         if (error)
                 return error;
 
-        if (new_dir->i_sb->s_dev != old_dir->i_sb->s_dev)
+        if (new_dir->i_sb != old_dir->i_sb)
                 return -EXDEV;
 
         if (!new_dentry->d_inode)
@@ -1903,7 +1880,7 @@ int presto_rename_other(struct presto_file_set *fset, struct dentry *old_parent,
         if (error)
                 return error;
 
-        if (new_dir->i_sb->s_dev != old_dir->i_sb->s_dev)
+        if (new_dir->i_sb != old_dir->i_sb)
                 return -EXDEV;
 
         if (!new_dentry->d_inode)

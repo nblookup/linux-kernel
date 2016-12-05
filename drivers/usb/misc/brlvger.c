@@ -249,17 +249,20 @@ static struct usb_driver brlvger_driver =
 static int
 __init brlvger_init (void)
 {
+	int retval;
 	printk(BANNER);
 
 	if(stall_tries < 1 || write_repeats < 1)
 	  return -EINVAL;
 
-	if (usb_register(&brlvger_driver)) {
+	retval = usb_register(&brlvger_driver);
+	if (retval) {
 		err("USB registration failed");
-		return -ENOSYS;
+		goto out;
 	}
 
-	return 0;
+out:
+	return retval;
 }
 
 static void
@@ -289,7 +292,7 @@ brlvger_probe (struct usb_interface *intf,
 	   we reserve it.*/
 	static DECLARE_MUTEX(reserve_sem);
 
-	actifsettings = dev->actconfig->interface->altsetting;
+	actifsettings = dev->actconfig->interface[0]->altsetting;
 
 	if( dev->descriptor.bNumConfigurations != 1
 			|| dev->config->desc.bNumInterfaces != 1 
@@ -432,7 +435,7 @@ brlvger_disconnect(struct usb_interface *intf)
 static int
 brlvger_open(struct inode *inode, struct file *file)
 {
-	int devnum = minor (inode->i_rdev);
+	int devnum = iminor(inode);
 	struct usb_interface *intf = NULL;
 	struct brlvger_priv *priv = NULL;
 	int n, ret;
@@ -588,14 +591,14 @@ brlvger_write(struct file *file, const char __user *buffer,
 			int firstpart = 6 - off;
 			
 #ifdef WRITE_DEBUG
-			dbg3("off: %d, rs: %d, count: %d, firstpart: %d",
+			dbg3("off: %lld, rs: %d, count: %d, firstpart: %d",
 			     off, rs, count, firstpart);
 #endif
 
 			firstpart = (firstpart < count) ? firstpart : count;
 
 #ifdef WRITE_DEBUG
-			dbg3("off: %d", off);
+			dbg3("off: %lld", off);
 			dbg3("firstpart: %d", firstpart);
 #endif
 
@@ -615,7 +618,7 @@ brlvger_write(struct file *file, const char __user *buffer,
 			off +=2;
 
 #ifdef WRITE_DEBUG
-			dbg3("off: %d, rs: %d, count: %d, firstpart: %d, "
+			dbg3("off: %lld, rs: %d, count: %d, firstpart: %d, "
 				"written: %d", 	off, rs, count, firstpart, written);
 #endif
 		}
@@ -708,6 +711,7 @@ brlvger_ioctl(struct inode *inode, struct file *file,
 	case BRLVGER_GET_INFO: {
 		struct brlvger_info vi;
 
+		memset(&vi, 0, sizeof(vi));
 		strlcpy(vi.driver_version, DRIVER_VERSION,
 			sizeof(vi.driver_version));
 		strlcpy(vi.driver_banner, longbanner,

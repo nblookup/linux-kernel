@@ -12,6 +12,7 @@
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/jiffies.h>
@@ -26,7 +27,6 @@
 #include <linux/skbuff.h>
 #include <linux/rtnetlink.h>
 #include <linux/init.h>
-#include <linux/proc_fs.h>
 #include <net/sock.h>
 #include <net/pkt_sched.h>
 
@@ -195,3 +195,5 @@ void qdisc_kill_estimator(struct tc_stats *stats)
 	}
 }
 
+EXPORT_SYMBOL(qdisc_kill_estimator);
+EXPORT_SYMBOL(qdisc_new_estimator);

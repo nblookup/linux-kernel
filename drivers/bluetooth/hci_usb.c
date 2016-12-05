@@ -36,7 +36,6 @@
 #include <linux/config.h>
 #include <linux/module.h>
 
-#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/sched.h>
@@ -303,7 +302,8 @@ static int hci_usb_open(struct hci_dev *hdev)
 			hci_usb_bulk_rx_submit(husb);
 
 #ifdef CONFIG_BT_USB_SCO
-		hci_usb_isoc_rx_submit(husb);
+		if (husb->isoc_iface)
+			hci_usb_isoc_rx_submit(husb);
 #endif
 	} else {
 		clear_bit(HCI_RUNNING, &hdev->flags);
@@ -783,7 +783,7 @@ int hci_usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 
 	BT_DBG("udev %p ifnum %d", udev, ifnum);
 
-	iface = &udev->actconfig->interface[0];
+	iface = udev->actconfig->interface[0];
 
 	/* Check our black list */
 	if (usb_match_id(intf, ignore_ids))
@@ -807,7 +807,7 @@ int hci_usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 
 	ifn = min_t(unsigned int, udev->actconfig->desc.bNumInterfaces, HCI_MAX_IFACE_NUM);
 	for (i = 0; i < ifn; i++) {
-		iface = &udev->actconfig->interface[i];
+		iface = udev->actconfig->interface[i];
 		for (a = 0; a < iface->num_altsetting; a++) {
 			uif = &iface->altsetting[a];
 			for (e = 0; e < uif->desc.bNumEndpoints; e++) {

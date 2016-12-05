@@ -173,7 +173,7 @@ static int tvmixer_ioctl(struct inode *inode, struct file *file, unsigned int cm
 
 static int tvmixer_open(struct inode *inode, struct file *file)
 {
-        int i, minor = minor(inode->i_rdev);
+        int i, minor = iminor(inode);
         struct TVMIXER *mix = NULL;
 	struct i2c_client *client = NULL;
 
@@ -291,7 +291,7 @@ static int tvmixer_clients(struct i2c_client *client)
 	devices[i].count = 0;
 	devices[i].dev   = client;
 	printk("tvmixer: %s (%s) registered with minor %d\n",
-	       client->dev.name,client->adapter->dev.name,minor);
+	       client->name,client->adapter->name,minor);
 	
 	return 0;
 }

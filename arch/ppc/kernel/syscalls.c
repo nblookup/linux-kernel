@@ -1,7 +1,7 @@
 /*
  * arch/ppc/kernel/sys_ppc.c
  *
- *  PowerPC version 
+ *  PowerPC version
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
  *
  * Derived from "arch/i386/kernel/sys_i386.c"
@@ -20,7 +20,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -59,10 +58,15 @@ sys_ipc (uint call, int first, int second, int third, void __user *ptr, long fif
 	version = call >> 16; /* hack for backward compatibility */
 	call &= 0xffff;
 
-	ret = -EINVAL;
+	ret = -ENOSYS;
 	switch (call) {
 	case SEMOP:
-		ret = sys_semop (first, (struct sembuf __user *)ptr, second);
+		ret = sys_semtimedop (first, (struct sembuf __user *)ptr,
+				      second, NULL);
+		break;
+	case SEMTIMEDOP:
+		ret = sys_semtimedop (first, (struct sembuf __user *)ptr,
+				      second, (const struct timespec *) fifth);
 		break;
 	case SEMGET:
 		ret = sys_semget (first, second, third);
@@ -121,7 +125,7 @@ sys_ipc (uint call, int first, int second, int third, void __user *ptr, long fif
 		ret = put_user (raddr, (ulong __user *) third);
 		break;
 		}
-	case SHMDT: 
+	case SHMDT:
 		ret = sys_shmdt ((char __user *)ptr);
 		break;
 	case SHMGET:
@@ -165,7 +169,7 @@ do_mmap2(unsigned long addr, size_t len,
 		if (!(file = fget(fd)))
 			goto out;
 	}
-	
+
 	down_write(&current->mm->mmap_sem);
 	ret = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
 	up_write(&current->mm->mmap_sem);
@@ -240,7 +244,7 @@ int sys_olduname(struct oldold_utsname __user * name)
 		return -EFAULT;
 	if (!access_ok(VERIFY_WRITE,name,sizeof(struct oldold_utsname)))
 		return -EFAULT;
-  
+
 	down_read(&uts_sem);
 	error = __copy_to_user(&name->sysname,&system_utsname.sysname,__OLD_UTS_LEN);
 	error -= __put_user(0,name->sysname+__OLD_UTS_LEN);
@@ -258,6 +262,14 @@ int sys_olduname(struct oldold_utsname __user * name)
 	return error;
 }
 
-cond_syscall(sys_pciconfig_read);
-cond_syscall(sys_pciconfig_write);
+/*
+ * We put the arguments in a different order so we only use 6
+ * registers for arguments, rather than 7 as sys_fadvise64_64 needs
+ * (because `offset' goes in r5/r6).
+ */
+long ppc_fadvise64_64(int fd, int advice, loff_t offset, loff_t len)
+{
+	return sys_fadvise64_64(fd, offset, len, advice);
+}
+
 cond_syscall(sys_pciconfig_iobase);

@@ -222,7 +222,7 @@ _GLOBAL(low_choose_750fx_pll)
 	mtspr	HID0,r5
 	isync
 	sync
-	
+
 1:
 	/* Calc new HID1 value */
 	mfspr	r4,SPRN_HID1	/* Build a HID1:PS bit from parameter */
@@ -247,9 +247,9 @@ _GLOBAL(low_choose_750fx_pll)
 	mtspr	HID0,r5
 	isync
 	sync
-	
-1:	
-	/* Return */		
+
+1:
+	/* Return */
 	mtmsr	r7
 	blr
 
@@ -260,7 +260,7 @@ _GLOBAL(local_save_flags_ptr)
 	mfmsr	r4
 	stw	r4,0(r3)
 	blr
-	/* 
+	/*
 	 * Need these nops here for taking over save/restore to
 	 * handle lost intrs
 	 * -- Cort
@@ -284,7 +284,7 @@ _GLOBAL(local_save_flags_ptr)
 	nop
 _GLOBAL(local_save_flags_ptr_end)
 
-/* void local_irq_restore(unsigned long flags) */	
+/* void local_irq_restore(unsigned long flags) */
 _GLOBAL(local_irq_restore)
 /*
  * Just set/clear the MSR_EE bit through restore/flags but do not
@@ -332,7 +332,7 @@ _GLOBAL(local_irq_disable)
 	SYNC			/* Some chip revs have problems here... */
 	mtmsr	r0		/* Update machine state */
 	blr			/* Done */
-	/* 
+	/*
 	 * Need these nops here for taking over save/restore to
 	 * handle lost intrs
 	 * -- Cort
@@ -360,7 +360,7 @@ _GLOBAL(local_irq_enable)
 	SYNC			/* Some chip revs have problems here... */
 	mtmsr	r3		/* Update machine state */
 	blr
-	/* 
+	/*
 	 * Need these nops here for taking over save/restore to
 	 * handle lost intrs
 	 * -- Cort
@@ -405,16 +405,20 @@ _GLOBAL(_tlbia)
 	sync			/* Flush to memory before changing mapping */
 	tlbia
 	isync			/* Flush shadow TLB */
-#elif defined(CONFIG_440)
+#elif defined(CONFIG_44x)
 	lis	r3,0
 	sync
 1:
-	tlbwe	r3,r3,PPC440_TLB_PAGEID
+	tlbwe	r3,r3,PPC44x_TLB_PAGEID
 	addi	r3,r3,1
-	cmpwi	0,r3,61
+	/* Load high watermark */
+	lis	r4,tlb_44x_hwater@h
+	ori	r4,r4,tlb_44x_hwater@l
+	lwz	r5,0(r4)
+	cmpw	0,r3,r5
 	ble	1b
 	isync
-#else /* !(CONFIG_40x || CONFIG_440) */
+#else /* !(CONFIG_40x || CONFIG_44x) */
 #if defined(CONFIG_SMP)
 	rlwinm	r8,r1,0,0,18
 	lwz	r8,TI_CPU(r8)
@@ -449,7 +453,7 @@ _GLOBAL(_tlbia)
 	sync
 #endif /* CONFIG_SMP */
 #endif /* ! defined(CONFIG_40x) */
-	blr	
+	blr
 
 /*
  * Flush MMU TLB for a particular address
@@ -465,17 +469,17 @@ _GLOBAL(_tlbie)
 	tlbwe	r3, r3, TLB_TAG
 	isync
 10:
-#elif defined(CONFIG_440)
+#elif defined(CONFIG_44x)
 	mfspr	r4,SPRN_MMUCR			/* Get MMUCR */
-	lis	r5,PPC440_MMUCR_STS@h
-	ori	r5,r5,PPC440_MMUCR_TID@l	/* Create mask */
+	lis	r5,PPC44x_MMUCR_STS@h
+	ori	r5,r5,PPC44x_MMUCR_TID@l	/* Create mask */
 	andc	r4,r4,r5			/* Clear out TID/STS bits */
 	mfspr	r5,SPRN_PID			/* Get PID */
 	or	r4,r4,r5			/* Set TID bits */
 	mfmsr	r6				/* Get MSR */
 	andi.	r6,r6,MSR_IS@l			/* TS=1? */
 	beq	11f				/* If not, leave STS=0 */
-	oris	r4,r4,PPC440_MMUCR_STS@h	/* Set STS=1 */
+	oris	r4,r4,PPC44x_MMUCR_STS@h	/* Set STS=1 */
 11:	mtspr	SPRN_MMUCR, r4			/* Put MMUCR */
 
 	tlbsx.	r3, 0, r3
@@ -486,10 +490,10 @@ _GLOBAL(_tlbie)
 	 * the V bit in the TLB_PAGEID, loading this
 	 * value will invalidate the TLB entry.
 	 */
-	tlbwe	r3, r3, PPC440_TLB_PAGEID
+	tlbwe	r3, r3, PPC44x_TLB_PAGEID
 	isync
 10:
-#else /* !(CONFIG_40x || CONFIG_440) */
+#else /* !(CONFIG_40x || CONFIG_44x) */
 #if defined(CONFIG_SMP)
 	rlwinm	r8,r1,0,0,18
 	lwz	r8,TI_CPU(r8)
@@ -539,7 +543,7 @@ _GLOBAL(flush_instruction_cache)
 	li      r3, 512
 	mtctr   r3
 	lis     r4, KERNELBASE@h
-1:	iccci   0, r4 
+1:	iccci   0, r4
 	addi    r4, r4, 16
 	bdnz    1b
 #else
@@ -658,9 +662,9 @@ _GLOBAL(invalidate_dcache_range)
 #ifdef CONFIG_NOT_COHERENT_CACHE
 /*
  * 40x cores have 8K or 16K dcache and 32 byte line size.
- * 440 has a 32K dcache and 32 byte line size.
+ * 44x has a 32K dcache and 32 byte line size.
  * 8xx has 1, 2, 4, 8K variants.
- * For now, cover the worst case of the 440.
+ * For now, cover the worst case of the 44x.
  * Must be called with external interrupts disabled.
  */
 #define CACHE_NWAYS	64
@@ -738,7 +742,7 @@ _GLOBAL(__flush_dcache_icache_phys)
 	mtmsr	r10				/* restore DR */
 	isync
 	blr
-	
+
 /*
  * Clear a page using the dcbz instruction, which doesn't cause any
  * memory traffic (except to write out any cache lines which get
@@ -874,7 +878,7 @@ _GLOBAL(_outsb)
 	stb	r5,0(r3)
 	eieio
 	bdnz	00b
-	blr	
+	blr
 
 _GLOBAL(_insw)
 	cmpwi	0,r5,0
@@ -894,9 +898,9 @@ _GLOBAL(_outsw)
 	blelr-
 00:	lhzu	r5,2(r4)
 	eieio
-	sthbrx	r5,0,r3	
+	sthbrx	r5,0,r3
 	bdnz	00b
-	blr	
+	blr
 
 _GLOBAL(_insl)
 	cmpwi	0,r5,0
@@ -918,7 +922,7 @@ _GLOBAL(_outsl)
 	stwbrx	r5,0,r3
 	eieio
 	bdnz	00b
-	blr	
+	blr
 
 _GLOBAL(__ide_mm_insw)
 _GLOBAL(_insw_ns)
@@ -942,7 +946,7 @@ _GLOBAL(_outsw_ns)
 	sth	r5,0(r3)
 	eieio
 	bdnz	00b
-	blr	
+	blr
 
 _GLOBAL(__ide_mm_insl)
 _GLOBAL(_insl_ns)
@@ -966,11 +970,11 @@ _GLOBAL(_outsl_ns)
 	stw	r5,0(r3)
 	eieio
 	bdnz	00b
-	blr	
+	blr
 
 /*
  * Extended precision shifts.
- * 
+ *
  * Updated to be valid for shift counts from 0 to 63 inclusive.
  * -- Gabriel
  *
@@ -978,12 +982,12 @@ _GLOBAL(_outsl_ns)
  * R5    has shift count
  * result in R3/R4
  *
- *  ashrdi3: arithmetic right shift (sign propagation)	    
- *  lshrdi3: logical right shift	
+ *  ashrdi3: arithmetic right shift (sign propagation)	
+ *  lshrdi3: logical right shift
  *  ashldi3: left shift
  */
 _GLOBAL(__ashrdi3)
-	subfic	r6,r5,32	
+	subfic	r6,r5,32
 	srw	r4,r4,r5	# LSW = count > 31 ? 0 : LSW >> count
 	addi	r7,r5,32	# could be xori, or addi with -32
 	slw	r6,r3,r6	# t1 = count > 31 ? 0 : MSW << (32-count)
@@ -996,7 +1000,7 @@ _GLOBAL(__ashrdi3)
 	blr
 
 _GLOBAL(__ashldi3)
-	subfic	r6,r5,32	
+	subfic	r6,r5,32
 	slw	r3,r3,r5	# MSW = count > 31 ? 0 : MSW << count
 	addi	r7,r5,32	# could be xori, or addi with -32
 	srw	r6,r4,r6	# t1 = count > 31 ? 0 : LSW >> (32-count)
@@ -1007,14 +1011,14 @@ _GLOBAL(__ashldi3)
 	blr
 
 _GLOBAL(__lshrdi3)
-	subfic	r6,r5,32	
+	subfic	r6,r5,32
 	srw	r4,r4,r5	# LSW = count > 31 ? 0 : LSW >> count
 	addi	r7,r5,32	# could be xori, or addi with -32
 	slw	r6,r3,r6	# t1 = count > 31 ? 0 : MSW << (32-count)
 	srw	r7,r3,r7	# t2 = count < 32 ? 0 : MSW >> (count-32)
 	or	r4,r4,r6	# LSW |= t1
 	srw	r3,r3,r5	# MSW = MSW >> count
-	or	r4,r4,r7	# LSW |= t2 
+	or	r4,r4,r7	# LSW |= t2
 	blr
 
 _GLOBAL(abs)
@@ -1026,7 +1030,7 @@ _GLOBAL(abs)
 _GLOBAL(_get_SP)
 	mr	r3,r1		/* Close enough */
 	blr
-	
+
 /*
  * These are used in the alignment trap handler when emulating
  * single-precision loads and stores.
@@ -1096,7 +1100,7 @@ _GLOBAL(kernel_thread)
 
 /*
  * This routine is just here to keep GCC happy - sigh...
- */	
+ */
 _GLOBAL(__main)
 	blr
 
@@ -1122,7 +1126,7 @@ SYSCALL(dup)
 SYSCALL(execve)
 SYSCALL(waitpid)
 
-/* Why isn't this a) automatic, b) written in 'C'? */	
+/* Why isn't this a) automatic, b) written in 'C'? */
 	.data
 	.align 4
 _GLOBAL(sys_call_table)
@@ -1300,7 +1304,7 @@ _GLOBAL(sys_call_table)
 	.long sys_prctl
 	.long sys_rt_sigreturn
 	.long sys_rt_sigaction
-	.long sys_rt_sigprocmask	
+	.long sys_rt_sigprocmask
 	.long sys_rt_sigpending	/* 175 */
 	.long sys_rt_sigtimedwait
 	.long sys_rt_sigqueueinfo
@@ -1318,14 +1322,14 @@ _GLOBAL(sys_call_table)
 	.long ppc_vfork
 	.long sys_getrlimit	/* 190 */
 	.long sys_readahead
-	.long sys_mmap2	
+	.long sys_mmap2
 	.long sys_truncate64
 	.long sys_ftruncate64
 	.long sys_stat64	/* 195 */
 	.long sys_lstat64
 	.long sys_fstat64
 	.long sys_pciconfig_read
-	.long sys_pciconfig_write 
+	.long sys_pciconfig_write
 	.long sys_pciconfig_iobase 	/* 200 */
 	.long sys_ni_syscall		/* 201 - reserved - MacOnLinux - new */
 	.long sys_getdents64
@@ -1375,3 +1379,9 @@ _GLOBAL(sys_call_table)
 	.long sys_clock_gettime
 	.long sys_clock_getres
 	.long sys_clock_nanosleep
+	.long sys_swapcontext
+	.long sys_tgkill	/* 250 */
+	.long sys_utimes
+	.long sys_statfs64
+	.long sys_fstatfs64
+	.long ppc_fadvise64_64

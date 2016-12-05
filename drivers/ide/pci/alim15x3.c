@@ -37,7 +37,6 @@
 
 #include <asm/io.h>
 
-#include "ide_modes.h"
 #include "alim15x3.h"
 
 /*
@@ -635,23 +634,25 @@ static unsigned int __init init_chipset_ali15x3 (struct pci_dev *dev, const char
 	        return 0;
 	}
 
-	/*
-	 * set south-bridge's enable bit, m1533, 0x79
-	 */
+	if (m5229_revision < 0xC5 && isa_dev)
+	{	
+		/*
+		 * set south-bridge's enable bit, m1533, 0x79
+		 */
 
-	pci_read_config_byte(isa_dev, 0x79, &tmpbyte);
-	if (m5229_revision == 0xC2) {
-		/*
-		 * 1543C-B0 (m1533, 0x79, bit 2)
-		 */
-		pci_write_config_byte(isa_dev, 0x79, tmpbyte | 0x04);
-	} else if (m5229_revision >= 0xC3) {
-		/*
-		 * 1553/1535 (m1533, 0x79, bit 1)
-		 */
-		pci_write_config_byte(isa_dev, 0x79, tmpbyte | 0x02);
+		pci_read_config_byte(isa_dev, 0x79, &tmpbyte);
+		if (m5229_revision == 0xC2) {
+			/*
+			 * 1543C-B0 (m1533, 0x79, bit 2)
+			 */
+			pci_write_config_byte(isa_dev, 0x79, tmpbyte | 0x04);
+		} else if (m5229_revision >= 0xC3) {
+			/*
+			 * 1553/1535 (m1533, 0x79, bit 1)
+			 */
+			pci_write_config_byte(isa_dev, 0x79, tmpbyte | 0x02);
+		}
 	}
-
 	local_irq_restore(flags);
 	return 0;
 }
@@ -745,7 +746,7 @@ static void __init init_hwif_common_ali15x3 (ide_hwif_t *hwif)
 	hwif->speedproc = &ali15x3_tune_chipset;
 
 	/* Don't use LBA48 on ALi devices before rev 0xC5 */
-	hwif->addressing = (m5229_revision <= 0xC4) ? 1 : 0;
+	hwif->no_lba48 = (m5229_revision <= 0xC4) ? 1 : 0;
 
 	if (!hwif->dma_base) {
 		hwif->drives[0].autotune = 1;
@@ -860,7 +861,7 @@ static int __devinit alim15x3_init_one(struct pci_dev *dev, const struct pci_dev
 {
 	ide_pci_device_t *d = &ali15x3_chipsets[id->driver_data];
 	
-	if(pci_find_device(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RADEON_IGP, NULL))
+	if(pci_find_device(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RS100, NULL))
 		printk(KERN_ERR "Warning: ATI Radeon IGP Northbridge is not yet fully tested.\n");
 
 #if defined(CONFIG_SPARC64)
@@ -872,7 +873,7 @@ static int __devinit alim15x3_init_one(struct pci_dev *dev, const struct pci_dev
 }
 
 
-static struct pci_device_id alim15x3_pci_tbl[] __devinitdata = {
+static struct pci_device_id alim15x3_pci_tbl[] = {
 	{ PCI_VENDOR_ID_AL, PCI_DEVICE_ID_AL_M5229, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ 0, },
 };

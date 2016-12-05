@@ -39,6 +39,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -225,7 +226,7 @@ void __kfree_skb(struct sk_buff *skb)
 	}
 
 	dst_release(skb->dst);
-#ifdef CONFIG_INET
+#ifdef CONFIG_XFRM
 	secpath_put(skb->sp);
 #endif
 	if(skb->destructor) {
@@ -236,7 +237,7 @@ void __kfree_skb(struct sk_buff *skb)
 	}
 #ifdef CONFIG_NETFILTER
 	nf_conntrack_put(skb->nfct);
-#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+#ifdef CONFIG_BRIDGE_NETFILTER
 	nf_bridge_put(skb->nf_bridge);
 #endif
 #endif
@@ -301,7 +302,7 @@ struct sk_buff *skb_clone(struct sk_buff *skb, int gfp_mask)
 #ifdef CONFIG_NETFILTER_DEBUG
 	C(nf_debug);
 #endif
-#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+#ifdef CONFIG_BRIDGE_NETFILTER
 	C(nf_bridge);
 	nf_bridge_get(skb->nf_bridge);
 #endif
@@ -359,7 +360,7 @@ static void copy_skb_header(struct sk_buff *new, const struct sk_buff *old)
 #ifdef CONFIG_NETFILTER_DEBUG
 	new->nf_debug	= old->nf_debug;
 #endif
-#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+#ifdef CONFIG_BRIDGE_NETFILTER
 	new->nf_bridge	= old->nf_bridge;
 	nf_bridge_get(old->nf_bridge);
 #endif
@@ -582,6 +583,8 @@ struct sk_buff *skb_copy_expand(const struct sk_buff *skb,
 	 */
 	struct sk_buff *n = alloc_skb(newheadroom + skb->len + newtailroom,
 				      gfp_mask);
+	int head_copy_len, head_copy_off;
+
 	if (!n)
 		return NULL;
 
@@ -590,8 +593,16 @@ struct sk_buff *skb_copy_expand(const struct sk_buff *skb,
 	/* Set the tail pointer and length */
 	skb_put(n, skb->len);
 
-	/* Copy the data only. */
-	if (skb_copy_bits(skb, 0, n->data, skb->len))
+	head_copy_len = skb_headroom(skb);
+	head_copy_off = 0;
+	if (newheadroom <= head_copy_len)
+		head_copy_len = newheadroom;
+	else
+		head_copy_off = newheadroom - head_copy_len;
+
+	/* Copy the linear header and data. */
+	if (skb_copy_bits(skb, -head_copy_len, n->head + head_copy_off,
+			  skb->len + head_copy_len))
 		BUG();
 
 	copy_skb_header(n, skb);
@@ -1103,3 +1114,22 @@ void __init skb_init(void)
 	if (!skbuff_head_cache)
 		panic("cannot create skbuff cache");
 }
+
+EXPORT_SYMBOL(___pskb_trim);
+EXPORT_SYMBOL(__kfree_skb);
+EXPORT_SYMBOL(__pskb_pull_tail);
+EXPORT_SYMBOL(alloc_skb);
+EXPORT_SYMBOL(pskb_copy);
+EXPORT_SYMBOL(pskb_expand_head);
+EXPORT_SYMBOL(skb_checksum);
+EXPORT_SYMBOL(skb_clone);
+EXPORT_SYMBOL(skb_clone_fraglist);
+EXPORT_SYMBOL(skb_copy);
+EXPORT_SYMBOL(skb_copy_and_csum_bits);
+EXPORT_SYMBOL(skb_copy_and_csum_dev);
+EXPORT_SYMBOL(skb_copy_bits);
+EXPORT_SYMBOL(skb_copy_expand);
+EXPORT_SYMBOL(skb_over_panic);
+EXPORT_SYMBOL(skb_pad);
+EXPORT_SYMBOL(skb_realloc_headroom);
+EXPORT_SYMBOL(skb_under_panic);

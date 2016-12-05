@@ -36,8 +36,9 @@
 #include <linux/mtio.h>
 #include <linux/cdrom.h>
 #include <linux/loop.h>
-#include <linux/auto_fs.h>
+#include <linux/auto_fs4.h>
 #include <linux/devfs_fs.h>
+#include <linux/ncp_fs.h>
 #include <linux/tty.h>
 #include <linux/vt_kern.h>
 #include <linux/fb.h>
@@ -47,7 +48,6 @@
 #include <linux/raw.h>
 #include <linux/smb_fs.h>
 #include <linux/blkpg.h>
-#include <linux/blk.h>
 #include <linux/elevator.h>
 #include <linux/rtc.h>
 #include <linux/pci.h>
@@ -1426,7 +1426,7 @@ static int vt_check(struct file *file)
 		return -EINVAL;
 	                
 	tty = (struct tty_struct *)file->private_data;
-	if (tty_paranoia_check(tty, inode->i_rdev, "tty_ioctl"))
+	if (tty_paranoia_check(tty, inode, "tty_ioctl"))
 		return -EINVAL;
 	                                                
 	if (tty->driver->ioctl != vt_ioctl)
@@ -2458,7 +2458,7 @@ int siocdevprivate_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 #define COMPATIBLE_IOCTL(cmd) HANDLE_IOCTL(cmd, sys_ioctl) 
 
 #define IOCTL_TABLE_START  struct ioctl_trans ioctl_start[] = {
-#define IOCTL_TABLE_END    }; struct ioctl_trans ioctl_end[0];
+#define IOCTL_TABLE_END    };
 
 IOCTL_TABLE_START
 #include <linux/compat_ioctl.h>
@@ -2631,3 +2631,4 @@ HANDLE_IOCTL(DRM32_IOCTL_RES_CTX, drm32_res_ctx);
 #endif /* DRM */
 IOCTL_TABLE_END
 
+int ioctl_table_size = ARRAY_SIZE(ioctl_start);

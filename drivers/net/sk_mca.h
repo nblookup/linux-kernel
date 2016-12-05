@@ -1,3 +1,5 @@
+#include <linux/version.h>
+
 #ifndef _SK_MCA_INCLUDE_
 #define _SK_MCA_INCLUDE_
 
@@ -5,7 +7,6 @@
 
 /* version-dependent functions/structures */
 
-#if LINUX_VERSION_CODE >= 0x020318
 #define SKMCA_READB(addr) isa_readb(addr)
 #define SKMCA_READW(addr) isa_readw(addr)
 #define SKMCA_WRITEB(data, addr) isa_writeb(data, addr)
@@ -13,17 +14,6 @@
 #define SKMCA_TOIO(dest, src, len) isa_memcpy_toio(dest, src, len)
 #define SKMCA_FROMIO(dest, src, len) isa_memcpy_fromio(dest, src, len)
 #define SKMCA_SETIO(dest, val, len) isa_memset_io(dest, val, len)
-#define SKMCA_NETDEV net_device
-#else
-#define SKMCA_READB(addr) readb(addr)
-#define SKMCA_READW(addr) readw(addr)
-#define SKMCA_WRITEB(data, addr) writeb(data, addr)
-#define SKMCA_WRITEW(data, addr) writew(data, addr)
-#define SKMCA_TOIO(dest, src, len) memcpy_toio(dest, src, len)
-#define SKMCA_FROMIO(dest, src, len) memcpy_fromio(dest, src, len)
-#define SKMCA_SETIO(dest, val, len) memset_io(dest, val, len)
-#define SKMCA_NETDEV device
-#endif
 
 /* Adapter ID's */
 #define SKNET_MCA_ID 0x6afd
@@ -53,6 +43,7 @@ typedef struct {
 	int realirq;		/* memorizes actual IRQ, even when 
 				   currently not allocated          */
 	skmca_medium medium;	/* physical cannector               */
+	spinlock_t lock;
 } skmca_priv;
 
 /* card registers: control/status register bits */
@@ -187,7 +178,7 @@ typedef struct {		/* LANCE Rx descriptor               */
 
 #endif				/* _SK_MCA_DRIVER_ */
 
-extern int skmca_probe(struct SKMCA_NETDEV *);
+extern int skmca_probe(struct net_device *);
 
 
 #endif	/* _SK_MCA_INCLUDE_ */

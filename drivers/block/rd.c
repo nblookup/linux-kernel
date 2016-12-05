@@ -67,7 +67,7 @@
 
 static struct gendisk *rd_disks[NUM_RAMDISKS];
 static struct block_device *rd_bdev[NUM_RAMDISKS];/* Protected device data */
-static struct request_queue *rd_queue;
+static struct request_queue *rd_queue[NUM_RAMDISKS];
 
 /*
  * Parameters for the boot-loading of the RAM disk.  These are set by
@@ -245,6 +245,7 @@ fail:
 static int rd_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
 {
 	int error;
+	struct block_device *bdev = inode->i_bdev;
 
 	if (cmd != BLKFLSBUF)
 		return -EINVAL;
@@ -253,12 +254,12 @@ static int rd_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 	   it's not like with the other blockdevices where
 	   this ioctl only flushes away the buffer cache. */
 	error = -EBUSY;
-	down(&inode->i_bdev->bd_sem);
-	if (inode->i_bdev->bd_openers <= 2) {
-		truncate_inode_pages(inode->i_mapping, 0);
+	down(&bdev->bd_sem);
+	if (bdev->bd_openers <= 2) {
+		truncate_inode_pages(bdev->bd_inode->i_mapping, 0);
 		error = 0;
 	}
-	up(&inode->i_bdev->bd_sem);
+	up(&bdev->bd_sem);
 	return error;
 }
 
@@ -269,18 +270,18 @@ static struct backing_dev_info rd_backing_dev_info = {
 
 static int rd_open(struct inode * inode, struct file * filp)
 {
-	unsigned unit = minor(inode->i_rdev);
+	unsigned unit = iminor(inode);
 
 	/*
 	 * Immunize device against invalidate_buffers() and prune_icache().
 	 */
 	if (rd_bdev[unit] == NULL) {
 		struct block_device *bdev = inode->i_bdev;
-		atomic_inc(&bdev->bd_count);
+		inode = igrab(bdev->bd_inode);
 		rd_bdev[unit] = bdev;
 		bdev->bd_openers++;
 		bdev->bd_block_size = rd_blocksize;
-		bdev->bd_inode->i_size = get_capacity(rd_disks[unit])<<9;
+		inode->i_size = get_capacity(rd_disks[unit])<<9;
 		inode->i_mapping->a_ops = &ramdisk_aops;
 		inode->i_mapping->backing_dev_info = &rd_backing_dev_info;
 	}
@@ -309,7 +310,6 @@ static void __exit rd_cleanup (void)
 		del_gendisk(rd_disks[i]);
 		put_disk(rd_disks[i]);
 	}
-	kfree(rd_queue);
 	devfs_remove("rd");
 	unregister_blkdev(RAMDISK_MAJOR, "ramdisk" );
 }
@@ -333,14 +333,9 @@ static int __init rd_init (void)
 			goto out;
 	}
 
-	rd_queue = kmalloc(NUM_RAMDISKS * sizeof(struct request_queue),
-			     GFP_KERNEL);
-	if (!rd_queue)
-		goto out;
-	memset(rd_queue, 0, NUM_RAMDISKS * sizeof(struct request_queue));
 	if (register_blkdev(RAMDISK_MAJOR, "ramdisk")) {
 		err = -EIO;
-		goto out_queue;
+		goto out;
 	}
 
 	devfs_mk_dir("rd");
@@ -348,13 +343,17 @@ static int __init rd_init (void)
 	for (i = 0; i < NUM_RAMDISKS; i++) {
 		struct gendisk *disk = rd_disks[i];
 
-		blk_queue_make_request(&rd_queue[i], &rd_make_request);
+		rd_queue[i] = blk_alloc_queue(GFP_KERNEL);
+		if (!rd_queue[i])
+			goto out_queue;
+
+		blk_queue_make_request(rd_queue[i], &rd_make_request);
 
 		/* rd_size is given in kB */
 		disk->major = RAMDISK_MAJOR;
 		disk->first_minor = i;
 		disk->fops = &rd_bd_op;
-		disk->queue = &rd_queue[i];
+		disk->queue = rd_queue[i];
 		sprintf(disk->disk_name, "ram%d", i);
 		sprintf(disk->devfs_name, "rd/%d", i);
 		set_capacity(disk, rd_size * 2);
@@ -368,7 +367,7 @@ static int __init rd_init (void)
 
 	return 0;
 out_queue:
-	kfree(rd_queue);
+	unregister_blkdev(RAMDISK_MAJOR, "ramdisk");
 out:
 	while (i--)
 		put_disk(rd_disks[i]);

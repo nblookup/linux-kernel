@@ -6,6 +6,7 @@
  *  and Cort Dougan (PReP) (cort@cs.nmt.edu)
  *    Copyright (C) 1996 Paul Mackerras
  *  Amiga/APUS changes by Jesper Skov (jskov@cygnus.co.uk).
+ *  PPC44x/36-bit changes by Matt Porter (mporter@mvista.com)
  *
  *  Derived from "arch/i386/mm/init.c"
  *    Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
@@ -18,6 +19,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -79,6 +81,9 @@ extern char __openfirmware_begin, __openfirmware_end;
 #ifdef CONFIG_HIGHMEM
 pte_t *kmap_pte;
 pgprot_t kmap_prot;
+
+EXPORT_SYMBOL(kmap_prot);
+EXPORT_SYMBOL(kmap_pte);
 #endif
 
 void MMU_init(void);
@@ -536,14 +541,14 @@ set_phys_avail(unsigned long total_memory)
 	 * memory as high as possible (it must be outside of the
 	 * bus address seen as the AGP aperture). It will be used
 	 * by the r128 DRM driver
-	 * 
+	 *
 	 * FIXME: We need to make sure that page doesn't overlap any of the\
 	 * above. This could be done by improving mem_pieces_find to be able
 	 * to do a backward search from the end of the list.
 	 */
 	if (_machine == _MACH_Pmac && find_devices("uni-north-agp")) {
 		agp_special_page = (total_memory - PAGE_SIZE);
-		mem_pieces_remove(&phys_avail, agp_special_page, PAGE_SIZE, 0);	
+		mem_pieces_remove(&phys_avail, agp_special_page, PAGE_SIZE, 0);
 		agp_special_page = (unsigned long)__va(agp_special_page);
 	}
 #endif /* CONFIG_PPC_PMAC */

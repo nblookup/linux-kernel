@@ -20,14 +20,24 @@ static int ebt_target_redirect(struct sk_buff **pskb, unsigned int hooknr,
 {
 	struct ebt_redirect_info *info = (struct ebt_redirect_info *)data;
 
+	if (skb_shared(*pskb) || skb_cloned(*pskb)) {
+		struct sk_buff *nskb;
+
+		nskb = skb_copy(*pskb, GFP_ATOMIC);
+		if (!nskb)
+			return NF_DROP;
+		if ((*pskb)->sk)
+			skb_set_owner_w(nskb, (*pskb)->sk);
+		kfree_skb(*pskb);
+		*pskb = nskb;
+	}
 	if (hooknr != NF_BR_BROUTING)
 		memcpy((**pskb).mac.ethernet->h_dest,
 		   in->br_port->br->dev->dev_addr, ETH_ALEN);
-	else {
+	else
 		memcpy((**pskb).mac.ethernet->h_dest,
 		   in->dev_addr, ETH_ALEN);
-		(*pskb)->pkt_type = PACKET_HOST;
-	}
+	(*pskb)->pkt_type = PACKET_HOST;
 	return info->target;
 }
 
@@ -36,7 +46,7 @@ static int ebt_target_redirect_check(const char *tablename, unsigned int hookmas
 {
 	struct ebt_redirect_info *info = (struct ebt_redirect_info *)data;
 
-	if (datalen != sizeof(struct ebt_redirect_info))
+	if (datalen != EBT_ALIGN(sizeof(struct ebt_redirect_info)))
 		return -EINVAL;
 	if (BASE_CHAIN && info->target == EBT_RETURN)
 		return -EINVAL;

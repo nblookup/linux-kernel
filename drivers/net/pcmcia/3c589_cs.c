@@ -148,7 +148,7 @@ DRV_NAME ".c " DRV_VERSION " 2001/10/13 00:08:50 (David Hinds)";
 /*====================================================================*/
 
 static void tc589_config(dev_link_t *link);
-static void tc589_release(unsigned long arg);
+static void tc589_release(dev_link_t *link);
 static int tc589_event(event_t event, int priority,
 		       event_callback_args_t *args);
 
@@ -165,7 +165,7 @@ static int el3_rx(struct net_device *dev);
 static int el3_close(struct net_device *dev);
 static void el3_tx_timeout(struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
-static int netdev_ioctl (struct net_device *dev, struct ifreq *rq, int cmd);
+static struct ethtool_ops netdev_ethtool_ops;
 
 static dev_info_t dev_info = "3c589_cs";
 
@@ -173,24 +173,6 @@ static dev_link_t *tc589_attach(void);
 static void tc589_detach(dev_link_t *);
 
 static dev_link_t *dev_list;
-
-/*======================================================================
-
-    This bit of code is used to avoid unregistering network devices
-    at inappropriate times.  2.2 and later kernels are fairly picky
-    about when this can happen.
-    
-======================================================================*/
-
-static void flush_stale_links(void)
-{
-    dev_link_t *link, *next;
-    for (link = dev_list; link; link = next) {
-	next = link->next;
-	if (link->state & DEV_STALE_LINK)
-	    tc589_detach(link);
-    }
-}
 
 /*======================================================================
 
@@ -209,7 +191,6 @@ static dev_link_t *tc589_attach(void)
     int i, ret;
 
     DEBUG(0, "3c589_attach()\n");
-    flush_stale_links();
     
     /* Create new ethernet device */
     dev = alloc_etherdev(sizeof(struct el3_private));
@@ -220,9 +201,6 @@ static dev_link_t *tc589_attach(void)
     link->priv = dev;
 
     spin_lock_init(&lp->lock);
-    init_timer(&link->release);
-    link->release.function = &tc589_release;
-    link->release.data = (unsigned long)link;
     link->io.NumPorts1 = 16;
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_16;
     link->irq.Attributes = IRQ_TYPE_EXCLUSIVE | IRQ_HANDLE_PRESENT;
@@ -252,7 +230,7 @@ static dev_link_t *tc589_attach(void)
     dev->tx_timeout = el3_tx_timeout;
     dev->watchdog_timeo = TX_TIMEOUT;
 #endif
-    dev->do_ioctl = netdev_ioctl;
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 
     /* Register with Card Services */
     link->next = dev_list;
@@ -298,13 +276,10 @@ static void tc589_detach(dev_link_t *link)
     if (*linkp == NULL)
 	return;
 
-    del_timer_sync(&link->release);
     if (link->state & DEV_CONFIG) {
-	tc589_release((unsigned long)link);
-	if (link->state & DEV_STALE_CONFIG) {
-	    link->state |= DEV_STALE_LINK;
+	tc589_release(link);
+	if (link->state & DEV_STALE_CONFIG)
 	    return;
-	}
     }
     
     if (link->handle)
@@ -312,9 +287,11 @@ static void tc589_detach(dev_link_t *link)
     
     /* Unlink device structure, free bits */
     *linkp = link->next;
-    if (link->dev)
+    if (link->dev) {
 	unregister_netdev(dev);
-    kfree(dev);
+	free_netdev(dev);
+    } else
+        kfree(dev);
     
 } /* tc589_detach */
 
@@ -439,7 +416,7 @@ static void tc589_config(dev_link_t *link)
 cs_failed:
     cs_error(link->handle, last_fn, last_ret);
 failed:
-    tc589_release((unsigned long)link);
+    tc589_release(link);
     return;
     
 } /* tc589_config */
@@ -452,10 +429,8 @@ failed:
     
 ======================================================================*/
 
-static void tc589_release(unsigned long arg)
+static void tc589_release(dev_link_t *link)
 {
-    dev_link_t *link = (dev_link_t *)arg;
-
     DEBUG(0, "3c589_release(0x%p)\n", link);
     
     if (link->open) {
@@ -470,8 +445,10 @@ static void tc589_release(unsigned long arg)
     CardServices(ReleaseIRQ, link->handle, &link->irq);
     
     link->state &= ~DEV_CONFIG;
-    
-} /* tc589_release */
+
+    if (link->state & DEV_STALE_CONFIG)
+	    tc589_detach(link);
+}
 
 /*======================================================================
 
@@ -495,7 +472,7 @@ static int tc589_event(event_t event, int priority,
 	link->state &= ~DEV_PRESENT;
 	if (link->state & DEV_CONFIG) {
 	    netif_device_detach(dev);
-	    mod_timer(&link->release, jiffies + HZ/20);
+	    tc589_release(link);
 	}
 	break;
     case CS_EVENT_CARD_INSERTION:
@@ -643,70 +620,33 @@ static void tc589_reset(struct net_device *dev)
 	 | AdapterFailure, ioaddr + EL3_CMD);
 }
 
-static int netdev_ethtool_ioctl (struct net_device *dev, void *useraddr)
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
 {
-	u32 ethcmd;
-
-	/* dev_ioctl() in ../../net/core/dev.c has already checked
-	   capable(CAP_NET_ADMIN), so don't bother with that here.  */
-
-	if (get_user(ethcmd, (u32 *)useraddr))
-		return -EFAULT;
-
-	switch (ethcmd) {
-
-	case ETHTOOL_GDRVINFO: {
-		struct ethtool_drvinfo info = { ETHTOOL_GDRVINFO };
-		strcpy (info.driver, DRV_NAME);
-		strcpy (info.version, DRV_VERSION);
-		sprintf(info.bus_info, "PCMCIA 0x%lx", dev->base_addr);
-		if (copy_to_user (useraddr, &info, sizeof (info)))
-			return -EFAULT;
-		return 0;
-	}
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "PCMCIA 0x%lx", dev->base_addr);
+}
 
 #ifdef PCMCIA_DEBUG
-	/* get message-level */
-	case ETHTOOL_GMSGLVL: {
-		struct ethtool_value edata = {ETHTOOL_GMSGLVL};
-		edata.data = pc_debug;
-		if (copy_to_user(useraddr, &edata, sizeof(edata)))
-			return -EFAULT;
-		return 0;
-	}
-	/* set message-level */
-	case ETHTOOL_SMSGLVL: {
-		struct ethtool_value edata;
-		if (copy_from_user(&edata, useraddr, sizeof(edata)))
-			return -EFAULT;
-		pc_debug = edata.data;
-		return 0;
-	}
-#endif
-
-	default:
-		break;
-	}
-
-	return -EOPNOTSUPP;
-}
-
-static int netdev_ioctl (struct net_device *dev, struct ifreq *rq, int cmd)
+static u32 netdev_get_msglevel(struct net_device *dev)
 {
-	int rc;
-
-	switch (cmd) {
-	case SIOCETHTOOL:
-		rc = netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
-		break;
-
-	default:
-		rc = -EOPNOTSUPP;
-		break;
-	}
-
-	return rc;
+	return pc_debug;
 }
+
+static void netdev_set_msglevel(struct net_device *dev, u32 level)
+{
+	pc_debug = level;
+}
+#endif /* PCMCIA_DEBUG */
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+#ifdef PCMCIA_DEBUG
+	.get_msglevel		= netdev_get_msglevel,
+	.set_msglevel		= netdev_set_msglevel,
+#endif /* PCMCIA_DEBUG */
+};
 
 static int el3_config(struct net_device *dev, struct ifmap *map)
 {
@@ -921,7 +861,7 @@ static void media_check(unsigned long arg)
     }
     if (lp->fast_poll) {
 	lp->fast_poll--;
-	lp->media.expires = jiffies + 1;
+	lp->media.expires = jiffies + HZ/100;
 	add_timer(&lp->media);
 	return;
     }
@@ -1137,7 +1077,7 @@ static int el3_close(struct net_device *dev)
     netif_stop_queue(dev);
     del_timer_sync(&lp->media);
     if (link->state & DEV_STALE_CONFIG)
-	mod_timer(&link->release, jiffies + HZ/20);
+	     tc589_release(link);
     
     return 0;
 }

@@ -5,6 +5,7 @@
  * 
  * Copyright (C) 2001 Nicolas Pitre
  */
+#include <linux/compiler.h>
 #include <linux/init.h>
 
 #include <asm/leds.h>
@@ -41,6 +42,8 @@ sa1100_leds_init(void)
 		leds_event = adsbitsy_leds_event;
 	if (machine_is_pt_system3())
 		leds_event = system3_leds_event;
+	if (machine_is_simpad())
+		leds_event = simpad_leds_event; /* what about machine registry? including led, apm... -zecke */
 
 	leds_event(led_start);
 	return 0;

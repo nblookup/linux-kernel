@@ -1,8 +1,8 @@
 /*
  * Edgeport USB Serial Converter driver
  *
- * Copyright(c) 2000 Inside Out Networks, All rights reserved.
- * Copyright(c) 2001-2002 Greg Kroah-Hartman <greg@kroah.com>
+ * Copyright (C) 2000 Inside Out Networks, All rights reserved.
+ * Copyright (C) 2001-2002 Greg Kroah-Hartman <greg@kroah.com>
  *
  *	This program is free software; you can redistribute it and/or modify
  *	it under the terms of the GNU General Public License as published by
@@ -824,7 +824,7 @@ static void edge_interrupt_callback (struct urb *urb, struct pt_regs *regs)
 		while ((position < length) && (portNumber < edge_serial->serial->num_ports)) {
 			txCredits = data[position] | (data[position+1] << 8);
 			if (txCredits) {
-				port = &edge_serial->serial->port[portNumber];
+				port = edge_serial->serial->port[portNumber];
 				if (port_paranoia_check (port, __FUNCTION__) == 0) {
 					edge_port = usb_get_serial_port_data(port);
 					if (edge_port->open) {
@@ -1031,7 +1031,7 @@ static int edge_open (struct usb_serial_port *port, struct file * filp)
 		return -ENODEV;
 	}
 	if (edge_serial->interrupt_in_buffer == NULL) {
-		struct usb_serial_port *port0 = &serial->port[0];
+		struct usb_serial_port *port0 = serial->port[0];
 		
 		/* not set up yet, so do it now */
 		edge_serial->interrupt_in_buffer = port0->interrupt_in_buffer;
@@ -1806,10 +1806,10 @@ static int edge_tiocmget(struct usb_serial_port *port, struct file *file)
 	mcr = edge_port->shadowMCR;
 	result = ((mcr & MCR_DTR)	? TIOCM_DTR: 0)	  /* 0x002 */
 		  | ((mcr & MCR_RTS)	? TIOCM_RTS: 0)   /* 0x004 */
-		  | ((msr & MSR_CTS)	? TIOCM_CTS: 0)   /* 0x020 */
-		  | ((msr & MSR_CD)	? TIOCM_CAR: 0)   /* 0x040 */
-		  | ((msr & MSR_RI)	? TIOCM_RI:  0)   /* 0x080 */
-		  | ((msr & MSR_DSR)	? TIOCM_DSR: 0);  /* 0x100 */
+		  | ((msr & EDGEPORT_MSR_CTS)	? TIOCM_CTS: 0)   /* 0x020 */
+		  | ((msr & EDGEPORT_MSR_CD)	? TIOCM_CAR: 0)   /* 0x040 */
+		  | ((msr & EDGEPORT_MSR_RI)	? TIOCM_RI:  0)   /* 0x080 */
+		  | ((msr & EDGEPORT_MSR_DSR)	? TIOCM_DSR: 0);  /* 0x100 */
 
 
 	dbg("%s -- %x", __FUNCTION__, result);
@@ -1906,6 +1906,7 @@ static int edge_ioctl (struct usb_serial_port *port, struct file *file, unsigned
 
 		case TIOCGICOUNT:
 			cnow = edge_port->icount;
+			memset(&icount, 0, sizeof(icount));
 			icount.cts = cnow.cts;
 			icount.dsr = cnow.dsr;
 			icount.rng = cnow.rng;
@@ -2065,7 +2066,7 @@ static int process_rcvd_data (struct edgeport_serial *edge_serial, unsigned char
 
 				/* spit this data back into the tty driver if this port is open */
 				if (rxLen) {
-					port = &edge_serial->serial->port[edge_serial->rxPort];
+					port = edge_serial->serial->port[edge_serial->rxPort];
 					if (port_paranoia_check (port, __FUNCTION__) == 0) {
         					edge_port = usb_get_serial_port_data(port);
 						if (edge_port->open) {
@@ -2118,7 +2119,7 @@ static void process_rcvd_status (struct edgeport_serial *edge_serial, __u8 byte2
 	__u8 code = edge_serial->rxStatusCode;
 
 	/* switch the port pointer to the one being currently talked about */
-	port = &edge_serial->serial->port[edge_serial->rxPort];
+	port = edge_serial->serial->port[edge_serial->rxPort];
 	if (port_paranoia_check (port, __FUNCTION__)) {
 		return;
 	}
@@ -2221,20 +2222,20 @@ static void handle_new_msr(struct edgeport_port *edge_port, __u8 newMsr)
 
 	dbg("%s %02x", __FUNCTION__, newMsr);
 
-	if (newMsr & (MSR_DELTA_CTS | MSR_DELTA_DSR | MSR_DELTA_RI | MSR_DELTA_CD)) {
+	if (newMsr & (EDGEPORT_MSR_DELTA_CTS | EDGEPORT_MSR_DELTA_DSR | EDGEPORT_MSR_DELTA_RI | EDGEPORT_MSR_DELTA_CD)) {
 		icount = &edge_port->icount;
 
 		/* update input line counters */
-		if (newMsr & MSR_DELTA_CTS) {
+		if (newMsr & EDGEPORT_MSR_DELTA_CTS) {
 			icount->cts++;
 		}
-		if (newMsr & MSR_DELTA_DSR) {
+		if (newMsr & EDGEPORT_MSR_DELTA_DSR) {
 			icount->dsr++;
 		}
-		if (newMsr & MSR_DELTA_CD) {
+		if (newMsr & EDGEPORT_MSR_DELTA_CD) {
 			icount->dcd++;
 		}
-		if (newMsr & MSR_DELTA_RI) {
+		if (newMsr & EDGEPORT_MSR_DELTA_RI) {
 			icount->rng++;
 		}
 		wake_up_interruptible(&edge_port->delta_msr_wait);
@@ -3018,8 +3019,8 @@ static int edge_startup (struct usb_serial *serial)
 			return -ENOMEM;
 		}
 		memset (edge_port, 0, sizeof(struct edgeport_port));
-		edge_port->port = &serial->port[i];
-		usb_set_serial_port_data(&serial->port[i], edge_port);
+		edge_port->port = serial->port[i];
+		usb_set_serial_port_data(serial->port[i], edge_port);
 	}
 	
 	return 0;
@@ -3039,8 +3040,8 @@ static void edge_shutdown (struct usb_serial *serial)
 
 	/* stop reads and writes on all ports */
 	for (i=0; i < serial->num_ports; ++i) {
-		kfree (usb_get_serial_port_data(&serial->port[i]));
-		usb_set_serial_port_data(&serial->port[i],  NULL);
+		kfree (usb_get_serial_port_data(serial->port[i]));
+		usb_set_serial_port_data(serial->port[i],  NULL);
 	}
 	kfree (usb_get_serial_data(serial));
 	usb_set_serial_data(serial, NULL);
@@ -3051,15 +3052,36 @@ static void edge_shutdown (struct usb_serial *serial)
  * edgeport_init
  *	This is called by the module subsystem, or on startup to initialize us
  ****************************************************************************/
-int __init edgeport_init(void)
+static int __init edgeport_init(void)
 {
-	usb_serial_register (&edgeport_1port_device);
-	usb_serial_register (&edgeport_2port_device);
-	usb_serial_register (&edgeport_4port_device);
-	usb_serial_register (&edgeport_8port_device);
-	usb_register (&io_driver);
+	int retval;
+	retval = usb_serial_register(&edgeport_1port_device);
+	if (retval) 
+		goto failed_1port_device_register;
+	retval = usb_serial_register(&edgeport_2port_device);
+	if (retval)
+		goto failed_2port_device_register;
+	retval = usb_serial_register(&edgeport_4port_device);
+	if (retval)
+		goto failed_4port_device_register;
+	retval = usb_serial_register(&edgeport_8port_device);
+	if (retval)
+		goto failed_8port_device_register;
+	retval = usb_register(&io_driver);
+	if (retval) 
+		goto failed_usb_register;
 	info(DRIVER_DESC " " DRIVER_VERSION);
 	return 0;
+failed_usb_register:
+	usb_serial_deregister(&edgeport_8port_device);
+failed_8port_device_register:
+	usb_serial_deregister(&edgeport_4port_device);
+failed_4port_device_register:
+	usb_serial_deregister(&edgeport_2port_device);
+failed_2port_device_register:
+	usb_serial_deregister(&edgeport_1port_device);
+failed_1port_device_register:
+	return retval;
 }
 
 
@@ -3068,7 +3090,7 @@ int __init edgeport_init(void)
  * edgeport_exit
  *	Called when the driver is about to be unloaded.
  ****************************************************************************/
-void __exit edgeport_exit (void)
+static void __exit edgeport_exit (void)
 {
 	usb_deregister (&io_driver);
 	usb_serial_deregister (&edgeport_1port_device);

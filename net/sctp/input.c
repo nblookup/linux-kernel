@@ -150,7 +150,7 @@ int sctp_rcv(struct sk_buff *skb)
 	 * IP broadcast addresses cannot be used in an SCTP transport
 	 * address."
 	 */
-	if (!af->addr_valid(&src) || !af->addr_valid(&dest))
+	if (!af->addr_valid(&src, NULL) || !af->addr_valid(&dest, NULL))
 		goto discard_it;
 
 	asoc = __sctp_rcv_lookup(skb, &src, &dest, &transport);
@@ -528,7 +528,7 @@ void __sctp_hash_endpoint(struct sctp_endpoint *ep)
 	epb = &ep->base;
 
 	epb->hashent = sctp_ep_hashfn(epb->bind_addr.port);
-	head = &sctp_ep_hashbucket[epb->hashent];
+	head = &sctp_ep_hashtable[epb->hashent];
 
 	sctp_write_lock(&head->lock);
 	epp = &head->chain;
@@ -558,7 +558,7 @@ void __sctp_unhash_endpoint(struct sctp_endpoint *ep)
 
 	epb->hashent = sctp_ep_hashfn(epb->bind_addr.port);
 
-	head = &sctp_ep_hashbucket[epb->hashent];
+	head = &sctp_ep_hashtable[epb->hashent];
 
 	sctp_write_lock(&head->lock);
 
@@ -589,7 +589,7 @@ struct sctp_endpoint *__sctp_rcv_lookup_endpoint(const union sctp_addr *laddr)
 	int hash;
 
 	hash = sctp_ep_hashfn(laddr->v4.sin_port);
-	head = &sctp_ep_hashbucket[hash];
+	head = &sctp_ep_hashtable[hash];
 	read_lock(&head->lock);
 	for (epb = head->chain; epb; epb = epb->next) {
 		ep = sctp_ep(epb);
@@ -627,7 +627,7 @@ void __sctp_hash_established(struct sctp_association *asoc)
 	/* Calculate which chain this entry will belong to. */
 	epb->hashent = sctp_assoc_hashfn(epb->bind_addr.port, asoc->peer.port);
 
-	head = &sctp_assoc_hashbucket[epb->hashent];
+	head = &sctp_assoc_hashtable[epb->hashent];
 
 	sctp_write_lock(&head->lock);
 	epp = &head->chain;
@@ -658,7 +658,7 @@ void __sctp_unhash_established(struct sctp_association *asoc)
 	epb->hashent = sctp_assoc_hashfn(epb->bind_addr.port,
 					 asoc->peer.port);
 
-	head = &sctp_assoc_hashbucket[epb->hashent];
+	head = &sctp_assoc_hashtable[epb->hashent];
 
 	sctp_write_lock(&head->lock);
 
@@ -688,7 +688,7 @@ struct sctp_association *__sctp_lookup_association(
 	 * have wildcards anyways.
 	 */
 	hash = sctp_assoc_hashfn(local->v4.sin_port, peer->v4.sin_port);
-	head = &sctp_assoc_hashbucket[hash];
+	head = &sctp_assoc_hashtable[hash];
 	read_lock(&head->lock);
 	for (epb = head->chain; epb; epb = epb->next) {
 		asoc = sctp_assoc(epb);
@@ -768,6 +768,7 @@ static struct sctp_association *__sctp_rcv_init_lookup(struct sk_buff *skb,
 	union sctp_params params;
 	sctp_init_chunk_t *init;
 	struct sctp_transport *transport;
+	struct sctp_af *af;
 
 	ch = (sctp_chunkhdr_t *) skb->data;
 
@@ -802,11 +803,12 @@ static struct sctp_association *__sctp_rcv_init_lookup(struct sk_buff *skb,
 	sctp_walk_params(params, init, init_hdr.params) {
 
 		/* Note: Ignoring hostname addresses. */
-		if ((SCTP_PARAM_IPV4_ADDRESS != params.p->type) &&
-		    (SCTP_PARAM_IPV6_ADDRESS != params.p->type))
+		af = sctp_get_af_specific(param_type2af(params.p->type));
+		if (!af)
 			continue;
 
-		sctp_param2sockaddr(paddr, params.addr, ntohs(sh->source), 0);
+		af->from_addr_param(paddr, params.addr, ntohs(sh->source), 0);
+
 		asoc = __sctp_lookup_association(laddr, paddr, &transport);
 		if (asoc)
 			return asoc;

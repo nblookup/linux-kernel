@@ -80,7 +80,6 @@ struct xfs_iocore;
 struct xfs_bmbt_irec;
 struct xfs_bmap_free;
 
-#define	SPLDECL(s)		unsigned long s
 #define	AIL_LOCK_T		lock_t
 #define	AIL_LOCKINIT(x,y)	spinlock_init(x,y)
 #define	AIL_LOCK_DESTROY(x)	spinlock_destroy(x)
@@ -92,12 +91,12 @@ struct xfs_bmap_free;
  * Prototypes and functions for the Data Migration subsystem.
  */
 
-typedef int	(*xfs_send_data_t)(int, struct bhv_desc *,
+typedef int	(*xfs_send_data_t)(int, struct vnode *,
 			xfs_off_t, size_t, int, vrwlock_t *);
 typedef int	(*xfs_send_mmap_t)(struct vm_area_struct *, uint);
-typedef int	(*xfs_send_destroy_t)(struct bhv_desc *, dm_right_t);
-typedef int	(*xfs_send_namesp_t)(dm_eventtype_t, struct bhv_desc *,
-			dm_right_t, struct bhv_desc *, dm_right_t,
+typedef int	(*xfs_send_destroy_t)(struct vnode *, dm_right_t);
+typedef int	(*xfs_send_namesp_t)(dm_eventtype_t, struct vnode *,
+			dm_right_t, struct vnode *, dm_right_t,
 			char *, char *, mode_t, int, int);
 typedef void	(*xfs_send_unmount_t)(struct vfs *, struct vnode *,
 			dm_right_t, mode_t, int, int);
@@ -110,12 +109,12 @@ typedef struct xfs_dmops {
 	xfs_send_unmount_t	xfs_send_unmount;
 } xfs_dmops_t;
 
-#define XFS_SEND_DATA(mp, ev,bdp,off,len,fl,lock) \
-	(*(mp)->m_dm_ops.xfs_send_data)(ev,bdp,off,len,fl,lock)
+#define XFS_SEND_DATA(mp, ev,vp,off,len,fl,lock) \
+	(*(mp)->m_dm_ops.xfs_send_data)(ev,vp,off,len,fl,lock)
 #define XFS_SEND_MMAP(mp, vma,fl) \
 	(*(mp)->m_dm_ops.xfs_send_mmap)(vma,fl)
-#define XFS_SEND_DESTROY(mp, bdp,right) \
-	(*(mp)->m_dm_ops.xfs_send_destroy)(bdp,right)
+#define XFS_SEND_DESTROY(mp, vp,right) \
+	(*(mp)->m_dm_ops.xfs_send_destroy)(vp,right)
 #define XFS_SEND_NAMESP(mp, ev,b1,r1,b2,r2,n1,n2,mode,rval,fl) \
 	(*(mp)->m_dm_ops.xfs_send_namesp)(ev,b1,r1,b2,r2,n1,n2,mode,rval,fl)
 #define XFS_SEND_UNMOUNT(mp, vfsp,vp,right,mode,rval,fl) \
@@ -352,9 +351,10 @@ typedef struct xfs_mount {
 	uint			m_qflags;	/* quota status flags */
 	xfs_trans_reservations_t m_reservations;/* precomputed res values */
 	__uint64_t		m_maxicount;	/* maximum inode count */
+	__uint64_t		m_maxioffset;	/* maximum inode offset */
 	__uint64_t		m_resblks;	/* total reserved blocks */
 	__uint64_t		m_resblks_avail;/* available reserved blocks */
-#if XFS_BIG_FILESYSTEMS
+#if XFS_BIG_INUMS
 	xfs_ino_t		m_inoadd;	/* add value for ino64_offset */
 #endif
 	int			m_dalign;	/* stripe unit */
@@ -392,9 +392,7 @@ typedef struct xfs_mount {
 #define	XFS_MOUNT_WSYNC		0x00000001	/* for nfs - all metadata ops
 						   must be synchronous except
 						   for space allocations */
-#if XFS_BIG_FILESYSTEMS
 #define	XFS_MOUNT_INO64		0x00000002
-#endif
 			     /* 0x00000004	-- currently unused */
 			     /* 0x00000008	-- currently unused */
 #define XFS_MOUNT_FS_SHUTDOWN	0x00000010	/* atomic stop of all filesystem
@@ -413,12 +411,12 @@ typedef struct xfs_mount {
 #define XFS_MOUNT_DFLT_IOSIZE	0x00001000	/* set default i/o size */
 #define XFS_MOUNT_OSYNCISOSYNC	0x00002000	/* o_sync is REALLY o_sync */
 						/* osyncisdsync is now default*/
-#define XFS_MOUNT_NOUUID	0x00004000	/* ignore uuid during mount */
-#define XFS_MOUNT_32BITINODES	0x00008000	/* do not create inodes above
+#define XFS_MOUNT_32BITINODES	0x00004000	/* do not create inodes above
 						 * 32 bits in size */
-#define XFS_MOUNT_NOLOGFLUSH	0x00010000
-
-#define XFS_FORCED_SHUTDOWN(mp)	((mp)->m_flags & XFS_MOUNT_FS_SHUTDOWN)
+#define XFS_MOUNT_32BITINOOPT	0x00008000	/* saved mount option state */
+#define XFS_MOUNT_NOUUID	0x00010000	/* ignore uuid during mount */
+#define XFS_MOUNT_NOLOGFLUSH	0x00020000
+#define XFS_MOUNT_IDELETE	0x00040000	/* delete empty inode clusters*/
 
 /*
  * Default minimum read and write sizes.
@@ -444,6 +442,9 @@ typedef struct xfs_mount {
 #define	XFS_WSYNC_READIO_LOG	15	/* 32K */
 #define	XFS_WSYNC_WRITEIO_LOG	14	/* 16K */
 
+#define XFS_MAXIOFFSET(mp)	((mp)->m_maxioffset)
+
+#define XFS_FORCED_SHUTDOWN(mp)	((mp)->m_flags & XFS_MOUNT_FS_SHUTDOWN)
 #define xfs_force_shutdown(m,f)	\
 	VFS_FORCE_SHUTDOWN((XFS_MTOVFS(m)), f, __FILE__, __LINE__)
 

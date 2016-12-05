@@ -172,7 +172,7 @@ static int ide_setup_pci_baseregs (struct pci_dev *dev, const char *name)
  *	is already in DMA mode we check and enforce IDE simplex rules.
  */
 
-static unsigned long __init ide_get_or_set_dma_base (ide_hwif_t *hwif)
+static unsigned long ide_get_or_set_dma_base (ide_hwif_t *hwif)
 {
 	unsigned long	dma_base = 0;
 	struct pci_dev	*dev = hwif->pci_dev;
@@ -285,10 +285,10 @@ void ide_setup_pci_noise (struct pci_dev *dev, ide_pci_device_t *d)
 	if ((d->vendor != dev->vendor) && (d->device != dev->device)) {
 		printk(KERN_INFO "%s: unknown IDE controller at PCI slot "
 			"%s, VID=%04x, DID=%04x\n",
-			d->name, dev->slot_name, dev->vendor, dev->device);
+			d->name, pci_name(dev), dev->vendor, dev->device);
         } else {
 		printk(KERN_INFO "%s: IDE controller at PCI slot %s\n",
-			d->name, dev->slot_name);
+			d->name, pci_name(dev));
 	}
 }
 
@@ -587,7 +587,6 @@ void ide_pci_setup_ports(struct pci_dev *dev, ide_pci_device_t *d, int autodma, 
 	int at_least_one_hwif_enabled = 0;
 	ide_hwif_t *hwif, *mate = NULL;
 	static int secondpdc = 0;
-	int drive0_tune, drive1_tune;
 	u8 tmp;
 
 	index->all = 0xf0f0;
@@ -648,26 +647,11 @@ controller_ok:
 		else
 			ide_hwif_setup_dma(dev, d, hwif);
 bypass_legacy_dma:
-
-		drive0_tune = hwif->drives[0].autotune;
-		drive1_tune = hwif->drives[1].autotune;
-
 		if (d->init_hwif)
 			/* Call chipset-specific routine
 			 * for each enabled hwif
 			 */
 			d->init_hwif(hwif);
-
-		/*
-		 *	This is in the wrong place. The driver may
-		 *	do set up based on the autotune value and this
-		 *	will then trash it. Torben please move it and
-		 *	propagate the fixes into the drivers
-		 */		
-		if (drive0_tune == IDE_TUNE_BIOS) /* biostimings */
-			hwif->drives[0].autotune = IDE_TUNE_BIOS;
-		if (drive1_tune == IDE_TUNE_BIOS)
-			hwif->drives[1].autotune = IDE_TUNE_BIOS;
 
 		mate = hwif;
 		at_least_one_hwif_enabled = 1;

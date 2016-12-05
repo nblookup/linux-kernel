@@ -559,7 +559,10 @@ static int ipmi_ioctl(struct inode *inode, struct file *file,
 
 	case WDIOC_GETSTATUS:
 		val = 0;
-		return copy_to_user((void *) arg, &val, sizeof(val));
+		i = copy_to_user((void *) arg, &val, sizeof(val));
+		if (i)
+			return -EFAULT;
+		return 0;
 
 	default:
 		return -ENOIOCTLCMD;
@@ -642,7 +645,7 @@ static ssize_t ipmi_read(struct file *file,
 
 static int ipmi_open(struct inode *ino, struct file *filep)
 {
-        switch (minor(ino->i_rdev))
+        switch (iminor(ino))
         {
                 case WATCHDOG_MINOR:
                     if (ipmi_wdog_open)
@@ -685,7 +688,7 @@ static int ipmi_fasync(int fd, struct file *file, int on)
 
 static int ipmi_close(struct inode *ino, struct file *filep)
 {
-	if (minor(ino->i_rdev)==WATCHDOG_MINOR)
+	if (iminor(ino)==WATCHDOG_MINOR)
 	{
 #ifndef CONFIG_WATCHDOG_NOWAYOUT	
 		ipmi_watchdog_state = WDOG_TIMEOUT_NONE;

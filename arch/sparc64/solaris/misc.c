@@ -77,8 +77,8 @@ static u32 do_solaris_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u64 o
 			goto out;
 		else {
 			struct inode * inode = file->f_dentry->d_inode;
-			if(major(inode->i_rdev) == MEM_MAJOR &&
-			   minor(inode->i_rdev) == 5) {
+			if(imajor(inode) == MEM_MAJOR &&
+			   iminor(inode) == 5) {
 				flags |= MAP_ANONYMOUS;
 				fput(file);
 				file = NULL;
@@ -349,8 +349,7 @@ asmlinkage int solaris_sysconf(int id)
 	case SOLARIS_CONFIG_XOPEN_VER:	return 3;
 	case SOLARIS_CONFIG_CLK_TCK:
 	case SOLARIS_CONFIG_PROF_TCK:
-		return prom_getintdefault(prom_cpu_nodes[smp_processor_id()],
-					  "clock-frequency", 167000000);
+		return sparc64_get_clock_tick(smp_processor_id());
 #ifdef CONFIG_SMP	
 	case SOLARIS_CONFIG_NPROC_CONF:	return NR_CPUS;
 	case SOLARIS_CONFIG_NPROC_ONLN:	return num_online_cpus();
@@ -393,7 +392,7 @@ asmlinkage int solaris_procids(int cmd, s32 pid, s32 pgid)
 	
 	switch (cmd) {
 	case 0: /* getpgrp */
-		return current->pgrp;
+		return process_group(current);
 	case 1: /* setpgrp */
 		{
 			int (*sys_setpgid)(pid_t,pid_t) =
@@ -404,7 +403,7 @@ asmlinkage int solaris_procids(int cmd, s32 pid, s32 pgid)
 			ret = sys_setpgid(0, 0);
 			if (ret) return ret;
 			current->tty = NULL;
-			return current->pgrp;
+			return process_group(current);
 		}
 	case 2: /* getsid */
 		{

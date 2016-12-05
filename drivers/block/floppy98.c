@@ -277,13 +277,12 @@ static int irqdma_allocated;
 #define LOCAL_END_REQUEST
 #define DEVICE_NAME "floppy"
 
-#include <linux/blk.h>
 #include <linux/blkpg.h>
 #include <linux/cdrom.h> /* for the compatibility eject ioctl */
 #include <linux/completion.h>
 
 static struct request *current_req;
-static struct request_queue floppy_queue;
+static struct request_queue *floppy_queue;
 
 #ifndef fd_get_dma_residue
 #define fd_get_dma_residue() get_dma_residue(FLOPPY_DMA)
@@ -2361,7 +2360,7 @@ static void floppy_end_request(struct request *req, int uptodate)
  * logical buffer */
 static void request_done(int uptodate)
 {
-	struct request_queue *q = &floppy_queue;
+	struct request_queue *q = floppy_queue;
 	struct request *req = current_req;
 	unsigned long flags;
 	int block;
@@ -2963,9 +2962,9 @@ static void redo_fd_request(void)
 		if (!current_req) {
 			struct request *req;
 
-			spin_lock_irq(floppy_queue.queue_lock);
-			req = elv_next_request(&floppy_queue);
-			spin_unlock_irq(floppy_queue.queue_lock);
+			spin_lock_irq(floppy_queue->queue_lock);
+			req = elv_next_request(floppy_queue);
+			spin_unlock_irq(floppy_queue->queue_lock);
 			if (!req) {
 				do_floppy = NULL;
 				unlock_fdc();
@@ -3845,9 +3844,9 @@ static int floppy_open(struct inode * inode, struct file * filp)
 		}
 	}
 
-	UDRS->fd_device = minor(inode->i_rdev);
-	set_capacity(disks[drive], floppy_sizes[minor(inode->i_rdev)]);
-	if (old_dev != -1 && old_dev != minor(inode->i_rdev)) {
+	UDRS->fd_device = iminor(inode);
+	set_capacity(disks[drive], floppy_sizes[iminor(inode)]);
+	if (old_dev != -1 && old_dev != iminor(inode)) {
 		if (buffer_drive == drive)
 			buffer_track = -1;
 	}
@@ -3990,22 +3989,6 @@ static int __floppy_read_block_0(struct block_device *bdev)
 	return 0;
 }
 
-static int floppy_read_block_0(struct gendisk *disk)
-{
-	struct block_device *bdev;
-	int ret;
-
-	bdev = bdget_disk(disk, 0);
-	if (!bdev) {
-		printk("No block device for %s\n", disk->disk_name);
-		BUG();
-	}
-	bdev->bd_disk = disk;	/* ewww */
-	ret = __floppy_read_block_0(bdev);
-	atomic_dec(&bdev->bd_count);
-	return ret;
-}
-
 /* revalidate the floppy disk, i.e. trigger format autodetection by reading
  * the bootblock (block 0). "Autodetection" is also needed to check whether
  * there is a disk in the drive at all... Thus we also do it for fixed
@@ -4041,7 +4024,7 @@ static int floppy_revalidate(struct gendisk *disk)
 			UDRS->generation++;
 		if (NO_GEOM){
 			/* auto-sensing */
-			res = floppy_read_block_0(disk);
+			res = __floppy_read_block_0(opened_bdev[drive]);
 		} else {
 			if (cf)
 				poll_drive(0, FD_RAW_NEED_DISK);
@@ -4064,21 +4047,32 @@ static struct block_device_operations floppy_fops = {
 static char *table[] =
 {"",
 #if 0
-"d360", 
+	"d360", 
 #else
-"h1232",
+	"h1232",
 #endif
-"h1200", "u360", "u720", "h360", "h720",
-"u1440", "u2880", "CompaQ", "h1440", "u1680", "h410",
-"u820", "h1476", "u1722", "h420", "u830", "h1494", "u1743",
-"h880", "u1040", "u1120", "h1600", "u1760", "u1920",
-"u3200", "u3520", "u3840", "u1840", "u800", "u1600",
+	"h1200", "u360", "u720", "h360", "h720",
+	"u1440", "u2880", "CompaQ", "h1440", "u1680", "h410",
+	"u820", "h1476", "u1722", "h420", "u830", "h1494", "u1743",
+	"h880", "u1040", "u1120", "h1600", "u1760", "u1920",
+	"u3200", "u3520", "u3840", "u1840", "u800", "u1600",
 NULL
 };
-static int t360[] = {1,0}, t1200[] = {2,5,6,10,12,14,16,18,20,23,0},
-t3in[] = {8,9,26,27,28, 7,11,15,19,24,25,29,31, 3,4,13,17,21,22,30,0};
-static int *table_sup[] = 
-{NULL, t360, t1200, t3in+5+8, t3in+5, t3in, t3in};
+
+static int t360[] = {
+	1,0
+};
+static int t1200[] = {
+	2,5,6,10,12,14,16,18,20,23,0
+};
+static int t3in[] = {
+	 8, 9,26,27,28, 7,11,15,19,24,25,
+	29,31, 3, 4,13,17,21,22,30, 0
+};
+
+static int *table_sup[] = {
+	NULL, t360, t1200, t3in+5+8, t3in+5, t3in, t3in
+};
 
 static void __init register_devfs_entries (int drive)
 {
@@ -4255,6 +4249,7 @@ static struct kobject *floppy_find(dev_t dev, int *part, void *data)
 		return NULL;
 	if (((*part>>2) & 0x1f) >= NUMBER(floppy_type))
 		return NULL;
+	*part = 0;
 	return get_disk(disks[drive]);
 }
 
@@ -4294,7 +4289,10 @@ int __init floppy_init(void)
 		else
 			floppy_sizes[i] = MAX_DISK_SIZE << 1;
 
-	blk_init_queue(&floppy_queue, do_fd_request, &floppy_lock);
+	floppy_queue = blk_init_queue(do_fd_request, &floppy_lock)
+	if (!floppy_queue)
+		goto out_queue;
+
 	reschedule_timeout(MAXTIMEOUT, "floppy init", MAXTIMEOUT);
 	config_types();
 
@@ -4394,7 +4392,7 @@ int __init floppy_init(void)
 			continue;
 		/* to be cleaned up... */
 		disks[drive]->private_data = (void*)(long)drive;
-		disks[drive]->queue = &floppy_queue;
+		disks[drive]->queue = floppy_queue;
 		add_disk(disks[drive]);
 	}
 
@@ -4402,11 +4400,12 @@ int __init floppy_init(void)
 	return 0;
 
 out1:
-	del_timer(&fd_timeout);
+	del_timer_sync(&fd_timeout);
 out2:
+	blk_cleanup_queue(floppy_queue);
+out_queue:
 	blk_unregister_region(MKDEV(FLOPPY_MAJOR, 0), 256);
 	unregister_blkdev(FLOPPY_MAJOR,"fd");
-	blk_cleanup_queue(&floppy_queue);
 out:
 	for (i=0; i<N_DRIVE; i++)
 		put_disk(disks[i]);
@@ -4430,11 +4429,9 @@ static int floppy_grab_irq_and_dma(void)
 		return 0;
 	}
 	spin_unlock_irqrestore(&floppy_usage_lock, flags);
-	MOD_INC_USE_COUNT;
 	if (fd_request_irq()) {
 		DPRINT("Unable to grab IRQ%d for the floppy driver\n",
 			FLOPPY_IRQ);
-		MOD_DEC_USE_COUNT;
 		spin_lock_irqsave(&floppy_usage_lock, flags);
 		usage_count--;
 		spin_unlock_irqrestore(&floppy_usage_lock, flags);
@@ -4444,7 +4441,6 @@ static int floppy_grab_irq_and_dma(void)
 		DPRINT("Unable to grab DMA%d for the floppy driver\n",
 			FLOPPY_DMA);
 		fd_free_irq();
-		MOD_DEC_USE_COUNT;
 		spin_lock_irqsave(&floppy_usage_lock, flags);
 		usage_count--;
 		spin_unlock_irqrestore(&floppy_usage_lock, flags);
@@ -4521,7 +4517,6 @@ cleanup1:
 			release_region(0x04be, 1);
 		}
 	}
-	MOD_DEC_USE_COUNT;
 	spin_lock_irqsave(&floppy_usage_lock, flags);
 	usage_count--;
 	spin_unlock_irqrestore(&floppy_usage_lock, flags);
@@ -4587,7 +4582,6 @@ static void floppy_release_irq_and_dma(void)
 			}
 		}
 	fdc = old_fdc;
-	MOD_DEC_USE_COUNT;
 }
 
 
@@ -4648,7 +4642,7 @@ void cleanup_module(void)
 	}
 	devfs_remove("floppy");
 
-	blk_cleanup_queue(&floppy_queue);
+	blk_cleanup_queue(floppy_queue);
 	/* eject disk, if any */
 	fd_eject(0);
 }

@@ -34,6 +34,7 @@
  */
 #include <linux/init.h>
 #include <linux/kernel_stat.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/spinlock.h>
 
@@ -222,6 +223,8 @@ void do_gettimeofday(struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
+EXPORT_SYMBOL(do_gettimeofday);
+
 void do_settimeofday(struct timeval *tv)
 {
 	write_seqlock_irq(&xtime_lock);
@@ -248,6 +251,8 @@ void do_settimeofday(struct timeval *tv)
 	write_sequnlock_irq(&xtime_lock);
 }
 
+EXPORT_SYMBOL(do_settimeofday);
+
 /*
  * There are a lot of conceptually broken versions of the MIPS timer interrupt
  * handler floating around.  This one is rather different, but the algorithm
@@ -262,7 +267,7 @@ void mips_timer_interrupt(struct pt_regs *regs)
         }
 
 	do {
-		kstat_cpu(0).irqs[irq]++;
+		kstat_this_cpu.irqs[irq]++;
 		do_timer(regs);
 		r4k_cur += r4k_offset;
 		ack_r4ktimer(r4k_cur);

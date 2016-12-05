@@ -30,8 +30,8 @@
 #include <linux/timer.h>
 #include <linux/delay.h>
 #include <linux/fd.h>
-#include <linux/blk.h>
 #include <linux/ioctl.h>
+#include <linux/blkdev.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
 #include <asm/mac_iop.h>
@@ -78,7 +78,7 @@ static int floppy_count;
 static struct floppy_state floppy_states[MAX_FLOPPIES];
 static spinlock_t swim_iop_lock = SPIN_LOCK_UNLOCKED;
 
-#define CURRENT elv_next_request(&swim_queue)
+#define CURRENT elv_next_request(swim_queue)
 
 static char *drive_names[7] = {
 	"not installed",	/* DRV_NONE    */
@@ -121,7 +121,7 @@ static struct block_device_operations floppy_fops = {
 	.revalidate_disk= floppy_revalidate,
 };
 
-static struct request_queue swim_queue;
+static struct request_queue *swim_queue;
 /*
  * SWIM IOP initialization
  */
@@ -143,12 +143,19 @@ int swimiop_init(void)
 	if (register_blkdev(FLOPPY_MAJOR, "fd"))
 		return -EBUSY;
 
-	blk_init_queue(&swim_queue, do_fd_request, &swim_iop_lock);
+	swim_queue = blk_init_queue(do_fd_request, &swim_iop_lock);
+	if (!swim_queue) {
+		unregister_blkdev(FLOPPY_MAJOR, "fd");
+		return -ENOMEM;
+	}
+
 	printk("SWIM-IOP: %s by Joshua M. Thompson (funaho@jurai.org)\n",
 		DRIVER_VERSION);
 
 	if (iop_listen(SWIM_IOP, SWIM_CHAN, swimiop_receive, "SWIM") != 0) {
 		printk(KERN_ERR "SWIM-IOP: IOP channel already in use; can't initialize.\n");
+		unregister_blkdev(FLOPPY_MAJOR, "fd");
+		blk_cleanup_queue(swim_queue);
 		return -EBUSY;
 	}
 
@@ -191,7 +198,7 @@ int swimiop_init(void)
 		disk->fops = &floppy_fops;
 		sprintf(disk->disk_name, "fd%d", i);
 		disk->private_data = &floppy_states[i];
-		disk->queue = &swim_queue;
+		disk->queue = swim_queue;
 		set_capacity(disk, 2880 * 2);
 		add_disk(disk);
 	}

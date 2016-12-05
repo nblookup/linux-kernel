@@ -196,9 +196,10 @@ static int tda9840_detect(struct i2c_adapter *adapter, int address, int kind)
 		printk("tda9840.o: not enough kernel memory.\n");
 		return -ENOMEM;
 	}
+	memset(client, 0, sizeof(struct i2c_client));
 	
 	/* fill client structure */
-	sprintf(client->dev.name,"tda9840 (0x%02x)", address);
+	sprintf(client->name,"tda9840 (0x%02x)", address);
 	client->id = tda9840_id++;
 	client->flags = 0;
 	client->addr = address;
@@ -227,7 +228,7 @@ static int tda9840_detect(struct i2c_adapter *adapter, int address, int kind)
  		printk("tda9840.o: could not initialize ic #3. continuing anyway. (result:%d)\n",result);
 	} 
 	
-	printk("tda9840.o: detected @ 0x%02x on adapter %s\n",2*address,&client->adapter->dev.name[0]);
+	printk("tda9840.o: detected @ 0x%02x on adapter %s\n",2*address,&client->adapter->name[0]);
 
 	return 0;
 }
@@ -236,7 +237,7 @@ static int tda9840_attach(struct i2c_adapter *adapter)
 {
 	/* let's see whether this is a know adapter we can attach to */
 	if( adapter->id != I2C_ALGO_SAA7146 ) {
-		dprintk("tda9840.o: refusing to probe on unknown adapter [name='%s',id=0x%x]\n",adapter->dev.name,adapter->id);
+		dprintk("tda9840.o: refusing to probe on unknown adapter [name='%s',id=0x%x]\n",adapter->name,adapter->id);
 		return -ENODEV;
 	}
 
@@ -258,9 +259,7 @@ static int tda9840_detach(struct i2c_client *client)
 }
 
 static struct i2c_driver driver = {
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,5,54)
 	.owner		= THIS_MODULE,
-#endif
 	.name		= "tda9840 driver",
 	.id		= I2C_DRIVERID_TDA9840,
 	.flags		= I2C_DF_NOTIFY,

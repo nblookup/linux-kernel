@@ -295,7 +295,7 @@ static void mii_wr(ioaddr_t ioaddr, u_char phyaddr, u_char phyreg,
 
 static int has_ce2_string(dev_link_t * link);
 static void xirc2ps_config(dev_link_t * link);
-static void xirc2ps_release(u_long arg);
+static void xirc2ps_release(dev_link_t * link);
 static int xirc2ps_event(event_t event, int priority,
 			 event_callback_args_t * args);
 
@@ -382,6 +382,7 @@ static int set_card_type(dev_link_t *link, const void *s);
 static int do_config(struct net_device *dev, struct ifmap *map);
 static int do_open(struct net_device *dev);
 static int do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
+static struct ethtool_ops netdev_ethtool_ops;
 static void hardreset(struct net_device *dev);
 static void do_reset(struct net_device *dev, int full);
 static int init_mii(struct net_device *dev);
@@ -389,17 +390,6 @@ static void do_powerdown(struct net_device *dev);
 static int do_stop(struct net_device *dev);
 
 /*=============== Helper functions =========================*/
-static void
-flush_stale_links(void)
-{
-    dev_link_t *link, *next;
-    for (link = dev_list; link; link = next) {
-	next = link->next;
-	if (link->state & DEV_STALE_LINK)
-	    xirc2ps_detach(link);
-    }
-}
-
 static int
 get_tuple_data(int fn, client_handle_t handle, tuple_t *tuple)
 {
@@ -601,7 +591,6 @@ xirc2ps_attach(void)
     int err;
 
     DEBUG(0, "attach()\n");
-    flush_stale_links();
 
     /* Allocate the device structure */
     dev = alloc_etherdev(sizeof(local_info_t));
@@ -610,10 +599,6 @@ xirc2ps_attach(void)
     local = dev->priv;
     link = &local->link;
     link->priv = dev;
-
-    init_timer(&link->release);
-    link->release.function = &xirc2ps_release;
-    link->release.data = (u_long) link;
 
     /* General socket configuration */
     link->conf.Attributes = CONF_ENABLE_IRQ;
@@ -630,6 +615,7 @@ xirc2ps_attach(void)
     dev->set_config = &do_config;
     dev->get_stats = &do_get_stats;
     dev->do_ioctl = &do_ioctl;
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
     dev->set_multicast_list = &set_multicast_list;
     dev->open = &do_open;
     dev->stop = &do_stop;
@@ -689,14 +675,8 @@ xirc2ps_detach(dev_link_t * link)
      * the release() function is called, that will trigger a proper
      * detach().
      */
-    del_timer(&link->release);
-    if (link->state & DEV_CONFIG) {
-	xirc2ps_release((unsigned long)link);
-	if (link->state & DEV_STALE_CONFIG) {
-		link->state |= DEV_STALE_LINK;
-		return;
-	}
-    }
+    if (link->state & DEV_CONFIG)
+	xirc2ps_release(link);
 
     /* Break the link with Card Services */
     if (link->handle)
@@ -704,9 +684,11 @@ xirc2ps_detach(dev_link_t * link)
 
     /* Unlink device structure, free it */
     *linkp = link->next;
-    if (link->dev)
+    if (link->dev) {
 	unregister_netdev(dev);
-    kfree(dev);
+	free_netdev(dev);
+    } else
+	kfree(dev);
 
 } /* xirc2ps_detach */
 
@@ -1164,7 +1146,7 @@ xirc2ps_config(dev_link_t * link)
 
   config_error:
     link->state &= ~DEV_CONFIG_PENDING;
-    xirc2ps_release((u_long)link);
+    xirc2ps_release(link);
     return;
 
   cis_error:
@@ -1179,24 +1161,10 @@ xirc2ps_config(dev_link_t * link)
  * still open, this will be postponed until it is closed.
  */
 static void
-xirc2ps_release(u_long arg)
+xirc2ps_release(dev_link_t *link)
 {
-    dev_link_t *link = (dev_link_t *) arg;
 
     DEBUG(0, "release(0x%p)\n", link);
-
-#if 0
-    /*
-     * If the device is currently in use, we won't release until it
-     * is actually closed.
-     */
-    if (link->open) {
-	DEBUG(0, "release postponed, '%s' "
-	      "still open\n", link->dev->dev_name);
-	link->state |= DEV_STALE_CONFIG;
-	return;
-    }
-#endif
 
     if (link->win) {
 	struct net_device *dev = link->priv;
@@ -1243,7 +1211,7 @@ xirc2ps_event(event_t event, int priority,
 	link->state &= ~DEV_PRESENT;
 	if (link->state & DEV_CONFIG) {
 	    netif_device_detach(dev);
-	    mod_timer(&link->release, jiffies + HZ/20);
+	    xirc2ps_release(link);
 	}
 	break;
     case CS_EVENT_CARD_INSERTION:
@@ -1703,25 +1671,15 @@ do_open(struct net_device *dev)
     return 0;
 }
 
-static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
 {
-	u32 ethcmd;
-		
-	if (copy_from_user(&ethcmd, useraddr, sizeof(ethcmd)))
-		return -EFAULT;
-	
-	switch (ethcmd) {
-	case ETHTOOL_GDRVINFO: {
-		struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
-		strncpy(info.driver, "xirc2ps_cs", sizeof(info.driver)-1);
-		if (copy_to_user(useraddr, &info, sizeof(info)))
-			return -EFAULT;
-		return 0;
-	}
-	}
-	
-	return -EOPNOTSUPP;
+	strcpy(info->driver, "xirc2ps_cs");
 }
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
 
 static int
 do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
@@ -1738,15 +1696,13 @@ do_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	return -EOPNOTSUPP;
 
     switch(cmd) {
-      case SIOCETHTOOL:
-        return netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
-      case SIOCDEVPRIVATE:	/* Get the address of the PHY in use. */
+      case SIOCGMIIPHY:		/* Get the address of the PHY in use. */
 	data[0] = 0;		/* we have only this address */
 	/* fall trough */
-      case SIOCDEVPRIVATE+1:	/* Read the specified MII register. */
+      case SIOCGMIIREG:		/* Read the specified MII register. */
 	data[3] = mii_rd(ioaddr, data[0] & 0x1f, data[1] & 0x1f);
 	break;
-      case SIOCDEVPRIVATE+2:	/* Write the specified MII register */
+      case SIOCSMIIREG:		/* Write the specified MII register */
 	if (!capable(CAP_NET_ADMIN))
 	    return -EPERM;
 	mii_wr(ioaddr, data[0] & 0x1f, data[1] & 0x1f, data[2], 16);
@@ -2044,9 +2000,6 @@ do_stop(struct net_device *dev)
     SelectPage(0);
 
     link->open--;
-    if (link->state & DEV_STALE_CONFIG)
-	mod_timer(&link->release, jiffies + HZ/20);
-
     return 0;
 }
 

@@ -220,20 +220,12 @@ isar_load_firmware(struct IsdnCardState *cs, u8 *buf)
 	cs->debug &= ~(L1_DEB_HSCX | L1_DEB_HSCX_FIFO);
 #endif
 	printk(KERN_DEBUG"isar_load_firmware buf %#lx\n", (u_long)buf);
-	if ((ret = verify_area(VERIFY_READ, (void *) p, sizeof(int)))) {
-		printk(KERN_ERR"isar_load_firmware verify_area ret %d\n", ret);
-		return ret;
-	}
 	if ((ret = copy_from_user(&size, p, sizeof(int)))) {
 		printk(KERN_ERR"isar_load_firmware copy_from_user ret %d\n", ret);
 		return -EFAULT;
 	}
 	p += sizeof(int);
 	printk(KERN_DEBUG"isar_load_firmware size: %d\n", size);
-	if ((ret = verify_area(VERIFY_READ, (void *) p, size))) {
-		printk(KERN_ERR"isar_load_firmware verify_area ret %d\n", ret);
-		return ret;
-	}
 	cnt = 0;
 	/* disable ISAR IRQ */
 	isar_write_reg(cs, 0, ISAR_IRQBIT, 0);
@@ -677,7 +669,7 @@ isar_fill_fifo(struct BCState *bcs)
 	if (!(bcs->hw.isar.reg->bstat & 
 		(bcs->hw.isar.dpath == 1 ? BSTAT_RDM1 : BSTAT_RDM2)))
 		return;
-	if (bcs->tx_skb->len > bcs->hw.isar.mml) {
+	if (bcs->tx_skb->len > (u_int)bcs->hw.isar.mml) {
 		msb = 0;
 		count = bcs->hw.isar.mml;
 	} else {

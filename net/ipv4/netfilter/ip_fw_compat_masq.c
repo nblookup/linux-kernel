@@ -13,7 +13,6 @@
 #include <linux/netdevice.h>
 #include <linux/inetdevice.h>
 #include <linux/proc_fs.h>
-#include <linux/version.h>
 #include <linux/module.h>
 #include <net/route.h>
 
@@ -92,9 +91,6 @@ do_masquerade(struct sk_buff **pskb, const struct net_device *dev)
 			WRITE_UNLOCK(&ip_nat_lock);
 			return ret;
 		}
-
-		place_in_hashes(ct, info);
-		info->initialized = 1;
 	} else
 		DEBUGP("Masquerading already done on this conn.\n");
 	WRITE_UNLOCK(&ip_nat_lock);

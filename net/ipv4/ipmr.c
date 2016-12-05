@@ -46,6 +46,7 @@
 #include <linux/inetdevice.h>
 #include <linux/igmp.h>
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/mroute.h>
 #include <linux/init.h>
 #include <net/ip.h>
@@ -193,7 +194,7 @@ static void reg_vif_setup(struct net_device *dev)
 	dev->flags		= IFF_NOARP;
 	dev->hard_start_xmit	= reg_vif_xmit;
 	dev->get_stats		= reg_vif_get_stats;
-	dev->destructor		= (void (*)(struct net_device *)) kfree;
+	dev->destructor		= free_netdev;
 }
 
 static struct net_device *ipmr_reg_vif(void)
@@ -1100,6 +1101,7 @@ static void ip_encap(struct sk_buff *skb, u32 saddr, u32 daddr)
 
 	skb->h.ipiph = skb->nh.iph;
 	skb->nh.iph = iph;
+	memset(&(IPCB(skb)->opt), 0, sizeof(IPCB(skb)->opt));
 #ifdef CONFIG_NETFILTER
 	nf_conntrack_put(skb->nfct);
 	skb->nfct = NULL;
@@ -1108,30 +1110,30 @@ static void ip_encap(struct sk_buff *skb, u32 saddr, u32 daddr)
 
 static inline int ipmr_forward_finish(struct sk_buff *skb)
 {
-	struct dst_entry *dst = skb->dst;
+	struct ip_options * opt	= &(IPCB(skb)->opt);
 
-	if (skb->len <= dst_pmtu(dst))
-		return dst_output(skb);
-	else
-		return ip_fragment(skb, dst_output);
+	IP_INC_STATS_BH(IpForwDatagrams);
+
+	if (unlikely(opt->optlen))
+		ip_forward_options(skb);
+
+	return dst_output(skb);
 }
 
 /*
  *	Processing handlers for ipmr_forward
  */
 
-static void ipmr_queue_xmit(struct sk_buff *skb, struct mfc_cache *c,
-			   int vifi, int last)
+static void ipmr_queue_xmit(struct sk_buff *skb, struct mfc_cache *c, int vifi)
 {
 	struct iphdr *iph = skb->nh.iph;
 	struct vif_device *vif = &vif_table[vifi];
 	struct net_device *dev;
 	struct rtable *rt;
 	int    encap = 0;
-	struct sk_buff *skb2;
 
 	if (vif->dev == NULL)
-		return;
+		goto out_free;
 
 #ifdef CONFIG_IP_PIMSM
 	if (vif->flags & VIFF_REGISTER) {
@@ -1140,6 +1142,7 @@ static void ipmr_queue_xmit(struct sk_buff *skb, struct mfc_cache *c,
 		((struct net_device_stats*)vif->dev->priv)->tx_bytes += skb->len;
 		((struct net_device_stats*)vif->dev->priv)->tx_packets++;
 		ipmr_cache_report(skb, vifi, IGMPMSG_WHOLEPKT);
+		kfree_skb(skb);
 		return;
 	}
 #endif
@@ -1152,7 +1155,7 @@ static void ipmr_queue_xmit(struct sk_buff *skb, struct mfc_cache *c,
 						.tos = RT_TOS(iph->tos) } },
 				    .proto = IPPROTO_IPIP };
 		if (ip_route_output_key(&rt, &fl))
-			return;
+			goto out_free;
 		encap = sizeof(struct iphdr);
 	} else {
 		struct flowi fl = { .oif = vif->link,
@@ -1161,7 +1164,7 @@ static void ipmr_queue_xmit(struct sk_buff *skb, struct mfc_cache *c,
 						.tos = RT_TOS(iph->tos) } },
 				    .proto = IPPROTO_IPIP };
 		if (ip_route_output_key(&rt, &fl))
-			return;
+			goto out_free;
 	}
 
 	dev = rt->u.dst.dev;
@@ -1174,43 +1177,34 @@ static void ipmr_queue_xmit(struct sk_buff *skb, struct mfc_cache *c,
 
 		IP_INC_STATS_BH(IpFragFails);
 		ip_rt_put(rt);
-		return;
+		goto out_free;
 	}
 
-	encap += LL_RESERVED_SPACE(dev);
+	encap += LL_RESERVED_SPACE(dev) + rt->u.dst.header_len;
 
-	if (skb_headroom(skb) < encap || skb_cloned(skb) || !last)
-		skb2 = skb_realloc_headroom(skb, (encap + 15)&~15);
-	else if (atomic_read(&skb->users) != 1)
-		skb2 = skb_clone(skb, GFP_ATOMIC);
-	else {
-		atomic_inc(&skb->users);
-		skb2 = skb;
-	}
-
-	if (skb2 == NULL) {
-		ip_rt_put(rt);
-		return;
+	if (skb_cow(skb, encap)) {
+ 		ip_rt_put(rt);
+		goto out_free;
 	}
 
 	vif->pkt_out++;
 	vif->bytes_out+=skb->len;
 
-	dst_release(skb2->dst);
-	skb2->dst = &rt->u.dst;
-	iph = skb2->nh.iph;
+	dst_release(skb->dst);
+	skb->dst = &rt->u.dst;
+	iph = skb->nh.iph;
 	ip_decrease_ttl(iph);
 
 	/* FIXME: forward and output firewalls used to be called here.
 	 * What do we do with netfilter? -- RR */
 	if (vif->flags & VIFF_TUNNEL) {
-		ip_encap(skb2, vif->local, vif->remote);
+		ip_encap(skb, vif->local, vif->remote);
 		/* FIXME: extra output firewall step used to be here. --RR */
 		((struct ip_tunnel *)vif->dev->priv)->stat.tx_packets++;
-		((struct ip_tunnel *)vif->dev->priv)->stat.tx_bytes+=skb2->len;
+		((struct ip_tunnel *)vif->dev->priv)->stat.tx_bytes+=skb->len;
 	}
 
-	IPCB(skb2)->flags |= IPSKB_FORWARDED;
+	IPCB(skb)->flags |= IPSKB_FORWARDED;
 
 	/*
 	 * RFC1584 teaches, that DVMRP/PIM router must deliver packets locally
@@ -1223,8 +1217,13 @@ static void ipmr_queue_xmit(struct sk_buff *skb, struct mfc_cache *c,
 	 * not mrouter) cannot join to more than one interface - it will
 	 * result in receiving multiple packets.
 	 */
-	NF_HOOK(PF_INET, NF_IP_FORWARD, skb2, skb->dev, dev, 
+	NF_HOOK(PF_INET, NF_IP_FORWARD, skb, skb->dev, dev, 
 		ipmr_forward_finish);
+	return;
+
+out_free:
+	kfree_skb(skb);
+	return;
 }
 
 static int ipmr_find_vif(struct net_device *dev)
@@ -1295,13 +1294,24 @@ static int ip_mr_forward(struct sk_buff *skb, struct mfc_cache *cache, int local
 	 */
 	for (ct = cache->mfc_un.res.maxvif-1; ct >= cache->mfc_un.res.minvif; ct--) {
 		if (skb->nh.iph->ttl > cache->mfc_un.res.ttls[ct]) {
-			if (psend != -1)
-				ipmr_queue_xmit(skb, cache, psend, 0);
+			if (psend != -1) {
+				struct sk_buff *skb2 = skb_clone(skb, GFP_ATOMIC);
+				if (skb2)
+					ipmr_queue_xmit(skb2, cache, psend);
+			}
 			psend=ct;
 		}
 	}
-	if (psend != -1)
-		ipmr_queue_xmit(skb, cache, psend, !local);
+	if (psend != -1) {
+		if (local) {
+			struct sk_buff *skb2 = skb_clone(skb, GFP_ATOMIC);
+			if (skb2)
+				ipmr_queue_xmit(skb2, cache, psend);
+		} else {
+			ipmr_queue_xmit(skb, cache, psend);
+			return 0;
+		}
+	}
 
 dont_forward:
 	if (!local)
@@ -1599,133 +1609,267 @@ int ipmr_get_route(struct sk_buff *skb, struct rtmsg *rtm, int nowait)
 /*
  *	The /proc interfaces to multicast routing /proc/ip_mr_cache /proc/ip_mr_vif
  */
- 
-static int ipmr_vif_info(char *buffer, char **start, off_t offset, int length)
-{
-	struct vif_device *vif;
-	int len=0;
-	off_t pos=0;
-	off_t begin=0;
-	int size;
+struct ipmr_vif_iter {
 	int ct;
+};
 
-	len += sprintf(buffer,
-		 "Interface      BytesIn  PktsIn  BytesOut PktsOut Flags Local    Remote\n");
-	pos=len;
-  
-	read_lock(&mrt_lock);
-	for (ct=0;ct<maxvif;ct++) 
-	{
-		char *name = "none";
-		vif=&vif_table[ct];
-		if(!VIF_EXISTS(ct))
+static struct vif_device *ipmr_vif_seq_idx(struct ipmr_vif_iter *iter,
+					   loff_t pos)
+{
+	for (iter->ct = 0; iter->ct < maxvif; ++iter->ct) {
+		if(!VIF_EXISTS(iter->ct))
 			continue;
-		if (vif->dev)
-			name = vif->dev->name;
-        	size = sprintf(buffer+len, "%2d %-10s %8ld %7ld  %8ld %7ld %05X %08X %08X\n",
-        		ct, name, vif->bytes_in, vif->pkt_in, vif->bytes_out, vif->pkt_out,
-        		vif->flags, vif->local, vif->remote);
-		len+=size;
-		pos+=size;
-		if(pos<offset)
-		{
-			len=0;
-			begin=pos;
-		}
-		if(pos>offset+length)
-			break;
-  	}
-	read_unlock(&mrt_lock);
-  	
-  	*start=buffer+(offset-begin);
-  	len-=(offset-begin);
-  	if(len>length)
-  		len=length;
-	if (len<0)
-		len = 0;
-  	return len;
+		if (pos-- == 0) 
+			return &vif_table[iter->ct];
+	}
+	return NULL;
 }
 
-static int ipmr_mfc_info(char *buffer, char **start, off_t offset, int length)
+static void *ipmr_vif_seq_start(struct seq_file *seq, loff_t *pos)
+{
+	read_lock(&mrt_lock);
+	return *pos ? ipmr_vif_seq_idx(seq->private, *pos - 1) 
+		: SEQ_START_TOKEN;
+}
+
+static void *ipmr_vif_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	struct ipmr_vif_iter *iter = seq->private;
+
+	++*pos;
+	if (v == SEQ_START_TOKEN)
+		return ipmr_vif_seq_idx(iter, 0);
+	
+	while (++iter->ct < maxvif) {
+		if(!VIF_EXISTS(iter->ct))
+			continue;
+		return &vif_table[iter->ct];
+	}
+	return NULL;
+}
+
+static void ipmr_vif_seq_stop(struct seq_file *seq, void *v)
+{
+	read_unlock(&mrt_lock);
+}
+
+static int ipmr_vif_seq_show(struct seq_file *seq, void *v)
+{
+	if (v == SEQ_START_TOKEN) {
+		seq_puts(seq, 
+			 "Interface      BytesIn  PktsIn  BytesOut PktsOut Flags Local    Remote\n");
+	} else {
+		const struct vif_device *vif = v;
+		const char *name =  vif->dev ? vif->dev->name : "none";
+
+		seq_printf(seq,
+			   "%2Zd %-10s %8ld %7ld  %8ld %7ld %05X %08X %08X\n",
+			   vif - vif_table,
+			   name, vif->bytes_in, vif->pkt_in, 
+			   vif->bytes_out, vif->pkt_out,
+			   vif->flags, vif->local, vif->remote);
+	}
+	return 0;
+}
+
+static struct seq_operations ipmr_vif_seq_ops = {
+	.start = ipmr_vif_seq_start,
+	.next  = ipmr_vif_seq_next,
+	.stop  = ipmr_vif_seq_stop,
+	.show  = ipmr_vif_seq_show,
+};
+
+static int ipmr_vif_open(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq;
+	int rc = -ENOMEM;
+	struct ipmr_vif_iter *s = kmalloc(sizeof(*s), GFP_KERNEL);
+       
+	if (!s)
+		goto out;
+
+	rc = seq_open(file, &ipmr_vif_seq_ops);
+	if (rc)
+		goto out_kfree;
+
+	s->ct = 0;
+	seq = file->private_data;
+	seq->private = s;
+out:
+	return rc;
+out_kfree:
+	kfree(s);
+	goto out;
+
+}
+
+static struct file_operations ipmr_vif_fops = {
+	.owner	 = THIS_MODULE,
+	.open    = ipmr_vif_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = seq_release,
+};
+
+struct ipmr_mfc_iter {
+	struct mfc_cache **cache;
+	int ct;
+};
+
+
+static struct mfc_cache *ipmr_mfc_seq_idx(struct ipmr_mfc_iter *it, loff_t pos)
 {
 	struct mfc_cache *mfc;
-	int len=0;
-	off_t pos=0;
-	off_t begin=0;
-	int size;
-	int ct;
 
-	len += sprintf(buffer,
-		 "Group    Origin   Iif     Pkts    Bytes    Wrong Oifs\n");
-	pos=len;
-
+	it->cache = mfc_cache_array;
 	read_lock(&mrt_lock);
-	for (ct=0;ct<MFC_LINES;ct++) 
-	{
-		for(mfc=mfc_cache_array[ct]; mfc; mfc=mfc->next)
-		{
-			int n;
+	for (it->ct = 0; it->ct < MFC_LINES; it->ct++) 
+		for(mfc = mfc_cache_array[it->ct]; mfc; mfc = mfc->next) 
+			if (pos-- == 0) 
+				return mfc;
+	read_unlock(&mrt_lock);
 
-			/*
-			 *	Interface forwarding map
-			 */
-			size = sprintf(buffer+len, "%08lX %08lX %-3d %8ld %8ld %8ld",
-				(unsigned long)mfc->mfc_mcastgrp,
-				(unsigned long)mfc->mfc_origin,
-				mfc->mfc_parent,
-				mfc->mfc_un.res.pkt,
-				mfc->mfc_un.res.bytes,
-				mfc->mfc_un.res.wrong_if);
-			for(n=mfc->mfc_un.res.minvif;n<mfc->mfc_un.res.maxvif;n++)
-			{
-				if(VIF_EXISTS(n) && mfc->mfc_un.res.ttls[n] < 255)
-					size += sprintf(buffer+len+size, " %2d:%-3d", n, mfc->mfc_un.res.ttls[n]);
-			}
-			size += sprintf(buffer+len+size, "\n");
-			len+=size;
-			pos+=size;
-			if(pos<offset)
-			{
-				len=0;
-				begin=pos;
-			}
-			if(pos>offset+length)
-				goto done;
-	  	}
-  	}
-
+	it->cache = &mfc_unres_queue;
 	spin_lock_bh(&mfc_unres_lock);
-	for(mfc=mfc_unres_queue; mfc; mfc=mfc->next) {
-		size = sprintf(buffer+len, "%08lX %08lX %-3d %8ld %8ld %8ld\n",
-			       (unsigned long)mfc->mfc_mcastgrp,
-			       (unsigned long)mfc->mfc_origin,
-			       -1,
-				(long)mfc->mfc_un.unres.unresolved.qlen,
-				0L, 0L);
-		len+=size;
-		pos+=size;
-		if(pos<offset)
-		{
-			len=0;
-			begin=pos;
-		}
-		if(pos>offset+length)
-			break;
-	}
+	for(mfc = mfc_unres_queue; mfc; mfc = mfc->next) 
+		if (pos-- == 0)
+			return mfc;
 	spin_unlock_bh(&mfc_unres_lock);
 
-done:
-	read_unlock(&mrt_lock);
-  	*start=buffer+(offset-begin);
-  	len-=(offset-begin);
-  	if(len>length)
-  		len=length;
-	if (len < 0) {
-		len = 0;
-	}
-  	return len;
+	it->cache = NULL;
+	return NULL;
 }
 
+
+static void *ipmr_mfc_seq_start(struct seq_file *seq, loff_t *pos)
+{
+	return *pos ? ipmr_mfc_seq_idx(seq->private, *pos - 1) 
+		: SEQ_START_TOKEN;
+}
+
+static void *ipmr_mfc_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	struct mfc_cache *mfc = v;
+	struct ipmr_mfc_iter *it = seq->private;
+
+	++*pos;
+
+	if (v == SEQ_START_TOKEN)
+		return ipmr_mfc_seq_idx(seq->private, 0);
+
+	if (mfc->next)
+		return mfc->next;
+	
+	if (it->cache == &mfc_unres_queue) 
+		goto end_of_list;
+
+	BUG_ON(it->cache != mfc_cache_array);
+
+	while (++it->ct < MFC_LINES) {
+		mfc = mfc_cache_array[it->ct];
+		if (mfc)
+			return mfc;
+	}
+
+	/* exhausted cache_array, show unresolved */
+	read_unlock(&mrt_lock);
+	it->cache = &mfc_unres_queue;
+	it->ct = 0;
+		
+	spin_lock_bh(&mfc_unres_lock);
+	mfc = mfc_unres_queue;
+	if (mfc) 
+		return mfc;
+
+ end_of_list:
+	spin_unlock_bh(&mfc_unres_lock);
+	it->cache = NULL;
+
+	return NULL;
+}
+
+static void ipmr_mfc_seq_stop(struct seq_file *seq, void *v)
+{
+	struct ipmr_mfc_iter *it = seq->private;
+
+	if (it->cache == &mfc_unres_queue)
+		spin_unlock_bh(&mfc_unres_lock);
+	else if (it->cache == mfc_cache_array)
+		read_unlock(&mrt_lock);
+}
+
+static int ipmr_mfc_seq_show(struct seq_file *seq, void *v)
+{
+	int n;
+
+	if (v == SEQ_START_TOKEN) {
+		seq_puts(seq, 
+		 "Group    Origin   Iif     Pkts    Bytes    Wrong Oifs\n");
+	} else {
+		const struct mfc_cache *mfc = v;
+		const struct ipmr_mfc_iter *it = seq->private;
+		
+		seq_printf(seq, "%08lX %08lX %-3d %8ld %8ld %8ld",
+			   (unsigned long) mfc->mfc_mcastgrp,
+			   (unsigned long) mfc->mfc_origin,
+			   mfc->mfc_parent,
+			   mfc->mfc_un.res.pkt,
+			   mfc->mfc_un.res.bytes,
+			   mfc->mfc_un.res.wrong_if);
+
+		if (it->cache != &mfc_unres_queue) {
+			for(n = mfc->mfc_un.res.minvif; 
+			    n < mfc->mfc_un.res.maxvif; n++ ) {
+				if(VIF_EXISTS(n) 
+				   && mfc->mfc_un.res.ttls[n] < 255)
+				seq_printf(seq, 
+					   " %2d:%-3d", 
+					   n, mfc->mfc_un.res.ttls[n]);
+			}
+		}
+		seq_putc(seq, '\n');
+	}
+	return 0;
+}
+
+static struct seq_operations ipmr_mfc_seq_ops = {
+	.start = ipmr_mfc_seq_start,
+	.next  = ipmr_mfc_seq_next,
+	.stop  = ipmr_mfc_seq_stop,
+	.show  = ipmr_mfc_seq_show,
+};
+
+static int ipmr_mfc_open(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq;
+	int rc = -ENOMEM;
+	struct ipmr_mfc_iter *s = kmalloc(sizeof(*s), GFP_KERNEL);
+       
+	if (!s)
+		goto out;
+
+	rc = seq_open(file, &ipmr_mfc_seq_ops);
+	if (rc)
+		goto out_kfree;
+
+	memset(s, 0, sizeof(*s));
+	seq = file->private_data;
+	seq->private = s;
+out:
+	return rc;
+out_kfree:
+	kfree(s);
+	goto out;
+
+}
+
+static struct file_operations ipmr_mfc_fops = {
+	.owner	 = THIS_MODULE,
+	.open    = ipmr_mfc_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = seq_release,
+};
 #endif	
 
 #ifdef CONFIG_IP_PIMSM_V2
@@ -1741,7 +1885,6 @@ static struct inet_protocol pim_protocol = {
  
 void __init ip_mr_init(void)
 {
-	printk(KERN_INFO "Linux IP multicast router 0.06 plus PIM-SM\n");
 	mrt_cachep = kmem_cache_create("ip_mrt_cache",
 				       sizeof(struct mfc_cache),
 				       0, SLAB_HWCACHE_ALIGN,
@@ -1750,7 +1893,7 @@ void __init ip_mr_init(void)
 	ipmr_expire_timer.function=ipmr_expire_process;
 	register_netdevice_notifier(&ip_mr_notifier);
 #ifdef CONFIG_PROC_FS	
-	proc_net_create("ip_mr_vif",0,ipmr_vif_info);
-	proc_net_create("ip_mr_cache",0,ipmr_mfc_info);
+	proc_net_fops_create("ip_mr_vif", 0, &ipmr_vif_fops);
+	proc_net_fops_create("ip_mr_cache", 0, &ipmr_mfc_fops);
 #endif	
 }

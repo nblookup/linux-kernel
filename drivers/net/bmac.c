@@ -1462,7 +1462,7 @@ out2:
 	release_OF_resource(bp->node, 0);
 out1:
 	pmac_call_feature(PMAC_FTR_BMAC_ENABLE, bp->node, 0, 0);
-	kfree(dev);
+	free_netdev(dev);
 }
 
 static int bmac_open(struct net_device *dev)
@@ -1720,7 +1720,7 @@ static void __exit bmac_cleanup (void)
 		free_irq(bp->tx_dma_intr, dev);
 		free_irq(bp->rx_dma_intr, dev);
 
-		kfree(dev);
+		free_netdev(dev);
 	} while (bmac_devs != NULL);
 }
 

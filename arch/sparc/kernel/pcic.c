@@ -35,27 +35,6 @@
 #include <asm/timer.h>
 #include <asm/uaccess.h>
 
-#ifndef CONFIG_PCI
-
-asmlinkage int sys_pciconfig_read(unsigned long bus,
-				  unsigned long dfn,
-				  unsigned long off,
-				  unsigned long len,
-				  unsigned char *buf)
-{
-	return -EINVAL;
-}
-
-asmlinkage int sys_pciconfig_write(unsigned long bus,
-				   unsigned long dfn,
-				   unsigned long off,
-				   unsigned long len,
-				   unsigned char *buf)
-{
-	return -EINVAL;
-}
-
-#else
 
 struct pci_fixup pcibios_fixups[] = {
 	{ 0 }
@@ -797,15 +776,29 @@ static void pci_do_gettimeofday(struct timeval *tv)
 	unsigned long flags;
 	unsigned long seq;
 	unsigned long usec, sec;
+	unsigned long max_ntp_tick = tick_usec - tickadj;
 
 	do {
+		unsigned long lost;
+
 		seq = read_seqbegin_irqsave(&xtime_lock, flags);
 		usec = do_gettimeoffset();
-		{
-			unsigned long lost = jiffies - wall_jiffies;
+		lost = jiffies - wall_jiffies;
+
+		/*
+		 * If time_adjust is negative then NTP is slowing the clock
+		 * so make sure not to go into next possible interval.
+		 * Better to lose some accuracy than have time go backwards..
+		 */
+		if (unlikely(time_adjust < 0)) {
+			usec = min(usec, max_ntp_tick);
+
 			if (lost)
-				usec += lost * (1000000 / HZ);
+				usec += lost * max_ntp_tick;
 		}
+		else if (unlikely(lost))
+			usec += lost * tick_usec;
+
 		sec = xtime.tv_sec;
 		usec += (xtime.tv_nsec / 1000);
 	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
@@ -1044,5 +1037,3 @@ void insl(unsigned long addr, void *dst, unsigned long count) {
 }
 
 subsys_initcall(pcic_init);
-
-#endif

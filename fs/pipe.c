@@ -208,10 +208,8 @@ pipe_write(struct file *filp, const char __user *buf, size_t count, loff_t *ppos
 		wake_up_interruptible(PIPE_WAIT(*inode));
 		kill_fasync(PIPE_FASYNC_READERS(*inode), SIGIO, POLL_IN);
 	}
-	if (ret > 0) {
-		inode->i_ctime = inode->i_mtime = CURRENT_TIME;
-		mark_inode_dirty(inode);
-	}
+	if (ret > 0)
+		inode_update_time(inode, 1);	/* mtime and ctime */
 	return ret;
 }
 
@@ -643,11 +641,10 @@ static int __init init_pipe_fs(void)
 	int err = register_filesystem(&pipe_fs_type);
 	if (!err) {
 		pipe_mnt = kern_mount(&pipe_fs_type);
-		err = PTR_ERR(pipe_mnt);
-		if (IS_ERR(pipe_mnt))
+		if (IS_ERR(pipe_mnt)) {
+			err = PTR_ERR(pipe_mnt);
 			unregister_filesystem(&pipe_fs_type);
-		else
-			err = 0;
+		}
 	}
 	return err;
 }

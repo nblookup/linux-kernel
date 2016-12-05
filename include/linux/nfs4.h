@@ -46,8 +46,8 @@
 #define NFS4_ACE_SYSTEM_AUDIT_ACE_TYPE   2
 #define NFS4_ACE_SYSTEM_ALARM_ACE_TYPE   3
 
-typedef char nfs4_verifier[NFS4_VERIFIER_SIZE];
-typedef char nfs4_stateid[16];
+typedef struct { char data[NFS4_VERIFIER_SIZE]; } nfs4_verifier;
+typedef struct { char data[16]; } nfs4_stateid;
 
 enum nfs_opnum4 {
 	OP_ACCESS = 3,
@@ -133,6 +133,15 @@ enum open_delegation_type4 {
 	NFS4_OPEN_DELEGATE_READ = 1,
 	NFS4_OPEN_DELEGATE_WRITE = 2
 };
+
+enum lock_type4 {
+	NFS4_UNLOCK_LT = 0,
+	NFS4_READ_LT = 1,
+	NFS4_WRITE_LT = 2,
+	NFS4_READW_LT = 3,
+	NFS4_WRITEW_LT = 4
+};
+
 
 /* Mandatory Attributes */
 #define FATTR4_WORD0_SUPPORTED_ATTRS    (1)

@@ -238,13 +238,9 @@ EXPORT_SYMBOL(ite_gpio_int_wait);
 
 static int ite_gpio_open(struct inode *inode, struct file *file)
 {
-	unsigned int minor = minor(inode->i_rdev); 
+	unsigned int minor = iminor(inode); 
 	if (minor != GPIO_MINOR)
 		return -ENODEV;
-
-#ifdef MODULE
-	MOD_INC_USE_COUNT;
-#endif
 
 	return 0;
 }
@@ -252,11 +248,6 @@ static int ite_gpio_open(struct inode *inode, struct file *file)
 
 static int ite_gpio_release(struct inode *inode, struct file *file)
 {
-
-#ifdef MODULE
-	MOD_DEC_USE_COUNT;
-#endif
-
 	return 0;
 }
 

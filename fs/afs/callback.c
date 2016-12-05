@@ -68,7 +68,7 @@ int SRXAFSCM_InitCallBackState(afs_server_t *server)
 			spin_unlock(&vnode->lock);
 
 			iput(inode);
-			if (release) afs_put_server(server);
+			afs_put_server(server);
 
 			spin_lock(&server->cb_lock);
 		}
@@ -146,7 +146,7 @@ int SRXAFSCM_CallBack(afs_server_t *server, size_t count, afs_callback_t callbac
 			spin_unlock(&vnode->lock);
 
 			if (valid) {
-				invalidate_inode_pages(inode->i_mapping);
+				invalidate_remote_inode(inode);
 				afs_put_server(server);
 			}
 			iput(inode);

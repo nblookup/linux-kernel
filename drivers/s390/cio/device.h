@@ -15,8 +15,6 @@ enum dev_state {
 	DEV_STATE_DISBAND_PGID,
 	DEV_STATE_BOXED,
 	/* states to wait for i/o completion before doing something */
-	DEV_STATE_ONLINE_VERIFY,
-	DEV_STATE_W4SENSE_VERIFY,
 	DEV_STATE_CLEAR_VERIFY,
 	DEV_STATE_TIMEOUT_KILL,
 	/* last element! */
@@ -65,6 +63,8 @@ extern struct workqueue_struct *ccw_device_work;
 
 void io_subchannel_recog_done(struct ccw_device *cdev);
 
+void ccw_device_unregister(void *);
+
 int ccw_device_recognition(struct ccw_device *);
 int ccw_device_online(struct ccw_device *);
 int ccw_device_offline(struct ccw_device *);
@@ -93,7 +93,7 @@ void ccw_device_disband_start(struct ccw_device *);
 void ccw_device_disband_irq(struct ccw_device *, enum dev_event);
 void ccw_device_disband_done(struct ccw_device *, int);
 
-void ccw_device_call_handler(struct ccw_device *);
+int ccw_device_call_handler(struct ccw_device *);
 
 void ccw_device_add_stlck(void *);
 int ccw_device_stlck(struct ccw_device *);

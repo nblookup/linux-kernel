@@ -98,6 +98,7 @@
 #include <linux/in.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
@@ -153,8 +154,14 @@ static int sock_set_timeout(long *timeo_p, char __user *optval, int optlen)
 
 static void sock_warn_obsolete_bsdism(const char *name)
 {
-	printk(KERN_WARNING "process `%s' is using obsolete "
-	       "%s SO_BSDCOMPAT\n", current->comm, name);
+	static int warned;
+	static char warncomm[16];
+	if (strcmp(warncomm, current->comm) && warned < 5) { 
+		strcpy(warncomm,  current->comm); 
+		printk(KERN_WARNING "process `%s' is using obsolete "
+		       "%s SO_BSDCOMPAT\n", warncomm, name);
+		warned++;
+	}
 }
 
 /*
@@ -1111,3 +1118,40 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 
 	atomic_set(&sk->sk_refcnt, 1);
 }
+
+EXPORT_SYMBOL(__lock_sock);
+EXPORT_SYMBOL(__release_sock);
+EXPORT_SYMBOL(sk_alloc);
+EXPORT_SYMBOL(sk_free);
+EXPORT_SYMBOL(sk_send_sigurg);
+EXPORT_SYMBOL(sock_alloc_send_pskb);
+EXPORT_SYMBOL(sock_alloc_send_skb);
+EXPORT_SYMBOL(sock_getsockopt);
+EXPORT_SYMBOL(sock_init_data);
+EXPORT_SYMBOL(sock_kfree_s);
+EXPORT_SYMBOL(sock_kmalloc);
+EXPORT_SYMBOL(sock_no_accept);
+EXPORT_SYMBOL(sock_no_bind);
+EXPORT_SYMBOL(sock_no_connect);
+EXPORT_SYMBOL(sock_no_getname);
+EXPORT_SYMBOL(sock_no_getsockopt);
+EXPORT_SYMBOL(sock_no_ioctl);
+EXPORT_SYMBOL(sock_no_listen);
+EXPORT_SYMBOL(sock_no_mmap);
+EXPORT_SYMBOL(sock_no_poll);
+EXPORT_SYMBOL(sock_no_recvmsg);
+EXPORT_SYMBOL(sock_no_release);
+EXPORT_SYMBOL(sock_no_sendmsg);
+EXPORT_SYMBOL(sock_no_sendpage);
+EXPORT_SYMBOL(sock_no_setsockopt);
+EXPORT_SYMBOL(sock_no_shutdown);
+EXPORT_SYMBOL(sock_no_socketpair);
+EXPORT_SYMBOL(sock_rfree);
+EXPORT_SYMBOL(sock_rmalloc);
+EXPORT_SYMBOL(sock_setsockopt);
+EXPORT_SYMBOL(sock_wfree);
+EXPORT_SYMBOL(sock_wmalloc);
+#ifdef CONFIG_SYSCTL
+EXPORT_SYMBOL(sysctl_rmem_max);
+EXPORT_SYMBOL(sysctl_wmem_max);
+#endif

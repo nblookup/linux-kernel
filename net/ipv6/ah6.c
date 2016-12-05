@@ -19,15 +19,15 @@
  *
  *	Mitsuru KANDA @USAGI       : IPv6 Support 
  * 	Kazunori MIYAZAWA @USAGI   :
- * 	Kunihiro Ishiguro          :
+ * 	Kunihiro Ishiguro <kunihiro@ipinfusion.com>
  * 	
  * 	This file is derived from net/ipv4/ah.c.
  */
 
 #include <linux/config.h>
 #include <linux/module.h>
+#include <net/inet_ecn.h>
 #include <net/ip.h>
-#include <net/xfrm.h>
 #include <net/ah.h>
 #include <linux/crypto.h>
 #include <linux/pfkeyv2.h>
@@ -220,6 +220,8 @@ int ah6_output(struct sk_buff *skb)
 		skb->nh.ipv6h->flow_lbl[0] = iph->flow_lbl[0];
 		skb->nh.ipv6h->flow_lbl[1] = iph->flow_lbl[1];
 		skb->nh.ipv6h->flow_lbl[2] = iph->flow_lbl[2];
+		if (x->props.flags & XFRM_STATE_NOECN)
+			IP6_ECN_clear(skb->nh.ipv6h);
 	} else {
 		memcpy(skb->nh.ipv6h, iph, hdr_len);
 		skb->nh.raw[nh_offset] = IPPROTO_AH;
@@ -262,13 +264,12 @@ int ah6_input(struct xfrm_state *x, struct xfrm_decap_state *decap, struct sk_bu
 	 * There is offset of AH before IPv6 header after the process.
 	 */
 
-	struct ipv6hdr *iph = skb->nh.ipv6h;
 	struct ipv6_auth_hdr *ah;
 	struct ah_data *ahp;
 	unsigned char *tmp_hdr = NULL;
-	u16 hdr_len = skb->data - skb->nh.raw;
+	u16 hdr_len;
 	u16 ah_hlen;
-	u16 cleared_hlen = hdr_len;
+	u16 cleared_hlen;
 	u16 nh_offset = 0;
 	u8 nexthdr = 0;
 	u8 *prevhdr;
@@ -276,6 +277,14 @@ int ah6_input(struct xfrm_state *x, struct xfrm_decap_state *decap, struct sk_bu
 	if (!pskb_may_pull(skb, sizeof(struct ip_auth_hdr)))
 		goto out;
 
+	/* We are going to _remove_ AH header to keep sockets happy,
+	 * so... Later this can change. */
+	if (skb_cloned(skb) &&
+	    pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
+		goto out;
+
+	hdr_len = skb->data - skb->nh.raw;
+	cleared_hlen = hdr_len;
 	ah = (struct ipv6_auth_hdr*)skb->data;
 	ahp = x->data;
 	nexthdr = ah->nexthdr;
@@ -294,27 +303,22 @@ int ah6_input(struct xfrm_state *x, struct xfrm_decap_state *decap, struct sk_bu
 	if (!pskb_may_pull(skb, ah_hlen))
 		goto out;
 
-	/* We are going to _remove_ AH header to keep sockets happy,
-	 * so... Later this can change. */
-	if (skb_cloned(skb) &&
-	    pskb_expand_head(skb, 0, 0, GFP_ATOMIC))
-		goto out;
-
 	tmp_hdr = kmalloc(cleared_hlen, GFP_ATOMIC);
 	if (!tmp_hdr)
 		goto out;
 	memcpy(tmp_hdr, skb->nh.raw, cleared_hlen);
 	ipv6_clear_mutable_options(skb, &nh_offset, XFRM_POLICY_IN);
-	iph->priority    = 0;
-	iph->flow_lbl[0] = 0;
-	iph->flow_lbl[1] = 0;
-	iph->flow_lbl[2] = 0;
-	iph->hop_limit   = 0;
+	skb->nh.ipv6h->priority    = 0;
+	skb->nh.ipv6h->flow_lbl[0] = 0;
+	skb->nh.ipv6h->flow_lbl[1] = 0;
+	skb->nh.ipv6h->flow_lbl[2] = 0;
+	skb->nh.ipv6h->hop_limit   = 0;
 
         {
 		u8 auth_data[ahp->icv_trunc_len];
 
 		memcpy(auth_data, ah->auth_data, ahp->icv_trunc_len);
+		memset(ah->auth_data, 0, ahp->icv_trunc_len);
 		skb_push(skb, skb->data - skb->nh.raw);
 		ahp->icv(ahp, skb, ah->auth_data);
 		if (memcmp(ah->auth_data, auth_data, ahp->icv_trunc_len)) {
@@ -364,7 +368,7 @@ void ah6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 	if (!x)
 		return;
 
-	printk(KERN_DEBUG "pmtu discvovery on SA AH/%08x/"
+	printk(KERN_DEBUG "pmtu discovery on SA AH/%08x/"
 			"%04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x\n",
 	       ntohl(ah->spi), NIP6(iph->daddr));
 
@@ -375,6 +379,9 @@ static int ah6_init_state(struct xfrm_state *x, void *args)
 {
 	struct ah_data *ahp = NULL;
 	struct xfrm_algo_desc *aalg_desc;
+
+	if (!x->aalg)
+		goto error;
 
 	/* null auth can use a zero length key */
 	if (x->aalg->alg_key_len > 512)
@@ -438,6 +445,9 @@ error:
 static void ah6_destroy(struct xfrm_state *x)
 {
 	struct ah_data *ahp = x->data;
+
+	if (!ahp)
+		return;
 
 	if (ahp->work_icv) {
 		kfree(ahp->work_icv);

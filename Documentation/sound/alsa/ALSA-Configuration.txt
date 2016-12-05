@@ -27,6 +27,13 @@ the card supports).  You don't need to configure the PnP via
 isapnptools.
 
 
+Creating ALSA devices
+=====================
+
+Use the MAKEDEV.snd script located in the directory named scripts
+in the linux kernel tree.
+
+
 Module parameters
 =================
 
@@ -92,7 +99,7 @@ Module parameters
     amidi_map	- MIDI device number maps assigned to the 2st OSS device.
 		  (default: 1)
 
-  Global parameters for top soundcard modules
+  Common parameters for top soundcard modules
   -------------------------------------------
 
     Each of top-level soundcard module takes some general options,
@@ -442,7 +449,8 @@ Module parameters
     pcm_substreams_c	- capture channels (1-8, default=0)
     clock		- clock (0 = auto-detection)
     use_pm		- support the power-management (0 = off, 1 = on,
-			  2 = auto)
+			  2 = auto (default))
+    enable_mpu		- enable MPU401 (0 = off, 1 = on, 2 = auto (default))
 
     Module supports up to 8 cards and autoprobe.
 
@@ -518,6 +526,15 @@ Module parameters
 
     Module supports up to 8 cards.
 
+    Note: you need to load the firmware via hdsploader utility included
+          in alsa-tools package.
+
+    Note: snd-page-alloc module does the job which snd-hammerfall-mem
+          module did formerly.  It will allocate the buffers in advance
+          when any HDSP cards are found.  To make the buffer
+          allocation sure, load snd-page-alloc module in the early
+          stage of boot sequence.
+
   Module snd-ice1712
   ------------------
 
@@ -549,6 +566,7 @@ Module parameters
     Module for Envy24HT (VT/ICE1724) based PCI soundcards.
 			* MidiMan M Audio Revolution 7.1
 			* AMP Ltd AUDIO2000
+			* TerraTec Aureon Sky-5.1, Space-7.1
 
     Module supports up to 8 cards and autoprobe.
 
@@ -790,6 +808,12 @@ Module parameters
 
     Module supports up to 8 cards.
 
+    Note: snd-page-alloc module does the job which snd-hammerfall-mem
+          module did formerly.  It will allocate the buffers in advance
+          when any RME9652 cards are found.  To make the buffer
+          allocation sure, load snd-page-alloc module in the early
+          stage of boot sequence.
+
   Module snd-sa11xx-uda1341 (on arm only)
   ---------------------------------------
 
@@ -969,7 +993,7 @@ Module parameters
 		  [VIA686A/686B only]
     ac97_clock	- AC'97 codec clock base (default 48000Hz)
     dxs_support	- support DXS channels,
-		  0 = auto (default), 1 = enable, 2 = disable,
+		  0 = auto (defalut), 1 = enable, 2 = disable,
 		  3 = 48k only
 		  [VIA8233/C,8235 only]
 
@@ -982,13 +1006,18 @@ Module parameters
           assigned under 15. You might also upgrade your BIOS.
     
     Note: VIA8233/5 (not VIA8233A) can support DXS (direct sound)
-	  channels as the first PCM.  With this device, up to 4
-	  streams can be played at the same time.  If the playback on
-	  this PCM is noisy, try to specify dxs_channels option to 2
-	  or 3.
+	  channels as the first PCM.  On these channels, up to 4
+	  streams can be played at the same time.
+	  As default (dxs_support = 0), 48k fixed rate is chosen since
+	  the output is often noisy except for 48k on some mother
+	  boards due to the bug of BIOS.
+	  Please try once dxs_support=1 and if it works on other
+	  sample rates, please let us know the PCI subsystem
+	  vendor/device id's (output of "lspci -nv").
+	  If it doesn't work, use dxs_support=3 or dxs_support=2.
 
     Note: for the MPU401 on VIA823x, use snd-mpu401 driver
-	  additonally.
+	  additonally.  The mpu_port option is for VIA686 chips only.
 
   Module snd-virmidi
   ------------------
@@ -1007,6 +1036,7 @@ Module parameters
     Module for Digigram VX-Pocket VX222, V222 v2 and Mic cards.
 
     mic		- Enable Microphone on V222 Mic (NYI)
+    ibl		- Capture IBL size. (default = 0, minimum size)
 
     Module supports up to 8 cards.
 
@@ -1016,12 +1046,21 @@ Module parameters
 
 	post-install snd-vx222 "/usr/bin/vxload"
 
+    IBL size defines the interrupts period for PCM.  The smaller size
+    gives smaller latency but leads to more CPU consumption, too.
+    The size is usually aligned to 126.  As default (=0), the smallest
+    size is chosen.  The possible IBL values can be found in
+    /proc/asound/cardX/vx-status proc file.
+
   Module snd-vxpocket
   -------------------
 
     Module for Digigram VX-Pocket VX2 PCMCIA card.
 
     irq_mask - IRQ bitmask, specifies the available IRQs as bits
+               (default = 0xffff, all available)
+    irq_list - List of available interrupts (default = -1, not specified)
+    ibl      - Capture IBL size. (default = 0, minimum size)
 
     Module supports up to 8 cards.  The module is compiled only when
     PCMCIA is supported on kernel.
@@ -1032,12 +1071,19 @@ Module parameters
     For loading the firmware, use vxloader utility in alsa-tools
     package.
 
+    The irq_mask and irq_list are provided to avoid allocation of
+    specific IRQs.  Usually you don't need to specify them.
+
+    About capture IBL, see the description of snd-vx222 module.
+
   Module snd-vxp440
   -----------------
 
     Module for Digigram VX-Pocket 440 PCMCIA card.
 
     irq_mask - IRQ bitmask, specifies the available IRQs as bits
+    irq_list - List of available interrupts (default = -1, not specified)
+    ibl      - Capture IBL size. (default = 0, minimum size)
 
     Module supports up to 8 cards.  The module is compiled only when
     PCMCIA is supported on kernel.
@@ -1047,6 +1093,11 @@ Module parameters
 
     For loading the firmware, use vxloader utility in alsa-tools
     package.
+
+    The irq_mask and irq_list are provided to avoid allocation of
+    specific IRQs.  Usually you don't need to specify them.
+
+    About capture IBL, see the description of snd-vx222 module.
 
   Module snd-ymfpci
   -----------------
@@ -1284,6 +1335,9 @@ Proc interfaces (/proc/asound)
 	  - direct    don't use plugins
 	  - block     force block mode (rvplayer)
 	  - non-block force non-block mode
+	  - whole-frag  write only whole fragments (optimization affecting
+			playback only)
+	  - no-silence  do not fill silence ahead to avoid clicks
 
   Example: echo "x11amp 128 16384" > /proc/asound/card0/pcm0p/oss
            echo "squake 0 0 disable" > /proc/asound/card0/pcm0c/oss

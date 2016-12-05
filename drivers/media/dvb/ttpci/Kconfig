@@ -1,6 +1,8 @@
 config DVB_AV7110
 	tristate "AV7110 cards"
-	depends on VIDEO_DEV && DVB_CORE
+	depends on DVB_CORE
+	select VIDEO_DEV
+	select VIDEO_SAA7146_VV
 	help
 	  Support for SAA7146 and AV7110 based DVB cards as produced 
 	  by Fujitsu-Siemens, Technotrend, Hauppauge and others.
@@ -26,6 +28,7 @@ config DVB_AV7110_OSD
 config DVB_BUDGET
 	tristate "Budget cards"
 	depends on DVB_CORE
+	select VIDEO_SAA7146
 	help
 	  Support for simple SAA7146 based DVB cards
 	  (so called Budget- or Nova-PCI cards) without onboard
@@ -33,15 +36,13 @@ config DVB_BUDGET
 
 	  Say Y if you own such a card and want to use it.
 
-	  This driver is available as a module called
-	  dvb-ttpci-budget.o ( = code which can be inserted in
-	  and removed from the running kernel whenever you want).
-	  If you want to compile it as a module, say M
-	  here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called budget.
 
 config DVB_BUDGET_CI
 	tristate "Budget cards with onboard CI connector"
-	depends on VIDEO_DEV && DVB_CORE && DVB_BUDGET
+	depends on DVB_CORE
+	select VIDEO_SAA7146
 	help
 	  Support for simple SAA7146 based DVB cards
 	  (so called Budget- or Nova-PCI cards) without onboard
@@ -49,15 +50,14 @@ config DVB_BUDGET_CI
 
 	  Say Y if you own such a card and want to use it.
 
-	  This driver is available as a module called
-	  dvb-ttpci-budget-av.o ( = code which can be inserted in
-	  and removed from the running kernel whenever you want).
-	  If you want to compile it as a module, say M
-	  here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called budget-ci.
 
 config DVB_BUDGET_AV
 	tristate "Budget cards with analog video inputs"
-	depends on VIDEO_DEV && DVB_CORE && DVB_BUDGET
+	depends on DVB_CORE
+	select VIDEO_DEV
+	select VIDEO_SAA7146_VV
 	help
 	  Support for simple SAA7146 based DVB cards
 	  (so called Budget- or Nova-PCI cards) without onboard
@@ -65,14 +65,14 @@ config DVB_BUDGET_AV
 
 	  Say Y if you own such a card and want to use it.
 
-	  This driver is available as a module called
-	  dvb-ttpci-budget-av.o ( = code which can be inserted in
-	  and removed from the running kernel whenever you want).
-	  here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called budget-av.
 
 config DVB_BUDGET_PATCH
 	tristate "AV7110 cards with Budget Patch"
-	depends on DVB_CORE && DVB_BUDGET
+	depends on DVB_BUDGET
+	select VIDEO_DEV
+	select VIDEO_SAA7146_VV
 	help
 	  Support for Budget Patch (full TS) modification on 
 	  SAA7146+AV7110 based cards (DVB-S cards). This
@@ -85,8 +85,5 @@ config DVB_BUDGET_PATCH
 
 	  Say Y if you own such a card and want to use it.
 
-	  This driver is available as a module called
-	  dvb-ttpci-budget-patch.o ( = code which can be inserted in
-	  and removed from the running kernel whenever you want).
-	  If you want to compile it as a module, say M
-	  here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called budget-patch.

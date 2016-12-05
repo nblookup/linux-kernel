@@ -8,6 +8,10 @@
 #define MATCH   1
 #define NOMATCH 0
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Bart De Schuymer <bdschuym@pandora.be>");
+MODULE_DESCRIPTION("iptables bridge physical device match module");
+
 static int
 match(const struct sk_buff *skb,
       const struct net_device *in,
@@ -17,9 +21,9 @@ match(const struct sk_buff *skb,
       int *hotdrop)
 {
 	int i;
-	static const char nulldevname[IFNAMSIZ] = { 0 };
+	static const char nulldevname[IFNAMSIZ];
 	const struct ipt_physdev_info *info = matchinfo;
-	unsigned long ret;
+	unsigned int ret;
 	const char *indev, *outdev;
 	struct nf_bridge_info *nf_bridge;
 
@@ -61,10 +65,10 @@ match(const struct sk_buff *skb,
 	if (!(info->bitmask & IPT_PHYSDEV_OP_IN))
 		goto match_outdev;
 	indev = nf_bridge->physindev ? nf_bridge->physindev->name : nulldevname;
-	for (i = 0, ret = 0; i < IFNAMSIZ/sizeof(unsigned long); i++) {
-		ret |= (((const unsigned long *)indev)[i]
-			^ ((const unsigned long *)info->physindev)[i])
-			& ((const unsigned long *)info->in_mask)[i];
+	for (i = 0, ret = 0; i < IFNAMSIZ/sizeof(unsigned int); i++) {
+		ret |= (((const unsigned int *)indev)[i]
+			^ ((const unsigned int *)info->physindev)[i])
+			& ((const unsigned int *)info->in_mask)[i];
 	}
 
 	if ((ret == 0) ^ !(info->invert & IPT_PHYSDEV_OP_IN))
@@ -75,10 +79,10 @@ match_outdev:
 		return MATCH;
 	outdev = nf_bridge->physoutdev ?
 		 nf_bridge->physoutdev->name : nulldevname;
-	for (i = 0, ret = 0; i < IFNAMSIZ/sizeof(unsigned long); i++) {
-		ret |= (((const unsigned long *)outdev)[i]
-			^ ((const unsigned long *)info->physoutdev)[i])
-			& ((const unsigned long *)info->out_mask)[i];
+	for (i = 0, ret = 0; i < IFNAMSIZ/sizeof(unsigned int); i++) {
+		ret |= (((const unsigned int *)outdev)[i]
+			^ ((const unsigned int *)info->physoutdev)[i])
+			& ((const unsigned int *)info->out_mask)[i];
 	}
 
 	return (ret != 0) ^ !(info->invert & IPT_PHYSDEV_OP_OUT);
@@ -120,4 +124,3 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
-MODULE_LICENSE("GPL");

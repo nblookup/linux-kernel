@@ -20,6 +20,7 @@
 #include <linux/miscdevice.h>
 #include <linux/watchdog.h>
 #include <linux/init.h>
+#include <linux/moduleparam.h>
 #include <asm/uaccess.h>
 #include <asm/sgi/sgimc.h>
 
@@ -33,7 +34,7 @@ static int nowayout = 1;
 static int nowayout = 0;
 #endif
 
-MODULE_PARM(nowayout,"i");
+module_param(nowayout, int, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default=CONFIG_WATCHDOG_NOWAYOUT)");
 
 static void indydog_ping()
@@ -54,7 +55,7 @@ static int indydog_open(struct inode *inode, struct file *file)
 		return -EBUSY;
 
 	if (nowayout)
-		MOD_INC_USE_COUNT;
+		__module_get(THIS_MODULE);
 
 	/*
 	 *	Activate timer

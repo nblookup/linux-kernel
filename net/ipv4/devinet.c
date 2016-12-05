@@ -32,6 +32,7 @@
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -904,6 +905,14 @@ static int inetdev_event(struct notifier_block *this, unsigned long event,
 		 * not interesting to applications using netlink.
 		 */
 		inetdev_changename(dev, in_dev);
+
+#ifdef CONFIG_SYSCTL
+		devinet_sysctl_unregister(&in_dev->cnf);
+		neigh_sysctl_unregister(in_dev->arp_parms);
+		neigh_sysctl_register(dev, in_dev->arp_parms, NET_IPV4,
+				      NET_IPV4_NEIGH, "ipv4");
+		devinet_sysctl_register(in_dev, &in_dev->cnf);
+#endif
 		break;
 	}
 out:
@@ -922,6 +931,7 @@ static int inet_fill_ifaddr(struct sk_buff *skb, struct in_ifaddr *ifa,
 	unsigned char	 *b = skb->tail;
 
 	nlh = NLMSG_PUT(skb, pid, seq, event, sizeof(*ifm));
+	if (pid) nlh->nlmsg_flags |= NLM_F_MULTI;
 	ifm = NLMSG_DATA(nlh);
 	ifm->ifa_family = AF_INET;
 	ifm->ifa_prefixlen = ifa->ifa_prefixlen;
@@ -1300,6 +1310,7 @@ static void devinet_sysctl_register(struct in_device *in_dev,
 	int i;
 	struct net_device *dev = in_dev ? in_dev->dev : NULL;
 	struct devinet_sysctl_table *t = kmalloc(sizeof(*t), GFP_KERNEL);
+	char *dev_name = NULL;
 
 	if (!t)
 		return;
@@ -1308,13 +1319,25 @@ static void devinet_sysctl_register(struct in_device *in_dev,
 		t->devinet_vars[i].data += (char *)p - (char *)&ipv4_devconf;
 		t->devinet_vars[i].de = NULL;
 	}
+
 	if (dev) {
-		t->devinet_dev[0].procname = dev->name;
+		dev_name = dev->name; 
 		t->devinet_dev[0].ctl_name = dev->ifindex;
 	} else {
-		t->devinet_dev[0].procname = "default";
+		dev_name = "default";
 		t->devinet_dev[0].ctl_name = NET_PROTO_CONF_DEFAULT;
 	}
+
+	/* 
+	 * Make a copy of dev_name, because '.procname' is regarded as const 
+	 * by sysctl and we wouldn't want anyone to change it under our feet
+	 * (see SIOCSIFNAME).
+	 */	
+	dev_name = net_sysctl_strdup(dev_name);
+	if (!dev_name)
+	    goto free;
+
+	t->devinet_dev[0].procname    = dev_name;
 	t->devinet_dev[0].child	      = t->devinet_vars;
 	t->devinet_dev[0].de	      = NULL;
 	t->devinet_conf_dir[0].child  = t->devinet_dev;
@@ -1326,9 +1349,17 @@ static void devinet_sysctl_register(struct in_device *in_dev,
 
 	t->sysctl_header = register_sysctl_table(t->devinet_root_dir, 0);
 	if (!t->sysctl_header)
-		kfree(t);
-	else
-		p->sysctl = t;
+	    goto free_procname;
+
+	p->sysctl = t;
+	return;
+
+	/* error path */
+ free_procname:
+	kfree(dev_name);
+ free:
+	kfree(t);
+	return;
 }
 
 static void devinet_sysctl_unregister(struct ipv4_devconf *p)
@@ -1337,6 +1368,7 @@ static void devinet_sysctl_unregister(struct ipv4_devconf *p)
 		struct devinet_sysctl_table *t = p->sysctl;
 		p->sysctl = NULL;
 		unregister_sysctl_table(t->sysctl_header);
+		kfree(t->devinet_dev[0].procname);
 		kfree(t);
 	}
 }
@@ -1353,3 +1385,11 @@ void __init devinet_init(void)
 	devinet_sysctl_register(NULL, &ipv4_devconf_dflt);
 #endif
 }
+
+EXPORT_SYMBOL(devinet_ioctl);
+EXPORT_SYMBOL(in_dev_finish_destroy);
+EXPORT_SYMBOL(inet_select_addr);
+EXPORT_SYMBOL(inetdev_by_index);
+EXPORT_SYMBOL(inetdev_lock);
+EXPORT_SYMBOL(register_inetaddr_notifier);
+EXPORT_SYMBOL(unregister_inetaddr_notifier);

@@ -112,8 +112,8 @@ asmlinkage long sys_uname(struct new_utsname * name)
 	down_read(&uts_sem);
 	err = copy_to_user(name, &system_utsname, sizeof (*name));
 	up_read(&uts_sem);
-	if (current->personality == PER_LINUX32) 
-		err |= copy_to_user(&name->machine, "i386", 5); 		
+	if (personality(current->personality) == PER_LINUX32) 
+		err |= copy_to_user(&name->machine, "i686", 5); 		
 	return err ? -EFAULT : 0;
 }
 
@@ -122,3 +122,17 @@ asmlinkage long wrap_sys_shmat(int shmid, char *shmaddr, int shmflg)
 	unsigned long raddr;
 	return sys_shmat(shmid,shmaddr,shmflg,&raddr) ?: (long)raddr;
 } 
+
+asmlinkage long sys_time64(long * tloc)
+{
+	struct timeval now; 
+	int i; 
+
+	do_gettimeofday(&now);
+	i = now.tv_sec;
+	if (tloc) {
+		if (put_user(i,tloc))
+			i = -EFAULT;
+	}
+	return i;
+}

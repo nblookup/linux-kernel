@@ -57,40 +57,40 @@
  */
 
 struct screen_info {
-	unsigned char  orig_x;			/* 0x00 */
-	unsigned char  orig_y;			/* 0x01 */
-	unsigned short dontuse1;		/* 0x02 -- EXT_MEM_K sits here */
-	unsigned short orig_video_page;		/* 0x04 */
-	unsigned char  orig_video_mode;		/* 0x06 */
-	unsigned char  orig_video_cols;		/* 0x07 */
-	unsigned short unused2;			/* 0x08 */
-	unsigned short orig_video_ega_bx;	/* 0x0a */
-	unsigned short unused3;			/* 0x0c */
-	unsigned char  orig_video_lines;	/* 0x0e */
-	unsigned char  orig_video_isVGA;	/* 0x0f */
-	unsigned short orig_video_points;	/* 0x10 */
+	u8  orig_x;		/* 0x00 */
+	u8  orig_y;		/* 0x01 */
+	u16 dontuse1;		/* 0x02 -- EXT_MEM_K sits here */
+	u16 orig_video_page;	/* 0x04 */
+	u8  orig_video_mode;	/* 0x06 */
+	u8  orig_video_cols;	/* 0x07 */
+	u16 unused2;		/* 0x08 */
+	u16 orig_video_ega_bx;	/* 0x0a */
+	u16 unused3;		/* 0x0c */
+	u8  orig_video_lines;	/* 0x0e */
+	u8  orig_video_isVGA;	/* 0x0f */
+	u16 orig_video_points;	/* 0x10 */
 
 	/* VESA graphic mode -- linear frame buffer */
-	unsigned short lfb_width;		/* 0x12 */
-	unsigned short lfb_height;		/* 0x14 */
-	unsigned short lfb_depth;		/* 0x16 */
-	unsigned long  lfb_base;		/* 0x18 */
-	unsigned long  lfb_size;		/* 0x1c */
-	unsigned short dontuse2, dontuse3;	/* 0x20 -- CL_MAGIC and CL_OFFSET here */
-	unsigned short lfb_linelength;		/* 0x24 */
-	unsigned char  red_size;		/* 0x26 */
-	unsigned char  red_pos;			/* 0x27 */
-	unsigned char  green_size;		/* 0x28 */
-	unsigned char  green_pos;		/* 0x29 */
-	unsigned char  blue_size;		/* 0x2a */
-	unsigned char  blue_pos;		/* 0x2b */
-	unsigned char  rsvd_size;		/* 0x2c */
-	unsigned char  rsvd_pos;		/* 0x2d */
-	unsigned short vesapm_seg;		/* 0x2e */
-	unsigned short vesapm_off;		/* 0x30 */
-	unsigned short pages;			/* 0x32 */
-	unsigned short vesa_attributes;		/* 0x34 */
-						/* 0x36 -- 0x3f reserved for future expansion */
+	u16 lfb_width;		/* 0x12 */
+	u16 lfb_height;		/* 0x14 */
+	u16 lfb_depth;		/* 0x16 */
+	u32 lfb_base;		/* 0x18 */
+	u32 lfb_size;		/* 0x1c */
+	u16 dontuse2, dontuse3;	/* 0x20 -- CL_MAGIC and CL_OFFSET here */
+	u16 lfb_linelength;	/* 0x24 */
+	u8  red_size;		/* 0x26 */
+	u8  red_pos;		/* 0x27 */
+	u8  green_size;		/* 0x28 */
+	u8  green_pos;		/* 0x29 */
+	u8  blue_size;		/* 0x2a */
+	u8  blue_pos;		/* 0x2b */
+	u8  rsvd_size;		/* 0x2c */
+	u8  rsvd_pos;		/* 0x2d */
+	u16 vesapm_seg;		/* 0x2e */
+	u16 vesapm_off;		/* 0x30 */
+	u16 pages;		/* 0x32 */
+	u16 vesa_attributes;	/* 0x34 */
+				/* 0x36 -- 0x3f reserved for future expansion */
 };
 
 extern struct screen_info screen_info;
@@ -264,7 +264,6 @@ struct tty_struct {
 	char name[64];
 	int pgrp;
 	int session;
-	dev_t	device;
 	unsigned long flags;
 	int count;
 	struct winsize winsize;
@@ -348,26 +347,9 @@ extern int fg_console, last_console, want_console;
 extern int kmsg_redirect;
 
 extern void console_init(void);
-
-extern int lp_init(void);
-extern int pty_init(void);
-extern void tty_init(void);
-extern int mxser_init(void);
-extern int moxa_init(void);
-extern int ip2_init(void);
-extern int pcxe_init(void);
-extern int pc_init(void);
 extern int vcs_init(void);
-extern int rp_init(void);
-extern int cy_init(void);
-extern int stl_init(void);
-extern int stli_init(void);
-extern int specialix_init(void);
-extern int espserial_init(void);
-extern int macserial_init(void);
-extern int a2232board_init(void);
 
-extern int tty_paranoia_check(struct tty_struct *tty, kdev_t device,
+extern int tty_paranoia_check(struct tty_struct *tty, struct inode *inode,
 			      const char *routine);
 extern char *tty_name(struct tty_struct *tty, char *buf);
 extern void tty_wait_until_sent(struct tty_struct * tty, long timeout);
@@ -419,6 +401,11 @@ extern void console_print(const char *);
 
 extern int vt_ioctl(struct tty_struct *tty, struct file * file,
 		    unsigned int cmd, unsigned long arg);
+
+static inline dev_t tty_devnum(struct tty_struct *tty)
+{
+	return MKDEV(tty->driver->major, tty->driver->minor_start) + tty->index;
+}
 
 #endif /* __KERNEL__ */
 #endif

@@ -222,15 +222,21 @@ xfs_mount_validate_sb(
 		return XFS_ERROR(EWRONGFS);
 	}
 
-	if (unlikely(sbp->sb_logstart == 0 && mp->m_logdev_targp == mp->m_ddev_targp)) {
-		cmn_err(CE_WARN, "XFS: filesystem is marked as having an external log; specify logdev on the\nmount command line.");
+	if (unlikely(
+	    sbp->sb_logstart == 0 && mp->m_logdev_targp == mp->m_ddev_targp)) {
+		cmn_err(CE_WARN,
+	"XFS: filesystem is marked as having an external log; "
+	"specify logdev on the\nmount command line.");
 		XFS_CORRUPTION_ERROR("xfs_mount_validate_sb(1)",
 				     XFS_ERRLEVEL_HIGH, mp, sbp);
 		return XFS_ERROR(EFSCORRUPTED);
 	}
 
-	if (unlikely(sbp->sb_logstart != 0 && mp->m_logdev_targp != mp->m_ddev_targp)) {
-		cmn_err(CE_WARN, "XFS: filesystem is marked as having an internal log; don't specify logdev on\nthe mount command line.");
+	if (unlikely(
+	    sbp->sb_logstart != 0 && mp->m_logdev_targp != mp->m_ddev_targp)) {
+		cmn_err(CE_WARN,
+	"XFS: filesystem is marked as having an internal log; "
+	"don't specify logdev on\nthe mount command line.");
 		XFS_CORRUPTION_ERROR("xfs_mount_validate_sb(2)",
 				     XFS_ERRLEVEL_HIGH, mp, sbp);
 		return XFS_ERROR(EFSCORRUPTED);
@@ -276,10 +282,14 @@ xfs_mount_validate_sb(
 		return XFS_ERROR(EFSCORRUPTED);
 	}
 
-#if !XFS_BIG_FILESYSTEMS
-	if (sbp->sb_dblocks > INT_MAX || sbp->sb_rblocks > INT_MAX)  {
+#if !XFS_BIG_BLKNOS
+	if (unlikely(
+	    (sbp->sb_dblocks << (__uint64_t)(sbp->sb_blocklog - BBSHIFT))
+		> UINT_MAX ||
+	    (sbp->sb_rblocks << (__uint64_t)(sbp->sb_blocklog - BBSHIFT))
+		> UINT_MAX)) {
 		cmn_err(CE_WARN,
-"XFS:  File systems greater than 1TB not supported on this system.");
+	"XFS: File system is too large to be mounted on this system.");
 		return XFS_ERROR(E2BIG);
 	}
 #endif
@@ -294,7 +304,7 @@ xfs_mount_validate_sb(
 	/*
 	 * Until this is fixed only page-sized or smaller data blocks work.
 	 */
-	if (sbp->sb_blocksize > PAGE_SIZE) {
+	if (unlikely(sbp->sb_blocksize > PAGE_SIZE)) {
 		cmn_err(CE_WARN,
 		"XFS: Attempted to mount file system with blocksize %d bytes",
 			sbp->sb_blocksize);
@@ -322,9 +332,11 @@ xfs_initialize_perag(xfs_mount_t *mp, int agcount)
 	ino = XFS_AGINO_TO_INO(mp, agcount - 1, agino);
 
 	/* Clear the mount flag if no inode can overflow 32 bits
-	 * on this filesystem.
+	 * on this filesystem, or if specifically requested..
 	 */
-	if (ino <= max_inum) {
+	if ((mp->m_flags & XFS_MOUNT_32BITINOOPT) && ino > max_inum) {
+		mp->m_flags |= XFS_MOUNT_32BITINODES;
+	} else {
 		mp->m_flags &= ~XFS_MOUNT_32BITINODES;
 	}
 
@@ -728,6 +740,8 @@ xfs_mountfs(
 	} else
 		mp->m_maxicount = 0;
 
+	mp->m_maxioffset = xfs_max_file_offset(sbp->sb_blocklog);
+
 	/*
 	 * XFS uses the uuid from the superblock as the unique
 	 * identifier for fsid.  We can not use the uuid from the volume
@@ -935,7 +949,7 @@ xfs_mountfs(
 	 * log's mount-time initialization. Perform 1st part recovery if needed
 	 */
 	if (likely(sbp->sb_logblocks > 0)) {	/* check for volume case */
-		error = xfs_log_mount(mp, mp->m_logdev_targp->pbr_dev,
+		error = xfs_log_mount(mp, mp->m_logdev_targp,
 				      XFS_FSB_TO_DADDR(mp, sbp->sb_logstart),
 				      XFS_FSB_TO_BB(mp, sbp->sb_logblocks));
 		if (error) {
@@ -963,10 +977,10 @@ xfs_mountfs(
 	rvp = XFS_ITOV(rip);
 	VMAP(rvp, vmap);
 
-	if (unlikely((rip->i_d.di_mode & IFMT) != IFDIR)) {
+	if (unlikely((rip->i_d.di_mode & S_IFMT) != S_IFDIR)) {
 		cmn_err(CE_WARN, "XFS: corrupted root inode");
 		prdev("Root inode %llu is not a directory",
-		      mp->m_dev, (unsigned long long)rip->i_ino);
+		      mp->m_ddev_targp, (unsigned long long)rip->i_ino);
 		xfs_iunlock(rip, XFS_ILOCK_EXCL);
 		XFS_ERROR_REPORT("xfs_mountfs_int(2)", XFS_ERRLEVEL_LOW,
 				 mp);

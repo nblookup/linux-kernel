@@ -155,6 +155,11 @@ int max_queued_signals = 1024;
 	(!T(signr, SIG_KERNEL_IGNORE_MASK|SIG_KERNEL_STOP_MASK) && \
 	 (t)->sighand->action[(signr)-1].sa.sa_handler == SIG_DFL)
 
+#define sig_avoid_stop_race() \
+	(sigtestsetmask(&current->pending.signal, M(SIGCONT) | M(SIGKILL)) || \
+	 sigtestsetmask(&current->signal->shared_pending.signal, \
+						  M(SIGCONT) | M(SIGKILL)))
+
 static inline int sig_ignored(struct task_struct *t, int sig)
 {
 	void * handler;
@@ -534,7 +539,7 @@ inline void signal_wake_up(struct task_struct *t, int resume)
 {
 	unsigned int mask;
 
-	set_tsk_thread_flag(t,TIF_SIGPENDING);
+	set_tsk_thread_flag(t, TIF_SIGPENDING);
 
 	/*
 	 * If resume is set, we want to wake it up in the TASK_STOPPED case.
@@ -546,10 +551,8 @@ inline void signal_wake_up(struct task_struct *t, int resume)
 	mask = TASK_INTERRUPTIBLE;
 	if (resume)
 		mask |= TASK_STOPPED;
-	if (t->state & mask) {
-		wake_up_process_kick(t);
-		return;
-	}
+	if (!wake_up_state(t, mask))
+		kick_process(t);
 }
 
 /*
@@ -1000,6 +1003,23 @@ void zap_other_threads(struct task_struct *p)
 		return;
 
 	for (t = next_thread(p); t != p; t = next_thread(t)) {
+		/*
+		 * Don't bother with already dead threads
+		 */
+		if (t->state & (TASK_ZOMBIE|TASK_DEAD))
+			continue;
+
+		/*
+		 * We don't want to notify the parent, since we are
+		 * killed as part of a thread group due to another
+		 * thread doing an execve() or similar. So set the
+		 * exit signal to -1 to allow immediate reaping of
+		 * the process.  But don't detach the thread group
+		 * leader.
+		 */
+		if (t != p->group_leader)
+			t->exit_signal = -1;
+
 		sigaddset(&t->pending.signal, SIGKILL);
 		rm_from_queue(SIG_KERNEL_STOP_MASK, &t->pending);
 		signal_wake_up(t, 1);
@@ -1117,7 +1137,7 @@ kill_proc_info(int sig, struct siginfo *info, pid_t pid)
 static int kill_something_info(int sig, struct siginfo *info, int pid)
 {
 	if (!pid) {
-		return kill_pg_info(sig, info, current->pgrp);
+		return kill_pg_info(sig, info, process_group(current));
 	} else if (pid == -1) {
 		int retval = 0, count = 0;
 		struct task_struct * p;
@@ -1387,6 +1407,9 @@ void do_notify_parent(struct task_struct *tsk, int sig)
 	if (sig == -1)
 		BUG();
 
+	BUG_ON(tsk->group_leader != tsk && tsk->group_leader->state != TASK_ZOMBIE && !tsk->ptrace);
+	BUG_ON(tsk->group_leader == tsk && !thread_group_empty(tsk) && !tsk->ptrace);
+
 	info.si_signo = sig;
 	info.si_errno = 0;
 	info.si_pid = tsk->pid;
@@ -1541,17 +1564,13 @@ do_signal_stop(int signr)
 	struct sighand_struct *sighand = current->sighand;
 	int stop_count = -1;
 
+	/* spin_lock_irq(&sighand->siglock) is now done in caller */
+
 	if (sig->group_stop_count > 0) {
 		/*
 		 * There is a group stop in progress.  We don't need to
 		 * start another one.
 		 */
-		spin_lock_irq(&sighand->siglock);
-		if (unlikely(sig->group_stop_count == 0)) {
-			BUG_ON(!sig->group_exit);
-			spin_unlock_irq(&sighand->siglock);
-			return;
-		}
 		signr = sig->group_exit_code;
 		stop_count = --sig->group_stop_count;
 		current->exit_code = signr;
@@ -1560,17 +1579,27 @@ do_signal_stop(int signr)
 	}
 	else if (thread_group_empty(current)) {
 		/*
-		 * No locks needed in this case.
+		 * Lock must be held through transition to stopped state.
 		 */
 		current->exit_code = signr;
 		set_current_state(TASK_STOPPED);
+		spin_unlock_irq(&sighand->siglock);
 	}
 	else {
 		/*
 		 * There is no group stop already in progress.
-		 * We must initiate one now.
+		 * We must initiate one now, but that requires
+		 * dropping siglock to get both the tasklist lock
+		 * and siglock again in the proper order.  Note that
+		 * this allows an intervening SIGCONT to be posted.
+		 * We need to check for that and bail out if necessary.
 		 */
 		struct task_struct *t;
+
+		spin_unlock_irq(&sighand->siglock);
+
+		/* signals can be posted during this window */
+
 		read_lock(&tasklist_lock);
 		spin_lock_irq(&sighand->siglock);
 
@@ -1579,6 +1608,16 @@ do_signal_stop(int signr)
 			 * There is a group exit in progress now.
 			 * We'll just ignore the stop and process the
 			 * associated fatal signal.
+			 */
+			spin_unlock_irq(&sighand->siglock);
+			read_unlock(&tasklist_lock);
+			return;
+		}
+
+		if (unlikely(sig_avoid_stop_race())) {
+			/*
+			 * Either a SIGCONT or a SIGKILL signal was
+			 * posted in the siglock-not-held window.
 			 */
 			spin_unlock_irq(&sighand->siglock);
 			read_unlock(&tasklist_lock);
@@ -1659,20 +1698,21 @@ static inline int handle_group_stop(void)
 int get_signal_to_deliver(siginfo_t *info, struct pt_regs *regs, void *cookie)
 {
 	sigset_t *mask = &current->blocked;
+	int signr = 0;
 
+relock:
+	spin_lock_irq(&current->sighand->siglock);
 	for (;;) {
-		unsigned long signr = 0;
 		struct k_sigaction *ka;
 
-		spin_lock_irq(&current->sighand->siglock);
 		if (unlikely(current->signal->group_stop_count > 0) &&
 		    handle_group_stop())
-			continue;
+			goto relock;
+
 		signr = dequeue_signal(current, mask, info);
-		spin_unlock_irq(&current->sighand->siglock);
 
 		if (!signr)
-			break;
+			break; /* will return 0 */
 
 		if ((current->ptrace & PT_PTRACED) && signr != SIGKILL) {
 			ptrace_signal_deliver(regs, cookie);
@@ -1681,25 +1721,25 @@ int get_signal_to_deliver(siginfo_t *info, struct pt_regs *regs, void *cookie)
 			 * If there is a group stop in progress,
 			 * we must participate in the bookkeeping.
 			 */
-			if (current->signal->group_stop_count > 0) {
-				spin_lock_irq(&current->sighand->siglock);
+			if (current->signal->group_stop_count > 0)
 				--current->signal->group_stop_count;
-				spin_unlock_irq(&current->sighand->siglock);
-			}
 
 			/* Let the debugger run.  */
 			current->exit_code = signr;
 			current->last_siginfo = info;
 			set_current_state(TASK_STOPPED);
+			spin_unlock_irq(&current->sighand->siglock);
 			notify_parent(current, SIGCHLD);
 			schedule();
 
 			current->last_siginfo = NULL;
 
 			/* We're back.  Did the debugger cancel the sig?  */
+			spin_lock_irq(&current->sighand->siglock);
 			signr = current->exit_code;
 			if (signr == 0)
 				continue;
+
 			current->exit_code = 0;
 
 			/* Update the siginfo structure if the signal has
@@ -1716,9 +1756,7 @@ int get_signal_to_deliver(siginfo_t *info, struct pt_regs *regs, void *cookie)
 
 			/* If the (new) signal is now blocked, requeue it.  */
 			if (sigismember(&current->blocked, signr)) {
-				spin_lock_irq(&current->sighand->siglock);
 				specific_send_sig_info(signr, info, current);
-				spin_unlock_irq(&current->sighand->siglock);
 				continue;
 			}
 		}
@@ -1727,7 +1765,7 @@ int get_signal_to_deliver(siginfo_t *info, struct pt_regs *regs, void *cookie)
 		if (ka->sa.sa_handler == SIG_IGN) /* Do nothing.  */
 			continue;
 		if (ka->sa.sa_handler != SIG_DFL) /* Run the handler.  */
-			return signr;
+			break; /* will return non-zero "signr" value */
 
 		/*
 		 * Now we are doing the default action for this signal.
@@ -1744,20 +1782,44 @@ int get_signal_to_deliver(siginfo_t *info, struct pt_regs *regs, void *cookie)
 			 * The default action is to stop all threads in
 			 * the thread group.  The job control signals
 			 * do nothing in an orphaned pgrp, but SIGSTOP
-			 * always works.
+			 * always works.  Note that siglock needs to be
+			 * dropped during the call to is_orphaned_pgrp()
+			 * because of lock ordering with tasklist_lock.
+			 * This allows an intervening SIGCONT to be posted.
+			 * We need to check for that and bail out if necessary.
 			 */
-			if (signr == SIGSTOP ||
-			    !is_orphaned_pgrp(current->pgrp))
-				do_signal_stop(signr);
-			continue;
+			if (signr == SIGSTOP) {
+				do_signal_stop(signr); /* releases siglock */
+				goto relock;
+			}
+			spin_unlock_irq(&current->sighand->siglock);
+
+			/* signals can be posted during this window */
+
+			if (is_orphaned_pgrp(process_group(current)))
+				goto relock;
+
+			spin_lock_irq(&current->sighand->siglock);
+			if (unlikely(sig_avoid_stop_race())) {
+				/*
+				 * Either a SIGCONT or a SIGKILL signal was
+				 * posted in the siglock-not-held window.
+				 */
+				continue;
+			}
+
+			do_signal_stop(signr); /* releases siglock */
+			goto relock;
 		}
+
+		spin_unlock_irq(&current->sighand->siglock);
 
 		/*
 		 * Anything else is fatal, maybe with a core dump.
 		 */
 		current->flags |= PF_SIGNALED;
 		if (sig_kernel_coredump(signr) &&
-		    do_coredump(signr, signr, regs)) {
+		    do_coredump((long)signr, signr, regs)) {
 			/*
 			 * That killed all other threads in the group and
 			 * synchronized with their demise, so there can't
@@ -1771,8 +1833,8 @@ int get_signal_to_deliver(siginfo_t *info, struct pt_regs *regs, void *cookie)
 			BUG_ON(!current->signal->group_exit);
 			BUG_ON(current->signal->group_exit_code != code);
 			do_exit(code);
-				/* NOTREACHED */
-			}
+			/* NOTREACHED */
+		}
 
 		/*
 		 * Death signals, no core dump.
@@ -1780,7 +1842,8 @@ int get_signal_to_deliver(siginfo_t *info, struct pt_regs *regs, void *cookie)
 		do_group_exit(signr);
 		/* NOTREACHED */
 	}
-	return 0;
+	spin_unlock_irq(&current->sighand->siglock);
+	return signr;
 }
 
 #endif

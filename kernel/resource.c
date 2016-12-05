@@ -8,6 +8,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
@@ -27,6 +28,8 @@ struct resource ioport_resource = {
 	.flags	= IORESOURCE_IO,
 };
 
+EXPORT_SYMBOL(ioport_resource);
+
 struct resource iomem_resource = {
 	.name	= "PCI mem",
 	.start	= 0UL,
@@ -34,79 +37,97 @@ struct resource iomem_resource = {
 	.flags	= IORESOURCE_MEM,
 };
 
+EXPORT_SYMBOL(iomem_resource);
+
 static rwlock_t resource_lock = RW_LOCK_UNLOCKED;
 
 #ifdef CONFIG_PROC_FS
 
-#define MAX_IORES_LEVEL		5
+enum { MAX_IORES_LEVEL = 5 };
 
-/*
- * do_resource_list():
- * for reports of /proc/ioports and /proc/iomem;
- * do current entry, then children, then siblings;
- */
-static int do_resource_list(struct seq_file *m, struct resource *res, const char *fmt, int level)
+static void *r_next(struct seq_file *m, void *v, loff_t *pos)
 {
-	while (res) {
-		const char *name;
+	struct resource *p = v;
+	(*pos)++;
+	if (p->child)
+		return p->child;
+	while (!p->sibling && p->parent)
+		p = p->parent;
+	return p->sibling;
+}
 
-		name = res->name ? res->name : "<BAD>";
-		if (level > MAX_IORES_LEVEL)
-			level = MAX_IORES_LEVEL;
-		seq_printf (m, fmt + 2 * MAX_IORES_LEVEL - 2 * level,
-				res->start, res->end, name);
+static void *r_start(struct seq_file *m, loff_t *pos)
+{
+	struct resource *p = m->private;
+	loff_t l = 0;
+	read_lock(&resource_lock);
+	for (p = p->child; p && l < *pos; p = r_next(m, p, &l))
+		;
+	return p;
+}
 
-		if (res->child)
-			do_resource_list(m, res->child, fmt, level + 1);
+static void r_stop(struct seq_file *m, void *v)
+{
+	read_unlock(&resource_lock);
+}
 
-		res = res->sibling;
-	}
+static int r_show(struct seq_file *m, void *v)
+{
+	struct resource *root = m->private;
+	struct resource *r = v, *p;
+	int width = root->end < 0x10000 ? 4 : 8;
+	int depth;
 
+	for (depth = 0, p = r; depth < MAX_IORES_LEVEL; depth++, p = p->parent)
+		if (p->parent == root)
+			break;
+	seq_printf(m, "%*s%0*lx-%0*lx : %s\n",
+			depth * 2, "",
+			width, r->start,
+			width, r->end,
+			r->name ? r->name : "<BAD>");
 	return 0;
 }
 
-static int ioresources_show(struct seq_file *m, void *v)
-{
-	struct resource *root = m->private;
-	char *fmt;
-	int retval;
-
-	fmt = root->end < 0x10000
-		? "          %04lx-%04lx : %s\n"
-		: "          %08lx-%08lx : %s\n";
-	read_lock(&resource_lock);
-	retval = do_resource_list(m, root->child, fmt, 0);
-	read_unlock(&resource_lock);
-	return retval;
-}
-
-static int ioresources_open(struct file *file, struct resource *root)
-{
-	return single_open(file, ioresources_show, root);
-}
+struct seq_operations resource_op = {
+	.start	= r_start,
+	.next	= r_next,
+	.stop	= r_stop,
+	.show	= r_show,
+};
 
 static int ioports_open(struct inode *inode, struct file *file)
 {
-	return ioresources_open(file, &ioport_resource);
+	int res = seq_open(file, &resource_op);
+	if (!res) {
+		struct seq_file *m = file->private_data;
+		m->private = &ioport_resource;
+	}
+	return res;
+}
+
+static int iomem_open(struct inode *inode, struct file *file)
+{
+	int res = seq_open(file, &resource_op);
+	if (!res) {
+		struct seq_file *m = file->private_data;
+		m->private = &iomem_resource;
+	}
+	return res;
 }
 
 static struct file_operations proc_ioports_operations = {
 	.open		= ioports_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
-	.release	= single_release,
+	.release	= seq_release,
 };
-
-static int iomem_open(struct inode *inode, struct file *file)
-{
-	return ioresources_open(file, &iomem_resource);
-}
 
 static struct file_operations proc_iomem_operations = {
 	.open		= iomem_open,
 	.read		= seq_read,
 	.llseek		= seq_lseek,
-	.release	= single_release,
+	.release	= seq_release,
 };
 
 static int __init ioresources_init(void)
@@ -183,6 +204,20 @@ int request_resource(struct resource *root, struct resource *new)
 	return conflict ? -EBUSY : 0;
 }
 
+EXPORT_SYMBOL(request_resource);
+
+struct resource *____request_resource(struct resource *root, struct resource *new)
+{
+	struct resource *conflict;
+
+	write_lock(&resource_lock);
+	conflict = __request_resource(root, new);
+	write_unlock(&resource_lock);
+	return conflict;
+}
+
+EXPORT_SYMBOL(____request_resource);
+
 int release_resource(struct resource *old)
 {
 	int retval;
@@ -192,6 +227,8 @@ int release_resource(struct resource *old)
 	write_unlock(&resource_lock);
 	return retval;
 }
+
+EXPORT_SYMBOL(release_resource);
 
 /*
  * Find empty slot in the resource tree given range and alignment.
@@ -207,9 +244,17 @@ static int find_resource(struct resource *root, struct resource *new,
 	struct resource *this = root->child;
 
 	new->start = root->start;
+	/*
+	 * Skip past an allocated resource that starts at 0, since the assignment
+	 * of this->start - 1 to new->end below would cause an underflow.
+	 */
+	if (this && this->start == 0) {
+		new->start = this->end + 1;
+		this = this->sibling;
+	}
 	for(;;) {
 		if (this)
-			new->end = this->start;
+			new->end = this->start - 1;
 		else
 			new->end = root->end;
 		if (new->start < min)
@@ -251,6 +296,69 @@ int allocate_resource(struct resource *root, struct resource *new,
 	write_unlock(&resource_lock);
 	return err;
 }
+
+EXPORT_SYMBOL(allocate_resource);
+
+/**
+ * insert_resource - Inserts a resource in the resource tree
+ * @parent: parent of the new resource
+ * @new: new resource to insert
+ *
+ * Returns 0 on success, -EBUSY if the resource can't be inserted.
+ *
+ * This function is equivalent of request_resource when no
+ * conflict happens. If a conflict happens, and the conflicting
+ * resources entirely fit within the range of the new resource,
+ * then the new resource is inserted and the conflicting resources
+ * become childs of the new resource. 
+ */
+int insert_resource(struct resource *parent, struct resource *new)
+{
+	int result = 0;
+	struct resource *first, *next;
+
+	write_lock(&resource_lock);
+	first = __request_resource(parent, new);
+	if (!first)
+		goto out;
+
+	result = -EBUSY;
+	if (first == parent)
+		goto out;
+
+	for (next = first; next->sibling; next = next->sibling)
+		if (next->sibling->start > new->end)
+			break;
+
+	/* existing resource overlaps end of new resource */
+	if (next->end > new->end)
+		goto out;
+
+	result = 0;
+
+	new->parent = parent;
+	new->sibling = next->sibling;
+	new->child = first;
+
+	next->sibling = NULL;
+	for (next = first; next; next = next->sibling)
+		next->parent = new;
+
+	if (parent->child == first) {
+		parent->child = new;
+	} else {
+		next = parent->child;
+		while (next->sibling != first)
+			next = next->sibling;
+		next->sibling = new;
+	}
+
+ out:
+	write_unlock(&resource_lock);
+	return result;
+}
+
+EXPORT_SYMBOL(insert_resource);
 
 /*
  * This is compatibility stuff for IO resources.
@@ -299,6 +407,8 @@ struct resource * __request_region(struct resource *parent, unsigned long start,
 	return res;
 }
 
+EXPORT_SYMBOL(__request_region);
+
 int __deprecated __check_region(struct resource *parent, unsigned long start, unsigned long n)
 {
 	struct resource * res;
@@ -311,6 +421,8 @@ int __deprecated __check_region(struct resource *parent, unsigned long start, un
 	kfree(res);
 	return 0;
 }
+
+EXPORT_SYMBOL(__check_region);
 
 void __release_region(struct resource *parent, unsigned long start, unsigned long n)
 {
@@ -341,13 +453,15 @@ void __release_region(struct resource *parent, unsigned long start, unsigned lon
 	printk(KERN_WARNING "Trying to free nonexistent resource <%08lx-%08lx>\n", start, end);
 }
 
+EXPORT_SYMBOL(__release_region);
+
 /*
  * Called from init/main.c to reserve IO ports.
  */
 #define MAXRESERVE 4
 static int __init reserve_setup(char *str)
 {
-	static int reserved = 0;
+	static int reserved;
 	static struct resource reserve[MAXRESERVE];
 
 	for (;;) {

@@ -221,7 +221,7 @@ static void free_scq(scq_info *scq, struct atm_vcc *vcc);
 static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
                        u32 handle2, u32 addr2);
 static irqreturn_t ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs);
-static int ns_open(struct atm_vcc *vcc, short vpi, int vci);
+static int ns_open(struct atm_vcc *vcc);
 static void ns_close(struct atm_vcc *vcc);
 static void fill_tst(ns_dev *card, int n, vc_map *vc);
 static int ns_send(struct atm_vcc *vcc, struct sk_buff *skb);
@@ -1371,11 +1371,10 @@ static irqreturn_t ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs)
 
 
 
-static int ns_open(struct atm_vcc *vcc, short vpi, int vci)
+static int ns_open(struct atm_vcc *vcc)
 {
    ns_dev *card;
    vc_map *vc;
-   int error;
    unsigned long tmpl, modl;
    int tcr, tcra;	/* target cell rate, and absolute value */
    int n = 0;		/* Number of entries in the TST. Initialized to remove
@@ -1386,6 +1385,8 @@ static int ns_open(struct atm_vcc *vcc, short vpi, int vci)
 			   tell which variables can truly be used
 			   uninitialized... */
    int inuse;		/* tx or rx vc already in use by another vcc */
+   short vpi = vcc->vpi;
+   int vci = vcc->vci;
 
    card = (ns_dev *) vcc->dev->dev_data;
    PRINTK("nicstar%d: opening vpi.vci %d.%d \n", card->index, (int) vpi, vci);
@@ -1395,14 +1396,7 @@ static int ns_open(struct atm_vcc *vcc, short vpi, int vci)
       return -EINVAL;
    }
 
-   if ((error = atm_find_ci(vcc, &vpi, &vci)))
-   {
-      PRINTK("nicstar%d: error in atm_find_ci().\n", card->index);
-      return error;
-   }
    vc = &(card->vcmap[vpi << card->vcibits | vci]);
-   vcc->vpi = vpi;
-   vcc->vci = vci;
    vcc->dev_data = vc;
 
    inuse = 0;
@@ -1680,6 +1674,25 @@ static void ns_close(struct atm_vcc *vcc)
       
       card->scd2vc[(vc->cbr_scd - NS_FRSCD) / NS_FRSCD_SIZE] = NULL;
       free_scq(vc->scq, vcc);
+   }
+
+   /* remove all references to vcc before deleting it */
+   if (vcc->qos.txtp.traffic_class != ATM_NONE)
+   {
+     unsigned long flags;
+     scq_info *scq = card->scq0;
+
+     ns_grab_scq_lock(card, scq, flags);
+
+     for(i = 0; i < scq->num_entries; i++) {
+       if(scq->skb[i] && ATM_SKB(scq->skb[i])->vcc == vcc) {
+        ATM_SKB(scq->skb[i])->vcc = NULL;
+	atm_return(vcc, scq->skb[i]->truesize);
+        PRINTK("nicstar: deleted pending vcc mapping\n");
+       }
+     }
+
+     spin_unlock_irqrestore(&scq->lock, flags);
    }
 
    vcc->dev_data = NULL;
@@ -2080,7 +2093,7 @@ static void drain_scq(ns_dev *card, scq_info *scq, int pos)
       if (skb != NULL)
       {
          vcc = ATM_SKB(skb)->vcc;
-	 if (vcc->pop != NULL) {
+	 if (vcc && vcc->pop != NULL) {
 	    vcc->pop(vcc, skb);
 	 } else {
 	    dev_kfree_skb_irq(skb);

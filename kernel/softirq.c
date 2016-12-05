@@ -9,8 +9,6 @@
 #include <linux/module.h>
 #include <linux/kernel_stat.h>
 #include <linux/interrupt.h>
-#include <linux/notifier.h>
-#include <linux/percpu.h>
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/notifier.h>
@@ -59,11 +57,22 @@ static inline void wakeup_softirqd(void)
 		wake_up_process(tsk);
 }
 
+/*
+ * We restart softirq processing MAX_SOFTIRQ_RESTART times,
+ * and we fall back to softirqd after that.
+ *
+ * This number has been established via experimentation.
+ * The two things to balance is latency against fairness -
+ * we want to handle softirqs as soon as possible, but they
+ * should not be able to lock up the box.
+ */
+#define MAX_SOFTIRQ_RESTART 10
+
 asmlinkage void do_softirq(void)
 {
+	int max_restart = MAX_SOFTIRQ_RESTART;
 	__u32 pending;
 	unsigned long flags;
-	__u32 mask;
 
 	if (in_interrupt())
 		return;
@@ -75,7 +84,6 @@ asmlinkage void do_softirq(void)
 	if (pending) {
 		struct softirq_action *h;
 
-		mask = ~pending;
 		local_bh_disable();
 restart:
 		/* Reset the pending bitmask before enabling irqs */
@@ -95,10 +103,8 @@ restart:
 		local_irq_disable();
 
 		pending = local_softirq_pending();
-		if (pending & mask) {
-			mask &= ~pending;
+		if (pending && --max_restart)
 			goto restart;
-		}
 		if (pending)
 			wakeup_softirqd();
 		__local_bh_enable();
@@ -106,6 +112,8 @@ restart:
 
 	local_irq_restore(flags);
 }
+
+EXPORT_SYMBOL(do_softirq);
 
 void local_bh_enable(void)
 {
@@ -138,6 +146,8 @@ inline void raise_softirq_irqoff(unsigned int nr)
 		wakeup_softirqd();
 }
 
+EXPORT_SYMBOL(raise_softirq_irqoff);
+
 void raise_softirq(unsigned int nr)
 {
 	unsigned long flags;
@@ -147,12 +157,15 @@ void raise_softirq(unsigned int nr)
 	local_irq_restore(flags);
 }
 
+EXPORT_SYMBOL(raise_softirq);
+
 void open_softirq(int nr, void (*action)(struct softirq_action*), void *data)
 {
 	softirq_vec[nr].data = data;
 	softirq_vec[nr].action = action;
 }
 
+EXPORT_SYMBOL(open_softirq);
 
 /* Tasklets */
 struct tasklet_head
@@ -176,6 +189,8 @@ void __tasklet_schedule(struct tasklet_struct *t)
 	local_irq_restore(flags);
 }
 
+EXPORT_SYMBOL(__tasklet_schedule);
+
 void __tasklet_hi_schedule(struct tasklet_struct *t)
 {
 	unsigned long flags;
@@ -186,6 +201,8 @@ void __tasklet_hi_schedule(struct tasklet_struct *t)
 	raise_softirq_irqoff(HI_SOFTIRQ);
 	local_irq_restore(flags);
 }
+
+EXPORT_SYMBOL(__tasklet_hi_schedule);
 
 static void tasklet_action(struct softirq_action *a)
 {
@@ -264,6 +281,8 @@ void tasklet_init(struct tasklet_struct *t,
 	t->data = data;
 }
 
+EXPORT_SYMBOL(tasklet_init);
+
 void tasklet_kill(struct tasklet_struct *t)
 {
 	if (in_interrupt())
@@ -278,6 +297,7 @@ void tasklet_kill(struct tasklet_struct *t)
 	clear_bit(TASKLET_STATE_SCHED, &t->state);
 }
 
+EXPORT_SYMBOL(tasklet_kill);
 
 static void tasklet_init_cpu(int cpu)
 {
@@ -322,9 +342,8 @@ static int ksoftirqd(void * __bind_cpu)
 	current->flags |= PF_IOTHREAD;
 
 	/* Migrate to the right CPU */
-	set_cpus_allowed(current, 1UL << cpu);
-	if (smp_processor_id() != cpu)
-		BUG();
+	set_cpus_allowed(current, cpumask_of_cpu(cpu));
+	BUG_ON(smp_processor_id() != cpu);
 
 	__set_current_state(TASK_INTERRUPTIBLE);
 	mb();

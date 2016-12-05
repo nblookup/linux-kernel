@@ -27,7 +27,6 @@
 #include <linux/inet.h>
 #include <linux/udp.h>
 #include <linux/tcp.h>
-#include <linux/version.h>
 #include <linux/unistd.h>
 #include <linux/slab.h>
 #include <linux/netdevice.h>
@@ -146,6 +145,8 @@ svc_sock_enqueue(struct svc_sock *svsk)
 
 	if (!(svsk->sk_flags &
 	      ( (1<<SK_CONN)|(1<<SK_DATA)|(1<<SK_CLOSE)|(1<<SK_DEFERRED)) ))
+		return;
+	if (test_bit(SK_DEAD, &svsk->sk_flags))
 		return;
 
 	spin_lock_bh(&serv->sv_lock);
@@ -351,6 +352,9 @@ svc_sendto(struct svc_rqst *rqstp, struct xdr_buf *xdr)
 	struct svc_sock	*svsk = rqstp->rq_sock;
 	struct socket	*sock = svsk->sk_sock;
 	int		slen;
+	char 		buffer[CMSG_SPACE(sizeof(struct in_pktinfo))];
+	struct cmsghdr *cmh = (struct cmsghdr *)buffer;
+	struct in_pktinfo *pki = (struct in_pktinfo *)CMSG_DATA(cmh);
 	int		len = 0;
 	int		result;
 	int		size;
@@ -362,15 +366,21 @@ svc_sendto(struct svc_rqst *rqstp, struct xdr_buf *xdr)
 	slen = xdr->len;
 
 	if (rqstp->rq_prot == IPPROTO_UDP) {
-		/* set the destination */
+		/* set the source and destination */
 		struct msghdr	msg;
 		msg.msg_name    = &rqstp->rq_addr;
 		msg.msg_namelen = sizeof(rqstp->rq_addr);
 		msg.msg_iov     = NULL;
 		msg.msg_iovlen  = 0;
-		msg.msg_control = NULL;
-		msg.msg_controllen = 0;
 		msg.msg_flags	= MSG_MORE;
+
+		msg.msg_control = cmh;
+		msg.msg_controllen = sizeof(buffer);
+		cmh->cmsg_len = CMSG_LEN(sizeof(*pki));
+		cmh->cmsg_level = SOL_IP;
+		cmh->cmsg_type = IP_PKTINFO;
+		pki->ipi_ifindex = 0;
+		pki->ipi_spec_dst.s_addr = rqstp->rq_daddr;
 
 		if (sock_sendmsg(sock, &msg, 0) < 0)
 			goto out;
@@ -567,18 +577,27 @@ svc_udp_recvfrom(struct svc_rqst *rqstp)
 				(serv->sv_nrthreads+3) * serv->sv_bufsz,
 				(serv->sv_nrthreads+3) * serv->sv_bufsz);
 
-	if ((rqstp->rq_deferred = svc_deferred_dequeue(svsk)))
+	if ((rqstp->rq_deferred = svc_deferred_dequeue(svsk))) {
+		svc_sock_received(svsk);
 		return svc_deferred_recv(rqstp);
+	}
 
 	clear_bit(SK_DATA, &svsk->sk_flags);
 	while ((skb = skb_recv_datagram(svsk->sk_sk, 0, 1, &err)) == NULL) {
-		svc_sock_received(svsk);
-		if (err == -EAGAIN)
+		if (err == -EAGAIN) {
+			svc_sock_received(svsk);
 			return err;
+		}
 		/* possibly an icmp error */
 		dprintk("svc: recvfrom returned error %d\n", -err);
 	}
+	svsk->sk_sk->sk_stamp = skb->stamp;
 	set_bit(SK_DATA, &svsk->sk_flags); /* there may be more data... */
+
+	/*
+	 * Maybe more packets - kick another thread ASAP.
+	 */
+	svc_sock_received(svsk);
 
 	len  = skb->len - sizeof(struct udphdr);
 	rqstp->rq_arg.len = len;
@@ -589,8 +608,7 @@ svc_udp_recvfrom(struct svc_rqst *rqstp)
 	rqstp->rq_addr.sin_family = AF_INET;
 	rqstp->rq_addr.sin_port = skb->h.uh->source;
 	rqstp->rq_addr.sin_addr.s_addr = skb->nh.iph->saddr;
-
-	svsk->sk_sk->sk_stamp = skb->stamp;
+	rqstp->rq_daddr = skb->nh.iph->daddr;
 
 	if (skb_is_nonlinear(skb)) {
 		/* we have to copy */
@@ -599,7 +617,6 @@ svc_udp_recvfrom(struct svc_rqst *rqstp)
 			local_bh_enable();
 			/* checksum error */
 			skb_free_datagram(svsk->sk_sk, skb);
-			svc_sock_received(svsk);
 			return 0;
 		}
 		local_bh_enable();
@@ -611,7 +628,6 @@ svc_udp_recvfrom(struct svc_rqst *rqstp)
 		if (skb->ip_summed != CHECKSUM_UNNECESSARY) {
 			if ((unsigned short)csum_fold(skb_checksum(skb, 0, skb->len, skb->csum))) {
 				skb_free_datagram(svsk->sk_sk, skb);
-				svc_sock_received(svsk);
 				return 0;
 			}
 			skb->ip_summed = CHECKSUM_UNNECESSARY;
@@ -630,9 +646,6 @@ svc_udp_recvfrom(struct svc_rqst *rqstp)
 
 	if (serv->sv_stats)
 		serv->sv_stats->netudpcnt++;
-
-	/* One down, maybe more to go... */
-	svc_sock_received(svsk);
 
 	return len;
 }
@@ -869,8 +882,10 @@ svc_tcp_recvfrom(struct svc_rqst *rqstp)
 		test_bit(SK_CONN, &svsk->sk_flags),
 		test_bit(SK_CLOSE, &svsk->sk_flags));
 
-	if ((rqstp->rq_deferred = svc_deferred_dequeue(svsk)))
+	if ((rqstp->rq_deferred = svc_deferred_dequeue(svsk))) {
+		svc_sock_received(svsk);
 		return svc_deferred_recv(rqstp);
+	}
 
 	if (test_bit(SK_CLOSE, &svsk->sk_flags)) {
 		svc_delete_socket(svsk);
@@ -1024,6 +1039,9 @@ svc_tcp_sendto(struct svc_rqst *rqstp)
 	reclen = htonl(0x80000000|((xbufp->len ) - 4));
 	memcpy(xbufp->head[0].iov_base, &reclen, 4);
 
+	if (test_bit(SK_DEAD, &rqstp->rq_sock->sk_flags))
+		return -ENOTCONN;
+
 	sent = svc_sendto(rqstp, &rqstp->rq_res);
 	if (sent != xbufp->len) {
 		printk(KERN_NOTICE "rpc-srv/tcp: %s: %s %d when sending %d bytes - shutting down socket\n",
@@ -1133,7 +1151,6 @@ svc_recv(struct svc_serv *serv, struct svc_rqst *rqstp, long timeout)
 		if (!p) {
 			set_current_state(TASK_UNINTERRUPTIBLE);
 			schedule_timeout(HZ/2);
-			current->state = TASK_RUNNING;
 			continue;
 		}
 		rqstp->rq_argpages[rqstp->rq_arghi++] = p;
@@ -1377,7 +1394,8 @@ svc_create_socket(struct svc_serv *serv, int protocol, struct sockaddr_in *sin)
 		return error;
 
 	if (sin != NULL) {
-		sock->sk->sk_reuse = 1; /* allow address reuse */
+		if (type == SOCK_STREAM)
+			sock->sk->sk_reuse = 1; /* allow address reuse */
 		error = sock->ops->bind(sock, (struct sockaddr *) sin,
 						sizeof(*sin));
 		if (error < 0)
@@ -1544,6 +1562,5 @@ static struct svc_deferred_req *svc_deferred_dequeue(struct svc_sock *svsk)
 		set_bit(SK_DEFERRED, &svsk->sk_flags);
 	}
 	spin_unlock(&serv->sv_lock);
-	svc_sock_received(svsk);
 	return dr;
 }

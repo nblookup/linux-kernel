@@ -33,7 +33,7 @@ BOOTLFLAGS	:= -Ttext 0x00400000 -e _start -T $(obj)/zImage.lds
 BOOTOBJCOPY	:= $(CROSS32_COMPILE)objcopy
 OBJCOPYFLAGS    := contents,alloc,load,readonly,data
 
-src-boot := crt0.S string.S prom.c main.c zlib.c imagesize.c
+src-boot := crt0.S string.S prom.c main.c zlib.c imagesize.c div64.S
 src-boot := $(addprefix $(obj)/, $(src-boot))
 obj-boot := $(addsuffix .o, $(basename $(src-boot)))
 
@@ -118,9 +118,11 @@ $(obj)/imagesize.c: vmlinux
 	ls -l vmlinux | \
 	awk '{printf "/* generated -- do not edit! */\n" \
 		"unsigned long vmlinux_filesize = %d;\n", $$5}' > $(obj)/imagesize.c
-	$(CROSS_COMPILE)nm -n vmlinux | tail -1 | \
+	$(CROSS_COMPILE)nm -n vmlinux | tail -n 1 | \
 	awk '{printf "unsigned long vmlinux_memsize = 0x%s;\n", substr($$1,8)}' \
 		>> $(obj)/imagesize.c
 
+install: $(CONFIGURE) $(obj)/$(BOOTIMAGE)
+	sh -x $(src)/install.sh "$(KERNELRELEASE)" "$(obj)/$(BOOTIMAGE)" "$(TOPDIR)/System.map" "$(INSTALL_PATH)"
 
 clean-files := $(patsubst $(obj)/%,%, $(obj-boot))

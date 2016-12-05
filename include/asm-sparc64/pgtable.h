@@ -12,6 +12,7 @@
  * the SpitFire page tables.
  */
 
+#include <linux/config.h>
 #include <asm/spitfire.h>
 #include <asm/asi.h>
 #include <asm/system.h>
@@ -30,7 +31,6 @@
 #define MODULES_LEN		0x000000007e000000
 #define MODULES_END		0x0000000080000000
 #define VMALLOC_START		0x0000000140000000
-#define VMALLOC_VMADDR(x)	((unsigned long)(x))
 #define VMALLOC_END		0x0000000200000000
 #define LOW_OBP_ADDRESS		0x00000000f0000000
 #define HI_OBP_ADDRESS		0x0000000100000000
@@ -137,9 +137,17 @@
 #elif PAGE_SHIFT == 19
 #define _PAGE_SZBITS	_PAGE_SZ512K
 #elif PAGE_SHIFT == 22
-#define _PAGE_SZBITS	_PAGE_SZ4M
+#define _PAGE_SZBITS	_PAGE_SZ4MB
 #else
 #error Wrong PAGE_SHIFT specified
+#endif
+
+#if defined(CONFIG_HUGETLB_PAGE_SIZE_4MB)
+#define _PAGE_SZHUGE	_PAGE_SZ4MB
+#elif defined(CONFIG_HUGETLB_PAGE_SIZE_512K)
+#define _PAGE_SZHUGE	_PAGE_512K
+#elif defined(CONFIG_HUGETLB_PAGE_SIZE_64K)
+#define _PAGE_SZHUGE	_PAGE_64K
 #endif
 
 #define _PAGE_CACHE	(_PAGE_CP | _PAGE_CV)
@@ -148,7 +156,7 @@
 #define __ACCESS_BITS	(_PAGE_ACCESSED | _PAGE_READ | _PAGE_R)
 #define __PRIV_BITS	_PAGE_P
 
-#define PAGE_NONE	__pgprot (_PAGE_PRESENT | _PAGE_ACCESSED)
+#define PAGE_NONE	__pgprot (_PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_CACHE)
 
 /* Don't set the TTE _PAGE_W bit here, else the dirty bit never gets set. */
 #define PAGE_SHARED	__pgprot (_PAGE_PRESENT | _PAGE_VALID | _PAGE_CACHE | \
@@ -163,11 +171,7 @@
 #define PAGE_KERNEL	__pgprot (_PAGE_PRESENT | _PAGE_VALID | _PAGE_CACHE | \
 				  __PRIV_BITS | __ACCESS_BITS | __DIRTY_BITS)
 
-#define PAGE_INVALID	__pgprot (0)
-
 #define _PFN_MASK	_PAGE_PADDR
-
-#define _PAGE_CHG_MASK	(_PFN_MASK | _PAGE_MODIFIED | _PAGE_ACCESSED | _PAGE_PRESENT | _PAGE_SZBITS)
 
 #define pg_iobits (_PAGE_VALID | _PAGE_PRESENT | __DIRTY_BITS | __ACCESS_BITS | _PAGE_E)
 
@@ -216,9 +220,13 @@ extern struct page *mem_map_zero;
 static inline pte_t pte_modify(pte_t orig_pte, pgprot_t new_prot)
 {
 	pte_t __pte;
+	const unsigned long preserve_mask = (_PFN_MASK |
+					     _PAGE_MODIFIED | _PAGE_ACCESSED |
+					     _PAGE_CACHE | _PAGE_E |
+					     _PAGE_PRESENT | _PAGE_SZBITS);
 
-	pte_val(__pte) = (pte_val(orig_pte) & _PAGE_CHG_MASK) |
-		pgprot_val(new_prot);
+	pte_val(__pte) = (pte_val(orig_pte) & preserve_mask) |
+		(pgprot_val(new_prot) & ~preserve_mask);
 
 	return __pte;
 }

@@ -17,8 +17,8 @@
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/stddef.h>
-#include <linux/blk.h>
 #include <linux/init.h>
+#include <asm/page.h>
 
 #include "mem_pieces.h"
 
@@ -46,14 +46,14 @@ mem_pieces_find(unsigned int size, unsigned int align)
 		}
 	}
 	panic("Couldn't find %u bytes at %u alignment\n", size, align);
-	
+
 	return NULL;
 }
 
 /*
  * Remove some memory from an array of pieces
  */
-void __init 
+void __init
 mem_pieces_remove(struct mem_pieces *mp, unsigned int start, unsigned int size,
 		  int must_exist)
 {

@@ -177,12 +177,12 @@ static int kobil_startup (struct usb_serial *serial)
 		printk(KERN_DEBUG "KOBIL KAAN SIM detected\n");
 		break;
 	}
-	usb_set_serial_port_data(serial->port, priv);
+	usb_set_serial_port_data(serial->port[0], priv);
 
 	// search for the necessary endpoints
 	pdev = serial->dev;
  	actconfig = pdev->actconfig;
- 	interface = actconfig->interface;
+ 	interface = actconfig->interface[0];
 	altsetting = interface->altsetting;
  	endpoint = altsetting->endpoint;
   
@@ -206,14 +206,14 @@ static int kobil_startup (struct usb_serial *serial)
 static void kobil_shutdown (struct usb_serial *serial)
 {
 	int i;
-	dbg("%s - port %d", __FUNCTION__, serial->port->number);
+	dbg("%s - port %d", __FUNCTION__, serial->port[0]->number);
 
 	for (i=0; i < serial->num_ports; ++i) {
-		while (serial->port[i].open_count > 0) {
-			kobil_close (&serial->port[i], NULL);
+		while (serial->port[i]->open_count > 0) {
+			kobil_close (serial->port[i], NULL);
 		}
-		kfree(usb_get_serial_port_data(&serial->port[i]));
-		usb_set_serial_port_data(&serial->port[i], NULL);
+		kfree(usb_get_serial_port_data(serial->port[i]));
+		usb_set_serial_port_data(serial->port[i], NULL);
 	}
 }
 
@@ -743,13 +743,22 @@ static int  kobil_ioctl(struct usb_serial_port *port, struct file *file,
 
 static int __init kobil_init (void)
 {
-	usb_serial_register (&kobil_device);
-	usb_register (&kobil_driver);
+	int retval;
+	retval = usb_serial_register(&kobil_device);
+	if (retval)
+		goto failed_usb_serial_register;
+	retval = usb_register(&kobil_driver);
+	if (retval) 
+		goto failed_usb_register;
 
 	info(DRIVER_VERSION " " DRIVER_AUTHOR);
 	info(DRIVER_DESC);
 
 	return 0;
+failed_usb_register:
+	usb_serial_deregister(&kobil_device);
+failed_usb_serial_register:
+	return retval;
 }
 
 

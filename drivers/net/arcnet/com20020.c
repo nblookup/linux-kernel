@@ -50,13 +50,12 @@ static void com20020_command(struct net_device *dev, int command);
 static int com20020_status(struct net_device *dev);
 static void com20020_setmask(struct net_device *dev, int mask);
 static int com20020_reset(struct net_device *dev, int really_reset);
-static void com20020_openclose(struct net_device *dev, bool open);
 static void com20020_copy_to_card(struct net_device *dev, int bufnum,
 				  int offset, void *buf, int count);
 static void com20020_copy_from_card(struct net_device *dev, int bufnum,
 				    int offset, void *buf, int count);
 static void com20020_set_mc_list(struct net_device *dev);
-
+static void com20020_close(struct net_device *);
 
 static void com20020_copy_from_card(struct net_device *dev, int bufnum,
 				    int offset, void *buf, int count)
@@ -87,7 +86,7 @@ static void com20020_copy_to_card(struct net_device *dev, int bufnum,
 
 
 /* Reset the card and check some basic stuff during the detection stage. */
-int __devinit com20020_check(struct net_device *dev)
+int com20020_check(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr, status;
 	struct arcnet_local *lp = dev->priv;
@@ -153,7 +152,7 @@ int __devinit com20020_check(struct net_device *dev)
 /* Set up the struct net_device associated with this card.  Called after
  * probing succeeds.
  */
-int __devinit com20020_found(struct net_device *dev, int shared)
+int com20020_found(struct net_device *dev, int shared)
 {
 	struct arcnet_local *lp;
 	int ioaddr = dev->base_addr;
@@ -162,13 +161,14 @@ int __devinit com20020_found(struct net_device *dev, int shared)
 
 	lp = (struct arcnet_local *) dev->priv;
 
+	lp->hw.owner = THIS_MODULE;
 	lp->hw.command = com20020_command;
 	lp->hw.status = com20020_status;
 	lp->hw.intmask = com20020_setmask;
 	lp->hw.reset = com20020_reset;
-	lp->hw.open_close = com20020_openclose;
 	lp->hw.copy_to_card = com20020_copy_to_card;
 	lp->hw.copy_from_card = com20020_copy_from_card;
+	lp->hw.close = com20020_close;
 
 	dev->set_multicast_list = com20020_set_mc_list;
 
@@ -205,11 +205,7 @@ int __devinit com20020_found(struct net_device *dev, int shared)
 		BUGMSG(D_NORMAL, "Can't get IRQ %d!\n", dev->irq);
 		return -ENODEV;
 	}
-	/* reserve the I/O region */
-	if (!request_region(ioaddr, ARCNET_TOTAL_SIZE, "arcnet (COM20020)")) {
-		free_irq(dev->irq, dev);
-		return -EBUSY;
-	}
+
 	dev->base_addr = ioaddr;
 
 	BUGMSG(D_NORMAL, "%s: station %02Xh found at %03lXh, IRQ %d.\n",
@@ -227,7 +223,6 @@ int __devinit com20020_found(struct net_device *dev, int shared)
 
 	if (!dev->init && register_netdev(dev)) {
 		free_irq(dev->irq, dev);
-		release_region(ioaddr, ARCNET_TOTAL_SIZE);
 		return -EIO;
 	}
 	return 0;
@@ -298,24 +293,15 @@ static int com20020_status(struct net_device *dev)
 	return ASTATUS();
 }
 
-
-static void com20020_openclose(struct net_device *dev, bool open)
+static void com20020_close(struct net_device *dev)
 {
 	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
 	int ioaddr = dev->base_addr;
 
-	if (open) {
-		MOD_INC_USE_COUNT;
-	}
-	else {
-		/* disable transmitter */
-		lp->config &= ~TXENcfg;
-		SETCONF;
-		MOD_DEC_USE_COUNT;
-	}
-	lp->hw.open_close_ll(dev, open);
+	/* disable transmitter */
+	lp->config &= ~TXENcfg;
+	SETCONF;
 }
-
 
 /* Set or clear the multicast filter for this adaptor.
  * num_addrs == -1    Promiscuous mode, receive all packets
@@ -346,13 +332,12 @@ static void com20020_set_mc_list(struct net_device *dev)
 	}
 }
 
-void __devexit com20020_remove(struct net_device *dev)
+void com20020_remove(struct net_device *dev)
 {
 	unregister_netdev(dev);
 	free_irq(dev->irq, dev);
-	release_region(dev->base_addr, ARCNET_TOTAL_SIZE);
 	kfree(dev->priv);
-	kfree(dev);
+	free_netdev(dev);
 }
 
 #ifdef MODULE

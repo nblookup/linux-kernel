@@ -25,7 +25,6 @@
 #include <linux/slab.h>
 #include <linux/timer.h>
 #include <linux/aio.h>
-#include <linux/module.h>
 #include <linux/highmem.h>
 #include <linux/workqueue.h>
 
@@ -258,6 +257,7 @@ out_cleanup:
 	return ERR_PTR(-EAGAIN);
 
 out_freectx:
+	mmdrop(mm);
 	kmem_cache_free(kioctx_cachep, ctx);
 	ctx = ERR_PTR(-ENOMEM);
 
@@ -376,6 +376,11 @@ void __put_ioctx(struct kioctx *ctx)
  *	Allocate a slot for an aio request.  Increments the users count
  * of the kioctx so that the kioctx stays around until all requests are
  * complete.  Returns NULL if no requests are free.
+ *
+ * Returns with kiocb->users set to 2.  The io submit code path holds
+ * an extra reference while submitting the i/o.
+ * This prevents races between the aio code path referencing the
+ * req (after submitting it) and aio_complete() freeing the req.
  */
 static struct kiocb *FASTCALL(__aio_get_req(struct kioctx *ctx));
 static struct kiocb *__aio_get_req(struct kioctx *ctx)
@@ -389,7 +394,7 @@ static struct kiocb *__aio_get_req(struct kioctx *ctx)
 		return NULL;
 
 	req->ki_flags = 1 << KIF_LOCKED;
-	req->ki_users = 1;
+	req->ki_users = 2;
 	req->ki_key = 0;
 	req->ki_ctx = ctx;
 	req->ki_cancel = NULL;
@@ -639,13 +644,13 @@ int aio_complete(struct kiocb *iocb, long res, long res2)
 		iocb->ki_user_data = res;
 		if (iocb->ki_users == 1) {
 			iocb->ki_users = 0;
-			return 1;
+			ret = 1;
+		} else {
+			spin_lock_irq(&ctx->ctx_lock);
+			iocb->ki_users--;
+			ret = (0 == iocb->ki_users);
+			spin_unlock_irq(&ctx->ctx_lock);
 		}
-		spin_lock_irq(&ctx->ctx_lock);
-		iocb->ki_users--;
-		ret = (0 == iocb->ki_users);
-		spin_unlock_irq(&ctx->ctx_lock);
-
 		/* sync iocbs put the task here for us */
 		wake_up_process(iocb->ki_user_obj);
 		return ret;
@@ -679,12 +684,11 @@ int aio_complete(struct kiocb *iocb, long res, long res2)
 	/* after flagging the request as done, we
 	 * must never even look at it again
 	 */
-	barrier();
+	smp_wmb();	/* make event visible before updating tail */
 
 	info->tail = tail;
 	ring->tail = tail;
 
-	wmb();
 	put_aio_ring_event(event, KM_IRQ0);
 	kunmap_atomic(ring, KM_IRQ1);
 
@@ -721,7 +725,7 @@ static int aio_read_evt(struct kioctx *ioctx, struct io_event *ent)
 	dprintk("in aio_read_evt h%lu t%lu m%lu\n",
 		 (unsigned long)ring->head, (unsigned long)ring->tail,
 		 (unsigned long)ring->nr);
-	barrier();
+
 	if (ring->head == ring->tail)
 		goto out;
 
@@ -732,7 +736,7 @@ static int aio_read_evt(struct kioctx *ioctx, struct io_event *ent)
 		struct io_event *evp = aio_ring_event(info, head, KM_USER1);
 		*ent = *evp;
 		head = (head + 1) % info->nr;
-		barrier();
+		smp_mb(); /* finish reading the event before updatng the head */
 		ring->head = head;
 		ret = 1;
 		put_aio_ring_event(evp, KM_USER1);
@@ -1010,7 +1014,7 @@ int io_submit_one(struct kioctx *ctx, struct iocb __user *user_iocb,
 	if (unlikely(!file))
 		return -EBADF;
 
-	req = aio_get_req(ctx);
+	req = aio_get_req(ctx);		/* returns with 2 references to req */
 	if (unlikely(!req)) {
 		fput(file);
 		return -EAGAIN;
@@ -1070,13 +1074,15 @@ int io_submit_one(struct kioctx *ctx, struct iocb __user *user_iocb,
 		ret = -EINVAL;
 	}
 
+	aio_put_req(req);	/* drop extra ref to req */
 	if (likely(-EIOCBQUEUED == ret))
 		return 0;
-	aio_complete(req, ret, 0);
+	aio_complete(req, ret, 0);	/* will drop i/o ref to req */
 	return 0;
 
 out_put_req:
-	aio_put_req(req);
+	aio_put_req(req);	/* drop extra ref to req */
+	aio_put_req(req);	/* drop i/o ref to req */
 	return ret;
 }
 

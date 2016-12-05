@@ -1,6 +1,7 @@
 /*
  *  hosts.c Copyright (C) 1992 Drew Eckhardt
  *          Copyright (C) 1993, 1994, 1995 Eric Youngdale
+ *          Copyright (C) 2002-2003 Christoph Hellwig
  *
  *  mid to lowlevel SCSI driver interface
  *      Initial versions: Drew Eckhardt
@@ -30,8 +31,8 @@
 #include <linux/completion.h>
 #include <linux/unistd.h>
 
+#include <scsi/scsi_host.h>
 #include "scsi.h"
-#include "hosts.h"
 
 #include "scsi_priv.h"
 #include "scsi_logging.h"
@@ -39,30 +40,50 @@
 
 static int scsi_host_next_hn;		/* host_no for next new host */
 
-/**
- * scsi_remove_host - check a scsi host for release and release
- * @shost:	a pointer to a scsi host to release
- *
- * Return value:
- * 	0 on Success / 1 on Failure
- **/
-int scsi_remove_host(struct Scsi_Host *shost)
+
+static void scsi_host_cls_release(struct class_device *class_dev)
 {
-	struct scsi_device *sdev;
+	put_device(&class_to_shost(class_dev)->shost_gendev);
+}
 
-	/*
-	 * FIXME Do ref counting.  We force all of the devices offline to
-	 * help prevent race conditions where other hosts/processors could
-	 * try and get in and queue a command.
-	 */
-	list_for_each_entry(sdev, &shost->my_devices, siblings)
-		sdev->online = FALSE;
+static struct class shost_class = {
+	.name		= "scsi_host",
+	.release	= scsi_host_cls_release,
+};
 
+static int scsi_device_cancel_cb(struct device *dev, void *data)
+{
+	return scsi_device_cancel(to_scsi_device(dev), *(int *)data);
+}
+
+/**
+ * scsi_host_cancel - cancel outstanding IO to this host
+ * @shost:	pointer to struct Scsi_Host
+ * recovery:	recovery requested to run.
+ **/
+void scsi_host_cancel(struct Scsi_Host *shost, int recovery)
+{
+	set_bit(SHOST_CANCEL, &shost->shost_state);
+	device_for_each_child(&shost->shost_gendev, &recovery,
+			      scsi_device_cancel_cb);
+	wait_event(shost->host_wait, (!test_bit(SHOST_RECOVERY,
+						&shost->shost_state)));
+}
+
+/**
+ * scsi_remove_host - remove a scsi host
+ * @shost:	a pointer to a scsi host to remove
+ **/
+void scsi_remove_host(struct Scsi_Host *shost)
+{
+	scsi_host_cancel(shost, 0);
 	scsi_proc_host_rm(shost);
 	scsi_forget_host(shost);
-	scsi_sysfs_remove_host(shost);
 
-	return 0;
+	set_bit(SHOST_DEL, &shost->shost_state);
+
+	class_device_unregister(&shost->shost_classdev);
+	device_del(&shost->shost_gendev);
 }
 
 /**
@@ -81,28 +102,48 @@ int scsi_add_host(struct Scsi_Host *shost, struct device *dev)
 	printk(KERN_INFO "scsi%d : %s\n", shost->host_no,
 			sht->info ? sht->info(shost) : sht->name);
 
-	error = scsi_sysfs_add_host(shost, dev);
-
 	if (!shost->can_queue) {
 		printk(KERN_ERR "%s: can_queue = 0 no longer supported\n",
 				sht->name);
-		error = -EINVAL;
+		return -EINVAL;
 	}
 
-	if (!error) {
-		scsi_proc_host_add(shost);
-		scsi_scan_host(shost);
-	}
-			
+	if (!shost->shost_gendev.parent)
+		shost->shost_gendev.parent = dev ? dev : &legacy_bus;
+
+	error = device_add(&shost->shost_gendev);
+	if (error)
+		goto out;
+
+	set_bit(SHOST_ADD, &shost->shost_state);
+	get_device(shost->shost_gendev.parent);
+
+	error = class_device_add(&shost->shost_classdev);
+	if (error)
+		goto out_del_gendev;
+
+	get_device(&shost->shost_gendev);
+
+	error = scsi_sysfs_add_host(shost);
+	if (error)
+		goto out_del_classdev;
+
+	scsi_proc_host_add(shost);
+	return error;
+
+ out_del_classdev:
+	class_device_del(&shost->shost_classdev);
+ out_del_gendev:
+	device_del(&shost->shost_gendev);
+ out:
 	return error;
 }
 
-/**
- * scsi_free_sdev - free a scsi hosts resources
- * @shost:	scsi host to free 
- **/
-void scsi_free_shost(struct Scsi_Host *shost)
+static void scsi_host_dev_release(struct device *dev)
 {
+	struct Scsi_Host *shost = dev_to_shost(dev);
+	struct device *parent = dev->parent;
+
 	if (shost->ehandler) {
 		DECLARE_COMPLETION(sem);
 		shost->eh_notify = &sem;
@@ -112,8 +153,16 @@ void scsi_free_shost(struct Scsi_Host *shost)
 		shost->eh_notify = NULL;
 	}
 
-	shost->hostt->present--;
+	scsi_proc_hostdir_rm(shost->hostt);
 	scsi_destroy_command_freelist(shost);
+
+	/*
+	 * Some drivers (eg aha1542) do scsi_register()/scsi_unregister()
+	 * during probing without performing a scsi_set_device() in between.
+	 * In this case dev->parent is NULL.
+	 */
+	if (parent)
+		put_device(parent);
 	kfree(shost);
 }
 
@@ -151,12 +200,6 @@ struct Scsi_Host *scsi_host_alloc(struct scsi_host_template *sht, int privsize)
 		dump_stack();
         }
 
-	/* if its not set in the template, use the default */
-	if (!sht->shost_attrs)
-		 sht->shost_attrs = scsi_sysfs_shost_attrs;
-	if (!sht->sdev_attrs)
-		 sht->sdev_attrs = scsi_sysfs_sdev_attrs;
-
 	shost = kmalloc(sizeof(struct Scsi_Host) + privsize, gfp_mask);
 	if (!shost)
 		return NULL;
@@ -164,10 +207,12 @@ struct Scsi_Host *scsi_host_alloc(struct scsi_host_template *sht, int privsize)
 
 	spin_lock_init(&shost->default_lock);
 	scsi_assign_lock(shost, &shost->default_lock);
-	INIT_LIST_HEAD(&shost->my_devices);
+	INIT_LIST_HEAD(&shost->__devices);
 	INIT_LIST_HEAD(&shost->eh_cmd_q);
 	INIT_LIST_HEAD(&shost->starved_list);
 	init_waitqueue_head(&shost->host_wait);
+
+	init_MUTEX(&shost->scan_mutex);
 
 	shost->host_no = scsi_host_next_hn++; /* XXX(hch): still racy */
 	shost->dma_channel = 0xff;
@@ -191,8 +236,6 @@ struct Scsi_Host *scsi_host_alloc(struct scsi_host_template *sht, int privsize)
 	shost->cmd_per_lun = sht->cmd_per_lun;
 	shost->unchecked_isa_dma = sht->unchecked_isa_dma;
 	shost->use_clustering = sht->use_clustering;
-	shost->use_blk_tcq = sht->use_blk_tcq;
-	shost->highmem_io = sht->highmem_io;
 
 	if (sht->max_host_blocked)
 		shost->max_host_blocked = sht->max_host_blocked;
@@ -208,20 +251,41 @@ struct Scsi_Host *scsi_host_alloc(struct scsi_host_template *sht, int privsize)
 	else
 		shost->max_sectors = SCSI_DEFAULT_MAX_SECTORS;
 
+	/*
+	 * assume a 4GB boundary, if not set
+	 */
+	if (sht->dma_boundary)
+		shost->dma_boundary = sht->dma_boundary;
+	else
+		shost->dma_boundary = 0xffffffff;
+
 	rval = scsi_setup_command_freelist(shost);
 	if (rval)
-		goto fail;
+		goto fail_kfree;
 
-	scsi_sysfs_init_host(shost);
+	device_initialize(&shost->shost_gendev);
+	snprintf(shost->shost_gendev.bus_id, BUS_ID_SIZE, "host%d",
+		shost->host_no);
+	shost->shost_gendev.release = scsi_host_dev_release;
+
+	class_device_initialize(&shost->shost_classdev);
+	shost->shost_classdev.dev = &shost->shost_gendev;
+	shost->shost_classdev.class = &shost_class;
+	snprintf(shost->shost_classdev.class_id, BUS_ID_SIZE, "host%d",
+		  shost->host_no);
 
 	shost->eh_notify = &complete;
-	/* XXX(hch): handle error return */
-	kernel_thread((int (*)(void *))scsi_error_handler, shost, 0);
+	rval = kernel_thread(scsi_error_handler, shost, 0);
+	if (rval < 0)
+		goto fail_destroy_freelist;
 	wait_for_completion(&complete);
 	shost->eh_notify = NULL;
-	shost->hostt->present++;
+	scsi_proc_hostdir_add(shost->hostt);
 	return shost;
- fail:
+
+ fail_destroy_freelist:
+	scsi_destroy_command_freelist(shost);
+ fail_kfree:
 	kfree(shost);
 	return NULL;
 }
@@ -257,22 +321,19 @@ void scsi_unregister(struct Scsi_Host *shost)
  **/
 struct Scsi_Host *scsi_host_lookup(unsigned short hostnum)
 {
-	struct class *class = class_get(&shost_class);
+	struct class *class = &shost_class;
 	struct class_device *cdev;
-	struct Scsi_Host *shost = NULL, *p;
+	struct Scsi_Host *shost = ERR_PTR(-ENXIO), *p;
 
-	if (class) {
-		down_read(&class->subsys.rwsem);
-		list_for_each_entry(cdev, &class->children, node) {
-			p = class_to_shost(cdev);
-			if (p->host_no == hostnum) {
-				scsi_host_get(p);
-				shost = p;
-				break;
-			}
+	down_read(&class->subsys.rwsem);
+	list_for_each_entry(cdev, &class->children, node) {
+		p = class_to_shost(cdev);
+		if (p->host_no == hostnum) {
+			shost = scsi_host_get(p);
+			break;
 		}
-		up_read(&class->subsys.rwsem);
 	}
+	up_read(&class->subsys.rwsem);
 
 	return shost;
 }
@@ -281,10 +342,12 @@ struct Scsi_Host *scsi_host_lookup(unsigned short hostnum)
  * *scsi_host_get - inc a Scsi_Host ref count
  * @shost:	Pointer to Scsi_Host to inc.
  **/
-void scsi_host_get(struct Scsi_Host *shost)
+struct Scsi_Host *scsi_host_get(struct Scsi_Host *shost)
 {
-	get_device(&shost->host_gendev);
-	class_device_get(&shost->class_dev);
+	if (test_bit(SHOST_DEL, &shost->shost_state) ||
+		!get_device(&shost->shost_gendev))
+		return NULL;
+	return shost;
 }
 
 /**
@@ -293,6 +356,15 @@ void scsi_host_get(struct Scsi_Host *shost)
  **/
 void scsi_host_put(struct Scsi_Host *shost)
 {
-	class_device_put(&shost->class_dev);
-	put_device(&shost->host_gendev);
+	put_device(&shost->shost_gendev);
+}
+
+int scsi_init_hosts(void)
+{
+	return class_register(&shost_class);
+}
+
+void scsi_exit_hosts(void)
+{
+	class_unregister(&shost_class);
 }

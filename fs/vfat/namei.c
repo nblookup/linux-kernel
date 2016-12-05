@@ -23,6 +23,7 @@
 #include <linux/slab.h>
 #include <linux/smp_lock.h>
 #include <linux/buffer_head.h>
+#include <linux/namei.h>
 
 #define DEBUG_LEVEL 0
 #if (DEBUG_LEVEL >= 1)
@@ -70,14 +71,23 @@ static struct dentry_operations vfat_dentry_ops[4] = {
 
 static int vfat_revalidate(struct dentry *dentry, struct nameidata *nd)
 {
-	PRINTK1(("vfat_revalidate: %s\n", dentry->d_name.name));
-	spin_lock(&dcache_lock);
-	if (dentry->d_time == dentry->d_parent->d_inode->i_version) {
-		spin_unlock(&dcache_lock);
-		return 1;
+	int ret = 1;
+
+	if (!dentry->d_inode &&
+	    nd && !(nd->flags & LOOKUP_CONTINUE) && (nd->flags & LOOKUP_CREATE))
+		/*
+		 * negative dentry is dropped, in order to make sure
+		 * to use the name which a user desires if this is
+		 * create path.
+		 */
+		ret = 0;
+	else {
+		spin_lock(&dentry->d_lock);
+		if (dentry->d_time != dentry->d_parent->d_inode->i_version)
+			ret = 0;
+		spin_unlock(&dentry->d_lock);
 	}
-	spin_unlock(&dcache_lock);
-	return 0;
+	return ret;
 }
 
 static inline unsigned char
@@ -96,7 +106,7 @@ vfat_toupper(struct nls_table *t, unsigned char c)
 	return nc ? nc : c;
 }
 
-static int
+static inline int
 vfat_strnicmp(struct nls_table *t, const unsigned char *s1,
 					const unsigned char *s2, int len)
 {
@@ -107,6 +117,17 @@ vfat_strnicmp(struct nls_table *t, const unsigned char *s1,
 	return 0;
 }
 
+/* returns the length of a struct qstr, ignoring trailing dots */
+static unsigned int vfat_striptail_len(struct qstr *qstr)
+{
+	unsigned int len = qstr->len;
+
+	while (len && qstr->name[len-1] == '.')
+		len--;
+
+	return len;
+}
+
 /*
  * Compute the hash for the vfat name corresponding to the dentry.
  * Note: if the name is invalid, we leave the hash code unchanged so
@@ -115,15 +136,7 @@ vfat_strnicmp(struct nls_table *t, const unsigned char *s1,
  */
 static int vfat_hash(struct dentry *dentry, struct qstr *qstr)
 {
-	const char *name;
-	int len;
-
-	len = qstr->len;
-	name = qstr->name;
-	while (len && name[len-1] == '.')
-		len--;
-
-	qstr->hash = full_name_hash(name, len);
+	qstr->hash = full_name_hash(qstr->name, vfat_striptail_len(qstr));
 
 	return 0;
 }
@@ -137,14 +150,12 @@ static int vfat_hash(struct dentry *dentry, struct qstr *qstr)
 static int vfat_hashi(struct dentry *dentry, struct qstr *qstr)
 {
 	struct nls_table *t = MSDOS_SB(dentry->d_inode->i_sb)->nls_io;
-	const char *name;
-	int len;
+	const unsigned char *name;
+	unsigned int len;
 	unsigned long hash;
 
-	len = qstr->len;
 	name = qstr->name;
-	while (len && name[len-1] == '.')
-		len--;
+	len = vfat_striptail_len(qstr);
 
 	hash = init_name_hash();
 	while (len--)
@@ -160,15 +171,11 @@ static int vfat_hashi(struct dentry *dentry, struct qstr *qstr)
 static int vfat_cmpi(struct dentry *dentry, struct qstr *a, struct qstr *b)
 {
 	struct nls_table *t = MSDOS_SB(dentry->d_inode->i_sb)->nls_io;
-	int alen, blen;
+	unsigned int alen, blen;
 
 	/* A filename cannot end in '.' or we treat it like it has none */
-	alen = a->len;
-	blen = b->len;
-	while (alen && a->name[alen-1] == '.')
-		alen--;
-	while (blen && b->name[blen-1] == '.')
-		blen--;
+	alen = vfat_striptail_len(a);
+	blen = vfat_striptail_len(b);
 	if (alen == blen) {
 		if (vfat_strnicmp(t, a->name, b->name, alen) == 0)
 			return 0;
@@ -181,66 +188,17 @@ static int vfat_cmpi(struct dentry *dentry, struct qstr *a, struct qstr *b)
  */
 static int vfat_cmp(struct dentry *dentry, struct qstr *a, struct qstr *b)
 {
-	int alen, blen;
+	unsigned int alen, blen;
 
 	/* A filename cannot end in '.' or we treat it like it has none */
-	alen = a->len;
-	blen = b->len;
-	while (alen && a->name[alen-1] == '.')
-		alen--;
-	while (blen && b->name[blen-1] == '.')
-		blen--;
+	alen = vfat_striptail_len(a);
+	blen = vfat_striptail_len(b);
 	if (alen == blen) {
 		if (strncmp(a->name, b->name, alen) == 0)
 			return 0;
 	}
 	return 1;
 }
-
-#ifdef DEBUG
-
-static void dump_fat(struct super_block *sb,int start)
-{
-	printk("[");
-	while (start) {
-		printk("%d ",start);
-		start = fat_access(sb,start,-1);
-		if (!start) {
-			printk("ERROR");
-			break;
-		}
-		if (start == -1) break;
-	}
-	printk("]\n");
-}
-
-static void dump_de(struct msdos_dir_entry *de)
-{
-	int i;
-	unsigned char *p = (unsigned char *) de;
-	printk("[");
-
-	for (i = 0; i < 32; i++, p++) {
-		printk("%02x ", *p);
-	}
-	printk("]\n");
-}
-
-#endif
-
-/* MS-DOS "device special files" */
-
-static const char *reserved3_names[] = {
-	"con     ", "prn     ", "nul     ", "aux     ", NULL
-};
-
-static const char *reserved4_names[] = {
-	"com1    ", "com2    ", "com3    ", "com4    ", "com5    ",
-	"com6    ", "com7    ", "com8    ", "com9    ",
-	"lpt1    ", "lpt2    ", "lpt3    ", "lpt4    ", "lpt5    ",
-	"lpt6    ", "lpt7    ", "lpt8    ", "lpt9    ",
-	NULL };
-
 
 /* Characters that are undesirable in an MS-DOS file name */
 
@@ -283,37 +241,34 @@ static inline int vfat_is_used_badchars(const wchar_t *s, int len)
 	return 0;
 }
 
-/* Checks the validity of a long MS-DOS filename */
-/* Returns negative number on error, 0 for a normal
- * return, and 1 for . or .. */
-
-static int vfat_valid_longname(const char *name, int len, int xlate)
+static int vfat_valid_longname(const unsigned char *name, unsigned int len)
 {
-	const char **reserved, *walk;
-	int baselen;
+	if (len && name[len-1] == ' ')
+		return 0;
+	if (len >= 256)
+		return 0;
 
-	if (len && name[len-1] == ' ') return -EINVAL;
-	if (len >= 256) return -EINVAL;
- 	if (len < 3) return 0;
-
-	for (walk = name; *walk != 0 && *walk != '.'; walk++);
-	baselen = walk - name;
-
-	if (baselen == 3) {
-		for (reserved = reserved3_names; *reserved; reserved++) {
-			if (!strnicmp(name,*reserved,baselen))
-				return -EINVAL;
-		}
-	} else if (baselen == 4) {
-		for (reserved = reserved4_names; *reserved; reserved++) {
-			if (!strnicmp(name,*reserved,baselen))
-				return -EINVAL;
+	/* MS-DOS "device special files" */
+	if (len == 3 || (len > 3 && name[3] == '.')) {	/* basename == 3 */
+		if (!strnicmp(name, "aux", 3) ||
+		    !strnicmp(name, "con", 3) ||
+		    !strnicmp(name, "nul", 3) ||
+		    !strnicmp(name, "prn", 3))
+			return 0;
+	}
+	if (len == 4 || (len > 4 && name[4] == '.')) {	/* basename == 4 */
+		/* "com1", "com2", ... */
+		if ('1' <= name[3] && name[3] <= '9') {
+			if (!strnicmp(name, "com", 3) ||
+			    !strnicmp(name, "lpt", 3))
+				return 0;
 		}
 	}
-	return 0;
+
+	return 1;
 }
 
-static int vfat_find_form(struct inode *dir,char *name)
+static int vfat_find_form(struct inode *dir, unsigned char *name)
 {
 	struct msdos_dir_entry *de;
 	struct buffer_head *bh = NULL;
@@ -375,7 +330,7 @@ shortname_info_to_lcase(struct shortname_info *base,
 }
 
 static inline int to_shortname_char(struct nls_table *nls,
-				    char *buf, int buf_size, wchar_t *src,
+				    unsigned char *buf, int buf_size, wchar_t *src,
 				    struct shortname_info *info)
 {
 	int len;
@@ -426,7 +381,7 @@ static inline int to_shortname_char(struct nls_table *nls,
  */
 static int vfat_create_shortname(struct inode *dir, struct nls_table *nls,
 				 wchar_t *uname, int ulen,
-				 char *name_res, unsigned char *lcase)
+				 unsigned char *name_res, unsigned char *lcase)
 {
 	wchar_t *ip, *ext_start, *end, *name_start;
 	unsigned char base[9], ext[4], buf[8], *p;
@@ -606,21 +561,22 @@ static int vfat_create_shortname(struct inode *dir, struct nls_table *nls,
 
 /* Translate a string, including coded sequences into Unicode */
 static int
-xlate_to_uni(const char *name, int len, char *outname, int *longlen, int *outlen,
-	     int escape, int utf8, struct nls_table *nls)
+xlate_to_uni(const unsigned char *name, int len, unsigned char *outname,
+	     int *longlen, int *outlen, int escape, int utf8,
+	     struct nls_table *nls)
 {
 	const unsigned char *ip;
 	unsigned char nc;
-	char *op;
+	unsigned char *op;
 	unsigned int ec;
 	int i, k, fill;
 	int charlen;
 
 	if (utf8) {
-		*outlen = utf8_mbstowcs((__u16 *) outname, name, PAGE_SIZE);
+		*outlen = utf8_mbstowcs((wchar_t *)outname, name, PAGE_SIZE);
 		if (name[len-1] == '.')
 			*outlen-=2;
-		op = &outname[*outlen * sizeof(__u16)];
+		op = &outname[*outlen * sizeof(wchar_t)];
 	} else {
 		if (name[len-1] == '.') 
 			len--;
@@ -691,8 +647,9 @@ xlate_to_uni(const char *name, int len, char *outname, int *longlen, int *outlen
 	return 0;
 }
 
-static int vfat_build_slots(struct inode *dir, const char *name, int len,
-			    struct msdos_dir_slot *ds, int *slots, int is_dir)
+static int vfat_build_slots(struct inode *dir, const unsigned char *name,
+			    int len, struct msdos_dir_slot *ds,
+			    int *slots, int is_dir)
 {
 	struct msdos_sb_info *sbi = MSDOS_SB(dir->i_sb);
 	struct fat_mount_options *opts = &sbi->options;
@@ -700,21 +657,20 @@ static int vfat_build_slots(struct inode *dir, const char *name, int len,
 	struct msdos_dir_entry *de;
 	unsigned long page;
 	unsigned char cksum, lcase;
-	char msdos_name[MSDOS_NAME];
+	unsigned char msdos_name[MSDOS_NAME];
 	wchar_t *uname;
 	int res, slot, ulen, usize, i;
 	loff_t offset;
 
 	*slots = 0;
-	res = vfat_valid_longname(name, len, opts->unicode_xlate);
-	if (res < 0)
-		return res;
+	if (!vfat_valid_longname(name, len))
+		return -EINVAL;
 
 	if(!(page = __get_free_page(GFP_KERNEL)))
 		return -ENOMEM;
 
 	uname = (wchar_t *)page;
-	res = xlate_to_uni(name, len, (char *)uname, &ulen, &usize,
+	res = xlate_to_uni(name, len, (unsigned char *)uname, &ulen, &usize,
 			   opts->unicode_xlate, opts->utf8, sbi->nls_io);
 	if (res < 0)
 		goto out_free;
@@ -758,7 +714,7 @@ shortname:
 	PRINTK3(("vfat_fill_slots 9\n"));
 	/* build the entry of 8.3 alias name */
 	(*slots)++;
-	strncpy(de->name, msdos_name, MSDOS_NAME);
+	memcpy(de->name, msdos_name, MSDOS_NAME);
 	de->attr = is_dir ? ATTR_DIR : ATTR_ARCH;
 	de->lcase = lcase;
 	de->adate = de->cdate = de->date = 0;
@@ -779,7 +735,7 @@ static int vfat_add_entry(struct inode *dir,struct qstr* qname,
 	struct msdos_dir_slot *dir_slots;
 	loff_t offset;
 	int slots, slot;
-	int res, len;
+	int res;
 	struct msdos_dir_entry *dummy_de;
 	struct buffer_head *dummy_bh;
 	loff_t dummy_i_pos;
@@ -789,10 +745,7 @@ static int vfat_add_entry(struct inode *dir,struct qstr* qname,
 	if (dir_slots == NULL)
 		return -ENOMEM;
 
-	len = qname->len;
-	while (len && qname->name[len-1] == '.')
-		len--;
-	res = vfat_build_slots(dir, qname->name, len,
+	res = vfat_build_slots(dir, qname->name, vfat_striptail_len(qname),
 			       dir_slots, &slots, is_dir);
 	if (res < 0)
 		goto cleanup;
@@ -843,12 +796,9 @@ static int vfat_find(struct inode *dir,struct qstr* qname,
 {
 	struct super_block *sb = dir->i_sb;
 	loff_t offset;
-	int res,len;
+	int res;
 
-	len = qname->len;
-	while (len && qname->name[len-1] == '.') 
-		len--;
-	res = fat_search_long(dir, qname->name, len,
+	res = fat_search_long(dir, qname->name, vfat_striptail_len(qname),
 			(MSDOS_SB(sb)->options.name_check != 's'),
 			&offset,&sinfo->longname_offset);
 	if (res>0) {
@@ -951,8 +901,7 @@ static void vfat_remove_entry(struct inode *dir,struct vfat_slot_info *sinfo,
 	int i;
 
 	/* remove the shortname */
-	dir->i_mtime = CURRENT_TIME;
-	dir->i_atime = CURRENT_TIME;
+	dir->i_mtime = dir->i_atime = CURRENT_TIME;
 	dir->i_version++;
 	mark_inode_dirty(dir);
 	de->name[0] = DELETED_FLAG;
@@ -989,8 +938,7 @@ int vfat_rmdir(struct inode *dir,struct dentry* dentry)
 		return res;
 	}
 	dentry->d_inode->i_nlink = 0;
-	dentry->d_inode->i_mtime = CURRENT_TIME;
-	dentry->d_inode->i_atime = CURRENT_TIME;
+	dentry->d_inode->i_mtime = dentry->d_inode->i_atime = CURRENT_TIME;
 	fat_detach(dentry->d_inode);
 	mark_inode_dirty(dentry->d_inode);
 	/* releases bh */
@@ -1015,8 +963,7 @@ int vfat_unlink(struct inode *dir, struct dentry* dentry)
 		return res;
 	}
 	dentry->d_inode->i_nlink = 0;
-	dentry->d_inode->i_mtime = CURRENT_TIME;
-	dentry->d_inode->i_atime = CURRENT_TIME;
+	dentry->d_inode->i_mtime = dentry->d_inode->i_atime = CURRENT_TIME;
 	fat_detach(dentry->d_inode);
 	mark_inode_dirty(dentry->d_inode);
 	/* releases bh */
@@ -1063,8 +1010,7 @@ out:
 
 mkdir_failed:
 	inode->i_nlink = 0;
-	inode->i_mtime = CURRENT_TIME;
-	inode->i_atime = CURRENT_TIME;
+	inode->i_mtime = inode->i_atime = CURRENT_TIME;
 	fat_detach(inode);
 	mark_inode_dirty(inode);
 	/* releases bh */

@@ -1,7 +1,7 @@
 /* SCTP kernel reference Implementation
+ * (C) Copyright IBM Corp. 2001, 2003
  * Copyright (c) 1999-2000 Cisco, Inc.
  * Copyright (c) 1999-2001 Motorola, Inc.
- * Copyright (c) 2001-2003 International Business Machines, Corp.
  * Copyright (c) 2001-2003 Intel Corp.
  *
  * This file is part of the SCTP kernel reference Implementation
@@ -40,6 +40,7 @@
  *    Sridhar Samudrala     <sri@us.ibm.com>
  *    Ardelle Fan           <ardelle.fan@intel.com>
  *    Ryan Layer            <rmlayer@us.ibm.com>
+ *    Kevin Gao             <kevin.gao@intel.com> 
  *
  * Any bugs reported given to us we will try to fix... any fixes shared will
  * be incorporated into the next SCTP release.
@@ -115,6 +116,9 @@
 #define SCTP_STATIC static
 #endif
 
+#define MSECS_TO_JIFFIES(msec) (msec * HZ / 1000)
+#define JIFFIES_TO_MSECS(jiff) (jiff * 1000 / HZ)
+
 /*
  * Function declarations.
  */
@@ -145,6 +149,7 @@ int sctp_primitive_SHUTDOWN(struct sctp_association *, void *arg);
 int sctp_primitive_ABORT(struct sctp_association *, void *arg);
 int sctp_primitive_SEND(struct sctp_association *, void *arg);
 int sctp_primitive_REQUESTHEARTBEAT(struct sctp_association *, void *arg);
+int sctp_primitive_ASCONF(struct sctp_association *, void *arg);
 
 /*
  * sctp/crc32c.c
@@ -404,6 +409,12 @@ static inline struct list_head *sctp_list_dequeue(struct list_head *list)
 	return result;
 }
 
+/* Tests if the list has one and only one entry. */
+static inline int sctp_list_single_entry(struct list_head *head)
+{
+	return ((head->next != head) && (head->next == head->prev));
+}
+
 /* Calculate the size (in bytes) occupied by the data of an iovec.  */
 static inline size_t get_user_iov_size(struct iovec *iov, int iovlen)
 {
@@ -487,22 +498,19 @@ for (err = (sctp_errhdr_t *)((void *)chunk_hdr + \
 #define tv_lt(s, t) \
    (s.tv_sec < t.tv_sec || (s.tv_sec == t.tv_sec && s.tv_usec < t.tv_usec))
 
-/* Stolen from net/profile.h.  Using it from there is more grief than
- * it is worth.
- */
-static inline void tv_add(const struct timeval *entered, struct timeval *leaved)
-{
-	time_t usecs = leaved->tv_usec + entered->tv_usec;
-	time_t secs = leaved->tv_sec + entered->tv_sec;
-
-	if (usecs >= 1000000) {
-		usecs -= 1000000;
-		secs++;
-	}
-	leaved->tv_sec = secs;
-	leaved->tv_usec = usecs;
-}
-
+/* Add tv1 to tv2. */
+#define TIMEVAL_ADD(tv1, tv2) \
+({ \
+        suseconds_t usecs = (tv2).tv_usec + (tv1).tv_usec; \
+        time_t secs = (tv2).tv_sec + (tv1).tv_sec; \
+\
+        if (usecs >= 1000000) { \
+                usecs -= 1000000; \
+                secs++; \
+        } \
+        (tv2).tv_sec = secs; \
+        (tv2).tv_usec = usecs; \
+})
 
 /* External references. */
 
@@ -519,6 +527,19 @@ static inline int ipver2af(__u8 ipver)
 	case 4:
 	        return  AF_INET;
 	case 6:
+		return AF_INET6;
+	default:
+		return 0;
+	};
+}
+
+/* Convert from an address parameter type to an address family.  */
+static inline int param_type2af(__u16 type)
+{
+	switch (type) {
+	case SCTP_PARAM_IPV4_ADDRESS:
+	        return  AF_INET;
+	case SCTP_PARAM_IPV6_ADDRESS:
 		return AF_INET6;
 	default:
 		return 0;
@@ -588,6 +609,7 @@ struct sctp6_sock {
 #endif /* CONFIG_IPV6 */
 
 #define sctp_sk(__sk) (&((struct sctp_sock *)__sk)->sctp)
+#define sctp_opt2sk(__sp) &container_of(__sp, struct sctp_sock, sctp)->sk
 
 /* Is a socket of this style? */
 #define sctp_style(sk, style) __sctp_style((sk), (SCTP_SOCKET_##style))
@@ -609,6 +631,25 @@ int static inline __sctp_state(const struct sctp_association *asoc,
 int static inline __sctp_sstate(const struct sock *sk, sctp_sock_state_t state)
 {
 	return sk->sk_state == state;
+}
+
+/* Map v4-mapped v6 address back to v4 address */
+static inline void sctp_v6_map_v4(union sctp_addr *addr)
+{
+	addr->v4.sin_family = AF_INET;
+	addr->v4.sin_port = addr->v6.sin6_port;
+	addr->v4.sin_addr.s_addr = addr->v6.sin6_addr.s6_addr32[3];
+}
+
+/* Map v4 address to v4-mapped v6 address */
+static inline void sctp_v4_map_v6(union sctp_addr *addr)
+{
+	addr->v6.sin6_family = AF_INET6;
+	addr->v6.sin6_port = addr->v4.sin_port;
+	addr->v6.sin6_addr.s6_addr32[3] = addr->v4.sin_addr.s_addr;
+	addr->v6.sin6_addr.s6_addr32[0] = 0;
+	addr->v6.sin6_addr.s6_addr32[1] = 0;
+	addr->v6.sin6_addr.s6_addr32[2] = htonl(0x0000ffff);
 }
 
 #endif /* __net_sctp_h__ */

@@ -1,7 +1,7 @@
 /*
  *   fs/cifs_debug.c
  *
- *   Copyright (c) International Business Machines  Corp., 2000,2002
+ *   Copyright (C) International Business Machines  Corp., 2000,2003
  *
  *   Modified by Steve French (sfrench@us.ibm.com)
  *
@@ -84,13 +84,13 @@ cifs_debug_data_read(char *buf, char **beginBuffer, off_t offset,
 		ses = list_entry(tmp, struct cifsSesInfo, cifsSessionList);
 		length =
 		    sprintf(buf,
-			    "\n%d) Name: %s  Domain: %s Mounts: %d ServerOS: %s  ServerNOS: %s\n\tCapabilities: 0x%x",
+			    "\n%d) Name: %s  Domain: %s Mounts: %d ServerOS: %s  \n\tServerNOS: %s\tCapabilities: 0x%x\n\tSMB session status: %d\tTCP session status: %d",
 				i, ses->serverName, ses->serverDomain, atomic_read(&ses->inUse),
-				ses->serverOS, ses->serverNOS, ses->capabilities);
+				ses->serverOS, ses->serverNOS, ses->capabilities,ses->status,ses->server->tcpStatus);
 		buf += length;
 		if(ses->server)
-			buf += sprintf(buf, "\tLocal Users To Same Server: %d ",
-				atomic_read(&ses->server->socketUseCount));
+			buf += sprintf(buf, "\n\tLocal Users To Same Server: %d SecMode: 0x%x",
+				atomic_read(&ses->server->socketUseCount),ses->server->secMode);
 	}
 	read_unlock(&GlobalSMBSeslock);
 	sprintf(buf, "\n");
@@ -106,13 +106,13 @@ cifs_debug_data_read(char *buf, char **beginBuffer, off_t offset,
 		tcon = list_entry(tmp, struct cifsTconInfo, cifsConnectionList);
 		length =
 		    sprintf(buf,
-			    "\n%d) %s Uses: %d on FS: %s with characteristics: 0x%x Attributes: 0x%x\n\tPathComponentMax: %d",
+			    "\n%d) %s Uses: %d on FS: %s with characteristics: 0x%x Attributes: 0x%x\n\tPathComponentMax: %d Status: %d",
 			    i, tcon->treeName,
 			    atomic_read(&tcon->useCount),
 			    tcon->nativeFileSystem,
 			    tcon->fsDevInfo.DeviceCharacteristics,
 			    tcon->fsAttrInfo.Attributes,
-			    tcon->fsAttrInfo.MaxPathNameComponentLength);
+			    tcon->fsAttrInfo.MaxPathNameComponentLength,tcon->tidStatus);
 		buf += length;        
 		if (tcon->fsDevInfo.DeviceType == FILE_DEVICE_DISK)
 			length = sprintf(buf, " type: DISK ");
@@ -123,6 +123,8 @@ cifs_debug_data_read(char *buf, char **beginBuffer, off_t offset,
 			    sprintf(buf, " type: %d ",
 				    tcon->fsDevInfo.DeviceType);
 		buf += length;
+		if(tcon->tidStatus == CifsNeedReconnect)
+			buf += sprintf(buf, "\tDISCONNECTED ");
 	}
 	read_unlock(&GlobalSMBSeslock);
 	length = sprintf(buf, "\n");
@@ -197,6 +199,8 @@ static read_proc_t ntlmv2_enabled_read;
 static write_proc_t ntlmv2_enabled_write;
 static read_proc_t packet_signing_enabled_read;
 static write_proc_t packet_signing_enabled_write;
+static read_proc_t quotaEnabled_read;
+static write_proc_t quotaEnabled_write;
 
 void
 cifs_proc_init(void)
@@ -232,6 +236,11 @@ cifs_proc_init(void)
 				     oplockEnabled_read, 0);
 	if (pde)
 		pde->write_proc = oplockEnabled_write;
+
+        pde = create_proc_read_entry("QuotaEnabled", 0, proc_fs_cifs,
+                                     quotaEnabled_read, 0);
+        if (pde)
+                pde->write_proc = quotaEnabled_write;
 
 	pde =
 	    create_proc_read_entry("MultiuserMount", 0, proc_fs_cifs,
@@ -360,6 +369,47 @@ oplockEnabled_write(struct file *file, const char *buffer,
 
 	return count;
 }
+
+static int
+quotaEnabled_read(char *page, char **start, off_t off,
+                   int count, int *eof, void *data)
+{
+        int len;
+
+        len = sprintf(page, "%d\n", quotaEnabled);
+/* could also check if quotas are enabled in kernel
+	as a whole first */
+        len -= off;
+        *start = page + off;
+
+        if (len > count)
+                len = count;
+        else
+                *eof = 1;
+
+        if (len < 0)
+                len = 0;
+
+        return len;
+}
+static int
+quotaEnabled_write(struct file *file, const char *buffer,
+                    unsigned long count, void *data)
+{
+        char c;
+        int rc;
+
+        rc = get_user(c, buffer);
+        if (rc)
+                return rc;
+        if (c == '0' || c == 'n' || c == 'N')
+                quotaEnabled = 0;
+        else if (c == '1' || c == 'y' || c == 'Y')
+                quotaEnabled = 1;
+
+        return count;
+}
+
 
 static int
 lookupFlag_read(char *page, char **start, off_t off,
@@ -590,6 +640,8 @@ packet_signing_enabled_write(struct file *file, const char *buffer,
 		sign_CIFS_PDUs = 0;
 	else if (c == '1' || c == 'y' || c == 'Y')
 		sign_CIFS_PDUs = 1;
+	else if (c == '2')
+		sign_CIFS_PDUs = 2;
 
 	return count;
 }

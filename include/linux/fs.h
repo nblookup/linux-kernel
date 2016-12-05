@@ -89,6 +89,7 @@ extern int leases_enable, dir_notify_enable, lease_break_time;
 
 /* public flags for file_system_type */
 #define FS_REQUIRES_DEV 1 
+#define FS_REVAL_DOT	16384	/* Check the paths ".", ".." for staleness */
 #define FS_ODD_RENAME	32768	/* Temporary stuff; will go away as soon
 				  * as nfs_rename() will be cleaned up
 				  */
@@ -187,15 +188,18 @@ extern int leases_enable, dir_notify_enable, lease_break_time;
 #define BLKSSZGET  _IO(0x12,104)/* get block device sector size */
 #if 0
 #define BLKPG      _IO(0x12,105)/* See blkpg.h */
-#define BLKELVGET  _IOR(0x12,106,sizeof(blkelv_ioctl_arg_t))/* elevator get */
-#define BLKELVSET  _IOW(0x12,107,sizeof(blkelv_ioctl_arg_t))/* elevator set */
+
+/* Some people are morons.  Do not use sizeof! */
+
+#define BLKELVGET  _IOR(0x12,106,size_t)/* elevator get */
+#define BLKELVSET  _IOW(0x12,107,size_t)/* elevator set */
 /* This was here just to show that the number is taken -
    probably all these _IO(0x12,*) ioctls should be moved to blkpg.h. */
 #endif
 /* A jump here: 108-111 have been used for various private purposes. */
-#define BLKBSZGET  _IOR(0x12,112,sizeof(int))
-#define BLKBSZSET  _IOW(0x12,113,sizeof(int))
-#define BLKGETSIZE64 _IOR(0x12,114,sizeof(u64))	/* return device size in bytes (u64 *arg) */
+#define BLKBSZGET  _IOR(0x12,112,size_t)
+#define BLKBSZSET  _IOW(0x12,113,size_t)
+#define BLKGETSIZE64 _IOR(0x12,114,size_t)	/* return device size in bytes (u64 *arg) */
 
 #define BMAP_IOCTL 1		/* obsolete - kept for compatibility */
 #define FIBMAP	   _IO(0x00,1)	/* bmap access */
@@ -219,6 +223,8 @@ typedef int (get_block_t)(struct inode *inode, sector_t iblock,
 typedef int (get_blocks_t)(struct inode *inode, sector_t iblock,
 			unsigned long max_blocks,
 			struct buffer_head *bh_result, int create);
+typedef void (dio_iodone_t)(struct inode *inode, loff_t offset,
+			ssize_t bytes, void *private);
 
 /*
  * Attribute flags.  These should be or-ed together to figure out what
@@ -323,8 +329,9 @@ struct address_space {
 	struct list_head	i_mmap;		/* list of private mappings */
 	struct list_head	i_mmap_shared;	/* list of shared mappings */
 	struct semaphore	i_shared_sem;	/* protect both above lists */
+	atomic_t		truncate_count;	/* Cover race condition with truncate */
 	unsigned long		dirtied_when;	/* jiffies of first page dirtying */
-	int			gfp_mask;	/* how to allocate the pages */
+	unsigned long		flags;		/* error bits/gfp mask */
 	struct backing_dev_info *backing_dev_info; /* device readahead, etc */
 	spinlock_t		private_lock;	/* for use by the address_space */
 	struct list_head	private_list;	/* ditto */
@@ -332,10 +339,8 @@ struct address_space {
 };
 
 struct block_device {
-	struct list_head	bd_hash;
-	atomic_t		bd_count;
-	struct inode *		bd_inode;
 	dev_t			bd_dev;  /* not a kdev_t - it's a search key */
+	struct inode *		bd_inode;	/* will die */
 	int			bd_openers;
 	struct semaphore	bd_sem;	/* open/close mutex */
 	struct list_head	bd_inodes;
@@ -343,11 +348,23 @@ struct block_device {
 	int			bd_holders;
 	struct block_device *	bd_contains;
 	unsigned		bd_block_size;
-	sector_t		bd_offset;
+	struct hd_struct *	bd_part;
 	unsigned		bd_part_count;
 	int			bd_invalidated;
 	struct gendisk *	bd_disk;
+	struct list_head	bd_list;
 };
+
+/*
+ * Use sequence counter to get consistent i_size on 32-bit processors.
+ */
+#if BITS_PER_LONG==32 && defined(CONFIG_SMP)
+#include <linux/seqlock.h>
+#define __NEED_I_SIZE_ORDERED
+#define i_size_ordered_init(inode) seqcount_init(&inode->i_size_seqcount)
+#else
+#define i_size_ordered_init(inode) do { } while (0)
+#endif
 
 struct inode {
 	struct hlist_node	i_hash;
@@ -359,7 +376,7 @@ struct inode {
 	unsigned int		i_nlink;
 	uid_t			i_uid;
 	gid_t			i_gid;
-	kdev_t			i_rdev;
+	dev_t			i_rdev;
 	loff_t			i_size;
 	struct timespec		i_atime;
 	struct timespec		i_mtime;
@@ -399,7 +416,69 @@ struct inode {
 	union {
 		void		*generic_ip;
 	} u;
+#ifdef __NEED_I_SIZE_ORDERED
+	seqcount_t		i_size_seqcount;
+#endif
 };
+
+/*
+ * NOTE: in a 32bit arch with a preemptable kernel and
+ * an UP compile the i_size_read/write must be atomic
+ * with respect to the local cpu (unlike with preempt disabled),
+ * but they don't need to be atomic with respect to other cpus like in
+ * true SMP (so they need either to either locally disable irq around
+ * the read or for example on x86 they can be still implemented as a
+ * cmpxchg8b without the need of the lock prefix). For SMP compiles
+ * and 64bit archs it makes no difference if preempt is enabled or not.
+ */
+static inline loff_t i_size_read(struct inode *inode)
+{
+#if BITS_PER_LONG==32 && defined(CONFIG_SMP)
+	loff_t i_size;
+	unsigned int seq;
+
+	do {
+		seq = read_seqcount_begin(&inode->i_size_seqcount);
+		i_size = inode->i_size;
+	} while (read_seqcount_retry(&inode->i_size_seqcount, seq));
+	return i_size;
+#elif BITS_PER_LONG==32 && defined(CONFIG_PREEMPT)
+	loff_t i_size;
+
+	preempt_disable();
+	i_size = inode->i_size;
+	preempt_enable();
+	return i_size;
+#else
+	return inode->i_size;
+#endif
+}
+
+
+static inline void i_size_write(struct inode *inode, loff_t i_size)
+{
+#if BITS_PER_LONG==32 && defined(CONFIG_SMP)
+	write_seqcount_begin(&inode->i_size_seqcount);
+	inode->i_size = i_size;
+	write_seqcount_end(&inode->i_size_seqcount);
+#elif BITS_PER_LONG==32 && defined(CONFIG_PREEMPT)
+	preempt_disable();
+	inode->i_size = i_size;
+	preempt_enable();
+#else
+	inode->i_size = i_size;
+#endif
+}
+
+static inline unsigned iminor(struct inode *inode)
+{
+	return MINOR(inode->i_rdev);
+}
+
+static inline unsigned imajor(struct inode *inode)
+{
+	return MAJOR(inode->i_rdev);
+}
 
 struct fown_struct {
 	rwlock_t lock;          /* protects pid, uid, euid fields */
@@ -532,6 +611,10 @@ extern int fcntl_setlk(struct file *, unsigned int, struct flock __user *);
 extern int fcntl_getlk64(struct file *, struct flock64 __user *);
 extern int fcntl_setlk64(struct file *, unsigned int, struct flock64 __user *);
 #endif
+
+extern void send_sigio(struct fown_struct *fown, int fd, int band);
+extern int fcntl_setlease(unsigned int fd, struct file *filp, long arg);
+extern int fcntl_getlease(struct file *filp);
 
 /* fs/locks.c */
 extern void locks_init_lock(struct file_lock *);
@@ -1076,7 +1159,6 @@ extern struct block_device *lookup_bdev(const char *);
 extern struct block_device *open_bdev_excl(const char *, int, int, void *);
 extern void close_bdev_excl(struct block_device *, int);
 
-extern const char * cdevname(kdev_t);
 extern void init_special_inode(struct inode *, umode_t, dev_t);
 
 /* Invalid inode operations -- fs/bad_inode.c */
@@ -1109,6 +1191,12 @@ extern int invalidate_partition(struct gendisk *, int);
 unsigned long invalidate_mapping_pages(struct address_space *mapping,
 					pgoff_t start, pgoff_t end);
 unsigned long invalidate_inode_pages(struct address_space *mapping);
+static inline void invalidate_remote_inode(struct inode *inode)
+{
+	if (S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode) ||
+	    S_ISLNK(inode->i_mode))
+		invalidate_inode_pages(inode->i_mapping);
+}
 extern void invalidate_inode_pages2(struct address_space *mapping);
 extern void write_inode_now(struct inode *, int);
 extern int filemap_fdatawrite(struct address_space *);
@@ -1211,6 +1299,7 @@ int generic_write_checks(struct inode *inode, struct file *file,
 			loff_t *pos, size_t *count, int isblk);
 extern ssize_t generic_file_write(struct file *, const char __user *, size_t, loff_t *);
 extern ssize_t generic_file_aio_read(struct kiocb *, char __user *, size_t, loff_t);
+extern ssize_t __generic_file_aio_read(struct kiocb *, const struct iovec *, unsigned long, loff_t *);
 extern ssize_t generic_file_aio_write(struct kiocb *, const char __user *, size_t, loff_t);
 extern ssize_t generic_file_aio_write_nolock(struct kiocb *, const struct iovec *,
 				unsigned long, loff_t *);
@@ -1227,7 +1316,7 @@ extern ssize_t generic_file_direct_IO(int rw, struct kiocb *iocb,
 	const struct iovec *iov, loff_t offset, unsigned long nr_segs);
 extern int blockdev_direct_IO(int rw, struct kiocb *iocb, struct inode *inode, 
 	struct block_device *bdev, const struct iovec *iov, loff_t offset, 
-	unsigned long nr_segs, get_blocks_t *get_blocks);
+	unsigned long nr_segs, get_blocks_t *get_blocks, dio_iodone_t *end_io);
 extern ssize_t generic_file_readv(struct file *filp, const struct iovec *iov, 
 	unsigned long nr_segs, loff_t *ppos);
 ssize_t generic_file_writev(struct file *filp, const struct iovec *iov, 
@@ -1250,6 +1339,8 @@ static inline void do_generic_file_read(struct file * filp, loff_t *ppos,
 }
 
 extern struct file_operations generic_ro_fops;
+
+#define special_file(m) (S_ISCHR(m)||S_ISBLK(m)||S_ISFIFO(m)||S_ISSOCK(m))
 
 extern int vfs_readlink(struct dentry *, char __user *, int, const char *);
 extern int vfs_follow_link(struct nameidata *, const char *);
@@ -1301,10 +1392,6 @@ struct tree_descr { char *name; struct file_operations *ops; int mode; };
 extern int simple_fill_super(struct super_block *, int, struct tree_descr *);
 extern int simple_pin_fs(char *name, struct vfsmount **mount, int *count);
 extern void simple_release_fs(struct vfsmount **mount, int *count);
-
-#ifdef CONFIG_BLK_DEV_INITRD
-extern unsigned int real_root_dev;
-#endif
 
 extern int inode_change_ok(struct inode *, struct iattr *);
 extern int inode_setattr(struct inode *, struct iattr *);

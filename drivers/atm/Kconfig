@@ -32,9 +32,8 @@ config ATM_ENI
 	  The driver works with MMF (-MF or ...F) and UTP-5 (-U5 or ...D)
 	  adapters.
 
-	  This driver is also available as a module.  If you want to compile
-	  it as a module, say M here and read
-	  <file:Documentation/modules.txt>.  The module will be called eni.
+	  To compile this driver as a module, choose M here: the module will
+	  be called eni.
 
 config ATM_ENI_DEBUG
 	bool "Enable extended debugging"
@@ -138,10 +137,8 @@ config ATM_FIRESTREAM
 	  Driver for the Fujitsu FireStream 155 (MB86697) and
 	  FireStream 50 (MB86695) ATM PCI chips.
 
-	  This driver is also available as a module.  If you want to compile
-	  it as a module, say M here and read
-	  <file:Documentation/modules.txt>.  The module will be called
-	  firestream.
+	  To compile this driver as a module, choose M here: the module will
+	  be called firestream.
 
 config ATM_ZATM
 	tristate "ZeitNet ZN1221/ZN1225"
@@ -150,9 +147,8 @@ config ATM_ZATM
 	  Driver for the ZeitNet ZN1221 (MMF) and ZN1225 (UTP-5) 155 Mbps ATM
 	  adapters.
 
-	  This driver is also available as a module.  If you want to compile
-	  it as a module, say M here and read
-	  <file:Documentation/modules.txt>.  The module will be called zatm.
+	  To compile this driver as a module, choose M here: the module will
+	  be called zatm.
 
 config ATM_ZATM_DEBUG
 	bool "Enable extended debugging"
@@ -164,34 +160,20 @@ config ATM_ZATM_DEBUG
 	  Note that extended debugging may create certain race conditions
 	  itself. Enable this ONLY if you suspect problems with the driver.
 
-config ATM_ZATM_EXACT_TS
-	bool "Enable usec resolution timestamps"
-	depends on ATM_ZATM && X86
-	help
-	  The uPD98401 SAR chip supports a high-resolution timer (approx. 30
-	  MHz) that is used for very accurate reception timestamps. Because
-	  that timer overflows after 140 seconds, and also to avoid timer
-	  drift, time measurements need to be periodically synchronized with
-	  the normal system time. Enabling this feature will add some general
-	  overhead for timer synchronization and also per-packet overhead for
-	  time conversion.
-
 #   bool 'Rolfs TI TNETA1570' CONFIG_ATM_TNETA1570 y
 #   if [ "$CONFIG_ATM_TNETA1570" = "y" ]; then
 #      bool '  Enable extended debugging' CONFIG_ATM_TNETA1570_DEBUG n
 #   fi
 config ATM_NICSTAR
 	tristate "IDT 77201 (NICStAR) (ForeRunnerLE)"
-	depends on PCI && ATM
+	depends on PCI && ATM && !64BIT
 	help
 	  The NICStAR chipset family is used in a large number of ATM NICs for
 	  25 and for 155 Mbps, including IDT cards and the Fore ForeRunnerLE
 	  series. Say Y if you have one of those.
 
-	  This driver is also available as a module.  If you want to compile
-	  it as a module, say M here and read
-	  <file:Documentation/modules.txt>. The module will be called
-	  nicstar.
+	  To compile this driver as a module, choose M here: the module will
+	  be called nicstar.
 
 config ATM_NICSTAR_USE_SUNI
 	bool "Use suni PHY driver (155Mbps)"
@@ -221,9 +203,8 @@ config ATM_IDT77252
 	help
 	  Driver for the IDT 77252 ATM PCI chips.
 
-	  This driver is also available as a module.  If you want to compile
-	  it as a module, say M here and read
-	  <file:Documentation/modules.txt>. The module will be called idt77252
+	  To compile this driver as a module, choose M here: the module will
+	  be called idt77252.
 
 config ATM_IDT77252_DEBUG
 	bool "Enable debugging messages"
@@ -301,7 +282,7 @@ config ATM_HORIZON_DEBUG
 
 config ATM_IA
 	tristate "Interphase ATM PCI x575/x525/x531"
-	depends on PCI && ATM
+	depends on PCI && ATM && !64BIT
 	---help---
 	  This is a driver for the Interphase (i)ChipSAR adapter cards
 	  which include a variety of variants in term of the size of the

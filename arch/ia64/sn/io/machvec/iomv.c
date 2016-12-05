@@ -6,13 +6,13 @@
  * Copyright (C) 2000-2003 Silicon Graphics, Inc. All rights reserved.
  */
 
-#include <linux/pci.h>
 #include <linux/module.h>
 #include <asm/io.h>
 #include <asm/delay.h>
 #include <asm/sn/simulator.h>
 #include <asm/sn/pda.h>
 #include <asm/sn/sn_cpuid.h>
+#include <asm/sn/sn2/shub_mmr.h>
 
 /**
  * sn_io_addr - convert an in/out port to an i/o address
@@ -73,3 +73,4 @@ sn_mmiob (void)
 				SH_PIO_WRITE_STATUS_0_PENDING_WRITE_COUNT_MASK)
 		udelay(1);
 }
+EXPORT_SYMBOL(sn_mmiob);

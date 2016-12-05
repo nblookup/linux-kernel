@@ -19,6 +19,7 @@
  *  Naturally it's not a 1:1 relation, but there are similarities.
  */
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/ptrace.h>
 #include <linux/kernel_stat.h>
 #include <linux/signal.h>
@@ -35,6 +36,9 @@
 #include <asm/irq.h>
 #include <asm/system.h>
 #include <asm/irqchip.h>
+
+//FIXME - this ought to be in a header IMO
+void __init arc_init_irq(void);
 
 /*
  * Maximum IRQ count.  Currently, this is arbitary.  However, it should
@@ -557,6 +561,8 @@ int request_irq(unsigned int irq, irqreturn_t (*handler)(int, void *, struct pt_
 	return retval;
 }
 
+EXPORT_SYMBOL(request_irq);
+
 /**
  *	free_irq - free an interrupt
  *	@irq: Interrupt line to free
@@ -599,6 +605,8 @@ void free_irq(unsigned int irq, void *dev_id)
 out:
 	spin_unlock_irqrestore(&irq_controller_lock, flags);
 }
+
+EXPORT_SYMBOL(free_irq);
 
 /* Start the interrupt probing.  Unlike other architectures,
  * we don't return a mask of interrupts from probe_irq_on,
@@ -650,6 +658,8 @@ unsigned long probe_irq_on(void)
 	return irqs;
 }
 
+EXPORT_SYMBOL(probe_irq_on);
+
 /*
  * Possible return values:
  *  >= 0 - interrupt number
@@ -683,6 +693,8 @@ out:
 
 	return irq_found;
 }
+
+EXPORT_SYMBOL(probe_irq_off);
 
 void __init init_irq_proc(void)
 {

@@ -42,6 +42,7 @@
 #include <linux/reboot.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
+#include <linux/moduleparam.h>
 
 #include <asm/io.h>
 #include <asm/uaccess.h>
@@ -122,7 +123,7 @@ static int nowayout = 1;
 static int nowayout = 0;
 #endif
 
-MODULE_PARM(nowayout,"i");
+module_param(nowayout, int, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default=CONFIG_WATCHDOG_NOWAYOUT)");
 
 
@@ -163,12 +164,6 @@ ibwdt_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 		return 1;
 	}
 	return 0;
-}
-
-static ssize_t
-ibwdt_read(struct file *file, char *buf, size_t count, loff_t *ppos)
-{
-	return -EINVAL;
 }
 
 static int
@@ -223,14 +218,14 @@ ibwdt_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 static int
 ibwdt_open(struct inode *inode, struct file *file)
 {
-	if (minor(inode->i_rdev) == WATCHDOG_MINOR) {
+	if (iminor(inode) == WATCHDOG_MINOR) {
 		spin_lock(&ibwdt_lock);
 		if (ibwdt_is_open) {
 			spin_unlock(&ibwdt_lock);
 			return -EBUSY;
 		}
 		if (nowayout)
-			MOD_INC_USE_COUNT;
+			__module_get(THIS_MODULE);
 
 		/* Activate */
 		ibwdt_is_open = 1;
@@ -245,7 +240,7 @@ ibwdt_open(struct inode *inode, struct file *file)
 static int
 ibwdt_close(struct inode *inode, struct file *file)
 {
-	if (minor(inode->i_rdev) == WATCHDOG_MINOR) {
+	if (iminor(inode) == WATCHDOG_MINOR) {
 		spin_lock(&ibwdt_lock);
 		if (expect_close)
 			outb_p(wd_times[wd_margin], WDT_STOP);
@@ -279,7 +274,6 @@ ibwdt_notify_sys(struct notifier_block *this, unsigned long code,
 
 static struct file_operations ibwdt_fops = {
 	.owner		= THIS_MODULE,
-	.read		= ibwdt_read,
 	.write		= ibwdt_write,
 	.ioctl		= ibwdt_ioctl,
 	.open		= ibwdt_open,

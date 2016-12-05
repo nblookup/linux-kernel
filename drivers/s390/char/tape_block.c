@@ -10,10 +10,8 @@
  */
 
 #include <linux/config.h>
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/blkdev.h>
-#include <linux/blk.h>
 #include <linux/interrupt.h>
 #include <linux/buffer_head.h>
 
@@ -69,7 +67,7 @@ __tapeblock_end_request(struct tape_request *ccw_req, void *data)
 		device->blk_data.block_position = -1;
 	device->discipline->free_bread(ccw_req);
 	if (!list_empty(&device->req_queue) ||
-	    elv_next_request(&device->blk_data.request_queue))
+	    elv_next_request(device->blk_data.request_queue))
 		tasklet_schedule(&device->blk_data.tasklet);
 }
 
@@ -89,7 +87,7 @@ __tape_process_blk_queue(struct tape_device *device, struct list_head *new_req)
 	   owns the device. tape_state != TS_IN_USE is NOT enough. */
 	if (device->tape_state != TS_IN_USE)
 		return;
-	queue = &device->blk_data.request_queue;
+	queue = device->blk_data.request_queue;
 	nr_queued = 0;
 	/* Count number of requests on ccw queue. */
 	list_for_each(l, &device->req_queue)
@@ -187,7 +185,7 @@ tapeblock_tasklet(unsigned long data)
 	struct tape_device *device;
 
 	device = (struct tape_device *) data;
-	while (elv_next_request(&device->blk_data.request_queue)) {
+	while (elv_next_request(device->blk_data.request_queue)) {
 		INIT_LIST_HEAD(&new_req);
 		spin_lock_irq(get_ccwdev_lock(device->cdev));
 		__tape_process_blk_queue(device, &new_req);
@@ -209,7 +207,7 @@ int
 tapeblock_setup_device(struct tape_device * device)
 {
 	struct tape_blk_data *d = &device->blk_data;
-	request_queue_t *q = &d->request_queue;
+	request_queue_t *q;
 	struct gendisk *disk = alloc_disk(1);
 	int rc;
 
@@ -219,10 +217,12 @@ tapeblock_setup_device(struct tape_device * device)
 	tasklet_init(&d->tasklet, tapeblock_tasklet, (unsigned long)device);
 
 	spin_lock_init(&d->request_queue_lock);
-	rc = blk_init_queue(q, tapeblock_request_fn, &d->request_queue_lock);
-	if (rc)
+	q = blk_init_queue(tapeblock_request_fn, &d->request_queue_lock);
+	if (!q) {
+		rc = -ENXIO;
 		goto put_disk;
-
+	}
+	d->request_queue = q;
 	elevator_exit(q);
 	rc = elevator_init(q, &elevator_noop);
 	if (rc)
@@ -263,7 +263,7 @@ tapeblock_cleanup_device(struct tape_device *device)
 
 	del_gendisk(d->disk);
 	put_disk(d->disk);
-	blk_cleanup_queue(&d->request_queue);
+	blk_cleanup_queue(d->request_queue);
 
 	tasklet_kill(&d->tasklet);
 }

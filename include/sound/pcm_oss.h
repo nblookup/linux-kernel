@@ -30,7 +30,9 @@ struct _snd_pcm_oss_setup {
 	unsigned int disable:1,
 		     direct:1,
 		     block:1,
-		     nonblock:1;
+		     nonblock:1,
+		     wholefrag:1,
+		     nosilence:1;
 	unsigned int periods;
 	unsigned int period_size;
 	snd_pcm_oss_setup_t *next;
@@ -48,12 +50,13 @@ typedef struct _snd_pcm_oss_runtime {
 	unsigned int maxfrags;
 	unsigned int subdivision;		/* requested subdivision */
 	size_t period_bytes;			/* requested period size */
+	size_t period_ptr;			/* actual write pointer to period */
 	unsigned int periods;
-	size_t buffer_bytes;			/* requested period size */
+	size_t buffer_bytes;			/* requested buffer size */
 	size_t bytes;				/* total # bytes processed */
 	size_t mmap_bytes;
 	char *buffer;				/* vmallocated period */
-	size_t buffer_used;			/* used length from buffer */
+	size_t buffer_used;			/* used length from period buffer */
 	snd_pcm_plugin_t *plugin_first;
 	snd_pcm_plugin_t *plugin_last;
 	unsigned int prev_hw_ptr_interrupt;

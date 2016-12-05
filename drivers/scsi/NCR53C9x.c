@@ -29,7 +29,7 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/slab.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/interrupt.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
@@ -815,6 +815,7 @@ static int copy_info(struct info_str *info, char *fmt, ...)
 
 static int esp_host_info(struct NCR_ESP *esp, char *ptr, off_t offset, int len)
 {
+	struct scsi_device *sdev;
 	struct info_str info;
 	int i;
 
@@ -867,23 +868,20 @@ static int esp_host_info(struct NCR_ESP *esp, char *ptr, off_t offset, int len)
 	
 	/* Now describe the state of each existing target. */
 	copy_info(&info, "Target #\tconfig3\t\tSync Capabilities\tDisconnect\n");
-	for(i = 0; i < 15; i++) {
-		if(esp->targets_present & (1 << i)) {
-			Scsi_Device *SDptr;
-			struct esp_device *esp_dev;
 
-			list_for_each_entry(SDptr, &esp->ehost->my_devices,
-					siblings)
-				if(SDptr->id == i)
-					break;
+	shost_for_each_device(sdev, esp->ehost) {
+		struct esp_device *esp_dev = sdev->hostdata;
+		uint id = sdev->id;
 
-			esp_dev = SDptr->hostdata;
-			copy_info(&info, "%d\t\t", i);
-			copy_info(&info, "%08lx\t", esp->config3[i]);
-			copy_info(&info, "[%02lx,%02lx]\t\t\t", esp_dev->sync_max_offset,
-				  esp_dev->sync_min_period);
-			copy_info(&info, "%s\n", esp_dev->disconnect ? "yes" : "no");
-		}
+		if (!(esp->targets_present & (1 << id)))
+			continue;
+
+		copy_info(&info, "%d\t\t", id);
+		copy_info(&info, "%08lx\t", esp->config3[id]);
+		copy_info(&info, "[%02lx,%02lx]\t\t\t",
+			esp_dev->sync_max_offset,
+			esp_dev->sync_min_period);
+		copy_info(&info, "%s\n", esp_dev->disconnect ? "yes" : "no");
 	}
 
 	return info.pos > info.offset? info.pos - info.offset : 0;
@@ -911,7 +909,7 @@ static void esp_get_dmabufs(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 		if (esp->dma_mmu_get_scsi_one)
 			esp->dma_mmu_get_scsi_one(esp, sp);
 		else
-			sp->SCp.have_data_in = (int) sp->SCp.ptr =
+			sp->SCp.ptr =
 				(char *) virt_to_phys(sp->request_buffer);
 	} else {
 		sp->SCp.buffer = (struct scatterlist *) sp->buffer;
@@ -3470,7 +3468,7 @@ void esp_handle(struct NCR_ESP *esp)
 		 * for reselection.  See esp100_reconnect_hwbug()
 		 * to see how we try very hard to avoid this.
 		 */
-		ESPLOG(("esp%d: illegal command\n", esp->esp_id));
+		ESPLOG(("esp%d: invalid command\n", esp->esp_id));
 
 		esp_dump_state(esp, eregs);
 

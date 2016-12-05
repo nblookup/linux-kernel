@@ -21,6 +21,7 @@
 #include <linux/tty.h>
 #include <linux/binfmts.h>
 #include <linux/elf.h>
+#include <linux/suspend.h>
 
 #include <asm/pgalloc.h>
 #include <asm/ucontext.h>
@@ -186,6 +187,9 @@ asmlinkage int sys_sigreturn(struct pt_regs *regs)
 	struct sigframe *frame;
 	sigset_t set;
 
+	/* Always make any pending restarted system calls return -EINTR */
+	current_thread_info()->restart_block.fn = do_no_restart_syscall;
+
 	/*
 	 * Since we stacked the signal on a 64-bit boundary,
 	 * then 'sp' should be word aligned here.  If it's
@@ -230,6 +234,9 @@ asmlinkage int sys_rt_sigreturn(struct pt_regs *regs)
 {
 	struct rt_sigframe *frame;
 	sigset_t set;
+
+	/* Always make any pending restarted system calls return -EINTR */
+	current_thread_info()->restart_block.fn = do_no_restart_syscall;
 
 	/*
 	 * Since we stacked the signal on a 64-bit boundary,
@@ -461,8 +468,6 @@ handle_signal(unsigned long sig, siginfo_t *info, sigset_t *oldset,
 	if (syscall) {
 		switch (regs->ARM_r0) {
 		case -ERESTART_RESTARTBLOCK:
-			current_thread_info()->restart_block.fn =
-				do_no_restart_syscall;
 		case -ERESTARTNOHAND:
 			regs->ARM_r0 = -EINTR;
 			break;
@@ -496,18 +501,21 @@ handle_signal(unsigned long sig, siginfo_t *info, sigset_t *oldset,
 	 */
 	ret |= !valid_user_regs(regs);
 
+	/*
+	 * Block the signal if we were unsuccessful.
+	 */
+	if (ret != 0 || !(ka->sa.sa_flags & SA_NODEFER)) {
+		spin_lock_irq(&tsk->sighand->siglock);
+		sigorsets(&tsk->blocked, &tsk->blocked,
+			  &ka->sa.sa_mask);
+		sigaddset(&tsk->blocked, sig);
+		recalc_sigpending();
+		spin_unlock_irq(&tsk->sighand->siglock);
+	}
+
 	if (ret == 0) {
 		if (ka->sa.sa_flags & SA_ONESHOT)
 			ka->sa.sa_handler = SIG_DFL;
-
-		if (!(ka->sa.sa_flags & SA_NODEFER)) {
-			spin_lock_irq(&tsk->sighand->siglock);
-			sigorsets(&tsk->blocked, &tsk->blocked,
-				  &ka->sa.sa_mask);
-			sigaddset(&tsk->blocked, sig);
-			recalc_sigpending();
-			spin_unlock_irq(&tsk->sighand->siglock);
-		}
 		return;
 	}
 
@@ -539,6 +547,11 @@ static int do_signal(sigset_t *oldset, struct pt_regs *regs, int syscall)
 	if (!user_mode(regs))
 		return 0;
 
+	if (current->flags & PF_FREEZE) {
+		refrigerator(0);
+		goto no_signal;
+	}
+
 	if (current->ptrace & PT_SINGLESTEP)
 		ptrace_cancel_bpt(current);
 
@@ -550,6 +563,7 @@ static int do_signal(sigset_t *oldset, struct pt_regs *regs, int syscall)
 		return 1;
 	}
 
+ no_signal:
 	/*
 	 * No signal to deliver to the process - restart the syscall.
 	 */

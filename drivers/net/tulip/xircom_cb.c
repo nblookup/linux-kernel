@@ -140,7 +140,7 @@ static int link_status(struct xircom_private *card);
 
 
 
-static struct pci_device_id xircom_pci_table[] __devinitdata = {
+static struct pci_device_id xircom_pci_table[] = {
 	{0x115D, 0x0003, PCI_ANY_ID, PCI_ANY_ID,},
 	{0,},
 };
@@ -175,36 +175,18 @@ static void print_binary(unsigned int number)
 }
 #endif
 
-static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
 {
-	u32 ethcmd;
-		
-	if (copy_from_user(&ethcmd, useraddr, sizeof(ethcmd)))
-		return -EFAULT;
-	
-	switch (ethcmd) {
-	case ETHTOOL_GDRVINFO: {
-		struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
-		strncpy(info.driver, "xircom_cb", sizeof(info.driver)-1);
-		if (copy_to_user(useraddr, &info, sizeof(info)))
-			return -EFAULT;
-		return 0;
-	}
-	}
-	
-	return -EOPNOTSUPP;
+	struct xircom_private *private = dev->priv;
+
+	strcpy(info->driver, "xircom_cb");
+	strcpy(info->bus_info, pci_name(private->pdev));
 }
 
-static int private_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
-{
-
-       switch(cmd) {
-       case SIOCETHTOOL:
-	       return netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
-	default:
-		return -EOPNOTSUPP;
-	}
-}
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
 
 /* xircom_probe is the code that gets called on device insertion.
    it sets up the hardware and registers the device to the networklayer.
@@ -248,7 +230,8 @@ static int __devinit xircom_probe(struct pci_dev *pdev, const struct pci_device_
 	   This way, we can fail gracefully if not enough memory
 	   is available. 
 	 */
-	if ((dev = init_etherdev(NULL, sizeof(struct xircom_private))) == NULL) {
+	dev = alloc_etherdev(sizeof(struct xircom_private));
+	if (!dev) {
 		printk(KERN_ERR "xircom_probe: failed to allocate etherdev\n");
 		goto device_fail;
 	}
@@ -268,7 +251,7 @@ static int __devinit xircom_probe(struct pci_dev *pdev, const struct pci_device_
 
 	SET_MODULE_OWNER(dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
-	printk(KERN_INFO "%s: Xircom cardbus revision %i at irq %i \n", dev->name, chip_rev, pdev->irq);
+
 
 	private->dev = dev;
 	private->pdev = pdev;
@@ -276,7 +259,6 @@ static int __devinit xircom_probe(struct pci_dev *pdev, const struct pci_device_
 	private->lock = SPIN_LOCK_UNLOCKED;
 	dev->irq = pdev->irq;
 	dev->base_addr = private->io_port;
-	
 	
 	initialize_card(private);
 	read_mac_address(private);
@@ -287,10 +269,15 @@ static int __devinit xircom_probe(struct pci_dev *pdev, const struct pci_device_
 	dev->stop = &xircom_close;
 	dev->get_stats = &xircom_get_stats;
 	dev->priv = private;
-	dev->do_ioctl = &private_ioctl;
+	SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 	pci_set_drvdata(pdev, dev);
 
-	
+	if (register_netdev(dev)) {
+		printk(KERN_ERR "xircom_probe: netdevice registration failed.\n");
+		goto reg_fail;
+	}
+		
+	printk(KERN_INFO "%s: Xircom cardbus revision %i at irq %i \n", dev->name, chip_rev, pdev->irq);
 	/* start the transmitter to get a heartbeat */
 	/* TODO: send 2 dummy packets here */
 	transceiver_voodoo(private);
@@ -305,10 +292,12 @@ static int __devinit xircom_probe(struct pci_dev *pdev, const struct pci_device_
 	leave("xircom_probe");
 	return 0;
 
+reg_fail:
+	kfree(private->tx_buffer);
 tx_buf_fail:
 	kfree(private->rx_buffer);
 rx_buf_fail:
-	kfree(dev);
+	free_netdev(dev);
 device_fail:
 	return -ENODEV;
 }
@@ -323,22 +312,16 @@ device_fail:
 static void __devexit xircom_remove(struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
-	struct xircom_private *card;
+	struct xircom_private *card = dev->priv;
+
 	enter("xircom_remove");
-	if (dev!=NULL) {
-		card=dev->priv;
-		if (card!=NULL) {	
-			if (card->rx_buffer!=NULL)
-				pci_free_consistent(pdev,8192,card->rx_buffer,card->rx_dma_handle);
-			card->rx_buffer = NULL;
-			if (card->tx_buffer!=NULL)
-				pci_free_consistent(pdev,8192,card->tx_buffer,card->tx_dma_handle);
-			card->tx_buffer = NULL;			
-		}
-	}
+	pci_free_consistent(pdev,8192,card->rx_buffer,card->rx_dma_handle);
+	pci_free_consistent(pdev,8192,card->tx_buffer,card->tx_dma_handle);
+
 	release_region(dev->base_addr, 128);
 	unregister_netdev(dev);
-	kfree(dev);
+	free_netdev(dev);
+	pci_set_drvdata(pdev, NULL);
 	leave("xircom_remove");
 } 
 

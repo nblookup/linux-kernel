@@ -86,7 +86,7 @@ void release_cis_mem(struct pcmcia_socket *s)
 {
     if (s->cis_mem.sys_start != 0) {
 	s->cis_mem.flags &= ~MAP_ACTIVE;
-	s->ss_entry->set_mem_map(s, &s->cis_mem);
+	s->ops->set_mem_map(s, &s->cis_mem);
 	if (!(s->features & SS_CAP_STATIC_MAP))
 	    release_mem_region(s->cis_mem.sys_start, s->map_size);
 	iounmap(s->cis_virt);
@@ -118,7 +118,7 @@ set_cis_map(struct pcmcia_socket *s, unsigned int card_offset, unsigned int flag
     }
     mem->card_start = card_offset;
     mem->flags = flags;
-    s->ss_entry->set_mem_map(s, mem);
+    s->ops->set_mem_map(s, mem);
     if (s->features & SS_CAP_STATIC_MAP) {
 	if (s->cis_virt)
 	    iounmap(s->cis_virt);
@@ -293,15 +293,17 @@ static void read_cis_cache(struct pcmcia_socket *s, int attr, u_int addr,
 #endif
 	ret = read_cis_mem(s, attr, addr, len, ptr);
 
-    /* Copy data into the cache */
-    cis = kmalloc(sizeof(struct cis_cache_entry) + len, GFP_KERNEL);
-    if (cis) {
-	cis->addr = addr;
-	cis->len = len;
-	cis->attr = attr;
-	memcpy(cis->cache, ptr, len);
-	list_add(&cis->node, &s->cis_cache);
-    }
+	if (ret == 0) {
+		/* Copy data into the cache */
+		cis = kmalloc(sizeof(struct cis_cache_entry) + len, GFP_KERNEL);
+		if (cis) {
+			cis->addr = addr;
+			cis->len = len;
+			cis->attr = attr;
+			memcpy(cis->cache, ptr, len);
+			list_add(&cis->node, &s->cis_cache);
+		}
+	}
 }
 
 static void

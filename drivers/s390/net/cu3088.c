@@ -1,5 +1,5 @@
 /*
- * $Id: cu3088.c,v 1.26 2003/01/17 13:46:13 cohuck Exp $
+ * $Id: cu3088.c,v 1.31 2003/09/29 15:24:27 cohuck Exp $
  *
  * CTC / LCS ccw_device driver
  *
@@ -55,9 +55,14 @@ static struct ccw_device_id cu3088_ids[] = {
 
 static struct ccw_driver cu3088_driver;
 
+static void
+cu3088_root_dev_release (struct device *dev)
+{
+}
+
 struct device cu3088_root_dev = {
-	.name   = "CU3088 Devices",
 	.bus_id = "cu3088",
+	.release = cu3088_root_dev_release,
 };
 
 static ssize_t
@@ -79,7 +84,7 @@ group_write(struct device_driver *drv, const char *buf, size_t count)
 
 		if (!(end = strchr(start, delim[i])))
 			return count;
-		len = min_t(ptrdiff_t, BUS_ID_SIZE, end - start);
+		len = min_t(ptrdiff_t, BUS_ID_SIZE, end - start + 1);
 		strlcpy (bus_ids[i], start, len);
 		argv[i] = bus_ids[i];
 		start = end + 1;

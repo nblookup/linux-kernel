@@ -110,7 +110,7 @@ static int orinoco_cs_hard_reset(struct orinoco_private *priv);
 
 /* PCMCIA gumpf */
 static void orinoco_cs_config(dev_link_t * link);
-static void orinoco_cs_release(u_long arg);
+static void orinoco_cs_release(dev_link_t * link);
 static int orinoco_cs_event(event_t event, int priority,
 			    event_callback_args_t * args);
 
@@ -153,24 +153,6 @@ orinoco_cs_error(client_handle_t handle, int func, int ret)
 	CardServices(ReportError, handle, &err);
 }
 
-
-/* Remove zombie instances (card removed, detach pending) */
-static void
-flush_stale_links(void)
-{
-	dev_link_t *link, *next;
-
-	TRACE_ENTER("");
-
-	for (link = dev_list; link; link = next) {
-		next = link->next;
-		if (link->state & DEV_STALE_LINK) {
-			orinoco_cs_detach(link);
-		}
-	}
-	TRACE_EXIT("");
-}
-
 /*
  * This creates an "instance" of the driver, allocating local data
  * structures for one device.  The device is registered with Card
@@ -189,9 +171,6 @@ orinoco_cs_attach(void)
 	client_reg_t client_reg;
 	int ret, i;
 
-	/* A bit of cleanup */
-	flush_stale_links();
-
 	dev = alloc_orinocodev(sizeof(*card), orinoco_cs_hard_reset);
 	if (! dev)
 		return NULL;
@@ -201,11 +180,6 @@ orinoco_cs_attach(void)
 	/* Link both structures together */
 	link = &card->link;
 	link->priv = dev;
-
-	/* Initialize the dev_link_t structure */
-	init_timer(&link->release);
-	link->release.function = &orinoco_cs_release;
-	link->release.data = (u_long) link;
 
 	/* Interrupt setup */
 	link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
@@ -271,13 +245,8 @@ orinoco_cs_detach(dev_link_t * link)
 		return;
 	}
 
-	if (link->state & DEV_CONFIG) {
-		orinoco_cs_release((u_long)link);
-		if (link->state & DEV_CONFIG) {
-			link->state |= DEV_STALE_LINK;
-			return;
-		}
-	}
+	if (link->state & DEV_CONFIG)
+		orinoco_cs_release(link);
 
 	/* Break the link with Card Services */
 	if (link->handle)
@@ -291,7 +260,7 @@ orinoco_cs_detach(dev_link_t * link)
 		      dev);
 		unregister_netdev(dev);
 	}
-	kfree(dev);
+	free_netdev(dev);
 }				/* orinoco_cs_detach */
 
 /*
@@ -530,7 +499,7 @@ orinoco_cs_config(dev_link_t *link)
 	orinoco_cs_error(link->handle, last_fn, last_ret);
 
  failed:
-	orinoco_cs_release((u_long) link);
+	orinoco_cs_release(link);
 }				/* orinoco_cs_config */
 
 /*
@@ -539,9 +508,8 @@ orinoco_cs_config(dev_link_t *link)
  * still open, this will be postponed until it is closed.
  */
 static void
-orinoco_cs_release(u_long arg)
+orinoco_cs_release(dev_link_t *link)
 {
-	dev_link_t *link = (dev_link_t *) arg;
 	struct net_device *dev = link->priv;
 	struct orinoco_private *priv = dev->priv;
 	unsigned long flags;
@@ -697,7 +665,7 @@ exit_orinoco_cs(void)
 		DEBUG(0, "orinoco_cs: Removing leftover devices.\n");
 	while (dev_list != NULL) {
 		if (dev_list->state & DEV_CONFIG)
-			orinoco_cs_release((u_long) dev_list);
+			orinoco_cs_release(dev_list);
 		orinoco_cs_detach(dev_list);
 	}
 }

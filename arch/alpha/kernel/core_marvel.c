@@ -524,7 +524,7 @@ mk_conf_addr(struct pci_bus *pbus, unsigned int devfn, int where)
 	if (!io7_port->enabled)
 		return addr;
 
-	if (hose->first_busno == bus) {
+	if (!pbus->parent) { /* No parent means peer PCI bus. */
 		/* Don't support idsel > 20 on primary bus.  */
 		if (devfn >= PCI_DEVFN(21, 0))
 			return addr;
@@ -696,7 +696,7 @@ marvel_ioremap(unsigned long addr, unsigned long size)
 			}
 			pfn >>= 1;	/* make it a true pfn */
 			
-			if (__alpha_remap_area_pages(VMALLOC_VMADDR(vaddr), 
+			if (__alpha_remap_area_pages(vaddr,
 						     pfn << PAGE_SHIFT, 
 						     PAGE_SIZE, 0)) {
 				printk("FAILED to map...\n");

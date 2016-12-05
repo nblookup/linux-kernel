@@ -712,7 +712,8 @@ cciss_scsi_detect(int ctlr)
 	sh->hostdata[0] = (unsigned long) hba[ctlr];
 	sh->irq = hba[ctlr]->intr;
 	sh->unique_id = sh->irq;
-	scsi_add_host(sh, &hba[ctlr]->pdev->dev);
+	scsi_add_host(sh, &hba[ctlr]->pdev->dev); /* XXX handle failure */
+	scsi_scan_host(sh);
 
 	return 1;
 }
@@ -895,12 +896,13 @@ cciss_scsi_do_inquiry(ctlr_info_t *c, unsigned char *scsi3addr,
 	spin_lock_irqsave(CCISS_LOCK(c->ctlr), flags);
 	cp = scsi_cmd_alloc(c);
 	spin_unlock_irqrestore(CCISS_LOCK(c->ctlr), flags);
-	ei = cp->err_info; 
 
 	if (cp == NULL) {			/* trouble... */
 		printk("cmd_alloc returned NULL!\n");
 		return -1;
 	}
+
+	ei = cp->err_info; 
 
 	cdb[0] = CISS_INQUIRY;
 	cdb[1] = 0;

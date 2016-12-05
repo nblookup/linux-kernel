@@ -114,7 +114,7 @@ MODULE_LICENSE("GPL");
 
 static void ibmtr_config(dev_link_t *link);
 static void ibmtr_hw_setup(struct net_device *dev, u_int mmiobase);
-static void ibmtr_release(u_long arg);
+static void ibmtr_release(dev_link_t *link);
 static int ibmtr_event(event_t event, int priority,
                        event_callback_args_t *args);
 
@@ -136,57 +136,18 @@ typedef struct ibmtr_dev_t {
     struct net_device	*dev;
     dev_node_t          node;
     window_handle_t     sram_win_handle;
-    struct tok_info	ti;
+    struct tok_info	*ti;
 } ibmtr_dev_t;
 
-/*======================================================================
-
-    This bit of code is used to avoid unregistering network devices
-    at inappropriate times.  2.2 and later kernels are fairly picky
-    about when this can happen.
-    
-======================================================================*/
-
-static void flush_stale_links(void)
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
 {
-    dev_link_t *link, *next;
-    for (link = dev_list; link; link = next) {
-	next = link->next;
-	if (link->state & DEV_STALE_LINK)
-	    ibmtr_detach(link);
-    }
+	strcpy(info->driver, "ibmtr_cs");
 }
 
-static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
-{
-	u32 ethcmd;
-		
-	if (copy_from_user(&ethcmd, useraddr, sizeof(ethcmd)))
-		return -EFAULT;
-	
-	switch (ethcmd) {
-	case ETHTOOL_GDRVINFO: {
-		struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
-		strncpy(info.driver, "ibmtr_cs", sizeof(info.driver)-1);
-		if (copy_to_user(useraddr, &info, sizeof(info)))
-			return -EFAULT;
-		return 0;
-	}
-	}
-	
-	return -EOPNOTSUPP;
-}
-
-static int private_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
-{
-
-       switch(cmd) {
-       case SIOCETHTOOL:
-	       return netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
-	default:
-	    return -EOPNOTSUPP;
-	}
-}
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
 
 /*======================================================================
 
@@ -205,20 +166,21 @@ static dev_link_t *ibmtr_attach(void)
     int i, ret;
     
     DEBUG(0, "ibmtr_attach()\n");
-    flush_stale_links();
 
     /* Create new token-ring device */
-    dev = alloc_trdev(sizeof(*info));
-    if (!dev)
-	    return NULL;
-    info = dev->priv;
+    info = kmalloc(sizeof(*info), GFP_KERNEL); 
+    if (!info) return NULL;
+    memset(info,0,sizeof(*info));
+    dev = alloc_trdev(sizeof(struct tok_info));
+    if (!dev) { 
+	kfree(info); 
+	return NULL;
+    } 
 
     link = &info->link;
     link->priv = info;
+    info->ti = dev->priv; 
 
-    init_timer(&link->release);
-    link->release.function = &ibmtr_release;
-    link->release.data = (u_long)link;
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_8;
     link->io.NumPorts1 = 4;
     link->io.IOAddrLines = 16;
@@ -238,7 +200,7 @@ static dev_link_t *ibmtr_attach(void)
     link->irq.Instance = info->dev = dev;
     
     dev->init = &ibmtr_probe;
-    dev->do_ioctl = &private_ioctl;
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 
     /* Register with Card Services */
     link->next = dev_list;
@@ -293,15 +255,12 @@ static void ibmtr_detach(dev_link_t *link)
     dev = info->dev;
     {
 	struct tok_info *ti = (struct tok_info *)dev->priv;
-	del_timer(&(ti->tr_timer));
+	del_timer_sync(&(ti->tr_timer));
     }
-    del_timer(&link->release);
     if (link->state & DEV_CONFIG) {
-        ibmtr_release((u_long)link);
-        if (link->state & DEV_STALE_CONFIG) {
-            link->state |= DEV_STALE_LINK;
+        ibmtr_release(link);
+        if (link->state & DEV_STALE_CONFIG)
             return;
-        }
     }
 
     if (link->handle)
@@ -310,7 +269,8 @@ static void ibmtr_detach(dev_link_t *link)
     /* Unlink device structure, free bits */
     *linkp = link->next;
     unregister_netdev(dev);
-    kfree(dev);
+    free_netdev(dev);
+    kfree(info); 
 } /* ibmtr_detach */
 
 /*======================================================================
@@ -434,7 +394,7 @@ static void ibmtr_config(dev_link_t *link)
 cs_failed:
     cs_error(link->handle, last_fn, last_ret);
 failed:
-    ibmtr_release((u_long)link);
+    ibmtr_release(link);
 } /* ibmtr_config */
 
 /*======================================================================
@@ -445,9 +405,8 @@ failed:
 
 ======================================================================*/
 
-static void ibmtr_release(u_long arg)
+static void ibmtr_release(dev_link_t *link)
 {
-    dev_link_t *link = (dev_link_t *)arg;
     ibmtr_dev_t *info = link->priv;
     struct net_device *dev = info->dev;
 
@@ -472,7 +431,9 @@ static void ibmtr_release(u_long arg)
 
     link->state &= ~DEV_CONFIG;
 
-} /* ibmtr_release */
+    if (link->state & DEV_STALE_CONFIG)
+	    ibmtr_detach(link);
+}
 
 /*======================================================================
 
@@ -499,7 +460,7 @@ static int ibmtr_event(event_t event, int priority,
 	    /* set flag to bypass normal interrupt code */
 	    ((struct tok_info *)dev->priv)->sram_virt |= 1;
 	    netif_device_detach(dev);
-	    mod_timer(&link->release, jiffies + HZ/20);
+	    ibmtr_release(link);
         }
         break;
     case CS_EVENT_CARD_INSERTION:

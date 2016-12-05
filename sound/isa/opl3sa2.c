@@ -161,7 +161,7 @@ static snd_card_t *snd_opl3sa2_legacy[SNDRV_CARDS] = SNDRV_DEFAULT_PTR;
 
 #ifdef CONFIG_PNP
 
-static struct pnp_card_device_id snd_opl3sa2_pnpids[] __devinitdata = {
+static struct pnp_card_device_id snd_opl3sa2_pnpids[] = {
 	/* Yamaha YMF719E-S (Genius Sound Maker 3DX) */
 	{ .id = "YMH0020", .devs = { { "YMH0021" } } },
 	/* Yamaha OPL3-SA3 (integrated on Intel's Pentium II AL440LX motherboard) */
@@ -552,9 +552,8 @@ static void snd_opl3sa2_suspend(opl3sa2_t *chip)
 	if (card->power_state == SNDRV_CTL_POWER_D3hot)
 		return;
 
-	/* FIXME: is this order ok? */
+	snd_pcm_suspend_all(chip->cs4231->pcm); /* stop before saving regs */
 	chip->cs4231_suspend(chip->cs4231);
-	snd_pcm_suspend_all(chip->cs4231->pcm);
 
 	/* power down */
 	snd_opl3sa2_write(chip, OPL3SA2_PM_CTRL, OPL3SA2_PM_D3);
@@ -753,6 +752,7 @@ static int __devinit snd_opl3sa2_probe(int dev,
 		err = -ENOMEM;
 		goto __error;
 	}
+	spin_lock_init(&chip->reg_lock);
 	chip->irq = -1;
 	if ((err = snd_device_new(card, SNDRV_DEV_LOWLEVEL, chip, &ops)) < 0)
 		goto __error;

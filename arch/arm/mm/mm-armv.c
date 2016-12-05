@@ -9,6 +9,7 @@
  *
  *  Page table sludge for ARM v3 and v4 processor architectures.
  */
+#include <linux/config.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
@@ -34,8 +35,8 @@ struct cachepolicy {
 };
 
 static struct cachepolicy cache_policies[] __initdata = {
-	{ "uncached",		CR1_W|CR1_C,	PMD_SECT_UNCACHED },
-	{ "buffered",		CR1_C,		PMD_SECT_BUFFERED },
+	{ "uncached",		CR_W|CR_C,	PMD_SECT_UNCACHED },
+	{ "buffered",		CR_C,		PMD_SECT_BUFFERED },
 	{ "writethrough",	0,		PMD_SECT_WT       },
 #ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
 	{ "writeback",		0,		PMD_SECT_WB       },
@@ -102,8 +103,8 @@ __early_param("ecc=", early_ecc);
 
 static int __init noalign_setup(char *__unused)
 {
-	cr_alignment &= ~CR1_A;
-	cr_no_alignment &= ~CR1_A;
+	cr_alignment &= ~CR_A;
+	cr_no_alignment &= ~CR_A;
 	set_cr(cr_alignment);
 	return 1;
 }
@@ -305,8 +306,34 @@ static struct mem_types mem_types[] __initdata = {
  */
 static void __init build_mem_type_table(void)
 {
+	unsigned int cr = get_cr();
 	int cpu_arch = cpu_architecture();
 	const char *policy;
+
+	/*
+	 * ARMv6 and above have extended page tables.
+	 */
+	if (cpu_arch >= CPU_ARCH_ARMv6 && (cr & CR_XP)) {
+		/*
+		 * bit 4 becomes XN which we must clear for the
+		 * kernel memory mapping.
+		 */
+		mem_types[MT_MEMORY].prot_sect &= ~PMD_BIT4;
+		/*
+		 * Mark cache clean areas read only from SVC mode
+		 * and no access from userspace.
+		 */
+		mem_types[MT_MINICLEAN].prot_sect |= PMD_SECT_APX|PMD_SECT_AP_WRITE;
+		mem_types[MT_CACHECLEAN].prot_sect |= PMD_SECT_APX|PMD_SECT_AP_WRITE;
+	}
+
+	/*
+	 * ARMv6 can map the vectors as write-through.
+	 */
+	if (cpu_arch >= CPU_ARCH_ARMv6)
+		mem_types[MT_VECTORS].prot_pte |= PTE_CACHEABLE;
+	else
+		mem_types[MT_VECTORS].prot_pte |= PTE_BUFFERABLE|PTE_CACHEABLE;
 
 	/*
 	 * ARMv5 and higher can use ECC memory.
@@ -366,10 +393,17 @@ static void __init create_mapping(struct map_desc *md)
 	long off;
 
 	if (md->virtual != vectors_base() && md->virtual < PAGE_OFFSET) {
-		printk(KERN_WARNING "MM: not creating mapping for "
+		printk(KERN_WARNING "BUG: not creating mapping for "
 		       "0x%08lx at 0x%08lx in user region\n",
 		       md->physical, md->virtual);
 		return;
+	}
+
+	if (md->type == MT_DEVICE &&
+	    md->virtual >= PAGE_OFFSET && md->virtual < VMALLOC_END) {
+		printk(KERN_WARNING "BUG: mapping for 0x%08lx at 0x%08lx "
+		       "overlaps vmalloc space\n",
+		       md->physical, md->virtual);
 	}
 
 	domain	  = mem_types[md->type].domain;
@@ -383,7 +417,7 @@ static void __init create_mapping(struct map_desc *md)
 
 	if (mem_types[md->type].prot_l1 == 0 &&
 	    (virt & 0xfffff || (virt + off) & 0xfffff || (virt + length) & 0xfffff)) {
-		printk(KERN_WARNING "MM: map for 0x%08lx at 0x%08lx can not "
+		printk(KERN_WARNING "BUG: map for 0x%08lx at 0x%08lx can not "
 		       "be mapped using pages, ignoring.\n",
 		       md->physical, md->virtual);
 		return;

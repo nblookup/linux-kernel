@@ -42,6 +42,9 @@
 #include <asm/edd.h>
 #include <asm/setup.h>
 #include <asm/arch_hooks.h>
+#include <asm/sections.h>
+#include <asm/io_apic.h>
+#include <asm/ist.h>
 #include "setup_arch_pre.h"
 #include "mach_resources.h"
 
@@ -61,12 +64,20 @@ struct cpuinfo_x86 boot_cpu_data = { 0, 0, 0, 0, -1, 1, 0, 0, -1 };
 unsigned long mmu_cr4_features;
 EXPORT_SYMBOL_GPL(mmu_cr4_features);
 
-#ifdef CONFIG_ACPI_HT_ONLY
-int acpi_disabled = 1;
+#ifdef	CONFIG_ACPI_INTERPRETER
+	int acpi_disabled = 0;
 #else
-int acpi_disabled = 0;
+	int acpi_disabled = 1;
 #endif
 EXPORT_SYMBOL(acpi_disabled);
+
+#ifdef	CONFIG_ACPI_BOOT
+	int acpi_irq __initdata = 1;	/* enable IRQ */
+	int acpi_ht __initdata = 1;	/* enable HT */
+#endif
+
+int acpi_force __initdata = 0;
+
 
 int MCA_bus;
 /* for MCA, but anyone else can use it if they want */
@@ -92,6 +103,7 @@ struct sys_desc_table_struct {
 	unsigned char table[0];
 };
 struct edid_info edid_info;
+struct ist_info ist_info;
 struct e820map e820;
 
 unsigned char aux_device_present;
@@ -100,7 +112,7 @@ extern void early_cpu_init(void);
 extern void dmi_scan_machine(void);
 extern void generic_apic_probe(char *);
 extern int root_mountflags;
-extern char _text, _etext, _edata, _end;
+extern char _end[];
 
 unsigned long saved_videomode;
 
@@ -127,22 +139,23 @@ static void __init probe_roms(void)
 	probe_extension_roms(roms);
 }
 
-static void __init limit_regions (unsigned long long size)
+static void __init limit_regions(unsigned long long size)
 {
+	unsigned long long current_addr = 0;
 	int i;
-	unsigned long long current_size = 0;
 
 	for (i = 0; i < e820.nr_map; i++) {
 		if (e820.map[i].type == E820_RAM) {
-			current_size += e820.map[i].size;
-			if (current_size >= size) {
-				e820.map[i].size -= current_size-size;
+			current_addr = e820.map[i].addr + e820.map[i].size;
+			if (current_addr >= size) {
+				e820.map[i].size -= current_addr-size;
 				e820.nr_map = i + 1;
 				return;
 			}
 		}
 	}
 }
+
 static void __init add_memory_region(unsigned long long start,
                                   unsigned long long size, int type)
 {
@@ -515,13 +528,37 @@ static void __init parse_cmdline_early (char ** cmdline_p)
 			}
 		}
 
-		/* "acpi=off" disables both ACPI table parsing and interpreter init */
-		if (c == ' ' && !memcmp(from, "acpi=off", 8))
+#ifdef CONFIG_ACPI_BOOT
+		/* "acpi=off" disables both ACPI table parsing and interpreter */
+		else if (!memcmp(from, "acpi=off", 8)) {
+			acpi_ht = 0;
 			acpi_disabled = 1;
+		}
 
-		/* "acpismp=force" turns on ACPI again */
-		else if (!memcmp(from, "acpismp=force", 14))
+		/* acpi=force to over-ride black-list */
+		else if (!memcmp(from, "acpi=force", 10)) {
+			acpi_force = 1;
+			acpi_ht=1;
 			acpi_disabled = 0;
+		}
+
+		/* Limit ACPI just to boot-time to enable HT */
+		else if (!memcmp(from, "acpi=ht", 7)) {
+			acpi_ht = 1;
+			if (!acpi_force) acpi_disabled = 1;
+		}
+
+		/* "pci=noacpi" disables ACPI interrupt routing */
+		else if (!memcmp(from, "pci=noacpi", 10)) {
+			acpi_irq = 0;
+		}
+
+#ifdef CONFIG_X86_LOCAL_APIC
+		/* disable IO-APIC */
+		else if (!memcmp(from, "noapic", 6))
+			disable_ioapic_setup();
+#endif /* CONFIG_X86_LOCAL_APIC */
+#endif /* CONFIG_ACPI_BOOT */
 
 		/*
 		 * highmem=size forces highmem to be exactly 'size' bytes.
@@ -676,7 +713,7 @@ static unsigned long __init setup_memory(void)
 	 * partially used pages are not usable - thus
 	 * we are rounding upwards:
 	 */
-	start_pfn = PFN_UP(__pa(&_end));
+	start_pfn = PFN_UP(__pa(_end));
 
 	find_max_pfn();
 
@@ -921,13 +958,13 @@ void __init setup_arch(char **cmdline_p)
 	pre_setup_arch_hook();
 	early_cpu_init();
 
- 	ROOT_DEV = ORIG_ROOT_DEV;
+ 	ROOT_DEV = old_decode_dev(ORIG_ROOT_DEV);
  	drive_info = DRIVE_INFO;
  	screen_info = SCREEN_INFO;
 	edid_info = EDID_INFO;
 	apm_info.bios = APM_BIOS_INFO;
+	ist_info = IST_INFO;
 	saved_videomode = VIDEO_MODE;
-	printk("Video mode to be used for restore is %lx\n", saved_videomode);
 	if( SYS_DESC_TABLE.length != 0 ) {
 		MCA_bus = SYS_DESC_TABLE.table[3] &0x2;
 		machine_id = SYS_DESC_TABLE.table[0];
@@ -947,15 +984,15 @@ void __init setup_arch(char **cmdline_p)
 
 	if (!MOUNT_ROOT_RDONLY)
 		root_mountflags &= ~MS_RDONLY;
-	init_mm.start_code = (unsigned long) &_text;
-	init_mm.end_code = (unsigned long) &_etext;
-	init_mm.end_data = (unsigned long) &_edata;
-	init_mm.brk = (unsigned long) &_end;
+	init_mm.start_code = (unsigned long) _text;
+	init_mm.end_code = (unsigned long) _etext;
+	init_mm.end_data = (unsigned long) _edata;
+	init_mm.brk = (unsigned long) _end;
 
-	code_resource.start = virt_to_phys(&_text);
-	code_resource.end = virt_to_phys(&_etext)-1;
-	data_resource.start = virt_to_phys(&_etext);
-	data_resource.end = virt_to_phys(&_edata)-1;
+	code_resource.start = virt_to_phys(_text);
+	code_resource.end = virt_to_phys(_etext)-1;
+	data_resource.start = virt_to_phys(_etext);
+	data_resource.end = virt_to_phys(_edata)-1;
 
 	parse_cmdline_early(cmdline_p);
 
@@ -977,19 +1014,14 @@ void __init setup_arch(char **cmdline_p)
 	generic_apic_probe(*cmdline_p);
 #endif	
 
-#ifdef CONFIG_ACPI_BOOT
 	/*
 	 * Parse the ACPI tables for possible boot-time SMP configuration.
 	 */
-	if (!acpi_disabled)
-		acpi_boot_init();
-#endif
+	acpi_boot_init();
+
 #ifdef CONFIG_X86_LOCAL_APIC
 	if (smp_found_config)
 		get_smp_config();
-#endif
-#ifdef CONFIG_X86_SUMMIT
-	setup_summit();
 #endif
 
 	register_memory(max_low_pfn);

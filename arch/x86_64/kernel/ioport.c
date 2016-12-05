@@ -10,46 +10,24 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/ioport.h>
-#include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/stddef.h>
 #include <linux/slab.h>
-#include <asm/io.h>
+#include <linux/thread_info.h>
 
 /* Set EXTENT bits starting at BASE in BITMAP to value TURN_ON. */
-static void set_bitmap(unsigned long *bitmap, short base, short extent, int new_value)
+static void set_bitmap(unsigned long *bitmap, unsigned int base, unsigned int extent, int new_value)
 {
-	unsigned long mask;
-	unsigned long *bitmap_base = bitmap + (base / sizeof(unsigned long));
-	unsigned short low_index = base & 0x3f;
-	int length = low_index + extent;
-
-	if (low_index != 0) {
-		mask = (~0UL << low_index);
-		if (length < 64)
-			mask &= ~(~0UL << length);
+	int i;
 		if (new_value)
-			*bitmap_base++ |= mask;
+		for (i = base; i < base + extent; i++) 
+			__set_bit(i, bitmap); 
 		else
-			*bitmap_base++ &= ~mask;
-		length -= 64;
-	}
-
-	mask = (new_value ? ~0UL : 0UL);
-	while (length >= 64) {
-		*bitmap_base++ = mask;
-		length -= 64;
-	}
-
-	if (length > 0) {
-		mask = ~(~0UL << length);
-		if (new_value)
-			*bitmap_base++ |= mask;
-		else
-			*bitmap_base++ &= ~mask;
-	}
+		for (i = base; i < base + extent; i++) 
+			clear_bit(i, bitmap); 
 }
+
 
 /*
  * this changes the io permissions bitmap in the current task.
@@ -58,35 +36,40 @@ asmlinkage long sys_ioperm(unsigned long from, unsigned long num, int turn_on)
 {
 	struct thread_struct * t = &current->thread;
 	struct tss_struct * tss;
-	int ret = 0;
+	unsigned long *bitmap;
 
-	if ((from + num <= from) || (from + num > IO_BITMAP_SIZE*32))
+	if ((from + num <= from) || (from + num > IO_BITMAP_BITS))
 		return -EINVAL;
 	if (turn_on && !capable(CAP_SYS_RAWIO))
 		return -EPERM;
 
-	if (!t->io_bitmap_ptr) { 
-		t->io_bitmap_ptr = kmalloc((IO_BITMAP_SIZE+1)*4, GFP_KERNEL);
-		if (!t->io_bitmap_ptr) { 
-			ret = -ENOMEM;
-			goto out;
-		}
-		memset(t->io_bitmap_ptr,0xff,(IO_BITMAP_SIZE+1)*4);
-		tss  = init_tss + get_cpu();
-		tss->io_map_base = IO_BITMAP_OFFSET;
-		put_cpu(); 
+	/*
+	 * If it's the first ioperm() call in this thread's lifetime, set the
+	 * IO bitmap up. ioperm() is much less timing critical than clone(),
+	 * this is why we delay this operation until now:
+	 */
+	if (!t->io_bitmap_ptr) {
+		bitmap = kmalloc(IO_BITMAP_BYTES, GFP_KERNEL);
+		if (!bitmap)
+			return -ENOMEM;
+
+		memset(bitmap, 0xff, IO_BITMAP_BYTES);
+		t->io_bitmap_ptr = bitmap;
 	}
-	tss = init_tss + get_cpu();
 
 	/*
 	 * do it in the per-thread copy and in the TSS ...
 	 */
-	set_bitmap((unsigned long *) t->io_bitmap_ptr, from, num, !turn_on);
-	set_bitmap((unsigned long *) tss->io_bitmap, from, num, !turn_on);
-
- out:
+	set_bitmap(t->io_bitmap_ptr, from, num, !turn_on);
+	tss = init_tss + get_cpu();
+	if (tss->io_bitmap_base == IO_BITMAP_OFFSET) { /* already active? */
+		set_bitmap(tss->io_bitmap, from, num, !turn_on);
+	} else {
+		memcpy(tss->io_bitmap, t->io_bitmap_ptr, IO_BITMAP_BYTES);
+		tss->io_bitmap_base = IO_BITMAP_OFFSET; /* Activate it in the TSS */
+	}
 	put_cpu();
-	return ret;
+	return 0;
 }
 
 /*
@@ -111,13 +94,8 @@ asmlinkage long sys_iopl(unsigned int level, struct pt_regs regs)
 		if (!capable(CAP_SYS_RAWIO))
 			return -EPERM;
 	}
-	regs.eflags = (regs.eflags & 0xffffffffffffcfff) | (level << 12);
+	regs.eflags = (regs.eflags &~ 0x3000UL) | (level << 12);
+	/* Make sure we return the long way (not sysenter) */
+	set_thread_flag(TIF_IRET);
 	return 0;
 }
-
-void eat_key(void)
-{
-	if (inb(0x60) & 1) 
-		inb(0x64);
-}
-

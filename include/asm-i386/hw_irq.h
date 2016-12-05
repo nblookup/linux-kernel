@@ -16,6 +16,7 @@
 #include <linux/profile.h>
 #include <asm/atomic.h>
 #include <asm/irq.h>
+#include <asm/sections.h>
 
 /*
  * Various low-level irq details needed by irq.c, process.c,
@@ -24,46 +25,44 @@
  * Interrupt entry/exit code at both C and assembly level
  */
 
-extern int irq_vector[NR_IRQS];
-#define IO_APIC_VECTOR(irq)	irq_vector[irq]
+extern u8 irq_vector[NR_IRQ_VECTORS];
+#define IO_APIC_VECTOR(irq)	((int)irq_vector[irq])
 
 extern void (*interrupt[NR_IRQS])(void);
 
 #ifdef CONFIG_SMP
-extern asmlinkage void reschedule_interrupt(void);
-extern asmlinkage void invalidate_interrupt(void);
-extern asmlinkage void call_function_interrupt(void);
+asmlinkage void reschedule_interrupt(void);
+asmlinkage void invalidate_interrupt(void);
+asmlinkage void call_function_interrupt(void);
 #endif
 
 #ifdef CONFIG_X86_LOCAL_APIC
-extern asmlinkage void apic_timer_interrupt(void);
-extern asmlinkage void error_interrupt(void);
-extern asmlinkage void spurious_interrupt(void);
-extern asmlinkage void thermal_interrupt(struct pt_regs);
+asmlinkage void apic_timer_interrupt(void);
+asmlinkage void error_interrupt(void);
+asmlinkage void spurious_interrupt(void);
+asmlinkage void thermal_interrupt(struct pt_regs);
 #endif
 
-extern void mask_irq(unsigned int irq);
-extern void unmask_irq(unsigned int irq);
-extern void disable_8259A_irq(unsigned int irq);
-extern void enable_8259A_irq(unsigned int irq);
-extern int i8259A_irq_pending(unsigned int irq);
-extern void make_8259A_irq(unsigned int irq);
-extern void init_8259A(int aeoi);
-extern void FASTCALL(send_IPI_self(int vector));
-extern void init_VISWS_APIC_irqs(void);
-extern void setup_IO_APIC(void);
-extern void disable_IO_APIC(void);
-extern void print_IO_APIC(void);
-extern int IO_APIC_get_PCI_irq_vector(int bus, int slot, int fn);
-extern void send_IPI(int dest, int vector);
-extern void setup_ioapic_dest(unsigned long mask);
+void mask_irq(unsigned int irq);
+void unmask_irq(unsigned int irq);
+void disable_8259A_irq(unsigned int irq);
+void enable_8259A_irq(unsigned int irq);
+int i8259A_irq_pending(unsigned int irq);
+void make_8259A_irq(unsigned int irq);
+void init_8259A(int aeoi);
+void FASTCALL(send_IPI_self(int vector));
+void init_VISWS_APIC_irqs(void);
+void setup_IO_APIC(void);
+void disable_IO_APIC(void);
+void print_IO_APIC(void);
+int IO_APIC_get_PCI_irq_vector(int bus, int slot, int fn);
+void send_IPI(int dest, int vector);
+void setup_ioapic_dest(cpumask_t mask);
 
 extern unsigned long io_apic_irqs;
 
 extern atomic_t irq_err_count;
 extern atomic_t irq_mis_count;
-
-extern char _stext, _etext;
 
 #define IO_APIC_IRQ(x) (((x) >= 16) || ((1<<(x)) & io_apic_irqs))
 
@@ -95,7 +94,7 @@ static inline void x86_do_profile(struct pt_regs * regs)
 	if (!((1<<smp_processor_id()) & prof_cpu_mask))
 		return;
 
-	eip -= (unsigned long) &_stext;
+	eip -= (unsigned long)_stext;
 	eip >>= prof_shift;
 	/*
 	 * Don't ignore out-of-bounds EIP values silently,
@@ -107,7 +106,7 @@ static inline void x86_do_profile(struct pt_regs * regs)
 	atomic_inc((atomic_t *)&prof_buffer[eip]);
 }
  
-#if defined(CONFIG_X86_IO_APIC) && defined(CONFIG_SMP)
+#if defined(CONFIG_X86_IO_APIC)
 static inline void hw_resend_irq(struct hw_interrupt_type *h, unsigned int i)
 {
 	if (IO_APIC_IRQ(i))

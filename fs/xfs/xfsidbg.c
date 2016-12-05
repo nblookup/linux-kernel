@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2002 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2003 Silicon Graphics, Inc.  All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of version 2 of the GNU General Public License as
@@ -78,7 +78,6 @@
 #include "xfs_rw.h"
 #include "xfs_bit.h"
 #include "xfs_quota.h"
-#include "xfs_log_recover.h"
 #include "quota/xfs_qm.h"
 
 MODULE_AUTHOR("Silicon Graphics, Inc.");
@@ -1685,9 +1684,11 @@ static void	printinode(struct inode *ip)
 					ip->i_size);
 
 	kdb_printf(
-		" i_mode = 0x%x  i_nlink = %d  i_rdev = 0x%x i_state = 0x%lx\n",
+		" i_mode = 0x%x  i_nlink = %d  i_rdev = %u:%u i_state = 0x%lx\n",
 					ip->i_mode, ip->i_nlink,
-					kdev_t_to_nr(ip->i_rdev), ip->i_state);
+					MAJOR(ip->i_rdev),
+					MINOR(ip->i_rdev),
+					ip->i_state);
 
 	kdb_printf(" i_hash.nxt = 0x%p i_hash.prv = 0x%p\n",
 					ip->i_hash.next, ip->i_hash.prev);
@@ -2642,6 +2643,7 @@ xfs_buf_item_print(xfs_buf_log_item_t *blip, int summary)
 		"stale",	/* 0x4 */
 		"logged",	/* 0x8 */
 		"ialloc",	/* 0x10 */
+		"inode_stale",  /* 0x20 */
 		0
 		};
 	static char *blf_flags[] = {
@@ -3022,6 +3024,12 @@ xfs_prdinode_core(xfs_dinode_core_t *dip, int convert)
 	static char *diflags[] = {
 		"realtime",		/* XFS_DIFLAG_REALTIME */
 		"prealloc",		/* XFS_DIFLAG_PREALLOC */
+		"newrtbm",		/* XFS_DIFLAG_NEWRTBM */
+		"immutable",		/* XFS_DIFLAG_IMMUTABLE */
+		"append",		/* XFS_DIFLAG_APPEND */
+		"sync",			/* XFS_DIFLAG_SYNC */
+		"noatime",		/* XFS_DIFLAG_NOATIME */
+		"nodump",		/* XFS_DIFLAG_NODUMP */
 		NULL
 	};
 
@@ -3033,11 +3041,12 @@ xfs_prdinode_core(xfs_dinode_core_t *dip, int convert)
 		INT_GET(dip->di_format, convert),
 		xfs_fmtformat(
 		    (xfs_dinode_fmt_t)INT_GET(dip->di_format, convert)));
-	kdb_printf("nlink 0x%x uid 0x%x gid 0x%x projid 0x%x\n",
+	kdb_printf("nlink %d uid %d gid %d projid %d flushiter %u\n",
 		INT_GET(dip->di_nlink, convert),
 		INT_GET(dip->di_uid, convert),
 		INT_GET(dip->di_gid, convert),
-		(uint)INT_GET(dip->di_projid, convert));
+		(uint)INT_GET(dip->di_projid, convert),
+		(uint)INT_GET(dip->di_flushiter, convert));
 	kdb_printf("atime 0x%x:%x mtime 0x%x:%x ctime 0x%x:%x\n",
 		INT_GET(dip->di_atime.t_sec, convert),
 		INT_GET(dip->di_atime.t_nsec, convert),
@@ -3731,8 +3740,9 @@ xfsidbg_xdabuf(xfs_dabuf_t *dabuf)
 		kdb_printf(" %d:0x%p", i, dabuf->bps[i]);
 	kdb_printf("\n");
 #ifdef XFS_DABUF_DEBUG
-	kdb_printf(" ra 0x%x prev 0x%x next 0x%x dev 0x%x blkno 0x%x\n",
-		dabuf->ra, dabuf->prev, dabuf->next, dabuf->dev, dabuf->blkno);
+	kdb_printf(" ra 0x%x prev 0x%x next 0x%x dev %s blkno 0x%x\n",
+		dabuf->ra, dabuf->prev, dabuf->next,
+		XFS_BUFTARG_NAME(dabuf->dev), dabuf->blkno);
 #endif
 }
 
@@ -4091,7 +4101,7 @@ xfsidbg_xiclog(xlog_in_core_t *iclog)
 	if (iclog->ic_state & XLOG_STATE_ALL)
 		printflags(iclog->ic_state, ic_flags, "state:");
 	else
-		kdb_printf("state: ILLEGAL 0x%x", iclog->ic_state);
+		kdb_printf("state: INVALID 0x%x", iclog->ic_state);
 	kdb_printf("\n");
 }	/* xfsidbg_xiclog */
 
@@ -4260,8 +4270,8 @@ xfsidbg_xlog(xlog_t *log)
 			xfsidbg_get_cstate(log->l_covered_state));
 	kdb_printf("flags: ");
 	printflags(log->l_flags, t_flags,"log");
-	kdb_printf("  dev: 0x%x logBBstart: %lld logsize: %d logBBsize: %d\n",
-		log->l_dev, (long long) log->l_logBBstart,
+	kdb_printf("  dev: %s logBBstart: %lld logsize: %d logBBsize: %d\n",
+		XFS_BUFTARG_NAME(log->l_targ), (long long) log->l_logBBstart,
 		log->l_logsize,log->l_logBBsize);
 	kdb_printf("curr_cycle: %d  prev_cycle: %d  curr_block: %d  prev_block: %d\n",
 	     log->l_curr_cycle, log->l_prev_cycle, log->l_curr_block,
@@ -4636,11 +4646,14 @@ xfsidbg_xmount(xfs_mount_t *mp)
 		XFS_MTOVFS(mp), mp->m_tid, &mp->m_ail_lock, &mp->m_ail);
 	kdb_printf("ail_gen 0x%x &sb 0x%p\n",
 		mp->m_ail_gen, &mp->m_sb);
-	kdb_printf("sb_lock 0x%p sb_bp 0x%p dev 0x%x logdev 0x%x rtdev 0x%x\n",
+	kdb_printf("sb_lock 0x%p sb_bp 0x%p dev %s logdev %s rtdev %s\n",
 		&mp->m_sb_lock, mp->m_sb_bp,
-		mp->m_ddev_targp ? mp->m_ddev_targp->pbr_dev : 0,
-		mp->m_logdev_targp ? mp->m_logdev_targp->pbr_dev : 0,
-		mp->m_rtdev_targp ? mp->m_rtdev_targp->pbr_dev : 0);
+		mp->m_ddev_targp ?
+			XFS_BUFTARG_NAME(mp->m_ddev_targp) : "none",
+		mp->m_logdev_targp ?
+			XFS_BUFTARG_NAME(mp->m_logdev_targp) : "none",
+		mp->m_rtdev_targp ?
+			XFS_BUFTARG_NAME(mp->m_rtdev_targp) : "none");
 	kdb_printf("bsize %d agfrotor %d agirotor %d ihash 0x%p ihsize %d\n",
 		mp->m_bsize, mp->m_agfrotor, mp->m_agirotor,
 		mp->m_ihash, mp->m_ihsize);
@@ -4686,7 +4699,7 @@ xfsidbg_xmount(xfs_mount_t *mp)
 		mp->m_attroffset, mp->m_maxicount, mp->m_inoalign_mask);
 	kdb_printf("resblks %Ld resblks_avail %Ld\n", mp->m_resblks,
 		mp->m_resblks_avail);
-#if XFS_BIG_FILESYSTEMS
+#if XFS_BIG_INUMS
 	kdb_printf(" inoadd %llx\n", (unsigned long long) mp->m_inoadd);
 #else
 	kdb_printf("\n");
@@ -4799,6 +4812,7 @@ xfsidbg_xnode(xfs_inode_t *ip)
 		"uiosize",	/* XFS_IUIOSZ */
 		"quiesce",	/* XFS_IQUIESCE */
 		"reclaim",	/* XFS_IRECLAIM */
+		"stale",	/* XFS_ISTALE */
 		NULL
 	};
 
@@ -4811,8 +4825,8 @@ xfsidbg_xnode(xfs_inode_t *ip)
 		ip->i_mnext,
 		ip->i_mprev,
 		XFS_ITOV_NULL(ip));
-	kdb_printf("dev %x ino %s\n",
-		ip->i_mount->m_dev,
+	kdb_printf("dev %s ino %s\n",
+		XFS_BUFTARG_NAME(ip->i_mount->m_ddev_targp),
 		xfs_fmtino(ip->i_ino, ip->i_mount));
 	kdb_printf("blkno 0x%llx len 0x%x boffset 0x%x\n",
 		(long long) ip->i_blkno,

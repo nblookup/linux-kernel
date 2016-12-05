@@ -69,12 +69,14 @@ struct fsxattr {
  * There should be a one-to-one correspondence between these flags and the
  * XFS_DIFLAG_s.
  */
-#define XFS_XFLAG_REALTIME	0x00000001
-#define XFS_XFLAG_PREALLOC	0x00000002
+#define XFS_XFLAG_REALTIME	0x00000001	/* data in realtime volume */
+#define XFS_XFLAG_PREALLOC	0x00000002	/* preallocated file extents */
+#define XFS_XFLAG_IMMUTABLE	0x00000008	/* file cannot be modified */
+#define XFS_XFLAG_APPEND	0x00000010	/* all writes append */
+#define XFS_XFLAG_SYNC		0x00000020	/* all writes synchronous */
+#define XFS_XFLAG_NOATIME	0x00000040	/* do not update access time */
+#define XFS_XFLAG_NODUMP	0x00000080	/* do not include in backups */
 #define XFS_XFLAG_HASATTR	0x80000000	/* no DIFLAG for this	*/
-#define XFS_XFLAG_ALL		\
-	( XFS_XFLAG_REALTIME|XFS_XFLAG_PREALLOC|XFS_XFLAG_HASATTR )
-
 
 /*
  * Structure for XFS_IOC_GETBMAP.
@@ -390,22 +392,17 @@ typedef struct xfs_fsop_attrmulti_handlereq {
 } xfs_fsop_attrmulti_handlereq_t;
 
 /*
- * File system identifier. Should be unique (at least per machine).
+ * per machine unique filesystem identifier types.
  */
-typedef struct {
-	__u32 val[2];			/* file system id type */
-} xfs_fsid_t;
+typedef struct { __u32 val[2]; } xfs_fsid_t; /* file system id type */
 
-/*
- * File identifier.  Should be unique per filesystem on a single machine.
- * This is typically called by a stateless file server in order to generate
- * "file handles".
- */
+
 #ifndef HAVE_FID
 #define MAXFIDSZ	46
+
 typedef struct fid {
 	__u16		fid_len;		/* length of data in bytes */
-	unsigned char	fid_data[MAXFIDSZ];	/* data (variable length)  */
+	unsigned char	fid_data[MAXFIDSZ];	/* data (fid_len worth)  */
 } fid_t;
 #endif
 

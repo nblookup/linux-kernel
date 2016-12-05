@@ -1,5 +1,6 @@
 #include <linux/config.h>
 #include <linux/module.h>
+#include <net/inet_ecn.h>
 #include <net/ip.h>
 #include <net/xfrm.h>
 #include <net/esp.h>
@@ -109,6 +110,8 @@ int esp_output(struct sk_buff *skb)
 		top_iph->ihl = 5;
 		top_iph->version = 4;
 		top_iph->tos = iph->tos;	/* DS disclosed */
+		if (x->props.flags & XFRM_STATE_NOECN)
+			IP_ECN_clear(top_iph);
 		top_iph->tot_len = htons(skb->len + alen);
 		top_iph->frag_off = iph->frag_off&htons(IP_DF);
 		if (!(top_iph->frag_off))
@@ -425,7 +428,7 @@ void esp4_err(struct sk_buff *skb, u32 info)
 	x = xfrm_state_lookup((xfrm_address_t *)&iph->daddr, esph->spi, IPPROTO_ESP, AF_INET);
 	if (!x)
 		return;
-	printk(KERN_DEBUG "pmtu discvovery on SA ESP/%08x/%08x\n",
+	printk(KERN_DEBUG "pmtu discovery on SA ESP/%08x/%08x\n",
 	       ntohl(esph->spi), ntohl(iph->daddr));
 	xfrm_state_put(x);
 }
@@ -433,6 +436,9 @@ void esp4_err(struct sk_buff *skb, u32 info)
 void esp_destroy(struct xfrm_state *x)
 {
 	struct esp_data *esp = x->data;
+
+	if (!esp)
+		return;
 
 	if (esp->conf.tfm) {
 		crypto_free_tfm(esp->conf.tfm);
@@ -502,7 +508,10 @@ int esp_init_state(struct xfrm_state *x, void *args)
 	}
 	esp->conf.key = x->ealg->alg_key;
 	esp->conf.key_len = (x->ealg->alg_key_len+7)/8;
-	esp->conf.tfm = crypto_alloc_tfm(x->ealg->alg_name, CRYPTO_TFM_MODE_CBC);
+	if (x->props.ealgo == SADB_EALG_NULL)
+		esp->conf.tfm = crypto_alloc_tfm(x->ealg->alg_name, CRYPTO_TFM_MODE_ECB);
+	else
+		esp->conf.tfm = crypto_alloc_tfm(x->ealg->alg_name, CRYPTO_TFM_MODE_CBC);
 	if (esp->conf.tfm == NULL)
 		goto error;
 	esp->conf.ivlen = crypto_tfm_alg_ivsize(esp->conf.tfm);

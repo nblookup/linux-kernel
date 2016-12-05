@@ -1,5 +1,5 @@
 /*
- *  PowerPC version 
+ *  PowerPC version
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
  *
  *  Rewritten by Cort Dougan (cort@cs.nmt.edu) for PReP
@@ -66,7 +66,7 @@
 	mtspr	DBAT##n##U,RA;		\
 	mtspr	DBAT##n##L,RB;		\
 1:
-#endif /* CONFIG_PPC64BRIDGE */	 
+#endif /* CONFIG_PPC64BRIDGE */
 
 	.text
 	.stabs	"arch/ppc/kernel/",N_SO,0,0,0f
@@ -82,7 +82,7 @@ _stext:
 	.text
 	.globl	_start
 _start:
-	/* 
+	/*
 	 * These are here for legacy reasons, the kernel used to
 	 * need to look like a coff function entry for the pmac
 	 * but we're always started by some kind of bootloader now.
@@ -140,16 +140,28 @@ __start:
 	mr	r28,r6
 	mr	r27,r7
 	li	r24,0			/* cpu # */
+
+#ifdef CONFIG_POWER4
+/*
+ * On the PPC970, we have to turn off real-mode cache inhibit
+ * early, before we first turn the MMU off.
+ */
+	mfspr	r0,SPRN_PVR
+	srwi	r0,r0,16
+	cmpwi	r0,0x39
+	beql	ppc970_setup_hid
+#endif /* CONFIG_POWER4 */
+
 /*
  * early_init() does the early machine identification and does
  * the necessary low-level setup and clears the BSS
  *  -- Cort <cort@fsmlabs.com>
- */ 
+ */
 	bl	early_init
 
 #ifdef CONFIG_APUS
-/* On APUS the __va/__pa constants need to be set to the correct 
- * values before continuing. 
+/* On APUS the __va/__pa constants need to be set to the correct
+ * values before continuing.
  */
 	mr	r4,r30
 	bl	fix_mem_constants
@@ -160,6 +172,7 @@ __start:
  */
  	bl	mmu_off
 __after_mmu_off:
+#ifndef CONFIG_POWER4
 	bl	clear_bats
 	bl	flush_tlbs
 
@@ -167,6 +180,10 @@ __after_mmu_off:
 #if !defined(CONFIG_APUS) && defined(CONFIG_BOOTX_TEXT)
 	bl	setup_disp_bat
 #endif
+#else /* CONFIG_POWER4 */
+	bl	reloc_offset
+	bl	initial_mm_power4
+#endif /* CONFIG_POWER4 */
 
 /*
  * Call setup_cpu for CPU 0 and initialize 6xx Idle
@@ -178,8 +195,12 @@ __after_mmu_off:
 	bl	reloc_offset
 	bl	init_idle_6xx
 #endif /* CONFIG_6xx */
+#ifdef CONFIG_POWER4
+	bl	reloc_offset
+	bl	init_idle_power4
+#endif /* CONFIG_POWER4 */
 
-	
+
 #ifndef CONFIG_APUS
 /*
  * We need to run with _start at physical address 0.
@@ -276,7 +297,7 @@ __secondary_hold:
 	stw	r1,GPR1(r11);	\
 	stw	r1,0(r11);	\
 	tovirt(r1,r11);			/* set new kernel sp */	\
-	li	r10,MSR_;		/* can now take exceptions again */ \
+	li	r10,MSR_KERNEL & ~(MSR_IR|MSR_DR); /* can take exceptions */ \
 	MTMSRD(r10);			/* (except for mach check in rtas) */ \
 	stw	r0,GPR0(r11);	\
 	SAVE_4GPRS(3, r11);	\
@@ -355,11 +376,6 @@ i##n:								\
  *	-- paulus.
  */
 	. = 0x200
-MachineCheck:
-BEGIN_FTR_SECTION
-	dssall
-	sync
-END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
 	mtspr	SPRG0,r10
 	mtspr	SPRG1,r11
 	mfcr	r10
@@ -688,12 +704,21 @@ DataStoreTLBMiss:
 	mtcrf	0x80,r3
 	rfi
 
+#ifndef CONFIG_ALTIVEC
+#define AltivecAssistException	UnknownException
+#endif
 	EXCEPTION(0x1300, Trap_13, InstructionBreakpoint, EXC_XFER_EE)
 	EXCEPTION(0x1400, SMI, SMIException, EXC_XFER_EE)
 	EXCEPTION(0x1500, Trap_15, UnknownException, EXC_XFER_EE)
+#ifdef CONFIG_POWER4
 	EXCEPTION(0x1600, Trap_16, UnknownException, EXC_XFER_EE)
+	EXCEPTION(0x1700, Trap_17, AltivecAssistException, EXC_XFER_EE)
+	EXCEPTION(0x1800, Trap_18, TAUException, EXC_XFER_STD)
+#else /* !CONFIG_POWER4 */
+	EXCEPTION(0x1600, Trap_16, AltivecAssistException, EXC_XFER_EE)
 	EXCEPTION(0x1700, Trap_17, TAUException, EXC_XFER_STD)
 	EXCEPTION(0x1800, Trap_18, UnknownException, EXC_XFER_EE)
+#endif /* CONFIG_POWER4 */
 	EXCEPTION(0x1900, Trap_19, UnknownException, EXC_XFER_EE)
 	EXCEPTION(0x1a00, Trap_1a, UnknownException, EXC_XFER_EE)
 	EXCEPTION(0x1b00, Trap_1b, UnknownException, EXC_XFER_EE)
@@ -716,7 +741,10 @@ DataStoreTLBMiss:
 	EXCEPTION(0x2c00, Trap_2c, UnknownException, EXC_XFER_EE)
 	EXCEPTION(0x2d00, Trap_2d, UnknownException, EXC_XFER_EE)
 	EXCEPTION(0x2e00, Trap_2e, UnknownException, EXC_XFER_EE)
-	EXCEPTION(0x2f00, Trap_2f, UnknownException, EXC_XFER_EE)
+	EXCEPTION(0x2f00, MOLTrampoline, UnknownException, EXC_XFER_EE_LITE)
+
+	.globl mol_trampoline
+	.set mol_trampoline, i0x2f00
 
 	. = 0x3000
 
@@ -920,7 +948,9 @@ load_up_altivec:
 	/* enable use of AltiVec after return */
 	oris	r9,r9,MSR_VEC@h
 	mfspr	r5,SPRG3		/* current task's THREAD (phys) */
+	li	r4,1
 	li	r10,THREAD_VSCR
+	stw	r4,THREAD_USED_VR(r5)
 	lvx	vr0,r10,r5
 	mtvscr	vr0
 	REST_32VR(0,r10,r5)
@@ -1106,7 +1136,7 @@ fix_mem_constants:
 
 /*
  * Map the memory where the exception handlers will
- * be copied to when hash constants have been patched.  
+ * be copied to when hash constants have been patched.
  */
 #ifdef CONFIG_APUS_FAST_EXCEPT
 	lis	r8,0xfff0
@@ -1202,6 +1232,10 @@ __secondary_start:
 	lis	r3,-KERNELBASE@h
 	bl	init_idle_6xx
 #endif /* CONFIG_6xx */
+#ifdef CONFIG_POWER4
+	lis	r3,-KERNELBASE@h
+	bl	init_idle_power4
+#endif /* CONFIG_POWER4 */
 
 	/* get current_thread_info and current */
 	lis	r1,secondary_ti@ha
@@ -1229,6 +1263,7 @@ __secondary_start:
 
 	/* enable MMU and jump to start_secondary */
 	li	r4,MSR_KERNEL
+	FIX_SRR1(r4,r5)
 	lis	r3,start_secondary@h
 	ori	r3,r3,start_secondary@l
 	mtspr	SRR0,r3
@@ -1243,6 +1278,10 @@ __secondary_start:
  */
 _GLOBAL(__setup_cpu_power3)
 	blr
+_GLOBAL(__setup_cpu_power4)
+	blr
+_GLOBAL(__setup_cpu_ppc970)
+	blr
 _GLOBAL(__setup_cpu_generic)
 	blr
 
@@ -1250,6 +1289,13 @@ _GLOBAL(__setup_cpu_generic)
 _GLOBAL(__save_cpu_setup)
 	blr
 _GLOBAL(__restore_cpu_setup)
+#ifdef CONFIG_POWER4
+	/* turn off real-mode cache inhibit on the PPC970 */
+	mfspr	r0,SPRN_PVR
+	srwi	r0,r0,16
+	cmpwi	r0,0x39
+	beq	ppc970_setup_hid
+#endif
 	blr
 #endif /* CONFIG_6xx */
 
@@ -1259,6 +1305,11 @@ _GLOBAL(__restore_cpu_setup)
  * IR=0 and DR=0.
  */
 load_up_mmu:
+	sync			/* Force all PTE updates to finish */
+	isync
+	tlbia			/* Clear all TLB entries */
+	sync			/* wait for tlbia/tlbie to finish */
+	TLBSYNC			/* ... on all CPUs */
 	/* Load the SDR1 register (hash table base & size) */
 	lis	r6,_SDR1@ha
 	tophys(r6,r6)
@@ -1277,6 +1328,7 @@ load_up_mmu:
 	addi	r3,r3,0x111	/* increment VSID */
 	addis	r4,r4,0x1000	/* address of next segment */
 	bdnz	3b
+#ifndef CONFIG_POWER4
 /* Load the BAT registers with the values set up by MMU_init.
    MMU_init takes care of whether we're on a 601 or not. */
 	mfpvr	r3
@@ -1289,6 +1341,7 @@ load_up_mmu:
 	LOAD_BAT(1,r3,r4,r5)
 	LOAD_BAT(2,r3,r4,r5)
 	LOAD_BAT(3,r3,r4,r5)
+#endif /* CONFIG_POWER4 */
 	blr
 
 /*
@@ -1352,15 +1405,9 @@ start_here:
 	SYNC
 	RFI
 /* Load up the kernel context */
-2:
-	sync			/* Force all PTE updates to finish */
-	ISYNC_601
-	tlbia			/* Clear all TLB entries */
-	sync			/* wait for tlbia/tlbie to finish */
-	TLBSYNC			/* ... on all CPUs */
+2:	bl	load_up_mmu
 
-	bl	load_up_mmu
-
+#ifdef CONFIG_BDI_SWITCH
 	/* Add helper information for the Abatron bdiGDB debugger.
 	 * We do this here because we know the mmu is disabled, and
 	 * will be enabled for real in just a few instructions.
@@ -1372,6 +1419,7 @@ start_here:
 	ori	r6, r6, swapper_pg_dir@l
 	tophys(r5, r5)
 	stw	r6, 0(r5)
+#endif /* CONFIG_BDI_SWITCH */
 
 /* Now turn on the MMU for real! */
 	li	r4,MSR_KERNEL
@@ -1419,13 +1467,13 @@ END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
 	isync
 	blr
 
-/* 
+/*
  * An undocumented "feature" of 604e requires that the v bit
  * be cleared before changing BAT values.
  *
  * Also, newer IBM firmware does not clear bat3 and 4 so
  * this makes sure it's done.
- *  -- Cort 
+ *  -- Cort
  */
 clear_bats:
 	li	r10,0
@@ -1496,6 +1544,7 @@ mmu_off:
 	sync
 	RFI
 
+#ifndef CONFIG_POWER4
 /*
  * Use the first pair of BAT registers to map the 1st 16MB
  * of RAM to KERNELBASE.  From this point on we can't safely
@@ -1568,6 +1617,69 @@ setup_disp_bat:
 	blr
 
 #endif /* !defined(CONFIG_APUS) && defined(CONFIG_BOOTX_TEXT) */
+
+#else /* CONFIG_POWER4 */
+/*
+ * Load up the SDR1 and segment register values now
+ * since we don't have the BATs.
+ * Also make sure we are running in 32-bit mode.
+ */
+
+initial_mm_power4:
+	addis	r14,r3,_SDR1@ha		/* get the value from _SDR1 */
+	lwz	r14,_SDR1@l(r14)	/* assume hash table below 4GB */
+	mtspr	SDR1,r14
+	slbia
+	lis	r4,0x2000		/* set pseudo-segment reg 12 */
+	ori	r5,r4,0x0ccc
+	mtsr	12,r5
+	ori	r5,r4,0x0888		/* set pseudo-segment reg 8 */
+	mtsr	8,r5			/* (for access to serial port) */
+	ori	r5,r4,0x0999		/* set pseudo-segment reg 8 */
+	mtsr	9,r5			/* (for access to screen) */
+	mfmsr	r0
+	clrldi	r0,r0,1
+	sync
+	mtmsr	r0
+	isync
+	blr
+
+/*
+ * On 970 (G5), we pre-set a few bits in HID0 & HID1
+ */
+ppc970_setup_hid:
+	li	r0,0
+	sync
+	mtspr	0x3f4,r0
+	isync
+	sync
+	mtspr	0x3f6,r0
+	isync
+	mfspr	r0,SPRN_HID0
+	li	r11,1			/* clear DOZE, NAP and SLEEP */
+	rldimi	r0,r11,52,8		/* set DPM */
+	mtspr	SPRN_HID0,r0
+	mfspr	r0,SPRN_HID0
+	mfspr	r0,SPRN_HID0
+	mfspr	r0,SPRN_HID0
+	mfspr	r0,SPRN_HID0
+	mfspr	r0,SPRN_HID0
+	mfspr	r0,SPRN_HID0
+	sync
+	isync
+	mfspr	r0,SPRN_HID1
+	li	r11,0x1200		/* enable i-fetch cacheability */
+	sldi	r11,r11,44		/* and prefetch */
+	or	r0,r0,r11
+	mtspr	SPRN_HID1,r0
+	mtspr	SPRN_HID1,r0
+	isync
+	li	r0,0
+	sync
+	mtspr	0x137,0
+	isync
+	blr
+#endif /* CONFIG_POWER4 */
 
 #ifdef CONFIG_8260
 /* Jump into the system reset for the rom.

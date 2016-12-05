@@ -85,7 +85,10 @@ running once the system is up.
 			See also Documentation/scsi/ncr53c7xx.txt.
 
 	acpi=		[HW,ACPI] Advanced Configuration and Power Interface 
-			Format: off[,<...>]
+			Format: { force | off | ht }
+			force -- enables ACPI for systems with default off
+			off -- disabled ACPI for systems with default on
+			ht -- run only enough ACPI to enable Hyper Threading
 			See also Documentation/pm.txt.
  
 	ad1816=		[HW,OSS]
@@ -212,7 +215,10 @@ running once the system is up.
 			when calculating gettimeofday(). If specicified timesource
 			is not avalible, it defaults to PIT. 
 			Format: { pit | tsc | cyclone | ... }
-			
+
+	hpet=		[IA-32,HPET] option to disable HPET and use PIT.
+			Format: disable
+
 	cm206=		[HW,CD]
 			Format: { auto | [<io>,][<irq>] }
 
@@ -387,7 +393,7 @@ running once the system is up.
 			See Documentation/ide.txt.
 
 	idle=		[HW]
-			Format: poll
+			Format: idle=poll or idle=halt
  
 	in2000=		[HW,SCSI]
 			See header of drivers/scsi/in2000.c.
@@ -436,6 +442,8 @@ running once the system is up.
 
 	l2cr=		[PPC]
 
+	lapic		[IA-32,APIC] Enable the local APIC even if BIOS disabled it.
+
 	lasi=		[HW,SCSI] PARISC LASI driver for the 53c700 chip
 			Format: addr:<io>,irq:<irq>
 
@@ -451,6 +459,10 @@ running once the system is up.
 
 	logibm_irq=	[HW,MOUSE] Logitech Bus Mouse Driver
 			Format: <irq>
+
+	log_buf_len=n	Sets the size of the printk ring buffer, in bytes.
+			Format is n, nk, nM.  n must be a power of two.  The
+			default is set in kernel config.
 
 	lp=0		[LP]	Specify parallel ports to use, e.g,
 	lp=port[,port...]	lp=none,parport0 (lp0 not configured, lp1 uses
@@ -613,8 +625,6 @@ running once the system is up.
 			instruction doesn't work correctly and not to
 			use it.
 
-	noht		[SMP,IA-32] Disables P4 Xeon(tm) HyperThreading.
-
 	noirqdebug	[IA-32] Disables the code which attempts to detect and
 			disable unhandled interrupt sources.
 
@@ -624,6 +634,8 @@ running once the system is up.
 			initial RAM disk.
 
 	nointroute	[IA-64]
+
+	nolapic		[IA-32,APIC] Do not enable or use the local APIC.
 
 	nomce		[IA-32] Machine Check Exception
 
@@ -772,13 +784,17 @@ running once the system is up.
 			Ranges are in pairs (memory base and size).
 
 	profile=	[KNL] Enable kernel profiling via /proc/profile
-			Format: <log_level>
+			(param: profile step/bucket size as a power of 2)
 
 	prompt_ramdisk=	[RAM] List of RAM disks to prompt for floppy disk
 			before loading.
 			See Documentation/ramdisk.txt.
 
 	psmouse_noext	[HW,MOUSE] Disable probing for PS2 mouse protocol extensions
+
+	psmouse_resetafter=
+			[HW,MOUSE] Try to reset Synaptics Touchpad after so many
+			bad packets (0 = never).
 
 	pss=		[HW,OSS] Personal Sound System (ECHO ESC614)
 			Format: <io>,<mss_io>,<mss_irq>,<mss_dma>,<mpu_io>,<mpu_irq>

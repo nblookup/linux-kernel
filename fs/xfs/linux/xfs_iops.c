@@ -109,14 +109,27 @@ linvfs_mknod(
 	struct inode	*ip;
 	vattr_t		va;
 	vnode_t		*vp = NULL, *dvp = LINVFS_GET_VP(dir);
+	xfs_acl_t	*default_acl = NULL;
 	xattr_exists_t	test_default_acl = _ACL_DEFAULT_EXISTS;
-	int		have_default_acl = 0;
-	int		error = EINVAL;
+	int		error;
 
-	if (test_default_acl)
-		have_default_acl = test_default_acl(dvp);
+	/*
+	 * Irix uses Missed'em'V split, but doesn't want to see
+	 * the upper 5 bits of (14bit) major.
+	 */
+	if (!sysv_valid_dev(rdev) || MAJOR(rdev) & ~0x1ff)
+		return -EINVAL;
 
-	if (IS_POSIXACL(dir) && !have_default_acl && has_fs_struct(current))
+	if (test_default_acl && test_default_acl(dvp)) {
+		if (!_ACL_ALLOC(default_acl))
+			return -ENOMEM;
+		if (!_ACL_GET_DEFAULT(dvp, default_acl)) {
+			_ACL_FREE(default_acl);
+			default_acl = NULL;
+		}
+	}
+
+	if (IS_POSIXACL(dir) && !default_acl && has_fs_struct(current))
 		mode &= ~current->fs->umask;
 
 	memset(&va, 0, sizeof(va));
@@ -126,7 +139,7 @@ linvfs_mknod(
 
 	switch (mode & S_IFMT) {
 	case S_IFCHR: case S_IFBLK: case S_IFIFO: case S_IFSOCK:
-		va.va_rdev = XFS_MKDEV(MAJOR(rdev), MINOR(rdev));
+		va.va_rdev = sysv_encode_dev(rdev);
 		va.va_mask |= XFS_AT_RDEV;
 		/*FALLTHROUGH*/
 	case S_IFREG:
@@ -140,33 +153,43 @@ linvfs_mknod(
 		break;
 	}
 
+	if (default_acl) {
+		if (!error) {
+			error = _ACL_INHERIT(vp, &va, default_acl);
+			if (!error) {
+				VMODIFY(vp);
+			} else {
+				struct dentry	teardown = {};
+				int		err2;
+
+				/* Oh, the horror.
+				 * If we can't add the ACL we must back out.
+				 * ENOSPC can hit here, among other things.
+				 */
+				teardown.d_inode = ip = LINVFS_GET_IP(vp);
+				teardown.d_name = dentry->d_name;
+				remove_inode_hash(ip);
+				make_bad_inode(ip);
+				if (S_ISDIR(mode))
+					VOP_RMDIR(dvp, &teardown, NULL, err2);
+				else
+					VOP_REMOVE(dvp, &teardown, NULL, err2);
+				VN_RELE(vp);
+			}
+		}
+		_ACL_FREE(default_acl);
+	}
+
 	if (!error) {
 		ASSERT(vp);
 		ip = LINVFS_GET_IP(vp);
-		if (!ip) {
-			VN_RELE(vp);
-			return -ENOMEM;
-		}
 
 		if (S_ISCHR(mode) || S_ISBLK(mode))
-			ip->i_rdev = to_kdev_t(rdev);
+			ip->i_rdev = rdev;
 		else if (S_ISDIR(mode))
 			validate_fields(ip);
 		d_instantiate(dentry, ip);
 		validate_fields(dir);
-	}
-
-	if (!error && have_default_acl) {
-		_ACL_DECL	(pdacl);
-
-		if (!_ACL_ALLOC(pdacl)) {
-			error = -ENOMEM;
-		} else {
-			if (_ACL_GET_DEFAULT(dvp, pdacl))
-				error = _ACL_INHERIT(vp, &va, pdacl);
-			VMODIFY(vp);
-			_ACL_FREE(pdacl);
-		}
 	}
 	return -error;
 }
@@ -364,7 +387,7 @@ linvfs_readlink(
 	uio.uio_resid = size;
 	uio.uio_iovcnt = 1;
 
-	VOP_READLINK(vp, &uio, NULL, error);
+	VOP_READLINK(vp, &uio, 0, NULL, error);
 	if (error)
 		return -error;
 
@@ -409,10 +432,9 @@ linvfs_follow_link(
 	uio->uio_offset = 0;
 	uio->uio_segflg = UIO_SYSSPACE;
 	uio->uio_resid = MAXNAMELEN;
-	uio->uio_fmode = 0;
 	uio->uio_iovcnt = 1;
 
-	VOP_READLINK(vp, uio, NULL, error);
+	VOP_READLINK(vp, uio, 0, NULL, error);
 	if (error) {
 		kfree(uio);
 		kfree(link);
@@ -428,6 +450,7 @@ linvfs_follow_link(
 	return error;
 }
 
+#ifdef CONFIG_XFS_POSIX_ACL
 STATIC int
 linvfs_permission(
 	struct inode	*inode,
@@ -441,6 +464,9 @@ linvfs_permission(
 	VOP_ACCESS(vp, mode, NULL, error);
 	return -error;
 }
+#else
+#define linvfs_permission NULL
+#endif
 
 STATIC int
 linvfs_getattr(
@@ -615,6 +641,9 @@ linvfs_setxattr(
 		return error;
 	}
 
+	if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
+		return -EPERM;
+
 	/* Convert Linux syscall to XFS internal ATTR flags */
 	if (flags & XATTR_CREATE)
 		xflags |= ATTR_CREATE;
@@ -642,7 +671,7 @@ linvfs_setxattr(
 }
 
 STATIC ssize_t
-__linvfs_getxattr(
+linvfs_getxattr(
 	struct dentry	*dentry,
 	const char	*name,
 	void		*data,
@@ -698,23 +727,7 @@ __linvfs_getxattr(
 }
 
 STATIC ssize_t
-linvfs_getxattr(
-	struct dentry	*dentry,
-	const char	*name,
-	void		*data,
-	size_t		size)
-{
-	int error;
-
-	down(&dentry->d_inode->i_sem);
-	error = __linvfs_getxattr(dentry, name, data, size);
-	up(&dentry->d_inode->i_sem);
-
-	return error;
-}
-
-STATIC ssize_t
-__linvfs_listxattr(
+linvfs_listxattr(
 	struct dentry		*dentry,
 	char			*data,
 	size_t			size)
@@ -756,21 +769,6 @@ __linvfs_listxattr(
 	return result;
 }
 
-STATIC ssize_t
-linvfs_listxattr(
-	struct dentry		*dentry,
-	char			*data,
-	size_t			size)
-{
-	int error;
-
-	down(&dentry->d_inode->i_sem);
-	error = __linvfs_listxattr(dentry, data, size);
-	up(&dentry->d_inode->i_sem);
-
-	return error;
-}
-
 STATIC int
 linvfs_removexattr(
 	struct dentry	*dentry,
@@ -794,6 +792,9 @@ linvfs_removexattr(
 			error = xfs_cap_vremove(vp);
 		return error;
 	}
+
+        if (IS_IMMUTABLE(inode) || IS_APPEND(inode))
+		return -EPERM;
 
 	if (strncmp(name, xfs_namespaces[ROOT_NAMES].name,
 			xfs_namespaces[ROOT_NAMES].namelen) == 0) {

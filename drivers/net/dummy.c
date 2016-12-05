@@ -28,8 +28,6 @@
 			Alan Cox, 30th May 1994
 */
 
-/* To have statistics (just packets sent) define this */
-
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -107,7 +105,7 @@ static int __init dummy_init_module(void)
 static void __exit dummy_cleanup_module(void)
 {
 	unregister_netdev(dev_dummy);
-	kfree(dev_dummy);
+	free_netdev(dev_dummy);
 	dev_dummy = NULL;
 }
 

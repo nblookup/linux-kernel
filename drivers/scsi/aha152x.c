@@ -224,8 +224,7 @@
 #include <linux/sched.h>
 #include <asm/irq.h>
 #include <asm/io.h>
-#include <linux/version.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include "scsi.h"
 #include "hosts.h"
 #include <asm/system.h>
@@ -241,9 +240,7 @@
 #include <linux/isapnp.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
-#include <linux/blk.h>
 #include <asm/semaphore.h>
-#include <asm/io.h>
 #include <scsi/scsicam.h>
 
 #include "scsi.h"
@@ -941,7 +938,8 @@ static irqreturn_t swintr(int irqno, void *dev_id, struct pt_regs *regs)
 	struct Scsi_Host *shpnt = lookup_irq(irqno);
 
 	if (!shpnt) {
-        	printk(KERN_ERR "aha152x%d: catched software interrupt %d for unknown controller.\n", HOSTNO, irqno);
+		/* no point using HOSTNO here! */
+        	printk(KERN_ERR "aha152x: catched software interrupt %d for unknown controller.\n", irqno);
 		return IRQ_NONE;
 	}
 
@@ -1049,6 +1047,10 @@ struct Scsi_Host *aha152x_probe_one(struct aha152x_setup *setup)
 
 	printk(KERN_INFO "aha152x%d: trying software interrupt, ",
 			 shost->host_no);
+
+	/* need to have host registered before triggering any interrupt */
+	aha152x_host[registered_count] = shost;
+	mb();
 	SETPORT(DMACNTRL0, SWINT|INTEN);
 	mdelay(1000);
 	free_irq(shost->irq, shost);
@@ -1064,7 +1066,7 @@ struct Scsi_Host *aha152x_probe_one(struct aha152x_setup *setup)
 
 		printk(KERN_ERR "aha152x%d: IRQ %d possibly wrong.  "
 				"Please verify.\n", shost->host_no, shost->irq);
-		goto out_release_region;
+		goto out_unregister_host;
 	}
 	printk("ok.\n");
 
@@ -1077,12 +1079,12 @@ struct Scsi_Host *aha152x_probe_one(struct aha152x_setup *setup)
 				"aha152x", shost) < 0) {
 		printk(KERN_ERR "aha152x%d: failed to reassign interrupt.\n",
 				shost->host_no);
-		goto out_release_region;
+		goto out_unregister_host;
 	}
-
-	aha152x_host[registered_count] = shost;
 	return shost;	/* the pcmcia stub needs the return value; */
 
+out_unregister_host:
+	aha152x_host[registered_count] = NULL;
 out_release_region:
 	release_region(shost->io_port, IO_RANGE);
 out_unregister:
@@ -1758,7 +1760,7 @@ static void reset_ports(struct Scsi_Host *shpnt)
 int aha152x_host_reset(Scsi_Cmnd * SCpnt)
 {
 #if defined(AHA152X_DEBUG)
-	struct Scsi_Host *shpnt = SCpnt->host;
+	struct Scsi_Host *shpnt = SCpnt->device->host;
 #endif
 
 	DPRINTK(debug_eh, DEBUG_LEAD "aha152x_host_reset(%p)\n", CMDINFO(SCpnt), SCpnt);
@@ -1865,11 +1867,30 @@ static void run(void)
 static irqreturn_t intr(int irqno, void *dev_id, struct pt_regs *regs)
 {
 	struct Scsi_Host *shpnt = lookup_irq(irqno);
+	unsigned char rev, dmacntrl0;
 
 	if (!shpnt) {
 		printk(KERN_ERR "aha152x: catched interrupt %d for unknown controller.\n", irqno);
 		return IRQ_NONE;
 	}
+
+	/*
+	 * Read a couple of registers that are known to not be all 1's. If
+	 * we read all 1's (-1), that means that either:
+	 *
+	 * a. The host adapter chip has gone bad, and we cannot control it,
+	 *	OR
+	 * b. The host adapter is a PCMCIA card that has been ejected
+	 *
+	 * In either case, we cannot do anything with the host adapter at
+	 * this point in time. So just ignore the interrupt and return.
+	 * In the latter case, the interrupt might actually be meant for
+	 * someone else sharing this IRQ, and that driver will handle it.
+	 */
+	rev = GETPORT(REV);
+	dmacntrl0 = GETPORT(DMACNTRL0);
+	if ((rev == 0xFF) && (dmacntrl0 == 0xFF))
+		return IRQ_NONE;
 
 	/* no more interrupts from the controller, while we're busy.
 	   INTEN is restored by the BH handler */
@@ -3095,7 +3116,7 @@ static void disp_ports(struct Scsi_Host *shpnt)
 		printk("MESSAGE IN");
 		break;
 	default:
-		printk("*illegal*");
+		printk("*invalid*");
 		break;
 	}
 
@@ -3464,7 +3485,7 @@ static int get_ports(struct Scsi_Host *shpnt, char *pos)
 		SPRINTF("MESSAGE IN");
 		break;
 	default:
-		SPRINTF("*illegal*");
+		SPRINTF("*invalid*");
 		break;
 	}
 

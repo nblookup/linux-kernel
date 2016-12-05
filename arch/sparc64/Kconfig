@@ -5,6 +5,9 @@
 
 mainmenu "Linux/UltraSPARC Kernel Configuration"
 
+config 64BIT
+	def_bool y
+
 config MMU
 	bool
 	default y
@@ -16,6 +19,7 @@ menu "General setup"
 
 config BBC_I2C
 	tristate "UltraSPARC-III bootbus i2c controller driver"
+	depends on PCI
 	help
 	  The BBC devices on the UltraSPARC III have two I2C controllers.  The
 	  first I2C controller connects mainly to configuration PROMs (NVRAM,
@@ -25,7 +29,8 @@ config BBC_I2C
 	  smartcard reader, if present.  Say Y to enable support for these.
 
 config VT
-	bool
+	bool "Virtual terminal" if EMBEDDED
+	select INPUT
 	default y
 	---help---
 	  If you say Y here, you will get support for terminal devices with
@@ -55,7 +60,8 @@ config VT
 	  shiny Linux system :-)
 
 config VT_CONSOLE
-	bool
+	bool "Support for console on virtual terminal" if EMBEDDED
+	depends on VT
 	default y
 	---help---
 	  The system console is the device which receives all kernel messages
@@ -78,16 +84,6 @@ config VT_CONSOLE
 config HW_CONSOLE
 	bool
 	default y
-
-config HUGETLB_PAGE
-	bool "SPARC64 Huge TLB Page Support"
-	help
-	  This enables support for huge pages.  User space applications
-	  can make use of this support with the sys_alloc_hugepages and
-	  sys_free_hugepages system calls.  If your applications are
-	  huge page aware, then say Y here.
-
-	  Otherwise, say N.
 
 config SMP
 	bool "Symmetric multi-processing support"
@@ -208,16 +204,28 @@ config HOTPLUG
 	  to use devices as you hotplug them.
 
 # Global things across all Sun machines.
-config HAVE_DEC_LOCK
-	bool
-	default y
-
 config RWSEM_GENERIC_SPINLOCK
 	bool
 
 config RWSEM_XCHGADD_ALGORITHM
 	bool
 	default y
+
+choice
+	prompt "SPARC64 Huge TLB Page Size"
+	depends on HUGETLB_PAGE
+	default HUGETLB_PAGE_SIZE_4MB
+
+config HUGETLB_PAGE_SIZE_4MB
+	bool "4MB"
+
+config HUGETLB_PAGE_SIZE_512K
+	bool "512K"
+
+config HUGETLB_PAGE_SIZE_64K
+	bool "64K"
+
+endchoice
 
 config GENERIC_ISA_DMA
 	bool
@@ -238,10 +246,8 @@ config ISAPNP
 	  Say Y here if you would like support for ISA Plug and Play devices.
 	  Some information is in <file:Documentation/isapnp.txt>.
 
-	  This support is also available as a module called isapnp ( =
-	  code which can be inserted in and removed from the running kernel
-	  whenever you want). If you want to compile it as a module, say M
-	  here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called isapnp.
 
 	  If unsure, say Y.
 
@@ -283,11 +289,8 @@ config PCMCIA
 	  for location).  Please also read the PCMCIA-HOWTO, available from
 	  <http://www.tldp.org/docs.html#howto>.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  When compiled this way, there will be modules called pcmcia_core
-	  and ds.  If you want to compile it as a module, say M here and
-	  read <file:Documentation/modules.txt>.
+	  To compile this driver as modules, choose M here: the
+	  modules will be called pcmcia_core and ds.
 
 config SBUS
 	bool
@@ -346,10 +349,8 @@ config RTC
 	  sampling), then say Y here, and read <file:Documentation/rtc.txt>
 	  for details.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module is called rtc. If you want to compile it as a module,
-	  say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called rtc.
 
 source "drivers/pci/Kconfig"
 
@@ -360,34 +361,8 @@ config SUN_OPENPROMFS
 	  virtual file system, which you can mount to /proc/openprom by "mount
 	  -t openpromfs none /proc/openprom".
 
-	  If you want to compile the /proc/openprom support as a module ( =
-	  code which can be inserted in and removed from the running kernel
-	  whenever you want), say M here and read
-	  <file:Documentation/modules.txt>.
-	  The module will be called openpromfs.  If unsure, say M.
-
-config KCORE_ELF
-	bool
-	depends on PROC_FS
-	default y
-	---help---
-	  If you enabled support for /proc file system then the file
-	  /proc/kcore will contain the kernel core image. This can be used
-	  in gdb:
-
-	  $ cd /usr/src/linux ; gdb vmlinux /proc/kcore
-
-	  You have two choices here: ELF and A.OUT. Selecting ELF will make
-	  /proc/kcore appear in ELF core format as defined by the Executable
-	  and Linking Format specification. Selecting A.OUT will choose the
-	  old "a.out" format which may be necessary for some old versions
-	  of binutils or on some architectures.
-
-	  This is especially useful if you have compiled the kernel with the
-	  "-g" option to preserve debugging information. It is mainly used
-	  for examining kernel data structures on the live kernel so if you
-	  don't understand what this means or are not a kernel hacker, just
-	  leave it at its default value ELF.
+	  To compile the /proc/openprom support as a module, choose M here: the
+	  module will be called openpromfs.  If unsure, choose M.
 
 config SPARC32_COMPAT
 	bool "Kernel support for Linux/Sparc 32bit binary compatibility"
@@ -396,6 +371,11 @@ config SPARC32_COMPAT
 	  Everybody wants this; say Y.
 
 config COMPAT
+	bool
+	depends on SPARC32_COMPAT
+	default y
+
+config UID16
 	bool
 	depends on SPARC32_COMPAT
 	default y
@@ -433,10 +413,8 @@ config SOLARIS_EMUL
 	  This is experimental code which will enable you to run (many)
 	  Solaris binaries on your SPARC Linux machine.
 
-	  This code is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called solaris. If you want to compile it as a
-	  module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this code as a module, choose M here: the
+	  module will be called solaris.
 
 source "drivers/parport/Kconfig"
 
@@ -452,10 +430,8 @@ config PRINTER
 
 	  It is possible to share one parallel port among several devices
 	  (e.g. printer and ZIP drive) and it is safe to compile the
-	  corresponding drivers into the kernel.  If you want to compile this
-	  driver as a module however ( = code which can be inserted in and
-	  removed from the running kernel whenever you want), say M here and
-	  read <file:Documentation/modules.txt> and
+	  corresponding drivers into the kernel.
+	  To compile this driver as a module, choose M here and read
 	  <file:Documentation/parport.txt>.  The module will be called lp.
 
 	  If you have several parallel ports, you can specify which ports to
@@ -474,10 +450,8 @@ config ENVCTRL
 	  Kernel support for temperature and fan monitoring on Sun SME
 	  machines.
 
-	  This code is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called envctrl. If you want to compile it as a
-	  module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called envctrl.
 
 config DISPLAY7SEG
 	tristate "7-Segment Display support"
@@ -486,10 +460,8 @@ config DISPLAY7SEG
 	  This is the driver for the 7-segment display and LED present on
 	  Sun Microsystems CompactPCI models CP1400 and CP1500.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called display7seg. If you want to compile it
-	  as a module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called display7seg.
 
 	  If you do not have a CompactPCI model CP1400 or CP1500, or
 	  another UltraSPARC-IIi-cEngine boardset with a 7-segment display,
@@ -502,10 +474,8 @@ config WATCHDOG_CP1XXX
 	  This is the driver for the hardware watchdog timers present on
 	  Sun Microsystems CompactPCI models CP1400 and CP1500.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called cpwatchdog. If you want to compile it
-	  as a module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called cpwatchdog.
 
 	  If you do not have a CompactPCI model CP1400 or CP1500, or
 	  another UltraSPARC-IIi-cEngine boardset with hardware watchdog,
@@ -544,10 +514,8 @@ config BLK_DEV_FD
 	  well as location of the fdutils package used to configure additional
 	  parameters of the driver at run time.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called floppy. If you want to compile it as a
-	  module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called floppy.
 
 config BLK_DEV_LOOP
 	tristate "Loopback device support"
@@ -593,10 +561,8 @@ config BLK_DEV_LOOP
 	  Note that this loop device has nothing to do with the loopback
 	  device used for network connections from the machine to itself.
 
-	  If you want to compile this driver as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want),
-	  say M here and read <file:Documentation/modules.txt>. The module
-	  will be called loop.
+	  To compile this driver as a module, choose M here: the
+	  module will be called loop.
 
 	  Most users will answer N here.
 
@@ -622,10 +588,8 @@ config BLK_DEV_NBD
 	  Note that this has nothing to do with the network file systems NFS
 	  or Coda; you can say N here even if you intend to use NFS or Coda.
 
-	  If you want to compile this driver as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want),
-	  say M here and read <file:Documentation/modules.txt>. The module
-	  will be called nbd.
+	  To compile this driver as a module, choose M here: the
+	  module will be called nbd.
 
 	  If unsure, say N.
 
@@ -644,10 +608,8 @@ config BLK_DEV_RAM
 	  Note that the kernel command line option "ramdisk=XX" is now
 	  obsolete. For details, read <file:Documentation/ramdisk.txt>.
 
-	  If you want to compile this as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want),
-	  say M and read <file:Documentation/modules.txt>. The module will be
-	  called rd.
+	  To compile this driver as a module, choose M here: the
+	  module will be called rd.
 
 	  Most normal users won't need the RAM disk functionality, and can
 	  thus say N here.
@@ -686,10 +648,6 @@ endif
 source "drivers/ieee1394/Kconfig"
 
 source "net/Kconfig"
-
-source "net/ax25/Kconfig"
-
-source "net/irda/Kconfig"
 
 source "drivers/isdn/Kconfig"
 
@@ -744,44 +702,6 @@ config UNIX98_PTY_COUNT
 endmenu
 
 
-menu "Video For Linux"
-
-config VIDEO_DEV
-	tristate "Video For Linux"
-	---help---
-	  Support for audio/video capture and overlay devices and FM radio
-	  cards. The exact capabilities of each device vary. User tools for
-	  this are available from
-	  <ftp://ftp.uk.linux.org/pub/linux/video4linux/>.
-
-	  If you are interested in writing a driver for such an audio/video
-	  device or user software interacting with such a driver, please read
-	  the file <file:Documentation/video4linux/API.html>.
-
-	  This driver is also available as a module called videodev ( = code
-	  which can be inserted in and removed from the running kernel
-	  whenever you want). If you want to compile it as a module, say M
-	  here and read <file:Documentation/modules.txt>.
-
-config VIDEO_BT848
-	tristate "BT848 Video For Linux"
-	depends on PCI && VIDEO_DEV
-	---help---
-	  Support for BT848 based frame grabber/overlay boards. This includes
-	  the Miro, Hauppauge and STB boards. Please read the material in
-	  <file:Documentation/video4linux/bttv> for more information.
-
-	  If you say Y or M here, you need to say Y or M to "I2C support" and
-	  "I2C bit-banging interfaces" in the character device section.
-
-	  This driver is available as a module called bttv ( = code
-	  which can be inserted in and removed from the running kernel
-	  whenever you want). If you want to compile it as a module, say M
-	  here and read <file:Documentation/modules.txt>.
-
-endmenu
-
-
 menu "XFree86 DRI support"
 
 config DRM
@@ -822,48 +742,15 @@ endmenu
 
 source "drivers/input/Kconfig"
 
+source "drivers/i2c/Kconfig"
+
 source "fs/Kconfig"
 
-
-menu "Sound"
-
-config SOUND
-	tristate "Sound card support"
-	---help---
-	  If you have a sound card in your computer, i.e. if it can say more
-	  than an occasional beep, say Y.  Be sure to have all the information
-	  about your sound card and its configuration down (I/O port,
-	  interrupt and DMA channel), because you will be asked for it.
-
-	  You want to read the Sound-HOWTO, available from
-	  <http://www.tldp.org/docs.html#howto>. General information about
-	  the modular sound system is contained in the files
-	  <file:Documentation/sound/Introduction>.  The file
-	  <file:Documentation/sound/README.OSS> contains some slightly
-	  outdated but still useful information as well.
-
-	  If you have a PnP sound card and you want to configure it at boot
-	  time using the ISA PnP tools (read
-	  <http://www.roestock.demon.co.uk/isapnptools/>), then you need to
-	  compile the sound card support as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want)
-	  and load that module after the PnP configuration is finished.  To do
-	  this, say M here and read <file:Documentation/modules.txt> as well
-	  as <file:Documentation/sound/README.modules>; the module will be
-	  called soundcore.
-
-	  I'm told that even without a sound card, you can make your computer
-	  say more than an occasional beep, by programming the PC speaker.
-	  Kernel patches and supporting utilities to do that are in the pcsp
-	  package, available at <ftp://ftp.infradead.org/pub/pcsp/>.
+source "drivers/media/Kconfig"
 
 source "sound/Kconfig"
 
-endmenu
-
 source "drivers/usb/Kconfig"
-
-source "net/bluetooth/Kconfig"
 
 
 menu "Watchdog"
@@ -875,11 +762,8 @@ config SOFT_WATCHDOG
 	  from some situations that the hardware watchdog will recover
 	  from. Equally it's a lot cheaper to install.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  If you want to compile it as a module, say M here and read
-	  <file:Documentation/modules.txt>. The module will be called
-	  softdog.
+	  To compile this driver as a module, choose M here: the
+	  module will be called softdog.
 
 endmenu
 
@@ -924,12 +808,13 @@ config DEBUG_SPINLOCK
 	  best used in conjunction with the NMI watchdog so that spinlock
 	  deadlocks are also debuggable.
 
-config KALLSYMS
-	bool "Load all symbols for debugging/ksymoops"
-	help
-	  Say Y here to let the kernel print out symbolic crash information and
-	  symbolic stack backtraces. This increases the size of the kernel
-	  somewhat, as all symbols have to be loaded into the kernel image.
+# We have a custom atomic_dec_and_lock() implementation but it's not
+# compatible with spinlock debugging so we need to fall back on
+# the generic version in that case.
+config HAVE_DEC_LOCK
+	bool
+	depends on SMP && !DEBUG_SPINLOCK
+	default y
 
 config DEBUG_SPINLOCK_SLEEP
 	bool "Sleep-inside-spinlock checking"
@@ -949,6 +834,15 @@ config DEBUG_DCFLUSH
 	bool "D-cache flush debugging"
 	depends on DEBUG_KERNEL
 
+config DEBUG_INFO
+	bool "Compile the kernel with debug info"
+	depends on DEBUG_KERNEL
+	help
+          If you say Y here the resulting kernel image will include
+	  debugging info resulting in a larger kernel image.
+	  Say Y here only if you plan to use gdb to debug the kernel.
+	  If you don't debug the kernel, you can say N.
+	  
 config STACK_DEBUG
 	bool "Stack Overflow Detection Support"
 

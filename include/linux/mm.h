@@ -110,6 +110,7 @@ struct vm_area_struct {
 #define VM_RESERVED	0x00080000	/* Don't unmap it from swap_out */
 #define VM_ACCOUNT	0x00100000	/* Is a VM accounted object */
 #define VM_HUGETLB	0x00400000	/* Huge TLB Page VM */
+#define VM_NONLINEAR	0x00800000	/* Is non-linear (remap_file_pages) */
 
 #ifndef VM_STACK_DEFAULT_FLAGS		/* arch can override this */
 #define VM_STACK_DEFAULT_FLAGS VM_DATA_DEFAULT_FLAGS
@@ -195,7 +196,7 @@ struct page {
 #if defined(WANT_PAGE_VIRTUAL)
 	void *virtual;			/* Kernel virtual address (NULL if
 					   not kmapped, ie. highmem) */
-#endif /* CONFIG_HIGMEM || WANT_PAGE_VIRTUAL */
+#endif /* WANT_PAGE_VIRTUAL */
 };
 
 /*
@@ -322,7 +323,6 @@ static inline void put_page(struct page *page)
  * The zone field is never updated after free_area_init_core()
  * sets it, so none of the operations on it need to be atomic.
  */
-#define NODE_SHIFT 4
 #define ZONE_SHIFT (BITS_PER_LONG - 8)
 
 struct zone;
@@ -400,6 +400,8 @@ static inline int page_mapped(struct page *page)
 #define VM_FAULT_MINOR	1
 #define VM_FAULT_MAJOR	2
 
+#define offset_in_page(p)	((unsigned long)(p) & ~PAGE_MASK)
+
 extern void show_free_areas(void);
 
 struct page *shmem_nopage(struct vm_area_struct * vma,
@@ -421,15 +423,20 @@ int copy_page_range(struct mm_struct *dst, struct mm_struct *src,
 int zeromap_page_range(struct vm_area_struct *vma, unsigned long from,
 			unsigned long size, pgprot_t prot);
 
+extern void invalidate_mmap_range(struct address_space *mapping,
+				  loff_t const holebegin,
+				  loff_t const holelen);
 extern int vmtruncate(struct inode * inode, loff_t offset);
 extern pmd_t *FASTCALL(__pmd_alloc(struct mm_struct *mm, pgd_t *pgd, unsigned long address));
 extern pte_t *FASTCALL(pte_alloc_kernel(struct mm_struct *mm, pmd_t *pmd, unsigned long address));
 extern pte_t *FASTCALL(pte_alloc_map(struct mm_struct *mm, pmd_t *pmd, unsigned long address));
 extern int install_page(struct mm_struct *mm, struct vm_area_struct *vma, unsigned long addr, struct page *page, pgprot_t prot);
+extern int install_file_pte(struct mm_struct *mm, struct vm_area_struct *vma, unsigned long addr, unsigned long pgoff, pgprot_t prot);
 extern int handle_mm_fault(struct mm_struct *mm,struct vm_area_struct *vma, unsigned long address, int write_access);
 extern int make_pages_present(unsigned long addr, unsigned long end);
 extern int access_process_vm(struct task_struct *tsk, unsigned long addr, void *buf, int len, int write);
 extern long sys_remap_file_pages(unsigned long start, unsigned long size, unsigned long prot, unsigned long pgoff, unsigned long nonblock);
+extern long sys_fadvise64_64(int fd, loff_t offset, loff_t len, int advice);
 void put_dirty_page(struct task_struct *tsk, struct page *page,
 			unsigned long address, pgprot_t prot);
 
@@ -566,6 +573,8 @@ int write_one_page(struct page *page, int wait);
 #define VM_MIN_READAHEAD	16	/* kbytes (includes current page) */
 
 int do_page_cache_readahead(struct address_space *mapping, struct file *filp,
+			unsigned long offset, unsigned long nr_to_read);
+int force_page_cache_readahead(struct address_space *mapping, struct file *filp,
 			unsigned long offset, unsigned long nr_to_read);
 void page_cache_readahead(struct address_space *mapping, 
 			  struct file_ra_state *ra,

@@ -269,7 +269,7 @@ int is_reiserfs_jr (struct reiserfs_super_block * rs);
 #define NO_BALANCING_NEEDED  (-4)
 #define NO_MORE_UNUSED_CONTIGUOUS_BLOCKS (-5)
 
-typedef unsigned long b_blocknr_t;
+typedef __u32 b_blocknr_t;
 typedef __u32 unp_t;
 
 struct unfm_nodeinfo {
@@ -570,7 +570,7 @@ extern void reiserfs_warning (const char * fmt, ...);
 static inline int uniqueness2type (__u32 uniqueness) CONSTF;
 static inline int uniqueness2type (__u32 uniqueness)
 {
-    switch (uniqueness) {
+    switch ((int)uniqueness) {
     case V1_SD_UNIQUENESS: return TYPE_STAT_DATA;
     case V1_INDIRECT_UNIQUENESS: return TYPE_INDIRECT;
     case V1_DIRECT_UNIQUENESS: return TYPE_DIRECT;
@@ -879,19 +879,14 @@ struct stat_data_v1
 /* we want common flags to have the same values as in ext2,
    so chattr(1) will work without problems */
 #define REISERFS_IMMUTABLE_FL EXT2_IMMUTABLE_FL
+#define REISERFS_APPEND_FL    EXT2_APPEND_FL
 #define REISERFS_SYNC_FL      EXT2_SYNC_FL
 #define REISERFS_NOATIME_FL   EXT2_NOATIME_FL
 #define REISERFS_NODUMP_FL    EXT2_NODUMP_FL
 #define REISERFS_SECRM_FL     EXT2_SECRM_FL
 #define REISERFS_UNRM_FL      EXT2_UNRM_FL
 #define REISERFS_COMPR_FL     EXT2_COMPR_FL
-/* persistent flag to disable tails on per-file basic.
-   Note, that is inheritable: mark directory with this and
-   all new files inside will not have tails. 
-
-   Teodore Tso allocated EXT2_NODUMP_FL (0x00008000) for this. Change
-   numeric constant to ext2 macro when available. */
-#define REISERFS_NOTAIL_FL    (0x00008000) /* EXT2_NOTAIL_FL */
+#define REISERFS_NOTAIL_FL    EXT2_NOTAIL_FL
 
 /* persistent flags that file inherits from the parent directory */
 #define REISERFS_INHERIT_MASK ( REISERFS_IMMUTABLE_FL |	\
@@ -1730,11 +1725,11 @@ int journal_release_error(struct reiserfs_transaction_handle*, struct super_bloc
 int journal_end(struct reiserfs_transaction_handle *, struct super_block *, unsigned long) ;
 int journal_end_sync(struct reiserfs_transaction_handle *, struct super_block *, unsigned long) ;
 int journal_mark_dirty_nolog(struct reiserfs_transaction_handle *, struct super_block *, struct buffer_head *bh) ;
-int journal_mark_freed(struct reiserfs_transaction_handle *, struct super_block *, unsigned long blocknr) ;
+int journal_mark_freed(struct reiserfs_transaction_handle *, struct super_block *, b_blocknr_t blocknr) ;
 int push_journal_writer(char *w) ;
 int pop_journal_writer(int windex) ;
 int journal_transaction_should_end(struct reiserfs_transaction_handle *, int) ;
-int reiserfs_in_journal(struct super_block *p_s_sb, int bmap_nr, int bit_nr, int searchall, unsigned long *next) ;
+int reiserfs_in_journal(struct super_block *p_s_sb, int bmap_nr, int bit_nr, int searchall, b_blocknr_t *next) ;
 int journal_begin(struct reiserfs_transaction_handle *, struct super_block *p_s_sb, unsigned long) ;
 void flush_async_commits(struct super_block *p_s_sb) ;
 
@@ -1936,32 +1931,13 @@ struct dentry *reiserfs_get_parent(struct dentry *) ;
 
 int reiserfs_proc_info_init( struct super_block *sb );
 int reiserfs_proc_info_done( struct super_block *sb );
-struct proc_dir_entry *reiserfs_proc_register( struct super_block *sb, 
-											   char *name, read_proc_t *func );
-void reiserfs_proc_unregister( struct super_block *sb, const char *name );
 struct proc_dir_entry *reiserfs_proc_register_global( char *name, 
 													  read_proc_t *func );
 void reiserfs_proc_unregister_global( const char *name );
 int reiserfs_proc_info_global_init( void );
 int reiserfs_proc_info_global_done( void );
-int reiserfs_proc_tail( int len, char *buffer, char **start, 
-						off_t offset, int count, int *eof );
 int reiserfs_global_version_in_proc( char *buffer, char **start, off_t offset,
 									 int count, int *eof, void *data );
-int reiserfs_version_in_proc( char *buffer, char **start, off_t offset,
-							  int count, int *eof, void *data );
-int reiserfs_super_in_proc( char *buffer, char **start, off_t offset,
-							int count, int *eof, void *data );
-int reiserfs_per_level_in_proc( char *buffer, char **start, off_t offset,
-								int count, int *eof, void *data );
-int reiserfs_bitmap_in_proc( char *buffer, char **start, off_t offset,
-								int count, int *eof, void *data );
-int reiserfs_on_disk_super_in_proc( char *buffer, char **start, off_t offset,
-									int count, int *eof, void *data );
-int reiserfs_oidmap_in_proc( char *buffer, char **start, off_t offset,
-							 int count, int *eof, void *data );
-int reiserfs_journal_in_proc( char *buffer, char **start, off_t offset,
-							  int count, int *eof, void *data );
 
 #if defined( REISERFS_PROC_INFO )
 
@@ -2105,8 +2081,8 @@ struct buffer_head * get_FEB (struct tree_balance *);
 typedef struct __reiserfs_blocknr_hint reiserfs_blocknr_hint_t;
 
 int reiserfs_parse_alloc_options (struct super_block *, char *);
-int is_reusable (struct super_block * s, unsigned long block, int bit_value);
-void reiserfs_free_block (struct reiserfs_transaction_handle *th, unsigned long);
+int is_reusable (struct super_block * s, b_blocknr_t block, int bit_value);
+void reiserfs_free_block (struct reiserfs_transaction_handle *th, b_blocknr_t);
 int reiserfs_allocate_blocknrs(reiserfs_blocknr_hint_t *, b_blocknr_t * , int, int);
 extern inline int reiserfs_new_form_blocknrs (struct tree_balance * tb,
 					      b_blocknr_t *new_blocknrs, int amount_needed)

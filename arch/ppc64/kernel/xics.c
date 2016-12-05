@@ -16,6 +16,7 @@
 #include <linux/smp.h>
 #include <linux/interrupt.h>
 #include <linux/signal.h>
+#include <linux/init.h>
 #include <asm/prom.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
@@ -33,7 +34,7 @@ void xics_enable_irq(u_int irq);
 void xics_disable_irq(u_int irq);
 void xics_mask_and_ack_irq(u_int irq);
 void xics_end_irq(u_int irq);
-void xics_set_affinity(unsigned int irq_nr, unsigned long cpumask);
+void xics_set_affinity(unsigned int irq_nr, cpumask_t cpumask);
 
 struct hw_interrupt_type xics_pic = {
 	" XICS     ",
@@ -266,6 +267,15 @@ void xics_disable_irq(u_int virq)
 		       irq, call_status);
 		return;
 	}
+
+	/* Have to set XIVE to 0xff to be able to remove a slot */
+	call_status = rtas_call(ibm_set_xive, 3, 1, NULL, irq, default_server,
+				0xff);
+	if (call_status != 0) {
+	printk("xics_disable_irq: irq=%x: ibm_set_xive(0xff) returned %lx\n",
+	       irq, call_status);
+		return;
+	}
 }
 
 void xics_end_irq(u_int	irq)
@@ -374,12 +384,12 @@ void xics_init_IRQ(void)
 	int i;
 	unsigned long intr_size = 0;
 	struct device_node *np;
-	uint *ireg, ilen, indx=0;
+	uint *ireg, ilen, indx = 0;
 	unsigned long intr_base = 0;
 	struct xics_interrupt_node {
-		unsigned long long addr;
-		unsigned long long size;
-	} inodes[NR_CPUS*2]; 
+		unsigned long addr;
+		unsigned long size;
+	} inodes[NR_CPUS]; 
 
 	ppc64_boot_msg(0x20, "XICS Init");
 
@@ -490,25 +500,40 @@ nextnode:
 
 	ops->cppr_info(boot_cpuid, 0xff);
 	iosync();
-	if (xics_irq_8259_cascade != -1) {
+
+	ppc64_boot_msg(0x21, "XICS Done");
+}
+
+/*
+ * We cant do this in init_IRQ because we need the memory subsystem up for
+ * request_irq()
+ */
+static int __init xics_setup_i8259(void)
+{
+	if (naca->interrupt_controller == IC_PPC_XIC &&
+	    xics_irq_8259_cascade != -1) {
 		if (request_irq(xics_irq_8259_cascade + XICS_IRQ_OFFSET,
 				no_action, 0, "8259 cascade", 0))
 			printk(KERN_ERR "xics_init_IRQ: couldn't get 8259 cascade\n");
 		i8259_init();
 	}
+	return 0;
+}
+arch_initcall(xics_setup_i8259);
 
 #ifdef CONFIG_SMP
+void xics_request_IPIs(void)
+{
 	real_irq_to_virt_map[XICS_IPI] = virt_irq_to_real_map[XICS_IPI] =
 		XICS_IPI;
 	/* IPIs are marked SA_INTERRUPT as they must run with irqs disabled */
 	request_irq(XICS_IPI + XICS_IRQ_OFFSET, xics_ipi_action, SA_INTERRUPT,
 		    "IPI", 0);
 	irq_desc[XICS_IPI+XICS_IRQ_OFFSET].status |= IRQ_PER_CPU;
-#endif
-	ppc64_boot_msg(0x21, "XICS Done");
 }
+#endif
 
-void xics_set_affinity(unsigned int virq, unsigned long cpumask)
+void xics_set_affinity(unsigned int virq, cpumask_t cpumask)
 {
         irq_desc_t *desc = irq_desc + virq;
 	unsigned int irq;
@@ -516,6 +541,8 @@ void xics_set_affinity(unsigned int virq, unsigned long cpumask)
 	long status;
 	unsigned long xics_status[2];
 	unsigned long newmask;
+	cpumask_t allcpus = CPU_MASK_ALL;
+	cpumask_t tmp = CPU_MASK_NONE;
 
 	virq -= XICS_IRQ_OFFSET;
 	irq = virt_irq_to_real(virq);
@@ -533,12 +560,13 @@ void xics_set_affinity(unsigned int virq, unsigned long cpumask)
 	}
 
 	/* For the moment only implement delivery to all cpus or one cpu */
-	if (cpumask == -1UL) {
+	if (cpus_equal(cpumask, allcpus)) {
 		newmask = default_distrib_server;
 	} else {
-		if (!(cpumask & cpu_online_map))
+		cpus_and(tmp, cpu_online_map, cpumask);
+		if (cpus_empty(tmp))
 			goto out;
-		newmask = find_first_bit(&cpumask, 8*sizeof(unsigned long));
+		newmask = first_cpu(cpumask);
 	}
 
 	status = rtas_call(ibm_set_xive, 3, 1, NULL,

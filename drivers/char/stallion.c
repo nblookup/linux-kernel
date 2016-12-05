@@ -28,7 +28,6 @@
 
 #include <linux/config.h>
 #include <linux/module.h>
-#include <linux/version.h> /* for linux/stallion.h */
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/tty.h>
@@ -472,8 +471,6 @@ static unsigned int	stl_baudrates[] = {
  */
 
 #ifdef MODULE
-int		init_module(void);
-void		cleanup_module(void);
 static void	stl_argbrds(void);
 static int	stl_parsebrd(stlconf_t *confp, char **argp);
 
@@ -1227,7 +1224,6 @@ static void stl_delay(int len)
 	if (len > 0) {
 		current->state = TASK_INTERRUPTIBLE;
 		schedule_timeout(len);
-		current->state = TASK_RUNNING;
 	}
 }
 
@@ -3080,7 +3076,7 @@ static int stl_memioctl(struct inode *ip, struct file *fp, unsigned int cmd, uns
 		(int) fp, cmd, (int) arg);
 #endif
 
-	brdnr = minor(ip->i_rdev);
+	brdnr = iminor(ip);
 	if (brdnr >= STL_MAXBRDS)
 		return(-ENODEV);
 	rc = 0;
@@ -3175,7 +3171,7 @@ int __init stl_init(void)
 	for (i = 0; i < 4; i++) {
 		devfs_mk_cdev(MKDEV(STL_SIOMEMMAJOR, i),
 				S_IFCHR|S_IRUSR|S_IWUSR,
-				&stl_fsiomem, NULL, "staliomem/%d", i);
+				"staliomem/%d", i);
 	}
 
 	stl_serial->owner = THIS_MODULE;
@@ -4236,7 +4232,7 @@ static void stl_cd1400mdmisr(stlpanel_t *panelp, int ioaddr)
 	misr = inb(ioaddr + EREG_DATA);
 	if (misr & MISR_DCD) {
 		set_bit(ASYI_DCDCHANGE, &portp->istate);
-		schedule_task(&portp->tqueue);
+		schedule_work(&portp->tqueue);
 		portp->stats.modem++;
 	}
 
@@ -5033,7 +5029,7 @@ static void stl_sc26198txisr(stlport_t *portp)
 	if ((len == 0) || ((len < STL_TXBUFLOW) &&
 	    (test_bit(ASYI_TXLOW, &portp->istate) == 0))) {
 		set_bit(ASYI_TXLOW, &portp->istate);
-		schedule_task(&portp->tqueue); 
+		schedule_work(&portp->tqueue); 
 	}
 
 	if (len == 0) {
@@ -5250,7 +5246,7 @@ static void stl_sc26198otherisr(stlport_t *portp, unsigned int iack)
 		ipr = stl_sc26198getreg(portp, IPR);
 		if (ipr & IPR_DCDCHANGE) {
 			set_bit(ASYI_DCDCHANGE, &portp->istate);
-			schedule_task(&portp->tqueue); 
+			schedule_work(&portp->tqueue); 
 			portp->stats.modem++;
 		}
 		break;

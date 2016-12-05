@@ -18,10 +18,10 @@
 #include <asm/scatterlist.h>
 #include <linux/crypto.h>
 #include <linux/pfkeyv2.h>
+#include <net/inet_ecn.h>
 #include <net/ip.h>
 #include <net/xfrm.h>
 #include <net/icmp.h>
-#include <net/esp.h>
 #include <net/ipcomp.h>
 
 static int ipcomp_decompress(struct xfrm_state *x, struct sk_buff *skb)
@@ -210,6 +210,8 @@ static int ipcomp_output(struct sk_buff *skb)
 	top_iph = (struct iphdr *)skb_push(skb, sizeof(struct ip_comp_hdr));
 	memcpy(top_iph, &tmp_iph, iph->ihl * 4);
 	iph = top_iph;
+	if (x->props.mode && (x->props.flags & XFRM_STATE_NOECN))
+		IP_ECN_clear(iph);
 	iph->tot_len = htons(skb->len);
 	iph->protocol = IPPROTO_COMP;
 	iph->check = 0;
@@ -256,7 +258,7 @@ static void ipcomp4_err(struct sk_buff *skb, u32 info)
 	                      spi, IPPROTO_COMP, AF_INET);
 	if (!x)
 		return;
-	printk(KERN_DEBUG "pmtu discvovery on SA IPCOMP/%08x/%u.%u.%u.%u\n",
+	printk(KERN_DEBUG "pmtu discovery on SA IPCOMP/%08x/%u.%u.%u.%u\n",
 	       spi, NIPQUAD(iph->daddr));
 	xfrm_state_put(x);
 }
@@ -277,6 +279,7 @@ static struct xfrm_state *ipcomp_tunnel_create(struct xfrm_state *x)
 	t->props.family = AF_INET;
 	t->props.mode = 1;
 	t->props.saddr.a4 = x->props.saddr.a4;
+	t->props.flags = x->props.flags;
 	
 	t->type = xfrm_get_type(IPPROTO_IPIP, t->props.family);
 	if (t->type == NULL)
@@ -333,16 +336,23 @@ static void ipcomp_free_data(struct ipcomp_data *ipcd)
 static void ipcomp_destroy(struct xfrm_state *x)
 {
 	struct ipcomp_data *ipcd = x->data;
+	if (!ipcd)
+		return;
 	ipcomp_free_data(ipcd);
 	kfree(ipcd);
 }
 
 static int ipcomp_init_state(struct xfrm_state *x, void *args)
 {
-	int err = -ENOMEM;
+	int err;
 	struct ipcomp_data *ipcd;
 	struct xfrm_algo_desc *calg_desc;
 
+	err = -EINVAL;
+	if (!x->calg)
+		goto out;
+
+	err = -ENOMEM;
 	ipcd = kmalloc(sizeof(*ipcd), GFP_KERNEL);
 	if (!ipcd)
 		goto error;
@@ -351,7 +361,6 @@ static int ipcomp_init_state(struct xfrm_state *x, void *args)
 	x->props.header_len = sizeof(struct ip_comp_hdr);
 	if (x->props.mode)
 		x->props.header_len += sizeof(struct iphdr);
-	x->data = ipcd;
 
 	ipcd->scratch = kmalloc(IPCOMP_SCRATCH_SIZE, GFP_KERNEL);
 	if (!ipcd->scratch)
@@ -370,6 +379,7 @@ static int ipcomp_init_state(struct xfrm_state *x, void *args)
 	calg_desc = xfrm_calg_get_byname(x->calg->alg_name);
 	BUG_ON(!calg_desc);
 	ipcd->threshold = calg_desc->uinfo.comp.threshold;
+	x->data = ipcd;
 	err = 0;
 out:
 	return err;

@@ -74,7 +74,9 @@ static int max_interrupt_work = 10;
 
 #include <linux/config.h>
 #include <linux/module.h>
+#ifdef CONFIG_MCA
 #include <linux/mca.h>
+#endif
 #include <linux/isapnp.h>
 #include <linux/string.h>
 #include <linux/interrupt.h>
@@ -300,10 +302,11 @@ static int nopnp;
  *
  * Both call el3_common_init/el3_common_remove. */
 
-static void __init el3_common_init(struct net_device *dev)
+static int __init el3_common_init(struct net_device *dev)
 {
 	struct el3_private *lp = dev->priv;
 	short i;
+	int err;
 
 	spin_lock_init(&lp->lock);
 
@@ -314,20 +317,6 @@ static void __init el3_common_init(struct net_device *dev)
 		dev->if_port |= (dev->mem_start & 0x08);
 	}
 
-	{
-		const char *if_names[] = {"10baseT", "AUI", "undefined", "BNC"};
-		printk("%s: 3c5x9 at %#3.3lx, %s port, address ",
-			dev->name, dev->base_addr, if_names[(dev->if_port & 0x03)]);
-	}
-
-	/* Read in the station address. */
-	for (i = 0; i < 6; i++)
-		printk(" %2.2x", dev->dev_addr[i]);
-	printk(", IRQ %d.\n", dev->irq);
-
-	if (el3_debug > 0)
-		printk(KERN_INFO "%s" KERN_INFO "%s", versionA, versionB);
-
 	/* The EL3-specific entries in the device structure. */
 	dev->open = &el3_open;
 	dev->hard_start_xmit = &el3_start_xmit;
@@ -337,6 +326,31 @@ static void __init el3_common_init(struct net_device *dev)
 	dev->tx_timeout = el3_tx_timeout;
 	dev->watchdog_timeo = TX_TIMEOUT;
 	dev->do_ioctl = netdev_ioctl;
+
+	err = register_netdev(dev);
+	if (err) {
+		printk(KERN_ERR "Failed to register 3c5x9 at %#3.3lx, IRQ %d.\n",
+			dev->base_addr, dev->irq);
+		release_region(dev->base_addr, EL3_IO_EXTENT);
+		return err;
+	}
+
+	{
+		const char *if_names[] = {"10baseT", "AUI", "undefined", "BNC"};
+		printk("%s: 3c5x9 found at %#3.3lx, %s port, address ",
+			dev->name, dev->base_addr, 
+			if_names[(dev->if_port & 0x03)]);
+	}
+
+	/* Read in the station address. */
+	for (i = 0; i < 6; i++)
+		printk(" %2.2x", dev->dev_addr[i]);
+	printk(", IRQ %d.\n", dev->irq);
+
+	if (el3_debug > 0)
+		printk(KERN_INFO "%s" KERN_INFO "%s", versionA, versionB);
+	return 0;
+
 }
 
 static void el3_common_remove (struct net_device *dev)
@@ -355,7 +369,7 @@ static void el3_common_remove (struct net_device *dev)
 
 		unregister_netdev (dev);
 		release_region(dev->base_addr, EL3_IO_EXTENT);
-		kfree (dev);
+		free_netdev (dev);
 }
 
 static int __init el3_probe(int card_idx)
@@ -370,9 +384,7 @@ static int __init el3_probe(int card_idx)
 #if defined(__ISAPNP__) && !defined(CONFIG_X86_PC9800)
 	static int pnp_cards;
 	struct pnp_dev *idev = NULL;
-#endif /* __ISAPNP__ */
 
-#if defined(__ISAPNP__) && !defined(CONFIG_X86_PC9800)
 	if (nopnp == 1)
 		goto no_pnp;
 
@@ -428,12 +440,15 @@ no_pnp:
 #else
 	/* Select an open I/O location at 0x1*0 to do contention select. */
 	for ( ; id_port < 0x200; id_port += 0x10) {
-		if (check_region(id_port, 1))
+		if (!request_region(id_port, 1, "3c509"))
 			continue;
 		outb(0x00, id_port);
 		outb(0xff, id_port);
-		if (inb(id_port) & 0x01)
+		if (inb(id_port) & 0x01){
+			release_region(id_port, 1);
 			break;
+		} else
+			release_region(id_port, 1);
 	}
 	if (id_port >= 0x200) {
 		/* Rare -- do we really need a warning? */
@@ -564,9 +579,8 @@ no_pnp:
 #if defined(__ISAPNP__) && !defined(CONFIG_X86_PC9800)
 	lp->dev = &idev->dev;
 #endif
-	el3_common_init(dev);
+	err = el3_common_init(dev);
 
-	err = register_netdev(dev);
 	if (err)
 		goto out1;
 
@@ -588,13 +602,12 @@ no_pnp:
 	return 0;
 
 out1:
-	release_region(ioaddr, EL3_IO_EXTENT);
 #if defined(__ISAPNP__) && !defined(CONFIG_X86_PC9800)
 	if (idev)
 		pnp_device_detach(idev);
 #endif
 out:
-	kfree(dev);
+	free_netdev(dev);
 	return err;
 }
 
@@ -629,8 +642,8 @@ static int __init el3_mca_probe(struct device *device) {
 			   el3_mca_adapter_names[mdev->index], slot + 1);
 
 		/* claim the slot */
-		strncpy(device->name, el3_mca_adapter_names[mdev->index],
-				sizeof(device->name));
+		strncpy(mdev->name, el3_mca_adapter_names[mdev->index],
+				sizeof(mdev->name));
 		mca_device_set_claim(mdev, 1);
 
 		if_port = pos4 & 0x03;
@@ -662,11 +675,9 @@ static int __init el3_mca_probe(struct device *device) {
 		lp->dev = device;
 		lp->type = EL3_MCA;
 		device->driver_data = dev;
-		el3_common_init(dev);
+		err = el3_common_init(dev);
 
-		err = register_netdev(dev);
 		if (err) {
-			release_region(ioaddr, EL3_IO_EXTENT);
 			return -ENOMEM;
 		}
 
@@ -723,11 +734,9 @@ static int __init el3_eisa_probe (struct device *device)
 	lp->dev = device;
 	lp->type = EL3_EISA;
 	eisa_set_drvdata (edev, dev);
-	el3_common_init(dev);
+	err = el3_common_init(dev);
 
-	err = register_netdev(dev);
 	if (err) {
-		release_region(ioaddr, EL3_IO_EXTENT);
 		return err;
 	}
 

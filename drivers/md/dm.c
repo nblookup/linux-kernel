@@ -8,7 +8,7 @@
 
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/blk.h>
+#include <linux/moduleparam.h>
 #include <linux/blkpg.h>
 #include <linux/bio.h>
 #include <linux/mempool.h>
@@ -44,7 +44,7 @@ struct mapped_device {
 
 	unsigned long flags;
 
-	request_queue_t queue;
+	request_queue_t *queue;
 	struct gendisk *disk;
 
 	/*
@@ -63,6 +63,12 @@ struct mapped_device {
 	 * io objects are allocated from here.
 	 */
 	mempool_t *io_pool;
+
+	/*
+	 * Event handling.
+	 */
+	uint32_t event_nr;
+	wait_queue_head_t eventq;
 };
 
 #define MIN_IOS 256
@@ -73,7 +79,7 @@ static __init int local_init(void)
 	int r;
 
 	/* allocate a slab for the dm_ios */
-	_io_cache = kmem_cache_create("dm io",
+	_io_cache = kmem_cache_create("dm_io",
 				      sizeof(struct dm_io), 0, 0, NULL, NULL);
 	if (!_io_cache)
 		return -ENOMEM;
@@ -510,6 +516,11 @@ static int dm_request(request_queue_t *q, struct bio *bio)
 		down_read(&md->lock);
 	}
 
+	if (!md->map) {
+		bio_io_error(bio, bio->bi_size);
+		return 0;
+	}
+
 	__split_bio(md, bio);
 	up_read(&md->lock);
 	return 0;
@@ -590,13 +601,20 @@ static struct mapped_device *alloc_dev(unsigned int minor, int persistent)
 	init_rwsem(&md->lock);
 	atomic_set(&md->holders, 1);
 
-	md->queue.queuedata = md;
-	blk_queue_make_request(&md->queue, dm_request);
+	md->queue = blk_alloc_queue(GFP_KERNEL);
+	if (!md->queue) {
+		kfree(md);
+		return NULL;
+	}
+
+	md->queue->queuedata = md;
+	blk_queue_make_request(md->queue, dm_request);
 
 	md->io_pool = mempool_create(MIN_IOS, mempool_alloc_slab,
 				     mempool_free_slab, _io_cache);
 	if (!md->io_pool) {
 		free_minor(minor);
+		blk_put_queue(md->queue);
 		kfree(md);
 		return NULL;
 	}
@@ -605,6 +623,7 @@ static struct mapped_device *alloc_dev(unsigned int minor, int persistent)
 	if (!md->disk) {
 		mempool_destroy(md->io_pool);
 		free_minor(minor);
+		blk_put_queue(md->queue);
 		kfree(md);
 		return NULL;
 	}
@@ -612,13 +631,15 @@ static struct mapped_device *alloc_dev(unsigned int minor, int persistent)
 	md->disk->major = _major;
 	md->disk->first_minor = minor;
 	md->disk->fops = &dm_blk_dops;
-	md->disk->queue = &md->queue;
+	md->disk->queue = md->queue;
 	md->disk->private_data = md;
 	sprintf(md->disk->disk_name, "dm-%d", minor);
 	add_disk(md->disk);
 
 	atomic_set(&md->pending, 0);
 	init_waitqueue_head(&md->wait);
+	init_waitqueue_head(&md->eventq);
+
 	return md;
 }
 
@@ -628,15 +649,26 @@ static void free_dev(struct mapped_device *md)
 	mempool_destroy(md->io_pool);
 	del_gendisk(md->disk);
 	put_disk(md->disk);
+	blk_put_queue(md->queue);
 	kfree(md);
 }
 
 /*
  * Bind a table to the device.
  */
+static void event_callback(void *context)
+{
+	struct mapped_device *md = (struct mapped_device *) context;
+
+	down_write(&md->lock);
+	md->event_nr++;
+	wake_up_interruptible(&md->eventq);
+	up_write(&md->lock);
+}
+
 static int __bind(struct mapped_device *md, struct dm_table *t)
 {
-	request_queue_t *q = &md->queue;
+	request_queue_t *q = md->queue;
 	sector_t size;
 	md->map = t;
 
@@ -645,6 +677,8 @@ static int __bind(struct mapped_device *md, struct dm_table *t)
 	if (size == 0)
 		return 0;
 
+	dm_table_event_callback(md->map, event_callback, md);
+
 	dm_table_get(t);
 	dm_table_set_restrictions(t, q);
 	return 0;
@@ -652,6 +686,10 @@ static int __bind(struct mapped_device *md, struct dm_table *t)
 
 static void __unbind(struct mapped_device *md)
 {
+	if (!md->map)
+		return;
+
+	dm_table_event_callback(md->map, NULL, NULL);
 	dm_table_put(md->map);
 	md->map = NULL;
 	set_capacity(md->disk, 0);
@@ -661,35 +699,26 @@ static void __unbind(struct mapped_device *md)
  * Constructor for a new device.
  */
 static int create_aux(unsigned int minor, int persistent,
-		      struct dm_table *table, struct mapped_device **result)
+		      struct mapped_device **result)
 {
-	int r;
 	struct mapped_device *md;
 
 	md = alloc_dev(minor, persistent);
 	if (!md)
 		return -ENXIO;
 
-	r = __bind(md, table);
-	if (r) {
-		free_dev(md);
-		return r;
-	}
-	dm_table_resume_targets(md->map);
-
 	*result = md;
 	return 0;
 }
 
-int dm_create(struct dm_table *table, struct mapped_device **result)
+int dm_create(struct mapped_device **result)
 {
-	return create_aux(0, 0, table, result);
+	return create_aux(0, 0, result);
 }
 
-int dm_create_with_minor(unsigned int minor,
-			 struct dm_table *table, struct mapped_device **result)
+int dm_create_with_minor(unsigned int minor, struct mapped_device **result)
 {
-	return create_aux(minor, 1, table, result);
+	return create_aux(minor, 1, result);
 }
 
 void dm_get(struct mapped_device *md)
@@ -700,7 +729,7 @@ void dm_get(struct mapped_device *md)
 void dm_put(struct mapped_device *md)
 {
 	if (atomic_dec_and_test(&md->holders)) {
-		if (!test_bit(DMF_SUSPENDED, &md->flags))
+		if (!test_bit(DMF_SUSPENDED, &md->flags) && md->map)
 			dm_table_suspend_targets(md->map);
 		__unbind(md);
 		free_dev(md);
@@ -790,7 +819,8 @@ int dm_suspend(struct mapped_device *md)
 	down_write(&md->lock);
 	remove_wait_queue(&md->wait, &wait);
 	set_bit(DMF_SUSPENDED, &md->flags);
-	dm_table_suspend_targets(md->map);
+	if (md->map)
+		dm_table_suspend_targets(md->map);
 	up_write(&md->lock);
 
 	return 0;
@@ -801,7 +831,8 @@ int dm_resume(struct mapped_device *md)
 	struct deferred_io *def;
 
 	down_write(&md->lock);
-	if (!test_bit(DMF_SUSPENDED, &md->flags) ||
+	if (!md->map ||
+	    !test_bit(DMF_SUSPENDED, &md->flags) ||
 	    !dm_table_get_size(md->map)) {
 		up_write(&md->lock);
 		return -EINVAL;
@@ -820,6 +851,42 @@ int dm_resume(struct mapped_device *md)
 	return 0;
 }
 
+/*-----------------------------------------------------------------
+ * Event notification.
+ *---------------------------------------------------------------*/
+uint32_t dm_get_event_nr(struct mapped_device *md)
+{
+	uint32_t r;
+
+	down_read(&md->lock);
+	r = md->event_nr;
+	up_read(&md->lock);
+
+	return r;
+}
+
+int dm_add_wait_queue(struct mapped_device *md, wait_queue_t *wq,
+		      uint32_t event_nr)
+{
+	down_write(&md->lock);
+	if (event_nr != md->event_nr) {
+		up_write(&md->lock);
+		return 1;
+	}
+
+	add_wait_queue(&md->eventq, wq);
+	up_write(&md->lock);
+
+	return 0;
+}
+
+void dm_remove_wait_queue(struct mapped_device *md, wait_queue_t *wq)
+{
+	down_write(&md->lock);
+	remove_wait_queue(&md->eventq, wq);
+	up_write(&md->lock);
+}
+
 /*
  * The gendisk is only valid as long as you have a reference
  * count on 'md'.
@@ -835,7 +902,8 @@ struct dm_table *dm_get_table(struct mapped_device *md)
 
 	down_read(&md->lock);
 	t = md->map;
-	dm_table_get(t);
+	if (t)
+		dm_table_get(t);
 	up_read(&md->lock);
 
 	return t;
@@ -858,7 +926,7 @@ struct block_device_operations dm_blk_dops = {
 module_init(dm_init);
 module_exit(dm_exit);
 
-MODULE_PARM(major, "i");
+module_param(major, uint, 0);
 MODULE_PARM_DESC(major, "The major number of the device mapper");
 MODULE_DESCRIPTION(DM_NAME " driver");
 MODULE_AUTHOR("Joe Thornber <thornber@sistina.com>");

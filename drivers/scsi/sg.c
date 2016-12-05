@@ -61,7 +61,7 @@ static int sg_version_num = 30529;	/* 2 digits for each component */
 #include <asm/uaccess.h>
 #include <asm/system.h>
 
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include "scsi.h"
 #include "hosts.h"
 #include <scsi/scsi_driver.h>
@@ -70,7 +70,7 @@ static int sg_version_num = 30529;	/* 2 digits for each component */
 
 #include "scsi_logging.h"
 
-#ifdef CONFIG_PROC_FS
+#ifdef CONFIG_SCSI_PROC_FS
 #include <linux/proc_fs.h>
 static int sg_proc_init(void);
 static void sg_proc_cleanup(void);
@@ -83,7 +83,7 @@ static void sg_proc_cleanup(void);
 #define SG_ALLOW_DIO_DEF 0
 #define SG_ALLOW_DIO_CODE /* compile out by commenting this define */
 
-#define SG_MAX_DEVS_MASK ((1U << KDEV_MINOR_BITS) - 1)
+#define SG_MAX_DEVS_MASK (256 - 1)
 
 /*
  * Suppose you want to calculate the formula muldiv(x,m,d)=int(x * m / d)
@@ -222,7 +222,7 @@ static int sg_build_direct(Sg_request * srp, Sg_fd * sfp, int dxfer_len);
 // static void sg_unmap_and(Sg_scatter_hold * schp, int free_also);
 static Sg_device *sg_get_dev(int dev);
 static inline unsigned char *sg_scatg2virt(const struct scatterlist *sclp);
-#ifdef CONFIG_PROC_FS
+#ifdef CONFIG_SCSI_PROC_FS
 static int sg_last_dev(void);
 #endif
 
@@ -238,7 +238,7 @@ static int sg_nr_dev;
 static int
 sg_open(struct inode *inode, struct file *filp)
 {
-	int dev = minor(inode->i_rdev);
+	int dev = iminor(inode);
 	int flags = filp->f_flags;
 	Sg_device *sdp;
 	Sg_fd *sfp;
@@ -680,7 +680,7 @@ sg_common_write(Sg_fd * sfp, Sg_request * srp,
 		sg_finish_rem_req(srp);
 		return -ENODEV;
 	}
-	SRpnt = scsi_allocate_request(sdp->device);
+	SRpnt = scsi_allocate_request(sdp->device, GFP_ATOMIC);
 	if (SRpnt == NULL) {
 		SCSI_LOG_TIMEOUT(1, printk("sg_write: no mem\n"));
 		sg_finish_rem_req(srp);
@@ -877,6 +877,8 @@ sg_ioctl(struct inode *inode, struct file *filp,
 		result = get_user(val, (int *) arg);
 		if (result)
 			return result;
+		if (val < 0)
+			return -EINVAL;
 		if (val != sfp->reserve.bufflen) {
 			if (sg_res_in_use(sfp) || sfp->mmap_called)
 				return -EBUSY;
@@ -912,7 +914,8 @@ sg_ioctl(struct inode *inode, struct file *filp,
 	case SG_GET_VERSION_NUM:
 		return put_user(sg_version_num, (int *) arg);
 	case SG_GET_ACCESS_COUNT:
-		val = (sdp->device ? sdp->device->access_count : 0);
+		/* faked - we don't have a real access count anymore */
+		val = (sdp->device ? 1 : 0);
 		return put_user(val, (int *) arg);
 	case SG_GET_REQUEST_TABLE:
 		result = verify_area(VERIFY_WRITE, (void *) arg,
@@ -954,7 +957,8 @@ sg_ioctl(struct inode *inode, struct file *filp,
 		if (sdp->detached)
 			return -ENODEV;
 		if (filp->f_flags & O_NONBLOCK) {
-			if (sdp->device->host->in_recovery)
+			if (test_bit(SHOST_RECOVERY,
+				     &sdp->device->host->shost_state))
 				return -EBUSY;
 		} else if (!scsi_block_when_processing_errors(sdp->device))
 			return -EBUSY;
@@ -1513,20 +1517,22 @@ init_sg(void)
 	if (rc)
 		return rc;
 	rc = scsi_register_interface(&sg_interface);
-	if (rc)
+	if (rc) {
+		unregister_chrdev(SCSI_GENERIC_MAJOR, "sg");
 		return rc;
-#ifdef CONFIG_PROC_FS
+	}
+#ifdef CONFIG_SCSI_PROC_FS
 	sg_proc_init();
-#endif				/* CONFIG_PROC_FS */
+#endif				/* CONFIG_SCSI_PROC_FS */
 	return 0;
 }
 
 static void __exit
 exit_sg(void)
 {
-#ifdef CONFIG_PROC_FS
+#ifdef CONFIG_SCSI_PROC_FS
 	sg_proc_cleanup();
-#endif				/* CONFIG_PROC_FS */
+#endif				/* CONFIG_SCSI_PROC_FS */
 	scsi_unregister_interface(&sg_interface);
 	unregister_chrdev(SCSI_GENERIC_MAJOR, "sg");
 	if (sg_dev_arr != NULL) {
@@ -1622,7 +1628,7 @@ st_map_user_pages(struct scatterlist *sgl, const unsigned int max_pages,
 	unsigned int nr_pages;
 	struct page **pages;
 
-	nr_pages = ((uaddr & ~PAGE_MASK) + count - 1 + ~PAGE_MASK) >> PAGE_SHIFT;
+	nr_pages = ((uaddr & ~PAGE_MASK) + count + ~PAGE_MASK) >> PAGE_SHIFT;
 
 	/* User attempted Overflow! */
 	if ((uaddr + count) < uaddr)
@@ -1813,7 +1819,7 @@ sg_build_indirect(Sg_scatter_hold * schp, Sg_fd * sfp, int buff_size)
 					break;
 			}
 			sclp->page = virt_to_page(p);
-			sclp->offset = (unsigned long) p & ~PAGE_MASK;
+			sclp->offset = offset_in_page(p);
 			sclp->length = ret_sz;
 
 			SCSI_LOG_TIMEOUT(5, printk("sg_build_build: k=%d, a=0x%p, len=%d\n",
@@ -2224,7 +2230,7 @@ sg_get_rq_mark(Sg_fd * sfp, int pack_id)
 	return resp;
 }
 
-#ifdef CONFIG_PROC_FS
+#ifdef CONFIG_SCSI_PROC_FS
 static Sg_request *
 sg_get_nth_request(Sg_fd * sfp, int nth)
 {
@@ -2316,7 +2322,7 @@ sg_remove_request(Sg_fd * sfp, Sg_request * srp)
 	return res;
 }
 
-#ifdef CONFIG_PROC_FS
+#ifdef CONFIG_SCSI_PROC_FS
 static Sg_fd *
 sg_get_nth_sfp(Sg_device * sdp, int nth)
 {
@@ -2547,7 +2553,7 @@ sg_allow_access(unsigned char opcode, char dev_type)
 	return 0;
 }
 
-#ifdef CONFIG_PROC_FS
+#ifdef CONFIG_SCSI_PROC_FS
 static int
 sg_last_dev(void)
 {
@@ -2578,11 +2584,11 @@ sg_get_dev(int dev)
 	return sdp;
 }
 
-#ifdef CONFIG_PROC_FS
+#ifdef CONFIG_SCSI_PROC_FS
 
 static struct proc_dir_entry *sg_proc_sgp = NULL;
 
-static char sg_proc_sg_dirname[] = "sg";
+static char sg_proc_sg_dirname[] = "scsi/sg";
 
 static int sg_proc_adio_read(char *buffer, char **start, off_t offset,
 			     int size, int *eof, void *data);
@@ -2656,10 +2662,6 @@ static struct sg_proc_leaf sg_proc_leaf_arr[] = {
 				size : begin + len - offset;    \
     } while(0)
 
-/* this should _really_ be private to the scsi midlayer.  But
-   /proc/scsi/sg is an established name, so.. */
-extern struct proc_dir_entry *proc_scsi;
-
 static int
 sg_proc_init(void)
 {
@@ -2669,10 +2671,8 @@ sg_proc_init(void)
 	struct proc_dir_entry *pdep;
 	struct sg_proc_leaf * leaf;
 
-	if (!proc_scsi)
-		return 1;
 	sg_proc_sgp = create_proc_entry(sg_proc_sg_dirname,
-					S_IFDIR | S_IRUGO | S_IXUGO, proc_scsi);
+					S_IFDIR | S_IRUGO | S_IXUGO, NULL);
 	if (!sg_proc_sgp)
 		return 1;
 	for (k = 0; k < num_leaves; ++k) {
@@ -2695,11 +2695,11 @@ sg_proc_cleanup(void)
 	int num_leaves =
 	    sizeof (sg_proc_leaf_arr) / sizeof (sg_proc_leaf_arr[0]);
 
-	if ((!proc_scsi) || (!sg_proc_sgp))
+	if (!sg_proc_sgp)
 		return;
 	for (k = 0; k < num_leaves; ++k)
 		remove_proc_entry(sg_proc_leaf_arr[k].name, sg_proc_sgp);
-	remove_proc_entry(sg_proc_sg_dirname, proc_scsi);
+	remove_proc_entry(sg_proc_sg_dirname, NULL);
 }
 
 static int
@@ -2904,7 +2904,7 @@ sg_proc_dev_info(char *buffer, int *len, off_t * begin, off_t offset, int size)
 			PRINT_PROC("%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\n",
 				   scsidp->host->host_no, scsidp->channel,
 				   scsidp->id, scsidp->lun, (int) scsidp->type,
-				   (int) scsidp->access_count,
+				   1,
 				   (int) scsidp->queue_depth,
 				   (int) scsidp->device_busy,
 				   (int) scsidp->online);
@@ -2970,7 +2970,7 @@ sg_proc_version_info(char *buffer, int *len, off_t * begin,
 	PRINT_PROC("%d\t%s\n", sg_version_num, sg_version_str);
 	return 1;
 }
-#endif				/* CONFIG_PROC_FS */
+#endif				/* CONFIG_SCSI_PROC_FS */
 
 module_init(init_sg);
 module_exit(exit_sg);

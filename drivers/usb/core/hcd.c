@@ -483,7 +483,7 @@ static void rh_report_status (unsigned long ptr)
 {
 	struct urb	*urb;
 	struct usb_hcd	*hcd;
-	int		length;
+	int		length = 0;
 	unsigned long	flags;
 
 	urb = (struct urb *) ptr;
@@ -499,7 +499,9 @@ static void rh_report_status (unsigned long ptr)
 		return;
 	}
 
-	length = hcd->driver->hub_status_data (hcd, urb->transfer_buffer);
+	if (!HCD_IS_SUSPENDED (hcd->state))
+		length = hcd->driver->hub_status_data (
+					hcd, urb->transfer_buffer);
 
 	/* complete the status urb, or retrigger the timer */
 	spin_lock (&hcd_data_lock);
@@ -734,14 +736,20 @@ EXPORT_SYMBOL (usb_deregister_bus);
  * The USB host controller calls this function to register the root hub
  * properly with the USB subsystem.  It sets up the device properly in
  * the driverfs tree, and then calls usb_new_device() to register the
- * usb device.
+ * usb device.  It also assigns the root hub's USB address (always 1).
  */
 int usb_register_root_hub (struct usb_device *usb_dev, struct device *parent_dev)
 {
+	const int devnum = 1;
 	int retval;
 
 	sprintf (&usb_dev->dev.bus_id[0], "usb%d", usb_dev->bus->busnum);
 	usb_dev->state = USB_STATE_DEFAULT;
+
+	usb_dev->devnum = devnum;
+	usb_dev->bus->devnum_next = devnum + 1;
+	set_bit (devnum, usb_dev->bus->devmap.devicemap);
+
 	retval = usb_new_device (usb_dev, parent_dev);
 	if (retval)
 		dev_err (parent_dev, "can't register root hub for %s, %d\n",
@@ -1091,6 +1099,8 @@ done:
 static int hcd_get_frame_number (struct usb_device *udev)
 {
 	struct usb_hcd	*hcd = (struct usb_hcd *)udev->bus->hcpriv;
+	if (!HCD_IS_RUNNING (hcd->state))
+		return -ESHUTDOWN;
 	return hcd->driver->get_frame_number (hcd);
 }
 
@@ -1187,6 +1197,12 @@ static int hcd_unlink_urb (struct urb *urb)
 		goto done;
 	}
 
+	/* running ~= hc unlink handshake works (irq, timer, etc)
+	 * halted ~= no unlink handshake is needed
+	 * suspended, resuming == should never happen
+	 */
+	WARN_ON (!HCD_IS_RUNNING (hcd->state) && hcd->state != USB_STATE_HALT);
+
 	if (!urb->hcpriv) {
 		retval = -EINVAL;
 		goto done;
@@ -1200,6 +1216,17 @@ static int hcd_unlink_urb (struct urb *urb)
 	if (urb->status != -EINPROGRESS) {
 		retval = -EBUSY;
 		goto done;
+	}
+
+	/* PCI IRQ setup can easily be broken so that USB controllers
+	 * never get completion IRQs ... maybe even the ones we need to
+	 * finish unlinking the initial failed usb_set_address().
+	 */
+	if (!hcd->saw_irq) {
+		dev_warn (hcd->controller, "Unlink after no-IRQ?  "
+			"Different ACPI or APIC settings may help."
+			"\n");
+		hcd->saw_irq = 1;
 	}
 
 	/* maybe set up to block until the urb's completion fires.  the
@@ -1273,7 +1300,6 @@ bye:
  */
 static void hcd_endpoint_disable (struct usb_device *udev, int endpoint)
 {
-	unsigned long	flags;
 	struct hcd_dev	*dev;
 	struct usb_hcd	*hcd;
 	struct urb	*urb;
@@ -1281,6 +1307,10 @@ static void hcd_endpoint_disable (struct usb_device *udev, int endpoint)
 
 	dev = udev->hcpriv;
 	hcd = udev->bus->hcpriv;
+
+	WARN_ON (!HCD_IS_RUNNING (hcd->state) && hcd->state != USB_STATE_HALT);
+
+	local_irq_disable ();
 
 rescan:
 	/* (re)block new requests, as best we can */
@@ -1293,14 +1323,15 @@ rescan:
 	}
 
 	/* then kill any current requests */
-	spin_lock_irqsave (&hcd_data_lock, flags);
+	spin_lock (&hcd_data_lock);
 	list_for_each_entry (urb, &dev->urb_list, urb_list) {
 		int	tmp = urb->pipe;
 
 		/* ignore urbs for other endpoints */
 		if (usb_pipeendpoint (tmp) != epnum)
 			continue;
-		if ((tmp ^ endpoint) & USB_DIR_IN)
+		/* NOTE assumption that only ep0 is a control endpoint */
+		if (epnum != 0 && ((tmp ^ endpoint) & USB_DIR_IN))
 			continue;
 
 		/* another cpu may be in hcd, spinning on hcd_data_lock
@@ -1311,13 +1342,13 @@ rescan:
 		if (urb->status != -EINPROGRESS)
 			continue;
 		usb_get_urb (urb);
-		spin_unlock_irqrestore (&hcd_data_lock, flags);
+		spin_unlock (&hcd_data_lock);
 
-		spin_lock_irqsave (&urb->lock, flags);
+		spin_lock (&urb->lock);
 		tmp = urb->status;
 		if (tmp == -EINPROGRESS)
 			urb->status = -ESHUTDOWN;
-		spin_unlock_irqrestore (&urb->lock, flags);
+		spin_unlock (&urb->lock);
 
 		/* kick hcd unless it's already returning this */
 		if (tmp == -EINPROGRESS) {
@@ -1340,7 +1371,8 @@ rescan:
 		/* list contents may have changed */
 		goto rescan;
 	}
-	spin_unlock_irqrestore (&hcd_data_lock, flags);
+	spin_unlock (&hcd_data_lock);
+	local_irq_enable ();
 
 	/* synchronize with the hardware, so old configuration state
 	 * clears out immediately (and will be freed).
@@ -1474,6 +1506,7 @@ irqreturn_t usb_hcd_irq (int irq, void *__hcd, struct pt_regs * r)
 	if (unlikely (hcd->state == USB_STATE_HALT))	/* irq sharing? */
 		return IRQ_NONE;
 
+	hcd->saw_irq = 1;
 	hcd->driver->irq (hcd, r);
 	if (hcd->state != start && hcd->state == USB_STATE_HALT)
 		usb_hc_died (hcd);
@@ -1485,8 +1518,16 @@ EXPORT_SYMBOL (usb_hcd_irq);
 
 static void hcd_panic (void *_hcd)
 {
-	struct usb_hcd *hcd = _hcd;
-	hcd->driver->stop (hcd);
+	struct usb_hcd		*hcd = _hcd;
+	struct usb_device	*hub = hcd->self.root_hub;
+	unsigned		i;
+
+	/* hc's root hub is removed later removed in hcd->stop() */
+	hub->state = USB_STATE_NOTATTACHED;
+	for (i = 0; i < hub->maxchild; i++) {
+		if (hub->children [i])
+			usb_disconnect (&hub->children [i]);
+	}
 }
 
 /**
@@ -1499,29 +1540,9 @@ static void hcd_panic (void *_hcd)
  */
 void usb_hc_died (struct usb_hcd *hcd)
 {
-	struct list_head	*devlist, *urblist;
-	struct hcd_dev		*dev;
-	struct urb		*urb;
-	unsigned long		flags;
-	
-	/* flag every pending urb as done */
-	spin_lock_irqsave (&hcd_data_lock, flags);
-	list_for_each (devlist, &hcd->dev_list) {
-		dev = list_entry (devlist, struct hcd_dev, dev_list);
-		list_for_each (urblist, &dev->urb_list) {
-			urb = list_entry (urblist, struct urb, urb_list);
-			dev_dbg (hcd->controller, "shutdown %s urb %p pipe %x, current status %d\n",
-				hcd->self.bus_name, urb, urb->pipe, urb->status);
-			if (urb->status == -EINPROGRESS)
-				urb->status = -ESHUTDOWN;
-		}
-	}
-	urb = (struct urb *) hcd->rh_timer.data;
-	if (urb)
-		urb->status = -ESHUTDOWN;
-	spin_unlock_irqrestore (&hcd_data_lock, flags);
+	dev_err (hcd->controller, "HC died; cleaning up\n");
 
-	/* hcd->stop() needs a task context */
+	/* clean up old urbs and devices; needs a task context */
 	INIT_WORK (&hcd->work, hcd_panic, hcd);
 	(void) schedule_work (&hcd->work);
 }

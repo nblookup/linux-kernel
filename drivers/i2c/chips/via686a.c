@@ -494,27 +494,27 @@ static ssize_t show_temp(struct device *dev, char *buf, int nr) {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct via686a_data *data = i2c_get_clientdata(client);
 	via686a_update_client(client);
-	return sprintf(buf, "%ld\n", TEMP_FROM_REG10(data->temp[nr])*10 );
+	return sprintf(buf, "%ld\n", TEMP_FROM_REG10(data->temp[nr])*100 );
 }
 /* more like overshoot temperature */
 static ssize_t show_temp_max(struct device *dev, char *buf, int nr) {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct via686a_data *data = i2c_get_clientdata(client);
 	via686a_update_client(client);
-	return sprintf(buf, "%ld\n", TEMP_FROM_REG(data->temp_over[nr])*10);
+	return sprintf(buf, "%ld\n", TEMP_FROM_REG(data->temp_over[nr])*100);
 }
 /* more like hysteresis temperature */
 static ssize_t show_temp_min(struct device *dev, char *buf, int nr) {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct via686a_data *data = i2c_get_clientdata(client);
 	via686a_update_client(client);
-	return sprintf(buf, "%ld\n", TEMP_FROM_REG(data->temp_hyst[nr])*10);
+	return sprintf(buf, "%ld\n", TEMP_FROM_REG(data->temp_hyst[nr])*100);
 }
 static ssize_t set_temp_max(struct device *dev, const char *buf, 
 		size_t count, int nr) {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct via686a_data *data = i2c_get_clientdata(client);
-	int val = simple_strtol(buf, NULL, 10)/10;
+	int val = simple_strtol(buf, NULL, 10)/100;
 	data->temp_over[nr] = TEMP_TO_REG(val);
 	via686a_write_value(client, VIA686A_REG_TEMP_OVER(nr), data->temp_over[nr]);
 	return count;
@@ -523,7 +523,7 @@ static ssize_t set_temp_min(struct device *dev, const char *buf,
 		size_t count, int nr) {
 	struct i2c_client *client = to_i2c_client(dev);
 	struct via686a_data *data = i2c_get_clientdata(client);
-	int val = simple_strtol(buf, NULL, 10)/10;
+	int val = simple_strtol(buf, NULL, 10)/100;
 	data->temp_hyst[nr] = TEMP_TO_REG(val);
 	via686a_write_value(client, VIA686A_REG_TEMP_HYST(nr), data->temp_hyst[nr]);
 	return count;
@@ -671,7 +671,7 @@ static int via686a_detect(struct i2c_adapter *adapter, int address, int kind)
 	struct i2c_client *new_client;
 	struct via686a_data *data;
 	int err = 0;
-	const char client_name[] = "via686a chip";
+	const char client_name[] = "via686a";
 	u16 val;
 
 	/* Make sure we are probing the ISA bus!!  */
@@ -727,7 +727,7 @@ static int via686a_detect(struct i2c_adapter *adapter, int address, int kind)
 	new_client->dev.parent = &adapter->dev;
 
 	/* Fill in the remaining client fields and put into the global list */
-	snprintf(new_client->dev.name, DEVICE_NAME_SIZE, client_name);
+	snprintf(new_client->name, I2C_NAME_SIZE, client_name);
 
 	data->valid = 0;
 	init_MUTEX(&data->update_lock);
@@ -735,7 +735,10 @@ static int via686a_detect(struct i2c_adapter *adapter, int address, int kind)
 	if ((err = i2c_attach_client(new_client)))
 		goto ERROR3;
 	
-	/* register sysfs hooks */
+	/* Initialize the VIA686A chip */
+	via686a_init_client(new_client);
+
+	/* Register sysfs hooks */
 	device_create_file(&new_client->dev, &dev_attr_in_input0);
 	device_create_file(&new_client->dev, &dev_attr_in_input1);
 	device_create_file(&new_client->dev, &dev_attr_in_input2);
@@ -768,8 +771,6 @@ static int via686a_detect(struct i2c_adapter *adapter, int address, int kind)
 	device_create_file(&new_client->dev, &dev_attr_fan_div2);
 	device_create_file(&new_client->dev, &dev_attr_alarm);
 
-	/* Initialize the VIA686A chip */
-	via686a_init_client(new_client);
 	return 0;
 
       ERROR3:
@@ -914,7 +915,7 @@ static void via686a_update_client(struct i2c_client *client)
 	up(&data->update_lock);
 }
 
-static struct pci_device_id via686a_pci_ids[] __devinitdata = {
+static struct pci_device_id via686a_pci_ids[] = {
        {
 	       .vendor 		= PCI_VENDOR_ID_VIA, 
 	       .device 		= PCI_DEVICE_ID_VIA_82C686_4, 

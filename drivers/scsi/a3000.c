@@ -1,8 +1,7 @@
 #include <linux/types.h>
 #include <linux/mm.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/sched.h>
-#include <linux/version.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
@@ -36,9 +35,9 @@ static irqreturn_t a3000_intr (int irq, void *dummy, struct pt_regs *fp)
 		return IRQ_NONE;
 	if (status & ISTR_INTS)
 	{
-		spin_lock_irqsave(&a3000_host->host_lock, flags);
+		spin_lock_irqsave(a3000_host->host_lock, flags);
 		wd33c93_intr (a3000_host);
-		spin_unlock_irqrestore(&a3000_host->host_lock, flags);
+		spin_unlock_irqrestore(a3000_host->host_lock, flags);
 		return IRQ_HANDLED;
 	}
 	printk("Non-serviced A3000 SCSI-interrupt? ISTR = %02x\n", status);

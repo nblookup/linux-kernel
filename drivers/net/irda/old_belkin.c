@@ -32,8 +32,6 @@
 #include <linux/delay.h>
 #include <linux/tty.h>
 #include <linux/init.h>
-#include <linux/net.h>
-#include <linux/irda.h>
 
 #include <net/irda/irda.h>
 #include <net/irda/irda_device.h>
@@ -76,12 +74,12 @@ static int  old_belkin_reset(struct irda_task *task);
 /* static __u32 baud_rates[] = { 9600 }; */
 
 static struct dongle_reg dongle = {
-	Q_NULL,
-	IRDA_OLD_BELKIN_DONGLE,
-	old_belkin_open,
-	old_belkin_close,
-	old_belkin_reset,
-	old_belkin_change_speed,
+	.type = IRDA_OLD_BELKIN_DONGLE,
+	.open = old_belkin_open,
+	.close = old_belkin_close,
+	.reset = old_belkin_reset,
+	.change_speed = old_belkin_change_speed,
+	.owner = THIS_MODULE,
 };
 
 int __init old_belkin_init(void)
@@ -100,16 +98,12 @@ static void old_belkin_open(dongle_t *self, struct qos_info *qos)
 	qos->baud_rate.bits &= IR_9600;
 	/* Needs at least 10 ms (totally wild guess, can do probably better) */
 	qos->min_turn_time.bits = 0x01;
-
-	MOD_INC_USE_COUNT;
 }
 
 static void old_belkin_close(dongle_t *self)
 {
 	/* Power off dongle */
 	self->set_dtr_rts(self->dev, FALSE, FALSE);
-
-	MOD_DEC_USE_COUNT;
 }
 
 /*
@@ -151,7 +145,7 @@ static int old_belkin_reset(struct irda_task *task)
 MODULE_AUTHOR("Jean Tourrilhes <jt@hpl.hp.com>");
 MODULE_DESCRIPTION("Belkin (old) SmartBeam dongle driver");	
 MODULE_LICENSE("GPL");
-
+MODULE_ALIAS("irda-dongle-7"); /* IRDA_OLD_BELKIN_DONGLE */
 
 /*
  * Function init_module (void)

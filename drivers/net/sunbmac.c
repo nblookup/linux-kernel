@@ -1,7 +1,7 @@
 /* $Id: sunbmac.c,v 1.30 2002/01/15 06:48:55 davem Exp $
  * sunbmac.c: Driver for Sparc BigMAC 100baseT ethernet adapters.
  *
- * Copyright (C) 1997, 1998, 1999 David S. Miller (davem@redhat.com)
+ * Copyright (C) 1997, 1998, 1999, 2003 David S. Miller (davem@redhat.com)
  */
 
 #include <linux/module.h>
@@ -18,6 +18,7 @@
 #include <linux/init.h>
 #include <linux/crc32.h>
 #include <linux/errno.h>
+#include <linux/ethtool.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
@@ -37,7 +38,7 @@
 #include "sunbmac.h"
 
 static char version[] __initdata =
-        "sunbmac.c:v1.9 11/Sep/99 David S. Miller (davem@redhat.com)\n";
+        "sunbmac.c:v2.0 24/Nov/03 David S. Miller (davem@redhat.com)\n";
 
 #undef DEBUG_PROBE
 #undef DEBUG_TX
@@ -1035,6 +1036,33 @@ static void bigmac_set_multicast(struct net_device *dev)
 	sbus_writel(tmp, bregs + BMAC_RXCFG);
 }
 
+/* Ethtool support... */
+static void bigmac_get_drvinfo(struct net_device *dev, struct ethtool_drvinfo *info)
+{
+	struct bigmac *bp = dev->priv;
+
+	strcpy(info->driver, "sunbmac");
+	strcpy(info->version, "2.0");
+	sprintf(info->bus_info, "SBUS:%d",
+		bp->qec_sdev->slot);
+}
+
+static u32 bigmac_get_link(struct net_device *dev)
+{
+	struct bigmac *bp = dev->priv;
+
+	spin_lock_irq(&bp->lock);
+	bp->sw_bmsr = bigmac_tcvr_read(bp, bp->tregs, BIGMAC_BMSR);
+	spin_unlock_irq(&bp->lock);
+
+	return (bp->sw_bmsr & BMSR_LSTATUS);
+}
+
+static struct ethtool_ops bigmac_ethtool_ops = {
+	.get_drvinfo		= bigmac_get_drvinfo,
+	.get_link		= bigmac_get_link,
+};
+
 static int __init bigmac_ether_init(struct sbus_dev *qec_sdev)
 {
 	struct net_device *dev;
@@ -1044,7 +1072,7 @@ static int __init bigmac_ether_init(struct sbus_dev *qec_sdev)
 	int i;
 
 	/* Get a new device struct for this interface. */
-	dev = init_etherdev(NULL, sizeof(struct bigmac));
+	dev = alloc_etherdev(sizeof(struct bigmac));
 	if (!dev)
 		return -ENOMEM;
 	SET_MODULE_OWNER(dev);
@@ -1052,13 +1080,9 @@ static int __init bigmac_ether_init(struct sbus_dev *qec_sdev)
 	if (version_printed++ == 0)
 		printk(KERN_INFO "%s", version);
 
-	/* Report what we have found to the user. */
-	printk(KERN_INFO "%s: BigMAC 100baseT Ethernet ", dev->name);
 	dev->base_addr = (long) qec_sdev;
 	for (i = 0; i < 6; i++)
-		printk("%2.2x%c", dev->dev_addr[i] = idprom->id_ethaddr[i],
-		       i == 5 ? ' ' : ':');
-	printk("\n");
+		dev->dev_addr[i] = idprom->id_ethaddr[i];
 
 	/* Setup softc, with backpointers to QEC and BigMAC SBUS device structs. */
 	bp = dev->priv;
@@ -1169,6 +1193,7 @@ static int __init bigmac_ether_init(struct sbus_dev *qec_sdev)
 	dev->open = &bigmac_open;
 	dev->stop = &bigmac_close;
 	dev->hard_start_xmit = &bigmac_start_xmit;
+	dev->ethtool_ops = &bigmac_ethtool_ops;
 
 	/* Set links to BigMAC statistic and multi-cast loading code. */
 	dev->get_stats = &bigmac_get_stats;
@@ -1181,11 +1206,22 @@ static int __init bigmac_ether_init(struct sbus_dev *qec_sdev)
 	dev->irq = bp->bigmac_sdev->irqs[0];
 	dev->dma = 0;
 
+	if (register_netdev(dev)) {
+		printk(KERN_ERR "BIGMAC: Cannot register device.\n");
+		goto fail_and_cleanup;
+	}
+
 	/* Put us into the list of instances attached for later driver
 	 * exit.
 	 */
 	bp->next_module = root_bigmac_dev;
 	root_bigmac_dev = bp;
+
+	printk(KERN_INFO "%s: BigMAC 100baseT Ethernet ", dev->name);
+	for (i = 0; i < 6; i++)
+		printk("%2.2x%c", dev->dev_addr[i],
+		       i == 5 ? ' ' : ':');
+	printk("\n");
 
 	return 0;
 
@@ -1207,9 +1243,8 @@ fail_and_cleanup:
 				     bp->bmac_block,
 				     bp->bblock_dvma);
 
-	unregister_netdev(dev);
 	/* This also frees the co-located 'dev->priv' */
-	kfree(dev);
+	free_netdev(dev);
 	return -ENODEV;
 }
 
@@ -1275,7 +1310,7 @@ static void __exit bigmac_cleanup(void)
 				     bp->bblock_dvma);
 
 		unregister_netdev(bp->dev);
-		kfree(bp->dev);
+		free_netdev(bp->dev);
 		root_bigmac_dev = bp_nxt;
 	}
 }

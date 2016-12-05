@@ -105,7 +105,7 @@
 #include <asm/io.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include "scsi.h"
 #include "hosts.h"
 #include "g_NCR5380.h"
@@ -386,14 +386,21 @@ int __init generic_NCR5380_detect(Scsi_Host_Template * tpnt)
 
 			if (overrides[current_override].NCR5380_map_name != PORT_AUTO)
 				for (i = 0; ports[i]; i++) {
+					if (!request_region(ports[i],  16, "ncr53c80"))
+						continue;
 					if (overrides[current_override].NCR5380_map_name == ports[i])
 						break;
+					release_region(ports[i], 16);
 			} else
 				for (i = 0; ports[i]; i++) {
-					if ((!check_region(ports[i], 16)) && (inb(ports[i]) == 0xff))
+					if (!request_region(ports[i],  16, "ncr53c80"))
+						continue;
+					if (inb(ports[i]) == 0xff)
 						break;
+					release_region(ports[i], 16);
 				}
 			if (ports[i]) {
+				/* At this point we have our region reserved */
 				outb(0x59, 0x779);
 				outb(0xb9, 0x379);
 				outb(0xc5, 0x379);
@@ -408,12 +415,15 @@ int __init generic_NCR5380_detect(Scsi_Host_Template * tpnt)
 			} else
 				continue;
 		}
-
-		request_region(overrides[current_override].NCR5380_map_name, NCR5380_region_size, "ncr5380");
+		else
+		{
+			/* Not a 53C400A style setup - just grab */
+			if(!(request_region(overrides[current_override].NCR5380_map_name, NCR5380_region_size, "ncr5380")))
+				continue;
+		}
 #else
-		if (check_mem_region(overrides[current_override].NCR5380_map_name, NCR5380_region_size))
+		if(!request_mem_region(overrides[current_override].NCR5380_map_name, NCR5380_region_size, "ncr5380"))
 			continue;
-		request_mem_region(overrides[current_override].NCR5380_map_name, NCR5380_region_size, "ncr5380");
 #endif
 		instance = scsi_register(tpnt, sizeof(struct NCR5380_hostdata));
 		if (instance == NULL) {
@@ -517,8 +527,9 @@ int generic_NCR5380_release_resources(struct Scsi_Host *instance)
  *	Locks: none
  */
 
-int generic_NCR5380_biosparam(struct scsi_device *sdev,
-		struct block_device *bdev, sector_t capacity, int *ip)
+static int
+generic_NCR5380_biosparam(struct scsi_device *sdev, struct block_device *bdev,
+			  sector_t capacity, int *ip)
 {
 	ip[0] = 64;
 	ip[1] = 32;
@@ -770,7 +781,7 @@ static int sprint_Scsi_Cmnd(char *buffer, int len, Scsi_Cmnd * cmd)
  *	Locks: global cli/lock for queue walk
  */
  
-int generic_NCR5380_proc_info(struct Scsi_Host *scsi_ptr, char *buffer, char **start, off_t offset, int length, int inout)
+static int generic_NCR5380_proc_info(struct Scsi_Host *scsi_ptr, char *buffer, char **start, off_t offset, int length, int inout)
 {
 	int len = 0;
 	NCR5380_local_declare();
@@ -815,7 +826,7 @@ int generic_NCR5380_proc_info(struct Scsi_Host *scsi_ptr, char *buffer, char **s
 		PRINTP("  %d pending writes" ANDP hostdata->pendingw);
 	if (hostdata->pendingr || hostdata->pendingw)
 		PRINTP("\n");
-	list_for_each_entry (dev, &scsi_ptr->my_devices, siblings) {
+	shost_for_each_device(dev, scsi_ptr) {
 		unsigned long br = hostdata->bytes_read[dev->id];
 		unsigned long bw = hostdata->bytes_write[dev->id];
 		long tr = hostdata->time_read[dev->id] / HZ;

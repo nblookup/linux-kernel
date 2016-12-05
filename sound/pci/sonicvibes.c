@@ -254,12 +254,12 @@ struct _snd_sonicvibes {
 	snd_kcontrol_t *master_mute;
 	snd_kcontrol_t *master_volume;
 
-#if defined(CONFIG_GAMEPORT) || defined(CONFIG_GAMEPORT_MODULE)
+#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
 	struct gameport gameport;
 #endif
 };
 
-static struct pci_device_id snd_sonic_ids[] __devinitdata = {
+static struct pci_device_id snd_sonic_ids[] = {
 	{ 0x5333, 0xca00, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0, },
         { 0, }
 };
@@ -1189,7 +1189,7 @@ SONICVIBES_SINGLE("Joystick Speed", 0, SV_IREG_GAME_PORT, 1, 15, 0);
 
 static int snd_sonicvibes_free(sonicvibes_t *sonic)
 {
-#if defined(CONFIG_GAMEPORT) || defined(CONFIG_GAMEPORT_MODULE)
+#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
 	if (sonic->gameport.io)
 		gameport_unregister_port(&sonic->gameport);
 #endif
@@ -1264,32 +1264,32 @@ static int __devinit snd_sonicvibes_create(snd_card_t * card,
 	sonic->irq = -1;
 	sonic->sb_port = pci_resource_start(pci, 0);
 	if ((sonic->res_sb_port = request_region(sonic->sb_port, 0x10, "S3 SonicVibes SB")) == NULL) {
-		snd_sonicvibes_free(sonic);
 		snd_printk("unable to grab SB port at 0x%lx-0x%lx\n", sonic->sb_port, sonic->sb_port + 0x10 - 1);
+		snd_sonicvibes_free(sonic);
 		return -EBUSY;
 	}
 	sonic->enh_port = pci_resource_start(pci, 1);
 	if ((sonic->res_enh_port = request_region(sonic->enh_port, 0x10, "S3 SonicVibes Enhanced")) == NULL) {
-		snd_sonicvibes_free(sonic);
 		snd_printk("unable to grab PCM port at 0x%lx-0x%lx\n", sonic->enh_port, sonic->enh_port + 0x10 - 1);
+		snd_sonicvibes_free(sonic);
 		return -EBUSY;
 	}
 	sonic->synth_port = pci_resource_start(pci, 2);
 	if ((sonic->res_synth_port = request_region(sonic->synth_port, 4, "S3 SonicVibes Synth")) == NULL) {
-		snd_sonicvibes_free(sonic);
 		snd_printk("unable to grab synth port at 0x%lx-0x%lx\n", sonic->synth_port, sonic->synth_port + 4 - 1);
+		snd_sonicvibes_free(sonic);
 		return -EBUSY;
 	}
 	sonic->midi_port = pci_resource_start(pci, 3);
 	if ((sonic->res_midi_port = request_region(sonic->midi_port, 4, "S3 SonicVibes Midi")) == NULL) {
-		snd_sonicvibes_free(sonic);
 		snd_printk("unable to grab MIDI port at 0x%lx-0x%lx\n", sonic->midi_port, sonic->midi_port + 4 - 1);
+		snd_sonicvibes_free(sonic);
 		return -EBUSY;
 	}
 	sonic->game_port = pci_resource_start(pci, 4);
 	if (request_irq(pci->irq, snd_sonicvibes_interrupt, SA_INTERRUPT|SA_SHIRQ, "S3 SonicVibes", (void *)sonic)) {
-		snd_magic_kfree(sonic);
 		snd_printk("unable to grab IRQ %d\n", pci->irq);
+		snd_sonicvibes_free(sonic);
 		return -EBUSY;
 	}
 	sonic->irq = pci->irq;
@@ -1493,7 +1493,7 @@ static int __devinit snd_sonic_probe(struct pci_dev *pci,
 		snd_card_free(card);
 		return err;
 	}
-#if defined(CONFIG_GAMEPORT) || defined(CONFIG_GAMEPORT_MODULE)
+#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
 	sonic->gameport.io = sonic->game_port;
 	gameport_register_port(&sonic->gameport);
 #endif

@@ -3,7 +3,7 @@
  *
  *  $Id: hashtable.S,v 1.6 1999/10/08 01:56:15 paulus Exp $
  *
- *  PowerPC version 
+ *  PowerPC version
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
  *  Rewritten by Cort Dougan (cort@cs.nmt.edu) for PReP
  *    Copyright (C) 1996 Cort Dougan <cort@cs.nmt.edu>
@@ -20,7 +20,7 @@
  *  modify it under the terms of the GNU General Public License
  *  as published by the Free Software Foundation; either version
  *  2 of the License, or (at your option) any later version.
- *	
+ *
  */
 
 #include <linux/config.h>
@@ -49,8 +49,7 @@
  * Uses r0, r3 - r8, ctr, lr.
  */
 	.text
-	.globl	hash_page
-hash_page:
+_GLOBAL(hash_page)
 #ifdef CONFIG_PPC64BRIDGE
 	mfmsr	r0
 	clrldi	r0,r0,1		/* make sure it's in 32-bit mode */
@@ -150,7 +149,7 @@ retry:
 	lwz	r7,GPR7(r11)
 	lwz	r8,GPR8(r11)
 	b	fast_exception_return
-	
+
 #ifdef CONFIG_SMP
 hash_page_out:
 	eieio
@@ -337,8 +336,7 @@ _GLOBAL(create_hpte)
 	SET_V(r5)			/* set V (valid) bit */
 
 	/* Get the address of the primary PTE group in the hash table (r3) */
-	.globl	hash_page_patch_A
-hash_page_patch_A:
+_GLOBAL(hash_page_patch_A)
 	addis	r0,r7,Hash_base@h	/* base address of hash table */
 	rlwimi	r0,r3,LG_PTEG_SIZE,HASH_LEFT,HASH_RIGHT    /* VSID -> hash */
 	rlwinm	r3,r4,20+LG_PTEG_SIZE,HASH_LEFT,HASH_RIGHT /* PI -> hash */
@@ -368,8 +366,7 @@ hash_page_patch_A:
 
 	/* Search the secondary PTEG for a matching PTE */
 	ori	r5,r5,PTE_H		/* set H (secondary hash) bit */
-	.globl	hash_page_patch_B
-hash_page_patch_B:
+_GLOBAL(hash_page_patch_B)
 	xoris	r4,r3,Hash_msk>>16	/* compute secondary hash */
 	xori	r4,r4,(-PTEG_SIZE & 0xffff)
 	addi	r4,r4,-PTE_SIZE
@@ -396,8 +393,7 @@ hash_page_patch_B:
 
 	/* Search the secondary PTEG for an empty slot */
 	ori	r5,r5,PTE_H		/* set H (secondary hash) bit */
-	.globl	hash_page_patch_C
-hash_page_patch_C:
+_GLOBAL(hash_page_patch_C)
 	xoris	r4,r3,Hash_msk>>16	/* compute secondary hash */
 	xori	r4,r4,(-PTEG_SIZE & 0xffff)
 	addi	r4,r4,-PTE_SIZE
@@ -421,6 +417,21 @@ hash_page_patch_C:
 	lwz	r6,next_slot@l(r4)
 	addi	r6,r6,PTE_SIZE
 	andi.	r6,r6,7*PTE_SIZE
+#ifdef CONFIG_POWER4
+	/*
+	 * Since we don't have BATs on POWER4, we rely on always having
+	 * PTEs in the hash table to map the hash table and the code
+	 * that manipulates it in virtual mode, namely flush_hash_page and
+	 * flush_hash_segments.  Otherwise we can get a DSI inside those
+	 * routines which leads to a deadlock on the hash_table_lock on
+	 * SMP machines.  We avoid this by never overwriting the first
+	 * PTE of each PTEG if it is already valid.
+	 *	-- paulus.
+	 */
+	bne	102f
+	li	r6,PTE_SIZE
+102:
+#endif /* CONFIG_POWER4 */
 	stw	r6,next_slot@l(r4)
 	add	r4,r3,r6
 
@@ -562,8 +573,7 @@ _GLOBAL(flush_hash_pages)
 	bne-	33b
 
 	/* Get the address of the primary PTE group in the hash table (r3) */
-	.globl	flush_hash_patch_A
-flush_hash_patch_A:
+_GLOBAL(flush_hash_patch_A)
 	addis	r8,r7,Hash_base@h	/* base address of hash table */
 	rlwimi	r8,r3,LG_PTEG_SIZE,HASH_LEFT,HASH_RIGHT    /* VSID -> hash */
 	rlwinm	r0,r4,20+LG_PTEG_SIZE,HASH_LEFT,HASH_RIGHT /* PI -> hash */
@@ -581,8 +591,7 @@ flush_hash_patch_A:
 	/* Search the secondary PTEG for a matching PTE */
 	ori	r11,r11,PTE_H		/* set H (secondary hash) bit */
 	li	r0,8			/* PTEs/group */
-	.globl	flush_hash_patch_B
-flush_hash_patch_B:
+_GLOBAL(flush_hash_patch_B)
 	xoris	r12,r8,Hash_msk>>16	/* compute secondary hash */
 	xori	r12,r12,(-PTEG_SIZE & 0xffff)
 	addi	r12,r12,-PTE_SIZE

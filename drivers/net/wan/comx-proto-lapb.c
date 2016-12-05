@@ -24,7 +24,6 @@
 #define VERSION "0.80"
 
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
@@ -232,7 +231,10 @@ static int comxlapb_write_proc(struct file *file, const char *buffer,
 		return -ENOMEM;
 	}
 
-	copy_from_user(page, buffer, count);
+	if (copy_from_user(page, buffer, count)) {
+		free_page((unsigned long)page);
+		return -EFAULT;
+	}
 	if (*(page + count - 1) == '\n') {
 		*(page + count - 1) = 0;
 	}
@@ -370,6 +372,10 @@ static int comxlapb_data_indication(void *token, struct sk_buff *skb)
 
 	if (ch->dev->type == ARPHRD_X25) {
 		skb_push(skb, 1);
+
+		if (skb_cow(skb, 1))
+			return NET_RX_DROP;
+
 		skb->data[0] = 0;	// indicate data for X25
 		skb->protocol = htons(ETH_P_X25);
 	} else {

@@ -134,6 +134,7 @@ static void dvb_bend_frequency (struct dvb_frontend_data *this_fe, int recursive
 {
 	struct list_head *entry;
 	int stepsize = this_fe->info->frequency_stepsize;
+	int this_fe_adap_num = this_fe->frontend.i2c->adapter->num;
 	int frequency;
 
 	if (!stepsize || recursive > 10) {
@@ -156,6 +157,9 @@ static void dvb_bend_frequency (struct dvb_frontend_data *this_fe, int recursive
 		int f;
 
 		fe = list_entry (entry, struct dvb_frontend_data, list_head);
+
+		if (fe->frontend.i2c->adapter->num != this_fe_adap_num)
+			continue;
 
 		f = fe->parameters.frequency;
 		f += fe->lnb_drift;
@@ -263,8 +267,14 @@ static int dvb_frontend_get_event (struct dvb_frontend_data *fe,
                 if (flags & O_NONBLOCK)
                         return -EWOULDBLOCK;
 
+		up(&fe->sem);
+
                 ret = wait_event_interruptible (events->wait_queue,
                                                 events->eventw != events->eventr);
+
+        	if (down_interruptible (&fe->sem))
+			return -ERESTARTSYS;
+
                 if (ret < 0)
                         return ret;
         }
@@ -860,6 +870,7 @@ dvb_register_frontend (int (*ioctl) (struct dvb_frontend *frontend,
 	static const struct dvb_device dvbdev_template = {
 		.users = ~0,
 		.writers = 1,
+		.readers = (~0)-1,
 		.fops = &dvb_frontend_fops,
 		.kernel_ioctl = dvb_frontend_ioctl
 	};

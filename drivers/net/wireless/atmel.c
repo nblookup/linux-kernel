@@ -37,7 +37,6 @@
 ******************************************************************************/
 
 #include <linux/config.h>
-#include <linux/version.h>
 #include <linux/init.h>
 
 #include <linux/kernel.h>
@@ -64,13 +63,11 @@
 #include <linux/proc_fs.h>
 #include <linux/device.h>
 #include <linux/moduleparam.h>
-#ifdef CONFIG_FW_LOADER
 #include <linux/firmware.h>
-#endif
 #include "ieee802_11.h"
 
 #define DRIVER_MAJOR 0
-#define DRIVER_MINOR 7
+#define DRIVER_MINOR 8
 
 MODULE_AUTHOR("Simon Kelley");
 MODULE_DESCRIPTION("Support for Atmel at76c50x 802.11 wireless ethernet cards.");
@@ -523,7 +520,6 @@ struct atmel_private {
 	int operating_mode, power_mode;
 	time_t last_qual;
 	int beacons_this_sec;
-	u64 last_beacon_timestamp;
 	int channel;
 	int reg_domain;
 	int tx_rate;
@@ -561,6 +557,7 @@ struct atmel_private {
 	int SSID_size, new_SSID_size;
 	u8 CurrentBSSID[6], BSSID[6];
 	u8 SSID[MAX_SSID_LENGTH], new_SSID[MAX_SSID_LENGTH];
+	u64 last_beacon_timestamp;
 	u8 rx_buf[MAX_WIRELESS_BODY];
 	
 };
@@ -1470,7 +1467,7 @@ void stop_atmel_card(struct net_device *dev, int freeres)
 		/* PCMCIA frees this stuff, so only for PCI */
 	        release_region(dev->base_addr, 64);
         }
-	kfree(dev);
+	free_netdev(dev);
 }
 
 EXPORT_SYMBOL(stop_atmel_card);
@@ -2057,12 +2054,13 @@ static int atmel_get_range(struct net_device *dev,
 	range->num_channels = 0;
 	for (j = 0; j < sizeof(channel_table)/sizeof(channel_table[0]); j++)
 		if (priv->reg_domain == channel_table[j].reg_domain) {
-			range->num_channels = channel_table[j].max - channel_table[j].min + 1; 
+			range->num_channels = channel_table[j].max - channel_table[j].min + 1;
+			break;
 		}
 	if (range->num_channels != 0) {
 		for(k = 0, i = channel_table[j].min; i <= channel_table[j].max; i++) {
-			range->freq[k].i = i + 1; /* List index */
-			range->freq[k].m = frequency_list[i] * 100000;
+			range->freq[k].i = i; /* List index */
+			range->freq[k].m = frequency_list[i-1] * 100000;
 			range->freq[k++].e = 1;	/* Values in table in MHz -> * 10^5 * 10 */
 		}
 		range->num_frequency = k;
@@ -3337,13 +3335,10 @@ int reset_atmel_card(struct net_device *dev)
 	
 	if (priv->card_type == CARD_TYPE_EEPROM) {
 		/* copy in firmware if needed */
-#ifdef CONFIG_FW_LOADER
 		const struct firmware *fw_entry = NULL;
-#endif
 		unsigned char *fw;
 		int len = priv->firmware_length;
 		if (!(fw = priv->firmware)) { 
-#ifdef CONFIG_FW_LOADER
 			if (strlen(priv->firmware_id) == 0) {
 				printk(KERN_INFO
 				       "%s: card type is unknown: assuming at76c502 firmware is OK.\n",
@@ -3361,11 +3356,6 @@ int reset_atmel_card(struct net_device *dev)
 			}
 			fw = fw_entry->data;
 			len = fw_entry->size;
-#else
-			printk(KERN_ALERT 
-			       "%s: no firmware supplied, cannot start.\n", dev->name);
-			return 0;
-#endif
 		}
 		
 		if (len <= 0x6000) {
@@ -3381,10 +3371,8 @@ int reset_atmel_card(struct net_device *dev)
 			atmel_copy_to_card(priv->dev, 0x8000, &fw[0x6000], len - 0x6000);
 		}
 
-#ifdef CONFIG_FW_LOADER
 		if (fw_entry)
 			release_firmware(fw_entry);
-#endif
 	}
 
 	if (!atmel_wakeup_firmware(priv))

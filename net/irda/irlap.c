@@ -37,6 +37,7 @@
 #include <linux/proc_fs.h>
 #include <linux/init.h>
 #include <linux/random.h>
+#include <linux/seq_file.h>
 
 #include <net/irda/irda.h>
 #include <net/irda/irda_device.h>
@@ -48,7 +49,7 @@
 #include <net/irda/timer.h>
 #include <net/irda/qos.h>
 
-hashbin_t *irlap = NULL;
+static hashbin_t *irlap = NULL;
 int sysctl_slot_timeout = SLOT_TIMEOUT * 1000 / HZ;
 
 /* This is the delay of missed pf period before generating an event
@@ -72,13 +73,15 @@ static char *lap_reasons[] = {
 };
 #endif	/* CONFIG_IRDA_DEBUG */
 
-#ifdef CONFIG_PROC_FS
-int irlap_proc_read(char *, char **, off_t, int);
-
-#endif /* CONFIG_PROC_FS */
-
 int __init irlap_init(void)
 {
+	/* Check if the compiler did its job properly.
+	 * May happen on some ARM configuration, check with Russell King. */
+	ASSERT(sizeof(struct xid_frame) == 14, ;);
+	ASSERT(sizeof(struct test_frame) == 10, ;);
+	ASSERT(sizeof(struct ua_frame) == 10, ;);
+	ASSERT(sizeof(struct snrm_frame) == 11, ;);
+
 	/* Allocate master array */
 	irlap = hashbin_new(HB_LOCK);
 	if (irlap == NULL) {
@@ -103,7 +106,7 @@ void __exit irlap_cleanup(void)
  *
  */
 struct irlap_cb *irlap_open(struct net_device *dev, struct qos_info *qos,
-			    char *	hw_name)
+			    const char *hw_name)
 {
 	struct irlap_cb *self;
 
@@ -214,8 +217,11 @@ void irlap_close(struct irlap_cb *self)
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == LAP_MAGIC, return;);
 
-	irlap_disconnect_indication(self, LAP_DISC_INDICATION);
+	/* We used to send a LAP_DISC_INDICATION here, but this was
+	 * racy. This has been move within irlmp_unregister_link()
+	 * itself. Jean II */
 
+	/* Kill the LAP and all LSAPs on top of it */
 	irlmp_unregister_link(self->saddr);
 	self->notify.instance = NULL;
 
@@ -530,7 +536,13 @@ void irlap_discovery_request(struct irlap_cb *self, discovery_t *discovery)
 	}
 
 	/* All operations will occur at predictable time, no need to lock */
-	self->discovery_log= hashbin_new(HB_NOLOCK);
+	self->discovery_log = hashbin_new(HB_NOLOCK);
+
+	if (self->discovery_log == NULL) {
+		WARNING("%s(), Unable to allocate discovery log!\n",
+			__FUNCTION__);
+		return;
+	}
 
 	info.S = discovery->nslots; /* Number of slots */
 	info.s = 0; /* Current slot */
@@ -1080,100 +1092,161 @@ void irlap_apply_connection_parameters(struct irlap_cb *self, int now)
 }
 
 #ifdef CONFIG_PROC_FS
-/*
- * Function irlap_proc_read (buf, start, offset, len, unused)
- *
- *    Give some info to the /proc file system
- *
- */
-int irlap_proc_read(char *buf, char **start, off_t offset, int len)
+struct irlap_iter_state {
+	int id;
+};
+
+static void *irlap_seq_start(struct seq_file *seq, loff_t *pos)
 {
+	struct irlap_iter_state *iter = seq->private;
 	struct irlap_cb *self;
-	unsigned long flags;
-	int i = 0;
 
-	spin_lock_irqsave(&irlap->hb_spinlock, flags);
+	/* Protect our access to the tsap list */
+	spin_lock_irq(&irlap->hb_spinlock);
+	iter->id = 0;
 
-	len = 0;
-
-	self = (struct irlap_cb *) hashbin_get_first(irlap);
-	while (self != NULL) {
-		ASSERT(self != NULL, break;);
-		ASSERT(self->magic == LAP_MAGIC, break;);
-
-		len += sprintf(buf+len, "irlap%d ", i++);
-		len += sprintf(buf+len, "state: %s\n",
-			       irlap_state[self->state]);
-
-		len += sprintf(buf+len, "  device name: %s, ",
-			       (self->netdev) ? self->netdev->name : "bug");
-		len += sprintf(buf+len, "hardware name: %s\n", self->hw_name);
-
-		len += sprintf(buf+len, "  caddr: %#02x, ", self->caddr);
-		len += sprintf(buf+len, "saddr: %#08x, ", self->saddr);
-		len += sprintf(buf+len, "daddr: %#08x\n", self->daddr);
-
-		len += sprintf(buf+len, "  win size: %d, ",
-			       self->window_size);
-		len += sprintf(buf+len, "win: %d, ", self->window);
-#ifdef CONFIG_IRDA_DYNAMIC_WINDOW
-		len += sprintf(buf+len, "line capacity: %d, ",
-			       self->line_capacity);
-		len += sprintf(buf+len, "bytes left: %d\n", self->bytes_left);
-#endif /* CONFIG_IRDA_DYNAMIC_WINDOW */
-		len += sprintf(buf+len, "  tx queue len: %d ",
-			       skb_queue_len(&self->txq));
-		len += sprintf(buf+len, "win queue len: %d ",
-			       skb_queue_len(&self->wx_list));
-		len += sprintf(buf+len, "rbusy: %s", self->remote_busy ?
-			       "TRUE" : "FALSE");
-		len += sprintf(buf+len, " mbusy: %s\n", self->media_busy ?
-			       "TRUE" : "FALSE");
-
-		len += sprintf(buf+len, "  retrans: %d ", self->retry_count);
-		len += sprintf(buf+len, "vs: %d ", self->vs);
-		len += sprintf(buf+len, "vr: %d ", self->vr);
-		len += sprintf(buf+len, "va: %d\n", self->va);
-
-		len += sprintf(buf+len, "  qos\tbps\tmaxtt\tdsize\twinsize\taddbofs\tmintt\tldisc\tcomp\n");
-
-		len += sprintf(buf+len, "  tx\t%d\t",
-			       self->qos_tx.baud_rate.value);
-		len += sprintf(buf+len, "%d\t",
-			       self->qos_tx.max_turn_time.value);
-		len += sprintf(buf+len, "%d\t",
-			       self->qos_tx.data_size.value);
-		len += sprintf(buf+len, "%d\t",
-			       self->qos_tx.window_size.value);
-		len += sprintf(buf+len, "%d\t",
-			       self->qos_tx.additional_bofs.value);
-		len += sprintf(buf+len, "%d\t",
-			       self->qos_tx.min_turn_time.value);
-		len += sprintf(buf+len, "%d\t",
-			       self->qos_tx.link_disc_time.value);
-		len += sprintf(buf+len, "\n");
-
-		len += sprintf(buf+len, "  rx\t%d\t",
-			       self->qos_rx.baud_rate.value);
-		len += sprintf(buf+len, "%d\t",
-			       self->qos_rx.max_turn_time.value);
-		len += sprintf(buf+len, "%d\t",
-			       self->qos_rx.data_size.value);
-		len += sprintf(buf+len, "%d\t",
-			       self->qos_rx.window_size.value);
-		len += sprintf(buf+len, "%d\t",
-			       self->qos_rx.additional_bofs.value);
-		len += sprintf(buf+len, "%d\t",
-			       self->qos_rx.min_turn_time.value);
-		len += sprintf(buf+len, "%d\t",
-			       self->qos_rx.link_disc_time.value);
-		len += sprintf(buf+len, "\n");
-
-		self = (struct irlap_cb *) hashbin_get_next(irlap);
+	for (self = (struct irlap_cb *) hashbin_get_first(irlap); 
+	     self; self = (struct irlap_cb *) hashbin_get_next(irlap)) {
+		if (iter->id == *pos)
+			break;
+		++iter->id;
 	}
-	spin_unlock_irqrestore(&irlap->hb_spinlock, flags);
-
-	return len;
+		
+	return self;
 }
+
+static void *irlap_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	struct irlap_iter_state *iter = seq->private;
+
+	++*pos;
+	++iter->id;
+	return (void *) hashbin_get_next(irlap);
+}
+
+static void irlap_seq_stop(struct seq_file *seq, void *v)
+{
+	spin_unlock_irq(&irlap->hb_spinlock);
+}
+
+static int irlap_seq_show(struct seq_file *seq, void *v)
+{
+	const struct irlap_iter_state *iter = seq->private;
+	const struct irlap_cb *self = v;
+	
+	ASSERT(self->magic == LAP_MAGIC, return -EINVAL;);
+
+	seq_printf(seq, "irlap%d ", iter->id);
+	seq_printf(seq, "state: %s\n",
+		   irlap_state[self->state]);
+
+	seq_printf(seq, "  device name: %s, ",
+		   (self->netdev) ? self->netdev->name : "bug");
+	seq_printf(seq, "hardware name: %s\n", self->hw_name);
+
+	seq_printf(seq, "  caddr: %#02x, ", self->caddr);
+	seq_printf(seq, "saddr: %#08x, ", self->saddr);
+	seq_printf(seq, "daddr: %#08x\n", self->daddr);
+
+	seq_printf(seq, "  win size: %d, ",
+		   self->window_size);
+	seq_printf(seq, "win: %d, ", self->window);
+#ifdef CONFIG_IRDA_DYNAMIC_WINDOW
+	seq_printf(seq, "line capacity: %d, ",
+		   self->line_capacity);
+	seq_printf(seq, "bytes left: %d\n", self->bytes_left);
+#endif /* CONFIG_IRDA_DYNAMIC_WINDOW */
+	seq_printf(seq, "  tx queue len: %d ",
+		   skb_queue_len(&self->txq));
+	seq_printf(seq, "win queue len: %d ",
+		   skb_queue_len(&self->wx_list));
+	seq_printf(seq, "rbusy: %s", self->remote_busy ?
+		   "TRUE" : "FALSE");
+	seq_printf(seq, " mbusy: %s\n", self->media_busy ?
+		   "TRUE" : "FALSE");
+
+	seq_printf(seq, "  retrans: %d ", self->retry_count);
+	seq_printf(seq, "vs: %d ", self->vs);
+	seq_printf(seq, "vr: %d ", self->vr);
+	seq_printf(seq, "va: %d\n", self->va);
+
+	seq_printf(seq, "  qos\tbps\tmaxtt\tdsize\twinsize\taddbofs\tmintt\tldisc\tcomp\n");
+
+	seq_printf(seq, "  tx\t%d\t",
+		   self->qos_tx.baud_rate.value);
+	seq_printf(seq, "%d\t",
+		   self->qos_tx.max_turn_time.value);
+	seq_printf(seq, "%d\t",
+		   self->qos_tx.data_size.value);
+	seq_printf(seq, "%d\t",
+		   self->qos_tx.window_size.value);
+	seq_printf(seq, "%d\t",
+		   self->qos_tx.additional_bofs.value);
+	seq_printf(seq, "%d\t",
+		   self->qos_tx.min_turn_time.value);
+	seq_printf(seq, "%d\t",
+		   self->qos_tx.link_disc_time.value);
+	seq_printf(seq, "\n");
+
+	seq_printf(seq, "  rx\t%d\t",
+		   self->qos_rx.baud_rate.value);
+	seq_printf(seq, "%d\t",
+		   self->qos_rx.max_turn_time.value);
+	seq_printf(seq, "%d\t",
+		   self->qos_rx.data_size.value);
+	seq_printf(seq, "%d\t",
+		   self->qos_rx.window_size.value);
+	seq_printf(seq, "%d\t",
+		   self->qos_rx.additional_bofs.value);
+	seq_printf(seq, "%d\t",
+		   self->qos_rx.min_turn_time.value);
+	seq_printf(seq, "%d\n",
+		   self->qos_rx.link_disc_time.value);
+
+	return 0;
+}
+
+static struct seq_operations irlap_seq_ops = {
+	.start  = irlap_seq_start,
+	.next   = irlap_seq_next,
+	.stop   = irlap_seq_stop,
+	.show   = irlap_seq_show,
+};
+
+static int irlap_seq_open(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq;
+	int rc = -ENOMEM;
+	struct irlap_iter_state *s = kmalloc(sizeof(*s), GFP_KERNEL);
+       
+	if (!s)
+		goto out;
+
+	if (irlap == NULL) {
+		rc = -EINVAL;
+		goto out_kfree;
+	}
+
+	rc = seq_open(file, &irlap_seq_ops);
+	if (rc)
+		goto out_kfree;
+
+	seq	     = file->private_data;
+	seq->private = s;
+	memset(s, 0, sizeof(*s));
+out:
+	return rc;
+out_kfree:
+	kfree(s);
+	goto out;
+}
+
+struct file_operations irlap_seq_fops = {
+	.owner		= THIS_MODULE,
+	.open           = irlap_seq_open,
+	.read           = seq_read,
+	.llseek         = seq_lseek,
+	.release	= seq_release_private,
+};
 
 #endif /* CONFIG_PROC_FS */

@@ -44,6 +44,7 @@ extern void NS8390_init(struct net_device *dev, int startp);
 extern int ei_open(struct net_device *dev);
 extern int ei_close(struct net_device *dev);
 extern irqreturn_t ei_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+extern struct net_device *alloc_ei_netdev(void);
 
 /* You have one of these per-board */
 struct ei_device {
@@ -110,7 +111,7 @@ struct ei_device {
  */
  
 #if defined(CONFIG_MAC) ||  \
-    defined(CONFIG_ARIADNE2) || defined(CONFIG_ARIADNE2_MODULE) || \
+    defined(CONFIG_ZORRO8390) || defined(CONFIG_ZORRO8390_MODULE) || \
     defined(CONFIG_HYDRA) || defined(CONFIG_HYDRA_MODULE)
 #define EI_SHIFT(x)	(ei_local->reg_offset[x])
 #undef inb

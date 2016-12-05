@@ -47,7 +47,7 @@ MODULE_DESCRIPTION("Adaptec I2O RAID Driver");
 #include <linux/config.h>	/* for CONFIG_PCI */
 #include <linux/pci.h>		/* for PCI support */
 #include <linux/proc_fs.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/delay.h>	/* for udelay */
 #include <linux/interrupt.h>
 #include <linux/kernel.h>	/* for printk */
@@ -1551,7 +1551,7 @@ static int adpt_open(struct inode *inode, struct file *file)
 
 	//TODO check for root access
 	//
-	minor = minor(inode->i_rdev);
+	minor = iminor(inode);
 	if (minor >= hba_count) {
 		return -ENXIO;
 	}
@@ -1582,7 +1582,7 @@ static int adpt_close(struct inode *inode, struct file *file)
 	int minor;
 	adpt_hba* pHba;
 
-	minor = minor(inode->i_rdev);
+	minor = iminor(inode);
 	if (minor >= hba_count) {
 		return -ENXIO;
 	}
@@ -1878,7 +1878,7 @@ static int adpt_ioctl(struct inode *inode, struct file *file, uint cmd,
 	adpt_hba* pHba;
 	ulong flags;
 
-	minor = minor(inode->i_rdev);
+	minor = iminor(inode);
 	if (minor >= DPTI_MAX_HBA){
 		return -ENXIO;
 	}
@@ -2483,7 +2483,7 @@ static void adpt_fail_posted_scbs(adpt_hba* pHba)
 	Scsi_Cmnd* 	cmd = NULL;
 	Scsi_Device* 	d = NULL;
 
-	list_for_each_entry(d, &pHba->host->my_devices, siblings) {
+	shost_for_each_device(d, pHba->host) {
 		unsigned long flags;
 		spin_lock_irqsave(&d->list_lock, flags);
 		list_for_each_entry(cmd, &d->cmd_list, list) {

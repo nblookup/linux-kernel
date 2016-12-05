@@ -1,6 +1,6 @@
 /*
- *   Copyright (c) International Business Machines Corp., 2000-2003
- *   Portions Copyright (c) Christoph Hellwig, 2001-2002
+ *   Copyright (C) International Business Machines Corp., 2000-2003
+ *   Portions Copyright (C) Christoph Hellwig, 2001-2002
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -178,7 +178,7 @@ void inlineLog(struct jfs_log * log, struct tblock * tblk, struct lrd * lrd,
 	       struct tlock * tlck);
 void mapLog(struct jfs_log * log, struct tblock * tblk, struct lrd * lrd,
 	    struct tlock * tlck);
-void txAbortCommit(struct commit * cd, int exval);
+static void txAbortCommit(struct commit * cd);
 static void txAllocPMap(struct inode *ip, struct maplock * maplock,
 			struct tblock * tblk);
 void txForce(struct tblock * tblk);
@@ -1113,7 +1113,7 @@ int txCommit(tid_t tid,		/* transaction identifier */
 	jfs_info("txCommit, tid = %d, flag = %d", tid, flag);
 	/* is read-only file system ? */
 	if (isReadOnly(iplist[0])) {
-		rc = EROFS;
+		rc = -EROFS;
 		goto TheEnd;
 	}
 
@@ -1317,7 +1317,7 @@ int txCommit(tid_t tid,		/* transaction identifier */
 
       out:
 	if (rc != 0)
-		txAbortCommit(&cd, rc);
+		txAbortCommit(&cd);
 
       TheEnd:
 	jfs_info("txCommit: tid = %d, returning %d", tid, rc);
@@ -1354,7 +1354,7 @@ static int txLog(struct jfs_log * log, struct tblock * tblk, struct commit * cd)
 
 		/* initialize lrd common */
 		ip = tlck->ip;
-		lrd->aggregate = cpu_to_le32(ip->i_sb->s_bdev->bd_dev);
+		lrd->aggregate = cpu_to_le32(new_encode_dev(ip->i_sb->s_bdev->bd_dev));
 		lrd->log.redopage.fileset = cpu_to_le32(JFS_IP(ip)->fileset);
 		lrd->log.redopage.inode = cpu_to_le32(ip->i_ino);
 
@@ -1442,7 +1442,6 @@ int diLog(struct jfs_log * log, struct tblock * tblk, struct lrd * lrd,
 		 * page is not itself logged, to prevent pageout of the map
 		 * page before the log;
 		 */
-		assert(tlck->type & tlckFREE);
 
 		/* log LOG_NOREDOINOEXT of the freed inode extent for
 		 * logredo() to start NoRedoPage filters, and to update
@@ -2655,7 +2654,7 @@ void txAbort(tid_t tid, int dirty)
 	 * mark filesystem dirty
 	 */
 	if (dirty)
-		updateSuper(tblk->sb, FM_DIRTY);
+		jfs_error(tblk->sb, "txAbort");
 
 	return;
 }
@@ -2672,14 +2671,13 @@ void txAbort(tid_t tid, int dirty)
  * log age of page-frames in memory for which caller has
  * are reset to 0 (to avoid logwarap).
  */
-void txAbortCommit(struct commit * cd, int exval)
+static void txAbortCommit(struct commit * cd)
 {
 	struct tblock *tblk;
 	tid_t tid;
 	lid_t lid, next;
 	struct metapage *mp;
 
-	assert(exval == EIO || exval == ENOMEM);
 	jfs_warn("txAbortCommit: cd:0x%p", cd);
 
 	/*
@@ -2715,7 +2713,7 @@ void txAbortCommit(struct commit * cd, int exval)
 	/*
 	 * mark filesystem dirty
 	 */
-	updateSuper(cd->sb, FM_DIRTY);
+	jfs_error(cd->sb, "txAbortCommit");
 }
 
 

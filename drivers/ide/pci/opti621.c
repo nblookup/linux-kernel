@@ -104,7 +104,6 @@
 
 #include <asm/io.h>
 
-#include "ide_modes.h"
 #include "opti621.h"
 
 #define OPTI621_MAX_PIO 3
@@ -349,11 +348,6 @@ static void __init init_hwif_opti621 (ide_hwif_t *hwif)
 	hwif->drives[1].autodma = hwif->autodma;
 }
 
-static void __init init_dma_opti621 (ide_hwif_t *hwif, unsigned long dmabase)
-{
-	ide_setup_dma(hwif, dmabase, 8);
-}
-
 extern void ide_setup_pci_device(struct pci_dev *, ide_pci_device_t *);
 
 static void __init init_setup_opti621 (struct pci_dev *dev, ide_pci_device_t *d)
@@ -371,7 +365,7 @@ static int __devinit opti621_init_one(struct pci_dev *dev, const struct pci_devi
 	return 0;
 }
 
-static struct pci_device_id opti621_pci_tbl[] __devinitdata = {
+static struct pci_device_id opti621_pci_tbl[] = {
 	{ PCI_VENDOR_ID_OPTI, PCI_DEVICE_ID_OPTI_82C621, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ PCI_VENDOR_ID_OPTI, PCI_DEVICE_ID_OPTI_82C825, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1},
 	{ 0, },

@@ -1,6 +1,7 @@
 /* b44.c: Broadcom 4400 device driver.
  *
  * Copyright (C) 2002 David S. Miller (davem@redhat.com)
+ * Fixed by Pekka Pietikainen (pp@ee.oulu.fi)
  */
 
 #include <linux/kernel.h>
@@ -14,6 +15,7 @@
 #include <linux/pci.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/version.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -23,8 +25,8 @@
 
 #define DRV_MODULE_NAME		"b44"
 #define PFX DRV_MODULE_NAME	": "
-#define DRV_MODULE_VERSION	"0.6"
-#define DRV_MODULE_RELDATE	"Nov 11, 2002"
+#define DRV_MODULE_VERSION	"0.92"
+#define DRV_MODULE_RELDATE	"Nov 4, 2003"
 
 #define B44_DEF_MSG_ENABLE	  \
 	(NETIF_MSG_DRV		| \
@@ -78,7 +80,7 @@ MODULE_PARM_DESC(b44_debug, "B44 bitmapped debugging message enable value");
 
 static int b44_debug = -1;	/* -1 == use B44_DEF_MSG_ENABLE as value */
 
-static struct pci_device_id b44_pci_tbl[] __devinitdata = {
+static struct pci_device_id b44_pci_tbl[] = {
 	{ PCI_VENDOR_ID_BROADCOM, PCI_DEVICE_ID_BCM4401,
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0UL },
 	{ }	/* terminate list with empty entry */
@@ -259,7 +261,7 @@ static int ssb_is_core_up(struct b44 *bp)
 		== SBTMSLOW_CLOCK);
 }
 
-static void __b44_cam_write(struct b44 *bp, char *data, int index)
+static void __b44_cam_write(struct b44 *bp, unsigned char *data, int index)
 {
 	u32 val;
 
@@ -521,7 +523,7 @@ static void b44_check_phy(struct b44 *bp)
 			/* Link now up */
 			netif_carrier_on(bp->dev);
 			b44_link_report(bp);
-		} else if (netif_carrier_ok(bp->dev)) {
+		} else if (netif_carrier_ok(bp->dev) && !(bmsr & BMSR_LSTATUS)) {
 			/* Link now down */
 			netif_carrier_off(bp->dev);
 			b44_link_report(bp);
@@ -650,8 +652,7 @@ static void b44_recycle_rx(struct b44 *bp, int src_idx, u32 dest_idx_unmasked)
 	src_map = &bp->rx_buffers[src_idx];
 
 	dest_map->skb = src_map->skb;
-	rh = (struct rx_header *)
-		(src_map->skb->data - bp->rx_offset);
+	rh = (struct rx_header *) src_map->skb->data;
 	rh->len = 0;
 	rh->flags = 0;
 	pci_unmap_addr_set(dest_map, mapping,
@@ -660,9 +661,12 @@ static void b44_recycle_rx(struct b44 *bp, int src_idx, u32 dest_idx_unmasked)
 	ctrl = src_desc->ctrl;
 	if (dest_idx == (B44_RX_RING_SIZE - 1))
 		ctrl |= cpu_to_le32(DESC_CTRL_EOT);
+	else
+		ctrl &= cpu_to_le32(~DESC_CTRL_EOT);
 
 	dest_desc->ctrl = ctrl;
 	dest_desc->addr = src_desc->addr;
+	src_map->skb = NULL;
 }
 
 static int b44_rx(struct b44 *bp, int budget)
@@ -685,7 +689,7 @@ static int b44_rx(struct b44 *bp, int budget)
 		pci_dma_sync_single(bp->pdev, map,
 				    RX_PKT_BUF_SZ,
 				    PCI_DMA_FROMDEVICE);
-		rh = (struct rx_header *) (skb->data - bp->rx_offset);
+		rh = (struct rx_header *) skb->data;
 		len = cpu_to_le16(rh->len);
 		if ((len > (RX_PKT_BUF_SZ - bp->rx_offset)) ||
 		    (rh->flags & cpu_to_le16(RX_FLAG_ERRORS))) {
@@ -718,7 +722,9 @@ static int b44_rx(struct b44 *bp, int budget)
 				goto drop_it;
 			pci_unmap_single(bp->pdev, map,
 					 skb_size, PCI_DMA_FROMDEVICE);
-			skb_put(skb, len);
+			/* Leave out rx_header */
+                	skb_put(skb, len+bp->rx_offset);
+            	        skb_pull(skb,bp->rx_offset);
 		} else {
 			struct sk_buff *copy_skb;
 
@@ -730,8 +736,8 @@ static int b44_rx(struct b44 *bp, int budget)
 			copy_skb->dev = bp->dev;
 			skb_reserve(copy_skb, 2);
 			skb_put(copy_skb, len);
-			/* DMA sync done above */
-			memcpy(copy_skb->data, skb->data, len);
+			/* DMA sync done above, copy just the actual packet */
+			memcpy(copy_skb->data, skb->data+bp->rx_offset, len);
 
 			skb = copy_skb;
 		}
@@ -748,6 +754,7 @@ static int b44_rx(struct b44 *bp, int budget)
 	}
 
 	bp->rx_cons = cons;
+	bw32(B44_DMARX_PTR, cons * sizeof(struct dma_desc));
 
 	return received;
 }
@@ -764,6 +771,7 @@ static int b44_poll(struct net_device *netdev, int *budget)
 		b44_tx(bp);
 		/* spin_unlock(&bp->tx_lock); */
 	}
+	spin_unlock_irq(&bp->lock);
 
 	done = 1;
 	if (bp->istat & ISTAT_RX) {
@@ -783,10 +791,12 @@ static int b44_poll(struct net_device *netdev, int *budget)
 	}
 
 	if (bp->istat & ISTAT_ERRORS) {
+		spin_lock_irq(&bp->lock);
 		b44_halt(bp);
 		b44_init_rings(bp);
 		b44_init_hw(bp);
 		netif_wake_queue(bp->dev);
+		spin_unlock_irq(&bp->lock);
 		done = 1;
 	}
 
@@ -794,7 +804,6 @@ static int b44_poll(struct net_device *netdev, int *budget)
 		netif_rx_complete(netdev);
 		b44_enable_ints(bp);
 	}
-	spin_unlock_irq(&bp->lock);
 
 	return (done ? 0 : 1);
 }
@@ -852,6 +861,8 @@ static void b44_tx_timeout(struct net_device *dev)
 
 	spin_unlock_irq(&bp->lock);
 
+	b44_enable_ints(bp);
+
 	netif_wake_queue(dev);
 }
 
@@ -885,7 +896,7 @@ static int b44_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		ctrl |= DESC_CTRL_EOT;
 
 	bp->tx_ring[entry].ctrl = cpu_to_le32(ctrl);
-	bp->tx_ring[entry].addr = cpu_to_le32((u32) mapping);
+	bp->tx_ring[entry].addr = cpu_to_le32((u32) mapping+bp->dma_offset);
 
 	entry = NEXT_TX(entry);
 
@@ -931,6 +942,8 @@ static int b44_change_mtu(struct net_device *dev, int new_mtu)
 	b44_init_hw(bp);
 	spin_unlock_irq(&bp->lock);
 
+	b44_enable_ints(bp);
+	
 	return 0;
 }
 
@@ -1173,8 +1186,8 @@ static int b44_init_hw(struct b44 *bp)
 	__b44_set_rx_mode(bp->dev);
 
 	/* MTU + eth header + possible VLAN tag + struct rx_header */
-	bw32(B44_RXMAXLEN, bp->dev->mtu + ETH_HLEN + 8 + 24);
-	bw32(B44_TXMAXLEN, bp->dev->mtu + ETH_HLEN + 8 + 24);
+	bw32(B44_RXMAXLEN, bp->dev->mtu + ETH_HLEN + 8 + RX_HEADER_LEN);
+	bw32(B44_TXMAXLEN, bp->dev->mtu + ETH_HLEN + 8 + RX_HEADER_LEN);
 
 	bw32(B44_TX_WMARK, 56); /* XXX magic */
 	bw32(B44_DMATX_CTRL, DMATX_CTRL_ENABLE);
@@ -1184,6 +1197,7 @@ static int b44_init_hw(struct b44 *bp)
 	bw32(B44_DMARX_ADDR, bp->rx_ring_dma + bp->dma_offset);
 
 	bw32(B44_DMARX_PTR, bp->rx_pending);
+	bp->rx_prod = bp->rx_pending;	
 
 	bw32(B44_MIB_CTRL, MIB_CTRL_CLR_ON_READ);
 
@@ -1345,6 +1359,8 @@ static void __b44_set_rx_mode(struct net_device *dev)
 			__b44_load_mcast(bp, dev);
 
 		bw32(B44_RXCONFIG, val);
+        	val = br32(B44_CAM_CTRL);
+	        bw32(B44_CAM_CTRL, val | CAM_CTRL_ENABLE);
 	}
 }
 
@@ -1372,7 +1388,7 @@ static int b44_ethtool_ioctl (struct net_device *dev, void *useraddr)
 		strcpy (info.driver, DRV_MODULE_NAME);
 		strcpy (info.version, DRV_MODULE_VERSION);
 		memset(&info.fw_version, 0, sizeof(info.fw_version));
-		strcpy (info.bus_info, pci_dev->slot_name);
+		strcpy (info.bus_info, pci_name(pci_dev));
 		info.eedump_len = 0;
 		info.regdump_len = 0;
 		if (copy_to_user (useraddr, &info, sizeof (info)))
@@ -1544,6 +1560,8 @@ static int b44_ethtool_ioctl (struct net_device *dev, void *useraddr)
 		netif_wake_queue(bp->dev);
 		spin_unlock_irq(&bp->lock);
 
+		b44_enable_ints(bp);
+		
 		return 0;
 	}
 	case ETHTOOL_GPAUSEPARAM: {
@@ -1587,6 +1605,8 @@ static int b44_ethtool_ioctl (struct net_device *dev, void *useraddr)
 		}
 		spin_unlock_irq(&bp->lock);
 
+		b44_enable_ints(bp);
+		
 		return 0;
 	}
 	};
@@ -1678,8 +1698,9 @@ static int __devinit b44_get_invariants(struct b44 *bp)
 	bp->core_unit = ssb_core_unit(bp);
 	bp->dma_offset = ssb_get_addr(bp, SBID_PCI_DMA, 0);
 
-	bp->flags |= B44_FLAG_BUGGY_TXPTR;
-
+	/* XXX - really required? 
+	   bp->flags |= B44_FLAG_BUGGY_TXPTR;
+         */
 out:
 	return err;
 }
@@ -1737,6 +1758,7 @@ static int __devinit b44_init_one(struct pci_dev *pdev,
 	}
 
 	SET_MODULE_OWNER(dev);
+	SET_NETDEV_DEV(dev,&pdev->dev);
 
 	/* No interesting netdevice features in this card... */
 	dev->features |= 0;
@@ -1812,7 +1834,7 @@ err_out_iounmap:
 	iounmap((void *) bp->regs);
 
 err_out_free_dev:
-	kfree(dev);
+	free_netdev(dev);
 
 err_out_free_res:
 	pci_release_regions(pdev);
@@ -1830,11 +1852,54 @@ static void __devexit b44_remove_one(struct pci_dev *pdev)
 	if (dev) {
 		unregister_netdev(dev);
 		iounmap((void *) ((struct b44 *)(dev->priv))->regs);
-		kfree(dev);
+		free_netdev(dev);
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
 		pci_set_drvdata(pdev, NULL);
 	}
+}
+
+static int b44_suspend(struct pci_dev *pdev, u32 state)
+{
+	struct net_device *dev = pci_get_drvdata(pdev);
+	struct b44 *bp = dev->priv;
+
+        if (!netif_running(dev))
+                 return 0;
+
+	del_timer_sync(&bp->timer);
+
+	spin_lock_irq(&bp->lock); 
+
+	b44_halt(bp);
+	netif_carrier_off(bp->dev); 
+	netif_device_detach(bp->dev);
+	b44_free_rings(bp);
+
+	spin_unlock_irq(&bp->lock);
+	return 0;
+}
+
+static int b44_resume(struct pci_dev *pdev)
+{
+	struct net_device *dev = pci_get_drvdata(pdev);
+	struct b44 *bp = dev->priv;
+
+	if (!netif_running(dev))
+		return 0;
+
+	spin_lock_irq(&bp->lock);
+
+	b44_init_rings(bp);
+	b44_init_hw(bp);
+	netif_device_attach(bp->dev);
+	spin_unlock_irq(&bp->lock);
+
+	bp->timer.expires = jiffies + HZ;
+	add_timer(&bp->timer);
+
+	b44_enable_ints(bp);
+	return 0;
 }
 
 static struct pci_driver b44_driver = {
@@ -1842,6 +1907,8 @@ static struct pci_driver b44_driver = {
 	.id_table	= b44_pci_tbl,
 	.probe		= b44_init_one,
 	.remove		= __devexit_p(b44_remove_one),
+        .suspend        = b44_suspend,
+        .resume         = b44_resume,
 };
 
 static int __init b44_init(void)

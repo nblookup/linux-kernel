@@ -162,7 +162,7 @@ void * __ioremap(phys_t phys_addr, phys_t size, unsigned long flags)
 	if (!area)
 		return NULL;
 	addr = area->addr;
-	if (remap_area_pages(VMALLOC_VMADDR(addr), phys_addr, size, flags)) {
+	if (remap_area_pages((unsigned long) addr, phys_addr, size, flags)) {
 		vunmap(addr);
 		return NULL;
 	}
@@ -172,7 +172,7 @@ void * __ioremap(phys_t phys_addr, phys_t size, unsigned long flags)
 
 #define IS_KSEG1(addr) (((unsigned long)(addr) & ~0x1fffffffUL) == KSEG1)
 
-void iounmap(void *addr)
+void __iounmap(void *addr)
 {
 	struct vm_struct *p;
 
@@ -190,4 +190,4 @@ void iounmap(void *addr)
 }
 
 EXPORT_SYMBOL(__ioremap);
-EXPORT_SYMBOL(iounmap);
+EXPORT_SYMBOL(__iounmap);

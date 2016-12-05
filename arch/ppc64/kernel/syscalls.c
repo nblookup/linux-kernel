@@ -1,5 +1,5 @@
 /*
- * linux/arch/ppc/kernel/sys_ppc.c
+ * linux/arch/ppc64/kernel/sys_ppc.c
  *
  *  PowerPC version 
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
@@ -40,7 +40,6 @@
 #include <asm/uaccess.h>
 #include <asm/ipc.h>
 #include <asm/semaphore.h>
-#include <asm/ppcdebug.h>
 #include <asm/time.h>
 
 extern unsigned long wall_jiffies;
@@ -66,7 +65,12 @@ sys_ipc (uint call, int first, int second, long third, void *ptr, long fifth)
 	ret = -ENOSYS;
 	switch (call) {
 	case SEMOP:
-		ret = sys_semop (first, (struct sembuf *)ptr, second);
+		ret = sys_semtimedop (first, (struct sembuf *)ptr, second,
+				      NULL);
+		break;
+	case SEMTIMEDOP:
+		ret = sys_semtimedop (first, (struct sembuf *)ptr, second,
+				      (const struct timespec *) fifth);
 		break;
 	case SEMGET:
 		ret = sys_semget (first, second, third);
@@ -74,6 +78,7 @@ sys_ipc (uint call, int first, int second, long third, void *ptr, long fifth)
 	case SEMCTL: {
 		union semun fourth;
 
+		ret = -EINVAL;
 		if (!ptr)
 			break;
 		if ((ret = get_user(fourth.__pad, (void **)ptr)))
@@ -89,6 +94,7 @@ sys_ipc (uint call, int first, int second, long third, void *ptr, long fifth)
 		case 0: {
 			struct ipc_kludge tmp;
 
+			ret = -EINVAL;
 			if (!ptr)
 				break;
 			if ((ret = copy_from_user(&tmp,
@@ -122,6 +128,7 @@ sys_ipc (uint call, int first, int second, long third, void *ptr, long fifth)
 			break;
 		}
 		case 1:	/* iBCS2 emulator entry point */
+			ret = -EINVAL;
 			if (!segment_eq(get_fs(), get_ds()))
 				break;
 			ret = sys_shmat (first, (char *) ptr, second,

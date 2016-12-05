@@ -17,7 +17,7 @@
 #include <linux/module.h>
 #include <linux/backing-dev.h>
 #include <linux/bio.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/highmem.h>
 #include <linux/mm.h>
 #include <linux/kernel_stat.h>
@@ -50,6 +50,9 @@ static wait_queue_head_t congestion_wqh[2];
 static struct workqueue_struct *kblockd_workqueue; 
 
 unsigned long blk_max_low_pfn, blk_max_pfn;
+
+EXPORT_SYMBOL(blk_max_low_pfn);
+EXPORT_SYMBOL(blk_max_pfn);
 
 /* Amount of time in which a process may batch requests */
 #define BLK_BATCH_TIME	(HZ/50UL)
@@ -119,7 +122,7 @@ static void set_queue_congested(request_queue_t *q, int rw)
 
 /**
  * blk_get_backing_dev_info - get the address of a queue's backing_dev_info
- * @dev:	device
+ * @bdev:	device
  *
  * Locates the passed device's request queue and returns the address of its
  * backing_dev_info
@@ -134,6 +137,12 @@ struct backing_dev_info *blk_get_backing_dev_info(struct block_device *bdev)
 	if (q)
 		ret = &q->backing_dev_info;
 	return ret;
+}
+
+void blk_queue_activity_fn(request_queue_t *q, activity_fn *fn, void *data)
+{
+	q->activity_fn = fn;
+	q->activity_data = data;
 }
 
 /**
@@ -151,6 +160,8 @@ void blk_queue_prep_rq(request_queue_t *q, prep_rq_fn *pfn)
 {
 	q->prep_rq_fn = pfn;
 }
+
+EXPORT_SYMBOL(blk_queue_prep_rq);
 
 /**
  * blk_queue_merge_bvec - set a merge_bvec function for queue
@@ -170,6 +181,8 @@ void blk_queue_merge_bvec(request_queue_t *q, merge_bvec_fn *mbfn)
 {
 	q->merge_bvec_fn = mbfn;
 }
+
+EXPORT_SYMBOL(blk_queue_merge_bvec);
 
 /**
  * blk_queue_make_request - define an alternate make_request function for a device
@@ -214,7 +227,6 @@ void blk_queue_make_request(request_queue_t * q, make_request_fn * mfn)
 	if (q->unplug_delay == 0)
 		q->unplug_delay = 1;
 
-	init_timer(&q->unplug_timer);
 	INIT_WORK(&q->unplug_work, blk_unplug_work, q);
 
 	q->unplug_timer.function = blk_unplug_timeout;
@@ -225,9 +237,12 @@ void blk_queue_make_request(request_queue_t * q, make_request_fn * mfn)
 	 */
 	blk_queue_bounce_limit(q, BLK_BOUNCE_HIGH);
 
-	init_waitqueue_head(&q->queue_wait);
 	INIT_LIST_HEAD(&q->plug_list);
+
+	blk_queue_activity_fn(q, NULL, NULL);
 }
+
+EXPORT_SYMBOL(blk_queue_make_request);
 
 /**
  * blk_queue_bounce_limit - set bounce buffer limit for queue
@@ -274,6 +289,7 @@ void blk_queue_bounce_limit(request_queue_t *q, u64 dma_addr)
 	last_q = q;
 }
 
+EXPORT_SYMBOL(blk_queue_bounce_limit);
 
 /**
  * blk_queue_max_sectors - set max sectors for a request for this queue
@@ -294,6 +310,8 @@ void blk_queue_max_sectors(request_queue_t *q, unsigned short max_sectors)
 	q->max_sectors = max_sectors;
 }
 
+EXPORT_SYMBOL(blk_queue_max_sectors);
+
 /**
  * blk_queue_max_phys_segments - set max phys segments for a request for this queue
  * @q:  the request queue for the device
@@ -313,6 +331,8 @@ void blk_queue_max_phys_segments(request_queue_t *q, unsigned short max_segments
 
 	q->max_phys_segments = max_segments;
 }
+
+EXPORT_SYMBOL(blk_queue_max_phys_segments);
 
 /**
  * blk_queue_max_hw_segments - set max hw segments for a request for this queue
@@ -335,6 +355,8 @@ void blk_queue_max_hw_segments(request_queue_t *q, unsigned short max_segments)
 	q->max_hw_segments = max_segments;
 }
 
+EXPORT_SYMBOL(blk_queue_max_hw_segments);
+
 /**
  * blk_queue_max_segment_size - set max segment size for blk_rq_map_sg
  * @q:  the request queue for the device
@@ -354,6 +376,8 @@ void blk_queue_max_segment_size(request_queue_t *q, unsigned int max_size)
 	q->max_segment_size = max_size;
 }
 
+EXPORT_SYMBOL(blk_queue_max_segment_size);
+
 /**
  * blk_queue_hardsect_size - set hardware sector size for the queue
  * @q:  the request queue for the device
@@ -370,6 +394,31 @@ void blk_queue_hardsect_size(request_queue_t *q, unsigned short size)
 	q->hardsect_size = size;
 }
 
+EXPORT_SYMBOL(blk_queue_hardsect_size);
+
+/*
+ * Returns the minimum that is _not_ zero, unless both are zero.
+ */
+#define min_not_zero(l, r) (l == 0) ? r : ((r == 0) ? l : min(l, r))
+
+/**
+ * blk_queue_stack_limits - inherit underlying queue limits for stacked drivers
+ * @t:	the stacking driver (top)
+ * @b:  the underlying device (bottom)
+ **/
+void blk_queue_stack_limits(request_queue_t *t, request_queue_t *b)
+{
+	/* zero is "infinity" */
+	t->max_sectors = min_not_zero(t->max_sectors,b->max_sectors);
+
+	t->max_phys_segments = min(t->max_phys_segments,b->max_phys_segments);
+	t->max_hw_segments = min(t->max_hw_segments,b->max_hw_segments);
+	t->max_segment_size = min(t->max_segment_size,b->max_segment_size);
+	t->hardsect_size = max(t->hardsect_size,b->hardsect_size);
+}
+
+EXPORT_SYMBOL(blk_queue_stack_limits);
+
 /**
  * blk_queue_segment_boundary - set boundary rules for segment merging
  * @q:  the request queue for the device
@@ -385,10 +434,12 @@ void blk_queue_segment_boundary(request_queue_t *q, unsigned long mask)
 	q->seg_boundary_mask = mask;
 }
 
+EXPORT_SYMBOL(blk_queue_segment_boundary);
+
 /**
  * blk_queue_dma_alignment - set dma length and memory alignment
- * @q:  the request queue for the device
- * @dma_mask:  alignment mask
+ * @q:     the request queue for the device
+ * @mask:  alignment mask
  *
  * description:
  *    set required memory and length aligment for direct dma transactions.
@@ -399,6 +450,8 @@ void blk_queue_dma_alignment(request_queue_t *q, int mask)
 {
 	q->dma_alignment = mask;
 }
+
+EXPORT_SYMBOL(blk_queue_dma_alignment);
 
 /**
  * blk_queue_find_tag - find a request by its tag and queue
@@ -422,6 +475,8 @@ struct request *blk_queue_find_tag(request_queue_t *q, int tag)
 	return bqt->tag_index[tag];
 }
 
+EXPORT_SYMBOL(blk_queue_find_tag);
+
 /**
  * blk_queue_free_tags - release tag maintenance info
  * @q:  the request queue for the device
@@ -438,19 +493,24 @@ void blk_queue_free_tags(request_queue_t *q)
 	if (!bqt)
 		return;
 
-	BUG_ON(bqt->busy);
-	BUG_ON(!list_empty(&bqt->busy_list));
+	if (atomic_dec_and_test(&bqt->refcnt)) {
+		BUG_ON(bqt->busy);
+		BUG_ON(!list_empty(&bqt->busy_list));
 
-	kfree(bqt->tag_index);
-	bqt->tag_index = NULL;
+		kfree(bqt->tag_index);
+		bqt->tag_index = NULL;
 
-	kfree(bqt->tag_map);
-	bqt->tag_map = NULL;
+		kfree(bqt->tag_map);
+		bqt->tag_map = NULL;
 
-	kfree(bqt);
+		kfree(bqt);
+	}
+
 	q->queue_tags = NULL;
 	q->queue_flags &= ~(1 << QUEUE_FLAG_QUEUED);
 }
+
+EXPORT_SYMBOL(blk_queue_free_tags);
 
 static int
 init_tag_map(request_queue_t *q, struct blk_queue_tag *tags, int depth)
@@ -483,6 +543,9 @@ init_tag_map(request_queue_t *q, struct blk_queue_tag *tags, int depth)
 	for (i = depth; i < bits * BLK_TAGS_PER_LONG; i++)
 		__set_bit(i, tags->tag_map);
 
+	INIT_LIST_HEAD(&tags->busy_list);
+	tags->busy = 0;
+	atomic_set(&tags->refcnt, 1);
 	return 0;
 fail:
 	kfree(tags->tag_index);
@@ -494,19 +557,18 @@ fail:
  * @q:  the request queue for the device
  * @depth:  the maximum queue depth supported
  **/
-int blk_queue_init_tags(request_queue_t *q, int depth)
+int blk_queue_init_tags(request_queue_t *q, int depth,
+			struct blk_queue_tag *tags)
 {
-	struct blk_queue_tag *tags;
+	if (!tags) {
+		tags = kmalloc(sizeof(struct blk_queue_tag), GFP_ATOMIC);
+		if (!tags)
+			goto fail;
 
-	tags = kmalloc(sizeof(struct blk_queue_tag),GFP_ATOMIC);
-	if (!tags)
-		goto fail;
-
-	if (init_tag_map(q, tags, depth))
-		goto fail;
-
-	INIT_LIST_HEAD(&tags->busy_list);
-	tags->busy = 0;
+		if (init_tag_map(q, tags, depth))
+			goto fail;
+	} else
+		atomic_inc(&tags->refcnt);
 
 	/*
 	 * assign it, all done
@@ -518,6 +580,8 @@ fail:
 	kfree(tags);
 	return -ENOMEM;
 }
+
+EXPORT_SYMBOL(blk_queue_init_tags);
 
 /**
  * blk_queue_resize_tags - change the queueing depth
@@ -567,7 +631,7 @@ int blk_queue_resize_tags(request_queue_t *q, int new_depth)
 /**
  * blk_queue_end_tag - end tag operations for a request
  * @q:  the request queue for the device
- * @tag:  the tag that has completed
+ * @rq: the request that has completed
  *
  *  Description:
  *    Typically called when end_that_request_first() returns 0, meaning
@@ -603,6 +667,8 @@ void blk_queue_end_tag(request_queue_t *q, struct request *rq)
 	bqt->tag_index[tag] = NULL;
 	bqt->busy--;
 }
+
+EXPORT_SYMBOL(blk_queue_end_tag);
 
 /**
  * blk_queue_start_tag - find a free tag and assign it
@@ -654,6 +720,8 @@ int blk_queue_start_tag(request_queue_t *q, struct request *rq)
 	return 0;
 }
 
+EXPORT_SYMBOL(blk_queue_start_tag);
+
 /**
  * blk_queue_invalidate_tags - invalidate all pending tags
  * @q:  the request queue for the device
@@ -683,13 +751,15 @@ void blk_queue_invalidate_tags(request_queue_t *q)
 			blk_queue_end_tag(q, rq);
 
 		rq->flags &= ~REQ_STARTED;
-		__elv_add_request(q, rq, 0, 0);
+		__elv_add_request(q, rq, ELEVATOR_INSERT_BACK, 0);
 	}
 }
 
+EXPORT_SYMBOL(blk_queue_invalidate_tags);
+
 static char *rq_flags[] = {
 	"REQ_RW",
-	"REQ_RW_AHEAD",
+	"REQ_FAILFAST",
 	"REQ_SOFTBARRIER",
 	"REQ_HARDBARRIER",
 	"REQ_CMD",
@@ -706,6 +776,15 @@ static char *rq_flags[] = {
 	"REQ_DRIVE_CMD",
 	"REQ_DRIVE_TASK",
 	"REQ_DRIVE_TASKFILE",
+	"REQ_PREEMPT",
+	"REQ_PM_SUSPEND",
+	"REQ_PM_RESUME",
+	"REQ_PM_SHUTDOWN",
+	"REQ_IDETAPE_PC1",
+	"REQ_IDETAPE_PC2",
+	"REQ_IDETAPE_READ",
+	"REQ_IDETAPE_WRITE",
+	"REQ_IDETAPE_READ_BUFFER",
 };
 
 void blk_dump_rq_flags(struct request *rq, char *msg)
@@ -734,10 +813,13 @@ void blk_dump_rq_flags(struct request *rq, char *msg)
 	}
 }
 
+EXPORT_SYMBOL(blk_dump_rq_flags);
+
 void blk_recount_segments(request_queue_t *q, struct bio *bio)
 {
 	struct bio_vec *bv, *bvprv = NULL;
 	int i, nr_phys_segs, nr_hw_segs, seg_size, cluster;
+	int high, highprv = 1;
 
 	if (unlikely(!bio->bi_io_vec))
 		return;
@@ -745,7 +827,15 @@ void blk_recount_segments(request_queue_t *q, struct bio *bio)
 	cluster = q->queue_flags & (1 << QUEUE_FLAG_CLUSTER);
 	seg_size = nr_phys_segs = nr_hw_segs = 0;
 	bio_for_each_segment(bv, bio, i) {
-		if (bvprv && cluster) {
+		/*
+		 * the trick here is making sure that a high page is never
+		 * considered part of another segment, since that might
+		 * change with the bounce page.
+		 */
+		high = page_to_pfn(bv->bv_page) >= q->bounce_pfn;
+		if (high || highprv)
+			goto new_hw_segment;
+		if (cluster) {
 			if (seg_size + bv->bv_len > q->max_segment_size)
 				goto new_segment;
 			if (!BIOVEC_PHYS_MERGEABLE(bvprv, bv))
@@ -758,12 +848,14 @@ void blk_recount_segments(request_queue_t *q, struct bio *bio)
 			continue;
 		}
 new_segment:
-		if (!bvprv || !BIOVEC_VIRT_MERGEABLE(bvprv, bv))
+		if (!BIOVEC_VIRT_MERGEABLE(bvprv, bv))
+new_hw_segment:
 			nr_hw_segs++;
 
 		nr_phys_segs++;
 		bvprv = bv;
 		seg_size = bv->bv_len;
+		highprv = high;
 	}
 
 	bio->bi_phys_segments = nr_phys_segs;
@@ -793,6 +885,8 @@ int blk_phys_contig_segment(request_queue_t *q, struct bio *bio,
 	return 0;
 }
 
+EXPORT_SYMBOL(blk_phys_contig_segment);
+
 int blk_hw_contig_segment(request_queue_t *q, struct bio *bio,
 				 struct bio *nxt)
 {
@@ -813,6 +907,8 @@ int blk_hw_contig_segment(request_queue_t *q, struct bio *bio,
 
 	return 0;
 }
+
+EXPORT_SYMBOL(blk_hw_contig_segment);
 
 /*
  * map a request to scatterlist, return number of sg entries setup. Caller
@@ -863,6 +959,8 @@ new_segment:
 
 	return nsegs;
 }
+
+EXPORT_SYMBOL(blk_rq_map_sg);
 
 /*
  * the standard queue merge functions, can be overridden with device
@@ -992,13 +1090,21 @@ static int ll_merge_requests_fn(request_queue_t *q, struct request *req,
 void blk_plug_device(request_queue_t *q)
 {
 	WARN_ON(!irqs_disabled());
-	if (!blk_queue_plugged(q)) {
+
+	/*
+	 * don't plug a stopped queue, it must be paired with blk_start_queue()
+	 * which will restart the queueing
+	 */
+	if (!blk_queue_plugged(q)
+	    && !test_bit(QUEUE_FLAG_STOPPED, &q->queue_flags)) {
 		spin_lock(&blk_plug_lock);
 		list_add_tail(&q->plug_list, &blk_plug_list);
 		mod_timer(&q->unplug_timer, jiffies + q->unplug_delay);
 		spin_unlock(&blk_plug_lock);
 	}
 }
+
+EXPORT_SYMBOL(blk_plug_device);
 
 /*
  * remove the queue from the plugged list, if present. called with
@@ -1018,15 +1124,17 @@ int blk_remove_plug(request_queue_t *q)
 	return 0;
 }
 
+EXPORT_SYMBOL(blk_remove_plug);
+
 /*
  * remove the plug and let it rip..
  */
 static inline void __generic_unplug_device(request_queue_t *q)
 {
-	if (!blk_remove_plug(q))
+	if (test_bit(QUEUE_FLAG_STOPPED, &q->queue_flags))
 		return;
 
-	if (test_bit(QUEUE_FLAG_STOPPED, &q->queue_flags))
+	if (!blk_remove_plug(q))
 		return;
 
 	del_timer(&q->unplug_timer);
@@ -1059,6 +1167,8 @@ void generic_unplug_device(void *data)
 	spin_unlock_irq(q->queue_lock);
 }
 
+EXPORT_SYMBOL(generic_unplug_device);
+
 static void blk_unplug_work(void *data)
 {
 	request_queue_t *q = data;
@@ -1088,6 +1198,8 @@ void blk_start_queue(request_queue_t *q)
 	schedule_work(&q->unplug_work);
 }
 
+EXPORT_SYMBOL(blk_start_queue);
+
 /**
  * blk_stop_queue - stop a queue
  * @q:    The &request_queue_t in question
@@ -1108,9 +1220,11 @@ void blk_stop_queue(request_queue_t *q)
 	set_bit(QUEUE_FLAG_STOPPED, &q->queue_flags);
 }
 
+EXPORT_SYMBOL(blk_stop_queue);
+
 /**
  * blk_run_queue - run a single device queue
- * @q	The queue to run
+ * @q:	The queue to run
  */
 void blk_run_queue(struct request_queue *q)
 {
@@ -1121,6 +1235,8 @@ void blk_run_queue(struct request_queue *q)
 	q->request_fn(q);
 	spin_unlock_irqrestore(q->queue_lock, flags);
 }
+
+EXPORT_SYMBOL(blk_run_queue);
 
 /**
  * blk_run_queues - fire all plugged queues
@@ -1156,16 +1272,19 @@ out:
 	spin_unlock_irq(&blk_plug_lock);
 }
 
+EXPORT_SYMBOL(blk_run_queues);
+
 /**
  * blk_cleanup_queue: - release a &request_queue_t when it is no longer needed
  * @q:    the request queue to be released
  *
  * Description:
- *     blk_cleanup_queue is the pair to blk_init_queue().  It should
- *     be called when a request queue is being released; typically
- *     when a block device is being de-registered.  Currently, its
- *     primary task it to free all the &struct request structures that
- *     were allocated to the queue.
+ *     blk_cleanup_queue is the pair to blk_init_queue() or
+ *     blk_queue_make_request().  It should be called when a request queue is
+ *     being released; typically when a block device is being de-registered.
+ *     Currently, its primary task it to free all the &struct request
+ *     structures that were allocated to the queue and the queue itself.
+ *
  * Caveat:
  *     Hopefully the low level driver will have finished any
  *     outstanding requests first...
@@ -1174,18 +1293,24 @@ void blk_cleanup_queue(request_queue_t * q)
 {
 	struct request_list *rl = &q->rq;
 
+	if (!atomic_dec_and_test(&q->refcnt))
+		return;
+
 	elevator_exit(q);
 
 	del_timer_sync(&q->unplug_timer);
 	kblockd_flush();
 
-	mempool_destroy(rl->rq_pool);
+	if (rl->rq_pool)
+		mempool_destroy(rl->rq_pool);
 
 	if (blk_queue_tagged(q))
 		blk_queue_free_tags(q);
 
-	memset(q, 0, sizeof(*q));
+	kfree(q);
 }
+
+EXPORT_SYMBOL(blk_cleanup_queue);
 
 static int blk_init_free_list(request_queue_t *q)
 {
@@ -1205,23 +1330,59 @@ static int blk_init_free_list(request_queue_t *q)
 
 static int __make_request(request_queue_t *, struct bio *);
 
-static elevator_t *chosen_elevator = &iosched_as;
+static elevator_t *chosen_elevator =
+#if defined(CONFIG_IOSCHED_AS)
+	&iosched_as;
+#elif defined(CONFIG_IOSCHED_DEADLINE)
+	&iosched_deadline;
+#elif defined(CONFIG_IOSCHED_NOOP)
+	&elevator_noop;
+#else
+	NULL;
+#error "You must have at least 1 I/O scheduler selected"
+#endif
 
+#if defined(CONFIG_IOSCHED_AS) || defined(CONFIG_IOSCHED_DEADLINE) || defined (CONFIG_IOSCHED_NOOP)
 static int __init elevator_setup(char *str)
 {
+#ifdef CONFIG_IOSCHED_DEADLINE
 	if (!strcmp(str, "deadline"))
 		chosen_elevator = &iosched_deadline;
+#endif
+#ifdef CONFIG_IOSCHED_AS
 	if (!strcmp(str, "as"))
 		chosen_elevator = &iosched_as;
+#endif
+#ifdef CONFIG_IOSCHED_NOOP
+	if (!strcmp(str, "noop"))
+		chosen_elevator = &elevator_noop;
+#endif
 	return 1;
 }
+
 __setup("elevator=", elevator_setup);
+#endif /* CONFIG_IOSCHED_AS || CONFIG_IOSCHED_DEADLINE || CONFIG_IOSCHED_NOOP */
+
+request_queue_t *blk_alloc_queue(int gfp_mask)
+{
+	request_queue_t *q = kmalloc(sizeof(*q), gfp_mask);
+
+	if (!q)
+		return NULL;
+
+	memset(q, 0, sizeof(*q));
+	init_timer(&q->unplug_timer);
+	atomic_set(&q->refcnt, 1);
+	return q;
+}
+
+EXPORT_SYMBOL(blk_alloc_queue);
 
 /**
  * blk_init_queue  - prepare a request queue for use with a block device
- * @q:    The &request_queue_t to be initialised
  * @rfn:  The function to be called to process requests that have been
  *        placed on the queue.
+ * @lock: Request queue spin lock
  *
  * Description:
  *    If a block device wishes to use the standard request handling procedures,
@@ -1241,30 +1402,32 @@ __setup("elevator=", elevator_setup);
  *    The queue spin lock must be held while manipulating the requests on the
  *    request queue.
  *
+ *    Function returns a pointer to the initialized request queue, or NULL if
+ *    it didn't succeed.
+ *
  * Note:
  *    blk_init_queue() must be paired with a blk_cleanup_queue() call
  *    when the block device is deactivated (such as at module unload).
  **/
-int blk_init_queue(request_queue_t *q, request_fn_proc *rfn, spinlock_t *lock)
+request_queue_t *blk_init_queue(request_fn_proc *rfn, spinlock_t *lock)
 {
-	int ret;
+	request_queue_t *q;
 	static int printed;
 
+	q = blk_alloc_queue(GFP_KERNEL);
+	if (!q)
+		return NULL;
+
 	if (blk_init_free_list(q))
-		return -ENOMEM;
+		goto out_init;
 
 	if (!printed) {
 		printed = 1;
-		if (chosen_elevator == &iosched_deadline)
-			printk("deadline elevator\n");
-		else if (chosen_elevator == &iosched_as)
-			printk("anticipatory scheduling elevator\n");
+		printk("Using %s io scheduler\n", chosen_elevator->elevator_name);
 	}
 
-	if ((ret = elevator_init(q, chosen_elevator))) {
-		blk_cleanup_queue(q);
-		return ret;
-	}
+	if (elevator_init(q, chosen_elevator))
+		goto out_elv;
 
 	q->request_fn		= rfn;
 	q->back_merge_fn       	= ll_back_merge_fn;
@@ -1283,8 +1446,27 @@ int blk_init_queue(request_queue_t *q, request_fn_proc *rfn, spinlock_t *lock)
 	blk_queue_max_hw_segments(q, MAX_HW_SEGMENTS);
 	blk_queue_max_phys_segments(q, MAX_PHYS_SEGMENTS);
 
-	return 0;
+	return q;
+out_elv:
+	blk_cleanup_queue(q);
+out_init:
+	kfree(q);
+	return NULL;
 }
+
+EXPORT_SYMBOL(blk_init_queue);
+
+int blk_get_queue(request_queue_t *q)
+{
+	if (!test_bit(QUEUE_FLAG_DEAD, &q->queue_flags)) {
+		atomic_inc(&q->refcnt);
+		return 0;
+	}
+
+	return 1;
+}
+
+EXPORT_SYMBOL(blk_get_queue);
 
 static inline void blk_free_request(request_queue_t *q, struct request *rq)
 {
@@ -1495,12 +1677,35 @@ struct request *blk_get_request(request_queue_t *q, int rw, int gfp_mask)
 	return rq;
 }
 
+EXPORT_SYMBOL(blk_get_request);
+
+/**
+ * blk_requeue_request - put a request back on queue
+ * @q:		request queue where request should be inserted
+ * @rq:		request to be inserted
+ *
+ * Description:
+ *    Drivers often keep queueing requests until the hardware cannot accept
+ *    more, when that condition happens we need to put the request back
+ *    on the queue. Must be called with queue lock held.
+ */
+void blk_requeue_request(request_queue_t *q, struct request *rq)
+{
+	if (blk_rq_tagged(rq))
+		blk_queue_end_tag(q, rq);
+
+	elv_requeue_request(q, rq);
+}
+
+EXPORT_SYMBOL(blk_requeue_request);
+
 /**
  * blk_insert_request - insert a special request in to a request queue
  * @q:		request queue where request should be inserted
  * @rq:		request to be inserted
  * @at_head:	insert request at head or tail of queue
  * @data:	private data
+ * @reinsert:	true if request it a reinsertion of previously processed one
  *
  * Description:
  *    Many block devices need to execute commands asynchronously, so they don't
@@ -1515,7 +1720,7 @@ struct request *blk_get_request(request_queue_t *q, int rw, int gfp_mask)
  *    host that is unable to accept a particular command.
  */
 void blk_insert_request(request_queue_t *q, struct request *rq,
-			int at_head, void *data)
+			int at_head, void *data, int reinsert)
 {
 	unsigned long flags;
 
@@ -1533,20 +1738,31 @@ void blk_insert_request(request_queue_t *q, struct request *rq,
 	/*
 	 * If command is tagged, release the tag
 	 */
-	if (blk_rq_tagged(rq))
-		blk_queue_end_tag(q, rq);
+	if(reinsert) {
+		blk_requeue_request(q, rq);
+	} else {
+		int where = ELEVATOR_INSERT_BACK;
 
-	drive_stat_acct(rq, rq->nr_sectors, 1);
-	__elv_add_request(q, rq, !at_head, 0);
+		if (at_head)
+			where = ELEVATOR_INSERT_FRONT;
+
+		if (blk_rq_tagged(rq))
+			blk_queue_end_tag(q, rq);
+
+		drive_stat_acct(rq, rq->nr_sectors, 1);
+		__elv_add_request(q, rq, where, 0);
+	}
 	q->request_fn(q);
 	spin_unlock_irqrestore(q->queue_lock, flags);
 }
+
+EXPORT_SYMBOL(blk_insert_request);
 
 void drive_stat_acct(struct request *rq, int nr_sectors, int new_io)
 {
 	int rw = rq_data_dir(rq);
 
-	if (!rq->rq_disk)
+	if (!blk_fs_request(rq) || !rq->rq_disk)
 		return;
 
 	if (rw == READ) {
@@ -1560,7 +1776,7 @@ void drive_stat_acct(struct request *rq, int nr_sectors, int new_io)
 	}
 	if (new_io) {
 		disk_round_stats(rq->rq_disk);
-		disk_stat_inc(rq->rq_disk, in_flight);
+		rq->rq_disk->in_flight++;
 	}
 }
 
@@ -1569,16 +1785,18 @@ void drive_stat_acct(struct request *rq, int nr_sectors, int new_io)
  * queue lock is held and interrupts disabled, as we muck with the
  * request queue list.
  */
-static inline void add_request(request_queue_t * q, struct request * req,
-			       struct list_head *insert_here)
+static inline void add_request(request_queue_t * q, struct request * req)
 {
 	drive_stat_acct(req, req->nr_sectors, 1);
+
+	if (q->activity_fn)
+		q->activity_fn(q->activity_data, rq_data_dir(req));
 
 	/*
 	 * elevator indicated where it wants this request to be
 	 * inserted at elevator_merge time
 	 */
-	__elv_add_request_pos(q, req, insert_here);
+	__elv_add_request(q, req, ELEVATOR_INSERT_SORT, 0);
 }
  
 /*
@@ -1601,10 +1819,10 @@ void disk_round_stats(struct gendisk *disk)
 	unsigned long now = jiffies;
 
 	disk_stat_add(disk, time_in_queue, 
-			disk_stat_read(disk, in_flight) * (now - disk->stamp));
+			disk->in_flight * (now - disk->stamp));
 	disk->stamp = now;
 
-	if (disk_stat_read(disk, in_flight))
+	if (disk->in_flight)
 		disk_stat_add(disk, io_ticks, (now - disk->stamp_idle));
 	disk->stamp_idle = now;
 }
@@ -1658,6 +1876,8 @@ void blk_put_request(struct request *req)
 	}
 }
 
+EXPORT_SYMBOL(blk_put_request);
+
 /**
  * blk_congestion_wait - wait for a queue to become uncongested
  * @rw: READ or WRITE
@@ -1677,6 +1897,8 @@ void blk_congestion_wait(int rw, long timeout)
 	io_schedule_timeout(timeout);
 	finish_wait(wqh, &wait);
 }
+
+EXPORT_SYMBOL(blk_congestion_wait);
 
 /*
  * Has to be called with the request spinlock acquired
@@ -1716,7 +1938,7 @@ static int attempt_merge(request_queue_t *q, struct request *req,
 
 	if (req->rq_disk) {
 		disk_round_stats(req->rq_disk);
-		disk_stat_dec(req->rq_disk, in_flight);
+		req->rq_disk->in_flight--;
 	}
 
 	__blk_put_request(q, next);
@@ -1765,6 +1987,8 @@ void blk_attempt_remerge(request_queue_t *q, struct request *rq)
 	spin_unlock_irqrestore(q->queue_lock, flags);
 }
 
+EXPORT_SYMBOL(blk_attempt_remerge);
+
 /*
  * Non-locking blk_attempt_remerge variant.
  */
@@ -1773,11 +1997,12 @@ void __blk_attempt_remerge(request_queue_t *q, struct request *rq)
 	attempt_back_merge(q, rq);
 }
 
+EXPORT_SYMBOL(__blk_attempt_remerge);
+
 static int __make_request(request_queue_t *q, struct bio *bio)
 {
 	struct request *req, *freereq = NULL;
-	int el_ret, rw, nr_sectors, cur_nr_sectors, barrier;
-	struct list_head *insert_here;
+	int el_ret, rw, nr_sectors, cur_nr_sectors, barrier, ra;
 	sector_t sector;
 
 	sector = bio->bi_sector;
@@ -1797,8 +2022,9 @@ static int __make_request(request_queue_t *q, struct bio *bio)
 
 	barrier = test_bit(BIO_RW_BARRIER, &bio->bi_rw);
 
+	ra = bio->bi_rw & (1 << BIO_RW_AHEAD);
+
 again:
-	insert_here = NULL;
 	spin_lock_irq(q->queue_lock);
 
 	if (elv_queue_empty(q)) {
@@ -1808,17 +2034,13 @@ again:
 	if (barrier)
 		goto get_rq;
 
-	el_ret = elv_merge(q, &insert_here, bio);
+	el_ret = elv_merge(q, &req, bio);
 	switch (el_ret) {
 		case ELEVATOR_BACK_MERGE:
-			req = list_entry_rq(insert_here);
-
 			BUG_ON(!rq_mergeable(req));
 
-			if (!q->back_merge_fn(q, req, bio)) {
-				insert_here = &req->queuelist;
+			if (!q->back_merge_fn(q, req, bio))
 				break;
-			}
 
 			req->biotail->bi_next = bio;
 			req->biotail = bio;
@@ -1829,14 +2051,10 @@ again:
 			goto out;
 
 		case ELEVATOR_FRONT_MERGE:
-			req = list_entry_rq(insert_here);
-
 			BUG_ON(!rq_mergeable(req));
 
-			if (!q->front_merge_fn(q, req, bio)) {
-				insert_here = req->queuelist.prev;
+			if (!q->front_merge_fn(q, req, bio))
 				break;
-			}
 
 			bio->bi_next = req->bio;
 			req->cbio = req->bio = bio;
@@ -1884,7 +2102,7 @@ get_rq:
 			/*
 			 * READA bit set
 			 */
-			if (bio_flagged(bio, BIO_RW_AHEAD))
+			if (ra)
 				goto end_io;
 	
 			freereq = get_request_wait(q, rw);
@@ -1904,6 +2122,12 @@ get_rq:
 	if (barrier)
 		req->flags |= (REQ_HARDBARRIER | REQ_NOMERGE);
 
+	/*
+	 * don't stack up retries for read ahead
+	 */
+	if (ra)
+		req->flags |= REQ_FAILFAST;
+
 	req->errors = 0;
 	req->hard_sector = req->sector = sector;
 	req->hard_nr_sectors = req->nr_sectors = nr_sectors;
@@ -1918,7 +2142,7 @@ get_rq:
 	req->rq_disk = bio->bi_bdev->bd_disk;
 	req->start_time = jiffies;
 
-	add_request(q, req, insert_here);
+	add_request(q, req);
 out:
 	if (freereq)
 		__blk_put_request(q, freereq);
@@ -1943,24 +2167,23 @@ end_io:
 static inline void blk_partition_remap(struct bio *bio)
 {
 	struct block_device *bdev = bio->bi_bdev;
-	struct gendisk *disk = bdev->bd_disk;
-	struct hd_struct *p;
-	if (bdev == bdev->bd_contains)
-		return;
 
-	p = disk->part[bdev->bd_dev-MKDEV(disk->major,disk->first_minor)-1];
-	switch (bio->bi_rw) {
-	case READ:
-		p->read_sectors += bio_sectors(bio);
-		p->reads++;
-		break;
-	case WRITE:
-		p->write_sectors += bio_sectors(bio);
-		p->writes++;
-		break;
+	if (bdev != bdev->bd_contains) {
+		struct hd_struct *p = bdev->bd_part;
+
+		switch (bio->bi_rw) {
+		case READ:
+			p->read_sectors += bio_sectors(bio);
+			p->reads++;
+			break;
+		case WRITE:
+			p->write_sectors += bio_sectors(bio);
+			p->writes++;
+			break;
+		}
+		bio->bi_sector += p->start_sect;
+		bio->bi_bdev = bdev->bd_contains;
 	}
-	bio->bi_sector += bdev->bd_offset;
-	bio->bi_bdev = bdev->bd_contains;
 }
 
 /**
@@ -2048,6 +2271,9 @@ end_io:
 			goto end_io;
 		}
 
+		if (test_bit(QUEUE_FLAG_DEAD, &q->queue_flags))
+			goto end_io;
+
 		/*
 		 * If this device has partitions, remap block n
 		 * of partition p to block n+start(p) of the disk.
@@ -2057,6 +2283,8 @@ end_io:
 		ret = q->make_request_fn(q, bio);
 	} while (ret);
 }
+
+EXPORT_SYMBOL(generic_make_request);
 
 /**
  * submit_bio: submit a bio to the block device layer for I/O
@@ -2082,6 +2310,8 @@ int submit_bio(int rw, struct bio *bio)
 	generic_make_request(bio);
 	return 1;
 }
+
+EXPORT_SYMBOL(submit_bio);
 
 /**
  * blk_rq_next_segment
@@ -2157,6 +2387,8 @@ int process_that_request_first(struct request *req, unsigned int nr_sectors)
 	}
 	return 1;
 }
+
+EXPORT_SYMBOL(process_that_request_first);
 
 void blk_recalc_rq_segments(struct request *rq)
 {
@@ -2262,8 +2494,8 @@ static int __end_that_request_first(struct request *req, int uptodate,
 			 * not a complete bvec done
 			 */
 			if (unlikely(nbytes > nr_bytes)) {
-				bio_iovec(bio)->bv_offset += nr_bytes;
-				bio_iovec(bio)->bv_len -= nr_bytes;
+				bio_iovec_idx(bio, idx)->bv_offset += nr_bytes;
+				bio_iovec_idx(bio, idx)->bv_len -= nr_bytes;
 				bio_nbytes += nr_bytes;
 				total_bytes += nr_bytes;
 				break;
@@ -2326,6 +2558,8 @@ int end_that_request_first(struct request *req, int uptodate, int nr_sectors)
 	return __end_that_request_first(req, uptodate, nr_sectors << 9);
 }
 
+EXPORT_SYMBOL(end_that_request_first);
+
 /**
  * end_that_request_chunk - end I/O on a request
  * @req:      the request being processed
@@ -2346,6 +2580,8 @@ int end_that_request_chunk(struct request *req, int uptodate, int nr_bytes)
 	return __end_that_request_first(req, uptodate, nr_bytes);
 }
 
+EXPORT_SYMBOL(end_that_request_chunk);
+
 /*
  * queue lock must be held
  */
@@ -2354,7 +2590,7 @@ void end_that_request_last(struct request *req)
 	struct gendisk *disk = req->rq_disk;
 	struct completion *waiting = req->waiting;
 
-	if (disk) {
+	if (disk && blk_fs_request(req)) {
 		unsigned long duration = jiffies - req->start_time;
 		switch (rq_data_dir(req)) {
 		    case WRITE:
@@ -2367,13 +2603,15 @@ void end_that_request_last(struct request *req)
 			break;
 		}
 		disk_round_stats(disk);
-		disk_stat_dec(disk, in_flight);
+		disk->in_flight--;
 	}
 	__blk_put_request(req->q, req);
 	/* Do this LAST! The structure may be freed immediately afterwards */
 	if (waiting)
 		complete(waiting);
 }
+
+EXPORT_SYMBOL(end_that_request_last);
 
 void end_request(struct request *req, int uptodate)
 {
@@ -2383,6 +2621,8 @@ void end_request(struct request *req, int uptodate)
 		end_that_request_last(req);
 	}
 }
+
+EXPORT_SYMBOL(end_request);
 
 void blk_rq_bio_prep(request_queue_t *q, struct request *rq, struct bio *bio)
 {
@@ -2401,6 +2641,8 @@ void blk_rq_bio_prep(request_queue_t *q, struct request *rq, struct bio *bio)
 	rq->cbio = rq->bio = rq->biotail = bio;
 }
 
+EXPORT_SYMBOL(blk_rq_bio_prep);
+
 void blk_rq_prep_restart(struct request *rq)
 {
 	struct bio *bio;
@@ -2416,6 +2658,8 @@ void blk_rq_prep_restart(struct request *rq)
 	rq->nr_sectors = rq->hard_nr_sectors;
 	rq->current_nr_sectors = rq->hard_cur_sectors;
 }
+
+EXPORT_SYMBOL(blk_rq_prep_restart);
 
 int kblockd_schedule_work(struct work_struct *work)
 {
@@ -2448,8 +2692,6 @@ int __init blk_dev_init(void)
 	return 0;
 }
 
-static atomic_t nr_io_contexts = ATOMIC_INIT(0);
-
 /*
  * IO Context helper functions
  */
@@ -2464,7 +2706,6 @@ void put_io_context(struct io_context *ioc)
 		if (ioc->aic && ioc->aic->dtor)
 			ioc->aic->dtor(ioc->aic);
 		kfree(ioc);
-		atomic_dec(&nr_io_contexts);
 	}
 }
 
@@ -2505,7 +2746,6 @@ struct io_context *get_io_context(int gfp_flags)
 	if (ret == NULL) {
 		ret = kmalloc(sizeof(*ret), GFP_ATOMIC);
 		if (ret) {
-			atomic_inc(&nr_io_contexts);
 			atomic_set(&ret->refcount, 1);
 			ret->pid = tsk->pid;
 			ret->last_waited = jiffies; /* doesn't matter... */
@@ -2696,54 +2936,3 @@ void blk_unregister_queue(struct gendisk *disk)
 		kobject_put(&disk->kobj);
 	}
 }
-
-
-EXPORT_SYMBOL(process_that_request_first);
-EXPORT_SYMBOL(end_that_request_first);
-EXPORT_SYMBOL(end_that_request_chunk);
-EXPORT_SYMBOL(end_that_request_last);
-EXPORT_SYMBOL(end_request);
-EXPORT_SYMBOL(blk_init_queue);
-EXPORT_SYMBOL(blk_cleanup_queue);
-EXPORT_SYMBOL(blk_queue_make_request);
-EXPORT_SYMBOL(blk_queue_bounce_limit);
-EXPORT_SYMBOL(generic_make_request);
-EXPORT_SYMBOL(generic_unplug_device);
-EXPORT_SYMBOL(blk_plug_device);
-EXPORT_SYMBOL(blk_remove_plug);
-EXPORT_SYMBOL(blk_attempt_remerge);
-EXPORT_SYMBOL(__blk_attempt_remerge);
-EXPORT_SYMBOL(blk_max_low_pfn);
-EXPORT_SYMBOL(blk_max_pfn);
-EXPORT_SYMBOL(blk_queue_max_sectors);
-EXPORT_SYMBOL(blk_queue_max_phys_segments);
-EXPORT_SYMBOL(blk_queue_max_hw_segments);
-EXPORT_SYMBOL(blk_queue_max_segment_size);
-EXPORT_SYMBOL(blk_queue_hardsect_size);
-EXPORT_SYMBOL(blk_queue_segment_boundary);
-EXPORT_SYMBOL(blk_queue_dma_alignment);
-EXPORT_SYMBOL(blk_rq_map_sg);
-EXPORT_SYMBOL(blk_dump_rq_flags);
-EXPORT_SYMBOL(submit_bio);
-EXPORT_SYMBOL(blk_phys_contig_segment);
-EXPORT_SYMBOL(blk_hw_contig_segment);
-EXPORT_SYMBOL(blk_get_request);
-EXPORT_SYMBOL(blk_put_request);
-EXPORT_SYMBOL(blk_insert_request);
-
-EXPORT_SYMBOL(blk_queue_prep_rq);
-EXPORT_SYMBOL(blk_queue_merge_bvec);
-
-EXPORT_SYMBOL(blk_queue_find_tag);
-EXPORT_SYMBOL(blk_queue_init_tags);
-EXPORT_SYMBOL(blk_queue_free_tags);
-EXPORT_SYMBOL(blk_queue_start_tag);
-EXPORT_SYMBOL(blk_queue_end_tag);
-EXPORT_SYMBOL(blk_queue_invalidate_tags);
-
-EXPORT_SYMBOL(blk_start_queue);
-EXPORT_SYMBOL(blk_stop_queue);
-EXPORT_SYMBOL(blk_run_queue);
-EXPORT_SYMBOL(blk_run_queues);
-
-EXPORT_SYMBOL(blk_rq_bio_prep);

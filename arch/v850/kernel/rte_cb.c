@@ -15,9 +15,10 @@
 #include <linux/init.h>
 #include <linux/irq.h>
 #include <linux/fs.h>
+#include <linux/module.h>
 
 #include <asm/machdep.h>
-#include <asm/nb85e_uart.h>
+#include <asm/v850e_uart.h>
 
 #include "mach.h"
 
@@ -34,7 +35,7 @@ extern void multi_init (void);
 
 void __init rte_cb_early_init (void)
 {
-	nb85e_intc_disable_irqs ();
+	v850e_intc_disable_irqs ();
 
 #ifdef CONFIG_RTE_CB_MULTI
 	multi_init ();
@@ -43,6 +44,7 @@ void __init rte_cb_early_init (void)
 
 void __init mach_setup (char **cmdline)
 {
+#ifdef CONFIG_RTE_MB_A_PCI
 	/* Probe for Mother-A, and print a message if we find it.  */
 	*(volatile unsigned long *)MB_A_SRAM_ADDR = 0xDEADBEEF;
 	if (*(volatile unsigned long *)MB_A_SRAM_ADDR == 0xDEADBEEF) {
@@ -52,22 +54,10 @@ void __init mach_setup (char **cmdline)
 				"          NEC SolutionGear/Midas lab"
 				" RTE-MOTHER-A motherboard\n");
 	}
-
-#if defined (CONFIG_V850E_NB85E_UART_CONSOLE) && !defined (CONFIG_TIME_BOOTUP)
-	nb85e_uart_cons_init (0);
-#endif
+#endif /* CONFIG_RTE_MB_A_PCI */
 
 	mach_tick = led_tick;
 }
-
-#ifdef CONFIG_TIME_BOOTUP
-void initial_boot_done (void)
-{
-#ifdef CONFIG_V850E_NB85E_UART_CONSOLE
-	nb85e_uart_cons_init (0);
-#endif
-}
-#endif
 
 void machine_restart (char *__unused)
 {
@@ -76,6 +66,8 @@ void machine_restart (char *__unused)
 #endif
 	asm ("jmp r0"); /* Jump to the reset vector.  */
 }
+
+EXPORT_SYMBOL(machine_restart);
 
 /* This says `HALt.' in LEDese.  */
 static unsigned char halt_leds_msg[] = { 0x76, 0x77, 0x38, 0xF8 };
@@ -97,10 +89,14 @@ void machine_halt (void)
 		asm ("halt; nop; nop; nop; nop; nop");
 }
 
+EXPORT_SYMBOL(machine_halt);
+
 void machine_power_off (void)
 {
 	machine_halt ();
 }
+
+EXPORT_SYMBOL(machine_power_off);
 
 
 /* Animated LED display for timer tick.  */
@@ -193,6 +189,7 @@ static struct gbus_int_irq_init gbus_irq_inits[] = {
 static struct hw_interrupt_type gbus_hw_itypes[NUM_GBUS_IRQ_INITS];
 
 #endif /* CONFIG_RTE_GBUS_INT */
+
 
 void __init rte_cb_init_irqs (void)
 {

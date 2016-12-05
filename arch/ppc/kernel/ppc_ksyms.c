@@ -123,7 +123,7 @@ EXPORT_SYMBOL(strncmp);
 EXPORT_SYMBOL(strcasecmp);
 EXPORT_SYMBOL(__div64_32);
 
-/* EXPORT_SYMBOL(csum_partial); already in net/netsyms.c */
+EXPORT_SYMBOL(csum_partial);
 EXPORT_SYMBOL(csum_partial_copy_generic);
 EXPORT_SYMBOL(ip_fast_csum);
 EXPORT_SYMBOL(csum_tcpudp_magic);
@@ -155,6 +155,9 @@ EXPORT_SYMBOL(_outsl_ns);
 EXPORT_SYMBOL(iopa);
 EXPORT_SYMBOL(mm_ptov);
 EXPORT_SYMBOL(ioremap);
+#ifdef CONFIG_44x
+EXPORT_SYMBOL(ioremap64);
+#endif
 EXPORT_SYMBOL(__ioremap);
 EXPORT_SYMBOL(iounmap);
 EXPORT_SYMBOL(ioremap_bot);	/* aka VMALLOC_END */
@@ -200,6 +203,7 @@ EXPORT_SYMBOL(flush_dcache_range);
 EXPORT_SYMBOL(flush_icache_user_range);
 EXPORT_SYMBOL(flush_dcache_page);
 EXPORT_SYMBOL(flush_tlb_kernel_range);
+EXPORT_SYMBOL(flush_tlb_page);
 #ifdef CONFIG_ALTIVEC
 EXPORT_SYMBOL(last_task_used_altivec);
 EXPORT_SYMBOL(giveup_altivec);
@@ -259,6 +263,15 @@ EXPORT_SYMBOL(release_OF_resource);
 EXPORT_SYMBOL(pci_busdev_to_OF_node);
 EXPORT_SYMBOL(pci_device_to_OF_node);
 EXPORT_SYMBOL(pci_device_from_OF_node);
+EXPORT_SYMBOL(of_find_node_by_name);
+EXPORT_SYMBOL(of_find_node_by_type);
+EXPORT_SYMBOL(of_find_compatible_node);
+EXPORT_SYMBOL(of_find_node_by_path);
+EXPORT_SYMBOL(of_find_all_nodes);
+EXPORT_SYMBOL(of_get_parent);
+EXPORT_SYMBOL(of_get_next_child);
+EXPORT_SYMBOL(of_node_get);
+EXPORT_SYMBOL(of_node_put);
 #endif /* CONFIG_PPC_OF */
 #if defined(CONFIG_BOOTX_TEXT)
 EXPORT_SYMBOL(btext_update_display);
@@ -343,7 +356,7 @@ EXPORT_SYMBOL(debugger_fault_handler);
 EXPORT_SYMBOL(cpm_install_handler);
 EXPORT_SYMBOL(cpm_free_handler);
 #endif /* CONFIG_8xx */
-#if defined(CONFIG_8xx) || defined(CONFIG_40x)
+#if defined(CONFIG_8xx) || defined(CONFIG_4xx)
 EXPORT_SYMBOL(__res);
 #endif
 #if defined(CONFIG_8xx)
@@ -354,11 +367,17 @@ EXPORT_SYMBOL(next_mmu_context);
 EXPORT_SYMBOL(set_context);
 EXPORT_SYMBOL(handle_mm_fault); /* For MOL */
 EXPORT_SYMBOL_NOVERS(disarm_decr);
+extern long mol_trampoline;
+EXPORT_SYMBOL(mol_trampoline); /* For MOL */
 #ifdef CONFIG_PPC_STD_MMU
 EXPORT_SYMBOL(flush_hash_pages); /* For MOL */
+#ifdef CONFIG_SMP
+extern int mmu_hash_lock;
+EXPORT_SYMBOL(mmu_hash_lock); /* For MOL */
+#endif /* CONFIG_SMP */
 extern long *intercept_table;
 EXPORT_SYMBOL(intercept_table);
-#endif
+#endif /* CONFIG_PPC_STD_MMU */
 EXPORT_SYMBOL(cur_cpu_spec);
 #ifdef CONFIG_PPC_PMAC
 extern unsigned long agp_special_page;

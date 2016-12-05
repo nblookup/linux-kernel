@@ -38,8 +38,6 @@ int disable_apic_timer __initdata;
 /* Using APIC to generate smp_local_timer_interrupt? */
 int using_apic_timer = 0;
 
-int dont_enable_local_apic __initdata = 0;
-
 static DEFINE_PER_CPU(int, prof_multiplier) = 1;
 static DEFINE_PER_CPU(int, prof_old_multiplier) = 1;
 static DEFINE_PER_CPU(int, prof_counter) = 1;
@@ -298,8 +296,8 @@ void __init setup_local_APIC (void)
 	 * Double-check whether this APIC is really registered.
 	 * This is meaningless in clustered apic mode, so we skip it.
 	 */
-	if (!clustered_apic_mode && 
-	    !test_bit(GET_APIC_ID(apic_read(APIC_ID)), &phys_cpu_present_map))
+	if (!clustered_apic_mode &&
+		!physid_isset(GET_APIC_ID(apic_read(APIC_ID)), phys_cpu_present_map))
 		BUG();
 
 	/*
@@ -441,9 +439,6 @@ void __init setup_local_APIC (void)
 
 #ifdef CONFIG_PM
 
-#include <linux/device.h>
-#include <linux/module.h>
-
 static struct {
 	/* 'active' is true if the local APIC was enabled by us and
 	   not the BIOS; this signifies that we are also responsible
@@ -467,7 +462,6 @@ static struct {
 
 static int lapic_suspend(struct sys_device *dev, u32 state)
 {
-	unsigned int l, h;
 	unsigned long flags;
 
 	if (!apic_pm_state.active)
@@ -489,9 +483,6 @@ static int lapic_suspend(struct sys_device *dev, u32 state)
 	local_save_flags(flags);
 	local_irq_disable();
 	disable_local_APIC();
-	rdmsr(MSR_IA32_APICBASE, l, h);
-	l &= ~MSR_IA32_APICBASE_ENABLE;
-	wrmsr(MSR_IA32_APICBASE, l, h);
 	local_irq_restore(flags);
 	return 0;
 }
@@ -540,7 +531,6 @@ static struct sysdev_class lapic_sysclass = {
 	.suspend	= lapic_suspend,
 };
 
-/* not static, needed by child devices */
 static struct sys_device device_lapic = {
 	.id		= 0,
 	.cls		= &lapic_sysclass,
@@ -997,7 +987,7 @@ int __init APIC_init_uniprocessor (void)
 
 	connect_bsp_APIC();
 
-	phys_cpu_present_map = 1;
+	phys_cpu_present_map = physid_mask_of_physid(0);
 	apic_write_around(APIC_ID, boot_cpu_id);
 
 	setup_local_APIC();
@@ -1021,12 +1011,23 @@ static __init int setup_disableapic(char *str)
 	return 0;
 } 
 
+static __init int setup_nolapic(char *str) 
+{ 
+	disable_apic = 1;
+	return 0;
+} 
+
 static __init int setup_noapictimer(char *str) 
 { 
 	disable_apic_timer = 1;
 	return 0;
 } 
 
+/* dummy parsing: see setup.c */
+
 __setup("disableapic", setup_disableapic); 
+__setup("nolapic", setup_nolapic);  /* same as disableapic, for compatibility */
+
 __setup("noapictimer", setup_noapictimer); 
 
+/* no "lapic" flag - we only use the lapic when the BIOS tells us so. */

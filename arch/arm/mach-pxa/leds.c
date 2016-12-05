@@ -7,7 +7,7 @@
  *
  * Copyright (c) 2001 Jeff Sutherland, Accelent Systems Inc.
  */
-#include <linux/config.h>
+#include <linux/compiler.h>
 #include <linux/init.h>
 
 #include <asm/leds.h>

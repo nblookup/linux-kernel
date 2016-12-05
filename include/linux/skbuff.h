@@ -98,13 +98,16 @@ struct nf_ct_info {
 	struct nf_conntrack *master;
 };
 
-#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+#ifdef CONFIG_BRIDGE_NETFILTER
 struct nf_bridge_info {
 	atomic_t use;
 	struct net_device *physindev;
 	struct net_device *physoutdev;
+#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
+	struct net_device *netoutdev;
+#endif
 	unsigned int mask;
-	unsigned long hh[16 / sizeof(unsigned long)];
+	unsigned long hh[32 / sizeof(unsigned long)];
 };
 #endif
 
@@ -152,6 +155,7 @@ struct skb_shared_info {
  *	@sk: Socket we are owned by
  *	@stamp: Time we arrived
  *	@dev: Device we arrived on/are leaving by
+ *      @real_dev: The real device we are using
  *	@h: Transport layer header
  *	@nh: Network layer header
  *	@mac: Link layer header
@@ -179,6 +183,7 @@ struct skb_shared_info {
  *	@nfct: Associated connection, if any
  *	@nf_debug: Netfilter debugging
  *	@nf_bridge: Saved data about a bridged frame - see br_netfilter.c
+ *      @private: Data which is private to the HIPPI implementation
  *	@tc_index: Traffic control index
  */
 
@@ -244,7 +249,7 @@ struct sk_buff {
 #ifdef CONFIG_NETFILTER_DEBUG
         unsigned int		nf_debug;
 #endif
-#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+#ifdef CONFIG_BRIDGE_NETFILTER
 	struct nf_bridge_info	*nf_bridge;
 #endif
 #endif /* CONFIG_NETFILTER */
@@ -306,7 +311,7 @@ extern void	      skb_under_panic(struct sk_buff *skb, int len,
  *
  *	Returns true if the queue is empty, false otherwise.
  */
-static inline int skb_queue_empty(struct sk_buff_head *list)
+static inline int skb_queue_empty(const struct sk_buff_head *list)
 {
 	return list->next == (struct sk_buff *)list;
 }
@@ -357,7 +362,7 @@ static inline void kfree_skb_fast(struct sk_buff *skb)
  *	one of multiple shared copies of the buffer. Cloned buffers are
  *	shared data so must not be written to under normal circumstances.
  */
-static inline int skb_cloned(struct sk_buff *skb)
+static inline int skb_cloned(const struct sk_buff *skb)
 {
 	return skb->cloned && atomic_read(&skb_shinfo(skb)->dataref) != 1;
 }
@@ -369,7 +374,7 @@ static inline int skb_cloned(struct sk_buff *skb)
  *	Returns true if more than one person has a reference to this
  *	buffer.
  */
-static inline int skb_shared(struct sk_buff *skb)
+static inline int skb_shared(const struct sk_buff *skb)
 {
 	return atomic_read(&skb->users) != 1;
 }
@@ -389,6 +394,7 @@ static inline int skb_shared(struct sk_buff *skb)
  */
 static inline struct sk_buff *skb_share_check(struct sk_buff *skb, int pri)
 {
+	might_sleep_if(pri & __GFP_WAIT);
 	if (skb_shared(skb)) {
 		struct sk_buff *nskb = skb_clone(skb, pri);
 		kfree_skb(skb);
@@ -419,6 +425,7 @@ static inline struct sk_buff *skb_share_check(struct sk_buff *skb, int pri)
  */
 static inline struct sk_buff *skb_unshare(struct sk_buff *skb, int pri)
 {
+	might_sleep_if(pri & __GFP_WAIT);
 	if (skb_cloned(skb)) {
 		struct sk_buff *nskb = skb_copy(skb, pri);
 		kfree_skb(skb);	/* Free our shared copy */
@@ -475,7 +482,7 @@ static inline struct sk_buff *skb_peek_tail(struct sk_buff_head *list_)
  *
  *	Return the length of an &sk_buff queue.
  */
-static inline __u32 skb_queue_len(struct sk_buff_head *list_)
+static inline __u32 skb_queue_len(const struct sk_buff_head *list_)
 {
 	return list_->qlen;
 }
@@ -883,7 +890,7 @@ static inline char *__skb_pull(struct sk_buff *skb, unsigned int len)
  */
 static inline unsigned char *skb_pull(struct sk_buff *skb, unsigned int len)
 {
-	return (len > skb->len) ? NULL : __skb_pull(skb, len);
+	return unlikely(len > skb->len) ? NULL : __skb_pull(skb, len);
 }
 
 extern unsigned char *__pskb_pull_tail(struct sk_buff *skb, int delta);
@@ -899,14 +906,14 @@ static inline char *__pskb_pull(struct sk_buff *skb, unsigned int len)
 
 static inline unsigned char *pskb_pull(struct sk_buff *skb, unsigned int len)
 {
-	return (len > skb->len) ? NULL : __pskb_pull(skb, len);
+	return unlikely(len > skb->len) ? NULL : __pskb_pull(skb, len);
 }
 
 static inline int pskb_may_pull(struct sk_buff *skb, unsigned int len)
 {
-	if (len <= skb_headlen(skb))
+	if (likely(len <= skb_headlen(skb)))
 		return 1;
-	if (len > skb->len)
+	if (unlikely(len > skb->len))
 		return 0;
 	return __pskb_pull_tail(skb, len-skb_headlen(skb)) != NULL;
 }
@@ -1050,7 +1057,7 @@ static inline struct sk_buff *__dev_alloc_skb(unsigned int length,
 					      int gfp_mask)
 {
 	struct sk_buff *skb = alloc_skb(length + 16, gfp_mask);
-	if (skb)
+	if (likely(skb))
 		skb_reserve(skb, 16);
 	return skb;
 }
@@ -1195,7 +1202,7 @@ static inline void nf_conntrack_get(struct nf_ct_info *nfct)
 		atomic_inc(&nfct->master->use);
 }
 
-#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+#ifdef CONFIG_BRIDGE_NETFILTER
 static inline void nf_bridge_put(struct nf_bridge_info *nf_bridge)
 {
 	if (nf_bridge && atomic_dec_and_test(&nf_bridge->use))

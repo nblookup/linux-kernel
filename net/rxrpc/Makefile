@@ -2,6 +2,8 @@
 # Makefile for Linux kernel Rx RPC
 #
 
+#CFLAGS += -finstrument-functions
+
 rxrpc-objs := \
 	call.o \
 	connection.o \

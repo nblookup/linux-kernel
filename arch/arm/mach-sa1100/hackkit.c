@@ -11,8 +11,6 @@
  * published by the Free Software Foundation.
  *
  */
-
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -41,7 +39,6 @@
  */
 
 /* init funcs */
-static void __init get_hackkit_scr(void);
 static int __init hackkit_init(void);
 static void __init hackkit_init_irq(void);
 static void __init hackkit_map_io(void);

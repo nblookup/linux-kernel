@@ -9,6 +9,7 @@
 
 #include <asm/patch.h>
 #include <asm/processor.h>
+#include <asm/sections.h>
 #include <asm/system.h>
 #include <asm/unistd.h>
 
@@ -76,7 +77,7 @@ void
 ia64_patch_imm60 (u64 insn_addr, u64 val)
 {
 	ia64_patch(insn_addr,
-		   0x011ffffe000, (  ((val & 0x1000000000000000) >> 24) /* bit 60 -> 36 */
+		   0x011ffffe000, (  ((val & 0x0800000000000000) >> 23) /* bit 59 -> 36 */
 				   | ((val & 0x00000000000fffff) << 13) /* bit  0 -> 13 */));
 	ia64_patch(insn_addr - 1, 0x1fffffffffc, val >> 18);
 }
@@ -129,9 +130,11 @@ ia64_patch_mckinley_e9 (unsigned long start, unsigned long end)
 
 	while (offp < (s32 *) end) {
 		wp = (u64 *) ia64_imva((char *) offp + *offp);
-		wp[0] = 0x0000000100000000;
+		wp[0] = 0x0000000100000000; /* nop.m 0; nop.i 0; nop.i 0 */
 		wp[1] = 0x0004000000000200;
-		ia64_fc(wp);
+		wp[2] = 0x0000000100000011; /* nop.m 0; nop.i 0; br.ret.sptk.many b6 */
+		wp[3] = 0x0084006880000200;
+		ia64_fc(wp); ia64_fc(wp + 2);
 		++offp;
 	}
 	ia64_sync_i();
@@ -176,16 +179,8 @@ patch_brl_fsys_bubble_down (unsigned long start, unsigned long end)
 void
 ia64_patch_gate (void)
 {
-	extern char __start_gate_mckinley_e9_patchlist;
-	extern char __end_gate_mckinley_e9_patchlist;
-	extern char __start_gate_vtop_patchlist;
-	extern char __end_gate_vtop_patchlist;
-	extern char __start_gate_fsyscall_patchlist;
-	extern char __end_gate_fsyscall_patchlist;
-	extern char __start_gate_brl_fsys_bubble_down_patchlist;
-	extern char __end_gate_brl_fsys_bubble_down_patchlist;
-#	define START(name)	((unsigned long) &__start_gate_##name##_patchlist)
-#	define END(name)	((unsigned long)&__end_gate_##name##_patchlist)
+#	define START(name)	((unsigned long) __start_gate_##name##_patchlist)
+#	define END(name)	((unsigned long)__end_gate_##name##_patchlist)
 
 	patch_fsyscall_table(START(fsyscall), END(fsyscall));
 	patch_brl_fsys_bubble_down(START(brl_fsys_bubble_down), END(brl_fsys_bubble_down));

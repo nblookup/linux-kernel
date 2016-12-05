@@ -11,7 +11,6 @@
 NM := $(NM) -B
 
 LDFLAGS_vmlinux	:= -static -N #-relax
-LDFLAGS_BLOB	:= --format binary --oformat elf64-alpha
 cflags-y	:= -pipe -mno-fp-regs -ffixed-8
 
 # Determine if we can use the BWX instructions with GAS.
@@ -109,7 +108,7 @@ all boot: $(boot)/vmlinux.gz
 $(boot)/vmlinux.gz: vmlinux
 	$(Q)$(MAKE) -f scripts/Makefile.build obj=$(boot) $@
 
-bootimage bootpfile: vmlinux
+bootimage bootpfile bootpzfile: vmlinux
 	$(Q)$(MAKE) -f scripts/Makefile.build obj=$(boot) $(boot)/$@
 
 
@@ -130,4 +129,5 @@ define archhelp
   echo '* boot		- Compressed kernel image (arch/alpha/boot/vmlinux.gz)'
   echo '  bootimage	- SRM bootable image (arch/alpha/boot/bootimage)'
   echo '  bootpfile	- BOOTP bootable image (arch/alpha/boot/bootpfile)'
+  echo '  bootpzfile	- compressed kernel BOOTP image (arch/alpha/boot/bootpzfile)'
 endef

@@ -1,9 +1,9 @@
 /*
  * PCI HotPlug Core Functions
  *
- * Copyright (c) 1995,2001 Compaq Computer Corporation
- * Copyright (c) 2001 Greg Kroah-Hartman (greg@kroah.com)
- * Copyright (c) 2001 IBM Corp.
+ * Copyright (C) 1995,2001 Compaq Computer Corporation
+ * Copyright (C) 2001 Greg Kroah-Hartman (greg@kroah.com)
+ * Copyright (C) 2001 IBM Corp.
  *
  * All rights reserved.
  *
@@ -145,6 +145,7 @@ extern int pci_hp_register		(struct hotplug_slot *slot);
 extern int pci_hp_deregister		(struct hotplug_slot *slot);
 extern int pci_hp_change_slot_info	(struct hotplug_slot *slot,
 					 struct hotplug_slot_info *info);
+extern struct subsystem pci_hotplug_slots_subsys;
 
 #endif
 

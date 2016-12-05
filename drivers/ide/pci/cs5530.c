@@ -31,7 +31,6 @@
 #include <asm/io.h>
 #include <asm/irq.h>
 
-#include "ide_modes.h"
 #include "cs5530.h"
 
 #if defined(DISPLAY_CS5530_TIMINGS) && defined(CONFIG_PROC_FS)
@@ -405,19 +404,6 @@ static void __init init_hwif_cs5530 (ide_hwif_t *hwif)
 	hwif->drives[1].autodma = hwif->autodma;
 }
 
-/**
- *	init_dma_cs5530		-	set up for DMA
- *	@hwif: interface
- *	@dmabase: DMA base address
- *
- *	FIXME: this can go away
- */
- 
-static void __init init_dma_cs5530 (ide_hwif_t *hwif, unsigned long dmabase)
-{
-	ide_setup_dma(hwif, dmabase, 8);
-}
-
 extern void ide_setup_pci_device(struct pci_dev *, ide_pci_device_t *);
 
 
@@ -431,7 +417,7 @@ static int __devinit cs5530_init_one(struct pci_dev *dev, const struct pci_devic
 	return 0;
 }
 
-static struct pci_device_id cs5530_pci_tbl[] __devinitdata = {
+static struct pci_device_id cs5530_pci_tbl[] = {
 	{ PCI_VENDOR_ID_CYRIX, PCI_DEVICE_ID_CYRIX_5530_IDE, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ 0, },
 };

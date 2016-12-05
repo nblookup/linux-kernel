@@ -132,7 +132,7 @@
 #endif
 
 #if LINUX_VERSION_CODE >= 0x20400
-static struct pci_device_id acenic_pci_tbl[] __initdata = {
+static struct pci_device_id acenic_pci_tbl[] = {
 	{ PCI_VENDOR_ID_ALTEON, PCI_DEVICE_ID_ALTEON_ACENIC_FIBRE,
 	  PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_NETWORK_ETHERNET << 8, 0xffff00, },
 	{ PCI_VENDOR_ID_ALTEON, PCI_DEVICE_ID_ALTEON_ACENIC_COPPER,
@@ -685,7 +685,7 @@ int __devinit acenic_probe (ACE_PROBE_ARG)
 		}
 
 		if (pci_enable_device(pdev)) {
-			kfree(dev);
+			free_netdev(dev);
 			continue;
 		}
 
@@ -733,7 +733,7 @@ int __devinit acenic_probe (ACE_PROBE_ARG)
 
 		if (register_netdev(dev)) {
 			printk(KERN_ERR "acenic: device registration failed\n");
-			kfree(dev);
+			free_netdev(dev);
 			continue;
 		}
 
@@ -793,7 +793,7 @@ int __devinit acenic_probe (ACE_PROBE_ARG)
 			printk(KERN_ERR "%s: Driver compiled without Tigon I"
 			       " support - NIC disabled\n", dev->name);
 			ace_init_cleanup(dev);
-			kfree(dev);
+			free_netdev(dev);
 			continue;
 		}
 #endif
@@ -803,7 +803,7 @@ int __devinit acenic_probe (ACE_PROBE_ARG)
 			 * ace_allocate_descriptors() calls
 			 * ace_init_cleanup() on error.
 			 */
-			kfree(dev);
+			free_netdev(dev);
 			continue;
 		}
 
@@ -820,7 +820,7 @@ int __devinit acenic_probe (ACE_PROBE_ARG)
 			/*
 			 * ace_init() calls ace_init_cleanup() on error.
 			 */
-			kfree(dev);
+			free_netdev(dev);
 			continue;
 		}
 
@@ -955,7 +955,7 @@ static void __exit ace_module_cleanup(void)
 		}
 
 		ace_init_cleanup(root_dev);
-		kfree(root_dev);
+		free_netdev(root_dev);
 		root_dev = next;
 	}
 }
@@ -1757,7 +1757,8 @@ static int __init ace_init(struct net_device *dev)
 	 * Wait for the firmware to spin up - max 3 seconds.
 	 */
 	myjif = jiffies + 3 * HZ;
-	while (time_before(jiffies, myjif) && !ap->fw_running);
+	while (time_before(jiffies, myjif) && !ap->fw_running)
+		cpu_relax();
 
 	if (!ap->fw_running) {
 		printk(KERN_ERR "%s: Firmware NOT running!\n", dev->name);
@@ -1960,7 +1961,7 @@ static void ace_load_std_rx_ring(struct ace_private *ap, int nr_bufs)
 		 */
 		skb_reserve(skb, 2 + 16);
 		mapping = pci_map_page(ap->pdev, virt_to_page(skb->data),
-				       ((unsigned long)skb->data & ~PAGE_MASK),
+				       offset_in_page(skb->data),
 				       ACE_STD_BUFSIZE - (2 + 16),
 				       PCI_DMA_FROMDEVICE);
 		ap->skb->rx_std_skbuff[idx].skb = skb;
@@ -2026,7 +2027,7 @@ static void ace_load_mini_rx_ring(struct ace_private *ap, int nr_bufs)
 		 */
 		skb_reserve(skb, 2 + 16);
 		mapping = pci_map_page(ap->pdev, virt_to_page(skb->data),
-				       ((unsigned long)skb->data & ~PAGE_MASK),
+				       offset_in_page(skb->data),
 				       ACE_MINI_BUFSIZE - (2 + 16),
 				       PCI_DMA_FROMDEVICE);
 		ap->skb->rx_mini_skbuff[idx].skb = skb;
@@ -2087,7 +2088,7 @@ static void ace_load_jumbo_rx_ring(struct ace_private *ap, int nr_bufs)
 		 */
 		skb_reserve(skb, 2 + 16);
 		mapping = pci_map_page(ap->pdev, virt_to_page(skb->data),
-				       ((unsigned long)skb->data & ~PAGE_MASK),
+				       offset_in_page(skb->data),
 				       ACE_JUMBO_BUFSIZE - (2 + 16),
 				       PCI_DMA_FROMDEVICE);
 		ap->skb->rx_jumbo_skbuff[idx].skb = skb;
@@ -2743,7 +2744,7 @@ ace_map_tx_skb(struct ace_private *ap, struct sk_buff *skb,
 	struct tx_ring_info *info;
 
 	mapping = pci_map_page(ap->pdev, virt_to_page(skb->data),
-			       ((unsigned long) skb->data & ~PAGE_MASK),
+			       offset_in_page(skb->data),
 			       skb->len, PCI_DMA_TODEVICE);
 
 	info = ap->skb->tx_skbuff + idx;
@@ -3088,7 +3089,7 @@ static int ace_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 			 tigonFwReleaseFix);
 		strncpy(info.version, version, sizeof(info.version) - 1);
 		if (ap && ap->pdev)
-			strcpy(info.bus_info, ap->pdev->slot_name);
+			strcpy(info.bus_info, pci_name(ap->pdev));
 		if (copy_to_user(ifr->ifr_data, &info, sizeof(info)))
 			return -EFAULT;
 		return 0;

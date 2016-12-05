@@ -17,6 +17,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -32,6 +33,7 @@
 #include <linux/init_task.h>
 #include <linux/prctl.h>
 #include <linux/ptrace.h>
+#include <linux/kallsyms.h>
 
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
@@ -46,6 +48,7 @@
 #include <asm/iSeries/HvCallHpt.h>
 #include <asm/hardirq.h>
 #include <asm/cputable.h>
+#include <asm/sections.h>
 
 struct task_struct *last_task_used_math = NULL;
 
@@ -67,23 +70,6 @@ enable_kernel_fp(void)
 	giveup_fpu(last_task_used_math);
 #endif /* CONFIG_SMP */
 }
-
-#ifdef CONFIG_SMP
-static void smp_unlazy_onefpu(void *arg)
-{
-	struct pt_regs *regs = current->thread.regs;
-
-	if (!regs)
-		return;
-	if (regs->msr & MSR_FP)
-		giveup_fpu(current);
-}
-
-void dump_smp_unlazy_fpu(void)
-{
-	smp_call_function(smp_unlazy_onefpu, NULL, 1, 1);
-}
-#endif
 
 int dump_task_fpu(struct task_struct *tsk, elf_fpregset_t *fpregs)
 {
@@ -129,12 +115,9 @@ struct task_struct *__switch_to(struct task_struct *prev,
 	return last;
 }
 
-char *ppc_find_proc_name(unsigned *p, char *buf, unsigned buflen);
-
 void show_regs(struct pt_regs * regs)
 {
 	int i;
-	char name_buf[256];
 
 	printk("NIP: %016lX XER: %016lX LR: %016lX\n",
 	       regs->nip, regs->xer, regs->link);
@@ -169,8 +152,7 @@ void show_regs(struct pt_regs * regs)
 	 * above info out without failing
 	 */
 	printk("NIP [%016lx] ", regs->nip);
-	printk("%s\n", ppc_find_proc_name((unsigned *)regs->nip,
-	       name_buf, 256));
+	print_symbol("%s\n", regs->nip);
 	show_stack(current, (unsigned long *)regs->gpr[1]);
 }
 
@@ -384,104 +366,6 @@ out:
 	return error;
 }
 
-void initialize_paca_hardware_interrupt_stack(void)
-{
-	int i;
-	unsigned long stack;
-	unsigned long end_of_stack =0;
-
-	for (i=1; i < NR_CPUS; i++) {
-		if (!cpu_possible(i))
-			continue;
-		/* Carve out storage for the hardware interrupt stack */
-		stack = __get_free_pages(GFP_ATOMIC, get_order(8*PAGE_SIZE));
-
-		if ( !stack ) {     
-			printk("ERROR, cannot find space for hardware stack.\n");
-			panic(" no hardware stack ");
-		}
-
-
-		/* Store the stack value in the PACA for the processor */
-		paca[i].xHrdIntStack = stack + (8*PAGE_SIZE) - STACK_FRAME_OVERHEAD;
-		paca[i].xHrdIntCount = 0;
-
-	}
-
-	/*
-	 * __get_free_pages() might give us a page > KERNBASE+256M which
-	 * is mapped with large ptes so we can't set up the guard page.
-	 */
-	if (cur_cpu_spec->cpu_features & CPU_FTR_16M_PAGE)
-		return;
-
-	for (i=0; i < NR_CPUS; i++) {
-		if (!cpu_possible(i))
-			continue;
-		/* set page at the top of stack to be protected - prevent overflow */
-		end_of_stack = paca[i].xHrdIntStack - (8*PAGE_SIZE - STACK_FRAME_OVERHEAD);
-		ppc_md.hpte_updateboltedpp(PP_RXRX,end_of_stack);
-	}
-}
-
-extern char _stext[], _etext[], __init_begin[], __init_end[];
-
-char *ppc_find_proc_name(unsigned *p, char *buf, unsigned buflen)
-{
-	unsigned long tb_flags;
-	unsigned short name_len;
-	unsigned long tb_start, code_start, code_ptr, code_offset;
-	unsigned int code_len;
-	unsigned long end;
-
-	strcpy(buf, "Unknown");
-	code_ptr = (unsigned long)p;
-	code_offset = 0;
-
-	/* handle functions in text and init sections */
-	if (((unsigned long)p >= (unsigned long)_stext) && 
-	    ((unsigned long)p < (unsigned long)_etext))
-		end = (unsigned long)_etext;
-	else if (((unsigned long)p >= (unsigned long)__init_begin) && 
-		 ((unsigned long)p < (unsigned long)__init_end))
-		end = (unsigned long)__init_end;
-	else
-		return buf;
-
-	while ((unsigned long)p < end) {
-		if (*p == 0) {
-			tb_start = (unsigned long)p;
-			++p;	/* Point to traceback flags */
-			tb_flags = *((unsigned long *)p);
-			p += 2;	/* Skip over traceback flags */
-			if (tb_flags & TB_NAME_PRESENT) {
-				if (tb_flags & TB_PARMINFO)
-					++p;	/* skip over parminfo data */
-				if (tb_flags & TB_HAS_TBOFF) {
-					code_len = *p;	/* get code length */
-					code_start = tb_start - code_len;
-					code_offset = code_ptr - code_start + 1;
-					if (code_offset > 0x100000)
-						break;
-					++p;	/* skip over code size */
-				}
-				name_len = *((unsigned short *)p);
-				if (name_len > (buflen-20))
-					name_len = buflen-20;
-				memcpy(buf, ((char *)p)+2, name_len);
-				buf[name_len] = 0;
-				if (code_offset)
-					sprintf(buf+name_len, "+0x%lx",
-						code_offset-1); 
-			}
-			break;
-		}
-		++p;
-	}
-
-	return buf;
-}
-
 /*
  * These bracket the sleeping functions..
  */
@@ -521,7 +405,6 @@ void show_stack(struct task_struct *p, unsigned long *_sp)
 	unsigned long ip;
 	unsigned long stack_page = (unsigned long)p->thread_info;
 	int count = 0;
-	char name_buf[256];
 	unsigned long sp = (unsigned long)_sp;
 
 	if (!p)
@@ -540,8 +423,7 @@ void show_stack(struct task_struct *p, unsigned long *_sp)
 		if (__get_user(ip, (unsigned long *)(sp + 16)))
 			break;
 		printk("[%016lx] ", ip);
-		printk("%s\n", ppc_find_proc_name((unsigned *)ip,
-		       name_buf, 256));
+		print_symbol("%s\n", ip);
 	} while (count++ < 32);
 }
 
@@ -549,6 +431,8 @@ void dump_stack(void)
 {
 	show_stack(current, (unsigned long *)_get_SP());
 }
+
+EXPORT_SYMBOL(dump_stack);
 
 void show_trace_task(struct task_struct *tsk)
 {

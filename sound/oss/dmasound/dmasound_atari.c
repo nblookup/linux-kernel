@@ -35,7 +35,7 @@
 extern void atari_microwire_cmd(int cmd);
 
 static int is_falcon;
-static int write_sq_ignore_int = 0;	/* ++TeSche: used for Falcon */
+static int write_sq_ignore_int;	/* ++TeSche: used for Falcon */
 
 static int expand_bal;	/* Balance factor for expanding (not volume!) */
 static int expand_data;	/* Data for expanding */
@@ -115,8 +115,6 @@ static ssize_t ata_ctx_u16le(const u_char *userPtr, size_t userCount,
 /*** Low level stuff *********************************************************/
 
 
-static void AtaOpen(void);
-static void AtaRelease(void);
 static void *AtaAlloc(unsigned int size, int flags);
 static void AtaFree(void *, unsigned int size);
 static int AtaIrqInit(void);
@@ -813,16 +811,6 @@ static TRANS transFalconExpanding = {
  * Atari (TT/Falcon)
  */
 
-static void AtaOpen(void)
-{
-	MOD_INC_USE_COUNT;
-}
-
-static void AtaRelease(void)
-{
-	MOD_DEC_USE_COUNT;
-}
-
 static void *AtaAlloc(unsigned int size, int flags)
 {
 	return atari_stram_alloc(size, "dmasound");
@@ -1256,7 +1244,7 @@ static irqreturn_t AtaInterrupt(int irq, void *dummy, struct pt_regs *fp)
 {
 #if 0
 	/* ++TeSche: if you should want to test this... */
-	static int cnt = 0;
+	static int cnt;
 	if (write_sq.active == 2)
 		if (++cnt == 10) {
 			/* simulate losing an interrupt */
@@ -1521,8 +1509,7 @@ static SETTINGS def_soft = {
 static MACHINE machTT = {
 	.name		= "Atari",
 	.name2		= "TT",
-	.open		= AtaOpen,
-	.release	= AtaRelease,
+	.owner		= THIS_MODULE,
 	.dma_alloc	= AtaAlloc,
 	.dma_free	= AtaFree,
 	.irqinit	= AtaIrqInit,

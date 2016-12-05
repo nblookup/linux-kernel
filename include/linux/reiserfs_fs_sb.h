@@ -133,7 +133,7 @@ typedef enum {
 struct reiserfs_journal_cnode {
   struct buffer_head *bh ;		 /* real buffer head */
   struct super_block *sb ;		 /* dev of real buffer head */
-  unsigned long blocknr ;		 /* block number of real buffer head, == 0 when buffer on disk */		 
+  __u32 blocknr ;		 /* block number of real buffer head, == 0 when buffer on disk */
   long state ;
   struct reiserfs_journal_list *jlist ;  /* journal list this cnode lives in */
   struct reiserfs_journal_cnode *next ;  /* next in transaction list */
@@ -468,7 +468,7 @@ struct reiserfs_sb_info
 
 
 void reiserfs_file_buffer (struct buffer_head * bh, int list);
-int is_reiserfs_super(struct super_block *s)  ;
+extern struct file_system_type reiserfs_fs_type;
 int journal_mark_dirty(struct reiserfs_transaction_handle *, struct super_block *, struct buffer_head *bh) ;
 int flush_old_commits(struct super_block *s, int) ;
 int show_reiserfs_locks(void) ;

@@ -42,7 +42,7 @@ static LIST_HEAD(snd_control_ioctls);
 
 static int snd_ctl_open(struct inode *inode, struct file *file)
 {
-	int cardnum = SNDRV_MINOR_CARD(minor(inode->i_rdev));
+	int cardnum = SNDRV_MINOR_CARD(iminor(inode));
 	unsigned long flags;
 	snd_card_t *card;
 	snd_ctl_file_t *ctl;
@@ -504,8 +504,10 @@ static int snd_ctl_elem_list(snd_card_t *card, snd_ctl_elem_list_t *_list)
 			offset = 0;
 		}
 		up_read(&card->controls_rwsem);
-		if (list.used > 0 && copy_to_user(list.pids, dst, list.used * sizeof(snd_ctl_elem_id_t)))
+		if (list.used > 0 && copy_to_user(list.pids, dst, list.used * sizeof(snd_ctl_elem_id_t))) {
+			vfree(dst);
 			return -EFAULT;
+		}
 		vfree(dst);
 	} else {
 		down_read(&card->controls_rwsem);
@@ -820,10 +822,9 @@ static ssize_t snd_ctl_read(struct file *file, char *buffer, size_t count, loff_
 			}
 			init_waitqueue_entry(&wait, current);
 			add_wait_queue(&ctl->change_sleep, &wait);
-			spin_unlock_irq(&ctl->read_lock);
 			set_current_state(TASK_INTERRUPTIBLE);
+			spin_unlock_irq(&ctl->read_lock);
 			schedule();
-			set_current_state(TASK_RUNNING);
 			remove_wait_queue(&ctl->change_sleep, &wait);
 			if (signal_pending(current))
 				return result > 0 ? result : -ERESTARTSYS;

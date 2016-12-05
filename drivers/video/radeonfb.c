@@ -185,7 +185,7 @@ enum radeon_montype
 };
 
 
-static struct pci_device_id radeonfb_pci_table[] __devinitdata = {
+static struct pci_device_id radeonfb_pci_table[] = {
 	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RADEON_QD, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RADEON_QD},
 	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RADEON_QE, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RADEON_QE},
 	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RADEON_QF, PCI_ANY_ID, PCI_ANY_ID, 0, 0, RADEON_QF},
@@ -1432,7 +1432,7 @@ static int radeonfb_check_var (struct fb_var_screeninfo *var, struct fb_info *in
 			den = 1;
 			v.red.offset = 10;
 			v.green.offset = 5;
-			v.red.offset = 0;
+			v.blue.offset = 0;
 			v.red.length = v.green.length = v.blue.length = 5;
 			v.transp.offset = v.transp.length = 0;
 			break;

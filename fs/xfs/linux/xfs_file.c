@@ -58,17 +58,175 @@
 static struct vm_operations_struct linvfs_file_vm_ops;
 
 
+STATIC inline ssize_t
+__linvfs_read(
+	struct kiocb		*iocb,
+	char __user		*buf,
+	int			ioflags,
+	size_t			count,
+	loff_t			pos)
+{
+	struct iovec		iov = {buf, count};
+	struct file		*file = iocb->ki_filp;
+	vnode_t			*vp;
+	int			error;
+
+	BUG_ON(iocb->ki_pos != pos);
+
+	if (unlikely(file->f_flags & O_DIRECT))
+		ioflags |= IO_ISDIRECT;
+	vp = LINVFS_GET_VP(file->f_dentry->d_inode);
+	VOP_READ(vp, iocb, &iov, 1, &iocb->ki_pos, ioflags, NULL, error);
+	return error;
+}
+
+
 STATIC ssize_t
-linvfs_readv(
-	struct file		*filp,
-	const struct iovec	*iovp,
+linvfs_read(
+	struct kiocb		*iocb,
+	char __user		*buf,
+	size_t			count,
+	loff_t			pos)
+{
+	return __linvfs_read(iocb, buf, 0, count, pos);
+}
+
+STATIC ssize_t
+linvfs_read_invis(
+	struct kiocb		*iocb,
+	char __user		*buf,
+	size_t			count,
+	loff_t			pos)
+{
+	return __linvfs_read(iocb, buf, IO_INVIS, count, pos);
+}
+
+
+STATIC inline ssize_t
+__linvfs_write(
+	struct kiocb	*iocb,
+	const char 	*buf,
+	int		ioflags,
+	size_t		count,
+	loff_t		pos)
+{
+	struct iovec	iov = {(void *)buf, count};
+	struct file	*file = iocb->ki_filp;
+	struct inode	*inode = file->f_dentry->d_inode->i_mapping->host;
+	vnode_t		*vp = LINVFS_GET_VP(inode);
+	int		error;
+
+	BUG_ON(iocb->ki_pos != pos);
+	if (unlikely(file->f_flags & O_DIRECT)) {
+		ioflags |= IO_ISDIRECT;
+		VOP_WRITE(vp, iocb, &iov, 1, &iocb->ki_pos,
+				ioflags, NULL, error);
+	} else {
+		down(&inode->i_sem);
+		VOP_WRITE(vp, iocb, &iov, 1, &iocb->ki_pos,
+				ioflags, NULL, error);
+		up(&inode->i_sem);
+	}
+	return error;
+}
+
+
+STATIC ssize_t
+linvfs_write(
+	struct kiocb		*iocb,
+	const char __user	*buf,
+	size_t			count,
+	loff_t			pos)
+{
+	return __linvfs_write(iocb, buf, 0, count, pos);
+}
+
+STATIC ssize_t
+linvfs_write_invis(
+	struct kiocb		*iocb,
+	const char __user	*buf,
+	size_t			count,
+	loff_t			pos)
+{
+	return __linvfs_write(iocb, buf, IO_INVIS, count, pos);
+}
+
+
+STATIC inline ssize_t
+__linvfs_readv(
+	struct file		*file,
+	const struct iovec 	*iov,
+	int			ioflags,
 	unsigned long		nr_segs,
 	loff_t			*ppos)
 {
-	vnode_t			*vp = LINVFS_GET_VP(filp->f_dentry->d_inode);
-	int			error;
+	struct inode	*inode = file->f_dentry->d_inode->i_mapping->host;
+	vnode_t		*vp = LINVFS_GET_VP(inode);
+	struct		kiocb kiocb;
+	int		error;
 
-	VOP_READ(vp, filp, iovp, nr_segs, ppos, NULL, error);
+	init_sync_kiocb(&kiocb, file);
+	kiocb.ki_pos = *ppos;
+
+	if (unlikely(file->f_flags & O_DIRECT))
+		ioflags |= IO_ISDIRECT;
+	VOP_READ(vp, &kiocb, iov, nr_segs, &kiocb.ki_pos, ioflags, NULL, error);
+	if (-EIOCBQUEUED == error)
+		error = wait_on_sync_kiocb(&kiocb);
+	*ppos = kiocb.ki_pos;
+
+	return error;
+}
+
+STATIC ssize_t
+linvfs_readv(
+	struct file		*file,
+	const struct iovec 	*iov,
+	unsigned long		nr_segs,
+	loff_t			*ppos)
+{
+	return __linvfs_readv(file, iov, 0, nr_segs, ppos);
+}
+
+STATIC ssize_t
+linvfs_readv_invis(
+	struct file		*file,
+	const struct iovec 	*iov,
+	unsigned long		nr_segs,
+	loff_t			*ppos)
+{
+	return __linvfs_readv(file, iov, IO_INVIS, nr_segs, ppos);
+}
+
+
+STATIC inline ssize_t
+__linvfs_writev(
+	struct file		*file,
+	const struct iovec 	*iov,
+	int			ioflags,
+	unsigned long		nr_segs,
+	loff_t			*ppos)
+{
+	struct inode	*inode = file->f_dentry->d_inode->i_mapping->host;
+	vnode_t		*vp = LINVFS_GET_VP(inode);
+	struct		kiocb kiocb;
+	int		error;
+
+	init_sync_kiocb(&kiocb, file);
+	kiocb.ki_pos = *ppos;
+	if (unlikely(file->f_flags & O_DIRECT)) {
+		ioflags |= IO_ISDIRECT;
+		VOP_WRITE(vp, &kiocb, iov, nr_segs, &kiocb.ki_pos,
+				ioflags, NULL, error);
+	} else {
+		down(&inode->i_sem);
+		VOP_WRITE(vp, &kiocb, iov, nr_segs, &kiocb.ki_pos,
+				ioflags, NULL, error);
+		up(&inode->i_sem);
+	}
+	if (-EIOCBQUEUED == error)
+		error = wait_on_sync_kiocb(&kiocb);
+	*ppos = kiocb.ki_pos;
 
 	return error;
 }
@@ -76,87 +234,23 @@ linvfs_readv(
 
 STATIC ssize_t
 linvfs_writev(
-	struct file		*filp,
-	const struct iovec	*iovp,
+	struct file		*file,
+	const struct iovec 	*iov,
 	unsigned long		nr_segs,
 	loff_t			*ppos)
 {
-	struct inode		*inode = filp->f_dentry->d_inode;
-	vnode_t			*vp = LINVFS_GET_VP(inode);
-	int			error = filp->f_error;
-
-	if (unlikely(error)) {
-		filp->f_error = 0;
-		return error;
-	}
-
-	/*
-	 * We allow multiple direct writers in, there is no
-	 * potential call to vmtruncate in that path.
-	 */
-	if (filp->f_flags & O_DIRECT) {
-		VOP_WRITE(vp, filp, iovp, nr_segs, ppos, NULL, error);
-	} else {
-		down(&inode->i_sem);
-		VOP_WRITE(vp, filp, iovp, nr_segs, ppos, NULL, error);
-		up(&inode->i_sem);
-	}
-
-	return error;
+	return __linvfs_writev(file, iov, 0, nr_segs, ppos);
 }
 
-
 STATIC ssize_t
-linvfs_read(
-	struct file		*filp,
-	char			*buf,
-	size_t			count,
-	loff_t			*ppos)
-{
-	struct iovec		iov = {buf, count};
-
-	return linvfs_readv(filp, &iov, 1, ppos);
-}
-
-
-STATIC ssize_t
-linvfs_write(
+linvfs_writev_invis(
 	struct file		*file,
-	const char		*buf,
-	size_t			count,
+	const struct iovec 	*iov,
+	unsigned long		nr_segs,
 	loff_t			*ppos)
 {
-	struct iovec		iov = {(void *)buf, count};
-
-	return linvfs_writev(file, &iov, 1, ppos);
+	return __linvfs_writev(file, iov, IO_INVIS, nr_segs, ppos);
 }
-
-
-STATIC ssize_t
-linvfs_aio_read(
-	struct kiocb		*iocb,
-	char			*buf,
-	size_t			count,
-	loff_t			pos)
-{
-	struct iovec		iov = {buf, count};
-
-	return linvfs_readv(iocb->ki_filp, &iov, 1, &iocb->ki_pos);
-}
-
-
-STATIC ssize_t
-linvfs_aio_write(
-	struct kiocb		*iocb,
-	const char		*buf,
-	size_t			count,
-	loff_t			pos)
-{
-	struct iovec		iov = {(void *)buf, count};
-
-	return linvfs_writev(iocb->ki_filp, &iov, 1, &iocb->ki_pos);
-}
-
 
 STATIC ssize_t
 linvfs_sendfile(
@@ -169,8 +263,7 @@ linvfs_sendfile(
 	vnode_t			*vp = LINVFS_GET_VP(filp->f_dentry->d_inode);
 	int			error;
 
-	VOP_SENDFILE(vp, filp, ppos, count, actor, target, NULL, error);
-
+	VOP_SENDFILE(vp, filp, ppos, 0, count, actor, target, NULL, error);
 	return error;
 }
 
@@ -183,7 +276,7 @@ linvfs_open(
 	vnode_t		*vp = LINVFS_GET_VP(inode);
 	int		error;
 
-	if (!(filp->f_flags & O_LARGEFILE) && inode->i_size > MAX_NON_LFS)
+	if (!(filp->f_flags & O_LARGEFILE) && i_size_read(inode) > MAX_NON_LFS)
 		return -EFBIG;
 
 	ASSERT(vp);
@@ -263,9 +356,12 @@ linvfs_readdir(
 		return -ENOMEM;
 
 	uio.uio_iov = &iov;
-	uio.uio_fmode = filp->f_mode;
 	uio.uio_segflg = UIO_SYSSPACE;
-	curr_offset = uio.uio_offset = filp->f_pos;
+	curr_offset = filp->f_pos;
+	if (filp->f_pos != 0x7fffffff)
+		uio.uio_offset = filp->f_pos;
+	else
+		uio.uio_offset = 0xffffffff;
 
 	while (!eof) {
 		uio.uio_resid = iov.iov_len = rlen;
@@ -286,13 +382,13 @@ linvfs_readdir(
 			namelen = strlen(dbp->d_name);
 
 			if (filldir(dirent, dbp->d_name, namelen,
-					(loff_t) curr_offset,
+					(loff_t) curr_offset & 0x7fffffff,
 					(ino_t) dbp->d_ino,
 					DT_UNKNOWN)) {
 				goto done;
 			}
 			size -= dbp->d_reclen;
-			curr_offset = (loff_t)dbp->d_off & 0x7fffffff;
+			curr_offset = (loff_t)dbp->d_off /* & 0x7fffffff */;
 			dbp = nextdp(dbp);
 		}
 	}
@@ -345,7 +441,30 @@ linvfs_ioctl(
 	vnode_t		*vp = LINVFS_GET_VP(inode);
 
 	ASSERT(vp);
-	VOP_IOCTL(vp, inode, filp, cmd, arg, error);
+	VOP_IOCTL(vp, inode, filp, 0, cmd, arg, error);
+	VMODIFY(vp);
+
+	/* NOTE:  some of the ioctl's return positive #'s as a
+	 *	  byte count indicating success, such as
+	 *	  readlink_by_handle.  So we don't "sign flip"
+	 *	  like most other routines.  This means true
+	 *	  errors need to be returned as a negative value.
+	 */
+	return error;
+}
+
+STATIC int
+linvfs_ioctl_invis(
+	struct inode	*inode,
+	struct file	*filp,
+	unsigned int	cmd,
+	unsigned long	arg)
+{
+	int		error;
+	vnode_t		*vp = LINVFS_GET_VP(inode);
+
+	ASSERT(vp);
+	VOP_IOCTL(vp, inode, filp, IO_INVIS, cmd, arg, error);
 	VMODIFY(vp);
 
 	/* NOTE:  some of the ioctl's return positive #'s as a
@@ -381,12 +500,12 @@ linvfs_mprotect(
 
 struct file_operations linvfs_file_operations = {
 	.llseek		= generic_file_llseek,
-	.read		= linvfs_read,
-	.write		= linvfs_write,
+	.read		= do_sync_read,
+	.write		= do_sync_write,
 	.readv		= linvfs_readv,
 	.writev		= linvfs_writev,
-	.aio_read	= linvfs_aio_read,
-	.aio_write	= linvfs_aio_write,
+	.aio_read	= linvfs_read,
+	.aio_write	= linvfs_write,
 	.sendfile	= linvfs_sendfile,
 	.ioctl		= linvfs_ioctl,
 	.mmap		= linvfs_file_mmap,
@@ -394,6 +513,23 @@ struct file_operations linvfs_file_operations = {
 	.release	= linvfs_release,
 	.fsync		= linvfs_fsync,
 };
+
+struct file_operations linvfs_invis_file_operations = {
+	.llseek		= generic_file_llseek,
+	.read		= do_sync_read,
+	.write		= do_sync_write,
+	.readv		= linvfs_readv_invis,
+	.writev		= linvfs_writev_invis,
+	.aio_read	= linvfs_read_invis,
+	.aio_write	= linvfs_write_invis,
+	.sendfile	= linvfs_sendfile,
+	.ioctl		= linvfs_ioctl_invis,
+	.mmap		= linvfs_file_mmap,
+	.open		= linvfs_open,
+	.release	= linvfs_release,
+	.fsync		= linvfs_fsync,
+};
+
 
 struct file_operations linvfs_dir_operations = {
 	.read		= generic_read_dir,

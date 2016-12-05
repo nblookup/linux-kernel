@@ -35,7 +35,7 @@ MODULE_DESCRIPTION("802.1Q match module (ebtables extension), v"
 MODULE_LICENSE("GPL");
 
 
-#define DEBUG_MSG(...) if (debug) printk (KERN_DEBUG "ebt_vlan: " __VA_ARGS__)
+#define DEBUG_MSG(args...) if (debug) printk (KERN_DEBUG "ebt_vlan: " args)
 #define INV_FLAG(_inv_flag_) (info->invflags & _inv_flag_) ? "!" : ""
 #define GET_BITMASK(_BIT_MASK_) info->bitmask & _BIT_MASK_
 #define SET_BITMASK(_BIT_MASK_) info->bitmask |= _BIT_MASK_
@@ -48,7 +48,7 @@ ebt_filter_vlan(const struct sk_buff *skb,
 		const void *data, unsigned int datalen)
 {
 	struct ebt_vlan_info *info = (struct ebt_vlan_info *) data;
-	struct vlan_ethhdr frame;
+	struct vlan_hdr frame;
 
 	unsigned short TCI;	/* Whole TCI, given from parsed frame */
 	unsigned short id;	/* VLAN ID, given from frame TCI */
@@ -94,7 +94,7 @@ ebt_check_vlan(const char *tablename,
 	struct ebt_vlan_info *info = (struct ebt_vlan_info *) data;
 
 	/* Parameters buffer overflow check */
-	if (datalen != sizeof(struct ebt_vlan_info)) {
+	if (datalen != EBT_ALIGN(sizeof(struct ebt_vlan_info))) {
 		DEBUG_MSG
 		    ("passed size %d is not eq to ebt_vlan_info (%Zd)\n",
 		     datalen, sizeof(struct ebt_vlan_info));

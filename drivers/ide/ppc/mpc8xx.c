@@ -27,7 +27,6 @@
 #include <linux/interrupt.h>
 #include <linux/reboot.h>
 #include <linux/init.h>
-#include <linux/blk.h>
 #include <linux/ioport.h>
 #include <linux/ide.h>
 #include <linux/bootmem.h>
@@ -43,7 +42,6 @@
 #include <asm/machdep.h>
 #include <asm/irq.h>
 
-#include "ide_modes.h"
 static int identify  (volatile u8 *p);
 static void print_fixed (volatile u8 *p);
 static void print_funcid (int func);

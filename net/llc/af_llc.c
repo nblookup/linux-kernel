@@ -24,13 +24,12 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/tcp.h>
+#include <linux/rtnetlink.h>
+#include <linux/init.h>
+#include <net/llc.h>
 #include <net/llc_sap.h>
 #include <net/llc_pdu.h>
 #include <net/llc_conn.h>
-#include <net/llc_mac.h>
-#include <net/llc_main.h>
-#include <linux/rtnetlink.h>
-#include <linux/init.h>
 
 /* remember: uninitialized global data is zeroed because its in .bss */
 static u16 llc_ui_sap_last_autoport = LLC_SAP_DYN_START;
@@ -182,10 +181,14 @@ static int llc_ui_release(struct socket *sock)
 	if (!llc_send_disc(sk))
 		llc_ui_wait_for_disc(sk, sk->sk_rcvtimeo);
 	if (!sk->sk_zapped)
-		llc_sap_unassign_sock(llc->sap, sk);
+		llc_sap_remove_socket(llc->sap, sk);
 	release_sock(sk);
-	if (llc->sap && hlist_empty(&llc->sap->sk_list.list))
+	if (llc->sap && hlist_empty(&llc->sap->sk_list.list)) {
+		llc_release_sockets(llc->sap);
 		llc_sap_close(llc->sap);
+	}
+	if (llc->dev)
+		dev_put(llc->dev);
 	sock_put(sk);
 	llc_sk_free(sk);
 out:
@@ -243,67 +246,26 @@ static int llc_ui_autobind(struct socket *sock, struct sockaddr_llc *addr)
 	struct sock *sk = sock->sk;
 	struct llc_opt *llc = llc_sk(sk);
 	struct llc_sap *sap;
-	struct net_device *dev = NULL;
 	int rc = -EINVAL;
 
 	if (!sk->sk_zapped)
 		goto out;
-	/* bind to a specific mac, optional. */
-	if (!llc_mac_null(addr->sllc_smac)) {
-		rtnl_lock();
-		dev = dev_getbyhwaddr(addr->sllc_arphrd, addr->sllc_smac);
-		rtnl_unlock();
-		rc = -ENETUNREACH;
-		if (!dev)
-			goto out;
-		llc->dev = dev;
-	}
-	/* bind to a specific sap, optional. */
-	if (!addr->sllc_ssap) {
-		rc = -EUSERS;
-		addr->sllc_ssap = llc_ui_autoport();
-		if (!addr->sllc_ssap)
-			goto out;
-	}
-	sap = llc_sap_find(addr->sllc_ssap);
-	if (!sap) {
-		sap = llc_sap_open(addr->sllc_ssap, NULL);
-		rc = -EBUSY; /* some other network layer is using the sap */
-		if (!sap)
-			goto out;
-	} else {
-		struct llc_addr laddr, daddr;
-		struct sock *ask;
-
-		rc = -EUSERS; /* can't get exclusive use of sap */
-		if (!dev && llc_mac_null(addr->sllc_mmac))
-			goto out;
-		memset(&laddr, 0, sizeof(laddr));
-		memset(&daddr, 0, sizeof(daddr));
-		if (!llc_mac_null(addr->sllc_mmac)) {
-			if (sk->sk_type != SOCK_DGRAM) {
-				rc = -EOPNOTSUPP;
-				goto out;
-			}
-			memcpy(laddr.mac, addr->sllc_mmac, IFHWADDRLEN);
-		} else
-			memcpy(laddr.mac, addr->sllc_smac, IFHWADDRLEN);
-		laddr.lsap = addr->sllc_ssap;
-		rc = -EADDRINUSE; /* mac + sap clash. */
-		ask = llc_lookup_established(sap, &daddr, &laddr);
-		if (ask) {
-			sock_put(ask);
-			goto out;
-		}
-	}
-	llc->laddr.lsap = addr->sllc_ssap;
-	if (llc->dev)
-		memcpy(llc->laddr.mac, llc->dev->dev_addr, IFHWADDRLEN);
-	llc->daddr.lsap = addr->sllc_dsap;
-	memcpy(llc->daddr.mac, addr->sllc_dmac, IFHWADDRLEN);
+	rc = -ENODEV;
+	llc->dev = dev_getfirstbyhwtype(addr->sllc_arphrd);
+	if (!llc->dev)
+		goto out;
+	rc = -EUSERS;
+	llc->laddr.lsap = llc_ui_autoport();
+	if (!llc->laddr.lsap)
+		goto out;
+	rc = -EBUSY; /* some other network layer is using the sap */
+	sap = llc_sap_open(llc->laddr.lsap, NULL);
+	if (!sap)
+		goto out;
+	memcpy(llc->laddr.mac, llc->dev->dev_addr, IFHWADDRLEN);
 	memcpy(&llc->addr, addr, sizeof(llc->addr));
 	/* assign new connection to its SAP */
-	llc_sap_assign_sock(sap, sk);
+	llc_sap_add_socket(sap, sk);
 	rc = sk->sk_zapped = 0;
 out:
 	return rc;
@@ -331,16 +293,53 @@ static int llc_ui_bind(struct socket *sock, struct sockaddr *uaddr, int addrlen)
 {
 	struct sockaddr_llc *addr = (struct sockaddr_llc *)uaddr;
 	struct sock *sk = sock->sk;
+	struct llc_opt *llc = llc_sk(sk);
+	struct llc_sap *sap;
 	int rc = -EINVAL;
 
-	dprintk("%s: binding %02X\n", __FUNCTION__, addr->sllc_ssap);
+	dprintk("%s: binding %02X\n", __FUNCTION__, addr->sllc_sap);
 	if (!sk->sk_zapped || addrlen != sizeof(*addr))
 		goto out;
 	rc = -EAFNOSUPPORT;
 	if (addr->sllc_family != AF_LLC)
 		goto out;
-	/* use autobind, to avoid code replication. */
-	rc = llc_ui_autobind(sock, addr);
+	if (!addr->sllc_sap) {
+		rc = -EUSERS;
+		addr->sllc_sap = llc_ui_autoport();
+		if (!addr->sllc_sap)
+			goto out;
+	}
+	sap = llc_sap_find(addr->sllc_sap);
+	if (!sap) {
+		sap = llc_sap_open(addr->sllc_sap, NULL);
+		rc = -EBUSY; /* some other network layer is using the sap */
+		if (!sap)
+			goto out;
+	} else {
+		struct llc_addr laddr, daddr;
+		struct sock *ask;
+
+		memset(&laddr, 0, sizeof(laddr));
+		memset(&daddr, 0, sizeof(daddr));
+		/*
+		 * FIXME: check if the the address is multicast,
+		 * 	  only SOCK_DGRAM can do this.
+		 */
+		memcpy(laddr.mac, addr->sllc_mac, IFHWADDRLEN);
+		laddr.lsap = addr->sllc_sap;
+		rc = -EADDRINUSE; /* mac + sap clash. */
+		ask = llc_lookup_established(sap, &daddr, &laddr);
+		if (ask) {
+			sock_put(ask);
+			goto out;
+		}
+	}
+	llc->laddr.lsap = addr->sllc_sap;
+	memcpy(llc->laddr.mac, addr->sllc_mac, IFHWADDRLEN);
+	memcpy(&llc->addr, addr, sizeof(llc->addr));
+	/* assign new connection to its SAP */
+	llc_sap_add_socket(sap, sk);
+	rc = sk->sk_zapped = 0;
 out:
 	return rc;
 }
@@ -385,9 +384,9 @@ out:
  *	@flags: Operational flags specified by the user.
  *
  *	Connect to a remote llc2 mac + sap. The caller must specify the
- *	destination mac and address to connect to. If the user previously
- *	called bind(2) with a smac the user does not need to specify the source
- *	address and mac.
+ *	destination mac and address to connect to. If the user hasn't previously
+ *	called bind(2) with a smac the address of the first interface of the
+ *	specified arp type will be used.
  *	This function will autobind if user did not previously call bind.
  *	Returns: 0 upon success, negative otherwise.
  */
@@ -412,16 +411,10 @@ static int llc_ui_connect(struct socket *sock, struct sockaddr *uaddr,
 		rc = llc_ui_autobind(sock, addr);
 		if (rc)
 			goto out;
+		llc->daddr.lsap = addr->sllc_sap;
+		memcpy(llc->daddr.mac, addr->sllc_mac, IFHWADDRLEN);
 	}
-	if (!llc->dev) {
-		rtnl_lock();
-		dev = dev_getbyhwaddr(addr->sllc_arphrd, addr->sllc_smac);
-		rtnl_unlock();
-		if (!dev)
-			goto out;
-		llc->dev = dev;
-	} else
-		dev = llc->dev;
+	dev = llc->dev;
 	if (sk->sk_type != SOCK_STREAM)
 		goto out;
 	rc = -EALREADY;
@@ -431,7 +424,7 @@ static int llc_ui_connect(struct socket *sock, struct sockaddr *uaddr,
 	sk->sk_state   = TCP_SYN_SENT;
 	llc->link   = llc_ui_next_link_no(llc->sap->laddr.lsap);
 	rc = llc_establish_connection(sk, dev->dev_addr,
-				      addr->sllc_dmac, addr->sllc_dsap);
+				      addr->sllc_mac, addr->sllc_sap);
 	if (rc) {
 		dprintk("%s: llc_ui_send_conn failed :-(\n", __FUNCTION__);
 		sock->state  = SS_UNCONNECTED;
@@ -490,18 +483,18 @@ static int llc_ui_wait_for_disc(struct sock *sk, int timeout)
 	add_wait_queue_exclusive(sk->sk_sleep, &wait);
 	for (;;) {
 		__set_current_state(TASK_INTERRUPTIBLE);
-		rc = -ERESTARTSYS;
-		if (signal_pending(current))
-			break;
-		rc = -EAGAIN;
-		if (!timeout)
-			break;
 		rc = 0;
 		if (sk->sk_state != TCP_CLOSE) {
 			release_sock(sk);
 			timeout = schedule_timeout(timeout);
 			lock_sock(sk);
 		} else
+			break;
+		rc = -ERESTARTSYS;
+		if (signal_pending(current))
+			break;
+		rc = -EAGAIN;
+		if (!timeout)
 			break;
 	}
 	__set_current_state(TASK_RUNNING);
@@ -520,18 +513,18 @@ static int llc_ui_wait_for_conn(struct sock *sk, int timeout)
 		rc = -EAGAIN;
 		if (sk->sk_state == TCP_CLOSE)
 			break;
-		rc = -ERESTARTSYS;
-		if (signal_pending(current))
-			break;
-		rc = -EAGAIN;
-		if (!timeout)
-			break;
 		rc = 0;
 		if (sk->sk_state != TCP_ESTABLISHED) {
 			release_sock(sk);
 			timeout = schedule_timeout(timeout);
 			lock_sock(sk);
 		} else
+			break;
+		rc = -ERESTARTSYS;
+		if (signal_pending(current))
+			break;
+		rc = -EAGAIN;
+		if (!timeout)
 			break;
 	}
 	__set_current_state(TASK_RUNNING);
@@ -549,12 +542,6 @@ static int llc_ui_wait_for_data(struct sock *sk, int timeout)
 		__set_current_state(TASK_INTERRUPTIBLE);
 		if (sk->sk_shutdown & RCV_SHUTDOWN)
 			break;
-		rc = -ERESTARTSYS;
-		if (signal_pending(current))
-			break;
-		rc = -EAGAIN;
-		if (!timeout)
-			break;
 		/*
 		 * Well, if we have backlog, try to process it now.
 		 */
@@ -568,6 +555,12 @@ static int llc_ui_wait_for_data(struct sock *sk, int timeout)
 			timeout = schedule_timeout(timeout);
 			lock_sock(sk);
 		} else
+			break;
+		rc = -ERESTARTSYS;
+		if (signal_pending(current))
+			break;
+		rc = -EAGAIN;
+		if (!timeout)
 			break;
 	}
 	__set_current_state(TASK_RUNNING);
@@ -588,18 +581,18 @@ static int llc_ui_wait_for_busy_core(struct sock *sk, int timeout)
 		rc = -ENOTCONN;
 		if (sk->sk_shutdown & RCV_SHUTDOWN)
 			break;
-		rc = -ERESTARTSYS;
-		if (signal_pending(current))
-			break;
-		rc = -EAGAIN;
-		if (!timeout)
-			break;
 		rc = 0;
 		if (llc_data_accept_state(llc->state) || llc->p_flag) {
 			release_sock(sk);
 			timeout = schedule_timeout(timeout);
 			lock_sock(sk);
 		} else
+			break;
+		rc = -ERESTARTSYS;
+		if (signal_pending(current))
+			break;
+		rc = -EAGAIN;
+		if (!timeout)
 			break;
 	}
 	__set_current_state(TASK_RUNNING);
@@ -624,7 +617,7 @@ static int llc_ui_accept(struct socket *sock, struct socket *newsock, int flags)
 	int rc = -EOPNOTSUPP;
 
 	dprintk("%s: accepting on %02X\n", __FUNCTION__,
-	        llc_sk(sk)->addr.sllc_ssap);
+	        llc_sk(sk)->laddr.lsap);
 	lock_sock(sk);
 	if (sk->sk_type != SOCK_STREAM)
 		goto out;
@@ -636,7 +629,7 @@ static int llc_ui_accept(struct socket *sock, struct socket *newsock, int flags)
 	if (rc)
 		goto out;
 	dprintk("%s: got a new connection on %02X\n", __FUNCTION__,
-	        llc_sk(sk)->addr.sllc_ssap);
+	        llc_sk(sk)->laddr.lsap);
 	skb = skb_dequeue(&sk->sk_receive_queue);
 	rc = -EINVAL;
 	if (!skb->sk)
@@ -652,8 +645,6 @@ static int llc_ui_accept(struct socket *sock, struct socket *newsock, int flags)
 	llc			= llc_sk(sk);
 	newllc			= llc_sk(newsk);
 	memcpy(&newllc->addr, &llc->addr, sizeof(newllc->addr));
-	memcpy(newllc->addr.sllc_dmac, newllc->daddr.mac, IFHWADDRLEN);
-	newllc->addr.sllc_dsap = newllc->daddr.lsap;
 	newllc->link = llc_ui_next_link_no(newllc->laddr.lsap);
 
 	/* put original socket back into a clean listen state. */
@@ -661,7 +652,7 @@ static int llc_ui_accept(struct socket *sock, struct socket *newsock, int flags)
 	sk->sk_ack_backlog--;
 	skb->sk = NULL;
 	dprintk("%s: ok success on %02X, client on %02X\n", __FUNCTION__,
-		llc_sk(sk)->addr.sllc_ssap, newllc->addr.sllc_dsap);
+		llc_sk(sk)->addr.sllc_sap, newllc->daddr.lsap);
 frees:
 	kfree_skb(skb);
 out:
@@ -763,15 +754,7 @@ static int llc_ui_sendmsg(struct kiocb *iocb, struct socket *sock,
 		if (rc)
 			goto release;
 	}
-	if (!llc->dev) {
-		rtnl_lock();
-		dev = dev_getbyhwaddr(addr->sllc_arphrd, addr->sllc_smac);
-		rtnl_unlock();
-		rc = -ENETUNREACH;
-		if (!dev)
-			goto release;
-	} else
-		dev = llc->dev;
+	dev = llc->dev;
 	hdrlen = dev->hard_header_len + llc_ui_header_len(sk, addr);
 	size = hdrlen + len;
 	if (size > dev->mtu)
@@ -790,18 +773,18 @@ static int llc_ui_sendmsg(struct kiocb *iocb, struct socket *sock,
 	if (rc)
 		goto out;
 	if (sk->sk_type == SOCK_DGRAM || addr->sllc_ua) {
-		llc_build_and_send_ui_pkt(llc->sap, skb, addr->sllc_dmac,
-					  addr->sllc_dsap);
+		llc_build_and_send_ui_pkt(llc->sap, skb, addr->sllc_mac,
+					  addr->sllc_sap);
 		goto out;
 	}
 	if (addr->sllc_test) {
-		llc_build_and_send_test_pkt(llc->sap, skb, addr->sllc_dmac,
-					    addr->sllc_dsap);
+		llc_build_and_send_test_pkt(llc->sap, skb, addr->sllc_mac,
+					    addr->sllc_sap);
 		goto out;
 	}
 	if (addr->sllc_xid) {
-		llc_build_and_send_xid_pkt(llc->sap, skb, addr->sllc_dmac,
-					   addr->sllc_dsap);
+		llc_build_and_send_xid_pkt(llc->sap, skb, addr->sllc_mac,
+					   addr->sllc_sap);
 		goto out;
 	}
 	rc = -ENOPROTOOPT;
@@ -849,17 +832,17 @@ static int llc_ui_getname(struct socket *sock, struct sockaddr *uaddr,
 			goto out;
 		if(llc->dev)
 			sllc.sllc_arphrd = llc->dev->type;
-		sllc.sllc_dsap = llc->daddr.lsap;
-		memcpy(&sllc.sllc_dmac, &llc->daddr.mac, IFHWADDRLEN);
+		sllc.sllc_sap = llc->daddr.lsap;
+		memcpy(&sllc.sllc_mac, &llc->daddr.mac, IFHWADDRLEN);
 	} else {
 		rc = -EINVAL;
 		if (!llc->sap)
 			goto out;
-		sllc.sllc_ssap = llc->sap->laddr.lsap;
+		sllc.sllc_sap = llc->sap->laddr.lsap;
 
 		if (llc->dev) {
 			sllc.sllc_arphrd = llc->dev->type;
-			memcpy(&sllc.sllc_smac, &llc->dev->dev_addr,
+			memcpy(&sllc.sllc_mac, &llc->dev->dev_addr,
 			       IFHWADDRLEN);
 		}
 	}
@@ -1042,19 +1025,38 @@ static struct proto_ops llc_ui_ops = {
 	.sendpage    = sock_no_sendpage,
 };
 
-static char llc_ui_banner[] __initdata =
-	KERN_INFO "NET4.0 IEEE 802.2 BSD sockets, Jay Schulist, 2001, "
-		  "Arnaldo C. Melo, 2002-2003\n";
+extern void llc_sap_handler(struct llc_sap *sap, struct sk_buff *skb);
+extern void llc_conn_handler(struct llc_sap *sap, struct sk_buff *skb);
 
-int __init llc_ui_init(void)
+static int __init llc2_init(void)
 {
+	int rc;
+
+	llc_build_offset_table();
+	llc_station_init();
 	llc_ui_sap_last_autoport = LLC_SAP_DYN_START;
-	sock_register(&llc_ui_family_ops);
-	printk(llc_ui_banner);
-	return 0;
+	rc = llc_proc_init();
+	if (!rc) {
+		sock_register(&llc_ui_family_ops);
+		llc_add_pack(LLC_DEST_SAP, llc_sap_handler);
+		llc_add_pack(LLC_DEST_CONN, llc_conn_handler);
+	}
+	return rc;
 }
 
-void __exit llc_ui_exit(void)
+static void __exit llc2_exit(void)
 {
+	llc_station_exit();
+	llc_remove_pack(LLC_DEST_SAP);
+	llc_remove_pack(LLC_DEST_CONN);
 	sock_unregister(PF_LLC);
+	llc_proc_exit();
 }
+
+module_init(llc2_init);
+module_exit(llc2_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Procom 1997, Jay Schullist 2001, Arnaldo C. Melo 2001-2003");
+MODULE_DESCRIPTION("IEEE 802.2 PF_LLC support");
+MODULE_ALIAS_NETPROTO(PF_LLC);

@@ -24,6 +24,7 @@
  *	(Even though the technical memorandum forbids it)
  */
 
+#include <linux/module.h>
 #include <linux/timex.h>
 #include <linux/errno.h>
 #include <linux/smp_lock.h>
@@ -34,6 +35,8 @@
  * programs who obtain this value by using gettimeofday.
  */
 struct timezone sys_tz;
+
+EXPORT_SYMBOL(sys_tz);
 
 #if !defined(__alpha__) && !defined(__ia64__)
 
@@ -66,7 +69,7 @@ asmlinkage long sys_time(int * tloc)
  * architectures that need it).
  */
  
-asmlinkage long sys_stime(int * tptr)
+asmlinkage long sys_stime(time_t *tptr)
 {
 	struct timespec tv;
 
@@ -160,22 +163,25 @@ int do_sys_settimeofday(struct timespec *tv, struct timezone *tz)
 	return 0;
 }
 
-asmlinkage long sys_settimeofday(struct timeval __user *tv, struct timezone __user *tz)
+asmlinkage long sys_settimeofday(struct timeval __user *tv,
+				struct timezone __user *tz)
 {
-	struct timespec	new_tv;
+	struct timeval user_tv;
+	struct timespec	new_ts;
 	struct timezone new_tz;
 
 	if (tv) {
-		if (copy_from_user(&new_tv, tv, sizeof(*tv)))
+		if (copy_from_user(&user_tv, tv, sizeof(*tv)))
 			return -EFAULT;
-		new_tv.tv_nsec *= NSEC_PER_USEC;
+		new_ts.tv_sec = user_tv.tv_sec;
+		new_ts.tv_nsec = user_tv.tv_usec * NSEC_PER_USEC;
 	}
 	if (tz) {
 		if (copy_from_user(&new_tz, tz, sizeof(*tz)))
 			return -EFAULT;
 	}
 
-	return do_sys_settimeofday(tv ? &new_tv : NULL, tz ? &new_tz : NULL);
+	return do_sys_settimeofday(tv ? &new_ts : NULL, tz ? &new_tz : NULL);
 }
 
 long pps_offset;		/* pps time offset (us) */
@@ -230,7 +236,7 @@ int do_adjtimex(struct timex *txc)
 	result = time_state;	/* mostly `TIME_OK' */
 
 	/* Save for later - semantics of adjtime is to return old value */
-	save_adjust = time_adjust;
+	save_adjust = time_next_adjust ? time_next_adjust : time_adjust;
 
 #if 0	/* STA_CLOCKERR is never set yet */
 	time_status &= ~STA_CLOCKERR;		/* reset STA_CLOCKERR */
@@ -277,7 +283,8 @@ int do_adjtimex(struct timex *txc)
 	    if (txc->modes & ADJ_OFFSET) {	/* values checked earlier */
 		if (txc->modes == ADJ_OFFSET_SINGLESHOT) {
 		    /* adjtime() is independent from ntp_adjtime() */
-		    time_adjust = txc->offset;
+		    if ((time_next_adjust = txc->offset) == 0)
+			 time_adjust = 0;
 		}
 		else if ( time_status & (STA_PLL | STA_PPSTIME) ) {
 		    ltemp = (time_status & (STA_PPSTIME | STA_PPSSIGNAL)) ==
@@ -410,6 +417,8 @@ struct timespec current_kernel_time(void)
 	return now; 
 }
 
+EXPORT_SYMBOL(current_kernel_time);
+
 #if (BITS_PER_LONG < 64)
 u64 get_jiffies_64(void)
 {
@@ -422,4 +431,8 @@ u64 get_jiffies_64(void)
 	} while (read_seqretry(&xtime_lock, seq));
 	return ret;
 }
+
+EXPORT_SYMBOL(get_jiffies_64);
 #endif
+
+EXPORT_SYMBOL(jiffies);

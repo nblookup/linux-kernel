@@ -18,6 +18,7 @@
 #include <asm/current.h>
 #include <asm/system.h>
 #include <asm/mmsegment.h>
+#include <linux/personality.h>
 
 #define TF_MASK		0x00000100
 #define IF_MASK		0x00000200
@@ -159,7 +160,6 @@ static inline void clear_in_cr4 (unsigned long mask)
 /*
  * Bus types
  */
-#define EISA_bus 0
 #define MCA_bus 0
 #define MCA_bus__is_a_macro
 
@@ -172,15 +172,18 @@ static inline void clear_in_cr4 (unsigned long mask)
 /* This decides where the kernel will search for a free chunk of vm
  * space during mmap's.
  */
-#define TASK_UNMAPPED_32 0xa0000000
+#define IA32_PAGE_OFFSET ((current->personality & ADDR_LIMIT_3GB) ? 0xc0000000 : 0xFFFFe000)
+#define TASK_UNMAPPED_32 (IA32_PAGE_OFFSET / 3)
 #define TASK_UNMAPPED_64 PAGE_ALIGN(TASK_SIZE/3) 
 #define TASK_UNMAPPED_BASE	\
 	(test_thread_flag(TIF_IA32) ? TASK_UNMAPPED_32 : TASK_UNMAPPED_64)  
 
 /*
- * Size of io_bitmap in longwords: 32 is ports 0-0x3ff.
+ * Size of io_bitmap, covering ports 0 to 0x3ff.
  */
-#define IO_BITMAP_SIZE	32
+#define IO_BITMAP_BITS  1024
+#define IO_BITMAP_BYTES (IO_BITMAP_BITS/8)
+#define IO_BITMAP_LONGS (IO_BITMAP_BYTES/sizeof(long))
 #define IO_BITMAP_OFFSET offsetof(struct tss_struct,io_bitmap)
 #define INVALID_IO_BITMAP_OFFSET 0x8000
 
@@ -212,8 +215,17 @@ struct tss_struct {
 	u32 reserved3;
 	u32 reserved4;
 	u16 reserved5;
-	u16 io_map_base;
-	u32 io_bitmap[IO_BITMAP_SIZE];
+	u16 io_bitmap_base;
+	/*
+	 * The extra 1 is there because the CPU will access an
+	 * additional byte beyond the end of the IO permission
+	 * bitmap. The extra byte must be all 1 bits, and must
+	 * be within the limit. Thus we have:
+	 *
+	 * 128 bytes, the bitmap itself, for ports 0..0x3ff
+	 * 8 bytes, for an extra "long" of ~0UL
+	 */
+	unsigned long io_bitmap[IO_BITMAP_LONGS + 1];
 } __attribute__((packed)) ____cacheline_aligned;
 
 struct thread_struct {
@@ -237,7 +249,7 @@ struct thread_struct {
 /* IO permissions. the bitmap could be moved into the GDT, that would make
    switch faster for a limited number of ioperm using tasks. -AK */
 	int		ioperm;
-	u32	*io_bitmap_ptr;
+	unsigned long	*io_bitmap_ptr;
 /* cached TLS descriptors. */
 	u64 tls_array[GDT_ENTRY_TLS_ENTRIES];
 };
@@ -251,8 +263,8 @@ struct thread_struct {
 #define DOUBLEFAULT_STACK 2 
 #define NMI_STACK 3 
 #define N_EXCEPTION_STACKS 3  /* hw limit: 7 */
-#define EXCEPTION_STKSZ 1024
-#define EXCEPTION_STK_ORDER 0
+#define EXCEPTION_STKSZ (PAGE_SIZE << EXCEPTION_STACK_ORDER)
+#define EXCEPTION_STACK_ORDER 0 
 
 #define start_thread(regs,new_rip,new_rsp) do { \
 	asm volatile("movl %0,%%fs; movl %0,%%es; movl %0,%%ds": :"r" (0));	 \
@@ -366,5 +378,26 @@ static inline void prefetchw(void *x)
 	asm("andq %%rsp,%0; ":"=r" (ti) : "0" (CURRENT_MASK));	\
 	ti->task;					\
 })
+
+#define ASM_NOP1 K8_NOP1
+#define ASM_NOP2 K8_NOP2
+#define ASM_NOP3 K8_NOP3
+#define ASM_NOP4 K8_NOP4
+#define ASM_NOP5 K8_NOP5
+#define ASM_NOP6 K8_NOP6
+#define ASM_NOP7 K8_NOP7
+#define ASM_NOP8 K8_NOP8
+
+/* Opteron nops */
+#define K8_NOP1 ".byte 0x90\n"
+#define K8_NOP2	".byte 0x66,0x90\n" 
+#define K8_NOP3	".byte 0x66,0x66,0x90\n" 
+#define K8_NOP4	".byte 0x66,0x66,0x66,0x90\n" 
+#define K8_NOP5	K8_NOP3 K8_NOP2 
+#define K8_NOP6	K8_NOP3 K8_NOP3
+#define K8_NOP7	K8_NOP4 K8_NOP3
+#define K8_NOP8	K8_NOP4 K8_NOP4
+
+#define ASM_NOP_MAX 8
 
 #endif /* __ASM_X86_64_PROCESSOR_H */

@@ -8,6 +8,7 @@
  */
 
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/highmem.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -135,23 +136,23 @@ static int map_area_pmd(pmd_t *pmd, unsigned long address,
 
 void unmap_vm_area(struct vm_struct *area)
 {
-	unsigned long address = VMALLOC_VMADDR(area->addr);
+	unsigned long address = (unsigned long) area->addr;
 	unsigned long end = (address + area->size);
 	pgd_t *dir;
 
 	dir = pgd_offset_k(address);
-	flush_cache_all();
+	flush_cache_vunmap(address, end);
 	do {
 		unmap_area_pmd(dir, address, end - address);
 		address = (address + PGDIR_SIZE) & PGDIR_MASK;
 		dir++;
 	} while (address && (address < end));
-	flush_tlb_kernel_range(VMALLOC_VMADDR(area->addr), end);
+	flush_tlb_kernel_range((unsigned long) area->addr, end);
 }
 
 int map_vm_area(struct vm_struct *area, pgprot_t prot, struct page ***pages)
 {
-	unsigned long address = VMALLOC_VMADDR(area->addr);
+	unsigned long address = (unsigned long) area->addr;
 	unsigned long end = address + (area->size-PAGE_SIZE);
 	pgd_t *dir;
 	int err = 0;
@@ -174,25 +175,15 @@ int map_vm_area(struct vm_struct *area, pgprot_t prot, struct page ***pages)
 	} while (address && (address < end));
 
 	spin_unlock(&init_mm.page_table_lock);
-	flush_cache_all();
+	flush_cache_vmap((unsigned long) area->addr, end);
 	return err;
 }
 
-
-/**
- *	get_vm_area  -  reserve a contingous kernel virtual area
- *
- *	@size:		size of the area
- *	@flags:		%VM_IOREMAP for I/O mappings or VM_ALLOC
- *
- *	Search an area of @size in the kernel virtual mapping area,
- *	and reserved it for out purposes.  Returns the area descriptor
- *	on success or %NULL on failure.
- */
-struct vm_struct *get_vm_area(unsigned long size, unsigned long flags)
+struct vm_struct *__get_vm_area(unsigned long size, unsigned long flags,
+				unsigned long start, unsigned long end)
 {
 	struct vm_struct **p, *tmp, *area;
-	unsigned long addr = VMALLOC_START;
+	unsigned long addr = start;
 
 	area = kmalloc(sizeof(*area), GFP_KERNEL);
 	if (unlikely(!area))
@@ -209,12 +200,14 @@ struct vm_struct *get_vm_area(unsigned long size, unsigned long flags)
 
 	write_lock(&vmlist_lock);
 	for (p = &vmlist; (tmp = *p) ;p = &tmp->next) {
+		if ((unsigned long)tmp->addr < addr)
+			continue;
 		if ((size + addr) < addr)
 			goto out;
 		if (size + addr <= (unsigned long)tmp->addr)
 			goto found;
 		addr = tmp->size + (unsigned long)tmp->addr;
-		if (addr > VMALLOC_END-size)
+		if (addr > end - size)
 			goto out;
 	}
 
@@ -236,6 +229,21 @@ out:
 	write_unlock(&vmlist_lock);
 	kfree(area);
 	return NULL;
+}
+
+/**
+ *	get_vm_area  -  reserve a contingous kernel virtual area
+ *
+ *	@size:		size of the area
+ *	@flags:		%VM_IOREMAP for I/O mappings or VM_ALLOC
+ *
+ *	Search an area of @size in the kernel virtual mapping area,
+ *	and reserved it for out purposes.  Returns the area descriptor
+ *	on success or %NULL on failure.
+ */
+struct vm_struct *get_vm_area(unsigned long size, unsigned long flags)
+{
+	return __get_vm_area(size, flags, VMALLOC_START, VMALLOC_END);
 }
 
 /**
@@ -317,6 +325,8 @@ void vfree(void *addr)
 	__vunmap(addr, 1);
 }
 
+EXPORT_SYMBOL(vfree);
+
 /**
  *	vunmap  -  release virtual mapping obtained by vmap()
  *
@@ -332,6 +342,8 @@ void vunmap(void *addr)
 	BUG_ON(in_interrupt());
 	__vunmap(addr, 0);
 }
+
+EXPORT_SYMBOL(vunmap);
 
 /**
  *	vmap  -  map an array of pages into virtually contiguous space
@@ -362,6 +374,8 @@ void *vmap(struct page **pages, unsigned int count,
 
 	return area->addr;
 }
+
+EXPORT_SYMBOL(vmap);
 
 /**
  *	__vmalloc  -  allocate virtually contiguous memory
@@ -418,6 +432,8 @@ fail:
 	return NULL;
 }
 
+EXPORT_SYMBOL(__vmalloc);
+
 /**
  *	vmalloc  -  allocate virtually contiguous memory
  *
@@ -434,6 +450,8 @@ void *vmalloc(unsigned long size)
        return __vmalloc(size, GFP_KERNEL | __GFP_HIGHMEM, PAGE_KERNEL);
 }
 
+EXPORT_SYMBOL(vmalloc);
+
 /**
  *	vmalloc_32  -  allocate virtually contiguous memory (32bit addressable)
  *
@@ -446,6 +464,8 @@ void *vmalloc_32(unsigned long size)
 {
 	return __vmalloc(size, GFP_KERNEL, PAGE_KERNEL);
 }
+
+EXPORT_SYMBOL(vmalloc_32);
 
 long vread(char *buf, char *addr, unsigned long count)
 {

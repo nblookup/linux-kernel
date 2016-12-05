@@ -27,6 +27,7 @@
  *	10-06-2002 TG	128K card support added
  */
 
+#include <linux/version.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -73,39 +74,39 @@ __setup("autcpu12_pedr=",autcpu12_pedr);
 extern struct nand_oobinfo jffs2_oobinfo;
 
 static struct mtd_partition partition_info16k[] = {
-	{ name: "AUTCPU12 flash partition 1",
-	  offset:  0,
-	  size:    8 * SZ_1M },
-	{ name: "AUTCPU12 flash partition 2",
-	  offset:  8 * SZ_1M,
-	  size:    8 * SZ_1M },
+	{ .name = "AUTCPU12 flash partition 1",
+	  .offset  = 0,
+	  .size =    8 * SZ_1M },
+	{ .name = "AUTCPU12 flash partition 2",
+	  .offset =  8 * SZ_1M,
+	  .size =    8 * SZ_1M },
 };
 
 static struct mtd_partition partition_info32k[] = {
-	{ name: "AUTCPU12 flash partition 1",
-	  offset:  0,
-	  size:    8 * SZ_1M },
-	{ name: "AUTCPU12 flash partition 2",
-	  offset:  8 * SZ_1M,
-	  size:   24 * SZ_1M },
+	{ .name = "AUTCPU12 flash partition 1",
+	  .offset  = 0,
+	  .size =    8 * SZ_1M },
+	{ .name = "AUTCPU12 flash partition 2",
+	  .offset =  8 * SZ_1M,
+	  .size =   24 * SZ_1M },
 };
 
 static struct mtd_partition partition_info64k[] = {
-	{ name: "AUTCPU12 flash partition 1",
-	  offset:  0,
-	  size:   16 * SZ_1M },
-	{ name: "AUTCPU12 flash partition 2",
-	  offset: 16 * SZ_1M,
-	  size:   48 * SZ_1M },
+	{ .name = "AUTCPU12 flash partition 1",
+	  .offset  = 0,
+	  .size =   16 * SZ_1M },
+	{ .name = "AUTCPU12 flash partition 2",
+	  .offset = 16 * SZ_1M,
+	  .size =   48 * SZ_1M },
 };
 
 static struct mtd_partition partition_info128k[] = {
-	{ name: "AUTCPU12 flash partition 1",
-	  offset:  0,
-	  size:   16 * SZ_1M },
-	{ name: "AUTCPU12 flash partition 2",
-	  offset: 16 * SZ_1M,
-	  size:   112 * SZ_1M },
+	{ .name = "AUTCPU12 flash partition 1",
+	  .offset  = 0,
+	  .size =   16 * SZ_1M },
+	{ .name = "AUTCPU12 flash partition 2",
+	  .offset = 16 * SZ_1M,
+	  .size =   112 * SZ_1M },
 };
 
 #define NUM_PARTITIONS16K 2

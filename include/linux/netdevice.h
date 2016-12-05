@@ -28,7 +28,6 @@
 #include <linux/if.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
-#include <linux/device.h>
 
 #include <asm/atomic.h>
 #include <asm/cache.h>
@@ -36,15 +35,20 @@
 
 #ifdef __KERNEL__
 #include <linux/config.h>
-#ifdef CONFIG_NET_PROFILE
-#include <net/profile.h>
-#endif
+#include <linux/device.h>
+#include <linux/percpu.h>
 
 struct divert_blk;
 struct vlan_group;
+struct ethtool_ops;
+
+					/* source back-compat hook */
+#define SET_ETHTOOL_OPS(netdev,ops) \
+	( (netdev)->ethtool_ops = (ops) )
 
 #define HAVE_ALLOC_NETDEV		/* feature macro: alloc_xxxdev
 					   functions are available. */
+#define HAVE_FREE_NETDEV
 
 #define NET_XMIT_SUCCESS	0
 #define NET_XMIT_DROP		1	/* skb dropped			*/
@@ -161,9 +165,9 @@ struct netif_rx_stats
 	unsigned fastroute_deferred_out;
 	unsigned fastroute_latency_reduction;
 	unsigned cpu_collision;
-} ____cacheline_aligned;
+};
 
-extern struct netif_rx_stats netdev_rx_stat[];
+DECLARE_PER_CPU(struct netif_rx_stats, netdev_rx_stat);
 
 
 /*
@@ -197,7 +201,7 @@ struct hh_cache
 	(HH_DATA_MOD - ((__len) & (HH_DATA_MOD - 1)))
 #define HH_DATA_ALIGN(__len) \
 	(((__len)+(HH_DATA_MOD-1))&~(HH_DATA_MOD - 1))
-	unsigned long	hh_data[HH_DATA_ALIGN(LL_MAX_HEADER)];
+	unsigned long	hh_data[HH_DATA_ALIGN(LL_MAX_HEADER) / sizeof(long)];
 };
 
 /* Reserve HH_DATA_MOD byte aligned hard_header_len, but at least that much.
@@ -299,6 +303,8 @@ struct net_device
 	 * See <net/iw_handler.h> for details. Jean II */
 	struct iw_handler_def *	wireless_handlers;
 
+	struct ethtool_ops *ethtool_ops;
+
 	/*
 	 * This marks the end of the "visible" part of the structure. All
 	 * fields hereafter are internal to the system, and may change at
@@ -376,6 +382,7 @@ struct net_device
 	       NETREG_REGISTERED,	/* completed register todo */
 	       NETREG_UNREGISTERING,	/* called unregister_netdevice */
 	       NETREG_UNREGISTERED,	/* completed unregister todo */
+	       NETREG_RELEASED,		/* called free_netdev */
 	} reg_state;
 
 	/* Net device features */
@@ -462,9 +469,7 @@ struct net_device
 
 	/* class/net/name entry */
 	struct class_device	class_dev;
-
-	/* statistics sub-directory */
-	struct kobject		stats_kobj;
+	struct net_device_stats* (*last_stats)(struct net_device *);
 };
 
 #define SET_MODULE_OWNER(dev) do { } while (0)
@@ -473,17 +478,14 @@ struct net_device
  */
 #define SET_NETDEV_DEV(net, pdev)	((net)->class_dev.dev = (pdev))
 
-
-struct packet_type 
-{
+struct packet_type {
 	unsigned short		type;	/* This is really htons(ether_type).	*/
 	struct net_device		*dev;	/* NULL is wildcarded here		*/
 	int			(*func) (struct sk_buff *, struct net_device *,
 					 struct packet_type *);
-	void			*data;	/* Private to the packet type		*/
+	void			*af_packet_priv;
 	struct list_head	list;
 };
-
 
 #include <linux/interrupt.h>
 #include <linux/notifier.h>
@@ -495,23 +497,34 @@ extern rwlock_t				dev_base_lock;		/* Device list lock */
 extern int			netdev_boot_setup_add(char *name, struct ifmap *map);
 extern int 			netdev_boot_setup_check(struct net_device *dev);
 extern struct net_device    *dev_getbyhwaddr(unsigned short type, char *hwaddr);
+extern struct net_device *__dev_getfirstbyhwtype(unsigned short type);
+extern struct net_device *dev_getfirstbyhwtype(unsigned short type);
 extern void		dev_add_pack(struct packet_type *pt);
 extern void		dev_remove_pack(struct packet_type *pt);
 extern void		__dev_remove_pack(struct packet_type *pt);
-extern int		dev_get(const char *name);
+extern int		__dev_get(const char *name);
+static inline int __deprecated dev_get(const char *name)
+{
+	return __dev_get(name);
+}
 extern struct net_device	*dev_get_by_flags(unsigned short flags,
 						  unsigned short mask);
 extern struct net_device	*__dev_get_by_flags(unsigned short flags,
 						    unsigned short mask);
 extern struct net_device	*dev_get_by_name(const char *name);
 extern struct net_device	*__dev_get_by_name(const char *name);
-extern struct net_device	*dev_alloc(const char *name, int *err);
+extern struct net_device        *__dev_alloc(const char *name, int *err);
+static inline __deprecated struct net_device *dev_alloc(const char *name, int *err)
+{
+	return __dev_alloc(name, err);
+}
 extern int		dev_alloc_name(struct net_device *dev, const char *name);
 extern int		dev_open(struct net_device *dev);
 extern int		dev_close(struct net_device *dev);
 extern int		dev_queue_xmit(struct sk_buff *skb);
 extern int		register_netdevice(struct net_device *dev);
 extern int		unregister_netdevice(struct net_device *dev);
+extern void		free_netdev(struct net_device *dev);
 extern void		synchronize_net(void);
 extern int 		register_netdevice_notifier(struct notifier_block *nb);
 extern int		unregister_netdevice_notifier(struct notifier_block *nb);
@@ -544,10 +557,9 @@ struct softnet_data
 	struct sk_buff		*completion_queue;
 
 	struct net_device	backlog_dev;	/* Sorry. 8) */
-} ____cacheline_aligned;
+};
 
-
-extern struct softnet_data softnet_data[NR_CPUS];
+DECLARE_PER_CPU(struct softnet_data,softnet_data);
 
 #define HAVE_NETIF_QUEUE
 
@@ -555,12 +567,12 @@ static inline void __netif_schedule(struct net_device *dev)
 {
 	if (!test_and_set_bit(__LINK_STATE_SCHED, &dev->state)) {
 		unsigned long flags;
-		int cpu;
+		struct softnet_data *sd;
 
 		local_irq_save(flags);
-		cpu = smp_processor_id();
-		dev->next_sched = softnet_data[cpu].output_queue;
-		softnet_data[cpu].output_queue = dev;
+		sd = &__get_cpu_var(softnet_data);
+		dev->next_sched = sd->output_queue;
+		sd->output_queue = dev;
 		raise_softirq_irqoff(NET_TX_SOFTIRQ);
 		local_irq_restore(flags);
 	}
@@ -605,13 +617,13 @@ static inline int netif_running(const struct net_device *dev)
 static inline void dev_kfree_skb_irq(struct sk_buff *skb)
 {
 	if (atomic_dec_and_test(&skb->users)) {
-		int cpu;
+		struct softnet_data *sd;
 		unsigned long flags;
 
 		local_irq_save(flags);
-		cpu = smp_processor_id();
-		skb->next = softnet_data[cpu].completion_queue;
-		softnet_data[cpu].completion_queue = skb;
+		sd = &__get_cpu_var(softnet_data);
+		skb->next = sd->completion_queue;
+		sd->completion_queue = skb;
 		raise_softirq_irqoff(NET_TX_SOFTIRQ);
 		local_irq_restore(flags);
 	}
@@ -633,6 +645,7 @@ extern int		netif_rx(struct sk_buff *skb);
 #define HAVE_NETIF_RECEIVE_SKB 1
 extern int		netif_receive_skb(struct sk_buff *skb);
 extern int		dev_ioctl(unsigned int cmd, void *);
+extern int		dev_ethtool(struct ifreq *);
 extern unsigned		dev_get_flags(const struct net_device *);
 extern int		dev_change_flags(struct net_device *, unsigned);
 extern int		dev_set_mtu(struct net_device *, int);
@@ -769,12 +782,10 @@ static inline int netif_rx_schedule_prep(struct net_device *dev)
 static inline void __netif_rx_schedule(struct net_device *dev)
 {
 	unsigned long flags;
-	int cpu;
 
 	local_irq_save(flags);
-	cpu = smp_processor_id();
 	dev_hold(dev);
-	list_add_tail(&dev->poll_list, &softnet_data[cpu].poll_list);
+	list_add_tail(&dev->poll_list, &__get_cpu_var(softnet_data).poll_list);
 	if (dev->quota < 0)
 		dev->quota += dev->weight;
 	else
@@ -798,13 +809,11 @@ static inline int netif_rx_reschedule(struct net_device *dev, int undo)
 {
 	if (netif_rx_schedule_prep(dev)) {
 		unsigned long flags;
-		int cpu;
 
 		dev->quota += undo;
 
 		local_irq_save(flags);
-		cpu = smp_processor_id();
-		list_add_tail(&dev->poll_list, &softnet_data[cpu].poll_list);
+		list_add_tail(&dev->poll_list, &__get_cpu_var(softnet_data).poll_list);
 		__raise_softirq_irqoff(NET_RX_SOFTIRQ);
 		local_irq_restore(flags);
 		return 1;
@@ -824,8 +833,41 @@ static inline void netif_rx_complete(struct net_device *dev)
 	local_irq_save(flags);
 	if (!test_bit(__LINK_STATE_RX_SCHED, &dev->state)) BUG();
 	list_del(&dev->poll_list);
+	smp_mb__before_clear_bit();
 	clear_bit(__LINK_STATE_RX_SCHED, &dev->state);
 	local_irq_restore(flags);
+}
+
+static inline void netif_poll_disable(struct net_device *dev)
+{
+	while (test_and_set_bit(__LINK_STATE_RX_SCHED, &dev->state)) {
+		/* No hurry. */
+		current->state = TASK_INTERRUPTIBLE;
+		schedule_timeout(1);
+	}
+}
+
+static inline void netif_poll_enable(struct net_device *dev)
+{
+	clear_bit(__LINK_STATE_RX_SCHED, &dev->state);
+}
+
+/* same as netif_rx_complete, except that local_irq_save(flags)
+ * has already been issued
+ */
+static inline void __netif_rx_complete(struct net_device *dev)
+{
+	if (!test_bit(__LINK_STATE_RX_SCHED, &dev->state)) BUG();
+	list_del(&dev->poll_list);
+	smp_mb__before_clear_bit();
+	clear_bit(__LINK_STATE_RX_SCHED, &dev->state);
+}
+
+static inline void netif_tx_disable(struct net_device *dev)
+{
+	spin_lock_bh(&dev->xmit_lock);
+	netif_stop_queue(dev);
+	spin_unlock_bh(&dev->xmit_lock);
 }
 
 /* These functions live elsewhere (drivers/net/net_init.c, but related) */
@@ -865,6 +907,9 @@ extern int		netdev_fastroute_obstacles;
 extern void		dev_clear_fastroute(struct net_device *dev);
 #endif
 
+#ifdef CONFIG_SYSCTL
+extern char *net_sysctl_strdup(const char *s);
+#endif
 
 #endif /* __KERNEL__ */
 

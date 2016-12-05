@@ -118,7 +118,7 @@ static void RCreset_callback (U32, U32, U32, struct net_device *);
 static void RCreboot_callback (U32, U32, U32, struct net_device *);
 static int RC_allocate_and_post_buffers (struct net_device *, int);
 
-static struct pci_device_id rcpci45_pci_table[] __devinitdata = {
+static struct pci_device_id rcpci45_pci_table[] = {
 	{ PCI_VENDOR_ID_REDCREEK, PCI_DEVICE_ID_RC45, PCI_ANY_ID, PCI_ANY_ID,},
 	{}
 };
@@ -146,7 +146,7 @@ rcpci45_remove_one (struct pci_dev *pdev)
 			     pDpa->msgbuf_dma);
 	if (pDpa->pPab)
 		kfree (pDpa->pPab);
-	kfree (dev);
+	free_netdev (dev);
 	pci_set_drvdata (pdev, NULL);
 }
 
@@ -259,17 +259,19 @@ rcpci45_init_one (struct pci_dev *pdev, const struct pci_device_id *ent)
 	dev->set_config = &RCconfig;
 
 	if ((error = register_netdev(dev)))
-		goto err_out_free_region;
+		goto err_out_iounmap;
 
 	return 0;		/* success */
 
+err_out_iounmap:
+	iounmap((void *) dev->base_addr);
 err_out_free_region:
 	pci_release_regions (pdev);
 err_out_free_msgbuf:
 	pci_free_consistent (pdev, MSG_BUF_SIZE, pDpa->msgbuf,
 			     pDpa->msgbuf_dma);
 err_out_free_dev:
-	kfree (dev);
+	free_netdev (dev);
 err_out:
 	card_idx--;
 	return error;

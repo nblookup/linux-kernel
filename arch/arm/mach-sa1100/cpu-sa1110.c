@@ -270,8 +270,12 @@ static int sa1110_target(struct cpufreq_policy *policy,
 	 * We wait 20ms to be safe.
 	 */
 	sdram_set_refresh(2);
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout(20 * HZ / 1000);
+	if (!irqs_disabled()) {
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		schedule_timeout(20 * HZ / 1000);
+	} else {
+		mdelay(20);
+	}
 
 	/*
 	 * Reprogram the DRAM timings with interrupts disabled, and
@@ -282,19 +286,19 @@ static int sa1110_target(struct cpufreq_policy *policy,
 	local_irq_save(flags);
 	asm("mcr p15, 0, %0, c7, c10, 4" : : "r" (0));
 	udelay(10);
-	__asm__ __volatile__("
-		b	2f
-		.align	5
-1:		str	%3, [%1, #0]		@ MDCNFG
-		str	%4, [%1, #28]		@ MDREFR
-		str	%5, [%1, #4]		@ MDCAS0
-		str	%6, [%1, #8]		@ MDCAS1
-		str	%7, [%1, #12]		@ MDCAS2
-		str	%8, [%2, #0]		@ PPCR
-		ldr	%0, [%1, #0]
-		b	3f
-2:		b	1b
-3:		nop
+	__asm__ __volatile__("					\n\
+		b	2f					\n\
+		.align	5					\n\
+1:		str	%3, [%1, #0]		@ MDCNFG	\n\
+		str	%4, [%1, #28]		@ MDREFR	\n\
+		str	%5, [%1, #4]		@ MDCAS0	\n\
+		str	%6, [%1, #8]		@ MDCAS1	\n\
+		str	%7, [%1, #12]		@ MDCAS2	\n\
+		str	%8, [%2, #0]		@ PPCR		\n\
+		ldr	%0, [%1, #0]				\n\
+		b	3f					\n\
+2:		b	1b					\n\
+3:		nop						\n\
 		nop"
 		: "=&r" (unused)
 		: "r" (&MDCNFG), "r" (&PPCR), "0" (sd.mdcnfg),
@@ -317,7 +321,7 @@ static int __init sa1110_cpu_init(struct cpufreq_policy *policy)
 	if (policy->cpu != 0)
 		return -EINVAL;
 	policy->cur = policy->min = policy->max = sa11x0_getspeed();
-	policy->policy = CPUFREQ_POLICY_POWERSAVE;
+	policy->governor = CPUFREQ_DEFAULT_GOVERNOR;
 	policy->cpuinfo.min_freq = 59000;
 	policy->cpuinfo.max_freq = 287000;
 	policy->cpuinfo.transition_latency = CPUFREQ_ETERNAL;

@@ -17,6 +17,7 @@
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/socket.h>
 #include <linux/sched.h>
 #include <linux/netdevice.h>
@@ -50,6 +51,7 @@ static void neigh_timer_handler(unsigned long arg);
 static void neigh_app_notify(struct neighbour *n);
 #endif
 static int pneigh_ifdown(struct neigh_table *tbl, struct net_device *dev);
+void neigh_changeaddr(struct neigh_table *tbl, struct net_device *dev);
 
 static int neigh_glbl_allocs;
 static struct neigh_table *neigh_tables;
@@ -166,6 +168,33 @@ static void pneigh_queue_purge(struct sk_buff_head *list)
 		dev_put(skb->dev);
 		kfree_skb(skb);
 	}
+}
+
+void neigh_changeaddr(struct neigh_table *tbl, struct net_device *dev)
+{
+	int i;
+
+	write_lock_bh(&tbl->lock);
+
+	for (i=0; i <= NEIGH_HASHMASK; i++) {
+		struct neighbour *n, **np;
+
+		np = &tbl->hash_buckets[i];
+		while ((n = *np) != NULL) {
+			if (dev && n->dev != dev) {
+				np = &n->next;
+				continue;
+			}
+			*np = n->next;
+			write_lock_bh(&n->lock);
+			n->dead = 1;
+			neigh_del_timer(n);
+			write_unlock_bh(&n->lock);
+			neigh_release(n);
+		}
+	}
+
+        write_unlock_bh(&tbl->lock);
 }
 
 int neigh_ifdown(struct neigh_table *tbl, struct net_device *dev)
@@ -1599,6 +1628,9 @@ int neigh_sysctl_register(struct net_device *dev, struct neigh_parms *p,
 			  int p_id, int pdev_id, char *p_name)
 {
 	struct neigh_sysctl_table *t = kmalloc(sizeof(*t), GFP_KERNEL);
+	const char *dev_name_source = NULL;
+	char *dev_name = NULL;
+	int err = 0;
 
 	if (!t)
 		return -ENOBUFS;
@@ -1615,8 +1647,10 @@ int neigh_sysctl_register(struct net_device *dev, struct neigh_parms *p,
 	t->neigh_vars[9].data  = &p->anycast_delay;
 	t->neigh_vars[10].data = &p->proxy_delay;
 	t->neigh_vars[11].data = &p->locktime;
+
+ 	dev_name_source = t->neigh_dev[0].procname;
 	if (dev) {
-		t->neigh_dev[0].procname = dev->name;
+		dev_name_source = dev->name;
 		t->neigh_dev[0].ctl_name = dev->ifindex;
 		memset(&t->neigh_vars[12], 0, sizeof(ctl_table));
 	} else {
@@ -1625,6 +1659,15 @@ int neigh_sysctl_register(struct net_device *dev, struct neigh_parms *p,
 		t->neigh_vars[14].data = (int *)(p + 1) + 2;
 		t->neigh_vars[15].data = (int *)(p + 1) + 3;
 	}
+
+	dev_name = net_sysctl_strdup(dev_name_source);
+	if (!dev_name) {
+		err = -ENOBUFS;
+		goto free;
+	}
+
+ 	t->neigh_dev[0].procname = dev_name;
+
 	t->neigh_neigh_dir[0].ctl_name = pdev_id;
 
 	t->neigh_proto_dir[0].procname = p_name;
@@ -1637,11 +1680,19 @@ int neigh_sysctl_register(struct net_device *dev, struct neigh_parms *p,
 
 	t->sysctl_header = register_sysctl_table(t->neigh_root_dir, 0);
 	if (!t->sysctl_header) {
-		kfree(t);
-		return -ENOBUFS;
+		err = -ENOBUFS;
+		goto free_procname;
 	}
 	p->sysctl_table = t;
 	return 0;
+
+	/* error path */
+ free_procname:
+	kfree(dev_name);
+ free:
+	kfree(t);
+
+	return err;
 }
 
 void neigh_sysctl_unregister(struct neigh_parms *p)
@@ -1650,8 +1701,40 @@ void neigh_sysctl_unregister(struct neigh_parms *p)
 		struct neigh_sysctl_table *t = p->sysctl_table;
 		p->sysctl_table = NULL;
 		unregister_sysctl_table(t->sysctl_header);
+		kfree(t->neigh_dev[0].procname);
 		kfree(t);
 	}
 }
 
 #endif	/* CONFIG_SYSCTL */
+
+EXPORT_SYMBOL(__neigh_event_send);
+EXPORT_SYMBOL(neigh_add);
+EXPORT_SYMBOL(neigh_changeaddr);
+EXPORT_SYMBOL(neigh_compat_output);
+EXPORT_SYMBOL(neigh_connected_output);
+EXPORT_SYMBOL(neigh_create);
+EXPORT_SYMBOL(neigh_delete);
+EXPORT_SYMBOL(neigh_destroy);
+EXPORT_SYMBOL(neigh_dump_info);
+EXPORT_SYMBOL(neigh_event_ns);
+EXPORT_SYMBOL(neigh_ifdown);
+EXPORT_SYMBOL(neigh_lookup);
+EXPORT_SYMBOL(neigh_parms_alloc);
+EXPORT_SYMBOL(neigh_parms_release);
+EXPORT_SYMBOL(neigh_rand_reach_time);
+EXPORT_SYMBOL(neigh_resolve_output);
+EXPORT_SYMBOL(neigh_table_clear);
+EXPORT_SYMBOL(neigh_table_init);
+EXPORT_SYMBOL(neigh_update);
+EXPORT_SYMBOL(neigh_update_hhs);
+EXPORT_SYMBOL(pneigh_enqueue);
+EXPORT_SYMBOL(pneigh_lookup);
+
+#ifdef CONFIG_ARPD
+EXPORT_SYMBOL(neigh_app_ns);
+#endif
+#ifdef CONFIG_SYSCTL
+EXPORT_SYMBOL(neigh_sysctl_register);
+EXPORT_SYMBOL(neigh_sysctl_unregister);
+#endif

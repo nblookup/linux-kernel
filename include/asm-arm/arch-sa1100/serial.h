@@ -7,6 +7,8 @@
  * This is included by serial.c -- serial_sa1100.c makes no use of it.
  */
 
+#include <linux/config.h>
+
 /* Standard COM flags */
 #define STD_COM_FLAGS (ASYNC_BOOT_AUTOCONF | ASYNC_SKIP_TEST)
 
@@ -17,16 +19,12 @@
  */
 #ifdef CONFIG_SA1100_TRIZEPS
 
-#define RS_TABLE_SIZE 2
-
 #define STD_SERIAL_PORT_DEFNS	\
        /* UART	CLK     	PORT		IRQ		FLAGS		*/ \
 	{ 0,	1500000,	TRIZEPS_UART5,	IRQ_GPIO16,	STD_COM_FLAGS },   \
 	{ 0,	1500000,	TRIZEPS_UART6,	IRQ_GPIO17,	STD_COM_FLAGS }
 
 #else
-
-#define RS_TABLE_SIZE 4
 
 /*
  * This assumes you have a 1.8432 MHz clock for your UART.

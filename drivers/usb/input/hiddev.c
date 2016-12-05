@@ -271,7 +271,7 @@ static int hiddev_release(struct inode * inode, struct file * file)
 static int hiddev_open(struct inode * inode, struct file * file) {
 	struct hiddev_list *list;
 
-	int i = minor(inode->i_rdev) - HIDDEV_MINOR_BASE;
+	int i = iminor(inode) - HIDDEV_MINOR_BASE;
 
 	if (i >= HIDDEV_MINORS || !hiddev_table[i])
 		return -ENODEV;
@@ -727,6 +727,7 @@ int hiddev_connect(struct hid_device *hid)
  	retval = usb_register_dev(&hiddev->intf, &hiddev_class);
 	if (retval) {
 		err("Not able to get a minor for this device.");
+		kfree(hiddev);
 		return -1;
 	}
 
@@ -795,11 +796,10 @@ static /* const */ struct usb_driver hiddev_driver = {
 int __init hiddev_init(void)
 {
 	devfs_mk_dir("usb/hid");
-	usb_register(&hiddev_driver);
-	return 0;
+	return usb_register(&hiddev_driver);
 }
 
-void __exit hiddev_exit(void)
+void hiddev_exit(void)
 {
 	usb_deregister(&hiddev_driver);
 	devfs_remove("usb/hid");

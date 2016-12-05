@@ -121,7 +121,7 @@ static int get_registers(pegasus_t * pegasus, __u16 indx, __u16 size,
 	char *buffer;
 	DECLARE_WAITQUEUE(wait, current);
 
-	buffer = kmalloc(size, GFP_DMA);
+	buffer = kmalloc(size, GFP_KERNEL);
 	if (!buffer) {
 		warn("%s: looks like we're out of memory", __FUNCTION__);
 		return -ENOMEM;
@@ -170,7 +170,7 @@ static int set_registers(pegasus_t * pegasus, __u16 indx, __u16 size,
 	char *buffer;
 	DECLARE_WAITQUEUE(wait, current);
 
-	buffer = kmalloc(size, GFP_DMA);
+	buffer = kmalloc(size, GFP_KERNEL);
 	if (!buffer) {
 		warn("%s: looks like we're out of memory", __FUNCTION__);
 		return -ENOMEM;
@@ -218,7 +218,7 @@ static int set_register(pegasus_t * pegasus, __u16 indx, __u8 data)
 	char *tmp;
 	DECLARE_WAITQUEUE(wait, current);
 
-	tmp = kmalloc(1, GFP_DMA);
+	tmp = kmalloc(1, GFP_KERNEL);
 	if (!tmp) {
 		warn("%s: looks like we're out of memory", __FUNCTION__);
 		return -ENOMEM;
@@ -1262,7 +1262,6 @@ static int pegasus_probe(struct usb_interface *intf,
 	}
 	set_ethernet_addr(pegasus);
 	fill_skb_pool(pegasus);
-	printk("%s: %s\n", net->name, usb_dev_id[dev_index].name);
 	if (pegasus->features & PEGASUS_II) {
 		info("setup Pegasus II specific registers");
 		setup_pegasus_II(pegasus);
@@ -1273,9 +1272,11 @@ static int pegasus_probe(struct usb_interface *intf,
 		pegasus->phy = 1;
 	}
 	usb_set_intfdata(intf, pegasus);
+	SET_NETDEV_DEV(net, &intf->dev);
 	res = register_netdev(net);
 	if (res)
 		goto out4;
+	printk("%s: %s\n", net->name, usb_dev_id[dev_index].name);
 	return 0;
 
 out4:
@@ -1309,7 +1310,7 @@ static void pegasus_disconnect(struct usb_interface *intf)
 	free_skb_pool(pegasus);
 	if (pegasus->rx_skb)
 		dev_kfree_skb(pegasus->rx_skb);
-	kfree(pegasus->net);
+	free_netdev(pegasus->net);
 	kfree(pegasus);
 }
 

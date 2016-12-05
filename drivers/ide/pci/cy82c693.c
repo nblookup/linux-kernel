@@ -54,7 +54,6 @@
 
 #include <asm/io.h>
 
-#include "ide_modes.h"
 #include "cy82c693.h"
 
 /*
@@ -113,7 +112,7 @@ static void compute_clocks (u8 pio, pio_clocks_t *p_pclk)
 
 	/* note: we use the same values for 16bit IOR and IOW
          *	those are all the same, since I don't have other
-	 *	timings than those from ide_modes.h
+	 *	timings than those from ide-lib.c
 	 */
 
 	p_pclk->time_16r = (u8)clk1;
@@ -439,7 +438,7 @@ static int __devinit cy82c693_init_one(struct pci_dev *dev, const struct pci_dev
 	return 0;
 }
 
-static struct pci_device_id cy82c693_pci_tbl[] __devinitdata = {
+static struct pci_device_id cy82c693_pci_tbl[] = {
 	{ PCI_VENDOR_ID_CONTAQ, PCI_DEVICE_ID_CONTAQ_82C693, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ 0, },
 };

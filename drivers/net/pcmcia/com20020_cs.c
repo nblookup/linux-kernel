@@ -126,7 +126,7 @@ MODULE_LICENSE("GPL");
 /*====================================================================*/
 
 static void com20020_config(dev_link_t *link);
-static void com20020_release(u_long arg);
+static void com20020_release(dev_link_t *link);
 static int com20020_event(event_t event, int priority,
                        event_callback_args_t *args);
 
@@ -145,22 +145,18 @@ typedef struct com20020_dev_t {
     dev_node_t          node;
 } com20020_dev_t;
 
-/*======================================================================
-
-    This bit of code is used to avoid unregistering network devices
-    at inappropriate times.  2.2 and later kernels are fairly picky
-    about when this can happen.
-    
-======================================================================*/
-
-static void flush_stale_links(void)
+static void com20020_setup(struct net_device *dev)
 {
-    dev_link_t *link, *next;
-    for (link = dev_list; link; link = next) {
-	next = link->next;
-	if (link->state & DEV_STALE_LINK)
-	    com20020_detach(link);
-    }
+	struct arcnet_local *lp = dev->priv;
+
+	lp->timeout = timeout;
+	lp->backplane = backplane;
+	lp->clockp = clockp;
+	lp->clockm = clockm & 3;
+	lp->hw.owner = THIS_MODULE;
+
+	/* fill in our module parameters as defaults */
+	dev->dev_addr[0] = node;
 }
 
 /*======================================================================
@@ -170,14 +166,6 @@ static void flush_stale_links(void)
     with Card Services.
 
 ======================================================================*/
-
-static void com20020cs_open_close(struct net_device *dev, bool open)
-{
-    if (open)
-	MOD_INC_USE_COUNT;
-    else
-	MOD_DEC_USE_COUNT;
-}
 
 static dev_link_t *com20020_attach(void)
 {
@@ -189,7 +177,6 @@ static dev_link_t *com20020_attach(void)
     struct arcnet_local *lp;
     
     DEBUG(0, "com20020_attach()\n");
-    flush_stale_links();
 
     /* Create new network device */
     link = kmalloc(sizeof(struct dev_link_t), GFP_KERNEL);
@@ -200,22 +187,15 @@ static dev_link_t *com20020_attach(void)
     if (!info)
 	goto fail_alloc_info;
 
-    lp =  kmalloc(sizeof(struct arcnet_local), GFP_KERNEL);
-    if (!lp)
-	goto fail_alloc_lp;
-
-    dev = dev_alloc("arc%d", &ret);
+    dev = alloc_netdev(sizeof(struct arcnet_local), "arc%d",
+		       com20020_setup);
     if (!dev)
 	goto fail_alloc_dev;
 
     memset(info, 0, sizeof(struct com20020_dev_t));
-    memset(lp, 0, sizeof(struct arcnet_local));
     memset(link, 0, sizeof(struct dev_link_t));
-    dev->priv = lp;
+    lp = dev->priv;
 
-    init_timer(&link->release);
-    link->release.function = &com20020_release;
-    link->release.data = (u_long)link;
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_8;
     link->io.NumPorts1 = 16;
     link->io.IOAddrLines = 16;
@@ -231,13 +211,6 @@ static dev_link_t *com20020_attach(void)
     link->conf.IntType = INT_MEMORY_AND_IO;
     link->conf.Present = PRESENT_OPTION;
 
-    /* fill in our module parameters as defaults */
-    dev->dev_addr[0] = node;
-    lp->timeout = timeout;
-    lp->backplane = backplane;
-    lp->clockp = clockp;
-    lp->clockm = clockm & 3;
-    lp->hw.open_close_ll = com20020cs_open_close;
 
     link->irq.Instance = info->dev = dev;
     link->priv = info;
@@ -264,8 +237,6 @@ static dev_link_t *com20020_attach(void)
     return link;
 
 fail_alloc_dev:
-    kfree(lp);
-fail_alloc_lp:
     kfree(info);
 fail_alloc_info:
     kfree(link);
@@ -300,11 +271,9 @@ static void com20020_detach(dev_link_t *link)
     dev = info->dev;
 
     if (link->state & DEV_CONFIG) {
-        com20020_release((u_long)link);
-        if (link->state & DEV_STALE_CONFIG) {
-            link->state |= DEV_STALE_LINK;
+        com20020_release(link);
+        if (link->state & DEV_STALE_CONFIG)
             return;
-        }
     }
 
     if (link->handle)
@@ -335,12 +304,10 @@ static void com20020_detach(dev_link_t *link)
 		/* ...but I/O ports are done automatically by card services */
 		
 		unregister_netdev(dev);
-		MOD_DEC_USE_COUNT;
 	    }
 	    
 	    DEBUG(1,"kfree...\n");
-	    kfree(dev->priv);
-	    kfree(dev);
+	    free_netdev(dev);
 	}
 	DEBUG(1,"kfree2...\n");
 	kfree(info);
@@ -393,7 +360,6 @@ static void com20020_config(dev_link_t *link)
 
     /* Configure card */
     link->state |= DEV_CONFIG;
-    strcpy(info->node.dev_name, dev->name);
 
     DEBUG(1,"arcnet: baseport1 is %Xh\n", link->io.BasePort1);
     i = !CS_SUCCESS;
@@ -439,13 +405,11 @@ static void com20020_config(dev_link_t *link)
 	goto failed;
     }
     
-    MOD_INC_USE_COUNT;
-
     lp = dev->priv;
     lp->card_name = "PCMCIA COM20020";
     lp->card_flags = ARC_CAN_10MBIT; /* pretend all of them can 10Mbit */
 
-    i = com20020_found(dev, 0);
+    i = com20020_found(dev, 0);	/* calls register_netdev */
     
     if (i != 0) {
 	DEBUG(1,KERN_NOTICE "com20020_cs: com20020_found() failed\n");
@@ -453,6 +417,7 @@ static void com20020_config(dev_link_t *link)
     }
 
     info->dev_configured = 1;
+    strcpy(info->node.dev_name, dev->name);
     link->dev = &info->node;
     link->state &= ~DEV_CONFIG_PENDING;
 
@@ -464,7 +429,7 @@ cs_failed:
     cs_error(link->handle, last_fn, last_ret);
 failed:
     DEBUG(1,"com20020_config failed...\n");
-    com20020_release((u_long)link);
+    com20020_release(link);
 } /* com20020_config */
 
 /*======================================================================
@@ -475,9 +440,8 @@ failed:
 
 ======================================================================*/
 
-static void com20020_release(u_long arg)
+static void com20020_release(dev_link_t *link)
 {
-    dev_link_t *link = (dev_link_t *)arg;
 
     DEBUG(1,"release...\n");
 
@@ -496,7 +460,9 @@ static void com20020_release(u_long arg)
 
     link->state &= ~(DEV_CONFIG | DEV_RELEASE_PENDING);
 
-} /* com20020_release */
+    if (link->state & DEV_STALE_CONFIG)
+	    com20020_detach(link);
+}
 
 /*======================================================================
 
@@ -521,9 +487,7 @@ static int com20020_event(event_t event, int priority,
         link->state &= ~DEV_PRESENT;
         if (link->state & DEV_CONFIG) {
             netif_device_detach(dev);
-            link->release.expires = jiffies + HZ/20;
             link->state |= DEV_RELEASE_PENDING;
-            add_timer(&link->release);
         }
         break;
     case CS_EVENT_CARD_INSERTION:

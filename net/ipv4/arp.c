@@ -69,6 +69,7 @@
  *		Arnaldo C. Melo :	convert /proc/net/arp to seq_file
  */
 
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
@@ -630,12 +631,6 @@ int arp_process(struct sk_buff *skb)
 	if (in_dev == NULL)
 		goto out;
 
-	/* ARP header, plus 2 device addresses, plus 2 IP addresses.  */
-	if (!pskb_may_pull(skb, (sizeof(struct arphdr) +
-				 (2 * dev->addr_len) +
-				 (2 * sizeof(u32)))))
-		goto out;
-
 	arp = skb->nh.arph;
 
 	switch (dev_type) {
@@ -835,8 +830,15 @@ out:
 
 int arp_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 {
-	struct arphdr *arp = skb->nh.arph;
+	struct arphdr *arp;
 
+	/* ARP header, plus 2 device addresses, plus 2 IP addresses.  */
+	if (!pskb_may_pull(skb, (sizeof(struct arphdr) +
+				 (2 * dev->addr_len) +
+				 (2 * sizeof(u32)))))
+		goto freeskb;
+
+	arp = skb->nh.arph;
 	if (arp->ar_hln != dev->addr_len ||
 	    dev->flags & IFF_NOARP ||
 	    skb->pkt_type == PACKET_OTHERHOST ||
@@ -1071,6 +1073,26 @@ out:
 	return err;
 }
 
+static int arp_netdev_event(struct notifier_block *this, unsigned long event, void *ptr)
+{
+	struct net_device *dev = ptr;
+
+	switch (event) {
+	case NETDEV_CHANGEADDR:
+		neigh_changeaddr(&arp_tbl, dev);
+		rt_cache_flush(0);
+		break;
+	default:
+		break;
+	}
+
+	return NOTIFY_DONE;
+}
+
+struct notifier_block arp_netdev_notifier = {
+	.notifier_call = arp_netdev_event,
+};
+
 /* Note, that it is not on notifier chain.
    It is necessary, that this routine was called after route cache will be
    flushed.
@@ -1088,7 +1110,6 @@ void arp_ifdown(struct net_device *dev)
 static struct packet_type arp_packet_type = {
 	.type =	__constant_htons(ETH_P_ARP),
 	.func =	arp_rcv,
-	.data =	(void*) 1, /* understand shared skbs */
 };
 
 static int arp_proc_init(void);
@@ -1103,6 +1124,7 @@ void __init arp_init(void)
 	neigh_sysctl_register(NULL, &arp_tbl.parms, NET_IPV4,
 			      NET_IPV4_NEIGH, "ipv4");
 #endif
+	register_netdevice_notifier(&arp_netdev_notifier);
 }
 
 #ifdef CONFIG_PROC_FS
@@ -1254,7 +1276,11 @@ static void *arp_get_idx(struct seq_file *seq, loff_t pos)
 
 static void *arp_seq_start(struct seq_file *seq, loff_t *pos)
 {
-	return *pos ? arp_get_idx(seq, *pos - 1) : (void *)1;
+	struct arp_iter_state* state = seq->private;
+
+	state->is_pneigh = 0;
+	state->bucket = 0;
+	return *pos ? arp_get_idx(seq, *pos - 1) : SEQ_START_TOKEN;
 }
 
 static void *arp_seq_next(struct seq_file *seq, void *v, loff_t *pos)
@@ -1262,7 +1288,7 @@ static void *arp_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 	void *rc;
 	struct arp_iter_state* state;
 
-	if (v == (void *)1) {
+	if (v == SEQ_START_TOKEN) {
 		rc = arp_get_idx(seq, 0);
 		goto out;
 	}
@@ -1285,7 +1311,7 @@ static void arp_seq_stop(struct seq_file *seq, void *v)
 {
 	struct arp_iter_state* state = seq->private;
 
-	if (!state->is_pneigh && v != (void *)1)
+	if (!state->is_pneigh && v != SEQ_START_TOKEN)
 		read_unlock_bh(&arp_tbl.lock);
 }
 
@@ -1338,7 +1364,7 @@ static __inline__ void arp_format_pneigh_entry(struct seq_file *seq,
 
 static int arp_seq_show(struct seq_file *seq, void *v)
 {
-	if (v == (void *)1)
+	if (v == SEQ_START_TOKEN)
 		seq_puts(seq, "IP address       HW type     Flags       "
 			      "HW address            Mask     Device\n");
 	else {
@@ -1377,7 +1403,6 @@ static int arp_seq_open(struct inode *inode, struct file *file)
 
 	seq	     = file->private_data;
 	seq->private = s;
-	memset(s, 0, sizeof(*s));
 out:
 	return rc;
 out_kfree:
@@ -1395,14 +1420,9 @@ static struct file_operations arp_seq_fops = {
 
 static int __init arp_proc_init(void)
 {
-	int rc = 0;
-	struct proc_dir_entry *p = create_proc_entry("arp", S_IRUGO, proc_net);
-
-        if (p)
-		p->proc_fops = &arp_seq_fops;
-	else
-		rc = -ENOMEM;
-	return rc;
+	if (!proc_net_fops_create("arp", S_IRUGO, &arp_seq_fops))
+		return -ENOMEM;
+	return 0;
 }
 
 #else /* CONFIG_PROC_FS */
@@ -1413,3 +1433,13 @@ static int __init arp_proc_init(void)
 }
 
 #endif /* CONFIG_PROC_FS */
+
+EXPORT_SYMBOL(arp_broken_ops);
+EXPORT_SYMBOL(arp_find);
+EXPORT_SYMBOL(arp_rcv);
+EXPORT_SYMBOL(arp_send);
+EXPORT_SYMBOL(arp_tbl);
+
+#if defined(CONFIG_ATM_CLIP) || defined(CONFIG_ATM_CLIP_MODULE)
+EXPORT_SYMBOL(clip_tbl_hook);
+#endif

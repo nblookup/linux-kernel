@@ -15,6 +15,7 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/seq_file.h>
 
 #include <asm/pdc.h>
@@ -29,6 +30,7 @@
 int split_tlb;
 int dcache_stride;
 int icache_stride;
+EXPORT_SYMBOL(dcache_stride);
 
 struct pdc_cache_info cache_info;
 #ifndef CONFIG_PA20
@@ -49,6 +51,7 @@ flush_cache_all_local(void)
 	flush_instruction_cache_local();
 	flush_data_cache_local();
 }
+EXPORT_SYMBOL(flush_cache_all_local);
 
 /* flushes EVERYTHING (tlb & cache) */
 
@@ -58,6 +61,7 @@ flush_all_caches(void)
 	flush_cache_all();
 	flush_tlb_all();
 }
+EXPORT_SYMBOL(flush_all_caches);
 
 void
 update_mmu_cache(struct vm_area_struct *vma, unsigned long address, pte_t pte)
@@ -232,7 +236,8 @@ void __flush_dcache_page(struct page *page)
 
 	if (!page->mapping)
 		return;
-
+	/* check shared list first if it's not empty...it's usually
+	 * the shortest */
 	list_for_each(l, &page->mapping->i_mmap_shared) {
 		struct vm_area_struct *mpnt;
 		unsigned long off;
@@ -257,7 +262,35 @@ void __flush_dcache_page(struct page *page)
 		/* All user shared mappings should be equivalently mapped,
 		 * so once we've flushed one we should be ok
 		 */
+		return;
+	}
+
+	/* then check private mapping list for read only shared mappings
+	 * which are flagged by VM_MAYSHARE */
+	list_for_each(l, &page->mapping->i_mmap) {
+		struct vm_area_struct *mpnt;
+		unsigned long off;
+
+		mpnt = list_entry(l, struct vm_area_struct, shared);
+
+
+		if (mpnt->vm_mm != mm || !(mpnt->vm_flags & VM_MAYSHARE))
+			continue;
+
+		if (page->index < mpnt->vm_pgoff)
+			continue;
+
+		off = page->index - mpnt->vm_pgoff;
+		if (off >= (mpnt->vm_end - mpnt->vm_start) >> PAGE_SHIFT)
+			continue;
+
+		flush_cache_page(mpnt, mpnt->vm_start + (off << PAGE_SHIFT));
+
+		/* All user shared mappings should be equivalently mapped,
+		 * so once we've flushed one we should be ok
+		 */
 		break;
 	}
 }
 
+EXPORT_SYMBOL(__flush_dcache_page);

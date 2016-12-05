@@ -103,11 +103,6 @@
 
 #include <linux/kmod.h>
 
-#define IS_CONSOLE_DEV(dev)	(kdev_val(dev) == __mkdev(TTY_MAJOR,0))
-#define IS_TTY_DEV(dev)		(kdev_val(dev) == __mkdev(TTYAUX_MAJOR,0))
-#define IS_SYSCONS_DEV(dev)	(kdev_val(dev) == __mkdev(TTYAUX_MAJOR,1))
-#define IS_PTMX_DEV(dev)	(kdev_val(dev) == __mkdev(TTYAUX_MAJOR,2))
-
 #undef TTY_DEBUG_HANGUP
 
 #define TTY_PARANOIA_CHECK 1
@@ -121,6 +116,8 @@ struct termios tty_std_termios = {	/* for the benefit of tty drivers  */
 		   ECHOCTL | ECHOKE | IEXTEN,
 	.c_cc = INIT_C_CC
 };
+
+EXPORT_SYMBOL(tty_std_termios);
 
 LIST_HEAD(tty_drivers);			/* linked list of tty drivers */
 struct tty_ldisc ldiscs[NR_LDISCS];	/* line disc dispatch table	*/
@@ -136,18 +133,14 @@ static void initialize_tty_struct(struct tty_struct *tty);
 
 static ssize_t tty_read(struct file *, char *, size_t, loff_t *);
 static ssize_t tty_write(struct file *, const char *, size_t, loff_t *);
+ssize_t redirected_tty_write(struct file *, const char *, size_t, loff_t *);
 static unsigned int tty_poll(struct file *, poll_table *);
 static int tty_open(struct inode *, struct file *);
 static int tty_release(struct inode *, struct file *);
 int tty_ioctl(struct inode * inode, struct file * file,
 	      unsigned int cmd, unsigned long arg);
 static int tty_fasync(int fd, struct file * filp, int on);
-extern int vme_scc_init (void);
-extern int serial167_init(void);
-extern int rs_8xx_init(void);
-extern void tub3270_init(void);
 extern void rs_360_init(void);
-extern void tx3912_rs_init(void);
 
 static struct tty_struct *alloc_tty_struct(void)
 {
@@ -177,21 +170,20 @@ char *tty_name(struct tty_struct *tty, char *buf)
 
 EXPORT_SYMBOL(tty_name);
 
-inline int tty_paranoia_check(struct tty_struct *tty, kdev_t device,
+inline int tty_paranoia_check(struct tty_struct *tty, struct inode *inode,
 			      const char *routine)
 {
 #ifdef TTY_PARANOIA_CHECK
-	static const char badmagic[] = KERN_WARNING
-		"Warning: bad magic number for tty struct (%s) in %s\n";
-	static const char badtty[] = KERN_WARNING
-		"Warning: null TTY for (%s) in %s\n";
-
 	if (!tty) {
-		printk(badtty, cdevname(device), routine);
+		printk(KERN_WARNING
+			"null TTY for (%d:%d) in %s\n",
+			imajor(inode), iminor(inode), routine);
 		return 1;
 	}
 	if (tty->magic != TTY_MAGIC) {
-		printk(badmagic, cdevname(device), routine);
+		printk(KERN_WARNING
+			"bad magic number for tty struct (%d:%d) in %s\n",
+			imajor(inode), iminor(inode), routine);
 		return 1;
 	}
 #endif
@@ -330,13 +322,13 @@ int tty_check_change(struct tty_struct * tty)
 		printk(KERN_WARNING "tty_check_change: tty->pgrp <= 0!\n");
 		return 0;
 	}
-	if (current->pgrp == tty->pgrp)
+	if (process_group(current) == tty->pgrp)
 		return 0;
 	if (is_ignored(SIGTTOU))
 		return 0;
-	if (is_orphaned_pgrp(current->pgrp))
+	if (is_orphaned_pgrp(process_group(current)))
 		return -EIO;
-	(void) kill_pg(current->pgrp,SIGTTOU,1);
+	(void) kill_pg(process_group(current), SIGTTOU, 1);
 	return -ERESTARTSYS;
 }
 
@@ -383,6 +375,17 @@ static struct file_operations tty_fops = {
 	.fasync		= tty_fasync,
 };
 
+static struct file_operations console_fops = {
+	.llseek		= no_llseek,
+	.read		= tty_read,
+	.write		= redirected_tty_write,
+	.poll		= tty_poll,
+	.ioctl		= tty_ioctl,
+	.open		= tty_open,
+	.release	= tty_release,
+	.fasync		= tty_fasync,
+};
+
 static struct file_operations hung_up_tty_fops = {
 	.llseek		= no_llseek,
 	.read		= hung_up_tty_read,
@@ -420,18 +423,13 @@ void do_tty_hangup(void *data)
 		redirect = NULL;
 	}
 	spin_unlock(&redirect_lock);
-	if (f)
-		fput(f);
 	
 	check_tty_count(tty, "do_tty_hangup");
 	file_list_lock();
 	list_for_each_entry(filp, &tty->tty_files, f_list) {
-		if (IS_CONSOLE_DEV(filp->f_dentry->d_inode->i_rdev) ||
-		    IS_SYSCONS_DEV(filp->f_dentry->d_inode->i_rdev)) {
+		if (filp->f_op->write == redirected_tty_write)
 			cons_filp = filp;
-			continue;
-		}
-		if (filp->f_op != &tty_fops)
+		if (filp->f_op->write != tty_write)
 			continue;
 		closecount++;
 		tty_fasync(-1, filp, 0);	/* can't block */
@@ -512,6 +510,8 @@ void do_tty_hangup(void *data)
 	} else if (tty->driver->hangup)
 		(tty->driver->hangup)(tty);
 	unlock_kernel();
+	if (f)
+		fput(f);
 }
 
 void tty_hangup(struct tty_struct * tty)
@@ -611,6 +611,8 @@ void stop_tty(struct tty_struct *tty)
 		(tty->driver->stop)(tty);
 }
 
+EXPORT_SYMBOL(stop_tty);
+
 void start_tty(struct tty_struct *tty)
 {
 	if (!tty->stopped || tty->flow_stopped)
@@ -629,6 +631,8 @@ void start_tty(struct tty_struct *tty)
 	wake_up_interruptible(&tty->write_wait);
 }
 
+EXPORT_SYMBOL(start_tty);
+
 static ssize_t tty_read(struct file * file, char * buf, size_t count, 
 			loff_t *ppos)
 {
@@ -642,27 +646,11 @@ static ssize_t tty_read(struct file * file, char * buf, size_t count,
 
 	tty = (struct tty_struct *)file->private_data;
 	inode = file->f_dentry->d_inode;
-	if (tty_paranoia_check(tty, inode->i_rdev, "tty_read"))
+	if (tty_paranoia_check(tty, inode, "tty_read"))
 		return -EIO;
 	if (!tty || (test_bit(TTY_IO_ERROR, &tty->flags)))
 		return -EIO;
 
-	/* This check not only needs to be done before reading, but also
-	   whenever read_chan() gets woken up after sleeping, so I've
-	   moved it to there.  This should only be done for the N_TTY
-	   line discipline, anyway.  Same goes for write_chan(). -- jlc. */
-#if 0
-	if (!IS_CONSOLE_DEV(inode->i_rdev) && /* don't stop on /dev/console */
-	    (tty->pgrp > 0) &&
-	    (current->tty == tty) &&
-	    (tty->pgrp != current->pgrp))
-		if (is_ignored(SIGTTIN) || is_orphaned_pgrp(current->pgrp))
-			return -EIO;
-		else {
-			(void) kill_pg(current->pgrp, SIGTTIN, 1);
-			return -ERESTARTSYS;
-		}
-#endif
 	lock_kernel();
 	if (tty->ldisc.read)
 		i = (tty->ldisc.read)(tty,file,buf,count);
@@ -727,39 +715,15 @@ static inline ssize_t do_tty_write(
 static ssize_t tty_write(struct file * file, const char * buf, size_t count,
 			 loff_t *ppos)
 {
-	int is_console;
 	struct tty_struct * tty;
 	struct inode *inode = file->f_dentry->d_inode;
-	/*
-	 *      For now, we redirect writes from /dev/console as
-	 *      well as /dev/tty0.
-	 */
-	is_console = IS_SYSCONS_DEV(inode->i_rdev) ||
-		     IS_CONSOLE_DEV(inode->i_rdev);
 
 	/* Can't seek (pwrite) on ttys.  */
 	if (ppos != &file->f_pos)
 		return -ESPIPE;
 
-	if (is_console) {
-		struct file *p = NULL;
-
-		spin_lock(&redirect_lock);
-		if (redirect) {
-			get_file(redirect);
-			p = redirect;
-		}
-		spin_unlock(&redirect_lock);
-
-		if (p) {
-			ssize_t res = vfs_write(p, buf, count, &p->f_pos);
-			fput(p);
-			return res;
-		}
-	}
-
 	tty = (struct tty_struct *)file->private_data;
-	if (tty_paranoia_check(tty, inode->i_rdev, "tty_write"))
+	if (tty_paranoia_check(tty, inode, "tty_write"))
 		return -EIO;
 	if (!tty || !tty->driver->write || (test_bit(TTY_IO_ERROR, &tty->flags)))
 		return -EIO;
@@ -767,6 +731,31 @@ static ssize_t tty_write(struct file * file, const char * buf, size_t count,
 		return -EIO;
 	return do_tty_write(tty->ldisc.write, tty, file,
 			    (const unsigned char *)buf, count);
+}
+
+ssize_t redirected_tty_write(struct file * file, const char * buf, size_t count,
+			 loff_t *ppos)
+{
+	struct file *p = NULL;
+
+	spin_lock(&redirect_lock);
+	if (redirect) {
+		get_file(redirect);
+		p = redirect;
+	}
+	spin_unlock(&redirect_lock);
+
+	if (p) {
+		ssize_t res;
+		/* Can't seek (pwrite) on ttys.  */
+		if (ppos != &file->f_pos)
+			return -ESPIPE;
+		res = vfs_write(p, buf, count, &p->f_pos);
+		fput(p);
+		return res;
+	}
+
+	return tty_write(file, buf, count, ppos);
 }
 
 /* Semaphore to protect creating and releasing a tty */
@@ -834,7 +823,6 @@ static int init_dev(struct tty_driver *driver, int idx,
 	if(!tty)
 		goto fail_no_mem;
 	initialize_tty_struct(tty);
-	tty->device = MKDEV(driver->major, driver->minor_start) + idx;
 	tty->driver = driver;
 	tty->index = idx;
 	tty_line_name(driver, idx, tty->name);
@@ -862,8 +850,6 @@ static int init_dev(struct tty_driver *driver, int idx,
 		if (!o_tty)
 			goto free_mem_out;
 		initialize_tty_struct(o_tty);
-		o_tty->device = MKDEV(driver->other->major,
-					driver->other->minor_start) + idx;
 		o_tty->driver = driver->other;
 		o_tty->index = idx;
 		tty_line_name(driver->other, idx, o_tty->name);
@@ -1019,7 +1005,7 @@ static void release_mem(struct tty_struct *tty, int idx)
 		o_tty->magic = 0;
 		o_tty->driver->refcount--;
 		file_list_lock();
-		list_del(&o_tty->tty_files);
+		list_del_init(&o_tty->tty_files);
 		file_list_unlock();
 		free_tty_struct(o_tty);
 	}
@@ -1033,7 +1019,7 @@ static void release_mem(struct tty_struct *tty, int idx)
 	tty->magic = 0;
 	tty->driver->refcount--;
 	file_list_lock();
-	list_del(&tty->tty_files);
+	list_del_init(&tty->tty_files);
 	file_list_unlock();
 	module_put(tty->driver->owner);
 	free_tty_struct(tty);
@@ -1055,7 +1041,7 @@ static void release_dev(struct file * filp)
 	char	buf[64];
 	
 	tty = (struct tty_struct *)filp->private_data;
-	if (tty_paranoia_check(tty, filp->f_dentry->d_inode->i_rdev, "release_dev"))
+	if (tty_paranoia_check(tty, filp->f_dentry->d_inode, "release_dev"))
 		return;
 
 	check_tty_count(tty, "release_dev");
@@ -1303,14 +1289,11 @@ static int tty_open(struct inode * inode, struct file * filp)
 	int noctty, retval;
 	struct tty_driver *driver;
 	int index;
-	kdev_t device;
-	unsigned short saved_flags;
-
-	saved_flags = filp->f_flags;
+	dev_t device = inode->i_rdev;
+	unsigned short saved_flags = filp->f_flags;
 retry_open:
 	noctty = filp->f_flags & O_NOCTTY;
-	device = inode->i_rdev;
-	if (IS_TTY_DEV(device)) {
+	if (device == MKDEV(TTYAUX_MAJOR,0)) {
 		if (!current->tty)
 			return -ENXIO;
 		driver = current->tty->driver;
@@ -1320,7 +1303,7 @@ retry_open:
 		goto got_driver;
 	}
 #ifdef CONFIG_VT
-	if (IS_CONSOLE_DEV(device)) {
+	if (device == MKDEV(TTY_MAJOR,0)) {
 		extern int fg_console;
 		extern struct tty_driver *console_driver;
 		driver = console_driver;
@@ -1329,7 +1312,7 @@ retry_open:
 		goto got_driver;
 	}
 #endif
-	if (IS_SYSCONS_DEV(device)) {
+	if (device == MKDEV(TTYAUX_MAJOR,1)) {
 		struct console *c = console_drivers;
 		for (c = console_drivers; c; c = c->next) {
 			if (!c->device)
@@ -1345,7 +1328,7 @@ retry_open:
 		return -ENODEV;
 	}
 
-	if (IS_PTMX_DEV(device)) {
+	if (device == MKDEV(TTYAUX_MAJOR,2)) {
 #ifdef CONFIG_UNIX98_PTYS
 		/* find a device that is not in use. */
 		retval = -1;
@@ -1362,7 +1345,7 @@ retry_open:
 		return -ENODEV;
 #endif  /* CONFIG_UNIX_98_PTYS */
 	} else {
-		driver = get_tty_driver(kdev_t_to_nr(device), &index);
+		driver = get_tty_driver(device, &index);
 		if (!driver)
 			return -ENODEV;
 got_driver:
@@ -1404,7 +1387,8 @@ got_driver:
 		/*
 		 * Need to reset f_op in case a hangup happened.
 		 */
-		filp->f_op = &tty_fops;
+		if (filp->f_op == &hung_up_tty_fops)
+			filp->f_op = &tty_fops;
 		goto retry_open;
 	}
 	if (!noctty &&
@@ -1416,7 +1400,7 @@ got_driver:
 		task_unlock(current);
 		current->tty_old_pgrp = 0;
 		tty->session = current->session;
-		tty->pgrp = current->pgrp;
+		tty->pgrp = process_group(current);
 	}
 	return 0;
 }
@@ -1435,7 +1419,7 @@ static unsigned int tty_poll(struct file * filp, poll_table * wait)
 	struct tty_struct * tty;
 
 	tty = (struct tty_struct *)filp->private_data;
-	if (tty_paranoia_check(tty, filp->f_dentry->d_inode->i_rdev, "tty_poll"))
+	if (tty_paranoia_check(tty, filp->f_dentry->d_inode, "tty_poll"))
 		return 0;
 
 	if (tty->ldisc.poll)
@@ -1449,7 +1433,7 @@ static int tty_fasync(int fd, struct file * filp, int on)
 	int retval;
 
 	tty = (struct tty_struct *)filp->private_data;
-	if (tty_paranoia_check(tty, filp->f_dentry->d_inode->i_rdev, "tty_fasync"))
+	if (tty_paranoia_check(tty, filp->f_dentry->d_inode, "tty_fasync"))
 		return 0;
 	
 	retval = fasync_helper(fd, filp, on, &tty->fasync);
@@ -1513,10 +1497,9 @@ static int tiocswinsz(struct tty_struct *tty, struct tty_struct *real_tty,
 	return 0;
 }
 
-static int tioccons(struct inode *inode, struct file *file)
+static int tioccons(struct file *file)
 {
-	if (IS_SYSCONS_DEV(inode->i_rdev) ||
-	    IS_CONSOLE_DEV(inode->i_rdev)) {
+	if (file->f_op->write == redirected_tty_write) {
 		struct file *f;
 		if (!capable(CAP_SYS_ADMIN))
 			return -EPERM;
@@ -1591,7 +1574,7 @@ static int tiocsctty(struct tty_struct *tty, int arg)
 	task_unlock(current);
 	current->tty_old_pgrp = 0;
 	tty->session = current->session;
-	tty->pgrp = current->pgrp;
+	tty->pgrp = process_group(current);
 	return 0;
 }
 
@@ -1723,7 +1706,7 @@ int tty_ioctl(struct inode * inode, struct file * file,
 	int retval;
 	
 	tty = (struct tty_struct *)file->private_data;
-	if (tty_paranoia_check(tty, inode->i_rdev, "tty_ioctl"))
+	if (tty_paranoia_check(tty, inode, "tty_ioctl"))
 		return -EINVAL;
 
 	real_tty = tty;
@@ -1783,7 +1766,7 @@ int tty_ioctl(struct inode * inode, struct file * file,
 		case TIOCSWINSZ:
 			return tiocswinsz(tty, real_tty, (struct winsize *) arg);
 		case TIOCCONS:
-			return real_tty!=tty ? -EINVAL : tioccons(inode, file);
+			return real_tty!=tty ? -EINVAL : tioccons(file);
 		case FIONBIO:
 			return fionbio(file, (int *) arg);
 		case TIOCEXCL:
@@ -1914,8 +1897,10 @@ static void __do_SAK(void *arg)
 			spin_lock(&p->files->file_lock);
 			for (i=0; i < p->files->max_fds; i++) {
 				filp = fcheck_files(p->files, i);
-				if (filp && (filp->f_op == &tty_fops) &&
-				    (filp->private_data == tty)) {
+				if (!filp)
+					continue;
+				if (filp->f_op->read == tty_read &&
+				    filp->private_data == tty) {
 					printk(KERN_NOTICE "SAK: killed process %d"
 					    " (%s): fd#%d opened to the tty\n",
 					    p->pid, p->comm, i);
@@ -2051,6 +2036,8 @@ void tty_flip_buffer_push(struct tty_struct *tty)
 		schedule_delayed_work(&tty->flip.work, 1);
 }
 
+EXPORT_SYMBOL(tty_flip_buffer_push);
+
 /*
  * This subroutine initializes a tty structure.
  */
@@ -2106,7 +2093,7 @@ static spinlock_t tty_dev_list_lock = SPIN_LOCK_UNLOCKED;
 static ssize_t show_dev(struct class_device *class_dev, char *buf)
 {
 	struct tty_dev *tty_dev = to_tty_dev(class_dev);
-	return sprintf(buf, "%04lx\n", (unsigned long)tty_dev->dev);
+	return print_dev_t(buf, tty_dev->dev);
 }
 static CLASS_DEVICE_ATTR(dev, S_IRUGO, show_dev, NULL);
 
@@ -2136,7 +2123,7 @@ error:
 	kfree(tty_dev);
 }
 
-void tty_remove_class_device(dev_t dev)
+static void tty_remove_class_device(dev_t dev)
 {
 	struct tty_dev *tty_dev = NULL;
 	struct list_head *tmp;
@@ -2145,19 +2132,15 @@ void tty_remove_class_device(dev_t dev)
 	spin_lock(&tty_dev_list_lock);
 	list_for_each (tmp, &tty_dev_list) {
 		tty_dev = list_entry(tmp, struct tty_dev, node);
-		if ((MAJOR(tty_dev->dev) == MAJOR(dev)) &&
-		    (MINOR(tty_dev->dev) == MINOR(dev))) {
+		if (tty_dev->dev == dev) {
+			list_del(&tty_dev->node);
 			found = 1;
 			break;
 		}
 	}
-	if (found) {
-		list_del(&tty_dev->node);
-		spin_unlock(&tty_dev_list_lock);
+	spin_unlock(&tty_dev_list_lock);
+	if (found)
 		class_device_unregister(&tty_dev->class_dev);
-	} else {
-		spin_unlock(&tty_dev_list_lock);
-	}
 }
 
 /**
@@ -2334,6 +2317,8 @@ int tty_register_driver(struct tty_driver *driver)
 	return 0;
 }
 
+EXPORT_SYMBOL(tty_register_driver);
+
 /*
  * Called by a tty driver to unregister itself.
  */
@@ -2379,6 +2364,8 @@ int tty_unregister_driver(struct tty_driver *driver)
 	cdev_del(&driver->cdev);
 	return 0;
 }
+
+EXPORT_SYMBOL(tty_unregister_driver);
 
 
 /*
@@ -2436,7 +2423,7 @@ static struct cdev vc0_cdev;
  * Ok, now we can initialize the rest of the tty devices and can count
  * on memory allocations, interrupts etc..
  */
-void __init tty_init(void)
+static int __init tty_init(void)
 {
 	strcpy(tty_cdev.kobj.name, "dev.tty");
 	cdev_init(&tty_cdev, &tty_fops);
@@ -2447,7 +2434,7 @@ void __init tty_init(void)
 	tty_add_class_device ("tty", MKDEV(TTYAUX_MAJOR, 0), NULL);
 
 	strcpy(console_cdev.kobj.name, "dev.console");
-	cdev_init(&console_cdev, &tty_fops);
+	cdev_init(&console_cdev, &console_fops);
 	if (cdev_add(&console_cdev, MKDEV(TTYAUX_MAJOR, 1), 1) ||
 	    register_chrdev_region(MKDEV(TTYAUX_MAJOR, 1), 1, "/dev/console") < 0)
 		panic("Couldn't register /dev/console driver\n");
@@ -2469,7 +2456,7 @@ void __init tty_init(void)
 	
 #ifdef CONFIG_VT
 	strcpy(vc0_cdev.kobj.name, "dev.vc0");
-	cdev_init(&vc0_cdev, &tty_fops);
+	cdev_init(&vc0_cdev, &console_fops);
 	if (cdev_add(&vc0_cdev, MKDEV(TTY_MAJOR, 0), 1) ||
 	    register_chrdev_region(MKDEV(TTY_MAJOR, 0), 1, "/dev/vc/0") < 0)
 		panic("Couldn't register /dev/tty0 driver\n");
@@ -2478,51 +2465,6 @@ void __init tty_init(void)
 
 	vty_init();
 #endif
-
-#ifdef CONFIG_ESPSERIAL  /* init ESP before rs, so rs doesn't see the port */
-	espserial_init();
-#endif
-#if defined(CONFIG_MVME162_SCC) || defined(CONFIG_BVME6000_SCC) || defined(CONFIG_MVME147_SCC)
-	vme_scc_init();
-#endif
-#ifdef CONFIG_SERIAL_TX3912
-	tx3912_rs_init();
-#endif
-#ifdef CONFIG_ROCKETPORT
-	rp_init();
-#endif
-#ifdef CONFIG_SERIAL167
-	serial167_init();
-#endif
-#ifdef CONFIG_CYCLADES
-	cy_init();
-#endif
-#ifdef CONFIG_STALLION
-	stl_init();
-#endif
-#ifdef CONFIG_ISTALLION
-	stli_init();
-#endif
-#ifdef CONFIG_DIGI
-	pcxe_init();
-#endif
-#ifdef CONFIG_DIGIEPCA
-	pc_init();
-#endif
-#ifdef CONFIG_SPECIALIX
-	specialix_init();
-#endif
-#if (defined(CONFIG_8xx) || defined(CONFIG_8260))
-	rs_8xx_init();
-#endif /* CONFIG_8xx */
-	pty_init();
-#ifdef CONFIG_MOXA_INTELLIO
-	moxa_init();
-#endif	
-#ifdef CONFIG_TN3270
-	tub3270_init();
-#endif
-#ifdef CONFIG_A2232
-	a2232board_init();
-#endif
+	return 0;
 }
+module_init(tty_init);

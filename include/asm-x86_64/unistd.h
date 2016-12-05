@@ -461,7 +461,7 @@ __SYSCALL(__NR_fremovexattr, sys_fremovexattr)
 #define __NR_tkill	200
 __SYSCALL(__NR_tkill, sys_tkill) 
 #define __NR_time      201
-__SYSCALL(__NR_time, sys_time)
+__SYSCALL(__NR_time, sys_time64)
 #define __NR_futex     202
 __SYSCALL(__NR_futex, sys_futex)
 #define __NR_sched_setaffinity    203
@@ -526,8 +526,14 @@ __SYSCALL(__NR_exit_group, sys_exit_group)
 __SYSCALL(__NR_epoll_wait, sys_epoll_wait)
 #define __NR_epoll_ctl		233
 __SYSCALL(__NR_epoll_ctl, sys_epoll_ctl)
+#define __NR_tgkill		234
+__SYSCALL(__NR_tgkill, sys_tgkill)
+#define __NR_utimes		235
+__SYSCALL(__NR_utimes, sys_utimes)
+#define __NR_vserver		236
+__SYSCALL(__NR_vserver, sys_ni_syscall)
 
-#define __NR_syscall_max __NR_epoll_ctl
+#define __NR_syscall_max __NR_vserver
 #ifndef __NO_STUBS
 
 /* user-visible error numbers are in the range -1 - -4095 */

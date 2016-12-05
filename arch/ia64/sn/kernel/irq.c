@@ -35,7 +35,6 @@
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/vmalloc.h>
-#include <asm/current.h>
 #include <linux/irq.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
@@ -44,7 +43,6 @@
 #include <asm/sn/sgi.h>
 #include <asm/sn/iograph.h>
 #include <asm/sn/invent.h>
-#include <linux/devfs_fs_kernel.h>
 #include <asm/sn/hcl.h>
 #include <asm/sn/types.h>
 #include <asm/sn/pci/bridge.h>
@@ -62,6 +60,7 @@
 #include <asm/processor.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
+#include <asm/sn/sn2/shub_mmr.h>
 
 int irq_to_bit_pos(int irq);
 static void force_interrupt(int irq);
@@ -292,16 +291,16 @@ sn_check_intr(int irq, pcibr_intr_t intr) {
 	irr_bit = irq_to_vector(irq) % 64;
 	switch (irr_reg_num) {
 		case 0:
-			irr_reg = ia64_get_irr0();
+			irr_reg = ia64_getreg(_IA64_REG_CR_IRR0);
 			break;
 		case 1:
-			irr_reg = ia64_get_irr1();
+			irr_reg = ia64_getreg(_IA64_REG_CR_IRR1);
 			break;
 		case 2:
-			irr_reg = ia64_get_irr2();
+			irr_reg = ia64_getreg(_IA64_REG_CR_IRR2);
 			break;
 		case 3:
-			irr_reg = ia64_get_irr3();
+			irr_reg = ia64_getreg(_IA64_REG_CR_IRR3);
 			break;
 	}
 	if (!test_bit(irr_bit, &irr_reg) ) {
@@ -354,9 +353,9 @@ sn_get_next_bit(void) {
 void
 sn_set_tpr(int vector) {
 	if (vector > IA64_LAST_DEVICE_VECTOR || vector < IA64_FIRST_DEVICE_VECTOR) {
-		ia64_set_tpr(vector);
+		ia64_setreg(_IA64_REG_CR_TPR, vector);
 	} else {
-		ia64_set_tpr(IA64_LAST_DEVICE_VECTOR);
+		ia64_setreg(_IA64_REG_CR_TPR, IA64_LAST_DEVICE_VECTOR);
 	}
 }
 

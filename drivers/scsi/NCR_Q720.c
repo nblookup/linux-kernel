@@ -79,12 +79,13 @@ static int __init
 NCR_Q720_probe_one(struct NCR_Q720_private *p, int siop,
 		int irq, int slot, __u32 paddr, __u32 vaddr)
 {
-	ncr_device device;
+	struct ncr_device device;
 	__u8 scsi_id;
 	static int unit = 0;
 	__u8 scsr1 = readb(vaddr + NCR_Q720_SCSR_OFFSET + 1);
 	__u8 differential = readb(vaddr + NCR_Q720_SCSR_OFFSET) & 0x20;
 	__u8 version;
+	int error;
 
 	scsi_id = scsr1 >> 4;
 	/* enable burst length 16 (FIXME: should allow this) */
@@ -95,7 +96,7 @@ NCR_Q720_probe_one(struct NCR_Q720_private *p, int siop,
 	udelay(10);
 	version = readb(vaddr + 0x18) >> 4;
 
-	memset(&device, 0, sizeof(ncr_device));
+	memset(&device, 0, sizeof(struct ncr_device));
 		/* Initialise ncr_device structure with items required by ncr_attach. */
 	device.chip		= q720_chip;
 	device.chip.revision_id	= version;
@@ -120,9 +121,12 @@ NCR_Q720_probe_one(struct NCR_Q720_private *p, int siop,
 	scsr1 &= ~0x01;
 	writeb(scsr1, vaddr + NCR_Q720_SCSR_OFFSET + 1);
 
-	scsi_add_host(p->hosts[siop], p->dev);
-
-	return 0;
+	error = scsi_add_host(p->hosts[siop], p->dev);
+	if (error)
+		ncr53c8xx_release(p->hosts[siop]);
+	else
+		scsi_scan_host(p->hosts[siop]);
+	return error;
 
  fail:
 	return -ENODEV;
@@ -175,6 +179,7 @@ NCR_Q720_probe(struct device *dev)
 	i = inb(io_base) | (inb(io_base+1)<<8);
 	if(i != NCR_Q720_MCA_ID) {
 		printk(KERN_ERR "NCR_Q720, adapter failed to I/O map registers correctly at 0x%x(0x%x)\n", io_base, i);
+		kfree(p);
 		return -ENODEV;
 	}
 
@@ -287,7 +292,7 @@ NCR_Q720_probe(struct device *dev)
 	}
 
 	mca_device_set_claim(mca_dev, 1);
-	strlcpy(dev->name, "NCR_Q720", sizeof(dev->name));
+	mca_device_set_name(mca_dev, "NCR_Q720");
 	dev_set_drvdata(dev, p);
 
 	return 0;
@@ -347,7 +352,6 @@ static void __exit
 NCR_Q720_exit(void)
 {
 	mca_unregister_driver(&NCR_Q720_driver);
-	//scsi_sysfs_release_attributes(&NCR_Q720_driver_template);
 }
 
 module_init(NCR_Q720_init);

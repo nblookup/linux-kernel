@@ -119,7 +119,7 @@ static int
 ipppd_open(struct inode *ino, struct file *file)
 {
 	unsigned long flags;
-	unsigned int minor = minor(ino->i_rdev) - ISDN_MINOR_PPP;
+	unsigned int minor = iminor(ino) - ISDN_MINOR_PPP;
 	struct ipppd *ipppd;
 
 	ipppd = kmalloc(sizeof(*ipppd), GFP_KERNEL);
@@ -715,7 +715,7 @@ isdn_ppp_bind(isdn_net_dev *idev)
  found:
 	unit = isdn_ppp_if_get_unit(idev->name);	/* get unit number from interface name .. ugly! */
 	if (unit < 0) {
-		printk(KERN_INFO "isdn_ppp_bind: illegal interface name %s.\n", idev->name);
+		printk(KERN_INFO "isdn_ppp_bind: invalid interface name %s.\n", idev->name);
 		retval = -ENODEV;
 		goto err;
 	}

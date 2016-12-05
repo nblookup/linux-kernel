@@ -1,6 +1,6 @@
 /*
- *   Copyright (c) International Business Machines Corp., 2000-2003
- *   Portions Copyright (c) Christoph Hellwig, 2001-2002
+ *   Copyright (C) International Business Machines Corp., 2000-2003
+ *   Portions Copyright (C) Christoph Hellwig, 2001-2002
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -20,6 +20,7 @@
 #include <linux/fs.h>
 #include <linux/config.h>
 #include <linux/module.h>
+#include <linux/parser.h>
 #include <linux/completion.h>
 #include <linux/vfs.h>
 #include <asm/uaccess.h>
@@ -83,6 +84,42 @@ extern void jfs_proc_clean(void);
 extern wait_queue_head_t jfs_IO_thread_wait;
 extern wait_queue_head_t jfs_commit_thread_wait;
 extern wait_queue_head_t jfs_sync_thread_wait;
+
+static void jfs_handle_error(struct super_block *sb)
+{
+	struct jfs_sb_info *sbi = JFS_SBI(sb);
+
+	if (sb->s_flags & MS_RDONLY)
+		return;
+
+	updateSuper(sb, FM_DIRTY);
+
+	if (sbi->flag & JFS_ERR_PANIC)
+		panic("JFS (device %s): panic forced after error\n",
+			sb->s_id);
+	else if (sbi->flag & JFS_ERR_REMOUNT_RO) {
+		jfs_err("ERROR: (device %s): remounting filesystem "
+			"as read-only\n",
+			sb->s_id);
+		sb->s_flags |= MS_RDONLY;
+	} 
+
+	/* nothing is done for continue beyond marking the superblock dirty */
+}
+
+void jfs_error(struct super_block *sb, const char * function, ...)
+{
+	static char error_buf[256];
+	va_list args;
+
+	va_start(args, function);
+	vsprintf(error_buf, function, args);
+	va_end(args);
+
+	printk(KERN_ERR "ERROR: (device %s): %s\n", sb->s_id, error_buf);
+
+	jfs_handle_error(sb);
+}
 
 static struct inode *jfs_alloc_inode(struct super_block *sb)
 {
@@ -164,59 +201,108 @@ static void jfs_put_super(struct super_block *sb)
 	kfree(sbi);
 }
 
+enum {
+	Opt_integrity, Opt_nointegrity, Opt_iocharset, Opt_resize,
+	Opt_errors, Opt_ignore, Opt_err,
+};
+
+static match_table_t tokens = {
+	{Opt_integrity, "integrity"},
+	{Opt_nointegrity, "nointegrity"},
+	{Opt_iocharset, "iocharset=%s"},
+	{Opt_resize, "resize=%u"},
+	{Opt_errors, "errors=%s"},
+	{Opt_ignore, "noquota"},
+	{Opt_ignore, "quota"},
+	{Opt_ignore, "usrquota"},
+	{Opt_ignore, "grpquota"},
+	{Opt_err, NULL}
+};
+
 static int parse_options(char *options, struct super_block *sb, s64 *newLVSize,
 			 int *flag)
 {
 	void *nls_map = NULL;
-	char *this_char;
-	char *value;
+	char *p;
 	struct jfs_sb_info *sbi = JFS_SBI(sb);
 
 	*newLVSize = 0;
 
 	if (!options)
 		return 1;
-	while ((this_char = strsep(&options, ",")) != NULL) {
-		if (!*this_char)
+
+	while ((p = strsep(&options, ",")) != NULL) {
+		substring_t args[MAX_OPT_ARGS];
+		int token;
+		if (!*p)
 			continue;
-		if ((value = strchr(this_char, '=')) != NULL)
-			*value++ = 0;
-		if (!strcmp(this_char, "integrity")) {
+
+		token = match_token(p, tokens, args);
+		switch (token) {
+		case Opt_integrity:
 			*flag &= ~JFS_NOINTEGRITY;
-		} else 	if (!strcmp(this_char, "nointegrity")) {
+			break;
+		case Opt_nointegrity:
 			*flag |= JFS_NOINTEGRITY;
-		} else if (!strcmp(this_char, "iocharset")) {
-			if (!value || !*value)
-				goto needs_arg;
+			break;
+		case Opt_ignore:
+			/* Silently ignore the quota options */
+			/* Don't do anything ;-) */
+			break;
+		case Opt_iocharset:
 			if (nls_map)	/* specified iocharset twice! */
 				unload_nls(nls_map);
-			nls_map = load_nls(value);
+			nls_map = load_nls(args[0].from);
 			if (!nls_map) {
 				printk(KERN_ERR "JFS: charset not found\n");
 				goto cleanup;
 			}
-		} else if (!strcmp(this_char, "resize")) {
-			if (!value || !*value) {
+			break;
+		case Opt_resize:
+		{
+			char *resize = args[0].from;
+			if (!resize || !*resize) {
 				*newLVSize = sb->s_bdev->bd_inode->i_size >>
 					sb->s_blocksize_bits;
 				if (*newLVSize == 0)
 					printk(KERN_ERR
-					 "JFS: Cannot determine volume size\n");
+					"JFS: Cannot determine volume size\n");
 			} else
-				*newLVSize = simple_strtoull(value, &value, 0);
-
-			/* Silently ignore the quota options */
-		} else if (!strcmp(this_char, "grpquota")
-			   || !strcmp(this_char, "noquota")
-			   || !strcmp(this_char, "quota")
-			   || !strcmp(this_char, "usrquota"))
-			/* Don't do anything ;-) */ ;
-		else {
-			printk("jfs: Unrecognized mount option %s\n",
-			       this_char);
+				*newLVSize = simple_strtoull(resize, &resize, 0);
+			break;
+		}
+		case Opt_errors:
+		{
+			char *errors = args[0].from;
+			if (!errors || !*errors)
+				goto cleanup;
+			if (!strcmp(errors, "continue")) {
+				*flag &= ~JFS_ERR_REMOUNT_RO;
+				*flag &= ~JFS_ERR_PANIC;
+				*flag |= JFS_ERR_CONTINUE;
+			} else if (!strcmp(errors, "remount-ro")) {
+				*flag &= ~JFS_ERR_CONTINUE;
+				*flag &= ~JFS_ERR_PANIC;
+				*flag |= JFS_ERR_REMOUNT_RO;
+			} else if (!strcmp(errors, "panic")) {
+				*flag &= ~JFS_ERR_CONTINUE;
+				*flag &= ~JFS_ERR_REMOUNT_RO;
+				*flag |= JFS_ERR_PANIC;
+			} else {
+				printk(KERN_ERR
+				       "JFS: %s is an invalid error handler\n",
+				       errors);
+				goto cleanup;
+			}
+			break;
+		}
+		default:
+			printk("jfs: Unrecognized mount option \"%s\" "
+					" or missing value\n", p);
 			goto cleanup;
 		}
 	}
+
 	if (nls_map) {
 		/* Discard old (if remount) */
 		if (sbi->nls_tab)
@@ -224,8 +310,7 @@ static int parse_options(char *options, struct super_block *sb, s64 *newLVSize,
 		sbi->nls_tab = nls_map;
 	}
 	return 1;
-needs_arg:
-	printk(KERN_ERR "JFS: %s needs an argument\n", this_char);
+
 cleanup:
 	if (nls_map)
 		unload_nls(nls_map);
@@ -284,13 +369,18 @@ static int jfs_fill_super(struct super_block *sb, void *data, int silent)
 
 	jfs_info("In jfs_read_super: s_flags=0x%lx", sb->s_flags);
 
+	if (!new_valid_dev(sb->s_bdev->bd_dev))
+		return -EOVERFLOW;
+
 	sbi = kmalloc(sizeof (struct jfs_sb_info), GFP_KERNEL);
 	if (!sbi)
 		return -ENOSPC;
 	memset(sbi, 0, sizeof (struct jfs_sb_info));
 	sb->s_fs_info = sbi;
 
-	flag = 0;
+	/* initialize the mount flag and determine the default error handler */
+	flag = JFS_ERR_REMOUNT_RO;
+
 	if (!parse_options((char *) data, sb, &newLVSize, &flag)) {
 		kfree(sbi);
 		return -EINVAL;
@@ -382,6 +472,7 @@ static void jfs_write_super_lockfs(struct super_block *sb)
 	if (!(sb->s_flags & MS_RDONLY)) {
 		txQuiesce(sb);
 		lmLogShutdown(log);
+		updateSuper(sb, FM_CLEAN);
 	}
 }
 
@@ -392,6 +483,7 @@ static void jfs_unlockfs(struct super_block *sb)
 	int rc = 0;
 
 	if (!(sb->s_flags & MS_RDONLY)) {
+		updateSuper(sb, FM_MOUNT);
 		if ((rc = lmLogInit(log)))
 			jfs_err("jfs_unlock failed with return code %d", rc);
 		else
@@ -457,6 +549,7 @@ static void init_once(void *foo, kmem_cache_t * cachep, unsigned long flags)
 		INIT_LIST_HEAD(&jfs_ip->anon_inode_list);
 		init_rwsem(&jfs_ip->rdwrlock);
 		init_MUTEX(&jfs_ip->commit_sem);
+		init_rwsem(&jfs_ip->xattr_sem);
 		jfs_ip->atlhead = 0;
 		jfs_ip->active_ag = -1;
 #ifdef CONFIG_JFS_POSIX_ACL
@@ -498,24 +591,21 @@ static int __init init_jfs_fs(void)
 	/*
 	 * I/O completion thread (endio)
 	 */
-	jfsIOthread = kernel_thread(jfsIOWait, 0,
-				    CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
+	jfsIOthread = kernel_thread(jfsIOWait, 0, CLONE_KERNEL);
 	if (jfsIOthread < 0) {
 		jfs_err("init_jfs_fs: fork failed w/rc = %d", jfsIOthread);
 		goto end_txmngr;
 	}
 	wait_for_completion(&jfsIOwait);	/* Wait until thread starts */
 
-	jfsCommitThread = kernel_thread(jfs_lazycommit, 0,
-					CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
+	jfsCommitThread = kernel_thread(jfs_lazycommit, 0, CLONE_KERNEL);
 	if (jfsCommitThread < 0) {
 		jfs_err("init_jfs_fs: fork failed w/rc = %d", jfsCommitThread);
 		goto kill_iotask;
 	}
 	wait_for_completion(&jfsIOwait);	/* Wait until thread starts */
 
-	jfsSyncThread = kernel_thread(jfs_sync, 0,
-				      CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
+	jfsSyncThread = kernel_thread(jfs_sync, 0, CLONE_KERNEL);
 	if (jfsSyncThread < 0) {
 		jfs_err("init_jfs_fs: fork failed w/rc = %d", jfsSyncThread);
 		goto kill_committask;

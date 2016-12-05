@@ -31,9 +31,9 @@ static void usb_b_out(struct st5481_bcs *bcs,int buf_nr)
 	struct st5481_b_out *b_out = &bcs->b_out;
 	struct st5481_adapter *adapter = bcs->adapter;
 	struct urb *urb;
-	unsigned int packet_size,offset;
-	int len,buf_size,bytes_sent;
-	int i;
+	u_int packet_size, bytes_sent;
+	int len, offset, buf_size;
+	u_int i;
 	struct sk_buff *skb;
 	
 	if (test_and_set_bit(buf_nr, &b_out->busy)) {
@@ -245,7 +245,7 @@ static void st5481B_mode(struct st5481_bcs *bcs, int mode)
 	}
 }
 
-static int __devinit st5481_setup_b_out(struct st5481_bcs *bcs)
+static int st5481_setup_b_out(struct st5481_bcs *bcs)
 {
 	struct usb_device *dev = bcs->adapter->usb_dev;
 	struct usb_host_interface *altsetting;
@@ -254,7 +254,7 @@ static int __devinit st5481_setup_b_out(struct st5481_bcs *bcs)
 
 	DBG(4,"");
 
-	altsetting = &(dev->config->interface[0].altsetting[3]);
+	altsetting = &(dev->config->interface[0]->altsetting[3]);
 
 	// Allocate URBs and buffers for the B channel out
 	endpoint = &altsetting->endpoint[EP_B1_OUT - 1 + bcs->channel * 2];
@@ -279,7 +279,7 @@ static void st5481_release_b_out(struct st5481_bcs *bcs)
 	st5481_release_isocpipes(b_out->urb);
 }
 
-int __devinit st5481_setup_b(struct st5481_bcs *bcs)
+int st5481_setup_b(struct st5481_bcs *bcs)
 {
 	int retval;
 

@@ -60,6 +60,8 @@
 #include <linux/timex.h>
 #include <linux/config.h>
 
+#include <asm/hpet.h>
+
 #include <asm/arch_hooks.h>
 
 #include "io_ports.h"
@@ -70,6 +72,8 @@ int pit_latch_buggy;              /* extern */
 #include "do_timer.h"
 
 u64 jiffies_64 = INITIAL_JIFFIES;
+
+EXPORT_SYMBOL(jiffies_64);
 
 unsigned long cpu_khz;	/* Detected as we calibrate the TSC */
 
@@ -90,6 +94,7 @@ void do_gettimeofday(struct timeval *tv)
 {
 	unsigned long seq;
 	unsigned long usec, sec;
+	unsigned long max_ntp_tick = tick_usec - tickadj;
 
 	do {
 		unsigned long lost;
@@ -98,8 +103,21 @@ void do_gettimeofday(struct timeval *tv)
 
 		usec = cur_timer->get_offset();
 		lost = jiffies - wall_jiffies;
-		if (lost)
-			usec += lost * (1000000 / HZ);
+
+		/*
+		 * If time_adjust is negative then NTP is slowing the clock
+		 * so make sure not to go into next possible interval.
+		 * Better to lose some accuracy than have time go backwards..
+		 */
+		if (unlikely(time_adjust < 0)) {
+			usec = min(usec, max_ntp_tick);
+
+			if (lost)
+				usec += lost * max_ntp_tick;
+		}
+		else if (unlikely(lost))
+			usec += lost * tick_usec;
+
 		sec = xtime.tv_sec;
 		usec += (xtime.tv_nsec / 1000);
 	} while (read_seqretry(&xtime_lock, seq));
@@ -113,8 +131,13 @@ void do_gettimeofday(struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
+EXPORT_SYMBOL(do_gettimeofday);
+
 int do_settimeofday(struct timespec *tv)
 {
+	time_t wtm_sec, sec = tv->tv_sec;
+	long wtm_nsec, nsec = tv->tv_nsec;
+
 	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
 		return -EINVAL;
 
@@ -125,28 +148,15 @@ int do_settimeofday(struct timespec *tv)
 	 * wall time.  Discover what correction gettimeofday() would have
 	 * made, and then undo it!
 	 */
-	tv->tv_nsec -= cur_timer->get_offset() * NSEC_PER_USEC;
-	tv->tv_nsec -= (jiffies - wall_jiffies) * TICK_NSEC;
+	nsec -= cur_timer->get_offset() * NSEC_PER_USEC;
+	nsec -= (jiffies - wall_jiffies) * TICK_NSEC;
 
-	while (tv->tv_nsec < 0) {
-		tv->tv_nsec += NSEC_PER_SEC;
-		tv->tv_sec--;
-	}
+	wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
+	wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
 
-	wall_to_monotonic.tv_sec += xtime.tv_sec - tv->tv_sec;
-	wall_to_monotonic.tv_nsec += xtime.tv_nsec - tv->tv_nsec;
+	set_normalized_timespec(&xtime, sec, nsec);
+	set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
 
-	if (wall_to_monotonic.tv_nsec > NSEC_PER_SEC) {
-		wall_to_monotonic.tv_nsec -= NSEC_PER_SEC;
-		wall_to_monotonic.tv_sec++;
-	}
-	if (wall_to_monotonic.tv_nsec < 0) {
-		wall_to_monotonic.tv_nsec += NSEC_PER_SEC;
-		wall_to_monotonic.tv_sec--;
-	}
-
-	xtime.tv_sec = tv->tv_sec;
-	xtime.tv_nsec = tv->tv_nsec;
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
@@ -155,6 +165,8 @@ int do_settimeofday(struct timespec *tv)
 	clock_was_set();
 	return 0;
 }
+
+EXPORT_SYMBOL(do_settimeofday);
 
 static int set_rtc_mmss(unsigned long nowtime)
 {
@@ -301,8 +313,38 @@ static int time_init_device(void)
 
 device_initcall(time_init_device);
 
+#ifdef CONFIG_HPET_TIMER
+extern void (*late_time_init)(void);
+/* Duplicate of time_init() below, with hpet_enable part added */
+void __init hpet_time_init(void)
+{
+	xtime.tv_sec = get_cmos_time();
+	wall_to_monotonic.tv_sec = -xtime.tv_sec;
+	xtime.tv_nsec = (INITIAL_JIFFIES % HZ) * (NSEC_PER_SEC / HZ);
+	wall_to_monotonic.tv_nsec = -xtime.tv_nsec;
+
+	if (hpet_enable() >= 0) {
+		printk("Using HPET for base-timer\n");
+	}
+
+	cur_timer = select_timer();
+	time_init_hook();
+}
+#endif
+
 void __init time_init(void)
 {
+#ifdef CONFIG_HPET_TIMER
+	if (is_hpet_capable()) {
+		/*
+		 * HPET initialization needs to do memory-mapped io. So, let
+		 * us do a late initialization after mem_init().
+		 */
+		late_time_init = hpet_time_init;
+		return;
+	}
+#endif
+
 	xtime.tv_sec = get_cmos_time();
 	wall_to_monotonic.tv_sec = -xtime.tv_sec;
 	xtime.tv_nsec = (INITIAL_JIFFIES % HZ) * (NSEC_PER_SEC / HZ);

@@ -12,6 +12,7 @@
 #include <linux/jiffies.h>
 #include <linux/rbtree.h>
 #include <linux/thread_info.h>
+#include <linux/cpumask.h>
 
 #include <asm/system.h>
 #include <asm/semaphore.h>
@@ -49,9 +50,10 @@ struct exec_domain;
 #define CLONE_SETTLS	0x00080000	/* create a new TLS for the child */
 #define CLONE_PARENT_SETTID	0x00100000	/* set the TID in the parent */
 #define CLONE_CHILD_CLEARTID	0x00200000	/* clear the TID in the child */
-#define CLONE_DETACHED		0x00400000	/* parent wants no child-exit signal */
+#define CLONE_DETACHED		0x00400000	/* Not used - CLONE_THREAD implies detached uniquely */
 #define CLONE_UNTRACED		0x00800000	/* set if the tracing process can't force CLONE_PTRACE on this clone */
 #define CLONE_CHILD_SETTID	0x01000000	/* set the TID in the child */
+#define CLONE_STOPPED		0x02000000	/* Start in stopped state */
 
 /*
  * List of flags we want to share for kernel threads,
@@ -202,8 +204,10 @@ struct mm_struct {
 	unsigned long arg_start, arg_end, env_start, env_end;
 	unsigned long rss, total_vm, locked_vm;
 	unsigned long def_flags;
-	unsigned long cpu_vm_mask;
+	cpumask_t cpu_vm_mask;
 	unsigned long swap_address;
+
+	unsigned long saved_auxv[40]; /* for /proc/PID/auxv */
 
 	unsigned dumpable:1;
 #ifdef CONFIG_HUGETLB_PAGE
@@ -279,7 +283,9 @@ struct signal_struct {
 #define MAX_RT_PRIO		MAX_USER_RT_PRIO
 
 #define MAX_PRIO		(MAX_RT_PRIO + 40)
- 
+
+#define rt_task(p)		((p)->prio < MAX_RT_PRIO)
+
 /*
  * Some day this will be a full-fledged user tracking system..
  */
@@ -338,10 +344,12 @@ struct task_struct {
 	prio_array_t *array;
 
 	unsigned long sleep_avg;
-	unsigned long last_run;
+	long interactive_credit;
+	unsigned long long timestamp;
+	int activated;
 
 	unsigned long policy;
-	unsigned long cpus_allowed;
+	cpumask_t cpus_allowed;
 	unsigned int time_slice, first_time_slice;
 
 	struct list_head tasks;
@@ -358,7 +366,7 @@ struct task_struct {
 	unsigned long personality;
 	int did_exec:1;
 	pid_t pid;
-	pid_t pgrp;
+	pid_t __pgrp;		/* Accessed via process_group() */
 	pid_t tty_old_pgrp;
 	pid_t session;
 	pid_t tgid;
@@ -373,7 +381,7 @@ struct task_struct {
 	struct task_struct *parent;	/* parent process */
 	struct list_head children;	/* list of my children */
 	struct list_head sibling;	/* linkage in my parent's children list */
-	struct task_struct *group_leader;
+	struct task_struct *group_leader;	/* threadgroup leader */
 
 	/* PID/PID hash table linkage. */
 	struct pid_link pids[PIDTYPE_MAX];
@@ -389,6 +397,7 @@ struct task_struct {
 	struct timer_list real_timer;
 	struct list_head posix_timers; /* POSIX.1b Interval Timers */
 	unsigned long utime, stime, cutime, cstime;
+	unsigned long nvcsw, nivcsw, cnvcsw, cnivcsw; /* context switch counts */
 	u64 start_time;
 /* mm fault and swap info: this can arguably be seen as either mm-specific or thread-specific */
 	unsigned long min_flt, maj_flt, nswap, cmin_flt, cmaj_flt, cnswap;
@@ -407,7 +416,6 @@ struct task_struct {
 /* file system info */
 	int link_count, total_link_count;
 	struct tty_struct *tty; /* NULL if no tty */
-	unsigned int locks; /* How many file locks are being held */
 /* ipc stuff */
 	struct sysv_sem sysvsem;
 /* CPU-specific state of this task */
@@ -458,6 +466,11 @@ struct task_struct {
 	siginfo_t *last_siginfo; /* For ptrace use.  */
 };
 
+static inline pid_t process_group(struct task_struct *tsk)
+{
+	return tsk->group_leader->__pgrp;
+}
+
 extern void __put_task_struct(struct task_struct *tsk);
 #define get_task_struct(tsk) do { atomic_inc(&(tsk)->usage); } while(0)
 #define put_task_struct(tsk) \
@@ -470,6 +483,7 @@ do { if (atomic_dec_and_test(&(tsk)->usage)) __put_task_struct(tsk); } while(0)
 					/* Not implemented yet, only for 486*/
 #define PF_STARTING	0x00000002	/* being created */
 #define PF_EXITING	0x00000004	/* getting shut down */
+#define PF_DEAD		0x00000008	/* Dead */
 #define PF_FORKNOEXEC	0x00000040	/* forked but didn't exec */
 #define PF_SUPERPRIV	0x00000100	/* used super-user privileges */
 #define PF_DUMPCORE	0x00000200	/* dumped core */
@@ -484,17 +498,19 @@ do { if (atomic_dec_and_test(&(tsk)->usage)) __put_task_struct(tsk); } while(0)
 #define PF_FSTRANS	0x00020000	/* inside a filesystem transaction */
 #define PF_KSWAPD	0x00040000	/* I am kswapd */
 #define PF_SWAPOFF	0x00080000	/* I am in swapoff */
-#define PF_LESS_THROTTLE 0x01000000	/* Throttle me less: I clena memory */
+#define PF_LESS_THROTTLE 0x00100000	/* Throttle me less: I clean memory */
 #define PF_SYNCWRITE	0x00200000	/* I am doing a sync write */
 
 #ifdef CONFIG_SMP
-extern int set_cpus_allowed(task_t *p, unsigned long new_mask);
+extern int set_cpus_allowed(task_t *p, cpumask_t new_mask);
 #else
-static inline int set_cpus_allowed(task_t *p, unsigned long new_mask)
+static inline int set_cpus_allowed(task_t *p, cpumask_t new_mask)
 {
 	return 0;
 }
 #endif
+
+extern unsigned long long sched_clock(void);
 
 #ifdef CONFIG_NUMA
 extern void sched_balance_exec(void);
@@ -526,6 +542,16 @@ union thread_union {
 	unsigned long stack[INIT_THREAD_SIZE/sizeof(long)];
 };
 
+#ifndef __HAVE_ARCH_KSTACK_END
+static inline int kstack_end(void *addr)
+{
+	/* Reliable end of stack detection:
+	 * Some APM bios versions misalign the stack
+	 */
+	return !(((unsigned long)addr+sizeof(void*)-1) & (THREAD_SIZE-sizeof(void*)));
+}
+#endif
+
 extern union thread_union init_thread_union;
 extern struct task_struct init_task;
 
@@ -548,7 +574,11 @@ extern void do_timer(struct pt_regs *);
 
 extern int FASTCALL(wake_up_state(struct task_struct * tsk, unsigned int state));
 extern int FASTCALL(wake_up_process(struct task_struct * tsk));
-extern int FASTCALL(wake_up_process_kick(struct task_struct * tsk));
+#ifdef CONFIG_SMP
+ extern void FASTCALL(kick_process(struct task_struct * tsk));
+#else
+ static inline void kick_process(struct task_struct *tsk) { }
+#endif
 extern void FASTCALL(wake_up_forked_process(struct task_struct * tsk));
 extern void FASTCALL(sched_exit(task_t * p));
 
@@ -561,6 +591,19 @@ extern void proc_caches_init(void);
 extern void flush_signals(struct task_struct *);
 extern void flush_signal_handlers(struct task_struct *, int force_default);
 extern int dequeue_signal(struct task_struct *tsk, sigset_t *mask, siginfo_t *info);
+
+static inline int dequeue_signal_lock(struct task_struct *tsk, sigset_t *mask, siginfo_t *info)
+{
+	unsigned long flags;
+	int ret;
+
+	spin_lock_irqsave(&tsk->sighand->siglock, flags);
+	ret = dequeue_signal(tsk, mask, info);
+	spin_unlock_irqrestore(&tsk->sighand->siglock, flags);
+
+	return ret;
+}	
+
 extern void block_all_signals(int (*notifier)(void *priv), void *priv,
 			      sigset_t *mask);
 extern void unblock_all_signals(void);
@@ -636,6 +679,8 @@ static inline void mmdrop(struct mm_struct * mm)
 
 /* mmput gets rid of the mappings and all user-space */
 extern void mmput(struct mm_struct *);
+/* Grab a reference to the mm if its not already going away */
+extern struct mm_struct *mmgrab(struct mm_struct *);
 /* Remove the current tasks stale references to the old mm_struct */
 extern void mm_release(struct task_struct *, struct mm_struct *);
 
@@ -656,6 +701,7 @@ extern NORET_TYPE void do_group_exit(int);
 extern void reparent_to_init(void);
 extern void daemonize(const char *, ...);
 extern int allow_signal(int);
+extern int disallow_signal(int);
 extern task_t *child_reaper;
 
 extern int do_execve(char *, char __user * __user *, char __user * __user *, struct pt_regs *);
@@ -743,7 +789,7 @@ static inline struct mm_struct * get_task_mm(struct task_struct * task)
 	task_lock(task);
 	mm = task->mm;
 	if (mm)
-		atomic_inc(&mm->mm_users);
+		mm = mmgrab(mm);
 	task_unlock(task);
 
 	return mm;

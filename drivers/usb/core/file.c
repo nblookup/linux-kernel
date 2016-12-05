@@ -34,7 +34,7 @@ static spinlock_t minor_lock = SPIN_LOCK_UNLOCKED;
 
 static int usb_open(struct inode * inode, struct file * file)
 {
-	int minor = minor(inode->i_rdev);
+	int minor = iminor(inode);
 	struct file_operations *c;
 	int err = -ENODEV;
 	struct file_operations *old_fops, *new_fops = NULL;
@@ -66,8 +66,15 @@ static struct file_operations usb_fops = {
 	.open =		usb_open,
 };
 
+static void release_usb_class_dev(struct class_device *class_dev)
+{
+	dbg("%s - %s", __FUNCTION__, class_dev->class_id);
+	kfree(class_dev);
+}
+
 static struct class usb_class = {
-	.name	= "usb",
+	.name		= "usb",
+	.release	= &release_usb_class_dev,
 };
 
 int usb_major_init(void)
@@ -91,9 +98,8 @@ void usb_major_cleanup(void)
 
 static ssize_t show_dev(struct class_device *class_dev, char *buf)
 {
-	struct usb_interface *intf = class_dev_to_usb_interface(class_dev);
-	dev_t dev = MKDEV(USB_MAJOR, intf->minor);
-	return sprintf(buf, "%04x\n", dev);
+	int minor = (int)(long)class_get_devdata(class_dev);
+	return print_dev_t(buf, MKDEV(USB_MAJOR, minor));
 }
 static CLASS_DEVICE_ATTR(dev, S_IRUGO, show_dev, NULL);
 
@@ -123,7 +129,8 @@ int usb_register_dev(struct usb_interface *intf,
 	int retval = -EINVAL;
 	int minor_base = class_driver->minor_base;
 	int minor = 0;
-	char name[DEVICE_ID_SIZE];
+	char name[BUS_ID_SIZE];
+	struct class_device *class_dev;
 	char *temp;
 
 #ifdef CONFIG_USB_DYNAMIC_MINORS
@@ -159,22 +166,27 @@ int usb_register_dev(struct usb_interface *intf,
 	intf->minor = minor;
 
 	/* handle the devfs registration */
-	snprintf(name, DEVICE_ID_SIZE, class_driver->name, minor - minor_base);
+	snprintf(name, BUS_ID_SIZE, class_driver->name, minor - minor_base);
 	devfs_mk_cdev(MKDEV(USB_MAJOR, minor), class_driver->mode, name);
 
 	/* create a usb class device for this usb interface */
-	memset(&intf->class_dev, 0x00, sizeof(struct class_device));
-	intf->class_dev.class = &usb_class;
-	intf->class_dev.dev = &intf->dev;
+	class_dev = kmalloc(sizeof(*class_dev), GFP_KERNEL);
+	if (class_dev) {
+		memset(class_dev, 0x00, sizeof(struct class_device));
+		class_dev->class = &usb_class;
+		class_dev->dev = &intf->dev;
 
-	temp = strrchr(name, '/');
-	if (temp && (temp[1] != 0x00))
-		++temp;
-	else
-		temp = name;
-	snprintf(intf->class_dev.class_id, BUS_ID_SIZE, "%s", temp);
-	class_device_register(&intf->class_dev);
-	class_device_create_file (&intf->class_dev, &class_device_attr_dev);
+		temp = strrchr(name, '/');
+		if (temp && (temp[1] != 0x00))
+			++temp;
+		else
+			temp = name;
+		snprintf(class_dev->class_id, BUS_ID_SIZE, "%s", temp);
+		class_set_devdata(class_dev, (void *)(long)intf->minor);
+		class_device_register(class_dev);
+		class_device_create_file(class_dev, &class_device_attr_dev);
+		intf->class_dev = class_dev;
+	}
 exit:
 	return retval;
 }
@@ -199,7 +211,7 @@ void usb_deregister_dev(struct usb_interface *intf,
 			struct usb_class_driver *class_driver)
 {
 	int minor_base = class_driver->minor_base;
-	char name[DEVICE_ID_SIZE];
+	char name[BUS_ID_SIZE];
 
 #ifdef CONFIG_USB_DYNAMIC_MINORS
 	minor_base = 0;
@@ -214,10 +226,13 @@ void usb_deregister_dev(struct usb_interface *intf,
 	usb_minors[intf->minor] = NULL;
 	spin_unlock (&minor_lock);
 
-	snprintf(name, DEVICE_ID_SIZE, class_driver->name, intf->minor - minor_base);
+	snprintf(name, BUS_ID_SIZE, class_driver->name, intf->minor - minor_base);
 	devfs_remove (name);
 
-	class_device_unregister(&intf->class_dev);
+	if (intf->class_dev) {
+		class_device_unregister(intf->class_dev);
+		intf->class_dev = NULL;
+	}
 	intf->minor = -1;
 }
 EXPORT_SYMBOL(usb_deregister_dev);

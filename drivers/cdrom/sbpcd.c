@@ -363,7 +363,6 @@
 
 #include <linux/module.h>
 
-#include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -387,7 +386,7 @@
 #include "sbpcd.h"
 
 #define MAJOR_NR MATSUSHITA_CDROM_MAJOR
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 
 /*==========================================================================*/
 #if SBPCD_DIS_IRQ
@@ -463,7 +462,7 @@ static int sbpcd[] =
  * Protects access to global structures etc.
  */
 static spinlock_t sbpcd_lock __cacheline_aligned = SPIN_LOCK_UNLOCKED;
-static struct request_queue sbpcd_queue;
+static struct request_queue *sbpcd_queue;
 
 MODULE_PARM(sbpcd, "2i");
 MODULE_PARM(max_drives, "i");
@@ -5803,7 +5802,15 @@ int __init sbpcd_init(void)
 #endif /* MODULE */
 	}
 
-	blk_init_queue(&sbpcd_queue, do_sbpcd_request, &sbpcd_lock);
+	/*
+	 * init error handling is broken beyond belief in this driver...
+	 */
+	sbpcd_queue = blk_init_queue(do_sbpcd_request, &sbpcd_lock);
+	if (!sbpcd_queue) {
+		release_region(CDo_command,4);
+		unregister_blkdev(MAJOR_NR, major_name);
+		return -ENOMEM;
+	}
 
 	devfs_mk_dir("sbp");
 
@@ -5836,7 +5843,7 @@ int __init sbpcd_init(void)
 				printk("Can't unregister %s\n", major_name);
 			}
 			release_region(CDo_command,4);
-			blk_cleanup_queue(&sbpcd_queue);
+			blk_cleanup_queue(sbpcd_queue);
 			return -EIO;
 		}
 #ifdef MODULE
@@ -5852,7 +5859,7 @@ int __init sbpcd_init(void)
 		if (sbpcd_infop == NULL)
 		{
                         release_region(CDo_command,4);
-			blk_cleanup_queue(&sbpcd_queue);
+			blk_cleanup_queue(sbpcd_queue);
                         return -ENOMEM;
 		}
 		memset(sbpcd_infop, 0, sizeof(struct cdrom_device_info));
@@ -5875,10 +5882,10 @@ int __init sbpcd_init(void)
 			printk(" sbpcd: Unable to register with Uniform CD-ROm driver\n");
 		}
 		disk->private_data = p;
-		disk->queue = &sbpcd_queue;
+		disk->queue = sbpcd_queue;
 		add_disk(disk);
 	}
-	blk_queue_hardsect_size(&sbpcd_queue, CD_FRAMESIZE);
+	blk_queue_hardsect_size(sbpcd_queue, CD_FRAMESIZE);
 
 #ifndef MODULE
  init_done:
@@ -5897,7 +5904,7 @@ void sbpcd_exit(void)
 		return;
 	}
 	release_region(CDo_command,4);
-	blk_cleanup_queue(&sbpcd_queue);
+	blk_cleanup_queue(sbpcd_queue);
 	for (j=0;j<NR_SBPCD;j++)
 	{
 		if (D_S[j].drv_id==-1) continue;
@@ -5946,6 +5953,9 @@ static int sbpcd_media_changed(struct cdrom_device_info *cdi, int disc_nr)
 }
 
 MODULE_LICENSE("GPL");
+/* FIXME: Old modules.conf claims MATSUSHITA_CDROM2_MAJOR and CDROM3, but
+   AFAICT this doesn't support those majors, so why? --RR 30 Jul 2003 */
+MODULE_ALIAS_BLOCKDEV_MAJOR(MATSUSHITA_CDROM_MAJOR);
 
 /*==========================================================================*/
 /*

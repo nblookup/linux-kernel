@@ -138,6 +138,9 @@ int lease_break_time = 45;
 	for (lockp = &inode->i_flock; *lockp != NULL; lockp = &(*lockp)->fl_next)
 
 LIST_HEAD(file_lock_list);
+
+EXPORT_SYMBOL(file_lock_list);
+
 static LIST_HEAD(blocked_list);
 
 static kmem_cache_t *filelock_cache;
@@ -185,6 +188,8 @@ void locks_init_lock(struct file_lock *fl)
 	fl->fl_remove = NULL;
 }
 
+EXPORT_SYMBOL(locks_init_lock);
+
 /*
  * Initialises the fields of the file lock which are invariant for
  * free file_locks.
@@ -218,10 +223,12 @@ void locks_copy_lock(struct file_lock *new, struct file_lock *fl)
 	new->fl_u = fl->fl_u;
 }
 
+EXPORT_SYMBOL(locks_copy_lock);
+
 static inline int flock_translate_cmd(int cmd) {
 	if (cmd & LOCK_MAND)
 		return cmd & (LOCK_MAND | LOCK_RW);
-	switch (cmd &~ LOCK_NB) {
+	switch (cmd) {
 	case LOCK_SH:
 		return F_RDLCK;
 	case LOCK_EX:
@@ -233,8 +240,8 @@ static inline int flock_translate_cmd(int cmd) {
 }
 
 /* Fill in a file_lock structure with an appropriate FLOCK lock. */
-static int flock_make_lock(struct file *filp,
-		struct file_lock **lock, unsigned int cmd)
+static int flock_make_lock(struct file *filp, struct file_lock **lock,
+		unsigned int cmd)
 {
 	struct file_lock *fl;
 	int type = flock_translate_cmd(cmd);
@@ -247,7 +254,7 @@ static int flock_make_lock(struct file *filp,
 
 	fl->fl_file = filp;
 	fl->fl_pid = current->tgid;
-	fl->fl_flags = (cmd & LOCK_NB) ? FL_FLOCK : FL_FLOCK | FL_SLEEP;
+	fl->fl_flags = FL_FLOCK;
 	fl->fl_type = type;
 	fl->fl_end = OFFSET_MAX;
 	
@@ -285,7 +292,7 @@ static int flock_to_posix_lock(struct file *filp, struct file_lock *fl,
 		start = filp->f_pos;
 		break;
 	case 2: /*SEEK_END*/
-		start = filp->f_dentry->d_inode->i_size;
+		start = i_size_read(filp->f_dentry->d_inode);
 		break;
 	default:
 		return -EINVAL;
@@ -335,7 +342,7 @@ static int flock64_to_posix_lock(struct file *filp, struct file_lock *fl,
 		start = filp->f_pos;
 		break;
 	case 2: /*SEEK_END*/
-		start = filp->f_dentry->d_inode->i_size;
+		start = i_size_read(filp->f_dentry->d_inode);
 		break;
 	default:
 		return -EINVAL;
@@ -604,6 +611,8 @@ posix_test_lock(struct file *filp, struct file_lock *fl)
 	return (cfl);
 }
 
+EXPORT_SYMBOL(posix_test_lock);
+
 /* This function tests for deadlock condition before putting a process to
  * sleep. The detection scheme is no longer recursive. Recursive was neat,
  * but dangerous - we risked stack corruption if the lock data was bad, or
@@ -645,6 +654,8 @@ next_task:
 	}
 	return 0;
 }
+
+EXPORT_SYMBOL(posix_locks_deadlock);
 
 /* Try to create a FLOCK lock on filp. We always insert new FLOCK locks
  * at the head of the list, but that's secret knowledge known only to
@@ -706,6 +717,8 @@ out:
 	unlock_kernel();
 	return error;
 }
+
+EXPORT_SYMBOL(posix_lock_file);
 
 static int __posix_lock_file(struct inode *inode, struct file_lock *request)
 {
@@ -928,10 +941,10 @@ int locks_mandatory_locked(struct inode *inode)
  * locks_mandatory_area - Check for a conflicting lock
  * @read_write: %FLOCK_VERIFY_WRITE for exclusive access, %FLOCK_VERIFY_READ
  *		for shared
- * @inode: the file to check
- * @file: how the file was opened (if it was)
- * @offset: start of area to check
- * @count: length of area to check
+ * @inode:      the file to check
+ * @filp:       how the file was opened (if it was)
+ * @offset:     start of area to check
+ * @count:      length of area to check
  *
  * Searches the inode's list of locks to find any POSIX locks which conflict.
  * This function is called from locks_verify_area() and
@@ -977,6 +990,8 @@ int locks_mandatory_area(int read_write, struct inode *inode,
 
 	return error;
 }
+
+EXPORT_SYMBOL(locks_mandatory_area);
 
 /* We already had a lease on this file; just change its type */
 static int lease_modify(struct file_lock **before, int arg)
@@ -1116,9 +1131,12 @@ out:
 	return error;
 }
 
+EXPORT_SYMBOL(__break_lease);
+
 /**
  *	lease_get_mtime
  *	@inode: the inode
+ *      @time:  pointer to a timespec which will contain the last modified time
  *
  * This is to force NFS clients to flush their caches for files with
  * exclusive leases.  The justification is that if someone has an
@@ -1132,6 +1150,8 @@ void lease_get_mtime(struct inode *inode, struct timespec *time)
 	else
 		*time = inode->i_mtime;
 }
+
+EXPORT_SYMBOL(lease_get_mtime);
 
 /**
  *	fcntl_getlease - Enquire what lease is currently active
@@ -1265,11 +1285,10 @@ int fcntl_setlease(unsigned int fd, struct file *filp, long arg)
 		locks_free_lock(fl);
 		goto out_unlock;
 	}
-	fl->fl_next = *before;
-	*before = fl;
-	list_add(&fl->fl_link, &file_lock_list);
 
-	error = f_setown(filp, current->tgid, 1);
+	locks_insert_lock(before, fl);
+
+	error = f_setown(filp, current->pid, 0);
 out_unlock:
 	unlock_kernel();
 	return error;
@@ -1298,6 +1317,7 @@ asmlinkage long sys_flock(unsigned int fd, unsigned int cmd)
 {
 	struct file *filp;
 	struct file_lock *lock;
+	int can_sleep, unlock;
 	int error;
 
 	error = -EBADF;
@@ -1305,12 +1325,18 @@ asmlinkage long sys_flock(unsigned int fd, unsigned int cmd)
 	if (!filp)
 		goto out;
 
-	if ((cmd != LOCK_UN) && !(cmd & LOCK_MAND) && !(filp->f_mode & 3))
+	can_sleep = !(cmd & LOCK_NB);
+	cmd &= ~LOCK_NB;
+	unlock = (cmd == LOCK_UN);
+
+	if (!unlock && !(cmd & LOCK_MAND) && !(filp->f_mode & 3))
 		goto out_putf;
 
 	error = flock_make_lock(filp, &lock, cmd);
 	if (error)
 		goto out_putf;
+	if (can_sleep)
+		lock->fl_flags |= FL_SLEEP;
 
 	error = security_file_lock(filp, cmd);
 	if (error)
@@ -1318,7 +1344,7 @@ asmlinkage long sys_flock(unsigned int fd, unsigned int cmd)
 
 	for (;;) {
 		error = flock_lock_file(filp, lock);
-		if ((error != -EAGAIN) || (cmd & LOCK_NB))
+		if ((error != -EAGAIN) || !can_sleep)
 			break;
 		error = wait_event_interruptible(lock->fl_wait, !lock->fl_next);
 		if (!error)
@@ -1329,7 +1355,7 @@ asmlinkage long sys_flock(unsigned int fd, unsigned int cmd)
 	}
 
  out_free:
-	if (error) {
+	if (list_empty(&lock->fl_link)) {
 		locks_free_lock(lock);
 	}
 
@@ -1718,8 +1744,11 @@ posix_block_lock(struct file_lock *blocker, struct file_lock *waiter)
 	locks_insert_block(blocker, waiter);
 }
 
+EXPORT_SYMBOL(posix_block_lock);
+
 /**
  *	posix_unblock_lock - stop waiting for a file lock
+ *      @filp:   how the file was opened
  *	@waiter: the lock which was waiting
  *
  *	lockd needs to block waiting for locks.
@@ -1741,6 +1770,8 @@ posix_unblock_lock(struct file *filp, struct file_lock *waiter)
 		posix_lock_file(filp, waiter);
 	}
 }
+
+EXPORT_SYMBOL(posix_unblock_lock);
 
 static void lock_get_status(char* out, struct file_lock *fl, int id, char *pfx)
 {
@@ -1912,6 +1943,8 @@ int lock_may_read(struct inode *inode, loff_t start, unsigned long len)
 	return result;
 }
 
+EXPORT_SYMBOL(lock_may_read);
+
 /**
  *	lock_may_write - checks that the region is free of locks
  *	@inode: the inode that is being written
@@ -1948,6 +1981,8 @@ int lock_may_write(struct inode *inode, loff_t start, unsigned long len)
 	return result;
 }
 
+EXPORT_SYMBOL(lock_may_write);
+
 static int __init filelock_init(void)
 {
 	filelock_cache = kmem_cache_create("file_lock_cache",
@@ -1958,13 +1993,3 @@ static int __init filelock_init(void)
 }
 
 module_init(filelock_init)
-
-EXPORT_SYMBOL(file_lock_list);
-EXPORT_SYMBOL(locks_init_lock);
-EXPORT_SYMBOL(locks_copy_lock);
-EXPORT_SYMBOL(posix_lock_file);
-EXPORT_SYMBOL(posix_test_lock);
-EXPORT_SYMBOL(posix_block_lock);
-EXPORT_SYMBOL(posix_unblock_lock);
-EXPORT_SYMBOL(posix_locks_deadlock);
-EXPORT_SYMBOL(locks_mandatory_area);

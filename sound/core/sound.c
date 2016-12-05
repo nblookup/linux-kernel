@@ -20,7 +20,6 @@
  */
 
 #include <sound/driver.h>
-#include <linux/version.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/time.h>
@@ -117,7 +116,7 @@ static snd_minor_t *snd_minor_search(int minor)
 
 static int snd_open(struct inode *inode, struct file *file)
 {
-	int minor = minor(inode->i_rdev);
+	int minor = iminor(inode);
 	int card = SNDRV_MINOR_CARD(minor);
 	int dev = SNDRV_MINOR_DEVICE(minor);
 	snd_minor_t *mptr = NULL;
@@ -388,6 +387,24 @@ static void __exit alsa_sound_exit(void)
 
 module_init(alsa_sound_init)
 module_exit(alsa_sound_exit)
+
+#ifndef MODULE
+
+/* format is: snd=major,cards_limit[,device_mode] */
+
+static int __init alsa_sound_setup(char *str)
+{
+	(void)(get_option(&str,&major) == 2 &&
+	       get_option(&str,&cards_limit) == 2);
+#ifdef CONFIG_DEVFS_FS
+	(void)(get_option(&str,&device_mode) == 2);
+#endif
+	return 1;
+}
+
+__setup("snd=", alsa_sound_setup);
+
+#endif /* ifndef MODULE */
 
   /* sound.c */
 EXPORT_SYMBOL(snd_major);

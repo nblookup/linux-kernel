@@ -37,7 +37,6 @@
 #define VERSION "0.73"
 
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/jiffies.h>
 #include <linux/netdevice.h>
@@ -657,7 +656,10 @@ static int fr_write_proc(struct file *file, const char *buffer,
 		return -ENOMEM;
 	}
 
-	copy_from_user(page, buffer, count);
+	if (copy_from_user(page, buffer, count)) {
+		free_page((unsigned long)page);
+		return -EFAULT;
+	}
 	if (*(page + count - 1) == '\n') {
 		*(page + count - 1) = 0;
 	}

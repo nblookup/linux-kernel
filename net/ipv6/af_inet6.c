@@ -40,7 +40,6 @@
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <linux/init.h>
-#include <linux/version.h>
 
 #include <linux/inet.h>
 #include <linux/netdevice.h>
@@ -65,7 +64,7 @@
 #include <asm/system.h>
 
 #if 0 /*def MODULE*/
-static int unloadable = 0; /* XX: Turn to one when all is ok within the
+static int unloadable;     /* XX: Turn to one when all is ok within the
 			      module for allowing unload */
 MODULE_PARM(unloadable, "i");
 #endif
@@ -624,7 +623,7 @@ out_permanent:
 
 out_illegal:
 	printk(KERN_ERR
-	       "Ignoring attempt to register illegal socket type %d.\n",
+	       "Ignoring attempt to register invalid socket type %d.\n",
 	       p->type);
 	goto out;
 }
@@ -723,8 +722,6 @@ static int __init inet6_init(void)
 	__this_module.can_unload = &ipv6_unload;
 #endif
 #endif
-
-	printk(KERN_INFO "IPv6 v0.8 for NET4.0\n");
 
 	if (sizeof(struct inet6_skb_parm) > sizeof(dummy_skb->cb))
 	{
@@ -893,3 +890,5 @@ static void inet6_exit(void)
 }
 module_exit(inet6_exit);
 #endif /* MODULE */
+
+MODULE_ALIAS_NETPROTO(PF_INET6);

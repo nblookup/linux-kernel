@@ -23,10 +23,9 @@
  */
 
 #include <asm/bitops.h>
-#include <asm/ioctls.h>
+#include <asm/termios.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
-#include <linux/smp_lock.h>
 
 #include <linux/errno.h>
 #include <linux/fs.h>
@@ -37,7 +36,6 @@
 #include <linux/sched.h>
 #include <linux/stat.h>
 #include <linux/string.h>
-#include <linux/smp_lock.h>
 #include <linux/blkdev.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -56,7 +54,7 @@ static inline void presto_relock_other(struct inode *dir)
 {
         /* vfs_mkdir locks */
         //        down(&dir->i_zombie);
-        lock_kernel(); 
+        //lock_kernel(); 
 }
 
 static inline void presto_fulllock(struct inode *dir) 
@@ -65,13 +63,13 @@ static inline void presto_fulllock(struct inode *dir)
         down(&dir->i_sem);
         /* vfs_mkdir locks */
         //        down(&dir->i_zombie);
-        lock_kernel(); 
+        //lock_kernel(); 
 }
 
 static inline void presto_unlock(struct inode *dir) 
 {
         /* vfs_mkdir locks */
-        unlock_kernel(); 
+        //unlock_kernel(); 
         //        up(&dir->i_zombie);
         /* the lock from sys_mkdir / lookup_create */
         up(&dir->i_sem);
@@ -82,7 +80,7 @@ static inline void presto_unlock(struct inode *dir)
  * these are initialized in super.c
  */
 extern int presto_permission(struct inode *inode, int mask, struct nameidata *nd);
-static int izo_authorized_uid = 0;
+static int izo_authorized_uid;
 
 int izo_dentry_is_ilookup(struct dentry *dentry, ino_t *id,
                           unsigned int *generation)
@@ -725,6 +723,9 @@ static int presto_mknod(struct inode * dir, struct dentry * dentry, int mode, de
         struct presto_file_set *fset;
         struct dentry *parent = dentry->d_parent;
         struct lento_vfs_context info;
+
+	if (!old_valid_dev(rdev))
+		return -EINVAL;
 
         ENTRY;
         error = presto_check_set_fsdata(dentry);

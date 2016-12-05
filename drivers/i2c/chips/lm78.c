@@ -625,11 +625,11 @@ int lm78_detect(struct i2c_adapter *adapter, int address, int kind)
 	}
 
 	if (kind == lm78) {
-		client_name = "LM78 chip";
+		client_name = "lm78";
 	} else if (kind == lm78j) {
-		client_name = "LM78-J chip";
+		client_name = "lm78-j";
 	} else if (kind == lm79) {
-		client_name = "LM79 chip";
+		client_name = "lm79";
 	} else {
 		dev_dbg(&adapter->dev, "Internal error: unknown kind (%d)?!?",
 			kind);
@@ -638,7 +638,7 @@ int lm78_detect(struct i2c_adapter *adapter, int address, int kind)
 	}
 
 	/* Fill in the remaining client fields and put into the global list */
-	strlcpy(new_client->dev.name, client_name, DEVICE_NAME_SIZE);
+	strlcpy(new_client->name, client_name, I2C_NAME_SIZE);
 	data->type = kind;
 
 	data->valid = 0;
@@ -648,7 +648,10 @@ int lm78_detect(struct i2c_adapter *adapter, int address, int kind)
 	if ((err = i2c_attach_client(new_client)))
 		goto ERROR2;
 
-	/* register sysfs hooks */
+	/* Initialize the LM78 chip */
+	lm78_init_client(new_client);
+
+	/* Register sysfs hooks */
 	device_create_file(&new_client->dev, &dev_attr_in_input0);
 	device_create_file(&new_client->dev, &dev_attr_in_min0);
 	device_create_file(&new_client->dev, &dev_attr_in_max0);
@@ -685,8 +688,6 @@ int lm78_detect(struct i2c_adapter *adapter, int address, int kind)
 	device_create_file(&new_client->dev, &dev_attr_alarms);
 	device_create_file(&new_client->dev, &dev_attr_vid);
 
-	/* Initialize the LM78 chip */
-	lm78_init_client(new_client);
 	return 0;
 
 ERROR2:

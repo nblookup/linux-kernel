@@ -13,6 +13,7 @@
 #include <linux/config.h> /* CONFIG_HEARTBEAT */
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/param.h>
 #include <linux/string.h>
 #include <linux/mm.h>
@@ -27,7 +28,17 @@
 
 u64 jiffies_64 = INITIAL_JIFFIES;
 
+EXPORT_SYMBOL(jiffies_64);
+
 #define TICK_SIZE	(tick_nsec / 1000)
+
+/*
+ * Scheduler clock - returns current time in nanosec units.
+ */
+unsigned long long sched_clock(void)
+{
+	return (unsigned long long)jiffies * (1000000000 / HZ);
+}
 
 static inline void do_profile (unsigned long pc)
 {
@@ -51,7 +62,7 @@ static inline void do_profile (unsigned long pc)
  * timer_interrupt() needs to keep up the real-time clock,
  * as well as call the "do_timer()" routine every clocktick
  */
-static void timer_interrupt (int irq, void *dummy, struct pt_regs *regs)
+static irqreturn_t timer_interrupt (int irq, void *dummy, struct pt_regs *regs)
 {
 #if 0
 	/* last time the cmos clock got updated */
@@ -106,6 +117,8 @@ static void timer_interrupt (int irq, void *dummy, struct pt_regs *regs)
 	}
 #endif /* CONFIG_HEARTBEAT */
 #endif /* 0 */
+
+	return IRQ_HANDLED;
 }
 
 /*
@@ -147,6 +160,8 @@ void do_gettimeofday (struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
+EXPORT_SYMBOL(do_gettimeofday);
+
 int do_settimeofday(struct timespec *tv)
 {
 	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
@@ -180,6 +195,8 @@ int do_settimeofday(struct timespec *tv)
 	write_sequnlock_irq (&xtime_lock);
 	return 0;
 }
+
+EXPORT_SYMBOL(do_settimeofday);
 
 static int timer_dev_id;
 static struct irqaction timer_irqaction = {

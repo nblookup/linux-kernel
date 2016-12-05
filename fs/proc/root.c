@@ -65,6 +65,7 @@ void __init proc_root_init(void)
 #endif
 	proc_root_fs = proc_mkdir("fs", 0);
 	proc_root_driver = proc_mkdir("driver", 0);
+	proc_mkdir("fs/nfsd", 0); /* somewhere for the nfsd filesystem to be mounted */
 #if defined(CONFIG_SUN_OPENPROMFS) || defined(CONFIG_SUN_OPENPROMFS_MODULE)
 	/* just give it a mountpoint */
 	proc_mkdir("openprom", 0);
@@ -153,7 +154,6 @@ struct proc_dir_entry proc_root = {
 EXPORT_SYMBOL(proc_sys_root);
 #endif
 EXPORT_SYMBOL(proc_symlink);
-EXPORT_SYMBOL(proc_mknod);
 EXPORT_SYMBOL(proc_mkdir);
 EXPORT_SYMBOL(create_proc_entry);
 EXPORT_SYMBOL(remove_proc_entry);

@@ -27,6 +27,7 @@
 #include <linux/config.h>
 #include <linux/skbuff.h>
 #include <linux/init.h>
+#include <linux/seq_file.h>
 
 #include <asm/byteorder.h>
 #include <asm/unaligned.h>
@@ -858,10 +859,10 @@ static int irttp_udata_indication(void *instance, void *sap,
 		err = self->notify.udata_indication(self->notify.instance,
 						    self,skb);
 		/* Same comment as in irttp_do_data_indication() */
-		if (err != -ENOMEM) 
+		if (!err) 
 			return 0;
 	}
-	/* Either no handler, or -ENOMEM */
+	/* Either no handler, or handler returns an error */
 	dev_kfree_skb(skb);
 
 	return 0;
@@ -966,6 +967,10 @@ void irttp_status_indication(void *instance,
 
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == TTP_TSAP_MAGIC, return;);
+
+	/* Check if client has already closed the TSAP and gone away */
+	if (self->close_pend)
+		return;
 
 	/*
 	 *  Inform service user if he has requested it
@@ -1094,7 +1099,8 @@ int irttp_connect_request(struct tsap_cb *self, __u8 dtsap_sel,
 		 *  Check that the client has reserved enough space for
 		 *  headers
 		 */
-		ASSERT(skb_headroom(userdata) >= TTP_MAX_HEADER, return -1;);
+		ASSERT(skb_headroom(userdata) >= TTP_MAX_HEADER,
+		       { dev_kfree_skb(userdata); return -1; } );
 	}
 
 	/* Initialize connection parameters */
@@ -1123,7 +1129,7 @@ int irttp_connect_request(struct tsap_cb *self, __u8 dtsap_sel,
 	/* SAR enabled? */
 	if (max_sdu_size > 0) {
 		ASSERT(skb_headroom(tx_skb) >= (TTP_MAX_HEADER + TTP_SAR_HEADER),
-		       return -1;);
+		       { dev_kfree_skb(tx_skb); return -1; } );
 
 		/* Insert SAR parameters */
 		frame = skb_push(tx_skb, TTP_HEADER+TTP_SAR_HEADER);
@@ -1340,7 +1346,8 @@ int irttp_connect_response(struct tsap_cb *self, __u32 max_sdu_size,
 		 *  Check that the client has reserved enough space for
 		 *  headers
 		 */
-		ASSERT(skb_headroom(tx_skb) >= TTP_MAX_HEADER, return -1;);
+		ASSERT(skb_headroom(userdata) >= TTP_MAX_HEADER,
+		       { dev_kfree_skb(userdata); return -1; } );
 	}
 
 	self->avail_credit = 0;
@@ -1362,8 +1369,8 @@ int irttp_connect_response(struct tsap_cb *self, __u32 max_sdu_size,
 
 	/* SAR enabled? */
 	if (max_sdu_size > 0) {
-		ASSERT(skb_headroom(tx_skb) >= (TTP_MAX_HEADER+TTP_SAR_HEADER),
-		       return -1;);
+		ASSERT(skb_headroom(tx_skb) >= (TTP_MAX_HEADER + TTP_SAR_HEADER),
+		       { dev_kfree_skb(tx_skb); return -1; } );
 
 		/* Insert TTP header with SAR parameters */
 		frame = skb_push(tx_skb, TTP_HEADER+TTP_SAR_HEADER);
@@ -1427,9 +1434,16 @@ struct tsap_cb *irttp_dup(struct tsap_cb *orig, void *instance)
 	/* We don't need the old instance any more */
 	spin_unlock_irqrestore(&irttp->tsaps->hb_spinlock, flags);
 
+	/* Try to dup the LSAP (may fail if we were too slow) */
+	new->lsap = irlmp_dup(orig->lsap, new);
+	if (!new->lsap) {
+		IRDA_DEBUG(0, "%s(), dup failed!\n", __FUNCTION__);
+		kfree(new);
+		return NULL;
+	}
+
 	/* Not everything should be copied */
 	new->notify.instance = instance;
-	new->lsap = irlmp_dup(orig->lsap, new);
 	init_timer(&new->todo_timer);
 
 	skb_queue_head_init(&new->rx_queue);
@@ -1593,7 +1607,7 @@ void irttp_do_data_indication(struct tsap_cb *self, struct sk_buff *skb)
 {
 	int err;
 
-	/* Check if client has already tried to close the TSAP */
+	/* Check if client has already closed the TSAP and gone away */
 	if (self->close_pend) {
 		dev_kfree_skb(skb);
 		return;
@@ -1606,7 +1620,7 @@ void irttp_do_data_indication(struct tsap_cb *self, struct sk_buff *skb)
 	 * be difficult, so it can instead just refuse to eat it and just
 	 * give an error back
 	 */
-	if (err == -ENOMEM) {
+	if (err) {
 		IRDA_DEBUG(0, "%s() requeueing skb!\n", __FUNCTION__);
 
 		/* Make sure we take a break */
@@ -1758,71 +1772,125 @@ void irttp_run_rx_queue(struct tsap_cb *self)
 }
 
 #ifdef CONFIG_PROC_FS
-/*
- * Function irttp_proc_read (buf, start, offset, len, unused)
- *
- *    Give some info to the /proc file system
- */
-int irttp_proc_read(char *buf, char **start, off_t offset, int len)
+struct irttp_iter_state {
+	int id;
+};
+
+static void *irttp_seq_start(struct seq_file *seq, loff_t *pos)
 {
+	struct irttp_iter_state *iter = seq->private;
 	struct tsap_cb *self;
-	unsigned long flags;
-	int i = 0;
-
-	ASSERT(irttp != NULL, return 0;);
-
-	len = 0;
 
 	/* Protect our access to the tsap list */
-	spin_lock_irqsave(&irttp->tsaps->hb_spinlock, flags);
+	spin_lock_irq(&irttp->tsaps->hb_spinlock);
+	iter->id = 0;
 
-	self = (struct tsap_cb *) hashbin_get_first(irttp->tsaps);
-	while (self != NULL) {
-		if (!self || self->magic != TTP_TSAP_MAGIC)
+	for (self = (struct tsap_cb *) hashbin_get_first(irttp->tsaps); 
+	     self != NULL;
+	     self = (struct tsap_cb *) hashbin_get_next(irttp->tsaps)) {
+		if (iter->id == *pos)
 			break;
-
-		len += sprintf(buf+len, "TSAP %d, ", i++);
-		len += sprintf(buf+len, "stsap_sel: %02x, ",
-			       self->stsap_sel);
-		len += sprintf(buf+len, "dtsap_sel: %02x\n",
-			       self->dtsap_sel);
-		len += sprintf(buf+len, "  connected: %s, ",
-			       self->connected? "TRUE":"FALSE");
-		len += sprintf(buf+len, "avail credit: %d, ",
-			       self->avail_credit);
-		len += sprintf(buf+len, "remote credit: %d, ",
-			       self->remote_credit);
-		len += sprintf(buf+len, "send credit: %d\n",
-			       self->send_credit);
-		len += sprintf(buf+len, "  tx packets: %ld, ",
-			       self->stats.tx_packets);
-		len += sprintf(buf+len, "rx packets: %ld, ",
-			       self->stats.rx_packets);
-		len += sprintf(buf+len, "tx_queue len: %d ",
-			       skb_queue_len(&self->tx_queue));
-		len += sprintf(buf+len, "rx_queue len: %d\n",
-			       skb_queue_len(&self->rx_queue));
-		len += sprintf(buf+len, "  tx_sdu_busy: %s, ",
-			       self->tx_sdu_busy? "TRUE":"FALSE");
-		len += sprintf(buf+len, "rx_sdu_busy: %s\n",
-			       self->rx_sdu_busy? "TRUE":"FALSE");
-		len += sprintf(buf+len, "  max_seg_size: %d, ",
-			       self->max_seg_size);
-		len += sprintf(buf+len, "tx_max_sdu_size: %d, ",
-			       self->tx_max_sdu_size);
-		len += sprintf(buf+len, "rx_max_sdu_size: %d\n",
-			       self->rx_max_sdu_size);
-
-		len += sprintf(buf+len, "  Used by (%s)\n",
-				self->notify.name);
-
-		len += sprintf(buf+len, "\n");
-
-		self = (struct tsap_cb *) hashbin_get_next(irttp->tsaps);
+		++iter->id;
 	}
-	spin_unlock_irqrestore(&irttp->tsaps->hb_spinlock, flags);
-
-	return len;
+		
+	return self;
 }
+
+static void *irttp_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	struct irttp_iter_state *iter = seq->private;
+
+	++*pos;
+	++iter->id;
+	return (void *) hashbin_get_next(irttp->tsaps);
+}
+
+static void irttp_seq_stop(struct seq_file *seq, void *v)
+{
+	spin_unlock_irq(&irttp->tsaps->hb_spinlock);
+}
+
+static int irttp_seq_show(struct seq_file *seq, void *v)
+{
+	const struct irttp_iter_state *iter = seq->private;
+	const struct tsap_cb *self = v;
+
+	seq_printf(seq, "TSAP %d, ", iter->id);
+	seq_printf(seq, "stsap_sel: %02x, ",
+		   self->stsap_sel);
+	seq_printf(seq, "dtsap_sel: %02x\n",
+		   self->dtsap_sel);
+	seq_printf(seq, "  connected: %s, ",
+		   self->connected? "TRUE":"FALSE");
+	seq_printf(seq, "avail credit: %d, ",
+		   self->avail_credit);
+	seq_printf(seq, "remote credit: %d, ",
+		   self->remote_credit);
+	seq_printf(seq, "send credit: %d\n",
+		   self->send_credit);
+	seq_printf(seq, "  tx packets: %ld, ",
+		   self->stats.tx_packets);
+	seq_printf(seq, "rx packets: %ld, ",
+		   self->stats.rx_packets);
+	seq_printf(seq, "tx_queue len: %d ",
+		   skb_queue_len(&self->tx_queue));
+	seq_printf(seq, "rx_queue len: %d\n",
+		   skb_queue_len(&self->rx_queue));
+	seq_printf(seq, "  tx_sdu_busy: %s, ",
+		   self->tx_sdu_busy? "TRUE":"FALSE");
+	seq_printf(seq, "rx_sdu_busy: %s\n",
+		   self->rx_sdu_busy? "TRUE":"FALSE");
+	seq_printf(seq, "  max_seg_size: %d, ",
+		   self->max_seg_size);
+	seq_printf(seq, "tx_max_sdu_size: %d, ",
+		   self->tx_max_sdu_size);
+	seq_printf(seq, "rx_max_sdu_size: %d\n",
+		   self->rx_max_sdu_size);
+
+	seq_printf(seq, "  Used by (%s)\n\n",
+		   self->notify.name);
+	return 0;
+}
+
+static struct seq_operations irttp_seq_ops = {
+	.start  = irttp_seq_start,
+	.next   = irttp_seq_next,
+	.stop   = irttp_seq_stop,
+	.show   = irttp_seq_show,
+};
+
+static int irttp_seq_open(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq;
+	int rc = -ENOMEM;
+	struct irttp_iter_state *s;
+       
+	ASSERT(irttp != NULL, return -EINVAL;);
+
+	s = kmalloc(sizeof(*s), GFP_KERNEL);
+	if (!s)
+		goto out;
+
+	rc = seq_open(file, &irttp_seq_ops);
+	if (rc)
+		goto out_kfree;
+
+	seq	     = file->private_data;
+	seq->private = s;
+	memset(s, 0, sizeof(*s));
+out:
+	return rc;
+out_kfree:
+	kfree(s);
+	goto out;
+}
+
+struct file_operations irttp_seq_fops = {
+	.owner		= THIS_MODULE,
+	.open           = irttp_seq_open,
+	.read           = seq_read,
+	.llseek         = seq_lseek,
+	.release	= seq_release_private,
+};
 
 #endif /* PROC_FS */

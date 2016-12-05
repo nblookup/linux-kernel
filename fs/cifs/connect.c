@@ -1,7 +1,7 @@
 /*
  *   fs/cifs/connect.c
  *
- *   Copyright (c) International Business Machines  Corp., 2002
+ *   Copyright (C) International Business Machines  Corp., 2002,2003
  *   Author(s): Steve French (sfrench@us.ibm.com)
  *
  *   This library is free software; you can redistribute it and/or modify
@@ -52,6 +52,8 @@ struct smb_vol {
 	char *domainname;
 	char *UNC;
 	char *UNCip;
+	char *iocharset;  /* local code page for mapping to and from Unicode */
+	char *source_rfc1001_name; /* netbios name of client */
 	uid_t linux_uid;
 	gid_t linux_gid;
 	mode_t file_mode;
@@ -59,6 +61,7 @@ struct smb_vol {
 	int rw;
 	unsigned int rsize;
 	unsigned int wsize;
+	unsigned int sockopt;
 	unsigned short int port;
 };
 
@@ -81,7 +84,9 @@ cifs_reconnect(struct TCP_Server_Info *server)
 	struct list_head *tmp;
 	struct cifsSesInfo *ses;
 	struct cifsTconInfo *tcon;
-
+	
+	if(server->tcpStatus == CifsExiting)
+		return rc;
 	server->tcpStatus = CifsNeedReconnect;
 	server->maxBuf = 0;
 
@@ -102,7 +107,7 @@ cifs_reconnect(struct TCP_Server_Info *server)
 	}
 	list_for_each(tmp, &GlobalTreeConnectionList) {
 		tcon = list_entry(tmp, struct cifsTconInfo, cifsConnectionList);
-		if(tcon->ses->server == server) {
+		if((tcon) && (tcon->ses) && (tcon->ses->server == server)) {
 			tcon->tidStatus = CifsNeedReconnect;
 		}
 	}
@@ -182,23 +187,26 @@ cifs_demultiplex_thread(struct TCP_Server_Info *server)
 				 sizeof (struct smb_hdr) -
 				 1 /* RFC1001 header and SMB header */ ,
 				 MSG_PEEK /* flags see socket.h */ );
-		if (length < 0) {
-			if (length == -ECONNRESET) {
-				cERROR(1, ("Connection reset by peer "));
-				cifs_reconnect(server);
-				csocket = server->ssocket;
-				continue;
-			} else { /* find define for the -512 returned at unmount time */
-				cFYI(1,("Error on sock_recvmsg(peek) length = %d",
-					length)); 
-			}
+
+		if(server->tcpStatus == CifsExiting) {
 			break;
-		} else if (length == 0) {
-			cFYI(1,("Zero length peek received - dead session?"));
+		} else if (server->tcpStatus == CifsNeedReconnect) {
+			cFYI(1,("Reconnecting after server stopped responding"));
+			cifs_reconnect(server);
+			csocket = server->ssocket;
+			continue;
+		} else if ((length == -ERESTARTSYS) || (length == -EAGAIN)) {
+			schedule_timeout(1); /* minimum sleep to prevent looping
+				allowing socket to clear and app threads to set
+				tcpStatus CifsNeedReconnect if server hung */
+			continue;
+		} else if (length <= 0) {
+			cFYI(1,("Reconnecting after unexpected rcvmsg error "));
 			cifs_reconnect(server);
 			csocket = server->ssocket;
 			continue;
 		}
+
 		pdu_length = 4 + ntohl(smb_buffer->smb_buf_length);
 		cFYI(1, ("Peek length rcvd: %d with smb length: %d", length, pdu_length));
 
@@ -222,7 +230,9 @@ cifs_demultiplex_thread(struct TCP_Server_Info *server)
 				cERROR(1,
 				       ("Unknown RFC 1001 frame received not 0x00 nor 0x85"));
 				cifs_dump_mem(" Received Data is: ", temp, length);
-				break;
+				cifs_reconnect(server);
+				csocket = server->ssocket;
+				continue;
 			} else {
 				if ((length != sizeof (struct smb_hdr) - 1)
 				    || (pdu_length >
@@ -233,14 +243,15 @@ cifs_demultiplex_thread(struct TCP_Server_Info *server)
 				    (checkSMBhdr
 				     (smb_buffer, smb_buffer->Mid))) {
 					cERROR(1,
-					       (KERN_ERR
-						"Invalid size or format for SMB found with length %d and pdu_lenght %d",
+					    ("Invalid size or format for SMB found with length %d and pdu_lenght %d",
 						length, pdu_length));
-					/* BB fix by finding next smb signature - and reading off data until next smb ? BB */
-
-					/* BB add reconnect here */
-
-					break;
+					cifs_dump_mem("Received Data is: ",temp,sizeof(struct smb_hdr));
+					/* could we fix this network corruption by finding next 
+						smb header (instead of killing the session) and
+						restart reading from next valid SMB found? */
+					cifs_reconnect(server);
+					csocket = server->ssocket;
+					continue;
 				} else {	/* length ok */
 
 					length = 0;
@@ -248,19 +259,16 @@ cifs_demultiplex_thread(struct TCP_Server_Info *server)
 					iov.iov_len = pdu_length;
 					for (total_read = 0; total_read < pdu_length; total_read += length) {	
              /* Should improve check for buffer overflow with bad pdu_length */
-						/*  iov.iov_base = smb_buffer+total_read;
-						   iov.iov_len =  pdu_length-total_read; */
 						length = sock_recvmsg(csocket, &smb_msg, 
-                                 pdu_length - total_read, 0);
-         /* cERROR(1,("For iovlen %d Length received: %d with total read %d",
-						   iov.iov_len, length,total_read));       */
+							pdu_length - total_read, 0);
 						if (length == 0) {
 							cERROR(1,
 							       ("Zero length receive when expecting %d ",
 								pdu_length - total_read));
-							/* BB add reconnect here */
-							break;
-						}						
+							cifs_reconnect(server);
+							csocket = server->ssocket;
+							continue;
+						}
 					}
 				}
 
@@ -272,7 +280,7 @@ cifs_demultiplex_thread(struct TCP_Server_Info *server)
 				}
 
 				task_to_wake = NULL;
-				read_lock(&GlobalMid_Lock);
+				spin_lock(&GlobalMid_Lock);
 				list_for_each(tmp, &server->pending_mid_q) {
 					mid_entry = list_entry(tmp, struct
 							       mid_q_entry,
@@ -288,7 +296,7 @@ cifs_demultiplex_thread(struct TCP_Server_Info *server)
 						    MID_RESPONSE_RECEIVED;
 					}
 				}
-				read_unlock(&GlobalMid_Lock);
+				spin_unlock(&GlobalMid_Lock);
 				if (task_to_wake) {
 					smb_buffer = NULL;	/* will be freed by users thread after he is done */
 					wake_up_process(task_to_wake);
@@ -405,7 +413,7 @@ parse_mount_options(char *options, const char *devname, struct smb_vol *vol)
 				return 1;	/* needs_arg; */
 			}
 			if ((temp_len = strnlen(value, 300)) < 300) {
-				vol->UNC = kmalloc(GFP_KERNEL, temp_len);
+				vol->UNC = kmalloc(temp_len+1,GFP_KERNEL);
 				strcpy(vol->UNC,value);
 				if (strncmp(vol->UNC, "//", 2) == 0) {
 					vol->UNC[0] = '\\';
@@ -430,6 +438,20 @@ parse_mount_options(char *options, const char *devname, struct smb_vol *vol)
 				cFYI(1, ("Domain name set"));
 			} else {
 				printk(KERN_WARNING "CIFS: domain name too long\n");
+				return 1;
+			}
+		} else if (strnicmp(data, "iocharset", 9) == 0) {
+			if (!value || !*value) {
+				printk(KERN_WARNING "CIFS: invalid iocharset specified\n");
+				return 1;	/* needs_arg; */
+			}
+			if (strnlen(value, 65) < 65) {
+				if(strnicmp(value,"default",7))
+					vol->iocharset = value;
+				/* if iocharset not set load_nls_default used by caller */
+				cFYI(1, ("iocharset set to %s",value));
+			} else {
+				printk(KERN_WARNING "CIFS: iocharset name too long.\n");
 				return 1;
 			}
 		} else if (strnicmp(data, "uid", 3) == 0) {
@@ -467,6 +489,19 @@ parse_mount_options(char *options, const char *devname, struct smb_vol *vol)
 				vol->wsize =
 					simple_strtoul(value, &value, 0);
 			}
+		} else if (strnicmp(data, "sockopt", 5) == 0) {
+			if (value && *value) {
+				vol->sockopt =
+					simple_strtoul(value, &value, 0);
+			}
+		} else if (strnicmp(data, "netbiosname", 4) == 0) {
+			if (!value || !*value) {
+				vol->source_rfc1001_name = NULL;
+			} else if (strnlen(value, 17) < 17) {
+				vol->source_rfc1001_name = value;
+			} else {
+				printk(KERN_WARNING "CIFS: netbiosname too long (more than 15)\n");
+			}
 		} else if (strnicmp(data, "version", 3) == 0) {
 			/* ignore */
 		} else if (strnicmp(data, "rw", 2) == 0) {
@@ -482,7 +517,7 @@ parse_mount_options(char *options, const char *devname, struct smb_vol *vol)
 			return 1;
 		}
 		if ((temp_len = strnlen(devname, 300)) < 300) {
-			vol->UNC = kmalloc(GFP_KERNEL, temp_len);
+			vol->UNC = kmalloc(temp_len+1,GFP_KERNEL);
 			strcpy(vol->UNC,devname);
 			if (strncmp(vol->UNC, "//", 2) == 0) {
 				vol->UNC[0] = '\\';
@@ -634,7 +669,6 @@ get_dfs_path(int xid, struct cifsSesInfo *pSesInfo,
 int setup_session(unsigned int xid, struct cifsSesInfo *pSesInfo, struct nls_table * nls_info)
 {
 	int rc = 0;
-	char session_key[CIFS_SESSION_KEY_SIZE];
 	char ntlm_session_key[CIFS_SESSION_KEY_SIZE];
 	int ntlmv2_flag = FALSE;
 
@@ -666,35 +700,44 @@ int setup_session(unsigned int xid, struct cifsSesInfo *pSesInfo, struct nls_tab
 						nls_info);
 			if (!rc) {
 				if(ntlmv2_flag) {
-					cFYI(1,("Able to use the more secure NTLM version 2 password hash"));
-			/* SMBNTv2encrypt( ...);  */ /* BB fix this up - 
-			   and note that Samba client equivalent looks wrong */
-				} else
+					char * v2_response;
+					cFYI(1,("Can use more secure NTLM version 2 password hash"));
+					CalcNTLMv2_partial_mac_key(pSesInfo, 
+						nls_info);
+					v2_response = kmalloc(16 + 64 /* blob */, GFP_KERNEL);
+					if(v2_response) {
+						CalcNTLMv2_response(pSesInfo,v2_response);
+/*						cifs_calculate_ntlmv2_mac_key(pSesInfo->mac_signing_key, response, ntlm_session_key, */
+						kfree(v2_response);
+					/* BB Put dummy sig in SessSetup PDU? */
+					} else
+						rc = -ENOMEM;
+
+				} else {
 					SMBNTencrypt(pSesInfo->password_with_pad,
-						pSesInfo->server->cryptKey,ntlm_session_key);
+						pSesInfo->server->cryptKey,
+						ntlm_session_key);
 
-				/* BB add call to save MAC key here BB */
-
-				/* for better security the weaker lanman hash not sent 
-				   in AuthSessSetup so why bother calculating it */
-				/* toUpper(nls_info,
-					password_with_pad);
-				SMBencrypt(password_with_pad,
-					   pSesInfo->server->cryptKey, session_key); */
+					cifs_calculate_mac_key(pSesInfo->mac_signing_key,
+						ntlm_session_key,
+						pSesInfo->password_with_pad);
+				}
+			/* for better security the weaker lanman hash not sent
+			   in AuthSessSetup so we no longer calculate it */
 
 				rc = CIFSNTLMSSPAuthSessSetup(xid,
-						pSesInfo,
-						ntlm_session_key,
-						session_key,
-						ntlmv2_flag,
-						nls_info);
+					pSesInfo,
+					ntlm_session_key,
+					ntlmv2_flag,
+					nls_info);
 			}
 		} else { /* old style NTLM 0.12 session setup */
 			SMBNTencrypt(pSesInfo->password_with_pad,
 				pSesInfo->server->cryptKey,
 				ntlm_session_key);
 
-			cifs_calculate_mac_key(pSesInfo->mac_signing_key, ntlm_session_key, pSesInfo->password_with_pad);
+			cifs_calculate_mac_key(pSesInfo->mac_signing_key, 
+				ntlm_session_key, pSesInfo->password_with_pad);
 			rc = CIFSSessSetup(xid, pSesInfo,
 				ntlm_session_key, nls_info);
 		}
@@ -714,12 +757,13 @@ ipv4_connect(struct sockaddr_in *psin_server, struct socket **csocket)
 	int rc = 0;
 
 	if(*csocket == NULL) {
-	    rc = sock_create(PF_INET, SOCK_STREAM, IPPROTO_TCP, csocket);
-	    if (rc < 0) {
+		rc = sock_create(PF_INET, SOCK_STREAM, IPPROTO_TCP, csocket);
+		if (rc < 0) {
 			cERROR(1, ("Error %d creating socket",rc));
 			*csocket = NULL;
 			return rc;
-	    } else {
+		} else {
+		/* BB other socket options to set KEEPALIVE, NODELAY? */
 			cFYI(1,("Socket created"));
 		}
 	}
@@ -754,6 +798,11 @@ ipv4_connect(struct sockaddr_in *psin_server, struct socket **csocket)
 		}
 	}
 
+	/* Eventually check for other socket options to change from 
+		the default. sock_setsockopt not used because it expects 
+		user space buffer */
+	(*csocket)->sk->sk_rcvtimeo = 8 * HZ;
+		
 	return rc;
 }
 
@@ -775,6 +824,7 @@ ipv6_connect(struct sockaddr_in6 *psin_server, struct socket **csocket)
 				(struct sockaddr *) psin_server,
 				sizeof (struct sockaddr_in6),0);
 		if (rc >= 0) {
+                /* BB other socket options to set KEEPALIVE, timeouts? NODELAY? */
 			return rc;
 		}
 	}
@@ -852,7 +902,20 @@ cifs_mount(struct super_block *sb, struct cifs_sb_info *cifs_sb,
 		FreeXid(xid);
 		return -EINVAL;
 	}
-	/* BB add support to use the multiuser_mount flag BB */
+
+	/* this is needed for ASCII cp to Unicode converts */
+	if(volume_info.iocharset == NULL) {
+		cifs_sb->local_nls = load_nls_default();
+	/* load_nls_default can not return null */
+	} else {
+		cifs_sb->local_nls = load_nls(volume_info.iocharset);
+		if(cifs_sb->local_nls == NULL) {
+			cERROR(1,("CIFS mount error: iocharset %s not found",volume_info.iocharset));
+			FreeXid(xid);
+			return -ELIBACC;
+		}
+	}
+
 	existingCifsSes =
 	    find_tcp_session(sin_server.sin_addr.s_addr,
 			     volume_info.username, &srvTcp);
@@ -918,6 +981,7 @@ cifs_mount(struct super_block *sb, struct cifs_sb_info *cifs_sb,
 			if (volume_info.domainname)
 				strncpy(pSesInfo->domainName,
 					volume_info.domainname,MAX_USERNAME_SIZE);
+			pSesInfo->linux_uid = volume_info.linux_uid;
 
 			rc = setup_session(xid,pSesInfo, cifs_sb->local_nls);
 			if(!rc)
@@ -988,6 +1052,8 @@ cifs_mount(struct super_block *sb, struct cifs_sb_info *cifs_sb,
 
 /* on error free sesinfo and tcon struct if needed */
 	if (rc) {
+		if(atomic_read(&srvTcp->socketUseCount) == 0)
+                	srvTcp->tcpStatus = CifsExiting;
 		           /* If find_unc succeeded then rc == 0 so we can not end */
 		if (tcon)  /* up here accidently freeing someone elses tcon struct */
 			tconInfoFree(tcon);
@@ -1297,7 +1363,7 @@ CIFSSpnegoSessSetup(unsigned int xid, struct cifsSesInfo *ses,
 	int bytes_returned = 0;
 	int len;
 
-	cFYI(1, ("In v2 sesssetup "));
+	cFYI(1, ("In spnego sesssetup "));
 
 	smb_buffer = buf_get();
 	if (smb_buffer == 0) {
@@ -1605,7 +1671,9 @@ CIFSNTLMSSPNegotiateSessSetup(unsigned int xid,
 	SecurityBlob->NegotiateFlags =
 	    NTLMSSP_NEGOTIATE_UNICODE | NTLMSSP_NEGOTIATE_OEM |
 	    NTLMSSP_REQUEST_TARGET | NTLMSSP_NEGOTIATE_NTLM | 0x80000000 |
-	    NTLMSSP_NEGOTIATE_ALWAYS_SIGN | NTLMSSP_NEGOTIATE_128;
+	    /* NTLMSSP_NEGOTIATE_ALWAYS_SIGN | */ NTLMSSP_NEGOTIATE_128;
+	if(sign_CIFS_PDUs)
+		SecurityBlob->NegotiateFlags |= NTLMSSP_NEGOTIATE_SIGN;
 	if(ntlmv2_support)
 		SecurityBlob->NegotiateFlags |= NTLMSSP_NEGOTIATE_NTLMV2;
 	/* setup pointers to domain name and workstation name */
@@ -1725,6 +1793,17 @@ CIFSNTLMSSPNegotiateSessSetup(unsigned int xid,
 				       CIFS_CRYPTO_KEY_SIZE);
 				if(SecurityBlob2->NegotiateFlags & NTLMSSP_NEGOTIATE_NTLMV2)
 					*pNTLMv2_flag = TRUE;
+
+				if((SecurityBlob2->NegotiateFlags & 
+					NTLMSSP_NEGOTIATE_ALWAYS_SIGN) 
+					|| (sign_CIFS_PDUs > 1))
+						ses->server->secMode |= 
+							SECMODE_SIGN_REQUIRED;	
+				if ((SecurityBlob2->NegotiateFlags & 
+					NTLMSSP_NEGOTIATE_SIGN) && (sign_CIFS_PDUs))
+						ses->server->secMode |= 
+							SECMODE_SIGN_ENABLED;
+
 				if (smb_buffer->Flags2 &= SMBFLG2_UNICODE) {
 					if ((long) (bcc_ptr) % 2) {
 						remaining_words =
@@ -1868,7 +1947,7 @@ CIFSNTLMSSPNegotiateSessSetup(unsigned int xid,
 
 int
 CIFSNTLMSSPAuthSessSetup(unsigned int xid, struct cifsSesInfo *ses,
-		char *ntlm_session_key, char *lanman_session_key, int ntlmv2_flag,
+		char *ntlm_session_key, int ntlmv2_flag,
 		const struct nls_table *nls_codepage)
 {
 	struct smb_hdr *smb_buffer;
@@ -1934,7 +2013,9 @@ CIFSNTLMSSPAuthSessSetup(unsigned int xid, struct cifsSesInfo *ses,
 	SecurityBlob->NegotiateFlags =
 	    NTLMSSP_NEGOTIATE_UNICODE | NTLMSSP_REQUEST_TARGET |
 	    NTLMSSP_NEGOTIATE_NTLM | NTLMSSP_NEGOTIATE_TARGET_INFO |
-	    0x80000000 | NTLMSSP_NEGOTIATE_ALWAYS_SIGN | NTLMSSP_NEGOTIATE_128;
+	    0x80000000 | NTLMSSP_NEGOTIATE_128;
+	if(sign_CIFS_PDUs)
+		SecurityBlob->NegotiateFlags |= /* NTLMSSP_NEGOTIATE_ALWAYS_SIGN |*/ NTLMSSP_NEGOTIATE_SIGN;
 	if(ntlmv2_flag)
 		SecurityBlob->NegotiateFlags |= NTLMSSP_NEGOTIATE_NTLMV2;
 

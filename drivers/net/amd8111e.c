@@ -102,7 +102,7 @@ MODULE_PARM_DESC(coalesce, "Enable or Disable interrupt coalescing, 1: Enable, 0
 MODULE_PARM(dynamic_ipg, "1-" __MODULE_STRING(MAX_UNITS) "i");
 MODULE_PARM_DESC(dynamic_ipg, "Enable or Disable dynamic IPG, 1: Enable, 0: Disable");
 
-static struct pci_device_id amd8111e_pci_tbl[] __devinitdata = {
+static struct pci_device_id amd8111e_pci_tbl[] = {
 		
 	{ PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD8111E_7462,
 	 PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0UL },
@@ -1405,7 +1405,7 @@ static int amd8111e_ethtool_ioctl(struct net_device* dev, void* useraddr)
 		strcpy (info.version, MODULE_VERSION);
 		memset(&info.fw_version, 0, sizeof(info.fw_version));
 		sprintf(info.fw_version,"%u",chip_version);
-		strcpy (info.bus_info, pci_dev->slot_name);
+		strcpy (info.bus_info, pci_name(pci_dev));
 		info.eedump_len = 0;
 		info.regdump_len = AMD8111E_REG_DUMP_LEN;
 		if (copy_to_user (useraddr, &info, sizeof(info)))
@@ -1698,7 +1698,7 @@ static int amd8111e_resume(struct pci_dev *pci_dev)
 	/* Restart ipg timer */
 	if(lp->options & OPTION_DYN_IPG_ENABLE)	        
 		mod_timer(&lp->ipg_data.ipg_timer, 
-				jiffies + (IPG_CONVERGE_TIME * HZ));
+				jiffies + IPG_CONVERGE_JIFFIES);
 	spin_unlock_irq(&lp->lock);
 
 	return 0;
@@ -1711,7 +1711,7 @@ static void __devexit amd8111e_remove_one(struct pci_dev *pdev)
 	if (dev) {
 		unregister_netdev(dev);
 		iounmap((void *) ((struct amd8111e_priv *)(dev->priv))->mmio);
-		kfree(dev);
+		free_netdev(dev);
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
 		pci_set_drvdata(pdev, NULL);
@@ -1772,7 +1772,7 @@ static void amd8111e_config_ipg(struct net_device* dev)
 		writew((u32)tmp_ipg, mmio + IPG); 
 		writew((u32)(tmp_ipg - IFS1_DELTA), mmio + IFS1); 
 	}
-	 mod_timer(&lp->ipg_data.ipg_timer, jiffies + (IPG_CONVERGE_TIME * HZ));
+	 mod_timer(&lp->ipg_data.ipg_timer, jiffies + IPG_CONVERGE_JIFFIES);
 	return;
 
 }
@@ -1909,7 +1909,7 @@ static int __devinit amd8111e_probe_one(struct pci_dev *pdev,
 		lp->ipg_data.ipg_timer.data = (unsigned long) dev;
 		lp->ipg_data.ipg_timer.function = (void *)&amd8111e_config_ipg;
 		lp->ipg_data.ipg_timer.expires = jiffies + 
-						 IPG_CONVERGE_TIME * HZ;
+						 IPG_CONVERGE_JIFFIES;
 		lp->ipg_data.ipg = DEFAULT_IPG;
 		lp->ipg_data.ipg_state = CSTATE;
 	};
@@ -1927,7 +1927,7 @@ err_iounmap:
 	iounmap((void *) lp->mmio);
 
 err_free_dev:
-	kfree(dev);
+	free_netdev(dev);
 
 err_free_reg:
 	pci_release_regions(pdev);
@@ -1940,12 +1940,12 @@ err_disable_pdev:
 }
 
 static struct pci_driver amd8111e_driver = {
-	name:		MODULE_NAME,
-	id_table:	amd8111e_pci_tbl,
-	probe:		amd8111e_probe_one,
-	remove:		__devexit_p(amd8111e_remove_one),
-	suspend:	amd8111e_suspend,
-	resume:		amd8111e_resume
+	.name		= MODULE_NAME,
+	.id_table	= amd8111e_pci_tbl,
+	.probe		= amd8111e_probe_one,
+	.remove		= __devexit_p(amd8111e_remove_one),
+	.suspend	= amd8111e_suspend,
+	.resume		= amd8111e_resume
 };
 
 static int __init amd8111e_init(void)

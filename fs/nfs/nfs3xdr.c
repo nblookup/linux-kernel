@@ -124,8 +124,6 @@ xdr_decode_fhandle(u32 *p, struct nfs_fh *fh)
 
 /*
  * Encode/decode time.
- * Since the VFS doesn't care for fractional times, we ignore the
- * nanosecond field.
  */
 static inline u32 *
 xdr_encode_time3(u32 *p, struct timespec *timep)
@@ -165,6 +163,8 @@ xdr_decode_fattr(u32 *p, struct nfs_fattr *fattr)
 	major = ntohl(*p++);
 	minor = ntohl(*p++);
 	fattr->rdev = MKDEV(major, minor);
+	if (MAJOR(fattr->rdev) != major || MINOR(fattr->rdev) != minor)
+		fattr->rdev = 0;
 
 	p = xdr_decode_hyper(p, &fattr->fsid_u.nfs3);
 	p = xdr_decode_hyper(p, &fattr->fileid);

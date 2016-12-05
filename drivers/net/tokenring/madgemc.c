@@ -20,7 +20,7 @@
 static const char version[] = "madgemc.c: v0.91 23/01/2000 by Adam Fritzler\n";
 
 #include <linux/module.h>
-#include <linux/mca.h>
+#include <linux/mca-legacy.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
@@ -774,7 +774,7 @@ static void __exit madgemc_exit(void)
 		release_region(dev->base_addr-MADGEMC_SIF_OFFSET, MADGEMC_IO_EXTENT);
 		free_irq(dev->irq, dev);
 		tmsdev_term(dev);
-		kfree(dev);
+		free_netdev(dev);
 		this_card = madgemc_card_list;
 		madgemc_card_list = this_card->next;
 		kfree(this_card);

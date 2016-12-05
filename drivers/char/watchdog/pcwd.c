@@ -45,6 +45,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/types.h>
 #include <linux/timer.h>
 #include <linux/config.h>
@@ -87,7 +88,7 @@ static int timeout_val = WD_TIMEOUT;
 static int timeout = 2;
 static int expect_close = 0;
 
-MODULE_PARM(timeout,"i");
+module_param(timeout, int, 0);
 MODULE_PARM_DESC(timeout, "Watchdog timeout in seconds (default=2)"); 
 
 #ifdef CONFIG_WATCHDOG_NOWAYOUT
@@ -96,7 +97,7 @@ static int nowayout = 1;
 static int nowayout = 0;
 #endif
 
-MODULE_PARM(nowayout,"i");
+module_param(nowayout, int, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default=CONFIG_WATCHDOG_NOWAYOUT)");
 
 
@@ -425,13 +426,13 @@ static ssize_t pcwd_write(struct file *file, const char *buf, size_t len,
 
 static int pcwd_open(struct inode *ino, struct file *filep)
 {
-	switch (minor(ino->i_rdev)) {
+	switch (iminor(ino)) {
 	case WATCHDOG_MINOR:
 		if (!atomic_dec_and_test(&open_allowed) ) {
 			atomic_inc( &open_allowed );
 			return -EBUSY;
 		}
-		MOD_INC_USE_COUNT;
+		__module_get(THIS_MODULE);
 		/*  Enable the port  */
 		if (revision == PCWD_REVISION_C) {
 			spin_lock(&io_lock);
@@ -456,7 +457,7 @@ static ssize_t pcwd_read(struct file *file, char *buf, size_t count,
 	/*  Can't seek (pread) on this device  */
 	if (ppos != &file->f_pos)
 		return -ESPIPE;
-	switch(minor(file->f_dentry->d_inode->i_rdev)) 
+	switch(iminor(file->f_dentry->d_inode)) 
 	{
 		case TEMP_MINOR:
 			/*
@@ -476,7 +477,7 @@ static ssize_t pcwd_read(struct file *file, char *buf, size_t count,
 
 static int pcwd_close(struct inode *ino, struct file *filep)
 {
-	if (minor(ino->i_rdev)==WATCHDOG_MINOR) {
+	if (iminor(ino)==WATCHDOG_MINOR) {
 		if (expect_close) {
 			/*  Disable the board  */
 			if (revision == PCWD_REVISION_C) {

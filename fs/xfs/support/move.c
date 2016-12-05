@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2002 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2003 Silicon Graphics, Inc.  All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of version 2 of the GNU General Public License as
@@ -38,57 +38,35 @@
 #include "debug.h"
 #include "move.h"
 
-/*
- * Move "n" bytes at byte address "cp"; "rw" indicates the direction
- * of the move, and the I/O parameters are provided in "uio", which is
- * update to reflect the data which was moved.  Returns 0 on success or
- * a non-zero errno on failure.
+/* Read from kernel buffer at src to user/kernel buffer defined
+ * by the uio structure. Advance the pointer in the uio struct
+ * as we go.
  */
 int
-uiomove(void *cp, size_t n, enum uio_rw rw, struct uio *uio)
+uio_read(caddr_t src, size_t len, struct uio *uio)
 {
-	register struct iovec *iov;
-	u_int cnt;
-	int error;
+	size_t	count;
 
-	while (n > 0 && uio->uio_resid) {
-		iov = uio->uio_iov;
-		cnt = (u_int)iov->iov_len;
-		if (cnt == 0) {
-			uio->uio_iov++;
-			uio->uio_iovcnt--;
-			continue;
-		}
-		if (cnt > n)
-			cnt = (u_int)n;
-		switch (uio->uio_segflg) {
-		case UIO_USERSPACE:
-			if (rw == UIO_READ)
-				error = copy_to_user(iov->iov_base, cp, cnt);
-			else
-				error = copy_from_user(cp, iov->iov_base, cnt);
-			if (error)
-				return EFAULT;
-			break;
+	if (!len || !uio->uio_resid)
+		return 0;
 
+	count = uio->uio_iov->iov_len;
+	if (!count)
+		return 0;
+	if (count > len)
+		count = len;
 
-		case UIO_SYSSPACE:
-			if (rw == UIO_READ)
-				memcpy(iov->iov_base, cp, cnt);
-			else
-				memcpy(cp, iov->iov_base, cnt);
-			break;
-
-		default:
-			ASSERT(0);
-			break;
-		}
-		iov->iov_base = (void *)((char *)iov->iov_base + cnt);
-		iov->iov_len -= cnt;
-		uio->uio_resid -= cnt;
-		uio->uio_offset += cnt;
-		cp = (void *)((char *)cp + cnt);
-		n -= cnt;
+	if (uio->uio_segflg == UIO_USERSPACE) {
+		if (copy_to_user(uio->uio_iov->iov_base, src, count))
+			return EFAULT;
+	} else {
+		ASSERT(uio->uio_segflg == UIO_SYSSPACE);
+		memcpy(uio->uio_iov->iov_base, src, count);
 	}
+
+	uio->uio_iov->iov_base = (void*)((char*)uio->uio_iov->iov_base + count);
+	uio->uio_iov->iov_len -= count;
+	uio->uio_offset += count;
+	uio->uio_resid -= count;
 	return 0;
 }

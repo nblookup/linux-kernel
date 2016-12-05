@@ -5,8 +5,9 @@
 menu "Console display driver support"
 
 config VGA_CONSOLE
-	bool "VGA text console"
-	depends on !ARCH_ACORN && !ARCH_EBSA110 || !4xx && !8xx
+	bool "VGA text console" if EMBEDDED || !X86
+	depends on !ARCH_ACORN && !ARCH_EBSA110 && !4xx && !8xx && !SPARC32 && !SPARC64
+	default y
 	help
 	  Saying Y here will allow you to use Linux in text mode through a
 	  display that complies with the generic VGA standard. Virtually
@@ -50,10 +51,8 @@ config MDA_CONSOLE
 	  say Y here if your MDA card is the primary card in your system; the
 	  normal VGA driver will handle it.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted and removed from the running kernel whenever you want).
-	  The module will be called mdacon. If you want to compile it as
-	  a module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called mdacon.
 
 	  If unsure, say N.
 

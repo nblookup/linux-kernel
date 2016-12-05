@@ -17,6 +17,7 @@
 
 #include <linux/config.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
@@ -53,7 +54,9 @@ int smp_threads_ready;
 unsigned long cache_decay_ticks;
 
 /* initialised so it doesn't end up in bss */
-unsigned long cpu_online_map = 0;
+cpumask_t cpu_online_map = CPU_MASK_NONE;
+
+EXPORT_SYMBOL(cpu_online_map);
 
 static struct smp_ops_t *smp_ops;
 
@@ -208,7 +211,7 @@ smp_openpic_message_pass(int target, int msg, unsigned long data, int wait)
 	}
 }
 
-static int __init smp_chrp_probe(void)
+static int __init smp_openpic_probe(void)
 {
 	int i;
 	int nr_cpus = 0;
@@ -301,6 +304,10 @@ static int __init smp_xics_probe(void)
 		if (cpu_possible(i))
 			nr_cpus++;
 	}
+#ifdef CONFIG_SMP
+	extern void xics_request_IPIs(void);
+	xics_request_IPIs();
+#endif
 
 	return nr_cpus;
 }
@@ -337,7 +344,7 @@ void __init smp_init_pSeries(void)
 
 	if (naca->interrupt_controller == IC_OPEN_PIC) {
 		smp_ops->message_pass	= smp_openpic_message_pass;
-		smp_ops->probe		= smp_chrp_probe;
+		smp_ops->probe		= smp_openpic_probe;
 	} else {
 		smp_ops->message_pass	= smp_xics_message_pass;
 		smp_ops->probe		= smp_xics_probe;
@@ -570,7 +577,7 @@ void __init smp_prepare_cpus(unsigned int max_cpus)
 
 void __devinit smp_prepare_boot_cpu(void)
 {
-	set_bit(smp_processor_id(), &cpu_online_map);
+	cpu_set(smp_processor_id(), cpu_online_map);
 	/* FIXME: what about cpu_possible()? */
 }
 
@@ -631,7 +638,7 @@ int __devinit __cpu_up(unsigned int cpu)
 
 	if (smp_ops->give_timebase)
 		smp_ops->give_timebase();
-	set_bit(cpu, &cpu_online_map);
+	cpu_set(cpu, cpu_online_map);
 	return 0;
 }
 

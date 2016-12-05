@@ -14,7 +14,6 @@
 #include <linux/major.h>
 #include <linux/fs.h>
 #include <linux/blkpg.h>
-#include <linux/blk.h>
 
 #include <asm/ccwdev.h>
 #include <asm/uaccess.h>
@@ -126,8 +125,7 @@ dasd_ioctl_api_version(struct block_device *bdev, int no, long args)
 
 /*
  * Enable device.
- * FIXME: how can we get here if the device is not already enabled?
- * 	-arnd
+ * used by dasdfmt after BIODASDDISABLE to retrigger blocksize detection
  */
 static int
 dasd_ioctl_enable(struct block_device *bdev, int no, long args)
@@ -140,6 +138,10 @@ dasd_ioctl_enable(struct block_device *bdev, int no, long args)
 	if (device == NULL)
 		return -ENODEV;
 	dasd_enable_device(device);
+	/* Formatting the dasd device can change the capacity. */
+	down(&bdev->bd_sem);
+	i_size_write(bdev->bd_inode, (loff_t)get_capacity(device->gdp) << 9);
+	up(&bdev->bd_sem);
 	return 0;
 }
 

@@ -242,14 +242,14 @@ static struct pci_driver maestro_pci_driver;
 #define M_DEBUG 1
 
 #ifdef M_DEBUG
-static int debug=0;
+static int debug;
 #define M_printk(args...) {if (debug) printk(args);}
 #else
 #define M_printk(x)
 #endif
 
 /* we try to setup 2^(dsps_order) /dev/dsp devices */
-static int dsps_order=0;
+static int dsps_order;
 /* whether or not we mess around with power management */
 static int use_pm=2; /* set to 1 for force */
 /* clocking for broken hardware - a few laptops seem to use a 50Khz clock
@@ -726,6 +726,12 @@ static void ac97_write_mixer(struct ess_card *card,int mixer, unsigned int left,
 			left = (left * mh->scale) / 100;
 			if ((left == 0) && (right == 0))
 				val |= 0x8000;
+		} else if (mixer == SOUND_MIXER_PCM || mixer == SOUND_MIXER_CD) {
+			/* log conversion seems bad for them */
+			if ((left == 0) && (right == 0))
+				val = 0x8000;
+			right = ((100 - right) * mh->scale) / 100;
+			left = ((100 - left) * mh->scale) / 100;
 		} else {
 			/* log conversion for the stereo controls */
 			if((left == 0) && (right == 0))
@@ -1937,12 +1943,12 @@ ess_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		   manner by adjusting the master mixer volume. */
 		volume = c->mix.mixer_state[0] & 0xff;
 		if (vol_evt == UP_EVT) {
-			volume += 10;
+			volume += 5;
 			if (volume > 100)
 				volume = 100;
 		}
 		else if (vol_evt == DOWN_EVT) {
-			volume -= 10;
+			volume -= 5;
 			if (volume < 0)
 				volume = 0;
 		} else {
@@ -2024,6 +2030,7 @@ static int mixer_ioctl(struct ess_card *card, unsigned int cmd, unsigned long ar
 	VALIDATE_CARD(card);
         if (cmd == SOUND_MIXER_INFO) {
 		mixer_info info;
+		memset(&info, 0, sizeof(info));
 		strlcpy(info.id, card_names[card->card_type], sizeof(info.id));
 		strlcpy(info.name, card_names[card->card_type], sizeof(info.name));
 		info.modify_counter = card->mix.modcnt;
@@ -2033,6 +2040,7 @@ static int mixer_ioctl(struct ess_card *card, unsigned int cmd, unsigned long ar
 	}
 	if (cmd == SOUND_OLD_MIXER_INFO) {
 		_old_mixer_info info;
+		memset(&info, 0, sizeof(info));
 		strlcpy(info.id, card_names[card->card_type], sizeof(info.id));
 		strlcpy(info.name, card_names[card->card_type], sizeof(info.name));
 		if (copy_to_user((void *)arg, &info, sizeof(info)))
@@ -2130,7 +2138,7 @@ static int mixer_ioctl(struct ess_card *card, unsigned int cmd, unsigned long ar
 /* --------------------------------------------------------------------- */
 static int ess_open_mixdev(struct inode *inode, struct file *file)
 {
-	unsigned int minor = minor(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	struct ess_card *card = NULL;
 	struct pci_dev *pdev = NULL;
 	struct pci_driver *drvr;
@@ -2975,7 +2983,7 @@ free_buffers(struct ess_state *s)
 static int 
 ess_open(struct inode *inode, struct file *file)
 {
-	unsigned int minor = minor(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	struct ess_state *s = NULL;
 	unsigned char fmtm = ~0, fmts = 0;
 	struct pci_dev *pdev = NULL;
@@ -3604,7 +3612,7 @@ static void maestro_remove(struct pci_dev *pcidev) {
 	pci_set_drvdata(pcidev,NULL);
 }
 
-static struct pci_device_id maestro_pci_tbl[] __devinitdata = {
+static struct pci_device_id maestro_pci_tbl[] = {
 	{PCI_VENDOR_ESS, PCI_DEVICE_ID_ESS_ESS1968, PCI_ANY_ID, PCI_ANY_ID, 0, 0, TYPE_MAESTRO2},
 	{PCI_VENDOR_ESS, PCI_DEVICE_ID_ESS_ESS1978, PCI_ANY_ID, PCI_ANY_ID, 0, 0, TYPE_MAESTRO2E},
 	{PCI_VENDOR_ESS_OLD, PCI_DEVICE_ID_ESS_ESS0100, PCI_ANY_ID, PCI_ANY_ID, 0, 0, TYPE_MAESTRO},

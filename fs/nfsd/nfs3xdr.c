@@ -4,6 +4,8 @@
  * XDR support for nfsd/protocol version 3.
  *
  * Copyright (C) 1995, 1996, 1997 Olaf Kirch <okir@monad.swb.de>
+ *
+ * 2003-08-09 Jamie Lokier: Use htonl() for nanoseconds, not htons()!
  */
 
 #include <linux/types.h>
@@ -43,7 +45,7 @@ static u32	nfs3_ftypes[] = {
 static inline u32 *
 encode_time3(u32 *p, struct timespec *time)
 {
-	*p++ = htonl((u32) time->tv_sec); *p++ = htons(time->tv_nsec);
+	*p++ = htonl((u32) time->tv_sec); *p++ = htonl(time->tv_nsec);
 	return p;
 }
 
@@ -184,12 +186,10 @@ encode_fattr3(struct svc_rqst *rqstp, u32 *p, struct svc_fh *fhp)
 	p = xdr_encode_hyper(p, ((u64)stat.blocks) << 9);
 	*p++ = htonl((u32) MAJOR(stat.rdev));
 	*p++ = htonl((u32) MINOR(stat.rdev));
-	if (rqstp->rq_reffh->fh_version == 1
-	    && rqstp->rq_reffh->fh_fsid_type == 1
-	    && (fhp->fh_export->ex_flags & NFSEXP_FSID))
+	if (is_fsid(fhp, rqstp->rq_reffh))
 		p = xdr_encode_hyper(p, (u64) fhp->fh_export->ex_fsid);
 	else
-		p = xdr_encode_hyper(p, (u64) stat.dev);
+		p = xdr_encode_hyper(p, (u64) huge_encode_dev(stat.dev));
 	p = xdr_encode_hyper(p, (u64) stat.ino);
 	p = encode_time3(p, &stat.atime);
 	lease_get_mtime(dentry->d_inode, &time); 
@@ -220,12 +220,10 @@ encode_saved_post_attr(struct svc_rqst *rqstp, u32 *p, struct svc_fh *fhp)
 	p = xdr_encode_hyper(p, ((u64)fhp->fh_post_blocks) << 9);
 	*p++ = fhp->fh_post_rdev[0];
 	*p++ = fhp->fh_post_rdev[1];
-	if (rqstp->rq_reffh->fh_version == 1
-	    && rqstp->rq_reffh->fh_fsid_type == 1
-	    && (fhp->fh_export->ex_flags & NFSEXP_FSID))
+	if (is_fsid(fhp, rqstp->rq_reffh))
 		p = xdr_encode_hyper(p, (u64) fhp->fh_export->ex_fsid);
 	else
-		p = xdr_encode_hyper(p, (u64) inode->i_sb->s_dev);
+		p = xdr_encode_hyper(p, (u64)huge_encode_dev(inode->i_sb->s_dev));
 	p = xdr_encode_hyper(p, (u64) inode->i_ino);
 	p = encode_time3(p, &fhp->fh_post_atime);
 	p = encode_time3(p, &fhp->fh_post_mtime);
@@ -446,7 +444,7 @@ nfs3svc_decode_symlinkargs(struct svc_rqst *rqstp, u32 *p,
 	 */
 	svc_take_page(rqstp);
 	len = ntohl(*p++);
-	if (len <= 0 || len > NFS3_MAXPATHLEN)
+	if (len <= 0 || len > NFS3_MAXPATHLEN || len >= PAGE_SIZE)
 		return 0;
 	args->tname = new = page_address(rqstp->rq_respages[rqstp->rq_resused-1]);
 	args->tlen = len;
@@ -454,7 +452,7 @@ nfs3svc_decode_symlinkargs(struct svc_rqst *rqstp, u32 *p,
 	old = (char*)p;
 	vec = &rqstp->rq_arg.head[0];
 	avail = vec->iov_len - (old - (char*)vec->iov_base);
-	while (len > 0 && *old && avail) {
+	while (len && avail && *old) {
 		*new++ = *old++;
 		len--;
 		avail--;
@@ -465,7 +463,7 @@ nfs3svc_decode_symlinkargs(struct svc_rqst *rqstp, u32 *p,
 		if (avail > PAGE_SIZE) avail = PAGE_SIZE;
 		old = page_address(rqstp->rq_arg.pages[0]);
 	}
-	while (len > 0 && *old && avail) {
+	while (len && avail && *old) {
 		*new++ = *old++;
 		len--;
 		avail--;
@@ -826,6 +824,8 @@ encode_entry(struct readdir_cd *ccd, const char *name,
 		} else
 			dchild = lookup_one_len(name, dparent,namlen);
 		if (IS_ERR(dchild))
+			goto noexec;
+		if (d_mountpoint(dchild))
 			goto noexec;
 		if (fh_compose(&fh, exp, dchild, &cd->fh) != 0 || !dchild->d_inode)
 			goto noexec;

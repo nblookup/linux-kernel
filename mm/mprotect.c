@@ -224,9 +224,13 @@ fail:
 asmlinkage long
 sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 {
-	unsigned long nstart, end, tmp;
+	unsigned long vm_flags, nstart, end, tmp;
 	struct vm_area_struct * vma, * next, * prev;
 	int error = -EINVAL;
+	const int grows = prot & (PROT_GROWSDOWN|PROT_GROWSUP);
+	prot &= ~(PROT_GROWSDOWN|PROT_GROWSUP);
+	if (grows == (PROT_GROWSDOWN|PROT_GROWSUP)) /* can't be both */
+		return -EINVAL;
 
 	if (start & ~PAGE_MASK)
 		return -EINVAL;
@@ -239,12 +243,32 @@ sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 	if (end == start)
 		return 0;
 
+	vm_flags = calc_vm_prot_bits(prot);
+
 	down_write(&current->mm->mmap_sem);
 
 	vma = find_vma_prev(current->mm, start, &prev);
 	error = -ENOMEM;
-	if (!vma || vma->vm_start > start)
+	if (!vma)
 		goto out;
+	if (unlikely(grows & PROT_GROWSDOWN)) {
+		if (vma->vm_start >= end)
+			goto out;
+		start = vma->vm_start;
+		error = -EINVAL;
+		if (!(vma->vm_flags & VM_GROWSDOWN))
+			goto out;
+	}
+	else {
+		if (vma->vm_start > start)
+			goto out;
+		if (unlikely(grows & PROT_GROWSUP)) {
+			end = vma->vm_end;
+			error = -EINVAL;
+			if (!(vma->vm_flags & VM_GROWSUP))
+				goto out;
+		}
+	}
 
 	for (nstart = start ; ; ) {
 		unsigned int newflags;
@@ -257,7 +281,8 @@ sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 			goto out;
 		}
 
-		newflags = prot | (vma->vm_flags & ~(PROT_READ | PROT_WRITE | PROT_EXEC));
+		newflags = vm_flags | (vma->vm_flags & ~(VM_READ | VM_WRITE | VM_EXEC));
+
 		if ((newflags & ~(newflags >> 4)) & 0xf) {
 			error = -EACCES;
 			goto out;

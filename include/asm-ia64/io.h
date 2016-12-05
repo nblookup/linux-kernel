@@ -52,6 +52,7 @@ extern unsigned int num_io_spaces;
 
 # ifdef __KERNEL__
 
+#include <asm/intrinsics.h>
 #include <asm/machvec.h>
 #include <asm/page.h>
 #include <asm/system.h>
@@ -71,6 +72,9 @@ phys_to_virt (unsigned long address)
 	return (void *) (address + PAGE_OFFSET);
 }
 
+#define ARCH_HAS_VALID_PHYS_ADDR_RANGE
+extern int valid_phys_addr_range (unsigned long addr, size_t *count); /* efi.c */
+
 /*
  * The following two macros are deprecated and scheduled for removal.
  * Please use the PCI-DMA interface defined in <asm/pci.h> instead.
@@ -85,7 +89,7 @@ phys_to_virt (unsigned long address)
  * Memory fence w/accept.  This should never be used in code that is
  * not IA-64 specific.
  */
-#define __ia64_mf_a()	__asm__ __volatile__ ("mf.a" ::: "memory")
+#define __ia64_mf_a()	ia64_mfa()
 
 static inline const unsigned long
 __ia64_get_io_port_base (void)
@@ -414,6 +418,17 @@ extern void __ia64_memset_c_io (unsigned long, unsigned long, long);
 # endif /* __KERNEL__ */
 
 /*
+ * Enabling BIO_VMERGE_BOUNDARY forces us to turn off I/O MMU bypassing.  It is said that
+ * BIO-level virtual merging can give up to 4% performance boost (not verified for ia64).
+ * On the other hand, we know that I/O MMU bypassing gives ~8% performance improvement on
+ * SPECweb-like workloads on zx1-based machines.  Thus, for now we favor I/O MMU bypassing
+ * over BIO-level virtual merging.
+ */
+extern unsigned long ia64_max_iommu_merge_mask;
+#if 1
+#define BIO_VMERGE_BOUNDARY	0
+#else
+/*
  * It makes no sense at all to have this BIO_VMERGE_BOUNDARY macro here.  Should be
  * replaced by dma_merge_mask() or something of that sort.  Note: the only way
  * BIO_VMERGE_BOUNDARY is used is to mask off bits.  Effectively, our definition gets
@@ -423,7 +438,7 @@ extern void __ia64_memset_c_io (unsigned long, unsigned long, long);
  *
  * which is precisely what we want.
  */
-extern unsigned long ia64_max_iommu_merge_mask;
 #define BIO_VMERGE_BOUNDARY	(ia64_max_iommu_merge_mask + 1)
+#endif
 
 #endif /* _ASM_IA64_IO_H */

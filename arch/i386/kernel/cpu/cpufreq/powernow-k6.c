@@ -1,8 +1,5 @@
 /*
- *  $Id: powernow-k6.c,v 1.48 2003/02/22 10:23:46 db Exp $
- *  This file was part of Powertweak Linux (http://powertweak.sf.net)
- *  and is shared with the Linux Kernel module.
- *
+ *  This file was based upon code in Powertweak Linux (http://powertweak.sf.net)
  *  (C) 2000-2003  Dave Jones, Arjan van de Ven, Janne Pänkälä, Dominik Brodowski.
  *
  *  Licensed under the terms of the GNU GPL License version 2.
@@ -160,7 +157,7 @@ static int powernow_k6_cpu_init(struct cpufreq_policy *policy)
 	}
 
 	/* cpuinfo and default policy values */
-	policy->policy = CPUFREQ_POLICY_PERFORMANCE;
+	policy->governor = CPUFREQ_DEFAULT_GOVERNOR;
 	policy->cpuinfo.transition_latency = CPUFREQ_ETERNAL;
 	policy->cur = busfreq * max_multiplier;
 
@@ -230,7 +227,7 @@ static void __exit powernow_k6_exit(void)
 }
 
 
-MODULE_AUTHOR ("Arjan van de Ven <arjanv@redhat.com>, Dave Jones <davej@suse.de>, Dominik Brodowski <linux@brodo.de>");
+MODULE_AUTHOR ("Arjan van de Ven <arjanv@redhat.com>, Dave Jones <davej@codemonkey.org.uk>, Dominik Brodowski <linux@brodo.de>");
 MODULE_DESCRIPTION ("PowerNow! driver for AMD K6-2+ / K6-3+ processors.");
 MODULE_LICENSE ("GPL");
 

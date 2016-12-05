@@ -94,7 +94,7 @@ static char *version = DRV_NAME ".c " DRV_VERSION " 2002/03/23";
 static void fmvj18x_config(dev_link_t *link);
 static int fmvj18x_get_hwinfo(dev_link_t *link, u_char *node_id);
 static int fmvj18x_setup_mfc(dev_link_t *link);
-static void fmvj18x_release(u_long arg);
+static void fmvj18x_release(dev_link_t *link);
 static int fmvj18x_event(event_t event, int priority,
 			  event_callback_args_t *args);
 static dev_link_t *fmvj18x_attach(void);
@@ -113,7 +113,7 @@ static void fjn_reset(struct net_device *dev);
 static struct net_device_stats *fjn_get_stats(struct net_device *dev);
 static void set_rx_mode(struct net_device *dev);
 static void fjn_tx_timeout(struct net_device *dev);
-static int fjn_ioctl(struct net_device *, struct ifreq *, int);
+static struct ethtool_ops netdev_ethtool_ops;
 
 static dev_info_t dev_info = "fmvj18x_cs";
 static dev_link_t *dev_list;
@@ -242,24 +242,6 @@ typedef struct local_info_t {
 #define BANK_1U              0x24 /* bank 1 (CONFIG_1) */
 #define BANK_2U              0x28 /* bank 2 (CONFIG_1) */
 
-/*======================================================================
-
-    This bit of code is used to avoid unregistering network devices
-    at inappropriate times.  2.2 and later kernels are fairly picky
-    about when this can happen.
-    
-======================================================================*/
-
-static void flush_stale_links(void)
-{
-    dev_link_t *link, *next;
-    for (link = dev_list; link; link = next) {
-	next = link->next;
-	if (link->state & DEV_STALE_LINK)
-	    fmvj18x_detach(link);
-    }
-}
-
 static dev_link_t *fmvj18x_attach(void)
 {
     local_info_t *lp;
@@ -269,7 +251,6 @@ static dev_link_t *fmvj18x_attach(void)
     int i, ret;
     
     DEBUG(0, "fmvj18x_attach()\n");
-    flush_stale_links();
 
     /* Make up a FMVJ18x specific data structure */
     dev = alloc_etherdev(sizeof(local_info_t));
@@ -278,10 +259,6 @@ static dev_link_t *fmvj18x_attach(void)
     lp = dev->priv;
     link = &lp->link;
     link->priv = dev;
-
-    init_timer(&link->release);
-    link->release.function = &fmvj18x_release;
-    link->release.data = (u_long)link;
 
     /* The io structure describes IO port mapping */
     link->io.NumPorts1 = 32;
@@ -316,7 +293,7 @@ static dev_link_t *fmvj18x_attach(void)
     dev->tx_timeout = fjn_tx_timeout;
     dev->watchdog_timeo = TX_TIMEOUT;
 #endif
-    dev->do_ioctl = fjn_ioctl;
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
     
     /* Register with Card Services */
     link->next = dev_list;
@@ -355,13 +332,10 @@ static void fmvj18x_detach(dev_link_t *link)
     if (*linkp == NULL)
 	return;
 
-    del_timer_sync(&link->release);
     if (link->state & DEV_CONFIG) {
-	fmvj18x_release((u_long)link);
-	if (link->state & DEV_STALE_CONFIG) {
-	    link->state |= DEV_STALE_LINK;
+	fmvj18x_release(link);
+	if (link->state & DEV_STALE_CONFIG)
 	    return;
-	}
     }
 
     /* Break the link with Card Services */
@@ -370,9 +344,11 @@ static void fmvj18x_detach(dev_link_t *link)
     
     /* Unlink device structure, free pieces */
     *linkp = link->next;
-    if (link->dev)
+    if (link->dev) {
 	unregister_netdev(dev);
-    kfree(dev);
+	free_netdev(dev);
+    } else
+    	kfree(dev);
     
 } /* fmvj18x_detach */
 
@@ -526,6 +502,8 @@ static void fmvj18x_config(dev_link_t *link)
     }
 
     if (link->io.NumPorts2 != 0) {
+    	link->irq.Attributes =
+		IRQ_TYPE_DYNAMIC_SHARING|IRQ_FIRST_SHARED|IRQ_HANDLE_PRESENT;
 	ret = mfc_try_io_port(link);
 	if (ret != CS_SUCCESS) goto cs_failed;
     } else if (cardtype == UNGERMANN) {
@@ -638,7 +616,7 @@ cs_failed:
     /* All Card Services errors end up here */
     cs_error(link->handle, last_fn, last_ret);
 failed:
-    fmvj18x_release((u_long)link);
+    fmvj18x_release(link);
     link->state &= ~DEV_CONFIG_PENDING;
 
 } /* fmvj18x_config */
@@ -742,9 +720,8 @@ static int fmvj18x_setup_mfc(dev_link_t *link)
 }
 /*====================================================================*/
 
-static void fmvj18x_release(u_long arg)
+static void fmvj18x_release(dev_link_t *link)
 {
-    dev_link_t *link = (dev_link_t *)arg;
 
     DEBUG(0, "fmvj18x_release(0x%p)\n", link);
 
@@ -766,8 +743,10 @@ static void fmvj18x_release(u_long arg)
     CardServices(ReleaseIRQ, link->handle, &link->irq);
     
     link->state &= ~DEV_CONFIG;
-    
-} /* fmvj18x_release */
+
+    if (link->state & DEV_STALE_CONFIG)
+	    fmvj18x_detach(link);
+}
 
 /*====================================================================*/
 
@@ -784,7 +763,7 @@ static int fmvj18x_event(event_t event, int priority,
 	link->state &= ~DEV_PRESENT;
 	if (link->state & DEV_CONFIG) {
 	    netif_device_detach(dev);
-	    mod_timer(&link->release, jiffies + HZ/20);
+	    fmvj18x_release(link);
 	}
 	break;
     case CS_EVENT_CARD_INSERTION:
@@ -1190,64 +1169,33 @@ static void fjn_rx(struct net_device *dev)
 
 /*====================================================================*/
 
-static int netdev_ethtool_ioctl (struct net_device *dev, void *useraddr)
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
 {
-	u32 ethcmd;
-
-	/* dev_ioctl() in ../../net/core/dev.c has already checked
-	   capable(CAP_NET_ADMIN), so don't bother with that here.  */
-
-	if (get_user(ethcmd, (u32 *)useraddr))
-		return -EFAULT;
-
-	switch (ethcmd) {
-
-	case ETHTOOL_GDRVINFO: {
-		struct ethtool_drvinfo info = { ETHTOOL_GDRVINFO };
-		strcpy (info.driver, DRV_NAME);
-		strcpy (info.version, DRV_VERSION);
-		sprintf(info.bus_info, "PCMCIA 0x%lx", dev->base_addr);
-		if (copy_to_user (useraddr, &info, sizeof (info)))
-			return -EFAULT;
-		return 0;
-	}
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "PCMCIA 0x%lx", dev->base_addr);
+}
 
 #ifdef PCMCIA_DEBUG
-	/* get message-level */
-	case ETHTOOL_GMSGLVL: {
-		struct ethtool_value edata = {ETHTOOL_GMSGLVL};
-		edata.data = pc_debug;
-		if (copy_to_user(useraddr, &edata, sizeof(edata)))
-			return -EFAULT;
-		return 0;
-	}
-	/* set message-level */
-	case ETHTOOL_SMSGLVL: {
-		struct ethtool_value edata;
-		if (copy_from_user(&edata, useraddr, sizeof(edata)))
-			return -EFAULT;
-		pc_debug = edata.data;
-		return 0;
-	}
-#endif
-
-	default:
-		break;
-	}
-
-	return -EOPNOTSUPP;
-}
-
-static int fjn_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+static u32 netdev_get_msglevel(struct net_device *dev)
 {
-	switch (cmd) {
-	case SIOCETHTOOL:
-		return netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
-
-	default:
-		return -EOPNOTSUPP;
-	}
+	return pc_debug;
 }
+
+static void netdev_set_msglevel(struct net_device *dev, u32 level)
+{
+	pc_debug = level;
+}
+#endif /* PCMCIA_DEBUG */
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+#ifdef PCMCIA_DEBUG
+	.get_msglevel		= netdev_get_msglevel,
+	.set_msglevel		= netdev_set_msglevel,
+#endif /* PCMCIA_DEBUG */
+};
 
 static int fjn_config(struct net_device *dev, struct ifmap *map){
     return 0;
@@ -1306,7 +1254,7 @@ static int fjn_close(struct net_device *dev)
 
     link->open--;
     if (link->state & DEV_STALE_CONFIG)
-	mod_timer(&link->release, jiffies + HZ/20);
+	    fmvj18x_release(link);
 
     return 0;
 } /* fjn_close */

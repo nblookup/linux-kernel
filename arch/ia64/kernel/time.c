@@ -12,22 +12,27 @@
 
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/profile.h>
 #include <linux/sched.h>
 #include <linux/time.h>
 #include <linux/interrupt.h>
 #include <linux/efi.h>
+#include <linux/profile.h>
 #include <linux/timex.h>
 
 #include <asm/delay.h>
 #include <asm/hw_irq.h>
 #include <asm/ptrace.h>
 #include <asm/sal.h>
+#include <asm/sections.h>
 #include <asm/system.h>
 
 extern unsigned long wall_jiffies;
 
 u64 jiffies_64 = INITIAL_JIFFIES;
+
+EXPORT_SYMBOL(jiffies_64);
 
 #define TIME_KEEPER_ID	0	/* smp_processor_id() of time-keeper */
 
@@ -37,28 +42,12 @@ unsigned long last_cli_ip;
 
 #endif
 
-static void
-do_profile (unsigned long ip)
+unsigned long long
+sched_clock (void)
 {
-	extern unsigned long prof_cpu_mask;
-	extern char _stext;
+	unsigned long offset = ia64_get_itc();
 
-	if (!prof_buffer)
-		return;
-
-	if (!((1UL << smp_processor_id()) & prof_cpu_mask))
-		return;
-
-	ip -= (unsigned long) &_stext;
-	ip >>= prof_shift;
-	/*
-	 * Don't ignore out-of-bounds IP values silently, put them into the last
-	 * histogram slot, so if present, they will show up as a sharp peak.
-	 */
-	if (ip > prof_len - 1)
-		ip = prof_len - 1;
-
-	atomic_inc((atomic_t *) &prof_buffer[ip]);
+	return (offset * local_cpu_data->nsec_per_cyc) >> IA64_NSEC_PER_CYC_SHIFT;
 }
 
 static void
@@ -76,24 +65,22 @@ itc_update (long delta_nsec)
 }
 
 /*
- * Return the number of nano-seconds that elapsed since the last update to jiffy.  The
- * xtime_lock must be at least read-locked when calling this routine.
+ * Return the number of nano-seconds that elapsed since the last
+ * update to jiffy.  It is quite possible that the timer interrupt
+ * will interrupt this and result in a race for any of jiffies,
+ * wall_jiffies or itm_next.  Thus, the xtime_lock must be at least
+ * read synchronised when calling this routine (see do_gettimeofday()
+ * below for an example).
  */
 unsigned long
 itc_get_offset (void)
 {
 	unsigned long elapsed_cycles, lost = jiffies - wall_jiffies;
-	unsigned long now, last_tick;
+	unsigned long now = ia64_get_itc(), last_tick;
 
 	last_tick = (cpu_data(TIME_KEEPER_ID)->itm_next
 		     - (lost + 1)*cpu_data(TIME_KEEPER_ID)->itm_delta);
 
-	now = ia64_get_itc();
-	if (unlikely((long) (now - last_tick) < 0)) {
-		printk(KERN_ERR "CPU %d: now < last_tick (now=0x%lx,last_tick=0x%lx)!\n",
-		       smp_processor_id(), now, last_tick);
-		return last_nsec_offset;
-	}
 	elapsed_cycles = now - last_tick;
 	return (elapsed_cycles*local_cpu_data->nsec_per_cyc) >> IA64_NSEC_PER_CYC_SHIFT;
 }
@@ -103,21 +90,6 @@ static struct time_interpolator itc_interpolator = {
 	.update =	itc_update,
 	.reset =	itc_reset
 };
-
-static inline void
-set_normalized_timespec (struct timespec *ts, time_t sec, long nsec)
-{
-	while (nsec > NSEC_PER_SEC) {
-		nsec -= NSEC_PER_SEC;
-		++sec;
-	}
-	while (nsec < 0) {
-		nsec += NSEC_PER_SEC;
-		--sec;
-	}
-	ts->tv_sec = sec;
-	ts->tv_nsec = nsec;
-}
 
 int
 do_settimeofday (struct timespec *tv)
@@ -154,6 +126,8 @@ do_settimeofday (struct timespec *tv)
 	clock_was_set();
 	return 0;
 }
+
+EXPORT_SYMBOL(do_settimeofday);
 
 void
 do_gettimeofday (struct timeval *tv)
@@ -215,6 +189,54 @@ do_gettimeofday (struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
+EXPORT_SYMBOL(do_gettimeofday);
+
+/*
+ * The profiling function is SMP safe. (nothing can mess
+ * around with "current", and the profiling counters are
+ * updated with atomic operations). This is especially
+ * useful with a profiling multiplier != 1
+ */
+static inline void
+ia64_do_profile (struct pt_regs * regs)
+{
+	unsigned long ip, slot;
+	extern cpumask_t prof_cpu_mask;
+
+	profile_hook(regs);
+
+	if (user_mode(regs))
+		return;
+
+	if (!prof_buffer)
+		return;
+
+	ip = instruction_pointer(regs);
+	/* Conserve space in histogram by encoding slot bits in address
+	 * bits 2 and 3 rather than bits 0 and 1.
+	 */
+	slot = ip & 3;
+	ip = (ip & ~3UL) + 4*slot;
+
+	/*
+	 * Only measure the CPUs specified by /proc/irq/prof_cpu_mask.
+	 * (default is all CPUs.)
+	 */
+	if (!cpu_isset(smp_processor_id(), prof_cpu_mask))
+		return;
+
+	ip -= (unsigned long) &_stext;
+	ip >>= prof_shift;
+	/*
+	 * Don't ignore out-of-bounds IP values silently,
+	 * put them into the last histogram slot, so if
+	 * present, they will show up as a sharp peak.
+	 */
+	if (ip > prof_len-1)
+		ip = prof_len-1;
+	atomic_inc((atomic_t *)&prof_buffer[ip]);
+}
+
 static irqreturn_t
 timer_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 {
@@ -226,14 +248,9 @@ timer_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 		printk(KERN_ERR "Oops: timer tick before it's due (itc=%lx,itm=%lx)\n",
 		       ia64_get_itc(), new_itm);
 
+	ia64_do_profile(regs);
+
 	while (1) {
-		/*
-		 * Do kernel PC profiling here.  We multiply the instruction number by
-		 * four so that we can use a prof_shift of 2 to get instruction-level
-		 * instead of just bundle-level accuracy.
-		 */
-		if (!user_mode(regs))
-			do_profile(regs->cr_iip + 4*ia64_psr(regs)->ri);
 
 #ifdef CONFIG_SMP
 		smp_do_timer(regs);

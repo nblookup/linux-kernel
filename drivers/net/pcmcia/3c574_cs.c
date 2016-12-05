@@ -232,7 +232,7 @@ static char mii_preamble_required = 0;
 /* Index of functions. */
 
 static void tc574_config(dev_link_t *link);
-static void tc574_release(unsigned long arg);
+static void tc574_release(dev_link_t *link);
 static int tc574_event(event_t event, int priority,
 					   event_callback_args_t *args);
 
@@ -253,6 +253,7 @@ static int el3_rx(struct net_device *dev, int worklimit);
 static int el3_close(struct net_device *dev);
 static void el3_tx_timeout(struct net_device *dev);
 static int el3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
+static struct ethtool_ops netdev_ethtool_ops;
 static void set_rx_mode(struct net_device *dev);
 
 static dev_info_t dev_info = "3c574_cs";
@@ -261,16 +262,6 @@ static dev_link_t *tc574_attach(void);
 static void tc574_detach(dev_link_t *);
 
 static dev_link_t *dev_list;
-
-static void flush_stale_links(void)
-{
-	dev_link_t *link, *next;
-	for (link = dev_list; link; link = next) {
-		next = link->next;
-		if (link->state & DEV_STALE_LINK)
-			tc574_detach(link);
-	}
-}
 
 /*
 	tc574_attach() creates an "instance" of the driver, allocating
@@ -287,7 +278,6 @@ static dev_link_t *tc574_attach(void)
 	int i, ret;
 
 	DEBUG(0, "3c574_attach()\n");
-	flush_stale_links();
 
 	/* Create the PC card device object. */
 	dev = alloc_etherdev(sizeof(struct el3_private));
@@ -296,10 +286,8 @@ static dev_link_t *tc574_attach(void)
 	lp = dev->priv;
 	link = &lp->link;
 	link->priv = dev;
-	
-	init_timer(&link->release);
-	link->release.function = &tc574_release;
-	link->release.data = (unsigned long)link;
+
+	spin_lock_init(&lp->window_lock);
 	link->io.NumPorts1 = 32;
 	link->io.Attributes1 = IO_DATA_PATH_WIDTH_16;
 	link->irq.Attributes = IRQ_TYPE_EXCLUSIVE | IRQ_HANDLE_PRESENT;
@@ -321,6 +309,7 @@ static dev_link_t *tc574_attach(void)
 	dev->hard_start_xmit = &el3_start_xmit;
 	dev->get_stats = &el3_get_stats;
 	dev->do_ioctl = &el3_ioctl;
+	SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 	dev->set_multicast_list = &set_rx_mode;
 	dev->open = &el3_open;
 	dev->stop = &el3_close;
@@ -373,13 +362,10 @@ static void tc574_detach(dev_link_t *link)
 	if (*linkp == NULL)
 	return;
 
-	del_timer_sync(&link->release);
 	if (link->state & DEV_CONFIG) {
-		tc574_release((unsigned long)link);
-		if (link->state & DEV_STALE_CONFIG) {
-			link->state |= DEV_STALE_LINK;
+		tc574_release(link);
+		if (link->state & DEV_STALE_CONFIG)
 			return;
-		}
 	}
 
 	if (link->handle)
@@ -387,9 +373,11 @@ static void tc574_detach(dev_link_t *link)
 
 	/* Unlink device structure, free bits */
 	*linkp = link->next;
-	if (link->dev)
+	if (link->dev) {
 		unregister_netdev(dev);
-	kfree(dev);
+		free_netdev(dev);
+	} else 
+		kfree(dev);
 
 } /* tc574_detach */
 
@@ -554,7 +542,7 @@ static void tc574_config(dev_link_t *link)
 cs_failed:
 	cs_error(link->handle, last_fn, last_ret);
 failed:
-	tc574_release((unsigned long)link);
+	tc574_release(link);
 	return;
 
 } /* tc574_config */
@@ -565,10 +553,8 @@ failed:
 	still open, this will be postponed until it is closed.
 */
 
-static void tc574_release(unsigned long arg)
+static void tc574_release(dev_link_t *link)
 {
-	dev_link_t *link = (dev_link_t *)arg;
-
 	DEBUG(0, "3c574_release(0x%p)\n", link);
 
 	if (link->open) {
@@ -584,7 +570,9 @@ static void tc574_release(unsigned long arg)
 
 	link->state &= ~DEV_CONFIG;
 
-} /* tc574_release */
+	if (link->state & DEV_STALE_CONFIG)
+		tc574_detach(link);
+}
 
 /*
 	The card status event handler.  Mostly, this schedules other
@@ -606,7 +594,7 @@ static int tc574_event(event_t event, int priority,
 		link->state &= ~DEV_PRESENT;
 		if (link->state & DEV_CONFIG) {
 			netif_device_detach(dev);
-			mod_timer(&link->release, jiffies + HZ/20);
+			tc574_release(link);
 		}
 		break;
 	case CS_EVENT_CARD_INSERTION:
@@ -1048,7 +1036,7 @@ static void media_check(unsigned long arg)
 	}
 	if (lp->fast_poll) {
 		lp->fast_poll--;
-		lp->media.expires = jiffies + 2;
+		lp->media.expires = jiffies + 2*HZ/100;
 		add_timer(&lp->media);
 		return;
 	}
@@ -1205,25 +1193,15 @@ static int el3_rx(struct net_device *dev, int worklimit)
 	return worklimit;
 }
 
-static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
 {
-	u32 ethcmd;
-		
-	if (copy_from_user(&ethcmd, useraddr, sizeof(ethcmd)))
-		return -EFAULT;
-	
-	switch (ethcmd) {
-	case ETHTOOL_GDRVINFO: {
-		struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
-		strncpy(info.driver, "3c574_cs", sizeof(info.driver)-1);
-		if (copy_to_user(useraddr, &info, sizeof(info)))
-			return -EFAULT;
-		return 0;
-	}
-	}
-	
-	return -EOPNOTSUPP;
+	strcpy(info->driver, "3c574_cs");
 }
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
 
 /* Provide ioctl() calls to examine the MII xcvr state. */
 static int el3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
@@ -1238,11 +1216,9 @@ static int el3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		  data[0], data[1], data[2], data[3]);
 
 	switch(cmd) {
-	case SIOCETHTOOL:
-		return netdev_ethtool_ioctl(dev, (void *)rq->ifr_data);
-	case SIOCDEVPRIVATE:		/* Get the address of the PHY in use. */
+	case SIOCGMIIPHY:		/* Get the address of the PHY in use. */
 		data[0] = phy;
-	case SIOCDEVPRIVATE+1:		/* Read the specified MII register. */
+	case SIOCGMIIREG:		/* Read the specified MII register. */
 		{
 			int saved_window;
 			unsigned long flags;
@@ -1255,7 +1231,7 @@ static int el3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 			spin_unlock_irqrestore(&lp->window_lock, flags);
 			return 0;
 		}
-	case SIOCDEVPRIVATE+2:		/* Write the specified MII register */
+	case SIOCSMIIREG:		/* Write the specified MII register */
 		{
 			int saved_window;
                        unsigned long flags;
@@ -1322,7 +1298,7 @@ static int el3_close(struct net_device *dev)
 	netif_stop_queue(dev);
 	del_timer_sync(&lp->media);
 	if (link->state & DEV_STALE_CONFIG)
-		mod_timer(&link->release, jiffies + HZ/20);
+		tc574_release(link);
 	return 0;
 }
 

@@ -84,7 +84,7 @@ static int flag_time = HZ;
 MODULE_PARM(flag_time, "i");
 MODULE_PARM_DESC(flag_time, "ppp_async: interval between flagged packets (in clock ticks)");
 MODULE_LICENSE("GPL");
-
+MODULE_ALIAS_LDISC(N_PPP);
 
 /*
  * Prototypes.
@@ -891,6 +891,11 @@ ppp_async_input(struct asyncppp *ap, const unsigned char *buf,
 			process_input_packet(ap);
 		} else if (c == PPP_ESCAPE) {
 			ap->state |= SC_ESCAPE;
+		} else if (I_IXON(ap->tty)) {
+			if (c == START_CHAR(ap->tty))
+				start_tty(ap->tty);
+			else if (c == STOP_CHAR(ap->tty))
+				stop_tty(ap->tty);
 		}
 		/* otherwise it's a char in the recv ACCM */
 		++n;

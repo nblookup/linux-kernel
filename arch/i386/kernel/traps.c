@@ -28,6 +28,7 @@
 
 #ifdef CONFIG_EISA
 #include <linux/ioport.h>
+#include <linux/eisa.h>
 #endif
 
 #ifdef CONFIG_MCA
@@ -103,7 +104,7 @@ void show_trace(struct task_struct *task, unsigned long * stack)
 #ifdef CONFIG_KALLSYMS
 	printk("\n");
 #endif
-	while (((long) stack & (THREAD_SIZE-1)) != 0) {
+	while (!kstack_end(stack)) {
 		addr = *stack++;
 		if (kernel_text_address(addr)) {
 			printk(" [<%08lx>] ", addr);
@@ -137,7 +138,7 @@ void show_stack(struct task_struct *task, unsigned long *esp)
 
 	stack = esp;
 	for(i = 0; i < kstack_depth_to_print; i++) {
-		if (((long) stack & (THREAD_SIZE-1)) == 0)
+		if (kstack_end(stack))
 			break;
 		if (i && ((i % 8) == 0))
 			printk("\n       ");
@@ -156,6 +157,8 @@ void dump_stack(void)
 
 	show_trace(current, &stack);
 }
+
+EXPORT_SYMBOL(dump_stack);
 
 void show_registers(struct pt_regs *regs)
 {
@@ -371,6 +374,9 @@ DO_ERROR_INFO(17, SIGBUS, "alignment check", alignment_check, BUS_ADRALN, get_cr
 
 asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
 {
+	if (regs->eflags & X86_EFLAGS_IF)
+		local_irq_enable();
+ 
 	if (regs->eflags & VM_MASK)
 		goto gp_in_vm86;
 
@@ -383,6 +389,7 @@ asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
 	return;
 
 gp_in_vm86:
+	local_irq_enable();
 	handle_vm86_fault((struct kernel_vm86_regs *) regs, error_code);
 	return;
 
@@ -629,9 +636,10 @@ void math_error(void *eip)
 		default:
 			break;
 		case 0x001: /* Invalid Op */
-		case 0x040: /* Stack Fault */
-		case 0x240: /* Stack Fault | Direction */
+		case 0x041: /* Stack Fault */
+		case 0x241: /* Stack Fault | Direction */
 			info.si_code = FPE_FLTINV;
+			/* Should we clear the SF or let user space do it ???? */
 			break;
 		case 0x002: /* Denormalize */
 		case 0x010: /* Underflow */
@@ -744,7 +752,8 @@ asmlinkage void do_spurious_interrupt_bug(struct pt_regs * regs,
  * Careful.. There are problems with IBM-designed IRQ13 behaviour.
  * Don't touch unless you *really* know how it works.
  *
- * Must be called with kernel preemption disabled.
+ * Must be called with kernel preemption disabled (in this case,
+ * local interrupts are disabled at the call-site in entry.S).
  */
 asmlinkage void math_state_restore(struct pt_regs regs)
 {
@@ -780,7 +789,7 @@ void __init trap_init_f00f_bug(void)
 	 * it uses the read-only mapped virtual address.
 	 */
 	idt_descr.address = fix_to_virt(FIX_F00F_IDT);
-	__asm__ __volatile__("lidt %0": "=m" (idt_descr));
+	__asm__ __volatile__("lidt %0" : : "m" (idt_descr));
 }
 #endif
 
@@ -829,10 +838,6 @@ static void __init set_task_gate(unsigned int n, unsigned int gdt_entry)
 	_set_gate(idt_table+n,5,0,0,(gdt_entry<<3));
 }
 
-
-#ifdef CONFIG_EISA
-int EISA_bus;
-#endif
 
 void __init trap_init(void)
 {

@@ -24,6 +24,8 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#include <linux/config.h>
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
@@ -35,6 +37,9 @@
 #include <linux/acpi.h>
 #ifdef CONFIG_X86_IO_APIC
 #include <asm/mpspec.h>
+#endif
+#ifdef CONFIG_IOSAPIC
+# include <asm/iosapic.h>
 #endif
 #include <acpi/acpi_bus.h>
 #include <acpi/acpi_drivers.h>
@@ -65,6 +70,9 @@ acpi_pci_irq_find_prt_entry (
 	struct acpi_prt_entry	*entry = NULL;
 
 	ACPI_FUNCTION_TRACE("acpi_pci_irq_find_prt_entry");
+
+	if (!acpi_prt.count)
+		return_PTR(NULL);
 
 	/*
 	 * Parse through all PRT entries looking for a match on the specified
@@ -249,7 +257,7 @@ acpi_pci_irq_lookup (struct pci_bus *bus, int device, int pin)
 	}
 
 	if (!entry->irq && entry->link.handle) {
-		entry->irq = acpi_pci_link_get_irq(entry->link.handle, entry->link.index);
+		entry->irq = acpi_pci_link_get_irq(entry->link.handle, entry->link.index, NULL, NULL);
 		if (!entry->irq) {
 			ACPI_DEBUG_PRINT((ACPI_DB_WARN, "Invalid IRQ link routing entry\n"));
 			return_VALUE(0);
@@ -291,7 +299,7 @@ acpi_pci_irq_derive (
 	}
 
 	if (!irq) {
-		ACPI_DEBUG_PRINT((ACPI_DB_WARN, "Unable to derive IRQ for device %s\n", dev->slot_name));
+		ACPI_DEBUG_PRINT((ACPI_DB_WARN, "Unable to derive IRQ for device %s\n", pci_name(dev)));
 		return_VALUE(0);
 	}
 
@@ -316,7 +324,7 @@ acpi_pci_irq_enable (
 	
 	pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &pin);
 	if (!pin) {
-		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "No interrupt pin configured for device %s\n", dev->slot_name));
+		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "No interrupt pin configured for device %s\n", pci_name(dev)));
 		return_VALUE(0);
 	}
 	pin--;
@@ -344,7 +352,7 @@ acpi_pci_irq_enable (
 	 * driver reported one, then use it. Exit in any case.
 	 */
 	if (!irq) {
-		printk(KERN_WARNING PREFIX "No IRQ known for interrupt pin %c of device %s", ('A' + pin), dev->slot_name);
+		printk(KERN_WARNING PREFIX "No IRQ known for interrupt pin %c of device %s", ('A' + pin), pci_name(dev));
 		/* Interrupt Line values above 0xF are forbidden */
 		if (dev->irq && dev->irq >= 0xF) {
 			printk(" - using IRQ %d\n", dev->irq);
@@ -358,7 +366,7 @@ acpi_pci_irq_enable (
 
 	dev->irq = irq;
 
-	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Device %s using IRQ %d\n", dev->slot_name, dev->irq));
+	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Device %s using IRQ %d\n", pci_name(dev), dev->irq));
 
 	/* 
 	 * Make sure all (legacy) PCI IRQs are set as level-triggered.
@@ -369,6 +377,10 @@ acpi_pci_irq_enable (
 		irq_mask |= (1 << dev->irq);
 		eisa_set_level_irq(dev->irq);
 	}
+#endif
+#ifdef CONFIG_IOSAPIC
+	if (acpi_irq_model == ACPI_IRQ_MODEL_IOSAPIC)
+		iosapic_enable_intr(dev->irq);
 #endif
 
 	return_VALUE(dev->irq);
@@ -389,7 +401,9 @@ acpi_pci_irq_init (void)
 	}
 
 	/* Make sure all link devices have a valid IRQ. */
-	acpi_pci_link_check();
+	if (acpi_pci_link_check()) {
+		return_VALUE(-ENODEV);
+	}
 
 #ifdef CONFIG_X86_IO_APIC
 	/* Program IOAPICs using data from PRT entries. */

@@ -72,6 +72,7 @@ extern void openpic_init_IRQ(void);
 
 extern void find_and_init_phbs(void);
 
+extern void pSeries_get_boot_time(struct rtc_time *rtc_time);
 extern void pSeries_get_rtc_time(struct rtc_time *rtc_time);
 extern int  pSeries_set_rtc_time(struct rtc_time *rtc_time);
 void pSeries_calibrate_decr(void);
@@ -101,13 +102,24 @@ chrp_get_cpuinfo(struct seq_file *m)
 	seq_printf(m, "machine\t\t: CHRP %s\n", model);
 }
 
-void __init chrp_request_regions(void) {
+#define I8042_DATA_REG 0x60
+
+void __init chrp_request_regions(void) 
+{
 	request_region(0x20,0x20,"pic1");
 	request_region(0xa0,0x20,"pic2");
 	request_region(0x00,0x20,"dma1");
 	request_region(0x40,0x20,"timer");
 	request_region(0x80,0x10,"dma page reg");
 	request_region(0xc0,0x20,"dma2");
+
+	/*
+	 * Some machines have an unterminated i8042 so check the device
+	 * tree and reserve the region if it does not appear. Later on
+	 * the i8042 code will try and reserve this region and fail.
+	 */
+	if (!find_type_devices("8042"))
+		request_region(I8042_DATA_REG, 16, "reserved (no i8042)");
 }
 
 void __init
@@ -245,7 +257,7 @@ chrp_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.power_off      = rtas_power_off;
 	ppc_md.halt           = rtas_halt;
 
-	ppc_md.get_boot_time  = pSeries_get_rtc_time;
+	ppc_md.get_boot_time  = pSeries_get_boot_time;
 	ppc_md.get_rtc_time   = pSeries_get_rtc_time;
 	ppc_md.set_rtc_time   = pSeries_set_rtc_time;
 	ppc_md.calibrate_decr = pSeries_calibrate_decr;

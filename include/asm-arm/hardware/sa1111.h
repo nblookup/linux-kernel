@@ -429,22 +429,6 @@
 #define SA1111_WAKEPOL0		0x0034
 #define SA1111_WAKEPOL1		0x0038
 
-#define INTTEST0	__CCREG(SA1111_INTC + SA1111_INTTEST0)
-#define INTTEST1	__CCREG(SA1111_INTC + SA1111_INTTEST1)
-#define INTEN0		__CCREG(SA1111_INTC + SA1111_INTEN0)
-#define INTEN1		__CCREG(SA1111_INTC + SA1111_INTEN1)
-#define INTPOL0		__CCREG(SA1111_INTC + SA1111_INTPOL0)
-#define INTPOL1		__CCREG(SA1111_INTC + SA1111_INTPOL1)
-#define INTTSTSEL	__CCREG(SA1111_INTC + SA1111_INTTSTSEL)
-#define INTSTATCLR0	__CCREG(SA1111_INTC + SA1111_INTSTATCLR0)
-#define INTSTATCLR1	__CCREG(SA1111_INTC + SA1111_INTSTATCLR1)
-#define INTSET0		__CCREG(SA1111_INTC + SA1111_INTSET0)
-#define INTSET1		__CCREG(SA1111_INTC + SA1111_INTSET1)
-#define WAKE_EN0	__CCREG(SA1111_INTC + SA1111_WAKEEN0)
-#define WAKE_EN1	__CCREG(SA1111_INTC + SA1111_WAKEEN1)
-#define WAKE_POL0	__CCREG(SA1111_INTC + SA1111_WAKEPOL0)
-#define WAKE_POL1	__CCREG(SA1111_INTC + SA1111_WAKEPOL1)
-
 /*
  * PS/2 Trackpad and Mouse Interfaces
  *
@@ -558,19 +542,21 @@ struct sa1111_dev {
 
 #define SA1111_DEV(_d)	container_of((_d), struct sa1111_dev, dev)
 
+#define sa1111_get_drvdata(d)	dev_get_drvdata(&(d)->dev)
+#define sa1111_set_drvdata(d,p)	dev_set_drvdata(&(d)->dev, p)
+
 struct sa1111_driver {
 	struct device_driver	drv;
 	unsigned int		devid;
+	int (*probe)(struct sa1111_dev *);
+	int (*remove)(struct sa1111_dev *);
+	int (*suspend)(struct sa1111_dev *, u32);
+	int (*resume)(struct sa1111_dev *);
 };
 
 #define SA1111_DRV(_d)	container_of((_d), struct sa1111_driver, drv)
 
 #define SA1111_DRIVER_NAME(_sadev) ((_sadev)->dev.driver->name)
-
-/*
- * Probe for a SA1111 chip.
- */
-extern int sa1111_init(unsigned long phys, unsigned int irq);
 
 /*
  * These frob the SKPCR register.
@@ -588,5 +574,8 @@ int sa1111_set_audio_rate(struct sa1111_dev *sadev, int rate);
 int sa1111_get_audio_rate(struct sa1111_dev *sadev);
 
 int sa1111_check_dma_bug(dma_addr_t addr);
+
+int sa1111_driver_register(struct sa1111_driver *);
+void sa1111_driver_unregister(struct sa1111_driver *);
 
 #endif  /* _ASM_ARCH_SA1111 */

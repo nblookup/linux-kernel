@@ -8,6 +8,7 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/kernel_stat.h>
+#include <linux/module.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -153,7 +154,7 @@ int get_irq_list(char *buf)
 		if (!action)
 			gotos skip;
 		len += sprintf(buf+len, "%2d: %8d %c %s",
-			i, kstat_cpu(0).irqs[i],
+			i, kstat_this_cpu.irqs[i],
 			(action->flags & SA_INTERRUPT) ? '+' : ' ',
 			action->name);
 		for (action=action->next; action; action = action->next) {
@@ -183,7 +184,7 @@ static void do_IRQ(int irq, struct pt_regs * regs)
 
 	cpu = smp_processor_id();
 	irq_enter();
-	kstat_cpus(cpu)[irq]++;
+	kstat_cpus(cpu).irqs[irq]++;
 
 	mask_irq(irq);
 	action = *(irq + irq_action);
@@ -337,6 +338,8 @@ int request_irq(unsigned int irq,
 	return retval;
 }
 
+EXPORT_SYMBOL(request_irq);
+
 void free_irq(unsigned int irq, void *dev_id)
 {
 	struct irqaction * action, **p;
@@ -361,17 +364,23 @@ void free_irq(unsigned int irq, void *dev_id)
 	printk("Trying to free free IRQ%d\n",irq);
 }
 
+EXPORT_SYMBOL(free_irq);
+
 unsigned long probe_irq_on (void)
 {
 	/* TODO */
 	return 0;
 }
 
+EXPORT_SYMBOL(probe_irq_on);
+
 int probe_irq_off (unsigned long irqs)
 {
 	/* TODO */
 	return 0;
 }
+
+EXPORT_SYMBOL(probe_irq_off);
 
 
 static void write_err_interrupt(int irq, void *dev_id, struct pt_regs * regs)

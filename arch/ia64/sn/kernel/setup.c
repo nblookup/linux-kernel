@@ -117,14 +117,14 @@ irqpda_t		*irqpdaindr;
  * VGA color display.
  */
 struct screen_info sn_screen_info = {
-	orig_x:			 0,
-	orig_y:			 0,
-	orig_video_mode:	 3,
-	orig_video_cols:	80,
-	orig_video_ega_bx:	 3,
-	orig_video_lines:	25,
-	orig_video_isVGA:	 1,
-	orig_video_points:	16
+	.orig_x			= 0,
+	.orig_y			= 0,
+	.orig_video_mode	= 3,
+	.orig_video_cols	= 80,
+	.orig_video_ega_bx	= 3,
+	.orig_video_lines	= 25,
+	.orig_video_isVGA	= 1,
+	.orig_video_points	= 16
 };
 
 /*
@@ -147,7 +147,6 @@ char drive_info[4*16];
  * Sets up an initial console to aid debugging.  Intended primarily
  * for bringup.  See start_kernel() in init/main.c.
  */
-#if defined(CONFIG_IA64_EARLY_PRINTK_SGI_SN) || defined(CONFIG_IA64_SGI_SN_SIM)
 
 void __init
 early_sn_setup(void)
@@ -189,7 +188,6 @@ early_sn_setup(void)
 		printk(KERN_DEBUG "early_sn_setup: setting master_node_bedrock_address to 0x%lx\n", master_node_bedrock_address);
 	}
 }
-#endif /* CONFIG_IA64_EARLY_PRINTK_SGI_SN */
 
 #ifdef CONFIG_IA64_MCA
 extern int platform_intr_list[];
@@ -280,7 +278,7 @@ sn_setup(char **cmdline_p)
 	else
 		sn_rtc_cycles_per_second = ticks_per_sec;
 
-	platform_intr_list[ACPI_INTERRUPT_CPEI] = IA64_PCE_VECTOR;
+	platform_intr_list[ACPI_INTERRUPT_CPEI] = IA64_CPE_VECTOR;
 
 
 	if ( IS_RUNNING_ON_SIMULATOR() )
@@ -395,7 +393,7 @@ sn_cpu_init(void)
 		return;
 
 	cpuid = smp_processor_id();
-	cpuphyid = ((ia64_get_lid() >> 16) & 0xffff);
+	cpuphyid = ((ia64_getreg(_IA64_REG_CR_LID) >> 16) & 0xffff);
 	nasid = cpu_physical_id_to_nasid(cpuphyid);
 	cnode = nasid_to_cnodeid(nasid);
 	slice = cpu_physical_id_to_slice(cpuphyid);

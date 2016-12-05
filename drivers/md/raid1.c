@@ -27,7 +27,6 @@
 #define MAJOR_NR MD_MAJOR
 #define MD_DRIVER
 #define MD_PERSONALITY
-#define DEVICE_NR(device) (minor(device))
 
 /*
  * Number of guaranteed r1bios in case of extreme VM load:
@@ -678,6 +677,8 @@ static int raid1_add_disk(mddev_t *mddev, mdk_rdev_t *rdev)
 	for (mirror=0; mirror < mddev->raid_disks; mirror++)
 		if ( !(p=conf->mirrors+mirror)->rdev) {
 			p->rdev = rdev;
+			blk_queue_stack_limits(mddev->queue,
+					       rdev->bdev->bd_disk->queue);
 			p->head_position = 0;
 			rdev->raid_disk = mirror;
 			found = 1;
@@ -829,7 +830,7 @@ static void sync_request_write(mddev_t *mddev, r1bio_t *r1_bio)
 		mbio = bio_clone(bio, GFP_NOIO);
 		r1_bio->write_bios[i] = mbio;
 		mbio->bi_bdev = conf->mirrors[i].rdev->bdev;
-		mbio->bi_sector = r1_bio->sector | conf->mirrors[i].rdev->data_offset;
+		mbio->bi_sector = r1_bio->sector + conf->mirrors[i].rdev->data_offset;
 		mbio->bi_end_io	= end_sync_write;
 		mbio->bi_rw = WRITE;
 		mbio->bi_private = r1_bio;
@@ -840,7 +841,7 @@ static void sync_request_write(mddev_t *mddev, r1bio_t *r1_bio)
 	}
 
 	if (atomic_dec_and_test(&r1_bio->remaining)) {
-		md_done_sync(mddev, r1_bio->master_bio->bi_size >> 9, 0);
+		md_done_sync(mddev, r1_bio->master_bio->bi_size >> 9, 1);
 		put_buf(r1_bio);
 	}
 }
@@ -1076,6 +1077,8 @@ static int run(mddev_t *mddev)
 		disk = conf->mirrors + disk_idx;
 
 		disk->rdev = rdev;
+		blk_queue_stack_limits(mddev->queue,
+				       rdev->bdev->bd_disk->queue);
 		disk->head_position = 0;
 		if (!rdev->faulty && rdev->in_sync)
 			conf->working_disks++;
@@ -1193,3 +1196,4 @@ static void raid_exit(void)
 module_init(raid_init);
 module_exit(raid_exit);
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("md-personality-3"); /* RAID1 */

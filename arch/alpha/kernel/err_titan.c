@@ -14,6 +14,8 @@
 #include <asm/core_titan.h>
 #include <asm/hwrpb.h>
 #include <asm/smp.h>
+#include <asm/err_common.h>
+#include <asm/err_ev6.h>
 
 #include "err_impl.h"
 #include "proto.h"
@@ -436,8 +438,9 @@ titan_machine_check(u64 vector, u64 la_ptr, struct pt_regs *regs)
 		       (unsigned int)vector, (int)smp_processor_id());
 		
 #ifdef CONFIG_VERBOSE_MCHECK
-		titan_process_logout_frame(mchk_header, 1);
-		dik_show_regs(regs, NULL);
+		titan_process_logout_frame(mchk_header, alpha_verbose_mcheck);
+		if (alpha_verbose_mcheck)
+			dik_show_regs(regs, NULL);
 #endif /* CONFIG_VERBOSE_MCHECK */
 
 		err_print_prefix = saved_err_prefix;
@@ -567,6 +570,8 @@ titan_register_error_handlers(void)
 		cdl_register_subpacket_annotation(&el_titan_annotations[i]);
 
 	cdl_register_subpacket_handler(&titan_subpacket_handler);
+
+	ev6_register_error_handlers();
 }
 
 

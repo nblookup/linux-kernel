@@ -33,6 +33,7 @@
 #include <linux/seq_file.h>
 #include <linux/root_dev.h>
 #include <linux/initrd.h>
+#include <linux/eisa.h>
 #ifdef CONFIG_MAGIC_SYSRQ
 #include <linux/sysrq.h>
 #include <linux/reboot.h>
@@ -62,6 +63,12 @@ static struct notifier_block alpha_panic_block = {
 
 struct hwrpb_struct *hwrpb;
 unsigned long srm_hae;
+
+#ifdef CONFIG_VERBOSE_MCHECK
+/* 0=minimum, 1=verbose, 2=all */
+/* These can be overridden via the command line, ie "verbose_mcheck=2") */
+unsigned long alpha_verbose_mcheck = CONFIG_VERBOSE_MCHECK_ON;
+#endif
 
 /* Which processor we booted from.  */
 int boot_cpuid;
@@ -479,6 +486,21 @@ setup_arch(char **cmdline_p)
 	hwrpb = (struct hwrpb_struct*) __va(INIT_HWRPB->phys_addr);
 	boot_cpuid = hard_smp_processor_id();
 
+        /*
+	 * Pre-process the system type to make sure it will be valid.
+	 *
+	 * This may restore real CABRIO and EB66+ family names, ie
+	 * EB64+ and EB66.
+	 *
+	 * Oh, and "white box" AS800 (aka DIGITAL Server 3000 series)
+	 * and AS1200 (DIGITAL Server 5000 series) have the type as
+	 * the negative of the real one.
+	 */
+        if ((long)hwrpb->sys_type < 0) {
+		hwrpb->sys_type = -((long)hwrpb->sys_type);
+		hwrpb_update_checksum(hwrpb);
+	}
+
 	/* Register a call for panic conditions. */
 	notifier_chain_register(&panic_notifier_list, &alpha_panic_block);
 
@@ -538,6 +560,12 @@ setup_arch(char **cmdline_p)
 				get_mem_size_limit(p+9) << PAGE_SHIFT;
 			continue;
 		}
+#ifdef CONFIG_VERBOSE_MCHECK
+		if (strncmp(p, "verbose_mcheck=", 15) == 0) {
+			alpha_verbose_mcheck = simple_strtol(p+15, NULL, 0);
+			continue;
+		}
+#endif
 	}
 
 	/* Replace the command line, now that we've killed it with strsep.  */
@@ -597,6 +625,38 @@ setup_arch(char **cmdline_p)
 	       var_name, alpha_mv.vector_name,
 	       (alpha_using_srm ? "SRM" : "MILO"));
 
+	printk("Major Options: "
+#ifdef CONFIG_SMP
+	       "SMP "
+#endif
+#ifdef CONFIG_ALPHA_EV56
+	       "EV56 "
+#endif
+#ifdef CONFIG_ALPHA_EV67
+	       "EV67 "
+#endif
+#ifdef CONFIG_ALPHA_LEGACY_START_ADDRESS
+	       "LEGACY_START "
+#endif
+#ifdef CONFIG_VERBOSE_MCHECK
+	       "VERBOSE_MCHECK "
+#endif
+
+#ifdef CONFIG_DISCONTIGMEM
+	       "DISCONTIGMEM "
+#ifdef CONFIG_NUMA
+	       "NUMA "
+#endif
+#endif
+
+#ifdef CONFIG_DEBUG_SPINLOCK
+	       "DEBUG_SPINLOCK "
+#endif
+#ifdef CONFIG_MAGIC_SYSRQ
+	       "MAGIC_SYSRQ "
+#endif
+	       "\n");
+
 	printk("Command line: %s\n", command_line);
 
 	/* 
@@ -635,6 +695,11 @@ setup_arch(char **cmdline_p)
 
 	/* Default root filesystem to sda2.  */
 	ROOT_DEV = Root_SDA2;
+
+#ifdef CONFIG_EISA
+	/* FIXME:  only set this when we actually have EISA in this box? */
+	EISA_bus = 1;
+#endif
 
  	/*
 	 * Check ASN in HWRPB for validity, report if bad.
@@ -1159,7 +1224,7 @@ show_cpuinfo(struct seq_file *f, void *slot)
 		       platform_string(), nr_processors);
 
 #ifdef CONFIG_SMP
-	seq_printf(f, "cpus active\t\t: %d\n"
+	seq_printf(f, "cpus active\t\t: %ld\n"
 		      "cpu active mask\t\t: %016lx\n",
 		       num_online_cpus(), cpu_present_mask);
 #endif

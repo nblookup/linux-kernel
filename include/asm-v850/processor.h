@@ -1,7 +1,7 @@
 /*
  * include/asm-v850/processor.h
  *
- *  Copyright (C) 2001,02,03  NEC Corporation
+ *  Copyright (C) 2001,02,03  NEC Electronics Corporation
  *  Copyright (C) 2001,02,03  Miles Bader <miles@gnu.org>
  *
  * This file is subject to the terms and conditions of the GNU General
@@ -52,8 +52,6 @@
 /*
  * Bus types
  */
-#define EISA_bus 0
-#define EISA_bus__is_a_macro /* for versions in ksyms.c */
 #define MCA_bus 0
 #define MCA_bus__is_a_macro /* for versions in ksyms.c */
 

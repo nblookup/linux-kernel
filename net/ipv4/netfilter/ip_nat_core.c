@@ -2,7 +2,6 @@
 
 /* (c) 1999 Paul `Rusty' Russell.  Licenced under the GNU General
    Public Licence. */
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/timer.h>
@@ -68,6 +67,7 @@ hash_by_src(const struct ip_conntrack_manip *manip, u_int16_t proto)
 static void ip_nat_cleanup_conntrack(struct ip_conntrack *conn)
 {
 	struct ip_nat_info *info = &conn->nat.info;
+	unsigned int hs, hp;
 
 	if (!info->initialized)
 		return;
@@ -75,21 +75,18 @@ static void ip_nat_cleanup_conntrack(struct ip_conntrack *conn)
 	IP_NF_ASSERT(info->bysource.conntrack);
 	IP_NF_ASSERT(info->byipsproto.conntrack);
 
-	WRITE_LOCK(&ip_nat_lock);
-	LIST_DELETE(&bysource[hash_by_src(&conn->tuplehash[IP_CT_DIR_ORIGINAL]
-					  .tuple.src,
-					  conn->tuplehash[IP_CT_DIR_ORIGINAL]
-					  .tuple.dst.protonum)],
-		    &info->bysource);
+	hs = hash_by_src(&conn->tuplehash[IP_CT_DIR_ORIGINAL].tuple.src,
+	                 conn->tuplehash[IP_CT_DIR_ORIGINAL]
+	                 .tuple.dst.protonum);
 
-	LIST_DELETE(&byipsproto
-		    [hash_by_ipsproto(conn->tuplehash[IP_CT_DIR_REPLY]
-				      .tuple.src.ip,
-				      conn->tuplehash[IP_CT_DIR_REPLY]
-				      .tuple.dst.ip,
-				      conn->tuplehash[IP_CT_DIR_REPLY]
-				      .tuple.dst.protonum)],
-		    &info->byipsproto);
+	hp = hash_by_ipsproto(conn->tuplehash[IP_CT_DIR_REPLY].tuple.src.ip,
+	                      conn->tuplehash[IP_CT_DIR_REPLY].tuple.dst.ip,
+	                      conn->tuplehash[IP_CT_DIR_REPLY]
+	                      .tuple.dst.protonum);
+
+	WRITE_LOCK(&ip_nat_lock);
+	LIST_DELETE(&bysource[hs], &info->bysource);
+	LIST_DELETE(&byipsproto[hp], &info->byipsproto);
 	WRITE_UNLOCK(&ip_nat_lock);
 }
 
@@ -160,8 +157,8 @@ in_range(const struct ip_conntrack_tuple *tuple,
 				continue;
 		}
 
-		if ((mr->range[i].flags & IP_NAT_RANGE_PROTO_SPECIFIED)
-		    && proto->in_range(&newtuple, IP_NAT_MANIP_SRC,
+		if (!(mr->range[i].flags & IP_NAT_RANGE_PROTO_SPECIFIED)
+		    || proto->in_range(&newtuple, IP_NAT_MANIP_SRC,
 				       &mr->range[i].min, &mr->range[i].max))
 			return 1;
 	}
@@ -246,11 +243,12 @@ count_maps(u_int32_t src, u_int32_t dst, u_int16_t protonum,
 	   const struct ip_conntrack *conntrack)
 {
 	unsigned int score = 0;
+	unsigned int h;
 
 	MUST_BE_READ_LOCKED(&ip_nat_lock);
-	LIST_FIND(&byipsproto[hash_by_ipsproto(src, dst, protonum)],
-		  fake_cmp, struct ip_nat_hash *, src, dst, protonum, &score,
-		  conntrack);
+	h = hash_by_ipsproto(src, dst, protonum);
+	LIST_FIND(&byipsproto[h], fake_cmp, struct ip_nat_hash *,
+	          src, dst, protonum, &score, conntrack);
 
 	return score;
 }
@@ -278,7 +276,7 @@ find_best_ips_proto(struct ip_conntrack_tuple *tuple,
 		struct ip_conntrack_tuple tuple;
 	} best = { NULL,  0xFFFFFFFF };
 	u_int32_t *var_ipp, *other_ipp, saved_ip, orig_dstip;
-	static unsigned int randomness = 0;
+	static unsigned int randomness;
 
 	if (HOOK2MANIP(hooknum) == IP_NAT_MANIP_SRC) {
 		var_ipp = &tuple->src.ip;
@@ -423,7 +421,8 @@ get_unique_tuple(struct ip_conntrack_tuple *tuple,
 			*tuple = ((struct ip_conntrack_tuple)
 				  { *manip, orig_tuple->dst });
 			DEBUGP("get_unique_tuple: Found current src map\n");
-			return 1;
+			if (!ip_nat_used_tuple(tuple, conntrack))
+				return 1;
 		}
 	}
 
@@ -518,12 +517,14 @@ ip_nat_setup_info(struct ip_conntrack *conntrack,
 	struct ip_conntrack_tuple new_tuple, inv_tuple, reply;
 	struct ip_conntrack_tuple orig_tp;
 	struct ip_nat_info *info = &conntrack->nat.info;
+	int in_hashes = info->initialized;
 
 	MUST_BE_WRITE_LOCKED(&ip_nat_lock);
 	IP_NF_ASSERT(hooknum == NF_IP_PRE_ROUTING
 		     || hooknum == NF_IP_POST_ROUTING
 		     || hooknum == NF_IP_LOCAL_OUT);
 	IP_NF_ASSERT(info->num_manips < IP_NAT_MAX_MANIPS);
+	IP_NF_ASSERT(!(info->initialized & (1 << HOOK2MANIP(hooknum))));
 
 	/* What we've got will look like inverse of reply. Normally
 	   this is what is in the conntrack, except for prior
@@ -640,6 +641,14 @@ ip_nat_setup_info(struct ip_conntrack *conntrack,
 
 	/* It's done. */
 	info->initialized |= (1 << HOOK2MANIP(hooknum));
+
+	if (in_hashes) {
+		IP_NF_ASSERT(info->bysource.conntrack);
+		replace_in_hashes(conntrack, info);
+	} else {
+		place_in_hashes(conntrack, info);
+	}
+
 	return NF_ACCEPT;
 }
 
@@ -762,11 +771,6 @@ do_bindings(struct ip_conntrack *ct,
 	struct ip_nat_helper *helper;
 	enum ip_conntrack_dir dir = CTINFO2DIR(ctinfo);
 	int proto = (*pskb)->nh.iph->protocol;
-
-	/* Skip everything and don't call helpers if there are no
-	 * manips for this connection */
-	if (info->num_manips == 0)
-		return NF_ACCEPT;
 
 	/* Need nat lock to protect against modification, but neither
 	   conntrack (referenced) and helper (deleted with

@@ -41,8 +41,10 @@ int acpi_found_madt;
  * MP-table.
  */
 int apic_version [MAX_APICS];
-int mp_bus_id_to_type [MAX_MP_BUSSES] = { [0 ... MAX_MP_BUSSES-1] = -1 };
+unsigned char mp_bus_id_to_type [MAX_MP_BUSSES] = { [0 ... MAX_MP_BUSSES-1] = -1 };
 int mp_bus_id_to_pci_bus [MAX_MP_BUSSES] = { [0 ... MAX_MP_BUSSES-1] = -1 };
+cpumask_t mp_bus_to_cpumask [MAX_MP_BUSSES] = { [0 ... MAX_MP_BUSSES-1] = CPU_MASK_ALL };
+
 int mp_current_pci_id = 0;
 /* I/O APIC entries */
 struct mpc_config_ioapic mp_ioapics[MAX_IO_APICS];
@@ -65,7 +67,7 @@ unsigned int boot_cpu_id = -1U;
 static unsigned int num_processors = 0;
 
 /* Bitmask of physically existing CPUs */
-unsigned long phys_cpu_present_map = 0;
+physid_mask_t phys_cpu_present_map = PHYSID_MASK_NONE;
 
 /* ACPI MADT entry parsing functions */
 #ifdef CONFIG_ACPI_BOOT
@@ -124,7 +126,7 @@ static void __init MP_processor_info (struct mpc_config_processor *m)
 	}
 	ver = m->mpc_apicver;
 
-	phys_cpu_present_map |= 1 << m->mpc_apicid;
+	physid_set(m->mpc_apicid, phys_cpu_present_map);
 	/*
 	 * Validate version
 	 */
@@ -707,7 +709,7 @@ static int __init mp_find_ioapic (
 			return i;
 	}
 
-	printk(KERN_ERR "ERROR: Unable to locate IOAPIC for IRQ %d/n", irq);
+	printk(KERN_ERR "ERROR: Unable to locate IOAPIC for IRQ %d\n", irq);
 
 	return -1;
 }
@@ -884,6 +886,8 @@ void __init mp_parse_prt (void)
 	int			ioapic_pin = 0;
 	int			irq = 0;
 	int			idx, bit = 0;
+	int			edge_level = 0;
+	int			active_high_low = 0;
 
 	/*
 	 * Parsing through the PCI Interrupt Routing Table (PRT) and program
@@ -894,12 +898,19 @@ void __init mp_parse_prt (void)
 
 		/* Need to get irq for dynamic entry */
 		if (entry->link.handle) {
-			irq = acpi_pci_link_get_irq(entry->link.handle, entry->link.index);
+			irq = acpi_pci_link_get_irq(entry->link.handle, entry->link.index, &edge_level, &active_high_low);
 			if (!irq)
-			continue;
+				continue;
+		} else {
+			/* Hardwired IRQ. Assume PCI standard settings */
+			irq = entry->link.index;
+			edge_level = 1;
+			active_high_low = 1;
 		}
-		else
-		irq = entry->link.index;
+
+		/* Don't set up the ACPI SCI because it's already set up */
+		if (acpi_fadt.sci_int == irq)
+			continue;
 
 		ioapic = mp_find_ioapic(irq);
 		if (ioapic < 0)
@@ -928,7 +939,7 @@ void __init mp_parse_prt (void)
 
 		mp_ioapic_routing[ioapic].pin_programmed[idx] |= (1<<bit);
 
-		vector = io_apic_set_pci_routing(ioapic, ioapic_pin, irq);
+		vector = io_apic_set_pci_routing(ioapic, ioapic_pin, irq, edge_level, active_high_low);
 		if (vector)
 			entry->irq = irq;
 

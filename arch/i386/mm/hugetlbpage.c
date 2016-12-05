@@ -59,7 +59,7 @@ static struct page *alloc_fresh_huge_page(void)
 	return page;
 }
 
-void free_huge_page(struct page *page);
+static void free_huge_page(struct page *page);
 
 static struct page *alloc_hugetlb_page(void)
 {
@@ -275,7 +275,7 @@ follow_huge_pmd(struct mm_struct *mm, unsigned long address,
 }
 #endif
 
-void free_huge_page(struct page *page)
+static void free_huge_page(struct page *page)
 {
 	BUG_ON(page_count(page));
 	BUG_ON(page->mapping);
@@ -355,14 +355,21 @@ int hugetlb_prefault(struct address_space *mapping, struct vm_area_struct *vma)
 			+ (vma->vm_pgoff >> (HPAGE_SHIFT - PAGE_SHIFT));
 		page = find_get_page(mapping, idx);
 		if (!page) {
+			/* charge the fs quota first */
+			if (hugetlb_get_quota(mapping)) {
+				ret = -ENOMEM;
+				goto out;
+			}
 			page = alloc_hugetlb_page();
 			if (!page) {
+				hugetlb_put_quota(mapping);
 				ret = -ENOMEM;
 				goto out;
 			}
 			ret = add_to_page_cache(page, mapping, idx, GFP_ATOMIC);
 			unlock_page(page);
 			if (ret) {
+				hugetlb_put_quota(mapping);
 				free_huge_page(page);
 				goto out;
 			}
@@ -374,7 +381,7 @@ out:
 	return ret;
 }
 
-void update_and_free_page(struct page *page)
+static void update_and_free_page(struct page *page)
 {
 	int j;
 	struct page *map;
@@ -392,7 +399,7 @@ void update_and_free_page(struct page *page)
 	__free_pages(page, HUGETLB_PAGE_ORDER);
 }
 
-int try_to_free_low(int count)
+static int try_to_free_low(int count)
 {
 	struct list_head *p;
 	struct page *page, *map;
@@ -423,7 +430,7 @@ int try_to_free_low(int count)
 	return count;
 }
 
-int set_hugetlb_mem_size(int count)
+static int set_hugetlb_mem_size(int count)
 {
 	int lcount;
 	struct page *page;
@@ -464,6 +471,8 @@ int set_hugetlb_mem_size(int count)
 int hugetlb_sysctl_handler(ctl_table *table, int write,
 		struct file *file, void *buffer, size_t *length)
 {
+	if (!cpu_has_pse)
+		return -ENODEV;
 	proc_dointvec(table, write, file, buffer, length);
 	htlbpage_max = set_hugetlb_mem_size(htlbpage_max);
 	return 0;
@@ -481,6 +490,9 @@ static int __init hugetlb_init(void)
 {
 	int i;
 	struct page *page;
+
+	if (!cpu_has_pse)
+		return -ENODEV;
 
 	for (i = 0; i < MAX_NUMNODES; ++i)
 		INIT_LIST_HEAD(&hugepage_freelists[i]);

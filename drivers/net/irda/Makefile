@@ -5,20 +5,18 @@
 # Rewritten to use lists instead of if-statements.
 #
 
-# Old SIR drivers (irtty is broken)
-obj-$(CONFIG_IRTTY_OLD)		+= irtty.o
+# Old SIR drivers 
 obj-$(CONFIG_IRPORT_SIR)	+= 		irport.o
 # FIR drivers
 obj-$(CONFIG_USB_IRDA)		+= irda-usb.o
 obj-$(CONFIG_NSC_FIR)		+= nsc-ircc.o
 obj-$(CONFIG_WINBOND_FIR)	+= w83977af_ir.o
 obj-$(CONFIG_SA1100_FIR)	+= sa1100_ir.o
-obj-$(CONFIG_TOSHIBA_OLD)	+= toshoboe.o
 obj-$(CONFIG_TOSHIBA_FIR)	+= donauboe.o
-obj-$(CONFIG_SMC_IRCC_OLD)	+= smc-ircc.o	irport.o
 obj-$(CONFIG_SMC_IRCC_FIR)	+= smsc-ircc2.o
 obj-$(CONFIG_ALI_FIR)		+= ali-ircc.o
 obj-$(CONFIG_VLSI_FIR)		+= vlsi_ir.o
+obj-$(CONFIG_VIA_FIR)		+= via-ircc.o
 # Old dongle drivers for old SIR drivers
 obj-$(CONFIG_ESI_DONGLE_OLD)		+= esi.o
 obj-$(CONFIG_TEKRAM_DONGLE_OLD)	+= tekram.o

@@ -232,8 +232,6 @@ static int sa1100_pcmcia_sock_init(struct pcmcia_socket *sock)
 	DEBUG(2, "%s(): initializing socket %u\n", __FUNCTION__, skt->nr);
 
 	skt->ops->socket_init(skt);
-	sa1100_pcmcia_config_skt(skt, &dead_socket);
-
 	return 0;
 }
 
@@ -556,7 +554,6 @@ static struct bittbl conf_bits[] = {
 	{ SS_DMA_MODE,		"SS_DMA_MODE"	},
 	{ SS_SPKR_ENA,		"SS_SPKR_ENA"	},
 	{ SS_OUTPUT_ENA,	"SS_OUTPUT_ENA"	},
-	{ SS_DEBOUNCED,		"SS_DEBOUNCED"	},
 };
 
 static void
@@ -725,7 +722,7 @@ int sa11xx_drv_pcmcia_probe(struct device *dev, struct pcmcia_low_level *ops, in
 		struct sa1100_pcmcia_socket *skt = PCMCIA_SOCKET(i);
 		memset(skt, 0, sizeof(*skt));
 
-		skt->socket.ss_entry = &sa11xx_pcmcia_operations;
+		skt->socket.ops = &sa11xx_pcmcia_operations;
 		skt->socket.owner = ops->owner;
 		skt->socket.dev.dev = dev;
 
@@ -947,7 +944,7 @@ static int __init sa11xx_pcmcia_init(void)
 {
 	int ret;
 
-	printk(KERN_INFO "SA11xx PCMCIA (CS release %s)\n", CS_RELEASE);
+	printk(KERN_INFO "SA11xx PCMCIA\n");
 
 	ret = cpufreq_register_notifier(&sa1100_pcmcia_notifier_block,
 					CPUFREQ_TRANSITION_NOTIFIER);

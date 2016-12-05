@@ -20,6 +20,7 @@
 #define HANDSPRING_VENDOR_ID		0x082d
 #define HANDSPRING_VISOR_ID		0x0100
 #define HANDSPRING_TREO_ID		0x0200
+#define HANDSPRING_TREO600_ID		0x0300
 
 #define PALM_VENDOR_ID			0x0830
 #define PALM_M500_ID			0x0001
@@ -40,6 +41,12 @@
 #define SONY_CLIE_4_1_ID		0x009A
 #define SONY_CLIE_NX60_ID		0x00DA
 #define SONY_CLIE_NZ90V_ID		0x00E9
+
+#define SAMSUNG_VENDOR_ID		0x04E8
+#define SAMSUNG_SCH_I330_ID		0x8001
+
+#define GARMIN_VENDOR_ID		0x091E
+#define GARMIN_IQUE_3600_ID		0x0004
 
 /****************************************************************************
  * Handspring Visor Vendor specific request codes (bRequest values)

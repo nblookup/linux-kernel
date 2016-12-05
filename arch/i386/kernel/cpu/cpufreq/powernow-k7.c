@@ -1,7 +1,7 @@
 /*
- *  $Id: powernow-k7.c,v 1.34 2003/02/22 10:23:46 db Exp $
- *
- *  (C) 2003 Dave Jones <davej@suse.de>
+ *  AMD K7 Powernow driver.
+ *  (C) 2003 Dave Jones <davej@codemonkey.org.uk> on behalf of SuSE Labs.
+ *  (C) 2003 Dave Jones <davej@redhat.com>
  *
  *  Licensed under the terms of the GNU GPL License version 2.
  *  Based upon datasheets & sample CPUs kindly provided by AMD.
@@ -14,6 +14,7 @@
  * - We disable half multipliers if ACPI is used on A0 stepping CPUs.
  */
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h> 
 #include <linux/init.h>
@@ -83,27 +84,6 @@ static unsigned int number_scales;
 static unsigned int fsb;
 static unsigned int latency;
 static char have_a0;
-
-
-#ifndef rdmsrl
-#define rdmsrl(msr,val) do {unsigned long l__,h__; \
-	rdmsr (msr, l__, h__);	\
-	val = l__;	\
-	val |= ((u64)h__<<32);	\
-} while(0)
-#endif
-
-#ifndef wrmsrl
-static void wrmsrl (u32 msr, u64 val)
-{
-	u32 lo, hi;
-
-	lo = (u32) val;
-	hi = val >> 32;
-	wrmsr (msr, lo, hi);
-}
-#endif
-
 
 
 static int check_powernow(void)
@@ -212,10 +192,11 @@ static void change_FID(int fid)
 {
 	union msr_fidvidctl fidvidctl;
 
+	rdmsrl (MSR_K7_FID_VID_CTL, fidvidctl.val);
 	if (fidvidctl.bits.FID != fid) {
-		rdmsrl (MSR_K7_FID_VID_CTL, fidvidctl.val);
 		fidvidctl.bits.SGTC = latency;
 		fidvidctl.bits.FID = fid;
+		fidvidctl.bits.VIDC = 0;
 		fidvidctl.bits.FIDC = 1;
 		wrmsrl (MSR_K7_FID_VID_CTL, fidvidctl.val);
 	}
@@ -226,9 +207,11 @@ static void change_VID(int vid)
 {
 	union msr_fidvidctl fidvidctl;
 
+	rdmsrl (MSR_K7_FID_VID_CTL, fidvidctl.val);
 	if (fidvidctl.bits.VID != vid) {
-		rdmsrl (MSR_K7_FID_VID_CTL, fidvidctl.val);
+		fidvidctl.bits.SGTC = latency;
 		fidvidctl.bits.VID = vid;
+		fidvidctl.bits.FIDC = 0;
 		fidvidctl.bits.VIDC = 1;
 		wrmsrl (MSR_K7_FID_VID_CTL, fidvidctl.val);
 	}
@@ -240,6 +223,7 @@ static void change_speed (unsigned int index)
 	u8 fid, vid;
 	struct cpufreq_freqs freqs;
 	union msr_fidvidstatus fidvidstatus;
+	int cfid;
 
 	/* fid are the lower 8 bits of the index we stored into
 	 * the cpufreq frequency table in powernow_decode_bios,
@@ -252,7 +236,8 @@ static void change_speed (unsigned int index)
 	freqs.cpu = 0;
 
 	rdmsrl (MSR_K7_FID_VID_STATUS, fidvidstatus.val);
-	freqs.old = fsb * fid_codes[fidvidstatus.bits.CFID] * 100;
+	cfid = fidvidstatus.bits.CFID;
+	freqs.old = fsb * fid_codes[cfid] * 100;
 	freqs.new = powernow_table[index].frequency;
 
 	cpufreq_notify_transition(&freqs, CPUFREQ_PRECHANGE);
@@ -316,8 +301,14 @@ static int powernow_decode_bios (int maxfid, int startvid)
 			dprintk (" voltage regulator)\n");
 
 			latency = psb->settlingtime;
+			if (latency < 100) {
+				printk (KERN_INFO PFX "BIOS set settling time to %d microseconds."
+						"Should be at least 100. Correcting.\n", latency);
+				latency = 100;
+			}
 			dprintk (KERN_INFO PFX "Settling Time: %d microseconds.\n", psb->settlingtime);
 			dprintk (KERN_INFO PFX "Has %d PST tables. (Only dumping ones relevant to this CPU).\n", psb->numpst);
+			latency *= 100;	/* SGTC needs to be in units of 10ns */
 
 			p += sizeof (struct psb_s);
 
@@ -345,6 +336,8 @@ static int powernow_decode_bios (int maxfid, int startvid)
 						p+=2;
 				}
 			}
+			printk (KERN_INFO PFX "No PST tables match this cpuid (0x%x)\n", etuple);
+			printk ("This is indicative of a broken BIOS. Email davej@redhat.com\n");
 			return -EINVAL;
 		}
 		p++;
@@ -392,7 +385,7 @@ static int __init powernow_cpu_init (struct cpufreq_policy *policy)
 	printk (KERN_INFO PFX "Minimum speed %d MHz. Maximum speed %d MHz.\n",
 				minimum_speed, maximum_speed);
 
-	policy->policy = CPUFREQ_POLICY_PERFORMANCE;
+	policy->governor = CPUFREQ_DEFAULT_GOVERNOR;
 	policy->cpuinfo.transition_latency = latency;
 	policy->cur = maximum_speed;
 
@@ -426,7 +419,7 @@ static void __exit powernow_exit (void)
 		kfree(powernow_table);
 }
 
-MODULE_AUTHOR ("Dave Jones <davej@suse.de>");
+MODULE_AUTHOR ("Dave Jones <davej@codemonkey.org.uk>");
 MODULE_DESCRIPTION ("Powernow driver for AMD K7 processors.");
 MODULE_LICENSE ("GPL");
 

@@ -8,7 +8,9 @@
  * Software Foundation; either version 2 of the License, or (at your option) 
  * any later version.
  */
+
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/pfkeyv2.h>
 #include <net/xfrm.h>
@@ -216,6 +218,40 @@ static struct xfrm_algo_desc ealg_list[] = {
 		.sadb_alg_minbits = 128,
 		.sadb_alg_maxbits = 256
 	}
+},
+{
+        .name = "serpent",
+
+        .uinfo = {
+                .encr = {
+                        .blockbits = 128,
+                        .defkeybits = 128,
+                }
+        },
+
+        .desc = {
+                .sadb_alg_id = SADB_X_EALG_SERPENTCBC,
+                .sadb_alg_ivlen = 8,
+                .sadb_alg_minbits = 128,
+                .sadb_alg_maxbits = 256,
+        }
+},
+{
+        .name = "twofish",
+                 
+        .uinfo = {
+                .encr = {
+                        .blockbits = 128,
+                        .defkeybits = 128,
+                }
+        },
+
+        .desc = {
+                .sadb_alg_id = SADB_X_EALG_TWOFISHCBC,
+                .sadb_alg_ivlen = 8,
+                .sadb_alg_minbits = 128,
+                .sadb_alg_maxbits = 256
+        }
 },
 };
 
@@ -583,6 +619,7 @@ skb_to_sgvec(struct sk_buff *skb, struct scatterlist *sg, int offset, int len)
 		BUG();
 	return elt;
 }
+EXPORT_SYMBOL_GPL(skb_to_sgvec);
 
 /* Check that skb data bits are writable. If they are not, copy data
  * to newly created private area. If "tailbits" is given, make sure that
@@ -683,6 +720,7 @@ int skb_cow_data(struct sk_buff *skb, int tailbits, struct sk_buff **trailer)
 
 	return elt;
 }
+EXPORT_SYMBOL_GPL(skb_cow_data);
 
 void *pskb_put(struct sk_buff *skb, struct sk_buff *tail, int len)
 {
@@ -692,4 +730,5 @@ void *pskb_put(struct sk_buff *skb, struct sk_buff *tail, int len)
 	}
 	return skb_put(tail, len);
 }
+EXPORT_SYMBOL_GPL(pskb_put);
 #endif

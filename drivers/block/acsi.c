@@ -55,7 +55,6 @@
 #include <linux/delay.h>
 #include <linux/mm.h>
 #include <linux/major.h>
-#include <linux/blk.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <scsi/scsi.h> /* for SCSI_IOCTL_GET_IDLUN */
@@ -64,6 +63,7 @@ typedef void Scsi_Device; /* hack to avoid including scsi.h */
 #include <linux/hdreg.h> /* for HDIO_GETGEO */
 #include <linux/blkpg.h>
 #include <linux/buffer_head.h>
+#include <linux/blkdev.h>
 
 #include <asm/setup.h>
 #include <asm/pgtable.h>
@@ -76,9 +76,9 @@ typedef void Scsi_Device; /* hack to avoid including scsi.h */
 #include <asm/atari_stram.h>
 
 static void (*do_acsi)(void) = NULL;
-static struct request_queue acsi_queue;
-#define QUEUE (&acsi_queue)
-#define CURRENT elv_next_request(&acsi_queue)
+static struct request_queue *acsi_queue;
+#define QUEUE (acsi_queue)
+#define CURRENT elv_next_request(acsi_queue)
 
 #define DEBUG
 #undef DEBUG_DETECT
@@ -347,7 +347,7 @@ struct acsi_error {
 static int acsicmd_dma( const char *cmd, char *buffer, int blocks, int
                         rwflag, int enable);
 static int acsi_reqsense( char *buffer, int targ, int lun);
-static void acsi_print_error(const unsigned char *errblk, int struct acsi_info_struct *aip);
+static void acsi_print_error(const unsigned char *errblk, struct acsi_info_struct *aip);
 static irqreturn_t acsi_interrupt (int irq, void *data, struct pt_regs *fp);
 static void unexpected_acsi_interrupt( void );
 static void bad_rw_intr( void );
@@ -1636,7 +1636,11 @@ int acsi_init( void )
 	phys_acsi_buffer = virt_to_phys( acsi_buffer );
 	STramMask = ATARIHW_PRESENT(EXTD_DMA) ? 0x00000000 : 0xff000000;
 	
-	blk_init_queue(&acsi_queue, do_acsi_request, &acsi_lock);
+	acsi_queue = blk_init_queue(do_acsi_request, &acsi_lock);
+	if (!acsi_queue) {
+		err = -ENOMEM;
+		goto out2a;
+	}
 #ifdef CONFIG_ATARI_SLM
 	err = slm_init();
 #endif
@@ -1726,14 +1730,18 @@ int acsi_init( void )
 	for( i = 0; i < NDevices; ++i ) {
 		struct gendisk *disk = acsi_gendisk[i];
 		sprintf(disk->disk_name, "ad%c", 'a'+i);
+		aip = &acsi_info[NDevices];
+		sprintf(disk->devfs_name, "ad/target%d/lun%d", aip->target, aip->lun);
 		disk->major = ACSI_MAJOR;
 		disk->first_minor = i << 4;
-		if (acsi_info[i].type != HARDDISK)
+		if (acsi_info[i].type != HARDDISK) {
 			disk->minors = 1;
+			strcat(disk->devfs_name, "/disc");
+		}
 		disk->fops = &acsi_fops;
 		disk->private_data = &acsi_info[i];
 		set_capacity(disk, acsi_info[i].size);
-		disk->queue = &acsi_queue;
+		disk->queue = acsi_queue;
 		add_disk(disk);
 	}
 	return 0;
@@ -1741,7 +1749,8 @@ out4:
 	while (i--)
 		put_disk(acsi_gendisk[i]);
 out3:
-	blk_cleanup_queue(&acsi_queue);
+	blk_cleanup_queue(acsi_queue);
+out2a:
 	atari_stram_free( acsi_buffer );
 out2:
 	unregister_blkdev( ACSI_MAJOR, "ad" );
@@ -1768,7 +1777,7 @@ void cleanup_module(void)
 {
 	int i;
 	del_timer( &acsi_timer );
-	blk_cleanup_queue(&acsi_queue);
+	blk_cleanup_queue(acsi_queue);
 	atari_stram_free( acsi_buffer );
 
 	if (unregister_blkdev( ACSI_MAJOR, "ad" ) != 0)

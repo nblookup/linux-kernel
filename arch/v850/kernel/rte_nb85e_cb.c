@@ -21,7 +21,7 @@
 
 #include <asm/atomic.h>
 #include <asm/page.h>
-#include <asm/nb85e.h>
+#include <asm/v850e.h>
 #include <asm/rte_nb85e_cb.h>
 
 #include "mach.h"
@@ -41,7 +41,7 @@ void __init mach_early_init (void)
 
 	   Unfortunately, the dcache seems to be buggy, so we only use the
 	   icache for now.  */
-	nb85e_cache_enable (0x0040 /* BHC */, 0x0000 /* DCC */);
+	v850e_cache_enable (0x0040 /*BHC*/, 0x0003 /*ICC*/, 0x0000 /*DCC*/);
 
 	rte_cb_early_init ();
 }
@@ -52,21 +52,6 @@ void __init mach_get_physical_ram (unsigned long *ram_start,
 	/* We just use SDRAM here.  */
 	*ram_start = SDRAM_ADDR;
 	*ram_len = SDRAM_SIZE;
-}
-
-void __init mach_reserve_bootmem ()
-{
-	extern char _root_fs_image_start, _root_fs_image_end;
-	u32 root_fs_image_start = (u32)&_root_fs_image_start;
-	u32 root_fs_image_end = (u32)&_root_fs_image_end;
-
-	/* Reserve the memory used by the root filesystem image if it's
-	   in SDRAM.  */
-	if (root_fs_image_end > root_fs_image_start
-	    && root_fs_image_start >= SDRAM_ADDR
-	    && root_fs_image_start < (SDRAM_ADDR + SDRAM_SIZE))
-		reserve_bootmem (root_fs_image_start,
-				 root_fs_image_end - root_fs_image_start);
 }
 
 void mach_gettimeofday (struct timespec *tv)

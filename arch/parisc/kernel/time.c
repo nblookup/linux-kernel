@@ -12,6 +12,7 @@
  */
 #include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
@@ -34,6 +35,8 @@
 
 u64 jiffies_64 = INITIAL_JIFFIES;
 
+EXPORT_SYMBOL(jiffies_64);
+
 /* xtime and wall_jiffies keep wall-clock time */
 extern unsigned long wall_jiffies;
 
@@ -48,7 +51,9 @@ static inline void
 parisc_do_profile(struct pt_regs *regs)
 {
 	unsigned long pc = regs->iaoq[0];
+#if 0
 	extern unsigned long prof_cpu_mask;
+#endif
 	extern char _stext;
 
 	profile_hook(regs);
@@ -60,6 +65,10 @@ parisc_do_profile(struct pt_regs *regs)
 		return;
 
 #if 0
+	/* FIXME: when we have irq affinity to cpu, we need to
+	 * only look at the cpus specified in this mask 
+	 */
+
 	if (!((1 << smp_processor_id()) & prof_cpu_mask))
 		return;
 #endif
@@ -187,9 +196,14 @@ do_gettimeofday (struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
+EXPORT_SYMBOL(do_gettimeofday);
+
 int
-do_settimeofday (struct timeval *tv)
+do_settimeofday (struct timespec *tv)
 {
+	time_t wtm_sec, sec = tv->tv_sec;
+	long wtm_nsec, nsec = tv->tv_nsec;
+
 	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
 		return -EINVAL;
 
@@ -202,16 +216,14 @@ do_settimeofday (struct timeval *tv)
 		 * Discover what correction gettimeofday would have
 		 * done, and then undo it!
 		 */
-		tv->tv_nsec -= gettimeoffset() * 1000;
-		tv->tv_nsec -= (jiffies - wall_jiffies) * (NSEC_PER_SEC / HZ);
+		nsec -= gettimeoffset() * 1000;
 
-		while (tv->tv_nsec < 0) {
-			tv->tv_nsec += NSEC_PER_SEC;
-			tv->tv_sec--;
-		}
+		wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
+		wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
 
-		xtime.tv_sec = tv->tv_sec;
-		xtime.tv_nsec = tv->tv_nsec;
+		set_normalized_timespec(&xtime, sec, nsec);
+		set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
+
 		time_adjust = 0;		/* stop active adjtime() */
 		time_status |= STA_UNSYNC;
 		time_maxerror = NTP_PHASE_LIMIT;
@@ -219,6 +231,18 @@ do_settimeofday (struct timeval *tv)
 	}
 	write_sequnlock_irq(&xtime_lock);
 	return 0;
+}
+
+EXPORT_SYMBOL(do_settimeofday);
+
+/*
+ * XXX: We can do better than this.
+ * Returns nanoseconds
+ */
+
+unsigned long long sched_clock(void)
+{
+	return (unsigned long long)jiffies * (1000000000 / HZ);
 }
 
 
@@ -243,6 +267,8 @@ void __init time_init(void)
 		write_seqlock_irq(&xtime_lock);
 		xtime.tv_sec = tod_data.tod_sec;
 		xtime.tv_nsec = tod_data.tod_usec * 1000;
+		set_normalized_timespec(&wall_to_monotonic,
+		                        -xtime.tv_sec, -xtime.tv_nsec);
 		write_sequnlock_irq(&xtime_lock);
 	} else {
 		printk(KERN_ERR "Error reading tod clock\n");

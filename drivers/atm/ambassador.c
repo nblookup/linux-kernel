@@ -310,10 +310,11 @@ static u32 __initdata ucode_data[] = {
   0xdeadbeef
 };
 
+static void do_housekeeping (unsigned long arg);
 /********** globals **********/
 
 static amb_dev * amb_devs = NULL;
-static struct timer_list housekeeping;
+static struct timer_list housekeeping = TIMER_INITIALIZER(do_housekeeping, 0, 1);
 
 static unsigned short debug = 0;
 static unsigned int cmds = 8;
@@ -937,63 +938,6 @@ static irqreturn_t interrupt_handler(int irq, void *dev_id,
   return IRQ_HANDLED;
 }
 
-/********** don't panic... yeah, right **********/
-
-#ifdef DEBUG_AMBASSADOR
-static void dont_panic (amb_dev * dev) {
-  amb_cq * cq = &dev->cq;
-  volatile amb_cq_ptrs * ptrs = &cq->ptrs;
-  amb_txq * txq;
-  amb_rxq * rxq;
-  command * cmd;
-  tx_in * tx;
-  tx_simple * tx_descr;
-  unsigned char pool;
-  rx_in * rx;
-  
-  unsigned long flags;
-  save_flags (flags);
-  cli();
-  
-  PRINTK (KERN_INFO, "don't panic - putting adapter into reset");
-  wr_plain (dev, offsetof(amb_mem, reset_control),
-	    rd_plain (dev, offsetof(amb_mem, reset_control)) | AMB_RESET_BITS);
-  
-  PRINTK (KERN_INFO, "marking all commands complete");
-  for (cmd = ptrs->start; cmd < ptrs->limit; ++cmd)
-    cmd->request = cpu_to_be32 (SRB_COMPLETE);
-
-  PRINTK (KERN_INFO, "completing all TXs");
-  txq = &dev->txq;
-  tx = txq->in.ptr;
-  while (txq->pending--) {
-    if (tx == txq->in.start)
-      tx = txq->in.limit;
-    --tx;
-    tx_descr = bus_to_virt (be32_to_cpu (tx->tx_descr_addr));
-    amb_kfree_skb (tx_descr->skb);
-    kfree (tx_descr);
-  }
-  
-  PRINTK (KERN_INFO, "freeing all RX buffers");
-  for (pool = 0; pool < NUM_RX_POOLS; ++pool) {
-    rxq = &dev->rxq[pool];
-    rx = rxq->in.ptr;
-    while (rxq->pending--) {
-      if (rx == rxq->in.start)
-	rx = rxq->in.limit;
-      --rx;
-      dev_kfree_skb_any (bus_to_virt (rx->handle));
-    }
-  }
-  
-  PRINTK (KERN_INFO, "don't panic over - close all VCs and rmmod");
-  set_bit (dead, &dev->flags);
-  restore_flags (flags);
-  return;
-}
-#endif
-
 /********** make rate (not quite as much fun as Horizon) **********/
 
 static unsigned int make_rate (unsigned int rate, rounding r,
@@ -1120,7 +1064,8 @@ static unsigned int make_rate (unsigned int rate, rounding r,
 
 /********** Open a VC **********/
 
-static int amb_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
+static int amb_open (struct atm_vcc * atm_vcc)
+{
   int error;
   
   struct atm_qos * qos;
@@ -1133,6 +1078,8 @@ static int amb_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
   amb_dev * dev = AMB_DEV(atm_vcc->dev);
   amb_vcc * vcc;
   unsigned char pool = -1; // hush gcc
+  short vpi = atm_vcc->vpi;
+  int vci = atm_vcc->vci;
   
   PRINTD (DBG_FLOW|DBG_VCC, "amb_open %x %x", vpi, vci);
   
@@ -1143,14 +1090,6 @@ static int amb_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
     return -EINVAL;
   }
 #endif
-  
-  // deal with possibly wildcarded VCs
-  error = atm_find_ci (atm_vcc, &vpi, &vci);
-  if (error) {
-    PRINTD (DBG_WARN|DBG_VCC, "atm_find_ci failed!");
-    return error;
-  }
-  PRINTD (DBG_VCC, "atm_find_ci gives %x %x", vpi, vci);
   
   if (!(0 <= vpi && vpi < (1<<NUM_VPI_BITS) &&
 	0 <= vci && vci < (1<<NUM_VCI_BITS))) {
@@ -1330,10 +1269,6 @@ static int amb_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
     up (&dev->vcc_sf);
   }
   
-  // set elements of vcc
-  atm_vcc->vpi = vpi; // 0
-  atm_vcc->vci = vci;
-  
   // indicate readiness
   set_bit(ATM_VF_READY,&atm_vcc->flags);
   
@@ -1420,32 +1355,6 @@ static void amb_close (struct atm_vcc * atm_vcc) {
   return;
 }
 
-/********** DebugIoctl **********/
-
-#if 0
-static int amb_ioctl (struct atm_dev * dev, unsigned int cmd, void * arg) {
-  unsigned short newdebug;
-  if (cmd == AMB_SETDEBUG) {
-    if (!capable(CAP_NET_ADMIN))
-      return -EPERM;
-    if (copy_from_user (&newdebug, arg, sizeof(newdebug))) {
-      // moan
-      return -EFAULT;
-    } else {
-      debug = newdebug;
-      return 0;
-    }
-  } else if (cmd == AMB_DONTPANIC) {
-    if (!capable(CAP_NET_ADMIN))
-      return -EPERM;
-    dont_panic (dev);
-  } else {
-    // moan
-    return -ENOIOCTLCMD;
-  }
-}
-#endif
-
 /********** Set socket options for a VC **********/
 
 // int amb_getsockopt (struct atm_vcc * atm_vcc, int level, int optname, void * optval, int optlen);
@@ -1524,64 +1433,10 @@ static int amb_send (struct atm_vcc * atm_vcc, struct sk_buff * skb) {
   tx.tx_descr_length = cpu_to_be16 (sizeof(tx_frag)+sizeof(tx_frag_end));
   tx.tx_descr_addr = cpu_to_be32 (virt_to_bus (&tx_descr->tx_frag));
   
-#ifdef DEBUG_AMBASSADOR
-  /* wey-hey! */
-  if (vc == 1023) {
-    unsigned int i;
-    unsigned short d = 0;
-    char * s = skb->data;
-    switch (*s++) {
-      case 'D': {
-	for (i = 0; i < 4; ++i) {
-	  d = (d<<4) | ((*s <= '9') ? (*s - '0') : (*s - 'a' + 10));
-	  ++s;
-	}
-	PRINTK (KERN_INFO, "debug bitmap is now %hx", debug = d);
-	break;
-      }
-      case 'R': {
-	if (*s++ == 'e' && *s++ == 's' && *s++ == 'e' && *s++ == 't')
-	  dont_panic (dev);
-	break;
-      }
-      default: {
-	break;
-      }
-    }
-  }
-#endif
-  
   while (tx_give (dev, &tx))
     schedule();
   return 0;
 }
-
-/********** Scatter Gather Send Capability **********/
-
-static int amb_sg_send (struct atm_vcc * atm_vcc,
-			unsigned long start,
-			unsigned long size) {
-  PRINTD (DBG_FLOW|DBG_VCC, "amb_sg_send: never");
-  return 0;
-  if (atm_vcc->qos.aal == ATM_AAL5) {
-    PRINTD (DBG_FLOW|DBG_VCC, "amb_sg_send: yes");
-    return 1;
-  } else {
-    PRINTD (DBG_FLOW|DBG_VCC, "amb_sg_send: no");
-    return 0;
-  }
-  PRINTD (DBG_FLOW|DBG_VCC, "amb_sg_send: always");
-  return 1;
-}
-
-/********** Send OAM **********/
-
-// static int amb_send_oam (struct atm_vcc * atm_vcc, void * cell, int flags);
-
-/********** Feedback to Driver **********/
-
-// void amb_feedback (struct atm_vcc * atm_vcc, struct sk_buff * skb,
-// unsigned long start, unsigned long dest, int len);
 
 /********** Change QoS on a VC **********/
 
@@ -1690,22 +1545,14 @@ static int amb_proc_read (struct atm_dev * atm_dev, loff_t * pos, char * page) {
 /********** Operation Structure **********/
 
 static const struct atmdev_ops amb_ops = {
-  .open	= amb_open,
+  .open         = amb_open,
   .close	= amb_close,
-  .send	= amb_send,
-  .sg_send	= amb_sg_send,
+  .send         = amb_send,
   .proc_read	= amb_proc_read,
   .owner	= THIS_MODULE,
 };
 
 /********** housekeeping **********/
-
-static inline void set_timer (struct timer_list * timer, unsigned long delay) {
-  timer->expires = jiffies + delay;
-  add_timer (timer);
-  return;
-}
-
 static void do_housekeeping (unsigned long arg) {
   amb_dev * dev = amb_devs;
   // data is set to zero at module unload
@@ -1721,7 +1568,7 @@ static void do_housekeeping (unsigned long arg) {
       
       dev = dev->prev;
     }
-    set_timer (&housekeeping, 10*HZ);
+    mod_timer(&housekeeping, jiffies + 10*HZ);
   }
   
   return;
@@ -2607,11 +2454,7 @@ static int __init amb_module_init (void) {
   devs = amb_probe();
   
   if (devs) {
-    init_timer (&housekeeping);
-    housekeeping.function = do_housekeeping;
-    // paranoia
-    housekeeping.data = 1;
-    set_timer (&housekeeping, 0);
+    mod_timer (&housekeeping, jiffies);
   } else {
     PRINTK (KERN_INFO, "no (usable) adapters found");
   }
@@ -2628,7 +2471,7 @@ static void __exit amb_module_exit (void) {
   
   // paranoia
   housekeeping.data = 0;
-  del_timer (&housekeeping);
+  del_timer_sync(&housekeeping);
   
   while (amb_devs) {
     dev = amb_devs;

@@ -7,6 +7,7 @@
 
 #ifndef __ASSEMBLY__
 
+#include <linux/string.h>
 #include <asm/segment.h>
 #include <asm/mmu.h>
 
@@ -94,12 +95,12 @@ static inline void _set_gate(void *adr, unsigned type, unsigned long func, unsig
 
 static inline void set_intr_gate(int nr, void *func) 
 { 
-	_set_gate(&idt_table[nr], GATE_INTERRUPT, (unsigned long) func, 3, 0); 
+	_set_gate(&idt_table[nr], GATE_INTERRUPT, (unsigned long) func, 0, 0); 
 } 
 
 static inline void set_intr_gate_ist(int nr, void *func, unsigned ist) 
 { 
-	_set_gate(&idt_table[nr], GATE_INTERRUPT, (unsigned long) func, 3, ist); 
+	_set_gate(&idt_table[nr], GATE_INTERRUPT, (unsigned long) func, 0, ist); 
 } 
 
 static inline void set_system_gate(int nr, void *func) 
@@ -117,7 +118,7 @@ static inline void set_tssldt_descriptor(void *ptr, unsigned long tss, unsigned 
 	d.base1 = PTR_MIDDLE(tss) & 0xFF; 
 	d.type = type;
 	d.p = 1; 
-	d.limit1 = 0xF;
+	d.limit1 = (size >> 16) & 0xF;
 	d.base2 = (PTR_MIDDLE(tss) >> 8) & 0xFF; 
 	d.base3 = PTR_HIGH(tss); 
 	memcpy(ptr, &d, 16); 
@@ -148,6 +149,8 @@ static inline void set_seg_base(unsigned cpu, int entry, void *base)
 
 #define LDT_entry_a(info) \
 	((((info)->base_addr & 0x0000ffff) << 16) | ((info)->limit & 0x0ffff))
+/* Don't allow setting of the lm bit. It is useless anyways because 
+   64bit system calls require __USER_CS. */ 
 #define LDT_entry_b(info) \
 	(((info)->base_addr & 0xff000000) | \
 	(((info)->base_addr & 0x00ff0000) >> 16) | \
@@ -158,7 +161,7 @@ static inline void set_seg_base(unsigned cpu, int entry, void *base)
 	((info)->seg_32bit << 22) | \
 	((info)->limit_in_pages << 23) | \
 	((info)->useable << 20) | \
-	((info)->lm << 21) | \
+	/* ((info)->lm << 21) | */ \
 	0x7000)
 
 #define LDT_empty(info) (\

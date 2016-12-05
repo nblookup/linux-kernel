@@ -9,6 +9,7 @@
  *		2 of the License, or (at your option) any later version.
  */
 
+#include <linux/module.h>
 #include <linux/signal.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
@@ -41,7 +42,7 @@
 
 static __inline__ int scm_check_creds(struct ucred *creds)
 {
-	if ((creds->pid == current->pid || capable(CAP_SYS_ADMIN)) &&
+	if ((creds->pid == current->tgid || capable(CAP_SYS_ADMIN)) &&
 	    ((creds->uid == current->uid || creds->uid == current->euid ||
 	      creds->uid == current->suid) || capable(CAP_SETUID)) &&
 	    ((creds->gid == current->gid || creds->gid == current->egid ||
@@ -282,3 +283,9 @@ struct scm_fp_list *scm_fp_dup(struct scm_fp_list *fpl)
 	}
 	return new_fpl;
 }
+
+EXPORT_SYMBOL(__scm_destroy);
+EXPORT_SYMBOL(__scm_send);
+EXPORT_SYMBOL(put_cmsg);
+EXPORT_SYMBOL(scm_detach_fds);
+EXPORT_SYMBOL(scm_fp_dup);

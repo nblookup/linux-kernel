@@ -8,13 +8,9 @@
 #include <linux/notifier.h>
 #include <linux/config.h>
 #include <linux/init.h>
+#include <linux/pm.h>
 
-extern unsigned char software_suspend_enabled;
-
-#define NORESUME	 1
-#define RESUME_SPECIFIED 2
-
-#ifdef CONFIG_SOFTWARE_SUSPEND
+#ifdef CONFIG_PM
 /* page backup entry */
 typedef struct pbe {
 	unsigned long address;		/* address of the copy */
@@ -49,42 +45,31 @@ extern int shrink_mem(void);
 /* mm/page_alloc.c */
 extern void drain_local_pages(void);
 
-/* kernel/suspend.c */
-extern void software_suspend(void);
-extern void software_resume(void);
-
-extern int register_suspend_notifier(struct notifier_block *);
-extern int unregister_suspend_notifier(struct notifier_block *);
-extern void refrigerator(unsigned long);
-
-extern int freeze_processes(void);
-extern void thaw_processes(void);
-
 extern unsigned int nr_copy_pages __nosavedata;
 extern suspend_pagedir_t *pagedir_nosave __nosavedata;
+#endif /* CONFIG_PM */
 
-/* Communication between kernel/suspend.c and arch/i386/suspend.c */
+#ifdef CONFIG_SOFTWARE_SUSPEND
 
-extern void do_magic_resume_1(void);
-extern void do_magic_resume_2(void);
-extern void do_magic_suspend_1(void);
-extern void do_magic_suspend_2(void);
+extern unsigned char software_suspend_enabled;
 
-/* Communication between acpi and arch/i386/suspend.c */
-
-extern void do_suspend_lowlevel(int resume);
-extern void do_suspend_lowlevel_s4bios(int resume);
-
-#else
+extern void software_suspend(void);
+#else	/* CONFIG_SOFTWARE_SUSPEND */
 static inline void software_suspend(void)
 {
+	printk("Warning: fake suspend called\n");
 }
-#define software_resume()		do { } while(0)
-#define register_suspend_notifier(a)	do { } while(0)
-#define unregister_suspend_notifier(a)	do { } while(0)
-#define refrigerator(a)			do { BUG(); } while(0)
-#define freeze_processes()		do { panic("You need CONFIG_SOFTWARE_SUSPEND to do sleeps."); } while(0)
-#define thaw_processes()		do { } while(0)
-#endif
+#endif	/* CONFIG_SOFTWARE_SUSPEND */
+
+
+#ifdef CONFIG_PM
+extern void refrigerator(unsigned long);
+
+#else
+static inline void refrigerator(unsigned long flag)
+{
+
+}
+#endif	/* CONFIG_PM */
 
 #endif /* _LINUX_SWSUSP_H */

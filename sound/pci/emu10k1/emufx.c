@@ -364,12 +364,12 @@ static int snd_emu10k1_gpr_ctl_put(snd_kcontrol_t * kcontrol, snd_ctl_elem_value
 		case EMU10K1_GPR_TRANSLATION_TABLE100:
 			snd_emu10k1_ptr_write(emu, emu->gpr_base + ctl->gpr[i], 0, db_table[val]);
 			break;
-		case EMU10K1_GRP_TRANSLATION_BASS:
+		case EMU10K1_GPR_TRANSLATION_BASS:
 			snd_runtime_check((ctl->count % 5) == 0 && (ctl->count / 5) == ctl->vcount, change = -EIO; goto __error);
 			for (j = 0; j < 5; j++)
 				snd_emu10k1_ptr_write(emu, emu->gpr_base + ctl->gpr[j * ctl->vcount + i], 0, bass_table[val][j]);
 			break;
-		case EMU10K1_GRP_TRANSLATION_TREBLE:
+		case EMU10K1_GPR_TRANSLATION_TREBLE:
 			snd_runtime_check((ctl->count % 5) == 0 && (ctl->count / 5) == ctl->vcount, change = -EIO; goto __error);
 			for (j = 0; j < 5; j++)
 				snd_emu10k1_ptr_write(emu, emu->gpr_base + ctl->gpr[j * ctl->vcount + i], 0, treble_table[val][j]);
@@ -667,7 +667,7 @@ static snd_pcm_uframes_t snd_emu10k1_fx8010_playback_pointer(snd_pcm_substream_t
 	pcm->hw_io = ptr;
 	pcm->hw_ready -= frames;
 	pcm->sw_io += frames;
-	if (pcm->sw_io > runtime->buffer_size)
+	if (pcm->sw_io >= runtime->buffer_size)
 		pcm->sw_io -= runtime->buffer_size;
 	snd_emu10k1_fx8010_playback_transfer(substream);
 	return pcm->sw_io;
@@ -945,12 +945,15 @@ static void snd_emu10k1_add_controls(emu10k1_t *emu, emu10k1_fx8010_code_t *icod
 	snd_emu10k1_fx8010_ctl_t *ctl, nctl;
 	snd_kcontrol_new_t knew;
 	snd_kcontrol_t *kctl;
-	snd_ctl_elem_value_t val;
+	snd_ctl_elem_value_t *val;
 
+	val = (snd_ctl_elem_value_t *)kmalloc(sizeof(*val), GFP_KERNEL);
+	if (!val)
+		return;
 	for (i = 0, _gctl = icode->gpr_add_controls;
 	     i < icode->gpr_add_control_count; i++, _gctl++) {
 		if (copy_from_user(&gctl, _gctl, sizeof(gctl)))
-			return;
+			break;
 		snd_runtime_check(gctl.id.iface == SNDRV_CTL_ELEM_IFACE_MIXER ||
 		                  gctl.id.iface == SNDRV_CTL_ELEM_IFACE_PCM, continue);
 		snd_runtime_check(gctl.id.name[0] != '\0', continue);
@@ -970,7 +973,7 @@ static void snd_emu10k1_add_controls(emu10k1_t *emu, emu10k1_fx8010_code_t *icod
 		for (j = 0; j < 32; j++) {
 			nctl.gpr[j] = gctl.gpr[j];
 			nctl.value[j] = ~gctl.value[j];	/* inverted, we want to write new value in gpr_ctl_put() */
-			val.value.integer.value[j] = gctl.value[j];
+			val->value.integer.value[j] = gctl.value[j];
 		}
 		nctl.min = gctl.min;
 		nctl.max = gctl.max;
@@ -996,8 +999,9 @@ static void snd_emu10k1_add_controls(emu10k1_t *emu, emu10k1_fx8010_code_t *icod
 			snd_ctl_notify(emu->card, SNDRV_CTL_EVENT_MASK_VALUE |
 			                          SNDRV_CTL_EVENT_MASK_INFO, &ctl->kcontrol->id);
 		}
-		snd_emu10k1_gpr_ctl_put(ctl->kcontrol, &val);
+		snd_emu10k1_gpr_ctl_put(ctl->kcontrol, val);
 	}
+	kfree(val);
 }
 
 static void snd_emu10k1_del_controls(emu10k1_t *emu, emu10k1_fx8010_code_t *icode)
@@ -1231,10 +1235,14 @@ static void __devinit snd_emu10k1_init_stereo_onoff_control(emu10k1_fx8010_contr
  */
 
 #define A_GPR_ACCU 0xd6
+#define A_GPR_COND 0xd7
 
 static int __devinit _snd_emu10k1_audigy_init_efx(emu10k1_t *emu)
 {
-	int err, i, z, gpr, tmp, playback, capture, nctl;
+	int err, i, z, gpr, nctl;
+	const int playback = 10;
+	const int capture = playback + (SND_EMU10K1_PLAYBACK_CHANNELS * 2); /* we reserve 10 voices */
+	const int tmp = 0x88;
 	u32 ptr;
 	emu10k1_fx8010_code_t *icode;
 	emu10k1_fx8010_control_gpr_t *controls, *ctl;
@@ -1257,19 +1265,15 @@ static int __devinit _snd_emu10k1_audigy_init_efx(emu10k1_t *emu)
 	strcpy(icode->name, "Audigy DSP code for ALSA");
 	ptr = 0;
 	nctl = 0;
-	playback = 10;
-	capture = playback + (SND_EMU10K1_PLAYBACK_CHANNELS * 2); /* we reserve 10 voices */
 	gpr = capture + 10;
-	tmp = 0x88;
 
 	/* stop FX processor */
 	snd_emu10k1_ptr_write(emu, A_DBG, 0, (emu->fx8010.dbg = 0) | A_DBG_SINGLE_STEP);
 
-	/* Wave Playback */
+	/* Wave Playback Volume */
 	A_OP(icode, &ptr, iMAC0, A_GPR(playback), A_C_00000000, A_GPR(gpr), A_FXBUS(FXBUS_PCM_LEFT));
 	A_OP(icode, &ptr, iMAC0, A_GPR(playback+1), A_C_00000000, A_GPR(gpr+1), A_FXBUS(FXBUS_PCM_RIGHT));
-	snd_emu10k1_init_stereo_control(&controls[nctl++], "Wave Playback Volume", gpr,
-					emu->revision == 4 ? 50 : 100);
+	snd_emu10k1_init_stereo_control(&controls[nctl++], "Wave Playback Volume", gpr, 100);
 	gpr += 2;
 
 	/* Wave Surround Playback */
@@ -1431,7 +1435,7 @@ A_OP(icode, &ptr, iMAC0, A_GPR(var), A_GPR(var), A_GPR(vol), A_EXTIN(input))
 	ctl->min = 0;
 	ctl->max = 40;
 	ctl->value[0] = ctl->value[1] = 20;
-	ctl->translation = EMU10K1_GRP_TRANSLATION_BASS;
+	ctl->translation = EMU10K1_GPR_TRANSLATION_BASS;
 	ctl = &controls[nctl + 1];
 	ctl->id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	strcpy(ctl->id.name, "Tone Control - Treble");
@@ -1440,7 +1444,7 @@ A_OP(icode, &ptr, iMAC0, A_GPR(var), A_GPR(var), A_GPR(vol), A_EXTIN(input))
 	ctl->min = 0;
 	ctl->max = 40;
 	ctl->value[0] = ctl->value[1] = 20;
-	ctl->translation = EMU10K1_GRP_TRANSLATION_TREBLE;
+	ctl->translation = EMU10K1_GPR_TRANSLATION_TREBLE;
 
 #define BASS_GPR	0x8c
 #define TREBLE_GPR	0x96
@@ -1493,14 +1497,16 @@ A_OP(icode, &ptr, iMAC0, A_GPR(var), A_GPR(var), A_GPR(vol), A_EXTIN(input))
 	snd_emu10k1_init_stereo_onoff_control(controls + nctl++, "Tone Control - Switch", gpr, 0);
 	gpr += 2;
 
-	/* digital outputs */
-	A_PUT_STEREO_OUTPUT(A_EXTOUT_FRONT_L, A_EXTOUT_FRONT_R, playback + SND_EMU10K1_PLAYBACK_CHANNELS);
-	A_PUT_STEREO_OUTPUT(A_EXTOUT_REAR_L, A_EXTOUT_REAR_R, playback+2 + SND_EMU10K1_PLAYBACK_CHANNELS);
-	A_PUT_OUTPUT(A_EXTOUT_CENTER, playback+4 + SND_EMU10K1_PLAYBACK_CHANNELS);
-	A_PUT_OUTPUT(A_EXTOUT_LFE, playback+5 + SND_EMU10K1_PLAYBACK_CHANNELS);
+	/* Master volume for audigy2 */
+	if (emu->revision == 4) {
+		A_OP(icode, &ptr, iMAC0, A_GPR(playback+0+SND_EMU10K1_PLAYBACK_CHANNELS), A_C_00000000, A_GPR(gpr), A_GPR(playback+0+SND_EMU10K1_PLAYBACK_CHANNELS));
+		A_OP(icode, &ptr, iMAC0, A_GPR(playback+1+SND_EMU10K1_PLAYBACK_CHANNELS), A_C_00000000, A_GPR(gpr+1), A_GPR(playback+1+SND_EMU10K1_PLAYBACK_CHANNELS));
+		snd_emu10k1_init_stereo_control(&controls[nctl++], "Wave Master Playback Volume", gpr, 0);
+		gpr += 2;
+	}	
 
 	/* analog speakers */
-	if (emu->audigy && emu->revision == 4) { /* audigy2 */
+	if (emu->revision == 4) { /* audigy2 */
 		A_PUT_STEREO_OUTPUT(A_EXTOUT_AFRONT_L, A_EXTOUT_AFRONT_R, playback + SND_EMU10K1_PLAYBACK_CHANNELS);
 	} else {
 		A_PUT_STEREO_OUTPUT(A_EXTOUT_AC97_L, A_EXTOUT_AC97_R, playback + SND_EMU10K1_PLAYBACK_CHANNELS);
@@ -1511,6 +1517,29 @@ A_OP(icode, &ptr, iMAC0, A_GPR(var), A_GPR(var), A_GPR(vol), A_EXTIN(input))
 
 	/* headphone */
 	A_PUT_STEREO_OUTPUT(A_EXTOUT_HEADPHONE_L, A_EXTOUT_HEADPHONE_R, playback + SND_EMU10K1_PLAYBACK_CHANNELS);
+
+	/* digital outputs */
+//	A_PUT_STEREO_OUTPUT(A_EXTOUT_FRONT_L, A_EXTOUT_FRONT_R, playback + SND_EMU10K1_PLAYBACK_CHANNELS);
+
+	/* IEC958 Optical Raw Playback Switch */ 
+	icode->gpr_map[gpr++] = 0x1008;
+	icode->gpr_map[gpr++] = 0xffff0000;
+	for (z = 0; z < 2; z++) {
+		A_OP(icode, &ptr, iMAC0, A_GPR(tmp + 2), A_FXBUS(FXBUS_PT_LEFT + z), A_C_00000000, A_C_00000000);
+		A_OP(icode, &ptr, iSKIP, A_GPR_COND, A_GPR_COND, A_GPR(gpr - 2), A_C_00000001);
+		A_OP(icode, &ptr, iACC3, A_GPR(tmp + 2), A_C_00000000, A_C_00010000, A_GPR(tmp + 2));
+		A_OP(icode, &ptr, iANDXOR, A_GPR(tmp + 2), A_GPR(tmp + 2), A_GPR(gpr - 1), A_C_00000000);
+		A_SWITCH(icode, &ptr, tmp + 0, tmp + 2, gpr + z);
+		A_SWITCH_NEG(icode, &ptr, tmp + 1, gpr + z);
+		A_SWITCH(icode, &ptr, tmp + 1, playback + SND_EMU10K1_PLAYBACK_CHANNELS + z, tmp + 1);
+		A_OP(icode, &ptr, iACC3, A_EXTOUT(A_EXTOUT_FRONT_L + z), A_GPR(tmp + 0), A_GPR(tmp + 1), A_C_00000000);
+	}
+	snd_emu10k1_init_stereo_onoff_control(controls + nctl++, "IEC958 Optical Raw Playback Switch", gpr, 0);
+	gpr += 2;
+	
+	A_PUT_STEREO_OUTPUT(A_EXTOUT_REAR_L, A_EXTOUT_REAR_R, playback+2 + SND_EMU10K1_PLAYBACK_CHANNELS);
+	A_PUT_OUTPUT(A_EXTOUT_CENTER, playback+4 + SND_EMU10K1_PLAYBACK_CHANNELS);
+	A_PUT_OUTPUT(A_EXTOUT_LFE, playback+5 + SND_EMU10K1_PLAYBACK_CHANNELS);
 
 	/* ADC buffer */
 	A_PUT_OUTPUT(A_EXTOUT_ADC_CAP_L, capture);
@@ -1935,7 +1964,7 @@ static int __devinit _snd_emu10k1_init_efx(emu10k1_t *emu)
 	ctl->min = 0;
 	ctl->max = 40;
 	ctl->value[0] = ctl->value[1] = 20;
-	ctl->translation = EMU10K1_GRP_TRANSLATION_BASS;
+	ctl->translation = EMU10K1_GPR_TRANSLATION_BASS;
 	ctl = &controls[i + 1];
 	ctl->id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
 	strcpy(ctl->id.name, "Tone Control - Treble");
@@ -1944,7 +1973,7 @@ static int __devinit _snd_emu10k1_init_efx(emu10k1_t *emu)
 	ctl->min = 0;
 	ctl->max = 40;
 	ctl->value[0] = ctl->value[1] = 20;
-	ctl->translation = EMU10K1_GRP_TRANSLATION_TREBLE;
+	ctl->translation = EMU10K1_GPR_TRANSLATION_TREBLE;
 
 #define BASS_GPR	0x8c
 #define TREBLE_GPR	0x96
@@ -2227,7 +2256,7 @@ static int snd_emu10k1_fx8010_info(emu10k1_t *emu, emu10k1_fx8010_info_t *info)
 static int snd_emu10k1_fx8010_ioctl(snd_hwdep_t * hw, struct file *file, unsigned int cmd, unsigned long arg)
 {
 	emu10k1_t *emu = snd_magic_cast(emu10k1_t, hw->private_data, return -ENXIO);
-	emu10k1_fx8010_info_t info;
+	emu10k1_fx8010_info_t *info;
 	emu10k1_fx8010_code_t *icode;
 	emu10k1_fx8010_pcm_t *ipcm;
 	unsigned int addr;
@@ -2235,10 +2264,18 @@ static int snd_emu10k1_fx8010_ioctl(snd_hwdep_t * hw, struct file *file, unsigne
 	
 	switch (cmd) {
 	case SNDRV_EMU10K1_IOCTL_INFO:
-		if ((res = snd_emu10k1_fx8010_info(emu, &info)) < 0)
+		info = (emu10k1_fx8010_info_t *)kmalloc(sizeof(*info), GFP_KERNEL);
+		if (!info)
+			return -ENOMEM;
+		if ((res = snd_emu10k1_fx8010_info(emu, info)) < 0) {
+			kfree(info);
 			return res;
-		if (copy_to_user((void *)arg, &info, sizeof(info)))
+		}
+		if (copy_to_user((void *)arg, info, sizeof(*info))) {
+			kfree(info);
 			return -EFAULT;
+		}
+		kfree(info);
 		return 0;
 	case SNDRV_EMU10K1_IOCTL_CODE_POKE:
 		if (!capable(CAP_SYS_ADMIN))
@@ -2271,9 +2308,13 @@ static int snd_emu10k1_fx8010_ioctl(snd_hwdep_t * hw, struct file *file, unsigne
 	case SNDRV_EMU10K1_IOCTL_PCM_POKE:
 		if (emu->audigy)
 			return -EINVAL;
-		ipcm = (emu10k1_fx8010_pcm_t *)snd_kcalloc(sizeof(*ipcm), GFP_KERNEL);
+		ipcm = (emu10k1_fx8010_pcm_t *)kmalloc(sizeof(*ipcm), GFP_KERNEL);
 		if (ipcm == NULL)
 			return -ENOMEM;
+		if (copy_from_user(ipcm, (void *)arg, sizeof(*ipcm))) {
+			kfree(ipcm);
+			return -EFAULT;
+		}
 		res = snd_emu10k1_ipcm_poke(emu, ipcm);
 		kfree(ipcm);
 		return res;
@@ -2283,6 +2324,10 @@ static int snd_emu10k1_fx8010_ioctl(snd_hwdep_t * hw, struct file *file, unsigne
 		ipcm = (emu10k1_fx8010_pcm_t *)snd_kcalloc(sizeof(*ipcm), GFP_KERNEL);
 		if (ipcm == NULL)
 			return -ENOMEM;
+		if (copy_from_user(ipcm, (void *)arg, sizeof(*ipcm))) {
+			kfree(ipcm);
+			return -EFAULT;
+		}
 		res = snd_emu10k1_ipcm_peek(emu, ipcm);
 		if (res == 0 && copy_to_user((void *)arg, ipcm, sizeof(*ipcm))) {
 			kfree(ipcm);

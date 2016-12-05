@@ -54,6 +54,7 @@ static int __init find_device_prom_node(struct pci_pbm_info *pbm,
 	    (pdev->vendor == PCI_VENDOR_ID_SUN) &&
 	    (pdev->device == PCI_DEVICE_ID_SUN_PBM ||
 	     pdev->device == PCI_DEVICE_ID_SUN_SCHIZO ||
+	     pdev->device == PCI_DEVICE_ID_SUN_TOMATILLO ||
 	     pdev->device == PCI_DEVICE_ID_SUN_SABRE ||
 	     pdev->device == PCI_DEVICE_ID_SUN_HUMMINGBIRD)) {
 		*nregs = 0;
@@ -390,7 +391,7 @@ static void __init pdev_record_assignments(struct pci_pbm_info *pbm,
 			if ((res->start >> 32) != 0UL) {
 				printk(KERN_ERR "PCI: OBP assigns out of range MEM address "
 				       "%016lx for region %ld on device %s\n",
-				       res->start, (res - &pdev->resource[0]), pdev->dev.name);
+				       res->start, (res - &pdev->resource[0]), pci_name(pdev));
 				continue;
 			}
 		}
@@ -412,7 +413,7 @@ static void __init pdev_record_assignments(struct pci_pbm_info *pbm,
 				       "[%016lx:%016lx] of device %s\n",
 				       (res - &pdev->resource[0]),
 				       res->start, res->end,
-				       pdev->dev.name);
+				       pci_name(pdev));
 			}
 		}
 	}
@@ -489,7 +490,7 @@ static void __init pdev_assign_unassigned(struct pci_pbm_info *pbm,
 		if (allocate_resource(root, res, size + 1, min, max, align, NULL, NULL) < 0) {
 			/* uh oh */
 			prom_printf("PCI: Failed to allocate resource %d for %s\n",
-				    i, pdev->dev.name);
+				    i, pci_name(pdev));
 			prom_halt();
 		}
 
@@ -685,7 +686,7 @@ static void __init pdev_fixup_irq(struct pci_dev *pdev)
 	struct pcidev_cookie *pcp = pdev->sysdata;
 	struct pci_pbm_info *pbm = pcp->pbm;
 	struct pci_controller_info *p = pbm->parent;
-	unsigned int portid = p->portid;
+	unsigned int portid = pbm->portid;
 	unsigned int prom_irq;
 	int prom_node = pcp->prom_node;
 	int err;
@@ -991,7 +992,7 @@ void pci_scan_for_target_abort(struct pci_controller_info *p,
 			pci_write_config_word(pdev, PCI_STATUS, error_bits);
 			printk("PCI%d(PBM%c): Device [%s] saw Target Abort [%016x]\n",
 			       p->index, ((pbm == &p->pbm_A) ? 'A' : 'B'),
-			       pdev->dev.name, status);
+			       pci_name(pdev), status);
 		}
 	}
 
@@ -1017,7 +1018,7 @@ void pci_scan_for_master_abort(struct pci_controller_info *p,
 			pci_write_config_word(pdev, PCI_STATUS, error_bits);
 			printk("PCI%d(PBM%c): Device [%s] received Master Abort [%016x]\n",
 			       p->index, ((pbm == &p->pbm_A) ? 'A' : 'B'),
-			       pdev->dev.name, status);
+			       pci_name(pdev), status);
 		}
 	}
 
@@ -1044,7 +1045,7 @@ void pci_scan_for_parity_error(struct pci_controller_info *p,
 			pci_write_config_word(pdev, PCI_STATUS, error_bits);
 			printk("PCI%d(PBM%c): Device [%s] saw Parity Error [%016x]\n",
 			       p->index, ((pbm == &p->pbm_A) ? 'A' : 'B'),
-			       pdev->dev.name, status);
+			       pci_name(pdev), status);
 		}
 	}
 

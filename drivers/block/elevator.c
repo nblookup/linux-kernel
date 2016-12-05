@@ -29,7 +29,6 @@
 #include <linux/blkdev.h>
 #include <linux/elevator.h>
 #include <linux/bio.h>
-#include <linux/blk.h>
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -82,75 +81,9 @@ inline int elv_try_merge(struct request *__rq, struct bio *bio)
 inline int elv_try_last_merge(request_queue_t *q, struct bio *bio)
 {
 	if (q->last_merge)
-		return elv_try_merge(list_entry_rq(q->last_merge), bio);
+		return elv_try_merge(q->last_merge, bio);
 
 	return ELEVATOR_NO_MERGE;
-}
-
-/*
- * elevator noop
- *
- * See if we can find a request that this buffer can be coalesced with.
- */
-int elevator_noop_merge(request_queue_t *q, struct list_head **insert,
-			struct bio *bio)
-{
-	struct list_head *entry = &q->queue_head;
-	struct request *__rq;
-	int ret;
-
-	if ((ret = elv_try_last_merge(q, bio))) {
-		*insert = q->last_merge;
-		return ret;
-	}
-
-	while ((entry = entry->prev) != &q->queue_head) {
-		__rq = list_entry_rq(entry);
-
-		if (__rq->flags & (REQ_SOFTBARRIER | REQ_HARDBARRIER))
-			break;
-		else if (__rq->flags & REQ_STARTED)
-			break;
-
-		if (!blk_fs_request(__rq))
-			continue;
-
-		if ((ret = elv_try_merge(__rq, bio))) {
-			*insert = &__rq->queuelist;
-			q->last_merge = &__rq->queuelist;
-			return ret;
-		}
-	}
-
-	return ELEVATOR_NO_MERGE;
-}
-
-void elevator_noop_merge_requests(request_queue_t *q, struct request *req,
-				  struct request *next)
-{
-	list_del_init(&next->queuelist);
-}
-
-void elevator_noop_add_request(request_queue_t *q, struct request *rq,
-			       struct list_head *insert_here)
-{
-	list_add_tail(&rq->queuelist, &q->queue_head);
-
-	/*
-	 * new merges must not precede this barrier
-	 */
-	if (rq->flags & REQ_HARDBARRIER)
-		q->last_merge = NULL;
-	else if (!q->last_merge)
-		q->last_merge = &rq->queuelist;
-}
-
-struct request *elevator_noop_next_request(request_queue_t *q)
-{
-	if (!list_empty(&q->queue_head))
-		return list_entry_rq(q->queue_head.next);
-
-	return NULL;
 }
 
 /*
@@ -184,12 +117,12 @@ int elevator_global_init(void)
 	return 0;
 }
 
-int elv_merge(request_queue_t *q, struct list_head **entry, struct bio *bio)
+int elv_merge(request_queue_t *q, struct request **req, struct bio *bio)
 {
 	elevator_t *e = &q->elevator;
 
 	if (e->elevator_merge_fn)
-		return e->elevator_merge_fn(q, entry, bio);
+		return e->elevator_merge_fn(q, req, bio);
 
 	return ELEVATOR_NO_MERGE;
 }
@@ -207,33 +140,41 @@ void elv_merge_requests(request_queue_t *q, struct request *rq,
 {
 	elevator_t *e = &q->elevator;
 
-	if (q->last_merge == &next->queuelist)
+	if (q->last_merge == next)
 		q->last_merge = NULL;
 
 	if (e->elevator_merge_req_fn)
 		e->elevator_merge_req_fn(q, rq, next);
 }
 
-void __elv_add_request(request_queue_t *q, struct request *rq, int at_end,
+void elv_requeue_request(request_queue_t *q, struct request *rq)
+{
+	/*
+	 * if iosched has an explicit requeue hook, then use that. otherwise
+	 * just put the request at the front of the queue
+	 */
+	if (q->elevator.elevator_requeue_req_fn)
+		q->elevator.elevator_requeue_req_fn(q, rq);
+	else
+		__elv_add_request(q, rq, ELEVATOR_INSERT_FRONT, 0);
+}
+
+void __elv_add_request(request_queue_t *q, struct request *rq, int where,
 		       int plug)
 {
-	struct list_head *insert = &q->queue_head;
-
-	if (at_end)
-		insert = insert->prev;
 	if (plug)
 		blk_plug_device(q);
 
-	q->elevator.elevator_add_req_fn(q, rq, insert);
+	q->elevator.elevator_add_req_fn(q, rq, where);
 }
 
-void elv_add_request(request_queue_t *q, struct request *rq, int at_end,
+void elv_add_request(request_queue_t *q, struct request *rq, int where,
 		     int plug)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(q->queue_lock, flags);
-	__elv_add_request(q, rq, at_end, plug);
+	__elv_add_request(q, rq, where, plug);
 	spin_unlock_irqrestore(q->queue_lock, flags);
 }
 
@@ -255,7 +196,7 @@ struct request *elv_next_request(request_queue_t *q)
 		 */
 		rq->flags |= REQ_STARTED;
 
-		if (&rq->queuelist == q->last_merge)
+		if (rq == q->last_merge)
 			q->last_merge = NULL;
 
 		if ((rq->flags & REQ_DONTPREP) || !q->prep_rq_fn)
@@ -293,7 +234,7 @@ void elv_remove_request(request_queue_t *q, struct request *rq)
 	 * deleted without ever being given to driver (merged with another
 	 * request).
 	 */
-	if (&rq->queuelist == q->last_merge)
+	if (rq == q->last_merge)
 		q->last_merge = NULL;
 
 	if (e->elevator_remove_req_fn)
@@ -404,19 +345,11 @@ void elv_unregister_queue(struct request_queue *q)
 	}
 }
 
-elevator_t elevator_noop = {
-	.elevator_merge_fn		= elevator_noop_merge,
-	.elevator_merge_req_fn		= elevator_noop_merge_requests,
-	.elevator_next_req_fn		= elevator_noop_next_request,
-	.elevator_add_req_fn		= elevator_noop_add_request,
-};
-
 module_init(elevator_global_init);
-
-EXPORT_SYMBOL(elevator_noop);
 
 EXPORT_SYMBOL(elv_add_request);
 EXPORT_SYMBOL(__elv_add_request);
+EXPORT_SYMBOL(elv_requeue_request);
 EXPORT_SYMBOL(elv_next_request);
 EXPORT_SYMBOL(elv_remove_request);
 EXPORT_SYMBOL(elv_queue_empty);

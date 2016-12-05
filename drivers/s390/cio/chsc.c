@@ -1,7 +1,7 @@
 /*
  *  drivers/s390/cio/chsc.c
  *   S/390 common I/O routines -- channel subsystem call
- *   $Revision: 1.73 $
+ *   $Revision: 1.78 $
  *
  *    Copyright (C) 1999-2002 IBM Deutschland Entwicklung GmbH,
  *			      IBM Corporation
@@ -206,6 +206,7 @@ chsc_get_sch_descriptions(void)
 	if (!page)
 		return -ENOMEM;
 
+	err = 0;
 	for (irq = 0; irq <= highest_subchannel; irq++) {
 		/*
 		 * retrieve information for each sch
@@ -222,13 +223,14 @@ chsc_get_sch_descriptions(void)
 				       "not work\n", err);
 				cio_chsc_err_msg = 1;
 			}
-			return err;
+			goto out;
 		}
 		clear_page(page);
 	}
 	cio_chsc_desc_avail = 1;
+out:
 	free_page((unsigned long)page);
-	return 0;
+	return err;
 }
 
 __initcall(chsc_get_sch_descriptions);
@@ -428,7 +430,7 @@ s390_process_res_acc (u8 chpid, __u16 fla, u32 fla_mask)
 			ret = css_probe_device(irq);
 			if (ret == -ENXIO)
 				/* We're through */
-				return;
+				break;
 			continue;
 		}
 	
@@ -841,6 +843,12 @@ chp_status_write(struct device *dev, const char *buf, size_t count)
 
 static DEVICE_ATTR(status, 0644, chp_status_show, chp_status_write);
 
+
+static void
+chp_release(struct device *dev)
+{
+}
+
 /*
  * Entries for chpids on the system bus.
  * This replaces /proc/chpids.
@@ -861,11 +869,11 @@ new_channel_path(int chpid, int status)
 	/* fill in status, etc. */
 	chp->id = chpid;
 	chp->state = status;
-	chp->dev.parent = &css_bus_device;
-
-	snprintf(chp->dev.name, DEVICE_NAME_SIZE,
-		 "channel path %x", chpid);
-	snprintf(chp->dev.bus_id, DEVICE_ID_SIZE, "chp%x", chpid);
+	chp->dev = (struct device) {
+		.parent  = &css_bus_device,
+		.release = chp_release,
+	};
+	snprintf(chp->dev.bus_id, BUS_ID_SIZE, "chp0.%x", chpid);
 
 	/* make it known to the system */
 	ret = device_register(&chp->dev);

@@ -36,11 +36,13 @@ int cpufreq_unregister_notifier(struct notifier_block *nb, unsigned int list);
 #define CPUFREQ_POLICY_NOTIFIER		(1)
 
 
-/********************** cpufreq policy notifiers *********************/
+/* if (cpufreq_driver->target) exists, the ->governor decides what frequency
+ * within the limits is used. If (cpufreq_driver->setpolicy> exists, these
+ * two generic policies are available:
+ */
 
 #define CPUFREQ_POLICY_POWERSAVE	(1)
 #define CPUFREQ_POLICY_PERFORMANCE	(2)
-#define CPUFREQ_POLICY_GOVERNOR		(3)
 
 /* Frequency values here are CPU kHz so that hardware which doesn't run 
  * with some frequencies can complain without having to guess what per 
@@ -58,6 +60,13 @@ struct cpufreq_cpuinfo {
 	unsigned int		transition_latency; /* in 10^(-9) s */
 };
 
+struct cpufreq_real_policy {
+	unsigned int		min;    /* in kHz */
+	unsigned int		max;    /* in kHz */
+        unsigned int		policy; /* see above */
+	struct cpufreq_governor	*governor; /* see below */
+};
+
 struct cpufreq_policy {
 	unsigned int		cpu;    /* cpu nr */
 	struct cpufreq_cpuinfo	cpuinfo;/* see above */
@@ -71,6 +80,8 @@ struct cpufreq_policy {
 
  	struct semaphore	lock;   /* CPU ->setpolicy or ->target may
 					   only be called once a time */
+
+	struct cpufreq_real_policy	user_policy;
 
 	struct kobject		kobj;
 	struct completion	kobj_unregister;
@@ -137,15 +148,20 @@ struct cpufreq_governor {
 
 /* pass a target to the cpufreq driver 
  */
-inline int cpufreq_driver_target(struct cpufreq_policy *policy,
+extern int cpufreq_driver_target(struct cpufreq_policy *policy,
 				 unsigned int target_freq,
 				 unsigned int relation);
+extern int __cpufreq_driver_target(struct cpufreq_policy *policy,
+				   unsigned int target_freq,
+				   unsigned int relation);
+
 
 /* pass an event to the cpufreq governor */
 int cpufreq_governor(unsigned int cpu, unsigned int event);
 
 int cpufreq_register_governor(struct cpufreq_governor *governor);
 void cpufreq_unregister_governor(struct cpufreq_governor *governor);
+
 
 /*********************************************************************
  *                      CPUFREQ DRIVER INTERFACE                     *
@@ -160,8 +176,6 @@ struct cpufreq_driver {
 	struct module           *owner;
 	char			name[CPUFREQ_NAME_LEN];
 
-	struct cpufreq_policy	*policy;
-
 	/* needed by all drivers */
 	int	(*init)		(struct cpufreq_policy *policy);
 	int	(*verify)	(struct cpufreq_policy *policy);
@@ -174,6 +188,7 @@ struct cpufreq_driver {
 
 	/* optional */
 	int	(*exit)		(struct cpufreq_policy *policy);
+	int	(*resume)	(struct cpufreq_policy *policy);
 	struct freq_attr	**attr;
 };
 
@@ -211,6 +226,7 @@ struct freq_attr {
  *********************************************************************/
 int cpufreq_set_policy(struct cpufreq_policy *policy);
 int cpufreq_get_policy(struct cpufreq_policy *policy, unsigned int cpu);
+int cpufreq_update_policy(unsigned int cpu);
 
 /* the proc_intf.c needs this */
 int cpufreq_parse_governor (char *str_governor, unsigned int *policy, struct cpufreq_governor **governor);
@@ -219,7 +235,6 @@ int cpufreq_parse_governor (char *str_governor, unsigned int *policy, struct cpu
 /*********************************************************************
  *                      CPUFREQ USERSPACE GOVERNOR                   *
  *********************************************************************/
-extern struct cpufreq_governor cpufreq_gov_userspace;
 int cpufreq_gov_userspace_init(void);
 
 int cpufreq_setmax(unsigned int cpu);
@@ -276,6 +291,19 @@ enum {
 
 #endif /* CONFIG_CPU_FREQ_GOV_USERSPACE */
 
+
+/*********************************************************************
+ *                       CPUFREQ DEFAULT GOVERNOR                    *
+ *********************************************************************/
+
+
+#ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_PERFORMANCE
+extern struct cpufreq_governor cpufreq_gov_performance;
+#define CPUFREQ_DEFAULT_GOVERNOR	&cpufreq_gov_performance
+#elif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_USERSPACE)
+extern struct cpufreq_governor cpufreq_gov_userspace;
+#define CPUFREQ_DEFAULT_GOVERNOR	&cpufreq_gov_userspace
+#endif
 
 /*********************************************************************
  *                     FREQUENCY TABLE HELPERS                       *

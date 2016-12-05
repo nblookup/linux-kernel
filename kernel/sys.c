@@ -55,6 +55,11 @@
 int overflowuid = DEFAULT_OVERFLOWUID;
 int overflowgid = DEFAULT_OVERFLOWGID;
 
+#ifdef CONFIG_UID16
+EXPORT_SYMBOL(overflowuid);
+EXPORT_SYMBOL(overflowgid);
+#endif
+
 /*
  * the same as above, but for filesystems which can only store a 16-bit
  * UID and GID. as such, this is needed on all architectures
@@ -63,14 +68,15 @@ int overflowgid = DEFAULT_OVERFLOWGID;
 int fs_overflowuid = DEFAULT_FS_OVERFLOWUID;
 int fs_overflowgid = DEFAULT_FS_OVERFLOWUID;
 
+EXPORT_SYMBOL(fs_overflowuid);
+EXPORT_SYMBOL(fs_overflowgid);
+
 /*
  * this indicates whether you can reboot with ctrl-alt-del: the default is yes
  */
 
 int C_A_D = 1;
 int cad_pid = 1;
-
-extern int system_running;
 
 /*
  *	Notifier list for kernel code which wants to be called
@@ -106,6 +112,8 @@ int notifier_chain_register(struct notifier_block **list, struct notifier_block 
 	return 0;
 }
 
+EXPORT_SYMBOL(notifier_chain_register);
+
 /**
  *	notifier_chain_unregister - Remove notifier from a notifier chain
  *	@nl: Pointer to root list pointer
@@ -132,6 +140,8 @@ int notifier_chain_unregister(struct notifier_block **nl, struct notifier_block 
 	write_unlock(&notifier_lock);
 	return -ENOENT;
 }
+
+EXPORT_SYMBOL(notifier_chain_unregister);
 
 /**
  *	notifier_call_chain - Call functions in a notifier chain
@@ -166,6 +176,8 @@ int notifier_call_chain(struct notifier_block **n, unsigned long val, void *v)
 	return ret;
 }
 
+EXPORT_SYMBOL(notifier_call_chain);
+
 /**
  *	register_reboot_notifier - Register function to be called at reboot time
  *	@nb: Info about notifier function to be called
@@ -182,6 +194,8 @@ int register_reboot_notifier(struct notifier_block * nb)
 	return notifier_chain_register(&reboot_notifier_list, nb);
 }
 
+EXPORT_SYMBOL(register_reboot_notifier);
+
 /**
  *	unregister_reboot_notifier - Unregister previously registered reboot notifier
  *	@nb: Hook to be unregistered
@@ -196,6 +210,8 @@ int unregister_reboot_notifier(struct notifier_block * nb)
 {
 	return notifier_chain_unregister(&reboot_notifier_list, nb);
 }
+
+EXPORT_SYMBOL(unregister_reboot_notifier);
 
 asmlinkage long sys_ni_syscall(void)
 {
@@ -233,6 +249,8 @@ cond_syscall(compat_sys_futex)
 cond_syscall(sys_epoll_create)
 cond_syscall(sys_epoll_ctl)
 cond_syscall(sys_epoll_wait)
+cond_syscall(sys_pciconfig_read)
+cond_syscall(sys_pciconfig_write)
 
 static int set_one_prio(struct task_struct *p, int niceval, int error)
 {
@@ -288,7 +306,7 @@ asmlinkage long sys_setpriority(int which, int who, int niceval)
 			break;
 		case PRIO_PGRP:
 			if (!who)
-				who = current->pgrp;
+				who = process_group(current);
 			for_each_task_pid(who, PIDTYPE_PGID, p, l, pid)
 				error = set_one_prio(p, niceval, error);
 			break;
@@ -344,7 +362,7 @@ asmlinkage long sys_getpriority(int which, int who)
 			break;
 		case PRIO_PGRP:
 			if (!who)
-				who = current->pgrp;
+				who = process_group(current);
 			for_each_task_pid(who, PIDTYPE_PGID, p, l, pid) {
 				niceval = 20 - task_nice(p);
 				if (niceval > retval)
@@ -457,7 +475,7 @@ asmlinkage long sys_reboot(int magic1, int magic2, unsigned int cmd, void __user
 		if (!software_suspend_enabled) {
 			unlock_kernel();
 			return -EAGAIN;
-		}		
+		}
 		software_suspend();
 		do_exit(0);
 		break;
@@ -599,6 +617,14 @@ static int set_user(uid_t new_ruid, int dumpclear)
 	new_user = alloc_uid(new_ruid);
 	if (!new_user)
 		return -EAGAIN;
+
+	if (atomic_read(&new_user->processes) >=
+				current->rlim[RLIMIT_NPROC].rlim_cur &&
+			new_user != &root_user) {
+		free_uid(new_user);
+		return -EAGAIN;
+	}
+
 	switch_uid(new_user);
 
 	if(dumpclear)
@@ -972,11 +998,12 @@ ok_pgid:
 	if (err)
 		goto out;
 
-	if (p->pgrp != pgid) {
+	if (process_group(p) != pgid) {
 		detach_pid(p, PIDTYPE_PGID);
-		p->pgrp = pgid;
+		p->group_leader->__pgrp = pgid;
 		attach_pid(p, PIDTYPE_PGID, pgid);
 	}
+
 	err = 0;
 out:
 	/* All paths lead to here, thus we are safe. -DaveM */
@@ -987,7 +1014,7 @@ out:
 asmlinkage long sys_getpgid(pid_t pid)
 {
 	if (!pid) {
-		return current->pgrp;
+		return process_group(current);
 	} else {
 		int retval;
 		struct task_struct *p;
@@ -999,7 +1026,7 @@ asmlinkage long sys_getpgid(pid_t pid)
 		if (p) {
 			retval = security_task_getpgid(p);
 			if (!retval)
-				retval = p->pgrp;
+				retval = process_group(p);
 		}
 		read_unlock(&tasklist_lock);
 		return retval;
@@ -1009,7 +1036,7 @@ asmlinkage long sys_getpgid(pid_t pid)
 asmlinkage long sys_getpgrp(void)
 {
 	/* SMP - assuming writes are word atomic this is fine */
-	return current->pgrp;
+	return process_group(current);
 }
 
 asmlinkage long sys_getsid(pid_t pid)
@@ -1052,7 +1079,7 @@ asmlinkage long sys_setsid(void)
 	__set_special_pids(current->pid, current->pid);
 	current->tty = NULL;
 	current->tty_old_pgrp = 0;
-	err = current->pgrp;
+	err = process_group(current);
 out:
 	write_unlock_irq(&tasklist_lock);
 	return err;
@@ -1133,6 +1160,8 @@ int in_group_p(gid_t grp)
 	return retval;
 }
 
+EXPORT_SYMBOL(in_group_p);
+
 int in_egroup_p(gid_t grp)
 {
 	int retval = 1;
@@ -1141,7 +1170,11 @@ int in_egroup_p(gid_t grp)
 	return retval;
 }
 
+EXPORT_SYMBOL(in_egroup_p);
+
 DECLARE_RWSEM(uts_sem);
+
+EXPORT_SYMBOL(uts_sem);
 
 asmlinkage long sys_newuname(struct new_utsname __user * name)
 {
@@ -1157,6 +1190,7 @@ asmlinkage long sys_newuname(struct new_utsname __user * name)
 asmlinkage long sys_sethostname(char __user *name, int len)
 {
 	int errno;
+	char tmp[__NEW_UTS_LEN];
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -1164,7 +1198,8 @@ asmlinkage long sys_sethostname(char __user *name, int len)
 		return -EINVAL;
 	down_write(&uts_sem);
 	errno = -EFAULT;
-	if (!copy_from_user(system_utsname.nodename, name, len)) {
+	if (!copy_from_user(tmp, name, len)) {
+		memcpy(system_utsname.nodename, tmp, len);
 		system_utsname.nodename[len] = 0;
 		errno = 0;
 	}
@@ -1196,6 +1231,7 @@ asmlinkage long sys_gethostname(char __user *name, int len)
 asmlinkage long sys_setdomainname(char __user *name, int len)
 {
 	int errno;
+	char tmp[__NEW_UTS_LEN];
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
@@ -1204,9 +1240,10 @@ asmlinkage long sys_setdomainname(char __user *name, int len)
 
 	down_write(&uts_sem);
 	errno = -EFAULT;
-	if (!copy_from_user(system_utsname.domainname, name, len)) {
-		errno = 0;
+	if (!copy_from_user(tmp, name, len)) {
+		memcpy(system_utsname.domainname, tmp, len);
 		system_utsname.domainname[len] = 0;
+		errno = 0;
 	}
 	up_write(&uts_sem);
 	return errno;
@@ -1298,6 +1335,8 @@ int getrusage(struct task_struct *p, int who, struct rusage __user *ru)
 		case RUSAGE_SELF:
 			jiffies_to_timeval(p->utime, &r.ru_utime);
 			jiffies_to_timeval(p->stime, &r.ru_stime);
+			r.ru_nvcsw = p->nvcsw;
+			r.ru_nivcsw = p->nivcsw;
 			r.ru_minflt = p->min_flt;
 			r.ru_majflt = p->maj_flt;
 			r.ru_nswap = p->nswap;
@@ -1305,6 +1344,8 @@ int getrusage(struct task_struct *p, int who, struct rusage __user *ru)
 		case RUSAGE_CHILDREN:
 			jiffies_to_timeval(p->cutime, &r.ru_utime);
 			jiffies_to_timeval(p->cstime, &r.ru_stime);
+			r.ru_nvcsw = p->cnvcsw;
+			r.ru_nivcsw = p->cnivcsw;
 			r.ru_minflt = p->cmin_flt;
 			r.ru_majflt = p->cmaj_flt;
 			r.ru_nswap = p->cnswap;
@@ -1312,6 +1353,8 @@ int getrusage(struct task_struct *p, int who, struct rusage __user *ru)
 		default:
 			jiffies_to_timeval(p->utime + p->cutime, &r.ru_utime);
 			jiffies_to_timeval(p->stime + p->cstime, &r.ru_stime);
+			r.ru_nvcsw = p->nvcsw + p->cnvcsw;
+			r.ru_nivcsw = p->nivcsw + p->cnivcsw;
 			r.ru_minflt = p->min_flt + p->cmin_flt;
 			r.ru_majflt = p->maj_flt + p->cmaj_flt;
 			r.ru_nswap = p->nswap + p->cnswap;
@@ -1385,7 +1428,15 @@ asmlinkage long sys_prctl(int option, unsigned long arg2, unsigned long arg3,
 		case PR_GET_FPEXC:
 			error = GET_FPEXC_CTL(current, arg2);
 			break;
-
+		case PR_GET_TIMING:
+			error = PR_TIMING_STATISTICAL;
+			break;
+		case PR_SET_TIMING:
+			if (arg2 == PR_TIMING_STATISTICAL)
+				error = 0;
+			else
+				error = -EINVAL;
+			break;
 
 		case PR_GET_KEEPCAPS:
 			if (current->keep_capabilities)
@@ -1404,11 +1455,3 @@ asmlinkage long sys_prctl(int option, unsigned long arg2, unsigned long arg3,
 	}
 	return error;
 }
-
-EXPORT_SYMBOL(notifier_chain_register);
-EXPORT_SYMBOL(notifier_chain_unregister);
-EXPORT_SYMBOL(notifier_call_chain);
-EXPORT_SYMBOL(register_reboot_notifier);
-EXPORT_SYMBOL(unregister_reboot_notifier);
-EXPORT_SYMBOL(in_group_p);
-EXPORT_SYMBOL(in_egroup_p);

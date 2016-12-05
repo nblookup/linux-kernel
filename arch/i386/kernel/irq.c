@@ -19,6 +19,7 @@
 
 #include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/ioport.h>
@@ -44,8 +45,6 @@
 #include <asm/delay.h>
 #include <asm/desc.h>
 #include <asm/irq.h>
-
-
 
 /*
  * Linux has a controller-independent x86 interrupt architecture.
@@ -356,8 +355,10 @@ inline void disable_irq_nosync(unsigned int irq)
  
 void disable_irq(unsigned int irq)
 {
+	irq_desc_t *desc = irq_desc + irq;
 	disable_irq_nosync(irq);
-	synchronize_irq(irq);
+	if (desc->action)
+		synchronize_irq(irq);
 }
 
 /**
@@ -581,6 +582,8 @@ int request_irq(unsigned int irq,
 	return retval;
 }
 
+EXPORT_SYMBOL(request_irq);
+
 /**
  *	free_irq - free an interrupt
  *	@irq: Interrupt line to free
@@ -634,6 +637,8 @@ void free_irq(unsigned int irq, void *dev_id)
 		return;
 	}
 }
+
+EXPORT_SYMBOL(free_irq);
 
 /*
  * IRQ autodetection code..
@@ -727,6 +732,8 @@ unsigned long probe_irq_on(void)
 
 	return val;
 }
+
+EXPORT_SYMBOL(probe_irq_on);
 
 /*
  * Return a mask of triggered interrupts (this
@@ -826,6 +833,8 @@ int probe_irq_off(unsigned long val)
 	return irq_found;
 }
 
+EXPORT_SYMBOL(probe_irq_off);
+
 /* this was setup_x86_irq but it seems pretty generic */
 int setup_irq(unsigned int irq, struct irqaction * new)
 {
@@ -889,13 +898,13 @@ int setup_irq(unsigned int irq, struct irqaction * new)
 static struct proc_dir_entry * root_irq_dir;
 static struct proc_dir_entry * irq_dir [NR_IRQS];
 
-#define HEX_DIGITS 8
+#define HEX_DIGITS (2*sizeof(cpumask_t))
 
-static unsigned int parse_hex_value (const char __user *buffer,
-		unsigned long count, unsigned long *ret)
+static unsigned int parse_hex_value(const char __user *buffer,
+		unsigned long count, cpumask_t *ret)
 {
-	unsigned char hexnum [HEX_DIGITS];
-	unsigned long value;
+	unsigned char hexnum[HEX_DIGITS];
+	cpumask_t value = CPU_MASK_NONE;
 	int i;
 
 	if (!count)
@@ -906,13 +915,13 @@ static unsigned int parse_hex_value (const char __user *buffer,
 		return -EFAULT;
 
 	/*
-	 * Parse the first 8 characters as a hex string, any non-hex char
+	 * Parse the first HEX_DIGITS characters as a hex string, any non-hex char
 	 * is end-of-string. '00e1', 'e1', '00E1', 'E1' are all the same.
 	 */
-	value = 0;
 
 	for (i = 0; i < count; i++) {
 		unsigned int c = hexnum[i];
+		int k;
 
 		switch (c) {
 			case '0' ... '9': c -= '0'; break;
@@ -921,7 +930,10 @@ static unsigned int parse_hex_value (const char __user *buffer,
 		default:
 			goto out;
 		}
-		value = (value << 4) | c;
+		cpus_shift_left(value, value, 4);
+		for (k = 0; k < 4; ++k)
+			if (test_bit(k, (unsigned long *)&c))
+				cpu_set(k, value);
 	}
 out:
 	*ret = value;
@@ -930,38 +942,55 @@ out:
 
 #ifdef CONFIG_SMP
 
-static struct proc_dir_entry * smp_affinity_entry [NR_IRQS];
+static struct proc_dir_entry *smp_affinity_entry[NR_IRQS];
 
-unsigned long irq_affinity [NR_IRQS] = { [0 ... NR_IRQS-1] = ~0UL };
-static int irq_affinity_read_proc (char *page, char **start, off_t off,
+cpumask_t irq_affinity[NR_IRQS] = { [0 ... NR_IRQS-1] = CPU_MASK_ALL };
+
+static int irq_affinity_read_proc(char *page, char **start, off_t off,
 			int count, int *eof, void *data)
 {
+	int k, len;
+	cpumask_t tmp = irq_affinity[(long)data];
+
 	if (count < HEX_DIGITS+1)
 		return -EINVAL;
-	return sprintf (page, "%08lx\n", irq_affinity[(long)data]);
+
+	len = 0;
+	for (k = 0; k < sizeof(cpumask_t)/sizeof(u16); ++k) {
+		int j = sprintf(page, "%04hx", (u16)cpus_coerce(tmp));
+		len += j;
+		page += j;
+		cpus_shift_right(tmp, tmp, 16);
+	}
+	len += sprintf(page, "\n");
+	return len;
 }
 
-static int irq_affinity_write_proc (struct file *file, const char __user *buffer,
+static int irq_affinity_write_proc(struct file *file, const char __user *buffer,
 					unsigned long count, void *data)
 {
-	int irq = (long) data, full_count = count, err;
-	unsigned long new_value;
+	int irq = (long)data, full_count = count, err;
+	cpumask_t new_value, tmp;
 
 	if (!irq_desc[irq].handler->set_affinity)
 		return -EIO;
 
 	err = parse_hex_value(buffer, count, &new_value);
+	if (err)
+		return err;
 
 	/*
 	 * Do not allow disabling IRQs completely - it's a too easy
 	 * way to make the system unusable accidentally :-) At least
 	 * one online CPU still has to be targeted.
 	 */
-	if (!(new_value & cpu_online_map))
+	cpus_and(tmp, new_value, cpu_online_map);
+	if (cpus_empty(tmp))
 		return -EINVAL;
 
 	irq_affinity[irq] = new_value;
-	irq_desc[irq].handler->set_affinity(irq, new_value);
+	irq_desc[irq].handler->set_affinity(irq,
+					cpumask_of_cpu(first_cpu(new_value)));
 
 	return full_count;
 }
@@ -980,8 +1009,9 @@ static int prof_cpu_mask_read_proc (char *page, char **start, off_t off,
 static int prof_cpu_mask_write_proc (struct file *file, const char __user *buffer,
 					unsigned long count, void *data)
 {
-	unsigned long *mask = (unsigned long *) data, full_count = count, err;
-	unsigned long new_value;
+	cpumask_t *mask = (cpumask_t *)data;
+	unsigned long full_count = count, err;
+	cpumask_t new_value;
 
 	err = parse_hex_value(buffer, count, &new_value);
 	if (err)

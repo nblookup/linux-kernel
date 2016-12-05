@@ -23,12 +23,12 @@
 #include <linux/slab.h>
 #include <linux/proc_fs.h>
 #include <linux/errno.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/seq_file.h>
 #include <asm/uaccess.h>
 
+#include <scsi/scsi_host.h>
 #include "scsi.h"
-#include "hosts.h"
 
 #include "scsi_priv.h"
 #include "scsi_logging.h"
@@ -37,10 +37,10 @@
 /* 4K page size, but our output routines, use some slack for overruns */
 #define PROC_BLOCK_SIZE (3*1024)
 
-/* XXX: this shouldn't really be exposed to drivers. */
-struct proc_dir_entry *proc_scsi;
-EXPORT_SYMBOL(proc_scsi);
+static struct proc_dir_entry *proc_scsi;
 
+/* Protect sht->present and sht->proc_dir */
+static DECLARE_MUTEX(global_host_template_sem);
 
 static int proc_scsi_read(char *buffer, char **start, off_t offset,
 			  int length, int *eof, void *data)
@@ -77,24 +77,44 @@ out:
 	return ret;
 }
 
+void scsi_proc_hostdir_add(struct scsi_host_template *sht)
+{
+	if (!sht->proc_info)
+		return;
+
+	down(&global_host_template_sem);
+	if (!sht->present++) {
+		sht->proc_dir = proc_mkdir(sht->proc_name, proc_scsi);
+        	if (!sht->proc_dir)
+			printk(KERN_ERR "%s: proc_mkdir failed for %s\n",
+			       __FUNCTION__, sht->proc_name);
+		else
+			sht->proc_dir->owner = sht->module;
+	}
+	up(&global_host_template_sem);
+}
+
+void scsi_proc_hostdir_rm(struct scsi_host_template *sht)
+{
+	if (!sht->proc_info)
+		return;
+
+	down(&global_host_template_sem);
+	if (!--sht->present && sht->proc_dir) {
+		remove_proc_entry(sht->proc_name, proc_scsi);
+		sht->proc_dir = NULL;
+	}
+	up(&global_host_template_sem);
+}
+
 void scsi_proc_host_add(struct Scsi_Host *shost)
 {
 	struct scsi_host_template *sht = shost->hostt;
 	struct proc_dir_entry *p;
 	char name[10];
 
-	if (!sht->proc_info)
+	if (!sht->proc_dir)
 		return;
-
-	if (!sht->proc_dir) {
-		sht->proc_dir = proc_mkdir(sht->proc_name, proc_scsi);
-        	if (!sht->proc_dir) {
-			printk(KERN_ERR "%s: proc_mkdir failed for %s\n",
-			       __FUNCTION__, sht->proc_name);
-			return;
-		}
-		sht->proc_dir->owner = sht->module;
-	}
 
 	sprintf(name,"%d", shost->host_no);
 	p = create_proc_read_entry(name, S_IFREG | S_IRUGO | S_IWUSR,
@@ -107,20 +127,18 @@ void scsi_proc_host_add(struct Scsi_Host *shost)
 	} 
 
 	p->write_proc = proc_scsi_write_proc;
-	p->owner = shost->hostt->module;
+	p->owner = sht->module;
 }
 
 void scsi_proc_host_rm(struct Scsi_Host *shost)
 {
-	struct scsi_host_template *sht = shost->hostt;
 	char name[10];
 
-	if (sht->proc_info) {
-		sprintf(name,"%d", shost->host_no);
-		remove_proc_entry(name, sht->proc_dir);
-		if (!sht->present)
-			remove_proc_entry(sht->proc_name, proc_scsi);
-	}
+	if (!shost->hostt->proc_dir)
+		return;
+
+	sprintf(name,"%d", shost->host_no);
+	remove_proc_entry(name, shost->hostt->proc_dir);
 }
 
 static int proc_print_scsidevice(struct device *dev, void *data)
@@ -174,21 +192,13 @@ static int proc_print_scsidevice(struct device *dev, void *data)
 static int scsi_add_single_device(uint host, uint channel, uint id, uint lun)
 {
 	struct Scsi_Host *shost;
-	struct scsi_device *sdev;
-	int error = -ENODEV;
+	int error = -ENXIO;
 
 	shost = scsi_host_lookup(host);
-	if (!shost)
-		return -ENODEV;
+	if (IS_ERR(shost))
+		return PTR_ERR(shost);
 
-	if (!scsi_find_device(shost, channel, id, lun)) {
-		sdev = scsi_add_device(shost, channel, id, lun);
-		if (IS_ERR(sdev))
-			error = PTR_ERR(sdev);
-		else
-			error = 0;
-	}
-
+	error = scsi_scan_host_selected(shost, channel, id, lun, 1);
 	scsi_host_put(shost);
 	return error;
 }
@@ -197,19 +207,18 @@ static int scsi_remove_single_device(uint host, uint channel, uint id, uint lun)
 {
 	struct scsi_device *sdev;
 	struct Scsi_Host *shost;
-	int error = -ENODEV;
+	int error = -ENXIO;
 
 	shost = scsi_host_lookup(host);
-	if (!shost)
-		return -ENODEV;
-	sdev = scsi_find_device(shost, channel, id, lun);
-	if (!sdev)
-		goto out;
-	if (sdev->access_count)
-		goto out;
+	if (IS_ERR(shost))
+		return PTR_ERR(shost);
+	sdev = scsi_device_lookup(shost, channel, id, lun);
+	if (sdev) {
+		scsi_remove_device(sdev);
+		scsi_device_put(sdev);
+		error = 0;
+	}
 
-	error = scsi_remove_device(sdev);
-out:
 	scsi_host_put(shost);
 	return error;
 }
@@ -221,106 +230,28 @@ static ssize_t proc_scsi_write(struct file *file, const char __user *buf,
 	char *buffer, *p;
 	int err;
 
-	if (!buf || length>PAGE_SIZE)
+	if (!buf || length > PAGE_SIZE)
 		return -EINVAL;
 
 	buffer = (char *)__get_free_page(GFP_KERNEL);
 	if (!buffer)
 		return -ENOMEM;
-	if (copy_from_user(buffer, buf, length)) {
-		err =-EFAULT;
+
+	err = -EFAULT;
+	if (copy_from_user(buffer, buf, length))
 		goto out;
-	}
 
 	err = -EINVAL;
-
 	if (length < PAGE_SIZE)
 		buffer[length] = '\0';
 	else if (buffer[PAGE_SIZE-1])
 		goto out;
 
-	if (length < 11 || strncmp("scsi", buffer, 4))
-		goto out;
-
-#ifdef CONFIG_SCSI_LOGGING
-	/*
-	 * Usage: echo "scsi log token #N" > /proc/scsi/scsi
-	 * where token is one of [error,scan,mlqueue,mlcomplete,llqueue,
-	 * llcomplete,hlqueue,hlcomplete]
-	 */
-	if (!strncmp("log", buffer + 5, 3)) {
-		char *token;
-		unsigned int level;
-
-		p = buffer + 9;
-		token = p;
-		while (*p != ' ' && *p != '\t' && *p != '\0') {
-			p++;
-		}
-
-		if (*p == '\0') {
-			if (strncmp(token, "all", 3) == 0) {
-				/*
-				 * Turn on absolutely everything.
-				 */
-				scsi_logging_level = ~0;
-			} else if (strncmp(token, "none", 4) == 0) {
-				/*
-				 * Turn off absolutely everything.
-				 */
-				scsi_logging_level = 0;
-			} else {
-				goto out;
-			}
-		} else {
-			*p++ = '\0';
-
-			level = simple_strtoul(p, NULL, 0);
-
-			/*
-			 * Now figure out what to do with it.
-			 */
-			if (strcmp(token, "error") == 0) {
-				SCSI_SET_ERROR_RECOVERY_LOGGING(level);
-			} else if (strcmp(token, "timeout") == 0) {
-				SCSI_SET_TIMEOUT_LOGGING(level);
-			} else if (strcmp(token, "scan") == 0) {
-				SCSI_SET_SCAN_BUS_LOGGING(level);
-			} else if (strcmp(token, "mlqueue") == 0) {
-				SCSI_SET_MLQUEUE_LOGGING(level);
-			} else if (strcmp(token, "mlcomplete") == 0) {
-				SCSI_SET_MLCOMPLETE_LOGGING(level);
-			} else if (strcmp(token, "llqueue") == 0) {
-				SCSI_SET_LLQUEUE_LOGGING(level);
-			} else if (strcmp(token, "llcomplete") == 0) {
-				SCSI_SET_LLCOMPLETE_LOGGING(level);
-			} else if (strcmp(token, "hlqueue") == 0) {
-				SCSI_SET_HLQUEUE_LOGGING(level);
-			} else if (strcmp(token, "hlcomplete") == 0) {
-				SCSI_SET_HLCOMPLETE_LOGGING(level);
-			} else if (strcmp(token, "ioctl") == 0) {
-				SCSI_SET_IOCTL_LOGGING(level);
-			} else {
-				goto out;
-			}
-		}
-
-		printk(KERN_INFO "scsi logging level set to 0x%8.8x\n", scsi_logging_level);
-	}
-#endif	/* CONFIG_SCSI_LOGGING */
-
 	/*
 	 * Usage: echo "scsi add-single-device 0 1 2 3" >/proc/scsi/scsi
 	 * with  "0 1 2 3" replaced by your "Host Channel Id Lun".
-	 * Consider this feature BETA.
-	 *     CAUTION: This is not for hotplugging your peripherals. As
-	 *     SCSI was not designed for this you could damage your
-	 *     hardware !
-	 * However perhaps it is legal to switch on an
-	 * already connected device. It is perhaps not
-	 * guaranteed this device doesn't corrupt an ongoing data transfer.
 	 */
-	if (!strncmp("add-single-device", buffer + 5, 17)) {
+	if (!strncmp("scsi add-single-device", buffer, 22)) {
 		p = buffer + 23;
 
 		host = simple_strtoul(p, &p, 0);
@@ -331,18 +262,12 @@ static ssize_t proc_scsi_write(struct file *file, const char __user *buf,
 		err = scsi_add_single_device(host, channel, id, lun);
 		if (err >= 0)
 			err = length;
+
 	/*
 	 * Usage: echo "scsi remove-single-device 0 1 2 3" >/proc/scsi/scsi
 	 * with  "0 1 2 3" replaced by your "Host Channel Id Lun".
-	 *
-	 * Consider this feature pre-BETA.
-	 *
-	 *     CAUTION: This is not for hotplugging your peripherals. As
-	 *     SCSI was not designed for this you could damage your
-	 *     hardware and thoroughly confuse the SCSI subsystem.
-	 *
 	 */
-	} else if (!strncmp("remove-single-device", buffer + 5, 20)) {
+	} else if (!strncmp("scsi remove-single-device", buffer, 25)) {
 		p = buffer + 26;
 
 		host = simple_strtoul(p, &p, 0);
@@ -352,8 +277,8 @@ static ssize_t proc_scsi_write(struct file *file, const char __user *buf,
 
 		err = scsi_remove_single_device(host, channel, id, lun);
 	}
-out:
-	
+
+ out:
 	free_page((unsigned long)buffer);
 	return err;
 }

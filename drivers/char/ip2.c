@@ -34,64 +34,32 @@ ip2_loadmain(int *, int  *, unsigned char *, int ); // ref into ip2main.c
 static int io[IP2_MAX_BOARDS]= { 0, 0, 0, 0 };
 static int irq[IP2_MAX_BOARDS] = { -1, -1, -1, -1 }; 
 
-#ifdef MODULE
-
 static int poll_only = 0;
 
-#	if LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,0)
-		MODULE_AUTHOR("Doug McNash");
-		MODULE_DESCRIPTION("Computone IntelliPort Plus Driver");
-		MODULE_PARM(irq,"1-"__MODULE_STRING(IP2_MAX_BOARDS) "i");
-		MODULE_PARM_DESC(irq,"Interrupts for IntelliPort Cards");
-		MODULE_PARM(io,"1-"__MODULE_STRING(IP2_MAX_BOARDS) "i");
-		MODULE_PARM_DESC(io,"I/O ports for IntelliPort Cards");
-		MODULE_PARM(poll_only,"1i");
-		MODULE_PARM_DESC(poll_only,"Do not use card interrupts");
-#	endif	/* LINUX_VERSION */
+MODULE_AUTHOR("Doug McNash");
+MODULE_DESCRIPTION("Computone IntelliPort Plus Driver");
+MODULE_PARM(irq,"1-"__MODULE_STRING(IP2_MAX_BOARDS) "i");
+MODULE_PARM_DESC(irq,"Interrupts for IntelliPort Cards");
+MODULE_PARM(io,"1-"__MODULE_STRING(IP2_MAX_BOARDS) "i");
+MODULE_PARM_DESC(io,"I/O ports for IntelliPort Cards");
+MODULE_PARM(poll_only,"1i");
+MODULE_PARM_DESC(poll_only,"Do not use card interrupts");
 
 
-//======================================================================
-int
-init_module(void)
+static int __init ip2_init(void)
 {
-	int rc;
-
-	MOD_INC_USE_COUNT;	// hold till done 
-		
 	if( poll_only ) {
 		/* Hard lock the interrupts to zero */
 		irq[0] = irq[1] = irq[2] = irq[3] = 0;
 	}
 
-	rc = ip2_loadmain(io,irq,(unsigned char *)fip_firm,sizeof(fip_firm));
-	// The call to lock and load main, create dep 
-
-	MOD_DEC_USE_COUNT;	//done - kerneld now can unload us
-	return rc;
+	return ip2_loadmain(io,irq,(unsigned char *)fip_firm,sizeof(fip_firm));
 }
-
-//======================================================================
-int
-ip2_init(void)
-{
-	// call to this is in tty_io.c so we need this
-	return 0;
-}
-
-//======================================================================
-void
-cleanup_module(void) 
-{
-}
+module_init(ip2_init);
 
 MODULE_LICENSE("GPL");
 
-#else	// !MODULE 
-
-#ifndef NULL
-# define NULL		((void *) 0)
-#endif
-
+#ifndef MODULE
 /******************************************************************************
  *	ip2_setup:
  *		str: kernel command line string
@@ -138,15 +106,5 @@ static int __init ip2_setup(char *str)
 	}
 	return 1;
 }
-
-int
-ip2_init(void) {
-	return ip2_loadmain(io,irq,(unsigned char *)fip_firm,sizeof(fip_firm));
-}
-
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,13))
 __setup("ip2=", ip2_setup);
-__initcall(ip2_init);
-#endif
-
 #endif /* !MODULE */

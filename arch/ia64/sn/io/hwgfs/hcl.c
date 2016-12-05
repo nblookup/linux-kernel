@@ -53,72 +53,11 @@ static unsigned int hcl_debug = HCL_DEBUG_NONE;
 static unsigned int boot_options = OPTION_NONE;
 #endif
 
-/*
- * Some Global definitions.
- */
-vertex_hdl_t hcl_handle;
-
 invplace_t invplace_none = {
 	GRAPH_VERTEX_NONE,
 	GRAPH_VERTEX_PLACE_NONE,
 	NULL
 };
-
-/*
- * HCL device driver.
- * The purpose of this device driver is to provide a facility 
- * for User Level Apps e.g. hinv, ioconfig etc. an ioctl path 
- * to manipulate label entries without having to implement
- * system call interfaces.  This methodology will enable us to 
- * make this feature module loadable.
- */
-static int hcl_open(struct inode * inode, struct file * filp)
-{
-	if (hcl_debug) {
-        	printk("HCL: hcl_open called.\n");
-	}
-
-        return(0);
-
-}
-
-static int hcl_close(struct inode * inode, struct file * filp)
-{
-
-	if (hcl_debug) {
-        	printk("HCL: hcl_close called.\n");
-	}
-
-        return(0);
-
-}
-
-static int hcl_ioctl(struct inode * inode, struct file * file,
-        unsigned int cmd, unsigned long arg)
-{
-
-	if (hcl_debug) {
-		printk("HCL: hcl_ioctl called.\n");
-	}
-
-	switch (cmd) {
-		default:
-			if (hcl_debug) {
-				printk("HCL: hcl_ioctl cmd = 0x%x\n", cmd);
-			}
-	}
-
-	return(0);
-
-}
-
-struct file_operations hcl_fops = {
-	.owner = (struct module *)0,
-	.ioctl = hcl_ioctl,
-	.open = hcl_open,
-	.release = hcl_close,
-};
-
 
 /*
  * init_hcl() - Boot time initialization.
@@ -145,21 +84,6 @@ int __init init_hcl(void)
 	rv = hwgraph_path_add(NULL, EDGE_LBL_HW, &hwgraph_root);
 	if (rv)
 		printk ("WARNING: init_hcl: Failed to create hwgraph_root. Error = %d.\n", rv);
-
-	/*
-	 * Create the hcl driver to support inventory entry manipulations.
-	 *
-	 */
-	hcl_handle = hwgraph_register(hwgraph_root, ".hcl",
-		        0, 0,
-			0, 0,
-			S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP, 0, 0,
-			&hcl_fops, NULL);
-
-	if (hcl_handle == NULL) {
-		panic("HCL: Unable to create HCL Driver in init_hcl().\n");
-		return(0);
-	}
 
 	/*
 	 * Initialize the HCL string table.
@@ -759,28 +683,6 @@ hwgraph_info_unexport_LBL(vertex_hdl_t de, char *name)
 }
 
 /*
- * hwgraph_path_lookup - return the handle for the given path.
- *
- */
-int
-hwgraph_path_lookup(vertex_hdl_t start_vertex_handle,
-			char *lookup_path,
-			vertex_hdl_t *vertex_handle_ptr,
-			char **remainder)
-{
-	*vertex_handle_ptr = hwgfs_find_handle(start_vertex_handle,	/* start dir */
-					lookup_path,		/* path */
-					0,			/* major */
-					0,			/* minor */
-					0,			/* char | block */
-					1);			/* traverse symlinks */
-	if (*vertex_handle_ptr == NULL)
-		return(-1);
-	else
-		return(0);
-}
-
-/*
  * hwgraph_traverse - Find and return the handle starting from de.
  *
  */
@@ -920,6 +822,5 @@ EXPORT_SYMBOL(hwgraph_info_get_exported_LBL);
 EXPORT_SYMBOL(hwgraph_info_get_next_LBL);
 EXPORT_SYMBOL(hwgraph_info_export_LBL);
 EXPORT_SYMBOL(hwgraph_info_unexport_LBL);
-EXPORT_SYMBOL(hwgraph_path_lookup);
 EXPORT_SYMBOL(hwgraph_traverse);
 EXPORT_SYMBOL(hwgraph_vertex_name_get);

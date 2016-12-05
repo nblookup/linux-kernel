@@ -12,6 +12,7 @@
  */
 
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
@@ -48,12 +49,22 @@
 
 u64 jiffies_64 = INITIAL_JIFFIES;
 
+EXPORT_SYMBOL(jiffies_64);
+
 static ext_int_info_t ext_int_info_timer;
 static u64 init_timer_cc;
 static u64 jiffies_timer_cc;
 static u64 xtime_cc;
 
 extern unsigned long wall_jiffies;
+
+/*
+ * Scheduler clock - returns current time in nanosec units.
+ */
+unsigned long long sched_clock(void)
+{
+	return (get_clock() - jiffies_timer_cc) >> 2;
+}
 
 void tod_to_timeval(__u64 todval, struct timespec *xtime)
 {
@@ -70,8 +81,7 @@ static inline unsigned long do_gettimeoffset(void)
 {
 	__u64 now;
 
-	asm volatile ("STCK 0(%0)" : : "a" (&now) : "memory", "cc");
-        now = (now - jiffies_timer_cc) >> 12;
+        now = (get_clock() - jiffies_timer_cc) >> 12;
 	/* We require the offset from the latest update of xtime */
 	now -= (__u64) wall_jiffies*USECS_PER_JIFFY;
 	return (unsigned long) now;
@@ -102,8 +112,13 @@ void do_gettimeofday(struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
+EXPORT_SYMBOL(do_gettimeofday);
+
 int do_settimeofday(struct timespec *tv)
 {
+	time_t wtm_sec, sec = tv->tv_sec;
+	long wtm_nsec, nsec = tv->tv_nsec;
+
 	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
 		return -EINVAL;
 
@@ -114,15 +129,14 @@ int do_settimeofday(struct timespec *tv)
 	 * Discover what correction gettimeofday
 	 * would have done, and then undo it!
 	 */
-	tv->tv_nsec -= do_gettimeoffset() * 1000;
+	nsec -= do_gettimeoffset() * 1000;
 
-	while (tv->tv_nsec < 0) {
-		tv->tv_nsec += NSEC_PER_SEC;
-		tv->tv_sec--;
-	}
+	wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
+	wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
 
-	xtime.tv_sec = tv->tv_sec;
-	xtime.tv_nsec = tv->tv_nsec;
+	set_normalized_timespec(&xtime, sec, nsec);
+	set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
+
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
@@ -130,6 +144,8 @@ int do_settimeofday(struct timespec *tv)
 	write_sequnlock_irq(&xtime_lock);
 	return 0;
 }
+
+EXPORT_SYMBOL(do_settimeofday);
 
 #ifndef CONFIG_ARCH_S390X
 
@@ -157,28 +173,28 @@ __calculate_ticks(__u64 elapsed)
  * timer_interrupt() needs to keep up the real-time clock,
  * as well as call the "do_timer()" routine every clocktick
  */
-static void do_comparator_interrupt(struct pt_regs *regs, __u16 error_code)
+void account_ticks(struct pt_regs *regs)
 {
 	__u64 tmp;
 	__u32 ticks;
 
 	/* Calculate how many ticks have passed. */
-	asm volatile ("STCK 0(%0)" : : "a" (&tmp) : "memory", "cc");
-	tmp = tmp - S390_lowcore.jiffy_timer;
-	if (tmp >= 2*CLK_TICKS_PER_JIFFY) {  /* more than one tick ? */
-		ticks = __calculate_ticks(tmp);
+	tmp = S390_lowcore.int_clock - S390_lowcore.jiffy_timer;
+	if (tmp >= 2*CLK_TICKS_PER_JIFFY) {  /* more than two ticks ? */
+		ticks = __calculate_ticks(tmp) + 1;
 		S390_lowcore.jiffy_timer +=
 			CLK_TICKS_PER_JIFFY * (__u64) ticks;
+	} else if (tmp >= CLK_TICKS_PER_JIFFY) {
+		ticks = 2;
+		S390_lowcore.jiffy_timer += 2*CLK_TICKS_PER_JIFFY;
 	} else {
 		ticks = 1;
 		S390_lowcore.jiffy_timer += CLK_TICKS_PER_JIFFY;
 	}
 
 	/* set clock comparator for next tick */
-	tmp = S390_lowcore.jiffy_timer + CLK_TICKS_PER_JIFFY + CPU_DEVIATION;
+	tmp = S390_lowcore.jiffy_timer + CPU_DEVIATION;
         asm volatile ("SCKC %0" : : "m" (tmp));
-
-	irq_enter();
 
 #ifdef CONFIG_SMP
 	/*
@@ -207,8 +223,6 @@ static void do_comparator_interrupt(struct pt_regs *regs, __u16 error_code)
 	while (ticks--)
 		do_timer(regs);
 #endif
-
-	irq_exit();
 }
 
 /*
@@ -220,7 +234,7 @@ void init_cpu_timer(void)
 	__u64 timer;
 
 	timer = jiffies_timer_cc + jiffies_64 * CLK_TICKS_PER_JIFFY;
-	S390_lowcore.jiffy_timer = timer;
+	S390_lowcore.jiffy_timer = timer + CLK_TICKS_PER_JIFFY;
 	timer += CLK_TICKS_PER_JIFFY + CPU_DEVIATION;
 	asm volatile ("SCKC %0" : : "m" (timer));
         /* allow clock comparator timer interrupt */
@@ -259,13 +273,15 @@ void __init time_init(void)
 	jiffies_timer_cc = init_timer_cc - jiffies_64 * CLK_TICKS_PER_JIFFY;
 
 	/* set xtime */
-	xtime_cc = init_timer_cc;
+	xtime_cc = init_timer_cc + CLK_TICKS_PER_JIFFY;
 	set_time_cc = init_timer_cc - 0x8126d60e46000000LL +
 		(0x3c26700LL*1000000*4096);
         tod_to_timeval(set_time_cc, &xtime);
+        set_normalized_timespec(&wall_to_monotonic,
+                                -xtime.tv_sec, -xtime.tv_nsec);
 
         /* request the 0x1004 external interrupt */
-        if (register_early_external_interrupt(0x1004, do_comparator_interrupt,
+        if (register_early_external_interrupt(0x1004, 0,
 					      &ext_int_info_timer) != 0)
                 panic("Couldn't request external interrupt 0x1004");
 

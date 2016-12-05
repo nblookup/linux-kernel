@@ -15,6 +15,7 @@
  */
 
 #include <linux/init.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/namei.h>
@@ -218,7 +219,7 @@ int permission(struct inode * inode,int mask, struct nameidata *nd)
 	if (retval)
 		return retval;
 
-	return security_inode_permission(inode, mask);
+	return security_inode_permission(inode, mask, nd);
 }
 
 /*
@@ -302,7 +303,8 @@ static struct dentry * cached_lookup(struct dentry * parent, struct qstr * name,
  * short-cut DAC fails, then call permission() to do more
  * complete permission check.
  */
-static inline int exec_permission_lite(struct inode *inode)
+static inline int exec_permission_lite(struct inode *inode,
+				       struct nameidata *nd)
 {
 	umode_t	mode = inode->i_mode;
 
@@ -325,7 +327,7 @@ static inline int exec_permission_lite(struct inode *inode)
 
 	return -EACCES;
 ok:
-	return security_inode_permission(inode, MAY_EXEC);
+	return security_inode_permission(inode, MAY_EXEC, nd);
 }
 
 /*
@@ -434,19 +436,17 @@ int follow_up(struct vfsmount **mnt, struct dentry **dentry)
 	return 1;
 }
 
+/* no need for dcache_lock, as serialization is taken care in
+ * namespace.c
+ */
 static int follow_mount(struct vfsmount **mnt, struct dentry **dentry)
 {
 	int res = 0;
 	while (d_mountpoint(*dentry)) {
-		struct vfsmount *mounted;
-		spin_lock(&dcache_lock);
-		mounted = lookup_mnt(*mnt, *dentry);
-		if (!mounted) {
-			spin_unlock(&dcache_lock);
+		struct vfsmount *mounted = lookup_mnt(*mnt, *dentry);
+		if (!mounted)
 			break;
-		}
-		*mnt = mntget(mounted);
-		spin_unlock(&dcache_lock);
+		*mnt = mounted;
 		dput(*dentry);
 		mntput(mounted->mnt_parent);
 		*dentry = dget(mounted->mnt_root);
@@ -455,21 +455,21 @@ static int follow_mount(struct vfsmount **mnt, struct dentry **dentry)
 	return res;
 }
 
+/* no need for dcache_lock, as serialization is taken care in
+ * namespace.c
+ */
 static inline int __follow_down(struct vfsmount **mnt, struct dentry **dentry)
 {
 	struct vfsmount *mounted;
 
-	spin_lock(&dcache_lock);
 	mounted = lookup_mnt(*mnt, *dentry);
 	if (mounted) {
-		*mnt = mntget(mounted);
-		spin_unlock(&dcache_lock);
+		*mnt = mounted;
 		dput(*dentry);
 		mntput(mounted->mnt_parent);
 		*dentry = dget(mounted->mnt_root);
 		return 1;
 	}
-	spin_unlock(&dcache_lock);
 	return 0;
 }
 
@@ -574,7 +574,7 @@ int link_path_walk(const char * name, struct nameidata *nd)
 	while (*name=='/')
 		name++;
 	if (!*name)
-		goto return_base;
+		goto return_reval;
 
 	inode = nd->dentry->d_inode;
 	if (current->link_count)
@@ -586,7 +586,7 @@ int link_path_walk(const char * name, struct nameidata *nd)
 		struct qstr this;
 		unsigned int c;
 
-		err = exec_permission_lite(inode);
+		err = exec_permission_lite(inode, nd);
 		if (err == -EAGAIN) { 
 			err = permission(inode, MAY_EXEC, nd);
 		}
@@ -695,7 +695,7 @@ last_component:
 				inode = nd->dentry->d_inode;
 				/* fallthrough */
 			case 1:
-				goto return_base;
+				goto return_reval;
 		}
 		if (nd->dentry->d_op && nd->dentry->d_op->d_hash) {
 			err = nd->dentry->d_op->d_hash(nd->dentry, &this);
@@ -739,6 +739,20 @@ lookup_parent:
 			nd->last_type = LAST_DOT;
 		else if (this.len == 2 && this.name[1] == '.')
 			nd->last_type = LAST_DOTDOT;
+		else
+			goto return_base;
+return_reval:
+		/*
+		 * We bypassed the ordinary revalidation routines.
+		 * We may need to check the cached dentry for staleness.
+		 */
+		if (nd->dentry && nd->dentry->d_sb &&
+		    (nd->dentry->d_sb->s_type->fs_flags & FS_REVAL_DOT)) {
+			err = -ESTALE;
+			/* Note: we do not d_invalidate() */
+			if (!nd->dentry->d_op->d_revalidate(nd->dentry, nd))
+				break;
+		}
 return_base:
 		return 0;
 out_dput:
@@ -1377,8 +1391,15 @@ do_link:
 	goto do_last;
 }
 
-/* SMP-safe */
-static struct dentry *lookup_create(struct nameidata *nd, int is_dir)
+/**
+ * lookup_create - lookup a dentry, creating it if it doesn't exist
+ * @nd: nameidata info
+ * @is_dir: directory flag
+ *
+ * Simple function to lookup and return a dentry and create it
+ * if it doesn't exist.  Is SMP-safe.
+ */
+struct dentry *lookup_create(struct nameidata *nd, int is_dir)
 {
 	struct dentry *dentry;
 
@@ -1426,7 +1447,7 @@ int vfs_mknod(struct inode *dir, struct dentry *dentry, int mode, dev_t dev)
 	return error;
 }
 
-asmlinkage long sys_mknod(const char __user * filename, int mode, dev_t dev)
+asmlinkage long sys_mknod(const char __user * filename, int mode, unsigned dev)
 {
 	int error = 0;
 	char * tmp;
@@ -1452,8 +1473,12 @@ asmlinkage long sys_mknod(const char __user * filename, int mode, dev_t dev)
 		case 0: case S_IFREG:
 			error = vfs_create(nd.dentry->d_inode,dentry,mode,&nd);
 			break;
-		case S_IFCHR: case S_IFBLK: case S_IFIFO: case S_IFSOCK:
-			error = vfs_mknod(nd.dentry->d_inode,dentry,mode,dev);
+		case S_IFCHR: case S_IFBLK:
+			error = vfs_mknod(nd.dentry->d_inode,dentry,mode,
+					new_decode_dev(dev));
+			break;
+		case S_IFIFO: case S_IFSOCK:
+			error = vfs_mknod(nd.dentry->d_inode,dentry,mode,0);
 			break;
 		case S_IFDIR:
 			error = -EPERM;
@@ -2252,3 +2277,33 @@ struct inode_operations page_symlink_inode_operations = {
 	.readlink	= page_readlink,
 	.follow_link	= page_follow_link,
 };
+
+EXPORT_SYMBOL(__user_walk);
+EXPORT_SYMBOL(follow_down);
+EXPORT_SYMBOL(follow_up);
+EXPORT_SYMBOL(get_write_access); /* binfmt_aout */
+EXPORT_SYMBOL(getname);
+EXPORT_SYMBOL(lock_rename);
+EXPORT_SYMBOL(lookup_create);
+EXPORT_SYMBOL(lookup_hash);
+EXPORT_SYMBOL(lookup_one_len);
+EXPORT_SYMBOL(page_follow_link);
+EXPORT_SYMBOL(page_readlink);
+EXPORT_SYMBOL(page_symlink);
+EXPORT_SYMBOL(page_symlink_inode_operations);
+EXPORT_SYMBOL(path_lookup);
+EXPORT_SYMBOL(path_release);
+EXPORT_SYMBOL(path_walk);
+EXPORT_SYMBOL(permission);
+EXPORT_SYMBOL(unlock_rename);
+EXPORT_SYMBOL(vfs_create);
+EXPORT_SYMBOL(vfs_follow_link);
+EXPORT_SYMBOL(vfs_link);
+EXPORT_SYMBOL(vfs_mkdir);
+EXPORT_SYMBOL(vfs_mknod);
+EXPORT_SYMBOL(vfs_permission);
+EXPORT_SYMBOL(vfs_readlink);
+EXPORT_SYMBOL(vfs_rename);
+EXPORT_SYMBOL(vfs_rmdir);
+EXPORT_SYMBOL(vfs_symlink);
+EXPORT_SYMBOL(vfs_unlink);

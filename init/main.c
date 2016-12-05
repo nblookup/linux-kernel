@@ -12,6 +12,7 @@
 #define __KERNEL_SYSCALLS__
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/proc_fs.h>
 #include <linux/devfs_fs_kernel.h>
 #include <linux/kernel.h>
@@ -23,7 +24,6 @@
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/smp_lock.h>
-#include <linux/blk.h>
 #include <linux/initrd.h>
 #include <linux/hdreg.h>
 #include <linux/bootmem.h>
@@ -90,15 +90,11 @@ extern void driver_init(void);
 extern void tc_init(void);
 #endif
 
-#if defined(CONFIG_SYSVIPC)
-extern void ipc_init(void);
-#endif
-
 /*
  * Are we up and running (ie do we have all the infrastructure
  * set up)
  */
-int system_running = 0;
+int system_running;
 
 /*
  * Boot command-line arguments
@@ -107,6 +103,8 @@ int system_running = 0;
 #define MAX_INIT_ENVS 8
 
 extern void time_init(void);
+/* Default late time init is NULL. archs can override this later. */
+void (*late_time_init)(void) = NULL;
 extern void softirq_init(void);
 
 int rows, cols;
@@ -167,6 +165,10 @@ static int __init obsolete_checksetup(char *line)
 /* this should be approx 2 Bo*oMips to start (note initial shift), and will
    still work even if initially too large, it will just take slightly longer */
 unsigned long loops_per_jiffy = (1<<12);
+
+#ifndef __ia64__
+EXPORT_SYMBOL(loops_per_jiffy);
+#endif
 
 /* This is the number of bits of precision for the loops_per_jiffy.  Each
    bit takes on average 1.5/HZ seconds.  This (like the original) is a little
@@ -310,6 +312,8 @@ static inline void smp_prepare_cpus(unsigned int maxcpus) { }
 #ifdef __GENERIC_PER_CPU
 unsigned long __per_cpu_offset[NR_CPUS];
 
+EXPORT_SYMBOL(__per_cpu_offset);
+
 static void __init setup_per_cpu_areas(void)
 {
 	unsigned long size, i;
@@ -422,7 +426,6 @@ asmlinkage void __init start_kernel(void)
 	console_init();
 	profile_init();
 	local_irq_enable();
-	calibrate_delay();
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (initrd_start && !initrd_below_start_ok &&
 			initrd_start < min_low_pfn << PAGE_SHIFT) {
@@ -434,6 +437,9 @@ asmlinkage void __init start_kernel(void)
 	page_address_init();
 	mem_init();
 	kmem_cache_init();
+	if (late_time_init)
+		late_time_init();
+	calibrate_delay();
 	pidmap_init();
 	pgtable_cache_init();
 	pte_chain_init();
@@ -449,9 +455,6 @@ asmlinkage void __init start_kernel(void)
 	populate_rootfs();
 #ifdef CONFIG_PROC_FS
 	proc_root_init();
-#endif
-#if defined(CONFIG_SYSVIPC)
-	ipc_init();
 #endif
 	check_bugs();
 	printk("POSIX conformance testing by UNIFIX\n");
@@ -546,12 +549,16 @@ static void do_pre_smp_initcalls(void)
 	spawn_ksoftirqd();
 }
 
+static void run_init_process(char *init_filename)
+{
+	argv_init[0] = init_filename;
+	execve(init_filename, argv_init, envp_init);
+}
+
 extern void prepare_namespace(void);
 
 static int init(void * unused)
 {
-	static char * argv_sh[] = { "sh", NULL, };
-
 	lock_kernel();
 	/*
 	 * Tell the world that we're going to be the grim
@@ -596,10 +603,12 @@ static int init(void * unused)
 	 */
 
 	if (execute_command)
-		execve(execute_command,argv_init,envp_init);
-	execve("/sbin/init",argv_init,envp_init);
-	execve("/etc/init",argv_init,envp_init);
-	execve("/bin/init",argv_init,envp_init);
-	execve("/bin/sh",argv_sh,envp_init);
+		run_init_process(execute_command);
+
+	run_init_process("/sbin/init");
+	run_init_process("/etc/init");
+	run_init_process("/bin/init");
+	run_init_process("/bin/sh");
+
 	panic("No init found.  Try passing init= option to kernel.");
 }

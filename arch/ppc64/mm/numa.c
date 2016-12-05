@@ -13,6 +13,7 @@
 #include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/mmzone.h>
+#include <linux/module.h>
 #include <asm/lmb.h>
 
 #if 1
@@ -24,18 +25,21 @@
 int numa_cpu_lookup_table[NR_CPUS] = { [ 0 ... (NR_CPUS - 1)] = -1};
 int numa_memory_lookup_table[MAX_MEMORY >> MEMORY_INCREMENT_SHIFT] =
 	{ [ 0 ... ((MAX_MEMORY >> MEMORY_INCREMENT_SHIFT) - 1)] = -1};
-unsigned long numa_cpumask_lookup_table[MAX_NUMNODES];
+cpumask_t numa_cpumask_lookup_table[MAX_NUMNODES];
 int nr_cpus_in_node[MAX_NUMNODES] = { [0 ... (MAX_NUMNODES -1)] = 0};
 
 struct pglist_data node_data[MAX_NUMNODES];
 bootmem_data_t plat_node_bdata[MAX_NUMNODES];
 
+EXPORT_SYMBOL(node_data);
+EXPORT_SYMBOL(numa_memory_lookup_table);
+
 static inline void map_cpu_to_node(int cpu, int node)
 {
 	dbg("cpu %d maps to domain %d\n", cpu, node);
 	numa_cpu_lookup_table[cpu] = node;
-	if (!(numa_cpumask_lookup_table[node] & 1UL << cpu)) {
-		numa_cpumask_lookup_table[node] |= 1UL << cpu;
+	if (!(cpu_isset(cpu, numa_cpumask_lookup_table[node]))) {
+		cpu_set(cpu, numa_cpumask_lookup_table[node]);
 		nr_cpus_in_node[node]++;
 	}
 }
@@ -303,6 +307,7 @@ void __init paging_init(void)
 {
 	unsigned long zones_size[MAX_NR_ZONES];
 	int i, nid;
+	struct page *node_mem_map; 
 
 	for (i = 1; i < MAX_NR_ZONES; i++)
 		zones_size[i] = 0;
@@ -311,16 +316,24 @@ void __init paging_init(void)
 		unsigned long start_pfn;
 		unsigned long end_pfn;
 
-		if (node_data[nid].node_spanned_pages == 0)
-			continue;
-
 		start_pfn = plat_node_bdata[nid].node_boot_start >> PAGE_SHIFT;
 		end_pfn = plat_node_bdata[nid].node_low_pfn;
 
 		zones_size[ZONE_DMA] = end_pfn - start_pfn;
 		dbg("free_area_init node %d %lx %lx\n", nid,
 				zones_size[ZONE_DMA], start_pfn);
-		free_area_init_node(nid, NODE_DATA(nid), NULL, zones_size,
-				    start_pfn, NULL);
+
+		/* 
+		 * Give this empty node a dummy struct page to avoid
+		 * us from trying to allocate a node local mem_map
+		 * in free_area_init_node (which will fail).
+		 */
+		if (!node_data[nid].node_spanned_pages)
+			node_mem_map = alloc_bootmem(sizeof(struct page));
+		else
+			node_mem_map = NULL;
+
+		free_area_init_node(nid, NODE_DATA(nid), node_mem_map,
+				    zones_size, start_pfn, NULL);
 	}
 }

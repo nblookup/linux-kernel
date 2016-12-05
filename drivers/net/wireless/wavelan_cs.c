@@ -4128,7 +4128,7 @@ wv_pcmcia_config(dev_link_t *	link)
   /* If any step failed, release any partially configured state */
   if(i != 0)
     {
-      wv_pcmcia_release((u_long) link);
+      wv_pcmcia_release(link);
       return FALSE;
     }
 
@@ -4148,9 +4148,8 @@ wv_pcmcia_config(dev_link_t *	link)
  * still open, this will be postponed until it is closed.
  */
 static void
-wv_pcmcia_release(u_long	arg)	/* Address of the interface struct */
+wv_pcmcia_release(dev_link_t *link)
 {
-  dev_link_t *	link = (dev_link_t *) arg;
   device *	dev = (device *) link->priv;
 
 #ifdef DEBUG_CONFIG_TRACE
@@ -4176,50 +4175,14 @@ wv_pcmcia_release(u_long	arg)	/* Address of the interface struct */
   CardServices(ReleaseIO, link->handle, &link->io);
   CardServices(ReleaseIRQ, link->handle, &link->irq);
 
-  link->state &= ~(DEV_CONFIG | DEV_STALE_CONFIG);
+  link->state &= ~DEV_CONFIG;
 
 #ifdef DEBUG_CONFIG_TRACE
   printk(KERN_DEBUG "%s: <- wv_pcmcia_release()\n", dev->name);
 #endif
-} /* wv_pcmcia_release */
 
-/*------------------------------------------------------------------*/
-/*
- * Sometimes, wavelan_detach can't be performed following a call from
- * cardmgr (device still open, pcmcia_release not done) and the device
- * is put in a STALE_LINK state and remains in memory.
- *
- * This function run through our current list of device and attempt
- * another time to remove them. We hope that since last time the
- * device has properly been closed.
- *
- * (called by wavelan_attach() & cleanup_module())
- */
-static void
-wv_flush_stale_links(void)
-{
-  dev_link_t *	link;		/* Current node in linked list */
-  dev_link_t *	next;		/* Next node in linked list */
-
-#ifdef DEBUG_CONFIG_TRACE
-  printk(KERN_DEBUG "-> wv_flush_stale_links(0x%p)\n", dev_list);
-#endif
-
-  /* Go through the list */
-  for (link = dev_list; link; link = next)
-    {
-      next = link->next;
-
-      /* Check if in need of being removed */
-      if((link->state & DEV_STALE_LINK) ||
-	 (! (link->state & DEV_PRESENT)))
-	wavelan_detach(link);
-
-    }
-
-#ifdef DEBUG_CONFIG_TRACE
-  printk(KERN_DEBUG "<- wv_flush_stale_links()\n");
-#endif
+  if (link->state & DEV_STALE_CONFIG)
+	  wavelan_detach(link);
 }
 
 /************************ INTERRUPT HANDLING ************************/
@@ -4675,7 +4638,7 @@ wavelan_close(device *	dev)
   else
     /* The card is no more there (flag is activated in wv_pcmcia_release) */
     if(link->state & DEV_STALE_CONFIG)
-      wv_pcmcia_release((u_long)link);
+      wv_pcmcia_release(link);
 
 #ifdef DEBUG_CALLBACK_TRACE
   printk(KERN_DEBUG "%s: <-wavelan_close()\n", dev->name);
@@ -4706,17 +4669,10 @@ wavelan_attach(void)
   printk(KERN_DEBUG "-> wavelan_attach()\n");
 #endif
 
-  /* Perform some cleanup */
-  wv_flush_stale_links();
-
   /* Initialize the dev_link_t structure */
   link = kmalloc(sizeof(struct dev_link_t), GFP_KERNEL);
   if (!link) return NULL;
   memset(link, 0, sizeof(struct dev_link_t));
-
-  /* Unused for the Wavelan */
-  link->release.function = &wv_pcmcia_release;
-  link->release.data = (u_long) link;
 
   /* The io structure describes IO port mapping */
   link->io.NumPorts1 = 8;
@@ -4857,14 +4813,13 @@ wavelan_detach(dev_link_t *	link)
   if(link->state & DEV_CONFIG)
     {
       /* Some others haven't done their job : give them another chance */
-      wv_pcmcia_release((u_long) link);
+      wv_pcmcia_release(link);
       if(link->state & DEV_STALE_CONFIG)
 	{
 #ifdef DEBUG_CONFIG_INFO
 	  printk(KERN_DEBUG "wavelan_detach: detach postponed,"
 		 " '%s' still locked\n", link->dev->dev_name);
 #endif
-	  link->state |= DEV_STALE_LINK;
 	  return;
 	}
     }
@@ -4965,7 +4920,7 @@ wavelan_event(event_t		event,		/* The event received */
 	    netif_device_detach(dev);
 
 	    /* Release the card */
-	    wv_pcmcia_release((u_long) link);
+	    wv_pcmcia_release(link);
 	  }
 	break;
 
@@ -5044,9 +4999,6 @@ init_wavelan_cs(void)
 static void __exit
 exit_wavelan_cs(void)
 {
-	/* Do some cleanup of the device list */
-	wv_flush_stale_links();
-
 	pcmcia_unregister_driver(&wavelan_driver);
 }
 

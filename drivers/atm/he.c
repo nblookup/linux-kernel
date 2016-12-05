@@ -135,10 +135,9 @@ static char *version = "$Id: he.c,v 1.18 2003/05/06 22:57:15 chas Exp $";
 
 /* declarations */
 
-static int he_open(struct atm_vcc *vcc, short vpi, int vci);
+static int he_open(struct atm_vcc *vcc);
 static void he_close(struct atm_vcc *vcc);
 static int he_send(struct atm_vcc *vcc, struct sk_buff *skb);
-static int he_sg_send(struct atm_vcc *vcc, unsigned long start, unsigned long size);
 static int he_ioctl(struct atm_dev *dev, unsigned int cmd, void *arg);
 static irqreturn_t he_irq_handler(int irq, void *dev_id, struct pt_regs *regs);
 static void he_tasklet(unsigned long data);
@@ -158,7 +157,7 @@ static short nvpibits = -1;
 static short nvcibits = -1;
 static short rx_skb_reserve = 16;
 static short irq_coalesce = 1;
-static short sdh = 1;
+static short sdh = 0;
 
 static struct atmdev_ops he_ops =
 {
@@ -166,7 +165,6 @@ static struct atmdev_ops he_ops =
 	.close =	he_close,	
 	.ioctl =	he_ioctl,	
 	.send =		he_send,
-	.sg_send =	he_sg_send,	
 	.phy_put =	he_phy_put,
 	.phy_get =	he_phy_get,
 	.proc_read =	he_proc_read,
@@ -329,6 +327,7 @@ he_readl_internal(struct he_dev *he_dev, unsigned addr, unsigned flags)
 static __inline__ struct atm_vcc*
 __find_vcc(struct he_dev *he_dev, unsigned cid)
 {
+	struct hlist_head *head;
 	struct atm_vcc *vcc;
 	struct hlist_node *node;
 	struct sock *s;
@@ -337,8 +336,9 @@ __find_vcc(struct he_dev *he_dev, unsigned cid)
 
 	vpi = cid >> he_dev->vcibits;
 	vci = cid & ((1 << he_dev->vcibits) - 1);
+	head = &vcc_hash[vci & (VCC_HTABLE_SIZE -1)];
 
-	sk_for_each(s, node, &vcc_sklist) {
+	sk_for_each(s, node, head) {
 		vcc = atm_sk(s);
 		if (vcc->dev == he_dev->atm_dev &&
 		    vcc->vci == vci && vcc->vpi == vpi &&
@@ -1547,11 +1547,10 @@ he_start(struct atm_dev *dev)
 
 	if (sdh) {
 		/* this really should be in suni.c but for now... */
-
 		int val;
 
 		val = he_phy_get(he_dev->atm_dev, SUNI_TPOP_APM);
-		val = (val & ~SUNI_TPOP_APM_S) | ( 0x2 << SUNI_TPOP_APM_S_SHIFT);
+		val = (val & ~SUNI_TPOP_APM_S) | (SUNI_TPOP_S_SDH << SUNI_TPOP_APM_S_SHIFT);
 		he_phy_put(he_dev->atm_dev, val, SUNI_TPOP_APM);
 	}
 
@@ -2335,23 +2334,18 @@ __enqueue_tpd(struct he_dev *he_dev, struct he_tpd *tpd, unsigned cid)
 }
 
 static int
-he_open(struct atm_vcc *vcc, short vpi, int vci)
+he_open(struct atm_vcc *vcc)
 {
 	unsigned long flags;
 	struct he_dev *he_dev = HE_DEV(vcc->dev);
 	struct he_vcc *he_vcc;
 	int err = 0;
 	unsigned cid, rsr0, rsr1, rsr4, tsr0, tsr0_aal, tsr4, period, reg, clock;
+	short vpi = vcc->vpi;
+	int vci = vcc->vci;
 
-	
-	if ((err = atm_find_ci(vcc, &vpi, &vci))) {
-		HPRINTK("atm_find_ci err = %d\n", err);
-		return err;
-	}
 	if (vci == ATM_VCI_UNSPEC || vpi == ATM_VPI_UNSPEC)
 		return 0;
-	vcc->vpi = vpi;
-	vcc->vci = vci;
 
 	HPRINTK("open vcc %p %d.%d\n", vcc, vpi, vci);
 
@@ -2635,7 +2629,6 @@ he_close(struct atm_vcc *vcc)
 		       (retry < MAX_RETRY)) {
 			set_current_state(TASK_UNINTERRUPTIBLE);
 			(void) schedule_timeout(sleep);
-			set_current_state(TASK_RUNNING);
 			if (sleep < HZ)
 				sleep = sleep * 2;
 
@@ -2724,16 +2717,6 @@ close_tx_incomplete:
 	kfree(he_vcc);
 
 	clear_bit(ATM_VF_ADDR, &vcc->flags);
-}
-
-static int
-he_sg_send(struct atm_vcc *vcc, unsigned long start, unsigned long size)
-{
-#ifdef USE_SCATTERGATHER
-	return 1;
-#else
-	return 0;
-#endif
 }
 
 static int
@@ -2872,8 +2855,10 @@ he_ioctl(struct atm_dev *atm_dev, unsigned int cmd, void *arg)
 			if (!capable(CAP_NET_ADMIN))
 				return -EPERM;
 
-			copy_from_user(&reg, (struct he_ioctl_reg *) arg,
-						sizeof(struct he_ioctl_reg));
+			if (copy_from_user(&reg, (struct he_ioctl_reg *) arg,
+						sizeof(struct he_ioctl_reg)))
+				return -EFAULT;
+			
 			spin_lock_irqsave(&he_dev->global_lock, flags);
 			switch (reg.type) {
 				case HE_REGTYPE_PCI:
@@ -2897,8 +2882,9 @@ he_ioctl(struct atm_dev *atm_dev, unsigned int cmd, void *arg)
 			}
 			spin_unlock_irqrestore(&he_dev->global_lock, flags);
 			if (err == 0)
-				copy_to_user((struct he_ioctl_reg *) arg, &reg,
-							sizeof(struct he_ioctl_reg));
+				if (copy_to_user((struct he_ioctl_reg *) arg, &reg,
+							sizeof(struct he_ioctl_reg)))
+					return -EFAULT;
 			break;
 		default:
 #ifdef CONFIG_ATM_HE_USE_SUNI
@@ -3096,7 +3082,7 @@ MODULE_PARM_DESC(irq_coalesce, "use interrupt coalescing (default 1)");
 MODULE_PARM(sdh, "i");
 MODULE_PARM_DESC(sdh, "use SDH framing (default 0)");
 
-static struct pci_device_id he_pci_tbl[] __devinitdata = {
+static struct pci_device_id he_pci_tbl[] = {
 	{ PCI_VENDOR_ID_FORE, PCI_DEVICE_ID_FORE_HE, PCI_ANY_ID, PCI_ANY_ID,
 	  0, 0, 0 },
 	{ 0, }

@@ -12,15 +12,11 @@ obj-y :=	open.o read_write.o file_table.o buffer.o \
 		filesystems.o namespace.o seq_file.o xattr.o libfs.o \
 		fs-writeback.o mpage.o direct-io.o aio.o
 
-obj-$(CONFIG_EPOLL)	+= eventpoll.o
+obj-$(CONFIG_EPOLL)		+= eventpoll.o
+obj-$(CONFIG_COMPAT)		+= compat.o
 
-obj-$(CONFIG_COMPAT) += compat.o
-
-ifneq ($(CONFIG_NFSD),n)
-ifneq ($(CONFIG_NFSD),)
-obj-y += nfsctl.o
-endif
-endif
+nfsd-$(CONFIG_NFSD)		:= nfsctl.o
+obj-y				+= $(nfsd-y) $(nfsd-m)
 
 obj-$(CONFIG_BINFMT_AOUT)	+= binfmt_aout.o
 obj-$(CONFIG_BINFMT_EM86)	+= binfmt_em86.o
@@ -74,7 +70,7 @@ obj-$(CONFIG_LOCKD)		+= lockd/
 obj-$(CONFIG_NLS)		+= nls/
 obj-$(CONFIG_SYSV_FS)		+= sysv/
 obj-$(CONFIG_SMB_FS)		+= smbfs/
-obj-$(CONFIG_CIFS)             += cifs/
+obj-$(CONFIG_CIFS)		+= cifs/
 obj-$(CONFIG_NCP_FS)		+= ncpfs/
 obj-$(CONFIG_HPFS_FS)		+= hpfs/
 obj-$(CONFIG_NTFS_FS)		+= ntfs/
@@ -85,11 +81,11 @@ obj-$(CONFIG_JFFS2_FS)		+= jffs2/
 obj-$(CONFIG_AFFS_FS)		+= affs/
 obj-$(CONFIG_ROMFS_FS)		+= romfs/
 obj-$(CONFIG_QNX4FS_FS)		+= qnx4/
-obj-$(CONFIG_UDF_FS)		+= udf/
 obj-$(CONFIG_AUTOFS_FS)		+= autofs/
 obj-$(CONFIG_AUTOFS4_FS)	+= autofs4/
 obj-$(CONFIG_ADFS_FS)		+= adfs/
 obj-$(CONFIG_REISERFS_FS)	+= reiserfs/
+obj-$(CONFIG_UDF_FS)		+= udf/
 obj-$(CONFIG_SUN_OPENPROMFS)	+= openpromfs/
 obj-$(CONFIG_JFS_FS)		+= jfs/
 obj-$(CONFIG_XFS_FS)		+= xfs/

@@ -72,8 +72,8 @@
  *					Vinay Kulkarni
  */
 
-
 #include <linux/config.h>
+#include <linux/module.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <linux/types.h>
@@ -90,6 +90,7 @@
 #include <linux/igmp.h>
 #include <linux/if_arp.h>
 #include <linux/rtnetlink.h>
+#include <linux/times.h>
 #include <net/ip.h>
 #include <net/protocol.h>
 #include <net/route.h>
@@ -280,8 +281,10 @@ static struct sk_buff *igmpv3_newpack(struct net_device *dev, int size)
 				    .nl_u = { .ip4_u = {
 				    .daddr = IGMPV3_ALL_MCR } },
 				    .proto = IPPROTO_IGMP };
-		if (ip_route_output_key(&rt, &fl))
+		if (ip_route_output_key(&rt, &fl)) {
+			kfree_skb(skb);
 			return 0;
+		}
 	}
 	if (rt->rt_src == 0) {
 		ip_rt_put(rt);
@@ -373,7 +376,7 @@ static struct sk_buff *add_grec(struct sk_buff *skb, struct ip_mc_list *pmc,
 	struct net_device *dev = pmc->interface->dev;
 	struct igmpv3_report *pih;
 	struct igmpv3_grec *pgr = 0;
-	struct ip_sf_list *psf, *psf_next, *psf_prev, *psf_list;
+	struct ip_sf_list *psf, *psf_next, *psf_prev, **psf_list;
 	int scount, first, isquery, truncate;
 
 	if (pmc->multiaddr == IGMP_ALL_HOSTS)
@@ -384,9 +387,9 @@ static struct sk_buff *add_grec(struct sk_buff *skb, struct ip_mc_list *pmc,
 	truncate = type == IGMPV3_MODE_IS_EXCLUDE ||
 		    type == IGMPV3_CHANGE_TO_EXCLUDE;
 
-	psf_list = sdeleted ? pmc->tomb : pmc->sources;
+	psf_list = sdeleted ? &pmc->tomb : &pmc->sources;
 
-	if (!psf_list) {
+	if (!*psf_list) {
 		if (type == IGMPV3_ALLOW_NEW_SOURCES ||
 		    type == IGMPV3_BLOCK_OLD_SOURCES)
 			return skb;
@@ -417,7 +420,7 @@ static struct sk_buff *add_grec(struct sk_buff *skb, struct ip_mc_list *pmc,
 	first = 1;
 	scount = 0;
 	psf_prev = 0;
-	for (psf=psf_list; psf; psf=psf_next) {
+	for (psf=*psf_list; psf; psf=psf_next) {
 		u32 *psrc;
 
 		psf_next = psf->sf_next;
@@ -457,7 +460,7 @@ static struct sk_buff *add_grec(struct sk_buff *skb, struct ip_mc_list *pmc,
 				if (psf_prev)
 					psf_prev->sf_next = psf->sf_next;
 				else
-					pmc->tomb = psf->sf_next;
+					*psf_list = psf->sf_next;
 				kfree(psf);
 				continue;
 			}
@@ -1060,17 +1063,19 @@ static void igmp_group_dropped(struct ip_mc_list *im)
 	reporter = im->reporter;
 	igmp_stop_timer(im);
 
-	if (IGMP_V1_SEEN(in_dev))
-		goto done;
-	if (IGMP_V2_SEEN(in_dev)) {
-		if (reporter)
-			igmp_send_report(in_dev, im, IGMP_HOST_LEAVE_MESSAGE);
-		goto done;
-	}
-	/* IGMPv3 */
-	igmpv3_add_delrec(in_dev, im);
+	if (in_dev->dev->flags & IFF_UP) {
+		if (IGMP_V1_SEEN(in_dev))
+			goto done;
+		if (IGMP_V2_SEEN(in_dev)) {
+			if (reporter)
+				igmp_send_report(in_dev, im, IGMP_HOST_LEAVE_MESSAGE);
+			goto done;
+		}
+		/* IGMPv3 */
+		igmpv3_add_delrec(in_dev, im);
 
-	igmp_ifc_event(in_dev);
+		igmp_ifc_event(in_dev);
+	}
 done:
 #endif
 	ip_mc_clear_src(im);
@@ -1387,8 +1392,9 @@ int ip_mc_del_src(struct in_device *in_dev, __u32 *pmca, int sfmode,
 	sf_markstate(pmc);
 #endif
 	if (!delta) {
+		err = -EINVAL;
 		if (!pmc->sfcount[sfmode])
-			return -EINVAL;
+			goto out_unlock;
 		pmc->sfcount[sfmode]--;
 	}
 	err = 0;
@@ -1419,6 +1425,7 @@ int ip_mc_del_src(struct in_device *in_dev, __u32 *pmca, int sfmode,
 		igmp_ifc_event(pmc->interface);
 #endif
 	}
+out_unlock:
 	spin_unlock_bh(&pmc->lock);
 	return err;
 }
@@ -2120,6 +2127,7 @@ static inline struct ip_mc_list *igmp_mc_get_first(struct seq_file *seq)
 			break;
 		}
 		read_unlock(&in_dev->lock);
+		in_dev_put(in_dev);
 	}
 	return im;
 }
@@ -2159,13 +2167,13 @@ static struct ip_mc_list *igmp_mc_get_idx(struct seq_file *seq, loff_t pos)
 static void *igmp_mc_seq_start(struct seq_file *seq, loff_t *pos)
 {
 	read_lock(&dev_base_lock);
-	return *pos ? igmp_mc_get_idx(seq, *pos) : (void *)1;
+	return *pos ? igmp_mc_get_idx(seq, *pos - 1) : SEQ_START_TOKEN;
 }
 
 static void *igmp_mc_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
 	struct ip_mc_list *im;
-	if (v == (void *)1)
+	if (v == SEQ_START_TOKEN)
 		im = igmp_mc_get_first(seq);
 	else
 		im = igmp_mc_get_next(seq, v);
@@ -2179,13 +2187,15 @@ static void igmp_mc_seq_stop(struct seq_file *seq, void *v)
 	if (likely(state->in_dev != NULL)) {
 		read_unlock(&state->in_dev->lock);
 		in_dev_put(state->in_dev);
+		state->in_dev = NULL;
 	}
+	state->dev = NULL;
 	read_unlock(&dev_base_lock);
 }
 
 static int igmp_mc_seq_show(struct seq_file *seq, void *v)
 {
-	if (v == (void *)1)
+	if (v == SEQ_START_TOKEN)
 		seq_printf(seq, 
 			   "Idx\tDevice    : Count Querier\tGroup    Users Timer\tReporter\n");
 	else {
@@ -2206,7 +2216,7 @@ static int igmp_mc_seq_show(struct seq_file *seq, void *v)
 		seq_printf(seq,
 			   "\t\t\t\t%08lX %5d %d:%08lX\t\t%d\n",
 			   im->multiaddr, im->users,
-			   im->tm_running, im->timer.expires-jiffies, im->reporter);
+			   im->tm_running, jiffies_to_clock_t(im->timer.expires-jiffies), im->reporter);
 	}
 	return 0;
 }
@@ -2282,6 +2292,7 @@ static inline struct ip_sf_list *igmp_mcf_get_first(struct seq_file *seq)
 			spin_unlock_bh(&im->lock);
 		}
 		read_unlock_bh(&idev->lock);
+		in_dev_put(idev);
 	}
 	return psf;
 }
@@ -2331,13 +2342,13 @@ static struct ip_sf_list *igmp_mcf_get_idx(struct seq_file *seq, loff_t pos)
 static void *igmp_mcf_seq_start(struct seq_file *seq, loff_t *pos)
 {
 	read_lock(&dev_base_lock);
-	return *pos ? igmp_mcf_get_idx(seq, *pos) : (void *)1;
+	return *pos ? igmp_mcf_get_idx(seq, *pos - 1) : SEQ_START_TOKEN;
 }
 
 static void *igmp_mcf_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
 	struct ip_sf_list *psf;
-	if (v == (void *)1)
+	if (v == SEQ_START_TOKEN)
 		psf = igmp_mcf_get_first(seq);
 	else
 		psf = igmp_mcf_get_next(seq, v);
@@ -2348,12 +2359,16 @@ static void *igmp_mcf_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 static void igmp_mcf_seq_stop(struct seq_file *seq, void *v)
 {
 	struct igmp_mcf_iter_state *state = igmp_mcf_seq_private(seq);
-	if (likely(state->im != NULL))
+	if (likely(state->im != NULL)) {
 		spin_unlock_bh(&state->im->lock);
+		state->im = NULL;
+	}
 	if (likely(state->idev != NULL)) {
 		read_unlock_bh(&state->idev->lock);
 		in_dev_put(state->idev);
+		state->idev = NULL;
 	}
+	state->dev = NULL;
 	read_unlock(&dev_base_lock);
 }
 
@@ -2362,7 +2377,7 @@ static int igmp_mcf_seq_show(struct seq_file *seq, void *v)
 	struct ip_sf_list *psf = (struct ip_sf_list *)v;
 	struct igmp_mcf_iter_state *state = igmp_mcf_seq_private(seq);
 
-	if (v == (void *)1) {
+	if (v == SEQ_START_TOKEN) {
 		seq_printf(seq, 
 			   "%3s %6s "
 			   "%10s %10s %6s %6s\n", "Idx",
@@ -2420,16 +2435,12 @@ static struct file_operations igmp_mcf_seq_fops = {
 
 int __init igmp_mc_proc_init(void)
 {
-	struct proc_dir_entry *p;
-
-	p = create_proc_entry("igmp", S_IRUGO, proc_net);
-	if (p)
-		p->proc_fops = &igmp_mc_seq_fops;
-
-	p = create_proc_entry("mcfilter", S_IRUGO, proc_net);
-	if (p)
-		p->proc_fops = &igmp_mcf_seq_fops;
+	proc_net_fops_create("igmp", S_IRUGO, &igmp_mc_seq_fops);
+	proc_net_fops_create("mcfilter", S_IRUGO, &igmp_mcf_seq_fops);
 	return 0;
 }
 #endif
 
+EXPORT_SYMBOL(ip_mc_dec_group);
+EXPORT_SYMBOL(ip_mc_inc_group);
+EXPORT_SYMBOL(ip_mc_join_group);

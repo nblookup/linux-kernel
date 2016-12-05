@@ -8,6 +8,7 @@
 #define PSCHED_CLOCK_SOURCE	PSCHED_JIFFIES
 
 #include <linux/config.h>
+#include <linux/netdevice.h>
 #include <linux/types.h>
 #include <linux/pkt_sched.h>
 #include <net/pkt_cls.h>
@@ -216,12 +217,16 @@ extern psched_time_t	psched_time_base;
 
 #if PSCHED_CLOCK_SOURCE == PSCHED_JIFFIES
 
-#if HZ == 100
+#if HZ < 96
+#define PSCHED_JSCALE 14
+#elif HZ >= 96 && HZ < 192
 #define PSCHED_JSCALE 13
-#elif HZ == 1024
+#elif HZ >= 192 && HZ < 384
+#define PSCHED_JSCALE 12
+#elif HZ >= 384 && HZ < 768
+#define PSCHED_JSCALE 11
+#elif HZ >= 768
 #define PSCHED_JSCALE 10
-#else
-#define PSCHED_JSCALE 0
 #endif
 
 #define PSCHED_EXPORTLIST_2

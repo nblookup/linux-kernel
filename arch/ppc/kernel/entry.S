@@ -1,5 +1,5 @@
 /*
- *  PowerPC version 
+ *  PowerPC version
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
  *  Rewritten by Cort Dougan (cort@fsmlabs.com) for PReP
  *    Copyright (C) 1996 Cort Dougan <cort@fsmlabs.com>
@@ -16,7 +16,7 @@
  *  modify it under the terms of the GNU General Public License
  *  as published by the Free Software Foundation; either version
  *  2 of the License, or (at your option) any later version.
- *	
+ *
  */
 
 #include <linux/config.h>
@@ -170,8 +170,6 @@ _GLOBAL(DoSyscall)
 #ifdef SHOW_SYSCALLS
 	bl	do_show_syscall
 #endif /* SHOW_SYSCALLS */
-	cmpli	0,r0,NR_syscalls
-	bge-	66f
 	rlwinm	r10,r1,0,0,18	/* current_thread_info() */
 	lwz	r11,TI_FLAGS(r10)
 	rlwinm	r11,r11,0,~_TIF_FORCE_NOERROR
@@ -179,9 +177,11 @@ _GLOBAL(DoSyscall)
 	andi.	r11,r11,_TIF_SYSCALL_TRACE
 	bne-	syscall_dotrace
 syscall_dotrace_cont:
+	cmpli	0,r0,NR_syscalls
 	lis	r10,sys_call_table@h
 	ori	r10,r10,sys_call_table@l
 	slwi	r0,r0,2
+	bge-	66f
 	lwzx	r10,r10,r0	/* Fetch system call handler [ptr] */
 	mtlr	r10
 	addi	r9,r1,STACK_FRAME_OVERHEAD
@@ -200,7 +200,7 @@ ret_from_syscall:
 	andi.	r11,r11,_TIF_FORCE_NOERROR
 	bne	30f
 	neg	r3,r3
-22:	lwz	r10,_CCR(r1)	/* Set SO bit in CR */
+	lwz	r10,_CCR(r1)	/* Set SO bit in CR */
 	oris	r10,r10,0x1000
 	stw	r10,_CCR(r1)
 
@@ -233,8 +233,8 @@ syscall_exit_cont:
 	SYNC
 	RFI
 
-66:	li	r3,ENOSYS
-	b	22b
+66:	li	r3,-ENOSYS
+	b	ret_from_syscall
 
 	.globl	ret_from_fork
 ret_from_fork:
@@ -433,7 +433,7 @@ ppc_clone:
  *
  * The code which creates the new task context is in 'copy_thread'
  * in arch/ppc/kernel/process.c
- */	
+ */
 _GLOBAL(_switch)
 	stwu	r1,-INT_FRAME_SIZE(r1)
 	mflr	r0
@@ -818,7 +818,7 @@ END_FTR_SECTION_IFSET(CPU_FTR_601)
 	.comm	ee_restarts,4
 
 /*
- * PROM code for specific machines follows.  Put it 
+ * PROM code for specific machines follows.  Put it
  * here so it's easy to add arch-specific sections later.
  * -- Cort
  */
@@ -844,7 +844,7 @@ _GLOBAL(enter_rtas)
 	LOAD_MSR_KERNEL(r0,MSR_KERNEL)
 	SYNC			/* disable interrupts so SRR0/1 */
 	MTMSRD(r0)		/* don't get trashed */
-	li	r9,MSR_
+	li	r9,MSR_KERNEL & ~(MSR_IR|MSR_DR)
 	mtlr	r6
 	CLR_TOP32(r7)
 	mtspr	SPRG2,r7

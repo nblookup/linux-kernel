@@ -153,8 +153,9 @@
  * is less than 512 (PAGE_SIZE<<3), but greater than 256.
  */
 
-#define BUFCTL_END 0xffffFFFF
-#define	SLAB_LIMIT 0xffffFFFE
+#define BUFCTL_END	0xffffFFFF
+#define BUFCTL_FREE	0xffffFFFE
+#define	SLAB_LIMIT	0xffffFFFD
 typedef unsigned int kmem_bufctl_t;
 
 /* Max number of objs-per-slab for caches which use off-slab slabs.
@@ -249,7 +250,7 @@ struct kmem_cache_s {
 	unsigned int		limit;
 /* 2) touched by every alloc & free from the backend */
 	struct kmem_list3	lists;
-	/* NUMA: kmem_3list_t	*nodelists[NR_NODES] */
+	/* NUMA: kmem_3list_t	*nodelists[MAX_NUMNODES] */
 	unsigned int		objsize;
 	unsigned int	 	flags;	/* constant flags */
 	unsigned int		num;	/* # of objs per slab */
@@ -292,6 +293,10 @@ struct kmem_cache_s {
 	atomic_t		allocmiss;
 	atomic_t		freehit;
 	atomic_t		freemiss;
+#endif
+#if DEBUG
+	int			dbghead;
+	int			reallen;
 #endif
 };
 
@@ -356,32 +361,68 @@ struct kmem_cache_s {
 #define POISON_AFTER	0x6b	/* for use-after-free poisoning */
 #define	POISON_END	0xa5	/* end-byte of poisoning */
 
+/* memory layout of objects:
+ * 0		: objp
+ * 0 .. cachep->dbghead - BYTES_PER_WORD - 1: padding. This ensures that
+ * 		the end of an object is aligned with the end of the real
+ * 		allocation. Catches writes behind the end of the allocation.
+ * cachep->dbghead - BYTES_PER_WORD .. cachep->dbghead - 1:
+ * 		redzone word.
+ * cachep->dbghead: The real object.
+ * cachep->objsize - 2* BYTES_PER_WORD: redzone word [BYTES_PER_WORD long]
+ * cachep->objsize - 1* BYTES_PER_WORD: last caller address [BYTES_PER_WORD long]
+ */
 static inline int obj_dbghead(kmem_cache_t *cachep)
 {
-	if (cachep->flags & SLAB_RED_ZONE)
-		return BYTES_PER_WORD;
-	return 0;
+	return cachep->dbghead;
 }
 
-static inline int obj_dbglen(kmem_cache_t *cachep)
+static inline int obj_reallen(kmem_cache_t *cachep)
 {
-	int len = 0;
+	return cachep->reallen;
+}
 
-	if (cachep->flags & SLAB_RED_ZONE) {
-		len += 2*BYTES_PER_WORD;
-	}
-	if (cachep->flags & SLAB_STORE_USER) {
-		len += BYTES_PER_WORD;
-	}
-	return len;
+static unsigned long *dbg_redzone1(kmem_cache_t *cachep, void *objp)
+{
+	BUG_ON(!(cachep->flags & SLAB_RED_ZONE));
+	return (unsigned long*) (objp+obj_dbghead(cachep)-BYTES_PER_WORD);
+}
+
+static unsigned long *dbg_redzone2(kmem_cache_t *cachep, void *objp)
+{
+	BUG_ON(!(cachep->flags & SLAB_RED_ZONE));
+	if (cachep->flags & SLAB_STORE_USER)
+		return (unsigned long*) (objp+cachep->objsize-2*BYTES_PER_WORD);
+	return (unsigned long*) (objp+cachep->objsize-BYTES_PER_WORD);
+}
+
+static void **dbg_userword(kmem_cache_t *cachep, void *objp)
+{
+	BUG_ON(!(cachep->flags & SLAB_STORE_USER));
+	return (void**)(objp+cachep->objsize-BYTES_PER_WORD);
 }
 #else
 static inline int obj_dbghead(kmem_cache_t *cachep)
 {
 	return 0;
 }
-static inline int obj_dbglen(kmem_cache_t *cachep)
+static inline int obj_reallen(kmem_cache_t *cachep)
 {
+	return cachep->objsize;
+}
+static inline unsigned long *dbg_redzone1(kmem_cache_t *cachep, void *objp)
+{
+	BUG();
+	return 0;
+}
+static inline unsigned long *dbg_redzone2(kmem_cache_t *cachep, void *objp)
+{
+	BUG();
+	return 0;
+}
+static inline void **dbg_userword(kmem_cache_t *cachep, void *objp)
+{
+	BUG();
 	return 0;
 }
 #endif
@@ -424,6 +465,8 @@ struct cache_sizes malloc_sizes[] = {
 	{ 0, }
 #undef CACHE
 };
+
+EXPORT_SYMBOL(malloc_sizes);
 
 /* Must match cache_sizes above. Out of line to keep cache footprint low. */
 static struct cache_names {
@@ -750,44 +793,45 @@ int __init cpucache_init(void)
 
 __initcall(cpucache_init);
 
-/* Interface to system's page allocator. No need to hold the cache-lock.
+/*
+ * Interface to system's page allocator. No need to hold the cache-lock.
+ *
+ * If we requested dmaable memory, we will get it. Even if we
+ * did not request dmaable memory, we might get it, but that
+ * would be relatively rare and ignorable.
  */
-static inline void * kmem_getpages (kmem_cache_t *cachep, unsigned long flags)
+static inline void *kmem_getpages(kmem_cache_t *cachep, unsigned long flags)
 {
-	void	*addr;
+	void *addr;
 
-	/*
-	 * If we requested dmaable memory, we will get it. Even if we
-	 * did not request dmaable memory, we might get it, but that
-	 * would be relatively rare and ignorable.
-	 */
 	flags |= cachep->gfpflags;
-	if ( cachep->flags & SLAB_RECLAIM_ACCOUNT) 
+	if (cachep->flags & SLAB_RECLAIM_ACCOUNT)
 		atomic_add(1<<cachep->gfporder, &slab_reclaim_pages);
-	addr = (void*) __get_free_pages(flags, cachep->gfporder);
-	/* Assume that now we have the pages no one else can legally
-	 * messes with the 'struct page's.
-	 * However vm_scan() might try to test the structure to see if
-	 * it is a named-page or buffer-page.  The members it tests are
-	 * of no interest here.....
-	 */
+	addr = (void*)__get_free_pages(flags, cachep->gfporder);
+	if (addr) {
+		int i = (1 << cachep->gfporder);
+		struct page *page = virt_to_page(addr);
+
+		while (i--) {
+			SetPageSlab(page);
+			page++;
+		}
+	}
 	return addr;
 }
 
-/* Interface to system's page release. */
-static inline void kmem_freepages (kmem_cache_t *cachep, void *addr)
+/*
+ * Interface to system's page release.
+ */
+static inline void kmem_freepages(kmem_cache_t *cachep, void *addr)
 {
 	unsigned long i = (1<<cachep->gfporder);
 	struct page *page = virt_to_page(addr);
 	const unsigned long nr_freed = i;
 
-	/* free_pages() does not clear the type bit - we do that.
-	 * The pages have been unlinked from their cache-slab,
-	 * but their 'struct page's might be accessed in
-	 * vm_scan(). Shouldn't be a worry.
-	 */
 	while (i--) {
-		ClearPageSlab(page);
+		if (!TestClearPageSlab(page))
+			BUG();
 		page++;
 	}
 	sub_page_state(nr_slab, nr_freed);
@@ -803,7 +847,7 @@ static inline void kmem_freepages (kmem_cache_t *cachep, void *addr)
 #ifdef CONFIG_DEBUG_PAGEALLOC
 static void store_stackinfo(kmem_cache_t *cachep, unsigned long *addr, unsigned long caller)
 {
-	int size = cachep->objsize-obj_dbglen(cachep);
+	int size = obj_reallen(cachep);
 
 	addr = (unsigned long *)&((char*)addr)[obj_dbghead(cachep)];
 
@@ -818,7 +862,7 @@ static void store_stackinfo(kmem_cache_t *cachep, unsigned long *addr, unsigned 
 		unsigned long *sptr = &caller;
 		unsigned long svalue;
 
-		while (((long) sptr & (THREAD_SIZE-1)) != 0) {
+		while (!kstack_end(sptr)) {
 			svalue = *sptr++;
 			if (kernel_text_address(svalue)) {
 				*addr++=svalue;
@@ -835,7 +879,7 @@ static void store_stackinfo(kmem_cache_t *cachep, unsigned long *addr, unsigned 
 
 static void poison_obj(kmem_cache_t *cachep, void *addr, unsigned char val)
 {
-	int size = cachep->objsize-obj_dbglen(cachep);
+	int size = obj_reallen(cachep);
 	addr = &((char*)addr)[obj_dbghead(cachep)];
 
 	memset(addr, val, size);
@@ -857,47 +901,42 @@ static void *scan_poisoned_obj(unsigned char* addr, unsigned int size)
 	return NULL;
 }
 
-static void check_poison_obj(kmem_cache_t *cachep, void *addr)
+static void check_poison_obj(kmem_cache_t *cachep, void *objp)
 {
 	void *end;
-	int size = cachep->objsize-obj_dbglen(cachep);
+	void *realobj;
+	int size = obj_reallen(cachep);
 
-	addr = &((char*)addr)[obj_dbghead(cachep)];
+	realobj = objp+obj_dbghead(cachep);
 
-	end = scan_poisoned_obj(addr, size);
+	end = scan_poisoned_obj(realobj, size);
 	if (end) {
 		int s;
 		printk(KERN_ERR "Slab corruption: start=%p, expend=%p, "
-				"problemat=%p\n", addr, addr+size-1, end);
+				"problemat=%p\n", realobj, realobj+size-1, end);
 		if (cachep->flags & SLAB_STORE_USER) {
-			void *pc;
-
-			if (cachep->flags & SLAB_RED_ZONE)
-				pc = *(void**)(addr+size+BYTES_PER_WORD);
-			else
-				pc = *(void**)(addr+size);
-			printk(KERN_ERR "Last user: [<%p>]", pc);
-			print_symbol("(%s)", (unsigned long)pc);
+			printk(KERN_ERR "Last user: [<%p>]", *dbg_userword(cachep, objp));
+			print_symbol("(%s)", (unsigned long)*dbg_userword(cachep, objp));
 			printk("\n");
 		}
 		printk(KERN_ERR "Data: ");
 		for (s = 0; s < size; s++) {
-			if (((char*)addr)[s] == POISON_BEFORE)
+			if (((char*)realobj)[s] == POISON_BEFORE)
 				printk(".");
-			else if (((char*)addr)[s] == POISON_AFTER)
+			else if (((char*)realobj)[s] == POISON_AFTER)
 				printk("*");
 			else
-				printk("%02X ", ((unsigned char*)addr)[s]);
+				printk("%02X ", ((unsigned char*)realobj)[s]);
 		}
 		printk("\n");
 		printk(KERN_ERR "Next: ");
 		for (; s < size + 32; s++) {
-			if (((char*)addr)[s] == POISON_BEFORE)
+			if (((char*)realobj)[s] == POISON_BEFORE)
 				printk(".");
-			else if (((char*)addr)[s] == POISON_AFTER)
+			else if (((char*)realobj)[s] == POISON_AFTER)
 				printk("*");
 			else
-				printk("%02X ", ((unsigned char*)addr)[s]);
+				printk("%02X ", ((unsigned char*)realobj)[s]);
 		}
 		printk("\n");
 		slab_error(cachep, "object was modified after freeing");
@@ -915,7 +954,6 @@ static void slab_destroy (kmem_cache_t *cachep, struct slab *slabp)
 	int i;
 	for (i = 0; i < cachep->num; i++) {
 		void *objp = slabp->s_mem + cachep->objsize * i;
-		int objlen = cachep->objsize;
 
 		if (cachep->flags & SLAB_POISON) {
 #ifdef CONFIG_DEBUG_PAGEALLOC
@@ -927,21 +965,16 @@ static void slab_destroy (kmem_cache_t *cachep, struct slab *slabp)
 			check_poison_obj(cachep, objp);
 #endif
 		}
-		if (cachep->flags & SLAB_STORE_USER)
-			objlen -= BYTES_PER_WORD;
-
 		if (cachep->flags & SLAB_RED_ZONE) {
-			if (*((unsigned long*)(objp)) != RED_INACTIVE)
+			if (*dbg_redzone1(cachep, objp) != RED_INACTIVE)
 				slab_error(cachep, "start of a freed object "
 							"was overwritten");
-			if (*((unsigned long*)(objp + objlen - BYTES_PER_WORD))
-				       	!= RED_INACTIVE)
+			if (*dbg_redzone2(cachep, objp) != RED_INACTIVE)
 				slab_error(cachep, "end of a freed object "
 							"was overwritten");
-			objp += BYTES_PER_WORD;
 		}
 		if (cachep->dtor && !(cachep->flags & SLAB_POISON))
-			(cachep->dtor)(objp, cachep, 0);
+			(cachep->dtor)(objp+obj_dbghead(cachep), cachep, 0);
 	}
 #else
 	if (cachep->dtor) {
@@ -1012,6 +1045,7 @@ kmem_cache_create (const char *name, size_t size, size_t offset,
 			BUG();
 
 #if DEBUG
+	WARN_ON(strchr(name, ' '));	/* It confuses parsers */
 	if ((flags & SLAB_DEBUG_INITIAL) && !ctor) {
 		/* No constructor, but inital state check requested */
 		printk("%sNo con, but init state check requested - %s\n", func_nm, name);
@@ -1019,10 +1053,6 @@ kmem_cache_create (const char *name, size_t size, size_t offset,
 	}
 
 #if FORCED_DEBUG
-#ifdef CONFIG_DEBUG_PAGEALLOC
-	if (size < PAGE_SIZE-3*BYTES_PER_WORD && size > 128)
-		size = PAGE_SIZE-3*BYTES_PER_WORD;
-#endif
 	/*
 	 * Enable redzoning and last user accounting, except
 	 * - for caches with forced alignment: redzoning would violate the
@@ -1053,6 +1083,9 @@ kmem_cache_create (const char *name, size_t size, size_t offset,
 		goto opps;
 	memset(cachep, 0, sizeof(kmem_cache_t));
 
+#if DEBUG
+	cachep->reallen = size;
+#endif
 	/* Check that size is in terms of words.  This is needed to avoid
 	 * unaligned accesses for some archs when redzoning is used, and makes
 	 * sure any on-slab bufctl's are also correctly aligned.
@@ -1070,12 +1103,20 @@ kmem_cache_create (const char *name, size_t size, size_t offset,
 		 * when redzoning.
 		 */
 		flags &= ~SLAB_HWCACHE_ALIGN;
-		size += 2*BYTES_PER_WORD;	/* words for redzone */
+		/* add space for red zone words */
+		cachep->dbghead += BYTES_PER_WORD;
+		size += 2*BYTES_PER_WORD;
 	}
 	if (flags & SLAB_STORE_USER) {
 		flags &= ~SLAB_HWCACHE_ALIGN;
-		size += BYTES_PER_WORD;		/* word for kfree caller address */
+		size += BYTES_PER_WORD; /* add space */
 	}
+#if FORCED_DEBUG && defined(CONFIG_DEBUG_PAGEALLOC)
+	if (size > 128 && cachep->reallen > L1_CACHE_BYTES && size < PAGE_SIZE) {
+		cachep->dbghead += PAGE_SIZE - size;
+		size = PAGE_SIZE;
+	}
+#endif
 #endif
 	align = BYTES_PER_WORD;
 	if (flags & SLAB_HWCACHE_ALIGN)
@@ -1237,6 +1278,8 @@ opps:
 	return cachep;
 }
 
+EXPORT_SYMBOL(kmem_cache_create);
+
 static inline void check_irq_off(void)
 {
 #if DEBUG
@@ -1356,6 +1399,8 @@ int kmem_cache_shrink(kmem_cache_t *cachep)
 	return __cache_shrink(cachep);
 }
 
+EXPORT_SYMBOL(kmem_cache_shrink);
+
 /**
  * kmem_cache_destroy - delete a cache
  * @cachep: the cache to destroy
@@ -1407,6 +1452,8 @@ int kmem_cache_destroy (kmem_cache_t * cachep)
 	return 0;
 }
 
+EXPORT_SYMBOL(kmem_cache_destroy);
+
 /* Get the memory for a slab management obj. */
 static inline struct slab* alloc_slabmgmt (kmem_cache_t *cachep,
 			void *objp, int colour_off, int local_flags)
@@ -1443,20 +1490,15 @@ static void cache_init_objs (kmem_cache_t * cachep,
 	for (i = 0; i < cachep->num; i++) {
 		void* objp = slabp->s_mem+cachep->objsize*i;
 #if DEBUG
-		int objlen = cachep->objsize;
 		/* need to poison the objs? */
 		if (cachep->flags & SLAB_POISON)
 			poison_obj(cachep, objp, POISON_BEFORE);
-		if (cachep->flags & SLAB_STORE_USER) {
-			objlen -= BYTES_PER_WORD;
-			((unsigned long*)(objp+objlen))[0] = 0;
-		}
+		if (cachep->flags & SLAB_STORE_USER)
+			*dbg_userword(cachep, objp) = NULL;
 
 		if (cachep->flags & SLAB_RED_ZONE) {
-			*((unsigned long*)(objp)) = RED_INACTIVE;
-			objp += BYTES_PER_WORD;
-			objlen -= 2* BYTES_PER_WORD;
-			*((unsigned long*)(objp + objlen)) = RED_INACTIVE;
+			*dbg_redzone1(cachep, objp) = RED_INACTIVE;
+			*dbg_redzone2(cachep, objp) = RED_INACTIVE;
 		}
 		/*
 		 * Constructors are not allowed to allocate memory from
@@ -1464,14 +1506,13 @@ static void cache_init_objs (kmem_cache_t * cachep,
 		 * Otherwise, deadlock. They must also be threaded.
 		 */
 		if (cachep->ctor && !(cachep->flags & SLAB_POISON))
-			cachep->ctor(objp, cachep, ctor_flags);
+			cachep->ctor(objp+obj_dbghead(cachep), cachep, ctor_flags);
 
 		if (cachep->flags & SLAB_RED_ZONE) {
-			if (*((unsigned long*)(objp + objlen)) != RED_INACTIVE)
+			if (*dbg_redzone2(cachep, objp) != RED_INACTIVE)
 				slab_error(cachep, "constructor overwrote the"
 							" end of an object");
-			objp -= BYTES_PER_WORD;
-			if (*((unsigned long*)(objp)) != RED_INACTIVE)
+			if (*dbg_redzone1(cachep, objp) != RED_INACTIVE)
 				slab_error(cachep, "constructor overwrote the"
 							" start of an object");
 		}
@@ -1567,7 +1608,6 @@ static int cache_grow (kmem_cache_t * cachep, int flags)
 	do {
 		SET_PAGE_CACHE(page, cachep);
 		SET_PAGE_SLAB(page, slabp);
-		SetPageSlab(page);
 		inc_page_state(nr_slab);
 		page++;
 	} while (--i);
@@ -1622,30 +1662,33 @@ static inline void *cache_free_debugcheck (kmem_cache_t * cachep, void * objp, v
 #if DEBUG
 	struct page *page;
 	unsigned int objnr;
-	int objlen = cachep->objsize;
 	struct slab *slabp;
 
+	objp -= obj_dbghead(cachep);
 	kfree_debugcheck(objp);
 	page = virt_to_page(objp);
 
-	BUG_ON(GET_PAGE_CACHE(page) != cachep);
+	if (GET_PAGE_CACHE(page) != cachep) {
+		printk(KERN_ERR "mismatch in kmem_cache_free: expected cache %p, got %p\n",
+				GET_PAGE_CACHE(page),cachep);
+		printk(KERN_ERR "%p is %s.\n", cachep, cachep->name);
+		printk(KERN_ERR "%p is %s.\n", GET_PAGE_CACHE(page), GET_PAGE_CACHE(page)->name);
+		WARN_ON(1);
+	}
 	slabp = GET_PAGE_SLAB(page);
 
-	if (cachep->flags & SLAB_STORE_USER) {
-		objlen -= BYTES_PER_WORD;
-	}
 	if (cachep->flags & SLAB_RED_ZONE) {
-		objp -= BYTES_PER_WORD;
-		if (xchg((unsigned long *)objp, RED_INACTIVE) != RED_ACTIVE)
-			slab_error(cachep, "double free, or memory before"
+		if (*dbg_redzone1(cachep, objp) != RED_ACTIVE || *dbg_redzone2(cachep, objp) != RED_ACTIVE) {
+			slab_error(cachep, "double free, or memory outside"
 						" object was overwritten");
-		if (xchg((unsigned long *)(objp+objlen-BYTES_PER_WORD), RED_INACTIVE) != RED_ACTIVE)
-			slab_error(cachep, "double free, or memory after "
-						" object was overwritten");
+			printk(KERN_ERR "%p: redzone 1: 0x%lx, redzone 2: 0x%lx.\n",
+					objp, *dbg_redzone1(cachep, objp), *dbg_redzone2(cachep, objp));
+		}
+		*dbg_redzone1(cachep, objp) = RED_INACTIVE;
+		*dbg_redzone2(cachep, objp) = RED_INACTIVE;
 	}
-	if (cachep->flags & SLAB_STORE_USER) {
-		*((void**)(objp+objlen)) = caller;
-	}
+	if (cachep->flags & SLAB_STORE_USER)
+		*dbg_userword(cachep, objp) = caller;
 
 	objnr = (objp-slabp->s_mem)/cachep->objsize;
 
@@ -1692,40 +1735,23 @@ static inline void check_slabp(kmem_cache_t *cachep, struct slab *slabp)
 	/* Check slab's freelist to see if this obj is there. */
 	for (i = slabp->free; i != BUFCTL_END; i = slab_bufctl(slabp)[i]) {
 		entries++;
-		BUG_ON(entries > cachep->num);
-		BUG_ON(i < 0 || i >= cachep->num);
+		if (entries > cachep->num || i < 0 || i >= cachep->num)
+			goto bad;
 	}
-	BUG_ON(entries != cachep->num - slabp->inuse);
+	if (entries != cachep->num - slabp->inuse) {
+		int i;
+bad:
+		printk(KERN_ERR "slab: Internal list corruption detected in cache '%s'(%d), slabp %p(%d). Hexdump:\n",
+				cachep->name, cachep->num, slabp, slabp->inuse);
+		for (i=0;i<sizeof(slabp)+cachep->num*sizeof(kmem_bufctl_t);i++) {
+			if ((i%16)==0)
+				printk("\n%03x:", i);
+			printk(" %02x", ((unsigned char*)slabp)[i]);
+		}
+		printk("\n");
+		BUG();
+	}
 #endif
-}
-
-static inline void * cache_alloc_one_tail (kmem_cache_t *cachep,
-						struct slab *slabp)
-{
-	void *objp;
-
-	check_spinlock_acquired(cachep);
-
-	STATS_INC_ALLOCED(cachep);
-	STATS_INC_ACTIVE(cachep);
-	STATS_SET_HIGH(cachep);
-
-	/* get obj pointer */
-	slabp->inuse++;
-	objp = slabp->s_mem + slabp->free*cachep->objsize;
-	slabp->free=slab_bufctl(slabp)[slabp->free];
-
-	return objp;
-}
-
-static inline void cache_alloc_listfixup(struct kmem_list3 *l3, struct slab *slabp)
-{
-	list_del(&slabp->list);
-	if (slabp->free == BUFCTL_END) {
-		list_add(&slabp->list, &l3->slabs_full);
-	} else {
-		list_add(&slabp->list, &l3->slabs_partial);
-	}
 }
 
 static void* cache_alloc_refill(kmem_cache_t* cachep, int flags)
@@ -1776,11 +1802,31 @@ retry:
 
 		slabp = list_entry(entry, struct slab, list);
 		check_slabp(cachep, slabp);
-		while (slabp->inuse < cachep->num && batchcount--)
-			ac_entry(ac)[ac->avail++] =
-				cache_alloc_one_tail(cachep, slabp);
+		check_spinlock_acquired(cachep);
+		while (slabp->inuse < cachep->num && batchcount--) {
+			kmem_bufctl_t next;
+			STATS_INC_ALLOCED(cachep);
+			STATS_INC_ACTIVE(cachep);
+			STATS_SET_HIGH(cachep);
+
+			/* get obj pointer */
+			ac_entry(ac)[ac->avail++] = slabp->s_mem + slabp->free*cachep->objsize;
+
+			slabp->inuse++;
+			next = slab_bufctl(slabp)[slabp->free];
+#if DEBUG
+			slab_bufctl(slabp)[slabp->free] = BUFCTL_FREE;
+#endif
+		       	slabp->free = next;
+		}
 		check_slabp(cachep, slabp);
-		cache_alloc_listfixup(l3, slabp);
+
+		/* move slabp to correct slabp list: */
+		list_del(&slabp->list);
+		if (slabp->free == BUFCTL_END)
+			list_add(&slabp->list, &l3->slabs_full);
+		else
+			list_add(&slabp->list, &l3->slabs_partial);
 	}
 
 must_grow:
@@ -1807,8 +1853,7 @@ alloc_done:
 static inline void
 cache_alloc_debugcheck_before(kmem_cache_t *cachep, int flags)
 {
-	if (flags & __GFP_WAIT)
-		might_sleep();
+	might_sleep_if(flags & __GFP_WAIT);
 #if DEBUG
 	kmem_flagcheck(cachep, flags);
 #endif
@@ -1819,8 +1864,6 @@ cache_alloc_debugcheck_after(kmem_cache_t *cachep,
 			unsigned long flags, void *objp, void *caller)
 {
 #if DEBUG
-	int objlen = cachep->objsize;
-
 	if (!objp)	
 		return objp;
  	if (cachep->flags & SLAB_POISON) {
@@ -1834,24 +1877,20 @@ cache_alloc_debugcheck_after(kmem_cache_t *cachep,
 #endif
 		poison_obj(cachep, objp, POISON_BEFORE);
 	}
-	if (cachep->flags & SLAB_STORE_USER) {
-		objlen -= BYTES_PER_WORD;
-		*((void **)(objp+objlen)) = caller;
-	}
+	if (cachep->flags & SLAB_STORE_USER)
+		*dbg_userword(cachep, objp) = caller;
 
 	if (cachep->flags & SLAB_RED_ZONE) {
-		/* Set alloc red-zone, and check old one. */
-		if (xchg((unsigned long *)objp, RED_ACTIVE) != RED_INACTIVE) {
-			slab_error(cachep, "memory before object was "
-						"overwritten");
+		if (*dbg_redzone1(cachep, objp) != RED_INACTIVE || *dbg_redzone2(cachep, objp) != RED_INACTIVE) {
+			slab_error(cachep, "double free, or memory outside"
+						" object was overwritten");
+			printk(KERN_ERR "%p: redzone 1: 0x%lx, redzone 2: 0x%lx.\n",
+					objp, *dbg_redzone1(cachep, objp), *dbg_redzone2(cachep, objp));
 		}
-		if (xchg((unsigned long *)(objp+objlen - BYTES_PER_WORD),
-				       	RED_ACTIVE) != RED_INACTIVE) {
-			slab_error(cachep, "memory after object was "
-						"overwritten");
-		}
-		objp += BYTES_PER_WORD;
+		*dbg_redzone1(cachep, objp) = RED_ACTIVE;
+		*dbg_redzone2(cachep, objp) = RED_ACTIVE;
 	}
+	objp += obj_dbghead(cachep);
 	if (cachep->ctor && cachep->flags & SLAB_POISON) {
 		unsigned long	ctor_flags = SLAB_CTOR_CONSTRUCTOR;
 
@@ -1911,6 +1950,13 @@ static void free_block(kmem_cache_t *cachep, void **objpp, int nr_objects)
 		list_del(&slabp->list);
 		objnr = (objp - slabp->s_mem) / cachep->objsize;
 		check_slabp(cachep, slabp);
+#if DEBUG
+		if (slab_bufctl(slabp)[objnr] != BUFCTL_FREE) {
+			printk(KERN_ERR "slab: double free detected in cache '%s', objp %p.\n",
+						cachep->name, objp);
+			BUG();
+		}
+#endif
 		slab_bufctl(slabp)[objnr] = slabp->free;
 		slabp->free = objnr;
 		STATS_DEC_ACTIVE(cachep);
@@ -2025,6 +2071,8 @@ void * kmem_cache_alloc (kmem_cache_t *cachep, int flags)
 	return __cache_alloc(cachep, flags);
 }
 
+EXPORT_SYMBOL(kmem_cache_alloc);
+
 /**
  * kmalloc - allocate memory
  * @size: how many bytes of memory are required.
@@ -2066,6 +2114,8 @@ void * __kmalloc (size_t size, int flags)
 	return NULL;
 }
 
+EXPORT_SYMBOL(__kmalloc);
+
 #ifdef CONFIG_SMP
 /**
  * __alloc_percpu - allocate one copy of the object for every present
@@ -2105,6 +2155,8 @@ unwind_oom:
 	kfree(pdata);
 	return NULL;
 }
+
+EXPORT_SYMBOL(__alloc_percpu);
 #endif
 
 /**
@@ -2123,6 +2175,8 @@ void kmem_cache_free (kmem_cache_t *cachep, void *objp)
 	__cache_free(cachep, objp);
 	local_irq_restore(flags);
 }
+
+EXPORT_SYMBOL(kmem_cache_free);
 
 /**
  * kfree - free previously allocated memory
@@ -2145,6 +2199,8 @@ void kfree (const void *objp)
 	local_irq_restore(flags);
 }
 
+EXPORT_SYMBOL(kfree);
+
 #ifdef CONFIG_SMP
 /**
  * free_percpu - free previously allocated percpu memory
@@ -2165,12 +2221,16 @@ free_percpu(const void *objp)
 		kfree(p->ptrs[i]);
 	}
 }
+
+EXPORT_SYMBOL(free_percpu);
 #endif
 
 unsigned int kmem_cache_size(kmem_cache_t *cachep)
 {
-	return cachep->objsize-obj_dbglen(cachep);
+	return obj_reallen(cachep);
 }
+
+EXPORT_SYMBOL(kmem_cache_size);
 
 kmem_cache_t * kmem_find_general_cachep (size_t size, int gfpflags)
 {
@@ -2187,6 +2247,8 @@ kmem_cache_t * kmem_find_general_cachep (size_t size, int gfpflags)
 	}
 	return (gfpflags & GFP_DMA) ? csizep->cs_dmacachep : csizep->cs_cachep;
 }
+
+EXPORT_SYMBOL(kmem_find_general_cachep);
 
 struct ccupdate_struct {
 	kmem_cache_t *cachep;
@@ -2349,7 +2411,7 @@ static void drain_array_locked(kmem_cache_t *cachep,
 	int tofree;
 
 	check_spinlock_acquired(cachep);
-	if (ac->touched) {
+	if (ac->touched && !force) {
 		ac->touched = 0;
 	} else if (ac->avail) {
 		tofree = force ? ac->avail : (ac->limit+4)/5;
@@ -2482,11 +2544,11 @@ static void *s_start(struct seq_file *m, loff_t *pos)
 		seq_puts(m, "slabinfo - version: 2.0\n");
 #endif
 		seq_puts(m, "# name            <active_objs> <num_objs> <objsize> <objperslab> <pagesperslab>");
-		seq_puts(m, " : tunables <batchcount> <limit <sharedfactor>");
+		seq_puts(m, " : tunables <batchcount> <limit> <sharedfactor>");
 		seq_puts(m, " : slabdata <active_slabs> <num_slabs> <sharedavail>");
 #if STATS
 		seq_puts(m, " : globalstat <listallocs> <maxobjs> <grown> <reaped> <error> <maxfreeable> <freelimit>");
-		seq_puts(m, " : cpustat <allochit <allocmiss <freehit <freemiss>");
+		seq_puts(m, " : cpustat <allochit> <allocmiss> <freehit> <freemiss>");
 #endif
 		seq_putc(m, '\n');
 	}
@@ -2636,8 +2698,8 @@ struct seq_operations slabinfo_op = {
  * slabinfo_write - Tuning for the slab allocator
  * @file: unused
  * @buffer: user buffer
- * @count: data len
- * @data: unused
+ * @count: data length
+ * @ppos: unused
  */
 ssize_t slabinfo_write(struct file *file, const char __user *buffer,
 				size_t count, loff_t *ppos)
@@ -2710,6 +2772,7 @@ void ptrinfo(unsigned long addr)
 		printk("virt addr invalid.\n");
 		return;
 	}
+#ifdef CONFIG_MMU
 	do {
 		pgd_t *pgd = pgd_offset_k(addr);
 		pmd_t *pmd;
@@ -2731,6 +2794,7 @@ void ptrinfo(unsigned long addr)
 		printk("normal page, pte_val 0x%llx\n",
 		  (unsigned long long)pte_val(*pte_offset_kernel(pmd, addr)));
 	} while(0);
+#endif
 
 	page = virt_to_page((void*)addr);
 	printk("struct page at %p, flags %lxh.\n", page, page->flags);
@@ -2757,12 +2821,17 @@ void ptrinfo(unsigned long addr)
 		if (objnr >= c->num) {
 			printk("Bad obj number.\n");
 		} else {
-			kernel_map_pages(virt_to_page(objp), c->objsize/PAGE_SIZE, 1);
+			kernel_map_pages(virt_to_page(objp),
+					c->objsize/PAGE_SIZE, 1);
 
-			printk("redzone: %lxh/%lxh/%lxh.\n",
-				((unsigned long*)objp)[0],
-				((unsigned long*)(objp+c->objsize))[-2],
-				((unsigned long*)(objp+c->objsize))[-1]);
+			if (c->flags & SLAB_RED_ZONE)
+				printk("redzone: 0x%lx/0x%lx.\n",
+					*dbg_redzone1(c, objp),
+					*dbg_redzone2(c, objp));
+
+			if (c->flags & SLAB_STORE_USER)
+				printk("Last user: %p.\n",
+					*dbg_userword(c, objp));
 		}
 		spin_unlock_irqrestore(&c->spinlock, flags);
 

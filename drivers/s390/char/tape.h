@@ -15,7 +15,6 @@
 #include <linux/config.h>
 #include <linux/blkdev.h>
 #include <linux/kernel.h>
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/mtio.h>
 #include <linux/interrupt.h>
@@ -169,7 +168,7 @@ struct tape_char_data {
 struct tape_blk_data
 {
 	/* Block device request queue. */
-	request_queue_t request_queue;
+	request_queue_t *request_queue;
 	spinlock_t request_queue_lock;
 	/* Block frontend tasklet */
 	struct tasklet_struct tasklet;

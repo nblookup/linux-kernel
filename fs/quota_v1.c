@@ -21,7 +21,7 @@ static void v1_disk2mem_dqblk(struct mem_dqblk *m, struct v1_disk_dqblk *d)
 	m->dqb_curinodes = d->dqb_curinodes;
 	m->dqb_bhardlimit = d->dqb_bhardlimit;
 	m->dqb_bsoftlimit = d->dqb_bsoftlimit;
-	m->dqb_curspace = d->dqb_curblocks << QUOTABLOCK_BITS;
+	m->dqb_curspace = ((qsize_t)d->dqb_curblocks) << QUOTABLOCK_BITS;
 	m->dqb_itime = d->dqb_itime;
 	m->dqb_btime = d->dqb_btime;
 }
@@ -132,12 +132,14 @@ static int v1_check_quota_file(struct super_block *sb, int type)
 	mm_segment_t fs;
 	ssize_t size;
 	loff_t offset = 0;
+	loff_t isize;
 	static const uint quota_magics[] = V2_INITQMAGICS;
 
-	if (!inode->i_size)
+	isize = i_size_read(inode);
+	if (!isize)
 		return 0;
-	blocks = inode->i_size >> BLOCK_SIZE_BITS;
-	off = inode->i_size & (BLOCK_SIZE - 1);
+	blocks = isize >> BLOCK_SIZE_BITS;
+	off = isize & (BLOCK_SIZE - 1);
 	if ((blocks % sizeof(struct v1_disk_dqblk) * BLOCK_SIZE + off) % sizeof(struct v1_disk_dqblk))
 		return 0;
 	/* Doublecheck whether we didn't get file with new format - with old quotactl() this could happen */
@@ -162,7 +164,6 @@ static int v1_read_file_info(struct super_block *sb, int type)
 	struct v1_disk_dqblk dqblk;
 	int ret;
 
-	down(&dqopt->dqio_sem);
 	offset = v1_dqoff(0);
 	fs = get_fs();
 	set_fs(KERNEL_DS);
@@ -175,7 +176,6 @@ static int v1_read_file_info(struct super_block *sb, int type)
 	dqopt->info[type].dqi_igrace = dqblk.dqb_itime ? dqblk.dqb_itime : MAX_IQ_TIME;
 	dqopt->info[type].dqi_bgrace = dqblk.dqb_btime ? dqblk.dqb_btime : MAX_DQ_TIME;
 out:
-	up(&dqopt->dqio_sem);
 	set_fs(fs);
 	return ret;
 }
@@ -189,7 +189,6 @@ static int v1_write_file_info(struct super_block *sb, int type)
 	loff_t offset;
 	int ret;
 
-	down(&dqopt->dqio_sem);
 	dqopt->info[type].dqi_flags &= ~DQF_INFO_DIRTY;
 	offset = v1_dqoff(0);
 	fs = get_fs();
@@ -208,7 +207,6 @@ static int v1_write_file_info(struct super_block *sb, int type)
 	else if (ret > 0)
 		ret = -EIO;
 out:
-	up(&dqopt->dqio_sem);
 	set_fs(fs);
 	return ret;
 }

@@ -99,13 +99,14 @@ static void ymfpci_disable_dsp(ymfpci_t *unit);
 static void ymfpci_download_image(ymfpci_t *codec);
 static void ymf_memload(ymfpci_t *unit);
 
+static spinlock_t ymf_devs_lock = SPIN_LOCK_UNLOCKED;
 static LIST_HEAD(ymf_devs);
 
 /*
  *  constants
  */
 
-static struct pci_device_id ymf_id_tbl[] __devinitdata = {
+static struct pci_device_id ymf_id_tbl[] = {
 #define DEV(v, d, data) \
   { PCI_VENDOR_ID_##v, PCI_DEVICE_ID_##v##_##d, PCI_ANY_ID, PCI_ANY_ID, 0, 0, (unsigned long)data }
 	DEV (YAMAHA, 724,  "YMF724"),
@@ -177,15 +178,16 @@ static void ymfpci_codec_write(struct ac97_codec *dev, u8 reg, u16 val)
 	ymfpci_t *codec = dev->private_data;
 	u32 cmd;
 
+	spin_lock(&codec->ac97_lock);
 	/* XXX Do make use of dev->id */
 	ymfpci_codec_ready(codec, 0, 0);
 	cmd = ((YDSXG_AC97WRITECMD | reg) << 16) | val;
 	ymfpci_writel(codec, YDSXGR_AC97CMDDATA, cmd);
+	spin_unlock(&codec->ac97_lock);
 }
 
-static u16 ymfpci_codec_read(struct ac97_codec *dev, u8 reg)
+static u16 _ymfpci_codec_read(ymfpci_t *unit, u8 reg)
 {
-	ymfpci_t *unit = dev->private_data;
 	int i;
 
 	if (ymfpci_codec_ready(unit, 0, 0))
@@ -198,6 +200,18 @@ static u16 ymfpci_codec_read(struct ac97_codec *dev, u8 reg)
 			ymfpci_readw(unit, YDSXGR_PRISTATUSDATA);
 	}
 	return ymfpci_readw(unit, YDSXGR_PRISTATUSDATA);
+}
+
+static u16 ymfpci_codec_read(struct ac97_codec *dev, u8 reg)
+{
+	ymfpci_t *unit = dev->private_data;
+	u16 ret;
+	
+	spin_lock(&unit->ac97_lock);
+	ret = _ymfpci_codec_read(unit, reg);
+	spin_unlock(&unit->ac97_lock);
+	
+	return ret;
 }
 
 /*
@@ -1891,7 +1905,7 @@ static int ymf_open(struct inode *inode, struct file *file)
 	struct ymf_state *state;
 	int err;
 
-	minor = minor(inode->i_rdev);
+	minor = iminor(inode);
 	if ((minor & 0x0F) == 3) {	/* /dev/dspN */
 		;
 	} else {
@@ -1899,12 +1913,14 @@ static int ymf_open(struct inode *inode, struct file *file)
 	}
 
 	unit = NULL;	/* gcc warns */
+	spin_lock(&ymf_devs_lock);
 	list_for_each(list, &ymf_devs) {
 		unit = list_entry(list, ymfpci_t, ymf_devs);
 		if (((unit->dev_audio ^ minor) & ~0x0F) == 0)
 			break;
 	}
-	if (list == &ymf_devs)
+	spin_unlock(&ymf_devs_lock);
+	if (unit == NULL)
 		return -ENODEV;
 
 	down(&unit->open_sem);
@@ -2003,20 +2019,23 @@ static int ymf_release(struct inode *inode, struct file *file)
  */
 static int ymf_open_mixdev(struct inode *inode, struct file *file)
 {
-	int minor = minor(inode->i_rdev);
+	int minor = iminor(inode);
 	struct list_head *list;
 	ymfpci_t *unit;
 	int i;
 
+	spin_lock(&ymf_devs_lock);
 	list_for_each(list, &ymf_devs) {
 		unit = list_entry(list, ymfpci_t, ymf_devs);
 		for (i = 0; i < NR_AC97; i++) {
 			if (unit->ac97_codec[i] != NULL &&
 			    unit->ac97_codec[i]->dev_mixer == minor) {
+				spin_unlock(&ymf_devs_lock);
 				goto match;
 			}
 		}
 	}
+	spin_unlock(&ymf_devs_lock);
 	return -ENODEV;
 
  match:
@@ -2444,9 +2463,8 @@ static int ymf_ac97_init(ymfpci_t *unit, int num_ac97)
 	struct ac97_codec *codec;
 	u16 eid;
 
-	if ((codec = kmalloc(sizeof(struct ac97_codec), GFP_KERNEL)) == NULL)
+	if ((codec = ac97_alloc_codec()) == NULL)
 		return -ENOMEM;
-	memset(codec, 0, sizeof(struct ac97_codec));
 
 	/* initialize some basic codec information, other fields will be filled
 	   in ac97_probe_codec */
@@ -2462,7 +2480,7 @@ static int ymf_ac97_init(ymfpci_t *unit, int num_ac97)
 	}
 
 	eid = ymfpci_codec_read(codec, AC97_EXTENDED_ID);
-	if (eid==0xFFFFFF) {
+	if (eid==0xFFFF) {
 		printk(KERN_WARNING "ymfpci: no codec attached ?\n");
 		goto out_kfree;
 	}
@@ -2478,14 +2496,14 @@ static int ymf_ac97_init(ymfpci_t *unit, int num_ac97)
 
 	return 0;
  out_kfree:
-	kfree(codec);
+	ac97_release_codec(codec);
 	return -ENODEV;
 }
 
 #ifdef CONFIG_SOUND_YMFPCI_LEGACY
 # ifdef MODULE
-static int mpu_io     = 0;
-static int synth_io   = 0;
+static int mpu_io;
+static int synth_io;
 MODULE_PARM(mpu_io, "i");
 MODULE_PARM(synth_io, "i");
 # else
@@ -2517,6 +2535,7 @@ static int __devinit ymf_probe_one(struct pci_dev *pcidev, const struct pci_devi
 
 	spin_lock_init(&codec->reg_lock);
 	spin_lock_init(&codec->voice_lock);
+	spin_lock_init(&codec->ac97_lock);
 	init_MUTEX(&codec->open_sem);
 	INIT_LIST_HEAD(&codec->states);
 	codec->pci = pcidev;
@@ -2594,7 +2613,9 @@ static int __devinit ymf_probe_one(struct pci_dev *pcidev, const struct pci_devi
 #endif /* CONFIG_SOUND_YMFPCI_LEGACY */
 
 	/* put it into driver list */
+	spin_lock(&ymf_devs_lock);
 	list_add_tail(&codec->ymf_devs, &ymf_devs);
+	spin_unlock(&ymf_devs_lock);
 	pci_set_drvdata(pcidev, codec);
 
 	return 0;
@@ -2615,7 +2636,8 @@ static int __devinit ymf_probe_one(struct pci_dev *pcidev, const struct pci_devi
  out_release_region:
 	release_mem_region(pci_resource_start(pcidev, 0), 0x8000);
  out_free:
-	kfree(codec);
+	if (codec->ac97_codec[0])
+		ac97_release_codec(codec->ac97_codec[0]);
 	return -ENODEV;
 }
 
@@ -2625,10 +2647,12 @@ static void __devexit ymf_remove_one(struct pci_dev *pcidev)
 	ymfpci_t *codec = pci_get_drvdata(pcidev);
 
 	/* remove from list of devices */
+	spin_lock(&ymf_devs_lock);
 	list_del(&codec->ymf_devs);
+	spin_unlock(&ymf_devs_lock);
 
 	unregister_sound_mixer(codec->ac97_codec[0]->dev_mixer);
-	kfree(codec->ac97_codec[0]);
+	ac97_release_codec(codec->ac97_codec[0]);
 	unregister_sound_dsp(codec->dev_audio);
 	free_irq(pcidev->irq, codec);
 	ymfpci_memfree(codec);
@@ -2643,7 +2667,6 @@ static void __devexit ymf_remove_one(struct pci_dev *pcidev)
 		unload_uart401(&codec->mpu_data);
 	}
 #endif /* CONFIG_SOUND_YMFPCI_LEGACY */
-	kfree(codec);
 }
 
 MODULE_AUTHOR("Jaroslav Kysela");

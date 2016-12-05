@@ -290,7 +290,7 @@ static int klsi_105_startup (struct usb_serial *serial)
 
 		priv->bytes_in	    = 0;
 		priv->bytes_out	    = 0;
-		usb_set_serial_port_data(&serial->port[i], priv);
+		usb_set_serial_port_data(serial->port[i], priv);
 
 		spin_lock_init (&priv->lock);
 		for (i=0; i<NUM_URBS; i++) {
@@ -312,7 +312,7 @@ static int klsi_105_startup (struct usb_serial *serial)
 		}
 
 		/* priv->termios is left uninitalized until port opening */
-		init_waitqueue_head(&serial->port[i].write_wait);
+		init_waitqueue_head(&serial->port[i]->write_wait);
 	}
 	
 	return (0);
@@ -327,7 +327,7 @@ static void klsi_105_shutdown (struct usb_serial *serial)
 
 	/* stop reads and writes on all ports */
 	for (i=0; i < serial->num_ports; ++i) {
-		struct klsi_105_private *priv = usb_get_serial_port_data(&serial->port[i]);
+		struct klsi_105_private *priv = usb_get_serial_port_data(serial->port[i]);
 		unsigned long flags;
 
 		if (priv) {
@@ -354,7 +354,7 @@ static void klsi_105_shutdown (struct usb_serial *serial)
 			spin_unlock_irqrestore (&priv->lock, flags);
 
 			kfree(priv);
-			usb_set_serial_port_data(&serial->port[i], NULL);
+			usb_set_serial_port_data(serial->port[i], NULL);
 		}
 	}
 } /* klsi_105_shutdown */
@@ -1037,11 +1037,20 @@ static void klsi_105_unthrottle (struct usb_serial_port *port)
 
 static int __init klsi_105_init (void)
 {
-	usb_serial_register (&kl5kusb105d_device);
-	usb_register (&kl5kusb105d_driver);
+	int retval;
+	retval = usb_serial_register(&kl5kusb105d_device);
+	if (retval)
+		goto failed_usb_serial_register;
+	retval = usb_register(&kl5kusb105d_driver);
+	if (retval)
+		goto failed_usb_register;
 
 	info(DRIVER_DESC " " DRIVER_VERSION);
 	return 0;
+failed_usb_register:
+	usb_serial_deregister(&kl5kusb105d_device);
+failed_usb_serial_register:
+	return retval;
 }
 
 

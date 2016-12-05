@@ -324,7 +324,7 @@ static void auerchain_complete (struct urb * urb, struct pt_regs *regs)
                 urb    = acep->urbp;
                 dbg ("auerchain_complete: submitting next urb from chain");
 		urb->status = 0;	/* needed! */
-		result = usb_submit_urb(urb, GFP_KERNEL);
+		result = usb_submit_urb(urb, GFP_ATOMIC);
 
                 /* check for submit errors */
                 if (result) {
@@ -402,7 +402,7 @@ static int auerchain_submit_urb_list (pauerchain_t acp, struct urb * urb, int ea
         if (acep) {
                 dbg("submitting urb immediate");
 		urb->status = 0;	/* needed! */
-                result = usb_submit_urb(urb, GFP_KERNEL);
+                result = usb_submit_urb(urb, GFP_ATOMIC);
                 /* check for submit errors */
                 if (result) {
                         urb->status = result;
@@ -774,7 +774,7 @@ static void auerbuf_free_buffers (pauerbufctl_t bcp)
 /* requirement: auerbuf_init() */
 static int auerbuf_setup (pauerbufctl_t bcp, unsigned int numElements, unsigned int bufsize)
 {
-        pauerbuf_t bep;
+        pauerbuf_t bep = NULL;
 
         dbg ("auerbuf_setup called with %d elements of %d bytes", numElements, bufsize);
 
@@ -801,6 +801,7 @@ static int auerbuf_setup (pauerbufctl_t bcp, unsigned int numElements, unsigned 
 
 bl_fail:/* not enough memory. Free allocated elements */
         dbg ("auerbuf_setup: no more memory");
+	kfree(bep);
         auerbuf_free_buffers (bcp);
         return -ENOMEM;
 }
@@ -1379,7 +1380,7 @@ static void auerswald_removeservice (pauerswald_t cp, pauerscon_t scp)
 /* Open a new character device */
 static int auerchar_open (struct inode *inode, struct file *file)
 {
-	int dtindex = minor(inode->i_rdev);
+	int dtindex = iminor(inode);
 	pauerswald_t cp = NULL;
 	pauerchar_t ccp = NULL;
 	struct usb_interface *intf;

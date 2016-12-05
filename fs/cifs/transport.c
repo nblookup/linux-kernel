@@ -1,7 +1,7 @@
 /*
  *   fs/cifs/transport.c
  *
- *   Copyright (c) International Business Machines  Corp., 2002
+ *   Copyright (C) International Business Machines  Corp., 2002,2003
  *   Author(s): Steve French (sfrench@us.ibm.com)
  *
  *   This library is free software; you can redistribute it and/or modify
@@ -23,7 +23,6 @@
 #include <linux/list.h>
 #include <linux/wait.h>
 #include <linux/net.h>
-#include <linux/version.h>
 #include <asm/uaccess.h>
 #include <asm/processor.h>
 #include "cifspdu.h"
@@ -40,11 +39,15 @@ AllocMidQEntry(struct smb_hdr *smb_buffer, struct cifsSesInfo *ses)
 	struct mid_q_entry *temp;
 	int timeout = 10 * HZ;
 
-/* BB add spinlock to protect midq for each session BB */
 	if (ses == NULL) {
 		cERROR(1, ("Null session passed in to AllocMidQEntry "));
 		return NULL;
 	}
+	if (ses->server == NULL) {
+		cERROR(1, ("Null TCP session in AllocMidQEntry"));
+		return NULL;
+	}
+	
 	temp = (struct mid_q_entry *) kmem_cache_alloc(cifs_mid_cachep,
 						       SLAB_KERNEL);
 	if (temp == NULL)
@@ -65,15 +68,14 @@ AllocMidQEntry(struct smb_hdr *smb_buffer, struct cifsSesInfo *ses)
 		/* Should we wake up tcp thread first? BB  */
 		timeout = wait_event_interruptible_timeout(ses->server->response_q,
 			(ses->server->tcpStatus == CifsGood), timeout);
-        cFYI(1,("timeout (after reconnection wait) %d",timeout));
 	}
 
 	if (ses->server->tcpStatus == CifsGood) {
-		write_lock(&GlobalMid_Lock);
+		spin_lock(&GlobalMid_Lock);
 		list_add_tail(&temp->qhead, &ses->server->pending_mid_q);
 		atomic_inc(&midCount);
 		temp->midState = MID_REQUEST_ALLOCATED;
-		write_unlock(&GlobalMid_Lock);
+		spin_unlock(&GlobalMid_Lock);
 	} else { 
 		cERROR(1,("Need to reconnect after session died to server"));
 		if (temp)
@@ -86,21 +88,20 @@ AllocMidQEntry(struct smb_hdr *smb_buffer, struct cifsSesInfo *ses)
 void
 DeleteMidQEntry(struct mid_q_entry *midEntry)
 {
-	/* BB add spinlock to protect midq for each session BB */
-	write_lock(&GlobalMid_Lock);
+	spin_lock(&GlobalMid_Lock);
 	midEntry->midState = MID_FREE;
 	list_del(&midEntry->qhead);
 	atomic_dec(&midCount);
-	write_unlock(&GlobalMid_Lock);
+	spin_unlock(&GlobalMid_Lock);
 	buf_release(midEntry->resp_buf);
 	kmem_cache_free(cifs_mid_cachep, midEntry);
 }
 
 struct oplock_q_entry *
-AllocOplockQEntry(struct file * file, struct cifsTconInfo * tcon)
+AllocOplockQEntry(struct inode * pinode, __u16 fid, struct cifsTconInfo * tcon)
 {
 	struct oplock_q_entry *temp;
-	if ((file == NULL) || (tcon == NULL)) {
+	if ((pinode== NULL) || (tcon == NULL)) {
 		cERROR(1, ("Null parms passed to AllocOplockQEntry"));
 		return NULL;
 	}
@@ -109,11 +110,12 @@ AllocOplockQEntry(struct file * file, struct cifsTconInfo * tcon)
 	if (temp == NULL)
 		return temp;
 	else {
-		temp->file_to_flush = file;
+		temp->pinode = pinode;
 		temp->tcon = tcon;
-		write_lock(&GlobalMid_Lock);
+		temp->netfid = fid;
+		spin_lock(&GlobalMid_Lock);
 		list_add_tail(&temp->qhead, &GlobalOplock_Q);
-		write_unlock(&GlobalMid_Lock);
+		spin_unlock(&GlobalMid_Lock);
 	}
 	return temp;
 
@@ -121,11 +123,10 @@ AllocOplockQEntry(struct file * file, struct cifsTconInfo * tcon)
 
 void DeleteOplockQEntry(struct oplock_q_entry * oplockEntry)
 {
-	/* BB add spinlock to protect midq for each session BB */
-	write_lock(&GlobalMid_Lock); 
+	spin_lock(&GlobalMid_Lock); 
     /* should we check if list empty first? */
 	list_del(&oplockEntry->qhead);
-	write_unlock(&GlobalMid_Lock);
+	spin_unlock(&GlobalMid_Lock);
 	kmem_cache_free(cifs_oplock_cachep, oplockEntry);
 }
 
@@ -164,7 +165,10 @@ smb_send(struct socket *ssocket, struct smb_hdr *smb_buffer,
 	temp_fs = get_fs();	/* we must turn off socket api parm checking */
 	set_fs(get_ds());
 	rc = sock_sendmsg(ssocket, &smb_msg, smb_buf_length + 4);
-
+	while((rc == -ENOSPC) || (rc == -EAGAIN)) {
+		schedule_timeout(HZ/2);
+		rc = sock_sendmsg(ssocket, &smb_msg, smb_buf_length + 4);
+	}
 	set_fs(temp_fs);
 
 	if (rc < 0) {
@@ -199,17 +203,20 @@ SendReceive(const unsigned int xid, struct cifsSesInfo *ses,
 
         if (in_buf->smb_buf_length > 12)
                 in_buf->Flags2 = cpu_to_le16(in_buf->Flags2);
-
+	
         rc = cifs_sign_smb(in_buf, ses, &midQ->sequence_number);
 
 	midQ->midState = MID_REQUEST_SUBMITTED;
 	rc = smb_send(ses->server->ssocket, in_buf, in_buf->smb_buf_length,
 		      (struct sockaddr *) &(ses->server->sockAddr));
 
+	if (long_op == -1)
+		goto cifs_no_response_exit;
 	if (long_op > 1) /* writes past end of file can take looooong time */
 		timeout = 300 * HZ;
 	else if (long_op == 1)
-		timeout = 60 * HZ;
+		timeout = 45 * HZ; /* should be greater than 
+			servers oplock break timeout (about 43 seconds) */
 	else
 		timeout = 15 * HZ;
 	/* wait for 15 seconds or until woken up due to response arriving or 
@@ -228,7 +235,9 @@ SendReceive(const unsigned int xid, struct cifsSesInfo *ses,
 			receive_len =
 			    be32_to_cpu(midQ->resp_buf->smb_buf_length);
 		else {
+			cFYI(1,("No response buffer"));
 			DeleteMidQEntry(midQ);
+			ses->server->tcpStatus = CifsNeedReconnect;
 			return -EIO;
 		}
 	}
@@ -280,10 +289,12 @@ SendReceive(const unsigned int xid, struct cifsSesInfo *ses,
 			    4 /* do not count RFC1001 header */  +
 			    (2 * out_buf->WordCount) + 2 /* bcc */ )
 				BCC(out_buf) = le16_to_cpu(BCC(out_buf));
-		} else
+		} else {
 			rc = -EIO;
+			cFYI(1,("Bad MID state? "));
+		}
 	}
-
+cifs_no_response_exit:
 	DeleteMidQEntry(midQ);	/* BB what if process is killed?
 			 - BB add background daemon to clean up Mid entries from
 			 killed processes & test killing process with active mid */

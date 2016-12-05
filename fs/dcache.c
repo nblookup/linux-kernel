@@ -35,6 +35,8 @@
 spinlock_t dcache_lock __cacheline_aligned_in_smp = SPIN_LOCK_UNLOCKED;
 seqlock_t rename_lock __cacheline_aligned_in_smp = SEQLOCK_UNLOCKED;
 
+EXPORT_SYMBOL(dcache_lock);
+
 static kmem_cache_t *dentry_cache; 
 
 /*
@@ -82,7 +84,7 @@ static void d_free(struct dentry *dentry)
 /*
  * Release the dentry's inode, using the filesystem
  * d_iput() operation if defined.
- * Called with dcache_lock held, drops it.
+ * Called with dcache_lock and per dentry lock held, drops both.
  */
 static inline void dentry_iput(struct dentry * dentry)
 {
@@ -90,13 +92,16 @@ static inline void dentry_iput(struct dentry * dentry)
 	if (inode) {
 		dentry->d_inode = NULL;
 		list_del_init(&dentry->d_alias);
+		spin_unlock(&dentry->d_lock);
 		spin_unlock(&dcache_lock);
 		if (dentry->d_op && dentry->d_op->d_iput)
 			dentry->d_op->d_iput(dentry, inode);
 		else
 			iput(inode);
-	} else
+	} else {
+		spin_unlock(&dentry->d_lock);
 		spin_unlock(&dcache_lock);
+	}
 }
 
 /* 
@@ -177,9 +182,8 @@ kill_it: {
   			dentry_stat.nr_unused--;
   		}
   		list_del(&dentry->d_child);
- 		spin_unlock(&dentry->d_lock);
 		dentry_stat.nr_dentry--;	/* For d_free, below */
-		/* drops the lock, at that point nobody can reach this dentry */
+		/*drops the locks, at that point nobody can reach this dentry */
 		dentry_iput(dentry);
 		parent = dentry->d_parent;
 		d_free(dentry);
@@ -341,7 +345,6 @@ static inline void prune_one_dentry(struct dentry * dentry)
 
 	__d_drop(dentry);
 	list_del(&dentry->d_child);
- 	spin_unlock(&dentry->d_lock);
 	dentry_stat.nr_dentry--;	/* For d_free, below */
 	dentry_iput(dentry);
 	parent = dentry->d_parent;
@@ -1116,7 +1119,6 @@ void d_delete(struct dentry * dentry)
 	spin_lock(&dcache_lock);
 	spin_lock(&dentry->d_lock);
 	if (atomic_read(&dentry->d_count) == 1) {
-		spin_unlock(&dentry->d_lock);
 		dentry_iput(dentry);
 		return;
 	}
@@ -1451,19 +1453,24 @@ out:
 int is_subdir(struct dentry * new_dentry, struct dentry * old_dentry)
 {
 	int result;
+	unsigned long seq;
 
 	result = 0;
-	for (;;) {
-		if (new_dentry != old_dentry) {
-			struct dentry * parent = new_dentry->d_parent;
-			if (parent == new_dentry)
-				break;
-			new_dentry = parent;
-			continue;
+        do {
+		seq = read_seqbegin(&rename_lock);
+		for (;;) {
+			if (new_dentry != old_dentry) {
+				struct dentry * parent = new_dentry->d_parent;
+				if (parent == new_dentry)
+					break;
+				new_dentry = parent;
+				continue;
+			}
+			result = 1;
+			break;
 		}
-		result = 1;
-		break;
-	}
+	} while (read_seqretry(&rename_lock, seq));
+
 	return result;
 }
 
@@ -1634,3 +1641,27 @@ void __init vfs_caches_init(unsigned long mempages)
 	bdev_cache_init();
 	chrdev_init();
 }
+
+EXPORT_SYMBOL(d_alloc);
+EXPORT_SYMBOL(d_alloc_anon);
+EXPORT_SYMBOL(d_alloc_root);
+EXPORT_SYMBOL(d_delete);
+EXPORT_SYMBOL(d_find_alias);
+EXPORT_SYMBOL(d_instantiate);
+EXPORT_SYMBOL(d_invalidate);
+EXPORT_SYMBOL(d_lookup);
+EXPORT_SYMBOL(d_move);
+EXPORT_SYMBOL(d_path);
+EXPORT_SYMBOL(d_prune_aliases);
+EXPORT_SYMBOL(d_rehash);
+EXPORT_SYMBOL(d_splice_alias);
+EXPORT_SYMBOL(d_validate);
+EXPORT_SYMBOL(dget_locked);
+EXPORT_SYMBOL(dput);
+EXPORT_SYMBOL(find_inode_number);
+EXPORT_SYMBOL(have_submounts);
+EXPORT_SYMBOL(is_subdir);
+EXPORT_SYMBOL(names_cachep);
+EXPORT_SYMBOL(shrink_dcache_anon);
+EXPORT_SYMBOL(shrink_dcache_parent);
+EXPORT_SYMBOL(shrink_dcache_sb);

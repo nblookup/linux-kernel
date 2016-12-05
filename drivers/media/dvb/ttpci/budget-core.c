@@ -1,4 +1,5 @@
 #include "budget.h"
+#include "ttpci-eeprom.h"
 
 int budget_debug = 0;
 
@@ -45,12 +46,12 @@ static int start_ts_capture (struct budget *budget)
         mdelay(10);
 
         saa7146_write(dev, BASE_ODD3, 0);
-        saa7146_write(dev, BASE_EVEN3, TS_WIDTH*TS_HEIGHT/2);
+        saa7146_write(dev, BASE_EVEN3, 0);
         saa7146_write(dev, PROT_ADDR3, TS_WIDTH*TS_HEIGHT);	
         saa7146_write(dev, BASE_PAGE3, budget->pt.dma |ME1|0x90);
         saa7146_write(dev, PITCH3, TS_WIDTH);
 
-        saa7146_write(dev, NUM_LINE_BYTE3, ((TS_HEIGHT/2)<<16)|TS_WIDTH);
+        saa7146_write(dev, NUM_LINE_BYTE3, (TS_HEIGHT<<16)|TS_WIDTH);
       	saa7146_write(dev, MC2, (MASK_04 | MASK_20));
      	saa7146_write(dev, MC1, (MASK_04 | MASK_20)); // DMA3 on
 
@@ -79,14 +80,11 @@ static void vpeirq (unsigned long data)
 		return;
 
         if (newdma > olddma) { /* no wraparound, dump olddma..newdma */
-               	if(mem[olddma] == 0x47)
                         dvb_dmx_swfilter_packets(&budget->demux, 
         	                mem+olddma, (newdma-olddma) / 188);
         } else { /* wraparound, dump olddma..buflen and 0..newdma */
-                if(mem[olddma] == 0x47)
 	                dvb_dmx_swfilter_packets(&budget->demux,
         	                mem+olddma, (TS_BUFLEN-olddma) / 188);
-                if(mem[0] == 0x47)
                         dvb_dmx_swfilter_packets(&budget->demux,
                                 mem, newdma / 188);
         }
@@ -165,7 +163,6 @@ static int budget_register(struct budget *budget)
         if (ret < 0)
                 return ret;
 
-        budget->dvb_net.card_num = budget->dvb_adapter->num;
         dvb_net_init(budget->dvb_adapter, &budget->dvb_net, &dvbdemux->dmx);
 
 	return 0;
@@ -222,7 +219,7 @@ int ttpci_budget_init (struct budget *budget,
            get recognized before the main driver is loaded */
         saa7146_write(dev, GPIO_CTRL, 0x500000);
 	
-	saa7146_i2c_adapter_prepare(dev, NULL, SAA7146_I2C_BUS_BIT_RATE_3200);
+	saa7146_i2c_adapter_prepare(dev, NULL, SAA7146_I2C_BUS_BIT_RATE_120);
 
 	budget->i2c_bus = dvb_register_i2c_bus (master_xfer, dev,
 						budget->dvb_adapter, 0);
@@ -231,6 +228,8 @@ int ttpci_budget_init (struct budget *budget,
 		dvb_unregister_adapter (budget->dvb_adapter);
 		return -ENOMEM;
 	}
+
+	ttpci_eeprom_parse_mac(budget->i2c_bus);
 
 	if( NULL == (budget->grabbing = saa7146_vmalloc_build_pgtable(dev->pci,length,&budget->pt))) {
 		ret = -ENOMEM;

@@ -39,7 +39,7 @@
 #define _COMPONENT		ACPI_BUS_COMPONENT
 ACPI_MODULE_NAME		("acpi_bus")
 
-extern void eisa_set_level_irq(unsigned int irq);
+extern void acpi_pic_set_level_irq(unsigned int irq);
 
 FADT_DESCRIPTOR			acpi_fadt;
 struct acpi_device		*acpi_root;
@@ -615,7 +615,7 @@ acpi_bus_init (void)
 	if (acpi_ioapic)
 		mp_config_ioapic_for_sci(acpi_fadt.sci_int);
 	else
-		eisa_set_level_irq(acpi_fadt.sci_int);
+		acpi_pic_set_level_irq(acpi_fadt.sci_int);
 #endif
 
 	status = acpi_enable_subsystem(ACPI_FULL_INITIALIZATION);
@@ -634,8 +634,7 @@ acpi_bus_init (void)
 	 * the EC parameters out of that.
 	 */
 	status = acpi_ec_ecdt_probe();
-	if (ACPI_FAILURE(status))
-		goto error1;
+	/* Ignore result. Not having an ECDT is not fatal. */
 #endif
 
 	status = acpi_initialize_objects(ACPI_FULL_INITIALIZATION);
@@ -691,7 +690,7 @@ static int __init acpi_init (void)
 	acpi_set_debug(ACPI_DEBUG_LOW);
 
 	if (acpi_disabled) {
-		printk(KERN_INFO PREFIX "Disabled via command line (acpi=off)\n");
+		printk(KERN_INFO PREFIX "Interpreter disabled.\n");
 		return -ENODEV;
 	}
 

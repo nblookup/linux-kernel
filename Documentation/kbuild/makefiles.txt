@@ -212,12 +212,11 @@ more details, with real examples.
 
 	No special notation is required in the makefiles for
 	modules exporting symbols.
-	See also Documentation/modules.txt.
 
 --- 3.5 Library file goals - lib-y
 
-	Objects listed with obj-* is used for modules or
-	are combined in a built-in.o for that specific directory.
+	Objects listed with obj-* are used for modules or
+	combined in a built-in.o for that specific directory.
 	There is also the possibility to list objects that will
 	be included in a library, lib.a.
 	All objects listed with lib-y are combined in a single
@@ -256,7 +255,7 @@ more details, with real examples.
 
 	Example:
 		#fs/Makefile
-		obj-$(CONfIG_EXT2_FS) += ext2/
+		obj-$(CONFIG_EXT2_FS) += ext2/
 
 	If CONFIG_EXT2_FS is set to either 'y' (built-in) or 'm' (modular)
 	the corresponding obj- variable will be set, and kbuild will descend

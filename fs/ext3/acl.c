@@ -20,7 +20,7 @@ static struct posix_acl *
 ext3_acl_from_disk(const void *value, size_t size)
 {
 	const char *end = (char *)value + size;
-	size_t n, count;
+	int n, count;
 	struct posix_acl *acl;
 
 	if (!value)
@@ -425,7 +425,7 @@ ext3_acl_chmod(struct inode *inode)
 	if (!error) {
 		handle_t *handle;
 
-		handle = ext3_journal_start(inode, EXT3_XATTR_TRANS_BLOCKS);
+		handle = ext3_journal_start(inode, EXT3_DATA_TRANS_BLOCKS);
 		if (IS_ERR(handle)) {
 			error = PTR_ERR(handle);
 			ext3_std_error(inode->i_sb, error);
@@ -531,7 +531,7 @@ ext3_xattr_set_acl(struct inode *inode, int type, const void *value,
 	} else
 		acl = NULL;
 
-	handle = ext3_journal_start(inode, EXT3_XATTR_TRANS_BLOCKS);
+	handle = ext3_journal_start(inode, EXT3_DATA_TRANS_BLOCKS);
 	if (IS_ERR(handle))
 		return PTR_ERR(handle);
 	error = ext3_set_acl(handle, inode, type, acl);

@@ -13,9 +13,6 @@
 #include <linux/agp_backend.h>
 #include "agp.h"
 
-static int agp_try_unsupported __initdata = 0;
-
-
 static struct aper_size_info_fixed intel_i810_sizes[] =
 {
 	{64, 16384, 4},
@@ -78,6 +75,10 @@ static int intel_i810_configure(void)
 	temp &= 0xfff80000;
 
 	intel_i810_private.registers = (volatile u8 *) ioremap(temp, 128 * 4096);
+	if (!intel_i810_private.registers) {
+		printk(KERN_ERR PFX "Unable to remap memory.\n");
+		return -ENOMEM;
+	}
 
 	if ((INREG32(intel_i810_private.registers, I810_DRAM_CTL)
 		& I810_DRAM_ROW_0) == I810_DRAM_ROW_0_SDRAM) {
@@ -444,7 +445,7 @@ static int intel_i830_insert_entries(struct agp_memory *mem,off_t pg_start,
 	num_entries = A_SIZE_FIX(temp)->num_entries;
 
 	if (pg_start < intel_i830_private.gtt_entries) {
-		printk (KERN_DEBUG "pg_start == 0x%.8lx,intel_i830_private.gtt_entries == 0x%.8x\n",
+		printk (KERN_DEBUG PFX "pg_start == 0x%.8lx,intel_i830_private.gtt_entries == 0x%.8x\n",
 				pg_start,intel_i830_private.gtt_entries);
 
 		printk (KERN_INFO PFX "Trying to insert into local/stolen memory\n");
@@ -617,7 +618,7 @@ static int intel_configure(void)
 	pci_write_config_word(agp_bridge->dev, INTEL_APSIZE, current_size->size_value);
 
 	/* address to map to */
-	pci_read_config_dword(agp_bridge->dev, INTEL_APBASE, &temp);
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 
 	/* attbase - aperture base */
@@ -656,7 +657,7 @@ static int intel_815_configure(void)
 			current_size->size_value); 
 
 	/* address to map to */
-	pci_read_config_dword(agp_bridge->dev, INTEL_APBASE, &temp);
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 
 	pci_read_config_dword(agp_bridge->dev, INTEL_ATTBASE, &addr);
@@ -707,7 +708,7 @@ static int intel_820_configure(void)
 	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value); 
 
 	/* address to map to */
-	pci_read_config_dword(agp_bridge->dev, INTEL_APBASE, &temp);
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 
 	/* attbase - aperture base */
@@ -738,7 +739,7 @@ static int intel_840_configure(void)
 	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value); 
 
 	/* address to map to */
-	pci_read_config_dword(agp_bridge->dev, INTEL_APBASE, &temp);
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 
 	/* attbase - aperture base */
@@ -767,7 +768,7 @@ static int intel_845_configure(void)
 	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value); 
 
 	/* address to map to */
-	pci_read_config_dword(agp_bridge->dev, INTEL_APBASE, &temp);
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 
 	/* attbase - aperture base */
@@ -796,7 +797,7 @@ static int intel_850_configure(void)
 	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value); 
 
 	/* address to map to */
-	pci_read_config_dword(agp_bridge->dev, INTEL_APBASE, &temp);
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 
 	/* attbase - aperture base */
@@ -825,7 +826,7 @@ static int intel_860_configure(void)
 	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value);
 
 	/* address to map to */
-	pci_read_config_dword(agp_bridge->dev, INTEL_APBASE, &temp);
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 
 	/* attbase - aperture base */
@@ -854,7 +855,7 @@ static int intel_830mp_configure(void)
 	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value);
 
 	/* address to map to */
-	pci_read_config_dword(agp_bridge->dev, INTEL_APBASE, &temp);
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 
 	/* attbase - aperture base */
@@ -883,7 +884,7 @@ static int intel_7505_configure(void)
 	pci_write_config_byte(agp_bridge->dev, INTEL_APSIZE, current_size->size_value);
 
 	/* address to map to */
-	pci_read_config_dword(agp_bridge->dev, INTEL_APBASE, &temp);
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 
 	/* attbase - aperture base */
@@ -1231,12 +1232,13 @@ static int find_i830(u16 device)
 	return 1;
 }
 
-static int __init agp_intel_probe(struct pci_dev *pdev,
-				  const struct pci_device_id *ent)
+static int __devinit agp_intel_probe(struct pci_dev *pdev,
+				     const struct pci_device_id *ent)
 {
 	struct agp_bridge_data *bridge;
 	char *name = "(unknown)";
 	u8 cap_ptr = 0;
+	struct resource *r;
 
 	cap_ptr = pci_find_capability(pdev, PCI_CAP_ID_AGP);
 
@@ -1357,15 +1359,9 @@ static int __init agp_intel_probe(struct pci_dev *pdev,
 		name = "E7205";
 		break;
 	default:
-		if (!agp_try_unsupported) {
-			printk(KERN_ERR PFX
-			    "Unsupported Intel chipset (device id: %04x),"
-			    " you might want to try agp_try_unsupported=1.\n",
+		printk(KERN_ERR PFX "Unsupported Intel chipset (device id: %04x)\n",
 			    pdev->device);
-			return -ENODEV;
-		}
-		bridge->driver = &intel_generic_driver;
-		break;
+		return -ENODEV;
 	};
 
 	bridge->dev = pdev;
@@ -1377,6 +1373,29 @@ static int __init agp_intel_probe(struct pci_dev *pdev,
 		bridge->dev_private_data = &intel_i830_private;
 
 	printk(KERN_INFO PFX "Detected an Intel %s Chipset.\n", name);
+
+	/*
+	* The following fixes the case where the BIOS has "forgotten" to
+	* provide an address range for the GART.
+	* 20030610 - hamish@zot.org
+	*/
+	r = &pdev->resource[0];
+	if (!r->start && r->end) {
+		if(pci_assign_resource(pdev, 0)) {
+			printk(KERN_ERR PFX "could not assign resource 0\n");
+			return (-ENODEV);
+		}
+	}
+
+	/*
+	* If the device has not been properly setup, the following will catch
+	* the problem and should stop the system from crashing.
+	* 20030610 - hamish@zot.org
+	*/
+	if (pci_enable_device(pdev)) {
+		printk(KERN_ERR PFX "Unable to Enable PCI device\n");
+		return (-ENODEV);
+	}
 
 	/* Fill in the mode register */
 	if (cap_ptr) {
@@ -1417,7 +1436,7 @@ static int agp_intel_resume(struct pci_dev *pdev)
 	return 0;
 }
 
-static struct pci_device_id agp_intel_pci_table[] __initdata = {
+static struct pci_device_id agp_intel_pci_table[] = {
 	{
 	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
 	.class_mask	= ~0,
@@ -1461,6 +1480,5 @@ static void __exit agp_intel_cleanup(void)
 module_init(agp_intel_init);
 module_exit(agp_intel_cleanup);
 
-MODULE_PARM(agp_try_unsupported, "1i");
 MODULE_AUTHOR("Dave Jones <davej@codemonkey.org.uk>");
 MODULE_LICENSE("GPL and additional rights");

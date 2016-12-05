@@ -707,7 +707,7 @@ retry:
 		goto retry;
 	}
 
-	msq->q_lspid = current->pid;
+	msq->q_lspid = current->tgid;
 	msq->q_stime = get_seconds();
 
 	if(!pipelined_send(msq,msg)) {
@@ -801,7 +801,7 @@ retry:
 		list_del(&msg->m_list);
 		msq->q_qnum--;
 		msq->q_rtime = get_seconds();
-		msq->q_lrpid = current->pid;
+		msq->q_lrpid = current->tgid;
 		msq->q_cbytes -= msg->m_ts;
 		atomic_sub(msg->m_ts,&msg_bytes);
 		atomic_dec(&msg_hdrs);
@@ -837,11 +837,20 @@ out_success:
 		msg_unlock(msq);
 
 		schedule();
-		current->state = TASK_RUNNING;
 
+		/*
+		 * The below optimisation is buggy.  A sleeping thread that is
+		 * woken up checks if it got a message and if so, copies it to
+		 * userspace and just returns without taking any locks.
+		 * But this return to user space can be faster than the message
+		 * send, and if the receiver immediately exits the
+		 * wake_up_process performed by the sender will oops.
+		 */
+#if 0
 		msg = (struct msg_msg*) msr_d.r_msg;
 		if(!IS_ERR(msg)) 
 			goto out_success;
+#endif
 
 		msq = msg_lock(msqid);
 		msg = (struct msg_msg*)msr_d.r_msg;

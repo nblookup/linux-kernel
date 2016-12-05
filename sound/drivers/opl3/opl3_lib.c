@@ -440,9 +440,9 @@ int snd_opl3_create(snd_card_t * card,
 	default:
 		opl3->command = &snd_opl2_command;
 		if ((err = snd_opl3_detect(opl3)) < 0) {
-			snd_opl3_free(opl3);
 			snd_printd("OPL2/3 chip not detected at 0x%lx/0x%lx\n",
 				   opl3->l_port, opl3->r_port);
+			snd_opl3_free(opl3);
 			return err;
 		}
 		/* detect routine returns correct hardware type */
@@ -538,7 +538,7 @@ int snd_opl3_hwdep_new(opl3_t * opl3,
 	hw->ops.release = snd_opl3_release;
 
 	opl3->seq_dev_num = seq_device;
-#if defined(CONFIG_SND_SEQUENCER) || defined(CONFIG_SND_SEQUENCER_MODULE)
+#if defined(CONFIG_SND_SEQUENCER) || (defined(MODULE) && defined(CONFIG_SND_SEQUENCER_MODULE))
 	if (snd_seq_device_new(card, seq_device, SNDRV_SEQ_DEV_ID_OPL3,
 			       sizeof(opl3_t*), &opl3->seq_dev) >= 0) {
 		strcpy(opl3->seq_dev->name, hw->name);

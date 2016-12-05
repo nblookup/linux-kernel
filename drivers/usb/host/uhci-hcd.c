@@ -156,6 +156,7 @@ static struct uhci_td *uhci_alloc_td(struct uhci_hcd *uhci, struct usb_device *d
 	td->dev = dev;
 
 	INIT_LIST_HEAD(&td->list);
+	INIT_LIST_HEAD(&td->remove_list);
 	INIT_LIST_HEAD(&td->fl_list);
 
 	usb_get_dev(dev);
@@ -286,6 +287,8 @@ static void uhci_free_td(struct uhci_hcd *uhci, struct uhci_td *td)
 {
 	if (!list_empty(&td->list))
 		dbg("td %p is still in list!", td);
+	if (!list_empty(&td->remove_list))
+		dbg("td %p still in remove_list!", td);
 	if (!list_empty(&td->fl_list))
 		dbg("td %p is still in fl_list!", td);
 
@@ -702,6 +705,7 @@ static void uhci_destroy_urb_priv(struct uhci_hcd *uhci, struct urb *urb)
 {
 	struct list_head *head, *tmp;
 	struct urb_priv *urbp;
+	unsigned long flags;
 
 	urbp = (struct urb_priv *)urb->hcpriv;
 	if (!urbp)
@@ -713,6 +717,13 @@ static void uhci_destroy_urb_priv(struct uhci_hcd *uhci, struct urb *urb)
 	if (!list_empty(&urbp->complete_list))
 		warn("uhci_destroy_urb_priv: urb %p still on uhci->complete_list", urb);
 
+	spin_lock_irqsave(&uhci->td_remove_list_lock, flags);
+
+	/* Check to see if the remove list is empty. Set the IOC bit */
+	/* to force an interrupt so we can remove the TD's*/
+	if (list_empty(&uhci->td_remove_list))
+		uhci_set_next_interrupt(uhci);
+
 	head = &urbp->td_list;
 	tmp = head->next;
 	while (tmp != head) {
@@ -722,8 +733,10 @@ static void uhci_destroy_urb_priv(struct uhci_hcd *uhci, struct urb *urb)
 
 		uhci_remove_td_from_urb(td);
 		uhci_remove_td(uhci, td);
-		uhci_free_td(uhci, td);
+		list_add(&td->remove_list, &uhci->td_remove_list);
 	}
+
+	spin_unlock_irqrestore(&uhci->td_remove_list_lock, flags);
 
 	urb->hcpriv = NULL;
 	kmem_cache_free(uhci_up_cachep, urbp);
@@ -1801,6 +1814,26 @@ static void uhci_free_pending_qhs(struct uhci_hcd *uhci)
 	spin_unlock_irqrestore(&uhci->qh_remove_list_lock, flags);
 }
 
+static void uhci_free_pending_tds(struct uhci_hcd *uhci)
+{
+	struct list_head *tmp, *head;
+	unsigned long flags;
+
+	spin_lock_irqsave(&uhci->td_remove_list_lock, flags);
+	head = &uhci->td_remove_list;
+	tmp = head->next;
+	while (tmp != head) {
+		struct uhci_td *td = list_entry(tmp, struct uhci_td, remove_list);
+
+		tmp = tmp->next;
+
+		list_del_init(&td->remove_list);
+
+		uhci_free_td(uhci, td);
+	}
+	spin_unlock_irqrestore(&uhci->td_remove_list_lock, flags);
+}
+
 static void uhci_finish_urb(struct usb_hcd *hcd, struct urb *urb, struct pt_regs *regs)
 {
 	struct urb_priv *urbp = (struct urb_priv *)urb->hcpriv;
@@ -1899,6 +1932,8 @@ static void uhci_irq(struct usb_hcd *hcd, struct pt_regs *regs)
 
 	uhci_free_pending_qhs(uhci);
 
+	uhci_free_pending_tds(uhci);
+
 	uhci_remove_pending_qhs(uhci);
 
 	uhci_clear_next_interrupt(uhci);
@@ -1930,13 +1965,11 @@ static void reset_hc(struct uhci_hcd *uhci)
 	outw(USBCMD_GRESET, io_addr + USBCMD);
 	set_current_state(TASK_UNINTERRUPTIBLE);
 	schedule_timeout((HZ*50+999) / 1000);
-	set_current_state(TASK_RUNNING);
 	outw(0, io_addr + USBCMD);
 
 	/* Another 10ms delay */
 	set_current_state(TASK_UNINTERRUPTIBLE);
 	schedule_timeout((HZ*10+999) / 1000);
-	set_current_state(TASK_RUNNING);
 	uhci->resume_detect = 0;
 }
 
@@ -2007,19 +2040,17 @@ static int suspend_allowed(struct uhci_hcd *uhci)
 	unsigned int io_addr = uhci->io_addr;
 	int i;
 
-	if (!uhci->hcd.pdev ||
-	     uhci->hcd.pdev->vendor != PCI_VENDOR_ID_INTEL ||
-	     uhci->hcd.pdev->device != PCI_DEVICE_ID_INTEL_82371AB_2)
+	if (!uhci->hcd.pdev || uhci->hcd.pdev->vendor != PCI_VENDOR_ID_INTEL)
 		return 1;
 
-	/* This is a 82371AB/EB/MB USB controller which has a bug that
-	 * causes false resume indications if any port has an
-	 * over current condition.  To prevent problems, we will not
-	 * allow a global suspend if any ports are OC.
+	/* Some of Intel's USB controllers have a bug that causes false
+	 * resume indications if any port has an over current condition.
+	 * To prevent problems, we will not allow a global suspend if
+	 * any ports are OC.
 	 *
-	 * Some motherboards using the 82371AB/EB/MB (but not the USB portion)
-	 * appear to hardwire the over current inputs active to disable
-	 * the USB ports.
+	 * Some motherboards using Intel's chipsets (but not using all
+	 * the USB ports) appear to hardwire the over current inputs active
+	 * to disable the USB ports.
 	 */
 
 	/* check for over current condition on any port */
@@ -2101,7 +2132,7 @@ static void start_hc(struct uhci_hcd *uhci)
 	uhci->state_end = jiffies + HZ;
 	outw(USBCMD_RS | USBCMD_CF | USBCMD_MAXP, io_addr + USBCMD);
 
-        uhci->hcd.state = USB_STATE_READY;
+        uhci->hcd.state = USB_STATE_RUNNING;
 }
 
 /*
@@ -2145,6 +2176,20 @@ static void release_uhci(struct uhci_hcd *uhci)
 #endif
 }
 
+static int uhci_reset(struct usb_hcd *hcd)
+{
+	struct uhci_hcd *uhci = hcd_to_uhci(hcd);
+
+	uhci->io_addr = (unsigned long) hcd->regs;
+
+	/* Maybe kick BIOS off this hardware.  Then reset, so we won't get
+	 * interrupts from any previous setup.
+	 */
+	reset_hc(uhci);
+	pci_write_config_word(hcd->pdev, USBLEGSUP, USBLEGSUP_DEFAULT);
+	return 0;
+}
+
 /*
  * Allocate a frame list, and then setup the skeleton
  *
@@ -2161,7 +2206,7 @@ static void release_uhci(struct uhci_hcd *uhci)
  *  - The fourth queue is the bandwidth reclamation queue, which loops back
  *    to the high speed control queue.
  */
-static int __devinit uhci_start(struct usb_hcd *hcd)
+static int uhci_start(struct usb_hcd *hcd)
 {
 	struct uhci_hcd *uhci = hcd_to_uhci(hcd);
 	int retval = -EBUSY;
@@ -2173,7 +2218,6 @@ static int __devinit uhci_start(struct usb_hcd *hcd)
 	struct proc_dir_entry *ent;
 #endif
 
-	uhci->io_addr = (unsigned long) hcd->regs;
 	io_size = pci_resource_len(hcd->pdev, hcd->region);
 
 #ifdef CONFIG_PROC_FS
@@ -2190,15 +2234,14 @@ static int __devinit uhci_start(struct usb_hcd *hcd)
 	uhci->proc_entry = ent;
 #endif
 
-	/* Reset here so we don't get any interrupts from an old setup */
-	/*  or broken setup */
-	reset_hc(uhci);
-
 	uhci->fsbr = 0;
 	uhci->fsbrtimeout = 0;
 
 	spin_lock_init(&uhci->qh_remove_list_lock);
 	INIT_LIST_HEAD(&uhci->qh_remove_list);
+
+	spin_lock_init(&uhci->td_remove_list_lock);
+	INIT_LIST_HEAD(&uhci->td_remove_list);
 
 	spin_lock_init(&uhci->urb_remove_list_lock);
 	INIT_LIST_HEAD(&uhci->urb_remove_list);
@@ -2345,10 +2388,6 @@ static int __devinit uhci_start(struct usb_hcd *hcd)
 
 	init_stall_timer(hcd);
 
-	/* disable legacy emulation */
-	pci_write_config_word(hcd->pdev, USBLEGSUP, USBLEGSUP_DEFAULT);
-
-	usb_connect(udev);
 	udev->speed = USB_SPEED_FULL;
 
 	if (usb_register_root_hub(udev, &hcd->pdev->dev) != 0) {
@@ -2415,11 +2454,13 @@ static void uhci_stop(struct usb_hcd *hcd)
 	 * to this bus since there are no more parents
 	 */
 	uhci_free_pending_qhs(uhci);
+	uhci_free_pending_tds(uhci);
 	uhci_remove_pending_qhs(uhci);
 
 	reset_hc(uhci);
 
 	uhci_free_pending_qhs(uhci);
+	uhci_free_pending_tds(uhci);
 
 	release_uhci(uhci);
 }
@@ -2449,7 +2490,7 @@ static int uhci_resume(struct usb_hcd *hcd)
 		reset_hc(uhci);
 		start_hc(uhci);
 	}
-	uhci->hcd.state = USB_STATE_READY;
+	uhci->hcd.state = USB_STATE_RUNNING;
 	return 0;
 }
 #endif
@@ -2463,6 +2504,7 @@ static struct usb_hcd *uhci_hcd_alloc(void)
 		return NULL;
 
 	memset(uhci, 0, sizeof(*uhci));
+	uhci->hcd.product_desc = "UHCI Host Controller";
 	return &uhci->hcd;
 }
 
@@ -2476,7 +2518,7 @@ static int uhci_hcd_get_frame_number(struct usb_hcd *hcd)
 	return uhci_get_current_frame_number(hcd_to_uhci(hcd));
 }
 
-static const char hcd_name[] = "uhci-hcd";
+static const char hcd_name[] = "uhci_hcd";
 
 static const struct hc_driver uhci_driver = {
 	.description =		hcd_name,
@@ -2486,6 +2528,7 @@ static const struct hc_driver uhci_driver = {
 	.flags =		HCD_USB11,
 
 	/* Basic lifecycle operations */
+	.reset =		uhci_reset,
 	.start =		uhci_start,
 #ifdef CONFIG_PM
 	.suspend =		uhci_suspend,
@@ -2505,19 +2548,10 @@ static const struct hc_driver uhci_driver = {
 	.hub_control =		uhci_hub_control,
 };
 
-static const struct pci_device_id __devinitdata uhci_pci_ids[] = { {
-
+static const struct pci_device_id uhci_pci_ids[] = { {
 	/* handle any USB UHCI controller */
-	.class = 		((PCI_CLASS_SERIAL_USB << 8) | 0x00),
-	.class_mask = 	~0,
+	PCI_DEVICE_CLASS(((PCI_CLASS_SERIAL_USB << 8) | 0x00), ~0),
 	.driver_data =	(unsigned long) &uhci_driver,
-
-	/* no matter who makes it */
-	.vendor =	PCI_ANY_ID,
-	.device =	PCI_ANY_ID,
-	.subvendor =	PCI_ANY_ID,
-	.subdevice =	PCI_ANY_ID,
-
 	}, { /* end: all zeroes */ }
 };
 

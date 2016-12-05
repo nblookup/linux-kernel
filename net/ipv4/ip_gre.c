@@ -37,6 +37,7 @@
 #include <net/arp.h>
 #include <net/checksum.h>
 #include <net/inet_ecn.h>
+#include <net/xfrm.h>
 
 #ifdef CONFIG_IPV6
 #include <net/ipv6.h>
@@ -271,13 +272,19 @@ static struct ip_tunnel * ipgre_tunnel_locate(struct ip_tunnel_parm *parms, int 
 	}
 
 	dev = alloc_netdev(sizeof(*t), name, ipgre_tunnel_setup);
+	if (!dev)
+	  return NULL;
+
+	dev->init = ipgre_tunnel_init;
+	nt = dev->priv;
+	nt->parms = *parms;
+
 	if (register_netdevice(dev) < 0) {
 		kfree(dev);
 		goto failed;
 	}
 
 	nt = dev->priv;
-	dev->init = ipgre_tunnel_init;
 	nt->parms = *parms;
 
 	dev_hold(dev);
@@ -596,6 +603,8 @@ int ipgre_rcv(struct sk_buff *skb)
 
 	read_lock(&ipgre_lock);
 	if ((tunnel = ipgre_tunnel_lookup(iph->saddr, iph->daddr, key)) != NULL) {
+		secpath_reset(skb);
+
 		skb->mac.raw = skb->nh.raw;
 		skb->nh.raw = __pskb_pull(skb, offset);
 		memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
@@ -799,8 +808,6 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			tunnel->err_count = 0;
 	}
 
-	skb->h.raw = skb->nh.raw;
-
 	max_headroom = LL_RESERVED_SPACE(tdev) + gre_hlen;
 
 	if (skb_headroom(skb) < max_headroom || skb_cloned(skb) || skb_shared(skb)) {
@@ -816,8 +823,10 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			skb_set_owner_w(new_skb, skb->sk);
 		dev_kfree_skb(skb);
 		skb = new_skb;
+		old_iph = skb->nh.iph;
 	}
 
+	skb->h.raw = skb->nh.raw;
 	skb->nh.raw = skb_push(skb, gre_hlen);
 	memset(&(IPCB(skb)->opt), 0, sizeof(IPCB(skb)->opt));
 	dst_release(skb->dst);
@@ -1127,7 +1136,7 @@ static void ipgre_tunnel_setup(struct net_device *dev)
 {
 	SET_MODULE_OWNER(dev);
 	dev->uninit		= ipgre_tunnel_uninit;
-	dev->destructor 	= (void (*)(struct net_device *))kfree;
+	dev->destructor 	= free_netdev;
 	dev->hard_start_xmit	= ipgre_tunnel_xmit;
 	dev->get_stats		= ipgre_tunnel_get_stats;
 	dev->do_ioctl		= ipgre_tunnel_ioctl;

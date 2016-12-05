@@ -41,7 +41,6 @@
 #include <linux/usb.h>
 #include <linux/moduleparam.h>
 
-#include <linux/version.h>
 #include "../core/hcd.h"
 
 #include <asm/byteorder.h>
@@ -232,7 +231,6 @@ static void ehci_ready (struct ehci_hcd *ehci)
 		ehci->hcd.state = USB_STATE_HALT;
 		return;
 	}
-	ehci->hcd.state = USB_STATE_READY;
 }
 
 /*-------------------------------------------------------------------------*/
@@ -318,27 +316,21 @@ ehci_reboot (struct notifier_block *self, unsigned long code, void *null)
 
 /* called by khubd or root hub init threads */
 
-static int ehci_start (struct usb_hcd *hcd)
+static int ehci_hc_reset (struct usb_hcd *hcd)
 {
 	struct ehci_hcd		*ehci = hcd_to_ehci (hcd);
 	u32			temp;
-	struct usb_device	*udev;
-	struct usb_bus		*bus;
-	int			retval;
-	u32			hcc_params;
-	u8                      tempbyte;
 
 	spin_lock_init (&ehci->lock);
 
 	ehci->caps = (struct ehci_caps *) hcd->regs;
-	ehci->regs = (struct ehci_regs *) (hcd->regs + ehci->caps->length);
-	dbg_hcs_params (ehci, "ehci_start");
-	dbg_hcc_params (ehci, "ehci_start");
-
-	hcc_params = readl (&ehci->caps->hcc_params);
+	ehci->regs = (struct ehci_regs *) (hcd->regs +
+				readb (&ehci->caps->length));
+	dbg_hcs_params (ehci, "reset");
+	dbg_hcc_params (ehci, "reset");
 
 	/* EHCI 0.96 and later may have "extended capabilities" */
-	temp = HCC_EXT_CAPS (hcc_params);
+	temp = HCC_EXT_CAPS (readl (&ehci->caps->hcc_params));
 	while (temp) {
 		u32		cap;
 
@@ -363,8 +355,18 @@ static int ehci_start (struct usb_hcd *hcd)
 	ehci->hcs_params = readl (&ehci->caps->hcs_params);
 
 	/* force HC to halt state */
-	if ((retval = ehci_halt (ehci)) != 0)
-		return retval;
+	return ehci_halt (ehci);
+}
+
+static int ehci_start (struct usb_hcd *hcd)
+{
+	struct ehci_hcd		*ehci = hcd_to_ehci (hcd);
+	u32			temp;
+	struct usb_device	*udev;
+	struct usb_bus		*bus;
+	int			retval;
+	u32			hcc_params;
+	u8                      tempbyte;
 
 	/*
 	 * hw default: 1K periodic list heads, one per frame.
@@ -375,6 +377,7 @@ static int ehci_start (struct usb_hcd *hcd)
 		return retval;
 
 	/* controllers may cache some of the periodic schedule ... */
+	hcc_params = readl (&ehci->caps->hcc_params);
 	if (HCC_ISOC_CACHE (hcc_params)) 	// full frame cache
 		ehci->i_thresh = 8;
 	else					// N microframes cached
@@ -423,8 +426,11 @@ static int ehci_start (struct usb_hcd *hcd)
 	 */
 	if (HCC_64BIT_ADDR (hcc_params)) {
 		writel (0, &ehci->regs->segment);
+#if 0
+// this is deeply broken on almost all architectures
 		if (!pci_set_dma_mask (ehci->hcd.pdev, 0xffffffffffffffffULL))
 			ehci_info (ehci, "enabled 64bit PCI DMA\n");
+#endif
 	}
 
 	/* help hc dma work well with cachelines */
@@ -477,7 +483,7 @@ done2:
 	ehci->reboot_notifier.notifier_call = ehci_reboot;
 	register_reboot_notifier (&ehci->reboot_notifier);
 
-	ehci->hcd.state = USB_STATE_READY;
+	ehci->hcd.state = USB_STATE_RUNNING;
 	writel (FLAG_CF, &ehci->regs->configured_flag);
 	readl (&ehci->regs->command);	/* unblock posted write */
 
@@ -496,7 +502,6 @@ done2:
 	 * Before this point the HC was idle/ready.  After, khubd
 	 * and device drivers may start it running.
 	 */
-	usb_connect (udev);
 	udev->speed = USB_SPEED_HIGH;
 	if (hcd_register_root (hcd) != 0) {
 		if (hcd->state == USB_STATE_RUNNING)
@@ -622,7 +627,7 @@ static int ehci_resume (struct usb_hcd *hcd)
 	/* resume HC and each port */
 // restore pci FLADJ value
 	// khubd and drivers will set HC running, if needed;
-	hcd->state = USB_STATE_READY;
+	hcd->state = USB_STATE_RUNNING;
 	// FIXME Philips/Intel/... etc don't really have a "READY"
 	// state ... turn on CMD_RUN too
 	for (i = 0; i < ports; i++) {
@@ -937,6 +942,7 @@ static const struct hc_driver ehci_driver = {
 	/*
 	 * basic lifecycle operations
 	 */
+	.reset =		ehci_hc_reset,
 	.start =		ehci_start,
 #ifdef	CONFIG_PM
 	.suspend =		ehci_suspend,
@@ -974,21 +980,12 @@ static const struct hc_driver ehci_driver = {
 /* EHCI spec says PCI is required. */
 
 /* PCI driver selection metadata; PCI hotplugging uses this */
-static struct pci_device_id __devinitdata pci_ids [] = { {
-
+static const struct pci_device_id pci_ids [] = { {
 	/* handle any USB 2.0 EHCI controller */
-
-	.class = 		((PCI_CLASS_SERIAL_USB << 8) | 0x20),
-	.class_mask = 	~0,
+	PCI_DEVICE_CLASS(((PCI_CLASS_SERIAL_USB << 8) | 0x20), ~0),
 	.driver_data =	(unsigned long) &ehci_driver,
-
-	/* no matter who makes it */
-	.vendor =	PCI_ANY_ID,
-	.device =	PCI_ANY_ID,
-	.subvendor =	PCI_ANY_ID,
-	.subdevice =	PCI_ANY_ID,
-
-}, { /* end: all zeroes */ }
+	},
+	{ /* end: all zeroes */ }
 };
 MODULE_DEVICE_TABLE (pci, pci_ids);
 

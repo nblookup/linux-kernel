@@ -227,7 +227,7 @@ static int packet_rcv_spkt(struct sk_buff *skb, struct net_device *dev,  struct 
 	 *	field for just this event.
 	 */
 
-	sk = (struct sock *) pt->data;
+	sk = pt->af_packet_priv;
 	
 	/*
 	 *	Yank back the headers [hope the device set this
@@ -381,6 +381,23 @@ out_unlock:
 }
 #endif
 
+static inline unsigned run_filter(struct sk_buff *skb, struct sock *sk, unsigned res)
+{
+	struct sk_filter *filter;
+
+	bh_lock_sock(sk);
+	filter = sk->sk_filter;
+	/*
+	 * Our caller already checked that filter != NULL but we need to
+	 * verify that under bh_lock_sock() to be safe
+	 */
+	if (likely(filter != NULL))
+		res = sk_run_filter(skb, filter->insns, filter->len);
+	bh_unlock_sock(sk);
+
+	return res;
+}
+
 /*
    This function makes lazy skb cloning in hope that most of packets
    are discarded by BPF.
@@ -405,7 +422,7 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,  struct packe
 	if (skb->pkt_type == PACKET_LOOPBACK)
 		goto drop;
 
-	sk = (struct sock *) pt->data;
+	sk = pt->af_packet_priv;
 	po = pkt_sk(sk);
 
 	skb->dev = dev;
@@ -429,15 +446,7 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,  struct packe
 	snaplen = skb->len;
 
 	if (sk->sk_filter) {
-		unsigned res = snaplen;
-		struct sk_filter *filter;
-
-		bh_lock_sock(sk);
-		if ((filter = sk->sk_filter) != NULL)
-			res = sk_run_filter(skb, sk->sk_filter->insns,
-					    sk->sk_filter->len);
-		bh_unlock_sock(sk);
-
+		unsigned res = run_filter(skb, sk, snaplen);
 		if (res == 0)
 			goto drop_n_restore;
 		if (snaplen > res)
@@ -516,7 +525,7 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,  struct pack
 	if (skb->pkt_type == PACKET_LOOPBACK)
 		goto drop;
 
-	sk = (struct sock *) pt->data;
+	sk = pt->af_packet_priv;
 	po = pkt_sk(sk);
 
 	if (dev->hard_header) {
@@ -533,15 +542,7 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,  struct pack
 	snaplen = skb->len;
 
 	if (sk->sk_filter) {
-		unsigned res = snaplen;
-		struct sk_filter *filter;
-
-		bh_lock_sock(sk);
-		if ((filter = sk->sk_filter) != NULL)
-			res = sk_run_filter(skb, sk->sk_filter->insns,
-					    sk->sk_filter->len);
-		bh_unlock_sock(sk);
-
+		unsigned res = run_filter(skb, sk, snaplen);
 		if (res == 0)
 			goto drop_n_restore;
 		if (snaplen > res)
@@ -972,7 +973,7 @@ static int packet_create(struct socket *sock, int protocol)
 	if (sock->type == SOCK_PACKET)
 		po->prot_hook.func = packet_rcv_spkt;
 #endif
-	po->prot_hook.data = (void *)sk;
+	po->prot_hook.af_packet_priv = sk;
 
 	if (protocol) {
 		po->prot_hook.type = protocol;
@@ -1832,3 +1833,4 @@ static int __init packet_init(void)
 module_init(packet_init);
 module_exit(packet_exit);
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_NETPROTO(PF_PACKET);

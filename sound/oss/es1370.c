@@ -889,8 +889,8 @@ static int mixer_ioctl(struct es1370_state *s, unsigned int cmd, unsigned long a
 	}
         if (cmd == SOUND_MIXER_INFO) {
 		mixer_info info;
-		strlcpy(info.id, "ES1370", sizeof(info.id));
-		strlcpy(info.name, "Ensoniq ES1370", sizeof(info.name));
+		strncpy(info.id, "ES1370", sizeof(info.id));
+		strncpy(info.name, "Ensoniq ES1370", sizeof(info.name));
 		info.modify_counter = s->mix.modcnt;
 		if (copy_to_user((void *)arg, &info, sizeof(info)))
 			return -EFAULT;
@@ -898,8 +898,8 @@ static int mixer_ioctl(struct es1370_state *s, unsigned int cmd, unsigned long a
 	}
 	if (cmd == SOUND_OLD_MIXER_INFO) {
 		_old_mixer_info info;
-		strlcpy(info.id, "ES1370", sizeof(info.id));
-		strlcpy(info.name, "Ensoniq ES1370", sizeof(info.name));
+		strncpy(info.id, "ES1370", sizeof(info.id));
+		strncpy(info.name, "Ensoniq ES1370", sizeof(info.name));
 		if (copy_to_user((void *)arg, &info, sizeof(info)))
 			return -EFAULT;
 		return 0;
@@ -1023,7 +1023,7 @@ static int mixer_ioctl(struct es1370_state *s, unsigned int cmd, unsigned long a
 
 static int es1370_open_mixdev(struct inode *inode, struct file *file)
 {
-	unsigned int minor = minor(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	struct list_head *list;
 	struct es1370_state *s;
 
@@ -1727,7 +1727,7 @@ static int es1370_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 
 static int es1370_open(struct inode *inode, struct file *file)
 {
-	unsigned int minor = minor(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	struct list_head *list;
@@ -2165,7 +2165,7 @@ static int es1370_ioctl_dac(struct inode *inode, struct file *file, unsigned int
 
 static int es1370_open_dac(struct inode *inode, struct file *file)
 {
-	unsigned int minor = minor(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	struct list_head *list;
@@ -2408,7 +2408,7 @@ static unsigned int es1370_midi_poll(struct file *file, struct poll_table_struct
 
 static int es1370_midi_open(struct inode *inode, struct file *file)
 {
-	unsigned int minor = minor(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	struct list_head *list;
@@ -2484,12 +2484,8 @@ static int es1370_midi_release(struct inode *inode, struct file *file)
 				break;
 			if (signal_pending(current))
 				break;
-			if (file->f_flags & O_NONBLOCK) {
-				remove_wait_queue(&s->midi.owait, &wait);
-				set_current_state(TASK_RUNNING);
-				unlock_kernel();
-				return -EBUSY;
-			}
+			if (file->f_flags & O_NONBLOCK) 
+				break;
 			tmo = (count * HZ) / 3100;
 			if (!schedule_timeout(tmo ? : 1) && tmo)
 				DBG(printk(KERN_DEBUG "es1370: midi timed out??\n");)
@@ -2526,10 +2522,10 @@ static /*const*/ struct file_operations es1370_midi_fops = {
 /* maximum number of devices; only used for command line params */
 #define NR_DEVICE 5
 
-static int lineout[NR_DEVICE] = { 0, };
-static int micbias[NR_DEVICE] = { 0, };
+static int lineout[NR_DEVICE];
+static int micbias[NR_DEVICE];
 
-static unsigned int devindex = 0;
+static unsigned int devindex;
 
 MODULE_PARM(lineout, "1-" __MODULE_STRING(NR_DEVICE) "i");
 MODULE_PARM_DESC(lineout, "if 1 the LINE input is converted to LINE out");
@@ -2649,6 +2645,10 @@ static int __devinit es1370_probe(struct pci_dev *pcidev, const struct pci_devic
 	outl(s->sctrl, s->io+ES1370_REG_SERIAL_CONTROL);
 	/* point phantom write channel to "bugbuf" */
 	s->bugbuf_cpu = pci_alloc_consistent(pcidev,16,&s->bugbuf_dma);
+	if (!s->bugbuf_cpu) {
+		ret = -ENOMEM;
+		goto err_dev5;
+	}
 	outl((ES1370_REG_PHANTOM_FRAMEADR >> 8) & 15, s->io+ES1370_REG_MEMPAGE);
 	outl(s->bugbuf_dma, s->io+(ES1370_REG_PHANTOM_FRAMEADR & 0xff));
 	outl(0, s->io+(ES1370_REG_PHANTOM_FRAMECNT & 0xff));
@@ -2680,6 +2680,8 @@ static int __devinit es1370_probe(struct pci_dev *pcidev, const struct pci_devic
 		devindex++;
 	return 0;
 
+ err_dev5:
+	unregister_sound_midi(s->dev_midi);
  err_dev4:
 	unregister_sound_dsp(s->dev_dac);
  err_dev3:
@@ -2723,7 +2725,7 @@ static void __devinit es1370_remove(struct pci_dev *dev)
 	pci_set_drvdata(dev, NULL);
 }
 
-static struct pci_device_id id_table[] __devinitdata = {
+static struct pci_device_id id_table[] = {
 	{ PCI_VENDOR_ID_ENSONIQ, PCI_DEVICE_ID_ENSONIQ_ES1370, PCI_ANY_ID, PCI_ANY_ID, 0, 0 },
 	{ 0, }
 };

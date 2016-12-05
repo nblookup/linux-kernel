@@ -162,6 +162,7 @@ xfs_buf_item_log_check(
 #endif
 
 STATIC void	xfs_buf_error_relse(xfs_buf_t *bp);
+STATIC void	xfs_buf_do_callbacks(xfs_buf_t *bp, xfs_log_item_t *lip);
 
 /*
  * This returns the number of log iovecs needed to log the
@@ -417,22 +418,25 @@ xfs_buf_item_unpin(
 		ASSERT(XFS_BUF_VALUSEMA(bp) <= 0);
 		ASSERT(!(XFS_BUF_ISDELAYWRITE(bp)));
 		ASSERT(XFS_BUF_ISSTALE(bp));
-/**
-		ASSERT(bp->b_pincount == 0);
-**/
 		ASSERT(bip->bli_format.blf_flags & XFS_BLI_CANCEL);
 		xfs_buf_item_trace("UNPIN STALE", bip);
 		xfs_buftrace("XFS_UNPIN STALE", bp);
-		AIL_LOCK(mp,s);
 		/*
 		 * If we get called here because of an IO error, we may
 		 * or may not have the item on the AIL. xfs_trans_delete_ail()
 		 * will take care of that situation.
 		 * xfs_trans_delete_ail() drops the AIL lock.
 		 */
-		xfs_trans_delete_ail(mp, (xfs_log_item_t *)bip, s);
-		xfs_buf_item_relse(bp);
-		ASSERT(XFS_BUF_FSPRIVATE(bp, void *) == NULL);
+		if (bip->bli_flags & XFS_BLI_STALE_INODE) {
+			xfs_buf_do_callbacks(bp, (xfs_log_item_t *)bip);
+			XFS_BUF_FSPRIVATE(bp, void *) = NULL;
+			XFS_BUF_CLR_IODONE_FUNC(bp);
+		} else {
+			AIL_LOCK(mp,s);
+			xfs_trans_delete_ail(mp, (xfs_log_item_t *)bip, s);
+			xfs_buf_item_relse(bp);
+			ASSERT(XFS_BUF_FSPRIVATE(bp, void *) == NULL);
+		}
 		xfs_buf_relse(bp);
 	}
 }
@@ -1007,7 +1011,7 @@ xfs_buf_iodone_callbacks(
 {
 	xfs_log_item_t	*lip;
 	static ulong	lasttime;
-	static dev_t	lastdev;
+	static xfs_buftarg_t *lasttarg;
 	xfs_mount_t	*mp;
 
 	ASSERT(XFS_BUF_FSPRIVATE(bp, void *) != NULL);
@@ -1045,15 +1049,15 @@ xfs_buf_iodone_callbacks(
 			return;
 		}
 
-		if ((XFS_BUF_TARGET_DEV(bp) != lastdev) ||
+		if ((XFS_BUF_TARGET(bp) != lasttarg) ||
 		    (time_after(jiffies, (lasttime + 5*HZ)))) {
 			lasttime = jiffies;
 			prdev("XFS write error in file system meta-data "
 			      "block 0x%Lx in %s",
-			      XFS_BUF_TARGET_DEV(bp),
+			      XFS_BUF_TARGET(bp),
 			      XFS_BUF_ADDR(bp), mp->m_fsname);
 		}
-		lastdev = XFS_BUF_TARGET_DEV(bp);
+		lasttarg = XFS_BUF_TARGET(bp);
 
 		if (XFS_BUF_ISASYNC(bp)) {
 			/*

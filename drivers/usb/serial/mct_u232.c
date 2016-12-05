@@ -320,9 +320,9 @@ static int mct_u232_startup (struct usb_serial *serial)
 	priv->control_state = 0;
 	priv->last_lsr = 0;
 	priv->last_msr = 0;
-	usb_set_serial_port_data(serial->port, priv);
+	usb_set_serial_port_data(serial->port[0], priv);
 
-	init_waitqueue_head(&serial->port->write_wait);
+	init_waitqueue_head(&serial->port[0]->write_wait);
 
 	return (0);
 } /* mct_u232_startup */
@@ -337,7 +337,7 @@ static void mct_u232_shutdown (struct usb_serial *serial)
 
 	for (i=0; i < serial->num_ports; ++i) {
 		/* My special items, the standard routines free my urbs */
-		priv = usb_get_serial_port_data(&serial->port[i]);
+		priv = usb_get_serial_port_data(serial->port[i]);
 		if (priv)
 			kfree(priv);
 	}
@@ -393,7 +393,7 @@ static int  mct_u232_open (struct usb_serial_port *port, struct file *filp)
 	{
 		/* Puh, that's dirty */
 		struct usb_serial_port *rport;	
-		rport = &serial->port[1];
+		rport = serial->port[1];
 		rport->tty = port->tty;
 		usb_set_serial_port_data(rport, usb_get_serial_port_data(port));
 		port->read_urb = rport->interrupt_in_urb;
@@ -850,10 +850,19 @@ static int mct_u232_ioctl (struct usb_serial_port *port, struct file * file,
 
 static int __init mct_u232_init (void)
 {
-	usb_serial_register (&mct_u232_device);
-	usb_register (&mct_u232_driver);
+	int retval;
+	retval = usb_serial_register(&mct_u232_device);
+	if (retval)
+		goto failed_usb_serial_register;
+	retval = usb_register(&mct_u232_driver);
+	if (retval)
+		goto failed_usb_register;
 	info(DRIVER_DESC " " DRIVER_VERSION);
 	return 0;
+failed_usb_register:
+	usb_serial_deregister(&mct_u232_device);
+failed_usb_serial_register:
+	return retval;
 }
 
 

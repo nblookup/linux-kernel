@@ -114,32 +114,39 @@ Valid options:
 
 __setup("noexec32=", nonx32_setup); 
 
-#ifndef  __GENERIC_PER_CPU
-
-unsigned long __per_cpu_offset[NR_CPUS];
-
+/*
+ * Great future plan:
+ * Declare PDA itself and support (irqstack,tss,pml4) as per cpu data.
+ * Always point %gs to its beginning
+ */
 void __init setup_per_cpu_areas(void)
 { 
-	unsigned long size, i;
-	unsigned char *ptr;
+	int i;
+	unsigned long size;
 
 	/* Copy section for each CPU (we discard the original) */
 	size = ALIGN(__per_cpu_end - __per_cpu_start, SMP_CACHE_BYTES);
-	if (!size)
-		return;
+#ifdef CONFIG_MODULES
+	if (size < PERCPU_ENOUGH_ROOM)
+		size = PERCPU_ENOUGH_ROOM;
+#endif
 
-	ptr = alloc_bootmem(size * NR_CPUS);
-
-	for (i = 0; i < NR_CPUS; i++, ptr += size) {
-		/* hide this from the compiler to avoid problems */ 
-		unsigned long offset;
-		asm("subq %[b],%0" : "=r" (offset) : "0" (ptr), [b] "r" (&__per_cpu_start));
-		__per_cpu_offset[i] = offset;
-		cpu_pda[i].cpudata_offset = offset;
-		memcpy(ptr, __per_cpu_start, size);
+	for (i = 0; i < NR_CPUS; i++) { 
+		unsigned char *ptr;
+		/* If possible allocate on the node of the CPU.
+		   In case it doesn't exist round-robin nodes. */
+		if (!NODE_DATA(i % numnodes)) { 
+			printk("cpu with no node %d, numnodes %d\n", i, numnodes);
+			ptr = alloc_bootmem(size);
+		} else { 
+			ptr = alloc_bootmem_node(NODE_DATA(i % numnodes), size);
+		}
+		if (!ptr)
+			panic("Cannot allocate cpu data for CPU %d\n", i);
+		cpu_pda[i].data_offset = ptr - __per_cpu_start;
+		memcpy(ptr, __per_cpu_start, __per_cpu_end - __per_cpu_start);
 	}
 } 
-#endif
 
 void pda_init(int cpu)
 { 
@@ -153,7 +160,6 @@ void pda_init(int cpu)
 	pda->me = pda;
 	pda->cpunumber = cpu; 
 	pda->irqcount = -1;
-	pda->cpudata_offset = 0;
 	pda->kernelstack = 
 		(unsigned long)stack_thread_info() - PDA_STACKOFFSET + THREAD_SIZE; 
 	pda->active_mm = &init_mm;
@@ -165,14 +171,14 @@ void pda_init(int cpu)
 		pda->irqstackptr = boot_cpu_stack; 
 		level4 = init_level4_pgt; 
 	} else {
+		level4 = (pml4_t *)__get_free_pages(GFP_ATOMIC, 0); 
+		if (!level4) 
+			panic("Cannot allocate top level page for cpu %d", cpu); 
 		pda->irqstackptr = (char *)
 			__get_free_pages(GFP_ATOMIC, IRQSTACK_ORDER);
 		if (!pda->irqstackptr)
-			panic("cannot allocate irqstack for cpu %d\n", cpu); 
-		level4 = (pml4_t *)__get_free_pages(GFP_ATOMIC, 0); 
+			panic("cannot allocate irqstack for cpu %d", cpu); 
 	}
-	if (!level4) 
-		panic("Cannot allocate top level page for cpu %d", cpu); 
 
 	pda->level4_pgt = (unsigned long *)level4; 
 	if (level4 != init_level4_pgt)
@@ -183,8 +189,7 @@ void pda_init(int cpu)
 	pda->irqstackptr += IRQSTACKSIZE-64;
 } 
 
-#define EXCEPTION_STK_ORDER 0 /* >= N_EXCEPTION_STACKS*EXCEPTION_STKSZ */
-char boot_exception_stacks[N_EXCEPTION_STACKS*EXCEPTION_STKSZ];
+char boot_exception_stacks[N_EXCEPTION_STACKS * EXCEPTION_STKSZ];
 
 void syscall_init(void)
 {
@@ -220,15 +225,12 @@ void __init cpu_init (void)
 #endif
 	struct tss_struct * t = &init_tss[cpu];
 	unsigned long v, efer; 
-	char *estacks; 
+	char *estacks = NULL; 
 	struct task_struct *me;
 
 	/* CPU 0 is initialised in head64.c */
 	if (cpu != 0) {
 		pda_init(cpu);
-		estacks = (char *)__get_free_pages(GFP_ATOMIC, 0); 
-		if (!estacks)
-			panic("Can't allocate exception stacks for CPU %d\n",cpu);
 	} else 
 		estacks = boot_exception_stacks; 
 
@@ -276,13 +278,23 @@ void __init cpu_init (void)
 	/*
 	 * set up and load the per-CPU TSS
 	 */
-	estacks += EXCEPTION_STKSZ;
 	for (v = 0; v < N_EXCEPTION_STACKS; v++) {
-		t->ist[v] = (unsigned long)estacks;
+		if (cpu) {
+			estacks = (char *)__get_free_pages(GFP_ATOMIC, 0);
+			if (!estacks)
+				panic("Cannot allocate exception stack %ld %d\n",
+				      v, cpu); 
+		}
 		estacks += EXCEPTION_STKSZ;
+		t->ist[v] = (unsigned long)estacks;
 	}
 
-	t->io_map_base = INVALID_IO_BITMAP_OFFSET;
+	t->io_bitmap_base = INVALID_IO_BITMAP_OFFSET;
+	/*
+	 * This is required because the CPU will access up to
+	 * 8 bits beyond the end of the IO permission bitmap.
+	 */
+	t->io_bitmap[IO_BITMAP_LONGS] = ~0UL;
 
 	atomic_inc(&init_mm.mm_count);
 	me->active_mm = &init_mm;

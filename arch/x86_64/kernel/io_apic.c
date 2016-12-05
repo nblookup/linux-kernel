@@ -63,7 +63,7 @@ int nr_ioapic_registers[MAX_IO_APICS];
  */
 
 static struct irq_pin_list {
-	int apic, pin, next;
+	short apic, pin, next;
 } irq_2_pin[PIN_MAP_SIZE];
 
 /*
@@ -176,14 +176,79 @@ static void clear_IO_APIC (void)
 int pirq_entries [MAX_PIRQS];
 int pirqs_enabled;
 int skip_ioapic_setup;
+int ioapic_force;
 
-static int __init ioapic_setup(char *str)
+/* dummy parsing: see setup.c */
+
+static int __init disable_ioapic_setup(char *str)
 {
 	skip_ioapic_setup = 1;
 	return 1;
 }
 
-__setup("noapic", ioapic_setup);
+static int __init enable_ioapic_setup(char *str)
+{
+	ioapic_force = 1;
+	skip_ioapic_setup = 0;
+	return 1;
+}
+
+__setup("noapic", disable_ioapic_setup);
+__setup("apic", enable_ioapic_setup);
+
+#ifndef CONFIG_SMP
+#include <asm/pci-direct.h>
+#include <linux/pci_ids.h>
+#include <linux/pci.h>
+
+/* Temporary Hack. Nvidia and VIA boards currently only work with IO-APIC
+   off. Check for an Nvidia or VIA PCI bridge and turn it off.
+   Use pci direct infrastructure because this runs before the PCI subsystem. 
+
+   Can be overwritten with "apic" */
+void __init check_ioapic(void) 
+{ 
+	int num,slot,func; 
+	if (ioapic_force) 
+		return; 
+
+	/* Poor man's PCI discovery */
+	for (num = 0; num < 32; num++) { 
+		for (slot = 0; slot < 32; slot++) { 
+			for (func = 0; func < 8; func++) { 
+				u32 class;
+				u32 vendor;
+				class = read_pci_config(num,slot,func,
+							PCI_CLASS_REVISION);
+				if (class == 0xffffffff)
+					break; 
+
+		       		if ((class >> 16) != PCI_CLASS_BRIDGE_PCI)
+					continue; 
+
+				vendor = read_pci_config(num, slot, func, 
+							 PCI_VENDOR_ID);
+				vendor &= 0xffff;
+				switch (vendor) { 
+				case PCI_VENDOR_ID_NVIDIA: 
+				case PCI_VENDOR_ID_VIA:
+					printk(KERN_INFO 
+     "PCI bridge %02x:%02x from %x found. Setting \"noapic\". Overwrite with \"apic\"\n",
+					       num,slot,vendor); 
+					skip_ioapic_setup = 1;
+					return;
+				} 
+
+				/* No multi-function device? */
+				u8 type = read_pci_config_byte(num,slot,func,
+							       PCI_HEADER_TYPE);
+				if (!(type & 0x80))
+					break;
+			} 
+		}
+	}
+} 
+#endif
 
 static int __init ioapic_pirq_setup(char *str)
 {
@@ -557,11 +622,13 @@ static inline int IO_APIC_irq_trigger(int irq)
 	return 0;
 }
 
-int irq_vector[NR_IRQS] = { FIRST_DEVICE_VECTOR , 0 };
+/* irq_vectors is indexed by the sum of all RTEs in all I/O APICs. */
+u8 irq_vector[NR_IRQ_VECTORS] = { FIRST_DEVICE_VECTOR , 0 };
 
 static int __init assign_irq_vector(int irq)
 {
 	static int current_vector = FIRST_DEVICE_VECTOR, offset = 0;
+	BUG_ON(irq >= NR_IRQ_VECTORS);
 	if (IO_APIC_VECTOR(irq) > 0)
 		return IO_APIC_VECTOR(irq);
 next:
@@ -1014,7 +1081,7 @@ void disable_IO_APIC(void)
 static void __init setup_ioapic_ids_from_mpc (void)
 {
 	union IO_APIC_reg_00 reg_00;
-	unsigned long phys_id_present_map = phys_cpu_present_map;
+	physid_mask_t phys_id_present_map = phys_cpu_present_map;
 	int apic;
 	int i;
 	unsigned char old_id;
@@ -1047,22 +1114,22 @@ static void __init setup_ioapic_ids_from_mpc (void)
 		 * system must have a unique ID or we get lots of nice
 		 * 'stuck on smp_invalidate_needed IPI wait' messages.
 	 	 */
-		if (phys_id_present_map & (1 << mp_ioapics[apic].mpc_apicid)) {
+		if (physid_isset(mp_ioapics[apic].mpc_apicid, phys_id_present_map)) {
 			printk(KERN_ERR "BIOS bug, IO-APIC#%d ID %d is already used!...\n",
 				apic, mp_ioapics[apic].mpc_apicid);
 			for (i = 0; i < 0xf; i++)
-				if (!(phys_id_present_map & (1 << i)))
+				if (!physid_isset(i, phys_id_present_map))
 					break;
 			if (i >= 0xf)
 				panic("Max APIC ID exceeded!\n");
 			printk(KERN_ERR "... fixing up to %d. (tell your hw vendor)\n",
 				i);
-			phys_id_present_map |= 1 << i;
+			physid_set(i, phys_id_present_map);
 			mp_ioapics[apic].mpc_apicid = i;
 		} else {
 			printk(KERN_INFO 
 			       "Using IO-APIC %d\n", mp_ioapics[apic].mpc_apicid);
-			phys_id_present_map |= 1 << mp_ioapics[apic].mpc_apicid;
+			physid_set(mp_ioapics[apic].mpc_apicid, phys_id_present_map);
 		}
 
 
@@ -1278,16 +1345,20 @@ static void end_level_ioapic_irq (unsigned int irq)
 
 static void mask_and_ack_level_ioapic_irq (unsigned int irq) { /* nothing */ }
 
-static void set_ioapic_affinity (unsigned int irq, unsigned long mask)
+static void set_ioapic_affinity (unsigned int irq, cpumask_t mask)
 {
 	unsigned long flags;
+	unsigned int dest;
+
+	dest = cpu_mask_to_apicid(mk_cpumask_const(mask));
+
 	/*
 	 * Only the first 8 bits are valid.
 	 */
-	mask = mask << 24;
+	dest = dest << 24;
 
 	spin_lock_irqsave(&ioapic_lock, flags);
-	__DO_ACTION(1, = mask, )
+	__DO_ACTION(1, = dest, )
 	spin_unlock_irqrestore(&ioapic_lock, flags);
 }
 
@@ -1638,7 +1709,7 @@ void __init mp_config_ioapic_for_sci(int irq)
 int __init io_apic_get_unique_id (int ioapic, int apic_id)
 {
 	union IO_APIC_reg_00 reg_00;
-	static unsigned long apic_id_map = 0;
+	static physid_mask_t apic_id_map;
 	unsigned long flags;
 	int i = 0;
 
@@ -1651,7 +1722,7 @@ int __init io_apic_get_unique_id (int ioapic, int apic_id)
 	 *      advantage of new APIC bus architecture.
 	 */
 
-	if (!apic_id_map)
+	if (!physids_empty(apic_id_map))
 		apic_id_map = phys_cpu_present_map;
 
 	spin_lock_irqsave(&ioapic_lock, flags);
@@ -1668,10 +1739,10 @@ int __init io_apic_get_unique_id (int ioapic, int apic_id)
 	 * Every APIC in a system must have a unique ID or we get lots of nice 
 	 * 'stuck on smp_invalidate_needed IPI wait' messages.
 	 */
-	if (apic_id_map & (1 << apic_id)) {
+	if (physid_isset(apic_id, apic_id_map)) {
 
 		for (i = 0; i < IO_APIC_MAX_ID; i++) {
-			if (!(apic_id_map & (1 << i)))
+			if (!physid_isset(i, apic_id_map))
 				break;
 		}
 
@@ -1684,7 +1755,7 @@ int __init io_apic_get_unique_id (int ioapic, int apic_id)
 		apic_id = i;
 	} 
 
-	apic_id_map |= (1 << apic_id);
+	physid_set(apic_id, apic_id_map);
 
 	if (reg_00.bits.ID != apic_id) {
 		reg_00.bits.ID = apic_id;
@@ -1731,13 +1802,13 @@ int __init io_apic_get_redir_entries (int ioapic)
 }
 
 
-int io_apic_set_pci_routing (int ioapic, int pin, int irq)
+int io_apic_set_pci_routing (int ioapic, int pin, int irq, int edge_level, int active_high_low)
 {
 	struct IO_APIC_route_entry entry;
 	unsigned long flags;
 
 	if (!IO_APIC_IRQ(irq)) {
-		printk(KERN_ERR "IOAPIC[%d]: Invalid reference to IRQ 0/n", 
+		printk(KERN_ERR "IOAPIC[%d]: Invalid reference to IRQ 0\n",
 			ioapic);
 		return -EINVAL;
 	}
@@ -1753,19 +1824,24 @@ int io_apic_set_pci_routing (int ioapic, int pin, int irq)
 	entry.delivery_mode = dest_LowestPrio;
 	entry.dest_mode = INT_DELIVERY_MODE;
 	entry.dest.logical.logical_dest = TARGET_CPUS;
+	entry.trigger = edge_level;
+	entry.polarity = active_high_low;
 	entry.mask = 1;					 /* Disabled (masked) */
-	entry.trigger = 1;				   /* Level sensitive */
-	entry.polarity = 1;					/* Low active */
 
 	add_pin_to_irq(irq, ioapic, pin);
 
 	entry.vector = assign_irq_vector(irq);
 
 	printk(KERN_DEBUG "IOAPIC[%d]: Set PCI routing entry (%d-%d -> 0x%x -> "
-		"IRQ %d)\n", ioapic, 
-		mp_ioapics[ioapic].mpc_apicid, pin, entry.vector, irq);
+		"IRQ %d Mode:%i Active:%i)\n", ioapic, 
+	       mp_ioapics[ioapic].mpc_apicid, pin, entry.vector, irq,
+	       edge_level, active_high_low);
 
-	irq_desc[irq].handler = &ioapic_level_irq_type;
+	if (edge_level) {
+		irq_desc[irq].handler = &ioapic_level_irq_type;
+	} else {
+		irq_desc[irq].handler = &ioapic_edge_irq_type;
+	}
 
 	set_intr_gate(entry.vector, interrupt[irq]);
 
@@ -1781,3 +1857,21 @@ int io_apic_set_pci_routing (int ioapic, int pin, int irq)
 }
 
 #endif /*CONFIG_ACPI_BOOT*/
+
+#ifndef CONFIG_SMP
+void send_IPI_self(int vector)
+{
+	unsigned int cfg;
+
+       /*
+        * Wait for idle.
+        */
+	apic_wait_icr_idle();
+	cfg = APIC_DM_FIXED | APIC_DEST_SELF | vector | APIC_DEST_LOGICAL;
+
+	/*
+	 * Send the IPI. The write to APIC_ICR fires this off.
+	 */
+	apic_write_around(APIC_ICR, cfg);
+}
+#endif

@@ -1206,14 +1206,16 @@ asmlinkage long sys_bind(int fd, struct sockaddr __user *umyaddr, int addrlen)
  *	ready for listening.
  */
 
+int sysctl_somaxconn = SOMAXCONN;
+
 asmlinkage long sys_listen(int fd, int backlog)
 {
 	struct socket *sock;
 	int err;
 	
 	if ((sock = sockfd_lookup(fd, &err)) != NULL) {
-		if ((unsigned) backlog > SOMAXCONN)
-			backlog = SOMAXCONN;
+		if ((unsigned) backlog > sysctl_somaxconn)
+			backlog = sysctl_somaxconn;
 
 		err = security_socket_listen(sock, backlog);
 		if (err) {
@@ -1894,6 +1896,8 @@ int sock_register(struct net_proto_family *ops)
 		err = 0;
 	}
 	net_family_write_unlock();
+	printk(KERN_INFO "NET: Registered protocol family %d\n",
+	       ops->family);
 	return err;
 }
 
@@ -1911,6 +1915,8 @@ int sock_unregister(int family)
 	net_family_write_lock();
 	net_families[family]=NULL;
 	net_family_write_unlock();
+	printk(KERN_INFO "NET: Unregistered protocol family %d\n",
+	       family);
 	return 0;
 }
 
@@ -1985,3 +1991,18 @@ void socket_seq_show(struct seq_file *seq)
 	seq_printf(seq, "sockets: used %d\n", counter);
 }
 #endif /* CONFIG_PROC_FS */
+
+/* ABI emulation layers need these two */
+EXPORT_SYMBOL(move_addr_to_kernel);
+EXPORT_SYMBOL(move_addr_to_user);
+EXPORT_SYMBOL(sock_alloc);
+EXPORT_SYMBOL(sock_alloc_inode);
+EXPORT_SYMBOL(sock_create);
+EXPORT_SYMBOL(sock_map_fd);
+EXPORT_SYMBOL(sock_recvmsg);
+EXPORT_SYMBOL(sock_register);
+EXPORT_SYMBOL(sock_release);
+EXPORT_SYMBOL(sock_sendmsg);
+EXPORT_SYMBOL(sock_unregister);
+EXPORT_SYMBOL(sock_wake_async);
+EXPORT_SYMBOL(sockfd_lookup);

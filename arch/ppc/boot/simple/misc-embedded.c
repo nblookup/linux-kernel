@@ -13,7 +13,6 @@
 #include <asm/bootinfo.h>
 #include <asm/mmu.h>
 #include <asm/page.h>
-#include <asm/processor.h>
 #include <asm/residual.h>
 #if defined(CONFIG_4xx)
 #include <asm/ibm4xx.h>
@@ -75,7 +74,7 @@ extern void gunzip(void *, int, unsigned char *, int *);
 extern void embed_config(bd_t **bp);
 
 unsigned long
-decompress_kernel(unsigned long load_addr, int num_words, unsigned long cksum, bd_t *bp)
+load_kernel(unsigned long load_addr, int num_words, unsigned long cksum, bd_t *bp)
 {
 	char *cp, ch;
 	int timer = 0, zimage_size;

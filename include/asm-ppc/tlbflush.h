@@ -12,24 +12,29 @@
 
 #include <linux/config.h>
 #include <linux/mm.h>
-#include <asm/processor.h>
 
 extern void _tlbie(unsigned long address);
 extern void _tlbia(void);
 
 #if defined(CONFIG_4xx)
 
+#ifndef CONFIG_44x
+#define __tlbia()	asm volatile ("sync; tlbia; isync" : : : "memory")
+#else
+#define __tlbia		_tlbia
+#endif
+
 static inline void flush_tlb_mm(struct mm_struct *mm)
-	{ _tlbia(); }
+	{ __tlbia(); }
 static inline void flush_tlb_page(struct vm_area_struct *vma,
 				unsigned long vmaddr)
 	{ _tlbie(vmaddr); }
 static inline void flush_tlb_range(struct vm_area_struct *vma,
 				unsigned long start, unsigned long end)
-	{ _tlbia(); }
+	{ __tlbia(); }
 static inline void flush_tlb_kernel_range(unsigned long start,
 				unsigned long end)
-	{ _tlbia(); }
+	{ __tlbia(); }
 
 #elif defined(CONFIG_8xx)
 #define __tlbia()	asm volatile ("tlbia; sync" : : : "memory")

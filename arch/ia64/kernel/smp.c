@@ -72,7 +72,7 @@ static volatile struct call_data_struct *call_data;
 #define IPI_CPU_STOP		1
 
 /* This needs to be cacheline aligned because it is written to by *other* CPUs.  */
-static DEFINE_PER_CPU(__u64, ipi_operation) ____cacheline_aligned;
+static DEFINE_PER_CPU(u64, ipi_operation) ____cacheline_aligned;
 
 static void
 stop_this_cpu (void)
@@ -81,7 +81,7 @@ stop_this_cpu (void)
 	/*
 	 * Remove this CPU:
 	 */
-	clear_bit(smp_processor_id(), &cpu_online_map);
+	cpu_clear(smp_processor_id(), cpu_online_map);
 	max_xtp();
 	local_irq_disable();
 	cpu_halt();
@@ -91,7 +91,7 @@ irqreturn_t
 handle_IPI (int irq, void *dev_id, struct pt_regs *regs)
 {
 	int this_cpu = get_cpu();
-	unsigned long *pending_ipis = &__get_cpu_var(ipi_operation);
+	unsigned long *pending_ipis = &__ia64_per_cpu_var(ipi_operation);
 	unsigned long ops;
 
 	/* Count this now; we may make a call that never returns. */

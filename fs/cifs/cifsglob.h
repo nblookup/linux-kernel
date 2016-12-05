@@ -1,7 +1,7 @@
 /*
  *   fs/cifs/cifsglob.h
  *
- *   Copyright (c) International Business Machines  Corp., 2002
+ *   Copyright (C) International Business Machines  Corp., 2002,2003
  *   Author(s): Steve French (sfrench@us.ibm.com)
  *
  *   This library is free software; you can redistribute it and/or modify
@@ -155,7 +155,8 @@ struct cifsSesInfo {
 	char *serverOS;		/* name of operating system underlying the server */
 	char *serverNOS;	/* name of network operating system that the server is running */
 	char *serverDomain;	/* security realm of server */
-	int Suid;		/* needed for user level security */
+	int Suid;		/* remote smb uid  */
+	uid_t linux_uid;        /* local Linux uid */
 	int capabilities;
 	char serverName[SERVER_NAME_LEN_WITH_NULL * 2];	/* BB make bigger for tcp names - will ipv6 and sctp addresses fit here?? */
 	char userName[MAX_USERNAME_SIZE + 1];
@@ -207,9 +208,11 @@ struct cifsFileInfo {
 	/* BB add lock scope info here if needed */ ;
 	/* lock scope id (0 if none) */
 	struct file * pfile; /* needed for writepage */
+	struct inode * pInode; /* needed for oplock break */
 	int endOfSearch:1;	/* we have reached end of search */
 	int closePend:1;	/* file is marked to close */
 	int emptyDir:1;
+	int invalidHandle:1;  /* file closed via session abend */
 	char * search_resume_name;
 	unsigned int resume_name_length;
 	__u32 resume_key;
@@ -262,8 +265,9 @@ struct mid_q_entry {
 
 struct oplock_q_entry {
 	struct list_head qhead;
-	struct file * file_to_flush;
+	struct inode * pinode;
 	struct cifsTconInfo * tcon; 
+	__u16 netfid;
 };
 
 #define   MID_FREE 0
@@ -291,7 +295,27 @@ struct servers_not_supported { /* @z4a */
  * following to be declared.
  */
 
-/* BB Every global should have an associated mutex for safe update BB */
+/****************************************************************************
+ *  Locking notes.  All updates to global variables and lists should be
+ *                  protected by spinlocks or semaphores.
+ *
+ *  Spinlocks
+ *  ---------
+ *  GlobalMid_Lock protects:
+ *	list operations on pending_mid_q and oplockQ
+ *      updates to XID counters, multiplex id  and SMB sequence numbers
+ *  GlobalSMBSesLock protects:
+ *	list operations on tcp and SMB session lists and tCon lists
+ *  f_owner.lock protects certain per file struct operations
+ *  mapping->page_lock protects certain per page operations
+ *
+ *  Semaphores
+ *  ----------
+ *  sesSem     operations on smb session
+ *  tconSem    operations on tree connection
+ *  i_sem      inode operations 
+ *
+ ****************************************************************************/
 
 #ifdef DECLARE_GLOBALS_HERE
 #define GLOBAL_EXTERN
@@ -324,7 +348,7 @@ GLOBAL_EXTERN struct list_head GlobalOplock_Q;
 GLOBAL_EXTERN unsigned int GlobalCurrentXid;	/* protected by GlobalMid_Sem */
 GLOBAL_EXTERN unsigned int GlobalTotalActiveXid;	/* prot by GlobalMid_Sem */
 GLOBAL_EXTERN unsigned int GlobalMaxActiveXid;	/* prot by GlobalMid_Sem */
-GLOBAL_EXTERN rwlock_t GlobalMid_Lock;  /* protects above and list operations */
+GLOBAL_EXTERN spinlock_t GlobalMid_Lock;  /* protects above and list operations */
 					/* on midQ entries */
 GLOBAL_EXTERN char Local_System_Name[15];
 
@@ -344,6 +368,7 @@ GLOBAL_EXTERN unsigned int multiuser_mount;	/* if enabled allows new sessions
 				have the uid/password or Kerberos credential 
 				or equivalent for current user */
 GLOBAL_EXTERN unsigned int oplockEnabled;
+GLOBAL_EXTERN unsigned int quotaEnabled;
 GLOBAL_EXTERN unsigned int lookupCacheEnabled;
 GLOBAL_EXTERN unsigned int extended_security;	/* if on, session setup sent 
 				with more secure ntlmssp2 challenge/resp */

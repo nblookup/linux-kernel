@@ -63,7 +63,6 @@
 #include <asm/irq.h>
 
 #include "ide-timing.h"
-#include "ide_modes.h"
 #include "sis5513.h"
 
 /* registers layout and init values are chipset family dependant */
@@ -697,13 +696,15 @@ try_dma_modes:
 		} else {
 			goto fast_ata_pio;
 		}
+		return hwif->ide_dma_on(drive);
 	} else if ((id->capability & 8) || (id->field_valid & 2)) {
 fast_ata_pio:
 no_dma_set:
 		sis5513_tune_drive(drive, 5);
 		return hwif->ide_dma_off_quietly(drive);
 	}
-	return hwif->ide_dma_on(drive);
+	/* IORDY not supported */
+	return 0;
 }
 
 /* initiates/aborts (U)DMA read/write operations on a drive. */
@@ -943,11 +944,6 @@ static void __init init_hwif_sis5513 (ide_hwif_t *hwif)
 	return;
 }
 
-static void __init init_dma_sis5513 (ide_hwif_t *hwif, unsigned long dmabase)
-{
-	ide_setup_dma(hwif, dmabase, 8);
-}
-
 extern void ide_setup_pci_device(struct pci_dev *, ide_pci_device_t *);
 
 
@@ -961,7 +957,7 @@ static int __devinit sis5513_init_one(struct pci_dev *dev, const struct pci_devi
 	return 0;
 }
 
-static struct pci_device_id sis5513_pci_tbl[] __devinitdata = {
+static struct pci_device_id sis5513_pci_tbl[] = {
 	{ PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_5513, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ 0, },
 };

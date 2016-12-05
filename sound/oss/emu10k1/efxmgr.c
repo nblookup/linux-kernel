@@ -80,15 +80,20 @@ void emu10k1_set_control_gpr(struct emu10k1_card *card, int addr, s32 val, int f
 	if (addr < 0 || addr >= NUM_GPRS)
 		return;
 
-	if (flag)
-		val += sblive_readptr(card, GPR_BASE + addr, 0);
-
-	if (val > mgr->gpr[addr].max)
-		val = mgr->gpr[addr].max;
-	else if (val < mgr->gpr[addr].min)
-		val = mgr->gpr[addr].min;
-
-	sblive_writeptr(card, GPR_BASE + addr, 0, val);
+	//fixme: once patch manager is up, remember to fix this for the audigy
+	if (card->is_audigy) {
+		sblive_writeptr(card, A_GPR_BASE + addr, 0, val);
+	} else {
+		if (flag)
+			val += sblive_readptr(card, GPR_BASE + addr, 0);
+		if (val > mgr->gpr[addr].max)
+			val = mgr->gpr[addr].max;
+		else if (val < mgr->gpr[addr].min)
+			val = mgr->gpr[addr].min;
+		sblive_writeptr(card, GPR_BASE + addr, 0, val);
+	}
+	
+	
 }
 
 //TODO: make this configurable:
@@ -101,10 +106,10 @@ void emu10k1_set_oss_vol(struct emu10k1_card *card, int oss_mixer,
 {
 	extern char volume_params[SOUND_MIXER_NRDEVICES];
 
-	card->ac97.mixer_state[oss_mixer] = (right << 8) | left;
+	card->ac97->mixer_state[oss_mixer] = (right << 8) | left;
 
 	if (!card->is_aps)
-		card->ac97.write_mixer(&card->ac97, oss_mixer, left, right);
+		card->ac97->write_mixer(card->ac97, oss_mixer, left, right);
 	
 	emu10k1_set_volume_gpr(card, card->mgr.ctrl_gpr[oss_mixer][0], left,
 			       volume_params[oss_mixer]);
@@ -118,14 +123,14 @@ void emu10k1_mute_irqhandler(struct emu10k1_card *card)
 {
 	int oss_channel = VOLCTRL_CHANNEL;
 	int left, right;
-	static int val = 0;
+	static int val;
 
 	if (val) {
 		left = val & 0xff;
 		right = (val >> 8) & 0xff;
 		val = 0;
 	} else {
-		val = card->ac97.mixer_state[oss_channel];
+		val = card->ac97->mixer_state[oss_channel];
 		left = 0;
 		right = 0;
 	}
@@ -138,8 +143,8 @@ void emu10k1_volincr_irqhandler(struct emu10k1_card *card)
 	int oss_channel = VOLCTRL_CHANNEL;
 	int left, right;
 
-	left = card->ac97.mixer_state[oss_channel] & 0xff;
-	right = (card->ac97.mixer_state[oss_channel] >> 8) & 0xff;
+	left = card->ac97->mixer_state[oss_channel] & 0xff;
+	right = (card->ac97->mixer_state[oss_channel] >> 8) & 0xff;
 
 	if ((left += VOLCTRL_STEP_SIZE) > 100)
 		left = 100;
@@ -155,8 +160,8 @@ void emu10k1_voldecr_irqhandler(struct emu10k1_card *card)
 	int oss_channel = VOLCTRL_CHANNEL;
 	int left, right;
 
-	left = card->ac97.mixer_state[oss_channel] & 0xff;
-	right = (card->ac97.mixer_state[oss_channel] >> 8) & 0xff;
+	left = card->ac97->mixer_state[oss_channel] & 0xff;
+	right = (card->ac97->mixer_state[oss_channel] >> 8) & 0xff;
 
 	if ((left -= VOLCTRL_STEP_SIZE) < 0)
 		left = 0;

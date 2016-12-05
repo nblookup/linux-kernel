@@ -65,7 +65,6 @@
 #include <linux/tty_driver.h>
 #include <linux/slab.h>
 #include <linux/init.h>
-#include <linux/version.h>
 
 #ifndef MODULE
 #include <linux/ctype.h> /* We only need it for parsing the "digi="-line */
@@ -110,7 +109,6 @@ static int memsize[]      = {0, 0, 0, 0};
 static int altpin[]       = {0, 0, 0, 0};
 static int numports[]     = {0, 0, 0, 0};
 
-# if (LINUX_VERSION_CODE > 0x020111)
 MODULE_AUTHOR("Bernhard Kaindl");
 MODULE_DESCRIPTION("Digiboard PC/X{i,e,eve} driver");
 MODULE_LICENSE("GPL");
@@ -121,9 +119,8 @@ MODULE_PARM(membase,     "1-4i");
 MODULE_PARM(memsize,     "1-4i");
 MODULE_PARM(altpin,      "1-4i");
 MODULE_PARM(numports,    "1-4i");
-# endif
 
-#endif MODULE
+#endif /* MODULE */
 
 static int numcards = 1;
 static int nbdevs = 0;
@@ -144,8 +141,6 @@ static struct tty_driver *pcxe_driver;
 
 static struct timer_list pcxx_timer;
 
-DECLARE_TASK_QUEUE(tq_pcxx);
-
 static void pcxxpoll(unsigned long dummy);
 static void fepcmd(struct channel *, int, int, int, int, int);
 static void pcxe_put_char(struct tty_struct *, unsigned char);
@@ -163,7 +158,6 @@ static void receive_data(struct channel *);
 static void pcxxparam(struct tty_struct *, struct channel *ch);
 static void do_softint(void *);
 static inline void pcxe_sched_event(struct channel *, int);
-static void do_pcxe_bh(void);
 static void pcxe_start(struct tty_struct *);
 static void pcxe_stop(struct tty_struct *);
 static void pcxe_throttle(struct tty_struct *);
@@ -205,21 +199,7 @@ static void cleanup_board_resources(void)
 	}
 }
 
-/*****************************************************************************/
-
-#ifdef MODULE
-
-/*
- * pcxe_init() is our init_module():
- */
-#define pcxe_init init_module
-
-void	cleanup_module(void);
-
-
-/*****************************************************************************/
-
-void cleanup_module()
+static void __exit pcxe_cleanup(void)
 {
 
 	unsigned long	flags;
@@ -230,7 +210,6 @@ void cleanup_module()
 	save_flags(flags);
 	cli();
 	del_timer_sync(&pcxx_timer);
-	remove_bh(DIGI_BH);
 
 	if ((e1 = tty_unregister_driver(pcxe_driver)))
 		printk("SERIAL: failed to unregister serial driver (%d)\n", e1);
@@ -240,7 +219,12 @@ void cleanup_module()
 	kfree(digi_channels);
 	restore_flags(flags);
 }
-#endif
+
+/*
+ * pcxe_init() is our init_module():
+ */
+module_init(pcxe_init);
+module_cleanup(pcxe_cleanup);
 
 static inline struct channel *chan(register struct tty_struct *tty)
 {
@@ -316,8 +300,7 @@ static inline void assertmemoff(struct channel *ch)
 static inline void pcxe_sched_event(struct channel *info, int event)
 {
 	info->event |= 1 << event;
-	queue_task(&info->tqueue, &tq_pcxx);
-	mark_bh(DIGI_BH);
+	schedule_work(&info->tqueue);
 }
 
 static void pcxx_error(int line, char *msg)
@@ -1027,6 +1010,9 @@ void __init pcxx_setup(char *str, int *ints)
 }
 #endif
 
+module_init(pcxe_init)
+module_exit(pcxe_exit)
+
 static struct tty_operations pcxe_ops = {
 	.open = pcxe_open,
 	.close = pcxe_close,
@@ -1049,7 +1035,7 @@ static struct tty_operations pcxe_ops = {
  * function to initialize the driver with the given parameters, which are either
  * the default values from this file or the parameters given at boot.
  */
-int __init pcxe_init(void)
+static int __init pcxe_init(void)
 {
 	ulong memory_seg=0, memory_size=0;
 	int lowwater, enabled_cards=0, i, crd, shrinkmem=0, topwin = 0xff00L, botwin=0x100L;
@@ -1153,8 +1139,6 @@ int __init pcxe_init(void)
 		return -ENOMEM;
 	}
 	memset(digi_channels, 0, sizeof(struct channel) * nbdevs);
-
-	init_bh(DIGI_BH,do_pcxe_bh);
 
 	init_timer(&pcxx_timer);
 	pcxx_timer.function = pcxxpoll;
@@ -1454,8 +1438,7 @@ load_fep:
 			}
 			ch->brdchan = bc;
 			ch->mailbox = gd;
-			ch->tqueue.routine = do_softint;
-			ch->tqueue.data = ch;
+			INIT_WORK(&ch->tqueue, do_softint, ch);
 			ch->board = &boards[crd];
 #ifdef DEFAULT_HW_FLOW
 			ch->digiext.digi_flags = RTSPACE|CTSPACE;
@@ -2257,11 +2240,6 @@ static void pcxe_set_termios(struct tty_struct *tty, struct termios *old_termios
 	}
 }
 
-
-static void do_pcxe_bh(void)
-{
-	run_task_queue(&tq_pcxx);
-}
 
 
 static void do_softint(void *private_)

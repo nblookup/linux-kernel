@@ -45,8 +45,7 @@
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/wait.h>
-#include <linux/devfs_fs_kernel.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/blkpg.h>
 
 #include <asm/system.h>
@@ -144,7 +143,7 @@ static struct timer_list xd_watchdog_int;
 static volatile u_char xd_error;
 static int nodma = XD_DONT_USE_DMA;
 
-static struct request_queue xd_queue;
+static struct request_queue *xd_queue;
 
 /* xd_init: register the block device number and set up pointer tables */
 static int __init xd_init(void)
@@ -177,8 +176,11 @@ static int __init xd_init(void)
 	if (register_blkdev(XT_DISK_MAJOR, "xd"))
 		goto out1;
 
-	devfs_mk_dir("xd");
-	blk_init_queue(&xd_queue, do_xd_request, &xd_lock);
+	err = -ENOMEM;
+	xd_queue = blk_init_queue(do_xd_request, &xd_lock);
+	if (!xd_queue)
+		goto out1a;
+
 	if (xd_detect(&controller,&address)) {
 
 		printk("Detected a%s controller (type %d) at address %06x\n",
@@ -209,9 +211,10 @@ static int __init xd_init(void)
 		disk->major = XT_DISK_MAJOR;
 		disk->first_minor = i<<6;
 		sprintf(disk->disk_name, "xd%c", i+'a');
+		sprintf(disk->devfs_name, "xd/target%d", i);
 		disk->fops = &xd_fops;
 		disk->private_data = p;
-		disk->queue = &xd_queue;
+		disk->queue = xd_queue;
 		set_capacity(disk, p->heads * p->cylinders * p->sectors);
 		printk(" %s: CHS=%d/%d/%d\n", disk->disk_name,
 			p->cylinders, p->heads, p->sectors);
@@ -230,7 +233,7 @@ static int __init xd_init(void)
 	}
 
 	/* xd_maxsectors depends on controller - so set after detection */
-	blk_queue_max_sectors(&xd_queue, xd_maxsectors);
+	blk_queue_max_sectors(xd_queue, xd_maxsectors);
 
 	for (i = 0; i < xd_drives; i++)
 		add_disk(xd_gendisk[i]);
@@ -245,8 +248,8 @@ out4:
 out3:
 	release_region(xd_iobase,4);
 out2:
-	devfs_remove("xd");
-	blk_cleanup_queue(&xd_queue);
+	blk_cleanup_queue(xd_queue);
+out1a:
 	unregister_blkdev(XT_DISK_MAJOR, "xd");
 out1:
 	if (xd_dma_buffer)
@@ -1057,9 +1060,8 @@ void cleanup_module(void)
 		del_gendisk(xd_gendisk[i]);
 		put_disk(xd_gendisk[i]);
 	}
-	blk_cleanup_queue(&xd_queue);
+	blk_cleanup_queue(xd_queue);
 	release_region(xd_iobase,4);
-	devfs_remove("xd");
 	if (xd_drives) {
 		free_irq(xd_irq, NULL);
 		free_dma(xd_dma);
@@ -1098,5 +1100,5 @@ __setup ("xd_geo=", xd_manual_geo_init);
 
 #endif /* MODULE */
 
-module_init(xd_init)
-
+module_init(xd_init);
+MODULE_ALIAS_BLOCKDEV_MAJOR(XT_DISK_MAJOR);

@@ -229,7 +229,7 @@ To install:
    second, third, or fourth controller installed, do not say "y" to the 
    secondary Matsushita CD-ROM questions.
 
-3. Then do a "make dep", then make the kernel image ("make zlilo" or similar).
+3. Then make the kernel image ("make zlilo" or similar).
 
 4. Make the device file(s). This step usually already has been done by the
    MAKEDEV script.
@@ -272,7 +272,6 @@ Using sbpcd as a "loadable module":
 
 If you do NOT select "Matsushita/Panasonic CDROM driver support" during the
 "make config" of your kernel, you can build the "loadable module" sbpcd.o.
-Read /usr/src/linux/Documentation/modules.txt on this.
 
 If sbpcd gets used as a module, the support of more than one interface
 card (i.e. drives 4...15) is disabled.

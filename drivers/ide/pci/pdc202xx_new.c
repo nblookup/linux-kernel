@@ -32,7 +32,6 @@
 #include <asm/io.h>
 #include <asm/irq.h>
 
-#include "ide_modes.h"
 #include "pdc202xx_new.h"
 
 #define PDC202_DEBUG_CABLE	0
@@ -415,13 +414,15 @@ try_dma_modes:
 		} else {
 			goto fast_ata_pio;
 		}
+		return hwif->ide_dma_on(drive);
 	} else if ((id->capability & 8) || (id->field_valid & 2)) {
 fast_ata_pio:
 no_dma_set:
 		hwif->tuneproc(drive, 5);
 		return hwif->ide_dma_off_quietly(drive);
 	}
-	return hwif->ide_dma_on(drive);
+	/* IORDY not supported */
+	return 0;
 }
 
 static int pdcnew_quirkproc (ide_drive_t *drive)
@@ -564,11 +565,6 @@ static void __init init_hwif_pdc202new (ide_hwif_t *hwif)
 #endif /* PDC202_DEBUG_CABLE */
 }
 
-static void __init init_dma_pdc202new (ide_hwif_t *hwif, unsigned long dmabase)
-{
-	ide_setup_dma(hwif, dmabase, 8);
-}
-
 extern void ide_setup_pci_device(struct pci_dev *, ide_pci_device_t *);
 extern void ide_setup_pci_devices(struct pci_dev *, struct pci_dev *, ide_pci_device_t *);
 
@@ -636,7 +632,7 @@ static int __devinit pdc202new_init_one(struct pci_dev *dev, const struct pci_de
 	return 0;
 }
 
-static struct pci_device_id pdc202new_pci_tbl[] __devinitdata = {
+static struct pci_device_id pdc202new_pci_tbl[] = {
 	{ PCI_VENDOR_ID_PROMISE, PCI_DEVICE_ID_PROMISE_20268, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ PCI_VENDOR_ID_PROMISE, PCI_DEVICE_ID_PROMISE_20269, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1},
 	{ PCI_VENDOR_ID_PROMISE, PCI_DEVICE_ID_PROMISE_20270, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 2},

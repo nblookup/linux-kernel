@@ -10,6 +10,7 @@
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/blkdev.h>
 #include <linux/backing-dev.h>
 #include <linux/pagevec.h>
@@ -18,6 +19,8 @@ struct backing_dev_info default_backing_dev_info = {
 	.ra_pages	= (VM_MAX_READAHEAD * 1024) / PAGE_CACHE_SIZE,
 	.state		= 0,
 };
+
+EXPORT_SYMBOL_GPL(default_backing_dev_info);
 
 /*
  * Initialise a struct file's readahead state
@@ -28,6 +31,8 @@ file_ra_state_init(struct file_ra_state *ra, struct address_space *mapping)
 	memset(ra, 0, sizeof(*ra));
 	ra->ra_pages = mapping->backing_dev_info->ra_pages;
 }
+
+EXPORT_SYMBOL(file_ra_state_init);
 
 /*
  * Return max readahead size for this inode in number-of-pages.
@@ -89,14 +94,19 @@ int read_cache_pages(struct address_space *mapping, struct list_head *pages,
 	return ret;
 }
 
+EXPORT_SYMBOL(read_cache_pages);
+
 static int read_pages(struct address_space *mapping, struct file *filp,
 		struct list_head *pages, unsigned nr_pages)
 {
 	unsigned page_idx;
 	struct pagevec lru_pvec;
+	int ret = 0;
 
-	if (mapping->a_ops->readpages)
-		return mapping->a_ops->readpages(filp, mapping, pages, nr_pages);
+	if (mapping->a_ops->readpages) {
+		ret = mapping->a_ops->readpages(filp, mapping, pages, nr_pages);
+		goto out;
+	}
 
 	pagevec_init(&lru_pvec, 0);
 	for (page_idx = 0; page_idx < nr_pages; page_idx++) {
@@ -112,7 +122,8 @@ static int read_pages(struct address_space *mapping, struct file *filp,
 		}
 	}
 	pagevec_lru_add(&lru_pvec);
-	return 0;
+out:
+	return ret;
 }
 
 /*
@@ -208,11 +219,12 @@ __do_page_cache_readahead(struct address_space *mapping, struct file *filp,
 	LIST_HEAD(page_pool);
 	int page_idx;
 	int ret = 0;
+	loff_t isize = i_size_read(inode);
 
-	if (inode->i_size == 0)
+	if (isize == 0)
 		goto out;
 
- 	end_index = ((inode->i_size - 1) >> PAGE_CACHE_SHIFT);
+ 	end_index = ((isize - 1) >> PAGE_CACHE_SHIFT);
 
 	/*
 	 * Preallocate as many pages as we will need.
@@ -255,8 +267,8 @@ out:
  * Chunk the readahead into 2 megabyte units, so that we don't pin too much
  * memory at once.
  */
-int do_page_cache_readahead(struct address_space *mapping, struct file *filp,
-			unsigned long offset, unsigned long nr_to_read)
+int force_page_cache_readahead(struct address_space *mapping, struct file *filp,
+		unsigned long offset, unsigned long nr_to_read)
 {
 	int ret = 0;
 
@@ -281,6 +293,22 @@ int do_page_cache_readahead(struct address_space *mapping, struct file *filp,
 		nr_to_read -= this_chunk;
 	}
 	return ret;
+}
+
+/*
+ * This version skips the IO if the queue is read-congested, and will tell the
+ * block layer to abandon the readahead if request allocation would block.
+ *
+ * force_page_cache_readahead() will ignore queue congestion and will block on
+ * request queues.
+ */
+int do_page_cache_readahead(struct address_space *mapping, struct file *filp,
+			unsigned long offset, unsigned long nr_to_read)
+{
+	if (!bdi_read_congested(mapping->backing_dev_info))
+		return __do_page_cache_readahead(mapping, filp,
+						offset, nr_to_read);
+	return 0;
 }
 
 /*

@@ -8,6 +8,7 @@
 #include <linux/mm.h>
 #include <linux/sysctl.h>
 #include <linux/config.h>
+#include <linux/module.h>
 
 #ifdef CONFIG_SYSCTL
 
@@ -28,10 +29,24 @@ extern __u32 sysctl_rmem_default;
 
 extern int sysctl_core_destroy_delay;
 extern int sysctl_optmem_max;
+extern int sysctl_somaxconn;
 
 #ifdef CONFIG_NET_DIVERT
 extern char sysctl_divert_version[];
 #endif /* CONFIG_NET_DIVERT */
+
+/*
+ * This strdup() is used for creating copies of network 
+ * device names to be handed over to sysctl.
+ */
+ 
+char *net_sysctl_strdup(const char *s)
+{
+	char *rv = kmalloc(strlen(s)+1, GFP_KERNEL);
+	if (rv)
+		strcpy(rv, s);
+	return rv;
+}
 
 ctl_table core_table[] = {
 #ifdef CONFIG_NET
@@ -86,7 +101,7 @@ ctl_table core_table[] = {
 	{
 		.ctl_name	= NET_CORE_NO_CONG_THRESH,
 		.procname	= "no_cong_thresh",
-		.data		= &no_cong,
+		.data		= &no_cong_thresh,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec
@@ -160,6 +175,17 @@ ctl_table core_table[] = {
 	},
 #endif /* CONFIG_NET_DIVERT */
 #endif /* CONFIG_NET */
+	{
+		.ctl_name	= NET_CORE_SOMAXCONN,
+		.procname	= "somaxconn",
+		.data		= &sysctl_somaxconn,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
+	},
 	{ .ctl_name = 0 }
 };
+
+EXPORT_SYMBOL(net_sysctl_strdup);
+
 #endif

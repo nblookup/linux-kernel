@@ -10,6 +10,7 @@
 
 #include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -129,7 +130,7 @@ common_shutdown_1(void *generic_ptr)
 		/* This has the effect of resetting the VGA video origin.  */
 		take_over_console(&dummy_con, 0, MAX_NR_CONSOLES-1, 1);
 #endif
-		/* reset_for_srm(); */
+		pci_restore_srm_config();
 		set_hae(srm_hae);
 	}
 
@@ -164,17 +165,23 @@ machine_restart(char *restart_cmd)
 	common_shutdown(LINUX_REBOOT_CMD_RESTART, restart_cmd);
 }
 
+EXPORT_SYMBOL(machine_restart);
+
 void
 machine_halt(void)
 {
 	common_shutdown(LINUX_REBOOT_CMD_HALT, NULL);
 }
 
+EXPORT_SYMBOL(machine_halt);
+
 void
 machine_power_off(void)
 {
 	common_shutdown(LINUX_REBOOT_CMD_POWER_OFF, NULL);
 }
+
+EXPORT_SYMBOL(machine_power_off);
 
 /* Used by sysrq-p, among others.  I don't believe r9-r15 are ever
    saved in the context it's used.  */

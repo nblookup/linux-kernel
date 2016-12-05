@@ -36,7 +36,6 @@
 #include <linux/sched.h>
 #include <linux/video_decoder.h>
 
-#include <linux/version.h>
 #include <asm/uaccess.h>
 
 #include "tuner.h"
@@ -488,7 +487,7 @@ DEBUG(printk(KERN_DEBUG "       %d: clip(%d,%d,%d,%d)\n", i,vp->x,vp->y,vp->widt
 		    vcp->width < 0 || (uint)(vcp->x+vcp->width) > ztv->overinfo.w ||
 		    vcp->height < 0 || (vcp->y+vcp->height) > ztv->overinfo.h)
 		{
-			DEBUG(printk(CARD_DEBUG "illegal clipzone (%d,%d,%d,%d) not in (0,0,%d,%d), adapting\n",CARD,vcp->x,vcp->y,vcp->width,vcp->height,ztv->overinfo.w,ztv->overinfo.h));
+			DEBUG(printk(CARD_DEBUG "invalid clipzone (%d,%d,%d,%d) not in (0,0,%d,%d), adapting\n",CARD,vcp->x,vcp->y,vcp->width,vcp->height,ztv->overinfo.w,ztv->overinfo.h));
 			if (vcp->x < 0) vcp->x = 0;
 			if ((uint)vcp->x > ztv->overinfo.w) vcp->x = ztv->overinfo.w;
 			if (vcp->y < 0) vcp->y = 0;

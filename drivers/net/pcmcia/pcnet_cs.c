@@ -110,13 +110,13 @@ MODULE_PARM(hw_addr, "6i");
 
 static void mii_phy_probe(struct net_device *dev);
 static void pcnet_config(dev_link_t *link);
-static void pcnet_release(u_long arg);
+static void pcnet_release(dev_link_t *link);
 static int pcnet_event(event_t event, int priority,
 		       event_callback_args_t *args);
 static int pcnet_open(struct net_device *dev);
 static int pcnet_close(struct net_device *dev);
 static int ei_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
-static int do_ioctl_light(struct net_device *dev, struct ifreq *rq, int cmd);
+static struct ethtool_ops netdev_ethtool_ops;
 static irqreturn_t ei_irq_wrapper(int irq, void *dev_id, struct pt_regs *regs);
 static void ei_watchdog(u_long arg);
 static void pcnet_reset_8390(struct net_device *dev);
@@ -239,24 +239,6 @@ typedef struct pcnet_dev_t {
 
 /*======================================================================
 
-    This bit of code is used to avoid unregistering network devices
-    at inappropriate times.  2.2 and later kernels are fairly picky
-    about when this can happen.
-    
-======================================================================*/
-
-static void flush_stale_links(void)
-{
-    dev_link_t *link, *next;
-    for (link = dev_list; link; link = next) {
-	next = link->next;
-	if (link->state & DEV_STALE_LINK)
-	    pcnet_detach(link);
-    }
-}
-
-/*======================================================================
-
     We never need to do anything when a pcnet device is "initialized"
     by the net software, because we only register already-found cards.
 
@@ -284,7 +266,6 @@ static dev_link_t *pcnet_attach(void)
     int i, ret;
 
     DEBUG(0, "pcnet_attach()\n");
-    flush_stale_links();
 
     /* Create new ethernet device */
     info = kmalloc(sizeof(*info), GFP_KERNEL);
@@ -293,9 +274,6 @@ static dev_link_t *pcnet_attach(void)
     link = &info->link; dev = &info->dev;
     link->priv = info;
 
-    init_timer(&link->release);
-    link->release.function = &pcnet_release;
-    link->release.data = (u_long)link;
     link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
     link->irq.IRQInfo1 = IRQ_INFO2_VALID|IRQ_LEVEL_ID;
     if (irq_list[0] == -1)
@@ -357,13 +335,10 @@ static void pcnet_detach(dev_link_t *link)
     if (*linkp == NULL)
 	return;
 
-    del_timer(&link->release);
     if (link->state & DEV_CONFIG) {
-	pcnet_release((u_long)link);
-	if (link->state & DEV_STALE_CONFIG) {
-	    link->state |= DEV_STALE_LINK;
+	pcnet_release(link);
+	if (link->state & DEV_STALE_CONFIG)
 	    return;
-	}
     }
 
     if (link->handle)
@@ -371,9 +346,11 @@ static void pcnet_detach(dev_link_t *link)
 
     /* Unlink device structure, free bits */
     *linkp = link->next;
-    if (link->dev)
+    if (link->dev) {
 	unregister_netdev(&info->dev);
-    kfree(info);
+	free_netdev(&info->dev);
+    } else
+	 kfree(info);
 
 } /* pcnet_detach */
 
@@ -704,10 +681,6 @@ static void pcnet_config(dev_link_t *link)
     } else {
 	dev->if_port = 0;
     }
-    if (register_netdev(dev) != 0) {
-	printk(KERN_NOTICE "pcnet_cs: register_netdev() failed\n");
-	goto failed;
-    }
 
     hw_info = get_hwinfo(link);
     if (hw_info == NULL)
@@ -722,7 +695,6 @@ static void pcnet_config(dev_link_t *link)
     if (hw_info == NULL) {
 	printk(KERN_NOTICE "pcnet_cs: unable to read hardware net"
 	       " address for io base %#3lx\n", dev->base_addr);
-	unregister_netdev(dev);
 	goto failed;
     }
 
@@ -756,8 +728,7 @@ static void pcnet_config(dev_link_t *link)
     ei_status.word16 = 1;
     ei_status.reset_8390 = &pcnet_reset_8390;
 
-    strcpy(info->node.dev_name, dev->name);
-    link->dev = &info->node;
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
 
     if (info->flags & (IS_DL10019|IS_DL10022)) {
 	u_char id = inb(dev->base_addr + 0x1a);
@@ -765,13 +736,27 @@ static void pcnet_config(dev_link_t *link)
 	mii_phy_probe(dev);
 	if ((id == 0x30) && !info->pna_phy && (info->eth_phy == 4))
 	    info->eth_phy = 0;
+    }
+
+    link->dev = &info->node;
+    link->state &= ~DEV_CONFIG_PENDING;
+
+    if (register_netdev(dev) != 0) {
+	printk(KERN_NOTICE "pcnet_cs: register_netdev() failed\n");
+	link->dev = NULL;
+	goto failed;
+    }
+
+    strcpy(info->node.dev_name, dev->name);
+
+    if (info->flags & (IS_DL10019|IS_DL10022)) {
+	u_char id = inb(dev->base_addr + 0x1a);
 	printk(KERN_INFO "%s: NE2000 (DL100%d rev %02x): ",
 	       dev->name, ((info->flags & IS_DL10022) ? 22 : 19), id);
 	if (info->pna_phy)
 	    printk("PNA, ");
     } else {
 	printk(KERN_INFO "%s: NE2000 Compatible: ", dev->name);
- 	dev->do_ioctl = &do_ioctl_light;	
     }
     printk("io %#3lx, irq %d,", dev->base_addr, dev->irq);
     if (info->flags & USE_SHMEM)
@@ -781,13 +766,12 @@ static void pcnet_config(dev_link_t *link)
     printk(" hw_addr ");
     for (i = 0; i < 6; i++)
 	printk("%02X%s", dev->dev_addr[i], ((i<5) ? ":" : "\n"));
-    link->state &= ~DEV_CONFIG_PENDING;
     return;
 
 cs_failed:
     cs_error(link->handle, last_fn, last_ret);
 failed:
-    pcnet_release((u_long)link);
+    pcnet_release(link);
     link->state &= ~DEV_CONFIG_PENDING;
     return;
 } /* pcnet_config */
@@ -800,9 +784,8 @@ failed:
 
 ======================================================================*/
 
-static void pcnet_release(u_long arg)
+static void pcnet_release(dev_link_t *link)
 {
-    dev_link_t *link = (dev_link_t *)arg;
     pcnet_dev_t *info = link->priv;
 
     DEBUG(0, "pcnet_release(0x%p)\n", link);
@@ -824,7 +807,9 @@ static void pcnet_release(u_long arg)
 
     link->state &= ~DEV_CONFIG;
 
-} /* pcnet_release */
+    if (link->state & DEV_STALE_CONFIG)
+	    pcnet_detach(link);
+}
 
 /*======================================================================
 
@@ -848,7 +833,7 @@ static int pcnet_event(event_t event, int priority,
 	link->state &= ~DEV_PRESENT;
 	if (link->state & DEV_CONFIG) {
 	    netif_device_detach(&info->dev);
-	    mod_timer(&link->release, jiffies + HZ/20);
+	    pcnet_release(link);
 	}
 	break;
     case CS_EVENT_CARD_INSERTION:
@@ -1052,9 +1037,9 @@ static int pcnet_close(struct net_device *dev)
     
     link->open--;
     netif_stop_queue(dev);
-    del_timer(&info->watchdog);
+    del_timer_sync(&info->watchdog);
     if (link->state & DEV_STALE_CONFIG)
-	mod_timer(&link->release, jiffies + HZ/20);
+	    pcnet_release(link);
 
     return 0;
 } /* pcnet_close */
@@ -1208,25 +1193,15 @@ reschedule:
 
 /*====================================================================*/
 
-static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
 {
-	u32 ethcmd;
-	
-	if (copy_from_user(&ethcmd, useraddr, sizeof(ethcmd)))
-		return -EFAULT;
-	
-	switch (ethcmd) {
-	case ETHTOOL_GDRVINFO: {
-		struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
-		strncpy(info.driver, "pcnet_cs", sizeof(info.driver)-1);
-		if (copy_to_user(useraddr, &info, sizeof(info)))
-			return -EFAULT;
-		return 0;
-	}
-	}
-	
-	return -EOPNOTSUPP;
+	strcpy(info->driver, "pcnet_cs");
 }
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+};
 
 /*====================================================================*/
 
@@ -1237,31 +1212,18 @@ static int ei_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
     u16 *data = (u16 *)&rq->ifr_data;
     ioaddr_t mii_addr = dev->base_addr + DLINK_GPIO;
     switch (cmd) {
-    case SIOCETHTOOL:
-        return netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
-    case SIOCDEVPRIVATE:
+    case SIOCGMIIPHY:
 	data[0] = info->phy_id;
-    case SIOCDEVPRIVATE+1:
+    case SIOCGMIIREG:		/* Read MII PHY register. */
 	data[3] = mdio_read(mii_addr, data[0], data[1] & 0x1f);
 	return 0;
-    case SIOCDEVPRIVATE+2:
+    case SIOCSMIIREG:		/* Write MII PHY register. */
 	if (!capable(CAP_NET_ADMIN))
 	    return -EPERM;
 	mdio_write(mii_addr, data[0], data[1] & 0x1f, data[2]);
 	return 0;
     }
     return -EOPNOTSUPP;
-}
-
-/*====================================================================*/
-
-static int do_ioctl_light(struct net_device *dev, struct ifreq *rq, int cmd)
-{
-    switch (cmd) {
-        case SIOCETHTOOL:
-            return netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
-    }	    
-    return -EOPNOTSUPP;    
 }
 
 /*====================================================================*/

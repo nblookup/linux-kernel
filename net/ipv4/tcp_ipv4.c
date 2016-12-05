@@ -56,10 +56,12 @@
 
 #include <linux/types.h>
 #include <linux/fcntl.h>
+#include <linux/module.h>
 #include <linux/random.h>
 #include <linux/cache.h>
 #include <linux/jhash.h>
 #include <linux/init.h>
+#include <linux/times.h>
 
 #include <net/icmp.h>
 #include <net/tcp.h>
@@ -179,20 +181,22 @@ void tcp_bind_hash(struct sock *sk, struct tcp_bind_bucket *tb,
 
 static inline int tcp_bind_conflict(struct sock *sk, struct tcp_bind_bucket *tb)
 {
-	struct inet_opt *inet = inet_sk(sk);
+	const u32 sk_rcv_saddr = tcp_v4_rcv_saddr(sk);
 	struct sock *sk2;
 	struct hlist_node *node;
 	int reuse = sk->sk_reuse;
 
 	sk_for_each_bound(sk2, node, &tb->owners) {
 		if (sk != sk2 &&
-		    !ipv6_only_sock(sk2) &&
-		    sk->sk_bound_dev_if == sk2->sk_bound_dev_if) {
+		    !tcp_v6_ipv6only(sk2) &&
+		    (!sk->sk_bound_dev_if ||
+		     !sk2->sk_bound_dev_if ||
+		     sk->sk_bound_dev_if == sk2->sk_bound_dev_if)) {
 			if (!reuse || !sk2->sk_reuse ||
 			    sk2->sk_state == TCP_LISTEN) {
-				struct inet_opt *inet2 = inet_sk(sk2);
-				if (!inet2->rcv_saddr || !inet->rcv_saddr ||
-				    inet2->rcv_saddr == inet->rcv_saddr)
+				const u32 sk2_rcv_saddr = tcp_v4_rcv_saddr(sk2);
+				if (!sk2_rcv_saddr || !sk_rcv_saddr ||
+				    sk2_rcv_saddr == sk_rcv_saddr)
 					break;
 			}
 		}
@@ -1884,6 +1888,7 @@ static int tcp_v4_reselect_saddr(struct sock *sk)
 
 	__sk_dst_set(sk, &rt->u.dst);
 	tcp_v4_setup_caps(sk, &rt->u.dst);
+	tcp_sk(sk)->ext2_header_len = rt->u.dst.header_len;
 
 	new_saddr = rt->rt_src;
 
@@ -1943,6 +1948,7 @@ int tcp_v4_rebuild_header(struct sock *sk)
 	if (!err) {
 		__sk_dst_set(sk, &rt->u.dst);
 		tcp_v4_setup_caps(sk, &rt->u.dst);
+		tcp_sk(sk)->ext2_header_len = rt->u.dst.header_len;
 		return 0;
 	}
 
@@ -2140,7 +2146,6 @@ static void *listening_get_first(struct seq_file *seq)
 
 		if (!sk)
 			continue;
-		++st->num;
 		if (sk->sk_family == st->family) {
 			rc = sk;
 			goto out;
@@ -2154,7 +2159,7 @@ static void *listening_get_first(struct seq_file *seq)
 			for (st->sbucket = 0; st->sbucket < TCP_SYNQ_HSIZE;
 			     ++st->sbucket) {
 				for (req = tp->listen_opt->syn_table[st->sbucket];
-				     req; req = req->dl_next, ++st->num) {
+				     req; req = req->dl_next) {
 					if (req->class->family != st->family)
 						continue;
 					rc = req;
@@ -2176,6 +2181,8 @@ static void *listening_get_next(struct seq_file *seq, void *cur)
 	struct sock *sk = cur;
 	struct tcp_iter_state* st = seq->private;
 
+	++st->num;
+
 	if (st->state == TCP_SEQ_STATE_OPENREQ) {
 		struct open_request *req = cur;
 
@@ -2183,7 +2190,6 @@ static void *listening_get_next(struct seq_file *seq, void *cur)
 		req = req->dl_next;
 		while (1) {
 			while (req) {
-				++st->num;
 				if (req->class->family == st->family) {
 					cur = req;
 					goto out;
@@ -2230,10 +2236,11 @@ static void *listening_get_idx(struct seq_file *seq, loff_t *pos)
 {
 	void *rc = listening_get_first(seq);
 
-	if (rc)
-		while (*pos && (rc = listening_get_next(seq, rc)))
-			--*pos;
-	return *pos ? NULL : rc;
+	while (rc && *pos) {
+		rc = listening_get_next(seq, rc);
+		--*pos;
+	}
+	return rc;
 }
 
 static void *established_get_first(struct seq_file *seq)
@@ -2249,7 +2256,6 @@ static void *established_get_first(struct seq_file *seq)
 		read_lock(&tcp_ehash[st->bucket].lock);
 		sk_for_each(sk, node, &tcp_ehash[st->bucket].chain) {
 			if (sk->sk_family != st->family) {
-				++st->num;
 				continue;
 			}
 			rc = sk;
@@ -2259,7 +2265,6 @@ static void *established_get_first(struct seq_file *seq)
 		tw_for_each(tw, node,
 			    &tcp_ehash[st->bucket + tcp_ehash_size].chain) {
 			if (tw->tw_family != st->family) {
-				++st->num;
 				continue;
 			}
 			rc = tw;
@@ -2279,12 +2284,13 @@ static void *established_get_next(struct seq_file *seq, void *cur)
 	struct hlist_node *node;
 	struct tcp_iter_state* st = seq->private;
 
+	++st->num;
+
 	if (st->state == TCP_SEQ_STATE_TIME_WAIT) {
 		tw = cur;
 		tw = tw_next(tw);
 get_tw:
 		while (tw && tw->tw_family != st->family) {
-			++st->num;
 			tw = tw_next(tw);
 		}
 		if (tw) {
@@ -2306,7 +2312,6 @@ get_tw:
 	sk_for_each_from(sk, node) {
 		if (sk->sk_family == st->family)
 			goto found;
-		++st->num;
 	}
 
 	st->state = TCP_SEQ_STATE_TIME_WAIT;
@@ -2322,10 +2327,11 @@ static void *established_get_idx(struct seq_file *seq, loff_t pos)
 {
 	void *rc = established_get_first(seq);
 
-	if (rc)
-		while (pos && (rc = established_get_next(seq, rc)))
-			--pos;
-	return pos ? NULL : rc;
+	while (rc && pos) {
+		rc = established_get_next(seq, rc);
+		--pos;
+	}		
+	return rc;
 }
 
 static void *tcp_get_idx(struct seq_file *seq, loff_t pos)
@@ -2349,7 +2355,10 @@ static void *tcp_get_idx(struct seq_file *seq, loff_t pos)
 
 static void *tcp_seq_start(struct seq_file *seq, loff_t *pos)
 {
-	return *pos ? tcp_get_idx(seq, *pos - 1) : (void *)1;
+	struct tcp_iter_state* st = seq->private;
+	st->state = TCP_SEQ_STATE_LISTENING;
+	st->num = 0;
+	return *pos ? tcp_get_idx(seq, *pos - 1) : SEQ_START_TOKEN;
 }
 
 static void *tcp_seq_next(struct seq_file *seq, void *v, loff_t *pos)
@@ -2357,7 +2366,7 @@ static void *tcp_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 	void *rc = NULL;
 	struct tcp_iter_state* st;
 
-	if (v == (void *)1) {
+	if (v == SEQ_START_TOKEN) {
 		rc = tcp_get_idx(seq, 0);
 		goto out;
 	}
@@ -2395,7 +2404,7 @@ static void tcp_seq_stop(struct seq_file *seq, void *v)
 			read_unlock_bh(&tp->syn_wait_lock);
 		}
 	case TCP_SEQ_STATE_LISTENING:
-		if (v != (void *)1)
+		if (v != SEQ_START_TOKEN)
 			tcp_listen_unlock();
 		break;
 	case TCP_SEQ_STATE_TIME_WAIT:
@@ -2411,11 +2420,15 @@ static int tcp_seq_open(struct inode *inode, struct file *file)
 {
 	struct tcp_seq_afinfo *afinfo = PDE(inode)->data;
 	struct seq_file *seq;
-	int rc = -ENOMEM;
-	struct tcp_iter_state *s = kmalloc(sizeof(*s), GFP_KERNEL);
+	struct tcp_iter_state *s;
+	int rc;
 
+	if (unlikely(afinfo == NULL))
+		return -EINVAL;
+
+	s = kmalloc(sizeof(*s), GFP_KERNEL);
 	if (!s)
-		goto out;
+		return -ENOMEM;
 	memset(s, 0, sizeof(*s));
 	s->family		= afinfo->family;
 	s->seq_ops.start	= tcp_seq_start;
@@ -2448,11 +2461,10 @@ int tcp_proc_register(struct tcp_seq_afinfo *afinfo)
 	afinfo->seq_fops->llseek	= seq_lseek;
 	afinfo->seq_fops->release	= seq_release_private;
 	
-	p = create_proc_entry(afinfo->name, S_IRUGO, proc_net);
-	if (p) {
+	p = proc_net_fops_create(afinfo->name, S_IRUGO, afinfo->seq_fops);
+	if (p)
 		p->data = afinfo;
-		p->proc_fops = afinfo->seq_fops;
-	} else
+	else
 		rc = -ENOMEM;
 	return rc;
 }
@@ -2461,7 +2473,7 @@ void tcp_proc_unregister(struct tcp_seq_afinfo *afinfo)
 {
 	if (!afinfo)
 		return;
-	remove_proc_entry(afinfo->name, proc_net);
+	proc_net_remove(afinfo->name);
 	memset(afinfo->seq_fops, 0, sizeof(*afinfo->seq_fops)); 
 }
 
@@ -2480,7 +2492,7 @@ static void get_openreq4(struct sock *sk, struct open_request *req,
 		TCP_SYN_RECV,
 		0, 0, /* could print option size, but that is af dependent. */
 		1,    /* timers active (only the expire timer) */
-		ttd,
+		jiffies_to_clock_t(ttd),
 		req->retrans,
 		uid,
 		0,  /* non standard timer */
@@ -2518,7 +2530,8 @@ static void get_tcp4_sock(struct sock *sp, char *tmpbuf, int i)
 			"%08X %5d %8d %lu %d %p %u %u %u %u %d",
 		i, src, srcp, dest, destp, sp->sk_state,
 		tp->write_seq - tp->snd_una, tp->rcv_nxt - tp->copied_seq,
-		timer_active, timer_expires - jiffies,
+		timer_active,
+		jiffies_to_clock_t(timer_expires - jiffies),
 		tp->retransmits,
 		sock_i_uid(sp),
 		tp->probes_out,
@@ -2546,7 +2559,7 @@ static void get_timewait4_sock(struct tcp_tw_bucket *tw, char *tmpbuf, int i)
 	sprintf(tmpbuf, "%4d: %08X:%04X %08X:%04X"
 		" %02X %08X:%08X %02X:%08X %08X %5d %8d %d %d %p",
 		i, src, srcp, dest, destp, tw->tw_substate, 0, 0,
-		3, ttd, 0, 0, 0, 0,
+		3, jiffies_to_clock_t(ttd), 0, 0, 0, 0,
 		atomic_read(&tw->tw_refcnt), tw);
 }
 
@@ -2557,7 +2570,7 @@ static int tcp4_seq_show(struct seq_file *seq, void *v)
 	struct tcp_iter_state* st;
 	char tmpbuf[TMPSZ + 1];
 
-	if (v == (void *)1) {
+	if (v == SEQ_START_TOKEN) {
 		seq_printf(seq, "%-*s\n", TMPSZ - 1,
 			   "  sl  local_address rem_address   st tx_queue "
 			   "rx_queue tr tm->when retrnsmt   uid  timeout "
@@ -2639,3 +2652,32 @@ void __init tcp_v4_init(struct net_proto_family *ops)
 	 */
 	tcp_socket->sk->sk_prot->unhash(tcp_socket->sk);
 }
+
+EXPORT_SYMBOL(ipv4_specific);
+EXPORT_SYMBOL(tcp_bind_hash);
+EXPORT_SYMBOL(tcp_bucket_create);
+EXPORT_SYMBOL(tcp_hashinfo);
+EXPORT_SYMBOL(tcp_inherit_port);
+EXPORT_SYMBOL(tcp_listen_wlock);
+EXPORT_SYMBOL(tcp_port_rover);
+EXPORT_SYMBOL(tcp_prot);
+EXPORT_SYMBOL(tcp_put_port);
+EXPORT_SYMBOL(tcp_unhash);
+EXPORT_SYMBOL(tcp_v4_conn_request);
+EXPORT_SYMBOL(tcp_v4_connect);
+EXPORT_SYMBOL(tcp_v4_do_rcv);
+EXPORT_SYMBOL(tcp_v4_lookup_listener);
+EXPORT_SYMBOL(tcp_v4_rebuild_header);
+EXPORT_SYMBOL(tcp_v4_remember_stamp);
+EXPORT_SYMBOL(tcp_v4_send_check);
+EXPORT_SYMBOL(tcp_v4_syn_recv_sock);
+
+#ifdef CONFIG_PROC_FS
+EXPORT_SYMBOL(tcp_proc_register);
+EXPORT_SYMBOL(tcp_proc_unregister);
+#endif
+#ifdef CONFIG_SYSCTL
+EXPORT_SYMBOL(sysctl_local_port_range);
+EXPORT_SYMBOL(sysctl_max_syn_backlog);
+EXPORT_SYMBOL(sysctl_tcp_low_latency);
+#endif

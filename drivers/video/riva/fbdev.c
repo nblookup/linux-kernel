@@ -193,7 +193,7 @@ static struct riva_chip_info {
 	{ "Quadro4-700-XGL", NV_ARCH_20 }
 };
 
-static struct pci_device_id rivafb_pci_tbl[] __initdata = {
+static struct pci_device_id rivafb_pci_tbl[] = {
 	{ PCI_VENDOR_ID_NVIDIA_SGS, PCI_DEVICE_ID_NVIDIA_SGS_RIVA128,
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_RIVA_128 },
 	{ PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_TNT,
@@ -297,34 +297,34 @@ static char *mode_option __initdata = NULL;
 #endif
 
 static struct fb_fix_screeninfo rivafb_fix = {
-	id:		"nVidia",
-	type:		FB_TYPE_PACKED_PIXELS,
-	xpanstep:	1,
-	ypanstep:	1,
+	.id		= "nVidia",
+	.type		= FB_TYPE_PACKED_PIXELS,
+	.xpanstep	= 1,
+	.ypanstep	= 1,
 };
 
 static struct fb_var_screeninfo rivafb_default_var = {
-	xres:		640,
-	yres:		480,
-	xres_virtual:	640,
-	yres_virtual:	480,
-	bits_per_pixel:	8,
-	red:		{0, 8, 0},
-	green:		{0, 8, 0},
-	blue:		{0, 8, 0},
-	transp:		{0, 0, 0},
-	activate:	FB_ACTIVATE_NOW,
-	height:		-1,
-	width:		-1,
-	accel_flags:	FB_ACCELF_TEXT,
-	pixclock:	39721,
-	left_margin:	40,
-	right_margin:	24,
-	upper_margin:	32,
-	lower_margin:	11,
-	hsync_len:	96,
-	vsync_len:	2,
-	vmode:		FB_VMODE_NONINTERLACED
+	.xres		= 640,
+	.yres		= 480,
+	.xres_virtual	= 640,
+	.yres_virtual	= 480,
+	.bits_per_pixel	= 8,
+	.red		= {0, 8, 0},
+	.green		= {0, 8, 0},
+	.blue		= {0, 8, 0},
+	.transp		= {0, 0, 0},
+	.activate	= FB_ACTIVATE_NOW,
+	.height		= -1,
+	.width		= -1,
+	.accel_flags	= FB_ACCELF_TEXT,
+	.pixclock	= 39721,
+	.left_margin	= 40,
+	.right_margin	= 24,
+	.upper_margin	= 32,
+	.lower_margin	= 11,
+	.hsync_len	= 96,
+	.vsync_len	= 2,
+	.vmode		= FB_VMODE_NONINTERLACED
 };
 
 /* from GGI */
@@ -1576,7 +1576,7 @@ static struct fb_ops riva_fb_ops = {
 	.fb_sync 	= rivafb_sync,
 };
 
-static int __init riva_set_fbinfo(struct fb_info *info)
+static int __devinit riva_set_fbinfo(struct fb_info *info)
 {
 	struct riva_par *par = (struct riva_par *) info->par;
 	unsigned int cmap_len;
@@ -1726,7 +1726,7 @@ static void riva_get_dfpinfo(struct fb_info *info)
  *
  * ------------------------------------------------------------------------- */
 
-static int __init rivafb_probe(struct pci_dev *pd,
+static int __devinit rivafb_probe(struct pci_dev *pd,
 			     	const struct pci_device_id *ent)
 {
 	struct riva_chip_info *rci = &riva_chip_info[ent->driver_data];
@@ -1977,10 +1977,10 @@ int __init rivafb_setup(char *options)
 #endif /* !MODULE */
 
 static struct pci_driver rivafb_driver = {
-	name:		"rivafb",
-	id_table:	rivafb_pci_tbl,
-	probe:		rivafb_probe,
-	remove:		__exit_p(rivafb_remove),
+	.name		= "rivafb",
+	.id_table	= rivafb_pci_tbl,
+	.probe		= rivafb_probe,
+	.remove		= __exit_p(rivafb_remove),
 };
 
 

@@ -7,7 +7,6 @@
 #include <linux/config.h>
 #include <asm/thread_info.h>
 
-#ifndef CONFIG_DEBUG_SPINLOCK
 	.text
 	.align	64
 
@@ -30,7 +29,7 @@
 atomic_dec_and_lock:	/* %o0 = counter, %o1 = lock */
 loop1:	lduw	[%o0], %g5
 	subcc	%g5, 1, %g7
-	be,pn	%icc, to_zero
+	be,pn	%icc, start_to_zero
 	 nop
 nzero:	cas	[%o0], %g5, %g7
 	cmp	%g5, %g7
@@ -41,6 +40,7 @@ out:
 	membar	#StoreLoad | #StoreStore
 	retl
 	 mov	%g1, %o0
+start_to_zero:
 #ifdef CONFIG_PREEMPT
 	ldsw	[%g6 + TI_PRE_COUNT], %g3
 	add	%g3, 1, %g3
@@ -76,5 +76,3 @@ spin_on_lock:
 	ba,pt	%xcc, to_zero
 	 nop
 	nop
-
-#endif /* !(CONFIG_DEBUG_SPINLOCK) */

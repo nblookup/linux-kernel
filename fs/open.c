@@ -20,8 +20,8 @@
 #include <linux/mount.h>
 #include <linux/vfs.h>
 #include <asm/uaccess.h>
-
-#define special_file(m) (S_ISCHR(m)||S_ISBLK(m)||S_ISFIFO(m)||S_ISSOCK(m))
+#include <linux/fs.h>
+#include <linux/pagemap.h>
 
 int vfs_statfs(struct super_block *sb, struct kstatfs *buf)
 {
@@ -41,6 +41,8 @@ int vfs_statfs(struct super_block *sb, struct kstatfs *buf)
 	}
 	return retval;
 }
+
+EXPORT_SYMBOL(vfs_statfs);
 
 static int vfs_statfs_native(struct super_block *sb, struct statfs *buf)
 {
@@ -354,6 +356,10 @@ asmlinkage long sys_utime(char __user * filename, struct utimbuf __user * times)
 	/* Don't worry, the checks are done in inode_change_ok() */
 	newattrs.ia_valid = ATTR_CTIME | ATTR_MTIME | ATTR_ATIME;
 	if (times) {
+		error = -EPERM;
+		if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
+			goto dput_and_out;
+
 		error = get_user(newattrs.ia_atime.tv_sec, &times->actime);
 		newattrs.ia_atime.tv_nsec = 0;
 		if (!error) 
@@ -364,6 +370,10 @@ asmlinkage long sys_utime(char __user * filename, struct utimbuf __user * times)
 
 		newattrs.ia_valid |= ATTR_ATIME_SET | ATTR_MTIME_SET;
 	} else {
+                error = -EACCES;
+                if (IS_IMMUTABLE(inode))
+                        goto dput_and_out;
+
 		if (current->fsuid != inode->i_uid &&
 		    (error = permission(inode,MAY_WRITE,&nd)) != 0)
 			goto dput_and_out;
@@ -403,12 +413,20 @@ long do_utimes(char __user * filename, struct timeval * times)
 	/* Don't worry, the checks are done in inode_change_ok() */
 	newattrs.ia_valid = ATTR_CTIME | ATTR_MTIME | ATTR_ATIME;
 	if (times) {
+		error = -EPERM;
+                if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
+                        goto dput_and_out;
+
 		newattrs.ia_atime.tv_sec = times[0].tv_sec;
 		newattrs.ia_atime.tv_nsec = times[0].tv_usec * 1000;
 		newattrs.ia_mtime.tv_sec = times[1].tv_sec;
 		newattrs.ia_mtime.tv_nsec = times[1].tv_usec * 1000;
 		newattrs.ia_valid |= ATTR_ATIME_SET | ATTR_MTIME_SET;
 	} else {
+		error = -EACCES;
+                if (IS_IMMUTABLE(inode))
+                        goto dput_and_out;
+
 		if (current->fsuid != inode->i_uid &&
 		    (error = permission(inode,MAY_WRITE,&nd)) != 0)
 			goto dput_and_out;
@@ -737,6 +755,8 @@ struct file *filp_open(const char * filename, int flags, int mode)
 	return ERR_PTR(error);
 }
 
+EXPORT_SYMBOL(filp_open);
+
 struct file *dentry_open(struct dentry *dentry, struct vfsmount *mnt, int flags)
 {
 	struct file * f;
@@ -795,6 +815,8 @@ cleanup_dentry:
 	mntput(mnt);
 	return ERR_PTR(error);
 }
+
+EXPORT_SYMBOL(dentry_open);
 
 /*
  * Find an empty file descriptor entry, and mark it busy.
@@ -858,6 +880,8 @@ out:
 	return error;
 }
 
+EXPORT_SYMBOL(get_unused_fd);
+
 static inline void __put_unused_fd(struct files_struct *files, unsigned int fd)
 {
 	__FD_CLR(fd, files->open_fds);
@@ -872,6 +896,8 @@ void put_unused_fd(unsigned int fd)
 	__put_unused_fd(files, fd);
 	spin_unlock(&files->file_lock);
 }
+
+EXPORT_SYMBOL(put_unused_fd);
 
 /*
  * Install a file pointer in the fd array.  
@@ -895,6 +921,8 @@ void fd_install(unsigned int fd, struct file * file)
 	files->fd[fd] = file;
 	spin_unlock(&files->file_lock);
 }
+
+EXPORT_SYMBOL(fd_install);
 
 asmlinkage long sys_open(const char __user * filename, int flags, int mode)
 {
@@ -947,18 +975,29 @@ int filp_close(struct file *filp, fl_owner_t id)
 {
 	int retval;
 
+	/* Report and clear outstanding errors */
+	retval = filp->f_error;
+	if (retval)
+		filp->f_error = 0;
+
 	if (!file_count(filp)) {
 		printk(KERN_ERR "VFS: Close: file count is 0\n");
-		return 0;
+		return retval;
 	}
-	retval = 0;
-	if (filp->f_op && filp->f_op->flush)
-		retval = filp->f_op->flush(filp);
+
+	if (filp->f_op && filp->f_op->flush) {
+		int err = filp->f_op->flush(filp);
+		if (!retval)
+			retval = err;
+	}
+
 	dnotify_flush(filp, id);
 	locks_remove_posix(filp, id);
 	fput(filp);
 	return retval;
 }
+
+EXPORT_SYMBOL(filp_close);
 
 /*
  * Careful here! We test whether the file pointer is NULL before
@@ -987,6 +1026,8 @@ out_unlock:
 	return -EBADF;
 }
 
+EXPORT_SYMBOL(sys_close);
+
 /*
  * This routine simulates a hangup on the tty, to arrange that users
  * are given clean terminals at login time.
@@ -1008,7 +1049,7 @@ asmlinkage long sys_vhangup(void)
  */
 int generic_file_open(struct inode * inode, struct file * filp)
 {
-	if (!(filp->f_flags & O_LARGEFILE) && inode->i_size > MAX_NON_LFS)
+	if (!(filp->f_flags & O_LARGEFILE) && i_size_read(inode) > MAX_NON_LFS)
 		return -EFBIG;
 	return 0;
 }

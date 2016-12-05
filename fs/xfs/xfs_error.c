@@ -238,7 +238,7 @@ xfs_fs_cmn_err(int level, xfs_mount_t *mp, char *fmt, ...)
 }
 
 void
-xfs_cmn_err(uint64_t panic_tag, int level, xfs_mount_t *mp, char *fmt, ...)
+xfs_cmn_err(int panic_tag, int level, xfs_mount_t *mp, char *fmt, ...)
 {
 	va_list ap;
 
@@ -329,6 +329,7 @@ xfs_corruption_error(
 	int		linenum,
 	inst_t		*ra)
 {
-	xfs_hex_dump(p, 16);
+	if (level <= xfs_error_level)
+		xfs_hex_dump(p, 16);
 	xfs_error_report(tag, level, mp, fname, linenum, ra);
 }

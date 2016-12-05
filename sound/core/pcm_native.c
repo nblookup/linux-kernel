@@ -20,7 +20,6 @@
  */
 
 #include <sound/driver.h>
-#include <linux/version.h>
 #include <linux/mm.h>
 #include <linux/file.h>
 #include <linux/slab.h>
@@ -461,9 +460,15 @@ static int snd_pcm_sw_params(snd_pcm_substream_t * substream, snd_pcm_sw_params_
 	if (params->xfer_align == 0 ||
 	    params->xfer_align % runtime->min_align != 0)
 		return -EINVAL;
-	if ((params->silence_threshold != 0 || params->silence_size < runtime->boundary) &&
-	    (params->silence_threshold + params->silence_size > runtime->buffer_size))
-		return -EINVAL;
+	if (params->silence_size >= runtime->boundary) {
+		if (params->silence_threshold != 0)
+			return -EINVAL;
+	} else {
+		if (params->silence_size > params->silence_threshold)
+			return -EINVAL;
+		if (params->silence_threshold > runtime->buffer_size)
+			return -EINVAL;
+	}
 	snd_pcm_stream_lock_irq(substream);
 	runtime->tstamp_mode = params->tstamp_mode;
 	runtime->sleep_min = params->sleep_min;
@@ -1232,11 +1237,11 @@ static int snd_pcm_playback_drain(snd_pcm_substream_t * substream)
 	add_wait_queue(&runtime->sleep, &wait);
 	while (1) {
 		long tout;
-		set_current_state(TASK_INTERRUPTIBLE);
 		if (signal_pending(current)) {
 			state = SIGNALED;
 			break;
 		}
+		set_current_state(TASK_INTERRUPTIBLE);
 		snd_pcm_stream_unlock_irq(substream);
 		tout = schedule_timeout(10 * HZ);
 		snd_pcm_stream_lock_irq(substream);
@@ -1249,7 +1254,6 @@ static int snd_pcm_playback_drain(snd_pcm_substream_t * substream)
 			break;
 		}
 	}
-	set_current_state(TASK_RUNNING);
 	remove_wait_queue(&runtime->sleep, &wait);
 
 	switch (state) {
@@ -1425,11 +1429,11 @@ static struct file *snd_pcm_file_fd(int fd)
 		return 0;
 	inode = file->f_dentry->d_inode;
 	if (!S_ISCHR(inode->i_mode) ||
-	    major(inode->i_rdev) != snd_major) {
+	    imajor(inode) != snd_major) {
 		fput(file);
 		return 0;
 	}
-	minor = minor(inode->i_rdev);
+	minor = iminor(inode);
 	if (minor >= 256 || 
 	    minor % SNDRV_MINOR_DEVICES < SNDRV_MINOR_PCM_PLAYBACK) {
 		fput(file);
@@ -1934,8 +1938,8 @@ static int snd_pcm_open_file(struct file *file,
 
 int snd_pcm_open(struct inode *inode, struct file *file)
 {
-	int cardnum = SNDRV_MINOR_CARD(minor(inode->i_rdev));
-	int device = SNDRV_MINOR_DEVICE(minor(inode->i_rdev));
+	int cardnum = SNDRV_MINOR_CARD(iminor(inode));
+	int device = SNDRV_MINOR_DEVICE(iminor(inode));
 	int err;
 	snd_pcm_t *pcm;
 	snd_pcm_file_t *pcm_file;
@@ -1956,12 +1960,11 @@ int snd_pcm_open(struct inode *inode, struct file *file)
 	}
 	init_waitqueue_entry(&wait, current);
 	add_wait_queue(&pcm->open_wait, &wait);
+	down(&pcm->open_mutex);
 	while (1) {
-		down(&pcm->open_mutex);
 		err = snd_pcm_open_file(file, pcm, device >= SNDRV_MINOR_PCM_CAPTURE ? SNDRV_PCM_STREAM_CAPTURE : SNDRV_PCM_STREAM_PLAYBACK, &pcm_file);
 		if (err >= 0)
 			break;
-		up(&pcm->open_mutex);
 		if (err == -EAGAIN) {
 			if (file->f_flags & O_NONBLOCK) {
 				err = -EBUSY;
@@ -1970,17 +1973,18 @@ int snd_pcm_open(struct inode *inode, struct file *file)
 		} else
 			break;
 		set_current_state(TASK_INTERRUPTIBLE);
+		up(&pcm->open_mutex);
 		schedule();
+		down(&pcm->open_mutex);
 		if (signal_pending(current)) {
 			err = -ERESTARTSYS;
 			break;
 		}
 	}
-	set_current_state(TASK_RUNNING);
 	remove_wait_queue(&pcm->open_wait, &wait);
+	up(&pcm->open_mutex);
 	if (err < 0)
 		goto __error;
-	up(&pcm->open_mutex);
 	return err;
 
       __error:
@@ -2785,7 +2789,8 @@ static struct page * snd_pcm_mmap_status_nopage(struct vm_area_struct *area, uns
 		return NOPAGE_OOM;
 	runtime = substream->runtime;
 	page = virt_to_page(runtime->status);
-	get_page(page);
+	if (!PageReserved(page))
+		get_page(page);
 	return page;
 }
 
@@ -2822,7 +2827,8 @@ static struct page * snd_pcm_mmap_control_nopage(struct vm_area_struct *area, un
 		return NOPAGE_OOM;
 	runtime = substream->runtime;
 	page = virt_to_page(runtime->control);
-	get_page(page);
+	if (!PageReserved(page))
+		get_page(page);
 	return page;
 }
 
@@ -2887,7 +2893,8 @@ static struct page * snd_pcm_mmap_data_nopage(struct vm_area_struct *area, unsig
 		vaddr = runtime->dma_area + offset;
 		page = virt_to_page(vaddr);
 	}
-	get_page(page);
+	if (!PageReserved(page))
+		get_page(page);
 	return page;
 }
 

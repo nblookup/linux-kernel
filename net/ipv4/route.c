@@ -62,6 +62,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
@@ -88,6 +89,7 @@
 #include <linux/random.h>
 #include <linux/jhash.h>
 #include <linux/rcupdate.h>
+#include <linux/times.h>
 #include <net/protocol.h>
 #include <net/ip.h>
 #include <net/route.h>
@@ -259,14 +261,14 @@ static struct rtable *rt_cache_get_idx(struct seq_file *seq, loff_t pos)
 
 static void *rt_cache_seq_start(struct seq_file *seq, loff_t *pos)
 {
-	return *pos ? rt_cache_get_idx(seq, *pos) : (void *)1;
+	return *pos ? rt_cache_get_idx(seq, *pos - 1) : SEQ_START_TOKEN;
 }
 
 static void *rt_cache_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
 	struct rtable *r = NULL;
 
-	if (v == (void *)1)
+	if (v == SEQ_START_TOKEN)
 		r = rt_cache_get_first(seq);
 	else
 		r = rt_cache_get_next(seq, v);
@@ -276,13 +278,13 @@ static void *rt_cache_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 
 static void rt_cache_seq_stop(struct seq_file *seq, void *v)
 {
-	if (v && v != (void *)1)
+	if (v && v != SEQ_START_TOKEN)
 		rcu_read_unlock();
 }
 
 static int rt_cache_seq_show(struct seq_file *seq, void *v)
 {
-	if (v == (void *)1)
+	if (v == SEQ_START_TOKEN)
 		seq_printf(seq, "%-127s\n",
 			   "Iface\tDestination\tGateway \tFlags\t\tRefCnt\tUse\t"
 			   "Metric\tSource\t\tMTU\tWindow\tIRTT\tTOS\tHHRef\t"
@@ -310,49 +312,6 @@ static int rt_cache_seq_show(struct seq_file *seq, void *v)
 		seq_printf(seq, "%-127s\n", temp);
         }
   	return 0;
-}
-
-static int rt_cache_stat_get_info(char *buffer, char **start, off_t offset, int length)
-{
-	unsigned int dst_entries = atomic_read(&ipv4_dst_ops.entries);
-	int i;
-	int len = 0;
-
-	for (i = 0; i < NR_CPUS; i++) {
-		if (!cpu_possible(i))
-			continue;
-		len += sprintf(buffer+len, "%08x  %08x %08x %08x %08x %08x %08x %08x  %08x %08x %08x %08x %08x %08x %08x %08x %08x \n",
-			       dst_entries,		       
-			       per_cpu_ptr(rt_cache_stat, i)->in_hit,
-			       per_cpu_ptr(rt_cache_stat, i)->in_slow_tot,
-			       per_cpu_ptr(rt_cache_stat, i)->in_slow_mc,
-			       per_cpu_ptr(rt_cache_stat, i)->in_no_route,
-			       per_cpu_ptr(rt_cache_stat, i)->in_brd,
-			       per_cpu_ptr(rt_cache_stat, i)->in_martian_dst,
-			       per_cpu_ptr(rt_cache_stat, i)->in_martian_src,
-
-			       per_cpu_ptr(rt_cache_stat, i)->out_hit,
-			       per_cpu_ptr(rt_cache_stat, i)->out_slow_tot,
-			       per_cpu_ptr(rt_cache_stat, i)->out_slow_mc, 
-
-			       per_cpu_ptr(rt_cache_stat, i)->gc_total,
-			       per_cpu_ptr(rt_cache_stat, i)->gc_ignored,
-			       per_cpu_ptr(rt_cache_stat, i)->gc_goal_miss,
-			       per_cpu_ptr(rt_cache_stat, i)->gc_dst_overflow,
-			       per_cpu_ptr(rt_cache_stat, i)->in_hlist_search,
-			       per_cpu_ptr(rt_cache_stat, i)->out_hlist_search
-
-			);
-	}
-	len -= offset;
-
-	if (len > length)
-		len = length;
-	if (len < 0)
-		len = 0;
-
-	*start = buffer + offset;
-  	return len;
 }
 
 static struct seq_operations rt_cache_seq_ops = {
@@ -391,22 +350,89 @@ static struct file_operations rt_cache_seq_fops = {
 	.release = seq_release_private,
 };
 
-int __init rt_cache_proc_init(void)
+
+static void *rt_cpu_seq_start(struct seq_file *seq, loff_t *pos)
 {
-	int rc = 0;
-	struct proc_dir_entry *p = create_proc_entry("rt_cache", S_IRUGO,
-						     proc_net);
-	if (p)
-		p->proc_fops = &rt_cache_seq_fops;
-	else
-		rc = -ENOMEM;
-	return rc;
+	int cpu;
+
+	for (cpu = *pos; cpu < NR_CPUS; ++cpu) {
+		if (!cpu_possible(cpu))
+			continue;
+		*pos = cpu;
+		return per_cpu_ptr(rt_cache_stat, cpu);
+	}
+	return NULL;
 }
 
-void __init rt_cache_proc_exit(void)
+static void *rt_cpu_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 {
-	remove_proc_entry("rt_cache", proc_net);
+	int cpu;
+
+	for (cpu = *pos + 1; cpu < NR_CPUS; ++cpu) {
+		if (!cpu_possible(cpu))
+			continue;
+		*pos = cpu;
+		return per_cpu_ptr(rt_cache_stat, cpu);
+	}
+	return NULL;
+	
 }
+
+static void rt_cpu_seq_stop(struct seq_file *seq, void *v)
+{
+
+}
+
+static int rt_cpu_seq_show(struct seq_file *seq, void *v)
+{
+	struct rt_cache_stat *st = v;
+	
+	seq_printf(seq,"%08x  %08x %08x %08x %08x %08x %08x %08x "
+		   " %08x %08x %08x %08x %08x %08x %08x %08x %08x \n",
+		   atomic_read(&ipv4_dst_ops.entries),
+		   st->in_hit,
+		   st->in_slow_tot,
+		   st->in_slow_mc,
+		   st->in_no_route,
+		   st->in_brd,
+		   st->in_martian_dst,
+		   st->in_martian_src,
+
+		   st->out_hit,
+		   st->out_slow_tot,
+		   st->out_slow_mc, 
+
+		   st->gc_total,
+		   st->gc_ignored,
+		   st->gc_goal_miss,
+		   st->gc_dst_overflow,
+		   st->in_hlist_search,
+		   st->out_hlist_search
+		);
+	return 0;
+}
+
+static struct seq_operations rt_cpu_seq_ops = {
+	.start  = rt_cpu_seq_start,
+	.next   = rt_cpu_seq_next,
+	.stop   = rt_cpu_seq_stop,
+	.show   = rt_cpu_seq_show,
+};
+
+
+static int rt_cpu_seq_open(struct inode *inode, struct file *file)
+{
+	return seq_open(file, &rt_cpu_seq_ops);
+}
+
+static struct file_operations rt_cpu_seq_fops = {
+	.owner	 = THIS_MODULE,
+	.open	 = rt_cpu_seq_open,
+	.read	 = seq_read,
+	.llseek	 = seq_lseek,
+	.release = seq_release_private,
+};
+
 #endif /* CONFIG_PROC_FS */
   
 static __inline__ void rt_free(struct rtable *rt)
@@ -463,7 +489,9 @@ out:	return ret;
  */
 static inline u32 rt_score(struct rtable *rt)
 {
-	u32 score = rt->u.dst.__use;
+	u32 score = jiffies - rt->u.dst.lastuse;
+
+	score = ~score & ~(3<<30);
 
 	if (rt_valuable(rt))
 		score |= (1<<31);
@@ -805,8 +833,7 @@ restart:
 		 * The second limit is less certain. At the moment it allows
 		 * only 2 entries per bucket. We will see.
 		 */
-		if (chain_length > ip_rt_gc_elasticity ||
-		    (chain_length > 1 && !(min_score & (1<<31)))) {
+		if (chain_length > ip_rt_gc_elasticity) {
 			*candp = cand->u.rt_next;
 			rt_free(cand);
 		}
@@ -1372,9 +1399,6 @@ static void rt_set_nexthop(struct rtable *rt, struct fib_result *res, u32 itag)
 			rt->rt_gateway = FIB_RES_GW(*res);
 		memcpy(rt->u.dst.metrics, fi->fib_metrics,
 		       sizeof(rt->u.dst.metrics));
-		if (rt->u.dst.metrics[RTAX_HOPLIMIT-1] == 0)
-			rt->u.dst.metrics[RTAX_HOPLIMIT-1] =
-				sysctl_ip_default_ttl;
 		if (fi->fib_mtu == 0) {
 			rt->u.dst.metrics[RTAX_MTU-1] = rt->u.dst.dev->mtu;
 			if (rt->u.dst.metrics[RTAX_LOCK-1] & (1 << RTAX_MTU) &&
@@ -1388,6 +1412,8 @@ static void rt_set_nexthop(struct rtable *rt, struct fib_result *res, u32 itag)
 	} else
 		rt->u.dst.metrics[RTAX_MTU-1]= rt->u.dst.dev->mtu;
 
+	if (rt->u.dst.metrics[RTAX_HOPLIMIT-1] == 0)
+		rt->u.dst.metrics[RTAX_HOPLIMIT-1] = sysctl_ip_default_ttl;
 	if (rt->u.dst.metrics[RTAX_MTU-1] > IP_MAX_MTU)
 		rt->u.dst.metrics[RTAX_MTU-1] = IP_MAX_MTU;
 	if (rt->u.dst.metrics[RTAX_ADVMSS-1] == 0)
@@ -2279,11 +2305,11 @@ static int rt_fill_info(struct sk_buff *skb, u32 pid, u32 seq, int event,
 		RTA_PUT(skb, RTA_GATEWAY, 4, &rt->rt_gateway);
 	if (rtnetlink_put_metrics(skb, rt->u.dst.metrics) < 0)
 		goto rtattr_failure;
-	ci.rta_lastuse	= jiffies - rt->u.dst.lastuse;
+	ci.rta_lastuse	= jiffies_to_clock_t(jiffies - rt->u.dst.lastuse);
 	ci.rta_used	= rt->u.dst.__use;
 	ci.rta_clntref	= atomic_read(&rt->u.dst.__refcnt);
 	if (rt->u.dst.expires)
-		ci.rta_expires = rt->u.dst.expires - jiffies;
+		ci.rta_expires = jiffies_to_clock_t(rt->u.dst.expires - jiffies);
 	else
 		ci.rta_expires = 0;
 	ci.rta_error	= rt->u.dst.error;
@@ -2753,8 +2779,8 @@ int __init ip_rt_init(void)
 	ip_rt_max_size = (rt_hash_mask + 1) * 16;
 
 	rt_cache_stat = alloc_percpu(struct rt_cache_stat);
-	if (!rt_cache_stat) 
-		goto out_enomem1;
+	if (!rt_cache_stat)
+		return -ENOMEM;
 
 	devinet_init();
 	ip_fib_init();
@@ -2778,20 +2804,23 @@ int __init ip_rt_init(void)
 	add_timer(&rt_secret_timer);
 
 #ifdef CONFIG_PROC_FS
-	if (rt_cache_proc_init())
-		goto out_enomem;
-	proc_net_create ("rt_cache_stat", 0, rt_cache_stat_get_info);
+	if (!proc_net_fops_create("rt_cache", S_IRUGO, &rt_cache_seq_fops) ||
+	    !proc_net_fops_create("rt_cache_stat", S_IRUGO, &rt_cpu_seq_fops)) {
+		free_percpu(rt_cache_stat);
+		return -ENOMEM;
+	}
+
 #ifdef CONFIG_NET_CLS_ROUTE
-	create_proc_read_entry("net/rt_acct", 0, 0, ip_rt_acct_read, NULL);
+	create_proc_read_entry("rt_acct", 0, proc_net, ip_rt_acct_read, NULL);
 #endif
 #endif
+#ifdef CONFIG_XFRM
 	xfrm_init();
 	xfrm4_init();
-out:
+#endif
 	return rc;
-out_enomem:
-	free_percpu(rt_cache_stat);
-out_enomem1:
-	rc = -ENOMEM;
-	goto out;
 }
+
+EXPORT_SYMBOL(__ip_select_ident);
+EXPORT_SYMBOL(ip_route_input);
+EXPORT_SYMBOL(ip_route_output_key);

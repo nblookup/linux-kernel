@@ -4,7 +4,7 @@
  * Changes:
  *	Mitsuru KANDA @USAGI
  * 	Kazunori MIYAZAWA @USAGI
- * 	Kunihiro Ishiguro
+ * 	Kunihiro Ishiguro <kunihiro@ipinfusion.com>
  * 		IPv6 support
  * 	YOSHIFUJI Hideaki @USAGI
  * 		Split up af-specific functions
@@ -485,7 +485,8 @@ out:
 	err = -EINVAL;
 	spin_lock_bh(&x1->lock);
 	if (likely(x1->km.state == XFRM_STATE_VALID)) {
-		memcpy(x1->encap, x->encap, sizeof(*x1->encap));
+		if (x->encap && x1->encap)
+			memcpy(x1->encap, x->encap, sizeof(*x1->encap));
 		memcpy(&x1->lft, &x->lft, sizeof(x1->lft));
 		x1->km.dying = 0;
 		err = 0;
@@ -554,7 +555,7 @@ xfrm_state_lookup(xfrm_address_t *daddr, u32 spi, u8 proto,
 }
 
 struct xfrm_state *
-xfrm_find_acq(u8 mode, u16 reqid, u8 proto, 
+xfrm_find_acq(u8 mode, u32 reqid, u8 proto, 
 	      xfrm_address_t *daddr, xfrm_address_t *saddr, 
 	      int create, unsigned short family)
 {
@@ -830,6 +831,7 @@ int xfrm_user_policy(struct sock *sk, int optname, u8 *optval, int optlen)
 
 	if (err >= 0) {
 		xfrm_sk_policy_insert(sk, err, pol);
+		xfrm_pol_put(pol);
 		err = 0;
 	}
 

@@ -1809,10 +1809,6 @@ static int __devinit eni_start(struct atm_dev *dev)
 		    "master (0x%02x)\n",dev->number,error);
 		return error;
 	}
-#ifdef __sparc_v9__ /* copied from drivers/net/sunhme.c */
-	/* NOTE: Cache line size is in 32-bit word units. */
-	pci_write_config_byte(eni_dev->pci_dev, PCI_CACHE_LINE_SIZE, 0x10);
-#endif
 	if ((error = pci_write_config_byte(eni_dev->pci_dev,PCI_TONGA_CTRL,
 	    END_SWAP_DMA))) {
 		printk(KERN_ERR DEV_LABEL "(itf %d): can't set endian swap "
@@ -1885,80 +1881,18 @@ static void eni_close(struct atm_vcc *vcc)
 }
 
 
-static int get_ci(struct atm_vcc *vcc,short *vpi,int *vci)
-{
-	struct sock *s;
-	struct hlist_node *node;
-	struct atm_vcc *walk;
-
-	read_lock(&vcc_sklist_lock);
-	if (*vpi == ATM_VPI_ANY) *vpi = 0;
-	if (*vci == ATM_VCI_ANY) {
-		for (*vci = ATM_NOT_RSV_VCI; *vci < NR_VCI; (*vci)++) {
-			if (vcc->qos.rxtp.traffic_class != ATM_NONE &&
-			    ENI_DEV(vcc->dev)->rx_map[*vci])
-				continue;
-			if (vcc->qos.txtp.traffic_class != ATM_NONE) {
-				sk_for_each(s, node, &vcc_sklist) {
-					walk = atm_sk(s);
-					if (walk->dev != vcc->dev)
-						continue;
-					if (test_bit(ATM_VF_ADDR,&walk->flags)
-					    && walk->vci == *vci &&
-					    walk->qos.txtp.traffic_class !=
-					    ATM_NONE)
-						break;
-				}
-				if (node)
-					continue;
-			}
-			break;
-		}
-		read_unlock(&vcc_sklist_lock);
-		return *vci == NR_VCI ? -EADDRINUSE : 0;
-	}
-	if (*vci == ATM_VCI_UNSPEC) {
-		read_unlock(&vcc_sklist_lock);
-		return 0;
-	}
-	if (vcc->qos.rxtp.traffic_class != ATM_NONE &&
-	    ENI_DEV(vcc->dev)->rx_map[*vci]) {
-		read_unlock(&vcc_sklist_lock);
-		return -EADDRINUSE;
-	}
-	if (vcc->qos.txtp.traffic_class == ATM_NONE) {
-		read_unlock(&vcc_sklist_lock);
-		return 0;
-	}
-	sk_for_each(s, node, &vcc_sklist) {
-		walk = atm_sk(s);
-		if (walk->dev != vcc->dev)
-			continue;
-		if (test_bit(ATM_VF_ADDR,&walk->flags) && walk->vci == *vci &&
-		    walk->qos.txtp.traffic_class != ATM_NONE) {
-			read_unlock(&vcc_sklist_lock);
-			return -EADDRINUSE;
-		}
-	}
-	read_unlock(&vcc_sklist_lock);
-	return 0;
-}
-
-
-static int eni_open(struct atm_vcc *vcc,short vpi,int vci)
+static int eni_open(struct atm_vcc *vcc)
 {
 	struct eni_dev *eni_dev;
 	struct eni_vcc *eni_vcc;
 	int error;
+	short vpi = vcc->vpi;
+	int vci = vcc->vci;
 
 	DPRINTK(">eni_open\n");
 	EVENT("eni_open\n",0,0);
 	if (!test_bit(ATM_VF_PARTIAL,&vcc->flags)) ENI_VCC(vcc) = NULL;
 	eni_dev = ENI_DEV(vcc->dev);
-	error = get_ci(vcc,&vpi,&vci);
-	if (error) return error;
-	vcc->vpi = vpi;
-	vcc->vci = vci;
 	if (vci != ATM_VPI_UNSPEC && vpi != ATM_VCI_UNSPEC)
 		set_bit(ATM_VF_ADDR,&vcc->flags);
 	if (vcc->qos.aal != ATM_AAL0 && vcc->qos.aal != ATM_AAL5)
@@ -2019,8 +1953,7 @@ static int eni_change_qos(struct atm_vcc *vcc,struct atm_qos *qos,int flgs)
 	 * segmentation buffer descriptors of this VCC.
 	 */
 	tasklet_disable(&eni_dev->task);
-	for (skb = eni_dev->tx_queue.next; skb !=
-	    (struct sk_buff *) &eni_dev->tx_queue; skb = skb->next) {
+	skb_queue_walk(&eni_dev->tx_queue, skb) {
 		unsigned long dsc;
 
 		if (ATM_SKB(skb)->vcc != vcc) continue;
@@ -2123,15 +2056,6 @@ backlogged++;
 	return 0;
 }
 
-
-static int eni_sg_send(struct atm_vcc *vcc,unsigned long start,
-    unsigned long size)
-{
-	return vcc->qos.aal == ATM_AAL5 && !((start | size) & 3);
-		/* don't tolerate misalignment */
-}
-
-
 static void eni_phy_put(struct atm_dev *dev,unsigned char value,
     unsigned long addr)
 {
@@ -2223,30 +2147,34 @@ static int eni_proc_read(struct atm_dev *dev,loff_t *pos,char *page)
 		    skb_queue_len(&tx->backlog));
 	}
 	read_lock(&vcc_sklist_lock);
-	sk_for_each(s, node, &vcc_sklist) {
-		struct eni_vcc *eni_vcc;
-		int length;
+	for(i = 0; i < VCC_HTABLE_SIZE; ++i) {
+		struct hlist_head *head = &vcc_hash[i];
 
-		vcc = atm_sk(s);
-		if (vcc->dev != dev)
-			continue;
-		eni_vcc = ENI_VCC(vcc);
-		if (--left) continue;
-		length = sprintf(page,"vcc %4d: ",vcc->vci);
-		if (eni_vcc->rx) {
-			length += sprintf(page+length,"0x%06lx-0x%06lx "
-			    "(%6ld bytes)",
-			    eni_vcc->recv-eni_dev->ram,
-			    eni_vcc->recv-eni_dev->ram+eni_vcc->words*4-1,
-			    eni_vcc->words*4);
-			if (eni_vcc->tx) length += sprintf(page+length,", ");
+		sk_for_each(s, node, head) {
+			struct eni_vcc *eni_vcc;
+			int length;
+
+			vcc = atm_sk(s);
+			if (vcc->dev != dev)
+				continue;
+			eni_vcc = ENI_VCC(vcc);
+			if (--left) continue;
+			length = sprintf(page,"vcc %4d: ",vcc->vci);
+			if (eni_vcc->rx) {
+				length += sprintf(page+length,"0x%06lx-0x%06lx "
+				    "(%6ld bytes)",
+				    eni_vcc->recv-eni_dev->ram,
+				    eni_vcc->recv-eni_dev->ram+eni_vcc->words*4-1,
+				    eni_vcc->words*4);
+				if (eni_vcc->tx) length += sprintf(page+length,", ");
+			}
+			if (eni_vcc->tx)
+				length += sprintf(page+length,"tx[%d], txing %d bytes",
+				    eni_vcc->tx->index,eni_vcc->txing);
+			page[length] = '\n';
+			read_unlock(&vcc_sklist_lock);
+			return length+1;
 		}
-		if (eni_vcc->tx)
-			length += sprintf(page+length,"tx[%d], txing %d bytes",
-			    eni_vcc->tx->index,eni_vcc->txing);
-		page[length] = '\n';
-		read_unlock(&vcc_sklist_lock);
-		return length+1;
 	}
 	read_unlock(&vcc_sklist_lock);
 	for (i = 0; i < eni_dev->free_len; i++) {
@@ -2270,7 +2198,6 @@ static const struct atmdev_ops ops = {
 	.getsockopt	= eni_getsockopt,
 	.setsockopt	= eni_setsockopt,
 	.send		= eni_send,
-	.sg_send	= eni_sg_send,
 	.phy_put	= eni_phy_put,
 	.phy_get	= eni_phy_get,
 	.change_qos	= eni_change_qos,
@@ -2286,8 +2213,6 @@ static int __devinit eni_init_one(struct pci_dev *pci_dev,
 	int error = -ENOMEM;
 
 	DPRINTK("eni_init_one\n");
-
-	MOD_INC_USE_COUNT; /* @@@ we don't support unloading yet */
 
 	if (pci_enable_device(pci_dev)) {
 		error = -EIO;
@@ -2322,12 +2247,11 @@ out2:
 out1:
 	kfree(eni_dev);
 out0:
-	MOD_DEC_USE_COUNT; /* @@@ we don't support unloading yet */
 	return error;
 }
 
 
-static struct pci_device_id eni_pci_tbl[] __devinitdata = {
+static struct pci_device_id eni_pci_tbl[] = {
 	{ PCI_VENDOR_ID_EF, PCI_DEVICE_ID_EF_ATM_FPGA, PCI_ANY_ID, PCI_ANY_ID,
 	  0, 0, 0 /* FPGA */ },
 	{ PCI_VENDOR_ID_EF, PCI_DEVICE_ID_EF_ATM_ASIC, PCI_ANY_ID, PCI_ANY_ID,
@@ -2356,7 +2280,7 @@ static int __init eni_init(void)
 	struct sk_buff *skb; /* dummy for sizeof */
 
 	if (sizeof(skb->cb) < sizeof(struct eni_skb_prv)) {
-		printk(KERN_ERR "eni_detect: skb->cb is too small (%d < %d)\n",
+		printk(KERN_ERR "eni_detect: skb->cb is too small (%Zd < %Zd)\n",
 		    sizeof(skb->cb),sizeof(struct eni_skb_prv));
 		return -EIO;
 	}
@@ -2366,16 +2290,7 @@ static int __init eni_init(void)
 }
 
 
-static void __exit eni_cleanup(void)
-{
-	/*
-	 * Well, there's no way to get rid of the driver yet, so we don't
-	 * have to clean up, right ? :-)
-	 */
-}
-
-
 module_init(eni_init);
-module_exit(eni_cleanup);
+/* @@@ since exit routine not defined, this module can not be unloaded */
 
 MODULE_LICENSE("GPL");

@@ -812,7 +812,7 @@ static unsigned int usb_midi_poll(struct file *file, struct poll_table_struct *w
 
 static int usb_midi_open(struct inode *inode, struct file *file)
 {
-	int minor = minor(inode->i_rdev);
+	int minor = iminor(inode);
 	DECLARE_WAITQUEUE(wait, current);
 	struct list_head      *devs, *mdevs;
 	struct usb_midi_state *s;
@@ -1524,10 +1524,10 @@ static int get_alt_setting( struct usb_device *d, int ifnum )
 	int epin, epout;
 	int i;
 
-	alts = d->actconfig->interface[ifnum].num_altsetting;
+	alts = d->actconfig->interface[ifnum]->num_altsetting;
 
 	for ( alt=0 ; alt<alts ; alt++ ) {
-		interface = &d->actconfig->interface[ifnum].altsetting[alt];
+		interface = &d->actconfig->interface[ifnum]->altsetting[alt];
 		epin = -1;
 		epout = -1;
 
@@ -1750,7 +1750,7 @@ static int alloc_usb_midi_device( struct usb_device *d, struct usb_midi_state *s
 	return 0;
 
  error_end:
-	if ( mdevs != NULL && devices > 0 ) {
+	if ( mdevs != NULL ) {
 		for ( i=0 ; i<devices ; i++ ) {
 			if ( mdevs[i] != NULL ) {
 				unregister_sound_midi( mdevs[i]->dev_midi );
@@ -1795,8 +1795,8 @@ static int detect_yamaha_device( struct usb_device *d, unsigned int ifnum, struc
 		return -EINVAL;
 	}
 
-	for ( i=0 ; i < c->interface[ifnum].num_altsetting; i++ ) {
-		interface = c->interface[ifnum].altsetting + i;
+	for ( i=0 ; i < c->interface[ifnum]->num_altsetting; i++ ) {
+		interface = c->interface[ifnum]->altsetting + i;
 
 		if ( interface->desc.bInterfaceClass != 255 ||
 		     interface->desc.bInterfaceSubClass != 0 )
@@ -1889,8 +1889,8 @@ static int detect_midi_subclass(struct usb_device *d, unsigned int ifnum, struct
 	int alts=-1;
 	int ret;
 
-	for ( i=0 ; i < c->interface[ifnum].num_altsetting; i++ ) {
-		interface = c->interface[ifnum].altsetting + i;
+	for ( i=0 ; i < c->interface[ifnum]->num_altsetting; i++ ) {
+		interface = c->interface[ifnum]->altsetting + i;
 
 		if ( interface->desc.bInterfaceClass != USB_CLASS_AUDIO ||
 		     interface->desc.bInterfaceSubClass != USB_SUBCLASS_MIDISTREAMING )
@@ -2084,16 +2084,12 @@ static struct usb_driver usb_midi_driver = {
 
 /* ------------------------------------------------------------------------- */
 
-int __init usb_midi_init(void)
+static int __init usb_midi_init(void)
 {
-	if ( usb_register(&usb_midi_driver) < 0 )
-		return -1;
-
-	return 0;
-
+	return usb_register(&usb_midi_driver);
 }
 
-void __exit usb_midi_exit(void)
+static void __exit usb_midi_exit(void)
 {
 	usb_deregister(&usb_midi_driver);
 }

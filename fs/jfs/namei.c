@@ -1,6 +1,6 @@
 /*
- *   Copyright (c) International Business Machines Corp., 2000-2002
- *   Portions Copyright (c) Christoph Hellwig, 2001-2002
+ *   Copyright (C) International Business Machines Corp., 2000-2003
+ *   Portions Copyright (C) Christoph Hellwig, 2001-2002
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -19,6 +19,7 @@
 
 #include <linux/fs.h>
 #include "jfs_incore.h"
+#include "jfs_superblock.h"
 #include "jfs_inode.h"
 #include "jfs_dinode.h"
 #include "jfs_dmap.h"
@@ -120,7 +121,7 @@ int jfs_create(struct inode *dip, struct dentry *dentry, int mode,
 	ino = ip->i_ino;
 	if ((rc = dtInsert(tid, dip, &dname, &ino, &btstack))) {
 		jfs_err("jfs_create: dtInsert returned %d", rc);
-		if (rc == EIO)
+		if (rc == -EIO)
 			txAbort(tid, 1);	/* Marks Filesystem dirty */
 		else
 			txAbort(tid, 0);	/* Filesystem full */
@@ -247,7 +248,7 @@ int jfs_mkdir(struct inode *dip, struct dentry *dentry, int mode)
 	if ((rc = dtInsert(tid, dip, &dname, &ino, &btstack))) {
 		jfs_err("jfs_mkdir: dtInsert returned %d", rc);
 
-		if (rc == EIO)
+		if (rc == -EIO)
 			txAbort(tid, 1);	/* Marks Filesystem dirty */
 		else
 			txAbort(tid, 0);	/* Filesystem full */
@@ -258,7 +259,7 @@ int jfs_mkdir(struct inode *dip, struct dentry *dentry, int mode)
 	ip->i_op = &jfs_dir_inode_operations;
 	ip->i_fop = &jfs_dir_operations;
 	ip->i_mapping->a_ops = &jfs_aops;
-	ip->i_mapping->gfp_mask = GFP_NOFS;
+	mapping_set_gfp_mask(ip->i_mapping, GFP_NOFS);
 
 	insert_inode_hash(ip);
 	mark_inode_dirty(ip);
@@ -353,7 +354,7 @@ int jfs_rmdir(struct inode *dip, struct dentry *dentry)
 	ino = ip->i_ino;
 	if ((rc = dtDelete(tid, dip, &dname, &ino, JFS_REMOVE))) {
 		jfs_err("jfs_rmdir: dtDelete returned %d", rc);
-		if (rc == EIO)
+		if (rc == -EIO)
 			txAbort(tid, 1);
 		txEnd(tid);
 		up(&JFS_IP(dip)->commit_sem);
@@ -469,7 +470,7 @@ int jfs_unlink(struct inode *dip, struct dentry *dentry)
 	ino = ip->i_ino;
 	if ((rc = dtDelete(tid, dip, &dname, &ino, JFS_REMOVE))) {
 		jfs_err("jfs_unlink: dtDelete returned %d", rc);
-		if (rc == EIO)
+		if (rc == -EIO)
 			txAbort(tid, 1);	/* Marks FS Dirty */
 		txEnd(tid);
 		up(&JFS_IP(dip)->commit_sem);
@@ -535,7 +536,7 @@ int jfs_unlink(struct inode *dip, struct dentry *dentry)
 		new_size = xtTruncate_pmap(tid, ip, new_size);
 		if (new_size < 0) {
 			txAbort(tid, 1);	/* Marks FS Dirty */
-			rc = -new_size;		/* We return -rc */
+			rc = new_size;
 		} else
 			rc = txCommit(tid, 2, &iplist[0], COMMIT_SYNC);
 		txEnd(tid);
@@ -771,15 +772,16 @@ int jfs_link(struct dentry *old_dentry,
 	jfs_info("jfs_link: %s %s", old_dentry->d_name.name,
 		 dentry->d_name.name);
 
+	if (ip->i_nlink == JFS_LINK_MAX)
+		return -EMLINK;
+
+	if (ip->i_nlink == 0)
+		return -ENOENT;
+
 	tid = txBegin(ip->i_sb, 0);
 
 	down(&JFS_IP(dir)->commit_sem);
 	down(&JFS_IP(ip)->commit_sem);
-
-	if (ip->i_nlink == JFS_LINK_MAX) {
-		rc = -EMLINK;
-		goto out;
-	}
 
 	/*
 	 * scan parent directory for entry/freespace
@@ -1138,7 +1140,17 @@ int jfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 		new_ip->i_nlink--;
 		if (S_ISDIR(new_ip->i_mode)) {
 			new_ip->i_nlink--;
-			assert(new_ip->i_nlink == 0);
+			if (new_ip->i_nlink) {
+				up(&JFS_IP(new_dir)->commit_sem);
+				up(&JFS_IP(old_ip)->commit_sem);
+				if (old_dir != new_dir)
+					up(&JFS_IP(old_dir)->commit_sem);
+				if (!S_ISDIR(old_ip->i_mode) && new_ip)
+					IWRITE_UNLOCK(new_ip);
+				jfs_error(new_ip->i_sb,
+					  "jfs_rename: new_ip->i_nlink != 0");
+				return -EIO;
+			}
 			tblk = tid_to_tblock(tid);
 			tblk->xflag |= COMMIT_DELETE;
 			tblk->ip = new_ip;
@@ -1302,6 +1314,7 @@ int jfs_rename(struct inode *old_dir, struct dentry *old_dentry,
  */
 int jfs_mknod(struct inode *dir, struct dentry *dentry, int mode, dev_t rdev)
 {
+	struct jfs_inode_info *jfs_ip;
 	struct btstack btstack;
 	struct component_name dname;
 	ino_t ino;
@@ -1310,6 +1323,9 @@ int jfs_mknod(struct inode *dir, struct dentry *dentry, int mode, dev_t rdev)
 	int rc;
 	tid_t tid;
 	struct tblock *tblk;
+
+	if (!new_valid_dev(rdev))
+		return -EINVAL;
 
 	jfs_info("jfs_mknod: %s", dentry->d_name.name);
 
@@ -1321,6 +1337,7 @@ int jfs_mknod(struct inode *dir, struct dentry *dentry, int mode, dev_t rdev)
 		rc = -ENOSPC;
 		goto out1;
 	}
+	jfs_ip = JFS_IP(ip);
 
 	tid = txBegin(dir->i_sb, 0);
 
@@ -1339,6 +1356,7 @@ int jfs_mknod(struct inode *dir, struct dentry *dentry, int mode, dev_t rdev)
 		goto out3;
 
 	ip->i_op = &jfs_file_inode_operations;
+	jfs_ip->dev = new_encode_dev(rdev);
 	init_special_inode(ip, ip->i_mode, rdev);
 
 	insert_inode_hash(ip);

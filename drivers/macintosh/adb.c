@@ -266,8 +266,7 @@ adb_probe_task(void *x)
 static void
 __adb_probe_task(void *data)
 {
-	adb_probe_task_pid = kernel_thread(adb_probe_task, NULL,
-		SIGCHLD | CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
+	adb_probe_task_pid = kernel_thread(adb_probe_task, NULL, SIGCHLD | CLONE_KERNEL);
 }
 
 static DECLARE_WORK(adb_reset_work, __adb_probe_task, NULL);
@@ -712,7 +711,7 @@ static int adb_open(struct inode *inode, struct file *file)
 {
 	struct adbdev_state *state;
 
-	if (minor(inode->i_rdev) > 0 || adb_controller == NULL)
+	if (iminor(inode) > 0 || adb_controller == NULL)
 		return -ENXIO;
 	state = kmalloc(sizeof(struct adbdev_state), GFP_KERNEL);
 	if (state == 0)

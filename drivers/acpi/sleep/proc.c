@@ -51,40 +51,31 @@ acpi_system_write_sleep (
 	size_t			count,
 	loff_t			*ppos)
 {
-	acpi_status		status = AE_ERROR;
-	char			state_string[12] = {'\0'};
-	u32			state = 0;
+	char	str[12];
+	u32	state = 0;
+	int	error = 0;
 
-	ACPI_FUNCTION_TRACE("acpi_system_write_sleep");
-
-	if (count > sizeof(state_string) - 1)
+	if (count > sizeof(str) - 1)
 		goto Done;
+	memset(str,0,sizeof(str));
+	if (copy_from_user(str, buffer, count))
+		return -EFAULT;
 
-	if (copy_from_user(state_string, buffer, count))
-		return_VALUE(-EFAULT);
-	
-	state_string[count] = '\0';
-	
-	state = simple_strtoul(state_string, NULL, 0);
-
-	if (state < 1 || state > 4)
+	/* Check for S4 bios request */
+	if (!strcmp(str,"4b")) {
+		error = acpi_suspend(4);
 		goto Done;
-
-	if (!sleep_states[state]) 
-		goto Done;
-
+	}
+	state = simple_strtoul(str, NULL, 0);
 #ifdef CONFIG_SOFTWARE_SUSPEND
 	if (state == 4) {
 		software_suspend();
 		goto Done;
 	}
 #endif
-	status = acpi_suspend(state);
+	error = acpi_suspend(state);
  Done:
-	if (ACPI_FAILURE(status))
-		return_VALUE(-EINVAL);
-	else
-		return_VALUE(count);
+	return error ? error : count;
 }
 
 static int acpi_system_alarm_seq_show(struct seq_file *seq, void *offset)

@@ -40,18 +40,12 @@ static int idedefault_attach(ide_drive_t *drive);
 
 /*
  *	IDE subdriver functions, registered with ide.c
- *
- *	idedefault *must* support DMA because it will be
- *	attached before the other drivers are loaded and
- *	we don't want to lose the DMA status at probe
- *	time.
  */
 
 ide_driver_t idedefault_driver = {
 	.name		=	"ide-default",
 	.version	=	IDEDEFAULT_VERSION,
 	.attach		=	idedefault_attach,
-	.supports_dma	=	1,
 	.drives		=	LIST_HEAD_INIT(idedefault_driver.drives)
 };
 
@@ -63,6 +57,14 @@ static int idedefault_attach (ide_drive_t *drive)
 			"driver with ide.c\n", drive->name);
 		return 1;
 	}
+	
+	/* For the sake of the request layer, we must make sure we have a
+	 * correct ready_stat value, that is 0 for ATAPI devices or we will
+	 * fail any request like Power Management
+	 */
+	if (drive->media != ide_disk)
+		drive->ready_stat = 0;
+
 	return 0;
 }
 

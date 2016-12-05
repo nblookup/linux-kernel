@@ -71,7 +71,7 @@ unsigned int boot_cpu_logical_apicid = -1U;
 static unsigned int __initdata num_processors;
 
 /* Bitmask of physically existing CPUs */
-unsigned long phys_cpu_present_map;
+physid_mask_t phys_cpu_present_map;
 
 u8 bios_cpu_apicid[NR_CPUS] = { [0 ... NR_CPUS-1] = BAD_APICID };
 
@@ -106,6 +106,7 @@ static struct mpc_config_translation *translation_table[MAX_MPC_ENTRY] __initdat
 void __init MP_processor_info (struct mpc_config_processor *m)
 {
  	int ver, apicid;
+	physid_mask_t tmp;
  	
 	if (!(m->mpc_cpuflag & CPU_ENABLED))
 		return;
@@ -166,6 +167,11 @@ void __init MP_processor_info (struct mpc_config_processor *m)
 		boot_cpu_logical_apicid = apicid;
 	}
 
+	if (num_processors >= NR_CPUS) {
+		printk(KERN_WARNING "NR_CPUS limit of %i reached.  Cannot "
+			"boot CPU(apicid 0x%x).\n", NR_CPUS, m->mpc_apicid);
+		return;
+	}
 	num_processors++;
 
 	if (MAX_APICS - m->mpc_apicid <= 0) {
@@ -176,7 +182,8 @@ void __init MP_processor_info (struct mpc_config_processor *m)
 	}
 	ver = m->mpc_apicver;
 
-	phys_cpu_present_map |= apicid_to_cpu_present(apicid);
+	tmp = apicid_to_cpu_present(apicid);
+	physids_or(phys_cpu_present_map, phys_cpu_present_map, tmp);
 	
 	/*
 	 * Validate version
@@ -330,6 +337,16 @@ static void __init smp_read_mpc_oem(struct mp_config_oemtable *oemtable, \
 		}
        }
 }
+
+static inline void mps_oem_check(struct mp_config_table *mpc, char *oem,
+		char *productid)
+{
+	if (strncmp(oem, "IBM NUMA", 8))
+		printk("Warning!  May not be a NUMA-Q system!\n");
+	if (mpc->mpc_oemptr)
+		smp_read_mpc_oem((struct mp_config_oemtable *) mpc->mpc_oemptr,
+				mpc->mpc_oemsize);
+}
 #endif	/* CONFIG_X86_NUMAQ */
 
 /*
@@ -344,15 +361,12 @@ static int __init smp_read_mpc(struct mp_config_table *mpc)
 	unsigned char *mpt=((unsigned char *)mpc)+count;
 
 	if (memcmp(mpc->mpc_signature,MPC_SIGNATURE,4)) {
-		panic("SMP mptable: bad signature [%c%c%c%c]!\n",
-			mpc->mpc_signature[0],
-			mpc->mpc_signature[1],
-			mpc->mpc_signature[2],
-			mpc->mpc_signature[3]);
+		printk(KERN_ERR "SMP mptable: bad signature [0x%x]!\n",
+			*(u32 *)mpc->mpc_signature);
 		return 0;
 	}
 	if (mpf_checksum((unsigned char *)mpc,mpc->mpc_length)) {
-		panic("SMP mptable: checksum error!\n");
+		printk(KERN_ERR "SMP mptable: checksum error!\n");
 		return 0;
 	}
 	if (mpc->mpc_spec!=0x01 && mpc->mpc_spec!=0x04) {
@@ -620,7 +634,7 @@ void __init get_smp_config (void)
 
 	/*
 	 * ACPI may be used to obtain the entire SMP configuration or just to 
-	 * enumerate/configure processors (CONFIG_ACPI_HT_ONLY).  Note that 
+	 * enumerate/configure processors (CONFIG_ACPI_HT).  Note that 
 	 * ACPI supports both logical (e.g. Hyper-Threading) and physical 
 	 * processors, where MPS only supports physical.
 	 */
@@ -823,7 +837,7 @@ void __init mp_register_lapic (
 	MP_processor_info(&processor);
 }
 
-#ifdef CONFIG_X86_IO_APIC
+#if defined(CONFIG_X86_IO_APIC) && defined(CONFIG_ACPI_INTERPRETER)
 
 #define MP_ISA_BUS		0
 #define MP_MAX_IOAPIC_PIN	127
@@ -848,7 +862,7 @@ static int __init mp_find_ioapic (
 			return i;
 	}
 
-	printk(KERN_ERR "ERROR: Unable to locate IOAPIC for IRQ %d/n", irq);
+	printk(KERN_ERR "ERROR: Unable to locate IOAPIC for IRQ %d\n", irq);
 
 	return -1;
 }
@@ -1012,10 +1026,6 @@ void __init mp_config_acpi_legacy_irqs (void)
 	}
 }
 
-#ifndef CONFIG_ACPI_HT_ONLY
-
-/* Ensure the ACPI SCI interrupt level is active low, edge-triggered */
-
 extern FADT_DESCRIPTOR acpi_fadt;
 
 void __init mp_config_ioapic_for_sci(int irq)
@@ -1024,6 +1034,7 @@ void __init mp_config_ioapic_for_sci(int irq)
 	int ioapic_pin;
 	struct acpi_table_madt *madt;
 	struct acpi_table_int_src_ovr *entry = NULL;
+	acpi_interrupt_flags flags;
 	void *madt_end;
 	acpi_status status;
 
@@ -1042,33 +1053,37 @@ void __init mp_config_ioapic_for_sci(int irq)
 
 		while ((void *) entry < madt_end) {
                 	if (entry->header.type == ACPI_MADT_INT_SRC_OVR &&
-			    acpi_fadt.sci_int == entry->bus_irq) {
-				/*
-				 * See the note at the end of ACPI 2.0b section
-				 * 5.2.10.8 for what this is about.
-				 */
-				if (entry->bus_irq != entry->global_irq) {
-					acpi_fadt.sci_int = entry->global_irq;
-					irq = entry->global_irq;
-					break;
-				}
-				else
-                			return;
-			}
-
+			    acpi_fadt.sci_int == entry->bus_irq)
+				goto found;
+			
                 	entry = (struct acpi_table_int_src_ovr *)
                 	        ((unsigned long) entry + entry->header.length);
         	}
 	}
+	/*
+	 * Although the ACPI spec says that the SCI should be level/low
+	 * don't reprogram it unless there is an explicit MADT OVR entry
+	 * instructing us to do so -- otherwise we break Tyan boards which
+	 * have the SCI wired edge/high but no MADT OVR.
+	 */
+	return;
+
+found:
+	/*
+	 * See the note at the end of ACPI 2.0b section
+	 * 5.2.10.8 for what this is about.
+	 */
+	flags = entry->flags;
+	acpi_fadt.sci_int = entry->global_irq;
+	irq = entry->global_irq;
 
 	ioapic = mp_find_ioapic(irq);
 
 	ioapic_pin = irq - mp_ioapic_routing[ioapic].irq_start;
 
-	io_apic_set_pci_routing(ioapic, ioapic_pin, irq);
+	io_apic_set_pci_routing(ioapic, ioapic_pin, irq, 
+				(flags.trigger >> 1) , (flags.polarity >> 1));
 }
-
-#endif /*CONFIG_ACPI_HT_ONLY*/
 
 #ifdef CONFIG_ACPI_PCI
 
@@ -1080,6 +1095,8 @@ void __init mp_parse_prt (void)
 	int			ioapic_pin = 0;
 	int			irq = 0;
 	int			idx, bit = 0;
+	int			edge_level = 0;
+	int			active_high_low = 0;
 
 	/*
 	 * Parsing through the PCI Interrupt Routing Table (PRT) and program
@@ -1090,16 +1107,22 @@ void __init mp_parse_prt (void)
 
 		/* Need to get irq for dynamic entry */
 		if (entry->link.handle) {
-			irq = acpi_pci_link_get_irq(entry->link.handle, entry->link.index);
+			irq = acpi_pci_link_get_irq(entry->link.handle, entry->link.index, &edge_level, &active_high_low);
 			if (!irq)
 				continue;
 		}
-		else
+		else {
+			/* Hardwired IRQ. Assume PCI standard settings */
 			irq = entry->link.index;
+			edge_level = 1;
+			active_high_low = 1;
+		}
 
 		/* Don't set up the ACPI SCI because it's already set up */
-		if (acpi_fadt.sci_int == irq)
+                if (acpi_fadt.sci_int == irq) {
+                        entry->irq = irq; /*we still need to set entry's irq*/
 			continue;
+                }
 	
 		ioapic = mp_find_ioapic(irq);
 		if (ioapic < 0)
@@ -1130,7 +1153,7 @@ void __init mp_parse_prt (void)
 
 		mp_ioapic_routing[ioapic].pin_programmed[idx] |= (1<<bit);
 
-		if (!io_apic_set_pci_routing(ioapic, ioapic_pin, irq))
+		if (!io_apic_set_pci_routing(ioapic, ioapic_pin, irq, edge_level, active_high_low))
 			entry->irq = irq;
 
 		printk(KERN_DEBUG "%02x:%02x:%02x[%c] -> %d-%d -> IRQ %d\n",
@@ -1139,12 +1162,8 @@ void __init mp_parse_prt (void)
 			mp_ioapic_routing[ioapic].apic_id, ioapic_pin, 
 			entry->irq);
 	}
-	
-	return;
 }
 
 #endif /*CONFIG_ACPI_PCI*/
-
-#endif /*CONFIG_X86_IO_APIC*/
-
+#endif /*CONFIG_X86_IO_APIC && CONFIG_ACPI_INTERPRETER*/
 #endif /*CONFIG_ACPI_BOOT*/

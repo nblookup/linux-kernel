@@ -74,15 +74,15 @@
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include "sjcd.h"
 
 static int sjcd_present = 0;
-static struct request_queue sjcd_queue;
+static struct request_queue *sjcd_queue;
 
 #define MAJOR_NR SANYO_CDROM_MAJOR
-#define QUEUE (&sjcd_queue)
-#define CURRENT elv_next_request(&sjcd_queue)
+#define QUEUE (sjcd_queue)
+#define CURRENT elv_next_request(sjcd_queue)
 
 #define SJCD_BUF_SIZ 32		/* cdr-h94a has internal 64K buffer */
 
@@ -842,8 +842,9 @@ static int sjcd_ioctl(struct inode *ip, struct file *fp,
 					    CDROM_AUDIO_NO_STATUS;
 				}
 
-				copy_from_user(&sjcd_msf, (void *) arg,
-					       sizeof(sjcd_msf));
+				if (copy_from_user(&sjcd_msf, (void *) arg,
+					       sizeof(sjcd_msf)))
+					return (-EFAULT);
 
 				sjcd_playing.start.min =
 				    bin2bcd(sjcd_msf.cdmsf_min0);
@@ -893,9 +894,9 @@ static int sjcd_ioctl(struct inode *ip, struct file *fp,
 					 sizeof(toc_entry))) == 0) {
 				struct sjcd_hw_disk_info *tp;
 
-				copy_from_user(&toc_entry, (void *) arg,
-					       sizeof(toc_entry));
-
+				if (copy_from_user(&toc_entry, (void *) arg,
+					       sizeof(toc_entry)))
+					return (-EFAULT);
 				if (toc_entry.cdte_track == CDROM_LEADOUT)
 					tp = &sjcd_table_of_contents[0];
 				else if (toc_entry.cdte_track <
@@ -948,8 +949,10 @@ static int sjcd_ioctl(struct inode *ip, struct file *fp,
 					 sizeof(subchnl))) == 0) {
 				struct sjcd_hw_qinfo q_info;
 
-				copy_from_user(&subchnl, (void *) arg,
-					       sizeof(subchnl));
+				if (copy_from_user(&subchnl, (void *) arg,
+					       sizeof(subchnl)))
+					return (-EFAULT);
+
 				if (sjcd_get_q_info(&q_info) < 0)
 					return (-EIO);
 
@@ -1005,8 +1008,9 @@ static int sjcd_ioctl(struct inode *ip, struct file *fp,
 					 sizeof(vol_ctrl))) == 0) {
 				unsigned char dummy[4];
 
-				copy_from_user(&vol_ctrl, (void *) arg,
-					       sizeof(vol_ctrl));
+				if (copy_from_user(&vol_ctrl, (void *) arg,
+					       sizeof(vol_ctrl)))
+					return (-EFAULT);
 				sjcd_send_4_cmd(SCMD_SET_VOLUME,
 						vol_ctrl.channel0, 0xFF,
 						vol_ctrl.channel1, 0xFF);
@@ -1679,8 +1683,11 @@ static int __init sjcd_init(void)
 	if (register_blkdev(MAJOR_NR, "sjcd"))
 		return -EIO;
 
-	blk_init_queue(&sjcd_queue, do_sjcd_request, &sjcd_lock);
-	blk_queue_hardsect_size(&sjcd_queue, 2048);
+	sjcd_queue = blk_init_queue(do_sjcd_request, &sjcd_lock);
+	if (!sjcd_queue)
+		goto out0;
+
+	blk_queue_hardsect_size(sjcd_queue, 2048);
 
 	sjcd_disk = alloc_disk(1);
 	if (!sjcd_disk) {
@@ -1778,17 +1785,18 @@ static int __init sjcd_init(void)
 	}
 
 	printk(KERN_INFO "SJCD: Status: port=0x%x.\n", sjcd_base);
-	sjcd_disk->queue = &sjcd_queue;
+	sjcd_disk->queue = sjcd_queue;
 	add_disk(sjcd_disk);
 
 	sjcd_present++;
 	return (0);
 out3:
 	release_region(sjcd_base, 4);
-	blk_cleanup_queue(&sjcd_queue);
 out2:
 	put_disk(sjcd_disk);
 out1:
+	blk_cleanup_queue(sjcd_queue);
+out0:
 	if ((unregister_blkdev(MAJOR_NR, "sjcd") == -EINVAL))
 		printk("SJCD: cannot unregister device.\n");
 	return (-EIO);
@@ -1799,7 +1807,7 @@ static void __exit sjcd_exit(void)
 	del_gendisk(sjcd_disk);
 	put_disk(sjcd_disk);
 	release_region(sjcd_base, 4);
-	blk_cleanup_queue(&sjcd_queue);
+	blk_cleanup_queue(sjcd_queue);
 	if ((unregister_blkdev(MAJOR_NR, "sjcd") == -EINVAL))
 		printk("SJCD: cannot unregister device.\n");
 	printk(KERN_INFO "SJCD: module: removed.\n");
@@ -1809,3 +1817,4 @@ module_init(sjcd_init);
 module_exit(sjcd_exit);
 
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_BLOCKDEV_MAJOR(SANYO_CDROM_MAJOR);

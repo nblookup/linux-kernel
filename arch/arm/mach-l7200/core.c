@@ -5,13 +5,11 @@
  *
  *  Extra MM routines for L7200 architecture
  */
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 
 #include <asm/hardware.h>
 #include <asm/page.h>
-#include <asm/proc/domain.h>
 
 #include <asm/mach/map.h>
 #include <asm/arch/hardware.h>

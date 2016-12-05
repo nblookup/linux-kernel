@@ -81,7 +81,7 @@ int usb_hcd_pci_probe (struct pci_dev *dev, const struct pci_device_id *id)
 	
         if (!dev->irq) {
         	err ("Found HC with no IRQ.  Check BIOS/PCI %s setup!",
-			dev->slot_name);
+			pci_name(dev));
    	        return -ENODEV;
         }
 	
@@ -99,7 +99,7 @@ int usb_hcd_pci_probe (struct pci_dev *dev, const struct pci_device_id *id)
 			retval = -EFAULT;
 clean_1:
 			release_mem_region (resource, len);
-			err ("init %s fail, %d", dev->slot_name, retval);
+			err ("init %s fail, %d", pci_name(dev), retval);
 			return retval;
 		}
 
@@ -122,10 +122,9 @@ clean_1:
 		base = (void *) resource;
 	}
 
-	// driver->start(), later on, will transfer device from
+	// driver->reset(), later on, will transfer device from
 	// control by SMM/BIOS to control by Linux (if needed)
 
-	pci_set_master (dev);
 	hcd = driver->hcd_alloc ();
 	if (hcd == NULL){
 		dbg ("hcd alloc fail");
@@ -136,16 +135,21 @@ clean_2:
 			goto clean_1;
 		} else {
 			release_region (resource, len);
-			err ("init %s fail, %d", dev->slot_name, retval);
+			err ("init %s fail, %d", pci_name(dev), retval);
 			return retval;
 		}
 	}
+	// hcd zeroed everything
+	hcd->regs = base;
+	hcd->region = region;
+
 	pci_set_drvdata (dev, hcd);
 	hcd->driver = driver;
 	hcd->description = driver->description;
 	hcd->pdev = dev;
-	hcd->self.bus_name = dev->slot_name;
-	hcd->product_desc = dev->dev.name;
+	hcd->self.bus_name = pci_name(dev);
+	if (hcd->product_desc == NULL)
+		hcd->product_desc = "USB Host Controller";
 	hcd->self.controller = &dev->dev;
 	hcd->controller = hcd->self.controller;
 
@@ -157,22 +161,28 @@ clean_3:
 
 	dev_info (hcd->controller, "%s\n", hcd->product_desc);
 
+	/* till now HC has been in an indeterminate state ... */
+	if (driver->reset && (retval = driver->reset (hcd)) < 0) {
+		dev_err (hcd->controller, "can't reset\n");
+		goto clean_3;
+	}
+	hcd->state = USB_STATE_HALT;
+
+	pci_set_master (dev);
 #ifndef __sparc__
 	sprintf (buf, "%d", dev->irq);
 #else
 	bufp = __irq_itoa(dev->irq);
 #endif
-	if (request_irq (dev->irq, usb_hcd_irq, SA_SHIRQ, hcd->description, hcd)
-			!= 0) {
+	retval = request_irq (dev->irq, usb_hcd_irq, SA_SHIRQ,
+				hcd->description, hcd);
+	if (retval != 0) {
 		dev_err (hcd->controller,
 				"request interrupt %s failed\n", bufp);
-		retval = -EBUSY;
 		goto clean_3;
 	}
 	hcd->irq = dev->irq;
 
-	hcd->regs = base;
-	hcd->region = region;
 	dev_info (hcd->controller, "irq %s, %s %p\n", bufp,
 		(driver->flags & HCD_MEMORY) ? "pci mem" : "io base",
 		base);
@@ -222,7 +232,8 @@ void usb_hcd_pci_remove (struct pci_dev *dev)
 		BUG ();
 
 	hub = hcd->self.root_hub;
-	hcd->state = USB_STATE_QUIESCING;
+	if (HCD_IS_RUNNING (hcd->state))
+		hcd->state = USB_STATE_QUIESCING;
 
 	dev_dbg (hcd->controller, "roothub graceful disconnect\n");
 	usb_disconnect (&hub);
@@ -249,56 +260,44 @@ EXPORT_SYMBOL (usb_hcd_pci_remove);
 
 #ifdef	CONFIG_PM
 
-/*
- * Some "sleep" power levels imply updating struct usb_driver
- * to include a callback asking hcds to do their bit by checking
- * if all the drivers can suspend.  Gets involved with remote wakeup.
- *
- * If there are pending urbs, then HCs will need to access memory,
- * causing extra power drain.  New sleep()/wakeup() PM calls might
- * be needed, beyond PCI suspend()/resume().  The root hub timer
- * still be accessing memory though ...
- *
- * FIXME:  USB should have some power budgeting support working with
- * all kinds of hubs.
- *
- * FIXME:  This assumes only D0->D3 suspend and D3->D0 resume.
- * D1 and D2 states should do something, yes?
- *
- * FIXME:  Should provide generic enable_wake(), calling pci_enable_wake()
- * for all supported states, so that USB remote wakeup can work for any
- * devices that support it (and are connected via powered hubs).
- *
- * FIXME:  resume doesn't seem to work right any more...
- */
-
-
-// 2.4 kernels have issued concurrent resumes (w/APM)
-// we defend against that error; PCI doesn't yet.
-
 /**
  * usb_hcd_pci_suspend - power management suspend of a PCI-based HCD
  * @dev: USB Host Controller being suspended
+ * @state: state that the controller is going into
  *
  * Store this function in the HCD's struct pci_driver as suspend().
  */
 int usb_hcd_pci_suspend (struct pci_dev *dev, u32 state)
 {
 	struct usb_hcd		*hcd;
-	int			retval;
+	int			retval = 0;
 
 	hcd = pci_get_drvdata(dev);
-	dev_info (hcd->controller, "suspend to state %d\n", state);
+	dev_dbg (hcd->controller, "suspend D%d --> D%d\n",
+			dev->current_state, state);
 
-	pci_save_state (dev, hcd->pci_state);
+	switch (hcd->state) {
+	case USB_STATE_HALT:
+		dev_dbg (hcd->controller, "halted; hcd not suspended\n");
+		break;
+	case USB_STATE_SUSPENDED:
+		dev_dbg (hcd->controller, "hcd already suspended\n");
+		break;
+	default:
+		/* remote wakeup needs hub->suspend() cooperation */
+		// pci_enable_wake (dev, 3, 1);
 
-	// FIXME for all connected devices, leaf-to-root:
-	// driver->suspend()
-	// proposed "new 2.5 driver model" will automate that
+		pci_save_state (dev, hcd->pci_state);
 
-	/* driver may want to disable DMA etc */
-	retval = hcd->driver->suspend (hcd, state);
-	hcd->state = USB_STATE_SUSPENDED;
+		/* driver may want to disable DMA etc */
+		hcd->state = USB_STATE_QUIESCING;
+		retval = hcd->driver->suspend (hcd, state);
+		if (retval)
+			dev_dbg (hcd->controller, "suspend fail, retval %d\n",
+					retval);
+		else
+			hcd->state = USB_STATE_SUSPENDED;
+	}
 
  	pci_set_power_state (dev, state);
 	return retval;
@@ -317,39 +316,27 @@ int usb_hcd_pci_resume (struct pci_dev *dev)
 	int			retval;
 
 	hcd = pci_get_drvdata(dev);
-	dev_info (hcd->controller, "resume\n");
+	dev_dbg (hcd->controller, "resume from state D%d\n",
+			dev->current_state);
 
-	/* guard against multiple resumes (APM bug?) */
-	atomic_inc (&hcd->resume_count);
-	if (atomic_read (&hcd->resume_count) != 1) {
-		dev_err (hcd->controller, "concurrent PCI resumes\n");
-		retval = 0;
-		goto done;
-	}
-
-	retval = -EBUSY;
 	if (hcd->state != USB_STATE_SUSPENDED) {
 		dev_dbg (hcd->controller, "can't resume, not suspended!\n");
-		goto done;
+		return -EL3HLT;
 	}
 	hcd->state = USB_STATE_RESUMING;
 
 	pci_set_power_state (dev, 0);
 	pci_restore_state (dev, hcd->pci_state);
 
+	/* remote wakeup needs hub->suspend() cooperation */
+	// pci_enable_wake (dev, 3, 0);
+
 	retval = hcd->driver->resume (hcd);
 	if (!HCD_IS_RUNNING (hcd->state)) {
 		dev_dbg (hcd->controller, "resume fail, retval %d\n", retval);
 		usb_hc_died (hcd);
-// FIXME:  recover, reset etc.
-	} else {
-		// FIXME for all connected devices, root-to-leaf:
-		// driver->resume ();
-		// proposed "new 2.5 driver model" will automate that
 	}
 
-done:
-	atomic_dec (&hcd->resume_count);
 	return retval;
 }
 EXPORT_SYMBOL (usb_hcd_pci_resume);

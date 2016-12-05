@@ -8,6 +8,7 @@ Linux PCMCIA ethernet adapter driver for the New Media Ethernet LAN.
 
 Written by Roger C. Pao <rpao@paonet.org>
   Copyright 1995 Roger C. Pao
+  Linux 2.5 cleanups Copyright Red Hat 2003
 
   This software may be used and distributed according to the terms of
   the GNU General Public License.
@@ -68,6 +69,10 @@ Driver Notes and Issues
 History
 -------------------------------------------------------------------------------
 Log: nmclan_cs.c,v
+ * 2.5.75-ac1 2003/07/11 Alan Cox <alan@redhat.com>
+ * Fixed hang on card eject as we probe it
+ * Cleaned up to use new style locking.
+ *
  * Revision 0.16  1995/07/01  06:42:17  rpao
  * Bug fix: nmclan_reset() called CardServices incorrectly.
  *
@@ -369,6 +374,8 @@ typedef struct _mace_private {
 
     char tx_free_frames; /* Number of free transmit frame buffers */
     char tx_irq_disabled; /* MACE TX interrupt disabled */
+    
+    spinlock_t bank_lock; /* Must be held if you step off bank 0 */
 } mace_private;
 
 /* ----------------------------------------------------------------------------
@@ -420,7 +427,7 @@ Function Prototypes
 ---------------------------------------------------------------------------- */
 
 static void nmclan_config(dev_link_t *link);
-static void nmclan_release(u_long arg);
+static void nmclan_release(dev_link_t *link);
 static int nmclan_event(event_t event, int priority,
 			event_callback_args_t *args);
 
@@ -435,25 +442,11 @@ static struct net_device_stats *mace_get_stats(struct net_device *dev);
 static int mace_rx(struct net_device *dev, unsigned char RxCnt);
 static void restore_multicast_list(struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
-static int mace_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
+static struct ethtool_ops netdev_ethtool_ops;
+
 
 static dev_link_t *nmclan_attach(void);
 static void nmclan_detach(dev_link_t *);
-
-/* ----------------------------------------------------------------------------
-flush_stale_links
-	Clean up stale device structures
----------------------------------------------------------------------------- */
-
-static void flush_stale_links(void)
-{
-    dev_link_t *link, *next;
-    for (link = dev_list; link; link = next) {
-	next = link->next;
-	if (link->state & DEV_STALE_LINK)
-	    nmclan_detach(link);
-    }
-}
 
 /* ----------------------------------------------------------------------------
 nmclan_attach
@@ -472,7 +465,6 @@ static dev_link_t *nmclan_attach(void)
 
     DEBUG(0, "nmclan_attach()\n");
     DEBUG(1, "%s\n", rcsid);
-    flush_stale_links();
 
     /* Create new ethernet device */
     dev = alloc_etherdev(sizeof(mace_private));
@@ -482,9 +474,7 @@ static dev_link_t *nmclan_attach(void)
     link = &lp->link;
     link->priv = dev;
     
-    init_timer(&link->release);
-    link->release.function = &nmclan_release;
-    link->release.data = (u_long)link;
+    spin_lock_init(&lp->bank_lock);
     link->io.NumPorts1 = 32;
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_AUTO;
     link->io.IOAddrLines = 5;
@@ -510,7 +500,7 @@ static dev_link_t *nmclan_attach(void)
     dev->set_config = &mace_config;
     dev->get_stats = &mace_get_stats;
     dev->set_multicast_list = &set_multicast_list;
-    dev->do_ioctl = &mace_ioctl;
+    SET_ETHTOOL_OPS(dev, &netdev_ethtool_ops);
     dev->open = &mace_open;
     dev->stop = &mace_close;
 #ifdef HAVE_TX_TIMEOUT
@@ -561,13 +551,10 @@ static void nmclan_detach(dev_link_t *link)
     if (*linkp == NULL)
 	return;
 
-    del_timer(&link->release);
     if (link->state & DEV_CONFIG) {
-	nmclan_release((u_long)link);
-	if (link->state & DEV_STALE_CONFIG) {
-	    link->state |= DEV_STALE_LINK;
+	nmclan_release(link);
+	if (link->state & DEV_STALE_CONFIG)
 	    return;
-	}
     }
 
     if (link->handle)
@@ -575,9 +562,11 @@ static void nmclan_detach(dev_link_t *link)
 
     /* Unlink device structure, free bits */
     *linkp = link->next;
-    if (link->dev)
+    if (link->dev) {
 	unregister_netdev(dev);
-    kfree(dev);
+	free_netdev(dev);
+    } else
+	kfree(dev);
 
 } /* nmclan_detach */
 
@@ -588,7 +577,7 @@ mace_read
 	assuming that during normal operation, the MACE is always in
 	bank 0.
 ---------------------------------------------------------------------------- */
-static int mace_read(ioaddr_t ioaddr, int reg)
+static int mace_read(mace_private *lp, ioaddr_t ioaddr, int reg)
 {
   int data = 0xFF;
   unsigned long flags;
@@ -598,12 +587,11 @@ static int mace_read(ioaddr_t ioaddr, int reg)
       data = inb(ioaddr + AM2150_MACE_BASE + reg);
       break;
     case 1: /* register 16-31 */
-      save_flags(flags);
-      cli();
+      spin_lock_irqsave(&lp->bank_lock, flags);
       MACEBANK(1);
       data = inb(ioaddr + AM2150_MACE_BASE + (reg & 0x0F));
       MACEBANK(0);
-      restore_flags(flags);
+      spin_unlock_irqrestore(&lp->bank_lock, flags);
       break;
   }
   return (data & 0xFF);
@@ -616,7 +604,7 @@ mace_write
 	are assuming that during normal operation, the MACE is always in
 	bank 0.
 ---------------------------------------------------------------------------- */
-static void mace_write(ioaddr_t ioaddr, int reg, int data)
+static void mace_write(mace_private *lp, ioaddr_t ioaddr, int reg, int data)
 {
   unsigned long flags;
 
@@ -625,12 +613,11 @@ static void mace_write(ioaddr_t ioaddr, int reg, int data)
       outb(data & 0xFF, ioaddr + AM2150_MACE_BASE + reg);
       break;
     case 1: /* register 16-31 */
-      save_flags(flags);
-      cli();
+      spin_lock_irqsave(&lp->bank_lock, flags);
       MACEBANK(1);
       outb(data & 0xFF, ioaddr + AM2150_MACE_BASE + (reg & 0x0F));
       MACEBANK(0);
-      restore_flags(flags);
+      spin_unlock_irqrestore(&lp->bank_lock, flags);
       break;
   }
 } /* mace_write */
@@ -639,22 +626,29 @@ static void mace_write(ioaddr_t ioaddr, int reg, int data)
 mace_init
 	Resets the MACE chip.
 ---------------------------------------------------------------------------- */
-static void mace_init(ioaddr_t ioaddr, char *enet_addr)
+static int mace_init(mace_private *lp, ioaddr_t ioaddr, char *enet_addr)
 {
   int i;
+  int ct = 0;
 
   /* MACE Software reset */
-  mace_write(ioaddr, MACE_BIUCC, 1);
-  while (mace_read(ioaddr, MACE_BIUCC) & 0x01) {
+  mace_write(lp, ioaddr, MACE_BIUCC, 1);
+  while (mace_read(lp, ioaddr, MACE_BIUCC) & 0x01) {
     /* Wait for reset bit to be cleared automatically after <= 200ns */;
+    if(++ct > 500)
+    {
+    	printk(KERN_ERR "mace: reset failed, card removed ?\n");
+    	return -1;
+    }
+    udelay(1);
   }
-  mace_write(ioaddr, MACE_BIUCC, 0);
+  mace_write(lp, ioaddr, MACE_BIUCC, 0);
 
   /* The Am2150 requires that the MACE FIFOs operate in burst mode. */
-  mace_write(ioaddr, MACE_FIFOCC, 0x0F);
+  mace_write(lp, ioaddr, MACE_FIFOCC, 0x0F);
 
-  mace_write(ioaddr, MACE_RCVFC, 0); /* Disable Auto Strip Receive */
-  mace_write(ioaddr, MACE_IMR, 0xFF); /* Disable all interrupts until _open */
+  mace_write(lp,ioaddr, MACE_RCVFC, 0); /* Disable Auto Strip Receive */
+  mace_write(lp, ioaddr, MACE_IMR, 0xFF); /* Disable all interrupts until _open */
 
   /*
    * Bit 2-1 PORTSEL[1-0] Port Select.
@@ -670,31 +664,39 @@ static void mace_init(ioaddr_t ioaddr, char *enet_addr)
    */
   switch (if_port) {
     case 1:
-      mace_write(ioaddr, MACE_PLSCC, 0x02);
+      mace_write(lp, ioaddr, MACE_PLSCC, 0x02);
       break;
     case 2:
-      mace_write(ioaddr, MACE_PLSCC, 0x00);
+      mace_write(lp, ioaddr, MACE_PLSCC, 0x00);
       break;
     default:
-      mace_write(ioaddr, MACE_PHYCC, /* ASEL */ 4);
+      mace_write(lp, ioaddr, MACE_PHYCC, /* ASEL */ 4);
       /* ASEL Auto Select.  When set, the PORTSEL[1-0] bits are overridden,
 	 and the MACE device will automatically select the operating media
 	 interface port. */
       break;
   }
 
-  mace_write(ioaddr, MACE_IAC, MACE_IAC_ADDRCHG | MACE_IAC_PHYADDR);
+  mace_write(lp, ioaddr, MACE_IAC, MACE_IAC_ADDRCHG | MACE_IAC_PHYADDR);
   /* Poll ADDRCHG bit */
-  while (mace_read(ioaddr, MACE_IAC) & MACE_IAC_ADDRCHG)
-    ;
+  ct = 0;
+  while (mace_read(lp, ioaddr, MACE_IAC) & MACE_IAC_ADDRCHG)
+  {
+  	if(++ ct > 500)
+  	{
+  		printk(KERN_ERR "mace: ADDRCHG timeout, card removed ?\n");
+  		return -1;
+  	}
+  }
   /* Set PADR register */
   for (i = 0; i < ETHER_ADDR_LEN; i++)
-    mace_write(ioaddr, MACE_PADR, enet_addr[i]);
+    mace_write(lp, ioaddr, MACE_PADR, enet_addr[i]);
 
   /* MAC Configuration Control Register should be written last */
   /* Let set_multicast_list set this. */
-  /* mace_write(ioaddr, MACE_MACCC, MACE_MACCC_ENXMT | MACE_MACCC_ENRCV); */
-  mace_write(ioaddr, MACE_MACCC, 0x00);
+  /* mace_write(lp, ioaddr, MACE_MACCC, MACE_MACCC_ENXMT | MACE_MACCC_ENRCV); */
+  mace_write(lp, ioaddr, MACE_MACCC, 0x00);
+  return 0;
 } /* mace_init */
 
 /* ----------------------------------------------------------------------------
@@ -759,8 +761,8 @@ static void nmclan_config(dev_link_t *link)
   {
     char sig[2];
 
-    sig[0] = mace_read(ioaddr, MACE_CHIPIDL);
-    sig[1] = mace_read(ioaddr, MACE_CHIPIDH);
+    sig[0] = mace_read(lp, ioaddr, MACE_CHIPIDL);
+    sig[1] = mace_read(lp, ioaddr, MACE_CHIPIDH);
     if ((sig[0] == 0x40) && ((sig[1] & 0x0F) == 0x09)) {
       DEBUG(0, "nmclan_cs configured: mace id=%x %x\n",
 	    sig[0], sig[1]);
@@ -772,7 +774,8 @@ static void nmclan_config(dev_link_t *link)
     }
   }
 
-  mace_init(ioaddr, dev->dev_addr);
+  if(mace_init(lp, ioaddr, dev->dev_addr) == -1)
+  	goto failed;
 
   /* The if_port symbol can be set when the module is loaded */
   if (if_port <= 2)
@@ -793,7 +796,7 @@ static void nmclan_config(dev_link_t *link)
 cs_failed:
     cs_error(link->handle, last_fn, last_ret);
 failed:
-    nmclan_release((u_long)link);
+    nmclan_release(link);
     return;
 
 } /* nmclan_config */
@@ -804,9 +807,8 @@ nmclan_release
 	net device, and release the PCMCIA configuration.  If the device
 	is still open, this will be postponed until it is closed.
 ---------------------------------------------------------------------------- */
-static void nmclan_release(u_long arg)
+static void nmclan_release(dev_link_t *link)
 {
-  dev_link_t *link = (dev_link_t *)arg;
 
   DEBUG(0, "nmclan_release(0x%p)\n", link);
 
@@ -823,7 +825,9 @@ static void nmclan_release(u_long arg)
 
   link->state &= ~DEV_CONFIG;
 
-} /* nmclan_release */
+  if (link->state & DEV_STALE_CONFIG)
+	  nmclan_detach(link);
+}
 
 /* ----------------------------------------------------------------------------
 nmclan_event
@@ -845,7 +849,7 @@ static int nmclan_event(event_t event, int priority,
       link->state &= ~DEV_PRESENT;
       if (link->state & DEV_CONFIG) {
 	netif_device_detach(dev);
-	mod_timer(&link->release, jiffies + HZ/20);
+	nmclan_release(link);
       }
       break;
     case CS_EVENT_CARD_INSERTION:
@@ -923,8 +927,8 @@ static void nmclan_reset(struct net_device *dev)
   lp->tx_free_frames=AM2150_MAX_TX_FRAMES;
 
   /* Reinitialize the MACE chip for operation. */
-  mace_init(dev->base_addr, dev->dev_addr);
-  mace_write(dev->base_addr, MACE_IMR, MACE_IMR_DEFAULT);
+  mace_init(lp, dev->base_addr, dev->dev_addr);
+  mace_write(lp, dev->base_addr, MACE_IMR, MACE_IMR_DEFAULT);
 
   /* Restore the multicast list and enable TX and RX. */
   restore_multicast_list(dev);
@@ -990,70 +994,38 @@ static int mace_close(struct net_device *dev)
   link->open--;
   netif_stop_queue(dev);
   if (link->state & DEV_STALE_CONFIG)
-    mod_timer(&link->release, jiffies + HZ/20);
+	  nmclan_release(link);
 
   return 0;
 } /* mace_close */
 
-static int netdev_ethtool_ioctl (struct net_device *dev, void *useraddr)
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
 {
-	u32 ethcmd;
-
-	/* dev_ioctl() in ../../net/core/dev.c has already checked
-	   capable(CAP_NET_ADMIN), so don't bother with that here.  */
-
-	if (get_user(ethcmd, (u32 *)useraddr))
-		return -EFAULT;
-
-	switch (ethcmd) {
-
-	case ETHTOOL_GDRVINFO: {
-		struct ethtool_drvinfo info = { ETHTOOL_GDRVINFO };
-		strcpy (info.driver, DRV_NAME);
-		strcpy (info.version, DRV_VERSION);
-		sprintf(info.bus_info, "PCMCIA 0x%lx", dev->base_addr);
-		if (copy_to_user (useraddr, &info, sizeof (info)))
-			return -EFAULT;
-		return 0;
-	}
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "PCMCIA 0x%lx", dev->base_addr);
+}
 
 #ifdef PCMCIA_DEBUG
-	/* get message-level */
-	case ETHTOOL_GMSGLVL: {
-		struct ethtool_value edata = {ETHTOOL_GMSGLVL};
-		edata.data = pc_debug;
-		if (copy_to_user(useraddr, &edata, sizeof(edata)))
-			return -EFAULT;
-		return 0;
-	}
-	/* set message-level */
-	case ETHTOOL_SMSGLVL: {
-		struct ethtool_value edata;
-		if (copy_from_user(&edata, useraddr, sizeof(edata)))
-			return -EFAULT;
-		pc_debug = edata.data;
-		return 0;
-	}
-#endif
-
-	default:
-		break;
-	}
-
-	return -EOPNOTSUPP;
-}
-
-static int mace_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+static u32 netdev_get_msglevel(struct net_device *dev)
 {
-	switch (cmd) {
-	case SIOCETHTOOL:
-		return netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
-
-	default:
-		return -EOPNOTSUPP;
-	}
-	return 0;
+	return pc_debug;
 }
+
+static void netdev_set_msglevel(struct net_device *dev, u32 level)
+{
+	pc_debug = level;
+}
+#endif /* PCMCIA_DEBUG */
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+#ifdef PCMCIA_DEBUG
+	.get_msglevel		= netdev_get_msglevel,
+	.set_msglevel		= netdev_set_msglevel,
+#endif /* PCMCIA_DEBUG */
+};
 
 /* ----------------------------------------------------------------------------
 mace_start_xmit
@@ -1456,9 +1428,9 @@ static void update_stats(ioaddr_t ioaddr, struct net_device *dev)
 {
   mace_private *lp = (mace_private *)dev->priv;
 
-  lp->mace_stats.rcvcc += mace_read(ioaddr, MACE_RCVCC);
-  lp->mace_stats.rntpc += mace_read(ioaddr, MACE_RNTPC);
-  lp->mace_stats.mpc += mace_read(ioaddr, MACE_MPC);
+  lp->mace_stats.rcvcc += mace_read(lp, ioaddr, MACE_RCVCC);
+  lp->mace_stats.rntpc += mace_read(lp, ioaddr, MACE_RNTPC);
+  lp->mace_stats.mpc += mace_read(lp, ioaddr, MACE_MPC);
   /* At this point, mace_stats is fully updated for this call.
      We may now update the linux_stats. */
 
@@ -1608,30 +1580,30 @@ static void restore_multicast_list(struct net_device *dev)
 
     DEBUG(1, "Attempt to restore multicast list detected.\n");
 
-    mace_write(ioaddr, MACE_IAC, MACE_IAC_ADDRCHG | MACE_IAC_LOGADDR);
+    mace_write(lp, ioaddr, MACE_IAC, MACE_IAC_ADDRCHG | MACE_IAC_LOGADDR);
     /* Poll ADDRCHG bit */
-    while (mace_read(ioaddr, MACE_IAC) & MACE_IAC_ADDRCHG)
+    while (mace_read(lp, ioaddr, MACE_IAC) & MACE_IAC_ADDRCHG)
       ;
     /* Set LADRF register */
     for (i = 0; i < MACE_LADRF_LEN; i++)
-      mace_write(ioaddr, MACE_LADRF, ladrf[i]);
+      mace_write(lp, ioaddr, MACE_LADRF, ladrf[i]);
 
-    mace_write(ioaddr, MACE_UTR, MACE_UTR_RCVFCSE | MACE_UTR_LOOP_EXTERNAL);
-    mace_write(ioaddr, MACE_MACCC, MACE_MACCC_ENXMT | MACE_MACCC_ENRCV);
+    mace_write(lp, ioaddr, MACE_UTR, MACE_UTR_RCVFCSE | MACE_UTR_LOOP_EXTERNAL);
+    mace_write(lp, ioaddr, MACE_MACCC, MACE_MACCC_ENXMT | MACE_MACCC_ENRCV);
 
   } else if (num_addrs < 0) {
 
     /* Promiscuous mode: receive all packets */
-    mace_write(ioaddr, MACE_UTR, MACE_UTR_LOOP_EXTERNAL);
-    mace_write(ioaddr, MACE_MACCC,
+    mace_write(lp, ioaddr, MACE_UTR, MACE_UTR_LOOP_EXTERNAL);
+    mace_write(lp, ioaddr, MACE_MACCC,
       MACE_MACCC_PROM | MACE_MACCC_ENXMT | MACE_MACCC_ENRCV
     );
 
   } else {
 
     /* Normal mode */
-    mace_write(ioaddr, MACE_UTR, MACE_UTR_LOOP_EXTERNAL);
-    mace_write(ioaddr, MACE_MACCC, MACE_MACCC_ENXMT | MACE_MACCC_ENRCV);
+    mace_write(lp, ioaddr, MACE_UTR, MACE_UTR_LOOP_EXTERNAL);
+    mace_write(lp, ioaddr, MACE_MACCC, MACE_MACCC_ENXMT | MACE_MACCC_ENRCV);
 
   }
 } /* restore_multicast_list */
@@ -1691,20 +1663,21 @@ static void set_multicast_list(struct net_device *dev)
 static void restore_multicast_list(struct net_device *dev)
 {
   ioaddr_t ioaddr = dev->base_addr;
+  mace_private *lp = (mace_private *)dev->priv;
 
   DEBUG(2, "%s: restoring Rx mode to %d addresses.\n", dev->name,
 	((mace_private *)(dev->priv))->multicast_num_addrs);
 
   if (dev->flags & IFF_PROMISC) {
     /* Promiscuous mode: receive all packets */
-    mace_write(ioaddr, MACE_UTR, MACE_UTR_LOOP_EXTERNAL);
-    mace_write(ioaddr, MACE_MACCC,
+    mace_write(lp,ioaddr, MACE_UTR, MACE_UTR_LOOP_EXTERNAL);
+    mace_write(lp, ioaddr, MACE_MACCC,
       MACE_MACCC_PROM | MACE_MACCC_ENXMT | MACE_MACCC_ENRCV
     );
   } else {
     /* Normal mode */
-    mace_write(ioaddr, MACE_UTR, MACE_UTR_LOOP_EXTERNAL);
-    mace_write(ioaddr, MACE_MACCC, MACE_MACCC_ENXMT | MACE_MACCC_ENRCV);
+    mace_write(lp, ioaddr, MACE_UTR, MACE_UTR_LOOP_EXTERNAL);
+    mace_write(lp, ioaddr, MACE_MACCC, MACE_MACCC_ENXMT | MACE_MACCC_ENRCV);
   }
 } /* restore_multicast_list */
 

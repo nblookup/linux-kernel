@@ -23,7 +23,7 @@
 #include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
@@ -140,7 +140,7 @@ static struct Scsi_Host *default_instance;
  
 static int sun3scsi_detect(Scsi_Host_Template * tpnt)
 {
-	unsigned long ioaddr, irq;
+	unsigned long ioaddr, irq = 0;
 	static int called = 0;
 	struct Scsi_Host *instance;
 	int i;
@@ -277,17 +277,15 @@ static int sun3scsi_detect(Scsi_Host_Template * tpnt)
 	return 1;
 }
 
-#ifdef MODULE
 int sun3scsi_release (struct Scsi_Host *shpnt)
 {
 	if (shpnt->irq != SCSI_IRQ_NONE)
 		free_irq (shpnt->irq, NULL);
 
-	iounmap(sun3_scsi_regp);
+	iounmap((void *)sun3_scsi_regp);
 
 	return 0;
 }
-#endif
 
 #ifdef RESET_BOOT
 /*

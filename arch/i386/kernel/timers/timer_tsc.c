@@ -19,9 +19,18 @@
 #include "io_ports.h"
 #include "mach_timer.h"
 
+#include <asm/hpet.h>
+
+#ifdef CONFIG_HPET_TIMER
+static unsigned long hpet_usec_quotient;
+static unsigned long hpet_last;
+struct timer_opts timer_tsc;
+#endif
+
 int tsc_disable __initdata = 0;
 
 extern spinlock_t i8253_lock;
+extern volatile unsigned long jiffies;
 
 static int use_tsc;
 /* Number of usecs that the last interrupt was delayed */
@@ -30,7 +39,7 @@ static int delay_at_last_interrupt;
 static unsigned long last_tsc_low; /* lsb 32 bits of Time Stamp Counter */
 static unsigned long last_tsc_high; /* msb 32 bits of Time Stamp Counter */
 static unsigned long long monotonic_base;
-static rwlock_t monotonic_lock = RW_LOCK_UNLOCKED;
+static seqlock_t monotonic_lock = SEQLOCK_UNLOCKED;
 
 /* convert from cycles(64bits) => nanoseconds (64bits)
  *  basic equation:
@@ -102,12 +111,14 @@ static unsigned long get_offset_tsc(void)
 static unsigned long long monotonic_clock_tsc(void)
 {
 	unsigned long long last_offset, this_offset, base;
+	unsigned seq;
 	
 	/* atomically read monotonic base & last_offset */
-	read_lock_irq(&monotonic_lock);
-	last_offset = ((unsigned long long)last_tsc_high<<32)|last_tsc_low;
-	base = monotonic_base;
-	read_unlock_irq(&monotonic_lock);
+	do {
+		seq = read_seqbegin(&monotonic_lock);
+		last_offset = ((unsigned long long)last_tsc_high<<32)|last_tsc_low;
+		base = monotonic_base;
+	} while (read_seqretry(&monotonic_lock, seq));
 
 	/* Read the Time Stamp Counter */
 	rdtscll(this_offset);
@@ -115,6 +126,30 @@ static unsigned long long monotonic_clock_tsc(void)
 	/* return the value in ns */
 	return base + cycles_2_ns(this_offset - last_offset);
 }
+
+/*
+ * Scheduler clock - returns current time in nanosec units.
+ */
+unsigned long long sched_clock(void)
+{
+	unsigned long long this_offset;
+
+	/*
+	 * In the NUMA case we dont use the TSC as they are not
+	 * synchronized across all CPUs.
+	 */
+#ifndef CONFIG_NUMA
+	if (!use_tsc)
+#endif
+		return (unsigned long long)jiffies * (1000000000 / HZ);
+
+	/* Read the Time Stamp Counter */
+	rdtscll(this_offset);
+
+	/* return the value in ns */
+	return cycles_2_ns(this_offset);
+}
+
 
 static void mark_offset_tsc(void)
 {
@@ -126,7 +161,7 @@ static void mark_offset_tsc(void)
 	unsigned long long this_offset, last_offset;
 	static int lost_count = 0;
 	
-	write_lock(&monotonic_lock);
+	write_seqlock(&monotonic_lock);
 	last_offset = ((unsigned long long)last_tsc_high<<32)|last_tsc_low;
 	/*
 	 * It is important that these two operations happen almost at
@@ -182,9 +217,9 @@ static void mark_offset_tsc(void)
 	if (lost >= 2) {
 		jiffies += lost-1;
 
-		/* sanity check to ensure we're not always loosing ticks */
+		/* sanity check to ensure we're not always losing ticks */
 		if (lost_count++ > 100) {
-			printk(KERN_WARNING "Loosing too many ticks!\n");
+			printk(KERN_WARNING "Losing too many ticks!\n");
 			printk(KERN_WARNING "TSC cannot be used as a timesource."
 					" (Are you running with SpeedStep?)\n");
 			printk(KERN_WARNING "Falling back to a sane timesource.\n");
@@ -195,7 +230,7 @@ static void mark_offset_tsc(void)
 	/* update the monotonic base value */
 	this_offset = ((unsigned long long)last_tsc_high<<32)|last_tsc_low;
 	monotonic_base += cycles_2_ns(this_offset - last_offset);
-	write_unlock(&monotonic_lock);
+	write_sequnlock(&monotonic_lock);
 
 	/* calculate delay_at_last_interrupt */
 	count = ((LATCH-1) - count) * TICK_SIZE;
@@ -221,67 +256,55 @@ static void delay_tsc(unsigned long loops)
 	} while ((now-bclock) < loops);
 }
 
-/* ------ Calibrate the TSC ------- 
- * Return 2^32 * (1 / (TSC clocks per usec)) for do_fast_gettimeoffset().
- * Too much 64-bit arithmetic here to do this cleanly in C, and for
- * accuracy's sake we want to keep the overhead on the CTC speaker (channel 2)
- * output busy loop as low as possible. We avoid reading the CTC registers
- * directly because of the awkward 8-bit access mechanism of the 82C54
- * device.
- */
-
-#define CALIBRATE_TIME	(5 * 1000020/HZ)
-
-unsigned long __init calibrate_tsc(void)
+#ifdef CONFIG_HPET_TIMER
+static void mark_offset_tsc_hpet(void)
 {
-	mach_prepare_counter();
+	unsigned long long this_offset, last_offset;
+ 	unsigned long offset, temp, hpet_current;
 
-	{
-		unsigned long startlow, starthigh;
-		unsigned long endlow, endhigh;
-		unsigned long count;
-
-		rdtsc(startlow,starthigh);
-		mach_countup(&count);
-		rdtsc(endlow,endhigh);
-
-		last_tsc_low = endlow;
-
-		/* Error: ECTCNEVERSET */
-		if (count <= 1)
-			goto bad_ctc;
-
-		/* 64-bit subtract - gcc just messes up with long longs */
-		__asm__("subl %2,%0\n\t"
-			"sbbl %3,%1"
-			:"=a" (endlow), "=d" (endhigh)
-			:"g" (startlow), "g" (starthigh),
-			 "0" (endlow), "1" (endhigh));
-
-		/* Error: ECPUTOOFAST */
-		if (endhigh)
-			goto bad_ctc;
-
-		/* Error: ECPUTOOSLOW */
-		if (endlow <= CALIBRATE_TIME)
-			goto bad_ctc;
-
-		__asm__("divl %2"
-			:"=a" (endlow), "=d" (endhigh)
-			:"r" (endlow), "0" (0), "1" (CALIBRATE_TIME));
-
-		return endlow;
-	}
-
+	write_seqlock(&monotonic_lock);
+	last_offset = ((unsigned long long)last_tsc_high<<32)|last_tsc_low;
 	/*
-	 * The CTC wasn't reliable: we got a hit on the very first read,
-	 * or the CPU was so fast/slow that the quotient wouldn't fit in
-	 * 32 bits..
+	 * It is important that these two operations happen almost at
+	 * the same time. We do the RDTSC stuff first, since it's
+	 * faster. To avoid any inconsistencies, we need interrupts
+	 * disabled locally.
 	 */
-bad_ctc:
-	return 0;
-}
+	/*
+	 * Interrupts are just disabled locally since the timer irq
+	 * has the SA_INTERRUPT flag set. -arca
+	 */
+	/* read Pentium cycle counter */
 
+	hpet_current = hpet_readl(HPET_COUNTER);
+	rdtsc(last_tsc_low, last_tsc_high);
+
+	/* lost tick compensation */
+	offset = hpet_readl(HPET_T0_CMP) - hpet_tick;
+	if (unlikely(((offset - hpet_last) > hpet_tick) && (hpet_last != 0))) {
+		int lost_ticks = (offset - hpet_last) / hpet_tick;
+		jiffies += lost_ticks;
+	}
+	hpet_last = hpet_current;
+
+	/* update the monotonic base value */
+	this_offset = ((unsigned long long)last_tsc_high<<32)|last_tsc_low;
+	monotonic_base += cycles_2_ns(this_offset - last_offset);
+	write_sequnlock(&monotonic_lock);
+
+	/* calculate delay_at_last_interrupt */
+	/*
+	 * Time offset = (hpet delta) * ( usecs per HPET clock )
+	 *             = (hpet delta) * ( usecs per tick / HPET clocks per tick)
+	 *             = (hpet delta) * ( hpet_usec_quotient ) / (2^32)
+	 * Where,
+	 * hpet_usec_quotient = (2^32 * usecs per tick)/HPET clocks per tick
+	 */
+	delay_at_last_interrupt = hpet_current - offset;
+	ASM_MUL64_REG(temp, delay_at_last_interrupt,
+			hpet_usec_quotient, delay_at_last_interrupt);
+}
+#endif
 
 #ifdef CONFIG_CPU_FREQ
 static unsigned int  ref_freq = 0;
@@ -298,7 +321,7 @@ time_cpufreq_notifier(struct notifier_block *nb, unsigned long val,
 {
 	struct cpufreq_freqs *freq = data;
 
-	write_seqlock(&xtime_lock);
+	write_seqlock_irq(&xtime_lock);
 	if (!ref_freq) {
 		ref_freq = freq->old;
 		loops_per_jiffy_ref = cpu_data[freq->cpu].loops_per_jiffy;
@@ -315,10 +338,11 @@ time_cpufreq_notifier(struct notifier_block *nb, unsigned long val,
 		if (use_tsc) {
 			fast_gettimeoffset_quotient = cpufreq_scale(fast_gettimeoffset_ref, freq->new, ref_freq);
 			cpu_khz = cpufreq_scale(cpu_khz_ref, ref_freq, freq->new);
+			set_cyc2ns_scale(cpu_khz/1000);
 		}
 #endif
 	}
-	write_sequnlock(&xtime_lock);
+	write_sequnlock_irq(&xtime_lock);
 
 	return 0;
 }
@@ -333,8 +357,16 @@ static int __init init_tsc(char* override)
 {
 
 	/* check clock override */
-	if (override[0] && strncmp(override,"tsc",3))
+	if (override[0] && strncmp(override,"tsc",3)) {
+#ifdef CONFIG_HPET_TIMER
+		if (is_hpet_enabled()) {
+			printk(KERN_ERR "Warning: clock= override failed. Defaulting to tsc\n");
+		} else
+#endif
+		{
 			return -ENODEV;
+		}
+	}
 
 	/*
 	 * If we have APM enabled or the CPU clock speed is variable
@@ -368,7 +400,29 @@ static int __init init_tsc(char* override)
 	count2 = LATCH; /* initialize counter for mark_offset_tsc() */
 
 	if (cpu_has_tsc) {
-		unsigned long tsc_quotient = calibrate_tsc();
+		unsigned long tsc_quotient;
+#ifdef CONFIG_HPET_TIMER
+		if (is_hpet_enabled()){
+			unsigned long result, remain;
+			printk("Using TSC for gettimeofday\n");
+			tsc_quotient = calibrate_tsc_hpet(NULL);
+			timer_tsc.mark_offset = &mark_offset_tsc_hpet;
+			/*
+			 * Math to calculate hpet to usec multiplier
+			 * Look for the comments at get_offset_tsc_hpet()
+			 */
+			ASM_DIV64_REG(result, remain, hpet_tick,
+					0, KERNEL_TICK_USEC);
+			if (remain > (hpet_tick >> 1))
+				result++; /* rounding the result */
+
+			hpet_usec_quotient = result;
+		} else
+#endif
+		{
+			tsc_quotient = calibrate_tsc();
+		}
+
 		if (tsc_quotient) {
 			fast_gettimeoffset_quotient = tsc_quotient;
 			use_tsc = 1;

@@ -103,7 +103,6 @@
 
 #include <asm/io.h>
 
-#include "ide_modes.h"
 #include "piix.h"
 
 static int no_piix_dma;
@@ -589,13 +588,15 @@ try_dma_modes:
 		} else {
 			goto fast_ata_pio;
 		}
+		return hwif->ide_dma_on(drive);
 	} else if ((id->capability & 8) || (id->field_valid & 2)) {
 fast_ata_pio:
 no_dma_set:
 		hwif->tuneproc(drive, 255);
 		return hwif->ide_dma_off_quietly(drive);
 	}
-	return hwif->ide_dma_on(drive);
+	/* IORDY not supported */
+	return 0;
 }
 
 /**
@@ -710,21 +711,6 @@ static void __init init_hwif_piix (ide_hwif_t *hwif)
 	hwif->drives[0].autodma = hwif->autodma;
 }
 
-/**
- *	init_dma_piix		-	set up the PIIX DMA
- *	@hwif: IDE interface
- *	@dmabase: DMA PCI base
- *
- *	Set up the DMA on the PIIX controller, providing a DMA base is
- *	available. The PIIX follows the normal specs so we do nothing
- *	magical here.
- */
-
-static void __init init_dma_piix (ide_hwif_t *hwif, unsigned long dmabase)
-{
-	ide_setup_dma(hwif, dmabase, 8);
-}
-
 extern void ide_setup_pci_device(struct pci_dev *, ide_pci_device_t *);
 
 /**
@@ -792,7 +778,7 @@ static void __init piix_check_450nx(void)
 		printk(KERN_WARNING "piix: A BIOS update may resolve this.\n");
 }		
 
-static struct pci_device_id piix_pci_tbl[] __devinitdata = {
+static struct pci_device_id piix_pci_tbl[] = {
 	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371FB_0, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371FB_1, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1},
 	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371MX,   PCI_ANY_ID, PCI_ANY_ID, 0, 0, 2},
@@ -811,7 +797,9 @@ static struct pci_device_id piix_pci_tbl[] __devinitdata = {
 	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801EB_11,PCI_ANY_ID, PCI_ANY_ID, 0, 0, 15},
 	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801E_11, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 16},
 	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801DB_10,PCI_ANY_ID, PCI_ANY_ID, 0, 0, 17},
+#ifndef CONFIG_SCSI_SATA
  	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801EB_1, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 18},
+#endif /* !CONFIG_SCSI_SATA */
 	{ 0, },
 };
 

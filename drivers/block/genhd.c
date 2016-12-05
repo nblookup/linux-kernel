@@ -7,7 +7,7 @@
 #include <linux/fs.h>
 #include <linux/genhd.h>
 #include <linux/kernel.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
 #include <linux/seq_file.h>
@@ -114,6 +114,8 @@ out:
 	return ret;
 }
 
+EXPORT_SYMBOL(register_blkdev);
+
 /* todo: make void - error printk here */
 int unregister_blkdev(unsigned int major, const char *name)
 {
@@ -141,6 +143,8 @@ int unregister_blkdev(unsigned int major, const char *name)
 	return ret;
 }
 
+EXPORT_SYMBOL(unregister_blkdev);
+
 static struct kobj_map *bdev_map;
 
 /*
@@ -155,12 +159,13 @@ void blk_register_region(dev_t dev, unsigned long range, struct module *module,
 	kobj_map(bdev_map, dev, range, module, probe, lock, data);
 }
 
+EXPORT_SYMBOL(blk_register_region);
+
 void blk_unregister_region(dev_t dev, unsigned long range)
 {
 	kobj_unmap(bdev_map, dev, range);
 }
 
-EXPORT_SYMBOL(blk_register_region);
 EXPORT_SYMBOL(blk_unregister_region);
 
 static struct kobject *exact_match(dev_t dev, int *part, void *data)
@@ -250,7 +255,7 @@ static int show_partition(struct seq_file *part, void *v)
 {
 	struct gendisk *sgp = v;
 	int n;
-	char buf[64];
+	char buf[BDEVNAME_SIZE];
 
 	if (&sgp->kobj.entry == block_subsys.kset.list.next)
 		seq_puts(part, "major minor  #blocks  name\n\n");
@@ -336,7 +341,7 @@ static struct sysfs_ops disk_sysfs_ops = {
 static ssize_t disk_dev_read(struct gendisk * disk, char *page)
 {
 	dev_t base = MKDEV(disk->major, disk->first_minor); 
-	return sprintf(page, "%04x\n", (unsigned)base);
+	return print_dev_t(page, base);
 }
 static ssize_t disk_range_read(struct gendisk * disk, char *page)
 {
@@ -372,7 +377,7 @@ static ssize_t disk_stats_read(struct gendisk * disk, char *page)
 		disk_stat_read(disk, write_merges),
 		(unsigned long long)disk_stat_read(disk, write_sectors),
 		jiffies_to_msec(disk_stat_read(disk, write_ticks)),
-		disk_stat_read(disk, in_flight), 
+		disk->in_flight,
 		jiffies_to_msec(disk_stat_read(disk, io_ticks)),
 		jiffies_to_msec(disk_stat_read(disk, time_in_queue)));
 }
@@ -472,7 +477,7 @@ static void diskstats_stop(struct seq_file *part, void *v)
 static int diskstats_show(struct seq_file *s, void *v)
 {
 	struct gendisk *gp = v;
-	char buf[64];
+	char buf[BDEVNAME_SIZE];
 	int n = 0;
 
 	/*
@@ -492,7 +497,7 @@ static int diskstats_show(struct seq_file *s, void *v)
 		disk_stat_read(gp, writes), disk_stat_read(gp, write_merges),
 		(unsigned long long)disk_stat_read(gp, write_sectors),
 		jiffies_to_msec(disk_stat_read(gp, write_ticks)),
-		disk_stat_read(gp, in_flight),
+		gp->in_flight,
 		jiffies_to_msec(disk_stat_read(gp, io_ticks)),
 		jiffies_to_msec(disk_stat_read(gp, time_in_queue)));
 
@@ -545,6 +550,8 @@ struct gendisk *alloc_disk(int minors)
 	return disk;
 }
 
+EXPORT_SYMBOL(alloc_disk);
+
 struct kobject *get_disk(struct gendisk *disk)
 {
 	struct module *owner;
@@ -564,26 +571,25 @@ struct kobject *get_disk(struct gendisk *disk)
 
 }
 
+EXPORT_SYMBOL(get_disk);
+
 void put_disk(struct gendisk *disk)
 {
 	if (disk)
 		kobject_put(&disk->kobj);
 }
 
-EXPORT_SYMBOL(alloc_disk);
-EXPORT_SYMBOL(get_disk);
 EXPORT_SYMBOL(put_disk);
 
 void set_device_ro(struct block_device *bdev, int flag)
 {
-	struct gendisk *disk = bdev->bd_disk;
-	if (bdev->bd_contains != bdev) {
-		int part = bdev->bd_dev - MKDEV(disk->major, disk->first_minor);
-		struct hd_struct *p = disk->part[part-1];
-		if (p) p->policy = flag;
-	} else
-		disk->policy = flag;
+	if (bdev->bd_contains != bdev)
+		bdev->bd_part->policy = flag;
+	else
+		bdev->bd_disk->policy = flag;
 }
+
+EXPORT_SYMBOL(set_device_ro);
 
 void set_disk_ro(struct gendisk *disk, int flag)
 {
@@ -593,20 +599,19 @@ void set_disk_ro(struct gendisk *disk, int flag)
 		if (disk->part[i]) disk->part[i]->policy = flag;
 }
 
+EXPORT_SYMBOL(set_disk_ro);
+
 int bdev_read_only(struct block_device *bdev)
 {
-	struct gendisk *disk;
 	if (!bdev)
 		return 0;
-	disk = bdev->bd_disk;
-	if (bdev->bd_contains != bdev) {
-		int part = bdev->bd_dev - MKDEV(disk->major, disk->first_minor);
-		struct hd_struct *p = disk->part[part-1];
-		if (p) return p->policy;
-		return 0;
-	} else
-		return disk->policy;
+	else if (bdev->bd_contains != bdev)
+		return bdev->bd_part->policy;
+	else
+		return bdev->bd_disk->policy;
 }
+
+EXPORT_SYMBOL(bdev_read_only);
 
 int invalidate_partition(struct gendisk *disk, int index)
 {
@@ -618,7 +623,4 @@ int invalidate_partition(struct gendisk *disk, int index)
 	return res;
 }
 
-EXPORT_SYMBOL(bdev_read_only);
-EXPORT_SYMBOL(set_device_ro);
-EXPORT_SYMBOL(set_disk_ro);
 EXPORT_SYMBOL(invalidate_partition);

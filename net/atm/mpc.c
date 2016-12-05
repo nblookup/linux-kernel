@@ -224,7 +224,7 @@ int atm_mpoa_delete_qos(struct atm_mpoa_qos *entry)
 	return 0;
 }
 
-void atm_mpoa_disp_qos(char *page, int *len)
+void atm_mpoa_disp_qos(char *page, ssize_t *len)
 {
 
 	unsigned char *ip;
@@ -252,11 +252,11 @@ void atm_mpoa_disp_qos(char *page, int *len)
 static struct net_device *find_lec_by_itfnum(int itf)
 {
 	struct net_device *dev;
-	if (!try_atm_lane_ops())
-		return NULL;
+	char name[IFNAMSIZ];
 
-	dev = atm_lane_ops->get_lec(itf);
-	module_put(atm_lane_ops->owner);
+	sprintf(name, "lec%d", itf);
+	dev = dev_get_by_name(name);
+	
 	return dev;
 }
 
@@ -669,7 +669,7 @@ static void mpc_push(struct atm_vcc *vcc, struct sk_buff *skb)
 		dprintk("mpoa: (%s) mpc_push: control packet arrived\n", dev->name);
 		/* Pass control packets to daemon */
 		skb_queue_tail(&vcc->sk->sk_receive_queue, skb);
-		wake_up(&vcc->sleep);
+		vcc->sk->sk_data_ready(vcc->sk, skb->len);
 		return;
 	}
 
@@ -947,7 +947,7 @@ int msg_to_mpoad(struct k_message *mesg, struct mpoa_client *mpc)
 	memcpy(skb->data, mesg, sizeof(struct k_message));
 	atm_force_charge(mpc->mpoad_vcc, skb->truesize);
 	skb_queue_tail(&mpc->mpoad_vcc->sk->sk_receive_queue, skb);
-	wake_up(&mpc->mpoad_vcc->sleep);
+	mpc->mpoad_vcc->sk->sk_data_ready(mpc->mpoad_vcc->sk, skb->len);
 
 	return 0;
 }
@@ -1226,7 +1226,7 @@ static void purge_egress_shortcut(struct atm_vcc *vcc, eg_cache_entry *entry)
 
 	atm_force_charge(vcc, skb->truesize);
 	skb_queue_tail(&vcc->sk->sk_receive_queue, skb);
-	wake_up(&vcc->sleep);
+	vcc->sk->sk_data_ready(vcc->sk, skb->len);
 	dprintk("mpoa: purge_egress_shortcut: exiting:\n");
 
 	return;
@@ -1379,8 +1379,8 @@ static void mpc_timer_refresh()
 static void mpc_cache_check( unsigned long checking_time  )
 {
 	struct mpoa_client *mpc = mpcs;
-	static unsigned long previous_resolving_check_time = 0;
-	static unsigned long previous_refresh_time = 0;
+	static unsigned long previous_resolving_check_time;
+	static unsigned long previous_refresh_time;
 	
 	while( mpc != NULL ){
 		mpc->in_ops->clear_count(mpc);
@@ -1400,15 +1400,41 @@ static void mpc_cache_check( unsigned long checking_time  )
 	return;
 }
 
-static struct atm_mpoa_ops __atm_mpoa_ops = {
-	.mpoad_attach =	atm_mpoa_mpoad_attach,
-	.vcc_attach =	atm_mpoa_vcc_attach,
-	.owner = THIS_MODULE
+static int atm_mpoa_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
+{
+	int err = 0;
+	struct atm_vcc *vcc = ATM_SD(sock);
+
+	if (cmd != ATMMPC_CTRL && cmd != ATMMPC_DATA)
+		return -ENOIOCTLCMD;
+
+	if (!capable(CAP_NET_ADMIN))
+		return -EPERM;
+
+	switch (cmd) {
+		case ATMMPC_CTRL:
+			err = atm_mpoa_mpoad_attach(vcc, (int)arg);
+			if (err >= 0)
+				sock->state = SS_CONNECTED;
+			break;
+		case ATMMPC_DATA:
+			err = atm_mpoa_vcc_attach(vcc, arg);
+			break;
+		default:
+			break;
+	}
+	return err;
+}
+
+
+static struct atm_ioctl atm_ioctl_ops = {
+	.owner	= THIS_MODULE,
+	.ioctl	= atm_mpoa_ioctl,
 };
 
 static __init int atm_mpoa_init(void)
 {
-	atm_mpoa_ops_set(&__atm_mpoa_ops);
+	register_atm_ioctl(&atm_ioctl_ops);
 
 #ifdef CONFIG_PROC_FS
 	if (mpc_proc_init() != 0)
@@ -1434,7 +1460,7 @@ void __exit atm_mpoa_cleanup(void)
 
 	del_timer(&mpc_timer);
 	unregister_netdevice_notifier(&mpoa_notifier);
-	atm_mpoa_ops_set(NULL);
+	deregister_atm_ioctl(&atm_ioctl_ops);
 
 	mpc = mpcs;
 	mpcs = NULL;

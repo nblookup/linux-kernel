@@ -32,7 +32,6 @@
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
-#include <linux/version.h>
 #include <linux/mm.h>
 #include <linux/ioport.h>
 #include <linux/errno.h>
@@ -189,7 +188,6 @@ static struct mxser_mstatus GMStatus[MAX_PORTS];
 
 static int verbose = 0;
 static int ttymajor = MOXAMAJOR;
-#ifdef MODULE
 /* Variables for insmod */
 static int baseaddr[] 	= 	{0, 0, 0, 0};
 static int type[]	=	{0, 0, 0, 0};
@@ -204,8 +202,6 @@ MODULE_PARM(numports, "1-4i");
 MODULE_PARM(ttymajor, "i");
 MODULE_PARM(verbose, "i");
 
-#endif				//MODULE
-
 static struct tty_driver *moxaDriver;
 static struct moxa_str moxaChannels[MAX_PORTS];
 static unsigned char *moxaXmitBuff;
@@ -215,11 +211,6 @@ static int moxaEmptyTimer_on[MAX_PORTS];
 static struct timer_list moxaEmptyTimer[MAX_PORTS];
 static struct semaphore moxaBuffSem;
 
-int moxa_init(void);
-#ifdef MODULE
-int init_module(void);
-void cleanup_module(void);
-#endif
 /*
  * static functions:
  */
@@ -281,42 +272,6 @@ static int moxa_get_serial_info(struct moxa_str *, struct serial_struct *);
 static int moxa_set_serial_info(struct moxa_str *, struct serial_struct *);
 static void MoxaSetFifo(int port, int enable);
 
-#ifdef MODULE
-int init_module(void)
-{
-	int ret;
-
-	if (verbose)
-		printk("Loading module moxa ...\n");
-	ret = moxa_init();
-	if (verbose)
-		printk("Done\n");
-	return (ret);
-}
-
-void cleanup_module(void)
-{
-	int i;
-
-	if (verbose)
-		printk("Unloading module moxa ...\n");
-
-	if (moxaTimer_on)
-		del_timer(&moxaTimer);
-
-	for (i = 0; i < MAX_PORTS; i++)
-		if (moxaEmptyTimer_on[i])
-			del_timer(&moxaEmptyTimer[i]);
-
-	if (tty_unregister_driver(moxaDriver))
-		printk("Couldn't unregister MOXA Intellio family serial driver\n");
-	put_tty_driver(moxaDriver);
-	if (verbose)
-		printk("Done\n");
-
-}
-#endif
-
 static struct tty_operations moxa_ops = {
 	.open = moxa_open,
 	.close = moxa_close,
@@ -335,7 +290,7 @@ static struct tty_operations moxa_ops = {
 	.hangup = moxa_hangup,
 };
 
-int moxa_init(void)
+static int __init moxa_init(void)
 {
 	int i, n, numBoards;
 	struct moxa_str *ch;
@@ -481,6 +436,31 @@ int moxa_init(void)
 
 	return (0);
 }
+
+static void __exit moxa_exit(void)
+{
+	int i;
+
+	if (verbose)
+		printk("Unloading module moxa ...\n");
+
+	if (moxaTimer_on)
+		del_timer(&moxaTimer);
+
+	for (i = 0; i < MAX_PORTS; i++)
+		if (moxaEmptyTimer_on[i])
+			del_timer(&moxaEmptyTimer[i]);
+
+	if (tty_unregister_driver(moxaDriver))
+		printk("Couldn't unregister MOXA Intellio family serial driver\n");
+	put_tty_driver(moxaDriver);
+	if (verbose)
+		printk("Done\n");
+
+}
+
+module_init(moxa_init);
+module_exit(moxa_exit);
 
 static int moxa_get_PCI_conf(struct pci_dev *p, int board_type, moxa_board_conf * board)
 {

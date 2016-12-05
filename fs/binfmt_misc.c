@@ -62,7 +62,7 @@ static int entry_count;
  */
 static Node *check_file(struct linux_binprm *bprm)
 {
-	char *p = strrchr(bprm->filename, '.');
+	char *p = strrchr(bprm->interp, '.');
 	struct list_head *l;
 
 	list_for_each(l, &entries) {
@@ -127,13 +127,13 @@ static int load_misc_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 	if (!(fmt->flags & MISC_FMT_PRESERVE_ARGV0)) {
 		remove_arg_zero(bprm);
 	}
-	retval = copy_strings_kernel(1, &bprm->filename, bprm);
+	retval = copy_strings_kernel(1, &bprm->interp, bprm);
 	if (retval < 0) goto _ret; 
 	bprm->argc++;
 	retval = copy_strings_kernel(1, &iname_addr, bprm);
 	if (retval < 0) goto _ret; 
 	bprm->argc++;
-	bprm->filename = iname;	/* for binfmt_script */
+	bprm->interp = iname;	/* for binfmt_script */
 
 	file = open_exec(iname);
 	retval = PTR_ERR(file);
@@ -529,8 +529,8 @@ static ssize_t bm_register_write(struct file *file, const char *buffer,
 	inode->u.generic_ip = e;
 	inode->i_fop = &bm_entry_operations;
 
-	write_lock(&entries_lock);
 	d_instantiate(dentry, inode);
+	write_lock(&entries_lock);
 	list_add(&e->list, &entries);
 	write_unlock(&entries_lock);
 

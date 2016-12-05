@@ -41,7 +41,7 @@
 #include <linux/vmalloc.h>
 #include <linux/moduleparam.h>
 
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include "scsi.h"
 #include "hosts.h"
 #include <scsi/scsicam.h>
@@ -687,7 +687,7 @@ static int resp_mode_sense(unsigned char * cmd, int target,
 	pcontrol = (cmd[2] & 0xc0) >> 6;
 	pcode = cmd[2] & 0x3f;
 	msense_6 = (MODE_SENSE == cmd[0]);
-	alloc_len = msense_6 ? cmd[4] : ((cmd[7] << 8) | cmd[6]);
+	alloc_len = msense_6 ? cmd[4] : ((cmd[7] << 8) | cmd[8]);
 	/* printk(KERN_INFO "msense: dbd=%d pcontrol=%d pcode=%d "
 		"msense_6=%d alloc_len=%d\n", dbd, pcontrol, pcode, "
 		"msense_6, alloc_len); */
@@ -861,7 +861,7 @@ static int resp_report_luns(unsigned char * cmd, unsigned char * buff,
 	unsigned int alloc_len; 
 	int lun_cnt, i, upper;
 	int select_report = (int)cmd[2];
-	ScsiLun *one_lun;
+	struct scsi_lun *one_lun;
 
 	alloc_len = cmd[9] + (cmd[8] << 8) + (cmd[7] << 16) + (cmd[6] << 24);
 	if ((alloc_len < 16) || (select_report > 2)) {
@@ -873,11 +873,11 @@ static int resp_report_luns(unsigned char * cmd, unsigned char * buff,
 			      (lun 0 to lun 16383) */
 		memset(buff, 0, bufflen);
 		lun_cnt = scsi_debug_max_luns;
-		buff[2] = ((sizeof(ScsiLun) * lun_cnt) >> 8) & 0xff;
-		buff[3] = (sizeof(ScsiLun) * lun_cnt) & 0xff;
-		lun_cnt = min((int)((bufflen - 8) / sizeof(ScsiLun)), 
+		buff[2] = ((sizeof(struct scsi_lun) * lun_cnt) >> 8) & 0xff;
+		buff[3] = (sizeof(struct scsi_lun) * lun_cnt) & 0xff;
+		lun_cnt = min((int)((bufflen - 8) / sizeof(struct scsi_lun)), 
 			      lun_cnt);
-		one_lun = (ScsiLun*) &buff[8];
+		one_lun = (struct scsi_lun *) &buff[8];
 		for (i = 0; i < lun_cnt; i++) {
 			upper = (i >> 8) & 0x3f;
 			if (upper)
@@ -1566,7 +1566,6 @@ device_initcall(scsi_debug_init);
 module_exit(scsi_debug_exit);
 
 static struct device pseudo_primary = {
-	.name		= "Host/Pseudo Bridge",
 	.bus_id		= "pseudo_0",
 };
 
@@ -1615,7 +1614,7 @@ static int sdebug_add_adapter()
                         printk(KERN_ERR "%s: out of memory at line %d\n",
                                __FUNCTION__, __LINE__);
                         error = -ENOMEM;
-			goto clean1;
+			goto clean;
                 }
                 memset(sdbg_devinfo, 0, sizeof(*sdbg_devinfo));
                 sdbg_devinfo->sdbg_host = sdbg_host;
@@ -1630,18 +1629,17 @@ static int sdebug_add_adapter()
         sdbg_host->dev.bus = &pseudo_lld_bus;
         sdbg_host->dev.parent = &pseudo_primary;
         sdbg_host->dev.release = &sdebug_release_adapter;
-        sprintf(sdbg_host->dev.name, "scsi debug adapter");
         sprintf(sdbg_host->dev.bus_id, "adapter%d", scsi_debug_add_host);
 
         error = device_register(&sdbg_host->dev);
 
         if (error)
-		goto clean2;
+		goto clean;
 
 	++scsi_debug_add_host;
         return error;
 
-clean2:
+clean:
 	list_for_each_safe(lh, lh_sf, &sdbg_host->dev_info_list) {
 		sdbg_devinfo = list_entry(lh, struct sdebug_dev_info,
 					  dev_list);
@@ -1649,7 +1647,6 @@ clean2:
 		kfree(sdbg_devinfo);
 	}
 
-clean1:
 	kfree(sdbg_host);
         return error;
 }
@@ -1701,7 +1698,8 @@ static int sdebug_driver_probe(struct device * dev)
                 printk(KERN_ERR "%s: scsi_add_host failed\n", __FUNCTION__);
                 error = -ENODEV;
 		scsi_host_put(hpnt);
-        }
+        } else
+		scsi_scan_host(hpnt);
 
 
         return error;
@@ -1721,10 +1719,7 @@ static int sdebug_driver_remove(struct device * dev)
 		return -ENODEV;
 	}
 
-        if (scsi_remove_host(sdbg_host->shost)) {
-                printk(KERN_ERR "%s: scsi_remove_host failed\n", __FUNCTION__);
-                return -EBUSY;
-        }
+        scsi_remove_host(sdbg_host->shost);
 
         list_for_each_safe(lh, lh_sf, &sdbg_host->dev_info_list) {
                 sdbg_devinfo = list_entry(lh, struct sdebug_dev_info,

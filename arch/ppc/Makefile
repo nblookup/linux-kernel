@@ -13,7 +13,6 @@
 # This must match PAGE_OFFSET in include/asm-ppc/page.h.
 KERNELLOAD	:= $(CONFIG_KERNEL_START)
 
-LDFLAGS_BLOB	:= --format binary --oformat elf32-powerpc
 LDFLAGS_vmlinux	:= -Ttext $(KERNELLOAD) -Bstatic
 CPPFLAGS	+= -Iarch/$(ARCH)
 AFLAGS		+= -Iarch/$(ARCH)
@@ -23,9 +22,6 @@ CPP		= $(CC) -E $(CFLAGS)
 
 cflags-$(CONFIG_4xx)		+= -Wa,-m405
 cflags-$(CONFIG_PPC64BRIDGE)	+= -Wa,-mppc64bridge
-# Use sed to remove the quotes.
-cflags-$(CONFIG_MORE_COMPILE_OPTIONS) += \
-	$(shell echo $(CONFIG_COMPILE_OPTIONS) | sed -e 's/"//g')
 
 CFLAGS += $(cflags-y)
 
@@ -33,9 +29,10 @@ CFLAGS += $(cflags-y)
 head-y				:= arch/ppc/kernel/head.o
 head-$(CONFIG_8xx)		:= arch/ppc/kernel/head_8xx.o
 head-$(CONFIG_4xx)		:= arch/ppc/kernel/head_4xx.o
-head-$(CONFIG_440)		:= arch/ppc/kernel/head_44x.o
+head-$(CONFIG_44x)		:= arch/ppc/kernel/head_44x.o
 
 head-$(CONFIG_6xx)		+= arch/ppc/kernel/idle_6xx.o
+head-$(CONFIG_POWER4)		+= arch/ppc/kernel/idle_power4.o
 
 core-y				+= arch/ppc/kernel/ arch/ppc/platforms/ \
 				   arch/ppc/mm/ arch/ppc/lib/ arch/ppc/syslib/
@@ -48,7 +45,7 @@ drivers-$(CONFIG_4xx)		+= arch/ppc/4xx_io/
 drivers-$(CONFIG_8260)		+= arch/ppc/8260_io/
 drivers-$(CONFIG_OCP)		+= arch/ppc/ocp/
 
-BOOT_TARGETS = zImage zImage.initrd znetboot znetboot.initrd pImage vmlinux.sm
+BOOT_TARGETS = zImage zImage.initrd znetboot znetboot.initrd vmlinux.sm
 
 .PHONY: $(BOOT_TARGETS)
 
@@ -59,12 +56,23 @@ AFLAGS_vmlinux.lds.o	:= -Upowerpc
 # All the instructions talk about "make bzImage".
 bzImage: zImage
 
-$(BOOT_TARGETS): vmlinux
-	$(Q)$(MAKE) $(build)=arch/ppc/boot $@
+boot := arch/$(ARCH)/boot
 
-%_config: arch/ppc/configs/%_defconfig
-	rm -f .config arch/ppc/defconfig
-	cp -f arch/ppc/configs/$(@:config=defconfig) .config
+$(BOOT_TARGETS): vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $@
+
+uImage: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot)/images $(boot)/images/$@
+
+define archhelp
+  @echo '* zImage          - Compressed kernel image (arch/$(ARCH)/boot/images/zImage.*)'
+  @echo '  uImage          - Create a bootable image for U-Boot / PPCBoot'
+  @echo '  install         - Install kernel using'
+  @echo '                    (your) ~/bin/installkernel or'
+  @echo '                    (distribution) /sbin/installkernel or'
+  @echo '                    install to $$(INSTALL_PATH) and run lilo'
+  @echo '  *_defconfig     - Select default config from arch/$(ARCH)/ppc/configs'
+endef
 
 archclean:
 	$(Q)$(MAKE) $(clean)=arch/ppc/boot
@@ -74,7 +82,7 @@ prepare: include/asm-$(ARCH)/offsets.h checkbin
 arch/$(ARCH)/kernel/asm-offsets.s: include/asm include/linux/version.h \
 				   include/config/MARKER
 
-include/asm-$(ARCH)/offsets.h: arch/$(ARCH)/kernel/asm-offsets.s 
+include/asm-$(ARCH)/offsets.h: arch/$(ARCH)/kernel/asm-offsets.s
 	$(call filechk,gen-asm-offsets)
 
 ifdef CONFIG_6xx

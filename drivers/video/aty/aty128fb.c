@@ -148,7 +148,7 @@ static int aty128_probe(struct pci_dev *pdev,
 static void aty128_remove(struct pci_dev *pdev);
 
 /* supported Rage128 chipsets */
-static struct pci_device_id aty128_pci_tbl[] __devinitdata = {
+static struct pci_device_id aty128_pci_tbl[] = {
 	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_RE,
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, rage_128 },
 	{ PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RAGE128_RF,
@@ -2041,9 +2041,9 @@ aty128fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 #define ATY_MIRROR_CRT_ON	0x00000002
 
 /* out param: u32*	backlight value: 0 to 15 */
-#define FBIO_ATY128_GET_MIRROR	_IOR('@', 1, sizeof(__u32*))
+#define FBIO_ATY128_GET_MIRROR	_IOR('@', 1, __u32*)
 /* in param: u32*	backlight value: 0 to 15 */
-#define FBIO_ATY128_SET_MIRROR	_IOW('@', 2, sizeof(__u32*))
+#define FBIO_ATY128_SET_MIRROR	_IOW('@', 2, __u32*)
 
 static int aty128fb_ioctl(struct inode *inode, struct file *file, u_int cmd,
 			  u_long arg, struct fb_info *info)

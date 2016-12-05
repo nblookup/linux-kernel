@@ -39,7 +39,6 @@
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/timer.h>
 #include <linux/netdevice.h>
 #include <linux/moduleparam.h>
 #include <linux/device.h>
@@ -85,7 +84,7 @@ static u_int irq_mask = 0xdeb8;
 static int irq_list[4] = { -1 };
 
 MODULE_AUTHOR("Simon Kelley");
-MODULE_DESCRIPTION("Support for Atmel at76c50x 802.11 wireless ethnet cards.");
+MODULE_DESCRIPTION("Support for Atmel at76c50x 802.11 wireless ethernet cards.");
 MODULE_LICENSE("GPL");
 MODULE_SUPPORTED_DEVICE("Atmel at76c50x PCMCIA cards");
 MODULE_PARM(irq_mask, "i");
@@ -108,7 +107,7 @@ void stop_atmel_card( struct net_device *, int );
 int reset_atmel_card( struct net_device * );
 
 static void atmel_config(dev_link_t *link);
-static void atmel_release(u_long arg);
+static void atmel_release(dev_link_t *link);
 static int atmel_event(event_t event, int priority,
 		       event_callback_args_t *args);
 
@@ -177,24 +176,6 @@ typedef struct local_info_t {
 
 /*======================================================================
   
-  This bit of code is used to avoid unregistering network devices
-  at inappropriate times.  2.2 and later kernels are fairly picky
-  about when this can happen.
-  
-  ======================================================================*/
-
-static void flush_stale_links(void)
-{
-	dev_link_t *link, *next;
-	for (link = dev_list; link; link = next) {
-		next = link->next;
-		if (link->state & DEV_STALE_LINK)
-			atmel_detach(link);
-	}
-}
- 
-/*======================================================================
-  
   atmel_attach() creates an "instance" of the driver, allocating
   local data structures for one device.  The device is registered
   with Card Services.
@@ -213,8 +194,7 @@ static dev_link_t *atmel_attach(void)
 	int ret, i;
 	
 	DEBUG(0, "atmel_attach()\n");
-	flush_stale_links();
-	
+
 	/* Initialize the dev_link_t structure */
 	link = kmalloc(sizeof(struct dev_link_t), GFP_KERNEL);
 	if (!link) {
@@ -222,9 +202,6 @@ static dev_link_t *atmel_attach(void)
 		return NULL;
 	}
 	memset(link, 0, sizeof(struct dev_link_t));
-	init_timer(&link->release);
-	link->release.function = &atmel_release;
-	link->release.data = (u_long)link;
 	
 	/* Interrupt setup */
 	link->irq.Attributes = IRQ_TYPE_EXCLUSIVE;
@@ -300,30 +277,19 @@ static void atmel_detach(dev_link_t *link)
 	if (*linkp == NULL)
 		return;
 
-	del_timer(&link->release);
-	if ( link->state & DEV_CONFIG ) {
-		atmel_release( (int)link );
-		if ( link->state & DEV_STALE_CONFIG ) {
-			link->state |= DEV_STALE_LINK;
-			return;
-		}
-	}
-	
+	if (link->state & DEV_CONFIG)
+		atmel_release(link);
 		
 	/* Break the link with Card Services */
 	if (link->handle)
 		CardServices(DeregisterClient, link->handle);
-	
-	
-	
+
 	/* Unlink device structure, free pieces */
 	*linkp = link->next;
-	if (link->priv) {
+	if (link->priv)
 		kfree(link->priv);
-	}
 	kfree(link);
-	
-} /* atmel_detach */
+}
 
 /*======================================================================
   
@@ -375,11 +341,13 @@ static struct {
         { 0, 0, "SMC/2632W", "atmel_at76c502d.bin", "SMC 2632W-V3" },
 	{ 0xd601, 0x0007, NULL, "atmel_at76c502.bin", "Sitecom WLAN-011"}, /* suspect - from a usenet posting. */
 	{ 0x01bf, 0x3302, NULL, "atmel_at76c502d.bin", "Belkin F5D6060u"},  /*    "        "  "    "      "     */
+	{ 0, 0, "BT/Voyager 1020 Laptop Adapter", "atmel_at76c502.bin", "BT Voyager 1020"},
+        { 0, 0, "IEEE 802.11b/Wireless LAN PC Card", "atmel_at76c502.bin", "Siemens Gigaset PC Card II" },
+	{ 0, 0, "CNet/CNWLC 11Mbps Wireless PC Card V-5", "atmel_at76c502e.bin", "CNet CNWLC-811ARL" }
 };
 
 /* This is strictly temporary, until PCMCIA devices get integrated into the device model. */
 static struct device atmel_device = {
-        .name      = "Atmel at76c50x wireless",
         .bus_id    = "pcmcia",
 };
 
@@ -391,7 +359,7 @@ static void atmel_config(dev_link_t *link)
 	local_info_t *dev;
 	int last_fn, last_ret;
 	u_char buf[64];
-	int card_index = -1;
+	int card_index = -1, done = 0;
 	
 	handle = link->handle;
 	dev = link->priv;
@@ -415,13 +383,13 @@ static void atmel_config(dev_link_t *link)
 			    manfid->manf == card_table[i].manf &&
 			    manfid->card == card_table[i].card) {
 				card_index = i;
-				goto done;
+				done = 1;
 			}
 		}
 	}
 
 	tuple.DesiredTuple = CISTPL_VERS_1;
-	if (CardServices(GetFirstTuple, handle, &tuple) == 0) {
+	if (!done && (CardServices(GetFirstTuple, handle, &tuple) == 0)) {
 		int i, j, k;
 		cistpl_vers_1_t *ver1;
 		CS_CHECK(GetTupleData, handle, &tuple);
@@ -436,9 +404,12 @@ static void atmel_config(dev_link_t *link)
 					goto mismatch;
 				for (k = 0; k < j; k++) {
 					while ((*p != '\0') && (*p != '/')) p++;
-					if (*p == '\0')
-						goto mismatch;
-					p++;
+					if (*p == '\0') {
+						if (*q != '\0')
+							goto mismatch;
+					} else {
+						p++;
+					}
 				}
 				while((*q != '\0') && (*p != '\0') && 
 				      (*p != '/') && (*p == *q)) p++, q++;
@@ -446,12 +417,11 @@ static void atmel_config(dev_link_t *link)
 					goto mismatch;
 			}
 			card_index = i;
-			goto done;
+			break;	/* done */
 			
 		mismatch:
-			
+			j = 0; /* dummy stmt to shut up compiler */
 		}
-	done:
 	}		
 
 	/*
@@ -607,9 +577,8 @@ static void atmel_config(dev_link_t *link)
 	
  cs_failed:
 	cs_error(link->handle, last_fn, last_ret);
-	atmel_release((u_long)link);
-	
-} /* atmel_config */
+	atmel_release(link);
+}
 
 /*======================================================================
   
@@ -619,9 +588,8 @@ static void atmel_config(dev_link_t *link)
   
   ======================================================================*/
 
-static void atmel_release(u_long arg)
+static void atmel_release(dev_link_t *link)
 {
-	dev_link_t *link = (dev_link_t *)arg;
 	struct net_device *dev = ((local_info_t*)link->priv)->eth_dev;
 		
 	DEBUG(0, "atmel_release(0x%p)\n", link);
@@ -640,8 +608,7 @@ static void atmel_release(u_long arg)
 	if (link->irq.AssignedIRQ)
 		CardServices(ReleaseIRQ, link->handle, &link->irq);
 	link->state &= ~DEV_CONFIG;
-	
-} /* atmel_release */
+}
 
 /*======================================================================
   
@@ -668,7 +635,7 @@ static int atmel_event(event_t event, int priority,
 		link->state &= ~DEV_PRESENT;
 		if (link->state & DEV_CONFIG) {
 			netif_device_detach(local->eth_dev);
-			mod_timer(&link->release, jiffies + HZ/20);
+			atmel_release(link);
 		}
 		break;
 	case CS_EVENT_CARD_INSERTION:
@@ -720,7 +687,7 @@ static void atmel_cs_cleanup(void)
         /* XXX: this really needs to move into generic code.. */
         while (dev_list != NULL) {
                 if (dev_list->state & DEV_CONFIG)
-                        atmel_release((u_long)dev_list);
+                        atmel_release(dev_list);
                 atmel_detach(dev_list);
         }
 }

@@ -22,6 +22,8 @@
  * 2002-05-27:	Nicolas Pitre	Killed sleep.h and the kmalloced save array.
  * 				Storage is local on the stack now.
  */
+#include <linux/init.h>
+#include <linux/suspend.h>
 #include <linux/errno.h>
 #include <linux/time.h>
 
@@ -54,12 +56,17 @@ enum {	SLEEP_SAVE_SP = 0,
 };
 
 
-int pm_do_suspend(void)
+static int sa11x0_pm_enter(u32 state)
 {
 	unsigned long sleep_save[SLEEP_SAVE_SIZE];
+	unsigned long delta, gpio;
+
+	if (state != PM_SUSPEND_MEM)
+		return -EINVAL;
 
 	/* preserve current time */
-	RCNR = xtime.tv_sec;
+	delta = xtime.tv_sec - RCNR;
+	gpio = GPLR;
 
 	/* save vital registers */
 	SAVE(OSCR);
@@ -112,6 +119,9 @@ int pm_do_suspend(void)
 
 	RESTORE(Ser1SDCR0);
 
+	GPSR = gpio;
+	GPCR = ~gpio;
+
 	/*
 	 * Clear the peripheral sleep-hold bit.
 	 */
@@ -125,7 +135,7 @@ int pm_do_suspend(void)
 	RESTORE(OIER);
 
 	/* restore current time */
-	xtime.tv_sec = RCNR;
+	xtime.tv_sec = RCNR + delta;
 
 	return 0;
 }
@@ -134,3 +144,37 @@ unsigned long sleep_phys_sp(void *sp)
 {
 	return virt_to_phys(sp);
 }
+
+/*
+ * Called after processes are frozen, but before we shut down devices.
+ */
+static int sa11x0_pm_prepare(u32 state)
+{
+	return 0;
+}
+
+/*
+ * Called after devices are re-setup, but before processes are thawed.
+ */
+static int sa11x0_pm_finish(u32 state)
+{
+	return 0;
+}
+
+/*
+ * Set to PM_DISK_FIRMWARE so we can quickly veto suspend-to-disk.
+ */
+static struct pm_ops sa11x0_pm_ops = {
+	.pm_disk_mode	= PM_DISK_FIRMWARE,
+	.prepare	= sa11x0_pm_prepare,
+	.enter		= sa11x0_pm_enter,
+	.finish		= sa11x0_pm_finish,
+};
+
+static int __init sa11x0_pm_init(void)
+{
+	pm_set_ops(&sa11x0_pm_ops);
+	return 0;
+}
+
+late_initcall(sa11x0_pm_init);

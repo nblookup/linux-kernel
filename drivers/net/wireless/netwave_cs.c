@@ -204,14 +204,13 @@ MODULE_PARM(irq_list, "1-4i");
 /*====================================================================*/
 
 /* PCMCIA (Card Services) related functions */
-static void netwave_release(u_long arg);     /* Card removal */
+static void netwave_release(dev_link_t *link);     /* Card removal */
 static int  netwave_event(event_t event, int priority, 
 					      event_callback_args_t *args);
 static void netwave_pcmcia_config(dev_link_t *arg); /* Runs after card 
 													   insertion */
 static dev_link_t *netwave_attach(void);     /* Create instance */
 static void netwave_detach(dev_link_t *);    /* Destroy instance */
-static void netwave_flush_stale_links(void);	     /* Destroy all staled instances */
 
 /* Hardware configuration */
 static void netwave_doreset(ioaddr_t iobase, u_char* ramBase);
@@ -444,9 +443,6 @@ static dev_link_t *netwave_attach(void)
     
     DEBUG(0, "netwave_attach()\n");
     
-    /* Perform some cleanup */
-    netwave_flush_stale_links();
-
     /* Initialize the dev_link_t structure */
     dev = alloc_etherdev(sizeof(netwave_private));
     if (!dev)
@@ -455,10 +451,6 @@ static dev_link_t *netwave_attach(void)
     link = &priv->link;
     link->priv = dev;
 
-    init_timer(&link->release);
-    link->release.function = &netwave_release;
-    link->release.data = (u_long)link;
-	
     /* The io structure describes IO port mapping */
     link->io.NumPorts1 = 16;
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_16;
@@ -552,13 +544,11 @@ static void netwave_detach(dev_link_t *link)
 	  the release() function is called, that will trigger a proper
 	  detach().
 	*/
-    del_timer(&link->release);
     if (link->state & DEV_CONFIG) {
-	netwave_release((u_long) link);
+	netwave_release(link);
 	if (link->state & DEV_STALE_CONFIG) {
 	    DEBUG(1, "netwave_cs: detach postponed, '%s' still "
 		  "locked\n", link->dev->dev_name);
-	    link->state |= DEV_STALE_LINK;
 	    return;
 	}
     }
@@ -579,36 +569,11 @@ static void netwave_detach(dev_link_t *link)
 
     /* Unlink device structure, free pieces */
     *linkp = link->next;
-    if (link->dev)
+    if (link->dev) 
 	unregister_netdev(dev);
-    kfree(dev);
+    free_netdev(dev);
     
 } /* netwave_detach */
-
-/*
- * Function netwave_flush_stale_links (void)
- *
- *    This deletes all driver "instances" that need to be deleted.
- *    Sometimes, netwave_detach can't be performed following a call from
- *    cardmgr (device still open) and the device is put in a STALE_LINK
- *    state.
- *    This function is in charge of making the cleanup...
- */
-static void netwave_flush_stale_links(void)
-{
-    dev_link_t *	link;		/* Current node in linked list */
-    dev_link_t *	next;		/* Next node in linked list */
-
-    DEBUG(1, "netwave_flush_stale_links(0x%p)\n", dev_list);
-
-    /* Go through the list */
-    for (link = dev_list; link; link = next) {
-        next = link->next;
-        /* Check if in need of being removed */
-        if(link->state & DEV_STALE_LINK)
-	    netwave_detach(link);
-    }
-} /* netwave_flush_stale_links */
 
 /*
  * Wireless Handler : get protocol name
@@ -1149,7 +1114,7 @@ static void netwave_pcmcia_config(dev_link_t *link) {
 cs_failed:
     cs_error(link->handle, last_fn, last_ret);
 failed:
-    netwave_release((u_long)link);
+    netwave_release(link);
 } /* netwave_pcmcia_config */
 
 /*
@@ -1159,8 +1124,8 @@ failed:
  *    device, and release the PCMCIA configuration.  If the device is
  *    still open, this will be postponed until it is closed.
  */
-static void netwave_release(u_long arg) {
-    dev_link_t *link = (dev_link_t *)arg;
+static void netwave_release(dev_link_t *link)
+{
     struct net_device *dev = link->priv;
     netwave_private *priv = dev->priv;
 
@@ -1186,9 +1151,11 @@ static void netwave_release(u_long arg) {
     CardServices(ReleaseIO, link->handle, &link->io);
     CardServices(ReleaseIRQ, link->handle, &link->irq);
 
-    link->state &= ~(DEV_CONFIG | DEV_STALE_CONFIG);
+    link->state &= ~DEV_CONFIG;
 
-} /* netwave_release */
+    if (link->state & DEV_STALE_CONFIG)
+	netwave_detach(link);
+}
 
 /*
  * Function netwave_event (event, priority, args)
@@ -1220,7 +1187,7 @@ static int netwave_event(event_t event, int priority,
 	link->state &= ~DEV_PRESENT;
 	if (link->state & DEV_CONFIG) {
 	    netif_device_detach(dev);
-	    mod_timer(&link->release, jiffies + HZ/20);
+	    netwave_release(link);
 	}
 	break;
     case CS_EVENT_CARD_INSERTION:
@@ -1738,8 +1705,7 @@ static int netwave_close(struct net_device *dev) {
     link->open--;
     netif_stop_queue(dev);
     if (link->state & DEV_STALE_CONFIG)
-	mod_timer(&link->release, jiffies + HZ/20);
-	
+	    netwave_release(link);
     return 0;
 }
 
@@ -1761,8 +1727,6 @@ static void __exit exit_netwave_cs(void)
 {
 	pcmcia_unregister_driver(&netwave_driver);
 
-	/* Do some cleanup of the device list */
-	netwave_flush_stale_links();
 	if (dev_list != NULL)	/* Critical situation */
 		printk("netwave_cs: devices remaining when removing module\n");
 }

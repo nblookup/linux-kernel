@@ -36,28 +36,30 @@ export IA32_CC IA32_LD IA32_AS IA32_OBJCOPY IA32_CPP
 LDFLAGS		:= -m elf_x86_64
 OBJCOPYFLAGS	:= -O binary -R .note -R .comment -S
 LDFLAGS_vmlinux := -e stext
-LDFLAGS_BLOB	:= --format binary --oformat elf64-x86-64
+
+check_gcc = $(shell if $(CC) $(1) -S -o /dev/null -xc /dev/null > /dev/null 2>&1 ; then echo "$(1)"; else echo "$(2)"; fi)
 
 CFLAGS += -mno-red-zone
 CFLAGS += -mcmodel=kernel
 CFLAGS += -pipe
 # this makes reading assembly source easier, but produces worse code
+# actually it makes the kernel smaller too.
 CFLAGS += -fno-reorder-blocks	
 # should lower this a lot and see how much .text is saves	
-CFLAGS += -finline-limit=2000
+# CFLAGS += -finline-limit=2000
 CFLAGS += -Wno-sign-compare
-#CFLAGS += -g
 # don't enable this when you use kgdb:
 ifneq ($(CONFIG_X86_REMOTE_DEBUG),y)
 CFLAGS += -fno-asynchronous-unwind-tables
 endif
+#CFLAGS += $(call check_gcc,-funit-at-a-time,)
 
 head-y := arch/x86_64/kernel/head.o arch/x86_64/kernel/head64.o arch/x86_64/kernel/init_task.o
 
 libs-y 					+= arch/x86_64/lib/
 core-y					+= arch/x86_64/kernel/ arch/x86_64/mm/
 core-$(CONFIG_IA32_EMULATION)		+= arch/x86_64/ia32/
-drivers-$(CONFIG_PCI)			+= arch/x86_64/pci/
+drivers-$(CONFIG_PCI)			+= arch/i386/pci/
 drivers-$(CONFIG_OPROFILE)		+= arch/x86_64/oprofile/
 
 boot := arch/x86_64/boot

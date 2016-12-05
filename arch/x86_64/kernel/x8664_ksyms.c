@@ -71,6 +71,7 @@ EXPORT_SYMBOL_NOVERS(__down_failed_trylock);
 EXPORT_SYMBOL_NOVERS(__up_wakeup);
 /* Networking helper routines. */
 EXPORT_SYMBOL(csum_partial_copy_nocheck);
+EXPORT_SYMBOL(ip_compute_csum);
 /* Delay loops */
 EXPORT_SYMBOL(__udelay);
 EXPORT_SYMBOL(__ndelay);
@@ -113,6 +114,7 @@ EXPORT_SYMBOL(mmx_clear_page);
 EXPORT_SYMBOL(mmx_copy_page);
 #endif
 
+EXPORT_SYMBOL(cpu_pda);
 #ifdef CONFIG_SMP
 EXPORT_SYMBOL(cpu_data);
 EXPORT_SYMBOL(cpu_online_map);
@@ -121,6 +123,7 @@ EXPORT_SYMBOL_NOVERS(__read_lock_failed);
 
 EXPORT_SYMBOL(synchronize_irq);
 EXPORT_SYMBOL(smp_call_function);
+EXPORT_SYMBOL(cpu_callout_map);
 #endif
 
 #ifdef CONFIG_VT
@@ -152,7 +155,7 @@ EXPORT_SYMBOL_GPL(unset_nmi_callback);
 
 extern void * memset(void *,int,__kernel_size_t);
 extern size_t strlen(const char *);
-extern char * bcopy(const char * src, char * dest, int count);
+extern void bcopy(const char * src, char * dest, int count);
 extern void * memmove(void * dest,const void *src,size_t count);
 extern char * strcpy(char * dest,const char *src);
 extern int strcmp(const char * cs,const char * ct);
@@ -214,5 +217,7 @@ EXPORT_SYMBOL(fake_node);
 
 EXPORT_SYMBOL(clear_page);
 
+#ifdef CONFIG_SMP
 EXPORT_SYMBOL(flush_tlb_page);
 EXPORT_SYMBOL_GPL(flush_tlb_all);
+#endif

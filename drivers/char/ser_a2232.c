@@ -122,8 +122,6 @@ static void a2232_init_portstructs(void);
 /* Initialize and register TTY drivers. */
 /* returns 0 IFF successful */
 static int a2232_init_drivers(void); 
-/* Initialize all A2232 boards; main entry point. */
-int a2232board_init(void);
 
 /* BEGIN GENERIC_SERIAL PROTOTYPES */
 static void a2232_disable_tx_interrupts(void *ptr);
@@ -705,7 +703,7 @@ static int a2232_init_drivers(void)
 	a2232_driver->name = "ttyY";
 	a2232_driver->major = A2232_NORMAL_MAJOR;
 	a2232_driver->type = TTY_DRIVER_TYPE_SERIAL;
-	a2232_driver->subtype = SERIAL_TTY_NORMAL;
+	a2232_driver->subtype = SERIAL_TYPE_NORMAL;
 	a2232_driver->init_termios = tty_std_termios;
 	a2232_driver->init_termios.c_cflag =
 		B9600 | CS8 | CREAD | HUPCL | CLOCAL;
@@ -720,7 +718,7 @@ static int a2232_init_drivers(void)
 	return 0;
 }
 
-int a2232board_init(void)
+static int __init a2232board_init(void)
 {
 	struct zorro_dev *z;
 
@@ -731,7 +729,7 @@ int a2232board_init(void)
 	volatile u_char *to;
 	volatile struct a2232memory *mem;
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	return -ENODEV;	/* This driver is not SMP aware. Is there an SMP ZorroII-bus-machine? */
 #endif
 
@@ -813,13 +811,7 @@ int a2232board_init(void)
 	return 0;
 }
 
-#ifdef MODULE
-int init_module(void)
-{
-	return a2232board_init();
-}
-
-void cleanup_module(void)
+static void __exit a2232board_exit(void)
 {
 	int i;
 
@@ -831,8 +823,9 @@ void cleanup_module(void)
 	put_tty_driver(a2232_driver);
 	free_irq(IRQ_AMIGA_VERTB, a2232_driver_ID);
 }
-#endif
-/***************************** End of Functions *********************/
+
+module_init(a2232board_init);
+module_exit(a2232board_exit);
 
 MODULE_AUTHOR("Enver Haase");
 MODULE_DESCRIPTION("Amiga A2232 multi-serial board driver");

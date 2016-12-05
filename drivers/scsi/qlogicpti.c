@@ -17,7 +17,7 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/slab.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <linux/init.h>
@@ -1550,10 +1550,6 @@ static Scsi_Host_Template driver_template = {
 	.sg_tablesize		= QLOGICPTI_MAX_SG(QLOGICPTI_REQ_QUEUE_LEN),
 	.cmd_per_lun		= 1,
 	.use_clustering		= ENABLE_CLUSTERING,
-/* Sparc32's iommu code cannot handle highmem pages yet. */
-#ifdef CONFIG_SPARC64
-	.highmem_io		= 1,
-#endif
 };
 
 

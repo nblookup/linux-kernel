@@ -2,7 +2,7 @@ Intro
 =====
 
 This document is designed to provide a list of the minimum levels of
-software necessary to run the 2.5 kernels, as well as provide brief
+software necessary to run the 2.6 kernels, as well as provide brief
 instructions regarding any other "Gotchas" users may encounter when
 trying life on the Bleeding Edge.  If upgrading from a pre-2.4.x
 kernel, please consult the Changes file included with 2.4.x kernels for
@@ -52,18 +52,18 @@ o  Gnu C                  2.95.3                  # gcc --version
 o  Gnu make               3.78                    # make --version
 o  binutils               2.12                    # ld -v
 o  util-linux             2.10o                   # fdformat --version
-o  module-init-tools      0.9.9                   # depmod -V
+o  module-init-tools      0.9.10                  # depmod -V
 o  e2fsprogs              1.29                    # tune2fs
-o  jfsutils               1.0.14                  # fsck.jfs -V
+o  jfsutils               1.1.3                   # fsck.jfs -V
 o  reiserfsprogs          3.6.3                   # reiserfsck -V 2>&1|grep reiserfsprogs
 o  xfsprogs               2.1.0                   # xfs_db -V
 o  pcmcia-cs              3.1.21                  # cardmgr -V
 o  quota-tools            3.09                    # quota -V
 o  PPP                    2.4.0                   # pppd --version
 o  isdn4k-utils           3.1pre1                 # isdnctrl 2>&1|grep version
-o  procps                 2.0.9                   # ps --version
+o  nfs-utils              1.0.5                   # showmount --version
+o  procps                 3.1.13                  # ps --version
 o  oprofile               0.5.3                   # oprofiled --version
-o  nfs-utils              1.0.3                   # showmount --version
 
 Kernel compilation
 ==================
@@ -142,7 +142,7 @@ version of ksymoops to decode the report; see REPORTING-BUGS in the
 root of the Linux source for more information.
 
 Module-Init-Tools
---------
+-----------------
 
 A new module loader is now in the kernel that requires module-init-tools
 to use.  It is backward compatible with the 2.4.x series kernels.
@@ -280,6 +280,34 @@ Isdn4k-utils
 Due to changes in the length of the phone number field, isdn4k-utils
 needs to be recompiled or (preferably) upgraded.
 
+NFS-utils
+---------
+
+In 2.4 and earlier kernels, the nfs server needed to know about any
+client that expected to be able to access files via NFS.  This
+information would be given to the kernel by "mountd" when the client
+mounted the filesystem, or by "exportfs" at system startup.  exportfs
+would take information about active clients from /var/lib/nfs/rmtab.
+
+This approach is quite fragile as it depends on rmtab being correct
+which is not always easy, particularly when trying to implement
+fail-over.  Even when the system is working well, rmtab suffers from
+getting lots of old entries that never get removed.
+
+With 2.6 we have the option of having the kernel tell mountd when it
+gets a request from an unknown host, and mountd can give appropriate
+export information to the kernel.  This removes the dependency on
+rmtab and means that the kernel only needs to know about currently
+active clients.
+
+To enable this new functionality, you need to:
+
+  mount -t nfsd nfsd /proc/fs/nfs
+
+before running exportfs or mountd.  It is recommended that all NFS
+services be protected from the internet-at-large by a firewall where
+that is possible.
+
 Getting updated software
 ========================
 
@@ -309,8 +337,8 @@ Ksymoops
 --------
 o  <ftp://ftp.kernel.org/pub/linux/utils/kernel/ksymoops/v2.4/>
 
-Modutils
---------
+Module-Init-Tools
+-----------------
 o  <ftp://ftp.kernel.org/pub/linux/kernel/people/rusty/modules/>
 
 Mkinitrd
@@ -368,6 +396,10 @@ Isdn4k-utils
 ------------
 o  <ftp://ftp.isdn4linux.de/pub/isdn4linux/utils/isdn4k-utils.v3.1pre1.tar.gz>
 
+NFS-utils
+---------
+o  <http://sourceforge.net/project/showfiles.php?group_id=14>
+
 Netfilter
 ---------
 o  <http://netfilter.filewatcher.org/iptables-1.2.tar.bz2>
@@ -381,7 +413,12 @@ o  <ftp://ftp.inr.ac.ru/ip-routing/iproute2-2.2.4-now-ss991023.tar.gz>
 OProfile
 --------
 o  <http://oprofile.sf.net/download/>
- 
+
+NFS-Utils
+---------
+o  <http://nfs.sourceforge.net/>
+
+
 Suggestions and corrections
 ===========================
 

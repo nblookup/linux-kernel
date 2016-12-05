@@ -19,6 +19,7 @@
 #include <linux/hugetlb.h>
 #include <linux/profile.h>
 #include <linux/module.h>
+#include <linux/mount.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgalloc.h>
@@ -134,29 +135,6 @@ out:
 	retval = mm->brk;
 	up_write(&mm->mmap_sem);
 	return retval;
-}
-
-/* Combine the mmap "prot" and "flags" argument into one "vm_flags" used
- * internally. Essentially, translate the "PROT_xxx" and "MAP_xxx" bits
- * into "VM_xxx".
- */
-static inline unsigned long
-calc_vm_flags(unsigned long prot, unsigned long flags)
-{
-#define _trans(x,bit1,bit2) \
-((bit1==bit2)?(x&bit1):(x&bit1)?bit2:0)
-
-	unsigned long prot_bits, flag_bits;
-	prot_bits =
-		_trans(prot, PROT_READ, VM_READ) |
-		_trans(prot, PROT_WRITE, VM_WRITE) |
-		_trans(prot, PROT_EXEC, VM_EXEC);
-	flag_bits =
-		_trans(flags, MAP_GROWSDOWN, VM_GROWSDOWN) |
-		_trans(flags, MAP_DENYWRITE, VM_DENYWRITE) |
-		_trans(flags, MAP_EXECUTABLE, VM_EXECUTABLE);
-	return prot_bits | flag_bits;
-#undef _trans
 }
 
 #ifdef DEBUG_MM_RB
@@ -303,6 +281,26 @@ static void vma_link(struct mm_struct *mm, struct vm_area_struct *vma,
 }
 
 /*
+ * Insert vm structure into process list sorted by address and into the inode's
+ * i_mmap ring. The caller should hold mm->page_table_lock and
+ * ->f_mappping->i_shared_sem if vm_file is non-NULL.
+ */
+static void
+__insert_vm_struct(struct mm_struct * mm, struct vm_area_struct * vma)
+{
+	struct vm_area_struct * __vma, * prev;
+	struct rb_node ** rb_link, * rb_parent;
+
+	__vma = find_vma_prepare(mm, vma->vm_start,&prev, &rb_link, &rb_parent);
+	if (__vma && __vma->vm_start < vma->vm_end)
+		BUG();
+	__vma_link(mm, vma, prev, rb_link, rb_parent);
+	mark_mm_hugetlb(mm, vma);
+	mm->map_count++;
+	validate_mm(mm);
+}
+
+/*
  * If the vma has a ->close operation then the driver probably needs to release
  * per-vma resources, so we don't attempt to merge those.
  */
@@ -374,7 +372,9 @@ static int vma_merge(struct mm_struct *mm, struct vm_area_struct *prev,
 			unsigned long end, unsigned long vm_flags,
 			struct file *file, unsigned long pgoff)
 {
-	spinlock_t * lock = &mm->page_table_lock;
+	spinlock_t *lock = &mm->page_table_lock;
+	struct inode *inode = file ? file->f_dentry->d_inode : NULL;
+	struct semaphore *i_shared_sem;
 
 	/*
 	 * We later require that vma->vm_flags == vm_flags, so this tests
@@ -382,6 +382,8 @@ static int vma_merge(struct mm_struct *mm, struct vm_area_struct *prev,
 	 */
 	if (vm_flags & VM_SPECIAL)
 		return 0;
+
+	i_shared_sem = file ? &inode->i_mapping->i_shared_sem : NULL;
 
 	if (!prev) {
 		prev = rb_entry(rb_parent, struct vm_area_struct, vm_rb);
@@ -395,12 +397,11 @@ static int vma_merge(struct mm_struct *mm, struct vm_area_struct *prev,
 			is_mergeable_vma(prev, file, vm_flags) &&
 			can_vma_merge_after(prev, vm_flags, file, pgoff)) {
 		struct vm_area_struct *next;
-		struct inode *inode = file ? file->f_dentry->d_inode : NULL;
 		int need_up = 0;
 
 		if (unlikely(file && prev->vm_next &&
 				prev->vm_next->vm_file == file)) {
-			down(&inode->i_mapping->i_shared_sem);
+			down(i_shared_sem);
 			need_up = 1;
 		}
 		spin_lock(lock);
@@ -418,7 +419,7 @@ static int vma_merge(struct mm_struct *mm, struct vm_area_struct *prev,
 			__remove_shared_vm_struct(next, inode);
 			spin_unlock(lock);
 			if (need_up)
-				up(&inode->i_mapping->i_shared_sem);
+				up(i_shared_sem);
 			if (file)
 				fput(file);
 
@@ -428,7 +429,7 @@ static int vma_merge(struct mm_struct *mm, struct vm_area_struct *prev,
 		}
 		spin_unlock(lock);
 		if (need_up)
-			up(&inode->i_mapping->i_shared_sem);
+			up(i_shared_sem);
 		return 1;
 	}
 
@@ -442,10 +443,14 @@ static int vma_merge(struct mm_struct *mm, struct vm_area_struct *prev,
 				pgoff, (end - addr) >> PAGE_SHIFT))
 			return 0;
 		if (end == prev->vm_start) {
+			if (file)
+				down(i_shared_sem);
 			spin_lock(lock);
 			prev->vm_start = addr;
 			prev->vm_pgoff -= (end - addr) >> PAGE_SHIFT;
 			spin_unlock(lock);
+			if (file)
+				up(i_shared_sem);
 			return 1;
 		}
 	}
@@ -470,16 +475,21 @@ unsigned long do_mmap_pgoff(struct file * file, unsigned long addr,
 	struct rb_node ** rb_link, * rb_parent;
 	unsigned long charged = 0;
 
-	if (file && (!file->f_op || !file->f_op->mmap))
-		return -ENODEV;
+	if (file) {
+		if (!file->f_op || !file->f_op->mmap)
+			return -ENODEV;
+
+		if ((prot & PROT_EXEC) && (file->f_vfsmnt->mnt_flags & MNT_NOEXEC))
+			return -EPERM;
+	}
 
 	if (!len)
 		return addr;
 
-	if (len > TASK_SIZE)
-		return -EINVAL;
-
+	/* Careful about overflows.. */
 	len = PAGE_ALIGN(len);
+	if (!len || len > TASK_SIZE)
+		return -EINVAL;
 
 	/* offset overflow? */
 	if ((pgoff + (len >> PAGE_SHIFT)) < pgoff)
@@ -500,8 +510,8 @@ unsigned long do_mmap_pgoff(struct file * file, unsigned long addr,
 	 * to. we assume access permissions have been handled by the open
 	 * of the memory object, so we don't do any here.
 	 */
-	vm_flags = calc_vm_flags(prot,flags) | mm->def_flags |
-			VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
+	vm_flags = calc_vm_prot_bits(prot) | calc_vm_flag_bits(flags) |
+			mm->def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
 
 	if (flags & MAP_LOCKED) {
 		if (!capable(CAP_IPC_LOCK))
@@ -704,6 +714,8 @@ unacct_error:
 	return error;
 }
 
+EXPORT_SYMBOL(do_mmap_pgoff);
+
 /* Get an address range which is currently unmapped.
  * For shmat() with addr=0.
  *
@@ -802,6 +814,8 @@ get_unmapped_area(struct file *file, unsigned long addr, unsigned long len,
 	return arch_get_unmapped_area(file, addr, len, pgoff, flags);
 }
 
+EXPORT_SYMBOL(get_unmapped_area);
+
 /* Look up the first VMA which satisfies  addr < vm_end,  NULL if none. */
 struct vm_area_struct * find_vma(struct mm_struct * mm, unsigned long addr)
 {
@@ -837,6 +851,8 @@ struct vm_area_struct * find_vma(struct mm_struct * mm, unsigned long addr)
 	}
 	return vma;
 }
+
+EXPORT_SYMBOL(find_vma);
 
 /* Same as find_vma, but also return a pointer to the previous VMA in *pprev. */
 struct vm_area_struct *
@@ -1159,6 +1175,7 @@ int split_vma(struct mm_struct * mm, struct vm_area_struct * vma,
 	      unsigned long addr, int new_below)
 {
 	struct vm_area_struct *new;
+	struct address_space *mapping = NULL;
 
 	if (mm->map_count >= MAX_MAP_COUNT)
 		return -ENOMEM;
@@ -1172,12 +1189,9 @@ int split_vma(struct mm_struct * mm, struct vm_area_struct * vma,
 
 	INIT_LIST_HEAD(&new->shared);
 
-	if (new_below) {
+	if (new_below)
 		new->vm_end = addr;
-		vma->vm_start = addr;
-		vma->vm_pgoff += ((addr - new->vm_start) >> PAGE_SHIFT);
-	} else {
-		vma->vm_end = addr;
+	else {
 		new->vm_start = addr;
 		new->vm_pgoff += ((addr - vma->vm_start) >> PAGE_SHIFT);
 	}
@@ -1188,7 +1202,25 @@ int split_vma(struct mm_struct * mm, struct vm_area_struct * vma,
 	if (new->vm_ops && new->vm_ops->open)
 		new->vm_ops->open(new);
 
-	insert_vm_struct(mm, new);
+	if (vma->vm_file)
+		 mapping = vma->vm_file->f_dentry->d_inode->i_mapping;
+
+	if (mapping)
+		down(&mapping->i_shared_sem);
+	spin_lock(&mm->page_table_lock);
+
+	if (new_below) {
+		vma->vm_start = addr;
+		vma->vm_pgoff += ((addr - new->vm_start) >> PAGE_SHIFT);
+	} else
+		vma->vm_end = addr;
+
+	__insert_vm_struct(mm, new);
+
+	spin_unlock(&mm->page_table_lock);
+	if (mapping)
+		up(&mapping->i_shared_sem);
+
 	return 0;
 }
 
@@ -1265,6 +1297,8 @@ int do_munmap(struct mm_struct *mm, unsigned long start, size_t len)
 	return 0;
 }
 
+EXPORT_SYMBOL(do_munmap);
+
 asmlinkage long sys_munmap(unsigned long addr, size_t len)
 {
 	int ret;
@@ -1291,6 +1325,9 @@ unsigned long do_brk(unsigned long addr, unsigned long len)
 	len = PAGE_ALIGN(len);
 	if (!len)
 		return addr;
+
+	if ((addr + len) > TASK_SIZE || (addr + len) < addr)
+		return -EINVAL;
 
 	/*
 	 * mlock MCL_FUTURE?
@@ -1361,6 +1398,8 @@ out:
 	}
 	return addr;
 }
+
+EXPORT_SYMBOL(do_brk);
 
 /* Build the RB tree corresponding to the VMA list. */
 void build_mmap_rb(struct mm_struct * mm)

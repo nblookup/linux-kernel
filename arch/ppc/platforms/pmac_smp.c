@@ -3,7 +3,7 @@
  *
  * We support both the old "powersurge" SMP architecture
  * and the current Core99 (G4 PowerMac) machines.
- * 
+ *
  * Note that we don't support the very first rev. of
  * Apple/DayStar 2 CPUs board, the one with the funky
  * watchdog. Hopefully, none of these should be there except
@@ -51,6 +51,7 @@
 #include <asm/time.h>
 #include <asm/open_pic.h>
 #include <asm/cacheflush.h>
+#include <asm/keylargo.h>
 
 /*
  * Powersurge (old powermac SMP) support.
@@ -108,8 +109,15 @@ static volatile u32 *psurge_start;
 /* what sort of powersurge board we have */
 static int psurge_type = PSURGE_NONE;
 
+/* L2 and L3 cache settings to pass from CPU0 to CPU1 */
 volatile static long int core99_l2_cache;
 volatile static long int core99_l3_cache;
+
+/* Timebase freeze GPIO */
+static unsigned int core99_tb_gpio;
+
+/* Sync flag for HW tb sync */
+static volatile int sec_tb_reset = 0;
 
 static void __init
 core99_init_caches(int cpu)
@@ -380,7 +388,6 @@ static void __init smp_psurge_kick_cpu(int nr)
  */
 static void __init psurge_dual_sync_tb(int cpu_nr)
 {
-	static volatile int sec_tb_reset = 0;
 	int t;
 
 	set_dec(tb_ticks_per_jiffy);
@@ -408,8 +415,15 @@ smp_psurge_setup_cpu(int cpu_nr)
 {
 
 	if (cpu_nr == 0) {
-		if (num_online_cpus() < 2)
+		/* If we failed to start the second CPU, we should still
+		 * send it an IPI to start the timebase & DEC or we might
+		 * have them stuck.
+		 */
+		if (num_online_cpus() < 2) {
+			if (psurge_type == PSURGE_DUAL)
+				psurge_set_ipi(1);
 			return;
+		}
 		/* reset the entry point so if we get another intr we won't
 		 * try to startup again */
 		out_be32(psurge_start, 0x100);
@@ -421,19 +435,42 @@ smp_psurge_setup_cpu(int cpu_nr)
 		psurge_dual_sync_tb(cpu_nr);
 }
 
+void __init
+smp_psurge_take_timebase(void)
+{
+	/* Dummy implementation */
+}
+
+void __init
+smp_psurge_give_timebase(void)
+{
+	/* Dummy implementation */
+}
+
 static int __init
 smp_core99_probe(void)
 {
+	extern int powersave_nap;
 	struct device_node *cpus;
 	int i, ncpus = 1;
-	extern int powersave_nap;
+	u32 *tbprop;
 
 	if (ppc_md.progress) ppc_md.progress("smp_core99_probe", 0x345);
 	cpus = find_type_devices("cpu");
-	if (cpus)
-		while ((cpus = cpus->next) != NULL)
-			++ncpus;
+	if (cpus == NULL)
+		return 0;
+
+	tbprop = (u32 *)get_property(cpus, "timebase-enable", NULL);
+	if (tbprop)
+		core99_tb_gpio = *tbprop;
+	else
+		core99_tb_gpio = KL_GPIO_TB_ENABLE;
+
+       	while ((cpus = cpus->next) != NULL)
+	       	++ncpus;
+
 	printk("smp_core99_probe: found %d cpus\n", ncpus);
+
 	if (ncpus > 1) {
 		openpic_request_IPIs();
 		for (i = 1; i < ncpus; ++i)
@@ -461,13 +498,13 @@ smp_core99_kick_cpu(int nr)
 
 	local_irq_save(flags);
 	local_irq_disable();
-	
+
 	/* Save reset vector */
 	save_vector = *vector;
-	
-	/* Setup fake reset vector that does	  
+
+	/* Setup fake reset vector that does	
 	 *   b __secondary_start_psurge - KERNELBASE
-	 */  
+	 */
 	switch(nr) {
 		case 1:
 			new_vector = (unsigned long)__secondary_start_psurge;
@@ -480,24 +517,24 @@ smp_core99_kick_cpu(int nr)
 			break;
 	}
 	*vector = 0x48000002 + new_vector - KERNELBASE;
-	
+
 	/* flush data cache and inval instruction cache */
 	flush_icache_range((unsigned long) vector, (unsigned long) vector + 4);
-	
+
 	/* Put some life in our friend */
 	pmac_call_feature(PMAC_FTR_RESET_CPU, NULL, nr, 0);
-	
+
 	/* FIXME: We wait a bit for the CPU to take the exception, I should
 	 * instead wait for the entry code to set something for me. Well,
 	 * ideally, all that crap will be done in prom.c and the CPU left
 	 * in a RAM-based wait loop like CHRP.
 	 */
 	mdelay(1);
-	
+
 	/* Restore our exception vector */
 	*vector = save_vector;
 	flush_icache_range((unsigned long) vector, (unsigned long) vector + 4);
-	
+
 	local_irq_restore(flags);
 	if (ppc_md.progress) ppc_md.progress("smp_core99_kick_cpu done", 0x347);
 }
@@ -508,7 +545,7 @@ smp_core99_setup_cpu(int cpu_nr)
 	/* Setup some registers */
 	if (cpu_nr != 0)
 		core99_init_caches(cpu_nr);
-	
+
 	/* Setup openpic */
 	do_openpic_setup_cpu();
 
@@ -517,14 +554,59 @@ smp_core99_setup_cpu(int cpu_nr)
 		if (ppc_md.progress) ppc_md.progress("core99_setup_cpu 0 done", 0x349);
 }
 
+void __init
+smp_core99_take_timebase(void)
+{
+	/* Secondary processor "takes" the timebase by freezing
+	 * it, resetting its local TB and telling CPU 0 to go on
+	 */
+	pmac_call_feature(PMAC_FTR_WRITE_GPIO, NULL, core99_tb_gpio, 4);
+	pmac_call_feature(PMAC_FTR_READ_GPIO, NULL, core99_tb_gpio, 0);
+	mb();
+
+	set_dec(tb_ticks_per_jiffy);
+	set_tb(0, 0);
+	last_jiffy_stamp(smp_processor_id()) = 0;
+
+	mb();
+       	sec_tb_reset = 1;
+}
+
+void __init
+smp_core99_give_timebase(void)
+{
+	unsigned int t;
+
+	/* Primary processor waits for secondary to have frozen
+	 * the timebase, resets local TB, and kick timebase again
+	 */
+	/* wait for the secondary to have reset its TB before proceeding */
+	for (t = 1000; t > 0 && !sec_tb_reset; --t)
+		udelay(1000);
+	if (t == 0)
+		printk(KERN_WARNING "Timeout waiting sync on second CPU\n");
+
+       	set_dec(tb_ticks_per_jiffy);
+	set_tb(0, 0);
+	last_jiffy_stamp(smp_processor_id()) = 0;
+	mb();
+
+	/* Now, restart the timebase by leaving the GPIO to an open collector */
+       	pmac_call_feature(PMAC_FTR_WRITE_GPIO, NULL, core99_tb_gpio, 0);
+        pmac_call_feature(PMAC_FTR_READ_GPIO, NULL, core99_tb_gpio, 0);
+
+	smp_tb_synchronized = 1;
+}
+
+
 /* PowerSurge-style Macs */
 struct smp_ops_t psurge_smp_ops __pmacdata = {
 	.message_pass	= smp_psurge_message_pass,
 	.probe		= smp_psurge_probe,
 	.kick_cpu	= smp_psurge_kick_cpu,
 	.setup_cpu	= smp_psurge_setup_cpu,
-	.give_timebase	= smp_generic_give_timebase,
-	.take_timebase	= smp_generic_take_timebase,
+	.give_timebase	= smp_psurge_give_timebase,
+	.take_timebase	= smp_psurge_take_timebase,
 };
 
 /* Core99 Macs (dual G4s) */
@@ -533,6 +615,6 @@ struct smp_ops_t core99_smp_ops __pmacdata = {
 	.probe		= smp_core99_probe,
 	.kick_cpu	= smp_core99_kick_cpu,
 	.setup_cpu	= smp_core99_setup_cpu,
-	.give_timebase	= smp_generic_give_timebase,
-	.take_timebase	= smp_generic_take_timebase,
+	.give_timebase	= smp_core99_give_timebase,
+	.take_timebase	= smp_core99_take_timebase,
 };

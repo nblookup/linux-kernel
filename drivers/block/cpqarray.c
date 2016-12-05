@@ -38,7 +38,6 @@
 #include <linux/init.h>
 #include <linux/hdreg.h>
 #include <linux/spinlock.h>
-#include <linux/blk.h>
 #include <linux/blkdev.h>
 #include <linux/genhd.h>
 #include <asm/uaccess.h>
@@ -100,8 +99,6 @@ static struct board_type products[] = {
 
 static struct gendisk *ida_gendisk[MAX_CTLR][NWD];
 
-static struct proc_dir_entry *proc_array;
-
 /* Debug... */
 #define DBG(s)	do { s } while(0)
 /* Debug (general info)... */
@@ -154,8 +151,6 @@ static void ida_procinit(int i);
 static int ida_proc_get_info(char *buffer, char **start, off_t offset, int length, int *eof, void *data);
 #else
 static void ida_procinit(int i) {}
-static int ida_proc_get_info(char *buffer, char **start, off_t offset,
-			     int length, int *eof, void *data) { return 0;}
 #endif
 
 static inline drv_info_t *get_drv(struct gendisk *disk)
@@ -179,6 +174,8 @@ static struct block_device_operations ida_fops  = {
 
 
 #ifdef CONFIG_PROC_FS
+
+static struct proc_dir_entry *proc_array;
 
 /*
  * Get us a file in /proc/array that says something about each controller.
@@ -303,7 +300,7 @@ static void __exit cpqarray_exit(void)
 		iounmap(hba[i]->vaddr);
 		unregister_blkdev(COMPAQ_SMART2_MAJOR+i, hba[i]->devname);
 		del_timer(&hba[i]->timer);
-		blk_cleanup_queue(&hba[i]->queue);
+		blk_cleanup_queue(hba[i]->queue);
 		remove_proc_entry(hba[i]->devname, proc_array);
 		pci_free_consistent(hba[i]->pci_dev, 
 			NR_CMDS * sizeof(cmdlist_t), (hba[i]->cmd_pool), 
@@ -379,15 +376,20 @@ static int __init cpqarray_init(void)
 		memset(hba[i]->cmd_pool_bits, 0, ((NR_CMDS+BITS_PER_LONG-1)/BITS_PER_LONG)*sizeof(unsigned long));
 		printk(KERN_INFO "cpqarray: Finding drives on %s", 
 			hba[i]->devname);
+
+		spin_lock_init(&hba[i]->lock);
+		q = blk_init_queue(do_ida_request, &hba[i]->lock);
+		if (!q)
+			goto Enomem1;
+
+		hba[i]->queue = q;
+		q->queuedata = hba[i];
+
 		getgeometry(i);
 		start_fwbk(i); 
 
 		ida_procinit(i);
 
-		q = &hba[i]->queue;
-		q->queuedata = hba[i];
-		spin_lock_init(&hba[i]->lock);
-		blk_init_queue(q, do_ida_request, &hba[i]->lock);
 		blk_queue_bounce_limit(q, hba[i]->pci_dev->dma_mask);
 
 		/* This is a hardware imposed limit. */
@@ -414,9 +416,9 @@ static int __init cpqarray_init(void)
 			disk->fops = &ida_fops; 
 			if (j && !drv->nr_blks)
 				continue;
-			hba[i]->queue.hardsect_size = drv->blk_size;
+			blk_queue_hardsect_size(hba[i]->queue, drv->blk_size);
 			set_capacity(disk, drv->nr_blks);
-			disk->queue = &hba[i]->queue;
+			disk->queue = hba[i]->queue;
 			disk->private_data = drv;
 			add_disk(disk);
 		}
@@ -996,7 +998,7 @@ static irqreturn_t do_ida_intr(int irq, void *dev_id, struct pt_regs *regs)
 	/*
 	 * See if we can queue up some more IO
 	 */
-	do_ida_request(&h->queue);
+	do_ida_request(h->queue);
 	spin_unlock_irqrestore(IDA_LOCK(h->ctlr), flags); 
 	return IRQ_HANDLED;
 }
@@ -1074,7 +1076,7 @@ out_passthru:
 		put_user(host->ctlr_sig, (int*)arg);
 		return 0;
 	case IDAREVALIDATEVOLS:
-		if (minor(inode->i_rdev) != 0)
+		if (iminor(inode) != 0)
 			return -ENXIO;
 		return revalidate_allvol(host);
 	case IDADRIVERVERSION:
@@ -1449,9 +1451,9 @@ static int revalidate_allvol(ctlr_info_t *host)
 		drv_info_t *drv = &host->drv[i];
 		if (i && !drv->nr_blks)
 			continue;
-		host->queue.hardsect_size = drv->blk_size;
+		blk_queue_hardsect_size(host->queue, drv->blk_size);
 		set_capacity(disk, drv->nr_blks);
-		disk->queue = &host->queue;
+		disk->queue = host->queue;
 		disk->private_data = drv;
 		if (i)
 			add_disk(disk);

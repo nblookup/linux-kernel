@@ -1,9 +1,27 @@
+/*
+ *  linux/include/asm-arm/page.h
+ *
+ *  Copyright (C) 1995-2003 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
 #ifndef _ASMARM_PAGE_H
 #define _ASMARM_PAGE_H
 
 #include <linux/config.h>
 
+/* PAGE_SHIFT determines the page size */
+#define PAGE_SHIFT		12
+#define PAGE_SIZE		(1UL << PAGE_SHIFT)
+#define PAGE_MASK		(~(PAGE_SIZE-1))
+
 #ifdef __KERNEL__
+
+/* to align the pointer to the (next) page boundary */
+#define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
+
 #ifndef __ASSEMBLY__
 
 #include <asm/glue.h>
@@ -26,7 +44,7 @@
 #undef _USER
 #undef MULTI_USER
 
-#if defined(CONFIG_CPU_ARM610) || defined(CONFIG_CPU_ARM710)
+#ifdef CONFIG_CPU_COPY_V3
 # ifdef _USER
 #  define MULTI_USER 1
 # else
@@ -34,7 +52,7 @@
 # endif
 #endif
 
-#if defined(CONFIG_CPU_ARM720T)
+#ifdef CONFIG_CPU_COPY_V4WT
 # ifdef _USER
 #  define MULTI_USER 1
 # else
@@ -42,9 +60,7 @@
 # endif
 #endif
 
-#if defined(CONFIG_CPU_ARM920T) || defined(CONFIG_CPU_ARM922T) || \
-    defined(CONFIG_CPU_ARM926T) || defined(CONFIG_CPU_SA110)   || \
-    defined(CONFIG_CPU_ARM1020)
+#ifdef CONFIG_CPU_COPY_V4WB
 # ifdef _USER
 #  define MULTI_USER 1
 # else
@@ -52,7 +68,7 @@
 # endif
 #endif
 
-#if defined(CONFIG_CPU_SA1100)
+#ifdef CONFIG_CPU_SA1100
 # ifdef _USER
 #  define MULTI_USER 1
 # else
@@ -60,7 +76,7 @@
 # endif
 #endif
 
-#if defined(CONFIG_CPU_XSCALE)
+#ifdef CONFIG_CPU_XSCALE
 # ifdef _USER
 #  define MULTI_USER 1
 # else
@@ -119,10 +135,12 @@ extern void copy_page(void *to, void *from);
  */
 typedef struct { unsigned long pte; } pte_t;
 typedef struct { unsigned long pmd; } pmd_t;
+typedef struct { unsigned long pgd[2]; } pgd_t;
 typedef struct { unsigned long pgprot; } pgprot_t;
 
 #define pte_val(x)      ((x).pte)
 #define pmd_val(x)      ((x).pmd)
+#define pgd_val(x)	((x).pgd[0])
 #define pgprot_val(x)   ((x).pgprot)
 
 #define __pte(x)        ((pte_t) { (x) } )
@@ -135,10 +153,12 @@ typedef struct { unsigned long pgprot; } pgprot_t;
  */
 typedef unsigned long pte_t;
 typedef unsigned long pmd_t;
+typedef unsigned long pgd_t[2];
 typedef unsigned long pgprot_t;
 
 #define pte_val(x)      (x)
 #define pmd_val(x)      (x)
+#define pgd_val(x)	((x)[0])
 #define pgprot_val(x)   (x)
 
 #define __pte(x)        (x)
@@ -146,19 +166,6 @@ typedef unsigned long pgprot_t;
 #define __pgprot(x)     (x)
 
 #endif /* STRICT_MM_TYPECHECKS */
-#endif /* !__ASSEMBLY__ */
-#endif /* __KERNEL__ */
-
-#include <asm/proc/page.h>
-
-#define PAGE_SIZE		(1UL << PAGE_SHIFT)
-#define PAGE_MASK		(~(PAGE_SIZE-1))
-
-/* to align the pointer to the (next) page boundary */
-#define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
-
-#ifdef __KERNEL__
-#ifndef __ASSEMBLY__
 
 /* Pure 2^n version of get_order */
 static inline int get_order(unsigned long size)

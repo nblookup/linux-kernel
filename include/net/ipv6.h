@@ -51,7 +51,7 @@
 /*
  *	Addr type
  *	
- *	type	-	unicast | multicast | anycast
+ *	type	-	unicast | multicast
  *	scope	-	local	| site	    | global
  *	v4	-	compat
  *	v4mapped
@@ -63,7 +63,6 @@
 
 #define IPV6_ADDR_UNICAST      	0x0001U	
 #define IPV6_ADDR_MULTICAST    	0x0002U	
-#define IPV6_ADDR_ANYCAST	0x0004U
 
 #define IPV6_ADDR_LOOPBACK	0x0010U
 #define IPV6_ADDR_LINKLOCAL	0x0020U
@@ -194,7 +193,7 @@ struct ip6_flowlabel
 	struct in6_addr		dst;
 	struct ipv6_txoptions	*opt;
 	atomic_t		users;
-	u32			linger;
+	unsigned long		linger;
 	u8			share;
 	u32			owner;
 	unsigned long		lastuse;

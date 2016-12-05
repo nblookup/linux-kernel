@@ -5,40 +5,46 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# (C) Copyright 2002, Yoshinori Sato <ysato@users.sourceforge.jp>
+# (C) Copyright 2002,2003 Yoshinori Sato <ysato@users.sourceforge.jp>
 #
 ifndef include-config
 -include $(TOPDIR)/.config
 endif
 
 platform-$(CONFIG_CPU_H8300H)	:= h8300h
+platform-$(CONFIG_CPU_H8S)	:= h8s
 PLATFORM := $(platform-y)
 
 board-$(CONFIG_H8300H_GENERIC)		:= generic
-board-$(CONFIG_H8300H_AKI3068NET)	:= ucsimm
-board-$(CONFIG_H8300H_H8MAX)		:= ucdimm
+board-$(CONFIG_H8300H_AKI3068NET)	:= aki3068net
+board-$(CONFIG_H8300H_H8MAX)		:= h8max
 board-$(CONFIG_H8300H_SIM)		:= generic
+board-$(CONFIG_H8S_GENERIC)		:= generic
+board-$(CONFIG_H8S_EDOSK2674)		:= edosk2674
+board-$(CONFIG_H8S_SIM)			:= generic
 BOARD := $(board-y)
 
 model-$(CONFIG_RAMKERNEL)	:= ram
 model-$(CONFIG_ROMKERNEL)	:= rom
 MODEL := $(model-y)
 
-cflags-$(CONFIG_CPU_H8300H)		:= -mh
+cflags-$(CONFIG_CPU_H8300H)	:= -mh
 ldflags-$(CONFIG_CPU_H8300H)	:= -mh8300helf
+cflags-$(CONFIG_CPU_H8S)	:= -ms
+ldflags-$(CONFIG_CPU_H8S)	:= -mh8300self
 
 CFLAGS += $(cflags-y)
-CFLAGS += -mint32 -fno-builtin
-CFLAGS += -O2 -g
+CFLAGS += -mint32 -fno-builtin -Os
+CFLAGS += -g
 CFLAGS += -D__linux__
-CFLAGS += -DUTS_SYSNAME=\"uClinux\" -DTARGET=$(BOARD)
-AFLAGS += -DPLATFORM=$(PLATFORM) -DTARGET=$(BOARD) -DMODEL=$(MODEL) $(cflags-y)
+CFLAGS += -DUTS_SYSNAME=\"uClinux\"
+AFLAGS += -DPLATFORM=$(PLATFORM) -DMODEL=$(MODEL) $(cflags-y)
 LDFLAGS += $(ldflags-y)
-LDFLAGS_BLOB :=  --format binary --oformat elf32-h8300
 
 CROSS_COMPILE = h8300-elf-
-#HEAD := arch/$(ARCH)/platform/$(platform-y)/$(board-y)/crt0_$(model-y).o
 LIBGCC := $(shell $(CROSS-COMPILE)$(CC) $(CFLAGS) -print-libgcc-file-name)
+
+head-y := arch/$(ARCH)/platform/$(platform-y)/$(board-y)/crt0_$(model-y).o
 
 core-y	+= arch/$(ARCH)/kernel/ \
 	   arch/$(ARCH)/mm/ \
@@ -47,15 +53,32 @@ core-y	+= arch/$(ARCH)/kernel/ \
 
 libs-y	+= arch/$(ARCH)/lib/ $(LIBGCC)
 
-export MODEL
+boot := arch/h8300/boot
+
+export MODEL PLATFORM BOARD
 
 archmrproper:
 
 archclean:
-	$(call descend arch/$(ARCH), subdirclean)
+	$(Q)$(MAKE) $(clean)=$(boot)
 
-prepare: include/asm-$(ARCH)/asm-offsets.h
+prepare: include/asm-$(ARCH)/machine-depend.h include/asm-$(ARCH)/asm-offsets.h
+
+include/asm-$(ARCH)/machine-depend.h: include/asm-$(ARCH)/$(BOARD)/machine-depend.h
+	$(Q)ln -sf $(BOARD)/machine-depend.h \
+                   include/asm-$(ARCH)/machine-depend.h
+	@echo '  Create include/asm-$(ARCH)/machine-depend.h'
 
 include/asm-$(ARCH)/asm-offsets.h: arch/$(ARCH)/kernel/asm-offsets.s \
 				   include/asm include/linux/version.h
 	$(call filechk,gen-asm-offsets)
+
+vmlinux.srec vmlinux.bin: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
+
+define archhelp
+  echo  'vmlinux.bin  - Create raw binary'
+  echo  'vmlinux.srec - Create srec binary'
+endef
+
+CLEAN_FILES += include/asm-$(ARCH)/asm-offsets.h include/asm-$(ARCH)/machine-depend.h

@@ -36,69 +36,63 @@ static void nr_t2timer_expiry(unsigned long);
 static void nr_t4timer_expiry(unsigned long);
 static void nr_idletimer_expiry(unsigned long);
 
+void nr_init_timers(struct sock *sk)
+{
+	nr_cb *nr = nr_sk(sk);
+
+	init_timer(&nr->t1timer);
+	nr->t1timer.data     = (unsigned long)sk;
+	nr->t1timer.function = &nr_t1timer_expiry;
+	
+	init_timer(&nr->t2timer);
+	nr->t2timer.data     = (unsigned long)sk;
+	nr->t2timer.function = &nr_t2timer_expiry;
+
+	init_timer(&nr->t4timer);
+	nr->t4timer.data     = (unsigned long)sk;
+	nr->t4timer.function = &nr_t4timer_expiry;
+
+	init_timer(&nr->idletimer);
+	nr->idletimer.data     = (unsigned long)sk;
+	nr->idletimer.function = &nr_idletimer_expiry;
+
+	/* initialized by sock_init_data */
+	sk->sk_timer.data     = (unsigned long)sk;
+	sk->sk_timer.function = &nr_heartbeat_expiry;
+}
+
 void nr_start_t1timer(struct sock *sk)
 {
 	nr_cb *nr = nr_sk(sk);
 
-	del_timer(&nr->t1timer);
-
-	nr->t1timer.data     = (unsigned long)sk;
-	nr->t1timer.function = &nr_t1timer_expiry;
-	nr->t1timer.expires  = jiffies + nr->t1;
-
-	add_timer(&nr->t1timer);
+	mod_timer(&nr->t1timer, jiffies + nr->t1);
 }
 
 void nr_start_t2timer(struct sock *sk)
 {
 	nr_cb *nr = nr_sk(sk);
 
-	del_timer(&nr->t2timer);
-
-	nr->t2timer.data     = (unsigned long)sk;
-	nr->t2timer.function = &nr_t2timer_expiry;
-	nr->t2timer.expires  = jiffies + nr->t2;
-
-	add_timer(&nr->t2timer);
+	mod_timer(&nr->t2timer, jiffies + nr->t2);
 }
 
 void nr_start_t4timer(struct sock *sk)
 {
 	nr_cb *nr = nr_sk(sk);
 
-	del_timer(&nr->t4timer);
-
-	nr->t4timer.data     = (unsigned long)sk;
-	nr->t4timer.function = &nr_t4timer_expiry;
-	nr->t4timer.expires  = jiffies + nr->t4;
-
-	add_timer(&nr->t4timer);
+	mod_timer(&nr->t4timer, jiffies + nr->t4);
 }
 
 void nr_start_idletimer(struct sock *sk)
 {
 	nr_cb *nr = nr_sk(sk);
 
-	del_timer(&nr->idletimer);
-
-	if (nr->idle > 0) {
-		nr->idletimer.data     = (unsigned long)sk;
-		nr->idletimer.function = &nr_idletimer_expiry;
-		nr->idletimer.expires  = jiffies + nr->idle;
-
-		add_timer(&nr->idletimer);
-	}
+	if (nr->idle > 0)
+		mod_timer(&nr->idletimer, jiffies + nr->idle);
 }
 
 void nr_start_heartbeat(struct sock *sk)
 {
-	del_timer(&sk->sk_timer);
-
-	sk->sk_timer.data     = (unsigned long)sk;
-	sk->sk_timer.function = &nr_heartbeat_expiry;
-	sk->sk_timer.expires  = jiffies + 5 * HZ;
-
-	add_timer(&sk->sk_timer);
+	mod_timer(&sk->sk_timer, jiffies + 5 * HZ);
 }
 
 void nr_stop_t1timer(struct sock *sk)
@@ -143,7 +137,10 @@ static void nr_heartbeat_expiry(unsigned long param)
 		   is accepted() it isn't 'dead' so doesn't get removed. */
 		if (sock_flag(sk, SOCK_DESTROY) ||
 		    (sk->sk_state == TCP_LISTEN && sock_flag(sk, SOCK_DEAD))) {
+			sock_hold(sk);
 			nr_destroy_socket(sk);
+			bh_unlock_sock(sk);
+			sock_put(sk);
 			return;
 		}
 		break;
@@ -227,6 +224,7 @@ static void nr_t1timer_expiry(unsigned long param)
 	case NR_STATE_1:
 		if (nr->n2count == nr->n2) {
 			nr_disconnect(sk, ETIMEDOUT);
+			bh_unlock_sock(sk);
 			return;
 		} else {
 			nr->n2count++;
@@ -237,6 +235,7 @@ static void nr_t1timer_expiry(unsigned long param)
 	case NR_STATE_2:
 		if (nr->n2count == nr->n2) {
 			nr_disconnect(sk, ETIMEDOUT);
+			bh_unlock_sock(sk);
 			return;
 		} else {
 			nr->n2count++;
@@ -247,6 +246,7 @@ static void nr_t1timer_expiry(unsigned long param)
 	case NR_STATE_3:
 		if (nr->n2count == nr->n2) {
 			nr_disconnect(sk, ETIMEDOUT);
+			bh_unlock_sock(sk);
 			return;
 		} else {
 			nr->n2count++;

@@ -59,7 +59,6 @@
 #include "xfs_bmap.h"
 #include "xfs_acl.h"
 #include "xfs_mac.h"
-#include "xfs_attr.h"
 #include "xfs_error.h"
 #include "xfs_buf_item.h"
 #include "xfs_rw.h"
@@ -87,17 +86,17 @@ xfs_write_clear_setuid(
 	xfs_ilock(ip, XFS_ILOCK_EXCL);
 	xfs_trans_ijoin(tp, ip, XFS_ILOCK_EXCL);
 	xfs_trans_ihold(tp, ip);
-	ip->i_d.di_mode &= ~ISUID;
+	ip->i_d.di_mode &= ~S_ISUID;
 
 	/*
 	 * Note that we don't have to worry about mandatory
 	 * file locking being disabled here because we only
-	 * clear the ISGID bit if the Group execute bit is
+	 * clear the S_ISGID bit if the Group execute bit is
 	 * on, but if it was on then mandatory locking wouldn't
 	 * have been enabled.
 	 */
-	if (ip->i_d.di_mode & (IEXEC >> 3)) {
-		ip->i_d.di_mode &= ~ISGID;
+	if (ip->i_d.di_mode & S_IXGRP) {
+		ip->i_d.di_mode &= ~S_ISGID;
 	}
 	xfs_trans_log_inode(tp, ip, XFS_ILOG_CORE);
 	xfs_trans_set_sync(tp);
@@ -261,10 +260,10 @@ xfs_ioerror_alert(
 	xfs_daddr_t		blkno)
 {
 	cmn_err(CE_ALERT,
- "I/O error in filesystem (\"%s\") meta-data dev 0x%x block 0x%llx"
+ "I/O error in filesystem (\"%s\") meta-data dev %s block 0x%llx"
  "       (\"%s\") error %d buf count %u",
 		(!mp || !mp->m_fsname) ? "(fs name not set)" : mp->m_fsname,
-		XFS_BUF_TARGET_DEV(bp),
+		XFS_BUFTARG_NAME(bp->pb_target),
 		(__uint64_t)blkno,
 		func,
 		XFS_BUF_GETERROR(bp),

@@ -1,6 +1,9 @@
 #ifndef _LINUX_EISA_H
 #define _LINUX_EISA_H
 
+#include <linux/ioport.h>
+#include <linux/device.h>
+
 #define EISA_SIG_LEN   8
 #define EISA_MAX_SLOTS 8
 
@@ -42,6 +45,9 @@ struct eisa_device {
 	struct resource       res[EISA_MAX_RESOURCES];
 	u64                   dma_mask;
 	struct device         dev; /* generic device */
+#ifdef CONFIG_EISA_NAMES
+	char		      pretty_name[DEVICE_NAME_SIZE];
+#endif
 };
 
 #define to_eisa_device(n) container_of(n, struct eisa_device, dev)
@@ -91,5 +97,11 @@ struct eisa_root_device {
 };
 
 int eisa_root_register (struct eisa_root_device *root);
+
+#ifdef CONFIG_EISA
+extern int EISA_bus;
+#else
+# define EISA_bus 0
+#endif
 
 #endif

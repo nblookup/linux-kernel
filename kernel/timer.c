@@ -20,6 +20,7 @@
  */
 
 #include <linux/kernel_stat.h>
+#include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/percpu.h>
 #include <linux/init.h>
@@ -144,42 +145,77 @@ static void internal_add_timer(tvec_base_t *base, struct timer_list *timer)
 	list_add_tail(&timer->entry, vec);
 }
 
-/***
- * add_timer - start a timer
- * @timer: the timer to be added
- *
- * The kernel will do a ->function(->data) callback from the
- * timer interrupt at the ->expired point in the future. The
- * current time is 'jiffies'.
- *
- * The timer's ->expired, ->function (and if the handler uses it, ->data)
- * fields must be set prior calling this function.
- *
- * Timers with an ->expired field in the past will be executed in the next
- * timer tick. It's illegal to add an already pending timer.
- */
-void add_timer(struct timer_list *timer)
+int __mod_timer(struct timer_list *timer, unsigned long expires)
 {
-	tvec_base_t *base = &get_cpu_var(tvec_bases);
-  	unsigned long flags;
-  
-  	BUG_ON(timer_pending(timer) || !timer->function);
+	tvec_base_t *old_base, *new_base;
+	unsigned long flags;
+	int ret = 0;
+
+	BUG_ON(!timer->function);
 
 	check_timer(timer);
 
-	spin_lock_irqsave(&base->lock, flags);
-	internal_add_timer(base, timer);
-	timer->base = base;
-	spin_unlock_irqrestore(&base->lock, flags);
-	put_cpu_var(tvec_bases);
+	spin_lock_irqsave(&timer->lock, flags);
+	new_base = &__get_cpu_var(tvec_bases);
+repeat:
+	old_base = timer->base;
+
+	/*
+	 * Prevent deadlocks via ordering by old_base < new_base.
+	 */
+	if (old_base && (new_base != old_base)) {
+		if (old_base < new_base) {
+			spin_lock(&new_base->lock);
+			spin_lock(&old_base->lock);
+		} else {
+			spin_lock(&old_base->lock);
+			spin_lock(&new_base->lock);
+		}
+		/*
+		 * The timer base might have been cancelled while we were
+		 * trying to take the lock(s):
+		 */
+		if (timer->base != old_base) {
+			spin_unlock(&new_base->lock);
+			spin_unlock(&old_base->lock);
+			goto repeat;
+		}
+	} else {
+		spin_lock(&new_base->lock);
+		if (timer->base != old_base) {
+			spin_unlock(&new_base->lock);
+			goto repeat;
+		}
+	}
+
+	/*
+	 * Delete the previous timeout (if there was any), and install
+	 * the new one:
+	 */
+	if (old_base) {
+		list_del(&timer->entry);
+		ret = 1;
+	}
+	timer->expires = expires;
+	internal_add_timer(new_base, timer);
+	timer->base = new_base;
+
+	if (old_base && (new_base != old_base))
+		spin_unlock(&old_base->lock);
+	spin_unlock(&new_base->lock);
+	spin_unlock_irqrestore(&timer->lock, flags);
+
+	return ret;
 }
+
+EXPORT_SYMBOL(__mod_timer);
 
 /***
  * add_timer_on - start a timer on a particular CPU
  * @timer: the timer to be added
  * @cpu: the CPU to start it on
  *
- * This is not very scalable on SMP.
+ * This is not very scalable on SMP. Double adds are not possible.
  */
 void add_timer_on(struct timer_list *timer, int cpu)
 {
@@ -217,10 +253,6 @@ void add_timer_on(struct timer_list *timer, int cpu)
  */
 int mod_timer(struct timer_list *timer, unsigned long expires)
 {
-	tvec_base_t *old_base, *new_base;
-	unsigned long flags;
-	int ret = 0;
-
 	BUG_ON(!timer->function);
 
 	check_timer(timer);
@@ -233,53 +265,10 @@ int mod_timer(struct timer_list *timer, unsigned long expires)
 	if (timer->expires == expires && timer_pending(timer))
 		return 1;
 
-	spin_lock_irqsave(&timer->lock, flags);
-	new_base = &__get_cpu_var(tvec_bases);
-repeat:
-	old_base = timer->base;
-
-	/*
-	 * Prevent deadlocks via ordering by old_base < new_base.
-	 */
-	if (old_base && (new_base != old_base)) {
-		if (old_base < new_base) {
-			spin_lock(&new_base->lock);
-			spin_lock(&old_base->lock);
-		} else {
-			spin_lock(&old_base->lock);
-			spin_lock(&new_base->lock);
-		}
-		/*
-		 * The timer base might have been cancelled while we were
-		 * trying to take the lock(s):
-		 */
-		if (timer->base != old_base) {
-			spin_unlock(&new_base->lock);
-			spin_unlock(&old_base->lock);
-			goto repeat;
-		}
-	} else
-		spin_lock(&new_base->lock);
-
-	/*
-	 * Delete the previous timeout (if there was any), and install
-	 * the new one:
-	 */
-	if (old_base) {
-		list_del(&timer->entry);
-		ret = 1;
-	}
-	timer->expires = expires;
-	internal_add_timer(new_base, timer);
-	timer->base = new_base;
-
-	if (old_base && (new_base != old_base))
-		spin_unlock(&old_base->lock);
-	spin_unlock(&new_base->lock);
-	spin_unlock_irqrestore(&timer->lock, flags);
-
-	return ret;
+	return __mod_timer(timer, expires);
 }
+
+EXPORT_SYMBOL(mod_timer);
 
 /***
  * del_timer - deactive a timer.
@@ -314,6 +303,8 @@ repeat:
 
 	return 1;
 }
+
+EXPORT_SYMBOL(del_timer);
 
 #ifdef CONFIG_SMP
 /***
@@ -354,13 +345,15 @@ del_again:
 			break;
 		}
 	}
+	smp_rmb();
 	if (timer_pending(timer))
 		goto del_again;
 
 	return ret;
 }
-#endif
 
+EXPORT_SYMBOL(del_timer_sync);
+#endif
 
 static int cascade(tvec_base_t *base, tvec_t *tv, int index)
 {
@@ -425,8 +418,9 @@ repeat:
  			data = timer->data;
 
 			list_del(&timer->entry);
-			timer->base = NULL;
 			set_running_timer(base, timer);
+			smp_wmb();
+			timer->base = NULL;
 			spin_unlock_irq(&base->lock);
 			fn(data);
 			spin_lock_irq(&base->lock);
@@ -456,6 +450,8 @@ unsigned long tick_nsec = TICK_NSEC;		/* ACTHZ period (nsec) */
 struct timespec xtime __attribute__ ((aligned (16)));
 struct timespec wall_to_monotonic __attribute__ ((aligned (16)));
 
+EXPORT_SYMBOL(xtime);
+
 /* Don't completely fail for HZ > 500.  */
 int tickadj = 500/HZ ? : 1;		/* microsecs */
 
@@ -478,6 +474,7 @@ long time_freq = (((NSEC_PER_SEC + HZ/2) % HZ - HZ/2) << SHIFT_USEC) / NSEC_PER_
 long time_adj;				/* tick adjust (scaled 1 / HZ)	*/
 long time_reftime;			/* time at last adjustment (s)	*/
 long time_adjust;
+long time_next_adjust;
 
 /*
  * this routine handles the overflow of the microsecond field
@@ -606,6 +603,15 @@ static void second_overflow(void)
     else
 	time_adj += (time_adj >> 2) + (time_adj >> 5);
 #endif
+#if HZ == 1000
+    /* Compensate for (HZ==1000) != (1 << SHIFT_HZ).
+     * Add 1.5625% and 0.78125% to get 1023.4375; => only 0.05% error (p. 14)
+     */
+    if (time_adj < 0)
+	time_adj -= (-time_adj >> 6) + (-time_adj >> 7);
+    else
+	time_adj += (time_adj >> 6) + (time_adj >> 7);
+#endif
 }
 
 /* in the NTP reference this is called "hardclock()" */
@@ -649,6 +655,12 @@ static void update_wall_time_one_tick(void)
 	}
 	xtime.tv_nsec += delta_nsec;
 	time_interpolator_update(delta_nsec);
+
+	/* Changes by adjtime() do not take effect till next tick. */
+	if (time_next_adjust != 0) {
+		time_adjust = time_next_adjust;
+		time_next_adjust = 0;
+	}
 }
 
 /*
@@ -785,6 +797,8 @@ unsigned long wall_jiffies = INITIAL_JIFFIES;
  */
 #ifndef ARCH_HAVE_XTIME_LOCK
 seqlock_t xtime_lock __cacheline_aligned_in_smp = SEQLOCK_UNLOCKED;
+
+EXPORT_SYMBOL(xtime_lock);
 #endif
 
 /*
@@ -840,8 +854,6 @@ void do_timer(struct pt_regs *regs)
 }
 
 #if !defined(__alpha__) && !defined(__ia64__)
-
-extern int do_setitimer(int, struct itimerval *, struct itimerval *);
 
 /*
  * For backwards compatibility?  This can be done in libc so Alpha
@@ -1040,12 +1052,13 @@ signed long schedule_timeout(signed long timeout)
 	return timeout < 0 ? 0 : timeout;
 }
 
+EXPORT_SYMBOL(schedule_timeout);
+
 /* Thread ID - the internal kernel "pid" */
 asmlinkage long sys_gettid(void)
 {
 	return current->pid;
 }
-#ifndef FOLD_NANO_SLEEP_INTO_CLOCK_NANO_SLEEP
 
 static long nanosleep_restart(struct restart_block *restart)
 {
@@ -1104,7 +1117,6 @@ asmlinkage long sys_nanosleep(struct timespec *rqtp, struct timespec *rmtp)
 	}
 	return ret;
 }
-#endif // ! FOLD_NANO_SLEEP_INTO_CLOCK_NANO_SLEEP
 
 /*
  * sys_sysinfo - fill in sysinfo struct

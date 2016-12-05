@@ -28,11 +28,13 @@ extern void __setup_cpu_7400(unsigned long offset, int cpu_nr, struct cpu_spec* 
 extern void __setup_cpu_7410(unsigned long offset, int cpu_nr, struct cpu_spec* spec);
 extern void __setup_cpu_745x(unsigned long offset, int cpu_nr, struct cpu_spec* spec);
 extern void __setup_cpu_power3(unsigned long offset, int cpu_nr, struct cpu_spec* spec);
+extern void __setup_cpu_power4(unsigned long offset, int cpu_nr, struct cpu_spec* spec);
+extern void __setup_cpu_ppc970(unsigned long offset, int cpu_nr, struct cpu_spec* spec);
 extern void __setup_cpu_8xx(unsigned long offset, int cpu_nr, struct cpu_spec* spec);
 extern void __setup_cpu_generic(unsigned long offset, int cpu_nr, struct cpu_spec* spec);
 
 #define CLASSIC_PPC (!defined(CONFIG_8xx) && !defined(CONFIG_4xx) && \
-		     !defined(CONFIG_POWER3))
+		     !defined(CONFIG_POWER3) && !defined(CONFIG_POWER4))
 
 /* This table only contains "desktop" CPUs, it need to be filled with embedded
  * ones as well...
@@ -44,9 +46,11 @@ extern void __setup_cpu_generic(unsigned long offset, int cpu_nr, struct cpu_spe
  * support
  */
 #ifdef CONFIG_ALTIVEC
-#define CPU_FTR_ALTIVEC_COMP	CPU_FTR_ALTIVEC
+#define CPU_FTR_ALTIVEC_COMP		CPU_FTR_ALTIVEC
+#define PPC_FEATURE_ALTIVEC_COMP    	PPC_FEATURE_HAS_ALTIVEC  
 #else
-#define CPU_FTR_ALTIVEC_COMP	0
+#define CPU_FTR_ALTIVEC_COMP		0
+#define PPC_FEATURE_ALTIVEC_COMP       	0
 #endif
 
 struct cpu_spec	cpu_specs[] = {
@@ -154,6 +158,15 @@ struct cpu_spec	cpu_specs[] = {
 	32, 32,
 	__setup_cpu_750cx
     },
+    {	/* 750FX rev 1.x */
+    	0xffffff00, 0x70000100, "750FX",
+    	CPU_FTR_SPLIT_ID_CACHE | CPU_FTR_CAN_DOZE | CPU_FTR_USE_TB |
+	CPU_FTR_L2CR | CPU_FTR_TAU | CPU_FTR_HPTE_TABLE | CPU_FTR_CAN_NAP |
+	CPU_FTR_DUAL_PLL_750FX | CPU_FTR_NO_DPM,
+	COMMON_PPC,
+	32, 32,
+	__setup_cpu_750
+    },
     {	/* 750FX rev 2.0 must disable HID0[DPM] */
     	0xffffffff, 0x70000200, "750FX",
     	CPU_FTR_SPLIT_ID_CACHE | CPU_FTR_CAN_DOZE | CPU_FTR_USE_TB |
@@ -172,7 +185,7 @@ struct cpu_spec	cpu_specs[] = {
 	32, 32,
 	__setup_cpu_750fx
     },
- 
+
     {	/* 740/750 (L2CR bit need fixup for 740) */
     	0xffff0000, 0x00080000, "740/750",
     	CPU_FTR_SPLIT_ID_CACHE | CPU_FTR_CAN_DOZE | CPU_FTR_USE_TB |
@@ -186,7 +199,7 @@ struct cpu_spec	cpu_specs[] = {
     	CPU_FTR_SPLIT_ID_CACHE | CPU_FTR_CAN_DOZE | CPU_FTR_USE_TB |
 	CPU_FTR_L2CR | CPU_FTR_ALTIVEC_COMP | CPU_FTR_HPTE_TABLE |
 	CPU_FTR_CAN_NAP,
-	COMMON_PPC | PPC_FEATURE_HAS_ALTIVEC,
+	COMMON_PPC | PPC_FEATURE_ALTIVEC_COMP,
 	32, 32,
 	__setup_cpu_7400
     },
@@ -195,7 +208,7 @@ struct cpu_spec	cpu_specs[] = {
     	CPU_FTR_SPLIT_ID_CACHE | CPU_FTR_CAN_DOZE | CPU_FTR_USE_TB |
 	CPU_FTR_L2CR | CPU_FTR_TAU | CPU_FTR_ALTIVEC_COMP | CPU_FTR_HPTE_TABLE |
 	CPU_FTR_CAN_NAP,
-	COMMON_PPC | PPC_FEATURE_HAS_ALTIVEC,
+	COMMON_PPC | PPC_FEATURE_ALTIVEC_COMP,
 	32, 32,
 	__setup_cpu_7400
     },
@@ -204,7 +217,7 @@ struct cpu_spec	cpu_specs[] = {
     	CPU_FTR_SPLIT_ID_CACHE | CPU_FTR_CAN_DOZE | CPU_FTR_USE_TB |
 	CPU_FTR_L2CR | CPU_FTR_TAU | CPU_FTR_ALTIVEC_COMP | CPU_FTR_HPTE_TABLE |
 	CPU_FTR_CAN_NAP,
-	COMMON_PPC | PPC_FEATURE_HAS_ALTIVEC,
+	COMMON_PPC | PPC_FEATURE_ALTIVEC_COMP,
 	32, 32,
 	__setup_cpu_7410
     },
@@ -213,7 +226,7 @@ struct cpu_spec	cpu_specs[] = {
     	CPU_FTR_SPLIT_ID_CACHE | CPU_FTR_USE_TB |
 	CPU_FTR_L2CR | CPU_FTR_ALTIVEC_COMP | CPU_FTR_L3CR |
 	CPU_FTR_HPTE_TABLE | CPU_FTR_SPEC7450,
-	COMMON_PPC | PPC_FEATURE_HAS_ALTIVEC,
+	COMMON_PPC | PPC_FEATURE_ALTIVEC_COMP,
 	32, 32,
 	__setup_cpu_745x
     },
@@ -223,7 +236,7 @@ struct cpu_spec	cpu_specs[] = {
 	CPU_FTR_L2CR | CPU_FTR_ALTIVEC_COMP | CPU_FTR_L3CR |
 	CPU_FTR_HPTE_TABLE | CPU_FTR_SPEC7450 | CPU_FTR_NAP_DISABLE_L2_PR |
 	CPU_FTR_L3_DISABLE_NAP,
-	COMMON_PPC | PPC_FEATURE_HAS_ALTIVEC,
+	COMMON_PPC | PPC_FEATURE_ALTIVEC_COMP,
 	32, 32,
 	__setup_cpu_745x
     },
@@ -232,7 +245,7 @@ struct cpu_spec	cpu_specs[] = {
     	CPU_FTR_SPLIT_ID_CACHE | CPU_FTR_USE_TB | CPU_FTR_CAN_NAP |
 	CPU_FTR_L2CR | CPU_FTR_ALTIVEC_COMP | CPU_FTR_L3CR |
 	CPU_FTR_HPTE_TABLE | CPU_FTR_SPEC7450 | CPU_FTR_NAP_DISABLE_L2_PR,
-	COMMON_PPC | PPC_FEATURE_HAS_ALTIVEC,
+	COMMON_PPC | PPC_FEATURE_ALTIVEC_COMP,
 	32, 32,
 	__setup_cpu_745x
     },
@@ -241,7 +254,7 @@ struct cpu_spec	cpu_specs[] = {
     	CPU_FTR_SPLIT_ID_CACHE | CPU_FTR_USE_TB |
 	CPU_FTR_L2CR | CPU_FTR_ALTIVEC_COMP | CPU_FTR_L3CR |
 	CPU_FTR_HPTE_TABLE | CPU_FTR_SPEC7450 | CPU_FTR_HAS_HIGH_BATS,
-	COMMON_PPC | PPC_FEATURE_HAS_ALTIVEC,
+	COMMON_PPC | PPC_FEATURE_ALTIVEC_COMP,
 	32, 32,
 	__setup_cpu_745x
     },
@@ -251,7 +264,7 @@ struct cpu_spec	cpu_specs[] = {
 	CPU_FTR_L2CR | CPU_FTR_ALTIVEC_COMP | CPU_FTR_L3CR |
 	CPU_FTR_HPTE_TABLE | CPU_FTR_SPEC7450 | CPU_FTR_NAP_DISABLE_L2_PR |
 	CPU_FTR_L3_DISABLE_NAP | CPU_FTR_HAS_HIGH_BATS,
-	COMMON_PPC | PPC_FEATURE_HAS_ALTIVEC,
+	COMMON_PPC | PPC_FEATURE_ALTIVEC_COMP,
 	32, 32,
 	__setup_cpu_745x
     },
@@ -261,7 +274,7 @@ struct cpu_spec	cpu_specs[] = {
 	CPU_FTR_L2CR | CPU_FTR_ALTIVEC_COMP | CPU_FTR_L3CR |
 	CPU_FTR_HPTE_TABLE | CPU_FTR_SPEC7450 | CPU_FTR_NAP_DISABLE_L2_PR |
 	CPU_FTR_HAS_HIGH_BATS,
-	COMMON_PPC | PPC_FEATURE_HAS_ALTIVEC,
+	COMMON_PPC | PPC_FEATURE_ALTIVEC_COMP,
 	32, 32,
 	__setup_cpu_745x
     },
@@ -271,7 +284,7 @@ struct cpu_spec	cpu_specs[] = {
 	CPU_FTR_L2CR | CPU_FTR_ALTIVEC_COMP | CPU_FTR_L3CR |
 	CPU_FTR_HPTE_TABLE | CPU_FTR_SPEC7450 | CPU_FTR_NAP_DISABLE_L2_PR |
 	CPU_FTR_HAS_HIGH_BATS,
-	COMMON_PPC | PPC_FEATURE_HAS_ALTIVEC,
+	COMMON_PPC | PPC_FEATURE_ALTIVEC_COMP,
 	32, 32,
 	__setup_cpu_745x
     },
@@ -289,7 +302,7 @@ struct cpu_spec	cpu_specs[] = {
 	32, 32,
 	__setup_cpu_generic
     },
-#endif /* CLASSIC_PPC */    
+#endif /* CLASSIC_PPC */
 #ifdef CONFIG_PPC64BRIDGE
     {	/* Power3 */
     	0xffff0000, 0x00400000, "Power3 (630)",
@@ -319,7 +332,24 @@ struct cpu_spec	cpu_specs[] = {
 		128, 128,
 		__setup_cpu_power3
 	},
-#endif /* CONFIG_PPC64BRIDGE */    
+#endif /* CONFIG_PPC64BRIDGE */
+#ifdef CONFIG_POWER4
+    {	/* Power4 */
+    	0xffff0000, 0x00350000, "Power4",
+    	CPU_FTR_SPLIT_ID_CACHE | CPU_FTR_USE_TB | CPU_FTR_HPTE_TABLE,
+    	COMMON_PPC | PPC_FEATURE_64,
+	128, 128,
+	__setup_cpu_power4
+    },
+    {	/* PPC970 */
+	0xffff0000, 0x00390000, "PPC970",
+	CPU_FTR_SPLIT_ID_CACHE | CPU_FTR_USE_TB | CPU_FTR_HPTE_TABLE |
+	CPU_FTR_ALTIVEC_COMP | CPU_FTR_CAN_NAP,
+	COMMON_PPC | PPC_FEATURE_64 | PPC_FEATURE_ALTIVEC_COMP,
+	128, 128,
+	__setup_cpu_ppc970
+    },
+#endif /* CONFIG_POWER4 */
 #ifdef CONFIG_8xx
     {	/* 8xx */
     	0xffff0000, 0x00500000, "8xx",
@@ -424,7 +454,7 @@ struct cpu_spec	cpu_specs[] = {
      },
 
 #endif /* CONFIG_40x */
-#ifdef CONFIG_440
+#ifdef CONFIG_44x
     { /* 440GP Rev. B */
         0xf0000fff, 0x40000440, "440GP Rev. B",
         CPU_FTR_SPLIT_ID_CACHE | CPU_FTR_USE_TB,
@@ -439,7 +469,14 @@ struct cpu_spec	cpu_specs[] = {
         32, 32,
         0, /*__setup_cpu_440 */
     },
-#endif /* CONFIG_440 */
+    { /* 440GX Rev. A */
+        0xf0000fff, 0x50000850, "440GX Rev. A",
+        CPU_FTR_SPLIT_ID_CACHE | CPU_FTR_USE_TB,
+        PPC_FEATURE_32 | PPC_FEATURE_HAS_MMU,
+        32, 32,
+        0, /*__setup_cpu_440 */
+    },
+#endif /* CONFIG_44x */
 #if !CLASSIC_PPC
     {	/* default match */
     	0x00000000, 0x00000000, "(generic PPC)",

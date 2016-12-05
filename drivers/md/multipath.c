@@ -29,7 +29,6 @@
 #define MAJOR_NR MD_MAJOR
 #define MD_DRIVER
 #define MD_PERSONALITY
-#define DEVICE_NR(device) (minor(device))
 
 #define MAX_WORK_PER_DISK 128
 
@@ -179,6 +178,7 @@ static int multipath_make_request (request_queue_t *q, struct bio * bio)
 
 	mp_bh->bio = *bio;
 	mp_bh->bio.bi_bdev = multipath->rdev->bdev;
+	mp_bh->bio.bi_rw |= (1 << BIO_RW_FAILFAST);
 	mp_bh->bio.bi_end_io = multipath_end_request;
 	mp_bh->bio.bi_private = mp_bh;
 	generic_make_request(&mp_bh->bio);
@@ -271,6 +271,8 @@ static int multipath_add_disk(mddev_t *mddev, mdk_rdev_t *rdev)
 	for (path=0; path<mddev->raid_disks; path++) 
 		if ((p=conf->multipaths+path)->rdev == NULL) {
 			p->rdev = rdev;
+			blk_queue_stack_limits(mddev->queue,
+					       rdev->bdev->bd_disk->queue);
 			conf->working_disks++;
 			rdev->raid_disk = path;
 			rdev->in_sync = 1;
@@ -408,6 +410,8 @@ static int multipath_run (mddev_t *mddev)
 
 		disk = conf->multipaths + disk_idx;
 		disk->rdev = rdev;
+		blk_queue_stack_limits(mddev->queue,
+				       rdev->bdev->bd_disk->queue);
 		if (!rdev->faulty) 
 			conf->working_disks++;
 	}
@@ -504,3 +508,4 @@ static void __exit multipath_exit (void)
 module_init(multipath_init);
 module_exit(multipath_exit);
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("md-personality-7"); /* MULTIPATH */

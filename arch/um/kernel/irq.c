@@ -7,6 +7,7 @@
 
 #include "linux/config.h"
 #include "linux/kernel.h"
+#include "linux/module.h"
 #include "linux/smp.h"
 #include "linux/irq.h"
 #include "linux/kernel_stat.h"
@@ -429,6 +430,8 @@ int request_irq(unsigned int irq,
 	return retval;
 }
 
+EXPORT_SYMBOL(request_irq);
+
 int um_request_irq(unsigned int irq, int fd, int type,
 		   void (*handler)(int, void *, struct pt_regs *),
 		   unsigned long irqflags, const char * devname,
@@ -557,6 +560,8 @@ void free_irq(unsigned int irq, void *dev_id)
 	}
 }
 
+EXPORT_SYMBOL(free_irq);
+
 /* These are initialized by sysctl_init, which is called from init/main.c */
 static struct proc_dir_entry * root_irq_dir;
 static struct proc_dir_entry * irq_dir [NR_IRQS];
@@ -565,9 +570,9 @@ static struct proc_dir_entry * smp_affinity_entry [NR_IRQS];
 /* These are read and written as longs, so a read won't see a partial write
  * even during a race.
  */
-static unsigned long irq_affinity [NR_IRQS] = { [0 ... NR_IRQS-1] = ~0UL };
+static cpumask_t irq_affinity [NR_IRQS] = { [0 ... NR_IRQS-1] = CPU_MASK_ALL };
 
-#define HEX_DIGITS 8
+#define HEX_DIGITS (2*sizeof(cpumask_t))
 
 static int irq_affinity_read_proc (char *page, char **start, off_t off,
 			int count, int *eof, void *data)
@@ -578,10 +583,10 @@ static int irq_affinity_read_proc (char *page, char **start, off_t off,
 }
 
 static unsigned int parse_hex_value (const char *buffer,
-		unsigned long count, unsigned long *ret)
+		unsigned long count, cpumask_t *ret)
 {
 	unsigned char hexnum [HEX_DIGITS];
-	unsigned long value;
+	cpumask_t value = CPU_MASK_NONE;
 	int i;
 
 	if (!count)
@@ -595,10 +600,9 @@ static unsigned int parse_hex_value (const char *buffer,
 	 * Parse the first 8 characters as a hex string, any non-hex char
 	 * is end-of-string. '00e1', 'e1', '00E1', 'E1' are all the same.
 	 */
-	value = 0;
 
 	for (i = 0; i < count; i++) {
-		unsigned int c = hexnum[i];
+		unsigned int k, c = hexnum[i];
 
 		switch (c) {
 			case '0' ... '9': c -= '0'; break;
@@ -607,7 +611,10 @@ static unsigned int parse_hex_value (const char *buffer,
 		default:
 			goto out;
 		}
-		value = (value << 4) | c;
+		cpus_shift_left(value, value, 16);
+		for (k = 0; k < 4; ++k)
+			if (c & (1 << k))
+				cpu_set(k, value);
 	}
 out:
 	*ret = value;
@@ -618,7 +625,7 @@ static int irq_affinity_write_proc (struct file *file, const char *buffer,
 					unsigned long count, void *data)
 {
 	int irq = (long) data, full_count = count, err;
-	unsigned long new_value;
+	cpumask_t new_value, tmp;
 
 	if (!irq_desc[irq].handler->set_affinity)
 		return -EIO;
@@ -631,7 +638,8 @@ static int irq_affinity_write_proc (struct file *file, const char *buffer,
 	 * way to make the system unusable accidentally :-) At least
 	 * one online CPU still has to be targeted.
 	 */
-	if (!(new_value & cpu_online_map))
+	cpus_and(tmp, new_value, cpu_online_map);
+	if (cpus_empty(tmp))
 		return -EINVAL;
 #endif
 
@@ -644,17 +652,27 @@ static int irq_affinity_write_proc (struct file *file, const char *buffer,
 static int prof_cpu_mask_read_proc (char *page, char **start, off_t off,
 			int count, int *eof, void *data)
 {
-	unsigned long *mask = (unsigned long *) data;
+	cpumask_t tmp, *mask = (cpumask_t *) data;
+	int k, len = 0;
+
 	if (count < HEX_DIGITS+1)
 		return -EINVAL;
-	return sprintf (page, "%08lx\n", *mask);
+	tmp = *mask;
+	for (k = 0; k < sizeof(cpumask_t)/sizeof(u16); ++k) {
+		int j = sprintf(page, "%04hx", cpus_coerce(tmp));
+		len += j;
+		page += j;
+		cpus_shift_right(tmp, tmp, 16);
+	}
+	len += sprintf(page, "\n");
+	return len;
 }
 
 static int prof_cpu_mask_write_proc (struct file *file, const char *buffer,
 					unsigned long count, void *data)
 {
-	unsigned long *mask = (unsigned long *) data, full_count = count, err;
-	unsigned long new_value;
+	cpumask_t *mask = (cpumask_t *)data, new_value;
+	unsigned long full_count = count, err;
 
 	err = parse_hex_value(buffer, count, &new_value);
 	if (err)
@@ -693,7 +711,7 @@ static void register_irq_proc (unsigned int irq)
 }
 
 /* Read and written as a long */
-unsigned long prof_cpu_mask = -1;
+cpumask_t prof_cpu_mask = CPU_MASK_ALL;
 
 void __init init_irq_proc (void)
 {
@@ -738,10 +756,14 @@ unsigned long probe_irq_on(void)
 	return(0);
 }
 
+EXPORT_SYMBOL(probe_irq_on);
+
 int probe_irq_off(unsigned long val)
 {
 	return(0);
 }
+
+EXPORT_SYMBOL(probe_irq_off);
 
 static unsigned int startup_SIGIO_irq(unsigned int irq)
 {

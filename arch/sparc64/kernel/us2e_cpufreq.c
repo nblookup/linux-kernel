@@ -232,15 +232,16 @@ static unsigned long estar_to_divisor(unsigned long estar)
 
 static void us2e_set_cpu_divider_index(unsigned int cpu, unsigned int index)
 {
-	unsigned long new_bits, new_freq, cpus_allowed;
+	unsigned long new_bits, new_freq;
 	unsigned long clock_tick, divisor, old_divisor, estar;
+	cpumask_t cpus_allowed;
 	struct cpufreq_freqs freqs;
 
 	if (!cpu_online(cpu))
 		return;
 
 	cpus_allowed = current->cpus_allowed;
-	set_cpus_allowed(current, (1UL << cpu));
+	set_cpus_allowed(current, cpumask_of_cpu(cpu));
 
 	new_freq = clock_tick = sparc64_get_clock_tick(cpu);
 	new_bits = index_to_estar_mode(index);
@@ -308,7 +309,7 @@ static int __init us2e_freq_cpu_init(struct cpufreq_policy *policy)
 	table[2].index = 5;
 	table[3].frequency = CPUFREQ_TABLE_END;
 
-	policy->policy = CPUFREQ_POLICY_PERFORMANCE;
+	policy->governor = CPUFREQ_DEFAULT_GOVERNOR;
 	policy->cpuinfo.transition_latency = 0;
 	policy->cur = clock_tick;
 

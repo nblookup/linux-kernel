@@ -936,6 +936,7 @@ static int catc_probe(struct usb_interface *intf, const struct usb_device_id *id
 	printk("%2.2x.\n", netdev->dev_addr[i]);
 	usb_set_intfdata(intf, catc);
 
+	SET_NETDEV_DEV(netdev, &intf->dev);
 	if (register_netdev(netdev) != 0) {
 		usb_set_intfdata(intf, NULL);
 		usb_free_urb(catc->ctrl_urb);
@@ -960,7 +961,7 @@ static void catc_disconnect(struct usb_interface *intf)
 		usb_free_urb(catc->tx_urb);
 		usb_free_urb(catc->rx_urb);
 		usb_free_urb(catc->irq_urb);
-		kfree(catc->netdev);
+		free_netdev(catc->netdev);
 		kfree(catc);
 	}
 }
@@ -988,9 +989,10 @@ static struct usb_driver catc_driver = {
 
 static int __init catc_init(void)
 {
-	info(DRIVER_VERSION " " DRIVER_DESC);
-	usb_register(&catc_driver);
-	return 0;
+	int result = usb_register(&catc_driver);
+	if (result == 0)
+		info(DRIVER_VERSION " " DRIVER_DESC);
+	return result;
 }
 
 static void __exit catc_exit(void)

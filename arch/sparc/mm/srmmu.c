@@ -15,7 +15,6 @@
 #include <linux/vmalloc.h>
 #include <linux/pagemap.h>
 #include <linux/init.h>
-#include <linux/blk.h>
 #include <linux/spinlock.h>
 #include <linux/bootmem.h>
 #include <linux/fs.h>
@@ -147,6 +146,9 @@ extern unsigned long fix_kmap_end;
 
 /* 1 bit <=> 256 bytes of nocache <=> 64 PTEs */
 #define SRMMU_NOCACHE_BITMAP_SHIFT (PAGE_SHIFT - 4)
+
+/* The context table is a nocache user with the biggest alignment needs. */
+#define SRMMU_NOCACHE_ALIGN_MAX (sizeof(ctxd_t)*SRMMU_MAX_CONTEXTS)
 
 void *srmmu_nocache_pool;
 void *srmmu_nocache_bitmap;
@@ -320,13 +322,14 @@ static unsigned long __srmmu_get_nocache(int size, int align)
 		printk("Size 0x%x unaligned int nocache request\n", size);
 		size += SRMMU_NOCACHE_BITMAP_SHIFT-1;
 	}
+	if (align > SRMMU_NOCACHE_ALIGN_MAX) {
+		BUG();
+		return 0;
+	}
 
 	offset = bit_map_string_get(&srmmu_nocache_map,
 		       			size >> SRMMU_NOCACHE_BITMAP_SHIFT,
 					align >> SRMMU_NOCACHE_BITMAP_SHIFT);
-/* P3 */ /* printk("srmmu: get size %d align %d, got %d (0x%x)\n",
-   size >> SRMMU_NOCACHE_BITMAP_SHIFT, align >> SRMMU_NOCACHE_BITMAP_SHIFT,
-   offset, offset); */
 	if (offset == -1) {
 		printk("srmmu: out of nocache %d: %d/%d\n",
 		    size, (int) srmmu_nocache_size,
@@ -379,7 +382,6 @@ void srmmu_free_nocache(unsigned long vaddr, int size)
 	offset = (vaddr - SRMMU_NOCACHE_VADDR) >> SRMMU_NOCACHE_BITMAP_SHIFT;
 	size = size >> SRMMU_NOCACHE_BITMAP_SHIFT;
 
-/* P3 */ /* printk("srmmu: free off %d (0x%x) size %d\n", offset, offset, size); */
 	bit_map_clear(&srmmu_nocache_map, offset, size);
 }
 
@@ -425,7 +427,8 @@ void srmmu_nocache_init(void)
 
 	bitmap_bits = srmmu_nocache_size >> SRMMU_NOCACHE_BITMAP_SHIFT;
 
-	srmmu_nocache_pool = __alloc_bootmem(srmmu_nocache_size, PAGE_SIZE, 0UL);
+	srmmu_nocache_pool = __alloc_bootmem(srmmu_nocache_size,
+		SRMMU_NOCACHE_ALIGN_MAX, 0UL);
 	memset(srmmu_nocache_pool, 0, srmmu_nocache_size);
 
 	srmmu_nocache_bitmap = __alloc_bootmem(bitmap_bits >> 3, SMP_CACHE_BYTES, 0UL);
@@ -439,9 +442,6 @@ void srmmu_nocache_init(void)
 
 	paddr = __pa((unsigned long)srmmu_nocache_pool);
 	vaddr = SRMMU_NOCACHE_VADDR;
-
-/* P3 */ printk("srmmu: pool 0x%x vaddr 0x%x bitmap 0x%x bits %d (0x%x)\n",
-  (int)srmmu_nocache_pool, vaddr, srmmu_nocache_bitmap, bitmap_bits, bitmap_bits);
 
 	while (vaddr < srmmu_nocache_end) {
 		pgd = pgd_offset_k(vaddr);

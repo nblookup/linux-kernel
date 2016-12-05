@@ -1,7 +1,7 @@
 /* SCTP kernel reference Implementation
+ * (C) Copyright IBM Corp. 2001, 2003
  * Copyright (c) 1999-2000 Cisco, Inc.
  * Copyright (c) 1999-2001 Motorola, Inc.
- * Copyright (c) 2001-2002 International Business Machines, Corp.
  * Copyright (c) 2001-2002 Intel Corp.
  * Copyright (c) 2002      Nokia Corp.
  *
@@ -929,6 +929,7 @@ static int sctp_sf_send_restart_abort(union sctp_addr *ssa,
 	struct sctp_errhdr *errhdr;
 	struct sctp_endpoint *ep;
 	char buffer[sizeof(struct sctp_errhdr)+sizeof(union sctp_addr_param)];
+	struct sctp_af *af = sctp_get_af_specific(ssa->v4.sin_family);
 
 	/* Build the error on the stack.   We are way to malloc crazy
 	 * throughout the code today.
@@ -937,7 +938,7 @@ static int sctp_sf_send_restart_abort(union sctp_addr *ssa,
 	addrparm = (union sctp_addr_param *)errhdr->variable;
 
 	/* Copy into a parm format. */
-	len = sockaddr2sctp_addr(ssa, addrparm);
+	len = af->to_addr_param(ssa, addrparm);
 	len += sizeof(sctp_errhdr_t);
 
 	errhdr->cause = SCTP_ERROR_RESTART;
@@ -2863,6 +2864,9 @@ sctp_disposition_t sctp_sf_operr_notify(const struct sctp_endpoint *ep,
 			sctp_ulpevent_free(ev);
 			goto nomem;
 		}
+
+		sctp_add_cmd_sf(commands, SCTP_CMD_PROCESS_OPERR,
+				SCTP_CHUNK(chunk));	
 	}
 	return SCTP_DISPOSITION_CONSUME;
 
@@ -3060,6 +3064,36 @@ sctp_disposition_t sctp_sf_do_8_5_1_E_sa(const struct sctp_endpoint *ep,
 	 * called with a NULL association.
 	 */
 	return sctp_sf_shut_8_4_5(ep, NULL, type, arg, commands);
+}
+
+/*
+ * ADDIP Section 4.2 Upon reception of an ASCONF Chunk
+ * When an endpoint receive an ASCONF Chunk from the remote peer
+ * special procedures MAY be needed to identify the association the
+ * ASCONF Chunk is associated with. To properly find the association
+ * the following procedures should be L1 to L4 and C1 to C5
+ */
+sctp_disposition_t sctp_sf_do_asconf(const struct sctp_endpoint *ep,
+				const struct sctp_association *asoc,
+				const sctp_subtype_t type, void *arg,
+				sctp_cmd_seq_t *commands)
+{
+	// FIXME: Handle the ASCONF chunk
+	return SCTP_DISPOSITION_CONSUME;
+}
+
+/*
+ * ADDIP Section 4.3 General rules for address manipulation
+ * When building TLV parameters for the ASCONF Chunk that will add or
+ * delete IP addresses the D0 to D13 rules should be applied:
+ */
+sctp_disposition_t sctp_sf_do_asconf_ack(const struct sctp_endpoint *ep,
+				const struct sctp_association *asoc,
+				const sctp_subtype_t type, void *arg,
+				sctp_cmd_seq_t *commands)
+{
+	// FIXME: Handle the ASCONF-ACK chunk
+	return SCTP_DISPOSITION_CONSUME;
 }
 
 /*
@@ -3816,6 +3850,26 @@ sctp_disposition_t sctp_sf_do_prm_requestheartbeat(
 }
 
 /*
+ * ADDIP Section 4.1 ASCONF Chunk Procedures
+ * When an endpoint has an ASCONF signaled change to be sent to the
+ * remote endpoint it should do A1 to A9
+ */
+sctp_disposition_t sctp_sf_do_prm_asconf(const struct sctp_endpoint *ep,
+					const struct sctp_association *asoc,
+					const sctp_subtype_t type,
+					void *arg,
+					sctp_cmd_seq_t *commands)
+{
+	struct sctp_chunk *chunk = arg;
+
+	sctp_add_cmd_sf(commands, SCTP_CMD_SETUP_T4, SCTP_CHUNK(chunk));
+	sctp_add_cmd_sf(commands, SCTP_CMD_TIMER_START,
+			SCTP_TO(SCTP_EVENT_TIMEOUT_T4_RTO));
+	sctp_add_cmd_sf(commands, SCTP_CMD_REPLY, SCTP_CHUNK(chunk));
+	return SCTP_DISPOSITION_CONSUME;
+}
+
+/*
  * Ignore the primitive event
  *
  * The return value is the disposition of the primitive.
@@ -3862,7 +3916,7 @@ sctp_disposition_t sctp_sf_do_9_2_start_shutdown(
 	 * in the Cumulative TSN Ack field the last sequential TSN it
 	 * has received from the peer.
 	 */
-	reply = sctp_make_shutdown(asoc);
+	reply = sctp_make_shutdown(asoc, NULL);
 	if (!reply)
 		goto nomem;
 
@@ -4179,7 +4233,7 @@ sctp_disposition_t sctp_sf_t2_timer_expire(const struct sctp_endpoint *ep,
 
 	switch (asoc->state) {
 	case SCTP_STATE_SHUTDOWN_SENT:
-		reply = sctp_make_shutdown(asoc);
+		reply = sctp_make_shutdown(asoc, NULL);
 		break;
 
 	case SCTP_STATE_SHUTDOWN_ACK_SENT:
@@ -4211,6 +4265,21 @@ sctp_disposition_t sctp_sf_t2_timer_expire(const struct sctp_endpoint *ep,
 
 nomem:
 	return SCTP_DISPOSITION_NOMEM;
+}
+
+/*
+ * ADDIP Section 4.1 ASCONF CHunk Procedures
+ * If the T-4 RTO timer expires the endpoint should do B1 to B5
+ */
+sctp_disposition_t sctp_sf_t4_timer_expire(
+	const struct sctp_endpoint *ep,
+	const struct sctp_association *asoc,
+	const sctp_subtype_t type,
+	void *arg,
+	sctp_cmd_seq_t *commands)
+{
+	// FIXME: need to handle t4 expire
+	return SCTP_DISPOSITION_CONSUME;
 }
 
 /* sctpimpguide-05 Section 2.12.2

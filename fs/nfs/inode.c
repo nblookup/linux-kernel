@@ -42,7 +42,17 @@
 #define NFSDBG_FACILITY		NFSDBG_VFS
 #define NFS_PARANOIA 1
 
-static struct inode * __nfs_fhget(struct super_block *, struct nfs_fh *, struct nfs_fattr *);
+/* Maximum number of readahead requests
+ * FIXME: this should really be a sysctl so that users may tune it to suit
+ *        their needs. People that do NFS over a slow network, might for
+ *        instance want to reduce it to something closer to 1 for improved
+ *        interactive response.
+ *
+ *        For the moment, though, we instead set it to RPC_MAXREQS, which
+ *        is the maximum number of simultaneous RPC requests on the wire.
+ */
+#define NFS_MAX_READAHEAD	RPC_MAXREQS
+
 void nfs_zap_caches(struct inode *);
 static void nfs_invalidate_inode(struct inode *);
 
@@ -141,25 +151,22 @@ nfs_clear_inode(struct inode *inode)
 	cred = nfsi->cache_access.cred;
 	if (cred)
 		put_rpccred(cred);
-	/* Clean up the V4 state */
-	nfs4_put_shareowner(inode, nfsi->wo_owner);
-	nfs4_put_shareowner(inode, nfsi->ro_owner);
-	nfs4_put_shareowner(inode, nfsi->rw_owner);
 }
 
 void
 nfs_put_super(struct super_block *sb)
 {
 	struct nfs_server *server = NFS_SB(sb);
-	struct rpc_clnt	*rpc;
 
 #ifdef CONFIG_NFS_V4
 	if (server->idmap != NULL)
 		nfs_idmap_delete(server);
 #endif /* CONFIG_NFS_V4 */
 
-	if ((rpc = server->client) != NULL)
-		rpc_shutdown_client(rpc);
+	if (server->client != NULL)
+		rpc_shutdown_client(server->client);
+	if (server->client_sys != NULL)
+		rpc_shutdown_client(server->client_sys);
 
 	if (!(server->flags & NFS_MOUNT_NONLM))
 		lockd_down();	/* release rpc.lockd */
@@ -226,27 +233,57 @@ nfs_block_size(unsigned long bsize, unsigned char *nrbitsp)
 /*
  * Obtain the root inode of the file system.
  */
-static struct inode *
-nfs_get_root(struct super_block *sb, struct nfs_fh *rootfh)
+static int
+nfs_get_root(struct inode **rooti, rpc_authflavor_t authflavor, struct super_block *sb, struct nfs_fh *rootfh)
 {
 	struct nfs_server	*server = NFS_SB(sb);
-	struct nfs_fattr	fattr;
-	struct inode		*inode;
+	struct nfs_fattr	fattr = { };
 	int			error;
 
-	if ((error = server->rpc_ops->getroot(server, rootfh, &fattr)) < 0) {
+	error = server->rpc_ops->getroot(server, rootfh, &fattr);
+	if (error == -EACCES && authflavor > RPC_AUTH_MAXFLAVOR) {
+		/*
+		 * Some authentication types (gss/krb5, most notably)
+		 * are such that root won't be able to present a
+		 * credential for GETATTR (ie, getroot()).
+		 *
+		 * We still want the mount to succeed.
+		 * 
+		 * So we fake the attr values and mark the inode as such.
+		 * On the first succesful traversal, we fix everything.
+		 * The auth type test isn't quite correct, but whatever.
+		 */
+		dfprintk(VFS, "NFS: faking root inode\n");
+
+		fattr.fileid = 1;
+		fattr.nlink = 2;	/* minimum for a dir */
+		fattr.type = NFDIR;
+		fattr.mode = S_IFDIR|S_IRUGO|S_IXUGO;
+		fattr.size = 4096;
+		fattr.du.nfs3.used = 1;
+		fattr.valid = NFS_ATTR_FATTR|NFS_ATTR_FATTR_V3;
+	} else if (error < 0) {
 		printk(KERN_NOTICE "nfs_get_root: getattr error = %d\n", -error);
-		return NULL;
+		*rooti = NULL;	/* superfluous ... but safe */
+		return error;
 	}
 
-	inode = __nfs_fhget(sb, rootfh, &fattr);
-	return inode;
+	*rooti = nfs_fhget(sb, rootfh, &fattr);
+	if (error == -EACCES && authflavor > RPC_AUTH_MAXFLAVOR) {
+		if (*rooti) {
+			NFS_FLAGS(*rooti) |= NFS_INO_FAKE_ROOT;
+			NFS_CACHEINV((*rooti));
+			error = 0;
+		}
+	}
+	return error;
 }
 
 /*
  * Do NFS version-independent mount processing, and sanity checking
  */
-int nfs_sb_init(struct super_block *sb)
+static int
+nfs_sb_init(struct super_block *sb, rpc_authflavor_t authflavor)
 {
 	struct nfs_server	*server;
 	struct inode		*root_inode = NULL;
@@ -267,8 +304,7 @@ int nfs_sb_init(struct super_block *sb)
 	sb->s_op         = &nfs_sops;
 
 	/* Did getting the root inode fail? */
-	root_inode = nfs_get_root(sb, &server->fh);
-	if (!root_inode)
+	if (nfs_get_root(&root_inode, authflavor, sb, &server->fh) < 0)
 		goto out_no_root;
 	sb->s_root = d_alloc_root(root_inode);
 	if (!sb->s_root)
@@ -326,7 +362,7 @@ int nfs_sb_init(struct super_block *sb)
 		server->acdirmin = server->acdirmax = 0;
 		sb->s_flags |= MS_SYNCHRONOUS;
 	}
-	server->backing_dev_info.ra_pages = server->rpages << 2;
+	server->backing_dev_info.ra_pages = server->rpages * NFS_MAX_READAHEAD;
 
 	sb->s_maxbytes = fsinfo.maxfilesize;
 	if (sb->s_maxbytes > MAX_LFS_FILESIZE) 
@@ -346,19 +382,66 @@ out_no_root:
 }
 
 /*
+ * Create an RPC client handle.
+ */
+static struct rpc_clnt *
+nfs_create_client(struct nfs_server *server, const struct nfs_mount_data *data)
+{
+	struct rpc_timeout	timeparms;
+	struct rpc_xprt		*xprt = NULL;
+	struct rpc_clnt		*clnt = NULL;
+	int			tcp   = (data->flags & NFS_MOUNT_TCP);
+
+	/* Initialize timeout values */
+	timeparms.to_initval = data->timeo * HZ / 10;
+	timeparms.to_retries = data->retrans;
+	timeparms.to_maxval  = tcp ? RPC_MAX_TCP_TIMEOUT : RPC_MAX_UDP_TIMEOUT;
+	timeparms.to_exponential = 1;
+
+	if (!timeparms.to_initval)
+		timeparms.to_initval = (tcp ? 600 : 11) * HZ / 10;
+	if (!timeparms.to_retries)
+		timeparms.to_retries = 5;
+
+	/* create transport and client */
+	xprt = xprt_create_proto(tcp ? IPPROTO_TCP : IPPROTO_UDP,
+				 &server->addr, &timeparms);
+	if (xprt == NULL) {
+		printk(KERN_WARNING "NFS: cannot create RPC transport.\n");
+		goto out_fail;
+	}
+	clnt = rpc_create_client(xprt, server->hostname, &nfs_program,
+				 server->rpc_ops->version, data->pseudoflavor);
+	if (clnt == NULL) {
+		printk(KERN_WARNING "NFS: cannot create RPC client.\n");
+		goto out_fail;
+	}
+
+	clnt->cl_intr     = (server->flags & NFS_MOUNT_INTR) ? 1 : 0;
+	clnt->cl_softrtry = (server->flags & NFS_MOUNT_SOFT) ? 1 : 0;
+	clnt->cl_droppriv = (server->flags & NFS_MOUNT_BROKEN_SUID) ? 1 : 0;
+	clnt->cl_chatty   = 1;
+
+	return clnt;
+
+out_fail:
+	if (xprt)
+		xprt_destroy(xprt);
+	return NULL;
+}
+
+/*
  * The way this works is that the mount process passes a structure
  * in the data argument which contains the server's IP address
  * and the root file handle obtained from the server's mount
  * daemon. We stash these away in the private superblock fields.
  */
-int nfs_fill_super(struct super_block *sb, struct nfs_mount_data *data, int silent)
+static int
+nfs_fill_super(struct super_block *sb, struct nfs_mount_data *data, int silent)
 {
 	struct nfs_server	*server;
-	struct rpc_xprt		*xprt = NULL;
-	struct rpc_clnt		*clnt = NULL;
-	struct rpc_timeout	timeparms;
-	int			tcp, err = -EIO;
-	u32			authflavor;
+	int			err = -EIO;
+	rpc_authflavor_t	authflavor;
 
 	server           = NFS_SB(sb);
 	sb->s_blocksize_bits = 0;
@@ -400,46 +483,20 @@ int nfs_fill_super(struct super_block *sb, struct nfs_mount_data *data, int sile
 		server->rpc_ops = &nfs_v2_clientops;
 	}
 
-	/* Which protocol do we use? */
-	tcp   = (data->flags & NFS_MOUNT_TCP);
+	/* Fill in pseudoflavor for mount version < 5 */
+	if (!(data->flags & NFS_MOUNT_SECFLAVOUR))
+		data->pseudoflavor = RPC_AUTH_UNIX;
+	authflavor = data->pseudoflavor;	/* save for sb_init() */
+	/* XXX maybe we want to add a server->pseudoflavor field */
 
-	/* Initialize timeout values */
-	timeparms.to_initval = data->timeo * HZ / 10;
-	timeparms.to_retries = data->retrans;
-	timeparms.to_maxval  = tcp? RPC_MAX_TCP_TIMEOUT : RPC_MAX_UDP_TIMEOUT;
-	timeparms.to_exponential = 1;
-
-	if (!timeparms.to_initval)
-		timeparms.to_initval = (tcp ? 600 : 11) * HZ / 10;
-	if (!timeparms.to_retries)
-		timeparms.to_retries = 5;
-
-	/* Now create transport and client */
-	xprt = xprt_create_proto(tcp? IPPROTO_TCP : IPPROTO_UDP,
-						&server->addr, &timeparms);
-	if (xprt == NULL) {
-		printk(KERN_WARNING "NFS: cannot create RPC transport.\n");
+	/* Create RPC client handles */
+	server->client = nfs_create_client(server, data);
+	if (server->client == NULL)
 		goto out_fail;
-	}
-
-	if (data->flags & NFS_MOUNT_SECFLAVOUR)
-		authflavor = data->pseudoflavor;
-	else
-		authflavor = RPC_AUTH_UNIX;
-
-	clnt = rpc_create_client(xprt, server->hostname, &nfs_program,
-				 server->rpc_ops->version, authflavor);
-	if (clnt == NULL) {
-		printk(KERN_WARNING "NFS: cannot create RPC client.\n");
-		xprt_destroy(xprt);
-		goto out_fail;
-	}
-
-	clnt->cl_intr     = (server->flags & NFS_MOUNT_INTR) ? 1 : 0;
-	clnt->cl_softrtry = (server->flags & NFS_MOUNT_SOFT) ? 1 : 0;
-	clnt->cl_droppriv = (server->flags & NFS_MOUNT_BROKEN_SUID) ? 1 : 0;
-	clnt->cl_chatty   = 1;
-	server->client    = clnt;
+	data->pseudoflavor = RPC_AUTH_UNIX;	/* RFC 2623, sec 2.3.2 */
+	server->client_sys = nfs_create_client(server, data);
+	if (server->client_sys == NULL)
+		goto out_shutdown;
 
 	/* Fire up rpciod if not yet running */
 	if (rpciod_up() != 0) {
@@ -447,7 +504,7 @@ int nfs_fill_super(struct super_block *sb, struct nfs_mount_data *data, int sile
 		goto out_shutdown;
 	}
 
-	err = nfs_sb_init(sb);
+	err = nfs_sb_init(sb, authflavor);
 	if (err != 0)
 		goto out_noinit;
 
@@ -466,7 +523,10 @@ int nfs_fill_super(struct super_block *sb, struct nfs_mount_data *data, int sile
 out_noinit:
 	rpciod_down();
 out_shutdown:
-	rpc_shutdown_client(server->client);
+	if (server->client)
+		rpc_shutdown_client(server->client);
+	if (server->client_sys)
+		rpc_shutdown_client(server->client_sys);
 out_fail:
 	if (server->hostname)
 		kfree(server->hostname);
@@ -566,7 +626,7 @@ nfs_zap_caches(struct inode *inode)
 	NFS_ATTRTIMEO(inode) = NFS_MINATTRTIMEO(inode);
 	NFS_ATTRTIMEO_UPDATE(inode) = jiffies;
 
-	invalidate_inode_pages(inode->i_mapping);
+	invalidate_remote_inode(inode);
 
 	memset(NFS_COOKIEVERF(inode), 0, sizeof(NFS_COOKIEVERF(inode)));
 	NFS_CACHEINV(inode);
@@ -627,33 +687,15 @@ nfs_init_locked(struct inode *inode, void *opaque)
 	return 0;
 }
 
-/*
- * This is our own version of iget that looks up inodes by file handle
- * instead of inode number.  We use this technique instead of using
- * the vfs read_inode function because there is no way to pass the
- * file handle or current attributes into the read_inode function.
- *
- */
-struct inode *
-nfs_fhget(struct dentry *dentry, struct nfs_fh *fhandle,
-				 struct nfs_fattr *fattr)
-{
-	struct super_block *sb = dentry->d_sb;
-
-	dprintk("NFS: nfs_fhget(%s/%s fileid=%Ld)\n",
-		dentry->d_parent->d_name.name, dentry->d_name.name,
-		(long long)fattr->fileid);
-	return __nfs_fhget(sb, fhandle, fattr);
-}
-
 /* Don't use READDIRPLUS on directories that we believe are too large */
 #define NFS_LIMIT_READDIRPLUS (8*PAGE_SIZE)
 
 /*
- * Look up the inode by super block and fattr->fileid.
+ * This is our front-end to iget that looks up inodes by file handle
+ * instead of inode number.
  */
-static struct inode *
-__nfs_fhget(struct super_block *sb, struct nfs_fh *fh, struct nfs_fattr *fattr)
+struct inode *
+nfs_fhget(struct super_block *sb, struct nfs_fh *fh, struct nfs_fattr *fattr)
 {
 	struct nfs_find_desc desc = {
 		.fh	= fh,
@@ -736,7 +778,7 @@ __nfs_fhget(struct super_block *sb, struct nfs_fh *fh, struct nfs_fattr *fattr)
 		unlock_new_inode(inode);
 	} else
 		nfs_refresh_inode(inode, fattr);
-	dprintk("NFS: __nfs_fhget(%s/%Ld ct=%d)\n",
+	dprintk("NFS: nfs_fhget(%s/%Ld ct=%d)\n",
 		inode->i_sb->s_id,
 		(long long)NFS_FILEID(inode),
 		atomic_read(&inode->i_count));
@@ -745,7 +787,7 @@ out:
 	return inode;
 
 out_no_inode:
-	printk("__nfs_fhget: iget failed\n");
+	printk("nfs_fhget: iget failed\n");
 	goto out;
 }
 
@@ -769,14 +811,15 @@ printk("nfs_setattr: revalidate failed, error=%d\n", error);
 		goto out;
 	}
 
-	if (!S_ISREG(inode->i_mode))
+	if (!S_ISREG(inode->i_mode)) {
 		attr->ia_valid &= ~ATTR_SIZE;
-
-	filemap_fdatawrite(inode->i_mapping);
-	error = nfs_wb_all(inode);
-	filemap_fdatawait(inode->i_mapping);
-	if (error)
-		goto out;
+	} else {
+		filemap_fdatawrite(inode->i_mapping);
+		error = nfs_wb_all(inode);
+		filemap_fdatawait(inode->i_mapping);
+		if (error)
+			goto out;
+	}
 
 	error = NFS_PROTO(inode)->setattr(dentry, &fattr, attr);
 	if (error)
@@ -844,7 +887,7 @@ int nfs_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
  * Ensure that mmap has a recent RPC credential for use when writing out
  * shared pages
  */
-static inline void
+void
 nfs_set_mmcred(struct inode *inode, struct rpc_cred *cred)
 {
 	struct rpc_cred **p = &NFS_I(inode)->mm_cred,
@@ -904,6 +947,11 @@ __nfs_revalidate_inode(struct nfs_server *server, struct inode *inode)
  		goto out_nowait;
 	if (NFS_STALE(inode) && inode != inode->i_sb->s_root->d_inode)
  		goto out_nowait;
+	if (NFS_FAKE_ROOT(inode)) {
+		dfprintk(VFS, "NFS: not revalidating fake root\n");
+		status = 0;
+		goto out_nowait;
+	}
 
 	while (NFS_REVALIDATING(inode)) {
 		status = nfs_wait_on_inode(inode, NFS_INO_REVALIDATING);
@@ -1001,10 +1049,18 @@ __nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
 	loff_t		new_isize;
 	int		invalid = 0;
 	int		mtime_update = 0;
+	loff_t		cur_isize;
 
 	dfprintk(VFS, "NFS: refresh_inode(%s/%ld ct=%d info=0x%x)\n",
 			inode->i_sb->s_id, inode->i_ino,
 			atomic_read(&inode->i_count), fattr->valid);
+
+	/* First successful call after mount, fill real data. */
+	if (NFS_FAKE_ROOT(inode)) {
+		dfprintk(VFS, "NFS: updating fake root\n");
+		nfsi->fileid = fattr->fileid;
+		NFS_FLAGS(inode) &= ~NFS_INO_FAKE_ROOT;
+	}
 
 	if (nfsi->fileid != fattr->fileid) {
 		printk(KERN_ERR "nfs_refresh_inode: inode number mismatch\n"
@@ -1087,8 +1143,9 @@ __nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
 	 * If we have pending writebacks, things can get
 	 * messy.
 	 */
-	if (nfs_have_writebacks(inode) && new_isize < inode->i_size)
-		new_isize = inode->i_size;
+	cur_isize = i_size_read(inode);
+	if (nfs_have_writebacks(inode) && new_isize < cur_isize)
+		new_isize = cur_isize;
 
 	nfsi->read_cache_ctime = fattr->ctime;
 	inode->i_ctime = fattr->ctime;
@@ -1102,7 +1159,7 @@ __nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
 	}
 
 	nfsi->read_cache_isize = new_size;
-	inode->i_size = new_isize;
+	i_size_write(inode, new_isize);
 
 	if (inode->i_mode != fattr->mode ||
 	    inode->i_uid != fattr->uid ||
@@ -1137,7 +1194,7 @@ __nfs_refresh_inode(struct inode *inode, struct nfs_fattr *fattr)
 	if (invalid) {
 		nfsi->attrtimeo = NFS_MINATTRTIMEO(inode);
 		nfsi->attrtimeo_timestamp = jiffies;
-		invalidate_inode_pages(inode->i_mapping);
+		invalidate_remote_inode(inode);
 		memset(NFS_COOKIEVERF(inode), 0, sizeof(NFS_COOKIEVERF(inode)));
 	} else if (time_after(jiffies, nfsi->attrtimeo_timestamp+nfsi->attrtimeo)) {
 		if ((nfsi->attrtimeo <<= 1) > NFS_MAXATTRTIMEO(inode))
@@ -1227,6 +1284,8 @@ static struct super_block *nfs_get_sb(struct file_system_type *fs_type,
 			root->size = NFS2_FHSIZE;
 			memcpy(root->data, data->old_root.data, NFS2_FHSIZE);
 		}
+		if (data->version < 5)
+			data->flags &= ~NFS_MOUNT_SECFLAVOUR;
 	}
 
 	if (root->size > sizeof(root->data)) {
@@ -1273,7 +1332,7 @@ static struct file_system_type nfs_fs_type = {
 	.name		= "nfs",
 	.get_sb		= nfs_get_sb,
 	.kill_sb	= nfs_kill_super,
-	.fs_flags	= FS_ODD_RENAME,
+	.fs_flags	= FS_ODD_RENAME|FS_REVAL_DOT,
 };
 
 #ifdef CONFIG_NFS_V4
@@ -1371,7 +1430,7 @@ static int nfs4_fill_super(struct super_block *sb, struct nfs4_mount_data *data,
 	if ((server->idmap = nfs_idmap_new(server)) == NULL)
 		printk(KERN_WARNING "NFS: couldn't start IDmap\n");
 
-	err = nfs_sb_init(sb);
+	err = nfs_sb_init(sb, authflavour);
 	if (err == 0)
 		return 0;
 	rpciod_down();
@@ -1505,14 +1564,12 @@ static struct file_system_type nfs4_fs_type = {
 	.name		= "nfs4",
 	.get_sb		= nfs4_get_sb,
 	.kill_sb	= nfs_kill_super,
-	.fs_flags	= FS_ODD_RENAME,
+	.fs_flags	= FS_ODD_RENAME|FS_REVAL_DOT,
 };
 
 #define nfs4_zero_state(nfsi) \
 	do { \
-		(nfsi)->wo_owner = NULL; \
-		(nfsi)->ro_owner = NULL; \
-		(nfsi)->rw_owner = NULL; \
+		INIT_LIST_HEAD(&(nfsi)->open_states); \
 	} while(0)
 #define register_nfs4fs() register_filesystem(&nfs4_fs_type)
 #define unregister_nfs4fs() unregister_filesystem(&nfs4_fs_type)

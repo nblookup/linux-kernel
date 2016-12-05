@@ -190,7 +190,9 @@ struct sadb_x_ipsecrequest {
 	uint16_t	sadb_x_ipsecrequest_proto;
 	uint8_t		sadb_x_ipsecrequest_mode;
 	uint8_t		sadb_x_ipsecrequest_level;
-	uint16_t	sadb_x_ipsecrequest_reqid;
+	uint16_t	sadb_x_ipsecrequest_reserved1;
+	uint32_t	sadb_x_ipsecrequest_reqid;
+	uint32_t	sadb_x_ipsecrequest_reserved2;
 } __attribute__((packed));
 /* sizeof(struct sadb_x_ipsecrequest) == 16 */
 
@@ -243,6 +245,7 @@ struct sadb_x_nat_t_port {
 
 /* Security Association flags */
 #define SADB_SAFLAGS_PFS	1
+#define SADB_SAFLAGS_NOECN	0x80000000
 
 /* Security Association states */
 #define SADB_SASTATE_LARVAL	0
@@ -281,7 +284,10 @@ struct sadb_x_nat_t_port {
 #define SADB_X_EALG_BLOWFISHCBC		7
 #define SADB_EALG_NULL			11
 #define SADB_X_EALG_AESCBC		12
-#define SADB_EALG_MAX			12
+#define SADB_EALG_MAX                   253 /* last EALG */
+/* private allocations should use 249-255 (RFC2407) */
+#define SADB_X_EALG_SERPENTCBC  252     /* draft-ietf-ipsec-ciph-aes-cbc-00 */
+#define SADB_X_EALG_TWOFISHCBC  253     /* draft-ietf-ipsec-ciph-aes-cbc-00 */
 
 /* Compression algorithms */
 #define SADB_X_CALG_NONE		0

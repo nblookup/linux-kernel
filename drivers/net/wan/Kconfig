@@ -52,17 +52,15 @@ config COSA
 	  <file:drivers/net/wan/cosa.c> for details about the cards and the driver
 	  itself.
 
-	  The driver will be compiled as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called cosa. For general information about
-	  modules read <file:Documentation/modules.txt>.
+	  The driver will be compiled as a module: the module will be called cosa.
 
 #
 # COMX drivers
 #
+# Not updated to 2.6.
 config COMX
 	tristate "MultiGate (COMX) synchronous serial boards support"
-	depends on WAN && (ISA || PCI)
+	depends on WAN && (ISA || PCI) && BROKEN
 	---help---
 	  Say Y if you want to use any board from the MultiGate (COMX) family.
 	  These boards are synchronous serial adapters for the PC,
@@ -75,8 +73,8 @@ config COMX
 	  You must say Y to "/proc file system support" (CONFIG_PROC_FS) to
 	  use this driver.
 
-	  If you want to compile this as a module, say M and read
-	  <file:Documentation/modules.txt>.  The module will be called comx.
+	  To compile this driver as a module, choose M here: the
+	  module will be called comx.
 
 config COMX_HW_COMX
 	tristate "Support for COMX/CMX/HiCOMX boards"
@@ -88,9 +86,8 @@ config COMX_HW_COMX
 	  You will need additional firmware to use these cards, which are
 	  downloadable from <ftp://ftp.itc.hu/>.
 
-	  If you want to compile this as a module, say M and read
-	  <file:Documentation/modules.txt>.  The module will be called
-	  comx-hw-comx.
+	  To compile this driver as a module, choose M here: the
+	  module will be called comx-hw-comx.
 
 config COMX_HW_LOCOMX
 	tristate "Support for LoCOMX board"
@@ -99,9 +96,8 @@ config COMX_HW_LOCOMX
 	  Hardware driver for the 'LoCOMX' board from the MultiGate family.
 	  Say Y if you have a board like this.
 
-	  If you want to compile this as a module, say M and read
-	  <file:Documentation/modules.txt>.  The module will be called
-	  comx-hw-locomx.
+	  To compile this driver as a module, choose M here: the
+	  module will be called comx-hw-locomx.
 
 config COMX_HW_MIXCOM
 	tristate "Support for MixCOM board"
@@ -117,9 +113,8 @@ config COMX_HW_MIXCOM
 	  driver for the flash ROM of this card is available separately on
 	  <ftp://ftp.itc.hu/>.
 
-	  If you want to compile this as a module, say M and read
-	  <file:Documentation/modules.txt>. The module will be called
-	  comx-hw-mixcom.
+	  To compile this driver as a module, choose M here: the
+	  module will be called comx-hw-mixcom.
 
 config COMX_HW_MUNICH
 	tristate "Support for MUNICH based boards: SliceCOM, PCICOM (WelCOM)"
@@ -128,10 +123,8 @@ config COMX_HW_MUNICH
 	  Hardware driver for the 'SliceCOM' (channelized E1) and 'PciCOM'
 	  boards (X21) from the MultiGate family.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called comx-hw-munich. If you want to compile it
-	  as a module, say M here and read Documentation/modules.txt.
+	  To compile this driver as a module, choose M here: the
+	  module will be called comx-hw-munich.
 
 	  Read linux/Documentation/networking/slicecom.txt for help on
 	  configuring and using SliceCOM interfaces. Further info on these cards
@@ -145,8 +138,7 @@ config COMX_PROTO_PPP
 	  boards. Say Y if you want to use either protocol on your MultiGate
 	  boards.
 
-	  If you want to compile this as a module, say M and read
-	  <file:Documentation/modules.txt>.  The module will be called
+	  To compile this as a module, choose M here: the module will be called
 	  comx-proto-ppp.
 
 config COMX_PROTO_LAPB
@@ -156,8 +148,7 @@ config COMX_PROTO_LAPB
 	  LAPB protocol driver for all MultiGate boards. Say Y if you
 	  want to use this protocol on your MultiGate boards.
 
-	  If you want to compile this as a module, say M and read
-	  <file:Documentation/modules.txt>.  The module will be called
+	  To compile this as a module, choose M here: the module will be called
 	  comx-proto-lapb.
 
 config COMX_PROTO_FR
@@ -167,13 +158,9 @@ config COMX_PROTO_FR
 	  Frame Relay protocol driver for all MultiGate boards. Say Y if you
 	  want to use this protocol on your MultiGate boards.
 
-	  If you want to compile this as a module, say M and read
-	  <file:Documentation/modules.txt>.  The module will be called
+	  To compile this as a module, choose M here: the module will be called
 	  comx-proto-fr.
 
-#
-# The Etinc driver has not been tested as non-modular yet.
-#
 config DSCC4
 	tristate "Etinc PCISYNC serial board support"
 	depends on WAN && PCI && m
@@ -183,10 +170,33 @@ config DSCC4
 	  ports card. Take a look at <http://www.cogenit.fr/dscc4/>
 	  for further informations about the driver and his configuration.
 
-	  The driver will be compiled as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called dscc4. For general information about
-	  modules read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the module
+	  will be called dscc4.
+
+config DSCC4_PCISYNC
+	bool "Etinc PCISYNC features"
+	depends on DSCC4
+	help
+	  Due to Etinc's design choice for its PCISYNC cards, some operations
+	  are only allowed on specific ports of the DSCC4. This option is the
+	  only way for the driver to know that it shouldn't return a success
+	  code for these operations.
+
+	  Please say Y if your card is an Etinc's PCISYNC.
+
+config DSCC4_PCI_RST
+	bool "Hard reset support"
+	depends on DSCC4
+	help
+	  Various DSCC4 bugs forbid any reliable software reset of the asic.
+	  As a replacement, some vendors provide a way to assert the PCI #RST
+	  pin of DSCC4 through the GPIO port of the card. If you choose Y,
+	  the driver will make use of this feature before module removal
+	  (i.e. rmmod).
+	  The feature is known to be available on Commtech's cards.
+	  Contact your manufacturer for details.
+
+	  Say Y if your card supports this feature.
 
 #
 # Lan Media's board. Currently 1000, 1200, 5200, 5245
@@ -214,10 +224,8 @@ config LANMEDIA
 	  To change setting such as syncPPP vs cisco HDLC or clock source you
 	  will need lmcctl.  It is available at <ftp://ftp.lanmedia.com/>.
 
-	  This code is also available as a module called lmc ( = code
-	  which can be inserted in and removed from the running kernel
-	  whenever you want). If you want to compile it as a module, say M
-	  here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the module
+	  will be called lmc.
 
 # There is no way to detect a Sealevel board. Force it modular
 config SEALEVEL_4021
@@ -253,9 +261,7 @@ config HDLC
 	  Generic HDLC driver currently supports raw HDLC, Cisco HDLC, Frame
 	  Relay, synchronous Point-to-Point Protocol (PPP) and X.25.
 
- 	  If you want to compile the driver as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want),
-	  say M here and read <file:Documentation/modules.txt>.  The module
+ 	  To compile this driver as a module, choose M here: the module
 	  will be called hdlc.
 
 	  If unsure, say N here.
@@ -319,6 +325,30 @@ config HDLC_X25
 comment "X.25/LAPB support is disabled"
 	depends on WAN && HDLC && (LAPB!=m || HDLC!=m) && LAPB!=y
 
+config WANXL
+	tristate "SBE Inc. wanXL support"
+	depends on HDLC && PCI
+	help
+	  This driver is for wanXL PCI cards made by SBE Inc.  If you have
+	  such a card, say Y here and see <http://hq.pm.waw.pl/pub/hdlc/>.
+
+	  If you want to compile the driver as a module ( = code which can be
+	  inserted in and removed from the running kernel whenever you want),
+	  say M here and read <file:Documentation/modules.txt>.  The module
+	  will be called wanxl.
+
+	  If unsure, say N here.
+
+config WANXL_BUILD_FIRMWARE
+	bool "rebuild wanXL firmware"
+	depends on WANXL
+	help
+	  This option allows you to rebuild firmware run by the QUICC
+	  processor. It requires as68k, ld68k and hexdump programs.
+	  You should never need this option.
+
+	  If unsure, say N here.
+
 config PC300
 	tristate "Cyclades-PC300 support (RS-232/V.35, X.21, T1/E1 boards)"
 	depends on HDLC && PCI
@@ -330,9 +360,7 @@ config PC300
 	  option below this one and read the file README.mlppp provided by PC300
 	  package.
 
-	  If you want to compile this as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want),
-	  say M here and read Documentation/modules.txt. The module will be
+	  To compile this as a module, choose M here: the module will be
 	  called pc300.
 
 	  If you haven't heard about it, it's safe to say N.
@@ -360,9 +388,7 @@ config N2
 
 	  Note that N2csu and N2dds cards are not supported by this driver.
 
-	  If you want to compile the driver as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want),
-	  say M here and read <file:Documentation/modules.txt>.  The module
+	  To compile this driver as a module, choose M here: the module
 	  will be called n2.
 
 	  If unsure, say N here.
@@ -375,9 +401,7 @@ config C101
 	  Technologies Co., Ltd. If you have such a card,
 	  say Y here and see <http://hq.pm.waw.pl/pub/hdlc/>
 
-	  If you want to compile the driver as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want),
-	  say M here and read <file:Documentation/modules.txt>.  The module
+	  To compile this driver as a module, choose M here: the module
 	  will be called c101.
 
 	  If unsure, say N here.
@@ -392,44 +416,11 @@ config FARSYNC
 	  8Mb/s (128K on V.24) using synchronous PPP, Cisco HDLC, raw HDLC,
 	  Frame Relay or X.25/LAPB.
 
-	  If you want to compile this driver as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want)
-	  say M here and read <file:Documentation/modules.txt>.
-	  The module will be called farsync and if you want the module to be
-	  automatically loaded when the interface is referenced then you
-	  should add "alias hdlcX farsync" to /etc/modules.conf for each
-	  interface, where X is 0, 1, 2, ...
-
-config HDLC_DEBUG_PKT
-	bool "Debug received/transmitted packets"
-	depends on HDLC
-	help
-	  This option is for developers only - do NOT use on production
-	  systems.
-
-config HDLC_DEBUG_HARD_HEADER
-	bool "Debug hard_header routines"
-	depends on HDLC
-	help
-	  This option is for developers only - do NOT use on production
-	  systems.
-
-config HDLC_DEBUG_ECN
-	bool "Debug FECN/BECN conditions"
-	depends on HDLC
-	help
-	  This option is for developers only - do NOT use on production
-	  systems.
-
-config HDLC_DEBUG_RINGS
-	bool "Debug RX/TX packet rings"
-	depends on HDLC
-	help
-	  If you answer Y here you will be able to get a diagnostic dump of
-	  port's TX and RX packet rings, using "sethdlc hdlcX private"
-	  command. It does not affect normal operations.
-
-	  If unsure, say Y here.
+	  To compile this driver as a module, choose M here: the module will be
+	  called farsync.  If you want the module to be automatically loaded
+	  when the interface is referenced then you should add
+	  "alias hdlcX farsync" to /etc/modules.conf for each interface, where
+	  X is 0, 1, 2, ...
 
 config DLCI
 	tristate "Frame relay DLCI support"
@@ -447,10 +438,8 @@ config DLCI
 	  net-tools package as explained in
 	  <file:Documentation/networking/framerelay.txt>.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called dlci. If you want to compile it as a
-	  module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the module will be
+	  called dlci.
 
 config DLCI_COUNT
 	int "Max open DLCI"
@@ -480,10 +469,8 @@ config SDLA
 	  only frame relay is supported by the driver at this time. Please
 	  read <file:Documentation/framerelay.txt>.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called sdla. If you want to compile it as a
-	  module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the module will be
+	  called sdla.
 
 # Wan router core.
 config WAN_ROUTER_DRIVERS
@@ -506,7 +493,7 @@ config WAN_ROUTER_DRIVERS
 
 config VENDOR_SANGOMA
 	tristate "Sangoma WANPIPE(tm) multiprotocol cards"
-	depends on WAN_ROUTER_DRIVERS && WAN_ROUTER && (PCI || ISA)
+	depends on WAN_ROUTER_DRIVERS && WAN_ROUTER && (PCI || ISA) && BROKEN
 	---help---
 	  WANPIPE from Sangoma Technologies Inc. (<http://www.sangoma.com/>)
 	  is a family of intelligent multiprotocol WAN adapters with data
@@ -530,10 +517,8 @@ config VENDOR_SANGOMA
 	  <file:Documentation/networking/wanpipe.txt>.  The next questions
 	  will ask you about the protocols you want the driver to support.
 
-	  The driver will be compiled as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called wanpipe.  For general information about
-	  modules read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the module will
+	  be called wanpipe.
 
 config WANPIPE_CHDLC
 	bool "WANPIPE Cisco HDLC support"
@@ -622,10 +607,8 @@ config CYCLADES_SYNC
 	  additional details, I hope to have documentation available as soon
 	  as possible. (Cyclades Brazil is writing the Documentation).
 
-	  The driver will be compiled as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called cyclomx. For general information about
-	  modules read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the module will be
+	  called cyclomx.
 
 config CYCLOMX_X25
 	bool "Cyclom 2X X.25 support (EXPERIMENTAL)"
@@ -648,9 +631,7 @@ config LAPBETHER
 	  need to say Y or M to the driver for your Ethernet card as well as
 	  to "LAPB Data Link Driver".
 
-	  If you want to compile this driver as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want),
-	  say M here and read <file:Documentation/modules.txt>.  The module
+	  To compile this driver as a module, choose M here: the module
 	  will be called lapbether.  If unsure, say N.
 
 config X25_ASY
@@ -663,9 +644,7 @@ config X25_ASY
 	  currently comply with the asynchronous HDLS framing protocols in
 	  CCITT recommendation X.25.
 
-	  If you want to compile this driver as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want),
-	  say M here and read <file:Documentation/modules.txt>.  The module
+	  To compile this driver as a module, choose M here: the module
 	  will be called x25_asy.  If unsure, say N.
 
 config SBNI

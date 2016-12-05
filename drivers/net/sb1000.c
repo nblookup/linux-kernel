@@ -35,7 +35,6 @@
 static char version[] = "sb1000.c:v1.1.2 6/01/98 (fventuri@mediaone.net)\n";
 
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/interrupt.h>
@@ -213,9 +212,11 @@ sb1000_probe_one(struct pnp_dev *pdev, const struct pnp_device_id *id)
 
 	error = register_netdev(dev);
 	if (error)
-		goto out_release_regions;
+		goto out_free_netdev;
 	return 0;
 
+ out_free_netdev:
+	free_netdev(dev);
  out_release_regions:
 	release_region(ioaddr[1], 16);
  out_release_region0:
@@ -235,7 +236,7 @@ sb1000_remove_one(struct pnp_dev *pdev)
 	unregister_netdev(dev);
 	release_region(dev->base_addr, 16);
 	release_region(dev->mem_start, 16);
-	kfree(dev);
+	free_netdev(dev);
 }
 
 static struct pnp_driver sb1000_driver = {

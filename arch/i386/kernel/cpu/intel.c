@@ -11,7 +11,6 @@
 
 #include "cpu.h"
 
-static int disable_P4_HT __initdata = 0;
 extern int trap_init_f00f_bug(void);
 
 #ifdef CONFIG_X86_INTEL_USERCOPY
@@ -68,13 +67,6 @@ int __init ppro_with_ram_bug(void)
 	return 0;
 }
 	
-static int __init P4_disable_ht(char *s)
-{
-	disable_P4_HT = 1;
-	return 1;
-}
-__setup("noht", P4_disable_ht);
-
 #define LVL_1_INST	1
 #define LVL_1_DATA	2
 #define LVL_2		3
@@ -172,7 +164,7 @@ static void __init init_intel(struct cpuinfo_x86 *c)
 	}
 #endif
 
-
+	select_idle_routine(c);
 	if (c->cpuid_level > 1) {
 		/* supports eax=2  call */
 		int i, j, n;
@@ -245,10 +237,10 @@ static void __init init_intel(struct cpuinfo_x86 *c)
 		c->x86_cache_size = l2 ? l2 : (l1i+l1d);
 	}
 
-	/* SEP CPUID bug: Pentium Pro reports SEP but doesn't have it */
-	if ( c->x86 == 6 && c->x86_model < 3 && c->x86_mask < 3 )
+	/* SEP CPUID bug: Pentium Pro reports SEP but doesn't have it until model 3 mask 3 */
+	if ((c->x86<<8 | c->x86_model<<4 | c->x86_mask) < 0x633)
 		clear_bit(X86_FEATURE_SEP, c->x86_capability);
-	
+
 	/* Names for the Pentium II/Celeron processors 
 	   detectable only by also checking the cache size.
 	   Dixon is NOT a Celeron. */
@@ -281,12 +273,10 @@ static void __init init_intel(struct cpuinfo_x86 *c)
 		strcpy(c->x86_model_id, p);
 	
 #ifdef CONFIG_X86_HT
-	if (cpu_has(c, X86_FEATURE_HT) && !disable_P4_HT) {
+	if (cpu_has(c, X86_FEATURE_HT)) {
 		extern	int phys_proc_id[NR_CPUS];
 		
 		u32 	eax, ebx, ecx, edx;
-		int 	index_lsb, index_msb, tmp;
-		int	initial_apic_id;
 		int 	cpu = smp_processor_id();
 
 		cpuid(1, &eax, &ebx, &ecx, &edx);
@@ -295,8 +285,6 @@ static void __init init_intel(struct cpuinfo_x86 *c)
 		if (smp_num_siblings == 1) {
 			printk(KERN_INFO  "CPU: Hyper-Threading is disabled\n");
 		} else if (smp_num_siblings > 1 ) {
-			index_lsb = 0;
-			index_msb = 31;
 			/*
 			 * At this point we only support two siblings per
 			 * processor package.
@@ -307,20 +295,13 @@ static void __init init_intel(struct cpuinfo_x86 *c)
 				smp_num_siblings = 1;
 				goto too_many_siblings;
 			}
-			tmp = smp_num_siblings;
-			while ((tmp & 1) == 0) {
-				tmp >>=1 ;
-				index_lsb++;
-			}
-			tmp = smp_num_siblings;
-			while ((tmp & 0x80000000 ) == 0) {
-				tmp <<=1 ;
-				index_msb--;
-			}
-			if (index_lsb != index_msb )
-				index_msb++;
-			initial_apic_id = ebx >> 24 & 0xff;
-			phys_proc_id[cpu] = initial_apic_id >> index_msb;
+			/* cpuid returns the value latched in the HW at reset,
+			 * not the APIC ID register's value.  For any box
+			 * whose BIOS changes APIC IDs, like clustered APIC
+			 * systems, we must use hard_smp_processor_id.
+			 * See Intel's IA-32 SW Dev's Manual Vol2 under CPUID.
+			 */
+			phys_proc_id[cpu] = hard_smp_processor_id() & ~(smp_num_siblings - 1);
 
 			printk(KERN_INFO  "CPU: Physical Processor ID: %d\n",
                                phys_proc_id[cpu]);
@@ -329,8 +310,6 @@ static void __init init_intel(struct cpuinfo_x86 *c)
 	}
 too_many_siblings:
 
-	if (disable_P4_HT)
-		clear_bit(X86_FEATURE_HT, c->x86_capability);
 #endif
 
 	/* Work around errata */

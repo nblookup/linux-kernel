@@ -41,7 +41,7 @@
 #define DEFAULT_TIMER_LIMIT 2
 #endif
 
-int timer_limit = DEFAULT_TIMER_LIMIT;
+static int timer_limit = DEFAULT_TIMER_LIMIT;
 MODULE_AUTHOR("Jaroslav Kysela <perex@suse.cz>, Takashi Iwai <tiwai@suse.de>");
 MODULE_DESCRIPTION("ALSA timer interface");
 MODULE_LICENSE("GPL");
@@ -148,24 +148,19 @@ static snd_timer_t *snd_timer_find(snd_timer_id_t *tid)
 
 static void snd_timer_request(snd_timer_id_t *tid)
 {
-	char str[32];
-	
 	switch (tid->dev_class) {
 	case SNDRV_TIMER_CLASS_GLOBAL:
-		if (tid->device >= timer_limit)
-			return;
-		sprintf(str, "snd-timer-%i", tid->device);
+		if (tid->device < timer_limit)
+			request_module("snd-timer-%i", tid->device);
 		break;
 	case SNDRV_TIMER_CLASS_CARD:
 	case SNDRV_TIMER_CLASS_PCM:
-		if (tid->card >= snd_ecards_limit)
-			return;
-		sprintf(str, "snd-card-%i", tid->card);
+		if (tid->card < snd_ecards_limit)
+			request_module("snd-card-%i", tid->card);
 		break;
 	default:
-		return;
+		break;
 	}
-	request_module(str);
 }
 
 #endif
@@ -458,12 +453,14 @@ static int _snd_timer_stop(snd_timer_instance_t * timeri, int keep_flag, enum sn
 		return -EINVAL;
 	spin_lock_irqsave(&timer->lock, flags);
 	list_del_init(&timeri->ack_list);
+#if 0   /* FIXME: this causes dead lock with the sequencer timer */
 	/* wait until the callback is finished */
 	while (timeri->flags & SNDRV_TIMER_IFLG_CALLBACK) {
 		spin_unlock_irqrestore(&timer->lock, flags);
 		udelay(10);
 		spin_lock_irqsave(&timer->lock, flags);
 	}
+#endif
 	list_del_init(&timeri->active_list);
 	if ((timeri->flags & SNDRV_TIMER_IFLG_RUNNING) &&
 	    !(timeri->flags & SNDRV_TIMER_IFLG_SLAVE) &&
@@ -1681,16 +1678,16 @@ static ssize_t snd_timer_user_read(struct file *file, char *buffer, size_t count
 			spin_lock_irq(&tu->qlock);
 
 			remove_wait_queue(&tu->qchange_sleep, &wait);
-			set_current_state(TASK_RUNNING);
 
 			if (signal_pending(current)) {
 				err = -ERESTARTSYS;
 				break;
 			}
 		}
-		spin_unlock_irq(&tu->qlock);
 		if (err < 0)
 			break;
+
+		spin_unlock_irq(&tu->qlock);
 
 		if (tu->tread) {
 			if (copy_to_user(buffer, &tu->tqueue[tu->qhead++], sizeof(snd_timer_tread_t))) {
@@ -1712,6 +1709,7 @@ static ssize_t snd_timer_user_read(struct file *file, char *buffer, size_t count
 		spin_lock_irq(&tu->qlock);
 		tu->qused--;
 	}
+	spin_unlock_irq(&tu->qlock);
 	return result > 0 ? result : err;
 }
 
@@ -1801,6 +1799,18 @@ static void __exit alsa_timer_exit(void)
 
 module_init(alsa_timer_init)
 module_exit(alsa_timer_exit)
+
+#ifndef MODULE
+/* format is: snd-timer=timer_limit */
+
+static int __init alsa_timer_setup(char *str)
+{
+	(void)(get_option(&str,&timer_limit) == 2);
+	return 1;
+}
+
+__setup("snd-timer=", alsa_timer_setup);
+#endif /* ifndef MODULE */
 
 EXPORT_SYMBOL(snd_timer_open);
 EXPORT_SYMBOL(snd_timer_close);

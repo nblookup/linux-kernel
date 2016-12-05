@@ -417,10 +417,21 @@ static int usb_stor_control_thread(void * __us)
 		scsi_unlock(host);
 	} /* for (;;) */
 
-	/* notify the exit routine that we're actually exiting now */
-	complete(&(us->notify));
-
-	return 0;
+	/* notify the exit routine that we're actually exiting now 
+	 *
+	 * complete()/wait_for_completion() is similar to up()/down(),
+	 * except that complete() is safe in the case where the structure
+	 * is getting deleted in a parallel mode of execution (i.e. just
+	 * after the down() -- that's necessary for the thread-shutdown
+	 * case.
+	 *
+	 * complete_and_exit() goes even further than this -- it is safe in
+	 * the case that the thread of the caller is going away (not just
+	 * the structure) -- this is necessary for the module-remove case.
+	 * This is important in preemption kernels, which transfer the flow
+	 * of execution immediately upon a complete().
+	 */
+	complete_and_exit(&(us->notify), 0);
 }	
 
 /***********************************************************************
@@ -921,9 +932,14 @@ static int storage_probe(struct usb_interface *intf,
 	if (us->protocol == US_PR_EUSB_SDDR09 ||
 			us->protocol == US_PR_DPCM_USB) {
 		/* set the configuration -- STALL is an acceptable response here */
-		result = usb_set_configuration(us->pusb_dev, 1);
+		if (us->pusb_dev->actconfig->desc.bConfigurationValue != 1) {
+			US_DEBUGP("active config #%d != 1 ??\n", us->pusb_dev
+				->actconfig->desc.bConfigurationValue);
+			goto BadDevice;
+		}
+		result = usb_reset_configuration(us->pusb_dev);
 
-		US_DEBUGP("Result from usb_set_configuration is %d\n", result);
+		US_DEBUGP("Result of usb_reset_configuration is %d\n", result);
 		if (result == -EPIPE) {
 			US_DEBUGP("-- stall on control interface\n");
 		} else if (result != 0) {
@@ -958,6 +974,8 @@ static int storage_probe(struct usb_interface *intf,
 		goto BadDevice;
 	}
 
+	scsi_scan_host(us->host);
+
 	printk(KERN_DEBUG 
 	       "WARNING: USB Mass Storage data integrity not assured\n");
 	printk(KERN_DEBUG 
@@ -976,15 +994,8 @@ BadDevice:
 static void storage_disconnect(struct usb_interface *intf)
 {
 	struct us_data *us = usb_get_intfdata(intf);
-	struct scsi_device *sdev;
 
 	US_DEBUGP("storage_disconnect() called\n");
-
-	/* Set devices offline -- need host lock for this */
-	scsi_lock(us->host);
-	list_for_each_entry(sdev, &us->host->my_devices, siblings)
-		sdev->online = 0;
-	scsi_unlock(us->host);
 
 	/* Prevent new USB transfers and stop the current command */
 	set_bit(US_FLIDX_DISCONNECTING, &us->flags);
@@ -993,12 +1004,7 @@ static void storage_disconnect(struct usb_interface *intf)
 	/* Dissociate from the USB device */
 	dissociate_dev(us);
 
-	/* Begin the SCSI host removal sequence */
-	if (scsi_remove_host(us->host)) {
-		US_DEBUGP("-- SCSI refused to remove the host\n");
-		BUG();
-		return;
-	}
+	scsi_remove_host(us->host);
 
 	/* TODO: somehow, wait for the device to
 	 * be 'idle' (tasklet completion) */
@@ -1011,20 +1017,23 @@ static void storage_disconnect(struct usb_interface *intf)
  * Initialization and registration
  ***********************************************************************/
 
-int __init usb_stor_init(void)
+static int __init usb_stor_init(void)
 {
+	int retval;
 	printk(KERN_INFO "Initializing USB Mass Storage driver...\n");
 
-	/* register the driver, return -1 if error */
-	if (usb_register(&usb_storage_driver) < 0)
-		return -1;
+	/* register the driver, return usb_register return code if error */
+	retval = usb_register(&usb_storage_driver);
+	if (retval)
+		goto out;
 
 	/* we're all set */
 	printk(KERN_INFO "USB Mass Storage support registered.\n");
-	return 0;
+out:
+	return retval;
 }
 
-void __exit usb_stor_exit(void)
+static void __exit usb_stor_exit(void)
 {
 	US_DEBUGP("usb_stor_exit() called\n");
 

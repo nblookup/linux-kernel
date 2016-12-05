@@ -3,7 +3,9 @@
 #
 
 obj-$(CONFIG_STRIP) += strip.o
-obj-$(CONFIG_ARLAN) += arlan.o arlan-proc.o
+obj-$(CONFIG_ARLAN) += arlan.o 
+
+arlan-objs := arlan-main.o arlan-proc.o
 
 # Obsolete cards
 obj-$(CONFIG_WAVELAN)		+= wavelan.o
@@ -23,4 +25,4 @@ obj-$(CONFIG_AIRO_CS)		+= airo_cs.o airo.o
 # 16-bit wireless PCMCIA client drivers
 obj-$(CONFIG_PCMCIA_RAYCS)	+= ray_cs.o
 obj-$(CONFIG_PCMCIA_ATMEL)      += atmel_cs.o atmel.o 
-
+obj-$(CONFIG_PCMCIA_WL3501)	+= wl3501_cs.o

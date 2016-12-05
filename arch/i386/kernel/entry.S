@@ -49,6 +49,8 @@
 #include <asm/page.h>
 #include "irq_vectors.h"
 
+#define nr_syscalls ((syscall_table_size)/4)
+
 EBX		= 0x00
 ECX		= 0x04
 EDX		= 0x08
@@ -595,7 +597,7 @@ ENTRY(page_fault)
 #ifdef CONFIG_X86_MCE
 ENTRY(machine_check)
 	pushl $0
-	pushl $do_machine_check
+	pushl machine_check_vector
 	jmp error_code
 #endif
 
@@ -876,6 +878,9 @@ ENTRY(sys_call_table)
  	.long sys_clock_nanosleep
 	.long sys_statfs64
 	.long sys_fstatfs64	
-	.long sys_tgkill
- 
-nr_syscalls=(.-sys_call_table)/4
+	.long sys_tgkill	/* 270 */
+	.long sys_utimes
+ 	.long sys_fadvise64_64
+	.long sys_ni_syscall	/* sys_vserver */
+
+syscall_table_size=(.-sys_call_table)

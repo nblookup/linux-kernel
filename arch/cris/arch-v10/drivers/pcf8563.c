@@ -57,10 +57,10 @@ int pcf8563_open(struct inode *, struct file *);
 int pcf8563_release(struct inode *, struct file *);
 
 static struct file_operations pcf8563_fops = {
-	owner: THIS_MODULE,
-	ioctl: pcf8563_ioctl,
-	open: pcf8563_open,
-	release: pcf8563_release,
+	.owner = THIS_MODULE,
+	.ioctl = pcf8563_ioctl,
+	.open = pcf8563_open,
+	.release = pcf8563_release,
 };
 
 unsigned char
@@ -282,6 +282,5 @@ pcf8563_release(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-EXPORT_NO_SYMBOLS;
 module_init(pcf8563_init);
 module_exit(pcf8563_exit);

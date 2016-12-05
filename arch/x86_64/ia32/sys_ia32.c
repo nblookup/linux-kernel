@@ -61,6 +61,7 @@
 #include <linux/compat.h>
 #include <linux/vfs.h>
 #include <linux/ptrace.h>
+#include <linux/highuid.h>
 #include <asm/mman.h>
 #include <asm/types.h>
 #include <asm/uaccess.h>
@@ -78,38 +79,24 @@
 #define ROUND_UP(x,a)	((__typeof__(x))(((unsigned long)(x) + ((a) - 1)) & ~((a) - 1)))
 #define NAME_OFFSET(de) ((int) ((de)->d_name - (char *) (de)))
 
-#undef high2lowuid
-#undef high2lowgid
-#undef low2highuid
-#undef low2highgid
-
-#define high2lowuid(uid) ((uid) > 65535) ? (u16)overflowuid : (u16)(uid)
-#define high2lowgid(gid) ((gid) > 65535) ? (u16)overflowgid : (u16)(gid)
-#define low2highuid(uid) ((uid) == (u16)-1) ? (uid_t)-1 : (uid_t)(uid)
-#define low2highgid(gid) ((gid) == (u16)-1) ? (gid_t)-1 : (gid_t)(gid)
-extern int overflowuid,overflowgid; 
-
-
-extern asmlinkage long sys_newstat(char * filename, struct stat * statbuf);
-extern asmlinkage long sys_newlstat(char * filename, struct stat * statbuf);
-extern asmlinkage long sys_newfstat(unsigned int fd, struct stat * statbuf);
-
-
-extern asmlinkage long sys_newstat(char * filename, struct stat * statbuf);
-extern asmlinkage long sys_newlstat(char * filename, struct stat * statbuf);
-extern asmlinkage long sys_newfstat(unsigned int fd, struct stat * statbuf);
-
-
 int cp_compat_stat(struct kstat *kbuf, struct compat_stat *ubuf)
 {
+	typeof(ubuf->st_uid) uid = 0;
+	typeof(ubuf->st_gid) gid = 0;
+	SET_UID(uid, kbuf->uid);
+	SET_GID(gid, kbuf->gid);
+	if (!old_valid_dev(kbuf->dev) || !old_valid_dev(kbuf->rdev))
+		return -EOVERFLOW;
+	if (kbuf->size >= 0x7fffffff)
+		return -EOVERFLOW;
 	if (verify_area(VERIFY_WRITE, ubuf, sizeof(struct compat_stat)) ||
-	    __put_user (kbuf->dev, &ubuf->st_dev) ||
+	    __put_user (old_encode_dev(kbuf->dev), &ubuf->st_dev) ||
 	    __put_user (kbuf->ino, &ubuf->st_ino) ||
 	    __put_user (kbuf->mode, &ubuf->st_mode) ||
 	    __put_user (kbuf->nlink, &ubuf->st_nlink) ||
-	    __put_user (kbuf->uid, &ubuf->st_uid) ||
-	    __put_user (kbuf->gid, &ubuf->st_gid) ||
-	    __put_user (kbuf->rdev, &ubuf->st_rdev) ||
+	    __put_user (uid, &ubuf->st_uid) ||
+	    __put_user (gid, &ubuf->st_gid) ||
+	    __put_user (old_encode_dev(kbuf->rdev), &ubuf->st_rdev) ||
 	    __put_user (kbuf->size, &ubuf->st_size) ||
 	    __put_user (kbuf->atime.tv_sec, &ubuf->st_atime) ||
 	    __put_user (kbuf->atime.tv_nsec, &ubuf->st_atime_nsec) ||
@@ -127,26 +114,30 @@ int cp_compat_stat(struct kstat *kbuf, struct compat_stat *ubuf)
    support for 64bit inode numbers. */
 
 static int
-putstat64(struct stat64 *ubuf, struct stat *kbuf)
+cp_stat64(struct stat64 *ubuf, struct kstat *stat)
 {
+	typeof(ubuf->st_uid) uid = 0;
+	typeof(ubuf->st_gid) gid = 0;
+	SET_UID(uid, stat->uid);
+	SET_GID(gid, stat->gid);
 	if (verify_area(VERIFY_WRITE, ubuf, sizeof(struct stat64)) ||
-	    __put_user (kbuf->st_dev, &ubuf->st_dev) ||
-	    __put_user (kbuf->st_ino, &ubuf->__st_ino) ||
-	    __put_user (kbuf->st_ino, &ubuf->st_ino) ||
-	    __put_user (kbuf->st_mode, &ubuf->st_mode) ||
-	    __put_user (kbuf->st_nlink, &ubuf->st_nlink) ||
-	    __put_user (kbuf->st_uid, &ubuf->st_uid) ||
-	    __put_user (kbuf->st_gid, &ubuf->st_gid) ||
-	    __put_user (kbuf->st_rdev, &ubuf->st_rdev) ||
-	    __put_user (kbuf->st_size, &ubuf->st_size) ||
-	    __put_user (kbuf->st_atime, &ubuf->st_atime) ||
-	    __put_user (kbuf->st_atime_nsec, &ubuf->st_atime_nsec) ||
-	    __put_user (kbuf->st_mtime, &ubuf->st_mtime) ||
-	    __put_user (kbuf->st_mtime_nsec, &ubuf->st_mtime_nsec) ||
-	    __put_user (kbuf->st_ctime, &ubuf->st_ctime) ||
-	    __put_user (kbuf->st_ctime_nsec, &ubuf->st_ctime_nsec) ||
-	    __put_user (kbuf->st_blksize, &ubuf->st_blksize) ||
-	    __put_user (kbuf->st_blocks, &ubuf->st_blocks))
+	    __put_user(huge_encode_dev(stat->dev), &ubuf->st_dev) ||
+	    __put_user (stat->ino, &ubuf->__st_ino) ||
+	    __put_user (stat->ino, &ubuf->st_ino) ||
+	    __put_user (stat->mode, &ubuf->st_mode) ||
+	    __put_user (stat->nlink, &ubuf->st_nlink) ||
+	    __put_user (uid, &ubuf->st_uid) ||
+	    __put_user (gid, &ubuf->st_gid) ||
+	    __put_user (huge_encode_dev(stat->rdev), &ubuf->st_rdev) ||
+	    __put_user (stat->size, &ubuf->st_size) ||
+	    __put_user (stat->atime.tv_sec, &ubuf->st_atime) ||
+	    __put_user (stat->atime.tv_nsec, &ubuf->st_atime_nsec) ||
+	    __put_user (stat->mtime.tv_sec, &ubuf->st_mtime) ||
+	    __put_user (stat->mtime.tv_nsec, &ubuf->st_mtime_nsec) ||
+	    __put_user (stat->ctime.tv_sec, &ubuf->st_ctime) ||
+	    __put_user (stat->ctime.tv_nsec, &ubuf->st_ctime_nsec) ||
+	    __put_user (stat->blksize, &ubuf->st_blksize) ||
+	    __put_user (stat->blocks, &ubuf->st_blocks))
 		return -EFAULT;
 	return 0;
 }
@@ -154,49 +145,32 @@ putstat64(struct stat64 *ubuf, struct stat *kbuf)
 asmlinkage long
 sys32_stat64(char * filename, struct stat64 *statbuf)
 {
-	int ret;
-	struct stat s;
-	mm_segment_t old_fs = get_fs();
-	
-	set_fs (KERNEL_DS);
-	ret = sys_newstat(filename, &s);
-	set_fs (old_fs);
-	if (putstat64 (statbuf, &s))
-		return -EFAULT;
+	struct kstat stat;
+	int ret = vfs_stat(filename, &stat);
+	if (!ret)
+		ret = cp_stat64(statbuf, &stat);
 	return ret;
 }
 
 asmlinkage long
 sys32_lstat64(char * filename, struct stat64 *statbuf)
 {
-	int ret;
-	struct stat s;
-	mm_segment_t old_fs = get_fs();
-	
-	set_fs (KERNEL_DS);
-	ret = sys_newlstat(filename, &s);
-	set_fs (old_fs);
-	if (putstat64 (statbuf, &s))
-		return -EFAULT;
+	struct kstat stat;
+	int ret = vfs_lstat(filename, &stat);
+	if (!ret)
+		ret = cp_stat64(statbuf, &stat);
 	return ret;
 }
 
 asmlinkage long
 sys32_fstat64(unsigned int fd, struct stat64 *statbuf)
 {
-	int ret;
-	struct stat s;
-	mm_segment_t old_fs = get_fs();
-	
-	set_fs (KERNEL_DS);
-	ret = sys_newfstat(fd, &s);
-	set_fs (old_fs);
-	if (putstat64 (statbuf, &s))
-		return -EFAULT;
+	struct kstat stat;
+	int ret = vfs_fstat(fd, &stat);
+	if (!ret)
+		ret = cp_stat64(statbuf, &stat);
 	return ret;
 }
-
-
 
 /*
  * Linux/i386 didn't use to be able to handle more than
@@ -1170,37 +1144,6 @@ sys32_rt_sigqueueinfo(int pid, int sig, siginfo_t32 *uinfo)
 	return ret;
 }
 
-extern void check_pending(int signum);
-
-asmlinkage long sys_utimes(char *, struct timeval *);
-
-asmlinkage long
-sys32_utimes(char *filename, struct compat_timeval *tvs)
-{
-	char *kfilename;
-	struct timeval ktvs[2];
-	mm_segment_t old_fs;
-	int ret;
-
-	kfilename = getname(filename);
-	ret = PTR_ERR(kfilename);
-	if (!IS_ERR(kfilename)) {
-		if (tvs) {
-			if (get_tv32(&ktvs[0], tvs) ||
-			    get_tv32(&ktvs[1], 1+tvs))
-				return -EFAULT;
-		}
-
-		old_fs = get_fs();
-		set_fs(KERNEL_DS);
-		ret = sys_utimes(kfilename, &ktvs[0]);
-		set_fs(old_fs);
-
-		putname(kfilename);
-	}
-	return ret;
-}
-
 /* These are here just in case some old ia32 binary calls it. */
 asmlinkage long
 sys32_pause(void)
@@ -1479,8 +1422,9 @@ asmlinkage long sys32_olduname(struct oldold_utsname * name)
 	 __copy_to_user(&name->version,&system_utsname.version,__OLD_UTS_LEN);
 	 __put_user(0,name->version+__OLD_UTS_LEN);
 	 { 
-		 char *arch = current->personality == PER_LINUX32
-			 ? "i386" : "x86_64"; 
+		 char *arch = "x86_64";
+		 if (personality(current->personality) == PER_LINUX32)
+			 arch = "i686";
 		 
 		 __copy_to_user(&name->machine,arch,strlen(arch)+1);
 	 }
@@ -1500,14 +1444,14 @@ long sys32_uname(struct old_utsname * name)
 	down_read(&uts_sem);
 	err=copy_to_user(name, &system_utsname, sizeof (*name));
 	up_read(&uts_sem);
-	if (current->personality == PER_LINUX32) 
+	if (personality(current->personality) == PER_LINUX32) 
 		err |= copy_to_user(&name->machine, "i686", 5);
 	return err?-EFAULT:0;
 }
 
 extern int sys_ustat(dev_t, struct ustat *);
 
-long sys32_ustat(dev_t dev, struct ustat32 *u32p)
+long sys32_ustat(unsigned dev, struct ustat32 *u32p)
 {
 	struct ustat u;
 	mm_segment_t seg;
@@ -1757,8 +1701,8 @@ static int nfs_exp32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32)
 		      &arg32->ca32_export.ex32_anon_uid);
 	err |= __get_user(karg->ca_export.ex_anon_gid,
 		      &arg32->ca32_export.ex32_anon_gid);
-	karg->ca_export.ex_anon_uid = high2lowuid(karg->ca_export.ex_anon_uid);
-	karg->ca_export.ex_anon_gid = high2lowgid(karg->ca_export.ex_anon_gid);
+	SET_UID(karg->ca_export.ex_anon_uid, karg->ca_export.ex_anon_uid);
+	SET_GID(karg->ca_export.ex_anon_gid, karg->ca_export.ex_anon_gid);
 	return err;
 }
 
@@ -1800,7 +1744,7 @@ static int nfs_getfs32_trans(struct nfsctl_arg *karg, struct nfsctl_arg32 *arg32
  */
 static int nfs_getfh32_res_trans(union nfsctl_res *kres, union nfsctl_res32 *res32)
 {
-	return copy_to_user(res32, kres, sizeof(*res32));
+	return copy_to_user(res32, kres, sizeof(*res32)) ? -EFAULT : 0;
 }
 
 long asmlinkage sys32_nfsservctl(int cmd, struct nfsctl_arg32 *arg32, union nfsctl_res32 *res32)
@@ -1993,6 +1937,55 @@ asmlinkage long sys32_open(const char * filename, int flags, int mode)
 	return fd;
 }
 
+struct sigevent32 { 
+	u32 sigev_value;
+	u32 sigev_signo; 
+	u32 sigev_notify; 
+	u32 payload[(64 / 4) - 3]; 
+}; 
+
+extern asmlinkage long
+sys_timer_create(clockid_t which_clock,
+		 struct sigevent __user *timer_event_spec,
+		 timer_t __user * created_timer_id);
+
+long
+sys32_timer_create(u32 clock, struct sigevent32 *se32, timer_t *timer_id)
+{
+	struct sigevent se;
+       mm_segment_t oldfs;
+       long err;
+
+	if (se32) { 
+		memset(&se, 0, sizeof(struct sigevent)); 
+		if (get_user(se.sigev_value.sival_int,  &se32->sigev_value) ||
+		    __get_user(se.sigev_signo, &se32->sigev_signo) ||
+		    __get_user(se.sigev_notify, &se32->sigev_notify) ||
+		    __copy_from_user(&se._sigev_un._pad, &se32->payload, 
+				     sizeof(se32->payload)))
+			return -EFAULT;
+	} 
+	if (!access_ok(VERIFY_WRITE,timer_id,sizeof(timer_t)))
+		return -EFAULT;
+
+       oldfs = get_fs();
+	set_fs(KERNEL_DS);
+       err = sys_timer_create(clock, se32 ? &se : NULL, timer_id);
+	set_fs(oldfs); 
+	
+	return err; 
+} 
+
+extern long sys_fadvise64_64(int fd, loff_t offset, loff_t len, int advice);
+
+long sys32_fadvise64_64(int fd, __u32 offset_low, __u32 offset_high, 
+			__u32 len_low, __u32 len_high, int advice)
+{ 
+	return sys_fadvise64_64(fd,
+			       (((u64)offset_high)<<32) | offset_low,
+			       (((u64)len_high)<<32) | len_low,
+			       advice); 
+} 
 
 long sys32_vm86_warning(void)
 { 

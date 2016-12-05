@@ -76,10 +76,14 @@ void disable_hlt(void)
 	hlt_counter++;
 }
 
+EXPORT_SYMBOL(disable_hlt);
+
 void enable_hlt(void)
 {
 	hlt_counter--;
 }
+
+EXPORT_SYMBOL(enable_hlt);
 
 /*
  * We use this if we don't have any better
@@ -138,14 +142,60 @@ void cpu_idle (void)
 {
 	/* endless idle loop with no priority at all */
 	while (1) {
-		void (*idle)(void) = pm_idle;
-		if (!idle)
-			idle = default_idle;
-		irq_stat[smp_processor_id()].idle_timestamp = jiffies;
-		while (!need_resched())
+		while (!need_resched()) {
+			void (*idle)(void) = pm_idle;
+
+			if (!idle)
+				idle = default_idle;
+
+			irq_stat[smp_processor_id()].idle_timestamp = jiffies;
 			idle();
+		}
 		schedule();
 	}
+}
+
+/*
+ * This uses new MONITOR/MWAIT instructions on P4 processors with PNI,
+ * which can obviate IPI to trigger checking of need_resched.
+ * We execute MONITOR against need_resched and enter optimized wait state
+ * through MWAIT. Whenever someone changes need_resched, we would be woken
+ * up from MWAIT (without an IPI).
+ */
+static void mwait_idle(void)
+{
+	local_irq_enable();
+
+	if (!need_resched()) {
+		set_thread_flag(TIF_POLLING_NRFLAG);
+		do {
+			__monitor((void *)&current_thread_info()->flags, 0, 0);
+			if (need_resched())
+				break;
+			__mwait(0, 0);
+		} while (!need_resched());
+		clear_thread_flag(TIF_POLLING_NRFLAG);
+	}
+}
+
+void __init select_idle_routine(const struct cpuinfo_x86 *c)
+{
+	if (cpu_has(c, X86_FEATURE_MWAIT)) {
+		printk("monitor/mwait feature present.\n");
+		/*
+		 * Skip, if setup has overridden idle.
+		 * Also, take care of system with asymmetric CPUs.
+		 * Use, mwait_idle only if all cpus support it.
+		 * If not, we fallback to default_idle()
+		 */
+		if (!pm_idle) {
+			printk("using mwait in idle threads.\n");
+			pm_idle = mwait_idle;
+		}
+		return;
+	}
+	pm_idle = default_idle;
+	return;
 }
 
 static int __init idle_setup (char *str)
@@ -153,6 +203,9 @@ static int __init idle_setup (char *str)
 	if (!strncmp(str, "poll", 4)) {
 		printk("using polling idle threads.\n");
 		pm_idle = poll_idle;
+	} else if (!strncmp(str, "halt", 4)) {
+		printk("using halt in idle threads.\n");
+		pm_idle = default_idle;
 	}
 
 	return 1;
@@ -238,9 +291,9 @@ void exit_thread(void)
 	struct task_struct *tsk = current;
 
 	/* The process may have allocated an io port bitmap... nuke it. */
-	if (unlikely(NULL != tsk->thread.ts_io_bitmap)) {
-		kfree(tsk->thread.ts_io_bitmap);
-		tsk->thread.ts_io_bitmap = NULL;
+	if (unlikely(NULL != tsk->thread.io_bitmap_ptr)) {
+		kfree(tsk->thread.io_bitmap_ptr);
+		tsk->thread.io_bitmap_ptr = NULL;
 	}
 }
 
@@ -305,11 +358,11 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 	savesegment(gs,p->thread.gs);
 
 	tsk = current;
-	if (unlikely(NULL != tsk->thread.ts_io_bitmap)) {
-		p->thread.ts_io_bitmap = kmalloc(IO_BITMAP_BYTES, GFP_KERNEL);
-		if (!p->thread.ts_io_bitmap)
+	if (unlikely(NULL != tsk->thread.io_bitmap_ptr)) {
+		p->thread.io_bitmap_ptr = kmalloc(IO_BITMAP_BYTES, GFP_KERNEL);
+		if (!p->thread.io_bitmap_ptr)
 			return -ENOMEM;
-		memcpy(p->thread.ts_io_bitmap, tsk->thread.ts_io_bitmap,
+		memcpy(p->thread.io_bitmap_ptr, tsk->thread.io_bitmap_ptr,
 			IO_BITMAP_BYTES);
 	}
 
@@ -339,8 +392,8 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 
 	err = 0;
  out:
-	if (err && p->thread.ts_io_bitmap)
-		kfree(p->thread.ts_io_bitmap);
+	if (err && p->thread.io_bitmap_ptr)
+		kfree(p->thread.io_bitmap_ptr);
 	return err;
 }
 
@@ -449,7 +502,7 @@ struct task_struct * __switch_to(struct task_struct *prev_p, struct task_struct 
 
 	/* never put a printk in __switch_to... printk() calls wake_up*() indirectly */
 
-	unlazy_fpu(prev_p);
+	__unlazy_fpu(prev_p);
 
 	/*
 	 * Reload esp0, LDT and the page table pointer:
@@ -489,8 +542,8 @@ struct task_struct * __switch_to(struct task_struct *prev_p, struct task_struct 
 		loaddebug(next, 7);
 	}
 
-	if (unlikely(prev->ts_io_bitmap || next->ts_io_bitmap)) {
-		if (next->ts_io_bitmap) {
+	if (unlikely(prev->io_bitmap_ptr || next->io_bitmap_ptr)) {
+		if (next->io_bitmap_ptr) {
 			/*
 			 * 4 cachelines copy ... not good, but not that
 			 * bad either. Anyone got something better?
@@ -499,9 +552,9 @@ struct task_struct * __switch_to(struct task_struct *prev_p, struct task_struct 
 			 * and playing VM tricks to switch the IO bitmap
 			 * is not really acceptable.]
 			 */
-			memcpy(tss->io_bitmap, next->ts_io_bitmap,
+			memcpy(tss->io_bitmap, next->io_bitmap_ptr,
 				IO_BITMAP_BYTES);
-			tss->bitmap = IO_BITMAP_OFFSET;
+			tss->io_bitmap_base = IO_BITMAP_OFFSET;
 		} else
 			/*
 			 * a bitmap offset pointing outside of the TSS limit
@@ -509,7 +562,7 @@ struct task_struct * __switch_to(struct task_struct *prev_p, struct task_struct 
 			 * tries to use a port IO instruction. The first
 			 * sys_ioperm() call sets up the bitmap properly.
 			 */
-			tss->bitmap = INVALID_IO_BITMAP_OFFSET;
+			tss->io_bitmap_base = INVALID_IO_BITMAP_OFFSET;
 	}
 	return prev_p;
 }

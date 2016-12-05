@@ -22,7 +22,7 @@
 
 #include <asm/io.h>
 #include <asm/system.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/module.h>
@@ -30,7 +30,6 @@
 #include <linux/sched.h>
 #include <linux/signal.h>
 #include <linux/stat.h>
-#include <linux/version.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 

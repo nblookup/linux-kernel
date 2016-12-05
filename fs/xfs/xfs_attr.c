@@ -116,37 +116,37 @@ ktrace_t *xfs_attr_trace_buf;
  *========================================================================*/
 
 /*ARGSUSED*/
-int								/* error */
-xfs_attr_get(bhv_desc_t *bdp, char *name, char *value, int *valuelenp,
-	     int flags, struct cred *cred)
+STATIC int
+xfs_attr_get_int(xfs_inode_t *ip, char *name, char *value, int *valuelenp,
+	     int flags, int lock, struct cred *cred)
 {
 	xfs_da_args_t   args;
 	int             error;
 	int             namelen;
-	xfs_inode_t	*ip = XFS_BHVTOI(bdp);
 
-	if (!name)
-		return EINVAL;
 	ASSERT(MAXNAMELEN-1 <= 0xff);	/* length is stored in uint8 */
 	namelen = strlen(name);
 	if (namelen >= MAXNAMELEN)
-		return EFAULT;		/* match IRIX behaviour */
-	XFS_STATS_INC(xfsstats.xs_attr_get);
-
-	if (XFS_IFORK_Q(ip) == 0)
-		return ENOATTR;
-
+		return(EFAULT);		/* match IRIX behaviour */
+	XFS_STATS_INC(xs_attr_get);
 
 	if (XFS_FORCED_SHUTDOWN(ip->i_mount))
-		return (EIO);
+		return(EIO);
 
-	/*
-	 * Do we answer them, or ignore them?
-	 */
-	xfs_ilock(ip, XFS_ILOCK_SHARED);
-	if ((error = xfs_iaccess(XFS_BHVTOI(bdp), IREAD, cred))) {
-		xfs_iunlock(ip, XFS_ILOCK_SHARED);
-		return(XFS_ERROR(error));
+	if ((XFS_IFORK_Q(ip) == 0) ||
+	    (ip->i_d.di_aformat == XFS_DINODE_FMT_EXTENTS &&
+	     ip->i_d.di_anextents == 0))
+		return(ENOATTR);
+
+	if (lock) {
+		xfs_ilock(ip, XFS_ILOCK_SHARED);
+		/*
+		 * Do we answer them, or ignore them?
+		 */
+		if ((error = xfs_iaccess(ip, S_IRUSR, cred))) {
+			xfs_iunlock(ip, XFS_ILOCK_SHARED);
+			return(XFS_ERROR(error));
+		}
 	}
 
 	/*
@@ -177,7 +177,9 @@ xfs_attr_get(bhv_desc_t *bdp, char *name, char *value, int *valuelenp,
 	} else {
 		error = xfs_attr_node_get(&args);
 	}
-	xfs_iunlock(ip, XFS_ILOCK_SHARED);
+
+	if (lock)
+		xfs_iunlock(ip, XFS_ILOCK_SHARED);
 
 	/*
 	 * Return the number of bytes in the value to the caller.
@@ -187,6 +189,23 @@ xfs_attr_get(bhv_desc_t *bdp, char *name, char *value, int *valuelenp,
 	if (error == EEXIST)
 		error = 0;
 	return(error);
+}
+
+int
+xfs_attr_fetch(xfs_inode_t *ip, char *name, char *value, int valuelen)
+{
+	return xfs_attr_get_int(ip, name, value, &valuelen, ATTR_ROOT, 0, NULL);
+}
+
+int
+xfs_attr_get(bhv_desc_t *bdp, char *name, char *value, int *valuelenp,
+	     int flags, struct cred *cred)
+{
+	xfs_inode_t	*ip = XFS_BHVTOI(bdp);
+
+	if (!name)
+		return(EINVAL);
+	return xfs_attr_get_int(ip, name, value, valuelenp, flags, 1, cred);
 }
 
 /*ARGSUSED*/
@@ -210,7 +229,7 @@ xfs_attr_set(bhv_desc_t *bdp, char *name, char *value, int valuelen, int flags,
 	if (namelen >= MAXNAMELEN)
 		return EFAULT; /* match irix behaviour */
 
-	XFS_STATS_INC(xfsstats.xs_attr_set);
+	XFS_STATS_INC(xs_attr_set);
 	/*
 	 * Do we answer them, or ignore them?
 	 */
@@ -220,7 +239,7 @@ xfs_attr_set(bhv_desc_t *bdp, char *name, char *value, int valuelen, int flags,
 		return (EIO);
 
 	xfs_ilock(dp, XFS_ILOCK_SHARED);
-	if ((error = xfs_iaccess(dp, IWRITE, cred))) {
+	if ((error = xfs_iaccess(dp, S_IWUSR, cred))) {
 		xfs_iunlock(dp, XFS_ILOCK_SHARED);
 		return(XFS_ERROR(error));
 	}
@@ -468,7 +487,7 @@ xfs_attr_remove(bhv_desc_t *bdp, char *name, int flags, struct cred *cred)
 	if (namelen>=MAXNAMELEN)
 		return EFAULT; /* match irix behaviour */
 
-	XFS_STATS_INC(xfsstats.xs_attr_remove);
+	XFS_STATS_INC(xs_attr_remove);
 
 	/*
 	 * Do we answer them, or ignore them?
@@ -479,7 +498,7 @@ xfs_attr_remove(bhv_desc_t *bdp, char *name, int flags, struct cred *cred)
 		return (EIO);
 
 	xfs_ilock(dp, XFS_ILOCK_SHARED);
-	if ((error = xfs_iaccess(dp, IWRITE, cred))) {
+	if ((error = xfs_iaccess(dp, S_IWUSR, cred))) {
 		xfs_iunlock(dp, XFS_ILOCK_SHARED);
 		return(XFS_ERROR(error));
 	} else if (XFS_IFORK_Q(dp) == 0 ||
@@ -620,7 +639,7 @@ xfs_attr_list(bhv_desc_t *bdp, char *buffer, int bufsize, int flags,
 	xfs_inode_t *dp;
 	int error;
 
-	XFS_STATS_INC(xfsstats.xs_attr_list);
+	XFS_STATS_INC(xs_attr_list);
 
 	/*
 	 * Validate the cursor.
@@ -668,7 +687,7 @@ xfs_attr_list(bhv_desc_t *bdp, char *buffer, int bufsize, int flags,
 	 * Do they have permission?
 	 */
 	xfs_ilock(dp, XFS_ILOCK_SHARED);
-	if ((error = xfs_iaccess(dp, IREAD, cred))) {
+	if ((error = xfs_iaccess(dp, S_IRUSR, cred))) {
 		xfs_iunlock(dp, XFS_ILOCK_SHARED);
 		return(XFS_ERROR(error));
 	}

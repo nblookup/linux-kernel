@@ -328,7 +328,7 @@ static char *card_names[] = {
 .driver_data = TYPE,				\
 }
 
-static struct pci_device_id m3_id_table[] __initdata = {
+static struct pci_device_id m3_id_table[] = {
     M3_DEVICE(0x1988, ESS_ALLEGRO),
     M3_DEVICE(0x1998, ESS_MAESTRO3),
     M3_DEVICE(0x199a, ESS_MAESTRO3HW),
@@ -1980,7 +1980,7 @@ free_dmabuf(struct pci_dev *pci_dev, struct dmabuf *db)
 
 static int m3_open(struct inode *inode, struct file *file)
 {
-    unsigned int minor = minor(inode->i_rdev);
+    unsigned int minor = iminor(inode);
     struct m3_card *c;
     struct m3_state *s = NULL;
     int i;
@@ -2149,7 +2149,7 @@ out:
 /* OSS /dev/mixer file operation methods */
 static int m3_open_mixdev(struct inode *inode, struct file *file)
 {
-    unsigned int minor = minor(inode->i_rdev);
+    unsigned int minor = iminor(inode);
     struct m3_card *card = devs;
 
     for (card = devs; card != NULL; card = card->next) {
@@ -2297,13 +2297,12 @@ static void m3_codec_reset(struct m3_card *card, int busywait)
 #endif
 }
 
-static int __init m3_codec_install(struct m3_card *card)
+static int __devinit m3_codec_install(struct m3_card *card)
 {
     struct ac97_codec *codec;
 
-    if ((codec = kmalloc(sizeof(struct ac97_codec), GFP_KERNEL)) == NULL)
+    if ((codec = ac97_alloc_codec()) == NULL)
         return -ENOMEM;
-    memset(codec, 0, sizeof(struct ac97_codec));
 
     codec->private_data = card;
     codec->codec_read = m3_ac97_read;
@@ -2313,13 +2312,13 @@ static int __init m3_codec_install(struct m3_card *card)
 
     if (ac97_probe_codec(codec) == 0) {
         printk(KERN_ERR PFX "codec probe failed\n");
-        kfree(codec);
+        ac97_release_codec(codec);
         return -1;
     }
 
     if ((codec->dev_mixer = register_sound_mixer(&m3_mixer_fops, -1)) < 0) {
         printk(KERN_ERR PFX "couldn't register mixer!\n");
-        kfree(codec);
+        ac97_release_codec(codec);
         return -1;
     }
 
@@ -2595,7 +2594,7 @@ void free_dsp_suspendmem(struct m3_card *card)
 /*
  * great day!  this function is ugly as hell.
  */
-static int __init m3_probe(struct pci_dev *pci_dev, const struct pci_device_id *pci_id)
+static int __devinit m3_probe(struct pci_dev *pci_dev, const struct pci_device_id *pci_id)
 {
     u32 n;
     int i;

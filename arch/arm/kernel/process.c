@@ -45,10 +45,14 @@ void disable_hlt(void)
 	hlt_counter++;
 }
 
+EXPORT_SYMBOL(disable_hlt);
+
 void enable_hlt(void)
 {
 	hlt_counter--;
 }
+
+EXPORT_SYMBOL(enable_hlt);
 
 static int __init nohlt_setup(char *__unused)
 {
@@ -117,15 +121,17 @@ __setup("reboot=", reboot_setup);
 
 void machine_halt(void)
 {
-	leds_event(led_halted);
 }
+
+EXPORT_SYMBOL(machine_halt);
 
 void machine_power_off(void)
 {
-	leds_event(led_halted);
 	if (pm_power_off)
 		pm_power_off();
 }
+
+EXPORT_SYMBOL(machine_power_off);
 
 void machine_restart(char * __unused)
 {
@@ -154,6 +160,8 @@ void machine_restart(char * __unused)
 	printk("Reboot failed -- System halted\n");
 	while (1);
 }
+
+EXPORT_SYMBOL(machine_restart);
 
 void show_regs(struct pt_regs * regs)
 {
@@ -312,8 +320,8 @@ void release_thread(struct task_struct *dead_task)
 asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
 
 int
-copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
-	    unsigned long unused, struct task_struct *p, struct pt_regs *regs)
+copy_thread(int nr, unsigned long clone_flags, unsigned long stack_start,
+	    unsigned long stk_sz, struct task_struct *p, struct pt_regs *regs)
 {
 	struct thread_info *thread = p->thread_info;
 	struct pt_regs *childregs;
@@ -321,7 +329,7 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 	childregs = ((struct pt_regs *)((unsigned long)thread + THREAD_SIZE - 8)) - 1;
 	*childregs = *regs;
 	childregs->ARM_r0 = 0;
-	childregs->ARM_sp = esp;
+	childregs->ARM_sp = stack_start;
 
 	memset(&thread->cpu_context, 0, sizeof(struct cpu_context_save));
 	thread->cpu_context.sp = (unsigned long)childregs;
@@ -373,33 +381,35 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 }
 
 /*
- * This is the mechanism for creating a new kernel thread.
- *
- * NOTE! Only a kernel-only process(ie the swapper or direct descendants
- * who haven't done an "execve()") should use this: it will work within
- * a system call from a "real" process, but the process memory space will
- * not be free'd until both the parent and the child have exited.
+ * Shuffle the argument into the correct register before calling the
+ * thread function.  r1 is the thread argument, r2 is the pointer to
+ * the thread function, and r3 points to the exit function.
+ */
+extern void kernel_thread_helper(void);
+asm(	".align\n"
+"	.type	kernel_thread_helper, #function\n"
+"kernel_thread_helper:\n"
+"	mov	r0, r1\n"
+"	mov	lr, r3\n"
+"	mov	pc, r2\n"
+"	.size	kernel_thread_helper, . - kernel_thread_helper");
+
+/*
+ * Create a kernel thread.
  */
 pid_t kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
 {
-	register unsigned int r0 asm("r0") = flags | CLONE_VM | CLONE_UNTRACED;
-	register unsigned int r1 asm("r1") = 0;
-	register pid_t __ret asm("r0");
+	struct pt_regs regs;
 
-	__asm__ __volatile__(
-	__syscall(clone)"	@ kernel_thread sys_clone	\n\
-	movs	%0, r0		@ if we are the child		\n\
-	bne	1f						\n\
-	mov	fp, #0		@ ensure that fp is zero	\n\
-	mov	r0, %4						\n\
-	mov	lr, pc						\n\
-	mov	pc, %3						\n\
-	b	sys_exit					\n\
-1:	"
-        : "=r" (__ret)
-        : "0" (r0), "r" (r1), "r" (fn), "r" (arg)
-	: "lr");
-	return __ret;
+	memset(&regs, 0, sizeof(regs));
+
+	regs.ARM_r1 = (unsigned long)arg;
+	regs.ARM_r2 = (unsigned long)fn;
+	regs.ARM_r3 = (unsigned long)do_exit;
+	regs.ARM_pc = (unsigned long)kernel_thread_helper;
+	regs.ARM_cpsr = SVC_MODE;
+
+	return do_fork(flags|CLONE_VM|CLONE_UNTRACED, 0, &regs, 0, NULL, NULL);
 }
 
 /*

@@ -15,7 +15,6 @@
 
 #include "linux/config.h"
 #include "linux/module.h"
-#include "linux/blk.h"
 #include "linux/blkdev.h"
 #include "linux/hdreg.h"
 #include "linux/init.h"
@@ -56,9 +55,6 @@ static int ubd_ioctl(struct inode * inode, struct file * file,
 		     unsigned int cmd, unsigned long arg);
 
 #define MAX_DEV (8)
-#define MAX_MINOR (MAX_DEV << UBD_SHIFT)
-
-#define DEVICE_NR(n) (minor(n) >> UBD_SHIFT)
 
 static struct block_device_operations ubd_blops = {
         .owner		= THIS_MODULE,
@@ -68,7 +64,7 @@ static struct block_device_operations ubd_blops = {
 };
 
 /* Protected by the queue_lock */
-static request_queue_t ubd_queue;
+static request_queue_t *ubd_queue;
 
 /* Protected by ubd_lock */
 static int fake_major = 0;
@@ -371,7 +367,7 @@ static void ubd_finish(struct request *req, int error)
 static void ubd_handler(void)
 {
 	struct io_thread_req req;
-	struct request *rq = elv_next_request(&ubd_queue);
+	struct request *rq = elv_next_request(ubd_queue);
 	int n;
 
 	do_ubd = NULL;
@@ -392,7 +388,7 @@ static void ubd_handler(void)
 	
 	ubd_finish(rq, req.error);
 	reactivate_fd(thread_fd, UBD_IRQ);	
-	do_ubd_request(&ubd_queue);
+	do_ubd_request(ubd_queue);
 }
 
 static void ubd_intr(int irq, void *dev, struct pt_regs *unused)
@@ -498,7 +494,7 @@ static int ubd_new_disk(int major, u64 size, int unit,
 	sprintf(disk->devfs_name, "ubd/disc%d", unit);
 
 	disk->private_data = &ubd_dev[unit];
-	disk->queue = &ubd_queue;
+	disk->queue = ubd_queue;
 	add_disk(disk);
 
 	*disk_out = disk;
@@ -665,8 +661,13 @@ int ubd_init(void)
 	if (register_blkdev(MAJOR_NR, "ubd"))
 		return -1;
 
-	blk_init_queue(&ubd_queue, do_ubd_request, &ubd_io_lock);
-	elevator_init(&ubd_queue, &elevator_noop);
+	ubd_queue = blk_init_queue(do_ubd_request, &ubd_io_lock);
+	if (!ubd_queue) {
+		unregister_blkdev(MAJOR_NR, "ubd");
+		return -1;
+	}
+		
+	elevator_init(ubd_queue, &elevator_noop);
 
 	if (fake_major != 0) {
 		char name[sizeof("ubd_nnn\0")];

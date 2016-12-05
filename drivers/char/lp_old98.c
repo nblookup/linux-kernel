@@ -23,7 +23,6 @@
 #include <linux/fcntl.h>
 #include <linux/delay.h>
 #include <linux/console.h>
-#include <linux/version.h>
 #include <linux/fs.h>
 
 #include <asm/io.h>
@@ -219,7 +218,7 @@ static ssize_t lp_old98_write(struct file * file,
 
 static int lp_old98_open(struct inode * inode, struct file * file)
 {
-	if (minor(inode->i_rdev) != 0)
+	if (iminor(inode) != 0)
 		return -ENXIO;
 
 	if (lp.flags & LP_BUSY)

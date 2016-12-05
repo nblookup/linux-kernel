@@ -12,6 +12,10 @@
 #include <linux/netfilter_ipv4/ip_nat_rule.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+MODULE_DESCRIPTION("iptables MASQUERADE target module");
+
 #if 0
 #define DEBUGP printk
 #else
@@ -91,11 +95,18 @@ masquerade_target(struct sk_buff **pskb,
 #ifdef CONFIG_IP_ROUTE_FWMARK
 						.fwmark = (*pskb)->nfmark
 #endif
-					      } },
-				    .oif = out->ifindex };
+					      } } };
 		if (ip_route_output_key(&rt, &fl) != 0) {
-			/* Shouldn't happen */
-			printk("MASQUERADE: No route: Rusty's brain broke!\n");
+			/* Funky routing can do this. */
+			if (net_ratelimit())
+				printk("MASQUERADE:"
+				       " No route: Rusty's brain broke!\n");
+			return NF_DROP;
+		}
+		if (rt->u.dst.dev != out) {
+			if (net_ratelimit())
+				printk("MASQUERADE:"
+				       " Route sent us somewhere else.\n");
 			return NF_DROP;
 		}
 	}
@@ -119,56 +130,34 @@ masquerade_target(struct sk_buff **pskb,
 }
 
 static inline int
-device_cmp(const struct ip_conntrack *i, void *ifindex)
+device_cmp(const struct ip_conntrack *i, void *_ina)
 {
-	int ret;
+	int ret = 0;
+	struct in_ifaddr *ina = _ina;
 
 	READ_LOCK(&masq_lock);
-	ret = (i->nat.masq_index == (int)(long)ifindex);
+	/* If it's masquerading out this interface with a different address,
+	   or we don't know the new address of this interface. */
+	if (i->nat.masq_index == ina->ifa_dev->dev->ifindex
+	    && i->tuplehash[IP_CT_DIR_REPLY].tuple.dst.ip != ina->ifa_address)
+		ret = 1;
 	READ_UNLOCK(&masq_lock);
 
 	return ret;
-}
-
-static int masq_device_event(struct notifier_block *this,
-			     unsigned long event,
-			     void *ptr)
-{
-	struct net_device *dev = ptr;
-
-	if (event == NETDEV_DOWN) {
-		/* Device was downed.  Search entire table for
-		   conntracks which were associated with that device,
-		   and forget them. */
-		IP_NF_ASSERT(dev->ifindex != 0);
-
-		ip_ct_selective_cleanup(device_cmp, (void *)(long)dev->ifindex);
-	}
-
-	return NOTIFY_DONE;
 }
 
 static int masq_inet_event(struct notifier_block *this,
 			   unsigned long event,
 			   void *ptr)
 {
-	struct net_device *dev = ((struct in_ifaddr *)ptr)->ifa_dev->dev;
-
-	if (event == NETDEV_DOWN) {
-		/* IP address was deleted.  Search entire table for
-		   conntracks which were associated with that device,
-		   and forget them. */
-		IP_NF_ASSERT(dev->ifindex != 0);
-
-		ip_ct_selective_cleanup(device_cmp, (void *)(long)dev->ifindex);
-	}
+	/* For some configurations, interfaces often come back with
+	 * the same address.  If not, clean up old conntrack
+	 * entries. */
+	if (event == NETDEV_UP)
+		ip_ct_selective_cleanup(device_cmp, ptr);
 
 	return NOTIFY_DONE;
 }
-
-static struct notifier_block masq_dev_notifier = {
-	.notifier_call	= masq_device_event,
-};
 
 static struct notifier_block masq_inet_notifier = {
 	.notifier_call	= masq_inet_event,
@@ -187,12 +176,9 @@ static int __init init(void)
 
 	ret = ipt_register_target(&masquerade);
 
-	if (ret == 0) {
-		/* Register for device down reports */
-		register_netdevice_notifier(&masq_dev_notifier);
+	if (ret == 0)
 		/* Register IP address change reports */
 		register_inetaddr_notifier(&masq_inet_notifier);
-	}
 
 	return ret;
 }
@@ -200,10 +186,8 @@ static int __init init(void)
 static void __exit fini(void)
 {
 	ipt_unregister_target(&masquerade);
-	unregister_netdevice_notifier(&masq_dev_notifier);
 	unregister_inetaddr_notifier(&masq_inet_notifier);	
 }
 
 module_init(init);
 module_exit(fini);
-MODULE_LICENSE("GPL");

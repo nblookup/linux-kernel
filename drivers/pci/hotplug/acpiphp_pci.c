@@ -1,12 +1,12 @@
 /*
  * ACPI PCI HotPlug PCI configuration space management
  *
- * Copyright (c) 1995,2001 Compaq Computer Corporation
- * Copyright (c) 2001 Greg Kroah-Hartman (greg@kroah.com)
- * Copyright (c) 2001,2002 IBM Corp.
- * Copyright (c) 2002 Takayoshi Kochi (t-kochi@bq.jp.nec.com)
- * Copyright (c) 2002 Hiroshi Aono (h-aono@ap.jp.nec.com)
- * Copyright (c) 2002 NEC Corporation
+ * Copyright (C) 1995,2001 Compaq Computer Corporation
+ * Copyright (C) 2001 Greg Kroah-Hartman (greg@kroah.com)
+ * Copyright (C) 2001,2002 IBM Corp.
+ * Copyright (C) 2002 Takayoshi Kochi (t-kochi@bq.jp.nec.com)
+ * Copyright (C) 2002 Hiroshi Aono (h-aono@ap.jp.nec.com)
+ * Copyright (C) 2002 NEC Corporation
  *
  * All rights reserved.
  *
@@ -212,7 +212,7 @@ static int detect_used_resource (struct acpiphp_bridge *bridge, struct pci_dev *
 	int count;
 	struct pci_resource *res;
 
-	dbg("Device %s\n", dev->slot_name);
+	dbg("Device %s\n", pci_name(dev));
 
 	for (count = 0; address[count]; count++) {	/* for 6 BARs */
 		pci_read_config_dword(dev, address[count], &bar);
@@ -337,7 +337,7 @@ int acpiphp_init_func_resource (struct acpiphp_func *func)
 	struct pci_dev *dev;
 
 	dev = func->pci_dev;
-	dbg("Hot-pluggable device %s\n", dev->slot_name);
+	dbg("Hot-pluggable device %s\n", pci_name(dev));
 
 	for (count = 0; address[count]; count++) {	/* for 6 BARs */
 		pci_read_config_dword(dev, address[count], &bar);

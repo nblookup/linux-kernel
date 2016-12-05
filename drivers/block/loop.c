@@ -140,7 +140,8 @@ figure_loop_size(struct loop_device *lo)
 	sector_t x;
 
 	/* Compute loopsize in bytes */
-	size = lo->lo_backing_file->f_dentry->d_inode->i_mapping->host->i_size;
+	size = i_size_read(lo->lo_backing_file->f_dentry->
+				d_inode->i_mapping->host);
 	offset = lo->lo_offset;
 	loopsize = size - offset;
 	if (lo->lo_sizelimit > 0 && lo->lo_sizelimit < loopsize)
@@ -512,6 +513,7 @@ static int loop_transfer_bio(struct loop_device *lo,
 					from_bvec->bv_len, IV);
 		kunmap(from_bvec->bv_page);
 		kunmap(to_bvec->bv_page);
+		IV += from_bvec->bv_len >> 9;
 	}
 
 	return ret;
@@ -726,8 +728,9 @@ static int loop_set_fd(struct loop_device *lo, struct file *lo_file,
 		fput(file);
 		goto out_putf;
 	}
-	lo->old_gfp_mask = inode->i_mapping->gfp_mask;
-	inode->i_mapping->gfp_mask &= ~(__GFP_IO|__GFP_FS);
+	lo->old_gfp_mask = mapping_gfp_mask(inode->i_mapping);
+	mapping_set_gfp_mask(inode->i_mapping,
+			     lo->old_gfp_mask & ~(__GFP_IO|__GFP_FS));
 
 	set_blocksize(bdev, lo_blocksize);
 
@@ -737,8 +740,8 @@ static int loop_set_fd(struct loop_device *lo, struct file *lo_file,
 	 * set queue make_request_fn, and add limits based on lower level
 	 * device
 	 */
-	blk_queue_make_request(&lo->lo_queue, loop_make_request);
-	lo->lo_queue.queuedata = lo;
+	blk_queue_make_request(lo->lo_queue, loop_make_request);
+	lo->lo_queue->queuedata = lo;
 
 	/*
 	 * we remap to a block device, make sure we correctly stack limits
@@ -746,15 +749,15 @@ static int loop_set_fd(struct loop_device *lo, struct file *lo_file,
 	if (S_ISBLK(inode->i_mode)) {
 		request_queue_t *q = bdev_get_queue(lo_device);
 
-		blk_queue_max_sectors(&lo->lo_queue, q->max_sectors);
-		blk_queue_max_phys_segments(&lo->lo_queue,q->max_phys_segments);
-		blk_queue_max_hw_segments(&lo->lo_queue, q->max_hw_segments);
-		blk_queue_max_segment_size(&lo->lo_queue, q->max_segment_size);
-		blk_queue_segment_boundary(&lo->lo_queue, q->seg_boundary_mask);
-		blk_queue_merge_bvec(&lo->lo_queue, q->merge_bvec_fn);
+		blk_queue_max_sectors(lo->lo_queue, q->max_sectors);
+		blk_queue_max_phys_segments(lo->lo_queue,q->max_phys_segments);
+		blk_queue_max_hw_segments(lo->lo_queue, q->max_hw_segments);
+		blk_queue_max_segment_size(lo->lo_queue, q->max_segment_size);
+		blk_queue_segment_boundary(lo->lo_queue, q->seg_boundary_mask);
+		blk_queue_merge_bvec(lo->lo_queue, q->merge_bvec_fn);
 	}
 
-	kernel_thread(loop_thread, lo, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
+	kernel_thread(loop_thread, lo, CLONE_KERNEL);
 	down(&lo->lo_sem);
 
 	fput(file);
@@ -838,12 +841,12 @@ static int loop_clr_fd(struct loop_device *lo, struct block_device *bdev)
 	lo->lo_sizelimit = 0;
 	lo->lo_encrypt_key_size = 0;
 	lo->lo_flags = 0;
-	lo->lo_queue.queuedata = NULL;
 	memset(lo->lo_encrypt_key, 0, LO_KEY_SIZE);
-	memset(lo->lo_name, 0, LO_NAME_SIZE);
+	memset(lo->lo_crypt_name, 0, LO_NAME_SIZE);
+	memset(lo->lo_file_name, 0, LO_NAME_SIZE);
 	invalidate_bdev(bdev, 0);
 	set_capacity(disks[lo->lo_number], 0);
-	filp->f_dentry->d_inode->i_mapping->gfp_mask = gfp;
+	mapping_set_gfp_mask(filp->f_dentry->d_inode->i_mapping, gfp);
 	lo->lo_state = Lo_unbound;
 	fput(filp);
 	/* This is safe: open() is still holding a reference. */
@@ -892,7 +895,10 @@ loop_set_status(struct loop_device *lo, const struct loop_info64 *info)
 			return -EFBIG;
 	}
 
-	strlcpy(lo->lo_name, info->lo_name, LO_NAME_SIZE);
+	memcpy(lo->lo_file_name, info->lo_file_name, LO_NAME_SIZE);
+	memcpy(lo->lo_crypt_name, info->lo_crypt_name, LO_NAME_SIZE);
+	lo->lo_file_name[LO_NAME_SIZE-1] = 0;
+	lo->lo_crypt_name[LO_NAME_SIZE-1] = 0;
 
 	if (!xfer)
 		xfer = &none_funcs;
@@ -925,13 +931,14 @@ loop_get_status(struct loop_device *lo, struct loop_info64 *info)
 		return error;
 	memset(info, 0, sizeof(*info));
 	info->lo_number = lo->lo_number;
-	info->lo_device = stat.dev;
+	info->lo_device = huge_encode_dev(stat.dev);
 	info->lo_inode = stat.ino;
-	info->lo_rdevice = lo->lo_device ? stat.rdev : stat.dev;
+	info->lo_rdevice = huge_encode_dev(lo->lo_device ? stat.rdev : stat.dev);
 	info->lo_offset = lo->lo_offset;
 	info->lo_sizelimit = lo->lo_sizelimit;
 	info->lo_flags = lo->lo_flags;
-	strlcpy(info->lo_name, lo->lo_name, LO_NAME_SIZE);
+	memcpy(info->lo_file_name, lo->lo_file_name, LO_NAME_SIZE);
+	memcpy(info->lo_crypt_name, lo->lo_crypt_name, LO_NAME_SIZE);
 	info->lo_encrypt_type =
 		lo->lo_encryption ? lo->lo_encryption->number : 0;
 	if (lo->lo_encrypt_key_size && capable(CAP_SYS_ADMIN)) {
@@ -957,7 +964,10 @@ loop_info64_from_old(const struct loop_info *info, struct loop_info64 *info64)
 	info64->lo_flags = info->lo_flags;
 	info64->lo_init[0] = info->lo_init[0];
 	info64->lo_init[1] = info->lo_init[1];
-	memcpy(info64->lo_name, info->lo_name, LO_NAME_SIZE);
+	if (info->lo_encrypt_type == LO_CRYPT_CRYPTOAPI)
+		memcpy(info64->lo_crypt_name, info->lo_name, LO_NAME_SIZE);
+	else
+		memcpy(info64->lo_file_name, info->lo_name, LO_NAME_SIZE);
 	memcpy(info64->lo_encrypt_key, info->lo_encrypt_key, LO_KEY_SIZE);
 }
 
@@ -975,8 +985,11 @@ loop_info64_to_old(const struct loop_info64 *info64, struct loop_info *info)
 	info->lo_flags = info64->lo_flags;
 	info->lo_init[0] = info64->lo_init[0];
 	info->lo_init[1] = info64->lo_init[1];
-	memcpy(info->lo_name, info64->lo_name, LO_NAME_SIZE);
-	memcpy(info->lo_encrypt_key,info64->lo_encrypt_key,LO_KEY_SIZE);
+	if (info->lo_encrypt_type == LO_CRYPT_CRYPTOAPI)
+		memcpy(info->lo_name, info64->lo_crypt_name, LO_NAME_SIZE);
+	else
+		memcpy(info->lo_name, info64->lo_file_name, LO_NAME_SIZE);
+	memcpy(info->lo_encrypt_key, info64->lo_encrypt_key, LO_KEY_SIZE);
 
 	/* error in case values were truncated */
 	if (info->lo_device != info64->lo_device ||
@@ -1164,6 +1177,7 @@ int __init loop_init(void)
 	loop_dev = kmalloc(max_loop * sizeof(struct loop_device), GFP_KERNEL);
 	if (!loop_dev)
 		goto out_mem1;
+	memset(loop_dev, 0, max_loop * sizeof(struct loop_device));
 
 	disks = kmalloc(max_loop * sizeof(struct gendisk *), GFP_KERNEL);
 	if (!disks)
@@ -1180,7 +1194,12 @@ int __init loop_init(void)
 	for (i = 0; i < max_loop; i++) {
 		struct loop_device *lo = &loop_dev[i];
 		struct gendisk *disk = disks[i];
+
 		memset(lo, 0, sizeof(*lo));
+		lo->lo_queue = blk_alloc_queue(GFP_KERNEL);
+		if (!lo->lo_queue)
+			goto out_mem4;
+		disks[i]->queue = lo->lo_queue;
 		init_MUTEX(&lo->lo_ctl_mutex);
 		init_MUTEX_LOCKED(&lo->lo_sem);
 		init_MUTEX_LOCKED(&lo->lo_bh_mutex);
@@ -1192,12 +1211,16 @@ int __init loop_init(void)
 		sprintf(disk->disk_name, "loop%d", i);
 		sprintf(disk->devfs_name, "loop/%d", i);
 		disk->private_data = lo;
-		disk->queue = &lo->lo_queue;
+		disk->queue = lo->lo_queue;
 		add_disk(disk);
 	}
 	printk(KERN_INFO "loop: loaded (max %d devices)\n", max_loop);
 	return 0;
 
+out_mem4:
+	while (i--)
+		blk_put_queue(loop_dev[i].lo_queue);
+	i = max_loop;
 out_mem3:
 	while (i--)
 		put_disk(disks[i]);
@@ -1216,6 +1239,7 @@ void loop_exit(void)
 
 	for (i = 0; i < max_loop; i++) {
 		del_gendisk(disks[i]);
+		blk_put_queue(loop_dev[i].lo_queue);
 		put_disk(disks[i]);
 	}
 	devfs_remove("loop");

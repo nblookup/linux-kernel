@@ -21,17 +21,11 @@
 #undef MULTI_CPU
 #undef CPU_NAME
 
-#ifdef CONFIG_CPU_26
-# define CPU_INCLUDE_NAME "asm/cpu-multi26.h"
-# define MULTI_CPU
-#endif
-
 /*
  * CPU_NAME - the prefix for CPU related functions
  */
 
 #ifdef CONFIG_CPU_32
-# define CPU_INCLUDE_NAME "asm/cpu-multi32.h"
 # ifdef CONFIG_CPU_ARM610
 #  ifdef CPU_NAME
 #   undef  MULTI_CPU
@@ -104,6 +98,30 @@
 #   define CPU_NAME cpu_arm1020
 #  endif
 # endif
+# ifdef CONFIG_CPU_ARM1020E
+#  ifdef CPU_NAME
+#   undef  MULTI_CPU
+#   define MULTI_CPU
+#  else
+#   define CPU_NAME cpu_arm1020e
+#  endif
+# endif
+# ifdef CONFIG_CPU_ARM1022
+#  ifdef CPU_NAME
+#   undef  MULTI_CPU
+#   define MULTI_CPU
+#  else
+#   define CPU_NAME cpu_arm1022
+#  endif
+# endif
+# ifdef CONFIG_CPU_ARM1026
+#  ifdef CPU_NAME
+#   undef  MULTI_CPU
+#   define MULTI_CPU
+#  else
+#   define CPU_NAME cpu_arm1026
+#  endif
+# endif
 # ifdef CONFIG_CPU_XSCALE
 #  ifdef CPU_NAME
 #   undef  MULTI_CPU
@@ -115,11 +133,10 @@
 #endif
 
 #ifndef MULTI_CPU
-#undef CPU_INCLUDE_NAME
-#define CPU_INCLUDE_NAME "asm/cpu-single.h"
+#include "asm/cpu-single.h"
+#else
+#include "asm/cpu-multi32.h"
 #endif
-
-#include CPU_INCLUDE_NAME
 
 #endif /* __KERNEL__ */
 #endif /* __ASM_PROCFNS_H */

@@ -162,11 +162,8 @@ config PCMCIA
 	  for location).  Please also read the PCMCIA-HOWTO, available from
 	  <http://www.tldp.org/docs.html#howto>.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  When compiled this way, there will be modules called pcmcia_core
-	  and ds.  If you want to compile it as a module, say M here and
-	  read <file:Documentation/modules.txt>.
+	  To compile this driver as modules, choose M here: the
+	  modules will be called pcmcia_core and ds.
 
 config SBUS
 	bool
@@ -248,34 +245,8 @@ config SUN_OPENPROMFS
 	  virtual file system, which you can mount to /proc/openprom by "mount
 	  -t openpromfs none /proc/openprom".
 
-	  If you want to compile the /proc/openprom support as a module ( =
-	  code which can be inserted in and removed from the running kernel
-	  whenever you want), say M here and read
-	  <file:Documentation/modules.txt>.
-	  The module will be called openpromfs.  If unsure, say M.
-
-config KCORE_ELF
-	bool
-	depends on PROC_FS
-	default y
-	---help---
-	  If you enabled support for /proc file system then the file
-	  /proc/kcore will contain the kernel core image. This can be used
-	  in gdb:
-
-	  $ cd /usr/src/linux ; gdb vmlinux /proc/kcore
-
-	  You have two choices here: ELF and A.OUT. Selecting ELF will make
-	  /proc/kcore appear in ELF core format as defined by the Executable
-	  and Linking Format specification. Selecting A.OUT will choose the
-	  old "a.out" format which may be necessary for some old versions
-	  of binutils or on some architectures.
-
-	  This is especially useful if you have compiled the kernel with the
-	  "-g" option to preserve debugging information. It is mainly used
-	  for examining kernel data structures on the live kernel so if you
-	  don't understand what this means or are not a kernel hacker, just
-	  leave it at its default value ELF.
+	  To compile the /proc/openprom support as a module, choose M here: the
+	  module will be called openpromfs.  If unsure, choose M.
 
 source "fs/Kconfig.binfmt"
 
@@ -303,9 +274,7 @@ config PRINTER
 	  It is possible to share one parallel port among several devices
 	  (e.g. printer and ZIP drive) and it is safe to compile the
 	  corresponding drivers into the kernel.  If you want to compile this
-	  driver as a module however ( = code which can be inserted in and
-	  removed from the running kernel whenever you want), say M here and
-	  read <file:Documentation/modules.txt> and
+	  driver as a module however, choose M here and read
 	  <file:Documentation/parport.txt>.  The module will be called lp.
 
 	  If you have several parallel ports, you can specify which ports to
@@ -344,10 +313,8 @@ config BLK_DEV_FD
 	  well as location of the fdutils package used to configure additional
 	  parameters of the driver at run time.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called floppy. If you want to compile it as a
-	  module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called floppy.
 
 config BLK_DEV_LOOP
 	tristate "Loopback device support"
@@ -393,10 +360,8 @@ config BLK_DEV_LOOP
 	  Note that this loop device has nothing to do with the loopback
 	  device used for network connections from the machine to itself.
 
-	  If you want to compile this driver as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want),
-	  say M here and read <file:Documentation/modules.txt>. The module
-	  will be called loop.
+	  To compile this driver as a module, choose M here: the
+	  module will be called loop.
 
 	  Most users will answer N here.
 
@@ -422,10 +387,8 @@ config BLK_DEV_NBD
 	  Note that this has nothing to do with the network file systems NFS
 	  or Coda; you can say N here even if you intend to use NFS or Coda.
 
-	  If you want to compile this driver as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want),
-	  say M here and read <file:Documentation/modules.txt>. The module
-	  will be called nbd.
+	  To compile this driver as a module, choose M here: the
+	  module will be called nbd.
 
 	  If unsure, say N.
 
@@ -444,10 +407,8 @@ config BLK_DEV_RAM
 	  Note that the kernel command line option "ramdisk=XX" is now
 	  obsolete. For details, read <file:Documentation/ramdisk.txt>.
 
-	  If you want to compile this as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want),
-	  say M and read <file:Documentation/modules.txt>. The module will be
-	  called rd.
+	  To compile this driver as a module, choose M here: the
+	  module will be called rd.
 
 	  Most normal users won't need the RAM disk functionality, and can
 	  thus say N here.
@@ -486,8 +447,6 @@ source "drivers/scsi/Kconfig"
 source "drivers/fc4/Kconfig"
 
 source "net/Kconfig"
-
-source "net/ax25/Kconfig"
 
 # This one must be before the filesystem configs. -DaveM
 
@@ -541,47 +500,9 @@ source "drivers/input/Kconfig"
 
 source "fs/Kconfig"
 
-
-menu "Sound card support"
-
-config SOUND
-	tristate "Sound card support"
-	---help---
-	  If you have a sound card in your computer, i.e. if it can say more
-	  than an occasional beep, say Y.  Be sure to have all the information
-	  about your sound card and its configuration down (I/O port,
-	  interrupt and DMA channel), because you will be asked for it.
-
-	  You want to read the Sound-HOWTO, available from
-	  <http://www.tldp.org/docs.html#howto>. General information about
-	  the modular sound system is contained in the files
-	  <file:Documentation/sound/Introduction>.  The file
-	  <file:Documentation/sound/README.OSS> contains some slightly
-	  outdated but still useful information as well.
-
-	  If you have a PnP sound card and you want to configure it at boot
-	  time using the ISA PnP tools (read
-	  <http://www.roestock.demon.co.uk/isapnptools/>), then you need to
-	  compile the sound card support as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want)
-	  and load that module after the PnP configuration is finished.  To do
-	  this, say M here and read <file:Documentation/modules.txt> as well
-	  as <file:Documentation/sound/README.modules>; the module will be
-	  called soundcore.
-
-	  I'm told that even without a sound card, you can make your computer
-	  say more than an occasional beep, by programming the PC speaker.
-	  Kernel patches and supporting utilities to do that are in the pcsp
-	  package, available at <ftp://ftp.infradead.org/pub/pcsp/>.
-
 source "sound/Kconfig"
 
-endmenu
-
 source "drivers/usb/Kconfig"
-
-source "net/bluetooth/Kconfig"
-
 
 menu "Watchdog"
 
@@ -592,11 +513,8 @@ config SOFT_WATCHDOG
 	  from some situations that the hardware watchdog will recover
 	  from. Equally it's a lot cheaper to install.
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  If you want to compile it as a module, say M here and read
-	  <file:Documentation/modules.txt>. The module will be called
-	  softdog.
+	  To compile this driver as a module, choose M here: the
+	  module will be called softdog.
 
 endmenu
 

@@ -48,11 +48,9 @@ struct dm_table {
 	 */
 	struct io_restrictions limits;
 
-	/*
-	 * A waitqueue for processes waiting for something
-	 * interesting to happen to this table.
-	 */
-	wait_queue_head_t eventq;
+	/* events get handed up using this callback */
+	void (*event_fn)(void *);
+	void *event_context;
 };
 
 /*
@@ -222,7 +220,6 @@ int dm_table_create(struct dm_table **result, int mode)
 		return -ENOMEM;
 	}
 
-	init_waitqueue_head(&t->eventq);
 	t->mode = mode;
 	*result = t;
 	return 0;
@@ -242,9 +239,6 @@ static void free_devices(struct list_head *devices)
 void table_destroy(struct dm_table *t)
 {
 	unsigned int i;
-
-	/* destroying the table counts as an event */
-	dm_table_event(t);
 
 	/* free the indexes (see dm_table_complete) */
 	if (t->depth >= 2)
@@ -318,7 +312,7 @@ static int lookup_device(const char *path, dev_t *dev)
 		goto out;
 	}
 
-	*dev = kdev_t_to_nr(inode->i_rdev);
+	*dev = inode->i_rdev;
 
  out:
 	path_release(&nd);
@@ -424,14 +418,16 @@ static int __table_get_device(struct dm_table *t, struct dm_target *ti,
 	int r;
 	dev_t dev;
 	struct dm_dev *dd;
-	int major, minor;
+	unsigned int major, minor;
 
 	if (!t)
 		BUG();
 
-	if (sscanf(path, "%x:%x", &major, &minor) == 2) {
+	if (sscanf(path, "%u:%u", &major, &minor) == 2) {
 		/* Extract the major/minor numbers */
 		dev = MKDEV(major, minor);
+		if (MAJOR(dev) != major || MINOR(dev) != minor)
+			return -EOVERFLOW;
 	} else {
 		/* convert the path to a device */
 		if ((r = lookup_device(path, &dev)))
@@ -493,6 +489,18 @@ int dm_get_device(struct dm_target *ti, const char *path, sector_t start,
 		rs->max_sectors =
 			min_not_zero(rs->max_sectors, q->max_sectors);
 
+		/* FIXME: Device-Mapper on top of RAID-0 breaks because DM
+		 *        currently doesn't honor MD's merge_bvec_fn routine.
+		 *        In this case, we'll force DM to use PAGE_SIZE or
+		 *        smaller I/O, just to be safe. A better fix is in the
+		 *        works, but add this for the time being so it will at
+		 *        least operate correctly.
+		 */
+		if (q->merge_bvec_fn)
+			rs->max_sectors =
+				min_not_zero(rs->max_sectors,
+					     (unsigned short)(PAGE_SIZE >> 9));
+
 		rs->max_phys_segments =
 			min_not_zero(rs->max_phys_segments,
 				     q->max_phys_segments);
@@ -540,12 +548,36 @@ static int adjoin(struct dm_table *table, struct dm_target *ti)
 }
 
 /*
+ * Used to dynamically allocate the arg array.
+ */
+static char **realloc_argv(unsigned *array_size, char **old_argv)
+{
+	char **argv;
+	unsigned new_size;
+
+	new_size = *array_size ? *array_size * 2 : 64;
+	argv = kmalloc(new_size * sizeof(*argv), GFP_KERNEL);
+	if (argv) {
+		memcpy(argv, old_argv, *array_size * sizeof(*argv));
+		*array_size = new_size;
+	}
+
+	kfree(old_argv);
+	return argv;
+}
+
+/*
  * Destructively splits up the argument list to pass to ctr.
  */
-static int split_args(int max, int *argc, char **argv, char *input)
+static int split_args(int *argc, char ***argvp, char *input)
 {
-	char *start, *end = input, *out;
+	char *start, *end = input, *out, **argv = NULL;
+	unsigned array_size = 0;
+
 	*argc = 0;
+	argv = realloc_argv(&array_size, argv);
+	if (!argv)
+		return -ENOMEM;
 
 	while (1) {
 		start = end;
@@ -574,8 +606,11 @@ static int split_args(int max, int *argc, char **argv, char *input)
 		}
 
 		/* have we already filled the array ? */
-		if ((*argc + 1) > max)
-			return -EINVAL;
+		if ((*argc + 1) > array_size) {
+			argv = realloc_argv(&array_size, argv);
+			if (!argv)
+				return -ENOMEM;
+		}
 
 		/* we know this is whitespace */
 		if (*end)
@@ -587,6 +622,7 @@ static int split_args(int max, int *argc, char **argv, char *input)
 		(*argc)++;
 	}
 
+	*argvp = argv;
 	return 0;
 }
 
@@ -594,7 +630,7 @@ int dm_table_add_target(struct dm_table *t, const char *type,
 			sector_t start, sector_t len, char *params)
 {
 	int r = -EINVAL, argc;
-	char *argv[32];
+	char **argv;
 	struct dm_target *tgt;
 
 	if ((r = check_space(t)))
@@ -623,13 +659,14 @@ int dm_table_add_target(struct dm_table *t, const char *type,
 		goto bad;
 	}
 
-	r = split_args(ARRAY_SIZE(argv), &argc, argv, params);
+	r = split_args(&argc, &argv, params);
 	if (r) {
-		tgt->error = "couldn't split parameters";
+		tgt->error = "couldn't split parameters (insufficient memory)";
 		goto bad;
 	}
 
 	r = tgt->type->ctr(tgt, argc, argv);
+	kfree(argv);
 	if (r)
 		goto bad;
 
@@ -694,9 +731,22 @@ int dm_table_complete(struct dm_table *t)
 	return r;
 }
 
+static spinlock_t _event_lock = SPIN_LOCK_UNLOCKED;
+void dm_table_event_callback(struct dm_table *t,
+			     void (*fn)(void *), void *context)
+{
+	spin_lock_irq(&_event_lock);
+	t->event_fn = fn;
+	t->event_context = context;
+	spin_unlock_irq(&_event_lock);
+}
+
 void dm_table_event(struct dm_table *t)
 {
-	wake_up_interruptible(&t->eventq);
+	spin_lock(&_event_lock);
+	if (t->event_fn)
+		t->event_fn(t->event_context);
+	spin_unlock(&_event_lock);
 }
 
 sector_t dm_table_get_size(struct dm_table *t)
@@ -759,11 +809,6 @@ struct list_head *dm_table_get_devices(struct dm_table *t)
 int dm_table_get_mode(struct dm_table *t)
 {
 	return t->mode;
-}
-
-void dm_table_add_wait_queue(struct dm_table *t, wait_queue_t *wq)
-{
-	add_wait_queue(&t->eventq, wq);
 }
 
 void dm_table_suspend_targets(struct dm_table *t)

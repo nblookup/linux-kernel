@@ -147,9 +147,7 @@ static void __init init_hwif_ns87415 (ide_hwif_t *hwif)
 
 	/* Set a good latency timer and cache line size value. */
 	(void) pci_write_config_byte(dev, PCI_LATENCY_TIMER, 64);
-#ifdef __sparc_v9__
-	(void) pci_write_config_byte(dev, PCI_CACHE_LINE_SIZE, 0x10);
-#endif
+	/* FIXME: use pci_set_master() to ensure good latency timer value */
 
 	/*
 	 * We cannot probe for IRQ: both ports share common IRQ on INTA.
@@ -219,11 +217,6 @@ static void __init init_hwif_ns87415 (ide_hwif_t *hwif)
 	hwif->drives[1].autodma = hwif->autodma;
 }
 
-static void __init init_dma_ns87415 (ide_hwif_t *hwif, unsigned long dmabase)
-{
-	ide_setup_dma(hwif, dmabase, 8);
-}
-
 extern void ide_setup_pci_device(struct pci_dev *, ide_pci_device_t *);
 
 static int __devinit ns87415_init_one(struct pci_dev *dev, const struct pci_device_id *id)
@@ -236,7 +229,7 @@ static int __devinit ns87415_init_one(struct pci_dev *dev, const struct pci_devi
 	return 0;
 }
 
-static struct pci_device_id ns87415_pci_tbl[] __devinitdata = {
+static struct pci_device_id ns87415_pci_tbl[] = {
 	{ PCI_VENDOR_ID_NS, PCI_DEVICE_ID_NS_87415, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ 0, },
 };

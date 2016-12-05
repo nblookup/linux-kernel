@@ -46,14 +46,12 @@
 
 /* Find the stack offset for a register, relative to thread.esp0. */
 #define PT_REG(reg)	((long)&((struct pt_regs *)0)->reg)
-#define SW_REG(reg)	((long)&((struct switch_stack *)0)->reg \
-			 - sizeof(struct switch_stack))
 /* Mapping from PT_xxx to the stack offset at which the register is
    saved.  Notice that usp has no stack-slot and needs to be treated
    specially (see get_reg/put_reg below). */
 static const int regoff[] = {
-	PT_REG(er1), PT_REG(er2), PT_REG(er3), SW_REG(er4),
-	SW_REG(er5), SW_REG(er6), PT_REG(er0), PT_REG(orig_er0),
+	PT_REG(er1), PT_REG(er2), PT_REG(er3), PT_REG(er4),
+	PT_REG(er5), PT_REG(er6), PT_REG(er0), PT_REG(orig_er0),
 	PT_REG(ccr), PT_REG(pc)
 };
 
@@ -287,9 +285,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			ret = read_long(child, addr, &tmp);
 			if (ret < 0)
 				break ;
-			ret = verify_area(VERIFY_WRITE, (void *) data, sizeof(long));
-			if (!ret)
-				put_user(tmp, (unsigned long *) data);
+			ret = put_user(tmp, (unsigned long *) data);
 			break ;
 		}
 
@@ -300,10 +296,6 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			if ((addr & 3) || addr < 0 || addr >= sizeof(struct user))
 				ret = -EIO;
 			
-			ret = verify_area(VERIFY_WRITE, (void *) data,
-					  sizeof(long));
-			if (ret)
-				break ;
 			tmp = 0;  /* Default return condition */
 			addr = addr >> 2; /* temporary hack. */
 			if (addr < 10)
@@ -312,8 +304,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 				ret = -EIO;
 				break ;
 			}
-			put_user(tmp,(unsigned long *) data);
-			ret = 0;
+			ret = put_user(tmp,(unsigned long *) data);
 			break ;
 		}
 

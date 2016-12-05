@@ -13,6 +13,7 @@
 
 #include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
@@ -71,6 +72,8 @@ extern unsigned long wall_jiffies;
 spinlock_t tmu0_lock = SPIN_LOCK_UNLOCKED;
 
 u64 jiffies_64 = INITIAL_JIFFIES;
+
+EXPORT_SYMBOL(jiffies_64);
 
 /* XXX: Can we initialize this in a routine somewhere?  Dreamcast doesn't want
  * these routines anywhere... */
@@ -177,8 +180,13 @@ void do_gettimeofday(struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
+EXPORT_SYMBOL(do_gettimeofday);
+
 int do_settimeofday(struct timespec *tv)
 {
+	time_t wtm_sec, sec = tv->tv_sec;
+	long wtm_nsec, nsec = tv->tv_nsec;
+
 	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
 		return -EINVAL;
 
@@ -189,16 +197,15 @@ int do_settimeofday(struct timespec *tv)
 	 * wall time.  Discover what correction gettimeofday() would have
 	 * made, and then undo it!
 	 */
-	tv->tv_nsec -= 1000 * (do_gettimeoffset() +
-				(jiffies - wall_jiffies) * (1000000 / HZ));
+	nsec -= 1000 * (do_gettimeoffset() +
+			(jiffies - wall_jiffies) * (1000000 / HZ));
 
-	while (tv->tv_nsec < 0) {
-		tv->tv_nsec += NSEC_PER_SEC;
-		tv->tv_sec--;
-	}
+	wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
+	wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
 
-	xtime.tv_sec = tv->tv_sec;
-	xtime.tv_nsec = tv->tv_nsec;
+	set_normalized_timespec(&xtime, sec, nsec);
+	set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
+
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
@@ -208,6 +215,8 @@ int do_settimeofday(struct timespec *tv)
 
 	return 0;
 }
+
+EXPORT_SYMBOL(do_settimeofday);
 
 /* last time the RTC clock got updated */
 static long last_rtc_update;
@@ -417,6 +426,9 @@ void __init time_init(void)
 	current_cpu_data.module_clock = timer_freq * 4;
 
 	rtc_get_time(&xtime);
+
+        set_normalized_timespec(&wall_to_monotonic,
+                                -xtime.tv_sec, -xtime.tv_nsec);
 
 	if (board_timer_setup) {
 		board_timer_setup(&irq0);

@@ -91,7 +91,6 @@
 #if	defined(_LINUX_)	/****** Linux *******************************/
 
 #include <linux/config.h>
-#include <linux/version.h>
 #include <linux/kernel.h>	/* printk(), and other useful stuff */
 #include <linux/stddef.h>	/* offsetof(), etc. */
 #include <linux/errno.h>	/* return codes */
@@ -160,10 +159,6 @@
 
 /****** Function Prototypes *************************************************/
 
-/* Module entry points. These are called by the OS and must be public. */
-int init_module (void);
-void cleanup_module (void);
-
 /* Hardware-specific functions */
 static int sdla_detect	(sdlahw_t* hw);
 static int sdla_autodpm	(sdlahw_t* hw);
@@ -205,7 +200,7 @@ static int pci_probe(sdlahw_t *hw);
  * Note: All data must be explicitly initialized!!!
  */
 
-static struct pci_device_id sdladrv_pci_tbl[] __initdata = {
+static struct pci_device_id sdladrv_pci_tbl[] = {
 	{ V3_VENDOR_ID, V3_DEVICE_ID, PCI_ANY_ID, PCI_ANY_ID, },
 	{ }			/* Terminating entry */
 };
@@ -325,11 +320,7 @@ static int pci_slot_ar[MAX_S514_CARDS];
  * Context:	process
  */
 
-#ifdef MODULE
-int init_module (void)
-#else
 int sdladrv_init(void)
-#endif
 {
 	int i=0;
 
@@ -354,9 +345,12 @@ int sdladrv_init(void)
  * Module 'remove' entry point.
  * o release all remaining system resources
  */
-void cleanup_module (void)
+static void sdladrv_cleanup(void)
 {
 }
+
+module_init(sdladrv_init);
+module_exit(sdladrv_cleanup);
 #endif
 
 /******* Kernel APIs ********************************************************/
@@ -433,7 +427,7 @@ int sdla_setup (sdlahw_t* hw, void* sfm, unsigned len)
 
                 /* Verify IRQ configuration options */
                 if (!get_option_index(irq_opt, hw->irq)) {
-                        printk(KERN_INFO "%s: IRQ %d is illegal!\n",
+                        printk(KERN_INFO "%s: IRQ %d is invalid!\n",
                         	modname, hw->irq);
                       return -EINVAL;
                 } 
@@ -443,7 +437,7 @@ int sdla_setup (sdlahw_t* hw, void* sfm, unsigned len)
                         hw->pclk = pclk_opt[1];  /* use default */
         
                 else if (!get_option_index(pclk_opt, hw->pclk)) {
-                        printk(KERN_INFO "%s: CPU clock %u is illegal!\n",
+                        printk(KERN_INFO "%s: CPU clock %u is invalid!\n",
 				modname, hw->pclk);
                         return -EINVAL;
                 } 
@@ -463,7 +457,7 @@ int sdla_setup (sdlahw_t* hw, void* sfm, unsigned len)
                 else if (!get_option_index(dpmbase_opt,
 			virt_to_phys(hw->dpmbase))) {
                         printk(KERN_INFO
-				"%s: memory address 0x%lX is illegal!\n",
+				"%s: memory address 0x%lX is invalid!\n",
 				modname, virt_to_phys(hw->dpmbase));
                         return -EINVAL;
                 }               

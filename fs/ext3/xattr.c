@@ -629,9 +629,10 @@ bad_block:		ext3_error(sb, "ext3_xattr_set",
 				goto cleanup;
 			memcpy(header, HDR(bh), bh->b_size);
 			header->h_refcount = cpu_to_le32(1);
-			offset = (char *)header - bh->b_data;
-			here = ENTRY((char *)here + offset);
-			last = ENTRY((char *)last + offset);
+			offset = (char *)here - bh->b_data;
+			here = ENTRY((char *)header + offset);
+			offset = (char *)last - bh->b_data;
+			last = ENTRY((char *)header + offset);
 		}
 	} else {
 		/* Allocate a buffer where we construct the new block. */
@@ -873,17 +874,22 @@ ext3_xattr_set(struct inode *inode, int name_index, const char *name,
 	       const void *value, size_t value_len, int flags)
 {
 	handle_t *handle;
-	int error, error2;
+	int error;
 
-	handle = ext3_journal_start(inode, EXT3_XATTR_TRANS_BLOCKS);
-	if (IS_ERR(handle))
+	handle = ext3_journal_start(inode, EXT3_DATA_TRANS_BLOCKS);
+	if (IS_ERR(handle)) {
 		error = PTR_ERR(handle);
-	else
+	} else {
+		int error2;
+
 		error = ext3_xattr_set_handle(handle, inode, name_index, name,
 					      value, value_len, flags);
-	error2 = ext3_journal_stop(handle);
+		error2 = ext3_journal_stop(handle);
+		if (error == 0)
+			error = error2;
+	}
 
-	return error ? error : error2;
+	return error;
 }
 
 /*
@@ -1050,12 +1056,10 @@ ext3_xattr_cache_find(handle_t *handle, struct inode *inode,
 			ext3_error(inode->i_sb, "ext3_xattr_cache_find",
 				"inode %ld: block %ld read error",
 				inode->i_ino, (unsigned long) ce->e_block);
-		} else {
+		} else if (ext3_journal_get_write_access_credits(
+				handle, bh, credits) == 0) {
 			/* ext3_journal_get_write_access() requires an unlocked
 			 * bh, which complicates things here. */
-			if (ext3_journal_get_write_access_credits(handle, bh,
-								  credits) != 0)
-				return NULL;
 			lock_buffer(bh);
 			if (le32_to_cpu(HDR(bh)->h_refcount) >
 				   EXT3_XATTR_REFCOUNT_MAX) {
@@ -1070,6 +1074,7 @@ ext3_xattr_cache_find(handle_t *handle, struct inode *inode,
 			}
 			unlock_buffer(bh);
 			journal_release_buffer(handle, bh, *credits);
+			*credits = 0;
 			brelse(bh);
 		}
 		ce = mb_cache_entry_find_next(ce, 0, inode->i_sb->s_bdev, hash);

@@ -30,6 +30,15 @@
 
 /*-------------------------------------------------------------------------*/
 
+static int
+ohci_pci_reset (struct usb_hcd *hcd)
+{
+	struct ohci_hcd	*ohci = hcd_to_ohci (hcd);
+
+	ohci->regs = hcd->regs;
+	return hc_reset (ohci);
+}
+
 static int __devinit
 ohci_pci_start (struct usb_hcd *hcd)
 {
@@ -89,18 +98,13 @@ ohci_pci_start (struct usb_hcd *hcd)
 		ohci_stop (hcd);
 		return ret;
 	}
-	ohci->regs = hcd->regs;
-
-	if (hc_reset (ohci) < 0) {
-		ohci_stop (hcd);
-		return -ENODEV;
-	}
 
 	if (hc_start (ohci) < 0) {
 		ohci_err (ohci, "can't start\n");
 		ohci_stop (hcd);
 		return -EBUSY;
 	}
+	create_debug_files (ohci);
 
 #ifdef	DEBUG
 	ohci_dump (ohci, 1);
@@ -113,8 +117,8 @@ ohci_pci_start (struct usb_hcd *hcd)
 static int ohci_pci_suspend (struct usb_hcd *hcd, u32 state)
 {
 	struct ohci_hcd		*ohci = hcd_to_ohci (hcd);
-	unsigned long		flags;
 	u16			cmd;
+	u32			tmp;
 
 	if ((ohci->hc_control & OHCI_CTRL_HCFS) != OHCI_USB_OPER) {
 		ohci_dbg (ohci, "can't suspend (state is %s)\n",
@@ -124,16 +128,15 @@ static int ohci_pci_suspend (struct usb_hcd *hcd, u32 state)
 
 	/* act as if usb suspend can always be used */
 	ohci_dbg (ohci, "suspend to %d\n", state);
-	ohci->sleeping = 1;
-
+	
 	/* First stop processing */
-  	spin_lock_irqsave (&ohci->lock, flags);
+  	spin_lock_irq (&ohci->lock);
 	ohci->hc_control &=
 		~(OHCI_CTRL_PLE|OHCI_CTRL_CLE|OHCI_CTRL_BLE|OHCI_CTRL_IE);
 	writel (ohci->hc_control, &ohci->regs->control);
 	writel (OHCI_INTR_SF, &ohci->regs->intrstatus);
 	(void) readl (&ohci->regs->intrstatus);
-  	spin_unlock_irqrestore (&ohci->lock, flags);
+  	spin_unlock_irq (&ohci->lock);
 
 	/* Wait a frame or two */
 	mdelay (1);
@@ -151,20 +154,21 @@ static int ohci_pci_suspend (struct usb_hcd *hcd, u32 state)
 		&ohci->regs->intrenable);
 
 	/* Suspend chip and let things settle down a bit */
+  	spin_lock_irq (&ohci->lock);
  	ohci->hc_control = OHCI_USB_SUSPEND;
  	writel (ohci->hc_control, &ohci->regs->control);
 	(void) readl (&ohci->regs->control);
-	mdelay (500); /* No schedule here ! */
+  	spin_unlock_irq (&ohci->lock);
 
-	switch (readl (&ohci->regs->control) & OHCI_CTRL_HCFS) {
+	set_current_state (TASK_UNINTERRUPTIBLE);
+	schedule_timeout (HZ/2);
+
+	tmp = readl (&ohci->regs->control) | OHCI_CTRL_HCFS;
+	switch (tmp) {
 		case OHCI_USB_RESET:
-			ohci_dbg (ohci, "suspend->reset ?\n");
-			break;
 		case OHCI_USB_RESUME:
-			ohci_dbg (ohci, "suspend->resume ?\n");
-			break;
 		case OHCI_USB_OPER:
-			ohci_dbg (ohci, "suspend->operational ?\n");
+			ohci_err (ohci, "can't suspend; hcfs %d\n", tmp);
 			break;
 		case OHCI_USB_SUSPEND:
 			ohci_dbg (ohci, "suspended\n");
@@ -197,7 +201,6 @@ static int ohci_pci_resume (struct usb_hcd *hcd)
 	struct ohci_hcd		*ohci = hcd_to_ohci (hcd);
 	int			temp;
 	int			retval = 0;
-	unsigned long		flags;
 
 #ifdef CONFIG_PMAC_PBOOK
 	{
@@ -224,6 +227,7 @@ static int ohci_pci_resume (struct usb_hcd *hcd)
 	switch (temp) {
 
 	case OHCI_USB_RESET:	// lost power
+restart:
 		ohci_info (ohci, "USB restart\n");
 		retval = hc_restart (ohci);
 		break;
@@ -233,31 +237,28 @@ static int ohci_pci_resume (struct usb_hcd *hcd)
 		ohci_info (ohci, "USB continue from %s wakeup\n",
 			 (temp == OHCI_USB_SUSPEND)
 				? "host" : "remote");
+
+		/* we "should" only need RESUME if we're SUSPENDed ... */
 		ohci->hc_control = OHCI_USB_RESUME;
 		writel (ohci->hc_control, &ohci->regs->control);
 		(void) readl (&ohci->regs->control);
-		mdelay (20); /* no schedule here ! */
-		/* Some controllers (lucent) need a longer delay here */
-		mdelay (15);
+		/* Some controllers (lucent) need extra-long delays */
+		mdelay (35); /* no schedule here ! */
 
 		temp = readl (&ohci->regs->control);
 		temp = ohci->hc_control & OHCI_CTRL_HCFS;
 		if (temp != OHCI_USB_RESUME) {
 			ohci_err (ohci, "controller won't resume\n");
-			ohci->disabled = 1;
-			retval = -EIO;
-			break;
+			/* maybe we can reset */
+			goto restart;
 		}
 
-		/* Some chips likes being resumed first */
+		/* Then re-enable operations */
 		writel (OHCI_USB_OPER, &ohci->regs->control);
 		(void) readl (&ohci->regs->control);
 		mdelay (3);
 
-		/* Then re-enable operations */
-		spin_lock_irqsave (&ohci->lock, flags);
-		ohci->disabled = 0;
-		ohci->sleeping = 0;
+		spin_lock_irq (&ohci->lock);
 		ohci->hc_control = OHCI_CONTROL_INIT | OHCI_USB_OPER;
 		if (!ohci->ed_rm_list) {
 			if (ohci->ed_controltail)
@@ -265,32 +266,29 @@ static int ohci_pci_resume (struct usb_hcd *hcd)
 			if (ohci->ed_bulktail)
 				ohci->hc_control |= OHCI_CTRL_BLE;
 		}
-		hcd->state = USB_STATE_READY;
+		hcd->state = USB_STATE_RUNNING;
 		writel (ohci->hc_control, &ohci->regs->control);
 
 		/* trigger a start-frame interrupt (why?) */
 		writel (OHCI_INTR_SF, &ohci->regs->intrstatus);
 		writel (OHCI_INTR_SF, &ohci->regs->intrenable);
 
-		/* Check for a pending done list */
 		writel (OHCI_INTR_WDH, &ohci->regs->intrdisable);	
 		(void) readl (&ohci->regs->intrdisable);
-		spin_unlock_irqrestore (&ohci->lock, flags);
+		spin_unlock_irq (&ohci->lock);
 
 #ifdef CONFIG_PMAC_PBOOK
 		if (_machine == _MACH_Pmac)
 			enable_irq (hcd->pdev->irq);
 #endif
+
+		/* Check for a pending done list */
 		if (ohci->hcca->done_head)
 			dl_done_list (ohci, dl_reverse_done_list (ohci), NULL);
 		writel (OHCI_INTR_WDH, &ohci->regs->intrenable); 
 
 		/* assume there are TDs on the bulk and control lists */
 		writel (OHCI_BLF | OHCI_CLF, &ohci->regs->cmdstatus);
-
-// ohci_dump_status (ohci);
-ohci_dbg (ohci, "sleeping = %d, disabled = %d\n",
-		ohci->sleeping, ohci->disabled);
 		break;
 
 	default:
@@ -316,6 +314,7 @@ static const struct hc_driver ohci_pci_hc_driver = {
 	/*
 	 * basic lifecycle operations
 	 */
+	.reset =		ohci_pci_reset,
 	.start =		ohci_pci_start,
 #ifdef	CONFIG_PM
 	.suspend =		ohci_pci_suspend,
@@ -351,19 +350,10 @@ static const struct hc_driver ohci_pci_hc_driver = {
 /*-------------------------------------------------------------------------*/
 
 
-static const struct pci_device_id __devinitdata pci_ids [] = { {
-
+static const struct pci_device_id pci_ids [] = { {
 	/* handle any USB OHCI controller */
-	.class =	(PCI_CLASS_SERIAL_USB << 8) | 0x10,
-	.class_mask =	~0,
+	PCI_DEVICE_CLASS((PCI_CLASS_SERIAL_USB << 8) | 0x10, ~0),
 	.driver_data =	(unsigned long) &ohci_pci_hc_driver,
-
-	/* no matter who makes it */
-	.vendor =	PCI_ANY_ID,
-	.device =	PCI_ANY_ID,
-	.subvendor =	PCI_ANY_ID,
-	.subdevice =	PCI_ANY_ID,
-
 	}, { /* end: all zeroes */ }
 };
 MODULE_DEVICE_TABLE (pci, pci_ids);

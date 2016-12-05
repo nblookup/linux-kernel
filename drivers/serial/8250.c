@@ -105,11 +105,20 @@ unsigned int share_irqs = SERIAL8250_SHARE_IRQS;
 
 #include <asm/serial.h>
 
+/*
+ * SERIAL_PORT_DFNS tells us about built-in ports that have no
+ * standard enumeration mechanism.   Platforms that can find all
+ * serial ports via mechanisms like ACPI or PCI need not supply it.
+ */
+#ifndef SERIAL_PORT_DFNS
+#define SERIAL_PORT_DFNS
+#endif
+
 static struct old_serial_port old_serial_port[] = {
 	SERIAL_PORT_DFNS /* defined in asm/serial.h */
 };
 
-#define UART_NR	ARRAY_SIZE(old_serial_port)
+#define UART_NR	(ARRAY_SIZE(old_serial_port) + CONFIG_SERIAL_8250_NR_UARTS)
 
 #if defined(CONFIG_SERIAL_8250_RSA) && defined(MODULE)
 
@@ -122,6 +131,7 @@ struct uart_8250_port {
 	struct uart_port	port;
 	struct timer_list	timer;		/* "no irq" timer */
 	struct list_head	list;		/* ports on this IRQ */
+	unsigned int		capabilities;	/* port capabilities */
 	unsigned short		rev;
 	unsigned char		acr;
 	unsigned char		ier;
@@ -468,8 +478,14 @@ static void autoconfig_16550a(struct uart_8250_port *up)
 	 */
 	serial_outp(up, UART_LCR, UART_LCR_DLAB);
 	if (serial_in(up, UART_EFR) == 0) {
-		DEBUG_AUTOCONF("EFRv1 ");
-		up->port.type = PORT_16650;
+		serial_outp(up, UART_EFR, 0xA8);
+		if (serial_in(up, UART_EFR) != 0) {
+			DEBUG_AUTOCONF("EFRv1 ");
+			up->port.type = PORT_16650;
+		} else {
+			DEBUG_AUTOCONF("Motorola 8xxx DUART ");
+		}
+		serial_outp(up, UART_EFR, 0);
 		return;
 	}
 
@@ -489,7 +505,9 @@ static void autoconfig_16550a(struct uart_8250_port *up)
 	 * Attempt to switch to bank 2, read the value of the LOOP bit
 	 * from EXCR1. Switch back to bank 0, change it in MCR. Then
 	 * switch back to bank 2, read it from EXCR1 again and check
-	 * it's changed. If so, set baud_base in EXCR2 to 921600.
+	 * it's changed. If so, set baud_base in EXCR2 to 921600. -- dwmw2
+	 * On PowerPC we don't want to change baud_base, as we have
+	 * a number of different divisors.  -- Tom Rini
 	 */
 	serial_outp(up, UART_LCR, 0);
 	status1 = serial_in(up, UART_MCR);
@@ -505,12 +523,14 @@ static void autoconfig_16550a(struct uart_8250_port *up)
 		serial_outp(up, UART_MCR, status1);
 
 		if ((status2 ^ status1) & UART_MCR_LOOP) {
+#ifndef CONFIG_PPC
 			serial_outp(up, UART_LCR, 0xE0);
 			status1 = serial_in(up, 0x04); /* EXCR1 */
 			status1 &= ~0xB0; /* Disable LOCK, mask out PRESL[01] */
 			status1 |= 0x10;  /* 1.625 divisor for baud_base --> 921600 */
 			serial_outp(up, 0x04, status1);
 			serial_outp(up, UART_LCR, 0);
+#endif
 
 			up->port.type = PORT_NS16550A;
 			up->port.uartclk = 921600*16;
@@ -683,6 +703,7 @@ static void autoconfig(struct uart_8250_port *up, unsigned int probeflags)
 	serial_outp(up, UART_LCR, save_lcr);
 
 	up->port.fifosize = uart_config[up->port.type].dfl_xmit_fifo_size;
+	up->capabilities = uart_config[up->port.type].flags;
 
 	if (up->port.type == PORT_UNKNOWN)
 		goto out;
@@ -1190,6 +1211,8 @@ static int serial8250_startup(struct uart_port *port)
 	unsigned long flags;
 	int retval;
 
+	up->capabilities = uart_config[up->port.type].flags;
+
 	if (up->port.type == PORT_16C950) {
 		/* Wake up and initialize UART */
 		up->acr = 0;
@@ -1215,7 +1238,7 @@ static int serial8250_startup(struct uart_port *port)
 	 * Clear the FIFO buffers and disable them.
 	 * (they will be reeanbled in set_termios())
 	 */
-	if (uart_config[up->port.type].flags & UART_CLEAR_FIFO) {
+	if (up->capabilities & UART_CLEAR_FIFO) {
 		serial_outp(up, UART_FCR, UART_FCR_ENABLE_FIFO);
 		serial_outp(up, UART_FCR, UART_FCR_ENABLE_FIFO |
 				UART_FCR_CLEAR_RCVR | UART_FCR_CLEAR_XMIT);
@@ -1428,7 +1451,7 @@ serial8250_set_termios(struct uart_port *port, struct termios *termios,
 	    up->rev == 0x5201)
 		quot ++;
 
-	if (uart_config[up->port.type].flags & UART_USE_FIFO) {
+	if (up->capabilities & UART_USE_FIFO) {
 		if (baud < 2400)
 			fcr = UART_FCR_ENABLE_FIFO | UART_FCR_TRIGGER_1;
 #ifdef CONFIG_SERIAL_8250_RSA
@@ -1489,13 +1512,13 @@ serial8250_set_termios(struct uart_port *port, struct termios *termios,
 
 	serial_out(up, UART_IER, up->ier);
 
-	if (uart_config[up->port.type].flags & UART_STARTECH) {
+	if (up->capabilities & UART_STARTECH) {
 		serial_outp(up, UART_LCR, 0xBF);
 		serial_outp(up, UART_EFR,
 			    termios->c_cflag & CRTSCTS ? UART_EFR_CTS :0);
 	}
 
-	if (uart_config[up->port.type].flags & UART_NATSEMI) {
+	if (up->capabilities & UART_NATSEMI) {
 		/* Switch to bank 2 not bank 1, to avoid resetting EXCR2 */
 		serial_outp(up, UART_LCR, 0xe0);
 	} else {
@@ -1524,7 +1547,7 @@ serial8250_pm(struct uart_port *port, unsigned int state,
 	struct uart_8250_port *up = (struct uart_8250_port *)port;
 	if (state) {
 		/* sleep */
-		if (uart_config[up->port.type].flags & UART_STARTECH) {
+		if (up->capabilities & UART_STARTECH) {
 			/* Arrange to enter sleep mode */
 			serial_outp(up, UART_LCR, 0xBF);
 			serial_outp(up, UART_EFR, UART_EFR_ECB);
@@ -1543,7 +1566,7 @@ serial8250_pm(struct uart_port *port, unsigned int state,
 			up->pm(port, state, oldstate);
 	} else {
 		/* wake */
-		if (uart_config[up->port.type].flags & UART_STARTECH) {
+		if (up->capabilities & UART_STARTECH) {
 			/* Wake up UART */
 			serial_outp(up, UART_LCR, 0xBF);
 			serial_outp(up, UART_EFR, UART_EFR_ECB);
@@ -2063,6 +2086,9 @@ int register_serial(struct serial_struct *req)
 
 int __init early_serial_setup(struct uart_port *port)
 {
+	if (port->line >= ARRAY_SIZE(serial8250_ports))
+		return -ENODEV;
+
 	serial8250_isa_init_ports();
 	serial8250_ports[port->line].port	= *port;
 	serial8250_ports[port->line].port.ops	= &serial8250_pops;
@@ -2097,24 +2123,26 @@ void serial8250_get_irq_map(unsigned int *map)
 
 /**
  *	serial8250_suspend_port - suspend one serial port
- *	@line: serial line number
+ *	@line:  serial line number
+ *      @level: the level of port suspension, as per uart_suspend_port
  *
  *	Suspend one serial port.
  */
-void serial8250_suspend_port(int line, u32 level)
+void serial8250_suspend_port(int line)
 {
-	uart_suspend_port(&serial8250_reg, &serial8250_ports[line].port, level);
+	uart_suspend_port(&serial8250_reg, &serial8250_ports[line].port);
 }
 
 /**
  *	serial8250_resume_port - resume one serial port
- *	@line: serial line number
+ *	@line:  serial line number
+ *      @level: the level of port resumption, as per uart_resume_port
  *
  *	Resume one serial port.
  */
-void serial8250_resume_port(int line, u32 level)
+void serial8250_resume_port(int line)
 {
-	uart_resume_port(&serial8250_reg, &serial8250_ports[line].port, level);
+	uart_resume_port(&serial8250_reg, &serial8250_ports[line].port);
 }
 
 static int __init serial8250_init(void)
@@ -2122,7 +2150,8 @@ static int __init serial8250_init(void)
 	int ret, i;
 
 	printk(KERN_INFO "Serial: 8250/16550 driver $Revision: 1.90 $ "
-		"IRQ sharing %sabled\n", share_irqs ? "en" : "dis");
+		"%d ports, IRQ sharing %sabled\n", (int) UART_NR,
+		share_irqs ? "en" : "dis");
 
 	for (i = 0; i < NR_IRQS; i++)
 		spin_lock_init(&irq_lists[i].lock);

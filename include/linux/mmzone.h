@@ -10,13 +10,8 @@
 #include <linux/wait.h>
 #include <linux/cache.h>
 #include <linux/threads.h>
+#include <linux/numa.h>
 #include <asm/atomic.h>
-#ifdef CONFIG_DISCONTIGMEM
-#include <asm/numnodes.h>
-#endif
-#ifndef MAX_NUMNODES
-#define MAX_NUMNODES 1
-#endif
 
 /* Free memory management - zoned buddy allocator.  */
 #ifndef CONFIG_FORCE_MAX_ZONEORDER
@@ -88,6 +83,25 @@ struct zone {
 	unsigned long		pages_scanned;	   /* since last reclaim */
 
 	ZONE_PADDING(_pad2_)
+
+	/*
+	 * prev_priority holds the scanning priority for this zone.  It is
+	 * defined as the scanning priority at which we achieved our reclaim
+	 * target at the previous try_to_free_pages() or balance_pgdat()
+	 * invokation.
+	 *
+	 * We use prev_priority as a measure of how much stress page reclaim is
+	 * under - it drives the swappiness decision: whether to unmap mapped
+	 * pages.
+	 *
+	 * temp_priority is used to remember the scanning priority at which
+	 * this zone was successfully refilled to free_pages == pages_high.
+	 *
+	 * Access to both these fields is quite racy even on uniprocessor.  But
+	 * it is expected to average out OK.
+	 */
+	int temp_priority;
+	int prev_priority;
 
 	/*
 	 * free areas of different sizes
@@ -284,19 +298,34 @@ extern void setup_per_zone_pages_min(void);
 #define numa_node_id()		(cpu_to_node(smp_processor_id()))
 
 #ifndef CONFIG_DISCONTIGMEM
+
 extern struct pglist_data contig_page_data;
 #define NODE_DATA(nid)		(&contig_page_data)
 #define NODE_MEM_MAP(nid)	mem_map
-#define MAX_NR_NODES		1
+#define MAX_NODES_SHIFT		0
+
 #else /* CONFIG_DISCONTIGMEM */
 
 #include <asm/mmzone.h>
 
-/* page->zone is currently 8 bits ... */
-#define MAX_NR_NODES		(255 / MAX_NR_ZONES)
+#if BITS_PER_LONG == 32
+/*
+ * with 32 bit flags field, page->zone is currently 8 bits.
+ * there are 3 zones (2 bits) and this leaves 8-2=6 bits for nodes.
+ */
+#define MAX_NODES_SHIFT		6
+#elif BITS_PER_LONG == 64
+/*
+ * with 64 bit flags field, there's plenty of room.
+ */
+#define MAX_NODES_SHIFT		10
+#endif
 
 #endif /* !CONFIG_DISCONTIGMEM */
 
+#if NODES_SHIFT > MAX_NODES_SHIFT
+#error NODES_SHIFT > MAX_NODES_SHIFT
+#endif
 
 extern DECLARE_BITMAP(node_online_map, MAX_NUMNODES);
 extern DECLARE_BITMAP(memblk_online_map, MAX_NR_MEMBLKS);

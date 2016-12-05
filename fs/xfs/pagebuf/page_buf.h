@@ -37,7 +37,6 @@
 #ifndef __PAGE_BUF_H__
 #define __PAGE_BUF_H__
 
-#include <linux/version.h>
 #include <linux/config.h>
 #include <linux/list.h>
 #include <linux/types.h>
@@ -79,8 +78,9 @@ typedef enum {				/* pbm_flags values */
 	PBMF_EOF =		0x01,	/* mapping contains EOF		*/
 	PBMF_HOLE =		0x02,	/* mapping covers a hole	*/
 	PBMF_DELAY =		0x04,	/* mapping covers delalloc region  */
-	PBMF_UNWRITTEN =	0x20	/* mapping covers allocated	*/
+	PBMF_UNWRITTEN =	0x20,	/* mapping covers allocated	*/
 					/* but uninitialized file data	*/
+	PBMF_NEW =		0x40	/* just allocated		*/
 } bmap_flags_t;
 
 typedef enum {
@@ -95,6 +95,7 @@ typedef enum {
 	BMAP_MMAP = (1 << 6),		/* allocate for mmap write */
 	BMAP_SYNC = (1 << 7),		/* sync write */
 	BMAP_TRYLOCK = (1 << 8),	/* non-blocking request */
+	BMAP_DEVICE = (1 << 9),		/* we only want to know the device */
 } bmapi_flags_t;
 
 typedef enum page_buf_flags_e {		/* pb_flags values */
@@ -127,15 +128,13 @@ typedef enum page_buf_flags_e {		/* pb_flags values */
 	PBF_FORCEIO = (1 << 21),
 	PBF_FLUSH = (1 << 22),	/* flush disk write cache		   */
 	PBF_READ_AHEAD = (1 << 23),
+	PBF_RUN_QUEUES = (1 << 24), /* run block device task queue	   */
 
 } page_buf_flags_t;
 
 #define PBF_UPDATE (PBF_READ | PBF_WRITE)
 #define PBF_NOT_DONE(pb) (((pb)->pb_flags & (PBF_PARTIAL|PBF_NONE)) != 0)
 #define PBF_DONE(pb) (((pb)->pb_flags & (PBF_PARTIAL|PBF_NONE)) == 0)
-
-#define PBR_SECTOR_ONLY	1	/* only use sector size buffer heads */
-#define PBR_ALIGNED_ONLY 2	/* only use aligned I/O */
 
 typedef struct pb_target {
 	dev_t			pbr_dev;
@@ -238,10 +237,6 @@ typedef struct page_buf_s {
 } page_buf_t;
 
 
-/*
- * page_buf module entry points
- */
-
 /* Finding and Reading Buffers */
 
 extern page_buf_t *pagebuf_find(	/* find buffer for block if	*/
@@ -267,6 +262,7 @@ extern page_buf_t *pagebuf_lookup(
 
 extern page_buf_t *pagebuf_get_empty(	/* allocate pagebuf struct with	*/
 					/*  no memory or disk address	*/
+		size_t len,
 		struct pb_target *);	/* mount point "fake" inode	*/
 
 extern page_buf_t *pagebuf_get_no_daddr(/* allocate pagebuf struct	*/
@@ -274,11 +270,10 @@ extern page_buf_t *pagebuf_get_no_daddr(/* allocate pagebuf struct	*/
 		size_t len,
 		struct pb_target *);	/* mount point "fake" inode	*/
 
-extern int	pagebuf_associate_memory(
+extern int pagebuf_associate_memory(
 		page_buf_t *,
 		void *,
 		size_t);
-
 
 extern void pagebuf_hold(		/* increment reference count	*/
 		page_buf_t *);		/* buffer to hold		*/
@@ -289,7 +284,7 @@ extern void pagebuf_readahead(		/* read ahead into cache	*/
 		size_t,			/* length of range              */
 		page_buf_flags_t);	/* additional read flags	*/
 
-/* Writing and Releasing Buffers */
+/* Releasing Buffers */
 
 extern void pagebuf_free(		/* deallocate a buffer		*/
 		page_buf_t *);		/* buffer to deallocate		*/
@@ -312,11 +307,7 @@ extern int pagebuf_lock(		/* lock buffer                  */
 extern void pagebuf_unlock(		/* unlock buffer		*/
 		page_buf_t *);		/* buffer to unlock		*/
 
-/* Buffer Utility Routines */
-static inline int pagebuf_geterror(page_buf_t *pb)
-{
-	return (pb ? pb->pb_error : ENOMEM);
-}
+/* Buffer Read and Write Routines */
 
 extern void pagebuf_iodone(		/* mark buffer I/O complete	*/
 		page_buf_t *,		/* buffer to mark		*/
@@ -337,20 +328,8 @@ extern int pagebuf_iostart(		/* start I/O on a buffer	*/
 extern int pagebuf_iorequest(		/* start real I/O		*/
 		page_buf_t *);		/* buffer to convey to device	*/
 
-	/*
-	 * pagebuf_iorequest is the core I/O request routine.
-	 * It assumes that the buffer is well-formed and
-	 * mapped and ready for physical I/O, unlike
-	 * pagebuf_iostart() and pagebuf_iophysio().  Those
-	 * routines call the inode pagebuf_ioinitiate routine to start I/O,
-	 * if it is present, or else call pagebuf_iorequest()
-	 * directly if the inode pagebuf_ioinitiate routine is not present.
-	 */
-
 extern int pagebuf_iowait(		/* wait for buffer I/O done	*/
 		page_buf_t *);		/* buffer to wait on		*/
-
-extern caddr_t	pagebuf_offset(page_buf_t *, size_t);
 
 extern void pagebuf_iomove(		/* move data in/out of pagebuf	*/
 		page_buf_t *,		/* buffer to manipulate		*/
@@ -358,6 +337,22 @@ extern void pagebuf_iomove(		/* move data in/out of pagebuf	*/
 		size_t,			/* length in buffer		*/
 		caddr_t,		/* data pointer			*/
 		page_buf_rw_t);		/* direction			*/
+
+static inline int pagebuf_iostrategy(page_buf_t *pb)
+{
+	return pb->pb_strat ? pb->pb_strat(pb) : pagebuf_iorequest(pb);
+}
+
+static inline int pagebuf_geterror(page_buf_t *pb)
+{
+	return pb ? pb->pb_error : ENOMEM;
+}
+
+/* Buffer Utility Routines */
+
+extern caddr_t pagebuf_offset(		/* pointer at offset in buffer	*/
+		page_buf_t *,		/* buffer to offset into	*/
+		size_t);		/* offset			*/
 
 /* Pinning Buffer Storage in Memory */
 
@@ -367,33 +362,23 @@ extern void pagebuf_pin(		/* pin buffer in memory		*/
 extern void pagebuf_unpin(		/* unpin buffered data		*/
 		page_buf_t *);		/* buffer to unpin		*/
 
-extern int pagebuf_ispin( page_buf_t *); /* check if pagebuf is pinned	*/
+extern int pagebuf_ispin(		/* check if buffer is pinned	*/
+		page_buf_t *);		/* buffer to check		*/
 
-/* Reading and writing pages */
-
-extern void pagebuf_delwri_dequeue(page_buf_t *);
+/* Delayed Write Buffer Routines */
 
 #define PBDF_WAIT    0x01
-#define PBDF_TRYLOCK 0x02
 extern void pagebuf_delwri_flush(
-		struct pb_target *,
+		pb_target_t *,
 		unsigned long,
 		int *);
 
+extern void pagebuf_delwri_dequeue(
+		page_buf_t *);
+
+/* Buffer Daemon Setup Routines */
+
 extern int pagebuf_init(void);
 extern void pagebuf_terminate(void);
-
-static __inline__ int __pagebuf_iorequest(page_buf_t *pb)
-{
-	if (pb->pb_strat)
-		return pb->pb_strat(pb);
-	return pagebuf_iorequest(pb);
-}
-
-static __inline__ void pagebuf_run_queues(page_buf_t *pb)
-{
-	if (!pb || atomic_read(&pb->pb_io_remaining))
-		blk_run_queues();
-}
 
 #endif /* __PAGE_BUF_H__ */

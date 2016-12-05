@@ -13,6 +13,7 @@
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -27,7 +28,6 @@
 #include <linux/skbuff.h>
 #include <linux/rtnetlink.h>
 #include <linux/init.h>
-#include <linux/proc_fs.h>
 #include <net/sock.h>
 #include <net/pkt_sched.h>
 
@@ -249,3 +249,12 @@ rtattr_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
+
+EXPORT_SYMBOL(tcf_police);
+EXPORT_SYMBOL(tcf_police_destroy);
+EXPORT_SYMBOL(tcf_police_dump);
+EXPORT_SYMBOL(tcf_police_hash);
+EXPORT_SYMBOL(tcf_police_ht);
+EXPORT_SYMBOL(tcf_police_locate);
+EXPORT_SYMBOL(tcf_police_lookup);
+EXPORT_SYMBOL(tcf_police_new_index);

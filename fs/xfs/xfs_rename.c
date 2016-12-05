@@ -56,7 +56,6 @@
 #include "xfs_trans_space.h"
 #include "xfs_da_btree.h"
 #include "xfs_dir_leaf.h"
-#include "xfs_dmapi.h"
 
 
 /*
@@ -293,8 +292,8 @@ xfs_rename(
 	    DM_EVENT_ENABLED(target_dir_vp->v_vfsp,
 				target_dp, DM_EVENT_RENAME)) {
 		error = XFS_SEND_NAMESP(mp, DM_EVENT_RENAME,
-					src_dir_bdp, DM_RIGHT_NULL,
-					target_dir_bdp, DM_RIGHT_NULL,
+					src_dir_vp, DM_RIGHT_NULL,
+					target_dir_vp, DM_RIGHT_NULL,
 					src_name, target_name,
 					0, 0, 0);
 		if (error) {
@@ -327,7 +326,7 @@ xfs_rename(
 
 	ASSERT(src_ip != NULL);
 
-	if ((src_ip->i_d.di_mode & IFMT) == IFDIR) {
+	if ((src_ip->i_d.di_mode & S_IFMT) == S_IFDIR) {
 		/*
 		 * Check for link count overflow on target_dp
 		 */
@@ -341,7 +340,7 @@ xfs_rename(
 	}
 
 	new_parent = (src_dp != target_dp);
-	src_is_directory = ((src_ip->i_d.di_mode & IFMT) == IFDIR);
+	src_is_directory = ((src_ip->i_d.di_mode & S_IFMT) == S_IFDIR);
 
 	/*
 	 * Drop the locks on our inodes so that we can do the ancestor
@@ -450,7 +449,7 @@ xfs_rename(
 		 * target and source are directories and that target can be
 		 * destroyed, or that neither is a directory.
 		 */
-		if ((target_ip->i_d.di_mode & IFMT) == IFDIR) {
+		if ((target_ip->i_d.di_mode & S_IFMT) == S_IFDIR) {
 			/*
 			 * Make sure target dir is empty.
 			 */
@@ -650,8 +649,8 @@ std_return:
 	    DM_EVENT_ENABLED(target_dir_vp->v_vfsp,
 				target_dp, DM_EVENT_POSTRENAME)) {
 		(void) XFS_SEND_NAMESP (mp, DM_EVENT_POSTRENAME,
-					src_dir_bdp, DM_RIGHT_NULL,
-					target_dir_bdp, DM_RIGHT_NULL,
+					src_dir_vp, DM_RIGHT_NULL,
+					target_dir_vp, DM_RIGHT_NULL,
 					src_name, target_name,
 					0, error, 0);
 	}

@@ -19,7 +19,6 @@
  */
 
 #include <sound/driver.h>
-#include <linux/version.h>
 #include <linux/init.h>
 #include <linux/jiffies.h>
 #include <linux/slab.h>
@@ -41,6 +40,20 @@ MODULE_DEVICES("{{ALSA,Dummy soundcard}}");
 #define MAX_PCM_DEVICES		4
 #define MAX_PCM_SUBSTREAMS	16
 #define MAX_MIDI_DEVICES	2
+
+#if 0 /* emu10k1 emulation */
+#define MAX_BUFFER_SIZE		(128 * 1024)
+static int emu10k1_playback_constraints(snd_pcm_runtime_t *runtime)
+{
+	int err;
+	if ((err = snd_pcm_hw_constraint_integer(runtime, SNDRV_PCM_HW_PARAM_PERIODS)) < 0)
+		return err;
+	if ((err = snd_pcm_hw_constraint_minmax(runtime, SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 256, UINT_MAX)) < 0)
+		return err;
+	return 0;
+}
+#define add_playback_constraints emu10k1_playback_constraints
+#endif
 
 #if 0 /* RME9652 emulation */
 #define MAX_BUFFER_SIZE		(26 * 64 * 1024)
@@ -69,6 +82,15 @@ MODULE_DEVICES("{{ALSA,Dummy soundcard}}");
 #define USE_PERIODS_MAX		255
 #endif
 
+#if 0 /* simple AC97 bridge (intel8x0) with 48kHz AC97 only codec */
+#define USE_FORMATS		SNDRV_PCM_FMTBIT_S16_LE
+#define USE_CHANNELS_MIN	2
+#define USE_CHANNELS_MAX	2
+#define USE_RATE		SNDRV_PCM_RATE_48000
+#define USE_RATE_MIN		48000
+#define USE_RATE_MAX		48000
+#endif
+
 
 /* defaults */
 #ifndef MAX_BUFFER_SIZE
@@ -76,6 +98,11 @@ MODULE_DEVICES("{{ALSA,Dummy soundcard}}");
 #endif
 #ifndef USE_FORMATS
 #define USE_FORMATS 		(SNDRV_PCM_FMTBIT_U8 | SNDRV_PCM_FMTBIT_S16_LE)
+#endif
+#ifndef USE_RATE
+#define USE_RATE		SNDRV_PCM_RATE_CONTINUOUS | SNDRV_PCM_RATE_8000_48000
+#define USE_RATE_MIN		5500
+#define USE_RATE_MAX		48000
 #endif
 #ifndef USE_CHANNELS_MIN
 #define USE_CHANNELS_MIN 	1
@@ -88,6 +115,12 @@ MODULE_DEVICES("{{ALSA,Dummy soundcard}}");
 #endif
 #ifndef USE_PERIODS_MAX
 #define USE_PERIODS_MAX 	1024
+#endif
+#ifndef add_playback_constraints
+#define add_playback_constraints(x) 0
+#endif
+#ifndef add_capture_constraints
+#define add_capture_constraints(x) 0
 #endif
 
 static int index[SNDRV_CARDS] = SNDRV_DEFAULT_IDX;	/* Index 0-MAX */
@@ -271,9 +304,9 @@ static snd_pcm_hardware_t snd_card_dummy_playback =
 	.info =			(SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED |
 				 SNDRV_PCM_INFO_MMAP_VALID),
 	.formats =		USE_FORMATS,
-	.rates =		SNDRV_PCM_RATE_CONTINUOUS | SNDRV_PCM_RATE_8000_48000,
-	.rate_min =		5500,
-	.rate_max =		48000,
+	.rates =		USE_RATE,
+	.rate_min =		USE_RATE_MIN,
+	.rate_max =		USE_RATE_MAX,
 	.channels_min =		USE_CHANNELS_MIN,
 	.channels_max =		USE_CHANNELS_MAX,
 	.buffer_bytes_max =	MAX_BUFFER_SIZE,
@@ -289,9 +322,9 @@ static snd_pcm_hardware_t snd_card_dummy_capture =
 	.info =			(SNDRV_PCM_INFO_MMAP | SNDRV_PCM_INFO_INTERLEAVED |
 				 SNDRV_PCM_INFO_MMAP_VALID),
 	.formats =		USE_FORMATS,
-	.rates =		SNDRV_PCM_RATE_CONTINUOUS | SNDRV_PCM_RATE_8000_48000,
-	.rate_min =		5500,
-	.rate_max =		48000,
+	.rates =		USE_RATE,
+	.rate_min =		USE_RATE_MIN,
+	.rate_max =		USE_RATE_MAX,
 	.channels_min =		USE_CHANNELS_MIN,
 	.channels_max =		USE_CHANNELS_MAX,
 	.buffer_bytes_max =	MAX_BUFFER_SIZE,
@@ -312,6 +345,7 @@ static int snd_card_dummy_playback_open(snd_pcm_substream_t * substream)
 {
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	snd_card_dummy_pcm_t *dpcm;
+	int err;
 
 	dpcm = snd_magic_kcalloc(snd_card_dummy_pcm_t, 0, GFP_KERNEL);
 	if (dpcm == NULL)
@@ -334,6 +368,11 @@ static int snd_card_dummy_playback_open(snd_pcm_substream_t * substream)
 	}
 	if (substream->pcm->device & 2)
 		runtime->hw.info &= ~(SNDRV_PCM_INFO_MMAP|SNDRV_PCM_INFO_MMAP_VALID);
+	if ((err = add_playback_constraints(runtime)) < 0) {
+		snd_magic_kfree(dpcm);
+		return err;
+	}
+
 	return 0;
 }
 
@@ -341,6 +380,7 @@ static int snd_card_dummy_capture_open(snd_pcm_substream_t * substream)
 {
 	snd_pcm_runtime_t *runtime = substream->runtime;
 	snd_card_dummy_pcm_t *dpcm;
+	int err;
 
 	dpcm = snd_magic_kcalloc(snd_card_dummy_pcm_t, 0, GFP_KERNEL);
 	if (dpcm == NULL)
@@ -364,6 +404,11 @@ static int snd_card_dummy_capture_open(snd_pcm_substream_t * substream)
 	}
 	if (substream->pcm->device & 2)
 		runtime->hw.info &= ~(SNDRV_PCM_INFO_MMAP|SNDRV_PCM_INFO_MMAP_VALID);
+	if ((err = add_capture_constraints(runtime)) < 0) {
+		snd_magic_kfree(dpcm);
+		return err;
+	}
+
 	return 0;
 }
 

@@ -371,7 +371,7 @@ struct sv_state {
 /* --------------------------------------------------------------------- */
 
 static LIST_HEAD(devs);
-static unsigned long wavetable_mem = 0;
+static unsigned long wavetable_mem;
 
 /* --------------------------------------------------------------------- */
 
@@ -1046,6 +1046,7 @@ static int mixer_ioctl(struct sv_state *s, unsigned int cmd, unsigned long arg)
 	VALIDATE_STATE(s);
         if (cmd == SOUND_MIXER_INFO) {
 		mixer_info info;
+		memset(&info, 0, sizeof(info));
 		strlcpy(info.id, "SonicVibes", sizeof(info.id));
 		strlcpy(info.name, "S3 SonicVibes", sizeof(info.name));
 		info.modify_counter = s->mix.modcnt;
@@ -1055,6 +1056,7 @@ static int mixer_ioctl(struct sv_state *s, unsigned int cmd, unsigned long arg)
 	}
 	if (cmd == SOUND_OLD_MIXER_INFO) {
 		_old_mixer_info info;
+		memset(&info, 0, sizeof(info));
 		strlcpy(info.id, "SonicVibes", sizeof(info.id));
 		strlcpy(info.name, "S3 SonicVibes", sizeof(info.name));
 		if (copy_to_user((void *)arg, &info, sizeof(info)))
@@ -1236,7 +1238,7 @@ static int mixer_ioctl(struct sv_state *s, unsigned int cmd, unsigned long arg)
 
 static int sv_open_mixdev(struct inode *inode, struct file *file)
 {
-	int minor = minor(inode->i_rdev);
+	int minor = iminor(inode);
 	struct list_head *list;
 	struct sv_state *s;
 
@@ -1898,7 +1900,7 @@ static int sv_ioctl(struct inode *inode, struct file *file, unsigned int cmd, un
 
 static int sv_open(struct inode *inode, struct file *file)
 {
-	int minor = minor(inode->i_rdev);
+	int minor = iminor(inode);
 	DECLARE_WAITQUEUE(wait, current);
 	unsigned char fmtm = ~0, fmts = 0;
 	struct list_head *list;
@@ -2147,7 +2149,7 @@ static unsigned int sv_midi_poll(struct file *file, struct poll_table_struct *wa
 
 static int sv_midi_open(struct inode *inode, struct file *file)
 {
-	int minor = minor(inode->i_rdev);
+	int minor = iminor(inode);
 	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	struct list_head *list;
@@ -2369,7 +2371,7 @@ static int sv_dmfm_ioctl(struct inode *inode, struct file *file, unsigned int cm
 
 static int sv_dmfm_open(struct inode *inode, struct file *file)
 {
-	int minor = minor(inode->i_rdev);
+	int minor = iminor(inode);
 	DECLARE_WAITQUEUE(wait, current);
 	struct list_head *list;
 	struct sv_state *s;
@@ -2446,13 +2448,13 @@ static /*const*/ struct file_operations sv_dmfm_fops = {
 /* maximum number of devices; only used for command line params */
 #define NR_DEVICE 5
 
-static int reverb[NR_DEVICE] = { 0, };
+static int reverb[NR_DEVICE];
 
 #if 0
-static int wavetable[NR_DEVICE] = { 0, };
+static int wavetable[NR_DEVICE];
 #endif
 
-static unsigned int devindex = 0;
+static unsigned int devindex;
 
 MODULE_PARM(reverb, "1-" __MODULE_STRING(NR_DEVICE) "i");
 MODULE_PARM_DESC(reverb, "if 1 enables the reverb circuitry. NOTE: your card must have the reverb RAM");
@@ -2707,7 +2709,7 @@ static void __devinit sv_remove(struct pci_dev *dev)
 	pci_set_drvdata(dev, NULL);
 }
 
-static struct pci_device_id id_table[] __devinitdata = {
+static struct pci_device_id id_table[] = {
        { PCI_VENDOR_ID_S3, PCI_DEVICE_ID_S3_SONICVIBES, PCI_ANY_ID, PCI_ANY_ID, 0, 0 },
        { 0, }
 };

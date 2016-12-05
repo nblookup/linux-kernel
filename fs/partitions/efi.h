@@ -4,7 +4,7 @@
  * http://developer.intel.com/technology/efi/efi.htm
  *
  * By Matt Domsch <Matt_Domsch@dell.com>  Fri Sep 22 22:15:56 CDT 2000  
- *   Copyright 2000,2001 Dell Computer Corporation
+ *   Copyright 2000,2001 Dell Inc.
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -32,7 +32,6 @@
 #include <linux/kernel.h>
 #include <linux/major.h>
 #include <linux/string.h>
-#include <linux/blk.h>
 #include <linux/efi.h>
 
 #define MSDOS_MBR_SIGNATURE 0xaa55
@@ -40,7 +39,7 @@
 #define EFI_PMBR_OSTYPE_EFI_GPT 0xEE
 
 #define GPT_BLOCK_SIZE 512
-#define GPT_HEADER_SIGNATURE 0x5452415020494645L
+#define GPT_HEADER_SIGNATURE 0x5452415020494645ULL
 #define GPT_HEADER_REVISION_V1 0x00010000
 #define GPT_PRIMARY_PARTITION_TABLE_LBA 1
 

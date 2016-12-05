@@ -53,72 +53,22 @@
 #ifndef SYM_GLUE_H
 #define SYM_GLUE_H
 
-#if 0
-#define SYM_CONF_DMA_ADDRESSING_MODE 2
-#endif
-
-#define LinuxVersionCode(v, p, s) (((v)<<16)+((p)<<8)+(s))
-#include <linux/version.h>
-#if	LINUX_VERSION_CODE < LinuxVersionCode(2, 2, 0)
-#error	"This driver requires a kernel version not lower than 2.2.0"
-#endif
-
-#include <asm/dma.h>
-#include <asm/io.h>
-#include <asm/system.h>
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,3,17)
-#include <linux/spinlock.h>
-#else
-#include <asm/spinlock.h>
-#endif
+#include <linux/config.h>
 #include <linux/delay.h>
-#include <linux/signal.h>
-#include <linux/sched.h>
-#include <linux/errno.h>
+#include <linux/ioport.h>
 #include <linux/pci.h>
 #include <linux/string.h>
-#include <linux/mm.h>
-#include <linux/ioport.h>
-#include <linux/time.h>
 #include <linux/timer.h>
-#include <linux/stat.h>
-#include <linux/interrupt.h>
+#include <linux/types.h>
 
-#include <linux/blk.h>
-
+#include <asm/io.h>
 #ifdef __sparc__
 #  include <asm/irq.h>
 #endif
-#include <linux/init.h>
 
-#ifndef	__init
-#define	__init
-#endif
-#ifndef	__initdata
-#define	__initdata
-#endif
-
-#include "../scsi.h"
-#include "../hosts.h"
-
-#include <linux/types.h>
-
-/*
- *  Define BITS_PER_LONG for earlier linux versions.
- */
-#ifndef	BITS_PER_LONG
-#if (~0UL) == 0xffffffffUL
-#define	BITS_PER_LONG	32
-#else
-#define	BITS_PER_LONG	64
-#endif
-#endif
-
-typedef	u_long	vm_offset_t;
-
-#ifndef bcopy
-#define bcopy(s, d, n)	memcpy((d), (s), (n))
-#endif
+#include <scsi/scsi_cmnd.h>
+#include <scsi/scsi_host.h>
+#include "../scsi.h"		/* XXX: DID_* */
 
 #ifndef bzero
 #define bzero(d, n)	memset((d), 0, (n))
@@ -131,7 +81,6 @@ typedef	u_long	vm_offset_t;
 /*
  *  General driver includes.
  */
-#include "sym53c8xx.h"
 #include "sym_misc.h"
 #include "sym_conf.h"
 #include "sym_defs.h"
@@ -139,10 +88,6 @@ typedef	u_long	vm_offset_t;
 /*
  * Configuration addendum for Linux.
  */
-#if	LINUX_VERSION_CODE >= LinuxVersionCode(2,3,47)
-#define	SYM_LINUX_DYNAMIC_DMA_MAPPING
-#endif
-
 #define	SYM_CONF_TIMER_INTERVAL		((HZ+1)/2)
 
 #define SYM_OPT_HANDLE_DIR_UNKNOWN
@@ -151,10 +96,7 @@ typedef	u_long	vm_offset_t;
 #define SYM_OPT_SNIFF_INQUIRY
 #define SYM_OPT_LIMIT_COMMAND_REORDERING
 #define	SYM_OPT_ANNOUNCE_TRANSFER_RATE
-
-#ifdef	SYM_LINUX_DYNAMIC_DMA_MAPPING
 #define	SYM_OPT_BUS_DMA_ABSTRACTION
-#endif
 
 /*
  *  Print a message with severity.
@@ -172,8 +114,8 @@ typedef	u_long	vm_offset_t;
 /*
  *  Insert a delay in micro-seconds and milli-seconds.
  */
-void sym_udelay(int us);
-void sym_mdelay(int ms);
+#define sym_udelay(us)	udelay(us)
+#define sym_mdelay(ms)	mdelay(ms)
 
 /*
  *  Let the compiler know about driver data structure names.
@@ -182,16 +124,12 @@ typedef struct sym_tcb *tcb_p;
 typedef struct sym_lcb *lcb_p;
 typedef struct sym_ccb *ccb_p;
 typedef struct sym_hcb *hcb_p;
-typedef struct sym_stcb *stcb_p;
-typedef struct sym_slcb *slcb_p;
-typedef struct sym_sccb *sccb_p;
-typedef struct sym_shcb *shcb_p;
 
 /*
  *  Define a reference to the O/S dependent IO request.
  */
-typedef Scsi_Cmnd *cam_ccb_p;	/* Generic */
-typedef Scsi_Cmnd *cam_scsiio_p;/* SCSI I/O */
+typedef struct scsi_cmnd *cam_ccb_p;	/* Generic */
+typedef struct scsi_cmnd *cam_scsiio_p;/* SCSI I/O */
 
 
 /*
@@ -212,30 +150,17 @@ typedef Scsi_Cmnd *cam_scsiio_p;/* SCSI I/O */
 
 #else	/* little endian */
 
-#if defined(__i386__)	/* i386 implements full FLAT memory/MMIO model */
 #define	inw_raw		inw
 #define	inl_raw		inl
 #define	outw_raw	outw
 #define	outl_raw	outl
-#define readb_raw(a)	(*(volatile unsigned char *) (a))
-#define readw_raw(a)	(*(volatile unsigned short *) (a))
-#define readl_raw(a)	(*(volatile unsigned int *) (a))
-#define writeb_raw(b,a)	((*(volatile unsigned char *) (a)) = (b))
-#define writew_raw(b,a)	((*(volatile unsigned short *) (a)) = (b))
-#define writel_raw(b,a)	((*(volatile unsigned int *) (a)) = (b))
 
-#else	/* Other little-endian */
-#define	inw_raw		inw
-#define	inl_raw		inl
-#define	outw_raw	outw
-#define	outl_raw	outl
 #define	readw_raw	readw
 #define	readl_raw	readl
 #define	writew_raw	writew
 #define	writel_raw	writel
 
-#endif
-#endif
+#endif /* endian */
 
 #ifdef	SYM_CONF_CHIP_BIG_ENDIAN
 #error	"Chips in BIG ENDIAN addressing mode are not (yet) supported"
@@ -456,11 +381,8 @@ struct sym_shcb {
 
 	struct Scsi_Host *host;
 
-	u_char		bus;		/* PCI BUS number		*/
-	u_char		device_fn;	/* PCI BUS device and function	*/
-
-	vm_offset_t	mmio_va;	/* MMIO kernel virtual address	*/
-	vm_offset_t	ram_va;		/* RAM  kernel virtual address	*/
+	void *		mmio_va;	/* MMIO kernel virtual address	*/
+	void *		ram_va;		/* RAM  kernel virtual address	*/
 	u_long		io_port;	/* IO port address cookie	*/
 	u_short		io_ws;		/* IO window size		*/
 	int		irq;		/* IRQ number			*/
@@ -472,9 +394,6 @@ struct sym_shcb {
 	u_long		lasttime;
 	u_long		settle_time;	/* Resetting the SCSI BUS	*/
 	u_char		settle_time_valid;
-#if LINUX_VERSION_CODE < LinuxVersionCode(2, 4, 0)
-	u_char		release_stage;	/* Synchronisation on release	*/
-#endif
 };
 
 /*
@@ -487,9 +406,7 @@ struct sym_shcb {
  *  Must resolve the IO macros and sym_name(), when  
  *  used as sub-field 's' of another structure.
  */
-typedef struct {
-	int	bus;
-	u_char	device_fn;
+struct sym_slot {
 	u_long	base;
 	u_long	base_2;
 	u_long	base_c;
@@ -497,27 +414,23 @@ typedef struct {
 	int	irq;
 /* port and address fields to fit INB, OUTB macros */
 	u_long	io_port;
-	vm_offset_t mmio_va;
+	void *	mmio_va;
 	char	inst_name[16];
-} sym_slot;
+};
 
-typedef struct sym_nvram sym_nvram;
-typedef struct sym_pci_chip sym_chip;
-
-typedef struct {
+struct sym_device {
 	struct pci_dev *pdev;
-	sym_slot  s;
-	sym_chip  chip;
-	sym_nvram *nvram;
+	struct sym_slot  s;
+	struct sym_pci_chip chip;
+	struct sym_nvram *nvram;
 	u_short device_id;
 	u_char host_id;
 #ifdef	SYM_CONF_PQS_PDS_SUPPORT
 	u_char pqs_pds;
 #endif
-	int attach_done;
-} sym_device;
+};
 
-typedef sym_device *sdev_p;
+typedef struct sym_device *sdev_p;
 
 /*
  *  The driver definitions (sym_hipd.h) must know about a 
@@ -529,9 +442,7 @@ typedef u_long m_addr_t;	/* Enough bits to represent any address */
 #ifdef	MODULE
 #define SYM_MEM_FREE_UNUSED	/* Free unused pages immediately */
 #endif
-#ifdef	SYM_LINUX_DYNAMIC_DMA_MAPPING
 typedef struct pci_dev *m_pool_ident_t;
-#endif
 
 /*
  *  Include driver soft definitions.
@@ -554,19 +465,7 @@ typedef struct pci_dev *m_pool_ident_t;
 void *sym_calloc(int size, char *name);
 void sym_mfree(void *m, int size, char *name);
 
-#ifndef	SYM_LINUX_DYNAMIC_DMA_MAPPING
 /*
- *  Simple case.
- *  All the memory assummed DMAable and O/S providing virtual 
- *  to bus physical address translation.
- */
-#define __sym_calloc_dma(pool_id, size, name)	sym_calloc(size, name)
-#define __sym_mfree_dma(pool_id, m, size, name)	sym_mfree(m, size, name)
-#define __vtobus(b, p)				virt_to_bus(p)
-
-#else	/* SYM_LINUX_DYNAMIC_DMA_MAPPING */
-/*
- *  Complex case.
  *  We have to provide the driver memory allocator with methods for 
  *  it to maintain virtual to bus physical address translations.
  */
@@ -593,20 +492,17 @@ static __inline void sym_m_free_dma_mem_cluster(m_pool_p mp, m_vtob_p vbp)
 }
 
 #define sym_m_create_dma_mem_tag(mp)	(0)
-
 #define sym_m_delete_dma_mem_tag(mp)	do { ; } while (0)
 
 void *__sym_calloc_dma(m_pool_ident_t dev_dmat, int size, char *name);
 void __sym_mfree_dma(m_pool_ident_t dev_dmat, void *m, int size, char *name);
 m_addr_t __vtobus(m_pool_ident_t dev_dmat, void *m);
 
-#endif	/* SYM_LINUX_DYNAMIC_DMA_MAPPING */
-
 /*
  *  Set the status field of a CAM CCB.
  */
 static __inline void 
-sym_set_cam_status(Scsi_Cmnd  *ccb, int status)
+sym_set_cam_status(struct scsi_cmnd *ccb, int status)
 {
 	ccb->result &= ~(0xff  << 16);
 	ccb->result |= (status << 16);
@@ -616,7 +512,7 @@ sym_set_cam_status(Scsi_Cmnd  *ccb, int status)
  *  Get the status field of a CAM CCB.
  */
 static __inline int 
-sym_get_cam_status(Scsi_Cmnd  *ccb)
+sym_get_cam_status(struct scsi_cmnd *ccb)
 {
 	return ((ccb->result >> 16) & 0xff);
 }
@@ -645,11 +541,9 @@ void sym_xpt_async_nego_wide(hcb_p np, int target);
  */
 static __inline void sym_set_cam_result_ok(hcb_p np, ccb_p cp, int resid)
 {
-	Scsi_Cmnd *cmd = cp->cam_ccb;
+	struct scsi_cmnd *cmd = cp->cam_ccb;
 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,3,99)
 	cmd->resid = resid;
-#endif
 	cmd->result = (((DID_OK) << 16) + ((cp->ssss_status) & 0x7f));
 }
 void sym_set_cam_result_error(hcb_p np, ccb_p cp, int resid);
@@ -667,8 +561,6 @@ void sym_xpt_async_bus_reset(hcb_p np);
 void sym_xpt_async_sent_bdr(hcb_p np, int target);
 int  sym_setup_data_and_start (hcb_p np, cam_scsiio_p csio, ccb_p cp);
 void sym_log_bus_error(hcb_p np);
-#ifdef	SYM_OPT_SNIFF_INQUIRY
-void sym_sniff_inquiry(hcb_p np, Scsi_Cmnd *cmd, int resid);
-#endif
+void sym_sniff_inquiry(hcb_p np, struct scsi_cmnd *cmd, int resid);
 
 #endif /* SYM_GLUE_H */

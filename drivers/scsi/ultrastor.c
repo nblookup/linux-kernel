@@ -128,7 +128,7 @@
  */
 
 #include <linux/module.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/interrupt.h>
 #include <linux/stddef.h>
 #include <linux/string.h>
@@ -294,7 +294,7 @@ static inline void build_sg_list(struct mscp *, Scsi_Cmnd *SCpnt);
 
 /* Always called with host lock held */
 
-static inline int find_and_clear_bit_16(unsigned short *field)
+static inline int find_and_clear_bit_16(unsigned long *field)
 {
   int rv;
 

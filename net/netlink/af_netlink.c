@@ -40,6 +40,7 @@
 #include <linux/netdevice.h>
 #include <linux/rtnetlink.h>
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/smp_lock.h>
 #include <linux/notifier.h>
 #include <linux/security.h>
@@ -393,6 +394,7 @@ static int netlink_getname(struct socket *sock, struct sockaddr *addr, int *addr
 	struct sockaddr_nl *nladdr=(struct sockaddr_nl *)addr;
 	
 	nladdr->nl_family = AF_NETLINK;
+	nladdr->nl_pad = 0;
 	*addr_len = sizeof(*nladdr);
 
 	if (peer) {
@@ -429,6 +431,10 @@ retry:
 	if (sk == NULL)
 		goto no_dst;
 	nlk = nlk_sk(sk);
+
+	/* Don't bother queuing skb if kernel socket has no input function */
+        if (nlk->pid == 0 && !nlk->data_ready)
+        	goto no_dst;
 
 #ifdef NL_EMULATE_DEV
 	if (nlk->handler) {
@@ -712,6 +718,7 @@ static int netlink_recvmsg(struct kiocb *kiocb, struct socket *sock,
 	if (msg->msg_name) {
 		struct sockaddr_nl *addr = (struct sockaddr_nl*)msg->msg_name;
 		addr->nl_family = AF_NETLINK;
+		addr->nl_pad    = 0;
 		addr->nl_pid	= NETLINK_CB(skb).pid;
 		addr->nl_groups	= NETLINK_CB(skb).dst_groups;
 		msg->msg_namelen = sizeof(*addr);
@@ -893,8 +900,18 @@ void netlink_ack(struct sk_buff *in_skb, struct nlmsghdr *nlh, int err)
 		size = NLMSG_SPACE(4 + NLMSG_ALIGN(nlh->nlmsg_len));
 
 	skb = alloc_skb(size, GFP_KERNEL);
-	if (!skb)
+	if (!skb) {
+		struct sock *sk;
+
+		sk = netlink_lookup(in_skb->sk->sk_protocol,
+				    NETLINK_CB(in_skb).pid);
+		if (sk) {
+			sk->sk_err = ENOBUFS;
+			sk->sk_error_report(sk);
+			sock_put(sk);
+		}
 		return;
+	}
 
 	rep = __nlmsg_put(skb, NETLINK_CB(in_skb).pid, nlh->nlmsg_seq,
 			  NLMSG_ERROR, sizeof(struct nlmsgerr));
@@ -960,62 +977,108 @@ int netlink_post(int unit, struct sk_buff *skb)
 
 #endif
 
-
 #ifdef CONFIG_PROC_FS
-static int netlink_read_proc(char *buffer, char **start, off_t offset,
-			     int length, int *eof, void *data)
+static struct sock *netlink_seq_socket_idx(struct seq_file *seq, loff_t pos)
 {
-	off_t pos=0;
-	off_t begin=0;
-	int len=0;
-	int i;
+	long i;
 	struct sock *s;
 	struct hlist_node *node;
-	
-	len+= sprintf(buffer,"sk       Eth Pid    Groups   "
-		      "Rmem     Wmem     Dump     Locks\n");
-	
+	loff_t off = 0;
+
 	for (i=0; i<MAX_LINKS; i++) {
-		read_lock(&nl_table_lock);
 		sk_for_each(s, node, &nl_table[i]) {
-			struct netlink_opt *nlk = nlk_sk(s);
-
-			len+=sprintf(buffer+len,"%p %-3d %-6d %08x %-8d %-8d %p %d",
-				     s,
-				     s->sk_protocol,
-				     nlk->pid,
-				     nlk->groups,
-				     atomic_read(&s->sk_rmem_alloc),
-				     atomic_read(&s->sk_wmem_alloc),
-				     nlk->cb,
-				     atomic_read(&s->sk_refcnt)
-				     );
-
-			buffer[len++]='\n';
-		
-			pos=begin+len;
-			if(pos<offset) {
-				len=0;
-				begin=pos;
+			if (off == pos) {
+				seq->private = (void *) i;
+				return s;
 			}
-			if(pos>offset+length) {
-				read_unlock(&nl_table_lock);
-				goto done;
+			++off;
+		}
+	}
+	return NULL;
+}
+
+static void *netlink_seq_start(struct seq_file *seq, loff_t *pos)
+{
+	read_lock(&nl_table_lock);
+	return *pos ? netlink_seq_socket_idx(seq, *pos - 1) : SEQ_START_TOKEN;
+}
+
+static void *netlink_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	struct sock *s;
+
+	++*pos;
+
+	if (v == SEQ_START_TOKEN)
+		return netlink_seq_socket_idx(seq, 0);
+		
+	s = sk_next(v);
+	if (!s) {
+		long i = (long)seq->private;
+
+		while (++i < MAX_LINKS) {
+			s = sk_head(&nl_table[i]);
+			if (s) {
+				seq->private = (void *) i;
+				break;
 			}
 		}
-		read_unlock(&nl_table_lock);
 	}
-	*eof = 1;
-
-done:
-	*start=buffer+(offset-begin);
-	len-=(offset-begin);
-	if(len>length)
-		len=length;
-	if(len<0)
-		len=0;
-	return len;
+	return s;
 }
+
+static void netlink_seq_stop(struct seq_file *seq, void *v)
+{
+	read_unlock(&nl_table_lock);
+}
+
+
+static int netlink_seq_show(struct seq_file *seq, void *v)
+{
+	if (v == SEQ_START_TOKEN)
+		seq_puts(seq,
+			 "sk       Eth Pid    Groups   "
+			 "Rmem     Wmem     Dump     Locks\n");
+	else {
+		struct sock *s = v;
+		struct netlink_opt *nlk = nlk_sk(s);
+
+		seq_printf(seq, "%p %-3d %-6d %08x %-8d %-8d %p %d\n",
+			   s,
+			   s->sk_protocol,
+			   nlk->pid,
+			   nlk->groups,
+			   atomic_read(&s->sk_rmem_alloc),
+			   atomic_read(&s->sk_wmem_alloc),
+			   nlk->cb,
+			   atomic_read(&s->sk_refcnt)
+			);
+
+	}
+	return 0;
+}
+
+struct seq_operations netlink_seq_ops = {
+	.start  = netlink_seq_start,
+	.next   = netlink_seq_next,
+	.stop   = netlink_seq_stop,
+	.show   = netlink_seq_show,
+};
+
+
+static int netlink_seq_open(struct inode *inode, struct file *file)
+{
+	return seq_open(file, &netlink_seq_ops);
+}
+
+static struct file_operations netlink_seq_fops = {
+	.owner		= THIS_MODULE,
+	.open		= netlink_seq_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
+
 #endif
 
 int netlink_register_notifier(struct notifier_block *nb)
@@ -1065,7 +1128,7 @@ static int __init netlink_proto_init(void)
 	}
 	sock_register(&netlink_family_ops);
 #ifdef CONFIG_PROC_FS
-	create_proc_read_entry("net/netlink", 0, 0, netlink_read_proc, NULL);
+	proc_net_fops_create("netlink", 0, &netlink_seq_fops);
 #endif
 	/* The netlink device handler may be needed early. */ 
 	rtnetlink_init();
@@ -1075,10 +1138,29 @@ static int __init netlink_proto_init(void)
 static void __exit netlink_proto_exit(void)
 {
        sock_unregister(PF_NETLINK);
-       remove_proc_entry("net/netlink", NULL);
+       proc_net_remove("netlink");
 }
 
 core_initcall(netlink_proto_init);
 module_exit(netlink_proto_exit);
 
 MODULE_LICENSE("GPL");
+
+MODULE_ALIAS_NETPROTO(PF_NETLINK);
+
+EXPORT_SYMBOL(netlink_ack);
+EXPORT_SYMBOL(netlink_broadcast);
+EXPORT_SYMBOL(netlink_broadcast_deliver);
+EXPORT_SYMBOL(netlink_dump_start);
+EXPORT_SYMBOL(netlink_kernel_create);
+EXPORT_SYMBOL(netlink_register_notifier);
+EXPORT_SYMBOL(netlink_set_err);
+EXPORT_SYMBOL(netlink_set_nonroot);
+EXPORT_SYMBOL(netlink_unicast);
+EXPORT_SYMBOL(netlink_unregister_notifier);
+
+#if defined(CONFIG_NETLINK_DEV) || defined(CONFIG_NETLINK_DEV_MODULE)
+EXPORT_SYMBOL(netlink_attach);
+EXPORT_SYMBOL(netlink_detach);
+EXPORT_SYMBOL(netlink_post);
+#endif

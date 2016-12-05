@@ -40,7 +40,6 @@
 
 *******************************************************************************/
 
-#include <linux/version.h>
 #include <linux/module.h>  
 #include <linux/kernel.h>  
 #include <linux/mm.h>  
@@ -2677,7 +2676,7 @@ static void ia_close(struct atm_vcc *vcc)
         return;        
 }  
   
-static int ia_open(struct atm_vcc *vcc, short vpi, int vci)  
+static int ia_open(struct atm_vcc *vcc)
 {  
 	IADEV *iadev;  
 	struct ia_vcc *ia_vcc;  
@@ -2688,15 +2687,7 @@ static int ia_open(struct atm_vcc *vcc, short vpi, int vci)
 		INPH_IA_VCC(vcc) = NULL;  
 	}  
 	iadev = INPH_IA_DEV(vcc->dev);  
-	error = atm_find_ci(vcc, &vpi, &vci);  
-	if (error)   
-	{  
-	    printk("iadev: atm_find_ci returned error %d\n", error);  
-	    return error;  
-	}  
-	vcc->vpi = vpi;  
-	vcc->vci = vci;  
-	if (vci != ATM_VPI_UNSPEC && vpi != ATM_VCI_UNSPEC)  
+	if (vcc->vci != ATM_VPI_UNSPEC && vcc->vpi != ATM_VCI_UNSPEC)  
 	{  
 		IF_EVENT(printk("iphase open: unspec part\n");)  
 		set_bit(ATM_VF_ADDR,&vcc->flags);
@@ -3112,14 +3103,6 @@ static int ia_send(struct atm_vcc *vcc, struct sk_buff *skb)
 
 }
 
-static int ia_sg_send(struct atm_vcc *vcc, unsigned long start,   
-	unsigned long size)  
-{  
-	IF_EVENT(printk(">ia_sg_send\n");)  
-	return 0;  
-}  
-  
-  
 static int ia_proc_read(struct atm_dev *dev,loff_t *pos,char *page)
 { 
   int   left = *pos, n;   
@@ -3179,7 +3162,6 @@ static const struct atmdev_ops ops = {
 	.getsockopt	= ia_getsockopt,  
 	.setsockopt	= ia_setsockopt,  
 	.send		= ia_send,  
-	.sg_send	= ia_sg_send,  
 	.phy_put	= ia_phy_put,  
 	.phy_get	= ia_phy_get,  
 	.change_qos	= ia_change_qos,  
@@ -3279,7 +3261,7 @@ static void __devexit ia_remove_one(struct pci_dev *pdev)
       	kfree(iadev);
 }
 
-static struct pci_device_id ia_pci_tbl[] __devinitdata = {
+static struct pci_device_id ia_pci_tbl[] = {
 	{ PCI_VENDOR_ID_IPHASE, 0x0008, PCI_ANY_ID, PCI_ANY_ID, },
 	{ PCI_VENDOR_ID_IPHASE, 0x0009, PCI_ANY_ID, PCI_ANY_ID, },
 	{ 0,}

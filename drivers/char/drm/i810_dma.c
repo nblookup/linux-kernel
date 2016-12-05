@@ -83,7 +83,7 @@ static drm_buf_t *i810_freelist_get(drm_device_t *dev)
 		/* In use is already a pointer */
 	   	used = cmpxchg(buf_priv->in_use, I810_BUF_FREE,
 			       I810_BUF_CLIENT);
-	   	if(used == I810_BUF_FREE) {
+		if (used == I810_BUF_FREE) {
 			return buf;
 		}
 	}
@@ -101,7 +101,7 @@ static int i810_freelist_put(drm_device_t *dev, drm_buf_t *buf)
 
    	/* In use is already a pointer */
    	used = cmpxchg(buf_priv->in_use, I810_BUF_CLIENT, I810_BUF_FREE);
-   	if(used != I810_BUF_CLIENT) {
+	if (used != I810_BUF_CLIENT) {
 	   	DRM_ERROR("Freeing buffer thats not in use : %d\n", buf->idx);
 	   	return -EINVAL;
 	}
@@ -154,7 +154,8 @@ static int i810_map_buffer(drm_buf_t *buf, struct file *filp)
    	struct file_operations *old_fops;
 	int retcode = 0;
 
-	if(buf_priv->currently_mapped == I810_BUF_MAPPED) return -EINVAL;
+	if (buf_priv->currently_mapped == I810_BUF_MAPPED) 
+		return -EINVAL;
 
 	down_write( &current->mm->mmap_sem );
 	old_fops = filp->f_op;
@@ -182,7 +183,7 @@ static int i810_unmap_buffer(drm_buf_t *buf)
 	drm_i810_buf_priv_t *buf_priv = buf->dev_private;
 	int retcode = 0;
 
-	if(buf_priv->currently_mapped != I810_BUF_MAPPED)
+	if (buf_priv->currently_mapped != I810_BUF_MAPPED)
 		return -EINVAL;
 
 	down_write(&current->mm->mmap_sem);
@@ -212,7 +213,7 @@ static int i810_dma_get_buffer(drm_device_t *dev, drm_i810_dma_t *d,
 	}
 
 	retcode = i810_map_buffer(buf, filp);
-	if(retcode) {
+	if (retcode) {
 		i810_freelist_put(dev, buf);
 	   	DRM_ERROR("mapbuf failed, retcode %d\n", retcode);
 		return retcode;
@@ -244,7 +245,7 @@ int i810_dma_cleanup(drm_device_t *dev)
 	   	drm_i810_private_t *dev_priv =
 	     		(drm_i810_private_t *) dev->dev_private;
 
-	   	if(dev_priv->ring.virtual_start) {
+		if (dev_priv->ring.virtual_start) {
 		   	DRM(ioremapfree)((void *) dev_priv->ring.virtual_start,
 					 dev_priv->ring.Size, dev);
 		}
@@ -282,12 +283,14 @@ static int i810_wait_ring(drm_device_t *dev, int n)
 	   	ring->head = I810_READ(LP_RING + RING_HEAD) & HEAD_ADDR;
 	   	ring->space = ring->head - (ring->tail+8);
 		if (ring->space < 0) ring->space += ring->Size;
-
-		if (ring->head != last_head)
-		   end = jiffies + (HZ*3);
-
+	   
+		if (ring->head != last_head) {
+			end = jiffies + (HZ*3);
+			last_head = ring->head;
+		}
+	  
 	   	iters++;
-		if(time_before(end, jiffies)) {
+		if (time_before(end, jiffies)) {
 		   	DRM_ERROR("space: %d wanted %d\n", ring->space, n);
 		   	DRM_ERROR("lockup\n");
 		   	goto out_wait_ring;
@@ -317,7 +320,7 @@ static int i810_freelist_init(drm_device_t *dev, drm_i810_private_t *dev_priv)
    	u32 *hw_status = (u32 *)(dev_priv->hw_status_page + my_idx);
    	int i;
 
-   	if(dma->buf_count > 1019) {
+	if (dma->buf_count > 1019) {
 	   	/* Not enough space in the status page for the freelist */
 	   	return -EINVAL;
 	}
@@ -348,28 +351,28 @@ static int i810_dma_initialize(drm_device_t *dev,
 
 	list_for_each(list, &dev->maplist->head) {
 		drm_map_list_t *r_list = list_entry(list, drm_map_list_t, head);
-		if( r_list->map &&
+		if (r_list->map &&
 		    r_list->map->type == _DRM_SHM &&
 		    r_list->map->flags & _DRM_CONTAINS_LOCK ) {
 			dev_priv->sarea_map = r_list->map;
  			break;
  		}
  	}
-	if(!dev_priv->sarea_map) {
+	if (!dev_priv->sarea_map) {
 		dev->dev_private = (void *)dev_priv;
 	   	i810_dma_cleanup(dev);
 	   	DRM_ERROR("can not find sarea!\n");
 	   	return -EINVAL;
 	}
 	DRM_FIND_MAP( dev_priv->mmio_map, init->mmio_offset );
-	if(!dev_priv->mmio_map) {
+	if (!dev_priv->mmio_map) {
 		dev->dev_private = (void *)dev_priv;
 	   	i810_dma_cleanup(dev);
 	   	DRM_ERROR("can not find mmio map!\n");
 	   	return -EINVAL;
 	}
 	DRM_FIND_MAP( dev_priv->buffer_map, init->buffers_offset );
-	if(!dev_priv->buffer_map) {
+	if (!dev_priv->buffer_map) {
 		dev->dev_private = (void *)dev_priv;
 	   	i810_dma_cleanup(dev);
 	   	DRM_ERROR("can not find dma buffer map!\n");
@@ -403,6 +406,7 @@ static int i810_dma_initialize(drm_device_t *dev,
 	dev_priv->pitch = init->pitch;
 	dev_priv->back_offset = init->back_offset;
 	dev_priv->depth_offset = init->depth_offset;
+	dev_priv->front_offset = init->front_offset;
 
 	dev_priv->overlay_offset = init->overlay_offset;
 	dev_priv->overlay_physical = init->overlay_physical;
@@ -428,7 +432,7 @@ static int i810_dma_initialize(drm_device_t *dev,
    	DRM_DEBUG("Enabled hardware status page\n");
 
    	/* Now we need to init our freelist */
-   	if(i810_freelist_init(dev, dev_priv) != 0) {
+	if (i810_freelist_init(dev, dev_priv) != 0) {
 		dev->dev_private = (void *)dev_priv;
 	   	i810_dma_cleanup(dev);
 	   	DRM_ERROR("Not enough space in the status page for"
@@ -440,6 +444,49 @@ static int i810_dma_initialize(drm_device_t *dev,
    	return 0;
 }
 
+/* i810 DRM version 1.1 used a smaller init structure with different
+ * ordering of values than is currently used (drm >= 1.2). There is
+ * no defined way to detect the XFree version to correct this problem,
+ * however by checking using this procedure we can detect the correct
+ * thing to do.
+ *
+ * #1 Read the Smaller init structure from user-space
+ * #2 Verify the overlay_physical is a valid physical address, or NULL
+ *    If it isn't then we have a v1.1 client. Fix up params.
+ *    If it is, then we have a 1.2 client... get the rest of the data.
+ */
+int i810_dma_init_compat(drm_i810_init_t *init, unsigned long arg)
+{
+
+	/* Get v1.1 init data */
+	if (copy_from_user(init, (drm_i810_pre12_init_t *)arg,
+			  sizeof(drm_i810_pre12_init_t))) {
+		return -EFAULT;
+	}
+
+	if ((!init->overlay_physical) || (init->overlay_physical > 4096)) {
+
+		/* This is a v1.2 client, just get the v1.2 init data */
+		DRM_INFO("Using POST v1.2 init.\n");
+		if (copy_from_user(init, (drm_i810_init_t *)arg,
+				   sizeof(drm_i810_init_t))) {
+			return -EFAULT;
+		}
+	} else {
+
+		/* This is a v1.1 client, fix the params */
+		DRM_INFO("Using PRE v1.2 init.\n");
+	 	init->pitch_bits = init->h;
+	 	init->pitch = init->w;
+	 	init->h = init->overlay_physical;
+	 	init->w = init->overlay_offset;
+	 	init->overlay_physical = 0;
+	 	init->overlay_offset = 0;
+	}
+
+	return 0;
+}
+
 int i810_dma_init(struct inode *inode, struct file *filp,
 		  unsigned int cmd, unsigned long arg)
 {
@@ -449,22 +496,46 @@ int i810_dma_init(struct inode *inode, struct file *filp,
    	drm_i810_init_t init;
    	int retcode = 0;
 
-  	if (copy_from_user(&init, (drm_i810_init_t *)arg, sizeof(init)))
+	/* Get only the init func */
+	if (copy_from_user(&init, (void *)arg, sizeof(drm_i810_init_func_t))) 
 		return -EFAULT;
 
    	switch(init.func) {
 	 	case I810_INIT_DMA:
+	 	       	/* This case is for backward compatibility. It
+			 * handles XFree 4.1.0 and 4.2.0, and has to
+			 * do some parameter checking as described below.
+			 * It will someday go away.
+			 */
+			retcode = i810_dma_init_compat(&init, arg);
+			if (retcode)
+				return retcode;
+
 	   		dev_priv = DRM(alloc)(sizeof(drm_i810_private_t),
 					     DRM_MEM_DRIVER);
-	   		if(dev_priv == NULL) return -ENOMEM;
+	   		if (dev_priv == NULL)
+				return -ENOMEM;
 	   		retcode = i810_dma_initialize(dev, dev_priv, &init);
-	   	break;
+			break;
+
+		default:
+	 	case I810_INIT_DMA_1_4:
+			DRM_INFO("Using v1.4 init.\n");
+  			if (copy_from_user(&init, (drm_i810_init_t *)arg,
+					  sizeof(drm_i810_init_t))) {
+				return -EFAULT;
+			}
+	   		dev_priv = DRM(alloc)(sizeof(drm_i810_private_t),
+					     DRM_MEM_DRIVER);
+			if (dev_priv == NULL) 
+				return -ENOMEM;
+	   		retcode = i810_dma_initialize(dev, dev_priv, &init);
+			break;
+
 	 	case I810_CLEANUP_DMA:
+		        DRM_INFO("DMA Cleanup\n");
 	   		retcode = i810_dma_cleanup(dev);
-	   	break;
-	 	default:
-	   		retcode = -EINVAL;
-	   	break;
+              	   	break;
 	}
 
    	return retcode;
@@ -474,12 +545,16 @@ int i810_dma_init(struct inode *inode, struct file *filp,
 
 /* Most efficient way to verify state for the i810 is as it is
  * emitted.  Non-conformant state is silently dropped.
+ *
+ * Use 'volatile' & local var tmp to force the emitted values to be
+ * identical to the verified ones.
  */
 static void i810EmitContextVerified( drm_device_t *dev,
-				     unsigned int *code )
+				     volatile unsigned int *code )
 {
    	drm_i810_private_t *dev_priv = dev->dev_private;
 	int i, j = 0;
+	unsigned int tmp;
 	RING_LOCALS;
 
 	BEGIN_LP_RING( I810_CTX_SETUP_SIZE );
@@ -491,10 +566,12 @@ static void i810EmitContextVerified( drm_device_t *dev,
 	OUT_RING( code[I810_CTXREG_ST1] );
 
 	for ( i = 4 ; i < I810_CTX_SETUP_SIZE ; i++ ) {
-		if ((code[i] & (7<<29)) == (3<<29) &&
-		    (code[i] & (0x1f<<24)) < (0x1d<<24))
+		tmp = code[i];
+
+		if ((tmp & (7<<29)) == (3<<29) &&
+		    (tmp & (0x1f<<24)) < (0x1d<<24))
 		{
-			OUT_RING( code[i] );
+			OUT_RING( tmp );
 			j++;
 		}
 		else printk("constext state dropped!!!\n");
@@ -511,6 +588,7 @@ static void i810EmitTexVerified( drm_device_t *dev,
 {
    	drm_i810_private_t *dev_priv = dev->dev_private;
 	int i, j = 0;
+	unsigned int tmp;
 	RING_LOCALS;
 
 	BEGIN_LP_RING( I810_TEX_SETUP_SIZE );
@@ -521,11 +599,12 @@ static void i810EmitTexVerified( drm_device_t *dev,
 	OUT_RING( code[I810_TEXREG_MI3] );
 
 	for ( i = 4 ; i < I810_TEX_SETUP_SIZE ; i++ ) {
+		tmp = code[i];
 
-		if ((code[i] & (7<<29)) == (3<<29) &&
-		    (code[i] & (0x1f<<24)) < (0x1d<<24))
+		if ((tmp & (7<<29)) == (3<<29) &&
+		    (tmp & (0x1f<<24)) < (0x1d<<24))
 		{
-			OUT_RING( code[i] );
+			OUT_RING( tmp );
 			j++;
 		}
 		else printk("texture state dropped!!!\n");
@@ -553,9 +632,9 @@ static void i810EmitDestVerified( drm_device_t *dev,
 	if (tmp == dev_priv->front_di1 || tmp == dev_priv->back_di1) {
 		OUT_RING( CMD_OP_DESTBUFFER_INFO );
 		OUT_RING( tmp );
-	} 
-	else
-	   printk("buffer state dropped\n");
+	} else
+	   DRM_DEBUG("bad di1 %x (allow %x or %x)\n",
+		     tmp, dev_priv->front_di1, dev_priv->back_di1);
 
 	/* invarient:
 	 */
@@ -582,6 +661,8 @@ static void i810EmitState( drm_device_t *dev )
    	drm_i810_private_t *dev_priv = dev->dev_private;
       	drm_i810_sarea_t *sarea_priv = dev_priv->sarea_priv;
 	unsigned int dirty = sarea_priv->dirty;
+	
+	DRM_DEBUG("%s %x\n", __FUNCTION__, dirty);
 
 	if (dirty & I810_UPLOAD_BUFFERS) {
 		i810EmitDestVerified( dev, sarea_priv->BufferState );
@@ -620,6 +701,14 @@ static void i810_dma_dispatch_clear( drm_device_t *dev, int flags,
 	int cpp = 2;
 	int i;
 	RING_LOCALS;
+	
+	if ( dev_priv->current_page == 1 ) {
+	        unsigned int tmp = flags;
+	       
+		flags &= ~(I810_FRONT | I810_BACK);
+		if (tmp & I810_FRONT) flags |= I810_BACK;
+		if (tmp & I810_BACK) flags |= I810_FRONT;
+	}
 
   	i810_kernel_lost_context(dev);
 
@@ -685,9 +774,10 @@ static void i810_dma_dispatch_swap( drm_device_t *dev )
 	drm_clip_rect_t *pbox = sarea_priv->boxes;
 	int pitch = dev_priv->pitch;
 	int cpp = 2;
-	int ofs = dev_priv->back_offset;
 	int i;
 	RING_LOCALS;
+
+	DRM_DEBUG("swapbuffers\n");
 
   	i810_kernel_lost_context(dev);
 
@@ -699,7 +789,7 @@ static void i810_dma_dispatch_swap( drm_device_t *dev )
 		unsigned int w = pbox->x2 - pbox->x1;
 		unsigned int h = pbox->y2 - pbox->y1;
 		unsigned int dst = pbox->x1*cpp + pbox->y1*pitch;
-		unsigned int start = ofs + dst;
+		unsigned int start = dst;
 
 		if (pbox->x1 > pbox->x2 ||
 		    pbox->y1 > pbox->y2 ||
@@ -711,9 +801,15 @@ static void i810_dma_dispatch_swap( drm_device_t *dev )
 		OUT_RING( BR00_BITBLT_CLIENT | BR00_OP_SRC_COPY_BLT | 0x4 );
 		OUT_RING( pitch | (0xCC << 16));
 		OUT_RING( (h << 16) | (w * cpp));
-		OUT_RING( dst );
+		if (dev_priv->current_page == 0)
+		  OUT_RING(dev_priv->front_offset + start);
+		else
+		  OUT_RING(dev_priv->back_offset + start);
 		OUT_RING( pitch );
-		OUT_RING( start );
+		if (dev_priv->current_page == 0)
+		  OUT_RING(dev_priv->back_offset + start);
+		else
+		  OUT_RING(dev_priv->front_offset + start);
 		ADVANCE_LP_RING();
 	}
 }
@@ -800,6 +896,52 @@ static void i810_dma_dispatch_vertex(drm_device_t *dev,
 	}
 }
 
+static void i810_dma_dispatch_flip( drm_device_t *dev )
+{
+        drm_i810_private_t *dev_priv = dev->dev_private;
+	int pitch = dev_priv->pitch;
+	RING_LOCALS;
+
+	DRM_DEBUG( "%s: page=%d pfCurrentPage=%d\n", 
+		__FUNCTION__, 
+		dev_priv->current_page,
+		dev_priv->sarea_priv->pf_current_page);
+	
+        i810_kernel_lost_context(dev);
+
+	BEGIN_LP_RING( 2 );
+   	OUT_RING( INST_PARSER_CLIENT | INST_OP_FLUSH | INST_FLUSH_MAP_CACHE ); 
+	OUT_RING( 0 );
+	ADVANCE_LP_RING();
+
+	BEGIN_LP_RING( I810_DEST_SETUP_SIZE + 2 );
+	/* On i815 at least ASYNC is buggy */
+	/* pitch<<5 is from 11.2.8 p158,
+	   its the pitch / 8 then left shifted 8,
+	   so (pitch >> 3) << 8 */
+	OUT_RING( CMD_OP_FRONTBUFFER_INFO | (pitch<<5) /*| ASYNC_FLIP */ );
+	if ( dev_priv->current_page == 0 ) {
+		OUT_RING( dev_priv->back_offset );
+		dev_priv->current_page = 1;
+	} else {
+		OUT_RING( dev_priv->front_offset );
+		dev_priv->current_page = 0;
+	}
+	OUT_RING(0);
+	ADVANCE_LP_RING();
+
+	BEGIN_LP_RING(2);
+	OUT_RING( CMD_OP_WAIT_FOR_EVENT | WAIT_FOR_PLANE_A_FLIP );
+	OUT_RING( 0 );
+	ADVANCE_LP_RING();
+
+	/* Increment the frame counter.  The client-side 3D driver must
+	 * throttle the framerate by waiting for this value before
+	 * performing the swapbuffer ioctl.
+	 */
+	dev_priv->sarea_priv->pf_current_page = dev_priv->current_page;
+
+}
 
 void i810_dma_quiescent(drm_device_t *dev)
 {
@@ -878,7 +1020,7 @@ void i810_reclaim_buffers(struct file *filp)
 
 			if (used == I810_BUF_CLIENT)
 				DRM_DEBUG("reclaimed from client\n");
-		   	if(buf_priv->currently_mapped == I810_BUF_MAPPED)
+			if (buf_priv->currently_mapped == I810_BUF_MAPPED)
 		     		buf_priv->currently_mapped = I810_BUF_UNMAPPED;
 		}
 	}
@@ -890,7 +1032,7 @@ int i810_flush_ioctl(struct inode *inode, struct file *filp,
    	drm_file_t	  *priv	  = filp->private_data;
    	drm_device_t	  *dev	  = priv->dev;
 
-   	if(!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
+	if (!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
 		DRM_ERROR("i810_flush_ioctl called without lock held\n");
 		return -EINVAL;
 	}
@@ -915,12 +1057,16 @@ int i810_dma_vertex(struct inode *inode, struct file *filp,
 	if (copy_from_user(&vertex, (drm_i810_vertex_t *)arg, sizeof(vertex)))
 		return -EFAULT;
 
-   	if(!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
+	if (!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
 		DRM_ERROR("i810_dma_vertex called without lock held\n");
 		return -EINVAL;
 	}
 
-	if(vertex.idx < 0 || vertex.idx > dma->buf_count) return -EINVAL;
+	DRM_DEBUG("i810 dma vertex, idx %d used %d discard %d\n",
+		  vertex.idx, vertex.used, vertex.discard);
+
+	if (vertex.idx < 0 || vertex.idx > dma->buf_count) 
+		return -EINVAL;
 
 	i810_dma_dispatch_vertex( dev,
 				  dma->buflist[ vertex.idx ],
@@ -946,7 +1092,7 @@ int i810_clear_bufs(struct inode *inode, struct file *filp,
    	if (copy_from_user(&clear, (drm_i810_clear_t *)arg, sizeof(clear)))
 		return -EFAULT;
 
-   	if(!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
+	if (!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
 		DRM_ERROR("i810_clear_bufs called without lock held\n");
 		return -EINVAL;
 	}
@@ -968,7 +1114,9 @@ int i810_swap_bufs(struct inode *inode, struct file *filp,
 	drm_file_t *priv = filp->private_data;
 	drm_device_t *dev = priv->dev;
 
-   	if(!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
+	DRM_DEBUG("i810_swap_bufs\n");
+
+	if (!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
 		DRM_ERROR("i810_swap_buf called without lock held\n");
 		return -EINVAL;
 	}
@@ -1006,7 +1154,7 @@ int i810_getbuf(struct inode *inode, struct file *filp, unsigned int cmd,
    	if (copy_from_user(&d, (drm_i810_dma_t *)arg, sizeof(d)))
 		return -EFAULT;
 
-	if(!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
+	if (!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
 		DRM_ERROR("i810_dma called without lock held\n");
 		return -EINVAL;
 	}
@@ -1014,6 +1162,9 @@ int i810_getbuf(struct inode *inode, struct file *filp, unsigned int cmd,
 	d.granted = 0;
 
 	retcode = i810_dma_get_buffer(dev, &d, filp);
+
+	DRM_DEBUG("i810_dma: %d returning %d, granted = %d\n",
+		  current->pid, retcode, d.granted);
 
 	if (copy_to_user((drm_dma_t *)arg, &d, sizeof(d)))
 		return -EFAULT;
@@ -1053,7 +1204,7 @@ static void i810_dma_dispatch_mc(drm_device_t *dev, drm_buf_t *buf, int used,
 
 	u = cmpxchg(buf_priv->in_use, I810_BUF_CLIENT,
 		I810_BUF_HARDWARE);
-	if(u != I810_BUF_CLIENT) {
+	if (u != I810_BUF_CLIENT) {
 		DRM_DEBUG("MC found buffer that isn't mine!\n");
 	}
 
@@ -1117,7 +1268,7 @@ int i810_dma_mc(struct inode *inode, struct file *filp,
 		return -EFAULT;
 
 
-	if(!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
+	if (!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
 		DRM_ERROR("i810_dma_mc called without lock held\n");
 		return -EINVAL;
 	}
@@ -1165,7 +1316,7 @@ int i810_fstatus(struct inode *inode, struct file *filp,
 	drm_device_t *dev = priv->dev;
 	drm_i810_private_t *dev_priv = (drm_i810_private_t *)dev->dev_private;
 
-	if(!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
+	if (!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
 		DRM_ERROR("i810_fstatus called without lock held\n");
 		return -EINVAL;
 	}
@@ -1179,7 +1330,7 @@ int i810_ov0_flip(struct inode *inode, struct file *filp,
 	drm_device_t *dev = priv->dev;
 	drm_i810_private_t *dev_priv = (drm_i810_private_t *)dev->dev_private;
 
-	if(!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
+	if (!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
 		DRM_ERROR("i810_ov0_flip called without lock held\n");
 		return -EINVAL;
 	}
@@ -1191,3 +1342,47 @@ int i810_ov0_flip(struct inode *inode, struct file *filp,
 }
 
 
+/* Not sure why this isn't set all the time:
+ */ 
+static void i810_do_init_pageflip( drm_device_t *dev )
+{
+	drm_i810_private_t *dev_priv = dev->dev_private;
+	
+	DRM_DEBUG("%s\n", __FUNCTION__);
+	dev_priv->page_flipping = 1;
+	dev_priv->current_page = 0;
+	dev_priv->sarea_priv->pf_current_page = dev_priv->current_page;
+}
+
+int i810_do_cleanup_pageflip( drm_device_t *dev )
+{
+	drm_i810_private_t *dev_priv = dev->dev_private;
+
+	DRM_DEBUG("%s\n", __FUNCTION__);
+	if (dev_priv->current_page != 0)
+		i810_dma_dispatch_flip( dev );
+
+	dev_priv->page_flipping = 0;
+	return 0;
+}
+
+int i810_flip_bufs(struct inode *inode, struct file *filp,
+		   unsigned int cmd, unsigned long arg)
+{
+	drm_file_t *priv = filp->private_data;
+	drm_device_t *dev = priv->dev;
+	drm_i810_private_t *dev_priv = dev->dev_private;
+
+	DRM_DEBUG("%s\n", __FUNCTION__);
+
+	if (!_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)) {
+		DRM_ERROR("i810_flip_buf called without lock held\n");
+		return -EINVAL;
+	}
+
+	if (!dev_priv->page_flipping) 
+		i810_do_init_pageflip( dev );
+
+	i810_dma_dispatch_flip( dev );
+   	return 0;
+}

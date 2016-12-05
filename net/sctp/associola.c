@@ -1,7 +1,7 @@
 /* SCTP kernel reference Implementation
+ * (C) Copyright IBM Corp. 2001, 2003
  * Copyright (c) 1999-2000 Cisco, Inc.
  * Copyright (c) 1999-2001 Motorola, Inc.
- * Copyright (c) 2001-2003 International Business Machines Corp.
  * Copyright (c) 2001 Intel Corp.
  * Copyright (c) 2001 La Monte H.P. Yarroll
  *
@@ -42,6 +42,7 @@
  *    Sridhar Samudrala	    <sri@us.ibm.com>
  *    Daisy Chang	    <daisyc@us.ibm.com>
  *    Ryan Layer	    <rmlayer@us.ibm.com>
+ *    Kevin Gao             <kevin.gao@intel.com>
  *
  * Any bugs reported given to us we will try to fix... any fixes shared will
  * be incorporated into the next SCTP release.
@@ -140,9 +141,9 @@ struct sctp_association *sctp_association_init(struct sctp_association *asoc,
 	 * socket values.
 	 */
 	asoc->max_retrans = sp->assocparams.sasoc_asocmaxrxt;
-	asoc->rto_initial = sp->rtoinfo.srto_initial * HZ / 1000;
-	asoc->rto_max = sp->rtoinfo.srto_max * HZ / 1000;
-	asoc->rto_min = sp->rtoinfo.srto_min * HZ / 1000;
+	asoc->rto_initial = MSECS_TO_JIFFIES(sp->rtoinfo.srto_initial);
+	asoc->rto_max = MSECS_TO_JIFFIES(sp->rtoinfo.srto_max);
+	asoc->rto_min = MSECS_TO_JIFFIES(sp->rtoinfo.srto_min);
 
 	asoc->overall_error_count = 0;
 
@@ -167,7 +168,8 @@ struct sctp_association *sctp_association_init(struct sctp_association *asoc,
 	asoc->c.sinit_num_ostreams  = sp->initmsg.sinit_num_ostreams;
 	asoc->max_init_attempts	= sp->initmsg.sinit_max_attempts;
 
-	asoc->max_init_timeo    = sp->initmsg.sinit_max_init_timeo * HZ / 1000;
+	asoc->max_init_timeo =
+		 MSECS_TO_JIFFIES(sp->initmsg.sinit_max_init_timeo);
 
 	/* Allocate storage for the ssnmap after the inbound and outbound
 	 * streams have been negotiated during Init.
@@ -221,11 +223,13 @@ struct sctp_association *sctp_association_init(struct sctp_association *asoc,
 	 * remote endpoint it should do the following:
 	 * ...
 	 * A2) a serial number should be assigned to the chunk. The serial
-	 * number should be a monotonically increasing number. All serial
-	 * numbers are defined to be initialized at the start of the
+	 * number SHOULD be a monotonically increasing number. The serial
+	 * numbers SHOULD be initialized at the start of the
 	 * association to the same value as the initial TSN.
 	 */
 	asoc->addip_serial = asoc->c.initial_tsn;
+
+	skb_queue_head_init(&asoc->addip_chunks);
 
 	/* Make an empty list of remote transport addresses.  */
 	INIT_LIST_HEAD(&asoc->peer.transport_addr_list);
@@ -242,6 +246,11 @@ struct sctp_association *sctp_association_init(struct sctp_association *asoc,
 	 * already received one packet.]
 	 */
 	asoc->peer.sack_needed = 1;
+
+	/* Assume that the peer recongizes ASCONF until reported otherwise
+	 * via an ERROR chunk.
+	 */
+	asoc->peer.asconf_capable = 1;
 
 	/* Create an input queue.  */
 	sctp_inq_init(&asoc->base.inqueue);
@@ -263,8 +272,6 @@ struct sctp_association *sctp_association_init(struct sctp_association *asoc,
 
 	/* Set up the tsn tracking. */
 	sctp_tsnmap_init(&asoc->peer.tsn_map, SCTP_TSN_MAP_SIZE, 0);
-
-	skb_queue_head_init(&asoc->addip_chunks);
 
 	asoc->need_ecne = 0;
 
@@ -494,7 +501,7 @@ struct sctp_transport *sctp_assoc_add_peer(struct sctp_association *asoc,
 	/* Initialize the peer's heartbeat interval based on the
 	 * sock configured value.
 	 */
-	peer->hb_interval = sp->paddrparam.spp_hbinterval * HZ;
+	peer->hb_interval = MSECS_TO_JIFFIES(sp->paddrparam.spp_hbinterval);
 
 	/* Set the path max_retrans.  */
 	peer->max_retrans = asoc->max_retrans;
@@ -556,12 +563,12 @@ void sctp_assoc_control_transport(struct sctp_association *asoc,
 	switch (command) {
 	case SCTP_TRANSPORT_UP:
 		transport->active = SCTP_ACTIVE;
-		spc_state = ADDRESS_AVAILABLE;
+		spc_state = SCTP_ADDR_REACHABLE;
 		break;
 
 	case SCTP_TRANSPORT_DOWN:
 		transport->active = SCTP_INACTIVE;
-		spc_state = ADDRESS_UNREACHABLE;
+		spc_state = SCTP_ADDR_UNREACHABLE;
 		break;
 
 	default:
@@ -877,7 +884,7 @@ void sctp_assoc_migrate(struct sctp_association *assoc, struct sock *newsk)
 	/* Delete the association from the old endpoint's list of
 	 * associations.
 	 */
-	list_del(&assoc->asocs);
+	list_del_init(&assoc->asocs);
 
 	/* Decrement the backlog value for a TCP-style socket. */
 	if (sctp_style(oldsk, TCP))
@@ -1154,4 +1161,24 @@ int sctp_assoc_set_bind_addr_from_cookie(struct sctp_association *asoc,
 
 	return sctp_raw_to_bind_addrs(&asoc->base.bind_addr, raw, var_size3,
 				      asoc->ep->base.bind_addr.port, gfp);
+}
+
+/* Lookup laddr in the bind address list of an association. */ 
+int sctp_assoc_lookup_laddr(struct sctp_association *asoc, 
+			    const union sctp_addr *laddr)
+{
+	int found;
+
+	sctp_read_lock(&asoc->base.addr_lock);
+	if ((asoc->base.bind_addr.port == ntohs(laddr->v4.sin_port)) &&
+	    sctp_bind_addr_match(&asoc->base.bind_addr, laddr,
+			         sctp_sk(asoc->base.sk))) {
+		found = 1;
+		goto out;
+	}
+
+	found = 0;
+out:
+	sctp_read_unlock(&asoc->base.addr_lock);
+	return found;
 }

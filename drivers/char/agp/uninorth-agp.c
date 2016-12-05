@@ -10,8 +10,6 @@
 #include <asm/pci-bridge.h>
 #include "agp.h"
 
-static int agp_try_unsupported __initdata = 0;
-
 static int uninorth_fetch_size(void)
 {
 	int i;
@@ -284,7 +282,7 @@ struct agp_bridge_driver uninorth_agp_driver = {
 	.cant_use_aperture	= 1,
 };
 
-struct agp_device_ids uninorth_agp_device_ids[] __initdata = {
+static struct agp_device_ids uninorth_agp_device_ids[] __devinitdata = {
 	{
 		.device_id	= PCI_DEVICE_ID_APPLE_UNI_N_AGP,
 		.chipset_name	= "UniNorth",
@@ -303,8 +301,8 @@ struct agp_device_ids uninorth_agp_device_ids[] __initdata = {
 	},
 };
 
-static int __init agp_uninorth_probe(struct pci_dev *pdev,
-				     const struct pci_device_id *ent)
+static int __devinit agp_uninorth_probe(struct pci_dev *pdev,
+					const struct pci_device_id *ent)
 {
 	struct agp_device_ids *devs = uninorth_agp_device_ids;
 	struct agp_bridge_data *bridge;
@@ -324,15 +322,9 @@ static int __init agp_uninorth_probe(struct pci_dev *pdev,
 		}
 	}
 
-	if (!agp_try_unsupported) {
-		printk(KERN_ERR PFX "Unsupported Apple chipset"
-		       " (device id: %04x).\n", pdev->device);
-		printk(KERN_ERR PFX "You might want to try"
-		       " agp_try_unsupported=1\n");
-		return -ENODEV;
-	}
-	printk(KERN_ERR PFX "Trying generic Uninorth routines"
-	       " for device id %04x\n", pdev->device);
+	printk(KERN_ERR PFX "Unsupported Apple chipset (device id: %04x).\n",
+		pdev->device);
+	return -ENODEV;
 
  found:
 	bridge = agp_alloc_bridge();
@@ -358,7 +350,7 @@ static void __devexit agp_uninorth_remove(struct pci_dev *pdev)
 	agp_put_bridge(bridge);
 }
 
-static struct pci_device_id agp_uninorth_pci_table[] __initdata = {
+static struct pci_device_id agp_uninorth_pci_table[] = {
 	{
 	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
 	.class_mask	= ~0,
@@ -392,6 +384,5 @@ static void __exit agp_uninorth_cleanup(void)
 module_init(agp_uninorth_init);
 module_exit(agp_uninorth_cleanup);
 
-MODULE_PARM(agp_try_unsupported, "1i");
 MODULE_AUTHOR("Ben Herrenschmidt & Paul Mackerras");
 MODULE_LICENSE("GPL");

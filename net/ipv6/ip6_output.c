@@ -209,11 +209,6 @@ int ip6_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl,
 	int seg_len = skb->len;
 	int hlimit;
 	u32 mtu;
-	int err = 0;
-
-	if ((err = xfrm_lookup(&skb->dst, fl, sk, 0)) < 0) {
-		return err;
-	}
 
 	if (opt) {
 		int head_room;
@@ -881,7 +876,7 @@ static void ip6_copy_metadata(struct sk_buff *to, struct sk_buff *from)
 	/* Connection association is same as pre-frag packet */
 	to->nfct = from->nfct;
 	nf_conntrack_get(to->nfct);
-#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+#ifdef CONFIG_BRIDGE_NETFILTER
 	to->nf_bridge = from->nf_bridge;
 	nf_bridge_get(to->nf_bridge);
 #endif
@@ -1143,70 +1138,72 @@ fail:
 
 int ip6_dst_lookup(struct sock *sk, struct dst_entry **dst, struct flowi *fl)
 {
-	struct ipv6_pinfo *np = inet6_sk(sk);
 	int err = 0;
 
-	*dst = __sk_dst_check(sk, np->dst_cookie);
-	if (*dst) {
-		struct rt6_info *rt = (struct rt6_info*)*dst;
-
-			/* Yes, checking route validity in not connected
-			   case is not very simple. Take into account,
-			   that we do not support routing by source, TOS,
-			   and MSG_DONTROUTE 		--ANK (980726)
-
-			   1. If route was host route, check that
-			      cached destination is current.
-			      If it is network route, we still may
-			      check its validity using saved pointer
-			      to the last used address: daddr_cache.
-			      We do not want to save whole address now,
-			      (because main consumer of this service
-			       is tcp, which has not this problem),
-			      so that the last trick works only on connected
-			      sockets.
-			   2. oif also should be the same.
-			 */
-
-		if (((rt->rt6i_dst.plen != 128 ||
-		      ipv6_addr_cmp(&fl->fl6_dst, &rt->rt6i_dst.addr))
-		     && (np->daddr_cache == NULL ||
-			 ipv6_addr_cmp(&fl->fl6_dst, np->daddr_cache)))
-		    || (fl->oif && fl->oif != (*dst)->dev->ifindex)) {
-			*dst = NULL;
-		} else
-			dst_hold(*dst);
+	if (sk) {
+		struct ipv6_pinfo *np = inet6_sk(sk);
+	
+		*dst = __sk_dst_check(sk, np->dst_cookie);
+		if (*dst) {
+			struct rt6_info *rt = (struct rt6_info*)*dst;
+	
+				/* Yes, checking route validity in not connected
+				   case is not very simple. Take into account,
+				   that we do not support routing by source, TOS,
+				   and MSG_DONTROUTE 		--ANK (980726)
+	
+				   1. If route was host route, check that
+				      cached destination is current.
+				      If it is network route, we still may
+				      check its validity using saved pointer
+				      to the last used address: daddr_cache.
+				      We do not want to save whole address now,
+				      (because main consumer of this service
+				       is tcp, which has not this problem),
+				      so that the last trick works only on connected
+				      sockets.
+				   2. oif also should be the same.
+				 */
+	
+			if (((rt->rt6i_dst.plen != 128 ||
+			      ipv6_addr_cmp(&fl->fl6_dst, &rt->rt6i_dst.addr))
+			     && (np->daddr_cache == NULL ||
+				 ipv6_addr_cmp(&fl->fl6_dst, np->daddr_cache)))
+			    || (fl->oif && fl->oif != (*dst)->dev->ifindex)) {
+				*dst = NULL;
+			} else
+				dst_hold(*dst);
+		}
 	}
 
 	if (*dst == NULL)
 		*dst = ip6_route_output(sk, fl);
 
-	if ((*dst)->error) {
-		IP6_INC_STATS(Ip6OutNoRoutes);
-		dst_release(*dst);
-		return -ENETUNREACH;
-	}
+	if ((err = (*dst)->error))
+		goto out_err_release;
 
 	if (ipv6_addr_any(&fl->fl6_src)) {
 		err = ipv6_get_saddr(*dst, &fl->fl6_dst, &fl->fl6_src);
 
 		if (err) {
 #if IP6_DEBUG >= 2
-			printk(KERN_DEBUG "ip6_build_xmit: "
+			printk(KERN_DEBUG "ip6_dst_lookup: "
 			       "no available source address\n");
 #endif
-			return err;
+			goto out_err_release;
 		}
 	}
-
-        if (*dst) {
-		if ((err = xfrm_lookup(dst, fl, sk, 0)) < 0) {
-			dst_release(*dst);	
-			return -ENETUNREACH;
-		}
+	if ((err = xfrm_lookup(dst, fl, sk, 0)) < 0) {
+		err = -ENETUNREACH;
+		goto out_err_release;
         }
 
 	return 0;
+
+out_err_release:
+	dst_release(*dst);
+	*dst = NULL;
+	return err;
 }
 
 int ip6_append_data(struct sock *sk, int getfrag(void *from, char *to, int offset, int len, int odd, struct sk_buff *skb),
@@ -1242,18 +1239,18 @@ int ip6_append_data(struct sock *sk, int getfrag(void *from, char *to, int offse
 		}
 		dst_hold(&rt->u.dst);
 		np->cork.rt = rt;
-		np->cork.fl = fl;
+		inet->cork.fl = *fl;
+		np->cork.hop_limit = hlimit;
 		inet->cork.fragsize = mtu = dst_pmtu(&rt->u.dst);
 		inet->cork.length = 0;
 		inet->sndmsg_page = NULL;
 		inet->sndmsg_off = 0;
-		if ((exthdrlen = rt->u.dst.header_len) != 0) {
-			length += exthdrlen;
-			transhdrlen += exthdrlen;
-		}
-		exthdrlen += opt ? opt->opt_flen : 0;
+		exthdrlen = rt->u.dst.header_len + (opt ? opt->opt_flen : 0);
+		length += exthdrlen;
+		transhdrlen += exthdrlen;
 	} else {
 		rt = np->cork.rt;
+		fl = &inet->cork.fl;
 		if (inet->cork.flags & IPCORK_OPT)
 			opt = np->cork.opt;
 		transhdrlen = 0;
@@ -1427,7 +1424,7 @@ int ip6_push_pending_frames(struct sock *sk)
 	struct ipv6hdr *hdr;
 	struct ipv6_txoptions *opt = np->cork.opt;
 	struct rt6_info *rt = np->cork.rt;
-	struct flowi *fl = np->cork.fl;
+	struct flowi *fl = &inet->cork.fl;
 	unsigned char proto = fl->proto;
 	int err = 0;
 
@@ -1467,7 +1464,7 @@ int ip6_push_pending_frames(struct sock *sk)
 		hdr->payload_len = htons(skb->len - sizeof(struct ipv6hdr));
 	else
 		hdr->payload_len = 0;
-	hdr->hop_limit = np->hop_limit;
+	hdr->hop_limit = np->cork.hop_limit;
 	hdr->nexthdr = proto;
 	ipv6_addr_copy(&hdr->saddr, &fl->fl6_src);
 	ipv6_addr_copy(&hdr->daddr, final_dst);
@@ -1488,11 +1485,10 @@ out:
 		np->cork.opt = NULL;
 	}
 	if (np->cork.rt) {
+		dst_release(&np->cork.rt->u.dst);
 		np->cork.rt = NULL;
 	}
-	if (np->cork.fl) {
-		np->cork.fl = NULL;
-	}
+	memset(&inet->cork.fl, 0, sizeof(inet->cork.fl));
 	return err;
 error:
 	goto out;
@@ -1514,9 +1510,8 @@ void ip6_flush_pending_frames(struct sock *sk)
 		np->cork.opt = NULL;
 	}
 	if (np->cork.rt) {
+		dst_release(&np->cork.rt->u.dst);
 		np->cork.rt = NULL;
 	}
-	if (np->cork.fl) {
-		np->cork.fl = NULL;
-	}
+	memset(&inet->cork.fl, 0, sizeof(inet->cork.fl));
 }

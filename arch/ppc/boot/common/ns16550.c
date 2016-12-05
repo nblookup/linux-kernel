@@ -3,6 +3,8 @@
  */
 
 #include <linux/config.h>
+#include <linux/types.h>
+#include <linux/serial.h>
 #include <linux/serialP.h>
 #include <linux/serial_reg.h>
 #include <asm/serial.h>
@@ -60,7 +62,7 @@ unsigned long serial_init(int chan, void *ignored)
 	else {
 		/* Input clock. */
 		outb(com_port + (UART_DLL << shift),
-		     (BASE_BAUD / SERIAL_BAUD));
+		     (BASE_BAUD / SERIAL_BAUD) & 0xFF);
 		outb(com_port + (UART_DLM << shift),
 		     (BASE_BAUD / SERIAL_BAUD) >> 8);
 		/* 8 data, 1 stop, no parity */

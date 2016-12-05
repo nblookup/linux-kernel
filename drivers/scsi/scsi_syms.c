@@ -11,20 +11,21 @@
 #include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/fs.h>
 
 #include <asm/system.h>
 #include <asm/irq.h>
 #include <asm/dma.h>
 
-#include "scsi.h"
 #include <scsi/scsi_driver.h>
+#include <scsi/scsi_host.h>
 #include <scsi/scsi_ioctl.h>
-#include "hosts.h"
+#include <scsi/scsicam.h>
+#include "scsi.h"
+
 #include "scsi_logging.h"
 
-#include <scsi/scsicam.h>
 
 /*
  * This source file contains the symbol table used by scsi loadable
@@ -34,6 +35,7 @@ EXPORT_SYMBOL(scsi_register_driver);
 EXPORT_SYMBOL(scsi_register_interface);
 EXPORT_SYMBOL(scsi_host_alloc);
 EXPORT_SYMBOL(scsi_add_host);
+EXPORT_SYMBOL(scsi_scan_host);
 EXPORT_SYMBOL(scsi_remove_host);
 EXPORT_SYMBOL(scsi_host_get);
 EXPORT_SYMBOL(scsi_host_put);
@@ -81,11 +83,9 @@ EXPORT_SYMBOL(scsi_sleep);
 
 EXPORT_SYMBOL(scsi_io_completion);
 
-EXPORT_SYMBOL(scsi_device_get);
-EXPORT_SYMBOL(scsi_device_put);
 EXPORT_SYMBOL(scsi_add_device);
 EXPORT_SYMBOL(scsi_remove_device);
-EXPORT_SYMBOL(scsi_set_device_offline);
+EXPORT_SYMBOL(scsi_device_cancel);
 
 EXPORT_SYMBOL(__scsi_mode_sense);
 EXPORT_SYMBOL(scsi_mode_sense);

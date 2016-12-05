@@ -169,7 +169,7 @@
  */
 #define DRIVER_VERSION "v2.1"
 #define DRIVER_AUTHOR "Greg Kroah-Hartman <greg@kroah.com>"
-#define DRIVER_DESC "USB HandSpring Visor, Palm m50x, Sony Clié driver"
+#define DRIVER_DESC "USB HandSpring Visor / Palm OS driver"
 
 /* function prototypes for a handspring visor */
 static int  visor_open		(struct usb_serial_port *port, struct file *filp);
@@ -201,6 +201,8 @@ static struct usb_device_id id_table [] = {
 		.driver_info = (kernel_ulong_t)&palm_os_3_probe },
 	{ USB_DEVICE(HANDSPRING_VENDOR_ID, HANDSPRING_TREO_ID),
 		.driver_info = (kernel_ulong_t)&palm_os_4_probe },
+	{ USB_DEVICE(HANDSPRING_VENDOR_ID, HANDSPRING_TREO600_ID),
+		.driver_info = (kernel_ulong_t)&palm_os_4_probe },
 	{ USB_DEVICE(PALM_VENDOR_ID, PALM_M500_ID),
 		.driver_info = (kernel_ulong_t)&palm_os_4_probe },
 	{ USB_DEVICE(PALM_VENDOR_ID, PALM_M505_ID),
@@ -225,10 +227,15 @@ static struct usb_device_id id_table [] = {
 		.driver_info = (kernel_ulong_t)&palm_os_4_probe },
 	{ USB_DEVICE(SONY_VENDOR_ID, SONY_CLIE_S360_ID),
 		.driver_info = (kernel_ulong_t)&palm_os_4_probe },
-	{ USB_DEVICE(SONY_VENDOR_ID, SONY_CLIE_4_1_ID) },
+	{ USB_DEVICE(SONY_VENDOR_ID, SONY_CLIE_4_1_ID),
+		.driver_info = (kernel_ulong_t)&palm_os_4_probe },
 	{ USB_DEVICE(SONY_VENDOR_ID, SONY_CLIE_NX60_ID),
 		.driver_info = (kernel_ulong_t)&palm_os_4_probe },
 	{ USB_DEVICE(SONY_VENDOR_ID, SONY_CLIE_NZ90V_ID),
+		.driver_info = (kernel_ulong_t)&palm_os_4_probe },
+	{ USB_DEVICE(SAMSUNG_VENDOR_ID, SAMSUNG_SCH_I330_ID), 
+		.driver_info = (kernel_ulong_t)&palm_os_4_probe },
+	{ USB_DEVICE(GARMIN_VENDOR_ID, GARMIN_IQUE_3600_ID), 
 		.driver_info = (kernel_ulong_t)&palm_os_4_probe },
 	{ },					/* optional parameter entry */
 	{ }					/* Terminating entry */
@@ -242,6 +249,7 @@ static struct usb_device_id clie_id_3_5_table [] = {
 static struct usb_device_id id_table_combined [] = {
 	{ USB_DEVICE(HANDSPRING_VENDOR_ID, HANDSPRING_VISOR_ID) },
 	{ USB_DEVICE(HANDSPRING_VENDOR_ID, HANDSPRING_TREO_ID) },
+	{ USB_DEVICE(HANDSPRING_VENDOR_ID, HANDSPRING_TREO600_ID) },
 	{ USB_DEVICE(PALM_VENDOR_ID, PALM_M500_ID) },
 	{ USB_DEVICE(PALM_VENDOR_ID, PALM_M505_ID) },
 	{ USB_DEVICE(PALM_VENDOR_ID, PALM_M515_ID) },
@@ -258,6 +266,8 @@ static struct usb_device_id id_table_combined [] = {
 	{ USB_DEVICE(SONY_VENDOR_ID, SONY_CLIE_4_1_ID) },
 	{ USB_DEVICE(SONY_VENDOR_ID, SONY_CLIE_NX60_ID) },
 	{ USB_DEVICE(SONY_VENDOR_ID, SONY_CLIE_NZ90V_ID) },
+	{ USB_DEVICE(SAMSUNG_VENDOR_ID, SAMSUNG_SCH_I330_ID) },
+	{ USB_DEVICE(GARMIN_VENDOR_ID, GARMIN_IQUE_3600_ID) },
 	{ },					/* optional parameter entry */
 	{ }					/* Terminating entry */
 };
@@ -275,7 +285,7 @@ static struct usb_driver visor_driver = {
 /* All of the device info needed for the Handspring Visor, and Palm 4.0 devices */
 static struct usb_serial_device_type handspring_device = {
 	.owner =		THIS_MODULE,
-	.name =			"Handspring Visor / Treo / Palm 4.0 / Clié 4.x",
+	.name =			"Handspring Visor / Palm OS",
 	.short_name =		"visor",
 	.id_table =		id_table,
 	.num_interrupt_in =	NUM_DONT_CARE,
@@ -303,7 +313,7 @@ static struct usb_serial_device_type handspring_device = {
 /* device info for the Sony Clie OS version 3.5 */
 static struct usb_serial_device_type clie_3_5_device = {
 	.owner =		THIS_MODULE,
-	.name =			"Sony Clié 3.5",
+	.name =			"Sony Clie 3.5",
 	.short_name =		"clie_3.5",
 	.id_table =		clie_id_3_5_table,
 	.num_interrupt_in =	0,
@@ -509,18 +519,17 @@ static void visor_write_bulk_callback (struct urb *urb, struct pt_regs *regs)
 {
 	struct usb_serial_port *port = (struct usb_serial_port *)urb->context;
 
+	/* free up the transfer buffer, as usb_free_urb() does not do this */
+	kfree (urb->transfer_buffer);
+
 	if (port_paranoia_check (port, __FUNCTION__))
 		return;
 	
 	dbg("%s - port %d", __FUNCTION__, port->number);
 	
-	if (urb->status) {
-		dbg("%s - nonzero write bulk status received: %d", __FUNCTION__, urb->status);
-		return;
-	}
-
-	/* free up the transfer buffer, as usb_free_urb() does not do this */
-	kfree (urb->transfer_buffer);
+	if (urb->status)
+		dbg("%s - nonzero write bulk status received: %d",
+		    __FUNCTION__, urb->status);
 
 	schedule_work(&port->work);
 }
@@ -650,7 +659,7 @@ static int palm_os_3_probe (struct usb_serial *serial, const struct usb_device_i
 
 	transfer_buffer = kmalloc (sizeof (*connection_info), GFP_KERNEL);
 	if (!transfer_buffer) {
-		dev_err(dev, "%s - kmalloc(%d) failed.\n", __FUNCTION__,
+		dev_err(dev, "%s - kmalloc(%Zd) failed.\n", __FUNCTION__,
 			sizeof(*connection_info));
 		return -ENOMEM;
 	}
@@ -736,7 +745,7 @@ static int palm_os_4_probe (struct usb_serial *serial, const struct usb_device_i
 
 	transfer_buffer =  kmalloc (sizeof (*connection_info), GFP_KERNEL);
 	if (!transfer_buffer) {
-		dev_err(dev, "%s - kmalloc(%d) failed.\n", __FUNCTION__,
+		dev_err(dev, "%s - kmalloc(%Zd) failed.\n", __FUNCTION__,
 			sizeof(*connection_info));
 		return -ENOMEM;
 	}
@@ -764,8 +773,11 @@ static int visor_probe (struct usb_serial *serial, const struct usb_device_id *i
 
 	dbg("%s", __FUNCTION__);
 
-	dbg("%s - Set config to 1", __FUNCTION__);
-	usb_set_configuration (serial->dev, 1);
+	if (serial->dev->actconfig->desc.bConfigurationValue != 1) {
+		err("active config #%d != 1 ??",
+			serial->dev->actconfig->desc.bConfigurationValue);
+		return -ENODEV;
+	}
 
 	if (id->driver_info) {
 		startup = (void *)id->driver_info;
@@ -845,25 +857,25 @@ static int treo_attach (struct usb_serial *serial)
 	 * "virtual serial port".  So let's force the endpoints to be
 	 * where we want them to be. */
 	for (i = serial->num_bulk_in; i < serial->num_ports; ++i) {
-		port = &serial->port[i];
-		port->read_urb = serial->port[0].read_urb;
-		port->bulk_in_endpointAddress = serial->port[0].bulk_in_endpointAddress;
-		port->bulk_in_buffer = serial->port[0].bulk_in_buffer;
+		port = serial->port[i];
+		port->read_urb = serial->port[0]->read_urb;
+		port->bulk_in_endpointAddress = serial->port[0]->bulk_in_endpointAddress;
+		port->bulk_in_buffer = serial->port[0]->bulk_in_buffer;
 	}
 
 	for (i = serial->num_bulk_out; i < serial->num_ports; ++i) {
-		port = &serial->port[i];
-		port->write_urb = serial->port[0].write_urb;
-		port->bulk_out_size = serial->port[0].bulk_out_size;
-		port->bulk_out_endpointAddress = serial->port[0].bulk_out_endpointAddress;
-		port->bulk_out_buffer = serial->port[0].bulk_out_buffer;
+		port = serial->port[i];
+		port->write_urb = serial->port[0]->write_urb;
+		port->bulk_out_size = serial->port[0]->bulk_out_size;
+		port->bulk_out_endpointAddress = serial->port[0]->bulk_out_endpointAddress;
+		port->bulk_out_buffer = serial->port[0]->bulk_out_buffer;
 	}
 
 	for (i = serial->num_interrupt_in; i < serial->num_ports; ++i) {
-		port = &serial->port[i];
-		port->interrupt_in_urb = serial->port[0].interrupt_in_urb;
-		port->interrupt_in_endpointAddress = serial->port[0].interrupt_in_endpointAddress;
-		port->interrupt_in_buffer = serial->port[0].interrupt_in_buffer;
+		port = serial->port[i];
+		port->interrupt_in_urb = serial->port[0]->interrupt_in_urb;
+		port->interrupt_in_endpointAddress = serial->port[0]->interrupt_in_endpointAddress;
+		port->interrupt_in_buffer = serial->port[0]->interrupt_in_buffer;
 	}
 
 	return 0;
@@ -951,7 +963,7 @@ static void visor_set_termios (struct usb_serial_port *port, struct termios *old
 
 static int __init visor_init (void)
 {
-	int i;
+	int i, retval;
 	/* Only if parameters were passed to us */
 	if ((vendor>0) && (product>0)) {
 		struct usb_device_id usb_dev_temp[]=
@@ -978,12 +990,24 @@ static int __init visor_init (void)
 		info("Adding Palm OS protocol 4.x support for unknown device: 0x%x/0x%x",
 			vendor, product);
 	}
-	usb_serial_register (&handspring_device);
-	usb_serial_register (&clie_3_5_device);
-	usb_register (&visor_driver);
+	retval = usb_serial_register(&handspring_device);
+	if (retval)
+		goto failed_handspring_register;
+	retval = usb_serial_register(&clie_3_5_device);
+	if (retval)
+		goto failed_clie_3_5_register;
+	retval = usb_register(&visor_driver);
+	if (retval) 
+		goto failed_usb_register;
 	info(DRIVER_DESC " " DRIVER_VERSION);
 
 	return 0;
+failed_usb_register:
+	usb_serial_deregister(&clie_3_5_device);
+failed_clie_3_5_register:
+	usb_serial_deregister(&handspring_device);
+failed_handspring_register:
+	return retval;
 }
 
 

@@ -15,6 +15,7 @@
  */
 
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -34,12 +35,15 @@
 #include <linux/root_dev.h>
 #include <linux/console.h>
 #include <linux/seq_file.h>
+#include <linux/kernel_stat.h>
+
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/smp.h>
 #include <asm/mmu_context.h>
 #include <asm/cpcmd.h>
 #include <asm/lowcore.h>
+#include <asm/irq.h>
 
 /*
  * Machine setup..
@@ -53,7 +57,7 @@ struct { unsigned long addr, size, type; } memory_chunk[16] = { { 0 } };
 #define CHUNK_READ_WRITE 0
 #define CHUNK_READ_ONLY 1
 int cpus_initialized = 0;
-unsigned long cpu_initialized = 0;
+static cpumask_t cpu_initialized;
 volatile int __cpu_logical_map[NR_CPUS]; /* logical cpu to cpu address */
 
 /*
@@ -83,7 +87,7 @@ void __devinit cpu_init (void)
         int nr = smp_processor_id();
         int addr = hard_smp_processor_id();
 
-        if (test_and_set_bit(nr,&cpu_initialized)) {
+        if (cpu_test_and_set(nr,cpu_initialized)) {
                 printk("CPU#%d ALREADY INITIALIZED!!!!!!!!!\n", nr);
                 for (;;) local_irq_enable();
         }
@@ -94,7 +98,6 @@ void __devinit cpu_init (void)
          */
         asm volatile ("stidp %0": "=m" (S390_lowcore.cpu_data.cpu_id));
         S390_lowcore.cpu_data.cpu_addr = addr;
-        S390_lowcore.cpu_data.cpu_nr = nr;
 
         /*
          * Force FPU initialization:
@@ -287,15 +290,21 @@ void machine_restart(char *command)
 	_machine_restart(command);
 }
 
+EXPORT_SYMBOL(machine_restart);
+
 void machine_halt(void)
 {
 	_machine_halt();
 }
 
+EXPORT_SYMBOL(machine_halt);
+
 void machine_power_off(void)
 {
 	_machine_power_off();
 }
+
+EXPORT_SYMBOL(machine_power_off);
 
 /*
  * Setup function called from init/main.c just after the banner
@@ -415,7 +424,7 @@ void __init setup_arch(char **cmdline_p)
 	 * we are rounding upwards:
 	 */
 	start_pfn = (__pa(&_end) + PAGE_SIZE - 1) >> PAGE_SHIFT;
-	end_pfn = memory_end >> PAGE_SHIFT;
+	end_pfn = max_pfn = memory_end >> PAGE_SHIFT;
 
 	/*
 	 * Initialize the boot-time allocator (with low memory only):
@@ -494,21 +503,17 @@ void __init setup_arch(char **cmdline_p)
 	lc->io_new_psw.addr = PSW_ADDR_AMODE + (unsigned long) io_int_handler;
 	lc->ipl_device = S390_lowcore.ipl_device;
 	lc->jiffy_timer = -1LL;
-#ifndef CONFIG_ARCH_S390X
-	lc->kernel_stack = ((__u32) &init_thread_union) + 8192;
-	lc->async_stack = (__u32)
-		__alloc_bootmem(2*PAGE_SIZE, 2*PAGE_SIZE, 0) + 8192;
-	set_prefix((__u32) lc);
-#else /* CONFIG_ARCH_S390X */
-	lc->kernel_stack = ((__u64) &init_thread_union) + 16384;
-	lc->async_stack = (__u64)
-		__alloc_bootmem(4*PAGE_SIZE, 4*PAGE_SIZE, 0) + 16384;
+	lc->kernel_stack = ((unsigned long) &init_thread_union) + THREAD_SIZE;
+	lc->async_stack = (unsigned long)
+		__alloc_bootmem(ASYNC_SIZE, ASYNC_SIZE, 0) + ASYNC_SIZE;
+	lc->current_task = (unsigned long) init_thread_union.thread_info.task;
+#ifdef CONFIG_ARCH_S390X
 	if (MACHINE_HAS_DIAG44)
 		lc->diag44_opcode = 0x83000044;
 	else
 		lc->diag44_opcode = 0x07000700;
-	set_prefix((__u32)(__u64) lc);
 #endif /* CONFIG_ARCH_S390X */
+	set_prefix((u32)(unsigned long) lc);
         cpu_init();
         __cpu_logical_map[0] = S390_lowcore.cpu_data.cpu_addr;
 
@@ -562,7 +567,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 			       num_online_cpus(), loops_per_jiffy/(500000/HZ),
 			       (loops_per_jiffy/(5000/HZ))%100);
 	}
-	if (cpu_online_map & (1 << n)) {
+	if (cpu_online(n)) {
 #ifdef CONFIG_SMP
 		if (smp_processor_id() == n)
 			cpuinfo = &S390_lowcore.cpu_data;
@@ -600,3 +605,40 @@ struct seq_operations cpuinfo_op = {
 	.stop	= c_stop,
 	.show	= show_cpuinfo,
 };
+
+/*
+ * show_interrupts is needed by /proc/interrupts.
+ */
+
+static const char *intrclass_names[] = {
+	"EXT",
+	"I/O",
+};
+
+int show_interrupts(struct seq_file *p, void *v)
+{
+        int i, j;
+	
+        seq_puts(p, "           ");
+	
+        for (j=0; j<NR_CPUS; j++)
+                if (cpu_online(j))
+                        seq_printf(p, "CPU%d       ",j);
+	
+        seq_putc(p, '\n');
+	
+        for (i = 0 ; i < NR_IRQS ; i++) {
+		seq_printf(p, "%s: ", intrclass_names[i]);
+#ifndef CONFIG_SMP
+		seq_printf(p, "%10u ", kstat_irqs(i));
+#else
+		for (j = 0; j < NR_CPUS; j++)
+			if (cpu_online(j))
+				seq_printf(p, "%10u ", kstat_cpu(j).irqs[i]);
+#endif
+                seq_putc(p, '\n');
+		
+        }
+	
+        return 0;
+}

@@ -106,6 +106,7 @@ typedef struct _snd_pcm_channel_area {
 typedef struct _snd_pcm_plugin_channel {
 	void *aptr;			/* pointer to the allocated area */
 	snd_pcm_channel_area_t area;
+	snd_pcm_uframes_t frames;	/* allocated frames */
 	unsigned int enabled:1;		/* channel need to be processed */
 	unsigned int wanted:1;		/* channel is wanted */
 } snd_pcm_plugin_channel_t;
@@ -218,14 +219,9 @@ snd_pcm_sframes_t snd_pcm_plugin_client_channels(snd_pcm_plugin_t *plugin,
 
 int snd_pcm_area_silence(const snd_pcm_channel_area_t *dst_channel, size_t dst_offset,
 			 size_t samples, int format);
-int snd_pcm_areas_silence(const snd_pcm_channel_area_t *dst_channels, snd_pcm_uframes_t dst_offset,
-			  unsigned int channels, snd_pcm_uframes_t frames, int format);
 int snd_pcm_area_copy(const snd_pcm_channel_area_t *src_channel, size_t src_offset,
 		      const snd_pcm_channel_area_t *dst_channel, size_t dst_offset,
 		      size_t samples, int format);
-int snd_pcm_areas_copy(const snd_pcm_channel_area_t *src_channels, snd_pcm_uframes_t src_offset,
-		       const snd_pcm_channel_area_t *dst_channels, snd_pcm_uframes_t dst_offset,
-		       unsigned int channels, snd_pcm_uframes_t frames, int format);
 
 void *snd_pcm_plug_buf_alloc(snd_pcm_plug_t *plug, snd_pcm_uframes_t size);
 void snd_pcm_plug_buf_unlock(snd_pcm_plug_t *plug, void *ptr);
@@ -247,9 +243,9 @@ void zero_channel(snd_pcm_plugin_t *plugin,
 		  size_t samples);
 
 #ifdef PLUGIN_DEBUG
-#define pdprintf( args... ) printk( "plugin: " ##args)
+#define pdprintf( fmt, args... ) printk( "plugin: " fmt, ##args)
 #else
-#define pdprintf( args... ) { ; }
+#define pdprintf( fmt, args... ) 
 #endif
 
 #endif				/* __PCM_PLUGIN_H */

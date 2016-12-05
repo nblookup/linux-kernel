@@ -12,6 +12,10 @@
 #include <linux/netfilter_ipv4.h>
 #include <linux/netfilter_ipv4/ip_nat_rule.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+MODULE_DESCRIPTION("iptables REDIRECT target module");
+
 #if 0
 #define DEBUGP printk
 #else
@@ -79,7 +83,7 @@ redirect_target(struct sk_buff **pskb,
 
 		/* Device might not have an associated in_device. */
 		indev = (struct in_device *)(*pskb)->dev->ip_ptr;
-		if (indev == NULL)
+		if (indev == NULL || indev->ifa_list == NULL)
 			return NF_DROP;
 
 		/* Grab first address on interface. */
@@ -115,4 +119,3 @@ static void __exit fini(void)
 
 module_init(init);
 module_exit(fini);
-MODULE_LICENSE("GPL");

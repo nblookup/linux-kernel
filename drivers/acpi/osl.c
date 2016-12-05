@@ -35,6 +35,7 @@
 #include <linux/kmod.h>
 #include <linux/delay.h>
 #include <linux/workqueue.h>
+#include <linux/nmi.h>
 #include <acpi/acpi.h>
 #include <asm/io.h>
 #include <acpi/acpi_bus.h>
@@ -250,7 +251,12 @@ acpi_os_install_interrupt_handler(u32 irq, OSD_HANDLER handler, void *context)
 	irq = acpi_fadt.sci_int;
 
 #ifdef CONFIG_IA64
-	irq = gsi_to_vector(irq);
+	irq = acpi_irq_to_vector(irq);
+	if (irq < 0) {
+		printk(KERN_ERR PREFIX "SCI (ACPI interrupt %d) not registered\n",
+		       acpi_fadt.sci_int);
+		return AE_OK;
+	}
 #endif
 	acpi_irq_irq = irq;
 	acpi_irq_handler = handler;
@@ -268,7 +274,7 @@ acpi_os_remove_interrupt_handler(u32 irq, OSD_HANDLER handler)
 {
 	if (acpi_irq_handler) {
 #ifdef CONFIG_IA64
-		irq = gsi_to_vector(irq);
+		irq = acpi_irq_to_vector(irq);
 #endif
 		free_irq(irq, acpi_irq);
 		acpi_irq_handler = NULL;
@@ -291,11 +297,14 @@ acpi_os_sleep(u32 sec, u32 ms)
 void
 acpi_os_stall(u32 us)
 {
-	if (us > 10000) {
-		mdelay(us / 1000);
-	}
-	else {
-		udelay(us);
+	while (us) {
+		u32 delay = 1000;
+
+		if (delay > us)
+			delay = us;
+		udelay(delay);
+		touch_nmi_watchdog();
+		us -= delay;
 	}
 }
 

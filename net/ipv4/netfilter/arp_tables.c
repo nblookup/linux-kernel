@@ -25,6 +25,10 @@
 
 #include <linux/netfilter_arp/arp_tables.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("David S. Miller <davem@redhat.com>");
+MODULE_DESCRIPTION("arptables core");
+
 /*#define DEBUG_ARP_TABLES*/
 /*#define DEBUG_ARP_TABLES_USER*/
 
@@ -246,7 +250,7 @@ unsigned int arpt_do_table(struct sk_buff **pskb,
 			   struct arpt_table *table,
 			   void *userdata)
 {
-	static const char nulldevname[IFNAMSIZ] = { 0 };
+	static const char nulldevname[IFNAMSIZ];
 	unsigned int verdict = NF_DROP;
 	struct arphdr *arp;
 	int hotdrop = 0;
@@ -1324,4 +1328,3 @@ EXPORT_SYMBOL(arpt_unregister_target);
 
 module_init(init);
 module_exit(fini);
-MODULE_LICENSE("GPL");

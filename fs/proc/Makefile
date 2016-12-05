@@ -4,15 +4,11 @@
 
 obj-$(CONFIG_PROC_FS) += proc.o
 
-proc-objs    := inode.o root.o base.o generic.o array.o \
-		kmsg.o proc_tty.o proc_misc.o kcore.o
+proc-y			:= task_nommu.o
+proc-$(CONFIG_MMU)	:= task_mmu.o
 
-ifeq ($(CONFIG_MMU),y)
-proc-objs    += task_mmu.o
-else
-proc-objs    += task_nommu.o
-endif
+proc-y       += inode.o root.o base.o generic.o array.o \
+		kmsg.o proc_tty.o proc_misc.o
 
-ifeq ($(CONFIG_PROC_DEVICETREE),y)
-proc-objs    += proc_devtree.o
-endif
+proc-$(CONFIG_PROC_KCORE)	+= kcore.o
+proc-$(CONFIG_PROC_DEVICETREE)	+= proc_devtree.o

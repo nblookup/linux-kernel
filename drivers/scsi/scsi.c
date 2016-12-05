@@ -1,6 +1,7 @@
 /*
  *  scsi.c Copyright (C) 1992 Drew Eckhardt
  *         Copyright (C) 1993, 1994, 1995, 1999 Eric Youngdale
+ *         Copyright (C) 2002, 2003 Christoph Hellwig
  *
  *  generic mid-level SCSI driver
  *      Initial versions: Drew Eckhardt
@@ -36,7 +37,6 @@
  *  out_of_space hacks, D. Gilbert (dpg) 990608
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/kernel.h>
@@ -54,8 +54,8 @@
 #include <linux/kmod.h>
 #include <linux/interrupt.h>
 
+#include <scsi/scsi_host.h>
 #include "scsi.h"
-#include "hosts.h"
 
 #include "scsi_priv.h"
 #include "scsi_logging.h"
@@ -113,26 +113,21 @@ const char *const scsi_device_types[MAX_SCSI_DEVICE_CODE] = {
  *
  * Purpose:     Allocate a request descriptor.
  *
- * Arguments:   device    - device for which we want a request
+ * Arguments:   device		- device for which we want a request
+ *		gfp_mask	- allocation flags passed to kmalloc
  *
  * Lock status: No locks assumed to be held.  This function is SMP-safe.
  *
  * Returns:     Pointer to request block.
- *
- * Notes:       With the new queueing code, it becomes important
- *              to track the difference between a command and a
- *              request.  A request is a pending item in the queue that
- *              has not yet reached the top of the queue.
- *
- * XXX(hch):	Need to add a gfp_mask argument.
  */
-struct scsi_request *scsi_allocate_request(struct scsi_device *sdev)
+struct scsi_request *scsi_allocate_request(struct scsi_device *sdev,
+					   int gfp_mask)
 {
 	const int offset = ALIGN(sizeof(struct scsi_request), 4);
 	const int size = offset + sizeof(struct request);
 	struct scsi_request *sreq;
   
-	sreq = kmalloc(size, GFP_ATOMIC);
+	sreq = kmalloc(size, gfp_mask);
 	if (likely(sreq != NULL)) {
 		memset(sreq, 0, size);
 		sreq->sr_request = (struct request *)(((char *)sreq) + offset);
@@ -370,8 +365,18 @@ int scsi_dispatch_cmd(struct scsi_cmnd *cmd)
 	struct Scsi_Host *host = cmd->device->host;
 	unsigned long flags = 0;
 	unsigned long timeout;
-	int rtn = 1;
+	int rtn = 0;
 
+	/* check if the device is still usable */
+	if (unlikely(cmd->device->sdev_state == SDEV_DEL)) {
+		/* in SDEV_DEL we error all commands. DID_NO_CONNECT
+		 * returns an immediate error upwards, and signals
+		 * that the device is no longer present */
+		cmd->result = DID_NO_CONNECT << 16;
+		scsi_done(cmd);
+		/* return 0 (because the command has been processed) */
+		goto out;
+	}
 	/* Assign a unique nonzero serial_number. */
 	/* XXX(hch): this is racy */
 	if (++serial_number == 0)
@@ -444,7 +449,12 @@ int scsi_dispatch_cmd(struct scsi_cmnd *cmd)
 				   host->hostt->queuecommand));
 
 	spin_lock_irqsave(host->host_lock, flags);
-	rtn = host->hostt->queuecommand(cmd, scsi_done);
+	if (unlikely(test_bit(SHOST_CANCEL, &host->shost_state))) {
+		cmd->result = (DID_NO_CONNECT << 16);
+		scsi_done(cmd);
+	} else {
+		rtn = host->hostt->queuecommand(cmd, scsi_done);
+	}
 	spin_unlock_irqrestore(host->host_lock, flags);
 	if (rtn) {
 		scsi_queue_insert(cmd,
@@ -497,7 +507,6 @@ void scsi_init_cmd_from_req(struct scsi_cmnd *cmd, struct scsi_request *sreq)
 	cmd->serial_number_at_timeout = 0;
 	cmd->bufflen = sreq->sr_bufflen;
 	cmd->buffer = sreq->sr_buffer;
-	cmd->flags = 0;
 	cmd->retries = 0;
 	cmd->allowed = sreq->sr_allowed;
 	cmd->done = sreq->sr_done;
@@ -535,7 +544,7 @@ void scsi_init_cmd_from_req(struct scsi_cmnd *cmd, struct scsi_request *sreq)
 /*
  * Per-CPU I/O completion queue.
  */
-static struct list_head done_q[NR_CPUS] __cacheline_aligned;
+static DEFINE_PER_CPU(struct list_head, scsi_done_q);
 
 /**
  * scsi_done - Enqueue the finished SCSI command into the done queue.
@@ -553,7 +562,6 @@ static struct list_head done_q[NR_CPUS] __cacheline_aligned;
 void scsi_done(struct scsi_cmnd *cmd)
 {
 	unsigned long flags;
-	int cpu;
 
 	/*
 	 * We don't have to worry about this one timing out any more.
@@ -580,8 +588,7 @@ void scsi_done(struct scsi_cmnd *cmd)
 	 * and need no spinlock.
 	 */
 	local_irq_save(flags);
-	cpu = smp_processor_id();
-	list_add_tail(&cmd->eh_entry, &done_q[cpu]);
+	list_add_tail(&cmd->eh_entry, &__get_cpu_var(scsi_done_q));
 	raise_softirq_irqoff(SCSI_SOFTIRQ);
 	local_irq_restore(flags);
 }
@@ -600,7 +607,7 @@ static void scsi_softirq(struct softirq_action *h)
 	LIST_HEAD(local_q);
 
 	local_irq_disable();
-	list_splice_init(&done_q[smp_processor_id()], &local_q);
+	list_splice_init(&__get_cpu_var(scsi_done_q), &local_q);
 	local_irq_enable();
 
 	while (!list_empty(&local_q)) {
@@ -886,35 +893,139 @@ int scsi_track_queue_full(struct scsi_device *sdev, int depth)
 	return depth;
 }
 
+/**
+ * scsi_device_get  -  get an addition reference to a scsi_device
+ * @sdev:	device to get a reference to
+ *
+ * Gets a reference to the scsi_device and increments the use count
+ * of the underlying LLDD module.  You must hold host_lock of the
+ * parent Scsi_Host or already have a reference when calling this.
+ */
 int scsi_device_get(struct scsi_device *sdev)
 {
-	if (!try_module_get(sdev->host->hostt->module))
+	if (sdev->sdev_state == SDEV_DEL)
 		return -ENXIO;
-
-	sdev->access_count++;
+	if (!get_device(&sdev->sdev_gendev))
+		return -ENXIO;
+	if (!try_module_get(sdev->host->hostt->module)) {
+		put_device(&sdev->sdev_gendev);
+		return -ENXIO;
+	}
 	return 0;
 }
-
-void scsi_device_put(struct scsi_device *sdev)
-{
-	sdev->access_count--;
-	module_put(sdev->host->hostt->module);
-}
+EXPORT_SYMBOL(scsi_device_get);
 
 /**
- * scsi_set_device_offline - set scsi_device offline
- * @sdev:	pointer to struct scsi_device to offline. 
+ * scsi_device_put  -  release a reference to a scsi_device
+ * @sdev:	device to release a reference on.
  *
- * Locks:	host_lock held on entry.
+ * Release a reference to the scsi_device and decrements the use count
+ * of the underlying LLDD module.  The device is freed once the last
+ * user vanishes.
+ */
+void scsi_device_put(struct scsi_device *sdev)
+{
+	module_put(sdev->host->hostt->module);
+	put_device(&sdev->sdev_gendev);
+}
+EXPORT_SYMBOL(scsi_device_put);
+
+/* helper for shost_for_each_device, thus not documented */
+struct scsi_device *__scsi_iterate_devices(struct Scsi_Host *shost,
+					   struct scsi_device *prev)
+{
+	struct list_head *list = (prev ? &prev->siblings : &shost->__devices);
+	struct scsi_device *next = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(shost->host_lock, flags);
+	while (list->next != &shost->__devices) {
+		next = list_entry(list->next, struct scsi_device, siblings);
+		/* skip devices that we can't get a reference to */
+		if (!scsi_device_get(next))
+			break;
+		list = list->next;
+	}
+	spin_unlock_irqrestore(shost->host_lock, flags);
+
+	if (prev)
+		scsi_device_put(prev);
+	return next;
+}
+EXPORT_SYMBOL(__scsi_iterate_devices);
+
+/**
+ * scsi_device_lookup - find a device given the host (UNLOCKED)
+ * @shost:	SCSI host pointer
+ * @channel:	SCSI channel (zero if only one channel)
+ * @pun:	SCSI target number (physical unit number)
+ * @lun:	SCSI Logical Unit Number
+ *
+ * Looks up the scsi_device with the specified @channel, @id, @lun for a
+ * give host. The returned scsi_device does not have an additional reference.
+ * You must hold the host's host_lock over this call and any access to the
+ * returned scsi_device.
+ *
+ * Note:  The only reason why drivers would want to use this is because
+ * they're need to access the device list in irq context.  Otherwise you
+ * really want to use scsi_device_lookup instead.
  **/
-void scsi_set_device_offline(struct scsi_device *sdev)
+struct scsi_device *__scsi_device_lookup(struct Scsi_Host *shost,
+		uint channel, uint id, uint lun)
+{
+	struct scsi_device *sdev;
+
+	list_for_each_entry(sdev, &shost->__devices, siblings) {
+		if (sdev->channel == channel && sdev->id == id &&
+				sdev->lun ==lun)
+			return sdev;
+	}
+
+	return NULL;
+}
+EXPORT_SYMBOL(__scsi_device_lookup);
+
+/**
+ * scsi_device_lookup - find a device given the host
+ * @shost:	SCSI host pointer
+ * @channel:	SCSI channel (zero if only one channel)
+ * @id:		SCSI target number (physical unit number)
+ * @lun:	SCSI Logical Unit Number
+ *
+ * Looks up the scsi_device with the specified @channel, @id, @lun for a
+ * give host.  The returned scsi_device has an additional reference that
+ * needs to be release with scsi_host_put once you're done with it.
+ **/
+struct scsi_device *scsi_device_lookup(struct Scsi_Host *shost,
+		uint channel, uint id, uint lun)
+{
+	struct scsi_device *sdev;
+	unsigned long flags;
+
+	spin_lock_irqsave(shost->host_lock, flags);
+	sdev = __scsi_device_lookup(shost, channel, id, lun);
+	if (sdev && scsi_device_get(sdev))
+		sdev = NULL;
+	spin_unlock_irqrestore(shost->host_lock, flags);
+
+	return sdev;
+}
+EXPORT_SYMBOL(scsi_device_lookup);
+
+/**
+ * scsi_device_cancel - cancel outstanding IO to this device
+ * @sdev:	pointer to struct scsi_device
+ * @data:	pointer to cancel value.
+ *
+ **/
+int scsi_device_cancel(struct scsi_device *sdev, int recovery)
 {
 	struct scsi_cmnd *scmd;
 	LIST_HEAD(active_list);
 	struct list_head *lh, *lh_sf;
 	unsigned long flags;
 
-	sdev->online = 0;
+	sdev->sdev_state = SDEV_CANCEL;
 
 	spin_lock_irqsave(&sdev->list_lock, flags);
 	list_for_each_entry(scmd, &sdev->cmd_list, list) {
@@ -934,11 +1045,17 @@ void scsi_set_device_offline(struct scsi_device *sdev)
 	if (!list_empty(&active_list)) {
 		list_for_each_safe(lh, lh_sf, &active_list) {
 			scmd = list_entry(lh, struct scsi_cmnd, eh_entry);
-			scsi_eh_scmd_add(scmd, SCSI_EH_CANCEL_CMD);
+			list_del_init(lh);
+			if (recovery) {
+				scsi_eh_scmd_add(scmd, SCSI_EH_CANCEL_CMD);
+			} else {
+				scmd->result = (DID_ABORT << 16);
+				scsi_finish_command(scmd);
+			}
 		}
-	} else {
-		/* FIXME: Send online state change hotplug event */
 	}
+
+	return 0;
 }
 
 MODULE_DESCRIPTION("SCSI core");
@@ -960,18 +1077,28 @@ static int __init init_scsi(void)
 	error = scsi_init_devinfo();
 	if (error)
 		goto cleanup_procfs;
-	error = scsi_sysfs_register();
+	error = scsi_init_hosts();
 	if (error)
 		goto cleanup_devlist;
+	error = scsi_init_sysctl();
+	if (error)
+		goto cleanup_hosts;
+	error = scsi_sysfs_register();
+	if (error)
+		goto cleanup_sysctl;
 
 	for (i = 0; i < NR_CPUS; i++)
-		INIT_LIST_HEAD(&done_q[i]);
+		INIT_LIST_HEAD(&per_cpu(scsi_done_q, i));
 
 	devfs_mk_dir("scsi");
 	open_softirq(SCSI_SOFTIRQ, scsi_softirq, NULL);
 	printk(KERN_NOTICE "SCSI subsystem initialized\n");
 	return 0;
 
+cleanup_sysctl:
+	scsi_exit_sysctl();
+cleanup_hosts:
+	scsi_exit_hosts();
 cleanup_devlist:
 	scsi_exit_devinfo();
 cleanup_procfs:
@@ -986,6 +1113,8 @@ cleanup_queue:
 static void __exit exit_scsi(void)
 {
 	scsi_sysfs_unregister();
+	scsi_exit_sysctl();
+	scsi_exit_hosts();
 	scsi_exit_devinfo();
 	devfs_remove("scsi");
 	scsi_exit_procfs();

@@ -128,6 +128,7 @@ struct dongle_reg {
 	void (*close)(dongle_t *dongle);
 	int  (*reset)(struct irda_task *task);
 	int  (*change_speed)(struct irda_task *task);
+	struct module *owner;
 };
 
 /* 
@@ -209,7 +210,7 @@ void irda_device_cleanup(void);
  * We declare them here to avoid the driver pulling a whole bunch stack
  * headers they don't really need - Jean II */
 struct irlap_cb *irlap_open(struct net_device *dev, struct qos_info *qos,
-			    char *	hw_name);
+			    const char *hw_name);
 void irlap_close(struct irlap_cb *self);
 
 /* Interface to be uses by IrLAP */
@@ -222,7 +223,8 @@ int  irda_device_txqueue_empty(struct net_device *dev);
 int  irda_device_set_raw_mode(struct net_device* self, int status);
 int  irda_device_set_dtr_rts(struct net_device *dev, int dtr, int rts);
 int  irda_device_change_speed(struct net_device *dev, __u32 speed);
-int  irda_device_setup(struct net_device *dev);
+void irda_device_setup(struct net_device *dev);
+struct net_device *alloc_irdadev(int sizeof_priv);
 
 /* Dongle interface */
 void irda_device_unregister_dongle(struct dongle_reg *dongle);
@@ -230,7 +232,9 @@ int  irda_device_register_dongle(struct dongle_reg *dongle);
 dongle_t *irda_device_dongle_init(struct net_device *dev, int type);
 int irda_device_dongle_cleanup(dongle_t *dongle);
 
+#ifdef CONFIG_ISA
 void setup_dma(int channel, char *buffer, int count, int mode);
+#endif
 
 void irda_task_delete(struct irda_task *task);
 int  irda_task_kick(struct irda_task *task);

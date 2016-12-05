@@ -41,6 +41,7 @@
 #include <linux/irq.h>
 #include <linux/acpi.h>
 #include <linux/efi.h>
+#include <linux/mmzone.h>
 #include <asm/io.h>
 #include <asm/iosapic.h>
 #include <asm/machvec.h>
@@ -51,19 +52,13 @@
 
 #define PREFIX			"ACPI: "
 
-asm (".weak iosapic_register_intr");
-asm (".weak iosapic_override_isa_irq");
-asm (".weak iosapic_register_platform_intr");
-asm (".weak iosapic_init");
-asm (".weak iosapic_system_init");
-asm (".weak iosapic_version");
-
 void (*pm_idle) (void);
 void (*pm_power_off) (void);
 
 unsigned char acpi_kbd_controller_present = 1;
+unsigned char acpi_legacy_devices;
 
-int acpi_disabled __initdata;	/* XXX this shouldn't be needed---we can't boot without ACPI! */
+int acpi_disabled;	/* XXX this shouldn't be needed---we can't boot without ACPI! */
 
 const char *
 acpi_get_sysname (void)
@@ -137,7 +132,7 @@ acpi_request_vector (u32 int_type)
 	int vector = -1;
 
 	if (int_type < ACPI_MAX_PLATFORM_INTERRUPTS) {
-		/* correctable platform error interrupt */
+		/* corrected platform error interrupt */
 		vector = platform_intr_list[int_type];
 	} else
 		printk(KERN_ERR "acpi_request_vector(): invalid interrupt type\n");
@@ -241,8 +236,7 @@ acpi_parse_iosapic (acpi_table_entry_header *header)
 
 	acpi_table_print_madt_entry(header);
 
-	if (iosapic_init)
-		iosapic_init(iosapic->address, iosapic->global_irq_base);
+	iosapic_init(iosapic->address, iosapic->global_irq_base);
 
 	return 0;
 }
@@ -259,11 +253,6 @@ acpi_parse_plat_int_src (acpi_table_entry_header *header)
 		return -EINVAL;
 
 	acpi_table_print_madt_entry(header);
-
-	if (!iosapic_register_platform_intr) {
-		printk(KERN_WARNING PREFIX "No ACPI platform interrupt support\n");
-		return -ENODEV;
-	}
 
 	/*
 	 * Get vector assignment for this interrupt, set attributes,
@@ -292,10 +281,6 @@ acpi_parse_int_src_ovr (acpi_table_entry_header *header)
 		return -EINVAL;
 
 	acpi_table_print_madt_entry(header);
-
-	/* Ignore if the platform doesn't support overrides */
-	if (!iosapic_override_isa_irq)
-		return 0;
 
 	iosapic_override_isa_irq(p->bus_irq, p->global_irq,
 				 (p->flags.polarity == 1) ? IOSAPIC_POL_HIGH : IOSAPIC_POL_LOW,
@@ -334,8 +319,7 @@ acpi_parse_madt (unsigned long phys_addr, unsigned long size)
 #else
 	has_8259 = acpi_madt->flags.pcat_compat;
 #endif
-	if (iosapic_system_init)
-		iosapic_system_init(has_8259);
+	iosapic_system_init(has_8259);
 
 	/* Get base address of IPI Message Block */
 
@@ -349,7 +333,7 @@ acpi_parse_madt (unsigned long phys_addr, unsigned long size)
 
 #ifdef CONFIG_ACPI_NUMA
 
-#define SLIT_DEBUG
+#undef SLIT_DEBUG
 
 #define PXM_FLAG_LEN ((MAX_PXM_DOMAINS + 1)/32)
 
@@ -359,7 +343,7 @@ static u32 __initdata pxm_flag[PXM_FLAG_LEN];
 #define pxm_bit_test(bit)	(test_bit(bit,(void *)pxm_flag))
 /* maps to convert between proximity domain and logical node ID */
 int __initdata pxm_to_nid_map[MAX_PXM_DOMAINS];
-int __initdata nid_to_pxm_map[NR_NODES];
+int __initdata nid_to_pxm_map[MAX_NUMNODES];
 static struct acpi_table_slit __initdata *slit_table;
 
 /*
@@ -397,7 +381,7 @@ acpi_numa_processor_affinity_init (struct acpi_table_processor_affinity *pa)
 void __init
 acpi_numa_memory_affinity_init (struct acpi_table_memory_affinity *ma)
 {
-	unsigned long paddr, size, hole_size, min_hole_size;
+	unsigned long paddr, size;
 	u8 pxm;
 	struct node_memblk_s *p, *q, *pend;
 
@@ -418,34 +402,6 @@ acpi_numa_memory_affinity_init (struct acpi_table_memory_affinity *ma)
 	/* Ignore disabled entries */
 	if (!ma->flags.enabled)
 		return;
-
-	/*
-	 * When the chunk is not the first one in the node, check distance
-	 * from the other chunks. When the hole is too huge ignore the chunk.
-	 * This restriction should be removed when multiple chunks per node
-	 * is supported.
-	 */
-	pend = &node_memblk[num_memblks];
-	min_hole_size = 0;
-	for (p = &node_memblk[0]; p < pend; p++) {
-		if (p->nid != pxm)
-			continue;
-		if (p->start_paddr < paddr)
-			hole_size = paddr - (p->start_paddr + p->size);
-		else
-			hole_size = p->start_paddr - (paddr + size);
-
-		if (!min_hole_size || hole_size < min_hole_size)
-			min_hole_size = hole_size;
-	}
-
-	if (min_hole_size) {
-		if (min_hole_size > size) {
-			printk(KERN_ERR "Too huge memory hole. Ignoring %ld MBytes at %lx\n",
-			       size/(1024*1024), paddr);
-			return;
-		}
-	}
 
 	/* record this node in proximity bitmap */
 	pxm_bit_set(pxm);
@@ -470,6 +426,12 @@ void __init
 acpi_numa_arch_fixup (void)
 {
 	int i, j, node_from, node_to;
+
+	/* If there's no SRAT, fix the phys_id */
+	if (srat_num_cpus == 0) {
+		node_cpuid[0].phys_id = hard_smp_processor_id();
+		return;
+	}
 
 	/* calculate total number of nodes in system from PXM bitmap */
 	numnodes = 0;		/* init total nodes in system */
@@ -535,7 +497,6 @@ acpi_parse_fadt (unsigned long phys_addr, unsigned long size)
 {
 	struct acpi_table_header *fadt_header;
 	struct fadt_descriptor_rev2 *fadt;
-	u32 sci_irq;
 
 	if (!phys_addr || !size)
 		return -EINVAL;
@@ -549,15 +510,10 @@ acpi_parse_fadt (unsigned long phys_addr, unsigned long size)
 	if (!(fadt->iapc_boot_arch & BAF_8042_KEYBOARD_CONTROLLER))
 		acpi_kbd_controller_present = 0;
 
-	if (!iosapic_register_intr)
-		return 0;	/* just ignore the rest */
+	if (fadt->iapc_boot_arch & BAF_LEGACY_DEVICES)
+		acpi_legacy_devices = 1;
 
-	sci_irq = fadt->sci_int;
-
-	if (has_8259 && sci_irq < 16)
-		return 0;	/* legacy, no setup required */
-
-	iosapic_register_intr(sci_irq, IOSAPIC_POL_LOW, IOSAPIC_LEVEL);
+	acpi_register_irq(fadt->sci_int, ACPI_ACTIVE_LOW, ACPI_LEVEL_SENSITIVE);
 	return 0;
 }
 
@@ -630,14 +586,22 @@ acpi_boot_init (void)
 		printk(KERN_ERR PREFIX "Can't find FADT\n");
 
 #ifdef CONFIG_SMP
-	smp_boot_data.cpu_count = available_cpus;
 	if (available_cpus == 0) {
 		printk(KERN_INFO "ACPI: Found 0 CPUS; assuming 1\n");
+		printk(KERN_INFO "CPU 0 (0x%04x)", hard_smp_processor_id());
+		smp_boot_data.cpu_phys_id[available_cpus] = hard_smp_processor_id();
 		available_cpus = 1; /* We've got at least one of these, no? */
 	}
+	smp_boot_data.cpu_count = available_cpus;
 
 	smp_build_cpu_map();
 # ifdef CONFIG_NUMA
+	if (srat_num_cpus == 0) {
+		int cpu, i = 1;
+		for (cpu = 0; cpu < smp_boot_data.cpu_count; cpu++)
+			if (smp_boot_data.cpu_phys_id[cpu] != hard_smp_processor_id())
+				node_cpuid[i++].phys_id = smp_boot_data.cpu_phys_id[cpu];
+	}
 	build_cpu_to_node_map();
 # endif
 #endif
@@ -707,28 +671,23 @@ acpi_get_interrupt_model (int *type)
 }
 
 int
-acpi_irq_to_vector (u32 irq)
+acpi_irq_to_vector (u32 gsi)
 {
-	if (has_8259 && irq < 16)
-		return isa_irq_to_vector(irq);
+	if (has_8259 && gsi < 16)
+		return isa_irq_to_vector(gsi);
 
-	return gsi_to_vector(irq);
+	return gsi_to_vector(gsi);
 }
 
 int
 acpi_register_irq (u32 gsi, u32 polarity, u32 trigger)
 {
-	int vector = 0;
-
-	if (acpi_madt->flags.pcat_compat && (gsi < 16))
+	if (has_8259 && gsi < 16)
 		return isa_irq_to_vector(gsi);
 
-	if (!iosapic_register_intr)
-		return 0;
-
-	/* Turn it on */
-	vector = iosapic_register_intr (gsi, polarity, trigger);
-	return vector;
+	return iosapic_register_intr(gsi,
+			(polarity == ACPI_ACTIVE_HIGH) ? IOSAPIC_POL_HIGH : IOSAPIC_POL_LOW,
+			(trigger == ACPI_EDGE_SENSITIVE) ? IOSAPIC_EDGE : IOSAPIC_LEVEL);
 }
 
 #endif /* CONFIG_ACPI_BOOT */

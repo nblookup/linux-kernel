@@ -49,6 +49,7 @@ struct i2c_dev {
 	int minor;
 	struct i2c_adapter *adap;
 	struct class_device class_dev;
+	struct completion released;	/* FIXME, we need a class_device_unregister() */
 };
 #define to_i2c_dev(d) container_of(d, struct i2c_dev, class_dev)
 
@@ -112,13 +113,12 @@ static void return_i2c_dev(struct i2c_dev *i2c_dev)
 	spin_lock(&i2c_dev_array_lock);
 	i2c_dev_array[i2c_dev->minor] = NULL;
 	spin_unlock(&i2c_dev_array_lock);
-	kfree(i2c_dev);
 }
 
 static ssize_t show_dev(struct class_device *class_dev, char *buf)
 {
 	struct i2c_dev *i2c_dev = to_i2c_dev(class_dev);
-	return sprintf(buf, "%04x\n", MKDEV(I2C_MAJOR, i2c_dev->minor));
+	return print_dev_t(buf, MKDEV(I2C_MAJOR, i2c_dev->minor));
 }
 static CLASS_DEVICE_ATTR(dev, S_IRUGO, show_dev, NULL);
 
@@ -138,7 +138,7 @@ static ssize_t i2cdev_read (struct file *file, char __user *buf, size_t count,
 		return -ENOMEM;
 
 	pr_debug("i2c-dev.o: i2c-%d reading %d bytes.\n",
-		minor(file->f_dentry->d_inode->i_rdev), count);
+		iminor(file->f_dentry->d_inode), count);
 
 	ret = i2c_master_recv(client,tmp,count);
 	if (ret >= 0)
@@ -166,7 +166,7 @@ static ssize_t i2cdev_write (struct file *file, const char __user *buf, size_t c
 	}
 
 	pr_debug("i2c-dev.o: i2c-%d writing %d bytes.\n",
-		minor(file->f_dentry->d_inode->i_rdev), count);
+		iminor(file->f_dentry->d_inode), count);
 
 	ret = i2c_master_send(client,tmp,count);
 	kfree(tmp);
@@ -181,11 +181,12 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 	struct i2c_smbus_ioctl_data data_arg;
 	union i2c_smbus_data temp;
 	struct i2c_msg *rdwr_pa;
+	u8 **data_ptrs;
 	int i,datasize,res;
 	unsigned long funcs;
 
 	dev_dbg(&client->dev, "i2c-%d ioctl, cmd: 0x%x, arg: %lx.\n",
-		minor(inode->i_rdev),cmd, arg);
+		iminor(inode),cmd, arg);
 
 	switch ( cmd ) {
 	case I2C_SLAVE:
@@ -214,7 +215,7 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 		return (copy_to_user((unsigned long __user *)arg, &funcs,
 		                     sizeof(unsigned long)))?-EFAULT:0;
 
-        case I2C_RDWR:
+	case I2C_RDWR:
 		if (copy_from_user(&rdwr_arg, 
 				   (struct i2c_rdwr_ioctl_data __user *)arg, 
 				   sizeof(rdwr_arg)))
@@ -231,28 +232,37 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 
 		if (rdwr_pa == NULL) return -ENOMEM;
 
+		if (copy_from_user(rdwr_pa, rdwr_arg.msgs,
+				   rdwr_arg.nmsgs * sizeof(struct i2c_msg))) {
+			kfree(rdwr_pa);
+			return -EFAULT;
+		}
+
+		data_ptrs = (u8 **) kmalloc(rdwr_arg.nmsgs * sizeof(u8 *),
+					    GFP_KERNEL);
+		if (data_ptrs == NULL) {
+			kfree(rdwr_pa);
+			return -ENOMEM;
+		}
+
 		res = 0;
 		for( i=0; i<rdwr_arg.nmsgs; i++ ) {
-		    	if(copy_from_user(&(rdwr_pa[i]),
-					&(rdwr_arg.msgs[i]),
-					sizeof(rdwr_pa[i]))) {
-			        res = -EFAULT;
-				break;
-			}
 			/* Limit the size of the message to a sane amount */
 			if (rdwr_pa[i].len > 8192) {
 				res = -EINVAL;
 				break;
 			}
+			data_ptrs[i] = rdwr_pa[i].buf;
 			rdwr_pa[i].buf = kmalloc(rdwr_pa[i].len, GFP_KERNEL);
 			if(rdwr_pa[i].buf == NULL) {
 				res = -ENOMEM;
 				break;
 			}
 			if(copy_from_user(rdwr_pa[i].buf,
-				rdwr_arg.msgs[i].buf,
+				data_ptrs[i],
 				rdwr_pa[i].len)) {
-			    	res = -EFAULT;
+					++i; /* Needs to be kfreed too */
+					res = -EFAULT;
 				break;
 			}
 		}
@@ -260,18 +270,18 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 			int j;
 			for (j = 0; j < i; ++j)
 				kfree(rdwr_pa[j].buf);
+			kfree(data_ptrs);
 			kfree(rdwr_pa);
 			return res;
 		}
-		if (!res) {
-			res = i2c_transfer(client->adapter,
-				rdwr_pa,
-				rdwr_arg.nmsgs);
-		}
+
+		res = i2c_transfer(client->adapter,
+			rdwr_pa,
+			rdwr_arg.nmsgs);
 		while(i-- > 0) {
 			if( res>=0 && (rdwr_pa[i].flags & I2C_M_RD)) {
 				if(copy_to_user(
-					rdwr_arg.msgs[i].buf,
+					data_ptrs[i],
 					rdwr_pa[i].buf,
 					rdwr_pa[i].len)) {
 					res = -EFAULT;
@@ -279,6 +289,7 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 			}
 			kfree(rdwr_pa[i].buf);
 		}
+		kfree(data_ptrs);
 		kfree(rdwr_pa);
 		return res;
 
@@ -362,7 +373,7 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 
 static int i2cdev_open(struct inode *inode, struct file *file)
 {
-	unsigned int minor = minor(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	struct i2c_client *client;
 	struct i2c_adapter *adap;
 	struct i2c_dev *i2c_dev;
@@ -410,8 +421,15 @@ static struct file_operations i2cdev_fops = {
 	.release	= i2cdev_release,
 };
 
+static void release_i2c_dev(struct class_device *dev)
+{
+	struct i2c_dev *i2c_dev = to_i2c_dev(dev);
+	complete(&i2c_dev->released);
+}
+
 static struct class i2c_dev_class = {
-	.name	= "i2c-dev",
+	.name		= "i2c-dev",
+	.release	= &release_i2c_dev,
 };
 
 static int i2cdev_attach_adapter(struct i2c_adapter *adap)
@@ -442,6 +460,7 @@ static int i2cdev_attach_adapter(struct i2c_adapter *adap)
 	return 0;
 error:
 	return_i2c_dev(i2c_dev);
+	kfree(i2c_dev);
 	return retval;
 }
 
@@ -453,9 +472,12 @@ static int i2cdev_detach_adapter(struct i2c_adapter *adap)
 	if (!i2c_dev)
 		return -ENODEV;
 
-	class_device_unregister(&i2c_dev->class_dev);
+	init_completion(&i2c_dev->released);
 	devfs_remove("i2c/%d", i2c_dev->minor);
 	return_i2c_dev(i2c_dev);
+	class_device_unregister(&i2c_dev->class_dev);
+	wait_for_completion(&i2c_dev->released);
+	kfree(i2c_dev);
 
 	dev_dbg(&adap->dev, "Adapter unregistered\n");
 	return 0;
@@ -474,7 +496,7 @@ static int i2cdev_command(struct i2c_client *client, unsigned int cmd,
 
 static struct i2c_driver i2cdev_driver = {
 	.owner		= THIS_MODULE,
-	.name		= "dev driver",
+	.name		= "dev_driver",
 	.id		= I2C_DRIVERID_I2CDEV,
 	.flags		= I2C_DF_NOTIFY,
 	.attach_adapter	= i2cdev_attach_adapter,
@@ -484,9 +506,7 @@ static struct i2c_driver i2cdev_driver = {
 };
 
 static struct i2c_client i2cdev_client_template = {
-	.dev		= {
-		.name	= "I2C /dev entry",
-	},
+	.name		= "I2C /dev entry",
 	.id		= 1,
 	.addr		= -1,
 	.driver		= &i2cdev_driver,
@@ -496,8 +516,7 @@ static int __init i2c_dev_init(void)
 {
 	int res;
 
-	printk(KERN_INFO "i2c /dev entries driver module version %s (%s)\n",
-		I2C_VERSION, I2C_DATE);
+	printk(KERN_INFO "i2c /dev entries driver\n");
 
 	if (register_chrdev(I2C_MAJOR,"i2c",&i2cdev_fops)) {
 		printk(KERN_ERR "i2c-dev.o: unable to get major %d for i2c bus\n",

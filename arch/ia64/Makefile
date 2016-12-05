@@ -27,9 +27,7 @@ GCC_MINOR_VERSION=$(shell $(CC) -v 2>&1 | fgrep 'gcc version' | cut -f3 -d' ' | 
 
 GAS_STATUS=$(shell arch/ia64/scripts/check-gas $(CC) $(OBJDUMP))
 
-arch-cppflags	:= $(shell arch/ia64/scripts/toolchain-flags $(CC) $(OBJDUMP))
-cflags-y	+= $(arch-cppflags)
-AFLAGS		+= $(arch-cppflags)
+CPPFLAGS	+= $(shell arch/ia64/scripts/toolchain-flags $(CC) $(OBJDUMP))
 
 ifeq ($(GAS_STATUS),buggy)
 $(error Sorry, you need a newer version of the assember, one that is built from	\
@@ -66,12 +64,14 @@ core-$(CONFIG_IA64_SGI_SN2)	+= arch/ia64/sn/
 drivers-$(CONFIG_PCI)		+= arch/ia64/pci/
 drivers-$(CONFIG_IA64_HP_SIM)	+= arch/ia64/hp/sim/
 drivers-$(CONFIG_IA64_HP_ZX1)	+= arch/ia64/hp/common/ arch/ia64/hp/zx1/
-drivers-$(CONFIG_IA64_GENERIC)	+= arch/ia64/hp/common/ arch/ia64/hp/zx1/ arch/ia64/hp/sim/ \
-				   arch/ia64/sn/
+drivers-$(CONFIG_IA64_GENERIC)	+= arch/ia64/hp/common/ arch/ia64/hp/zx1/ arch/ia64/hp/sim/ arch/ia64/sn/
+drivers-$(CONFIG_OPROFILE)	+= arch/ia64/oprofile/
 
-boot := arch/ia64/boot
+boot := arch/ia64/hp/sim/boot
 
 .PHONY: boot compressed check
+
+all: compressed
 
 compressed: vmlinux.gz
 
@@ -103,6 +103,6 @@ boot:	lib/lib.a vmlinux
 
 
 define archhelp
-  echo '  compressed	- Build compressed kernel image'
+  echo '* compressed	- Build compressed kernel image'
   echo '  boot		- Build vmlinux and bootloader for Ski simulator'
 endef

@@ -125,10 +125,13 @@ static struct usb_device_id ipaq_id_table [] = {
 	{ USB_DEVICE(LINKUP_VENDOR_ID, LINKUP_PRODUCT_ID) },
 	{ USB_DEVICE(MICROSOFT_VENDOR_ID, MICROSOFT_00CE_ID) },
 	{ USB_DEVICE(PORTATEC_VENDOR_ID, PORTATEC_PRODUCT_ID) },
+	{ USB_DEVICE(ROVER_VENDOR_ID, ROVER_P5_ID) },
 	{ USB_DEVICE(SAGEM_VENDOR_ID, SAGEM_WIRELESS_ID) },
 	{ USB_DEVICE(SOCKET_VENDOR_ID, SOCKET_PRODUCT_ID) },
 	{ USB_DEVICE(TOSHIBA_VENDOR_ID, TOSHIBA_PRODUCT_ID) },
+	{ USB_DEVICE(TOSHIBA_VENDOR_ID, TOSHIBA_E310_ID) },
 	{ USB_DEVICE(TOSHIBA_VENDOR_ID, TOSHIBA_E740_ID) },
+	{ USB_DEVICE(TOSHIBA_VENDOR_ID, TOSHIBA_E335_ID) },
 	{ USB_DEVICE(HTC_VENDOR_ID, HTC_PRODUCT_ID) },
 	{ USB_DEVICE(NEC_VENDOR_ID, NEC_PRODUCT_ID) },
 	{ USB_DEVICE(ASUS_VENDOR_ID, ASUS_A600_PRODUCT_ID) },
@@ -338,7 +341,7 @@ static void ipaq_read_bulk_callback(struct urb *urb, struct pt_regs *regs)
 	usb_serial_debug_data (__FILE__, __FUNCTION__, urb->actual_length, data);
 
 	tty = port->tty;
-	if (urb->actual_length) {
+	if (tty && urb->actual_length) {
 		for (i = 0; i < urb->actual_length ; ++i) {
 			/* if we insert more than TTY_FLIPBUF_SIZE characters, we drop them. */
 			if(tty->flip.count >= TTY_FLIPBUF_SIZE) {
@@ -552,8 +555,12 @@ static void ipaq_destroy_lists(struct usb_serial_port *port)
 static int ipaq_startup(struct usb_serial *serial)
 {
 	dbg("%s", __FUNCTION__);
-	usb_set_configuration(serial->dev, 1);
-	return 0;
+	if (serial->dev->actconfig->desc.bConfigurationValue != 1) {
+		err("active config #%d != 1 ??",
+			serial->dev->actconfig->desc.bConfigurationValue);
+		return -ENODEV;
+	}
+	return usb_reset_configuration (serial->dev);
 }
 
 static void ipaq_shutdown(struct usb_serial *serial)
@@ -563,16 +570,25 @@ static void ipaq_shutdown(struct usb_serial *serial)
 
 static int __init ipaq_init(void)
 {
+	int retval;
 	spin_lock_init(&write_list_lock);
-	usb_serial_register(&ipaq_device);
+	retval = usb_serial_register(&ipaq_device);
+	if (retval) 
+		goto failed_usb_serial_register;
 	info(DRIVER_DESC " " DRIVER_VERSION);
 	if (vendor) {
 		ipaq_id_table[0].idVendor = vendor;
 		ipaq_id_table[0].idProduct = product;
 	}
-	usb_register(&ipaq_driver);
-
+	retval = usb_register(&ipaq_driver);
+	if (retval)
+		goto failed_usb_register;
+		  
 	return 0;
+failed_usb_register:
+	usb_serial_deregister(&ipaq_device);
+failed_usb_serial_register:
+	return retval;
 }
 
 

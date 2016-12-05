@@ -14,8 +14,8 @@
 #include <linux/limits.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/parser.h>
 #include <linux/smp_lock.h>
-#include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -136,34 +136,47 @@ static struct super_operations proc_sops = {
 	.statfs		= simple_statfs,
 };
 
+enum {
+	Opt_uid, Opt_gid, Opt_err
+};
+
+static match_table_t tokens = {
+	{Opt_uid, "uid=%u"},
+	{Opt_gid, "gid=%u"},
+	{Opt_err, NULL}
+};
+
 static int parse_options(char *options,uid_t *uid,gid_t *gid)
 {
-	char *this_char,*value;
+	char *p;
+	int option;
 
 	*uid = current->uid;
 	*gid = current->gid;
 	if (!options)
 		return 1;
-	while ((this_char = strsep(&options,",")) != NULL) {
-		if (!*this_char)
+
+	while ((p = strsep(&options, ",")) != NULL) {
+		substring_t args[MAX_OPT_ARGS];
+		int token;
+		if (!*p)
 			continue;
-		if ((value = strchr(this_char,'=')) != NULL)
-			*value++ = 0;
-		if (!strcmp(this_char,"uid")) {
-			if (!value || !*value)
+
+		token = match_token(p, tokens, args);
+		switch (token) {
+		case Opt_uid:
+			if (match_int(args, &option))
 				return 0;
-			*uid = simple_strtoul(value,&value,0);
-			if (*value)
+			*uid = option;
+			break;
+		case Opt_gid:
+			if (match_int(args, &option))
 				return 0;
+			*gid = option;
+			break;
+		default:
+			return 0;
 		}
-		else if (!strcmp(this_char,"gid")) {
-			if (!value || !*value)
-				return 0;
-			*gid = simple_strtoul(value,&value,0);
-			if (*value)
-				return 0;
-		}
-		else return 1;
 	}
 	return 1;
 }
@@ -204,8 +217,6 @@ printk("proc_iget: using deleted entry %s, count=%d\n", de->name, atomic_read(&d
 			inode->i_op = de->proc_iops;
 		if (de->proc_fops)
 			inode->i_fop = de->proc_fops;
-		else if (S_ISBLK(de->mode)||S_ISCHR(de->mode)||S_ISFIFO(de->mode))
-			init_special_inode(inode,de->mode,kdev_t_to_nr(de->rdev));
 	}
 
 out:

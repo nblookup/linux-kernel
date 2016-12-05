@@ -50,7 +50,7 @@ EXPORT_SYMBOL(nr_swap_pages);
  * Used by page_zone() to look up the address of the struct zone whose
  * id is encoded in the upper bits of page->flags
  */
-struct zone *zone_table[MAX_NR_ZONES*MAX_NR_NODES];
+struct zone *zone_table[MAX_NR_ZONES*MAX_NUMNODES];
 EXPORT_SYMBOL(zone_table);
 
 static char *zone_names[MAX_NR_ZONES] = { "DMA", "Normal", "HighMem" };
@@ -220,6 +220,7 @@ static inline void free_pages_check(const char *function, struct page *page)
 			1 << PG_locked	|
 			1 << PG_active	|
 			1 << PG_reclaim	|
+			1 << PG_slab	|
 			1 << PG_writeback )))
 		bad_page(function, page);
 	if (PageDirty(page))
@@ -331,6 +332,7 @@ static void prep_new_page(struct page *page, int order)
 	page->flags &= ~(1 << PG_uptodate | 1 << PG_error |
 			1 << PG_referenced | 1 << PG_arch_1 |
 			1 << PG_checked | 1 << PG_mappedtodisk);
+	page->private = 0;
 	set_page_refs(page, order);
 }
 
@@ -387,7 +389,7 @@ static int rmqueue_bulk(struct zone *zone, unsigned int order,
 	return allocated;
 }
 
-#ifdef CONFIG_SOFTWARE_SUSPEND
+#ifdef CONFIG_PM
 int is_head_of_free_region(struct page *page)
 {
         struct zone *zone = page_zone(page);
@@ -434,7 +436,7 @@ void drain_local_pages(void)
 	}
 	local_irq_restore(flags);	
 }
-#endif /* CONFIG_SOFTWARE_SUSPEND */
+#endif /* CONFIG_PM */
 
 /*
  * Free a 0-order page
@@ -518,7 +520,8 @@ static struct page *buffered_rmqueue(struct zone *zone, int order, int cold)
  *
  * Herein lies the mysterious "incremental min".  That's the
  *
- *	min += z->pages_low;
+ *	local_low = z->pages_low;
+ *	min += local_low;
  *
  * thing.  The intent here is to provide additional protection to low zones for
  * allocation requests which _could_ use higher zones.  So a GFP_HIGHMEM
@@ -536,13 +539,13 @@ __alloc_pages(unsigned int gfp_mask, unsigned int order,
 	unsigned long min;
 	struct zone **zones, *classzone;
 	struct page *page;
+	struct reclaim_state reclaim_state;
+	struct task_struct *p = current;
 	int i;
 	int cold;
 	int do_retry;
-	struct reclaim_state reclaim_state;
 
-	if (wait)
-		might_sleep();
+	might_sleep_if(wait);
 
 	cold = 0;
 	if (gfp_mask & __GFP_COLD)
@@ -557,8 +560,17 @@ __alloc_pages(unsigned int gfp_mask, unsigned int order,
 	min = 1UL << order;
 	for (i = 0; zones[i] != NULL; i++) {
 		struct zone *z = zones[i];
+		unsigned long local_low;
 
-		min += z->pages_low;
+		/*
+		 * This is the fabled 'incremental min'. We let real-time tasks
+		 * dip their real-time paws a little deeper into reserves.
+		 */
+		local_low = z->pages_low;
+		if (rt_task(p))
+			local_low >>= 1;
+		min += local_low;
+
 		if (z->free_pages >= min ||
 				(!wait && z->free_pages >= z->pages_high)) {
 			page = buffered_rmqueue(z, order, cold);
@@ -581,6 +593,8 @@ __alloc_pages(unsigned int gfp_mask, unsigned int order,
 		local_min = z->pages_min;
 		if (gfp_mask & __GFP_HIGH)
 			local_min >>= 2;
+		if (rt_task(p))
+			local_min >>= 1;
 		min += local_min;
 		if (z->free_pages >= min ||
 				(!wait && z->free_pages >= z->pages_high)) {
@@ -594,7 +608,7 @@ __alloc_pages(unsigned int gfp_mask, unsigned int order,
 	/* here we're in the low on memory slow path */
 
 rebalance:
-	if ((current->flags & (PF_MEMALLOC | PF_MEMDIE)) && !in_interrupt()) {
+	if ((p->flags & (PF_MEMALLOC | PF_MEMDIE)) && !in_interrupt()) {
 		/* go through the zonelist yet again, ignoring mins */
 		for (i = 0; zones[i] != NULL; i++) {
 			struct zone *z = zones[i];
@@ -610,14 +624,14 @@ rebalance:
 	if (!wait)
 		goto nopage;
 
-	current->flags |= PF_MEMALLOC;
+	p->flags |= PF_MEMALLOC;
 	reclaim_state.reclaimed_slab = 0;
-	current->reclaim_state = &reclaim_state;
+	p->reclaim_state = &reclaim_state;
 
 	try_to_free_pages(classzone, gfp_mask, order);
 
-	current->reclaim_state = NULL;
-	current->flags &= ~PF_MEMALLOC;
+	p->reclaim_state = NULL;
+	p->flags &= ~PF_MEMALLOC;
 
 	/* go through the zonelist yet one more time */
 	min = 1UL << order;
@@ -657,13 +671,15 @@ nopage:
 	if (!(gfp_mask & __GFP_NOWARN)) {
 		printk("%s: page allocation failure."
 			" order:%d, mode:0x%x\n",
-			current->comm, order, gfp_mask);
+			p->comm, order, gfp_mask);
 	}
 	return NULL;
 got_pg:
 	kernel_map_pages(page, 1 << order, 1);
 	return page;
 }
+
+EXPORT_SYMBOL(__alloc_pages);
 
 /*
  * Common helper functions.
@@ -677,6 +693,8 @@ unsigned long __get_free_pages(unsigned int gfp_mask, unsigned int order)
 		return 0;
 	return (unsigned long) page_address(page);
 }
+
+EXPORT_SYMBOL(__get_free_pages);
 
 unsigned long get_zeroed_page(unsigned int gfp_mask)
 {
@@ -697,6 +715,8 @@ unsigned long get_zeroed_page(unsigned int gfp_mask)
 	return 0;
 }
 
+EXPORT_SYMBOL(get_zeroed_page);
+
 void __pagevec_free(struct pagevec *pvec)
 {
 	int i = pagevec_count(pvec);
@@ -715,6 +735,8 @@ void __free_pages(struct page *page, unsigned int order)
 	}
 }
 
+EXPORT_SYMBOL(__free_pages);
+
 void free_pages(unsigned long addr, unsigned int order)
 {
 	if (addr != 0) {
@@ -722,6 +744,8 @@ void free_pages(unsigned long addr, unsigned int order)
 		__free_pages(virt_to_page(addr), order);
 	}
 }
+
+EXPORT_SYMBOL(free_pages);
 
 /*
  * Total amount of free (allocatable) RAM:
@@ -736,6 +760,7 @@ unsigned int nr_free_pages(void)
 
 	return sum;
 }
+
 EXPORT_SYMBOL(nr_free_pages);
 
 unsigned int nr_used_zone_pages(void)
@@ -902,6 +927,8 @@ void si_meminfo(struct sysinfo *val)
 #endif
 	val->mem_unit = PAGE_SIZE;
 }
+
+EXPORT_SYMBOL(si_meminfo);
 
 #ifdef CONFIG_NUMA
 void si_meminfo_node(struct sysinfo *val, int nid)
@@ -1370,6 +1397,8 @@ void __init free_area_init_node(int nid, struct pglist_data *pgdat,
 static bootmem_data_t contig_bootmem_data;
 struct pglist_data contig_page_data = { .bdata = &contig_bootmem_data };
 
+EXPORT_SYMBOL(contig_page_data);
+
 void __init free_area_init(unsigned long *zones_size)
 {
 	free_area_init_node(0, &contig_page_data, NULL, zones_size,
@@ -1609,7 +1638,7 @@ void setup_per_zone_pages_min(void)
  *	changes.
  */
 int min_free_kbytes_sysctl_handler(ctl_table *table, int write, 
-		struct file *file, void *buffer, size_t *length)
+		struct file *file, void __user *buffer, size_t *length)
 {
 	proc_dointvec(table, write, file, buffer, length);
 	setup_per_zone_pages_min();

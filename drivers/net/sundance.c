@@ -87,11 +87,15 @@
 	Version LK1.09 (D-Link):
 	- Fix the flowctrl bug.	
 	- Set Pause bit in MII ANAR if flow control enabled.	
+
+	Version LK1.09a (ICPlus):
+	- Add the delay time in reading the contents of EEPROM
+
 */
 
 #define DRV_NAME	"sundance"
 #define DRV_VERSION	"1.01+LK1.09a"
-#define DRV_RELDATE	"16-May-2003"
+#define DRV_RELDATE	"10-Jul-2003"
 
 
 /* The user-configurable values.
@@ -280,7 +284,7 @@ IVc. Errata
 #define USE_IO_OPS 1
 #endif
 
-static struct pci_device_id sundance_pci_tbl[] __devinitdata = {
+static struct pci_device_id sundance_pci_tbl[] = {
 	{0x1186, 0x1002, 0x1186, 0x1002, 0, 0, 0},
 	{0x1186, 0x1002, 0x1186, 0x1003, 0, 0, 1},
 	{0x1186, 0x1002, 0x1186, 0x1012, 0, 0, 2},
@@ -730,7 +734,7 @@ err_out_res:
 #endif
 	pci_release_regions(pdev);
 err_out_netdev:
-	kfree (dev);
+	free_netdev (dev);
 	return -ENODEV;
 }
 
@@ -744,12 +748,14 @@ static int change_mtu(struct net_device *dev, int new_mtu)
 	return 0;
 }
 
+#define eeprom_delay(ee_addr)	readl(ee_addr)
 /* Read the EEPROM and MII Management Data I/O (MDIO) interfaces. */
 static int __devinit eeprom_read(long ioaddr, int location)
 {
-	int boguscnt = 1000;		/* Typical 190 ticks. */
+	int boguscnt = 10000;		/* Typical 1900 ticks. */
 	writew(0x0200 | (location & 0xff), ioaddr + EECtrl);
 	do {
+		eeprom_delay(ioaddr + EECtrl);
 		if (! (readw(ioaddr + EECtrl) & 0x8000)) {
 			return readw(ioaddr + EEData);
 		}
@@ -1578,7 +1584,7 @@ static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
 			struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
 			strcpy(info.driver, DRV_NAME);
 			strcpy(info.version, DRV_VERSION);
-			strcpy(info.bus_info, np->pci_dev->slot_name);
+			strcpy(info.bus_info, pci_name(np->pci_dev));
 			memset(&info.fw_version, 0, sizeof(info.fw_version));
 			if (copy_to_user(useraddr, &info, sizeof(info)))
 				return -EFAULT;
@@ -1784,7 +1790,7 @@ static void __devexit sundance_remove1 (struct pci_dev *pdev)
 #ifndef USE_IO_OPS
 		iounmap((char *)(dev->base_addr));
 #endif
-		kfree(dev);
+		free_netdev(dev);
 		pci_set_drvdata(pdev, NULL);
 	}
 }

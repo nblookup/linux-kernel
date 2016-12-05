@@ -681,6 +681,8 @@ static struct sk_buff * pfkey_xfrm_state2msg(struct xfrm_state *x, int add_keys,
 	}
 
 	sa->sadb_sa_flags = 0;
+	if (x->props.flags & XFRM_STATE_NOECN)
+		sa->sadb_sa_flags |= SADB_SAFLAGS_NOECN;
 
 	/* hard time */
 	if (hsc & 2) {
@@ -957,6 +959,8 @@ static struct xfrm_state * pfkey_msg2xfrm_state(struct sadb_msg *hdr,
 	x->id.proto = proto;
 	x->id.spi = sa->sadb_sa_spi;
 	x->props.replay_window = sa->sadb_sa_replay;
+	if (sa->sadb_sa_flags & SADB_SAFLAGS_NOECN)
+		x->props.flags |= XFRM_STATE_NOECN;
 
 	lifetime = (struct sadb_lifetime*) ext_hdrs[SADB_EXT_LIFETIME_HARD-1];
 	if (lifetime != NULL) {
@@ -1099,7 +1103,7 @@ static int pfkey_getspi(struct sock *sk, struct sk_buff *skb, struct sadb_msg *h
 	struct sadb_msg *out_hdr;
 	struct xfrm_state *x = NULL;
 	u8 mode;
-	u16 reqid;
+	u32 reqid;
 	u8 proto;
 	unsigned short family;
 	xfrm_address_t *xsaddr = NULL, *xdaddr = NULL;
@@ -1496,7 +1500,7 @@ static int pfkey_promisc(struct sock *sk, struct sk_buff *skb, struct sadb_msg *
 static int check_reqid(struct xfrm_policy *xp, int dir, int count, void *ptr)
 {
 	int i;
-	u16 reqid = *(u16*)ptr;
+	u32 reqid = *(u32*)ptr;
 
 	for (i=0; i<xp->xfrm_nr; i++) {
 		if (xp->xfrm_vec[i].reqid == reqid)
@@ -1505,10 +1509,10 @@ static int check_reqid(struct xfrm_policy *xp, int dir, int count, void *ptr)
 	return 0;
 }
 
-static u16 gen_reqid(void)
+static u32 gen_reqid(void)
 {
-	u16 start;
-	static u16 reqid = IPSEC_MANUAL_REQID_MAX;
+	u32 start;
+	static u32 reqid = IPSEC_MANUAL_REQID_MAX;
 
 	start = reqid;
 	do {
@@ -1771,6 +1775,7 @@ static void pfkey_xfrm_policy2msg(struct sk_buff *skb, struct xfrm_policy *xp, i
 			size -= 2*socklen;
 		rq = (void*)skb_put(skb, req_size);
 		pol->sadb_x_policy_len += req_size/8;
+		memset(rq, 0, sizeof(*rq));
 		rq->sadb_x_ipsecrequest_len = req_size;
 		rq->sadb_x_ipsecrequest_proto = t->id.proto;
 		rq->sadb_x_ipsecrequest_mode = t->mode+1;
@@ -2839,3 +2844,4 @@ static int __init ipsec_pfkey_init(void)
 module_init(ipsec_pfkey_init);
 module_exit(ipsec_pfkey_exit);
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_NETPROTO(PF_KEY);

@@ -29,7 +29,6 @@
  */
 
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -44,7 +43,7 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/pci.h>
-#include <linux/mca.h>
+#include <linux/mca-legacy.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -1151,14 +1150,14 @@ static int __init smctr_chk_isa(struct net_device *dev)
                 if(smctr_read_584_chksum(ioaddr))
                 {
                         printk(KERN_ERR "%s: EEPROM Checksum Failure\n", dev->name);
-                        goto out3;
+			free_irq(dev->irq, dev);
+                        goto out2;
                 }
 		*/
         }
 
         return (0);
-out3:
-	free_irq(dev->irq, dev);
+
 out2:
 	release_region(ioaddr, SMCTR_IO_EXTENT);
 out:
@@ -5730,7 +5729,7 @@ void cleanup_module(void)
 		if (dev) {
 			unregister_netdev(dev);
 			cleanup_card(dev);
-			kfree(dev);
+			free_netdev(dev);
 		}
         }
 }

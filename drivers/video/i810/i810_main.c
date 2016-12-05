@@ -56,6 +56,57 @@
 #include "i810.h"
 #include "i810_main.h"
 
+/* PCI */
+static const char *i810_pci_list[] __devinitdata = {
+	"Intel(R) 810 Framebuffer Device"                                 ,
+	"Intel(R) 810-DC100 Framebuffer Device"                           ,
+	"Intel(R) 810E Framebuffer Device"                                ,
+	"Intel(R) 815 (Internal Graphics 100Mhz FSB) Framebuffer Device"  ,
+	"Intel(R) 815 (Internal Graphics only) Framebuffer Device"        ,
+	"Intel(R) 815 (Internal Graphics with AGP) Framebuffer Device"
+};
+
+static struct pci_device_id i810fb_pci_tbl[] = {
+	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82810_IG1,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82810_IG3,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1  },
+	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82810E_IG,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 2 },
+	/* mvo: added i815 PCI-ID */
+	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82815_100,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 3 },
+	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82815_NOAGP,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 4 },
+	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82815_CGC,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 5 },
+	{ 0 },
+};
+
+static struct pci_driver i810fb_driver = {
+	.name     =	"i810fb",
+	.id_table =	i810fb_pci_tbl,
+	.probe    =	i810fb_init_pci,
+	.remove   =	__exit_p(i810fb_remove_pci),
+	.suspend  =     i810fb_suspend,
+	.resume   =     i810fb_resume,
+};
+
+static int vram       __initdata = 4;
+static int bpp        __initdata = 8;
+static int mtrr       __initdata = 0;
+static int accel      __initdata = 0;
+static int hsync1     __initdata = 0;
+static int hsync2     __initdata = 0;
+static int vsync1     __initdata = 0;
+static int vsync2     __initdata = 0;
+static int xres       __initdata = 640;
+static int yres       __initdata = 480;
+static int vyres      __initdata = 0;
+static int sync       __initdata = 0;
+static int ext_vga    __initdata = 0;
+static int dcolor     __initdata = 0;
+
 /*------------------------------------------------------------*/
 
 /**************************************************************
@@ -1405,7 +1456,7 @@ static int i810fb_cursor(struct fb_info *info, struct fb_cursor *cursor)
 	return 0;
 }
 
-static struct fb_ops i810fb_ops __initdata = {
+static struct fb_ops i810fb_ops __devinitdata = {
 	.owner =             THIS_MODULE,
 	.fb_open =           i810fb_open,
 	.fb_release =        i810fb_release,
@@ -1487,7 +1538,7 @@ static int i810fb_resume(struct pci_dev *dev)
  *                  AGP resource allocation                            *
  ***********************************************************************/
   
-static void __init i810_fix_pointers(struct i810fb_par *par)
+static void __devinit i810_fix_pointers(struct i810fb_par *par)
 {
       	par->fb.physical = par->aperture.physical+(par->fb.offset << 12);
 	par->fb.virtual = par->aperture.virtual+(par->fb.offset << 12);
@@ -1499,7 +1550,7 @@ static void __init i810_fix_pointers(struct i810fb_par *par)
 		(par->cursor_heap.offset << 12);
 }
 
-static void __init i810_fix_offsets(struct i810fb_par *par)
+static void __devinit i810_fix_offsets(struct i810fb_par *par)
 {
 	if (vram + 1 > par->aperture.size >> 20)
 		vram = (par->aperture.size >> 20) - 1;
@@ -1519,7 +1570,7 @@ static void __init i810_fix_offsets(struct i810fb_par *par)
 	par->cursor_heap.size = 4096;
 }
 
-static int __init i810_alloc_agp_mem(struct fb_info *info)
+static int __devinit i810_alloc_agp_mem(struct fb_info *info)
 {
 	struct i810fb_par *par = (struct i810fb_par *) info->par;
 	int size;
@@ -1584,7 +1635,7 @@ static int __init i810_alloc_agp_mem(struct fb_info *info)
  * Sets the the user monitor's horizontal and vertical
  * frequency limits
  */
-static void __init i810_init_monspecs(struct fb_info *info)
+static void __devinit i810_init_monspecs(struct fb_info *info)
 {
 	if (!hsync1)
 		hsync1 = HFMIN;
@@ -1612,7 +1663,7 @@ static void __init i810_init_monspecs(struct fb_info *info)
  * @par: pointer to i810fb_par structure
  * @info: pointer to current fb_info structure
  */
-static void __init i810_init_defaults(struct i810fb_par *par, 
+static void __devinit i810_init_defaults(struct i810fb_par *par, 
 				      struct fb_info *info)
 {
 	if (voffset) 
@@ -1656,7 +1707,7 @@ static void __init i810_init_defaults(struct i810fb_par *par,
  * i810_init_device - initialize device
  * @par: pointer to i810fb_par structure
  */
-static void __init i810_init_device(struct i810fb_par *par)
+static void __devinit i810_init_device(struct i810fb_par *par)
 {
 	u8 reg, *mmio = par->mmio_start_virtual;
 
@@ -1675,7 +1726,7 @@ static void __init i810_init_device(struct i810fb_par *par)
 	par->mem_freq = (reg) ? 133 : 100;
 }
 
-static int __init 
+static int __devinit 
 i810_allocate_pci_resource(struct i810fb_par *par, 
 			   const struct pci_device_id *entry)
 {
@@ -1780,7 +1831,7 @@ int __init i810fb_setup(char *options)
 	return 0;
 }
 
-static int __init i810fb_init_pci (struct pci_dev *dev, 
+static int __devinit i810fb_init_pci (struct pci_dev *dev, 
 				   const struct pci_device_id *entry)
 {
 	struct fb_info    *info;

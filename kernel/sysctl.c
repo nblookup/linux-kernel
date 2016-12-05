@@ -19,6 +19,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/swap.h>
 #include <linux/slab.h>
@@ -35,6 +36,7 @@
 #include <linux/writeback.h>
 #include <linux/hugetlb.h>
 #include <linux/security.h>
+#include <linux/initrd.h>
 #include <asm/uaccess.h>
 
 #ifdef CONFIG_ROOT_NFS
@@ -87,6 +89,11 @@ extern char reboot_command [];
 extern int stop_a_enabled;
 #endif
 
+#ifdef __hppa__
+extern int pwrsw_enabled;
+extern int unaligned_enabled;
+#endif
+
 #ifdef CONFIG_ARCH_S390
 #ifdef CONFIG_MATHEMU
 extern int sysctl_ieee_emulation_warnings;
@@ -130,15 +137,12 @@ extern ctl_table random_table[];
 
 static ssize_t proc_readsys(struct file *, char __user *, size_t, loff_t *);
 static ssize_t proc_writesys(struct file *, const char __user *, size_t, loff_t *);
-static int proc_sys_permission(struct inode *, int, struct nameidata *);
+static int proc_opensys(struct inode *, struct file *);
 
 struct file_operations proc_sys_file_operations = {
+	.open		= proc_opensys,
 	.read		= proc_readsys,
 	.write		= proc_writesys,
-};
-
-static struct inode_operations proc_sys_inode_operations = {
-	.permission	= proc_sys_permission,
 };
 
 extern struct proc_dir_entry *proc_sys_root;
@@ -312,6 +316,30 @@ static ctl_table kern_table[] = {
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec,
 	},
+#endif
+#ifdef __hppa__
+	{
+		.ctl_name	= KERN_HPPA_PWRSW,
+		.procname	= "soft-power",
+		.data		= &pwrsw_enabled,
+		.maxlen		= sizeof (int),
+	 	.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_HPPA_UNALIGNED,
+		.procname	= "unaligned-trap",
+		.data		= &unaligned_enabled,
+		.maxlen		= sizeof (int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+#endif
+#ifdef __hppa__
+	{KERN_HPPA_PWRSW, "soft-power", &pwrsw_enabled, sizeof (int),
+	 0644, NULL, &proc_dointvec},
+	{KERN_HPPA_UNALIGNED, "unaligned-trap", &unaligned_enabled, sizeof (int),
+	 0644, NULL, &proc_dointvec},
 #endif
 #if defined(CONFIG_PPC32) && defined(CONFIG_6xx)
 	{
@@ -556,7 +584,7 @@ static ctl_table kern_table[] = {
 
 /* Constants for minimum and maximum testing in vm_table.
    We use these as one-element integer vectors. */
-static int zero = 0;
+static int zero;
 static int one_hundred = 100;
 
 
@@ -613,7 +641,7 @@ static ctl_table vm_table[] = {
 		.data		= &dirty_writeback_centisecs,
 		.maxlen		= sizeof(dirty_writeback_centisecs),
 		.mode		= 0644,
-		.proc_handler	= dirty_writeback_centisecs_handler,
+		.proc_handler	= &dirty_writeback_centisecs_handler,
 	},
 	{
 		.ctl_name	= VM_DIRTY_EXPIRE_CS,
@@ -819,11 +847,28 @@ int do_sysctl(int __user *name, int nlen, void __user *oldval, size_t __user *ol
 asmlinkage long sys_sysctl(struct __sysctl_args __user *args)
 {
 	struct __sysctl_args tmp;
+	int name[2];
 	int error;
 
 	if (copy_from_user(&tmp, args, sizeof(tmp)))
 		return -EFAULT;
-		
+	
+	if (tmp.nlen != 2 || copy_from_user(name, tmp.name, sizeof(name)) ||
+	    name[0] != CTL_KERN || name[1] != KERN_VERSION) { 
+		int i;
+		printk(KERN_INFO "%s: numerical sysctl ", current->comm); 
+		for (i = 0; i < tmp.nlen; i++) {
+			int n;
+			
+			if (get_user(n, tmp.name+i)) {
+				printk("? ");
+			} else {
+				printk("%d ", n);
+			}
+		}
+		printk("is obsolete.\n");
+	} 
+
 	lock_kernel();
 	error = do_sysctl(tmp.name, tmp.nlen, tmp.oldval, tmp.oldlenp,
 			  tmp.newval, tmp.newlen);
@@ -1093,10 +1138,8 @@ static void register_proc_table(ctl_table * table, struct proc_dir_entry *root)
 			if (!de)
 				continue;
 			de->data = (void *) table;
-			if (table->proc_handler) {
+			if (table->proc_handler)
 				de->proc_fops = &proc_sys_file_operations;
-				de->proc_iops = &proc_sys_inode_operations;
-			}
 		}
 		table->de = de;
 		if (de->mode & S_IFDIR)
@@ -1165,6 +1208,20 @@ static ssize_t do_rw_proc(int write, struct file * file, char __user * buf,
 	return res;
 }
 
+static int proc_opensys(struct inode *inode, struct file *file)
+{
+	if (file->f_mode & FMODE_WRITE) {
+		/*
+		 * sysctl entries that are not writable,
+		 * are _NOT_ writable, capabilities or not.
+		 */
+		if (!(inode->i_mode & S_IWUSR))
+			return -EPERM;
+	}
+
+	return 0;
+}
+
 static ssize_t proc_readsys(struct file * file, char __user * buf,
 			    size_t count, loff_t *ppos)
 {
@@ -1175,11 +1232,6 @@ static ssize_t proc_writesys(struct file * file, const char __user * buf,
 			     size_t count, loff_t *ppos)
 {
 	return do_rw_proc(1, file, (char __user *) buf, count, ppos);
-}
-
-static int proc_sys_permission(struct inode *inode, int op, struct nameidata *nd)
-{
-	return test_perm(inode->i_mode, op);
 }
 
 /**
@@ -1947,3 +1999,19 @@ void unregister_sysctl_table(struct ctl_table_header * table)
 }
 
 #endif /* CONFIG_SYSCTL */
+
+/*
+ * No sense putting this after each symbol definition, twice,
+ * exception granted :-)
+ */
+EXPORT_SYMBOL(proc_dointvec);
+EXPORT_SYMBOL(proc_dointvec_jiffies);
+EXPORT_SYMBOL(proc_dointvec_minmax);
+EXPORT_SYMBOL(proc_dostring);
+EXPORT_SYMBOL(proc_doulongvec_minmax);
+EXPORT_SYMBOL(proc_doulongvec_ms_jiffies_minmax);
+EXPORT_SYMBOL(register_sysctl_table);
+EXPORT_SYMBOL(sysctl_intvec);
+EXPORT_SYMBOL(sysctl_jiffies);
+EXPORT_SYMBOL(sysctl_string);
+EXPORT_SYMBOL(unregister_sysctl_table);

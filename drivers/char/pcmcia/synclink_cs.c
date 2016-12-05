@@ -1,7 +1,7 @@
 /*
  * linux/drivers/char/pcmcia/synclink_cs.c
  *
- * $Id: synclink_cs.c,v 4.13 2003/06/18 15:29:32 paulkf Exp $
+ * $Id: synclink_cs.c,v 4.15 2003/09/05 15:26:02 paulkf Exp $
  *
  * Device driver for Microgate SyncLink PC Card
  * multiprotocol serial adapter.
@@ -37,7 +37,6 @@
 
 #include <linux/config.h>	
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -491,7 +490,7 @@ MODULE_PARM(dosyncppp,"1-" __MODULE_STRING(MAX_DEVICE_COUNT) "i");
 MODULE_LICENSE("GPL");
 
 static char *driver_name = "SyncLink PC Card driver";
-static char *driver_version = "$Revision: 4.13 $";
+static char *driver_version = "$Revision: 4.15 $";
 
 static struct tty_driver *serial_driver;
 
@@ -725,14 +724,6 @@ static void mgslpc_release(u_long arg)
     if (debug_level >= DEBUG_LEVEL_INFO)
 	    printk("mgslpc_release(0x%p)\n", link);
 
-    if (link->open) {
-	    if (debug_level >= DEBUG_LEVEL_INFO)
-		    printk("synclink_cs: release postponed, '%s' still open\n",
-			   link->dev->dev_name);
-	    link->state |= DEV_STALE_CONFIG;
-	    return;
-    }
-
     /* Unlink the device chain */
     link->dev = NULL;
     link->state &= ~DEV_CONFIG;
@@ -838,6 +829,9 @@ static inline int mgslpc_paranoia_check(MGSLPC_INFO *info,
 		printk(badmagic, name, routine);
 		return 1;
 	}
+#else
+	if (!info)
+		return 1;
 #endif
 	return 0;
 }
@@ -2814,7 +2808,7 @@ static int mgslpc_open(struct tty_struct *tty, struct file * filp)
 	/* verify range of specified line number */	
 	line = tty->index;
 	if ((line < 0) || (line >= mgslpc_device_count)) {
-		printk("%s(%d):mgslpc_open with illegal line #%d.\n",
+		printk("%s(%d):mgslpc_open with invalid line #%d.\n",
 			__FILE__,__LINE__,line);
 		return -ENODEV;
 	}
@@ -4238,7 +4232,7 @@ void mgslpc_sppp_init(MGSLPC_INFO *info)
 	d->tx_timeout = mgslpc_sppp_tx_timeout;
 	d->watchdog_timeo = 10*HZ;
 
-	if (register_netdev(d) == -1) {
+	if (register_netdev(d)) {
 		printk(KERN_WARNING "%s: register_netdev failed.\n", d->name);
 		sppp_detach(info->netdev);
 		return;

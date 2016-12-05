@@ -9,8 +9,6 @@
 #include <linux/agp_backend.h>
 #include "agp.h"
 
-static int agp_try_unsupported __initdata = 0;
-
 static int ali_fetch_size(void)
 {
 	int i;
@@ -78,7 +76,7 @@ static int ali_configure(void)
 	pci_write_config_dword(agp_bridge->dev, ALI_TLBCTRL, ((temp & 0xffffff00) | 0x00000010));
 
 	/* address to map to */
-	pci_read_config_dword(agp_bridge->dev, ALI_APBASE, &temp);
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 
 #if 0
@@ -233,7 +231,7 @@ struct agp_bridge_driver ali_m1541_bridge = {
 };
 
 
-struct agp_device_ids ali_agp_device_ids[] __initdata =
+static struct agp_device_ids ali_agp_device_ids[] __devinitdata =
 {
 	{
 		.device_id	= PCI_DEVICE_ID_AL_M1541,
@@ -274,7 +272,7 @@ struct agp_device_ids ali_agp_device_ids[] __initdata =
 	{ }, /* dummy final entry, always present */
 };
 
-static int __init agp_ali_probe(struct pci_dev *pdev,
+static int __devinit agp_ali_probe(struct pci_dev *pdev,
 				const struct pci_device_id *ent)
 {
 	struct agp_device_ids *devs = ali_agp_device_ids;
@@ -292,16 +290,10 @@ static int __init agp_ali_probe(struct pci_dev *pdev,
 			goto found;
 	}
 
-	if (!agp_try_unsupported) {
-		printk(KERN_ERR PFX
-		     "Unsupported ALi chipset (device id: %04x),"
-		     " you might want to try agp_try_unsupported=1.\n",
-		     pdev->device);
-		return -ENODEV;
-	}
+	printk(KERN_ERR PFX "Unsupported ALi chipset (device id: %04x)\n",
+	     pdev->device);
+	return -ENODEV;
 
-	printk(KERN_WARNING PFX "Trying generic ALi routines"
-	       " for device id: %04x\n", pdev->device);
 
 found:
 	bridge = agp_alloc_bridge();
@@ -328,6 +320,7 @@ found:
 			devs[j].chipset_name = "M1641";
 			break;
 		case 0x43:
+			devs[j].chipset_name = "M????";
 			break;
 		case 0x47:
 			devs[j].chipset_name = "M1647";
@@ -363,7 +356,7 @@ static void __devexit agp_ali_remove(struct pci_dev *pdev)
 	agp_put_bridge(bridge);
 }
 
-static struct pci_device_id agp_ali_pci_table[] __initdata = {
+static struct pci_device_id agp_ali_pci_table[] = {
 	{
 	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
 	.class_mask	= ~0,
@@ -397,7 +390,6 @@ static void __exit agp_ali_cleanup(void)
 module_init(agp_ali_init);
 module_exit(agp_ali_cleanup);
 
-MODULE_PARM(agp_try_unsupported, "1i");
 MODULE_AUTHOR("Dave Jones <davej@codemonkey.org.uk>");
 MODULE_LICENSE("GPL and additional rights");
 

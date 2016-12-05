@@ -32,7 +32,6 @@
  */
 
 #include <linux/config.h>
-#include <linux/version.h>
 
 #undef SERIAL_PARANOIA_CHECK
 #define SERIAL_DO_RESTART
@@ -2145,14 +2144,14 @@ static int __init rs_init(void)
 
 static __exit void rs_exit(void) 
 {
-	int e1, e2;
+	int error;
 	struct async_struct *info = rs_table[0].info;
 
 	/* printk("Unloading %s: version %s\n", serial_name, serial_version); */
 	tasklet_kill(&info->tlet);
-	if ((e1 = tty_unregister_driver(serial_driver)))
+	if ((error = tty_unregister_driver(serial_driver)))
 		printk("SERIAL: failed to unregister serial driver (%d)\n",
-		       e1);
+		       error);
 	put_tty_driver(serial_driver);
 
 	if (info) {

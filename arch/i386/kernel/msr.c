@@ -187,14 +187,14 @@ static loff_t msr_seek(struct file *file, loff_t offset, int orig)
   return ret;
 }
 
-static ssize_t msr_read(struct file * file, char * buf,
+static ssize_t msr_read(struct file * file, char __user * buf,
 			size_t count, loff_t *ppos)
 {
   u32 *tmp = (u32 *)buf;
   u32 data[2];
   size_t rv;
   u32 reg = *ppos;
-  int cpu = minor(file->f_dentry->d_inode->i_rdev);
+  int cpu = iminor(file->f_dentry->d_inode);
   int err;
 
   if ( count % 8 )
@@ -212,14 +212,14 @@ static ssize_t msr_read(struct file * file, char * buf,
   return ((char *)tmp) - buf;
 }
 
-static ssize_t msr_write(struct file * file, const char * buf,
+static ssize_t msr_write(struct file * file, const char __user * buf,
 			 size_t count, loff_t *ppos)
 {
   const u32 *tmp = (const u32 *)buf;
   u32 data[2];
   size_t rv;
   u32 reg = *ppos;
-  int cpu = minor(file->f_dentry->d_inode->i_rdev);
+  int cpu = iminor(file->f_dentry->d_inode);
   int err;
 
   if ( count % 8 )
@@ -239,10 +239,10 @@ static ssize_t msr_write(struct file * file, const char * buf,
 
 static int msr_open(struct inode *inode, struct file *file)
 {
-  int cpu = minor(file->f_dentry->d_inode->i_rdev);
+  int cpu = iminor(file->f_dentry->d_inode);
   struct cpuinfo_x86 *c = &(cpu_data)[cpu];
   
-  if ( !(cpu_online_map & (1UL << cpu)) )
+  if (!cpu_online(cpu))
     return -ENXIO;		/* No such CPU */
   if ( !cpu_has(c, X86_FEATURE_MSR) )
     return -EIO;		/* MSR not supported */

@@ -5,7 +5,7 @@
  * Changes:
  *	Mitsuru KANDA @USAGI
  * 	Kazunori MIYAZAWA @USAGI
- * 	Kunihiro Ishiguro
+ * 	Kunihiro Ishiguro <kunihiro@ipinfusion.com>
  * 		IPv6 support
  * 	
  */
@@ -201,6 +201,7 @@ static void copy_from_user_state(struct xfrm_state *x, struct xfrm_usersa_info *
 	x->props.reqid = p->reqid;
 	x->props.family = p->family;
 	x->props.saddr = p->saddr;
+	x->props.flags = p->flags;
 }
 
 static struct xfrm_state *xfrm_state_construct(struct xfrm_usersa_info *p,
@@ -305,6 +306,7 @@ static void copy_to_user_state(struct xfrm_state *x, struct xfrm_usersa_info *p)
 	p->replay_window = x->props.replay_window;
 	p->reqid = x->props.reqid;
 	p->family = x->props.family;
+	p->flags = x->props.flags;
 	p->seq = x->km.seq;
 }
 
@@ -431,9 +433,9 @@ static int verify_userspi_info(struct xfrm_userspi_info *p)
 
 	case IPPROTO_COMP:
 		/* IPCOMP spi is 16-bits. */
-		if (p->min >= 0x10000 ||
-		    p->max >= 0x10000)
+		if (p->max >= 0x10000)
 			return -EINVAL;
+		break;
 
 	default:
 		return -EINVAL;
@@ -457,8 +459,8 @@ static int xfrm_alloc_userspi(struct sk_buff *skb, struct nlmsghdr *nlh, void **
 	if (err)
 		goto out_noput;
 	x = xfrm_find_acq(p->info.mode, p->info.reqid, p->info.id.proto,
-			  &p->info.sel.daddr,
-			  &p->info.sel.saddr, 1,
+			  &p->info.id.daddr,
+			  &p->info.saddr, 1,
 			  p->info.family);
 	err = -ENOENT;
 	if (x == NULL)
@@ -468,7 +470,7 @@ static int xfrm_alloc_userspi(struct sk_buff *skb, struct nlmsghdr *nlh, void **
 
 	spin_lock_bh(&x->lock);
 	if (x->km.state != XFRM_STATE_DEAD) {
-		xfrm_alloc_spi(x, p->min, p->max);
+		xfrm_alloc_spi(x, htonl(p->min), htonl(p->max));
 		if (x->id.spi)
 			resp_skb = xfrm_state_netlink(skb, x, nlh->nlmsg_seq);
 	}
@@ -525,7 +527,7 @@ static int verify_newpolicy_info(struct xfrm_userpolicy_info *p)
 		return -EINVAL;
 	};
 
-	switch (p->family) {
+	switch (p->sel.family) {
 	case AF_INET:
 		break;
 
@@ -592,7 +594,7 @@ static void copy_from_user_policy(struct xfrm_policy *xp, struct xfrm_userpolicy
 	memcpy(&xp->lft, &p->lft, sizeof(xp->lft));
 	xp->action = p->action;
 	xp->flags = p->flags;
-	xp->family = p->family;
+	xp->family = p->sel.family;
 	/* XXX xp->share = p->share; */
 }
 
@@ -603,7 +605,7 @@ static void copy_to_user_policy(struct xfrm_policy *xp, struct xfrm_userpolicy_i
 	memcpy(&p->curlft, &xp->curlft, sizeof(p->curlft));
 	p->priority = xp->priority;
 	p->index = xp->index;
-	p->family = xp->family;
+	p->sel.family = xp->family;
 	p->dir = dir;
 	p->action = xp->action;
 	p->flags = xp->flags;
@@ -935,7 +937,7 @@ static int xfrm_user_rcv_skb(struct sk_buff *skb)
 		rlen = NLMSG_ALIGN(nlh->nlmsg_len);
 		if (rlen > skb->len)
 			rlen = skb->len;
-		if (xfrm_user_rcv_msg(skb, nlh, &err)) {
+		if (xfrm_user_rcv_msg(skb, nlh, &err) < 0) {
 			if (err == 0)
 				return -1;
 			netlink_ack(skb, nlh, err);
@@ -1193,3 +1195,4 @@ static void __exit xfrm_user_exit(void)
 
 module_init(xfrm_user_init);
 module_exit(xfrm_user_exit);
+MODULE_LICENSE("GPL");

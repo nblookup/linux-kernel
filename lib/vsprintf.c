@@ -15,6 +15,7 @@
  */
 
 #include <stdarg.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/ctype.h>
@@ -53,6 +54,8 @@ unsigned long simple_strtoul(const char *cp,char **endp,unsigned int base)
 	return result;
 }
 
+EXPORT_SYMBOL(simple_strtoul);
+
 /**
  * simple_strtol - convert a string to a signed long
  * @cp: The start of the string
@@ -65,6 +68,8 @@ long simple_strtol(const char *cp,char **endp,unsigned int base)
 		return -simple_strtoul(cp+1,endp,base);
 	return simple_strtoul(cp,endp,base);
 }
+
+EXPORT_SYMBOL(simple_strtol);
 
 /**
  * simple_strtoull - convert a string to an unsigned long long
@@ -97,6 +102,8 @@ unsigned long long simple_strtoull(const char *cp,char **endp,unsigned int base)
 	return result;
 }
 
+EXPORT_SYMBOL(simple_strtoull);
+
 /**
  * simple_strtoll - convert a string to a signed long long
  * @cp: The start of the string
@@ -127,7 +134,7 @@ static int skip_atoi(const char **s)
 #define SPECIAL	32		/* 0x */
 #define LARGE	64		/* use 'ABCDEF' instead of 'abcdef' */
 
-static char * number(char * buf, char * end, long long num, int base, int size, int precision, int type)
+static char * number(char * buf, char * end, unsigned long long num, int base, int size, int precision, int type)
 {
 	char c,sign,tmp[66];
 	const char *digits;
@@ -143,9 +150,9 @@ static char * number(char * buf, char * end, long long num, int base, int size, 
 	c = (type & ZEROPAD) ? '0' : ' ';
 	sign = 0;
 	if (type & SIGN) {
-		if (num < 0) {
+		if ((signed long long) num < 0) {
 			sign = '-';
-			num = -num;
+			num = - (signed long long) num;
 			size--;
 		} else if (type & PLUS) {
 			sign = '+';
@@ -341,7 +348,7 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
 
 			case 's':
 				s = va_arg(args, char *);
-				if (!s)
+				if ((unsigned long)s < PAGE_SIZE)
 					s = "<NULL>";
 
 				len = strnlen(s, precision);
@@ -458,6 +465,8 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list args)
 	return str-buf;
 }
 
+EXPORT_SYMBOL(vsnprintf);
+
 /**
  * snprintf - Format a string and place it in a buffer
  * @buf: The buffer to place the result into
@@ -476,6 +485,8 @@ int snprintf(char * buf, size_t size, const char *fmt, ...)
 	return i;
 }
 
+EXPORT_SYMBOL(snprintf);
+
 /**
  * vsprintf - Format a string and place it in a buffer
  * @buf: The buffer to place the result into
@@ -490,6 +501,7 @@ int vsprintf(char *buf, const char *fmt, va_list args)
 	return vsnprintf(buf, 0xFFFFFFFFUL, fmt, args);
 }
 
+EXPORT_SYMBOL(vsprintf);
 
 /**
  * sprintf - Format a string and place it in a buffer
@@ -507,6 +519,8 @@ int sprintf(char * buf, const char *fmt, ...)
 	va_end(args);
 	return i;
 }
+
+EXPORT_SYMBOL(sprintf);
 
 /**
  * vsscanf - Unformat a buffer into a list of arguments
@@ -707,6 +721,8 @@ int vsscanf(const char * buf, const char * fmt, va_list args)
 	return num;
 }
 
+EXPORT_SYMBOL(vsscanf);
+
 /**
  * sscanf - Unformat a buffer into a list of arguments
  * @buf:	input buffer
@@ -723,3 +739,5 @@ int sscanf(const char * buf, const char * fmt, ...)
 	va_end(args);
 	return i;
 }
+
+EXPORT_SYMBOL(sscanf);

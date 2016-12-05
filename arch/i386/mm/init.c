@@ -7,6 +7,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -20,9 +21,6 @@
 #include <linux/swap.h>
 #include <linux/smp.h>
 #include <linux/init.h>
-#ifdef CONFIG_BLK_DEV_INITRD
-#include <linux/blk.h>
-#endif
 #include <linux/highmem.h>
 #include <linux/pagemap.h>
 #include <linux/bootmem.h>
@@ -192,6 +190,9 @@ static inline int page_is_ram(unsigned long pagenr)
 #ifdef CONFIG_HIGHMEM
 pte_t *kmap_pte;
 pgprot_t kmap_prot;
+
+EXPORT_SYMBOL(kmap_prot);
+EXPORT_SYMBOL(kmap_pte);
 
 #define kmap_get_fixmap_pte(vaddr)					\
 	pte_offset_kernel(pmd_offset(pgd_offset_k(vaddr), (vaddr)), (vaddr))
@@ -512,20 +513,30 @@ void __init mem_init(void)
 #endif
 }
 
-#ifdef CONFIG_X86_PAE
-struct kmem_cache_s *pae_pgd_cachep;
+kmem_cache_t *pgd_cache;
+kmem_cache_t *pmd_cache;
 
 void __init pgtable_cache_init(void)
 {
-        /*
-         * PAE pgds must be 16-byte aligned:
-         */
-        pae_pgd_cachep = kmem_cache_create("pae_pgd", 32, 0,
-                SLAB_HWCACHE_ALIGN | SLAB_MUST_HWCACHE_ALIGN, NULL, NULL);
-        if (!pae_pgd_cachep)
-                panic("init_pae(): Cannot alloc pae_pgd SLAB cache");
+	if (PTRS_PER_PMD > 1) {
+		pmd_cache = kmem_cache_create("pmd",
+					PTRS_PER_PMD*sizeof(pmd_t),
+					0,
+					SLAB_HWCACHE_ALIGN | SLAB_MUST_HWCACHE_ALIGN,
+					pmd_ctor,
+					NULL);
+		if (!pmd_cache)
+			panic("pgtable_cache_init(): cannot create pmd cache");
+	}
+	pgd_cache = kmem_cache_create("pgd",
+				PTRS_PER_PGD*sizeof(pgd_t),
+				0,
+				SLAB_HWCACHE_ALIGN | SLAB_MUST_HWCACHE_ALIGN,
+				pgd_ctor,
+				PTRS_PER_PMD == 1 ? pgd_dtor : NULL);
+	if (!pgd_cache)
+		panic("pgtable_cache_init(): Cannot create pgd cache");
 }
-#endif
 
 /*
  * This function cannot be __init, since exceptions don't work in that
@@ -565,7 +576,7 @@ void free_initmem(void)
 		free_page(addr);
 		totalram_pages++;
 	}
-	printk (KERN_INFO "Freeing unused kernel memory: %dk freed\n", (&__init_end - &__init_begin) >> 10);
+	printk (KERN_INFO "Freeing unused kernel memory: %dk freed\n", (__init_end - __init_begin) >> 10);
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD

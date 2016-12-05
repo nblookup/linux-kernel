@@ -103,7 +103,7 @@ static void moan_device(const char *str, struct pci_dev *dev)
 	       KERN_WARNING "message (0x%04x,0x%04x,0x%04x,0x%04x), the\n"
 	       KERN_WARNING "manufacturer and name of serial board or\n"
 	       KERN_WARNING "modem board to rmk+serial@arm.linux.org.uk.\n",
-	       dev->slot_name, str, dev->vendor, dev->device,
+	       pci_name(dev), str, dev->vendor, dev->device,
 	       dev->subsystem_vendor, dev->subsystem_device);
 }
 
@@ -1552,8 +1552,10 @@ pciserial_init_one(struct pci_dev *dev, const struct pci_device_id *ent)
 #endif
 		
 		priv->line[i] = register_serial(&serial_req);
-		if (priv->line[i] < 0)
+		if (priv->line[i] < 0) {
+			printk(KERN_WARNING "Couldn't register serial port %s: %d\n", pci_name(dev), priv->line[i]);
 			break;
+		}
 	}
 
 	priv->nr = i;
@@ -1600,19 +1602,6 @@ static void __devexit pciserial_remove_one(struct pci_dev *dev)
 	}
 }
 
-static int pciserial_save_state_one(struct pci_dev *dev, u32 state)
-{
-	struct serial_private *priv = pci_get_drvdata(dev);
-
-	if (priv) {
-		int i;
-
-		for (i = 0; i < priv->nr; i++)
-			serial8250_suspend_port(priv->line[i], SUSPEND_SAVE_STATE);
-	}
-	return 0;
-}
-
 static int pciserial_suspend_one(struct pci_dev *dev, u32 state)
 {
 	struct serial_private *priv = pci_get_drvdata(dev);
@@ -1621,7 +1610,7 @@ static int pciserial_suspend_one(struct pci_dev *dev, u32 state)
 		int i;
 
 		for (i = 0; i < priv->nr; i++)
-			serial8250_suspend_port(priv->line[i], SUSPEND_POWER_DOWN);
+			serial8250_suspend_port(priv->line[i]);
 	}
 	return 0;
 }
@@ -1639,15 +1628,13 @@ static int pciserial_resume_one(struct pci_dev *dev)
 		if (priv->quirk->init)
 			priv->quirk->init(dev);
 
-		for (i = 0; i < priv->nr; i++) {
-			serial8250_resume_port(priv->line[i], RESUME_POWER_ON);
-			serial8250_resume_port(priv->line[i], RESUME_RESTORE_STATE);
-		}
+		for (i = 0; i < priv->nr; i++)
+			serial8250_resume_port(priv->line[i]);
 	}
 	return 0;
 }
 
-static struct pci_device_id serial_pci_tbl[] __devinitdata = {
+static struct pci_device_id serial_pci_tbl[] = {
 	{	PCI_VENDOR_ID_V3, PCI_DEVICE_ID_V3_V960,
 		PCI_SUBVENDOR_ID_CONNECT_TECH,
 		PCI_SUBDEVICE_ID_CONNECT_TECH_BH8_232, 0, 0,
@@ -2040,7 +2027,6 @@ static struct pci_driver serial_pci_driver = {
 	.name		= "serial",
 	.probe		= pciserial_init_one,
 	.remove		= __devexit_p(pciserial_remove_one),
-	.save_state	= pciserial_save_state_one,
 	.suspend	= pciserial_suspend_one,
 	.resume		= pciserial_resume_one,
 	.id_table	= serial_pci_tbl,

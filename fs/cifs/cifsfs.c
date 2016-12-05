@@ -1,7 +1,7 @@
 /*
  *   fs/cifs/cifsfs.c
  *
- *   Copyright (c) International Business Machines  Corp., 2002
+ *   Copyright (C) International Business Machines  Corp., 2002,2003
  *   Author(s): Steve French (sfrench@us.ibm.com)
  *
  *   Common Internet FileSystem (CIFS) client
@@ -28,7 +28,6 @@
 #include <linux/mount.h>
 #include <linux/slab.h>
 #include <linux/init.h>
-#include <linux/version.h>
 #include <linux/list.h>
 #include <linux/seq_file.h>
 #include <linux/vfs.h>
@@ -42,17 +41,22 @@
 #include <linux/mm.h>
 #define CIFS_MAGIC_NUMBER 0xFF534D42	/* the first four bytes of all SMB PDUs */
 
+#ifdef CIFS_QUOTA
+static struct quotactl_ops cifs_quotactl_ops;
+#endif
+
 extern struct file_system_type cifs_fs_type;
 
 int cifsFYI = 0;
 int cifsERROR = 1;
 int traceSMB = 0;
-unsigned int oplockEnabled = 0;
+unsigned int oplockEnabled = 1;
+unsigned int quotaEnabled = 0;
 unsigned int lookupCacheEnabled = 1;
 unsigned int multiuser_mount = 0;
 unsigned int extended_security = 0;
 unsigned int ntlmv2_support = 0;
-unsigned int sign_CIFS_PDUs = 0;
+unsigned int sign_CIFS_PDUs = 1;
 unsigned int CIFSMaximumBufferSize = CIFS_MAX_MSGSIZE;
 struct task_struct * oplockThread = NULL;
 
@@ -77,7 +81,6 @@ cifs_read_super(struct super_block *sb, void *data,
 	cifs_sb = CIFS_SB(sb);
 	if(cifs_sb == NULL)
 		return -ENOMEM;
-	cifs_sb->local_nls = load_nls_default();	/* needed for ASCII cp to Unicode converts */
 
 	rc = cifs_mount(sb, cifs_sb, data, devname);
 
@@ -90,10 +93,12 @@ cifs_read_super(struct super_block *sb, void *data,
 
 	sb->s_magic = CIFS_MAGIC_NUMBER;
 	sb->s_op = &cifs_super_ops;
-	if(cifs_sb->tcon->ses->server->maxBuf > MAX_CIFS_HDR_SIZE + 512)
-	    sb->s_blocksize = cifs_sb->tcon->ses->server->maxBuf - MAX_CIFS_HDR_SIZE;
-	else
-		sb->s_blocksize = CIFSMaximumBufferSize;
+/*	if(cifs_sb->tcon->ses->server->maxBuf > MAX_CIFS_HDR_SIZE + 512)
+	    sb->s_blocksize = cifs_sb->tcon->ses->server->maxBuf - MAX_CIFS_HDR_SIZE; */
+#ifdef CIFS_QUOTA
+	sb->s_qcop = &cifs_quotactl_ops;
+#endif
+	sb->s_blocksize = CIFS_MAX_MSGSIZE;
 	sb->s_blocksize_bits = 14;	/* default 2**14 = CIFS_MAX_MSGSIZE */
 	inode = iget(sb, ROOT_I);
 
@@ -201,10 +206,14 @@ cifs_alloc_inode(struct super_block *sb)
 	cifs_inode->cifsAttrs = 0x20;	/* default */
 	atomic_set(&cifs_inode->inUse, 0);
 	cifs_inode->time = 0;
-	if(oplockEnabled) {
-		cifs_inode->clientCanCacheRead = 1;
-		cifs_inode->clientCanCacheAll = 1;
-	}
+	/* Until the file is open and we have gotten oplock
+	info back from the server, can not assume caching of
+	file data or metadata */
+	cifs_inode->clientCanCacheRead = FALSE;
+	cifs_inode->clientCanCacheAll = FALSE;
+	cifs_inode->vfs_inode.i_blksize = CIFS_MAX_MSGSIZE;
+	cifs_inode->vfs_inode.i_blkbits = 14;  /* 2**14 = CIFS_MAX_MSGSIZE */
+
 	INIT_LIST_HEAD(&cifs_inode->openFileList);
 	return &cifs_inode->vfs_inode;
 }
@@ -230,7 +239,7 @@ cifs_show_options(struct seq_file *s, struct vfsmount *m)
 	if (cifs_sb) {
 		if (cifs_sb->tcon) {
 			seq_printf(s, ",unc=%s", cifs_sb->tcon->treeName);
-			if (cifs_sb->tcon->ses->userName)
+			if ((cifs_sb->tcon->ses) && (cifs_sb->tcon->ses->userName))
 				seq_printf(s, ",username=%s",
 					   cifs_sb->tcon->ses->userName);
 			if(cifs_sb->tcon->ses->domainName)
@@ -242,6 +251,110 @@ cifs_show_options(struct seq_file *s, struct vfsmount *m)
 	}
 	return 0;
 }
+
+#ifdef CIFS_QUOTA
+int cifs_xquota_set(struct super_block * sb, int quota_type, qid_t qid,
+		struct fs_disk_quota * pdquota)
+{
+	int xid;
+	int rc = 0;
+	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
+	struct cifsTconInfo *pTcon;
+	
+	if(cifs_sb)
+		pTcon = cifs_sb->tcon;
+	else
+		return -EIO;
+
+
+	xid = GetXid();
+	if(pTcon) {
+		cFYI(1,("set type: 0x%x id: %d",quota_type,qid));		
+	} else {
+		return -EIO;
+	}
+
+	FreeXid(xid);
+	return rc;
+}
+
+int cifs_xquota_get(struct super_block * sb, int quota_type, qid_t qid,
+                struct fs_disk_quota * pdquota)
+{
+	int xid;
+	int rc = 0;
+	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
+	struct cifsTconInfo *pTcon;
+
+	if(cifs_sb)
+		pTcon = cifs_sb->tcon;
+	else
+		return -EIO;
+
+	xid = GetXid();
+	if(pTcon) {
+                cFYI(1,("set type: 0x%x id: %d",quota_type,qid));
+	} else {
+		rc = -EIO;
+	}
+
+	FreeXid(xid);
+	return rc;
+}
+
+int cifs_xstate_set(struct super_block * sb, unsigned int flags, int operation)
+{
+	int xid; 
+	int rc = 0;
+	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
+	struct cifsTconInfo *pTcon;
+
+	if(cifs_sb)
+		pTcon = cifs_sb->tcon;
+	else
+		return -EIO;
+
+	xid = GetXid();
+	if(pTcon) {
+                cFYI(1,("flags: 0x%x operation: 0x%x",flags,operation));
+	} else {
+		rc = -EIO;
+	}
+
+	FreeXid(xid);
+	return rc;
+}
+
+int cifs_xstate_get(struct super_block * sb, struct fs_quota_stat *qstats)
+{
+	int xid;
+	int rc = 0;
+	struct cifs_sb_info *cifs_sb = CIFS_SB(sb);
+	struct cifsTconInfo *pTcon;
+
+	if(cifs_sb) {
+		pTcon = cifs_sb->tcon;
+	} else {
+		return -EIO;
+	}
+	xid = GetXid();
+	if(pTcon) {
+		cFYI(1,("pqstats %p",qstats));		
+	} else {
+		rc = -EIO;
+	}
+
+	FreeXid(xid);
+	return rc;
+}
+
+static struct quotactl_ops cifs_quotactl_ops = {
+	.set_xquota	= cifs_xquota_set,
+	.get_xquota	= cifs_xquota_set,
+	.set_xstate	= cifs_xstate_set,
+	.get_xstate	= cifs_xstate_get,
+};
+#endif
 
 struct super_operations cifs_super_ops = {
 	.read_inode = cifs_read_inode,
@@ -281,6 +394,27 @@ cifs_get_sb(struct file_system_type *fs_type,
 	return sb;
 }
 
+ssize_t
+cifs_read_wrapper(struct file * file, char *read_data, size_t read_size,
+          loff_t * poffset)
+{
+	if(CIFS_I(file->f_dentry->d_inode)->clientCanCacheRead)
+		return generic_file_read(file,read_data,read_size,poffset);
+	else
+		return cifs_read(file,read_data,read_size,poffset);	
+}
+
+ssize_t
+cifs_write_wrapper(struct file * file, const char *write_data,
+           size_t write_size, loff_t * poffset) 
+{
+	if(CIFS_I(file->f_dentry->d_inode)->clientCanCacheAll)    /* check caching for write */
+		return generic_file_write(file,write_data, write_size,poffset);
+	else
+		return cifs_write(file,write_data,write_size,poffset);
+}
+
+
 static struct file_system_type cifs_fs_type = {
 	.owner = THIS_MODULE,
 	.name = "cifs",
@@ -301,6 +435,7 @@ struct inode_operations cifs_dir_inode_ops = {
 /*	revalidate:cifs_revalidate,   */
 	.setattr = cifs_setattr,
 	.symlink = cifs_symlink,
+	.mknod   = cifs_mknod,
 };
 
 struct inode_operations cifs_file_inode_ops = {
@@ -435,11 +570,10 @@ cifs_destroy_mids(void)
 
 static int cifs_oplock_thread(void * dummyarg)
 {
-	struct list_head * tmp;
-	struct list_head * tmp1;
 	struct oplock_q_entry * oplock_item;
-	struct file * pfile;
 	struct cifsTconInfo *pTcon;
+	struct inode * inode;
+	__u16  netfid;
 	int rc;
 
 	daemonize("cifsoplockd");
@@ -448,29 +582,36 @@ static int cifs_oplock_thread(void * dummyarg)
 	oplockThread = current;
 	do {
 		set_current_state(TASK_INTERRUPTIBLE);
-		schedule_timeout(100*HZ);
-		/* BB add missing code */
-		write_lock(&GlobalMid_Lock); 
-		list_for_each_safe(tmp, tmp1, &GlobalOplock_Q) {
-			oplock_item = list_entry(tmp, struct oplock_q_entry,
-							       qhead);
+		
+		schedule_timeout(39*HZ);
+		spin_lock(&GlobalMid_Lock);
+		if(list_empty(&GlobalOplock_Q)) {
+			spin_unlock(&GlobalMid_Lock);
+			schedule_timeout(39*HZ);
+		} else {
+			oplock_item = list_entry(GlobalOplock_Q.next, 
+				struct oplock_q_entry, qhead);
 			if(oplock_item) {
 				pTcon = oplock_item->tcon;
-				pfile = oplock_item->file_to_flush;
-				cFYI(1,("process item on queue"));/* BB remove */
+				inode = oplock_item->pinode;
+				netfid = oplock_item->netfid;
+				spin_unlock(&GlobalMid_Lock);
 				DeleteOplockQEntry(oplock_item);
-				write_unlock(&GlobalMid_Lock);
-				rc = filemap_fdatawrite(pfile->f_dentry->d_inode->i_mapping);
-				if(rc)
-					CIFS_I(pfile->f_dentry->d_inode)->write_behind_rc 
-						= rc;
-				cFYI(1,("Oplock flush file %p rc %d",pfile,rc));
-				/* send oplock break */
-				write_lock(&GlobalMid_Lock);
+				if (S_ISREG(inode->i_mode)) 
+					rc = filemap_fdatawrite(inode->i_mapping);
+				else
+					rc = 0;
+				if (rc)
+					CIFS_I(inode)->write_behind_rc = rc;
+				cFYI(1,("Oplock flush inode %p rc %d",inode,rc));
+				rc = CIFSSMBLock(0, pTcon, netfid,
+					0 /* len */ , 0 /* offset */, 0, 
+					0, LOCKING_ANDX_OPLOCK_RELEASE,
+					0 /* wait flag */);
+				cFYI(1,("Oplock release rc = %d ",rc));
 			} else
-				break;
+				spin_unlock(&GlobalMid_Lock);
 		}
-		write_unlock(&GlobalMid_Lock);
 	} while(!signal_pending(current));
 	complete_and_exit (&cifs_oplock_exited, 0);
 }
@@ -497,7 +638,7 @@ init_cifs(void)
 	GlobalTotalActiveXid = 0;
 	GlobalMaxActiveXid = 0;
 	GlobalSMBSeslock = RW_LOCK_UNLOCKED;
-	GlobalMid_Lock = RW_LOCK_UNLOCKED;
+	GlobalMid_Lock = SPIN_LOCK_UNLOCKED;
 
 	rc = cifs_init_inodecache();
 	if (!rc) {

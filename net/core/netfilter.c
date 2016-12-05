@@ -101,7 +101,7 @@ int nf_register_sockopt(struct nf_sockopt_ops *reg)
 	if (down_interruptible(&nf_sockopt_mutex) != 0)
 		return -EINTR;
 
-	for (i = nf_sockopts.next; i != &nf_sockopts; i = i->next) {
+	list_for_each(i, &nf_sockopts) {
 		struct nf_sockopt_ops *ops = (struct nf_sockopt_ops *)i;
 		if (ops->pf == reg->pf
 		    && (overlap(ops->set_optmin, ops->set_optmax, 
@@ -296,7 +296,7 @@ static int nf_sockopt(struct sock *sk, int pf, int val,
 	if (down_interruptible(&nf_sockopt_mutex) != 0)
 		return -EINTR;
 
-	for (i = nf_sockopts.next; i != &nf_sockopts; i = i->next) {
+	list_for_each(i, &nf_sockopts) {
 		ops = (struct nf_sockopt_ops *)i;
 		if (ops->pf == pf) {
 			if (get) {
@@ -430,7 +430,7 @@ static int nf_queue(struct sk_buff *skb,
 {
 	int status;
 	struct nf_info *info;
-#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+#ifdef CONFIG_BRIDGE_NETFILTER
 	struct net_device *physindev = NULL;
 	struct net_device *physoutdev = NULL;
 #endif
@@ -467,7 +467,7 @@ static int nf_queue(struct sk_buff *skb,
 	if (indev) dev_hold(indev);
 	if (outdev) dev_hold(outdev);
 
-#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+#ifdef CONFIG_BRIDGE_NETFILTER
 	if (skb->nf_bridge) {
 		physindev = skb->nf_bridge->physindev;
 		if (physindev) dev_hold(physindev);
@@ -483,7 +483,7 @@ static int nf_queue(struct sk_buff *skb,
 		/* James M doesn't say fuck enough. */
 		if (indev) dev_put(indev);
 		if (outdev) dev_put(outdev);
-#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+#ifdef CONFIG_BRIDGE_NETFILTER
 		if (physindev) dev_put(physindev);
 		if (physoutdev) dev_put(physoutdev);
 #endif
@@ -557,6 +557,18 @@ void nf_reinject(struct sk_buff *skb, struct nf_info *info,
 
 	rcu_read_lock();
 
+	/* Release those devices we held, or Alexey will kill me. */
+	if (info->indev) dev_put(info->indev);
+	if (info->outdev) dev_put(info->outdev);
+#ifdef CONFIG_BRIDGE_NETFILTER
+	if (skb->nf_bridge) {
+		if (skb->nf_bridge->physindev)
+			dev_put(skb->nf_bridge->physindev);
+		if (skb->nf_bridge->physoutdev)
+			dev_put(skb->nf_bridge->physoutdev);
+	}
+#endif
+
 	/* Drop reference to owner of hook which queued us. */
 	module_put(info->elem->owner);
 
@@ -599,19 +611,6 @@ void nf_reinject(struct sk_buff *skb, struct nf_info *info,
 	}
 	rcu_read_unlock();
 
-	/* Release those devices we held, or Alexey will kill me. */
-	if (info->indev) dev_put(info->indev);
-	if (info->outdev) dev_put(info->outdev);
-#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
-	if (skb->nf_bridge) {
-		if (skb->nf_bridge->physindev)
-			dev_put(skb->nf_bridge->physindev);
-		if (skb->nf_bridge->physoutdev)
-			dev_put(skb->nf_bridge->physoutdev);
-	}
-#endif
-
-
 	if (verdict == NF_DROP)
 		kfree_skb(skb);
 
@@ -625,66 +624,62 @@ int ip_route_me_harder(struct sk_buff **pskb)
 {
 	struct iphdr *iph = (*pskb)->nh.iph;
 	struct rtable *rt;
-	struct flowi fl = { .nl_u = { .ip4_u =
-				      { .daddr = iph->daddr,
-					.saddr = iph->saddr,
-					.tos = RT_TOS(iph->tos)|RTO_CONN,
-#ifdef CONFIG_IP_ROUTE_FWMARK
-					.fwmark = (*pskb)->nfmark
-#endif
-				      } },
-			    .oif = (*pskb)->sk ? (*pskb)->sk->sk_bound_dev_if : 0,
-			    };
-	struct net_device *dev_src = NULL;
-	int err;
+	struct flowi fl = {};
+	struct dst_entry *odst;
+	unsigned int hh_len;
 
-	/* accommodate ip_route_output_slow(), which expects the key src to be
-	   0 or a local address; however some non-standard hacks like
-	   ipt_REJECT.c:send_reset() can cause packets with foreign
-           saddr to be appear on the NF_IP_LOCAL_OUT hook -MB */
-	if(fl.fl4_src && !(dev_src = ip_dev_find(fl.fl4_src)))
-		fl.fl4_src = 0;
-
-	if ((err=ip_route_output_key(&rt, &fl)) != 0) {
-		printk("route_me_harder: ip_route_output_key(dst=%u.%u.%u.%u, src=%u.%u.%u.%u, oif=%d, tos=0x%x, fwmark=0x%lx) error %d\n",
-			NIPQUAD(iph->daddr), NIPQUAD(iph->saddr),
-			(*pskb)->sk ? (*pskb)->sk->sk_bound_dev_if : 0,
-			RT_TOS(iph->tos)|RTO_CONN,
+	/* some non-standard hacks like ipt_REJECT.c:send_reset() can cause
+	 * packets with foreign saddr to appear on the NF_IP_LOCAL_OUT hook.
+	 */
+	if (inet_addr_type(iph->saddr) == RTN_LOCAL) {
+		fl.nl_u.ip4_u.daddr = iph->daddr;
+		fl.nl_u.ip4_u.saddr = iph->saddr;
+		fl.nl_u.ip4_u.tos = RT_TOS(iph->tos);
+		fl.oif = (*pskb)->sk ? (*pskb)->sk->sk_bound_dev_if : 0;
 #ifdef CONFIG_IP_ROUTE_FWMARK
-			(*pskb)->nfmark,
-#else
-			0UL,
+		fl.nl_u.ip4_u.fwmark = (*pskb)->nfmark;
 #endif
-			err);
-		goto out;
+		if (ip_route_output_key(&rt, &fl) != 0)
+			return -1;
+
+		/* Drop old route. */
+		dst_release((*pskb)->dst);
+		(*pskb)->dst = &rt->u.dst;
+	} else {
+		/* non-local src, find valid iif to satisfy
+		 * rp-filter when calling ip_route_input. */
+		fl.nl_u.ip4_u.daddr = iph->saddr;
+		if (ip_route_output_key(&rt, &fl) != 0)
+			return -1;
+
+		odst = (*pskb)->dst;
+		if (ip_route_input(*pskb, iph->daddr, iph->saddr,
+				   RT_TOS(iph->tos), rt->u.dst.dev) != 0) {
+			dst_release(&rt->u.dst);
+			return -1;
+		}
+		dst_release(&rt->u.dst);
+		dst_release(odst);
 	}
-
-	/* Drop old route. */
-	dst_release((*pskb)->dst);
-
-	(*pskb)->dst = &rt->u.dst;
+	
+	if ((*pskb)->dst->error)
+		return -1;
 
 	/* Change in oif may mean change in hh_len. */
-	if (skb_headroom(*pskb) < (*pskb)->dst->dev->hard_header_len) {
+	hh_len = (*pskb)->dst->dev->hard_header_len;
+	if (skb_headroom(*pskb) < hh_len) {
 		struct sk_buff *nskb;
 
-		nskb = skb_realloc_headroom(*pskb,
-					    (*pskb)->dst->dev->hard_header_len);
-		if (!nskb) {
-			err = -ENOMEM;
-			goto out;
-		}
+		nskb = skb_realloc_headroom(*pskb, hh_len);
+		if (!nskb) 
+			return -1;
 		if ((*pskb)->sk)
 			skb_set_owner_w(nskb, (*pskb)->sk);
 		kfree_skb(*pskb);
 		*pskb = nskb;
 	}
 
-out:
-	if (dev_src)
-		dev_put(dev_src);
-
-	return err;
+	return 0;
 }
 
 int skb_ip_make_writable(struct sk_buff **pskb, unsigned int writable_len)
@@ -764,3 +759,17 @@ void __init netfilter_init(void)
 			INIT_LIST_HEAD(&nf_hooks[i][h]);
 	}
 }
+
+EXPORT_SYMBOL(ip_ct_attach);
+EXPORT_SYMBOL(ip_route_me_harder);
+EXPORT_SYMBOL(nf_getsockopt);
+EXPORT_SYMBOL(nf_hook_slow);
+EXPORT_SYMBOL(nf_hooks);
+EXPORT_SYMBOL(nf_register_hook);
+EXPORT_SYMBOL(nf_register_queue_handler);
+EXPORT_SYMBOL(nf_register_sockopt);
+EXPORT_SYMBOL(nf_reinject);
+EXPORT_SYMBOL(nf_setsockopt);
+EXPORT_SYMBOL(nf_unregister_hook);
+EXPORT_SYMBOL(nf_unregister_queue_handler);
+EXPORT_SYMBOL(nf_unregister_sockopt);

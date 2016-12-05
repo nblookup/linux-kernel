@@ -15,10 +15,6 @@
 #include <asm/byteorder.h>
 #include <asm/bug.h>
 
-/* Optimization barrier */
-/* The "volatile" is due to gcc bugs */
-#define barrier() __asm__ __volatile__("": : :"memory")
-
 #define INT_MAX		((int)(~0U>>1))
 #define INT_MIN		(-INT_MAX - 1)
 #define UINT_MAX	(~0U)
@@ -52,8 +48,10 @@ struct completion;
 #ifdef CONFIG_DEBUG_SPINLOCK_SLEEP
 void __might_sleep(char *file, int line);
 #define might_sleep() __might_sleep(__FILE__, __LINE__)
+#define might_sleep_if(cond) do { if (unlikely(cond)) might_sleep(); } while (0)
 #else
 #define might_sleep() do {} while(0)
+#define might_sleep_if(cond) do {} while (0)
 #endif
 
 extern struct notifier_block *panic_notifier_list;
@@ -103,7 +101,7 @@ static inline void console_verbose(void)
 extern void bust_spinlocks(int yes);
 extern int oops_in_progress;		/* If set, an oops, panic(), BUG() or die() is in progress */
 extern int panic_on_oops;
-
+extern int system_running;
 extern int tainted;
 extern const char *print_tainted(void);
 #define TAINT_PROPRIETARY_MODULE	(1<<0)

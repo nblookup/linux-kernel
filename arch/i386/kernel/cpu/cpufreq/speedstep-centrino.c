@@ -156,14 +156,15 @@ static struct cpufreq_frequency_table op_1700[] =
 };
 #undef OP
 
-#define CPU(max)	\
-	{ "Intel(R) Pentium(R) M processor " #max "MHz", (max)*1000, op_##max }
+#define _CPU(max, name)	\
+	{ "Intel(R) Pentium(R) M processor " name "MHz", (max)*1000, op_##max }
+#define CPU(max)	_CPU(max, #max)
 
 /* CPU models, their operating frequency range, and freq/voltage
    operating points */
 static const struct cpu_model models[] = 
 {
-	CPU( 900),
+       _CPU( 900, " 900"),
 	CPU(1100),
 	CPU(1200),
 	CPU(1300),
@@ -200,9 +201,7 @@ static int centrino_cpu_init(struct cpufreq_policy *policy)
 
 	freq = get_cur_freq();
 
-	policy->policy = (freq == centrino_model->max_freq) ? 
-		CPUFREQ_POLICY_PERFORMANCE : 
-		CPUFREQ_POLICY_POWERSAVE;
+	policy->governor = CPUFREQ_DEFAULT_GOVERNOR;
 	policy->cpuinfo.transition_latency = 10; /* 10uS transition latency */
 	policy->cur = freq;
 

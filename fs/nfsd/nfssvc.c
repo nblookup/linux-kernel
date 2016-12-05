@@ -20,6 +20,7 @@
 #include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
+#include <linux/fs_struct.h>
 
 #include <linux/sunrpc/types.h>
 #include <linux/sunrpc/stats.h>
@@ -115,9 +116,12 @@ nfsd_svc(unsigned short port, int nrservs)
 	nrservs -= (nfsd_serv->sv_nrthreads-1);
 	while (nrservs > 0) {
 		nrservs--;
+		__module_get(THIS_MODULE);
 		error = svc_create_thread(nfsd, nfsd_serv);
-		if (error < 0)
+		if (error < 0) {
+			module_put(THIS_MODULE);
 			break;
+		}
 	}
 	victim = nfsd_list.next;
 	while (nrservs < 0 && victim != &nfsd_list) {
@@ -168,15 +172,27 @@ static void
 nfsd(struct svc_rqst *rqstp)
 {
 	struct svc_serv	*serv = rqstp->rq_server;
+	struct fs_struct *fsp;
 	int		err;
 	struct nfsd_list me;
 	sigset_t shutdown_mask, allowed_mask;
 
 	/* Lock module and set up kernel thread */
-	MOD_INC_USE_COUNT;
 	lock_kernel();
 	daemonize("nfsd");
 	current->rlim[RLIMIT_FSIZE].rlim_cur = RLIM_INFINITY;
+
+	/* After daemonize() this kernel thread shares current->fs
+	 * with the init process. We need to create files with a
+	 * umask of 0 instead of init's umask. */
+	fsp = copy_fs_struct(current->fs);
+	if (!fsp) {
+		printk("Unable to start nfsd thread: out of memory\n");
+		goto out;
+	}
+	exit_fs(current);
+	current->fs = fsp;
+	current->fs->umask = 0;
 
 	siginitsetinv(&shutdown_mask, SHUTDOWN_SIGS);
 	siginitsetinv(&allowed_mask, ALLOWED_SIGS);
@@ -262,11 +278,12 @@ nfsd(struct svc_rqst *rqstp)
 	list_del(&me.list);
 	nfsdstats.th_cnt --;
 
+out:
 	/* Release the thread */
 	svc_exit_thread(rqstp);
 
 	/* Release module */
-	MOD_DEC_USE_COUNT;
+	module_put_and_exit(0);
 }
 
 int

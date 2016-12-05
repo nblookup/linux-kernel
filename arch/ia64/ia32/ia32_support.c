@@ -18,18 +18,21 @@
 #include <linux/personality.h>
 #include <linux/sched.h>
 
+#include <asm/intrinsics.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/processor.h>
+#include <asm/uaccess.h>
 
 #include "ia32priv.h"
 
 extern void die_if_kernel (char *str, struct pt_regs *regs, long err);
 
 struct exec_domain ia32_exec_domain;
-struct page *ia32_shared_page[(2*IA32_PAGE_SIZE + PAGE_SIZE - 1)/PAGE_SIZE];
-unsigned long *ia32_gdt;
+struct page *ia32_shared_page[NR_CPUS];
+unsigned long *ia32_boot_gdt;
+unsigned long *cpu_gdt_table[NR_CPUS];
 
 static unsigned long
 load_desc (u16 selector)
@@ -42,8 +45,8 @@ load_desc (u16 selector)
 		table = (unsigned long *) IA32_LDT_OFFSET;
 		limit = IA32_LDT_ENTRIES;
 	} else {
-		table = ia32_gdt;
-		limit = IA32_PAGE_SIZE / sizeof(ia32_gdt[0]);
+		table = cpu_gdt_table[smp_processor_id()];
+		limit = IA32_PAGE_SIZE / sizeof(ia32_boot_gdt[0]);
 	}
 	index = selector >> IA32_SEGSEL_INDEX_SHIFT;
 	if (index >= limit)
@@ -65,22 +68,42 @@ ia32_load_segment_descriptors (struct task_struct *task)
 	regs->ar_ssd = load_desc(regs->r17 >> 16);	/* SSD */
 }
 
+int
+ia32_clone_tls (struct task_struct *child, struct pt_regs *childregs)
+{
+	struct desc_struct *desc;
+	struct ia32_user_desc info;
+	int idx;
+
+	if (copy_from_user(&info, (void *)(childregs->r14 & 0xffffffff), sizeof(info)))
+		return -EFAULT;
+	if (LDT_empty(&info))
+		return -EINVAL;
+
+	idx = info.entry_number;
+	if (idx < GDT_ENTRY_TLS_MIN || idx > GDT_ENTRY_TLS_MAX)
+		return -EINVAL;
+
+	desc = child->thread.tls_array + idx - GDT_ENTRY_TLS_MIN;
+	desc->a = LDT_entry_a(&info);
+	desc->b = LDT_entry_b(&info);
+
+	/* XXX: can this be done in a cleaner way ? */
+	load_TLS(&child->thread, smp_processor_id());
+	ia32_load_segment_descriptors(child);
+	load_TLS(&current->thread, smp_processor_id());
+
+	return 0;
+}
+
 void
 ia32_save_state (struct task_struct *t)
 {
-	unsigned long eflag, fsr, fcr, fir, fdr;
-
-	asm ("mov %0=ar.eflag;"
-	     "mov %1=ar.fsr;"
-	     "mov %2=ar.fcr;"
-	     "mov %3=ar.fir;"
-	     "mov %4=ar.fdr;"
-	     : "=r"(eflag), "=r"(fsr), "=r"(fcr), "=r"(fir), "=r"(fdr));
-	t->thread.eflag = eflag;
-	t->thread.fsr = fsr;
-	t->thread.fcr = fcr;
-	t->thread.fir = fir;
-	t->thread.fdr = fdr;
+	t->thread.eflag = ia64_getreg(_IA64_REG_AR_EFLAG);
+	t->thread.fsr   = ia64_getreg(_IA64_REG_AR_FSR);
+	t->thread.fcr   = ia64_getreg(_IA64_REG_AR_FCR);
+	t->thread.fir   = ia64_getreg(_IA64_REG_AR_FIR);
+	t->thread.fdr   = ia64_getreg(_IA64_REG_AR_FDR);
 	ia64_set_kr(IA64_KR_IO_BASE, t->thread.old_iob);
 	ia64_set_kr(IA64_KR_TSSD, t->thread.old_k1);
 }
@@ -90,28 +113,28 @@ ia32_load_state (struct task_struct *t)
 {
 	unsigned long eflag, fsr, fcr, fir, fdr, tssd;
 	struct pt_regs *regs = ia64_task_regs(t);
-	int nr = get_cpu();	/* LDT and TSS depend on CPU number: */
 
 	eflag = t->thread.eflag;
 	fsr = t->thread.fsr;
 	fcr = t->thread.fcr;
 	fir = t->thread.fir;
 	fdr = t->thread.fdr;
-	tssd = load_desc(_TSS(nr));					/* TSSD */
+	tssd = load_desc(_TSS);					/* TSSD */
 
-	asm volatile ("mov ar.eflag=%0;"
-		      "mov ar.fsr=%1;"
-		      "mov ar.fcr=%2;"
-		      "mov ar.fir=%3;"
-		      "mov ar.fdr=%4;"
-		      :: "r"(eflag), "r"(fsr), "r"(fcr), "r"(fir), "r"(fdr));
+	ia64_setreg(_IA64_REG_AR_EFLAG, eflag);
+	ia64_setreg(_IA64_REG_AR_FSR, fsr);
+	ia64_setreg(_IA64_REG_AR_FCR, fcr);
+	ia64_setreg(_IA64_REG_AR_FIR, fir);
+	ia64_setreg(_IA64_REG_AR_FDR, fdr);
 	current->thread.old_iob = ia64_get_kr(IA64_KR_IO_BASE);
 	current->thread.old_k1 = ia64_get_kr(IA64_KR_TSSD);
 	ia64_set_kr(IA64_KR_IO_BASE, IA32_IOBASE);
 	ia64_set_kr(IA64_KR_TSSD, tssd);
 
-	regs->r17 = (_TSS(nr) << 48) | (_LDT(nr) << 32) | (__u32) regs->r17;
-	regs->r30 = load_desc(_LDT(nr));				/* LDTD */
+	regs->r17 = (_TSS << 48) | (_LDT << 32) | (__u32) regs->r17;
+	regs->r30 = load_desc(_LDT);				/* LDTD */
+	load_TLS(&t->thread, smp_processor_id());
+
 	put_cpu();
 }
 
@@ -121,37 +144,43 @@ ia32_load_state (struct task_struct *t)
 void
 ia32_gdt_init (void)
 {
-	unsigned long *tss;
+	int cpu = smp_processor_id();
+
+	ia32_shared_page[cpu] = alloc_page(GFP_KERNEL);
+	cpu_gdt_table[cpu] = page_address(ia32_shared_page[cpu]);
+
+	/* Copy from the boot cpu's GDT */
+	memcpy(cpu_gdt_table[cpu], ia32_boot_gdt, PAGE_SIZE);
+}
+
+
+/*
+ * Setup IA32 GDT and TSS
+ */
+void
+ia32_boot_gdt_init (void)
+{
 	unsigned long ldt_size;
-	int nr;
 
 	ia32_shared_page[0] = alloc_page(GFP_KERNEL);
-	ia32_gdt = page_address(ia32_shared_page[0]);
-	tss = ia32_gdt + IA32_PAGE_SIZE/sizeof(ia32_gdt[0]);
-
-	if (IA32_PAGE_SIZE == PAGE_SIZE) {
-		ia32_shared_page[1] = alloc_page(GFP_KERNEL);
-		tss = page_address(ia32_shared_page[1]);
-	}
+	ia32_boot_gdt = page_address(ia32_shared_page[0]);
+	cpu_gdt_table[0] = ia32_boot_gdt;
 
 	/* CS descriptor in IA-32 (scrambled) format */
-	ia32_gdt[__USER_CS >> 3] = IA32_SEG_DESCRIPTOR(0, (IA32_PAGE_OFFSET-1) >> IA32_PAGE_SHIFT,
-						       0xb, 1, 3, 1, 1, 1, 1);
+	ia32_boot_gdt[__USER_CS >> 3]
+		= IA32_SEG_DESCRIPTOR(0, (IA32_PAGE_OFFSET-1) >> IA32_PAGE_SHIFT,
+				      0xb, 1, 3, 1, 1, 1, 1);
 
 	/* DS descriptor in IA-32 (scrambled) format */
-	ia32_gdt[__USER_DS >> 3] = IA32_SEG_DESCRIPTOR(0, (IA32_PAGE_OFFSET-1) >> IA32_PAGE_SHIFT,
-						       0x3, 1, 3, 1, 1, 1, 1);
+	ia32_boot_gdt[__USER_DS >> 3]
+		= IA32_SEG_DESCRIPTOR(0, (IA32_PAGE_OFFSET-1) >> IA32_PAGE_SHIFT,
+				      0x3, 1, 3, 1, 1, 1, 1);
 
-	/* We never change the TSS and LDT descriptors, so we can share them across all CPUs.  */
 	ldt_size = PAGE_ALIGN(IA32_LDT_ENTRIES*IA32_LDT_ENTRY_SIZE);
-	for (nr = 0; nr < NR_CPUS; ++nr) {
-		ia32_gdt[_TSS(nr) >> IA32_SEGSEL_INDEX_SHIFT]
-			= IA32_SEG_DESCRIPTOR(IA32_TSS_OFFSET, 235,
-					      0xb, 0, 3, 1, 1, 1, 0);
-		ia32_gdt[_LDT(nr) >> IA32_SEGSEL_INDEX_SHIFT]
-			= IA32_SEG_DESCRIPTOR(IA32_LDT_OFFSET, ldt_size - 1,
-					      0x2, 0, 3, 1, 1, 1, 0);
-	}
+	ia32_boot_gdt[TSS_ENTRY] = IA32_SEG_DESCRIPTOR(IA32_TSS_OFFSET, 235,
+						       0xb, 0, 3, 1, 1, 1, 0);
+	ia32_boot_gdt[LDT_ENTRY] = IA32_SEG_DESCRIPTOR(IA32_LDT_OFFSET, ldt_size - 1,
+						       0x2, 0, 3, 1, 1, 1, 0);
 }
 
 /*
@@ -178,7 +207,7 @@ void
 ia32_cpu_init (void)
 {
 	/* initialize global ia32 state - CR0 and CR4 */
-	asm volatile ("mov ar.cflg = %0" :: "r" (((ulong) IA32_CR4 << 32) | IA32_CR0));
+	ia64_setreg(_IA64_REG_AR_CFLAG, (((ulong) IA32_CR4 << 32) | IA32_CR0));
 }
 
 static int __init

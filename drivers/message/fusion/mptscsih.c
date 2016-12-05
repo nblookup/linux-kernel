@@ -66,13 +66,11 @@
 /*=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=*/
 
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/kdev_t.h>
 #include <linux/blkdev.h>
-#include <linux/blk.h>		/* for io_request_lock (spinlock) decl */
 #include <linux/delay.h>	/* for mdelay */
 #include <linux/interrupt.h>	/* needed for in_interrupt() proto */
 #include <linux/reboot.h>	/* notifier code */
@@ -476,6 +474,8 @@ mptscsih_AddSGE(MPT_SCSI_HOST *hd, Scsi_Cmnd *SCpnt,
 			       (struct scatterlist *) SCpnt->request_buffer,
 			       SCpnt->use_sg,
 			       scsi_to_pci_dma_dir(SCpnt->sc_data_direction));
+		if (sges_left == 0) 
+			return FAILED;
 	} else if (SCpnt->request_bufflen) {
 		dma_addr_t	 buf_dma_addr;
 		scPrivate	*my_priv;
@@ -1459,7 +1459,6 @@ mptscsih_detect(Scsi_Host_Template *tpnt)
 				sh->max_lun = MPT_LAST_LUN + 1;
 
 				sh->max_sectors = MPT_SCSI_MAX_SECTORS;
-				sh->highmem_io = 1;
 				sh->this_id = this->pfacts[portnum].PortSCSIID;
 
 				/* Required entry.
@@ -3330,9 +3329,8 @@ mptscsih_slave_configure(Scsi_Device *device)
 		device, device->id, device->lun, device->channel));
 	dsprintk((KERN_INFO "sdtr %d wdtr %d ppr %d inq length=%d\n",
 		device->sdtr, device->wdtr, device->ppr, device->inquiry_len));
-	dsprintk(("tagged %d queue %d simple %d ordered %d\n",
-		device->tagged_supported, device->tagged_queue,
-		device->simple_tags, device->ordered_tags));
+	dsprintk(("tagged %d simple %d ordered %d\n",
+		device->tagged_supported, device->simple_tags, device->ordered_tags));
 
 	/*	set target parameters, queue depths, set dv flags ?  */
 	if (hd && (hd->Targets != NULL)) {

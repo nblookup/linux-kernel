@@ -2111,9 +2111,9 @@ static int snd_cs46xx_spdif_default_put(snd_kcontrol_t * kcontrol,
 	int change;
 
 	down (&chip->spos_mutex);
-	val = _wrap_all_bits(((u32)ucontrol->value.iec958.status[0] << 24)) |
-	      _wrap_all_bits(((u32)ucontrol->value.iec958.status[2] << 16)) |
-	      _wrap_all_bits( (u32)ucontrol->value.iec958.status[3])  |
+	val = ((unsigned int)_wrap_all_bits(ucontrol->value.iec958.status[0]) << 24) |
+		((unsigned int)_wrap_all_bits(ucontrol->value.iec958.status[2]) << 16) |
+		((unsigned int)_wrap_all_bits(ucontrol->value.iec958.status[3]))  |
 		/* left and right validity bit */
 		(1 << 13) | (1 << 12);
 
@@ -2164,9 +2164,9 @@ static int snd_cs46xx_spdif_stream_put(snd_kcontrol_t * kcontrol,
 	int change;
 
 	down (&chip->spos_mutex);
-	val = _wrap_all_bits(((u32)ucontrol->value.iec958.status[0] << 24)) |
-	      _wrap_all_bits(((u32)ucontrol->value.iec958.status[1] << 16)) |
-	      _wrap_all_bits( (u32)ucontrol->value.iec958.status[3]) |
+	val = ((unsigned int)_wrap_all_bits(ucontrol->value.iec958.status[0]) << 24) |
+		((unsigned int)_wrap_all_bits(ucontrol->value.iec958.status[1]) << 16) |
+		((unsigned int)_wrap_all_bits(ucontrol->value.iec958.status[3])) |
 		/* left and right validity bit */
 		(1 << 13) | (1 << 12);
 
@@ -2743,7 +2743,7 @@ int __devinit snd_cs46xx_midi(cs46xx_t *chip, int device, snd_rawmidi_t **rrawmi
  * gameport interface
  */
 
-#if defined(CONFIG_GAMEPORT) || defined(CONFIG_GAMEPORT_MODULE)
+#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
 
 typedef struct snd_cs46xx_gameport {
 	struct gameport info;
@@ -2960,7 +2960,7 @@ static int snd_cs46xx_free(cs46xx_t *chip)
 	if (chip->active_ctrl)
 		chip->active_ctrl(chip, 1);
 
-#if defined(CONFIG_GAMEPORT) || defined(CONFIG_GAMEPORT_MODULE)
+#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
 	if (chip->gameport) {
 		gameport_unregister_port(&chip->gameport->info);
 		kfree(chip->gameport);
@@ -3010,7 +3010,7 @@ static int snd_cs46xx_dev_free(snd_device_t *device)
 /*
  *  initialize chip
  */
-static int snd_cs46xx_chip_init(cs46xx_t *chip, int busywait)
+static int snd_cs46xx_chip_init(cs46xx_t *chip)
 {
 	int timeout;
 
@@ -3090,7 +3090,8 @@ static int snd_cs46xx_chip_init(cs46xx_t *chip, int busywait)
 	/*
          *  Wait until the PLL has stabilized.
 	 */
-	mdelay(100); /* FIXME: schedule? */
+	set_current_state(TASK_UNINTERRUPTIBLE);
+	schedule_timeout(HZ/10); /* 100ms */
 
 	/*
 	 *  Turn on clocking of the core so that we can setup the serial ports.
@@ -3143,12 +3144,8 @@ static int snd_cs46xx_chip_init(cs46xx_t *chip, int busywait)
 		 */
 		if (snd_cs46xx_peekBA0(chip, BA0_ACSTS) & ACSTS_CRDY)
 			goto ok1;
-		if (busywait)
-			mdelay(10);
-		else {
-			set_current_state(TASK_UNINTERRUPTIBLE);
-			schedule_timeout((HZ+99)/100);
-		}
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		schedule_timeout((HZ+99)/100);
 	}
 
 
@@ -3197,12 +3194,8 @@ static int snd_cs46xx_chip_init(cs46xx_t *chip, int busywait)
 		 */
 		if ((snd_cs46xx_peekBA0(chip, BA0_ACISV) & (ACISV_ISV3 | ACISV_ISV4)) == (ACISV_ISV3 | ACISV_ISV4))
 			goto ok2;
-		if (busywait)
-			mdelay(10);
-		else {
-			set_current_state(TASK_UNINTERRUPTIBLE);
-			schedule_timeout((HZ+99)/100);
-		}
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		schedule_timeout((HZ+99)/100);
 	}
 
 #ifndef CONFIG_SND_CS46XX_NEW_DSP
@@ -3811,7 +3804,7 @@ void snd_cs46xx_resume(cs46xx_t *chip)
 	chip->amplifier = 0;
 	chip->active_ctrl(chip, 1); /* force to on */
 
-	snd_cs46xx_chip_init(chip, 1);
+	snd_cs46xx_chip_init(chip);
 
 #if 0
 	snd_cs46xx_codec_write(chip, BA0_AC97_GENERAL_PURPOSE, 
@@ -3894,8 +3887,8 @@ int __devinit snd_cs46xx_create(snd_card_t * card,
 	chip->ba1_addr = pci_resource_start(pci, 1);
 	if (chip->ba0_addr == 0 || chip->ba0_addr == (unsigned long)~0 ||
 	    chip->ba1_addr == 0 || chip->ba1_addr == (unsigned long)~0) {
-	    	snd_cs46xx_free(chip);
 	    	snd_printk("wrong address(es) - ba0 = 0x%lx, ba1 = 0x%lx\n", chip->ba0_addr, chip->ba1_addr);
+	    	snd_cs46xx_free(chip);
 	    	return -ENOMEM;
 	}
 
@@ -3992,7 +3985,7 @@ int __devinit snd_cs46xx_create(snd_card_t * card,
 	}
 #endif
 
-	err = snd_cs46xx_chip_init(chip, 0);
+	err = snd_cs46xx_chip_init(chip);
 	if (err < 0) {
 		snd_cs46xx_free(chip);
 		return err;

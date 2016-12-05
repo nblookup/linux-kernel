@@ -63,7 +63,8 @@
 #define _PAGE_FILE		(1 << 1)		/* see swap & file pte remarks below */
 
 #define _PFN_MASK		_PAGE_PPN_MASK
-#define _PAGE_CHG_MASK		(_PFN_MASK | _PAGE_A | _PAGE_D)
+/* Mask of bits which may be changed by pte_modify(); the odd bits are there for _PAGE_PROTNONE */
+#define _PAGE_CHG_MASK	(_PAGE_P | _PAGE_PROTNONE | _PAGE_PL_MASK | _PAGE_AR_MASK | _PAGE_ED)
 
 #define _PAGE_SIZE_4K	12
 #define _PAGE_SIZE_8K	13
@@ -174,7 +175,6 @@ ia64_phys_addr_valid (unsigned long addr)
 	return (addr & (local_cpu_data->unimpl_pa_mask)) == 0;
 }
 
-#ifndef CONFIG_DISCONTIGMEM
 /*
  * kern_addr_valid(ADDR) tests if ADDR is pointing to valid kernel
  * memory.  For the return value to be meaningful, ADDR must be >=
@@ -190,7 +190,6 @@ ia64_phys_addr_valid (unsigned long addr)
  */
 #define kern_addr_valid(addr)	(1)
 
-#endif
 
 /*
  * Now come the defines and routines to manage and access the three-level
@@ -207,7 +206,6 @@ ia64_phys_addr_valid (unsigned long addr)
 #define RGN_KERNEL	7
 
 #define VMALLOC_START		0xa000000200000000
-#define VMALLOC_VMADDR(x)	((unsigned long)(x))
 #ifdef CONFIG_VIRTUAL_MEM_MAP
 # define VMALLOC_END_INIT	(0xa000000000000000 + (1UL << (4*PAGE_SHIFT - 9)))
 # define VMALLOC_END		vmalloc_end
@@ -233,7 +231,7 @@ ia64_phys_addr_valid (unsigned long addr)
 #define mk_pte(page, pgprot)	pfn_pte(page_to_pfn(page), (pgprot))
 
 #define pte_modify(_pte, newprot) \
-	(__pte((pte_val(_pte) & _PAGE_CHG_MASK) | pgprot_val(newprot)))
+	(__pte((pte_val(_pte) & ~_PAGE_CHG_MASK) | (pgprot_val(newprot) & _PAGE_CHG_MASK)))
 
 #define page_pte_prot(page,prot)	mk_pte(page, prot)
 #define page_pte(page)			page_pte_prot(page, __pgprot(0))
@@ -241,10 +239,8 @@ ia64_phys_addr_valid (unsigned long addr)
 #define pte_none(pte) 			(!pte_val(pte))
 #define pte_present(pte)		(pte_val(pte) & (_PAGE_P | _PAGE_PROTNONE))
 #define pte_clear(pte)			(pte_val(*(pte)) = 0UL)
-#ifndef CONFIG_DISCONTIGMEM
 /* pte_page() returns the "struct page *" corresponding to the PTE: */
 #define pte_page(pte)			virt_to_page(((pte_val(pte) & _PFN_MASK) + PAGE_OFFSET))
-#endif
 
 #define pmd_none(pmd)			(!pmd_val(pmd))
 #define pmd_bad(pmd)			(!ia64_phys_addr_valid(pmd_val(pmd)))
@@ -500,6 +496,6 @@ extern void update_mmu_cache (struct vm_area_struct *vma, unsigned long vaddr, p
 
 /* These tell get_user_pages() that the first gate page is accessible from user-level.  */
 #define FIXADDR_USER_START	GATE_ADDR
-#define FIXADDR_USER_END	(GATE_ADDR + 2*PAGE_SIZE)
+#define FIXADDR_USER_END	(GATE_ADDR + 2*PERCPU_PAGE_SIZE)
 
 #endif /* _ASM_IA64_PGTABLE_H */

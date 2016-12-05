@@ -1,7 +1,7 @@
 /*
  *   fs/cifs/cifsencrypt.c
  *
- *   Copyright (c) International Business Machines  Corp., 2003
+ *   Copyright (C) International Business Machines  Corp., 2003
  *   Author(s): Steve French (sfrench@us.ibm.com)
  *
  *   This library is free software; you can redistribute it and/or modify
@@ -24,6 +24,7 @@
 #include "cifsglob.h" 
 #include "cifs_debug.h"
 #include "md5.h"
+#include "cifs_unicode.h"
 
 /* Calculate and return the CIFS signature based on the mac key and the smb pdu */
 /* the 16 byte signature must be allocated by the caller  */
@@ -63,13 +64,13 @@ int cifs_sign_smb(struct smb_hdr * cifs_pdu, struct cifsSesInfo * ses,
 	if((le32_to_cpu(cifs_pdu->Flags2) & SMBFLG2_SECURITY_SIGNATURE) == 0) 
 		return rc;
 
-	write_lock(&GlobalMid_Lock);
+	spin_lock(&GlobalMid_Lock);
 	cifs_pdu->Signature.Sequence.SequenceNumber = cpu_to_le32(ses->sequence_number);
 	cifs_pdu->Signature.Sequence.Reserved = 0;
 	
 	*pexpected_response_sequence_number = ses->sequence_number++;
 	ses->sequence_number++;
-	write_unlock(&GlobalMid_Lock);
+	spin_unlock(&GlobalMid_Lock);
 
 	rc = cifs_calculate_signature(cifs_pdu, ses->mac_signing_key,smb_signature);
 	if(rc)
@@ -93,9 +94,14 @@ int cifs_verify_signature(struct smb_hdr * cifs_pdu, const char * mac_key,
 	if (cifs_pdu->Command == SMB_COM_NEGOTIATE)
 		return 0;
 
+	if (cifs_pdu->Command == SMB_COM_LOCKING_ANDX) {
+		struct smb_com_lock_req * pSMB = (struct smb_com_lock_req *)cifs_pdu;
+	        if(pSMB->LockType & LOCKING_ANDX_OPLOCK_RELEASE)
+			return 0;
+	}
+
 	/* BB what if signatures are supposed to be on for session but server does not
 		send one? BB */
-	/* BB also do not verify oplock breaks for signature */
 	
 	/* Do not need to verify session setups with signature "BSRSPYL "  */
 	if(memcmp(cifs_pdu->Signature.SecuritySignature,"BSRSPYL ",8)==0)
@@ -133,8 +139,68 @@ int cifs_calculate_mac_key(char * key, const char * rn, const char * password)
 	if ((key == NULL) || (rn == NULL) || (password == NULL))
 		return -EINVAL;
 
-	E_md4hash(password, temp_key);  /* BB may have to do another md4 of it */
+	E_md4hash(password, temp_key);
 	mdfour(key,temp_key,16);
 	memcpy(key+16,rn, CIFS_SESSION_KEY_SIZE);
 	return 0;
-} 
+}
+
+int CalcNTLMv2_partial_mac_key(struct cifsSesInfo * ses, struct nls_table * nls_info)
+{
+	char temp_hash[16];
+	struct HMACMD5Context ctx;
+	char * ucase_buf;
+	wchar_t * unicode_buf;
+	unsigned int i,user_name_len,dom_name_len;
+
+	if(ses)
+		return -EINVAL;
+
+	E_md4hash(ses->password_with_pad, temp_hash);
+
+	hmac_md5_init_limK_to_64(temp_hash, 16, &ctx);
+	user_name_len = strlen(ses->userName);
+	if(user_name_len > MAX_USERNAME_SIZE)
+		return -EINVAL;
+	dom_name_len = strlen(ses->domainName);
+	if(dom_name_len > MAX_USERNAME_SIZE)
+		return -EINVAL;
+
+	
+	ucase_buf = kmalloc((MAX_USERNAME_SIZE+1), GFP_KERNEL);
+        unicode_buf = kmalloc((MAX_USERNAME_SIZE+1)*4, GFP_KERNEL);
+	
+	for(i=0;i<user_name_len;i++)
+		ucase_buf[i] = nls_info->charset2upper[(int)ses->userName[i]];
+	ucase_buf[i] = 0;
+        user_name_len = cifs_strtoUCS(unicode_buf, ucase_buf, MAX_USERNAME_SIZE*2, nls_info);
+	unicode_buf[user_name_len] = 0;
+	user_name_len++;
+
+        for(i=0;i<dom_name_len;i++)
+                ucase_buf[i] = nls_info->charset2upper[(int)ses->domainName[i]];
+        ucase_buf[i] = 0;
+        dom_name_len = cifs_strtoUCS(unicode_buf+user_name_len, ucase_buf, MAX_USERNAME_SIZE*2, nls_info);
+
+	unicode_buf[user_name_len + dom_name_len] = 0;
+	hmac_md5_update((const unsigned char *) unicode_buf,
+		(user_name_len+dom_name_len)*2,&ctx);
+
+	hmac_md5_final(ses->mac_signing_key,&ctx);
+	kfree(ucase_buf);
+	kfree(unicode_buf);
+	return 0;
+}
+void CalcNTLMv2_response(const struct cifsSesInfo * ses,char * v2_session_response)
+{
+	struct HMACMD5Context context;
+	memcpy(v2_session_response + 8, ses->server->cryptKey,8);
+	/* gen_blob(v2_session_response + 16); */
+	hmac_md5_init_limK_to_64(ses->mac_signing_key, 16, &context);
+
+	hmac_md5_update(ses->server->cryptKey,8,&context);
+/*	hmac_md5_update(v2_session_response+16)client thing,8,&context); */ /* BB fix */
+
+
+	hmac_md5_final(v2_session_response,&context);
+}

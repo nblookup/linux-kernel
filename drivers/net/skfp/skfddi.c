@@ -56,6 +56,8 @@
  *		12-Nov-99	CG	Source code release
  *		22-Nov-99	CG	Included in kernel source.
  *		07-May-00	DM	64 bit fixes, new dma interface
+ *		31-Jul-03	DB	Audit copy_*_user in skfp_ioctl
+ *					  Daniele Bellucci <bellucda@tiscali.it>
  *
  * Compilation options (-Dxxx):
  *              DRIVERDEBUG     print lots of messages to log file
@@ -180,7 +182,7 @@ extern void mac_clear_multicast(struct s_smc *smc);
 extern void enable_tx_irq(struct s_smc *smc, u_short queue);
 extern void mac_drv_clear_txd(struct s_smc *smc);
 
-static struct pci_device_id skfddi_pci_tbl[] __initdata = {
+static struct pci_device_id skfddi_pci_tbl[] = {
 	{ PCI_VENDOR_ID_SK, PCI_DEVICE_ID_SK_FP, PCI_ANY_ID, PCI_ANY_ID, },
 	{ }			/* Terminating entry */
 };
@@ -1266,11 +1268,13 @@ static int skfp_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	struct s_skfp_ioctl ioc;
 	int status = 0;
 
-	copy_from_user(&ioc, rq->ifr_data, sizeof(struct s_skfp_ioctl));
+	if (copy_from_user(&ioc, rq->ifr_data, sizeof(struct s_skfp_ioctl)))
+		return -EFAULT;
 	switch (ioc.cmd) {
 	case SKFP_GET_STATS:	/* Get the driver statistics */
 		ioc.len = sizeof(lp->MacStat);
-		copy_to_user(ioc.data, skfp_ctl_get_stats(dev), ioc.len);
+		status = copy_to_user(ioc.data, skfp_ctl_get_stats(dev), ioc.len)
+				? -EFAULT : 0;
 		break;
 	case SKFP_CLR_STATS:	/* Zero out the driver statistics */
 		if (!capable(CAP_NET_ADMIN)) {
@@ -2582,7 +2586,7 @@ static struct net_device *unlink_modules(struct net_device *p)
 	}
 	unregister_netdev(p);
 	printk("%s: unloaded\n", p->name);
-	kfree(p);		/* Free the device structure */
+	free_netdev(p);		/* Free the device structure */
 
 	return next;
 }				// unlink_modules

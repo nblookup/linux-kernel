@@ -18,7 +18,7 @@
 #include <linux/mm.h>
 #include <linux/swap.h>
 #include <linux/bio.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -296,7 +296,7 @@ int bio_add_page(struct bio *bio, struct page *page, unsigned int len,
 		 unsigned int offset)
 {
 	request_queue_t *q = bdev_get_queue(bio->bi_bdev);
-	int fail_segments = 0, retried_segments = 0;
+	int retried_segments = 0;
 	struct bio_vec *bvec;
 
 	/*
@@ -315,18 +315,15 @@ int bio_add_page(struct bio *bio, struct page *page, unsigned int len,
 	 * we might lose a segment or two here, but rather that than
 	 * make this too complex.
 	 */
-retry_segments:
-	if (bio_phys_segments(q, bio) >= q->max_phys_segments
-	    || bio_hw_segments(q, bio) >= q->max_hw_segments)
-		fail_segments = 1;
 
-	if (fail_segments) {
+	while (bio_phys_segments(q, bio) >= q->max_phys_segments
+	    || bio_hw_segments(q, bio) >= q->max_hw_segments) {
+
 		if (retried_segments)
 			return 0;
 
 		bio->bi_flags &= ~(1 << BIO_SEG_VALID);
 		retried_segments = 1;
-		goto retry_segments;
 	}
 
 	/*
@@ -535,6 +532,12 @@ void bio_unmap_user(struct bio *bio, int write_to_vm)
  * check that the pages are still dirty.   If so, fine.  If not, redirty them
  * in process context.
  *
+ * We special-case compound pages here: normally this means reads into hugetlb
+ * pages.  The logic in here doesn't really work right for compound pages
+ * because the VM does not uniformly chase down the head page in all cases.
+ * But dirtiness of compound pages is pretty meaningless anyway: the VM doesn't
+ * handle them at all.  So we skip compound pages here at an early stage.
+ *
  * Note that this code is very hard to test under normal circumstances because
  * direct-io pins the pages with get_user_pages().  This makes
  * is_page_cache_freeable return false, and the VM will not clean the pages.
@@ -556,8 +559,21 @@ void bio_set_pages_dirty(struct bio *bio)
 	for (i = 0; i < bio->bi_vcnt; i++) {
 		struct page *page = bvec[i].bv_page;
 
+		if (page && !PageCompound(page))
+			set_page_dirty_lock(page);
+	}
+}
+
+static void bio_release_pages(struct bio *bio)
+{
+	struct bio_vec *bvec = bio->bi_io_vec;
+	int i;
+
+	for (i = 0; i < bio->bi_vcnt; i++) {
+		struct page *page = bvec[i].bv_page;
+
 		if (page)
-			set_page_dirty_lock(bvec[i].bv_page);
+			put_page(page);
 	}
 }
 
@@ -595,6 +611,7 @@ static void bio_dirty_fn(void *data)
 		struct bio *next = bio->bi_private;
 
 		bio_set_pages_dirty(bio);
+		bio_release_pages(bio);
 		bio_put(bio);
 		bio = next;
 	}
@@ -609,7 +626,7 @@ void bio_check_pages_dirty(struct bio *bio)
 	for (i = 0; i < bio->bi_vcnt; i++) {
 		struct page *page = bvec[i].bv_page;
 
-		if (PageDirty(page)) {
+		if (PageDirty(page) || PageCompound(page)) {
 			page_cache_release(page);
 			bvec[i].bv_page = NULL;
 		} else {
@@ -793,10 +810,6 @@ static void __init biovec_init_pools(void)
 					mempool_free_slab, bp->slab);
 		if (!bp->pool)
 			panic("biovec: can't init mempool\n");
-
-		printk("biovec pool[%d]: %3d bvecs: %3d entries (%d bytes)\n",
-						i, bp->nr_vecs, pool_entries,
-						size);
 	}
 }
 
@@ -809,8 +822,6 @@ static int __init init_bio(void)
 	bio_pool = mempool_create(BIO_POOL_SIZE, mempool_alloc_slab, mempool_free_slab, bio_slab);
 	if (!bio_pool)
 		panic("bio: can't create mempool\n");
-
-	printk("BIO: pool of %d setup, %ZuKb (%Zd bytes/bio)\n", BIO_POOL_SIZE, BIO_POOL_SIZE * sizeof(struct bio) >> 10, sizeof(struct bio));
 
 	biovec_init_pools();
 

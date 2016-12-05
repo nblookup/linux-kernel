@@ -74,8 +74,10 @@ static struct irda_usb_cb irda_instance[NIRUSB];
 
 /* These are the currently known IrDA USB dongles. Add new dongles here */
 static struct usb_device_id dongles[] = {
-	/* ACTiSYS Corp,  ACT-IR2000U FIR-USB Adapter */
+	/* ACTiSYS Corp.,  ACT-IR2000U FIR-USB Adapter */
 	{ USB_DEVICE(0x9c4, 0x011), .driver_info = IUC_SPEED_BUG | IUC_NO_WINDOW },
+	/* Look like ACTiSYS, Report : IBM Corp., IBM UltraPort IrDA */
+	{ USB_DEVICE(0x4428, 0x012), driver_info: IUC_SPEED_BUG | IUC_NO_WINDOW },
 	/* KC Technology Inc.,  KC-180 USB IrDA Device */
 	{ USB_DEVICE(0x50f, 0x180), .driver_info = IUC_SPEED_BUG | IUC_NO_WINDOW },
 	/* Extended Systems, Inc.,  XTNDAccess IrDA USB (ESI-9685) */
@@ -110,7 +112,6 @@ static int irda_usb_close(struct irda_usb_cb *self);
 static void speed_bulk_callback(struct urb *urb, struct pt_regs *regs);
 static void write_bulk_callback(struct urb *urb, struct pt_regs *regs);
 static void irda_usb_receive(struct urb *urb, struct pt_regs *regs);
-static int irda_usb_net_init(struct net_device *dev);
 static int irda_usb_net_open(struct net_device *dev);
 static int irda_usb_net_close(struct net_device *dev);
 static int irda_usb_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
@@ -899,24 +900,6 @@ static int irda_usb_is_receiving(struct irda_usb_cb *self)
  * be dealt with below...
  */
 
-/*------------------------------------------------------------------*/
-/*
- * Callback when a new IrDA device is created.
- */
-static int irda_usb_net_init(struct net_device *dev)
-{
-	IRDA_DEBUG(1, "%s()\n", __FUNCTION__);
-	
-	/* Keep track of module usage */
-	SET_MODULE_OWNER(dev);
-
-	/* Set up to be a normal IrDA network device driver */
-	irda_device_setup(dev);
-
-	/* Insert overrides below this line! */
-
-	return 0;
-}
 
 /*------------------------------------------------------------------*/
 /*
@@ -1123,7 +1106,10 @@ static inline void irda_usb_init_qos(struct irda_usb_cb *self)
 	/* Initialize QoS for this device */
 	irda_init_max_qos_capabilies(&self->qos);
 
-	self->qos.baud_rate.bits       = desc->wBaudRate;
+	/* See spec section 7.2 for meaning.
+	 * Values are little endian (as most USB stuff), the IrDA stack
+	 * use it in native order (see parameters.c). - Jean II */
+	self->qos.baud_rate.bits       = le16_to_cpu(desc->wBaudRate);
 	self->qos.min_turn_time.bits   = desc->bmMinTurnaroundTime;
 	self->qos.additional_bofs.bits = desc->bmAdditionalBOFs;
 	self->qos.window_size.bits     = desc->bmWindowSize;
@@ -1134,7 +1120,7 @@ static inline void irda_usb_init_qos(struct irda_usb_cb *self)
 
 	/* Don't always trust what the dongle tell us */
 	if(self->capability & IUC_SIR_ONLY)
-		self->qos.baud_rate.bits	&= 0xff;
+		self->qos.baud_rate.bits	&= 0x00ff;
 	if(self->capability & IUC_SMALL_PKT)
 		self->qos.data_size.bits	 = 0x07;
 	if(self->capability & IUC_NO_WINDOW)
@@ -1190,15 +1176,18 @@ static inline int irda_usb_open(struct irda_usb_cb *self)
 	memset(self->speed_buff, 0, IRDA_USB_SPEED_MTU);
 
 	/* Create a network device for us */
-	if (!(netdev = dev_alloc("irda%d", &err))) {
-		ERROR("%s(), dev_alloc() failed!\n", __FUNCTION__);
-		return -1;
+	netdev = alloc_irdadev(0);
+	if (!netdev) {
+		ERROR("%s(), alloc_net_dev() failed!\n", __FUNCTION__);
+		return -ENOMEM;
 	}
+
+	SET_MODULE_OWNER(dev);
+
 	self->netdev = netdev;
  	netdev->priv = (void *) self;
 
 	/* Override the network functions we need to use */
-	netdev->init            = irda_usb_net_init;
 	netdev->hard_start_xmit = irda_usb_hard_xmit;
 	netdev->tx_timeout	= irda_usb_net_timeout;
 	netdev->watchdog_timeo  = 250*HZ/1000;	/* 250 ms > USB timeout */
@@ -1207,12 +1196,12 @@ static inline int irda_usb_open(struct irda_usb_cb *self)
 	netdev->get_stats	= irda_usb_net_get_stats;
 	netdev->do_ioctl        = irda_usb_net_ioctl;
 
-	rtnl_lock();
-	err = register_netdevice(netdev);
-	rtnl_unlock();
+	err = register_netdev(netdev);
 	if (err) {
 		ERROR("%s(), register_netdev() failed!\n", __FUNCTION__);
-		return -1;
+		self->netdev = NULL;
+		free_netdev(netdev);
+		return err;
 	}
 	MESSAGE("IrDA: Registered device %s\n", netdev->name);
 
@@ -1231,9 +1220,11 @@ static inline int irda_usb_close(struct irda_usb_cb *self)
 	ASSERT(self != NULL, return -1;);
 
 	/* Remove netdevice */
-	if (self->netdev)
+	if (self->netdev) {
 		unregister_netdev(self->netdev);
-	self->netdev = NULL;
+		free_netdev(self->netdev);
+		self->netdev = NULL;
+	}
 
 	/* Remove the speed buffer */
 	if (self->speed_buff != NULL) {
@@ -1327,13 +1318,14 @@ static inline int irda_usb_parse_endpoints(struct irda_usb_cb *self, struct usb_
  */
 static inline void irda_usb_dump_class_desc(struct irda_class_desc *desc)
 {
+	/* Values are little endian */
 	printk("bLength=%x\n", desc->bLength);
 	printk("bDescriptorType=%x\n", desc->bDescriptorType);
-	printk("bcdSpecRevision=%x\n", desc->bcdSpecRevision); 
+	printk("bcdSpecRevision=%x\n", le16_to_cpu(desc->bcdSpecRevision)); 
 	printk("bmDataSize=%x\n", desc->bmDataSize);
 	printk("bmWindowSize=%x\n", desc->bmWindowSize);
 	printk("bmMinTurnaroundTime=%d\n", desc->bmMinTurnaroundTime);
-	printk("wBaudRate=%x\n", desc->wBaudRate);
+	printk("wBaudRate=%x\n", le16_to_cpu(desc->wBaudRate));
 	printk("bmAdditionalBOFs=%x\n", desc->bmAdditionalBOFs);
 	printk("bIrdaRateSniff=%x\n", desc->bIrdaRateSniff);
 	printk("bMaxUnicastList=%x\n", desc->bMaxUnicastList);
@@ -1404,8 +1396,8 @@ static inline struct irda_class_desc *irda_usb_find_class_desc(struct usb_interf
  * This routine is called by the USB subsystem for each new device
  * in the system. We need to check if the device is ours, and in
  * this case start handling it.
- * Note : it might be worth protecting this function by a global
- * spinlock... Or not, because maybe USB already deal with that...
+ * The USB layer protect us from reentrancy (via BKL), so we don't need
+ * to spinlock in there... Jean II
  */
 static int irda_usb_probe(struct usb_interface *intf,
 			  const struct usb_device_id *id)
@@ -1415,7 +1407,7 @@ static int irda_usb_probe(struct usb_interface *intf,
 	struct usb_host_interface *interface;
 	struct irda_class_desc *irda_desc;
 	int ret;
-	int i;
+	int i;		/* Driver instance index / Rx URB index */
 
 	/* Note : the probe make sure to call us only for devices that
 	 * matches the list of dongle (top of the file). So, we
@@ -1461,30 +1453,26 @@ static int irda_usb_probe(struct usb_interface *intf,
 	for (i = 0; i < IU_MAX_RX_URBS; i++) {
 		self->rx_urb[i] = usb_alloc_urb(0, GFP_KERNEL);
 		if (!self->rx_urb[i]) {
-			int j;
-			for (j = 0; j < i; j++)
-				usb_free_urb(self->rx_urb[j]);
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto err_out_1;
 		}
 	}
 	self->tx_urb = usb_alloc_urb(0, GFP_KERNEL);
 	if (!self->tx_urb) {
-		for (i = 0; i < IU_MAX_RX_URBS; i++)
-			usb_free_urb(self->rx_urb[i]);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_out_1;
 	}
 	self->speed_urb = usb_alloc_urb(0, GFP_KERNEL);
 	if (!self->speed_urb) {
-		for (i = 0; i < IU_MAX_RX_URBS; i++)
-			usb_free_urb(self->rx_urb[i]);
-		usb_free_urb(self->tx_urb);
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto err_out_2;
 	}
 
-	/* Is this really necessary? */
-	if (usb_set_configuration (dev, dev->config[0].desc.bConfigurationValue) < 0) {
-		err("set_configuration failed");
-		return -EIO;
+	/* Is this really necessary? (no, except maybe for broken devices) */
+	if (usb_reset_configuration (dev) < 0) {
+		err("reset_configuration failed");
+		ret = -EIO;
+		goto err_out_3;
 	}
 
 	/* Is this really necessary? */
@@ -1504,8 +1492,8 @@ static int irda_usb_probe(struct usb_interface *intf,
 			break;
 		default:
 			IRDA_DEBUG(0, "%s(), Unknown error %d\n", __FUNCTION__, ret);
-			return -EIO;
-			break;
+			ret = -EIO;
+			goto err_out_3;
 	}
 
 	/* Find our endpoints */
@@ -1513,15 +1501,17 @@ static int irda_usb_probe(struct usb_interface *intf,
 	if(!irda_usb_parse_endpoints(self, interface->endpoint,
 				     interface->desc.bNumEndpoints)) {
 		ERROR("%s(), Bogus endpoints...\n", __FUNCTION__);
-		return -EIO;
+		ret = -EIO;
+		goto err_out_3;
 	}
 
 	/* Find IrDA class descriptor */
 	irda_desc = irda_usb_find_class_desc(intf);
+	ret = -ENODEV;
 	if (irda_desc == NULL)
-		return -ENODEV;
-	
-	self->irda_desc =  irda_desc;	
+		goto err_out_3;
+
+	self->irda_desc =  irda_desc;
 	self->present = 1;
 	self->netopen = 0;
 	self->capability = id->driver_info;
@@ -1529,10 +1519,23 @@ static int irda_usb_probe(struct usb_interface *intf,
 	self->usbintf = intf;
 	ret = irda_usb_open(self);
 	if (ret)
-		return -ENOMEM;
+		goto err_out_3;
 
 	usb_set_intfdata(intf, self);
 	return 0;
+
+err_out_3:
+	/* Free all urbs that we may have created */
+	usb_free_urb(self->speed_urb);
+err_out_2:
+	usb_free_urb(self->tx_urb);
+err_out_1:
+	for (i = 0; i < IU_MAX_RX_URBS; i++) {
+		if (self->rx_urb[i])
+			usb_free_urb(self->rx_urb[i]);
+	}
+
+	return ret;
 }
 
 /*------------------------------------------------------------------*/
@@ -1624,10 +1627,13 @@ static struct usb_driver irda_driver = {
 /*
  * Module insertion
  */
-int __init usb_irda_init(void)
+static int __init usb_irda_init(void)
 {
-	if (usb_register(&irda_driver) < 0)
-		return -1;
+	int	ret;
+
+	ret = usb_register(&irda_driver);
+	if (ret < 0)
+		return ret;
 
 	MESSAGE("USB IrDA support registered\n");
 	return 0;
@@ -1638,7 +1644,7 @@ module_init(usb_irda_init);
 /*
  * Module removal
  */
-void __exit usb_irda_cleanup(void)
+static void __exit usb_irda_cleanup(void)
 {
 	struct irda_usb_cb *irda = NULL;
 	int	i;

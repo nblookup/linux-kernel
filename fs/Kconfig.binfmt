@@ -1,5 +1,5 @@
 config BINFMT_ELF
-	tristate "Kernel support for ELF binaries"
+	bool "Kernel support for ELF binaries"
 	depends on MMU
 	default y
 	---help---
@@ -23,11 +23,9 @@ config BINFMT_ELF
 	  ld.so (check the file <file:Documentation/Changes> for location and
 	  latest version).
 
-	  If you want to compile this as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want),
-	  say M here and read <file:Documentation/modules.txt>.  The module
-	  will be called binfmt_elf. Saying M or N here is dangerous because
-	  some crucial programs on your system might be in ELF format.
+	  To compile this as a module, choose M here: the module will be called
+	  binfmt_elf. Saying M or N here is dangerous because some crucial
+	  programs on your system might be in ELF format.
 
 config BINFMT_FLAT
 	tristate "Kernel support for flat binaries"
@@ -38,6 +36,7 @@ config BINFMT_FLAT
 config BINFMT_ZFLAT
 	bool "Enable ZFLAT support"
 	depends on BINFMT_FLAT
+	select ZLIB_INFLATE
 	help
 	  Support FLAT format compressed binaries
 
@@ -110,6 +109,9 @@ config BINFMT_MISC
 	  <file:Documentation/binfmt_misc.txt> to learn how to use this
 	  feature, and <file:Documentation/java.txt> for information about how
 	  to include Java support.
+
+          To use binfmt_misc, you will need to mount it:
+		mount binfmt_misc -t binfmt_misc /proc/sys/fs/binfmt_misc
 
 	  You may say M here for module support and later load the module when
 	  you have use for it; the module is called binfmt_misc. If you

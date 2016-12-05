@@ -7,6 +7,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
@@ -36,6 +37,7 @@
 #include <asm/starfire.h>
 #include <asm/uaccess.h>
 #include <asm/cache.h>
+#include <asm/cpudata.h>
 
 #ifdef CONFIG_SMP
 static void distribute_irqs(void);
@@ -56,12 +58,18 @@ static void distribute_irqs(void);
 
 struct ino_bucket ivector_table[NUM_IVECS] __attribute__ ((aligned (SMP_CACHE_BYTES)));
 
-#ifndef CONFIG_SMP
-unsigned int __up_workvec[16] __attribute__ ((aligned (SMP_CACHE_BYTES)));
-#define irq_work(__cpu, __pil)	&(__up_workvec[(void)(__cpu), (__pil)])
-#else
-#define irq_work(__cpu, __pil)	&(cpu_data[(__cpu)].irq_worklists[(__pil)])
-#endif
+/* This has to be in the main kernel image, it cannot be
+ * turned into per-cpu data.  The reason is that the main
+ * kernel image is locked into the TLB and this structure
+ * is accessed from the vectored interrupt trap handler.  If
+ * access to this structure takes a TLB miss it could cause
+ * the 5-level sparc v9 trap stack to overflow.
+ */
+struct irq_work_struct {
+	unsigned int	irq_worklists[16];
+};
+struct irq_work_struct __irq_work[NR_CPUS];
+#define irq_work(__cpu, __pil)	&(__irq_work[(__cpu)].irq_worklists[(__pil)])
 
 #ifdef CONFIG_PCI
 /* This is a table of physical addresses used to deal with IBF_DMA_SYNC.
@@ -109,6 +117,10 @@ static void register_irq_proc (unsigned int irq);
 	else \
 		action->flags |= __irq_ino(irq) << 48;
 #define get_ino_in_irqaction(action)	(action->flags >> 48)
+
+#if NR_CPUS > 64
+#error irqaction embedded smp affinity does not work with > 64 cpus, FIXME
+#endif
 
 #define put_smpaff_in_irqaction(action, smpaff)	(action)->mask = (smpaff)
 #define get_smpaff_in_irqaction(action) 	((action)->mask)
@@ -162,12 +174,24 @@ void enable_irq(unsigned int irq)
 		return;
 
 	if (tlb_type == cheetah || tlb_type == cheetah_plus) {
-		/* We set it to our Safari AID. */
-		__asm__ __volatile__("ldxa [%%g0] %1, %0"
-				     : "=r" (tid)
-				     : "i" (ASI_SAFARI_CONFIG));
-		tid = ((tid & (0x3ffUL<<17)) << 9);
-		tid &= IMAP_AID_SAFARI;
+		unsigned long ver;
+
+		__asm__ ("rdpr %%ver, %0" : "=r" (ver));
+		if ((ver >> 32) == 0x003e0016) {
+			/* We set it to our JBUS ID. */
+			__asm__ __volatile__("ldxa [%%g0] %1, %0"
+					     : "=r" (tid)
+					     : "i" (ASI_JBUS_CONFIG));
+			tid = ((tid & (0x1fUL<<17)) << 9);
+			tid &= IMAP_TID_JBUS;
+		} else {
+			/* We set it to our Safari AID. */
+			__asm__ __volatile__("ldxa [%%g0] %1, %0"
+					     : "=r" (tid)
+					     : "i" (ASI_SAFARI_CONFIG));
+			tid = ((tid & (0x3ffUL<<17)) << 9);
+			tid &= IMAP_AID_SAFARI;
+		}
 	} else if (this_is_starfire == 0) {
 		/* We set it to our UPA MID. */
 		__asm__ __volatile__("ldxa [%%g0] %1, %0"
@@ -463,6 +487,8 @@ free_and_enomem:
 	return -ENOMEM;
 }
 
+EXPORT_SYMBOL(request_irq);
+
 void free_irq(unsigned int irq, void *dev_id)
 {
 	struct irqaction *action;
@@ -585,6 +611,8 @@ out:
 	spin_unlock_irqrestore(&irq_action_lock, flags);
 }
 
+EXPORT_SYMBOL(free_irq);
+
 #ifdef CONFIG_SMP
 void synchronize_irq(unsigned int irq)
 {
@@ -658,11 +686,11 @@ static inline void redirect_intr(int cpu, struct ino_bucket *bp)
 	 *    Just Do It.
 	 */
 	struct irqaction *ap = bp->irq_info;
-	unsigned long cpu_mask = get_smpaff_in_irqaction(ap);
+	cpumask_t cpu_mask = get_smpaff_in_irqaction(ap);
 	unsigned int buddy, ticks;
 
-	cpu_mask &= cpu_online_map;
-	if (cpu_mask == 0)
+	cpus_and(cpu_mask, cpu_mask, cpu_online_map);
+	if (cpus_empty(cpu_mask))
 		cpu_mask = cpu_online_map;
 
 	if (this_is_starfire != 0 ||
@@ -677,7 +705,7 @@ static inline void redirect_intr(int cpu, struct ino_bucket *bp)
 		buddy = 0;
 
 	ticks = 0;
-	while ((cpu_mask & (1UL << buddy)) == 0) {
+	while (!cpu_isset(buddy, cpu_mask)) {
 		if (++buddy >= NR_CPUS)
 			buddy = 0;
 		if (++ticks > NR_CPUS) {
@@ -690,7 +718,7 @@ static inline void redirect_intr(int cpu, struct ino_bucket *bp)
 		goto out;
 
 	/* Voo-doo programming. */
-	if (cpu_data[buddy].idle_volume < FORWARD_VOLUME)
+	if (cpu_data(buddy).idle_volume < FORWARD_VOLUME)
 		goto out;
 
 	/* This just so happens to be correct on Cheetah
@@ -936,10 +964,14 @@ unsigned long probe_irq_on(void)
 	return 0;
 }
 
+EXPORT_SYMBOL(probe_irq_on);
+
 int probe_irq_off(unsigned long mask)
 {
 	return 0;
 }
+
+EXPORT_SYMBOL(probe_irq_off);
 
 #ifdef CONFIG_SMP
 static int retarget_one_irq(struct irqaction *p, int goal_cpu)
@@ -1067,15 +1099,42 @@ void enable_prom_timer(void)
 	prom_timers->count0 = 0;
 }
 
+void init_irqwork_curcpu(void)
+{
+	register struct irq_work_struct *workp asm("o2");
+	unsigned long tmp;
+
+	memset(__irq_work + smp_processor_id(), 0, sizeof(*workp));
+
+	/* Make sure we are called with PSTATE_IE disabled.  */
+	__asm__ __volatile__("rdpr	%%pstate, %0\n\t"
+			     : "=r" (tmp));
+	if (tmp & PSTATE_IE) {
+		prom_printf("BUG: init_irqwork_curcpu() called with "
+			    "PSTATE_IE enabled, bailing.\n");
+		__asm__ __volatile__("mov	%%i7, %0\n\t"
+				     : "=r" (tmp));
+		prom_printf("BUG: Called from %lx\n", tmp);
+		prom_halt();
+	}
+
+	/* Set interrupt globals.  */
+	workp = &__irq_work[smp_processor_id()];
+	__asm__ __volatile__(
+	"rdpr	%%pstate, %0\n\t"
+	"wrpr	%0, %1, %%pstate\n\t"
+	"mov	%2, %%g6\n\t"
+	"wrpr	%0, 0x0, %%pstate\n\t"
+	: "=&r" (tmp)
+	: "i" (PSTATE_IG), "r" (workp));
+}
+
 /* Only invoked on boot processor. */
 void __init init_IRQ(void)
 {
 	map_prom_timers();
 	kill_prom_timer();
 	memset(&ivector_table[0], 0, sizeof(ivector_table));
-#ifndef CONFIG_SMP
-	memset(&__up_workvec[0], 0, sizeof(__up_workvec));
-#endif
 
 	/* We need to clear any IRQ's pending in the soft interrupt
 	 * registers, a spurious one could be left around from the

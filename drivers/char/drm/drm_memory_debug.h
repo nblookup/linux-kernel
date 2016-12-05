@@ -1,6 +1,12 @@
-/* drm_memory.h -- Memory management wrappers for DRM -*- linux-c -*-
- * Created: Thu Feb  4 14:00:34 1999 by faith@valinux.com
+/**
+ * \file drm_memory.h 
+ * Memory management wrappers for DRM.
  *
+ * \author Rickard E. (Rik) Faith <faith@valinux.com>
+ * \author Gareth Hughes <gareth@valinux.com>
+ */
+
+/*
  * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
  * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
  * All Rights Reserved.
@@ -23,10 +29,6 @@
  * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
  * OTHER DEALINGS IN THE SOFTWARE.
- *
- * Authors:
- *    Rickard E. (Rik) Faith <faith@valinux.com>
- *    Gareth Hughes <gareth@valinux.com>
  */
 
 #include <linux/config.h>
@@ -162,6 +164,17 @@ void *DRM(alloc)(size_t size, int area)
 	DRM(mem_stats)[area].bytes_allocated += size;
 	spin_unlock(&DRM(mem_lock));
 	return pt;
+}
+
+void *DRM(calloc)(size_t size, size_t nmemb, int area)
+{
+	void *addr;
+
+	addr = DRM(alloc)(nmemb * size, area);
+	if (addr != NULL)
+		memset((void *)addr, 0, size * nmemb);
+
+	return addr;
 }
 
 void *DRM(realloc)(void *oldpt, size_t oldsize, size_t size, int area)
@@ -340,9 +353,9 @@ void DRM(ioremapfree)(void *pt, unsigned long size, drm_device_t *dev)
 
 #if __REALLY_HAVE_AGP
 
-agp_memory *DRM(alloc_agp)(int pages, u32 type)
+DRM_AGP_MEM *DRM(alloc_agp)(int pages, u32 type)
 {
-	agp_memory *handle;
+	DRM_AGP_MEM *handle;
 
 	if (!pages) {
 		DRM_MEM_ERROR(DRM_MEM_TOTALAGP, "Allocating 0 pages\n");
@@ -363,7 +376,7 @@ agp_memory *DRM(alloc_agp)(int pages, u32 type)
 	return NULL;
 }
 
-int DRM(free_agp)(agp_memory *handle, int pages)
+int DRM(free_agp)(DRM_AGP_MEM *handle, int pages)
 {
 	int           alloc_count;
 	int           free_count;
@@ -392,7 +405,7 @@ int DRM(free_agp)(agp_memory *handle, int pages)
 	return retval;
 }
 
-int DRM(bind_agp)(agp_memory *handle, unsigned int start)
+int DRM(bind_agp)(DRM_AGP_MEM *handle, unsigned int start)
 {
 	int retcode = -EINVAL;
 
@@ -416,7 +429,7 @@ int DRM(bind_agp)(agp_memory *handle, unsigned int start)
 	return retcode;
 }
 
-int DRM(unbind_agp)(agp_memory *handle)
+int DRM(unbind_agp)(DRM_AGP_MEM *handle)
 {
 	int alloc_count;
 	int free_count;

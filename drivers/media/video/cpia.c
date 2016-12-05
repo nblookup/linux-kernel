@@ -29,7 +29,6 @@
 #include <linux/config.h>
 
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/vmalloc.h>
@@ -3300,8 +3299,8 @@ static int cpia_close(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static int cpia_read(struct file *file, char *buf,
-		     size_t count, loff_t *ppos)
+static ssize_t cpia_read(struct file *file, char *buf,
+			 size_t count, loff_t *ppos)
 {
 	struct video_device *dev = file->private_data;
 	struct cam_data *cam = dev->priv;

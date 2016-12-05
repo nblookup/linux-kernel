@@ -30,7 +30,7 @@ static struct atm_dev *__alloc_atm_dev(const char *type)
 {
 	struct atm_dev *dev;
 
-	dev = kmalloc(sizeof(*dev), GFP_ATOMIC);
+	dev = kmalloc(sizeof(*dev), GFP_KERNEL);
 	if (!dev)
 		return NULL;
 	memset(dev, 0, sizeof(*dev));
@@ -110,20 +110,16 @@ struct atm_dev *atm_dev_register(const char *type, const struct atmdev_ops *ops,
 	list_add_tail(&dev->dev_list, &atm_devs);
 	spin_unlock(&atm_dev_lock);
 
-#ifdef CONFIG_PROC_FS
-	if (ops->proc_read) {
-		if (atm_proc_dev_register(dev) < 0) {
-			printk(KERN_ERR "atm_dev_register: "
-			       "atm_proc_dev_register failed for dev %s\n",
-			       type);
-			spin_lock(&atm_dev_lock);
-			list_del(&dev->dev_list);
-			spin_unlock(&atm_dev_lock);
-			__free_atm_dev(dev);
-			return NULL;
-		}
+	if (atm_proc_dev_register(dev) < 0) {
+		printk(KERN_ERR "atm_dev_register: "
+		       "atm_proc_dev_register failed for dev %s\n",
+		       type);
+		spin_lock(&atm_dev_lock);
+		list_del(&dev->dev_list);
+		spin_unlock(&atm_dev_lock);
+		__free_atm_dev(dev);
+		return NULL;
 	}
-#endif
 
 	return dev;
 }
@@ -133,10 +129,8 @@ void atm_dev_deregister(struct atm_dev *dev)
 {
 	unsigned long warning_time;
 
-#ifdef CONFIG_PROC_FS
-	if (dev->ops->proc_read)
-		atm_proc_dev_deregister(dev);
-#endif
+	atm_proc_dev_deregister(dev);
+
 	spin_lock(&atm_dev_lock);
 	list_del(&dev->dev_list);
 	spin_unlock(&atm_dev_lock);
@@ -145,7 +139,6 @@ void atm_dev_deregister(struct atm_dev *dev)
         while (atomic_read(&dev->refcnt) != 1) {
                 current->state = TASK_INTERRUPTIBLE;
                 schedule_timeout(HZ / 4);
-                current->state = TASK_RUNNING;
                 if ((jiffies - warning_time) > 10 * HZ) {
                         printk(KERN_EMERG "atm_dev_deregister: waiting for "
                                "dev %d to become free. Usage count = %d\n",
@@ -399,6 +392,35 @@ int atm_dev_ioctl(unsigned int cmd, unsigned long arg)
 done:
 	atm_dev_put(dev);
 	return error;
+}
+
+static __inline__ void *dev_get_idx(loff_t left)
+{
+	struct list_head *p;
+
+	list_for_each(p, &atm_devs) {
+		if (!--left)
+			break;
+	}
+	return (p != &atm_devs) ? p : NULL;
+}
+
+void *atm_dev_seq_start(struct seq_file *seq, loff_t *pos)
+{
+ 	spin_lock(&atm_dev_lock);
+	return *pos ? dev_get_idx(*pos) : (void *) 1;
+}
+
+void atm_dev_seq_stop(struct seq_file *seq, void *v)
+{
+ 	spin_unlock(&atm_dev_lock);
+}
+ 
+void *atm_dev_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	++*pos;
+	v = (v == (void *)1) ? atm_devs.next : ((struct list_head *)v)->next;
+	return (v == &atm_devs) ? NULL : v;
 }
 
 

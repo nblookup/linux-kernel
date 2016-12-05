@@ -29,7 +29,6 @@
 #include <asm/io.h>
 #include <asm/dma.h>
 
-#include "ide_modes.h"
 #include "sl82c105.h"
 
 #undef DEBUG
@@ -511,7 +510,7 @@ static int __devinit sl82c105_init_one(struct pci_dev *dev, const struct pci_dev
 	return 0;
 }
 
-static struct pci_device_id sl82c105_pci_tbl[] __devinitdata = {
+static struct pci_device_id sl82c105_pci_tbl[] = {
 	{ PCI_VENDOR_ID_WINBOND, PCI_DEVICE_ID_WINBOND_82C105, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ 0, },
 };

@@ -56,7 +56,6 @@ end:
 	return pte;
 }
 
-#ifdef CONFIG_HIGHPTE	/* Save a few cycles on the sane machines */
 static inline int page_table_present(struct mm_struct *mm, unsigned long addr)
 {
 	pgd_t *pgd;
@@ -68,9 +67,6 @@ static inline int page_table_present(struct mm_struct *mm, unsigned long addr)
 	pmd = pmd_offset(pgd, addr);
 	return pmd_present(*pmd);
 }
-#else
-#define page_table_present(mm, addr)	(1)
-#endif
 
 static inline pte_t *alloc_one_pte_map(struct mm_struct *mm, unsigned long addr)
 {
@@ -424,7 +420,7 @@ unsigned long do_mremap(unsigned long addr,
 	if (flags & MREMAP_MAYMOVE) {
 		if (!(flags & MREMAP_FIXED)) {
 			unsigned long map_flags = 0;
-			if (vma->vm_flags & VM_SHARED)
+			if (vma->vm_flags & VM_MAYSHARE)
 				map_flags |= MAP_SHARED;
 
 			new_addr = get_unmapped_area(vma->vm_file, 0, new_len,

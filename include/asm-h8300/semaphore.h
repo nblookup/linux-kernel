@@ -51,7 +51,7 @@ struct semaphore {
 #define DECLARE_MUTEX(name) __DECLARE_SEMAPHORE_GENERIC(name,1)
 #define DECLARE_MUTEX_LOCKED(name) __DECLARE_SEMAPHORE_GENERIC(name,0)
 
-extern inline void sema_init (struct semaphore *sem, int val)
+static inline void sema_init (struct semaphore *sem, int val)
 {
 	*sem = (struct semaphore)__SEMAPHORE_INITIALIZER(*sem, val);
 }
@@ -83,91 +83,98 @@ extern spinlock_t semaphore_wake_lock;
  * "down_failed" is a special asm handler that calls the C
  * routine that actually waits. See arch/m68k/lib/semaphore.S
  */
-extern inline void down(struct semaphore * sem)
+static inline void down(struct semaphore * sem)
 {
+	register atomic_t *count asm("er0");
+
 #if WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
+	might_sleep();
 
+	count = &(sem->count);
 	__asm__ __volatile__(
-		"stc ccr,r4l\n\t"
+		"stc ccr,r3l\n\t"
 		"orc #0x80,ccr\n\t"
-		"mov.l @%0, er0\n\t"
-		"dec.l #1,er0\n\t"
-		"mov.l er0,@%0\n\t"
+		"mov.l %0, er1\n\t"
+		"dec.l #1,er1\n\t"
+		"mov.l er1,%0\n\t"
 		"bpl 1f\n\t"
-		"ldc r4l,ccr\n\t"
-		"mov.l %0,er0\n\t"
-		"jsr @___down\n"
+		"ldc r3l,ccr\n\t"
+		"mov.l %1,er0\n\t"
+		"jsr @___down\n\t"
+		"bra 2f\n"
 		"1:\n\t"
-		"ldc r4l,ccr"
-		: /* no outputs */
-		: "r" (&(sem->count))
-		: "cc", "er0", "er1", "er2", "er3", "er4", "memory");
+		"ldc r3l,ccr\n"
+		"2:"
+		: "+m"(*count)
+		: "g"(sem)
+		: "cc",  "er1", "er2", "er3");
 }
 
-extern inline int down_interruptible(struct semaphore * sem)
+static inline int down_interruptible(struct semaphore * sem)
 {
-	register int ret __asm__("er0");
+	register atomic_t *count asm("er0");
 
 #if WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
+	might_sleep();
 
+	count = &(sem->count);
 	__asm__ __volatile__(
 		"stc ccr,r1l\n\t"
 		"orc #0x80,ccr\n\t"
-		"mov.l @%1, er2\n\t"
+		"mov.l %1, er2\n\t"
 		"dec.l #1,er2\n\t"
-		"mov.l er2,@%1\n\t"
+		"mov.l er2,%1\n\t"
 		"bpl 1f\n\t"
 		"ldc r1l,ccr\n\t"
-		"mov.l %1,er0\n\t"
+		"mov.l %2,er0\n\t"
 		"jsr @___down_interruptible\n\t"
 		"bra 2f\n"
 		"1:\n\t"
 		"ldc r1l,ccr\n\t"
 		"sub.l %0,%0\n\t"
 		"2:\n\t"
-		: "=r" (ret)
-		: "r" (&(sem->count))
-		: "cc", "er1", "er2", "er3", "memory");
-	return ret;
+		: "=r" (count),"+m" (*count)
+		: "g"(sem)
+		: "cc", "er1", "er2", "er3");
+	return (int)count;
 }
 
-extern inline int down_trylock(struct semaphore * sem)
+static inline int down_trylock(struct semaphore * sem)
 {
-	register int result;
+	register atomic_t *count asm("er0");
 
 #if WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
 
+	count = &(sem->count);
 	__asm__ __volatile__(
-		"stc ccr,r4l\n\t"
+		"stc ccr,r3l\n\t"
 		"orc #0x80,ccr\n\t"
-		"mov.l @%1,er0\n\t"
-		"dec.l #1,er0\n\t"
-		"mov.l er0,@%1\n\t"
+		"mov.l %0,er2\n\t"
+		"dec.l #1,er2\n\t"
+		"mov.l er2,%0\n\t"
 		"bpl 1f\n\t"
-		"ldc r4l,ccr\n\t"
-		"jmp @3f\n"
-		"1:\n\t"
-		"ldc r4l,ccr\n\t"
-		"sub.l %0,%0\n"
-		"2:\n"
-		".section .text.lock,\"ax\"\n"
-		".align 2\n"
+		"ldc r3l,ccr\n\t"
+		"jmp @3f\n\t"
+		LOCK_SECTION_START(".align 2\n\t")
 		"3:\n\t"
-		"mov.l %1,er0\n\t"
-		"jsr @___down_trylock\n"
-		"mov.l er0,%0\n\t"
-		"jmp @2b\n\t"
-		".previous"
-		: "=r" (result)
-		: "r" (&(sem->count))
-		: "cc", "er0","er4", "memory");
-	return result;
+		"mov.l %2,er0\n\t"
+		"jsr @___down_trylock\n\t"
+		"jmp @2f\n\t"
+		LOCK_SECTION_END
+		"1:\n\t"
+		"ldc r3l,ccr\n\t"
+		"sub.l %1,%1\n"
+		"2:"
+		: "+m" (*count),"=r"(count)
+		: "g"(sem)
+		: "cc", "er1","er2", "er3");
+	return (int)count;
 }
 
 /*
@@ -176,29 +183,31 @@ extern inline int down_trylock(struct semaphore * sem)
  * The default case (no contention) will result in NO
  * jumps for both down() and up().
  */
-extern inline void up(struct semaphore * sem)
+static inline void up(struct semaphore * sem)
 {
+	register atomic_t *count asm("er0");
+
 #if WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
 
+	count = &(sem->count);
 	__asm__ __volatile__(
-		"stc ccr,r4l\n\t"
+		"stc ccr,r3l\n\t"
 		"orc #0x80,ccr\n\t"
-		"mov.l @%0,er0\n\t"
-		"inc.l #1,er0\n\t"
-		"mov.l er0,@%0\n\t"
-		"bmi 1f\n\t"
-		"bne 2f\n\t"
-		"1:\n\t"
-		"ldc r4l,ccr\n\t"
-		"mov.l %0,er0\n\t"
+		"mov.l %0,er1\n\t"
+		"inc.l #1,er1\n\t"
+		"mov.l er1,%0\n\t"
+		"ldc r3l,ccr\n\t"
+		"sub.l er2,er2\n\t"
+		"cmp.l er2,er1\n\t"
+		"bgt 1f\n\t"
+		"mov.l %1,er0\n\t"
 		"jsr @___up\n"
-		"2:\n\t"
-                "ldc r4l,ccr"
-		: /* no outputs */
-		: "r" (&(sem->count))
-		: "cc", "er0", "er4", "memory");
+		"1:"
+		: "+m"(*count)
+		: "g"(sem)
+		: "cc", "er1", "er2", "er3");
 }
 
 #endif /* __ASSEMBLY__ */

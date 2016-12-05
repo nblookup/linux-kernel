@@ -17,10 +17,8 @@ config SOUND_BT878
 	  don't need this driver as most TV cards handle sound with a short
 	  cable from the TV card to your sound card's line-in.
 
-	  This driver is available as a module called btaudio ( = code
-	  which can be inserted in and removed from the running kernel
-	  whenever you want). If you want to compile it as a module, say M
-	  here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the module will
+	  be called btaudio.
 
 config SOUND_CMPCI
 	tristate "C-Media PCI (CMI8338/8738)"
@@ -233,12 +231,9 @@ config SOUND_ICH
 	  Support for integral audio in Intel's I/O Controller Hub (ICH)
 	  chipset, as used on the 810/820/840 motherboards.
 
-config SOUND_RME96XX
-	tristate "RME Hammerfall (RME96XX) support (EXPERIMENTAL)"
-	depends on SOUND_PRIME!=n && SOUND && PCI && EXPERIMENTAL
-	help
-	  Say Y or M if you have a Hammerfall, Hammerfall light or Hammerfall
-	  DSP card from RME.
+config SOUND_HARMONY
+	tristate "PA Harmony audio driver"
+	depends on GSC_LASI && SOUND
 
 config SOUND_SONICVIBES
 	tristate "S3 SonicVibes"
@@ -259,6 +254,10 @@ config SOUND_VWSND
 	  able to use its on-board audio.  Read
 	  <file:Documentation/sound/oss/vwsnd> for more info on this driver's
 	  capabilities.
+
+config SOUND_HAL2
+	tristate "SGI HAL2 sound (EXPERIMENTAL)"
+	depends on SGI_IP22 && SOUND && EXPERIMENTAL
 
 config SOUND_VRC5477
 	tristate "NEC Vrc5477 AC97 sound"
@@ -311,7 +310,7 @@ config SOUND_TRIDENT
 
 config SOUND_MSNDCLAS
 	tristate "Support for Turtle Beach MultiSound Classic, Tahiti, Monterey"
-	depends on SOUND_PRIME!=n && SOUND
+	depends on SOUND_PRIME!=n && SOUND && (m || !STANDALONE)
 	help
 	  Say M here if you have a Turtle Beach MultiSound Classic, Tahiti or
 	  Monterey (not for the Pinnacle or Fiji).
@@ -326,7 +325,7 @@ comment "Compiled-in MSND Classic support requires firmware during compilation."
 
 config MSNDCLAS_HAVE_BOOT
 	bool
-	depends on SOUND_MSNDCLAS=y
+	depends on SOUND_MSNDCLAS=y && !STANDALONE
 	default y
 
 config MSNDCLAS_INIT_FILE
@@ -375,7 +374,7 @@ config MSNDCLAS_IO
 
 config SOUND_MSNDPIN
 	tristate "Support for Turtle Beach MultiSound Pinnacle, Fiji"
-	depends on SOUND_PRIME!=n && SOUND
+	depends on SOUND_PRIME!=n && SOUND && (m || !STANDALONE)
 	help
 	  Say M here if you have a Turtle Beach MultiSound Pinnacle or Fiji.
 	  See <file:Documentation/sound/oss/MultiSound> for important information
@@ -598,6 +597,13 @@ config SOUND_AD1816
 	  If you compile the driver into the kernel, you have to add
 	  "ad1816=<io>,<irq>,<dma>,<dma2>" to the kernel command line.
 
+config SOUND_AD1889
+	tristate "AD1889 based cards (AD1819 codec) (EXPERIMENTAL)"
+	depends on EXPERIMENTAL && SOUND_OSS
+	help
+	  Say M here if you have a sound card based on the Analog Devices
+	  AD1889 chip.
+
 config SOUND_SGALAXY
 	tristate "Aztech Sound Galaxy (non-PnP) cards"
 	depends on SOUND_OSS
@@ -699,7 +705,7 @@ config SOUND_TRIX
 
 config TRIX_HAVE_BOOT
 	bool "Have TRXPRO.HEX firmware file"
-	depends on SOUND_TRIX=y
+	depends on SOUND_TRIX=y && !STANDALONE
 	help
 	  The MediaTrix AudioTrix Pro has an on-board microcontroller which
 	  needs to be initialized by downloading the code from the file
@@ -854,7 +860,7 @@ config PSS_MIXER
 
 config PSS_HAVE_BOOT
 	bool "Have DSPxxx.LD firmware file"
-	depends on SOUND_PSS
+	depends on SOUND_PSS && !STANDALONE
 	help
 	  If you have the DSPxxx.LD file or SYNTH.LD file for you card, say Y
 	  to include this file. Without this file the synth device (OPL) may
@@ -925,7 +931,7 @@ config SOUND_MAUI
 
 config MAUI_HAVE_BOOT
 	bool "Have OSWF.MOT firmware file"
-	depends on SOUND_MAUI=y
+	depends on SOUND_MAUI=y && !STANDALONE
 	help
 	  Turtle Beach Maui and Tropez sound cards have a microcontroller
 	  which needs to be initialized prior to use. OSWF.MOT is a file
@@ -1118,4 +1124,32 @@ config SOUND_TVMIXER
 	help
 	  Support for audio mixer facilities on the BT848 TV frame-grabber
 	  card.
+
+config SOUND_KAHLUA
+	tristate "XpressAudio Sound Blaster emulation"
+	depends on SOUND_SB
+
+config SOUND_ALI5455
+	tristate "ALi5455 audio support"
+	depends on SOUND_PRIME!=n && PCI
+
+config SOUND_FORTE
+	tristate "ForteMedia FM801 driver"
+	depends on SOUND_PRIME!=n && PCI
+	help
+	  Say Y or M if you want driver support for the ForteMedia FM801 PCI
+	  audio controller (Abit AU10, Genius Sound Maker, HP Workstation
+	  zx2000, and others).
+
+config SOUND_RME96XX
+	tristate "RME Hammerfall (RME96XX) support"
+	depends on SOUND_PRIME!=n && PCI
+	help
+	  Say Y or M if you have a Hammerfall or Hammerfall light
+	  multichannel card from RME. If you want to acess advanced
+	  features of the card, read Documentation/sound/rme96xx.
+
+config SOUND_AD1980
+	tristate "AD1980 front/back switch plugin"
+	depends on SOUND_PRIME!=n
 

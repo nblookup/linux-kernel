@@ -37,7 +37,6 @@
 
 /* #define DEBUG 1 */
 
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
@@ -93,14 +92,6 @@ static unsigned short amd756_ioport = 0;
      see E0 for the status bits and enabled in E2
      
 */
-
-/* Internally used pause function */
-static void amd756_do_pause(unsigned int amount)
-{
-	current->state = TASK_INTERRUPTIBLE;
-	schedule_timeout(amount);
-}
-
 #define GS_ABRT_STS	(1 << 0)
 #define GS_COL_STS	(1 << 1)
 #define GS_PRERR_STS	(1 << 2)
@@ -132,7 +123,7 @@ static int amd756_transaction(struct i2c_adapter *adap)
 	if ((temp = inw_p(SMB_GLOBAL_STATUS)) & (GS_HST_STS | GS_SMB_STS)) {
 		dev_dbg(&adap->dev, ": SMBus busy (%04x). Waiting... \n", temp);
 		do {
-			amd756_do_pause(1);
+			i2c_delay(1);
 			temp = inw_p(SMB_GLOBAL_STATUS);
 		} while ((temp & (GS_HST_STS | GS_SMB_STS)) &&
 		         (timeout++ < MAX_TIMEOUT));
@@ -149,7 +140,7 @@ static int amd756_transaction(struct i2c_adapter *adap)
 
 	/* We will always wait for a fraction of a second! */
 	do {
-		amd756_do_pause(1);
+		i2c_delay(1);
 		temp = inw_p(SMB_GLOBAL_STATUS);
 	} while ((temp & GS_HST_STS) && (timeout++ < MAX_TIMEOUT));
 
@@ -196,7 +187,7 @@ static int amd756_transaction(struct i2c_adapter *adap)
  abort:
 	dev_warn(&adap->dev, ": Sending abort.\n");
 	outw_p(inw(SMB_GLOBAL_ENABLE) | GE_ABORT, SMB_GLOBAL_ENABLE);
-	amd756_do_pause(100);
+	i2c_delay(100);
 	outw_p(GS_CLEAR_STS, SMB_GLOBAL_STATUS);
 	return -1;
 }
@@ -312,17 +303,14 @@ static struct i2c_algorithm smbus_algorithm = {
 
 static struct i2c_adapter amd756_adapter = {
 	.owner		= THIS_MODULE,
-	.id		= I2C_ALGO_SMBUS | I2C_HW_SMBUS_AMD756,
 	.class          = I2C_ADAP_CLASS_SMBUS,
 	.algo		= &smbus_algorithm,
-	.dev		= {
-		.name	= "unset",
-	},
+	.name		= "unset",
 };
 
 enum chiptype { AMD756, AMD766, AMD768, NFORCE };
 
-static struct pci_device_id amd756_ids[] __devinitdata = {
+static struct pci_device_id amd756_ids[] = {
 	{PCI_VENDOR_ID_AMD, 0x740B, PCI_ANY_ID, PCI_ANY_ID, 0, 0, AMD756 },
 	{PCI_VENDOR_ID_AMD, 0x7413, PCI_ANY_ID, PCI_ANY_ID, 0, 0, AMD766 },
 	{PCI_VENDOR_ID_AMD, 0x7443, PCI_ANY_ID, PCI_ANY_ID, 0, 0, AMD768 },
@@ -379,7 +367,7 @@ static int __devinit amd756_probe(struct pci_dev *pdev,
 	/* set up the driverfs linkage to our parent device */
 	amd756_adapter.dev.parent = &pdev->dev;
 
-	snprintf(amd756_adapter.dev.name, DEVICE_NAME_SIZE,
+	snprintf(amd756_adapter.name, I2C_NAME_SIZE,
 		"SMBus AMD75x adapter at %04x", amd756_ioport);
 
 	error = i2c_add_adapter(&amd756_adapter);

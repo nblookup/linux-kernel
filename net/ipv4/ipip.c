@@ -246,7 +246,7 @@ static struct ip_tunnel * ipip_tunnel_locate(struct ip_tunnel_parm *parms, int c
 	nt = dev->priv;
 	SET_MODULE_OWNER(dev);
 	dev->init = ipip_tunnel_init;
-	dev->destructor = (void (*)(struct net_device *))kfree;
+	dev->destructor = free_netdev;
 	nt->parms = *parms;
 
 	if (register_netdevice(dev) < 0) {
@@ -475,14 +475,22 @@ static int ipip_rcv(struct sk_buff *skb)
 		goto out;
 
 	iph = skb->nh.iph;
-	skb->mac.raw = skb->nh.raw;
-	skb->nh.raw = skb->data;
-	memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
-	skb->protocol = htons(ETH_P_IP);
-	skb->pkt_type = PACKET_HOST;
 
 	read_lock(&ipip_lock);
 	if ((tunnel = ipip_tunnel_lookup(iph->saddr, iph->daddr)) != NULL) {
+		if (!xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
+			kfree_skb(skb);
+			return 0;
+		}
+
+		secpath_reset(skb);
+
+		skb->mac.raw = skb->nh.raw;
+		skb->nh.raw = skb->data;
+		memset(&(IPCB(skb)->opt), 0, sizeof(struct ip_options));
+		skb->protocol = htons(ETH_P_IP);
+		skb->pkt_type = PACKET_HOST;
+
 		tunnel->stat.rx_packets++;
 		tunnel->stat.rx_bytes += skb->len;
 		skb->dev = tunnel->dev;
@@ -596,8 +604,6 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			tunnel->err_count = 0;
 	}
 
-	skb->h.raw = skb->nh.raw;
-
 	/*
 	 * Okay, now see if we can stuff it in the buffer as-is.
 	 */
@@ -616,8 +622,10 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 			skb_set_owner_w(new_skb, skb->sk);
 		dev_kfree_skb(skb);
 		skb = new_skb;
+		old_iph = skb->nh.iph;
 	}
 
+	skb->h.raw = skb->nh.raw;
 	skb->nh.raw = skb_push(skb, sizeof(struct iphdr));
 	memset(&(IPCB(skb)->opt), 0, sizeof(IPCB(skb)->opt));
 	dst_release(skb->dst);

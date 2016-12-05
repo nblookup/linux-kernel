@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2002 Silicon Graphics, Inc.  All Rights Reserved.
+ * Copyright (c) 2000-2003 Silicon Graphics, Inc.  All Rights Reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of version 2 of the GNU General Public License as
@@ -130,18 +130,18 @@ STATIC struct workqueue_struct *pagebuf_dataio_workqueue;
  */
 
 pagebuf_param_t pb_params = {
-			/*	MIN	DFLT	MAX	*/
-	flush_interval:	{	HZ/2,	HZ,	30*HZ	},
-	age_buffer:	{	1*HZ,	15*HZ,	300*HZ	},
-	stats_clear:	{	0,	0,	1	},
-	debug:		{	0,	0,	1	},
+			  /*	MIN	DFLT	MAX	*/
+	.flush_interval	= {	HZ/2,	HZ,	30*HZ	},
+	.age_buffer	= {	1*HZ,	15*HZ,	300*HZ	},
+	.stats_clear	= {	0,	0,	1	},
+	.debug		= {	0,	0,	1	},
 };
 
 /*
  * Pagebuf statistics variables
  */
 
-struct pbstats pbstats;
+DEFINE_PER_CPU(struct pbstats, pbstats);
 
 /*
  * Pagebuf allocation / freeing.
@@ -174,16 +174,13 @@ STATIC pb_hash_t	pbhash[NHASH];
 
 STATIC int
 _bhash(
-	dev_t		dev,
+	struct block_device *bdev,
 	loff_t		base)
 {
 	int		bit, hval;
 
 	base >>= 9;
-	/*
-	 * dev_t is 16 bits, loff_t is always 64 bits
-	 */
-	base ^= dev;
+	base ^= (unsigned long)bdev / L1_CACHE_BYTES;
 	for (bit = hval = 0; base && bit < sizeof(base) * 8; bit += NBITS) {
 		hval ^= (int)base & (NHASH-1);
 		base >>= NBITS;
@@ -296,7 +293,7 @@ _pagebuf_initialize(
 	atomic_set(&pb->pb_pin_count, 0);
 	init_waitqueue_head(&pb->pb_waiters);
 
-	PB_STATS_INC(pbstats.pb_create);
+	PB_STATS_INC(pb_create);
 	PB_TRACE(pb, PB_TRACE_REC(get), target);
 }
 
@@ -488,7 +485,7 @@ _pagebuf_lookup_pages(
 			page = find_or_create_page(aspace, index, gfp_mask);
 			if (!page) {
 				if (--retry_count > 0) {
-					PB_STATS_INC(pbstats.pb_page_retries);
+					PB_STATS_INC(pb_page_retries);
 					pagebuf_daemon_wakeup(1);
 					current->state = TASK_UNINTERRUPTIBLE;
 					schedule_timeout(10);
@@ -498,7 +495,7 @@ _pagebuf_lookup_pages(
 				all_mapped = 0;
 				continue;
 			}
-			PB_STATS_INC(pbstats.pb_page_found);
+			PB_STATS_INC(pb_page_found);
 			mark_page_accessed(page);
 			pb->pb_pages[pi] = page;
 		} else {
@@ -619,7 +616,7 @@ _pagebuf_find(				/* find buffer for block	*/
 	/* Ensure we never do IOs that are not sector aligned */
 	BUG_ON(range_base & (loff_t)target->pbr_smask);
 
-	hval = _bhash(target->pbr_bdev->bd_dev, range_base);
+	hval = _bhash(target->pbr_bdev, range_base);
 	h = &pbhash[hval];
 
 	spin_lock(&h->pb_hash_lock);
@@ -648,7 +645,7 @@ _pagebuf_find(				/* find buffer for block	*/
 		h->pb_count++;
 		list_add(&new_pb->pb_hash_list, &h->pb_hash);
 	} else {
-		PB_STATS_INC(pbstats.pb_miss_locked);
+		PB_STATS_INC(pb_miss_locked);
 	}
 
 	spin_unlock(&h->pb_hash_lock);
@@ -668,7 +665,7 @@ found:
 			/* wait for buffer ownership */
 			PB_TRACE(pb, PB_TRACE_REC(get_lk), 0);
 			pagebuf_lock(pb);
-			PB_STATS_INC(pbstats.pb_get_locked_waited);
+			PB_STATS_INC(pb_get_locked_waited);
 		} else {
 			/* We asked for a trylock and failed, no need
 			 * to look at file offset and length here, we
@@ -678,7 +675,7 @@ found:
 			 */
 
 			pagebuf_rele(pb);
-			PB_STATS_INC(pbstats.pb_busy_locked);
+			PB_STATS_INC(pb_busy_locked);
 			return (NULL);
 		}
 	} else {
@@ -694,7 +691,7 @@ found:
 				_PBF_ADDR_ALLOCATED | \
 				_PBF_MEM_ALLOCATED;
 	PB_TRACE(pb, PB_TRACE_REC(got_lk), 0);
-	PB_STATS_INC(pbstats.pb_get_locked);
+	PB_STATS_INC(pb_get_locked);
 	return (pb);
 }
 
@@ -750,7 +747,7 @@ pagebuf_get(				/* allocate a buffer		*/
 			return (NULL);
 	}
 
-	PB_STATS_INC(pbstats.pb_get);
+	PB_STATS_INC(pb_get);
 
 	/* fill in any missing pages */
 	error = _pagebuf_lookup_pages(pb, pb->pb_target->pbr_mapping, flags);
@@ -769,7 +766,7 @@ pagebuf_get(				/* allocate a buffer		*/
 	if (flags & PBF_READ) {
 		if (PBF_NOT_DONE(pb)) {
 			PB_TRACE(pb, PB_TRACE_REC(get_read), flags);
-			PB_STATS_INC(pbstats.pb_get_read);
+			PB_STATS_INC(pb_get_read);
 			pagebuf_iostart(pb, flags);
 		} else if (flags & PBF_ASYNC) {
 			/*
@@ -834,13 +831,14 @@ pagebuf_readahead(
 
 page_buf_t *
 pagebuf_get_empty(
+	size_t			len,
 	pb_target_t		*target)
 {
 	page_buf_t		*pb;
 
 	pb = pagebuf_allocate(_PBF_LOCKABLE);
 	if (pb)
-		_pagebuf_initialize(pb, target, 0, 0, _PBF_LOCKABLE);
+		_pagebuf_initialize(pb, target, 0, len, _PBF_LOCKABLE);
 	return pb;
 }
 
@@ -1113,10 +1111,10 @@ _pagebuf_wait_unpin(
 	add_wait_queue(&pb->pb_waiters, &wait);
 	for (;;) {
 		current->state = TASK_UNINTERRUPTIBLE;
-		if (atomic_read(&pb->pb_pin_count) == 0) {
+		if (atomic_read(&pb->pb_pin_count) == 0)
 			break;
-		}
-		pagebuf_run_queues(pb);
+		if (atomic_read(&pb->pb_io_remaining))
+			blk_run_queues();
 		schedule();
 	}
 	remove_wait_queue(&pb->pb_waiters, &wait);
@@ -1223,26 +1221,27 @@ pagebuf_iostart(			/* start I/O on a buffer	  */
 		return status;
 	}
 
-	pb->pb_flags &=
-		~(PBF_READ|PBF_WRITE|PBF_ASYNC|PBF_DELWRI|PBF_READ_AHEAD);
-	pb->pb_flags |= flags &
-		(PBF_READ|PBF_WRITE|PBF_ASYNC|PBF_SYNC|PBF_READ_AHEAD);
+	pb->pb_flags &= ~(PBF_READ | PBF_WRITE | PBF_ASYNC | \
+			PBF_DELWRI | PBF_READ_AHEAD | PBF_RUN_QUEUES);
+	pb->pb_flags |= flags & (PBF_READ | PBF_WRITE | PBF_ASYNC | \
+			PBF_SYNC | PBF_READ_AHEAD | PBF_RUN_QUEUES);
 
 	BUG_ON(pb->pb_bn == PAGE_BUF_DADDR_NULL);
 
-	/* For writes call internal function which checks for
-	 * filesystem specific callout function and execute it.
+	/* For writes allow an alternate strategy routine to precede
+	 * the actual I/O request (which may not be issued at all in
+	 * a shutdown situation, for example).
 	 */
-	if (flags & PBF_WRITE) {
-		status = __pagebuf_iorequest(pb);
-	} else {
-		status = pagebuf_iorequest(pb);
-	}
+	status = (flags & PBF_WRITE) ?
+		pagebuf_iostrategy(pb) : pagebuf_iorequest(pb);
 
-	/* Wait for I/O if we are not an async request */
-	if ((status == 0) && (flags & PBF_ASYNC) == 0) {
+	/* Wait for I/O if we are not an async request.
+	 * Note: async I/O request completion will release the buffer,
+	 * and that can already be done by this point.  So using the
+	 * buffer pointer from here on, after async I/O, is invalid.
+	 */
+	if (!status && !(flags & PBF_ASYNC))
 		status = pagebuf_iowait(pb);
-	}
 
 	return status;
 }
@@ -1250,6 +1249,28 @@ pagebuf_iostart(			/* start I/O on a buffer	  */
 /*
  * Helper routine for pagebuf_iorequest
  */
+
+STATIC __inline__ int
+_pagebuf_iolocked(
+	page_buf_t		*pb)
+{
+	ASSERT(pb->pb_flags & (PBF_READ|PBF_WRITE));
+	if (pb->pb_flags & PBF_READ)
+		return pb->pb_locked;
+	return ((pb->pb_flags & _PBF_LOCKABLE) == 0);
+}
+
+STATIC __inline__ void
+_pagebuf_iodone(
+	page_buf_t		*pb,
+	int			schedule)
+{
+	if (atomic_dec_and_test(&pb->pb_io_remaining) == 1) {
+		pb->pb_locked = 0;
+		pagebuf_iodone(pb, (pb->pb_flags & PBF_FS_DATAIOD), schedule);
+	}
+}
+
 STATIC int
 bio_end_io_pagebuf(
 	struct bio		*bio,
@@ -1285,20 +1306,120 @@ bio_end_io_pagebuf(
 				SetPageUptodate(page);
 		}
 
-		if (pb->pb_locked) {
+		if (_pagebuf_iolocked(pb)) {
 			unlock_page(page);
-		} else {
-			BUG_ON(PageLocked(page));
 		}
 	}
 
-	if (atomic_dec_and_test(&pb->pb_io_remaining) == 1) {
-		pb->pb_locked = 0;
-		pagebuf_iodone(pb, (pb->pb_flags & PBF_FS_DATAIOD), 1);
-	}
-
+	_pagebuf_iodone(pb, 1);
 	bio_put(bio);
 	return 0;
+}
+
+void
+_pagebuf_ioapply(
+	page_buf_t		*pb)
+{
+	int			i, map_i, total_nr_pages, nr_pages;
+	struct bio		*bio;
+	int			offset = pb->pb_offset;
+	int			size = pb->pb_count_desired;
+	sector_t		sector = pb->pb_bn;
+	unsigned int		blocksize = pb->pb_target->pbr_bsize;
+	int			locking = _pagebuf_iolocked(pb);
+
+	total_nr_pages = pb->pb_page_count;
+	map_i = 0;
+
+	/* Special code path for reading a sub page size pagebuf in --
+	 * we populate up the whole page, and hence the other metadata
+	 * in the same page.  This optimization is only valid when the
+	 * filesystem block size and the page size are equal.
+	 */
+	if ((pb->pb_buffer_length < PAGE_CACHE_SIZE) &&
+	    (pb->pb_flags & PBF_READ) && locking &&
+	    (blocksize == PAGE_CACHE_SIZE)) {
+		bio = bio_alloc(GFP_NOIO, 1);
+
+		bio->bi_bdev = pb->pb_target->pbr_bdev;
+		bio->bi_sector = sector - (offset >> BBSHIFT);
+		bio->bi_end_io = bio_end_io_pagebuf;
+		bio->bi_private = pb;
+
+		bio_add_page(bio, pb->pb_pages[0], PAGE_CACHE_SIZE, 0);
+		size = 0;
+
+		atomic_inc(&pb->pb_io_remaining);
+
+		goto submit_io;
+	}
+
+	/* Lock down the pages which we need to for the request */
+	if (locking && (pb->pb_flags & PBF_WRITE) && (pb->pb_locked == 0)) {
+		for (i = 0; size; i++) {
+			int		nbytes = PAGE_CACHE_SIZE - offset;
+			struct page	*page = pb->pb_pages[i];
+
+			if (nbytes > size)
+				nbytes = size;
+
+			lock_page(page);
+
+			size -= nbytes;
+			offset = 0;
+		}
+		offset = pb->pb_offset;
+		size = pb->pb_count_desired;
+	}
+
+next_chunk:
+	atomic_inc(&pb->pb_io_remaining);
+	nr_pages = BIO_MAX_SECTORS >> (PAGE_SHIFT - BBSHIFT);
+	if (nr_pages > total_nr_pages)
+		nr_pages = total_nr_pages;
+
+	bio = bio_alloc(GFP_NOIO, nr_pages);
+	bio->bi_bdev = pb->pb_target->pbr_bdev;
+	bio->bi_sector = sector;
+	bio->bi_end_io = bio_end_io_pagebuf;
+	bio->bi_private = pb;
+
+	for (; size && nr_pages; nr_pages--, map_i++) {
+		int	nbytes = PAGE_CACHE_SIZE - offset;
+
+		if (nbytes > size)
+			nbytes = size;
+
+		if (bio_add_page(bio, pb->pb_pages[map_i],
+					nbytes, offset) < nbytes)
+			break;
+
+		offset = 0;
+
+		sector += nbytes >> BBSHIFT;
+		size -= nbytes;
+		total_nr_pages--;
+	}
+
+submit_io:
+	if (likely(bio->bi_size)) {
+		if (pb->pb_flags & PBF_READ) {
+			submit_bio(READ, bio);
+		} else {
+			submit_bio(WRITE, bio);
+		}
+
+		if (size)
+			goto next_chunk;
+	} else {
+		pagebuf_ioerror(pb, EIO);
+	}
+
+	if (pb->pb_flags & PBF_RUN_QUEUES) {
+		pb->pb_flags &= ~PBF_RUN_QUEUES;
+		if (atomic_read(&pb->pb_io_remaining) > 1)
+			blk_run_queues();
+	}
 }
 
 /*
@@ -1323,16 +1444,6 @@ int
 pagebuf_iorequest(			/* start real I/O		*/
 	page_buf_t		*pb)	/* buffer to convey to device	*/
 {
-	int			i, map_i, total_nr_pages, nr_pages;
-	struct bio		*bio;
-	int			offset = pb->pb_offset;
-	int			size = pb->pb_count_desired;
-	sector_t		sector = pb->pb_bn;
-	unsigned int		blocksize = pb->pb_target->pbr_bsize;
-	int			locking;
-
-	locking = (pb->pb_flags & _PBF_LOCKABLE) == 0 && (pb->pb_locked == 0);
-
 	PB_TRACE(pb, PB_TRACE_REC(ioreq), 0);
 
 	if (pb->pb_flags & PBF_DELWRI) {
@@ -1340,107 +1451,21 @@ pagebuf_iorequest(			/* start real I/O		*/
 		return 0;
 	}
 
+	if (pb->pb_flags & PBF_WRITE) {
+		_pagebuf_wait_unpin(pb);
+	}
+
+	pagebuf_hold(pb);
+
 	/* Set the count to 1 initially, this will stop an I/O
 	 * completion callout which happens before we have started
 	 * all the I/O from calling pagebuf_iodone too early.
 	 */
 	atomic_set(&pb->pb_io_remaining, 1);
+	_pagebuf_ioapply(pb);
+	_pagebuf_iodone(pb, 0);
 
-	/* Special code path for reading a sub page size pagebuf in --
-	 * we populate up the whole page, and hence the other metadata
-	 * in the same page.  This optimization is only valid when the
-	 * filesystem block size and the page size are equal.
-	 */
-	if (unlikely((pb->pb_buffer_length < PAGE_CACHE_SIZE) &&
-	    (pb->pb_flags & PBF_READ) && pb->pb_locked &&
-	    (blocksize == PAGE_CACHE_SIZE))) {
-		bio = bio_alloc(GFP_NOIO, 1);
-
-		bio->bi_bdev = pb->pb_target->pbr_bdev;
-		bio->bi_sector = sector - (offset >> BBSHIFT);
-		bio->bi_end_io = bio_end_io_pagebuf;
-		bio->bi_private = pb;
-
-		bio_add_page(bio, pb->pb_pages[0], PAGE_CACHE_SIZE, 0);
-
-		atomic_inc(&pb->pb_io_remaining);
-		submit_bio(READ, bio);
-
-		goto io_submitted;
-	}
-
-	if (pb->pb_flags & PBF_WRITE) {
-		_pagebuf_wait_unpin(pb);
-	}
-
-	/* Lock down the pages which we need to for the request */
-	if (locking) {
-		for (i = 0; size; i++) {
-			int		nbytes = PAGE_CACHE_SIZE - offset;
-			struct page	*page = pb->pb_pages[i];
-
-			if (nbytes > size)
-				nbytes = size;
-
-			lock_page(page);
-
-			size -= nbytes;
-			offset = 0;
-		}
-		offset = pb->pb_offset;
-		size = pb->pb_count_desired;
-		pb->pb_locked = 1;
-	}
-
-	total_nr_pages = pb->pb_page_count;
-	map_i = 0;
-
-next_chunk:
-	atomic_inc(&pb->pb_io_remaining);
-	nr_pages = BIO_MAX_SECTORS >> (PAGE_SHIFT - BBSHIFT);
-	if (nr_pages > total_nr_pages)
-		nr_pages = total_nr_pages;
-
-	bio = bio_alloc(GFP_NOIO, nr_pages);
-
-	BUG_ON(bio == NULL);
-	bio->bi_bdev = pb->pb_target->pbr_bdev;
-	bio->bi_sector = sector;
-	bio->bi_end_io = bio_end_io_pagebuf;
-	bio->bi_private = pb;
-
-	for (; size && nr_pages; nr_pages--, map_i++) {
-		int	nbytes = PAGE_CACHE_SIZE - offset;
-
-		if (nbytes > size)
-			nbytes = size;
-
-		if (bio_add_page(bio, pb->pb_pages[map_i], nbytes, offset) < nbytes)
-			break;
-
-		offset = 0;
-
-		sector += nbytes >> BBSHIFT;
-		size -= nbytes;
-		total_nr_pages--;
-	}
-
-	if (pb->pb_flags & PBF_READ) {
-		submit_bio(READ, bio);
-	} else {
-		submit_bio(WRITE, bio);
-	}
-
-	if (size)
-		goto next_chunk;
-
-io_submitted:
-
-	if (atomic_dec_and_test(&pb->pb_io_remaining) == 1) {
-		pb->pb_locked = 0;
-		pagebuf_iodone(pb, (pb->pb_flags & PBF_FS_DATAIOD), 1);
-	}
-
+	pagebuf_rele(pb);
 	return 0;
 }
 
@@ -1456,7 +1481,8 @@ pagebuf_iowait(
 	page_buf_t		*pb)
 {
 	PB_TRACE(pb, PB_TRACE_REC(iowait), 0);
-	pagebuf_run_queues(pb);
+	if (atomic_read(&pb->pb_io_remaining))
+		blk_run_queues();
 	down(&pb->pb_iodonesema);
 	PB_TRACE(pb, PB_TRACE_REC(iowaited), (int)pb->pb_error);
 	return pb->pb_error;
@@ -1534,6 +1560,7 @@ pagebuf_iomove(
 		data += csize;
 	}
 }
+
 
 /*
  * Pagebuf delayed write buffer handling
@@ -1650,6 +1677,9 @@ pagebuf_daemon(
 					break;
 				}
 
+				pb->pb_flags &= ~PBF_DELWRI;
+				pb->pb_flags |= PBF_WRITE;
+
 				list_del(&pb->pb_list);
 				list_add(&pb->pb_list, &tmp);
 
@@ -1661,16 +1691,14 @@ pagebuf_daemon(
 		while (!list_empty(&tmp)) {
 			pb = list_entry(tmp.next, page_buf_t, pb_list);
 			list_del_init(&pb->pb_list);
-			pb->pb_flags &= ~PBF_DELWRI;
-			pb->pb_flags |= PBF_WRITE;
 
-			__pagebuf_iorequest(pb);
+			pagebuf_iostrategy(pb);
 		}
 
 		if (as_list_len > 0)
 			purge_addresses();
 		if (count)
-			pagebuf_run_queues(NULL);
+			blk_run_queues();
 
 		force_flush = 0;
 	} while (pbd_active == 1);
@@ -1693,6 +1721,7 @@ pagebuf_delwri_flush(
 	int			flush_cnt = 0;
 
 	pagebuf_runall_queues(pagebuf_dataio_workqueue);
+	pagebuf_runall_queues(pagebuf_logio_workqueue);
 
 	spin_lock(&pbd_delwrite_lock);
 	INIT_LIST_HEAD(&tmp);
@@ -1715,46 +1744,31 @@ pagebuf_delwri_flush(
 			continue;
 		}
 
-		if (flags & PBDF_TRYLOCK) {
-			if (!pagebuf_cond_lock(pb)) {
-				pincount++;
-				continue;
-			}
-		}
-
-		list_del_init(&pb->pb_list);
-		if (flags & PBDF_WAIT) {
-			list_add(&pb->pb_list, &tmp);
-			pb->pb_flags &= ~PBF_ASYNC;
-		}
-
-		spin_unlock(&pbd_delwrite_lock);
-
-		if ((flags & PBDF_TRYLOCK) == 0) {
-			pagebuf_lock(pb);
-		}
-
 		pb->pb_flags &= ~PBF_DELWRI;
 		pb->pb_flags |= PBF_WRITE;
-
-		__pagebuf_iorequest(pb);
-		if (++flush_cnt > 32) {
-			pagebuf_run_queues(NULL);
-			flush_cnt = 0;
-		}
-
-		spin_lock(&pbd_delwrite_lock);
+		list_move(&pb->pb_list, &tmp);
 	}
-
+	/* ok found all the items that can be worked on 
+	 * drop the lock and process the private list */
 	spin_unlock(&pbd_delwrite_lock);
 
-	pagebuf_run_queues(NULL);
+	list_for_each_safe(curr, next, &tmp) {
+		pb = list_entry(curr, page_buf_t, pb_list);
 
-	if (pinptr)
-		*pinptr = pincount;
+		if (flags & PBDF_WAIT)
+			pb->pb_flags &= ~PBF_ASYNC;
+		else
+			list_del_init(curr);
 
-	if ((flags & PBDF_WAIT) == 0)
-		return;
+		pagebuf_lock(pb);
+		pagebuf_iostrategy(pb);
+		if (++flush_cnt > 32) {
+			blk_run_queues();
+			flush_cnt = 0;
+		}
+	}
+
+	blk_run_queues();
 
 	while (!list_empty(&tmp)) {
 		pb = list_entry(tmp.next, page_buf_t, pb_list);
@@ -1765,6 +1779,9 @@ pagebuf_delwri_flush(
 			pagebuf_unlock(pb);
 		pagebuf_rele(pb);
 	}
+
+	if (pinptr)
+		*pinptr = pincount;
 }
 
 STATIC int
@@ -1819,14 +1836,18 @@ pb_stats_clear_handler(
 	void			*buffer,
 	size_t			*lenp)
 {
-	int			ret;
+	int			c, ret;
 	int			*valp = ctl->data;
 
 	ret = proc_doulongvec_minmax(ctl, write, filp, buffer, lenp);
 
 	if (!ret && write && *valp) {
 		printk("XFS Clearing pbstats\n");
-		memset(&pbstats, 0, sizeof(pbstats));
+		for (c = 0; c < NR_CPUS; c++) {
+			if (!cpu_possible(c)) continue;
+				memset(&per_cpu(pbstats, c), 0,
+				       sizeof(struct pbstats));
+		}
 		pb_params.stats_clear.val = 0;
 	}
 
@@ -1837,23 +1858,23 @@ STATIC struct ctl_table_header *pagebuf_table_header;
 
 STATIC ctl_table pagebuf_table[] = {
 	{PB_FLUSH_INT, "flush_int", &pb_params.flush_interval.val,
-	sizeof(ulong), 0644, NULL, &proc_doulongvec_ms_jiffies_minmax,
+	sizeof(int), 0644, NULL, &proc_dointvec_minmax,
 	&sysctl_intvec, NULL,
 	&pb_params.flush_interval.min, &pb_params.flush_interval.max},
 
 	{PB_FLUSH_AGE, "flush_age", &pb_params.age_buffer.val,
-	sizeof(ulong), 0644, NULL, &proc_doulongvec_ms_jiffies_minmax,
+	sizeof(int), 0644, NULL, &proc_dointvec_minmax,
 	&sysctl_intvec, NULL, 
 	&pb_params.age_buffer.min, &pb_params.age_buffer.max},
 
 	{PB_STATS_CLEAR, "stats_clear", &pb_params.stats_clear.val,
-	sizeof(ulong), 0644, NULL, &pb_stats_clear_handler,
+	sizeof(int), 0644, NULL, &pb_stats_clear_handler,
 	&sysctl_intvec, NULL, 
 	&pb_params.stats_clear.min, &pb_params.stats_clear.max},
 
 #ifdef PAGEBUF_TRACE
 	{PB_DEBUG, "debug", &pb_params.debug.val,
-	sizeof(ulong), 0644, NULL, &proc_doulongvec_minmax,
+	sizeof(int), 0644, NULL, &proc_dointvec_minmax,
 	&sysctl_intvec, NULL, 
 	&pb_params.debug.min, &pb_params.debug.max},
 #endif
@@ -1880,13 +1901,17 @@ pagebuf_readstats(
 	int			*eof,
 	void			*data)
 {
-	int			i, len;
+	int			c, i, len, val;
 
 	len = 0;
 	len += sprintf(buffer + len, "pagebuf");
-	for (i = 0; i < sizeof(pbstats) / sizeof(u_int32_t); i++) {
-		len += sprintf(buffer + len, " %u",
-			*(((u_int32_t*)&pbstats) + i));
+	for (i = 0; i < sizeof(struct pbstats) / sizeof(u_int32_t); i++) {
+		val = 0;
+		for (c = 0 ; c < NR_CPUS; c++) {
+			if (!cpu_possible(c)) continue;
+			val += *(((u_int32_t*)&per_cpu(pbstats, c) + i));
+		}
+		len += sprintf(buffer + len, " %u", val);
 	}
 	buffer[len++] = '\n';
 

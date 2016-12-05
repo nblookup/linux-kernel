@@ -250,7 +250,7 @@ struct reginit_item {
 };
 
 
-struct reginit_item PHY_NTC_INIT[] __initdata = {
+struct reginit_item PHY_NTC_INIT[] __devinitdata = {
 	{ PHY_CLEARALL, 0x40 }, 
 	{ 0x12,  0x0001 },
 	{ 0x13,  0x7605 },
@@ -854,7 +854,7 @@ static void process_incoming (struct fs_dev *dev, struct queue *q)
 
 #define DO_DIRECTION(tp) ((tp)->traffic_class != ATM_NONE)
 
-static int fs_open(struct atm_vcc *atm_vcc, short vpi, int vci)
+static int fs_open(struct atm_vcc *atm_vcc)
 {
 	struct fs_dev *dev;
 	struct fs_vcc *vcc;
@@ -867,6 +867,8 @@ static int fs_open(struct atm_vcc *atm_vcc, short vpi, int vci)
 	int bfp;
 	int to;
 	unsigned short tmc0;
+	short vpi = atm_vcc->vpi;
+	int vci = atm_vcc->vci;
 
 	func_enter ();
 
@@ -874,14 +876,6 @@ static int fs_open(struct atm_vcc *atm_vcc, short vpi, int vci)
 	fs_dprintk (FS_DEBUG_OPEN, "fs: open on dev: %p, vcc at %p\n", 
 		    dev, atm_vcc);
 
-	error = atm_find_ci(atm_vcc, &vpi, &vci);
-	if (error) {
-		fs_dprintk (FS_DEBUG_OPEN, "fs: find_ci failed.\n");
-		return error;
-	}
-
-	atm_vcc->vpi = vpi;
-	atm_vcc->vci = vci;
 	if (vci != ATM_VPI_UNSPEC && vpi != ATM_VCI_UNSPEC)
 		set_bit(ATM_VF_ADDR, &atm_vcc->flags);
 
@@ -895,7 +889,7 @@ static int fs_open(struct atm_vcc *atm_vcc, short vpi, int vci)
 	/* XXX handle qos parameters (rate limiting) ? */
 
 	vcc = kmalloc(sizeof(struct fs_vcc), GFP_KERNEL);
-	fs_dprintk (FS_DEBUG_ALLOC, "Alloc VCC: %p(%d)\n", vcc, sizeof(struct fs_vcc));
+	fs_dprintk (FS_DEBUG_ALLOC, "Alloc VCC: %p(%Zd)\n", vcc, sizeof(struct fs_vcc));
 	if (!vcc) {
 		clear_bit(ATM_VF_ADDR, &atm_vcc->flags);
 		return -ENOMEM;
@@ -946,7 +940,7 @@ static int fs_open(struct atm_vcc *atm_vcc, short vpi, int vci)
 
 	if (DO_DIRECTION (txtp)) {
 		tc = kmalloc (sizeof (struct fs_transmit_config), GFP_KERNEL);
-		fs_dprintk (FS_DEBUG_ALLOC, "Alloc tc: %p(%d)\n", 
+		fs_dprintk (FS_DEBUG_ALLOC, "Alloc tc: %p(%Zd)\n",
 			    tc, sizeof (struct fs_transmit_config));
 		if (!tc) {
 			fs_dprintk (FS_DEBUG_OPEN, "fs: can't alloc transmit_config.\n");
@@ -1180,7 +1174,7 @@ static int fs_send (struct atm_vcc *atm_vcc, struct sk_buff *skb)
 	vcc->last_skb = skb;
 
 	td = kmalloc (sizeof (struct FS_BPENTRY), GFP_ATOMIC);
-	fs_dprintk (FS_DEBUG_ALLOC, "Alloc transd: %p(%d)\n", td, sizeof (struct FS_BPENTRY));
+	fs_dprintk (FS_DEBUG_ALLOC, "Alloc transd: %p(%Zd)\n", td, sizeof (struct FS_BPENTRY));
 	if (!td) {
 		/* Oops out of mem */
 		return -ENOMEM;
@@ -1268,14 +1262,6 @@ static unsigned char fs_phy_get(struct atm_dev *dev,unsigned long addr)
 }
 
 
-static void fs_feedback(struct atm_vcc *vcc,struct sk_buff *skb,
-			unsigned long start,unsigned long dest,int len)
-{
-	func_enter ();
-	func_exit ();
-}
-
-
 static int fs_change_qos(struct atm_vcc *vcc,struct atm_qos *qos,int flags)
 {
 	func_enter ();
@@ -1290,14 +1276,10 @@ static const struct atmdev_ops ops = {
 	.open =         fs_open,
 	.close =        fs_close,
 	.send =         fs_send,
-#if 0
 	.owner =        THIS_MODULE,
-#endif
-	/*                 fs_sg_send */
 	/* ioctl:          fs_ioctl, */
 	/* getsockopt:     fs_getsockopt, */
 	/* setsockopt:     fs_setsockopt, */
-	/* feedback:       fs_feedback, */
 	/* change_qos:     fs_change_qos, */
 
 	/* For now implement these internally here... */  
@@ -1306,7 +1288,7 @@ static const struct atmdev_ops ops = {
 };
 
 
-static void __init undocumented_pci_fix (struct pci_dev *pdev)
+static void __devinit undocumented_pci_fix (struct pci_dev *pdev)
 {
 	int tint;
 
@@ -1330,13 +1312,13 @@ static void __init undocumented_pci_fix (struct pci_dev *pdev)
  *                              PHY routines                              *
  **************************************************************************/
 
-static void __init write_phy (struct fs_dev *dev, int regnum, int val)
+static void __devinit write_phy (struct fs_dev *dev, int regnum, int val)
 {
 	submit_command (dev,  &dev->hp_txq, QE_CMD_PRP_WR | QE_CMD_IMM_INQ,
 			regnum, val, 0);
 }
 
-static int __init init_phy (struct fs_dev *dev, struct reginit_item *reginit)
+static int __devinit init_phy (struct fs_dev *dev, struct reginit_item *reginit)
 {
 	int i;
 
@@ -1392,7 +1374,7 @@ static void reset_chip (struct fs_dev *dev)
 	}
 }
 
-static void __init *aligned_kmalloc (int size, int flags, int alignment)
+static void __devinit *aligned_kmalloc (int size, int flags, int alignment)
 {
 	void  *t;
 
@@ -1409,7 +1391,7 @@ static void __init *aligned_kmalloc (int size, int flags, int alignment)
 	return NULL;
 }
 
-static int __init init_q (struct fs_dev *dev, 
+static int __devinit init_q (struct fs_dev *dev, 
 			  struct queue *txq, int queue, int nentries, int is_rq)
 {
 	int sz = nentries * sizeof (struct FS_QENTRY);
@@ -1445,7 +1427,7 @@ static int __init init_q (struct fs_dev *dev,
 }
 
 
-static int __init init_fp (struct fs_dev *dev, 
+static int __devinit init_fp (struct fs_dev *dev, 
 			   struct freepool *fp, int queue, int bufsize, int nr_buffers)
 {
 	func_enter ();
@@ -1497,7 +1479,7 @@ static void top_off_fp (struct fs_dev *dev, struct freepool *fp, int gfp_flags)
 		fs_dprintk (FS_DEBUG_ALLOC, "Alloc rec-skb: %p(%d)\n", skb, fp->bufsize);
 		if (!skb) break;
 		ne = kmalloc (sizeof (struct FS_BPENTRY), gfp_flags);
-		fs_dprintk (FS_DEBUG_ALLOC, "Alloc rec-d: %p(%d)\n", ne, sizeof (struct FS_BPENTRY));
+		fs_dprintk (FS_DEBUG_ALLOC, "Alloc rec-d: %p(%Zd)\n", ne, sizeof (struct FS_BPENTRY));
 		if (!ne) {
 			fs_dprintk (FS_DEBUG_ALLOC, "Free rec-skb: %p\n", skb);
 			dev_kfree_skb_any (skb);
@@ -1665,7 +1647,7 @@ static void fs_poll (unsigned long data)
 }
 #endif
 
-static int __init fs_init (struct fs_dev *dev)
+static int __devinit fs_init (struct fs_dev *dev)
 {
 	struct pci_dev  *pci_dev;
 	int isr, to;
@@ -1722,7 +1704,7 @@ static int __init fs_init (struct fs_dev *dev)
 		}
 
 		/* Try again after 10ms. */
-		current->state = TASK_UNINTERRUPTIBLE;
+		set_current_state(TASK_UNINTERRUPTIBLE);
 		schedule_timeout ((HZ+99)/100);
 	}
 
@@ -1802,7 +1784,7 @@ static int __init fs_init (struct fs_dev *dev)
 	}
 	dev->atm_vccs = kmalloc (dev->nchannels * sizeof (struct atm_vcc *), 
 				 GFP_KERNEL);
-	fs_dprintk (FS_DEBUG_ALLOC, "Alloc atmvccs: %p(%d)\n", 
+	fs_dprintk (FS_DEBUG_ALLOC, "Alloc atmvccs: %p(%Zd)\n",
 		    dev->atm_vccs, dev->nchannels * sizeof (struct atm_vcc *));
 
 	if (!dev->atm_vccs) {
@@ -1900,7 +1882,7 @@ static int __init fs_init (struct fs_dev *dev)
 	return 0;
 }
 
-static int __init firestream_init_one (struct pci_dev *pci_dev,
+static int __devinit firestream_init_one (struct pci_dev *pci_dev,
 				       const struct pci_device_id *ent) 
 {
 	struct atm_dev *atm_dev;
@@ -1910,7 +1892,7 @@ static int __init firestream_init_one (struct pci_dev *pci_dev,
 		goto err_out;
 
 	fs_dev = kmalloc (sizeof (struct fs_dev), GFP_KERNEL);
-	fs_dprintk (FS_DEBUG_ALLOC, "Alloc fs-dev: %p(%d)\n", 
+	fs_dprintk (FS_DEBUG_ALLOC, "Alloc fs-dev: %p(%Zd)\n",
 		    fs_dev, sizeof (struct fs_dev));
 	if (!fs_dev)
 		goto err_out;
@@ -2091,7 +2073,7 @@ int __init init_PCI (void)
 #endif 
 */
 
-static struct pci_device_id firestream_pci_tbl[] __devinitdata = {
+static struct pci_device_id firestream_pci_tbl[] = {
 	{ PCI_VENDOR_ID_FUJITSU_ME, PCI_DEVICE_ID_FUJITSU_FS50, 
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, FS_IS50},
 	{ PCI_VENDOR_ID_FUJITSU_ME, PCI_DEVICE_ID_FUJITSU_FS155, 
@@ -2127,4 +2109,5 @@ module_init(firestream_init_module);
 module_exit(firestream_cleanup_module);
 
 MODULE_LICENSE("GPL");
+
 

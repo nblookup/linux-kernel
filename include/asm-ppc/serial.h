@@ -28,7 +28,7 @@
 #include <platforms/sandpoint.h>
 #elif defined(CONFIG_SPRUCE)
 #include <platforms/spruce_serial.h>
-#elif defined(CONFIG_40x)
+#elif defined(CONFIG_4xx)
 #include <asm/ibm4xx.h>
 #else
 
@@ -37,7 +37,6 @@
  * This is true for PReP and CHRP at least.
  */
 #include <asm/pc_serial.h>
-#include <asm/processor.h>
 
 #if defined(CONFIG_MAC_SERIAL)
 #define SERIAL_DEV_OFFSET	((_machine == _MACH_prep || _machine == _MACH_chrp) ? 0 : 2)

@@ -286,6 +286,15 @@ DEFINE_VIA_REGSET(CAPTURE_8233, 0x60);
 /*
  */
 
+#define VIA_DXS_AUTO	0
+#define VIA_DXS_ENABLE	1
+#define VIA_DXS_DISABLE	2
+#define VIA_DXS_48K	3
+
+
+/*
+ */
+
 typedef struct _snd_via82xx via82xx_t;
 typedef struct via_dev viadev_t;
 #define chip_t via82xx_t
@@ -452,7 +461,7 @@ struct _snd_via82xx {
 	snd_info_entry_t *proc_entry;
 };
 
-static struct pci_device_id snd_via82xx_ids[] __devinitdata = {
+static struct pci_device_id snd_via82xx_ids[] = {
 	{ 0x1106, 0x3058, PCI_ANY_ID, PCI_ANY_ID, 0, 0, TYPE_CARD_VIA686, },	/* 686A */
 	{ 0x1106, 0x3059, PCI_ANY_ID, PCI_ANY_ID, 0, 0, TYPE_CARD_VIA8233, },	/* VT8233 */
 	{ 0, }
@@ -886,9 +895,11 @@ static int snd_via8233_playback_prepare(snd_pcm_substream_t *substream)
 		snd_ac97_set_rate(chip->ac97, AC97_PCM_LFE_DAC_RATE, runtime->rate);
 		snd_ac97_set_rate(chip->ac97, AC97_SPDIF, runtime->rate);
 	}
-	if (chip->chip_type == TYPE_VIA8233A)
+#if 0
+	if (chip->revision == VIA_REV_8233A)
 		rbits = 0;
 	else
+#endif
 		rbits = (0xfffff / 48000) * runtime->rate + ((0xfffff % 48000) * runtime->rate) / 48000;
 	snd_assert((rbits & ~0xfffff) == 0, return -EINVAL);
 	snd_via82xx_channel_reset(chip, viadev);
@@ -928,9 +939,12 @@ static int snd_via8233_multi_prepare(snd_pcm_substream_t *substream)
 	fmt = (runtime->format == SNDRV_PCM_FORMAT_S16_LE) ? VIA_REG_MULTPLAY_FMT_16BIT : VIA_REG_MULTPLAY_FMT_8BIT;
 	fmt |= runtime->channels << 4;
 	outb(fmt, VIADEV_REG(viadev, OFS_MULTPLAY_FORMAT));
-	if (chip->chip_type == TYPE_VIA8233A)
+#if 0
+	if (chip->revision == VIA_REV_8233A)
 		slots = 0;
-	else {
+	else
+#endif
+	{
 		/* set sample number to slot 3, 4, 7, 8, 6, 9 (for VIA8233/C,8235) */
 		/* corresponding to FL, FR, RL, RR, C, LFE ?? */
 		switch (runtime->channels) {
@@ -1028,7 +1042,8 @@ static int snd_via82xx_pcm_open(via82xx_t *chip, viadev_t *viadev, snd_pcm_subst
 	ratep = &chip->rates[viadev->direction];
 	spin_lock_irqsave(&ratep->lock, flags);
 	ratep->used++;
-	if (chip->dxs_fixed) {
+	if (chip->dxs_fixed && viadev->reg_offset < 0x40) {
+		/* fixed DXS playback rate */
 		runtime->hw.rates = SNDRV_PCM_RATE_48000;
 		runtime->hw.rate_min = runtime->hw.rate_max = 48000;
 	} else if (! ratep->rate) {
@@ -1108,7 +1123,7 @@ static int snd_via8233_multi_open(snd_pcm_substream_t * substream)
 	if ((err = snd_via82xx_pcm_open(chip, viadev, substream)) < 0)
 		return err;
 	substream->runtime->hw.channels_max = 6;
-	if (chip->chip_type == TYPE_VIA8233A)
+	if (chip->revision == VIA_REV_8233A)
 		snd_pcm_hw_constraint_list(substream->runtime, 0, SNDRV_PCM_HW_PARAM_CHANNELS, &hw_constraints_channels);
 	return 0;
 }
@@ -1501,7 +1516,12 @@ static void snd_via82xx_mixer_free_ac97(ac97_t *ac97)
 }
 
 static struct ac97_quirk ac97_quirks[] = {
-	{ 0x1106, 0x4161, "ASRock K7VT2", AC97_TUNE_HP_ONLY },
+	{
+		.vendor = 0x1106,
+		.device = 0x4161,
+		.name = "ASRock K7VT2",
+		.type = AC97_TUNE_HP_ONLY
+	},
 	{ } /* terminator */
 };
 
@@ -1887,14 +1907,14 @@ static int __devinit snd_via82xx_create(snd_card_t * card,
 
 	chip->port = pci_resource_start(pci, 0);
 	if ((chip->res_port = request_region(chip->port, 256, card->driver)) == NULL) {
-		snd_via82xx_free(chip);
 		snd_printk("unable to grab ports 0x%lx-0x%lx\n", chip->port, chip->port + 256 - 1);
+		snd_via82xx_free(chip);
 		return -EBUSY;
 	}
 	if (request_irq(pci->irq, snd_via82xx_interrupt, SA_INTERRUPT|SA_SHIRQ,
 			card->driver, (void *)chip)) {
-		snd_via82xx_free(chip);
 		snd_printk("unable to grab IRQ %d\n", pci->irq);
+		snd_via82xx_free(chip);
 		return -EBUSY;
 	}
 	chip->irq = pci->irq;
@@ -1932,6 +1952,50 @@ static struct via823x_info via823x_cards[] __devinitdata = {
 	{ VIA_REV_8233, "VIA 8233", TYPE_VIA8233 },
 	{ VIA_REV_8233A, "VIA 8233A", TYPE_VIA8233A },
 	{ VIA_REV_8235, "VIA 8235", TYPE_VIA8233 },
+};
+
+/*
+ * auto detection of DXS channel supports.
+ */
+struct dxs_whitelist {
+	unsigned short vendor;
+	unsigned short device; 
+	unsigned short mask; 
+	short action;	/* new dxs_support value */
+};
+
+static int __devinit check_dxs_list(struct pci_dev *pci)
+{
+	static struct dxs_whitelist whitelist[] = {
+		{ .vendor = 0x1019, .device = 0x0996, .action = VIA_DXS_48K },
+		{ .vendor = 0x1297, .device = 0xc160, .action = VIA_DXS_ENABLE }, /* Shuttle SK41G */
+		{ } /* terminator */
+	};
+	struct dxs_whitelist *w;
+	unsigned short subsystem_vendor;
+	unsigned short subsystem_device;
+
+	pci_read_config_word(pci, PCI_SUBSYSTEM_VENDOR_ID, &subsystem_vendor);
+	pci_read_config_word(pci, PCI_SUBSYSTEM_ID, &subsystem_device);
+
+	for (w = whitelist; w->vendor; w++) {
+		if (w->vendor != subsystem_vendor)
+			continue;
+		if (w->mask) {
+			if ((w->mask & subsystem_device) == w->device)
+				return w->action;
+		} else {
+			if (subsystem_device == w->device)
+				return w->action;
+		}
+	}
+
+	/*
+	 * not detected, try 48k rate only to be sure.
+	 */
+	printk(KERN_INFO "via82xx: Assuming DXS channels with 48k fixed sample rate.\n");
+	printk(KERN_INFO "         Please try dxs_support=1 option and report if it works on your machine.\n");
+	return VIA_DXS_48K;
 };
 
 static int __devinit snd_via82xx_probe(struct pci_dev *pci,
@@ -1974,13 +2038,17 @@ static int __devinit snd_via82xx_probe(struct pci_dev *pci,
 				break;
 			}
 		}
-		/* force to use VIA8233 or 8233A model according to
-		 * dxs_support module option
-		 */
-		if (dxs_support[dev] == 1)
-			chip_type = TYPE_VIA8233;
-		else if (dxs_support[dev] == 2)
-			chip_type = TYPE_VIA8233A;
+		if (chip_type != TYPE_VIA8233A) {
+			if (dxs_support[dev] == VIA_DXS_AUTO)
+				dxs_support[dev] = check_dxs_list(pci);
+			/* force to use VIA8233 or 8233A model according to
+			 * dxs_support module option
+			 */
+			if (dxs_support[dev] == VIA_DXS_DISABLE)
+				chip_type = TYPE_VIA8233A;
+			else
+				chip_type = TYPE_VIA8233;
+		}
 		if (chip_type == TYPE_VIA8233A)
 			strcpy(card->driver, "VIA8233A");
 		else
@@ -2005,10 +2073,11 @@ static int __devinit snd_via82xx_probe(struct pci_dev *pci,
 		if (chip_type == TYPE_VIA8233A) {
 			if ((err = snd_via8233a_pcm_new(chip)) < 0)
 				goto __error;
+			chip->dxs_fixed = 1; /* use 48k for DXS #3 */
 		} else {
 			if ((err = snd_via8233_pcm_new(chip)) < 0)
 				goto __error;
-			if (dxs_support[dev] == 3)
+			if (dxs_support[dev] == VIA_DXS_48K)
 				chip->dxs_fixed = 1;
 		}
 		if ((err = snd_via8233_init_misc(chip, dev)) < 0)
@@ -2073,7 +2142,7 @@ module_exit(alsa_card_via82xx_exit)
 #ifndef MODULE
 
 /* format is: snd-via82xx=enable,index,id,
-			  mpu_port,ac97_clock */
+			  mpu_port,ac97_clock,dxs_support */
 
 static int __init alsa_card_via82xx_setup(char *str)
 {
@@ -2085,7 +2154,8 @@ static int __init alsa_card_via82xx_setup(char *str)
 	       get_option(&str,&index[nr_dev]) == 2 &&
 	       get_id(&str,&id[nr_dev]) == 2 &&
 	       get_option(&str,(int *)&mpu_port[nr_dev]) == 2 &&
-	       get_option(&str,&ac97_clock[nr_dev]) == 2);
+	       get_option(&str,&ac97_clock[nr_dev]) == 2 &&
+	       get_option(&str,&dxs_support[nr_dev]) == 2);
 	nr_dev++;
 	return 1;
 }

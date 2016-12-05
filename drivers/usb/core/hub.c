@@ -60,7 +60,7 @@ static inline char *portspeed (int portstatus)
 /* for dev_info, dev_dbg, etc */
 static inline struct device *hubdev (struct usb_device *dev)
 {
-	return &dev->actconfig->interface [0].dev;
+	return &dev->actconfig->interface[0]->dev;
 }
 
 /* USB 2.0 spec Section 11.24.4.5 */
@@ -597,10 +597,8 @@ descriptor_error:
 
 	usb_set_intfdata (intf, hub);
 
-	if (hub_configure(hub, endpoint) >= 0) {
-		strcpy (intf->dev.name, "Hub");
+	if (hub_configure(hub, endpoint) >= 0)
 		return 0;
-	}
 
 	hub_disconnect (intf);
 	return -ENODEV;
@@ -691,8 +689,11 @@ static void hub_start_disconnect(struct usb_device *dev)
 static int hub_port_status(struct usb_device *dev, int port,
 			       u16 *status, u16 *change)
 {
-	struct usb_hub *hub = usb_get_intfdata (dev->actconfig->interface);
+	struct usb_hub *hub = usb_get_intfdata(dev->actconfig->interface[0]);
 	int ret;
+
+	if (!hub)
+		return -ENODEV;
 
 	ret = get_port_status(dev, port + 1, &hub->status->port);
 	if (ret < 0)
@@ -708,6 +709,7 @@ static int hub_port_status(struct usb_device *dev, int port,
 
 #define HUB_RESET_TRIES		5
 #define HUB_PROBE_TRIES		2
+#define HUB_ROOT_RESET_TIME	50	/* times are in msec */
 #define HUB_SHORT_RESET_TIME	10
 #define HUB_LONG_RESET_TIME	200
 #define HUB_RESET_TIMEOUT	500
@@ -860,8 +862,7 @@ static int hub_port_debounce(struct usb_device *hub, int port)
 		}
 	}
 
-	/* XXX Replace this with dbg() when 2.6 is about to ship. */
-	dev_info (hubdev (hub),
+	dev_dbg (hubdev (hub),
 		"debounce: port %d: delay %dms stable %d status 0x%x\n",
 		port + 1, delay_time, stable_count, portstatus);
 
@@ -903,6 +904,12 @@ static void hub_port_connect_change(struct usb_hub *hubstate, int port,
 		return;
 	}
 
+	/* root hub ports have a slightly longer reset period
+	 * (from USB 2.0 spec, section 7.1.7.5)
+	 */
+	if (!hub->parent)
+		delay = HUB_ROOT_RESET_TIME;
+
 	/* Some low speed devices have problems with the quick delay, so */
 	/*  be a bit pessimistic with those devices. RHbug #23670 */
 	if (portstatus & USB_PORT_STAT_LOW_SPEED)
@@ -922,7 +929,6 @@ static void hub_port_connect_change(struct usb_hub *hubstate, int port,
 			break;
 		}
 
-		hub->children[port] = dev;
 		dev->state = USB_STATE_POWERED;
 
 		/* Reset the device, and detect its speed */
@@ -932,7 +938,7 @@ static void hub_port_connect_change(struct usb_hub *hubstate, int port,
 		}
 
 		/* Find a new address for it */
-		usb_connect(dev);
+		usb_choose_address(dev);
 
 		/* Set up TT records, if needed  */
 		if (hub->tt) {
@@ -975,8 +981,10 @@ static void hub_port_connect_change(struct usb_hub *hubstate, int port,
 		dev->dev.parent = dev->parent->dev.parent->parent;
 
 		/* Run it through the hoops (find a driver, etc) */
-		if (!usb_new_device(dev, &hub->dev))
+		if (!usb_new_device(dev, &hub->dev)) {
+			hub->children[port] = dev;
 			goto done;
+		}
 
 		/* Free the configuration if there was an error */
 		usb_put_dev(dev);
@@ -985,7 +993,6 @@ static void hub_port_connect_change(struct usb_hub *hubstate, int port,
 		delay = HUB_LONG_RESET_TIME;
 	}
 
-	hub->children[port] = NULL;
 	hub_port_disable(hub, port);
 done:
 	up(&usb_address0_sem);
@@ -1178,8 +1185,7 @@ int usb_hub_init(void)
 		return -1;
 	}
 
-	pid = kernel_thread(hub_thread, NULL,
-		CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
+	pid = kernel_thread(hub_thread, NULL, CLONE_KERNEL);
 	if (pid >= 0) {
 		khubd_pid = pid;
 
@@ -1324,23 +1330,25 @@ int usb_physical_reset_device(struct usb_device *dev)
 			return 1;
 		}
 
-		dev->actconfig = dev->config;
-		usb_set_maxpacket(dev);
-
+		usb_set_configuration(dev, dev->config[0].desc.bConfigurationValue);
 		return 1;
 	}
 
 	kfree(descriptor);
 
-	ret = usb_set_configuration(dev, dev->actconfig->desc.bConfigurationValue);
+	ret = usb_control_msg(dev, usb_sndctrlpipe(dev, 0),
+			USB_REQ_SET_CONFIGURATION, 0,
+			dev->actconfig->desc.bConfigurationValue, 0,
+			NULL, 0, HZ * USB_CTRL_SET_TIMEOUT);
 	if (ret < 0) {
 		err("failed to set dev %s active configuration (error=%d)",
 			dev->devpath, ret);
 		return ret;
 	}
+	dev->state = USB_STATE_CONFIGURED;
 
 	for (i = 0; i < dev->actconfig->desc.bNumInterfaces; i++) {
-		struct usb_interface *intf = &dev->actconfig->interface[i];
+		struct usb_interface *intf = dev->actconfig->interface[i];
 		struct usb_interface_descriptor *as;
 
 		as = &intf->altsetting[intf->act_altsetting].desc;

@@ -178,7 +178,7 @@ static int tx_params[MAX_UNITS] = {-1, -1, -1, -1, -1, -1, -1, -1};
 #include <asm/unaligned.h>
 #include <asm/cache.h>
 
-static char version[] __initdata =
+static char version[] __devinitdata =
 KERN_INFO DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE "  Written by Donald Becker\n"
 KERN_INFO "   Some modifications by Eric kasten <kasten@nscl.msu.edu>\n"
 KERN_INFO "   Further modifications by Keith Underwood <keithu@parl.clemson.edu>\n";
@@ -569,7 +569,7 @@ static struct net_device_stats *hamachi_get_stats(struct net_device *dev);
 static void set_rx_mode(struct net_device *dev);
 
 
-static int __init hamachi_init_one (struct pci_dev *pdev,
+static int __devinit hamachi_init_one (struct pci_dev *pdev,
 				    const struct pci_device_id *ent)
 {
 	struct hamachi_private *hmp;
@@ -785,7 +785,7 @@ err_out_unmap_tx:
 	pci_free_consistent(pdev, TX_TOTAL_SIZE, hmp->tx_ring, 
 		hmp->tx_ring_dma);
 err_out_cleardev:
-	kfree (dev);
+	free_netdev (dev);
 err_out_iounmap:
 	iounmap((char *)ioaddr);
 err_out_release:
@@ -794,7 +794,7 @@ err_out:
 	return ret;
 }
 
-static int __init read_eeprom(long ioaddr, int location)
+static int __devinit read_eeprom(long ioaddr, int location)
 {
 	int bogus_cnt = 1000;
 
@@ -1872,7 +1872,7 @@ static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
 		struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
 		strcpy(info.driver, DRV_NAME);
 		strcpy(info.version, DRV_VERSION);
-		strcpy(info.bus_info, np->pci_dev->slot_name);
+		strcpy(info.bus_info, pci_name(np->pci_dev));
 		if (copy_to_user(useraddr, &info, sizeof(info)))
 			return -EFAULT;
 		return 0;
@@ -1976,13 +1976,13 @@ static void __devexit hamachi_remove_one (struct pci_dev *pdev)
 			hmp->tx_ring_dma);
 		unregister_netdev(dev);
 		iounmap((char *)dev->base_addr);
-		kfree(dev);
+		free_netdev(dev);
 		pci_release_regions(pdev);
 		pci_set_drvdata(pdev, NULL);
 	}
 }
 
-static struct pci_device_id hamachi_pci_tbl[] __initdata = {
+static struct pci_device_id hamachi_pci_tbl[] = {
 	{ 0x1318, 0x0911, PCI_ANY_ID, PCI_ANY_ID, },
 	{ 0, }
 };

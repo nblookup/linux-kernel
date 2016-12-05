@@ -121,7 +121,7 @@ static int hpux_ustat(dev_t dev, struct hpux_ustat *ubuf)
 {
 	struct super_block *s;
 	struct hpux_ustat tmp;  /* Changed to hpux_ustat */
-	struct statfs sbuf;
+	struct kstatfs sbuf;
 	int err = -EINVAL;
 
 	s = user_get_super(dev);
@@ -272,7 +272,7 @@ int hpux_utssys(char *ubuf, int n, int type)
 		break ;
 	case 2:
 		/*  ustat():  */
-		return( hpux_ustat((dev_t)n, (struct hpux_ustat *)ubuf) );
+		return( hpux_ustat(new_decode_dev(n), (struct hpux_ustat *)ubuf) );
 		break ;
 	case 3:
 		/*  setuname():

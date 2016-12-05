@@ -613,6 +613,9 @@ static int reiserfs_mknod (struct inode * dir, struct dentry *dentry, int mode, 
     struct reiserfs_transaction_handle th ;
     int jbegin_count = JOURNAL_PER_BALANCE_CNT * 3; 
 
+    if (!new_valid_dev(rdev))
+	return -EINVAL;
+
     if (!(inode = new_inode(dir->i_sb))) {
 	return -ENOMEM ;
     }
@@ -822,6 +825,7 @@ static int reiserfs_unlink (struct inode * dir, struct dentry *dentry)
     int windex ;
     struct reiserfs_transaction_handle th ;
     int jbegin_count;
+    unsigned long savelink;
 
     inode = dentry->d_inode;
 
@@ -858,11 +862,20 @@ static int reiserfs_unlink (struct inode * dir, struct dentry *dentry)
 	inode->i_nlink = 1;
     }
 
-    retval = reiserfs_cut_from_item (&th, &path, &(de.de_entry_key), dir, NULL, 0);
-    if (retval < 0)
-	goto end_unlink;
-
     inode->i_nlink--;
+
+    /*
+     * we schedule before doing the add_save_link call, save the link
+     * count so we don't race
+     */
+    savelink = inode->i_nlink;
+
+
+    retval = reiserfs_cut_from_item (&th, &path, &(de.de_entry_key), dir, NULL, 0);
+    if (retval < 0) {
+	inode->i_nlink++;
+	goto end_unlink;
+    }
     inode->i_ctime = CURRENT_TIME;
     reiserfs_update_sd (&th, inode);
 
@@ -871,7 +884,7 @@ static int reiserfs_unlink (struct inode * dir, struct dentry *dentry)
     dir->i_ctime = dir->i_mtime = CURRENT_TIME;
     reiserfs_update_sd (&th, dir);
 
-    if (!inode->i_nlink)
+    if (!savelink)
        /* prevent file from getting lost */
        add_save_link (&th, inode, 0/* not truncate */);
 
@@ -976,6 +989,12 @@ static int reiserfs_link (struct dentry * old_dentry, struct inode * dir, struct
 	reiserfs_write_unlock(dir->i_sb);
 	return -EMLINK;
     }
+    if (inode->i_nlink == 0) {
+        return -ENOENT;
+    }
+
+    /* inc before scheduling so reiserfs_unlink knows we are here */
+    inode->i_nlink++;
 
     journal_begin(&th, dir->i_sb, jbegin_count) ;
     windex = push_journal_writer("reiserfs_link") ;
@@ -988,13 +1007,13 @@ static int reiserfs_link (struct dentry * old_dentry, struct inode * dir, struct
     reiserfs_update_inode_transaction(dir) ;
 
     if (retval) {
+	inode->i_nlink--;
 	pop_journal_writer(windex) ;
 	journal_end(&th, dir->i_sb, jbegin_count) ;
 	reiserfs_write_unlock(dir->i_sb);
 	return retval;
     }
 
-    inode->i_nlink++;
     inode->i_ctime = CURRENT_TIME;
     reiserfs_update_sd (&th, inode);
 
@@ -1068,6 +1087,7 @@ static int reiserfs_rename (struct inode * old_dir, struct dentry *old_dentry,
     struct reiserfs_transaction_handle th ;
     int jbegin_count ; 
     umode_t old_inode_mode;
+    unsigned long savelink = 1;
 
     /* two balancings: old name removal, new name insertion or "save" link,
        stat data updates: old directory and new directory and maybe block
@@ -1246,6 +1266,7 @@ static int reiserfs_rename (struct inode * old_dir, struct dentry *old_dentry,
 	    new_dentry_inode->i_nlink--;
 	}
 	new_dentry_inode->i_ctime = new_dir->i_ctime;
+	savelink = new_dentry_inode->i_nlink;
     }
 
     if (S_ISDIR(old_inode_mode)) {
@@ -1279,7 +1300,7 @@ static int reiserfs_rename (struct inode * old_dir, struct dentry *old_dentry,
     reiserfs_update_sd (&th, new_dir);
 
     if (new_dentry_inode) {
-	if (new_dentry_inode->i_nlink == 0)
+	if (savelink == 0)
 	    add_save_link (&th, new_dentry_inode, 0/* not truncate */);
 	reiserfs_update_sd (&th, new_dentry_inode);
     }

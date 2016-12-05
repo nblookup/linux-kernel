@@ -2174,7 +2174,8 @@ static int atm_pcr_check (struct atm_trafprm * tp, unsigned int pcr) {
 
 /********** open VC **********/
 
-static int hrz_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
+static int hrz_open (struct atm_vcc *atm_vcc)
+{
   int error;
   u16 channel;
   
@@ -2185,6 +2186,8 @@ static int hrz_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
   hrz_dev * dev = HRZ_DEV(atm_vcc->dev);
   hrz_vcc vcc;
   hrz_vcc * vccp; // allocated late
+  short vpi = atm_vcc->vpi;
+  int vci = atm_vcc->vci;
   PRINTD (DBG_FLOW|DBG_VCC, "hrz_open %x %x", vpi, vci);
   
 #ifdef ATM_VPI_UNSPEC
@@ -2194,14 +2197,6 @@ static int hrz_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
     return -EINVAL;
   }
 #endif
-  
-  // deal with possibly wildcarded VCs
-  error = atm_find_ci (atm_vcc, &vpi, &vci);
-  if (error) {
-    PRINTD (DBG_WARN|DBG_VCC, "atm_find_ci failed!");
-    return error;
-  }
-  PRINTD (DBG_VCC, "atm_find_ci gives %x %x", vpi, vci);
   
   error = vpivci_to_channel (&channel, vpi, vci);
   if (error) {
@@ -2557,8 +2552,6 @@ static int hrz_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
   }
   
   // success, set elements of atm_vcc
-  atm_vcc->vpi = vpi;
-  atm_vcc->vci = vci;
   atm_vcc->dev_data = (void *) vccp;
   
   // indicate readiness
@@ -2663,18 +2656,6 @@ static int hrz_setsockopt (struct atm_vcc * atm_vcc, int level, int optname,
 }
 #endif
 
-static int hrz_sg_send (struct atm_vcc * atm_vcc,
-			unsigned long start,
-			unsigned long size) {
-  if (atm_vcc->qos.aal == ATM_AAL5) {
-    PRINTD (DBG_FLOW|DBG_VCC, "hrz_sg_send: yes");
-    return 1;
-  } else {
-    PRINTD (DBG_FLOW|DBG_VCC, "hrz_sg_send: no");
-    return 0;
-  }
-}
-
 #if 0
 static int hrz_ioctl (struct atm_dev * atm_dev, unsigned int cmd, void *arg) {
   hrz_dev * dev = HRZ_DEV(atm_dev);
@@ -2748,7 +2729,6 @@ static const struct atmdev_ops hrz_ops = {
   .open	= hrz_open,
   .close	= hrz_close,
   .send	= hrz_send,
-  .sg_send	= hrz_sg_send,
   .proc_read	= hrz_proc_read,
   .owner	= THIS_MODULE,
 };

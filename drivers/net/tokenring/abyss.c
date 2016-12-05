@@ -40,12 +40,12 @@
 #include "tms380tr.h"
 #include "abyss.h"            /* Madge-specific constants */
 
-static char version[] __initdata =
+static char version[] __devinitdata =
 "abyss.c: v1.02 23/11/2000 by Adam Fritzler\n";
 
 #define ABYSS_IO_EXTENT 64
 
-static struct pci_device_id abyss_pci_tbl[] __initdata = {
+static struct pci_device_id abyss_pci_tbl[] = {
 	{ PCI_VENDOR_ID_MADGE, PCI_DEVICE_ID_MADGE_MK2,
 	  PCI_ANY_ID, PCI_ANY_ID, PCI_CLASS_NETWORK_TOKEN_RING << 8, 0x00ffffff, },
 	{ }			/* Terminating entry */
@@ -92,7 +92,7 @@ static void abyss_sifwritew(struct net_device *dev, unsigned short val, unsigned
 	outw(val, dev->base_addr + reg);
 }
 
-static int __init abyss_attach(struct pci_dev *pdev, const struct pci_device_id *ent)
+static int __devinit abyss_attach(struct pci_dev *pdev, const struct pci_device_id *ent)
 {	
 	static int versionprinted;
 	struct net_device *dev;
@@ -443,7 +443,7 @@ static void __devexit abyss_detach (struct pci_dev *pdev)
 	release_region(dev->base_addr-0x10, ABYSS_IO_EXTENT);
 	free_irq(dev->irq, dev);
 	tmsdev_term(dev);
-	kfree(dev);
+	free_netdev(dev);
 	pci_set_drvdata(pdev, NULL);
 }
 

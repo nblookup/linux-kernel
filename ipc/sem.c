@@ -425,7 +425,7 @@ static void freeary (struct sem_array *sma, int id)
 	ipc_rcu_free(sma, size);
 }
 
-static unsigned long copy_semid_to_user(void *buf, struct semid64_ds *in, int version)
+static unsigned long copy_semid_to_user(void __user *buf, struct semid64_ds *in, int version)
 {
 	switch(version) {
 	case IPC_64:
@@ -664,7 +664,7 @@ static int semctl_main(int semid, int semnum, int cmd, int version, union semun 
 		for (un = sma->undo; un; un = un->id_next)
 			un->semadj[semnum] = 0;
 		curr->semval = val;
-		curr->sempid = current->pid;
+		curr->sempid = current->tgid;
 		sma->sem_ctime = get_seconds();
 		/* maybe some queued-up processes were waiting for this */
 		update_queue(sma);
@@ -686,7 +686,7 @@ struct sem_setbuf {
 	mode_t	mode;
 };
 
-static inline unsigned long copy_semid_from_user(struct sem_setbuf *out, void *buf, int version)
+static inline unsigned long copy_semid_from_user(struct sem_setbuf *out, void __user *buf, int version)
 {
 	switch(version) {
 	case IPC_64:
@@ -960,13 +960,13 @@ out:
 	return un;
 }
 
-asmlinkage long sys_semop (int semid, struct sembuf *tsops, unsigned nsops)
+asmlinkage long sys_semop (int semid, struct sembuf __user *tsops, unsigned nsops)
 {
 	return sys_semtimedop(semid, tsops, nsops, NULL);
 }
 
-asmlinkage long sys_semtimedop(int semid, struct sembuf *tsops,
-			unsigned nsops, const struct timespec *timeout)
+asmlinkage long sys_semtimedop(int semid, struct sembuf __user *tsops,
+			unsigned nsops, const struct timespec __user *timeout)
 {
 	int error = -EINVAL;
 	struct sem_array *sma;
@@ -1038,8 +1038,10 @@ retry_undos:
 	 * allocated an undo structure, it was invalidated by an RMID
 	 * and now a new array with received the same id. Check and retry.
 	 */
-	if (un && un->semid == -1)
+	if (un && un->semid == -1) {
+		sem_unlock(sma);
 		goto retry_undos;
+	}
 	error = -EFBIG;
 	if (max >= sma->sem_nsems)
 		goto out_unlock_free;
@@ -1052,7 +1054,7 @@ retry_undos:
 	if (error)
 		goto out_unlock_free;
 
-	error = try_atomic_semop (sma, sops, nsops, un, current->pid);
+	error = try_atomic_semop (sma, sops, nsops, un, current->tgid);
 	if (error <= 0)
 		goto update;
 
@@ -1064,7 +1066,7 @@ retry_undos:
 	queue.sops = sops;
 	queue.nsops = nsops;
 	queue.undo = un;
-	queue.pid = current->pid;
+	queue.pid = current->tgid;
 	queue.id = semid;
 	if (alter)
 		append_to_queue(sma ,&queue);
@@ -1206,7 +1208,7 @@ found:
 				sem->semval += u->semadj[i];
 				if (sem->semval < 0)
 					sem->semval = 0; /* shouldn't happen */
-				sem->sempid = current->pid;
+				sem->sempid = current->tgid;
 			}
 		}
 		sma->sem_otime = get_seconds();

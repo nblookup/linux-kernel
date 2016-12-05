@@ -29,7 +29,7 @@
 #include <linux/config.h>
 #include <linux/module.h>
 
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/device.h>
 #include <linux/init.h>
 #include <linux/mca.h>
@@ -90,6 +90,7 @@ static Scsi_Host_Template sim710_driver_template = {
 	.name			= "LSI (Symbios) 710 MCA/EISA",
 	.proc_name		= "sim710",
 	.this_id		= 7,
+	.module			= THIS_MODULE,
 };
 
 static __devinit int
@@ -100,7 +101,7 @@ sim710_probe_common(struct device *dev, unsigned long base_addr,
 	struct NCR_700_Host_Parameters *hostdata =
 		kmalloc(sizeof(struct NCR_700_Host_Parameters),	GFP_KERNEL);
 
-	printk(KERN_NOTICE "sim710: %s\n", dev->name);
+	printk(KERN_NOTICE "sim710: %s\n", dev->bus_id);
 	printk(KERN_NOTICE "sim710: irq = %d, clock = %d, base = 0x%lx, scsi_id = %d\n",
 	       irq, clock, base_addr, scsi_id);
 
@@ -138,7 +139,8 @@ sim710_probe_common(struct device *dev, unsigned long base_addr,
 		goto out_unregister;
 	}
 
-	scsi_add_host(host, dev);
+	scsi_add_host(host, dev); /* XXX handle failure */
+	scsi_scan_host(host);
 	hostdata->dev = dev;
 
 	return 0;
@@ -254,7 +256,7 @@ sim710_mca_probe(struct device *dev)
 	} else {
 		return -ENODEV;
 	}
-	strlcpy(dev->name, name, sizeof(dev->name));
+	mca_device_set_name(mca_dev, name);
 	mca_device_set_claim(mca_dev, 1);
 	base = mca_device_transform_ioport(mca_dev, base);
 	irq_vector = mca_device_transform_irq(mca_dev, irq_vector);
@@ -303,7 +305,7 @@ sim710_eisa_probe(struct device *dev)
 		scsi_id = ffs(val) - 1;
 
 		if(scsi_id > 7 || (val & ~(1<<scsi_id)) != 0) {
-			printk(KERN_ERR "sim710.c, EISA card %s has incorrect scsi_id, setting to 7\n", dev->name);
+			printk(KERN_ERR "sim710.c, EISA card %s has incorrect scsi_id, setting to 7\n", dev->bus_id);
 			scsi_id = 7;
 		}
 	} else {

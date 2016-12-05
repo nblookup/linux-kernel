@@ -749,18 +749,28 @@ static int cdrom_decode_status(ide_drive_t *drive, int good_stat, int *stat_ret)
 		   by transferring the semaphore from the packet
 		   command request to the request sense request. */
 
+		rq->flags |= REQ_FAILED;
 		if ((stat & ERR_STAT) != 0) {
 			wait = rq->waiting;
 			rq->waiting = NULL;
+			if ((rq->flags & REQ_BLOCK_PC) != 0) {
+				cdrom_queue_request_sense(drive, wait,
+							  rq->sense, rq);
+				return 1; /* REQ_BLOCK_PC self-cares */
+			}
 		}
 
-		rq->flags |= REQ_FAILED;
 		cdrom_end_request(drive, 0);
 
 		if ((stat & ERR_STAT) != 0)
 			cdrom_queue_request_sense(drive, wait, rq->sense, rq);
 	} else if (blk_fs_request(rq)) {
+		int do_end_request = 0;
+
 		/* Handle errors from READ and WRITE requests. */
+
+		if (blk_noretry_request(rq))
+			do_end_request = 1;
 
 		if (sense_key == NOT_READY) {
 			/* Tray open. */
@@ -768,7 +778,7 @@ static int cdrom_decode_status(ide_drive_t *drive, int good_stat, int *stat_ret)
 
 			/* Fail the request. */
 			printk ("%s: tray open\n", drive->name);
-			cdrom_end_request(drive, 0);
+			do_end_request = 1;
 		} else if (sense_key == UNIT_ATTENTION) {
 			/* Media change. */
 			cdrom_saw_media_change (drive);
@@ -777,27 +787,34 @@ static int cdrom_decode_status(ide_drive_t *drive, int good_stat, int *stat_ret)
 			   But be sure to give up if we've retried
 			   too many times. */
 			if (++rq->errors > ERROR_MAX)
-				cdrom_end_request(drive, 0);
+				do_end_request = 1;
 		} else if (sense_key == ILLEGAL_REQUEST ||
 			   sense_key == DATA_PROTECT) {
 			/* No point in retrying after an illegal
 			   request or data protect error.*/
 			ide_dump_status (drive, "command error", stat);
-			cdrom_end_request(drive, 0);
+			do_end_request = 1;
+		} else if (sense_key == MEDIUM_ERROR) {
+			/* No point in re-trying a zillion times on a bad 
+			 * sector...  If we got here the error is not correctable */
+			ide_dump_status (drive, "media error (bad sector)", stat);
+			do_end_request = 1;
+		} else if (sense_key == BLANK_CHECK) {
+			/* Disk appears blank ?? */
+			ide_dump_status (drive, "media error (blank)", stat);
+			do_end_request = 1;
 		} else if ((err & ~ABRT_ERR) != 0) {
 			/* Go to the default handler
 			   for other errors. */
 			DRIVER(drive)->error(drive, "cdrom_decode_status",stat);
 			return 1;
-		} else if (sense_key == MEDIUM_ERROR) {
-			/* No point in re-trying a zillion times on a bad 
-			 * sector...  If we got here the error is not correctable */
-			ide_dump_status (drive, "media error (bad sector)", stat);
-			cdrom_end_request(drive, 0);
 		} else if ((++rq->errors > ERROR_MAX)) {
 			/* We've racked up too many retries.  Abort. */
-			cdrom_end_request(drive, 0);
+			do_end_request = 1;
 		}
+
+		if (do_end_request)
+			cdrom_end_request(drive, 0);
 
 		/* If we got a CHECK_CONDITION status,
 		   queue a request sense command. */
@@ -1356,7 +1373,7 @@ static ide_startstop_t cdrom_start_read (ide_drive_t *drive, unsigned int block)
 	if (cdrom_read_from_buffer(drive))
 		return ide_stopped;
 
-	blk_attempt_remerge(&drive->queue, rq);
+	blk_attempt_remerge(drive->queue, rq);
 
 	/* Clear the local sector buffer. */
 	info->nsectors_buffered = 0;
@@ -1657,13 +1674,14 @@ static ide_startstop_t cdrom_newpc_intr(ide_drive_t *drive)
 	dma = info->dma;
 	if (dma) {
 		info->dma = 0;
-		if ((dma_error = HWIF(drive)->ide_dma_end(drive))) {
-			printk("ide-cd: dma error\n");
-			HWIF(drive)->ide_dma_off(drive);
-		}
+		dma_error = HWIF(drive)->ide_dma_end(drive);
 	}
 
 	if (cdrom_decode_status(drive, 0, &stat)) {
+		if ((stat & ERR_STAT) != 0) {
+			end_that_request_chunk(rq, 0, rq->data_len);
+			goto end_request; /* purge the whole thing... */
+		}
 		end_that_request_chunk(rq, 1, rq->data_len);
 		return ide_stopped;
 	}
@@ -1672,8 +1690,11 @@ static ide_startstop_t cdrom_newpc_intr(ide_drive_t *drive)
 	 * using dma, transfer is complete now
 	 */
 	if (dma) {
-		if (dma_error)
+		if (dma_error) {
+			printk("ide-cd: dma error\n");
+			HWIF(drive)->ide_dma_off(drive);
 			return DRIVER(drive)->error(drive, "dma error", stat);
+		}
 
 		end_that_request_chunk(rq, 1, rq->data_len);
 		rq->data_len = 0;
@@ -1917,7 +1938,7 @@ static ide_startstop_t cdrom_start_write(ide_drive_t *drive, struct request *rq)
 	 * remerge requests, often the plugging will not have had time
 	 * to do this properly
 	 */
-	blk_attempt_remerge(&drive->queue, rq);
+	blk_attempt_remerge(drive->queue, rq);
 
 	info->nsectors_buffered = 0;
 
@@ -2348,7 +2369,7 @@ static int cdrom_read_toc(ide_drive_t *drive, struct request_sense *sense)
 
 	/* Now try to get the total cdrom capacity. */
 	stat = cdrom_get_last_written(cdi, (long *) &toc->capacity);
-	if (stat)
+	if (stat || !toc->capacity)
 		stat = cdrom_read_capacity(drive, &toc->capacity, sense);
 	if (stat)
 		toc->capacity = 0x1fffff;
@@ -2481,7 +2502,7 @@ static int ide_cdrom_packet(struct cdrom_device_info *cdi,
 	req.sense = cgc->sense;
 	cgc->stat = cdrom_queue_packet_command(drive, &req);
 	if (!cgc->stat)
-		cgc->buflen = req.data_len;
+		cgc->buflen -= req.data_len;
 	return cgc->stat;
 }
 
@@ -3088,10 +3109,10 @@ int ide_cdrom_setup (ide_drive_t *drive)
 	 * default to read-only always and fix latter at the bottom
 	 */
 	set_disk_ro(drive->disk, 1);
-	blk_queue_hardsect_size(&drive->queue, CD_FRAMESIZE);
+	blk_queue_hardsect_size(drive->queue, CD_FRAMESIZE);
 
-	blk_queue_prep_rq(&drive->queue, ide_cdrom_prep_fn);
-	blk_queue_dma_alignment(&drive->queue, 3);
+	blk_queue_prep_rq(drive->queue, ide_cdrom_prep_fn);
+	blk_queue_dma_alignment(drive->queue, 3);
 
 	drive->special.all	= 0;
 	drive->ready_stat	= 0;
@@ -3216,7 +3237,7 @@ int ide_cdrom_setup (ide_drive_t *drive)
 }
 
 static
-unsigned long ide_cdrom_capacity (ide_drive_t *drive)
+sector_t ide_cdrom_capacity (ide_drive_t *drive)
 {
 	unsigned long capacity;
 
@@ -3248,7 +3269,7 @@ int ide_cdrom_cleanup(ide_drive_t *drive)
 		printk("%s: ide_cdrom_cleanup failed to unregister device from the cdrom driver.\n", drive->name);
 	kfree(info);
 	drive->driver_data = NULL;
-	blk_queue_prep_rq(&drive->queue, NULL);
+	blk_queue_prep_rq(drive->queue, NULL);
 	del_gendisk(g);
 	g->fops = ide_fops;
 	return 0;
@@ -3301,7 +3322,6 @@ static ide_driver_t ide_cdrom_driver = {
 	.version		= IDECD_VERSION,
 	.media			= ide_cdrom,
 	.busy			= 0,
-	.supports_dma		= 1,
 	.supports_dsc_overlap	= 1,
 	.cleanup		= ide_cdrom_cleanup,
 	.do_request		= ide_do_rw_cdrom,
@@ -3313,10 +3333,6 @@ static ide_driver_t ide_cdrom_driver = {
 	.drives			= LIST_HEAD_INIT(ide_cdrom_driver.drives),
 	.start_power_step	= ide_cdrom_start_power_step,
 	.complete_power_step	= ide_cdrom_complete_power_step,
-	.gen_driver		= {
-		.suspend	= generic_ide_suspend,
-		.resume		= generic_ide_resume,
-	}
 };
 
 static int idecd_open(struct inode * inode, struct file * file)

@@ -63,7 +63,6 @@ void cred_hash1(unsigned char *out, unsigned char *in, unsigned char *key);
 void cred_hash2(unsigned char *out, unsigned char *in, unsigned char *key);
 void cred_hash3(unsigned char *out, unsigned char *in, unsigned char *key,
 		int forw);
-void SamOEMhash(unsigned char *data, unsigned char *key, int val);
 
 /*The following definitions come from  libsmb/smbencrypt.c  */
 
@@ -75,8 +74,6 @@ void SMBOWFencrypt(unsigned char passwd[16], unsigned char *c8,
 void NTLMSSPOWFencrypt(unsigned char passwd[8],
 		       unsigned char *ntlmchalresp, unsigned char p24[24]);
 void SMBNTencrypt(unsigned char *passwd, unsigned char *c8, unsigned char *p24);
-int make_oem_passwd_hash(char data[516], const char *passwd,
-			 unsigned char old_pw_hash[16], int unicode);
 int decode_pw_buffer(char in_buffer[516], char *new_pwrd,
 		     int new_pwrd_size, __u32 * new_pw_len);
 
@@ -346,46 +343,6 @@ static struct data_blob LMv2_generate_response(const unsigned char ntlm_v2_hash[
         return final_response;
 }
 
-int make_oem_passwd_hash(char data[516], const char *passwd,
-		     unsigned char old_pw_hash[16], int unicode)
-{
-	int new_pw_len = strlen(passwd) * (unicode ? 2 : 1);
-
-	if (new_pw_len > 512) {
-		cERROR(1,
-		       ("CIFS make_oem_passwd_hash: new password is too long."));
-		return FALSE;
-	}
-
-	/*
-	 * Now setup the data area.
-	 * We need to generate a random fill
-	 * for this area to make it harder to
-	 * decrypt. JRA.
-	 *
-	 */
-	get_random_bytes(data, sizeof (data));
-	if (unicode) {
-		/* Note that passwd should be in DOS oem character set. */
-		/*  dos_struni2( &data[512 - new_pw_len], passwd, 512); */
-		cifs_strtoUCS((wchar_t *) & data[512 - new_pw_len], passwd, 512,	/* struct nls_table */
-			      load_nls_default());
-		/* BB call unload_nls now or get nls differntly */
-	} else {
-		/* Note that passwd should be in DOS oem character set. */
-		strcpy(&data[512 - new_pw_len], passwd);
-	}
-	SIVAL(data, 512, new_pw_len);
-
-#ifdef DEBUG_PASSWORD
-	DEBUG(100, ("make_oem_passwd_hash\n"));
-	dump_data(100, data, 516);
-#endif
-	SamOEMhash((unsigned char *) data, (unsigned char *) old_pw_hash, 516);
-
-	return TRUE;
-}
-
 void
 SMBsesskeygen_ntv2(const unsigned char kr[16],
 		   const unsigned char *nt_resp, __u8 sess_key[16])
@@ -469,59 +426,4 @@ int SMBNTLMv2encrypt(const char *user, const char *domain, const char *password,
         }
 
         return TRUE;
-}
-
-
-/***********************************************************
- SMB signing - setup the MAC key.
-************************************************************/
-
-void
-cli_calculate_mac_key(__u8 * mac_key, int *pmac_key_len,
-		      const char *ntpasswd, const unsigned char resp[24])
-{
-	/* Get first 16 bytes. */
-	E_md4hash(ntpasswd, mac_key);
-	memcpy(mac_key + 16, resp, 24);
-	*pmac_key_len = 40;
-
-	/* Reset the sequence number in case we had a previous (aborted) attempt */
-/*	cli->sign_info.send_seq_num = 0; */
-}
-
-/***********************************************************
- SMB signing - calculate a MAC to send.
-************************************************************/
-
-void
-cli_caclulate_sign_mac(struct smb_hdr *outbuf, __u8 * mac_key,
-		       int mac_key_len, __u32 * send_seq_num,
-		       __u32 * reply_seq_num)
-{
-	unsigned char calc_md5_mac[16];
-	struct MD5Context md5_ctx;
-
-/*	if (!cli->sign_info.use_smb_signing) {
-		return;
-	} */
-
-	/*
-	 * Firstly put the sequence number into the first 4 bytes.
-	 * and zero out the next 4 bytes.
-	 */
-/*
-	SIVAL(outbuf, smb_ss_field, *send_seq_num);
-	SIVAL(outbuf, smb_ss_field + 4, 0); */
-
-	/* Calculate the 16 byte MAC and place first 8 bytes into the field. */
-	MD5Init(&md5_ctx);
-	MD5Update(&md5_ctx, mac_key, mac_key_len);
-	MD5Update(&md5_ctx, outbuf->Protocol,
-		  be32_to_cpu(outbuf->smb_buf_length));
-	MD5Final(calc_md5_mac, &md5_ctx);
-
-	memcpy(outbuf->Signature.SecuritySignature, calc_md5_mac, 8);
-	(*send_seq_num)++;
-	*reply_seq_num = *send_seq_num;
-	(*send_seq_num)++;
 }

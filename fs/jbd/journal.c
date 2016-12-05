@@ -31,7 +31,6 @@
 #include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/suspend.h>
 #include <linux/pagemap.h>
 #include <asm/uaccess.h>
@@ -278,9 +277,6 @@ static void journal_kill_thread(journal_t *journal)
  * Bit 1 set == buffer copy-out performed (kfree the data after IO)
  */
 
-static inline unsigned long virt_to_offset(void *p) 
-{return ((unsigned long) p) & ~PAGE_MASK;}
-					       
 int journal_write_metadata_buffer(transaction_t *transaction,
 				  struct journal_head  *jh_in,
 				  struct journal_head **jh_out,
@@ -318,10 +314,10 @@ repeat:
 	if (jh_in->b_frozen_data) {
 		done_copy_out = 1;
 		new_page = virt_to_page(jh_in->b_frozen_data);
-		new_offset = virt_to_offset(jh_in->b_frozen_data);
+		new_offset = offset_in_page(jh_in->b_frozen_data);
 	} else {
 		new_page = jh2bh(jh_in)->b_page;
-		new_offset = virt_to_offset(jh2bh(jh_in)->b_data);
+		new_offset = offset_in_page(jh2bh(jh_in)->b_data);
 	}
 
 	mapped_data = kmap_atomic(new_page, KM_USER0);
@@ -346,7 +342,7 @@ repeat:
 		tmp = jbd_rep_kmalloc(bh_in->b_size, GFP_NOFS);
 		jbd_lock_bh_state(bh_in);
 		if (jh_in->b_frozen_data) {
-			kfree(new_page);
+			kfree(tmp);
 			goto repeat;
 		}
 
@@ -358,7 +354,7 @@ repeat:
 		   address kmapped so that we can clear the escaped
 		   magic number below. */
 		new_page = virt_to_page(tmp);
-		new_offset = virt_to_offset(tmp);
+		new_offset = offset_in_page(tmp);
 		done_copy_out = 1;
 	}
 
@@ -484,6 +480,13 @@ int journal_start_commit(journal_t *journal, tid_t *ptid)
 		ret = __log_start_commit(journal, tid);
 		if (ret && ptid)
 			*ptid = tid;
+	} else if (journal->j_committing_transaction && ptid) {
+		/*
+		 * If ext3_write_super() recently started a commit, then we
+		 * have to wait for completion of that transaction
+		 */
+		*ptid = journal->j_committing_transaction->t_tid;
+		ret = 1;
 	}
 	spin_unlock(&journal->j_state_lock);
 	return ret;
@@ -1076,7 +1079,7 @@ void journal_destroy(journal_t *journal)
 	spin_lock(&journal->j_list_lock);
 	while (journal->j_checkpoint_transactions != NULL) {
 		spin_unlock(&journal->j_list_lock);
-		log_do_checkpoint(journal, 1);
+		log_do_checkpoint(journal);
 		spin_lock(&journal->j_list_lock);
 	}
 
@@ -1284,7 +1287,7 @@ int journal_flush(journal_t *journal)
 	spin_lock(&journal->j_list_lock);
 	while (!err && journal->j_checkpoint_transactions != NULL) {
 		spin_unlock(&journal->j_list_lock);
-		err = log_do_checkpoint(journal, journal->j_maxlen);
+		err = log_do_checkpoint(journal);
 		spin_lock(&journal->j_list_lock);
 	}
 	spin_unlock(&journal->j_list_lock);
@@ -1726,6 +1729,18 @@ static void __journal_remove_journal_head(struct buffer_head *bh)
 			J_ASSERT_BH(bh, buffer_jbd(bh));
 			J_ASSERT_BH(bh, jh2bh(jh) == bh);
 			BUFFER_TRACE(bh, "remove journal_head");
+			if (jh->b_frozen_data) {
+				printk(KERN_WARNING "%s: freeing "
+						"b_frozen_data\n",
+						__FUNCTION__);
+				kfree(jh->b_frozen_data);
+			}
+			if (jh->b_committed_data) {
+				printk(KERN_WARNING "%s: freeing "
+						"b_committed_data\n",
+						__FUNCTION__);
+				kfree(jh->b_committed_data);
+			}
 			bh->b_private = NULL;
 			jh->b_bh = NULL;	/* debug, really */
 			clear_buffer_jbd(bh);
@@ -1797,7 +1812,7 @@ int read_jbd_debug(char *page, char **start, off_t off,
 	return ret;
 }
 
-int write_jbd_debug(struct file *file, const char *buffer,
+int write_jbd_debug(struct file *file, const char __user *buffer,
 			   unsigned long count, void *data)
 {
 	char buf[32];
@@ -1886,7 +1901,6 @@ static int __init journal_init(void)
 {
 	int ret;
 
-	printk(KERN_INFO "Journalled Block Device driver loaded\n");
 	ret = journal_init_caches();
 	if (ret != 0)
 		journal_destroy_caches();

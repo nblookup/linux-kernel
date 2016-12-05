@@ -33,11 +33,9 @@
 #include <linux/vmalloc.h>
 #include <linux/stat.h>
 #include <linux/errno.h>
-#include <linux/smp_lock.h>
 #include <asm/segment.h>
 #include <asm/uaccess.h>
 #include <linux/string.h>
-#include <linux/smp_lock.h>
 #if defined(CONFIG_TMPFS)
 #include <linux/jbd.h>
 #if defined(CONFIG_EXT3)

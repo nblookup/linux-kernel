@@ -372,7 +372,7 @@ static int NCR5380_poll_politely(struct Scsi_Host *instance, int reg, int bit, i
 	{
 		r = NCR5380_read(reg);
 		if((r & bit) == val)
-			return r;
+			return 0;
 		cpu_relax();
 	}
 	
@@ -381,7 +381,7 @@ static int NCR5380_poll_politely(struct Scsi_Host *instance, int reg, int bit, i
 	{
 		r = NCR5380_read(reg);
 		if((r & bit) == val)
-			return r; 
+			return 0;
 		if(!in_interrupt())
 			yield();
 		else
@@ -852,9 +852,7 @@ char *lprint_command(unsigned char *cmd, char *pos, char *buffer, int len);
 static
 char *lprint_opcode(int opcode, char *pos, char *buffer, int length);
 
-#ifndef NCR5380_proc_info
 static
-#endif
 int NCR5380_proc_info(struct Scsi_Host *instance, char *buffer, char **start, off_t offset, int length, int inout)
 {
 	char *pos = buffer;
@@ -2514,7 +2512,7 @@ static void NCR5380_information_transfer(struct Scsi_Host *instance) {
 					case HEAD_OF_QUEUE_TAG:
 					case ORDERED_QUEUE_TAG:
 					case SIMPLE_QUEUE_TAG:
-						cmd->device->tagged_queue = 0;
+						cmd->device->simple_tags = 0;
 						hostdata->busy[cmd->device->id] |= (1 << cmd->device->lun);
 						break;
 					default:

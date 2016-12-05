@@ -128,16 +128,17 @@ static struct quota_format_type *find_quota_format(int id)
 	if (!actqf || !try_module_get(actqf->qf_owner)) {
 		int qm;
 
+		spin_unlock(&dq_list_lock);
+		
 		for (qm = 0; module_names[qm].qm_fmt_id && module_names[qm].qm_fmt_id != id; qm++);
-		if (!module_names[qm].qm_fmt_id || request_module(module_names[qm].qm_mod_name)) {
-			actqf = NULL;
-			goto out;
-		}
+		if (!module_names[qm].qm_fmt_id || request_module(module_names[qm].qm_mod_name))
+			return NULL;
+
+		spin_lock(&dq_list_lock);
 		for (actqf = quota_formats; actqf && actqf->qf_fmt_id != id; actqf = actqf->qf_next);
 		if (actqf && !try_module_get(actqf->qf_owner))
 			actqf = NULL;
 	}
-out:
 	spin_unlock(&dq_list_lock);
 	return actqf;
 }
@@ -826,28 +827,49 @@ void dquot_initialize(struct inode *inode, int type)
 }
 
 /*
- * Release all quota for the specified inode.
- *
- * Note: this is a blocking operation.
+ *	Remove references to quota from inode
+ *	This function needs dqptr_sem for writing
  */
-static void dquot_drop_nolock(struct inode *inode)
+static void dquot_drop_iupdate(struct inode *inode, struct dquot **to_drop)
 {
 	int cnt;
 
 	inode->i_flags &= ~S_QUOTA;
 	for (cnt = 0; cnt < MAXQUOTAS; cnt++) {
-		if (inode->i_dquot[cnt] == NODQUOT)
-			continue;
-		dqput(inode->i_dquot[cnt]);
+		to_drop[cnt] = inode->i_dquot[cnt];
 		inode->i_dquot[cnt] = NODQUOT;
 	}
 }
 
+/*
+ * 	Release all quotas referenced by inode
+ */
 void dquot_drop(struct inode *inode)
 {
+	struct dquot *to_drop[MAXQUOTAS];
+	int cnt;
+
 	down_write(&sb_dqopt(inode->i_sb)->dqptr_sem);
-	dquot_drop_nolock(inode);
+	dquot_drop_iupdate(inode, to_drop);
 	up_write(&sb_dqopt(inode->i_sb)->dqptr_sem);
+	for (cnt = 0; cnt < MAXQUOTAS; cnt++)
+		if (to_drop[cnt] != NODQUOT)
+			dqput(to_drop[cnt]);
+}
+
+/*
+ *	Release all quotas referenced by inode.
+ *	This function assumes dqptr_sem for writing
+ */
+void dquot_drop_nolock(struct inode *inode)
+{
+	struct dquot *to_drop[MAXQUOTAS];
+	int cnt;
+
+	dquot_drop_iupdate(inode, to_drop);
+	for (cnt = 0; cnt < MAXQUOTAS; cnt++)
+		if (to_drop[cnt] != NODQUOT)
+			dqput(to_drop[cnt]);
 }
 
 /*
@@ -862,6 +884,10 @@ int dquot_alloc_space(struct inode *inode, qsize_t number, int warn)
 		warntype[cnt] = NOWARN;
 
 	down_read(&sb_dqopt(inode->i_sb)->dqptr_sem);
+	if (IS_NOQUOTA(inode)) {
+		up_read(&sb_dqopt(inode->i_sb)->dqptr_sem);
+		return QUOTA_OK;
+	}
 	spin_lock(&dq_data_lock);
 	for (cnt = 0; cnt < MAXQUOTAS; cnt++) {
 		if (inode->i_dquot[cnt] == NODQUOT)
@@ -894,6 +920,10 @@ int dquot_alloc_inode(const struct inode *inode, unsigned long number)
 	for (cnt = 0; cnt < MAXQUOTAS; cnt++)
 		warntype[cnt] = NOWARN;
 	down_read(&sb_dqopt(inode->i_sb)->dqptr_sem);
+	if (IS_NOQUOTA(inode)) {
+		up_read(&sb_dqopt(inode->i_sb)->dqptr_sem);
+		return QUOTA_OK;
+	}
 	spin_lock(&dq_data_lock);
 	for (cnt = 0; cnt < MAXQUOTAS; cnt++) {
 		if (inode->i_dquot[cnt] == NODQUOT)
@@ -923,6 +953,10 @@ void dquot_free_space(struct inode *inode, qsize_t number)
 	unsigned int cnt;
 
 	down_read(&sb_dqopt(inode->i_sb)->dqptr_sem);
+	if (IS_NOQUOTA(inode)) {
+		up_read(&sb_dqopt(inode->i_sb)->dqptr_sem);
+		return;
+	}
 	spin_lock(&dq_data_lock);
 	for (cnt = 0; cnt < MAXQUOTAS; cnt++) {
 		if (inode->i_dquot[cnt] == NODQUOT)
@@ -942,6 +976,10 @@ void dquot_free_inode(const struct inode *inode, unsigned long number)
 	unsigned int cnt;
 
 	down_read(&sb_dqopt(inode->i_sb)->dqptr_sem);
+	if (IS_NOQUOTA(inode)) {
+		up_read(&sb_dqopt(inode->i_sb)->dqptr_sem);
+		return;
+	}
 	spin_lock(&dq_data_lock);
 	for (cnt = 0; cnt < MAXQUOTAS; cnt++) {
 		if (inode->i_dquot[cnt] == NODQUOT)

@@ -26,7 +26,7 @@
 #include <linux/proc_fs.h>
 #include <linux/spinlock.h>
 #include <linux/pci.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/stat.h>
 
 #include <asm/system.h>
@@ -2304,9 +2304,7 @@ static int atp870u_detect(Scsi_Host_Template * tpnt)
 	printk(KERN_INFO "aec671x_detect: \n");
 	tpnt->proc_name = "atp870u";
 
-	h = 0;
-	while (devid[h] != 0)
-	{
+	for (h = 0; devid[h]; h++) {
 		struct pci_dev *dev = NULL;
 		
 		while((dev = pci_find_device(0x1191, devid[h], dev))!=NULL)
@@ -2337,11 +2335,8 @@ static int atp870u_detect(Scsi_Host_Template * tpnt)
 				break;
 		}
 	}
-	for (h = 0; h < MAX_ATP; h++) {
+	for (h = 0; h < card; h++) {
 		struct atp_unit tmp, *dev;
-		if (pdev[h] == NULL) {
-			return count;
-		}
 
 		/* Found an atp870u/w. */
 		base_io = pci_resource_start(pdev[h], 0);

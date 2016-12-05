@@ -748,16 +748,17 @@ int cp_compat_stat(struct kstat *stat, struct compat_stat *statbuf)
 {
 	int err;
 
-	if (stat->size > MAX_NON_LFS)
+	if (stat->size > MAX_NON_LFS || !new_valid_dev(stat->dev) ||
+	    !new_valid_dev(stat->rdev))
 		return -EOVERFLOW;
 
-	err  = put_user(stat->dev, &statbuf->st_dev);
+	err  = put_user(new_encode_dev(stat->dev), &statbuf->st_dev);
 	err |= put_user(stat->ino, &statbuf->st_ino);
 	err |= put_user(stat->mode, &statbuf->st_mode);
 	err |= put_user(stat->nlink, &statbuf->st_nlink);
 	err |= put_user(stat->uid, &statbuf->st_uid);
 	err |= put_user(stat->gid, &statbuf->st_gid);
-	err |= put_user(stat->rdev, &statbuf->st_rdev);
+	err |= put_user(new_encode_dev(stat->rdev), &statbuf->st_rdev);
 	err |= put_user(stat->size, &statbuf->st_size);
 	err |= put_user(stat->atime.tv_sec, &statbuf->st_atime);
 	err |= put_user(0, &statbuf->__unused1);
@@ -1243,16 +1244,19 @@ asmlinkage long sys32_settimeofday(struct compat_timeval *tv, struct timezone *t
 }
 
 
-struct msgbuf32 { s32 mtype; char mtext[1]; };
+struct msgbuf32 {
+	compat_long_t mtype; 
+	char mtext[1];
+};
 
 struct semid_ds32 {
 	struct ipc_perm sem_perm;
 	compat_time_t sem_otime;
 	compat_time_t sem_ctime;
-	u32 sem_base;
-	u32 sem_pending;
-	u32 sem_pending_last;
-	u32 undo;
+	compat_uptr_t sem_base;
+	compat_uptr_t sem_pending;
+	compat_uptr_t sem_pending_last;
+	compat_uptr_t undo;
 	unsigned short sem_nsems;
 };
 
@@ -1262,21 +1266,20 @@ struct semid64_ds32 {
 	compat_time_t sem_otime;
 	unsigned int __unused2;
 	compat_time_t sem_ctime;
-	u32 sem_nsems;
-	u32 __unused3;
-	u32 __unused4;
+	compat_ulong_t sem_nsems;
+	compat_ulong_t __unused3;
+	compat_ulong_t __unused4;
 };
 
-struct msqid_ds32
-{
+struct msqid_ds32 {
 	struct ipc_perm msg_perm;
-	u32 msg_first;
-	u32 msg_last;
+	compat_uptr_t msg_first;
+	compat_uptr_t msg_last;
 	compat_time_t msg_stime;
 	compat_time_t msg_rtime;
 	compat_time_t msg_ctime;
-	u32 msg_lcbytes;
-	u32 msg_lqbytes;
+	compat_ulong_t msg_lcbytes;
+	compat_ulong_t msg_lqbytes;
 	unsigned short msg_cbytes;
 	unsigned short msg_qnum;
 	unsigned short msg_qbytes;
@@ -1292,13 +1295,13 @@ struct msqid64_ds32 {
 	compat_time_t msg_rtime;
 	unsigned int __unused3;
 	compat_time_t msg_ctime;
-	unsigned int msg_cbytes;
-	unsigned int msg_qnum;
-	unsigned int msg_qbytes;
+	compat_ulong_t msg_cbytes;
+	compat_ulong_t msg_qnum;
+	compat_ulong_t msg_qbytes;
 	compat_pid_t msg_lspid;
 	compat_pid_t msg_lrpid;
-	unsigned int __unused4;
-	unsigned int __unused5;
+	compat_ulong_t __unused4;
+	compat_ulong_t __unused5;
 };
 
 struct shmid_ds32 {
@@ -1311,8 +1314,8 @@ struct shmid_ds32 {
 	compat_ipc_pid_t shm_lpid;
 	unsigned short shm_nattch;
 	unsigned short __unused;
-	unsigned int __unused2;
-	unsigned int __unused3;
+	compat_uptr_t __unused2;
+	compat_uptr_t __unused3;
 };
 
 struct shmid64_ds32 {
@@ -1327,9 +1330,9 @@ struct shmid64_ds32 {
 	compat_size_t shm_segsz;
 	compat_pid_t shm_cpid;
 	compat_pid_t shm_lpid;
-	unsigned int shm_nattch;
-	unsigned int __unused5;
-	unsigned int __unused6;
+	compat_ulong_t shm_nattch;
+	compat_ulong_t __unused5;
+	compat_ulong_t __unused6;
 };
 
 /*
@@ -1350,7 +1353,7 @@ static long do_sys32_semctl(int first, int second, int third, void *uptr)
 	err = -EFAULT;
 	if (get_user(pad, (u32 *)uptr))
 		return err;
-	if (third == SETVAL)
+	if ((third & ~IPC_64) == SETVAL)
 		fourth.val = (int)pad;
 	else
 		fourth.__pad = (void *)A(pad);
@@ -1773,6 +1776,22 @@ do_sys32_shmctl(int first, int second, void *uptr)
 	return err;
 }
 
+static int sys32_semtimedop(int semid, struct sembuf *tsems, int nsems,
+			    const struct compat_timespec *timeout32)
+{
+	struct compat_timespec t32;
+	struct timespec *t64 = compat_alloc_user_space(sizeof(*t64));
+
+	if (copy_from_user(&t32, timeout32, sizeof(t32)))
+		return -EFAULT;
+
+	if (put_user(t32.tv_sec, &t64->tv_sec) ||
+	    put_user(t32.tv_nsec, &t64->tv_nsec))
+		return -EFAULT;
+
+	return sys_semtimedop(semid, tsems, nsems, t64);
+}
+
 /*
  * Note: it is necessary to treat first_parm, second_parm, and
  * third_parm as unsigned ints, with the corresponding cast to a
@@ -1795,8 +1814,12 @@ asmlinkage long sys32_ipc(u32 call, u32 first_parm, u32 second_parm, u32 third_p
 
 	case SEMOP:
 		/* struct sembuf is the same on 32 and 64bit :)) */
-		err = sys_semop(first, (struct sembuf *)AA(ptr),
-				second);
+		err = sys_semtimedop(first, (struct sembuf *)AA(ptr),
+				     second, NULL);
+		break;
+	case SEMTIMEDOP:
+		err = sys32_semtimedop(first, (struct sembuf *)AA(ptr), second,
+				       (const struct compat_timespec *)AA(fifth));
 		break;
 	case SEMGET:
 		err = sys_semget(first, second, third);
@@ -1998,6 +2021,7 @@ static int do_execve32(char * filename, u32 * argv, u32 * envp, struct pt_regs *
 
 	bprm.file = file;
 	bprm.filename = filename;
+	bprm.interp = filename;
 	bprm.sh_bang = 0;
 	bprm.loader = 0;
 	bprm.exec = 0;
@@ -2314,32 +2338,6 @@ extern asmlinkage long sys_mkdir(const char * pathname, int mode);
 asmlinkage long sys32_mkdir(const char * pathname, u32 mode)
 {
 	return sys_mkdir(pathname, (int)mode);
-}
-
-
-extern asmlinkage long sys_mlockall(int flags);
-
-/* Note: it is necessary to treat flags as an unsigned int,
- * with the corresponding cast to a signed int to insure that the 
- * proper conversion (sign extension) between the register representation of a signed int (msr in 32-bit mode)
- * and the register representation of a signed int (msr in 64-bit mode) is performed.
- */
-asmlinkage long sys32_mlockall(u32 flags)
-{
-	return sys_mlockall((int)flags);
-}
-
-
-extern asmlinkage long sys_msync(unsigned long start, size_t len, int flags);
-
-/* Note: it is necessary to treat flags as an unsigned int,
- * with the corresponding cast to a signed int to insure that the 
- * proper conversion (sign extension) between the register representation of a signed int (msr in 32-bit mode)
- * and the register representation of a signed int (msr in 64-bit mode) is performed.
- */
-asmlinkage long sys32_msync(unsigned long start, size_t len, u32 flags)
-{
-	return sys_msync(start, len, (int)flags);
 }
 
 extern asmlinkage long sys_nice(int increment);
@@ -2775,6 +2773,47 @@ long sys32_io_submit(aio_context_t ctx_id, u32 number, u32 *iocbpp)
 
 	put_ioctx(ctx);
 	return i ? i : ret;
+}
+
+int get_compat_timeval(struct timeval *tv, struct compat_timeval *ctv)
+{
+	return (verify_area(VERIFY_READ, ctv, sizeof(*ctv)) ||
+		__get_user(tv->tv_sec, &ctv->tv_sec) ||
+		__get_user(tv->tv_usec, &ctv->tv_usec)) ? -EFAULT : 0;
+}
+
+long sys32_utimes(char *filename, struct compat_timeval *tvs)
+{
+	char *kfilename;
+	struct timeval ktvs[2];
+	mm_segment_t old_fs;
+	long ret;
+
+	kfilename = getname(filename);
+	ret = PTR_ERR(kfilename);
+	if (!IS_ERR(kfilename)) {
+		if (tvs) {
+			if (get_compat_timeval(&ktvs[0], &tvs[0]) ||
+			    get_compat_timeval(&ktvs[1], &tvs[1]))
+				return -EFAULT;
+		}
+
+		old_fs = get_fs();
+		set_fs(KERNEL_DS);
+		ret = do_utimes(kfilename, (tvs ? &ktvs[0] : NULL));
+		set_fs(old_fs);
+
+		putname(kfilename);
+	}
+	return ret;
+}
+
+extern long sys_tgkill(int tgid, int pid, int sig);
+
+long sys32_tgkill(u32 tgid, u32 pid, int sig)
+{
+	/* sign extend tgid, pid */
+	return sys_tgkill((int)tgid, (int)pid, sig);
 }
 
 /* 

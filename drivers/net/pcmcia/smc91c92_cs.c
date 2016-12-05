@@ -283,7 +283,7 @@ enum RxCfg { RxAllMulti = 0x0004, RxPromisc = 0x0002,
 static dev_link_t *smc91c92_attach(void);
 static void smc91c92_detach(dev_link_t *);
 static void smc91c92_config(dev_link_t *link);
-static void smc91c92_release(u_long arg);
+static void smc91c92_release(dev_link_t *link);
 static int smc91c92_event(event_t event, int priority,
 			  event_callback_args_t *args);
 
@@ -307,24 +307,6 @@ static int smc_link_ok(struct net_device *dev);
 
 /*======================================================================
 
-    This bit of code is used to avoid unregistering network devices
-    at inappropriate times.  2.2 and later kernels are fairly picky
-    about when this can happen.
-
-======================================================================*/
-
-static void flush_stale_links(void)
-{
-    dev_link_t *link, *next;
-    for (link = dev_list; link; link = next) {
-	next = link->next;
-	if (link->state & DEV_STALE_LINK)
-	    smc91c92_detach(link);
-    }
-}
-
-/*======================================================================
-
   smc91c92_attach() creates an "instance" of the driver, allocating
   local data structures for one device.  The device is registered
   with Card Services.
@@ -340,7 +322,6 @@ static dev_link_t *smc91c92_attach(void)
     int i, ret;
 
     DEBUG(0, "smc91c92_attach()\n");
-    flush_stale_links();
 
     /* Create new ethernet device */
     dev = alloc_etherdev(sizeof(struct smc_private));
@@ -351,9 +332,6 @@ static dev_link_t *smc91c92_attach(void)
     link->priv = dev;
 
     spin_lock_init(&smc->lock);
-    init_timer(&link->release);
-    link->release.function = &smc91c92_release;
-    link->release.data = (u_long)link;
     link->io.NumPorts1 = 16;
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_AUTO;
     link->io.IOAddrLines = 4;
@@ -433,13 +411,10 @@ static void smc91c92_detach(dev_link_t *link)
     if (*linkp == NULL)
 	return;
 
-    del_timer(&link->release);
     if (link->state & DEV_CONFIG) {
-	smc91c92_release((u_long)link);
-	if (link->state & DEV_STALE_CONFIG) {
-	    link->state |= DEV_STALE_LINK;
+	smc91c92_release(link);
+	if (link->state & DEV_STALE_CONFIG)
 	    return;
-	}
     }
 
     if (link->handle)
@@ -447,9 +422,11 @@ static void smc91c92_detach(dev_link_t *link)
 
     /* Unlink device structure, free bits */
     *linkp = link->next;
-    if (link->dev)
+    if (link->dev) {
 	unregister_netdev(dev);
-    kfree(dev);
+	free_netdev(dev);
+    } else
+	kfree(dev);
 
 } /* smc91c92_detach */
 
@@ -1068,7 +1045,7 @@ static void smc91c92_config(dev_link_t *link)
 config_undo:
     unregister_netdev(dev);
 config_failed:			/* CS_EXIT_TEST() calls jump to here... */
-    smc91c92_release((u_long)link);
+    smc91c92_release(link);
     link->state &= ~DEV_CONFIG_PENDING;
 
 } /* smc91c92_config */
@@ -1081,9 +1058,8 @@ config_failed:			/* CS_EXIT_TEST() calls jump to here... */
 
 ======================================================================*/
 
-static void smc91c92_release(u_long arg)
+static void smc91c92_release(dev_link_t *link)
 {
-    dev_link_t *link = (dev_link_t *)arg;
 
     DEBUG(0, "smc91c92_release(0x%p)\n", link);
 
@@ -1106,7 +1082,9 @@ static void smc91c92_release(u_long arg)
 
     link->state &= ~DEV_CONFIG;
 
-} /* smc91c92_release */
+    if (link->state & DEV_STALE_CONFIG)
+	    smc91c92_detach(link);
+}
 
 /*======================================================================
 
@@ -1132,7 +1110,7 @@ static int smc91c92_event(event_t event, int priority,
 	link->state &= ~DEV_PRESENT;
 	if (link->state & DEV_CONFIG) {
 	    netif_device_detach(dev);
-	    mod_timer(&link->release, jiffies + HZ/20);
+	    smc91c92_release(link);
 	}
 	break;
     case CS_EVENT_CARD_INSERTION:
@@ -1330,9 +1308,9 @@ static int smc_close(struct net_device *dev)
     outw(CTL_POWERDOWN, ioaddr + CONTROL );
 
     link->open--;
-    del_timer(&smc->media);
+    del_timer_sync(&smc->media);
     if (link->state & DEV_STALE_CONFIG)
-	mod_timer(&link->release, jiffies + HZ/20);
+	    smc91c92_release(link);
 
     return 0;
 } /* smc_close */
@@ -1996,7 +1974,7 @@ static void media_check(u_long arg)
     }
     if (smc->fast_poll) {
 	smc->fast_poll--;
-	smc->media.expires = jiffies + 1;
+	smc->media.expires = jiffies + HZ/100;
 	add_timer(&smc->media);
 	SMC_SELECT_BANK(saved_bank);
 	return;
@@ -2238,6 +2216,8 @@ static int smc_ioctl (struct net_device *dev, struct ifreq *rq, int cmd)
     struct smc_private *smc = dev->priv;
     struct mii_ioctl_data *mii;
     int rc = 0;
+    u_short saved_bank;
+    ioaddr_t ioaddr = dev->base_addr;
 
     mii = (struct mii_ioctl_data *) &rq->ifr_data;
     if (!netif_running(dev))
@@ -2245,12 +2225,18 @@ static int smc_ioctl (struct net_device *dev, struct ifreq *rq, int cmd)
 
     switch (cmd) {
     case SIOCETHTOOL:
+	saved_bank = inw(ioaddr + BANK_SELECT);
+	SMC_SELECT_BANK(3);
 	rc = smc_ethtool_ioctl(dev, (void *) rq->ifr_data);
+	SMC_SELECT_BANK(saved_bank);
 	break;
 
     default:
 	spin_lock_irq(&smc->lock);
+	saved_bank = inw(ioaddr + BANK_SELECT);
+	SMC_SELECT_BANK(3);
 	rc = generic_mii_ioctl(&smc->mii_if, mii, cmd, NULL);
+	SMC_SELECT_BANK(saved_bank);
 	spin_unlock_irq(&smc->lock);
 	break;
     }

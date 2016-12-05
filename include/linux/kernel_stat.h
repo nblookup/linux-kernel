@@ -17,15 +17,15 @@ struct cpu_usage_stat {
 	unsigned int user;
 	unsigned int nice;
 	unsigned int system;
+	unsigned int softirq;
+	unsigned int irq;
 	unsigned int idle;
 	unsigned int iowait;
 };
 
 struct kernel_stat {
 	struct cpu_usage_stat	cpustat;
-#if !defined(CONFIG_ARCH_S390)
 	unsigned int irqs[NR_IRQS];
-#endif
 };
 
 DECLARE_PER_CPU(struct kernel_stat, kstat);
@@ -36,7 +36,6 @@ DECLARE_PER_CPU(struct kernel_stat, kstat);
 
 extern unsigned long nr_context_switches(void);
 
-#if !defined(CONFIG_ARCH_S390)
 /*
  * Number of interrupts per specific IRQ source, since bootup
  */
@@ -50,6 +49,5 @@ static inline int kstat_irqs(int irq)
 
 	return sum;
 }
-#endif
 
 #endif /* _LINUX_KERNEL_STAT_H */

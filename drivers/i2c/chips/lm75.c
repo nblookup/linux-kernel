@@ -194,7 +194,7 @@ static int lm75_detect(struct i2c_adapter *adapter, int address, int kind)
 	}
 
 	/* Fill in the remaining client fields and put it into the global list */
-	strlcpy(new_client->dev.name, name, DEVICE_NAME_SIZE);
+	strlcpy(new_client->name, name, I2C_NAME_SIZE);
 
 	new_client->id = lm75_id++;
 	data->valid = 0;
@@ -204,11 +204,14 @@ static int lm75_detect(struct i2c_adapter *adapter, int address, int kind)
 	if ((err = i2c_attach_client(new_client)))
 		goto exit_free;
 
+	/* Initialize the LM75 chip */
+	lm75_init_client(new_client);
+	
+	/* Register sysfs hooks */
 	device_create_file(&new_client->dev, &dev_attr_temp_max);
 	device_create_file(&new_client->dev, &dev_attr_temp_min);
 	device_create_file(&new_client->dev, &dev_attr_temp_input);
 
-	lm75_init_client(new_client);
 	return 0;
 
 exit_free:

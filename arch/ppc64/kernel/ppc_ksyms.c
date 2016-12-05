@@ -49,8 +49,6 @@
 
 extern int sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg);
 extern int do_signal(sigset_t *, struct pt_regs *);
-extern int register_ioctl32_conversion(unsigned int cmd, int (*handler)(unsigned int, unsigned int, unsigned long, struct file *));
-extern int unregister_ioctl32_conversion(unsigned int cmd);
 
 int abs(int);
 
@@ -59,15 +57,6 @@ extern struct pci_dev * iSeries_vio_dev;
 
 EXPORT_SYMBOL(do_signal);
 EXPORT_SYMBOL(sys_ioctl);
-EXPORT_SYMBOL(enable_irq);
-EXPORT_SYMBOL(disable_irq);
-EXPORT_SYMBOL(disable_irq_nosync);
-#ifdef CONFIG_SMP
-EXPORT_SYMBOL(synchronize_irq);
-#endif /* CONFIG_SMP */
-
-EXPORT_SYMBOL(register_ioctl32_conversion);
-EXPORT_SYMBOL(unregister_ioctl32_conversion);
 
 EXPORT_SYMBOL(isa_io_base);
 EXPORT_SYMBOL(pci_io_base);
@@ -232,3 +221,4 @@ EXPORT_SYMBOL(debugger_fault_handler);
 #endif
 
 EXPORT_SYMBOL(tb_ticks_per_usec);
+EXPORT_SYMBOL(paca);

@@ -25,32 +25,30 @@ struct eisa_device_info {
 	char name[DEVICE_NAME_SIZE];
 };
 
-static struct eisa_device_info __initdata eisa_table[] = {
 #ifdef CONFIG_EISA_NAMES
+static struct eisa_device_info __initdata eisa_table[] = {
 #include "devlist.h"
-#endif
 };
-
 #define EISA_INFOS (sizeof (eisa_table) / (sizeof (struct eisa_device_info)))
+#endif
 
 #define EISA_MAX_FORCED_DEV 16
-#define EISA_FORCED_OFFSET  2
 
-static int enable_dev[EISA_MAX_FORCED_DEV + EISA_FORCED_OFFSET]  = { 1, EISA_MAX_FORCED_DEV, };
-static int disable_dev[EISA_MAX_FORCED_DEV + EISA_FORCED_OFFSET] = { 1, EISA_MAX_FORCED_DEV, };
+static int enable_dev[EISA_MAX_FORCED_DEV];
+static int enable_dev_count;
+static int disable_dev[EISA_MAX_FORCED_DEV];
+static int disable_dev_count;
 
 static int is_forced_dev (int *forced_tab,
+			  int forced_count,
 			  struct eisa_root_device *root,
 			  struct eisa_device *edev)
 {
 	int i, x;
 
-	for (i = 0; i < EISA_MAX_FORCED_DEV; i++) {
-		if (!forced_tab[EISA_FORCED_OFFSET + i])
-			return 0;
-
+	for (i = 0; i < forced_count; i++) {
 		x = (root->bus_nr << 8) | edev->slot;
-		if (forced_tab[EISA_FORCED_OFFSET + i] == x)
+		if (forced_tab[i] == x)
 			return 1;
 	}
 
@@ -59,11 +57,11 @@ static int is_forced_dev (int *forced_tab,
 
 static void __init eisa_name_device (struct eisa_device *edev)
 {
+#ifdef CONFIG_EISA_NAMES
 	int i;
-
 	for (i = 0; i < EISA_INFOS; i++) {
 		if (!strcmp (edev->id.sig, eisa_table[i].id.sig)) {
-			strlcpy (edev->dev.name,
+			strlcpy (edev->pretty_name,
 				 eisa_table[i].name,
 				 DEVICE_NAME_SIZE);
 			return;
@@ -71,7 +69,8 @@ static void __init eisa_name_device (struct eisa_device *edev)
 	}
 
 	/* No name was found */
-	sprintf (edev->dev.name, "EISA device %.7s", edev->id.sig);
+	sprintf (edev->pretty_name, "EISA device %.7s", edev->id.sig);
+#endif
 }
 
 static char __init *decode_eisa_sig(unsigned long addr)
@@ -190,13 +189,18 @@ static int __init eisa_init_device (struct eisa_root_device *root,
 	edev->dev.dma_mask = &edev->dma_mask;
 	sprintf (edev->dev.bus_id, "%02X:%02X", root->bus_nr, slot);
 
-	for (i = 0; i < EISA_MAX_RESOURCES; i++)
-		edev->res[i].name  = edev->dev.name;
+	for (i = 0; i < EISA_MAX_RESOURCES; i++) {
+#ifdef CONFIG_EISA_NAMES
+		edev->res[i].name = edev->pretty_name;
+#else
+		edev->res[i].name = edev->id.sig;
+#endif
+	}
 
-	if (is_forced_dev (enable_dev, root, edev))
+	if (is_forced_dev (enable_dev, enable_dev_count, root, edev))
 		edev->state = EISA_CONFIG_ENABLED | EISA_CONFIG_FORCED;
 	
-	if (is_forced_dev (disable_dev, root, edev))
+	if (is_forced_dev (disable_dev, disable_dev_count, root, edev))
 		edev->state = EISA_CONFIG_FORCED;
 
 	return 0;
@@ -271,7 +275,7 @@ static int __init eisa_probe (struct eisa_root_device *root)
 	struct eisa_device *edev;
 
         printk (KERN_INFO "EISA: Probing bus %d at %s\n",
-		root->bus_nr, root->dev->name);
+		root->bus_nr, root->dev->bus_id);
 
 	/* First try to get hold of slot 0. If there is no device
 	 * here, simply fail, unless root->force_probe is set. */
@@ -413,15 +417,13 @@ static int __init eisa_init (void)
 	return 0;
 }
 
-/* Couldn't use intarray with checking on... :-( */
-#undef  param_check_intarray
-#define param_check_intarray(name, p)
-
-module_param(enable_dev,  intarray, 0444);
-module_param(disable_dev, intarray, 0444);
+module_param_array(enable_dev, int, enable_dev_count, 0444);
+module_param_array(disable_dev, int, disable_dev_count, 0444);
 
 postcore_initcall (eisa_init);
 
+int EISA_bus;		/* for legacy drivers */
+EXPORT_SYMBOL (EISA_bus);
 EXPORT_SYMBOL (eisa_bus_type);
 EXPORT_SYMBOL (eisa_driver_register);
 EXPORT_SYMBOL (eisa_driver_unregister);

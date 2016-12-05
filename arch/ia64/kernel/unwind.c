@@ -39,6 +39,7 @@
 #include <asm/ptrace.h>
 #include <asm/ptrace_offsets.h>
 #include <asm/rse.h>
+#include <asm/sections.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
 
@@ -1170,9 +1171,10 @@ desc_spill_sprel_p (unsigned char qp, unw_word t, unsigned char abreg, unw_word 
 static inline unw_hash_index_t
 hash (unsigned long ip)
 {
-#	define magic	0x9e3779b97f4a7c16	/* based on (sqrt(5)/2-1)*2^64 */
+#	define hashmagic	0x9e3779b97f4a7c16	/* based on (sqrt(5)/2-1)*2^64 */
 
-	return (ip >> 4)*magic >> (64 - UNW_LOG_HASH_SIZE);
+	return (ip >> 4)*hashmagic >> (64 - UNW_LOG_HASH_SIZE);
+#undef hashmagic
 }
 
 static inline long
@@ -1908,7 +1910,7 @@ unw_unwind_to_user (struct unw_frame_info *info)
 				   __FUNCTION__, ip);
 			return -1;
 		}
-		if (ip < GATE_ADDR)
+		if (ip < FIXADDR_USER_END)
 			return 0;
 	}
 	unw_get_ip(info, &ip);
@@ -2178,7 +2180,7 @@ __initcall(create_gate_table);
 void __init
 unw_init (void)
 {
-	extern int ia64_unw_start, ia64_unw_end, __gp;
+	extern char __gp[];
 	extern void unw_hash_index_t_is_too_narrow (void);
 	long i, off;
 
@@ -2211,8 +2213,8 @@ unw_init (void)
 	unw.lru_head = UNW_CACHE_SIZE - 1;
 	unw.lru_tail = 0;
 
-	init_unwind_table(&unw.kernel_table, "kernel", KERNEL_START, (unsigned long) &__gp,
-			  &ia64_unw_start, &ia64_unw_end);
+	init_unwind_table(&unw.kernel_table, "kernel", KERNEL_START, (unsigned long) __gp,
+			  __start_unwind, __end_unwind);
 }
 
 /*

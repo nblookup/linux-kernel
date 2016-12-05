@@ -28,11 +28,14 @@
 #include <asm/vsyscall.h>
 #include <asm/timex.h>
 #include <asm/proto.h>
+#include <linux/cpufreq.h>
 #ifdef CONFIG_X86_LOCAL_APIC
 #include <asm/apic.h>
 #endif
 
 u64 jiffies_64 = INITIAL_JIFFIES;
+
+EXPORT_SYMBOL(jiffies_64);
 
 extern int using_apic_timer;
 
@@ -79,6 +82,7 @@ static inline unsigned int do_gettimeoffset_tsc(void)
 	unsigned long t;
 	unsigned long x;
 	rdtscll_sync(&t);
+	if (t < vxtime.last_tsc) t = vxtime.last_tsc; /* hack */
 	x = ((t - vxtime.last_tsc) * vxtime.tsc_quot) >> 32;
 	return x;
 }
@@ -107,6 +111,14 @@ void do_gettimeofday(struct timeval *tv)
 		sec = xtime.tv_sec;
 		usec = xtime.tv_nsec / 1000;
 
+		/*
+		 * If time_adjust is negative then NTP is slowing the clock
+		 * so make sure not to go into next possible interval.
+		 * Better to lose some accuracy than have time go backwards..
+		 */
+		if (unlikely(time_adjust < 0) && usec > tickadj)
+			usec = tickadj;
+
 		t = (jiffies - wall_jiffies) * (1000000L / HZ) +
 			do_gettimeoffset();
 		usec += t;
@@ -117,6 +129,8 @@ void do_gettimeofday(struct timeval *tv)
 	tv->tv_usec = usec % 1000000;
 }
 
+EXPORT_SYMBOL(do_gettimeofday);
+
 /*
  * settimeofday() first undoes the correction that gettimeofday would do
  * on the time, and then saves it. This is ugly, but has been like this for
@@ -125,33 +139,22 @@ void do_gettimeofday(struct timeval *tv)
 
 int do_settimeofday(struct timespec *tv)
 {
+	time_t wtm_sec, sec = tv->tv_sec;
+	long wtm_nsec, nsec = tv->tv_nsec;
+
 	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
 		return -EINVAL;
 
 	write_seqlock_irq(&xtime_lock);
 
-	tv->tv_nsec -= do_gettimeoffset() * 1000 +
+	nsec -= do_gettimeoffset() * 1000 +
 		(jiffies - wall_jiffies) * (NSEC_PER_SEC/HZ);
 
-	while (tv->tv_nsec < 0) {
-		tv->tv_nsec += NSEC_PER_SEC;
-		tv->tv_sec--;
-	}
+	wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
+	wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
 
-	wall_to_monotonic.tv_sec += xtime.tv_sec - tv->tv_sec;
-	wall_to_monotonic.tv_nsec += xtime.tv_nsec - tv->tv_nsec;
-
-	if (wall_to_monotonic.tv_nsec > NSEC_PER_SEC) {
-		wall_to_monotonic.tv_nsec -= NSEC_PER_SEC;
-		wall_to_monotonic.tv_sec++;
-	}
-	if (wall_to_monotonic.tv_nsec < 0) {
-		wall_to_monotonic.tv_nsec += NSEC_PER_SEC;
-		wall_to_monotonic.tv_sec--;
-	}
-
-	xtime.tv_sec = tv->tv_sec;
-	xtime.tv_nsec = tv->tv_nsec;
+	set_normalized_timespec(&xtime, sec, nsec);
+	set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
 
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
@@ -162,6 +165,8 @@ int do_settimeofday(struct timespec *tv)
 	clock_was_set();
 	return 0;
 }
+
+EXPORT_SYMBOL(do_settimeofday);
 
 /*
  * In order to set the CMOS clock precisely, set_rtc_mmss has to be called 500
@@ -380,6 +385,30 @@ static irqreturn_t timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	return IRQ_HANDLED;
 }
 
+/* RED-PEN: calculation is done in 32bits with multiply for performance
+   and could overflow, it may be better (but slower)to use an 64bit division. */
+unsigned long long sched_clock(void)
+{
+	unsigned long a = 0;
+
+#if 0
+	/* Don't do a HPET read here. Using TSC always is much faster
+	   and HPET may not be mapped yet when the scheduler first runs.
+           Disadvantage is a small drift between CPUs in some configurations,
+	   but that should be tolerable. */
+	if (__vxtime.mode == VXTIME_HPET)
+		return (hpet_readl(HPET_COUNTER) * vxtime.quot) >> 32;
+#endif
+
+	/* Could do CPU core sync here. Opteron can execute rdtsc speculatively,
+	   which means it is not completely exact and may not be monotonous between
+	   CPUs. But the errors should be too small to matter for scheduling
+	   purposes. */
+
+	rdtscll(a);
+	return (a * vxtime.tsc_quot) >> 32;
+}
+
 unsigned long get_cmos_time(void)
 {
 	unsigned int timeout, year, mon, day, hour, min, sec;
@@ -440,6 +469,57 @@ unsigned long get_cmos_time(void)
 
 	return mktime(year, mon, day, hour, min, sec);
 }
+
+#ifdef CONFIG_CPU_FREQ
+
+/* Frequency scaling support. Adjust the TSC based timer when the cpu frequency
+   changes.
+   
+   RED-PEN: On SMP we assume all CPUs run with the same frequency.  It's
+   not that important because current Opteron setups do not support
+   scaling on SMP anyroads.
+
+   Should fix up last_tsc too. Currently gettimeofday in the
+   first tick after the change will be slightly wrong. */
+
+static unsigned int  ref_freq = 0;
+static unsigned long loops_per_jiffy_ref = 0;
+
+static unsigned long cpu_khz_ref = 0;
+
+static int time_cpufreq_notifier(struct notifier_block *nb, unsigned long val,
+				 void *data)
+{
+        struct cpufreq_freqs *freq = data;
+	unsigned long *lpj;
+
+#ifdef CONFIG_SMP
+	lpj = &cpu_data[freq->cpu].loops_per_jiffy;
+#else
+	lpj = &boot_cpu_data.loops_per_jiffy;
+#endif
+
+	if (!ref_freq) {
+		ref_freq = freq->old;
+		loops_per_jiffy_ref = *lpj;
+		cpu_khz_ref = cpu_khz;
+	}
+        if ((val == CPUFREQ_PRECHANGE  && freq->old < freq->new) ||
+            (val == CPUFREQ_POSTCHANGE && freq->old > freq->new)) {
+                *lpj =
+		cpufreq_scale(loops_per_jiffy_ref, ref_freq, freq->new);
+
+		cpu_khz = cpufreq_scale(cpu_khz_ref, ref_freq, freq->new);
+		vxtime.tsc_quot = (1000L << 32) / cpu_khz;
+	}
+	
+	return 0;
+}
+ 
+static struct notifier_block time_cpufreq_notifier_block = {
+         .notifier_call  = time_cpufreq_notifier
+};
+#endif
 
 /*
  * calibrate_tsc() calibrates the processor TSC in a very simple way, comparing
@@ -603,8 +683,8 @@ void __init time_init(void)
 	xtime.tv_sec = get_cmos_time();
 	xtime.tv_nsec = 0;
 
-	wall_to_monotonic.tv_sec = -xtime.tv_sec;
-	wall_to_monotonic.tv_nsec = -xtime.tv_nsec;
+	set_normalized_timespec(&wall_to_monotonic,
+	                        -xtime.tv_sec, -xtime.tv_nsec);
 
 	if (!hpet_init()) {
                 vxtime_hz = (1000000000000000L + hpet_period / 2) /
@@ -627,6 +707,11 @@ void __init time_init(void)
 	vxtime.hz = vxtime_hz;
 	rdtscll_sync(&vxtime.last_tsc);
 	setup_irq(0, &irq0);
+
+#ifdef CONFIG_CPU_FREQ
+	cpufreq_register_notifier(&time_cpufreq_notifier_block, 
+				  CPUFREQ_TRANSITION_NOTIFIER);
+#endif
 }
 
 void __init time_init_smp(void)

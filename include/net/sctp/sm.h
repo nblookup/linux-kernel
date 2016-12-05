@@ -1,8 +1,8 @@
 /* SCTP kernel reference Implementation
+ * (C) Copyright IBM Corp. 2001, 2003
  * Copyright (c) 1999-2000 Cisco, Inc.
  * Copyright (c) 1999-2001 Motorola, Inc.
  * Copyright (c) 2001 Intel Corp.
- * Copyright (c) 2001-2002 International Business Machines Corp.
  *
  * This file is part of the SCTP kernel reference Implementation
  *
@@ -41,6 +41,7 @@
  *    Sridhar Samudrala <sri@us.ibm.com>
  *    Daisy Chang <daisyc@us.ibm.com>
  *    Ardelle Fan <ardelle.fan@intel.com>
+ *    Kevin Gao <kevin.gao@intel.com>
  *
  * Any bugs reported given to us we will try to fix... any fixes shared will
  * be incorporated into the next SCTP release.
@@ -117,6 +118,7 @@ sctp_state_fn_t sctp_sf_tabort_8_4_8;
 sctp_state_fn_t sctp_sf_operr_notify;
 sctp_state_fn_t sctp_sf_t1_timer_expire;
 sctp_state_fn_t sctp_sf_t2_timer_expire;
+sctp_state_fn_t sctp_sf_t4_timer_expire;
 sctp_state_fn_t sctp_sf_t5_timer_expire;
 sctp_state_fn_t sctp_sf_sendbeat_8_3;
 sctp_state_fn_t sctp_sf_beat_8_3;
@@ -137,6 +139,8 @@ sctp_state_fn_t sctp_sf_unk_chunk;
 sctp_state_fn_t sctp_sf_do_8_5_1_E_sa;
 sctp_state_fn_t sctp_sf_cookie_echoed_err;
 sctp_state_fn_t sctp_sf_do_5_2_6_stale;
+sctp_state_fn_t sctp_sf_do_asconf;
+sctp_state_fn_t sctp_sf_do_asconf_ack;
 
 /* Prototypes for primitive event state functions.  */
 sctp_state_fn_t sctp_sf_do_prm_asoc;
@@ -154,6 +158,7 @@ sctp_state_fn_t sctp_sf_error_closed;
 sctp_state_fn_t sctp_sf_error_shutdown;
 sctp_state_fn_t sctp_sf_ignore_primitive;
 sctp_state_fn_t sctp_sf_do_prm_requestheartbeat;
+sctp_state_fn_t sctp_sf_do_prm_asconf;
 
 /* Prototypes for other event state functions.  */
 sctp_state_fn_t sctp_sf_do_9_2_start_shutdown;
@@ -183,10 +188,6 @@ sctp_state_fn_t sctp_do_9_2_reshut;
 sctp_state_fn_t sctp_do_9_2_reshutack;
 sctp_state_fn_t sctp_do_8_3_hb_err;
 sctp_state_fn_t sctp_heartoff;
-
-/* Prototypes for addip related state functions.  Not in use. */
-sctp_state_fn_t sctp_addip_do_asconf;
-sctp_state_fn_t sctp_addip_do_asconf_ack;
 
 /* Prototypes for utility support functions.  */
 __u8 sctp_get_chunk_type(struct sctp_chunk *chunk);
@@ -231,7 +232,8 @@ struct sctp_chunk *sctp_make_data_empty(struct sctp_association *,
 struct sctp_chunk *sctp_make_ecne(const struct sctp_association *,
 				  const __u32);
 struct sctp_chunk *sctp_make_sack(const struct sctp_association *);
-struct sctp_chunk *sctp_make_shutdown(const struct sctp_association *asoc);
+struct sctp_chunk *sctp_make_shutdown(const struct sctp_association *asoc,
+				      const struct sctp_chunk *chunk);
 struct sctp_chunk *sctp_make_shutdown_ack(const struct sctp_association *asoc,
 					  const struct sctp_chunk *);
 struct sctp_chunk *sctp_make_shutdown_complete(const struct sctp_association *,
@@ -259,6 +261,23 @@ struct sctp_chunk *sctp_make_op_error(const struct sctp_association *,
 				 __u16 cause_code,
 				 const void *payload,
 				 size_t paylen);
+
+struct sctp_chunk *sctp_make_asconf(struct sctp_association *asoc,
+				    union sctp_addr *addr,
+				    int vparam_len);
+struct sctp_chunk *sctp_make_asconf_update_ip(struct sctp_association *,
+					      union sctp_addr *,
+					      struct sockaddr *,
+					      int, int);
+struct sctp_chunk *sctp_make_asconf_set_prim(struct sctp_association *asoc,
+					     union sctp_addr *addr);
+struct sctp_chunk *sctp_make_asconf_ack(struct sctp_association *asoc,
+					int serial, int vparam_len);
+
+struct sctp_chunk *sctp_process_asconf(struct sctp_association *asoc,
+				       struct sctp_chunk *asconf,
+				       int vparam_len);
+
 void sctp_chunk_assign_tsn(struct sctp_chunk *);
 void sctp_chunk_assign_ssn(struct sctp_chunk *);
 
@@ -320,12 +339,6 @@ void sctp_send_stale_cookie_err(const struct sctp_endpoint *ep,
 /* 3rd level prototypes */
 __u32 sctp_generate_tag(const struct sctp_endpoint *);
 __u32 sctp_generate_tsn(const struct sctp_endpoint *);
-
-/* 4th level prototypes */
-void sctp_param2sockaddr(union sctp_addr *addr, union sctp_addr_param *,
-			 __u16 port, int iif);
-int sctp_addr2sockaddr(const union sctp_params, union sctp_addr *);
-int sockaddr2sctp_addr(const union sctp_addr *, union sctp_addr_param *);
 
 /* Extern declarations for major data structures.  */
 const sctp_sm_table_entry_t *sctp_chunk_event_lookup(sctp_cid_t, sctp_state_t);

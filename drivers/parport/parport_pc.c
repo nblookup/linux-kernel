@@ -93,8 +93,9 @@ static struct superio_struct {	/* For Super-IO chips autodetection */
 	int dma;
 } superios[NR_SUPERIOS] __devinitdata = { {0,},};
 
-static int user_specified __devinitdata = 0;
-#if defined(CONFIG_PARPORT_PC_FIFO) || defined(CONFIG_PARPORT_PC_SUPERIO)
+static int user_specified;
+#if defined(CONFIG_PARPORT_PC_SUPERIO) || \
+       (defined(CONFIG_PARPORT_1284) && defined(CONFIG_PARPORT_PC_FIFO))
 static int verbose_probing;
 #endif
 static int registered_parport;
@@ -2357,7 +2358,11 @@ struct parport *parport_pc_probe_port (unsigned long int base,
 		release_region(base_hi, 3);
 		ECR_res = NULL;
 	}
-
+	/* Likewise for EEP ports */
+	if (EPP_res && (p->modes & PARPORT_MODE_EPP) == 0) {
+		release_region(base+3, 5);
+		EPP_res = NULL;
+	}
 	if (p->irq != PARPORT_IRQ_NONE) {
 		if (request_irq (p->irq, parport_pc_interrupt,
 				 0, p->name, p)) {
@@ -2824,7 +2829,7 @@ static struct parport_pc_pci {
 	/* mobility_pp */		{ 1, { { 0, 1 }, } },
 };
 
-static struct pci_device_id parport_pc_pci_tbl[] __devinitdata = {
+static struct pci_device_id parport_pc_pci_tbl[] = {
 	/* Super-IO onboard chips */
 	{ 0x1106, 0x0686, PCI_ANY_ID, PCI_ANY_ID, 0, 0, sio_via_686a },
 	{ PCI_VENDOR_ID_ITE, PCI_DEVICE_ID_ITE_8872,
@@ -3116,7 +3121,8 @@ MODULE_PARM_DESC(irq, "IRQ line");
 MODULE_PARM(irq, "1-" __MODULE_STRING(PARPORT_PC_MAX_PORTS) "s");
 MODULE_PARM_DESC(dma, "DMA channel");
 MODULE_PARM(dma, "1-" __MODULE_STRING(PARPORT_PC_MAX_PORTS) "s");
-#if defined(CONFIG_PARPORT_PC_FIFO) || defined(CONFIG_PARPORT_PC_SUPERIO)
+#if defined(CONFIG_PARPORT_PC_SUPERIO) || \
+       (defined(CONFIG_PARPORT_1284) && defined(CONFIG_PARPORT_PC_FIFO))
 MODULE_PARM_DESC(verbose_probing, "Log chit-chat during initialisation");
 MODULE_PARM(verbose_probing, "i");
 #endif

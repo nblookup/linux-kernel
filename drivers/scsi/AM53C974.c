@@ -7,7 +7,7 @@
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/string.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
 
@@ -598,7 +598,7 @@ static int AM53C974_setup(char *str)
 			    (ints[1] == ints[2]) ||
 			    (ints[3] < (DEF_CLK / MAX_PERIOD)) || (ints[3] > (DEF_CLK / MIN_PERIOD)) ||
 			    (ints[4] < 0) || (ints[4] > MAX_OFFSET))
-				printk("AM53C974_setup: illegal parameter\n");
+				printk("AM53C974_setup: invalid parameter\n");
 			else {
 				overrides[commandline_current].host_scsi_id = ints[1];
 				overrides[commandline_current].target_scsi_id = ints[2];
@@ -1231,8 +1231,8 @@ static void AM53C974_intr(int irq, void *dev_id, struct pt_regs *regs)
 				hostdata->sel_cmd = NULL;
 				hostdata->selecting = 0;
 #ifdef SCSI2
-				if (!hostdata->connected->device->tagged_queue)
-#endif
+				if (!hostdata->conneted->device->simple_tags)
+#else
 					hostdata->busy[hostdata->connected->device->id] |= (1 << hostdata->connected->device->lun);
 				/* very strange -- use_sg is sometimes nonzero for request sense commands !! */
 				if ((hostdata->connected->cmnd[0] == REQUEST_SENSE) && hostdata->connected->use_sg) {
@@ -1811,7 +1811,7 @@ static int AM53C974_message(struct Scsi_Host *instance, Scsi_Cmnd * cmd,
 			case HEAD_OF_QUEUE_TAG:
 			    case ORDERED_QUEUE_TAG:
 			    case SIMPLE_QUEUE_TAG:
-			    cmd->device->tagged_queue = 0;
+			    cmd->device->simple_tags = 0;
 			hostdata->busy[cmd->device->id] |= (1 << cmd->device->lun);
 			break;
 			default:
@@ -1958,7 +1958,7 @@ static void AM53C974_select(struct Scsi_Host *instance, Scsi_Cmnd * cmd, int tag
 #endif
 
 #ifdef SCSI2
-	if (cmd->device->tagged_queue && (tag != TAG_NONE)) {
+	if (cmd->device->simple_tags && (tag != TAG_NONE)) {
 		tmp[1] = SIMPLE_QUEUE_TAG;
 		if (tag == TAG_NEXT) {
 			/* 0 is TAG_NONE, used to imply no tag for this command */

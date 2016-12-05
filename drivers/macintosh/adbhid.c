@@ -44,7 +44,9 @@
 #include <linux/pmu.h>
 
 #include <asm/machdep.h>
+#ifdef CONFIG_PPC_PMAC
 #include <asm/pmac_feature.h>
+#endif
 
 #ifdef CONFIG_PMAC_BACKLIGHT
 #include <asm/backlight.h>
@@ -160,6 +162,7 @@ adbhid_input_keycode(int id, int keycode, int repeat, struct pt_regs *regs)
 		return;
 	case 0x3f: /* ignore Powerbook Fn key */
 		return;
+#ifdef CONFIG_PPC_PMAC
 	case 0x7e: /* Power key on PBook 3400 needs remapping */
 		switch(pmac_call_feature(PMAC_FTR_GET_MB_INFO,
 			NULL, PMAC_MB_INFO_MODEL, 0)) {
@@ -169,6 +172,7 @@ adbhid_input_keycode(int id, int keycode, int repeat, struct pt_regs *regs)
 			keycode = 0x7f;
 		}
 		break;
+#endif /* CONFIG_PPC_PMAC */
 	}
 
 	if (adbhid[id]->keycode[keycode]) {
@@ -607,8 +611,8 @@ adbhid_input_register(int id, int default_id, int original_handler_id,
 		/* HACK WARNING!! This should go away as soon there is an utility
 		 * to control that for event devices.
 		 */
-		adbhid[id]->input.rep[REP_DELAY] = HZ/2;   /* input layer default: HZ/4 */
-		adbhid[id]->input.rep[REP_PERIOD] = HZ/15; /* input layer default: HZ/33 */
+		adbhid[id]->input.rep[REP_DELAY] = 500;   /* input layer default: 250 */
+		adbhid[id]->input.rep[REP_PERIOD] = 66; /* input layer default: 33 */
 	}
 }
 

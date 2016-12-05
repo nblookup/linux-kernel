@@ -35,7 +35,7 @@
  *			condition status from targets.
  */
 #include <linux/module.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
@@ -225,7 +225,8 @@ static void fas216_dumpinfo(FAS216_Info *info)
 	printk("    dma={ transfer_type=%X setup=%p pseudo=%p stop=%p }\n",
 		info->dma.transfer_type, info->dma.setup,
 		info->dma.pseudo, info->dma.stop);
-	printk("    magic_end=%lX }\n", info->magic_end);
+	printk("    internal_done=%X magic_end=%lX }\n",
+		info->internal_done, info->magic_end);
 }
 
 #ifdef CHECK_STRUCTURE
@@ -1818,7 +1819,7 @@ static void fas216_allocate_tag(FAS216_Info *info, Scsi_Cmnd *SCpnt)
 	/*
 	 * tagged queuing - allocate a new tag to this command
 	 */
-	if (SCpnt->device->tagged_queue && SCpnt->cmnd[0] != REQUEST_SENSE &&
+	if (SCpnt->device->simple_tags && SCpnt->cmnd[0] != REQUEST_SENSE &&
 	    SCpnt->cmnd[0] != INQUIRY) {
 	    SCpnt->device->current_tag += 1;
 		if (SCpnt->device->current_tag == 0)
@@ -2252,6 +2253,75 @@ int fas216_queue_command(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 	return result;
 }
 
+/**
+ * fas216_internal_done - trigger restart of a waiting thread in fas216_noqueue_command
+ * @SCpnt: Command to wake
+ *
+ * Trigger restart of a waiting thread in fas216_command
+ */
+static void fas216_internal_done(Scsi_Cmnd *SCpnt)
+{
+	FAS216_Info *info = (FAS216_Info *)SCpnt->device->host->hostdata;
+
+	fas216_checkmagic(info);
+
+	info->internal_done = 1;
+}
+
+/**
+ * fas216_noqueue_command - process a command for the adapter.
+ * @SCpnt: Command to queue
+ *
+ * Queue a command for adapter to process.
+ * Returns: scsi result code.
+ * Notes: io_request_lock is held, interrupts are disabled.
+ */
+int fas216_noqueue_command(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
+{
+	FAS216_Info *info = (FAS216_Info *)SCpnt->device->host->hostdata;
+
+	fas216_checkmagic(info);
+
+	/*
+	 * We should only be using this if we don't have an interrupt.
+	 * Provide some "incentive" to use the queueing code.
+	 */
+	BUG_ON(info->scsi.irq != NO_IRQ);
+
+	info->internal_done = 0;
+	fas216_queue_command(SCpnt, fas216_internal_done);
+
+	/*
+	 * This wastes time, since we can't return until the command is
+	 * complete. We can't sleep either since we may get re-entered!
+	 * However, we must re-enable interrupts, or else we'll be
+	 * waiting forever.
+	 */
+	spin_unlock_irq(info->host->host_lock);
+
+	while (!info->internal_done) {
+		/*
+		 * If we don't have an IRQ, then we must poll the card for
+		 * it's interrupt, and use that to call this driver's
+		 * interrupt routine.  That way, we keep the command
+		 * progressing.  Maybe we can add some inteligence here
+		 * and go to sleep if we know that the device is going
+		 * to be some time (eg, disconnected).
+		 */
+		if (fas216_readb(info, REG_STAT) & STAT_INT) {
+			spin_lock_irq(info->host->host_lock);
+			fas216_intr(info);
+			spin_unlock_irq(info->host->host_lock);
+		}
+	}
+
+	spin_lock_irq(info->host->host_lock);
+
+	done(SCpnt);
+
+	return 0;
+}
+
 /*
  * Error handler timeout function.  Indicate that we timed out,
  * and wake up any error handler process so it can continue.
@@ -2522,7 +2592,7 @@ int fas216_eh_bus_reset(Scsi_Cmnd *SCpnt)
 	 * all command structures.  Leave the running
 	 * command in place.
 	 */
-	list_for_each_entry(SDpnt, &info->host->my_devices, siblings) {
+	shost_for_each_device(SDpnt, info->host) {
 		int i;
 
 		if (SDpnt->soft_reset)
@@ -2861,6 +2931,8 @@ int fas216_add(struct Scsi_Host *host, struct device *dev)
 	ret = scsi_add_host(host, dev);
 	if (ret)
 		fas216_writeb(info, REG_CMD, CMD_RESETCHIP);
+	else
+		scsi_scan_host(host);
 
 	return ret;
 }
@@ -2935,12 +3007,12 @@ int fas216_print_devices(FAS216_Info *info, char *buffer)
 
 	p += sprintf(p, "Device/Lun TaggedQ       Parity   Sync\n");
 
-	list_for_each_entry(scd, &info->host->my_devices, siblings) {
+	shost_for_each_device(scd, info->host) {
 		dev = &info->device[scd->id];
 		p += sprintf(p, "     %d/%d   ", scd->id, scd->lun);
 		if (scd->tagged_supported)
 			p += sprintf(p, "%3sabled(%3d) ",
-				     scd->tagged_queue ? "en" : "dis",
+				     scd->simple_tags ? "en" : "dis",
 				     scd->current_tag);
 		else
 			p += sprintf(p, "unsupported   ");
@@ -2960,7 +3032,7 @@ int fas216_print_devices(FAS216_Info *info, char *buffer)
 EXPORT_SYMBOL(fas216_init);
 EXPORT_SYMBOL(fas216_add);
 EXPORT_SYMBOL(fas216_queue_command);
-EXPORT_SYMBOL(fas216_command);
+EXPORT_SYMBOL(fas216_noqueue_command);
 EXPORT_SYMBOL(fas216_intr);
 EXPORT_SYMBOL(fas216_remove);
 EXPORT_SYMBOL(fas216_release);

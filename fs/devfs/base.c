@@ -674,8 +674,8 @@
 #include <linux/devfs_fs_kernel.h>
 #include <linux/smp_lock.h>
 #include <linux/smp.h>
-#include <linux/version.h>
 #include <linux/rwsem.h>
+#include <linux/sched.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -973,8 +973,9 @@ static struct devfs_entry *_devfs_search_dir (struct devfs_entry *dir,
 
 /**
  *	_devfs_alloc_entry - Allocate a devfs entry.
- *	@name:  The name of the entry.
- *	@namelen:  The number of characters in @name.
+ *	@name:     the name of the entry
+ *	@namelen:  the number of characters in @name
+ *      @mode:     the mode for the entry
  *
  *  Allocate a devfs entry and returns a pointer to the entry on success, else
  *   %NULL.
@@ -1223,6 +1224,12 @@ static devfs_handle_t _devfs_walk_path (struct devfs_entry *dir,
     {
 	struct devfs_entry *de, *link;
 
+	if (!S_ISDIR (dir->mode))
+	{
+	    devfs_put (dir);
+	    return NULL;
+	}
+
 	if ( ( de = _devfs_descend (dir, name, namelen, &next_pos) ) == NULL )
 	{
 	    devfs_put (dir);
@@ -1325,8 +1332,20 @@ static void free_dentry (struct devfs_entry *de)
 
 static int is_devfsd_or_child (struct fs_info *fs_info)
 {
-    if (current == fs_info->devfsd_task) return (TRUE);
-    if (current->pgrp == fs_info->devfsd_pgrp) return (TRUE);
+    struct task_struct *p = current;
+
+    if (p == fs_info->devfsd_task) return (TRUE);
+    if (process_group(p) == fs_info->devfsd_pgrp) return (TRUE);
+    read_lock(&tasklist_lock);
+    for ( ; p != &init_task; p = p->real_parent)
+    {
+	if (p == fs_info->devfsd_task)
+	{
+	    read_unlock (&tasklist_lock);
+	    return (TRUE);
+	}
+    }
+    read_unlock (&tasklist_lock);
     return (FALSE);
 }   /*  End Function is_devfsd_or_child  */
 
@@ -1432,17 +1451,17 @@ int devfs_mk_bdev(dev_t dev, umode_t mode, const char *fmt, ...)
 	va_list args;
 	int error, n;
 
-	if (!S_ISBLK(mode)) {
-		printk(KERN_WARNING "%s: invalide mode (%u) for %s\n",
-				__FUNCTION__, mode, buf);
-		return -EINVAL;
-	}
-
 	va_start(args, fmt);
 	n = vsnprintf(buf, 64, fmt, args);
 	if (n >= 64 || !buf[0]) {
 		printk(KERN_WARNING "%s: invalid format string\n",
 				__FUNCTION__);
+		return -EINVAL;
+	}
+	
+	if (!S_ISBLK(mode)) {
+		printk(KERN_WARNING "%s: invalide mode (%u) for %s\n",
+				__FUNCTION__, mode, buf);
 		return -EINVAL;
 	}
 
@@ -1478,17 +1497,17 @@ int devfs_mk_cdev(dev_t dev, umode_t mode, const char *fmt, ...)
 	va_list args;
 	int error, n;
 
-	if (!S_ISCHR(mode)) {
-		printk(KERN_WARNING "%s: invalide mode (%u) for %s\n",
-				__FUNCTION__, mode, buf);
-		return -EINVAL;
-	}
-
 	va_start(args, fmt);
 	n = vsnprintf(buf, 64, fmt, args);
 	if (n >= 64 || !buf[0]) {
 		printk(KERN_WARNING "%s: invalid format string\n",
 				__FUNCTION__);
+		return -EINVAL;
+	}
+
+	if (!S_ISCHR(mode)) {
+		printk(KERN_WARNING "%s: invalide mode (%u) for %s\n",
+				__FUNCTION__, mode, buf);
 		return -EINVAL;
 	}
 
@@ -1684,13 +1703,13 @@ int devfs_mk_dir(const char *fmt, ...)
 	}
 
 	error = _devfs_append_entry(dir, de, &old);
-	if (error == -EEXIST) {
+	if (error == -EEXIST && S_ISDIR(old->mode)) {
 		/*
 		 * devfs_mk_dir() of an already-existing directory will
 		 * return success.
 		 */
 		error = 0;
-		devfs_put(old);
+		goto out_put;
 	} else if (error) {
 		PRINTK("(%s): could not append to dir: %p \"%s\"\n",
 				buf, dir, dir->name);
@@ -1991,14 +2010,13 @@ static struct inode *_devfs_get_vfs_inode (struct super_block *sb,
     inode->i_blksize = FAKE_BLOCK_SIZE;
     inode->i_op = &devfs_iops;
     inode->i_fop = &devfs_fops;
-    inode->i_rdev = NODEV;
     if ( S_ISCHR (de->mode) )
     {
-	inode->i_rdev = to_kdev_t(de->u.cdev.dev);
+	inode->i_rdev = de->u.cdev.dev;
     }
     else if ( S_ISBLK (de->mode) )
     {
-	inode->i_rdev = to_kdev_t(de->u.bdev.dev);
+	inode->i_rdev = de->u.bdev.dev;
 	if (bd_acquire (inode) != 0)
 		PRINTK ("(%d): no block device from bdget()\n",(int)inode->i_ino);
     }
@@ -2256,7 +2274,15 @@ static int devfs_d_revalidate_wait (struct dentry *dentry, struct nameidata *nd)
 	add_wait_queue (&lookup_info->wait_queue, &wait);
 	read_unlock (&parent->u.dir.lock);
 	schedule ();
-	remove_wait_queue (&lookup_info->wait_queue, &wait);
+	/*
+	 * This does not need nor should remove wait from wait_queue.
+	 * Wait queue head is never reused - nothing is ever added to it
+	 * after all waiters have been waked up and head itself disappears
+	 * very soon after it. Moreover it is local variable on stack that
+	 * is likely to have already disappeared so any reference to it
+	 * at this point is buggy.
+	 */
+
     }
     else read_unlock (&parent->u.dir.lock);
     return 1;
@@ -2308,7 +2334,6 @@ static struct dentry *devfs_lookup (struct inode *dir, struct dentry *dentry, st
 	revalidation  */
     up (&dir->i_sem);
     wait_for_devfsd_finished (fs_info);  /*  If I'm not devfsd, must wait  */
-    down (&dir->i_sem);      /*  Grab it again because them's the rules  */
     de = lookup_info.de;
     /*  If someone else has been so kind as to make the inode, we go home
 	early  */
@@ -2333,11 +2358,12 @@ static struct dentry *devfs_lookup (struct inode *dir, struct dentry *dentry, st
 	     de->name, de->inode.ino, inode, de, current->comm);
     d_instantiate (dentry, inode);
 out:
+    write_lock (&parent->u.dir.lock);
     dentry->d_op = &devfs_dops;
     dentry->d_fsdata = NULL;
-    write_lock (&parent->u.dir.lock);
     wake_up (&lookup_info.wait_queue);
     write_unlock (&parent->u.dir.lock);
+    down (&dir->i_sem);      /*  Grab it again because them's the rules  */
     devfs_put (de);
     return retval;
 }   /*  End Function devfs_lookup  */
@@ -2467,8 +2493,8 @@ static int devfs_mknod (struct inode *dir, struct dentry *dentry, int mode,
     struct devfs_entry *parent, *de;
     struct inode *inode;
 
-    DPRINTK (DEBUG_I_MKNOD, "(%s): mode: 0%o  dev: %d\n",
-	     dentry->d_name.name, mode, rdev);
+    DPRINTK (DEBUG_I_MKNOD, "(%s): mode: 0%o  dev: %u:%u\n",
+	     dentry->d_name.name, mode, MAJOR(rdev), MINOR(rdev));
     parent = get_devfs_entry_from_vfs_inode (dir);
     if (parent == NULL) return -ENOENT;
     de = _devfs_alloc_entry (dentry->d_name.name, dentry->d_name.len, mode);
@@ -2719,8 +2745,8 @@ static int devfsd_ioctl (struct inode *inode, struct file *file,
 	    }
 	    fs_info->devfsd_task = current;
 	    spin_unlock (&lock);
-	    fs_info->devfsd_pgrp = (current->pgrp == current->pid) ?
-		current->pgrp : 0;
+	    fs_info->devfsd_pgrp = (process_group(current) == current->pid) ?
+		process_group(current) : 0;
 	    fs_info->devfsd_file = file;
 	    fs_info->devfsd_info = kmalloc (sizeof *fs_info->devfsd_info,
 					    GFP_KERNEL);

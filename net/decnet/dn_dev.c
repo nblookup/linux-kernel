@@ -35,7 +35,6 @@
 #include <linux/string.h>
 #include <linux/if_arp.h>
 #include <linux/if_ether.h>
-#include <linux/init.h>
 #include <linux/skbuff.h>
 #include <linux/rtnetlink.h>
 #include <linux/sysctl.h>
@@ -1366,7 +1365,7 @@ static void *dn_dev_seq_start(struct seq_file *seq, loff_t *pos)
 			read_unlock(&dev_base_lock);
 		return dev;
 	}
-	return (void*)1;
+	return SEQ_START_TOKEN;
 }
 
 static void *dn_dev_seq_next(struct seq_file *seq, void *v, loff_t *pos)
@@ -1374,7 +1373,7 @@ static void *dn_dev_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 	struct net_device *dev = v;
 	loff_t one = 1;
 
-	if (v == (void*)1) {
+	if (v == SEQ_START_TOKEN) {
 		dev = dn_dev_seq_start(seq, &one);
 	} else {
 		dev = dn_dev_get_next(seq, dev);
@@ -1387,7 +1386,7 @@ static void *dn_dev_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 
 static void dn_dev_seq_stop(struct seq_file *seq, void *v)
 {
-	if (v && v != (void*)1)
+	if (v && v != SEQ_START_TOKEN)
 		read_unlock(&dev_base_lock);
 }
 
@@ -1407,7 +1406,7 @@ static char *dn_type2asc(char type)
 
 static int dn_dev_seq_show(struct seq_file *seq, void *v)
 {
-	if (v == (void*)1)
+	if (v == SEQ_START_TOKEN)
         	seq_puts(seq, "Name     Flags T1   Timer1 T3   Timer3 BlkSize Pri State DevType    Router Peer\n");
 	else {
 		struct net_device *dev = v;
@@ -1443,6 +1442,7 @@ static int dn_dev_seq_open(struct inode *inode, struct file *file)
 }
 
 static struct file_operations dn_dev_seq_fops = {
+	.owner	 = THIS_MODULE,
 	.open	 = dn_dev_seq_open,
 	.read	 = seq_read,
 	.llseek	 = seq_lseek,
@@ -1471,7 +1471,7 @@ static struct rtnetlink_link dnet_rtnetlink_table[RTM_MAX-RTM_BASE+1] =
 };
 
 #ifdef MODULE
-static int addr[2] = {0, 0};
+static int addr[2];
 
 MODULE_PARM(addr, "2i");
 MODULE_PARM_DESC(addr, "The DECnet address of this machine: area,node");

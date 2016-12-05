@@ -134,7 +134,7 @@ JP7 is not bus master -- do NOT use -- only 4 pci bus master's allowed -- SouthB
 #include <asm/time.h>
 #include <linux/version.h>
 #include <linux/bootmem.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #ifdef CONFIG_RTC_DS1742
 #include <asm/rtc_ds1742.h>
 #endif
@@ -255,14 +255,14 @@ static spinlock_t toshiba_rbtx4927_ioc_lock = SPIN_LOCK_UNLOCKED;
 
 #define TOSHIBA_RBTX4927_IOC_NAME "RBTX4927-IOC"
 static struct hw_interrupt_type toshiba_rbtx4927_irq_ioc_type = {
-	typename:TOSHIBA_RBTX4927_IOC_NAME,
-	startup:toshiba_rbtx4927_irq_ioc_startup,
-	shutdown:toshiba_rbtx4927_irq_ioc_shutdown,
-	enable:toshiba_rbtx4927_irq_ioc_enable,
-	disable:toshiba_rbtx4927_irq_ioc_disable,
-	ack:toshiba_rbtx4927_irq_ioc_mask_and_ack,
-	end:toshiba_rbtx4927_irq_ioc_end,
-	set_affinity:NULL
+	.typename = TOSHIBA_RBTX4927_IOC_NAME,
+	.startup = toshiba_rbtx4927_irq_ioc_startup,
+	.shutdown = toshiba_rbtx4927_irq_ioc_shutdown,
+	.enable = toshiba_rbtx4927_irq_ioc_enable,
+	.disable = toshiba_rbtx4927_irq_ioc_disable,
+	.ack = toshiba_rbtx4927_irq_ioc_mask_and_ack,
+	.end = toshiba_rbtx4927_irq_ioc_end,
+	.set_affinity = NULL
 };
 #define TOSHIBA_RBTX4927_IOC_INTR_ENAB 0xbc002000
 #define TOSHIBA_RBTX4927_IOC_INTR_STAT 0xbc002006
@@ -271,14 +271,14 @@ static struct hw_interrupt_type toshiba_rbtx4927_irq_ioc_type = {
 #ifdef CONFIG_TOSHIBA_FPCIB0
 #define TOSHIBA_RBTX4927_ISA_NAME "RBTX4927-ISA"
 static struct hw_interrupt_type toshiba_rbtx4927_irq_isa_type = {
-	typename:TOSHIBA_RBTX4927_ISA_NAME,
-	startup:toshiba_rbtx4927_irq_isa_startup,
-	shutdown:toshiba_rbtx4927_irq_isa_shutdown,
-	enable:toshiba_rbtx4927_irq_isa_enable,
-	disable:toshiba_rbtx4927_irq_isa_disable,
-	ack:toshiba_rbtx4927_irq_isa_mask_and_ack,
-	end:toshiba_rbtx4927_irq_isa_end,
-	set_affinity:NULL
+	.typename = TOSHIBA_RBTX4927_ISA_NAME,
+	.startup = toshiba_rbtx4927_irq_isa_startup,
+	.shutdown = toshiba_rbtx4927_irq_isa_shutdown,
+	.enable = toshiba_rbtx4927_irq_isa_enable,
+	.disable = toshiba_rbtx4927_irq_isa_disable,
+	.ack = toshiba_rbtx4927_irq_isa_mask_and_ack,
+	.end = toshiba_rbtx4927_irq_isa_end,
+	.set_affinity = NULL
 };
 #endif
 

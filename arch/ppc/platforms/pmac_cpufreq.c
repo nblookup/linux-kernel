@@ -1,4 +1,16 @@
+/*
+ *  arch/ppc/platforms/pmac_cpufreq.c
+ *
+ *  Copyright (C) 2002 - 2003 Benjamin Herrenschmidt <benh@kernel.crashing.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ */
+
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -9,6 +21,7 @@
 #include <linux/slab.h>
 #include <linux/cpufreq.h>
 #include <linux/init.h>
+#include <linux/sysdev.h>
 #include <asm/prom.h>
 #include <asm/machdep.h>
 #include <asm/irq.h>
@@ -19,12 +32,16 @@
 #include <asm/cputable.h>
 #include <asm/time.h>
 
+/* WARNING !!! This will cause calibrate_delay() to be called,
+ * but this is an __init function ! So you MUST go edit
+ * init/main.c to make it non-init before enabling DEBUG_FREQ
+ */
 #undef DEBUG_FREQ
 
 extern void low_choose_750fx_pll(int pll);
 extern void low_sleep_handler(void);
-extern void openpic_sleep_save_intrs(void);
-extern void openpic_sleep_restore_intrs(void);
+extern void openpic_suspend(struct sys_device *sysdev, u32 state);
+extern void openpic_resume(struct sys_device *sysdev);
 extern void enable_kernel_altivec(void);
 extern void enable_kernel_fp(void);
 
@@ -35,6 +52,18 @@ static int cpufreq_uses_pmu;
 
 #define PMAC_CPU_LOW_SPEED	1
 #define PMAC_CPU_HIGH_SPEED	0
+
+/* There are only two frequency states for each processor. Values
+ * are in kHz for the time being.
+ */
+#define CPUFREQ_HIGH                  PMAC_CPU_HIGH_SPEED
+#define CPUFREQ_LOW                   PMAC_CPU_LOW_SPEED
+
+static struct cpufreq_frequency_table pmac_cpu_freqs[] = {
+	{CPUFREQ_HIGH, 		0},
+	{CPUFREQ_LOW,		0},
+	{0,			CPUFREQ_TABLE_END},
+};
 
 static inline void
 wakeup_decrementer(void)
@@ -68,11 +97,11 @@ static int __pmac
 cpu_750fx_cpu_speed(int low_speed)
 {
 #ifdef DEBUG_FREQ
-	printk(KERN_DEBUG "HID1, before: %x\n", mfspr(SPRN_HID1));	
+	printk(KERN_DEBUG "HID1, before: %x\n", mfspr(SPRN_HID1));
 #endif
 	low_choose_750fx_pll(low_speed);
 #ifdef DEBUG_FREQ
-	printk(KERN_DEBUG "HID1, after: %x\n", mfspr(SPRN_HID1));	
+	printk(KERN_DEBUG "HID1, after: %x\n", mfspr(SPRN_HID1));
 	debug_calc_bogomips();
 #endif
 
@@ -87,15 +116,12 @@ pmu_set_cpu_speed(unsigned int low_speed)
 	struct adb_request req;
 	unsigned long save_l2cr;
 	unsigned long save_l3cr;
-	
+
 #ifdef DEBUG_FREQ
-	printk(KERN_DEBUG "HID1, before: %x\n", mfspr(SPRN_HID1));	
+	printk(KERN_DEBUG "HID1, before: %x\n", mfspr(SPRN_HID1));
 #endif
 	/* Disable all interrupt sources on openpic */
-	openpic_sleep_save_intrs();
-
-	/* Make sure the PMU is idle */
-	pmu_suspend();
+	openpic_suspend(NULL, 1);
 
 	/* Make sure the decrementer won't interrupt us */
 	asm volatile("mtdec %0" : : "r" (0x7fffffff));
@@ -129,11 +155,16 @@ pmu_set_cpu_speed(unsigned int low_speed)
 	pmu_request(&req, NULL, 6, PMU_CPU_SPEED, 'W', 'O', 'O', 'F', low_speed);
 	while (!req.complete)
 		pmu_poll();
-	
+
+	/* Prepare the northbridge for the speed transition */
 	pmac_call_feature(PMAC_FTR_SLEEP_STATE,NULL,1,1);
 
+	/* Call low level code to backup CPU state and recover from
+	 * hardware reset
+	 */
 	low_sleep_handler();
-	
+
+	/* Restore the northbridge */
 	pmac_call_feature(PMAC_FTR_SLEEP_STATE,NULL,1,0);
 
 	/* Restore L2 cache */
@@ -147,16 +178,17 @@ pmu_set_cpu_speed(unsigned int low_speed)
 	set_context(current->active_mm->context, current->active_mm->pgd);
 
 #ifdef DEBUG_FREQ
-	printk(KERN_DEBUG "HID1, after: %x\n", mfspr(SPRN_HID1));	
+	printk(KERN_DEBUG "HID1, after: %x\n", mfspr(SPRN_HID1));
 #endif
+
+	/* Restore low level PMU operations */
+	pmu_unlock();
 
 	/* Restore decrementer */
 	wakeup_decrementer();
 
 	/* Restore interrupts */
-	openpic_sleep_restore_intrs();
-
-	pmu_resume();
+	openpic_resume(NULL);
 
 	/* Let interrupts flow again ... */
 	local_irq_enable();
@@ -171,12 +203,15 @@ pmu_set_cpu_speed(unsigned int low_speed)
 static int __pmac
 do_set_cpu_speed(int speed_mode)
 {
-	struct cpufreq_freqs    freqs;
+	struct cpufreq_freqs freqs;
 	int rc;
-	
+
 	freqs.old = cur_freq;
 	freqs.new = (speed_mode == PMAC_CPU_HIGH_SPEED) ? hi_freq : low_freq;
-	freqs.cpu = CPUFREQ_ALL_CPUS;
+	freqs.cpu = smp_processor_id();
+
+	if (freqs.old == freqs.new)
+		return 0;
 
 	cpufreq_notify_transition(&freqs, CPUFREQ_PRECHANGE);
 	if (cpufreq_uses_pmu)
@@ -192,37 +227,21 @@ do_set_cpu_speed(int speed_mode)
 static int __pmac
 pmac_cpufreq_verify(struct cpufreq_policy *policy)
 {
-	if (!policy)
-		return -EINVAL;
-		
-	policy->cpu = 0; /* UP only */
-
-	cpufreq_verify_within_limits(policy, low_freq, hi_freq);
-
-	if ((policy->min > low_freq) && 
-	    (policy->max < hi_freq))
-		policy->max = hi_freq;
-
-	return 0;
+	return cpufreq_frequency_table_verify(policy, pmac_cpu_freqs);
 }
 
 static int __pmac
-pmac_cpufreq_setpolicy(struct cpufreq_policy *policy)
+pmac_cpufreq_target(	struct cpufreq_policy *policy,
+			unsigned int target_freq,
+			unsigned int relation)
 {
-	int rc;
-	
-	if (!policy)
-		return -EINVAL;
-	if (policy->min > low_freq)
-		rc = do_set_cpu_speed(PMAC_CPU_HIGH_SPEED);
-	else if (policy->max < hi_freq)
-		rc = do_set_cpu_speed(PMAC_CPU_LOW_SPEED);
-	else if (policy->policy == CPUFREQ_POLICY_POWERSAVE)
-		rc = do_set_cpu_speed(PMAC_CPU_LOW_SPEED);
-	else
-		rc = do_set_cpu_speed(PMAC_CPU_HIGH_SPEED);
+	unsigned int    newstate = 0;
 
-	return rc;
+	if (cpufreq_frequency_table_target(policy, pmac_cpu_freqs,
+			target_freq, relation, &newstate))
+		return -EINVAL;
+
+	return do_set_cpu_speed(newstate);
 }
 
 unsigned int __pmac
@@ -232,9 +251,29 @@ pmac_get_one_cpufreq(int i)
 	return (i == 0) ? cur_freq : 0;
 }
 
+static int __pmac
+pmac_cpufreq_cpu_init(struct cpufreq_policy *policy)
+{
+	if (policy->cpu != 0)
+		return -ENODEV;
+
+	policy->governor = CPUFREQ_DEFAULT_GOVERNOR;
+	policy->cpuinfo.transition_latency	= CPUFREQ_ETERNAL;
+	policy->cur = cur_freq;
+
+	return cpufreq_frequency_table_cpuinfo(policy, &pmac_cpu_freqs[0]);
+}
+
+static struct cpufreq_driver pmac_cpufreq_driver = {
+	.verify 	= pmac_cpufreq_verify,
+	.target 	= pmac_cpufreq_target,
+	.init		= pmac_cpufreq_cpu_init,
+	.name		= "powermac",
+	.owner		= THIS_MODULE,
+};
 
 /* Currently, we support the following machines:
- * 
+ *
  *  - Titanium PowerBook 800 (PMU based, 667Mhz & 800Mhz)
  *  - Titanium PowerBook 500 (PMU based, 300Mhz & 500Mhz)
  *  - iBook2 500 (PMU based, 400Mhz & 500Mhz)
@@ -242,14 +281,13 @@ pmac_get_one_cpufreq(int i)
  */
 static int __init
 pmac_cpufreq_setup(void)
-{	
+{
 	struct device_node	*cpunode;
-	struct cpufreq_driver   *driver;
 	u32			*value;
 	int			has_freq_ctl = 0;
-	int			rc;
-	
-	memset(&driver, 0, sizeof(driver));
+
+	if (strstr(cmd_line, "nocpufreq"))
+		return 0;
 
 	/* Assume only one CPU */
 	cpunode = find_type_devices("cpu");
@@ -274,11 +312,11 @@ pmac_cpufreq_setup(void)
 		 * here */
 		if (low_freq < 100000)
 			low_freq *= 10;
-		
+
 		value = (u32 *)get_property(cpunode, "max-clock-frequency", NULL);
 		if (!value)
 			goto out;
-		hi_freq = (*value) / 1000;			
+		hi_freq = (*value) / 1000;
 		has_freq_ctl = 1;
 		cpufreq_uses_pmu = 1;
 	}
@@ -305,7 +343,7 @@ pmac_cpufreq_setup(void)
 	/* Else check for 750FX */
 	else if (PVR_VER(mfspr(PVR)) == 0x7000) {
 		if (get_property(cpunode, "dynamic-power-step", NULL) == NULL)
-			goto out;	
+			goto out;
 		hi_freq = cur_freq;
 		value = (u32 *)get_property(cpunode, "reduced-clock-frequency", NULL);
 		if (!value)
@@ -317,35 +355,12 @@ pmac_cpufreq_setup(void)
 out:
 	if (!has_freq_ctl)
 		return -ENODEV;
-	
-	/* initialization of main "cpufreq" code*/
-	driver = kmalloc(sizeof(struct cpufreq_driver) + 
-			 NR_CPUS * sizeof(struct cpufreq_policy), GFP_KERNEL);
-	if (!driver)
-		return -ENOMEM;
 
-	driver->policy = (struct cpufreq_policy *) (driver + 1);
+	pmac_cpu_freqs[CPUFREQ_LOW].frequency = low_freq;
+	pmac_cpu_freqs[CPUFREQ_HIGH].frequency = hi_freq;
 
-	driver->verify		= &pmac_cpufreq_verify;
-	driver->setpolicy	= &pmac_cpufreq_setpolicy;
-	driver->init		= NULL;
-	driver->exit		= NULL;
-	strlcpy(driver->name, "powermac", sizeof(driver->name));
-
-	driver->policy[0].cpu				= 0;
-	driver->policy[0].cpuinfo.transition_latency	= CPUFREQ_ETERNAL;
-	driver->policy[0].cpuinfo.min_freq		= low_freq;
-	driver->policy[0].min				= low_freq;
-	driver->policy[0].max				= cur_freq;
-	driver->policy[0].cpuinfo.max_freq		= cur_freq;
-	driver->policy[0].policy			= (cur_freq == low_freq) ? 
-	    	CPUFREQ_POLICY_POWERSAVE : CPUFREQ_POLICY_PERFORMANCE;
-
-	rc = cpufreq_register_driver(driver);
-	if (rc)
-		kfree(driver);
-	return rc;
+	return cpufreq_register_driver(&pmac_cpufreq_driver);
 }
 
-__initcall(pmac_cpufreq_setup);
+module_init(pmac_cpufreq_setup);
 

@@ -18,7 +18,7 @@
 /************************************************************************/
 #define DC395X_NAME			"dc395x"
 #define DC395X_BANNER			"Tekram DC395(U/UW/F), DC315(U) - ASIC TRM-S1040"
-#define DC395X_VERSION			"v2.02, 2003/04/20"
+#define DC395X_VERSION			"v2.04, 2003/05/19"
 
 /************************************************************************/
 /*									*/
@@ -28,7 +28,6 @@
 #define DC395x_MAX_CMD_QUEUE		32
 /* #define DC395x_MAX_QTAGS		32 */
 #define DC395x_MAX_QTAGS		16
-#define DC395x_MAX_ADAPTER_NUM		4
 #define DC395x_MAX_SCSI_ID		16
 #define DC395x_MAX_CMD_PER_LUN		DC395x_MAX_QTAGS
 #define DC395x_MAX_SG_TABLESIZE		64	/* HW limitation			*/

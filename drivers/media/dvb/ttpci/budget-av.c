@@ -64,6 +64,19 @@ static u8 i2c_readreg (struct dvb_i2c_bus *i2c, u8 id, u8 reg)
 	return mm2[0];
 }
 
+static int i2c_readregs(struct dvb_i2c_bus *i2c, u8 id, u8 reg, u8 *buf, u8 len)
+{
+        u8 mm1[] = { reg };
+        struct i2c_msg msgs[2] = {
+		{ addr: id/2, flags: 0, buf: mm1, len: 1 },
+		{ addr: id/2, flags: I2C_M_RD, buf: buf, len: len }
+	};
+
+        if (i2c->xfer(i2c, msgs, 2) != 2)
+		return -EIO;
+	return 0;
+}
+
 
 static int i2c_writereg (struct dvb_i2c_bus *i2c, u8 id, u8 reg, u8 val)
 {
@@ -170,12 +183,14 @@ static int budget_av_detach (struct saa7146_dev *dev)
 	return err;
 }
 
+static struct saa7146_ext_vv vv_data;
 
 static int budget_av_attach (struct saa7146_dev* dev,
 		      struct saa7146_pci_extension_data *info)
 {
 	struct budget_av *budget_av;
 	struct budget_info *bi = info->ext_priv;
+	u8 *mac;
 	int err;
 
 	DEB_EE(("dev: %p\n",dev));
@@ -207,16 +222,22 @@ static int budget_av_attach (struct saa7146_dev* dev,
 	dvb_delay(500);
 
 	if ((err = saa7113_init (budget_av))) {
-		budget_av_detach(dev);
+		/* fixme: proper cleanup here */
+		ERR(("cannot init saa7113.\n"));
 		return err;
 	}
 
-	saa7146_vv_init(dev);
+	if ( 0 != saa7146_vv_init(dev,&vv_data)) {
+		/* fixme: proper cleanup here */
+		ERR(("cannot init vv subsystem.\n"));
+		return err;
+	}
+
 	if ((err = saa7146_register_device(&budget_av->vd, dev, "knc1",
 					   VFL_TYPE_GRABBER)))
 	{
+		/* fixme: proper cleanup here */
 		ERR(("cannot register capture v4l2 device.\n"));
-		budget_av_detach(dev);
 		return err;
 	}
 
@@ -236,6 +257,16 @@ static int budget_av_attach (struct saa7146_dev* dev,
 	/* fixme: find some sane values here... */
 	saa7146_write(dev, PCI_BT_V1, 0x1c00101f);
 
+	mac = budget_av->budget.dvb_adapter->proposed_mac;
+	if (i2c_readregs(budget_av->budget.i2c_bus, 0xa0, 0x30, mac, 6)) {
+		printk("KNC1-%d: Could not read MAC from KNC1 card\n",
+				budget_av->budget.dvb_adapter->num);
+		memset(mac, 0, 6);
+	}
+	else
+		printk("KNC1-%d: MAC addr = %.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n",
+				budget_av->budget.dvb_adapter->num,
+				mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 	return 0;
 }
 
@@ -256,8 +287,9 @@ static struct saa7146_extension_ioctls ioctls[] = {
 };
 
 
-static int av_ioctl(struct saa7146_dev *dev, unsigned int cmd, void *arg) 
+static int av_ioctl(struct saa7146_fh *fh, unsigned int cmd, void *arg) 
 {
+	struct saa7146_dev *dev = fh->dev;
 	struct budget_av *budget_av = (struct budget_av*) dev->ext_priv;
 /*
 	struct saa7146_vv *vv = dev->vv_data; 
@@ -299,10 +331,18 @@ static int av_ioctl(struct saa7146_dev *dev, unsigned int cmd, void *arg)
 }
 
 static struct saa7146_standard standard[] = {
-	{ "PAL",	V4L2_STD_PAL,	SAA7146_PAL_VALUES },
-	{ "NTSC",	V4L2_STD_NTSC,	SAA7146_NTSC_VALUES },
+	{
+		.name	= "PAL", 	.id	= V4L2_STD_PAL,
+		.v_offset	= 0x17,	.v_field 	= 288,	.v_calc		= 576,
+		.h_offset	= 0x14,	.h_pixels 	= 680,	.h_calc		= 680+1,
+		.v_max_out	= 576,	.h_max_out	= 768,
+	}, {
+		.name	= "NTSC", 	.id	= V4L2_STD_NTSC,
+		.v_offset	= 0x16,	.v_field 	= 240,	.v_calc		= 480,
+		.h_offset	= 0x06,	.h_pixels 	= 708,	.h_calc		= 708+1,
+		.v_max_out	= 480,	.h_max_out	= 640,
+	}
 };
-
 
 static struct saa7146_ext_vv vv_data = {
 	.inputs		= 2,
@@ -337,8 +377,6 @@ static struct saa7146_extension budget_extension = {
 	.module		= THIS_MODULE,
 	.attach		= budget_av_attach,
 	.detach		= budget_av_detach,
-
-	.ext_vv_data	= &vv_data,
 
 	.irq_mask	= MASK_10,
 	.irq_func	= ttpci_budget_irq10_handler,

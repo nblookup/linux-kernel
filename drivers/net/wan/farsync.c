@@ -317,7 +317,7 @@ struct buf_window {
 };
 
 /* Calculate offset of a buffer object within the shared memory window */
-#define BUF_OFFSET(X)   ((unsigned int)&(((struct buf_window *)BFM_BASE)->X))
+#define BUF_OFFSET(X)   offsetof(struct buf_window, X)
 
 #pragma pack()
 
@@ -414,7 +414,7 @@ static int fst_debug_mask = { FST_DEBUG };
 /*
  *      PCI ID lookup table
  */
-static struct pci_device_id fst_pci_dev_id[] __devinitdata = {
+static struct pci_device_id fst_pci_dev_id[] = {
         { FSC_PCI_VENDOR_ID, T2P_PCI_DEVICE_ID, PCI_ANY_ID, PCI_ANY_ID, 0, 0,
                                         FST_TYPE_T2P },
         { FSC_PCI_VENDOR_ID, T4P_PCI_DEVICE_ID, PCI_ANY_ID, PCI_ANY_ID, 0, 0,

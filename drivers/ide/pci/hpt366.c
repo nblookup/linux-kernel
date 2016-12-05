@@ -62,7 +62,6 @@
 #include <asm/io.h>
 #include <asm/irq.h>
 
-#include "ide_modes.h"
 #include "hpt366.h"
 
 #if defined(DISPLAY_HPT366_TIMINGS) && defined(CONFIG_PROC_FS)
@@ -440,7 +439,7 @@ static int hpt3xx_tune_chipset (ide_drive_t *drive, u8 speed)
 
 static void hpt3xx_tune_drive (ide_drive_t *drive, u8 pio)
 {
-	pio = ide_get_best_pio_mode(drive, pio, 5, NULL);
+	pio = ide_get_best_pio_mode(drive, 255, pio, NULL);
 	(void) hpt3xx_tune_chipset(drive, (XFER_PIO_0 + pio));
 }
 
@@ -539,13 +538,15 @@ try_dma_modes:
 		} else {
 			goto fast_ata_pio;
 		}
+		return hwif->ide_dma_on(drive);
 	} else if ((id->capability & 8) || (id->field_valid & 2)) {
 fast_ata_pio:
 no_dma_set:
 		hpt3xx_tune_drive(drive, 5);
 		return hwif->ide_dma_off_quietly(drive);
 	}
-	return hwif->ide_dma_on(drive);
+	/* IORDY not supported */
+	return 0;
 }
 
 /*
@@ -989,7 +990,40 @@ static void __init init_hwif_hpt366 (ide_hwif_t *hwif)
 	hwif->intrproc			= &hpt3xx_intrproc;
 	hwif->maskproc			= &hpt3xx_maskproc;
 
-	pci_read_config_byte(hwif->pci_dev, 0x5a, &ata66);
+	/*
+	 * The HPT37x uses the CBLID pins as outputs for MA15/MA16
+	 * address lines to access an external eeprom.  To read valid
+	 * cable detect state the pins must be enabled as inputs.
+	 */
+	if (hpt_minimum_revision(dev, 8) && PCI_FUNC(dev->devfn) & 1) {
+		/*
+		 * HPT374 PCI function 1
+		 * - set bit 15 of reg 0x52 to enable TCBLID as input
+		 * - set bit 15 of reg 0x56 to enable FCBLID as input
+		 */
+		u16 mcr3, mcr6;
+		pci_read_config_word(dev, 0x52, &mcr3);
+		pci_read_config_word(dev, 0x56, &mcr6);
+		pci_write_config_word(dev, 0x52, mcr3 | 0x8000);
+		pci_write_config_word(dev, 0x56, mcr6 | 0x8000);
+		/* now read cable id register */
+		pci_read_config_byte(dev, 0x5a, &ata66);
+		pci_write_config_word(dev, 0x52, mcr3);
+		pci_write_config_word(dev, 0x56, mcr6);
+	} else if (hpt_minimum_revision(dev, 3)) {
+		/*
+		 * HPT370/372 and 374 pcifn 0
+		 * - clear bit 0 of 0x5b to enable P/SCBLID as inputs
+		 */
+		u8 scr2;
+		pci_read_config_byte(dev, 0x5b, &scr2);
+		pci_write_config_byte(dev, 0x5b, scr2 & ~1);
+		/* now read cable id register */
+		pci_read_config_byte(dev, 0x5a, &ata66);
+		pci_write_config_byte(dev, 0x5b, scr2);
+	} else {
+		pci_read_config_byte(dev, 0x5a, &ata66);
+	}
 
 #ifdef DEBUG
 	printk("HPT366: reg5ah=0x%02x ATA-%s Cable Port%d\n",
@@ -1190,7 +1224,7 @@ static int __devinit hpt366_init_one(struct pci_dev *dev, const struct pci_devic
 	return 0;
 }
 
-static struct pci_device_id hpt366_pci_tbl[] __devinitdata = {
+static struct pci_device_id hpt366_pci_tbl[] = {
 	{ PCI_VENDOR_ID_TTI, PCI_DEVICE_ID_TTI_HPT366, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ PCI_VENDOR_ID_TTI, PCI_DEVICE_ID_TTI_HPT372, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1},
 	{ PCI_VENDOR_ID_TTI, PCI_DEVICE_ID_TTI_HPT302, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 2},

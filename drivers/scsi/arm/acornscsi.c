@@ -138,7 +138,7 @@
 #include <linux/errno.h>
 #include <linux/proc_fs.h>
 #include <linux/ioport.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
@@ -768,7 +768,7 @@ intr_ret_t acornscsi_kick(AS_Host *host)
 	/*
 	 * tagged queueing - allocate a new tag to this command
 	 */
-	if (SCpnt->device->tagged_queue) {
+	if (SCpnt->device->simple_tags) {
 	    SCpnt->device->current_tag += 1;
 	    if (SCpnt->device->current_tag == 0)
 		SCpnt->device->current_tag = 1;
@@ -1590,7 +1590,7 @@ void acornscsi_message(AS_Host *host)
 	     */
 	    printk(KERN_NOTICE "scsi%d.%c: disabling tagged queueing\n",
 		    host->host->host_no, acornscsi_target(host));
-	    host->SCpnt->device->tagged_queue = 0;
+	    host->SCpnt->device->simple_tags = 0;
 	    set_bit(host->SCpnt->device->id * 8 + host->SCpnt->device->lun, host->busyluns);
 	    break;
 #endif
@@ -2930,12 +2930,12 @@ int acornscsi_proc_info(struct Scsi_Host *instance, char *buffer, char **start, 
 
     p += sprintf(p, "\nAttached devices:\n");
 
-    list_for_each_entry(scd, &instance->my_devices, siblings) {
+    shost_for_each_device(scd, instance) {
 	p += sprintf(p, "Device/Lun TaggedQ      Sync\n");
 	p += sprintf(p, "     %d/%d   ", scd->id, scd->lun);
 	if (scd->tagged_supported)
 		p += sprintf(p, "%3sabled(%3d) ",
-			     scd->tagged_queue ? "en" : "dis",
+			     scd->simple_tags ? "en" : "dis",
 			     scd->current_tag);
 	else
 		p += sprintf(p, "unsupported  ");
@@ -2953,8 +2953,10 @@ int acornscsi_proc_info(struct Scsi_Host *instance, char *buffer, char **start, 
 	    p = buffer;
 	}
 	pos = p - buffer;
-	if (pos + begin > offset + length)
+	if (pos + begin > offset + length) {
+	    scsi_device_put(scd);
 	    break;
+	}
     }
 
     pos = p - buffer;
@@ -3043,9 +3045,13 @@ acornscsi_probe(struct expansion_card *ec, const struct ecard_id *id)
 	acornscsi_resetcard(ashost);
 
 	ret = scsi_add_host(host, &ec->dev);
-	if (ret == 0)
-		goto out;
+	if (ret)
+		goto err_7;
 
+	scsi_scan_host(host);
+	goto out;
+
+ err_7:
 	free_irq(host->irq, ashost);
  err_6:
 	release_region(host->io_port, 2048);

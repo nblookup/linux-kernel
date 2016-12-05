@@ -293,7 +293,6 @@ sclp_interrupt_handler(struct pt_regs *regs, __u16 code)
 	finished_sccb = ext_int_param & EXT_INT_SCCB_MASK;
 	evbuf_pending = ext_int_param & (EXT_INT_EVBUF_PENDING |
 					 EXT_INT_STATECHANGE_PENDING);
-	irq_enter();
 	req = NULL;
 	if (finished_sccb != 0U) {
 		list_for_each(l, &sclp_req_queue) {
@@ -321,7 +320,6 @@ sclp_interrupt_handler(struct pt_regs *regs, __u16 code)
 	spin_unlock(&sclp_lock);
 	/* and start next request on the queue */
 	sclp_start_request();
-	irq_exit();
 }
 
 /*
@@ -468,17 +466,17 @@ static struct sclp_register sclp_state_change_event = {
  * SCLP quiesce event handler
  */
 #ifdef CONFIG_SMP
-static volatile unsigned long cpu_quiesce_map;
+static cpumask_t cpu_quiesce_map;
 
 static void
 do_load_quiesce_psw(void * __unused)
 {
 	psw_t quiesce_psw;
 
-	clear_bit(smp_processor_id(), &cpu_quiesce_map);
+	cpu_clear(smp_processor_id(), cpu_quiesce_map);
 	if (smp_processor_id() == 0) {
 		/* Wait for all other cpus to enter do_load_quiesce_psw */
-		while (cpu_quiesce_map != 0);
+		while (!cpus_empty(cpu_quiesce_map));
 		/* Quiesce the last cpu with the special psw */
 		quiesce_psw.mask = PSW_BASE_BITS | PSW_MASK_WAIT;
 		quiesce_psw.addr = 0xfff;

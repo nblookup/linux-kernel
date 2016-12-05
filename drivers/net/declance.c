@@ -992,7 +992,7 @@ static void lance_set_multicast(struct net_device *dev)
 		return;
 
 	if (lp->tx_old != lp->tx_new) {
-		mod_timer(&lp->multicast_timer, jiffies + 4);
+		mod_timer(&lp->multicast_timer, jiffies + 4 * HZ/100);
 		netif_wake_queue(dev);
 		return;
 	}
@@ -1244,7 +1244,7 @@ static int __init dec_lance_init(const int type, const int slot)
 
 err_out:
 	unregister_netdev(dev);
-	kfree(dev);
+	free_netdev(dev);
 	return ret;
 }
 
@@ -1295,7 +1295,7 @@ static void __exit dec_lance_cleanup(void)
 #endif
 		root_lance_dev = lp->next;
 		unregister_netdev(dev);
-		kfree(dev);
+		free_netdev(dev);
 	}
 }
 

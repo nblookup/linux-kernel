@@ -401,7 +401,6 @@ static int __init setup_card(unsigned long io, unsigned irq, unsigned char dma)
 int init_module(void)
 {
 	int i, num;
-	struct net_device *dev;
 
 	num = 0;
 	if (io[0]) { /* Only probe addresses from command line */
@@ -411,7 +410,7 @@ int init_module(void)
 		}
 	} else {
 		for(i = 0; num < ISATR_MAX_ADAPTERS && portlist[i]; i++) {
-			if (setup_card(portlist[i], irq[i], dma[i]))
+			if (setup_card(portlist[i], irq[num], dma[num]) == 0)
 				num++;
 		}
 	}
@@ -437,7 +436,7 @@ void cleanup_module(void)
 		free_irq(dev->irq, dev);
 		free_dma(dev->dma);
 		tmsdev_term(dev);
-		kfree(dev);
+		free_netdev(dev);
 		this_card = proteon_card_list;
 		proteon_card_list = this_card->next;
 		kfree(this_card);

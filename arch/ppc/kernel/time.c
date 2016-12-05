@@ -59,7 +59,6 @@
 
 #include <asm/segment.h>
 #include <asm/io.h>
-#include <asm/processor.h>
 #include <asm/nvram.h>
 #include <asm/cache.h>
 #include <asm/8xx_immap.h>
@@ -69,6 +68,8 @@
 
 /* XXX false sharing with below? */
 u64 jiffies_64 = INITIAL_JIFFIES;
+
+EXPORT_SYMBOL(jiffies_64);
 
 unsigned long disarm_decr[NR_CPUS];
 
@@ -83,6 +84,7 @@ time_t last_rtc_update;
 unsigned tb_ticks_per_jiffy;
 unsigned tb_to_us;
 unsigned tb_last_stamp;
+unsigned long tb_to_ns_scale;
 
 extern unsigned long wall_jiffies;
 
@@ -151,7 +153,7 @@ void timer_interrupt(struct pt_regs * regs)
 		do_IRQ(regs);
 
 	irq_enter();
-	
+
 	while ((next_dec = tb_ticks_per_jiffy - tb_delta(&jiffy_stamp)) < 0) {
 		jiffy_stamp += tb_ticks_per_jiffy;
 		if (!user_mode(regs))
@@ -239,10 +241,14 @@ void do_gettimeofday(struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
+EXPORT_SYMBOL(do_gettimeofday);
+
 int do_settimeofday(struct timespec *tv)
 {
+	time_t wtm_sec, new_sec = tv->tv_sec;
+	long wtm_nsec, new_nsec = tv->tv_nsec;
 	unsigned long flags;
-	int tb_delta, new_nsec, new_sec;
+	int tb_delta;
 
 	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
 		return -EINVAL;
@@ -262,22 +268,22 @@ int do_settimeofday(struct timespec *tv)
 	 * harmful to relatively short timers.
 	 */
 
-	/* This works perfectly on SMP only if the tb are in sync but 
+	/* This works perfectly on SMP only if the tb are in sync but
 	 * guarantees an error < 1 jiffy even if they are off by eons,
 	 * still reasonable when gettimeofday resolution is 1 jiffy.
 	 */
 	tb_delta = tb_ticks_since(last_jiffy_stamp(smp_processor_id()));
 	tb_delta += (jiffies - wall_jiffies) * tb_ticks_per_jiffy;
-	new_sec = tv->tv_sec;
-	new_nsec = tv->tv_nsec - 1000 * mulhwu(tb_to_us, tb_delta);
-	while (new_nsec < 0) {
-		new_sec--; 
-		new_nsec += NSEC_PER_SEC;
-	}
-	xtime.tv_nsec = new_nsec;
-	xtime.tv_sec = new_sec;
 
-	/* In case of a large backwards jump in time with NTP, we want the 
+	new_nsec -= 1000 * mulhwu(tb_to_us, tb_delta);
+
+	wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - new_sec);
+	wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - new_nsec);
+
+	set_normalized_timespec(&xtime, new_sec, new_nsec);
+	set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
+
+	/* In case of a large backwards jump in time with NTP, we want the
 	 * clock to be updated as soon as the PLL is again in lock.
 	 */
 	last_rtc_update = new_sec - 658;
@@ -290,6 +296,8 @@ int do_settimeofday(struct timespec *tv)
 	write_sequnlock_irqrestore(&xtime_lock, flags);
 	return 0;
 }
+
+EXPORT_SYMBOL(do_settimeofday);
 
 /* This function is only called on the boot processor */
 void __init time_init(void)
@@ -307,9 +315,10 @@ void __init time_init(void)
 		tb_to_us = 0x418937;
         } else {
                 ppc_md.calibrate_decr();
+		tb_to_ns_scale = mulhwu(tb_to_us, 1000 << 10);
 	}
 
-	/* Now that the decrementer is calibrated, it can be used in case the 
+	/* Now that the decrementer is calibrated, it can be used in case the
 	 * clock is stuck, but the fact that we have to handle the 601
 	 * makes things more complex. Repeatedly read the RTC until the
 	 * next second boundary to try to achieve some precision.  If there
@@ -321,7 +330,7 @@ void __init time_init(void)
 		sec = ppc_md.get_rtc_time();
 		elapsed = 0;
 		do {
-			old_stamp = stamp; 
+			old_stamp = stamp;
 			old_sec = sec;
 			stamp = get_native_tbl();
 			if (__USE_RTC() && stamp < old_stamp)
@@ -347,6 +356,8 @@ void __init time_init(void)
 		sys_tz.tz_dsttime = 0;
 		xtime.tv_sec -= time_offset;
         }
+        set_normalized_timespec(&wall_to_monotonic,
+                                -xtime.tv_sec, -xtime.tv_nsec);
 }
 
 #define FEBRUARY		2
@@ -428,3 +439,26 @@ unsigned mulhwu_scale_factor(unsigned inscale, unsigned outscale) {
 	return mlt;
 }
 
+unsigned long long sched_clock(void)
+{
+	unsigned long lo, hi, hi2;
+	unsigned long long tb;
+
+	if (!__USE_RTC()) {
+		do {
+			hi = get_tbu();
+			lo = get_tbl();
+			hi2 = get_tbu();
+		} while (hi2 != hi);
+		tb = ((unsigned long long) hi << 32) | lo;
+		tb = (tb * tb_to_ns_scale) >> 10;
+	} else {
+		do {
+			hi = get_rtcu();
+			lo = get_rtcl();
+			hi2 = get_rtcu();
+		} while (hi2 != hi);
+		tb = ((unsigned long long) hi) * 1000000000 + lo;
+	}
+	return tb;
+}

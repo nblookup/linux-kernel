@@ -9,7 +9,6 @@
 #include <linux/crypto.h>
 #include <linux/pfkeyv2.h>
 #include <linux/in6.h>
-#include <linux/slab.h>
 
 #include <net/sock.h>
 #include <net/dst.h>
@@ -104,10 +103,11 @@ struct xfrm_state
 
 	/* Parameters of this state. */
 	struct {
+		u32		reqid;
 		u8		mode;
 		u8		replay_window;
 		u8		aalgo, ealgo, calgo;
-		u16		reqid;
+		u8		flags;
 		u16		family;
 		xfrm_address_t	saddr;
 		int		header_len;
@@ -193,7 +193,7 @@ struct xfrm_state_afinfo {
 						struct xfrm_tmpl *tmpl,
 						xfrm_address_t *daddr, xfrm_address_t *saddr);
 	struct xfrm_state	*(*state_lookup)(xfrm_address_t *daddr, u32 spi, u8 proto);
-	struct xfrm_state	*(*find_acq)(u8 mode, u16 reqid, u8 proto, 
+	struct xfrm_state	*(*find_acq)(u8 mode, u32 reqid, u8 proto, 
 					     xfrm_address_t *daddr, xfrm_address_t *saddr, 
 					     int create);
 };
@@ -244,7 +244,7 @@ struct xfrm_tmpl
 /* Source address of tunnel. Ignored, if it is not a tunnel. */
 	xfrm_address_t		saddr;
 
-	__u16			reqid;
+	__u32			reqid;
 
 /* Mode: transport/tunnel */
 	__u8			mode;
@@ -538,7 +538,6 @@ struct sec_decap_state {
 
 struct sec_path
 {
-	kmem_cache_t		*pool;
 	atomic_t		refcnt;
 	int			len;
 	struct sec_decap_state	x[XFRM_MAX_DEPTH];
@@ -559,6 +558,17 @@ secpath_put(struct sec_path *sp)
 {
 	if (sp && atomic_dec_and_test(&sp->refcnt))
 		__secpath_destroy(sp);
+}
+
+extern struct sec_path *secpath_dup(struct sec_path *src);
+
+static inline void
+secpath_reset(struct sk_buff *skb)
+{
+#ifdef CONFIG_XFRM
+	secpath_put(skb->sp);
+	skb->sp = NULL;
+#endif
 }
 
 static inline int
@@ -586,6 +596,8 @@ xfrm_state_addr_cmp(struct xfrm_tmpl *tmpl, struct xfrm_state *x, unsigned short
 	}
 	return !0;
 }
+
+#ifdef CONFIG_XFRM
 
 extern int __xfrm_policy_check(struct sock *, int dir, struct sk_buff *skb, unsigned short family);
 
@@ -651,6 +663,26 @@ static inline void xfrm_sk_free_policy(struct sock *sk)
 		sk->sk_policy[1] = NULL;
 	}
 }
+
+#else
+
+static inline void xfrm_sk_free_policy(struct sock *sk) {}
+static inline int xfrm_sk_clone_policy(struct sock *sk) { return 0; }
+static inline int xfrm6_route_forward(struct sk_buff *skb) { return 1; }  
+static inline int xfrm4_route_forward(struct sk_buff *skb) { return 1; } 
+static inline int xfrm6_policy_check(struct sock *sk, int dir, struct sk_buff *skb)
+{ 
+	return 1; 
+} 
+static inline int xfrm4_policy_check(struct sock *sk, int dir, struct sk_buff *skb)
+{
+	return 1;
+}
+static inline int xfrm_policy_check(struct sock *sk, int dir, struct sk_buff *skb, unsigned short family)
+{
+	return 1;
+}
+#endif
 
 static __inline__
 xfrm_address_t *xfrm_flowi_daddr(struct flowi *fl, unsigned short family)
@@ -782,12 +814,32 @@ extern void xfrm_replay_advance(struct xfrm_state *x, u32 seq);
 extern int xfrm_check_selectors(struct xfrm_state **x, int n, struct flowi *fl);
 extern int xfrm_check_output(struct xfrm_state *x, struct sk_buff *skb, unsigned short family);
 extern int xfrm4_rcv(struct sk_buff *skb);
-extern int xfrm4_rcv_encap(struct sk_buff *skb, __u16 encap_type);
 extern int xfrm4_tunnel_register(struct xfrm_tunnel *handler);
 extern int xfrm4_tunnel_deregister(struct xfrm_tunnel *handler);
 extern int xfrm4_tunnel_check_size(struct sk_buff *skb);
 extern int xfrm6_rcv(struct sk_buff **pskb, unsigned int *nhoffp);
+
+#ifdef CONFIG_XFRM
+extern int xfrm4_rcv_encap(struct sk_buff *skb, __u16 encap_type);
 extern int xfrm_user_policy(struct sock *sk, int optname, u8 *optval, int optlen);
+extern int xfrm_dst_lookup(struct xfrm_dst **dst, struct flowi *fl, unsigned short family);
+#else
+static inline int xfrm_user_policy(struct sock *sk, int optname, u8 *optval, int optlen)
+{
+ 	return -ENOPROTOOPT;
+} 
+
+static inline int xfrm4_rcv_encap(struct sk_buff *skb, __u16 encap_type)
+{
+ 	/* should not happen */
+ 	kfree_skb(skb);
+	return 0;
+}
+static inline int xfrm_dst_lookup(struct xfrm_dst **dst, struct flowi *fl, unsigned short family)
+{
+	return -EINVAL;
+} 
+#endif
 
 void xfrm_policy_init(void);
 void xfrm4_policy_init(void);
@@ -801,7 +853,7 @@ struct xfrm_policy *xfrm_policy_byid(int dir, u32 id, int delete);
 void xfrm_policy_flush(void);
 u32 xfrm_get_acqseq(void);
 void xfrm_alloc_spi(struct xfrm_state *x, u32 minspi, u32 maxspi);
-struct xfrm_state * xfrm_find_acq(u8 mode, u16 reqid, u8 proto, 
+struct xfrm_state * xfrm_find_acq(u8 mode, u32 reqid, u8 proto, 
 				  xfrm_address_t *daddr, xfrm_address_t *saddr, 
 				  int create, unsigned short family);
 extern void xfrm_policy_flush(void);
@@ -809,7 +861,6 @@ extern void xfrm_policy_kill(struct xfrm_policy *);
 extern int xfrm_sk_policy_insert(struct sock *sk, int dir, struct xfrm_policy *pol);
 extern struct xfrm_policy *xfrm_sk_policy_lookup(struct sock *sk, int dir, struct flowi *fl);
 extern int xfrm_flush_bundles(struct xfrm_state *x);
-extern int xfrm_dst_lookup(struct xfrm_dst **dst, struct flowi *fl, unsigned short family);
 
 extern wait_queue_head_t km_waitq;
 extern void km_state_expired(struct xfrm_state *x, int hard);
@@ -817,8 +868,7 @@ extern int km_query(struct xfrm_state *x, struct xfrm_tmpl *, struct xfrm_policy
 extern int km_new_mapping(struct xfrm_state *x, xfrm_address_t *ipaddr, u16 sport);
 extern void km_policy_expired(struct xfrm_policy *pol, int dir, int hard);
 
-extern void xfrm4_input_init(void);
-extern void xfrm6_input_init(void);
+extern void xfrm_input_init(void);
 extern int xfrm_parse_spi(struct sk_buff *skb, u8 nexthdr, u32 *spi, u32 *seq);
 
 extern void xfrm_probe_algs(void);

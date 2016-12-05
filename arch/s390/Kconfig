@@ -40,6 +40,9 @@ config ARCH_S390X
 	  Select this option if you have a 64 bit IBM zSeries machine
 	  and want to use the 64 bit addressing mode.
 
+config 64BIT
+	def_bool ARCH_S390X
+
 config ARCH_S390_31
 	bool
 	depends on ARCH_S390X = 'n'
@@ -163,10 +166,8 @@ config QDIO
 	  For details please refer to the documentation provided by IBM at
 	  <http://www10.software.ibm.com/developerworks/opensource/linux390>
 
-	  This driver is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called qdio. If you want to compile it as a
-	  module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called qdio.
 
 	  If unsure, say Y.
 
@@ -216,10 +217,6 @@ config IPL_VM
 	bool "vm_reader"
 
 endchoice
-
-config KCORE_ELF
-	bool
-	default y
 
 source "fs/Kconfig.binfmt"
 
@@ -306,6 +303,15 @@ config KALLSYMS
 	  symbolic stack backtraces. This increases the size of the kernel
 	  somewhat, as all symbols have to be loaded into the kernel image.
 
+config DEBUG_INFO
+	bool "Compile the kernel with debug info"
+	depends on DEBUG_KERNEL
+	help
+          If you say Y here the resulting kernel image will include
+	  debugging info resulting in a larger kernel image.
+	  Say Y here only if you plan to use gdb to debug the kernel.
+	  If you don't debug the kernel, you can say N.
+	  
 config DEBUG_SPINLOCK_SLEEP
 	bool "Sleep-inside-spinlock checking"
 	help

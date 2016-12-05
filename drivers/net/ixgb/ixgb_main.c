@@ -44,7 +44,7 @@ char ixgb_copyright[] = "Copyright (c) 2001-2003 Intel Corporation.";
  * { Vendor ID, Device ID, SubVendor ID, SubDevice ID,
  *   Class, Class Mask, String Index }
  */
-static struct pci_device_id ixgb_pci_tbl[] __devinitdata = {
+static struct pci_device_id ixgb_pci_tbl[] = {
 	/* Intel(R) PRO/10GbE Network Connection */
 	{INTEL_VENDOR_ID, IXGB_DEVICE_ID_82597EX,
 	 INTEL_SUBVENDOR_ID, IXGB_SUBDEVICE_ID_A11F, 0, 0, 0},
@@ -478,7 +478,7 @@ ixgb_remove(struct pci_dev *pdev)
 	iounmap((void *) adapter->hw.hw_addr);
 	pci_release_regions(pdev);
 
-	kfree(netdev);
+	free_netdev(netdev);
 }
 
 /**
@@ -1914,10 +1914,8 @@ ixgb_poll(struct net_device *netdev, int *budget)
 		skb->protocol = eth_type_trans(skb, netdev);
 		if (adapter->vlgrp
 		    && (rx_desc->status & IXGB_RX_DESC_STATUS_VP)) {
-			vlan_hwaccel_rx(skb, adapter->vlgrp,
-					(rx_desc->
-					 special &
-					 IXGB_RX_DESC_SPECIAL_VLAN_MASK));
+			vlan_hwaccel_receive_skb(skb, adapter->vlgrp,
+				(rx_desc-> special & IXGB_RX_DESC_SPECIAL_VLAN_MASK));
 		} else {
 			netif_receive_skb(skb);
 		}

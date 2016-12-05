@@ -130,7 +130,7 @@ static void __init free_bootmem_core(bootmem_data_t *bdata, unsigned long addr, 
  * We 'merge' subsequent allocations to save space. We might 'lose'
  * some fraction of a page if allocations cannot be satisfied due to
  * size constraints on boxes where there is physical RAM space
- * fragmentation - in these cases * (mostly large memory boxes) this
+ * fragmentation - in these cases (mostly large memory boxes) this
  * is not a problem.
  *
  * On low memory boxes we get it right in 100% of the cases.
@@ -183,7 +183,7 @@ restart_scan:
 	for (i = preferred; i < eidx; i += incr) {
 		unsigned long j;
 		i = find_next_zero_bit(bdata->node_bootmem_map, eidx, i);
-		i = (i + incr - 1) & -incr;
+		i = ALIGN(i, incr);
 		if (test_bit(i, bdata->node_bootmem_map))
 			continue;
 		for (j = i + 1; j < i + areasize; ++j) {
@@ -195,7 +195,7 @@ restart_scan:
 		start = i;
 		goto found;
 	fail_block:
-		;
+		i = ALIGN(j, incr);
 	}
 
 	if (preferred > offset) {
@@ -251,7 +251,7 @@ found:
 
 static unsigned long __init free_all_bootmem_core(pg_data_t *pgdat)
 {
-	struct page *page = pgdat->node_mem_map;
+	struct page *page;
 	bootmem_data_t *bdata = pgdat->bdata;
 	unsigned long i, count, total = 0;
 	unsigned long idx;
@@ -260,6 +260,8 @@ static unsigned long __init free_all_bootmem_core(pg_data_t *pgdat)
 	if (!bdata->node_bootmem_map) BUG();
 
 	count = 0;
+	/* first extant page of the node */
+	page = virt_to_page(phys_to_virt(bdata->node_boot_start));
 	idx = bdata->node_low_pfn - (bdata->node_boot_start >> PAGE_SHIFT);
 	map = bdata->node_bootmem_map;
 	for (i = 0; i < idx; ) {

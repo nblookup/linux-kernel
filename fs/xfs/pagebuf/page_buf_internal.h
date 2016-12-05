@@ -37,16 +37,12 @@
 #ifndef __PAGE_BUF_PRIVATE_H__
 #define __PAGE_BUF_PRIVATE_H__
 
+#include <linux/percpu.h>
 #include "page_buf.h"
 
 #define _PAGE_BUF_INTERNAL_
 #define PB_DEFINE_TRACES
 #include "page_buf_trace.h"
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,5,9)
-#define page_buffers(page)	((page)->buffers)
-#define page_has_buffers(page)	((page)->buffers)
-#endif
 
 #ifdef PAGEBUF_LOCK_TRACKING
 #define PB_SET_OWNER(pb)	(pb->pb_last_holder = current->pid)
@@ -86,9 +82,9 @@ struct pagebuf_trace_buf {
  */
 
 typedef struct pb_sysctl_val {
-	ulong min;
-	ulong val;
-	ulong max;
+	int min;
+	int val;
+	int max;
 } pb_sysctl_val_t;
 
 typedef struct pagebuf_param {
@@ -125,9 +121,11 @@ struct pbstats {
 	u_int32_t	pb_get_read;
 };
 
-extern struct pbstats pbstats;
+DECLARE_PER_CPU(struct pbstats, pbstats);
 
-#define PB_STATS_INC(count)	( count ++ )
+/* We don't disable preempt, not too worried about poking the
+ * wrong cpu's stat for now */
+#define PB_STATS_INC(count)	(__get_cpu_var(pbstats).count++)
 
 #ifndef STATIC
 # define STATIC	static

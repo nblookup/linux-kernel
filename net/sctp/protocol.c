@@ -295,6 +295,31 @@ static void sctp_v4_to_sk_daddr(union sctp_addr *addr, struct sock *sk)
 	inet_sk(sk)->daddr = addr->v4.sin_addr.s_addr;
 }
 
+/* Initialize a sctp_addr from an address parameter. */
+static void sctp_v4_from_addr_param(union sctp_addr *addr,
+				    union sctp_addr_param *param,
+				    __u16 port, int iif)
+{
+	addr->v4.sin_family = AF_INET;
+	addr->v4.sin_port = port;
+	addr->v4.sin_addr.s_addr = param->v4.addr.s_addr;
+}
+
+/* Initialize an address parameter from a sctp_addr and return the length
+ * of the address parameter.
+ */
+static int sctp_v4_to_addr_param(const union sctp_addr *addr,
+				 union sctp_addr_param *param)
+{
+	int length = sizeof(sctp_ipv4addr_param_t);
+
+	param->v4.param_hdr.type = SCTP_PARAM_IPV4_ADDRESS;
+	param->v4.param_hdr.length = ntohs(length);
+	param->v4.addr.s_addr = addr->v4.sin_addr.s_addr;	
+
+	return length;
+}
+
 /* Initialize a sctp_addr from a dst_entry. */
 static void sctp_v4_dst_saddr(union sctp_addr *saddr, struct dst_entry *dst,
 			      unsigned short port)
@@ -340,7 +365,7 @@ static int sctp_v4_is_any(const union sctp_addr *addr)
  * Return 0 - If the address is a non-unicast or an illegal address.
  * Return 1 - If the address is a unicast.
  */
-static int sctp_v4_addr_valid(union sctp_addr *addr)
+static int sctp_v4_addr_valid(union sctp_addr *addr, struct sctp_opt *sp)
 {
 	/* Is this a non-unicast address or a unusable SCTP address? */
 	if (IS_IPV4_UNUSABLE_ADDRESS(&addr->v4.sin_addr.s_addr))
@@ -350,7 +375,7 @@ static int sctp_v4_addr_valid(union sctp_addr *addr)
 }
 
 /* Should this be available for binding?   */
-static int sctp_v4_available(const union sctp_addr *addr)
+static int sctp_v4_available(union sctp_addr *addr, struct sctp_opt *sp)
 {
 	int ret = inet_addr_type(addr->v4.sin_addr.s_addr);
 
@@ -580,6 +605,12 @@ out:
 	return newsk;
 }
 
+/* Map address, empty for v4 family */
+static void sctp_v4_addr_v4map(struct sctp_opt *sp, union sctp_addr *addr)
+{
+	/* Empty */
+}
+
 /* Dump the v4 addr to the seq file. */
 static void sctp_v4_seq_dump_addr(struct seq_file *seq, union sctp_addr *addr)
 {
@@ -685,10 +716,13 @@ static void sctp_inet_event_msgname(struct sctp_ulpevent *event, char *msgname,
 	struct sockaddr_in *sin, *sinfrom;
 
 	if (msgname) {
+		struct sctp_association *asoc;
+
+		asoc = event->sndrcvinfo.sinfo_assoc_id;
 		sctp_inet_msgname(msgname, addr_len);
 		sin = (struct sockaddr_in *)msgname;
-		sinfrom = &event->asoc->peer.primary_addr.v4;
-		sin->sin_port = htons(event->asoc->peer.port);
+		sinfrom = &asoc->peer.primary_addr.v4;
+		sin->sin_port = htons(asoc->peer.port);
 		sin->sin_addr.s_addr = sinfrom->sin_addr.s_addr;
 	}
 }
@@ -709,7 +743,7 @@ static void sctp_inet_skb_msgname(struct sk_buff *skb, char *msgname, int *len)
 }
 
 /* Do we support this AF? */
-static int sctp_inet_af_supported(sa_family_t family)
+static int sctp_inet_af_supported(sa_family_t family, struct sctp_opt *sp)
 {
 	/* PF_INET only supports AF_INET addresses. */
 	return (AF_INET == family);
@@ -737,7 +771,7 @@ static int sctp_inet_cmp_addr(const union sctp_addr *addr1,
  */
 static int sctp_inet_bind_verify(struct sctp_opt *opt, union sctp_addr *addr)
 {
-	return sctp_v4_available(addr);
+	return sctp_v4_available(addr, opt);
 }
 
 /* Verify that sockaddr looks sendable.  Common verification has already
@@ -783,6 +817,7 @@ static struct sctp_pf sctp_pf_inet = {
 	.send_verify   = sctp_inet_send_verify,
 	.supported_addrs = sctp_inet_supported_addrs,
 	.create_accept_sk = sctp_v4_create_accept_sk,
+	.addr_v4map	= sctp_v4_addr_v4map,
 	.af            = &sctp_ipv4_specific,
 };
 
@@ -852,6 +887,8 @@ struct sctp_af sctp_ipv4_specific = {
 	.from_sk        = sctp_v4_from_sk,
 	.to_sk_saddr    = sctp_v4_to_sk_saddr,
 	.to_sk_daddr    = sctp_v4_to_sk_daddr,
+	.from_addr_param= sctp_v4_from_addr_param,
+	.to_addr_param  = sctp_v4_to_addr_param,	
 	.dst_saddr      = sctp_v4_dst_saddr,
 	.cmp_addr       = sctp_v4_cmp_addr,
 	.addr_valid     = sctp_v4_addr_valid,
@@ -924,6 +961,8 @@ __init int sctp_init(void)
 {
 	int i;
 	int status = 0;
+	unsigned long goal;
+	int order;
 
 	/* SCTP_DEBUG sanity check. */
 	if (!sctp_sanity_check())
@@ -1007,51 +1046,74 @@ __init int sctp_init(void)
 	sctp_max_instreams    		= SCTP_DEFAULT_INSTREAMS;
 	sctp_max_outstreams   		= SCTP_DEFAULT_OUTSTREAMS;
 
-	/* Allocate and initialize the association hash table.  */
-	sctp_assoc_hashsize = 4096;
-	sctp_assoc_hashbucket = (struct sctp_hashbucket *)
-		kmalloc(4096 * sizeof(struct sctp_hashbucket), GFP_KERNEL);
-	if (!sctp_assoc_hashbucket) {
+	/* Size and allocate the association hash table.
+	 * The methodology is similar to that of the tcp hash tables.
+	 */
+	if (num_physpages >= (128 * 1024))
+		goal = num_physpages >> (22 - PAGE_SHIFT);
+	else
+		goal = num_physpages >> (24 - PAGE_SHIFT);
+
+	for (order = 0; (1UL << order) < goal; order++)
+		;
+
+	do {
+		sctp_assoc_hashsize = (1UL << order) * PAGE_SIZE /
+					sizeof(struct sctp_hashbucket);
+		if ((sctp_assoc_hashsize > (64 * 1024)) && order > 0)
+			continue;
+		sctp_assoc_hashtable = (struct sctp_hashbucket *)
+					__get_free_pages(GFP_ATOMIC, order);
+	} while (!sctp_assoc_hashtable && --order > 0);
+	if (!sctp_assoc_hashtable) {
 		printk(KERN_ERR "SCTP: Failed association hash alloc.\n");
 		status = -ENOMEM;
 		goto err_ahash_alloc;
 	}
 	for (i = 0; i < sctp_assoc_hashsize; i++) {
-		sctp_assoc_hashbucket[i].lock = RW_LOCK_UNLOCKED;
-		sctp_assoc_hashbucket[i].chain = NULL;
+		sctp_assoc_hashtable[i].lock = RW_LOCK_UNLOCKED;
+		sctp_assoc_hashtable[i].chain = NULL;
 	}
 
 	/* Allocate and initialize the endpoint hash table.  */
 	sctp_ep_hashsize = 64;
-	sctp_ep_hashbucket = (struct sctp_hashbucket *)
+	sctp_ep_hashtable = (struct sctp_hashbucket *)
 		kmalloc(64 * sizeof(struct sctp_hashbucket), GFP_KERNEL);
-	if (!sctp_ep_hashbucket) {
+	if (!sctp_ep_hashtable) {
 		printk(KERN_ERR "SCTP: Failed endpoint_hash alloc.\n");
 		status = -ENOMEM;
 		goto err_ehash_alloc;
 	}
-
 	for (i = 0; i < sctp_ep_hashsize; i++) {
-		sctp_ep_hashbucket[i].lock = RW_LOCK_UNLOCKED;
-		sctp_ep_hashbucket[i].chain = NULL;
+		sctp_ep_hashtable[i].lock = RW_LOCK_UNLOCKED;
+		sctp_ep_hashtable[i].chain = NULL;
 	}
 
 	/* Allocate and initialize the SCTP port hash table.  */
-	sctp_port_hashsize = 4096;
-	sctp_port_hashtable = (struct sctp_bind_hashbucket *)
-		kmalloc(4096 * sizeof(struct sctp_bind_hashbucket),GFP_KERNEL);
+	do {
+		sctp_port_hashsize = (1UL << order) * PAGE_SIZE /
+					sizeof(struct sctp_bind_hashbucket);
+		if ((sctp_port_hashsize > (64 * 1024)) && order > 0)
+			continue;
+		sctp_port_hashtable = (struct sctp_bind_hashbucket *)
+					__get_free_pages(GFP_ATOMIC, order);
+	} while (!sctp_port_hashtable && --order > 0);
 	if (!sctp_port_hashtable) {
 		printk(KERN_ERR "SCTP: Failed bind hash alloc.");
 		status = -ENOMEM;
 		goto err_bhash_alloc;
 	}
-
-	sctp_port_alloc_lock = SPIN_LOCK_UNLOCKED;
-	sctp_port_rover = sysctl_local_port_range[0] - 1;
 	for (i = 0; i < sctp_port_hashsize; i++) {
 		sctp_port_hashtable[i].lock = SPIN_LOCK_UNLOCKED;
 		sctp_port_hashtable[i].chain = NULL;
 	}
+
+	sctp_port_alloc_lock = SPIN_LOCK_UNLOCKED;
+	sctp_port_rover = sysctl_local_port_range[0] - 1;
+
+	printk(KERN_INFO "SCTP: Hash tables configured "
+			 "(established %d bind %d)\n",
+		sctp_assoc_hashsize, sctp_port_hashsize);
 
 	sctp_sysctl_register();
 
@@ -1086,11 +1148,15 @@ err_ctl_sock_init:
 err_v6_init:
 	sctp_sysctl_unregister();
 	list_del(&sctp_ipv4_specific.list);
-	kfree(sctp_port_hashtable);
+	free_pages((unsigned long)sctp_port_hashtable,
+		   get_order(sctp_port_hashsize *
+			     sizeof(struct sctp_bind_hashbucket)));
 err_bhash_alloc:
-	kfree(sctp_ep_hashbucket);
+	kfree(sctp_ep_hashtable);
 err_ehash_alloc:
-	kfree(sctp_assoc_hashbucket);
+	free_pages((unsigned long)sctp_assoc_hashtable,
+		   get_order(sctp_assoc_hashsize *
+			     sizeof(struct sctp_hashbucket)));
 err_ahash_alloc:
 	sctp_dbg_objcnt_exit();
 	sctp_proc_exit();
@@ -1126,9 +1192,13 @@ __exit void sctp_exit(void)
 	sctp_sysctl_unregister();
 	list_del(&sctp_ipv4_specific.list);
 
-	kfree(sctp_assoc_hashbucket);
-	kfree(sctp_ep_hashbucket);
-	kfree(sctp_port_hashtable);
+	free_pages((unsigned long)sctp_assoc_hashtable,
+		   get_order(sctp_assoc_hashsize *
+			     sizeof(struct sctp_hashbucket)));
+	kfree(sctp_ep_hashtable);
+	free_pages((unsigned long)sctp_port_hashtable,
+		   get_order(sctp_port_hashsize *
+			     sizeof(struct sctp_bind_hashbucket)));
 
 	kmem_cache_destroy(sctp_chunk_cachep);
 	kmem_cache_destroy(sctp_bucket_cachep);

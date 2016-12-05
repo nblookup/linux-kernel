@@ -150,7 +150,7 @@ enum {D_PRT, D_PRO, D_UNI, D_MOD, D_SLV, D_LUN, D_DLY};
 #include <linux/hdreg.h>
 #include <linux/cdrom.h>
 #include <linux/spinlock.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/blkpg.h>
 #include <asm/uaccess.h>
 
@@ -222,9 +222,6 @@ MODULE_PARM(drive3, "1-7i");
 #define ATAPI_READ_10		0x28
 #define ATAPI_WRITE_10		0x2a
 
-#ifdef MODULE
-void cleanup_module(void);
-#endif
 static int pf_open(struct inode *inode, struct file *file);
 static void do_pf_request(request_queue_t * q);
 static int pf_ioctl(struct inode *inode, struct file *file,
@@ -773,7 +770,7 @@ static int pf_ready(void)
 	return (((status_reg(pf_current) & (STAT_BUSY | pf_mask)) == pf_mask));
 }
 
-static struct request_queue pf_queue;
+static struct request_queue *pf_queue;
 
 static void do_pf_request(request_queue_t * q)
 {
@@ -837,7 +834,7 @@ static inline void next_request(int success)
 	spin_lock_irqsave(&pf_spin_lock, saved_flags);
 	end_request(pf_req, success);
 	pf_busy = 0;
-	do_pf_request(&pf_queue);
+	do_pf_request(pf_queue);
 	spin_unlock_irqrestore(&pf_spin_lock, saved_flags);
 }
 
@@ -963,9 +960,16 @@ static int __init pf_init(void)
 			put_disk(pf->disk);
 		return -1;
 	}
-	blk_init_queue(&pf_queue, do_pf_request, &pf_spin_lock);
-	blk_queue_max_phys_segments(&pf_queue, cluster);
-	blk_queue_max_hw_segments(&pf_queue, cluster);
+	pf_queue = blk_init_queue(do_pf_request, &pf_spin_lock);
+	if (!pf_queue) {
+		unregister_blkdev(major, name);
+		for (pf = units, unit = 0; unit < PF_UNITS; pf++, unit++)
+			put_disk(pf->disk);
+		return -1;
+	}
+
+	blk_queue_max_phys_segments(pf_queue, cluster);
+	blk_queue_max_hw_segments(pf_queue, cluster);
 
 	for (pf = units, unit = 0; unit < PF_UNITS; pf++, unit++) {
 		struct gendisk *disk = pf->disk;
@@ -973,7 +977,7 @@ static int __init pf_init(void)
 		if (!pf->present)
 			continue;
 		disk->private_data = pf;
-		disk->queue = &pf_queue;
+		disk->queue = pf_queue;
 		add_disk(disk);
 	}
 	return 0;
@@ -991,7 +995,7 @@ static void __exit pf_exit(void)
 		put_disk(pf->disk);
 		pi_release(pf->pi);
 	}
-	blk_cleanup_queue(&pf_queue);
+	blk_cleanup_queue(pf_queue);
 }
 
 MODULE_LICENSE("GPL");

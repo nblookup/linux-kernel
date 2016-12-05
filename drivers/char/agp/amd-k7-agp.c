@@ -11,8 +11,6 @@
 #include <linux/mm.h>
 #include "agp.h"
 
-static int agp_try_unsupported __initdata = 0;
-
 struct amd_page_map {
 	unsigned long *real;
 	unsigned long *remapped;
@@ -150,7 +148,7 @@ static int amd_create_gatt_table(void)
 	 * used to program the agp master not the cpu
 	 */
 
-	pci_read_config_dword(agp_bridge->dev, AMD_APBASE, &temp);
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 	agp_bridge->gart_bus_addr = addr;
 
@@ -367,7 +365,7 @@ struct agp_bridge_driver amd_irongate_driver = {
 	.agp_destroy_page	= agp_generic_destroy_page,
 };
 
-struct agp_device_ids amd_agp_device_ids[] __initdata =
+static struct agp_device_ids amd_agp_device_ids[] __devinitdata =
 {
 	{
 		.device_id	= PCI_DEVICE_ID_AMD_FE_GATE_7006,
@@ -384,8 +382,8 @@ struct agp_device_ids amd_agp_device_ids[] __initdata =
 	{ }, /* dummy final entry, always present */
 };
 
-static int __init agp_amdk7_probe(struct pci_dev *pdev,
-				  const struct pci_device_id *ent)
+static int __devinit agp_amdk7_probe(struct pci_dev *pdev,
+				     const struct pci_device_id *ent)
 {
 	struct agp_device_ids *devs = amd_agp_device_ids;
 	struct agp_bridge_data *bridge;
@@ -404,16 +402,9 @@ static int __init agp_amdk7_probe(struct pci_dev *pdev,
 		}
 	}
 
-	if (!agp_try_unsupported) {
-		printk(KERN_ERR PFX
-		    "Unsupported AMD chipset (device id: %04x),"
-		    " you might want to try agp_try_unsupported=1.\n",
+	printk(KERN_ERR PFX "Unsupported AMD chipset (device id: %04x)\n",
 		    pdev->device);
-		return -ENODEV;
-	}
-
-	printk(KERN_WARNING PFX "Trying generic AMD routines"
-	       " for device id: %04x\n", pdev->device);
+	return -ENODEV;
 
 found:
 	bridge = agp_alloc_bridge();
@@ -442,7 +433,7 @@ static void __devexit agp_amdk7_remove(struct pci_dev *pdev)
 	agp_put_bridge(bridge);
 }
 
-static struct pci_device_id agp_amdk7_pci_table[] __initdata = {
+static struct pci_device_id agp_amdk7_pci_table[] = {
 	{
 	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
 	.class_mask	= ~0,
@@ -476,5 +467,4 @@ static void __exit agp_amdk7_cleanup(void)
 module_init(agp_amdk7_init);
 module_exit(agp_amdk7_cleanup);
 
-MODULE_PARM(agp_try_unsupported, "1i");
 MODULE_LICENSE("GPL and additional rights");

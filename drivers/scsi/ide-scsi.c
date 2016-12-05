@@ -517,6 +517,7 @@ static ide_startstop_t idescsi_issue_pc (ide_drive_t *drive, idescsi_pc_t *pc)
 	pc->current_position=pc->buffer;
 	bcount.all = IDE_MIN(pc->request_transfer, 63 * 1024);		/* Request to transfer the entire buffer at once */
 
+	feature.all = 0;
 	if (drive->using_dma && rq->bio) {
 		if (test_bit(PC_WRITING, &pc->flags))
 			feature.b.dma = !HWIF(drive)->ide_dma_write(drive);
@@ -627,7 +628,6 @@ static ide_driver_t idescsi_driver = {
 	.version		= IDESCSI_VERSION,
 	.media			= ide_scsi,
 	.busy			= 0,
-	.supports_dma		= 1,
 	.supports_dsc_overlap	= 0,
 	.attach			= idescsi_attach,
 	.cleanup		= idescsi_cleanup,
@@ -761,8 +761,8 @@ static inline struct bio *idescsi_dma_bio(ide_drive_t *drive, idescsi_pc_t *pc)
 		printk ("ide-scsi: %s: building DMA table for a single buffer (%dkB)\n", drive->name, pc->request_transfer >> 10);
 #endif /* IDESCSI_DEBUG_LOG */
 		bh->bi_io_vec[0].bv_page = virt_to_page(pc->scsi_cmd->request_buffer);
+		bh->bi_io_vec[0].bv_offset = offset_in_page(pc->scsi_cmd->request_buffer);
 		bh->bi_io_vec[0].bv_len = pc->request_transfer;
-		bh->bi_io_vec[0].bv_offset = (unsigned long) pc->scsi_cmd->request_buffer & ~PAGE_MASK;
 		bh->bi_size = pc->request_transfer;
 	}
 	return first_bh;
@@ -872,7 +872,7 @@ static int idescsi_abort (Scsi_Cmnd *cmd)
 			continue;
 		}
 		/* no, but is it queued in the ide subsystem? */
-		if (elv_queue_empty(&drive->queue)) {
+		if (elv_queue_empty(drive->queue)) {
 			spin_unlock_irqrestore(&ide_lock, flags);
 			return SUCCESS;
 		}
@@ -899,7 +899,7 @@ static int idescsi_reset (Scsi_Cmnd *cmd)
 		schedule_timeout(1);
 	}
 	/* now nuke the drive queue */
-	while ((req = elv_next_request(&drive->queue))) {
+	while ((req = elv_next_request(drive->queue))) {
 		blkdev_dequeue_request(req);
 		end_that_request_last(req);
 	}
@@ -947,19 +947,17 @@ static Scsi_Host_Template idescsi_template = {
 	.proc_name		= "ide-scsi",
 };
 
-static struct device     idescsi_primary = {
-	.name		= "Ide-scsi Parent",
-	.bus_id		= "ide-scsi",
-};
-static struct bus_type   idescsi_emu_bus = {
-	.name		= "ide-scsi",
-};
-
 static int idescsi_attach(ide_drive_t *drive)
 {
 	idescsi_scsi_t *idescsi;
 	struct Scsi_Host *host;
+	static int warned;
 	int err;
+
+	if (!warned && drive->media == ide_cdrom) {
+		printk(KERN_WARNING "ide-scsi is deprecated for cd burning! Use ide-cd and give dev=/dev/hdX as device\n");
+		warned = 1;
+	}
 
 	if (!strstr("ide-scsi", drive->driver_req) ||
 	    !drive->present ||
@@ -977,9 +975,11 @@ static int idescsi_attach(ide_drive_t *drive)
 	if (!err) {
 		idescsi_setup (drive, idescsi);
 		drive->disk->fops = &idescsi_ops;
-		err = scsi_add_host(host, &idescsi_primary);
-		if (!err)
+		err = scsi_add_host(host, &drive->gendev);
+		if (!err) {
+			scsi_scan_host(host);
 			return 0;
+		}
 		/* fall through on error */
 		ide_unregister_subdriver(drive);
 	}
@@ -990,27 +990,11 @@ static int idescsi_attach(ide_drive_t *drive)
 
 static int __init init_idescsi_module(void)
 {
-	int err;
-
-	err = bus_register(&idescsi_emu_bus);
-	if (!err) {
-		err = device_register(&idescsi_primary);
-		if (!err) {
-			err = ide_register_driver(&idescsi_driver);
-			if (!err)
-				return 0;
-
-			device_unregister(&idescsi_primary);
-		}
-		bus_unregister(&idescsi_emu_bus);
-	}
-	return err;
+	return ide_register_driver(&idescsi_driver);
 }
 
 static void __exit exit_idescsi_module(void)
 {
-	device_unregister(&idescsi_primary);
-	bus_unregister   (&idescsi_emu_bus);
 	ide_unregister_driver(&idescsi_driver);
 }
 

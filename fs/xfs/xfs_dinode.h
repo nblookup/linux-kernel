@@ -72,7 +72,8 @@ typedef struct xfs_dinode_core
 	__uint32_t	di_gid;		/* owner's group id */
 	__uint32_t	di_nlink;	/* number of links to file */
 	__uint16_t	di_projid;	/* owner's project id */
-	__uint8_t	di_pad[10];	/* unused, zeroed space */
+	__uint8_t	di_pad[8];	/* unused, zeroed space */
+	__uint16_t	di_flushiter;	/* incremented on flush */
 	xfs_timestamp_t	di_atime;	/* time last accessed */
 	xfs_timestamp_t	di_mtime;	/* time last modified */
 	xfs_timestamp_t	di_ctime;	/* time created/inode modified */
@@ -89,6 +90,8 @@ typedef struct xfs_dinode_core
 	__uint32_t	di_gen;		/* generation number */
 } xfs_dinode_core_t;
 
+#define DI_MAX_FLUSH 0xffff
+
 typedef struct xfs_dinode
 {
 	xfs_dinode_core_t	di_core;
@@ -104,7 +107,7 @@ typedef struct xfs_dinode
 		xfs_dir_shortform_t di_dirsf;	/* shortform directory */
 		xfs_dir2_sf_t	di_dir2sf;	/* shortform directory v2 */
 		char		di_c[1];	/* local contents */
-		xfs_dev_t	di_dev;		/* device for IFCHR/IFBLK */
+		xfs_dev_t	di_dev;		/* device for S_IFCHR/S_IFBLK */
 		uuid_t		di_muuid;	/* mount point value */
 		char		di_symlink[1];	/* local symbolic link */
 	}		di_u;
@@ -433,29 +436,6 @@ void xfs_dfork_next_set(xfs_dinode_t *dip, int w, int n);
 
 #endif
 
-/*
- * File types (mode field)
- */
-#define	IFMT		0170000		/* type of file */
-#define	IFIFO		0010000		/* named pipe (fifo) */
-#define	IFCHR		0020000		/* character special */
-#define	IFDIR		0040000		/* directory */
-#define	IFBLK		0060000		/* block special */
-#define	IFREG		0100000		/* regular */
-#define	IFLNK		0120000		/* symbolic link */
-#define	IFSOCK		0140000		/* socket */
-#define	IFMNT		0160000		/* mount point */
-
-/*
- * File execution and access modes.
- */
-#define	ISUID		04000		/* set user id on execution */
-#define	ISGID		02000		/* set group id on execution */
-#define	ISVTX		01000		/* sticky directory */
-#define	IREAD		0400		/* read, write, execute permissions */
-#define	IWRITE		0200
-#define	IEXEC		0100
-
 #if XFS_WANT_FUNCS || (XFS_WANT_SPACE && XFSSO_XFS_BUF_TO_DINODE)
 xfs_dinode_t *xfs_buf_to_dinode(struct xfs_buf *bp);
 #define	XFS_BUF_TO_DINODE(bp)	xfs_buf_to_dinode(bp)
@@ -468,13 +448,21 @@ xfs_dinode_t *xfs_buf_to_dinode(struct xfs_buf *bp);
  * There should be a one-to-one correspondence between these flags and the
  * XFS_XFLAG_s.
  */
-#define XFS_DIFLAG_REALTIME_BIT	0	/* file's blocks come from rt area */
-#define XFS_DIFLAG_PREALLOC_BIT	1	/* file space has been preallocated */
-#define	XFS_DIFLAG_NEWRTBM_BIT	2	/* for rtbitmap inode, new format */
-#define XFS_DIFLAG_REALTIME     (1 << XFS_DIFLAG_REALTIME_BIT)
-#define XFS_DIFLAG_PREALLOC	(1 << XFS_DIFLAG_PREALLOC_BIT)
-#define	XFS_DIFLAG_NEWRTBM	(1 << XFS_DIFLAG_NEWRTBM_BIT)
-#define XFS_DIFLAG_ALL  \
-	(XFS_DIFLAG_REALTIME|XFS_DIFLAG_PREALLOC|XFS_DIFLAG_NEWRTBM)
+#define XFS_DIFLAG_REALTIME_BIT  0	/* file's blocks come from rt area */
+#define XFS_DIFLAG_PREALLOC_BIT  1	/* file space has been preallocated */
+#define XFS_DIFLAG_NEWRTBM_BIT   2	/* for rtbitmap inode, new format */
+#define XFS_DIFLAG_IMMUTABLE_BIT 3	/* inode is immutable */
+#define XFS_DIFLAG_APPEND_BIT    4	/* inode is append-only */
+#define XFS_DIFLAG_SYNC_BIT      5	/* inode is written synchronously */
+#define XFS_DIFLAG_NOATIME_BIT   6	/* do not update atime */
+#define XFS_DIFLAG_NODUMP_BIT    7	/* do not dump */
+#define XFS_DIFLAG_REALTIME      (1 << XFS_DIFLAG_REALTIME_BIT)
+#define XFS_DIFLAG_PREALLOC      (1 << XFS_DIFLAG_PREALLOC_BIT)
+#define XFS_DIFLAG_NEWRTBM       (1 << XFS_DIFLAG_NEWRTBM_BIT)
+#define XFS_DIFLAG_IMMUTABLE     (1 << XFS_DIFLAG_IMMUTABLE_BIT)
+#define XFS_DIFLAG_APPEND        (1 << XFS_DIFLAG_APPEND_BIT)
+#define XFS_DIFLAG_SYNC          (1 << XFS_DIFLAG_SYNC_BIT)
+#define XFS_DIFLAG_NOATIME       (1 << XFS_DIFLAG_NOATIME_BIT)
+#define XFS_DIFLAG_NODUMP        (1 << XFS_DIFLAG_NODUMP_BIT)
 
 #endif	/* __XFS_DINODE_H__ */

@@ -28,9 +28,6 @@
 #ifndef _LINUX_I2C_H
 #define _LINUX_I2C_H
 
-#define I2C_DATE "20021208"
-#define I2C_VERSION "2.7.0"
-
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/i2c-id.h>
@@ -146,6 +143,8 @@ struct i2c_driver {
 
 extern struct bus_type i2c_bus_type;
 
+#define I2C_NAME_SIZE	50
+
 /*
  * i2c_client identifies a single device (i.e. chip) that is connected to an 
  * i2c bus. The behaviour is defined by the routines of the driver. This
@@ -166,6 +165,8 @@ struct i2c_client {
 					/* to the client		*/
 	struct device dev;		/* the device structure		*/
 	struct list_head list;
+	char name[I2C_NAME_SIZE];
+	struct completion released;
 };
 #define to_i2c_client(d) container_of(d, struct i2c_client, dev)
 
@@ -179,11 +180,11 @@ static inline void i2c_set_clientdata (struct i2c_client *dev, void *data)
 	dev_set_drvdata (&dev->dev, data);
 }
 
-#define I2C_DEVNAME(str)   .dev = { .name = str }
+#define I2C_DEVNAME(str)	.name = str
 
 static inline char *i2c_clientname(struct i2c_client *c)
 {
-	return c->dev.name;
+	return &c->name[0];
 }
 
 /*
@@ -251,8 +252,12 @@ struct i2c_adapter {
 	int nr;
 	struct list_head clients;
 	struct list_head list;
+	char name[I2C_NAME_SIZE];
+	struct completion dev_released;
+	struct completion class_dev_released;
 };
-#define to_i2c_adapter(d) container_of(d, struct i2c_adapter, dev)
+#define dev_to_i2c_adapter(d) container_of(d, struct i2c_adapter, dev)
+#define class_dev_to_i2c_adapter(d) container_of(d, struct i2c_adapter, class_dev)
 
 static inline void *i2c_get_adapdata (struct i2c_adapter *dev)
 {
@@ -593,5 +598,12 @@ union i2c_smbus_data {
         ((clientptr)->adapter->algo->id == I2C_ALGO_ISA)
 #define i2c_is_isa_adapter(adapptr) \
         ((adapptr)->algo->id == I2C_ALGO_ISA)
+
+/* Tiny delay function used by the i2c bus drivers */
+static inline void i2c_delay(signed long timeout)
+{
+	set_current_state(TASK_INTERRUPTIBLE);
+	schedule_timeout(timeout);
+}
 
 #endif /* _LINUX_I2C_H */

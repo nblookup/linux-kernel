@@ -199,7 +199,7 @@ History:
 
 #define MAJOR_NR CM206_CDROM_MAJOR
 
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 
 #undef DEBUG
 #define STATISTICS		/* record times and frequencies of events */
@@ -301,7 +301,7 @@ struct cm206_struct {
 #define PLAY_TO cd->toc[0]	/* toc[0] records end-time in play */
 
 static struct cm206_struct *cd;	/* the main memory structure */
-static struct request_queue cm206_queue;
+static struct request_queue *cm206_queue;
 static spinlock_t cm206_lock = SPIN_LOCK_UNLOCKED;
 
 /* First, we define some polling functions. These are actually
@@ -1505,9 +1505,12 @@ int __init cm206_init(void)
 		printk(KERN_INFO "Cannot register for cdrom %d!\n", MAJOR_NR);
 		goto out_cdrom;
 	}
-	blk_init_queue(&cm206_queue, do_cm206_request, &cm206_lock);
-	blk_queue_hardsect_size(&cm206_queue, 2048);
-	disk->queue = &cm206_queue;
+	cm206_queue = blk_init_queue(do_cm206_request, &cm206_lock);
+	if (!cm206_queue)
+		goto out_queue;
+		
+	blk_queue_hardsect_size(cm206_queue, 2048);
+	disk->queue = cm206_queue;
 	add_disk(disk);
 
 	memset(cd, 0, sizeof(*cd));	/* give'm some reasonable value */
@@ -1521,6 +1524,8 @@ int __init cm206_init(void)
 	       size);
 	return 0;
 
+out_queue:
+	unregister_cdrom(&cm206_info);
 out_cdrom:
 	put_disk(disk);
 out_disk:
@@ -1573,7 +1578,7 @@ void __exit cm206_exit(void)
 		printk("Can't unregister major cm206\n");
 		return;
 	}
-	blk_cleanup_queue(&cm206_queue);
+	blk_cleanup_queue(cm206_queue);
 	free_irq(cm206_irq, NULL);
 	kfree(cd);
 	release_region(cm206_base, 16);
@@ -1611,7 +1616,7 @@ static int __init cm206_setup(char *s)
 __setup("cm206=", cm206_setup);
 
 #endif				/* !MODULE */
-
+MODULE_ALIAS_BLOCKDEV_MAJOR(CM206_CDROM_MAJOR);
 
 /*
  * Local variables:

@@ -35,7 +35,6 @@
  */
 
 #include <linux/config.h>
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
@@ -65,7 +64,6 @@ MODULE_PARM(isapnp_rdp, "i");
 MODULE_PARM_DESC(isapnp_rdp, "ISA Plug & Play read data port");
 MODULE_PARM(isapnp_reset, "i");
 MODULE_PARM_DESC(isapnp_reset, "ISA Plug & Play reset all cards");
-MODULE_PARM(isapnp_allow_dma0, "i");
 MODULE_PARM(isapnp_verbose, "i");
 MODULE_PARM_DESC(isapnp_verbose, "ISA Plug & Play verbose mode");
 MODULE_LICENSE("GPL");
@@ -255,14 +253,22 @@ static void __init isapnp_peek(unsigned char *data, int bytes)
 static int isapnp_next_rdp(void)
 {
 	int rdp = isapnp_rdp;
+	static int old_rdp = 0;
+	
+	if(old_rdp)
+	{
+		release_region(old_rdp, 1);
+		old_rdp = 0;
+	}
 	while (rdp <= 0x3ff) {
 		/*
 		 *	We cannot use NE2000 probe spaces for ISAPnP or we
 		 *	will lock up machines.
 		 */
-		if ((rdp < 0x280 || rdp >  0x380) && !check_region(rdp, 1))
+		if ((rdp < 0x280 || rdp >  0x380) && request_region(rdp, 1, "ISAPnP"))
 		{
 			isapnp_rdp = rdp;
+			old_rdp = rdp;
 			return 0;
 		}
 		rdp += RDP_STEP;
@@ -735,7 +741,7 @@ static int __init isapnp_create_device(struct pnp_card *card,
 			size = 0;
 			break;
 		case _LTAG_ANSISTR:
-			isapnp_parse_name(dev->dev.name, sizeof(dev->dev.name), &size);
+			isapnp_parse_name(dev->name, sizeof(dev->name), &size);
 			break;
 		case _LTAG_UNICODESTR:
 			/* silently ignore */
@@ -800,7 +806,7 @@ static void __init isapnp_parse_resource_map(struct pnp_card *card)
 		case _STAG_VENDOR:
 			break;
 		case _LTAG_ANSISTR:
-			isapnp_parse_name(card->dev.name, sizeof(card->dev.name), &size);
+			isapnp_parse_name(card->name, sizeof(card->name), &size);
 			break;
 		case _LTAG_UNICODESTR:
 			/* silently ignore */
@@ -1136,11 +1142,11 @@ int __init isapnp_init(void)
 	protocol_for_each_card(&isapnp_protocol,card) {
 		cards++;
 		if (isapnp_verbose) {
-			printk(KERN_INFO "isapnp: Card '%s'\n", card->dev.name[0]?card->dev.name:"Unknown");
+			printk(KERN_INFO "isapnp: Card '%s'\n", card->name[0]?card->name:"Unknown");
 			if (isapnp_verbose < 2)
 				continue;
 			card_for_each_dev(card,dev) {
-				printk(KERN_INFO "isapnp:   Device '%s'\n", dev->dev.name[0]?dev->dev.name:"Unknown");
+				printk(KERN_INFO "isapnp:   Device '%s'\n", dev->name[0]?dev->name:"Unknown");
 			}
 		}
 	}

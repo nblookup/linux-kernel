@@ -96,7 +96,6 @@
 #endif
 
 #if defined(VRC5477_AC97_DEBUG)
-#include <linux/kernel.h>
 #define ASSERT(x)  if (!(x)) { \
 	panic("assertion failed at %s:%d: %s\n", __FILE__, __LINE__, #x); }
 #else
@@ -104,8 +103,8 @@
 #endif /* VRC5477_AC97_DEBUG */
 
 #if defined(VRC5477_AC97_VERBOSE_DEBUG)
-static u16 inTicket=0; 		/* check sync between intr & write */
-static u16 outTicket=0;
+static u16 inTicket; 		/* check sync between intr & write */
+static u16 outTicket;
 #endif
 
 /* --------------------------------------------------------------------- */
@@ -194,7 +193,7 @@ struct vrc5477_ac97_state {
 	struct proc_dir_entry *ac97_ps;
 #endif /* VRC5477_AC97_DEBUG */
 
-	struct ac97_codec codec;
+	struct ac97_codec *codec;
 
 	unsigned dacChannels, adcChannels;
 	unsigned short dacRate, adcRate;
@@ -385,7 +384,7 @@ static void vrc5477_ac97_delay(int msec)
 
 static void set_adc_rate(struct vrc5477_ac97_state *s, unsigned rate)
 {
-	wrcodec(&s->codec, AC97_PCM_LR_ADC_RATE, rate);
+	wrcodec(s->codec, AC97_PCM_LR_ADC_RATE, rate);
 	s->adcRate = rate;
 }
 
@@ -393,8 +392,8 @@ static void set_adc_rate(struct vrc5477_ac97_state *s, unsigned rate)
 static void set_dac_rate(struct vrc5477_ac97_state *s, unsigned rate)
 {
 	if(s->extended_status & AC97_EXTSTAT_VRA) {
-	wrcodec(&s->codec, AC97_PCM_FRONT_DAC_RATE, rate);
-		s->dacRate = rdcodec(&s->codec, AC97_PCM_FRONT_DAC_RATE);
+	wrcodec(s->codec, AC97_PCM_FRONT_DAC_RATE, rate);
+		s->dacRate = rdcodec(s->codec, AC97_PCM_FRONT_DAC_RATE);
 	}
 }
 
@@ -857,7 +856,7 @@ static irqreturn_t vrc5477_ac97_interrupt(int irq, void *dev_id, struct pt_regs 
 
 static int vrc5477_ac97_open_mixdev(struct inode *inode, struct file *file)
 {
-	int minor = minor(inode->i_rdev);
+	int minor = iminor(inode);
 	struct list_head *list;
 	struct vrc5477_ac97_state *s;
 
@@ -865,7 +864,7 @@ static int vrc5477_ac97_open_mixdev(struct inode *inode, struct file *file)
 		if (list == &devs)
 			return -ENODEV;
 		s = list_entry(list, struct vrc5477_ac97_state, devs);
-		if (s->codec.dev_mixer == minor)
+		if (s->codec->dev_mixer == minor)
 			break;
 	}
 	file->private_data = s;
@@ -889,7 +888,7 @@ static int vrc5477_ac97_ioctl_mixdev(struct inode *inode, struct file *file,
 {
     struct vrc5477_ac97_state *s = 
 	    (struct vrc5477_ac97_state *)file->private_data;
-    struct ac97_codec *codec = &s->codec;
+    struct ac97_codec *codec = s->codec;
 
     return mixdev_ioctl(codec, cmd, arg);
 }
@@ -1187,7 +1186,7 @@ copy_dac_from_user(struct vrc5477_ac97_state *s,
 #endif
 
 		count -= copyCount;
-		totalCopyCount =+ copyCount;
+		totalCopyCount += copyCount;
 		avail -= copyFragCount;
 		totalCopyFragCount += copyFragCount;
 
@@ -1563,13 +1562,13 @@ static int vrc5477_ac97_ioctl(struct inode *inode, struct file *file,
 		return -EINVAL;
 	}
 
-	return mixdev_ioctl(&s->codec, cmd, arg);
+	return mixdev_ioctl(s->codec, cmd, arg);
 }
 
 
 static int vrc5477_ac97_open(struct inode *inode, struct file *file)
 {
-	int minor = minor(inode->i_rdev);
+	int minor = iminor(inode);
 	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	struct list_head *list;
@@ -1789,7 +1788,7 @@ static int proc_vrc5477_ac97_dump (char *buf, char **start, off_t fpos,
 	len += sprintf (buf + len, "----------------------\n");
 	for (cnt=0; cnt <= 0x7e; cnt = cnt +2)
 		len+= sprintf (buf + len, "reg %02x = %04x\n",
-			       cnt, rdcodec(&s->codec, cnt));
+			       cnt, rdcodec(s->codec, cnt));
 
 	if (fpos >=len){
 		*start = buf;
@@ -1810,7 +1809,7 @@ static int proc_vrc5477_ac97_dump (char *buf, char **start, off_t fpos,
 /* maximum number of devices; only used for command line params */
 #define NR_DEVICE 5
 
-static unsigned int devindex = 0;
+static unsigned int devindex;
 
 MODULE_AUTHOR("Monta Vista Software, jsun@mvista.com or jsun@junsun.net");
 MODULE_DESCRIPTION("NEC Vrc5477 audio (AC97) Driver");
@@ -1842,12 +1841,14 @@ static int __devinit vrc5477_ac97_probe(struct pci_dev *pcidev,
 	s->dev = pcidev;
 	s->io = pci_resource_start(pcidev, 0);
 	s->irq = pcidev->irq;
+	
+	s->codec = ac97_alloc_codec();
 
-	s->codec.private_data = s;
-	s->codec.id = 0;
-	s->codec.codec_read = rdcodec;
-	s->codec.codec_write = wrcodec;
-	s->codec.codec_wait = waitcodec;
+	s->codec->private_data = s;
+	s->codec->id = 0;
+	s->codec->codec_read = rdcodec;
+	s->codec->codec_write = wrcodec;
+	s->codec->codec_wait = waitcodec;
 
 	/* setting some other default values such as
 	 * adcChannels, adcRate is done in open() so that
@@ -1855,7 +1856,7 @@ static int __devinit vrc5477_ac97_probe(struct pci_dev *pcidev,
 	 */
 
 	/* test if get response from ac97, if not return */
-        if (ac97_codec_not_present(&(s->codec))) {
+        if (ac97_codec_not_present(s->codec)) {
 		printk(KERN_ERR PFX "no ac97 codec\n");
 		goto err_region;
 
@@ -1878,7 +1879,7 @@ static int __devinit vrc5477_ac97_probe(struct pci_dev *pcidev,
 	/* register devices */
 	if ((s->dev_audio = register_sound_dsp(&vrc5477_ac97_audio_fops, -1)) < 0)
 		goto err_dev1;
-	if ((s->codec.dev_mixer =
+	if ((s->codec->dev_mixer =
 	     register_sound_mixer(&vrc5477_ac97_mixer_fops, -1)) < 0)
 		goto err_dev2;
 
@@ -1899,22 +1900,22 @@ static int __devinit vrc5477_ac97_probe(struct pci_dev *pcidev,
 	while (inl(s->io + VRC5477_ACLINK_CTRL) & VRC5477_ACLINK_CTRL_RST_ON);
 
 	/* codec init */
-	if (!ac97_probe_codec(&s->codec))
+	if (!ac97_probe_codec(s->codec))
 		goto err_dev3;
 
 #ifdef VRC5477_AC97_DEBUG
 	sprintf(proc_str, "driver/%s/%d/ac97", 
-		VRC5477_AC97_MODULE_NAME, s->codec.id);
+		VRC5477_AC97_MODULE_NAME, s->codec->id);
 	s->ac97_ps = create_proc_read_entry (proc_str, 0, NULL,
-					     ac97_read_proc, &s->codec);
+					     ac97_read_proc, s->codec);
 	/* TODO : why this proc file does not show up? */
 #endif
 
 	/* Try to enable variable rate audio mode. */
-	wrcodec(&s->codec, AC97_EXTENDED_STATUS,
-		rdcodec(&s->codec, AC97_EXTENDED_STATUS) | AC97_EXTSTAT_VRA);
+	wrcodec(s->codec, AC97_EXTENDED_STATUS,
+		rdcodec(s->codec, AC97_EXTENDED_STATUS) | AC97_EXTSTAT_VRA);
 	/* Did we enable it? */
-	if(rdcodec(&s->codec, AC97_EXTENDED_STATUS) & AC97_EXTSTAT_VRA)
+	if(rdcodec(s->codec, AC97_EXTENDED_STATUS) & AC97_EXTSTAT_VRA)
 		s->extended_status |= AC97_EXTSTAT_VRA;
 	else {
 		s->dacRate = 48000;
@@ -1923,17 +1924,17 @@ static int __devinit vrc5477_ac97_probe(struct pci_dev *pcidev,
 	}
 
         /* let us get the default volumne louder */
-        wrcodec(&s->codec, 0x2, 0x1010);	/* master volume, middle */
-        wrcodec(&s->codec, 0xc, 0x10);		/* phone volume, middle */
-        // wrcodec(&s->codec, 0xe, 0x10);		/* misc volume, middle */
-	wrcodec(&s->codec, 0x10, 0x8000);	/* line-in 2 line-out disable */
-        wrcodec(&s->codec, 0x18, 0x0707);	/* PCM out (line out) middle */
+        wrcodec(s->codec, 0x2, 0x1010);	/* master volume, middle */
+        wrcodec(s->codec, 0xc, 0x10);		/* phone volume, middle */
+        // wrcodec(s->codec, 0xe, 0x10);		/* misc volume, middle */
+	wrcodec(s->codec, 0x10, 0x8000);	/* line-in 2 line-out disable */
+        wrcodec(s->codec, 0x18, 0x0707);	/* PCM out (line out) middle */
 
 
 	/* by default we select line in the input */
-	wrcodec(&s->codec, 0x1a, 0x0404);
-	wrcodec(&s->codec, 0x1c, 0x0f0f);
-	wrcodec(&s->codec, 0x1e, 0x07);
+	wrcodec(s->codec, 0x1a, 0x0404);
+	wrcodec(s->codec, 0x1c, 0x0f0f);
+	wrcodec(s->codec, 0x1e, 0x07);
 
 	/* enable the master interrupt but disable all others */
 	outl(VRC5477_INT_MASK_NMASK, s->io + VRC5477_INT_MASK);
@@ -1949,7 +1950,7 @@ static int __devinit vrc5477_ac97_probe(struct pci_dev *pcidev,
 	return 0;
 
  err_dev3:
-	unregister_sound_mixer(s->codec.dev_mixer);
+	unregister_sound_mixer(s->codec->dev_mixer);
  err_dev2:
 	unregister_sound_dsp(s->dev_audio);
  err_dev1:
@@ -1958,6 +1959,7 @@ static int __devinit vrc5477_ac97_probe(struct pci_dev *pcidev,
  err_irq:
 	release_region(s->io, pci_resource_len(pcidev,0));
  err_region:
+ 	ac97_release_codec(codec);
 	kfree(s);
 	return -1;
 }
@@ -1979,13 +1981,14 @@ static void __devinit vrc5477_ac97_remove(struct pci_dev *dev)
 	free_irq(s->irq, s);
 	release_region(s->io, pci_resource_len(dev,0));
 	unregister_sound_dsp(s->dev_audio);
-	unregister_sound_mixer(s->codec.dev_mixer);
+	unregister_sound_mixer(s->codec->dev_mixer);
+	ac97_release_codec(s->codec);
 	kfree(s);
 	pci_set_drvdata(dev, NULL);
 }
 
 
-static struct pci_device_id id_table[] __devinitdata = {
+static struct pci_device_id id_table[] = {
     { PCI_VENDOR_ID_NEC, PCI_DEVICE_ID_NEC_VRC5477_AC97, 
       PCI_ANY_ID, PCI_ANY_ID, 0, 0 },
     { 0, }

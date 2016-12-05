@@ -1,8 +1,8 @@
 /*
  * arch/v850/kernel/gbus_int.c -- Midas labs GBUS interrupt support
  *
- *  Copyright (C) 2001,02  NEC Corporation
- *  Copyright (C) 2001,02  Miles Bader <miles@gnu.org>
+ *  Copyright (C) 2001,02,03  NEC Electronics Corporation
+ *  Copyright (C) 2001,02,03  Miles Bader <miles@gnu.org>
  *
  * This file is subject to the terms and conditions of the GNU General
  * Public License.  See the file COPYING in the main directory of this
@@ -99,9 +99,11 @@ int gbus_int_irq_pending (unsigned irq)
 
 /* Handle a shared GINT interrupt by passing to the appropriate GBUS
    interrupt handler.  */
-static void gbus_int_handle_irq (int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t gbus_int_handle_irq (int irq, void *dev_id,
+					struct pt_regs *regs)
 {
 	unsigned w;
+	irqreturn_t rval = IRQ_NONE;
 	unsigned gint = irq - IRQ_GINT (0);
 
 	for (w = 0; w < GBUS_INT_NUM_WORDS; w++) {
@@ -111,9 +113,7 @@ static void gbus_int_handle_irq (int irq, void *dev_id, struct pt_regs *regs)
 		/* Only pay attention to enabled interrupts.  */
 		status &= enable;
 		if (status) {
-			unsigned base_irq
-				= IRQ_GBUS_INT (w * GBUS_INT_BITS_PER_WORD);
-			irq = base_irq;
+			irq = IRQ_GBUS_INT (w * GBUS_INT_BITS_PER_WORD);
 			do {
 				/* There's an active interrupt in word
 				   W, find out which one, and call its
@@ -127,6 +127,7 @@ static void gbus_int_handle_irq (int irq, void *dev_id, struct pt_regs *regs)
 
 				/* Recursively call handle_irq to handle it. */
 				handle_irq (irq, regs);
+				rval = IRQ_HANDLED;
 			} while (status);
 		}
 	}
@@ -136,6 +137,8 @@ static void gbus_int_handle_irq (int irq, void *dev_id, struct pt_regs *regs)
 	   still pending, and so result in another CPU interrupt.  */
 	GBUS_INT_ENABLE (0, gint) &= ~0x1;
 	GBUS_INT_ENABLE (0, gint) |=  0x1;
+
+	return rval;
 }
 
 
@@ -242,7 +245,7 @@ void __init gbus_int_init_irqs (void)
 	/* First initialize the shared gint interrupts.  */
 	for (i = 0; i < NUM_USED_GINTS; i++) {
 		unsigned gint = used_gint[i].gint;
-		struct nb85e_intc_irq_init gint_irq_init[2];
+		struct v850e_intc_irq_init gint_irq_init[2];
 
 		/* We initialize one GINT interrupt at a time.  */
 		gint_irq_init[0].name = "GINT";
@@ -253,7 +256,7 @@ void __init gbus_int_init_irqs (void)
 
 		gint_irq_init[1].name = 0; /* Terminate the vector.  */
 
-		nb85e_intc_init_irq_types (gint_irq_init, gint_hw_itypes);
+		v850e_intc_init_irq_types (gint_irq_init, gint_hw_itypes);
 	}
 
 	/* Then the GBUS interrupts.  */

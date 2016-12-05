@@ -44,6 +44,8 @@
 #include <linux/ppp_channel.h>
 #include <linux/atmppp.h>
 
+#include "common.h"
+
 #if 0
 #define DPRINTK(format, args...) \
 	printk(KERN_DEBUG "pppoatm: " format, ##args)
@@ -130,7 +132,7 @@ static void pppoatm_unassign_vcc(struct atm_vcc *atmvcc)
 	atmvcc->user_back = NULL;
 	kfree(pvcc);
 	/* Gee, I hope we have the big kernel lock here... */
-	MOD_DEC_USE_COUNT;
+	module_put(THIS_MODULE);
 }
 
 /* Called when an AAL5 PDU comes in */
@@ -284,12 +286,9 @@ static int pppoatm_assign_vcc(struct atm_vcc *atmvcc, unsigned long arg)
 	if (be.encaps != PPPOATM_ENCAPS_AUTODETECT &&
 	    be.encaps != PPPOATM_ENCAPS_VC && be.encaps != PPPOATM_ENCAPS_LLC)
 		return -EINVAL;
-	MOD_INC_USE_COUNT;
 	pvcc = kmalloc(sizeof(*pvcc), GFP_KERNEL);
-	if (pvcc == NULL) {
-		MOD_DEC_USE_COUNT;
+	if (pvcc == NULL)
 		return -ENOMEM;
-	}
 	memset(pvcc, 0, sizeof(*pvcc));
 	pvcc->atmvcc = atmvcc;
 	pvcc->old_push = atmvcc->push;
@@ -308,6 +307,7 @@ static int pppoatm_assign_vcc(struct atm_vcc *atmvcc, unsigned long arg)
 	atmvcc->user_back = pvcc;
 	atmvcc->push = pppoatm_push;
 	atmvcc->pop = pppoatm_pop;
+	(void) try_module_get(THIS_MODULE);
 	return 0;
 }
 
@@ -315,9 +315,11 @@ static int pppoatm_assign_vcc(struct atm_vcc *atmvcc, unsigned long arg)
  * This handles ioctls actually performed on our vcc - we must return
  * -ENOIOCTLCMD for any unrecognized ioctl
  */
-static int pppoatm_ioctl(struct atm_vcc *atmvcc, unsigned int cmd,
+static int pppoatm_ioctl(struct socket *sock, unsigned int cmd,
 	unsigned long arg)
 {
+	struct atm_vcc *atmvcc = ATM_SD(sock);
+
 	if (cmd != ATM_SETBACKEND && atmvcc->push != pppoatm_push)
 		return -ENOIOCTLCMD;
 	switch (cmd) {
@@ -341,20 +343,20 @@ static int pppoatm_ioctl(struct atm_vcc *atmvcc, unsigned int cmd,
 	return -ENOIOCTLCMD;
 }
 
-/* the following avoids some spurious warnings from the compiler */
-#define UNUSED __attribute__((unused))
+struct atm_ioctl pppoatm_ioctl_ops = {
+	.owner	= THIS_MODULE,
+	.ioctl	= pppoatm_ioctl,
+};
 
-extern int (*pppoatm_ioctl_hook)(struct atm_vcc *, unsigned int, unsigned long);
-
-static int __init UNUSED pppoatm_init(void)
+static int __init pppoatm_init(void)
 {
-	pppoatm_ioctl_hook = pppoatm_ioctl;
+	register_atm_ioctl(&pppoatm_ioctl_ops);
 	return 0;
 }
 
-static void __exit UNUSED pppoatm_exit(void)
+static void __exit pppoatm_exit(void)
 {
-	pppoatm_ioctl_hook = NULL;
+	deregister_atm_ioctl(&pppoatm_ioctl_ops);
 }
 
 module_init(pppoatm_init);

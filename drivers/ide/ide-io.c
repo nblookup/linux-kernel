@@ -54,12 +54,9 @@
 #include <asm/io.h>
 #include <asm/bitops.h>
 
-#include "ide_modes.h"
-
 #if (DISK_RECOVERY_TIME > 0)
 
-Error So the User Has To Fix the Compilation And Stop Hacking Port 0x43
-Does anyone ever use this anyway ??
+#error So the User Has To Fix the Compilation And Stop Hacking Port 0x43. Does anyone ever use this anyway ??
 
 /*
  * For really screwy hardware (hey, at least it *can* be used with Linux)
@@ -114,6 +111,13 @@ int ide_end_request (ide_drive_t *drive, int uptodate, int nr_sectors)
 		nr_sectors = rq->hard_cur_sectors;
 
 	/*
+	 * if failfast is set on a request, override number of sectors and
+	 * complete the whole request right now
+	 */
+	if (blk_noretry_request(rq) && !uptodate)
+		nr_sectors = rq->hard_nr_sectors;
+
+	/*
 	 * decide whether to reenable DMA -- 3 is a random magic for now,
 	 * if we DMA timeout more than 3 times, just stay in PIO
 	 */
@@ -127,7 +131,7 @@ int ide_end_request (ide_drive_t *drive, int uptodate, int nr_sectors)
 		if (!blk_rq_tagged(rq))
 			blkdev_dequeue_request(rq);
 		else
-			blk_queue_end_tag(&drive->queue, rq);
+			blk_queue_end_tag(drive->queue, rq);
 		HWGROUP(drive)->rq = NULL;
 		end_that_request_last(rq);
 		ret = 0;
@@ -156,10 +160,10 @@ static void ide_complete_pm_request (ide_drive_t *drive, struct request *rq)
 #endif
 	spin_lock_irqsave(&ide_lock, flags);
 	if (blk_pm_suspend_request(rq)) {
-		blk_stop_queue(&drive->queue);
+		blk_stop_queue(drive->queue);
 	} else {
 		drive->blocked = 0;
-		blk_start_queue(&drive->queue);
+		blk_start_queue(drive->queue);
 	}
 	blkdev_dequeue_request(rq);
 	HWGROUP(drive)->rq = NULL;
@@ -750,12 +754,12 @@ repeat:
 	drive = hwgroup->drive;
 	do {
 		if ((!drive->sleep || time_after_eq(jiffies, drive->sleep))
-		    && !elv_queue_empty(&drive->queue)) {
+		    && !elv_queue_empty(drive->queue)) {
 			if (!best
 			 || (drive->sleep && (!best->sleep || 0 < (signed long)(best->sleep - drive->sleep)))
 			 || (!best->sleep && 0 < (signed long)(WAKEUP(best) - WAKEUP(drive))))
 			{
-				if (!blk_queue_plugged(&drive->queue))
+				if (!blk_queue_plugged(drive->queue))
 					best = drive;
 			}
 		}
@@ -896,7 +900,7 @@ queue_next:
 			break;
 		}
 
-		if (blk_queue_plugged(&drive->queue)) {
+		if (blk_queue_plugged(drive->queue)) {
 			if (drive->using_tcq)
 				break;
 
@@ -908,7 +912,7 @@ queue_next:
 		 * we know that the queue isn't empty, but this can happen
 		 * if the q->prep_rq_fn() decides to kill a request
 		 */
-		rq = elv_next_request(&drive->queue);
+		rq = elv_next_request(drive->queue);
 		if (!rq) {
 			hwgroup->busy = !!ata_pending_commands(drive);
 			break;
@@ -924,13 +928,10 @@ queue_next:
 		 * 
 		 * We let requests forced at head of queue with ide-preempt
 		 * though. I hope that doesn't happen too much, hopefully not
-		 * unless the subdriver triggers such a thing in it's own PM
+		 * unless the subdriver triggers such a thing in its own PM
 		 * state machine.
 		 */
 		if (drive->blocked && !blk_pm_request(rq) && !(rq->flags & REQ_PREEMPT)) {
-#ifdef DEBUG_PM
-			printk("%s: a request made it's way while we are power managing...\n", drive->name);
-#endif
 			/* We clear busy, there should be no pending ATA command at this point. */
 			hwgroup->busy = 0;
 			break;
@@ -949,14 +950,14 @@ queue_next:
 		 * happens anyway when any interrupt comes in, IDE or otherwise
 		 *  -- the kernel masks the IRQ while it is being handled.
 		 */
-		if (masked_irq != IDE_NO_IRQ && hwif->irq != masked_irq)
+		if (hwif->irq != masked_irq)
 			disable_irq_nosync(hwif->irq);
 		spin_unlock(&ide_lock);
 		local_irq_enable();
 			/* allow other IRQs while we start this request */
 		startstop = start_request(drive, rq);
 		spin_lock_irq(&ide_lock);
-		if (masked_irq != IDE_NO_IRQ && hwif->irq != masked_irq)
+		if (hwif->irq != masked_irq)
 			enable_irq(hwif->irq);
 		if (startstop == ide_released)
 			goto queue_next;
@@ -980,21 +981,25 @@ void do_ide_request(request_queue_t *q)
  * retry the current request in pio mode instead of risking tossing it
  * all away
  */
-void ide_dma_timeout_retry(ide_drive_t *drive)
+static ide_startstop_t ide_dma_timeout_retry(ide_drive_t *drive, int error)
 {
 	ide_hwif_t *hwif = HWIF(drive);
 	struct request *rq;
+	ide_startstop_t ret = ide_stopped;
 
 	/*
 	 * end current dma transaction
 	 */
-	(void) hwif->ide_dma_end(drive);
 
-	/*
-	 * complain a little, later we might remove some of this verbosity
-	 */
-	printk(KERN_WARNING "%s: timeout waiting for DMA\n", drive->name);
-	(void) hwif->ide_dma_timeout(drive);
+	if (error < 0) {
+		printk(KERN_WARNING "%s: DMA timeout error\n", drive->name);
+		(void)HWIF(drive)->ide_dma_end(drive);
+		ret = DRIVER(drive)->error(drive, "dma timeout error",
+						hwif->INB(IDE_STATUS_REG));
+	} else {
+		printk(KERN_WARNING "%s: DMA timeout retry\n", drive->name);
+		(void) hwif->ide_dma_timeout(drive);
+	}
 
 	/*
 	 * disable dma for now, but remember that we did so because of
@@ -1018,9 +1023,9 @@ void ide_dma_timeout_retry(ide_drive_t *drive)
 	rq->hard_cur_sectors = rq->current_nr_sectors;
 	if (rq->bio)
 		rq->buffer = NULL;
-}
 
-EXPORT_SYMBOL(ide_dma_timeout_retry);
+	return ret;
+}
 
 /**
  *	ide_timer_expiry	-	handle lack of an IDE interrupt
@@ -1041,11 +1046,10 @@ void ide_timer_expiry (unsigned long data)
 	ide_hwgroup_t	*hwgroup = (ide_hwgroup_t *) data;
 	ide_handler_t	*handler;
 	ide_expiry_t	*expiry;
- 	unsigned long	flags;
-	unsigned long	wait;
+	unsigned long	flags;
+	unsigned long	wait = -1;
 
 	spin_lock_irqsave(&ide_lock, flags);
-	del_timer(&hwgroup->timer);
 
 	if ((handler = hwgroup->handler) == NULL) {
 		/*
@@ -1072,7 +1076,7 @@ void ide_timer_expiry (unsigned long data)
 			}
 			if ((expiry = hwgroup->expiry) != NULL) {
 				/* continue */
-				if ((wait = expiry(drive)) != 0) {
+				if ((wait = expiry(drive)) > 0) {
 					/* reset timer */
 					hwgroup->timer.expires  = jiffies + wait;
 					add_timer(&hwgroup->timer);
@@ -1107,15 +1111,15 @@ void ide_timer_expiry (unsigned long data)
 				startstop = handler(drive);
 			} else {
 				if (drive->waiting_for_dma) {
-					startstop = ide_stopped;
-					ide_dma_timeout_retry(drive);
+					startstop = ide_dma_timeout_retry(drive, wait);
 				} else
-					startstop = DRIVER(drive)->error(drive, "irq timeout", hwif->INB(IDE_STATUS_REG));
+					startstop =
+					DRIVER(drive)->error(drive, "irq timeout", hwif->INB(IDE_STATUS_REG));
 			}
 			set_recovery_timer(hwif);
 			drive->service_time = jiffies - drive->service_start;
-			enable_irq(hwif->irq);
 			spin_lock_irq(&ide_lock);
+			enable_irq(hwif->irq);
 			if (startstop == ide_stopped)
 				hwgroup->busy = 0;
 		}
@@ -1380,7 +1384,7 @@ int ide_do_drive_cmd (ide_drive_t *drive, struct request *rq, ide_action_t actio
 	unsigned long flags;
 	ide_hwgroup_t *hwgroup = HWGROUP(drive);
 	DECLARE_COMPLETION(wait);
-	int insert_end = 1, err;
+	int where = ELEVATOR_INSERT_BACK, err;
 	int must_wait = (action == ide_wait || action == ide_head_wait);
 
 #ifdef CONFIG_BLK_DEV_PDC4030
@@ -1410,12 +1414,13 @@ int ide_do_drive_cmd (ide_drive_t *drive, struct request *rq, ide_action_t actio
 	}
 
 	spin_lock_irqsave(&ide_lock, flags);
-	if (action == ide_preempt || action == ide_head_wait) {
+	if (action == ide_preempt)
 		hwgroup->rq = NULL;
-		insert_end = 0;
+	if (action == ide_preempt || action == ide_head_wait) {
+		where = ELEVATOR_INSERT_FRONT;
 		rq->flags |= REQ_PREEMPT;
 	}
-	__elv_add_request(&drive->queue, rq, insert_end, 0);
+	__elv_add_request(drive->queue, rq, where, 0);
 	ide_do_request(hwgroup, IDE_NO_IRQ);
 	spin_unlock_irqrestore(&ide_lock, flags);
 

@@ -45,7 +45,6 @@
  * Define the address range of the vmalloc VM area.
  */
 #define VMALLOC_START (0xD000000000000000)
-#define VMALLOC_VMADDR(x) ((unsigned long)(x))
 #define VMALLOC_END   (VMALLOC_START + VALID_EA_BITS)
 
 /*
@@ -149,6 +148,25 @@ extern unsigned long empty_zero_page[PAGE_SIZE/sizeof(unsigned long)];
 /* shift to put page number into pte */
 #define PTE_SHIFT (16)
 
+/* We allow 2^41 bytes of real memory, so we need 29 bits in the PMD
+ * to give the PTE page number.  The bottom two bits are for flags. */
+#define PMD_TO_PTEPAGE_SHIFT (2)
+
+#ifdef CONFIG_HUGETLB_PAGE
+#define _PMD_HUGEPAGE	0x00000001U
+#define HUGEPTE_BATCH_SIZE (1<<(HPAGE_SHIFT-PMD_SHIFT))
+
+int hash_huge_page(struct mm_struct *mm, unsigned long access,
+		   unsigned long ea, unsigned long vsid, int local);
+
+#define HAVE_ARCH_UNMAPPED_AREA
+#else
+
+#define hash_huge_page(mm,a,ea,vsid,local)	-1
+#define _PMD_HUGEPAGE	0
+
+#endif
+
 #ifndef __ASSEMBLY__
 
 /*
@@ -178,12 +196,16 @@ extern unsigned long empty_zero_page[PAGE_SIZE/sizeof(unsigned long)];
 #define pte_pfn(x)		((unsigned long)((pte_val(x) >> PTE_SHIFT)))
 #define pte_page(x)		pfn_to_page(pte_pfn(x))
 
-#define pmd_set(pmdp, ptep) 	(pmd_val(*(pmdp)) = (__ba_to_bpn(ptep)))
+#define pmd_set(pmdp, ptep) 	\
+	(pmd_val(*(pmdp)) = (__ba_to_bpn(ptep) << PMD_TO_PTEPAGE_SHIFT))
 #define pmd_none(pmd)		(!pmd_val(pmd))
-#define	pmd_bad(pmd)		((pmd_val(pmd)) == 0)
-#define	pmd_present(pmd)	((pmd_val(pmd)) != 0)
+#define	pmd_hugepage(pmd)	(!!(pmd_val(pmd) & _PMD_HUGEPAGE))
+#define	pmd_bad(pmd)		(((pmd_val(pmd)) == 0) || pmd_hugepage(pmd))
+#define	pmd_present(pmd)	((!pmd_hugepage(pmd)) \
+				 && (pmd_val(pmd) & ~_PMD_HUGEPAGE) != 0)
 #define	pmd_clear(pmdp)		(pmd_val(*(pmdp)) = 0)
-#define pmd_page_kernel(pmd)	(__bpn_to_ba(pmd_val(pmd)))
+#define pmd_page_kernel(pmd)	\
+	(__bpn_to_ba(pmd_val(pmd) >> PMD_TO_PTEPAGE_SHIFT))
 #define pmd_page(pmd)		virt_to_page(pmd_page_kernel(pmd))
 #define pgd_set(pgdp, pmdp)	(pgd_val(*(pgdp)) = (__ba_to_bpn(pmdp)))
 #define pgd_none(pgd)		(!pgd_val(pgd))
@@ -372,10 +394,7 @@ extern void update_mmu_cache(struct vm_area_struct *, unsigned long, pte_t);
 
 #define io_remap_page_range remap_page_range 
 
-/*
- * No page table caches to initialise
- */
-#define pgtable_cache_init()	do { } while (0)
+void pgtable_cache_init(void);
 
 extern void hpte_init_pSeries(void);
 extern void hpte_init_iSeries(void);

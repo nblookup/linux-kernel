@@ -35,7 +35,6 @@
 #include <linux/serial.h>
 #include <linux/cdk.h>
 #include <linux/comstats.h>
-#include <linux/version.h>
 #include <linux/istallion.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
@@ -650,8 +649,6 @@ static unsigned int	stli_baudrates[] = {
  */
 
 #ifdef MODULE
-int		init_module(void);
-void		cleanup_module(void);
 static void	stli_argbrds(void);
 static int	stli_parsebrd(stlconf_t *confp, char **argp);
 
@@ -1491,7 +1488,6 @@ static void stli_delay(int len)
 	if (len > 0) {
 		set_current_state(TASK_INTERRUPTIBLE);
 		schedule_timeout(len);
-		set_current_state(TASK_RUNNING);
 	}
 }
 
@@ -2305,7 +2301,7 @@ static void stli_dohangup(void *arg)
 
 	/*
 	 * FIXME: There's a module removal race here: tty_hangup
-	 * calls schedule_task which will call into this
+	 * calls schedule_work which will call into this
 	 * driver later.
 	 */
 	portp = (stliport_t *) arg;
@@ -2946,7 +2942,7 @@ static inline int stli_hostcmd(stlibrd_t *brdp, stliport_t *portp)
 			    ((portp->sigs & TIOCM_CD) == 0)) {
 				if (portp->flags & ASYNC_CHECK_CD) {
 					if (tty)
-						schedule_task(&portp->tqhangup);
+						schedule_work(&portp->tqhangup);
 				}
 			}
 		}
@@ -4807,7 +4803,7 @@ static ssize_t stli_memread(struct file *fp, char *buf, size_t count, loff_t *of
 			(int) fp, (int) buf, count, (int) offp);
 #endif
 
-	brdnr = minor(fp->f_dentry->d_inode->i_rdev);
+	brdnr = iminor(fp->f_dentry->d_inode);
 	if (brdnr >= stli_nrbrds)
 		return(-ENODEV);
 	brdp = stli_brds[brdnr];
@@ -4862,7 +4858,7 @@ static ssize_t stli_memwrite(struct file *fp, const char *buf, size_t count, lof
 			(int) fp, (int) buf, count, (int) offp);
 #endif
 
-	brdnr = minor(fp->f_dentry->d_inode->i_rdev);
+	brdnr = iminor(fp->f_dentry->d_inode);
 	if (brdnr >= stli_nrbrds)
 		return(-ENODEV);
 	brdp = stli_brds[brdnr];
@@ -5203,7 +5199,7 @@ static int stli_memioctl(struct inode *ip, struct file *fp, unsigned int cmd, un
  *	Now handle the board specific ioctls. These all depend on the
  *	minor number of the device they were called from.
  */
-	brdnr = minor(ip->i_rdev);
+	brdnr = iminor(ip);
 	if (brdnr >= STL_MAXBRDS)
 		return(-ENODEV);
 	brdp = stli_brds[brdnr];

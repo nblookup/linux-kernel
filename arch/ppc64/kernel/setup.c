@@ -38,6 +38,7 @@
 #include <asm/paca.h>
 #include <asm/ppcdebug.h>
 #include <asm/time.h>
+#include <asm/sections.h>
 
 extern unsigned long klimit;
 /* extern void *stab; */
@@ -227,16 +228,22 @@ void machine_restart(char *cmd)
 {
 	ppc_md.restart(cmd);
 }
+
+EXPORT_SYMBOL(machine_restart);
   
 void machine_power_off(void)
 {
 	ppc_md.power_off();
 }
+
+EXPORT_SYMBOL(machine_power_off);
   
 void machine_halt(void)
 {
 	ppc_md.halt();
 }
+
+EXPORT_SYMBOL(machine_halt);
 
 unsigned long ppc_proc_freq;
 unsigned long ppc_tb_freq;
@@ -256,7 +263,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 		return 0;
 	}
 
-	if (!(cpu_online_map & (1UL << cpu_id)))
+	if (!cpu_online(cpu_id))
 		return 0;
 
 #ifdef CONFIG_SMP
@@ -489,7 +496,6 @@ extern void sort_exception_table(void);
 void __init setup_arch(char **cmdline_p)
 {
 	extern int panic_timeout;
-	extern char _etext[], _edata[];
 	extern void do_init_bootmem(void);
 
 	calibrate_delay = ppc64_calibrate_delay;
@@ -516,7 +522,7 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.start_code = PAGE_OFFSET;
 	init_mm.end_code = (unsigned long) _etext;
 	init_mm.end_data = (unsigned long) _edata;
-	init_mm.brk = (unsigned long) klimit;
+	init_mm.brk = klimit;
 	
 	/* Save unparsed command line copy for /proc/cmdline */
 	strcpy(saved_command_line, cmd_line);

@@ -59,7 +59,7 @@ static struct kobj_type ktype_class = {
 static decl_subsys(class,&ktype_class,NULL);
 
 
-int class_create_file(struct class * cls, struct class_attribute * attr)
+int class_create_file(struct class * cls, const struct class_attribute * attr)
 {
 	int error;
 	if (cls) {
@@ -69,7 +69,7 @@ int class_create_file(struct class * cls, struct class_attribute * attr)
 	return error;
 }
 
-void class_remove_file(struct class * cls, struct class_attribute * attr)
+void class_remove_file(struct class * cls, const struct class_attribute * attr)
 {
 	if (cls)
 		sysfs_remove_file(&cls->subsys.kset.kobj,&attr->attr);
@@ -93,8 +93,7 @@ int class_register(struct class * cls)
 
 	INIT_LIST_HEAD(&cls->children);
 	INIT_LIST_HEAD(&cls->interfaces);
-	
-	strlcpy(cls->subsys.kset.kobj.name,cls->name,KOBJ_NAME_LEN);
+	kobject_set_name(&cls->subsys.kset.kobj,cls->name);
 	subsys_set_kset(cls,class_subsys);
 	subsystem_register(&cls->subsys);
 
@@ -110,7 +109,7 @@ void class_unregister(struct class * cls)
 /* Class Device Stuff */
 
 int class_device_create_file(struct class_device * class_dev,
-			     struct class_device_attribute * attr)
+			     const struct class_device_attribute * attr)
 {
 	int error = -EINVAL;
 	if (class_dev)
@@ -119,7 +118,7 @@ int class_device_create_file(struct class_device * class_dev,
 }
 
 void class_device_remove_file(struct class_device * class_dev,
-			      struct class_device_attribute * attr)
+			      const struct class_device_attribute * attr)
 {
 	if (class_dev)
 		sysfs_remove_file(&class_dev->kobj, &attr->attr);
@@ -194,6 +193,12 @@ static void class_dev_release(struct kobject * kobj)
 
 	if (cls->release)
 		cls->release(cd);
+	else {
+		printk(KERN_ERR "Device class '%s' does not have a release() function, "
+			"it is broken and must be fixed.\n",
+			cd->class_id);
+		WARN_ON(1);
+	}
 }
 
 static struct kobj_type ktype_class_device = {
@@ -250,6 +255,7 @@ static decl_subsys(class_obj, &ktype_class_device, &class_hotplug_ops);
 
 void class_device_initialize(struct class_device *class_dev)
 {
+	kobj_set_kset_s(class_dev, class_obj_subsys);
 	kobject_init(&class_dev->kobj);
 	INIT_LIST_HEAD(&class_dev->node);
 }
@@ -271,8 +277,7 @@ int class_device_add(struct class_device *class_dev)
 		 class_dev->class_id);
 
 	/* first, register with generic layer. */
-	strlcpy(class_dev->kobj.name, class_dev->class_id, KOBJ_NAME_LEN);
-	kobj_set_kset_s(class_dev, class_obj_subsys);
+	kobject_set_name(&class_dev->kobj, class_dev->class_id);
 	if (parent)
 		class_dev->kobj.parent = &parent->subsys.kset.kobj;
 

@@ -29,7 +29,6 @@
 
 #include <linux/module.h>
 #include <linux/socket.h>
-#include <linux/miscdevice.h>
 #include <linux/list.h>
 #include <linux/vmalloc.h>
 #include <linux/slab.h>
@@ -90,7 +89,6 @@ static int dabusb_add_buf_tail (pdabusb_t s, struct list_head *dst, struct list_
 static void dump_urb (struct urb *urb)
 {
 	dbg("urb                   :%p", urb);
-	dbg("next                  :%p", urb->next);
 	dbg("dev                   :%p", urb->dev);
 	dbg("pipe                  :%08X", urb->pipe);
 	dbg("status                :%d", urb->status);
@@ -583,7 +581,7 @@ static ssize_t dabusb_read (struct file *file, char *buf, size_t count, loff_t *
 
 static int dabusb_open (struct inode *inode, struct file *file)
 {
-	int devnum = minor (inode->i_rdev);
+	int devnum = iminor(inode);
 	pdabusb_t s;
 
 	if (devnum < DABUSB_MINOR || devnum >= (DABUSB_MINOR + NRDABUSB))
@@ -721,7 +719,7 @@ static struct usb_class_driver dabusb_class = {
 
 
 /* --------------------------------------------------------------------- */
-static int dabusb_probe (struct usb_interface *intf, 
+static int dabusb_probe (struct usb_interface *intf,
 			 const struct usb_device_id *id)
 {
 	struct usb_device *usbdev = interface_to_usbdev(intf);
@@ -729,7 +727,7 @@ static int dabusb_probe (struct usb_interface *intf,
 	pdabusb_t s;
 
 	dbg("dabusb: probe: vendor id 0x%x, device id 0x%x ifnum:%d",
-	  usbdev->descriptor.idVendor, usbdev->descriptor.idProduct, ifnum);
+	  usbdev->descriptor.idVendor, usbdev->descriptor.idProduct, intf->altsetting->desc.bInterfaceNumber);
 
 	/* We don't handle multiple configurations */
 	if (usbdev->descriptor.bNumConfigurations != 1)
@@ -738,9 +736,7 @@ static int dabusb_probe (struct usb_interface *intf,
 	if (intf->altsetting->desc.bInterfaceNumber != _DABUSB_IF && usbdev->descriptor.idProduct == 0x9999)
 		return -ENODEV;
 
-	retval = usb_register_dev(intf, &dabusb_class);
-	if (retval)
-		return -ENOMEM;
+
 
 	s = &dabusb[intf->minor];
 
@@ -749,8 +745,8 @@ static int dabusb_probe (struct usb_interface *intf,
 	s->usbdev = usbdev;
 	s->devnum = intf->minor;
 
-	if (usb_set_configuration (usbdev, usbdev->config[0].desc.bConfigurationValue) < 0) {
-		err("set_configuration failed");
+	if (usb_reset_configuration (usbdev) < 0) {
+		err("reset_configuration failed");
 		goto reject;
 	}
 	if (usbdev->descriptor.idProduct == 0x2131) {
@@ -765,9 +761,16 @@ static int dabusb_probe (struct usb_interface *intf,
 			goto reject;
 		}
 	}
-	dbg("bound to interface: %d", ifnum);
-	up (&s->mutex);
+	dbg("bound to interface: %d", intf->altsetting->desc.bInterfaceNumber);
 	usb_set_intfdata (intf, s);
+	up (&s->mutex);
+
+	retval = usb_register_dev(intf, &dabusb_class);
+	if (retval) {
+		usb_set_intfdata (intf, NULL);
+		return -ENOMEM;
+	}
+
 	return 0;
 
       reject:
@@ -795,7 +798,7 @@ static void dabusb_disconnect (struct usb_interface *intf)
 }
 
 static struct usb_device_id dabusb_ids [] = {
-	{ USB_DEVICE(0x0547, 0x2131) },
+	// { USB_DEVICE(0x0547, 0x2131) },	/* An2131 chip, no boot ROM */
 	{ USB_DEVICE(0x0547, 0x9999) },
 	{ }						/* Terminating entry */
 };
@@ -814,6 +817,7 @@ static struct usb_driver dabusb_driver = {
 
 static int __init dabusb_init (void)
 {
+	int retval;
 	unsigned u;
 
 	/* initialize struct */
@@ -831,14 +835,16 @@ static int __init dabusb_init (void)
 	}
 
 	/* register misc device */
-	if (usb_register(&dabusb_driver))
-		return -1;
+	retval = usb_register(&dabusb_driver);
+	if (retval)
+		goto out;
 
 	dbg("dabusb_init: driver registered");
 
 	info(DRIVER_VERSION ":" DRIVER_DESC);
 
-	return 0;
+out:
+	return retval;
 }
 
 static void __exit dabusb_cleanup (void)

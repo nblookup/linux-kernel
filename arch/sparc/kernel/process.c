@@ -13,6 +13,7 @@
 #include <stdarg.h>
 
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -157,6 +158,8 @@ void machine_halt(void)
 	panic("Halt failed!");
 }
 
+EXPORT_SYMBOL(machine_halt);
+
 void machine_restart(char * cmd)
 {
 	char *p;
@@ -177,6 +180,8 @@ void machine_restart(char * cmd)
 	panic("Reboot failed!");
 }
 
+EXPORT_SYMBOL(machine_restart);
+
 void machine_power_off(void)
 {
 #ifdef CONFIG_SUN_AUXIO
@@ -185,6 +190,8 @@ void machine_power_off(void)
 #endif
 	machine_halt();
 }
+
+EXPORT_SYMBOL(machine_power_off);
 
 static spinlock_t sparc_backtrace_lock = SPIN_LOCK_UNLOCKED;
 
@@ -287,12 +294,21 @@ void show_regs(struct pt_regs *r)
 	       rw->ins[4], rw->ins[5], rw->ins[6], rw->ins[7]);
 }
 
+/*
+ * The show_stack is an external API which we do not use ourselves.
+ * The oops is printed in die_if_kernel.
+ */
 void show_stack(struct task_struct *tsk, unsigned long *_ksp)
 {
 	unsigned long pc, fp;
-	unsigned long task_base = (unsigned long) tsk;
+	unsigned long task_base;
 	struct reg_window *rw;
 	int count = 0;
+
+	if (tsk != NULL)
+		task_base = (unsigned long) tsk->thread_info;
+	else
+		task_base = (unsigned long) current_thread_info();
 
 	fp = (unsigned long) _ksp;
 	do {
@@ -306,13 +322,6 @@ void show_stack(struct task_struct *tsk, unsigned long *_ksp)
 		fp = rw->ins[6];
 	} while (++count < 16);
 	printk("\n");
-}
-
-void show_trace_task(struct task_struct *tsk)
-{
-	if (tsk)
-		show_stack(tsk,
-			   (unsigned long *) tsk->thread_info->ksp);
 }
 
 /*
@@ -405,15 +414,13 @@ asmlinkage int sparc_do_fork(unsigned long clone_flags,
                              struct pt_regs *regs,
                              unsigned long stack_size)
 {
-	unsigned long parent_tid_ptr = 0;
-	unsigned long child_tid_ptr = 0;
+	unsigned long parent_tid_ptr, child_tid_ptr;
 
 	clone_flags &= ~CLONE_IDLETASK;
 
-	if (clone_flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) {
-		parent_tid_ptr = regs->u_regs[UREG_G2];
-		child_tid_ptr = regs->u_regs[UREG_G3];
-	}
+	parent_tid_ptr = regs->u_regs[UREG_I2];
+	child_tid_ptr = regs->u_regs[UREG_I4];
+
 	return do_fork(clone_flags, stack_start,
 		       regs, stack_size,
 		       (int *) parent_tid_ptr,
@@ -538,6 +545,9 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 	/* Set the return value for the parent. */
 	regs->u_regs[UREG_I1] = 0;
 
+	if (clone_flags & CLONE_SETTLS)
+		childregs->u_regs[UREG_G7] = regs->u_regs[UREG_I3];
+
 	return 0;
 }
 
@@ -588,16 +598,20 @@ int dump_fpu (struct pt_regs * regs, elf_fpregset_t * fpregs)
 		put_psr(get_psr() | PSR_EF);
 		fpsave(&current->thread.float_regs[0], &current->thread.fsr,
 		       &current->thread.fpqueue[0], &current->thread.fpqdepth);
-		regs->psr &= ~(PSR_EF);
-		current->flags &= ~(PF_USEDFPU);
+		if (regs != NULL) {
+			regs->psr &= ~(PSR_EF);
+			current->flags &= ~(PF_USEDFPU);
+		}
 	}
 #else
 	if (current == last_task_used_math) {
 		put_psr(get_psr() | PSR_EF);
 		fpsave(&current->thread.float_regs[0], &current->thread.fsr,
 		       &current->thread.fpqueue[0], &current->thread.fpqdepth);
-		last_task_used_math = 0;
-		regs->psr &= ~(PSR_EF);
+		if (regs != NULL) {
+			regs->psr &= ~(PSR_EF);
+			last_task_used_math = 0;
+		}
 	}
 #endif
 	memcpy(&fpregs->pr_fr.pr_regs[0],

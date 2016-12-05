@@ -155,9 +155,11 @@ struct frhdr
 struct dlci_local
 {
    struct net_device_stats stats;
-   struct net_device          *slave;
+   struct net_device      *master;
+   struct net_device      *slave;
    struct dlci_conf       config;
    int                    configured;
+   struct list_head	  list;
 
    /* callback function */
    void              (*receive)(struct sk_buff *skb, struct net_device *);
@@ -188,9 +190,6 @@ struct frad_local
    int               state;		/* state of the S502/8 control latch */
    int               buffer;		/* current buffer for S508 firmware */
 };
-
-int register_frad(const char *name);
-int unregister_frad(const char *name);
 
 extern void dlci_ioctl_set(int (*hook)(unsigned int, void *));
 

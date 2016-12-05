@@ -55,7 +55,6 @@
 
 #include <linux/config.h>
 #include <linux/module.h>
-#include <linux/version.h>
 
 #include <linux/types.h>
 #include <linux/jiffies.h>
@@ -908,7 +907,7 @@ static int comx_rmdir(struct inode *dir, struct dentry *dentry)
 	if (dev->priv) {
 		kfree(dev->priv);
 	}
-	kfree(dev);
+	free_netdev(dev);
 
 	remove_proc_entry(FILENAME_DEBUG, entry);
 	remove_proc_entry(FILENAME_LINEUPDELAY, entry);

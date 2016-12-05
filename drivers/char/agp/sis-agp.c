@@ -8,8 +8,6 @@
 #include <linux/agp_backend.h>
 #include "agp.h"
 
-static int agp_try_unsupported __initdata = 0;
-
 static int sis_fetch_size(void)
 {
 	u8 temp_size;
@@ -45,7 +43,7 @@ static int sis_configure(void)
 
 	current_size = A_SIZE_8(agp_bridge->current_size);
 	pci_write_config_byte(agp_bridge->dev, SIS_TLBCNTRL, 0x05);
-	pci_read_config_dword(agp_bridge->dev, SIS_APBASE, &temp);
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &temp);
 	agp_bridge->gart_bus_addr = (temp & PCI_BASE_ADDRESS_MEM_MASK);
 	pci_write_config_dword(agp_bridge->dev, SIS_ATTBASE,
 			       agp_bridge->gatt_bus_addr);
@@ -97,19 +95,27 @@ struct agp_bridge_driver sis_driver = {
 	.agp_destroy_page	= agp_generic_destroy_page,
 };
 
-struct agp_device_ids sis_agp_device_ids[] __initdata =
+static struct agp_device_ids sis_agp_device_ids[] __devinitdata =
 {
 	{
-		.device_id	= PCI_DEVICE_ID_SI_740,
-		.chipset_name	= "740",
+		.device_id	= PCI_DEVICE_ID_SI_530,
+		.chipset_name	= "530",
 	},
 	{
-		.device_id	= PCI_DEVICE_ID_SI_650,
-		.chipset_name	= "650",
+		.device_id	= PCI_DEVICE_ID_SI_540,
+		.chipset_name	= "540",
 	},
 	{
-		.device_id  = PCI_DEVICE_ID_SI_651,
-		.chipset_name   = "651",
+		.device_id	= PCI_DEVICE_ID_SI_550,
+		.chipset_name	= "550",
+	},
+	{
+		.device_id	= PCI_DEVICE_ID_SI_620,
+		.chipset_name	= "620",
+	},
+	{
+		.device_id	= PCI_DEVICE_ID_SI_630,
+		.chipset_name	= "630",
 	},
 	{
 		.device_id	= PCI_DEVICE_ID_SI_645,
@@ -120,46 +126,58 @@ struct agp_device_ids sis_agp_device_ids[] __initdata =
 		.chipset_name	= "646",
 	},
 	{
-		.device_id	= PCI_DEVICE_ID_SI_735,
-		.chipset_name	= "735",
+		.device_id	= PCI_DEVICE_ID_SI_648,
+		.chipset_name	= "648",
 	},
 	{
-		.device_id	= PCI_DEVICE_ID_SI_745,
-		.chipset_name	= "745",
+		.device_id	= PCI_DEVICE_ID_SI_650,
+		.chipset_name	= "650",
+	},
+	{
+		.device_id  = PCI_DEVICE_ID_SI_651,
+		.chipset_name   = "651",
+	},
+	{
+		.device_id	= PCI_DEVICE_ID_SI_655,
+		.chipset_name	= "655",
+	},
+	{
+		.device_id	= PCI_DEVICE_ID_SI_661,
+		.chipset_name	= "661",
 	},
 	{
 		.device_id	= PCI_DEVICE_ID_SI_730,
 		.chipset_name	= "730",
 	},
 	{
-		.device_id	= PCI_DEVICE_ID_SI_630,
-		.chipset_name	= "630",
+		.device_id	= PCI_DEVICE_ID_SI_735,
+		.chipset_name	= "735",
 	},
 	{
-		.device_id	= PCI_DEVICE_ID_SI_540,
-		.chipset_name	= "540",
+		.device_id	= PCI_DEVICE_ID_SI_740,
+		.chipset_name	= "740",
 	},
 	{
-		.device_id	= PCI_DEVICE_ID_SI_620,
-		.chipset_name	= "620",
+		.device_id	= PCI_DEVICE_ID_SI_741,
+		.chipset_name	= "741",
 	},
 	{
-		.device_id	= PCI_DEVICE_ID_SI_530,
-		.chipset_name	= "530",
+		.device_id	= PCI_DEVICE_ID_SI_745,
+		.chipset_name	= "745",
 	},
 	{
-		.device_id	= PCI_DEVICE_ID_SI_550,
-		.chipset_name	= "550",
+		.device_id	= PCI_DEVICE_ID_SI_746,
+		.chipset_name	= "746",
 	},
 	{
-		.device_id	= PCI_DEVICE_ID_SI_655,
-		.chipset_name	= "655",
+		.device_id	= PCI_DEVICE_ID_SI_760,
+		.chipset_name	= "760",
 	},
 	{ }, /* dummy final entry, always present */
 };
 
-static int __init agp_sis_probe(struct pci_dev *pdev,
-				const struct pci_device_id *ent)
+static int __devinit agp_sis_probe(struct pci_dev *pdev,
+				   const struct pci_device_id *ent)
 {
 	struct agp_device_ids *devs = sis_agp_device_ids;
 	struct agp_bridge_data *bridge;
@@ -179,16 +197,9 @@ static int __init agp_sis_probe(struct pci_dev *pdev,
 		}
 	}
 
-	if (!agp_try_unsupported) {
-		printk(KERN_ERR PFX
-		    "Unsupported SiS chipset (device id: %04x),"
-		    " you might want to try agp_try_unsupported=1.\n",
+	printk(KERN_ERR PFX "Unsupported SiS chipset (device id: %04x)\n",
 		    pdev->device);
-		return -ENODEV;
-	}
-
-	printk(KERN_WARNING PFX "Trying generic SiS routines"
-	       " for device id: %04x\n", pdev->device);
+	return -ENODEV;
 
 found:
 	bridge = agp_alloc_bridge();
@@ -216,7 +227,7 @@ static void __devexit agp_sis_remove(struct pci_dev *pdev)
 	agp_put_bridge(bridge);
 }
 
-static struct pci_device_id agp_sis_pci_table[] __initdata = {
+static struct pci_device_id agp_sis_pci_table[] = {
 	{
 	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
 	.class_mask	= ~0,
@@ -250,5 +261,4 @@ static void __exit agp_sis_cleanup(void)
 module_init(agp_sis_init);
 module_exit(agp_sis_cleanup);
 
-MODULE_PARM(agp_try_unsupported, "1i");
 MODULE_LICENSE("GPL and additional rights");

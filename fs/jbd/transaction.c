@@ -147,10 +147,13 @@ repeat_locked:
 	 * lock to be released.
 	 */
 	if (transaction->t_state == T_LOCKED) {
+		DEFINE_WAIT(wait);
+
+		prepare_to_wait(&journal->j_wait_transaction_locked,
+					&wait, TASK_UNINTERRUPTIBLE);
 		spin_unlock(&journal->j_state_lock);
-		jbd_debug(3, "Handle %p stalling...\n", handle);
-		wait_event(journal->j_wait_transaction_locked,
-				transaction->t_state != T_LOCKED);
+		schedule();
+		finish_wait(&journal->j_wait_transaction_locked, &wait);
 		goto repeat;
 	}
 
@@ -206,15 +209,10 @@ repeat_locked:
 	 * Also, this test is inconsitent with the matching one in
 	 * journal_extend().
 	 */
-	needed = journal->j_max_transaction_buffers;
-	if (journal->j_committing_transaction) 
-		needed += journal->j_committing_transaction->
-					t_outstanding_credits;
-
-	if (__log_space_left(journal) < needed) {
+	if (__log_space_left(journal) < jbd_space_needed(journal)) {
 		jbd_debug(2, "Handle %p waiting for checkpoint...\n", handle);
 		spin_unlock(&transaction->t_handle_lock);
-		__log_wait_for_space(journal, needed);
+		__log_wait_for_space(journal);
 		goto repeat_locked;
 	}
 
@@ -530,11 +528,17 @@ do_get_write_access(handle_t *handle, struct journal_head *jh,
 			int force_copy, int *credits) 
 {
 	struct buffer_head *bh;
-	transaction_t *transaction = handle->h_transaction;
-	journal_t *journal = transaction->t_journal;
+	transaction_t *transaction;
+	journal_t *journal;
 	int error;
 	char *frozen_buffer = NULL;
 	int need_copy = 0;
+
+	if (is_handle_aborted(handle))
+		return -EROFS;
+
+	transaction = handle->h_transaction;
+	journal = transaction->t_journal;
 
 	jbd_debug(5, "buffer_head %p, force_copy %d\n", jh, force_copy);
 
@@ -747,7 +751,7 @@ int journal_get_write_access(handle_t *handle,
 	/* We do not want to get caught playing with fields which the
 	 * log thread also manipulates.  Make sure that the buffer
 	 * completes any outstanding IO before proceeding. */
-	rc = do_get_write_access(handle, jh, 0, NULL);
+	rc = do_get_write_access(handle, jh, 0, credits);
 	journal_put_journal_head(jh);
 	return rc;
 }
@@ -1111,16 +1115,6 @@ int journal_dirty_metadata(handle_t *handle, struct buffer_head *bh)
 	if (jh->b_transaction == handle->h_transaction &&
 					jh->b_jlist == BJ_Metadata) {
 		JBUFFER_TRACE(jh, "fastpath");
-		console_verbose();
-		if (jh->b_transaction != journal->j_running_transaction) {
-			printk("jh->b_transaction=%p\n", jh->b_transaction);
-			printk("journal->j_running_transaction=%p\n",
-				journal->j_running_transaction);
-			printk("handle->h_transaction=%p\n",
-				handle->h_transaction);
-			printk("journal->j_committing_transaction=%p\n",
-				journal->j_committing_transaction);
-		}
 		J_ASSERT_JH(jh, jh->b_transaction ==
 					journal->j_running_transaction);
 		goto out_unlock_bh;
@@ -1332,9 +1326,6 @@ int journal_stop(handle_t *handle)
 	transaction_t *transaction = handle->h_transaction;
 	journal_t *journal = transaction->t_journal;
 	int old_handle_count, err;
-
-	if (!handle)
-		return 0;
 
 	J_ASSERT(transaction->t_updates > 0);
 	J_ASSERT(journal_current_handle() == handle);
@@ -1944,9 +1935,6 @@ void __journal_file_buffer(struct journal_head *jh,
 	J_ASSERT_JH(jh, jbd_is_locked_bh_state(bh));
 	assert_spin_locked(&transaction->t_journal->j_list_lock);
 
-#ifdef __SMP__
-	J_ASSERT (current->lock_depth >= 0);
-#endif
 	J_ASSERT_JH(jh, jh->b_jlist < BJ_Types);
 	J_ASSERT_JH(jh, jh->b_transaction == transaction ||
 				jh->b_transaction == 0);

@@ -21,6 +21,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/smp_lock.h>
 #include <linux/acct.h>
@@ -134,9 +135,11 @@ void deactivate_super(struct super_block *s)
 	}
 }
 
+EXPORT_SYMBOL(deactivate_super);
+
 /**
- *	grab_super	- acquire an active reference
- *	@s	- reference we are trying to make active
+ *	grab_super - acquire an active reference
+ *	@s: reference we are trying to make active
  *
  *	Tries to acquire an active reference.  grab_super() is used when we
  * 	had just found a superblock in super_blocks or fs_type->fs_supers
@@ -214,6 +217,8 @@ void generic_shutdown_super(struct super_block *sb)
 	up_write(&sb->s_umount);
 }
 
+EXPORT_SYMBOL(generic_shutdown_super);
+
 /**
  *	sget	-	find or create a superblock
  *	@type:	filesystem type superblock should belong to
@@ -226,12 +231,9 @@ struct super_block *sget(struct file_system_type *type,
 			int (*set)(struct super_block *,void *),
 			void *data)
 {
-	struct super_block *s = alloc_super();
+	struct super_block *s = NULL;
 	struct list_head *p;
 	int err;
-
-	if (!s)
-		return ERR_PTR(-ENOMEM);
 
 retry:
 	spin_lock(&sb_lock);
@@ -242,9 +244,18 @@ retry:
 			continue;
 		if (!grab_super(old))
 			goto retry;
-		destroy_super(s);
+		if (s)
+			destroy_super(s);
 		return old;
 	}
+	if (!s) {
+		spin_unlock(&sb_lock);
+		s = alloc_super();
+		if (!s)
+			return ERR_PTR(-ENOMEM);
+		goto retry;
+	}
+		
 	err = set(s, data);
 	if (err) {
 		spin_unlock(&sb_lock);
@@ -259,11 +270,15 @@ retry:
 	return s;
 }
 
+EXPORT_SYMBOL(sget);
+
 void drop_super(struct super_block *sb)
 {
 	up_read(&sb->s_umount);
 	put_super(sb);
 }
+
+EXPORT_SYMBOL(drop_super);
 
 static inline void write_super(struct super_block *sb)
 {
@@ -353,8 +368,8 @@ restart:
 }
 
 /**
- *	get_super	-	get the superblock of a device
- *	@dev: device to get the superblock for
+ *	get_super - get the superblock of a device
+ *	@bdev: device to get the superblock for
  *	
  *	Scans the superblock list and finds the superblock of the file system
  *	mounted on the device given. %NULL is returned if no match is found.
@@ -382,6 +397,8 @@ rescan:
 	spin_unlock(&sb_lock);
 	return NULL;
 }
+
+EXPORT_SYMBOL(get_super);
  
 struct super_block * user_get_super(dev_t dev)
 {
@@ -405,14 +422,16 @@ rescan:
 	return NULL;
 }
 
-asmlinkage long sys_ustat(dev_t dev, struct ustat __user * ubuf)
+EXPORT_SYMBOL(user_get_super);
+
+asmlinkage long sys_ustat(unsigned dev, struct ustat __user * ubuf)
 {
         struct super_block *s;
         struct ustat tmp;
         struct kstatfs sbuf;
 	int err = -EINVAL;
 
-        s = user_get_super(dev);
+        s = user_get_super(new_decode_dev(dev));
         if (s == NULL)
                 goto out;
 	err = vfs_statfs(s, &sbuf);
@@ -442,10 +461,11 @@ static void mark_files_ro(struct super_block *sb)
 }
 
 /**
- *	do_remount_sb	-	asks filesystem to change mount options.
+ *	do_remount_sb - asks filesystem to change mount options.
  *	@sb:	superblock in question
  *	@flags:	numeric part of options
  *	@data:	the rest of options
+ *      @force: whether or not to force the change
  *
  *	Alters the mount options of a mounted file system.
  */
@@ -488,8 +508,16 @@ static void do_emergency_remount(unsigned long foo)
 		sb->s_count++;
 		spin_unlock(&sb_lock);
 		down_read(&sb->s_umount);
-		if (sb->s_root && sb->s_bdev && !(sb->s_flags & MS_RDONLY))
+		if (sb->s_root && sb->s_bdev && !(sb->s_flags & MS_RDONLY)) {
+			/*
+			 * ->remount_fs needs lock_kernel().
+			 *
+			 * What lock protects sb->s_flags??
+			 */
+			lock_kernel();
 			do_remount_sb(sb, MS_RDONLY, NULL, 1);
+			unlock_kernel();
+		}
 		drop_super(sb);
 		spin_lock(&sb_lock);
 	}
@@ -526,6 +554,8 @@ int set_anon_super(struct super_block *s, void *data)
 	return 0;
 }
 
+EXPORT_SYMBOL(set_anon_super);
+
 void kill_anon_super(struct super_block *sb)
 {
 	int slot = MINOR(sb->s_dev);
@@ -535,12 +565,16 @@ void kill_anon_super(struct super_block *sb)
 	spin_unlock(&unnamed_dev_lock);
 }
 
+EXPORT_SYMBOL(kill_anon_super);
+
 void kill_litter_super(struct super_block *sb)
 {
 	if (sb->s_root)
 		d_genocide(sb->s_root);
 	kill_anon_super(sb);
 }
+
+EXPORT_SYMBOL(kill_litter_super);
 
 static int set_bdev_super(struct super_block *s, void *data)
 {
@@ -600,6 +634,8 @@ out:
 	return s;
 }
 
+EXPORT_SYMBOL(get_sb_bdev);
+
 void kill_block_super(struct super_block *sb)
 {
 	struct block_device *bdev = sb->s_bdev;
@@ -607,6 +643,8 @@ void kill_block_super(struct super_block *sb)
 	set_blocksize(bdev, sb->s_old_blocksize);
 	close_bdev_excl(bdev, BDEV_FS);
 }
+
+EXPORT_SYMBOL(kill_block_super);
 
 struct super_block *get_sb_nodev(struct file_system_type *fs_type,
 	int flags, void *data,
@@ -629,6 +667,8 @@ struct super_block *get_sb_nodev(struct file_system_type *fs_type,
 	s->s_flags |= MS_ACTIVE;
 	return s;
 }
+
+EXPORT_SYMBOL(get_sb_nodev);
 
 static int compare_single(struct super_block *s, void *p)
 {
@@ -658,6 +698,8 @@ struct super_block *get_sb_single(struct file_system_type *fs_type,
 	do_remount_sb(s, flags, data, 0);
 	return s;
 }
+
+EXPORT_SYMBOL(get_sb_single);
 
 struct vfsmount *
 do_kern_mount(const char *fstype, int flags, const char *name, void *data)
@@ -701,3 +743,5 @@ struct vfsmount *kern_mount(struct file_system_type *type)
 {
 	return do_kern_mount(type->name, 0, type->name, NULL);
 }
+
+EXPORT_SYMBOL(kern_mount);

@@ -20,27 +20,20 @@ ifeq ($(CONFIG_FRAME_POINTER),y)
 CFLAGS		+=-fno-omit-frame-pointer -mapcs -mno-sched-prolog
 endif
 
-ifeq ($(CONFIG_DEBUG_INFO),y)
-CFLAGS		+=-g
-endif
-
 ifeq ($(CONFIG_CPU_BIG_ENDIAN),y)
 CFLAGS		+= -mbig-endian
 AS		+= -EB
 LD		+= -EB
+AFLAGS		+= -mbig-endian
 endif
 
-# Select CPU dependent flags.  Note that order of declaration is important;
-# the options further down the list override previous items.
-#
-apcs-$(CONFIG_CPU_32)		:=-mapcs-32
-apcs-$(CONFIG_CPU_26)		:=-mapcs-26 -mcpu=arm3
+comma = ,
 
 # This selects which instruction set is used.
 # Note that GCC does not numerically define an architecture version
 # macro, but instead defines a whole series of macros which makes
 # testing for a specific architecture or later rather impossible.
-arch-$(CONFIG_CPU_32v5)		:=-D__LINUX_ARM_ARCH__=5 -march=armv5te
+arch-$(CONFIG_CPU_32v5)		:=-D__LINUX_ARM_ARCH__=5 $(call check_gcc,-march=armv5te,-march=armv4)
 arch-$(CONFIG_CPU_32v4)		:=-D__LINUX_ARM_ARCH__=4 -march=armv4
 arch-$(CONFIG_CPU_32v3)		:=-D__LINUX_ARM_ARCH__=3 -march=armv3
 
@@ -53,39 +46,24 @@ tune-$(CONFIG_CPU_ARM922T)	:=-mtune=arm9tdmi
 tune-$(CONFIG_CPU_ARM926T)	:=-mtune=arm9tdmi
 tune-$(CONFIG_CPU_SA110)	:=-mtune=strongarm110
 tune-$(CONFIG_CPU_SA1100)	:=-mtune=strongarm1100
-tune-$(CONFIG_CPU_XSCALE)	:=-mtune=xscale
+tune-$(CONFIG_CPU_XSCALE)	:=$(call check_gcc,-mtune=xscale,-mtune=strongarm110) -Wa,-mcpu=xscale
 
-# Force -mno-fpu to be passed to the assembler.  Some versions of gcc don't
-# do this with -msoft-float
-CFLAGS_BOOT	:=$(apcs-y) $(arch-y) $(tune-y) -mshort-load-bytes -msoft-float -Wa,-mno-fpu -Uarm
-CFLAGS		+=$(apcs-y) $(arch-y) $(tune-y) -mshort-load-bytes -msoft-float -Wa,-mno-fpu -Uarm
-AFLAGS		+=$(apcs-y) $(arch-y) $(tune-y) -msoft-float -Wa,-mno-fpu
+# Need -Uarm for gcc < 3.x
+CFLAGS_BOOT	:=-mapcs-32 $(arch-y) $(tune-y) -mshort-load-bytes -msoft-float -Wa,-mno-fpu -Uarm
+CFLAGS		+=-mapcs-32 $(arch-y) $(tune-y) -mshort-load-bytes -msoft-float -Wa,-mno-fpu -Uarm
+AFLAGS		+=-mapcs-32 $(arch-y) $(tune-y) -msoft-float -Wa,-mno-fpu
 
 #Default value
 DATAADDR	:= .
 
-ifeq ($(CONFIG_CPU_26),y)
-PROCESSOR	:= armo
-head-y		:= arch/arm/mach-arc/head.o arch/arm/kernel/init_task.o
-LDFLAGS_BLOB	+= --oformat elf26-littlearm
-  ifeq ($(CONFIG_ROM_KERNEL),y)
-    DATAADDR	 := 0x02080000
-    textaddr-y	 := 0x03800000
-  else
-    textaddr-y	 := 0x02080000
-  endif
-endif
-
-ifeq ($(CONFIG_CPU_32),y)
 PROCESSOR	:= armv
 head-y		:= arch/arm/kernel/head.o arch/arm/kernel/init_task.o
-  ifeq ($(CONFIG_CPU_BIG_ENDIAN),y)
-    LDFLAGS_BLOB	+= --oformat elf32-bigarm
-  else
-    LDFLAGS_BLOB	+= --oformat elf32-littlearm
-  endif
-textaddr-y	:= 0xC0008000
+ifeq ($(CONFIG_CPU_BIG_ENDIAN),y)
+  LDFLAGS_BLOB	+= --oformat elf32-bigarm
+else
+  LDFLAGS_BLOB	+= --oformat elf32-littlearm
 endif
+textaddr-y	:= 0xC0008000
 
  machine-$(CONFIG_ARCH_ARCA5K)	   := arc
  machine-$(CONFIG_ARCH_RPC)	   := rpc
@@ -160,16 +138,10 @@ include/asm-arm/.arch: $(wildcard include/config/arch/*.h)
 	@ln -sf arch-$(INCDIR) include/asm-arm/arch
 	@touch $@
 
-include/asm-arm/.proc: $(wildcard include/config/cpu/32.h) $(wildcard include/config/cpu/26.h)
-	@echo '  Making asm-arm/proc -> asm-arm/proc-$(PROCESSOR) symlink'
-	@rm -f include/asm-arm/proc
-	@ln -sf proc-$(PROCESSOR) include/asm-arm/proc
-	@touch $@
-
 prepare: maketools
 
 .PHONY: maketools FORCE
-maketools: include/asm-arm/.arch include/asm-arm/.proc \
+maketools: include/asm-arm/.arch \
 	   include/asm-arm/constants.h include/linux/version.h FORCE
 	$(Q)$(MAKE) $(build)=arch/arm/tools include/asm-arm/mach-types.h
 
@@ -177,17 +149,14 @@ maketools: include/asm-arm/.arch include/asm-arm/.proc \
 bzImage: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/zImage
 
-zImage Image bootpImage: vmlinux
+zImage Image bootpImage uImage: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
 zinstall install: vmlinux
 	$(Q)$(MAKE) $(build)=$(boot) $@
 
-MRPROPER_FILES	+= \
-	include/asm-arm/arch include/asm-arm/.arch \
-	include/asm-arm/proc include/asm-arm/.proc \
-	include/asm-arm/constants.h* \
-	include/asm-arm/mach-types.h
+CLEAN_FILES += include/asm-arm/constants.h* include/asm-arm/mach-types.h
+MRPROPER_FILES += include/asm-arm/arch include/asm-arm/.arch
 
 # We use MRPROPER_FILES and CLEAN_FILES now
 archclean:
@@ -200,24 +169,8 @@ bp:;	$(Q)$(MAKE) $(build)=$(boot) $(boot)/bootpImage
 i:;	$(Q)$(MAKE) $(build)=$(boot) install
 zi:;	$(Q)$(MAKE) $(build)=$(boot) zinstall
 
-#
-# Configuration targets.  Use these to select a
-# configuration for your architecture
-%_config:
-	@( \
-	CFG=$(@:_config=); \
-	if [ -f arch/arm/def-configs/$$CFG ]; then \
-	  [ -f .config ] && mv -f .config .config.old; \
-	  cp arch/arm/def-configs/$$CFG .config; \
-	  echo "*** Default configuration for $$CFG installed"; \
-	  echo "*** Next, you may run 'make oldconfig'"; \
-	else \
-	  echo "$$CFG does not exist"; \
-	fi; \
-	)
-
 arch/$(ARCH)/kernel/asm-offsets.s: include/asm include/linux/version.h \
-				   include/asm-arm/.arch include/asm-arm/.proc \
+				   include/asm-arm/.arch \
 				   include/config/MARKER
 
 include/asm-$(ARCH)/constants.h: arch/$(ARCH)/kernel/asm-offsets.s
@@ -227,7 +180,6 @@ define archhelp
   echo  '* zImage        - Compressed kernel image (arch/$(ARCH)/boot/zImage)'
   echo  '  Image         - Uncompressed kernel image (arch/$(ARCH)/boot/Image)'
   echo  '  bootpImage    - Combined zImage and initial RAM disk' 
-  echo  '  initrd        - Create an initial image'
   echo  '  install       - Install uncompressed kernel'
   echo  '  zinstall      - Install compressed kernel'
   echo  '                  Install using (your) ~/bin/installkernel or'

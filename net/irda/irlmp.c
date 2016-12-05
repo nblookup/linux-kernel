@@ -33,6 +33,7 @@
 #include <linux/init.h>
 #include <linux/kmod.h>
 #include <linux/random.h>
+#include <linux/seq_file.h>
 
 #include <net/irda/irda.h>
 #include <net/irda/timer.h>
@@ -63,9 +64,6 @@ char *lmp_reasons[] = {
 };
 
 __u8 *irlmp_hint_to_service(__u8 *hint);
-#ifdef CONFIG_PROC_FS
-int irlmp_proc_read(char *buf, char **start, off_t offst, int len);
-#endif
 
 /*
  * Function irlmp_init (void)
@@ -89,6 +87,15 @@ int __init irlmp_init(void)
 	irlmp->links = hashbin_new(HB_LOCK);
 	irlmp->unconnected_lsaps = hashbin_new(HB_LOCK);
 	irlmp->cachelog = hashbin_new(HB_NOLOCK);
+
+	if ((irlmp->clients == NULL) ||
+	    (irlmp->services == NULL) ||
+	    (irlmp->links == NULL) ||
+	    (irlmp->unconnected_lsaps == NULL) ||
+	    (irlmp->cachelog == NULL)) {
+		return -ENOMEM;
+	}
+
 	spin_lock_init(&irlmp->cachelog->hb_spinlock);
 
 	irlmp->free_lsap_sel = 0x10; /* Reserved 0x00-0x0f */
@@ -139,6 +146,7 @@ struct lsap_cb *irlmp_open_lsap(__u8 slsap_sel, notify_t *notify, __u8 pid)
 	ASSERT(notify != NULL, return NULL;);
 	ASSERT(irlmp != NULL, return NULL;);
 	ASSERT(irlmp->magic == LMP_MAGIC, return NULL;);
+	ASSERT(notify->instance != NULL, return NULL;);
 
 	/*  Does the client care which Source LSAP selector it gets?  */
 	if (slsap_sel == LSAP_ANY) {
@@ -171,7 +179,6 @@ struct lsap_cb *irlmp_open_lsap(__u8 slsap_sel, notify_t *notify, __u8 pid)
 
 	init_timer(&self->watchdog_timer);
 
-	ASSERT(notify->instance != NULL, return NULL;);
 	self->notify = *notify;
 
 	self->lsap_state = LSAP_DISCONNECTED;
@@ -287,10 +294,15 @@ void irlmp_register_link(struct irlap_cb *irlap, __u32 saddr, notify_t *notify)
 	lap->magic = LMP_LAP_MAGIC;
 	lap->saddr = saddr;
 	lap->daddr = DEV_ADDR_ANY;
-	lap->lsaps = hashbin_new(HB_LOCK);
 #ifdef CONFIG_IRDA_CACHE_LAST_LSAP
 	lap->cache.valid = FALSE;
 #endif
+	lap->lsaps = hashbin_new(HB_LOCK);
+	if (lap->lsaps == NULL) {
+		WARNING("%s(), unable to kmalloc lsaps\n", __FUNCTION__);
+		kfree(lap);
+		return;
+	}
 
 	lap->lap_state = LAP_STANDBY;
 
@@ -321,15 +333,23 @@ void irlmp_unregister_link(__u32 saddr)
 
 	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
 
+	/* We must remove ourselves from the hashbin *first*. This ensure
+	 * that no more LSAPs will be open on this link and no discovery
+	 * will be triggered anymore. Jean II */
 	link = hashbin_remove(irlmp->links, saddr, NULL);
 	if (link) {
 		ASSERT(link->magic == LMP_LAP_MAGIC, return;);
 
+		/* Kill all the LSAPs on this link. Jean II */
+		link->reason = LAP_DISC_INDICATION;
+		link->daddr = DEV_ADDR_ANY;
+		irlmp_do_lap_event(link, LM_LAP_DISCONNECT_INDICATION, NULL);
+
 		/* Remove all discoveries discovered at this link */
 		irlmp_expire_discoveries(irlmp->cachelog, link->saddr, TRUE);
 
+		/* Final cleanup */
 		del_timer(&link->idle_timer);
-
 		link->magic = 0;
 		kfree(link);
 	}
@@ -532,7 +552,8 @@ int irlmp_connect_response(struct lsap_cb *self, struct sk_buff *userdata)
 	ASSERT(self->magic == LMP_LSAP_MAGIC, return -1;);
 	ASSERT(userdata != NULL, return -1;);
 
-	set_bit(0, &self->connected);	/* TRUE */
+	/* We set the connected bit and move the lsap to the connected list
+	 * in the state machine itself. Jean II */
 
 	IRDA_DEBUG(2, "%s(), slsap_sel=%02x, dlsap_sel=%02x\n",
 		   __FUNCTION__, self->slsap_sel, self->dlsap_sel);
@@ -604,13 +625,17 @@ struct lsap_cb *irlmp_dup(struct lsap_cb *orig, void *instance)
 
 	spin_lock_irqsave(&irlmp->unconnected_lsaps->hb_spinlock, flags);
 
-	/* Only allowed to duplicate unconnected LSAP's */
-	if (!hashbin_find(irlmp->unconnected_lsaps, (long) orig, NULL)) {
-		IRDA_DEBUG(0, "%s(), unable to find LSAP\n", __FUNCTION__);
+	/* Only allowed to duplicate unconnected LSAP's, and only LSAPs
+	 * that have received a connect indication. Jean II */
+	if ((!hashbin_find(irlmp->unconnected_lsaps, (long) orig, NULL)) ||
+	    (orig->lap == NULL)) {
+		IRDA_DEBUG(0, "%s(), invalid LSAP (wrong state)\n",
+			   __FUNCTION__);
 		spin_unlock_irqrestore(&irlmp->unconnected_lsaps->hb_spinlock,
 				       flags);
 		return NULL;
 	}
+
 	/* Allocate a new instance */
 	new = kmalloc(sizeof(struct lsap_cb), GFP_ATOMIC);
 	if (!new)  {
@@ -635,8 +660,8 @@ struct lsap_cb *irlmp_dup(struct lsap_cb *orig, void *instance)
 	hashbin_insert(irlmp->unconnected_lsaps, (irda_queue_t *) new,
 		       (long) new, NULL);
 
-	/* Make sure that we invalidate the cache */
 #ifdef CONFIG_IRDA_CACHE_LAST_LSAP
+	/* Make sure that we invalidate the LSAP cache */
 	new->lap->cache.valid = FALSE;
 #endif /* CONFIG_IRDA_CACHE_LAST_LSAP */
 
@@ -1753,81 +1778,189 @@ __u32 irlmp_get_daddr(struct lsap_cb *self)
 }
 
 #ifdef CONFIG_PROC_FS
-/*
- * Function irlmp_proc_read (buf, start, offset, len, unused)
- *
- *    Give some info to the /proc file system
- *
- */
-int irlmp_proc_read(char *buf, char **start, off_t offset, int len)
+
+struct irlmp_iter_state {
+	hashbin_t *hashbin;
+};
+
+#define LSAP_START_TOKEN	((void *)1)
+#define LINK_START_TOKEN	((void *)2)
+
+static void *irlmp_seq_hb_idx(struct irlmp_iter_state *iter, loff_t *off)
 {
-	struct lsap_cb *self;
-	struct lap_cb *lap;
-	unsigned long flags;
+	void *element;
 
-	ASSERT(irlmp != NULL, return 0;);
-
-	len = 0;
-
-	len += sprintf( buf+len, "Unconnected LSAPs:\n");
-	spin_lock_irqsave(&irlmp->unconnected_lsaps->hb_spinlock, flags);
-	self = (struct lsap_cb *) hashbin_get_first( irlmp->unconnected_lsaps);
-	while (self != NULL) {
-		ASSERT(self->magic == LMP_LSAP_MAGIC, break;);
-		len += sprintf(buf+len, "lsap state: %s, ",
-			       irlsap_state[ self->lsap_state]);
-		len += sprintf(buf+len,
-			       "slsap_sel: %#02x, dlsap_sel: %#02x, ",
-			       self->slsap_sel, self->dlsap_sel);
-		len += sprintf(buf+len, "(%s)", self->notify.name);
-		len += sprintf(buf+len, "\n");
-
-		self = (struct lsap_cb *) hashbin_get_next(
-			irlmp->unconnected_lsaps);
+	spin_lock_irq(&iter->hashbin->hb_spinlock);
+	for (element = hashbin_get_first(iter->hashbin);
+	     element != NULL; 
+	     element = hashbin_get_next(iter->hashbin)) {
+		if (!off || *off-- == 0) {
+			/* NB: hashbin left locked */
+			return element;
+		}
 	}
-	spin_unlock_irqrestore(&irlmp->unconnected_lsaps->hb_spinlock, flags);
+	spin_unlock_irq(&iter->hashbin->hb_spinlock);
+	iter->hashbin = NULL;
+	return NULL;
+}
 
-	len += sprintf(buf+len, "\nRegistred Link Layers:\n");
-	spin_lock_irqsave(&irlmp->links->hb_spinlock, flags);
-	lap = (struct lap_cb *) hashbin_get_first(irlmp->links);
-	while (lap != NULL) {
-		len += sprintf(buf+len, "lap state: %s, ",
-			       irlmp_state[lap->lap_state]);
 
-		len += sprintf(buf+len, "saddr: %#08x, daddr: %#08x, ",
-			       lap->saddr, lap->daddr);
-		len += sprintf(buf+len, "num lsaps: %d",
-			       HASHBIN_GET_SIZE(lap->lsaps));
-		len += sprintf(buf+len, "\n");
+static void *irlmp_seq_start(struct seq_file *seq, loff_t *pos)
+{
+	struct irlmp_iter_state *iter = seq->private;
+	void *v;
+	loff_t off = *pos;
+
+	iter->hashbin = NULL;
+	if (off-- == 0)
+		return LSAP_START_TOKEN;
+
+	iter->hashbin = irlmp->unconnected_lsaps;
+	v = irlmp_seq_hb_idx(iter, &off);
+	if (v)
+		return v;
+
+	if (off-- == 0)
+		return LINK_START_TOKEN;
+
+	iter->hashbin = irlmp->links;
+	return irlmp_seq_hb_idx(iter, &off);
+}
+
+static void *irlmp_seq_next(struct seq_file *seq, void *v, loff_t *pos)
+{
+	struct irlmp_iter_state *iter = seq->private;
+
+	++*pos;
+
+	if (v == LSAP_START_TOKEN) {		/* start of list of lsaps */
+		iter->hashbin = irlmp->unconnected_lsaps;
+		v = irlmp_seq_hb_idx(iter, NULL);
+		return v ? v : LINK_START_TOKEN;
+	}
+
+	if (v == LINK_START_TOKEN) {		/* start of list of links */
+		iter->hashbin = irlmp->links;
+		return irlmp_seq_hb_idx(iter, NULL);
+	}
+
+	v = hashbin_get_next(iter->hashbin);
+
+	if (v == NULL) {			/* no more in this hash bin */
+		spin_unlock_irq(&iter->hashbin->hb_spinlock);
+
+		if (iter->hashbin == irlmp->unconnected_lsaps) 
+			v =  LINK_START_TOKEN;
+
+		iter->hashbin = NULL;
+	}
+	return v;
+}
+
+static void irlmp_seq_stop(struct seq_file *seq, void *v)
+{
+	struct irlmp_iter_state *iter = seq->private;
+
+	if (iter->hashbin)
+		spin_unlock_irq(&iter->hashbin->hb_spinlock);
+}
+
+static int irlmp_seq_show(struct seq_file *seq, void *v)
+{
+	const struct irlmp_iter_state *iter = seq->private;
+	struct lsap_cb *self = v;
+
+	if (v == LSAP_START_TOKEN)
+		seq_puts(seq, "Unconnected LSAPs:\n");
+	else if (v == LINK_START_TOKEN)
+		seq_puts(seq, "\nRegistered Link Layers:\n");
+	else if (iter->hashbin == irlmp->unconnected_lsaps) {
+		self = v;
+		ASSERT(self->magic == LMP_LSAP_MAGIC, return -EINVAL; );
+		seq_printf(seq, "lsap state: %s, ",
+			   irlsap_state[ self->lsap_state]);
+		seq_printf(seq,
+			   "slsap_sel: %#02x, dlsap_sel: %#02x, ",
+			   self->slsap_sel, self->dlsap_sel);
+		seq_printf(seq, "(%s)", self->notify.name);
+		seq_printf(seq, "\n");
+	} else if (iter->hashbin == irlmp->links) {
+		struct lap_cb *lap = v;
+
+		seq_printf(seq, "lap state: %s, ",
+			   irlmp_state[lap->lap_state]);
+
+		seq_printf(seq, "saddr: %#08x, daddr: %#08x, ",
+			   lap->saddr, lap->daddr);
+		seq_printf(seq, "num lsaps: %d",
+			   HASHBIN_GET_SIZE(lap->lsaps));
+		seq_printf(seq, "\n");
 
 		/* Careful for priority inversions here !
 		 * All other uses of attrib spinlock are independent of
 		 * the object spinlock, so we are safe. Jean II */
 		spin_lock(&lap->lsaps->hb_spinlock);
 
-		len += sprintf(buf+len, "\n  Connected LSAPs:\n");
-		self = (struct lsap_cb *) hashbin_get_first(lap->lsaps);
-		while (self != NULL) {
+		seq_printf(seq, "\n  Connected LSAPs:\n");
+		for (self = (struct lsap_cb *) hashbin_get_first(lap->lsaps);
+		     self != NULL;
+		     self = (struct lsap_cb *)hashbin_get_next(lap->lsaps)) {
 			ASSERT(self->magic == LMP_LSAP_MAGIC, break;);
-			len += sprintf(buf+len, "  lsap state: %s, ",
-				       irlsap_state[ self->lsap_state]);
-			len += sprintf(buf+len,
-				       "slsap_sel: %#02x, dlsap_sel: %#02x, ",
-				       self->slsap_sel, self->dlsap_sel);
-			len += sprintf(buf+len, "(%s)", self->notify.name);
-			len += sprintf(buf+len, "\n");
+			seq_printf(seq, "  lsap state: %s, ",
+				   irlsap_state[ self->lsap_state]);
+			seq_printf(seq,
+				   "slsap_sel: %#02x, dlsap_sel: %#02x, ",
+				   self->slsap_sel, self->dlsap_sel);
+			seq_printf(seq, "(%s)", self->notify.name);
+			seq_putc(seq, '\n');
 
-			self = (struct lsap_cb *) hashbin_get_next(
-				lap->lsaps);
 		}
 		spin_unlock(&lap->lsaps->hb_spinlock);
-		len += sprintf(buf+len, "\n");
+		seq_putc(seq, '\n');
+	} else
+		return -EINVAL;
 
-		lap = (struct lap_cb *) hashbin_get_next(irlmp->links);
-	}
-	spin_unlock_irqrestore(&irlmp->links->hb_spinlock, flags);
-
-	return len;
+	return 0;
 }
+
+static struct seq_operations irlmp_seq_ops = {
+	.start  = irlmp_seq_start,
+	.next   = irlmp_seq_next,
+	.stop   = irlmp_seq_stop,
+	.show   = irlmp_seq_show,
+};
+
+static int irlmp_seq_open(struct inode *inode, struct file *file)
+{
+	struct seq_file *seq;
+	int rc = -ENOMEM;
+	struct irlmp_iter_state *s;
+
+	ASSERT(irlmp != NULL, return -EINVAL;);
+
+	s = kmalloc(sizeof(*s), GFP_KERNEL);
+	if (!s)
+		goto out;
+
+	rc = seq_open(file, &irlmp_seq_ops);
+	if (rc)
+		goto out_kfree;
+
+	seq	     = file->private_data;
+	seq->private = s;
+out:
+	return rc;
+out_kfree:
+	kfree(s);
+	goto out;
+}
+
+struct file_operations irlmp_seq_fops = {
+	.owner		= THIS_MODULE,
+	.open           = irlmp_seq_open,
+	.read           = seq_read,
+	.llseek         = seq_lseek,
+	.release	= seq_release_private,
+};
 
 #endif /* PROC_FS */

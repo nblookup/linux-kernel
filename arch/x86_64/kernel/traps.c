@@ -248,6 +248,8 @@ void dump_stack(void)
 	show_trace(&dummy);
 }
 
+EXPORT_SYMBOL(dump_stack);
+
 void show_registers(struct pt_regs *regs)
 {
 	int i;
@@ -333,25 +335,34 @@ void oops_begin(void)
 	bust_spinlocks(1); 
 }
 
+void oops_end(void)
+{ 
+	die_owner = -1;
+	bust_spinlocks(0); 
+	spin_unlock(&die_lock); 
+	local_irq_enable();	/* make sure back scroll still works */
+} 
+
 void __die(const char * str, struct pt_regs * regs, long err)
 {
 	static int die_counter;
-	handle_BUG(regs); 
-	printk(KERN_EMERG "%s: %04lx [%u]\n", str, err & 0xffff, ++die_counter);
+	printk(KERN_EMERG "%s: %04lx [%u]\n", str, err & 0xffff,++die_counter);
 	notify_die(DIE_OOPS, (char *)str, regs, err, 255, SIGSEGV);
 	show_registers(regs);
-	bust_spinlocks(0);
-	die_owner = -1; 
-	spin_unlock_irq(&die_lock);
-	do_exit(SIGSEGV);
+	/* Execute summary in case the oops scrolled away */
+	printk(KERN_EMERG "RIP "); 
+	printk_address(regs->rip); 
+	printk(" RSP <%016lx>\n", regs->rsp); 
 }
 
 void die(const char * str, struct pt_regs * regs, long err)
 {
 	oops_begin();
+	handle_BUG(regs);
 	__die(str, regs, err);
+	oops_end();
+	do_exit(SIGSEGV); 
 }
-
 static inline void die_if_kernel(const char * str, struct pt_regs * regs, long err)
 {
 	if (!(regs->eflags & VM_MASK) && (regs->cs == __KERNEL_CS))
@@ -679,8 +690,8 @@ void math_error(void *rip)
 		default:
 			break;
 		case 0x001: /* Invalid Op */
-		case 0x040: /* Stack Fault */
-		case 0x240: /* Stack Fault | Direction */
+		case 0x041: /* Stack Fault */
+		case 0x241: /* Stack Fault | Direction */
 			info.si_code = FPE_FLTINV;
 			break;
 		case 0x002: /* Denormalize */
@@ -822,7 +833,7 @@ void __init trap_init(void)
 	set_intr_gate(19,&simd_coprocessor_error);
 
 #ifdef CONFIG_IA32_EMULATION
-	set_intr_gate(IA32_SYSCALL_VECTOR, ia32_syscall);
+	set_system_gate(IA32_SYSCALL_VECTOR, ia32_syscall);
 #endif
        
 	set_intr_gate(KDB_VECTOR, call_debug);

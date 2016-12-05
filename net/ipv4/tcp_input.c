@@ -65,6 +65,7 @@
 
 #include <linux/config.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/sysctl.h>
 #include <net/tcp.h>
 #include <net/inet_common.h>
@@ -1966,7 +1967,10 @@ static int tcp_ack_update_window(struct sock *sk, struct tcp_opt *tp,
 				 struct sk_buff *skb, u32 ack, u32 ack_seq)
 {
 	int flag = 0;
-	u32 nwin = ntohs(skb->h.th->window) << tp->snd_wscale;
+	u32 nwin = ntohs(skb->h.th->window);
+
+	if (likely(!skb->h.th->syn))
+		nwin <<= tp->snd_wscale;
 
 	if (tcp_may_update_window(tp, ack, ack_seq, nwin)) {
 		flag |= FLAG_WIN_UPDATE;
@@ -2373,7 +2377,7 @@ static void tcp_fin(struct sk_buff *skb, struct sock *sk, struct tcphdr *th)
 	tcp_schedule_ack(tp);
 
 	sk->sk_shutdown |= RCV_SHUTDOWN;
-	sock_reset_flag(sk, SOCK_DONE);
+	sock_set_flag(sk, SOCK_DONE);
 
 	switch (sk->sk_state) {
 		case TCP_SYN_RECV:
@@ -3694,6 +3698,13 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 		tcp_sync_mss(sk, tp->pmtu_cookie);
 		tcp_initialize_rcv_mss(sk);
 
+		/* Remember, tcp_poll() does not lock socket!
+		 * Change state from SYN-SENT only after copied_seq
+		 * is initialized. */
+		tp->copied_seq = tp->rcv_nxt;
+		mb();
+		tcp_set_state(sk, TCP_ESTABLISHED);
+
 		/* Make sure socket is routed, for correct metrics.  */
 		tp->af_specific->rebuild_header(sk);
 
@@ -3713,13 +3724,6 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 			__tcp_fast_path_on(tp, tp->snd_wnd);
 		else
 			tp->pred_flags = 0;
-
-		/* Remember, tcp_poll() does not lock socket!
-		 * Change state from SYN-SENT only after copied_seq
-		 * is initialized. */
-		tp->copied_seq = tp->rcv_nxt;
-		mb();
-		tcp_set_state(sk, TCP_ESTABLISHED);
 
 		if (!sock_flag(sk, SOCK_DEAD)) {
 			sk->sk_state_change(sk);
@@ -4089,3 +4093,10 @@ discard:
 	}
 	return 0;
 }
+
+EXPORT_SYMBOL(sysctl_tcp_ecn);
+EXPORT_SYMBOL(sysctl_tcp_reordering);
+EXPORT_SYMBOL(tcp_cwnd_application_limited);
+EXPORT_SYMBOL(tcp_parse_options);
+EXPORT_SYMBOL(tcp_rcv_established);
+EXPORT_SYMBOL(tcp_rcv_state_process);

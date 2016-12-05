@@ -295,7 +295,7 @@ static struct pci_id_info pci_id_tbl[] = {
 	{0,},
 };
 
-static struct pci_device_id yellowfin_pci_tbl[] __devinitdata = {
+static struct pci_device_id yellowfin_pci_tbl[] = {
 	{ 0x1000, 0x0702, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ 0x1000, 0x0701, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1 },
 	{ 0, }
@@ -577,7 +577,7 @@ err_out_free_res:
 #endif
 	pci_release_regions(pdev);
 err_out_free_netdev:
-	kfree (dev);
+	free_netdev (dev);
 	return -ENODEV;
 }
 
@@ -873,8 +873,6 @@ static int yellowfin_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	/* Calculate the next Tx descriptor entry. */
 	entry = yp->cur_tx % TX_RING_SIZE;
 
-	yp->tx_skbuff[entry] = skb;
-
 	if (gx_fix) {	/* Note: only works for paddable protocols e.g.  IP. */
 		int cacheline_end = ((unsigned long)skb->data + skb->len) % 32;
 		/* Fix GX chipset errata. */
@@ -889,6 +887,8 @@ static int yellowfin_start_xmit(struct sk_buff *skb, struct net_device *dev)
 			return 0;
 		}
 	}
+	yp->tx_skbuff[entry] = skb;
+
 #ifdef NO_TXSTATS
 	yp->tx_ring[entry].addr = cpu_to_le32(pci_map_single(yp->pci_dev, 
 		skb->data, len, PCI_DMA_TODEVICE));
@@ -1413,7 +1413,7 @@ static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
 		struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
 		strcpy(info.driver, DRV_NAME);
 		strcpy(info.version, DRV_VERSION);
-		strcpy(info.bus_info, np->pci_dev->slot_name);
+		strcpy(info.bus_info, pci_name(np->pci_dev));
 		if (copy_to_user(useraddr, &info, sizeof(info)))
 			return -EFAULT;
 		return 0;
@@ -1486,7 +1486,7 @@ static void __devexit yellowfin_remove_one (struct pci_dev *pdev)
 	iounmap ((void *) dev->base_addr);
 #endif
 
-	kfree (dev);
+	free_netdev (dev);
 	pci_set_drvdata(pdev, NULL);
 }
 

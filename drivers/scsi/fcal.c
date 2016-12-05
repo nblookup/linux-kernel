@@ -9,7 +9,7 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/slab.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <linux/init.h>
@@ -228,7 +228,7 @@ int fcal_proc_info (struct Scsi_Host *host, char *buffer, char **start, off_t of
 #endif
 	SPRINTF ("Initiator AL-PA: %02x\n", fc->sid);
 
-	SPRINTF ("\nAttached devices: %s\n", !list_empty(&host->my_devices) ? "" : "none");
+	SPRINTF ("\nAttached devices:\n");
 	
 	for (i = 0; i < fc->posmap->len; i++) {
 		unsigned char alpa = fc->posmap->list[i];
@@ -245,7 +245,7 @@ int fcal_proc_info (struct Scsi_Host *host, char *buffer, char **start, off_t of
 				 alpa, u1[0], u1[1], u2[0], u2[1]);
 		} else {
 			Scsi_Device *scd;
-			list_for_each_entry (scd, &host->my_devices, siblings)
+			shost_for_each_device(scd, host)
 				if (scd->id == target) {
 					SPRINTF ("  [AL-PA: %02x, Id: %02d, Port WWN: %08x%08x, Node WWN: %08x%08x]  ",
 						alpa, target, u1[0], u1[1], u2[0], u2[1]);

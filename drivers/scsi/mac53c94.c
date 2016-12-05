@@ -12,7 +12,7 @@
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/slab.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <linux/spinlock.h>
@@ -361,7 +361,7 @@ mac53c94_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
 		return;
 	}
 	if (intr & INTR_ILL_CMD) {
-		printk(KERN_ERR "53c94: illegal cmd, intr=%x stat=%x seq=%x phase=%d\n",
+		printk(KERN_ERR "53c94: invalid cmd, intr=%x stat=%x seq=%x phase=%d\n",
 		       intr, stat, seq, state->phase);
 		cmd_done(state, DID_ERROR << 16);
 		return;

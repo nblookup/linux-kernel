@@ -26,6 +26,7 @@
 #include <linux/init.h>
 #include <linux/completion.h>
 
+#include <asm/apm.h> /* apm_power_info */
 #include <asm/system.h>
 
 /*
@@ -93,18 +94,7 @@ static DECLARE_COMPLETION(kapmd_exit);
 
 static const char driver_version[] = "1.13";	/* no spaces */
 
-/*
- * This structure gets filled in by the machine specific 'get_power_status'
- * implementation.  Any fields which are not set default to a safe value.
- */
-struct apm_power_info {
-	unsigned char	ac_line_status;
-	unsigned char	battery_status;
-	unsigned char	battery_flag;
-	unsigned char	battery_life;
-	int		time;
-	int		units;
-};
+
 
 /*
  * Compatibility cruft until the IPAQ people move over to the new
@@ -189,13 +179,10 @@ static void queue_event(apm_event_t event, struct apm_user *sender)
 	wake_up_interruptible(&apm_waitqueue);
 }
 
-/* defined in pm.c */
-extern int suspend(void);
-
 static int apm_suspend(void)
 {
 	struct list_head *l;
-	int err = suspend();
+	int err = pm_suspend(PM_SUSPEND_MEM);
 
 	/*
 	 * Anyone on the APM queues will think we're still suspended.
@@ -388,18 +375,18 @@ static int apm_open(struct inode * inode, struct file * filp)
 }
 
 static struct file_operations apm_bios_fops = {
-	owner:		THIS_MODULE,
-	read:		apm_read,
-	poll:		apm_poll,
-	ioctl:		apm_ioctl,
-	open:		apm_open,
-	release:	apm_release,
+	.owner		= THIS_MODULE,
+	.read		= apm_read,
+	.poll		= apm_poll,
+	.ioctl		= apm_ioctl,
+	.open		= apm_open,
+	.release	= apm_release,
 };
 
 static struct miscdevice apm_device = {
-	minor:		APM_MINOR_DEV,
-	name:		"apm_bios",
-	fops:		&apm_bios_fops
+	.minor		= APM_MINOR_DEV,
+	.name		= "apm_bios",
+	.fops		= &apm_bios_fops
 };
 
 

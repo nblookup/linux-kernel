@@ -568,6 +568,81 @@ nfsd4_decode_link(struct nfsd4_compoundargs *argp, struct nfsd4_link *link)
 }
 
 static int
+nfsd4_decode_lock(struct nfsd4_compoundargs *argp, struct nfsd4_lock *lock)
+{
+	DECODE_HEAD;
+
+	/*
+	* type, reclaim(boolean), offset, length, new_lock_owner(boolean)
+	*/
+	READ_BUF(28);
+	READ32(lock->lk_type);
+	if ((lock->lk_type < NFS4_READ_LT) || (lock->lk_type > NFS4_WRITEW_LT))
+		goto xdr_error;
+	READ32(lock->lk_reclaim);
+	READ64(lock->lk_offset);
+	READ64(lock->lk_length);
+	READ32(lock->lk_is_new);
+
+	if (lock->lk_is_new) {
+		READ_BUF(36);
+		READ32(lock->lk_new_open_seqid);
+		READ32(lock->lk_new_open_stateid.si_generation);
+
+		COPYMEM(&lock->lk_new_open_stateid.si_opaque, sizeof(stateid_opaque_t));
+		READ32(lock->lk_new_lock_seqid);
+		COPYMEM(&lock->lk_new_clientid, sizeof(clientid_t));
+		READ32(lock->lk_new_owner.len);
+		READ_BUF(lock->lk_new_owner.len);
+		READMEM(lock->lk_new_owner.data, lock->lk_new_owner.len);
+	} else {
+		READ_BUF(20);
+		READ32(lock->lk_old_lock_stateid.si_generation);
+		COPYMEM(&lock->lk_old_lock_stateid.si_opaque, sizeof(stateid_opaque_t));
+		READ32(lock->lk_old_lock_seqid);
+	}
+
+	DECODE_TAIL;
+}
+
+static int
+nfsd4_decode_lockt(struct nfsd4_compoundargs *argp, struct nfsd4_lockt *lockt)
+{
+	DECODE_HEAD;
+		        
+	READ_BUF(32);
+	READ32(lockt->lt_type);
+	if((lockt->lt_type < NFS4_READ_LT) || (lockt->lt_type > NFS4_WRITEW_LT))
+		goto xdr_error;
+	READ64(lockt->lt_offset);
+	READ64(lockt->lt_length);
+	COPYMEM(&lockt->lt_clientid, 8);
+	READ32(lockt->lt_owner.len);
+	READ_BUF(lockt->lt_owner.len);
+	READMEM(lockt->lt_owner.data, lockt->lt_owner.len);
+
+	DECODE_TAIL;
+}
+
+static int
+nfsd4_decode_locku(struct nfsd4_compoundargs *argp, struct nfsd4_locku *locku)
+{
+	DECODE_HEAD;
+
+	READ_BUF(24 + sizeof(stateid_t));
+	READ32(locku->lu_type);
+	if ((locku->lu_type < NFS4_READ_LT) || (locku->lu_type > NFS4_WRITEW_LT))
+		goto xdr_error;
+	READ32(locku->lu_seqid);
+	READ32(locku->lu_stateid.si_generation);
+	COPYMEM(&locku->lu_stateid.si_opaque, sizeof(stateid_opaque_t));
+	READ64(locku->lu_offset);
+	READ64(locku->lu_length);
+
+	DECODE_TAIL;
+}
+
+static int
 nfsd4_decode_lookup(struct nfsd4_compoundargs *argp, struct nfsd4_lookup *lookup)
 {
 	DECODE_HEAD;
@@ -616,7 +691,7 @@ nfsd4_decode_open(struct nfsd4_compoundargs *argp, struct nfsd4_open *open)
 			break;
 		case NFS4_CREATE_EXCLUSIVE:
 			READ_BUF(8);
-			COPYMEM(open->op_verf, 8);
+			COPYMEM(open->op_verf.data, 8);
 			break;
 		default:
 			goto xdr_error;
@@ -723,7 +798,7 @@ nfsd4_decode_readdir(struct nfsd4_compoundargs *argp, struct nfsd4_readdir *read
 
 	READ_BUF(24);
 	READ64(readdir->rd_cookie);
-	COPYMEM(readdir->rd_verf, sizeof(nfs4_verifier));
+	COPYMEM(readdir->rd_verf.data, sizeof(readdir->rd_verf.data));
 	READ32(readdir->rd_dircount);    /* just in case you needed a useless field... */
 	READ32(readdir->rd_maxcount);
 	if ((status = nfsd4_decode_bitmap(argp, readdir->rd_bmval)))
@@ -798,7 +873,7 @@ nfsd4_decode_setclientid(struct nfsd4_compoundargs *argp, struct nfsd4_setclient
 	DECODE_HEAD;
 
 	READ_BUF(12);
-	COPYMEM(setclientid->se_verf, 8);
+	COPYMEM(setclientid->se_verf.data, 8);
 	READ32(setclientid->se_namelen);
 
 	READ_BUF(setclientid->se_namelen + 8);
@@ -880,7 +955,7 @@ nfsd4_decode_write(struct nfsd4_compoundargs *argp, struct nfsd4_write *write)
 		v++;
 		write->wr_vec[v].iov_base = page_address(argp->pagelist[0]);
 		argp->pagelist++;
-		if (len >= PAGE_SIZE) {
+		if (argp->pagelen >= PAGE_SIZE) {
 			write->wr_vec[v].iov_len = PAGE_SIZE;
 			argp->pagelen -= PAGE_SIZE;
 		} else {
@@ -932,18 +1007,38 @@ nfsd4_decode_compound(struct nfsd4_compoundargs *argp)
 
 	for (i = 0; i < argp->opcnt; i++) {
 		op = &argp->ops[i];
+		op->replay = NULL;
 
 		/*
-		 * Before reading the opcode, we test for the 4-byte buffer
-		 * overrun explicitly, instead of using READ_BUF().  This is
-		 * because we want a missing opcode to be treated as opcode
-		 * OP_WRITE+1, instead of a failed XDR.
+		 * We can't use READ_BUF() here because we need to handle
+		 * a missing opcode as an OP_WRITE + 1. So we need to check
+		 * to see if we're truly at the end of our buffer or if there
+		 * is another page we need to flip to.
 		 */
+
 		if (argp->p == argp->end) {
-			op->opnum = OP_WRITE + 1;
-			op->status = nfserr_bad_xdr;
-			argp->opcnt = i+1;
-			break;
+			if (argp->pagelen < 4) {
+				/* There isn't an opcode still on the wire */
+				op->opnum = OP_WRITE + 1;
+				op->status = nfserr_bad_xdr;
+				argp->opcnt = i+1;
+				break;
+			}
+
+			/*
+			 * False alarm. We just hit a page boundary, but there
+			 * is still data available.  Move pointer across page
+			 * boundary.  *snip from READ_BUF*
+			 */
+			argp->p = page_address(argp->pagelist[0]);
+			argp->pagelist++;
+			if (argp->pagelen < PAGE_SIZE) {
+				argp->end = p + (argp->pagelen>>2);
+				argp->pagelen = 0;
+			} else {
+				argp->end = p + (PAGE_SIZE>>2);
+				argp->pagelen -= PAGE_SIZE;
+			}
 		}
 		op->opnum = ntohl(*argp->p++);
 
@@ -968,6 +1063,15 @@ nfsd4_decode_compound(struct nfsd4_compoundargs *argp)
 			break;
 		case OP_LINK:
 			op->status = nfsd4_decode_link(argp, &op->u.link);
+			break;
+		case OP_LOCK:
+			op->status = nfsd4_decode_lock(argp, &op->u.lock);
+			break;
+		case OP_LOCKT:
+			op->status = nfsd4_decode_lockt(argp, &op->u.lockt);
+			break;
+		case OP_LOCKU:
+			op->status = nfsd4_decode_locku(argp, &op->u.locku);
 			break;
 		case OP_LOOKUP:
 			op->status = nfsd4_decode_lookup(argp, &op->u.lookup);
@@ -1092,18 +1196,31 @@ nfsd4_decode_compound(struct nfsd4_compoundargs *argp)
 #define ADJUST_ARGS()		resp->p = p
 
 /*
+ * Header routine to setup seqid operation replay cache
+ */
+#define ENCODE_SEQID_OP_HEAD					\
+	u32 *p;							\
+	u32 *save;						\
+								\
+	save = resp->p;
+
+/*
  * Routine for encoding the result of a
  * "seqid-mutating" NFSv4 operation.  This is
- * where seqids are incremented
+ * where seqids are incremented, and the
+ * replay cache is filled.
  */
 
-#define ENCODE_SEQID_OP_TAIL(stateowner)		\
-	BUG_ON(!stateowner);				\
-	if (seqid_mutating_err(nfserr) && stateowner) {	\
-		if (stateowner->so_confirmed)		\
-			stateowner->so_seqid++;		\
-	}						\
-	return nfserr;
+#define ENCODE_SEQID_OP_TAIL(stateowner) do {			\
+	if (seqid_mutating_err(nfserr) && stateowner) {		\
+		if (stateowner->so_confirmed)			\
+			stateowner->so_seqid++;			\
+		stateowner->so_replay.rp_status = nfserr;   	\
+		stateowner->so_replay.rp_buflen = 		\
+			  (((char *)(resp)->p - (char *)save)); \
+		memcpy(stateowner->so_replay.rp_buf, save,      \
+ 			stateowner->so_replay.rp_buflen); 	\
+	} } while(0)
 
 
 static u32 nfs4_ftypes[16] = {
@@ -1604,7 +1721,7 @@ nfsd4_encode_access(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_acc
 static void
 nfsd4_encode_close(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_close *close)
 {
-	ENCODE_HEAD;
+	ENCODE_SEQID_OP_HEAD;
 
 	if (!nfserr) {
 		RESERVE_SPACE(sizeof(stateid_t));
@@ -1612,6 +1729,7 @@ nfsd4_encode_close(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_clos
 		WRITEMEM(&close->cl_stateid.si_opaque, sizeof(stateid_opaque_t));
 		ADJUST_ARGS();
 	}
+	ENCODE_SEQID_OP_TAIL(close->cl_stateowner);
 }
 
 
@@ -1622,7 +1740,7 @@ nfsd4_encode_commit(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_com
 
 	if (!nfserr) {
 		RESERVE_SPACE(8);
-		WRITEMEM(commit->co_verf, 8);
+		WRITEMEM(commit->co_verf.data, 8);
 		ADJUST_ARGS();
 	}
 }
@@ -1675,6 +1793,65 @@ nfsd4_encode_getfh(struct nfsd4_compoundres *resp, int nfserr, struct svc_fh *fh
 	}
 }
 
+/*
+* Including all fields other than the name, a LOCK4denied structure requires
+*   8(clientid) + 4(namelen) + 8(offset) + 8(length) + 4(type) = 32 bytes.
+*/
+static void
+nfsd4_encode_lock_denied(struct nfsd4_compoundres *resp, struct nfsd4_lock_denied *ld)
+{
+	ENCODE_HEAD;
+
+	RESERVE_SPACE(32 + XDR_LEN(ld->ld_sop->so_owner.len));
+	WRITE64(ld->ld_start);
+	WRITE64(ld->ld_length);
+	WRITE32(ld->ld_type);
+	WRITEMEM(&ld->ld_sop->so_client->cl_clientid, 8);
+	WRITE32(ld->ld_sop->so_owner.len);
+	WRITEMEM(ld->ld_sop->so_owner.data, ld->ld_sop->so_owner.len);
+	ADJUST_ARGS();
+}
+
+static void
+nfsd4_encode_lock(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_lock *lock)
+{
+
+	ENCODE_SEQID_OP_HEAD;
+
+	if (!nfserr) {
+		RESERVE_SPACE(4 + sizeof(stateid_t));
+		WRITE32(lock->lk_resp_stateid.si_generation);
+		WRITEMEM(&lock->lk_resp_stateid.si_opaque, sizeof(stateid_opaque_t));
+		ADJUST_ARGS();
+	} else if (nfserr == nfserr_denied)
+		nfsd4_encode_lock_denied(resp, &lock->lk_denied);
+
+	ENCODE_SEQID_OP_TAIL(lock->lk_stateowner);
+}
+
+static void
+nfsd4_encode_lockt(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_lockt *lockt)
+{
+	if (nfserr == nfserr_denied)
+		nfsd4_encode_lock_denied(resp, &lockt->lt_denied);
+}
+
+static void
+nfsd4_encode_locku(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_locku *locku)
+{
+	ENCODE_SEQID_OP_HEAD;
+
+	if (!nfserr) {
+		RESERVE_SPACE(sizeof(stateid_t));
+		WRITE32(locku->lu_stateid.si_generation);
+		WRITEMEM(&locku->lu_stateid.si_opaque, sizeof(stateid_opaque_t));
+		ADJUST_ARGS();
+	}
+				        
+	ENCODE_SEQID_OP_TAIL(locku->lu_stateowner);
+}
+
+
 static void
 nfsd4_encode_link(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_link *link)
 {
@@ -1691,7 +1868,7 @@ nfsd4_encode_link(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_link 
 static void
 nfsd4_encode_open(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_open *open)
 {
-	ENCODE_HEAD;
+	ENCODE_SEQID_OP_HEAD;
 
 	if (nfserr)
 		return;
@@ -1748,12 +1925,14 @@ nfsd4_encode_open(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_open 
 	default:
 		BUG();
 	}
+
+	ENCODE_SEQID_OP_TAIL(open->op_stateowner);
 }
 
-static int
+static void
 nfsd4_encode_open_confirm(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_open_confirm *oc)
 {
-	ENCODE_HEAD;
+	ENCODE_SEQID_OP_HEAD;
 				        
 	if (!nfserr) {
 		RESERVE_SPACE(sizeof(stateid_t));
@@ -1765,10 +1944,10 @@ nfsd4_encode_open_confirm(struct nfsd4_compoundres *resp, int nfserr, struct nfs
 	ENCODE_SEQID_OP_TAIL(oc->oc_stateowner);
 }
 
-static int
+static void
 nfsd4_encode_open_downgrade(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_open_downgrade *od)
 {
-	ENCODE_HEAD;
+	ENCODE_SEQID_OP_HEAD;
 				        
 	if (!nfserr) {
 		RESERVE_SPACE(sizeof(stateid_t));
@@ -2045,7 +2224,7 @@ nfsd4_encode_write(struct nfsd4_compoundres *resp, int nfserr, struct nfsd4_writ
 		RESERVE_SPACE(16);
 		WRITE32(write->wr_bytes_written);
 		WRITE32(write->wr_how_written);
-		WRITEMEM(write->wr_verifier, 8);
+		WRITEMEM(write->wr_verifier.data, 8);
 		ADJUST_ARGS();
 	}
 }
@@ -2082,6 +2261,15 @@ nfsd4_encode_operation(struct nfsd4_compoundres *resp, struct nfsd4_op *op)
 		break;
 	case OP_LINK:
 		nfsd4_encode_link(resp, op->status, &op->u.link);
+		break;
+	case OP_LOCK:
+		nfsd4_encode_lock(resp, op->status, &op->u.lock);
+		break;
+	case OP_LOCKT:
+		nfsd4_encode_lockt(resp, op->status, &op->u.lockt);
+		break;
+	case OP_LOCKU:
+		nfsd4_encode_locku(resp, op->status, &op->u.locku);
 		break;
 	case OP_LOOKUP:
 		break;
@@ -2145,6 +2333,30 @@ nfsd4_encode_operation(struct nfsd4_compoundres *resp, struct nfsd4_op *op)
 	 * since it is already in network byte order.
 	 */
 	*statp = op->status;
+}
+
+/* 
+ * Encode the reply stored in the stateowner reply cache 
+ * 
+ * XDR note: do not encode rp->rp_buflen: the buffer contains the
+ * previously sent already encoded operation.
+ */
+void
+nfsd4_encode_replay(struct nfsd4_compoundres *resp, struct nfsd4_op *op)
+{
+	ENCODE_HEAD;
+	struct nfs4_replay *rp = op->replay;
+
+	BUG_ON(!rp);
+
+	RESERVE_SPACE(8);
+	WRITE32(op->opnum);
+	WRITE32(NFS_OK);
+	ADJUST_ARGS();
+
+	RESERVE_SPACE(rp->rp_buflen);
+	WRITEMEM(rp->rp_buf, rp->rp_buflen);
+	ADJUST_ARGS();
 }
 
 /*

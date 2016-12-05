@@ -42,7 +42,6 @@
 #include <asm/io.h>
 #include <asm/it8172/it8172_int.h>
 
-#include "ide_modes.h"
 #include "it8172.h"
 
 /*
@@ -228,13 +227,15 @@ try_dma_modes:
 		} else {
 			goto fast_ata_pio;
 		}
+		return hwif->ide_dma_on(drive);
 	} else if ((id->capability & 8) || (id->field_valid & 2)) {
 fast_ata_pio:
 no_dma_set:
 		it8172_tune_drive(drive, 5);
 		return hwif->ide_dma_off_quietly(drive);
 	}
-	return hwif->ide_dma_on(drive);
+	/* IORDY not supported */
+	return 0;
 }
 
 static unsigned int __init init_chipset_it8172 (struct pci_dev *dev, const char *name)
@@ -285,11 +286,6 @@ static void __init init_hwif_it8172 (ide_hwif_t *hwif)
 	hwif->drives[1].autodma = hwif->autodma;
 }
 
-static void __init init_dma_it8172 (ide_hwif_t *hwif, unsigned long dmabase)
-{
-	ide_setup_dma(hwif, dmabase, 8);
-}
-
 extern void ide_setup_pci_device(struct pci_dev *, ide_pci_device_t *);
 
 static int __devinit it8172_init_one(struct pci_dev *dev, const struct pci_device_id *id)
@@ -303,7 +299,7 @@ static int __devinit it8172_init_one(struct pci_dev *dev, const struct pci_devic
 	return 0;
 }
 
-static struct pci_device_id it8172_pci_tbl[] __devinitdata = {
+static struct pci_device_id it8172_pci_tbl[] = {
 	{ PCI_VENDOR_ID_ITE, PCI_DEVICE_ID_ITE_IT8172G, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ 0, },
 };

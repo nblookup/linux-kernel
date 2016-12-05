@@ -60,7 +60,7 @@ void snd_pcm_playback_silence(snd_pcm_substream_t *substream, snd_pcm_uframes_t 
 			return;
 		snd_assert(runtime->silence_filled <= runtime->buffer_size, return);
 		noise_dist = snd_pcm_playback_hw_avail(runtime) + runtime->silence_filled;
-		if (noise_dist > (snd_pcm_sframes_t) runtime->silence_threshold)
+		if (noise_dist >= (snd_pcm_sframes_t) runtime->silence_threshold)
 			return;
 		frames = runtime->silence_threshold - noise_dist;
 		if (frames > runtime->silence_size)
@@ -84,10 +84,9 @@ void snd_pcm_playback_silence(snd_pcm_substream_t *substream, snd_pcm_uframes_t 
 			if ((snd_pcm_sframes_t)runtime->silence_start < 0)
 				runtime->silence_start += runtime->boundary;
 		}
-		frames = runtime->buffer_size;
+		frames = runtime->buffer_size - runtime->silence_filled;
 	}
-	snd_assert(frames >= runtime->silence_filled, return);
-	frames -= runtime->silence_filled;
+	snd_assert(frames <= runtime->buffer_size, return);
 	if (frames == 0)
 		return;
 	ofs = (runtime->silence_start + runtime->silence_filled) % runtime->buffer_size;
@@ -1932,7 +1931,7 @@ void snd_pcm_tick_prepare(snd_pcm_substream_t *substream)
 		if (runtime->silence_size >= runtime->boundary) {
 			frames = 1;
 		} else if (runtime->silence_size > 0 &&
-		    runtime->silence_filled < runtime->buffer_size) {
+			   runtime->silence_filled < runtime->buffer_size) {
 			snd_pcm_sframes_t noise_dist;
 			noise_dist = snd_pcm_playback_hw_avail(runtime) + runtime->silence_filled;
 			snd_assert(noise_dist <= (snd_pcm_sframes_t)runtime->silence_threshold, );
@@ -2107,11 +2106,11 @@ static snd_pcm_sframes_t snd_pcm_lib_write1(snd_pcm_substream_t *substream,
 			init_waitqueue_entry(&wait, current);
 			add_wait_queue(&runtime->sleep, &wait);
 			while (1) {
-				set_current_state(TASK_INTERRUPTIBLE);
 				if (signal_pending(current)) {
 					state = SIGNALED;
 					break;
 				}
+				set_current_state(TASK_INTERRUPTIBLE);
 				snd_pcm_stream_unlock_irq(substream);
 				tout = schedule_timeout(10 * HZ);
 				snd_pcm_stream_lock_irq(substream);
@@ -2140,7 +2139,6 @@ static snd_pcm_sframes_t snd_pcm_lib_write1(snd_pcm_substream_t *substream,
 				}
 			}
 		       _end_loop:
-			set_current_state(TASK_RUNNING);
 			remove_wait_queue(&runtime->sleep, &wait);
 
 			switch (state) {
@@ -2402,11 +2400,11 @@ static snd_pcm_sframes_t snd_pcm_lib_read1(snd_pcm_substream_t *substream, void 
 			init_waitqueue_entry(&wait, current);
 			add_wait_queue(&runtime->sleep, &wait);
 			while (1) {
-				set_current_state(TASK_INTERRUPTIBLE);
 				if (signal_pending(current)) {
 					state = SIGNALED;
 					break;
 				}
+				set_current_state(TASK_INTERRUPTIBLE);
 				snd_pcm_stream_unlock_irq(substream);
 				tout = schedule_timeout(10 * HZ);
 				snd_pcm_stream_lock_irq(substream);
@@ -2436,7 +2434,6 @@ static snd_pcm_sframes_t snd_pcm_lib_read1(snd_pcm_substream_t *substream, void 
 				}
 			}
 		       _end_loop:
-			set_current_state(TASK_RUNNING);
 			remove_wait_queue(&runtime->sleep, &wait);
 
 			switch (state) {

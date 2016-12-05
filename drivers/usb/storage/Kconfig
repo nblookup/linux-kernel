@@ -6,7 +6,8 @@ comment "SCSI support is needed for USB Storage"
 
 config USB_STORAGE
 	tristate "USB Mass Storage support"
-	depends on USB && SCSI
+	depends on USB
+	select SCSI
 	---help---
 	  Say Y here if you want to connect USB mass storage devices to your
 	  computer's USB port. This is the driver you need for USB floppy drives,
@@ -14,10 +15,8 @@ config USB_STORAGE
 	  similar devices. This driver may also be used for some cameras and
 	  card readers.
 
-	  This code is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called usb-storage. If you want to compile it
-	  as a module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called usb-storage.
 
 config USB_STORAGE_DEBUG
 	bool "USB Mass Storage verbose debug"
@@ -42,7 +41,7 @@ config USB_STORAGE_FREECOM
 
 config USB_STORAGE_ISD200
 	bool "ISD-200 USB/ATA Bridge support"
-	depends on USB_STORAGE
+	depends on USB_STORAGE && BLK_DEV_IDE
 	---help---
 	  Say Y here if you want to use USB Mass Store devices based
 	  on the In-Systems Design ISD-200 USB/ATA bridge.

@@ -29,7 +29,6 @@
 
 #include <net/irda/irda.h>
 #include <net/irda/irda_device.h>
-#include <net/irda/irtty.h>
 
 static void tekram_open(dongle_t *self, struct qos_info *qos);
 static void tekram_close(dongle_t *self);
@@ -45,12 +44,12 @@ static int  tekram_reset(struct irda_task *task);
 #define TEKRAM_PW     0x10 /* Pulse select bit */
 
 static struct dongle_reg dongle = {
-	Q_NULL,
-	IRDA_TEKRAM_DONGLE,
-	tekram_open,
-	tekram_close,
-	tekram_reset,
-	tekram_change_speed,
+	.type = IRDA_TEKRAM_DONGLE,
+	.open  = tekram_open,
+	.close = tekram_close,
+	.reset = tekram_reset,
+	.change_speed = tekram_change_speed,
+	.owner = THIS_MODULE,
 };
 
 int __init tekram_init(void)
@@ -70,8 +69,6 @@ static void tekram_open(dongle_t *self, struct qos_info *qos)
 	qos->baud_rate.bits &= IR_9600|IR_19200|IR_38400|IR_57600|IR_115200;
 	qos->min_turn_time.bits = 0x01; /* Needs at least 10 ms */	
 	irda_qos_bits_to_value(qos);
-
-	MOD_INC_USE_COUNT;
 }
 
 static void tekram_close(dongle_t *self)
@@ -85,8 +82,6 @@ static void tekram_close(dongle_t *self)
 		irda_task_delete(self->reset_task);
 	if (self->speed_task)
 		irda_task_delete(self->speed_task);
-
-	MOD_DEC_USE_COUNT;
 }
 
 /*
@@ -265,6 +260,7 @@ int tekram_reset(struct irda_task *task)
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("Tekram IrMate IR-210B dongle driver");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS("irda-dongle-0"); /* IRDA_TEKRAM_DONGLE */
 		
 /*
  * Function init_module (void)

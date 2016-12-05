@@ -46,6 +46,7 @@
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -411,10 +412,11 @@ static void ip_copy_metadata(struct sk_buff *to, struct sk_buff *from)
 #endif
 #ifdef CONFIG_NETFILTER
 	to->nfmark = from->nfmark;
+	to->nfcache = from->nfcache;
 	/* Connection association is same as pre-frag packet */
 	to->nfct = from->nfct;
 	nf_conntrack_get(to->nfct);
-#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+#ifdef CONFIG_BRIDGE_NETFILTER
 	to->nf_bridge = from->nf_bridge;
 	nf_bridge_get(to->nf_bridge);
 #endif
@@ -491,7 +493,7 @@ int ip_fragment(struct sk_buff *skb, int (*output)(struct sk_buff*))
 			    goto slow_path;
 
 			/* Correct socket ownership. */
-			if (frag->sk == NULL)
+			if (frag->sk == NULL && skb->sk)
 				goto slow_path;
 
 			/* Partially cloned skb? */
@@ -1294,12 +1296,9 @@ void ip_send_reply(struct sock *sk, struct sk_buff *skb, struct ip_reply_arg *ar
  *	IP protocol layer initialiser
  */
 
-static struct packet_type ip_packet_type =
-{
+static struct packet_type ip_packet_type = {
 	.type = __constant_htons(ETH_P_IP),
-	.dev  = NULL,	/* All devices */
 	.func = ip_rcv,
-	.data = (void*)1,
 };
 
 /*
@@ -1313,7 +1312,17 @@ void __init ip_init(void)
 	ip_rt_init();
 	inet_initpeers();
 
-#ifdef CONFIG_IP_MULTICAST
+#if defined(CONFIG_IP_MULTICAST) && defined(CONFIG_PROC_FS)
 	igmp_mc_proc_init();
 #endif
 }
+
+EXPORT_SYMBOL(ip_finish_output);
+EXPORT_SYMBOL(ip_fragment);
+EXPORT_SYMBOL(ip_generic_getfrag);
+EXPORT_SYMBOL(ip_queue_xmit);
+EXPORT_SYMBOL(ip_send_check);
+
+#ifdef CONFIG_SYSCTL
+EXPORT_SYMBOL(sysctl_ip_default_ttl);
+#endif

@@ -1,20 +1,19 @@
 /*
  * JFFS2 -- Journalling Flash File System, Version 2.
  *
- * Copyright (C) 2001, 2002 Red Hat, Inc.
+ * Copyright (C) 2001-2003 Red Hat, Inc.
  *
- * Created by David Woodhouse <dwmw2@cambridge.redhat.com>
+ * Created by David Woodhouse <dwmw2@redhat.com>
  *
  * For licensing information, see the file 'LICENCE' in this directory.
  *
- * $Id: super.c,v 1.79 2003/05/27 22:35:42 dwmw2 Exp $
+ * $Id: super.c,v 1.90 2003/10/11 11:47:23 dwmw2 Exp $
  *
  */
 
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/list.h>
@@ -27,8 +26,7 @@
 #include <linux/namei.h>
 #include "nodelist.h"
 
-void jffs2_put_super (struct super_block *);
-
+static void jffs2_put_super(struct super_block *);
 
 static kmem_cache_t *jffs2_inode_cachep;
 
@@ -66,7 +64,8 @@ static struct super_operations jffs2_super_operations =
 	.write_super =	jffs2_write_super,
 	.statfs =	jffs2_statfs,
 	.remount_fs =	jffs2_remount_fs,
-	.clear_inode =	jffs2_clear_inode
+	.clear_inode =	jffs2_clear_inode,
+	.dirty_inode =	jffs2_dirty_inode,
 };
 
 static int jffs2_sb_compare(struct super_block *sb, void *data)
@@ -137,8 +136,7 @@ static struct super_block *jffs2_get_sb_mtd(struct file_system_type *fs_type,
 		/* Failure case... */
 		up_write(&sb->s_umount);
 		deactivate_super(sb);
-		sb = ERR_PTR(ret);
-		goto out_put1;
+		return ERR_PTR(ret);
 	}
 
 	sb->s_flags |= MS_ACTIVE;
@@ -146,7 +144,6 @@ static struct super_block *jffs2_get_sb_mtd(struct file_system_type *fs_type,
 
  out_put:
 	kfree(c);
- out_put1:
 	put_mtd_device(mtd);
 
 	return sb;
@@ -174,7 +171,6 @@ static struct super_block *jffs2_get_sb(struct file_system_type *fs_type,
 	int err;
 	struct nameidata nd;
 	int mtdnr;
-	kdev_t dev;
 
 	if (!dev_name)
 		return ERR_PTR(-EINVAL);
@@ -228,30 +224,34 @@ static struct super_block *jffs2_get_sb(struct file_system_type *fs_type,
 	if (err)
 		return ERR_PTR(err);
 
-	if (!S_ISBLK(nd.dentry->d_inode->i_mode)) {
-		path_release(&nd);
-		return ERR_PTR(-EINVAL);
-	}
+	err = -EINVAL;
+
+	if (!S_ISBLK(nd.dentry->d_inode->i_mode))
+		goto out;
+
 	if (nd.mnt->mnt_flags & MNT_NODEV) {
-		path_release(&nd);
-		return ERR_PTR(-EACCES);
+		err = -EACCES;
+		goto out;
 	}
 
-	dev = nd.dentry->d_inode->i_rdev;
-	path_release(&nd);
-
-	if (major(dev) != MTD_BLOCK_MAJOR) {
+	if (imajor(nd.dentry->d_inode) != MTD_BLOCK_MAJOR) {
 		if (!(flags & MS_VERBOSE)) /* Yes I mean this. Strangely */
 			printk(KERN_NOTICE "Attempt to mount non-MTD device \"%s\" as JFFS2\n",
 			       dev_name);
-		return ERR_PTR(-EINVAL);
+		goto out;
 	}
 
-	return jffs2_get_sb_mtdnr(fs_type, flags, dev_name, data, minor(dev));
+	mtdnr = iminor(nd.dentry->d_inode);
+	path_release(&nd);
+
+	return jffs2_get_sb_mtdnr(fs_type, flags, dev_name, data, mtdnr);
+
+out:
+	path_release(&nd);
+	return ERR_PTR(err);
 }
 
-
-void jffs2_put_super (struct super_block *sb)
+static void jffs2_put_super (struct super_block *sb)
 {
 	struct jffs2_sb_info *c = JFFS2_SB_INFO(sb);
 
@@ -260,13 +260,12 @@ void jffs2_put_super (struct super_block *sb)
 	if (!(sb->s_flags & MS_RDONLY))
 		jffs2_stop_garbage_collect_thread(c);
 	down(&c->alloc_sem);
-	jffs2_flush_wbuf(c, 1);
+	jffs2_flush_wbuf_pad(c);
 	up(&c->alloc_sem);
 	jffs2_free_ino_caches(c);
 	jffs2_free_raw_node_refs(c);
 	kfree(c->blocks);
-	if (c->wbuf)
-		kfree(c->wbuf);
+	jffs2_nand_flash_cleanup(c);
 	kfree(c->inocache_list);
 	if (c->mtd->sync)
 		c->mtd->sync(c->mtd);
@@ -281,7 +280,7 @@ static void jffs2_kill_sb(struct super_block *sb)
 	put_mtd_device(c->mtd);
 	kfree(c);
 }
- 
+
 static struct file_system_type jffs2_fs_type = {
 	.owner =	THIS_MODULE,
 	.name =		"jffs2",
@@ -289,13 +288,15 @@ static struct file_system_type jffs2_fs_type = {
 	.kill_sb =	jffs2_kill_sb,
 };
 
-
-
 static int __init init_jffs2_fs(void)
 {
 	int ret;
 
-	printk(KERN_INFO "JFFS2 version 2.1. (C) 2001, 2002 Red Hat, Inc.\n");
+	printk(KERN_INFO "JFFS2 version 2.2."
+#ifdef CONFIG_FS_JFFS2_NAND
+	       " (NAND)"
+#endif
+	       " (C) 2001-2003 Red Hat, Inc.\n");
 
 	jffs2_inode_cachep = kmem_cache_create("jffs2_i",
 					     sizeof(struct jffs2_inode_info),

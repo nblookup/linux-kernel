@@ -22,6 +22,7 @@
 #include <asm/system.h>
 #include <asm/hdreg.h>
 #include <asm/io.h>
+#include <asm/semaphore.h>
 
 #define DEBUG_PM
 
@@ -106,7 +107,6 @@ typedef unsigned char	byte;	/* used everywhere */
 /*
  * Tune flags
  */
-#define IDE_TUNE_BIOS		3
 #define IDE_TUNE_NOAUTO		2
 #define IDE_TUNE_AUTO		1
 #define IDE_TUNE_DEFAULT	0
@@ -672,7 +672,7 @@ typedef struct ide_drive_s {
 	char		name[4];	/* drive name, such as "hda" */
         char            driver_req[10];	/* requests specific driver */
 
-	request_queue_t		queue;	/* request queue */
+	request_queue_t		*queue;	/* request queue */
 
 	struct request		*rq;	/* current request */
 	struct ide_drive_s 	*next;	/* circular list of hwgroup drives */
@@ -711,6 +711,7 @@ typedef struct ide_drive_s {
 	unsigned id_read	: 1;	/* 1=id read from disk 0 = synthetic */
 	unsigned noprobe 	: 1;	/* from:  hdx=noprobe */
 	unsigned removable	: 1;	/* 1 if need to do check_media_change */
+	unsigned attach		: 1;	/* needed for removable devices */
 	unsigned is_flash	: 1;	/* 1 if probed as flash */
 	unsigned forced_geom	: 1;	/* 1 if hdx=c,h,s was given at boot */
 	unsigned no_unmask	: 1;	/* disallow setting unmask bit */
@@ -720,8 +721,7 @@ typedef struct ide_drive_s {
 	unsigned nice0		: 1;	/* give obvious excess bandwidth */
 	unsigned nice2		: 1;	/* give a share in our own bandwidth */
 	unsigned doorlocking	: 1;	/* for removable only: door lock/unlock works */
-	unsigned autotune	: 3;	/* 1=autotune, 2=noautotune, 
-					   3=biostimings, 0=default */
+	unsigned autotune	: 2;	/* 0=default, 1=autotune, 2=noautotune */
 	unsigned remap_0_to_1	: 1;	/* 0=noremap, 1=remap 0->1 (for EZDrive) */
 	unsigned ata_flash	: 1;	/* 1=present, 0=default */
 	unsigned blocked        : 1;	/* 1=powermanagment told us not to do anything, so sleep nicely */
@@ -765,8 +765,7 @@ typedef struct ide_drive_s {
 	unsigned int	failures;	/* current failure count */
 	unsigned int	max_failures;	/* maximum allowed failure count */
 
-	u32		capacity;	/* total number of sectors */
-	u64		capacity48;	/* total number of sectors */
+	u64		capacity64;	/* total number of sectors */
 
 	int		last_lun;	/* last logical unit */
 	int		forced_lun;	/* if hdxlun was given at boot */
@@ -774,6 +773,7 @@ typedef struct ide_drive_s {
 	int		crc_count;	/* crc counter to reduce drive speed */
 	struct list_head list;
 	struct device	gendev;
+	struct semaphore gendev_rel_sem;	/* to deal with device release() */
 	struct gendisk *disk;
 } ide_drive_t;
 
@@ -848,29 +848,6 @@ static inline void ide_unmap_buffer(struct request *rq, char *buffer, unsigned l
 	if (rq->bio)
 		bio_kunmap_irq(buffer, flags);
 }
-
-#else /* !CONFIG_IDE_TASKFILE_IO */
-
-static inline void *task_map_rq(struct request *rq, unsigned long *flags)
-{
-	/*
-	 * fs request
-	 */
-	if (rq->cbio)
-		return rq_map_buffer(rq, flags);
-
-	/*
-	 * task request
-	 */
-	return rq->buffer + blk_rq_offset(rq);
-}
-
-static inline void task_unmap_rq(struct request *rq, char *buffer, unsigned long *flags)
-{
-	if (rq->cbio)
-		rq_unmap_buffer(buffer, flags);
-}
-
 #endif /* !CONFIG_IDE_TASKFILE_IO */
 
 #define IDE_CHIPSET_PCI_MASK	\
@@ -1007,7 +984,6 @@ typedef struct hwif_s {
 
 	int		mmio;		/* hosts iomio (0), mmio (1) or custom (2) select */
 	int		rqsize;		/* max sectors per request */
-	int		addressing;	/* hosts addressing */
 	int		irq;		/* our irq number */
 	int		initializing;	/* set while initializing self */
 
@@ -1036,14 +1012,18 @@ typedef struct hwif_s {
 	unsigned	reset      : 1;	/* reset after probe */
 	unsigned	autodma    : 1;	/* auto-attempt using DMA at boot */
 	unsigned	udma_four  : 1;	/* 1=ATA-66 capable, 0=default */
+	unsigned	no_lba48   : 1; /* 1 = cannot do LBA48 */
 	unsigned	no_dsc     : 1;	/* 0 default, 1 dsc_overlap disabled */
 	unsigned	auto_poll  : 1; /* supports nop auto-poll */
 
 	struct device	gendev;
+	struct semaphore gendev_rel_sem; /* To deal with device release() */
 
 	void		*hwif_data;	/* extra hwif data */
 
 	unsigned dma;
+
+	void (*led_act)(void *data, int rw);
 } ide_hwif_t;
 
 /*
@@ -1213,7 +1193,6 @@ typedef struct ide_driver_s {
 	const char			*version;
 	u8				media;
 	unsigned busy			: 1;
-	unsigned supports_dma		: 1;
 	unsigned supports_dsc_overlap	: 1;
 	int		(*cleanup)(ide_drive_t *);
 	int		(*shutdown)(ide_drive_t *);
@@ -1225,7 +1204,7 @@ typedef struct ide_driver_s {
 	ide_startstop_t	(*abort)(ide_drive_t *, const char *);
 	int		(*ioctl)(ide_drive_t *, struct inode *, struct file *, unsigned int, unsigned long);
 	void		(*pre_reset)(ide_drive_t *);
-	unsigned long	(*capacity)(ide_drive_t *);
+	sector_t	(*capacity)(ide_drive_t *);
 	ide_startstop_t	(*special)(ide_drive_t *);
 	ide_proc_entry_t	*proc;
 	int		(*attach)(ide_drive_t *);
@@ -1241,23 +1220,6 @@ typedef struct ide_driver_s {
 #define DRIVER(drive)		((drive)->driver)
 
 extern int generic_ide_ioctl(struct block_device *, unsigned, unsigned long);
-extern int generic_ide_suspend(struct device *dev, u32 state, u32 level);
-extern int generic_ide_resume(struct device *dev, u32 level);
-
-/*
- * IDE modules.
- */
-#define IDE_CHIPSET_MODULE		0	/* not supported yet */
-#define IDE_PROBE_MODULE		1
-
-typedef int	(ide_module_init_proc)(void);
-
-typedef struct ide_module_s {
-	int				type;
-	ide_module_init_proc		*init;
-	void				*info;
-	struct ide_module_s		*next;
-} ide_module_t;
 
 typedef struct ide_devices_s {
 	char			name[4];		/* hdX */
@@ -1276,8 +1238,7 @@ typedef struct ide_devices_s {
  */
 #ifndef _IDE_C
 extern	ide_hwif_t	ide_hwifs[];		/* master data repository */
-extern ide_module_t	*ide_chipsets;
-extern	ide_module_t	*ide_probe;
+extern int (*ide_probe)(void);
 
 extern ide_devices_t   *idedisk;
 extern ide_devices_t   *idecd;
@@ -1287,12 +1248,6 @@ extern ide_devices_t   *idescsi;
 
 #endif
 extern int noautodma;
-
-/*
- * We need blk.h, but we replace its end_request by our own version.
- */
-#define IDE_DRIVER		/* Toggle some magic bits in blk.h */
-#include <linux/blk.h>
 
 extern int ide_end_request (ide_drive_t *drive, int uptodate, int nrsecs);
 
@@ -1364,7 +1319,7 @@ extern int ide_wait_stat(ide_startstop_t *, ide_drive_t *, u8, u8, unsigned long
 /*
  * Return the current idea about the total capacity of this drive.
  */
-extern unsigned long current_capacity (ide_drive_t *drive);
+extern sector_t current_capacity (ide_drive_t *drive);
 
 /*
  * Start a reset operation for an IDE interface.
@@ -1492,9 +1447,19 @@ static inline void task_sectors(ide_drive_t *drive, struct request *rq,
 				unsigned nsect, int rw)
 {
 	unsigned long flags;
+	unsigned int bio_rq;
 	char *buf;
 
-	buf = task_map_rq(rq, &flags);
+	/*
+	 * bio_rq flag is needed because we can call
+	 * rq_unmap_buffer() with rq->cbio == NULL
+	 */
+	bio_rq = rq->cbio ? 1 : 0;
+
+	if (bio_rq)
+		buf = rq_map_buffer(rq, &flags);	/* fs request */
+	else
+		buf = rq->buffer + blk_rq_offset(rq);	/* task request */
 
 	/*
 	 * IRQ can happen instantly after reading/writing
@@ -1507,9 +1472,9 @@ static inline void task_sectors(ide_drive_t *drive, struct request *rq,
 	else
 		taskfile_input_data(drive, buf, nsect * SECTOR_WORDS);
 
-	task_unmap_rq(rq, buf, &flags);
+	if (bio_rq)
+		rq_unmap_buffer(buf, &flags);
 }
-
 #endif /* CONFIG_IDE_TASKFILE_IO */
 
 extern int drive_is_ready(ide_drive_t *);
@@ -1780,8 +1745,6 @@ extern int ide_hwif_request_regions(ide_hwif_t *hwif);
 extern void ide_hwif_release_regions(ide_hwif_t* hwif);
 extern void ide_unregister (unsigned int index);
 
-extern void export_ide_init_queue(ide_drive_t *);
-extern u8 export_probe_for_drive(ide_drive_t *);
 extern int probe_hwif_init(ide_hwif_t *);
 
 static inline void *ide_get_hwifdata (ide_hwif_t * hwif)
@@ -1801,6 +1764,24 @@ extern int ide_dma_enable(ide_drive_t *drive);
 extern char *ide_xfer_verbose(u8 xfer_rate);
 extern void ide_toggle_bounce(ide_drive_t *drive, int on);
 extern int ide_set_xfer_rate(ide_drive_t *drive, u8 rate);
+
+typedef struct ide_pio_timings_s {
+	int	setup_time;	/* Address setup (ns) minimum */
+	int	active_time;	/* Active pulse (ns) minimum */
+	int	cycle_time;	/* Cycle time (ns) minimum = (setup + active + recovery) */
+} ide_pio_timings_t;
+
+typedef struct ide_pio_data_s {
+	u8 pio_mode;
+	u8 use_iordy;
+	u8 overridden;
+	u8 blacklisted;
+	unsigned int cycle_time;
+} ide_pio_data_t;
+
+extern u8 ide_get_best_pio_mode (ide_drive_t *drive, u8 mode_wanted, u8 max_mode, ide_pio_data_t *d);
+extern const ide_pio_timings_t ide_pio_timings[6];
+
 
 extern spinlock_t ide_lock;
 extern struct semaphore ide_cfg_sem;
@@ -1824,7 +1805,7 @@ extern struct semaphore ide_cfg_sem;
 static inline int ata_pending_commands(ide_drive_t *drive)
 {
 	if (drive->using_tcq)
-		return blk_queue_tag_depth(&drive->queue);
+		return blk_queue_tag_depth(drive->queue);
 
 	return 0;
 }
@@ -1832,7 +1813,7 @@ static inline int ata_pending_commands(ide_drive_t *drive)
 static inline int ata_can_queue(ide_drive_t *drive)
 {
 	if (drive->using_tcq)
-		return blk_queue_tag_queue(&drive->queue);
+		return blk_queue_tag_queue(drive->queue);
 
 	return 1;
 }

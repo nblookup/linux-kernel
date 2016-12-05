@@ -12,6 +12,7 @@
 
 #include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -45,6 +46,8 @@ static struct signal_struct init_signals = INIT_SIGNALS(init_signals);
 static struct sighand_struct init_sighand = INIT_SIGHAND(init_sighand);
 struct mm_struct init_mm = INIT_MM(init_mm);
 
+EXPORT_SYMBOL(init_mm);
+
 union thread_union init_thread_union
 __attribute__((section(".data.init_task"), aligned(THREAD_SIZE)))
        = { INIT_THREAD_INFO(init_task) };
@@ -52,6 +55,7 @@ __attribute__((section(".data.init_task"), aligned(THREAD_SIZE)))
 /* initial task structure */
 struct task_struct init_task = INIT_TASK(init_task);
 
+EXPORT_SYMBOL(init_task);
 
 asmlinkage void ret_from_fork(void);
 
@@ -111,6 +115,8 @@ void machine_restart(char * __unused)
 	for (;;);
 }
 
+EXPORT_SYMBOL(machine_restart);
+
 void machine_halt(void)
 {
 	if (mach_halt)
@@ -118,12 +124,16 @@ void machine_halt(void)
 	for (;;);
 }
 
+EXPORT_SYMBOL(machine_halt);
+
 void machine_power_off(void)
 {
 	if (mach_power_off)
 		mach_power_off();
 	for (;;);
 }
+
+EXPORT_SYMBOL(machine_power_off);
 
 void show_regs(struct pt_regs * regs)
 {
@@ -202,24 +212,19 @@ void flush_thread(void)
 
 asmlinkage int m68k_fork(struct pt_regs *regs)
 {
-	struct task_struct *p;
-	p = do_fork(SIGCHLD, rdusp(), regs, 0, NULL, NULL);
-	return IS_ERR(p) ? PTR_ERR(p) : p->pid;
+	return do_fork(SIGCHLD, rdusp(), regs, 0, NULL, NULL);
 }
 
 asmlinkage int m68k_vfork(struct pt_regs *regs)
 {
-	struct task_struct *p;
-	p = do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, rdusp(), regs, 0, NULL,
-		    NULL);
-	return IS_ERR(p) ? PTR_ERR(p) : p->pid;
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, rdusp(), regs, 0,
+		       NULL, NULL);
 }
 
 asmlinkage int m68k_clone(struct pt_regs *regs)
 {
 	unsigned long clone_flags;
 	unsigned long newsp;
-	struct task_struct *p;
 	int *parent_tidptr, *child_tidptr;
 
 	/* syscall2 puts clone_flags in d1 and usp in d2 */
@@ -229,9 +234,8 @@ asmlinkage int m68k_clone(struct pt_regs *regs)
 	child_tidptr = (int *)regs->d4;
 	if (!newsp)
 		newsp = rdusp();
-	p = do_fork(clone_flags & ~CLONE_IDLETASK, newsp, regs, 0,
-		    parent_tidptr, child_tidptr);
-	return IS_ERR(p) ? PTR_ERR(p) : p->pid;
+	return do_fork(clone_flags & ~CLONE_IDLETASK, newsp, regs, 0,
+		       parent_tidptr, child_tidptr);
 }
 
 int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,

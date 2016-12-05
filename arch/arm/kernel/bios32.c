@@ -20,11 +20,15 @@
 
 static int debug_pci;
 
-void pcibios_report_status(u_int status_mask, int warn)
+/*
+ * We can't use pci_find_device() here since we are
+ * called from interrupt context.
+ */
+static void pcibios_bus_report_status(struct pci_bus *bus, u_int status_mask, int warn)
 {
-	struct pci_dev *dev = NULL;
+	struct pci_dev *dev;
 
-	while ((dev = pci_find_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL) {
+	list_for_each_entry(dev, &bus->devices, bus_list) {
 		u16 status;
 
 		/*
@@ -35,18 +39,32 @@ void pcibios_report_status(u_int status_mask, int warn)
 			continue;
 
 		pci_read_config_word(dev, PCI_STATUS, &status);
+		if (status == 0xffff)
+			continue;
 
-		status &= status_mask;
-		if (status == 0)
+		if ((status & status_mask) == 0)
 			continue;
 
 		/* clear the status errors */
-		pci_write_config_word(dev, PCI_STATUS, status);
+		pci_write_config_word(dev, PCI_STATUS, status & status_mask);
 
 		if (warn)
-			printk("(%02x:%02x.%d: %04X) ", dev->bus->number,
-				PCI_SLOT(dev->devfn), PCI_FUNC(dev->devfn),
-				status);
+			printk("(%s: %04X) ", pci_name(dev), status);
+	}
+
+	list_for_each_entry(dev, &bus->devices, bus_list)
+		if (dev->subordinate)
+			pcibios_bus_report_status(dev->subordinate, status_mask, warn);
+}
+
+void pcibios_report_status(u_int status_mask, int warn)
+{
+	struct list_head *l;
+
+	list_for_each(l, &pci_root_buses) {
+		struct pci_bus *bus = pci_bus_b(l);
+
+		pcibios_bus_report_status(bus, status_mask, warn);
 	}
 }
 
@@ -263,7 +281,7 @@ struct pci_fixup pcibios_fixups[] = {
 void __devinit pcibios_update_irq(struct pci_dev *dev, int irq)
 {
 	if (debug_pci)
-		printk("PCI: Assigning IRQ %02d to %s\n", irq, dev->dev.name);
+		printk("PCI: Assigning IRQ %02d to %s\n", irq, pci_name(dev));
 	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, irq);
 }
 
@@ -362,6 +380,19 @@ void __devinit pcibios_fixup_bus(struct pci_bus *bus)
 			isa_bridge = dev;
 			break;
 #endif
+		case PCI_CLASS_BRIDGE_PCI:
+			pci_read_config_word(dev, PCI_BRIDGE_CONTROL, &status);
+			status |= PCI_BRIDGE_CTL_PARITY|PCI_BRIDGE_CTL_MASTER_ABORT;
+			status &= ~(PCI_BRIDGE_CTL_BUS_RESET|PCI_BRIDGE_CTL_FAST_BACK);
+			pci_write_config_word(dev, PCI_BRIDGE_CONTROL, status);
+			break;
+
+		case PCI_CLASS_BRIDGE_CARDBUS:
+			pci_read_config_word(dev, PCI_CB_BRIDGE_CONTROL, &status);
+			status |= PCI_CB_BRIDGE_CTL_PARITY|PCI_CB_BRIDGE_CTL_MASTER_ABORT;
+			pci_write_config_word(dev, PCI_CB_BRIDGE_CONTROL, status);
+			break;
+		}
 	}
 
 	/*
@@ -460,7 +491,7 @@ static u8 __devinit pcibios_swizzle(struct pci_dev *dev, u8 *pin)
 
 	if (debug_pci)
 		printk("PCI: %s swizzling pin %d => pin %d slot %d\n",
-			dev->slot_name, oldpin, *pin, slot);
+			pci_name(dev), oldpin, *pin, slot);
 
 	return slot;
 }
@@ -478,7 +509,7 @@ static int pcibios_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 
 	if (debug_pci)
 		printk("PCI: %s mapping slot %d pin %d => irq %d\n",
-			dev->slot_name, slot, pin, irq);
+			pci_name(dev), slot, pin, irq);
 
 	return irq;
 }
@@ -611,7 +642,7 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 		r = dev->resource + idx;
 		if (!r->start && r->end) {
 			printk(KERN_ERR "PCI: Device %s not available because"
-			       " of resource collisions\n", dev->slot_name);
+			       " of resource collisions\n", pci_name(dev));
 			return -EINVAL;
 		}
 		if (r->flags & IORESOURCE_IO)
@@ -628,7 +659,7 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 
 	if (cmd != old_cmd) {
 		printk("PCI: enabling device %s (%04x -> %04x)\n",
-		       dev->slot_name, old_cmd, cmd);
+		       pci_name(dev), old_cmd, cmd);
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
 	}
 	return 0;

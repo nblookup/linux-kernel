@@ -1,9 +1,9 @@
 /*
  * Compaq Hot Plug Controller Driver
  *
- * Copyright (c) 1995,2001 Compaq Computer Corporation
- * Copyright (c) 2001 Greg Kroah-Hartman (greg@kroah.com)
- * Copyright (c) 2001 IBM Corp.
+ * Copyright (C) 1995,2001 Compaq Computer Corporation
+ * Copyright (C) 2001 Greg Kroah-Hartman (greg@kroah.com)
+ * Copyright (C) 2001 IBM Corp.
  *
  * All rights reserved.
  *
@@ -31,7 +31,6 @@
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/proc_fs.h>
-#include <linux/miscdevice.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
 #include <linux/pci.h>

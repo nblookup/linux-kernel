@@ -169,6 +169,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
+#include <linux/eisa.h>
 #include <linux/pci.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -233,7 +234,7 @@ static struct board {
 	const char	*deviceLabel;
 	u32	   	flags;
 	u16	   	addrOfs;
-} board_info[] __devinitdata = {
+} board_info[] = {
 	{ "Compaq Netelligent 10 T PCI UTP", TLAN_ADAPTER_ACTIVITY_LED, 0x83 },
 	{ "Compaq Netelligent 10/100 TX PCI UTP", TLAN_ADAPTER_ACTIVITY_LED, 0x83 },
 	{ "Compaq Integrated NetFlex-3/P", TLAN_ADAPTER_NONE, 0x83 },
@@ -252,7 +253,7 @@ static struct board {
 	{ "Compaq NetFlex-3/E", TLAN_ADAPTER_ACTIVITY_LED, 0x83 }, /* EISA card */
 };
 
-static struct pci_device_id tlan_pci_tbl[] __devinitdata = {
+static struct pci_device_id tlan_pci_tbl[] = {
 	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_NETEL10,
 		PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_NETEL100,
@@ -447,7 +448,7 @@ static void __devexit tlan_remove_one( struct pci_dev *pdev)
 
 	pci_release_regions(pdev);
 	
-	kfree( dev );
+	free_netdev( dev );
 		
 	pci_set_drvdata( pdev, NULL );
 } 
@@ -670,7 +671,7 @@ err_out_uninit:
 	pci_free_consistent(priv->pciDev, priv->dmaSize, priv->dmaStorage,
 			    priv->dmaStorageDMA );
 err_out_free_dev:
-	kfree(dev);
+	free_netdev(dev);
 err_out_regions:
 	if (pdev)
 		pci_release_regions(pdev);
@@ -695,7 +696,7 @@ static void TLan_Eisa_Cleanup(void)
 		release_region( dev->base_addr, 0x10);
 		unregister_netdev( dev );
 		TLan_Eisa_Devices = priv->nextDevice;
-		kfree( dev );
+		free_netdev( dev );
 		tlan_have_eisa--;
 	}
 }
@@ -882,7 +883,9 @@ static int TLan_Init( struct net_device *dev )
 			err );
 	}
 	dev->addr_len = 6;
-	
+
+	netif_carrier_off(dev);
+
 	/* Device methods */
 	dev->open = &TLan_Open;
 	dev->hard_start_xmit = &TLan_StartTx;
@@ -2204,6 +2207,8 @@ TLan_ResetAdapter( struct net_device *dev )
 
 	priv->tlanFullDuplex = FALSE;
 	priv->phyOnline=0;
+	netif_carrier_off(dev);
+
 /*  1.	Assert reset bit. */
 
 	data = inl(dev->base_addr + TLAN_HOST_CMD);
@@ -2367,6 +2372,7 @@ TLan_FinishReset( struct net_device *dev )
 		}
 		outl( priv->rxListDMA, dev->base_addr + TLAN_CH_PARM );
 		outl( TLAN_HC_GO | TLAN_HC_RT, dev->base_addr + TLAN_HOST_CMD );
+		netif_carrier_on(dev);
 	} else {
 		printk( "TLAN: %s: Link inactive, will retry in 10 secs...\n", dev->name );
 		TLan_SetTimer( dev, (10*HZ), TLAN_TIMER_FINISH_RESET );

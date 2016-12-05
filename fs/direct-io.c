@@ -15,9 +15,12 @@
  *		added support for non-aligned IO.
  * 06Nov2002	pbadari@us.ibm.com
  *		added asynchronous IO support.
+ * 21Jul2003	nathans@sgi.com
+ *		added IO completion notifier.
  */
 
 #include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
@@ -74,6 +77,7 @@ struct dio {
 	int boundary;			/* prev block is at a boundary */
 	int reap_counter;		/* rate limit reaping */
 	get_blocks_t *get_blocks;	/* block mapping function */
+	dio_iodone_t *end_io;		/* IO completion function */
 	sector_t final_block_in_bio;	/* current final block in bio + 1 */
 	sector_t next_block_for_io;	/* next block to be put under IO,
 					   in dio_blocks units */
@@ -193,13 +197,27 @@ static struct page *dio_get_page(struct dio *dio)
 }
 
 /*
+ * Called when all DIO BIO I/O has been completed - let the filesystem
+ * know, if it registered an interest earlier via get_blocks.  Pass the
+ * private field of the map buffer_head so that filesystems can use it
+ * to hold additional state between get_blocks calls and dio_complete.
+ */
+static void dio_complete(struct dio *dio, loff_t offset, ssize_t bytes)
+{
+	if (dio->end_io)
+		dio->end_io(dio->inode, offset, bytes, dio->map_bh.b_private);
+}
+
+/*
  * Called when a BIO has been processed.  If the count goes to zero then IO is
  * complete and we can signal this to the AIO layer.
  */
 static void finished_one_bio(struct dio *dio)
 {
 	if (atomic_dec_and_test(&dio->bio_count)) {
-		if(dio->is_async) {
+		if (dio->is_async) {
+			dio_complete(dio, dio->block_in_file << dio->blkbits,
+					dio->result);
 			aio_complete(dio->iocb, dio->result, 0);
 			kfree(dio);
 		}
@@ -659,7 +677,7 @@ static void dio_zero_block(struct dio *dio, int end)
 
 	this_chunk_bytes = this_chunk_blocks << dio->blkbits;
 
-	page = ZERO_PAGE(dio->cur_user_address);
+	page = ZERO_PAGE(dio->curr_user_address);
 	if (submit_page_section(dio, page, 0, this_chunk_bytes, 
 				dio->next_block_for_io))
 		return;
@@ -757,7 +775,7 @@ do_holes:
 				char *kaddr;
 
 				if (dio->block_in_file >=
-						dio->inode->i_size>>blkbits) {
+					i_size_read(dio->inode)>>blkbits) {
 					/* We hit eof */
 					page_cache_release(page);
 					goto out;
@@ -824,7 +842,7 @@ out:
 static int
 direct_io_worker(int rw, struct kiocb *iocb, struct inode *inode, 
 	const struct iovec *iov, loff_t offset, unsigned long nr_segs, 
-	unsigned blkbits, get_blocks_t get_blocks)
+	unsigned blkbits, get_blocks_t get_blocks, dio_iodone_t end_io)
 {
 	unsigned long user_addr; 
 	int seg;
@@ -852,6 +870,8 @@ direct_io_worker(int rw, struct kiocb *iocb, struct inode *inode,
 	dio->boundary = 0;
 	dio->reap_counter = 0;
 	dio->get_blocks = get_blocks;
+	dio->end_io = end_io;
+	dio->map_bh.b_private = NULL;
 	dio->final_block_in_bio = -1;
 	dio->next_block_for_io = -1;
 
@@ -943,14 +963,17 @@ direct_io_worker(int rw, struct kiocb *iocb, struct inode *inode,
 		if (ret == 0)
 			ret = dio->page_errors;
 		if (ret == 0 && dio->result) {
+			loff_t i_size = i_size_read(inode);
+
 			ret = dio->result;
 			/*
 			 * Adjust the return value if the read crossed a
 			 * non-block-aligned EOF.
 			 */
-			if (rw == READ && (offset + ret > inode->i_size))
-				ret = inode->i_size - offset;
+			if (rw == READ && (offset + ret > i_size))
+				ret = i_size - offset;
 		}
+		dio_complete(dio, offset, ret);
 		kfree(dio);
 	}
 	return ret;
@@ -962,7 +985,7 @@ direct_io_worker(int rw, struct kiocb *iocb, struct inode *inode,
 int
 blockdev_direct_IO(int rw, struct kiocb *iocb, struct inode *inode, 
 	struct block_device *bdev, const struct iovec *iov, loff_t offset, 
-	unsigned long nr_segs, get_blocks_t get_blocks)
+	unsigned long nr_segs, get_blocks_t get_blocks, dio_iodone_t end_io)
 {
 	int seg;
 	size_t size;
@@ -997,7 +1020,9 @@ blockdev_direct_IO(int rw, struct kiocb *iocb, struct inode *inode,
 	}
 
 	retval = direct_io_worker(rw, iocb, inode, iov, offset, 
-				nr_segs, blkbits, get_blocks);
+				nr_segs, blkbits, get_blocks, end_io);
 out:
 	return retval;
 }
+
+EXPORT_SYMBOL(blockdev_direct_IO);

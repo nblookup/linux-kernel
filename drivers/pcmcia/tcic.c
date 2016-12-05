@@ -362,19 +362,32 @@ static int __init get_tcic_id(void)
 
 /*====================================================================*/
 
+static int tcic_drv_suspend(struct device *dev, u32 state, u32 level)
+{
+	int ret = 0;
+	if (level == SUSPEND_SAVE_STATE)
+		ret = pcmcia_socket_dev_suspend(dev, state);
+	return ret;
+}
+
+static int tcic_drv_resume(struct device *dev, u32 level)
+{
+	int ret = 0;
+	if (level == RESUME_RESTORE_STATE)
+		ret = pcmcia_socket_dev_resume(dev);
+	return ret;
+}
+
 static struct device_driver tcic_driver = {
 	.name = "tcic-pcmcia",
 	.bus = &platform_bus_type,
-	.suspend = pcmcia_socket_dev_suspend,
-	.resume = pcmcia_socket_dev_resume,
+	.suspend = tcic_drv_suspend,
+	.resume = tcic_drv_resume,
 };
 
 static struct platform_device tcic_device = {
 	.name = "tcic-pcmcia",
 	.id = 0,
-	.dev = {
-		.name = "tcic-pcmcia",
-	},
 };
 
 
@@ -382,15 +395,6 @@ static int __init init_tcic(void)
 {
     int i, sock, ret = 0;
     u_int mask, scan;
-    servinfo_t serv;
-
-    DEBUG(0, "%s\n", version);
-    pcmcia_get_card_services_info(&serv);
-    if (serv.Revision != CS_RELEASE_CODE) {
-	printk(KERN_NOTICE "tcic: Card Services release "
-	       "does not match!\n");
-	return -1;
-    }
 
     if (driver_register(&tcic_driver))
 	return -1;
@@ -519,7 +523,7 @@ static int __init init_tcic(void)
     platform_device_register(&tcic_device);
 
     for (i = 0; i < sockets; i++) {
-	    socket_table[i].socket.ss_entry = &tcic_operations;
+	    socket_table[i].socket.ops = &tcic_operations;
 	    socket_table[i].socket.dev.dev = &tcic_device.dev;
 	    ret = pcmcia_register_socket(&socket_table[i].socket);	    
 	    if (ret && i)
@@ -639,7 +643,7 @@ static int tcic_get_status(struct pcmcia_socket *sock, u_int *value)
     reg = tcic_getb(TCIC_PWR);
     if (reg & (TCIC_PWR_VCC(psock)|TCIC_PWR_VPP(psock)))
 	*value |= SS_POWERON;
-    DEBUG(1, "tcic: GetStatus(%d) = %#2.2x\n", lsock, *value);
+    DEBUG(1, "tcic: GetStatus(%d) = %#2.2x\n", psock, *value);
     return 0;
 } /* tcic_get_status */
   
@@ -691,7 +695,7 @@ static int tcic_get_socket(struct pcmcia_socket *sock, socket_state_t *state)
     }
 
     DEBUG(1, "tcic: GetSocket(%d) = flags %#3.3x, Vcc %d, Vpp %d, "
-	  "io_irq %d, csc_mask %#2.2x\n", lsock, state->flags,
+	  "io_irq %d, csc_mask %#2.2x\n", psock, state->flags,
 	  state->Vcc, state->Vpp, state->io_irq, state->csc_mask);
     return 0;
 } /* tcic_get_socket */
@@ -705,7 +709,7 @@ static int tcic_set_socket(struct pcmcia_socket *sock, socket_state_t *state)
     u_short scf1, scf2;
 
     DEBUG(1, "tcic: SetSocket(%d, flags %#3.3x, Vcc %d, Vpp %d, "
-	  "io_irq %d, csc_mask %#2.2x)\n", lsock, state->flags,
+	  "io_irq %d, csc_mask %#2.2x)\n", psock, state->flags,
 	  state->Vcc, state->Vpp, state->io_irq, state->csc_mask);
     tcic_setw(TCIC_ADDR+2, (psock << TCIC_SS_SHFT) | TCIC_ADR2_INDREG);
 
@@ -780,7 +784,7 @@ static int tcic_set_io_map(struct pcmcia_socket *sock, struct pccard_io_map *io)
     u_short base, len, ioctl;
     
     DEBUG(1, "tcic: SetIOMap(%d, %d, %#2.2x, %d ns, "
-	  "%#4.4x-%#4.4x)\n", lsock, io->map, io->flags,
+	  "%#4.4x-%#4.4x)\n", psock, io->map, io->flags,
 	  io->speed, io->start, io->stop);
     if ((io->map > 1) || (io->start > 0xffff) || (io->stop > 0xffff) ||
 	(io->stop < io->start)) return -EINVAL;
@@ -817,7 +821,7 @@ static int tcic_set_mem_map(struct pcmcia_socket *sock, struct pccard_mem_map *m
     u_long base, len, mmap;
 
     DEBUG(1, "tcic: SetMemMap(%d, %d, %#2.2x, %d ns, "
-	  "%#5.5lx-%#5.5lx, %#5.5x)\n", lsock, mem->map, mem->flags,
+	  "%#5.5lx-%#5.5lx, %#5.5x)\n", psock, mem->map, mem->flags,
 	  mem->speed, mem->sys_start, mem->sys_stop, mem->card_start);
     if ((mem->map > 3) || (mem->card_start > 0x3ffffff) ||
 	(mem->sys_start > 0xffffff) || (mem->sys_stop > 0xffffff) ||
@@ -861,7 +865,6 @@ static int tcic_init(struct pcmcia_socket *s)
 	pccard_mem_map mem = { 0, 0, 0, 0, 0, 0 };
 
 	mem.sys_stop = 0x1000;
-	tcic_set_socket(s, &dead_socket);
 	for (i = 0; i < 2; i++) {
 		io.map = i;
 		tcic_set_io_map(s, &io);

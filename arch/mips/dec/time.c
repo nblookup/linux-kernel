@@ -9,6 +9,7 @@
  *
  */
 #include <linux/bcd.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -26,6 +27,7 @@
 #include <asm/mipsregs.h>
 #include <asm/io.h>
 #include <asm/irq.h>
+#include <asm/sections.h>
 #include <asm/dec/machtype.h>
 #include <asm/dec/ioasic.h>
 #include <asm/dec/ioasic_addrs.h>
@@ -237,6 +239,8 @@ void do_gettimeofday(struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
+EXPORT_SYMBOL(do_gettimeofday);
+
 void do_settimeofday(struct timeval *tv)
 {
 	write_seqlock_irq(&xtime_lock);
@@ -262,6 +266,8 @@ void do_settimeofday(struct timeval *tv)
 	time_esterror = NTP_PHASE_LIMIT;
 	write_sequnlock_irq(&xtime_lock);
 }
+
+EXPORT_SYMBOL(do_settimeofday);
 
 /*
  * In order to set the CMOS clock precisely, set_rtc_mmss has to be
@@ -342,10 +348,9 @@ timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (!user_mode(regs)) {
 		if (prof_buffer && current->pid) {
-			extern int _stext;
 			unsigned long pc = regs->cp0_epc;
 
-			pc -= (unsigned long) &_stext;
+			pc -= (unsigned long) _stext;
 			pc >>= prof_shift;
 			/*
 			 * Dont ignore out-of-bounds pc values silently,

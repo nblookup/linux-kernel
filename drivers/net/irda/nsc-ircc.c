@@ -81,8 +81,10 @@ static unsigned int dma[] = { 0, 0, 0, 0, 0 };
 
 static int nsc_ircc_probe_108(nsc_chip_t *chip, chipio_t *info);
 static int nsc_ircc_probe_338(nsc_chip_t *chip, chipio_t *info);
+static int nsc_ircc_probe_39x(nsc_chip_t *chip, chipio_t *info);
 static int nsc_ircc_init_108(nsc_chip_t *chip, chipio_t *info);
 static int nsc_ircc_init_338(nsc_chip_t *chip, chipio_t *info);
+static int nsc_ircc_init_39x(nsc_chip_t *chip, chipio_t *info);
 
 /* These are the known NSC chips */
 static nsc_chip_t chips[] = {
@@ -91,10 +93,16 @@ static nsc_chip_t chips[] = {
 	  nsc_ircc_probe_108, nsc_ircc_init_108 },
 	{ "PC87338", { 0x398, 0x15c, 0x2e }, 0x08, 0xb0, 0xf8, 
 	  nsc_ircc_probe_338, nsc_ircc_init_338 },
+	/* Contributed by Jan Frey - IBM A30/A31 */
+	{ "PC8739x", { 0x2e, 0x4e, 0x0 }, 0x20, 0xea, 0xff, 
+	  nsc_ircc_probe_39x, nsc_ircc_init_39x },
+	{ NULL }
+#if 0
+	/* Probably bogus, "PC8739x" should be the real thing. Jean II */
 	/* Contributed by Kevin Thayer - OmniBook 6100 */
 	{ "PC87338?", { 0x2e, 0x15c, 0x398 }, 0x08, 0x00, 0xf8, 
 	  nsc_ircc_probe_338, nsc_ircc_init_338 },
-	{ NULL }
+#endif
 };
 
 /* Max 4 instances for now */
@@ -135,7 +143,6 @@ static int  nsc_ircc_is_receiving(struct nsc_ircc_cb *self);
 static int  nsc_ircc_read_dongle_id (int iobase);
 static void nsc_ircc_init_dongle_interface (int iobase, int dongle_id);
 
-static int  nsc_ircc_net_init(struct net_device *dev);
 static int  nsc_ircc_net_open(struct net_device *dev);
 static int  nsc_ircc_net_close(struct net_device *dev);
 static int  nsc_ircc_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
@@ -253,14 +260,15 @@ static int __init nsc_ircc_open(int i, chipio_t *info)
 
 	MESSAGE("%s, driver loaded (Dag Brattli)\n", driver_name);
 
-	/* Allocate new instance of the driver */
-	self = kmalloc(sizeof(struct nsc_ircc_cb), GFP_KERNEL);
-	if (self == NULL) {
+	dev = alloc_irdadev(sizeof(struct nsc_ircc_cb));
+	if (dev == NULL) {
 		ERROR("%s(), can't allocate memory for "
 		       "control block!\n", __FUNCTION__);
 		return -ENOMEM;
 	}
-	memset(self, 0, sizeof(struct nsc_ircc_cb));
+
+	self = dev->priv;
+	self->netdev = dev;
 	spin_lock_init(&self->lock);
    
 	/* Need to store self somewhere */
@@ -280,9 +288,8 @@ static int __init nsc_ircc_open(int i, chipio_t *info)
 	if (!ret) {
 		WARNING("%s(), can't get iobase of 0x%03x\n",
 			__FUNCTION__, self->io.fir_base);
-		dev_self[i] = NULL;
-		kfree(self);
-		return -ENODEV;
+		err = -ENODEV;
+		goto out1;
 	}
 
 	/* Initialize QoS for this device */
@@ -305,17 +312,17 @@ static int __init nsc_ircc_open(int i, chipio_t *info)
 	self->rx_buff.head = (__u8 *) kmalloc(self->rx_buff.truesize,
 					      GFP_KERNEL|GFP_DMA);
 	if (self->rx_buff.head == NULL) {
-		kfree(self);
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto out2;
+
 	}
 	memset(self->rx_buff.head, 0, self->rx_buff.truesize);
 	
 	self->tx_buff.head = (__u8 *) kmalloc(self->tx_buff.truesize, 
 					      GFP_KERNEL|GFP_DMA);
 	if (self->tx_buff.head == NULL) {
-		kfree(self->rx_buff.head);
-		kfree(self);
-		return -ENOMEM;
+		err = -ENOMEM;
+		goto out3;
 	}
 	memset(self->tx_buff.head, 0, self->tx_buff.truesize);
 
@@ -328,28 +335,18 @@ static int __init nsc_ircc_open(int i, chipio_t *info)
 	self->tx_fifo.len = self->tx_fifo.ptr = self->tx_fifo.free = 0;
 	self->tx_fifo.tail = self->tx_buff.head;
 
-	if (!(dev = dev_alloc("irda%d", &err))) {
-		ERROR("%s(), dev_alloc() failed!\n", __FUNCTION__);
-		return -ENOMEM;
-	}
-
-	dev->priv = (void *) self;
-	self->netdev = dev;
-
 	/* Override the network functions we need to use */
-	dev->init            = nsc_ircc_net_init;
+	SET_MODULE_OWNER(dev);
 	dev->hard_start_xmit = nsc_ircc_hard_xmit_sir;
 	dev->open            = nsc_ircc_net_open;
 	dev->stop            = nsc_ircc_net_close;
 	dev->do_ioctl        = nsc_ircc_net_ioctl;
 	dev->get_stats	     = nsc_ircc_net_get_stats;
 
-	rtnl_lock();
-	err = register_netdevice(dev);
-	rtnl_unlock();
+	err = register_netdev(dev);
 	if (err) {
 		ERROR("%s(), register_netdev() failed!\n", __FUNCTION__);
-		return -1;
+		goto out4;
 	}
 	MESSAGE("IrDA: Registered device %s\n", dev->name);
 
@@ -372,6 +369,16 @@ static int __init nsc_ircc_open(int i, chipio_t *info)
                 pmdev->data = self;
 
 	return 0;
+ out4:
+	kfree(self->tx_buff.head);
+ out3:
+	kfree(self->rx_buff.head);
+ out2:
+	release_region(self->io.fir_base, self->io.fir_ext);
+ out1:
+	free_netdev(dev);
+	dev_self[i] = NULL;
+	return err;
 }
 
 /*
@@ -391,8 +398,7 @@ static int __exit nsc_ircc_close(struct nsc_ircc_cb *self)
         iobase = self->io.fir_base;
 
 	/* Remove netdevice */
-	if (self->netdev)
-		unregister_netdev(self->netdev);
+	unregister_netdev(self->netdev);
 
 	/* Release the PORT that this driver is using */
 	IRDA_DEBUG(4, "%s(), Releasing Region %03x\n", 
@@ -406,7 +412,7 @@ static int __exit nsc_ircc_close(struct nsc_ircc_cb *self)
 		kfree(self->rx_buff.head);
 
 	dev_self[self->index] = NULL;
-	kfree(self);
+	free_netdev(self->netdev);
 	
 	return 0;
 }
@@ -426,7 +432,7 @@ static int nsc_ircc_init_108(nsc_chip_t *chip, chipio_t *info)
 	outb(0x00, cfg_base+1); /* Disable device */
 	
 	/* Base Address and Interrupt Control Register (BAIC) */
-	outb(0, cfg_base);
+	outb(CFG_108_BAIC, cfg_base);
 	switch (info->fir_base) {
 	case 0x3e8: outb(0x14, cfg_base+1); break;
 	case 0x2e8: outb(0x15, cfg_base+1); break;
@@ -446,7 +452,7 @@ static int nsc_ircc_init_108(nsc_chip_t *chip, chipio_t *info)
 	case 15: temp = 0x07; break;
 	default: ERROR("%s(), invalid irq", __FUNCTION__);
 	}
-	outb(1, cfg_base);
+	outb(CFG_108_CSRT, cfg_base);
 	
 	switch (info->dma) {	
 	case 0: outb(0x08+temp, cfg_base+1); break;
@@ -455,7 +461,7 @@ static int nsc_ircc_init_108(nsc_chip_t *chip, chipio_t *info)
 	default: ERROR("%s(), invalid dma", __FUNCTION__);
 	}
 	
-	outb(2, cfg_base);      /* Mode Control Register (MCTL) */
+	outb(CFG_108_MCTL, cfg_base);      /* Mode Control Register (MCTL) */
 	outb(0x03, cfg_base+1); /* Enable device */
 
 	return 0;
@@ -473,7 +479,7 @@ static int nsc_ircc_probe_108(nsc_chip_t *chip, chipio_t *info)
 	int reg;
 
 	/* Read address and interrupt control register (BAIC) */
-	outb(CFG_BAIC, cfg_base);
+	outb(CFG_108_BAIC, cfg_base);
 	reg = inb(cfg_base+1);
 	
 	switch (reg & 0x03) {
@@ -495,7 +501,7 @@ static int nsc_ircc_probe_108(nsc_chip_t *chip, chipio_t *info)
 		   info->fir_base);
 
 	/* Read control signals routing register (CSRT) */
-	outb(CFG_CSRT, cfg_base);
+	outb(CFG_108_CSRT, cfg_base);
 	reg = inb(cfg_base+1);
 
 	switch (reg & 0x07) {
@@ -544,7 +550,7 @@ static int nsc_ircc_probe_108(nsc_chip_t *chip, chipio_t *info)
 	IRDA_DEBUG(2, "%s(), probing dma=%d\n", __FUNCTION__, info->dma);
 
 	/* Read mode control register (MCTL) */
-	outb(CFG_MCTL, cfg_base);
+	outb(CFG_108_MCTL, cfg_base);
 	reg = inb(cfg_base+1);
 
 	info->enabled = reg & 0x01;
@@ -581,13 +587,13 @@ static int nsc_ircc_probe_338(nsc_chip_t *chip, chipio_t *info)
 	int pnp;
 
 	/* Read funtion enable register (FER) */
-	outb(CFG_FER, cfg_base);
+	outb(CFG_338_FER, cfg_base);
 	reg = inb(cfg_base+1);
 
 	info->enabled = (reg >> 2) & 0x01;
 
 	/* Check if we are in Legacy or PnP mode */
-	outb(CFG_PNP0, cfg_base);
+	outb(CFG_338_PNP0, cfg_base);
 	reg = inb(cfg_base+1);
 	
 	pnp = (reg >> 3) & 0x01;
@@ -602,7 +608,7 @@ static int nsc_ircc_probe_338(nsc_chip_t *chip, chipio_t *info)
 		info->fir_base = reg;
 	} else {
 		/* Read function address register (FAR) */
-		outb(CFG_FAR, cfg_base);
+		outb(CFG_338_FAR, cfg_base);
 		reg = inb(cfg_base+1);
 		
 		switch ((reg >> 4) & 0x03) {
@@ -652,22 +658,146 @@ static int nsc_ircc_probe_338(nsc_chip_t *chip, chipio_t *info)
 	info->sir_base = info->fir_base;
 
 	/* Read PnP register 1 (PNP1) */
-	outb(CFG_PNP1, cfg_base);
+	outb(CFG_338_PNP1, cfg_base);
 	reg = inb(cfg_base+1);
 	
 	info->irq = reg >> 4;
 	
 	/* Read PnP register 3 (PNP3) */
-	outb(CFG_PNP3, cfg_base);
+	outb(CFG_338_PNP3, cfg_base);
 	reg = inb(cfg_base+1);
 
 	info->dma = (reg & 0x07) - 1;
 
 	/* Read power and test register (PTR) */
-	outb(CFG_PTR, cfg_base);
+	outb(CFG_338_PTR, cfg_base);
 	reg = inb(cfg_base+1);
 
 	info->suspended = reg & 0x01;
+
+	return 0;
+}
+
+
+/*
+ * Function nsc_ircc_init_39x (chip, info)
+ *
+ *    Now that we know it's a '39x (see probe below), we need to
+ *    configure it so we can use it.
+ *
+ * The NSC '338 chip is a Super I/O chip with a "bank" architecture,
+ * the configuration of the different functionality (serial, parallel,
+ * floppy...) are each in a different bank (Logical Device Number).
+ * The base address, irq and dma configuration registers are common
+ * to all functionalities (index 0x30 to 0x7F).
+ * There is only one configuration register specific to the
+ * serial port, CFG_39X_SPC.
+ * JeanII
+ *
+ * Note : this code was written by Jan Frey <janfrey@web.de>
+ */
+static int nsc_ircc_init_39x(nsc_chip_t *chip, chipio_t *info) 
+{
+	int cfg_base = info->cfg_base;
+	int enabled;
+
+	/* User is shure about his config... accept it. */
+	IRDA_DEBUG(2, "%s(): nsc_ircc_init_39x (user settings): "
+		   "io=0x%04x, irq=%d, dma=%d\n", 
+		   __FUNCTION__, info->fir_base, info->irq, info->dma);
+
+	/* Access bank for SP2 */
+	outb(CFG_39X_LDN, cfg_base);
+	outb(0x02, cfg_base+1);
+
+	/* Configure SP2 */
+
+	/* We want to enable the device if not enabled */
+	outb(CFG_39X_ACT, cfg_base);
+	enabled = inb(cfg_base+1) & 0x01;
+	
+	if (!enabled) {
+		/* Enable the device */
+		outb(CFG_39X_SIOCF1, cfg_base);
+		outb(0x01, cfg_base+1);
+		/* May want to update info->enabled. Jean II */
+	}
+
+	/* Enable UART bank switching (bit 7) ; Sets the chip to normal
+	 * power mode (wake up from sleep mode) (bit 1) */
+	outb(CFG_39X_SPC, cfg_base);
+	outb(0x82, cfg_base+1);
+
+	return 0;
+}
+
+/*
+ * Function nsc_ircc_probe_39x (chip, info)
+ *
+ *    Test if we really have a '39x chip at the given address
+ *
+ * Note : this code was written by Jan Frey <janfrey@web.de>
+ */
+static int nsc_ircc_probe_39x(nsc_chip_t *chip, chipio_t *info) 
+{
+	int cfg_base = info->cfg_base;
+	int reg1, reg2, irq, irqt, dma1, dma2;
+	int enabled, susp;
+
+	IRDA_DEBUG(2, "%s(), nsc_ircc_probe_39x, base=%d\n",
+		   __FUNCTION__, cfg_base);
+
+	/* This function should be executed with irq off to avoid
+	 * another driver messing with the Super I/O bank - Jean II */
+
+	/* Access bank for SP2 */
+	outb(CFG_39X_LDN, cfg_base);
+	outb(0x02, cfg_base+1);
+
+	/* Read infos about SP2 ; store in info struct */
+	outb(CFG_39X_BASEH, cfg_base);
+	reg1 = inb(cfg_base+1);
+	outb(CFG_39X_BASEL, cfg_base);
+	reg2 = inb(cfg_base+1);
+	info->fir_base = (reg1 << 8) | reg2;
+
+	outb(CFG_39X_IRQNUM, cfg_base);
+	irq = inb(cfg_base+1);
+	outb(CFG_39X_IRQSEL, cfg_base);
+	irqt = inb(cfg_base+1);
+	info->irq = irq;
+
+	outb(CFG_39X_DMA0, cfg_base);
+	dma1 = inb(cfg_base+1);
+	outb(CFG_39X_DMA1, cfg_base);
+	dma2 = inb(cfg_base+1);
+	info->dma = dma1 -1;
+
+	outb(CFG_39X_ACT, cfg_base);
+	info->enabled = enabled = inb(cfg_base+1) & 0x01;
+	
+	outb(CFG_39X_SPC, cfg_base);
+	susp = 1 - ((inb(cfg_base+1) & 0x02) >> 1);
+
+	IRDA_DEBUG(2, "%s(): io=0x%02x%02x, irq=%d (type %d), rxdma=%d, txdma=%d, enabled=%d (suspended=%d)\n", __FUNCTION__, reg1,reg2,irq,irqt,dma1,dma2,enabled,susp);
+
+	/* Configure SP2 */
+
+	/* We want to enable the device if not enabled */
+	outb(CFG_39X_ACT, cfg_base);
+	enabled = inb(cfg_base+1) & 0x01;
+	
+	if (!enabled) {
+		/* Enable the device */
+		outb(CFG_39X_SIOCF1, cfg_base);
+		outb(0x01, cfg_base+1);
+		/* May want to update info->enabled. Jean II */
+	}
+
+	/* Enable UART bank switching (bit 7) ; Sets the chip to normal
+	 * power mode (wake up from sleep mode) (bit 1) */
+	outb(CFG_39X_SPC, cfg_base);
+	outb(0x82, cfg_base+1);
 
 	return 0;
 }
@@ -1856,27 +1986,6 @@ static int nsc_ircc_is_receiving(struct nsc_ircc_cb *self)
 	spin_unlock_irqrestore(&self->lock, flags);
 
 	return status;
-}
-
-/*
- * Function nsc_ircc_net_init (dev)
- *
- *    Initialize network device
- *
- */
-static int nsc_ircc_net_init(struct net_device *dev)
-{
-	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
-
-	/* Keep track of module usage */
-	SET_MODULE_OWNER(dev);
-
-	/* Setup to be a normal IrDA network device driver */
-	irda_device_setup(dev);
-
-	/* Insert overrides below this line! */
-
-	return 0;
 }
 
 /*

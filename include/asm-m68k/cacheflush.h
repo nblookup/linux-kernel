@@ -80,6 +80,9 @@ extern void cache_push_v(unsigned long vaddr, int len);
 
 #define flush_cache_all() __flush_cache_all()
 
+#define flush_cache_vmap(start, end)		flush_cache_all()
+#define flush_cache_vunmap(start, end)		flush_cache_all()
+
 extern inline void flush_cache_mm(struct mm_struct *mm)
 {
 	if (mm == current->mm)
@@ -124,34 +127,14 @@ extern inline void __flush_page_to_ram(void *vaddr)
 	}
 }
 
-#define flush_dcache_page(page)	__flush_page_to_ram(page_address(page))
-#define flush_icache_page(vma,pg)              do { } while (0)
+#define flush_dcache_page(page)		__flush_page_to_ram(page_address(page))
+#define flush_icache_page(vma, page)	__flush_page_to_ram(page_address(page))
 #define flush_icache_user_range(vma,pg,adr,len)	do { } while (0)
+#define copy_to_user_page(vma, page, vaddr, dst, src, len) \
+	memcpy(dst, src, len)
+#define copy_from_user_page(vma, page, vaddr, dst, src, len) \
+	memcpy(dst, src, len)
 
-/* Push n pages at kernel virtual address and clear the icache */
-/* RZ: use cpush %bc instead of cpush %dc, cinv %ic */
-extern inline void flush_icache_range (unsigned long address,
-				       unsigned long endaddr)
-{
-	if (CPU_IS_040_OR_060) {
-		short n = (endaddr - address + PAGE_SIZE - 1) / PAGE_SIZE;
-
-		while (--n >= 0) {
-			__asm__ __volatile__("nop\n\t"
-					     ".chip 68040\n\t"
-					     "cpushp %%bc,(%0)\n\t"
-					     ".chip 68k"
-					     : : "a" (virt_to_phys((void *)address)));
-			address += PAGE_SIZE;
-		}
-	} else {
-		unsigned long tmp;
-		__asm__ __volatile__("movec %%cacr,%0\n\t"
-				     "orw %1,%0\n\t"
-				     "movec %0,%%cacr"
-				     : "=&d" (tmp)
-				     : "di" (FLUSH_I));
-	}
-}
+extern void flush_icache_range(unsigned long address, unsigned long endaddr);
 
 #endif /* _M68K_CACHEFLUSH_H */

@@ -419,6 +419,11 @@ struct pci_dev {
 	/* These fields are used by common fixups */
 	unsigned int	transparent:1;	/* Transparent PCI bridge */
 	unsigned int	multifunction:1;/* Part of multi-function device */
+#ifdef CONFIG_PCI_NAMES
+#define PCI_NAME_SIZE	50
+#define PCI_NAME_HALF	__stringify(20)	/* less than half to handle slop */
+	char		pretty_name[PCI_NAME_SIZE];	/* pretty name for users to see */
+#endif
 };
 
 #define pci_dev_g(n) list_entry(n, struct pci_dev, global_list)
@@ -510,7 +515,6 @@ struct pci_driver {
 	const struct pci_device_id *id_table;	/* must be non-NULL for probe to be called */
 	int  (*probe)  (struct pci_dev *dev, const struct pci_device_id *id);	/* New device inserted */
 	void (*remove) (struct pci_dev *dev);	/* Device removed (NULL if not a hot-plug capable driver) */
-	int  (*save_state) (struct pci_dev *dev, u32 state);    /* Save Device Context */
 	int  (*suspend) (struct pci_dev *dev, u32 state);	/* Device suspended */
 	int  (*resume) (struct pci_dev *dev);	                /* Device woken up */
 	int  (*enable_wake) (struct pci_dev *dev, u32 state, int enable);   /* Enable wake event */
@@ -521,6 +525,32 @@ struct pci_driver {
 
 #define	to_pci_driver(drv) container_of(drv,struct pci_driver, driver)
 
+/**
+ * PCI_DEVICE - macro used to describe a specific pci device
+ * @vend: the 16 bit PCI Vendor ID
+ * @dev: the 16 bit PCI Device ID
+ *
+ * This macro is used to create a struct pci_device_id that matches a
+ * specific device.  The subvendor and subdevice fields will be set to
+ * PCI_ANY_ID.
+ */
+#define PCI_DEVICE(vend,dev) \
+	.vendor = (vend), .device = (dev), \
+	.subvendor = PCI_ANY_ID, .subdevice = PCI_ANY_ID
+
+/**
+ * PCI_DEVICE_CLASS - macro used to describe a specific pci device class
+ * @dev_class: the class, subclass, prog-if triple for this device
+ * @dev_class_mask: the class mask for this device
+ *
+ * This macro is used to create a struct pci_device_id that matches a
+ * specific PCI class.  The vendor, device, subvendor, and subdevice 
+ * fields will be set to PCI_ANY_ID.
+ */
+#define PCI_DEVICE_CLASS(dev_class,dev_class_mask) \
+	.class = (dev_class), .class_mask = (dev_class_mask), \
+	.vendor = PCI_ANY_ID, .device = PCI_ANY_ID, \
+	.subvendor = PCI_ANY_ID, .subdevice = PCI_ANY_ID
 
 /* these external functions are only available when PCI support is enabled */
 #ifdef CONFIG_PCI
@@ -715,7 +745,6 @@ static inline int pci_dac_set_dma_mask(struct pci_dev *dev, u64 mask) { return -
 static inline int pci_assign_resource(struct pci_dev *dev, int i) { return -EBUSY;}
 static inline int pci_register_driver(struct pci_driver *drv) { return 0;}
 static inline void pci_unregister_driver(struct pci_driver *drv) { }
-static inline int scsi_to_pci_dma_dir(unsigned char scsi_dir) { return scsi_dir; }
 static inline int pci_find_capability (struct pci_dev *dev, int cap) {return 0; }
 static inline const struct pci_device_id *pci_match_device(const struct pci_device_id *ids, const struct pci_dev *dev) { return NULL; }
 
@@ -811,6 +840,13 @@ static inline char *pci_name(struct pci_dev *pdev)
 {
 	return pdev->dev.bus_id;
 }
+
+/* Some archs want to see the pretty pci name, so use this macro */
+#ifdef CONFIG_PCI_NAMES
+#define pci_pretty_name(dev) ((dev)->pretty_name)
+#else
+#define pci_pretty_name(dev) ""
+#endif
 
 /*
  *  The world is not perfect and supplies us with broken PCI devices.

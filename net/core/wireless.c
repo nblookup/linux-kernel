@@ -458,7 +458,7 @@ static __inline__ void wireless_seq_printf_stats(struct seq_file *seq,
  */
 static int wireless_seq_show(struct seq_file *seq, void *v)
 {
-	if (v == (void *)1)
+	if (v == SEQ_START_TOKEN)
 		seq_printf(seq, "Inter-| sta-|   Quality        |   Discarded "
 				"packets               | Missed | WE\n"
 				" face | tus | link level noise |  nwid  "
@@ -495,15 +495,10 @@ static struct file_operations wireless_seq_fops = {
 
 int __init wireless_proc_init(void)
 {
-	struct proc_dir_entry *p;
-	int rc = 0;
+	if (!proc_net_fops_create("wireless", S_IRUGO, &wireless_seq_fops))
+		return -ENOMEM;
 
-	p = create_proc_entry("wireless", S_IRUGO, proc_net);
-	if (p)
-		p->proc_fops = &wireless_seq_fops;
-	else
-		rc = -ENOMEM;
-	return rc;
+	return 0;
 }
 #endif	/* CONFIG_PROC_FS */
 
@@ -1370,3 +1365,10 @@ void wireless_spy_update(struct net_device *	dev,
 #endif /* IW_WIRELESS_THRSPY */
 #endif /* IW_WIRELESS_SPY */
 }
+
+EXPORT_SYMBOL(iw_handler_get_spy);
+EXPORT_SYMBOL(iw_handler_get_thrspy);
+EXPORT_SYMBOL(iw_handler_set_spy);
+EXPORT_SYMBOL(iw_handler_set_thrspy);
+EXPORT_SYMBOL(wireless_send_event);
+EXPORT_SYMBOL(wireless_spy_update);

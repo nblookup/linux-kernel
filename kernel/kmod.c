@@ -36,7 +36,7 @@
 #include <linux/kernel.h>
 #include <asm/uaccess.h>
 
-extern int max_threads, system_running;
+extern int max_threads;
 
 #ifdef CONFIG_KMOD
 
@@ -47,7 +47,8 @@ char modprobe_path[256] = "/sbin/modprobe";
 
 /**
  * request_module - try to load a kernel module
- * @module_name: Name of module
+ * @fmt:     printf style format string for the name of the module
+ * @varargs: arguements as specified in the format string
  *
  * Load a module using the user mode module loader. The function returns
  * zero on success or a negative errno code on failure. Note that a
@@ -60,12 +61,11 @@ char modprobe_path[256] = "/sbin/modprobe";
  */
 int request_module(const char *fmt, ...)
 {
-#define MODULENAME_SIZE 32
 	va_list args;
-	char module_name[MODULENAME_SIZE];
+	char module_name[MODULE_NAME_LEN];
 	unsigned int max_modprobes;
 	int ret;
-	char *argv[] = { modprobe_path, "--", module_name, NULL };
+	char *argv[] = { modprobe_path, "-q", "--", module_name, NULL };
 	static char *envp[] = { "HOME=/",
 				"TERM=linux",
 				"PATH=/sbin:/usr/sbin:/bin:/usr/bin",
@@ -75,9 +75,9 @@ int request_module(const char *fmt, ...)
 	static int kmod_loop_msg;
 
 	va_start(args, fmt);
-	ret = vsnprintf(module_name, MODULENAME_SIZE, fmt, args);
+	ret = vsnprintf(module_name, MODULE_NAME_LEN, fmt, args);
 	va_end(args);
-	if (ret >= MODULENAME_SIZE)
+	if (ret >= MODULE_NAME_LEN)
 		return -ENAMETOOLONG;
 
 	/* If modprobe needs a service that is in a module, we get a recursive

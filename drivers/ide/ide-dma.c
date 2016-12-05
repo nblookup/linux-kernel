@@ -210,7 +210,7 @@ static int ide_build_sglist (ide_drive_t *drive, struct request *rq)
 	if (hwif->sg_dma_active)
 		BUG();
 
-	nents = blk_rq_map_sg(&drive->queue, rq, hwif->sg_table);
+	nents = blk_rq_map_sg(drive->queue, rq, hwif->sg_table);
 		
 	if (rq_data_dir(rq) == READ)
 		hwif->sg_dma_direction = PCI_DMA_FROMDEVICE;
@@ -255,7 +255,7 @@ static int ide_raw_build_sglist (ide_drive_t *drive, struct request *rq)
 #endif
 		memset(&sg[nents], 0, sizeof(*sg));
 		sg[nents].page = virt_to_page(virt_addr);
-		sg[nents].offset = (unsigned long) virt_addr & ~PAGE_MASK;
+		sg[nents].offset = offset_in_page(virt_addr);
 		sg[nents].length = 128  * SECTOR_SIZE;
 		nents++;
 		virt_addr = virt_addr + (128 * SECTOR_SIZE);
@@ -263,7 +263,7 @@ static int ide_raw_build_sglist (ide_drive_t *drive, struct request *rq)
 	}
 	memset(&sg[nents], 0, sizeof(*sg));
 	sg[nents].page = virt_to_page(virt_addr);
-	sg[nents].offset = (unsigned long) virt_addr & ~PAGE_MASK;
+	sg[nents].offset = offset_in_page(virt_addr);
 	sg[nents].length =  sector_count  * SECTOR_SIZE;
 	nents++;
 
@@ -442,9 +442,10 @@ static int config_drive_for_dma (ide_drive_t *drive)
  *	the driver to resolve the problem, if a DMA transfer is still
  *	in progress we continue to wait (arguably we need to add a 
  *	secondary 'I don't care what the drive thinks' timeout here)
- *	Finally if we have an interrupt but for some reason got the
- *	timeout first we complete the I/O. This can occur if an 
- *	interrupt is lost or due to bugs.
+ *	Finally if we have an interrupt we let it complete the I/O.
+ *	But only one time - we clear expiry and if it's still not
+ *	completed after WAIT_CMD, we error and retry in PIO.
+ *	This can occur if an interrupt is lost or due to hang or bugs.
  */
  
 static int dma_timer_expiry (ide_drive_t *drive)
@@ -461,19 +462,16 @@ static int dma_timer_expiry (ide_drive_t *drive)
 	HWGROUP(drive)->expiry = NULL;	/* one free ride for now */
 
 	/* 1 dmaing, 2 error, 4 intr */
-	
-	if (dma_stat & 2) {	/* ERROR */
-		(void) hwif->ide_dma_end(drive);
-		return DRIVER(drive)->error(drive,
-			"dma_timer_expiry", hwif->INB(IDE_STATUS_REG));
-	}
+	if (dma_stat & 2)	/* ERROR */
+		return -1;
+
 	if (dma_stat & 1)	/* DMAing */
 		return WAIT_CMD;
 
 	if (dma_stat & 4)	/* Got an Interrupt */
-		HWGROUP(drive)->handler(drive);
+		return WAIT_CMD;
 
-	return 0;
+	return 0;	/* Status is unknown -- reset the bus */
 }
 
 /**
@@ -571,10 +569,6 @@ int __ide_dma_on (ide_drive_t *drive)
 
 	if (HWIF(drive)->ide_dma_host_on(drive))
 		return 1;
-
-#ifdef CONFIG_BLK_DEV_IDE_TCQ_DEFAULT
-	HWIF(drive)->ide_dma_queued_on(drive);
-#endif
 
 	return 0;
 }
@@ -1111,18 +1105,9 @@ void ide_setup_dma (ide_hwif_t *hwif, unsigned long dma_base, unsigned int num_p
 
 	if (hwif->chipset != ide_trm290) {
 		u8 dma_stat = hwif->INB(hwif->dma_status);
-		printk(", BIOS settings: %s:%s%s, %s:%s%s",
+		printk(", BIOS settings: %s:%s, %s:%s",
 		       hwif->drives[0].name, (dma_stat & 0x20) ? "DMA" : "pio",
-		       hwif->drives[0].autotune == IDE_TUNE_BIOS ? 
-		       		" (used)" : "",
-		       hwif->drives[1].name, (dma_stat & 0x40) ? "DMA" : "pio",
-		       hwif->drives[1].autotune == IDE_TUNE_BIOS ? 
-		       		" (used)" : "");
-
-		if (hwif->drives[0].autotune == IDE_TUNE_BIOS)
-			hwif->drives[0].using_dma = (dma_stat & 0x20);
-		if (hwif->drives[1].autotune == IDE_TUNE_BIOS)
-			hwif->drives[1].using_dma = (dma_stat & 0x40);
+		       hwif->drives[1].name, (dma_stat & 0x40) ? "DMA" : "pio");
 	}
 	printk("\n");
 

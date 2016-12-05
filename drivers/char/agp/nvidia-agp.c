@@ -13,21 +13,6 @@
 #include <linux/mm.h>
 #include "agp.h"
 
-
-/* registers */
-#define NVIDIA_0_APBASE		0x10
-#define NVIDIA_0_APSIZE		0x80
-#define NVIDIA_1_WBC		0xf0
-#define NVIDIA_2_GARTCTRL	0xd0
-#define NVIDIA_2_APBASE		0xd8
-#define NVIDIA_2_APLIMIT	0xdc
-#define NVIDIA_2_ATTBASE(i)	(0xe0 + (i) * 4)
-#define NVIDIA_3_APBASE		0x50
-#define NVIDIA_3_APLIMIT	0x54
-
-
-static int agp_try_unsupported __initdata = 0;
-
 static struct _nvidia_private {
 	struct pci_dev *dev_1;
 	struct pci_dev *dev_2;
@@ -76,7 +61,7 @@ static int nvidia_configure(void)
 		current_size->size_value);
 
     /* address to map to */
-	pci_read_config_dword(agp_bridge->dev, NVIDIA_0_APBASE, &apbase);
+	pci_read_config_dword(agp_bridge->dev, AGP_APBASE, &apbase);
 	apbase &= PCI_BASE_ADDRESS_MEM_MASK;
 	agp_bridge->gart_bus_addr = apbase;
 	aplimit = apbase + (current_size->size * 1024 * 1024) - 1;
@@ -211,7 +196,7 @@ static void nvidia_tlbflush(struct agp_memory *mem)
 			pci_read_config_dword(nvidia_private.dev_1,
 					NVIDIA_1_WBC, &wbc_reg);
 			if ((signed)(end - jiffies) <= 0) {
-				printk(KERN_ERR
+				printk(KERN_ERR PFX
 				    "TLB flush took more than 3 seconds.\n");
 			}
 		} while (wbc_reg & nvidia_private.wbc_mask);
@@ -265,8 +250,8 @@ struct agp_bridge_driver nvidia_driver = {
 	.agp_destroy_page	= agp_generic_destroy_page,
 };
 
-static int __init agp_nvidia_probe(struct pci_dev *pdev,
-				   const struct pci_device_id *ent)
+static int __devinit agp_nvidia_probe(struct pci_dev *pdev,
+				      const struct pci_device_id *ent)
 {
 	struct agp_bridge_data *bridge;
 	u8 cap_ptr;
@@ -279,9 +264,8 @@ static int __init agp_nvidia_probe(struct pci_dev *pdev,
 		pci_find_slot((unsigned int)pdev->bus->number, PCI_DEVFN(30, 0));
 	
 	if (!nvidia_private.dev_1 || !nvidia_private.dev_2 || !nvidia_private.dev_3) {
-		printk(KERN_INFO PFX "agpgart: Detected an NVIDIA "
-			"nForce/nForce2 chipset, but could not find "
-			"the secondary devices.\n");
+		printk(KERN_INFO PFX "Detected an NVIDIA nForce/nForce2 "
+			"chipset, but could not find the secondary devices.\n");
 		return -ENODEV;
 	}
 
@@ -299,17 +283,9 @@ static int __init agp_nvidia_probe(struct pci_dev *pdev,
 		nvidia_private.wbc_mask = 0x80000000;
 		break;
 	default:
-		if (!agp_try_unsupported) {
-			printk(KERN_ERR PFX
-			    "Unsupported NVIDIA chipset (device id: %04x),"
-			    " you might want to try agp_try_unsupported=1.\n",
+		printk(KERN_ERR PFX "Unsupported NVIDIA chipset (device id: %04x)\n",
 			    pdev->device);
-			return -ENODEV;
-		}
-		printk(KERN_WARNING PFX
-		    "Trying generic NVIDIA routines for device id: %04x\n",
-		    pdev->device);
-		break;
+		return -ENODEV;
 	}
 
 	bridge = agp_alloc_bridge();
@@ -338,7 +314,7 @@ static void __devexit agp_nvidia_remove(struct pci_dev *pdev)
 	agp_put_bridge(bridge);
 }
 
-static struct pci_device_id agp_nvidia_pci_table[] __initdata = {
+static struct pci_device_id agp_nvidia_pci_table[] = {
 	{
 	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
 	.class_mask	= ~0,
@@ -372,7 +348,6 @@ static void __exit agp_nvidia_cleanup(void)
 module_init(agp_nvidia_init);
 module_exit(agp_nvidia_cleanup);
 
-MODULE_PARM(agp_try_unsupported, "1i");
 MODULE_LICENSE("GPL and additional rights");
 MODULE_AUTHOR("NVIDIA Corporation");
 

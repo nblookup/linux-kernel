@@ -41,7 +41,6 @@
 
 #include <linux/interrupt.h>
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
@@ -763,7 +762,10 @@ static int mixcom_write_proc(struct file *file, const char *buffer,
 		return -ENOMEM;
 	}
 
-	copy_from_user(page, buffer, count = min_t(unsigned long, count, PAGE_SIZE));
+	if (copy_from_user(page, buffer, count = min_t(unsigned long, count, PAGE_SIZE))) {
+		free_page((unsigned long)page);
+		return -EFAULT;
+	}
 	if (*(page + count - 1) == '\n') {
 		*(page + count - 1) = 0;
 	}

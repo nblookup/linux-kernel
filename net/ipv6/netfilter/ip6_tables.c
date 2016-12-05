@@ -26,6 +26,10 @@
 
 #include <linux/netfilter_ipv6/ip6_tables.h>
 
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+MODULE_DESCRIPTION("IPv6 packet filter");
+
 #define IPV6_HDR_LEN	(sizeof(struct ipv6hdr))
 #define IPV6_OPTHDR_LEN	(sizeof(struct ipv6_opt_hdr))
 
@@ -329,7 +333,7 @@ ip6t_do_table(struct sk_buff **pskb,
 	      struct ip6t_table *table,
 	      void *userdata)
 {
-	static const char nulldevname[IFNAMSIZ] = { 0 };
+	static const char nulldevname[IFNAMSIZ];
 	u_int16_t offset = 0;
 	struct ipv6hdr *ipv6;
 	void *protohdr;
@@ -1923,4 +1927,3 @@ EXPORT_SYMBOL(ip6t_ext_hdr);
 
 module_init(init);
 module_exit(fini);
-MODULE_LICENSE("GPL");

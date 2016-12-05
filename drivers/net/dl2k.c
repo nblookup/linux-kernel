@@ -319,7 +319,7 @@ rio_probe1 (struct pci_dev *pdev, const struct pci_device_id *ent)
 
       err_out_dev:
 #endif
-	kfree (dev);
+	free_netdev (dev);
 
       err_out_res:
 	pci_release_regions (pdev);
@@ -1201,7 +1201,7 @@ rio_ethtool_ioctl (struct net_device *dev, void *useraddr)
 			struct ethtool_drvinfo info = { ETHTOOL_GDRVINFO };
 			strcpy(info.driver, "DL2K");
 			strcpy(info.version, DRV_VERSION);
-			strcpy(info.bus_info, np->pdev->slot_name);
+			strcpy(info.bus_info, pci_name(np->pdev));
 			memset(&info.fw_version, 0, sizeof(info.fw_version));
 			if (copy_to_user(useraddr, &info, sizeof(info)))
 				return -EFAULT;
@@ -1844,7 +1844,7 @@ rio_remove1 (struct pci_dev *pdev)
 #ifdef MEM_MAPPING
 		iounmap ((char *) (dev->base_addr));
 #endif
-		kfree (dev);
+		free_netdev (dev);
 		pci_release_regions (pdev);
 		pci_disable_device (pdev);
 	}

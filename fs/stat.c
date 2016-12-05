@@ -5,6 +5,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/file.h>
@@ -24,14 +25,16 @@ void generic_fillattr(struct inode *inode, struct kstat *stat)
 	stat->nlink = inode->i_nlink;
 	stat->uid = inode->i_uid;
 	stat->gid = inode->i_gid;
-	stat->rdev = kdev_t_to_nr(inode->i_rdev);
+	stat->rdev = inode->i_rdev;
 	stat->atime = inode->i_atime;
 	stat->mtime = inode->i_mtime;
 	stat->ctime = inode->i_ctime;
-	stat->size = inode->i_size;
+	stat->size = i_size_read(inode);
 	stat->blocks = inode->i_blocks;
 	stat->blksize = inode->i_blksize;
 }
+
+EXPORT_SYMBOL(generic_fillattr);
 
 int vfs_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
 {
@@ -56,6 +59,8 @@ int vfs_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
 	return 0;
 }
 
+EXPORT_SYMBOL(vfs_getattr);
+
 int vfs_stat(char __user *name, struct kstat *stat)
 {
 	struct nameidata nd;
@@ -68,6 +73,8 @@ int vfs_stat(char __user *name, struct kstat *stat)
 	}
 	return error;
 }
+
+EXPORT_SYMBOL(vfs_stat);
 
 int vfs_lstat(char __user *name, struct kstat *stat)
 {
@@ -82,6 +89,8 @@ int vfs_lstat(char __user *name, struct kstat *stat)
 	return error;
 }
 
+EXPORT_SYMBOL(vfs_lstat);
+
 int vfs_fstat(unsigned int fd, struct kstat *stat)
 {
 	struct file *f = fget(fd);
@@ -93,6 +102,8 @@ int vfs_fstat(unsigned int fd, struct kstat *stat)
 	}
 	return error;
 }
+
+EXPORT_SYMBOL(vfs_fstat);
 
 #if !defined(__alpha__) && !defined(__sparc__) && !defined(__ia64__) \
   && !defined(CONFIG_ARCH_S390) && !defined(__hppa__) && !defined(__x86_64__) \
@@ -106,7 +117,7 @@ static int cp_old_stat(struct kstat *stat, struct __old_kernel_stat __user * sta
 {
 	static int warncount = 5;
 	struct __old_kernel_stat tmp;
-
+	
 	if (warncount > 0) {
 		warncount--;
 		printk(KERN_WARNING "VFS: Warning: %s using old stat() call. Recompile your binary.\n",
@@ -116,13 +127,14 @@ static int cp_old_stat(struct kstat *stat, struct __old_kernel_stat __user * sta
 		warncount = 0;
 	}
 
-	tmp.st_dev = stat->dev;
+	memset(&tmp, 0, sizeof(struct __old_kernel_stat));
+	tmp.st_dev = old_encode_dev(stat->dev);
 	tmp.st_ino = stat->ino;
 	tmp.st_mode = stat->mode;
 	tmp.st_nlink = stat->nlink;
-	SET_OLDSTAT_UID(tmp, stat->uid);
-	SET_OLDSTAT_GID(tmp, stat->gid);
-	tmp.st_rdev = stat->rdev;
+	SET_UID(tmp.st_uid, stat->uid);
+	SET_GID(tmp.st_gid, stat->gid);
+	tmp.st_rdev = old_encode_dev(stat->rdev);
 #if BITS_PER_LONG == 32
 	if (stat->size > MAX_NON_LFS)
 		return -EOVERFLOW;
@@ -171,14 +183,30 @@ static int cp_new_stat(struct kstat *stat, struct stat __user *statbuf)
 {
 	struct stat tmp;
 
+#if BITS_PER_LONG == 32
+	if (!old_valid_dev(stat->dev) || !old_valid_dev(stat->rdev))
+		return -EOVERFLOW;
+#else
+	if (!new_valid_dev(stat->dev) || !new_valid_dev(stat->rdev))
+		return -EOVERFLOW;
+#endif
+
 	memset(&tmp, 0, sizeof(tmp));
-	tmp.st_dev = stat->dev;
+#if BITS_PER_LONG == 32
+	tmp.st_dev = old_encode_dev(stat->dev);
+#else
+	tmp.st_dev = new_encode_dev(stat->dev);
+#endif
 	tmp.st_ino = stat->ino;
 	tmp.st_mode = stat->mode;
 	tmp.st_nlink = stat->nlink;
-	SET_STAT_UID(tmp, stat->uid);
-	SET_STAT_GID(tmp, stat->gid);
-	tmp.st_rdev = stat->rdev;
+	SET_UID(tmp.st_uid, stat->uid);
+	SET_GID(tmp.st_gid, stat->gid);
+#if BITS_PER_LONG == 32
+	tmp.st_rdev = old_encode_dev(stat->rdev);
+#else
+	tmp.st_rdev = new_encode_dev(stat->rdev);
+#endif
 #if BITS_PER_LONG == 32
 	if (stat->size > MAX_NON_LFS)
 		return -EOVERFLOW;
@@ -262,7 +290,16 @@ static long cp_new_stat64(struct kstat *stat, struct stat64 __user *statbuf)
 	struct stat64 tmp;
 
 	memset(&tmp, 0, sizeof(struct stat64));
-	tmp.st_dev = stat->dev;
+#ifdef CONFIG_MIPS
+	/* mips has weird padding, so we don't get 64 bits there */
+	if (!new_valid_dev(stat->dev) || !new_valid_dev(stat->rdev))
+		return -EOVERFLOW;
+	tmp.st_dev = new_encode_dev(stat->dev);
+	tmp.st_rdev = new_encode_dev(stat->rdev);
+#else
+	tmp.st_dev = huge_encode_dev(stat->dev);
+	tmp.st_rdev = huge_encode_dev(stat->rdev);
+#endif
 	tmp.st_ino = stat->ino;
 #ifdef STAT64_HAS_BROKEN_ST_INO
 	tmp.__st_ino = stat->ino;
@@ -271,7 +308,6 @@ static long cp_new_stat64(struct kstat *stat, struct stat64 __user *statbuf)
 	tmp.st_nlink = stat->nlink;
 	tmp.st_uid = stat->uid;
 	tmp.st_gid = stat->gid;
-	tmp.st_rdev = stat->rdev;
 	tmp.st_atime = stat->atime.tv_sec;
 	tmp.st_atime_nsec = stat->atime.tv_nsec;
 	tmp.st_mtime = stat->mtime.tv_sec;
@@ -330,6 +366,8 @@ void inode_add_bytes(struct inode *inode, loff_t bytes)
 	spin_unlock(&inode->i_lock);
 }
 
+EXPORT_SYMBOL(inode_add_bytes);
+
 void inode_sub_bytes(struct inode *inode, loff_t bytes)
 {
 	spin_lock(&inode->i_lock);
@@ -343,6 +381,8 @@ void inode_sub_bytes(struct inode *inode, loff_t bytes)
 	spin_unlock(&inode->i_lock);
 }
 
+EXPORT_SYMBOL(inode_sub_bytes);
+
 loff_t inode_get_bytes(struct inode *inode)
 {
 	loff_t ret;
@@ -353,8 +393,12 @@ loff_t inode_get_bytes(struct inode *inode)
 	return ret;
 }
 
+EXPORT_SYMBOL(inode_get_bytes);
+
 void inode_set_bytes(struct inode *inode, loff_t bytes)
 {
 	inode->i_blocks = bytes >> 9;
 	inode->i_bytes = bytes & 511;
 }
+
+EXPORT_SYMBOL(inode_set_bytes);

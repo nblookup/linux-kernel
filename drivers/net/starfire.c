@@ -139,6 +139,7 @@ TODO:	bugfixes (no bugs known as of right now)
 #include <linux/config.h>
 #include <linux/version.h>
 #include <linux/module.h>
+#include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/netdevice.h>
@@ -323,7 +324,7 @@ static int full_duplex[MAX_UNITS] = {0, };
 #define netif_start_if(dev)
 #define netif_stop_if(dev)
 
-#define PCI_SLOT_NAME(pci_dev)	(pci_dev)->slot_name
+#define PCI_SLOT_NAME(pci_dev)	pci_name(pci_dev)
 
 #endif /* LINUX_VERSION_CODE > 0x20300 */
 
@@ -487,7 +488,7 @@ enum chipset {
 	CH_6915 = 0,
 };
 
-static struct pci_device_id starfire_pci_tbl[] __devinitdata = {
+static struct pci_device_id starfire_pci_tbl[] = {
 	{ 0x9004, 0x6915, PCI_ANY_ID, PCI_ANY_ID, 0, 0, CH_6915 },
 	{ 0, }
 };
@@ -1070,7 +1071,7 @@ err_out_cleardev:
 err_out_free_res:
 	pci_release_regions (pdev);
 err_out_free_netdev:
-	kfree(dev);
+	free_netdev(dev);
 	return -ENODEV;
 }
 
@@ -1174,15 +1175,9 @@ static int netdev_open(struct net_device *dev)
 	       TX_DESC_SPACING | TX_DESC_TYPE,
 	       ioaddr + TxDescCtrl);
 
-#if defined(ADDR_64BITS)
-	writel(np->queue_mem_dma >> 32, ioaddr + RxDescQHiAddr);
-	writel(np->queue_mem_dma >> 32, ioaddr + TxRingHiAddr);
-	writel(np->queue_mem_dma >> 32, ioaddr + CompletionHiAddr);
-#else
-	writel(0, ioaddr + RxDescQHiAddr);
-	writel(0, ioaddr + TxRingHiAddr);
-	writel(0, ioaddr + CompletionHiAddr);
-#endif
+	writel( (np->queue_mem_dma >> 16) >> 16, ioaddr + RxDescQHiAddr);
+	writel( (np->queue_mem_dma >> 16) >> 16, ioaddr + TxRingHiAddr);
+	writel( (np->queue_mem_dma >> 16) >> 16, ioaddr + CompletionHiAddr);
 	writel(np->rx_ring_dma, ioaddr + RxDescQAddr);
 	writel(np->tx_ring_dma, ioaddr + TxRingPtr);
 
@@ -2196,7 +2191,7 @@ static void __devexit starfire_remove_one (struct pci_dev *pdev)
 	pci_release_regions(pdev);
 
 	pci_set_drvdata(pdev, NULL);
-	kfree(dev);			/* Will also free np!! */
+	free_netdev(dev);			/* Will also free np!! */
 }
 
 

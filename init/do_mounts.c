@@ -1,3 +1,4 @@
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/ctype.h>
 #include <linux/fd.h>
@@ -22,6 +23,8 @@ static char __initdata saved_root_name[64];
 
 /* this is initialized in init/main.c */
 dev_t ROOT_DEV;
+
+EXPORT_SYMBOL(ROOT_DEV);
 
 static int __init load_ramdisk(char *str)
 {
@@ -58,6 +61,7 @@ static dev_t __init try_name(char *name, int part)
 	char *s;
 	int len;
 	int fd;
+	unsigned int maj, min;
 
 	/* read device number from .../dev */
 
@@ -70,9 +74,21 @@ static dev_t __init try_name(char *name, int part)
 	if (len <= 0 || len == 32 || buf[len - 1] != '\n')
 		goto fail;
 	buf[len - 1] = '\0';
-	res = (dev_t) simple_strtoul(buf, &s, 16);
-	if (*s)
-		goto fail;
+	if (sscanf(buf, "%u:%u", &maj, &min) == 2) {
+		/*
+		 * Try the %u:%u format -- see print_dev_t()
+		 */
+		res = MKDEV(maj, min);
+		if (maj != MAJOR(res) || min != MINOR(res))
+			goto fail;
+	} else {
+		/*
+		 * Nope.  Try old-style "0321"
+		 */
+		res = new_decode_dev(simple_strtoul(buf, &s, 16));
+		if (*s)
+			goto fail;
+	}
 
 	/* if it's there and we are not looking for a partition - that's it */
 	if (!part)
@@ -96,7 +112,7 @@ static dev_t __init try_name(char *name, int part)
 	if (part < range)
 		return res + part;
 fail:
-	return (dev_t) 0;
+	return 0;
 }
 
 /*
@@ -130,9 +146,17 @@ dev_t name_to_dev_t(char *name)
 		goto out;
 
 	if (strncmp(name, "/dev/", 5) != 0) {
-		res = (dev_t) simple_strtoul(name, &p, 16);
-		if (*p)
-			goto fail;
+		unsigned maj, min;
+
+		if (sscanf(name, "%u:%u", &maj, &min) == 2) {
+			res = MKDEV(maj, min);
+			if (maj != MAJOR(res) || min != MINOR(res))
+				goto fail;
+		} else {
+			res = new_decode_dev(simple_strtoul(name, &p, 16));
+			if (*p)
+				goto fail;
+		}
 		goto done;
 	}
 	name += 5;
@@ -170,7 +194,7 @@ out:
 	sys_rmdir("/sys");
 	return res;
 fail:
-	res = (dev_t) 0;
+	res = 0;
 	goto done;
 }
 
@@ -268,6 +292,7 @@ retry:
 		printk("VFS: Cannot open root device \"%s\" or %s\n",
 				root_device_name, b);
 		printk("Please append a correct \"root=\" boot option\n");
+
 		panic("VFS: Unable to mount root fs on %s", b);
 	}
 	panic("VFS: Unable to mount root fs on %s", __bdevname(ROOT_DEV, b));
@@ -364,10 +389,6 @@ void __init prepare_namespace(void)
 	}
 
 	is_floppy = MAJOR(ROOT_DEV) == FLOPPY_MAJOR;
-
-	/* This has to be before mounting root, because even readonly mount of reiserfs would replay
-	   log corrupting stuff */
-	software_resume();
 
 	if (initrd_load())
 		goto out;

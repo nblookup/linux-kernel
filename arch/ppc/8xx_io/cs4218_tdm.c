@@ -597,7 +597,7 @@ static ssize_t cs4218_ctx_law(const u_char *userPtr, size_t userCount,
 	int hSpeed = sound.hard.speed, sSpeed = sound.soft.speed;
 	int utotal, ftotal;
 	int stereo = sound.soft.stereo;
- 
+
 	frameLeft >>= 2;
 	if (stereo)
 		userCount >>= 1;
@@ -2087,7 +2087,7 @@ static int sq_open(struct inode *inode, struct file *file)
 
 		read_sq_setup(numReadBufs,readbufSize<<10, sound_read_buffers);
 		read_sq.open_mode = file->f_mode;
-	}                                                                      
+	}
 
 	/* Start up the 4218 by:
 	 * Reset.
@@ -2106,11 +2106,11 @@ static int sq_open(struct inode *inode, struct file *file)
 	 */
 	cs4218_ctl_write(cs4218_control);
 
-	sound.minDev = MINOR(inode->i_rdev) & 0x0f;
+	sound.minDev = iminor(inode) & 0x0f;
 	sound.soft = sound.dsp;
 	sound.hard = sound.dsp;
 	sound_init();
-	if ((MINOR(inode->i_rdev) & 0x0f) == SND_DEV_AUDIO) {
+	if ((iminor(inode) & 0x0f) == SND_DEV_AUDIO) {
 		sound_set_speed(8000);
 		sound_set_stereo(0);
 		sound_set_format(AFMT_MU_LAW);
@@ -2696,24 +2696,24 @@ void __init dmasound_setup(char *str, int *ints)
 	switch (ints[0]) {
 	case 3:
 		if ((ints[3] < 0) || (ints[3] > MAX_CATCH_RADIUS))
-			printk("dmasound_setup: illegal catch radius, using default = %d\n", catchRadius);
+			printk("dmasound_setup: invalid catch radius, using default = %d\n", catchRadius);
 		else
 			catchRadius = ints[3];
 		/* fall through */
 	case 2:
 		if (ints[1] < MIN_BUFFERS)
-			printk("dmasound_setup: illegal number of buffers, using default = %d\n", numBufs);
+			printk("dmasound_setup: invalid number of buffers, using default = %d\n", numBufs);
 		else
 			numBufs = ints[1];
 		if (ints[2] < MIN_BUFSIZE || ints[2] > MAX_BUFSIZE)
-			printk("dmasound_setup: illegal buffer size, using default = %d\n", bufSize);
+			printk("dmasound_setup: invalid buffer size, using default = %d\n", bufSize);
 		else
 			bufSize = ints[2];
 		break;
 	case 0:
 		break;
 	default:
-		printk("dmasound_setup: illegal number of arguments\n");
+		printk("dmasound_setup: invalid number of arguments\n");
 	}
 }
 

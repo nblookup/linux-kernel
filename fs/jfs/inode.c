@@ -20,6 +20,7 @@
 #include <linux/fs.h>
 #include <linux/mpage.h>
 #include <linux/buffer_head.h>
+#include <linux/pagemap.h>
 #include "jfs_incore.h"
 #include "jfs_filsys.h"
 #include "jfs_imap.h"
@@ -51,7 +52,7 @@ void jfs_read_inode(struct inode *inode)
 		inode->i_op = &jfs_dir_inode_operations;
 		inode->i_fop = &jfs_dir_operations;
 		inode->i_mapping->a_ops = &jfs_aops;
-		inode->i_mapping->gfp_mask = GFP_NOFS;
+		mapping_set_gfp_mask(inode->i_mapping, GFP_NOFS);
 	} else if (S_ISLNK(inode->i_mode)) {
 		if (inode->i_size >= IDATASIZE) {
 			inode->i_op = &page_symlink_inode_operations;
@@ -60,13 +61,9 @@ void jfs_read_inode(struct inode *inode)
 			inode->i_op = &jfs_symlink_inode_operations;
 	} else {
 		inode->i_op = &jfs_file_inode_operations;
-		init_special_inode(inode, inode->i_mode,
-				   kdev_t_to_nr(inode->i_rdev));
+		init_special_inode(inode, inode->i_mode, inode->i_rdev);
 	}
 }
-
-/* This define is from fs/open.c */
-#define special_file(m) (S_ISCHR(m)||S_ISBLK(m)||S_ISFIFO(m)||S_ISSOCK(m))
 
 /*
  * Workhorse of both fsync & write_inode
@@ -105,19 +102,23 @@ int jfs_commit_inode(struct inode *inode, int wait)
 	rc = txCommit(tid, 1, &inode, wait ? COMMIT_SYNC : 0);
 	txEnd(tid);
 	up(&JFS_IP(inode)->commit_sem);
-	return -rc;
+	return rc;
 }
 
 void jfs_write_inode(struct inode *inode, int wait)
 {
+	if (test_cflag(COMMIT_Nolink, inode))
+		return;
 	/*
 	 * If COMMIT_DIRTY is not set, the inode isn't really dirty.
 	 * It has been committed since the last change, but was still
-	 * on the dirty inode list
+	 * on the dirty inode list.
 	 */
-	if (test_cflag(COMMIT_Nolink, inode) ||
-	    !test_cflag(COMMIT_Dirty, inode))
+	 if (!test_cflag(COMMIT_Dirty, inode)) {
+		/* Make sure committed changes hit the disk */
+		jfs_flush_journal(JFS_SBI(inode->i_sb)->log, wait);
 		return;
+	 }
 
 	if (jfs_commit_inode(inode, wait)) {
 		jfs_err("jfs_write_inode: jfs_commit_inode failed!");
@@ -308,7 +309,7 @@ static int jfs_direct_IO(int rw, struct kiocb *iocb, const struct iovec *iov,
 	struct inode *inode = file->f_dentry->d_inode->i_mapping->host;
 
 	return blockdev_direct_IO(rw, iocb, inode, inode->i_sb->s_bdev, iov,
-				offset, nr_segs, jfs_get_blocks);
+				offset, nr_segs, jfs_get_blocks, NULL);
 }
 
 struct address_space_operations jfs_aops = {

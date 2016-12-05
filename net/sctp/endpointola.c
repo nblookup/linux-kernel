@@ -129,15 +129,16 @@ struct sctp_endpoint *sctp_endpoint_init(struct sctp_endpoint *ep,
 	ep->timeouts[SCTP_EVENT_TIMEOUT_T1_INIT] =
 		SCTP_DEFAULT_TIMEOUT_T1_INIT;
 	ep->timeouts[SCTP_EVENT_TIMEOUT_T2_SHUTDOWN] =
-		sp->rtoinfo.srto_initial * HZ / 1000;
+		MSECS_TO_JIFFIES(sp->rtoinfo.srto_initial);
 	ep->timeouts[SCTP_EVENT_TIMEOUT_T3_RTX] = 0;
+	ep->timeouts[SCTP_EVENT_TIMEOUT_T4_RTO] = 0;
 
 	/* sctpimpguide-05 Section 2.12.2
 	 * If the 'T5-shutdown-guard' timer is used, it SHOULD be set to the
 	 * recommended value of 5 times 'RTO.Max'.
 	 */
         ep->timeouts[SCTP_EVENT_TIMEOUT_T5_SHUTDOWN_GUARD]
-		= 5 * (sp->rtoinfo.srto_max * HZ / 1000);
+		= 5 * MSECS_TO_JIFFIES(sp->rtoinfo.srto_max);
 
 	ep->timeouts[SCTP_EVENT_TIMEOUT_HEARTBEAT] =
 		SCTP_DEFAULT_TIMEOUT_HEARTBEAT;

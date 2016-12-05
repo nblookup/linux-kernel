@@ -4,7 +4,7 @@
  * Authors:
  *	Mitsuru KANDA @USAGI
  * 	Kazunori MIYAZAWA @USAGI
- * 	Kunihiro Ishiguro
+ * 	Kunihiro Ishiguro <kunihiro@ipinfusion.com>
  * 		IPv6 support
  * 	YOSHIFUJI Hideaki
  * 		Split up af-specific portion
@@ -55,12 +55,22 @@ static struct dst_entry *
 __xfrm6_find_bundle(struct flowi *fl, struct rtable *rt, struct xfrm_policy *policy)
 {
 	struct dst_entry *dst;
+	u32 ndisc_bit = 0;
+
+	if (fl->proto == IPPROTO_ICMPV6 &&
+	    (fl->fl_icmp_type == NDISC_NEIGHBOUR_ADVERTISEMENT ||
+	     fl->fl_icmp_type == NDISC_NEIGHBOUR_SOLICITATION  ||
+	     fl->fl_icmp_type == NDISC_ROUTER_SOLICITATION))
+		ndisc_bit = RTF_NDISC;
 
 	/* Still not clear if we should set fl->fl6_{src,dst}... */
 	read_lock_bh(&policy->lock);
 	for (dst = policy->bundles; dst; dst = dst->next) {
 		struct xfrm_dst *xdst = (struct xfrm_dst*)dst;
 		struct in6_addr fl_dst_prefix, fl_src_prefix;
+
+		if ((xdst->u.rt6.rt6i_flags & RTF_NDISC) != ndisc_bit)
+			continue;
 
 		ipv6_addr_prefix(&fl_dst_prefix,
 				 &fl->fl6_dst,
@@ -159,7 +169,7 @@ __xfrm6_bundle_create(struct xfrm_policy *policy, struct xfrm_state **xfrm, int 
 		dst_prev->output	= dst_prev->xfrm->type->output;
 		/* Sheit... I remember I did this right. Apparently,
 		 * it was magically lost, so this code needs audit */
-		x->u.rt6.rt6i_flags    = rt0->rt6i_flags&(RTCF_BROADCAST|RTCF_MULTICAST|RTCF_LOCAL);
+		x->u.rt6.rt6i_flags    = rt0->rt6i_flags&(RTCF_BROADCAST|RTCF_MULTICAST|RTCF_LOCAL|RTF_NDISC);
 		x->u.rt6.rt6i_metric   = rt0->rt6i_metric;
 		x->u.rt6.rt6i_node     = rt0->rt6i_node;
 		x->u.rt6.rt6i_gateway  = rt0->rt6i_gateway;
@@ -209,6 +219,7 @@ _decode_session6(struct sk_buff *skb, struct flowi *fl)
 				fl->fl_ip_sport = ports[0];
 				fl->fl_ip_dport = ports[1];
 			}
+			fl->proto = nexthdr;
 			return;
 
 		/* XXX Why are there these headers? */
@@ -217,6 +228,7 @@ _decode_session6(struct sk_buff *skb, struct flowi *fl)
 		case IPPROTO_COMP:
 		default:
 			fl->fl_ipsec_spi = 0;
+			fl->proto = nexthdr;
 			return;
 		};
 	}
@@ -274,7 +286,6 @@ void __init xfrm6_init(void)
 {
 	xfrm6_policy_init();
 	xfrm6_state_init();
-	xfrm6_input_init();
 }
 
 void __exit xfrm6_fini(void)

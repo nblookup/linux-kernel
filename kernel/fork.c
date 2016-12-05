@@ -53,12 +53,7 @@ DEFINE_PER_CPU(unsigned long, process_counts) = 0;
 
 rwlock_t tasklist_lock __cacheline_aligned = RW_LOCK_UNLOCKED;  /* outer */
 
-/*
- * A per-CPU task cache - this relies on the fact that
- * the very last portion of sys_exit() is executed with
- * preemption turned off.
- */
-static task_t *task_cache[NR_CPUS] __cacheline_aligned;
+EXPORT_SYMBOL(tasklist_lock);
 
 int nr_processes(void)
 {
@@ -80,26 +75,8 @@ static kmem_cache_t *task_struct_cachep;
 
 static void free_task(struct task_struct *tsk)
 {
-	/*
-	 * The task cache is effectively disabled right now.
-	 * Do we want it? The slab cache already has per-cpu
-	 * stuff, but the thread info (usually a order-1 page
-	 * allocation) doesn't.
-	 */
-	if (tsk != current) {
-		free_thread_info(tsk->thread_info);
-		free_task_struct(tsk);
-	} else {
-		int cpu = get_cpu();
-
-		tsk = task_cache[cpu];
-		if (tsk) {
-			free_thread_info(tsk->thread_info);
-			free_task_struct(tsk);
-		}
-		task_cache[cpu] = current;
-		put_cpu();
-	}
+	free_thread_info(tsk->thread_info);
+	free_task_struct(tsk);
 }
 
 void __put_task_struct(struct task_struct *tsk)
@@ -123,6 +100,8 @@ void add_wait_queue(wait_queue_head_t *q, wait_queue_t * wait)
 	spin_unlock_irqrestore(&q->lock, flags);
 }
 
+EXPORT_SYMBOL(add_wait_queue);
+
 void add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t * wait)
 {
 	unsigned long flags;
@@ -133,6 +112,8 @@ void add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t * wait)
 	spin_unlock_irqrestore(&q->lock, flags);
 }
 
+EXPORT_SYMBOL(add_wait_queue_exclusive);
+
 void remove_wait_queue(wait_queue_head_t *q, wait_queue_t * wait)
 {
 	unsigned long flags;
@@ -142,42 +123,76 @@ void remove_wait_queue(wait_queue_head_t *q, wait_queue_t * wait)
 	spin_unlock_irqrestore(&q->lock, flags);
 }
 
+EXPORT_SYMBOL(remove_wait_queue);
+
+
+/*
+ * Note: we use "set_current_state()" _after_ the wait-queue add,
+ * because we need a memory barrier there on SMP, so that any
+ * wake-function that tests for the wait-queue being active
+ * will be guaranteed to see waitqueue addition _or_ subsequent
+ * tests in this thread will see the wakeup having taken place.
+ *
+ * The spin_unlock() itself is semi-permeable and only protects
+ * one way (it only protects stuff inside the critical region and
+ * stops them from bleeding out - it would still allow subsequent
+ * loads to move into the the critical region).
+ */
 void prepare_to_wait(wait_queue_head_t *q, wait_queue_t *wait, int state)
 {
 	unsigned long flags;
 
-	__set_current_state(state);
 	wait->flags &= ~WQ_FLAG_EXCLUSIVE;
 	spin_lock_irqsave(&q->lock, flags);
 	if (list_empty(&wait->task_list))
 		__add_wait_queue(q, wait);
+	set_current_state(state);
 	spin_unlock_irqrestore(&q->lock, flags);
 }
+
+EXPORT_SYMBOL(prepare_to_wait);
 
 void
 prepare_to_wait_exclusive(wait_queue_head_t *q, wait_queue_t *wait, int state)
 {
 	unsigned long flags;
 
-	__set_current_state(state);
 	wait->flags |= WQ_FLAG_EXCLUSIVE;
 	spin_lock_irqsave(&q->lock, flags);
 	if (list_empty(&wait->task_list))
 		__add_wait_queue_tail(q, wait);
+	set_current_state(state);
 	spin_unlock_irqrestore(&q->lock, flags);
 }
+
+EXPORT_SYMBOL(prepare_to_wait_exclusive);
 
 void finish_wait(wait_queue_head_t *q, wait_queue_t *wait)
 {
 	unsigned long flags;
 
 	__set_current_state(TASK_RUNNING);
-	if (!list_empty(&wait->task_list)) {
+	/*
+	 * We can check for list emptiness outside the lock
+	 * IFF:
+	 *  - we use the "careful" check that verifies both
+	 *    the next and prev pointers, so that there cannot
+	 *    be any half-pending updates in progress on other
+	 *    CPU's that we haven't seen yet (and that might
+	 *    still change the stack area.
+	 * and
+	 *  - all other users take the lock (ie we can only
+	 *    have _one_ other CPU that looks at or modifies
+	 *    the list).
+	 */
+	if (!list_empty_careful(&wait->task_list)) {
 		spin_lock_irqsave(&q->lock, flags);
 		list_del_init(&wait->task_list);
 		spin_unlock_irqrestore(&q->lock, flags);
 	}
 }
+
+EXPORT_SYMBOL(finish_wait);
 
 int autoremove_wake_function(wait_queue_t *wait, unsigned mode, int sync)
 {
@@ -187,6 +202,8 @@ int autoremove_wake_function(wait_queue_t *wait, unsigned mode, int sync)
 		list_del_init(&wait->task_list);
 	return ret;
 }
+
+EXPORT_SYMBOL(autoremove_wake_function);
 
 void __init fork_init(unsigned long mempages)
 {
@@ -220,25 +237,18 @@ static struct task_struct *dup_task_struct(struct task_struct *orig)
 {
 	struct task_struct *tsk;
 	struct thread_info *ti;
-	int cpu = get_cpu();
 
 	prepare_to_copy(orig);
 
-	tsk = task_cache[cpu];
-	task_cache[cpu] = NULL;
-	put_cpu();
-	if (!tsk) {
-		tsk = alloc_task_struct();
-		if (!tsk)
-			return NULL;
+	tsk = alloc_task_struct();
+	if (!tsk)
+		return NULL;
 
-		ti = alloc_thread_info(tsk);
-		if (!ti) {
-			free_task_struct(tsk);
-			return NULL;
-		}
-	} else
-		ti = tsk->thread_info;
+	ti = alloc_thread_info(tsk);
+	if (!ti) {
+		free_task_struct(tsk);
+		return NULL;
+	}
 
 	*ti = *orig->thread_info;
 	*tsk = *orig;
@@ -265,7 +275,7 @@ static inline int dup_mmap(struct mm_struct * mm, struct mm_struct * oldmm)
 	mm->free_area_cache = TASK_UNMAPPED_BASE;
 	mm->map_count = 0;
 	mm->rss = 0;
-	mm->cpu_vm_mask = 0;
+	cpus_clear(mm->cpu_vm_mask);
 	pprev = &mm->mmap;
 
 	/*
@@ -337,7 +347,7 @@ out:
 	return retval;
 fail_nomem:
 	retval = -ENOMEM;
-  fail:
+fail:
 	vm_unacct_memory(charge);
 	goto out;
 }
@@ -375,6 +385,7 @@ static struct mm_struct * mm_init(struct mm_struct * mm)
 	mm->core_waiters = 0;
 	mm->page_table_lock = SPIN_LOCK_UNLOCKED;
 	mm->ioctx_list_lock = RW_LOCK_UNLOCKED;
+	mm->ioctx_list = NULL;
 	mm->default_kioctx = (struct kioctx)INIT_KIOCTX(mm->default_kioctx, *mm);
 	mm->free_area_cache = TASK_UNMAPPED_BASE;
 
@@ -429,6 +440,23 @@ void mmput(struct mm_struct *mm)
 	}
 }
 
+/*
+ * Checks if the use count of an mm is non-zero and if so
+ * returns a reference to it after bumping up the use count.
+ * If the use count is zero, it means this mm is going away,
+ * so return NULL.
+ */
+struct mm_struct *mmgrab(struct mm_struct *mm)
+{
+	spin_lock(&mmlist_lock);
+	if (!atomic_read(&mm->mm_users))
+		mm = NULL;
+	else
+		atomic_inc(&mm->mm_users);
+	spin_unlock(&mmlist_lock);
+	return mm;
+}
+
 /* Please note the differences between mmput and mm_release.
  * mmput is called whenever we stop holding onto a mm_struct,
  * error success whatever.
@@ -475,6 +503,7 @@ static int copy_mm(unsigned long clone_flags, struct task_struct * tsk)
 	tsk->min_flt = tsk->maj_flt = 0;
 	tsk->cmin_flt = tsk->cmaj_flt = 0;
 	tsk->nswap = tsk->cnswap = 0;
+	tsk->nvcsw = tsk->nivcsw = tsk->cnvcsw = tsk->cnivcsw = 0;
 
 	tsk->mm = NULL;
 	tsk->active_mm = NULL;
@@ -512,7 +541,7 @@ static int copy_mm(unsigned long clone_flags, struct task_struct * tsk)
 		goto fail_nomem;
 
 	if (init_new_context(tsk,mm))
-		goto free_pt;
+		goto fail_nocontext;
 
 	retval = dup_mmap(mm, oldmm);
 	if (retval)
@@ -526,6 +555,15 @@ good_mm:
 free_pt:
 	mmput(mm);
 fail_nomem:
+	return retval;
+
+fail_nocontext:
+	/*
+	 * If init_new_context() failed, we cannot use mmput() to free the mm
+	 * because it calls destroy_context()
+	 */
+	mm_free_pgd(mm);
+	free_mm(mm);
 	return retval;
 }
 
@@ -558,6 +596,8 @@ struct fs_struct *copy_fs_struct(struct fs_struct *old)
 {
 	return __copy_fs_struct(old);
 }
+
+EXPORT_SYMBOL_GPL(copy_fs_struct);
 
 static inline int copy_fs(unsigned long clone_flags, struct task_struct * tsk)
 {
@@ -777,8 +817,30 @@ struct task_struct *copy_process(unsigned long clone_flags,
 	 */
 	if ((clone_flags & CLONE_THREAD) && !(clone_flags & CLONE_SIGHAND))
 		return ERR_PTR(-EINVAL);
-	if ((clone_flags & CLONE_DETACHED) && !(clone_flags & CLONE_THREAD))
+
+	/*
+	 * Shared signal handlers imply shared VM. By way of the above,
+	 * thread groups also imply shared VM. Blocking this case allows
+	 * for various simplifications in other code.
+	 */
+	if ((clone_flags & CLONE_SIGHAND) && !(clone_flags & CLONE_VM))
 		return ERR_PTR(-EINVAL);
+
+	/*
+	 * CLONE_DETACHED must match CLONE_THREAD: it's a historical
+	 * thing.
+	 */
+	if (!(clone_flags & CLONE_DETACHED) != !(clone_flags & CLONE_THREAD)) {
+		/* Warn about the old no longer supported case so that we see it */
+		if (clone_flags & CLONE_THREAD) {
+			static int count;
+			if (count < 5) {
+				count++;
+				printk(KERN_WARNING "%s trying to use CLONE_THREAD without CLONE_DETACH\n", current->comm);
+			}
+		}
+		return ERR_PTR(-EINVAL);
+	}
 
 	retval = security_task_create(clone_flags);
 	if (retval)
@@ -790,8 +852,10 @@ struct task_struct *copy_process(unsigned long clone_flags,
 		goto fork_out;
 
 	retval = -EAGAIN;
-	if (atomic_read(&p->user->processes) >= p->rlim[RLIMIT_NPROC].rlim_cur) {
-		if (!capable(CAP_SYS_ADMIN) && !capable(CAP_SYS_RESOURCE))
+	if (atomic_read(&p->user->processes) >=
+			p->rlim[RLIMIT_NPROC].rlim_cur) {
+		if (!capable(CAP_SYS_ADMIN) && !capable(CAP_SYS_RESOURCE) &&
+				p->user != &root_user)
 			goto bad_fork_free;
 	}
 
@@ -906,10 +970,7 @@ struct task_struct *copy_process(unsigned long clone_flags,
 	p->parent_exec_id = p->self_exec_id;
 
 	/* ok, now we should be set up.. */
-	if (clone_flags & CLONE_DETACHED)
-		p->exit_signal = -1;
-	else
-		p->exit_signal = clone_flags & CSIGNAL;
+	p->exit_signal = (clone_flags & CLONE_THREAD) ? -1 : (clone_flags & CSIGNAL);
 	p->pdeath_signal = 0;
 
 	/*
@@ -925,7 +986,7 @@ struct task_struct *copy_process(unsigned long clone_flags,
 	 */
 	p->first_time_slice = 1;
 	current->time_slice >>= 1;
-	p->last_run = jiffies;
+	p->timestamp = sched_clock();
 	if (!current->time_slice) {
 		/*
 	 	 * This case is rare, it happens when the parent has only
@@ -979,6 +1040,7 @@ struct task_struct *copy_process(unsigned long clone_flags,
 		if (current->signal->group_exit) {
 			spin_unlock(&current->sighand->siglock);
 			write_unlock_irq(&tasklist_lock);
+			retval = -EAGAIN;
 			goto bad_fork_cleanup_namespace;
 		}
 		p->tgid = current->tgid;
@@ -1004,7 +1066,7 @@ struct task_struct *copy_process(unsigned long clone_flags,
 	attach_pid(p, PIDTYPE_PID, p->pid);
 	if (thread_group_leader(p)) {
 		attach_pid(p, PIDTYPE_TGID, p->tgid);
-		attach_pid(p, PIDTYPE_PGID, p->pgrp);
+		attach_pid(p, PIDTYPE_PGID, process_group(p));
 		attach_pid(p, PIDTYPE_SID, p->session);
 		if (p->pid)
 			__get_cpu_var(process_counts)++;
@@ -1105,7 +1167,7 @@ long do_fork(unsigned long clone_flags,
 			init_completion(&vfork);
 		}
 
-		if (p->ptrace & PT_PTRACED) {
+		if ((p->ptrace & PT_PTRACED) || (clone_flags & CLONE_STOPPED)) {
 			/*
 			 * We'll start up with an immediate SIGSTOP.
 			 */
@@ -1113,7 +1175,9 @@ long do_fork(unsigned long clone_flags,
 			set_tsk_thread_flag(p, TIF_SIGPENDING);
 		}
 
-		wake_up_forked_process(p);		/* do this last */
+		p->state = TASK_STOPPED;
+		if (!(clone_flags & CLONE_STOPPED))
+			wake_up_forked_process(p);	/* do this last */
 		++total_forks;
 
 		if (unlikely (trace)) {

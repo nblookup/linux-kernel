@@ -128,7 +128,7 @@ static int i460_fetch_size (void)
 	if (temp & I460_BAPBASE_ENABLE)
 		i460.dynamic_apbase = INTEL_I460_BAPBASE;
 	else
-		i460.dynamic_apbase = INTEL_I460_APBASE;
+		i460.dynamic_apbase = AGP_APBASE;
 
 	for (i = 0; i < agp_bridge->driver->num_aperture_sizes; i++) {
 		/*
@@ -560,8 +560,8 @@ struct agp_bridge_driver intel_i460_driver = {
 	.cant_use_aperture	= 1,
 };
 
-static int __init agp_intel_i460_probe(struct pci_dev *pdev,
-				       const struct pci_device_id *ent)
+static int __devinit agp_intel_i460_probe(struct pci_dev *pdev,
+					  const struct pci_device_id *ent)
 {
 	struct agp_bridge_data *bridge;
 	u8 cap_ptr;
@@ -590,7 +590,7 @@ static void __devexit agp_intel_i460_remove(struct pci_dev *pdev)
 	agp_put_bridge(bridge);
 }
 
-static struct pci_device_id agp_intel_i460_pci_table[] __initdata = {
+static struct pci_device_id agp_intel_i460_pci_table[] = {
 	{
 	.class		= (PCI_CLASS_BRIDGE_HOST << 8),
 	.class_mask	= ~0,
@@ -608,7 +608,7 @@ static struct pci_driver agp_intel_i460_pci_driver = {
 	.name		= "agpgart-intel-i460",
 	.id_table	= agp_intel_i460_pci_table,
 	.probe		= agp_intel_i460_probe,
-	.remove		= agp_intel_i460_remove,
+	.remove		= __devexit_p(agp_intel_i460_remove),
 };
 
 static int __init agp_intel_i460_init(void)

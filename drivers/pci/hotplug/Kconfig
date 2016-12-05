@@ -14,10 +14,8 @@ config HOTPLUG_PCI
 	  powered up and running.  The file system pcihpfs must be mounted
 	  in order to interact with any PCI Hotplug controllers.
 
-	  This code is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called pci_hotplug. If you want to compile it
-	  as a module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called pci_hotplug.
 
 	  When in doubt, say N.
 
@@ -39,24 +37,20 @@ config HOTPLUG_PCI_FAKE
 
 	  Use this module at your own risk.  You have been warned!
 
-	  This code is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called fakephp. If you want to compile it
-	  as a module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called fakephp.
 
 	  When in doubt, say N.
 
 config HOTPLUG_PCI_COMPAQ
 	tristate "Compaq PCI Hotplug driver"
-	depends on HOTPLUG_PCI && X86
+	depends on HOTPLUG_PCI && X86 && PCI_BIOS
 	help
 	  Say Y here if you have a motherboard with a Compaq PCI Hotplug
 	  controller.
 
-	  This code is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called cpqphp. If you want to compile it
-	  as a module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called cpqphp.
 
 	  When in doubt, say N.
 
@@ -72,15 +66,13 @@ config HOTPLUG_PCI_COMPAQ_NVRAM
 
 config HOTPLUG_PCI_IBM
 	tristate "IBM PCI Hotplug driver"
-	depends on HOTPLUG_PCI && X86_IO_APIC && X86
+	depends on HOTPLUG_PCI && X86_IO_APIC && X86 && PCI_BIOS
 	help
 	  Say Y here if you have a motherboard with a IBM PCI Hotplug
 	  controller.
 
-	  This code is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called cpqphp. If you want to compile it
-	  as a module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called ibmphp.
 
 	  When in doubt, say N.
 
@@ -91,53 +83,42 @@ config HOTPLUG_PCI_ACPI
 	  Say Y here if you have a system that supports PCI Hotplug using
 	  ACPI.
 
-	  This code is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called acpiphp. If you want to compile it
-	  as a module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called acpiphp.
 
 	  When in doubt, say N.
 
 config HOTPLUG_PCI_CPCI
-	tristate "CompactPCI Hotplug driver"
+	bool "CompactPCI Hotplug driver"
 	depends on HOTPLUG_PCI
 	help
 	  Say Y here if you have a CompactPCI system card with CompactPCI
 	  hotswap support per the PICMG 2.1 specification.
 
-	  This code is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called cpci_hotplug. If you want to compile it
-	  as a module, say M here and read <file:Documentation/modules.txt>.
-
 	  When in doubt, say N.
 
 config HOTPLUG_PCI_CPCI_ZT5550
 	tristate "Ziatech ZT5550 CompactPCI Hotplug driver"
-	depends on HOTPLUG_PCI_CPCI && X86
+	depends on HOTPLUG_PCI && HOTPLUG_PCI_CPCI && X86
 	help
 	  Say Y here if you have an Performance Technologies (formerly Intel,
           formerly just Ziatech) Ziatech ZT5550 CompactPCI system card.
 
-	  This code is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called cpcihp_zt5550. If you want to compile it
-	  as a module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called cpcihp_zt5550.
 
 	  When in doubt, say N.
 
 config HOTPLUG_PCI_CPCI_GENERIC
 	tristate "Generic port I/O CompactPCI Hotplug driver"
-	depends on HOTPLUG_PCI_CPCI && X86
+	depends on HOTPLUG_PCI && HOTPLUG_PCI_CPCI && X86
 	help
 	  Say Y here if you have a CompactPCI system card that exposes the #ENUM
 	  hotswap signal as a bit in a system register that can be read through
 	  standard port I/O.
 
-	  This code is also available as a module ( = code which can be
-	  inserted in and removed from the running kernel whenever you want).
-	  The module will be called cpcihp_generic. If you want to compile it
-	  as a module, say M here and read <file:Documentation/modules.txt>.
+	  To compile this driver as a module, choose M here: the
+	  module will be called cpcihp_generic.
 
 	  When in doubt, say N.
 

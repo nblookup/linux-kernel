@@ -49,14 +49,10 @@ extern void get_dir_ent(paddr_t paddr, int *state,
 #endif
 
 /* intr.c */
-extern int intr_reserve_level(cpuid_t cpu, int level, int err, vertex_hdl_t owner_dev, char *name);
 extern void intr_unreserve_level(cpuid_t cpu, int level);
-extern int intr_connect_level(cpuid_t cpu, int bit, ilvl_t mask_no, 
-			intr_func_t intr_prefunc);
+extern int intr_connect_level(cpuid_t cpu, int bit);
 extern int intr_disconnect_level(cpuid_t cpu, int bit);
-extern cpuid_t intr_heuristic(vertex_hdl_t dev, device_desc_t dev_desc,
-			      int req_bit,int intr_resflags,vertex_hdl_t owner_dev,
-			      char *intr_name,int *resp_bit);
+extern cpuid_t intr_heuristic(vertex_hdl_t dev, int req_bit, int *resp_bit);
 extern void intr_block_bit(cpuid_t cpu, int bit);
 extern void intr_unblock_bit(cpuid_t cpu, int bit);
 extern void setrtvector(intr_func_t);
@@ -97,7 +93,6 @@ extern void setup_replication_mask(int maxnodes);
 /* init.c */
 extern cnodeid_t get_compact_nodeid(void);	/* get compact node id */
 extern void init_platform_nodepda(nodepda_t *npda, cnodeid_t node);
-extern void per_cpu_init(void);
 extern int is_fine_dirmode(void);
 extern void update_node_information(cnodeid_t);
  
@@ -177,7 +172,7 @@ typedef struct hubinfo_s {
 	/* structures for PIO management */
 	xwidgetnum_t			h_widgetid;	/* my widget # (as viewed from xbow) */
 	struct hub_piomap_s		h_small_window_piomap[HUB_WIDGET_ID_MAX+1];
-	sv_t				h_bwwait;	/* wait for big window to free */
+	wait_queue_head_t		h_bwwait;	/* wait for big window to free */
 	spinlock_t			h_bwlock;	/* guard big window piomap's */
 	spinlock_t			h_crblock;      /* gaurd CRB error handling */
 	int				h_num_big_window_fixed;	/* count number of FIXED maps */

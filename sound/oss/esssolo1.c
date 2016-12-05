@@ -721,8 +721,8 @@ static int mixer_ioctl(struct solo1_state *s, unsigned int cmd, unsigned long ar
 	}
         if (cmd == SOUND_MIXER_INFO) {
 		mixer_info info;
-		strlcpy(info.id, "Solo1", sizeof(info.id));
-		strlcpy(info.name, "ESS Solo1", sizeof(info.name));
+		strncpy(info.id, "Solo1", sizeof(info.id));
+		strncpy(info.name, "ESS Solo1", sizeof(info.name));
 		info.modify_counter = s->mix.modcnt;
 		if (copy_to_user((void *)arg, &info, sizeof(info)))
 			return -EFAULT;
@@ -730,8 +730,8 @@ static int mixer_ioctl(struct solo1_state *s, unsigned int cmd, unsigned long ar
 	}
 	if (cmd == SOUND_OLD_MIXER_INFO) {
 		_old_mixer_info info;
-		strlcpy(info.id, "Solo1", sizeof(info.id));
-		strlcpy(info.name, "ESS Solo1", sizeof(info.name));
+		strncpy(info.id, "Solo1", sizeof(info.id));
+		strncpy(info.name, "ESS Solo1", sizeof(info.name));
 		if (copy_to_user((void *)arg, &info, sizeof(info)))
 			return -EFAULT;
 		return 0;
@@ -913,7 +913,7 @@ static int mixer_ioctl(struct solo1_state *s, unsigned int cmd, unsigned long ar
 
 static int solo1_open_mixdev(struct inode *inode, struct file *file)
 {
-	unsigned int minor = minor(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	struct solo1_state *s = NULL;
 	struct pci_dev *pci_dev = NULL;
 
@@ -1594,7 +1594,7 @@ static int solo1_release(struct inode *inode, struct file *file)
 
 static int solo1_open(struct inode *inode, struct file *file)
 {
-	unsigned int minor = minor(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	DECLARE_WAITQUEUE(wait, current);
 	struct solo1_state *s = NULL;
 	struct pci_dev *pci_dev = NULL;
@@ -1884,7 +1884,7 @@ static unsigned int solo1_midi_poll(struct file *file, struct poll_table_struct 
 
 static int solo1_midi_open(struct inode *inode, struct file *file)
 {
-	unsigned int minor = minor(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	DECLARE_WAITQUEUE(wait, current);
 	unsigned long flags;
 	struct solo1_state *s = NULL;
@@ -1972,12 +1972,8 @@ static int solo1_midi_release(struct inode *inode, struct file *file)
 				break;
 			if (signal_pending(current))
 				break;
-			if (file->f_flags & O_NONBLOCK) {
-				remove_wait_queue(&s->midi.owait, &wait);
-				set_current_state(TASK_RUNNING);
-				unlock_kernel();
-				return -EBUSY;
-			}
+			if (file->f_flags & O_NONBLOCK)
+				break;
 			tmo = (count * HZ) / 3100;
 			if (!schedule_timeout(tmo ? : 1) && tmo)
 				printk(KERN_DEBUG "solo1: midi timed out??\n");
@@ -2110,7 +2106,7 @@ static int solo1_dmfm_ioctl(struct inode *inode, struct file *file, unsigned int
 
 static int solo1_dmfm_open(struct inode *inode, struct file *file)
 {
-	unsigned int minor = minor(inode->i_rdev);
+	unsigned int minor = iminor(inode);
 	DECLARE_WAITQUEUE(wait, current);
 	struct solo1_state *s = NULL;
 	struct pci_dev *pci_dev = NULL;
@@ -2440,7 +2436,7 @@ static void __devinit solo1_remove(struct pci_dev *dev)
 	pci_set_drvdata(dev, NULL);
 }
 
-static struct pci_device_id id_table[] __devinitdata = {
+static struct pci_device_id id_table[] = {
 	{ PCI_VENDOR_ID_ESS, PCI_DEVICE_ID_ESS_SOLO1, PCI_ANY_ID, PCI_ANY_ID, 0, 0 },
 	{ 0, }
 };

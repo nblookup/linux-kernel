@@ -194,7 +194,7 @@ struct tulip_chip_table tulip_tbl[] = {
 };
 
 
-static struct pci_device_id tulip_pci_tbl[] __devinitdata = {
+static struct pci_device_id tulip_pci_tbl[] = {
 	{ 0x1011, 0x0009, PCI_ANY_ID, PCI_ANY_ID, 0, 0, DC21140 },
 	{ 0x1011, 0x0019, PCI_ANY_ID, PCI_ANY_ID, 0, 0, DC21143 },
 	{ 0x11AD, 0x0002, PCI_ANY_ID, PCI_ANY_ID, 0, 0, LC82C168 },
@@ -224,8 +224,10 @@ static struct pci_device_id tulip_pci_tbl[] __devinitdata = {
 	{ 0x1186, 0x1561, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
 	{ 0x1626, 0x8410, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
 	{ 0x1737, 0xAB09, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
+	{ 0x1737, 0xAB08, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
 	{ 0x17B3, 0xAB08, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET },
  	{ 0x10b9, 0x5261, PCI_ANY_ID, PCI_ANY_ID, 0, 0, DM910X },	/* ALi 1563 integrated ethernet */
+	{ 0x10b7, 0x9300, PCI_ANY_ID, PCI_ANY_ID, 0, 0, COMET }, /* 3Com 3CSOHO100B-TX */
 	{ } /* terminate list */
 };
 MODULE_DEVICE_TABLE(pci, tulip_pci_tbl);
@@ -858,7 +860,7 @@ static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
 		struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
 		strcpy(info.driver, DRV_NAME);
 		strcpy(info.version, DRV_VERSION);
-		strcpy(info.bus_info, np->pdev->slot_name);
+		strcpy(info.bus_info, pci_name(np->pdev));
 		if (copy_to_user(useraddr, &info, sizeof(info)))
 			return -EFAULT;
 		return 0;
@@ -996,12 +998,12 @@ static void build_setup_frame_hash(u16 *setup_frm, struct net_device *dev)
 
 		set_bit_le(index, hash_table);
 
-		for (i = 0; i < 32; i++) {
-			*setup_frm++ = hash_table[i];
-			*setup_frm++ = hash_table[i];
-		}
-		setup_frm = &tp->setup_frame[13*6];
 	}
+	for (i = 0; i < 32; i++) {
+		*setup_frm++ = hash_table[i];
+		*setup_frm++ = hash_table[i];
+	}
+	setup_frm = &tp->setup_frame[13*6];
 
 	/* Fill the final entry with our physical address. */
 	eaddrs = (u16 *)dev->dev_addr;
@@ -1101,11 +1103,13 @@ static void set_rx_mode(struct net_device *dev)
 		}
 	} else {
 		unsigned long flags;
+		u32 tx_flags = 0x08000000 | 192;
 
 		/* Note that only the low-address shortword of setup_frame is valid!
 		   The values are doubled for big-endian architectures. */
 		if (dev->mc_count > 14) { /* Must use a multicast hash table. */
 			build_setup_frame_hash(tp->setup_frame, dev);
+			tx_flags = 0x08400000 | 192;
 		} else {
 			build_setup_frame_perfect(tp->setup_frame, dev);
 		}
@@ -1115,7 +1119,6 @@ static void set_rx_mode(struct net_device *dev)
 		if (tp->cur_tx - tp->dirty_tx > TX_RING_SIZE - 2) {
 			/* Same setup recently queued, we need not add it. */
 		} else {
-			u32 tx_flags = 0x08000000 | 192;
 			unsigned int entry;
 			int dummy = -1;
 
@@ -1172,7 +1175,7 @@ static void __devinit tulip_mwi_config (struct pci_dev *pdev,
 	u32 csr0;
 
 	if (tulip_debug > 3)
-		printk(KERN_DEBUG "%s: tulip_mwi_config()\n", pdev->slot_name);
+		printk(KERN_DEBUG "%s: tulip_mwi_config()\n", pci_name(pdev));
 
 	tp->csr0 = csr0 = 0;
 
@@ -1240,7 +1243,7 @@ out:
 	tp->csr0 = csr0;
 	if (tulip_debug > 2)
 		printk(KERN_DEBUG "%s: MWI config cacheline=%d, csr0=%08x\n",
-		       pdev->slot_name, cache, csr0);
+		       pci_name(pdev), cache, csr0);
 }
 #endif
 
@@ -1365,7 +1368,7 @@ static int __devinit tulip_init_one (struct pci_dev *pdev,
 	SET_NETDEV_DEV(dev, &pdev->dev);
 	if (pci_resource_len (pdev, 0) < tulip_tbl[chip_idx].io_size) {
 		printk (KERN_ERR PFX "%s: I/O region (0x%lx@0x%lx) too small, "
-			"aborting\n", pdev->slot_name,
+			"aborting\n", pci_name(pdev),
 			pci_resource_len (pdev, 0),
 			pci_resource_start (pdev, 0));
 		goto err_out_free_netdev;
@@ -1779,7 +1782,7 @@ static void __devexit tulip_remove_one (struct pci_dev *pdev)
 #ifndef USE_IO_OPS
 	iounmap((void *)dev->base_addr);
 #endif
-	kfree (dev);
+	free_netdev (dev);
 	pci_release_regions (pdev);
 	pci_set_drvdata (pdev, NULL);
 

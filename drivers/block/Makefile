@@ -13,9 +13,11 @@
 # kblockd threads
 #
 
-obj-y	:= elevator.o ll_rw_blk.o ioctl.o genhd.o scsi_ioctl.o \
-	deadline-iosched.o as-iosched.o
+obj-y	:= elevator.o ll_rw_blk.o ioctl.o genhd.o scsi_ioctl.o
 
+obj-$(CONFIG_IOSCHED_NOOP)	+= noop-iosched.o
+obj-$(CONFIG_IOSCHED_AS)	+= as-iosched.o
+obj-$(CONFIG_IOSCHED_DEADLINE)	+= deadline-iosched.o
 obj-$(CONFIG_MAC_FLOPPY)	+= swim3.o
 obj-$(CONFIG_BLK_DEV_FD)	+= floppy.o
 obj-$(CONFIG_BLK_DEV_FD98)	+= floppy98.o
@@ -26,7 +28,6 @@ obj-$(CONFIG_ATARI_ACSI)	+= acsi.o
 obj-$(CONFIG_ATARI_SLM)		+= acsi_slm.o
 obj-$(CONFIG_AMIGA_Z2RAM)	+= z2ram.o
 obj-$(CONFIG_BLK_DEV_RAM)	+= rd.o
-obj-$(CONFIG_BLK_DEV_INITRD)	+= initrd.o
 obj-$(CONFIG_BLK_DEV_LOOP)	+= loop.o
 obj-$(CONFIG_BLK_DEV_PS2)	+= ps2esdi.o
 obj-$(CONFIG_BLK_DEV_XD)	+= xd.o
@@ -36,3 +37,4 @@ obj-$(CONFIG_BLK_DEV_DAC960)	+= DAC960.o
 
 obj-$(CONFIG_BLK_DEV_UMEM)	+= umem.o
 obj-$(CONFIG_BLK_DEV_NBD)	+= nbd.o
+obj-$(CONFIG_BLK_DEV_CRYPTOLOOP) += cryptoloop.o

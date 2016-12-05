@@ -70,17 +70,23 @@ extern void show_regs(struct pt_regs * regs);
 extern int map_syscall32(struct mm_struct *mm, unsigned long address);
 extern char *syscall32_page;
 
-void setup_node_bootmem(int nodeid, unsigned long start, unsigned long end);
+extern void setup_node_bootmem(int nodeid, unsigned long start, unsigned long end);
+
+extern void check_ioapic(void);
 
 extern unsigned long max_mapnr;
 extern unsigned long end_pfn; 
 extern unsigned long table_start, table_end;
 
 extern int exception_trace;
-extern int no_iommu, force_mmu;
+extern int force_iommu, no_iommu;
 extern int using_apic_timer;
 extern int disable_apic;
 extern unsigned cpu_khz;
+extern int ioapic_force;
+extern int skip_ioapic_setup;
+extern int acpi_ht;
+extern int acpi_disabled;
 
 extern int fallback_aper_order;
 extern int fallback_aper_force;

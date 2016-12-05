@@ -107,7 +107,7 @@ static struct {
 	{
 "RealTek RTL8169 Gigabit Ethernet"},};
 
-static struct pci_device_id rtl8169_pci_tbl[] __devinitdata = {
+static struct pci_device_id rtl8169_pci_tbl[] = {
 	{0x10ec, 0x8169, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{0,},
 };
@@ -292,6 +292,7 @@ struct rtl8169_private {
 MODULE_AUTHOR("Realtek");
 MODULE_DESCRIPTION("RealTek RTL-8169 Gigabit Ethernet driver");
 MODULE_PARM(media, "1-" __MODULE_STRING(MAX_UNITS) "i");
+MODULE_LICENSE("GPL");
 
 static int rtl8169_open(struct net_device *dev);
 static int rtl8169_start_xmit(struct sk_buff *skb, struct net_device *dev);
@@ -437,9 +438,9 @@ rtl8169_init_board(struct pci_dev *pdev, struct net_device **dev_out,
 	//if unknown chip, assume array element #0, original RTL-8169 in this case
 	printk(KERN_DEBUG PFX
 	       "PCI device %s: unknown chip version, assuming RTL-8169\n",
-	       pdev->slot_name);
+	       pci_name(pdev));
 	printk(KERN_DEBUG PFX "PCI device %s: TxConfig = 0x%lx\n",
-	       pdev->slot_name, (unsigned long) RTL_R32(TxConfig));
+	       pci_name(pdev), (unsigned long) RTL_R32(TxConfig));
 	tp->chipset = 0;
 
 match:
@@ -454,7 +455,7 @@ err_out_disable:
 	pci_disable_device(pdev);
 
 err_out:
-	kfree(dev);
+	free_netdev(dev);
 	return rc;
 }
 
@@ -514,7 +515,7 @@ rtl8169_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		iounmap(ioaddr);
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
-		kfree(dev);
+		free_netdev(dev);
 		return rc;
 	}
 
@@ -641,12 +642,8 @@ rtl8169_remove_one(struct pci_dev *pdev)
 	iounmap(tp->mmio_addr);
 	pci_release_regions(pdev);
 
-	// poison memory before freeing 
-	memset(dev, 0xBC,
-	       sizeof (struct net_device) + sizeof (struct rtl8169_private));
-
 	pci_disable_device(pdev);
-	kfree(dev);
+	free_netdev(dev);
 	pci_set_drvdata(pdev, NULL);
 }
 

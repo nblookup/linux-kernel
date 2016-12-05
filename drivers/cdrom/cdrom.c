@@ -268,6 +268,7 @@
 #include <linux/init.h>
 #include <linux/fcntl.h>
 #include <linux/blkdev.h>
+#include <linux/times.h>
 
 #include <asm/uaccess.h>
 
@@ -1855,48 +1856,6 @@ static int cdrom_switch_blocksize(struct cdrom_device_info *cdi, int size)
 	return cdo->generic_packet(cdi, &cgc);
 }
 
-static int cdrom_do_cmd(struct cdrom_device_info *cdi,
-			struct cdrom_generic_command *cgc)
-{
-	struct request_sense *usense, sense;
-	unsigned char *ubuf;
-	int ret;
-
-	if (cgc->data_direction == CGC_DATA_UNKNOWN)
-		return -EINVAL;
-
-	if (cgc->buflen < 0 || cgc->buflen >= 131072)
-		return -EINVAL;
-
-	if ((ubuf = cgc->buffer)) {
-		cgc->buffer = kmalloc(cgc->buflen, GFP_KERNEL);
-		if (cgc->buffer == NULL)
-			return -ENOMEM;
-	}
-
-	usense = cgc->sense;
-	cgc->sense = &sense;
-	if (usense && !access_ok(VERIFY_WRITE, usense, sizeof(*usense)))
-		return -EFAULT;
-
-	if (cgc->data_direction == CGC_DATA_READ) {
-		if (!access_ok(VERIFY_READ, ubuf, cgc->buflen))
-			return -EFAULT;
-	} else if (cgc->data_direction == CGC_DATA_WRITE) {
-		if (copy_from_user(cgc->buffer, ubuf, cgc->buflen)) {
-			kfree(cgc->buffer);
-			return -EFAULT;
-		}
-	}
-
-	ret = cdi->ops->generic_packet(cdi, cgc);
-	__copy_to_user(usense, cgc->sense, sizeof(*usense));
-	if (!ret && cgc->data_direction == CGC_DATA_READ)
-		__copy_to_user(ubuf, cgc->buffer, cgc->buflen);
-	kfree(cgc->buffer);
-	return ret;
-}
-
 static int mmc_ioctl(struct cdrom_device_info *cdi, unsigned int cmd,
 		     unsigned long arg)
 {		
@@ -2166,13 +2125,6 @@ static int mmc_ioctl(struct cdrom_device_info *cdi, unsigned int cmd,
 		return 0;
 		}
 
-	case CDROM_SEND_PACKET: {
-		if (!CDROM_CAN(CDC_GENERIC_PACKET))
-			return -ENOSYS;
-		cdinfo(CD_DO_IOCTL, "entering CDROM_SEND_PACKET\n"); 
-		IOCTL_IN(arg, struct cdrom_generic_command, cgc);
-		return cdrom_do_cmd(cdi, &cgc);
-		}
 	case CDROM_NEXT_WRITABLE: {
 		long next = 0;
 		cdinfo(CD_DO_IOCTL, "entering CDROM_NEXT_WRITABLE\n"); 
@@ -2627,7 +2579,8 @@ static void cdrom_sysctl_register(void)
 		return;
 
 	cdrom_sysctl_header = register_sysctl_table(cdrom_root_table, 1);
-	cdrom_root_table->child->de->owner = THIS_MODULE;
+	if (cdrom_root_table->ctl_name && cdrom_root_table->child->de)
+		cdrom_root_table->child->de->owner = THIS_MODULE;
 
 	/* set the defaults */
 	cdrom_sysctl_settings.autoclose = autoclose;

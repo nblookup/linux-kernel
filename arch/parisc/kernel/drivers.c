@@ -28,6 +28,7 @@
 
 /* See comments in include/asm-parisc/pci.h */
 struct hppa_dma_ops *hppa_dma_ops;
+EXPORT_SYMBOL(hppa_dma_ops);
 
 static struct parisc_device root;
 
@@ -112,7 +113,9 @@ static int parisc_driver_probe(struct device *dev)
 static int parisc_driver_remove(struct device *dev)
 {
 	struct parisc_device *pa_dev = to_parisc_device(dev);
-
+	struct parisc_driver *pa_drv = to_parisc_driver(dev->driver);
+	if (pa_drv->remove)
+		pa_drv->remove(pa_dev);
 	release_mem_region(pa_dev->hpa, 0x1000);
 
 	return 0;
@@ -153,6 +156,7 @@ int register_parisc_driver(struct parisc_driver *driver)
 
 	return driver_register(&driver->drv);
 }
+EXPORT_SYMBOL(register_parisc_driver);
 
 /**
  * count_parisc_driver - count # of devices this driver would match
@@ -185,6 +189,7 @@ int unregister_parisc_driver(struct parisc_driver *driver)
 	driver_unregister(&driver->drv);
 	return 0;
 }
+EXPORT_SYMBOL(unregister_parisc_driver);
 
 static struct parisc_device *find_device_by_addr(unsigned long hpa)
 {
@@ -255,7 +260,7 @@ char *print_pa_hwpath(struct parisc_device *dev, char *output)
 	path.mod = dev->hw_path;
 	return print_hwpath(&path, output);
 }
-
+EXPORT_SYMBOL(print_pa_hwpath);
 
 #if defined(CONFIG_PCI) || defined(CONFIG_ISA)
 /**
@@ -287,6 +292,7 @@ void get_pci_node_path(struct pci_dev *dev, struct hardware_path *path)
 		padev = padev->parent;
 	}
 }
+EXPORT_SYMBOL(get_pci_node_path);
 
 /**
  * print_pci_hwpath - Returns hardware path for PCI devices
@@ -304,6 +310,8 @@ char *print_pci_hwpath(struct pci_dev *dev, char *output)
 	get_pci_node_path(dev, &path);
 	return print_hwpath(&path, output);
 }
+EXPORT_SYMBOL(print_pci_hwpath);
+
 #endif /* defined(CONFIG_PCI) || defined(CONFIG_ISA) */
 
 
@@ -445,7 +453,7 @@ int register_parisc_device(struct parisc_device *dev)
 #define MAX_NATIVE_DEVICES 64
 #define NATIVE_DEVICE_OFFSET 0x1000
 
-#define FLEX_MASK 	(unsigned long)0xfffffffffffc0000
+#define FLEX_MASK 	F_EXTEND(0xfffc0000)
 #define IO_IO_LOW	offsetof(struct bc_module, io_io_low)
 #define IO_IO_HIGH	offsetof(struct bc_module, io_io_high)
 #define READ_IO_IO_LOW(dev)  (unsigned long)(signed int)__raw_readl(dev->hpa + IO_IO_LOW)
@@ -512,7 +520,7 @@ static void walk_native_bus(unsigned long io_io_low, unsigned long io_io_high,
 	} while(!devices_found && hpa < io_io_high);
 }
 
-#define CENTRAL_BUS_ADDR (unsigned long) 0xfffffffffff80000
+#define CENTRAL_BUS_ADDR F_EXTEND(0xfff80000)
 
 /**
  * walk_central_bus - Find devices attached to the central bus

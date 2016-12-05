@@ -34,6 +34,7 @@
 #include <asm/pgalloc.h>
 #include <asm/desc.h>
 #include <asm/arch_hooks.h>
+#include <asm/hpet.h>
 
 #include <mach_apic.h>
 
@@ -52,6 +53,11 @@ void __init apic_intr_init(void)
 	/* IPI vectors for APIC spurious and error interrupts */
 	set_intr_gate(SPURIOUS_APIC_VECTOR, spurious_interrupt);
 	set_intr_gate(ERROR_APIC_VECTOR, error_interrupt);
+
+	/* thermal monitor LVT interrupt */
+#ifdef CONFIG_X86_MCE_P4THERMAL
+	set_intr_gate(THERMAL_APIC_VECTOR, thermal_interrupt);
+#endif
 }
 
 /* Using APIC to generate smp_local_timer_interrupt? */
@@ -60,6 +66,8 @@ int using_apic_timer = 0;
 static DEFINE_PER_CPU(int, prof_multiplier) = 1;
 static DEFINE_PER_CPU(int, prof_old_multiplier) = 1;
 static DEFINE_PER_CPU(int, prof_counter) = 1;
+
+static int enabled_via_apicbase;
 
 void enable_NMI_through_LVT0 (void * dummy)
 {
@@ -190,6 +198,13 @@ void disable_local_APIC(void)
 	value = apic_read(APIC_SPIV);
 	value &= ~APIC_SPIV_APIC_ENABLED;
 	apic_write_around(APIC_SPIV, value);
+
+	if (enabled_via_apicbase) {
+		unsigned int l, h;
+		rdmsr(MSR_IA32_APICBASE, l, h);
+		l &= ~MSR_IA32_APICBASE_ENABLE;
+		wrmsr(MSR_IA32_APICBASE, l, h);
+	}
 }
 
 /*
@@ -485,7 +500,6 @@ static struct {
 
 static int lapic_suspend(struct sys_device *dev, u32 state)
 {
-	unsigned int l, h;
 	unsigned long flags;
 
 	if (!apic_pm_state.active)
@@ -507,9 +521,6 @@ static int lapic_suspend(struct sys_device *dev, u32 state)
 	
 	local_irq_save(flags);
 	disable_local_APIC();
-	rdmsr(MSR_IA32_APICBASE, l, h);
-	l &= ~MSR_IA32_APICBASE_ENABLE;
-	wrmsr(MSR_IA32_APICBASE, l, h);
 	local_irq_restore(flags);
 	return 0;
 }
@@ -522,14 +533,19 @@ static int lapic_resume(struct sys_device *dev)
 	if (!apic_pm_state.active)
 		return 0;
 
-	/* XXX: Pavel needs this for S3 resume, but can't explain why */
-	set_fixmap_nocache(FIX_APIC_BASE, APIC_DEFAULT_PHYS_BASE);
-
 	local_irq_save(flags);
+
+	/*
+	 * Make sure the APICBASE points to the right address
+	 *
+	 * FIXME! This will be wrong if we ever support suspend on
+	 * SMP! We'll need to do this as part of the CPU restore!
+	 */
 	rdmsr(MSR_IA32_APICBASE, l, h);
 	l &= ~MSR_IA32_APICBASE_BASE;
-	l |= MSR_IA32_APICBASE_ENABLE | APIC_DEFAULT_PHYS_BASE;
+	l |= MSR_IA32_APICBASE_ENABLE | mp_lapic_addr;
 	wrmsr(MSR_IA32_APICBASE, l, h);
+
 	apic_write(APIC_LVTERR, ERROR_APIC_VECTOR | APIC_LVT_MASKED);
 	apic_write(APIC_ID, apic_pm_state.apic_id);
 	apic_write(APIC_DFR, apic_pm_state.apic_dfr);
@@ -594,7 +610,26 @@ static void apic_pm_activate(void) { }
  * Detect and enable local APICs on non-SMP boards.
  * Original code written by Keir Fraser.
  */
-int dont_enable_local_apic __initdata = 0;
+
+/*
+ * Knob to control our willingness to enable the local APIC.
+ */
+int enable_local_apic __initdata = 0; /* -1=force-disable, +1=force-enable */
+
+static int __init lapic_disable(char *str)
+{
+	enable_local_apic = -1;
+	clear_bit(X86_FEATURE_APIC, boot_cpu_data.x86_capability);
+	return 0;
+}
+__setup("nolapic", lapic_disable);
+
+static int __init lapic_enable(char *str)
+{
+	enable_local_apic = 1;
+	return 0;
+}
+__setup("lapic", lapic_enable);
 
 static int __init detect_init_APIC (void)
 {
@@ -602,7 +637,7 @@ static int __init detect_init_APIC (void)
 	extern void get_cpu_vendor(struct cpuinfo_x86*);
 
 	/* Disabled by DMI scan or kernel option? */
-	if (dont_enable_local_apic)
+	if (enable_local_apic < 0)
 		return -1;
 
 	/* Workaround for us being called before identify_cpu(). */
@@ -616,7 +651,7 @@ static int __init detect_init_APIC (void)
 		goto no_apic;
 	case X86_VENDOR_INTEL:
 		if (boot_cpu_data.x86 == 6 ||
-		    boot_cpu_data.x86 == 15 ||
+		    (boot_cpu_data.x86 == 15 && (cpu_has_apic || enable_local_apic > 0)) ||
 		    (boot_cpu_data.x86 == 5 && cpu_has_apic))
 			break;
 		goto no_apic;
@@ -636,6 +671,7 @@ static int __init detect_init_APIC (void)
 			l &= ~MSR_IA32_APICBASE_BASE;
 			l |= MSR_IA32_APICBASE_ENABLE | APIC_DEFAULT_PHYS_BASE;
 			wrmsr(MSR_IA32_APICBASE, l, h);
+			enabled_via_apicbase = 1;
 		}
 	}
 	/*
@@ -649,6 +685,12 @@ static int __init detect_init_APIC (void)
 	}
 	set_bit(X86_FEATURE_APIC, boot_cpu_data.x86_capability);
 	mp_lapic_addr = APIC_DEFAULT_PHYS_BASE;
+
+	/* The BIOS may have set up the APIC at some other address */
+	rdmsr(MSR_IA32_APICBASE, l, h);
+	if (l & MSR_IA32_APICBASE_ENABLE)
+		mp_lapic_addr = l & MSR_IA32_APICBASE_BASE;
+
 	if (nmi_watchdog != NMI_NONE)
 		nmi_watchdog = NMI_LOCAL_APIC;
 
@@ -749,7 +791,8 @@ static unsigned int __init get_8254_timer_count(void)
 	return count;
 }
 
-void __init wait_8254_wraparound(void)
+/* next tick in 8254 can be caught by catching timer wraparound */
+static void __init wait_8254_wraparound(void)
 {
 	unsigned int curr_count, prev_count=~0;
 	int delta;
@@ -769,6 +812,12 @@ void __init wait_8254_wraparound(void)
 
 	} while (delta < 300);
 }
+
+/*
+ * Default initialization for 8254 timers. If we use other timers like HPET,
+ * we override this later
+ */
+void (*wait_timer_tick)(void) = wait_8254_wraparound;
 
 /*
  * This function sets up the local APIC timer, with a timeout of
@@ -811,7 +860,7 @@ static void setup_APIC_timer(unsigned int clocks)
 	/*
 	 * Wait for IRQ0's slice:
 	 */
-	wait_8254_wraparound();
+	wait_timer_tick();
 
 	__setup_APIC_LVTT(clocks);
 
@@ -854,7 +903,7 @@ int __init calibrate_APIC_clock(void)
 	 * (the current tick might have been already half done)
 	 */
 
-	wait_8254_wraparound();
+	wait_timer_tick();
 
 	/*
 	 * We wrapped around just now. Let's start:
@@ -867,7 +916,7 @@ int __init calibrate_APIC_clock(void)
 	 * Let's wait LOOPS wraprounds:
 	 */
 	for (i = 0; i < LOOPS; i++)
-		wait_8254_wraparound();
+		wait_timer_tick();
 
 	tt2 = apic_read(APIC_TMCCT);
 	if (cpu_has_tsc)
@@ -897,14 +946,8 @@ int __init calibrate_APIC_clock(void)
 
 static unsigned int calibration_result;
 
-int dont_use_local_apic_timer __initdata = 0;
-
 void __init setup_boot_APIC_clock(void)
 {
-	/* Disabled by DMI scan or kernel option? */
-	if (dont_use_local_apic_timer)
-		return;
-
 	printk("Using local APIC timer interrupts.\n");
 	using_apic_timer = 1;
 
@@ -1121,6 +1164,9 @@ asmlinkage void smp_error_interrupt(void)
  */
 int __init APIC_init_uniprocessor (void)
 {
+	if (enable_local_apic < 0)
+		clear_bit(X86_FEATURE_APIC, boot_cpu_data.x86_capability);
+
 	if (!smp_found_config && !cpu_has_apic)
 		return -1;
 
@@ -1137,7 +1183,7 @@ int __init APIC_init_uniprocessor (void)
 
 	connect_bsp_APIC();
 
-	phys_cpu_present_map = 1 << boot_cpu_physical_apicid;
+	phys_cpu_present_map = physid_mask_of_physid(boot_cpu_physical_apicid);
 
 	setup_local_APIC();
 

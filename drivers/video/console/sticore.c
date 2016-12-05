@@ -988,7 +988,7 @@ static int __devinit sticore_pci_init(struct pci_dev *pd,
 	
 	if (!sti) {
 		printk(KERN_WARNING "Unable to handle STI device '%s'\n",
-			pd->dev.name);
+			pci_name(pd));
 		return -ENODEV;
 	}
 #endif /* CONFIG_PCI */
@@ -1003,7 +1003,7 @@ static void __devexit sticore_pci_remove(struct pci_dev *pd)
 }
 
 
-static struct pci_device_id sti_pci_tbl[] __devinitdata = {
+static struct pci_device_id sti_pci_tbl[] = {
 	{ PCI_VENDOR_ID_HP, PCI_DEVICE_ID_HP_VISUALIZE_EG, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_HP, PCI_DEVICE_ID_HP_VISUALIZE_FX6, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ PCI_VENDOR_ID_HP, PCI_DEVICE_ID_HP_VISUALIZE_FX4, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },

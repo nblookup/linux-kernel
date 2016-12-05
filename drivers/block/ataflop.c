@@ -63,45 +63,25 @@
 
 #include <linux/module.h>
 
-#include <linux/sched.h>
-#include <linux/string.h>
-#include <linux/fs.h>
-#include <linux/fcntl.h>
-#include <linux/kernel.h>
-#include <linux/timer.h>
 #include <linux/fd.h>
-#include <linux/errno.h>
-#include <linux/types.h>
 #include <linux/delay.h>
-#include <linux/mm.h>
-#include <linux/slab.h>
 #include <linux/init.h>
-#include <linux/buffer_head.h>		/* for invalidate_buffers() */
-
-#include <asm/setup.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/irq.h>
-#include <asm/pgtable.h>
-#include <asm/uaccess.h>
+#include <linux/blkdev.h>
 
 #include <asm/atafd.h>
 #include <asm/atafdreg.h>
-#include <asm/atarihw.h>
 #include <asm/atariints.h>
 #include <asm/atari_stdma.h>
 #include <asm/atari_stram.h>
-#include <linux/blk.h>
-#include <linux/blkpg.h>
 
 #define	FD_MAX_UNITS 2
 
 #undef DEBUG
 
-static struct request_queue floppy_queue;
+static struct request_queue *floppy_queue;
 
-#define QUEUE (&floppy_queue)
-#define CURRENT elv_next_request(&floppy_queue)
+#define QUEUE (floppy_queue)
+#define CURRENT elv_next_request(floppy_queue)
 
 /* Disk types: DD, HD, ED */
 static struct atari_disk_type {
@@ -1839,7 +1819,7 @@ static void __init config_types( void )
 static int floppy_open( struct inode *inode, struct file *filp )
 {
 	struct atari_floppy_struct *p = inode->i_bdev->bd_disk->private_data;
-	int type  = minor(inode->i_rdev) >> 2;
+	int type  = iminor(inode) >> 2;
 
 	DPRINT(("fd_open: type=%d\n",type));
 	if (p->ref && p->type != type)
@@ -1948,7 +1928,9 @@ static int __init atari_floppy_init (void)
 	PhysTrackBuffer = virt_to_phys(TrackBuffer);
 	BufferDrive = BufferSide = BufferTrack = -1;
 
-	blk_init_queue(&floppy_queue, do_fd_request, &ataflop_lock);
+	floppy_queue = blk_init_queue(do_fd_request, &ataflop_lock);
+	if (!floppy_queue)
+		goto Enomem;
 
 	for (i = 0; i < FD_MAX_UNITS; i++) {
 		unit[i].track = -1;
@@ -1958,7 +1940,7 @@ static int __init atari_floppy_init (void)
 		sprintf(unit[i].disk->disk_name, "fd%d", i);
 		unit[i].disk->fops = &floppy_fops;
 		unit[i].disk->private_data = &unit[i];
-		unit[i].disk->queue = &floppy_queue;
+		unit[i].disk->queue = floppy_queue;
 		set_capacity(unit[i].disk, MAX_DISK_SIZE * 2);
 		add_disk(unit[i].disk);
 	}
@@ -1975,6 +1957,8 @@ static int __init atari_floppy_init (void)
 Enomem:
 	while (i--)
 		put_disk(unit[i].disk);
+	if (floppy_queue)
+		blk_cleanup_queue(floppy_queue);
 	unregister_blkdev(FLOPPY_MAJOR, "fd");
 	return -ENOMEM;
 }
@@ -2018,7 +2002,7 @@ static void atari_floppy_exit(void)
 	}
 	unregister_blkdev(FLOPPY_MAJOR, "fd");
 
-	blk_cleanup_queue(&floppy_queue);
+	blk_cleanup_queue(floppy_queue);
 	del_timer_sync(&fd_timer);
 	atari_stram_free( DMABuffer );
 }

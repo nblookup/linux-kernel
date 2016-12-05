@@ -795,16 +795,14 @@ static void __init isa_probe(void)
 	
 	    if (pnp_device_attach(dev) < 0)
 	    	continue;
-	
-	    printk("PNP ");
-	    
+
 	    if (pnp_activate_dev(dev) < 0) {
 		printk("activate failed\n");
 		pnp_device_detach(dev);
 		break;
 	    }
 
-	    if (pnp_port_valid(dev, 0)) {
+	    if (!pnp_port_valid(dev, 0)) {
 		printk("invalid resources ?\n");
 		pnp_device_detach(dev);
 		break;
@@ -1324,7 +1322,6 @@ static int pcic_init(struct pcmcia_socket *s)
 	pccard_mem_map mem = { 0, 0, 0, 0, 0, 0 };
 
 	mem.sys_stop = 0x1000;
-	pcic_set_socket(s, &dead_socket);
 	for (i = 0; i < 2; i++) {
 		io.map = i;
 		pcic_set_io_map(s, &io);
@@ -1353,33 +1350,38 @@ static struct pccard_operations pcic_operations = {
 
 /*====================================================================*/
 
+static int i82365_suspend(struct device *dev, u32 state, u32 level)
+{
+	int ret = 0;
+	if (level == SUSPEND_SAVE_STATE)
+		ret = pcmcia_socket_dev_suspend(dev, state);
+	return ret;
+}
+
+static int i82365_resume(struct device *dev, u32 level)
+{
+	int ret = 0;
+	if (level == RESUME_RESTORE_STATE)
+		ret = pcmcia_socket_dev_resume(dev);
+	return ret;
+}
+
 static struct device_driver i82365_driver = {
 	.name = "i82365",
 	.bus = &platform_bus_type,
-	.suspend = pcmcia_socket_dev_suspend,
-	.resume = pcmcia_socket_dev_resume,
+	.suspend = i82365_suspend,
+	.resume = i82365_resume,
 };
 
 static struct platform_device i82365_device = {
 	.name = "i82365",
 	.id = 0,
-	.dev = {
-		.name = "i82365",
-	},
 };
 
 static int __init init_i82365(void)
 {
-    servinfo_t serv;
     int i, ret;
 
-    pcmcia_get_card_services_info(&serv);
-    if (serv.Revision != CS_RELEASE_CODE) {
-	printk(KERN_NOTICE "i82365: Card Services release "
-	       "does not match!\n");
-	return -1;
-    }
-    DEBUG(0, "%s\n", version);
     if (driver_register(&i82365_driver))
 	return -1;
 
@@ -1403,7 +1405,7 @@ static int __init init_i82365(void)
     /* register sockets with the pcmcia core */
     for (i = 0; i < sockets; i++) {
 	    socket[i].socket.dev.dev = &i82365_device.dev;
-	    socket[i].socket.ss_entry = &pcic_operations;
+	    socket[i].socket.ops = &pcic_operations;
 	    socket[i].socket.owner = THIS_MODULE;
 	    socket[i].number = i;
 	    ret = pcmcia_register_socket(&socket[i].socket);	    

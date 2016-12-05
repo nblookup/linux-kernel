@@ -32,10 +32,11 @@
 
 #include <linux/mm.h>
 #include <linux/fs.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include <linux/delay.h>
+#include <linux/proc_fs.h>
 #include <linux/reboot.h>
 #include <linux/module.h>
 #include <linux/list.h>
@@ -294,6 +295,7 @@ mega_find_card(Scsi_Host_Template *host_template, u16 pci_vendor,
 		if( subsysvid && (subsysvid != AMI_SUBSYS_VID) &&
 				(subsysvid != DELL_SUBSYS_VID) &&
 				(subsysvid != HP_SUBSYS_VID) &&
+				(subsysvid != INTEL_SUBSYS_VID) &&
 				(subsysvid != LSI_SUBSYS_VID) ) continue;
 
 
@@ -585,7 +587,7 @@ mega_find_card(Scsi_Host_Template *host_template, u16 pci_vendor,
 
 		/* Set the Mode of addressing to 64 bit if we can */
 		if((adapter->flag & BOARD_64BIT)&&(sizeof(dma_addr_t) == 8)) {
-			pci_set_dma_mask(pdev, 0xffffffffffffffff);
+			pci_set_dma_mask(pdev, 0xffffffffffffffffULL);
 			adapter->has_64bit_addr = 1;
 		}
 		else  {
@@ -2275,8 +2277,7 @@ mega_build_sglist(adapter_t *adapter, scb_t *scb, u32 *buf, u32 *len)
 	if( !cmd->use_sg ) {
 
 		page = virt_to_page(cmd->request_buffer);
-
-		offset = ((unsigned long)cmd->request_buffer & ~PAGE_MASK);
+		offset = offset_in_page(cmd->request_buffer);
 
 		scb->dma_h_bulkdata = pci_map_page(adapter->dev,
 						  page, offset,
@@ -5361,7 +5362,6 @@ static Scsi_Host_Template driver_template = {
 	.eh_device_reset_handler =	megaraid_reset,
 	.eh_bus_reset_handler =		megaraid_reset,
 	.eh_host_reset_handler =	megaraid_reset,
-	.highmem_io =			1,
 };
 #include "scsi_module.c"
 

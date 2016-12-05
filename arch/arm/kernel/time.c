@@ -26,6 +26,7 @@
 #include <linux/timex.h>
 #include <linux/errno.h>
 #include <linux/profile.h>
+#include <linux/sysdev.h>
 
 #include <asm/hardware.h>
 #include <asm/io.h>
@@ -33,6 +34,8 @@
 #include <asm/leds.h>
 
 u64 jiffies_64 = INITIAL_JIFFIES;
+
+EXPORT_SYMBOL(jiffies_64);
 
 extern unsigned long wall_jiffies;
 
@@ -66,6 +69,14 @@ static unsigned long dummy_gettimeoffset(void)
  * always called with interrupts disabled.
  */
 unsigned long (*gettimeoffset)(void) = dummy_gettimeoffset;
+
+/*
+ * Scheduler clock - returns current time in nanosec units.
+ */
+unsigned long long sched_clock(void)
+{
+	return (unsigned long long)jiffies * (1000000000 / HZ);
+}
 
 /*
  * Handle kernel profile stuff...
@@ -127,6 +138,47 @@ static void dummy_leds_event(led_event_t evt)
 
 void (*leds_event)(led_event_t) = dummy_leds_event;
 
+static int leds_suspend(struct sys_device *dev, u32 state)
+{
+	leds_event(led_stop);
+	return 0;
+}
+
+static int leds_resume(struct sys_device *dev)
+{
+	leds_event(led_start);
+	return 0;
+}
+
+static int leds_shutdown(struct sys_device *dev)
+{
+	leds_event(led_halted);
+	return 0;
+}
+
+static struct sysdev_class leds_sysclass = {
+	set_kset_name("leds"),
+	.shutdown	= leds_shutdown,
+	.suspend	= leds_suspend,
+	.resume		= leds_resume,
+};
+
+static struct sys_device leds_device = {
+	.id		= 0,
+	.cls		= &leds_sysclass,
+};
+
+static int __init leds_init(void)
+{
+	int ret;
+	ret = sysdev_class_register(&leds_sysclass);
+	if (ret == 0)
+		ret = sys_device_register(&leds_device);
+	return ret;
+}
+
+device_initcall(leds_init);
+
 EXPORT_SYMBOL(leds_event);
 #endif
 
@@ -172,8 +224,13 @@ void do_gettimeofday(struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
+EXPORT_SYMBOL(do_gettimeofday);
+
 int do_settimeofday(struct timespec *tv)
 {
+	time_t wtm_sec, sec = tv->tv_sec;
+	long wtm_nsec, nsec = tv->tv_nsec;
+
 	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
 		return -EINVAL;
 
@@ -184,23 +241,25 @@ int do_settimeofday(struct timespec *tv)
 	 * wall time.  Discover what correction gettimeofday() would have
 	 * done, and then undo it!
 	 */
-	tv->tv_nsec -= 1000 * (gettimeoffset() +
-				(jiffies - wall_jiffies) * USECS_PER_JIFFY);
+	nsec -= gettimeoffset() * NSEC_PER_USEC;
+	nsec -= (jiffies - wall_jiffies) * TICK_NSEC;
 
-	while (tv->tv_nsec < 0) {
-		tv->tv_nsec += NSEC_PER_SEC;
-		tv->tv_sec--;
-	}
+	wtm_sec  = wall_to_monotonic.tv_sec + (xtime.tv_sec - sec);
+	wtm_nsec = wall_to_monotonic.tv_nsec + (xtime.tv_nsec - nsec);
 
-	xtime.tv_sec = tv->tv_sec;
-	xtime.tv_nsec = tv->tv_nsec;
+	set_normalized_timespec(&xtime, sec, nsec);
+	set_normalized_timespec(&wall_to_monotonic, wtm_sec, wtm_nsec);
+
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
 	write_sequnlock_irq(&xtime_lock);
+	clock_was_set();
 	return 0;
 }
+
+EXPORT_SYMBOL(do_settimeofday);
 
 static struct irqaction timer_irq = {
 	.name	= "timer",

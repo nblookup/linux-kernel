@@ -39,7 +39,6 @@
 
 #include <asm/io.h>
 
-#include "ide_modes.h"
 #include "serverworks.h"
 
 static u8 svwks_revision = 0;
@@ -273,13 +272,18 @@ static int svwks_tune_chipset (ide_drive_t *drive, u8 xferspeed)
 
 	ide_hwif_t *hwif	= HWIF(drive);
 	struct pci_dev *dev	= hwif->pci_dev;
-	u8 speed		= ide_rate_filter(svwks_ratemask(drive), xferspeed);
+	u8 speed;
 	u8 pio			= ide_get_best_pio_mode(drive, 255, 5, NULL);
 	u8 unit			= (drive->select.b.unit & 0x01);
 	u8 csb5			= svwks_csb_check(dev);
 	u8 ultra_enable		= 0, ultra_timing = 0;
 	u8 dma_timing		= 0, pio_timing = 0;
 	u16 csb5_pio		= 0;
+
+	if (xferspeed == 255)	/* PIO auto-tuning */
+		speed = XFER_PIO_0 + pio;
+	else
+		speed = ide_rate_filter(svwks_ratemask(drive), xferspeed);
 
 	/* If we are about to put a disk into UDMA mode we screwed up.
 	   Our code assumes we never _ever_ do this on an OSB4 */
@@ -485,6 +489,7 @@ try_dma_modes:
 		} else {
 			goto no_dma_set;
 		}
+		return hwif->ide_dma_on(drive);
 	} else if ((id->capability & 8) || (id->field_valid & 2)) {
 fast_ata_pio:
 no_dma_set:
@@ -492,7 +497,8 @@ no_dma_set:
 		//	hwif->tuneproc(drive, 5);
 		return hwif->ide_dma_off_quietly(drive);
 	}
-	return hwif->ide_dma_on(drive);
+	/* IORDY not supported */
+	return 0;
 }
 
 /* This can go soon */
@@ -799,7 +805,7 @@ static int __devinit svwks_init_one(struct pci_dev *dev, const struct pci_device
 	return 0;
 }
 
-static struct pci_device_id svwks_pci_tbl[] __devinitdata = {
+static struct pci_device_id svwks_pci_tbl[] = {
 	{ PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_OSB4IDE, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
 	{ PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_CSB5IDE, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 1},
 	{ PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_CSB6IDE, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 2},

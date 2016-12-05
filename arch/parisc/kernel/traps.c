@@ -126,9 +126,10 @@ void show_regs(struct pt_regs *regs)
 void dump_stack(void)
 {
 	unsigned long stack;
-	show_trace(&stack);
+	show_trace(current, &stack);
 }
 
+EXPORT_SYMBOL(dump_stack);
 
 #ifndef __LP64__
 static int kstack_depth_to_print = 64 * 4;
@@ -136,7 +137,7 @@ static int kstack_depth_to_print = 64 * 4;
 static int kstack_depth_to_print = 128 * 4;
 #endif
 
-void show_stack(unsigned long *sp)
+void show_stack(struct task_struct *task, unsigned long *sp)
 {
 	unsigned long *stack;
 	int i;
@@ -145,8 +146,10 @@ void show_stack(unsigned long *sp)
 	 * debugging aid: "show_stack(NULL);" prints the
 	 * back trace for this cpu.
 	 */
-	if (sp==NULL)
+	if (task==NULL)
 		sp = (unsigned long*)&sp;
+	else if(sp == NULL)
+		sp = (unsigned long*)task->thread.regs.ksp;
 
 	stack = sp;
 	printk("\n" KERN_CRIT "Stack Dump:\n");
@@ -160,11 +163,11 @@ void show_stack(unsigned long *sp)
 		printk(RFMT " ", *stack--);
 	}
 	printk("\n" KERN_CRIT "\n");
-	show_trace(sp);
+	show_trace(task, sp);
 }
 
 
-void show_trace(unsigned long *stack)
+void show_trace(struct task_struct *task, unsigned long *stack)
 {
 	unsigned long *startstack;
 	unsigned long addr;
@@ -201,7 +204,7 @@ void show_trace(unsigned long *stack)
 
 void show_trace_task(struct task_struct *tsk)
 {
-	show_trace((unsigned long *)tsk->thread.regs.ksp);
+	show_trace(tsk, (unsigned long *)tsk->thread.regs.ksp);
 }
 
 void die_if_kernel(char *str, struct pt_regs *regs, long err)
@@ -218,6 +221,8 @@ void die_if_kernel(char *str, struct pt_regs *regs, long err)
 #endif
 		return;
 	}
+
+	oops_in_progress = 1;
 
 	/* Amuse the user in a SPARC fashion */
 	printk(
@@ -412,6 +417,8 @@ void parisc_terminate(char *msg, struct pt_regs *regs, int code, unsigned long o
 {
 	static spinlock_t terminate_lock = SPIN_LOCK_UNLOCKED;
 
+	oops_in_progress = 1;
+
 	set_eiem(0);
 	local_irq_disable();
 	spin_lock(&terminate_lock);
@@ -426,7 +433,7 @@ void parisc_terminate(char *msg, struct pt_regs *regs, int code, unsigned long o
 	if (code == 1)
 	    transfer_pim_to_trap_frame(regs);
 
-	show_stack((unsigned long *)regs->gr[30]);
+	show_stack(NULL, (unsigned long *)regs->gr[30]);
 
 	printk("\n");
 	printk(KERN_CRIT "%s: Code=%d regs=%p (Addr=" RFMT ")\n",
@@ -672,12 +679,13 @@ void handle_interruption(int code, struct pt_regs *regs)
 	}
 
 	if (user_mode(regs)) {
-	    if (fault_space != regs->sr[7]) {
+	    if ((fault_space>>SPACEID_SHIFT) != (regs->sr[7] >> SPACEID_SHIFT)) {
 #ifdef PRINT_USER_FAULTS
 		if (fault_space == 0)
 			printk(KERN_DEBUG "User Fault on Kernel Space ");
 		else
-			printk(KERN_DEBUG "User Fault (long pointer) ");
+			printk(KERN_DEBUG "User Fault (long pointer) (fault %d) ",
+			       code);
 		printk("pid=%d command='%s'\n", current->pid, current->comm);
 		show_regs(regs);
 #endif

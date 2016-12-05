@@ -95,12 +95,12 @@ static unsigned long chrp_find_phys_io_base(void)
 
 #ifdef CONFIG_MAGIC_SYSRQ
 static void sysrq_handle_xmon(int key, struct pt_regs *regs,
-			      struct tty_struct *tty) 
+			      struct tty_struct *tty)
 {
 	xmon(regs);
 }
 
-static struct sysrq_key_op sysrq_xmon_op = 
+static struct sysrq_key_op sysrq_xmon_op =
 {
 	.handler =	sysrq_handle_xmon,
 	.help_msg =	"Xmon",
@@ -113,7 +113,7 @@ xmon_map_scc(void)
 {
 #ifdef CONFIG_PPC_MULTIPLATFORM
 	volatile unsigned char *base;
-	
+
 	if (_machine == _MACH_Pmac) {
 		struct device_node *np;
 		unsigned long addr;
@@ -178,7 +178,7 @@ xmon_map_scc(void)
 #endif
 		TXRDY = 4;
 		RXRDY = 1;
-		
+	
 		np = find_devices("mac-io");
 		if (np && np->n_addrs)
 			addr = np->addrs[0].address + 0x13020;
@@ -225,14 +225,13 @@ xmon_map_scc(void)
 static int scc_initialized = 0;
 
 void xmon_init_scc(void);
-extern void pmu_poll(void);
 extern void cuda_poll(void);
 
 static inline void do_poll_adb(void)
 {
 #ifdef CONFIG_ADB_PMU
 	if (sys_ctrler == SYS_CTRLER_PMU)
-		pmu_poll();
+		pmu_poll_adb();
 #endif /* CONFIG_ADB_PMU */
 #ifdef CONFIG_ADB_CUDA
 	if (sys_ctrler == SYS_CTRLER_CUDA)

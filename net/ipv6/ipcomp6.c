@@ -32,6 +32,7 @@
  */
 #include <linux/config.h>
 #include <linux/module.h>
+#include <net/inet_ecn.h>
 #include <net/ip.h>
 #include <net/xfrm.h>
 #include <net/ipcomp.h>
@@ -201,6 +202,8 @@ static int ipcomp6_output(struct sk_buff *skb)
 	memcpy(top_iph, tmp_iph, hdr_len);
 	kfree(tmp_iph);
 
+	if (x->props.mode && (x->props.flags & XFRM_STATE_NOECN))
+		IP6_ECN_clear(top_iph);
 	top_iph->payload_len = htons(skb->len - sizeof(struct ipv6hdr));
 	skb->nh.raw = skb->data; /* top_iph */
 	ip6_find_1stfragopt(skb, &prevhdr); 
@@ -248,7 +251,7 @@ static void ipcomp6_err(struct sk_buff *skb, struct inet6_skb_parm *opt,
 	if (!x)
 		return;
 
-	printk(KERN_DEBUG "pmtu discvovery on SA IPCOMP/%08x/"
+	printk(KERN_DEBUG "pmtu discovery on SA IPCOMP/%08x/"
 			"%04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x\n",
 			spi, NIP6(iph->daddr));
 	xfrm_state_put(x);
@@ -265,16 +268,23 @@ static void ipcomp6_free_data(struct ipcomp_data *ipcd)
 static void ipcomp6_destroy(struct xfrm_state *x)
 {
 	struct ipcomp_data *ipcd = x->data;
+	if (!ipcd)
+		return;
 	ipcomp6_free_data(ipcd);
 	kfree(ipcd);
 }
 
 static int ipcomp6_init_state(struct xfrm_state *x, void *args)
 {
-	int err = -ENOMEM;
+	int err;
 	struct ipcomp_data *ipcd;
 	struct xfrm_algo_desc *calg_desc;
 
+	err = -EINVAL;
+	if (!x->calg)
+		goto out;
+
+	err = -ENOMEM;
 	ipcd = kmalloc(sizeof(*ipcd), GFP_KERNEL);
 	if (!ipcd)
 		goto error;
@@ -283,7 +293,6 @@ static int ipcomp6_init_state(struct xfrm_state *x, void *args)
 	x->props.header_len = sizeof(struct ipv6_comp_hdr);
 	if (x->props.mode)
 		x->props.header_len += sizeof(struct ipv6hdr);
-	x->data = ipcd;
 	
 	ipcd->scratch = kmalloc(IPCOMP_SCRATCH_SIZE, GFP_KERNEL);
 	if (!ipcd->scratch)
@@ -296,6 +305,7 @@ static int ipcomp6_init_state(struct xfrm_state *x, void *args)
 	calg_desc = xfrm_calg_get_byname(x->calg->alg_name);
 	BUG_ON(!calg_desc);
 	ipcd->threshold = calg_desc->uinfo.comp.threshold;
+	x->data = ipcd;
 	err = 0;
 out:
 	return err;
