@@ -3,7 +3,7 @@
 
 #include <linux/config.h>
 #include <linux/pci.h>
-
+#include <linux/errno.h>
 
 /*
  * The following structure is used to manage multiple PCI busses.
@@ -15,10 +15,11 @@
 struct linux_hose_info {
         struct pci_bus                  pci_bus;
 	struct linux_hose_info         *next;
-	unsigned long                   pci_io_space;
-	unsigned long                   pci_mem_space;
+	unsigned long                   pci_sparse_io_space;
+	unsigned long                   pci_sparse_mem_space;
+	unsigned long                   pci_dense_io_space;
+	unsigned long                   pci_dense_mem_space;
 	unsigned long                   pci_config_space;
-	unsigned long                   pci_sparse_space;
         unsigned int                    pci_first_busno;
         unsigned int                    pci_last_busno;
 	unsigned int                    pci_hose_index;
@@ -44,5 +45,21 @@ extern struct linux_hose_info *bus2hose[256];
 #define DEV_IS_ON_PRIMARY(dev)  ((dev)->bus->number == 0)
 
 #endif /* Multiple busses */
+
+/* Values for the `which' argument to sys_pciconfig_iobase.  */
+#define IOBASE_HOSE             0
+#define IOBASE_SPARSE_MEM       1
+#define IOBASE_DENSE_MEM        2
+#define IOBASE_SPARSE_IO        3
+#define IOBASE_DENSE_IO         4
+
+/* Return the index of the PCI controller for device PDEV. */
+static __inline__ int pci_controller_num(struct pci_dev *pdev)
+{
+	if (bus2hose[pdev->bus->number] == NULL)
+		return -ENXIO;
+
+	return bus2hose[pdev->bus->number]->pci_hose_index;
+}
 
 #endif /* __ALPHA_PCI_H */

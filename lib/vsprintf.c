@@ -142,7 +142,7 @@ static char * number(char * str, long num, int base, int size, int precision
 /* Forward decl. needed for IP address printing stuff... */
 int sprintf(char * buf, const char *fmt, ...);
 
-int vsprintf(char *buf, const char *fmt, va_list args)
+int _vsnprintf(char *buf, int n, const char *fmt, va_list args)
 {
 	int len;
 	unsigned long num;
@@ -157,7 +157,7 @@ int vsprintf(char *buf, const char *fmt, va_list args)
 				   number of chars for from string */
 	int qualifier;		/* 'h', 'l', or 'L' for integer fields */
 
-	for (str=buf ; *fmt ; ++fmt) {
+	for (str = buf; *fmt && (n == -1 || str - buf < n); ++fmt) {
 		if (*fmt != '%') {
 			*str++ = *fmt;
 			continue;
@@ -231,6 +231,12 @@ int vsprintf(char *buf, const char *fmt, va_list args)
 
 			len = strnlen(s, precision);
 
+			if (n != -1 && len >= n - (str - buf)) {
+				len = n - 1 - (str - buf);
+				if (len <= 0) break;
+				if (len < field_width) field_width = len;
+			}
+
 			if (!(flags & LEFT))
 				while (len < field_width--)
 					*str++ = ' ';
@@ -261,6 +267,10 @@ int vsprintf(char *buf, const char *fmt, va_list args)
 			}
 			continue;
 
+		case '%':
+			*str++ = '%';
+			continue;
+
 		/* integer number formats - set up the flags and "break" */
 		case 'o':
 			base = 8;
@@ -279,8 +289,7 @@ int vsprintf(char *buf, const char *fmt, va_list args)
 			break;
 
 		default:
-			if (*fmt != '%')
-				*str++ = '%';
+			*str++ = '%';
 			if (*fmt)
 				*str++ = *fmt;
 			else
@@ -303,6 +312,11 @@ int vsprintf(char *buf, const char *fmt, va_list args)
 	return str-buf;
 }
 
+int vsprintf(char *buf, const char *fmt, va_list args)
+{
+	return _vsnprintf(buf, -1, fmt, args);
+}
+
 int sprintf(char * buf, const char *fmt, ...)
 {
 	va_list args;
@@ -313,4 +327,3 @@ int sprintf(char * buf, const char *fmt, ...)
 	va_end(args);
 	return i;
 }
-

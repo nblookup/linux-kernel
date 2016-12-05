@@ -1,4 +1,11 @@
-/* isdnl2.h */
+/* $Id: isdnl2.h,v 1.1.2.1 2001/12/31 13:26:45 kai Exp $
+ *
+ * Layer 2 defines
+ *
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
+ */
 
 #define RR     0x01
 #define RNR    0x05

@@ -1,4 +1,4 @@
-/*  $Id: setup.c,v 1.37 1998/10/14 15:49:09 ecd Exp $
+/*  $Id: setup.c,v 1.43.2.7 2001/06/03 13:41:48 ecd Exp $
  *  linux/arch/sparc64/kernel/setup.c
  *
  *  Copyright (C) 1995,1996  David S. Miller (davem@caip.rutgers.edu)
@@ -65,6 +65,7 @@ struct screen_info screen_info = {
 #if CONFIG_SUN_CONSOLE
 void (*prom_palette)(int);
 #endif
+void (*prom_keyboard)(void);
 asmlinkage void sys_sync(void);	/* it's really int */
 
 static void
@@ -160,9 +161,17 @@ int prom_callback(long *args)
 		}
 
 		if ((va >= KERNBASE) && (va < (KERNBASE + (4 * 1024 * 1024)))) {
+			/* Spitfire Errata #32 workaround */
+			__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
+					     "flush	%%g6"
+					     : /* No outputs */
+					     : "r" (0),
+					     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
+
 			/*
 			 * Locked down tlb entry 63.
 			 */
+
 			tte = spitfire_get_dtlb_data(63);
 			res = PROM_TRUE;
 			goto done;
@@ -276,6 +285,22 @@ unsigned int boot_flags = 0;
 static int console_fb __initdata = 0;
 #endif
 static unsigned long memory_size = 0;
+
+#ifdef PROM_DEBUG_CONSOLE
+static struct console prom_debug_console = {
+	"debug",
+	prom_console_write,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	CON_PRINTBUFFER,
+	-1,
+	0,
+	NULL
+};
+#endif
 
 /* XXX Implement this at some point... */
 void kernel_enter_debugger(void)
@@ -397,13 +422,12 @@ __initfunc(static void boot_flags_init(char *commands))
 extern int prom_probe_memory(void);
 extern unsigned long start, end;
 extern void panic_setup(char *, int *);
-extern unsigned long sun_serial_setup(unsigned long);
 
 extern unsigned short root_flags;
 extern unsigned short root_dev;
 extern unsigned short ram_flags;
-extern unsigned int ramdisk_image;
-extern unsigned int ramdisk_size;
+extern unsigned int sparc_ramdisk_image;
+extern unsigned int sparc_ramdisk_size;
 #define RAMDISK_IMAGE_START_MASK	0x07FF
 #define RAMDISK_PROMPT_FLAG		0x8000
 #define RAMDISK_LOAD_FLAG		0x4000
@@ -419,6 +443,17 @@ static struct pt_regs fake_swapper_regs = { { 0, }, 0, 0, 0, 0 };
 
 extern struct consw sun_serial_con;
 
+void register_prom_callbacks(void)
+{
+	prom_setcallback(prom_callback);
+	prom_feval(": linux-va>tte-data 2 \" va>tte-data\" $callback drop ; "
+		   "' linux-va>tte-data to va>tte-data");
+	prom_feval(": linux-.soft1 1 \" .soft1\" $callback 2drop ; "
+		   "' linux-.soft1 to .soft1");
+	prom_feval(": linux-.soft2 1 \" .soft2\" $callback 2drop ; "
+		   "' linux-.soft2 to .soft2");
+}
+
 __initfunc(void setup_arch(char **cmdline_p,
 	unsigned long * memory_start_p, unsigned long * memory_end_p))
 {
@@ -429,6 +464,10 @@ __initfunc(void setup_arch(char **cmdline_p,
 	/* Initialize PROM console and command line. */
 	*cmdline_p = prom_getbootargs();
 	strcpy(saved_command_line, *cmdline_p);
+
+#ifdef PROM_DEBUG_CONSOLE
+	register_console(&prom_debug_console);
+#endif
 
 	printk("ARCH: SUN4U\n");
 
@@ -459,13 +498,6 @@ __initfunc(void setup_arch(char **cmdline_p,
 			}
 		}
 	}
-	prom_setcallback(prom_callback);
-	prom_feval(": linux-va>tte-data 2 \" va>tte-data\" $callback drop ; "
-		   "' linux-va>tte-data to va>tte-data");
-	prom_feval(": linux-.soft1 1 \" .soft1\" $callback 2drop ; "
-		   "' linux-.soft1 to .soft1");
-	prom_feval(": linux-.soft2 1 \" .soft2\" $callback 2drop ; "
-		   "' linux-.soft2 to .soft2");
 
 	/* In paging_init() we tip off this value to see if we need
 	 * to change init_mm.pgd to point to the real alias mapping.
@@ -489,13 +521,13 @@ __initfunc(void setup_arch(char **cmdline_p,
 	rd_doload = ((ram_flags & RAMDISK_LOAD_FLAG) != 0);	
 #endif
 #ifdef CONFIG_BLK_DEV_INITRD
-	if (ramdisk_image) {
+	if (sparc_ramdisk_image) {
 		unsigned long start = 0;
 		
-		if (ramdisk_image >= (unsigned long)&end - 2 * PAGE_SIZE)
-			ramdisk_image -= KERNBASE;
-		initrd_start = ramdisk_image + phys_base + PAGE_OFFSET;
-		initrd_end = initrd_start + ramdisk_size;
+		if (sparc_ramdisk_image >= (unsigned long)&end - 2 * PAGE_SIZE)
+			sparc_ramdisk_image -= KERNBASE;
+		initrd_start = sparc_ramdisk_image + phys_base + PAGE_OFFSET;
+		initrd_end = initrd_start + sparc_ramdisk_size;
 		if (initrd_end > *memory_end_p) {
 			printk(KERN_CRIT "initrd extends beyond end of memory "
 		                 	 "(0x%016lx > 0x%016lx)\ndisabling initrd\n",
@@ -503,10 +535,10 @@ __initfunc(void setup_arch(char **cmdline_p,
 			initrd_start = 0;
 		}
 		if (initrd_start)
-			start = ramdisk_image + KERNBASE;
+			start = sparc_ramdisk_image + KERNBASE;
 		if (start >= *memory_start_p && start < *memory_start_p + 2 * PAGE_SIZE) {
 			initrd_below_start_ok = 1;
-			*memory_start_p = PAGE_ALIGN (start + ramdisk_size);
+			*memory_start_p = PAGE_ALIGN (start + sparc_ramdisk_size);
 		}
 	}
 #endif	
@@ -519,7 +551,7 @@ __initfunc(void setup_arch(char **cmdline_p,
 	init_task.tss.kregs = &fake_swapper_regs;
 
 #ifdef CONFIG_IP_PNP
-	if (!ic_set_manually) {
+	if (ic_myaddr == INADDR_NONE) {
 		int chosen = prom_finddevice ("/chosen");
 		u32 cl, sv, gw;
 		
@@ -531,7 +563,9 @@ __initfunc(void setup_arch(char **cmdline_p,
 			ic_servaddr = sv;
 			if (gw)
 				ic_gateway = gw;
-			ic_bootp_flag = ic_rarp_flag = 0;
+#if defined(CONFIG_IP_PNP_BOOTP) || defined(CONFIG_IP_PNP_RARP)
+			ic_proto_enabled = 0;
+#endif
 		}
 	}
 #endif
@@ -566,7 +600,6 @@ __initfunc(void setup_arch(char **cmdline_p,
 		serial_console = 2;
 		break;
 	}
-	*memory_start_p = sun_serial_setup(*memory_start_p); /* set this up ASAP */
 #else
 	serial_console = 0;
 #endif
@@ -588,6 +621,10 @@ extern int smp_info(char *);
 extern int smp_bogo(char *);
 extern int mmu_info(char *);
 
+#ifndef __SMP__
+unsigned int up_clock_tick;
+#endif
+
 int get_cpuinfo(char *buffer)
 {
 	int cpuid=smp_processor_id();
@@ -602,7 +639,8 @@ int get_cpuinfo(char *buffer)
 	    "ncpus probed\t: %d\n"
 	    "ncpus active\t: %d\n"
 #ifndef __SMP__
-            "BogoMips\t: %lu.%02lu\n"
+            "Cpu0Bogo\t: %lu.%02lu\n"
+	    "Cpu0ClkTck\t: %016lx\n"
 #endif
 	    ,
             sparc_cpu_type[cpuid],
@@ -610,7 +648,8 @@ int get_cpuinfo(char *buffer)
             prom_rev, prom_prev >> 16, (prom_prev >> 8) & 0xff, prom_prev & 0xff,
 	    linux_num_cpus, smp_num_cpus
 #ifndef __SMP__
-            , loops_per_sec/500000, (loops_per_sec/5000) % 100
+	    , loops_per_jiffy/(500000/HZ), (loops_per_jiffy/(5000/HZ)) % 100,
+	    (unsigned long) up_clock_tick
 #endif
 	    );
 #ifdef __SMP__

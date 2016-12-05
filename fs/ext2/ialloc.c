@@ -268,21 +268,6 @@ error_return:
 }
 
 /*
- * This function increments the inode version number
- *
- * This may be used one day by the NFS server
- */
-static void inc_inode_version (struct inode * inode,
-			       struct ext2_group_desc *gdp,
-			       int mode)
-{
-	inode->u.ext2_i.i_version++;
-	mark_inode_dirty(inode);
-
-	return;
-}
-
-/*
  * There are two policies for allocating an inode.  If the new inode is
  * a directory, then a forward search is made for a block group with both
  * free space and a low directory-to-inode ratio; if that fails, then of
@@ -296,7 +281,7 @@ struct inode * ext2_new_inode (const struct inode * dir, int mode, int * err)
 {
 	struct super_block * sb;
 	struct buffer_head * bh;
-	struct buffer_head * bh2;
+	struct buffer_head * bh2, * tmpbh2;
 	int i, j, avefreei;
 	struct inode * inode;
 	int bitmap_nr;
@@ -331,10 +316,11 @@ repeat:
 /* I am not yet convinced that this next bit is necessary.
 		i = dir->u.ext2_i.i_block_group;
 		for (j = 0; j < sb->u.ext2_sb.s_groups_count; j++) {
-			tmp = ext2_get_group_desc (sb, i, &bh2);
+			tmp = ext2_get_group_desc (sb, i, &tmpbh2);
 			if (tmp &&
 			    (le16_to_cpu(tmp->bg_used_dirs_count) << 8) < 
 			     le16_to_cpu(tmp->bg_free_inodes_count)) {
+				bh2 = tmpbh2;
 				gdp = tmp;
 				break;
 			}
@@ -344,7 +330,7 @@ repeat:
 */
 		if (!gdp) {
 			for (j = 0; j < sb->u.ext2_sb.s_groups_count; j++) {
-				tmp = ext2_get_group_desc (sb, j, &bh2);
+				tmp = ext2_get_group_desc (sb, j, &tmpbh2);
 				if (tmp &&
 				    le16_to_cpu(tmp->bg_free_inodes_count) &&
 				    le16_to_cpu(tmp->bg_free_inodes_count) >= avefreei) {
@@ -352,6 +338,7 @@ repeat:
 					    (le16_to_cpu(tmp->bg_free_blocks_count) >
 					     le16_to_cpu(gdp->bg_free_blocks_count))) {
 						i = j;
+						bh2 = tmpbh2;
 						gdp = tmp;
 					}
 				}
@@ -364,11 +351,11 @@ repeat:
 		 * Try to place the inode in its parent directory
 		 */
 		i = dir->u.ext2_i.i_block_group;
-		tmp = ext2_get_group_desc (sb, i, &bh2);
-		if (tmp && le16_to_cpu(tmp->bg_free_inodes_count))
+		tmp = ext2_get_group_desc (sb, i, &tmpbh2);
+		if (tmp && le16_to_cpu(tmp->bg_free_inodes_count)) {
+			bh2 = tmpbh2;
 			gdp = tmp;
-		else
-		{
+		} else {
 			/*
 			 * Use a quadratic hash to find a group with a
 			 * free inode
@@ -377,9 +364,10 @@ repeat:
 				i += j;
 				if (i >= sb->u.ext2_sb.s_groups_count)
 					i -= sb->u.ext2_sb.s_groups_count;
-				tmp = ext2_get_group_desc (sb, i, &bh2);
+				tmp = ext2_get_group_desc (sb, i, &tmpbh2);
 				if (tmp &&
 				    le16_to_cpu(tmp->bg_free_inodes_count)) {
+					bh2 = tmpbh2;
 					gdp = tmp;
 					break;
 				}
@@ -393,9 +381,10 @@ repeat:
 			for (j = 2; j < sb->u.ext2_sb.s_groups_count; j++) {
 				if (++i >= sb->u.ext2_sb.s_groups_count)
 					i = 0;
-				tmp = ext2_get_group_desc (sb, i, &bh2);
+				tmp = ext2_get_group_desc (sb, i, &tmpbh2);
 				if (tmp &&
 				    le16_to_cpu(tmp->bg_free_inodes_count)) {
+					bh2 = tmpbh2;
 					gdp = tmp;
 					break;
 				}
@@ -493,8 +482,15 @@ repeat:
 	if (inode->u.ext2_i.i_flags & EXT2_SYNC_FL)
 		inode->i_flags |= MS_SYNCHRONOUS;
 	insert_inode_hash(inode);
+	/* 
+	 *   dhXXX:
+	 *  To be really picky we should set i_generation to one more than
+	 *  whatever's on the disk, to ensure a monotonic advance of 
+	 *  generation for NFS.  But the odds of duplicating the last igen 
+	 *  are only 1 in 2^32...
+	 */
+	inode->i_generation = inode_generation_count++;
 	mark_inode_dirty(inode);
-	inc_inode_version (inode, gdp, mode);
 
 	unlock_super (sb);
 	if(DQUOT_ALLOC_INODE(sb, inode)) {

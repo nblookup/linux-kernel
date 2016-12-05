@@ -20,6 +20,10 @@
  *	ROSE 003	Jonathan(G4KLX)	New timer architecture.
  *					Implemented idle timer.
  *					Added use count to neighbour.
+ *                      Tomi(OH2BNS)    Fixed rose_getname().
+ *
+ *	ROSE 0.63	Jean-Paul(F6FBB) Fixed wrong length of L3 packets
+ *					Added CLEAR_REQUEST facilities
  */
 
 #include <linux/config.h>
@@ -54,7 +58,6 @@
 #include <linux/proc_fs.h>
 #include <net/ip.h>
 #include <net/arp.h>
-#include <linux/if_arp.h>
 #include <linux/init.h>
 
 int rose_ndevs = 10;
@@ -471,6 +474,9 @@ static int rose_getsockopt(struct socket *sock, int level, int optname,
 		
 	if (get_user(len, optlen))
 		return -EFAULT;
+		
+	if (len < 0)
+		return -EINVAL;
 	
 	switch (optname) {
 		case ROSE_DEFER:
@@ -899,7 +905,7 @@ static int rose_accept(struct socket *sock, struct socket *newsock, int flags)
 static int rose_getname(struct socket *sock, struct sockaddr *uaddr,
 	int *uaddr_len, int peer)
 {
-	struct sockaddr_rose *srose = (struct sockaddr_rose *)uaddr;
+	struct full_sockaddr_rose *srose = (struct full_sockaddr_rose *)uaddr;
 	struct sock *sk = sock->sk;
 	int n;
 
@@ -907,42 +913,21 @@ static int rose_getname(struct socket *sock, struct sockaddr *uaddr,
 		if (sk->state != TCP_ESTABLISHED)
 			return -ENOTCONN;
 		srose->srose_family = AF_ROSE;
-		srose->srose_ndigis = 0;
 		srose->srose_addr   = sk->protinfo.rose->dest_addr;
 		srose->srose_call   = sk->protinfo.rose->dest_call;
 		srose->srose_ndigis = sk->protinfo.rose->dest_ndigis;
-		if (*uaddr_len >= sizeof(struct full_sockaddr_rose)) {
-			struct full_sockaddr_rose *full_srose = (struct full_sockaddr_rose *)uaddr;
-			for (n = 0 ; n < sk->protinfo.rose->dest_ndigis ; n++)
-				full_srose->srose_digis[n] = sk->protinfo.rose->dest_digis[n];
-			*uaddr_len = sizeof(struct full_sockaddr_rose);
-		} else {
-			if (sk->protinfo.rose->dest_ndigis >= 1) {
-				srose->srose_ndigis = 1;
-				srose->srose_digi = sk->protinfo.rose->dest_digis[0];
-			}
-			*uaddr_len = sizeof(struct sockaddr_rose);
-		}
+		for (n = 0 ; n < sk->protinfo.rose->dest_ndigis ; n++)
+			srose->srose_digis[n] = sk->protinfo.rose->dest_digis[n];
 	} else {
 		srose->srose_family = AF_ROSE;
-		srose->srose_ndigis = 0;
 		srose->srose_addr   = sk->protinfo.rose->source_addr;
 		srose->srose_call   = sk->protinfo.rose->source_call;
 		srose->srose_ndigis = sk->protinfo.rose->source_ndigis;
-		if (*uaddr_len >= sizeof(struct full_sockaddr_rose)) {
-			struct full_sockaddr_rose *full_srose = (struct full_sockaddr_rose *)uaddr;
-			for (n = 0 ; n < sk->protinfo.rose->source_ndigis ; n++)
-				full_srose->srose_digis[n] = sk->protinfo.rose->source_digis[n];
-			*uaddr_len = sizeof(struct full_sockaddr_rose);
-		} else {
-			if (sk->protinfo.rose->source_ndigis >= 1) {
-				srose->srose_ndigis = 1;
-				srose->srose_digi = sk->protinfo.rose->source_digis[sk->protinfo.rose->source_ndigis-1];
-			}
-			*uaddr_len = sizeof(struct sockaddr_rose);
-		}
+		for (n = 0 ; n < sk->protinfo.rose->source_ndigis ; n++)
+			srose->srose_digis[n] = sk->protinfo.rose->source_digis[n];
 	}
 
+	*uaddr_len = sizeof(struct full_sockaddr_rose);
 	return 0;
 }
 
@@ -1509,6 +1494,11 @@ __initfunc(void rose_proto_init(struct net_proto *pro))
 
 	for (i = 0; i < rose_ndevs; i++) {
 		dev_rose[i].name = kmalloc(20, GFP_KERNEL);
+		if(dev_rose[i].name == NULL)
+		{
+			printk(KERN_ERR "Rose: unable to register ROSE devices.\n");
+			break;
+		}
 		sprintf(dev_rose[i].name, "rose%d", i);
 		dev_rose[i].init = rose_init;
 		register_netdev(&dev_rose[i]);
@@ -1516,7 +1506,7 @@ __initfunc(void rose_proto_init(struct net_proto *pro))
 
 	sock_register(&rose_family_ops);
 	register_netdevice_notifier(&rose_dev_notifier);
-	printk(KERN_INFO "F6FBB/G4KLX ROSE for Linux. Version 0.62 for AX25.037 Linux 2.1\n");
+	printk(KERN_INFO "F6FBB/G4KLX ROSE for Linux. Version 0.63 for AX25.037 Linux 2.2\n");
 
 	ax25_protocol_register(AX25_P_ROSE, rose_route_frame);
 	ax25_linkfail_register(rose_link_failed);

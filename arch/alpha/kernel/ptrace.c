@@ -17,6 +17,7 @@
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
+#include <asm/fpu.h>
 
 #include "proto.h"
 
@@ -119,18 +120,30 @@ get_reg_addr(struct task_struct * task, unsigned long regno)
 /*
  * Get contents of register REGNO in task TASK.
  */
-static inline long
+static long
 get_reg(struct task_struct * task, unsigned long regno)
 {
+	/* Special hack for fpcr -- combine hardware and software bits.  */
+	if (regno == 63) {
+		unsigned long fpcr = *get_reg_addr(task, regno);
+		unsigned long swcr = task->tss.flags & IEEE_SW_MASK;
+		swcr = swcr_update_status(swcr, fpcr);
+		return fpcr | swcr;
+	}
 	return *get_reg_addr(task, regno);
 }
 
 /*
  * Write contents of register REGNO in task TASK.
  */
-static inline int
+static int
 put_reg(struct task_struct *task, unsigned long regno, long data)
 {
+	if (regno == 63) {
+		task->tss.flags = ((task->tss.flags & ~IEEE_SW_MASK)
+				   | (data & IEEE_SW_MASK));
+		data = (data & FPCR_DYN_MASK) | ieee_swcr_to_fpcr(data);
+	}
 	*get_reg_addr(task, regno) = data;
 	return 0;
 }
@@ -149,13 +162,18 @@ get_long(struct task_struct * tsk, struct vm_area_struct * vma,
 	pmd_t * pgmiddle;
 	pte_t * pgtable;
 	unsigned long page;
+	int fault;
 
 	DBG(DBG_MEM_ALL, ("getting long at 0x%lx\n", addr));
  repeat:
 	pgdir = pgd_offset(vma->vm_mm, addr);
 	if (pgd_none(*pgdir)) {
-		handle_mm_fault(tsk, vma, addr, 0);
-		goto repeat;
+		fault = handle_mm_fault(tsk, vma, addr, 0);
+		if (fault > 0)
+			goto repeat;
+		if (fault < 0)
+			force_sig(SIGKILL, tsk);
+		return 0;
 	}
 	if (pgd_bad(*pgdir)) {
 		printk("ptrace: bad page directory %08lx\n", pgd_val(*pgdir));
@@ -164,8 +182,12 @@ get_long(struct task_struct * tsk, struct vm_area_struct * vma,
 	}
 	pgmiddle = pmd_offset(pgdir, addr);
 	if (pmd_none(*pgmiddle)) {
-		handle_mm_fault(tsk, vma, addr, 0);
-		goto repeat;
+		fault = handle_mm_fault(tsk, vma, addr, 0);
+		if (fault > 0)
+			goto repeat;
+		if (fault < 0)
+			force_sig(SIGKILL, tsk);
+		return 0;
 	}
 	if (pmd_bad(*pgmiddle)) {
 		printk("ptrace: bad page middle %08lx\n", pmd_val(*pgmiddle));
@@ -174,8 +196,12 @@ get_long(struct task_struct * tsk, struct vm_area_struct * vma,
 	}
 	pgtable = pte_offset(pgmiddle, addr);
 	if (!pte_present(*pgtable)) {
-		handle_mm_fault(tsk, vma, addr, 0);
-		goto repeat;
+		fault = handle_mm_fault(tsk, vma, addr, 0);
+		if (fault > 0)
+			goto repeat;
+		if (fault < 0)
+			force_sig(SIGKILL, tsk);
+		return 0;
 	}
 	page = pte_page(*pgtable);
 	/* this is a hack for non-kernel-mapped video buffers and similar */
@@ -202,12 +228,17 @@ put_long(struct task_struct * tsk, struct vm_area_struct * vma,
 	pmd_t *pgmiddle;
 	pte_t *pgtable;
 	unsigned long page;
+	int fault;
 
  repeat:
 	pgdir = pgd_offset(vma->vm_mm, addr);
 	if (!pgd_present(*pgdir)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
+		fault = handle_mm_fault(tsk, vma, addr, 1);
+		if (fault > 0)
+			goto repeat;
+		if (fault < 0)
+			force_sig(SIGKILL, tsk);
+		return;
 	}
 	if (pgd_bad(*pgdir)) {
 		printk("ptrace: bad page directory %08lx\n", pgd_val(*pgdir));
@@ -216,8 +247,12 @@ put_long(struct task_struct * tsk, struct vm_area_struct * vma,
 	}
 	pgmiddle = pmd_offset(pgdir, addr);
 	if (pmd_none(*pgmiddle)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
+		fault = handle_mm_fault(tsk, vma, addr, 1);
+		if (fault > 0)
+			goto repeat;
+		if (fault < 0)
+			force_sig(SIGKILL, tsk);
+		return;
 	}
 	if (pmd_bad(*pgmiddle)) {
 		printk("ptrace: bad page middle %08lx\n", pmd_val(*pgmiddle));
@@ -226,13 +261,21 @@ put_long(struct task_struct * tsk, struct vm_area_struct * vma,
 	}
 	pgtable = pte_offset(pgmiddle, addr);
 	if (!pte_present(*pgtable)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
+		fault = handle_mm_fault(tsk, vma, addr, 1);
+		if (fault > 0)
+			goto repeat;
+		if (fault < 0)
+			force_sig(SIGKILL, tsk);
+		return;
 	}
 	page = pte_page(*pgtable);
 	if (!pte_write(*pgtable)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
+		fault = handle_mm_fault(tsk, vma, addr, 1);
+		if (fault > 0)
+			goto repeat;
+		if (fault < 0)
+			force_sig(SIGKILL, tsk);
+		return;
 	}
 
 	/* This is a hack for non-kernel-mapped video buffers and similar.  */
@@ -484,10 +527,10 @@ sys_ptrace(long request, long pid, long addr, long data,
 	ret = -EPERM;
 	if (request == PTRACE_TRACEME) {
 		/* are we already being traced? */
-		if (current->flags & PF_PTRACED)
+		if (current->ptrace & PT_PTRACED)
 			goto out;
 		/* set the ptrace bit in the process flags. */
-		current->flags |= PF_PTRACED;
+		current->ptrace |= PT_PTRACED;
 		ret = 0;
 		goto out;
 	}
@@ -510,9 +553,9 @@ sys_ptrace(long request, long pid, long addr, long data,
 		    && !capable(CAP_SYS_PTRACE))
 			goto out;
 		/* the same process cannot be attached many times */
-		if (child->flags & PF_PTRACED)
+		if (child->ptrace & PT_PTRACED)
 			goto out;
-		child->flags |= PF_PTRACED;
+		child->ptrace |= PT_PTRACED;
 		if (child->p_pptr != current) {
 			REMOVE_LINKS(child);
 			child->p_pptr = current;
@@ -523,7 +566,7 @@ sys_ptrace(long request, long pid, long addr, long data,
 		goto out;
 	}
 	ret = -ESRCH;
-	if (!(child->flags & PF_PTRACED)) {
+	if (!(child->ptrace & PT_PTRACED)) {
 		DBG(DBG_MEM, ("child not traced\n"));
 		goto out;
 	}
@@ -579,9 +622,9 @@ sys_ptrace(long request, long pid, long addr, long data,
 		if ((unsigned long) data > _NSIG)
 			goto out;
 		if (request == PTRACE_SYSCALL)
-			child->flags |= PF_TRACESYS;
+			child->ptrace |= PT_TRACESYS;
 		else
-			child->flags &= ~PF_TRACESYS;
+			child->ptrace &= ~PT_TRACESYS;
 		child->exit_code = data;
 		wake_up_process(child);
 		/* make sure single-step breakpoint is gone. */
@@ -609,7 +652,7 @@ sys_ptrace(long request, long pid, long addr, long data,
 		if ((unsigned long) data > _NSIG)
 			goto out;
 		child->tss.bpt_nsaved = -1;	/* mark single-stepping */
-		child->flags &= ~PF_TRACESYS;
+		child->ptrace &= ~PT_TRACESYS;
 		wake_up_process(child);
 		child->exit_code = data;
 		/* give it a chance to run. */
@@ -620,7 +663,7 @@ sys_ptrace(long request, long pid, long addr, long data,
 		ret = -EIO;
 		if ((unsigned long) data > _NSIG)
 			goto out;
-		child->flags &= ~(PF_PTRACED|PF_TRACESYS);
+		child->ptrace &= ~(PT_PTRACED|PT_TRACESYS);
 		wake_up_process(child);
 		child->exit_code = data;
 		REMOVE_LINKS(child);
@@ -643,8 +686,8 @@ sys_ptrace(long request, long pid, long addr, long data,
 asmlinkage void
 syscall_trace(void)
 {
-	if ((current->flags & (PF_PTRACED|PF_TRACESYS))
-	    != (PF_PTRACED|PF_TRACESYS))
+	if ((current->ptrace & (PT_PTRACED|PT_TRACESYS))
+	    != (PT_PTRACED|PT_TRACESYS))
 		return;
 	current->exit_code = SIGTRAP;
 	current->state = TASK_STOPPED;

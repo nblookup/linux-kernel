@@ -65,7 +65,6 @@ typedef struct {
 typedef struct {
   kdev_t devt;
   unsigned capacity;
-  struct wait_queue * waiting;
   Scsi_Device* device;
   struct semaphore sem;
   ST_buffer * buffer;
@@ -80,6 +79,7 @@ typedef struct {
   unsigned char restr_dma;
   unsigned char scsi2_logical;
   unsigned char default_drvbuffer;  /* 0xff = don't touch, value 3 bits */
+  unsigned char use_pf;             /* Set Page Format bit in all mode selects? */
   int write_threshold;
   int timeout;			/* timeout for normal commands */
   int long_timeout;		/* timeout for commands known to take long time*/
@@ -119,6 +119,10 @@ typedef struct {
   unsigned char last_sense[16];
 #endif
 } Scsi_Tape;
+
+/* Bit masks for use_pf */
+#define USE_PF      1
+#define PF_TESTED   2
 
 extern Scsi_Tape * scsi_tapes;
 

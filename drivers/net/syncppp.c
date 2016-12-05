@@ -16,7 +16,14 @@
  *
  *	Port for Linux-2.1 by Jan "Yenya" Kasprzak <kas@fi.muni.cz>
  */
-
+ /*
+  Patched by Pavel Selivanov. 08 Aug. 2001
+  If we are using dev_queue_xmit, and we have a listeners,
+  we should set skb->nh.raw. If no, we'll get a lot of warnings in
+  /var/log/debug
+  Look at core/net/dev.c dev_queue_xmit_nit
+*/
+				
 /*
  * Synchronous PPP/Cisco link level subroutines.
  * Keepalive protocol implemented in both Cisco and PPP modes.
@@ -48,10 +55,12 @@
 #include <linux/netdevice.h>
 #include <linux/inetdevice.h>
 #include <linux/random.h>
+#include <linux/pkt_sched.h>
 #include <asm/byteorder.h>
+#include <asm/uaccess.h>
 #include "syncppp.h"
 
-#define MAXALIVECNT     3               /* max. alive packets */
+#define MAXALIVECNT     6               /* max. alive packets */
 
 #define PPP_ALLSTATIONS 0xff            /* All-Stations broadcast address */
 #define PPP_UI          0x03            /* Unnumbered Information */
@@ -121,6 +130,7 @@ struct cisco_packet {
 	u16 time1;
 };
 #define CISCO_PACKET_LEN 18
+#define CISCO_BIG_PACKET_LEN 20
 
 static struct sppp *spppq;
 static struct timer_list sppp_keepalive_timer;
@@ -143,13 +153,17 @@ static void sppp_print_bytes (u8 *p, u16 len);
 
 static int debug = 0;
 
+MODULE_PARM(debug,"1i");
+
 /*
  *	Interface down stub
  */	
 
 static void if_down(struct device *dev)
 {
-	;
+	struct sppp *sp = (struct sppp *)sppp_of(dev);
+
+	sp->pp_link_state = SPPP_LINK_DOWN;
 }
 
 /*
@@ -185,12 +199,12 @@ static void sppp_clear_timeout(struct sppp *p)
 void sppp_input (struct device *dev, struct sk_buff *skb)
 {
 	struct ppp_header *h;
-	struct sppp *sp = &((struct ppp_device *)dev)->sppp;
+	struct sppp *sp = (struct sppp *)sppp_of(dev);
 	
 	skb->dev=dev;
 	skb->mac.raw=skb->data;
 	
-	if (dev->flags & IFF_UP)
+	if (dev->flags & IFF_RUNNING)
 	{
 		/* Count received bytes, add FCS and one flag */
 		sp->ibytes+= skb->len + 3;
@@ -314,13 +328,13 @@ EXPORT_SYMBOL(sppp_input);
 static int sppp_hard_header(struct sk_buff *skb, struct device *dev, __u16 type,
 		void *daddr, void *saddr, unsigned int len)
 {
-	struct sppp *sp = &((struct ppp_device *)dev)->sppp;
+	struct sppp *sp = (struct sppp *)sppp_of(dev);
 	struct ppp_header *h;
 	skb_push(skb,sizeof(struct ppp_header));
 	h=(struct ppp_header *)skb->data;
 	if(sp->pp_flags&PP_CISCO)
 	{
-		h->address = CISCO_MULTICAST;
+		h->address = CISCO_UNICAST;
 		h->control = 0;
 	}
 	else
@@ -366,7 +380,7 @@ static void sppp_keepalive (unsigned long dummy)
 
 		/* Keepalive mode disabled or channel down? */
 		if (! (sp->pp_flags & PP_KEEPALIVE) ||
-		    ! (dev->flags & IFF_RUNNING))
+		    ! (dev->flags & IFF_UP))
 			continue;
 
 		/* No keepalive in PPP mode if LCP not opened yet. */
@@ -380,6 +394,7 @@ static void sppp_keepalive (unsigned long dummy)
 			if_down (dev);
 			if (! (sp->pp_flags & PP_CISCO)) {
 				/* Shut down the PPP link. */
+				sp->lcp.magic = jiffies;
 				sp->lcp.state = LCP_STATE_CLOSED;
 				sp->ipcp.state = IPCP_STATE_CLOSED;
 				sppp_clear_timeout (sp);
@@ -497,8 +512,10 @@ badreq:
 		}
 		/* Send Configure-Ack packet. */
 		sp->pp_loopcnt = 0;
-		sppp_cp_send (sp, PPP_LCP, LCP_CONF_ACK,
-				h->ident, len-4, h+1);
+		if (sp->lcp.state != LCP_STATE_OPENED) {
+			sppp_cp_send (sp, PPP_LCP, LCP_CONF_ACK,
+					h->ident, len-4, h+1);
+		}
 		/* Change the state. */
 		switch (sp->lcp.state) {
 		case LCP_STATE_CLOSED:
@@ -509,15 +526,15 @@ badreq:
 			sppp_ipcp_open (sp);
 			break;
 		case LCP_STATE_OPENED:
-#if 0		
 			/* Remote magic changed -- close session. */
 			sp->lcp.state = LCP_STATE_CLOSED;
 			sp->ipcp.state = IPCP_STATE_CLOSED;
 			/* Initiate renegotiation. */
 			sppp_lcp_open (sp);
-			/* An ACK has already been sent. */
+			/* Send ACK after our REQ in attempt to break loop */
+			sppp_cp_send (sp, PPP_LCP, LCP_CONF_ACK,
+					h->ident, len-4, h+1);
 			sp->lcp.state = LCP_STATE_ACK_SENT;
-#endif			
 			break;
 		}
 		break;
@@ -525,10 +542,10 @@ badreq:
 		if (h->ident != sp->lcp.confid)
 			break;
 		sppp_clear_timeout (sp);
-		if (! (dev->flags & IFF_UP) &&
-		    (dev->flags & IFF_RUNNING)) {
+		if ((sp->pp_link_state != SPPP_LINK_UP) &&
+		    (dev->flags & IFF_UP)) {
 			/* Coming out of loopback mode. */
-			dev->flags |= IFF_UP;
+			sp->pp_link_state=SPPP_LINK_UP;
 			printk (KERN_INFO "%s: up\n", dev->name);
 		}
 		switch (sp->lcp.state) {
@@ -558,7 +575,7 @@ badreq:
 				sp->lcp.magic += newmagic;
 			} else
 				sp->lcp.magic = rmagic;
-			}
+		}
 		if (sp->lcp.state != LCP_STATE_ACK_SENT) {
 			/* Go to closed state. */
 			sp->lcp.state = LCP_STATE_CLOSED;
@@ -648,7 +665,7 @@ static void sppp_cisco_input (struct sppp *sp, struct sk_buff *skb)
 	struct cisco_packet *h;
 	struct device *dev = sp->pp_if;
 
-	if (skb->len != CISCO_PACKET_LEN) {
+	if (skb->len != CISCO_PACKET_LEN && skb->len != CISCO_BIG_PACKET_LEN) {
 		if (sp->pp_flags & PP_DEBUG)
 			printk (KERN_WARNING "%s: invalid cisco packet length: %d bytes\n",
 				dev->name,  skb->len);
@@ -657,14 +674,14 @@ static void sppp_cisco_input (struct sppp *sp, struct sk_buff *skb)
 	h = (struct cisco_packet *)skb->data;
 	skb_pull(skb, sizeof(struct cisco_packet*));
 	if (sp->pp_flags & PP_DEBUG)
-		printk (KERN_WARNING "%s: cisco input: %d bytes <%lxh %xh %xh %xh %xh-%xh>\n",
+		printk (KERN_WARNING "%s: cisco input: %d bytes <%xh %xh %xh %xh %xh-%xh>\n",
 			dev->name,  skb->len,
 			ntohl (h->type), h->par1, h->par2, h->rel,
 			h->time0, h->time1);
 	switch (ntohl (h->type)) {
 	default:
 		if (sp->pp_flags & PP_DEBUG)
-			printk (KERN_WARNING "%s: unknown cisco packet type: 0x%lx\n",
+			printk (KERN_WARNING "%s: unknown cisco packet type: 0x%x\n",
 				dev->name,  ntohl (h->type));
 		break;
 	case CISCO_ADDR_REPLY:
@@ -693,9 +710,9 @@ static void sppp_cisco_input (struct sppp *sp, struct sk_buff *skb)
 			break;
 		}
 		sp->pp_loopcnt = 0;
-		if (! (dev->flags & IFF_UP) &&
-		    (dev->flags & IFF_RUNNING)) {
-			dev->flags |= IFF_UP;
+		if (sp->pp_link_state==SPPP_LINK_DOWN &&
+		    (dev->flags & IFF_UP)) {
+			sp->pp_link_state=SPPP_LINK_UP;
 			printk (KERN_INFO "%s: up\n", dev->name);
 		}
 		break;
@@ -769,8 +786,10 @@ static void sppp_cp_send (struct sppp *sp, u16 proto, u8 type,
 	}
 	sp->obytes += skb->len;
 	/* Control is high priority so it doesnt get queued behind data */
-	skb->priority=1;
+	skb->priority=TC_PRIO_CONTROL;
 	skb->dev = dev;
+	skb->nh.raw = skb->data;
+	
 	dev_queue_xmit(skb);
 }
 
@@ -807,20 +826,22 @@ static void sppp_cisco_send (struct sppp *sp, int type, long par1, long par2)
 	ch->time1 = htons ((u16) t);
 
 	if (sp->pp_flags & PP_DEBUG)
-		printk (KERN_WARNING "%s: cisco output: <%lxh %xh %xh %xh %xh-%xh>\n",
+		printk (KERN_WARNING "%s: cisco output: <%xh %xh %xh %xh %xh-%xh>\n",
 			dev->name,  ntohl (ch->type), ch->par1,
 			ch->par2, ch->rel, ch->time0, ch->time1);
 	sp->obytes += skb->len;
-	skb->priority=1;
+	skb->priority=TC_PRIO_CONTROL;
 	skb->dev = dev;
+	skb->nh.raw = skb->data;
+	
 	dev_queue_xmit(skb);
 }
 
 
 int sppp_close (struct device *dev)
 {
-	struct sppp *sp = &((struct ppp_device *)dev)->sppp;
-	dev->flags &= ~IFF_RUNNING;
+	struct sppp *sp = (struct sppp *)sppp_of(dev);
+	sp->pp_link_state = SPPP_LINK_DOWN;
 	sp->lcp.state = LCP_STATE_CLOSED;
 	sp->ipcp.state = IPCP_STATE_CLOSED;
 	sppp_clear_timeout (sp);
@@ -832,15 +853,35 @@ EXPORT_SYMBOL(sppp_close);
 
 int sppp_open (struct device *dev)
 {
-	struct sppp *sp = &((struct ppp_device *)dev)->sppp;
+	struct sppp *sp = (struct sppp *)sppp_of(dev);
 	sppp_close(dev);
-	dev->flags |= IFF_RUNNING;
-	if (!(sp->pp_flags & PP_CISCO))
+	if (!(sp->pp_flags & PP_CISCO)) {
 		sppp_lcp_open (sp);
+	}
+	sp->pp_link_state = SPPP_LINK_DOWN;
 	return 0;
 }
 
 EXPORT_SYMBOL(sppp_open);
+
+int sppp_reopen (struct device *dev)
+{
+	struct sppp *sp = (struct sppp *)sppp_of(dev);
+	sppp_close(dev);
+	if (!(sp->pp_flags & PP_CISCO))
+	{
+		sp->lcp.magic = jiffies;
+		++sp->pp_seq;
+		sp->lcp.state = LCP_STATE_CLOSED;
+		sp->ipcp.state = IPCP_STATE_CLOSED;
+		/* Give it a moment for the line to settle then go */
+		sppp_set_timeout (sp, 1);
+	} 
+	sp->pp_link_state=SPPP_LINK_DOWN;
+	return 0;
+}
+
+EXPORT_SYMBOL(sppp_reopen);
 
 int sppp_change_mtu(struct device *dev, int new_mtu)
 {
@@ -854,7 +895,7 @@ EXPORT_SYMBOL(sppp_change_mtu);
 
 int sppp_do_ioctl(struct device *dev, struct ifreq *ifr, int cmd)
 {
-	struct sppp *sp = &((struct ppp_device *)dev)->sppp;
+	struct sppp *sp = (struct sppp *)sppp_of(dev);
 
 	if(dev->flags&IFF_UP)
 		return -EBUSY;
@@ -877,6 +918,14 @@ int sppp_do_ioctl(struct device *dev, struct ifreq *ifr, int cmd)
 			if(ifr->ifr_flags)
 				sp->pp_flags|=PP_DEBUG;
 			break;
+		case SPPPIOCGFLAGS:
+			if(copy_to_user(ifr->ifr_data, &sp->pp_flags, sizeof(sp->pp_flags)))
+				return -EFAULT;
+			break;
+		case SPPPIOCSFLAGS:
+			if(copy_from_user(&sp->pp_flags, ifr->ifr_data, sizeof(sp->pp_flags)))
+				return -EFAULT;
+			break;
 		default:
 			return -EINVAL;
 	}
@@ -887,7 +936,7 @@ EXPORT_SYMBOL(sppp_do_ioctl);
 
 void sppp_attach(struct ppp_device *pd)
 {
-	struct device *dev=&pd->dev;
+	struct device *dev = pd->dev;
 	struct sppp *sp = &pd->sppp;
 	
 	/* Initialize keepalive handler. */
@@ -944,8 +993,7 @@ EXPORT_SYMBOL(sppp_attach);
 
 void sppp_detach (struct device *dev)
 {
-	struct sppp **q, *p, *sp = &((struct ppp_device *)dev)->sppp;
-
+	struct sppp **q, *p, *sp = (struct sppp *)sppp_of(dev);
 
 	/* Remove the entry from the keepalive list. */
 	for (q = &spppq; (p = *q); q = &p->pp_next)
@@ -1154,7 +1202,7 @@ static void sppp_cp_timeout (unsigned long arg)
 	cli();
 
 	sp->pp_flags &= ~PP_TIMO;
-	if (! (sp->pp_if->flags & IFF_RUNNING) || (sp->pp_flags & PP_CISCO)) {
+	if (! (sp->pp_if->flags & IFF_UP) || (sp->pp_flags & PP_CISCO)) {
 		restore_flags(flags);
 		return;
 	}
@@ -1270,6 +1318,8 @@ void sync_ppp_init(void)
 	sppp_packet_type.type=htons(ETH_P_WAN_PPP);	
 	dev_add_pack(&sppp_packet_type);
 }
+
+EXPORT_SYMBOL(sync_ppp_init);
 
 #ifdef MODULE
 

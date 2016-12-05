@@ -1,11 +1,9 @@
-/*
+/* $Id: sgiseeq.c,v 1.9 1998/10/14 23:40:46 ralf Exp $
+ *
  * sgiseeq.c: Seeq8003 ethernet driver for SGI machines.
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
- *
- * $Id: sgiseeq.c,v 1.6 1998/10/14 17:29:44 ralf Exp $
  */
-
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -564,6 +562,8 @@ static int sgiseeq_start_xmit(struct sk_buff *skb, struct device *dev)
 	 *    added this new entry and restarted it.
 	 */
 	memcpy((char *)td->buf_vaddr, skb->data, skblen);
+	if(len != skblen)
+		memset((char *)(long)td->buf_vaddr + skb->len, 0, len-skblen);
 	td->tdma.cntinfo = ((len) & HPCDMA_BCNT) |
 		(HPCDMA_XIU | HPCDMA_EOXP | HPCDMA_XIE | HPCDMA_EOX);
 	if(sp->tx_old != sp->tx_new) {
@@ -695,6 +695,7 @@ int sgiseeq_init(struct device *dev, struct sgiseeq_regs *sregs,
 	dev->irq                  = irq;
 	dev->dma                  = 0;
 	ether_setup(dev);
+
 	return 0;
 }
 
@@ -724,15 +725,20 @@ static inline void str2eaddr(unsigned char *ea, unsigned char *str)
 
 int sgiseeq_probe(struct device *dev)
 {
+	static int initialized;
 	char *ep;
+
+	if (initialized)	/* Already initialized? */
+		return 0;
+	initialized++;
 
 	/* First get the ethernet address of the onboard
 	 * interface from ARCS.
+	 * (This is fragile; PROM doesn't like running from cache.)
 	 */
 	ep = romvec->get_evar("eaddr");
 	str2eaddr(onboard_eth_addr, ep);
 	return sgiseeq_init(dev,
 			    (struct sgiseeq_regs *) (KSEG1ADDR(0x1fbd4000)),
 			    &hpc3c0->ethregs, 3);
-
 }

@@ -1,4 +1,4 @@
-/*  $Id: signal.c,v 1.38 1998/10/16 03:19:04 davem Exp $
+/*  $Id: signal.c,v 1.38.2.3 2001/06/19 16:49:41 davem Exp $
  *  arch/sparc64/kernel/signal.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
@@ -850,7 +850,7 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 		
 		if (!signr) break;
 
-		if ((current->flags & PF_PTRACED) && signr != SIGKILL) {
+		if ((current->ptrace & PT_PTRACED) && signr != SIGKILL) {
 			current->exit_code = signr;
 			current->state = TASK_STOPPED;
 			notify_parent(current, SIGCHLD);
@@ -906,7 +906,7 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 					continue;
 
 			case SIGSTOP:
-				if (current->flags & PF_PTRACED)
+				if (current->ptrace & PT_PTRACED)
 					continue;
 				current->state = TASK_STOPPED;
 				current->exit_code = signr;
@@ -918,12 +918,8 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 
 			case SIGQUIT: case SIGILL: case SIGTRAP:
 			case SIGABRT: case SIGFPE: case SIGSEGV: case SIGBUS:
-				if(current->binfmt && current->binfmt->core_dump) {
-					lock_kernel();
-					if(current->binfmt->core_dump(signr, regs))
-						exit_code |= 0x80;
-					unlock_kernel();
-				}
+				if (do_coredump(signr, regs))
+					exit_code |= 0x80;
 #ifdef DEBUG_SIGNALS
 				/* Very useful to debug the dynamic linker */
 				printk ("Sig %d going...\n", (int)signr);
@@ -950,6 +946,7 @@ asmlinkage int do_signal(sigset_t *oldset, struct pt_regs * regs,
 			default:
 				lock_kernel();
 				sigaddset(&current->signal, signr);
+				recalc_sigpending(current);
 				current->flags |= PF_SIGNALED;
 				do_exit(exit_code);
 				/* NOT REACHED */

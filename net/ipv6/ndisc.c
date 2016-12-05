@@ -335,7 +335,7 @@ void ndisc_send_na(struct device *dev, struct neighbour *neigh,
         msg->icmph.icmp6_unused = 0;
         msg->icmph.icmp6_router    = router;
         msg->icmph.icmp6_solicited = solicited;
-        msg->icmph.icmp6_override  = override;
+        msg->icmph.icmp6_override  = !!override;
 
         /* Set the target address. */
 	ipv6_addr_copy(&msg->target, solicited_addr);
@@ -364,17 +364,7 @@ void ndisc_send_ns(struct device *dev, struct neighbour *neigh,
         struct nd_msg *msg;
         int len;
 	int err;
-
-	len = sizeof(struct icmp6hdr) + sizeof(struct in6_addr);
-	if (dev->addr_len)
-		len += NDISC_OPT_SPACE(dev->addr_len);
-
-	skb = sock_alloc_send_skb(sk, MAX_HEADER + len + dev->hard_header_len + 15,
-				  0, 0, &err);
-	if (skb == NULL) {
-		ND_PRINTK1("send_ns: alloc skb failed\n");
-		return;
-	}
+	int send_llinfo;
 
 	if (saddr == NULL) {
 		struct inet6_ifaddr *ifa;
@@ -384,7 +374,22 @@ void ndisc_send_ns(struct device *dev, struct neighbour *neigh,
 
 		if (ifa)
 			saddr = &ifa->addr;
+		else
+			return;
 	}
+
+	len = sizeof(struct icmp6hdr) + sizeof(struct in6_addr);
+	send_llinfo = dev->addr_len && ipv6_addr_type(saddr) != IPV6_ADDR_ANY;
+	if (send_llinfo)
+		len += NDISC_OPT_SPACE(dev->addr_len);
+
+	skb = sock_alloc_send_skb(sk, MAX_HEADER + len + dev->hard_header_len + 15,
+				  0, 0, &err);
+	if (skb == NULL) {
+		ND_PRINTK1("send_ns: alloc skb failed\n");
+		return;
+	}
+
 
 	if (ndisc_build_ll_hdr(skb, dev, daddr, neigh, len) == 0) {
 		kfree_skb(skb);
@@ -402,7 +407,7 @@ void ndisc_send_ns(struct device *dev, struct neighbour *neigh,
 	/* Set the target address. */
 	ipv6_addr_copy(&msg->target, solicit);
 
-	if (dev->addr_len)
+	if (send_llinfo)
 		ndisc_fill_option((void*)&msg->opt, ND_OPT_SOURCE_LL_ADDR, dev->dev_addr, dev->addr_len);
 
 	/* checksum */
@@ -497,7 +502,7 @@ static void ndisc_error_report(struct neighbour *neigh, struct sk_buff *skb)
 	 *	"The sender MUST return an ICMP
 	 *	 destination unreachable"
 	 */
-	icmpv6_send(skb, ICMPV6_DEST_UNREACH, ICMPV6_ADDR_UNREACH, 0, skb->dev);
+	dst_link_failure(skb);
 	kfree_skb(skb);
 }
 
@@ -604,6 +609,13 @@ static void ndisc_router_discovery(struct sk_buff *skb)
 			return;
 		}
 		neigh->flags |= NTF_ROUTER;
+
+		/*
+		 *	If we where using an "all destinations on link" route
+		 *	delete it
+		 */
+
+		rt6_purge_dflt_routers(RTF_ALLONLINK);
 	}
 
 	if (rt)
@@ -623,7 +635,8 @@ static void ndisc_router_discovery(struct sk_buff *skb)
 		if (ra_msg->reachable_time) {
 			__u32 rtime = (ntohl(ra_msg->reachable_time)*HZ)/1000;
 
-			if (rtime != in6_dev->nd_parms->base_reachable_time) {
+			if (rtime &&
+			    rtime != in6_dev->nd_parms->base_reachable_time) {
 				in6_dev->nd_parms->base_reachable_time = rtime;
 				in6_dev->nd_parms->gc_staletime = 3 * rtime;
 				in6_dev->nd_parms->reachable_time = neigh_rand_reach_time(rtime);
@@ -806,7 +819,7 @@ void ndisc_send_redirect(struct sk_buff *skb, struct neighbour *neigh,
 		}
 	}
 
-	rd_len = min(IPV6_MIN_MTU-sizeof(struct ipv6hdr)-len, ntohs(skb->nh.ipv6h->payload_len) + 8);
+	rd_len = min(IPV6_MIN_MTU-sizeof(struct ipv6hdr)-len, skb->len + 8);
 	rd_len &= ~0x7;
 	len += rd_len;
 
@@ -866,7 +879,7 @@ void ndisc_send_redirect(struct sk_buff *skb, struct neighbour *neigh,
 	*(opt++) = (rd_len >> 3);
 	opt += 6;
 
-	memcpy(opt, &skb->nh.ipv6h, rd_len - 8);
+	memcpy(opt, skb->nh.ipv6h, rd_len - 8);
 
 	icmph->icmp6_cksum = csum_ipv6_magic(&ifp->addr, &skb->nh.ipv6h->saddr,
 					     len, IPPROTO_ICMPV6,
@@ -989,7 +1002,7 @@ int ndisc_rcv(struct sk_buff *skb, unsigned long len)
 
 					if (neigh) {
 						ndisc_send_na(dev, neigh, saddr, &msg->target,
-							      0, 0, inc, inc);
+							      0, 1, 0, inc);
 						neigh_release(neigh);
 					}
 				} else {
@@ -1173,7 +1186,6 @@ __initfunc(int ndisc_init(struct net_proto_family *ops))
 	sk = ndisc_socket->sk;
 	sk->allocation = GFP_ATOMIC;
 	sk->net_pinfo.af_inet6.hop_limit = 255;
-	sk->net_pinfo.af_inet6.priority  = 15;
 	/* Do not loopback ndisc messages */
 	sk->net_pinfo.af_inet6.mc_loop = 0;
 	sk->num = 256;

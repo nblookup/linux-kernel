@@ -63,7 +63,9 @@ OLDESP		= 0x34
 OLDSS		= 0x38
 
 CF_MASK		= 0x00000001
+TF_MASK		= 0x00000100
 IF_MASK		= 0x00000200
+DF_MASK		= 0x00000400
 NT_MASK		= 0x00004000
 VM_MASK		= 0x00020000
 
@@ -76,6 +78,7 @@ sigpending	=  8
 addr_limit	= 12
 exec_domain	= 16
 need_resched	= 20
+ptrace		= 24
 
 ENOSYS = 38
 
@@ -138,6 +141,9 @@ ENTRY(lcall7)
 	movl CS(%esp),%edx	# this is eip..
 	movl EFLAGS(%esp),%ecx	# and this is cs..
 	movl %eax,EFLAGS(%esp)	#
+	andl $~(NT_MASK|TF_MASK|DF_MASK), %eax
+	pushl %eax
+	popfl
 	movl %edx,EIP(%esp)	# Now we move them to their "normal" places
 	movl %ecx,CS(%esp)	#
 	movl %esp,%ebx
@@ -154,7 +160,9 @@ ENTRY(lcall7)
 	.globl	ret_from_fork
 ret_from_fork:
 #ifdef __SMP__
+	pushl %ebx
 	call SYMBOL_NAME(schedule_tail)
+	addl $4, %esp
 #endif /* __SMP__ */
 	GET_CURRENT(%ebx)
 	jmp	ret_from_sys_call
@@ -172,7 +180,7 @@ ENTRY(system_call)
 	GET_CURRENT(%ebx)
 	cmpl $(NR_syscalls),%eax
 	jae badsys
-	testb $0x20,flags(%ebx)		# PF_TRACESYS
+	testb $0x02,ptrace(%ebx)	# PT_TRACESYS
 	jne tracesys
 	call *SYMBOL_NAME(sys_call_table)(,%eax,4)
 	movl %eax,EAX(%esp)		# save the return value
@@ -214,9 +222,11 @@ tracesys:
 	movl $-ENOSYS,EAX(%esp)
 	call SYMBOL_NAME(syscall_trace)
 	movl ORIG_EAX(%esp),%eax
+        cmpl $(NR_syscalls),%eax 
+        jae 1f 
 	call *SYMBOL_NAME(sys_call_table)(,%eax,4)
 	movl %eax,EAX(%esp)		# save the return value
-	call SYMBOL_NAME(syscall_trace)
+1:	call SYMBOL_NAME(syscall_trace)
 	jmp ret_from_sys_call
 badsys:
 	movl $-ENOSYS,EAX(%esp)
@@ -251,6 +261,9 @@ ENTRY(divide_error)
 	pushl $ SYMBOL_NAME(do_divide_error)
 	ALIGN
 error_code:
+	pushfl
+	andl $~(NT_MASK|TF_MASK|DF_MASK), (%esp)
+	popfl
 	pushl %ds
 	pushl %eax
 	xorl %eax,%eax
@@ -261,18 +274,19 @@ error_code:
 	decl %eax			# eax = -1
 	pushl %ecx
 	pushl %ebx
-	cld
 	movl %es,%cx
-	xchgl %eax, ORIG_EAX(%esp)	# orig_eax (get the error code. )
+	movl ORIG_EAX(%esp), %esi	# get the error code
+	movl ES(%esp), %edi		# get the function address
+	movl %eax, ORIG_EAX(%esp)
+	movl %ecx, ES(%esp)
 	movl %esp,%edx
-	xchgl %ecx, ES(%esp)		# get the address and save es.
-	pushl %eax			# push the error code
-	pushl %edx
+	pushl %esi			# push the error code
+	pushl %edx			# push the pt_regs pointer
 	movl $(__KERNEL_DS),%edx
 	movl %dx,%ds
 	movl %dx,%es
 	GET_CURRENT(%ebx)
-	call *%ecx
+	call *%edi
 	addl $8,%esp
 	jmp ret_from_exception
 
@@ -329,11 +343,6 @@ ENTRY(coprocessor_segment_overrun)
 	pushl $ SYMBOL_NAME(do_coprocessor_segment_overrun)
 	jmp error_code
 
-ENTRY(reserved)
-	pushl $0
-	pushl $ SYMBOL_NAME(do_reserved)
-	jmp error_code
-
 ENTRY(double_fault)
 	pushl $ SYMBOL_NAME(do_double_fault)
 	jmp error_code
@@ -360,6 +369,11 @@ ENTRY(alignment_check)
 
 ENTRY(page_fault)
 	pushl $ SYMBOL_NAME(do_page_fault)
+	jmp error_code
+
+ENTRY(machine_check)
+	pushl $0
+	pushl $ SYMBOL_NAME(do_machine_check)
 	jmp error_code
 
 ENTRY(spurious_interrupt_bug)

@@ -5,7 +5,7 @@
  *
  *		The IP fragmentation functionality.
  *		
- * Version:	$Id: ip_fragment.c,v 1.39 1998/08/26 10:35:26 davem Exp $
+ * Version:	$Id: ip_fragment.c,v 1.40 1999/03/20 23:58:34 davem Exp $
  *
  * Authors:	Fred N. van Kempen <waltje@uWalt.NL.Mugnet.ORG>
  *		Alan Cox <Alan.Cox@linux.org>
@@ -17,6 +17,7 @@
  *		xxxx		:	Overlapfrag bug.
  *		Ultima          :       ip_expire() kernel panic.
  *		Bill Hawes	:	Frag accounting and evictor fixes.
+ *		John McDonald	:	0 length frag bug.
  */
 
 #include <linux/types.h>
@@ -26,6 +27,8 @@
 #include <linux/ip.h>
 #include <linux/icmp.h>
 #include <linux/netdevice.h>
+#include <linux/jhash.h>
+#include <linux/random.h>
 #include <net/sock.h>
 #include <net/ip.h>
 #include <net/icmp.h>
@@ -71,9 +74,53 @@ struct ipq {
 #define IPQ_HASHSZ	64
 
 struct ipq *ipq_hash[IPQ_HASHSZ];
+static u32 ipfrag_hash_rnd;
 
-#define ipqhashfn(id, saddr, daddr, prot) \
-	((((id) >> 1) ^ (saddr) ^ (daddr) ^ (prot)) & (IPQ_HASHSZ - 1))
+static unsigned int ipqhashfn(u16 id, u32 saddr, u32 daddr, u8 prot)
+{
+	return jhash_3words((u32)id << 16 | prot, saddr, daddr,
+			    ipfrag_hash_rnd) & (IPQ_HASHSZ - 1);
+}
+
+static struct timer_list ipfrag_secret_timer;
+static int ipfrag_secret_interval = 10 * 60 * HZ;
+
+static void ipfrag_secret_rebuild(unsigned long dummy)
+{
+	unsigned long now = jiffies;
+	int i;
+
+	get_random_bytes(&ipfrag_hash_rnd, sizeof(u32));
+	for (i = 0; i < IPQ_HASHSZ; i++) {
+		struct ipq *q;
+
+		q = ipq_hash[i];
+		while (q) {
+			struct ipq *next = q->next;
+			unsigned int hval = ipqhashfn(q->iph->id,
+						      q->iph->saddr,
+						      q->iph->daddr,
+						      q->iph->protocol);
+
+			if (hval != i) {
+				/* Unlink. */
+				if (q->next)
+					q->next->pprev = q->pprev;
+				*q->pprev = q->next;
+
+				/* Relink to new hash chain. */
+				if ((q->next = ipq_hash[hval]) != NULL)
+					q->next->pprev = &q->next;
+				ipq_hash[hval] = q;
+				q->pprev = &ipq_hash[hval];
+			}
+
+			q = next;
+		}
+	}
+
+	mod_timer(&ipfrag_secret_timer, now + ipfrag_secret_interval);
+}
 
 atomic_t ip_frag_mem = ATOMIC_INIT(0);		/* Memory used for fragments */
 
@@ -357,7 +404,7 @@ static struct sk_buff *ip_glue(struct ipq *qp)
 	fp = qp->fragments;
 	count = qp->ihlen;
 	while(fp) {
-		if ((fp->len < 0) || ((count + fp->len) > skb->len))
+		if ((fp->len <= 0) || ((count + fp->len) > skb->len))
 			goto out_invalid;
 		memcpy((ptr + fp->offset), fp->ptr, fp->len);
 		if (count == qp->ihlen) {
@@ -406,6 +453,17 @@ out_oversize:
 out_fail:
 	ip_statistics.IpReasmFails++;
 	return NULL;
+}
+
+void ipfrag_init(void)
+{
+	ipfrag_hash_rnd = (u32) ((num_physpages ^ (num_physpages>>7)) ^
+				 (jiffies ^ (jiffies >> 6)));
+
+	init_timer(&ipfrag_secret_timer);
+	ipfrag_secret_timer.function = ipfrag_secret_rebuild;
+	ipfrag_secret_timer.expires = jiffies + ipfrag_secret_interval;
+	add_timer(&ipfrag_secret_timer);
 }
 
 /* Process an incoming IP datagram fragment. */

@@ -1,55 +1,30 @@
-/*
- * $Id: capiutil.c,v 1.6 1997/11/04 06:12:12 calle Exp $
+/* $Id: capiutil.c,v 1.1.2.1 2001/12/31 13:26:42 kai Exp $
  *
  * CAPI 2.0 convert capi message to capi message struct
  *
  * From CAPI 2.0 Development Kit AVM 1995 (msg.c)
- * Rewritten for Linux 1996 by Carsten Paeth (calle@calle.in-berlin.de)
+ * Rewritten for Linux 1996 by Carsten Paeth <calle@calle.de>
  *
- * $Log: capiutil.c,v $
- * Revision 1.6  1997/11/04 06:12:12  calle
- * capi.c: new read/write in file_ops since 2.1.60
- * capidrv.c: prepared isdnlog interface for d2-trace in newer firmware.
- * capiutil.c: needs config.h (CONFIG_ISDN_DRV_AVMB1_VERBOSE_REASON)
- * compat.h: added #define LinuxVersionCode
- *
- * Revision 1.5  1997/10/01 09:21:19  fritz
- * Removed old compatibility stuff for 2.0.X kernels.
- * From now on, this code is for 2.1.X ONLY!
- * Old stuff is still in the separate branch.
- *
- * Revision 1.4  1997/08/10 07:43:55  calle
- * forgot to export symbol capi_info2str for 2.1.x
- *
- * Revision 1.3  1997/05/18 09:24:18  calle
- * added verbose disconnect reason reporting to avmb1.
- * some fixes in capi20 interface.
- * changed info messages for B1-PCI
- *
- * Revision 1.2  1997/03/05 21:22:13  fritz
- * Fix: Symbols have to be exported unconditionally.
- *
- * Revision 1.1  1997/03/04 21:50:34  calle
- * Frirst version in isdn4linux
- *
- * Revision 2.2  1997/02/12 09:31:39  calle
- * new version
- *
- * Revision 1.1  1997/01/31 10:32:20  calle
- * Initial revision
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
+
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/ctype.h>
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/init.h>
 #include <asm/segment.h>
 #include <linux/config.h>
-
-#include "compat.h"
+#include <linux/isdn_compat.h>
 #include "capiutil.h"
+
+MODULE_DESCRIPTION("CAPI4Linux: CAPI message conversion support");
+MODULE_AUTHOR("Carsten Paeth");
+MODULE_LICENSE("GPL");
 
 /* from CAPI2.0 DDK AVM Berlin GmbH */
 
@@ -75,7 +50,7 @@ char *capi_info2str(__u16 reason)
 	case 0x1001:
 	   return "Too many applications";
 	case 0x1002:
-	   return "Logical block size to small, must be at least 128 Bytes";
+	   return "Logical block size too small, must be at least 128 Bytes";
 	case 0x1003:
 	   return "Buffer exceeds 64 kByte";
 	case 0x1004:
@@ -770,7 +745,7 @@ static char *pnames[] =
     /*15 */ "Class",
     /*16 */ "ConnectedNumber",
     /*17 */ "ConnectedSubaddress",
-    /*18 */ "Data",
+    /*18 */ "Data32",
     /*19 */ "DataHandle",
     /*1a */ "DataLength",
     /*1b */ "FacilityConfirmationParameter",
@@ -868,13 +843,7 @@ static void protocol_message_2_pars(_cmsg * cmsg, int level)
 			cmsg->l += 2;
 			break;
 		case _CDWORD:
-			if (strcmp(NAME, "Data") == 0) {
-				bufprint("%-*s = ", slen, NAME);
-				printstructlen((__u8 *) * (__u32 *) (cmsg->m + cmsg->l),
-					       *(__u16 *) (cmsg->m + cmsg->l + sizeof(__u32)));
-				bufprint("\n");
-			} else
-				bufprint("%-*s = 0x%lx\n", slen, NAME, *(__u32 *) (cmsg->m + cmsg->l));
+			bufprint("%-*s = 0x%lx\n", slen, NAME, *(__u32 *) (cmsg->m + cmsg->l));
 			cmsg->l += 4;
 			break;
 		case _CSTRUCT:
@@ -949,7 +918,6 @@ char *capi_cmsg2str(_cmsg * cmsg)
 	return buf;
 }
 
-
 EXPORT_SYMBOL(capi_cmsg2message);
 EXPORT_SYMBOL(capi_message2cmsg);
 EXPORT_SYMBOL(capi_cmsg_header);
@@ -958,15 +926,14 @@ EXPORT_SYMBOL(capi_cmsg2str);
 EXPORT_SYMBOL(capi_message2str);
 EXPORT_SYMBOL(capi_info2str);
 
-#ifdef MODULE
-
-int init_module(void)
-{
-	return 0;
+static int __init capiutil_init(void)
+{ 
+	return 0; 
 }
 
-void cleanup_module(void)
+static void  capiutil_exit(void)
 {
 }
 
-#endif
+module_init(capiutil_init);
+module_exit(capiutil_exit);

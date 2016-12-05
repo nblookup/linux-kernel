@@ -29,9 +29,10 @@
 #include <linux/a.out.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
-#include <linux/user.h>
 #include <linux/smp_lock.h>
 #include <linux/init.h>
+#define __NO_VERSION__
+#include <linux/module.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -169,30 +170,40 @@ out:
  */
 asmlinkage int sys_uselib(const char * library)
 {
-	int fd, retval;
+	int retval;
 	struct file * file;
 	struct linux_binfmt * fmt;
+	char * tmp = getname(library);
 
 	lock_kernel();
-	fd = sys_open(library, 0, 0);
-	retval = fd;
-	if (fd < 0)
+	retval = PTR_ERR(tmp);
+	if (IS_ERR(tmp))
 		goto out;
-	file = fget(fd);
+
+	file = filp_open(tmp, 0, 0);
+	putname(tmp);
+
+	retval = PTR_ERR(file);
+	if (IS_ERR(file))
+		goto out;
+
+	retval = -EINVAL;
+	if (!S_ISREG(file->f_dentry->d_inode->i_mode))
+		goto out_fput;
+
 	retval = -ENOEXEC;
-	if (file && file->f_dentry && file->f_op && file->f_op->read) {
+	if (file->f_op && file->f_op->read) {
 		for (fmt = formats ; fmt ; fmt = fmt->next) {
-			int (*fn)(int) = fmt->load_shlib;
+			int (*fn)(struct file *) = fmt->load_shlib;
 			if (!fn)
 				continue;
-			/* N.B. Should use file instead of fd */
-			retval = fn(fd);
+			retval = fn(file);
 			if (retval != -ENOEXEC)
 				break;
 		}
 	}
+out_fput:
 	fput(file);
-	sys_close(fd);
 out:
 	unlock_kernel();
   	return retval;
@@ -201,7 +212,7 @@ out:
 /*
  * count() counts the number of arguments/envelopes
  */
-static int count(char ** argv)
+static int count(char ** argv, int max)
 {
 	int i = 0;
 
@@ -216,7 +227,7 @@ static int count(char ** argv)
 			if (!p)
 				break;
 			argv++;
-			i++;
+			if (++i > max) return -E2BIG;
 		}
 	}
 	return i;
@@ -245,8 +256,8 @@ unsigned long copy_strings(int argc,char ** argv,unsigned long *page,
 	char *str;
 	mm_segment_t old_fs;
 
-	if (!p)
-		return 0;	/* bullet-proofing */
+	if ((long)p <= 0)
+		return p;	/* bullet-proofing */
 	old_fs = get_fs();
 	if (from_kmem==2)
 		set_fs(KERNEL_DS);
@@ -258,17 +269,20 @@ unsigned long copy_strings(int argc,char ** argv,unsigned long *page,
 			set_fs(KERNEL_DS);
 		get_user(str, argv+argc);
 		if (!str)
-			panic("VFS: argc is wrong");
+		{
+			set_fs(old_fs);
+			return -EFAULT;
+		}
 		if (from_kmem == 1)
 			set_fs(old_fs);
-		len = strlen_user(str);	/* includes the '\0' */
-		if (p < len) {	/* this shouldn't happen - 128kB */
-			set_fs(old_fs);
-			return 0;
+		len = strnlen_user(str, p);	/* includes the '\0' */
+ 		if (!len || len > p) {	/* EFAULT or E2BIG */
+ 			set_fs(old_fs);
+ 			return len ? -E2BIG : -EFAULT;
 		}
 		p -= len;
 		pos = p;
-		while (len) {
+		while (len>0) {
 			char *pag;
 			int offset, bytes_to_copy;
 
@@ -278,7 +292,7 @@ unsigned long copy_strings(int argc,char ** argv,unsigned long *page,
 			      (unsigned long *) get_free_page(GFP_USER))) {
 				if (from_kmem==2)
 					set_fs(old_fs);
-				return 0;
+				return -EFAULT;
 			}
 			bytes_to_copy = PAGE_SIZE - offset;
 			if (bytes_to_copy > len)
@@ -479,10 +493,10 @@ static inline void flush_old_files(struct files_struct * files)
 		unsigned long set, i;
 
 		i = j * __NFDBITS;
-		if (i >= files->max_fds)
+		if (i >= files->max_fds || i >= files->max_fdset)
 			break;
-		set = files->close_on_exec.fds_bits[j];
-		files->close_on_exec.fds_bits[j] = 0;
+		set = files->close_on_exec->fds_bits[j];
+		files->close_on_exec->fds_bits[j] = 0;
 		j++;
 		for ( ; set ; i++,set >>= 1) {
 			if (set & 1)
@@ -513,8 +527,13 @@ int flush_old_exec(struct linux_binprm * bprm)
 	/* This is the point of no return */
 	release_old_signals(oldsig);
 
+	current->sas_ss_sp = current->sas_ss_size = 0;
+
+	bprm->dumpable = 0;
 	if (current->euid == current->uid && current->egid == current->gid)
-		current->dumpable = 1;
+		bprm->dumpable = !bprm->priv_change;
+	else
+		current->dumpable = 0;
 	name = bprm->filename;
 	for (i=0; (ch = *(name++)) != '\0';) {
 		if (ch == '/')
@@ -527,9 +546,13 @@ int flush_old_exec(struct linux_binprm * bprm)
 
 	flush_thread();
 
-	if (bprm->e_uid != current->euid || bprm->e_gid != current->egid || 
-	    permission(bprm->dentry->d_inode,MAY_READ))
+	if (bprm->e_uid != current->euid || bprm->e_gid != current->egid ||
+	    permission(bprm->dentry->d_inode, MAY_READ)) {
+		bprm->dumpable = 0;
 		current->dumpable = 0;
+	}
+
+	current->self_exec_id++;
 
 	flush_signal_handlers(current);
 	flush_old_files(current->files);
@@ -545,17 +568,16 @@ flush_failed:
 }
 
 /*
- * We mustn't allow tracing of suid binaries, unless
- * the tracer has the capability to trace anything..
+ * We mustn't allow tracing of suid binaries, no matter what.
  */
 static inline int must_not_trace_exec(struct task_struct * p)
 {
-	return (p->flags & PF_PTRACED) && !cap_raised(p->p_pptr->cap_effective, CAP_SYS_PTRACE);
+	return (p->ptrace & PT_PTRACED);
 }
 
 /* 
  * Fill the binprm structure from the inode. 
- * Check permissions, then read the first 512 bytes
+ * Check permissions, then read the first 128 bytes
  */
 int prepare_binprm(struct linux_binprm *bprm)
 {
@@ -607,21 +629,18 @@ int prepare_binprm(struct linux_binprm *bprm)
 	cap_clear(bprm->cap_effective);
 
 	/*  To support inheritance of root-permissions and suid-root
-         *  executables under compatibility mode, we raise the
-         *  effective and inherited bitmasks of the executable file
-         *  (translation: we set the executable "capability dumb" and
-         *  set the allowed set to maximum). We don't set any forced
-         *  bits.
+         *  executables under compatibility mode, we raise all three
+         *  capability sets for the file.
          *
          *  If only the real uid is 0, we only raise the inheritable
-         *  bitmask of the executable file (translation: we set the
-         *  allowed set to maximum and the application to "capability
-         *  smart"). 
+         *  and permitted sets of the executable file.
          */
 
 	if (!issecure(SECURE_NOROOT)) {
-		if (bprm->e_uid == 0 || current->uid == 0)
+		if (bprm->e_uid == 0 || current->uid == 0) {
 			cap_set_full(bprm->cap_inheritable);
+			cap_set_full(bprm->cap_permitted);
+		}
 		if (bprm->e_uid == 0) 
 			cap_set_full(bprm->cap_effective);
 	}
@@ -632,16 +651,20 @@ int prepare_binprm(struct linux_binprm *bprm)
          * privilege does not go against other system constraints.
          * The new Permitted set is defined below -- see (***). */
 	{
-		kernel_cap_t working =
-			cap_combine(bprm->cap_permitted,
-				    cap_intersect(bprm->cap_inheritable,
-						  current->cap_inheritable));
+		kernel_cap_t permitted, working;
+
+		permitted = cap_intersect(bprm->cap_permitted, cap_bset);
+		working = cap_intersect(bprm->cap_inheritable,
+					current->cap_inheritable);
+		working = cap_combine(permitted, working);
 		if (!cap_issubset(working, current->cap_permitted)) {
 			cap_raised = 1;
 		}
 	}
 
-	if (id_change || cap_raised) {
+	bprm->priv_change = id_change || cap_raised;
+	if (bprm->priv_change) {
+		current->dumpable = 0;
 		/* We can't suid-execute if we're sharing parts of the executable */
 		/* or if we're being traced (or if suid execs are not allowed)    */
 		/* (current->mm->count > 1 is ok, as we'll get a new mm anyway)   */
@@ -668,26 +691,29 @@ int prepare_binprm(struct linux_binprm *bprm)
  * The formula used for evolving capabilities is:
  *
  *       pI' = pI
- * (***) pP' = fP | (fI & pI)
+ * (***) pP' = (fP & X) | (fI & pI)
  *       pE' = pP' & fE          [NB. fE is 0 or ~0]
  *
  * I=Inheritable, P=Permitted, E=Effective // p=process, f=file
- * ' indicates post-exec().
+ * ' indicates post-exec(), and X is the global 'cap_bset'.
  */
 
 void compute_creds(struct linux_binprm *bprm) 
 {
-	int new_permitted = cap_t(bprm->cap_permitted) |
-		(cap_t(bprm->cap_inheritable) & 
-		 cap_t(current->cap_inheritable));
+	kernel_cap_t new_permitted, working;
+
+	new_permitted = cap_intersect(bprm->cap_permitted, cap_bset);
+	working = cap_intersect(bprm->cap_inheritable,
+				current->cap_inheritable);
+	new_permitted = cap_combine(new_permitted, working);
 
 	/* For init, we want to retain the capabilities set
          * in the init_task struct. Thus we skip the usual
          * capability rules */
 	if (current->pid != 1) {
-		cap_t(current->cap_permitted) = new_permitted;
-		cap_t(current->cap_effective) = new_permitted & 
-						cap_t(bprm->cap_effective);
+		current->cap_permitted = new_permitted;
+		current->cap_effective =
+			cap_intersect(new_permitted, bprm->cap_effective);
 	}
 	
         /* AUD: Audit candidate if current->cap_effective is set */
@@ -695,8 +721,12 @@ void compute_creds(struct linux_binprm *bprm)
         current->suid = current->euid = current->fsuid = bprm->e_uid;
         current->sgid = current->egid = current->fsgid = bprm->e_gid;
         if (current->euid != current->uid || current->egid != current->gid ||
-	    !cap_issubset(new_permitted, current->cap_permitted))
-                current->dumpable = 0;
+	    !cap_issubset(new_permitted, current->cap_permitted)) {
+		bprm->dumpable = 0;
+		current->dumpable = 0;
+	}
+
+        current->keep_capabilities = 0;
 }
 
 
@@ -757,6 +787,17 @@ int search_binary_handler(struct linux_binprm *bprm,struct pt_regs *regs)
 	    }
 	}
 #endif
+        /*
+         * kernel module loader fixup 
+         * We don't try to load run modprobe in kernel space but at the
+         * same time kernel/kmod.c calls us with fs set to KERNEL_DS. This
+         * would cause us to explode messily on a split address space machine
+         * and its sort of lucky it ever worked before. Since the S/390 is
+         * such a split address space box we have to fix it..
+         */
+         
+        set_fs(USER_DS);
+
 	for (try=0; try<2; try++) {
 		for (fmt = formats ; fmt ; fmt = fmt->next) {
 			int (*fn)(struct linux_binprm *, struct pt_regs *) = fmt->load_binary;
@@ -802,6 +843,7 @@ int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs
 {
 	struct linux_binprm bprm;
 	struct dentry * dentry;
+	int was_dumpable;
 	int retval;
 	int i;
 
@@ -820,15 +862,18 @@ int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs
 	bprm.java = 0;
 	bprm.loader = 0;
 	bprm.exec = 0;
-	if ((bprm.argc = count(argv)) < 0) {
+	if ((bprm.argc = count(argv, bprm.p / sizeof(void *))) < 0) {
 		dput(dentry);
 		return bprm.argc;
 	}
 
-	if ((bprm.envc = count(envp)) < 0) {
+	if ((bprm.envc = count(envp, bprm.p / sizeof(void *))) < 0) {
 		dput(dentry);
 		return bprm.envc;
 	}
+
+	was_dumpable = current->dumpable;
+	current->dumpable = 0;
 
 	retval = prepare_binprm(&bprm);
 	
@@ -837,15 +882,18 @@ int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs
 		bprm.exec = bprm.p;
 		bprm.p = copy_strings(bprm.envc,envp,bprm.page,bprm.p,0);
 		bprm.p = copy_strings(bprm.argc,argv,bprm.page,bprm.p,0);
-		if (!bprm.p)
-			retval = -E2BIG;
+		if ((long)bprm.p < 0)
+			retval = (long)bprm.p;
 	}
 
 	if (retval >= 0)
 		retval = search_binary_handler(&bprm,regs);
-	if (retval >= 0)
+
+	if (retval >= 0) {
 		/* execve success */
+		current->dumpable = bprm.dumpable;
 		return retval;
+	}
 
 	/* Something went wrong, return the inode and free the argument pages*/
 	if (bprm.dentry)
@@ -854,5 +902,70 @@ int do_execve(char * filename, char ** argv, char ** envp, struct pt_regs * regs
 	for (i=0 ; i<MAX_ARG_PAGES ; i++)
 		free_page(bprm.page[i]);
 
+	current->dumpable = was_dumpable;
+
 	return retval;
+}
+
+void set_binfmt(struct linux_binfmt *new)
+{
+	struct linux_binfmt *old = current->binfmt;
+	if (new && new->module)
+		__MOD_INC_USE_COUNT(new->module);
+	current->binfmt = new;
+	if (old && old->module)
+		__MOD_DEC_USE_COUNT(old->module);
+}
+
+int do_coredump(long signr, struct pt_regs * regs)
+{
+	struct linux_binfmt *binfmt;
+	char corename[6+sizeof(current->comm)];
+	struct file * file;
+	struct inode * inode;
+
+	lock_kernel();
+	binfmt = current->binfmt;
+	if (!binfmt || !binfmt->core_dump)
+		goto fail;
+	if (!current->dumpable || atomic_read(&current->mm->count) != 1)
+		goto fail;
+	if (current->rlim[RLIMIT_CORE].rlim_cur < binfmt->min_coredump)
+		goto fail;
+	current->dumpable = 0;
+
+	memcpy(corename,"core.", 5);
+#if 0
+	memcpy(corename+5,current->comm,sizeof(current->comm));
+#else
+	corename[4] = '\0';
+#endif
+	file = filp_open(corename, O_CREAT | 2 | O_NOFOLLOW, 0600);
+	if (IS_ERR(file))
+		goto fail;
+	inode = file->f_dentry->d_inode;
+	if (inode->i_nlink > 1)
+		goto close_fail;	/* multiple links - don't dump */
+	if (list_empty(&file->f_dentry->d_hash))
+		goto close_fail;
+
+	if (!S_ISREG(inode->i_mode))
+		goto close_fail;
+	if (!file->f_op)
+		goto close_fail;
+	if (!file->f_op->write)
+		goto close_fail;
+	if (do_truncate(file->f_dentry, 0) != 0)
+		goto close_fail;
+	if (!binfmt->core_dump(signr, regs, file))
+		goto close_fail;
+	filp_close(file, NULL);
+	unlock_kernel();
+	return 1;
+
+close_fail:
+	filp_close(file, NULL);
+fail:
+	unlock_kernel();
+	return 0;
 }

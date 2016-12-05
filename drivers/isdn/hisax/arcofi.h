@@ -1,17 +1,27 @@
-/* $Id: arcofi.h,v 1.1 1997/10/29 18:51:20 keil Exp $
-
- * arcofi.h   Ansteuerung ARCOFI 2165
+/* $Id: arcofi.h,v 1.1.2.1 2001/12/31 13:26:45 kai Exp $
  *
- * Author     Karsten Keil (keil@temic-ech.spacenet.de)
+ * Ansteuerung ARCOFI 2165
  *
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
  *
- *
- * $Log: arcofi.h,v $
- * Revision 1.1  1997/10/29 18:51:20  keil
- * New files
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
  
 #define ARCOFI_USE	1
 
-extern int send_arcofi(struct IsdnCardState *cs, const u_char *msg);
+/* states */
+#define ARCOFI_NOP	0
+#define ARCOFI_TRANSMIT	1
+#define ARCOFI_RECEIVE	2
+/* events */
+#define ARCOFI_START	1
+#define ARCOFI_TX_END	2
+#define ARCOFI_RX_END	3
+#define ARCOFI_TIMEOUT	4
+
+extern int arcofi_fsm(struct IsdnCardState *cs, int event, void *data);
+extern void init_arcofi(struct IsdnCardState *cs);
+extern void clear_arcofi(struct IsdnCardState *cs);

@@ -1,4 +1,4 @@
-/* $Id: traps.c,v 1.57 1998/09/17 11:04:51 jj Exp $
+/* $Id: traps.c,v 1.59.2.2 2001/08/23 17:36:12 davem Exp $
  * arch/sparc/kernel/traps.c
  *
  * Copyright 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -82,8 +82,13 @@ void instruction_dump (unsigned long *pc)
 	printk("\n");
 }
 
+#define __SAVE __asm__ __volatile__("save %sp, -0x40, %sp\n\t")
+#define __RESTORE __asm__ __volatile__("restore %g0, %g0, %g0\n\t")
+
 void die_if_kernel(char *str, struct pt_regs *regs)
 {
+	int count = 0;
+
 	/* Amuse the user. */
 	printk(
 "              \\|/ ____ \\|/\n"
@@ -93,6 +98,27 @@ void die_if_kernel(char *str, struct pt_regs *regs)
 
 	printk("%s(%d): %s\n", current->comm, current->pid, str);
 	show_regs(regs);
+
+	__SAVE; __SAVE; __SAVE; __SAVE;
+	__SAVE; __SAVE; __SAVE; __SAVE;
+	__RESTORE; __RESTORE; __RESTORE; __RESTORE;
+	__RESTORE; __RESTORE; __RESTORE; __RESTORE;
+
+	{
+		struct reg_window *rw = (struct reg_window *)regs->u_regs[UREG_FP];
+
+		/* Stop the back trace when we hit userland or we
+		 * find some badly aligned kernel stack. Set an upper
+		 * bound in case our stack is trashed and we loop.
+		 */
+		while(rw					&&
+		      count++ < 30				&&
+                      (((unsigned long) rw) >= PAGE_OFFSET)	&&
+		      !(((unsigned long) rw) & 0x7)) {
+			printk("Caller[%08lx]\n", rw->ins[7]);
+			rw = (struct reg_window *)rw->ins[6];
+		}
+	}
 	printk("Instruction DUMP:");
 	instruction_dump ((unsigned long *) regs->pc);
 	if(regs->psr & PSR_PS)
@@ -302,6 +328,18 @@ void do_fpe_trap(struct pt_regs *regs, unsigned long pc, unsigned long npc,
 	       
 	fpt->tss.sig_address = pc;
 	fpt->tss.sig_desc = SUBSIG_FPERROR; /* as good as any */
+	if ((fpt->tss.fsr & 0x1c000) == (1 << 14)) {
+		if (fpt->tss.fsr & 0x01)
+			fpt->tss.sig_desc = SUBSIG_FPINEXACT;
+		else if (fpt->tss.fsr & 0x02)
+			fpt->tss.sig_desc = SUBSIG_FPDIVZERO;
+		else if (fpt->tss.fsr & 0x04)
+			fpt->tss.sig_desc = SUBSIG_FPUNFLOW;
+		else if (fpt->tss.fsr & 0x08)
+			fpt->tss.sig_desc = SUBSIG_FPOVFLOW;
+		else if (fpt->tss.fsr & 0x10)
+			fpt->tss.sig_desc = SUBSIG_FPINTOVFL;
+	}
 #ifdef __SMP__
 	fpt->flags &= ~PF_USEDFPU;
 #endif
@@ -391,8 +429,15 @@ void handle_cp_exception(struct pt_regs *regs, unsigned long pc, unsigned long n
 void handle_hw_divzero(struct pt_regs *regs, unsigned long pc, unsigned long npc,
 		       unsigned long psr)
 {
+#ifndef __SMP__
+	struct task_struct *fpt = last_task_used_math;
+#else
+	struct task_struct *fpt = current;
+#endif
 	lock_kernel();
-	send_sig(SIGILL, current, 1);
+	fpt->tss.sig_address = pc;
+	fpt->tss.sig_desc = SUBSIG_IDIVZERO;
+	send_sig(SIGFPE, fpt, 1);
 	unlock_kernel();
 }
 

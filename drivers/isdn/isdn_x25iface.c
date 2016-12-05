@@ -1,4 +1,10 @@
-/* $Id: isdn_x25iface.c,v 1.3 1998/02/20 17:25:20 fritz Exp $
+/* $Id: isdn_x25iface.c,v 1.1.2.1 2001/12/31 13:26:34 kai Exp $
+ *
+ * Linux ISDN subsystem, X.25 related functions
+ *
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
+ *
  * stuff needed to support the Linux X.25 PLP code on top of devices that
  * can provide a lab_b service using the concap_proto mechanism.
  * This module supports a network interface wich provides lapb_sematics
@@ -8,16 +14,6 @@
  *
  * Only protocol specific stuff goes here. Device specific stuff
  * goes to another -- device related -- concap_proto support source file.
- *
- * $Log: isdn_x25iface.c,v $
- * Revision 1.3  1998/02/20 17:25:20  fritz
- * Changes for recent kernels.
- *
- * Revision 1.2  1998/01/31 22:49:22  keil
- * correct comments
- *
- * Revision 1.1  1998/01/31 22:27:58  keil
- * New files from Henner Eisen for X.25 support
  *
  */
 
@@ -302,7 +298,12 @@ int isdn_x25iface_xmit(struct concap_proto *cprot, struct sk_buff *skb)
 	case 0x01: /* dl_connect request */
 		if( *state == WAN_DISCONNECTED ){
 			*state = WAN_CONNECTING;
-		        cprot -> dops -> connect_req(cprot);
+		        ret = cprot -> dops -> connect_req(cprot);
+			if(ret){
+				/* reset state and notify upper layer about
+				 * immidiatly failed attempts */
+				isdn_x25iface_disconn_ind(cprot);
+			}
 		} else {
 			illegal_state_warn( *state, firstbyte );
 		}

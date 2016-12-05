@@ -57,6 +57,7 @@ int sd_ioctl(struct inode * inode, struct file * file, unsigned int cmd, unsigne
         diskinfo[2] = rscsi_disks[DEVICE_NR(dev)].capacity >> 11;
 
 /* override with calculated, extended default, or driver values */
+/* this is the only call of hostt->bios_param() */
 
 	if(host->hostt->bios_param != NULL)
 	    host->hostt->bios_param(&rscsi_disks[DEVICE_NR(dev)],
@@ -107,6 +108,15 @@ int sd_ioctl(struct inode * inode, struct file * file, unsigned int cmd, unsigne
         if (!capable(CAP_SYS_ADMIN))
                 return -EACCES;
 	return revalidate_scsidisk(dev, 1);
+
+    case BLKSSZGET:
+	/* Block size of media */
+	return put_user(blksize_size[MAJOR(dev)][MINOR(dev)&0x0F],
+		(int *)arg);
+				
+    case BLKELVGET:
+    case BLKELVSET:
+            return blkelv_ioctl(inode->i_rdev, cmd, arg);
 
     RO_IOCTLS(dev, arg);
 
