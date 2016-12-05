@@ -6,8 +6,6 @@
  * with a lot of changes to make this thing work for R3000s
  * Copyright (C) 1998, 2000 Harald Koerfgen
  * Copyright (C) 1998 Gleb Raiko & Vladimir Roganov
- *
- * $Id: r2300.c,v 1.15 2000/02/24 00:12:40 ralf Exp $
  */
 #include <linux/init.h>
 #include <linux/kernel.h>
@@ -18,7 +16,6 @@
 #include <asm/pgtable.h>
 #include <asm/mmu_context.h>
 #include <asm/system.h>
-#include <asm/sgialib.h>
 #include <asm/isadep.h>
 #include <asm/io.h>
 #include <asm/wbflush.h>
@@ -116,7 +113,7 @@ static void r3k_copy_page(void * to, void * from)
 		 "I" (PAGE_SIZE));
 }
 
-static unsigned long __init size_cache(unsigned long ca_flags)
+unsigned long __init r3k_cache_size(unsigned long ca_flags)
 {
 	unsigned long flags, status, dummy, size;
 	volatile unsigned long *p;
@@ -152,15 +149,15 @@ static unsigned long __init size_cache(unsigned long ca_flags)
 
 static void __init probe_dcache(void)
 {
-	dcache_size = size_cache(ST0_DE);
+	dcache_size = r3k_cache_size(ST0_ISC);
 	printk("Primary data cache %dkb, linesize 4 bytes\n",
 		dcache_size >> 10);
 }
 
 static void __init probe_icache(void)
 {
-	icache_size = size_cache(ST0_DE|ST0_CE);
-	printk("Primary instruction cache %dkb, linesize 8 bytes\n",
+	icache_size = r3k_cache_size(ST0_ISC|ST0_SWC);
+	printk("Primary instruction cache %dkb, linesize 4 bytes\n",
 		icache_size >> 10);
 }
 
@@ -175,43 +172,43 @@ static void r3k_flush_icache_range(unsigned long start, unsigned long size)
 	save_and_cli(flags);
 
 	/* isolate cache space */
-	write_32bit_cp0_register(CP0_STATUS, (ST0_DE|ST0_CE|flags)&~ST0_IEC);
+	write_32bit_cp0_register(CP0_STATUS, (ST0_ISC|ST0_SWC|flags)&~ST0_IEC);
 
-	for (i = 0; i < size; i += 0x100) {
+	for (i = 0; i < size; i += 0x080) {
 		asm ( 	"sb\t$0,0x000(%0)\n\t"
+			"sb\t$0,0x004(%0)\n\t"
 			"sb\t$0,0x008(%0)\n\t"
+			"sb\t$0,0x00c(%0)\n\t"
 			"sb\t$0,0x010(%0)\n\t"
+			"sb\t$0,0x014(%0)\n\t"
 			"sb\t$0,0x018(%0)\n\t"
-			"sb\t$0,0x020(%0)\n\t"
+			"sb\t$0,0x01c(%0)\n\t"
+		 	"sb\t$0,0x020(%0)\n\t"
+			"sb\t$0,0x024(%0)\n\t"
 			"sb\t$0,0x028(%0)\n\t"
+			"sb\t$0,0x02c(%0)\n\t"
 			"sb\t$0,0x030(%0)\n\t"
+			"sb\t$0,0x034(%0)\n\t"
 			"sb\t$0,0x038(%0)\n\t"
-		 	"sb\t$0,0x040(%0)\n\t"
+			"sb\t$0,0x03c(%0)\n\t"
+			"sb\t$0,0x040(%0)\n\t"
+			"sb\t$0,0x044(%0)\n\t"
 			"sb\t$0,0x048(%0)\n\t"
+			"sb\t$0,0x04c(%0)\n\t"
 			"sb\t$0,0x050(%0)\n\t"
+			"sb\t$0,0x054(%0)\n\t"
 			"sb\t$0,0x058(%0)\n\t"
-			"sb\t$0,0x060(%0)\n\t"
+			"sb\t$0,0x05c(%0)\n\t"
+		 	"sb\t$0,0x060(%0)\n\t"
+			"sb\t$0,0x064(%0)\n\t"
 			"sb\t$0,0x068(%0)\n\t"
+			"sb\t$0,0x06c(%0)\n\t"
 			"sb\t$0,0x070(%0)\n\t"
+			"sb\t$0,0x074(%0)\n\t"
 			"sb\t$0,0x078(%0)\n\t"
-			"sb\t$0,0x080(%0)\n\t"
-			"sb\t$0,0x088(%0)\n\t"
-			"sb\t$0,0x090(%0)\n\t"
-			"sb\t$0,0x098(%0)\n\t"
-			"sb\t$0,0x0a0(%0)\n\t"
-			"sb\t$0,0x0a8(%0)\n\t"
-			"sb\t$0,0x0b0(%0)\n\t"
-			"sb\t$0,0x0b8(%0)\n\t"
-		 	"sb\t$0,0x0c0(%0)\n\t"
-			"sb\t$0,0x0c8(%0)\n\t"
-			"sb\t$0,0x0d0(%0)\n\t"
-			"sb\t$0,0x0d8(%0)\n\t"
-			"sb\t$0,0x0e0(%0)\n\t"
-			"sb\t$0,0x0e8(%0)\n\t"
-			"sb\t$0,0x0f0(%0)\n\t"
-			"sb\t$0,0x0f8(%0)\n\t"
+			"sb\t$0,0x07c(%0)\n\t"
 			: : "r" (p) );
-		p += 0x100;
+		p += 0x080;
 	}
 
 	restore_flags(flags);
@@ -222,13 +219,13 @@ static void r3k_flush_dcache_range(unsigned long start, unsigned long size)
 	unsigned long i, flags;
 	volatile unsigned char *p = (char *)start;
 
-	if (size > icache_size)
-		size = icache_size;
+	if (size > dcache_size)
+		size = dcache_size;
 
 	save_and_cli(flags);
 
 	/* isolate cache space */
-	write_32bit_cp0_register(CP0_STATUS, (ST0_DE|flags)&~ST0_IEC);
+	write_32bit_cp0_register(CP0_STATUS, (ST0_ISC|flags)&~ST0_IEC);
 
 	for (i = 0; i < size; i += 0x080) {
 		asm ( 	"sb\t$0,0x000(%0)\n\t"
@@ -295,7 +292,7 @@ static inline void r3k_flush_cache_all(void)
  
 static void r3k_flush_cache_mm(struct mm_struct *mm)
 {
-	if(mm->context != 0) {
+	if (mm->context != 0) {
 
 #ifdef DEBUG_CACHE
 		printk("cmm[%d]", (int)mm->context);
@@ -310,7 +307,7 @@ static void r3k_flush_cache_range(struct mm_struct *mm,
 {
 	struct vm_area_struct *vma;
 
-	if(mm->context == 0) 
+	if (mm->context == 0) 
 		return;
 
 	start &= PAGE_MASK;
@@ -318,15 +315,15 @@ static void r3k_flush_cache_range(struct mm_struct *mm,
 	printk("crange[%d,%08lx,%08lx]", (int)mm->context, start, end);
 #endif
 	vma = find_vma(mm, start);
-	if(vma) {
-		if(mm->context != current->mm->context) {
+	if (vma) {
+		if (mm->context != current->active_mm->context) {
 			flush_cache_all();
 		} else {
 			unsigned long flags, physpage;
 
 			save_and_cli(flags);
-			while(start < end) {
-				if((physpage = get_phys_page(start, mm)))
+			while (start < end) {
+				if ((physpage = get_phys_page(start, mm)))
 					r3k_flush_icache_range(physpage, PAGE_SIZE);
 		
 				start += PAGE_SIZE;
@@ -341,7 +338,7 @@ static void r3k_flush_cache_page(struct vm_area_struct *vma,
 {
 	struct mm_struct *mm = vma->vm_mm;
 
-	if(mm->context == 0)
+	if (mm->context == 0)
 		return;
 
 #ifdef DEBUG_CACHE
@@ -350,7 +347,7 @@ static void r3k_flush_cache_page(struct vm_area_struct *vma,
 	if (vma->vm_flags & VM_EXEC) {
 		unsigned long physpage;
 
-		if((physpage = get_phys_page(page, vma->vm_mm)))
+		if ((physpage = get_phys_page(page, vma->vm_mm)))
 			r3k_flush_icache_range(physpage, PAGE_SIZE);
 
 	}
@@ -377,7 +374,7 @@ static void r3k_flush_cache_sigtramp(unsigned long addr)
 
 	save_and_cli(flags);
 
-	write_32bit_cp0_register(CP0_STATUS, (ST0_DE|ST0_CE|flags)&~ST0_IEC);
+	write_32bit_cp0_register(CP0_STATUS, (ST0_ISC|ST0_SWC|flags)&~ST0_IEC);
 
 	asm ( 	"sb\t$0,0x000(%0)\n\t"
 		"sb\t$0,0x008(%0)\n\t"
@@ -417,7 +414,7 @@ void flush_tlb_all(void)
 
 void flush_tlb_mm(struct mm_struct *mm)
 {
-	if(mm->context != 0) {
+	if (mm->context != 0) {
 		unsigned long flags;
 
 #ifdef DEBUG_TLB
@@ -543,7 +540,13 @@ void update_mmu_cache(struct vm_area_struct * vma,
 	pte_t *ptep;
 	int idx, pid;
 
-	pid = (get_entryhi() & 0xfc0);
+	/*
+	 * Handle debugger faulting in for debugee.
+	 */
+	if (current->active_mm != vma->vm_mm)
+		return;
+
+	pid = get_entryhi() & 0xfc0;
 
 #ifdef DEBUG_TLB
 	if((pid != (vma->vm_mm->context & 0xfc0)) || (vma->vm_mm->context == 0)) {

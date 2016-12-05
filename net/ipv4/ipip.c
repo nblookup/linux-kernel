@@ -1,7 +1,7 @@
 /*
  *	Linux NET3:	IP/IP protocol decoder. 
  *
- *	Version: $Id: ipip.c,v 1.30 2000/01/06 00:41:55 davem Exp $
+ *	Version: $Id: ipip.c,v 1.41 2000/11/28 13:13:27 davem Exp $
  *
  *	Authors:
  *		Sam Lantinga (slouken@cs.ucdavis.edu)  02/01/95
@@ -93,6 +93,7 @@
  */
 
  
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/sched.h>
@@ -106,12 +107,14 @@
 #include <linux/if_arp.h>
 #include <linux/mroute.h>
 #include <linux/init.h>
+#include <linux/netfilter_ipv4.h>
 
 #include <net/sock.h>
 #include <net/ip.h>
 #include <net/icmp.h>
 #include <net/protocol.h>
 #include <net/ipip.h>
+#include <net/inet_ecn.h>
 
 #define HASH_SIZE  16
 #define HASH(addr) ((addr^(addr>>4))&0xF)
@@ -120,7 +123,7 @@ static int ipip_fb_tunnel_init(struct net_device *dev);
 static int ipip_tunnel_init(struct net_device *dev);
 
 static struct net_device ipip_fb_tunnel_dev = {
-	NULL, 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NULL, ipip_fb_tunnel_init,
+	"tunl0", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NULL, ipip_fb_tunnel_init,
 };
 
 static struct ip_tunnel ipip_fb_tunnel = {
@@ -236,10 +239,10 @@ struct ip_tunnel * ipip_tunnel_locate(struct ip_tunnel_parm *parms, int create)
 	dev->priv = (void*)(dev+1);
 	nt = (struct ip_tunnel*)dev->priv;
 	nt->dev = dev;
-	dev->name = nt->parms.name;
 	dev->init = ipip_tunnel_init;
-	dev->new_style = 1;
+	dev->features |= NETIF_F_DYNALLOC;
 	memcpy(&nt->parms, parms, sizeof(*parms));
+	strcpy(dev->name, nt->parms.name);
 	if (dev->name[0] == 0) {
 		int i;
 		for (i=1; i<100; i++) {
@@ -463,6 +466,13 @@ out:
 #endif
 }
 
+static inline void ipip_ecn_decapsulate(struct iphdr *iph, struct sk_buff *skb)
+{
+	if (INET_ECN_is_ce(iph->tos) &&
+	    INET_ECN_is_not_ce(skb->nh.iph->tos))
+		IP_ECN_set_ce(iph);
+}
+
 int ipip_rcv(struct sk_buff *skb, unsigned short len)
 {
 	struct iphdr *iph;
@@ -483,6 +493,14 @@ int ipip_rcv(struct sk_buff *skb, unsigned short len)
 		skb->dev = tunnel->dev;
 		dst_release(skb->dst);
 		skb->dst = NULL;
+#ifdef CONFIG_NETFILTER
+		nf_conntrack_put(skb->nfct);
+		skb->nfct = NULL;
+#ifdef CONFIG_NETFILTER_DEBUG
+		skb->nf_debug = 0;
+#endif
+#endif
+		ipip_ecn_decapsulate(iph, skb);
 		netif_rx(skb);
 		read_unlock(&ipip_lock);
 		return 0;
@@ -492,6 +510,12 @@ int ipip_rcv(struct sk_buff *skb, unsigned short len)
 	icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PROT_UNREACH, 0);
 	kfree_skb(skb);
 	return 0;
+}
+
+/* Need this wrapper because NF_HOOK takes the function address */
+static inline int do_ip_send(struct sk_buff *skb)
+{
+	return ip_send(skb);
 }
 
 /*
@@ -608,20 +632,22 @@ static int ipip_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	iph->ihl		=	sizeof(struct iphdr)>>2;
 	iph->frag_off		=	df;
 	iph->protocol		=	IPPROTO_IPIP;
-	iph->tos		=	tos;
+	iph->tos		=	INET_ECN_encapsulate(tos, old_iph->tos);
 	iph->daddr		=	rt->rt_dst;
 	iph->saddr		=	rt->rt_src;
 
 	if ((iph->ttl = tiph->ttl) == 0)
 		iph->ttl	=	old_iph->ttl;
 
-	iph->tot_len		=	htons(skb->len);
-	ip_select_ident(iph, &rt->u.dst);
-	ip_send_check(iph);
+#ifdef CONFIG_NETFILTER
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#ifdef CONFIG_NETFILTER_DEBUG
+	skb->nf_debug = 0;
+#endif
+#endif
 
-	stats->tx_bytes += skb->len;
-	stats->tx_packets++;
-	ip_send(skb);
+	IPTUNNEL_XMIT();
 	tunnel->recursion--;
 	return 0;
 
@@ -865,11 +891,12 @@ int __init ipip_init(void)
 	printk(KERN_INFO "IPv4 over IPv4 tunneling driver\n");
 
 	ipip_fb_tunnel_dev.priv = (void*)&ipip_fb_tunnel;
-	ipip_fb_tunnel_dev.name = ipip_fb_tunnel.parms.name;
 #ifdef MODULE
 	register_netdev(&ipip_fb_tunnel_dev);
 #else
+	rtnl_lock();
 	register_netdevice(&ipip_fb_tunnel_dev);
+	rtnl_unlock();
 #endif
 
 	inet_add_protocol(&ipip_protocol);

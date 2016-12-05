@@ -19,15 +19,10 @@
 #include <linux/console.h>
 #include <linux/timex.h>
 #include <linux/sched.h>
-#include <linux/mc146818rtc.h>
 
 #include <asm/io.h>
 #include <asm/machvec.h>
 #include <asm/system.h>
-
-#ifdef CONFIG_IA64_FW_EMU
-# include "../../kernel/fw-emu.c"
-#endif
 
 /*
  * This is here so we can use the CMOS detection in ide-probe.c to
@@ -47,17 +42,15 @@ dig_setup (char **cmdline_p)
 	unsigned int orig_x, orig_y, num_cols, num_rows, font_height;
 
 	/*
-	 * This assumes that the EFI partition is physical disk 1
-	 * partition 1 and the Linux root disk is physical disk 1
-	 * partition 2.
+	 * Default to /dev/sda2.  This assumes that the EFI partition
+	 * is physical disk 1 partition 1 and the Linux root disk is
+	 * physical disk 1 partition 2.
 	 */
-#ifdef CONFIG_IA64_LION_HACKS
-	/* default to /dev/sda2 on Lion... */
 	ROOT_DEV = to_kdev_t(0x0802);		/* default to second partition on first drive */
-#else
-	/* default to /dev/dha2 on BigSur... */
-	ROOT_DEV = to_kdev_t(0x0302);		/* default to second partition on first drive */
-#endif
+
+#ifdef	CONFIG_IA64_SOFTSDV_HACKS
+	ROOT_DEV = to_kdev_t(0x0302);		/* 2nd partion on 1st IDE */
+#endif /* CONFIG_IA64_SOFTSDV_HACKS */
 
 #ifdef CONFIG_SMP
 	init_smp_config();
@@ -90,4 +83,15 @@ dig_setup (char **cmdline_p)
 	screen_info.orig_video_mode = 3;	/* XXX fake */
 	screen_info.orig_video_isVGA = 1;	/* XXX fake */
 	screen_info.orig_video_ega_bx = 3;	/* XXX fake */
+}
+
+void
+dig_irq_init (void)
+{
+	/*
+	 * Disable the compatibility mode interrupts (8259 style), needs IN/OUT support
+	 * enabled.
+	 */
+	outb(0xff, 0xA1);
+	outb(0xff, 0x21);
 }

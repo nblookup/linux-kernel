@@ -54,9 +54,9 @@ extern __inline__ int find_first_zero_bit (void *addr, unsigned size);
 extern __inline__ int find_next_zero_bit (void * addr, int size, int offset);
 extern __inline__ unsigned long ffz(unsigned long word);
 
-#include <asm/mipsregs.h>
-
 #if defined(CONFIG_CPU_HAS_LLSC)
+
+#include <asm/mipsregs.h>
 
 /*
  * These functions for MIPS ISA > 1 are interrupt and SMP proof and
@@ -553,8 +553,9 @@ found_middle:
  * FIXME: These assume that Minix uses the native byte/bitorder.
  * This limits the Minix filesystem's value for data exchange very much.
  */
-#define minix_set_bit(nr,addr) test_and_set_bit(nr,addr)
-#define minix_clear_bit(nr,addr) test_and_clear_bit(nr,addr)
+#define minix_test_and_set_bit(nr,addr) test_and_set_bit(nr,addr)
+#define minix_set_bit(nr,addr) set_bit(nr,addr)
+#define minix_test_and_clear_bit(nr,addr) test_and_clear_bit(nr,addr)
 #define minix_test_bit(nr,addr) test_bit(nr,addr)
 #define minix_find_first_zero_bit(addr,size) find_first_zero_bit(addr,size)
 

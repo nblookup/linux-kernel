@@ -20,7 +20,7 @@
 
 #define MB	(1024*1024UL)
 
-#define NUM_MEM_DESCS	3
+#define NUM_MEM_DESCS	2
 
 static char fw_mem[(  sizeof(efi_system_table_t)
 		    + sizeof(efi_runtime_services_t)
@@ -124,7 +124,18 @@ asm ("
 	.proc pal_emulator_static
 pal_emulator_static:
 	mov r8=-1
-	cmp.eq p6,p7=6,r28		/* PAL_PTCE_INFO */
+
+	mov r9=256
+	;;
+	cmp.gtu p6,p7=r9,r28		/* r28 <= 255? */
+(p6)	br.cond.sptk.few static
+	;;
+	mov r9=512
+	;;
+	cmp.gtu p6,p7=r9,r28
+(p6)	br.cond.sptk.few stacked
+	;;
+static:	cmp.eq p6,p7=6,r28		/* PAL_PTCE_INFO */
 (p7)	br.cond.sptk.few 1f
 	;;
 	mov r8=0			/* status = 0 */
@@ -157,7 +168,12 @@ pal_emulator_static:
 	;;
 	mov ar.lc=r9
 	mov r8=r0
-1:	br.cond.sptk.few rp
+1:
+	br.cond.sptk.few rp
+
+stacked:
+	br.ret.sptk.few rp
+
 	.endp pal_emulator_static\n");
 
 /* Macro to emulate SAL call using legacy IN and OUT calls to CF8, CFC etc.. */
@@ -224,7 +240,7 @@ sal_emulator (long index, unsigned long in1, unsigned long in2,
 	if (index == SAL_FREQ_BASE) {
 		switch (in1) {
 		      case SAL_FREQ_BASE_PLATFORM:
-			r9 = 100000000;
+			r9 = 200000000;
 			break;
 
 		      case SAL_FREQ_BASE_INTERVAL_TIMER:
@@ -386,7 +402,6 @@ sys_fw_init (const char *args, int arglen)
 	sal_systab->sal_rev_minor = 1;
 	sal_systab->sal_rev_major = 0;
 	sal_systab->entry_count = 1;
-	sal_systab->ia32_bios_present = 0;
 
 #ifdef CONFIG_IA64_GENERIC
         strcpy(sal_systab->oem_id, "Generic");
@@ -437,6 +452,12 @@ sys_fw_init (const char *args, int arglen)
 	md->num_pages = (1*MB) >> 12;	/* 1MB (in 4KB pages) */
 	md->attribute = EFI_MEMORY_WB;
 
+#if 0
+	/*
+	 * XXX bootmem is broken for now... (remember to NUM_MEM_DESCS
+	 * if you re-enable this!)
+	 */
+
 	/* descriptor for high memory (>4GB): */
 	md = &efi_memmap[2];
 	md->type = EFI_CONVENTIONAL_MEMORY;
@@ -445,6 +466,7 @@ sys_fw_init (const char *args, int arglen)
 	md->virt_addr = 0;
 	md->num_pages = (32*MB) >> 12;	/* 32MB (in 4KB pages) */
 	md->attribute = EFI_MEMORY_WB;
+#endif
 
 	bp = id(ZERO_PAGE_ADDR);
 	bp->efi_systab = __pa(&fw_mem);

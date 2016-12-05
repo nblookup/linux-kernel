@@ -31,29 +31,10 @@
  * 
  */
 
-#include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/sched.h>
-#include <linux/types.h>
-#include <linux/fcntl.h>
-#include <linux/interrupt.h>
-#include <linux/ptrace.h>
-#include <linux/ioport.h>
-#include <linux/in.h>
-#include <linux/malloc.h>
-#include <linux/string.h>
-#include <linux/init.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
-#include <asm/uaccess.h>
-#include <linux/errno.h>
-
+#include <linux/kernel.h>
 #include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/skbuff.h>
-
+#include <linux/init.h>
 #include <linux/if_bonding.h>
 
 typedef struct slave
@@ -85,35 +66,47 @@ static int bond_open(struct net_device *dev)
 	return 0;
 }
 
+static void release_one_slave(struct net_device *master, slave_t *slave)
+{
+	bonding_t *bond = master->priv;
+
+	spin_lock_bh(&master->xmit_lock);
+	if (bond->current_slave == slave)
+		bond->current_slave = slave->next;
+	slave->next->prev = slave->prev;
+	slave->prev->next = slave->next;
+	spin_unlock_bh(&master->xmit_lock);
+
+	netdev_set_master(slave->dev, NULL);
+
+	dev_put(slave->dev);
+	kfree(slave);
+	MOD_DEC_USE_COUNT;
+}
+
 static int bond_close(struct net_device *master)
 {
 	bonding_t *bond = master->priv;
 	slave_t *slave;
 
-	while ((slave = bond->next) != (slave_t*)bond) {
-
-		spin_lock_bh(&master->xmit_lock);
-		slave->next->prev = slave->prev;
-		slave->prev->next = slave->next;
-		bond->current_slave = (slave_t*)bond;
-		spin_unlock_bh(&master->xmit_lock);
-
-		netdev_set_master(slave->dev, NULL);
-
-		kfree(slave);
-	}
+	while ((slave = bond->next) != (slave_t*)bond)
+		release_one_slave(master, slave);
 
 	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
-/* Fake multicast ability.
-
-   NB. It is possible and necessary to make it true one, otherwise
-   the device is not functional.
- */
-static void bond_set_multicast_list(struct net_device *dev)
+static void bond_set_multicast_list(struct net_device *master)
 {
+	bonding_t *bond = master->priv;
+	slave_t *slave;
+
+	for (slave = bond->next; slave != (slave_t*)bond; slave = slave->next) {
+		slave->dev->mc_list = master->mc_list;
+		slave->dev->mc_count = master->mc_count;
+		slave->dev->flags = master->flags;
+		slave->dev->set_multicast_list(slave->dev);
+	}
 }
 
 static int bond_enslave(struct net_device *master, struct net_device *dev)
@@ -161,20 +154,9 @@ static int bond_release(struct net_device *master, struct net_device *dev)
 	if (dev->master != master)
 		return -EINVAL;
 
-	netdev_set_master(dev, NULL);
-
 	for (slave = bond->next; slave != (slave_t*)bond; slave = slave->next) {
 		if (slave->dev == dev) {
-			spin_lock_bh(&master->xmit_lock);
-			if (bond->current_slave == slave)
-				bond->current_slave = slave->next;
-			slave->next->prev = slave->prev;
-			slave->prev->next = slave->next;
-			spin_unlock_bh(&master->xmit_lock);
-
-			kfree(slave);
-			dev_put(dev);
-			MOD_DEC_USE_COUNT;
+			release_one_slave(master, slave);
 			break;
 		}
 	}
@@ -227,13 +209,13 @@ static int bond_event(struct notifier_block *this, unsigned long event, void *pt
 	return NOTIFY_DONE;
 }
 
-struct notifier_block bond_netdev_notifier={
+static struct notifier_block bond_netdev_notifier={
 	bond_event,
 	NULL,
 	0
 };
 
-int __init bond_init(struct net_device *dev)
+static int __init bond_init(struct net_device *dev)
 {
 	bonding_t *bond;
 
@@ -281,7 +263,7 @@ static int bond_xmit(struct sk_buff *skb, struct net_device *dev)
 		if (slave == (slave_t*)bond)
 			continue;
 
-		if (netif_running(slave->dev) && netif_carrier_ok(dev)) {
+		if (netif_running(slave->dev) && netif_carrier_ok(slave->dev)) {
 			bond->current_slave = slave->next;
 			skb->dev = slave->dev;
 
@@ -307,17 +289,13 @@ static struct net_device_stats *bond_get_stats(struct net_device *dev)
 	return &bond->stats;
 }
 
-#ifdef MODULE
-
-static char bond_name[16];
-
 static struct net_device dev_bond = {
-		bond_name, 	/* Needs to be writeable */
+		"",
 		0, 0, 0, 0,
 	 	0x0, 0,
 	 	0, 0, 0, NULL, bond_init };
 
-int init_module(void)
+static int __init bonding_init(void)
 {
 	/* Find a name for this unit */
 	int err=dev_alloc_name(&dev_bond,"bond%d");
@@ -331,7 +309,7 @@ int init_module(void)
 	return 0;
 }
 
-void cleanup_module(void)
+static void __exit bonding_exit(void)
 {
 	unregister_netdevice_notifier(&bond_netdev_notifier);
 
@@ -339,7 +317,9 @@ void cleanup_module(void)
 
 	kfree(dev_bond.priv);
 }
-#endif /* MODULE */
+
+module_init(bonding_init);
+module_exit(bonding_exit);
 
 /*
  * Local variables:

@@ -1,4 +1,4 @@
-/* $Id: fault.c,v 1.12 2000/03/01 11:15:27 gniibe Exp $
+/* $Id: fault.c,v 1.13 2000/03/07 12:05:24 gniibe Exp $
  *
  *  linux/arch/sh/mm/fault.c
  *  Copyright (C) 1999  Niibe Yutaka
@@ -28,6 +28,10 @@
 #include <asm/mmu_context.h>
 
 extern void die(const char *,struct pt_regs *,long);
+static void __flush_tlb_page(unsigned long asid, unsigned long page);
+#if defined(__SH4__)
+static void __flush_tlb_phys(unsigned long phys);
+#endif
 
 /*
  * Ugly, ugly, but the goto's result in better assembly..
@@ -55,7 +59,7 @@ good_area:
 	start &= PAGE_MASK;
 
 	for (;;) {
-		if (handle_mm_fault(current, vma, start, 1) <= 0)
+		if (handle_mm_fault(current->mm, vma, start, 1) <= 0)
 			goto bad_area;
 		if (!size)
 			break;
@@ -81,34 +85,6 @@ bad_area:
 	return 0;
 }
 
-static void handle_vmalloc_fault(struct task_struct *tsk, unsigned long address)
-{
-	pgd_t *dir;
-	pmd_t *pmd;
-	pte_t *pte;
-	pte_t entry;
-
-	dir = pgd_offset_k(address);
-	pmd = pmd_offset(dir, address);
-	if (pmd_none(*pmd)) {
-		printk(KERN_ERR "vmalloced area %08lx bad\n", address);
-		return;
-	}
-	if (pmd_bad(*pmd)) {
-		pmd_ERROR(*pmd);
-		pmd_clear(pmd);
-		return;
-	}
-	pte = pte_offset(pmd, address);
-	entry = *pte;
-	if (pte_none(entry) || !pte_present(entry) || !pte_write(entry)) {
-		printk(KERN_ERR "vmalloced area %08lx bad\n", address);
-		return;
-	}
-
-	update_mmu_cache(NULL, address, entry);
-}
-
 /*
  * This routine handles page faults.  It determines the address,
  * and the problem, and then passes it off to one of the appropriate
@@ -125,11 +101,6 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long writeaccess,
 
 	tsk = current;
 	mm = tsk->mm;
-
-	if (address >= VMALLOC_START && address < VMALLOC_END) {
-		handle_vmalloc_fault(tsk, address);
-		return;
-	}
 
 	/*
 	 * If we're in an interrupt or have no user
@@ -167,12 +138,17 @@ good_area:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
-	{
-		int fault = handle_mm_fault(tsk, vma, address, writeaccess);
-		if (fault < 0)
-			goto out_of_memory;
-		if (!fault)
-			goto do_sigbus;
+	switch (handle_mm_fault(mm, vma, address, writeaccess)) {
+	case 1:
+		tsk->min_flt++;
+		break;
+	case 2:
+		tsk->maj_flt++;
+		break;
+	case 0:
+		goto do_sigbus;
+	default:
+		goto out_of_memory;
 	}
 
 	up(&mm->mmap_sem);
@@ -209,18 +185,20 @@ no_context:
 		printk(KERN_ALERT "Unable to handle kernel NULL pointer dereference");
 	else
 		printk(KERN_ALERT "Unable to handle kernel paging request");
-	printk(" at virtual address %08lx\n",address);
+	printk(" at virtual address %08lx\n", address);
 	printk(KERN_ALERT "pc = %08lx\n", regs->pc);
-	asm volatile("mov.l	%1,%0"
+	asm volatile("mov.l	%1, %0"
 		     : "=r" (page)
 		     : "m" (__m(MMU_TTB)));
-	page = ((unsigned long *) page)[address >> 22];
-	printk(KERN_ALERT "*pde = %08lx\n", page);
-	if (page & _PAGE_PRESENT) {
-		page &= PAGE_MASK;
-		address &= 0x003ff000;
-		page = ((unsigned long *) __va(page))[address >> PAGE_SHIFT];
-		printk(KERN_ALERT "*pte = %08lx\n", page);
+	if (page) {
+		page = ((unsigned long *) page)[address >> 22];
+		printk(KERN_ALERT "*pde = %08lx\n", page);
+		if (page & _PAGE_PRESENT) {
+			page &= PAGE_MASK;
+			address &= 0x003ff000;
+			page = ((unsigned long *) __va(page))[address >> PAGE_SHIFT];
+			printk(KERN_ALERT "*pte = %08lx\n", page);
+		}
 	}
 	die("Oops", regs, writeaccess);
 	do_exit(SIGKILL);
@@ -253,84 +231,169 @@ do_sigbus:
 		goto no_context;
 }
 
+/*
+ * Called with interrupt disabled.
+ */
+asmlinkage int __do_page_fault(struct pt_regs *regs, unsigned long writeaccess,
+			       unsigned long address)
+{
+	pgd_t *dir;
+	pmd_t *pmd;
+	pte_t *pte;
+	pte_t entry;
+
+	if (address >= VMALLOC_START && address < VMALLOC_END)
+		dir = pgd_offset_k(address);
+	else
+		dir = pgd_offset(current->mm, address);
+
+	pmd = pmd_offset(dir, address);
+	if (pmd_none(*pmd))
+		return 1;
+	if (pmd_bad(*pmd)) {
+		pmd_ERROR(*pmd);
+		pmd_clear(pmd);
+		return 1;
+	}
+	pte = pte_offset(pmd, address);
+	entry = *pte;
+	if (pte_none(entry) || !pte_present(entry)
+	    || (writeaccess && !pte_write(entry)))
+		return 1;
+
+	if (writeaccess)
+		entry = pte_mkdirty(entry);
+	entry = pte_mkyoung(entry);
+#if defined(__SH4__)
+	/*
+	 * ITLB is not affected by "ldtlb" instruction.
+	 * So, we need to flush the entry by ourselves.
+	 */
+	__flush_tlb_page(get_asid(), address&PAGE_MASK);
+#endif
+	set_pte(pte, entry);
+	update_mmu_cache(NULL, address, entry);
+	return 0;
+}
+
 void update_mmu_cache(struct vm_area_struct * vma,
 		      unsigned long address, pte_t pte)
 {
 	unsigned long flags;
 	unsigned long pteval;
 	unsigned long pteaddr;
+	unsigned long ptea;
 
 	save_and_cli(flags);
-	/*
-	 *  We don't need to set PTEH register.
-	 *  It's automatically set by the hardware.
-	 */
-	pteval = pte_val(pte);
-	pteval &= _PAGE_FLAGS_HARDWARE_MASK; /* drop software flags */
-	pteval |= _PAGE_FLAGS_HARDWARE_DEFAULT; /* add default flags */
-	/* Set PTEL register */
-	ctrl_outl(pteval, MMU_PTEL);
+
+#if defined(__SH4__)
+	if (pte_shared(pte)) {
+		struct page *pg;
+
+		pteval = pte_val(pte);
+		pteval &= PAGE_MASK; /* Physicall page address */
+		__flush_tlb_phys(pteval);
+		pg = virt_to_page(__va(pteval));
+		flush_dcache_page(pg);
+	}
+#endif
+
+	/* Ptrace may call this routine. */
+	if (vma && current->active_mm != vma->vm_mm) {
+		restore_flags(flags);
+		return;
+	}
+
 	/* Set PTEH register */
-	pteaddr = (address & MMU_VPN_MASK) | (vma->vm_mm->context & MMU_CONTEXT_ASID_MASK);
+	pteaddr = (address & MMU_VPN_MASK) | get_asid();
 	ctrl_outl(pteaddr, MMU_PTEH);
+
+	/* Set PTEA register */
+	/* TODO: make this look less hacky */
+	pteval = pte_val(pte);
+#if defined(__SH4__)
+	ptea = ((pteval >> 28) & 0xe) | (pteval & 0x1);
+	ctrl_outl(ptea, MMU_PTEA);
+#endif
+
+	/* Set PTEL register */
+	pteval &= _PAGE_FLAGS_HARDWARE_MASK; /* drop software flags */
+	/* conveniently, we want all the software flags to be 0 anyway */
+	ctrl_outl(pteval, MMU_PTEL);
 
 	/* Load the TLB */
 	asm volatile("ldtlb": /* no output */ : /* no input */ : "memory");
 	restore_flags(flags);
 }
 
-static void __flush_tlb_page(struct mm_struct *mm, unsigned long page)
+static void __flush_tlb_page(unsigned long asid, unsigned long page)
 {
-	unsigned long addr, data, asid;
-	unsigned long saved_asid = MMU_NO_ASID;
-#if defined(__SH4__)
-	int i;
-#endif
+	unsigned long addr, data;
 
-	if (mm->context == NO_CONTEXT)
-		return;
-
-	asid = mm->context & MMU_CONTEXT_ASID_MASK;
-	if (mm != current->mm) {
-		saved_asid = get_asid();
-		/*
-		 * We need to set ASID of the target entry to flush,
-		 * because TLB is indexed by (ASID and PAGE).
-		 */
-		set_asid(asid);
-	}
-
+	/*
+	 * NOTE: PTEH.ASID should be set to this MM
+	 *       _AND_ we need to write ASID to the array.
+	 *
+	 * It would be simple if we didn't need to set PTEH.ASID...
+	 */
 #if defined(__sh3__)
 	addr = MMU_TLB_ADDRESS_ARRAY |(page & 0x1F000)| MMU_PAGE_ASSOC_BIT;
 	data = (page & 0xfffe0000) | asid; /* VALID bit is off */
 	ctrl_outl(data, addr);
 #elif defined(__SH4__)
+	jump_to_P2();
 	addr = MMU_UTLB_ADDRESS_ARRAY | MMU_PAGE_ASSOC_BIT;
 	data = page | asid; /* VALID bit is off */
 	ctrl_outl(data, addr);
+	back_to_P1();
+#endif
+}
 
-	for (i=0; i<4; i++) {
-		addr = MMU_ITLB_ADDRESS_ARRAY | (i<<8);
+#if defined(__SH4__)
+static void __flush_tlb_phys(unsigned long phys)
+{
+	int i;
+	unsigned long addr, data;
+
+	jump_to_P2();
+	for (i = 0; i < MMU_UTLB_ENTRIES; i++) {
+		addr = MMU_UTLB_DATA_ARRAY | (i<<MMU_U_ENTRY_SHIFT);
 		data = ctrl_inl(addr);
-		data &= ~0x300;
-		if (data == (page | asid)) {
+		if ((data & MMU_UTLB_VALID) && (data&PAGE_MASK) == phys) {
+			data &= ~MMU_UTLB_VALID;
 			ctrl_outl(data, addr);
-			break;
 		}
 	}
-#endif
-	if (saved_asid != MMU_NO_ASID)
-		set_asid(saved_asid);
+	for (i = 0; i < MMU_ITLB_ENTRIES; i++) {
+		addr = MMU_ITLB_DATA_ARRAY | (i<<MMU_I_ENTRY_SHIFT);
+		data = ctrl_inl(addr);
+		if ((data & MMU_ITLB_VALID) && (data&PAGE_MASK) == phys) {
+			data &= ~MMU_ITLB_VALID;
+			ctrl_outl(data, addr);
+		}
+	}
+	back_to_P1();
 }
+#endif
 
 void flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 {
-	unsigned long flags;
+	if (vma->vm_mm && vma->vm_mm->context != NO_CONTEXT) {
+		unsigned long flags;
+		unsigned long asid;
+		unsigned long saved_asid = MMU_NO_ASID;
 
-	if (vma->vm_mm) {
+		asid = vma->vm_mm->context & MMU_CONTEXT_ASID_MASK;
 		page &= PAGE_MASK;
+
 		save_and_cli(flags);
-		__flush_tlb_page(vma->vm_mm, page);
+		if (vma->vm_mm != current->mm) {
+			saved_asid = get_asid();
+			set_asid(asid);
+		}
+		__flush_tlb_page(asid, page);
+		if (saved_asid != MMU_NO_ASID)
+			set_asid(saved_asid);
 		restore_flags(flags);
 	}
 }
@@ -349,13 +412,22 @@ void flush_tlb_range(struct mm_struct *mm, unsigned long start,
 			if (mm == current->mm)
 				activate_context(mm);
 		} else {
+			unsigned long asid = mm->context&MMU_CONTEXT_ASID_MASK;
+			unsigned long saved_asid = MMU_NO_ASID;
+
 			start &= PAGE_MASK;
 			end += (PAGE_SIZE - 1);
 			end &= PAGE_MASK;
+			if (mm != current->mm) {
+				saved_asid = get_asid();
+				set_asid(asid);
+			}
 			while (start < end) {
-				__flush_tlb_page(mm, start);
+				__flush_tlb_page(asid, start);
 				start += PAGE_SIZE;
 			}
+			if (saved_asid != MMU_NO_ASID)
+				set_asid(saved_asid);
 		}
 		restore_flags(flags);
 	}
@@ -380,9 +452,16 @@ void flush_tlb_all(void)
 {
 	unsigned long flags, status;
 
+	/*
+	 * Flush all the TLB.
+	 *
+	 * Write to the MMU control register's bit:
+	 * 	TF-bit for SH-3, TI-bit for SH-4.
+	 *      It's same position, bit #2.
+	 */
 	save_and_cli(flags);
 	status = ctrl_inl(MMUCR);
-	status |= 0x04;		/* Set TF-bit to flush */
-	ctrl_outl(status,MMUCR);
+	status |= 0x04;		
+	ctrl_outl(status, MMUCR);
 	restore_flags(flags);
 }

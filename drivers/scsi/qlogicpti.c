@@ -32,7 +32,6 @@
 #include <asm/sbus.h>
 #include <asm/dma.h>
 #include <asm/system.h>
-#include <asm/machines.h>
 #include <asm/ptrace.h>
 #include <asm/pgtable.h>
 #include <asm/oplib.h>
@@ -1527,10 +1526,8 @@ int qlogicpti_reset(Scsi_Cmnd *Cmnd, unsigned int reset_flags)
 	return return_status;
 }
 
-#ifdef MODULE
-Scsi_Host_Template driver_template = QLOGICPTI;
+static Scsi_Host_Template driver_template = QLOGICPTI;
 
 #include "scsi_module.c"
 
 EXPORT_NO_SYMBOLS;
-#endif /* MODULE */

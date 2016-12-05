@@ -1,24 +1,21 @@
 /*
- * linux/arch/arm/lib/uaccess.S
+ *  linux/arch/arm/lib/uaccess.S
  *
- * Copyright (C) 1995, 1996,1997,1998 Russell King
+ *  Copyright (C) 1995, 1996,1997,1998 Russell King
  *
- * Routines to block copy data to/from user memory
- *  These are highly optimised both for the 4k page size
- *  and for various alignments.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Routines to block copy data to/from user memory
+ *   These are highly optimised both for the 4k page size
+ *   and for various alignments.
  */
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 #include <asm/errno.h>
 
 		.text
-
-#define USER(x...)					\
-9999:		x;					\
-		.section __ex_table,"a";		\
-		.align	3;				\
-		.long	9999b,9001f;			\
-		.previous
 
 #define PAGE_SHIFT 12
 
@@ -76,20 +73,20 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		blt	.c2u_0rem8lp
 
 .c2u_0cpy8lp:	ldmia	r1!, {r3 - r6}
-		stmia	r0!, {r3 - r6}			@ Shouldn't fault
+		stmia	r0!, {r3 - r6}			@ Shouldnt fault
 		ldmia	r1!, {r3 - r6}
-		stmia	r0!, {r3 - r6}			@ Shouldn't fault
+		stmia	r0!, {r3 - r6}			@ Shouldnt fault
 		subs	ip, ip, #32
 		bpl	.c2u_0cpy8lp
 .c2u_0rem8lp:	cmn	ip, #16
 		ldmgeia	r1!, {r3 - r6}
-		stmgeia	r0!, {r3 - r6}			@ Shouldn't fault
+		stmgeia	r0!, {r3 - r6}			@ Shouldnt fault
 		tst	ip, #8
 		ldmneia	r1!, {r3 - r4}
-		stmneia	r0!, {r3 - r4}			@ Shouldn't fault
+		stmneia	r0!, {r3 - r4}			@ Shouldnt fault
 		tst	ip, #4
 		ldrne	r3, [r1], #4
-		strnet	r3, [r0], #4			@ Shouldn't fault
+		strnet	r3, [r0], #4			@ Shouldnt fault
 		ands	ip, ip, #3
 		beq	.c2u_0fupi
 .c2u_0nowords:	teq	ip, #0
@@ -141,7 +138,7 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		orr	r5, r5, r6, lsl #24
 		mov	r6, r6, lsr #8
 		orr	r6, r6, r7, lsl #24
-		stmia	r0!, {r3 - r6}			@ Shouldn't fault
+		stmia	r0!, {r3 - r6}			@ Shouldnt fault
 		subs	ip, ip, #16
 		bpl	.c2u_1cpy8lp
 .c2u_1rem8lp:	tst	ip, #8
@@ -150,12 +147,12 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		orrne	r3, r3, r4, lsl #24
 		movne	r4, r4, lsr #8
 		orrne	r4, r4, r7, lsl #24
-		stmneia	r0!, {r3 - r4}			@ Shouldn't fault
+		stmneia	r0!, {r3 - r4}			@ Shouldnt fault
 		tst	ip, #4
 		movne	r3, r7, lsr #8
 		ldrne	r7, [r1], #4
 		orrne	r3, r3, r7, lsl #24
-		strnet	r3, [r0], #4			@ Shouldn't fault
+		strnet	r3, [r0], #4			@ Shouldnt fault
 		ands	ip, ip, #3
 		beq	.c2u_1fupi
 .c2u_1nowords:	mov	r3, r7, lsr #8
@@ -195,7 +192,7 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		orr	r5, r5, r6, lsl #16
 		mov	r6, r6, lsr #16
 		orr	r6, r6, r7, lsl #16
-		stmia	r0!, {r3 - r6}			@ Shouldn't fault
+		stmia	r0!, {r3 - r6}			@ Shouldnt fault
 		subs	ip, ip, #16
 		bpl	.c2u_2cpy8lp
 .c2u_2rem8lp:	tst	ip, #8
@@ -204,12 +201,12 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		orrne	r3, r3, r4, lsl #16
 		movne	r4, r4, lsr #16
 		orrne	r4, r4, r7, lsl #16
-		stmneia	r0!, {r3 - r4}			@ Shouldn't fault
+		stmneia	r0!, {r3 - r4}			@ Shouldnt fault
 		tst	ip, #4
 		movne	r3, r7, lsr #16
 		ldrne	r7, [r1], #4
 		orrne	r3, r3, r7, lsl #16
-		strnet	r3, [r0], #4			@ Shouldn't fault
+		strnet	r3, [r0], #4			@ Shouldnt fault
 		ands	ip, ip, #3
 		beq	.c2u_2fupi
 .c2u_2nowords:	mov	r3, r7, lsr #16
@@ -249,7 +246,7 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		orr	r5, r5, r6, lsl #8
 		mov	r6, r6, lsr #24
 		orr	r6, r6, r7, lsl #8
-		stmia	r0!, {r3 - r6}			@ Shouldn't fault
+		stmia	r0!, {r3 - r6}			@ Shouldnt fault
 		subs	ip, ip, #16
 		bpl	.c2u_3cpy8lp
 .c2u_3rem8lp:	tst	ip, #8
@@ -258,12 +255,12 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		orrne	r3, r3, r4, lsl #8
 		movne	r4, r4, lsr #24
 		orrne	r4, r4, r7, lsl #8
-		stmneia	r0!, {r3 - r4}			@ Shouldn't fault
+		stmneia	r0!, {r3 - r4}			@ Shouldnt fault
 		tst	ip, #4
 		movne	r3, r7, lsr #24
 		ldrne	r7, [r1], #4
 		orrne	r3, r3, r7, lsl #8
-		strnet	r3, [r0], #4			@ Shouldn't fault
+		strnet	r3, [r0], #4			@ Shouldnt fault
 		ands	ip, ip, #3
 		beq	.c2u_3fupi
 .c2u_3nowords:	mov	r3, r7, lsr #24
@@ -333,20 +330,20 @@ USER(		ldrt	r3, [r1], #4)
 		subs	ip, ip, #32
 		blt	.cfu_0rem8lp
 
-.cfu_0cpy8lp:	ldmia	r1!, {r3 - r6}			@ Shouldn't fault
+.cfu_0cpy8lp:	ldmia	r1!, {r3 - r6}			@ Shouldnt fault
 		stmia	r0!, {r3 - r6}
-		ldmia	r1!, {r3 - r6}			@ Shouldn't fault
+		ldmia	r1!, {r3 - r6}			@ Shouldnt fault
 		stmia	r0!, {r3 - r6}
 		subs	ip, ip, #32
 		bpl	.cfu_0cpy8lp
 .cfu_0rem8lp:	cmn	ip, #16
-		ldmgeia	r1!, {r3 - r6}			@ Shouldn't fault
+		ldmgeia	r1!, {r3 - r6}			@ Shouldnt fault
 		stmgeia	r0!, {r3 - r6}
 		tst	ip, #8
-		ldmneia	r1!, {r3 - r4}			@ Shouldn't fault
+		ldmneia	r1!, {r3 - r4}			@ Shouldnt fault
 		stmneia	r0!, {r3 - r4}
 		tst	ip, #4
-		ldrnet	r3, [r1], #4			@ Shouldn't fault
+		ldrnet	r3, [r1], #4			@ Shouldnt fault
 		strne	r3, [r0], #4
 		ands	ip, ip, #3
 		beq	.cfu_0fupi
@@ -392,7 +389,7 @@ USER(		ldrt	r7, [r1], #4)			@ May fault
 		blt	.cfu_1rem8lp
 
 .cfu_1cpy8lp:	mov	r3, r7, lsr #8
-		ldmia	r1!, {r4 - r7}			@ Shouldn't fault
+		ldmia	r1!, {r4 - r7}			@ Shouldnt fault
 		orr	r3, r3, r4, lsl #24
 		mov	r4, r4, lsr #8
 		orr	r4, r4, r5, lsl #24
@@ -405,7 +402,7 @@ USER(		ldrt	r7, [r1], #4)			@ May fault
 		bpl	.cfu_1cpy8lp
 .cfu_1rem8lp:	tst	ip, #8
 		movne	r3, r7, lsr #8
-		ldmneia	r1!, {r4, r7}			@ Shouldn't fault
+		ldmneia	r1!, {r4, r7}			@ Shouldnt fault
 		orrne	r3, r3, r4, lsl #24
 		movne	r4, r4, lsr #8
 		orrne	r4, r4, r7, lsl #24
@@ -446,7 +443,7 @@ USER(		ldrt	r7, [r1], #4)			@ May fault
 		blt	.cfu_2rem8lp
 
 .cfu_2cpy8lp:	mov	r3, r7, lsr #16
-		ldmia	r1!, {r4 - r7}			@ Shouldn't fault
+		ldmia	r1!, {r4 - r7}			@ Shouldnt fault
 		orr	r3, r3, r4, lsl #16
 		mov	r4, r4, lsr #16
 		orr	r4, r4, r5, lsl #16
@@ -459,7 +456,7 @@ USER(		ldrt	r7, [r1], #4)			@ May fault
 		bpl	.cfu_2cpy8lp
 .cfu_2rem8lp:	tst	ip, #8
 		movne	r3, r7, lsr #16
-		ldmneia	r1!, {r4, r7}			@ Shouldn't fault
+		ldmneia	r1!, {r4, r7}			@ Shouldnt fault
 		orrne	r3, r3, r4, lsl #16
 		movne	r4, r4, lsr #16
 		orrne	r4, r4, r7, lsl #16
@@ -500,7 +497,7 @@ USER(		ldrt	r7, [r1], #4)			@ May fault
 		blt	.cfu_3rem8lp
 
 .cfu_3cpy8lp:	mov	r3, r7, lsr #24
-		ldmia	r1!, {r4 - r7}			@ Shouldn't fault
+		ldmia	r1!, {r4 - r7}			@ Shouldnt fault
 		orr	r3, r3, r4, lsl #8
 		mov	r4, r4, lsr #24
 		orr	r4, r4, r5, lsl #8
@@ -513,7 +510,7 @@ USER(		ldrt	r7, [r1], #4)			@ May fault
 		bpl	.cfu_3cpy8lp
 .cfu_3rem8lp:	tst	ip, #8
 		movne	r3, r7, lsr #24
-		ldmneia	r1!, {r4, r7}			@ Shouldn't fault
+		ldmneia	r1!, {r4, r7}			@ Shouldnt fault
 		orrne	r3, r3, r4, lsl #8
 		movne	r4, r4, lsr #24
 		orrne	r4, r4, r7, lsl #8
@@ -538,13 +535,18 @@ USER(		ldrget	r3, [r1], #0)			@ May fault
 
 		.section .fixup,"ax"
 		.align	0
-		/* We took an exception.  Zero out the buffer and pretend no
-		   data was copied.  */
-9001:		ldr	r0, [sp], #4
-		ldr	r1, [sp]
-		teq	r1, #0
+		/*
+		 * We took an exception.  r0 contains a pointer to
+		 * the byte not copied.
+		 */
+9001:		ldr	r2, [sp], #4			@ void *to
+		sub	r2, r0, r2			@ bytes copied
+		ldr	r1, [sp], #4			@ unsigned long count
+		subs	r4, r1, r2			@ bytes left to copy
+		movne	r1, r4
 		blne	SYMBOL_NAME(__memzero)
-		LOADREGS(fd,sp!, {r0, r4 - r7, pc})
+		mov	r0, r4
+		LOADREGS(fd,sp!, {r4 - r7, pc})
 		.previous
 
 /* Prototype: int __arch_clear_user(void *addr, size_t sz)
@@ -584,63 +586,4 @@ USER(		strnebt	r2, [r0], #1)
 		.align	0
 9001:		LOADREGS(fd,sp!, {r0, pc})
 		.previous
-
-/* Prototype: unsigned long __arch_strnlen_user(const char *str, long n)
- * Purpose  : get length of a string in user memory
- * Params   : str - address of string in user memory
- * Returns  : length of string *including terminator*
- *	      or zero on exception, or n + 1 if too long
- */
-ENTRY(__arch_strnlen_user)
-		stmfd	sp!, {lr}
-		mov	r2, r0
-1:
-USER(		ldrbt	r3, [r0], #1)
-		teq	r3, #0
-		beq	2f
-		subs	r1, r1, #1
-		bne	1b
-		add	r0, r0, #1
-2:		sub	r0, r0, r2
-		LOADREGS(fd,sp!, {pc})
-
-		.section .fixup,"ax"
-		.align	0
-9001:		mov	r0, #0
-		LOADREGS(fd,sp!,{pc})
-		.previous
-
-/* Prototype: size_t __arch_strncpy_from_user(char *dst, char *src, size_t len)
- * Purpose  : copy a string from user memory to kernel memory
- * Params   : dst - kernel memory destination
- *          : src - user memory source
- *          : len - maximum length of string
- * Returns  : number of characters copied
- */
-ENTRY(__arch_strncpy_from_user)
-		stmfd	sp!, {lr}
-		add	ip, r1, #1
-1:		subs	r2, r2, #1
-		bmi	2f
-USER(		ldrbt	r3, [r1], #1)
-		strb	r3, [r0], #1
-		teq	r3, #0
-		bne	1b
-		sub	r0, r1, ip
-		LOADREGS(fd, sp!, {pc})
-2:		sub	ip, ip, #1
-		sub	r0, r1, ip
-		LOADREGS(fd, sp!, {pc})
-
-		.section .fixup,"ax"
-		.align	0
-9001:		mov	ip, #0
-1:		strb	ip, [r0], #1
-		subs	r2, r2, #1
-		bpl	1b
-		mov	r0, #-EFAULT
-		LOADREGS(fd, sp!, {pc})
-		.previous
-
-		.align
 

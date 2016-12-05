@@ -38,13 +38,14 @@
 #include <linux/string.h> /* memset */
 #include <linux/errno.h>
 #include <linux/locks.h>
+#include <linux/smp_lock.h>
 
 #include "udf_i.h"
 #include "udf_sb.h"
 
-static int udf_adinicb_readpage(struct dentry *dentry, struct page * page)
+static int udf_adinicb_readpage(struct file *file, struct page * page)
 {
-	struct inode *inode = (struct inode *)page->mapping->host;
+	struct inode *inode = page->mapping->host;
 
 	struct buffer_head *bh;
 	int block;
@@ -53,21 +54,22 @@ static int udf_adinicb_readpage(struct dentry *dentry, struct page * page)
 	if (!PageLocked(page))
 		PAGE_BUG(page);
 
-	kaddr = (char *)kmap(page);
+	kaddr = kmap(page);
 	memset(kaddr, 0, PAGE_CACHE_SIZE);
 	block = udf_get_lb_pblock(inode->i_sb, UDF_I_LOCATION(inode), 0);
 	bh = bread (inode->i_dev, block, inode->i_sb->s_blocksize);
 	memcpy(kaddr, bh->b_data + udf_ext0_offset(inode), inode->i_size);
 	brelse(bh);
+	flush_dcache_page(page);
 	SetPageUptodate(page);
 	kunmap(page);
 	UnlockPage(page);
 	return 0;
 }
 
-static int udf_adinicb_writepage(struct dentry *dentry, struct page *page)
+static int udf_adinicb_writepage(struct page *page)
 {
-	struct inode *inode = (struct inode *)page->mapping->host;
+	struct inode *inode = page->mapping->host;
 
 	struct buffer_head *bh;
 	int block;
@@ -76,18 +78,18 @@ static int udf_adinicb_writepage(struct dentry *dentry, struct page *page)
 	if (!PageLocked(page))
 		PAGE_BUG(page);
 
-	kaddr = (char *)kmap(page);
+	kaddr = kmap(page);
 	block = udf_get_lb_pblock(inode->i_sb, UDF_I_LOCATION(inode), 0);
 	bh = bread (inode->i_dev, block, inode->i_sb->s_blocksize);
 	memcpy(bh->b_data + udf_ext0_offset(inode), kaddr, inode->i_size);
-	mark_buffer_dirty(bh, 0);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 	SetPageUptodate(page);
 	kunmap(page);
 	return 0;
 }
 
-static int udf_adinicb_prepare_write(struct page *page, unsigned offset, unsigned to)
+static int udf_adinicb_prepare_write(struct file *file, struct page *page, unsigned offset, unsigned to)
 {
 	kmap(page);
 	return 0;
@@ -95,17 +97,17 @@ static int udf_adinicb_prepare_write(struct page *page, unsigned offset, unsigne
 
 static int udf_adinicb_commit_write(struct file *file, struct page *page, unsigned offset, unsigned to)
 {
-	struct inode *inode = (struct inode *)page->mapping->host;
+	struct inode *inode = page->mapping->host;
 
 	struct buffer_head *bh;
 	int block;
-	char *kaddr = (char*)page_address(page);
+	char *kaddr = page_address(page);
 
 	block = udf_get_lb_pblock(inode->i_sb, UDF_I_LOCATION(inode), 0);
 	bh = bread (inode->i_dev, block, inode->i_sb->s_blocksize);
 	memcpy(bh->b_data + udf_file_entry_alloc_offset(inode) + offset,
 		kaddr + offset, to-offset);
-	mark_buffer_dirty(bh, 0);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 	SetPageUptodate(page);
 	kunmap(page);
@@ -118,6 +120,7 @@ static int udf_adinicb_commit_write(struct file *file, struct page *page, unsign
 struct address_space_operations udf_adinicb_aops = {
 	readpage:			udf_adinicb_readpage,
 	writepage:			udf_adinicb_writepage,
+	sync_page:		block_sync_page,
 	prepare_write:		udf_adinicb_prepare_write,
 	commit_write:		udf_adinicb_commit_write,
 };
@@ -246,7 +249,7 @@ int udf_ioctl(struct inode *inode, struct file *filp, unsigned int cmd,
 		struct FileEntry *fe;
 
 		fe = (struct FileEntry *)bh->b_data;
-		eaicb = fe->extendedAttrICB;
+		eaicb = lela_to_cpu(fe->extendedAttrICB);
 		if (UDF_I_LENEATTR(inode))
 			ea = fe->extendedAttr;
 	}
@@ -255,7 +258,7 @@ int udf_ioctl(struct inode *inode, struct file *filp, unsigned int cmd,
 		struct ExtendedFileEntry *efe;
 
 		efe = (struct ExtendedFileEntry *)bh->b_data;
-		eaicb = efe->extendedAttrICB;
+		eaicb = lela_to_cpu(efe->extendedAttrICB);
 		if (UDF_I_LENEATTR(inode))
 			ea = efe->extendedAttr;
 	}
@@ -295,8 +298,11 @@ int udf_ioctl(struct inode *inode, struct file *filp, unsigned int cmd,
  */
 static int udf_release_file(struct inode * inode, struct file * filp)
 {
-	if (filp->f_mode & FMODE_WRITE)
+	if (filp->f_mode & FMODE_WRITE) {
+		lock_kernel();
 		udf_discard_prealloc(inode);
+		unlock_kernel();
+	}
 	return 0;
 }
 
@@ -315,7 +321,7 @@ static int udf_release_file(struct inode * inode, struct file * filp)
  */
 static int udf_open_file(struct inode * inode, struct file * filp)
 {
-	if ((inode->i_size & 0xFFFFFFFF00000000UL) && !(filp->f_flags & O_LARGEFILE))
+	if ((inode->i_size & 0xFFFFFFFF00000000ULL) && !(filp->f_flags & O_LARGEFILE))
 		return -EFBIG;
 	return 0;
 }

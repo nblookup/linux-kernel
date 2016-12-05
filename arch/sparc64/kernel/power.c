@@ -1,4 +1,4 @@
-/* $Id: power.c,v 1.5 1999/12/19 23:28:00 davem Exp $
+/* $Id: power.c,v 1.8 2000/07/11 22:41:33 davem Exp $
  * power.c: Power management driver.
  *
  * Copyright (C) 1999 David S. Miller (davem@redhat.com)
@@ -35,10 +35,12 @@ static void power_handler(int irq, void *dev_id, struct pt_regs *regs)
 
 extern void machine_halt(void);
 
+extern int serial_console;
+
 void machine_power_off(void)
 {
 #ifdef CONFIG_PCI
-	if (power_reg != 0UL) {
+	if (power_reg != 0UL && !serial_console) {
 		/* Both register bits seem to have the
 		 * same effect, so until I figure out
 		 * what the difference is...
@@ -53,10 +55,9 @@ void machine_power_off(void)
 static int powerd(void *__unused)
 {
 	static char *envp[] = { "HOME=/", "TERM=linux", "PATH=/sbin:/usr/sbin:/bin:/usr/bin", NULL };
-	char *argv[] = { "/usr/bin/shutdown", "-h", "now", NULL };
+	char *argv[] = { "/sbin/shutdown", "-h", "now", NULL };
 
-	current->session = 1;
-	current->pgrp = 1;
+	daemonize();
 	sprintf(current->comm, "powerd");
 
 again:
@@ -68,7 +69,7 @@ again:
 	}
 
 	/* Ok, down we go... */
-	if (execve("/usr/bin/shutdown", argv, envp) < 0) {
+	if (execve("/sbin/shutdown", argv, envp) < 0) {
 		printk("powerd: shutdown execution failed\n");
 		button_pressed = 0;
 		goto again;

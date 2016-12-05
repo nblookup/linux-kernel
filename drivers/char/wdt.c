@@ -26,6 +26,7 @@
  *		Alan Cox	:	Cleaned up copy/user stuff
  *		Tim Hockin	:	Added insmod parameters, comment cleanup
  *					Parameterized timeout
+ *		Tigran Aivazian	:	Restructured wdt_init() to handle failures
  */
 
 #include <linux/config.h>
@@ -35,6 +36,7 @@
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/smp_lock.h>
 #include <linux/miscdevice.h>
 #include <linux/watchdog.h>
 #include "wd501p.h"
@@ -48,7 +50,7 @@
 #include <linux/reboot.h>
 #include <linux/init.h>
 
-static int wdt_is_open=0;
+static int wdt_is_open;
 
 /*
  *	You must set these - there is no sane way to probe for this board.
@@ -90,6 +92,11 @@ static int __init wdt_setup(char *str)
 __setup("wdt=", wdt_setup);
 
 #endif /* !MODULE */
+
+MODULE_PARM(io, "i");
+MODULE_PARM_DESC(io, "WDT io port (default=0x240)");
+MODULE_PARM(irq, "i");
+MODULE_PARM_DESC(irq, "WDT irq (default=11)");
  
 /*
  *	Programming support
@@ -159,10 +166,6 @@ static int wdt_status(void)
  *	Handle an interrupt from the board. These are raised when the status
  *	map changes in what the board considers an interesting way. That means
  *	a failure condition occuring.
- *
- *	FIXME:	We need to pass a dev_id as the PCI card can share irqs
- *	although its arguably a _very_ dumb idea to share watchdog
- *	irq lines
  */
  
 void wdt_interrupt(int irq, void *dev_id, struct pt_regs *regs)
@@ -341,7 +344,6 @@ static int wdt_open(struct inode *inode, struct file *file)
 		case WATCHDOG_MINOR:
 			if(wdt_is_open)
 				return -EBUSY;
-			MOD_INC_USE_COUNT;
 			/*
 			 *	Activate 
 			 */
@@ -357,7 +359,6 @@ static int wdt_open(struct inode *inode, struct file *file)
 			outb_p(0, WDT_DC);	/* Enable */
 			return 0;
 		case TEMP_MINOR:
-			MOD_INC_USE_COUNT;
 			return 0;
 		default:
 			return -ENODEV;
@@ -378,6 +379,7 @@ static int wdt_open(struct inode *inode, struct file *file)
  
 static int wdt_release(struct inode *inode, struct file *file)
 {
+	lock_kernel();
 	if(MINOR(inode->i_rdev)==WATCHDOG_MINOR)
 	{
 #ifndef CONFIG_WATCHDOG_NOWAYOUT	
@@ -386,7 +388,7 @@ static int wdt_release(struct inode *inode, struct file *file)
 #endif		
 		wdt_is_open=0;
 	}
-	MOD_DEC_USE_COUNT;
+	unlock_kernel();
 	return 0;
 }
 
@@ -420,6 +422,7 @@ static int wdt_notify_sys(struct notifier_block *this, unsigned long code,
  
  
 static struct file_operations wdt_fops = {
+	owner:		THIS_MODULE,
 	llseek:		wdt_llseek,
 	read:		wdt_read,
 	write:		wdt_write,
@@ -456,10 +459,6 @@ static struct notifier_block wdt_notifier=
 	0
 };
 
-#ifdef MODULE
-
-#define wdt_init init_module
-
 /**
  *	cleanup_module:
  *
@@ -470,7 +469,7 @@ static struct notifier_block wdt_notifier=
  *	module in 60 seconds or reboot.
  */
  
-void cleanup_module(void)
+static void __exit wdt_exit(void)
 {
 	misc_deregister(&wdt_miscdev);
 #ifdef CONFIG_WDT_501	
@@ -481,8 +480,6 @@ void cleanup_module(void)
 	free_irq(irq, NULL);
 }
 
-#endif
-
 /**
  * 	wdt_init:
  *
@@ -491,20 +488,58 @@ void cleanup_module(void)
  *	The open() function will actually kick the board off.
  */
  
-int __init wdt_init(void)
+static int __init wdt_init(void)
 {
-	printk(KERN_INFO "WDT500/501-P driver 0.07 at %X (Interrupt %d)\n", io,irq);
-	if(request_irq(irq, wdt_interrupt, SA_INTERRUPT, "wdt501p", NULL))
-	{
-		printk(KERN_ERR "IRQ %d is not free.\n", irq);
-		return -EIO;
+	int ret;
+
+	ret = misc_register(&wdt_miscdev);
+	if (ret) {
+		printk(KERN_ERR "wdt: can't misc_register on minor=%d\n", WATCHDOG_MINOR);
+		goto out;
 	}
-	misc_register(&wdt_miscdev);
-#ifdef CONFIG_WDT_501	
-	misc_register(&temp_miscdev);
-#endif	
-	request_region(io, 8, "wdt501p");
-	register_reboot_notifier(&wdt_notifier);
-	return 0;
+	ret = request_irq(irq, wdt_interrupt, SA_INTERRUPT, "wdt501p", NULL);
+	if(ret) {
+		printk(KERN_ERR "wdt: IRQ %d is not free.\n", irq);
+		goto outmisc;
+	}
+	if (!request_region(io, 8, "wdt501p")) {
+		printk(KERN_ERR "wdt: IO %X is not free.\n", io);
+		ret = -EBUSY;
+		goto outirq;
+	}
+	ret = register_reboot_notifier(&wdt_notifier);
+	if(ret) {
+		printk(KERN_ERR "wdt: can't register reboot notifier (err=%d)\n", ret);
+		goto outreg;
+	}
+
+#ifdef CONFIG_WDT_501
+	ret = misc_register(&temp_miscdev);
+	if (ret) {
+		printk(KERN_ERR "wdt: can't misc_register (temp) on minor=%d\n", TEMP_MINOR);
+		goto outrbt;
+	}
+#endif
+
+	ret = 0;
+	printk(KERN_INFO "WDT500/501-P driver 0.07 at %X (Interrupt %d)\n", io, irq);
+out:
+	return ret;
+
+#ifdef CONFIG_WDT_501
+outrbt:
+	unregister_reboot_notifier(&wdt_notifier);
+#endif
+
+outreg:
+	release_region(io,8);
+outirq:
+	free_irq(irq, NULL);
+outmisc:
+	misc_deregister(&wdt_miscdev);
+	goto out;
 }
+
+module_init(wdt_init);
+module_exit(wdt_exit);
 

@@ -1,7 +1,11 @@
 /*
- * linux/include/asm-arm/io.h
+ *  linux/include/asm-arm/io.h
  *
- * Copyright (C) 1996-1999 Russell King
+ *  Copyright (C) 1996-2000 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  * Modifications:
  *  16-Sep-1996	RMK	Inlined the inx/outx functions & optimised for both
@@ -11,6 +15,7 @@
  *  27-Mar-1999	PJB	Second parameter of memcpy_toio is const..
  *  04-Apr-1999	PJB	Added check_signature.
  *  12-Dec-1999	RMK	More cleanups
+ *  18-Jun-2000 RMK	Removed virt_to_* and friends definitions
  */
 #ifndef __ASM_ARM_IO_H
 #define __ASM_ARM_IO_H
@@ -18,7 +23,6 @@
 #include <linux/types.h>
 #include <asm/arch/hardware.h>
 #include <asm/arch/io.h>
-#include <asm/proc/io.h>
 
 #define outb_p(val,port)		outb((val),(port))
 #define outw_p(val,port)		outw((val),(port))
@@ -43,23 +47,7 @@ extern void insl(unsigned int port, void *from, int len);
 
 #ifdef __KERNEL__
 
-#include <asm/arch/memory.h>
-
-extern __inline__ unsigned long virt_to_phys(volatile void *x)
-{
-	return __virt_to_phys((unsigned long)(x));
-}
-
-extern __inline__ void *phys_to_virt(unsigned long x)
-{
-	return (void *)(__phys_to_virt((unsigned long)(x)));
-}
-
-/*
- * Virtual <-> DMA view memory address translations
- */
-#define virt_to_bus(x)		(__virt_to_bus((unsigned long)(x)))
-#define bus_to_virt(x)		((void *)(__bus_to_virt((unsigned long)(x))))
+#include <asm/memory.h>
 
 /* the following macro is depreciated */
 #define ioaddr(port)			__ioaddr((port))

@@ -6,13 +6,19 @@
  * Copyright (C) Vijay Chander (vijay@engr.sgi.com)
  * Copyright (C) Srinivasa Thirumalachar (sprasad@engr.sgi.com)
  */
+
+/* XXX use this temporary define for MP systems trying to INIT */
+#define SAL_MPINIT_WORKAROUND
+
 #ifndef _ASM_IA64_MCA_H
 #define _ASM_IA64_MCA_H
 
+#if !defined(__ASSEMBLY__)
 #include <linux/types.h>
 #include <asm/param.h>
 #include <asm/sal.h>
 #include <asm/processor.h>
+#include <asm/hw_irq.h>
 
 /* These are the return codes from all the IA64_MCA specific interfaces */
 typedef	int ia64_mca_return_code_t;
@@ -25,9 +31,9 @@ enum {
 #define IA64_MCA_RENDEZ_TIMEOUT		(100 * HZ)	/* 1000 milliseconds */
 
 /* Interrupt vectors reserved for MC handling. */
-#define IA64_MCA_RENDEZ_INT_VECTOR	0xF3	/* Rendez interrupt */
-#define IA64_MCA_WAKEUP_INT_VECTOR	0x12	/* Wakeup interrupt */
-#define IA64_MCA_CMC_INT_VECTOR		0xF2	/* Correctable machine check interrupt */
+#define IA64_MCA_RENDEZ_INT_VECTOR	MCA_RENDEZ_IRQ	/* Rendez interrupt */
+#define IA64_MCA_WAKEUP_INT_VECTOR	MCA_WAKEUP_IRQ	/* Wakeup interrupt */
+#define IA64_MCA_CMC_INT_VECTOR		CMC_IRQ	/* Correctable machine check interrupt */
 
 #define IA64_CMC_INT_DISABLE		0
 #define IA64_CMC_INT_ENABLE		1
@@ -40,11 +46,11 @@ typedef union cmcv_reg_u {
 	u64	cmcv_regval;
 	struct	{
 		u64  	cmcr_vector		: 8;
-		u64	cmcr_ignored1		: 47;
+		u64	cmcr_reserved1		: 4;
+		u64	cmcr_ignored1		: 1;
+		u64	cmcr_reserved2		: 3;
 		u64	cmcr_mask		: 1;
-		u64	cmcr_reserved1		: 3;
-		u64	cmcr_ignored2		: 1;
-		u64	cmcr_reserved2		: 4;
+		u64	cmcr_ignored2		: 47;
 	} cmcv_reg_s;
 
 } cmcv_reg_t;
@@ -119,7 +125,7 @@ typedef struct ia64_mca_os_to_sal_state_s {
 
 typedef int (*prfunc_t)(const char * fmt, ...);
 
-extern void mca_init(void);
+extern void ia64_mca_init(void);
 extern void ia64_os_mca_dispatch(void);
 extern void ia64_os_mca_dispatch_end(void);
 extern void ia64_mca_ucmc_handler(void);
@@ -134,10 +140,12 @@ extern void ia64_log_print(int,int,prfunc_t);
 
 #undef 	MCA_TEST
 
-#if defined(MCA_TEST)
-# define MCA_DEBUG	printk
-#else
-# define MCA_DEBUG
-#endif
+#define IA64_MCA_DEBUG_INFO 1
 
+#if defined(IA64_MCA_DEBUG_INFO)
+# define IA64_MCA_DEBUG	printk
+#else
+# define IA64_MCA_DEBUG
+#endif
+#endif /* !__ASSEMBLY__ */
 #endif /* _ASM_IA64_MCA_H */

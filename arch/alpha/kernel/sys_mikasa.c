@@ -164,7 +164,7 @@ mikasa_init_irq(void)
 static int __init
 mikasa_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[8][5] __initlocaldata = {
+	static char irq_tab[8][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
 		{16+12, 16+12, 16+12, 16+12, 16+12},	/* IdSel 17,  SCSI */
 		{   -1,    -1,    -1,    -1,    -1},	/* IdSel 18,  PCEB */
@@ -185,8 +185,8 @@ static void
 mikasa_apecs_machine_check(unsigned long vector, unsigned long la_ptr,
 		           struct pt_regs * regs)
 {
-#define MCHK_NO_DEVSEL 0x205L
-#define MCHK_NO_TABT 0x204L
+#define MCHK_NO_DEVSEL 0x205U
+#define MCHK_NO_TABT 0x204U
 
 	struct el_common *mchk_header;
 	unsigned int code;
@@ -258,7 +258,7 @@ struct alpha_machine_vector mikasa_primo_mv __initmv = {
 	init_arch:		cia_init_arch,
 	init_irq:		mikasa_init_irq,
 	init_rtc:		common_init_rtc,
-	init_pci:		common_init_pci,
+	init_pci:		cia_init_pci,
 	pci_map_irq:		mikasa_map_irq,
 	pci_swizzle:		common_swizzle,
 };

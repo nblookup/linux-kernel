@@ -12,7 +12,7 @@ extern int printk(const char * fmt, ...)
  * initialize their spinlocks properly, tsk tsk.
  * Remember to turn this off in 2.4. -ben
  */
-#define SPINLOCK_DEBUG	1
+#define SPINLOCK_DEBUG	0
 
 /*
  * Your basic SMP spinlocks, allowing only a single CPU anywhere
@@ -33,9 +33,10 @@ typedef struct {
 #define SPINLOCK_MAGIC_INIT	/* */
 #endif
 
-#define SPIN_LOCK_UNLOCKED (spinlock_t) { 0 SPINLOCK_MAGIC_INIT }
+#define SPIN_LOCK_UNLOCKED (spinlock_t) { 1 SPINLOCK_MAGIC_INIT }
 
 #define spin_lock_init(x)	do { *(x) = SPIN_LOCK_UNLOCKED; } while(0)
+
 /*
  * Simple spin lock operations.  There are two variants, one clears IRQ's
  * on the local processor, one does not.
@@ -43,34 +44,38 @@ typedef struct {
  * We make no fairness assumptions. They have a cost.
  */
 
-#define spin_unlock_wait(x)	do { barrier(); } while(((volatile spinlock_t *)(x))->lock)
-#define spin_is_locked(x)	((x)->lock != 0)
+#define spin_is_locked(x)	(*(volatile char *)(&(x)->lock) <= 0)
+#define spin_unlock_wait(x)	do { barrier(); } while(spin_is_locked(x))
 
 #define spin_lock_string \
 	"\n1:\t" \
-	"lock ; btsl $0,%0\n\t" \
-	"jc 2f\n" \
+	"lock ; decb %0\n\t" \
+	"js 2f\n" \
 	".section .text.lock,\"ax\"\n" \
 	"2:\t" \
-	"testb $1,%0\n\t" \
+	"cmpb $0,%0\n\t" \
 	"rep;nop\n\t" \
-	"jne 2b\n\t" \
+	"jle 2b\n\t" \
 	"jmp 1b\n" \
 	".previous"
 
 /*
- * Sadly, some early PPro chips require the locked access,
- * otherwise we could just always simply do
- *
- * 	#define spin_unlock_string \
- *		"movb $0,%0"
- *
- * Which is noticeably faster.
+ * This works. Despite all the confusion.
  */
 #define spin_unlock_string \
-	"lock ; btrl $0,%0"
+	"movb $1,%0"
 
-extern inline void spin_lock(spinlock_t *lock)
+static inline int spin_trylock(spinlock_t *lock)
+{
+	char oldval;
+	__asm__ __volatile__(
+		"xchgb %b0,%1"
+		:"=q" (oldval), "=m" (lock->lock)
+		:"0" (0) : "memory");
+	return oldval > 0;
+}
+
+static inline void spin_lock(spinlock_t *lock)
 {
 #if SPINLOCK_DEBUG
 	__label__ here;
@@ -82,23 +87,21 @@ printk("eip: %p\n", &&here);
 #endif
 	__asm__ __volatile__(
 		spin_lock_string
-		:"=m" (__dummy_lock(lock)));
+		:"=m" (lock->lock) : : "memory");
 }
 
-extern inline void spin_unlock(spinlock_t *lock)
+static inline void spin_unlock(spinlock_t *lock)
 {
 #if SPINLOCK_DEBUG
 	if (lock->magic != SPINLOCK_MAGIC)
 		BUG();
-	if (!lock->lock)
+	if (!spin_is_locked(lock))
 		BUG();
 #endif
 	__asm__ __volatile__(
 		spin_unlock_string
-		:"=m" (__dummy_lock(lock)));
+		:"=m" (lock->lock) : : "memory");
 }
-
-#define spin_trylock(lock) ({ !test_and_set_bit(0,(lock)); })
 
 /*
  * Read-write spinlocks, allowing multiple readers
@@ -127,6 +130,8 @@ typedef struct {
 
 #define RW_LOCK_UNLOCKED (rwlock_t) { RW_LOCK_BIAS RWLOCK_MAGIC_INIT }
 
+#define rwlock_init(x)	do { *(x) = RW_LOCK_UNLOCKED; } while(0)
+
 /*
  * On x86, we implement read-write locks as a 32-bit counter
  * with the high bit (sign) being the "contended" bit.
@@ -136,9 +141,9 @@ typedef struct {
  * Changed to use the same technique as rw semaphores.  See
  * semaphore.h for details.  -ben
  */
-/* the spinlock helpers are in arch/i386/kernel/semaphore.S */
+/* the spinlock helpers are in arch/i386/kernel/semaphore.c */
 
-extern inline void read_lock(rwlock_t *rw)
+static inline void read_lock(rwlock_t *rw)
 {
 #if SPINLOCK_DEBUG
 	if (rw->magic != RWLOCK_MAGIC)
@@ -147,7 +152,7 @@ extern inline void read_lock(rwlock_t *rw)
 	__build_read_lock(rw, "__read_lock_failed");
 }
 
-extern inline void write_lock(rwlock_t *rw)
+static inline void write_lock(rwlock_t *rw)
 {
 #if SPINLOCK_DEBUG
 	if (rw->magic != RWLOCK_MAGIC)
@@ -156,10 +161,10 @@ extern inline void write_lock(rwlock_t *rw)
 	__build_write_lock(rw, "__write_lock_failed");
 }
 
-#define read_unlock(rw)		asm volatile("lock ; incl %0" :"=m" (__dummy_lock(&(rw)->lock)))
-#define write_unlock(rw)	asm volatile("lock ; addl $" RW_LOCK_BIAS_STR ",%0":"=m" (__dummy_lock(&(rw)->lock)))
+#define read_unlock(rw)		asm volatile("lock ; incl %0" :"=m" ((rw)->lock) : : "memory")
+#define write_unlock(rw)	asm volatile("lock ; addl $" RW_LOCK_BIAS_STR ",%0":"=m" ((rw)->lock) : : "memory")
 
-extern inline int write_trylock(rwlock_t *lock)
+static inline int write_trylock(rwlock_t *lock)
 {
 	atomic_t *count = (atomic_t *)lock;
 	if (atomic_sub_and_test(RW_LOCK_BIAS, count))

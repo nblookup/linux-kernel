@@ -28,8 +28,6 @@
 
 #undef DEBUG
 
-extern char _end;
-
 struct linux_mdesc * __init
 ArcGetMemoryDescriptor(struct linux_mdesc *Current)
 {
@@ -235,8 +233,8 @@ prom_free_prom_memory (void)
 		addr = PAGE_OFFSET + (unsigned long) (long) p->base;
 		end = addr + (unsigned long) (long) p->size;
 		while (addr < end) {
-			ClearPageReserved(mem_map + MAP_NR(addr));
-			set_page_count(mem_map + MAP_NR(addr), 1);
+			ClearPageReserved(virt_to_page(addr));
+			set_page_count(virt_to_page(addr), 1);
 			free_page(addr);
 			addr += PAGE_SIZE;
 			freed += PAGE_SIZE;

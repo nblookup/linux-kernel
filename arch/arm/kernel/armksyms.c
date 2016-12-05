@@ -1,3 +1,12 @@
+/*
+ *  linux/arch/arm/kernel/armksyms.c
+ *
+ *  Copyright (C) 2000 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/user.h>
@@ -8,12 +17,14 @@
 #include <linux/pci.h>
 #include <linux/delay.h>
 #include <linux/in6.h>
+#include <linux/interrupt.h>
+#include <linux/pm.h>
+#include <linux/vt_kern.h>
 
 #include <asm/byteorder.h>
 #include <asm/elf.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/dma.h>
 #include <asm/pgalloc.h>
 #include <asm/proc-fns.h>
 #include <asm/processor.h>
@@ -21,14 +32,14 @@
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/checksum.h>
+#include <asm/mach-types.h>
 
 extern void dump_thread(struct pt_regs *, struct user *);
 extern int dump_fpu(struct pt_regs *, struct user_fp_struct *);
 extern void inswb(unsigned int port, void *to, int len);
 extern void outswb(unsigned int port, const void *to, int len);
 
-extern unsigned int local_bh_count[NR_CPUS];
-extern unsigned int local_irq_count[NR_CPUS];
+extern void __bad_xchg(volatile void *ptr, int size);
 
 /*
  * syscalls
@@ -65,6 +76,7 @@ extern void __umodsi3(void);
 extern void ret_from_exception(void);
 extern void fpundefinstr(void);
 extern void fp_enter(void);
+
 #define EXPORT_SYMBOL_ALIAS(sym,orig) \
  const char __kstrtab_##sym##[] __attribute__((section(".kstrtab"))) = \
     __MODULE_STRING(##sym##); \
@@ -83,13 +95,12 @@ EXPORT_SYMBOL(fpundefinstr);
 EXPORT_SYMBOL(ret_from_exception);
 #endif
 
+EXPORT_SYMBOL(kd_mksound);
+
 	/* platform dependent support */
 EXPORT_SYMBOL(dump_thread);
 EXPORT_SYMBOL(dump_fpu);
 EXPORT_SYMBOL(udelay);
-EXPORT_SYMBOL(xchg_str);
-EXPORT_SYMBOL(local_bh_count);
-EXPORT_SYMBOL(local_irq_count);
 #ifdef CONFIG_CPU_32
 EXPORT_SYMBOL(__ioremap);
 EXPORT_SYMBOL(__iounmap);
@@ -98,29 +109,16 @@ EXPORT_SYMBOL(kernel_thread);
 EXPORT_SYMBOL(system_rev);
 EXPORT_SYMBOL(system_serial_low);
 EXPORT_SYMBOL(system_serial_high);
+EXPORT_SYMBOL(mem_fclk_21285);
 EXPORT_SYMBOL(__bug);
+EXPORT_SYMBOL(__bad_xchg);
 EXPORT_SYMBOL(__readwrite_bug);
 EXPORT_SYMBOL(enable_irq);
 EXPORT_SYMBOL(disable_irq);
+EXPORT_SYMBOL(pm_idle);
+EXPORT_SYMBOL(pm_power_off);
 
 	/* processor dependencies */
-#ifdef MULTI_CPU
-EXPORT_SYMBOL(processor);
-#else
-EXPORT_SYMBOL(cpu_flush_cache_all);
-EXPORT_SYMBOL(cpu_flush_cache_area);
-EXPORT_SYMBOL(cpu_flush_cache_entry);
-EXPORT_SYMBOL(cpu_clean_cache_area);
-EXPORT_SYMBOL(cpu_flush_ram_page);
-EXPORT_SYMBOL(cpu_flush_tlb_all);
-EXPORT_SYMBOL(cpu_flush_tlb_area);
-EXPORT_SYMBOL(cpu_set_pgd);
-EXPORT_SYMBOL(cpu_set_pmd);
-EXPORT_SYMBOL(cpu_set_pte);
-EXPORT_SYMBOL(cpu_flush_icache_area);
-EXPORT_SYMBOL(cpu_cache_wback_area);
-EXPORT_SYMBOL(cpu_cache_purge_area);
-#endif
 EXPORT_SYMBOL(__machine_arch_type);
 
 	/* networking */
@@ -182,14 +180,17 @@ EXPORT_SYMBOL(__arch_copy_from_user);
 EXPORT_SYMBOL(__arch_copy_to_user);
 EXPORT_SYMBOL(__arch_clear_user);
 EXPORT_SYMBOL(__arch_strnlen_user);
+
+	/* consistent area handling */
+EXPORT_SYMBOL(pci_alloc_consistent);
+EXPORT_SYMBOL(consistent_alloc);
+EXPORT_SYMBOL(consistent_free);
+EXPORT_SYMBOL(consistent_sync);
+
 #elif defined(CONFIG_CPU_26)
 EXPORT_SYMBOL(uaccess_kernel);
 EXPORT_SYMBOL(uaccess_user);
 #endif
-
-EXPORT_SYMBOL(consistent_alloc);
-EXPORT_SYMBOL(consistent_free);
-EXPORT_SYMBOL(consistent_sync);
 
 	/* gcc lib functions */
 EXPORT_SYMBOL_NOVERS(__gcc_bcmp);

@@ -57,6 +57,10 @@ int ncp_read_kernel(struct ncp_server *, const char *, __u32, __u16,
 int ncp_write_kernel(struct ncp_server *, const char *, __u32, __u16,
 		const char *, int *);
 
+static inline void ncp_inode_close(struct inode *inode) {
+	atomic_dec(&NCP_FINFO(inode)->opened);
+}
+
 int ncp_obtain_info(struct ncp_server *server, struct inode *, char *,
 		struct nw_info_struct *target);
 int ncp_lookup_volume(struct ncp_server *, char *, struct nw_info_struct *);
@@ -92,16 +96,14 @@ ncp_ClearPhysicalRecord(struct ncp_server *server,
 			__u32 offset, __u32 length);
 #endif	/* CONFIG_NCPFS_IOCTL_LOCKING */
 
-#ifdef CONFIG_NCPFS_MOUNT_SUBDIR
 int
 ncp_mount_subdir(struct ncp_server *, struct nw_info_struct *,
 			__u8, __u8, __u32);
-#endif	/* CONFIG_NCPFS_MOUNT_SUBDIR */
 
 #ifdef CONFIG_NCPFS_NLS
 
-inline unsigned char ncp__tolower(struct nls_table *, unsigned char);
-inline unsigned char ncp__toupper(struct nls_table *, unsigned char);
+unsigned char ncp__tolower(struct nls_table *, unsigned char);
+unsigned char ncp__toupper(struct nls_table *, unsigned char);
 int ncp__io2vol(struct ncp_server *, unsigned char *, unsigned int *,
 				const unsigned char *, unsigned int, int);
 int ncp__vol2io(struct ncp_server *, unsigned char *, unsigned int *,
@@ -153,9 +155,11 @@ static inline void
 ncp_renew_dentries(struct dentry *parent)
 {
 	struct ncp_server *server = NCP_SERVER(parent->d_inode);
-	struct list_head *next = parent->d_subdirs.next;
+	struct list_head *next;
 	struct dentry *dentry;
 
+	spin_lock(&dcache_lock);
+	next = parent->d_subdirs.next;
 	while (next != &parent->d_subdirs) {
 		dentry = list_entry(next, struct dentry, d_child);
 
@@ -166,21 +170,25 @@ ncp_renew_dentries(struct dentry *parent)
 
 		next = next->next;
 	}
+	spin_unlock(&dcache_lock);
 }
 
 static inline void
 ncp_invalidate_dircache_entries(struct dentry *parent)
 {
 	struct ncp_server *server = NCP_SERVER(parent->d_inode);
-	struct list_head *next = parent->d_subdirs.next;
+	struct list_head *next;
 	struct dentry *dentry;
 
+	spin_lock(&dcache_lock);
+	next = parent->d_subdirs.next;
 	while (next != &parent->d_subdirs) {
 		dentry = list_entry(next, struct dentry, d_child);
 		dentry->d_fsdata = NULL;
 		ncp_age_dentry(server, dentry);
 		next = next->next;
 	}
+	spin_unlock(&dcache_lock);
 }
 
 struct ncp_cache_head {

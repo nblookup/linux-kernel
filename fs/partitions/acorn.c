@@ -1,13 +1,17 @@
 /*
- * linux/arch/arm/drivers/block/adfspart.c
+ *  linux/fs/partitions/acorn.c
  *
- * Copyright (c) 1996,1997 Russell King.
+ *  Copyright (c) 1996-2000 Russell King.
  *
- * Scan ADFS partitions on hard disk drives.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Scan ADFS partitions on hard disk drives.
  */
-
 #include <linux/config.h>
 #include <linux/kernel.h>
+#include <linux/types.h>
 #include <linux/kdev_t.h>
 #include <linux/major.h>
 #include <linux/string.h>
@@ -16,8 +20,6 @@
 
 #include "check.h"
 #include "acorn.h"
-
-extern void add_gd_partition(struct gendisk *hd, int minor, int start, int size);
 
 static void
 adfspart_setgeometry(kdev_t dev, unsigned int secspertrack, unsigned int heads,
@@ -32,30 +34,23 @@ adfspart_setgeometry(kdev_t dev, unsigned int secspertrack, unsigned int heads,
 #endif
 }
 
-#define LINUX_NATIVE_MAGIC 0xdeafa1de
-#define LINUX_SWAP_MAGIC   0xdeafab1e
-
-struct linux_part {
-	unsigned long magic;
-	unsigned long start_sect;
-	unsigned long nr_sects;
-};
-
-static struct disc_record *adfs_partition(struct gendisk *hd, char *name, char *data,
-					   unsigned long first_sector, unsigned int minor)
+static struct adfs_discrecord *
+adfs_partition(struct gendisk *hd, char *name, char *data,
+	       unsigned long first_sector, int minor)
 {
-	struct disc_record *dr;
+	struct adfs_discrecord *dr;
 	unsigned int nr_sects;
 
 	if (adfs_checkbblk(data))
 		return NULL;
 
-	dr = (struct disc_record *)(data + 0x1c0);
+	dr = (struct adfs_discrecord *)(data + 0x1c0);
 
 	if (dr->disc_size == 0 && dr->disc_size_high == 0)
 		return NULL;
 
-	nr_sects = (dr->disc_size_high << 23) | (dr->disc_size >> 9);
+	nr_sects = (le32_to_cpu(dr->disc_size_high) << 23) |
+		   (le32_to_cpu(dr->disc_size) >> 9);
 
 	if (name)
 		printk(" [%s]", name);
@@ -64,8 +59,9 @@ static struct disc_record *adfs_partition(struct gendisk *hd, char *name, char *
 }
 
 #ifdef CONFIG_ACORN_PARTITION_RISCIX
-static int riscix_partition(struct gendisk *hd, kdev_t dev, unsigned long first_sect,
-			     unsigned int minor, unsigned long nr_sects)
+static int
+riscix_partition(struct gendisk *hd, kdev_t dev, unsigned long first_sect,
+		 int minor, unsigned long nr_sects)
 {
 	struct buffer_head *bh;
 	struct riscix_record *rr;
@@ -77,7 +73,8 @@ static int riscix_partition(struct gendisk *hd, kdev_t dev, unsigned long first_
 	printk(" [RISCiX]");
 
 	add_gd_partition(hd, riscix_minor = minor++, first_sect, nr_sects);
-	hd->sizes[riscix_minor] = hd->part[riscix_minor].nr_sects >> (BLOCK_SIZE_BITS - 9);
+	hd->sizes[riscix_minor] = hd->part[riscix_minor].nr_sects >>
+					(BLOCK_SIZE_BITS - 9);
 	dev = MKDEV(hd->major, riscix_minor);
 
 	if (!(bh = bread(dev, 0, 1024)))
@@ -93,13 +90,13 @@ static int riscix_partition(struct gendisk *hd, kdev_t dev, unsigned long first_
 			if (rr->part[part].one &&
 			    memcmp(rr->part[part].name, "All\0", 4)) {
 				add_gd_partition(hd, minor++,
-						rr->part[part].start,
-						rr->part[part].length);
+						le32_to_cpu(rr->part[part].start),
+						le32_to_cpu(rr->part[part].length));
 				printk("(%s)", rr->part[part].name);
 			}
 		}
 
-		printk(" >");
+		printk(" >\n");
 
 		if (hd->part[riscix_minor].nr_sects > 2)
 			hd->part[riscix_minor].nr_sects = 2;
@@ -110,8 +107,9 @@ static int riscix_partition(struct gendisk *hd, kdev_t dev, unsigned long first_
 }
 #endif
 
-static int linux_partition(struct gendisk *hd, kdev_t dev, unsigned long first_sect,
-			    unsigned int minor, unsigned long nr_sects)
+static int
+linux_partition(struct gendisk *hd, kdev_t dev, unsigned long first_sect,
+		int minor, unsigned long nr_sects)
 {
 	struct buffer_head *bh;
 	struct linux_part *linuxp;
@@ -123,7 +121,8 @@ static int linux_partition(struct gendisk *hd, kdev_t dev, unsigned long first_s
 	printk(" [Linux]");
 
 	add_gd_partition(hd, linux_minor = minor++, first_sect, nr_sects);
-	hd->sizes[linux_minor] = hd->part[linux_minor].nr_sects >> (BLOCK_SIZE_BITS - 9);
+	hd->sizes[linux_minor] = hd->part[linux_minor].nr_sects >>
+					(BLOCK_SIZE_BITS - 9);
 	dev = MKDEV(hd->major, linux_minor);
 
 	if (!(bh = bread(dev, 0, 1024)))
@@ -131,11 +130,13 @@ static int linux_partition(struct gendisk *hd, kdev_t dev, unsigned long first_s
 
 	linuxp = (struct linux_part *)bh->b_data;
 	printk(" <");
-	while (linuxp->magic == LINUX_NATIVE_MAGIC || linuxp->magic == LINUX_SWAP_MAGIC) {
+	while (linuxp->magic == cpu_to_le32(LINUX_NATIVE_MAGIC) ||
+	       linuxp->magic == cpu_to_le32(LINUX_SWAP_MAGIC)) {
 		if (!(minor & mask))
 			break;
-		add_gd_partition(hd, minor++, first_sect + linuxp->start_sect,
-			linuxp->nr_sects);
+		add_gd_partition(hd, minor++, first_sect +
+				 le32_to_cpu(linuxp->start_sect),
+				 le32_to_cpu(linuxp->nr_sects));
 		linuxp ++;
 	}
 	printk(" >");
@@ -150,8 +151,9 @@ static int linux_partition(struct gendisk *hd, kdev_t dev, unsigned long first_s
 }
 
 #ifdef CONFIG_ACORN_PARTITION_CUMANA
-static int adfspart_check_CUMANA(struct gendisk *hd, kdev_t dev, unsigned long first_sector,
-				  unsigned int minor)
+static int
+adfspart_check_CUMANA(struct gendisk *hd, kdev_t dev,
+		      unsigned long first_sector, int minor)
 {
 	unsigned int start_blk = 0, mask = (1 << hd->minor_shift) - 1;
 	struct buffer_head *bh = NULL;
@@ -162,19 +164,20 @@ static int adfspart_check_CUMANA(struct gendisk *hd, kdev_t dev, unsigned long f
 		return 0;
 
 	/*
-	 * Try Cumana style partitions - sector 3 contains ADFS boot block with pointer
-	 * to next 'drive'.
+	 * Try Cumana style partitions - sector 3 contains ADFS boot block
+	 * with pointer to next 'drive'.
 	 *
-	 * There are unknowns in this code - is the 'cylinder number' of the next
-	 * partition relative to the start of this one - I'm assuming it is.
+	 * There are unknowns in this code - is the 'cylinder number' of the
+	 * next partition relative to the start of this one - I'm assuming
+	 * it is.
 	 *
 	 * Also, which ID did Cumana use?
 	 *
-	 * This is totally unfinished, and will require more work to get it going.
-	 * Hence it is totally untested.
+	 * This is totally unfinished, and will require more work to get it
+	 * going. Hence it is totally untested.
 	 */
 	do {
-		struct disc_record *dr;
+		struct adfs_discrecord *dr;
 		unsigned int nr_sects;
 
 		if (!(minor & mask))
@@ -183,13 +186,15 @@ static int adfspart_check_CUMANA(struct gendisk *hd, kdev_t dev, unsigned long f
 		if (!(bh = bread(dev, start_blk + 3, 1024)))
 			return -1;
 
-		dr = adfs_partition(hd, name, bh->b_data, first_sector, minor++);
+		dr = adfs_partition(hd, name, bh->b_data,
+				    first_sector, minor++);
 		if (!dr)
 			break;
 		name = NULL;
 
 		nr_sects = (bh->b_data[0x1fd] + (bh->b_data[0x1fe] << 8)) *
-			 (dr->heads + (dr->lowsector & 0x40 ? 1 : 0)) * dr->secspertrack;
+			   (dr->heads + (dr->lowsector & 0x40 ? 1 : 0)) *
+			   dr->secspertrack;
 
 		if (!nr_sects)
 			break;
@@ -204,13 +209,16 @@ static int adfspart_check_CUMANA(struct gendisk *hd, kdev_t dev, unsigned long f
 			break;
 
 #ifdef CONFIG_ACORN_PARTITION_RISCIX
-		case PARTITION_RISCIX_SCSI: /* RiscIX - we don't know how to find the next one. */
-			minor = riscix_partition(hd, dev, first_sector, minor, nr_sects);
+		case PARTITION_RISCIX_SCSI:
+			/* RISCiX - we don't know how to find the next one. */
+			minor = riscix_partition(hd, dev, first_sector,
+						 minor, nr_sects);
 			break;
 #endif
 
 		case PARTITION_LINUX:
-			minor = linux_partition(hd, dev, first_sector, minor, nr_sects);
+			minor = linux_partition(hd, dev, first_sector,
+						minor, nr_sects);
 			break;
 		}
 		brelse(bh);
@@ -219,7 +227,7 @@ static int adfspart_check_CUMANA(struct gendisk *hd, kdev_t dev, unsigned long f
 			return minor;
 	} while (1);
 	if (bh)
-		brelse(bh);
+		bforget(bh);
 	return first ? 0 : 1;
 }
 #endif
@@ -239,12 +247,13 @@ static int adfspart_check_CUMANA(struct gendisk *hd, kdev_t dev, unsigned long f
  *	    hda1 = ADFS partition on first drive.
  *	    hda2 = non-ADFS partition.
  */
-static int adfspart_check_ADFS(struct gendisk *hd, kdev_t dev, unsigned long first_sector,
-				unsigned int minor)
+static int
+adfspart_check_ADFS(struct gendisk *hd, kdev_t dev,
+		   unsigned long first_sector, int minor)
 {
 	unsigned long start_sect, nr_sects, sectscyl, heads;
 	struct buffer_head *bh;
-	struct disc_record *dr;
+	struct adfs_discrecord *dr;
 
 	if(get_ptable_blocksize(dev)!=1024)
 		return 0;
@@ -254,12 +263,13 @@ static int adfspart_check_ADFS(struct gendisk *hd, kdev_t dev, unsigned long fir
 
 	dr = adfs_partition(hd, "ADFS", bh->b_data, first_sector, minor++);
 	if (!dr) {
-	    	brelse(bh);
+		bforget(bh);
     		return 0;
 	}
 
 	heads = dr->heads + ((dr->lowsector >> 6) & 1);
-	adfspart_setgeometry(dev, dr->secspertrack, heads, hd->part[MINOR(dev)].nr_sects);
+	adfspart_setgeometry(dev, dr->secspertrack, heads,
+			     hd->part[MINOR(dev)].nr_sects);
 	sectscyl = dr->secspertrack * heads;
 
 	/*
@@ -270,21 +280,19 @@ static int adfspart_check_ADFS(struct gendisk *hd, kdev_t dev, unsigned long fir
 
 	if (start_sect) {
 		first_sector += start_sect;
-		/*
-		 * we now have a problem - how to set the origional disk size if the
-		 * disk doesn't report it, since there is no standard way of getting
-		 * that info.
-		 */
+
 		switch (bh->b_data[0x1fc] & 15) {
 #ifdef CONFIG_ACORN_PARTITION_RISCIX
 		case PARTITION_RISCIX_SCSI:
 		case PARTITION_RISCIX_MFM:
-			minor = riscix_partition(hd, dev, first_sector, minor, nr_sects);
+			minor = riscix_partition(hd, dev, first_sector,
+						 minor, nr_sects);
 			break;
 #endif
 
 		case PARTITION_LINUX:
-			minor = linux_partition(hd, dev, first_sector, minor, nr_sects);
+			minor = linux_partition(hd, dev, first_sector,
+						minor, nr_sects);
 			break;
 		}
 	}
@@ -299,9 +307,6 @@ static int adfspart_check_ICSLinux(kdev_t dev, unsigned long block)
 	struct buffer_head *bh;
 	unsigned int offset = block & 1 ? 512 : 0;
 	int result = 0;
-
-	if(get_ptable_blocksize(dev)!=1024)
-		return 0;
 
 	bh = bread(dev, block >> 1, 1024);
 
@@ -327,13 +332,14 @@ static int adfspart_check_ICSLinux(kdev_t dev, unsigned long block)
  *	    hda2 = ADFS partition 1 on first drive.
  *		..etc..
  */
-static int adfspart_check_ICS(struct gendisk *hd, kdev_t dev, unsigned long first_sector,
-			       unsigned int minor)
+static int
+adfspart_check_ICS(struct gendisk *hd, kdev_t dev,
+		   unsigned long first_sector, int minor)
 {
 	struct buffer_head *bh;
 	unsigned long sum;
 	unsigned int i, mask = (1 << hd->minor_shift) - 1;
-	struct ics_part { unsigned long start; signed long size; } *p;
+	struct ics_part *p;
 
 	if(get_ptable_blocksize(dev)!=1024)
 		return 0;
@@ -350,27 +356,41 @@ static int adfspart_check_ICS(struct gendisk *hd, kdev_t dev, unsigned long firs
 	for (i = 0, sum = 0x50617274; i < 508; i++)
 		sum += bh->b_data[i];
 
-	if (sum != *(unsigned long *)(&bh->b_data[508])) {
-	    	brelse(bh);
+	sum -= le32_to_cpu(*(__u32 *)(&bh->b_data[508]));
+	if (sum) {
+	    	bforget(bh);
 		return 0; /* not ICS partition table */
 	}
 
 	printk(" [ICS]");
 
 	for (p = (struct ics_part *)bh->b_data; p->size; p++) {
+		unsigned long start;
+		long size;
+
 		if ((minor & mask) == 0)
 			break;
 
-		if (p->size < 0 && adfspart_check_ICSLinux(dev, p->start)) {
+		start = le32_to_cpu(p->start);
+		size  = le32_to_cpu(p->size);
+
+		if (size < 0) {
+			size = -size;
+
 			/*
 			 * We use the first sector to identify what type
 			 * this partition is...
 			 */
-			if (-p->size > 1)
-				add_gd_partition(hd, minor, first_sector + p->start + 1, -p->size - 1);
-		} else
-			add_gd_partition(hd, minor, first_sector + p->start, p->size);
-		minor++;
+			if (size > 1 && adfspart_check_ICSLinux(dev, start)) {
+				start += 1;
+				size -= 1;
+			}
+		}
+
+		if (size) {
+			add_gd_partition(hd, minor, first_sector + start, size);
+			minor++;
+		}
 	}
 
 	brelse(bh);
@@ -379,15 +399,6 @@ static int adfspart_check_ICS(struct gendisk *hd, kdev_t dev, unsigned long firs
 #endif
 
 #ifdef CONFIG_ACORN_PARTITION_POWERTEC
-struct ptec_partition {
-	u32 unused1;
-	u32 unused2;
-	u32 start;
-	u32 size;
-	u32 unused5;
-	char type[8];
-};
-	
 /*
  * Purpose: allocate ICS partitions.
  * Params : hd		- pointer to gendisk structure to store partition info.
@@ -400,8 +411,9 @@ struct ptec_partition {
  *	    hda2 = ADFS partition 1 on first drive.
  *		..etc..
  */
-static int adfspart_check_POWERTEC(struct gendisk *hd, kdev_t dev, unsigned long first_sector,
-				   unsigned int minor)
+static int
+adfspart_check_POWERTEC(struct gendisk *hd, kdev_t dev,
+			unsigned long first_sector, int minor)
 {
 	struct buffer_head *bh;
 	struct ptec_partition *p;
@@ -415,15 +427,22 @@ static int adfspart_check_POWERTEC(struct gendisk *hd, kdev_t dev, unsigned long
 		checksum += bh->b_data[i];
 
 	if (checksum != bh->b_data[511]) {
-		brelse(bh);
+		bforget(bh);
 		return 0;
 	}
 
 	printk(" [POWERTEC]");
 
 	for (i = 0, p = (struct ptec_partition *)bh->b_data; i < 12; i++, p++) {
-		if (p->size)
-			add_gd_partition(hd, minor, first_sector + p->start, p->size);
+		unsigned long start;
+		unsigned long size;
+
+		start = le32_to_cpu(p->start);
+		size  = le32_to_cpu(p->size);
+
+		if (size)
+			add_gd_partition(hd, minor, first_sector + start,
+					 size);
 		minor++;
 	}
 
@@ -432,42 +451,44 @@ static int adfspart_check_POWERTEC(struct gendisk *hd, kdev_t dev, unsigned long
 }
 #endif
 
+static int (*partfn[])(struct gendisk *, kdev_t, unsigned long, int) = {
+#ifdef CONFIG_ACORN_PARTITION_ICS
+	adfspart_check_ICS,
+#endif
+#ifdef CONFIG_ACORN_PARTITION_CUMANA
+	adfspart_check_CUMANA,
+#endif
+#ifdef CONFIG_ACORN_PARTITION_ADFS
+	adfspart_check_ADFS,
+#endif
+#ifdef CONFIG_ACORN_PARTITION_POWERTEC
+	adfspart_check_POWERTEC,
+#endif
+	NULL
+};
 /*
  * Purpose: initialise all the partitions on an ADFS drive.
- *          These may be other ADFS partitions or a Linux/RiscBSD/RiscIX
+ *          These may be other ADFS partitions or a Linux/RiscBSD/RISCiX
  *	    partition.
  *
- * Params : hd		 - pointer to gendisk structure to store devices partitions.
- *          dev		 - device number to access
- *	    first_sector - first available sector on the disk.
- *	    minor	 - first available minor on this device.
+ * Params : hd		- pointer to gendisk structure
+ *          dev		- device number to access
+ *	    first_sect  - first available sector on the disk.
+ *	    first_minor	- first available minor on this device.
  *
  * Returns: -1 on error, 0 if not ADFS format, 1 if ok.
  */
 int acorn_partition(struct gendisk *hd, kdev_t dev,
-		    unsigned long first_sector, int first_part_minor)
+		    unsigned long first_sect, int first_minor)
 {
-	int r = 0;
+	int r = 0, i;
 
-#ifdef CONFIG_ACORN_PARTITION_ICS
-	if (r == 0)
-		r = adfspart_check_ICS(hd, dev, first_sector, first_part_minor);
-#endif
-#ifdef CONFIG_ACORN_PARTITION_CUMANA
-	if (r == 0)    
-		r = adfspart_check_CUMANA(hd, dev, first_sector, first_part_minor);
-#endif
-#ifdef CONFIG_ACORN_PARTITION_ADFS
-	if (r == 0)
-		r = adfspart_check_ADFS(hd, dev, first_sector, first_part_minor);
-#endif
-#ifdef CONFIG_ACORN_PARTITION_POWERTEC
-	if (r == 0)
-		r = adfspart_check_POWERTEC(hd, dev, first_sector, first_part_minor);
-#endif
-	if (r < 0)
-		if (warn_no_part) printk(" unable to read boot sectors / partition sectors\n");
-	else if (r)
+	for (i = 0; partfn[i] && r == 0; i++)
+		r = partfn[i](hd, dev, first_sect, first_minor);
+
+	if (r < 0 && warn_no_part)
+		printk(" unable to read boot sectors / partition sectors\n");
+	if (r > 0)
 		printk("\n");
 	return r;
 }

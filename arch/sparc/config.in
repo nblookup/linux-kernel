@@ -1,14 +1,24 @@
-# $Id: config.in,v 1.87 2000/02/27 19:34:12 davem Exp $
+# $Id: config.in,v 1.106 2000/11/17 04:27:52 davem Exp $
 # For a description of the syntax of this configuration file,
-# see the Configure script.
+# see Documentation/kbuild/config-language.txt.
 #
 mainmenu_name "Linux/SPARC Kernel Configuration"
 
 define_bool CONFIG_UID16 y
+define_bool CONFIG_HIGHMEM y
 
 mainmenu_option next_comment
 comment 'Code maturity level options'
 bool 'Prompt for development and/or incomplete code/drivers' CONFIG_EXPERIMENTAL
+endmenu
+
+mainmenu_option next_comment
+comment 'Loadable module support'
+bool 'Enable loadable module support' CONFIG_MODULES
+if [ "$CONFIG_MODULES" = "y" ]; then
+   bool '  Set version information on all symbols for modules' CONFIG_MODVERSIONS
+   bool '  Kernel module loader' CONFIG_KMOD
+fi
 endmenu
 
 mainmenu_option next_comment
@@ -19,19 +29,11 @@ define_bool CONFIG_VT_CONSOLE y
 
 bool 'Symmetric multi-processing support (does not work on sun4/sun4c)' CONFIG_SMP
 
-bool 'Support for SUN4 machines (disables SUN4[CDM] support)' CONFIG_SUN4
-if [ "$CONFIG_SUN4" != "y" ]; then
-   bool 'Support for PCI and PS/2 keyboard/mouse' CONFIG_PCI
-   source drivers/pci/Config.in
-fi
-
-mainmenu_option next_comment
-comment 'Console drivers'
-bool 'PROM console' CONFIG_PROM_CONSOLE
-source drivers/video/Config.in
-endmenu
-
 # Global things across all Sun machines.
+define_bool CONFIG_ISA n
+define_bool CONFIG_EISA n
+define_bool CONFIG_MCA n
+define_bool CONFIG_PCMCIA n
 define_bool CONFIG_SBUS y
 define_bool CONFIG_SBUSCHAR y
 define_bool CONFIG_BUSMOUSE y
@@ -43,9 +45,13 @@ define_bool CONFIG_SUN_KEYBOARD y
 define_bool CONFIG_SUN_CONSOLE y
 define_bool CONFIG_SUN_AUXIO y
 define_bool CONFIG_SUN_IO y
+
+bool 'Support for SUN4 machines (disables SUN4[CDM] support)' CONFIG_SUN4
 if [ "$CONFIG_SUN4" != "y" ]; then
-   source drivers/sbus/char/Config.in
-   source drivers/sbus/audio/Config.in
+   bool 'Support for PCI and PS/2 keyboard/mouse' CONFIG_PCI
+   source drivers/pci/Config.in
+else
+   define_bool CONFIG_PCI n
 fi
 
 tristate 'Openprom tree appears in /proc/openprom' CONFIG_SUN_OPENPROMFS
@@ -65,39 +71,65 @@ dep_tristate '  Parallel printer support' CONFIG_PRINTER $CONFIG_PARPORT
 endmenu
 
 mainmenu_option next_comment
-comment 'Loadable module support'
-bool 'Enable loadable module support' CONFIG_MODULES
-if [ "$CONFIG_MODULES" = "y" ]; then
-   bool '  Set version information on all symbols for modules' CONFIG_MODVERSIONS
-   bool '  Kernel module loader' CONFIG_KMOD
-fi
+comment 'Console drivers'
+bool 'PROM console' CONFIG_PROM_CONSOLE
+source drivers/video/Config.in
 endmenu
 
+source drivers/mtd/Config.in
+
+if [ "$CONFIG_SUN4" != "y" ]; then
+   source drivers/sbus/char/Config.in
+   source drivers/sbus/audio/Config.in
+fi
+
 mainmenu_option next_comment
-comment 'Floppy, IDE, and other block devices'
+comment 'Block devices'
 
 bool 'Normal floppy disk support' CONFIG_BLK_DEV_FD
-define_bool CONFIG_BLK_DEV_IDE n
-bool 'Multiple devices driver support' CONFIG_BLK_DEV_MD
-if [ "$CONFIG_BLK_DEV_MD" = "y" ]; then
-   tristate '  Linear (append) mode' CONFIG_MD_LINEAR
-   tristate '  RAID-0 (striping) mode' CONFIG_MD_STRIPED
-   tristate '  RAID-1 (mirroring) mode' CONFIG_MD_MIRRORING
-   tristate '  RAID-4/RAID-5 mode' CONFIG_MD_RAID5
-fi
-
-tristate 'RAM disk support' CONFIG_BLK_DEV_RAM
-if [ "$CONFIG_BLK_DEV_RAM" = "y" ]; then
-   bool '  Initial RAM disk (initrd) support' CONFIG_BLK_DEV_INITRD
-fi
 
 tristate 'Loopback device support' CONFIG_BLK_DEV_LOOP
-tristate 'Network block device support' CONFIG_BLK_DEV_NBD
+dep_tristate 'Network block device support' CONFIG_BLK_DEV_NBD $CONFIG_NET
+
+#tristate 'Logical volume manager (LVM) support' CONFIG_BLK_DEV_LVM N
+#if [ "$CONFIG_BLK_DEV_LVM" != "n" ]; then
+#   bool '   LVM information in proc filesystem' CONFIG_LVM_PROC_FS Y
+#fi
+
+source drivers/md/Config.in
+
+tristate 'RAM disk support' CONFIG_BLK_DEV_RAM
+if [ "$CONFIG_BLK_DEV_RAM" = "y" -o "$CONFIG_BLK_DEV_RAM" = "m" ]; then
+	int '   Default RAM disk size' CONFIG_BLK_DEV_RAM_SIZE 4096
+fi
+dep_bool '  Initial RAM disk (initrd) support' CONFIG_BLK_DEV_INITRD $CONFIG_BLK_DEV_RAM
 
 endmenu
 
 if [ "$CONFIG_NET" = "y" ]; then
    source net/Config.in
+fi
+
+# Don't frighten a common SBus user
+if [ "$CONFIG_PCI" = "y" ]; then
+
+  mainmenu_option next_comment
+  comment 'ATA/IDE/MFM/RLL support'
+
+  tristate 'ATA/IDE/MFM/RLL support' CONFIG_IDE
+
+  if [ "$CONFIG_IDE" != "n" ]; then
+    source drivers/ide/Config.in
+  else
+    define_bool CONFIG_BLK_DEV_IDE_MODES n
+    define_bool CONFIG_BLK_DEV_HD n
+  fi
+  endmenu
+else
+
+  define_bool CONFIG_IDE n
+  define_bool CONFIG_BLK_DEV_IDE_MODES n
+  define_bool CONFIG_BLK_DEV_HD n
 fi
 
 mainmenu_option next_comment
@@ -164,6 +196,12 @@ if [ "$CONFIG_NET" = "y" ]; then
    if [ "$CONFIG_NETDEVICES" = "y" ]; then
       tristate '  Dummy net driver support' CONFIG_DUMMY
       tristate '  Bonding driver support' CONFIG_BONDING
+      tristate '  Universal TUN/TAP device driver support' CONFIG_TUN
+      if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
+        if [ "$CONFIG_NETLINK" = "y" ]; then
+          tristate '  Ethertap network tap (OBSOLETE)' CONFIG_ETHERTAP
+        fi
+      fi
       tristate '  PPP (point-to-point) support' CONFIG_PPP
       if [ ! "$CONFIG_PPP" = "n" ]; then
         dep_tristate '  PPP support for async serial ports' CONFIG_PPP_ASYNC $CONFIG_PPP
@@ -179,12 +217,19 @@ if [ "$CONFIG_NET" = "y" ]; then
       fi
       tristate '  Sun LANCE support' CONFIG_SUNLANCE
       tristate '  Sun Happy Meal 10/100baseT support' CONFIG_HAPPYMEAL
-      tristate '  Sun BigMAC 10/100baseT support (EXPERIMENTAL)' CONFIG_SUNBMAC
+      if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
+	 tristate '  Sun BigMAC 10/100baseT support (EXPERIMENTAL)' CONFIG_SUNBMAC
+      fi
       tristate '  Sun QuadEthernet support' CONFIG_SUNQE
       tristate '  MyriCOM Gigabit Ethernet support' CONFIG_MYRI_SBUS
+      if [ "$CONFIG_PCI" = "y" ]; then
+         tristate '3c590/3c900 series (592/595/597) "Vortex/Boomerang" support' CONFIG_VORTEX
+      fi
+
 #      bool '  FDDI driver support' CONFIG_FDDI
 #      if [ "$CONFIG_FDDI" = "y" ]; then
 #      fi
+
       if [ "$CONFIG_ATM" = "y" ]; then
 	 source drivers/atm/Config.in
       fi

@@ -1,4 +1,3 @@
-# $Id: Makefile,v 1.6 2000/01/29 01:41:59 ralf Exp $
 #
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
@@ -13,6 +12,7 @@
 #
 # Select the object file format to substitute into the linker script.
 #
+CPP=$(CC) -E
 ifdef CONFIG_CPU_LITTLE_ENDIAN
 tool-prefix	= mips64el-linux-
 else
@@ -33,7 +33,8 @@ endif
 # machines may also.  Since BFD is incredibly buggy with respect to
 # crossformat linking we rely on the elf2ecoff tool for format conversion.
 #
-CFLAGS		+= -mabi=64 -G 0 -mno-abicalls -fno-pic -pipe
+CFLAGS		+= -I $(TOPDIR)/include/asm $(CFLAGS)
+CFLAGS		+= -mabi=64 -G 0 -mno-abicalls -fno-pic -Wa,--trap -pipe
 LINKFLAGS	+= -G 0 -static # -N
 MODFLAGS	+= -mlong-calls
 
@@ -86,7 +87,11 @@ SUBDIRS       += arch/mips64/sgi-ip27 arch/mips64/arc
 # must be 16kb aligned or the handling of the current variable will break.
 #
 #LOADADDR      += 0xa80000000001c000
+ifdef CONFIG_MAPPED_KERNEL
+LOADADDR      += 0xc001c000
+else
 LOADADDR      += 0x8001c000
+endif
 endif
 
 #
@@ -126,8 +131,17 @@ else
 64bit-bfd = elf64-bigmips
 endif
 
+vmlinux: arch/mips64/ld.script.elf32
+arch/mips64/ld.script.elf32: arch/mips64/ld.script.elf32.S
+	$(CPP) -C -P -I$(HPATH) -imacros $(HPATH)/asm-mips64/sn/mapped_kernel.h -Umips arch/mips64/ld.script.elf32.S > arch/mips64/ld.script.elf32
+
+ifdef CONFIG_MAPPED_KERNEL
+vmlinux.64: vmlinux
+	$(OBJCOPY) -O $(64bit-bfd) --change-addresses=0xbfffffff40000000 $< $@
+else
 vmlinux.64: vmlinux
 	$(OBJCOPY) -O $(64bit-bfd) --change-addresses=0xa7ffffff80000000 $< $@
+endif
 
 zImage: vmlinux
 	@$(MAKEBOOT) zImage
@@ -141,9 +155,14 @@ archclean:
 	@$(MAKEBOOT) clean
 	$(MAKE) -C arch/$(ARCH)/kernel clean
 	$(MAKE) -C arch/$(ARCH)/tools clean
-	rm -f vmlinux.64
+	rm -f vmlinux.64 arch/$(ARCH)/ld.script.elf32
 
 archmrproper:
+	@$(MAKEBOOT) mrproper
+	$(MAKE) -C arch/$(ARCH)/tools mrproper
 
 archdep:
+	if [ ! -f $(TOPDIR)/include/asm-$(ARCH)/offset.h ]; then \
+	 touch $(TOPDIR)/include/asm-$(ARCH)/offset.h; \
+	fi;
 	@$(MAKEBOOT) dep

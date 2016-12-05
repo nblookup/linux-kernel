@@ -78,7 +78,6 @@ static int remap_area_pages(unsigned long address, unsigned long phys_addr,
 		if (remap_area_pmd(pmd, address, end - address,
 					 phys_addr + address, flags))
 			return -ENOMEM;
-		set_pgdir(address, *dir);
 		address = (address + PGDIR_SIZE) & PGDIR_MASK;
 		dir++;
 	} while (address && (address < end));
@@ -121,15 +120,14 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 	 */
 	if (phys_addr < virt_to_phys(high_memory)) {
 		char *t_addr, *t_end;
-		int i;
+		struct page *page;
 
 		t_addr = __va(phys_addr);
 		t_end = t_addr + (size - 1);
 	   
-		for(i = MAP_NR(t_addr); i < MAP_NR(t_end); i++) {
-			if(!PageReserved(mem_map + i))
+		for(page = virt_to_page(t_addr); page <= virt_to_page(t_end); page++)
+			if(!PageReserved(page))
 				return NULL;
-		}
 	}
 
 	/*

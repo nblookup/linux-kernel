@@ -109,7 +109,10 @@ parport
 |   |   |-- active
 |   |   `-- lp
 |   |       `-- timeslice
-|   |-- hardware
+|   |-- base-addr
+|   |-- irq
+|   |-- dma
+|   |-- modes
 |   `-- spintime
 `-- parport1
     |-- autoprobe
@@ -121,7 +124,10 @@ parport
     |   |-- active
     |   `-- ppa
     |       `-- timeslice
-    |-- hardware
+    |-- base-addr
+    |-- irq
+    |-- dma
+    |-- modes
     `-- spintime
 
 
@@ -133,7 +139,28 @@ devices/active	A list of the device drivers using that port.  A "+"
 		string "none" means that there are no device drivers
 		using that port.
 
-hardware	Parallel port's base address, IRQ line and DMA channel.
+base-addr	Parallel port's base address, or addresses if the port
+		has more than one in which case they are separated
+		with tabs.  These values might not have any sensible
+		meaning for some ports.
+
+irq		Parallel port's IRQ, or -1 if none is being used.
+
+dma		Parallel port's DMA channel, or -1 if none is being
+		used.
+
+modes		Parallel port's hardware modes, comma-separated,
+		meaning:
+
+		PCSPP		PC-style SPP registers are available.
+		TRISTATE	Port is bidirectional.
+		COMPAT		Hardware acceleration for printers is
+				available and will be used.
+		EPP		Hardware acceleration for EPP protocol
+				is available and will be used.
+		ECP		Hardware acceleration for ECP protocol
+				is available and will be used.
+		DMA		DMA is available and will be used.
 
 autoprobe	Any IEEE-1284 device ID information that has been
 		acquired from the (non-IEEE 1284.3) device.
@@ -192,6 +219,46 @@ Also:
 
  * IRQ autoprobing works only for a few port types at the moment.
 
+Reporting printer problems with parport
+=======================================
+
+If you are having problems printing, please go through these steps to
+try to narrow down where the problem area is.
+
+When reporting problems with parport, really you need to give all of
+the messages that parport_pc spits out when it initialises.  There are
+several code paths:
+
+o polling
+o interrupt-driven, protocol in software
+o interrupt-driven, protocol in hardware using PIO
+o interrupt-driven, protocol in hardware using DMA
+
+The kernel messages that parport_pc logs give an indication of which
+code path is being used. (They could be a lot better actually..)
+
+For normal printer protocol, having IEEE 1284 modes enabled or not
+should not make a difference.
+
+To turn off the 'protocol in hardware' code paths, disable
+CONFIG_PARPORT_PC_FIFO.  Note that when they are enabled they are not
+necessarily _used_; it depends on whether the hardware is available,
+enabled by the BIOS, and detected by the driver.
+
+So, to start with, disable CONFIG_PARPORT_PC_FIFO, and load parport_pc
+with 'irq=none'. See if printing works then.  It really should,
+because this is the simplest code path.
+
+If that works fine, try with 'io=0x378 irq=7' (adjust for your
+hardware), to make it use interrupt-driven in-software protocol.
+
+If _that_ works fine, then one of the hardware modes isn't working
+right.  Enable CONFIG_PARPORT_PC_FIFO (no, it isn't a module option,
+and yes, it should be), set the port to ECP mode in the BIOS and note
+the DMA channel, and try with:
+
+    io=0x378 irq=7 dma=none (for PIO)
+    io=0x378 irq=7 dma=3 (for DMA)
 --
 Philip.Blundell@pobox.com
 tim@cyberelk.demon.co.uk

@@ -111,7 +111,7 @@ There are two types of DMA mappings:
 
 - Consistent DMA mappings which are usually mapped at driver
   initialization, unmapped at the end and for which the hardware should
-  guarentee that the device and the cpu can access the data
+  guarantee that the device and the cpu can access the data
   in parallel and will see updates made by each other without any
   explicit software flushing.
 
@@ -126,7 +126,7 @@ There are two types of DMA mappings:
 
   The invariant these examples all require is that any cpu store
   to memory is immediately visible to the device, and vice
-  versa.  Consistent mappings guarentee this.
+  versa.  Consistent mappings guarantee this.
 
 - Streaming DMA mappings which are usually mapped for one DMA transfer,
   unmapped right after it (unless you use pci_dma_sync below) and for which
@@ -171,9 +171,9 @@ it from the CPU and dma_handle which you pass to the card.
 The cpu return address and the DMA bus master address are both
 guaranteed to be aligned to the smallest PAGE_SIZE order which
 is greater than or equal to the requested size.  This invariant
-exists (for example) to guarentee that if you allocate a chunk
+exists (for example) to guarantee that if you allocate a chunk
 which is smaller than or equal to 64 kilobytes, the extent of the
-buffer you receive will not cross a 64K boundry.
+buffer you receive will not cross a 64K boundary.
 
 To unmap and free such a DMA region, you call:
 
@@ -198,12 +198,12 @@ One should provide the exact DMA direction if you know it.
 PCI_DMA_TODEVICE means "from main memory to the PCI device"
 PCI_DMA_FROMDEVICE means "from the PCI device to main memory"
 
-Cou are _strongly_ encouraged to specify this as precisely
+You are _strongly_ encouraged to specify this as precisely
 as you possibly can.
 
 If you absolutely cannot know the direction of the DMA transfer,
 specify PCI_DMA_BIDIRECTIONAL.  It means that the DMA can go in
-either direction.  The platform guarentees that you may legally
+either direction.  The platform guarantees that you may legally
 specify this, and that it will work, but this may be at the
 cost of performance for example.
 
@@ -284,7 +284,7 @@ accessed sg->address and sg->length as shown above.
 
 To unmap a scatterlist, just call:
 
-	pci_unmap_sg(dev, sglist, nents);
+	pci_unmap_sg(dev, sglist, nents, direction);
 
 Again, make sure DMA activity finished.
 
@@ -341,17 +341,17 @@ to use the pci_dma_sync_*() interfaces.
 			struct my_card_header *hp;
 
 			/* Examine the header to see if we wish
-			 * to except the data.  But synchronize
+			 * to accept the data.  But synchronize
 			 * the DMA transfer with the CPU first
 			 * so that we see updated contents.
 			 */
-			pci_dma_sync_single(cp->pdev, cp->rx_buf, cp->rx_len,
+			pci_dma_sync_single(cp->pdev, cp->rx_dma, cp->rx_len,
 					    PCI_DMA_FROMDEVICE);
 
 			/* Now it is safe to examine the buffer. */
 			hp = (struct my_card_header *) cp->rx_buf;
 			if (header_is_ok(hp)) {
-				pci_unmap_single(cp->pdev, cp->rx_buf, cp->rx_len,
+				pci_unmap_single(cp->pdev, cp->rx_dma, cp->rx_len,
 						 PCI_DMA_FROMDEVICE);
 				pass_to_upper_layers(cp->rx_buf);
 				make_and_setup_new_rx_buf(cp);

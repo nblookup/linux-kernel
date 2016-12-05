@@ -21,7 +21,7 @@
 /* With some changes from Kyösti Mälkki <kmalkki@cc.hut.fi> and even
    Frodo Looijaard <frodol@dds.nl> */
 
-/* $Id: i2c-algo-bit.c,v 1.26 2000/01/24 02:06:33 mds Exp $ */
+/* $Id: i2c-algo-bit.c,v 1.27 2000/07/09 15:16:16 frodo Exp $ */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -62,9 +62,9 @@
 
 /* module parameters:
  */
-static int i2c_debug=0;
-static int bit_test=0;	/* see if the line-setting functions work	*/
-static int bit_scan=0;	/* have a look at what's hanging 'round		*/
+static int i2c_debug;
+static int bit_test;	/* see if the line-setting functions work	*/
+static int bit_scan;	/* have a look at what's hanging 'round		*/
 
 /* --- setting states on the bus with the right timing: ---------------	*/
 
@@ -594,8 +594,10 @@ int i2c_bit_add_bus(struct i2c_adapter *adap)
 
 int i2c_bit_del_bus(struct i2c_adapter *adap)
 {
+	int res;
 
-	i2c_del_adapter(adap);
+	if ((res = i2c_del_adapter(adap)) < 0)
+		return res;
 
 	DEB2(printk("i2c-algo-bit.o: adapter unregistered: %s\n",adap->name));
 

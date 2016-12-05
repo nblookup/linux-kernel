@@ -1,4 +1,4 @@
-/* $Id: flash.c,v 1.17 2000/02/10 02:51:35 davem Exp $
+/* $Id: flash.c,v 1.20 2000/11/08 04:57:49 davem Exp $
  * flash.c: Allow mmap access to the OBP Flash, for OBP updates.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -13,6 +13,7 @@
 #include <linux/fcntl.h>
 #include <linux/poll.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -37,23 +38,28 @@ flash_mmap(struct file *file, struct vm_area_struct *vma)
 	unsigned long addr;
 	unsigned long size;
 
+	lock_kernel();
 	if (flash.read_base == flash.write_base) {
 		addr = flash.read_base;
 		size = flash.read_size;
 	} else {
 		if ((vma->vm_flags & VM_READ) &&
-		    (vma->vm_flags & VM_WRITE))
+		    (vma->vm_flags & VM_WRITE)) {
+			unlock_kernel();
 			return -EINVAL;
-
+		}
 		if (vma->vm_flags & VM_READ) {
 			addr = flash.read_base;
 			size = flash.read_size;
 		} else if (vma->vm_flags & VM_WRITE) {
 			addr = flash.write_base;
 			size = flash.write_size;
-		} else
+		} else {
+			unlock_kernel();
 			return -ENXIO;
+		}
 	}
+	unlock_kernel();
 
 	if ((vma->vm_pgoff << PAGE_SHIFT) > size)
 		return -ENXIO;
@@ -115,15 +121,15 @@ flash_open(struct inode *inode, struct file *file)
 	if (test_and_set_bit(0, (void *)&flash.busy) != 0)
 		return -EBUSY;
 
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static int
 flash_release(struct inode *inode, struct file *file)
 {
-	MOD_DEC_USE_COUNT;
+	lock_kernel();
 	flash.busy = 0;
+	unlock_kernel();
 	return 0;
 }
 
@@ -131,6 +137,7 @@ static struct file_operations flash_fops = {
 	/* no write to the Flash, use mmap
 	 * and play flash dependent tricks.
 	 */
+	owner:		THIS_MODULE,
 	llseek:		flash_llseek,
 	read:		flash_read,
 	mmap:		flash_mmap,
@@ -142,11 +149,7 @@ static struct miscdevice flash_dev = { FLASH_MINOR, "flash", &flash_fops };
 
 EXPORT_NO_SYMBOLS;
 
-#ifdef MODULE
-int init_module(void)
-#else
-int __init flash_init(void)
-#endif
+static int __init flash_init(void)
 {
 	struct sbus_bus *sbus;
 	struct sbus_dev *sdev = 0;
@@ -229,9 +232,10 @@ int __init flash_init(void)
 	return 0;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit flash_cleanup(void)
 {
 	misc_deregister(&flash_dev);
 }
-#endif
+
+module_init(flash_init);
+module_exit(flash_cleanup);

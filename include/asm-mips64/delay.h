@@ -1,15 +1,16 @@
-/* $Id: delay.h,v 1.1 1999/08/18 23:37:50 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
  * Copyright (C) 1994 by Waldorf Electronics
- * Copyright (C) 1995 - 1999 by Ralf Baechle
- * Copyright (C) 1999 Silicon Graphics, Inc.
+ * Copyright (C) 1995 - 2000 by Ralf Baechle
+ * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
  */
 #ifndef _ASM_DELAY_H
 #define _ASM_DELAY_H
+
+#include <linux/config.h>
 
 extern __inline__ void
 __delay(unsigned long loops)
@@ -35,15 +36,16 @@ __delay(unsigned long loops)
  */
 extern __inline__ void __udelay(unsigned long usecs, unsigned long lps)
 {
+	unsigned long lo;
+
 	usecs *= 0x000010c6f7a0b5edUL;		/* 2**64 / 1000000 */
-	__asm__("dmultu\t%0,%2\n\t"
-		"mfhi\t%0"
-		:"=r" (usecs)
-		:"0" (usecs),"r" (lps));
+	__asm__("dmultu\t%2,%3"
+		:"=h" (usecs), "=l" (lo)
+		:"r" (usecs),"r" (lps));
 	__delay(usecs);
 }
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #define __udelay_val cpu_data[smp_processor_id()].udelay_val
 #else
 #define __udelay_val loops_per_sec

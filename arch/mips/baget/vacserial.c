@@ -1,4 +1,4 @@
-/* $Id: vacserial.c,v 1.4 1999/10/09 00:00:57 ralf Exp $
+/* $Id: vacserial.c,v 1.3 1999/08/17 22:18:37 ralf Exp $
  * vacserial.c: VAC UART serial driver
  *              This code stealed and adopted from linux/drivers/char/serial.c
  *              See that for author info
@@ -115,6 +115,9 @@ static struct console sercons;
 static void autoconfig(struct serial_state * info);
 static void change_speed(struct async_struct *info);
 static void rs_wait_until_sent(struct tty_struct *tty, int timeout);
+static void rs_timer(unsigned long dummy);
+
+static struct timer_list vacs_timer;
 
 /*
  * Here we define the default xmit fifo size used for each type of
@@ -750,8 +753,7 @@ static int startup(struct async_struct * info)
 	/*
 	 * Set up serial timers...
 	 */
-	timer_table[RS_TIMER].expires = jiffies + 2*HZ/100;
-	timer_active |= 1 << RS_TIMER;
+	mod_timer(&vacs_timer, jiffies + 2*HZ/100);
 
 	/*
 	 * and set the speed of the serial port
@@ -1976,7 +1978,7 @@ static int get_async_struct(int line, struct async_struct **ret_info)
 	info->tqueue.data = info;
 	info->state = sstate;
 	if (sstate->info) {
-		kfree_s(info, sizeof(struct async_struct));
+		kfree(info);
 		*ret_info = sstate->info;
 		return 0;
 	}
@@ -2168,7 +2170,7 @@ int rs_read_proc(char *page, char **start, off_t off, int count,
 done:
 	if (off >= len+begin)
 		return 0;
-	*start = page + (begin-off);
+	*start = page + (off-begin);
 	return ((count < begin+len-off) ? count : begin+len-off);
 }
 
@@ -2255,7 +2257,7 @@ EXPORT_SYMBOL(unregister_serial);
  *  Important function for VAC UART check and reanimation.
  */
 
-static void rs_timer(void)
+static void rs_timer(unsigned long dummy)
 {
         static unsigned long last_strobe = 0;
         struct async_struct *info;
@@ -2285,8 +2287,7 @@ static void rs_timer(void)
                 }
         }
         last_strobe = jiffies;
-        timer_table[RS_TIMER].expires = jiffies + RS_STROBE_TIME;
-        timer_active |= 1 << RS_TIMER;
+        mod_timer(&vacs_timer, jiffies + RS_STROBE_TIME);
 
 	/*
 	 *  It looks this code for case we share IRQ with console...
@@ -2301,7 +2302,7 @@ static void rs_timer(void)
 #endif
                 restore_flags(flags);
 
-                timer_table[RS_TIMER].expires = jiffies + IRQ_timeout[0] - 2;
+                mod_timer(&vacs_timer, jiffies + IRQ_timeout[0] - 2);
         }
 }
  
@@ -2323,8 +2324,9 @@ int __init rs_init(void)
 #endif
 
 	init_bh(SERIAL_BH, do_serial_bh);
-	timer_table[RS_TIMER].fn = rs_timer;
-	timer_table[RS_TIMER].expires = 0;
+	init_timer(&vacs_timer);
+	vacs_timer.function = rs_timer;
+	vacs_timer.expires = 0;
 
 	for (i = 0; i < NR_IRQS; i++) {
 		IRQ_ports[i] = 0;
@@ -2528,9 +2530,7 @@ void cleanup_module(void)
 	save_flags(flags);
 	cli();
 
-	timer_active &= ~(1 << RS_TIMER);
-	timer_table[RS_TIMER].fn = NULL;
-	timer_table[RS_TIMER].expires = 0;
+	del_timer_sync(&vacs_timer);
         remove_bh(SERIAL_BH);
 
 	if ((e1 = tty_unregister_driver(&serial_driver)))
@@ -2811,17 +2811,13 @@ static int __init serial_console_setup(struct console *co, char *options)
 }
 
 static struct console sercons = {
-	"ttyS",
-	serial_console_write,
-	NULL,
-	serial_console_device,
-	serial_console_wait_key,
-	NULL,
-	serial_console_setup,
-	CON_PRINTBUFFER,
-	-1,
-	0,
-	NULL
+	name:		"ttyS",
+	write:		serial_console_write,
+	device:		serial_console_device,
+	wait_key:	serial_console_wait_key,
+	setup:		serial_console_setup,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
 };
 
 /*
@@ -2843,7 +2839,7 @@ long __init serial_console_init(long kmem_start, long kmem_end)
  * device more directly.
  */
 
-static int initialized = 0;
+static int initialized;
 
 static int rs_debug_init(struct async_struct *info)
 {

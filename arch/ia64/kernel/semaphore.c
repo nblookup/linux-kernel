@@ -7,9 +7,9 @@
 
 /*
  * Semaphores are implemented using a two-way counter: The "count"
- * variable is decremented for each process that tries to aquire the
+ * variable is decremented for each process that tries to acquire the
  * semaphore, while the "sleepers" variable is a count of such
- * aquires.
+ * acquires.
  *
  * Notably, the inline "up()" and "down()" functions can efficiently
  * test if they need to do any extra work (up needs to do something
@@ -50,7 +50,7 @@ __down (struct semaphore *sem)
 {
 	struct task_struct *tsk = current;
 	DECLARE_WAITQUEUE(wait, tsk);
-	tsk->state = TASK_UNINTERRUPTIBLE|TASK_EXCLUSIVE;
+	tsk->state = TASK_UNINTERRUPTIBLE;
 	add_wait_queue_exclusive(&sem->wait, &wait);
 
 	spin_lock_irq(&semaphore_lock);
@@ -70,7 +70,7 @@ __down (struct semaphore *sem)
 		spin_unlock_irq(&semaphore_lock);
 
 		schedule();
-		tsk->state = TASK_UNINTERRUPTIBLE|TASK_EXCLUSIVE;
+		tsk->state = TASK_UNINTERRUPTIBLE;
 		spin_lock_irq(&semaphore_lock);
 	}
 	spin_unlock_irq(&semaphore_lock);
@@ -85,7 +85,7 @@ __down_interruptible (struct semaphore * sem)
 	int retval = 0;
 	struct task_struct *tsk = current;
 	DECLARE_WAITQUEUE(wait, tsk);
-	tsk->state = TASK_INTERRUPTIBLE|TASK_EXCLUSIVE;
+	tsk->state = TASK_INTERRUPTIBLE;
 	add_wait_queue_exclusive(&sem->wait, &wait);
 
 	spin_lock_irq(&semaphore_lock);
@@ -121,7 +121,7 @@ __down_interruptible (struct semaphore * sem)
 		spin_unlock_irq(&semaphore_lock);
 
 		schedule();
-		tsk->state = TASK_INTERRUPTIBLE|TASK_EXCLUSIVE;
+		tsk->state = TASK_INTERRUPTIBLE;
 		spin_lock_irq(&semaphore_lock);
 	}
 	spin_unlock_irq(&semaphore_lock);
@@ -188,7 +188,7 @@ down_read_failed_biased (struct rw_semaphore *sem)
 }
 
 /*
- * This gets called if we failed to aquire the lock and we are not
+ * This gets called if we failed to acquire the lock and we are not
  * biased to acquire the lock.  We undo the decrement that was
  * done earlier, go to sleep, and then attempt to re-acquire the
  * lock afterwards.
@@ -222,9 +222,6 @@ down_read_failed (struct rw_semaphore *sem)
 void
 __down_read_failed (struct rw_semaphore *sem, long count)
 {
-	struct task_struct *tsk = current;
-	DECLARE_WAITQUEUE(wait, tsk);
-
 	while (1) {
 		if (count == -1) {
 			down_read_failed_biased(sem);
@@ -251,7 +248,7 @@ down_write_failed_biased (struct rw_semaphore *sem)
 	for (;;) {
 		if (sem->write_bias_granted && xchg(&sem->write_bias_granted, 0))
 			break;
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE | TASK_EXCLUSIVE);
+		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
 		if (!sem->write_bias_granted)
 			schedule();
 	}
@@ -280,9 +277,9 @@ down_write_failed (struct rw_semaphore *sem)
 	add_wait_queue_exclusive(&sem->wait, &wait);
 
 	while (sem->count < 0) {
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE | TASK_EXCLUSIVE);
+		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
 		if (sem->count >= 0)
-			break;	/* we must attempt to aquire or bias the lock */
+			break;	/* we must attempt to acquire or bias the lock */
 		schedule();
 	}
 
@@ -310,7 +307,7 @@ __down_write_failed (struct rw_semaphore *sem, long count)
 		do {
 			old_count = sem->count;
 			count = old_count - RW_LOCK_BIAS;
-		} while (cmpxchg(&sem->count, old_count, count) != old_count);
+		} while (cmpxchg_acq(&sem->count, old_count, count) != old_count);
 
 		if (count == 0)
 			return;

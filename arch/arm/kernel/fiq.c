@@ -83,8 +83,11 @@ int fiq_def_op(void *ref, int relinquish)
 	return 0;
 }
 
-static struct fiq_handler default_owner =
-	{ NULL, "default", fiq_def_op, NULL };
+static struct fiq_handler default_owner = {
+	name:	"default",
+	fiq_op:	fiq_def_op,
+};
+
 static struct fiq_handler *current_fiq = &default_owner;
 
 int get_fiq_list(char *buf)
@@ -128,15 +131,14 @@ void set_fiq_regs(struct pt_regs *regs)
 #endif
 #ifdef CONFIG_CPU_32
 	"mrs	%0, cpsr
-	bic	%1, %0, #0xf
-	orr	%1, %1, #0xc1
-	msr	cpsr, %1	@ select FIQ mode
+	mov	%1, #0xc1
+	msr	cpsr_c, %1	@ select FIQ mode
 	mov	r0, r0
 	ldmia	%2, {r8 - r14}
-	msr	cpsr, %0	@ return to SVC mode
+	msr	cpsr_c, %0	@ return to SVC mode
 	mov	r0, r0"
 #endif
-	: "=r" (tmp), "=r" (tmp2)
+	: "=&r" (tmp), "=&r" (tmp2)
 	: "r" (&regs->ARM_r8)
 	/* These registers aren't modified by the above code in a way
 	   visible to the compiler, but we mark them as clobbers anyway
@@ -161,15 +163,14 @@ void get_fiq_regs(struct pt_regs *regs)
 #endif
 #ifdef CONFIG_CPU_32
 	"mrs	%0, cpsr
-	bic	%1, %0, #0xf
-	orr	%1, %1, #0xc1
-	msr	cpsr, %1	@ select FIQ mode
+	mov	%1, #0xc1
+	msr	cpsr_c, %1	@ select FIQ mode
 	mov	r0, r0
 	stmia	%2, {r8 - r14}
-	msr	cpsr, %0	@ return to SVC mode
+	msr	cpsr_c, %0	@ return to SVC mode
 	mov	r0, r0"
 #endif
-	: "=r" (tmp), "=r" (tmp2)
+	: "=&r" (tmp), "=&r" (tmp2)
 	: "r" (&regs->ARM_r8)
 	/* These registers aren't modified by the above code in a way
 	   visible to the compiler, but we mark them as clobbers anyway

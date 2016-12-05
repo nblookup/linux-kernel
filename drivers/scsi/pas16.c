@@ -440,6 +440,9 @@ int __init pas16_detect(Scsi_Host_Template * tpnt)
 	    break;
 
 	instance = scsi_register (tpnt, sizeof(struct NCR5380_hostdata));
+	if(instance == NULL)
+		break;
+		
 	instance->io_port = io_port;
 
 	NCR5380_init(instance, 0);
@@ -597,12 +600,12 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance, unsigned char *src
 
 #include "NCR5380.c"
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = MV_PAS16;
+static Scsi_Host_Template driver_template = MV_PAS16;
 
 #include "scsi_module.c"
 
+#ifdef MODULE
 MODULE_PARM(pas16_addr, "h");
 MODULE_PARM(pas16_irq, "i");
 #endif

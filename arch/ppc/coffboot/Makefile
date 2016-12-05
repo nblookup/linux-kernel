@@ -8,13 +8,13 @@ HOSTCFLAGS = -O -I$(TOPDIR)/include
 CFLAGS	= $(CPPFLAGS) -O -fno-builtin
 OBJCOPY_ARGS = -O aixcoff-rs6000 -R .stab -R .stabstr -R .comment
 COFF_LD_ARGS = -e _start -T ld.script -Ttext 500000 -Tdata 510000 -Bstatic
-CHRP_LD_ARGS = -Ttext 0x00400000
+CHRP_LD_ARGS = -Ttext 0x01000000
 
 COFFOBJS = coffcrt0.o start.o coffmain.o misc.o string.o zlib.o image.o
 CHRPOBJS = crt0.o start.o chrpmain.o misc.o string.o zlib.o image.o
 LIBS = $(TOPDIR)/lib/lib.a
 
-ifeq ($(CONFIG_PPC64),y)
+ifeq ($(CONFIG_PPC64BRIDGE),y)
 MSIZE=.64
 else
 MSIZE=
@@ -42,7 +42,7 @@ znetboot: vmlinux.coff vmlinux.elf zImage
 	cp vmlinux.coff $(TFTPIMAGE)
 	cp vmlinux.elf $(TFTPIMAGE).elf
 
-znetboot.initrd: vmlinux.coff.initrd
+znetboot.initrd: vmlinux.coff.initrd vmlinux.elf.initrd
 	cp vmlinux.coff.initrd $(TFTPIMAGE)
 	cp vmlinux.elf.initrd $(TFTPIMAGE).elf
 
@@ -54,7 +54,7 @@ floppy: zImage
 miboot.image: dummy.o vmlinux.gz
 	$(OBJCOPY) $(OBJCOPY_ARGS) --add-section=image=vmlinux.gz dummy.o $@
 
-miboot.image.initrd: dummy.o vmlinux.gz
+miboot.image.initrd: miboot.image ramdisk.image.gz
 	$(OBJCOPY) $(OBJCOPY_ARGS) --add-section=initrd=ramdisk.image.gz miboot.image $@
 
 coffboot: $(COFFOBJS) no_initrd.o ld.script
@@ -81,7 +81,7 @@ vmlinux.coff: coffboot hack-coff
 	ln -sf vmlinux.coff zImage
 
 vmlinux.coff.initrd: coffboot.initrd hack-coff
-	$(OBJCOPY) $(OBJCOPY_ARGS) coffboot $@
+	$(OBJCOPY) $(OBJCOPY_ARGS) coffboot.initrd $@
 	./hack-coff $@
 
 vmlinux.elf: $(CHRPOBJS) no_initrd.o mknote

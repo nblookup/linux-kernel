@@ -230,7 +230,6 @@ int __init gvp11_detect(Scsi_Host_Template *tpnt)
 	address = z->resource.start;
 	if (!request_mem_region(address, 256, "wd33c93"))
 	    continue;
-	strcpy(z->name, "GVP Series II SCSI");
 
 #ifdef CHECK_WD33C93
 
@@ -305,6 +304,8 @@ int __init gvp11_detect(Scsi_Host_Template *tpnt)
 #endif
 
 	instance = scsi_register (tpnt, sizeof (struct WD33C93_hostdata));
+	if(instance == NULL)
+		goto release;
 	instance->base = ZTWO_VADDR(address);
 	instance->irq = IRQ_AMIGA_PORTS;
 	instance->unique_id = z->slotaddr;
@@ -345,24 +346,20 @@ int __init gvp11_detect(Scsi_Host_Template *tpnt)
 	continue;
 
 release:
-	release_mem_region(ZTWO_PADDR(instance->base), 256);
+	release_mem_region(address, 256);
     }
 
     return num_gvp11;
 }
 
 
-#ifdef MODULE
-
 #define HOSTS_C
 
 #include "gvp11.h"
 
-Scsi_Host_Template driver_template = GVP11_SCSI;
+static Scsi_Host_Template driver_template = GVP11_SCSI;
 
 #include "scsi_module.c"
-
-#endif
 
 int gvp11_release(struct Scsi_Host *instance)
 {

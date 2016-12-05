@@ -12,18 +12,21 @@
 #include <linux/string.h>
 #include <linux/stat.h>
 #include <linux/malloc.h>
+#include <linux/locks.h>
+#include <linux/smp_lock.h>
 #include <linux/binfmts.h>
 #include <linux/elf.h>
 #include <linux/init.h>
+#include <linux/file.h>
 
 
 #define EM86_INTERP	"/usr/bin/em86"
 #define EM86_I_NAME	"em86"
 
-static int do_load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
+static int load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
 {
 	char *interp, *i_name, *i_arg;
-	struct dentry * dentry;
+	struct file * file;
 	int retval;
 	struct elfhdr	elf_ex;
 
@@ -36,16 +39,14 @@ static int do_load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
 	/* First of all, some simple consistency checks */
 	if ((elf_ex.e_type != ET_EXEC && elf_ex.e_type != ET_DYN) ||
 		(!((elf_ex.e_machine == EM_386) || (elf_ex.e_machine == EM_486))) ||
-		(!bprm->dentry->d_inode->i_fop || 
-		!bprm->dentry->d_inode->i_fop->mmap)) {
+		(!bprm->file->f_op || !bprm->file->f_op->mmap)) {
 			return -ENOEXEC;
 	}
 
 	bprm->sh_bang++;	/* Well, the bang-shell is implicit... */
-	lock_kernel();
-	dput(bprm->dentry);
-	unlock_kernel();
-	bprm->dentry = NULL;
+	allow_write_access(bprm->file);
+	fput(bprm->file);
+	bprm->file = NULL;
 
 	/* Unlike in the script case, we don't have to do any hairy
 	 * parsing to find our interpreter... it's hardcoded!
@@ -77,31 +78,20 @@ static int do_load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
 
 	/*
 	 * OK, now restart the process with the interpreter's inode.
-	 * Note that we use open_namei() as the name is now in kernel
+	 * Note that we use open_exec() as the name is now in kernel
 	 * space, and we don't need to copy it.
 	 */
-	lock_kernel();
-	dentry = open_namei(interp, 0, 0);
-	unlock_kernel();
-	if (IS_ERR(dentry))
-		return PTR_ERR(dentry);
+	file = open_exec(interp);
+	if (IS_ERR(file))
+		return PTR_ERR(file);
 
-	bprm->dentry = dentry;
+	bprm->file = file;
 
 	retval = prepare_binprm(bprm);
 	if (retval < 0)
 		return retval;
 
 	return search_binary_handler(bprm, regs);
-}
-
-static int load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
-{
-	int retval;
-	MOD_INC_USE_COUNT;
-	retval = do_load_em86(bprm,regs);
-	MOD_DEC_USE_COUNT;
-	return retval;
 }
 
 struct linux_binfmt em86_format = {

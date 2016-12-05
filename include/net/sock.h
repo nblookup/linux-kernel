@@ -66,6 +66,11 @@
 #endif
 #endif
 
+#if defined(CONFIG_PPPOE) || defined(CONFIG_PPPOE_MODULE)
+#include <linux/if_pppox.h>
+#include <linux/ppp_channel.h>   /* struct ppp_channel */
+#endif
+
 #if defined(CONFIG_IPX) || defined(CONFIG_IPX_MODULE)
 #if defined(CONFIG_SPX) || defined(CONFIG_SPX_MODULE)
 #include <net/spx.h>
@@ -102,6 +107,7 @@ struct atm_vcc;
 struct unix_opt {
 	struct unix_address	*addr;
 	struct dentry *		dentry;
+	struct vfsmount *	mnt;
 	struct semaphore	readsem;
 	struct sock *		other;
 	struct sock **		list;
@@ -196,7 +202,8 @@ struct inet_opt
 	unsigned char		hdrincl;		/* Include headers ? */
 	__u8			mc_ttl;			/* Multicasting TTL */
 	__u8			mc_loop;		/* Loopback */
-	__u8			recverr;
+	unsigned		recverr : 1,
+				freebind : 1;
 	__u8			pmtudisc;
 	int			mc_index;		/* Multicast device index */
 	__u32			mc_addr;
@@ -204,6 +211,28 @@ struct inet_opt
 };
 #endif
 
+#if defined(CONFIG_PPPOE) || defined (CONFIG_PPPOE_MODULE)
+struct pppoe_opt
+{
+	struct net_device      *dev;	  /* device associated with socket*/
+	struct pppoe_addr	pa;	  /* what this socket is bound to*/
+	struct sockaddr_pppox	relay;	  /* what socket data will be
+					     relayed to (PPPoE relaying) */
+};
+
+struct pppox_opt
+{
+	struct ppp_channel	chan;
+	struct sock		*sk;
+	struct pppox_opt	*next;	  /* for hash table */
+	union {
+		struct pppoe_opt pppoe;
+	} proto;
+};
+#define pppoe_dev	proto.pppoe.dev
+#define pppoe_pa	proto.pppoe.pa
+#define pppoe_relay	proto.pppoe.relay
+#endif
 
 /* This defines a selective acknowledgement block. */
 struct tcp_sack_block {
@@ -240,10 +269,10 @@ struct tcp_opt {
 		__u8	pingpong;	/* The session is interactive		*/
 		__u8	blocked;	/* Delayed ACK was blocked by socket lock*/
 		__u32	ato;		/* Predicted tick of soft clock		*/
+		unsigned long timeout;	/* Currently scheduled timeout		*/
 		__u32	lrcvtime;	/* timestamp of last received data packet*/
-		__u16	last_seg_size;	/* Size of last incoming segment */
-		__u16	rcv_mss;	/* MSS used for delayed ACK decisions */ 
-		__u32	rcv_segs;	/* Number of received segments since last ack */
+		__u16	last_seg_size;	/* Size of last incoming segment	*/
+		__u16	rcv_mss;	/* MSS used for delayed ACK decisions	*/ 
 	} ack;
 
 	/* Data for direct copy to user */
@@ -256,29 +285,32 @@ struct tcp_opt {
 	} ucopy;
 
 	__u32	snd_wl1;	/* Sequence for window update		*/
-	__u32	snd_wl2;	/* Ack sequence for update		*/
 	__u32	snd_wnd;	/* The window we expect to receive	*/
 	__u32	max_window;	/* Maximal window ever seen from peer	*/
 	__u32	pmtu_cookie;	/* Last pmtu seen by socket		*/
 	__u16	mss_cache;	/* Cached effective mss, not including SACKS */
 	__u16	mss_clamp;	/* Maximal mss, negotiated at connection setup */
 	__u16	ext_header_len;	/* Network protocol overhead (IP/IPv6 options) */
-	__u8	dup_acks;	/* Consequetive duplicate acks seen from other end */
-	__u8	retransmits;
+	__u8	ca_state;	/* State of fast-retransmit machine 	*/
+	__u8	retransmits;	/* Number of unrecovered RTO timeouts.	*/
 
-	__u16	__empty1;
-	__u8	defer_accept;
+	__u8	reordering;	/* Packet reordering metric.		*/
+	__u8	queue_shrunk;	/* Write queue has been shrunk recently.*/
+	__u8	defer_accept;	/* User waits for some data after accept() */
 
 /* RTT measurement */
 	__u8	backoff;	/* backoff				*/
 	__u32	srtt;		/* smothed round trip time << 3		*/
 	__u32	mdev;		/* medium deviation			*/
+	__u32	mdev_max;	/* maximal mdev for the last rtt period	*/
+	__u32	rttvar;		/* smoothed mdev_max			*/
+	__u32	rtt_seq;	/* sequence number to update rttvar	*/
 	__u32	rto;		/* retransmit timeout			*/
 
 	__u32	packets_out;	/* Packets which are "in flight"	*/
-	__u32	fackets_out;	/* Non-retrans SACK'd packets		*/
-	__u32	retrans_out;	/* Fast-retransmitted packets out	*/
-	__u32	high_seq;	/* snd_nxt at onset of congestion	*/
+	__u32	left_out;	/* Packets which leaved network		*/
+	__u32	retrans_out;	/* Retransmitted packets out		*/
+
 
 /*
  *	Slow start and congestion control (see also Nagle, and Karn & Partridge)
@@ -287,12 +319,11 @@ struct tcp_opt {
  	__u32	snd_cwnd;	/* Sending congestion window		*/
  	__u16	snd_cwnd_cnt;	/* Linear increase counter		*/
 	__u16	snd_cwnd_clamp; /* Do not allow snd_cwnd to grow above this */
-
-	__u8	nonagle;	/* Disable Nagle algorithm?             */
-	__u8	syn_retries;	/* num of allowed syn retries */
-	__u16	user_mss;  	/* mss requested by user in ioctl */
+	__u32	snd_cwnd_used;
+	__u32	snd_cwnd_stamp;
 
 	/* Two commonly used timers in both sender and receiver paths. */
+	unsigned long		timeout;
  	struct timer_list	retransmit_timer;	/* Resend (no ack)	*/
  	struct timer_list	delack_timer;		/* Ack delay 		*/
 
@@ -300,16 +331,12 @@ struct tcp_opt {
 
 	struct tcp_func		*af_specific;	/* Operations which are AF_INET{4,6} specific	*/
 	struct sk_buff		*send_head;	/* Front of stuff to transmit			*/
-	struct sk_buff		*retrans_head;	/* retrans head can be 
-						 * different to the head of
-						 * write queue if we are doing
-						 * fast retransmit
-						 */
 
  	__u32	rcv_wnd;	/* Current receiver window		*/
 	__u32	rcv_wup;	/* rcv_nxt on last window update sent	*/
-	__u32	write_seq;
-	__u32	copied_seq;
+	__u32	write_seq;	/* Tail(+1) of data held in tcp send buffer */
+	__u32	pushed_seq;	/* Last pushed seq, required to talk to windows */
+	__u32	copied_seq;	/* Head of yet unread data		*/
 /*
  *      Options received (usually on last packet, some only on SYN packets).
  */
@@ -319,7 +346,7 @@ struct tcp_opt {
 	char	saw_tstamp;	/* Saw TIMESTAMP on last packet		*/
         __u8	snd_wscale;	/* Window scaling received from sender	*/
         __u8	rcv_wscale;	/* Window scaling to send to receiver	*/
-	__u8	rexmt_done;	/* Retransmitted up to send head?	*/
+	__u8	nonagle;	/* Disable Nagle algorithm?             */
 	__u8	keepalive_probes; /* num of allowed keep alive probes	*/
 
 /*	PAWS/RTTM data	*/
@@ -329,19 +356,38 @@ struct tcp_opt {
         long	ts_recent_stamp;/* Time we stored ts_recent (for aging) */
 
 /*	SACKs data	*/
+	__u16	user_mss;  	/* mss requested by user in ioctl */
+	__u8	dsack;		/* D-SACK is scheduled			*/
+	__u8	eff_sacks;	/* Size of SACK array to send with next packet */
+	struct tcp_sack_block duplicate_sack[1]; /* D-SACK block */
 	struct tcp_sack_block selective_acks[4]; /* The SACKS themselves*/
 
- 	struct timer_list	probe_timer;		/* Probes	*/
 	__u32	window_clamp;	/* Maximal window to advertise		*/
+	__u32	rcv_ssthresh;	/* Current window clamp			*/
 	__u8	probes_out;	/* unanswered 0 window probes		*/
 	__u8	num_sacks;	/* Number of SACK blocks		*/
 	__u16	advmss;		/* Advertised MSS			*/
 
-	__u32	syn_stamp;
-	__u32	syn_seq;
-	__u32	fin_seq;
-	__u32	urg_seq;
-	__u32	urg_data;
+	__u8	syn_retries;	/* num of allowed syn retries */
+	__u8	ecn_flags;	/* ECN status bits.			*/
+	__u16	prior_ssthresh; /* ssthresh saved at recovery start	*/
+	__u32	lost_out;	/* Lost packets				*/
+	__u32	sacked_out;	/* SACK'd packets			*/
+	__u32	fackets_out;	/* FACK'd packets			*/
+	__u32	high_seq;	/* snd_nxt at onset of congestion	*/
+
+	__u32	retrans_stamp;	/* Timestamp of the last retransmit,
+				 * also used in SYN-SENT to remember stamp of
+				 * the first SYN. */
+	__u32	undo_marker;	/* tracking retrans started here. */
+	int	undo_retrans;	/* number of undoable retransmissions. */
+	__u32	syn_seq;	/* Seq of received SYN. */
+	__u32	fin_seq;	/* Seq of received FIN. */
+	__u32	urg_seq;	/* Seq of received urgent pointer */
+	__u16	urg_data;	/* Saved octet of OOB data and control flags */
+	__u8	pending;	/* Scheduled timer event	*/
+	__u8	urg_mode;	/* In urgent mode		*/
+	__u32	snd_up;		/* Urgent pointer		*/
 
 	/* The syn_wait_lock is necessary only to avoid tcp_get_info having
 	 * to grab the main lock sock while browsing the listening hash
@@ -355,9 +401,12 @@ struct tcp_opt {
 	 */
 	rwlock_t		syn_wait_lock;
 	struct tcp_listen_opt	*listen_opt;
-	struct open_request	*accept_queue; /* Established children */
 
-	int write_pending;	/* A write to socket waits to start. */
+	/* FIFO of established children */
+	struct open_request	*accept_queue;
+	struct open_request	*accept_queue_tail;
+
+	int			write_pending;	/* A write to socket waits to start. */
 
 	unsigned int		keepalive_time;	  /* time before keep alive takes place */
 	unsigned int		keepalive_intvl;  /* time interval between keep alive probes */
@@ -409,7 +458,7 @@ struct tcp_opt {
 /* Define this to get the sk->debug debugging facility. */
 #define SOCK_DEBUGGING
 #ifdef SOCK_DEBUGGING
-#define SOCK_DEBUG(sk, msg...) do { if((sk) && ((sk)->debug)) printk(KERN_DEBUG ## msg); } while (0)
+#define SOCK_DEBUG(sk, msg...) do { if((sk) && ((sk)->debug)) printk(KERN_DEBUG msg); } while (0)
 #else
 #define SOCK_DEBUG(sk, msg...) do { } while (0)
 #endif
@@ -426,7 +475,6 @@ typedef struct {
 
 #define sock_lock_init(__sk) \
 do {	spin_lock_init(&((__sk)->lock.slock)); \
-	(__sk)->dst_lock = RW_LOCK_UNLOCKED; \
 	(__sk)->lock.users = 0; \
 	init_waitqueue_head(&((__sk)->lock.wq)); \
 } while(0);
@@ -450,8 +498,8 @@ struct sock {
 	__u16			sport;		/* Source port				*/
 
 	unsigned short		family;		/* Address family			*/
-	unsigned char		reuse,		/* SO_REUSEADDR setting			*/
-				__unused;
+	unsigned char		reuse;		/* SO_REUSEADDR setting			*/
+	unsigned char		shutdown;
 	atomic_t		refcnt;		/* Reference count			*/
 
 	socket_lock_t		lock;		/* Synchronizer...			*/
@@ -465,6 +513,8 @@ struct sock {
 	atomic_t		wmem_alloc;	/* Transmit queue bytes committed	*/
 	struct sk_buff_head	write_queue;	/* Packet sending queue			*/
 	atomic_t		omem_alloc;	/* "o" is "option" or "other" */
+	int			wmem_queued;	/* Persistent queue size */
+	int			forward_alloc;	/* Space allocated forward. */
 	__u32			saddr;		/* Sending source			*/
 	unsigned int		allocation;	/* Allocation mode			*/
 	int			sndbuf;		/* Size of send buffer in bytes		*/
@@ -483,6 +533,8 @@ struct sock {
 				broadcast,
 				bsdism;
 	unsigned char		debug;
+	unsigned char		rcvtstamp;
+	unsigned char		userlocks;
 	int			proc;
 	unsigned long	        lingertime;
 
@@ -504,8 +556,6 @@ struct sock {
 	struct sk_buff_head	error_queue;
 
 	struct proto		*prot;
-
-	unsigned short		shutdown;
 
 #if defined(CONFIG_IPV6) || defined (CONFIG_IPV6_MODULE)
 	union {
@@ -580,6 +630,9 @@ struct sock {
 #if defined(CONFIG_ROSE) || defined(CONFIG_ROSE_MODULE)
 		rose_cb			*rose;
 #endif
+#if defined(CONFIG_PPPOE) || defined(CONFIG_PPPOE_MODULE)
+		struct pppox_opt	*pppox;
+#endif
 #ifdef CONFIG_NETLINK
 		struct netlink_opt	*af_netlink;
 #endif
@@ -596,7 +649,6 @@ struct sock {
 
 
 	/* This part is used for the timeout functions. */
-	spinlock_t		timer_lock;	/* Required until timer in core is repaired */
 	struct timer_list	timer;		/* This is the sock cleanup timer. */
 	struct timeval		stamp;
 
@@ -698,6 +750,12 @@ static void __inline__ sock_prot_dec_use(struct proto *prot)
 #define RCV_SHUTDOWN	1
 #define SEND_SHUTDOWN	2
 
+#define SOCK_SNDBUF_LOCK	1
+#define SOCK_RCVBUF_LOCK	2
+#define SOCK_BINDADDR_LOCK	4
+#define SOCK_BINDPORT_LOCK	8
+
+
 /* Used by processes to "lock" a socket state, so that
  * interrupts and bottom half handlers won't change it
  * from under us. It essentially blocks any incoming
@@ -726,7 +784,7 @@ do {	spin_lock_bh(&((__sk)->lock.slock)); \
 	if ((__sk)->backlog.tail != NULL) \
 		__release_sock(__sk); \
 	(__sk)->lock.users = 0; \
-	wake_up(&((__sk)->lock.wq)); \
+        if (waitqueue_active(&((__sk)->lock.wq))) wake_up(&((__sk)->lock.wq)); \
 	spin_unlock_bh(&((__sk)->lock.slock)); \
 } while(0)
 
@@ -765,9 +823,6 @@ extern struct sk_buff		*sock_rmalloc(struct sock *sk,
 					      int priority);
 extern void			sock_wfree(struct sk_buff *skb);
 extern void			sock_rfree(struct sk_buff *skb);
-extern void			sock_cfree(struct sk_buff *skb);
-extern unsigned long		sock_rspace(struct sock *sk);
-extern unsigned long		sock_wspace(struct sock *sk);
 
 extern int			sock_setsockopt(struct socket *sock, int level,
 						int op, char *optval,
@@ -817,7 +872,7 @@ extern int                      sock_no_sendmsg(struct socket *,
 						struct msghdr *, int,
 						struct scm_cookie *);
 extern int                      sock_no_recvmsg(struct socket *,
-						struct msghdr *, int,
+						struct msghdr *, int, int,
 						struct scm_cookie *);
 extern int			sock_no_mmap(struct file *file,
 					     struct socket *sock,
@@ -837,12 +892,20 @@ extern void sklist_insert_socket(struct sock **list, struct sock *sk);
 extern void sklist_destroy_socket(struct sock **list, struct sock *sk);
 
 #ifdef CONFIG_FILTER
-/*
+
+/**
+ *	sk_filter - run a packet through a socket filter
+ *	@skb: buffer to filter
+ *	@filter: filter to apply
+ *
  * Run the filter code and then cut skb->data to correct size returned by
  * sk_run_filter. If pkt_len is 0 we toss packet. If skb->len is smaller
- * than pkt_len we keep whole skb->data.
+ * than pkt_len we keep whole skb->data. This is the socket level
+ * wrapper to sk_run_filter. It returns 0 if the packet should
+ * be accepted or 1 if the packet should be tossed.
  */
-extern __inline__ int sk_filter(struct sk_buff *skb, struct sk_filter *filter)
+ 
+static inline int sk_filter(struct sk_buff *skb, struct sk_filter *filter)
 {
 	int pkt_len;
 
@@ -855,17 +918,25 @@ extern __inline__ int sk_filter(struct sk_buff *skb, struct sk_filter *filter)
 	return 0;
 }
 
-extern __inline__ void sk_filter_release(struct sock *sk, struct sk_filter *fp)
+/**
+ *	sk_filter_release: Release a socket filter
+ *	@sk: socket
+ *	@fp: filter to remove
+ *
+ *	Remove a filter from a socket and release its resources.
+ */
+ 
+static inline void sk_filter_release(struct sock *sk, struct sk_filter *fp)
 {
 	unsigned int size = sk_filter_len(fp);
 
 	atomic_sub(size, &sk->omem_alloc);
 
 	if (atomic_dec_and_test(&fp->refcnt))
-		kfree_s(fp, size);
+		kfree(fp);
 }
 
-extern __inline__ void sk_filter_charge(struct sock *sk, struct sk_filter *fp)
+static inline void sk_filter_charge(struct sock *sk, struct sk_filter *fp)
 {
 	atomic_inc(&fp->refcnt);
 	atomic_add(sk_filter_len(fp), &sk->omem_alloc);
@@ -904,7 +975,7 @@ extern __inline__ void sk_filter_charge(struct sock *sk, struct sk_filter *fp)
    modifications.
  */
 
-extern __inline__ void sock_hold(struct sock *sk)
+static inline void sock_hold(struct sock *sk)
 {
 	atomic_inc(&sk->refcnt);
 }
@@ -912,13 +983,13 @@ extern __inline__ void sock_hold(struct sock *sk)
 /* Ungrab socket in the context, which assumes that socket refcnt
    cannot hit zero, f.e. it is true in context of any socketcall.
  */
-extern __inline__ void __sock_put(struct sock *sk)
+static inline void __sock_put(struct sock *sk)
 {
 	atomic_dec(&sk->refcnt);
 }
 
 /* Ungrab socket and destroy it, if it was the last reference. */
-extern __inline__ void sock_put(struct sock *sk)
+static inline void sock_put(struct sock *sk)
 {
 	if (atomic_dec_and_test(&sk->refcnt))
 		sk_free(sk);
@@ -930,10 +1001,8 @@ extern __inline__ void sock_put(struct sock *sk)
  * we do not release it in this function, because protocol
  * probably wants some additional cleanups or even continuing
  * to work with this socket (TCP).
- *
- * NOTE: When softnet goes in replace _irq with _bh!
  */
-extern __inline__ void sock_orphan(struct sock *sk)
+static inline void sock_orphan(struct sock *sk)
 {
 	write_lock_bh(&sk->callback_lock);
 	sk->dead = 1;
@@ -942,7 +1011,7 @@ extern __inline__ void sock_orphan(struct sock *sk)
 	write_unlock_bh(&sk->callback_lock);
 }
 
-extern __inline__ void sock_graft(struct sock *sk, struct socket *parent)
+static inline void sock_graft(struct sock *sk, struct socket *parent)
 {
 	write_lock_bh(&sk->callback_lock);
 	sk->sleep = &parent->wait;
@@ -951,14 +1020,33 @@ extern __inline__ void sock_graft(struct sock *sk, struct socket *parent)
 	write_unlock_bh(&sk->callback_lock);
 }
 
+static inline int sock_i_uid(struct sock *sk)
+{
+	int uid;
 
-extern __inline__ struct dst_entry *
+	read_lock(&sk->callback_lock);
+	uid = sk->socket ? sk->socket->inode->i_uid : 0;
+	read_unlock(&sk->callback_lock);
+	return uid;
+}
+
+static inline unsigned long sock_i_ino(struct sock *sk)
+{
+	unsigned long ino;
+
+	read_lock(&sk->callback_lock);
+	ino = sk->socket ? sk->socket->inode->i_ino : 0;
+	read_unlock(&sk->callback_lock);
+	return ino;
+}
+
+static inline struct dst_entry *
 __sk_dst_get(struct sock *sk)
 {
 	return sk->dst_cache;
 }
 
-extern __inline__ struct dst_entry *
+static inline struct dst_entry *
 sk_dst_get(struct sock *sk)
 {
 	struct dst_entry *dst;
@@ -971,7 +1059,7 @@ sk_dst_get(struct sock *sk)
 	return dst;
 }
 
-extern __inline__ void
+static inline void
 __sk_dst_set(struct sock *sk, struct dst_entry *dst)
 {
 	struct dst_entry *old_dst;
@@ -981,7 +1069,7 @@ __sk_dst_set(struct sock *sk, struct dst_entry *dst)
 	dst_release(old_dst);
 }
 
-extern __inline__ void
+static inline void
 sk_dst_set(struct sock *sk, struct dst_entry *dst)
 {
 	write_lock(&sk->dst_lock);
@@ -989,7 +1077,7 @@ sk_dst_set(struct sock *sk, struct dst_entry *dst)
 	write_unlock(&sk->dst_lock);
 }
 
-extern __inline__ void
+static inline void
 __sk_dst_reset(struct sock *sk)
 {
 	struct dst_entry *old_dst;
@@ -999,7 +1087,7 @@ __sk_dst_reset(struct sock *sk)
 	dst_release(old_dst);
 }
 
-extern __inline__ void
+static inline void
 sk_dst_reset(struct sock *sk)
 {
 	write_lock(&sk->dst_lock);
@@ -1007,7 +1095,7 @@ sk_dst_reset(struct sock *sk)
 	write_unlock(&sk->dst_lock);
 }
 
-extern __inline__ struct dst_entry *
+static inline struct dst_entry *
 __sk_dst_check(struct sock *sk, u32 cookie)
 {
 	struct dst_entry *dst = sk->dst_cache;
@@ -1020,7 +1108,7 @@ __sk_dst_check(struct sock *sk, u32 cookie)
 	return dst;
 }
 
-extern __inline__ struct dst_entry *
+static inline struct dst_entry *
 sk_dst_check(struct sock *sk, u32 cookie)
 {
 	struct dst_entry *dst = sk_dst_get(sk);
@@ -1043,7 +1131,7 @@ sk_dst_check(struct sock *sk, u32 cookie)
  *	packet ever received.
  */
 
-extern __inline__ void skb_set_owner_w(struct sk_buff *skb, struct sock *sk)
+static inline void skb_set_owner_w(struct sk_buff *skb, struct sock *sk)
 {
 	sock_hold(sk);
 	skb->sk = sk;
@@ -1051,22 +1139,14 @@ extern __inline__ void skb_set_owner_w(struct sk_buff *skb, struct sock *sk)
 	atomic_add(skb->truesize, &sk->wmem_alloc);
 }
 
-extern __inline__ void skb_set_owner_r(struct sk_buff *skb, struct sock *sk)
+static inline void skb_set_owner_r(struct sk_buff *skb, struct sock *sk)
 {
 	skb->sk = sk;
 	skb->destructor = sock_rfree;
 	atomic_add(skb->truesize, &sk->rmem_alloc);
 }
 
-extern __inline__ void skb_set_owner_c(struct sk_buff *skb, struct sock *sk)
-{
-	sock_hold(sk);
-	skb->sk = sk;
-	skb->destructor = sock_cfree;
-}
-
-
-extern __inline__ int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
+static inline int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 {
 	/* Cast skb->rcvbuf to unsigned... It's pointless, but reduces
 	   number of warnings when compiling with -W --ANK
@@ -1092,6 +1172,7 @@ extern __inline__ int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	}
 #endif /* CONFIG_FILTER */
 
+	skb->dev = NULL;
 	skb_set_owner_r(skb, sk);
 	skb_queue_tail(&sk->receive_queue, skb);
 	if (!sk->dead)
@@ -1099,7 +1180,7 @@ extern __inline__ int sock_queue_rcv_skb(struct sock *sk, struct sk_buff *skb)
 	return 0;
 }
 
-extern __inline__ int sock_queue_err_skb(struct sock *sk, struct sk_buff *skb)
+static inline int sock_queue_err_skb(struct sock *sk, struct sk_buff *skb)
 {
 	/* Cast skb->rcvbuf to unsigned... It's pointless, but reduces
 	   number of warnings when compiling with -W --ANK
@@ -1117,13 +1198,13 @@ extern __inline__ int sock_queue_err_skb(struct sock *sk, struct sk_buff *skb)
  *	Recover an error report and clear atomically
  */
  
-extern __inline__ int sock_error(struct sock *sk)
+static inline int sock_error(struct sock *sk)
 {
 	int err=xchg(&sk->err,0);
 	return -err;
 }
 
-extern __inline__ unsigned long sock_wspace(struct sock *sk)
+static inline unsigned long sock_wspace(struct sock *sk)
 {
 	int amt = 0;
 
@@ -1135,8 +1216,14 @@ extern __inline__ unsigned long sock_wspace(struct sock *sk)
 	return amt;
 }
 
+static inline void sk_wake_async(struct sock *sk, int how, int band)
+{
+	if (sk->socket && sk->socket->fasync_list)
+		sock_wake_async(sk->socket, how, band);
+}
+
 #define SOCK_MIN_SNDBUF 2048
-#define SOCK_MIN_RCVBUF 128
+#define SOCK_MIN_RCVBUF 256
 /* Must be less or equal SOCK_MIN_SNDBUF */
 #define SOCK_MIN_WRITE_SPACE	SOCK_MIN_SNDBUF
 
@@ -1144,29 +1231,46 @@ extern __inline__ unsigned long sock_wspace(struct sock *sk)
  *	Default write policy as shown to user space via poll/select/SIGIO
  *	Kernel internally doesn't use the MIN_WRITE_SPACE threshold.
  */
-extern __inline__ int sock_writeable(struct sock *sk) 
+static inline int sock_writeable(struct sock *sk) 
 {
 	return sock_wspace(sk) >= SOCK_MIN_WRITE_SPACE;
 }
 
-extern __inline__ int gfp_any(void)
+static inline int gfp_any(void)
 {
 	return in_softirq() ? GFP_ATOMIC : GFP_KERNEL;
 }
 
-extern __inline__ long sock_rcvtimeo(struct sock *sk, int noblock)
+static inline long sock_rcvtimeo(struct sock *sk, int noblock)
 {
 	return noblock ? 0 : sk->rcvtimeo;
 }
 
-extern __inline__ long sock_sndtimeo(struct sock *sk, int noblock)
+static inline long sock_sndtimeo(struct sock *sk, int noblock)
 {
 	return noblock ? 0 : sk->sndtimeo;
 }
 
-extern __inline__ int sock_rcvlowat(struct sock *sk, int waitall, int len)
+static inline int sock_rcvlowat(struct sock *sk, int waitall, int len)
 {
-	return waitall ? len : min(sk->rcvlowat, len);
+	return (waitall ? len : min(sk->rcvlowat, len)) ? : 1;
+}
+
+/* Alas, with timeout socket operations are not restartable.
+ * Compare this to poll().
+ */
+static inline int sock_intr_errno(long timeo)
+{
+	return timeo == MAX_SCHEDULE_TIMEOUT ? -ERESTARTSYS : -EINTR;
+}
+
+static __inline__ void
+sock_recv_timestamp(struct msghdr *msg, struct sock *sk, struct sk_buff *skb)
+{
+	if (sk->rcvtstamp)
+		put_cmsg(msg, SOL_SOCKET, SO_TIMESTAMP, sizeof(skb->stamp), &skb->stamp);
+	else
+		sk->stamp = skb->stamp;
 }
 
 /* 

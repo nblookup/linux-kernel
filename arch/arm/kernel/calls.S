@@ -1,9 +1,13 @@
 /*
- * linux/arch/arm/lib/calls.h
+ *  linux/arch/arm/lib/calls.h
  *
- * Copyright (C) 1995-1998 Russell King
+ *  Copyright (C) 1995-1998 Russell King
  *
- * This file is included twice in entry-common.S
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  This file is included twice in entry-common.S
  */
 #ifndef NR_syscalls
 #define NR_syscalls 256
@@ -68,7 +72,7 @@
 		.long	SYMBOL_NAME(sys_ni_syscall)		/* was sys_mpx */
 		.long	SYMBOL_NAME(sys_setpgid)
 		.long	SYMBOL_NAME(sys_ni_syscall)		/* was sys_ulimit */
-		.long	SYMBOL_NAME(sys_olduname)
+		.long	SYMBOL_NAME(sys_ni_syscall)		/* was sys_olduname */
 /* 60 */	.long	SYMBOL_NAME(sys_umask)
 		.long	SYMBOL_NAME(sys_chroot)
 		.long	SYMBOL_NAME(sys_ustat)
@@ -118,8 +122,8 @@
 		.long	SYMBOL_NAME(sys_newstat)
 		.long	SYMBOL_NAME(sys_newlstat)
 		.long	SYMBOL_NAME(sys_newfstat)
-		.long	SYMBOL_NAME(sys_uname)
-/* 110 */	.long	SYMBOL_NAME(sys_iopl)
+		.long	SYMBOL_NAME(sys_ni_syscall)		/* was sys_uname */
+/* 110 */	.long	SYMBOL_NAME(sys_ni_syscall)		/* was sys_iopl */
 		.long	SYMBOL_NAME(sys_vhangup)
 		.long	SYMBOL_NAME(sys_ni_syscall)
 		.long	SYMBOL_NAME(sys_syscall)		/* call a syscall */
@@ -226,8 +230,9 @@
 		.long	SYMBOL_NAME(sys_setgid)
 /* 215 */	.long	SYMBOL_NAME(sys_setfsuid)
 		.long	SYMBOL_NAME(sys_setfsgid)
+		.long	SYMBOL_NAME(sys_getdents64)
 
-		.rept	NR_syscalls-216
+		.rept	NR_syscalls-217
 			.long	SYMBOL_NAME(sys_ni_syscall)
 		.endr
 #endif

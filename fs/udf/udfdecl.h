@@ -106,7 +106,7 @@ struct ktm
 struct ustr
 {
 	Uint8 u_cmpID;
-	Uint8 u_name[UDF_NAME_LEN-1];
+	Uint8 u_name[UDF_NAME_LEN];
 	Uint8 u_len;
 	Uint8 padding;
 	unsigned long u_hash;
@@ -134,7 +134,7 @@ extern struct buffer_head * udf_bread(struct inode *, int, int, int *);
 extern void udf_read_inode(struct inode *);
 extern void udf_put_inode(struct inode *);
 extern void udf_delete_inode(struct inode *);
-extern void udf_write_inode(struct inode *);
+extern void udf_write_inode(struct inode *, int);
 extern long udf_locked_block_map(struct inode *, long);
 extern long udf_block_map(struct inode *, long);
 extern int inode_bmap(struct inode *, int, lb_addr *, Uint32 *, lb_addr *, Uint32 *, Uint32 *, struct buffer_head **);
@@ -182,7 +182,9 @@ extern void udf_truncate(struct inode *);
 extern void udf_free_blocks(const struct inode *, lb_addr, Uint32, Uint32);
 extern int udf_prealloc_blocks(const struct inode *, Uint16, Uint32, Uint32);
 extern int udf_new_block(const struct inode *, Uint16, Uint32, int *);
-extern int udf_sync_file(struct file *, struct dentry *);
+
+/* fsync.c */
+extern int udf_sync_file(struct file *, struct dentry *, int);
 
 /* directory.c */
 extern Uint8 * udf_filead_read(struct inode *, Uint8 *, Uint8, lb_addr, int *, int *, struct buffer_head **, int *);

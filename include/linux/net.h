@@ -18,6 +18,7 @@
 #ifndef _LINUX_NET_H
 #define _LINUX_NET_H
 
+#include <linux/config.h>
 #include <linux/socket.h>
 #include <linux/wait.h>
 
@@ -53,11 +54,13 @@ typedef enum {
   SS_DISCONNECTING			/* in process of disconnecting	*/
 } socket_state;
 
-#define SO_ACCEPTCON	(1<<16)		/* performed a listen		*/
-#define SO_WAITDATA	(1<<17)		/* wait data to read		*/
-#define SO_NOSPACE	(1<<18)		/* no space to write		*/
+#define __SO_ACCEPTCON	(1<<16)		/* performed a listen		*/
 
 #ifdef __KERNEL__
+
+#define SOCK_ASYNC_NOSPACE	0
+#define SOCK_ASYNC_WAITDATA	1
+#define SOCK_NOSPACE		2
 
 struct socket
 {
@@ -102,8 +105,6 @@ struct proto_ops {
 			 char *optval, int optlen);
   int	(*getsockopt)	(struct socket *sock, int level, int optname,
 			 char *optval, int *optlen);
-  int	(*fcntl)	(struct socket *sock, unsigned int cmd,
-			 unsigned long arg);	
   int   (*sendmsg)	(struct socket *sock, struct msghdr *m, int total_len, struct scm_cookie *scm);
   int   (*recvmsg)	(struct socket *sock, struct msghdr *m, int total_len, int flags, struct scm_cookie *scm);
   int	(*mmap)		(struct file *file, struct socket *sock, struct vm_area_struct * vma);
@@ -141,7 +142,7 @@ extern int	net_ratelimit(void);
 extern unsigned long net_random(void);
 extern void net_srandom(unsigned long);
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 #define SOCKOPS_WRAPPED(name) name
 #define SOCKOPS_WRAP(name, fam)
 #else
@@ -192,8 +193,6 @@ SOCKCALL_WRAP(name, setsockopt, (struct socket *sock, int level, int optname, \
 			 char *optval, int optlen), (sock, level, optname, optval, optlen)) \
 SOCKCALL_WRAP(name, getsockopt, (struct socket *sock, int level, int optname, \
 			 char *optval, int *optlen), (sock, level, optname, optval, optlen)) \
-SOCKCALL_WRAP(name, fcntl, (struct socket *sock, unsigned int cmd, \
-			 unsigned long arg), (sock, cmd, arg)) \
 SOCKCALL_WRAP(name, sendmsg, (struct socket *sock, struct msghdr *m, int len, struct scm_cookie *scm), \
 	      (sock, m, len, scm)) \
 SOCKCALL_WRAP(name, recvmsg, (struct socket *sock, struct msghdr *m, int len, int flags, struct scm_cookie *scm), \
@@ -201,25 +200,24 @@ SOCKCALL_WRAP(name, recvmsg, (struct socket *sock, struct msghdr *m, int len, in
 SOCKCALL_WRAP(name, mmap, (struct file *file, struct socket *sock, struct vm_area_struct *vma), \
 	      (file, sock, vma)) \
 	      \
-static struct proto_ops name##_ops = {	\
-	fam,				\
-					\
-	__lock_##name##_release,	\
-	__lock_##name##_bind,		\
-	__lock_##name##_connect,	\
-	__lock_##name##_socketpair,	\
-	__lock_##name##_accept,		\
-	__lock_##name##_getname,	\
-	__lock_##name##_poll,		\
-	__lock_##name##_ioctl,		\
-	__lock_##name##_listen,		\
-	__lock_##name##_shutdown,	\
-	__lock_##name##_setsockopt,	\
-	__lock_##name##_getsockopt,	\
-	__lock_##name##_fcntl,		\
-	__lock_##name##_sendmsg,	\
-	__lock_##name##_recvmsg,	\
-	__lock_##name##_mmap,		\
+static struct proto_ops name##_ops = {			\
+	family:		fam,				\
+							\
+	release:	__lock_##name##_release,	\
+	bind:		__lock_##name##_bind,		\
+	connect:	__lock_##name##_connect,	\
+	socketpair:	__lock_##name##_socketpair,	\
+	accept:		__lock_##name##_accept,		\
+	getname:	__lock_##name##_getname,	\
+	poll:		__lock_##name##_poll,		\
+	ioctl:		__lock_##name##_ioctl,		\
+	listen:		__lock_##name##_listen,		\
+	shutdown:	__lock_##name##_shutdown,	\
+	setsockopt:	__lock_##name##_setsockopt,	\
+	getsockopt:	__lock_##name##_getsockopt,	\
+	sendmsg:	__lock_##name##_sendmsg,	\
+	recvmsg:	__lock_##name##_recvmsg,	\
+	mmap:		__lock_##name##_mmap,		\
 };
 #endif
 

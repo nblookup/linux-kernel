@@ -132,7 +132,7 @@ hacr_write_slow(u_long	base,
 {
   hacr_write(base, hacr);
   /* delay might only be needed sometimes */
-  udelay(1000L);
+  mdelay(1L);
 } /* hacr_write_slow */
 
 /*------------------------------------------------------------------*/
@@ -190,7 +190,7 @@ psa_write(device *	dev,
        * sequence to write is. This hack seem to work for me... */
       count = 0;
       while((readb(verify) != PSA_COMP_PCMCIA_915) && (count++ < 100))
-	udelay(1000);
+	mdelay(1);
     }
 
   /* Put the host interface back in standard state */
@@ -479,7 +479,7 @@ fee_write(u_long	base,	/* i/o port of the card */
       mmc_out(base, mmwoff(0, mmw_fee_ctrl), MMW_FEE_CTRL_WRITE);
 
       /* Wavelan doc says : wait at least 10 ms for EEBUSY = 0 */
-      udelay(10000);
+      mdelay(10);
       fee_wait(base, 10, 100);
     }
 
@@ -2926,7 +2926,7 @@ wv_packet_write(device *	dev,
   lp->stats.tx_bytes += length;
 
   /* If watchdog not already active, activate it... */
-  if(lp->watchdog.prev == (timer_list *) NULL)
+  if (!timer_pending(&lp->watchdog))
     {
       /* set timer to expire in WATCHDOG_JIFFIES */
       lp->watchdog.expires = jiffies + WATCHDOG_JIFFIES;
@@ -3612,7 +3612,7 @@ wv_hw_config(device *	dev)
 
   /* reset the LAN controller (i82593) */
   outb(OP0_RESET, LCCR(base));
-  udelay(1000L);	/* A bit crude ! */
+  mdelay(1);	/* A bit crude ! */
 
   /* Initialize the LAN controler */
   if((wv_82593_config(dev) == FALSE) ||
@@ -3655,7 +3655,7 @@ wv_hw_reset(device *	dev)
 #endif
 
   /* If watchdog was activated, kill it ! */
-  if(lp->watchdog.prev != (timer_list *) NULL)
+  if (timer_pending(&lp->watchdog))
     del_timer(&lp->watchdog);
 
   lp->nresets++;
@@ -4061,7 +4061,7 @@ wavelan_interrupt(int		irq,
 #endif
 
 	  /* If watchdog was activated, kill it ! */
-	  if(lp->watchdog.prev != (timer_list *) NULL)
+	  if(timer_pending(&lp->watchdog))
 	    del_timer(&lp->watchdog);
 
 	  /* Get transmission status */
@@ -4353,7 +4353,7 @@ wavelan_close(device *	dev)
 #endif	/* WAVELAN_ROAMING */
 
   /* If watchdog was activated, kill it ! */
-  if(lp->watchdog.prev != (timer_list *) NULL)
+  if(timer_pending(&lp->watchdog))
     del_timer(&lp->watchdog);
 
   link->open--;
@@ -4498,8 +4498,7 @@ wavelan_attach(void)
 #endif
 
   /* Other specific data */
-  /* Provide storage area for device name */
-  dev->name = ((net_local *)dev->priv)->node.dev_name;
+  strcpy(dev->name, ((net_local *)dev->priv)->node.dev_name);
   netif_start_queue (dev);
   dev->mtu = WAVELAN_MTU;
 

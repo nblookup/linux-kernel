@@ -4,6 +4,7 @@
  *	(c) 1998 Martin Mares <mj@ucw.cz>
  */
 
+#ifdef __KERNEL__
 #ifndef _LINUX_ASM_VGA_H_
 #define _LINUX_ASM_VGA_H_
 
@@ -21,12 +22,12 @@
  *  <linux/vt_buffer.h> has already done the right job for us.
  */
 
-extern inline void scr_writew(u16 val, u16 *addr)
+extern inline void scr_writew(u16 val, volatile u16 *addr)
 {
     st_le16(addr, val);
 }
 
-extern inline u16 scr_readw(const u16 *addr)
+extern inline u16 scr_readw(volatile const u16 *addr)
 {
     return ld_le16(addr);
 }
@@ -42,3 +43,4 @@ extern unsigned long vgacon_remap_base;
 #define vga_writeb(x,y) (*(y) = (x))
 
 #endif
+#endif /* __KERNEL__ */

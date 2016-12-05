@@ -15,6 +15,7 @@
  *  1999-03-10  Improved NTP compatibility by Ulrich Windl
  */
 
+#include <linux/config.h>
 #include <linux/mm.h>
 #include <linux/timex.h>
 #include <linux/delay.h>
@@ -38,7 +39,6 @@ int tickadj = 500/HZ ? : 1;		/* microsecs */
 
 DECLARE_TASK_QUEUE(tq_timer);
 DECLARE_TASK_QUEUE(tq_immediate);
-DECLARE_TASK_QUEUE(tq_scheduler);
 
 /*
  * phase-lock loop variables
@@ -46,30 +46,30 @@ DECLARE_TASK_QUEUE(tq_scheduler);
 /* TIME_ERROR prevents overwriting the CMOS clock */
 int time_state = TIME_OK;		/* clock synchronization status	*/
 int time_status = STA_UNSYNC;		/* clock status bits		*/
-long time_offset = 0;			/* time adjustment (us)		*/
+long time_offset;			/* time adjustment (us)		*/
 long time_constant = 2;			/* pll time constant		*/
 long time_tolerance = MAXFREQ;		/* frequency tolerance (ppm)	*/
 long time_precision = 1;		/* clock precision (us)		*/
 long time_maxerror = NTP_PHASE_LIMIT;	/* maximum error (us)		*/
 long time_esterror = NTP_PHASE_LIMIT;	/* estimated error (us)		*/
-long time_phase = 0;			/* phase offset (scaled us)	*/
+long time_phase;			/* phase offset (scaled us)	*/
 long time_freq = ((1000000 + HZ/2) % HZ - HZ/2) << SHIFT_USEC;
 					/* frequency offset (scaled ppm)*/
-long time_adj = 0;			/* tick adjust (scaled 1 / HZ)	*/
-long time_reftime = 0;			/* time at last adjustment (s)	*/
+long time_adj;				/* tick adjust (scaled 1 / HZ)	*/
+long time_reftime;			/* time at last adjustment (s)	*/
 
-long time_adjust = 0;
-long time_adjust_step = 0;
+long time_adjust;
+long time_adjust_step;
 
-unsigned long event = 0;
+unsigned long event;
 
 extern int do_setitimer(int, struct itimerval *, struct itimerval *);
 
-unsigned long volatile jiffies = 0;
+unsigned long volatile jiffies;
 
-unsigned int * prof_buffer = NULL;
-unsigned long prof_len = 0;
-unsigned long prof_shift = 0;
+unsigned int * prof_buffer;
+unsigned long prof_len;
+unsigned long prof_shift;
 
 /*
  * Event timer code
@@ -82,20 +82,20 @@ unsigned long prof_shift = 0;
 #define TVR_MASK (TVR_SIZE - 1)
 
 struct timer_vec {
-        int index;
-        struct timer_list *vec[TVN_SIZE];
+	int index;
+	struct list_head vec[TVN_SIZE];
 };
 
 struct timer_vec_root {
-        int index;
-        struct timer_list *vec[TVR_SIZE];
+	int index;
+	struct list_head vec[TVR_SIZE];
 };
 
-static struct timer_vec tv5 = { 0 };
-static struct timer_vec tv4 = { 0 };
-static struct timer_vec tv3 = { 0 };
-static struct timer_vec tv2 = { 0 };
-static struct timer_vec_root tv1 = { 0 };
+static struct timer_vec tv5;
+static struct timer_vec tv4;
+static struct timer_vec tv3;
+static struct timer_vec tv2;
+static struct timer_vec_root tv1;
 
 static struct timer_vec * const tvecs[] = {
 	(struct timer_vec *)&tv1, &tv2, &tv3, &tv4, &tv5
@@ -103,18 +103,21 @@ static struct timer_vec * const tvecs[] = {
 
 #define NOOF_TVECS (sizeof(tvecs) / sizeof(tvecs[0]))
 
-static unsigned long timer_jiffies = 0;
-
-static inline void insert_timer(struct timer_list *timer, struct timer_list **vec)
+void init_timervecs (void)
 {
-	struct timer_list *next = *vec;
+	int i;
 
-	timer->next = next;
-	if (next)
-		next->prev = timer;
-	*vec = timer;
-	timer->prev = (struct timer_list *)vec;
+	for (i = 0; i < TVN_SIZE; i++) {
+		INIT_LIST_HEAD(tv5.vec + i);
+		INIT_LIST_HEAD(tv4.vec + i);
+		INIT_LIST_HEAD(tv3.vec + i);
+		INIT_LIST_HEAD(tv2.vec + i);
+	}
+	for (i = 0; i < TVR_SIZE; i++)
+		INIT_LIST_HEAD(tv1.vec + i);
 }
+
+static unsigned long timer_jiffies;
 
 static inline void internal_add_timer(struct timer_list *timer)
 {
@@ -123,7 +126,7 @@ static inline void internal_add_timer(struct timer_list *timer)
 	 */
 	unsigned long expires = timer->expires;
 	unsigned long idx = expires - timer_jiffies;
-	struct timer_list ** vec;
+	struct list_head * vec;
 
 	if (idx < TVR_SIZE) {
 		int i = expires & TVR_MASK;
@@ -147,43 +150,51 @@ static inline void internal_add_timer(struct timer_list *timer)
 		vec = tv5.vec + i;
 	} else {
 		/* Can only get here on architectures with 64-bit jiffies */
-		timer->next = timer->prev = timer;
+		INIT_LIST_HEAD(&timer->list);
 		return;
 	}
-	insert_timer(timer, vec);
+	/*
+	 * Timers are FIFO!
+	 */
+	list_add(&timer->list, vec->prev);
 }
 
+/* Initialize both explicitly - let's try to have them in the same cache line */
 spinlock_t timerlist_lock = SPIN_LOCK_UNLOCKED;
+
+#ifdef CONFIG_SMP
+volatile struct timer_list * volatile running_timer;
+#define timer_enter(t) do { running_timer = t; mb(); } while (0)
+#define timer_exit() do { running_timer = NULL; } while (0)
+#define timer_is_running(t) (running_timer == t)
+#define timer_synchronize(t) while (timer_is_running(t)) barrier()
+#else
+#define timer_enter(t)		do { } while (0)
+#define timer_exit()		do { } while (0)
+#endif
 
 void add_timer(struct timer_list *timer)
 {
 	unsigned long flags;
 
 	spin_lock_irqsave(&timerlist_lock, flags);
-	if (timer->prev)
+	if (timer_pending(timer))
 		goto bug;
 	internal_add_timer(timer);
-out:
 	spin_unlock_irqrestore(&timerlist_lock, flags);
 	return;
-
 bug:
+	spin_unlock_irqrestore(&timerlist_lock, flags);
 	printk("bug: kernel timer added twice at %p.\n",
 			__builtin_return_address(0));
-	goto out;
 }
 
-static inline int detach_timer(struct timer_list *timer)
+static inline int detach_timer (struct timer_list *timer)
 {
-	struct timer_list *prev = timer->prev;
-	if (prev) {
-		struct timer_list *next = timer->next;
-		prev->next = next;
-		if (next)
-			next->prev = prev;
-		return 1;
-	}
-	return 0;
+	if (!timer_pending(timer))
+		return 0;
+	list_del(&timer->list);
+	return 1;
 }
 
 int mod_timer(struct timer_list *timer, unsigned long expires)
@@ -206,12 +217,17 @@ int del_timer(struct timer_list * timer)
 
 	spin_lock_irqsave(&timerlist_lock, flags);
 	ret = detach_timer(timer);
-	timer->next = timer->prev = 0;
+	timer->list.next = timer->list.prev = NULL;
 	spin_unlock_irqrestore(&timerlist_lock, flags);
 	return ret;
 }
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
+void sync_timers(void)
+{
+	spin_unlock_wait(&global_bh_lock);
+}
+
 /*
  * SMP specific function to delete periodic timer.
  * Caller must disable by some means restarting the timer
@@ -230,12 +246,13 @@ int del_timer_sync(struct timer_list * timer)
 
 		spin_lock_irqsave(&timerlist_lock, flags);
 		ret += detach_timer(timer);
-		timer->next = timer->prev = 0;
-		running = timer->running;
+		timer->list.next = timer->list.prev = 0;
+		running = timer_is_running(timer);
 		spin_unlock_irqrestore(&timerlist_lock, flags);
 
 		if (!running)
-			return ret;
+			break;
+
 		timer_synchronize(timer);
 	}
 
@@ -246,66 +263,64 @@ int del_timer_sync(struct timer_list * timer)
 
 static inline void cascade_timers(struct timer_vec *tv)
 {
-        /* cascade all the timers from tv up one level */
-        struct timer_list *timer;
-        timer = tv->vec[tv->index];
-        /*
-         * We are removing _all_ timers from the list, so we don't  have to
-         * detach them individually, just clear the list afterwards.
-         */
-        while (timer) {
-                struct timer_list *tmp = timer;
-                timer = timer->next;
-                internal_add_timer(tmp);
-        }
-        tv->vec[tv->index] = NULL;
-        tv->index = (tv->index + 1) & TVN_MASK;
+	/* cascade all the timers from tv up one level */
+	struct list_head *head, *curr, *next;
+
+	head = tv->vec + tv->index;
+	curr = head->next;
+	/*
+	 * We are removing _all_ timers from the list, so we don't  have to
+	 * detach them individually, just clear the list afterwards.
+	 */
+	while (curr != head) {
+		struct timer_list *tmp;
+
+		tmp = list_entry(curr, struct timer_list, list);
+		next = curr->next;
+		list_del(curr); // not needed
+		internal_add_timer(tmp);
+		curr = next;
+	}
+	INIT_LIST_HEAD(head);
+	tv->index = (tv->index + 1) & TVN_MASK;
 }
 
 static inline void run_timer_list(void)
 {
 	spin_lock_irq(&timerlist_lock);
 	while ((long)(jiffies - timer_jiffies) >= 0) {
-		struct timer_list *timer;
+		struct list_head *head, *curr;
 		if (!tv1.index) {
 			int n = 1;
 			do {
 				cascade_timers(tvecs[n]);
 			} while (tvecs[n]->index == 1 && ++n < NOOF_TVECS);
 		}
-		while ((timer = tv1.vec[tv1.index])) {
-			void (*fn)(unsigned long) = timer->function;
-			unsigned long data = timer->data;
+repeat:
+		head = tv1.vec + tv1.index;
+		curr = head->next;
+		if (curr != head) {
+			struct timer_list *timer;
+			void (*fn)(unsigned long);
+			unsigned long data;
+
+			timer = list_entry(curr, struct timer_list, list);
+ 			fn = timer->function;
+ 			data= timer->data;
+
 			detach_timer(timer);
-			timer->next = timer->prev = NULL;
-			timer_set_running(timer);
+			timer->list.next = timer->list.prev = NULL;
+			timer_enter(timer);
 			spin_unlock_irq(&timerlist_lock);
 			fn(data);
 			spin_lock_irq(&timerlist_lock);
+			timer_exit();
+			goto repeat;
 		}
 		++timer_jiffies; 
 		tv1.index = (tv1.index + 1) & TVR_MASK;
 	}
 	spin_unlock_irq(&timerlist_lock);
-}
-
-
-static inline void run_old_timers(void)
-{
-	struct timer_struct *tp;
-	unsigned long mask;
-
-	for (mask = 1, tp = timer_table+0 ; mask ; tp++,mask += mask) {
-		if (mask > timer_active)
-			break;
-		if (!(mask & timer_active))
-			continue;
-		if (time_after(tp->expires, jiffies))
-			continue;
-		timer_active &= ~mask;
-		tp->fn();
-		sti();
-	}
 }
 
 spinlock_t tqueue_lock = SPIN_LOCK_UNLOCKED;
@@ -319,9 +334,6 @@ void immediate_bh(void)
 {
 	run_task_queue(&tq_immediate);
 }
-
-unsigned long timer_active = 0;
-struct timer_struct timer_table[32];
 
 /*
  * this routine handles the overflow of the microsecond field
@@ -339,7 +351,7 @@ static void second_overflow(void)
     /* Bump the maxerror field */
     time_maxerror += time_tolerance >> SHIFT_USEC;
     if ( time_maxerror > NTP_PHASE_LIMIT ) {
-        time_maxerror = NTP_PHASE_LIMIT;
+	time_maxerror = NTP_PHASE_LIMIT;
 	time_status |= STA_UNSYNC;
     }
 
@@ -528,59 +540,60 @@ static inline void do_it_virt(struct task_struct * p, unsigned long ticks)
 	unsigned long it_virt = p->it_virt_value;
 
 	if (it_virt) {
-		if (it_virt <= ticks) {
-			it_virt = ticks + p->it_virt_incr;
+		it_virt -= ticks;
+		if (!it_virt) {
+			it_virt = p->it_virt_incr;
 			send_sig(SIGVTALRM, p, 1);
 		}
-		p->it_virt_value = it_virt - ticks;
+		p->it_virt_value = it_virt;
 	}
 }
 
-static inline void do_it_prof(struct task_struct * p, unsigned long ticks)
+static inline void do_it_prof(struct task_struct *p)
 {
 	unsigned long it_prof = p->it_prof_value;
 
 	if (it_prof) {
-		if (it_prof <= ticks) {
-			it_prof = ticks + p->it_prof_incr;
+		if (--it_prof == 0) {
+			it_prof = p->it_prof_incr;
 			send_sig(SIGPROF, p, 1);
 		}
-		p->it_prof_value = it_prof - ticks;
+		p->it_prof_value = it_prof;
 	}
 }
 
-void update_one_process(struct task_struct *p,
-	unsigned long ticks, unsigned long user, unsigned long system, int cpu)
+void update_one_process(struct task_struct *p, unsigned long user,
+			unsigned long system, int cpu)
 {
 	p->per_cpu_utime[cpu] += user;
 	p->per_cpu_stime[cpu] += system;
 	do_process_times(p, user, system);
 	do_it_virt(p, user);
-	do_it_prof(p, ticks);
+	do_it_prof(p);
 }	
 
-static void update_process_times(unsigned long ticks, unsigned long system)
-{
 /*
- * SMP does this on a per-CPU basis elsewhere
+ * Called from the timer interrupt handler to charge one tick to the current 
+ * process.  user_tick is 1 if the tick is user time, 0 for system.
  */
-#ifndef  __SMP__
-	struct task_struct * p = current;
-	unsigned long user = ticks - system;
+void update_process_times(int user_tick)
+{
+	struct task_struct *p = current;
+	int cpu = smp_processor_id(), system = user_tick ^ 1;
+
+	update_one_process(p, user_tick, system, cpu);
 	if (p->pid) {
-		p->counter -= ticks;
-		if (p->counter <= 0) {
+		if (--p->counter <= 0) {
 			p->counter = 0;
 			p->need_resched = 1;
 		}
-		if (p->priority < DEF_PRIORITY)
-			kstat.cpu_nice += user;
+		if (p->nice > 0)
+			kstat.per_cpu_nice[cpu] += user_tick;
 		else
-			kstat.cpu_user += user;
-		kstat.cpu_system += system;
-	}
-	update_one_process(p, ticks, user, system, 0);
-#endif
+			kstat.per_cpu_user[cpu] += user_tick;
+		kstat.per_cpu_system[cpu] += system;
+	} else if (local_bh_count(cpu) || local_irq_count(cpu) > 1)
+		kstat.per_cpu_system[cpu] += system;
 }
 
 /*
@@ -607,7 +620,7 @@ static unsigned long count_active_tasks(void)
  * Nothing else seems to be standardized: the fractional size etc
  * all seem to differ on different machines.
  */
-unsigned long avenrun[3] = { 0,0,0 };
+unsigned long avenrun[3];
 
 static inline void calc_load(unsigned long ticks)
 {
@@ -624,8 +637,8 @@ static inline void calc_load(unsigned long ticks)
 	}
 }
 
-volatile unsigned long lost_ticks = 0;
-static unsigned long lost_ticks_system = 0;
+/* jiffies at the most recent update of wall time */
+unsigned long wall_jiffies;
 
 /*
  * This spinlock protect us from races in SMP while playing with xtime. -arca
@@ -643,38 +656,31 @@ static inline void update_times(void)
 	 */
 	write_lock_irq(&xtime_lock);
 
-	ticks = lost_ticks;
-	lost_ticks = 0;
-
+	ticks = jiffies - wall_jiffies;
 	if (ticks) {
-		unsigned long system;
-		system = xchg(&lost_ticks_system, 0);
-
-		calc_load(ticks);
+		wall_jiffies += ticks;
 		update_wall_time(ticks);
-		write_unlock_irq(&xtime_lock);
-		
-		update_process_times(ticks, system);
-
-	} else
-		write_unlock_irq(&xtime_lock);
+	}
+	write_unlock_irq(&xtime_lock);
+	calc_load(ticks);
 }
 
 void timer_bh(void)
 {
 	update_times();
-	run_old_timers();
 	run_timer_list();
 }
 
-void do_timer(struct pt_regs * regs)
+void do_timer(struct pt_regs *regs)
 {
 	(*(unsigned long *)&jiffies)++;
-	lost_ticks++;
+#ifndef CONFIG_SMP
+	/* SMP process accounting uses the local APIC timer */
+
+	update_process_times(user_mode(regs));
+#endif
 	mark_bh(TIMER_BH);
-	if (!user_mode(regs))
-		lost_ticks_system++;
-	if (tq_timer)
+	if (TQ_ACTIVE(tq_timer))
 		mark_bh(TQUEUE_BH);
 }
 
@@ -713,7 +719,7 @@ asmlinkage unsigned long sys_alarm(unsigned int seconds)
 asmlinkage long sys_getpid(void)
 {
 	/* This is SMP safe - current->pid doesn't change */
-	return current->pid;
+	return current->tgid;
 }
 
 /*
@@ -748,7 +754,7 @@ asmlinkage long sys_getppid(void)
 	parent = me->p_opptr;
 	for (;;) {
 		pid = parent->pid;
-#if __SMP__
+#if CONFIG_SMP
 {
 		struct task_struct *old = parent;
 		mb();

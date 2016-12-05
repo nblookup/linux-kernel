@@ -21,6 +21,11 @@
  * modified by SRC, incorporated herein by reference.
  * 
  * **********************
+ * Changes:
+ * Arnaldo Carvalho de Melo <acme@conectiva.com.br> - 08/08/2000
+ * - reorganize kmallocs in com20020_attach, checking all for failure
+ *   and releasing the previous allocations if one fails
+ * **********************
  * 
  * For more details, see drivers/net/arcnet.c
  *
@@ -102,12 +107,14 @@ static inline void regdump(struct net_device *dev) { }
 static int node = 0;
 static int timeout = 3;
 static int backplane = 0;
-static int clock = 0;
+static int clockp = 0;
+static int clockm = 0;
 
 MODULE_PARM(node, "i");
 MODULE_PARM(timeout, "i");
 MODULE_PARM(backplane, "i");
-MODULE_PARM(clock, "i");
+MODULE_PARM(clockp, "i");
+MODULE_PARM(clockm, "i");
 
 /* Bit map of interrupts to choose from */
 static u_int irq_mask = 0xdeb8;
@@ -196,7 +203,24 @@ static dev_link_t *com20020_attach(void)
     link = kmalloc(sizeof(struct dev_link_t), GFP_KERNEL);
     if (!link)
 	return NULL;
+
+    info = kmalloc(sizeof(struct com20020_dev_t), GFP_KERNEL);
+    if (!info)
+	goto fail_alloc_info;
+
+    lp =  kmalloc(sizeof(struct arcnet_local), GFP_KERNEL);
+    if (!lp)
+	goto fail_alloc_lp;
+
+    dev = dev_alloc("arc%d", &ret);
+    if (!dev)
+	goto fail_alloc_dev;
+
+    memset(info, 0, sizeof(struct com20020_dev_t));
+    memset(lp, 0, sizeof(struct arcnet_local));
     memset(link, 0, sizeof(struct dev_link_t));
+    dev->priv = lp;
+
     link->release.function = &com20020_release;
     link->release.data = (u_long)link;
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_8;
@@ -214,24 +238,12 @@ static dev_link_t *com20020_attach(void)
     link->conf.IntType = INT_MEMORY_AND_IO;
     link->conf.Present = PRESENT_OPTION;
 
-    info = kmalloc(sizeof(struct com20020_dev_t), GFP_KERNEL);
-    if (!info)
-	return NULL;
-    memset(info, 0, sizeof(struct com20020_dev_t));
-
-    dev = dev_alloc("arc%d", &ret);
-    if (!dev)
-	return NULL;
-    lp = dev->priv = kmalloc(sizeof(struct arcnet_local), GFP_KERNEL);
-    if (!lp)
-	return NULL;
-    memset(lp, 0, sizeof(struct arcnet_local));
-
     /* fill in our module parameters as defaults */
     dev->dev_addr[0] = node;
     lp->timeout = timeout;
     lp->backplane = backplane;
-    lp->clock = clock;
+    lp->clockp = clockp;
+    lp->clockm = clockm & 3;
     lp->hw.open_close_ll = com20020cs_open_close;
 
     link->irq.Instance = info->dev = dev;
@@ -257,6 +269,14 @@ static dev_link_t *com20020_attach(void)
     }
 
     return link;
+
+fail_alloc_dev:
+    kfree(lp);
+fail_alloc_lp:
+    kfree(info);
+fail_alloc_info:
+    kfree(link);
+    return NULL;
 } /* com20020_attach */
 
 /*======================================================================
@@ -330,10 +350,10 @@ static void com20020_detach(dev_link_t *link)
 	    kfree(dev);
 	}
 	DEBUG(1,"kfree2...\n");
-	kfree_s(info, sizeof(struct com20020_dev_t));
+	kfree(info);
     }
     DEBUG(1,"kfree3...\n");
-    kfree_s(link, sizeof(struct dev_link_t));
+    kfree(link);
 
 } /* com20020_detach */
 
@@ -350,6 +370,7 @@ while ((last_ret=CardServices(last_fn=(fn), args))!=0) goto cs_failed
 
 static void com20020_config(dev_link_t *link)
 {
+    struct arcnet_local *lp;
     client_handle_t handle;
     tuple_t tuple;
     cisparse_t parse;
@@ -426,6 +447,11 @@ static void com20020_config(dev_link_t *link)
     }
     
     MOD_INC_USE_COUNT;
+
+    lp = dev->priv;
+    lp->card_name = "PCMCIA COM20020";
+    lp->card_flags = ARC_CAN_10MBIT; /* pretend all of them can 10Mbit */
+
     i = com20020_found(dev, 0);
     
     if (i != 0) {

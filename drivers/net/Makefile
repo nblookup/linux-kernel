@@ -3,115 +3,39 @@
 # Makefile for the Linux network (ethercard) device drivers.
 #
 
-O_OBJS          :=
-M_OBJS          :=
-MX_OBJS         :=
-
-# Object file lists.
-
 obj-y           :=
 obj-m           :=
 obj-n           :=
 obj-            :=
 
-SUB_DIRS     := 
-MOD_SUB_DIRS :=
-MOD_IN_SUB_DIRS :=
-ALL_SUB_DIRS := $(SUB_DIRS) fc hamradio irda pcmcia tokenring wan sk98lin \
-		arcnet skfp tulip appletalk
+mod-subdirs     := appletalk arcnet fc irda tokenring pcmcia wan
 
 O_TARGET := net.o
-MOD_LIST_NAME := NET_MODULES
 
 # All of the (potential) objects that export symbols.
 # This list comes from 'grep -l EXPORT_SYMBOL *.[hc]'.
 
 export-objs     :=	8390.o arlan.o aironet4500_core.o aironet4500_card.o ppp_async.o \
-			ppp_generic.o slhc.o
-
-ifeq ($(CONFIG_PCMCIA),y)
-  SUB_DIRS += pcmcia
-  MOD_IN_SUB_DIRS += pcmcia
-else
-  ifeq ($(CONFIG_PCMCIA),m)
-    MOD_IN_SUB_DIRS += pcmcia
-  endif
-endif
+			ppp_generic.o slhc.o pppox.o auto_irq.o
 
 ifeq ($(CONFIG_TULIP),y)
-  SUB_DIRS += tulip
   obj-y += tulip/tulip.o
-else
-  ifeq ($(CONFIG_TULIP),m)
-    MOD_SUB_DIRS += tulip
-  endif
 endif
 
-ifeq ($(CONFIG_IRDA),y)
-SUB_DIRS += irda
-MOD_IN_SUB_DIRS += irda
-else
-  ifeq ($(CONFIG_IRDA),m)
-  MOD_IN_SUB_DIRS += irda
-  endif
+ifeq ($(CONFIG_ISDN_PPP),y)
+  obj-$(CONFIG_ISDN) += slhc.o
 endif
 
-ifeq ($(CONFIG_TR),y)
-SUB_DIRS += tokenring
-MOD_IN_SUB_DIRS += tokenring
-else
-  ifeq ($(CONFIG_TR),m)
-  MOD_IN_SUB_DIRS += tokenring
-  endif
-endif
-
-ifeq ($(CONFIG_WAN),y)
-SUB_DIRS += wan
-MOD_IN_SUB_DIRS += wan
-else
-  ifeq ($(CONFIG_WAN),m)
-  MOD_IN_SUB_DIRS += wan
-  endif
-endif
-
-ifeq ($(CONFIG_NET_FC),y)
-SUB_DIRS += fc
-MOD_IN_SUB_DIRS += fc
-else
-  ifeq ($(CONFIG_NET_FC),m)
-  MOD_IN_SUB_DIRS += fc
-  endif
-endif
-
-ifeq ($(CONFIG_ISDN),y)
-  ifeq ($(CONFIG_ISDN_PPP),y)
-    obj-y += slhc.o ppp_deflate.o
-  endif
-else
-  ifeq ($(CONFIG_ISDN),m)
-    ifeq ($(CONFIG_ISDN_PPP),y)
-      obj-m += slhc.o ppp_deflate.o
-    endif
-  endif
-endif
-
-ifeq ($(CONFIG_ARCNET),y)
-SUB_DIRS += arcnet
-MOD_IN_SUB_DIRS += arcnet
-else
-  ifeq ($(CONFIG_ARCNET),m)
-  MOD_IN_SUB_DIRS += arcnet
-  endif
-endif
-
-ifeq ($(CONFIG_ATALK),y)
-SUB_DIRS += appletalk
-MOD_IN_SUB_DIRS += appletalk
-else
-  ifeq ($(CONFIG_ATALK),m)
-  MOD_IN_SUB_DIRS += appletalk
-  endif
-endif
+subdir-$(CONFIG_PCMCIA) += pcmcia
+subdir-$(CONFIG_TULIP) += tulip
+subdir-$(CONFIG_IRDA) += irda
+subdir-$(CONFIG_TR) += tokenring
+subdir-$(CONFIG_WAN) += wan
+subdir-$(CONFIG_NET_FC) += fc
+subdir-$(CONFIG_ARCNET) += arcnet
+subdir-$(CONFIG_APPLETALK) += appletalk
+subdir-$(CONFIG_SK98LIN) += sk98lin
+subdir-$(CONFIG_SKFP) += skfp
 
 #
 # link order important here
@@ -145,23 +69,15 @@ obj-$(CONFIG_SIS900) += sis900.o
 obj-$(CONFIG_DM9102) += dmfe.o
 obj-$(CONFIG_YELLOWFIN) += yellowfin.o
 obj-$(CONFIG_ACENIC) += acenic.o
+obj-$(CONFIG_NATSEMI) += natsemi.o
+obj-$(CONFIG_STNIC) += stnic.o 8390.o
 
 ifeq ($(CONFIG_SK98LIN),y)
-SUB_DIRS += sk98lin
 obj-y += sk98lin/sk98lin.o
-else
-  ifeq ($(CONFIG_SK98LIN),m)
-  MOD_IN_SUB_DIRS += sk98lin
-  endif
 endif
 
 ifeq ($(CONFIG_SKFP),y)
-  SUB_DIRS += skfp
   obj-y += skfp/skfp.o
-else
-  ifeq ($(CONFIG_SKFP),m)
-    MOD_IN_SUB_DIRS += skfp
-  endif
 endif
 
 obj-$(CONFIG_VIA_RHINE) += via-rhine.o
@@ -177,6 +93,9 @@ obj-$(CONFIG_AIRONET4500_NONCS)  += aironet4500_card.o
 obj-$(CONFIG_AIRONET4500_PROC)	+= aironet4500_proc.o
 obj-$(CONFIG_AIRONET4500_CS)	+= aironet4500_proc.o
 
+obj-$(CONFIG_WINBOND_840) += winbond-840.o
+obj-$(CONFIG_SUNDANCE) += sundance.o
+obj-$(CONFIG_HAMACHI) += hamachi.o
 obj-$(CONFIG_NET) += Space.o setup.o net_init.o loopback.o
 obj-$(CONFIG_SEEQ8005) += seeq8005.o
 obj-$(CONFIG_ETHERTAP) += ethertap.o
@@ -204,27 +123,12 @@ obj-$(CONFIG_ES3210) += es3210.o 8390.o
 obj-$(CONFIG_LNE390) += lne390.o 8390.o
 obj-$(CONFIG_NE3210) += ne3210.o 8390.o
 
-# bsd_comp.o is *always* a module, for some documented reason
-# (licensing).
-ifeq ($(CONFIG_PPP),y)
-  obj-y += ppp_generic.o slhc.o
-  obj-$(CONFIG_PPP_ASYNC) += ppp_async.o
-  obj-$(CONFIG_PPP_SYNC_TTY) += ppp_synctty.o
-  obj-$(CONFIG_PPP_DEFLATE) += ppp_deflate.o
-  ifeq ($(CONFIG_PPP_BSDCOMP),m)
-    obj-m += bsd_comp.o
-  endif
-else
-  ifeq ($(CONFIG_PPP),m)
-    obj-m += ppp_generic.o slhc.o
-    obj-$(CONFIG_PPP_ASYNC) += ppp_async.o
-    obj-$(CONFIG_PPP_SYNC_TTY) += ppp_synctty.o
-    obj-$(CONFIG_PPP_DEFLATE) += ppp_deflate.o
-    ifeq ($(CONFIG_PPP_BSDCOMP),m)
-      obj-m += bsd_comp.o
-    endif
-  endif
-endif
+obj-$(CONFIG_PPP) += ppp_generic.o slhc.o
+obj-$(CONFIG_PPP_ASYNC) += ppp_async.o
+obj-$(CONFIG_PPP_SYNC_TTY) += ppp_synctty.o
+obj-$(CONFIG_PPP_DEFLATE) += ppp_deflate.o
+obj-$(CONFIG_PPP_BSDCOMP) += bsd_comp.o
+obj-$(CONFIG_PPPOE) += pppox.o pppoe.o
 
 obj-$(CONFIG_SLIP) += slip.o
 ifeq ($(CONFIG_SLIP),y)
@@ -253,6 +157,7 @@ obj-$(CONFIG_EL1) += 3c501.o
 obj-$(CONFIG_EL16) += 3c507.o
 obj-$(CONFIG_ELMC) += 3c523.o
 obj-$(CONFIG_SKMC) += sk_mca.o
+obj-$(CONFIG_IBMLANA) += ibmlana.o
 obj-$(CONFIG_ELMC_II) += 3c527.o
 obj-$(CONFIG_EL3) += 3c509.o
 obj-$(CONFIG_3C515) += 3c515.o
@@ -288,43 +193,20 @@ obj-$(CONFIG_ATARILANCE) += atarilance.o
 obj-$(CONFIG_ATARI_BIONET) += atari_bionet.o
 obj-$(CONFIG_ATARI_PAMSNET) += atari_pamsnet.o
 obj-$(CONFIG_A2065) += a2065.o
-obj-$(CONFIG_HYDRA) += hydra.o
+obj-$(CONFIG_HYDRA) += hydra.o 8390.o
 obj-$(CONFIG_ARIADNE) += ariadne.o
 obj-$(CONFIG_CS89x0) += cs89x0.o
 obj-$(CONFIG_MACSONIC) += macsonic.o
 obj-$(CONFIG_MACMACE) += macmace.o
 obj-$(CONFIG_MAC89x0) += mac89x0.o
-
+obj-$(CONFIG_TUN) += tun.o
 #
 # HIPPI adapters
 #
 
-
-# Extract lists of the multi-part drivers.
-# The 'int-*' lists are the intermediate files used to build the multi's.
-
-multi-y         := $(filter $(list-multi), $(obj-y))
-multi-m         := $(filter $(list-multi), $(obj-m))
-int-y           := $(sort $(foreach m, $(multi-y), $($(basename $(m))-objs)))
-int-m           := $(sort $(foreach m, $(multi-m), $($(basename $(m))-objs)))
-
-# Files that are both resident and modular: remove from modular.
-
-obj-m           := $(filter-out $(obj-y), $(obj-m))
-int-m           := $(filter-out $(int-y), $(int-m))
-
-# Take multi-part drivers out of obj-y and put components in.
-
-obj-y           := $(filter-out $(list-multi), $(obj-y)) $(int-y)
-
-# Translate to Rules.make lists.
-
-O_OBJS          := $(filter-out $(export-objs), $(obj-y))
-OX_OBJS         := $(filter     $(export-objs), $(obj-y))
-M_OBJS          := $(sort $(filter-out $(export-objs), $(obj-m)))
-MX_OBJS         := $(sort $(filter     $(export-objs), $(obj-m)))
-
-O_OBJS += auto_irq.o
+ifneq ($(ARCH),s390)
+obj-y += auto_irq.o
+endif
 
 include $(TOPDIR)/Rules.make
 

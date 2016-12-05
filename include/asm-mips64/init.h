@@ -1,4 +1,4 @@
-/* $Id: init.h,v 1.1 1999/08/18 23:37:51 ralf Exp $
+/* $Id$
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -14,8 +14,6 @@
 #define __initfunc(__arginit) \
 	__arginit __init; \
 	__arginit
-
-#define __initlocaldata  __initdata
 
 /* For assembly routines */
 #define __INIT		.section	.text.init,"ax"

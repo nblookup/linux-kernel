@@ -46,8 +46,6 @@
 #define DPRINTK(fmt, args...)
 #endif
 
-#define arraysize(x)    (sizeof(x)/sizeof(*(x)))
-
 #if 1
 #define vgawb_3d(reg,dat) \
 	if (cv3d_on_zorro2) { \
@@ -277,7 +275,7 @@ static struct {
 };
 
 
-#define NUM_TOTAL_MODES    arraysize(virgefb_predefined)
+#define NUM_TOTAL_MODES    ARRAY_SIZE(virgefb_predefined)
 
 
 static int Cyberfb_inverse = 0;
@@ -298,8 +296,6 @@ static struct fb_var_screeninfo virgefb_default;
 
 int virgefb_setup(char*);
 
-static int virgefb_open(struct fb_info *info, int user);
-static int virgefb_release(struct fb_info *info, int user);
 static int virgefb_get_fix(struct fb_fix_screeninfo *fix, int con, struct
 fb_info *info);
 static int virgefb_get_var(struct fb_var_screeninfo *var, int con, struct
@@ -310,10 +306,6 @@ static int virgefb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			    struct fb_info *info);
 static int virgefb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			    struct fb_info *info);
-static int virgefb_pan_display(struct fb_var_screeninfo *var, int con,
-			       struct fb_info *info);
-static int virgefb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-                         u_long arg, int con, struct fb_info *info);
 
 
 /*
@@ -898,28 +890,6 @@ static void do_install_cmap(int con, struct fb_info *info)
 			    1, fbhw->setcolreg, info);
 }
 
-
-/*
- *  Open/Release the frame buffer device
- */
-
-static int virgefb_open(struct fb_info *info, int user)
-{
-	/*
-	 * Nothing, only a usage count for the moment
-	 */
-
-	MOD_INC_USE_COUNT;
-	return(0);
-}
-
-static int virgefb_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return(0);
-}
-
-
 /*
  *    Get the Fixed Part of the Display
  */
@@ -1096,34 +1066,13 @@ static int virgefb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 }
 
 
-/*
- *    Pan or Wrap the Display
- *
- *    This call looks only at xoffset, yoffset and the FB_VMODE_YWRAP flag
- */
-
-static int virgefb_pan_display(struct fb_var_screeninfo *var, int con,
-			       struct fb_info *info)
-{
-	return(-EINVAL);
-}
-
-
-/*
- *	 Cybervision Frame Buffer Specific ioctls
- */
-
-static int virgefb_ioctl(struct inode *inode, struct file *file,
-			 u_int cmd, u_long arg, int con, struct fb_info *info)
-{
-	return(-EINVAL);
-}
-
-
 static struct fb_ops virgefb_ops = {
-	virgefb_open, virgefb_release, virgefb_get_fix, virgefb_get_var,
-	virgefb_set_var, virgefb_get_cmap, virgefb_set_cmap,
-	virgefb_pan_display, virgefb_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	virgefb_get_fix,
+	fb_get_var:	virgefb_get_var,
+	fb_set_var:	virgefb_set_var,
+	fb_get_cmap:	virgefb_get_cmap,
+	fb_set_cmap:	virgefb_set_cmap,
 };
 
 
@@ -1188,7 +1137,6 @@ int __init virgefb_init(void)
 		release_mem_region(CyberRegs_phys, 0x10000);
 		continue;
 	    }
-	    strcpy(z->name, "CyberVision64-3D Graphics Board");
 
 	    if (board_addr < 0x01000000) {
 		/*
@@ -1367,9 +1315,14 @@ static void fbcon_virge8_clear_margins(struct vc_data *conp, struct display *p,
 }
 
 static struct display_switch fbcon_virge8 = {
-   fbcon_cfb8_setup, fbcon_virge8_bmove, fbcon_virge8_clear, fbcon_virge8_putc,
-   fbcon_virge8_putcs, fbcon_virge8_revc, NULL, NULL, fbcon_virge8_clear_margins,
-   FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
+   setup:		fbcon_cfb8_setup,
+   bmove:		fbcon_virge8_bmove,
+   clear:		fbcon_virge8_clear,
+   putc:		fbcon_virge8_putc,
+   putcs:		fbcon_virge8_putcs,
+   revc:		fbcon_virge8_revc,
+   clear_margins:	fbcon_virge8_clear_margins,
+   fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
 };
 #endif
 
@@ -1427,9 +1380,14 @@ static void fbcon_virge16_clear_margins(struct vc_data *conp, struct display *p,
 }
 
 static struct display_switch fbcon_virge16 = {
-   fbcon_cfb16_setup, fbcon_virge16_bmove, fbcon_virge16_clear, fbcon_virge16_putc,
-   fbcon_virge16_putcs, fbcon_virge16_revc, NULL, NULL, fbcon_virge16_clear_margins,
-   FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
+   setup:		fbcon_cfb16_setup,
+   bmove:		fbcon_virge16_bmove,
+   clear:		fbcon_virge16_clear,
+   putc:		fbcon_virge16_putc,
+   putcs:		fbcon_virge16_putcs,
+   revc:		fbcon_virge16_revc,
+   clear_margins:	fbcon_virge16_clear_margins,
+   fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
 };
 #endif
 

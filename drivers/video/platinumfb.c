@@ -65,7 +65,6 @@ struct fb_par_platinum {
 struct fb_info_platinum {
 	struct fb_info			fb_info;
 	struct display			disp;
-	struct display_switch		dispsw;
 	struct fb_par_platinum		default_par;
 	struct fb_par_platinum		current_par;
 
@@ -101,22 +100,16 @@ struct fb_info_platinum {
  * Frame buffer device API
  */
 
-static int platinum_open(struct fb_info *info, int user);
-static int platinum_release(struct fb_info *info, int user);
 static int platinum_get_fix(struct fb_fix_screeninfo *fix, int con,
 			    struct fb_info *fb);
 static int platinum_get_var(struct fb_var_screeninfo *var, int con,
 			    struct fb_info *fb);
 static int platinum_set_var(struct fb_var_screeninfo *var, int con,
 			    struct fb_info *fb);
-static int platinum_pan_display(struct fb_var_screeninfo *var, int con,
-				struct fb_info *fb);
 static int platinum_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			     struct fb_info *info);
 static int platinum_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			     struct fb_info *info);
-static int platinum_ioctl(struct inode *inode, struct file *file, u_int cmd,
-			  u_long arg, int con, struct fb_info *info);
 
 
 /*
@@ -132,6 +125,7 @@ static void platinum_blank(int blank, struct fb_info *fb);
  * internal functions
  */
 
+static void platinum_of_init(struct device_node *dp);
 static inline int platinum_vram_reqd(int video_mode, int color_mode);
 static int read_platinum_sense(struct fb_info_platinum *info);
 static void set_platinum_clock(struct fb_info_platinum *info);
@@ -145,8 +139,9 @@ static int platinum_var_to_par(const struct fb_var_screeninfo *var,
 static int platinum_encode_fix(struct fb_fix_screeninfo *fix,
 			       const struct fb_par_platinum *par,
 			       const struct fb_info_platinum *info);
-static void platinum_set_disp(struct display *disp, struct fb_info_platinum *info,
-			      int cmode, int accel);
+static void platinum_set_dispsw(struct display *disp,
+				struct fb_info_platinum *info, int cmode,
+				int accel);
 static int platinum_getcolreg(u_int regno, u_int *red, u_int *green, u_int *blue,
 			      u_int *transp, struct fb_info *fb);
 static int platinum_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
@@ -159,35 +154,16 @@ static void do_install_cmap(int con, struct fb_info *info);
  */
 
 int platinum_init(void);
-#ifdef CONFIG_FB_OF
-void platinum_of_init(struct device_node *dp);
-#endif
 int platinum_setup(char*);
 
-
 static struct fb_ops platinumfb_ops = {
-	platinum_open,
-	platinum_release,
-	platinum_get_fix,
-	platinum_get_var,
-	platinum_set_var,
-	platinum_get_cmap,
-	platinum_set_cmap,
-	platinum_pan_display,
-	platinum_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	platinum_get_fix,
+	fb_get_var:	platinum_get_var,
+	fb_set_var:	platinum_set_var,
+	fb_get_cmap:	platinum_get_cmap,
+	fb_set_cmap:	platinum_set_cmap,
 };
-
-static int platinum_open(struct fb_info *info, int user)
-{
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-static int platinum_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return 0;
-}
 
 static int platinum_get_fix(struct fb_fix_screeninfo *fix, int con,
 			    struct fb_info *fb)
@@ -217,27 +193,25 @@ static int platinum_get_var(struct fb_var_screeninfo *var, int con,
 	return 0;
 }
 
-static void platinum_set_disp(struct display *disp, struct fb_info_platinum *info,
-			      int cmode, int accel)
+static void platinum_set_dispsw(struct display *disp,
+				struct fb_info_platinum *info, int cmode,
+				int accel)
 {
 	switch(cmode) {
 #ifdef FBCON_HAS_CFB8
 	    case CMODE_8:
-		info->dispsw = fbcon_cfb8;
-		disp->dispsw = &info->dispsw;
+		disp->dispsw = &fbcon_cfb8;
 		break;
 #endif
 #ifdef FBCON_HAS_CFB16
 	    case CMODE_16:
-		info->dispsw = fbcon_cfb16;
-		disp->dispsw = &info->dispsw;
+		disp->dispsw = &fbcon_cfb16;
 		disp->dispsw_data = info->fbcon_cmap.cfb16;
 		break;
 #endif
 #ifdef FBCON_HAS_CFB32
 	    case CMODE_32:
-		info->dispsw = fbcon_cfb32;
-		disp->dispsw = &info->dispsw;
+		disp->dispsw = &fbcon_cfb32;
 		disp->dispsw_data = info->fbcon_cmap.cfb32;
 		break;
 #endif
@@ -295,7 +269,7 @@ static int platinum_set_var(struct fb_var_screeninfo *var, int con,
 	    display->line_length = fix.line_length;
 	    display->can_soft_blank = 1;
 	    display->inverse = 0;
-	    platinum_set_disp(display, info, par.cmode, 0);
+	    platinum_set_dispsw(display, info, par.cmode, 0);
 	    display->scrollmode = SCROLL_YREDRAW;
 	    if (info->fb_info.changevar)
 	      (*info->fb_info.changevar)(con);
@@ -311,20 +285,6 @@ static int platinum_set_var(struct fb_var_screeninfo *var, int con,
 	    do_install_cmap(con, &info->fb_info);
 	}
 
-	return 0;
-}
-
-static int platinum_pan_display(struct fb_var_screeninfo *var, int con,
-				struct fb_info *info)
-{
-    /*
-     *  Pan (or wrap, depending on the `vmode' field) the display using the
-     *  `xoffset' and `yoffset' fields of the `var' structure.
-     *  If the values don't fit, return -EINVAL.
-     */
-
-	if (var->xoffset != 0 || var->yoffset != 0)
-		return -EINVAL;
 	return 0;
 }
 
@@ -367,13 +327,6 @@ static int platinum_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 	return 0;
 }
 
-static int platinum_ioctl(struct inode *inode, struct file *file, u_int cmd,
-			  u_long arg, int con, struct fb_info *info)
-{
-	printk(KERN_ERR "platinum_ioctl not yet implemented\n");
-	return -EINVAL;
-}
-
 static int platinum_switch(int con, struct fb_info *fb)
 {
 	struct fb_info_platinum *info = (struct fb_info_platinum *) fb;
@@ -386,7 +339,7 @@ static int platinum_switch(int con, struct fb_info *fb)
 
 	platinum_var_to_par(&fb_display[con].var, &par, info);
 	platinum_set_par(&par, info);
-	platinum_set_disp(&fb_display[con], info, par.cmode, 0);
+	platinum_set_dispsw(&fb_display[con], info, par.cmode, 0);
 	do_install_cmap(con, fb);
 
 	return 1;
@@ -667,13 +620,11 @@ static int __init init_platinum(struct fb_info_platinum *info)
 
 int __init platinum_init(void)
 {
-#ifndef CONFIG_FB_OF
 	struct device_node *dp;
 
 	dp = find_devices("platinum");
 	if (dp != 0)
 		platinum_of_init(dp);
-#endif /* CONFIG_FB_OF */
 	return 0;
 }
 
@@ -685,7 +636,7 @@ int __init platinum_init(void)
 #define invalidate_cache(addr)
 #endif
 
-void __init platinum_of_init(struct device_node *dp)
+static void __init platinum_of_init(struct device_node *dp)
 {
 	struct fb_info_platinum	*info;
 	unsigned long		addr, size;
@@ -706,6 +657,11 @@ void __init platinum_of_init(struct device_node *dp)
 	for (i = 0; i < dp->n_addrs; ++i) {
 		addr = dp->addrs[i].address;
 		size = dp->addrs[i].size;
+		/* Let's assume we can request either all or nothing */
+		if (!request_mem_region(addr, size, "platinumfb")) {
+			kfree(info);
+			return;
+		}
 		if (size >= 0x400000) {
 			/* frame buffer - map only 4MB */
 			info->frame_buffer_phys = addr;
@@ -719,6 +675,7 @@ void __init platinum_of_init(struct device_node *dp)
 	}
 
 	info->cmap_regs_phys = 0xf301b000;	/* XXX not in prom? */
+	request_mem_region(info->cmap_regs_phys, 0x1000, "platinumfb cmap");
 	info->cmap_regs = ioremap(info->cmap_regs_phys, 0x1000);
 
 	/* Grok total video ram */

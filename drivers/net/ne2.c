@@ -110,16 +110,16 @@ static const char *version = "ne2.c:v0.91 Nov 16 1998 Wim Dumon <wimpie@kotnet.o
 #define NESM_STOP_PG	0x80	/* Last page +1 of RX ring */
 
 /* From the .ADF file: */
-static unsigned int addresses[7]=
+static unsigned int addresses[7] __initdata =
 		{0x1000, 0x2020, 0x8020, 0xa0a0, 0xb0b0, 0xc0c0, 0xc3d0};
-static int irqs[4] = {3, 4, 5, 9};
+static int irqs[4] __initdata = {3, 4, 5, 9};
 
 struct ne2_adapters_t {
 	unsigned int	id;
 	char		*name;
 };
 
-const struct ne2_adapters_t ne2_adapters[] = {
+static struct ne2_adapters_t ne2_adapters[] __initdata = {
 	{ 0x6354, "Arco Ethernet Adapter AE/2" },
 	{ 0x70DE, "Compex ENET-16 MC/P" },
 	{ 0x7154, "Novell Ethernet Adapter NE/2" },
@@ -152,6 +152,8 @@ int __init ne2_probe(struct net_device *dev)
 	int i;
 	int adapter_found = 0;
 
+	SET_MODULE_OWNER(dev);
+
 	/* Do not check any supplied i/o locations. 
 	   POS registers usually don't fail :) */
 
@@ -171,7 +173,7 @@ int __init ne2_probe(struct net_device *dev)
 			return ne2_probe1(dev, current_mca_slot);
 		}
 	}
-	return ENODEV;
+	return -ENODEV;
 }
 
 
@@ -200,18 +202,12 @@ static int ne2_procinfo(char *buf, int slot, struct net_device *dev)
 
 static int __init ne2_probe1(struct net_device *dev, int slot)
 {
-	int i, base_addr, irq;
+	int i, base_addr, irq, retval;
 	unsigned char POS;
 	unsigned char SA_prom[32];
 	const char *name = "NE/2";
 	int start_page, stop_page;
-	static unsigned version_printed = 0;
-
-	/* We should have a "dev" from Space.c or the static module table. */
-	if (dev == NULL) {
-		printk(KERN_ERR "ne2.c: Passed a NULL device.\n");
-		dev = init_etherdev(0, 0);
-	}
+	static unsigned version_printed;
 
 	if (ei_debug && version_printed++ == 0)
 		printk(version);
@@ -222,7 +218,7 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 	POS = mca_read_stored_pos(slot, 2);
 	if(!(POS % 2)) {
 		printk(" disabled.\n");
-		return ENODEV;
+		return -ENODEV;
 	}
 
 	i = (POS & 0xE)>>1;
@@ -231,6 +227,9 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 	   The above line was for remote testing, thanx to sdog ... */
 	base_addr = addresses[i - 1];
 	irq = irqs[(POS & 0x60)>>5];
+
+	if (!request_region(base_addr, NE_IO_EXTENT, dev->name))
+		return -EBUSY;
 
 #ifdef DEBUG
 	printk("POS info : pos 2 = %#x ; base = %#x ; irq = %ld\n", POS,
@@ -245,7 +244,8 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 	outb(0x21, base_addr + NE_CMD);
 	if (inb(base_addr + NE_CMD) != 0x21) {
 		printk("NE/2 adapter not responding\n");
-		return ENODEV;
+		retval = -ENODEV;
+		goto out;
 	}
 
 	/* In the crynwr sources they do a RAM-test here. I skip it. I suppose
@@ -266,7 +266,8 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 		while ((inb_p(base_addr + EN0_ISR) & ENISR_RESET) == 0)
 			if (jiffies - reset_start_time > 2*HZ/100) {
 				printk(" not found (no reset ack).\n");
-				return ENODEV;
+				retval = -ENODEV;
+				goto out;
 			}
 
 		outb_p(0xff, base_addr + EN0_ISR);         /* Ack all intr. */
@@ -315,14 +316,11 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 
 	/* Snarf the interrupt now.  There's no point in waiting since we cannot
 	   share and the board will usually be enabled. */
-	{
-		int irqval = request_irq(dev->irq, ei_interrupt, 
-				0, name, dev);
-		if (irqval) {
-			printk (" unable to get IRQ %d (irqval=%d).\n", 
-					dev->irq, +irqval);
-			return EAGAIN;
-		}
+	retval = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev);
+	if (retval) {
+		printk (" unable to get IRQ %d (irqval=%d).\n", 
+				dev->irq, retval);
+		goto out;
 	}
 
 	dev->base_addr = base_addr;
@@ -331,10 +329,9 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 	if (ethdev_init(dev)) {
 		printk (" unable to get memory for dev->priv.\n");
 		free_irq(dev->irq, dev);
-		return -ENOMEM;
+		retval = -ENOMEM;
+		goto out;
 	}
-
-	request_region(base_addr, NE_IO_EXTENT, name);
 
 	for(i = 0; i < ETHER_ADDR_LEN; i++) {
 		printk(" %2.2x", SA_prom[i]);
@@ -368,12 +365,14 @@ static int __init ne2_probe1(struct net_device *dev, int slot)
 	dev->stop = &ne_close;
 	NS8390_init(dev, 0);
 	return 0;
+out:
+	release_region(base_addr, NE_IO_EXTENT);
+	return retval;
 }
 
 static int ne_open(struct net_device *dev)
 {
 	ei_open(dev);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -382,7 +381,6 @@ static int ne_close(struct net_device *dev)
 	if (ei_debug > 1)
 		printk("%s: Shutting down ethercard.\n", dev->name);
 	ei_close(dev);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -619,20 +617,10 @@ retry:
 
 #ifdef MODULE
 #define MAX_NE_CARDS	4	/* Max number of NE cards per module */
-#define NAMELEN		8	/* # of chars for storing dev->name */
-static char namelist[NAMELEN * MAX_NE_CARDS] = { 0, };
-static struct net_device dev_ne[MAX_NE_CARDS] = {
-	{
-		NULL,		/* assign a chunk of namelist[] below */
-		0, 0, 0, 0,
-		0, 0,
-		0, 0, 0, NULL, NULL
-	},
-};
-
-static int io[MAX_NE_CARDS] = { 0, };
-static int irq[MAX_NE_CARDS]  = { 0, };
-static int bad[MAX_NE_CARDS]  = { 0, };	/* 0xbad = bad sig or no reset ack */
+static struct net_device dev_ne[MAX_NE_CARDS];
+static int io[MAX_NE_CARDS];
+static int irq[MAX_NE_CARDS];
+static int bad[MAX_NE_CARDS];	/* 0xbad = bad sig or no reset ack */
 
 #ifdef MODULE_PARM
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_NE_CARDS) "i");
@@ -648,7 +636,6 @@ int init_module(void)
 
 	for (this_dev = 0; this_dev < MAX_NE_CARDS; this_dev++) {
 		struct net_device *dev = &dev_ne[this_dev];
-		dev->name = namelist+(NAMELEN*this_dev);
 		dev->irq = irq[this_dev];
 		dev->mem_end = bad[this_dev];
 		dev->base_addr = io[this_dev];

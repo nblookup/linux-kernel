@@ -19,7 +19,7 @@ typedef struct user_m68kfp_struct elf_fpregset_t;
 /*
  * This is used to ensure we don't load something for the wrong architecture.
  */
-#define elf_check_arch(x) ((x) == EM_68K)
+#define elf_check_arch(x) ((x)->e_machine == EM_68K)
 
 /*
  * These are used to set parameters in the core dumps.
@@ -89,8 +89,7 @@ typedef struct user_m68kfp_struct elf_fpregset_t;
 #define ELF_PLATFORM  (NULL)
 
 #ifdef __KERNEL__
-#define SET_PERSONALITY(ex, ibcs2) \
-	current->personality = (ibcs2 ? PER_SVR4 : PER_LINUX)
+#define SET_PERSONALITY(ex, ibcs2) set_personality((ibcs2)?PER_SVR4:PER_LINUX)
 #endif
 
 #endif

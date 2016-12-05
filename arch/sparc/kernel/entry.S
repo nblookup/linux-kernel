@@ -1,4 +1,4 @@
-/* $Id: entry.S,v 1.163 1999/11/19 04:11:24 davem Exp $
+/* $Id: entry.S,v 1.168 2001/01/01 01:46:15 davem Exp $
  * arch/sparc/kernel/entry.S:  Sparc trap low-level entry points.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -294,7 +294,7 @@ bad_trap_handler:
 real_irq_entry:
 	SAVE_ALL
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	.globl	patchme_maybe_smp_msg
 
 	cmp	%l7, 12
@@ -319,7 +319,7 @@ patch_handler_irq:
 
 	RESTORE_ALL
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	/* SMP per-cpu ticker interrupts are handled specially. */
 smp4m_ticker:
 	bne	real_irq_continue+4
@@ -479,7 +479,7 @@ linux_trap_ipi15_sun4d:
 	/* FIXME */
 1:	b,a	1b
 
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 
 	/* This routine handles illegal instructions and privileged
 	 * instruction attempts from user code.
@@ -945,7 +945,7 @@ sun4c_fault:
 	 and	%l5, %l4, %l5
 
 	/* Test for NULL pte_t * in vmalloc area. */
-	sethi   %hi(SUN4C_VMALLOC_START), %l4
+	sethi   %hi(VMALLOC_START), %l4
 	cmp     %l5, %l4
 	blu,a   C_LABEL(invalid_segment_patch1)
 	 lduXa	[%l5] ASI_SEGMAP, %l4
@@ -1072,7 +1072,7 @@ C_LABEL(invalid_segment_patch2):
 	andn	%l4, 0x1ff, %l5
 
 1:
-	sethi	%hi(SUN4C_VMALLOC_START), %l4
+	sethi	%hi(VMALLOC_START), %l4
 	cmp	%l5, %l4
 
 	bgeu	1f
@@ -1233,8 +1233,8 @@ C_LABEL(sys_ptrace):
 	call	C_LABEL(do_ptrace)
 	 add	%sp, REGWIN_SZ, %o0
 
-	ld	[%curptr + AOFF_task_flags], %l5
-	andcc	%l5, 0x20, %g0
+	ld	[%curptr + AOFF_task_ptrace], %l5
+	andcc	%l5, 0x02, %g0
 	be	1f
 	 nop
 
@@ -1283,8 +1283,8 @@ C_LABEL(sys_sigpause):
 	call	C_LABEL(do_sigpause)
 	 add	%sp, REGWIN_SZ, %o1
 
-	ld	[%curptr + AOFF_task_flags], %l5
-	andcc	%l5, 0x20, %g0
+	ld	[%curptr + AOFF_task_ptrace], %l5
+	andcc	%l5, 0x02, %g0
 	be	1f
 	 nop
 
@@ -1301,8 +1301,8 @@ C_LABEL(sys_sigsuspend):
 	call	C_LABEL(do_sigsuspend)
 	 add	%sp, REGWIN_SZ, %o0
 
-	ld	[%curptr + AOFF_task_flags], %l5
-	andcc	%l5, 0x20, %g0
+	ld	[%curptr + AOFF_task_ptrace], %l5
+	andcc	%l5, 0x02, %g0
 	be	1f
 	 nop
 
@@ -1320,8 +1320,8 @@ C_LABEL(sys_rt_sigsuspend):
 	call	C_LABEL(do_rt_sigsuspend)
 	 add	%sp, REGWIN_SZ, %o2
 
-	ld	[%curptr + AOFF_task_flags], %l5
-	andcc	%l5, 0x20, %g0
+	ld	[%curptr + AOFF_task_ptrace], %l5
+	andcc	%l5, 0x02, %g0
 	be	1f
 	 nop
 
@@ -1338,8 +1338,8 @@ C_LABEL(sys_sigreturn):
 	call	C_LABEL(do_sigreturn)
 	 add	%sp, REGWIN_SZ, %o0
 
-	ld	[%curptr + AOFF_task_flags], %l5
-	andcc	%l5, 0x20, %g0
+	ld	[%curptr + AOFF_task_ptrace], %l5
+	andcc	%l5, 0x02, %g0
 	be	1f
 	 nop
 
@@ -1358,8 +1358,8 @@ C_LABEL(sys_rt_sigreturn):
 	call	C_LABEL(do_rt_sigreturn)
 	 add	%sp, REGWIN_SZ, %o0
 
-	ld	[%curptr + AOFF_task_flags], %l5
-	andcc	%l5, 0x20, %g0
+	ld	[%curptr + AOFF_task_ptrace], %l5
+	andcc	%l5, 0x02, %g0
 	be	1f
 	 nop
 
@@ -1391,6 +1391,7 @@ flush_patch_two:
 	mov	%fp, %o1			! arg1:	usp
 	std	%g4, [%curptr + AOFF_task_thread + AOFF_thread_fork_kpsr]
 	add	%sp, REGWIN_SZ, %o2		! arg2:	pt_regs ptr
+	mov	0, %o3
 	call	C_LABEL(do_fork)
 	 mov	%l5, %o7
 	
@@ -1413,6 +1414,7 @@ flush_patch_three:
 1:
 	std	%g4, [%curptr + AOFF_task_thread + AOFF_thread_fork_kpsr]
 	add	%sp, REGWIN_SZ, %o2		! arg2:	pt_regs ptr
+	mov	0, %o3
 	call	C_LABEL(do_fork)
 	 mov	%l5, %o7
 
@@ -1430,6 +1432,7 @@ flush_patch_four:
 	mov	%fp, %o1
 	or	%o0, %lo(0x4000 | 0x0100 | SIGCHLD), %o0
 	sethi	%hi(C_LABEL(do_fork)), %l1
+	mov	0, %o3
 	jmpl	%l1 + %lo(C_LABEL(do_fork)), %g0
 	 add	%sp, REGWIN_SZ, %o2
 
@@ -1462,7 +1465,7 @@ C_LABEL(ret_from_syscall):
 	b	C_LABEL(ret_sys_call)
 	 ld	[%sp + REGWIN_SZ + PT_I0], %o0
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	.globl	C_LABEL(ret_from_smpfork)
 C_LABEL(ret_from_smpfork):
 	wr	%l0, PSR_ET, %psr
@@ -1496,9 +1499,9 @@ syscall_is_too_hard:
 	mov	%i1, %o1
 	mov	%i2, %o2
 
-	ld	[%curptr + AOFF_task_flags], %l5
+	ld	[%curptr + AOFF_task_ptrace], %l5
 	mov	%i3, %o3
-	andcc	%l5, 0x20, %g0
+	andcc	%l5, 0x02, %g0
 	mov	%i4, %o4
 	bne	linux_syscall_trace
 	 mov	%i0, %l5
@@ -1510,12 +1513,12 @@ syscall_is_too_hard:
 
 	.globl	C_LABEL(ret_sys_call)
 C_LABEL(ret_sys_call):
-	ld	[%curptr + AOFF_task_flags], %l6
+	ld	[%curptr + AOFF_task_ptrace], %l6
 	cmp	%o0, -ENOIOCTLCMD
 	ld	[%sp + REGWIN_SZ + PT_PSR], %g3
 	set	PSR_C, %g2
 	bgeu	1f
-	 andcc	%l6, 0x20, %l6	
+	 andcc	%l6, 0x02, %l6	
 
 	/* System call success, clear Carry condition code. */
 	andn	%g3, %g2, %g3
@@ -1806,21 +1809,23 @@ C_LABEL(udelay):
 	sethi	%hi(0x10c6), %o1
 	call	.umul
 	 or	%o1, %lo(0x10c6), %o1
-#ifndef __SMP__
-	sethi	%hi(C_LABEL(loops_per_sec)), %o3
+#ifndef CONFIG_SMP
+	sethi	%hi(C_LABEL(loops_per_jiffy)), %o3
 	call	.umul
-	 ld	[%o3 + %lo(C_LABEL(loops_per_sec))], %o1
+	 ld	[%o3 + %lo(C_LABEL(loops_per_jiffy))], %o1
 #else
 	GET_PROCESSOR_OFFSET(o4, o2)
 	set	C_LABEL(cpu_data), %o3
 	call	.umul
 	 ld	[%o3 + %o4], %o1
 #endif
+	call	.umul
+	 mov	100, %o0
 
-	cmp	%o1, 0x0
+	cmp	%o0, 0x0
 1:
 	bne	1b
-	 subcc	%o1, 1, %o1
+	 subcc	%o0, 1, %o0
 	
 	ret
 	restore

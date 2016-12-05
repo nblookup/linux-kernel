@@ -97,16 +97,12 @@ struct hw_interrupt_type open_pic = {
 #define check_arg_cpu(cpu)	do {} while (0)
 #endif
 
-void no_action(int ir1, void *dev, struct pt_regs *regs)
-{
-}
-
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 void openpic_ipi_action(int cpl, void *dev_id, struct pt_regs *regs)
 {
-	smp_message_recv(cpl-OPENPIC_VEC_IPI);
+	smp_message_recv(cpl-OPENPIC_VEC_IPI, regs);
 }
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 
 #ifdef __i386__
 static inline u_int in_le32(volatile u_int *addr)
@@ -265,12 +261,15 @@ void __init openpic_init(int main_pic)
 			    	while(np) {
 					int j, pri;
 					pri = strcmp(np->name, "programmer-switch") ? 2 : 7;
-					for (j=0;j<np->n_intrs;j++)
-						openpic_initirq(	np->intrs[j].line,
-									pri,
-									np->intrs[j].line,
-									np->intrs[j].sense,
-									np->intrs[j].sense);
+					for (j=0;j<np->n_intrs;j++) {
+						openpic_initirq(np->intrs[j].line,
+								pri,
+								np->intrs[j].line,
+								0,
+								np->intrs[j].sense);
+						if (np->intrs[j].sense)
+							irq_desc[np->intrs[j].line].status =  IRQ_LEVEL;
+					}
 					np = np->next;
 				}
 			}
@@ -293,7 +292,7 @@ void __init openpic_init(int main_pic)
 
 void find_ISUs(void)
 {
-#ifdef CONFIG_PPC64
+#ifdef CONFIG_PPC64BRIDGE
 	/* hardcode this for now since the IBM 260 is the only thing with
 	 * a distributed openpic right now.  -- Cort
 	 */

@@ -51,12 +51,13 @@ static struct sock *econet_sklist;
    how you count) it makes sense to use a simple lookup table. */
 static struct net_device *net2dev_map[256];
 
+#define EC_PORT_IP	0xd2
+
 #ifdef CONFIG_ECONET_AUNUDP
 static spinlock_t aun_queue_lock;
 static struct socket *udpsock;
 #define AUN_PORT	0x8000
 
-#define EC_PORT_IP	0xd2
 
 struct aunhdr
 {
@@ -593,7 +594,7 @@ static int ec_dev_ioctl(struct socket *sock, unsigned int cmd, void *arg)
 		if (edev == NULL)
 		{
 			/* Magic up a new one. */
-			edev = kmalloc(GFP_KERNEL, sizeof(struct ec_device));
+			edev = kmalloc(sizeof(struct ec_device), GFP_KERNEL);
 			if (edev == NULL) {
 				printk("af_ec: memory squeeze.\n");
 				dev_put(dev);
@@ -640,17 +641,15 @@ static int ec_dev_ioctl(struct socket *sock, unsigned int cmd, void *arg)
 static int econet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	struct sock *sk = sock->sk;
-	int err;
 	int pid;
 
 	switch(cmd) 
 	{
 		case FIOSETOWN:
 		case SIOCSPGRP:
-			err = get_user(pid, (int *) arg);
-			if (err)
-				return err; 
-			if (current->pid != pid && current->pgrp != -pid && !suser())
+			if (get_user(pid, (int *) arg))
+				return -EFAULT; 
+			if (current->pid != pid && current->pgrp != -pid && !capable(CAP_NET_ADMIN))
 				return -EPERM;
 			sk->proc = pid;
 			return(0);
@@ -660,10 +659,7 @@ static int econet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg
 		case SIOCGSTAMP:
 			if(sk->stamp.tv_sec==0)
 				return -ENOENT;
-			err = -EFAULT;
-			if (!copy_to_user((void *)arg, &sk->stamp, sizeof(struct timeval)))
-				err = 0;
-			return err;
+			return copy_to_user((void *)arg, &sk->stamp, sizeof(struct timeval)) ? -EFAULT : 0;
 		case SIOCGIFFLAGS:
 		case SIOCSIFFLAGS:
 		case SIOCGIFCONF:
@@ -704,24 +700,23 @@ static struct net_proto_family econet_family_ops = {
 };
 
 static struct proto_ops SOCKOPS_WRAPPED(econet_ops) = {
-	PF_ECONET,
+	family:		PF_ECONET,
 
-	econet_release,
-	econet_bind,
-	sock_no_connect,
-	sock_no_socketpair,
-	sock_no_accept,
-	econet_getname, 
-	datagram_poll,
-	econet_ioctl,
-	sock_no_listen,
-	sock_no_shutdown,
-	sock_no_setsockopt,
-	sock_no_getsockopt,
-	sock_no_fcntl,
-	econet_sendmsg,
-	econet_recvmsg,
-	sock_no_mmap
+	release:	econet_release,
+	bind:		econet_bind,
+	connect:	sock_no_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		sock_no_accept,
+	getname:	econet_getname, 
+	poll:		datagram_poll,
+	ioctl:		econet_ioctl,
+	listen:		sock_no_listen,
+	shutdown:	sock_no_shutdown,
+	setsockopt:	sock_no_setsockopt,
+	getsockopt:	sock_no_getsockopt,
+	sendmsg:	econet_sendmsg,
+	recvmsg:	econet_recvmsg,
+	mmap:		sock_no_mmap,
 };
 
 #include <linux/smp_lock.h>
@@ -748,6 +743,28 @@ struct sock *ec_listening_socket(unsigned char port, unsigned char
 	}
 
 	return NULL;
+}
+
+/*
+ *	Queue a received packet for a socket.
+ */
+
+static int ec_queue_packet(struct sock *sk, struct sk_buff *skb,
+			   unsigned char stn, unsigned char net,
+			   unsigned char cb, unsigned char port)
+{
+	struct ec_cb *eb = (struct ec_cb *)&skb->cb;
+	struct sockaddr_ec *sec = (struct sockaddr_ec *)&eb->sec;
+
+	memset(sec, 0, sizeof(struct sockaddr_ec));
+	sec->sec_family = AF_ECONET;
+	sec->type = ECTYPE_PACKET_RECEIVED;
+	sec->port = port;
+	sec->cb = cb;
+	sec->addr.net = net;
+	sec->addr.station = stn;
+
+	return sock_queue_rcv_skb(sk, skb);
 }
 
 #ifdef CONFIG_ECONET_AUNUDP
@@ -792,27 +809,6 @@ static void aun_send_response(__u32 addr, unsigned long seq, int code, int cb)
 	set_fs(oldfs);
 }
 
-/*
- *	Queue a received packet for a socket.
- */
-
-static int ec_queue_packet(struct sock *sk, struct sk_buff *skb,
-			   unsigned char stn, unsigned char net,
-			   unsigned char cb, unsigned char port)
-{
-	struct ec_cb *eb = (struct ec_cb *)&skb->cb;
-	struct sockaddr_ec *sec = (struct sockaddr_ec *)&eb->sec;
-
-	memset(sec, 0, sizeof(struct sockaddr_ec));
-	sec->sec_family = AF_ECONET;
-	sec->type = ECTYPE_PACKET_RECEIVED;
-	sec->port = port;
-	sec->cb = cb;
-	sec->addr.net = net;
-	sec->addr.station = stn;
-
-	return sock_queue_rcv_skb(sk, skb);
-}
 
 /*
  *	Handle incoming AUN packets.  Work out if anybody wants them,
@@ -1029,7 +1025,7 @@ release:
  *	Receive an Econet frame from a device.
  */
 
-static int econet_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
+static int econet_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 {
 	struct ec_framehdr *hdr = (struct ec_framehdr *)skb->data;
 	struct sock *sk;
@@ -1129,12 +1125,12 @@ void __exit econet_proto_exit(void)
 #endif
 }
 
-int __init econet_proto_init(struct net_proto *pro)
+int __init econet_proto_init(void)
 {
 	extern void econet_sysctl_register(void);
-	spin_lock_init(&aun_queue_lock);
 	sock_register(&econet_family_ops);
 #ifdef CONFIG_ECONET_AUNUDP
+	spin_lock_init(&aun_queue_lock);
 	aun_udp_initialise();
 #endif
 #ifdef CONFIG_ECONET_NATIVE
@@ -1147,7 +1143,5 @@ int __init econet_proto_init(struct net_proto *pro)
 	return 0;
 }
 
-#ifdef MODULE
 module_init(econet_proto_init);
 module_exit(econet_proto_exit);
-#endif

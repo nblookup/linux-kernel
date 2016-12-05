@@ -62,7 +62,7 @@ int hpfs_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 	de->first = de->directory = 1;
 	/*de->hidden = de->system = 0;*/
 	de->fnode = fno;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 	hpfs_mark_4buffers_dirty(&qbh0);
 	hpfs_brelse4(&qbh0);
@@ -128,7 +128,7 @@ int hpfs_create(struct inode *dir, struct dentry *dentry, int mode)
 	fnode->len = len;
 	memcpy(fnode->name, name, len > 15 ? 15 : len);
 	fnode->up = dir->i_ino;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 	hpfs_lock_iget(dir->i_sb, 2);
 	if ((result = iget(dir->i_sb, fno))) {
@@ -196,7 +196,7 @@ int hpfs_mknod(struct inode *dir, struct dentry *dentry, int mode, int rdev)
 	fnode->len = len;
 	memcpy(fnode->name, name, len > 15 ? 15 : len);
 	fnode->up = dir->i_ino;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	hpfs_lock_iget(dir->i_sb, 2);
 	if ((result = iget(dir->i_sb, fno))) {
 		result->i_hpfs_parent_dir = dir->i_ino;
@@ -258,7 +258,7 @@ int hpfs_symlink(struct inode *dir, struct dentry *dentry, const char *symlink)
 	fnode->len = len;
 	memcpy(fnode->name, name, len > 15 ? 15 : len);
 	fnode->up = dir->i_ino;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 	hpfs_lock_iget(dir->i_sb, 2);
 	if ((result = iget(dir->i_sb, fno))) {
@@ -276,7 +276,7 @@ int hpfs_symlink(struct inode *dir, struct dentry *dentry, const char *symlink)
 		result->i_data.a_ops = &hpfs_symlink_aops;
 		if ((fnode = hpfs_map_fnode(dir->i_sb, fno, &bh))) {
 			hpfs_set_ea(result, fnode, "SYMLINK", (char *)symlink, strlen(symlink));
-			mark_buffer_dirty(bh, 1);
+			mark_buffer_dirty(bh);
 			brelse(bh);
 		}
 		hpfs_write_inode_nolock(result);
@@ -326,12 +326,19 @@ int hpfs_unlink(struct inode *dir, struct dentry *dentry)
 	if (r != 2) {
 		inode->i_nlink--;
 		hpfs_unlock_2inodes(dir, inode);
-		d_delete(dentry);
 	} else {	/* no space for deleting, try to truncate file */
 		struct iattr newattrs;
 		int err;
 		hpfs_unlock_2inodes(dir, inode);
-		if (rep || dentry->d_count > 1 || permission(inode, MAY_WRITE) || get_write_access(inode)) goto ret;
+		if (rep)
+			goto ret;
+		d_drop(dentry);
+		if (atomic_read(&dentry->d_count) > 1 ||
+		    permission(inode, MAY_WRITE) ||
+		    get_write_access(inode)) {
+			d_rehash(dentry);
+			goto ret;
+		}
 		/*printk("HPFS: truncating file before delete.\n");*/
 		down(&inode->i_sem);
 		newattrs.ia_size = 0;
@@ -375,11 +382,6 @@ int hpfs_rmdir(struct inode *dir, struct dentry *dentry)
 		hpfs_unlock_2inodes(dir, inode);
 		return -ENOTDIR;
 	}
-	if (!d_unhashed(dentry)) {
-		hpfs_brelse4(&qbh);
-		hpfs_unlock_2inodes(dir, inode);
-		return -EBUSY;
-	}
 	hpfs_count_dnodes(dir->i_sb, inode->i_hpfs_dno, NULL, NULL, &n_items);
 	if (n_items) {
 		hpfs_brelse4(&qbh);
@@ -393,32 +395,34 @@ int hpfs_rmdir(struct inode *dir, struct dentry *dentry)
 		dir->i_nlink--;
 		inode->i_nlink = 0;
 		hpfs_unlock_2inodes(dir, inode);
-		d_delete(dentry);
 	} else hpfs_unlock_2inodes(dir, inode);
 	return r == 2 ? -ENOSPC : r == 1 ? -EFSERROR : 0;
 }
 
-int hpfs_symlink_readpage(struct dentry *dentry, struct page *page)
+int hpfs_symlink_readpage(struct file *file, struct page *page)
 {
-	char *link = (char*)kmap(page);
-	struct inode *i = dentry->d_inode;
+	char *link = kmap(page);
+	struct inode *i = page->mapping->host;
 	struct fnode *fnode;
 	struct buffer_head *bh;
 	int err;
 
 	err = -EIO;
+	lock_kernel();
 	if (!(fnode = hpfs_map_fnode(i->i_sb, i->i_ino, &bh)))
 		goto fail;
 	err = hpfs_read_ea(i->i_sb, fnode, "SYMLINK", link, PAGE_SIZE);
 	brelse(bh);
 	if (err)
 		goto fail;
+	unlock_kernel();
 	SetPageUptodate(page);
 	kunmap(page);
 	UnlockPage(page);
 	return 0;
 
 fail:
+	unlock_kernel();
 	SetPageError(page);
 	kunmap(page);
 	UnlockPage(page);
@@ -519,7 +523,7 @@ int hpfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 		fnode->len = new_len;
 		memcpy(fnode->name, new_name, new_len>15?15:new_len);
 		if (new_len < 15) memset(&fnode->name[new_len], 0, 15 - new_len);
-		mark_buffer_dirty(bh, 1);
+		mark_buffer_dirty(bh);
 		brelse(bh);
 	}
 	i->i_hpfs_conv = i->i_sb->s_hpfs_conv;

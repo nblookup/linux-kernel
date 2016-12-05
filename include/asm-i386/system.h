@@ -1,6 +1,7 @@
 #ifndef __ASM_SYSTEM_H
 #define __ASM_SYSTEM_H
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <asm/segment.h>
 #include <linux/bitops.h> /* for LOCK_PREFIX */
@@ -215,7 +216,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
  * indicated by comparing RETURN with OLD.
  */
 
-#if CPU != 386
+#ifdef CONFIG_X86_CMPXCHG
 #define __HAVE_ARCH_CMPXCHG 1
 
 static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
@@ -266,16 +267,33 @@ static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
  * I expect future Intel CPU's to have a weaker ordering,
  * but I'd also expect them to finally get their act together
  * and add some real memory barriers if so.
+ *
+ * The Pentium III does add a real memory barrier with the
+ * sfence instruction, so we use that where appropriate.
  */
+#ifndef CONFIG_X86_XMM
 #define mb() 	__asm__ __volatile__ ("lock; addl $0,0(%%esp)": : :"memory")
+#else
+#define mb()	__asm__ __volatile__ ("sfence": : :"memory")
+#endif
 #define rmb()	mb()
 #define wmb()	__asm__ __volatile__ ("": : :"memory")
-#define set_rmb(var, value) do { xchg(&var, value); } while (0)
-#define set_mb(var, value) set_rmb(var, value)
+
+#ifdef CONFIG_SMP
+#define smp_mb()	mb()
+#define smp_rmb()	rmb()
+#define smp_wmb()	wmb()
+#else
+#define smp_mb()	barrier()
+#define smp_rmb()	barrier()
+#define smp_wmb()	barrier()
+#endif
+
+#define set_mb(var, value) do { xchg(&var, value); } while (0)
 #define set_wmb(var, value) do { var = value; wmb(); } while (0)
 
 /* interrupt control.. */
-#define __save_flags(x)		__asm__ __volatile__("pushfl ; popl %0":"=g" (x): /* no input */ :"memory")
+#define __save_flags(x)		__asm__ __volatile__("pushfl ; popl %0":"=g" (x): /* no input */)
 #define __restore_flags(x) 	__asm__ __volatile__("pushl %0 ; popfl": /* no output */ :"g" (x):"memory")
 #define __cli() 		__asm__ __volatile__("cli": : :"memory")
 #define __sti()			__asm__ __volatile__("sti": : :"memory")
@@ -284,11 +302,11 @@ static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
 
 /* For spinlocks etc */
 #define local_irq_save(x)	__asm__ __volatile__("pushfl ; popl %0 ; cli":"=g" (x): /* no input */ :"memory")
-#define local_irq_restore(x)	__asm__ __volatile__("pushl %0 ; popfl": /* no output */ :"g" (x):"memory")
-#define local_irq_disable()	__asm__ __volatile__("cli": : :"memory")
-#define local_irq_enable()	__asm__ __volatile__("sti": : :"memory")
+#define local_irq_restore(x)	__restore_flags(x)
+#define local_irq_disable()	__cli()
+#define local_irq_enable()	__sti()
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 
 extern void __global_cli(void);
 extern void __global_sti(void);

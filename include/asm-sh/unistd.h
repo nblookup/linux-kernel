@@ -227,6 +227,10 @@
 #define __NR_setfsuid32		215
 #define __NR_setfsgid32		216
 #define __NR_pivot_root		217
+#define __NR_mincore		218
+#define __NR_madvise		219
+#define __NR_getdents64		220
+#define __NR_fcntl64		221
 
 /* user-visible error numbers are in the range -1 - -125: see <asm-sh/errno.h> */
 
@@ -246,8 +250,8 @@ do { \
 #define _syscall0(type,name) \
 type name(void) \
 { \
-register long __sc0 __asm__ ("$r0") = __NR_##name; \
-__asm__ __volatile__ ("trapa	#0" \
+register long __sc0 __asm__ ("r3") = __NR_##name; \
+__asm__ __volatile__ ("trapa	#0x10" \
 	: "=z" (__sc0) \
 	: "0" (__sc0) \
 	: "memory" ); \
@@ -257,9 +261,9 @@ __syscall_return(type,__sc0); \
 #define _syscall1(type,name,type1,arg1) \
 type name(type1 arg1) \
 { \
-register long __sc0 __asm__ ("$r0") = __NR_##name; \
-register long __sc4 __asm__ ("$r4") = (long) arg1; \
-__asm__ __volatile__ ("trapa	#0" \
+register long __sc0 __asm__ ("r3") = __NR_##name; \
+register long __sc4 __asm__ ("r4") = (long) arg1; \
+__asm__ __volatile__ ("trapa	#0x11" \
 	: "=z" (__sc0) \
 	: "0" (__sc0), "r" (__sc4) \
 	: "memory"); \
@@ -269,10 +273,10 @@ __syscall_return(type,__sc0); \
 #define _syscall2(type,name,type1,arg1,type2,arg2) \
 type name(type1 arg1,type2 arg2) \
 { \
-register long __sc0 __asm__ ("$r0") = __NR_##name; \
-register long __sc4 __asm__ ("$r4") = (long) arg1; \
-register long __sc5 __asm__ ("$r5") = (long) arg2; \
-__asm__ __volatile__ ("trapa	#0" \
+register long __sc0 __asm__ ("r3") = __NR_##name; \
+register long __sc4 __asm__ ("r4") = (long) arg1; \
+register long __sc5 __asm__ ("r5") = (long) arg2; \
+__asm__ __volatile__ ("trapa	#0x12" \
 	: "=z" (__sc0) \
 	: "0" (__sc0), "r" (__sc4), "r" (__sc5) \
 	: "memory"); \
@@ -282,11 +286,11 @@ __syscall_return(type,__sc0); \
 #define _syscall3(type,name,type1,arg1,type2,arg2,type3,arg3) \
 type name(type1 arg1,type2 arg2,type3 arg3) \
 { \
-register long __sc0 __asm__ ("$r0") = __NR_##name; \
-register long __sc4 __asm__ ("$r4") = (long) arg1; \
-register long __sc5 __asm__ ("$r5") = (long) arg2; \
-register long __sc6 __asm__ ("$r6") = (long) arg3; \
-__asm__ __volatile__ ("trapa	#0" \
+register long __sc0 __asm__ ("r3") = __NR_##name; \
+register long __sc4 __asm__ ("r4") = (long) arg1; \
+register long __sc5 __asm__ ("r5") = (long) arg2; \
+register long __sc6 __asm__ ("r6") = (long) arg3; \
+__asm__ __volatile__ ("trapa	#0x13" \
 	: "=z" (__sc0) \
 	: "0" (__sc0), "r" (__sc4), "r" (__sc5), "r" (__sc6) \
 	: "memory"); \
@@ -296,12 +300,12 @@ __syscall_return(type,__sc0); \
 #define _syscall4(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4) \
 type name (type1 arg1, type2 arg2, type3 arg3, type4 arg4) \
 { \
-register long __sc0 __asm__ ("$r0") = __NR_##name; \
-register long __sc4 __asm__ ("$r4") = (long) arg1; \
-register long __sc5 __asm__ ("$r5") = (long) arg2; \
-register long __sc6 __asm__ ("$r6") = (long) arg3; \
-register long __sc7 __asm__ ("$r7") = (long) arg4; \
-__asm__ __volatile__ ("trapa	#0" \
+register long __sc0 __asm__ ("r3") = __NR_##name; \
+register long __sc4 __asm__ ("r4") = (long) arg1; \
+register long __sc5 __asm__ ("r5") = (long) arg2; \
+register long __sc6 __asm__ ("r6") = (long) arg3; \
+register long __sc7 __asm__ ("r7") = (long) arg4; \
+__asm__ __volatile__ ("trapa	#0x14" \
 	: "=z" (__sc0) \
 	: "0" (__sc0), "r" (__sc4), "r" (__sc5), "r" (__sc6),  \
 	  "r" (__sc7) \
@@ -312,16 +316,16 @@ __syscall_return(type,__sc0); \
 #define _syscall5(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4,type5,arg5) \
 type name (type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5) \
 { \
-register long __sc0 __asm__ ("$r0") = __NR_##name; \
-register long __sc4 __asm__ ("$r4") = (long) arg1; \
-register long __sc5 __asm__ ("$r5") = (long) arg2; \
-register long __sc6 __asm__ ("$r6") = (long) arg3; \
-register long __sc7 __asm__ ("$r7") = (long) arg4; \
-__asm__ __volatile__ ("mov.l	%2, @-$r15\n\t" \
-		      "trapa	#0" \
+register long __sc3 __asm__ ("r3") = __NR_##name; \
+register long __sc4 __asm__ ("r4") = (long) arg1; \
+register long __sc5 __asm__ ("r5") = (long) arg2; \
+register long __sc6 __asm__ ("r6") = (long) arg3; \
+register long __sc7 __asm__ ("r7") = (long) arg4; \
+register long __sc0 __asm__ ("r0") = (long) arg5; \
+__asm__ __volatile__ ("trapa	#0x15" \
 	: "=z" (__sc0) \
-	: "0" (__sc0), "r" (arg5), \
-	  "r" (__sc4), "r" (__sc5), "r" (__sc6), "r" (__sc7) \
+	: "0" (__sc0), "r" (__sc4), "r" (__sc5), "r" (__sc6), "r" (__sc7),  \
+	  "r" (__sc3) \
 	: "memory" ); \
 __syscall_return(type,__sc0); \
 }
@@ -342,7 +346,6 @@ __syscall_return(type,__sc0); \
  */
 #define __NR__exit __NR_exit
 static __inline__ _syscall0(int,pause)
-static __inline__ _syscall1(int,setup,int,magic)
 static __inline__ _syscall0(int,sync)
 static __inline__ _syscall0(pid_t,setsid)
 static __inline__ _syscall3(int,write,int,fd,const char *,buf,off_t,count)

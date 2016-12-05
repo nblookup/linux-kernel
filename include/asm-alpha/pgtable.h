@@ -33,21 +33,23 @@
 /*
  * Entries per page directory level:  the Alpha is three-level, with
  * all levels having a one-page page table.
- *
- * The PGD is special:  the last entry is reserved for self-mapping.
  */
 #define PTRS_PER_PTE	(1UL << (PAGE_SHIFT-3))
 #define PTRS_PER_PMD	(1UL << (PAGE_SHIFT-3))
-#define PTRS_PER_PGD	((1UL << (PAGE_SHIFT-3))-1)
+#define PTRS_PER_PGD	(1UL << (PAGE_SHIFT-3))
 #define USER_PTRS_PER_PGD	(TASK_SIZE / PGDIR_SIZE)
 #define FIRST_USER_PGD_NR	0
 
 /* Number of pointers that fit on a page:  this will go away. */
 #define PTRS_PER_PAGE	(1UL << (PAGE_SHIFT-3))
 
-#define VMALLOC_START		0xFFFFFE0000000000
+#ifdef CONFIG_ALPHA_LARGE_VMALLOC
+#define VMALLOC_START		0xfffffe0000000000
+#else
+#define VMALLOC_START		(-2*PGDIR_SIZE)
+#endif
 #define VMALLOC_VMADDR(x)	((unsigned long)(x))
-#define VMALLOC_END		(~0UL)
+#define VMALLOC_END		(-PGDIR_SIZE)
 
 /*
  * OSF/1 PAL-code-imposed page table bits
@@ -57,6 +59,11 @@
 #define _PAGE_FOW	0x0004	/* used for page protection (fault on write) */
 #define _PAGE_FOE	0x0008	/* used for page protection (fault on exec) */
 #define _PAGE_ASM	0x0010
+#if defined(CONFIG_ALPHA_EV6) && !defined(CONFIG_SMP)
+#define _PAGE_MBE	0x0080	/* MB disable bit for EV6.  */
+#else
+#define _PAGE_MBE	0x0000
+#endif
 #define _PAGE_KRE	0x0100	/* xxx - see below on the "accessed" bit */
 #define _PAGE_URE	0x0200	/* xxx */
 #define _PAGE_KWE	0x1000	/* used to do the dirty bit in software */
@@ -83,19 +90,20 @@
 #define _PFN_MASK	0xFFFFFFFF00000000
 
 #define _PAGE_TABLE	(_PAGE_VALID | __DIRTY_BITS | __ACCESS_BITS)
-#define _PAGE_CHG_MASK	(_PFN_MASK | __DIRTY_BITS | __ACCESS_BITS)
+#define _PAGE_CHG_MASK	(_PFN_MASK | __DIRTY_BITS | __ACCESS_BITS | _PAGE_MBE)
 
 /*
- * All the normal masks have the "page accessed" bits on, as any time they are used,
- * the page is accessed. They are cleared only by the page-out routines
+ * All the normal masks have the "page accessed" bits on, as any time they
+ * are used, the page is accessed.  They are cleared only by the page-out
+ * routines. 
  */
 #define PAGE_NONE	__pgprot(_PAGE_VALID | __ACCESS_BITS | _PAGE_FOR | _PAGE_FOW | _PAGE_FOE)
 #define PAGE_SHARED	__pgprot(_PAGE_VALID | __ACCESS_BITS)
 #define PAGE_COPY	__pgprot(_PAGE_VALID | __ACCESS_BITS | _PAGE_FOW)
 #define PAGE_READONLY	__pgprot(_PAGE_VALID | __ACCESS_BITS | _PAGE_FOW)
-#define PAGE_KERNEL	__pgprot(_PAGE_VALID | _PAGE_ASM | _PAGE_KRE | _PAGE_KWE)
+#define PAGE_KERNEL	__pgprot(_PAGE_VALID | _PAGE_ASM | _PAGE_KRE | _PAGE_KWE | _PAGE_MBE)
 
-#define _PAGE_NORMAL(x) __pgprot(_PAGE_VALID | __ACCESS_BITS | (x))
+#define _PAGE_NORMAL(x) __pgprot(_PAGE_VALID | __ACCESS_BITS | _PAGE_MBE | (x))
 
 #define _PAGE_P(x) _PAGE_NORMAL((x) | (((x) & _PAGE_FOW)?0:_PAGE_FOW))
 #define _PAGE_S(x) _PAGE_NORMAL(x)
@@ -140,7 +148,7 @@ extern unsigned long __zero_page(void);
 
 #define BAD_PAGETABLE	__bad_pagetable()
 #define BAD_PAGE	__bad_page()
-#define ZERO_PAGE(vaddr)	(mem_map + MAP_NR(ZERO_PGE))
+#define ZERO_PAGE(vaddr)	(virt_to_page(ZERO_PGE))
 
 /* number of bits that fit into a memory pointer */
 #define BITS_PER_PTR			(8*sizeof(unsigned long))
@@ -159,6 +167,16 @@ extern unsigned long __zero_page(void);
  * On certain platforms whose physical address space can overlap KSEG,
  * namely EV6 and above, we must re-twiddle the physaddr to restore the
  * correct high-order bits.
+ *
+ * This is extremely confusing until you realize that this is actually
+ * just working around a userspace bug.  The X server was intending to
+ * provide the physical address but instead provided the KSEG address.
+ * Or tried to, except it's not representable.
+ * 
+ * On Tsunami there's nothing meaningful at 0x40000000000, so this is
+ * a safe thing to do.  Come the first core logic that does put something
+ * in this area -- memory or whathaveyou -- then this hack will have
+ * to go away.  So be prepared!
  */
 
 #if defined(CONFIG_ALPHA_GENERIC) && defined(USE_48_BIT_KSEG)
@@ -177,6 +195,7 @@ extern unsigned long __zero_page(void);
  * Conversion functions:  convert a page and protection to a page entry,
  * and a page entry and page directory to the page they refer to.
  */
+
 #define mk_pte(page, pgprot)						\
 ({									\
 	pte_t pte;							\
@@ -187,7 +206,7 @@ extern unsigned long __zero_page(void);
 })
 
 extern inline pte_t mk_pte_phys(unsigned long physpage, pgprot_t pgprot)
-{ pte_t pte; pte_val(pte) = (PHYS_TWIDDLE(physpage) << (32-PAGE_SHIFT)) | pgprot_val(pgprot); return pte; }
+{ pte_t pte; pte_val(pte) = (PHYS_TWIDDLE(physpage) << (32-PAGE_SHIFT)) | (pgprot_val(pgprot) & ~_PAGE_MBE); return pte; }
 
 extern inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 { pte_val(pte) = (pte_val(pte) & _PAGE_CHG_MASK) | pgprot_val(newprot); return pte; }
@@ -198,8 +217,7 @@ extern inline void pmd_set(pmd_t * pmdp, pte_t * ptep)
 extern inline void pgd_set(pgd_t * pgdp, pmd_t * pmdp)
 { pgd_val(*pgdp) = _PAGE_TABLE | ((((unsigned long) pmdp) - PAGE_OFFSET) << (32-PAGE_SHIFT)); }
 
-#define pte_pagenr(x)	((unsigned long)((pte_val(x) >> 32)))
-#define pte_page(x)	(mem_map+pte_pagenr(x))
+#define pte_page(x)	(mem_map+(unsigned long)((pte_val(x) >> 32)))
 
 extern inline unsigned long pmd_page(pmd_t pmd)
 { return PAGE_OFFSET + ((pmd_val(pmd) & _PFN_MASK) >> (32-PAGE_SHIFT)); }
@@ -250,7 +268,7 @@ extern inline pte_t pte_mkyoung(pte_t pte)	{ pte_val(pte) |= __ACCESS_BITS; retu
 #define pgd_offset_k(address) pgd_offset(&init_mm, address)
 
 /* to find an entry in a page-table-directory. */
-#define pgd_index(address)	((address >> PGDIR_SHIFT) & PTRS_PER_PGD)
+#define pgd_index(address)	((address >> PGDIR_SHIFT) & (PTRS_PER_PGD - 1))
 #define __pgd_offset(address)	pgd_index(address)
 #define pgd_offset(mm, address)	((mm)->pgd+pgd_index(address))
 
@@ -290,9 +308,6 @@ extern inline pte_t mk_swap_pte(unsigned long type, unsigned long offset)
 #define pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
 #define swp_entry_to_pte(x)		((pte_t) { (x).val })
 
-#define module_map	vmalloc
-#define module_unmap	vfree
-
 /* Needs to be defined here and not in linux/mm.h, as it is arch dependent */
 #define PageSkip(page)		(0)
 #define kern_addr_valid(addr)	(1)
@@ -308,5 +323,7 @@ extern inline pte_t mk_swap_pte(unsigned long type, unsigned long offset)
 	printk("%s:%d: bad pgd %016lx.\n", __FILE__, __LINE__, pgd_val(e))
 
 extern void paging_init(void);
+
+#include <asm-generic/pgtable.h>
 
 #endif /* _ALPHA_PGTABLE_H */

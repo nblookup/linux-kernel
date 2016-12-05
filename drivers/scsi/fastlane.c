@@ -100,8 +100,6 @@ int __init fastlane_esp_detect(Scsi_Host_Template *tpnt)
 					   sizeof(struct ESP_regs));
 			return 0;
 		}
-		strcpy(z->name, "Fastlane Z3 SCSI Host Adapter");
-
 		esp = esp_allocate(tpnt, (void *)board+FASTLANE_ESP_ADDR);
 
 		/* Do command transfer with programmed I/O */
@@ -349,17 +347,12 @@ static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write)
 	}
 }
 
-#ifdef MODULE
-
 #define HOSTS_C
 
 #include "fastlane.h"
 
-Scsi_Host_Template driver_template = SCSI_FASTLANE;
-
+static Scsi_Host_Template driver_template = SCSI_FASTLANE;
 #include "scsi_module.c"
-
-#endif
 
 int fastlane_esp_release(struct Scsi_Host *instance)
 {

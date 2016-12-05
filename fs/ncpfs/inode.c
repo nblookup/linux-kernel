@@ -25,20 +25,20 @@
 #include <linux/file.h>
 #include <linux/fcntl.h>
 #include <linux/malloc.h>
+#include <linux/vmalloc.h>
 #include <linux/init.h>
 
 #include <linux/ncp_fs.h>
 
 #include "ncplib_kernel.h"
 
-static void ncp_put_inode(struct inode *);
 static void ncp_delete_inode(struct inode *);
 static void ncp_put_super(struct super_block *);
 static int  ncp_statfs(struct super_block *, struct statfs *);
 
 static struct super_operations ncp_sops =
 {
-	put_inode:	ncp_put_inode,
+	put_inode:	force_delete,
 	delete_inode:	ncp_delete_inode,
 	put_super:	ncp_put_super,
 	statfs:		ncp_statfs,
@@ -62,7 +62,6 @@ void ncp_update_inode(struct inode *inode, struct ncp_entry_info *nwinfo)
 #ifdef CONFIG_NCPFS_STRONG
 	NCP_FINFO(inode)->nwattr = nwinfo->i.attributes;
 #endif
-	NCP_FINFO(inode)->opened = nwinfo->opened;
 	NCP_FINFO(inode)->access = nwinfo->access;
 	NCP_FINFO(inode)->server_file_handle = nwinfo->server_file_handle;
 	memcpy(NCP_FINFO(inode)->file_handle, nwinfo->file_handle,
@@ -77,7 +76,7 @@ void ncp_update_inode2(struct inode* inode, struct ncp_entry_info *nwinfo)
 	struct nw_info_struct *nwi = &nwinfo->i;
 	struct ncp_server *server = NCP_SERVER(inode);
 
-	if (!NCP_FINFO(inode)->opened) {
+	if (!atomic_read(&NCP_FINFO(inode)->opened)) {
 #ifdef CONFIG_NCPFS_STRONG
 		NCP_FINFO(inode)->nwattr = nwi->attributes;
 #endif
@@ -215,10 +214,11 @@ ncp_iget(struct super_block *sb, struct ncp_entry_info *info)
 		return NULL;
 	}
 
-	inode = get_empty_inode();
+	inode = new_inode(sb);
 	if (inode) {
-		inode->i_sb = sb;
-		inode->i_dev = sb->s_dev;
+		init_MUTEX(&NCP_FINFO(inode)->open_sem);
+		atomic_set(&NCP_FINFO(inode)->opened, info->opened);
+
 		inode->i_ino = info->ino;
 		ncp_set_attr(inode, info);
 		if (S_ISREG(inode->i_mode)) {
@@ -239,12 +239,6 @@ ncp_iget(struct super_block *sb, struct ncp_entry_info *info)
 	return inode;
 }
 
-static void ncp_put_inode(struct inode *inode)
-{
-	if (inode->i_count == 1)
-		inode->i_nlink = 0;
-}
-
 static void
 ncp_delete_inode(struct inode *inode)
 {
@@ -252,7 +246,7 @@ ncp_delete_inode(struct inode *inode)
 		DDPRINTK("ncp_delete_inode: put directory %ld\n", inode->i_ino);
 	}
 
-	if (NCP_FINFO(inode)->opened && ncp_make_closed(inode) != 0) {
+	if (ncp_make_closed(inode) != 0) {
 		/* We can't do anything but complain. */
 		printk(KERN_ERR "ncp_delete_inode: could not close\n");
 	}
@@ -266,8 +260,10 @@ ncp_read_super(struct super_block *sb, void *raw_data, int silent)
 	struct ncp_server *server;
 	struct file *ncp_filp;
 	struct inode *root_inode;
-	kdev_t dev = sb->s_dev;
+	struct inode *sock_inode;
+	struct socket *sock;
 	int error;
+	int default_bufsize;
 #ifdef CONFIG_NCPFS_PACKET_SIGNING
 	int options;
 #endif
@@ -319,13 +315,21 @@ ncp_read_super(struct super_block *sb, void *raw_data, int silent)
 	ncp_filp = fget(data.ncp_fd);
 	if (!ncp_filp)
 		goto out_bad_file;
-	if (!S_ISSOCK(ncp_filp->f_dentry->d_inode->i_mode))
+	sock_inode = ncp_filp->f_dentry->d_inode;
+	if (!S_ISSOCK(sock_inode->i_mode))
 		goto out_bad_file2;
+	sock = &sock_inode->u.socket_i;
+	if (!sock)
+		goto out_bad_file2;
+		
+	if (sock->type == SOCK_STREAM)
+		default_bufsize = 61440;
+	else
+		default_bufsize = 1024;
 
 	sb->s_blocksize = 1024;	/* Eh...  Is this correct? */
 	sb->s_blocksize_bits = 10;
 	sb->s_magic = NCP_SUPER_MAGIC;
-	sb->s_dev = dev;
 	sb->s_op = &ncp_sops;
 
 	server = NCP_SBP(sb);
@@ -371,8 +375,10 @@ ncp_read_super(struct super_block *sb, void *raw_data, int silent)
 
 	server->dentry_ttl = 0;	/* no caching */
 
+#undef NCP_PACKET_SIZE
+#define NCP_PACKET_SIZE 65536
 	server->packet_size = NCP_PACKET_SIZE;
-	server->packet = ncp_kmalloc(NCP_PACKET_SIZE, GFP_KERNEL);
+	server->packet = vmalloc(NCP_PACKET_SIZE);
 	if (server->packet == NULL)
 		goto out_no_packet;
 
@@ -384,13 +390,13 @@ ncp_read_super(struct super_block *sb, void *raw_data, int silent)
 	DPRINTK("ncp_read_super: NCP_SBP(sb) = %x\n", (int) NCP_SBP(sb));
 
 #ifdef CONFIG_NCPFS_PACKET_SIGNING
-	if (ncp_negotiate_size_and_options(server, NCP_DEFAULT_BUFSIZE,
+	if (ncp_negotiate_size_and_options(server, default_bufsize,
 		NCP_DEFAULT_OPTIONS, &(server->buffer_size), &options) == 0)
 	{
 		if (options != NCP_DEFAULT_OPTIONS)
 		{
 			if (ncp_negotiate_size_and_options(server, 
-				NCP_DEFAULT_BUFSIZE,
+				default_bufsize,
 				options & 2, 
 				&(server->buffer_size), &options) != 0)
 				
@@ -403,7 +409,7 @@ ncp_read_super(struct super_block *sb, void *raw_data, int silent)
 	}
 	else 
 #endif	/* CONFIG_NCPFS_PACKET_SIGNING */
-	if (ncp_negotiate_buffersize(server, NCP_DEFAULT_BUFSIZE,
+	if (ncp_negotiate_buffersize(server, default_bufsize,
   				     &(server->buffer_size)) != 0)
 		goto out_no_bufsize;
 	DPRINTK("ncpfs: bufsize = %d\n", server->buffer_size);
@@ -454,7 +460,7 @@ out_disconnect:
 out_no_connect:
 	printk(KERN_ERR "ncp_read_super: Failed connection, error=%d\n", error);
 out_free_packet:
-	ncp_kfree_s(server->packet, server->packet_size);
+	vfree(server->packet);
 	goto out_free_server;
 out_no_packet:
 	printk(KERN_ERR "ncp_read_super: could not alloc packet\n");
@@ -515,7 +521,7 @@ static void ncp_put_super(struct super_block *sb)
 		ncp_kfree_s(server->priv.data, server->priv.len);
 	if (server->auth.object_name)
 		ncp_kfree_s(server->auth.object_name, server->auth.object_name_len);
-	ncp_kfree_s(server->packet, server->packet_size);
+	vfree(server->packet);
 
 }
 
@@ -683,6 +689,7 @@ int ncp_notify_change(struct dentry *dentry, struct iattr *attr)
 
 		/* According to ndir, the changes only take effect after
 		   closing the file */
+		ncp_inode_close(inode);
 		result = ncp_make_closed(inode);
 		if (!result)
 			vmtruncate(inode, attr->ia_size);
@@ -698,15 +705,7 @@ int ncp_current_malloced;
 
 static DECLARE_FSTYPE(ncp_fs_type, "ncpfs", ncp_read_super, 0);
 
-int __init init_ncp_fs(void)
-{
-	return register_filesystem(&ncp_fs_type);
-}
-
-#ifdef MODULE
-EXPORT_NO_SYMBOLS;
-
-int init_module(void)
+static int __init init_ncp_fs(void)
 {
 	DPRINTK("ncpfs: init_module called\n");
 
@@ -714,10 +713,10 @@ int init_module(void)
 	ncp_malloced = 0;
 	ncp_current_malloced = 0;
 #endif
-	return init_ncp_fs();
+	return register_filesystem(&ncp_fs_type);
 }
 
-void cleanup_module(void)
+static void __exit exit_ncp_fs(void)
 {
 	DPRINTK("ncpfs: cleanup_module called\n");
 	unregister_filesystem(&ncp_fs_type);
@@ -727,4 +726,7 @@ void cleanup_module(void)
 #endif
 }
 
-#endif
+EXPORT_NO_SYMBOLS;
+
+module_init(init_ncp_fs)
+module_exit(exit_ncp_fs)

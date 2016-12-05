@@ -459,7 +459,7 @@ static struct file_operations vcs_fops = {
 	open:		vcs_open,
 };
 
-static devfs_handle_t devfs_handle = NULL;
+static devfs_handle_t devfs_handle;
 
 void vcs_make_devfs (unsigned int index, int unregister)
 {
@@ -469,19 +469,19 @@ void vcs_make_devfs (unsigned int index, int unregister)
     sprintf (name, "a%u", index + 1);
     if (unregister)
     {
-	devfs_unregister ( devfs_find_handle (devfs_handle, name + 1, 0, 0, 0,
+	devfs_unregister ( devfs_find_handle (devfs_handle, name + 1, 0, 0,
 					      DEVFS_SPECIAL_CHR, 0) );
-	devfs_unregister ( devfs_find_handle (devfs_handle, name, 0, 0, 0,
+	devfs_unregister ( devfs_find_handle (devfs_handle, name, 0, 0,
 					      DEVFS_SPECIAL_CHR, 0) );
     }
     else
     {
-	devfs_register (devfs_handle, name + 1, 0, DEVFS_FL_DEFAULT,
+	devfs_register (devfs_handle, name + 1, DEVFS_FL_DEFAULT,
 			VCS_MAJOR, index + 1,
-			S_IFCHR | S_IRUSR | S_IWUSR, 0, 0, &vcs_fops, NULL);
-	devfs_register (devfs_handle, name, 0, DEVFS_FL_DEFAULT,
+			S_IFCHR | S_IRUSR | S_IWUSR, &vcs_fops, NULL);
+	devfs_register (devfs_handle, name, DEVFS_FL_DEFAULT,
 			VCS_MAJOR, index + 129,
-			S_IFCHR | S_IRUSR | S_IWUSR, 0, 0, &vcs_fops, NULL);
+			S_IFCHR | S_IRUSR | S_IWUSR, &vcs_fops, NULL);
     }
 #endif /* CONFIG_DEVFS_FS */
 }
@@ -495,13 +495,13 @@ int __init vcs_init(void)
 	if (error)
 		printk("unable to get major %d for vcs device", VCS_MAJOR);
 
-	devfs_handle = devfs_mk_dir (NULL, "vcc", 3, NULL);
-	devfs_register (devfs_handle, "0", 1, DEVFS_FL_DEFAULT,
+	devfs_handle = devfs_mk_dir (NULL, "vcc", NULL);
+	devfs_register (devfs_handle, "0", DEVFS_FL_DEFAULT,
 			VCS_MAJOR, 0,
-			S_IFCHR | S_IRUSR | S_IWUSR, 0, 0, &vcs_fops, NULL);
-	devfs_register (devfs_handle, "a", 1, DEVFS_FL_DEFAULT,
+			S_IFCHR | S_IRUSR | S_IWUSR, &vcs_fops, NULL);
+	devfs_register (devfs_handle, "a", DEVFS_FL_DEFAULT,
 			VCS_MAJOR, 128,
-			S_IFCHR | S_IRUSR | S_IWUSR, 0, 0, &vcs_fops, NULL);
+			S_IFCHR | S_IRUSR | S_IWUSR, &vcs_fops, NULL);
 
 	return error;
 }

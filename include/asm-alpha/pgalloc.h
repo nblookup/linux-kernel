@@ -17,6 +17,7 @@ extern void __load_new_mm_context(struct mm_struct *);
 #define flush_cache_range(mm, start, end)	do { } while (0)
 #define flush_cache_page(vma, vmaddr)		do { } while (0)
 #define flush_page_to_ram(page)			do { } while (0)
+#define flush_dcache_page(page)			do { } while (0)
 
 /* Note that the following two definitions are _highly_ dependent
    on the contexts in which they are used in the kernel.  I personally
@@ -30,34 +31,11 @@ extern void __load_new_mm_context(struct mm_struct *);
    icache flushing.  While functional, it is _way_ overkill.  The
    icache is tagged with ASNs and it suffices to allocate a new ASN
    for the process.  */
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 #define flush_icache_range(start, end)		imb()
 #else
 #define flush_icache_range(start, end)		smp_imb()
 extern void smp_imb(void);
-#endif
-
-/* We need to flush the userspace icache after setting breakpoints in
-   ptrace.  I don't think it's needed in do_swap_page, or do_no_page,
-   but I don't know how to get rid of it either.
-
-   Instead of indiscriminately using imb, take advantage of the fact
-   that icache entries are tagged with the ASN and load a new mm context.  */
-/* ??? Ought to use this in arch/alpha/kernel/signal.c too.  */
-
-#ifndef __SMP__
-static inline void
-flush_icache_page(struct vm_area_struct *vma, struct page *page)
-{
-	if (vma->vm_flags & VM_EXEC) {
-		struct mm_struct *mm = vma->vm_mm;
-		mm->context = 0;
-		if (current->active_mm == mm)
-			__load_new_mm_context(mm);
-	}
-}
-#else
-extern void flush_icache_page(struct vm_area_struct *vma, struct page *page);
 #endif
 
 
@@ -79,11 +57,41 @@ ev5_flush_tlb_current(struct mm_struct *mm)
 	__load_new_mm_context(mm);
 }
 
-extern inline void
+static inline void
 flush_tlb_other(struct mm_struct *mm)
 {
-	mm->context = 0;
+	long * mmc = &mm->context[smp_processor_id()];
+	/*
+	 * Check it's not zero first to avoid cacheline ping pong when
+	 * possible.
+	 */
+	if (*mmc)
+		*mmc = 0;
 }
+
+/* We need to flush the userspace icache after setting breakpoints in
+   ptrace.  I don't think it's needed in do_swap_page, or do_no_page,
+   but I don't know how to get rid of it either.
+
+   Instead of indiscriminately using imb, take advantage of the fact
+   that icache entries are tagged with the ASN and load a new mm context.  */
+/* ??? Ought to use this in arch/alpha/kernel/signal.c too.  */
+
+#ifndef CONFIG_SMP
+static inline void
+flush_icache_page(struct vm_area_struct *vma, struct page *page)
+{
+	if (vma->vm_flags & VM_EXEC) {
+		struct mm_struct *mm = vma->vm_mm;
+		if (current->active_mm == mm)
+			__load_new_mm_context(mm);
+		else
+			mm->context[smp_processor_id()] = 0;
+	}
+}
+#else
+extern void flush_icache_page(struct vm_area_struct *vma, struct page *page);
+#endif
 
 /*
  * Flush just one page in the current TLB set.
@@ -139,7 +147,7 @@ ev5_flush_tlb_current_page(struct mm_struct * mm,
  */
 static inline void flush_tlb(void)
 {
-	flush_tlb_current(current->mm);
+	flush_tlb_current(current->active_mm);
 }
 
 /*
@@ -154,7 +162,7 @@ static inline void flush_tlb_pgtables(struct mm_struct *mm,
 {
 }
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 /*
  * Flush everything (kernel mapping may also have
  * changed due to vmalloc/vfree)
@@ -169,10 +177,10 @@ static inline void flush_tlb_all(void)
  */
 static inline void flush_tlb_mm(struct mm_struct *mm)
 {
-	if (mm != current->mm)
-		flush_tlb_other(mm);
-	else
+	if (mm == current->active_mm)
 		flush_tlb_current(mm);
+	else
+		flush_tlb_other(mm);
 }
 
 /*
@@ -188,10 +196,10 @@ static inline void flush_tlb_page(struct vm_area_struct *vma,
 {
 	struct mm_struct * mm = vma->vm_mm;
 
-	if (mm != current->mm)
-		flush_tlb_other(mm);
-	else
+	if (mm == current->active_mm)
 		flush_tlb_current_page(mm, vma, addr);
+	else
+		flush_tlb_other(mm);
 }
 
 /*
@@ -204,21 +212,21 @@ static inline void flush_tlb_range(struct mm_struct *mm,
 	flush_tlb_mm(mm);
 }
 
-#else /* __SMP__ */
+#else /* CONFIG_SMP */
 
 extern void flush_tlb_all(void);
 extern void flush_tlb_mm(struct mm_struct *);
 extern void flush_tlb_page(struct vm_area_struct *, unsigned long);
 extern void flush_tlb_range(struct mm_struct *, unsigned long, unsigned long);
 
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 
 /*      
  * Allocate and free page tables. The xxx_kernel() versions are
  * used to allocate a kernel page table - this turns on ASN bits
  * if any.
  */
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 extern struct pgtable_cache_struct {
 	unsigned long *pgd_cache;
 	unsigned long *pte_cache;
@@ -233,27 +241,13 @@ extern struct pgtable_cache_struct {
 #define pte_quicklist (quicklists.pte_cache)
 #define pgtable_cache_size (quicklists.pgtable_cache_sz)
 
-extern __inline__ pgd_t *get_pgd_slow(void)
-{
-	pgd_t *ret = (pgd_t *)__get_free_page(GFP_KERNEL), *init;
-	
-	if (ret) {
-		init = pgd_offset(&init_mm, 0UL);
-		memset (ret, 0, USER_PTRS_PER_PGD * sizeof(pgd_t));
-		memcpy (ret + USER_PTRS_PER_PGD, init + USER_PTRS_PER_PGD,
-			(PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
+extern pgd_t *get_pgd_slow(void);
 
-		pgd_val(ret[PTRS_PER_PGD])
-		  = pte_val(mk_pte(mem_map + MAP_NR(ret), PAGE_KERNEL));
-	}
-	return ret;
-}
-
-extern __inline__ pgd_t *get_pgd_fast(void)
+static inline pgd_t *get_pgd_fast(void)
 {
 	unsigned long *ret;
 
-	if((ret = pgd_quicklist) != NULL) {
+	if ((ret = pgd_quicklist) != NULL) {
 		pgd_quicklist = (unsigned long *)(*ret);
 		ret[0] = ret[1];
 		pgtable_cache_size--;
@@ -262,25 +256,25 @@ extern __inline__ pgd_t *get_pgd_fast(void)
 	return (pgd_t *)ret;
 }
 
-extern __inline__ void free_pgd_fast(pgd_t *pgd)
+static inline void free_pgd_fast(pgd_t *pgd)
 {
 	*(unsigned long *)pgd = (unsigned long) pgd_quicklist;
 	pgd_quicklist = (unsigned long *) pgd;
 	pgtable_cache_size++;
 }
 
-extern __inline__ void free_pgd_slow(pgd_t *pgd)
+static inline void free_pgd_slow(pgd_t *pgd)
 {
 	free_page((unsigned long)pgd);
 }
 
 extern pmd_t *get_pmd_slow(pgd_t *pgd, unsigned long address_premasked);
 
-extern __inline__ pmd_t *get_pmd_fast(void)
+static inline pmd_t *get_pmd_fast(void)
 {
 	unsigned long *ret;
 
-	if((ret = (unsigned long *)pte_quicklist) != NULL) {
+	if ((ret = (unsigned long *)pte_quicklist) != NULL) {
 		pte_quicklist = (unsigned long *)(*ret);
 		ret[0] = ret[1];
 		pgtable_cache_size--;
@@ -288,25 +282,25 @@ extern __inline__ pmd_t *get_pmd_fast(void)
 	return (pmd_t *)ret;
 }
 
-extern __inline__ void free_pmd_fast(pmd_t *pmd)
+static inline void free_pmd_fast(pmd_t *pmd)
 {
 	*(unsigned long *)pmd = (unsigned long) pte_quicklist;
 	pte_quicklist = (unsigned long *) pmd;
 	pgtable_cache_size++;
 }
 
-extern __inline__ void free_pmd_slow(pmd_t *pmd)
+static inline void free_pmd_slow(pmd_t *pmd)
 {
 	free_page((unsigned long)pmd);
 }
 
 extern pte_t *get_pte_slow(pmd_t *pmd, unsigned long address_preadjusted);
 
-extern __inline__ pte_t *get_pte_fast(void)
+static inline pte_t *get_pte_fast(void)
 {
 	unsigned long *ret;
 
-	if((ret = (unsigned long *)pte_quicklist) != NULL) {
+	if ((ret = (unsigned long *)pte_quicklist) != NULL) {
 		pte_quicklist = (unsigned long *)(*ret);
 		ret[0] = ret[1];
 		pgtable_cache_size--;
@@ -314,14 +308,14 @@ extern __inline__ pte_t *get_pte_fast(void)
 	return (pte_t *)ret;
 }
 
-extern __inline__ void free_pte_fast(pte_t *pte)
+static inline void free_pte_fast(pte_t *pte)
 {
 	*(unsigned long *)pte = (unsigned long) pte_quicklist;
 	pte_quicklist = (unsigned long *) pte;
 	pgtable_cache_size++;
 }
 
-extern __inline__ void free_pte_slow(pte_t *pte)
+static inline void free_pte_slow(pte_t *pte)
 {
 	free_page((unsigned long)pte);
 }
@@ -336,7 +330,7 @@ extern void __bad_pmd(pgd_t *pgd);
 #define pgd_free(pgd)		free_pgd_fast(pgd)
 #define pgd_alloc()		get_pgd_fast()
 
-extern inline pte_t * pte_alloc(pmd_t *pmd, unsigned long address)
+static inline pte_t * pte_alloc(pmd_t *pmd, unsigned long address)
 {
 	address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
 	if (pmd_none(*pmd)) {
@@ -354,7 +348,7 @@ extern inline pte_t * pte_alloc(pmd_t *pmd, unsigned long address)
 	return (pte_t *) pmd_page(*pmd) + address;
 }
 
-extern inline pmd_t * pmd_alloc(pgd_t *pgd, unsigned long address)
+static inline pmd_t * pmd_alloc(pgd_t *pgd, unsigned long address)
 {
 	address = (address >> PMD_SHIFT) & (PTRS_PER_PMD - 1);
 	if (pgd_none(*pgd)) {
@@ -376,21 +370,5 @@ extern inline pmd_t * pmd_alloc(pgd_t *pgd, unsigned long address)
 #define pmd_alloc_kernel	pmd_alloc
 
 extern int do_check_pgt_cache(int, int);
-
-extern inline void set_pgdir(unsigned long address, pgd_t entry)
-{
-	struct task_struct * p;
-	pgd_t *pgd;
-        
-	read_lock(&tasklist_lock);
-	for_each_task(p) {
-		if (!p->mm)
-			continue;
-		*pgd_offset(p->mm,address) = entry;
-	}
-	read_unlock(&tasklist_lock);
-	for (pgd = (pgd_t *)pgd_quicklist; pgd; pgd = (pgd_t *)*(unsigned long *)pgd)
-		pgd[(address >> PGDIR_SHIFT) & (PTRS_PER_PAGE - 1)] = entry;
-}
 
 #endif /* _ALPHA_PGALLOC_H */

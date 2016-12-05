@@ -12,7 +12,9 @@
  *
  *
  * Thomas Sailer   : ioctl code reworked (vmalloc/vfree removed)
+ * Bartlomiej Zolnierkiewicz : added __init to ics2101_mixer_init()
  */
+#include <linux/init.h>
 #include "sound_config.h"
 
 #include <linux/ultrasound.h>
@@ -206,13 +208,13 @@ static int ics2101_mixer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 
 static struct mixer_operations ics2101_mixer_operations =
 {
-	"ICS2101",
-	"ICS2101 Multimedia Mixer",
-	ics2101_mixer_ioctl
+	owner:	THIS_MODULE,
+	id:	"ICS2101",
+	name:	"ICS2101 Multimedia Mixer",
+	ioctl:	ics2101_mixer_ioctl
 };
 
-int
-ics2101_mixer_init(void)
+int __init ics2101_mixer_init(void)
 {
 	int i;
 	int n;

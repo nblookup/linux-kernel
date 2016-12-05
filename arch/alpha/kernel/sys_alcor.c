@@ -201,7 +201,7 @@ alcor_init_irq(void)
 static int __init
 alcor_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[7][5] __initlocaldata = {
+	static char irq_tab[7][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
 		/* note: IDSEL 17 is XLT only */
 		{16+13, 16+13, 16+13, 16+13, 16+13},	/* IdSel 17,  TULIP  */
@@ -249,7 +249,7 @@ struct alpha_machine_vector alcor_mv __initmv = {
 	init_arch:		cia_init_arch,
 	init_irq:		alcor_init_irq,
 	init_rtc:		common_init_rtc,
-	init_pci:		common_init_pci,
+	init_pci:		cia_init_pci,
 	kill_arch:		alcor_kill_arch,
 	pci_map_irq:		alcor_map_irq,
 	pci_swizzle:		common_swizzle,
@@ -279,7 +279,7 @@ struct alpha_machine_vector xlt_mv __initmv = {
 	init_arch:		cia_init_arch,
 	init_irq:		alcor_init_irq,
 	init_rtc:		common_init_rtc,
-	init_pci:		common_init_pci,
+	init_pci:		cia_init_pci,
 	kill_arch:		alcor_kill_arch,
 	pci_map_irq:		alcor_map_irq,
 	pci_swizzle:		common_swizzle,

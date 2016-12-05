@@ -43,7 +43,8 @@ static int rw_swap_page_base(int rw, swp_entry_t entry, struct page *page, int w
 	struct inode *swapf = 0;
 
 	/* Don't allow too many pending pages in flight.. */
-	if (atomic_read(&nr_async_pages) > pager_daemon.swap_cluster)
+	if ((rw == WRITE) && atomic_read(&nr_async_pages) >
+			pager_daemon.swap_cluster * (1 << page_cluster))
 		wait = 1;
 
 	if (rw == READ) {
@@ -74,7 +75,7 @@ static int rw_swap_page_base(int rw, swp_entry_t entry, struct page *page, int w
 		return 0;
 	}
  	if (!wait) {
- 		set_bit(PG_decr_after, &page->flags);
+ 		SetPageDecrAfter(page);
  		atomic_inc(&nr_async_pages);
  	}
 
@@ -126,12 +127,17 @@ void rw_swap_page(int rw, struct page *page, int wait)
  */
 void rw_swap_page_nolock(int rw, swp_entry_t entry, char *buf, int wait)
 {
-	struct page *page = mem_map + MAP_NR(buf);
+	struct page *page = virt_to_page(buf);
 	
 	if (!PageLocked(page))
 		PAGE_BUG(page);
 	if (PageSwapCache(page))
 		PAGE_BUG(page);
+	if (page->mapping)
+		PAGE_BUG(page);
+	/* needs sync_page to wait I/O completation */
+	page->mapping = &swapper_space;
 	if (!rw_swap_page_base(rw, entry, page, wait))
 		UnlockPage(page);
+	page->mapping = NULL;
 }

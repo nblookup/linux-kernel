@@ -76,7 +76,7 @@ struct cmsghdr {
  */
  
 #ifdef __KERNEL__
-#define __KINLINE extern __inline__
+#define __KINLINE static inline
 #elif  defined(__GNUC__) 
 #define __KINLINE static __inline__
 #elif defined(__cplusplus)
@@ -128,19 +128,6 @@ struct ucred {
 	__u32	gid;
 };
 
-/* Socket types. */
-
-#define SOCK_STREAM	1		/* stream (connection) socket	*/
-#define SOCK_DGRAM	2		/* datagram (conn.less) socket	*/
-#define SOCK_RAW	3		/* raw socket			*/
-#define SOCK_RDM	4		/* reliably-delivered message	*/
-#define SOCK_SEQPACKET	5		/* sequential packet socket	*/
-#define SOCK_PACKET	10		/* linux specific way of	*/
-					/* getting packets at the dev	*/
-					/* level.  For writing rarp and	*/
-					/* other similar things on the	*/
-					/* user level.			*/
-
 /* Supported address families. */
 #define AF_UNSPEC	0
 #define AF_UNIX		1	/* Unix domain sockets 		*/
@@ -167,6 +154,7 @@ struct ucred {
 #define AF_ATMSVC	20	/* ATM SVCs			*/
 #define AF_SNA		22	/* Linux SNA Project (nutters!) */
 #define AF_IRDA		23	/* IRDA sockets			*/
+#define AF_PPPOX	24	/* PPPoX sockets		*/
 #define AF_MAX		32	/* For now.. */
 
 /* Protocol families, same as address families. */
@@ -195,7 +183,7 @@ struct ucred {
 #define PF_ATMSVC	AF_ATMSVC
 #define PF_SNA		AF_SNA
 #define PF_IRDA		AF_IRDA
-
+#define PF_PPPOX	AF_PPPOX
 #define PF_MAX		AF_MAX
 
 /* Maximum queue length specifiable by listen.  */

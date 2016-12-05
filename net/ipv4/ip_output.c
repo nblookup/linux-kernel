@@ -5,7 +5,7 @@
  *
  *		The Internet Protocol (IP) output module.
  *
- * Version:	$Id: ip_output.c,v 1.81 2000/03/06 03:48:01 davem Exp $
+ * Version:	$Id: ip_output.c,v 1.87 2000/10/25 20:07:22 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -107,42 +107,11 @@ static int ip_dev_loopback_xmit(struct sk_buff *newskb)
 	return 0;
 }
 
-#ifdef CONFIG_NETFILTER
-/* To preserve the cute illusion that a locally-generated packet can
-   be mangled before routing, we actually reroute if a hook altered
-   the packet. -RR */
-static int route_me_harder(struct sk_buff *skb)
-{
-	struct iphdr *iph = skb->nh.iph;
-	struct rtable *rt;
-
-	if (ip_route_output(&rt, iph->daddr, iph->saddr,
-			    RT_TOS(iph->tos) | RTO_CONN,
-			    skb->sk ? skb->sk->bound_dev_if : 0)) {
-		printk("route_me_harder: No more route.\n");
-		return -EINVAL;
-	}
-
-	/* Drop old route. */
-	dst_release(skb->dst);
-
-	skb->dst = &rt->u.dst;
-	return 0;
-}
-#endif
-
-/* Do route recalc if netfilter changes skb. */
+/* Don't just hand NF_HOOK skb->dst->output, in case netfilter hook
+   changes route */
 static inline int
 output_maybe_reroute(struct sk_buff *skb)
 {
-#ifdef CONFIG_NETFILTER
-	if (skb->nfcache & NFC_ALTERED) {
-		if (route_me_harder(skb) != 0) {
-			kfree_skb(skb);
-			return -EINVAL;
-		}
-	}
-#endif
 	return skb->dst->output(skb);
 }
 
@@ -312,24 +281,6 @@ static inline int ip_queue_xmit2(struct sk_buff *skb)
 	struct net_device *dev;
 	struct iphdr *iph = skb->nh.iph;
 
-#ifdef CONFIG_NETFILTER
-	/* BLUE-PEN-FOR-ALEXEY.  I don't understand; you mean I can't
-           hold the route as I pass the packet to userspace? -- RR
-
-	   You may hold it, if you really hold it. F.e. if netfilter
-	   does not destroy handed skb with skb->dst attached, it
-	   will be held. When it was stored in info->arg, then
-	   it was not held apparently. Now (without second arg) it is evident,
-	   that it is clean.				   --ANK
-	 */
-	if (rt==NULL || (skb->nfcache & NFC_ALTERED)) {
-		if (route_me_harder(skb) != 0) {
-			kfree_skb(skb);
-			return -EHOSTUNREACH;
-		}
-	}
-#endif
-
 	dev = rt->u.dst.dev;
 
 	/* This can happen when the transport layer has segments queued
@@ -415,14 +366,13 @@ int ip_queue_xmit(struct sk_buff *skb)
 
 	/* OK, we know where to send it, allocate and build IP header. */
 	iph = (struct iphdr *) skb_push(skb, sizeof(struct iphdr) + (opt ? opt->optlen : 0));
-	iph->version  = 4;
-	iph->ihl      = 5;
-	iph->tos      = sk->protinfo.af_inet.tos;
+	*((__u16 *)iph)	= htons((4 << 12) | (5 << 8) | (sk->protinfo.af_inet.tos & 0xff));
+	iph->tot_len = htons(skb->len);
 	iph->frag_off = 0;
 	iph->ttl      = sk->protinfo.af_inet.ttl;
-	iph->daddr    = rt->rt_dst;
-	iph->saddr    = rt->rt_src;
 	iph->protocol = sk->protocol;
+	iph->saddr    = rt->rt_src;
+	iph->daddr    = rt->rt_dst;
 	skb->nh.iph   = iph;
 	/* Transport layer set skb->h.foo itself. */
 
@@ -430,8 +380,6 @@ int ip_queue_xmit(struct sk_buff *skb)
 		iph->ihl += opt->optlen >> 2;
 		ip_options_build(skb, opt, sk->daddr, rt, 0);
 	}
-
-	iph->tot_len = htons(skb->len);
 
 	return NF_HOOK(PF_INET, NF_IP_LOCAL_OUT, skb, NULL, rt->u.dst.dev,
 		       ip_queue_xmit2);
@@ -894,6 +842,9 @@ int ip_fragment(struct sk_buff *skb, int (*output)(struct sk_buff*))
 		/* Connection association is same as pre-frag packet */
 		skb2->nfct = skb->nfct;
 		nf_conntrack_get(skb2->nfct);
+#ifdef CONFIG_NETFILTER_DEBUG
+		skb2->nf_debug = skb->nf_debug;
+#endif
 #endif
 
 		/*

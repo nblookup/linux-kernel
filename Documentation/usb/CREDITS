@@ -5,6 +5,7 @@ order by last name).  I'm sure this list should be longer, its
 difficult to maintain, add yourself with a patch if desired.
 
   Georg Acher <acher@informatik.tu-muenchen.de>
+  David Brownell <dbrownell@users.sourceforge.net>
   Alan Cox <alan@lxorguk.ukuu.org.uk>
   Randy Dunlap <randy.dunlap@intel.com>
   Johannes Erdfelt <jerdfelt@sventech.com>
@@ -14,8 +15,10 @@ difficult to maintain, add yourself with a patch if desired.
   Greg Kroah-Hartman <greg@kroah.com>
   Pavel Machek <pavel@suse.cz>
   Paul Mackerras <paulus@cs.anu.edu.au>
+  Petko Manlolov <petkan@dce.bg>
   David E. Nelson <dnelson@jump.net>
   Vojtech Pavlik <vojtech@suse.cz>
+  Bill Ryder <bryder@sgi.com>
   Thomas Sailer <sailer@ife.ee.ethz.ch>
   Gregory P. Smith <greg@electricrain.com>
   Linus Torvalds <torvalds@transmeta.com>
@@ -44,7 +47,7 @@ THANKS file in Inaky's driver):
 
         - USAR Systems provided us with one of their excellent USB
           Evaluation Kits. It allows us to test the Linux-USB driver
-          for compilance with the latest USB specification. USAR
+          for compliance with the latest USB specification. USAR
           Systems recognized the importance of an up-to-date open
           Operating System and supports this project with
           Hardware. Thanks!.
@@ -63,9 +66,9 @@ THANKS file in Inaky's driver):
           Linux users.
 
         - Many thanks to ing büro h doran [http://www.ibhdoran.com]!
-          It was almost imposible to get a PC backplate USB connector
+          It was almost impossible to get a PC backplate USB connector
           for the motherboard here at Europe (mine, home-made, was
-          quite lowsy :). Now I know where to adquire nice USB stuff!
+          quite lousy :). Now I know where to acquire nice USB stuff!
 
         - Genius Germany donated a USB mouse to test the mouse boot
           protocol. They've also donated a F-23 digital joystick and a
@@ -111,6 +114,10 @@ THANKS file in Inaky's driver):
 	  serial converter, and the documentation for the device to
 	  allow a driver to be written.
 
+	- Thanks to ADMtek for providing Pegasus and Pegasus II
+	  evaluation boards, specs and valuable advices during
+	  the driver development.
+	
         And thanks go to (hey! in no particular order :)
 
         - Oren Tirosh <orenti@hishome.net>, for standing so patiently
@@ -127,7 +134,7 @@ THANKS file in Inaky's driver):
           documentation for the UUSBD. Go for it!
 
         - Ric Klaren <ia_ric@cs.utwente.nl> for doing nice
-          introductory documents (compiting with Alberto's :).
+          introductory documents (competing with Alberto's :).
 
         - Christian Groessler <cpg@aladdin.de>, for it's help on those
           itchy bits ... :)
@@ -142,7 +149,7 @@ THANKS file in Inaky's driver):
         - Rasca Gmelch <thron@gmx.de> has revived the raw driver and
           pointed bugs, as well as started the uusbd-utils package.
 
-        - Peter Dettori <dettori@ozy.dec.com> is unconvering bugs like
+        - Peter Dettori <dettori@ozy.dec.com> is uncovering bugs like
           crazy, as well as making cool suggestions, great :)
 
         - All the Free Software and Linux community, the FSF & the GNU
@@ -152,7 +159,7 @@ THANKS file in Inaky's driver):
         - Big thanks to Richard Stallman for creating Emacs!
 
         - The people at the linux-usb mailing list, for reading so
-          many messages :) Ok, no more kidding; for all your advices!
+          many messages :) Ok, no more kidding; for all your advises!
 
         - All the people at the USB Implementors Forum for their
           help and assistance.

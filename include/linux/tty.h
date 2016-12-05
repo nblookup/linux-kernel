@@ -108,7 +108,12 @@ extern struct screen_info screen_info;
 #define VIDEO_TYPE_EGAM		0x20	/* EGA/VGA in Monochrome Mode	*/
 #define VIDEO_TYPE_EGAC		0x21	/* EGA in Color Mode		*/
 #define VIDEO_TYPE_VGAC		0x22	/* VGA+ in Color Mode		*/
-#define VIDEO_TYPE_VLFB		0x23	/* VESA VGA in graphic mode    	*/
+#define VIDEO_TYPE_VLFB		0x23	/* VESA VGA in graphic mode	*/
+
+#define VIDEO_TYPE_PICA_S3	0x30	/* ACER PICA-61 local S3 video	*/
+#define VIDEO_TYPE_MIPS_G364	0x31    /* MIPS Magnum 4000 G364 video  */
+#define VIDEO_TYPE_SNI_RM	0x32    /* SNI RM200 PCI video          */
+#define VIDEO_TYPE_SGI          0x33    /* Various SGI graphics hardware */
 
 #define VIDEO_TYPE_TGAC		0x40	/* DEC TGA */
 
@@ -116,9 +121,6 @@ extern struct screen_info screen_info;
 #define VIDEO_TYPE_SUNPCI       0x51    /* Sun PCI based frame buffer. */
 
 #define VIDEO_TYPE_PMAC		0x60	/* PowerMacintosh frame buffer. */
-
-#define VIDEO_TYPE_SGI          0x70    /* Various SGI graphics hardware */
-#define VIDEO_TYPE_MIPS_G364	0x71    /* MIPS Magnum 4000 G364 video  */
 
 /*
  * This character is the same as _POSIX_VDISABLE: it cannot be used as
@@ -303,6 +305,8 @@ struct tty_struct {
 	unsigned long canon_head;
 	unsigned int canon_column;
 	struct semaphore atomic_read;
+	struct semaphore atomic_write;
+	spinlock_t read_lock;
 };
 
 /* tty magic number */
@@ -344,7 +348,6 @@ extern int kmsg_redirect;
 extern void con_init(void);
 extern void console_init(void);
 
-extern int rs_init(void);
 extern int lp_init(void);
 extern int pty_init(void);
 extern void tty_init(void);
@@ -358,7 +361,6 @@ extern int rp_init(void);
 extern int cy_init(void);
 extern int stl_init(void);
 extern int stli_init(void);
-extern int riscom8_init(void);
 extern int specialix_init(void);
 extern int espserial_init(void);
 extern int macserial_init(void);
@@ -373,6 +375,9 @@ extern void start_tty(struct tty_struct * tty);
 extern int tty_register_ldisc(int disc, struct tty_ldisc *new_ldisc);
 extern int tty_register_driver(struct tty_driver *driver);
 extern int tty_unregister_driver(struct tty_driver *driver);
+extern void tty_register_devfs (struct tty_driver *driver, unsigned int flags,
+				unsigned minor);
+extern void tty_unregister_devfs (struct tty_driver *driver, unsigned minor);
 extern int tty_read_raw_data(struct tty_struct *tty, unsigned char *bufp,
 			     int buflen);
 extern void tty_write_message(struct tty_struct *tty, char *msg);

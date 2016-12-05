@@ -16,15 +16,24 @@ SECTIONS
   /* . = 0xa800000000300000; */
   . = 0xffffffff80300000;
   .text : {
-    _ftext = . ;
     *(.text)
     *(.rodata)
     *(.rodata1)
     /* .gnu.warning sections are handled specially by elf32.em.  */
     *(.gnu.warning)
   } = 0
+  .kstrtab : { *(.kstrtab) }
+
+  . = ALIGN(16);		/* Exception table */
+  __start___ex_table = .;
+  __ex_table : { *(__ex_table) }
+  __stop___ex_table = .;
+
+  __start___dbe_table = .;	/* Exception table for data bus errors */
+  __dbe_table : { *(__dbe_table) }
+  __stop___dbe_table = .;
+
   _etext = .;
-  PROVIDE (etext = .);
 
   . = ALIGN(16384);
   .data.init_task : { *(.data.init_task) }
@@ -74,7 +83,6 @@ SECTIONS
     CONSTRUCTORS
   }
   .data1   : { *(.data1) }
-  _gp = . + 0x8000;
   .lit8 : { *(.lit8) }
   .lit4 : { *(.lit4) }
   .ctors         : { *(.ctors)   }
@@ -86,10 +94,7 @@ SECTIONS
      we can shorten the on-disk segment size.  */
   .sdata     : { *(.sdata) }
   _edata  =  .;
-  PROVIDE (edata = .);
 
-  __bss_start = .;
-  _fbss = .;
   .sbss      : { *(.sbss) *(.scommon) }
   .bss       :
   {
@@ -97,8 +102,16 @@ SECTIONS
    *(.bss)
    *(COMMON)
   _end = . ;
-  PROVIDE (end = .);
   }
+
+  /* Sections to be discarded */
+  /DISCARD/ : 
+  {
+        *(.text.exit)
+        *(.data.exit)
+        *(.exitcall.exit)
+  }
+
   /* These are needed for ELF backends which have not yet been
      converted to the new style linker.  */
   .stab 0 : { *(.stab) }

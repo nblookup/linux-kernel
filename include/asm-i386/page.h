@@ -30,24 +30,27 @@
 
 #endif
 
+#define clear_user_page(page, vaddr)	clear_page(page)
+#define copy_user_page(to, from, vaddr)	copy_page(to, from)
+
 /*
  * These are used to make use of C type-checking..
  */
 #if CONFIG_X86_PAE
-typedef struct { unsigned long long pte; } pte_t;
+typedef struct { unsigned long pte_low, pte_high; } pte_t;
 typedef struct { unsigned long long pmd; } pmd_t;
 typedef struct { unsigned long long pgd; } pgd_t;
-#define PTE_MASK	(~(unsigned long long) (PAGE_SIZE-1))
+#define pte_val(x)	((x).pte_low | ((unsigned long long)(x).pte_high << 32))
 #else
-typedef struct { unsigned long pte; } pte_t;
+typedef struct { unsigned long pte_low; } pte_t;
 typedef struct { unsigned long pmd; } pmd_t;
 typedef struct { unsigned long pgd; } pgd_t;
-#define PTE_MASK	PAGE_MASK
+#define pte_val(x)	((x).pte_low)
 #endif
+#define PTE_MASK	PAGE_MASK
 
 typedef struct { unsigned long pgprot; } pgprot_t;
 
-#define pte_val(x)	((x).pte)
 #define pmd_val(x)	((x).pmd)
 #define pgd_val(x)	((x).pgd)
 #define pgprot_val(x)	((x).pgprot)
@@ -72,14 +75,12 @@ typedef struct { unsigned long pgprot; } pgprot_t;
  * amount of physical memory you can use to about 950MB. 
  *
  * If you want more physical memory than this then see the CONFIG_HIGHMEM4G
- * amd CONFIG_HIGHMEM64G options in the kernel configuration.
+ * and CONFIG_HIGHMEM64G options in the kernel configuration.
  */
 
 #define __PAGE_OFFSET		(0xC0000000)
 
 #ifndef __ASSEMBLY__
-
-extern int console_loglevel;
 
 /*
  * Tell the user there is some problem. Beep too, so we can
@@ -113,8 +114,9 @@ extern __inline__ int get_order(unsigned long size)
 #define PAGE_OFFSET		((unsigned long)__PAGE_OFFSET)
 #define __pa(x)			((unsigned long)(x)-PAGE_OFFSET)
 #define __va(x)			((void *)((unsigned long)(x)+PAGE_OFFSET))
-#define MAP_NR(addr)		(__pa(addr) >> PAGE_SHIFT)
-#define PHYSMAP_NR(addr)	((unsigned long)(addr) >> PAGE_SHIFT)
+#define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT))
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
+
 
 #endif /* __KERNEL__ */
 

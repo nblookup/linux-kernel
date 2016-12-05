@@ -1,4 +1,4 @@
-/*  $Id: process.c,v 1.146 2000/03/01 02:53:27 davem Exp $
+/*  $Id: process.c,v 1.154 2000/10/05 06:12:57 anton Exp $
  *  linux/arch/sparc/kernel/process.c
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -45,7 +45,7 @@ extern void fpsave(unsigned long *, unsigned long *, void *, unsigned long *);
 struct task_struct *last_task_used_math = NULL;
 struct task_struct *current_set[NR_CPUS] = {&init_task, };
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 
 #define SUN4C_FAULT_HIGH 100
 
@@ -60,7 +60,7 @@ int cpu_idle(void)
 		goto out;
 
 	/* endless idle loop with no priority at all */
-	current->priority = 0;
+	current->nice = 20;
 	current->counter = -100;
 	init_idle();
 
@@ -109,7 +109,7 @@ out:
 int cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
-	current->priority = 0;
+	current->nice = 20;
 	current->counter = -100;
 	init_idle();
 
@@ -126,9 +126,10 @@ int cpu_idle(void)
 
 extern char reboot_command [];
 
+extern int serial_console;
+
 #ifdef CONFIG_SUN_CONSOLE
 extern void (*prom_palette)(int);
-extern int serial_console;
 #endif
 
 void machine_halt(void)
@@ -169,7 +170,7 @@ void machine_restart(char * cmd)
 void machine_power_off(void)
 {
 #ifdef CONFIG_SUN_AUXIO
-	if (auxio_power_register)
+	if (auxio_power_register && !serial_console)
 		*auxio_power_register |= AUXIO_POWER_OFF;
 #endif
 	machine_halt();
@@ -229,10 +230,11 @@ void show_backtrace(void)
 	__show_backtrace(fp);
 }
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 void smp_show_backtrace_all_cpus(void)
 {
 	xc0((smpfunc_t) show_backtrace);
+	show_backtrace();
 }
 #endif
 
@@ -320,7 +322,7 @@ void show_thread(struct thread_struct *thread)
  */
 void exit_thread(void)
 {
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	if(last_task_used_math == current) {
 #else
 	if(current->flags & PF_USEDFPU) {
@@ -329,7 +331,7 @@ void exit_thread(void)
 		put_psr(get_psr() | PSR_EF);
 		fpsave(&current->thread.float_regs[0], &current->thread.fsr,
 		       &current->thread.fpqueue[0], &current->thread.fpqdepth);
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 		last_task_used_math = NULL;
 #else
 		current->flags &= ~PF_USEDFPU;
@@ -343,7 +345,7 @@ void flush_thread(void)
 
 	/* No new signal delivery by default */
 	current->thread.new_signal = 0;
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	if(last_task_used_math == current) {
 #else
 	if(current->flags & PF_USEDFPU) {
@@ -352,7 +354,7 @@ void flush_thread(void)
 		put_psr(get_psr() | PSR_EF);
 		fpsave(&current->thread.float_regs[0], &current->thread.fsr,
 		       &current->thread.fpqueue[0], &current->thread.fpqdepth);
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 		last_task_used_math = NULL;
 #else
 		current->flags &= ~PF_USEDFPU;
@@ -453,20 +455,21 @@ clone_stackframe(struct sparc_stackf *dst, struct sparc_stackf *src)
  *       allocate the task_struct and kernel stack in
  *       do_fork().
  */
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 extern void ret_from_smpfork(void);
 #else
 extern void ret_from_syscall(void);
 #endif
 
 int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
+		unsigned long unused,
 		struct task_struct *p, struct pt_regs *regs)
 {
 	struct pt_regs *childregs;
 	struct reg_window *new_stack;
 	unsigned long stack_offset;
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	if(last_task_used_math == current) {
 #else
 	if(current->flags & PF_USEDFPU) {
@@ -474,7 +477,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 		put_psr(get_psr() | PSR_EF);
 		fpsave(&p->thread.float_regs[0], &p->thread.fsr,
 		       &p->thread.fpqueue[0], &p->thread.fpqdepth);
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 		current->flags &= ~PF_USEDFPU;
 #endif
 	}
@@ -490,7 +493,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 	copy_regwin(new_stack, (((struct reg_window *) regs) - 1));
 
 	p->thread.ksp = (unsigned long) new_stack;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	p->thread.kpc = (((unsigned long) ret_from_smpfork) - 0x8);
 	p->thread.kpsr = current->thread.fork_kpsr | PSR_PIL;
 #else
@@ -604,7 +607,7 @@ int dump_fpu (struct pt_regs * regs, elf_fpregset_t * fpregs)
 		fpregs->pr_q_entrysize = 8;
 		return 1;
 	}
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	if (current->flags & PF_USEDFPU) {
 		put_psr(get_psr() | PSR_EF);
 		fpsave(&current->thread.float_regs[0], &current->thread.fsr,

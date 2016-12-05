@@ -21,8 +21,6 @@
 
 #undef DEBUG
 
-extern char _end;
-
 struct linux_mdesc * __init
 ArcGetMemoryDescriptor(struct linux_mdesc *Current)
 {
@@ -195,6 +193,7 @@ void __init prom_meminit(void)
 	pblocks[i].size = 0;
 
 	max_low_pfn = find_max_low_pfn();
+
 	largest = find_largest_memblock();
 	bootmap_size = init_bootmem(largest->base >> PAGE_SHIFT, max_low_pfn);
 
@@ -208,6 +207,8 @@ void __init prom_meminit(void)
 		prom_printf("CRITIAL: overwriting PROM data.\n");
 		BUG();
 	}
+
+	/* Reserve the memory bootmap itself */
 	reserve_bootmem(largest->base, bootmap_size);
 
 	printk("PROMLIB: Total free ram %dK / %dMB.\n",
@@ -227,8 +228,8 @@ prom_free_prom_memory (void)
 
 		addr = PAGE_OFFSET + p->base;
 		while (addr < p->base + p->size) {
-			ClearPageReserved(mem_map + MAP_NR(addr));
-			set_page_count(mem_map + MAP_NR(addr), 1);
+			ClearPageReserved(virt_to_page(addr));
+			set_page_count(virt_to_page(addr), 1);
 			free_page(addr);
 			addr += PAGE_SIZE;
 			freed += PAGE_SIZE;

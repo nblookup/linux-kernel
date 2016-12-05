@@ -88,6 +88,9 @@
  *      to support windowing into on adapter shared ram.
  *      i.e. Use LANAID to setup a PnP configuration with 16K RAM. Paging
  *      will shift this 16K window over the entire available shared RAM.
+ *
+ *      Changes by Peter De Schrijver (p2@mind.be) :
+ *      + fixed a problem with PCMCIA card removal
  */
 
 /* change the define of IBMTR_DEBUG_MESSAGES to a nonzero value 
@@ -95,15 +98,7 @@ in the event that chatty debug messages are desired - jjs 12/30/98 */
 
 #define IBMTR_DEBUG_MESSAGES 0
 
-#ifdef PCMCIA
-#define MODULE
-#endif
-
 #include <linux/module.h>
-
-#ifdef PCMCIA
-#undef MODULE
-#endif
 
 #define NO_AUTODETECT 1
 #undef NO_AUTODETECT
@@ -161,13 +156,13 @@ static char mcchannelid[] = {
 #include <linux/stddef.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
+#include <linux/ibmtr.h>
 #include <net/checksum.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 
-#include "ibmtr.h"
 
 
 #define DPRINTK(format, args...) printk("%s: " format, dev->name , ## args)
@@ -300,7 +295,9 @@ static int __init ibmtr_probe1(struct net_device *dev, int PIOaddr)
 	struct tok_info *ti=0;
 	__u32 cd_chanid;
 	unsigned char *tchanid, ctemp;
+#ifndef PCMCIA
 	unsigned long timeout;
+#endif
 
 #ifndef MODULE
 #ifndef PCMCIA
@@ -459,7 +456,7 @@ static int __init ibmtr_probe1(struct net_device *dev, int PIOaddr)
 			while(!isa_readb(ti->mmio + ACA_OFFSET + ACA_RW + RRR_EVEN))
 				if (time_after(jiffies, timeout)) {
 					DPRINTK("Hardware timeout during initialization.\n");
-					kfree_s(ti, sizeof(struct tok_info));
+					kfree(ti);
 					return -ENODEV;
 			        }
 
@@ -610,7 +607,7 @@ static int __init ibmtr_probe1(struct net_device *dev, int PIOaddr)
 			break;
 		default:
 			DPRINTK("Unknown shared ram paging info %01X\n",ti->shared_ram_paging);
-			kfree_s(ti, sizeof(struct tok_info));
+			kfree(ti);
 			return -ENODEV;
 			break;
 	}
@@ -645,7 +642,7 @@ static int __init ibmtr_probe1(struct net_device *dev, int PIOaddr)
 			DPRINTK("Shared RAM for this adapter (%05x) exceeds driver"
 				" limit (%05x), adapter not started.\n",
 				chk_base, ibmtr_mem_base + IBMTR_SHARED_RAM_SIZE);
-			kfree_s(ti, sizeof(struct tok_info));
+			kfree(ti);
                         return -ENODEV;
 		} else {  /* seems cool, record what we have figured out */
 			ti->sram_base = new_base >> 12;
@@ -663,7 +660,7 @@ static int __init ibmtr_probe1(struct net_device *dev, int PIOaddr)
 #ifndef PCMCIA
 	if (request_irq (dev->irq = irq, &tok_interrupt,0,"ibmtr", dev) != 0) {
 		DPRINTK("Could not grab irq %d.  Halting Token Ring driver.\n",irq);
-		kfree_s(ti, sizeof(struct tok_info));
+		kfree(ti);
 		return -ENODEV;
 	}
  
@@ -786,6 +783,9 @@ static int __init trdev_init(struct net_device *dev)
 {
 	struct tok_info *ti=(struct tok_info *)dev->priv;
 
+	/* init the spinlock */
+	spin_lock_init(&ti->lock);
+
 	SET_PAGE(ti->srb_page);
 	ti->open_status		= CLOSED;
 
@@ -813,6 +813,9 @@ static void tok_set_multicast_list(struct net_device *dev)
 	unsigned char address[4];
 
 	int i;
+
+	if(ti->open_status==CLOSED)
+		return;
 
 	address[0] = address[1] = address[2] = address[3] = 0;
 
@@ -848,9 +851,6 @@ static int tok_open(struct net_device *dev)
 {
 	struct tok_info *ti=(struct tok_info *)dev->priv;
 
-	/* init the spinlock */
-	spin_lock_init(&ti->lock);
-
 	if (ti->open_status==CLOSED) tok_init_card(dev);
 
 	if (ti->open_status==IN_PROGRESS) sleep_on(&ti->wait_for_reset);
@@ -870,26 +870,28 @@ static int tok_close(struct net_device *dev)
 
 	struct tok_info *ti=(struct tok_info *) dev->priv;
 
-	netif_stop_queue(dev);
-	SET_PAGE(ti->srb_page);	
-	isa_writeb(DIR_CLOSE_ADAPTER,
-	       ti->srb + offsetof(struct srb_close_adapter, command));
-	isa_writeb(CMD_IN_SRB, ti->mmio + ACA_OFFSET + ACA_SET + ISRA_ODD);
+	if(ti->open_status!=CLOSED) {
+		netif_stop_queue(dev);
+		SET_PAGE(ti->srb_page);	
+		isa_writeb(DIR_CLOSE_ADAPTER,
+	       	ti->srb + offsetof(struct srb_close_adapter, command));
+		isa_writeb(CMD_IN_SRB, ti->mmio + ACA_OFFSET + ACA_SET + ISRA_ODD);
 
-	ti->open_status=CLOSED;
+		ti->open_status=CLOSED;
 
-	sleep_on(&ti->wait_for_tok_int);
+		sleep_on(&ti->wait_for_tok_int);
 
-	SET_PAGE(ti->srb_page);
-	if (isa_readb(ti->srb + offsetof(struct srb_close_adapter, ret_code)))
-		DPRINTK("close adapter failed: %02X\n",
-			(int)isa_readb(ti->srb + offsetof(struct srb_close_adapter, ret_code)));
+		SET_PAGE(ti->srb_page);
+		if (isa_readb(ti->srb + offsetof(struct srb_close_adapter, ret_code)))
+			DPRINTK("close adapter failed: %02X\n",
+				(int)isa_readb(ti->srb + offsetof(struct srb_close_adapter, ret_code)));
 
 #ifdef PCMCIA
-	ti->sram = 0 ;
+		ti->sram = 0 ;
 #endif
-	DPRINTK("Adapter closed.\n");
-	MOD_DEC_USE_COUNT;
+		DPRINTK("Adapter closed.\n");
+		MOD_DEC_USE_COUNT;
+	}
 
 	return 0;
 }
@@ -937,6 +939,7 @@ void tok_interrupt (int irq, void *dev_id, struct pt_regs *regs)
     		if (status == 0xFF)
        		{
 		          DPRINTK("PCMCIA card removed.\n");
+                          ti->open_status=CLOSED;
 			  goto return_point ; 
        		}
 
@@ -944,6 +947,7 @@ void tok_interrupt (int irq, void *dev_id, struct pt_regs *regs)
       	        if ( isa_readb (ti->mmio + ACA_OFFSET + ACA_RW + ISRP_EVEN) == 0xFF)
     	        {
          		 DPRINTK("PCMCIA card removed.\n");
+                         ti->open_status=CLOSED;
 			 goto return_point ; 
       		}
 #endif
@@ -1748,7 +1752,7 @@ static void tr_rx(struct net_device *dev)
 	/* Copy the payload... */
 	for (;;) {
 		if (IPv4_p)
-			chksum = csum_partial_copy(bus_to_virt(rbufdata), data,
+			chksum = csum_partial_copy_nocheck(bus_to_virt(rbufdata), data,
 						   length < rbuffer_len ? length : rbuffer_len,
 						   chksum);
 		else
@@ -1851,13 +1855,14 @@ int ibmtr_change_mtu(struct net_device *dev, int mtu) {
 	return 0;
 }
 
+#ifndef PCMCIA
 #ifdef MODULE
 
 /* 3COM 3C619C supports 8 interrupts, 32 I/O ports */
 static struct net_device* dev_ibmtr[IBMTR_MAX_ADAPTERS];
 static int io[IBMTR_MAX_ADAPTERS] = {0xa20,0xa24};
-static int irq[IBMTR_MAX_ADAPTERS] = {0,0};
-static int mem[IBMTR_MAX_ADAPTERS] = {0,0};
+static int irq[IBMTR_MAX_ADAPTERS];
+static int mem[IBMTR_MAX_ADAPTERS];
 
 MODULE_PARM(io, "1-" __MODULE_STRING(IBMTR_MAX_ADAPTERS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(IBMTR_MAX_ADAPTERS) "i");
@@ -1880,7 +1885,7 @@ int init_module(void)
 		dev_ibmtr[i]->init      = &ibmtr_probe;
 
 	        if (register_trdev(dev_ibmtr[i]) != 0) {
-			kfree_s(dev_ibmtr[i], sizeof(struct net_device));
+			kfree(dev_ibmtr[i]);
 			dev_ibmtr[i] = NULL;
 		        if (i == 0) {
 			        printk("ibmtr: register_trdev() returned non-zero.\n");
@@ -1902,9 +1907,10 @@ void cleanup_module(void)
 			 unregister_trdev(dev_ibmtr[i]);
 			 free_irq(dev_ibmtr[i]->irq, dev_ibmtr[i]);
 			 release_region(dev_ibmtr[i]->base_addr, IBMTR_IO_EXTENT);
-			 kfree_s(dev_ibmtr[i]->priv, sizeof(struct tok_info));
-			 kfree_s(dev_ibmtr[i], sizeof(struct net_device));
+			 kfree(dev_ibmtr[i]->priv);
+			 kfree(dev_ibmtr[i]);
 			 dev_ibmtr[i] = NULL;
                 }
 }
 #endif /* MODULE */
+#endif

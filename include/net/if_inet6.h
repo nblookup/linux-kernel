@@ -64,7 +64,9 @@ struct ifmcaddr6
 	struct ifmcaddr6	*next;
 	struct timer_list	mca_timer;
 	unsigned		mca_flags;
-	atomic_t		mca_users;	
+	int			mca_users;
+	atomic_t		mca_refcnt;
+	spinlock_t		mca_lock;
 };
 
 #define	IFA_HOST	IPV6_ADDR_LOOPBACK
@@ -106,7 +108,7 @@ struct inet6_dev
 
 extern struct ipv6_devconf ipv6_devconf;
 
-extern __inline__ void ipv6_eth_mc_map(struct in6_addr *addr, char *buf)
+static inline void ipv6_eth_mc_map(struct in6_addr *addr, char *buf)
 {
 	/*
 	 *	+-------+-------+-------+-------+-------+-------+
@@ -120,7 +122,7 @@ extern __inline__ void ipv6_eth_mc_map(struct in6_addr *addr, char *buf)
 	memcpy(buf + 2, &addr->s6_addr32[3], sizeof(__u32));
 }
 
-extern __inline__ void ipv6_tr_mc_map(struct in6_addr *addr, char *buf)
+static inline void ipv6_tr_mc_map(struct in6_addr *addr, char *buf)
 {
 	/* All nodes FF01::1, FF02::1, FF02::1:FFxx:xxxx */
 

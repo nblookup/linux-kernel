@@ -1,4 +1,4 @@
-/* $Id: pci_psycho.c,v 1.14 2000/03/10 02:42:15 davem Exp $
+/* $Id: pci_psycho.c,v 1.17 2000/09/21 06:25:14 anton Exp $
  * pci_psycho.c: PSYCHO/U2P specific PCI controller support.
  *
  * Copyright (C) 1997, 1998, 1999 David S. Miller (davem@caipfs.rutgers.edu)
@@ -15,6 +15,7 @@
 #include <asm/pbm.h>
 #include <asm/iommu.h>
 #include <asm/irq.h>
+#include <asm/starfire.h>
 
 #include "pci_impl.h"
 
@@ -1074,22 +1075,34 @@ static void __init psycho_base_address_update(struct pci_dev *pdev, int resource
 {
 	struct pcidev_cookie *pcp = pdev->sysdata;
 	struct pci_pbm_info *pbm = pcp->pbm;
-	struct resource *res = &pdev->resource[resource];
-	struct resource *root;
+	struct resource *res, *root;
 	u32 reg;
-	int where, size;
+	int where, size, is_64bit;
 
+	res = &pdev->resource[resource];
+	where = PCI_BASE_ADDRESS_0 + (resource * 4);
+
+	is_64bit = 0;
 	if (res->flags & IORESOURCE_IO)
 		root = &pbm->io_space;
-	else
+	else {
 		root = &pbm->mem_space;
+		if ((res->flags & PCI_BASE_ADDRESS_MEM_TYPE_MASK)
+		    == PCI_BASE_ADDRESS_MEM_TYPE_64)
+			is_64bit = 1;
+	}
 
-	where = PCI_BASE_ADDRESS_0 + (resource * 4);
 	size = res->end - res->start;
 	pci_read_config_dword(pdev, where, &reg);
 	reg = ((reg & size) |
 	       (((u32)(res->start - root->start)) & ~size));
 	pci_write_config_dword(pdev, where, reg);
+
+	/* This knows that the upper 32-bits of the address
+	 * must be zero.  Our PCI common layer enforces this.
+	 */
+	if (is_64bit)
+		pci_write_config_dword(pdev, where + 4, 0);
 }
 
 /* We have to do the config space accesses by hand, thus... */
@@ -1193,6 +1206,23 @@ static void __init pbm_bridge_reconfigure(struct pci_controller_info *p)
 	pbm_renumber(&p->pbm_A, 0xff);
 }
 
+static void __init pbm_config_busmastering(struct pci_pbm_info *pbm)
+{
+	u8 *addr;
+
+	/* Set cache-line size to 64 bytes, this is actually
+	 * a nop but I do it for completeness.
+	 */
+	addr = psycho_pci_config_mkaddr(pbm, pbm->pci_first_busno,
+					0, PCI_CACHE_LINE_SIZE);
+	pci_config_write8(addr, 64 / sizeof(u32));
+
+	/* Set PBM latency timer to 64 PCI clocks. */
+	addr = psycho_pci_config_mkaddr(pbm, pbm->pci_first_busno,
+					0, PCI_LATENCY_TIMER);
+	pci_config_write8(addr, 64);
+}
+
 static void __init pbm_scan_bus(struct pci_controller_info *p,
 				struct pci_pbm_info *pbm)
 {
@@ -1203,11 +1233,17 @@ static void __init pbm_scan_bus(struct pci_controller_info *p,
 	pci_record_assignments(pbm, pbm->pci_bus);
 	pci_assign_unassigned(pbm, pbm->pci_bus);
 	pci_fixup_irq(pbm, pbm->pci_bus);
+	pci_determine_66mhz_disposition(pbm, pbm->pci_bus);
+	pci_setup_busmastering(pbm, pbm->pci_bus);
 }
 
 static void __init psycho_scan_bus(struct pci_controller_info *p)
 {
 	pbm_bridge_reconfigure(p);
+	pbm_config_busmastering(&p->pbm_B);
+	p->pbm_B.is_66mhz_capable = 0;
+	pbm_config_busmastering(&p->pbm_A);
+	p->pbm_A.is_66mhz_capable = 1;
 	pbm_scan_bus(p, &p->pbm_B);
 	pbm_scan_bus(p, &p->pbm_A);
 
@@ -1219,8 +1255,6 @@ static void __init psycho_scan_bus(struct pci_controller_info *p)
 
 static void __init psycho_iommu_init(struct pci_controller_info *p)
 {
-	extern int this_is_starfire;
-	extern void *starfire_hookup(int);
 	unsigned long tsbbase, i;
 	u64 control;
 

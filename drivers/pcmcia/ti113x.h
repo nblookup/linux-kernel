@@ -136,6 +136,62 @@
 
 #ifdef CONFIG_CARDBUS
 
+/*
+ * Generic TI init - TI has an extension for the
+ * INTCTL register that sets the PCI CSC interrupt.
+ * Make sure we set it correctly at open and init
+ * time
+ * - open: disable the PCI CSC interrupt. This makes
+ *   it possible to use the CSC interrupt to probe the
+ *   ISA interrupts.
+ * - init: set the interrupt to match our PCI state.
+ *   This makes us correctly get PCI CSC interrupt
+ *   events.
+ */
+static int ti_open(pci_socket_t *socket)
+{
+	u8 new, reg = exca_readb(socket, I365_INTCTL);
+
+	new = reg & ~I365_INTR_ENA;
+	if (new != reg)
+		exca_writeb(socket, I365_INTCTL, new);
+	return 0;
+}
+
+static int ti_intctl(pci_socket_t *socket)
+{
+	u8 new, reg = exca_readb(socket, I365_INTCTL);
+
+	new = reg & ~I365_INTR_ENA;
+	if (socket->cb_irq)
+		new |= I365_INTR_ENA;
+	if (new != reg)
+		exca_writeb(socket, I365_INTCTL, new);
+	return 0;
+}
+
+static int ti_init(pci_socket_t *socket)
+{
+	yenta_init(socket);
+	ti_intctl(socket);
+	return 0;
+}
+
+static struct pci_socket_ops ti_ops = {
+	ti_open,
+	yenta_close,
+	ti_init,
+	yenta_suspend,
+	yenta_get_status,
+	yenta_get_socket,
+	yenta_set_socket,
+	yenta_get_io_map,
+	yenta_set_io_map,
+	yenta_get_mem_map,
+	yenta_set_mem_map,
+	yenta_proc_setup
+};
+
 #define ti_sysctl(socket)	((socket)->private[0])
 #define ti_cardctl(socket)	((socket)->private[1])
 #define ti_devctl(socket)	((socket)->private[2])
@@ -149,6 +205,7 @@ static int ti113x_open(pci_socket_t *socket)
 	ti_cardctl(socket) &= ~(TI113X_CCR_PCI_IRQ_ENA | TI113X_CCR_PCI_IREQ | TI113X_CCR_PCI_CSC);
 	if (socket->cb_irq)
 		ti_cardctl(socket) |= TI113X_CCR_PCI_IRQ_ENA | TI113X_CCR_PCI_CSC | TI113X_CCR_PCI_IREQ;
+	ti_open(socket);
 	return 0;
 }
 
@@ -159,7 +216,7 @@ static int ti113x_init(pci_socket_t *socket)
 	config_writel(socket, TI113X_SYSTEM_CONTROL, ti_sysctl(socket));
 	config_writeb(socket, TI113X_CARD_CONTROL, ti_cardctl(socket));
 	config_writeb(socket, TI113X_DEVICE_CONTROL, ti_devctl(socket));
-
+	ti_intctl(socket);
 	return 0;
 }
 
@@ -187,6 +244,7 @@ static int ti1250_open(pci_socket_t *socket)
 	ti_diag(socket) &= ~(TI1250_DIAG_PCI_CSC | TI1250_DIAG_PCI_IREQ);
 	if (socket->cb_irq)
 		ti_diag(socket) |= TI1250_DIAG_PCI_CSC | TI1250_DIAG_PCI_IREQ;
+	ti_open(socket);
 	return 0;
 }
 
@@ -195,6 +253,7 @@ static int ti1250_init(pci_socket_t *socket)
 	yenta_init(socket);
 
 	config_writeb(socket, TI1250_DIAGNOSTIC, ti_diag(socket));
+	ti_intctl(socket);
 	return 0;
 }
 

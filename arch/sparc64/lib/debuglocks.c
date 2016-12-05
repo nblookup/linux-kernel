@@ -1,15 +1,16 @@
-/* $Id: debuglocks.c,v 1.4 2000/01/31 04:59:10 davem Exp $
+/* $Id: debuglocks.c,v 1.5 2000/05/09 17:40:14 davem Exp $
  * debuglocks.c: Debugging versions of SMP locking primitives.
  *
  * Copyright (C) 1998 David S. Miller (davem@redhat.com)
  */
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <asm/system.h>
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 
 /* To enable this code, just define SPIN_LOCK_DEBUG in asm/spinlock.h */
 #ifdef SPIN_LOCK_DEBUG
@@ -275,4 +276,4 @@ wlock_again:
 }
 
 #endif /* SPIN_LOCK_DEBUG */
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */

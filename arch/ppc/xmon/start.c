@@ -8,6 +8,7 @@
 #include <asm/page.h>
 #include <linux/adb.h>
 #include <linux/pmu.h>
+#include <linux/cuda.h>
 #include <linux/kernel.h>
 #include <asm/prom.h>
 #include <asm/bootx.h>
@@ -43,6 +44,8 @@ void buf_access(void)
 		sccd[3] &= ~0x80;	/* reset DLAB */
 }
 
+extern int adb_init(void);
+
 void
 xmon_map_scc(void)
 {
@@ -59,11 +62,18 @@ xmon_map_scc(void)
 
 		/* needs to be hacked if xmon_printk is to be used
  		   from within find_via_pmu() */
+#ifdef CONFIG_ADB_PMU
 		if (!via_modem && disp_bi && find_via_pmu()) {
 			prom_drawstring("xmon uses screen and keyboard\n");
 			use_screen = 1;
-			return;
 		}
+#endif
+#ifdef CONFIG_ADB_CUDA
+		if (!via_modem && disp_bi ) {
+			prom_drawstring("xmon uses screen and keyboard\n");
+			use_screen = 1;
+		}
+#endif
 #endif
 
 #ifdef CHRP_ESCC
@@ -77,18 +87,11 @@ xmon_map_scc(void)
 		np = find_devices("mac-io");
 		if (np && np->n_addrs) {
 			macio_node = np;
-			addr = np->addrs[0].address + 0x13000;
-			/* use the B channel on the iMac */
-			if (!xmon_use_sccb)
-				addr += 0x20; /* use A channel */
+			addr = np->addrs[0].address + 0x13020;
 		}
 		base = (volatile unsigned char *) ioremap(addr & PAGE_MASK, PAGE_SIZE);
 		sccc = base + (addr & ~PAGE_MASK);
-#ifdef CHRP_ESCC
-		sccd = sccc + (0xc1013030 - 0xc1013020);
-#else
-		sccd = sccc + (0xf3013030 - 0xf3013020);
-#endif
+		sccd = sccc + 0x10;
 	}
 	else if ( _machine & _MACH_gemini )
 	{
@@ -104,6 +107,10 @@ xmon_map_scc(void)
 		/* should already be mapped by the kernel boot */
 		sccc = (volatile unsigned char *) (isa_io_base + 0x3fd);
 		sccd = (volatile unsigned char *) (isa_io_base + 0x3f8);
+		if (xmon_use_sccb) {
+			sccc -= 0x100;
+			sccd -= 0x100;
+		}
 		TXRDY = 0x20;
 		RXRDY = 1;
 	}
@@ -113,6 +120,19 @@ static int scc_initialized = 0;
 
 void xmon_init_scc(void);
 extern void pmu_poll(void);
+extern void cuda_poll(void);
+
+static inline void do_poll_adb(void)
+{
+#ifdef CONFIG_ADB_PMU
+	if (sys_ctrler == SYS_CTRLER_PMU)
+		pmu_poll();
+#endif /* CONFIG_ADB_PMU */
+#ifdef CONFIG_ADB_CUDA
+	if (sys_ctrler == SYS_CTRLER_CUDA)
+		cuda_poll();
+#endif /* CONFIG_ADB_CUDA */
+}
 
 int
 xmon_write(void *handle, void *ptr, int nb)
@@ -132,19 +152,14 @@ xmon_write(void *handle, void *ptr, int nb)
 		xmon_init_scc();
 	ct = 0;
 	for (i = 0; i < nb; ++i) {
-		while ((*sccc & TXRDY) == 0) {
-#ifdef CONFIG_ADB	    
-			if (sys_ctrler == SYS_CTRLER_PMU)
-				pmu_poll();
-#endif /* CONFIG_ADB */
-		}
+		while ((*sccc & TXRDY) == 0)
+			do_poll_adb();
 		c = p[i];
 		if (c == '\n' && !ct) {
 			c = '\r';
 			ct = 1;
 			--i;
 		} else {
-			prom_drawchar(c);
 			if (console)
 				printk("%c", c);
 			ct = 0;
@@ -156,10 +171,10 @@ xmon_write(void *handle, void *ptr, int nb)
 }
 
 int xmon_wants_key;
-int xmon_pmu_keycode;
+int xmon_adb_keycode;
 
 #ifdef CONFIG_BOOTX_TEXT
-static int xmon_pmu_shiftstate;
+static int xmon_adb_shiftstate;
 
 static unsigned char xmon_keytab[128] =
 	"asdfhgzxcv\000bqwer"				/* 0x00 - 0x0f */
@@ -178,13 +193,13 @@ static unsigned char xmon_shift_keytab[128] =
 	"\0\0000123456789\0\0\0";			/* 0x50 - 0x5f */
 
 static int
-xmon_get_pmu_key(void)
+xmon_get_adb_key(void)
 {
 	int k, t, on;
 
 	xmon_wants_key = 1;
 	for (;;) {
-		xmon_pmu_keycode = -1;
+		xmon_adb_keycode = -1;
 		t = 0;
 		on = 0;
 		do {
@@ -194,20 +209,20 @@ xmon_get_pmu_key(void)
 				prom_drawchar('\b');
 				t = 200000;
 			}
-			pmu_poll();
-		} while (xmon_pmu_keycode == -1);
-		k = xmon_pmu_keycode;
+			do_poll_adb();
+		} while (xmon_adb_keycode == -1);
+		k = xmon_adb_keycode;
 		if (on)
 			prom_drawstring(" \b");
 
 		/* test for shift keys */
 		if ((k & 0x7f) == 0x38 || (k & 0x7f) == 0x7b) {
-			xmon_pmu_shiftstate = (k & 0x80) == 0;
+			xmon_adb_shiftstate = (k & 0x80) == 0;
 			continue;
 		}
 		if (k >= 0x80)
 			continue;	/* ignore up transitions */
-		k = (xmon_pmu_shiftstate? xmon_shift_keytab: xmon_keytab)[k];
+		k = (xmon_adb_shiftstate? xmon_shift_keytab: xmon_keytab)[k];
 		if (k != 0)
 			break;
 	}
@@ -225,7 +240,7 @@ xmon_read(void *handle, void *ptr, int nb)
 #ifdef CONFIG_BOOTX_TEXT
     if (use_screen) {
 	for (i = 0; i < nb; ++i)
-	    *p++ = xmon_get_pmu_key();
+	    *p++ = xmon_get_adb_key();
 	return i;
     }
 #endif
@@ -233,14 +248,9 @@ xmon_read(void *handle, void *ptr, int nb)
 	xmon_init_scc();
     for (i = 0; i < nb; ++i) {
 	while ((*sccc & RXRDY) == 0)
-#ifdef CONFIG_ADB	    
-	    if (sys_ctrler == SYS_CTRLER_PMU)
-		pmu_poll();
-#else
-		;
-#endif /* CONFIG_ADB */
+	    do_poll_adb();
 	buf_access();
-		*p++ = *sccd;
+	*p++ = *sccd;
     }
     return i;
 }
@@ -249,12 +259,7 @@ int
 xmon_read_poll(void)
 {
 	if ((*sccc & RXRDY) == 0) {
-#ifdef CONFIG_ADB	    
-		if (sys_ctrler == SYS_CTRLER_PMU)
-			pmu_poll();
-#else
-			;
-#endif			
+		do_poll_adb();
 		return -1;
 	}
 	buf_access();
@@ -277,7 +282,7 @@ xmon_init_scc()
 	if ( _machine == _MACH_chrp )
 	{
 		sccd[3] = 0x83; eieio();	/* LCR = 8N1 + DLAB */
-		sccd[0] = 3; eieio();		/* DLL = 38400 baud */
+		sccd[0] = 12; eieio();		/* DLL = 9600 baud */
 		sccd[1] = 0; eieio();
 		sccd[2] = 0; eieio();		/* FCR = 0 */
 		sccd[3] = 3; eieio();		/* LCR = 8N1 */
@@ -296,6 +301,12 @@ xmon_init_scc()
 			t0 = readtb();
 			while (readtb() - t0 < 3*TB_SPEED)
 				eieio();
+		}
+		/* use the B channel if requested */
+		if (xmon_use_sccb) {
+			sccc = (volatile unsigned char *)
+				((unsigned long)sccc & ~0x20);
+			sccd = sccc + 0x10;
 		}
 		for (i = 20000; i != 0; --i) {
 			x = *sccc; eieio();
@@ -489,4 +500,20 @@ xmon_fgets(char *str, int nb, void *f)
     }
     *p = 0;
     return str;
+}
+
+void
+xmon_enter(void)
+{
+#ifdef CONFIG_ADB_PMU
+	pmu_suspend();
+#endif
+}
+
+void
+xmon_leave(void)
+{
+#ifdef CONFIG_ADB_PMU
+	pmu_resume();
+#endif
 }

@@ -31,8 +31,6 @@ extern volatile unsigned int *isr;	/* address of the interrupt status register  
 extern volatile unsigned int *imr;	/* address of the interrupt mask register       */
 extern decint_t dec_interrupt[NR_INTS];
 
-unsigned int local_bh_count[NR_CPUS];
-unsigned int local_irq_count[NR_CPUS];
 unsigned long spurious_count = 0;
 
 static inline void mask_irq(unsigned int irq_nr)

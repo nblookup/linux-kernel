@@ -1,7 +1,11 @@
 /*
- * linux/include/asm-arm/procinfo.h
+ *  linux/include/asm-arm/procinfo.h
  *
- * Copyright (C) 1996-1999 Russell King
+ *  Copyright (C) 1996-1999 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 #ifndef __ASM_PROCINFO_H
 #define __ASM_PROCINFO_H
@@ -18,8 +22,10 @@ struct proc_info_item {
 /*
  * Note!  struct processor is always defined if we're
  * using MULTI_CPU, otherwise this entry is unused,
- * but still exists.  NOTE! This structure is used
- * by assembler code!  Check:
+ * but still exists.
+ *
+ * NOTE! The following structure is defined by assembly
+ * language, NOT C code.  For more information, check:
  *  arch/arm/mm/proc-*.S and arch/arm/kernel/head-armv.S
  */
 struct proc_info_list {

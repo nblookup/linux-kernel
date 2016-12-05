@@ -1,4 +1,4 @@
-/* $Id: ip22-reset.c,v 1.3 1999/12/04 03:59:01 ralf Exp $
+/* $Id: ip22-reset.c,v 1.3 1999/10/08 21:07:51 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -87,9 +87,7 @@ static void blink_timeout(unsigned long data)
 	sgi_hpc_write1 ^= (HPC3_WRITE1_LC0OFF|HPC3_WRITE1_LC1OFF);
 	hpc3mregs->write1 = sgi_hpc_write1;
 
-	del_timer(&blink_timer);
-	blink_timer.expires = jiffies + data;
-	add_timer(&blink_timer);
+	mod_timer(&blink_timer, jiffies+data);
 }
 
 static void debounce(unsigned long data)

@@ -1,11 +1,10 @@
-/* $Id: ptrace.h,v 1.4 2000/02/24 00:13:20 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1994, 1995, 1996, 1997, 1998, 1999 by Ralf Baechle
- * Copyright (C) 1999 Silicon Graphics, Inc.
+ * Copyright (C) 1994, 95, 96, 97, 98, 99, 2000 by Ralf Baechle
+ * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
  */
 #ifndef _ASM_PTRACE_H
 #define _ASM_PTRACE_H
@@ -22,7 +21,7 @@
 #define FPC_CSR		69
 #define FPC_EIR		70
 
-#ifndef __ASSEMBLY__
+#ifndef _LANGUAGE_ASSEMBLY
 
 #define abi64_no_regargs						\
 	unsigned long __dummy0,						\
@@ -55,19 +54,34 @@ struct pt_regs {
 	unsigned long cp0_cause;
 };
 
-#endif /* !(__ASSEMBLY__) */
+#endif /* !(_LANGUAGE_ASSEMBLY__) */
 
+/* Arbitrarily choose the same ptrace numbers as used by the Sparc code. */
+/* #define PTRACE_GETREGS		12 */
+/* #define PTRACE_SETREGS		13 */
+/* #define PTRACE_GETFPREGS		14 */
+/* #define PTRACE_SETFPREGS		15 */
+/* #define PTRACE_GETFPXREGS		18 */
+/* #define PTRACE_SETFPXREGS		19 */
+
+#define PTRACE_SETOPTIONS	21
+
+/* options set using PTRACE_SETOPTIONS */
+#define PTRACE_O_TRACESYSGOOD	0x00000001
+
+#ifdef _LANGUAGE_ASSEMBLY
 #include <asm/offset.h>
+#endif /* (_LANGUAGE_ASSEMBLY__) */
 
 #ifdef __KERNEL__
 
-#ifndef __ASSEMBLY__
+#ifndef _LANGUAGE_ASSEMBLY
 #define instruction_pointer(regs) ((regs)->cp0_epc)
 
 extern void (*_show_regs)(struct pt_regs *);
 #define show_regs(regs)	_show_regs(regs)
 
-#endif /* !(__ASSEMBLY__) */
+#endif /* !(_LANGUAGE_ASSEMBLY__) */
 
 #endif
 

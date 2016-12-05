@@ -157,9 +157,7 @@ static int ingress_enqueue(struct sk_buff *skb,struct Qdisc *sch)
 #endif
 	};
 
-#ifdef CONFIG_NET_CLS_TCINDEX
-         skb->tc_index = TC_H_MIN(res.classid);
-#endif
+	skb->tc_index = TC_H_MIN(res.classid);
 	return result;
 }
 
@@ -224,15 +222,14 @@ used on the egress (might slow things for an iota)
 	return fwres;
 }
 
-/* after iptables */
+/* after ipt_filter */
 static struct nf_hook_ops ing_ops =
 {
 	{ NULL, NULL},
 	ing_hook,
-	NULL,
 	PF_INET,
 	NF_IP_PRE_ROUTING,
-	1
+	NF_IP_PRI_FILTER + 1
 };
 
 int ingress_init(struct Qdisc *sch,struct rtattr *opt)

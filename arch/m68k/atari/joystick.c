@@ -13,6 +13,7 @@
 #include <linux/poll.h>
 #include <linux/init.h>
 #include <linux/devfs_fs_kernel.h>
+#include <linux/smp_lock.h>
 
 #include <asm/atarikb.h>
 #include <asm/atari_joystick.h>
@@ -60,11 +61,13 @@ static int release_joystick(struct inode *inode, struct file *file)
 {
     int minor = DEVICE_NR(inode->i_rdev);
 
+    lock_kernel();
     joystick[minor].active = 0;
     joystick[minor].ready = 0;
 
     if ((joystick[0].active == 0) && (joystick[1].active == 0))
 	ikbd_joystick_disable();
+    unlock_kernel();
     return 0;
 }
 
@@ -136,7 +139,7 @@ int __init atari_joystick_init(void)
     if (devfs_register_chrdev(MAJOR_NR, "Joystick", &atari_joystick_fops))
 	printk("unable to get major %d for joystick devices\n", MAJOR_NR);
     devfs_register_series (NULL, "joysticks/digital%u", 2, DEVFS_FL_DEFAULT,
-			   MAJOR_NR, 128, S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			   MAJOR_NR, 128, S_IFCHR | S_IRUSR | S_IWUSR,
 			   &atari_joystick_fops, NULL);
 
     return 0;

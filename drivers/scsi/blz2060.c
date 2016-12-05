@@ -68,8 +68,6 @@ int __init blz2060_esp_detect(Scsi_Host_Template *tpnt)
 	    unsigned long board = z->resource.start;
 	    if (request_mem_region(board+BLZ2060_ESP_ADDR,
 				   sizeof(struct ESP_regs), "NCR53C9x")) {
-		strcpy(z->name, "Blizzard 2060 Accelerator");
-
 		esp = esp_allocate(tpnt, (void *)board+BLZ2060_ESP_ADDR);
 
 		/* Do command transfer with programmed I/O */
@@ -236,17 +234,13 @@ static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write)
 	}
 }
 
-#ifdef MODULE
-
 #define HOSTS_C
 
 #include "blz2060.h"
 
-Scsi_Host_Template driver_template = SCSI_BLZ2060;
+static Scsi_Host_Template driver_template = SCSI_BLZ2060;
 
 #include "scsi_module.c"
-
-#endif
 
 int blz2060_esp_release(struct Scsi_Host *instance)
 {

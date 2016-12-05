@@ -161,14 +161,6 @@ outnobh:
 	return s;
 }
 
-/* Nothing to do.. */
-
-static void
-romfs_put_super(struct super_block *sb)
-{
-	return;
-}
-
 /* That's simple too. */
 
 static int
@@ -262,6 +254,10 @@ romfs_copyfrom(struct inode *i, void *dest, unsigned long offset, unsigned long 
 	return res;
 }
 
+static unsigned char romfs_dtype_table[] = {
+	DT_UNKNOWN, DT_DIR, DT_REG, DT_LNK, DT_BLK, DT_CHR, DT_SOCK, DT_FIFO
+};
+
 static int
 romfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
@@ -306,7 +302,8 @@ romfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		nextfh = ntohl(ri.next);
 		if ((nextfh & ROMFH_TYPE) == ROMFH_HRD)
 			ino = ntohl(ri.spec);
-		if (filldir(dirent, fsname, j, offset, ino) < 0) {
+		if (filldir(dirent, fsname, j, offset, ino,
+			    romfs_dtype_table[nextfh & ROMFH_TYPE]) < 0) {
 			return stored;
 		}
 		stored++;
@@ -396,11 +393,11 @@ out:	return ERR_PTR(res);
  */
 
 static int
-romfs_readpage(struct dentry * dentry, struct page * page)
+romfs_readpage(struct file *file, struct page * page)
 {
-	struct inode *inode = dentry->d_inode;
-	unsigned long buf;
+	struct inode *inode = page->mapping->host;
 	unsigned long offset, avail, readlen;
+	void *buf;
 	int result = -EIO;
 
 	lock_kernel();
@@ -412,22 +409,23 @@ romfs_readpage(struct dentry * dentry, struct page * page)
 	if (offset < inode->i_size) {
 		avail = inode->i_size-offset;
 		readlen = min(avail, PAGE_SIZE);
-		if (romfs_copyfrom(inode, (void *)buf, inode->u.romfs_i.i_dataoffset+offset, readlen) == readlen) {
+		if (romfs_copyfrom(inode, buf, inode->u.romfs_i.i_dataoffset+offset, readlen) == readlen) {
 			if (readlen < PAGE_SIZE) {
-				memset((void *)(buf+readlen),0,PAGE_SIZE-readlen);
+				memset(buf + readlen,0,PAGE_SIZE-readlen);
 			}
 			SetPageUptodate(page);
 			result = 0;
 		}
 	}
 	if (result) {
-		memset((void *)buf, 0, PAGE_SIZE);
+		memset(buf, 0, PAGE_SIZE);
 		SetPageError(page);
 	}
+	flush_dcache_page(page);
 
 	UnlockPage(page);
 
-	free_page(buf);
+	__free_page(page);
 	unlock_kernel();
 
 	return result;
@@ -514,7 +512,8 @@ romfs_read_inode(struct inode *i)
 			break;
 		case 3:
 			i->i_op = &page_symlink_inode_operations;
-			i->i_mode = S_IRWXUGO;
+			i->i_data.a_ops = &romfs_aops;
+			i->i_mode = ino | S_IRWXUGO;
 			break;
 		default:
 			/* depending on MBZ for sock/fifos */
@@ -526,32 +525,24 @@ romfs_read_inode(struct inode *i)
 
 static struct super_operations romfs_ops = {
 	read_inode:	romfs_read_inode,
-	put_super:	romfs_put_super,
 	statfs:		romfs_statfs,
 };
 
 static DECLARE_FSTYPE_DEV(romfs_fs_type, "romfs", romfs_read_super);
 
-int __init init_romfs_fs(void)
+static int __init init_romfs_fs(void)
 {
 	return register_filesystem(&romfs_fs_type);
 }
 
-#ifdef MODULE
+static void __exit exit_romfs_fs(void)
+{
+	unregister_filesystem(&romfs_fs_type);
+}
 
 /* Yes, works even as a module... :) */
 
 EXPORT_NO_SYMBOLS;
 
-int
-init_module(void)
-{
-	return init_romfs_fs();
-}
-
-void
-cleanup_module(void)
-{
-	unregister_filesystem(&romfs_fs_type);
-}
-#endif
+module_init(init_romfs_fs)
+module_exit(exit_romfs_fs)

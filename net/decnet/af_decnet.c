@@ -32,6 +32,9 @@
  *       Patrick Caulfield: Fixes to delayed acceptance logic.
  *         David S. Miller: New socket locking
  *        Steve Whitehouse: Socket list hashing/locking
+ *         Arnaldo C. Melo: use capable, not suser
+ *        Steve Whitehouse: Removed unused code. Fix to use sk->allocation
+ *                          when required.
  */
 
 
@@ -285,7 +288,7 @@ int dn_username2sockaddr(unsigned char *data, int len, struct sockaddr_dn *sdn, 
 
 	switch(*fmt) {
 		case 0:
-			sdn->sdn_objnum = dn_htons(type);
+			sdn->sdn_objnum = type;
 			return 2;
 		case 1:
 			namel = 16;
@@ -526,10 +529,6 @@ static void dn_destroy_sock(struct sock *sk)
 {
 	struct dn_scp *scp = &sk->protinfo.dn;
 
-	if (sk->dead)
-		return;
-
-	sk->dead = 1;
 	scp->nsp_rxtshift = 0; /* reset back off */
 
 	if (sk->socket) {
@@ -541,7 +540,7 @@ static void dn_destroy_sock(struct sock *sk)
 
 	switch(scp->state) {
 		case DN_DN:
-			dn_nsp_send_disc(sk, NSP_DISCCONF, NSP_REASON_DC, GFP_KERNEL);
+			dn_nsp_send_disc(sk, NSP_DISCCONF, NSP_REASON_DC, sk->allocation);
 			scp->persist_fxn = dn_destroy_timer;
 			scp->persist = dn_nsp_persist(sk);
 			break;
@@ -553,7 +552,7 @@ static void dn_destroy_sock(struct sock *sk)
 		case DN_DI:
 		case DN_DR:
 disc_reject:
-			dn_nsp_send_disc(sk, NSP_DISCINIT, 0, GFP_KERNEL);
+			dn_nsp_send_disc(sk, NSP_DISCINIT, 0, sk->allocation);
 		case DN_NC:
 		case DN_NR:
 		case DN_RJ:
@@ -661,11 +660,12 @@ dn_release(struct socket *sock)
 	struct sock *sk = sock->sk;
 
 	if (sk) {
+		sock_orphan(sk);
+		sock_hold(sk);
 		lock_sock(sk);
-		sock->sk = NULL;
-		sk->socket = NULL;
 		dn_destroy_sock(sk);
 		release_sock(sk);
+		sock_put(sk);
 	}
 
         return 0;
@@ -691,7 +691,7 @@ static int dn_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	if (dn_ntohs(saddr->sdn_nodeaddrl) && (dn_ntohs(saddr->sdn_nodeaddrl) != 2))
 		return -EINVAL;
 
-	if (saddr->sdn_objnum && !suser())
+	if (saddr->sdn_objnum && !capable(CAP_NET_BIND_SERVICE))
 		return -EPERM;
 
 	if (dn_ntohs(saddr->sdn_objnamel) > DN_MAXOBJL)
@@ -701,7 +701,7 @@ static int dn_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 		return -EINVAL;
 
 	if (saddr->sdn_flags & SDF_WILD) {
-		if (!suser())
+		if (!capable(CAP_NET_BIND_SERVICE))
 			return -EPERM;
 	} else {
 		if (dn_ntohs(saddr->sdn_nodeaddrl)) {
@@ -969,7 +969,7 @@ static int dn_accept(struct socket *sock, struct socket *newsock, int flags)
 
 	cb = (struct dn_skb_cb *)skb->cb;
 
-	if ((newsk = dn_alloc_sock(newsock, GFP_KERNEL)) == NULL) {
+	if ((newsk = dn_alloc_sock(newsock, sk->allocation)) == NULL) {
 		release_sock(sk);
 		kfree_skb(skb);
 		return -ENOBUFS;
@@ -1033,7 +1033,7 @@ static int dn_accept(struct socket *sock, struct socket *newsock, int flags)
 
 	if (newsk->protinfo.dn.accept_mode == ACC_IMMED) {
 		newsk->protinfo.dn.state = DN_CC;
-        	dn_send_conn_conf(newsk, GFP_KERNEL);
+        	dn_send_conn_conf(newsk, newsk->allocation);
 		err = dn_wait_accept(newsock, flags);
 	}
 
@@ -1104,7 +1104,7 @@ static int dn_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 
 #if 0
 	case SIOCSIFADDR:
-		if (!suser())    return -EPERM;
+		if (!capable(CAP_NET_ADMIN))    return -EPERM;
 
 		if ((err = copy_from_user(devname, ioarg->devname, 5)) != 0)
 			break;
@@ -1146,7 +1146,7 @@ static int dn_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 
 #if 0
 	case SIOCSNETADDR:
-		if (!suser()) {
+		if (!capable(CAP_NET_ADMIN)) {
 			err = -EPERM;
 			break;
 		}
@@ -1177,7 +1177,7 @@ static int dn_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		break;
 #endif
 	case OSIOCSNETADDR:
-		if (!suser()) {
+		if (!capable(CAP_NET_ADMIN)) {
 			err = -EPERM;
 			break;
 		}
@@ -1192,8 +1192,7 @@ static int dn_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		break;
 
 	case OSIOCGNETADDR:
-		if ((err = put_user(decnet_address, (unsigned short *)arg)) != 0)
-			break;
+		err = put_user(decnet_address, (unsigned short *)arg);
 		break;
         case SIOCGIFCONF:
         case SIOCGIFFLAGS:
@@ -1391,7 +1390,7 @@ static int __dn_setsockopt(struct socket *sock, int level,int optname, char *opt
 				return -EINVAL;
 
 			scp->state = DN_CC;
-			dn_send_conn_conf(sk, GFP_KERNEL);
+			dn_send_conn_conf(sk, sk->allocation);
 			err = dn_wait_accept(sock, sock->file->f_flags);
 			return err;
 
@@ -1402,7 +1401,7 @@ static int __dn_setsockopt(struct socket *sock, int level,int optname, char *opt
 
 			scp->state = DN_DR;
 			sk->shutdown = SHUTDOWN_MASK;
-			dn_nsp_send_disc(sk, 0x38, 0, GFP_KERNEL);
+			dn_nsp_send_disc(sk, 0x38, 0, sk->allocation);
 			break;
 
 		default:
@@ -1530,7 +1529,7 @@ static int dn_wait_run(struct sock *sk, int flags)
 
 		case DN_CR:
 			scp->state = DN_CC;
-			dn_send_conn_conf(sk, GFP_KERNEL);
+			dn_send_conn_conf(sk, sk->allocation);
 			return dn_wait_accept(sk->socket, (flags & MSG_DONTWAIT) ? O_NONBLOCK : 0);
 		case DN_CI:
 		case DN_CC:
@@ -1670,14 +1669,14 @@ static int dn_recvmsg(struct socket *sock, struct msghdr *msg, int size,
 			goto out;
 		}
 
-		sock->flags |= SO_WAITDATA;
+		set_bit(SOCK_ASYNC_WAITDATA, &sock->flags);
 		SOCK_SLEEP_PRE(sk)
 
 		if (!dn_data_ready(sk, queue, flags, target))
 			schedule();
 
 		SOCK_SLEEP_POST(sk)
-		sock->flags &= ~SO_WAITDATA;
+		clear_bit(SOCK_ASYNC_WAITDATA, &sock->flags);
 	}
 
 	for(skb = queue->next; skb != (struct sk_buff *)queue; skb = nskb) {
@@ -2032,24 +2031,23 @@ static struct net_proto_family	dn_family_ops = {
 };
 
 static struct proto_ops dn_proto_ops = {
-        AF_DECnet,
+	family:		AF_DECnet,
 
-	dn_release,
-	dn_bind,
-	dn_connect,
-	sock_no_socketpair,
-	dn_accept,
-	dn_getname,
-	dn_poll,
-	dn_ioctl,
-	dn_listen,
-	dn_shutdown,
-	dn_setsockopt,
-	dn_getsockopt,
-	sock_no_fcntl,
-        dn_sendmsg,
-	dn_recvmsg,
-	sock_no_mmap
+	release:	dn_release,
+	bind:		dn_bind,
+	connect:	dn_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		dn_accept,
+	getname:	dn_getname,
+	poll:		dn_poll,
+	ioctl:		dn_ioctl,
+	listen:		dn_listen,
+	shutdown:	dn_shutdown,
+	setsockopt:	dn_setsockopt,
+	getsockopt:	dn_getsockopt,
+	sendmsg:	dn_sendmsg,
+	recvmsg:	dn_recvmsg,
+	mmap:		sock_no_mmap,
 };
 
 #ifdef CONFIG_SYSCTL
@@ -2057,9 +2055,37 @@ void dn_register_sysctl(void);
 void dn_unregister_sysctl(void);
 #endif
 
-void __init decnet_proto_init(struct net_proto *pro)
+
+#ifdef MODULE
+EXPORT_NO_SYMBOLS;
+MODULE_DESCRIPTION("The Linux DECnet Network Protocol");
+MODULE_AUTHOR("Linux DECnet Project Team");
+
+static int addr[2] = {0, 0};
+
+MODULE_PARM(addr, "2i");
+MODULE_PARM_DESC(addr, "The DECnet address of this machine: area,node");
+#endif
+
+
+static int __init decnet_init(void)
 {
-        printk(KERN_INFO "NET4: DECnet for Linux: V.2.3.49s (C) 1995-2000 Linux DECnet Project Team\n");
+#ifdef MODULE
+	if (addr[0] > 63 || addr[0] < 0) {
+		printk(KERN_ERR "DECnet: Area must be between 0 and 63");
+		return 1;
+	}
+
+	if (addr[1] > 1023 || addr[1] < 0) {
+		printk(KERN_ERR "DECnet: Node must be between 0 and 1023");
+		return 1;
+	}
+
+	decnet_address = dn_htons((addr[0] << 10) | addr[1]);
+	dn_dn2eth(decnet_ether_address, dn_ntohs(decnet_address));
+#endif
+
+        printk(KERN_INFO "NET4: DECnet for Linux: V.2.4.0-test10s (C) 1995-2000 Linux DECnet Project Team\n");
 
 	sock_register(&dn_family_ops);
 	dev_add_pack(&dn_dix_packet_type);
@@ -2079,6 +2105,15 @@ void __init decnet_proto_init(struct net_proto *pro)
 	dn_register_sysctl();
 #endif /* CONFIG_SYSCTL */
 
+	/*
+	 * Prevent DECnet module unloading until its fixed properly.
+	 * Requires an audit of the code to check for memory leaks and
+	 * initialisation problems etc.
+	 */
+	MOD_INC_USE_COUNT;
+
+	return 0;
+
 }
 
 #ifndef MODULE
@@ -2086,49 +2121,21 @@ static int __init decnet_setup(char *str)
 {
 	unsigned short area = simple_strtoul(str, &str, 0);
 	unsigned short node = simple_strtoul(*str > 0 ? ++str : str, &str, 0);
-	/* unsigned short type = simple_strtoul(*str > 0 ? ++str : str, &str, 0); */
 
 	decnet_address = dn_htons(area << 10 | node);
 	dn_dn2eth(decnet_ether_address, dn_ntohs(decnet_address));
 
-	return 0;
+	return 1;
 }
 
 __setup("decnet=", decnet_setup);
 #endif
 
-#ifdef MODULE
-EXPORT_NO_SYMBOLS;
-MODULE_DESCRIPTION("The Linux DECnet Network Protocol");
-MODULE_AUTHOR("Linux DECnet Project Team");
-
-static int addr[2] = {0, 0};
-
-MODULE_PARM(addr, "2i");
-MODULE_PARM_DESC(addr, "The DECnet address of this machine: area,node");
-
-int __init init_module(void)
+static void __exit decnet_exit(void)
 {
-	if (addr[0] > 63 || addr[0] < 0) {
-		printk(KERN_ERR "DECnet: Area must be between 0 and 63");
-		return 1;
-	}
+	sock_unregister(AF_DECnet);
+	dev_remove_pack(&dn_dix_packet_type);
 
-	if (addr[1] > 1023 || addr[1] < 0) {
-		printk(KERN_ERR "DECnet: Node must be between 0 and 1023");
-		return 1;
-	}
-
-	decnet_address = dn_htons((addr[0] << 10) | addr[1]);
-	dn_dn2eth(decnet_ether_address, dn_ntohs(decnet_address));
-
-	decnet_proto_init(NULL);
-
-	return 0;
-}
-
-void __exit cleanup_module(void)
-{
 #ifdef CONFIG_SYSCTL
 	dn_unregister_sysctl();
 #endif /* CONFIG_SYSCTL */
@@ -2144,9 +2151,7 @@ void __exit cleanup_module(void)
 #endif /* CONFIG_DECNET_ROUTER */
 
 	proc_net_remove("decnet");
-
-	dev_remove_pack(&dn_dix_packet_type);
-	sock_unregister(AF_DECnet);
 }
 
-#endif
+module_init(decnet_init);
+module_exit(decnet_exit);

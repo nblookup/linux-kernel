@@ -46,8 +46,8 @@ proc_bus_pci_read(struct file *file, char *buf, size_t nbytes, loff_t *ppos)
 	const struct inode *ino = file->f_dentry->d_inode;
 	const struct proc_dir_entry *dp = ino->u.generic_ip;
 	struct pci_dev *dev = dp->data;
-	int pos = *ppos;
-	int cnt, size;
+	unsigned int pos = *ppos;
+	unsigned int cnt, size;
 
 	/*
 	 * Normal users can read only the standardized portion of the
@@ -238,6 +238,13 @@ get_pci_dev_info(char *buf, char **start, off_t pos, int count)
 			} else
 				cnt += len;
 			buf += len;
+			if (cnt >= count)
+				/*
+				 * proc_file_read() gives us 1KB of slack so it's OK if the
+				 * above printfs write a little beyond the buffer end (we
+				 * never write more than 1KB beyond the buffer end).
+				 */
+				break;
 		}
 	}
 	return (count > cnt) ? cnt : count;
@@ -272,7 +279,7 @@ int pci_proc_detach_device(struct pci_dev *dev)
 	struct proc_dir_entry *e;
 
 	if ((e = dev->procent)) {
-		if (e->count)
+		if (atomic_read(&e->count))
 			return -EBUSY;
 		remove_proc_entry(e->name, dev->bus->procdir);
 		dev->procent = NULL;
@@ -389,7 +396,7 @@ static int pci_read_proc(char *buf, char **start, off_t off,
 
 	*eof = 1;
 	pci_for_each_dev(dev) {
-		nprinted = sprint_dev_config(dev, buf + len, count - len);
+		nprinted = sprint_dev_config(dev, buf + len, PAGE_SIZE - len);
 		if (nprinted < 0) {
 			*eof = 0;
 			break;

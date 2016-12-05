@@ -24,6 +24,7 @@
 #include <asm/cachectl.h>
 #include <asm/traps.h>
 #include <asm/ipc.h>
+#include <asm/page.h>
 
 /*
  * sys_pipe() is the normal C calling standard for creating
@@ -34,13 +35,11 @@ asmlinkage int sys_pipe(unsigned long * fildes)
 	int fd[2];
 	int error;
 
-	lock_kernel();
 	error = do_pipe(fd);
 	if (!error) {
 		if (copy_to_user(fildes, fd, 2*sizeof(int)))
 			error = -EFAULT;
 	}
-	unlock_kernel();
 	return error;
 }
 
@@ -61,11 +60,7 @@ static inline long do_mmap2(
 	}
 
 	down(&current->mm->mmap_sem);
-	lock_kernel();
-
 	error = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
-
-	unlock_kernel();
 	up(&current->mm->mmap_sem);
 
 	if (file)
@@ -143,8 +138,6 @@ asmlinkage long sys_mmap64(struct mmap_arg_struct64 *arg)
 	if ((a.offset >> PAGE_SHIFT) != pgoff)
 		return -EINVAL;
 
-	down(&current->mm->mmap_sem);
-	lock_kernel();
 	if (!(a.flags & MAP_ANONYMOUS)) {
 		error = -EBADF;
 		file = fget(a.fd);
@@ -153,12 +146,12 @@ asmlinkage long sys_mmap64(struct mmap_arg_struct64 *arg)
 	}
 	a.flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 
+	down(&current->mm->mmap_sem);
 	error = do_mmap_pgoff(file, a.addr, a.len, a.prot, a.flags, pgoff);
+	up(&current->mm->mmap_sem);
 	if (file)
 		fput(file);
 out:
-	unlock_kernel();
-	up(&current->mm->mmap_sem);
 	return error;
 }
 #endif
@@ -667,6 +660,11 @@ sys_cacheflush (unsigned long addr, int scope, int cache, unsigned long len)
 out:
 	unlock_kernel();
 	return ret;
+}
+
+asmlinkage int sys_getpagesize(void)
+{
+	return PAGE_SIZE;
 }
 
 /*

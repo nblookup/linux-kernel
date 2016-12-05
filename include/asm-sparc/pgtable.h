@@ -1,4 +1,4 @@
-/* $Id: pgtable.h,v 1.92 2000/03/02 20:37:37 davem Exp $ */
+/* $Id: pgtable.h,v 1.106 2000/11/08 04:49:24 davem Exp $ */
 #ifndef _SPARC_PGTABLE_H
 #define _SPARC_PGTABLE_H
 
@@ -52,19 +52,14 @@ BTFIXUPDEF_CALL(void,  mmu_release_scsi_sgl, struct scatterlist *, int, struct s
 
 /*
  * mmu_map/unmap are provided by iommu/iounit; Invalid to call on IIep.
- * mmu_flush/inval belong to CPU. Valid on IIep.
  */
 BTFIXUPDEF_CALL(void,  mmu_map_dma_area, unsigned long va, __u32 addr, int len)
 BTFIXUPDEF_CALL(unsigned long /*phys*/, mmu_translate_dvma, unsigned long busa)
 BTFIXUPDEF_CALL(void,  mmu_unmap_dma_area, unsigned long busa, int len)
-BTFIXUPDEF_CALL(void,  mmu_inval_dma_area, unsigned long virt, int len)
-BTFIXUPDEF_CALL(void,  mmu_flush_dma_area, unsigned long virt, int len)
 
 #define mmu_map_dma_area(va, ba,len) BTFIXUP_CALL(mmu_map_dma_area)(va,ba,len)
 #define mmu_unmap_dma_area(ba,len) BTFIXUP_CALL(mmu_unmap_dma_area)(ba,len)
 #define mmu_translate_dvma(ba)     BTFIXUP_CALL(mmu_translate_dvma)(ba)
-#define mmu_inval_dma_area(va,len) BTFIXUP_CALL(mmu_inval_dma_area)(va,len)
-#define mmu_flush_dma_area(va,len) BTFIXUP_CALL(mmu_flush_dma_area)(va,len)
 
 BTFIXUPDEF_SIMM13(pmd_shift)
 BTFIXUPDEF_SETHI(pmd_size)
@@ -92,13 +87,10 @@ BTFIXUPDEF_SIMM13(ptrs_per_pgd)
 BTFIXUPDEF_SIMM13(user_ptrs_per_pgd)
 
 #define VMALLOC_VMADDR(x) ((unsigned long)(x))
-/* This is the same accross all platforms */
-#define VMALLOC_START (0xfe300000)
-#define VMALLOC_END   ~0x0UL
 
-#define pte_ERROR(e)	__builtin_trap()
-#define pmd_ERROR(e)	__builtin_trap()
-#define pgd_ERROR(e)	__builtin_trap()
+#define pte_ERROR(e)   __builtin_trap()
+#define pmd_ERROR(e)   __builtin_trap()
+#define pgd_ERROR(e)   __builtin_trap()
 
 BTFIXUPDEF_INT(page_none)
 BTFIXUPDEF_INT(page_shared)
@@ -124,7 +116,14 @@ BTFIXUPDEF_INT(page_kernel)
 #define PAGE_SHARED    __pgprot(BTFIXUP_INT(page_shared))
 #define PAGE_COPY      __pgprot(BTFIXUP_INT(page_copy))
 #define PAGE_READONLY  __pgprot(BTFIXUP_INT(page_readonly))
+
+extern unsigned long page_kernel;
+
+#ifdef MODULE
+#define PAGE_KERNEL	page_kernel
+#else
 #define PAGE_KERNEL    __pgprot(BTFIXUP_INT(page_kernel))
+#endif
 
 /* Top-level page directory */
 extern pgd_t swapper_pg_dir[1024];
@@ -138,9 +137,6 @@ extern pte_t pg2[1024];
 extern pte_t pg3[1024];
 
 extern unsigned long ptr_in_current_pgd;
-
-/* the no. of pointers that fit on a page: this will go away */
-#define PTRS_PER_PAGE   (PAGE_SIZE/sizeof(void*))
 
 /* Here is a trick, since mmap.c need the initializer elements for
  * protection_map[] to be constant at compile time, I set the following
@@ -196,11 +192,9 @@ extern unsigned long empty_zero_page;
 
 #define SIZEOF_PTR_LOG2   2
 
-BTFIXUPDEF_CALL_CONST(unsigned long, pte_pagenr, pte_t)
 BTFIXUPDEF_CALL_CONST(unsigned long, pmd_page, pmd_t)
 BTFIXUPDEF_CALL_CONST(unsigned long, pgd_page, pgd_t)
 
-#define pte_pagenr(pte) BTFIXUP_CALL(pte_pagenr)(pte)
 #define pmd_page(pmd) BTFIXUP_CALL(pmd_page)(pmd)
 #define pgd_page(pgd) BTFIXUP_CALL(pgd_page)(pgd)
 
@@ -299,8 +293,10 @@ BTFIXUPDEF_CALL_CONST(pte_t, pte_mkyoung, pte_t)
 #define page_pte(page)			page_pte_prot(page, __pgprot(0))
 
 /* Permanent address of a page. */
-#define page_address(page) ({ if (!(page)->virtual) BUG(); (page)->virtual; })
-#define pte_page(x) (mem_map+pte_pagenr(x))
+#define page_address(page)  ((page)->virtual)
+
+BTFIXUPDEF_CALL(struct page *, pte_page, pte_t)
+#define pte_page(pte) BTFIXUP_CALL(pte_page)(pte)
 
 /*
  * Conversion functions: convert a page and protection to a page entry,
@@ -316,8 +312,10 @@ BTFIXUPDEF_CALL_CONST(pte_t, mk_pte_io, unsigned long, pgprot_t, int)
 #define mk_pte_io(page,pgprot,space) BTFIXUP_CALL(mk_pte_io)(page,pgprot,space)
 
 BTFIXUPDEF_CALL(void, pgd_set, pgd_t *, pmd_t *)
+BTFIXUPDEF_CALL(void, pmd_set, pmd_t *, pte_t *)
 
 #define pgd_set(pgdp,pmdp) BTFIXUP_CALL(pgd_set)(pgdp,pmdp)
+#define pmd_set(pmdp,ptep) BTFIXUP_CALL(pmd_set)(pmdp,ptep)
 
 BTFIXUPDEF_INT(pte_modify_mask)
 
@@ -439,8 +437,6 @@ __get_iospace (unsigned long addr)
 	}
 }
 
-#define module_map      vmalloc
-#define module_unmap    vfree
 extern unsigned long *sparc_valid_addr_bitmap;
 
 /* Needs to be defined here and not in linux/mm.h, as it is arch dependent */
@@ -449,6 +445,8 @@ extern unsigned long *sparc_valid_addr_bitmap;
 
 extern int io_remap_page_range(unsigned long from, unsigned long to,
 			       unsigned long size, pgprot_t prot, int space);
+
+#include <asm-generic/pgtable.h>
 
 #endif /* !(__ASSEMBLY__) */
 

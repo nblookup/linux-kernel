@@ -1,39 +1,25 @@
-/* $Id: saphir.c,v 1.5 1999/12/19 13:09:42 keil Exp $
-
+/* $Id: saphir.c,v 1.8 2000/11/24 17:05:38 kai Exp $
+ *
  * saphir.c low level stuff for HST Saphir 1
  *
  * Author     Karsten Keil (keil@isdn4linux.de)
  *
  * Thanks to    HST High Soft Tech GmbH
  *
- *
- * $Log: saphir.c,v $
- * Revision 1.5  1999/12/19 13:09:42  keil
- * changed TASK_INTERRUPTIBLE into TASK_UNINTERRUPTIBLE for
- * signal proof delays
- *
- * Revision 1.4  1999/09/04 06:20:06  keil
- * Changes from kernel set_current_state()
- *
- * Revision 1.3  1999/07/12 21:05:26  keil
- * fix race in IRQ handling
- * added watchdog for lost IRQs
- *
- * Revision 1.2  1999/07/01 08:07:55  keil
- * Initial version
- *
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
 
 
 #define __NO_VERSION__
+#include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
 #include "isdnl1.h"
 
 extern const char *CardType[];
-static char *saphir_rev = "$Revision: 1.5 $";
+static char *saphir_rev = "$Revision: 1.8 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -173,11 +159,9 @@ saphir_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 		goto Start_ISAC;
 	}
 	/* Watchdog */
-	if (cs->hw.saphir.timer.function) {
-		del_timer(&cs->hw.saphir.timer);
-		cs->hw.saphir.timer.expires = jiffies + 1*HZ;
-		add_timer(&cs->hw.saphir.timer);
-	} else
+	if (cs->hw.saphir.timer.function) 
+		mod_timer(&cs->hw.saphir.timer, jiffies+1*HZ);
+	else
 		printk(KERN_WARNING "saphir: Spurious timer!\n");
 	writereg(cs->hw.saphir.ale, cs->hw.saphir.hscx, HSCX_MASK, 0xFF);
 	writereg(cs->hw.saphir.ale, cs->hw.saphir.hscx, HSCX_MASK + 0x40, 0xFF);
@@ -192,9 +176,7 @@ SaphirWatchDog(struct IsdnCardState *cs)
 {
         /* 5 sec WatchDog, so read at least every 4 sec */
 	cs->readisac(cs, ISAC_RBCH);
-	del_timer(&cs->hw.saphir.timer);
-	cs->hw.saphir.timer.expires = jiffies + 1*HZ;
-	add_timer(&cs->hw.saphir.timer);
+	mod_timer(&cs->hw.saphir.timer, jiffies+1*HZ);
 }
 
 void
@@ -272,8 +254,8 @@ saphir_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 }
 
 
-__initfunc(int
-setup_saphir(struct IsdnCard *card))
+int __init
+setup_saphir(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];

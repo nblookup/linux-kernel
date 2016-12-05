@@ -109,6 +109,7 @@
 * Jan 02, 1997	Gene Kozin	Initial version.
 *****************************************************************************/
 
+#include <linux/config.h>
 #include <linux/kernel.h>	/* printk(), and other useful stuff */
 #include <linux/stddef.h>	/* offsetof(), etc. */
 #include <linux/errno.h>	/* return codes */
@@ -813,7 +814,7 @@ static int new_if (wan_device_t* wandev, struct net_device* dev, wanif_conf_t* c
 	chan->transmit_length = 0;
 
 	/* prepare network device data space for registration */
-	dev->name = chan->name;
+	strcpy(dev->name, chan->name);
 	dev->init = &if_init;
 	dev->priv = chan;
 
@@ -1587,9 +1588,9 @@ static void switch_net_numbers(unsigned char *sendpacket, unsigned long network_
 
 /*============================================================================
  * Get ethernet-style interface statistics.
- * Return a pointer to struct enet_statistics.
+ * Return a pointer to struct net_device_stats.
  */
-static struct enet_statistics* if_stats (struct net_device* dev)
+static struct net_device_stats* if_stats (struct net_device* dev)
 {
 	fr_channel_t* chan = dev->priv;
 	
@@ -3677,13 +3678,13 @@ void s508_s514_lock(sdla_t *card, unsigned long *smp_flags)
 {
 
 	if (card->hw.type != SDLA_S514){
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 		spin_lock_irqsave(&card->lock, *smp_flags);
 #else
     		disable_irq(card->hw.irq);
 #endif
 	}
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	else{
 		spin_lock(&card->lock);
 	}	
@@ -3693,13 +3694,13 @@ void s508_s514_lock(sdla_t *card, unsigned long *smp_flags)
 void s508_s514_unlock(sdla_t *card, unsigned long *smp_flags)
 {
 	if (card->hw.type != SDLA_S514){
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 		spin_unlock_irqrestore(&card->lock, *smp_flags);
 #else
     		enable_irq(card->hw.irq);
 #endif
 	}
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	else{
 		spin_unlock(&card->lock);
 	}	

@@ -67,6 +67,8 @@
 #define CM206_CDROM_MAJOR 32
 #define IDE2_MAJOR	33
 #define IDE3_MAJOR	34
+#define XPRAM_MAJOR     35      /* expanded storage on S/390 = "slow ram" */
+                                /* proposed by Peter                      */
 #define NETLINK_MAJOR	36
 #define PS2ESDI_MAJOR	36
 #define IDETAPE_MAJOR	37
@@ -106,6 +108,15 @@
 #define SPECIALIX_NORMAL_MAJOR 75
 #define SPECIALIX_CALLOUT_MAJOR 76
 
+#define COMPAQ_CISS_MAJOR 	104
+#define COMPAQ_CISS_MAJOR1	105
+#define COMPAQ_CISS_MAJOR2      106
+#define COMPAQ_CISS_MAJOR3      107
+#define COMPAQ_CISS_MAJOR4      108
+#define COMPAQ_CISS_MAJOR5      109
+#define COMPAQ_CISS_MAJOR6      110
+#define COMPAQ_CISS_MAJOR7      111
+
 #define DASD_MAJOR      94	/* Official assignations from Peter */
 
 #define MDISK_MAJOR     95	/* Official assignations from Peter */
@@ -118,6 +129,8 @@
 #define IDE9_MAJOR	91
 
 #define AURORA_MAJOR 79
+
+#define JSFD_MAJOR	99
 
 #define PHONE_MAJOR	100
 
@@ -133,6 +146,15 @@
 #define UNIX98_PTY_MASTER_MAJOR	128
 #define UNIX98_PTY_MAJOR_COUNT	8
 #define UNIX98_PTY_SLAVE_MAJOR	(UNIX98_PTY_MASTER_MAJOR+UNIX98_PTY_MAJOR_COUNT)
+
+#define VXVM_MAJOR		199	/* VERITAS volume i/o driver    */
+#define VXSPEC_MAJOR		200	/* VERITAS volume config driver */
+#define VXDMP_MAJOR		201	/* VERITAS volume multipath driver */
+
+#define MSR_MAJOR		202
+#define CPUID_MAJOR		203
+
+#define OSST_MAJOR	206	/* OnStream-SCx0 SCSI tape */
 
 /*
  * Tests for SCSI devices.

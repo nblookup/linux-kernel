@@ -12,6 +12,7 @@
 #include <linux/atmsap.h>
 #include <linux/atmsvc.h>
 #include <linux/atmdev.h>
+#include <linux/bitops.h>
 
 #include "resources.h"
 #include "signaling.h"
@@ -30,29 +31,35 @@
 
 
 struct atm_vcc *sigd = NULL;
-static wait_queue_head_t sigd_sleep;
+static DECLARE_WAIT_QUEUE_HEAD(sigd_sleep);
 
+extern spinlock_t atm_dev_lock;
 
 static void sigd_put_skb(struct sk_buff *skb)
 {
 #ifdef WAIT_FOR_DEMON
 	static unsigned long silence = 0;
-#endif
+	DECLARE_WAITQUEUE(wait,current);
 
+	add_wait_queue(&sigd_sleep,&wait);
 	while (!sigd) {
-#ifdef WAIT_FOR_DEMON
+		set_current_state(TASK_UNINTERRUPTIBLE);
 		if (time_after(jiffies, silence) || silence == 0) {
 			printk(KERN_INFO "atmsvc: waiting for signaling demon "
 			    "...\n");
 			silence = (jiffies+30*HZ)|1;
 		}
-		sleep_on(&sigd_sleep);
+		schedule();
+	}
+	current->state = TASK_RUNNING;
+	remove_wait_queue(&sigd_sleep,&wait);
 #else
+	if (!sigd) {
 		printk(KERN_WARNING "atmsvc: no signaling demon\n");
 		kfree_skb(skb);
 		return;
-#endif
 	}
+#endif
 	atm_force_charge(sigd,skb->truesize);
 	skb_queue_tail(&sigd->recvq,skb);
 	wake_up(&sigd->sleep);
@@ -63,7 +70,8 @@ static void modify_qos(struct atm_vcc *vcc,struct atmsvc_msg *msg)
 {
 	struct sk_buff *skb;
 
-	if ((vcc->flags & ATM_VF_RELEASED) || !(vcc->flags & ATM_VF_READY))
+	if (test_bit(ATM_VF_RELEASED,&vcc->flags) ||
+	    !test_bit(ATM_VF_READY,&vcc->flags))
 		return;
 	msg->type = as_error;
 	if (!vcc->dev->ops->change_qos) msg->reply = -EOPNOTSUPP;
@@ -114,7 +122,8 @@ static int sigd_send(struct atm_vcc *vcc,struct sk_buff *skb)
 				session_vcc->qos = msg->qos;
 			break;
 		case as_error:
-			vcc->flags &= ~(ATM_VF_REGIS | ATM_VF_READY);
+			clear_bit(ATM_VF_REGIS,&vcc->flags);
+			clear_bit(ATM_VF_READY,&vcc->flags);
 			vcc->reply = msg->reply;
 			break;
 		case as_indicate:
@@ -133,8 +142,8 @@ static int sigd_send(struct atm_vcc *vcc,struct sk_buff *skb)
 			}
 			return 0;
 		case as_close:
-			vcc->flags |= ATM_VF_RELEASED;
-			vcc->flags &= ~ATM_VF_READY;
+			set_bit(ATM_VF_RELEASED,&vcc->flags);
+			clear_bit(ATM_VF_READY,&vcc->flags);
 			vcc->reply = msg->reply;
 			break;
 		case as_modify:
@@ -151,9 +160,9 @@ static int sigd_send(struct atm_vcc *vcc,struct sk_buff *skb)
 }
 
 
-void sigd_enq(struct atm_vcc *vcc,enum atmsvc_msg_type type,
+void sigd_enq2(struct atm_vcc *vcc,enum atmsvc_msg_type type,
     struct atm_vcc *listen_vcc,const struct sockaddr_atmpvc *pvc,
-    const struct sockaddr_atmsvc *svc)
+    const struct sockaddr_atmsvc *svc,const struct atm_qos *qos,int reply)
 {
 	struct sk_buff *skb;
 	struct atmsvc_msg *msg;
@@ -166,18 +175,23 @@ void sigd_enq(struct atm_vcc *vcc,enum atmsvc_msg_type type,
 	msg->type = type;
 	*(struct atm_vcc **) &msg->vcc = vcc;
 	*(struct atm_vcc **) &msg->listen_vcc = listen_vcc;
-	msg->reply = 0; /* other ISP applications may use this field */
-	if (vcc) {
-		msg->qos = vcc->qos;
-		msg->sap = vcc->sap;
-	}
-	if (!svc) msg->svc.sas_family = 0;
-	else msg->svc = *svc;
+	msg->reply = reply;
+	if (qos) msg->qos = *qos;
+	if (vcc) msg->sap = vcc->sap;
+	if (svc) msg->svc = *svc;
 	if (vcc) msg->local = vcc->local;
-	if (!pvc) memset(&msg->pvc,0,sizeof(msg->pvc));
-	else msg->pvc = *pvc;
+	if (pvc) msg->pvc = *pvc;
 	sigd_put_skb(skb);
-	if (vcc) vcc->flags |= ATM_VF_REGIS;
+	if (vcc) set_bit(ATM_VF_REGIS,&vcc->flags);
+}
+
+
+void sigd_enq(struct atm_vcc *vcc,enum atmsvc_msg_type type,
+    struct atm_vcc *listen_vcc,const struct sockaddr_atmpvc *pvc,
+    const struct sockaddr_atmsvc *svc)
+{
+	sigd_enq2(vcc,type,listen_vcc,pvc,svc,vcc ? &vcc->qos : NULL,0);
+	/* other ISP applications may use "reply" */
 }
 
 
@@ -185,8 +199,8 @@ static void purge_vccs(struct atm_vcc *vcc)
 {
 	while (vcc) {
 		if (vcc->family == PF_ATMSVC &&
-		    !(vcc->flags & ATM_VF_META)) {
-			vcc->flags |= ATM_VF_RELEASED;
+		    !test_bit(ATM_VF_META,&vcc->flags)) {
+			set_bit(ATM_VF_RELEASED,&vcc->flags);
 			vcc->reply = -EUNATCH;
 			wake_up(&vcc->sleep);
 		}
@@ -206,7 +220,10 @@ static void sigd_close(struct atm_vcc *vcc)
 		printk(KERN_ERR "sigd_close: closing with requests pending\n");
 	while ((skb = skb_dequeue(&vcc->recvq))) kfree_skb(skb);
 	purge_vccs(nodev_vccs);
+
+	spin_lock (&atm_dev_lock);
 	for (dev = atm_devs; dev; dev = dev->next) purge_vccs(dev->vccs);
+	spin_unlock (&atm_dev_lock);
 }
 
 
@@ -223,7 +240,7 @@ static struct atm_dev sigd_dev = {
 	999,		/* dummy device number */
 	NULL,NULL,	/* pretend not to have any VCCs */
 	NULL,NULL,	/* no data */
-	0,		/* no flags */
+	{ 0 },		/* no flags */
 	NULL,		/* no local address */
 	{ 0 }		/* no ESI, no statistics */
 };
@@ -235,13 +252,8 @@ int sigd_attach(struct atm_vcc *vcc)
 	DPRINTK("sigd_attach\n");
 	sigd = vcc;
 	bind_vcc(vcc,&sigd_dev);
-	vcc->flags |= ATM_VF_READY | ATM_VF_META;
+	set_bit(ATM_VF_META,&vcc->flags);
+	set_bit(ATM_VF_READY,&vcc->flags);
 	wake_up(&sigd_sleep);
 	return 0;
-}
-
-
-void signaling_init(void)
-{
-	init_waitqueue_head(&sigd_sleep);
 }

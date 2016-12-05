@@ -9,6 +9,10 @@
  *  there. I took this into a separate file and switched the thing to generic
  *  proc_file_inode_operations, leaving in array.c only per-process stuff.
  *  Inumbers allocation made dynamic (via create_proc_entry()).  AV, May 1999.
+ *
+ * Changes:
+ * Fulton Green      :  Encapsulated position metric calculations.
+ *			<kernel@FultonGreen.com>
  */
 
 #include <linux/types.h>
@@ -30,6 +34,7 @@
 #include <linux/signal.h>
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -55,7 +60,7 @@ extern int get_module_list(char *);
 extern int get_ksyms_list(char *, char **, off_t, int);
 #endif
 extern int get_device_list(char *);
-extern int get_partition_list(char *);
+extern int get_partition_list(char *, char **, off_t, int);
 extern int get_filesystem_list(char *);
 extern int get_filesystem_info(char *);
 extern int get_exec_domain_list(char *);
@@ -66,6 +71,17 @@ extern int get_swaparea_info (char *);
 #ifdef CONFIG_SGI_DS1286
 extern int get_ds1286_status(char *);
 #endif
+
+static int proc_calc_metrics(char *page, char **start, off_t off,
+				 int count, int *eof, int len)
+{
+	if (len <= off+count) *eof = 1;
+	*start = page + off;
+	len -= off;
+	if (len>count) len = count;
+	if (len<0) len = 0;
+	return len;
+}
 
 static int loadavg_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
@@ -81,12 +97,7 @@ static int loadavg_read_proc(char *page, char **start, off_t off,
 		LOAD_INT(b), LOAD_FRAC(b),
 		LOAD_INT(c), LOAD_FRAC(c),
 		nr_running, nr_threads, last_pid);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 static int uptime_read_proc(char *page, char **start, off_t off,
@@ -121,12 +132,7 @@ static int uptime_read_proc(char *page, char **start, off_t off,
 		idle / HZ,
 		idle % HZ);
 #endif
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 static int meminfo_read_proc(char *page, char **start, off_t off,
@@ -155,22 +161,30 @@ static int meminfo_read_proc(char *page, char **start, off_t off,
          * have been updated.
          */
         len += sprintf(page+len,
-                "MemTotal:  %8lu kB\n"
-                "MemFree:   %8lu kB\n"
-                "MemShared: %8lu kB\n"
-                "Buffers:   %8lu kB\n"
-                "Cached:    %8u kB\n"
-                "HighTotal: %8lu kB\n"
-                "HighFree:  %8lu kB\n"
-                "LowTotal:  %8lu kB\n"
-                "LowFree:   %8lu kB\n"
-                "SwapTotal: %8lu kB\n"
-                "SwapFree:  %8lu kB\n",
+                "MemTotal:     %8lu kB\n"
+                "MemFree:      %8lu kB\n"
+                "MemShared:    %8lu kB\n"
+                "Buffers:      %8lu kB\n"
+                "Cached:       %8u kB\n"
+		"Active:       %8u kB\n"
+		"Inact_dirty:  %8u kB\n"
+		"Inact_clean:  %8u kB\n"
+		"Inact_target: %8lu kB\n"
+                "HighTotal:    %8lu kB\n"
+                "HighFree:     %8lu kB\n"
+                "LowTotal:     %8lu kB\n"
+                "LowFree:      %8lu kB\n"
+                "SwapTotal:    %8lu kB\n"
+                "SwapFree:     %8lu kB\n",
                 K(i.totalram),
                 K(i.freeram),
                 K(i.sharedram),
                 K(i.bufferram),
                 K(atomic_read(&page_cache_size)),
+		K(nr_active_pages),
+		K(nr_inactive_dirty_pages),
+		K(nr_inactive_clean_pages()),
+		K(inactive_target),
                 K(i.totalhigh),
                 K(i.freehigh),
                 K(i.totalram-i.totalhigh),
@@ -178,12 +192,7 @@ static int meminfo_read_proc(char *page, char **start, off_t off,
                 K(i.totalswap),
                 K(i.freeswap));
 
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 #undef B
 #undef K
 }
@@ -196,24 +205,14 @@ static int version_read_proc(char *page, char **start, off_t off,
 
 	strcpy(page, linux_banner);
 	len = strlen(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 static int cpuinfo_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_cpuinfo(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 #ifdef CONFIG_PROC_HARDWARE
@@ -221,12 +220,7 @@ static int hardware_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_hardware_list(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 #endif
 
@@ -235,12 +229,7 @@ static int stram_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_stram_list(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 #endif
 
@@ -249,12 +238,7 @@ static int malloc_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_malloc(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 #endif
 
@@ -263,12 +247,7 @@ static int modules_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_module_list(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 static int ksyms_read_proc(char *page, char **start, off_t off,
@@ -284,20 +263,23 @@ static int kstat_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int i, len;
-	unsigned sum = 0;
 	extern unsigned long total_forks;
 	unsigned long jif = jiffies;
+	unsigned int sum = 0, user = 0, nice = 0, system = 0;
+	int major, disk;
 
-	for (i = 0 ; i < NR_IRQS ; i++)
-		sum += kstat_irqs(i);
+	for (i = 0 ; i < smp_num_cpus; i++) {
+		int cpu = cpu_logical_map(i), j;
 
-#ifdef __SMP__
-	len = sprintf(page,
-		"cpu  %u %u %u %lu\n",
-		kstat.cpu_user,
-		kstat.cpu_nice,
-		kstat.cpu_system,
-		jif*smp_num_cpus - (kstat.cpu_user + kstat.cpu_nice + kstat.cpu_system));
+		user += kstat.per_cpu_user[cpu];
+		nice += kstat.per_cpu_nice[cpu];
+		system += kstat.per_cpu_system[cpu];
+		for (j = 0 ; j < NR_IRQS ; j++)
+			sum += kstat.irqs[cpu][j];
+	}
+
+	len = sprintf(page, "cpu  %u %u %u %lu\n", user, nice, system,
+		      jif * smp_num_cpus - (user + nice + system));
 	for (i = 0 ; i < smp_num_cpus; i++)
 		len += sprintf(page + len, "cpu%d %u %u %u %lu\n",
 			i,
@@ -308,47 +290,38 @@ static int kstat_read_proc(char *page, char **start, off_t off,
 			           + kstat.per_cpu_nice[cpu_logical_map(i)] \
 			           + kstat.per_cpu_system[cpu_logical_map(i)]));
 	len += sprintf(page + len,
-		"disk %u %u %u %u\n"
-		"disk_rio %u %u %u %u\n"
-		"disk_wio %u %u %u %u\n"
-		"disk_rblk %u %u %u %u\n"
-		"disk_wblk %u %u %u %u\n"
 		"page %u %u\n"
-		"swap %u %u\n"
+                "swap %u %u\n"
 		"intr %u",
-#else
-	len = sprintf(page,
-		"cpu  %u %u %u %lu\n"
-		"disk %u %u %u %u\n"
-		"disk_rio %u %u %u %u\n"
-		"disk_wio %u %u %u %u\n"
-		"disk_rblk %u %u %u %u\n"
-		"disk_wblk %u %u %u %u\n"
-		"page %u %u\n"
-		"swap %u %u\n"
-		"intr %u",
-		kstat.cpu_user,
-		kstat.cpu_nice,
-		kstat.cpu_system,
-		jif*smp_num_cpus - (kstat.cpu_user + kstat.cpu_nice + kstat.cpu_system),
-#endif
-		kstat.dk_drive[0], kstat.dk_drive[1],
-		kstat.dk_drive[2], kstat.dk_drive[3],
-		kstat.dk_drive_rio[0], kstat.dk_drive_rio[1],
-		kstat.dk_drive_rio[2], kstat.dk_drive_rio[3],
-		kstat.dk_drive_wio[0], kstat.dk_drive_wio[1],
-		kstat.dk_drive_wio[2], kstat.dk_drive_wio[3],
-		kstat.dk_drive_rblk[0], kstat.dk_drive_rblk[1],
-		kstat.dk_drive_rblk[2], kstat.dk_drive_rblk[3],
-		kstat.dk_drive_wblk[0], kstat.dk_drive_wblk[1],
-		kstat.dk_drive_wblk[2], kstat.dk_drive_wblk[3],
-		kstat.pgpgin,
-		kstat.pgpgout,
-		kstat.pswpin,
-		kstat.pswpout,
-		sum);
+			kstat.pgpgin,
+			kstat.pgpgout,
+			kstat.pswpin,
+			kstat.pswpout,
+			sum
+	);
 	for (i = 0 ; i < NR_IRQS ; i++)
 		len += sprintf(page + len, " %u", kstat_irqs(i));
+
+	len += sprintf(page + len, "\ndisk_io: ");
+
+	for (major = 0; major < DK_MAX_MAJOR; major++) {
+		for (disk = 0; disk < DK_MAX_DISK; disk++) {
+			int active = kstat.dk_drive[major][disk] +
+				kstat.dk_drive_rblk[major][disk] +
+				kstat.dk_drive_wblk[major][disk];
+			if (active)
+				len += sprintf(page + len,
+					"(%u,%u):(%u,%u,%u,%u,%u) ",
+					major, disk,
+					kstat.dk_drive[major][disk],
+					kstat.dk_drive_rio[major][disk],
+					kstat.dk_drive_rblk[major][disk],
+					kstat.dk_drive_wio[major][disk],
+					kstat.dk_drive_wblk[major][disk]
+			);
+		}
+	}
+
 	len += sprintf(page + len,
 		"\nctxt %u\n"
 		"btime %lu\n"
@@ -356,84 +329,53 @@ static int kstat_read_proc(char *page, char **start, off_t off,
 		kstat.context_swtch,
 		xtime.tv_sec - jif / HZ,
 		total_forks);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 static int devices_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_device_list(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 static int partitions_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
-	int len = get_partition_list(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
+	int len = get_partition_list(page, start, off, count);
+	if (len < count) *eof = 1;
 	return len;
 }
 
+#if !defined(CONFIG_ARCH_S390)
 static int interrupts_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_irq_list(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
+#endif
 
 static int filesystems_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_filesystem_list(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 static int dma_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_dma_list(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 static int ioports_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_ioport_list(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 static int cmdline_read_proc(char *page, char **start, off_t off,
@@ -444,12 +386,7 @@ static int cmdline_read_proc(char *page, char **start, off_t off,
 
 	len = sprintf(page, "%s\n", saved_command_line);
 	len = strlen(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 #ifdef CONFIG_SGI_DS1286
@@ -457,19 +394,17 @@ static int ds1286_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_ds1286_status(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 #endif
 
 static int locks_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
-	int len = get_locks_status(page, start, off, count);
+	int len;
+	lock_kernel();
+	len = get_locks_status(page, start, off, count);
+	unlock_kernel();
 	if (len < count) *eof = 1;
 	return len;
 }
@@ -478,60 +413,28 @@ static int mounts_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_filesystem_info(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 static int execdomains_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_exec_domain_list(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 static int swaps_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_swaparea_info(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
-}
-
-static int slabinfo_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
-{
-	int len = get_slabinfo(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 static int memory_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_mem_list(page);
-	if (len <= off+count) *eof = 1;
-	*start = page + off;
-	len -= off;
-	if (len>count) len = count;
-	if (len<0) len = 0;
-	return len;
+	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
 /*
@@ -574,7 +477,7 @@ static ssize_t read_profile(struct file *file, char *buf,
 static ssize_t write_profile(struct file * file, const char * buf,
 			     size_t count, loff_t *ppos)
 {
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	extern int setup_profiling_timer (unsigned int multiplier);
 
 	if (count==sizeof(int)) {
@@ -627,7 +530,9 @@ void __init proc_misc_init(void)
 		{"stat",	kstat_read_proc},
 		{"devices",	devices_read_proc},
 		{"partitions",	partitions_read_proc},
+#if !defined(CONFIG_ARCH_S390)
 		{"interrupts",	interrupts_read_proc},
+#endif
 		{"filesystems",	filesystems_read_proc},
 		{"dma",		dma_read_proc},
 		{"ioports",	ioports_read_proc},
@@ -638,12 +543,11 @@ void __init proc_misc_init(void)
 		{"locks",	locks_read_proc},
 		{"mounts",	mounts_read_proc},
 		{"swaps",	swaps_read_proc},
-		{"slabinfo",	slabinfo_read_proc},
 		{"iomem",	memory_read_proc},
 		{"execdomains",	execdomains_read_proc},
-		{NULL,NULL}
+		{NULL,}
 	};
-	for(p=simple_ones;p->name;p++)
+	for (p = simple_ones; p->name; p++)
 		create_proc_read_entry(p->name, 0, NULL, p->read_proc, NULL);
 
 	/* And now for trickier ones */
@@ -671,4 +575,8 @@ void __init proc_misc_init(void)
 			entry->proc_fops = &ppc_htab_operations;
 	}
 #endif
+	entry = create_proc_read_entry("slabinfo", S_IWUSR | S_IRUGO, NULL,
+				       slabinfo_read_proc, NULL);
+	if (entry)
+		entry->write_proc = slabinfo_write_proc;
 }

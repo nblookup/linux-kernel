@@ -21,7 +21,7 @@
 #include <linux/nfsd/export.h>
 #include <linux/nfsd/auth.h>
 #include <linux/nfsd/stats.h>
-
+#include <linux/nfsd/interface.h>
 /*
  * nfsd version
  */
@@ -57,7 +57,7 @@ struct readdir_cd {
 	char			dotonly;
 };
 typedef int		(*encode_dent_fn)(struct readdir_cd *, const char *,
-						int, off_t, ino_t);
+						int, off_t, ino_t, unsigned int);
 typedef int (*nfsd_dirop_t)(struct inode *, struct dentry *, int, int);
 
 /*
@@ -80,19 +80,19 @@ int		nfsd_racache_init(int);
 void		nfsd_racache_shutdown(void);
 int		nfsd_lookup(struct svc_rqst *, struct svc_fh *,
 				const char *, int, struct svc_fh *);
-#ifdef CONFIG_NFSD_V3
-int		nfsd_access(struct svc_rqst *, struct svc_fh *, u32 *);
-#endif /* CONFIG_NFSD_V3 */
 int		nfsd_setattr(struct svc_rqst *, struct svc_fh *,
 				struct iattr *);
 int		nfsd_create(struct svc_rqst *, struct svc_fh *,
 				char *name, int len, struct iattr *attrs,
 				int type, dev_t rdev, struct svc_fh *res);
 #ifdef CONFIG_NFSD_V3
+int		nfsd_access(struct svc_rqst *, struct svc_fh *, u32 *);
 int		nfsd_create_v3(struct svc_rqst *, struct svc_fh *,
 				char *name, int len, struct iattr *attrs,
 				struct svc_fh *res, int createmode,
 				u32 *verifier);
+int		nfsd_commit(struct svc_rqst *, struct svc_fh *,
+				off_t, unsigned long);
 #endif /* CONFIG_NFSD_V3 */
 int		nfsd_open(struct svc_rqst *, struct svc_fh *, int,
 				int, struct file *);
@@ -122,10 +122,7 @@ int		nfsd_readdir(struct svc_rqst *, struct svc_fh *,
 				u32 *buffer, int *countp, u32 *verf);
 int		nfsd_statfs(struct svc_rqst *, struct svc_fh *,
 				struct statfs *);
-#ifdef CONFIG_NFSD_V3
-int		nfsd_commit(struct svc_rqst *, struct svc_fh *,
-				off_t, unsigned long);
-#endif /* CONFIG_NFSD_V3 */
+
 int		nfsd_notify_change(struct inode *, struct iattr *);
 int		nfsd_permission(struct svc_export *, struct dentry *, int);
 
@@ -171,6 +168,9 @@ void		nfsd_lockd_unexport(struct svc_client *);
 #define	nfserr_serverfault	__constant_htonl(NFSERR_SERVERFAULT)
 #define	nfserr_badtype		__constant_htonl(NFSERR_BADTYPE)
 #define	nfserr_jukebox		__constant_htonl(NFSERR_JUKEBOX)
+
+/* Check for dir entries '.' and '..' */
+#define isdotent(n, l)	(l < 3 && n[0] == '.' && (l == 1 || n[1] == '.'))
 
 /*
  * Time of server startup

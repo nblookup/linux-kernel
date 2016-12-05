@@ -1,31 +1,71 @@
 /*
- * linux/arch/arm/kernel/head-armv.S
+ *  linux/arch/arm/kernel/head-armv.S
  *
- * Copyright (C) 1994-1999 Russell King
+ *  Copyright (C) 1994-1999 Russell King
  *
- * 32-bit kernel startup code for all architectures
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  32-bit kernel startup code for all architectures
  */
 #include <linux/config.h>
 #include <linux/linkage.h>
 
 #include <asm/assembler.h>
-#include <asm/hardware.h>
-#include <asm/dec21285.h>
+#include <asm/mach-types.h>
+#include <asm/mach/arch.h>
 
+#define K(a,b,c)	((a) << 24 | (b) << 12 | (c))
+
+/*
+ * We place the page tables 16K below TEXTADDR.  Therefore, we must make sure
+ * that TEXTADDR is correctly set.  Currently, we expect the least significant
+ * "short" to be 0x8000, but we could probably relax this restriction to
+ * TEXTADDR > PAGE_OFFSET + 0x4000
+ *
+ * Note that swapper_pg_dir is the virtual address of the page tables, and
+ * pgtbl gives us a position-independent reference to these tables.  We can
+ * do this because stext == TEXT_ADDR
+ */
 #if (TEXTADDR & 0xffff) != 0x8000
 #error TEXTADDR must start at 0xXXXX8000
 #endif
 
-#define SWAPPER_PGDIR_OFFSET	0x4000
-
 		.globl	SYMBOL_NAME(swapper_pg_dir)
-		.equ	SYMBOL_NAME(swapper_pg_dir),	TEXTADDR - 0x8000 + SWAPPER_PGDIR_OFFSET
+		.equ	SYMBOL_NAME(swapper_pg_dir), TEXTADDR - 0x4000
+
+		.macro	pgtbl, reg
+		adr	\reg, stext
+		sub	\reg, \reg, #0x4000
+		.endm
 
 		.section ".text.init",#alloc,#execinstr
+		.type	stext, #function
 ENTRY(stext)
-ENTRY(_stext)
-
-#ifdef CONFIG_ARCH_NETWINDER
+/*
+ * Entry point.  The general rules are:
+ *  should be called with r0 == 0
+ *  r1 contains the unique architecture number
+ *  with MMU is off, I-cache may be on or off, D-cache should be off.
+ * See linux/arch/arm/kernel/arch.c and linux/include/asm-arm/system.h
+ * for the complete list of numbers for r1.  If you require a new number,
+ * please follow the instructions given towards the end of
+ * linux/Documentation/arm/README.
+ */
+		mov	r12, r0
+/*
+ * NOTE!  Any code which is placed here should be done for one of
+ * the following reasons:
+ *
+ *  1. Compatability with old production boot firmware (ie, users
+ *     actually have and are booting the kernel with the old firmware)
+ *     and therefore will be eventually removed.
+ *  2. Cover the case when there is no boot firmware.  This is not
+ *     ideal, but in this case, it should ONLY set r0 and r1 to the
+ *     appropriate value.
+ */
+#if defined(CONFIG_ARCH_NETWINDER) || defined(CONFIG_ARCH_INTEGRATOR)
 /*
  * Compatability cruft for old NetWinder NeTTroms.  This
  * code is currently scheduled for destruction in 2.5.xx
@@ -60,33 +100,37 @@ ENTRY(_stext)
 		mov	r5, #0
 		movne	pc, r0
 
-		mov	r0, #0
-		mov	r1, #5
+		mov	r1, #MACH_TYPE_NETWINDER	@ (will go in 2.5)
+		mov	r12, #2 << 24			@ scheduled for removal in 2.5.xx
+		orr	r12, r12, #5 << 12
+__entry:
+#endif
+#if defined(CONFIG_ARCH_L7200)
+/*
+ * FIXME - No bootloader, so manually set 'r1' with our architecture number.
+ */
+		mov	r1, #MACH_TYPE_L7200
+#elif defined(CONFIG_ARCH_INTEGRATOR)
+		mov	r1, #MACH_TYPE_INTEGRATOR
 #endif
 
-/*
- * Entry point.  Entry *must* be called with r0 == 0, with the MMU off.
- *  r1 contains the unique architecture number.  See
- * linux/arch/arm/kernel/setup.c machine_desc[] array for the complete
- * list.  If you require a new number, please follow the instructions
- * given in Documentation/arm/README.
- */
-__entry:	teq	r0, #0
-		movne	r0, #'i'
-		bne	__error
+		mov	r0, #F_BIT | I_BIT | MODE_SVC	@ make sure svc mode
+		msr	cpsr_c, r0			@ and all irqs diabled
 		bl	__lookup_processor_type
 		teq	r10, #0				@ invalid processor?
-		moveq	r0, #'p'
+		moveq	r0, #'p'			@ yes, error 'p'
 		beq	__error
 		bl	__lookup_architecture_type
 		teq	r7, #0				@ invalid architecture?
-		moveq	r0, #'a'
+		moveq	r0, #'a'			@ yes, error 'a'
 		beq	__error
 		bl	__create_page_tables
-		adr	lr, __ret
-		add	pc, r10, #12			@ flush caches (returns ctrl reg)
+		adr	lr, __ret			@ return address
+		add	pc, r10, #12			@ initialise processor
+							@ (return control reg)
 
 __switch_data:	.long	__mmap_switched
+		.long	SYMBOL_NAME(compat)
 		.long	SYMBOL_NAME(__bss_start)
 		.long	SYMBOL_NAME(_end)
 		.long	SYMBOL_NAME(processor_id)
@@ -112,9 +156,11 @@ __ret:		ldr	lr, __switch_data
 		.align	5
 __mmap_switched:
 		adr	r3, __switch_data + 4
-		ldmia	r3, {r4, r5, r6, r7, r8, sp}	@ Setup stack
+		ldmia	r3, {r2, r4, r5, r6, r7, r8, sp}@ r2 = compat
+							@ sp = stack pointer
+		str	r12, [r2]
 
-		mov	fp, #0				@ Clear BSS
+		mov	fp, #0				@ Clear BSS (and zero fp)
 1:		cmp	r4, r5
 		strcc	fp, [r4],#4
 		bcc	1b
@@ -144,11 +190,11 @@ __mmap_switched:
  * r8 = page table flags
  */
 __create_page_tables:
-		add	r4, r5, #SWAPPER_PGDIR_OFFSET
+		pgtbl	r4
 		mov	r0, r4
 		mov	r3, #0
-		add	r2, r0, #0x4000			@ Clear page table
-1:		str	r3, [r0], #4
+		add	r2, r0, #0x4000			@ 16k of page table
+1:		str	r3, [r0], #4			@ Clear page table
 		str	r3, [r0], #4
 		str	r3, [r0], #4
 		str	r3, [r0], #4
@@ -156,24 +202,29 @@ __create_page_tables:
 		bne	1b
 		/*
 		 * Create identity mapping for first MB of kernel.
-		 * map in four sections (4MB) for kernel.
-		 * these are marked cacheable and bufferable.
+		 * This is marked cacheable and bufferable.
 		 *
 		 * The identity mapping will be removed by  paging_init()
 		 */
-		mov	r3, #0x0c
-		orr	r3, r3, r8
-		add	r3, r3, r5
+		add	r3, r8, r5			@ mmuflags + start of RAM
 		add	r0, r4, r5, lsr #18
-		str	r3, [r0]
-		add	r0, r4, #(TEXTADDR - 0x8000) >> 18
-		str	r3, [r0], #4
+		str	r3, [r0]			@ identity mapping
+		/*
+		 * Now setup the pagetables for our kernel direct
+		 * mapped region.  We round TEXTADDR down to the
+		 * nearest megabyte boundary.
+		 */
+		add	r0, r4, #(TEXTADDR & 0xfff00000) >> 18 @ start of kernel
+		str	r3, [r0], #4			@ PAGE_OFFSET + 0MB
 		add	r3, r3, #1 << 20
-		str	r3, [r0], #4
+		str	r3, [r0], #4			@ PAGE_OFFSET + 1MB
 		add	r3, r3, #1 << 20
-		str	r3, [r0], #4
+		str	r3, [r0], #4			@ PAGE_OFFSET + 2MB
 		add	r3, r3, #1 << 20
-		str	r3, [r0], #4
+		str	r3, [r0], #4			@ PAGE_OFFSET + 3MB
+
+		bic	r8, r8, #0x0c			@ turn off cacheable
+							@ and bufferable bits
 #ifdef CONFIG_DEBUG_LL
 		/*
 		 * Map in IO space for serial debugging.
@@ -191,6 +242,10 @@ __create_page_tables:
 		teq	r0, r2
 		bne	1b
 #ifdef CONFIG_ARCH_NETWINDER
+		/*
+		 * If we're using the NetWinder, we need to map in
+		 * the 16550-type serial port for the debug messages
+		 */
 		teq	r1, #5
 		bne	1f
 		add	r0, r4, #0x3fc0
@@ -225,11 +280,21 @@ __create_page_tables:
  * proceed.  We ought to tell the user, but since we
  * don't have any guarantee that we're even running on
  * the right architecture, we do virtually nothing.
- * r0 = ascii error character
+ * r0 = ascii error character:
+ *	a = invalid architecture
+ *	p = invalid processor
+ *	i = invalid calling convention
  *
  * Generally, only serious errors cause this.
  */
 __error:
+#ifdef CONFIG_DEBUG_LL
+		mov	r8, r0				@ preserve r0
+		adr	r0, err_str
+		bl	printascii
+		mov	r0, r8
+		bl	printch
+#endif
 #ifdef CONFIG_ARCH_RPC
 /*
  * Turn the screen red on a error - RiscPC only.
@@ -246,11 +311,17 @@ __error:
 1:		mov	r0, r0
 		b	1b
 
-
+#ifdef CONFIG_DEBUG_LL
+err_str:	.asciz	"\nError: "
+		.align
+#endif
 
 /*
- * Read processor ID register (CP#15, CR0), and determine
- * processor type.
+ * Read processor ID register (CP#15, CR0), and look up in the linker-built
+ * supported processor list.  Note that we can't use the absolute addresses
+ * for the __proc_info lists since we aren't running with the MMU on
+ * (and therefore, we are not in the correct address space).  We have to
+ * calculate the offset.
  *
  * Returns:
  *	r5, r6, r7 corrupted
@@ -261,162 +332,57 @@ __error:
 __lookup_processor_type:
 		adr	r5, 2f
 		ldmia	r5, {r7, r9, r10}
-		sub	r5, r5, r9
-		add	r7, r7, r5
-		add	r10, r10, r5
+		sub	r5, r5, r10			@ convert addresses
+		add	r7, r7, r5			@ to our address space
+		add	r10, r9, r5
 		mrc	p15, 0, r9, c0, c0		@ get processor id
 1:		ldmia	r10, {r5, r6, r8}		@ value, mask, mmuflags
-		eor	r5, r5, r9
-		tst	r5, r6
+		and	r6, r6, r9			@ mask wanted bits
+		teq	r5, r6
 		moveq	pc, lr
 		add	r10, r10, #36			@ sizeof(proc_info_list)
 		cmp	r10, r7
 		blt	1b
-		mov	r10, #0
+		mov	r10, #0				@ unknown processor
 		mov	pc, lr
 
+/*
+ * Look in include/asm-arm/procinfo.h and arch/arm/kernel/arch.[ch] for
+ * more information about the __proc_info and __arch_info structures.
+ */
 2:		.long	__proc_info_end
-		.long	2b
 		.long	__proc_info_begin
+		.long	2b
+		.long	__arch_info_begin
+		.long	__arch_info_end
 
 /*
- * Lookup machine architecture
- * r1 = machine architecture number
+ * Lookup machine architecture in the linker-build list of architectures.
+ * Note that we can't use the absolute addresses for the __arch_info
+ * lists since we aren't running with the MMU on (and therefore, we are
+ * not in the correct address space).  We have to calculate the offset.
+ *
+ *  r1 = machine architecture number
  * Returns:
- *  r4 = unused word
+ *  r2, r3, r4 corrupted
  *  r5 = physical start address of RAM
  *  r6 = physical address of IO
  *  r7 = byte offset into page tables for IO
  */
 __lookup_architecture_type:
-		cmp	r1, #(__arch_types_end - __arch_types_start) / 16
-		bge	1f
-		adr	r4, __arch_types_start
-		add	r4, r4, r1, lsl #4
-		ldmia	r4, {r4, r5, r6, r7}
-		mov	r7, r7, lsr #18
+		adr	r4, 2b
+		ldmia	r4, {r2, r3, r5, r6, r7}	@ throw away r2, r3
+		sub	r5, r4, r5			@ convert addresses
+		add	r4, r6, r5			@ to our address space
+		add	r7, r7, r5
+1:		ldr	r5, [r4]			@ get machine type
+		teq	r5, r1
+		beq	2f
+		add	r4, r4, #SIZEOF_MACHINE_DESC
+		cmp	r4, r7
+		blt	1b
+		mov	r7, #0				@ unknown architecture
 		mov	pc, lr
-1:		mov	r7, #0
+2:		ldmib	r4, {r5, r6, r7}		@ found, get results
+		mov	r7, r7, lsr #18			@ pagetable byte offset
 		mov	pc, lr
-
-/*
- * Machine parameters.  Each machine requires 4 words, which are:
- *
- * word0: unused
- * word1: physical start address of RAM
- * word2: physical start address of IO
- * word3: virtual start address of IO
- *
- * The IO mappings entered here are used to set up mappings
- * required for debugging information to be shown to the user.
- * paging_init() does the real page table initialisation.
- */
-		@ 0x00 - DEC EBSA110
-__arch_types_start:
-		.long	0
-		.long	0
-		.long	0xe0000000
-		.long	0xe0000000
-
-		@ 0x01 - Acorn RiscPC
-		.long	0
-		.long	0x10000000
-		.long	0x03000000
-		.long	0xe0000000
-
-		@ 0x02 - Unused
-		.long	0
-		.long	0
-		.long	0xe0000000
-		.long	0xe0000000
-
-		@ 0x03 - NexusPCI
-		.long	0
-		.long	0x40000000
-		.long	0x10000000
-		.long	0xe0000000
-
-		@ 0x04 - DEC EBSA285
-		.long	0
-		.long	0
-		.long	DC21285_ARMCSR_BASE
-		.long	0xfe000000
-
-		@ 0x05 - Rebel.com NetWinder
-		.long	0
-		.long	0
-		.long	DC21285_ARMCSR_BASE
-		.long	0xfe000000
-
-		@ 0x06 - CATS
-		.long	0
-		.long	0
-		.long	DC21285_ARMCSR_BASE
-		.long	0xfe000000
-
-		@ 0x07 - tbox
-		.long	0
-		.long	0x80000000
-		.long	0x00400000			@ Uart
-		.long	0xe0000000
-
-		@ 0x08 - DEC EBSA285 as co-processor
-		.long	0
-		.long	0
-		.long	DC21285_ARMCSR_BASE		@ Physical I/O base address
-		.long	0x7cf00000			@ Virtual I/O base address
-
-		@ 0x09 - CL-PS7110
-		.long	0
-		.long	0
-		.long	0
-		.long	0
-
-		@ 0x0a - Acorn Archimedes
-		.long	0
-		.long	0
-		.long	0
-		.long	0
-
-		@ 0x0b - Acorn A5000
-		.long	0
-		.long	0
-		.long	0
-		.long	0
-
-		@ 0x0c - Etoile
-		.long	0
-		.long	0
-		.long	0
-		.long	0
-
-		@ 0x0d - LaCie_NAS
-		.long	0
-		.long	0
-		.long	0
-		.long	0
-
-		@ 0x0e - CL-PS7500
-		.long	0
-		.long	0
-		.long	0
-		.long	0
-
-		@ 0x0f - Shark
-		.long	0
-		.long	0
-		.long	0
-		.long	0
-
-		@ 0x10 - SA1100
-		.long	0
-		.long	0xc0000000
-		.long	0x80000000
-		.long	0xf8000000
-
-		/*
-		 * Don't add anything here unless you have an
-		 * architecture number allocated - see
-		 * Documentation/arm/README
-		 */
-__arch_types_end:

@@ -106,6 +106,7 @@ pcibios_update_resource(struct pci_dev *dev, struct resource *root,
 		reg = PCI_BASE_ADDRESS_0 + 4*resource;
 	} else if (resource == PCI_ROM_RESOURCE) {
 		res->flags |= PCI_ROM_ADDRESS_ENABLE;
+		new |= PCI_ROM_ADDRESS_ENABLE;
 		reg = dev->rom_base_reg;
 	} else {
 		/* Somebody might have asked allocation of a non-standard resource */
@@ -121,25 +122,29 @@ pcibios_update_resource(struct pci_dev *dev, struct resource *root,
 	}
 }
 
+/*
+ * We need to avoid collisions with `mirrored' VGA ports
+ * and other strange ISA hardware, so we always want the
+ * addresses to be allocated in the 0x000-0x0ff region
+ * modulo 0x400.
+ *
+ * Why? Because some silly external IO cards only decode
+ * the low 10 bits of the IO address. The 0x00-0xff region
+ * is reserved for motherboard devices that decode all 16
+ * bits, so it's ok to allocate at, say, 0x2800-0x28ff,
+ * but we want to try to avoid allocating at 0x2900-0x2bff
+ * which might have be mirrored at 0x0100-0x03ff..
+ */
 void
 pcibios_align_resource(void *data, struct resource *res, unsigned long size)
 {
-	struct pci_dev *dev = data;
-
 	if (res->flags & IORESOURCE_IO) {
 		unsigned long start = res->start;
 
-		/* We need to avoid collisions with `mirrored' VGA ports
-		   and other strange ISA hardware, so we always want the
-		   addresses kilobyte aligned.  */
-		if (size > 0x100) {
-			printk(KERN_ERR "PCI: I/O Region %s/%d too large"
-			       " (%ld bytes)\n", dev->slot_name,
-			       dev->resource - res, size);
+		if (start & 0x300) {
+			start = (start + 0x3ff) & ~0x3ff;
+			res->start = start;
 		}
-
-		start = (start + 1024 - 1) & ~(1024 - 1);
-		res->start = start;
 	}
 }
 
@@ -228,7 +233,7 @@ static void __init pcibios_allocate_resources(int pass)
 				if (!pr || request_resource(pr, r) < 0) {
 					printk(KERN_ERR "PCI: Cannot allocate resource region %d of device %s\n", idx, dev->slot_name);
 					/* We'll assign a new address later */
-					r->start -= r->end;
+					r->end -= r->start;
 					r->start = 0;
 				}
 			}
@@ -317,9 +322,31 @@ int pcibios_enable_resources(struct pci_dev *dev)
 		if (r->flags & IORESOURCE_MEM)
 			cmd |= PCI_COMMAND_MEMORY;
 	}
+	if (dev->resource[PCI_ROM_RESOURCE].start)
+		cmd |= PCI_COMMAND_MEMORY;
 	if (cmd != old_cmd) {
 		printk("PCI: Enabling device %s (%04x -> %04x)\n", dev->slot_name, old_cmd, cmd);
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
 	}
 	return 0;
+}
+
+/*
+ *  If we set up a device for bus mastering, we need to check the latency
+ *  timer as certain crappy BIOSes forget to set it properly.
+ */
+unsigned int pcibios_max_latency = 255;
+
+void pcibios_set_master(struct pci_dev *dev)
+{
+	u8 lat;
+	pci_read_config_byte(dev, PCI_LATENCY_TIMER, &lat);
+	if (lat < 16)
+		lat = (64 <= pcibios_max_latency) ? 64 : pcibios_max_latency;
+	else if (lat > pcibios_max_latency)
+		lat = pcibios_max_latency;
+	else
+		return;
+	printk("PCI: Setting latency timer of device %s to %d\n", dev->slot_name, lat);
+	pci_write_config_byte(dev, PCI_LATENCY_TIMER, lat);
 }

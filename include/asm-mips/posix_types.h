@@ -1,4 +1,4 @@
-/* $Id: posix_types.h,v 1.7 2000/02/16 01:07:48 ralf Exp $
+/* $Id: posix_types.h,v 1.6 2000/02/04 23:32:54 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -15,15 +15,15 @@
  * assume GCC is being used.
  */
 
-typedef unsigned long	__kernel_dev_t;
+typedef unsigned int	__kernel_dev_t;
 typedef unsigned long	__kernel_ino_t;
-typedef unsigned long	__kernel_mode_t;
-typedef unsigned long	__kernel_nlink_t;
+typedef unsigned int	__kernel_mode_t;
+typedef int		__kernel_nlink_t;
 typedef long		__kernel_off_t;
-typedef long		__kernel_pid_t;
-typedef long		__kernel_ipc_pid_t;
-typedef long		__kernel_uid_t;
-typedef long		__kernel_gid_t;
+typedef int		__kernel_pid_t;
+typedef int		__kernel_ipc_pid_t;
+typedef int		__kernel_uid_t;
+typedef int		__kernel_gid_t;
 typedef unsigned int	__kernel_size_t;
 typedef int		__kernel_ssize_t;
 typedef int		__kernel_ptrdiff_t;
@@ -35,8 +35,8 @@ typedef char *		__kernel_caddr_t;
 
 typedef unsigned short	__kernel_uid16_t;
 typedef unsigned short	__kernel_gid16_t;
-typedef long		__kernel_uid32_t;
-typedef long		__kernel_gid32_t;
+typedef int		__kernel_uid32_t;
+typedef int		__kernel_gid32_t;
 typedef __kernel_uid_t	__kernel_old_uid_t;
 typedef __kernel_gid_t	__kernel_old_gid_t;
 

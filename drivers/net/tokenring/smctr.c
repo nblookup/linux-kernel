@@ -49,6 +49,7 @@ static const char *cardname = "smctr";
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/mca.h>
+#include <linux/delay.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -123,7 +124,7 @@ static unsigned int smctr_get_num_rx_bdbs(struct net_device *dev);
 static int smctr_get_physical_drop_number(struct net_device *dev);
 static __u8 *smctr_get_rx_pointer(struct net_device *dev, short queue);
 static int smctr_get_station_id(struct net_device *dev);
-static struct enet_statistics *smctr_get_stats(struct net_device *dev);
+static struct net_device_stats *smctr_get_stats(struct net_device *dev);
 static FCBlock *smctr_get_tx_fcb(struct net_device *dev, __u16 queue,
         __u16 bytes_count);
 static int smctr_get_upstream_neighbor_addr(struct net_device *dev);
@@ -1401,11 +1402,11 @@ static int smctr_get_station_id(struct net_device *dev)
  * Get the current statistics. This may be called with the card open
  * or closed.
  */
-static struct enet_statistics *smctr_get_stats(struct net_device *dev)
+static struct net_device_stats *smctr_get_stats(struct net_device *dev)
 {
         struct net_local *tp = (struct net_local *)dev->priv;
 
-        return ((struct enet_statistics *)&tp->MacStat);
+        return ((struct net_device_stats *)&tp->MacStat);
 }
 
 static FCBlock *smctr_get_tx_fcb(struct net_device *dev, __u16 queue,
@@ -3718,7 +3719,7 @@ static int __init smctr_probe1(struct net_device *dev, int ioaddr)
 		err = smctr_chk_mca(dev);
 		if(err < 0)
 		{
-                	kfree_s(tp, sizeof(struct net_local));
+                	kfree(tp);
                 	return (-ENODEV);
 		}
         }
@@ -5800,9 +5801,9 @@ static int smctr_wait_while_cbusy(struct net_device *dev)
 #ifdef MODULE
 
 static struct net_device* dev_smctr[SMCTR_MAX_ADAPTERS];
-static int io[SMCTR_MAX_ADAPTERS]        = { 0, 0 };
-static int irq[SMCTR_MAX_ADAPTERS]       = { 0, 0 };
-static int mem[SMCTR_MAX_ADAPTERS]       = { 0, 0 };
+static int io[SMCTR_MAX_ADAPTERS];
+static int irq[SMCTR_MAX_ADAPTERS];
+static int mem[SMCTR_MAX_ADAPTERS];
 
 MODULE_PARM(io,  "1-" __MODULE_STRING(SMCTR_MAX_ADAPTERS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(SMCTR_MAX_ADAPTERS) "i");
@@ -5829,7 +5830,7 @@ int init_module(void)
 
                 if(register_trdev(dev_smctr[i]) != 0)
                 {
-                        kfree_s(dev_smctr[i], sizeof(struct net_device));
+                        kfree(dev_smctr[i]);
                         dev_smctr[i] = NULL;
                         if(i == 0)
                         {
@@ -5865,9 +5866,8 @@ void cleanup_module(void)
                         if(dev_smctr[i]->irq)
                                 free_irq(dev_smctr[i]->irq, dev_smctr[i]);
                         if(dev_smctr[i]->priv)
-                                kfree_s(dev_smctr[i]->priv,
-                                        sizeof(struct net_local));
-                        kfree_s(dev_smctr[i], sizeof(struct net_device));
+                                kfree(dev_smctr[i]->priv);
+                        kfree(dev_smctr[i]);
                         dev_smctr[i] = NULL;
                 }
         }

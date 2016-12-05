@@ -20,7 +20,6 @@
 #include <linux/module.h>
 
 #include "sound_config.h"
-#include "soundmodule.h"
 
 #include "gus.h"
 #include "gus_hw.h"
@@ -184,7 +183,8 @@ static void __init attach_gus_db16(struct address_info *hw_config)
 					  hw_config->irq,
 					  hw_config->dma,
 					  hw_config->dma, 0,
-					  hw_config->osp);
+					  hw_config->osp,
+					  THIS_MODULE);
 }
 
 static void __exit unload_gus_db16(struct address_info *hw_config)
@@ -198,7 +198,9 @@ static void __exit unload_gus_db16(struct address_info *hw_config)
 }
 #endif
 
+#ifdef CONFIG_SOUND_GUS16
 static int gus16 = 0;
+#endif
 #ifdef CONFIG_SOUND_GUSMAX
 static int no_wave_dma = 0;/* Set if no dma is to be used for the
                                    wave table (GF1 chip) */
@@ -223,12 +225,12 @@ MODULE_PARM(irq, "i");
 MODULE_PARM(dma, "i");
 MODULE_PARM(dma16, "i");
 MODULE_PARM(type, "i");
-MODULE_PARM(gus16, "i");
 #ifdef CONFIG_SOUND_GUSMAX
 MODULE_PARM(no_wave_dma, "i");
 #endif
 #ifdef CONFIG_SOUND_GUS16
 MODULE_PARM(db16, "i");
+MODULE_PARM(gus16, "i");
 #endif
 
 static int __init init_gus(void)
@@ -259,7 +261,7 @@ static int __init init_gus(void)
 	if (!probe_gus(&cfg))
 		return -ENODEV;
 	attach_gus(&cfg);
-	SOUND_LOCK;
+
 	return 0;
 }
 
@@ -270,7 +272,6 @@ static void __exit cleanup_gus(void)
 		unload_gus_db16(&cfg);
 #endif
 	unload_gus(&cfg);
-	SOUND_LOCK_END;
 }
 
 module_init(init_gus);

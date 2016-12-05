@@ -158,15 +158,10 @@ sizeof(nop_cmd) = 8;
 
 /**************************************************************************/
 
-#define DELAY(x) {int i=jiffies; \
-                  if(loops_per_sec == 1) \
-                     while(time_after(i+(x), jiffies)); \
-                  else \
-                     __delay((loops_per_sec>>5)*x); \
-                 }
+#define DELAY(x) { mdelay(32 * x); }
 
 /* a much shorter delay: */
-#define DELAY_16(); { __delay( (loops_per_sec>>16)+1 ); }
+#define DELAY_16(); { udelay(16) ; }
 
 /* wait for command with timeout: */
 #define WAIT_4_SCB_CMD() { int i; \
@@ -271,7 +266,6 @@ static int elmc_close(struct net_device *dev)
 	netif_stop_queue(dev);
 	elmc_id_reset586();	/* the hard way to stop the receiver */
 	free_irq(dev->irq, dev);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -281,21 +275,21 @@ static int elmc_close(struct net_device *dev)
 
 static int elmc_open(struct net_device *dev)
 {
+	int ret;
 
 	elmc_id_attn586();	/* disable interrupts */
 
-	if (request_irq(dev->irq, &elmc_interrupt, SA_SHIRQ | SA_SAMPLE_RANDOM,
-			"3c523", dev)
-	    ) {
+	ret = request_irq(dev->irq, &elmc_interrupt, SA_SHIRQ | SA_SAMPLE_RANDOM,
+			  dev->name, dev);
+	if (ret) {
 		printk(KERN_ERR "%s: couldn't get irq %d\n", dev->name, dev->irq);
 		elmc_id_reset586();
-		return -EAGAIN;
+		return ret;
 	}
 	alloc586(dev);
 	init586(dev);
 	startrecv586(dev);
 	netif_start_queue(dev);
-	MOD_INC_USE_COUNT;
 	return 0;		/* most done by init */
 }
 
@@ -409,15 +403,16 @@ static int elmc_getinfo(char *buf, int slot, void *d)
 int __init elmc_probe(struct net_device *dev)
 {
 	static int slot = 0;
-	int base_addr = dev ? dev->base_addr : 0;
-	int irq = dev ? dev->irq : 0;
+	int base_addr = dev->base_addr;
+	int irq = dev->irq;
 	u_char status = 0;
 	u_char revision = 0;
 	int i = 0;
 	unsigned int size = 0;
 
+	SET_MODULE_OWNER(dev);
 	if (MCA_bus == 0) {
-		return ENODEV;
+		return -ENODEV;
 	}
 	/* search through the slots for the 3c523. */
 	slot = mca_find_adapter(ELMC_MCA_ID, 0);
@@ -519,7 +514,7 @@ int __init elmc_probe(struct net_device *dev)
 		printk(KERN_ERR "%s: memprobe, Can't find memory at 0x%lx!\n", dev->name,
 		       dev->mem_start);
 		release_region(dev->base_addr, ELMC_IO_EXTENT);
-		return ENODEV;
+		return -ENODEV;
 	}
 	dev->mem_end = dev->mem_start + size;	/* set mem_end showed by 'ifconfig' */
 
@@ -1207,20 +1202,10 @@ static void set_multicast_list(struct net_device *dev)
 
 /* Increase if needed ;) */
 #define MAX_3C523_CARDS 4
-/* I'm not sure where this magic 9 comes from */
-#define NAMELEN 9
 
-static char devicenames[NAMELEN * MAX_3C523_CARDS] = {0,};
-
-static struct net_device dev_elmc[MAX_3C523_CARDS] =
-{	
-	{
-	NULL /*"3c523" */ , 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL
-	},
-};
-
-static int irq[MAX_3C523_CARDS] = {0,};
-static int io[MAX_3C523_CARDS] = {0,};
+static struct net_device dev_elmc[MAX_3C523_CARDS];
+static int irq[MAX_3C523_CARDS];
+static int io[MAX_3C523_CARDS];
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_3C523_CARDS) "i");
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_3C523_CARDS) "i");
 
@@ -1232,7 +1217,6 @@ int init_module(void)
 	for(this_dev=0; this_dev<MAX_3C523_CARDS; this_dev++) 
 		{
 		struct net_device *dev = &dev_elmc[this_dev];
-		dev->name=devicenames+(NAMELEN*this_dev);
 		dev->irq=irq[this_dev];
 		dev->base_addr=io[this_dev];
 		dev->init=elmc_probe;
@@ -1274,7 +1258,7 @@ void cleanup_module(void)
 			mca_set_adapter_procfn(((struct priv *) (dev->priv))->slot,
 			       NULL, NULL);
 
-			kfree_s(dev->priv, sizeof(struct priv));
+			kfree(dev->priv);
 			dev->priv = NULL;
 		}
 	}

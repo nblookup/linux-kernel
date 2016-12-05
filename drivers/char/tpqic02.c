@@ -89,6 +89,7 @@
 #include <linux/mm.h>
 #include <linux/malloc.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 #include <linux/devfs_fs_kernel.h> 
 
 #include <asm/dma.h>
@@ -115,7 +116,7 @@
 
 static struct mtconfiginfo qic02_tape_dynconf = 	/* user settable */
     { 0, 0, BOGUS_IRQ, 0, 0, TPQD_DEFAULT_FLAGS, };
-static struct qic02_ccb qic02_tape_ccb = { 0, };	/* private stuff */
+static struct qic02_ccb qic02_tape_ccb;	/* private stuff */
 
 #else
 
@@ -126,7 +127,7 @@ unsigned long qic02_tape_debug = TPQD_DEFAULT_FLAGS;
 # endif
 #endif /* CONFIG_QIC02_DYNCONF */
 
-static volatile int ctlbits = 0;     /* control reg bits for tape interface */
+static volatile int ctlbits;     /* control reg bits for tape interface */
 
 static wait_queue_head_t qic02_tape_transfer; /* sync rw with interrupts */
 
@@ -148,10 +149,10 @@ static 		flag status_zombie = YES; /* it's `zombie' until irq/dma allocated */
 static volatile flag status_bytes_wr = NO;	/* write FM at close or not */
 static volatile flag status_bytes_rd = NO;	/* (rd|wr) used for rewinding */
 
-static volatile unsigned long status_cmd_pending = 0; /* cmd in progress */
+static volatile unsigned long status_cmd_pending; /* cmd in progress */
 static volatile flag status_expect_int = NO;	/* ready for interrupts */
 static volatile flag status_timer_on = NO; 	/* using time-out */
-static volatile int  status_error = 0;		/* int handler may detect error */
+static volatile int  status_error;		/* int handler may detect error */
 static volatile flag status_eof_detected = NO;	/* end of file */
 static volatile flag status_eom_detected = NO;	/* end of recorded media */
 static volatile flag status_eot_detected = NO;	/* end of tape */
@@ -160,12 +161,13 @@ static volatile flag doing_write = NO;
 
 static volatile unsigned long dma_bytes_todo;
 static volatile unsigned long dma_bytes_done;
-static volatile unsigned dma_mode = 0;		/* !=0 also means DMA in use */
+static volatile unsigned dma_mode;		/* !=0 also means DMA in use */
 static 		flag need_rewind = YES;
 
 static kdev_t current_tape_dev;
 static int extra_blocks_left = BLOCKS_BEYOND_EW;
 
+static struct timer_list tp_timer;
 
 /* return_*_eof:
  *	NO:	not at EOF,
@@ -206,7 +208,7 @@ static void qic02_release_resources(void);
  * must ensure that a large enough buffer is passed to the kernel, in order
  * to reduce tape repositioning wear and tear.
  */
-static unsigned long buffaddr = 0;	/* physical address of buffer */
+static unsigned long buffaddr;	/* physical address of buffer */
 
 /* This translates minor numbers to the corresponding recording format: */
 static const char *format_names[] = {
@@ -758,7 +760,7 @@ static int rdstatus(char *stp, unsigned size, char qcmd)
 static int get_status(volatile struct tpstatus *stp)
 {
 	int stat = rdstatus((char *) stp, TPSTATSIZE, QCMD_RD_STAT);
-#if defined(i386) || defined(i486)
+#ifdef __i386__
 	byte_swap_w(&(stp->dec));
 	byte_swap_w(&(stp->urc));
 #else
@@ -1595,7 +1597,7 @@ static void end_dma(unsigned long * bytes_done)
  * has decided to do a long rewind, just when I didn't expect it.
  * Just try again.
  */
-static void qic02_tape_times_out(void)
+static void qic02_tape_times_out(unsigned long dummy)
 {
 	printk("time-out in %s driver\n", TPQIC02_NAME);
 	if ((status_cmd_pending>0) || dma_mode) {
@@ -1720,7 +1722,7 @@ static void qic02_tape_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			wake_up(&qic02_tape_transfer);
 		} else {
 			/* start next transfer, account for track-switching time */
-			timer_table[QIC02_TAPE_TIMER].expires = jiffies + 6*HZ;
+			mod_timer(&tp_timer, jiffies + 6*HZ);
 			dma_transfer();
 		}
 	} else {
@@ -2177,10 +2179,6 @@ static int qic02_tape_open(struct inode * inode, struct file * filp)
     int open_error;
 
     open_error = qic02_tape_open_no_use_count(inode, filp);
-    if (!open_error)
-    {
-	MOD_INC_USE_COUNT;
-    }
     return open_error;
 }
 
@@ -2414,6 +2412,7 @@ static int qic02_tape_release(struct inode * inode, struct file * filp)
 {
     kdev_t dev = inode->i_rdev;
 
+    lock_kernel();
     if (TP_DIAGS(dev))
     {
 	printk("qic02_tape_release: dev=%s\n",  kdevname(dev));
@@ -2440,9 +2439,7 @@ static int qic02_tape_release(struct inode * inode, struct file * filp)
 	    (void) do_qic_cmd(QCMD_REWIND, TIM_R);
 	}
     }
-#ifdef MODULE
-    MOD_DEC_USE_COUNT;
-#endif
+    unlock_kernel();
     return 0;
 } /* qic02_tape_release */
 
@@ -2766,6 +2763,7 @@ static int qic02_tape_ioctl(struct inode * inode, struct file * filp,
 
 /* These are (most) of the interface functions: */
 static struct file_operations qic02_tape_fops = {
+	owner:		THIS_MODULE,
 	llseek:		qic02_tape_lseek,	/* not allowed */
 	read:		qic02_tape_read,
 	write:		qic02_tape_write,
@@ -2911,43 +2909,43 @@ int __init qic02_tape_init(void)
 #endif
 	return -ENODEV;
     }
-    devfs_register (NULL, "ntpqic11", 0, DEVFS_FL_NONE,
+    devfs_register (NULL, "ntpqic11", DEVFS_FL_DEFAULT,
 		    QIC02_TAPE_MAJOR, 2,
-		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP, 0, 0,
+		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
 		    &qic02_tape_fops, NULL);
-    devfs_register (NULL, "tpqic11", 0, DEVFS_FL_NONE,
+    devfs_register (NULL, "tpqic11", DEVFS_FL_DEFAULT,
 		    QIC02_TAPE_MAJOR, 3,
-		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP, 0, 0,
+		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
 		    &qic02_tape_fops, NULL);
-    devfs_register (NULL, "ntpqic24", 0, DEVFS_FL_NONE,
+    devfs_register (NULL, "ntpqic24", DEVFS_FL_DEFAULT,
 		    QIC02_TAPE_MAJOR, 4,
-		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP, 0, 0,
+		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
 		    &qic02_tape_fops, NULL);
-    devfs_register (NULL, "tpqic24", 0, DEVFS_FL_NONE,
+    devfs_register (NULL, "tpqic24", DEVFS_FL_DEFAULT,
 		    QIC02_TAPE_MAJOR, 5,
-		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP, 0, 0,
+		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
 		    &qic02_tape_fops, NULL);
-    devfs_register (NULL, "ntpqic120", 0, DEVFS_FL_NONE,
+    devfs_register (NULL, "ntpqic120", DEVFS_FL_DEFAULT,
 		    QIC02_TAPE_MAJOR, 6,
-		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP, 0, 0,
+		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
 		    &qic02_tape_fops, NULL);
-    devfs_register (NULL, "tpqic120", 0, DEVFS_FL_NONE,
+    devfs_register (NULL, "tpqic120", DEVFS_FL_DEFAULT,
 		    QIC02_TAPE_MAJOR, 7,
-		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP, 0, 0,
+		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
 		    &qic02_tape_fops, NULL);
-    devfs_register (NULL, "ntpqic150", 0, DEVFS_FL_NONE,
+    devfs_register (NULL, "ntpqic150", DEVFS_FL_DEFAULT,
 		    QIC02_TAPE_MAJOR, 8,
-		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP, 0, 0,
+		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
 		    &qic02_tape_fops, NULL);
-    devfs_register (NULL, "tpqic150", 0, DEVFS_FL_NONE,
+    devfs_register (NULL, "tpqic150", DEVFS_FL_DEFAULT,
 		    QIC02_TAPE_MAJOR, 9,
-		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP, 0, 0,
+		    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP,
 		    &qic02_tape_fops, NULL);
     init_waitqueue_head(&qic02_tape_transfer);
     /* prepare timer */
     TIMEROFF;
-    timer_table[QIC02_TAPE_TIMER].expires = 0;
-    timer_table[QIC02_TAPE_TIMER].fn = qic02_tape_times_out;
+    init_timer(&tp_timer);
+    tp_timer.function = qic02_tape_times_out;
     
 #ifndef CONFIG_QIC02_DYNCONF
     if (tape_reset(0)!=TE_OK || tp_sense(TP_WRP|TP_POR|TP_CNI)!=TE_OK)
@@ -2990,14 +2988,14 @@ void cleanup_module(void)
 	qic02_release_resources();
     }
     devfs_unregister_chrdev(QIC02_TAPE_MAJOR, TPQIC02_NAME);
-    devfs_unregister(devfs_find_handle(NULL, "ntpqic11", 0, QIC02_TAPE_MAJOR, 2, DEVFS_SPECIAL_CHR, 0));
-    devfs_unregister(devfs_find_handle(NULL, "tpqic11", 0, QIC02_TAPE_MAJOR, 3, DEVFS_SPECIAL_CHR, 0));
-    devfs_unregister(devfs_find_handle(NULL, "ntpqic24", 0, QIC02_TAPE_MAJOR, 4, DEVFS_SPECIAL_CHR, 0));
-    devfs_unregister(devfs_find_handle(NULL, "tpqic24", 0, QIC02_TAPE_MAJOR, 5, DEVFS_SPECIAL_CHR, 0));
-    devfs_unregister(devfs_find_handle(NULL, "ntpqic120", 0, QIC02_TAPE_MAJOR, 6, DEVFS_SPECIAL_CHR, 0));
-    devfs_unregister(devfs_find_handle(NULL, "tpqic120", 0, QIC02_TAPE_MAJOR, 7, DEVFS_SPECIAL_CHR, 0));
-    devfs_unregister(devfs_find_handle(NULL, "ntpqic150", 0, QIC02_TAPE_MAJOR, 8, DEVFS_SPECIAL_CHR, 0));
-    devfs_unregister(devfs_find_handle(NULL, "tpqic150", 0, QIC02_TAPE_MAJOR, 9, DEVFS_SPECIAL_CHR, 0));
+    devfs_unregister(devfs_find_handle(NULL, "ntpqic11", QIC02_TAPE_MAJOR, 2, DEVFS_SPECIAL_CHR, 0));
+    devfs_unregister(devfs_find_handle(NULL, "tpqic11", QIC02_TAPE_MAJOR, 3, DEVFS_SPECIAL_CHR, 0));
+    devfs_unregister(devfs_find_handle(NULL, "ntpqic24", QIC02_TAPE_MAJOR, 4, DEVFS_SPECIAL_CHR, 0));
+    devfs_unregister(devfs_find_handle(NULL, "tpqic24", QIC02_TAPE_MAJOR, 5, DEVFS_SPECIAL_CHR, 0));
+    devfs_unregister(devfs_find_handle(NULL, "ntpqic120", QIC02_TAPE_MAJOR, 6, DEVFS_SPECIAL_CHR, 0));
+    devfs_unregister(devfs_find_handle(NULL, "tpqic120", QIC02_TAPE_MAJOR, 7, DEVFS_SPECIAL_CHR, 0));
+    devfs_unregister(devfs_find_handle(NULL, "ntpqic150", QIC02_TAPE_MAJOR, 8, DEVFS_SPECIAL_CHR, 0));
+    devfs_unregister(devfs_find_handle(NULL, "tpqic150", QIC02_TAPE_MAJOR, 9, DEVFS_SPECIAL_CHR, 0));
 }
 
 int init_module(void)

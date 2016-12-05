@@ -1,8 +1,8 @@
 /* dma.c -- DMA IOCTL and function support -*- linux-c -*-
  * Created: Fri Mar 19 14:30:16 1999 by faith@precisioninsight.com
- * Revised: Thu Sep 16 12:55:39 1999 by faith@precisioninsight.com
  *
- * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
+ * Copyright 1999, 2000 Precision Insight, Inc., Cedar Park, Texas.
+ * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
  * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -24,8 +24,8 @@
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  * 
- * $PI: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/dma.c,v 1.7 1999/09/16 16:56:18 faith Exp $
- * $XFree86: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/dma.c,v 1.1 1999/09/25 14:37:58 dawes Exp $
+ * Authors:
+ *    Rickard E. (Rik) Faith <faith@valinuxa.com>
  *
  */
 
@@ -64,15 +64,24 @@ void drm_dma_takedown(drm_device_t *dev)
 					       dma->bufs[i].page_order,
 					       DRM_MEM_DMA);
 			}
-			drm_free(dma->bufs[i].buflist,
-				 dma->buf_count
-				 * sizeof(*dma->bufs[0].buflist),
-				 DRM_MEM_BUFS);
 			drm_free(dma->bufs[i].seglist,
-				 dma->buf_count
+				 dma->bufs[i].seg_count
 				 * sizeof(*dma->bufs[0].seglist),
 				 DRM_MEM_SEGS);
-			drm_freelist_destroy(&dma->bufs[i].freelist);
+		}
+	   	if(dma->bufs[i].buf_count) {
+		   	for(j = 0; j < dma->bufs[i].buf_count; j++) {
+			   if(dma->bufs[i].buflist[j].dev_private) {
+			      drm_free(dma->bufs[i].buflist[j].dev_private,
+				       dma->bufs[i].buflist[j].dev_priv_size,
+				       DRM_MEM_BUFS);
+			   }
+			}
+		   	drm_free(dma->bufs[i].buflist,
+				 dma->bufs[i].buf_count *
+				 sizeof(*dma->bufs[0].buflist),
+				 DRM_MEM_BUFS);
+		   	drm_freelist_destroy(&dma->bufs[i].freelist);
 		}
 	}
 	
@@ -388,14 +397,15 @@ int drm_dma_enqueue(drm_device_t *dev, drm_dma_t *d)
 
 	atomic_inc(&q->use_count);
 	if (atomic_read(&q->block_write)) {
-		current->state = TASK_INTERRUPTIBLE;
 		add_wait_queue(&q->write_queue, &entry);
 		atomic_inc(&q->block_count);
 		for (;;) {
+			current->state = TASK_INTERRUPTIBLE;
 			if (!atomic_read(&q->block_write)) break;
 			schedule();
 			if (signal_pending(current)) {
 				atomic_dec(&q->use_count);
+				remove_wait_queue(&q->write_queue, &entry);
 				return -EINTR;
 			}
 		}
@@ -477,14 +487,16 @@ static int drm_dma_get_buffers_of_order(drm_device_t *dev, drm_dma_t *d,
 				  buf->pending);
 		}
 		buf->pid     = current->pid;
-		copy_to_user_ret(&d->request_indices[i],
+		if (copy_to_user(&d->request_indices[i],
 				 &buf->idx,
-				 sizeof(buf->idx),
-				 -EFAULT);
-		copy_to_user_ret(&d->request_sizes[i],
+				 sizeof(buf->idx)))
+			return -EFAULT;
+
+		if (copy_to_user(&d->request_sizes[i],
 				 &buf->total,
-				 sizeof(buf->total),
-				 -EFAULT);
+				 sizeof(buf->total)))
+			return -EFAULT;
+
 		++d->granted_count;
 	}
 	return 0;

@@ -1,11 +1,37 @@
 /*
- * $Id: b1dma.c,v 1.3 2000/02/26 01:00:53 keil Exp $
+ * $Id: b1dma.c,v 1.11 2000/11/19 17:02:47 kai Exp $
  * 
  * Common module for AVM B1 cards that support dma with AMCC
  * 
  * (c) Copyright 2000 by Carsten Paeth (calle@calle.in-berlin.de)
  * 
  * $Log: b1dma.c,v $
+ * Revision 1.11  2000/11/19 17:02:47  kai
+ * compatibility cleanup - part 3
+ *
+ * Revision 1.10  2000/11/19 17:01:53  kai
+ * compatibility cleanup - part 2
+ *
+ * Revision 1.9  2000/11/01 14:05:02  calle
+ * - use module_init/module_exit from linux/init.h.
+ * - all static struct variables are initialized with "membername:" now.
+ * - avm_cs.c, let it work with newer pcmcia-cs.
+ *
+ * Revision 1.8  2000/10/10 17:44:19  kai
+ * changes from/for 2.2.18
+ *
+ * Revision 1.7  2000/08/04 12:20:08  calle
+ * - Fix unsigned/signed warning in the right way ...
+ *
+ * Revision 1.6  2000/06/29 13:59:06  calle
+ * Bugfix: reinit txdma without interrupt will confuse some AMCC chips.
+ *
+ * Revision 1.5  2000/06/19 16:51:53  keil
+ * don't free skb in irq context
+ *
+ * Revision 1.4  2000/04/03 16:38:05  calle
+ * made suppress_pollack static.
+ *
  * Revision 1.3  2000/02/26 01:00:53  keil
  * changes from 2.3.47
  *
@@ -28,13 +54,15 @@
 #include <linux/ioport.h>
 #include <linux/capi.h>
 #include <asm/io.h>
+#include <linux/init.h>
 #include <asm/uaccess.h>
+#include <linux/netdevice.h>
 #include "capilli.h"
 #include "avmcard.h"
 #include "capicmd.h"
 #include "capiutil.h"
 
-static char *revision = "$Revision: 1.3 $";
+static char *revision = "$Revision: 1.11 $";
 
 /* ------------------------------------------------------------- */
 
@@ -230,14 +258,14 @@ void b1dma_reset(avmcard *card)
 	restore_flags(flags);
 
 	b1dmaoutmeml(card->mbase+AMCC_MCSR, 0);
-	udelay(10 * 1000);
+	mdelay(10);
 	b1dmaoutmeml(card->mbase+AMCC_MCSR, 0x0f000000); /* reset all */
-	udelay(10 * 1000);
+	mdelay(10);
 	b1dmaoutmeml(card->mbase+AMCC_MCSR, 0);
 	if (card->cardtype == avm_t1pci)
-		udelay(42 * 1000);
+		mdelay(42);
 	else
-		udelay(10 * 1000);
+		mdelay(10);
 }
 
 /* ------------------------------------------------------------- */
@@ -245,11 +273,11 @@ void b1dma_reset(avmcard *card)
 int b1dma_detect(avmcard *card)
 {
 	b1dmaoutmeml(card->mbase+AMCC_MCSR, 0);
-	udelay(10 * 1000);
+	mdelay(10);
 	b1dmaoutmeml(card->mbase+AMCC_MCSR, 0x0f000000); /* reset all */
-	udelay(10 * 1000);
+	mdelay(10);
 	b1dmaoutmeml(card->mbase+AMCC_MCSR, 0);
-	udelay(42 * 1000);
+	mdelay(42);
 
 	b1dmaoutmeml(card->mbase+AMCC_RXLEN, 0);
 	b1dmaoutmeml(card->mbase+AMCC_TXLEN, 0);
@@ -427,7 +455,7 @@ static void b1dma_dispatch_tx(avmcard *card)
 		b1dmaoutmeml(card->mbase+AMCC_INTCSR, card->csr);
 
 	restore_flags(flags);
-	dev_kfree_skb(skb);
+	dev_kfree_skb_any(skb);
 }
 
 /* ------------------------------------------------------------- */
@@ -551,22 +579,26 @@ static void b1dma_handle_rx(avmcard *card)
 	case RECEIVE_TASK_READY:
 		ApplId = (unsigned) _get_word(&p);
 		MsgLen = _get_slice(&p, card->msgbuf);
-		card->msgbuf[MsgLen--] = 0;
-		while (    MsgLen >= 0
-		       && (   card->msgbuf[MsgLen] == '\n'
-			   || card->msgbuf[MsgLen] == '\r'))
-			card->msgbuf[MsgLen--] = 0;
+		card->msgbuf[MsgLen] = 0;
+		while (    MsgLen > 0
+		       && (   card->msgbuf[MsgLen-1] == '\n'
+			   || card->msgbuf[MsgLen-1] == '\r')) {
+			card->msgbuf[MsgLen-1] = 0;
+			MsgLen--;
+		}
 		printk(KERN_INFO "%s: task %d \"%s\" ready.\n",
 				card->name, ApplId, card->msgbuf);
 		break;
 
 	case RECEIVE_DEBUGMSG:
 		MsgLen = _get_slice(&p, card->msgbuf);
-		card->msgbuf[MsgLen--] = 0;
-		while (    MsgLen >= 0
-		       && (   card->msgbuf[MsgLen] == '\n'
-			   || card->msgbuf[MsgLen] == '\r'))
-			card->msgbuf[MsgLen--] = 0;
+		card->msgbuf[MsgLen] = 0;
+		while (    MsgLen > 0
+		       && (   card->msgbuf[MsgLen-1] == '\n'
+			   || card->msgbuf[MsgLen-1] == '\r')) {
+			card->msgbuf[MsgLen-1] = 0;
+			MsgLen--;
+		}
 		printk(KERN_INFO "%s: DEBUG: %s\n", card->name, card->msgbuf);
 		break;
 
@@ -612,11 +644,6 @@ static void b1dma_handle_interrupt(avmcard *card)
 	if ((status & TX_TC_INT) != 0) {
 		card->csr &= ~EN_TX_TC_INT;
 	        b1dma_dispatch_tx(card);
-	} else if (card->csr & EN_TX_TC_INT) {
-		if (b1dmainmeml(card->mbase+AMCC_TXLEN) == 0) {
-			card->csr &= ~EN_TX_TC_INT;
-			b1dma_dispatch_tx(card);
-		}
 	}
 	b1dmaoutmeml(card->mbase+AMCC_INTCSR, card->csr);
 }
@@ -958,11 +985,6 @@ EXPORT_SYMBOL(b1dma_release_appl);
 EXPORT_SYMBOL(b1dma_send_message);
 EXPORT_SYMBOL(b1dmactl_read_proc);
 
-#ifdef MODULE
-#define b1dma_init init_module
-void cleanup_module(void);
-#endif
-
 int b1dma_init(void)
 {
 	char *p;
@@ -980,8 +1002,9 @@ int b1dma_init(void)
 	return 0;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+void b1dma_exit(void)
 {
 }
-#endif
+
+module_init(b1dma_init);
+module_exit(b1dma_exit);

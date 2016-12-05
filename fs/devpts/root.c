@@ -52,21 +52,21 @@ static int devpts_root_readdir(struct file *filp, void *dirent, filldir_t filldi
 	switch(nr)
 	{
 	case 0:
-		if (filldir(dirent, ".", 1, nr, inode->i_ino) < 0)
+		if (filldir(dirent, ".", 1, nr, inode->i_ino, DT_DIR) < 0)
 			return 0;
 		filp->f_pos = ++nr;
 		/* fall through */
 	case 1:
-		if (filldir(dirent, "..", 2, nr, inode->i_ino) < 0)
+		if (filldir(dirent, "..", 2, nr, inode->i_ino, DT_DIR) < 0)
 			return 0;
 		filp->f_pos = ++nr;
 		/* fall through */
 	default:
-		while ( nr < sbi->max_ptys ) {
+		while ( nr - 2 < sbi->max_ptys ) {
 			int ptynr = nr - 2;
 			if ( sbi->inodes[ptynr] ) {
 				genptsname(numbuf, ptynr);
-				if ( filldir(dirent, numbuf, strlen(numbuf), nr, nr) < 0 )
+				if ( filldir(dirent, numbuf, strlen(numbuf), nr, nr, DT_CHR) < 0 )
 					return 0;
 			}
 			filp->f_pos = ++nr;
@@ -129,7 +129,7 @@ static struct dentry *devpts_root_lookup(struct inode * dir, struct dentry * den
 
 	dentry->d_inode = sbi->inodes[entry];
 	if ( dentry->d_inode )
-		dentry->d_inode->i_count++;
+		atomic_inc(&dentry->d_inode->i_count);
 	
 	d_add(dentry, dentry->d_inode);
 

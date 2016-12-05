@@ -67,7 +67,7 @@ struct proc_dir_entry {
 	void *data;
 	read_proc_t *read_proc;
 	write_proc_t *write_proc;
-	unsigned int count;	/* use count */
+	atomic_t count;		/* use count */
 	int deleted;		/* delete flag */
 	kdev_t	rdev;
 };
@@ -90,15 +90,12 @@ struct dentry *proc_pid_lookup(struct inode *dir, struct dentry * dentry);
 void proc_pid_delete_inode(struct inode *inode);
 int proc_pid_readdir(struct file * filp, void * dirent, filldir_t filldir);
 
-extern int proc_register(struct proc_dir_entry *, struct proc_dir_entry *);
-
 extern struct proc_dir_entry *create_proc_entry(const char *name, mode_t mode,
 						struct proc_dir_entry *parent);
 extern void remove_proc_entry(const char *name, struct proc_dir_entry *parent);
 
-extern struct super_block *proc_super_blocks;
+extern struct vfsmount *proc_mnt;
 extern struct super_block *proc_read_super(struct super_block *,void *,int);
-extern int init_proc_fs(void);
 extern struct inode * proc_get_inode(struct super_block *, int, struct proc_dir_entry *);
 
 extern int proc_match(int, const char *,struct proc_dir_entry *);
@@ -130,7 +127,7 @@ extern void proc_tty_unregister_driver(struct tty_driver *driver);
 extern void proc_device_tree_init(void);
 
 extern struct proc_dir_entry *proc_symlink(const char *,
-		struct proc_dir_entry *,char *);
+		struct proc_dir_entry *, const char *);
 extern struct proc_dir_entry *proc_mknod(const char *,mode_t,
 		struct proc_dir_entry *,kdev_t);
 extern struct proc_dir_entry *proc_mkdir(const char *,struct proc_dir_entry *);
@@ -168,7 +165,6 @@ extern inline void proc_net_remove(const char *name)
 
 #else
 
-extern inline int proc_register(struct proc_dir_entry *a, struct proc_dir_entry *b) { return 0; }
 extern inline struct proc_dir_entry *proc_net_create(const char *name, mode_t mode, 
 	get_info_t *get_info) {return NULL;}
 extern inline void proc_net_remove(const char *name) {}

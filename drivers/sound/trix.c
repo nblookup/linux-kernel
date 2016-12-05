@@ -14,6 +14,7 @@
  * Changes
  *	Alan Cox		Modularisation, cleanup.
  *	Christoph Hellwig	Adapted to module_init/module_exit
+ *	Arnaldo C. de Melo	Got rid of attach_uart401
  */
  
 #include <linux/config.h>
@@ -21,7 +22,6 @@
 #include <linux/module.h>
 
 #include "sound_config.h"
-#include "soundmodule.h"
 #include "sb.h"
 #include "sound_firmware.h"
 
@@ -259,7 +259,8 @@ static void __init attach_trix_wss(struct address_info *hw_config)
 					  dma1,
 					  dma2,
 					  0,
-					  hw_config->osp);
+					  hw_config->osp,
+					  THIS_MODULE);
 	request_region(hw_config->io_base, 4, "MSS config");
 
 	if (num_mixers > old_num_mixers)	/* Mixer got installed */
@@ -276,7 +277,7 @@ static int __init probe_trix_sb(struct address_info *hw_config)
 
 	int tmp;
 	unsigned char conf;
-	static char irq_translate[] = {
+	static signed char irq_translate[] = {
 		-1, -1, -1, 0, 1, 2, -1, 3
 	};
 
@@ -318,7 +319,7 @@ static int __init probe_trix_sb(struct address_info *hw_config)
 	sb_initialized = 1;
 
 	hw_config->name = "AudioTrix SB";
-	return sb_dsp_detect(hw_config, 0, 0);
+	return sb_dsp_detect(hw_config, 0, 0, NULL);
 }
 
 static void __init attach_trix_sb(struct address_info *hw_config)
@@ -332,21 +333,15 @@ static void __init attach_trix_sb(struct address_info *hw_config)
 	old_quiet = sb_be_quiet;
 	sb_be_quiet = 1;
 
-	sb_dsp_init(hw_config);
+	sb_dsp_init(hw_config, THIS_MODULE);
 
 	sb_be_quiet = old_quiet;
-}
-
-static void __init attach_trix_mpu(struct address_info *hw_config)
-{
-	hw_config->name = "AudioTrix Pro";
-	attach_uart401(hw_config);
 }
 
 static int __init probe_trix_mpu(struct address_info *hw_config)
 {
 	unsigned char conf;
-	static char irq_bits[] = {
+	static int irq_bits[] = {
 		-1, -1, -1, 1, 2, 3, -1, 4, -1, 5
 	};
 
@@ -363,11 +358,6 @@ static int __init probe_trix_mpu(struct address_info *hw_config)
 	if (mpu_initialized)
 	{
 		DDB(printk("Trix: MPU mode already initialized\n"));
-		return 0;
-	}
-	if (check_region(hw_config->io_base, 4))
-	{
-		printk(KERN_ERR "AudioTrix: MPU I/O port conflict (%x)\n", hw_config->io_base);
 		return 0;
 	}
 	if (hw_config->irq > 9)
@@ -401,7 +391,8 @@ static int __init probe_trix_mpu(struct address_info *hw_config)
 	conf |= irq_bits[hw_config->irq] << 4;
 	trix_write(0x19, (trix_read(0x19) & 0x83) | conf);
 	mpu_initialized = 1;
-	return probe_uart401(hw_config);
+	hw_config->name = "AudioTrix Pro";
+	return probe_uart401(hw_config, THIS_MODULE);
 }
 
 static void __exit unload_trix_wss(struct address_info *hw_config)
@@ -510,12 +501,9 @@ static int __init init_trix(void)
 			attach_trix_sb(&cfg2);
 	}
 	
-	if (cfg_mpu.io_base != -1) {
+	if (cfg_mpu.io_base != -1)
 		mpu = probe_trix_mpu(&cfg_mpu);
-		if (mpu)
-			attach_trix_mpu(&cfg_mpu);
-	}
-	SOUND_LOCK;
+
 	return 0;
 }
 
@@ -528,7 +516,6 @@ static void __exit cleanup_trix(void)
 	if (mpu)
 		unload_trix_mpu(&cfg_mpu);
 	unload_trix_wss(&cfg);
-	SOUND_LOCK_END;
 }
 
 module_init(init_trix);

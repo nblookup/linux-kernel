@@ -8,10 +8,13 @@
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
 .S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -Wa,-m68020 -c $< -o $*.o
+	$(CC) $(AFLAGS) -traditional -Wa,-m68020 -c $< -o $*.o
 
 O_TARGET := sun3.o 
-O_OBJS   := config.o idprom.o mmu_emu.o sun3ints.o leds.o dvma.o sbus.o intersil.o
-OX_OBJS  := sun3_ksyms.o
+
+export-objs	:= sun3_ksyms.o
+
+obj-y		:= config.o idprom.o mmu_emu.o sun3ints.o leds.o dvma.o \
+			sbus.o intersil.o sun3_ksyms.o
 
 include $(TOPDIR)/Rules.make

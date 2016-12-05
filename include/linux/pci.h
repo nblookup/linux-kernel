@@ -293,12 +293,20 @@
 #define PCI_DMA_FROMDEVICE	2
 #define PCI_DMA_NONE		3
 
-#include <asm/pci.h>
-
 #define DEVICE_COUNT_COMPATIBLE	4
 #define DEVICE_COUNT_IRQ	2
 #define DEVICE_COUNT_DMA	2
 #define DEVICE_COUNT_RESOURCE	12
+
+#define PCI_ANY_ID (~0)
+
+#define pci_present pcibios_present
+
+#define pci_for_each_dev(dev) \
+	for(dev = pci_dev_g(pci_devices.next); dev != pci_dev_g(&pci_devices); dev = pci_dev_g(dev->global_list.next))
+
+#define pci_for_each_dev_reverse(dev) \
+	for(dev = pci_dev_g(pci_devices.prev); dev != pci_dev_g(&pci_devices); dev = pci_dev_g(dev->global_list.prev))
 
 /*
  * The pci_dev structure is used to describe both PCI and ISAPnP devices.
@@ -342,7 +350,7 @@ struct pci_dev {
 	struct resource dma_resource[DEVICE_COUNT_DMA];
 	struct resource irq_resource[DEVICE_COUNT_IRQ];
 
-	char		name[48];	/* device name */
+	char		name[80];	/* device name */
 	char		slot_name[8];	/* slot name */
 	int		active;		/* ISAPnP: device is active */
 	int		ro;		/* ISAPnP: read only */
@@ -431,6 +439,27 @@ struct pbus_set_ranges_data
 	unsigned long mem_start, mem_end;
 };
 
+struct pci_device_id {
+	unsigned int vendor, device;		/* Vendor and device ID or PCI_ANY_ID */
+	unsigned int subvendor, subdevice;	/* Subsystem ID's or PCI_ANY_ID */
+	unsigned int class, class_mask;		/* (class,subclass,prog-if) triplet */
+	unsigned long driver_data;		/* Data private to the driver */
+};
+
+struct pci_driver {
+	struct list_head node;
+	char *name;
+	const struct pci_device_id *id_table;	/* NULL if wants all devices */
+	int (*probe)(struct pci_dev *dev, const struct pci_device_id *id);	/* New device inserted */
+	void (*remove)(struct pci_dev *dev);	/* Device removed (NULL if not a hot-plug capable driver) */
+	void (*suspend)(struct pci_dev *dev);	/* Device suspended */
+	void (*resume)(struct pci_dev *dev);	/* Device woken up */
+};
+
+
+/* these external functions are only available when PCI support is enabled */
+#ifdef CONFIG_PCI
+
 void pcibios_init(void);
 void pcibios_fixup_bus(struct pci_bus *);
 int pcibios_enable_device(struct pci_dev *);
@@ -446,7 +475,6 @@ void pcibios_fixup_pbus_ranges(struct pci_bus *, struct pbus_set_ranges_data *);
 /* Backward compatibility, don't use in new code! */
 
 int pcibios_present(void);
-#define pci_present pcibios_present
 int pcibios_read_config_byte (unsigned char bus, unsigned char dev_fn,
 			      unsigned char where, unsigned char *val);
 int pcibios_read_config_word (unsigned char bus, unsigned char dev_fn,
@@ -467,6 +495,7 @@ int pcibios_find_device (unsigned short vendor, unsigned short dev_id,
 /* Generic PCI functions used internally */
 
 void pci_init(void);
+int pci_bus_exists(const struct list_head *list, int nr);
 struct pci_bus *pci_scan_bus(int bus, struct pci_ops *ops, void *sysdata);
 struct pci_bus *pci_alloc_primary_bus(int bus);
 struct pci_dev *pci_scan_slot(struct pci_dev *temp);
@@ -476,7 +505,8 @@ void pci_name_device(struct pci_dev *dev);
 char *pci_class_name(u32 class);
 void pci_read_bridge_bases(struct pci_bus *child);
 struct resource *pci_find_parent_resource(const struct pci_dev *dev, struct resource *res);
-int pci_setup_device(struct pci_dev * dev);
+int pci_setup_device(struct pci_dev *dev);
+int pci_get_interrupt_pin(struct pci_dev *dev, struct pci_dev **bridge);
 
 /* Generic PCI functions exported to card drivers */
 
@@ -487,8 +517,6 @@ struct pci_dev *pci_find_subsys (unsigned int vendor, unsigned int device,
 struct pci_dev *pci_find_class (unsigned int class, const struct pci_dev *from);
 struct pci_dev *pci_find_slot (unsigned int bus, unsigned int devfn);
 int pci_find_capability (struct pci_dev *dev, int cap);
-
-#define PCI_ANY_ID (~0)
 
 int pci_read_config_byte(struct pci_dev *dev, int where, u8 *val);
 int pci_read_config_word(struct pci_dev *dev, int where, u16 *val);
@@ -502,39 +530,17 @@ void pci_set_master(struct pci_dev *dev);
 int pci_set_power_state(struct pci_dev *dev, int state);
 int pci_assign_resource(struct pci_dev *dev, int i);
 
-#define pci_for_each_dev(dev) \
-	for(dev = pci_dev_g(pci_devices.next); dev != pci_dev_g(&pci_devices); dev = pci_dev_g(dev->global_list.next))
-
-#define pci_for_each_dev_reverse(dev) \
-	for(dev = pci_dev_g(pci_devices.prev); dev != pci_dev_g(&pci_devices); dev = pci_dev_g(dev->global_list.prev))
-
-/* Helper functions for low-level code (drivers/pci/setup.c) */
+/* Helper functions for low-level code (drivers/pci/setup-[bus,res].c) */
 
 int pci_claim_resource(struct pci_dev *, int);
 void pci_assign_unassigned_resources(void);
-void pci_set_bus_ranges(void);
+void pdev_enable_device(struct pci_dev *);
+void pdev_sort_resources(struct pci_dev *, struct resource_list *, u32);
+unsigned long pci_bridge_check_io(struct pci_dev *);
 void pci_fixup_irqs(u8 (*)(struct pci_dev *, u8 *),
 		    int (*)(struct pci_dev *, u8, u8));
 
 /* New-style probing supporting hot-pluggable devices */
-
-struct pci_device_id {
-	unsigned int vendor, device;		/* Vendor and device ID or PCI_ANY_ID */
-	unsigned int subvendor, subdevice;	/* Subsystem ID's or PCI_ANY_ID */
-	unsigned int class, class_mask;		/* (class,subclass,prog-if) triplet */
-	unsigned long driver_data;		/* Data private to the driver */
-};
-
-struct pci_driver {
-	struct list_head node;
-	char *name;
-	const struct pci_device_id *id_table;	/* NULL if wants all devices */
-	int (*probe)(struct pci_dev *dev, const struct pci_device_id *id);	/* New device inserted */
-	void (*remove)(struct pci_dev *dev);	/* Device removed (NULL if not a hot-plug capable driver) */
-	void (*suspend)(struct pci_dev *dev);	/* Device suspended */
-	void (*resume)(struct pci_dev *dev);	/* Device woken up */
-};
-
 int pci_register_driver(struct pci_driver *);
 void pci_unregister_driver(struct pci_driver *);
 void pci_insert_device(struct pci_dev *, struct pci_bus *);
@@ -542,18 +548,26 @@ void pci_remove_device(struct pci_dev *);
 struct pci_driver *pci_dev_driver(const struct pci_dev *);
 const struct pci_device_id *pci_match_device(const struct pci_device_id *ids, const struct pci_dev *dev);
 
+#endif /* CONFIG_PCI */
+
+/* Include architecture-dependent settings and functions */
+
+#include <asm/pci.h>
+
 /*
  *  If the system does not have PCI, clearly these return errors.  Define
  *  these as simple inline functions to avoid hair in drivers.
  */
 
 #ifndef CONFIG_PCI
-extern inline int pcibios_present(void) { return 0; }
+static inline int pcibios_present(void) { return 0; }
+static inline int pcibios_find_class (unsigned int class_code, unsigned short index, unsigned char *bus, unsigned char *dev_fn) 
+{ 	return PCIBIOS_DEVICE_NOT_FOUND; }
 
 #define _PCI_NOP(o,s,t) \
-	extern inline int pcibios_##o##_config_##s## (u8 bus, u8 dfn, u8 where, t val) \
+	static inline int pcibios_##o##_config_##s## (u8 bus, u8 dfn, u8 where, t val) \
 		{ return PCIBIOS_FUNC_NOT_SUPPORTED; } \
-	extern inline int pci_##o##_config_##s## (struct pci_dev *dev, int where, t val) \
+	static inline int pci_##o##_config_##s## (struct pci_dev *dev, int where, t val) \
 		{ return PCIBIOS_FUNC_NOT_SUPPORTED; }
 #define _PCI_NOP_ALL(o,x)	_PCI_NOP(o,byte,u8 x) \
 				_PCI_NOP(o,word,u16 x) \
@@ -561,22 +575,27 @@ extern inline int pcibios_present(void) { return 0; }
 _PCI_NOP_ALL(read, *)
 _PCI_NOP_ALL(write,)
 
-extern inline struct pci_dev *pci_find_device(unsigned int vendor, unsigned int device, const struct pci_dev *from)
+static inline struct pci_dev *pci_find_device(unsigned int vendor, unsigned int device, const struct pci_dev *from)
 { return NULL; }
 
-extern inline struct pci_dev *pci_find_class(unsigned int class, const struct pci_dev *from)
+static inline struct pci_dev *pci_find_class(unsigned int class, const struct pci_dev *from)
 { return NULL; }
 
-extern inline struct pci_dev *pci_find_slot(unsigned int bus, unsigned int devfn)
+static inline struct pci_dev *pci_find_slot(unsigned int bus, unsigned int devfn)
 { return NULL; }
 
-extern inline struct pci_dev *pci_find_subsys(unsigned int vendor, unsigned int device,
+static inline struct pci_dev *pci_find_subsys(unsigned int vendor, unsigned int device,
 unsigned int ss_vendor, unsigned int ss_device, const struct pci_dev *from)
 { return NULL; }
 
-extern inline void pci_set_master(struct pci_dev *dev) { }
-extern inline int pci_enable_device(struct pci_dev *dev) { return -EIO; }
-extern inline int pci_module_init(struct pci_driver *drv) { return -ENODEV; }
+static inline void pci_set_master(struct pci_dev *dev) { }
+static inline int pci_enable_device(struct pci_dev *dev) { return -EIO; }
+static inline int pci_module_init(struct pci_driver *drv) { return -ENODEV; }
+static inline int pci_assign_resource(struct pci_dev *dev, int i) { return -EBUSY;}
+static inline int pci_register_driver(struct pci_driver *drv) { return 0;}
+static inline void pci_unregister_driver(struct pci_driver *drv) { }
+static inline int scsi_to_pci_dma_dir(unsigned char scsi_dir) { return scsi_dir; }
+static inline int pci_find_capability (struct pci_dev *dev, int cap) {return 0; }
 
 #else
 
@@ -586,7 +605,7 @@ extern inline int pci_module_init(struct pci_driver *drv) { return -ENODEV; }
  *
  * This MUST stay in a header, as it checks for -DMODULE
  */
-extern inline int pci_module_init(struct pci_driver *drv)
+static inline int pci_module_init(struct pci_driver *drv)
 {
 	int rc = pci_register_driver (drv);
 
@@ -624,6 +643,20 @@ extern inline int pci_module_init(struct pci_driver *drv)
 	 (pci_resource_end((dev),(bar)) -		\
 	  pci_resource_start((dev),(bar)) + 1))
 
+/* Similar to the helpers above, these manipulate per-pci_dev
+ * driver-specific data.  Currently stored as pci_dev::driver_data,
+ * a void pointer, but it is not present on older kernels.
+ */
+static inline void *pci_get_drvdata (struct pci_dev *pdev)
+{
+	return pdev->driver_data;
+}
+
+static inline void pci_set_drvdata (struct pci_dev *pdev, void *data)
+{
+	pdev->driver_data = data;
+}
+
 /*
  *  The world is not perfect and supplies us with broken PCI devices.
  *  For at least a part of these bugs we need a work-around, so both
@@ -648,6 +681,7 @@ extern int pci_pci_problems;
 #define PCIPCI_FAIL		1
 #define PCIPCI_TRITON		2
 #define PCIPCI_NATOMA		4
+#define PCIPCI_VIAETBF		8
 
 #endif /* __KERNEL__ */
 #endif /* LINUX_PCI_H */

@@ -1,5 +1,4 @@
-/* $Id: pgalloc.h,v 1.3 2000/02/24 00:13:20 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -10,12 +9,15 @@
 #ifndef _ASM_PGALLOC_H
 #define _ASM_PGALLOC_H
 
+#include <linux/config.h>
+
 /* TLB flushing:
  *
  *  - flush_tlb_all() flushes all processes TLB entries
  *  - flush_tlb_mm(mm) flushes the specified mm context TLB entries
  *  - flush_tlb_page(mm, vmaddr) flushes a single page
  *  - flush_tlb_range(mm, start, end) flushes a range of pages
+ *  - flush_tlb_pgtables(mm, start, end) flushes a range of page tables
  */
 extern void (*_flush_tlb_all)(void);
 extern void (*_flush_tlb_mm)(struct mm_struct *mm);
@@ -23,10 +25,21 @@ extern void (*_flush_tlb_range)(struct mm_struct *mm, unsigned long start,
 			       unsigned long end);
 extern void (*_flush_tlb_page)(struct vm_area_struct *vma, unsigned long page);
 
+#ifndef CONFIG_SMP
+
 #define flush_tlb_all()			_flush_tlb_all()
 #define flush_tlb_mm(mm)		_flush_tlb_mm(mm)
 #define flush_tlb_range(mm,vmaddr,end)	_flush_tlb_range(mm, vmaddr, end)
 #define flush_tlb_page(vma,page)	_flush_tlb_page(vma, page)
+
+#else /* CONFIG_SMP */
+
+extern void flush_tlb_all(void);
+extern void flush_tlb_mm(struct mm_struct *);
+extern void flush_tlb_range(struct mm_struct *, unsigned long, unsigned long);
+extern void flush_tlb_page(struct vm_area_struct *, unsigned long);
+
+#endif /* CONFIG_SMP */
 
 extern inline void flush_tlb_pgtables(struct mm_struct *mm,
                                       unsigned long start, unsigned long end)
@@ -109,8 +122,8 @@ extern inline pmd_t *get_pmd_fast(void)
 {
 	unsigned long *ret;
 
-	if ((ret = (unsigned long *)pte_quicklist) != NULL) {
-		pte_quicklist = (unsigned long *)(*ret);
+	if ((ret = (unsigned long *)pmd_quicklist) != NULL) {
+		pmd_quicklist = (unsigned long *)(*ret);
 		ret[0] = ret[1];
 		pgtable_cache_size--;
 		return (pmd_t *)ret;
@@ -121,8 +134,8 @@ extern inline pmd_t *get_pmd_fast(void)
 
 extern inline void free_pmd_fast(pmd_t *pmd)
 {
-	*(unsigned long *)pmd = (unsigned long) pte_quicklist;
-	pte_quicklist = (unsigned long *) pmd;
+	*(unsigned long *)pmd = (unsigned long) pmd_quicklist;
+	pmd_quicklist = (unsigned long *) pmd;
 	pgtable_cache_size++;
 }
 
@@ -135,31 +148,10 @@ extern void __bad_pte(pmd_t *pmd);
 extern void __bad_pte_kernel(pmd_t *pmd);
 extern void __bad_pmd(pgd_t *pgd);
 
-#define pte_free_kernel(pte)    free_pte_fast(pte)
 #define pte_free(pte)           free_pte_fast(pte)
-#define pmd_free_kernel(pte)    free_pmd_fast(pte)
 #define pmd_free(pte)           free_pmd_fast(pte)
 #define pgd_free(pgd)           free_pgd_fast(pgd)
 #define pgd_alloc()             get_pgd_fast()
-
-extern inline pte_t * pte_alloc_kernel(pmd_t * pmd, unsigned long address)
-{
-	address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
-
-	if (pmd_none(*pmd)) {
-		pte_t *page = get_pte_fast();
-		if (page) {
-			pmd_val(*pmd) = (unsigned long) page;
-			return page + address;
-		}
-		return get_pte_kernel_slow(pmd, address);
-	}
-	if (pmd_bad(*pmd)) {
-		__bad_pte_kernel(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + address;
-}
 
 extern inline pte_t * pte_alloc(pmd_t * pmd, unsigned long address)
 {
@@ -198,35 +190,16 @@ extern inline pmd_t *pmd_alloc(pgd_t * pgd, unsigned long address)
 	return (pmd_t *) pgd_page(*pgd) + address;
 }
 
-#define pmd_alloc_kernel	pmd_alloc
+extern pte_t kptbl[(PAGE_SIZE<<KPTBL_PAGE_ORDER)/sizeof(pte_t)];
+extern pmd_t kpmdtbl[PTRS_PER_PMD];
+
+#define pmd_alloc_kernel(d,a)	(pmd_t *)kpmdtbl
+
+extern inline pte_t * pte_alloc_kernel(pmd_t * pmd, unsigned long address)
+{
+	return (kptbl + (address >> PAGE_SHIFT));
+}
 
 extern int do_check_pgt_cache(int, int);
-
-extern inline void set_pgdir(unsigned long address, pgd_t entry)
-{
-	struct task_struct * p;
-	pgd_t *pgd;
-#ifdef __SMP__
-	int i;
-#endif	
-        
-	read_lock(&tasklist_lock);
-	for_each_task(p) {
-		if (!p->mm)
-			continue;
-		*pgd_offset(p->mm, address) = entry;
-	}
-	read_unlock(&tasklist_lock);
-#ifndef __SMP__
-	for (pgd = (pgd_t *)pgd_quicklist; pgd; pgd = (pgd_t *)*(unsigned long *)pgd)
-		pgd[address >> PGDIR_SHIFT] = entry;
-#else
-	/* To pgd_alloc/pgd_free, one holds master kernel lock and so does our
-	   callee, so we can modify pgd caches of other CPUs as well. -jj */
-	for (i = 0; i < NR_CPUS; i++)
-		for (pgd = (pgd_t *)cpu_data[i].pgd_quick; pgd; pgd = (pgd_t *)*(unsigned long *)pgd)
-			pgd[address >> PGDIR_SHIFT] = entry;
-#endif
-}
 
 #endif /* _ASM_PGALLOC_H */

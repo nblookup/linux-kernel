@@ -146,6 +146,27 @@ noinit   - tells driver, that devices were already initialized. You should use
 	   strange pattern on screen and so on. Devices not enabled by BIOS
 	   are still initialized. It is default.
 init     - driver initializes every device it knows about.
+memtype  - specifies memory type, implies 'init'. This is valid only for G200 
+           and G400 and has following meaning:
+             G200: 0 -> 2x128Kx32 chips, 2MB onboard, probably sgram
+                   1 -> 2x128Kx32 chips, 4MB onboard, probably sgram
+                   2 -> 2x256Kx32 chips, 4MB onboard, probably sgram
+                   3 -> 2x256Kx32 chips, 8MB onboard, probably sgram
+                   4 -> 2x512Kx16 chips, 8/16MB onboard, probably sdram only
+                   5 -> same as above
+                   6 -> 4x128Kx32 chips, 4MB onboard, probably sgram
+                   7 -> 4x128Kx32 chips, 8MB onboard, probably sgram
+             G400: 0 -> 2x512Kx16 SDRAM, 16/32MB
+                        2x512Kx32 SGRAM, 16/32MB
+                   1 -> 2x256Kx32 SGRAM, 8/16MB
+                   2 -> 4x128Kx32 SGRAM, 8/16MB
+                   3 -> 4x512Kx32 SDRAM, 32MB
+                   4 -> 4x256Kx32 SGRAM, 16/32MB
+                   5 -> 2x1Mx32 SDRAM, 32MB
+                   6 -> reserved
+                   7 -> reserved
+           You should use sdram or sgram parameter in addition to memtype 
+           parameter.
 nomtrr   - disables write combining on frame buffer. This slows down driver but
            there is reported minor incompatibility between GUS DMA and XFree
 	   under high loads if write combining is enabled (sound dropouts).
@@ -191,6 +212,10 @@ nocross4MB - pixel line must not cross 4MB boundary. It is default for
 	     limitations which do not allow this. But this option is
 	     incompatible with some (if not all yet released) versions of
 	     XF86_FBDev.
+dfp      - enables digital flat panel interface. This option is incompatible with
+           secondary (TV) output - if DFP is active, TV output must be
+	   inactive and vice versa. DFP always uses same timing as primary
+	   (monitor) output.
 vesa:X   - selects startup videomode. X is number from 0 to 0x1FF, see table
            above for detailed explanation. Default is 640x480x8bpp if driver
 	   has 8bpp support. Otherwise first available of 640x350x4bpp,
@@ -228,7 +253,7 @@ depth:X  - Bits per pixel: 0=text, 4,8,15,16,24 or 32. Default depends on
            `vesa'.
 
 If you know capabilities of your monitor, you can specify some (or all) of
-`pixclk', `fh' and `fv'. In this case, `pixclock' is computed so that
+`maxclk', `fh' and `fv'. In this case, `pixclock' is computed so that
 pixclock <= maxclk, real_fh <= fh and real_fv <= fv.
 
 maxclk:X - maximum dotclock. X can be specified in MHz, kHz or Hz. Default is

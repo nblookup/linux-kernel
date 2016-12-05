@@ -60,8 +60,6 @@
 
 #define IO_OUT16VAL(v, r)       (((v) << 8) | (r))
 
-#define arraysize(x)	(sizeof(x)/sizeof(*(x)))
-
 static int currcon = 0;
 static struct display disp;
 static struct fb_info fb_info;
@@ -77,8 +75,7 @@ static struct fb_var_screeninfo fb_var = { 0, };
      *  Interface used by the world
      */
 
-static int s3trio_open(struct fb_info *info, int user);
-static int s3trio_release(struct fb_info *info, int user);
+static void __init s3triofb_of_init(struct device_node *dp);
 static int s3trio_get_fix(struct fb_fix_screeninfo *fix, int con,
 			  struct fb_info *info);
 static int s3trio_get_var(struct fb_var_screeninfo *var, int con,
@@ -91,8 +88,6 @@ static int s3trio_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			   struct fb_info *info);
 static int s3trio_pan_display(struct fb_var_screeninfo *var, int con,
 			      struct fb_info *info);
-static int s3trio_ioctl(struct inode *inode, struct file *file, u_int cmd,
-			u_long arg, int con, struct fb_info *info);
 
 
     /*
@@ -141,31 +136,14 @@ static void do_install_cmap(int con, struct fb_info *info);
 
 
 static struct fb_ops s3trio_ops = {
-    s3trio_open, s3trio_release, s3trio_get_fix, s3trio_get_var, s3trio_set_var,
-    s3trio_get_cmap, s3trio_set_cmap, s3trio_pan_display, s3trio_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	s3trio_get_fix,
+	fb_get_var:	s3trio_get_var,
+	fb_set_var:	s3trio_set_var,
+	fb_get_cmap:	s3trio_get_cmap,
+	fb_set_cmap:	s3trio_set_cmap,
+	fb_pan_display:	s3trio_pan_display,
 };
-
-
-    /*
-     *  Open/Release the frame buffer device
-     */
-
-static int s3trio_open(struct fb_info *info, int user)
-{
-    /*
-     *  Nothing, only a usage count for the moment
-     */
-
-    MOD_INC_USE_COUNT;
-    return(0);
-}
-
-static int s3trio_release(struct fb_info *info, int user)
-{
-    MOD_DEC_USE_COUNT;
-    return(0);
-}
-
 
     /*
      *  Get the Fixed Part of the Display
@@ -282,20 +260,13 @@ static int s3trio_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 }
 
 
-static int s3trio_ioctl(struct inode *inode, struct file *file, u_int cmd,
-			u_long arg, int con, struct fb_info *info)
-{
-    return -EINVAL;
-}
-
 int __init s3triofb_init(void)
 {
-#ifdef __powerpc__
-    /* We don't want to be called like this. */
-    /* We rely on Open Firmware (offb) instead. */
-#else /* !__powerpc__ */
-    /* To be merged with cybervision */
-#endif /* !__powerpc__ */
+	struct device_node *dp;
+
+	dp = find_devices("S3Trio");
+	if (dp != 0)
+	    s3triofb_of_init(dp);
 	return 0;
 }
 
@@ -403,10 +374,10 @@ int __init s3trio_init(struct device_node *dp){
      *  We heavily rely on OF for the moment. This needs fixing.
      */
 
-void __init s3triofb_init_of(struct device_node *dp)
+static void __init s3triofb_of_init(struct device_node *dp)
 {
     int i, *pp, len;
-    unsigned long address;
+    unsigned long address, size;
     u_long *CursorBase;
 
     strncat(s3trio_name, dp->name, sizeof(s3trio_name));
@@ -443,9 +414,13 @@ void __init s3triofb_init_of(struct device_node *dp)
 	fb_fix.line_length = fb_var.xres_virtual;
     fb_fix.smem_len = fb_fix.line_length*fb_var.yres;
 
-    s3trio_init(dp);
     address = 0xc6000000;
-    s3trio_base = ioremap(address,64*1024*1024);
+    size = 64*1024*1024;
+    if (!request_mem_region(address, size, "S3triofb"))
+	return;
+
+    s3trio_init(dp);
+    s3trio_base = ioremap(address, size);
     fb_fix.smem_start = address;
     fb_fix.type = FB_TYPE_PACKED_PIXELS;
     fb_fix.type_aux = 0;
@@ -722,12 +697,6 @@ static void do_install_cmap(int con, struct fb_info *info)
 		    s3trio_setcolreg, &fb_info);
 }
 
-int s3triofb_setup(char *options) {
-
-        return 0;
-
-}
-
 static void Trio_WaitQueue(u_short fifo) {
 
 	u_short status;
@@ -879,8 +848,13 @@ static void fbcon_trio8_revc(struct display *p, int xx, int yy)
 }
 
 static struct display_switch fbcon_trio8 = {
-   fbcon_cfb8_setup, fbcon_trio8_bmove, fbcon_trio8_clear, fbcon_trio8_putc,
-   fbcon_trio8_putcs, fbcon_trio8_revc, NULL, NULL, fbcon_cfb8_clear_margins,
-   FONTWIDTH(8)
+   setup:		fbcon_cfb8_setup,
+   bmove:		fbcon_trio8_bmove,
+   clear:		fbcon_trio8_clear,
+   putc:		fbcon_trio8_putc,
+   putcs:		fbcon_trio8_putcs,
+   revc:		fbcon_trio8_revc,
+   clear_margins:	fbcon_cfb8_clear_margins,
+   fontwidthmask:	FONTWIDTH(8)
 };
 #endif

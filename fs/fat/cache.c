@@ -70,21 +70,21 @@ int default_fat_access(struct super_block *sb,int nr,int new_value)
 	}
 	if (MSDOS_SB(sb)->fat_bits == 32) {
 		p_first = p_last = NULL; /* GCC needs that stuff */
-		next = CF_LE_L(((unsigned long *) bh->b_data)[(first &
+		next = CF_LE_L(((__u32 *) bh->b_data)[(first &
 		    (SECTOR_SIZE-1)) >> 2]);
 		/* Fscking Microsoft marketing department. Their "32" is 28. */
 		next &= 0xfffffff;
 		if (next >= 0xffffff7) next = -1;
-		PRINTK(("fat_bread: 0x%x, nr=0x%x, first=0x%x, next=0x%d\n", b, nr, first, next));
+		PRINTK(("fat_bread: 0x%x, nr=0x%x, first=0x%x, next=0x%x\n", b, nr, first, next));
 
 	} else if (MSDOS_SB(sb)->fat_bits == 16) {
 		p_first = p_last = NULL; /* GCC needs that stuff */
-		next = CF_LE_W(((unsigned short *) bh->b_data)[(first &
+		next = CF_LE_W(((__u16 *) bh->b_data)[(first &
 		    (SECTOR_SIZE-1)) >> 1]);
 		if (next >= 0xfff7) next = -1;
 	} else {
-		p_first = &((unsigned char *) bh->b_data)[first & (SECTOR_SIZE-1)];
-		p_last = &((unsigned char *) bh2->b_data)[(first+1) &
+		p_first = &((__u8 *) bh->b_data)[first & (SECTOR_SIZE-1)];
+		p_last = &((__u8 *) bh2->b_data)[(first+1) &
 		    (SECTOR_SIZE-1)];
 		if (nr & 1) next = ((*p_first >> 4) | (*p_last << 4)) & 0xfff;
 		else next = (*p_first+(*p_last << 8)) & 0xfff;
@@ -92,10 +92,10 @@ int default_fat_access(struct super_block *sb,int nr,int new_value)
 	}
 	if (new_value != -1) {
 		if (MSDOS_SB(sb)->fat_bits == 32) {
-			((unsigned long *) bh->b_data)[(first & (SECTOR_SIZE-1)) >>
+			((__u32 *) bh->b_data)[(first & (SECTOR_SIZE-1)) >>
 			    2] = CT_LE_L(new_value);
 		} else if (MSDOS_SB(sb)->fat_bits == 16) {
-			((unsigned short *) bh->b_data)[(first & (SECTOR_SIZE-1)) >>
+			((__u16 *) bh->b_data)[(first & (SECTOR_SIZE-1)) >>
 			    1] = CT_LE_W(new_value);
 		} else {
 			if (nr & 1) {
@@ -106,16 +106,16 @@ int default_fat_access(struct super_block *sb,int nr,int new_value)
 				*p_first = new_value & 0xff;
 				*p_last = (*p_last & 0xf0) | (new_value >> 8);
 			}
-			fat_mark_buffer_dirty(sb, bh2, 1);
+			fat_mark_buffer_dirty(sb, bh2);
 		}
-		fat_mark_buffer_dirty(sb, bh, 1);
+		fat_mark_buffer_dirty(sb, bh);
 		for (copy = 1; copy < MSDOS_SB(sb)->fats; copy++) {
 			b = MSDOS_SB(sb)->fat_start + (first >> SECTOR_BITS) +
 				MSDOS_SB(sb)->fat_length * copy;
 			if (!(c_bh = fat_bread(sb, b)))
 				break;
 			memcpy(c_bh->b_data,bh->b_data,SECTOR_SIZE);
-			fat_mark_buffer_dirty(sb, c_bh, 1);
+			fat_mark_buffer_dirty(sb, c_bh);
 			if (bh != bh2) {
 				if (!(c_bh2 = fat_bread(sb, b+1))) {
 					fat_brelse(sb, c_bh);

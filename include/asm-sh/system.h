@@ -2,8 +2,10 @@
 #define __ASM_SH_SYSTEM_H
 
 /*
- * Copyright (C) 1999, 2000  Niibe Yutaka
+ * Copyright (C) 1999, 2000  Niibe Yutaka  &  Kaz Kojima
  */
+
+#include <linux/config.h>
 
 /*
  *	switch_to() should switch tasks to task nr n, first
@@ -13,18 +15,18 @@ typedef struct {
 	unsigned long seg;
 } mm_segment_t;
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #error no SMP SuperH
 #else
 #define prepare_to_switch()	do { } while(0)
 #define switch_to(prev,next,last) do { \
  register struct task_struct *__last; \
- register unsigned long *__ts1 __asm__ ("$r1") = &prev->thread.sp; \
- register unsigned long *__ts2 __asm__ ("$r2") = &prev->thread.pc; \
- register unsigned long *__ts4 __asm__ ("$r4") = (unsigned long *)prev; \
- register unsigned long *__ts5 __asm__ ("$r5") = (unsigned long *)next; \
- register unsigned long *__ts6 __asm__ ("$r6") = &next->thread.sp; \
- register unsigned long __ts7 __asm__ ("$r7") = next->thread.pc; \
+ register unsigned long *__ts1 __asm__ ("r1") = &prev->thread.sp; \
+ register unsigned long *__ts2 __asm__ ("r2") = &prev->thread.pc; \
+ register unsigned long *__ts4 __asm__ ("r4") = (unsigned long *)prev; \
+ register unsigned long *__ts5 __asm__ ("r5") = (unsigned long *)next; \
+ register unsigned long *__ts6 __asm__ ("r6") = &next->thread.sp; \
+ register unsigned long __ts7 __asm__ ("r7") = next->thread.pc; \
  __asm__ __volatile__ (".balign 4\n\t" \
 		       "stc.l	$gbr, @-$r15\n\t" \
 		       "sts.l	$pr, @-$r15\n\t" \
@@ -61,7 +63,7 @@ typedef struct {
 		       :"0" (prev), \
 			"r" (__ts1), "r" (__ts2), \
 			"r" (__ts4), "r" (__ts5), "r" (__ts6), "r" (__ts7) \
-		       :"r3"); \
+		       :"r3", "t"); \
   last = __last; \
 } while (0)
 #endif
@@ -86,31 +88,43 @@ extern void __xchg_called_with_bad_pointer(void);
 #define mb()	__asm__ __volatile__ ("": : :"memory")
 #define rmb()	mb()
 #define wmb()	__asm__ __volatile__ ("": : :"memory")
-#define set_rmb(var, value) do { xchg(&var, value); } while (0)
-#define set_mb(var, value) set_rmb(var, value)
+
+#ifdef CONFIG_SMP
+#define smp_mb()	mb()
+#define smp_rmb()	rmb()
+#define smp_wmb()	wmb()
+#else
+#define smp_mb()	barrier()
+#define smp_rmb()	barrier()
+#define smp_wmb()	barrier()
+#endif
+
+#define set_mb(var, value) do { xchg(&var, value); } while (0)
 #define set_wmb(var, value) do { var = value; wmb(); } while (0)
 
 /* Interrupt Control */
-extern __inline__ void __sti(void)
+static __inline__ void __sti(void)
 {
-	unsigned long __dummy;
+	unsigned long __dummy0, __dummy1;
 
 	__asm__ __volatile__("stc	$sr, %0\n\t"
 			     "and	%1, %0\n\t"
+			     "stc	$r6_bank, %1\n\t"
+			     "or	%1, %0\n\t"
 			     "ldc	%0, $sr"
-			     : "=&r" (__dummy)
-			     : "r" (0xefffffff)
+			     : "=&r" (__dummy0), "=r" (__dummy1)
+			     : "1" (~0x000000f0)
 			     : "memory");
 }
 
-extern __inline__ void __cli(void)
+static __inline__ void __cli(void)
 {
 	unsigned long __dummy;
 	__asm__ __volatile__("stc	$sr, %0\n\t"
-			     "or	%1, %0\n\t"
+			     "or	#0xf0, %0\n\t"
 			     "ldc	%0, $sr"
-			     : "=&r" (__dummy)
-			     : "r" (0x10000000)
+			     : "=&z" (__dummy)
+			     : /* no inputs */
 			     : "memory");
 }
 
@@ -118,33 +132,61 @@ extern __inline__ void __cli(void)
 x = (__extension__ ({	unsigned long __sr;	\
 	__asm__ __volatile__(			\
 		"stc	$sr, %0"		\
-		: "=r" (__sr)			\
+		: "=&r" (__sr)			\
 		: /* no inputs */		\
 		: "memory");			\
-	 (__sr & 0xffff7f0f);}))
+	 (__sr & 0x000000f0);}))
 
 #define __save_and_cli(x)    				\
 x = (__extension__ ({	unsigned long __dummy,__sr;	\
 	__asm__ __volatile__(                   	\
 		"stc	$sr, %1\n\t" 			\
-		"or	%0, %1\n\t" 			\
-		"stc	$sr, %0\n\t" 			\
-		"ldc	%1, $sr"     			\
-		: "=r" (__sr), "=&r" (__dummy) 		\
-		: "0" (0x10000000) 			\
-		: "memory"); (__sr & 0xffff7f0f); }))
+		"mov	%1, %0\n\t" 			\
+		"or	#0xf0, %0\n\t" 			\
+		"ldc	%0, $sr"     			\
+		: "=&z" (__dummy), "=&r" (__sr)		\
+		: /* no inputs */ 			\
+		: "memory"); (__sr & 0x000000f0); }))
 
 #define __restore_flags(x) do { 			\
+	if (x != 0x000000f0)	/* not CLI-ed? */		\
+		__sti();				\
+} while (0)
+
+/*
+ * Jump to P2 area.
+ * When handling TLB or caches, we need to do it from P2 area.
+ */
+#define jump_to_P2()			\
+do {					\
+	unsigned long __dummy;		\
+	__asm__ __volatile__(		\
+		"mov.l	1f, %0\n\t"	\
+		"or	%1, %0\n\t"	\
+		"jmp	@%0\n\t"	\
+		" nop\n\t" 		\
+		".balign 4\n"		\
+		"1:	.long 2f\n"	\
+		"2:"			\
+		: "=&r" (__dummy)	\
+		: "r" (0x20000000));	\
+} while (0)
+
+/*
+ * Back to P1 area.
+ */
+#define back_to_P1()					\
+do {							\
 	unsigned long __dummy;				\
 	__asm__ __volatile__(				\
-		"stc	$sr, %0\n\t"			\
-		"and	%1, %0\n\t"			\
-		"or	%2, %0\n\t"			\
-		"ldc	%0, $sr"			\
-		: "=&r" (__dummy)			\
-		: "r" (0x000080f0), /* IMASK+FD */	\
-		  "r" (x)		 		\
-		: "memory"); 				\
+		"nop;nop;nop;nop;nop;nop;nop\n\t"	\
+		"mov.l	1f, %0\n\t"			\
+		"jmp	@%0\n\t"			\
+		" nop\n\t"				\
+		".balign 4\n"				\
+		"1:	.long 2f\n"			\
+		"2:"					\
+		: "=&r" (__dummy));			\
 } while (0)
 
 /* For spinlocks etc */
@@ -153,7 +195,7 @@ x = (__extension__ ({	unsigned long __dummy,__sr;	\
 #define local_irq_disable()	__cli()
 #define local_irq_enable()	__sti()
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 
 extern void __global_cli(void);
 extern void __global_sti(void);
@@ -174,7 +216,7 @@ extern void __global_restore_flags(unsigned long);
 
 #endif
 
-extern __inline__ unsigned long xchg_u32(volatile int * m, unsigned long val)
+static __inline__ unsigned long xchg_u32(volatile int * m, unsigned long val)
 {
 	unsigned long flags, retval;
 
@@ -185,7 +227,7 @@ extern __inline__ unsigned long xchg_u32(volatile int * m, unsigned long val)
 	return retval;
 }
 
-extern __inline__ unsigned long xchg_u8(volatile unsigned char * m, unsigned long val)
+static __inline__ unsigned long xchg_u8(volatile unsigned char * m, unsigned long val)
 {
 	unsigned long flags, retval;
 

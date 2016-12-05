@@ -40,6 +40,7 @@
  * "current" is in register %ebx during any slow entries.
  */
 
+#include <linux/config.h>
 #include <linux/sys.h>
 #include <linux/linkage.h>
 #include <asm/segment.h>
@@ -76,7 +77,8 @@ sigpending	=  8
 addr_limit	= 12
 exec_domain	= 16
 need_resched	= 20
-processor	= 56
+tsk_ptrace	= 24
+processor	= 52
 
 ENOSYS = 38
 
@@ -128,8 +130,8 @@ ENOSYS = 38
 .previous
 
 #define GET_CURRENT(reg) \
-	movl %esp, reg; \
-	andl $-8192, reg;
+	movl $-8192, reg; \
+	andl %esp, reg
 
 ENTRY(lcall7)
 	pushfl			# We get a different stack layout with call gates,
@@ -174,14 +176,12 @@ ENTRY(lcall27)
 	jmp ret_from_sys_call
 
 
-	ALIGN
-	.globl	ret_from_fork
-ret_from_fork:
+ENTRY(ret_from_fork)
 	pushl %ebx
 	call SYMBOL_NAME(schedule_tail)
 	addl $4, %esp
 	GET_CURRENT(%ebx)
-	testb $0x20,flags(%ebx)		# PF_TRACESYS
+	testb $0x02,tsk_ptrace(%ebx)	# PT_TRACESYS
 	jne tracesys_exit
 	jmp	ret_from_sys_call
 
@@ -198,22 +198,19 @@ ENTRY(system_call)
 	GET_CURRENT(%ebx)
 	cmpl $(NR_syscalls),%eax
 	jae badsys
-	testb $0x20,flags(%ebx)		# PF_TRACESYS
+	testb $0x02,tsk_ptrace(%ebx)	# PT_TRACESYS
 	jne tracesys
 	call *SYMBOL_NAME(sys_call_table)(,%eax,4)
 	movl %eax,EAX(%esp)		# save the return value
-	ALIGN
-	.globl ret_from_sys_call
-	.globl ret_from_intr
-ret_from_sys_call:
-#ifdef __SMP__
+ENTRY(ret_from_sys_call)
+#ifdef CONFIG_SMP
 	movl processor(%ebx),%eax
-	shll $5,%eax
-	movl SYMBOL_NAME(softirq_state)(,%eax),%ecx
-	testl SYMBOL_NAME(softirq_state)+4(,%eax),%ecx
+	shll $CONFIG_X86_L1_CACHE_SHIFT,%eax
+	movl SYMBOL_NAME(irq_stat)(,%eax),%ecx		# softirq_active
+	testl SYMBOL_NAME(irq_stat)+4(,%eax),%ecx	# softirq_mask
 #else
-	movl SYMBOL_NAME(softirq_state),%ecx
-	testl SYMBOL_NAME(softirq_state)+4,%ecx
+	movl SYMBOL_NAME(irq_stat),%ecx		# softirq_active
+	testl SYMBOL_NAME(irq_stat)+4,%ecx	# softirq_mask
 #endif
 	jne   handle_softirq
 	
@@ -261,20 +258,19 @@ badsys:
 
 	ALIGN
 ret_from_exception:
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	GET_CURRENT(%ebx)
 	movl processor(%ebx),%eax
-	shll $5,%eax
-	movl SYMBOL_NAME(softirq_state)(,%eax),%ecx
-	testl SYMBOL_NAME(softirq_state)+4(,%eax),%ecx
+	shll $CONFIG_X86_L1_CACHE_SHIFT,%eax
+	movl SYMBOL_NAME(irq_stat)(,%eax),%ecx		# softirq_active
+	testl SYMBOL_NAME(irq_stat)+4(,%eax),%ecx	# softirq_mask
 #else
-	movl SYMBOL_NAME(softirq_state),%ecx
-	testl SYMBOL_NAME(softirq_state)+4,%ecx
+	movl SYMBOL_NAME(irq_stat),%ecx		# softirq_active
+	testl SYMBOL_NAME(irq_stat)+4,%ecx	# softirq_mask
 #endif
 	jne   handle_softirq
 
-	ALIGN
-ret_from_intr:
+ENTRY(ret_from_intr)
 	GET_CURRENT(%ebx)
 	movl EFLAGS(%esp),%eax		# mix EFLAGS and CS
 	movb CS(%esp),%al
@@ -309,22 +305,29 @@ error_code:
 	pushl %ebx
 	cld
 	movl %es,%ecx
-	xchgl %eax, ORIG_EAX(%esp)	# orig_eax (get the error code. )
+	movl ORIG_EAX(%esp), %esi	# get the error code
+	movl ES(%esp), %edi		# get the function address
+	movl %eax, ORIG_EAX(%esp)
+	movl %ecx, ES(%esp)
 	movl %esp,%edx
-	xchgl %ecx, ES(%esp)		# get the address and save es.
-	pushl %eax			# push the error code
-	pushl %edx
+	pushl %esi			# push the error code
+	pushl %edx			# push the pt_regs pointer
 	movl $(__KERNEL_DS),%edx
 	movl %edx,%ds
 	movl %edx,%es
 	GET_CURRENT(%ebx)
-	call *%ecx
+	call *%edi
 	addl $8,%esp
 	jmp ret_from_exception
 
 ENTRY(coprocessor_error)
 	pushl $0
 	pushl $ SYMBOL_NAME(do_coprocessor_error)
+	jmp error_code
+
+ENTRY(simd_coprocessor_error)
+	pushl $0
+	pushl $ SYMBOL_NAME(do_simd_coprocessor_error)
 	jmp error_code
 
 ENTRY(device_not_available)
@@ -380,11 +383,6 @@ ENTRY(coprocessor_segment_overrun)
 	pushl $ SYMBOL_NAME(do_coprocessor_segment_overrun)
 	jmp error_code
 
-ENTRY(reserved)
-	pushl $0
-	pushl $ SYMBOL_NAME(do_reserved)
-	jmp error_code
-
 ENTRY(double_fault)
 	pushl $ SYMBOL_NAME(do_double_fault)
 	jmp error_code
@@ -411,6 +409,11 @@ ENTRY(alignment_check)
 
 ENTRY(page_fault)
 	pushl $ SYMBOL_NAME(do_page_fault)
+	jmp error_code
+
+ENTRY(machine_check)
+	pushl $0
+	pushl $ SYMBOL_NAME(do_machine_check)
 	jmp error_code
 
 ENTRY(spurious_interrupt_bug)
@@ -638,7 +641,11 @@ ENTRY(sys_call_table)
 	.long SYMBOL_NAME(sys_setfsuid)		/* 215 */
 	.long SYMBOL_NAME(sys_setfsgid)
 	.long SYMBOL_NAME(sys_pivot_root)
-
+	.long SYMBOL_NAME(sys_mincore)
+	.long SYMBOL_NAME(sys_madvise)
+	.long SYMBOL_NAME(sys_getdents64)	/* 220 */
+	.long SYMBOL_NAME(sys_fcntl64)
+	.long SYMBOL_NAME(sys_ni_syscall)	/* reserved for TUX */
 
 	/*
 	 * NOTE!! This doesn't have to be exact - we just have
@@ -646,6 +653,6 @@ ENTRY(sys_call_table)
 	 * entries. Don't panic if you notice that this hasn't
 	 * been shrunk every time we add a new system call.
 	 */
-	.rept NR_syscalls-217
+	.rept NR_syscalls-221
 		.long SYMBOL_NAME(sys_ni_syscall)
 	.endr

@@ -18,6 +18,10 @@
  *   the definition is inactivated, but I still used it.  It turns out this
  *   actually happens a few times in the kernel source.  The simple way to
  *   fix this problem is to remove this particular optimization.
+ *
+ * 2.3.99-pre1, Andrew Morton <andrewm@uow.edu.au>
+ * - Changed so that 'filename.o' depends upon 'filename.[cS]'.  This is so that
+ *   missing source files are noticed, rather than silently ignored.
  */
 
 #include <ctype.h>
@@ -47,6 +51,8 @@ struct path_struct {
 };
 
 
+/* Current input file */
+static const char *g_filename;
 
 /*
  * This records all the configuration options seen.
@@ -58,7 +64,16 @@ char * str_config  = NULL;
 int    size_config = 0;
 int    len_config  = 0;
 
-
+static void
+do_depname(void)
+{
+	if (!hasdep) {
+		hasdep = 1;
+		printf("%s:", depname);
+		if (g_filename)
+			printf(" %s", g_filename);
+	}
+}
 
 /*
  * Grow the configuration string to a desired length.
@@ -66,15 +81,9 @@ int    len_config  = 0;
  */
 void grow_config(int len)
 {
-	if (str_config == NULL) {
-		len_config  = 0;
-		size_config = 4096;
-		str_config  = malloc(4096);
-		if (str_config == NULL)
-			{ perror("malloc"); exit(1); }
-	}
-
 	while (len_config + len > size_config) {
+		if (size_config == 0)
+			size_config = 2048;
 		str_config = realloc(str_config, size_config *= 2);
 		if (str_config == NULL)
 			{ perror("malloc config"); exit(1); }
@@ -142,15 +151,9 @@ int    len_precious  = 0;
  */
 void grow_precious(int len)
 {
-	if (str_precious == NULL) {
-		len_precious  = 0;
-		size_precious = 4096;
-		str_precious  = malloc(4096);
-		if (str_precious == NULL)
-			{ perror("malloc precious"); exit(1); }
-	}
-
 	while (len_precious + len > size_precious) {
+		if (size_precious == 0)
+			size_precious = 2048;
 		str_precious = realloc(str_precious, size_precious *= 2);
 		if (str_precious == NULL)
 			{ perror("malloc"); exit(1); }
@@ -193,10 +196,7 @@ void handle_include(int type, const char * name, int len)
 	if (access(path->buffer, F_OK) != 0)
 		return;
 
-	if (!hasdep) {
-		hasdep = 1;
-		printf("%s:", depname);
-	}
+	do_depname();
 	printf(" \\\n   %s", path->buffer);
 }
 
@@ -227,10 +227,7 @@ void use_config(const char * name, int len)
 
 	define_config(pc, len);
 
-	if (!hasdep) {
-		hasdep = 1;
-		printf("%s: ", depname);
-	}
+	do_depname();
 	printf(" \\\n   $(wildcard %s.h)", path_array[0].buffer);
 }
 
@@ -276,8 +273,8 @@ void use_config(const char * name, int len)
  */
 #define MAX2(a,b) ((a)>(b)?(a):(b))
 #define MIN2(a,b) ((a)<(b)?(a):(b))
-#define MAX6(a,b,c,d,e,f) (MAX2(a,MAX2(b,MAX2(c,MAX2(d,MAX2(e,f))))))
-#define MIN6(a,b,c,d,e,f) (MIN2(a,MIN2(b,MIN2(c,MIN2(d,MIN2(e,f))))))
+#define MAX5(a,b,c,d,e) (MAX2(a,MAX2(b,MAX2(c,MAX2(d,e)))))
+#define MIN5(a,b,c,d,e) (MIN2(a,MIN2(b,MIN2(c,MIN2(d,e)))))
 
 
 
@@ -285,18 +282,18 @@ void use_config(const char * name, int len)
  * The state machine looks for (approximately) these Perl regular expressions:
  *
  *    m|\/\*.*?\*\/|
+ *    m|\/\/.*|
  *    m|'.*?'|
  *    m|".*?"|
  *    m|#\s*include\s*"(.*?)"|
  *    m|#\s*include\s*<(.*?>"|
  *    m|#\s*(?define|undef)\s*CONFIG_(\w*)|
  *    m|(?!\w)CONFIG_|
- *    m|__SMP__|
  *
  * About 98% of the CPU time is spent here, and most of that is in
  * the 'start' paragraph.  Because the current characters are
  * in a register, the start loop usually eats 4 or 8 characters
- * per memory read.  The MAX6 and MIN6 tests dispose of most
+ * per memory read.  The MAX5 and MIN5 tests dispose of most
  * input characters with 1 or 2 comparisons.
  */
 void state_machine(const char * map, const char * end)
@@ -309,19 +306,27 @@ void state_machine(const char * map, const char * end)
 start:
 	GETNEXT
 __start:
-	if (current > MAX6('/','\'','"','#','C','_')) goto start;
-	if (current < MIN6('/','\'','"','#','C','_')) goto start;
+	if (current > MAX5('/','\'','"','#','C')) goto start;
+	if (current < MIN5('/','\'','"','#','C')) goto start;
 	CASE('/',  slash);
 	CASE('\'', squote);
 	CASE('"',  dquote);
 	CASE('#',  pound);
 	CASE('C',  cee);
-	CASE('_',  underscore);
 	goto start;
+
+/* // */
+slash_slash:
+	GETNEXT
+	CASE('\n', start);
+	NOTCASE('\\', slash_slash);
+	GETNEXT
+	goto slash_slash;
 
 /* / */
 slash:
 	GETNEXT
+	CASE('/',  slash_slash);
 	NOTCASE('*', __start);
 slash_star_dot_star:
 	GETNEXT
@@ -455,18 +460,6 @@ cee_CONFIG_word:
 		goto cee_CONFIG_word;
 	use_config(map_dot, next - map_dot - 1);
 	goto __start;
-
-/* __SMP__ */
-underscore:
-	GETNEXT NOTCASE('_', __start);
-	GETNEXT NOTCASE('S', __start);
-	GETNEXT NOTCASE('M', __start);
-	GETNEXT NOTCASE('P', __start);
-	GETNEXT NOTCASE('_', __start);
-	GETNEXT NOTCASE('_', __start);
-	use_config("SMP", 3);
-	goto __start;
-
     }
 }
 
@@ -549,11 +542,13 @@ int main(int argc, char **argv)
 	while (--argc > 0) {
 		const char * filename = *++argv;
 		const char * command  = __depname;
+		g_filename = 0;
 		len = strlen(filename);
 		memcpy(depname, filename, len+1);
 		if (len > 2 && filename[len-2] == '.') {
 			if (filename[len-1] == 'c' || filename[len-1] == 'S') {
 			    depname[len-1] = 'o';
+			    g_filename = filename;
 			    command = "";
 			}
 		}

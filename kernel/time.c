@@ -34,7 +34,7 @@
  * The timezone where the local system is located.  Used as a default by some
  * programs who obtain this value by using gettimeofday.
  */
-struct timezone sys_tz = { 0, 0};
+struct timezone sys_tz;
 
 static void do_normal_gettime(struct timeval * tm)
 {
@@ -202,23 +202,23 @@ asmlinkage long sys_settimeofday(struct timeval *tv, struct timezone *tz)
 	return do_sys_settimeofday(tv ? &new_tv : NULL, tz ? &new_tz : NULL);
 }
 
-long pps_offset = 0;		/* pps time offset (us) */
+long pps_offset;		/* pps time offset (us) */
 long pps_jitter = MAXTIME;	/* time dispersion (jitter) (us) */
 
-long pps_freq = 0;		/* frequency offset (scaled ppm) */
+long pps_freq;			/* frequency offset (scaled ppm) */
 long pps_stabil = MAXFREQ;	/* frequency dispersion (scaled ppm) */
 
 long pps_valid = PPS_VALID;	/* pps signal watchdog counter */
 
 int pps_shift = PPS_SHIFT;	/* interval duration (s) (shift) */
 
-long pps_jitcnt = 0;		/* jitter limit exceeded */
-long pps_calcnt = 0;		/* calibration intervals */
-long pps_errcnt = 0;		/* calibration errors */
-long pps_stbcnt = 0;		/* stability limit exceeded */
+long pps_jitcnt;		/* jitter limit exceeded */
+long pps_calcnt;		/* calibration intervals */
+long pps_errcnt;		/* calibration errors */
+long pps_stbcnt;		/* stability limit exceeded */
 
 /* hook for a loadable hardpps kernel module */
-void (*hardpps_ptr)(struct timeval *) = (void (*)(struct timeval *))0;
+void (*hardpps_ptr)(struct timeval *);
 
 /* adjtimex mainly allows reading (and writing, if superuser) of
  * kernel time-keeping variables. used by xntpd.

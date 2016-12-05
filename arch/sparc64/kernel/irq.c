@@ -1,4 +1,4 @@
-/* $Id: irq.c,v 1.85 2000/03/02 02:00:24 davem Exp $
+/* $Id: irq.c,v 1.94 2000/09/21 06:27:10 anton Exp $
  * irq.c: UltraSparc IRQ handling/init/registry.
  *
  * Copyright (C) 1997  David S. Miller  (davem@caip.rutgers.edu)
@@ -31,12 +31,13 @@
 #include <asm/smp.h>
 #include <asm/hardirq.h>
 #include <asm/softirq.h>
+#include <asm/starfire.h>
 
 /* Internal flag, should not be visible elsewhere at all. */
 #define SA_IMAP_MASKED		0x100
 #define SA_DMA_SYNC		0x200
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 static void distribute_irqs(void);
 #endif
 
@@ -55,11 +56,24 @@ static void distribute_irqs(void);
 
 struct ino_bucket ivector_table[NUM_IVECS] __attribute__ ((aligned (64)));
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 unsigned int __up_workvec[16] __attribute__ ((aligned (64)));
 #define irq_work(__cpu, __pil)	&(__up_workvec[(void)(__cpu), (__pil)])
 #else
 #define irq_work(__cpu, __pil)	&(cpu_data[(__cpu)].irq_worklists[(__pil)])
+#endif
+
+#ifdef CONFIG_PCI
+/* This is a table of physical addresses used to deal with SA_DMA_SYNC.
+ * It is used for PCI only to synchronize DMA transfers with IRQ delivery
+ * for devices behind busses other than APB on Sabre systems.
+ *
+ * Currently these physical addresses are just config space accesses
+ * to the command register for that device.
+ */
+unsigned long pci_dma_wsync;
+unsigned long dma_sync_reg_table[256];
+unsigned char dma_sync_reg_table_entry = 0;
 #endif
 
 /* This is based upon code in the 32-bit Sparc kernel written mostly by
@@ -79,7 +93,7 @@ int get_irq_list(char *buf)
 {
 	int i, len = 0;
 	struct irqaction *action;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	int j;
 #endif
 
@@ -87,7 +101,7 @@ int get_irq_list(char *buf)
 		if(!(action = *(i + irq_action)))
 			continue;
 		len += sprintf(buf + len, "%3d: ", i);
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 		len += sprintf(buf + len, "%10u ", kstat_irqs(i));
 #else
 		for (j = 0; j < smp_num_cpus; j++)
@@ -110,7 +124,6 @@ int get_irq_list(char *buf)
 /* Now these are always passed a true fully specified sun4u INO. */
 void enable_irq(unsigned int irq)
 {
-	extern int this_is_starfire;
 	struct ino_bucket *bucket = __bucket(irq);
 	unsigned long imap;
 	unsigned long tid;
@@ -126,9 +139,6 @@ void enable_irq(unsigned int irq)
 				     : "i" (ASI_UPA_CONFIG));
 		tid = ((tid & UPA_CONFIG_MID) << 9);
 	} else {
-		extern unsigned int starfire_translate(unsigned long imap,
-						       unsigned int upaid);
-
 		tid = (starfire_translate(imap, current->processor) << 26);
 	}
 
@@ -280,8 +290,6 @@ int request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *)
 			/*
 			 * Check wether we _should_ use DMA Write Sync
 			 * (for devices behind bridges behind APB). 
-			 *
-			 * XXX: Not implemented, yet.
 			 */
 			if (bucket->flags & IBF_DMA_SYNC)
 				irqflags |= SA_DMA_SYNC;
@@ -409,7 +417,7 @@ int request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *)
 	}
 	restore_flags(flags);
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	distribute_irqs();
 #endif
 	return 0;
@@ -537,83 +545,38 @@ out:
 	restore_flags(flags);
 }
 
-/* Only uniprocessor needs this IRQ/BH locking depth, on SMP it
- * lives in the per-cpu structure for cache reasons.
- */
-#ifndef __SMP__
-unsigned int local_irq_count;
-unsigned int local_bh_count;
+#ifdef CONFIG_SMP
 
-#define irq_enter(cpu, irq)	(local_irq_count++)
-#define irq_exit(cpu, irq)	(local_irq_count--)
-#else
-
-/* Who has global_irq_lock. */
+/* Who has the global irq brlock */
 unsigned char global_irq_holder = NO_PROC_ID;
-
-/* This protects IRQ's. */
-spinlock_t global_irq_lock = SPIN_LOCK_UNLOCKED;
-
-/* Global IRQ locking depth. */
-atomic_t global_irq_count = ATOMIC_INIT(0);
-
-#define irq_enter(cpu, irq)			\
-do {	hardirq_enter(cpu);			\
-	spin_unlock_wait(&global_irq_lock);	\
-} while(0)
-#define irq_exit(cpu, irq)	hardirq_exit(cpu)
 
 static void show(char * str)
 {
 	int cpu = smp_processor_id();
+	int i;
 
 	printk("\n%s, CPU %d:\n", str, cpu);
-	printk("irq:  %d [%u %u]\n",
-	       atomic_read(&global_irq_count),
-	       cpu_data[0].irq_count, cpu_data[1].irq_count);
-	printk("bh:   %d [%u %u]\n",
-	       (spin_is_locked(&global_bh_lock) ? 1 : 0),
-	       cpu_data[0].bh_count, cpu_data[1].bh_count);
+	printk("irq:  %d [ ", irqs_running());
+	for (i = 0; i < smp_num_cpus; i++)
+		printk("%u ", __brlock_array[i][BR_GLOBALIRQ_LOCK]);
+	printk("]\nbh:   %d [ ",
+	       (spin_is_locked(&global_bh_lock) ? 1 : 0));
+	for (i = 0; i < smp_num_cpus; i++)
+		printk("%u ", local_bh_count(i));
+	printk("]\n");
 }
 
 #define MAXCOUNT 100000000
 
+#if 0
 #define SYNC_OTHER_ULTRAS(x)	udelay(x+1)
-
-static inline void wait_on_irq(int cpu)
-{
-	int count = MAXCOUNT;
-	for(;;) {
-		membar("#LoadLoad");
-		if (!atomic_read (&global_irq_count)) {
-			if (local_bh_count || ! spin_is_locked(&global_bh_lock))
-				break;
-		}
-		spin_unlock (&global_irq_lock);
-		membar("#StoreLoad | #StoreStore");
-		for(;;) {
-			if (!--count) {
-				show("wait_on_irq");
-				count = ~0;
-			}
-			__sti();
-			SYNC_OTHER_ULTRAS(cpu);
-			__cli();
-			if (atomic_read(&global_irq_count))
-				continue;
-			if (spin_is_locked (&global_irq_lock))
-				continue;
-			if (!local_bh_count && spin_is_locked (&global_bh_lock))
-				continue;
-			if (spin_trylock(&global_irq_lock))
-				break;
-		}
-	}
-}
+#else
+#define SYNC_OTHER_ULTRAS(x)	membar("#Sync");
+#endif
 
 void synchronize_irq(void)
 {
-	if (atomic_read(&global_irq_count)) {
+	if (irqs_running()) {
 		cli();
 		sti();
 	}
@@ -621,15 +584,37 @@ void synchronize_irq(void)
 
 static inline void get_irqlock(int cpu)
 {
-	if (! spin_trylock(&global_irq_lock)) {
-		if ((unsigned char) cpu == global_irq_holder)
-			return;
-		do {
-			while (spin_is_locked (&global_irq_lock))
-				membar("#LoadLoad");
-		} while(! spin_trylock(&global_irq_lock));
+	int count;
+
+	if ((unsigned char)cpu == global_irq_holder)
+		return;
+
+	count = MAXCOUNT;
+again:
+	br_write_lock(BR_GLOBALIRQ_LOCK);
+	for (;;) {
+		spinlock_t *lock;
+
+		if (!irqs_running() &&
+		    (local_bh_count(smp_processor_id()) || !spin_is_locked(&global_bh_lock)))
+			break;
+
+		br_write_unlock(BR_GLOBALIRQ_LOCK);
+		lock = &__br_write_locks[BR_GLOBALIRQ_LOCK].lock;
+		while (irqs_running() ||
+		       spin_is_locked(lock) ||
+		       (!local_bh_count(smp_processor_id()) && spin_is_locked(&global_bh_lock))) {
+			if (!--count) {
+				show("get_irqlock");
+				count = (~0 >> 1);
+			}
+			__sti();
+			SYNC_OTHER_ULTRAS(cpu);
+			__cli();
+		}
+		goto again;
 	}
-	wait_on_irq(cpu);
+
 	global_irq_holder = cpu;
 }
 
@@ -641,7 +626,7 @@ void __global_cli(void)
 	if(flags == 0) {
 		int cpu = smp_processor_id();
 		__cli();
-		if (! local_irq_count)
+		if (! local_irq_count(cpu))
 			get_irqlock(cpu);
 	}
 }
@@ -650,7 +635,7 @@ void __global_sti(void)
 {
 	int cpu = smp_processor_id();
 
-	if (! local_irq_count)
+	if (! local_irq_count(cpu))
 		release_irqlock(cpu);
 	__sti();
 }
@@ -662,7 +647,7 @@ unsigned long __global_save_flags(void)
 	__save_flags(flags);
 	local_enabled = ((flags == 0) ? 1 : 0);
 	retval = 2 + local_enabled;
-	if (! local_irq_count) {
+	if (! local_irq_count(smp_processor_id())) {
 		if (local_enabled)
 			retval = 1;
 		if (global_irq_holder == (unsigned char) smp_processor_id())
@@ -696,7 +681,7 @@ void __global_restore_flags(unsigned long flags)
 	}
 }
 
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 
 void catch_disabled_ivec(struct pt_regs *regs)
 {
@@ -726,8 +711,7 @@ void handler_irq(int irq, struct pt_regs *regs)
 {
 	struct ino_bucket *bp, *nbp;
 	int cpu = smp_processor_id();
-#ifdef __SMP__
-	extern int this_is_starfire;
+#ifdef CONFIG_SMP
 	int should_forward = (this_is_starfire == 0	&&
 			      irq < 10			&&
 			      current->pid != 0);
@@ -736,20 +720,20 @@ void handler_irq(int irq, struct pt_regs *regs)
 	/* 'cpu' is the MID (ie. UPAID), calculate the MID
 	 * of our buddy.
 	 */
-	if(should_forward != 0) {
+	if (should_forward != 0) {
 		buddy = cpu_number_map(cpu) + 1;
 		if (buddy >= NR_CPUS ||
 		    (buddy = cpu_logical_map(buddy)) == -1)
 			buddy = cpu_logical_map(0);
 
 		/* Voo-doo programming. */
-		if(cpu_data[buddy].idle_volume < FORWARD_VOLUME)
+		if (cpu_data[buddy].idle_volume < FORWARD_VOLUME)
 			should_forward = 0;
 		buddy <<= 26;
 	}
 #endif
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	/*
 	 * Check for TICK_INT on level 14 softint.
 	 */
@@ -762,33 +746,39 @@ void handler_irq(int irq, struct pt_regs *regs)
 	kstat.irqs[cpu][irq]++;
 
 	/* Sliiiick... */
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	bp = ((irq != 0) ?
 	      __bucket(xchg32(irq_work(cpu, irq), 0)) :
 	      &pil0_dummy_bucket);
 #else
 	bp = __bucket(xchg32(irq_work(cpu, irq), 0));
 #endif
-	for( ; bp != NULL; bp = nbp) {
+	for ( ; bp != NULL; bp = nbp) {
 		unsigned char flags = bp->flags;
 
 		nbp = __bucket(bp->irq_chain);
-		if((flags & IBF_ACTIVE) != 0) {
-			if((flags & IBF_MULTI) == 0) {
+		if ((flags & IBF_ACTIVE) != 0) {
+#ifdef CONFIG_PCI
+			if ((flags & IBF_DMA_SYNC) != 0) {
+				upa_readl(dma_sync_reg_table[bp->synctab_ent]);
+				upa_readq(pci_dma_wsync);
+			}
+#endif
+			if ((flags & IBF_MULTI) == 0) {
 				struct irqaction *ap = bp->irq_info;
 				ap->handler(__irq(bp), ap->dev_id, regs);
 			} else {
 				void **vector = (void **)bp->irq_info;
 				int ent;
-				for(ent = 0; ent < 4; ent++) {
+				for (ent = 0; ent < 4; ent++) {
 					struct irqaction *ap = vector[ent];
-					if(ap != NULL)
+					if (ap != NULL)
 						ap->handler(__irq(bp), ap->dev_id, regs);
 				}
 			}
 			/* Only the dummy bucket lacks IMAP/ICLR. */
-			if(bp->pil != 0) {
-#ifdef __SMP__
+			if (bp->pil != 0) {
+#ifdef CONFIG_SMP
 				/* Ok, here is what is going on:
 				 * 1) Retargeting IRQs on Starfire is very
 				 *    expensive so just forget about it on them.
@@ -932,7 +922,7 @@ int request_fast_irq(unsigned int irq,
 
 	restore_flags(flags);
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	distribute_irqs();
 #endif
 	return 0;
@@ -958,14 +948,14 @@ void init_timers(void (*cfunc)(int, void *, struct pt_regs *),
 	unsigned long pstate;
 	extern unsigned long timer_tick_offset;
 	int node, err;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	extern void smp_tick_init(void);
 #endif
 
 	node = linux_cpus[0].prom_node;
 	*clock = prom_getint(node, "clock-frequency");
 	timer_tick_offset = *clock / HZ;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	smp_tick_init();
 #endif
 
@@ -1032,10 +1022,9 @@ void init_timers(void (*cfunc)(int, void *, struct pt_regs *),
 	sti();
 }
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 static int retarget_one_irq(struct irqaction *p, int goal_cpu)
 {
-	extern int this_is_starfire;
 	struct ino_bucket *bucket = __bucket(p->mask);
 	unsigned long imap = bucket->imap;
 	unsigned int tid;
@@ -1047,9 +1036,6 @@ static int retarget_one_irq(struct irqaction *p, int goal_cpu)
 	if(this_is_starfire == 0) {
 		tid = __cpu_logical_map[goal_cpu] << 26;
 	} else {
-		extern unsigned int starfire_translate(unsigned long imap,
-						       unsigned int upaid);
-
 		tid = (starfire_translate(imap, __cpu_logical_map[goal_cpu]) << 26);
 	}
 	upa_writel(IMAP_VALID | (tid & IMAP_TID), imap);
@@ -1159,7 +1145,7 @@ void __init init_IRQ(void)
 		map_prom_timers();
 		kill_prom_timer();
 		memset(&ivector_table[0], 0, sizeof(ivector_table));
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 		memset(&__up_workvec[0], 0, sizeof(__up_workvec));
 #endif
 	}

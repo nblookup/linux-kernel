@@ -1,4 +1,4 @@
-/* $Id: ebus.c,v 1.46 1999/11/19 05:52:48 davem Exp $
+/* $Id: ebus.c,v 1.53 2000/11/08 05:08:23 davem Exp $
  * ebus.c: PCI to EBus bridge device.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -22,17 +22,8 @@
 
 struct linux_ebus *ebus_chain = 0;
 
-#ifdef CONFIG_SUN_OPENPROMIO
-extern int openprom_init(void);
-#endif
 #ifdef CONFIG_SUN_AUXIO
 extern void auxio_probe(void);
-#endif
-#ifdef CONFIG_OBP_FLASH
-extern int flash_init(void);
-#endif
-#ifdef CONFIG_ENVCTRL
-extern int envctrl_init(void);
 #endif
 
 static inline void *ebus_alloc(size_t size)
@@ -278,7 +269,6 @@ void __init ebus_init(void)
 	struct linux_ebus *ebus;
 	struct pci_dev *pdev;
 	struct pcidev_cookie *cookie;
-	unsigned short pci_command;
 	int nd, ebusnd;
 	int num_ebus = 0;
 
@@ -328,17 +318,6 @@ void __init ebus_init(void)
 		ebus->self = pdev;
 		ebus->parent = pbm = cookie->pbm;
 
-		/* Enable BUS Master. */
-		pci_read_config_word(pdev, PCI_COMMAND, &pci_command);
-		pci_command |= PCI_COMMAND_MASTER;
-		pci_write_config_word(pdev, PCI_COMMAND, pci_command);
-
-		/* Set reasonable cache line size and latency timer values. */
-		pci_write_config_byte(pdev, PCI_LATENCY_TIMER, 64);
-
-		/* NOTE: Cache line size is in 32-bit word units. */
-		pci_write_config_byte(pdev, PCI_CACHE_LINE_SIZE, 64/sizeof(u32));
-
 		ebus_ranges_init(ebus);
 		ebus_intmap_init(ebus);
 
@@ -381,20 +360,8 @@ void __init ebus_init(void)
 		++num_ebus;
 	}
 
-#ifdef CONFIG_SUN_OPENPROMIO
-	openprom_init();
-#endif
-#ifdef CONFIG_SUN_BPP
-	bpp_init();
-#endif
 #ifdef CONFIG_SUN_AUXIO
 	auxio_probe();
-#endif
-#ifdef CONFIG_ENVCTRL
-	envctrl_init();
-#endif
-#ifdef CONFIG_OBP_FLASH
-	flash_init();
 #endif
 	clock_probe();
 	power_init();

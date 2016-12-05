@@ -14,6 +14,7 @@
  * Changes:
  *	Alan Cox		Modularisation
  *	Christoph Hellwig	Adapted to module_init/module_exit
+ *	Arnaldo C. de Melo	got rid of attach_uart401
  *
  * FIXME:
  * 	Check for install of mpu etc is wrong, should check result of the mss stuff
@@ -25,7 +26,6 @@
 #undef  SB_OK
 
 #include "sound_config.h"
-#include "soundmodule.h"
 
 #include "ad1848.h"
 #include "mpu401.h"
@@ -167,7 +167,7 @@ static void __init attach_opl3sa_wss(struct address_info *hw_config)
 	int nm = num_mixers;
 
 	/* FIXME */
-	attach_ms_sound(hw_config);
+	attach_ms_sound(hw_config, THIS_MODULE);
 	if (num_mixers > nm)	/* A mixer was installed */
 	{
 		AD1848_REROUTE(SOUND_MIXER_LINE1, SOUND_MIXER_CD);
@@ -176,12 +176,6 @@ static void __init attach_opl3sa_wss(struct address_info *hw_config)
 	}
 }
 
-
-static void __init attach_opl3sa_mpu(struct address_info *hw_config)
-{
-	hw_config->name = "OPL3-SA (MPU401)";
-	attach_uart401(hw_config);
-}
 
 static int __init probe_opl3sa_mpu(struct address_info *hw_config)
 {
@@ -196,11 +190,6 @@ static int __init probe_opl3sa_mpu(struct address_info *hw_config)
 	if (mpu_initialized)
 	{
 		DDB(printk("OPL3-SA: MPU mode already initialized\n"));
-		return 0;
-	}
-	if (check_region(hw_config->io_base, 4))
-	{
-		printk(KERN_ERR "OPL3-SA: MPU I/O port conflict (%x)\n", hw_config->io_base);
 		return 0;
 	}
 	if (hw_config->irq > 10)
@@ -237,8 +226,9 @@ static int __init probe_opl3sa_mpu(struct address_info *hw_config)
 	opl3sa_write(0x03, conf);
 
 	mpu_initialized = 1;
+	hw_config->name = "OPL3-SA (MPU401)";
 
-	return probe_uart401(hw_config);
+	return probe_uart401(hw_config, THIS_MODULE);
 }
 
 static void __exit unload_opl3sa_wss(struct address_info *hw_config)
@@ -311,9 +301,6 @@ static int __init init_opl3sa(void)
 	found_mpu=probe_opl3sa_mpu(&cfg_mpu);
 
 	attach_opl3sa_wss(&cfg);
-	if(found_mpu)
-		attach_opl3sa_mpu(&cfg_mpu);
-	SOUND_LOCK;
 	return 0;
 }
 
@@ -322,7 +309,6 @@ static void __exit cleanup_opl3sa(void)
 	if(found_mpu)
 		unload_opl3sa_mpu(&cfg_mpu);
 	unload_opl3sa_wss(&cfg);
-	SOUND_LOCK_END;
 }
 
 module_init(init_opl3sa);

@@ -14,14 +14,15 @@
 #include <linux/blkdev.h>
 #include <linux/raw.h>
 #include <linux/capability.h>
+#include <linux/smp_lock.h>
 #include <asm/uaccess.h>
 
 #define dprintk(x...) 
 
-static struct block_device *raw_device_bindings[256] = {};
-static int raw_device_inuse[256] = {};
-static int raw_device_sector_size[256] = {};
-static int raw_device_sector_bits[256] = {};
+static struct block_device *raw_device_bindings[256];
+static int raw_device_inuse[256];
+static int raw_device_sector_size[256];
+static int raw_device_sector_bits[256];
 
 static ssize_t rw_raw_dev(int rw, struct file *, char *, size_t, loff_t *);
 
@@ -102,7 +103,7 @@ int raw_open(struct inode *inode, struct file *filp)
 	 */
 	
 	sector_size = 512;
-	if (lookup_vfsmnt(rdev) != NULL) {
+	if (get_super(rdev) != NULL) {
 		if (blksize_size[MAJOR(rdev)])
 			sector_size = blksize_size[MAJOR(rdev)][MINOR(rdev)];
 	} else {
@@ -126,9 +127,11 @@ int raw_release(struct inode *inode, struct file *filp)
 	struct block_device *bdev;
 	
 	minor = MINOR(inode->i_rdev);
+	lock_kernel();
 	bdev = raw_device_bindings[minor];
 	blkdev_put(bdev, BDEV_RAW);
 	raw_device_inuse[minor]--;
+	unlock_kernel();
 	return 0;
 }
 

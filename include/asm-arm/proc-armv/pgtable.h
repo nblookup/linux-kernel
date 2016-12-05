@@ -1,17 +1,22 @@
 /*
- * linux/include/asm-arm/proc-armv/pgtable.h
+ *  linux/include/asm-arm/proc-armv/pgtable.h
  *
- * Copyright (C) 1995-1999 Russell King
+ *  Copyright (C) 1995-1999 Russell King
  *
- * 12-Jan-1997	RMK	Altered flushing routines to use function pointers
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  12-Jan-1997	RMK	Altered flushing routines to use function pointers
  *			now possible to combine ARM6, ARM7 and StrongARM versions.
- * 17-Apr-1999	RMK	Now pass an area size to clean_cache_area and
+ *  17-Apr-1999	RMK	Now pass an area size to clean_cache_area and
  *			flush_icache_area.
  */
 #ifndef __ASM_PROC_PGTABLE_H
 #define __ASM_PROC_PGTABLE_H
 
 #include <asm/proc/domain.h>
+#include <asm/arch/vmalloc.h>
 
 /*
  * entries per page directory level: they are two-level, so
@@ -20,19 +25,6 @@
 #define PTRS_PER_PTE		256
 #define PTRS_PER_PMD		1
 #define PTRS_PER_PGD		4096
-
-/*
- * Just any arbitrary offset to the start of the vmalloc VM area: the
- * current 8MB value just means that there will be a 8MB "hole" after the
- * physical memory until the kernel virtual memory starts.  That means that
- * any out-of-bounds memory accesses will hopefully be caught.
- * The vmalloc() routines leaves a hole of 4kB between each vmalloced
- * area for the same reason. ;)
- */
-#define VMALLOC_OFFSET	  (8*1024*1024)
-#define VMALLOC_START	  (((unsigned long)high_memory + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1))
-#define VMALLOC_VMADDR(x) ((unsigned long)(x))
-#define VMALLOC_END       (PAGE_OFFSET + 0x10000000)
 
 /****************
 * PMD functions *
@@ -91,7 +83,7 @@ extern __inline__ unsigned long pmd_page(pmd_t pmd)
 * PTE functions *
 ****************/
 
-/* PTE types (actially level 2 descriptor) */
+/* PTE types (actually level 2 descriptor) */
 #define PTE_TYPE_MASK		0x0003
 #define PTE_TYPE_FAULT		0x0000
 #define PTE_TYPE_LARGE		0x0001
@@ -134,11 +126,11 @@ extern __inline__ unsigned long pmd_page(pmd_t pmd)
  * The following macros handle the cache and bufferable bits...
  */
 #define _L_PTE_DEFAULT	L_PTE_PRESENT | L_PTE_YOUNG
-#define _L_PTE_READ	L_PTE_USER | L_PTE_CACHEABLE
+#define _L_PTE_READ	L_PTE_USER | L_PTE_CACHEABLE | L_PTE_BUFFERABLE
 
 #define PAGE_NONE       __pgprot(_L_PTE_DEFAULT)
-#define PAGE_COPY       __pgprot(_L_PTE_DEFAULT | _L_PTE_READ  | L_PTE_BUFFERABLE)
-#define PAGE_SHARED     __pgprot(_L_PTE_DEFAULT | _L_PTE_READ  | L_PTE_BUFFERABLE | L_PTE_WRITE)
+#define PAGE_COPY       __pgprot(_L_PTE_DEFAULT | _L_PTE_READ)
+#define PAGE_SHARED     __pgprot(_L_PTE_DEFAULT | _L_PTE_READ | L_PTE_WRITE)
 #define PAGE_READONLY   __pgprot(_L_PTE_DEFAULT | _L_PTE_READ)
 #define PAGE_KERNEL     __pgprot(_L_PTE_DEFAULT | L_PTE_CACHEABLE | L_PTE_BUFFERABLE | L_PTE_DIRTY | L_PTE_WRITE)
 

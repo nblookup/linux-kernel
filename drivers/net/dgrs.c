@@ -4,7 +4,7 @@
  *	The RightSwitch is a 4 (EISA) or 6 (PCI) port etherswitch and
  *	a NIC on an internal board.
  *
- *	Author: Rick Richardson, rick@dgii.com, rick_richardson@dgii.com
+ *	Author: Rick Richardson, rick@remotepoint.com
  *	Derived from the SVR4.2 (UnixWare) driver for the same card.
  *
  *	Copyright 1995-1996 Digi International Inc.
@@ -73,7 +73,7 @@
  *
  */
 
-static char *version = "$Id: dgrs.c,v 1.12 1996/12/21 13:43:58 rick Exp $";
+static char *version = "$Id: dgrs.c,v 1.13 2000/06/06 04:07:00 rick Exp $";
 
 #include <linux/version.h>
 #include <linux/module.h>
@@ -129,6 +129,14 @@ typedef unsigned int bool;
 #include "dgrs_ether.h"
 #include "dgrs_asstruct.h"
 #include "dgrs_bcomm.h"
+
+#if LINUX_VERSION_CODE >= 0x20400
+static struct pci_device_id dgrs_pci_tbl[] __initdata = {
+	{ SE6_PCI_VENDOR_ID, SE6_PCI_DEVICE_ID, PCI_ANY_ID, PCI_ANY_ID, },
+	{ }			/* Terminating entry */
+};
+MODULE_DEVICE_TABLE(pci, dgrs_pci_tbl);
+#endif /* LINUX_VERSION_CODE >= 0x20400 */
 
 /*
  *	Firmware.  Compiled separately for local compilation,
@@ -192,7 +200,6 @@ typedef struct
 	/*
 	 *	Stuff for generic ethercard I/F
 	 */
-	char			devname[8];	/* "ethN" string */
 	struct net_device		*next_dev;
 	struct net_device_stats	stats;
 
@@ -207,7 +214,7 @@ typedef struct
         I596_RFD        *rfdp;          /* Current RFD list */
         I596_RBD        *rbdp;          /* Current RBD list */
 
-        int             intrcnt;        /* Count of interrupts */
+        volatile int    intrcnt;        /* Count of interrupts */
 
         /*
          *      SE-4 (EISA) board variables
@@ -789,9 +796,6 @@ static int
 dgrs_open( struct net_device *dev )
 {
 	netif_start_queue(dev);
-
-	MOD_INC_USE_COUNT;
-
 	return (0);
 }
 
@@ -801,9 +805,6 @@ dgrs_open( struct net_device *dev )
 static int dgrs_close( struct net_device *dev )
 {
 	netif_stop_queue(dev);
-
-	MOD_DEC_USE_COUNT;
-
 	return (0);
 }
 
@@ -852,6 +853,8 @@ static int dgrs_ioctl(struct net_device *devN, struct ifreq *ifr, int cmd)
 				return -EFAULT;
 			return (0);
 		case DGRS_SETFILTER:
+			if (!capable(CAP_NET_ADMIN))
+				return -EPERM;
 			if (ioc.port > privN->bcomm->bc_nports)
 				return -EINVAL;
 			if (ioc.filter >= NFILTERS)
@@ -1091,6 +1094,7 @@ dgrs_download(struct net_device *dev0)
 
 	for (i = jiffies + 8 * HZ; time_after(i, jiffies); )
 	{
+		barrier();		/* Gcc 2.95 needs this */
 		if (priv0->bcomm->bc_status >= BC_RUN)
 			break;
 	}
@@ -1182,14 +1186,17 @@ dgrs_probe1(struct net_device *dev)
 	 */
 	if (priv->plxreg)
 		OUTL(dev->base_addr + PLX_LCL2PCI_DOORBELL, 1);
-	rc = request_irq(dev->irq, &dgrs_intr, 0, "RightSwitch", dev);
+	rc = request_irq(dev->irq, &dgrs_intr, SA_SHIRQ, "RightSwitch", dev);
 	if (rc)
 		return (rc);
 
 	priv->intrcnt = 0;
 	for (i = jiffies + 2*HZ + HZ/2; time_after(i, jiffies); )
+	{
+		barrier();		/* gcc 2.95 needs this */
 		if (priv->intrcnt >= 2)
 			break;
+	}
 	if (priv->intrcnt < 2)
 	{
 		printk("%s: Not interrupting on IRQ %d (%d)\n",
@@ -1251,7 +1258,6 @@ dgrs_found_device(
 	dev->priv = ((void *)dev) + sizeof(struct net_device);
 	priv = (DGRS_PRIV *)dev->priv;
 
-	dev->name = priv->devname; /* An empty string. */
 	dev->base_addr = io;
 	dev->mem_start = mem;
 	dev->mem_end = mem + 2048 * 1024 - 1;
@@ -1264,6 +1270,7 @@ dgrs_found_device(
 	priv->devtbl[0] = dev;
 
 	dev->init = dgrs_probe1;
+	SET_MODULE_OWNER(dev);
 	ether_setup(dev);
 	priv->next_dev = dgrs_root_dev;
 	dgrs_root_dev = dev;
@@ -1289,9 +1296,6 @@ dgrs_found_device(
 		memcpy(devN, dev, dev_size);
 		devN->priv = ((void *)devN) + sizeof(struct net_device);
 		privN = (DGRS_PRIV *)devN->priv;
-			/* ... but seset devname to a NULL string */
-		privN->devname[0] = 0;
-		devN->name = privN->devname;
 			/* ... and zero out VM areas */
 		privN->vmem = 0;
 		privN->vplxdma = 0;
@@ -1302,6 +1306,7 @@ dgrs_found_device(
 		privN->chan = i+1;
 		priv->devtbl[i] = devN;
 		devN->init = dgrs_initclone;
+		SET_MODULE_OWNER(dev);
 		ether_setup(devN);
 		privN->next_dev = dgrs_root_dev;
 		dgrs_root_dev = devN;
@@ -1330,34 +1335,15 @@ static int __init  dgrs_scan(void)
 	 */
 	if (pci_present())
 	{
-		int pci_index = 0;
+		struct pci_dev *pdev = NULL;
 
-		for (; pci_index < 8; pci_index++)
+		while ((pdev = pci_find_device(SE6_PCI_VENDOR_ID, SE6_PCI_DEVICE_ID, pdev)) != NULL)
 		{
-			uchar	pci_bus, pci_device_fn;
-#if LINUX_VERSION_CODE < 0x20100
-			uchar	pci_irq;
-#else
-			uint	pci_irq;
-			struct pci_dev *pdev;
-#endif
-			uchar	pci_latency;
-			ushort	pci_command;
-
-			if (pcibios_find_device(SE6_PCI_VENDOR_ID,
-							SE6_PCI_DEVICE_ID,
-							pci_index, &pci_bus,
-							&pci_device_fn))
-					break;
-
-			pdev = pci_find_slot(pci_bus, pci_device_fn);
-			pci_irq = pdev->irq;
-			plxreg = pdev->resource[0].start;
-			io = pdev->resource[1].start;
-			mem = pdev->resource[2].start;
-			pcibios_read_config_dword(pci_bus, pci_device_fn,
-					0x30, &plxdma);
-			irq = pci_irq;
+			plxreg = pci_resource_start (pdev, 0);
+			io = pci_resource_start (pdev, 1);
+			mem = pci_resource_start (pdev, 2);
+			pci_read_config_dword(pdev, 0x30, &plxdma);
+			irq = pdev->irq;
 			plxdma &= ~15;
 
 			/*
@@ -1373,10 +1359,8 @@ static int __init  dgrs_scan(void)
 			OUTL(io + PLX_SPACE0_RANGE, 0xFFE00000L);
 			if (plxdma == 0)
 				plxdma = mem + (2048L * 1024L);
-			pcibios_write_config_dword(pci_bus, pci_device_fn,
-					0x30, plxdma + 1);
-			pcibios_read_config_dword(pci_bus, pci_device_fn,
-					0x30, &plxdma);
+			pci_write_config_dword(pdev, 0x30, plxdma + 1);
+			pci_read_config_dword(pdev, 0x30, &plxdma);
 			plxdma &= ~15;
 
 			/*
@@ -1386,26 +1370,9 @@ static int __init  dgrs_scan(void)
 			 * value to avoid data corruption that occurs when the
 			 * timer expires during a transfer.  Yes, it's a bug.
 			 */
-			pcibios_read_config_word(pci_bus, pci_device_fn,
-						 PCI_COMMAND, &pci_command);
-			if ( ! (pci_command & PCI_COMMAND_MASTER))
-			{
-				printk("  Setting the PCI Master Bit!\n");
-				pci_command |= PCI_COMMAND_MASTER;
-				pcibios_write_config_word(pci_bus,
-						pci_device_fn,
-						PCI_COMMAND, pci_command);
-			}
-			pcibios_read_config_byte(pci_bus, pci_device_fn,
-					 PCI_LATENCY_TIMER, &pci_latency);
-			if (pci_latency != 255)
-			{
-				printk("  Overriding PCI latency timer: "
-					"was %d, now is 255.\n", pci_latency);
-				pcibios_write_config_byte(pci_bus,
-						pci_device_fn,
-						PCI_LATENCY_TIMER, 255);
-			}
+			if (pci_enable_device(pdev))
+				continue;
+			pci_set_master(pdev);
 
 			dgrs_found_device(io, mem, irq, plxreg, plxdma);
 

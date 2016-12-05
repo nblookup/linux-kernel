@@ -45,11 +45,16 @@ enum chipset_type {
 	INTEL_BX,
 	INTEL_GX,
 	INTEL_I810,
+       INTEL_I815,
+	INTEL_I840,
+	INTEL_I850,
 	VIA_GENERIC,
 	VIA_VP3,
 	VIA_MVP3,
 	VIA_MVP4,
 	VIA_APOLLO_PRO,
+	VIA_APOLLO_KX133,
+	VIA_APOLLO_KT133,
 	SIS_GENERIC,
 	AMD_GENERIC,
 	AMD_IRONGATE,
@@ -221,6 +226,25 @@ extern void agp_backend_release(void);
  * by another entity.  (Ensure that all memory
  * it bound is unbound.)
  * 
+ */
+
+typedef struct {
+	void       (*free_memory)(agp_memory *);
+	agp_memory *(*allocate_memory)(size_t, u32);
+	int        (*bind_memory)(agp_memory *, off_t);
+	int        (*unbind_memory)(agp_memory *);
+	void       (*enable)(u32);
+	int        (*acquire)(void);
+	void       (*release)(void);
+	void       (*copy_info)(agp_kern_info *);
+} drm_agp_t;
+
+extern const drm_agp_t *drm_agp_p;
+
+/*
+ * Interface between drm and agp code.  When agp initializes, it makes
+ * the above structure available via inter_module_register(), drm might
+ * use it.  Keith Owens <kaos@ocs.com.au> 28 Oct 2000.
  */
 
 #endif				/* _AGP_BACKEND_H */

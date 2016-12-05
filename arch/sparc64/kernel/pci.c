@@ -1,4 +1,4 @@
-/* $Id: pci.c,v 1.16 2000/03/01 02:53:33 davem Exp $
+/* $Id: pci.c,v 1.20 2000/12/14 22:57:25 davem Exp $
  * pci.c: UltraSparc PCI controller support.
  *
  * Copyright (C) 1997, 1998, 1999 David S. Miller (davem@redhat.com)
@@ -24,7 +24,6 @@ unsigned long pci_memspace_mask = 0xffffffffUL;
 
 #ifndef CONFIG_PCI
 /* A "nop" PCI implementation. */
-int pcibios_present(void) { return 0; }
 asmlinkage int sys_pciconfig_read(unsigned long bus, unsigned long dfn,
 				  unsigned long off, unsigned long len,
 				  unsigned char *buf)
@@ -203,12 +202,6 @@ void pcibios_update_irq(struct pci_dev *pdev, int irq)
 {
 }
 
-unsigned long resource_fixup(struct pci_dev *pdev, struct resource *res,
-			     unsigned long start, unsigned long size)
-{
-	return start;
-}
-
 void pcibios_fixup_pbus_ranges(struct pci_bus *pbus,
 			       struct pbus_set_ranges_data *pranges)
 {
@@ -234,122 +227,6 @@ char * __init pcibios_setup(char *str)
 		return NULL;
 	}
 	return str;
-}
-
-asmlinkage int sys_pciconfig_read(unsigned long bus,
-				  unsigned long dfn,
-				  unsigned long off,
-				  unsigned long len,
-				  unsigned char *buf)
-{
-	struct pci_dev *dev;
-	u8 byte;
-	u16 word;
-	u32 dword;
-	int err = 0;
-
-	if(!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-
-	dev = pci_find_slot(bus, dfn);
-	if (!dev) {
-		/* Xfree86 is such a turd, it does not check the
-		 * return value and just relies on the buffer being
-		 * set to all 1's to mean "device not present".
-		 */
-		switch(len) {
-		case 1:
-			put_user(0xff, (unsigned char *)buf);
-			break;
-		case 2:
-			put_user(0xffff, (unsigned short *)buf);
-			break;
-		case 4:
-			put_user(0xffffffff, (unsigned int *)buf);
-			break;
-		default:
-			err = -EINVAL;
-			break;
-		};
-		goto out;
-	}
-
-	lock_kernel();
-	switch(len) {
-	case 1:
-		pci_read_config_byte(dev, off, &byte);
-		put_user(byte, (unsigned char *)buf);
-		break;
-	case 2:
-		pci_read_config_word(dev, off, &word);
-		put_user(word, (unsigned short *)buf);
-		break;
-	case 4:
-		pci_read_config_dword(dev, off, &dword);
-		put_user(dword, (unsigned int *)buf);
-		break;
-
-	default:
-		err = -EINVAL;
-		break;
-	};
-	unlock_kernel();
-out:
-	return err;
-}
-
-asmlinkage int sys_pciconfig_write(unsigned long bus,
-				   unsigned long dfn,
-				   unsigned long off,
-				   unsigned long len,
-				   unsigned char *buf)
-{
-	struct pci_dev *dev;
-	u8 byte;
-	u16 word;
-	u32 dword;
-	int err = 0;
-
-	if(!capable(CAP_SYS_ADMIN))
-		return -EPERM;
-	dev = pci_find_slot(bus, dfn);
-	if (!dev) {
-		/* See commentary above about Xfree86 */
-		goto out;
-	}
-
-	lock_kernel();
-	switch(len) {
-	case 1:
-		err = get_user(byte, (u8 *)buf);
-		if(err)
-			break;
-		pci_write_config_byte(dev, off, byte);
-		break;
-
-	case 2:
-		err = get_user(word, (u16 *)buf);
-		if(err)
-			break;
-		pci_write_config_byte(dev, off, word);
-		break;
-
-	case 4:
-		err = get_user(dword, (u32 *)buf);
-		if(err)
-			break;
-		pci_write_config_byte(dev, off, dword);
-		break;
-
-	default:
-		err = -EINVAL;
-		break;
-
-	};
-	unlock_kernel();
-
-out:
-	return err;
 }
 
 #endif /* !(CONFIG_PCI) */

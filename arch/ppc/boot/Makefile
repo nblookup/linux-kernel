@@ -16,9 +16,9 @@
 .c.o:
 	$(CC) $(CFLAGS)  -DINITRD_OFFSET=$(IOFF) -DINITRD_SIZE=$(ISZ) -DZIMAGE_OFFSET=$(ZOFF) -DZIMAGE_SIZE=$(ZSZ) -D__BOOTER__ -c -o $*.o $<
 .S.s:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -E -o $*.o $<
+	$(CPP) $(AFLAGS) -traditional -o $*.o $<
 .S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c -o $*.o $<
+	$(CC) $(AFLAGS) -traditional -c -o $*.o $<
 
 ZOFF = 0
 ZSZ = 0
@@ -41,7 +41,7 @@ else
 TFTPSIMAGE=/tftpboot/sImage
 endif
 
-ifeq ($(CONFIG_PPC64),y)
+ifeq ($(CONFIG_PPC64BRIDGE),y)
 MSIZE=.64
 else
 MSIZE=

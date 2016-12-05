@@ -1,4 +1,4 @@
-/* $Id: streamable.c,v 1.11 2000/02/23 00:41:21 ralf Exp $
+/* $Id: streamable.c,v 1.10 2000/02/05 06:47:30 ralf Exp $
  *
  * streamable.c: streamable devices. /dev/gfx
  * (C) 1997 Miguel de Icaza (miguel@nuclecu.unam.mx)
@@ -13,6 +13,7 @@
 #include <linux/sched.h>
 #include <linux/kbd_kern.h>
 #include <linux/vt_kern.h>
+#include <linux/smp_lock.h>
 #include <asm/uaccess.h>
 #include <asm/shmiq.h>
 #include <asm/keyboard.h>
@@ -50,20 +51,6 @@ get_sioc (struct strioctl *sioc, unsigned long arg)
 
 /* /dev/gfx device */
 static int
-sgi_gfx_open (struct inode *inode, struct file *file)
-{
-	printk ("GFX: Opened by %ld\n", current->pid);
-	return 0;
-}
-
-static int
-sgi_gfx_close (struct inode *inode, struct file *file)
-{
-	printk ("GFX: Closed by %ld\n", current->pid);
-	return 0;
-}
-
-static int
 sgi_gfx_ioctl (struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
 {
 	printk ("GFX: ioctl 0x%x %ld called\n", cmd, arg);
@@ -73,8 +60,6 @@ sgi_gfx_ioctl (struct inode *inode, struct file *file, unsigned int cmd, unsigne
 
 struct file_operations sgi_gfx_fops = {
 	ioctl:		sgi_gfx_ioctl,
-	open:		sgi_gfx_open,
-	release:	sgi_gfx_close,
 };
  
 static struct miscdevice dev_gfx = {
@@ -236,7 +221,9 @@ sgi_mouse_open (struct inode *inode, struct file *file)
 static int
 sgi_mouse_close (struct inode *inode, struct file *filp)
 {
+	lock_kernel();
 	mouse_opened = 0;
+	unlock_kernel();
 	return 0;
 }
 

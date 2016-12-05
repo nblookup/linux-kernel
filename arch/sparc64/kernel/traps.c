@@ -1,4 +1,4 @@
-/* $Id: traps.c,v 1.65 2000/01/21 11:39:01 jj Exp $
+/* $Id: traps.c,v 1.68 2000/11/22 06:50:37 davem Exp $
  * arch/sparc64/kernel/traps.c
  *
  * Copyright (C) 1995,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -255,7 +255,6 @@ void bad_trap (struct pt_regs *regs, long lvl)
 {
 	siginfo_t info;
 
-	lock_kernel ();
 	if (lvl < 0x100) {
 		char buffer[24];
 		
@@ -270,17 +269,14 @@ void bad_trap (struct pt_regs *regs, long lvl)
 	info.si_addr = (void *)regs->tpc;
 	info.si_trapno = lvl - 0x100;
 	force_sig_info(SIGILL, &info, current);
-	unlock_kernel ();
 }
 
 void bad_trap_tl1 (struct pt_regs *regs, long lvl)
 {
 	char buffer[24];
 	
-	lock_kernel();
 	sprintf (buffer, "Bad trap %lx at tl>0", lvl);
 	die_if_kernel (buffer, regs);
-	unlock_kernel();
 }
 
 void instruction_access_exception (struct pt_regs *regs,
@@ -288,7 +284,6 @@ void instruction_access_exception (struct pt_regs *regs,
 {
 	siginfo_t info;
 
-	lock_kernel();
 	if (regs->tstate & TSTATE_PRIV) {
 #if 1
 		printk("instruction_access_exception: Shit SFSR[%016lx] SFAR[%016lx], going.\n",
@@ -302,7 +297,6 @@ void instruction_access_exception (struct pt_regs *regs,
 	info.si_addr = (void *)regs->tpc;
 	info.si_trapno = 0;
 	force_sig_info(SIGSEGV, &info, current);
-	unlock_kernel();
 }
 
 void data_access_exception (struct pt_regs *regs,
@@ -343,9 +337,7 @@ void data_access_exception (struct pt_regs *regs,
 	info.si_code = SEGV_MAPERR;
 	info.si_addr = (void *)sfar;
 	info.si_trapno = 0;
-	lock_kernel();
 	force_sig_info(SIGSEGV, &info, current);
-	unlock_kernel();
 }
 
 #ifdef CONFIG_PCI
@@ -389,9 +381,7 @@ void do_iae(struct pt_regs *regs)
 	info.si_code = BUS_OBJERR;
 	info.si_addr = (void *)0;
 	info.si_trapno = 0;
-	lock_kernel();
 	force_sig_info(SIGBUS, &info, current);
-	unlock_kernel();
 }
 
 void do_dae(struct pt_regs *regs)
@@ -561,7 +551,7 @@ void do_fpe_common(struct pt_regs *regs)
 			else if (fsr & 0x01)
 				info.si_code = FPE_FLTRES;
 		}
-		send_sig_info(SIGFPE, &info, current);
+		force_sig_info(SIGFPE, &info, current);
 	}
 }
 
@@ -604,7 +594,7 @@ void do_tof(struct pt_regs *regs)
 	info.si_code = EMT_TAGOVF;
 	info.si_addr = (void *)regs->tpc;
 	info.si_trapno = 0;
-	send_sig_info(SIGEMT, &info, current);
+	force_sig_info(SIGEMT, &info, current);
 }
 
 void do_div0(struct pt_regs *regs)
@@ -616,7 +606,7 @@ void do_div0(struct pt_regs *regs)
 	info.si_code = FPE_INTDIV;
 	info.si_addr = (void *)regs->tpc;
 	info.si_trapno = 0;
-	send_sig_info(SIGFPE, &info, current);
+	force_sig_info(SIGFPE, &info, current);
 }
 
 void instruction_dump (unsigned int *pc)
@@ -688,11 +678,10 @@ void die_if_kernel(char *str, struct pt_regs *regs)
 		instruction_dump ((unsigned int *) regs->tpc);
 	} else
 		user_instruction_dump ((unsigned int *) regs->tpc);
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	smp_report_regs();
 #endif
                                                 	
-	lock_kernel(); /* Or else! */
 	if(regs->tstate & TSTATE_PRIV)
 		do_exit(SIGKILL);
 	do_exit(SIGSEGV);
@@ -726,7 +715,7 @@ void do_illegal_instruction(struct pt_regs *regs)
 	info.si_code = ILL_ILLOPC;
 	info.si_addr = (void *)pc;
 	info.si_trapno = 0;
-	send_sig_info(SIGILL, &info, current);
+	force_sig_info(SIGILL, &info, current);
 }
 
 void mem_address_unaligned(struct pt_regs *regs, unsigned long sfar, unsigned long sfsr)
@@ -745,7 +734,7 @@ void mem_address_unaligned(struct pt_regs *regs, unsigned long sfar, unsigned lo
 	info.si_code = BUS_ADRALN;
 	info.si_addr = (void *)sfar;
 	info.si_trapno = 0;
-	send_sig_info(SIGBUS, &info, current);
+	force_sig_info(SIGBUS, &info, current);
 }
 
 void do_privop(struct pt_regs *regs)
@@ -757,7 +746,7 @@ void do_privop(struct pt_regs *regs)
 	info.si_code = ILL_PRVOPC;
 	info.si_addr = (void *)regs->tpc;
 	info.si_trapno = 0;
-	send_sig_info(SIGILL, &info, current);
+	force_sig_info(SIGILL, &info, current);
 }
 
 void do_privact(struct pt_regs *regs)
@@ -854,7 +843,7 @@ void do_tof_tl1(struct pt_regs *regs)
 #ifdef CONFIG_EC_FLUSH_TRAP
 void cache_flush_trap(struct pt_regs *regs)
 {
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	unsigned node = linux_cpus[get_cpuid()].prom_node;
 #else
 #error cache_flush_trap not supported on sparc64/SMP yet

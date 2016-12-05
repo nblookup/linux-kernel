@@ -43,7 +43,8 @@ void sysv_print_inode(struct inode * inode)
         printk("ino %lu  mode 0%6.6o  lk %d  uid %d  gid %d"
                "  sz %lu  blks %lu  cnt %u\n",
                inode->i_ino, inode->i_mode, inode->i_nlink, inode->i_uid,
-               inode->i_gid, inode->i_size, inode->i_blocks, inode->i_count);
+               inode->i_gid, inode->i_size, inode->i_blocks,
+               atomic_read(&inode->i_count));
         printk("  db <0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx"
                " 0x%lx 0x%lx>\n",
                 inode->u.sysv_i.i_data[0], inode->u.sysv_i.i_data[1],
@@ -60,9 +61,11 @@ void sysv_print_inode(struct inode * inode)
 
 static void sysv_delete_inode(struct inode *inode)
 {
+	lock_kernel();
 	inode->i_size = 0;
 	sysv_truncate(inode);
 	sysv_free_inode(inode);
+	unlock_kernel();
 }
 
 static void sysv_put_super(struct super_block *);
@@ -495,7 +498,6 @@ static struct super_block *sysv_read_super(struct super_block *sb,
 	sb->s_blocksize = sb->sv_block_size;
 	sb->s_blocksize_bits = sb->sv_block_size_bits;
 	/* set up enough so that it can read an inode */
-	sb->s_dev = dev;
 	sb->s_op = &sysv_sops;
 	root_inode = iget(sb,SYSV_ROOT_INO);
 	sb->s_root = d_alloc_root(root_inode);
@@ -516,7 +518,6 @@ static struct super_block *sysv_read_super(struct super_block *sb,
 /* This is only called on sync() and umount(), when s_dirt=1. */
 static void sysv_write_super(struct super_block *sb)
 {
-	lock_super(sb);
 	if (buffer_dirty(sb->sv_bh1) || buffer_dirty(sb->sv_bh2)) {
 		/* If we are going to write out the super block,
 		   then attach current time stamp.
@@ -531,10 +532,9 @@ static void sysv_write_super(struct super_block *sb)
 		if (sb->sv_convert)
 			time = to_coh_ulong(time);
 		*sb->sv_sb_time = time;
-		mark_buffer_dirty(sb->sv_bh2, 1);
+		mark_buffer_dirty(sb->sv_bh2);
 	}
 	sb->s_dirt = 0;
-	unlock_super(sb);
 }
 
 static void sysv_put_super(struct super_block *sb)
@@ -685,20 +685,6 @@ repeat:
 			return NULL;
 		}
 	}
-	*err = -EFBIG;
-
-	/* Check file limits.. */
-	{
-		unsigned long limit = current->rlim[RLIMIT_FSIZE].rlim_cur;
-		if (limit < RLIM_INFINITY) {
-			limit >>= sb->sv_block_size_bits;
-			if (new_block >= limit) {
-				send_sig(SIGXFSZ, current, 0);
-				*err = -EFBIG;
-				return NULL;
-			}
-		}
-	}
 
 	tmp = sysv_new_block(sb);
 	if (!tmp) {
@@ -742,7 +728,6 @@ static struct buffer_head *block_getblk(struct inode *inode,
 	u32 tmp, block;
 	sysv_zone_t *p;
 	struct buffer_head * result;
-	unsigned long limit;
 
 	result = NULL;
 	if (!bh)
@@ -771,16 +756,6 @@ repeat:
 			goto out;
 		}
 	}
-	*err = -EFBIG;
-
-	limit = current->rlim[RLIMIT_FSIZE].rlim_cur;
-	if (limit < RLIM_INFINITY) {
-		limit >>= sb->sv_block_size_bits;
-		if (new_block >= limit) {
-			send_sig(SIGXFSZ, current, 0);
-			goto out;
-		}
-	}
 
 	block = sysv_new_block(sb);
 	if (!block)
@@ -794,7 +769,7 @@ repeat:
 		}
 		memset(result->b_data, 0, sb->sv_block_size);
 		mark_buffer_uptodate(result, 1);
-		mark_buffer_dirty(result, 1);
+		mark_buffer_dirty(result);
 	} else {
 		*phys = tmp;
 		*new = 1;
@@ -805,7 +780,7 @@ repeat:
 		goto repeat;
 	}
 	*p = (sb->sv_convert ? to_coh_ulong(block) : block);
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	*err = 0;
 out:
 	brelse(bh);
@@ -919,7 +894,7 @@ static struct buffer_head *sysv_getblk(struct inode *inode, unsigned int block, 
 		if (buffer_new(&dummy)) {
 			memset(bh->b_data, 0, inode->i_sb->sv_block_size);
 			mark_buffer_uptodate(bh, 1);
-			mark_buffer_dirty(bh, 1);
+			mark_buffer_dirty(bh);
 		}
 		return bh;
 	}
@@ -941,15 +916,15 @@ struct buffer_head *sysv_file_bread(struct inode *inode, int block, int create)
 	return NULL;
 }
 
-static int sysv_writepage(struct dentry *dentry, struct page *page)
+static int sysv_writepage(struct page *page)
 {
 	return block_write_full_page(page,sysv_get_block);
 }
-static int sysv_readpage(struct dentry *dentry, struct page *page)
+static int sysv_readpage(struct file *file, struct page *page)
 {
 	return block_read_full_page(page,sysv_get_block);
 }
-static int sysv_prepare_write(struct page *page, unsigned from, unsigned to)
+static int sysv_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
 {
 	return block_prepare_write(page,from,to,sysv_get_block);
 }
@@ -960,6 +935,7 @@ static int sysv_bmap(struct address_space *mapping, long block)
 struct address_space_operations sysv_aops = {
 	readpage: sysv_readpage,
 	writepage: sysv_writepage,
+	sync_page: block_sync_page,
 	prepare_write: sysv_prepare_write,
 	commit_write: generic_commit_write,
 	bmap: sysv_bmap
@@ -1150,15 +1126,17 @@ static struct buffer_head * sysv_update_inode(struct inode * inode)
 	else
 		for (block = 0; block < 10+1+1+1; block++)
 			write3byte(&raw_inode->i_a.i_addb[3*block],inode->u.sysv_i.i_data[block]);
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	return bh;
 }
 
-void sysv_write_inode(struct inode * inode)
+void sysv_write_inode(struct inode * inode, int wait)
 {
 	struct buffer_head *bh;
+	lock_kernel();
 	bh = sysv_update_inode(inode);
 	brelse(bh);
+	unlock_kernel();
 }
 
 int sysv_sync_inode(struct inode * inode)
@@ -1188,22 +1166,17 @@ int sysv_sync_inode(struct inode * inode)
 
 static DECLARE_FSTYPE_DEV(sysv_fs_type, "sysv", sysv_read_super);
 
-int __init init_sysv_fs(void)
+static int __init init_sysv_fs(void)
 {
 	return register_filesystem(&sysv_fs_type);
 }
 
-#ifdef MODULE
-EXPORT_NO_SYMBOLS;
-
-int init_module(void)
-{
-	return init_sysv_fs();
-}
-
-void cleanup_module(void)
+static void __exit exit_sysv_fs(void)
 {
 	unregister_filesystem(&sysv_fs_type);
 }
 
-#endif
+EXPORT_NO_SYMBOLS;
+
+module_init(init_sysv_fs)
+module_exit(exit_sysv_fs)

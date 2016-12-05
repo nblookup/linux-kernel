@@ -1,14 +1,18 @@
 /*
- * linux/arch/arm/kernel/debug-armv.S
+ *  linux/arch/arm/kernel/debug-armv.S
  *
- * Copyright (C) 1994-1999 Russell King
+ *  Copyright (C) 1994-1999 Russell King
  *
- * 32-bit debugging code
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  32-bit debugging code
  */
 #include <linux/config.h>
 #include <linux/linkage.h>
 #include <asm/hardware.h>
-#include <asm/dec21285.h>
+#include <asm/hardware/dec21285.h>
 
 		.text
 
@@ -29,10 +33,10 @@
 		.endm
 
 		.macro	busyuart,rd,rx
-1002:		ldrb	\rd, [\rx, #0x14]
+1001:		ldrb	\rd, [\rx, #0x14]
 		and	\rd, \rd, #0x60
 		teq	\rd, #0x60
-		bne	1002b
+		bne	1001b
 		.endm
 
 		.macro	waituart,rd,rx
@@ -64,11 +68,14 @@
 		beq	1001b
 		.endm
 
-#elif defined(CONFIG_HOST_FOOTBRIDGE) || defined(CONFIG_ADDIN_FOOTBRIDGE)
+#elif defined(CONFIG_FOOTBRIDGE)
 #ifndef CONFIG_DEBUG_DC21285_PORT
 	/* For NetWinder debugging */
 		.macro	addruart,rx
-		mov	\rx, #0xff000000
+		mrc	p15, 0, \rx, c1, c0
+		tst	\rx, #1			@ MMU enabled?
+		moveq	\rx, #0x7c000000	@ physical
+		movne	\rx, #0xff000000	@ virtual
 		orr	\rx, \rx, #0x000003f8
 		.endm
 
@@ -133,7 +140,10 @@
 
 #elif defined(CONFIG_ARCH_SA1100)
 		.macro	addruart,rx
-		mov	\rx, #0xf8000000
+		mrc	p15, 0, \rx, c1, c0
+		tst	\rx, #1			@ MMU enabled?
+		moveq	\rx, #0x80000000	@ physical base address
+		movne	\rx, #0xf8000000	@ virtual address
 		add	\rx, \rx, #0x00050000	@ Ser3
 		@add	\rx, \rx, #0x00010000	@ Ser1
 		.endm
@@ -154,6 +164,67 @@
 		bne	1001b
 		.endm
 
+#elif defined(CONFIG_ARCH_L7200)
+
+		.equ	io_virt, IO_BASE
+		.equ	io_phys, IO_START
+
+		.macro	addruart,rx
+		mrc	p15, 0, \rx, c1, c0
+		tst	\rx, #1			@ MMU enabled?
+		moveq	\rx, #io_phys		@ physical base address
+		movne	\rx, #io_virt		@ virtual address
+		add	\rx, \rx, #0x00044000	@ Ser1
+@		add	\rx, \rx, #0x00045000	@ Ser2
+		.endm
+
+		.macro	senduart,rd,rx
+		str	\rd, [\rx, #0x0]	@ UARTDR1
+		.endm
+
+		.macro	waituart,rd,rx
+1001:		ldr	\rd, [\rx, #0x18]	@ UARTFLG
+		tst	\rd, #1 << 5		@ UARTFLGUTXFF - 1 when full
+		bne	1001b
+		.endm
+
+		.macro	busyuart,rd,rx
+1001:		ldr	\rd, [\rx, #0x18]	@ UARTFLG
+		tst	\rd, #1 << 3		@ UARTFLGUBUSY - 1 when busy
+		bne	1001b
+		.endm
+
+#elif defined(CONFIG_ARCH_INTEGRATOR)
+
+#include <asm/hardware/serial_amba.h>
+
+		.equ	io_virt, 0xf0000000 + (0x16000000 >> 4)
+		.equ	io_phys, 0x16000000
+
+		.macro	addruart,rx
+		mrc	p15, 0, \rx, c1, c0
+		tst	\rx, #1			@ MMU enabled?
+		moveq	\rx, #0x16000000	@ physical base address
+		movne	\rx, #0xf0000000	@ virtual base
+		addne	\rx, \rx, #0x16000000 >> 4
+		.endm
+
+		.macro	senduart,rd,rx
+		strb	\rd, [\rx, #AMBA_UARTDR]
+		.endm
+
+		.macro	waituart,rd,rx
+1001:		ldr	\rd, [\rx, #0x18]	@ UARTFLG
+		tst	\rd, #1 << 5		@ UARTFLGUTXFF - 1 when full
+		bne	1001b
+		.endm
+
+		.macro	busyuart,rd,rx
+1001:		ldr	\rd, [\rx, #0x18]	@ UARTFLG
+		tst	\rd, #1 << 3		@ UARTFLGUBUSY - 1 when busy
+		bne	1001b
+		.endm
+
 #else
 #error Unknown architecture
 #endif
@@ -171,7 +242,7 @@ ENTRY(printhex4)
 
 ENTRY(printhex2)
 		mov	r1, #2
-printhex:	ldr	r2, =hexbuf
+printhex:	adr	r2, hexbuf
 		add	r3, r2, r1
 		mov	r1, #0
 		strb	r1, [r3]
@@ -209,5 +280,4 @@ ENTRY(printch)
 		mov	r0, #0
 		b	1b
 
-		.bss
 hexbuf:		.space 16

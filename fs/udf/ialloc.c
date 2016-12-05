@@ -38,27 +38,6 @@ void udf_free_inode(struct inode * inode)
 	int is_directory;
 	unsigned long ino;
 
-	if (!inode->i_dev)
-	{
-		udf_debug("inode has no device\n");
-		return;
-	}
-	if (inode->i_count > 1)
-	{
-		udf_debug("inode has count=%d\n", inode->i_count);
-		return;
-	}
-	if (inode->i_nlink)
-	{
-		udf_debug("inode has nlink=%d\n", inode->i_nlink);
-		return;
-	}
-	if (!sb)
-	{
-		udf_debug("inode on nonexistent device\n");
-		return;
-	}
-
 	ino = inode->i_ino;
 
 	/*
@@ -83,7 +62,7 @@ void udf_free_inode(struct inode * inode)
 			UDF_SB_LVIDIU(sb)->numFiles =
 				cpu_to_le32(le32_to_cpu(UDF_SB_LVIDIU(sb)->numFiles) - 1);
 		
-		mark_buffer_dirty(UDF_SB_LVIDBH(sb), 1);
+		mark_buffer_dirty(UDF_SB_LVIDBH(sb));
 	}
 
 	unlock_super(sb);
@@ -98,15 +77,13 @@ struct inode * udf_new_inode (const struct inode *dir, int mode, int * err)
 	int block;
 	Uint32 start = UDF_I_LOCATION(dir).logicalBlockNum;
 
-	inode = get_empty_inode();
+	sb = dir->i_sb;
+	inode = new_inode(sb);
 	if (!inode)
 	{
 		*err = -ENOMEM;
 		return NULL;
 	}
-	sb = dir->i_sb;
-	inode->i_sb = sb;
-	inode->i_flags = 0;
 	*err = -ENOSPC;
 
 	block = udf_new_block(dir, UDF_I_LOCATION(dir).partitionReferenceNum,
@@ -133,17 +110,11 @@ struct inode * udf_new_inode (const struct inode *dir, int mode, int * err)
 		if (!(++uniqueID & 0x00000000FFFFFFFFUL))
 			uniqueID += 16;
 		lvhd->uniqueID = cpu_to_le64(uniqueID);
-		mark_buffer_dirty(UDF_SB_LVIDBH(sb), 1);
+		mark_buffer_dirty(UDF_SB_LVIDBH(sb));
 	}
 	inode->i_mode = mode;
-	inode->i_sb = sb;
-	inode->i_nlink = 1;
-	inode->i_dev = sb->s_dev;
 	inode->i_uid = current->fsuid;
-	if (test_opt (sb, GRPID))
-		inode->i_gid = dir->i_gid;
-	else if (dir->i_mode & S_ISGID)
-	{
+	if (dir->i_mode & S_ISGID) {
 		inode->i_gid = dir->i_gid;
 		if (S_ISDIR(mode))
 			mode |= S_ISGID;
@@ -156,7 +127,6 @@ struct inode * udf_new_inode (const struct inode *dir, int mode, int * err)
 	inode->i_ino = udf_get_lb_pblock(sb, UDF_I_LOCATION(inode), 0);
 	inode->i_blksize = PAGE_SIZE;
 	inode->i_blocks = 0;
-	inode->i_size = 0;
 	UDF_I_LENEATTR(inode) = 0;
 	UDF_I_LENALLOC(inode) = 0;
 	if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_EXTENDED_FE))

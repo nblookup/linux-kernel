@@ -29,6 +29,7 @@
 /*****************************************************************************/
 
 #define __NO_VERSION__
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/sched.h>
@@ -37,9 +38,8 @@
 #include <linux/init.h>
 #include <linux/proc_fs.h>
 #include <linux/usb.h>
+#include <linux/usbdevice_fs.h>
 #include <asm/uaccess.h>
-
-#include "usbdevice_fs.h"
 
 /* --------------------------------------------------------------------- */
 
@@ -48,6 +48,7 @@ static LIST_HEAD(superlist);
 struct special {
 	const char *name;
 	struct file_operations *fops;
+	struct inode *inode;
 	struct list_head inodes;
 };
 
@@ -290,14 +291,14 @@ static int usbdevfs_root_readdir(struct file *filp, void *dirent, filldir_t fill
 	i = filp->f_pos;
 	switch (i) {
 	case 0:
-		if (filldir(dirent, ".", 1, i, IROOT) < 0)
+		if (filldir(dirent, ".", 1, i, IROOT, DT_DIR) < 0)
 			return 0;
 		filp->f_pos++;
 		i++;
 		/* fall through */
 
 	case 1:
-		if (filldir(dirent, "..", 2, i, IROOT) < 0)
+		if (filldir(dirent, "..", 2, i, IROOT, DT_DIR) < 0)
 			return 0;
 		filp->f_pos++;
 		i++;
@@ -307,7 +308,7 @@ static int usbdevfs_root_readdir(struct file *filp, void *dirent, filldir_t fill
 		
 		while (i >= 2 && i < 2+NRSPECIAL) {
 			spec = &special[filp->f_pos-2];
-			if (filldir(dirent, spec->name, strlen(spec->name), i, ISPECIAL | (filp->f_pos-2+IROOT)) < 0)
+			if (filldir(dirent, spec->name, strlen(spec->name), i, ISPECIAL | (filp->f_pos-2+IROOT), DT_UNKNOWN) < 0)
 				return 0;
 			filp->f_pos++;
 			i++;
@@ -323,7 +324,7 @@ static int usbdevfs_root_readdir(struct file *filp, void *dirent, filldir_t fill
 			}
 			bus = list_entry(list, struct usb_bus, bus_list);
 			sprintf(numbuf, "%03d", bus->busnum);
-			if (filldir(dirent, numbuf, 3, filp->f_pos, IBUS | ((bus->busnum & 0xff) << 8)) < 0)
+			if (filldir(dirent, numbuf, 3, filp->f_pos, IBUS | ((bus->busnum & 0xff) << 8), DT_UNKNOWN) < 0)
 				break;
 			filp->f_pos++;
 		}
@@ -343,7 +344,7 @@ static int bus_readdir(struct usb_device *dev, unsigned long ino, int pos, struc
 	if (pos > 0)
 		pos--;
 	else {
-		if (filldir(dirent, numbuf, 3, filp->f_pos, ino | (dev->devnum & 0xff)) < 0)
+		if (filldir(dirent, numbuf, 3, filp->f_pos, ino | (dev->devnum & 0xff), DT_UNKNOWN) < 0)
 			return -1;
 		filp->f_pos++;
 	}
@@ -368,13 +369,13 @@ static int usbdevfs_bus_readdir(struct file *filp, void *dirent, filldir_t filld
 		return -EINVAL;
 	switch ((unsigned int)filp->f_pos) {
 	case 0:
-		if (filldir(dirent, ".", 1, filp->f_pos, ino) < 0)
+		if (filldir(dirent, ".", 1, filp->f_pos, ino, DT_DIR) < 0)
 			return 0;
 		filp->f_pos++;
 		/* fall through */
 
 	case 1:
-		if (filldir(dirent, "..", 2, filp->f_pos, IROOT) < 0)
+		if (filldir(dirent, "..", 2, filp->f_pos, IROOT, DT_DIR) < 0)
 			return 0;
 		filp->f_pos++;
 		/* fall through */
@@ -572,6 +573,7 @@ struct super_block *usbdevfs_read_super(struct super_block *s, void *data, int s
 		inode->i_uid = listuid;
 		inode->i_gid = listgid;
 		inode->i_mode = listmode | S_IFREG;
+		special[i].inode = inode;
 		list_add_tail(&inode->u.usbdev_i.slist, &s->u.usbdevfs_sb.ilist);
 		list_add_tail(&inode->u.usbdev_i.dlist, &special[i].inodes);
 	}
@@ -598,6 +600,17 @@ static DECLARE_FSTYPE(usbdevice_fs_type, "usbdevfs", usbdevfs_read_super, 0);
 
 /* --------------------------------------------------------------------- */
 
+static void update_special_inodes (void)
+{
+	int i;
+	for (i = 0; i < NRSPECIAL; i++) {
+		struct inode *inode = special[i].inode;
+		if (inode)
+			inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
+	}
+}
+
+
 void usbdevfs_add_bus(struct usb_bus *bus)
 {
 	struct list_head *slist;
@@ -605,6 +618,7 @@ void usbdevfs_add_bus(struct usb_bus *bus)
 	lock_kernel();
 	for (slist = superlist.next; slist != &superlist; slist = slist->next)
 		new_bus_inode(bus, list_entry(slist, struct super_block, u.usbdevfs_sb.slist));
+	update_special_inodes();
 	unlock_kernel();
 	usbdevfs_conn_disc_event();
 }
@@ -614,6 +628,7 @@ void usbdevfs_remove_bus(struct usb_bus *bus)
 	lock_kernel();
 	while (!list_empty(&bus->inodes))
 		free_inode(list_entry(bus->inodes.next, struct inode, u.usbdev_i.dlist));
+	update_special_inodes();
 	unlock_kernel();
 	usbdevfs_conn_disc_event();
 }
@@ -625,6 +640,7 @@ void usbdevfs_add_device(struct usb_device *dev)
 	lock_kernel();
 	for (slist = superlist.next; slist != &superlist; slist = slist->next)
 		new_dev_inode(dev, list_entry(slist, struct super_block, u.usbdevfs_sb.slist));
+	update_special_inodes();
 	unlock_kernel();
 	usbdevfs_conn_disc_event();
 }
@@ -652,6 +668,8 @@ void usbdevfs_remove_device(struct usb_device *dev)
 			send_sig_info(ds->discsignr, &sinfo, ds->disctask);
 		}
 	}
+
+	update_special_inodes();
 	unlock_kernel();
 	usbdevfs_conn_disc_event();
 }

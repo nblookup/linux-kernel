@@ -77,7 +77,7 @@ extern void __br_lock_usage_bug (void);
 
 #ifdef __BRLOCK_USE_ATOMICS
 
-extern inline void br_read_lock (enum brlock_indices idx)
+static inline void br_read_lock (enum brlock_indices idx)
 {
 	/*
 	 * This causes a link-time bug message if an
@@ -89,7 +89,7 @@ extern inline void br_read_lock (enum brlock_indices idx)
 	read_lock(&__brlock_array[smp_processor_id()][idx]);
 }
 
-extern inline void br_read_unlock (enum brlock_indices idx)
+static inline void br_read_unlock (enum brlock_indices idx)
 {
 	if (idx >= __BR_END)
 		__br_lock_usage_bug();
@@ -98,7 +98,7 @@ extern inline void br_read_unlock (enum brlock_indices idx)
 }
 
 #else /* ! __BRLOCK_USE_ATOMICS */
-extern inline void br_read_lock (enum brlock_indices idx)
+static inline void br_read_lock (enum brlock_indices idx)
 {
 	unsigned int *ctr;
 	spinlock_t *lock;
@@ -114,17 +114,30 @@ extern inline void br_read_lock (enum brlock_indices idx)
 	lock = &__br_write_locks[idx].lock;
 again:
 	(*ctr)++;
-	rmb();
+	mb();
 	if (spin_is_locked(lock)) {
 		(*ctr)--;
-		rmb();
+		wmb(); /*
+			* The release of the ctr must become visible
+			* to the other cpus eventually thus wmb(),
+			* we don't care if spin_is_locked is reordered
+			* before the releasing of the ctr.
+			* However IMHO this wmb() is superflous even in theory.
+			* It would not be superflous only if on the
+			* other CPUs doing a ldl_l instead of an ldl
+			* would make a difference and I don't think this is
+			* the case.
+			* I'd like to clarify this issue further
+			* but for now this is a slow path so adding the
+			* wmb() will keep us on the safe side.
+			*/
 		while (spin_is_locked(lock))
 			barrier();
 		goto again;
 	}
 }
 
-extern inline void br_read_unlock (enum brlock_indices idx)
+static inline void br_read_unlock (enum brlock_indices idx)
 {
 	unsigned int *ctr;
 
@@ -143,14 +156,14 @@ extern inline void br_read_unlock (enum brlock_indices idx)
 extern void FASTCALL(__br_write_lock (enum brlock_indices idx));
 extern void FASTCALL(__br_write_unlock (enum brlock_indices idx));
 
-extern inline void br_write_lock (enum brlock_indices idx)
+static inline void br_write_lock (enum brlock_indices idx)
 {
 	if (idx >= __BR_END)
 		__br_lock_usage_bug();
 	__br_write_lock(idx);
 }
 
-extern inline void br_write_unlock (enum brlock_indices idx)
+static inline void br_write_unlock (enum brlock_indices idx)
 {
 	if (idx >= __BR_END)
 		__br_lock_usage_bug();

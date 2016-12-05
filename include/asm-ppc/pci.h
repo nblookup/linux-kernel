@@ -1,5 +1,12 @@
 #ifndef __PPC_PCI_H
 #define __PPC_PCI_H
+#ifdef __KERNEL__
+
+/* Values for the `which' argument to sys_pciconfig_iobase syscall.  */
+#define IOBASE_BRIDGE_NUMBER	0
+#define IOBASE_MEMORY		1
+#define IOBASE_IO		2
+
 
 /* Can be used to override the logic in pci_scan_bus for skipping
  * already-configured bus numbers - to be used for buggy BIOSes
@@ -9,6 +16,16 @@
 
 #define PCIBIOS_MIN_IO		0x1000
 #define PCIBIOS_MIN_MEM		0x10000000
+
+extern inline void pcibios_set_master(struct pci_dev *dev)
+{
+	/* No special bus mastering setup handling */
+}
+
+extern inline void pcibios_penalize_isa_irq(int irq)
+{
+	/* We don't do dynamic PCI IRQ allocation */
+}
 
 /* Dynamic DMA Mapping stuff
  * 	++ajoshi
@@ -84,5 +101,7 @@ extern inline int pci_dma_supported(struct pci_dev *hwdev, dma_addr_t mask)
 
 #define sg_dma_address(sg)	(virt_to_bus((sg)->address))
 #define sg_dma_len(sg)		((sg)->length)
+
+#endif	/* __KERNEL__ */
 
 #endif /* __PPC_PCI_H */

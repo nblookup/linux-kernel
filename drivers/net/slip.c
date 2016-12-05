@@ -89,7 +89,6 @@
 
 
 typedef struct slip_ctrl {
-	char		if_name[16];	/* "sl0\0" .. "sl99999\0"	*/
 	struct slip	ctrl;		/* SLIP things			*/
 	struct net_device	dev;		/* the device			*/
 } slip_ctrl_t;
@@ -550,7 +549,6 @@ sl_close(struct net_device *dev)
 	sl->xleft    = 0;
 	spin_unlock_bh(&sl->lock);
 
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -565,7 +563,6 @@ static int sl_open(struct net_device *dev)
 
 	sl->flags &= (1 << SLF_INUSE);
 	netif_start_queue(dev);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -647,6 +644,8 @@ static int sl_init(struct net_device *dev)
 	dev->addr_len		= 0;
 	dev->type		= ARPHRD_SLIP + sl->mode;
 	dev->tx_queue_len	= 10;
+
+	SET_MODULE_OWNER(dev);
 
 	dev_init_buffers(dev);
 
@@ -805,8 +804,7 @@ sl_alloc(kdev_t line)
 	sl->dev	      	= &slp->dev;
 	spin_lock_init(&sl->lock);
 	sl->mode        = SL_MODE_DEFAULT;
-	sprintf(slp->if_name, "sl%d", i);
-	slp->dev.name         = slp->if_name;
+	sprintf(slp->dev.name, "sl%d", i);
 	slp->dev.base_addr    = i;
 	slp->dev.priv         = (void*)sl;
 	slp->dev.init         = sl_init;
@@ -1262,8 +1260,10 @@ static int sl_ioctl(struct net_device *dev,struct ifreq *rq,int cmd)
 	switch(cmd){
         case SIOCSKEEPALIVE:
 		/* max for unchar */
-                if (((unsigned int)((unsigned long)rq->ifr_data)) > 255)
+                if (((unsigned int)((unsigned long)rq->ifr_data)) > 255) {
+			spin_unlock_bh(&sl->lock);
 			return -EINVAL;
+		}
 		sl->keepalive = (unchar) ((unsigned long)rq->ifr_data);
 		if (sl->keepalive != 0) {
 			sl->keepalive_timer.expires=jiffies+sl->keepalive*HZ;
@@ -1272,7 +1272,6 @@ static int sl_ioctl(struct net_device *dev,struct ifreq *rq,int cmd)
                 } else {
                         del_timer(&sl->keepalive_timer);
 		}
-		spin_unlock_bh(&sl->lock);
 		break;
 
         case SIOCGKEEPALIVE:
@@ -1280,8 +1279,10 @@ static int sl_ioctl(struct net_device *dev,struct ifreq *rq,int cmd)
 		break;
 
         case SIOCSOUTFILL:
-                if (((unsigned)((unsigned long)rq->ifr_data)) > 255) /* max for unchar */
+                if (((unsigned)((unsigned long)rq->ifr_data)) > 255) { /* max for unchar */
+			spin_unlock_bh(&sl->lock);
 			return -EINVAL;
+		}
                 if ((sl->outfill = (unchar)((unsigned long) rq->ifr_data)) != 0){
 			mod_timer(&sl->outfill_timer, jiffies+sl->outfill*HZ);
 			set_bit(SLF_OUTWAIT, &sl->flags);
@@ -1481,7 +1482,6 @@ static void sl_outfill(unsigned long sls)
 	}
 out:
 	spin_unlock(&sl->lock);
-	timer_exit(&sl->outfill_timer);
 }
 
 static void sl_keepalive(unsigned long sls)
@@ -1513,7 +1513,6 @@ static void sl_keepalive(unsigned long sls)
 
 out:
 	spin_unlock(&sl->lock);
-	timer_exit(&sl->keepalive_timer);
 }
 
 #endif

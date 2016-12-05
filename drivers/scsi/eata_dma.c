@@ -554,7 +554,17 @@ int eata_queue(Scsi_Cmnd * cmd, void (* done) (Scsi_Cmnd *))
 				  GFP_ATOMIC | GFP_DMA);
 	}
 	if (ccb->sg_list == NULL)
-	    panic("eata_dma: Run out of DMA memory for SG lists !\n");
+	{
+	    /*
+	     *	Claim the bus was busy. Actually we are the problem but this
+	     *  will do a deferred retry for us ;)
+	     */
+	    printk(KERN_ERR "eata_dma: Run out of DMA memory for SG lists !\n");
+	    cmd->result = DID_BUS_BUSY << 16;
+	    ccb->status = FREE;    
+	    done(cmd);
+	    return(0);
+	}
 	ccb->cp_dataDMA = htonl(virt_to_bus(ccb->sg_list)); 
 	
 	ccb->cp_datalen = htonl(cmd->use_sg * sizeof(struct eata_sg_list));
@@ -666,7 +676,8 @@ int eata_abort(Scsi_Cmnd * cmd)
 int eata_reset(Scsi_Cmnd * cmd, unsigned int resetflags)
 {
     uint x; 
-    ulong loop = loops_per_sec / 3;
+    /* 10 million PCI reads take at least one third of a second */
+    ulong loop = 10 * 1000 * 1000;
     ulong flags;
     unchar success = FALSE;
     Scsi_Cmnd *sp; 
@@ -909,8 +920,17 @@ char * get_board_data(u32 base, u32 irq, u32 id)
 
     cp = (struct eata_ccb *) kmalloc(sizeof(struct eata_ccb),
 				     GFP_ATOMIC | GFP_DMA);
+				     
+    if(cp==NULL)
+    	return NULL;
+    	
     sp = (struct eata_sp *) kmalloc(sizeof(struct eata_sp), 
 					     GFP_ATOMIC | GFP_DMA);
+    if(sp==NULL)
+    {
+        kfree(cp);
+        return NULL;
+    }				  
 
     buff = dma_scratch;
  
@@ -1388,20 +1408,22 @@ void find_PCI(struct get_conf *buf, Scsi_Host_Template * tpnt)
 #ifndef CONFIG_PCI
     printk("eata_dma: kernel PCI support not enabled. Skipping scan for PCI HBAs.\n");
 #else
-    struct pci_dev *dev; 
+    struct pci_dev *dev = NULL; 
     u32 base, x;
     u8 pal1, pal2, pal3;
 
-    for(dev=NULL; dev = pci_find_device(PCI_VENDOR_ID_DPT, PCI_DEVICE_ID_DPT, dev);) {
+    while ((dev = pci_find_device(PCI_VENDOR_ID_DPT, PCI_DEVICE_ID_DPT, dev)) != NULL) {
 	    DBG(DBG_PROBE && DBG_PCI, 
 		printk("eata_dma: find_PCI, HBA at %s\n", dev->name));
+	    if (pci_enable_device(dev))
+	    	continue;
 	    pci_set_master(dev);
-	    base = dev->resource[0].flags;
-	    if (!(base & PCI_BASE_ADDRESS_SPACE_IO)) {
+	    base = pci_resource_flags(dev, 0);
+	    if (base & IORESOURCE_MEM) {
 		printk("eata_dma: invalid base address of device %s\n", dev->name);
 		continue;
 	    }
-	    base = dev->resource[0].start;
+	    base = pci_resource_start(dev, 0);
             /* EISA tag there ? */
 	    pal1 = inb(base);
 	    pal2 = inb(base + 1);
@@ -1461,6 +1483,10 @@ int eata_detect(Scsi_Host_Template * tpnt)
 
     if(status == NULL || dma_scratch == NULL) {
 	printk("eata_dma: can't allocate enough memory to probe for hosts !\n");
+	if(status)
+		kfree(status);
+	if(dma_scratch)
+		kfree(dma_scratch);
 	return(0);
     }
 
@@ -1518,11 +1544,9 @@ int eata_detect(Scsi_Host_Template * tpnt)
     return(registered_HBAs);
 }
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = EATA_DMA;
+static Scsi_Host_Template driver_template = EATA_DMA;
 #include "scsi_module.c"
-#endif
 
 /*
  * Overrides for Emacs so that we almost follow Linus's tabbing style.

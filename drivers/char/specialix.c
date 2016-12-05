@@ -181,11 +181,11 @@ DECLARE_TASK_QUEUE(tq_specialix);
 #define SPECIALIX_TYPE_CALLOUT	2
 
 static struct tty_driver specialix_driver, specialix_callout_driver;
-static int    specialix_refcount = 0;
-static struct tty_struct * specialix_table[SX_NBOARD * SX_NPORT] = { NULL, };
-static struct termios * specialix_termios[SX_NBOARD * SX_NPORT] = { NULL, };
-static struct termios * specialix_termios_locked[SX_NBOARD * SX_NPORT] = { NULL, };
-static unsigned char * tmp_buf = NULL;
+static int    specialix_refcount;
+static struct tty_struct * specialix_table[SX_NBOARD * SX_NPORT];
+static struct termios * specialix_termios[SX_NBOARD * SX_NPORT];
+static struct termios * specialix_termios_locked[SX_NBOARD * SX_NPORT];
+static unsigned char * tmp_buf;
 static DECLARE_MUTEX(tmp_buf_sem);
 
 static unsigned long baud_table[] =  {
@@ -200,9 +200,7 @@ static struct specialix_board sx_board[SX_NBOARD] =  {
 	{ 0, SX_IOBASE4, 15, },
 };
 
-static struct specialix_port sx_port[SX_NBOARD * SX_NPORT] =  {
-	{ 0, },
-};
+static struct specialix_port sx_port[SX_NBOARD * SX_NPORT];
 		
 
 #ifdef SPECIALIX_TIMER
@@ -836,8 +834,9 @@ extern inline void sx_check_modem(struct specialix_board * bp)
 #ifdef SPECIALIX_DEBUG
 			printk ( "Sending HUP.\n");
 #endif
-			queue_task(&port->tqueue_hangup,  
-			           &tq_scheduler);      
+			MOD_INC_USE_COUNT;
+			if (schedule_task(&port->tqueue_hangup) == 0)
+				MOD_DEC_USE_COUNT;
 		} else {
 #ifdef SPECIALIX_DEBUG
 			printk ( "Don't need to send HUP.\n");
@@ -1013,7 +1012,7 @@ static void sx_change_speed(struct specialix_board *bp, struct specialix_port *p
 	long tmp;
 	unsigned char cor1 = 0, cor3 = 0;
 	unsigned char mcor1 = 0, mcor2 = 0;
-	static int again=0;
+	static int again;
 	
 	if (!(tty = port->tty) || !tty->termios)
 		return;
@@ -2123,10 +2122,9 @@ static void do_sx_hangup(void *private_)
 	struct tty_struct	*tty;
 	
 	tty = port->tty;
-	if (!tty)
-		return;
-
-	tty_hangup(tty);
+	if (tty)
+		tty_hangup(tty);	/* FIXME: module removal race here */
+	MOD_DEC_USE_COUNT;
 }
 
 
@@ -2338,7 +2336,6 @@ int specialix_init(void)
 #ifdef CONFIG_PCI
 	if (pci_present()) {
 		struct pci_dev *pdev = NULL;
-		unsigned int tint;
 
 		i=0;
 		while (i <= SX_NBOARD) {
@@ -2351,11 +2348,12 @@ int specialix_init(void)
 			                        pdev);
 			if (!pdev) break;
 
+			if (pci_enable_device(pdev))
+				continue;
+
 			sx_board[i].irq = pdev->irq;
 
-			pci_read_config_dword(pdev, PCI_BASE_ADDRESS_2, &tint);
-			/* Mask out the fact that it's IO-space */
-			sx_board[i].base = tint & PCI_BASE_ADDRESS_IO_MASK; 
+			sx_board[i].base = pci_resource_start (pdev, 2);
 
 			sx_board[i].flags |= SX_BOARD_IS_PCI;
 			if (!sx_probe(&sx_board[i]))

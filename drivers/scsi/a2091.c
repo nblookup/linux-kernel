@@ -205,9 +205,12 @@ int __init a2091_detect(Scsi_Host_Template *tpnt)
 	address = z->resource.start;
 	if (!request_mem_region(address, 256, "wd33c93"))
 	    continue;
-	strcpy(z->name, "A590/A2091 SCSI Host Adapter");
 
 	instance = scsi_register (tpnt, sizeof (struct WD33C93_hostdata));
+	if (instance == NULL) {
+	    release_mem_region(address, 256);
+	    continue;
+	}
 	instance->base = ZTWO_VADDR(address);
 	instance->irq = IRQ_AMIGA_PORTS;
 	instance->unique_id = z->slotaddr;
@@ -226,17 +229,11 @@ int __init a2091_detect(Scsi_Host_Template *tpnt)
     return num_a2091;
 }
 
-#ifdef MODULE
-
 #define HOSTS_C
 
-#include "a2091.h"
-
-Scsi_Host_Template driver_template = A2091_SCSI;
+static Scsi_Host_Template driver_template = A2091_SCSI;
 
 #include "scsi_module.c"
-
-#endif
 
 int a2091_release(struct Scsi_Host *instance)
 {

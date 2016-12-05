@@ -15,6 +15,7 @@
  *				interrupt allocation. Protect against bogus unload
  *				Fixed to allow IRQ > 15
  *	Christoph Hellwig	Adapted to module_init/module_exit
+ *	Arnaldo C. de Melo	got rid of check_region
  *
  * Status:
  *		Untested
@@ -24,7 +25,6 @@
 #include <linux/module.h>
 
 #include "sound_config.h"
-#include "soundmodule.h"
 
 #include "mpu401.h"
 
@@ -40,8 +40,6 @@ typedef struct uart401_devc
 	int             share_irq;
 }
 uart401_devc;
-
-static uart401_devc *detected_devc = NULL;
 
 #define	DATAPORT   (devc->base)
 #define	COMDPORT   (devc->base+1)
@@ -206,21 +204,17 @@ static inline int uart401_buffer_status(int dev)
 
 static struct midi_operations uart401_operations =
 {
-	{
-		"MPU-401 (UART) MIDI", 0, 0, SNDCARD_MPU401
-	},
-	&std_midi_synth,
-	{0},
-	uart401_open,
-	uart401_close,
-	NULL, /* ioctl */
-	uart401_out,
-	uart401_start_read,
-	uart401_end_read,
-	uart401_kick,
-	NULL,
-	uart401_buffer_status,
-	NULL
+	owner:		THIS_MODULE,
+	info:		{"MPU-401 (UART) MIDI", 0, 0, SNDCARD_MPU401},
+	converter:	&std_midi_synth,
+	in_info:	{0},
+	open:		uart401_open,
+	close:		uart401_close,
+	outputc:	uart401_out,
+	start_read:	uart401_start_read,
+	end_read:	uart401_end_read,
+	kick:		uart401_kick,
+	buffer_status:	uart401_buffer_status,
 };
 
 static void enter_uart_mode(uart401_devc * devc)
@@ -244,92 +238,6 @@ static void enter_uart_mode(uart401_devc * devc)
 				ok = 1;
 
 	restore_flags(flags);
-}
-
-void attach_uart401(struct address_info *hw_config)
-{
-	uart401_devc *devc;
-	char *name = "MPU-401 (UART) MIDI";
-
-	
-	if (hw_config->name)
-		name = hw_config->name;
-
-	if (detected_devc == NULL)
-		return;
-
-
-	devc = (uart401_devc *) kmalloc(sizeof(uart401_devc), GFP_KERNEL);
-	if (devc == NULL)
-	{
-		printk(KERN_WARNING "uart401: Can't allocate memory\n");
-		return;
-	}
-	memcpy((char *) devc, (char *) detected_devc, sizeof(uart401_devc));
-	detected_devc = NULL;
-
-	devc->irq = hw_config->irq;
-	if (devc->irq < 0)
-	{
-		devc->share_irq = 1;
-		devc->irq *= -1;
-	}
-	else
-		devc->share_irq = 0;
-
-	if (!devc->share_irq)
-	{
-		if (request_irq(devc->irq, uart401intr, 0, "MPU-401 UART", devc) < 0)
-		{
-			printk(KERN_WARNING "uart401: Failed to allocate IRQ%d\n", devc->irq);
-			devc->share_irq = 1;
-		}
-	}
-	devc->my_dev = sound_alloc_mididev();
-
-	request_region(hw_config->io_base, 4, "MPU-401 UART");
-	enter_uart_mode(devc);
-
-	if (devc->my_dev == -1)
-	{
-		printk(KERN_INFO "uart401: Too many midi devices detected\n");
-		kfree(devc);
-		return;
-	}
-	conf_printf(name, hw_config);
-
-	std_midi_synth.midi_dev = devc->my_dev;
-	midi_devs[devc->my_dev] = (struct midi_operations *)kmalloc(sizeof(struct midi_operations), GFP_KERNEL);
-	if (midi_devs[devc->my_dev] == NULL)
-	{
-		printk(KERN_ERR "uart401: Failed to allocate memory\n");
-		sound_unload_mididev(devc->my_dev);
-		kfree(devc);
-		devc=NULL;
-		return;
-	}
-	memcpy((char *) midi_devs[devc->my_dev], (char *) &uart401_operations,
-	       sizeof(struct midi_operations));
-
-	midi_devs[devc->my_dev]->devc = devc;
-	midi_devs[devc->my_dev]->converter = (struct synth_operations *)kmalloc(sizeof(struct synth_operations), GFP_KERNEL);
-	if (midi_devs[devc->my_dev]->converter == NULL)
-	{
-		printk(KERN_WARNING "uart401: Failed to allocate memory\n");
-		kfree(midi_devs[devc->my_dev]);
-		kfree(devc);
-		sound_unload_mididev(devc->my_dev);
-		devc=NULL;
-		return;
-	}
-	memcpy((char *) midi_devs[devc->my_dev]->converter, (char *) &std_midi_synth,
-	       sizeof(struct synth_operations));
-
-	strcpy(midi_devs[devc->my_dev]->info.name, name);
-	midi_devs[devc->my_dev]->converter->id = "UART401";
-	hw_config->slots[4] = devc->my_dev;
-	sequencer_init();
-	devc->opened = 0;
 }
 
 static int reset_uart401(uart401_devc * devc)
@@ -381,21 +289,28 @@ static int reset_uart401(uart401_devc * devc)
 	return ok;
 }
 
-int probe_uart401(struct address_info *hw_config)
+int probe_uart401(struct address_info *hw_config, struct module *owner)
 {
+	uart401_devc *devc;
+	char *name = "MPU-401 (UART) MIDI";
 	int ok = 0;
 	unsigned long flags;
-	static uart401_devc hw_info;
-	uart401_devc *devc = &hw_info;
 
 	DDB(printk("Entered probe_uart401()\n"));
 
 	/* Default to "not found" */
 	hw_config->slots[4] = -1;
-	detected_devc = NULL;
 
-	if (check_region(hw_config->io_base, 4))
+	if (!request_region(hw_config->io_base, 4, "MPU-401 UART")) {
+		printk(KERN_INFO "uart401: could not request_region(%d, 4)\n", hw_config->io_base);
 		return 0;
+	}
+
+	devc = kmalloc(sizeof(uart401_devc), GFP_KERNEL);
+	if (!devc) {
+		printk(KERN_WARNING "uart401: Can't allocate memory\n");
+		goto cleanup_region;
+	}
 
 	devc->base = hw_config->io_base;
 	devc->irq = hw_config->irq;
@@ -411,10 +326,67 @@ int probe_uart401(struct address_info *hw_config)
 	ok = reset_uart401(devc);
 	restore_flags(flags);
 
-	if (ok)
-		detected_devc = devc;
+	if (!ok)
+		goto cleanup_devc;
 
-	return ok;
+	if (hw_config->name)
+		name = hw_config->name;
+
+	if (devc->irq < 0) {
+		devc->share_irq = 1;
+		devc->irq *= -1;
+	} else
+		devc->share_irq = 0;
+
+	if (!devc->share_irq)
+		if (request_irq(devc->irq, uart401intr, 0, "MPU-401 UART", devc) < 0) {
+			printk(KERN_WARNING "uart401: Failed to allocate IRQ%d\n", devc->irq);
+			devc->share_irq = 1;
+		}
+	devc->my_dev = sound_alloc_mididev();
+	enter_uart_mode(devc);
+
+	if (devc->my_dev == -1) {
+		printk(KERN_INFO "uart401: Too many midi devices detected\n");
+		goto cleanup_irq;
+	}
+	conf_printf(name, hw_config);
+	std_midi_synth.midi_dev = devc->my_dev;
+	midi_devs[devc->my_dev] = kmalloc(sizeof(struct midi_operations), GFP_KERNEL);
+	if (!midi_devs[devc->my_dev]) {
+		printk(KERN_ERR "uart401: Failed to allocate memory\n");
+		goto cleanup_unload_mididev;
+	}
+	memcpy(midi_devs[devc->my_dev], &uart401_operations, sizeof(struct midi_operations));
+
+	if (owner)
+		midi_devs[devc->my_dev]->owner = owner;
+	
+	midi_devs[devc->my_dev]->devc = devc;
+	midi_devs[devc->my_dev]->converter = kmalloc(sizeof(struct synth_operations), GFP_KERNEL);
+	if (!midi_devs[devc->my_dev]->converter) {
+		printk(KERN_WARNING "uart401: Failed to allocate memory\n");
+		goto cleanup_midi_devs;
+	}
+	memcpy(midi_devs[devc->my_dev]->converter, &std_midi_synth, sizeof(struct synth_operations));
+	strcpy(midi_devs[devc->my_dev]->info.name, name);
+	midi_devs[devc->my_dev]->converter->id = "UART401";
+	hw_config->slots[4] = devc->my_dev;
+	sequencer_init();
+	devc->opened = 0;
+	return 1;
+cleanup_midi_devs:
+	kfree(midi_devs[devc->my_dev]);
+cleanup_unload_mididev:
+	sound_unload_mididev(devc->my_dev);
+cleanup_irq:
+	if (!devc->share_irq)
+		free_irq(devc->irq, devc);
+cleanup_devc:
+	kfree(devc);
+cleanup_region:
+	release_region(hw_config->io_base, 4);
+	return 0;
 }
 
 void unload_uart401(struct address_info *hw_config)
@@ -448,7 +420,6 @@ void unload_uart401(struct address_info *hw_config)
 	sound_unload_mididev(hw_config->slots[4]);
 }
 
-EXPORT_SYMBOL(attach_uart401);
 EXPORT_SYMBOL(probe_uart401);
 EXPORT_SYMBOL(unload_uart401);
 EXPORT_SYMBOL(uart401intr);
@@ -471,11 +442,10 @@ static int __init init_uart401(void)
 	   to others */
 	if (cfg_mpu.io_base != -1 && cfg_mpu.irq != -1) {
 		printk(KERN_INFO "MPU-401 UART driver Copyright (C) Hannu Savolainen 1993-1997");
-		if (probe_uart401(&cfg_mpu) == 0)
+		if (!probe_uart401(&cfg_mpu, THIS_MODULE))
 			return -ENODEV;
-		attach_uart401(&cfg_mpu);
 	}
-	SOUND_LOCK;
+
 	return 0;
 }
 
@@ -483,7 +453,6 @@ static void __exit cleanup_uart401(void)
 {
 	if (cfg_mpu.io_base != -1 && cfg_mpu.irq != -1)
 		unload_uart401(&cfg_mpu);
-	SOUND_LOCK_END;
 }
 
 module_init(init_uart401);

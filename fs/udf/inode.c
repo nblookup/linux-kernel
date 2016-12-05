@@ -74,10 +74,15 @@ static int udf_get_block(struct inode *, long, struct buffer_head *, int);
  */
 void udf_put_inode(struct inode * inode)
 {
-	lock_kernel();
-	udf_discard_prealloc(inode);
-	write_inode_now(inode);
-	unlock_kernel();
+	if (!(inode->i_sb->s_flags & MS_RDONLY))
+	{
+		lock_kernel();
+		udf_discard_prealloc(inode);
+		/* write the root inode on put, if dirty */
+		if (!inode->i_sb->s_root && inode->i_state & I_DIRTY)
+			udf_update_inode(inode, IS_SYNC(inode));
+		unlock_kernel();
+	}
 }
 
 /*
@@ -108,7 +113,7 @@ void udf_delete_inode(struct inode * inode)
 
 	inode->i_size = 0;
 	udf_truncate(inode);
-	write_inode_now(inode);
+	udf_update_inode(inode, IS_SYNC(inode));
 	udf_free_inode(inode);
 out:
 	unlock_kernel();
@@ -120,17 +125,17 @@ void udf_discard_prealloc(struct inode * inode)
 		udf_trunc(inode);
 }
 
-static int udf_writepage(struct dentry *dentry, struct page *page)
+static int udf_writepage(struct page *page)
 {
 	return block_write_full_page(page, udf_get_block);
 }
 
-static int udf_readpage(struct dentry *dentry, struct page *page)
+static int udf_readpage(struct file *file, struct page *page)
 {
 	return block_read_full_page(page, udf_get_block);
 }
 
-static int udf_prepare_write(struct page *page, unsigned from, unsigned to)
+static int udf_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
 {
 	return block_prepare_write(page, from, to, udf_get_block);
 }
@@ -143,6 +148,7 @@ static int udf_bmap(struct address_space *mapping, long block)
 struct address_space_operations udf_aops = {
 	readpage:			udf_readpage,
 	writepage:			udf_writepage,
+	sync_page:		block_sync_page,
 	prepare_write:		udf_prepare_write,
 	commit_write:		generic_commit_write,
 	bmap:				udf_bmap,
@@ -152,7 +158,6 @@ void udf_expand_file_adinicb(struct inode * inode, int newsize, int * err)
 {
 	struct buffer_head *bh = NULL;
 	struct page *page;
-	unsigned long kaddr = 0;
 	int block;
 
 	/* from now on we have normal address_space methods */
@@ -177,11 +182,12 @@ void udf_expand_file_adinicb(struct inode * inode, int newsize, int * err)
 		PAGE_BUG(page);
 	if (!Page_Uptodate(page))
 	{
-		kaddr = kmap(page);
-		memset((char *)kaddr + UDF_I_LENALLOC(inode), 0x00,
+		char *kaddr = kmap(page);
+		memset(kaddr + UDF_I_LENALLOC(inode), 0x00,
 			PAGE_CACHE_SIZE - UDF_I_LENALLOC(inode));
-		memcpy((char *)kaddr, bh->b_data + udf_file_entry_alloc_offset(inode),
+		memcpy(kaddr, bh->b_data + udf_file_entry_alloc_offset(inode),
 			UDF_I_LENALLOC(inode));
+		flush_dcache_page(page);
 		SetPageUptodate(page);
 		kunmap(page);
 	}
@@ -193,10 +199,10 @@ void udf_expand_file_adinicb(struct inode * inode, int newsize, int * err)
 	else
 		UDF_I_ALLOCTYPE(inode) = ICB_FLAG_AD_LONG;
 	inode->i_blocks = inode->i_sb->s_blocksize / 512;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	udf_release_data(bh);
 
-	inode->i_data.a_ops->writepage(NULL, page);
+	inode->i_data.a_ops->writepage(page);
 	UnlockPage(page);
 	page_cache_release(page);
 
@@ -269,7 +275,7 @@ struct buffer_head * udf_expand_dir_adinicb(struct inode *inode, int *block, int
 			return NULL;
 		}
 	}
-	mark_buffer_dirty(dbh, 1);
+	mark_buffer_dirty(dbh);
 
 	memset(sbh->b_data + udf_file_entry_alloc_offset(inode),
 		0, UDF_I_LENALLOC(inode));
@@ -288,7 +294,7 @@ struct buffer_head * udf_expand_dir_adinicb(struct inode *inode, int *block, int
 	/* UniqueID stuff */
 
 	inode->i_blocks = inode->i_sb->s_blocksize / 512;
-	mark_buffer_dirty(sbh, 1);
+	mark_buffer_dirty(sbh);
 	udf_release_data(sbh);
 	mark_inode_dirty(inode);
 	inode->i_version ++;
@@ -372,7 +378,7 @@ struct buffer_head * udf_getblk(struct inode * inode, long block,
 				wait_on_buffer(bh);
 			memset(bh->b_data, 0x00, inode->i_sb->s_blocksize);
 			mark_buffer_uptodate(bh, 1);
-			mark_buffer_dirty(bh, 1);
+			mark_buffer_dirty(bh);
 		}
 		return bh;
 	}
@@ -391,7 +397,7 @@ static struct buffer_head * inode_getblk(struct inode * inode, long block,
 	int c = 1;
 	int lbcount = 0, b_off = 0, offset = 0;
 	Uint32 newblocknum, newblock;
-	char etype;
+	int etype;
 	int goal = 0, pgoal = UDF_I_LOCATION(inode).logicalBlockNum;
 	char lastblock = 0;
 
@@ -501,23 +507,6 @@ static struct buffer_head * inode_getblk(struct inode * inode, long block,
 			lastblock = 1;
 	}
 	udf_release_data(cbh);
-
-	*err = -EFBIG;
-
-	/* Check file limits.. */
-	{
-		unsigned long limit = current->rlim[RLIMIT_FSIZE].rlim_cur;
-		if (limit < RLIM_INFINITY)
-		{
-			limit >>= inode->i_sb->s_blocksize_bits;
-			if (block >= limit)
-			{
-				send_sig(SIGXFSZ, current, 0);
-				*err = -EFBIG;
-				return NULL;
-			}
-		}
-	}
 
 	/* if the current extent is not recorded but allocated, get the
 		block in the extent corresponding to the requested block */
@@ -1002,10 +991,6 @@ static void udf_fill_inode(struct inode *inode, struct buffer_head *bh)
 		inode->i_nlink = 1;
 	
 	inode->i_size = le64_to_cpu(fe->informationLength);
-#if BITS_PER_LONG < 64
-	if (le64_to_cpu(fe->informationLength) & 0xFFFFFFFF00000000ULL)
-		inode->i_size = (Uint32)-1;
-#endif
 
 	inode->i_mode = udf_convert_permissions(fe);
 	inode->i_mode &= ~UDF_SB(inode->i_sb)->s_umask;
@@ -1211,10 +1196,10 @@ udf_convert_permissions(struct FileEntry *fe)
  *	Written, tested, and released.
  */
 
-void udf_write_inode(struct inode * inode)
+void udf_write_inode(struct inode * inode, int sync)
 {
 	lock_kernel();
-	udf_update_inode(inode, 0);
+	udf_update_inode(inode, sync);
 	unlock_kernel();
 }
 
@@ -1308,7 +1293,7 @@ udf_update_inode(struct inode *inode, int do_sync)
 		eid->identSuffix[1] = UDF_OS_ID_LINUX;
 		dsea->majorDeviceIdent = kdev_t_to_nr(inode->i_rdev) >> 8;
 		dsea->minorDeviceIdent = kdev_t_to_nr(inode->i_rdev) & 0xFF;
-		mark_buffer_dirty(tbh, 1);
+		mark_buffer_dirty(tbh);
 		udf_release_data(tbh);
 	}
 
@@ -1401,7 +1386,7 @@ udf_update_inode(struct inode *inode, int do_sync)
 			fe->descTag.tagChecksum += ((Uint8 *)&(fe->descTag))[i];
 
 	/* write the data blocks */
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	if (do_sync)
 	{
 		ll_rw_block(WRITE, 1, &bh);
@@ -1554,22 +1539,24 @@ int udf_add_aext(struct inode *inode, lb_addr *bloc, int *extoffset,
 			case ICB_FLAG_AD_SHORT:
 			{
 				sad = (short_ad *)sptr;
-				sad->extLength = EXTENT_NEXT_EXTENT_ALLOCDECS << 30 |
-					inode->i_sb->s_blocksize;
+				sad->extLength = cpu_to_le32(
+					EXTENT_NEXT_EXTENT_ALLOCDECS << 30 |
+					inode->i_sb->s_blocksize);
 				sad->extPosition = cpu_to_le32(bloc->logicalBlockNum);
 				break;
 			}
 			case ICB_FLAG_AD_LONG:
 			{
 				lad = (long_ad *)sptr;
-				lad->extLength = EXTENT_NEXT_EXTENT_ALLOCDECS << 30 |
-					inode->i_sb->s_blocksize;
+				lad->extLength = cpu_to_le32(
+					EXTENT_NEXT_EXTENT_ALLOCDECS << 30 |
+					inode->i_sb->s_blocksize);
 				lad->extLocation = cpu_to_lelb(*bloc);
 				break;
 			}
 		}
 		udf_update_tag((*bh)->b_data, loffset);
-		mark_buffer_dirty(*bh, 1);
+		mark_buffer_dirty(*bh);
 		udf_release_data(*bh);
 		*bh = nbh;
 	}
@@ -1587,7 +1574,7 @@ int udf_add_aext(struct inode *inode, lb_addr *bloc, int *extoffset,
 		aed->lengthAllocDescs =
 			cpu_to_le32(le32_to_cpu(aed->lengthAllocDescs) + adsize);
 		udf_update_tag((*bh)->b_data, *extoffset + (inc ? 0 : adsize));
-		mark_buffer_dirty(*bh, 1);
+		mark_buffer_dirty(*bh);
 	}
 
 	return ret;
@@ -1646,7 +1633,7 @@ int udf_write_aext(struct inode *inode, lb_addr bloc, int *extoffset,
 	else
 		mark_inode_dirty(inode);
 
-	mark_buffer_dirty(*bh, 1);
+	mark_buffer_dirty(*bh);
 
 	if (inc)
 		*extoffset += adsize;
@@ -1881,7 +1868,7 @@ int udf_delete_aext(struct inode *inode, lb_addr nbloc, int nextoffset,
 	struct buffer_head *obh;
 	lb_addr obloc;
 	int oextoffset, adsize;
-	char type;
+	int type;
 	struct AllocExtDesc *aed;
 
 	if (!(nbh))
@@ -1944,7 +1931,7 @@ int udf_delete_aext(struct inode *inode, lb_addr nbloc, int nextoffset,
 			aed->lengthAllocDescs =
 				cpu_to_le32(le32_to_cpu(aed->lengthAllocDescs) - (2*adsize));
 			udf_update_tag((obh)->b_data, oextoffset - (2*adsize));
-			mark_buffer_dirty(obh, 1);
+			mark_buffer_dirty(obh);
 		}
 	}
 	else
@@ -1961,7 +1948,7 @@ int udf_delete_aext(struct inode *inode, lb_addr nbloc, int nextoffset,
 			aed->lengthAllocDescs =
 				cpu_to_le32(le32_to_cpu(aed->lengthAllocDescs) - adsize);
 			udf_update_tag((obh)->b_data, oextoffset - adsize);
-			mark_buffer_dirty(obh, 1);
+			mark_buffer_dirty(obh);
 		}
 	}
 	

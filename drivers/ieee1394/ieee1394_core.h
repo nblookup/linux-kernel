@@ -40,29 +40,25 @@ struct hpsb_packet {
         unsigned no_waiter:1;
 
         /* Data big endianness flag - may vary from request to request.  The
-         * header is always in machine byte order.  */
+         * header is always in machine byte order.
+         * Not really used currently.  */
         unsigned data_be:1;
 
         /* Speed to transmit with: 0 = 100Mbps, 1 = 200Mbps, 2 = 400Mbps */
         unsigned speed_code:2;
 
-        /* --- 16 bytes (one cacheline) --- */
-
-        /* *header and *data are guaranteed to be 32-bit DMAable and may be
+        /*
+         * *header and *data are guaranteed to be 32-bit DMAable and may be
          * overwritten to allow in-place byte swapping.  Neither of these is
          * CRCed (the sizes also don't include CRC), but contain space for at
          * least one additional quadlet to allow in-place CRCing.  The memory is
-         * also guaranteed to have physical mapping (virt_to_bus() is meaningful
-         * on these pointers).
-         * NOTE: The 32-bit DMA guarantee is currently not enforced.
-         *       That's a Linux 2.3 issue.  
+         * also guaranteed to be DMA mappable.
          */
         quadlet_t *header;
         quadlet_t *data;
         size_t header_size;
         size_t data_size;
 
-        /* --- 32 bytes --- */
 
         struct hpsb_host *host;
         unsigned int generation;
@@ -77,7 +73,6 @@ struct hpsb_packet {
 };
 
 
-void reset_host_bus(struct hpsb_host *host);
 void abort_timedouts(struct hpsb_host *host);
 void abort_requests(struct hpsb_host *host);
 
@@ -110,6 +105,9 @@ inline static void inc_hpsb_generation(void)
  */
 int hpsb_send_packet(struct hpsb_packet *packet);
 
+/* Initiate bus reset on the given host.  Returns 1 if bus reset already in
+ * progress, 0 otherwise. */
+int hpsb_reset_bus(struct hpsb_host *host);
 
 /*
  * The following functions are exported for host driver module usage.  All of
@@ -118,8 +116,9 @@ int hpsb_send_packet(struct hpsb_packet *packet);
  * them directly.
  */
 
-/* Notify a bus reset to the core. */
-void hpsb_bus_reset(struct hpsb_host *host);
+/* Notify a bus reset to the core.  Returns 1 if bus reset already in progress,
+ * 0 otherwise. */
+int hpsb_bus_reset(struct hpsb_host *host);
 
 /*
  * Hand over received selfid packet to the core.  Complement check (second
@@ -139,14 +138,21 @@ void hpsb_selfid_complete(struct hpsb_host *host, int phyid, int isroot);
  * for other cases (internal errors that don't justify a panic).  Safe to call
  * from within a transmit packet routine.
  */
-void hpsb_packet_sent(struct hpsb_host *host, struct hpsb_packet *packet, int ackcode);
+void hpsb_packet_sent(struct hpsb_host *host, struct hpsb_packet *packet,
+                      int ackcode);
 
 /*
  * Hand over received packet to the core.  The contents of data are expected to
  * be the full packet but with the CRCs left out (data block follows header
- * immediately) and in machine byte order.  *data can be safely overwritten
+ * immediately), with the header (i.e. the first four quadlets) in machine byte
+ * order and the data block in big endian.  *data can be safely overwritten
  * after this call.
+ *
+ * If the packet is a write request, write_acked is to be set to true if it was
+ * ack_complete'd already, false otherwise.  This arg is ignored for any other
+ * packet type.
  */
-void hpsb_packet_received(struct hpsb_host *host, quadlet_t *data, size_t size);
+void hpsb_packet_received(struct hpsb_host *host, quadlet_t *data, size_t size,
+                          int write_acked);
 
 #endif /* _IEEE1394_CORE_H */

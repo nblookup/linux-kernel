@@ -1,6 +1,6 @@
 /* net/atm/pvc.c - ATM PVC sockets */
 
-/* Written 1995-1999 by Werner Almesberger, EPFL LRC/ICA */
+/* Written 1995-2000 by Werner Almesberger, EPFL LRC/ICA */
 
 
 #include <linux/config.h>
@@ -13,6 +13,7 @@
 #include <linux/kernel.h>	/* printk */
 #include <linux/init.h>
 #include <linux/skbuff.h>
+#include <linux/bitops.h>
 #include <net/sock.h>		/* for sock_no_* */
 #ifdef CONFIG_ATM_CLIP
 #include <net/atmclip.h>
@@ -42,8 +43,8 @@ static int pvc_bind(struct socket *sock,struct sockaddr *sockaddr,
 	addr = (struct sockaddr_atmpvc *) sockaddr;
 	if (addr->sap_family != AF_ATMPVC) return -EAFNOSUPPORT;
 	vcc = ATM_SD(sock);
-	if (!(vcc->flags & ATM_VF_HASQOS)) return -EBADFD;
-	if (vcc->flags & ATM_VF_PARTIAL) {
+	if (!test_bit(ATM_VF_HASQOS,&vcc->flags)) return -EBADFD;
+	if (test_bit(ATM_VF_PARTIAL,&vcc->flags)) {
 		if (vcc->vpi != ATM_VPI_UNSPEC) addr->sap_addr.vpi = vcc->vpi;
 		if (vcc->vci != ATM_VCI_UNSPEC) addr->sap_addr.vci = vcc->vci;
 	}
@@ -65,7 +66,7 @@ static int pvc_getname(struct socket *sock,struct sockaddr *sockaddr,
 	struct sockaddr_atmpvc *addr;
 	struct atm_vcc *vcc = ATM_SD(sock);
 
-	if (!vcc->dev || !(vcc->flags & ATM_VF_ADDR)) return -ENOTCONN;
+	if (!vcc->dev || !test_bit(ATM_VF_ADDR,&vcc->flags)) return -ENOTCONN;
         *sockaddr_len = sizeof(struct sockaddr_atmpvc);
 	addr = (struct sockaddr_atmpvc *) sockaddr;
 	addr->sap_family = AF_ATMPVC;
@@ -77,23 +78,23 @@ static int pvc_getname(struct socket *sock,struct sockaddr *sockaddr,
 
 
 static struct proto_ops SOCKOPS_WRAPPED(pvc_proto_ops) = {
-	PF_ATMPVC,
-	atm_release,
-	pvc_bind,
-	pvc_connect,
-	sock_no_socketpair,
-	sock_no_accept,
-	pvc_getname,
-	atm_poll,
-	atm_ioctl,
-	sock_no_listen,
-	pvc_shutdown,
-	atm_setsockopt,
-	atm_getsockopt,
-	sock_no_fcntl,
-	atm_sendmsg,
-	atm_recvmsg,
-	sock_no_mmap
+	family:		PF_ATMPVC,
+
+	release:	atm_release,
+	bind:		pvc_bind,
+	connect:	pvc_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		sock_no_accept,
+	getname:	pvc_getname,
+	poll:		atm_poll,
+	ioctl:		atm_ioctl,
+	listen:		sock_no_listen,
+	shutdown:	pvc_shutdown,
+	setsockopt:	atm_setsockopt,
+	getsockopt:	atm_getsockopt,
+	sendmsg:	atm_sendmsg,
+	recvmsg:	atm_recvmsg,
+	mmap:		sock_no_mmap,
 };
 
 
@@ -122,14 +123,14 @@ static struct net_proto_family pvc_family_ops = {
  */
 
 
-void __init atmpvc_proto_init(struct net_proto *pro)
+static int __init atmpvc_init(void)
 {
 	int error;
 
 	error = sock_register(&pvc_family_ops);
 	if (error < 0) {
 		printk(KERN_ERR "ATMPVC: can't register (%d)",error);
-		return;
+		return error;
 	}
 #ifdef CONFIG_ATM_CLIP
 	atm_clip_init();
@@ -138,4 +139,7 @@ void __init atmpvc_proto_init(struct net_proto *pro)
 	error = atm_proc_init();
 	if (error) printk("atm_proc_init fails with %d\n",error);
 #endif
+	return 0;
 }
+
+module_init(atmpvc_init);

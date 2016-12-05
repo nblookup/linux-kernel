@@ -1,4 +1,4 @@
-/* $Id: semaphore.c,v 1.2 1999/12/23 17:12:03 jj Exp $
+/* $Id: semaphore.c,v 1.5 2000/11/10 04:02:03 davem Exp $
  *  Generic semaphore code. Buyer beware. Do your own
  * specific changes in <asm/semaphore-helper.h>
  */
@@ -203,7 +203,7 @@ void down_read_failed_biased(struct rw_semaphore *sem)
 	add_wait_queue(&sem->wait, &wait);	/* put ourselves at the head of the list */
 
 	for (;;) {
-		if (clear_le_bit(0, &sem->granted))
+		if (test_and_clear_le_bit(0, &sem->granted))
 			break;
 		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
 		if (!test_le_bit(0, &sem->granted))
@@ -221,9 +221,9 @@ void down_write_failed_biased(struct rw_semaphore *sem)
 	add_wait_queue_exclusive(&sem->write_bias_wait, &wait); /* put ourselves at the end of the list */
 
 	for (;;) {
-		if (clear_le_bit(1, &sem->granted))
+		if (test_and_clear_le_bit(1, &sem->granted))
 			break;
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE | TASK_EXCLUSIVE);
+		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
 		if (!test_le_bit(1, &sem->granted))
 			schedule();
 	}
@@ -273,9 +273,9 @@ void down_write_failed(struct rw_semaphore *sem)
 	add_wait_queue_exclusive(&sem->wait, &wait);
 
 	while (sem->count < 0) {
-		set_task_state(tsk, TASK_UNINTERRUPTIBLE | TASK_EXCLUSIVE);
+		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
 		if (sem->count >= 0)
-			break;  /* we must attempt to aquire or bias the lock */
+			break;  /* we must attempt to acquire or bias the lock */
 		schedule();
 	}
 
@@ -286,11 +286,11 @@ void down_write_failed(struct rw_semaphore *sem)
 void __rwsem_wake(struct rw_semaphore *sem, unsigned long readers)
 {
 	if (readers) {
-		if (set_le_bit(0, &sem->granted))
+		if (test_and_set_le_bit(0, &sem->granted))
 			BUG();
 		wake_up(&sem->wait);
 	} else {
-		if (set_le_bit(1, &sem->granted))
+		if (test_and_set_le_bit(1, &sem->granted))
 			BUG();
 		wake_up(&sem->write_bias_wait);
 	}

@@ -5,7 +5,7 @@
  *
  *		The User Datagram Protocol (UDP).
  *
- * Version:	$Id: udp.c,v 1.80 2000/02/27 19:51:43 davem Exp $
+ * Version:	$Id: udp.c,v 1.91 2000/11/28 13:38:38 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -126,7 +126,7 @@ struct sock *udp_hash[UDP_HTABLE_SIZE];
 rwlock_t udp_hash_lock = RW_LOCK_UNLOCKED;
 
 /* Shared by v4/v6 udp. */
-int udp_port_rover = 0;
+int udp_port_rover;
 
 static int udp_v4_get_port(struct sock *sk, unsigned short snum)
 {
@@ -158,7 +158,7 @@ static int udp_v4_get_port(struct sock *sk, unsigned short snum)
 			} while ((sk = sk->next) != NULL);
 			best_size_so_far = size;
 			best = result;
-		next:
+		next:;
 		}
 		result = best;
 		for(;; result += UDP_HTABLE_SIZE) {
@@ -188,6 +188,15 @@ gotit:
 		}
 	}
 	sk->num = snum;
+	if (sk->pprev == NULL) {
+		struct sock **skp = &udp_hash[snum & (UDP_HTABLE_SIZE - 1)];
+		if ((sk->next = *skp) != NULL)
+			(*skp)->pprev = &sk->next;
+		*skp = sk;
+		sk->pprev = skp;
+		sock_prot_inc_use(sk->prot);
+		sock_hold(sk);
+	}
 	write_unlock_bh(&udp_hash_lock);
 	return 0;
 
@@ -198,16 +207,7 @@ fail:
 
 static void udp_v4_hash(struct sock *sk)
 {
-	struct sock **skp = &udp_hash[sk->num & (UDP_HTABLE_SIZE - 1)];
-
-	write_lock_bh(&udp_hash_lock);
-	if ((sk->next = *skp) != NULL)
-		(*skp)->pprev = &sk->next;
-	*skp = sk;
-	sk->pprev = skp;
-	sock_prot_inc_use(sk->prot);
- 	sock_hold(sk);
-	write_unlock_bh(&udp_hash_lock);
+	BUG();
 }
 
 static void udp_v4_unhash(struct sock *sk)
@@ -218,6 +218,7 @@ static void udp_v4_unhash(struct sock *sk)
 			sk->next->pprev = sk->pprev;
 		*sk->pprev = sk->next;
 		sk->pprev = NULL;
+		sk->num = 0;
 		sock_prot_dec_use(sk->prot);
 		__sock_put(sk);
 	}
@@ -281,19 +282,17 @@ __inline__ struct sock *udp_v4_lookup(u32 saddr, u16 sport, u32 daddr, u16 dport
 }
 
 static inline struct sock *udp_v4_mcast_next(struct sock *sk,
-					     unsigned short num,
-					     unsigned long raddr,
-					     unsigned short rnum,
-					     unsigned long laddr,
+					     u16 loc_port, u32 loc_addr,
+					     u16 rmt_port, u32 rmt_addr,
 					     int dif)
 {
 	struct sock *s = sk;
-	unsigned short hnum = ntohs(num);
+	unsigned short hnum = ntohs(loc_port);
 	for(; s; s = s->next) {
 		if ((s->num != hnum)					||
-		    (s->daddr && s->daddr!=raddr)			||
-		    (s->dport != rnum && s->dport != 0)			||
-		    (s->rcv_saddr  && s->rcv_saddr != laddr)		||
+		    (s->daddr && s->daddr!=rmt_addr)			||
+		    (s->dport != rmt_port && s->dport != 0)			||
+		    (s->rcv_saddr  && s->rcv_saddr != loc_addr)		||
 		    (s->bound_dev_if && s->bound_dev_if != dif))
 			continue;
 		break;
@@ -493,8 +492,6 @@ int udp_sendmsg(struct sock *sk, struct msghdr *msg, int len)
 		if (usin->sin_family != AF_INET) {
 			if (usin->sin_family != AF_UNSPEC)
 				return -EINVAL;
-			if (net_ratelimit())
-				printk("Remind Kuznetsov, he has to repair %s eventually\n", current->comm);
 		}
 
 		ufh.daddr = usin->sin_addr.s_addr;
@@ -710,7 +707,8 @@ int udp_recvmsg(struct sock *sk, struct msghdr *msg, int len,
 
 	if (err)
 		goto out_free;
-	sk->stamp=skb->stamp;
+
+	sock_recv_timestamp(msg, sk, skb);
 
 	/* Copy the address. */
 	if (sin)
@@ -718,6 +716,7 @@ int udp_recvmsg(struct sock *sk, struct msghdr *msg, int len,
 		sin->sin_family = AF_INET;
 		sin->sin_port = skb->h.uh->source;
 		sin->sin_addr.s_addr = skb->nh.iph->saddr;
+		memset(sin->sin_zero, 0, sizeof(sin->sin_zero));
   	}
 	if (sk->protinfo.af_inet.cmsg_flags)
 		ip_cmsg_recv(msg, skb);
@@ -746,11 +745,7 @@ csum_copy_err:
 
 	skb_free_datagram(sk, skb);
 
-	/* 
-	 * Error for blocking case is chosen to masquerade
-   	 * as some normal condition.
-	 */
-	return (flags&MSG_DONTWAIT) ? -EAGAIN : -EHOSTUNREACH;	
+	return -EAGAIN;	
 }
 
 int udp_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
@@ -795,10 +790,21 @@ int udp_disconnect(struct sock *sk, int flags)
 	 */
 	 
 	sk->state = TCP_CLOSE;
-	sk->rcv_saddr = 0;
 	sk->daddr = 0;
 	sk->dport = 0;
 	sk->bound_dev_if = 0;
+	if (!(sk->userlocks&SOCK_BINDADDR_LOCK)) {
+		sk->rcv_saddr = 0;
+		sk->saddr = 0;
+#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
+		memset(&sk->net_pinfo.af_inet6.saddr, 0, 16);
+		memset(&sk->net_pinfo.af_inet6.rcv_saddr, 0, 16);
+#endif
+	}
+	if (!(sk->userlocks&SOCK_BINDPORT_LOCK)) {
+		sk->prot->unhash(sk);
+		sk->sport = 0;
+	}
 	sk_dst_reset(sk);
 	return 0;
 }
@@ -853,15 +859,15 @@ static int udp_v4_mcast_deliver(struct sk_buff *skb, struct udphdr *uh,
 	read_lock(&udp_hash_lock);
 	sk = udp_hash[ntohs(uh->dest) & (UDP_HTABLE_SIZE - 1)];
 	dif = skb->dev->ifindex;
-	sk = udp_v4_mcast_next(sk, uh->dest, saddr, uh->source, daddr, dif);
+	sk = udp_v4_mcast_next(sk, uh->dest, daddr, uh->source, saddr, dif);
 	if (sk) {
 		struct sock *sknext = NULL;
 
 		do {
 			struct sk_buff *skb1 = skb;
 
-			sknext = udp_v4_mcast_next(sk->next, uh->dest, saddr,
-						   uh->source, daddr, dif);
+			sknext = udp_v4_mcast_next(sk->next, uh->dest, daddr,
+						   uh->source, saddr, dif);
 			if(sknext)
 				skb1 = skb_clone(skb, GFP_ATOMIC);
 
@@ -981,22 +987,18 @@ static void get_udp_sock(struct sock *sp, char *tmpbuf, int i)
 {
 	unsigned int dest, src;
 	__u16 destp, srcp;
-	int timer_active;
-	unsigned long timer_expires;
 
 	dest  = sp->daddr;
 	src   = sp->rcv_saddr;
 	destp = ntohs(sp->dport);
 	srcp  = ntohs(sp->sport);
-	timer_active = (sp->timer.prev != NULL) ? 2 : 0;
-	timer_expires = (timer_active == 2 ? sp->timer.expires : jiffies);
 	sprintf(tmpbuf, "%4d: %08X:%04X %08X:%04X"
 		" %02X %08X:%08X %02X:%08lX %08X %5d %8d %ld %d %p",
 		i, src, srcp, dest, destp, sp->state, 
 		atomic_read(&sp->wmem_alloc), atomic_read(&sp->rmem_alloc),
-		timer_active, timer_expires-jiffies, 0,
-		sp->socket->inode->i_uid, 0,
-		sp->socket ? sp->socket->inode->i_ino : 0,
+		0, 0L, 0,
+		sock_i_uid(sp), 0,
+		sock_i_ino(sp),
 		atomic_read(&sp->refcnt), sp);
 }
 
@@ -1020,7 +1022,7 @@ int udp_get_info(char *buffer, char **start, off_t offset, int length)
 			if (sk->family != PF_INET)
 				continue;
 			pos += 128;
-			if (pos < offset)
+			if (pos <= offset)
 				continue;
 			get_udp_sock(sk, tmpbuf, i);
 			len += sprintf(buffer+len, "%-127s\n", tmpbuf);
@@ -1041,22 +1043,17 @@ out:
 }
 
 struct proto udp_prot = {
-	udp_close,			/* close */
-	udp_connect,			/* connect */
-	udp_disconnect,			/* disconnect */
-	NULL,				/* accept */
-	udp_ioctl,			/* ioctl */
-	NULL,				/* init */
-	NULL,				/* destroy */
-	NULL,				/* shutdown */
-	ip_setsockopt,			/* setsockopt */
-	ip_getsockopt,			/* getsockopt */
-	udp_sendmsg,			/* sendmsg */
-	udp_recvmsg,			/* recvmsg */
-	NULL,				/* bind */
-	udp_queue_rcv_skb,		/* backlog_rcv */
-	udp_v4_hash,			/* hash */
-	udp_v4_unhash,			/* unhash */
-	udp_v4_get_port,		/* good_socknum */
- 	"UDP",				/* name */
+ 	name:		"UDP",
+	close:		udp_close,
+	connect:	udp_connect,
+	disconnect:	udp_disconnect,
+	ioctl:		udp_ioctl,
+	setsockopt:	ip_setsockopt,
+	getsockopt:	ip_getsockopt,
+	sendmsg:	udp_sendmsg,
+	recvmsg:	udp_recvmsg,
+	backlog_rcv:	udp_queue_rcv_skb,
+	hash:		udp_v4_hash,
+	unhash:		udp_v4_unhash,
+	get_port:	udp_v4_get_port,
 };

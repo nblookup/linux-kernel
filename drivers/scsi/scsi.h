@@ -61,7 +61,7 @@ extern __inline__ int scsi_to_pci_dma_dir(unsigned char scsi_dir)
 #endif
 #endif
 
-#ifdef CONFIG_SBUS
+#if defined(CONFIG_SBUS) && !defined(CONFIG_SUN3)
 #include <asm/sbus.h>
 #if ((SCSI_DATA_UNKNOWN == SBUS_DMA_BIDIRECTIONAL) && (SCSI_DATA_WRITE == SBUS_DMA_TODEVICE) && (SCSI_DATA_READ == SBUS_DMA_FROMDEVICE) && (SCSI_DATA_NONE == SBUS_DMA_NONE))
 #define scsi_to_sbus_dma_dir(scsi_dir)	((int)(scsi_dir))
@@ -105,7 +105,7 @@ extern const char *const scsi_device_types[MAX_SCSI_DEVICE_CODE];
  */
 #define ASSERT_LOCK(_LOCK, _COUNT)
 
-#if defined(__SMP__) && defined(CONFIG_USER_DEBUG)
+#if defined(CONFIG_SMP) && defined(CONFIG_USER_DEBUG)
 #undef ASSERT_LOCK
 #define ASSERT_LOCK(_LOCK,_COUNT)       \
         { if( (_LOCK)->lock != _COUNT )   \
@@ -492,14 +492,12 @@ extern void scsi_done(Scsi_Cmnd * SCpnt);
 extern void scsi_finish_command(Scsi_Cmnd *);
 extern int scsi_retry_command(Scsi_Cmnd *);
 extern Scsi_Cmnd *scsi_allocate_device(Scsi_Device *, int, int);
+extern void __scsi_release_command(Scsi_Cmnd *);
 extern void scsi_release_command(Scsi_Cmnd *);
 extern void scsi_do_cmd(Scsi_Cmnd *, const void *cmnd,
 			void *buffer, unsigned bufflen,
 			void (*done) (struct scsi_cmnd *),
 			int timeout, int retries);
-extern void scsi_wait_cmd(Scsi_Cmnd *, const void *cmnd,
-  			  void *buffer, unsigned bufflen,
-  			  int timeout, int retries);
 extern int scsi_dev_init(void);
 
 /*
@@ -571,7 +569,7 @@ struct scsi_device {
 	Scsi_Cmnd *device_queue;	/* queue of SCSI Command structures */
 
 /* public: */
-	unsigned char id, lun, channel;
+	unsigned int id, lun, channel;
 
 	unsigned int manufacturer;	/* Manufacturer of device, for using 
 					 * vendor-specific cmd's */
@@ -731,9 +729,9 @@ struct scsi_cmnd {
 
 /* public: */
 
-	unsigned char target;
-	unsigned char lun;
-	unsigned char channel;
+	unsigned int target;
+	unsigned int lun;
+	unsigned int channel;
 	unsigned char cmd_len;
 	unsigned char old_cmd_len;
 	unsigned char sc_data_direction;
@@ -759,6 +757,8 @@ struct scsi_cmnd {
 
 	unsigned underflow;	/* Return error if less than
 				   this amount is transfered */
+	unsigned old_underflow;	/* save underflow here when reusing the
+				 * command for error handling */
 
 	unsigned transfersize;	/* How much we are guaranteed to
 				   transfer with each SCSI transfer

@@ -1,11 +1,15 @@
 /*
- * include/asm/setup.h
+ *  linux/include/asm/setup.h
  *
- * Structure passed to kernel to tell it about the
- * hardware it's running on.  See linux/Documentation/arm/Setup
- * for more info.
+ *  Copyright (C) 1997-1999 Russell King
  *
- * Copyright (C) 1997-1999 Russell King
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Structure passed to kernel to tell it about the
+ *  hardware it's running on.  See linux/Documentation/arm/Setup
+ *  for more info.
  */
 #ifndef __ASMARM_SETUP_H
 #define __ASMARM_SETUP_H
@@ -49,6 +53,7 @@ struct param_struct {
 	    unsigned long system_rev;		/* 76 */
 	    unsigned long system_serial_low;	/* 80 */
 	    unsigned long system_serial_high;	/* 84 */
+	    unsigned long mem_fclk_21285;       /* 88 */ 
 	} s;
 	char unused[256];
     } u1;
@@ -73,6 +78,7 @@ struct meminfo {
 	struct {
 		unsigned long start;
 		unsigned long size;
+		int           node;
 	} bank[NR_BANKS];
 };
 

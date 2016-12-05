@@ -26,6 +26,7 @@
 #define SAMPLE_ROUNDUP 0
 
 #include "sound_config.h"
+#include <linux/wrapper.h>
 
 #define DMAP_FREE_ON_CLOSE      0
 #define DMAP_KEEP_ON_CLOSE      1
@@ -56,8 +57,9 @@ static long dmabuf_timeout(struct dma_buffparms *dmap)
 static int sound_alloc_dmap(struct dma_buffparms *dmap)
 {
 	char *start_addr, *end_addr;
-	int i, dma_pagesize;
+	int dma_pagesize;
 	int sz, size;
+	struct page *page;
 
 	dmap->mapping_flags &= ~DMA_MAP_MAPPED;
 
@@ -66,6 +68,14 @@ static int sound_alloc_dmap(struct dma_buffparms *dmap)
 	if (dma_buffsize < 4096)
 		dma_buffsize = 4096;
 	dma_pagesize = (dmap->dma < 4) ? (64 * 1024) : (128 * 1024);
+	
+	/*
+	 *	Now check for the Cyrix problem.
+	 */
+	 
+	if(isa_dma_bridge_buggy==2)
+		dma_pagesize=32768;
+	 
 	dmap->raw_buf = NULL;
 	dmap->buffsize = dma_buffsize;
 	if (dmap->buffsize > dma_pagesize)
@@ -105,14 +115,15 @@ static int sound_alloc_dmap(struct dma_buffparms *dmap)
 	dmap->raw_buf = start_addr;
 	dmap->raw_buf_phys = virt_to_bus(start_addr);
 
-	for (i = MAP_NR(start_addr); i <= MAP_NR(end_addr); i++)
-		set_bit(PG_reserved, &mem_map[i].flags);;
+	for (page = virt_to_page(start_addr); page <= virt_to_page(end_addr); page++)
+		mem_map_reserve(page);
 	return 0;
 }
 
 static void sound_free_dmap(struct dma_buffparms *dmap)
 {
-	int sz, size, i;
+	int sz, size;
+	struct page *page;
 	unsigned long start_addr, end_addr;
 
 	if (dmap->raw_buf == NULL)
@@ -124,8 +135,8 @@ static void sound_free_dmap(struct dma_buffparms *dmap)
 	start_addr = (unsigned long) dmap->raw_buf;
 	end_addr = start_addr + dmap->buffsize;
 
-	for (i = MAP_NR(start_addr); i <= MAP_NR(end_addr); i++)
-		clear_bit(PG_reserved, &mem_map[i].flags);;
+	for (page = virt_to_page(start_addr); page <= virt_to_page(end_addr); page++)
+		mem_map_unreserve(page);
 
 	free_pages((unsigned long) dmap->raw_buf, sz);
 	dmap->raw_buf = NULL;
@@ -1210,6 +1221,7 @@ void DMAbuf_init(int dev, int dma1, int dma2)
 	}
 }
 
+/* No kernel lock - DMAbuf_activate_recording protected by global cli/sti */
 static unsigned int poll_input(struct file * file, int dev, poll_table *wait)
 {
 	struct audio_operations *adev = audio_devs[dev];

@@ -14,7 +14,6 @@
 */
 
 #include "tulip.h"
-#include <asm/io.h>
 
 
 void tulip_timer(unsigned long data)
@@ -87,7 +86,12 @@ void tulip_timer(unsigned long data)
 			break;
 		}
 		break;
-	case DC21140:  case DC21142: case MX98713: case COMPEX9881: default: {
+	case DC21140:
+	case DC21142:
+	case MX98713:
+	case COMPEX9881:
+	case DM910X:
+	default: {
 		struct medialeaf *mleaf;
 		unsigned char *p;
 		if (tp->mtable == NULL) {	/* No EEPROM info, use generic code. */
@@ -127,13 +131,15 @@ void tulip_timer(unsigned long data)
 			/* Check that the specified bit has the proper value. */
 			if ((bitnum < 0) !=
 				((csr12 & (1 << ((bitnum >> 1) & 7))) != 0)) {
-				if (tulip_debug > 1)
+				if (tulip_debug > 2)
 					printk(KERN_DEBUG "%s: Link beat detected for %s.\n", dev->name,
 						   medianame[mleaf->media]);
 				if ((p[2] & 0x61) == 0x01)	/* Bogus Znyx board. */
 					goto actually_mii;
+				netif_carrier_on(dev);
 				break;
 			}
+			netif_carrier_off(dev);
 			if (tp->medialock)
 				break;
 	  select_next_media:
@@ -151,14 +157,16 @@ void tulip_timer(unsigned long data)
 					   medianame[tp->mtable->mleaf[tp->cur_index].media]);
 			tulip_select_media(dev, 0);
 			/* Restart the transmit process. */
-			tulip_outl_CSR6(tp, tp->csr6 | 0x0002);
-			tulip_outl_CSR6(tp, tp->csr6 | 0x2002);
+			tulip_restart_rxtx(tp, tp->csr6);
 			next_tick = (24*HZ)/10;
 			break;
 		}
 		case 1:  case 3:		/* 21140, 21142 MII */
 		actually_mii:
-			tulip_check_duplex(dev);
+			if (tulip_check_duplex(dev) < 0)
+				netif_carrier_off(dev);
+			else
+				netif_carrier_on(dev);
 			next_tick = 60*HZ;
 			break;
 		case 2:					/* 21142 serial block has no link beat. */
@@ -168,8 +176,10 @@ void tulip_timer(unsigned long data)
 	}
 	break;
 	}
-	tp->timer.expires = RUN_AT(next_tick);
-	add_timer(&tp->timer);
+	/* mod_timer synchronizes us with potential add_timer calls
+	 * from interrupts.
+	 */
+	mod_timer(&tp->timer, RUN_AT(next_tick));
 }
 
 
@@ -185,8 +195,7 @@ void mxic_timer(unsigned long data)
 			   inl(ioaddr + CSR12));
 	}
 	if (next_tick) {
-		tp->timer.expires = RUN_AT(next_tick);
-		add_timer(&tp->timer);
+		mod_timer(&tp->timer, RUN_AT(next_tick));
 	}
 }
 
@@ -202,7 +211,9 @@ void comet_timer(unsigned long data)
 		printk(KERN_DEBUG "%s: Comet link status %4.4x partner capability "
 			   "%4.4x.\n",
 			   dev->name, inl(ioaddr + 0xB8), inl(ioaddr + 0xC8));
-	tp->timer.expires = RUN_AT(next_tick);
-	add_timer(&tp->timer);
+	/* mod_timer synchronizes us with potential add_timer calls
+	 * from interrupts.
+	 */
+	mod_timer(&tp->timer, RUN_AT(next_tick));
 }
 

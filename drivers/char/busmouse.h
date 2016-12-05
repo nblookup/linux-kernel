@@ -1,16 +1,17 @@
 /*
- * linux/drivers/char/mouse.h
+ * linux/drivers/char/busmouse.h
  *
  * Copyright (C) 1995 - 1998 Russell King
  *
  * Prototypes for generic busmouse interface
  */
-#ifndef MOUSE_H
-#define MOUSE_H
+#ifndef BUSMOUSE_H
+#define BUSMOUSE_H
 
 struct busmouse {
 	int minor;
 	const char *name;
+	struct module *owner;
 	int (*open)(struct inode * inode, struct file * file);
 	int (*release)(struct inode * inode, struct file * file);
 	int init_button_state;
@@ -22,7 +23,5 @@ extern void busmouse_add_buttons(int mousedev, int clear, int eor);
 
 extern int register_busmouse(struct busmouse *ops);
 extern int unregister_busmouse(int mousedev);
-
-extern int bus_mouse_init(void);
 
 #endif

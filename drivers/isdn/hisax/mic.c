@@ -1,42 +1,17 @@
-/* $Id: mic.c,v 1.8 1999/07/12 21:05:20 keil Exp $
-
+/* $Id: mic.c,v 1.10 2000/11/24 17:05:38 kai Exp $
+ *
  * mic.c  low level stuff for mic cards
  *
  * Copyright (C) 1997 
  *
  * Author  Stephan von Krawczynski <skraw@ithnet.com>
  *
- *
- * $Log: mic.c,v $
- * Revision 1.8  1999/07/12 21:05:20  keil
- * fix race in IRQ handling
- * added watchdog for lost IRQs
- *
- * Revision 1.7  1998/04/15 16:44:32  keil
- * new init code
- *
- * Revision 1.6  1998/02/17 15:39:57  keil
- * fix reset problem
- *
- * Revision 1.5  1998/02/02 13:29:43  keil
- * fast io
- *
- * Revision 1.4  1997/11/08 21:35:51  keil
- * new l1 init
- *
- * Revision 1.3  1997/11/06 17:09:11  keil
- * New 2.1 init code
- *
- * Revision 1.2  1997/10/29 18:51:17  keil
- * New files
- *
- * Revision 1.1.2.1  1997/10/17 22:10:54  keil
- * new files on 2.0
- *
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
 
 #define __NO_VERSION__
+#include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
@@ -44,7 +19,7 @@
 
 extern const char *CardType[];
 
-const char *mic_revision = "$Revision: 1.8 $";
+const char *mic_revision = "$Revision: 1.10 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -224,8 +199,8 @@ mic_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-__initfunc(int
-setup_mic(struct IsdnCard *card))
+int __init
+setup_mic(struct IsdnCard *card)
 {
 	int bytecnt;
 	struct IsdnCardState *cs = card->cs;

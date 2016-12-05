@@ -22,6 +22,7 @@
 * Aug 07, 1998	David Fong	Initial version.
 *****************************************************************************/
 
+#include <linux/config.h>
 #include <linux/version.h>
 #include <linux/kernel.h>	/* printk(), and other useful stuff */
 #include <linux/stddef.h>	/* offsetof(), etc. */
@@ -142,7 +143,7 @@ static int if_rebuild_hdr (void* hdr, struct net_device* dev, unsigned long radd
         struct sk_buff* skb);
 #endif
 static int if_send (struct sk_buff* skb, struct net_device* dev);
-static struct enet_statistics* if_stats (struct net_device* dev);
+static struct net_device_stats* if_stats (struct net_device* dev);
 
 /* CHDLC Firmware interface functions */
 static int chdlc_configure 	(sdla_t* card, void* data);
@@ -602,7 +603,7 @@ static int new_if (wan_device_t* wandev, struct net_device* dev, wanif_conf_t* c
 	chdlc_priv_area->mc = conf->mc;
 
 	/* prepare network device data space for registration */
-	dev->name = card->u.c.if_name;
+	strcpy(dev->name, card->u.c.if_name);
 	dev->init = &if_init;
 	dev->priv = chdlc_priv_area;
 
@@ -1168,7 +1169,7 @@ unsigned short calc_checksum (char *data, int len)
 
 /*============================================================================
  * Get ethernet-style interface statistics.
- * Return a pointer to struct enet_statistics.
+ * Return a pointer to struct net_device_stats.
  */
 #ifdef LINUX_2_1
 static struct net_device_stats* if_stats (struct net_device* dev)
@@ -1180,7 +1181,7 @@ static struct net_device_stats* if_stats (struct net_device* dev)
 	return &my_card->wandev.stats; 
 }
 #else
-static struct enet_statistics* if_stats (struct net_device* dev)
+static struct net_device_stats* if_stats (struct net_device* dev)
 {
         sdla_t *my_card;
         chdlc_private_area_t* chdlc_priv_area = dev->priv;
@@ -2762,7 +2763,7 @@ static void port_set_state (sdla_t *card, int state)
 
 void s508_lock (sdla_t *card, unsigned long *smp_flags)
 {
-#ifdef __SMP__
+#ifdef CONFIG_SMP
                 spin_lock_irqsave(&card->lock, *smp_flags);
                 if (card->next){
                         spin_lock(&card->next->lock);
@@ -2774,7 +2775,7 @@ void s508_lock (sdla_t *card, unsigned long *smp_flags)
 
 void s508_unlock (sdla_t *card, unsigned long *smp_flags)
 {
-#ifdef __SMP__
+#ifdef CONFIG_SMP
                         if (card->next){
                                 spin_unlock(&card->next->lock);
                         }

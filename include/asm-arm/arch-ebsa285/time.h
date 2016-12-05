@@ -1,8 +1,8 @@
 /*
- * linux/include/asm-arm/arch-ebsa285/time.h
+ *  linux/include/asm-arm/arch-ebsa285/time.h
  *
- * Copyright (c) 1998 Russell King.
- * Copyright (c) 1998 Phil Blundell
+ *  Copyright (C) 1998 Russell King.
+ *  Copyright (C) 1998 Phil Blundell
  *
  * CATS has a real-time clock, though the evaluation board doesn't.
  *
@@ -19,9 +19,9 @@
 
 #include <linux/mc146818rtc.h>
 
-#include <asm/dec21285.h>
+#include <asm/hardware/dec21285.h>
 #include <asm/leds.h>
-#include <asm/system.h>
+#include <asm/mach-types.h>
 
 static int rtc_base;
 
@@ -203,7 +203,8 @@ extern __inline__ void setup_timer(void)
 {
 	int irq;
 
-	if (machine_is_co285())
+	if (machine_is_co285() ||
+	    machine_is_personal_server())
 		/*
 		 * Add-in 21285s shouldn't access the RTC
 		 */
@@ -247,7 +248,9 @@ extern __inline__ void setup_timer(void)
 			rtc_base = 0;
 	}
 
-	if (machine_is_ebsa285() || machine_is_co285()) {
+	if (machine_is_ebsa285() ||
+	    machine_is_co285() ||
+	    machine_is_personal_server()) {
 		gettimeoffset = timer1_gettimeoffset;
 
 		*CSR_TIMER1_CLR  = 0;
@@ -267,5 +270,5 @@ extern __inline__ void setup_timer(void)
 		timer_irq.handler = isa_timer_interrupt;
 		irq = IRQ_ISA_TIMER;
 	}
-	setup_arm_irq(IRQ_ISA_TIMER, &timer_irq);
+	setup_arm_irq(irq, &timer_irq);
 }

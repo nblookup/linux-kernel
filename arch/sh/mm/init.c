@@ -1,4 +1,4 @@
-/* $Id: init.c,v 1.16 2000/02/14 15:19:05 gniibe Exp $
+/* $Id: init.c,v 1.17 2000-04-08 15:38:54+09 gniibe Exp $
  *
  *  linux/arch/sh/mm/init.c
  *
@@ -40,8 +40,8 @@
  */
 unsigned long mmu_context_cache;
 
-static unsigned long totalram_pages = 0;
-static unsigned long totalhigh_pages = 0;
+static unsigned long totalram_pages;
+static unsigned long totalhigh_pages;
 
 extern unsigned long init_smp_mappings(unsigned long);
 
@@ -150,7 +150,7 @@ int do_check_pgt_cache(int low, int high)
 
 void show_mem(void)
 {
-	int i,free = 0,total = 0,reserved = 0;
+	int i, total = 0, reserved = 0;
 	int shared = 0, cached = 0;
 
 	printk("Mem-info:\n");
@@ -163,9 +163,7 @@ void show_mem(void)
 			reserved++;
 		else if (PageSwapCache(mem_map+i))
 			cached++;
-		else if (!page_count(mem_map+i))
-			free++;
-		else
+		else if (page_count(mem_map+i))
 			shared += page_count(mem_map+i) - 1;
 	}
 	printk("%d pages of RAM\n",total);
@@ -207,6 +205,9 @@ void __init paging_init(void)
 	/* Enable MMU */
 	ctrl_outl(MMU_CONTROL_INIT, MMUCR);
 
+	/* The manual suggests doing some nops after turning on the MMU */
+	asm volatile("nop;nop;nop;nop;nop;nop;");
+
 	mmu_context_cache = MMU_CONTEXT_FIRST_VERSION;
 	set_asid(mmu_context_cache & MMU_CONTEXT_ASID_MASK);
 
@@ -224,7 +225,7 @@ void __init paging_init(void)
 			zones_size[ZONE_DMA] = max_dma - start_pfn;
 			zones_size[ZONE_NORMAL] = low - max_dma;
 		}
-		free_area_init_node(0, 0, zones_size, __MEMORY_START);
+		free_area_init_node(0, 0, 0, zones_size, __MEMORY_START, 0);
  	}
 }
 
@@ -238,6 +239,7 @@ void __init mem_init(void)
 
 	/* clear the zero-page */
 	memset(empty_zero_page, 0, PAGE_SIZE);
+	flush_page_to_ram(virt_to_page(empty_zero_page));
 
 	/* this will put all low memory onto the freelists */
 	totalram_pages += free_all_bootmem();
@@ -267,8 +269,8 @@ void free_initmem(void)
 	
 	addr = (unsigned long)(&__init_begin);
 	for (; addr < (unsigned long)(&__init_end); addr += PAGE_SIZE) {
-		ClearPageReserved(mem_map + MAP_NR(addr));
-		set_page_count(mem_map+MAP_NR(addr), 1);
+		ClearPageReserved(virt_to_page(addr));
+		set_page_count(virt_to_page(addr), 1);
 		free_page(addr);
 		totalram_pages++;
 	}
@@ -280,8 +282,8 @@ void free_initrd_mem(unsigned long start, unsigned long end)
 {
 	unsigned long p;
 	for (p = start; p < end; p += PAGE_SIZE) {
-		ClearPageReserved(mem_map + MAP_NR(p));
-		set_page_count(mem_map+MAP_NR(p), 1);
+		ClearPageReserved(virt_to_page(p));
+		set_page_count(virt_to_page(p), 1);
 		free_page(p);
 		totalram_pages++;
 	}

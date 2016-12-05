@@ -1,4 +1,4 @@
-/* $Id: system.h,v 1.81 2000/02/28 04:00:44 anton Exp $ */
+/* $Id: system.h,v 1.84 2000/09/23 02:11:22 davem Exp $ */
 #include <linux/config.h>
 
 #ifndef __SPARC_SYSTEM_H
@@ -66,7 +66,7 @@ extern void synchronize_user_stack(void);
 extern void fpsave(unsigned long *fpregs, unsigned long *fsr,
 		   void *fpqueue, unsigned long *fpqdepth);
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #define SWITCH_ENTER \
 	if(prev->flags & PF_USEDFPU) { \
 		put_psr(get_psr() | PSR_EF); \
@@ -249,7 +249,7 @@ extern __inline__ unsigned long read_psr_and_cli(void)
 #define local_irq_save(flags)		__save_and_cli(flags)
 #define local_irq_restore(flags)	__restore_flags(flags)
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 
 extern unsigned char global_irq_holder;
 
@@ -279,19 +279,21 @@ extern void __global_restore_flags(unsigned long flags);
 #define rmb()	mb()
 #define wmb()	mb()
 #define set_mb(__var, __value)  do { __var = __value; mb(); } while(0)
-#define set_rmb(__var, __value) set_mb(__var, __value)
 #define set_wmb(__var, __value) set_mb(__var, __value)
+#define smp_mb()	__asm__ __volatile__("":::"memory");
+#define smp_rmb()	__asm__ __volatile__("":::"memory");
+#define smp_wmb()	__asm__ __volatile__("":::"memory");
 
 #define nop() __asm__ __volatile__ ("nop");
 
 /* This has special calling conventions */
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 BTFIXUPDEF_CALL(void, ___xchg32, void)
 #endif
 
 extern __inline__ unsigned long xchg_u32(__volatile__ unsigned long *m, unsigned long val)
 {
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	__asm__ __volatile__("swap [%2], %0"
 			     : "=&r" (val)
 			     : "0" (val), "r" (m));

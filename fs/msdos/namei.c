@@ -85,7 +85,7 @@ static int msdos_format_name(const char *name,int len,
 		if((res==walk) && (c==0xE5)) c=0x05;
 		if (c == '.') break;
 		space = (c == ' ');
-		*walk = (c >= 'a' && c <= 'z') ? c-32 : c;
+		*walk = (!opts->nocase && c >= 'a' && c <= 'z') ? c-32 : c;
 	}
 	if (space) return -EINVAL;
 	if (opts->conversion == 's' && len && c != '.') {
@@ -114,7 +114,7 @@ static int msdos_format_name(const char *name,int len,
 			if (c >= 'A' && c <= 'Z' && opts->conversion == 's')
 				return -EINVAL;
 			space = c == ' ';
-			*walk++ = c >= 'a' && c <= 'z' ? c-32 : c;
+			*walk++ = (!opts->nocase && c >= 'a' && c <= 'z') ? c-32 : c;
 		}
 		if (space) return -EINVAL;
 		if (opts->conversion == 's' && len) return -EINVAL;
@@ -265,7 +265,7 @@ static int msdos_add_entry(struct inode *dir, const char *name,
 	(*de)->starthi = 0;
 	fat_date_unix2dos(dir->i_mtime,&(*de)->time,&(*de)->date);
 	(*de)->size = 0;
-	fat_mark_buffer_dirty(sb, *bh, 1);
+	fat_mark_buffer_dirty(sb, *bh);
 	return 0;
 }
 
@@ -325,22 +325,18 @@ int msdos_rmdir(struct inode *dir, struct dentry *dentry)
 	 * Check whether the directory is not in use, then check
 	 * whether it is empty.
 	 */
-	res = -EBUSY;
-	if (!d_unhashed(dentry))
-		goto rmdir_done;
 	res = fat_dir_empty(inode);
 	if (res)
 		goto rmdir_done;
 
 	de->name[0] = DELETED_FLAG;
-	fat_mark_buffer_dirty(sb, bh, 1);
+	fat_mark_buffer_dirty(sb, bh);
 	fat_detach(inode);
 	inode->i_nlink = 0;
 	inode->i_ctime = dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	dir->i_nlink--;
 	mark_inode_dirty(inode);
 	mark_inode_dirty(dir);
-	d_delete(dentry);
 	res = 0;
 
 rmdir_done:
@@ -400,7 +396,7 @@ mkdir_error:
 	mark_inode_dirty(inode);
 	mark_inode_dirty(dir);
 	de->name[0] = DELETED_FLAG;
-	fat_mark_buffer_dirty(sb, bh, 1);
+	fat_mark_buffer_dirty(sb, bh);
 	fat_brelse(sb, bh);
 	fat_detach(inode);
 	iput(inode);
@@ -428,14 +424,13 @@ int msdos_unlink( struct inode *dir, struct dentry *dentry)
 		goto unlink_done;
 
 	de->name[0] = DELETED_FLAG;
-	fat_mark_buffer_dirty(sb, bh, 1);
+	fat_mark_buffer_dirty(sb, bh);
 	fat_detach(inode);
 	fat_brelse(sb, bh);
 	inode->i_nlink = 0;
 	inode->i_ctime = dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	mark_inode_dirty(inode);
 	mark_inode_dirty(dir);
-	d_delete(dentry);	/* This also frees the inode */
 	res = 0;
 unlink_done:
 	return res;
@@ -463,9 +458,6 @@ static int do_msdos_rename(struct inode *old_dir, char *old_name,
 		goto degenerate_case;
 	if (is_dir) {
 		if (new_inode) {
-			error = -EBUSY;
-			if (!d_unhashed(new_dentry))
-				goto out;
 			error = fat_dir_empty(new_inode);
 			if (error)
 				goto out;
@@ -493,7 +485,7 @@ static int do_msdos_rename(struct inode *old_dir, char *old_name,
 	if (new_inode)
 		fat_detach(new_inode);
 	old_de->name[0] = DELETED_FLAG;
-	fat_mark_buffer_dirty(sb, old_bh, 1);
+	fat_mark_buffer_dirty(sb, old_bh);
 	fat_detach(old_inode);
 	fat_attach(old_inode, new_ino);
 	if (is_hid)
@@ -512,7 +504,7 @@ static int do_msdos_rename(struct inode *old_dir, char *old_name,
 	if (dotdot_bh) {
 		dotdot_de->start = CT_LE_W(MSDOS_I(new_dir)->i_logstart);
 		dotdot_de->starthi = CT_LE_W((MSDOS_I(new_dir)->i_logstart) >> 16);
-		fat_mark_buffer_dirty(sb, dotdot_bh, 1);
+		fat_mark_buffer_dirty(sb, dotdot_bh);
 		old_dir->i_nlink--;
 		mark_inode_dirty(old_dir);
 		if (new_inode) {
@@ -599,28 +591,7 @@ struct super_block *msdos_read_super(struct super_block *sb,void *data, int sile
 
 	MSDOS_SB(sb)->options.isvfat = 0;
 	res = fat_read_super(sb, data, silent, &msdos_dir_inode_operations);
-	if (res == NULL)
-		goto out_fail;
-	sb->s_root->d_op = &msdos_dentry_operations;
+	if (res)
+		sb->s_root->d_op = &msdos_dentry_operations;
 	return res;
-
-out_fail:
-	return NULL;
 }
-
-
-
-#ifdef MODULE
-int init_module(void)
-{
-	return init_msdos_fs();
-}
-
-
-void cleanup_module(void)
-{
-	unregister_filesystem(&msdos_fs_type);
-}
-
-#endif
-

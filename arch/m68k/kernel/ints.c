@@ -57,10 +57,6 @@ volatile unsigned int num_spurious;
 #define NUM_IRQ_NODES 100
 static irq_node_t nodes[NUM_IRQ_NODES];
 
-unsigned int local_irq_count[NR_CPUS];
-
-unsigned int local_bh_count[NR_CPUS];
-
 static void dummy_enable_irq(unsigned int irq);
 static void dummy_disable_irq(unsigned int irq);
 static int dummy_request_irq(unsigned int irq,
@@ -74,6 +70,8 @@ void (*disable_irq) (unsigned int) = dummy_disable_irq;
 int (*mach_request_irq) (unsigned int, void (*)(int, void *, struct pt_regs *),
                       unsigned long, const char *, void *) = dummy_request_irq;
 void (*mach_free_irq) (unsigned int, void *) = dummy_free_irq;
+
+void init_irq_proc(void);
 
 /*
  * void init_IRQ(void)
@@ -261,3 +259,9 @@ int get_irq_list(char *buf)
 	len += mach_get_irq_list(buf+len);
 	return len;
 }
+
+void init_irq_proc(void)
+{
+	/* Insert /proc/irq driver here */
+}
+

@@ -124,7 +124,6 @@ int oktagon_esp_detect(Scsi_Host_Template *tpnt)
 	    unsigned long board = z->resource.start;
 	    if (request_mem_region(board+OKTAGON_ESP_ADDR,
 				   sizeof(struct ESP_regs), "NCR53C9x")) {
-		strcpy(z->name, "Oktagon 2008 SCSI Host Adapter");
 		/*
 		 * It is a SCSI controller.
 		 * Hardwire Host adapter to SCSI ID 7
@@ -570,17 +569,14 @@ void dma_advance_sg(Scsi_Cmnd *sp)
   sp->SCp.ptr = sp->SCp.buffer->address;
 }
 
-#ifdef MODULE
 
 #define HOSTS_C
 
 #include "oktagon_esp.h"
 
-Scsi_Host_Template driver_template = SCSI_OKTAGON_ESP;
+static Scsi_Host_Template driver_template = SCSI_OKTAGON_ESP;
 
 #include "scsi_module.c"
-
-#endif
 
 int oktagon_esp_release(struct Scsi_Host *instance)
 {

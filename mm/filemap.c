@@ -25,6 +25,7 @@
 
 #include <asm/pgalloc.h>
 #include <asm/uaccess.h>
+#include <asm/mman.h>
 
 #include <linux/highmem.h>
 
@@ -54,25 +55,47 @@ spinlock_t pagemap_lru_lock = SPIN_LOCK_UNLOCKED;
 #define CLUSTER_PAGES		(1 << page_cluster)
 #define CLUSTER_OFFSET(x)	(((x) >> page_cluster) << page_cluster)
 
-void __add_page_to_hash_queue(struct page * page, struct page **p)
+static void add_page_to_hash_queue(struct page * page, struct page **p)
 {
-	atomic_inc(&page_cache_size);
-	if((page->next_hash = *p) != NULL)
-		(*p)->pprev_hash = &page->next_hash;
+	struct page *next = *p;
+
 	*p = page;
+	page->next_hash = next;
 	page->pprev_hash = p;
+	if (next)
+		next->pprev_hash = &page->next_hash;
 	if (page->buffers)
 		PAGE_BUG(page);
+	atomic_inc(&page_cache_size);
 }
 
-static void remove_page_from_hash_queue(struct page * page)
+static inline void add_page_to_inode_queue(struct address_space *mapping, struct page * page)
 {
-	if(page->pprev_hash) {
-		if(page->next_hash)
-			page->next_hash->pprev_hash = page->pprev_hash;
-		*page->pprev_hash = page->next_hash;
-		page->pprev_hash = NULL;
-	}
+	struct list_head *head = &mapping->clean_pages;
+
+	mapping->nrpages++;
+	list_add(&page->list, head);
+	page->mapping = mapping;
+}
+
+static inline void remove_page_from_inode_queue(struct page * page)
+{
+	struct address_space * mapping = page->mapping;
+
+	mapping->nrpages--;
+	list_del(&page->list);
+	page->mapping = NULL;
+}
+
+static inline void remove_page_from_hash_queue(struct page * page)
+{
+	struct page *next = page->next_hash;
+	struct page **pprev = page->pprev_hash;
+
+	if (next)
+		next->pprev_hash = pprev;
+	*pprev = next;
+	page->pprev_hash = NULL;
 	atomic_dec(&page_cache_size);
 }
 
@@ -81,286 +104,185 @@ static void remove_page_from_hash_queue(struct page * page)
  * sure the page is locked and that nobody else uses it - or that usage
  * is safe.
  */
+void __remove_inode_page(struct page *page)
+{
+	if (PageDirty(page)) BUG();
+	remove_page_from_inode_queue(page);
+	remove_page_from_hash_queue(page);
+	page->mapping = NULL;
+}
+
 void remove_inode_page(struct page *page)
 {
 	if (!PageLocked(page))
 		PAGE_BUG(page);
 
 	spin_lock(&pagecache_lock);
-	remove_page_from_inode_queue(page);
-	remove_page_from_hash_queue(page);
-	page->mapping = NULL;
+	__remove_inode_page(page);
 	spin_unlock(&pagecache_lock);
 }
+
+static inline int sync_page(struct page *page)
+{
+	struct address_space *mapping = page->mapping;
+
+	if (mapping && mapping->a_ops && mapping->a_ops->sync_page)
+		return mapping->a_ops->sync_page(page);
+	return 0;
+}
+
+/*
+ * Add a page to the dirty page list.
+ */
+void __set_page_dirty(struct page *page)
+{
+	struct address_space *mapping = page->mapping;
+
+	spin_lock(&pagecache_lock);
+	list_del(&page->list);
+	list_add(&page->list, &mapping->dirty_pages);
+	spin_unlock(&pagecache_lock);
+
+	mark_inode_dirty_pages(mapping->host);
+}
+
+/**
+ * invalidate_inode_pages - Invalidate all the unlocked pages of one inode
+ * @inode: the inode which pages we want to invalidate
+ *
+ * This function only removes the unlocked pages, if you want to
+ * remove all the pages of one inode, you must call truncate_inode_pages.
+ */
 
 void invalidate_inode_pages(struct inode * inode)
 {
 	struct list_head *head, *curr;
 	struct page * page;
 
-	head = &inode->i_mapping->pages;
+	head = &inode->i_mapping->clean_pages;
+
 	spin_lock(&pagecache_lock);
+	spin_lock(&pagemap_lru_lock);
 	curr = head->next;
 
 	while (curr != head) {
 		page = list_entry(curr, struct page, list);
 		curr = curr->next;
 
-		/* We cannot invalidate a locked page */
-		if (PageLocked(page))
+		/* We cannot invalidate something in use.. */
+		if (page_count(page) != 1)
 			continue;
 
-		lru_cache_del(page);
+		/* ..or dirty.. */
+		if (PageDirty(page))
+			continue;
 
-		remove_page_from_inode_queue(page);
-		remove_page_from_hash_queue(page);
-		page->mapping = NULL;
+		/* ..or locked */
+		if (TryLockPage(page))
+			continue;
+
+		__lru_cache_del(page);
+		__remove_inode_page(page);
+		UnlockPage(page);
 		page_cache_release(page);
 	}
+
+	spin_unlock(&pagemap_lru_lock);
 	spin_unlock(&pagecache_lock);
 }
 
-/*
- * Truncate the page cache at a set offset, removing the pages
- * that are beyond that offset (and zeroing out partial pages).
- */
-void truncate_inode_pages(struct address_space * mapping, loff_t lstart)
+static inline void truncate_partial_page(struct page *page, unsigned partial)
 {
-	struct list_head *head, *curr;
+	memclear_highpage_flush(page, partial, PAGE_CACHE_SIZE-partial);
+				
+	if (page->buffers)
+		block_flushpage(page, partial);
+
+}
+
+static inline void truncate_complete_page(struct page *page)
+{
+	/* Leave it on the LRU if it gets converted into anonymous buffers */
+	if (!page->buffers || block_flushpage(page, 0))
+		lru_cache_del(page);
+
+	/*
+	 * We remove the page from the page cache _after_ we have
+	 * destroyed all buffer-cache references to it. Otherwise some
+	 * other process might think this inode page is not in the
+	 * page cache and creates a buffer-cache alias to it causing
+	 * all sorts of fun problems ...  
+	 */
+	ClearPageDirty(page);
+	ClearPageUptodate(page);
+	remove_inode_page(page);
+	page_cache_release(page);
+}
+
+static int FASTCALL(truncate_list_pages(struct list_head *, unsigned long, unsigned *));
+static int truncate_list_pages(struct list_head *head, unsigned long start, unsigned *partial)
+{
+	struct list_head *curr;
 	struct page * page;
-	unsigned partial = lstart & (PAGE_CACHE_SIZE - 1);
-	unsigned long start;
 
-	start = (lstart + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
-
-repeat:
-	head = &mapping->pages;
-	spin_lock(&pagecache_lock);
 	curr = head->next;
 	while (curr != head) {
 		unsigned long offset;
 
 		page = list_entry(curr, struct page, list);
 		curr = curr->next;
-
 		offset = page->index;
 
-		/* page wholly truncated - free it */
-		if (offset >= start) {
-			get_page(page);
+		/* Is one of the pages to truncate? */
+		if ((offset >= start) || (*partial && (offset + 1) == start)) {
+			if (TryLockPage(page)) {
+				page_cache_get(page);
+				spin_unlock(&pagecache_lock);
+				wait_on_page(page);
+				page_cache_release(page);
+				return 1;
+			}
+			page_cache_get(page);
 			spin_unlock(&pagecache_lock);
 
-			lock_page(page);
-
-			if (!page->buffers || block_flushpage(page, 0))
-				lru_cache_del(page);
-
-			/*
-			 * We remove the page from the page cache
-			 * _after_ we have destroyed all buffer-cache
-			 * references to it. Otherwise some other process
-			 * might think this inode page is not in the
-			 * page cache and creates a buffer-cache alias
-			 * to it causing all sorts of fun problems ...
-			 */
-			remove_inode_page(page);
+			if (*partial && (offset + 1) == start) {
+				truncate_partial_page(page, *partial);
+				*partial = 0;
+			} else 
+				truncate_complete_page(page);
 
 			UnlockPage(page);
 			page_cache_release(page);
-			page_cache_release(page);
-
-			/*
-			 * We have done things without the pagecache lock,
-			 * so we'll have to repeat the scan.
-			 * It's not possible to deadlock here because
-			 * we are guaranteed to make progress. (ie. we have
-			 * just removed a page)
-			 */
-			goto repeat;
+			return 1;
 		}
-		/*
-		 * there is only one partial page possible.
-		 */
-		if (!partial)
-			continue;
-
-		/* and it's the one preceeding the first wholly truncated page */
-		if ((offset + 1) != start)
-			continue;
-
-		/* partial truncate, clear end of page */
-		get_page(page);
-		spin_unlock(&pagecache_lock);
-
-		lock_page(page);
-
-		memclear_highpage_flush(page, partial, PAGE_CACHE_SIZE-partial);
-		if (page->buffers)
-			block_flushpage(page, partial);
-
-		partial = 0;
-
-		/*
-		 * we have dropped the spinlock so we have to
-		 * restart.
-		 */
-		UnlockPage(page);
-		page_cache_release(page);
-		goto repeat;
 	}
-	spin_unlock(&pagecache_lock);
+	return 0;
 }
 
-int shrink_mmap(int priority, int gfp_mask, zone_t *zone)
+
+/**
+ * truncate_inode_pages - truncate *all* the pages from an offset
+ * @mapping: mapping to truncate
+ * @lstart: offset from with to truncate
+ *
+ * Truncate the page cache at a set offset, removing the pages
+ * that are beyond that offset (and zeroing out partial pages).
+ * If any page is locked we wait for it to become unlocked.
+ */
+void truncate_inode_pages(struct address_space * mapping, loff_t lstart) 
 {
-	int ret = 0, count;
-	LIST_HEAD(young);
-	LIST_HEAD(old);
-	LIST_HEAD(forget);
-	struct list_head * page_lru, * dispose;
-	struct page * page;
+	unsigned long start = (lstart + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
+	unsigned partial = lstart & (PAGE_CACHE_SIZE - 1);
 
-	count = nr_lru_pages / (priority+1);
-
-	spin_lock(&pagemap_lru_lock);
-
-	while (count > 0 && (page_lru = lru_cache.prev) != &lru_cache) {
-		page = list_entry(page_lru, struct page, lru);
-		list_del(page_lru);
-
-		dispose = &lru_cache;
-		if (test_and_clear_bit(PG_referenced, &page->flags))
-			/* Roll the page at the top of the lru list,
-			 * we could also be more aggressive putting
-			 * the page in the young-dispose-list, so
-			 * avoiding to free young pages in each pass.
-			 */
-			goto dispose_continue;
-
-		dispose = &old;
-		/* don't account passes over not DMA pages */
-		if (zone && (!memclass(page->zone, zone)))
-			goto dispose_continue;
-
-		count--;
-
-		dispose = &young;
-		if (TryLockPage(page))
-			goto dispose_continue;
-
-		/* Release the pagemap_lru lock even if the page is not yet
-		   queued in any lru queue since we have just locked down
-		   the page so nobody else may SMP race with us running
-		   a lru_cache_del() (lru_cache_del() always run with the
-		   page locked down ;). */
-		spin_unlock(&pagemap_lru_lock);
-
-		/* avoid unscalable SMP locking */
-		if (!page->buffers && page_count(page) > 1)
-			goto unlock_noput_continue;
-
-		/* Take the pagecache_lock spinlock held to avoid
-		   other tasks to notice the page while we are looking at its
-		   page count. If it's a pagecache-page we'll free it
-		   in one atomic transaction after checking its page count. */
-		spin_lock(&pagecache_lock);
-
-		/* avoid freeing the page while it's locked */
-		get_page(page);
-
-		/* Is it a buffer page? */
-		if (page->buffers) {
-			spin_unlock(&pagecache_lock);
-			if (!try_to_free_buffers(page))
-				goto unlock_continue;
-			/* page was locked, inode can't go away under us */
-			if (!page->mapping) {
-				atomic_dec(&buffermem_pages);
-				goto made_buffer_progress;
-			}
-			spin_lock(&pagecache_lock);
-		}
-
-		/*
-		 * We can't free pages unless there's just one user
-		 * (count == 2 because we added one ourselves above).
-		 */
-		if (page_count(page) != 2)
-			goto cache_unlock_continue;
-
-		/*
-		 * We did the page aging part.
-		 */
-		if (nr_lru_pages < freepages.min * priority)
-			goto cache_unlock_continue;
-
-		/*
-		 * Is it a page swap page? If so, we want to
-		 * drop it if it is no longer used, even if it
-		 * were to be marked referenced..
-		 */
-		if (PageSwapCache(page)) {
-			spin_unlock(&pagecache_lock);
-			__delete_from_swap_cache(page);
-			goto made_inode_progress;
-		}	
-
-		/* is it a page-cache page? */
-		if (page->mapping) {
-			if (!pgcache_under_min())
-			{
-				remove_page_from_inode_queue(page);
-				remove_page_from_hash_queue(page);
-				page->mapping = NULL;
-				spin_unlock(&pagecache_lock);
-				goto made_inode_progress;
-			}
-			goto cache_unlock_continue;
-		}
-
-		dispose = &forget;
-		printk(KERN_ERR "shrink_mmap: unknown LRU page!\n");
-
-cache_unlock_continue:
-		spin_unlock(&pagecache_lock);
-unlock_continue:
-		UnlockPage(page);
-		put_page(page);
-dispose_relock_continue:
-		/* even if the dispose list is local, a truncate_inode_page()
-		   may remove a page from its queue so always
-		   synchronize with the lru lock while accesing the
-		   page->lru field */
-		spin_lock(&pagemap_lru_lock);
-		list_add(page_lru, dispose);
-		continue;
-
-unlock_noput_continue:
-		UnlockPage(page);
-		goto dispose_relock_continue;
-
-dispose_continue:
-		list_add(page_lru, dispose);
-	}
-	goto out;
-
-made_inode_progress:
-	page_cache_release(page);
-made_buffer_progress:
-	UnlockPage(page);
-	put_page(page);
-	ret = 1;
-	spin_lock(&pagemap_lru_lock);
-	/* nr_lru_pages needs the spinlock */
-	nr_lru_pages--;
-
-out:
-	list_splice(&young, &lru_cache);
-	list_splice(&old, lru_cache.prev);
-
-	spin_unlock(&pagemap_lru_lock);
-
-	return ret;
+repeat:
+	spin_lock(&pagecache_lock);
+	if (truncate_list_pages(&mapping->clean_pages, start, &partial))
+		goto repeat;
+	if (truncate_list_pages(&mapping->dirty_pages, start, &partial))
+		goto repeat;
+	if (truncate_list_pages(&mapping->locked_pages, start, &partial))
+		goto repeat;
+	spin_unlock(&pagecache_lock);
 }
 
 static inline struct page * __find_page_nolock(struct address_space *mapping, unsigned long offset, struct page *page)
@@ -377,7 +299,14 @@ inside:
 		if (page->index == offset)
 			break;
 	}
-	set_bit(PG_referenced, &page->flags);
+	/*
+	 * Touching the page may move it to the active list.
+	 * If we end up with too few inactive pages, we wake
+	 * up kswapd.
+	 */
+	age_page_up(page);
+	if (inactive_shortage() > inactive_target / 2 && free_shortage())
+			wakeup_kswapd(0);
 not_found:
 	return page;
 }
@@ -397,7 +326,7 @@ static int writeout_one_page(struct page *page)
 		if (buffer_locked(bh) || !buffer_dirty(bh) || !buffer_uptodate(bh))
 			continue;
 
-		bh->b_flushtime = 0;
+		bh->b_flushtime = jiffies;
 		ll_rw_block(WRITE, 1, &bh);	
 	} while ((bh = bh->b_this_page) != head);
 	return 0;
@@ -417,13 +346,11 @@ static int waitfor_one_page(struct page *page)
 	return error;
 }
 
-static int do_buffer_fdatasync(struct inode *inode, unsigned long start, unsigned long end, int (*fn)(struct page *))
+static int do_buffer_fdatasync(struct list_head *head, unsigned long start, unsigned long end, int (*fn)(struct page *))
 {
-	struct list_head *head, *curr;
+	struct list_head *curr;
 	struct page *page;
 	int retval = 0;
-
-	head = &inode->i_mapping->pages;
 
 	spin_lock(&pagecache_lock);
 	curr = head->next;
@@ -437,7 +364,7 @@ static int do_buffer_fdatasync(struct inode *inode, unsigned long start, unsigne
 		if (page->index < start)
 			continue;
 
-		get_page(page);
+		page_cache_get(page);
 		spin_unlock(&pagecache_lock);
 		lock_page(page);
 
@@ -463,32 +390,129 @@ int generic_buffer_fdatasync(struct inode *inode, unsigned long start_idx, unsig
 {
 	int retval;
 
-	retval = do_buffer_fdatasync(inode, start_idx, end_idx, writeout_one_page);
-	retval |= do_buffer_fdatasync(inode, start_idx, end_idx, waitfor_one_page);
+	/* writeout dirty buffers on pages from both clean and dirty lists */
+	retval = do_buffer_fdatasync(&inode->i_mapping->dirty_pages, start_idx, end_idx, writeout_one_page);
+	retval |= do_buffer_fdatasync(&inode->i_mapping->clean_pages, start_idx, end_idx, writeout_one_page);
+	retval |= do_buffer_fdatasync(&inode->i_mapping->locked_pages, start_idx, end_idx, writeout_one_page);
+
+	/* now wait for locked buffers on pages from both clean and dirty lists */
+	retval |= do_buffer_fdatasync(&inode->i_mapping->dirty_pages, start_idx, end_idx, writeout_one_page);
+	retval |= do_buffer_fdatasync(&inode->i_mapping->clean_pages, start_idx, end_idx, waitfor_one_page);
+	retval |= do_buffer_fdatasync(&inode->i_mapping->locked_pages, start_idx, end_idx, waitfor_one_page);
+
 	return retval;
+}
+
+/**
+ *      filemap_fdatasync - walk the list of dirty pages of the given address space
+ *     	and writepage() all of them.
+ * 
+ *      @mapping: address space structure to write
+ *
+ */
+void filemap_fdatasync(struct address_space * mapping)
+{
+	int (*writepage)(struct page *) = mapping->a_ops->writepage;
+
+	spin_lock(&pagecache_lock);
+
+        while (!list_empty(&mapping->dirty_pages)) {
+		struct page *page = list_entry(mapping->dirty_pages.next, struct page, list);
+
+		list_del(&page->list);
+		list_add(&page->list, &mapping->locked_pages);
+
+		if (!PageDirty(page))
+			continue;
+
+		page_cache_get(page);
+		spin_unlock(&pagecache_lock);
+
+		lock_page(page);
+
+		if (PageDirty(page)) {
+			ClearPageDirty(page);
+			writepage(page);
+		} else
+			UnlockPage(page);
+
+		page_cache_release(page);
+		spin_lock(&pagecache_lock);
+	}
+	spin_unlock(&pagecache_lock);
+}
+
+/**
+ *      filemap_fdatawait - walk the list of locked pages of the given address space
+ *     	and wait for all of them.
+ * 
+ *      @mapping: address space structure to wait for
+ *
+ */
+void filemap_fdatawait(struct address_space * mapping)
+{
+	spin_lock(&pagecache_lock);
+
+        while (!list_empty(&mapping->locked_pages)) {
+		struct page *page = list_entry(mapping->locked_pages.next, struct page, list);
+
+		list_del(&page->list);
+		list_add(&page->list, &mapping->clean_pages);
+
+		if (!PageLocked(page))
+			continue;
+
+		page_cache_get(page);
+		spin_unlock(&pagecache_lock);
+
+		___wait_on_page(page);
+
+		page_cache_release(page);
+		spin_lock(&pagecache_lock);
+	}
+	spin_unlock(&pagecache_lock);
+}
+
+/*
+ * Add a page to the inode page cache.
+ *
+ * The caller must have locked the page and 
+ * set all the page flags correctly..
+ */
+void add_to_page_cache_locked(struct page * page, struct address_space *mapping, unsigned long index)
+{
+	if (!PageLocked(page))
+		BUG();
+
+	page_cache_get(page);
+	spin_lock(&pagecache_lock);
+	page->index = index;
+	add_page_to_inode_queue(mapping, page);
+	add_page_to_hash_queue(page, page_hash(mapping, index));
+	lru_cache_add(page);
+	spin_unlock(&pagecache_lock);
 }
 
 /*
  * This adds a page to the page cache, starting out as locked,
- * owned by us, referenced, but not uptodate and with no errors.
+ * owned by us, but unreferenced, not uptodate and with no errors.
  */
 static inline void __add_to_page_cache(struct page * page,
 	struct address_space *mapping, unsigned long offset,
 	struct page **hash)
 {
-	struct page *alias;
 	unsigned long flags;
 
-	flags = page->flags & ~((1 << PG_uptodate) | (1 << PG_error));
-	page->flags = flags | (1 << PG_locked) | (1 << PG_referenced);
-	get_page(page);
+	if (PageLocked(page))
+		BUG();
+
+	flags = page->flags & ~((1 << PG_uptodate) | (1 << PG_error) | (1 << PG_dirty) | (1 << PG_referenced) | (1 << PG_arch_1));
+	page->flags = flags | (1 << PG_locked);
+	page_cache_get(page);
 	page->index = offset;
 	add_page_to_inode_queue(mapping, page);
-	__add_page_to_hash_queue(page, hash);
+	add_page_to_hash_queue(page, hash);
 	lru_cache_add(page);
-	alias = __find_page_nolock(mapping, offset, *hash);
-	if (alias != page)
-		BUG();
 }
 
 void add_to_page_cache(struct page * page, struct address_space * mapping, unsigned long offset)
@@ -540,7 +564,7 @@ static inline int page_cache_read(struct file * file, unsigned long offset)
 		return -ENOMEM;
 
 	if (!add_to_page_cache_unique(page, mapping, offset, hash)) {
-		int error = mapping->a_ops->readpage(file->f_dentry, page);
+		int error = mapping->a_ops->readpage(file, page);
 		page_cache_release(page);
 		return error;
 	}
@@ -586,10 +610,11 @@ void ___wait_on_page(struct page *page)
 
 	add_wait_queue(&page->wait, &wait);
 	do {
-		run_task_queue(&tq_disk);
+		sync_page(page);
 		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
 		if (!PageLocked(page))
 			break;
+		run_task_queue(&tq_disk);
 		schedule();
 	} while (PageLocked(page));
 	tsk->state = TASK_RUNNING;
@@ -597,21 +622,47 @@ void ___wait_on_page(struct page *page)
 }
 
 /*
- * Get an exclusive lock on the page..
+ * Get a lock on the page, assuming we need to sleep
+ * to get it..
+ */
+static void __lock_page(struct page *page)
+{
+	struct task_struct *tsk = current;
+	DECLARE_WAITQUEUE(wait, tsk);
+
+	add_wait_queue_exclusive(&page->wait, &wait);
+	for (;;) {
+		sync_page(page);
+		set_task_state(tsk, TASK_UNINTERRUPTIBLE);
+		if (PageLocked(page)) {
+			run_task_queue(&tq_disk);
+			schedule();
+			continue;
+		}
+		if (!TryLockPage(page))
+			break;
+	}
+	tsk->state = TASK_RUNNING;
+	remove_wait_queue(&page->wait, &wait);
+}
+	
+
+/*
+ * Get an exclusive lock on the page, optimistically
+ * assuming it's not locked..
  */
 void lock_page(struct page *page)
 {
-	while (TryLockPage(page))
-		___wait_on_page(page);
+	if (TryLockPage(page))
+		__lock_page(page);
 }
-
 
 /*
  * a rather lightweight function, finding and getting a reference to a
  * hashed page atomically, waiting for it if it's locked.
  */
-struct page * __find_get_page (struct address_space *mapping,
-				unsigned long offset, struct page **hash)
+struct page * __find_get_page(struct address_space *mapping,
+			      unsigned long offset, struct page **hash)
 {
 	struct page *page;
 
@@ -619,41 +670,11 @@ struct page * __find_get_page (struct address_space *mapping,
 	 * We scan the hash list read-only. Addition to and removal from
 	 * the hash-list needs a held write-lock.
 	 */
-repeat:
 	spin_lock(&pagecache_lock);
 	page = __find_page_nolock(mapping, offset, *hash);
 	if (page)
-		get_page(page);
+		page_cache_get(page);
 	spin_unlock(&pagecache_lock);
-
-	/* Found the page, sleep if locked. */
-	if (page && PageLocked(page)) {
-		struct task_struct *tsk = current;
-		DECLARE_WAITQUEUE(wait, tsk);
-
-		run_task_queue(&tq_disk);
-
-		__set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		add_wait_queue(&page->wait, &wait);
-
-		if (PageLocked(page))
-			schedule();
-		__set_task_state(tsk, TASK_RUNNING);
-		remove_wait_queue(&page->wait, &wait);
-
-		/*
-		 * The page might have been unhashed meanwhile. It's
-		 * not freed though because we hold a reference to it.
-		 * If this is the case then it will be freed _here_,
-		 * and we recheck the hash anyway.
-		 */
-		page_cache_release(page);
-		goto repeat;
-	}
-	/*
-	 * It's not locked so we can return the page and we hold
-	 * a reference to it.
-	 */
 	return page;
 }
 
@@ -672,45 +693,76 @@ struct page * __find_lock_page (struct address_space *mapping,
 repeat:
 	spin_lock(&pagecache_lock);
 	page = __find_page_nolock(mapping, offset, *hash);
-	if (page)
-		get_page(page);
-	spin_unlock(&pagecache_lock);
+	if (page) {
+		page_cache_get(page);
+		spin_unlock(&pagecache_lock);
 
-	/* Found the page, sleep if locked. */
-	if (page && TryLockPage(page)) {
-		struct task_struct *tsk = current;
-		DECLARE_WAITQUEUE(wait, tsk);
+		lock_page(page);
 
-		run_task_queue(&tq_disk);
+		/* Is the page still hashed? Ok, good.. */
+		if (page->mapping)
+			return page;
 
-		__set_task_state(tsk, TASK_UNINTERRUPTIBLE);
-		add_wait_queue(&page->wait, &wait);
-
-		if (PageLocked(page))
-			schedule();
-		__set_task_state(tsk, TASK_RUNNING);
-		remove_wait_queue(&page->wait, &wait);
-
-		/*
-		 * The page might have been unhashed meanwhile. It's
-		 * not freed though because we hold a reference to it.
-		 * If this is the case then it will be freed _here_,
-		 * and we recheck the hash anyway.
-		 */
+		/* Nope: we raced. Release and try again.. */
+		UnlockPage(page);
 		page_cache_release(page);
 		goto repeat;
 	}
-	/*
-	 * It's not locked so we can return the page and we hold
-	 * a reference to it.
-	 */
-	return page;
+	spin_unlock(&pagecache_lock);
+	return NULL;
 }
 
 #if 0
 #define PROFILE_READAHEAD
 #define DEBUG_READAHEAD
 #endif
+
+/*
+ * We combine this with read-ahead to deactivate pages when we
+ * think there's sequential IO going on. Note that this is
+ * harmless since we don't actually evict the pages from memory
+ * but just move them to the inactive list.
+ *
+ * TODO:
+ * - make the readahead code smarter
+ * - move readahead to the VMA level so we can do the same
+ *   trick with mmap()
+ *
+ * Rik van Riel, 2000
+ */
+static void drop_behind(struct file * file, unsigned long index)
+{
+	struct inode *inode = file->f_dentry->d_inode;
+	struct address_space *mapping = inode->i_mapping;
+	struct page **hash;
+	struct page *page;
+	unsigned long start;
+
+	/* Nothing to drop-behind if we're on the first page. */
+	if (!index)
+		return;
+
+	if (index > file->f_rawin)
+		start = index - file->f_rawin;
+	else
+		start = 0;
+
+	/*
+	 * Go backwards from index-1 and drop all pages in the
+	 * readahead window. Since the readahead window may have
+	 * been increased since the last time we were called, we
+	 * stop when the page isn't there.
+	 */
+	spin_lock(&pagecache_lock);
+	while (--index >= start) {
+		hash = page_hash(mapping, index);
+		page = __find_page_nolock(mapping, index, *hash);
+		if (!page)
+			break;
+		deactivate_page(page);
+	}
+	spin_unlock(&pagecache_lock);
+}
 
 /*
  * Read-ahead profiling information
@@ -859,7 +911,7 @@ static void generic_file_readahead(int reada_ok,
  * page only.
  */
 	if (PageLocked(page)) {
-		if (!filp->f_ralen || index >= raend || index + filp->f_ralen < raend) {
+		if (!filp->f_ralen || index >= raend || index + filp->f_rawin < raend) {
 			raend = index;
 			if (raend < end_index)
 				max_ahead = filp->f_ramax;
@@ -934,6 +986,12 @@ static void generic_file_readahead(int reada_ok,
 
 		if (filp->f_ramax > max_readahead)
 			filp->f_ramax = max_readahead;
+
+		/*
+		 * Move the pages that have already been passed
+		 * to the inactive list.
+		 */
+		drop_behind(filp, index);
 
 #ifdef PROFILE_READAHEAD
 		profile_readahead((reada_ok == 2), filp);
@@ -1031,12 +1089,20 @@ void do_generic_file_read(struct file * filp, loff_t *ppos, read_descriptor_t * 
 		if (!page)
 			goto no_cached_page;
 found_page:
-		get_page(page);
+		page_cache_get(page);
 		spin_unlock(&pagecache_lock);
 
 		if (!Page_Uptodate(page))
 			goto page_not_up_to_date;
+		generic_file_readahead(reada_ok, filp, inode, page);
 page_ok:
+		/* If users can be writing to this page using arbitrary
+		 * virtual addresses, take care about potential aliasing
+		 * before reading the page on the kernel side.
+		 */
+		if (mapping->i_mmap_shared != NULL)
+			flush_dcache_page(page);
+
 		/*
 		 * Ok, we have the page, and it's up-to-date, so
 		 * now we can copy it to user space...
@@ -1068,6 +1134,15 @@ page_not_up_to_date:
 
 		/* Get exclusive access to the page ... */
 		lock_page(page);
+
+		/* Did it get unhashed before we got the lock? */
+		if (!page->mapping) {
+			UnlockPage(page);
+			page_cache_release(page);
+			continue;
+		}
+
+		/* Did somebody else fill it already? */
 		if (Page_Uptodate(page)) {
 			UnlockPage(page);
 			goto page_ok;
@@ -1075,7 +1150,7 @@ page_not_up_to_date:
 
 readpage:
 		/* ... and start the actual read. The read will unlock the page. */
-		error = mapping->a_ops->readpage(filp->f_dentry, page);
+		error = mapping->a_ops->readpage(filp, page);
 
 		if (!error) {
 			if (Page_Uptodate(page))
@@ -1139,14 +1214,14 @@ no_cached_page:
 
 static int file_read_actor(read_descriptor_t * desc, struct page *page, unsigned long offset, unsigned long size)
 {
-	unsigned long kaddr;
+	char *kaddr;
 	unsigned long left, count = desc->count;
 
 	if (size > count)
 		size = count;
 
 	kaddr = kmap(page);
-	left = __copy_to_user(desc->buf, (void *)(kaddr + offset), size);
+	left = __copy_to_user(desc->buf, kaddr + offset, size);
 	kunmap(page);
 	
 	if (left) {
@@ -1190,7 +1265,7 @@ ssize_t generic_file_read(struct file * filp, char * buf, size_t count, loff_t *
 
 static int file_send_actor(read_descriptor_t * desc, struct page *page, unsigned long offset , unsigned long size)
 {
-	unsigned long kaddr;
+	char *kaddr;
 	ssize_t written;
 	unsigned long count = desc->count;
 	struct file *file = (struct file *) desc->buf;
@@ -1202,8 +1277,7 @@ static int file_send_actor(read_descriptor_t * desc, struct page *page, unsigned
 	set_fs(KERNEL_DS);
 
 	kaddr = kmap(page);
-	written = file->f_op->write(file, (char *)kaddr + offset,
-						 size, &file->f_pos);
+	written = file->f_op->write(file, kaddr + offset, size, &file->f_pos);
 	kunmap(page);
 	set_fs(old_fs);
 	if (written < 0) {
@@ -1253,8 +1327,6 @@ asmlinkage ssize_t sys_sendfile(int out_fd, int in_fd, off_t *offset, size_t cou
 	if (!out_file->f_op || !out_file->f_op->write)
 		goto fput_out;
 	out_inode = out_file->f_dentry->d_inode;
-	if (!out_inode)
-		goto fput_out;
 	retval = locks_verify_area(FLOCK_VERIFY_WRITE, out_inode, out_file, out_file->f_pos, count);
 	if (retval)
 		goto fput_out;
@@ -1294,6 +1366,61 @@ out:
 }
 
 /*
+ * Read-ahead and flush behind for MADV_SEQUENTIAL areas.  Since we are
+ * sure this is sequential access, we don't need a flexible read-ahead
+ * window size -- we can always use a large fixed size window.
+ */
+static void nopage_sequential_readahead(struct vm_area_struct * vma,
+	unsigned long pgoff, unsigned long filesize)
+{
+	unsigned long ra_window;
+
+	ra_window = get_max_readahead(vma->vm_file->f_dentry->d_inode);
+	ra_window = CLUSTER_OFFSET(ra_window + CLUSTER_PAGES - 1);
+
+	/* vm_raend is zero if we haven't read ahead in this area yet.  */
+	if (vma->vm_raend == 0)
+		vma->vm_raend = vma->vm_pgoff + ra_window;
+
+	/*
+	 * If we've just faulted the page half-way through our window,
+	 * then schedule reads for the next window, and release the
+	 * pages in the previous window.
+	 */
+	if ((pgoff + (ra_window >> 1)) == vma->vm_raend) {
+		unsigned long start = vma->vm_pgoff + vma->vm_raend;
+		unsigned long end = start + ra_window;
+
+		if (end > ((vma->vm_end >> PAGE_SHIFT) + vma->vm_pgoff))
+			end = (vma->vm_end >> PAGE_SHIFT) + vma->vm_pgoff;
+		if (start > end)
+			return;
+
+		while ((start < end) && (start < filesize)) {
+			if (read_cluster_nonblocking(vma->vm_file,
+							start, filesize) < 0)
+				break;
+			start += CLUSTER_PAGES;
+		}
+		run_task_queue(&tq_disk);
+
+		/* if we're far enough past the beginning of this area,
+		   recycle pages that are in the previous window. */
+		if (vma->vm_raend > (vma->vm_pgoff + ra_window + ra_window)) {
+			unsigned long window = ra_window << PAGE_SHIFT;
+
+			end = vma->vm_start + (vma->vm_raend << PAGE_SHIFT);
+			end -= window + window;
+			filemap_sync(vma, end - window, window, MS_INVALIDATE);
+		}
+
+		vma->vm_raend += ra_window;
+	}
+
+	return;
+}
+
+/*
  * filemap_nopage() is invoked via the vma operations vector for a
  * mapped memory region to read in file data during a page fault.
  *
@@ -1309,16 +1436,16 @@ struct page * filemap_nopage(struct vm_area_struct * area,
 	struct inode *inode = file->f_dentry->d_inode;
 	struct address_space *mapping = inode->i_mapping;
 	struct page *page, **hash, *old_page;
-	unsigned long size = (inode->i_size + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
+	unsigned long size, pgoff;
 
-	unsigned long pgoff = ((address - area->vm_start) >> PAGE_CACHE_SHIFT) + area->vm_pgoff;
+	pgoff = ((address - area->vm_start) >> PAGE_CACHE_SHIFT) + area->vm_pgoff;
 
+retry_all:
 	/*
-	 * Semantics for shared and private memory areas are different
-	 * past the end of the file. A shared mapping past the last page
-	 * of the file is an error and results in a SIGBUS, while a
-	 * private mapping just maps in a zero page.
+	 * An external ptracer can access pages that normally aren't
+	 * accessible..
 	 */
+	size = (inode->i_size + PAGE_CACHE_SIZE - 1) >> PAGE_CACHE_SHIFT;
 	if ((pgoff >= size) && (area->vm_mm == current->mm))
 		return NULL;
 
@@ -1339,6 +1466,12 @@ retry_find:
 		goto page_not_uptodate;
 
 success:
+ 	/*
+	 * Try read-ahead for sequential areas.
+	 */
+	if (VM_SequentialReadHint(area))
+		nopage_sequential_readahead(area, pgoff, size);
+
 	/*
 	 * Found the page and have a reference on it, need to check sharing
 	 * and possibly copy it over to another page..
@@ -1348,14 +1481,14 @@ success:
 		struct page *new_page = page_cache_alloc();
 
 		if (new_page) {
-			copy_highpage(new_page, old_page);
+			copy_user_highpage(new_page, old_page, address);
 			flush_page_to_ram(new_page);
 		} else
 			new_page = NOPAGE_OOM;
 		page_cache_release(page);
 		return new_page;
 	}
-		
+
 	flush_page_to_ram(old_page);
 	return old_page;
 
@@ -1367,7 +1500,7 @@ no_cached_page:
 	 * Otherwise, we're off the end of a privately mapped file,
 	 * so we need to map a zero page.
 	 */
-	if (pgoff < size)
+	if ((pgoff < size) && !VM_RandomReadHint(area))
 		error = read_cluster_nonblocking(file, pgoff, size);
 	else
 		error = page_cache_read(file, pgoff);
@@ -1391,12 +1524,21 @@ no_cached_page:
 
 page_not_uptodate:
 	lock_page(page);
+
+	/* Did it get unhashed while we waited for it? */
+	if (!page->mapping) {
+		UnlockPage(page);
+		page_cache_release(page);
+		goto retry_all;
+	}
+
+	/* Did somebody else get it up-to-date? */
 	if (Page_Uptodate(page)) {
 		UnlockPage(page);
 		goto success;
 	}
 
-	if (!mapping->a_ops->readpage(file->f_dentry, page)) {
+	if (!mapping->a_ops->readpage(file, page)) {
 		wait_on_page(page);
 		if (Page_Uptodate(page))
 			goto success;
@@ -1409,12 +1551,21 @@ page_not_uptodate:
 	 * and we need to check for errors.
 	 */
 	lock_page(page);
+
+	/* Somebody truncated the page on us? */
+	if (!page->mapping) {
+		UnlockPage(page);
+		page_cache_release(page);
+		goto retry_all;
+	}
+
+	/* Somebody else successfully read it in? */
 	if (Page_Uptodate(page)) {
 		UnlockPage(page);
 		goto success;
 	}
 	ClearPageError(page);
-	if (!mapping->a_ops->readpage(file->f_dentry, page)) {
+	if (!mapping->a_ops->readpage(file, page)) {
 		wait_on_page(page);
 		if (Page_Uptodate(page))
 			goto success;
@@ -1428,88 +1579,20 @@ page_not_uptodate:
 	return NULL;
 }
 
-static int filemap_write_page(struct file *file,
-			      unsigned long index,
-			      struct page * page,
-			      int wait)
-{
-	int result;
-	struct dentry * dentry;
-	struct inode * inode;
-
-	dentry = file->f_dentry;
-	inode = dentry->d_inode;
-
-	/*
-	 * If a task terminates while we're swapping the page, the vma and
-	 * and file could be released: try_to_swap_out has done a get_file.
-	 * vma/file is guaranteed to exist in the unmap/sync cases because
-	 * mmap_sem is held.
-	 */
-	lock_page(page);
-	result = inode->i_mapping->a_ops->writepage(dentry, page);
-	UnlockPage(page);
-	return result;
-}
-
-
-/*
- * The page cache takes care of races between somebody
- * trying to swap something out and swap something in
- * at the same time..
+/* Called with mm->page_table_lock held to protect against other
+ * threads/the swapper from ripping pte's out from under us.
  */
-extern void wakeup_bdflush(int);
-int filemap_swapout(struct page * page, struct file * file)
-{
-	int retval = filemap_write_page(file, page->index, page, 0);
-	wakeup_bdflush(0);
-	return retval;
-}
-
 static inline int filemap_sync_pte(pte_t * ptep, struct vm_area_struct *vma,
 	unsigned long address, unsigned int flags)
 {
-	unsigned long pgoff;
 	pte_t pte = *ptep;
-	struct page *page;
-	int error;
 
-	if (!(flags & MS_INVALIDATE)) {
-		if (!pte_present(pte))
-			return 0;
-		if (!pte_dirty(pte))
-			return 0;
-		flush_page_to_ram(pte_page(pte));
-		flush_cache_page(vma, address);
-		set_pte(ptep, pte_mkclean(pte));
+	if (pte_present(pte) && ptep_test_and_clear_dirty(ptep)) {
+		struct page *page = pte_page(pte);
 		flush_tlb_page(vma, address);
-		page = pte_page(pte);
-		get_page(page);
-	} else {
-		if (pte_none(pte))
-			return 0;
-		flush_cache_page(vma, address);
-		pte_clear(ptep);
-		flush_tlb_page(vma, address);
-		if (!pte_present(pte)) {
-			swap_free(pte_to_swp_entry(pte));
-			return 0;
-		}
-		page = pte_page(pte);
-		if (!pte_dirty(pte) || flags == MS_INVALIDATE) {
-			page_cache_free(page);
-			return 0;
-		}
+		set_page_dirty(page);
 	}
-	pgoff = (address - vma->vm_start) >> PAGE_CACHE_SHIFT;
-	pgoff += vma->vm_pgoff;
-	if (page->index != pgoff) {
-		printk("weirdness: pgoff=%lu index=%lu address=%lu vm_start=%lu vm_pgoff=%lu\n",
-			pgoff, page->index, address, vma->vm_start, vma->vm_pgoff);
-	}
-	error = filemap_write_page(vma->vm_file, pgoff, page, 1);
-	page_cache_free(page);
-	return error;
+	return 0;
 }
 
 static inline int filemap_sync_pte_range(pmd_t * pmd,
@@ -1579,6 +1662,11 @@ int filemap_sync(struct vm_area_struct * vma, unsigned long address,
 	unsigned long end = address + size;
 	int error = 0;
 
+	/* Aquire the lock early; it may be possible to avoid dropping
+	 * and reaquiring it repeatedly.
+	 */
+	spin_lock(&vma->vm_mm->page_table_lock);
+
 	dir = pgd_offset(vma->vm_mm, address);
 	flush_cache_range(vma->vm_mm, end - size, end);
 	if (address >= end)
@@ -1589,17 +1677,10 @@ int filemap_sync(struct vm_area_struct * vma, unsigned long address,
 		dir++;
 	} while (address && (address < end));
 	flush_tlb_range(vma->vm_mm, end - size, end);
-	return error;
-}
 
-/*
- * This handles (potentially partial) area unmaps..
- */
-static void filemap_unmap(struct vm_area_struct *vma, unsigned long start, size_t len)
-{
-	lock_kernel();
-	filemap_sync(vma, start, len, MS_ASYNC);
-	unlock_kernel();
+	spin_unlock(&vma->vm_mm->page_table_lock);
+
+	return error;
 }
 
 /*
@@ -1608,10 +1689,7 @@ static void filemap_unmap(struct vm_area_struct *vma, unsigned long start, size_
  * backing-store for swapping..
  */
 static struct vm_operations_struct file_shared_mmap = {
-	unmap:		filemap_unmap,		/* unmap - we need to sync the pages */
-	sync:		filemap_sync,
 	nopage:		filemap_nopage,
-	swapout:	filemap_swapout,
 };
 
 /*
@@ -1646,7 +1724,6 @@ int generic_file_mmap(struct file * file, struct vm_area_struct * vma)
 	return 0;
 }
 
-
 /*
  * The msync() system call.
  */
@@ -1654,15 +1731,19 @@ int generic_file_mmap(struct file * file, struct vm_area_struct * vma)
 static int msync_interval(struct vm_area_struct * vma,
 	unsigned long start, unsigned long end, int flags)
 {
-	if (vma->vm_file && vma->vm_ops && vma->vm_ops->sync) {
+	struct file * file = vma->vm_file;
+	if (file && (vma->vm_flags & VM_SHARED)) {
 		int error;
-		error = vma->vm_ops->sync(vma, start, end-start, flags);
+		error = filemap_sync(vma, start, end-start, flags);
+
 		if (!error && (flags & MS_SYNC)) {
-			struct file * file = vma->vm_file;
-			if (file) {
-				struct dentry * dentry = file->f_dentry;
-				error = file_fsync(file, dentry);
-			}
+			struct inode * inode = file->f_dentry->d_inode;
+			down(&inode->i_sem);
+			filemap_fdatasync(inode->i_mapping);
+			if (file->f_op && file->f_op->fsync)
+				error = file->f_op->fsync(file, file->f_dentry, 1);
+			filemap_fdatawait(inode->i_mapping);
+			up(&inode->i_sem);
 		}
 		return error;
 	}
@@ -1676,7 +1757,6 @@ asmlinkage long sys_msync(unsigned long start, size_t len, int flags)
 	int unmapped_error, error = -EINVAL;
 
 	down(&current->mm->mmap_sem);
-	lock_kernel();
 	if (start & ~PAGE_MASK)
 		goto out;
 	len = (len + ~PAGE_MASK) & PAGE_MASK;
@@ -1722,12 +1802,513 @@ asmlinkage long sys_msync(unsigned long start, size_t len, int flags)
 		vma = vma->vm_next;
 	}
 out:
-	unlock_kernel();
 	up(&current->mm->mmap_sem);
 	return error;
 }
 
-struct page *read_cache_page(struct address_space *mapping,
+static inline void setup_read_behavior(struct vm_area_struct * vma,
+	int behavior)
+{
+	VM_ClearReadHint(vma);
+	switch(behavior) {
+		case MADV_SEQUENTIAL:
+			vma->vm_flags |= VM_SEQ_READ;
+			break;
+		case MADV_RANDOM:
+			vma->vm_flags |= VM_RAND_READ;
+			break;
+		default:
+			break;
+	}
+	return;
+}
+
+static long madvise_fixup_start(struct vm_area_struct * vma,
+	unsigned long end, int behavior)
+{
+	struct vm_area_struct * n;
+
+	n = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
+	if (!n)
+		return -EAGAIN;
+	*n = *vma;
+	n->vm_end = end;
+	setup_read_behavior(n, behavior);
+	n->vm_raend = 0;
+	get_file(n->vm_file);
+	if (n->vm_ops && n->vm_ops->open)
+		n->vm_ops->open(n);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
+	vma->vm_pgoff += (end - vma->vm_start) >> PAGE_SHIFT;
+	vma->vm_start = end;
+	__insert_vm_struct(current->mm, n);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
+	return 0;
+}
+
+static long madvise_fixup_end(struct vm_area_struct * vma,
+	unsigned long start, int behavior)
+{
+	struct vm_area_struct * n;
+
+	n = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
+	if (!n)
+		return -EAGAIN;
+	*n = *vma;
+	n->vm_start = start;
+	n->vm_pgoff += (n->vm_start - vma->vm_start) >> PAGE_SHIFT;
+	setup_read_behavior(n, behavior);
+	n->vm_raend = 0;
+	get_file(n->vm_file);
+	if (n->vm_ops && n->vm_ops->open)
+		n->vm_ops->open(n);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
+	vma->vm_end = start;
+	__insert_vm_struct(current->mm, n);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
+	return 0;
+}
+
+static long madvise_fixup_middle(struct vm_area_struct * vma,
+	unsigned long start, unsigned long end, int behavior)
+{
+	struct vm_area_struct * left, * right;
+
+	left = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
+	if (!left)
+		return -EAGAIN;
+	right = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
+	if (!right) {
+		kmem_cache_free(vm_area_cachep, left);
+		return -EAGAIN;
+	}
+	*left = *vma;
+	*right = *vma;
+	left->vm_end = start;
+	right->vm_start = end;
+	right->vm_pgoff += (right->vm_start - left->vm_start) >> PAGE_SHIFT;
+	left->vm_raend = 0;
+	right->vm_raend = 0;
+	atomic_add(2, &vma->vm_file->f_count);
+
+	if (vma->vm_ops && vma->vm_ops->open) {
+		vma->vm_ops->open(left);
+		vma->vm_ops->open(right);
+	}
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
+	vma->vm_pgoff += (start - vma->vm_start) >> PAGE_SHIFT;
+	vma->vm_start = start;
+	vma->vm_end = end;
+	setup_read_behavior(vma, behavior);
+	vma->vm_raend = 0;
+	__insert_vm_struct(current->mm, left);
+	__insert_vm_struct(current->mm, right);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
+	return 0;
+}
+
+/*
+ * We can potentially split a vm area into separate
+ * areas, each area with its own behavior.
+ */
+static long madvise_behavior(struct vm_area_struct * vma,
+	unsigned long start, unsigned long end, int behavior)
+{
+	int error = 0;
+
+	/* This caps the number of vma's this process can own */
+	if (vma->vm_mm->map_count > MAX_MAP_COUNT)
+		return -ENOMEM;
+
+	if (start == vma->vm_start) {
+		if (end == vma->vm_end) {
+			setup_read_behavior(vma, behavior);
+			vma->vm_raend = 0;
+		} else
+			error = madvise_fixup_start(vma, end, behavior);
+	} else {
+		if (end == vma->vm_end)
+			error = madvise_fixup_end(vma, start, behavior);
+		else
+			error = madvise_fixup_middle(vma, start, end, behavior);
+	}
+
+	return error;
+}
+
+/*
+ * Schedule all required I/O operations, then run the disk queue
+ * to make sure they are started.  Do not wait for completion.
+ */
+static long madvise_willneed(struct vm_area_struct * vma,
+	unsigned long start, unsigned long end)
+{
+	long error = -EBADF;
+	struct file * file;
+	unsigned long size, rlim_rss;
+
+	/* Doesn't work if there's no mapped file. */
+	if (!vma->vm_file)
+		return error;
+	file = vma->vm_file;
+	size = (file->f_dentry->d_inode->i_size + PAGE_CACHE_SIZE - 1) >>
+							PAGE_CACHE_SHIFT;
+
+	start = ((start - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
+	if (end > vma->vm_end)
+		end = vma->vm_end;
+	end = ((end - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
+
+	/* Make sure this doesn't exceed the process's max rss. */
+	error = -EIO;
+	rlim_rss = current->rlim ?  current->rlim[RLIMIT_RSS].rlim_cur :
+				LONG_MAX; /* default: see resource.h */
+	if ((vma->vm_mm->rss + (end - start)) > rlim_rss)
+		return error;
+
+	/* round to cluster boundaries if this isn't a "random" area. */
+	if (!VM_RandomReadHint(vma)) {
+		start = CLUSTER_OFFSET(start);
+		end = CLUSTER_OFFSET(end + CLUSTER_PAGES - 1);
+
+		while ((start < end) && (start < size)) {
+			error = read_cluster_nonblocking(file, start, size);
+			start += CLUSTER_PAGES;
+			if (error < 0)
+				break;
+		}
+	} else {
+		while ((start < end) && (start < size)) {
+			error = page_cache_read(file, start);
+			start++;
+			if (error < 0)
+				break;
+		}
+	}
+
+	/* Don't wait for someone else to push these requests. */
+	run_task_queue(&tq_disk);
+
+	return error;
+}
+
+/*
+ * Application no longer needs these pages.  If the pages are dirty,
+ * it's OK to just throw them away.  The app will be more careful about
+ * data it wants to keep.  Be sure to free swap resources too.  The
+ * zap_page_range call sets things up for refill_inactive to actually free
+ * these pages later if no one else has touched them in the meantime,
+ * although we could add these pages to a global reuse list for
+ * refill_inactive to pick up before reclaiming other pages.
+ *
+ * NB: This interface discards data rather than pushes it out to swap,
+ * as some implementations do.  This has performance implications for
+ * applications like large transactional databases which want to discard
+ * pages in anonymous maps after committing to backing store the data
+ * that was kept in them.  There is no reason to write this data out to
+ * the swap area if the application is discarding it.
+ *
+ * An interface that causes the system to free clean pages and flush
+ * dirty pages is already available as msync(MS_INVALIDATE).
+ */
+static long madvise_dontneed(struct vm_area_struct * vma,
+	unsigned long start, unsigned long end)
+{
+	if (vma->vm_flags & VM_LOCKED)
+		return -EINVAL;
+
+	flush_cache_range(vma->vm_mm, start, end);
+	zap_page_range(vma->vm_mm, start, end - start);
+	flush_tlb_range(vma->vm_mm, start, end);
+	return 0;
+}
+
+static long madvise_vma(struct vm_area_struct * vma, unsigned long start,
+	unsigned long end, int behavior)
+{
+	long error = -EBADF;
+
+	switch (behavior) {
+	case MADV_NORMAL:
+	case MADV_SEQUENTIAL:
+	case MADV_RANDOM:
+		error = madvise_behavior(vma, start, end, behavior);
+		break;
+
+	case MADV_WILLNEED:
+		error = madvise_willneed(vma, start, end);
+		break;
+
+	case MADV_DONTNEED:
+		error = madvise_dontneed(vma, start, end);
+		break;
+
+	default:
+		error = -EINVAL;
+		break;
+	}
+		
+	return error;
+}
+
+/*
+ * The madvise(2) system call.
+ *
+ * Applications can use madvise() to advise the kernel how it should
+ * handle paging I/O in this VM area.  The idea is to help the kernel
+ * use appropriate read-ahead and caching techniques.  The information
+ * provided is advisory only, and can be safely disregarded by the
+ * kernel without affecting the correct operation of the application.
+ *
+ * behavior values:
+ *  MADV_NORMAL - the default behavior is to read clusters.  This
+ *		results in some read-ahead and read-behind.
+ *  MADV_RANDOM - the system should read the minimum amount of data
+ *		on any access, since it is unlikely that the appli-
+ *		cation will need more than what it asks for.
+ *  MADV_SEQUENTIAL - pages in the given range will probably be accessed
+ *		once, so they can be aggressively read ahead, and
+ *		can be freed soon after they are accessed.
+ *  MADV_WILLNEED - the application is notifying the system to read
+ *		some pages ahead.
+ *  MADV_DONTNEED - the application is finished with the given range,
+ *		so the kernel can free resources associated with it.
+ *
+ * return values:
+ *  zero    - success
+ *  -EINVAL - start + len < 0, start is not page-aligned,
+ *		"behavior" is not a valid value, or application
+ *		is attempting to release locked or shared pages.
+ *  -ENOMEM - addresses in the specified range are not currently
+ *		mapped, or are outside the AS of the process.
+ *  -EIO    - an I/O error occurred while paging in data.
+ *  -EBADF  - map exists, but area maps something that isn't a file.
+ *  -EAGAIN - a kernel resource was temporarily unavailable.
+ */
+asmlinkage long sys_madvise(unsigned long start, size_t len, int behavior)
+{
+	unsigned long end;
+	struct vm_area_struct * vma;
+	int unmapped_error = 0;
+	int error = -EINVAL;
+
+	down(&current->mm->mmap_sem);
+
+	if (start & ~PAGE_MASK)
+		goto out;
+	len = (len + ~PAGE_MASK) & PAGE_MASK;
+	end = start + len;
+	if (end < start)
+		goto out;
+
+	error = 0;
+	if (end == start)
+		goto out;
+
+	/*
+	 * If the interval [start,end) covers some unmapped address
+	 * ranges, just ignore them, but return -ENOMEM at the end.
+	 */
+	vma = find_vma(current->mm, start);
+	for (;;) {
+		/* Still start < end. */
+		error = -ENOMEM;
+		if (!vma)
+			goto out;
+
+		/* Here start < vma->vm_end. */
+		if (start < vma->vm_start) {
+			unmapped_error = -ENOMEM;
+			start = vma->vm_start;
+		}
+
+		/* Here vma->vm_start <= start < vma->vm_end. */
+		if (end <= vma->vm_end) {
+			if (start < end) {
+				error = madvise_vma(vma, start, end,
+							behavior);
+				if (error)
+					goto out;
+			}
+			error = unmapped_error;
+			goto out;
+		}
+
+		/* Here vma->vm_start <= start < vma->vm_end < end. */
+		error = madvise_vma(vma, start, vma->vm_end, behavior);
+		if (error)
+			goto out;
+		start = vma->vm_end;
+		vma = vma->vm_next;
+	}
+
+out:
+	up(&current->mm->mmap_sem);
+	return error;
+}
+
+/*
+ * Later we can get more picky about what "in core" means precisely.
+ * For now, simply check to see if the page is in the page cache,
+ * and is up to date; i.e. that no page-in operation would be required
+ * at this time if an application were to map and access this page.
+ */
+static unsigned char mincore_page(struct vm_area_struct * vma,
+	unsigned long pgoff)
+{
+	unsigned char present = 0;
+	struct address_space * as = &vma->vm_file->f_dentry->d_inode->i_data;
+	struct page * page, ** hash = page_hash(as, pgoff);
+
+	spin_lock(&pagecache_lock);
+	page = __find_page_nolock(as, pgoff, *hash);
+	if ((page) && (Page_Uptodate(page)))
+		present = 1;
+	spin_unlock(&pagecache_lock);
+
+	return present;
+}
+
+static long mincore_vma(struct vm_area_struct * vma,
+	unsigned long start, unsigned long end, unsigned char * vec)
+{
+	long error, i, remaining;
+	unsigned char * tmp;
+
+	error = -ENOMEM;
+	if (!vma->vm_file)
+		return error;
+
+	start = ((start - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
+	if (end > vma->vm_end)
+		end = vma->vm_end;
+	end = ((end - vma->vm_start) >> PAGE_SHIFT) + vma->vm_pgoff;
+
+	error = -EAGAIN;
+	tmp = (unsigned char *) __get_free_page(GFP_KERNEL);
+	if (!tmp)
+		return error;
+
+	/* (end - start) is # of pages, and also # of bytes in "vec */
+	remaining = (end - start),
+
+	error = 0;
+	for (i = 0; remaining > 0; remaining -= PAGE_SIZE, i++) {
+		int j = 0;
+		long thispiece = (remaining < PAGE_SIZE) ?
+						remaining : PAGE_SIZE;
+
+		while (j < thispiece)
+			tmp[j++] = mincore_page(vma, start++);
+
+		if (copy_to_user(vec + PAGE_SIZE * i, tmp, thispiece)) {
+			error = -EFAULT;
+			break;
+		}
+	}
+
+	free_page((unsigned long) tmp);
+	return error;
+}
+
+/*
+ * The mincore(2) system call.
+ *
+ * mincore() returns the memory residency status of the pages in the
+ * current process's address space specified by [addr, addr + len).
+ * The status is returned in a vector of bytes.  The least significant
+ * bit of each byte is 1 if the referenced page is in memory, otherwise
+ * it is zero.
+ *
+ * Because the status of a page can change after mincore() checks it
+ * but before it returns to the application, the returned vector may
+ * contain stale information.  Only locked pages are guaranteed to
+ * remain in memory.
+ *
+ * return values:
+ *  zero    - success
+ *  -EFAULT - vec points to an illegal address
+ *  -EINVAL - addr is not a multiple of PAGE_CACHE_SIZE,
+ *		or len has a nonpositive value
+ *  -ENOMEM - Addresses in the range [addr, addr + len] are
+ *		invalid for the address space of this process, or
+ *		specify one or more pages which are not currently
+ *		mapped
+ *  -EAGAIN - A kernel resource was temporarily unavailable.
+ */
+asmlinkage long sys_mincore(unsigned long start, size_t len,
+	unsigned char * vec)
+{
+	int index = 0;
+	unsigned long end;
+	struct vm_area_struct * vma;
+	int unmapped_error = 0;
+	long error = -EINVAL;
+
+	down(&current->mm->mmap_sem);
+
+	if (start & ~PAGE_CACHE_MASK)
+		goto out;
+	len = (len + ~PAGE_CACHE_MASK) & PAGE_CACHE_MASK;
+	end = start + len;
+	if (end < start)
+		goto out;
+
+	error = 0;
+	if (end == start)
+		goto out;
+
+	/*
+	 * If the interval [start,end) covers some unmapped address
+	 * ranges, just ignore them, but return -ENOMEM at the end.
+	 */
+	vma = find_vma(current->mm, start);
+	for (;;) {
+		/* Still start < end. */
+		error = -ENOMEM;
+		if (!vma)
+			goto out;
+
+		/* Here start < vma->vm_end. */
+		if (start < vma->vm_start) {
+			unmapped_error = -ENOMEM;
+			start = vma->vm_start;
+		}
+
+		/* Here vma->vm_start <= start < vma->vm_end. */
+		if (end <= vma->vm_end) {
+			if (start < end) {
+				error = mincore_vma(vma, start, end,
+							&vec[index]);
+				if (error)
+					goto out;
+			}
+			error = unmapped_error;
+			goto out;
+		}
+
+		/* Here vma->vm_start <= start < vma->vm_end < end. */
+		error = mincore_vma(vma, start, vma->vm_end, &vec[index]);
+		if (error)
+			goto out;
+		index += (vma->vm_end - start) >> PAGE_CACHE_SHIFT;
+		start = vma->vm_end;
+		vma = vma->vm_next;
+	}
+
+out:
+	up(&current->mm->mmap_sem);
+	return error;
+}
+
+static inline
+struct page *__read_cache_page(struct address_space *mapping,
 				unsigned long index,
 				int (*filler)(void *,struct page*),
 				void *data)
@@ -1755,6 +2336,42 @@ repeat:
 	}
 	if (cached_page)
 		page_cache_free(cached_page);
+	return page;
+}
+
+/*
+ * Read into the page cache. If a page already exists,
+ * and Page_Uptodate() is not set, try to fill the page.
+ */
+struct page *read_cache_page(struct address_space *mapping,
+				unsigned long index,
+				int (*filler)(void *,struct page*),
+				void *data)
+{
+	struct page *page;
+	int err;
+
+retry:
+	page = __read_cache_page(mapping, index, filler, data);
+	if (IS_ERR(page) || Page_Uptodate(page))
+		goto out;
+
+	lock_page(page);
+	if (!page->mapping) {
+		UnlockPage(page);
+		page_cache_release(page);
+		goto retry;
+	}
+	if (Page_Uptodate(page)) {
+		UnlockPage(page);
+		goto out;
+	}
+	err = filler(data, page);
+	if (err < 0) {
+		page_cache_release(page);
+		page = ERR_PTR(err);
+	}
+ out:
 	return page;
 }
 
@@ -1807,8 +2424,7 @@ static inline void remove_suid(struct inode *inode)
 }
 
 /*
- * Write to a file through the page cache. This is mainly for the
- * benefit of NFS and possibly other network-based file systems.
+ * Write to a file through the page cache. 
  *
  * We currently put everything into the page cache prior to writing it.
  * This is not a problem when writing full pages. With partial pages,
@@ -1825,8 +2441,7 @@ static inline void remove_suid(struct inode *inode)
 ssize_t
 generic_file_write(struct file *file,const char *buf,size_t count,loff_t *ppos)
 {
-	struct dentry	*dentry = file->f_dentry; 
-	struct inode	*inode = dentry->d_inode; 
+	struct inode	*inode = file->f_dentry->d_inode; 
 	struct address_space *mapping = inode->i_mapping;
 	unsigned long	limit = current->rlim[RLIMIT_FSIZE].rlim_cur;
 	loff_t		pos;
@@ -1874,12 +2489,13 @@ generic_file_write(struct file *file,const char *buf,size_t count,loff_t *ppos)
 	if (count) {
 		remove_suid(inode);
 		inode->i_ctime = inode->i_mtime = CURRENT_TIME;
-		mark_inode_dirty(inode);
+		mark_inode_dirty_sync(inode);
 	}
 
 	while (count) {
 		unsigned long bytes, index, offset;
 		char *kaddr;
+		int deactivate = 1;
 
 		/*
 		 * Try to find the page in the cache. If it isn't there,
@@ -1888,8 +2504,21 @@ generic_file_write(struct file *file,const char *buf,size_t count,loff_t *ppos)
 		offset = (pos & (PAGE_CACHE_SIZE -1)); /* Within page */
 		index = pos >> PAGE_CACHE_SHIFT;
 		bytes = PAGE_CACHE_SIZE - offset;
-		if (bytes > count)
+		if (bytes > count) {
 			bytes = count;
+			deactivate = 0;
+		}
+
+		/*
+		 * Bring in the user page that we will copy from _first_.
+		 * Otherwise there's a nasty deadlock on copying from the
+		 * same page as we're writing to, without it being marked
+		 * up-to-date.
+		 */
+		{ volatile unsigned char dummy;
+			__get_user(dummy, buf);
+			__get_user(dummy, buf+bytes-1);
+		}
 
 		status = -ENOMEM;	/* we'll assign it later anyway */
 		page = __grab_cache_page(mapping, index, &cached_page);
@@ -1901,11 +2530,12 @@ generic_file_write(struct file *file,const char *buf,size_t count,loff_t *ppos)
 			PAGE_BUG(page);
 		}
 
-		status = mapping->a_ops->prepare_write(page, offset, offset+bytes);
+		status = mapping->a_ops->prepare_write(file, page, offset, offset+bytes);
 		if (status)
 			goto unlock;
-		kaddr = (char*)page_address(page);
+		kaddr = page_address(page);
 		status = copy_from_user(kaddr+offset, buf, bytes);
+		flush_dcache_page(page);
 		if (status)
 			goto fail_write;
 		status = mapping->a_ops->commit_write(file, page, offset, offset+bytes);
@@ -1921,6 +2551,8 @@ generic_file_write(struct file *file,const char *buf,size_t count,loff_t *ppos)
 unlock:
 		/* Mark it unlocked again and drop the page.. */
 		UnlockPage(page);
+		if (deactivate)
+			deactivate_page(page);
 		page_cache_release(page);
 
 		if (status < 0)
@@ -1931,8 +2563,14 @@ unlock:
 	if (cached_page)
 		page_cache_free(cached_page);
 
+	/* For now, when the user asks for O_SYNC, we'll actually
+	 * provide O_DSYNC. */
+	if ((status >= 0) && (file->f_flags & O_SYNC))
+		status = generic_osync_inode(inode, 1); /* 1 means datasync */
+	
 	err = written ? written : status;
 out:
+
 	up(&inode->i_sem);
 	return err;
 fail_write:

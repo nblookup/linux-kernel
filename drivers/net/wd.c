@@ -34,6 +34,7 @@ static const char *version =
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <linux/delay.h>
 #include <asm/io.h>
 #include <asm/system.h>
 
@@ -46,7 +47,7 @@ static unsigned int wd_portlist[] __initdata =
 {0x300, 0x280, 0x380, 0x240, 0};
 
 int wd_probe(struct net_device *dev);
-int wd_probe1(struct net_device *dev, int ioaddr);
+static int wd_probe1(struct net_device *dev, int ioaddr);
 
 static int wd_open(struct net_device *dev);
 static void wd_reset_8390(struct net_device *dev);
@@ -81,34 +82,44 @@ static int wd_close(struct net_device *dev);
 	The wd_probe1() routine initializes the card and fills the
 	station address field. */
 
-#ifdef HAVE_DEVLIST
-struct netdev_entry wd_drv =
-{"wd", wd_probe1, WD_IO_EXTENT, wd_portlist};
-#else
-
 int __init wd_probe(struct net_device *dev)
 {
 	int i;
-	int base_addr = dev ? dev->base_addr : 0;
+	struct resource *r;
+	int base_addr = dev->base_addr;
 
-	if (base_addr > 0x1ff)		/* Check a single specified location. */
-		return wd_probe1(dev, base_addr);
+	SET_MODULE_OWNER(dev);
+
+	if (base_addr > 0x1ff) {	/* Check a user specified location. */
+		r = request_region(base_addr, WD_IO_EXTENT, "wd-probe");
+		if ( r == NULL)
+			return -EBUSY;
+		i = wd_probe1(dev, base_addr);
+		if (i != 0)  
+			release_resource(r);
+		else
+			r->name = dev->name;
+		return i;
+	}
 	else if (base_addr != 0)	/* Don't probe at all. */
-		return ENXIO;
+		return -ENXIO;
 
 	for (i = 0; wd_portlist[i]; i++) {
 		int ioaddr = wd_portlist[i];
-		if (check_region(ioaddr, WD_IO_EXTENT))
+		r = request_region(ioaddr, WD_IO_EXTENT, "wd-probe");
+		if (r == NULL)
 			continue;
-		if (wd_probe1(dev, ioaddr) == 0)
+		if (wd_probe1(dev, ioaddr) == 0) {
+			r->name = dev->name;
 			return 0;
+		}
+		release_resource(r);
 	}
 
-	return ENODEV;
+	return -ENODEV;
 }
-#endif
 
-int __init wd_probe1(struct net_device *dev, int ioaddr)
+static int __init wd_probe1(struct net_device *dev, int ioaddr)
 {
 	int i;
 	int checksum = 0;
@@ -122,17 +133,7 @@ int __init wd_probe1(struct net_device *dev, int ioaddr)
 	if (inb(ioaddr + 8) == 0xff 	/* Extra check to avoid soundcard. */
 		|| inb(ioaddr + 9) == 0xff
 		|| (checksum & 0xff) != 0xFF)
-		return ENODEV;
-
-	/* Looks like we have a card. Make sure 8390 support is available. */
-        if (load_8390_module("wd.c"))
-                return -ENOSYS;
-
-	/* We should have a "dev" from Space.c or the static module table. */
-	if (dev == NULL) {
-		printk("wd.c: Passed a NULL device.\n");
-		dev = init_etherdev(0, 0);
-	}
+		return -ENODEV;
 
 	/* Check for semi-valid mem_start/end values if supplied. */
 	if ((dev->mem_start % 0x2000) || (dev->mem_end % 0x2000)) {
@@ -264,16 +265,15 @@ int __init wd_probe1(struct net_device *dev, int ioaddr)
 
 	/* Snarf the interrupt now.  There's no point in waiting since we cannot
 	   share and the board will usually be enabled. */
-	if (request_irq(dev->irq, ei_interrupt, 0, model_name, dev)) {
+	i = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev);
+	if (i) {
 		printk (" unable to get IRQ %d.\n", dev->irq);
 		kfree(dev->priv);
 		dev->priv = NULL;
-		return EAGAIN;
+		return i;
 	}
 
 	/* OK, were are certain this is going to work.  Setup the device. */
-	request_region(ioaddr, WD_IO_EXTENT, model_name);
-
 	ei_status.name = model_name;
 	ei_status.word16 = word16;
 	ei_status.tx_start_page = WD_START_PG;
@@ -327,7 +327,6 @@ wd_open(struct net_device *dev)
   outb(ei_status.reg0, ioaddr); /* WD_CMDREG */
 
   ei_open(dev);
-  MOD_INC_USE_COUNT;
   return 0;
 }
 
@@ -434,29 +433,17 @@ wd_close(struct net_device *dev)
 	/* And disable the shared memory. */
 	outb(ei_status.reg0 & ~WD_MEMENB, wd_cmdreg);
 
-	MOD_DEC_USE_COUNT;
-
 	return 0;
 }
 
 
 #ifdef MODULE
 #define MAX_WD_CARDS	4	/* Max number of wd cards per module */
-#define NAMELEN		8	/* # of chars for storing dev->name */
-static char namelist[NAMELEN * MAX_WD_CARDS] = { 0, };
-static struct net_device dev_wd[MAX_WD_CARDS] = {
-	{
-		NULL,		/* assign a chunk of namelist[] below */
-		0, 0, 0, 0,
-		0, 0,
-		0, 0, 0, NULL, NULL
-	},
-};
-
-static int io[MAX_WD_CARDS] = { 0, };
-static int irq[MAX_WD_CARDS]  = { 0, };
-static int mem[MAX_WD_CARDS] = { 0, };
-static int mem_end[MAX_WD_CARDS] = { 0, };	/* for non std. mem size */
+static struct net_device dev_wd[MAX_WD_CARDS];
+static int io[MAX_WD_CARDS];
+static int irq[MAX_WD_CARDS];
+static int mem[MAX_WD_CARDS];
+static int mem_end[MAX_WD_CARDS];	/* for non std. mem size */
 
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
@@ -472,7 +459,6 @@ init_module(void)
 
 	for (this_dev = 0; this_dev < MAX_WD_CARDS; this_dev++) {
 		struct net_device *dev = &dev_wd[this_dev];
-		dev->name = namelist+(NAMELEN*this_dev);
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
 		dev->mem_start = mem[this_dev];
@@ -485,14 +471,12 @@ init_module(void)
 		if (register_netdev(dev) != 0) {
 			printk(KERN_WARNING "wd.c: No wd80x3 card found (i/o = 0x%x).\n", io[this_dev]);
 			if (found != 0) {	/* Got at least one. */
-				lock_8390_module();
 				return 0;
 			}
 			return -ENXIO;
 		}
 		found++;
 	}
-	lock_8390_module();
 	return 0;
 }
 
@@ -510,7 +494,6 @@ cleanup_module(void)
 			release_region(ioaddr, WD_IO_EXTENT);
 			unregister_netdev(dev);
 			kfree(priv);
-			unlock_8390_module();
 		}
 	}
 }

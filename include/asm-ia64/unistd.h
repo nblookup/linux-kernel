@@ -4,8 +4,8 @@
 /*
  * IA-64 Linux syscall numbers and inline-functions.
  *
- * Copyright (C) 1998, 1999 Hewlett-Packard Co
- * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2000 Hewlett-Packard Co
+ * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 #include <asm/break.h>
@@ -93,7 +93,7 @@
 #define __NR_setpriority		1102
 #define __NR_statfs			1103
 #define __NR_fstatfs			1104
-#define __NR_ioperm			1105
+/* unused; used to be __NR_ioperm */
 #define __NR_semget			1106
 #define __NR_semop			1107
 #define __NR_semctl			1108
@@ -109,9 +109,9 @@
 #define __NR_syslog			1117
 #define __NR_setitimer			1118
 #define __NR_getitimer			1119
-#define __NR_stat			1120
-#define __NR_lstat			1121
-#define __NR_fstat			1122
+#define __NR_old_stat			1120
+#define __NR_old_lstat			1121
+#define __NR_old_fstat			1122
 #define __NR_vhangup			1123
 #define __NR_lchown			1124
 #define __NR_vm86			1125
@@ -160,7 +160,7 @@
 #define __NR_nanosleep			1168
 #define __NR_nfsservctl			1169
 #define __NR_prctl			1170
-#define __NR_getpagesize		1171
+/* 1171 is reserved for backwards compatibility with old __NR_getpagesize */
 #define __NR_mmap2			1172
 #define __NR_pciconfig_read		1173
 #define __NR_pciconfig_write		1174
@@ -196,7 +196,14 @@
 #define __NR_getsockopt			1204
 #define __NR_sendmsg			1205
 #define __NR_recvmsg			1206
-#define __NR_sys_pivot_root		1207
+#define __NR_pivot_root			1207
+#define __NR_mincore			1208
+#define __NR_madvise			1209
+#define __NR_stat			1210
+#define __NR_lstat			1211
+#define __NR_fstat			1212
+#define __NR_clone2			1213
+#define __NR_getdents64			1214
 
 #if !defined(__ASSEMBLY__) && !defined(ASSEMBLER)
 
@@ -267,7 +274,7 @@ type											\
 name (type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5)			\
 {											\
 	return __ia64_syscall((long) arg1, (long) arg2, (long) arg3,			\
-			      (long) arg4, (long), __NR_##name);			\
+			      (long) arg4, (long) arg5, __NR_##name);			\
 }
 
 #ifdef __KERNEL_SYSCALLS__

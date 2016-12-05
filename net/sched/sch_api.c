@@ -1111,7 +1111,7 @@ PSCHED_WATCHER psched_time_mark;
 static void psched_tick(unsigned long);
 
 static struct timer_list psched_timer =
-	{ NULL, NULL, 0, 0L, psched_tick };
+	{ function: psched_tick };
 
 static void psched_tick(unsigned long dummy)
 {
@@ -1203,7 +1203,7 @@ int __init pktsched_init(void)
 
 #define INIT_QDISC(name) { \
           extern struct Qdisc_ops name##_qdisc_ops; \
-          register_qdisc(&##name##_qdisc_ops); \
+          register_qdisc(& name##_qdisc_ops);       \
 	}
 
 	INIT_QDISC(pfifo);

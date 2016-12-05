@@ -2,7 +2,7 @@ This file contains brief information about the SCSI tape driver.
 The driver is currently maintained by Kai M{kisara (email
 Kai.Makisara@metla.fi)
 
-Last modified: Sat Aug  7 13:52:16 1999 by makisara@kai.makisara.local
+Last modified: Sat Aug  5 10:29:07 2000 by makisara@kai.makisara.local
 
 
 BASICS
@@ -67,7 +67,7 @@ non-rewind devices (minor is 128 + device number) are implemented.
 In variable block mode, the byte count in write() determines the size
 of the physical block on tape. When reading, the drive reads the next
 tape block and returns to the user the data if the read() byte count
-is at least the block size. Otherwise the data is truncated.
+is at least the block size. Otherwise, error ENOMEM is returned.
 
 In fixed block mode, the data transfer between the drive and the
 driver is in multiples of the block size. The write() byte count must
@@ -115,8 +115,8 @@ started and the write call returns immediately. The status is checked
 at the next tape operation.
 
 Buffered writes and asynchronous writes may in some rare cases cause
-problems in multivolume operations if there is not enough space after
-the early-warning mark to flush the driver buffer.
+problems in multivolume operations if there is not enough space on the
+tape after the early-warning mark to flush the driver buffer.
 
 Read ahead for fixed block mode (ST_READ_AHEAD). Filling the buffer is
 attempted even if the user does not want to get all of the data at
@@ -124,21 +124,17 @@ this read command. Should be disabled for those drives that don't like
 a filemark to truncate a read request or that don't like backspacing.
 
 The buffer size is defined (in 1024 byte units) by ST_BUFFER_BLOCKS or
-at boot time. If this size is not enough, the driver tries to allocate
-a large enough temporary buffer that is released when the device is
-closed. Buffer allocation uses chunks of memory having sizes
-2^n * (page size). Because of this the actual buffer size may be
-larger than the buffer size specified with ST_BUFFER_BLOCKS.
+at boot time. If this size is not large enough, the driver tries to
+temporarily enlarge the buffer. Buffer allocation uses chunks of
+memory having sizes 2^n * (page size). Because of this the actual
+buffer size may be larger than the buffer size specified with
+ST_BUFFER_BLOCKS.
 
 A small number of buffers are allocated at driver initialisation. The
 maximum number of these buffers is defined by ST_MAX_BUFFERS. The
 maximum can be changed with kernel or module startup options. One
 buffer is allocated for each drive detected when the driver is
-initialized up to the maximum. The minimum number of allocated buffers
-is ST_EXTRA_DEVS (in hosts.h) (unless this number exceeds the defined
-maximum). This ensures some functionality also for the drives found
-after tape driver initialization (a SCSI adapter driver is loaded as a
-module). The default for ST_EXTRA_DEVS is two.
+initialized up to the maximum.
 
 The driver tries to allocate new buffers at run-time if
 necessary. These buffers are freed after use. If the maximum number of

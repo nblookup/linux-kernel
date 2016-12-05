@@ -6,15 +6,20 @@
  *	Pedro Roque		<roque@di.fc.ul.pt>	
  *	Alexey Kuznetsov	<kuznet@ms2.inr.ac.ru>
  *
- *	$Id: sit.c,v 1.35 2000/01/06 00:42:08 davem Exp $
+ *	$Id: sit.c,v 1.47 2000/11/28 13:49:22 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
  *      as published by the Free Software Foundation; either version
  *      2 of the License, or (at your option) any later version.
+ *
+ *	Changes:
+ * Roger Venning <r.venning@telstra.com>:	6to4 support
+ * Nate Thompson <nate@thebog.net>:		6to4 support
  */
 
 #define __NO_VERSION__
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/types.h>
@@ -28,6 +33,7 @@
 #include <linux/icmp.h>
 #include <asm/uaccess.h>
 #include <linux/init.h>
+#include <linux/netfilter_ipv4.h>
 
 #include <net/sock.h>
 #include <net/snmp.h>
@@ -43,6 +49,7 @@
 #include <net/udp.h>
 #include <net/icmp.h>
 #include <net/ipip.h>
+#include <net/inet_ecn.h>
 
 /*
    This version of net/ipv6/sit.c is cloned of net/ipv4/ip_gre.c
@@ -57,7 +64,7 @@ static int ipip6_fb_tunnel_init(struct net_device *dev);
 static int ipip6_tunnel_init(struct net_device *dev);
 
 static struct net_device ipip6_fb_tunnel_dev = {
-	NULL, 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NULL, ipip6_fb_tunnel_init,
+	"sit0", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NULL, ipip6_fb_tunnel_init,
 };
 
 static struct ip_tunnel ipip6_fb_tunnel = {
@@ -172,10 +179,10 @@ struct ip_tunnel * ipip6_tunnel_locate(struct ip_tunnel_parm *parms, int create)
 	dev->priv = (void*)(dev+1);
 	nt = (struct ip_tunnel*)dev->priv;
 	nt->dev = dev;
-	dev->name = nt->parms.name;
 	dev->init = ipip6_tunnel_init;
-	dev->new_style = 1;
+	dev->features |= NETIF_F_DYNALLOC;
 	memcpy(&nt->parms, parms, sizeof(*parms));
+	strcpy(dev->name, nt->parms.name);
 	if (dev->name[0] == 0) {
 		int i;
 		for (i=1; i<100; i++) {
@@ -185,7 +192,7 @@ struct ip_tunnel * ipip6_tunnel_locate(struct ip_tunnel_parm *parms, int create)
 		}
 		if (i==100)
 			goto failed;
-		memcpy(parms->name, dev->name, IFNAMSIZ);
+		memcpy(nt->parms.name, dev->name, IFNAMSIZ);
 	}
 	if (register_netdevice(dev) < 0)
 		goto failed;
@@ -368,6 +375,13 @@ out:
 #endif
 }
 
+static inline void ipip6_ecn_decapsulate(struct iphdr *iph, struct sk_buff *skb)
+{
+	if (INET_ECN_is_ce(iph->tos) &&
+	    INET_ECN_is_not_ce(ip6_get_dsfield(skb->nh.ipv6h)))
+		IP6_ECN_set_ce(skb->nh.ipv6h);
+}
+
 int ipip6_rcv(struct sk_buff *skb, unsigned short len)
 {
 	struct iphdr *iph;
@@ -388,6 +402,14 @@ int ipip6_rcv(struct sk_buff *skb, unsigned short len)
 		skb->dev = tunnel->dev;
 		dst_release(skb->dst);
 		skb->dst = NULL;
+#ifdef CONFIG_NETFILTER
+		nf_conntrack_put(skb->nfct);
+		skb->nfct = NULL;
+#ifdef CONFIG_NETFILTER_DEBUG
+		skb->nf_debug = 0;
+#endif
+#endif
+		ipip6_ecn_decapsulate(iph, skb);
 		netif_rx(skb);
 		read_unlock(&ipip6_lock);
 		return 0;
@@ -397,6 +419,27 @@ int ipip6_rcv(struct sk_buff *skb, unsigned short len)
 	kfree_skb(skb);
 	read_unlock(&ipip6_lock);
 	return 0;
+}
+
+/* Need this wrapper because NF_HOOK takes the function address */
+static inline int do_ip_send(struct sk_buff *skb)
+{
+	return ip_send(skb);
+}
+
+
+/* Returns the embedded IPv4 address if the IPv6 address
+   comes from 6to4 (draft-ietf-ngtrans-6to4-04) addr space */
+
+static inline u32 try_6to4(struct in6_addr *v6dst)
+{
+	u32 dst = 0;
+
+	if (v6dst->s6_addr16[0] == htons(0x2002)) {
+	        /* 6to4 v6 addr has 16 bits prefix, 32 v4addr, 16 SLA, ... */
+		memcpy(&dst, &v6dst->s6_addr16[1], 4);
+	}
+	return dst;
 }
 
 /*
@@ -428,6 +471,9 @@ static int ipip6_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	if (skb->protocol != __constant_htons(ETH_P_IPV6))
 		goto tx_error;
 
+	if (!dst)
+		dst = try_6to4(&iph6->daddr);
+
 	if (!dst) {
 		struct neighbour *neigh = NULL;
 
@@ -454,6 +500,10 @@ static int ipip6_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	if (ip_route_output(&rt, dst, tiph->saddr, RT_TOS(tos), tunnel->parms.link)) {
+		tunnel->stat.tx_carrier_errors++;
+		goto tx_error_icmp;
+	}
+	if (rt->rt_type != RTN_UNICAST) {
 		tunnel->stat.tx_carrier_errors++;
 		goto tx_error_icmp;
 	}
@@ -536,21 +586,22 @@ static int ipip6_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 		iph->frag_off	=	0;
 
 	iph->protocol		=	IPPROTO_IPV6;
-	iph->tos		=	tos;
+	iph->tos		=	INET_ECN_encapsulate(tos, ip6_get_dsfield(iph6));
 	iph->daddr		=	rt->rt_dst;
 	iph->saddr		=	rt->rt_src;
 
 	if ((iph->ttl = tiph->ttl) == 0)
 		iph->ttl	=	iph6->hop_limit;
 
-	iph->tot_len		=	htons(skb->len);
-	ip_select_ident(iph, &rt->u.dst);
-	ip_send_check(iph);
+#ifdef CONFIG_NETFILTER
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#ifdef CONFIG_NETFILTER_DEBUG
+	skb->nf_debug = 0;
+#endif
+#endif
 
-	stats->tx_bytes += skb->len;
-	stats->tx_packets++;
-	ip_send(skb);
-
+	IPTUNNEL_XMIT();
 	tunnel->recursion--;
 	return 0;
 
@@ -800,11 +851,13 @@ int __init sit_init(void)
 	printk(KERN_INFO "IPv6 over IPv4 tunneling driver\n");
 
 	ipip6_fb_tunnel_dev.priv = (void*)&ipip6_fb_tunnel;
-	ipip6_fb_tunnel_dev.name = ipip6_fb_tunnel.parms.name;
+	strcpy(ipip6_fb_tunnel_dev.name, ipip6_fb_tunnel.parms.name);
 #ifdef MODULE
 	register_netdev(&ipip6_fb_tunnel_dev);
 #else
+	rtnl_lock();
 	register_netdevice(&ipip6_fb_tunnel_dev);
+	rtnl_unlock();
 #endif
 	inet_add_protocol(&sit_protocol);
 	return 0;

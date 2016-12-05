@@ -1,4 +1,4 @@
-/* $Id: entry.S,v 1.20 2000/02/23 00:41:00 ralf Exp $
+/* $Id: entry.S,v 1.19 1999/12/08 22:05:10 harald Exp $
  *
  * Low level exception handling
  *
@@ -43,8 +43,8 @@ reschedule:	jal	schedule
 EXPORT(ret_from_sys_call)
 EXPORT(ret_from_irq)
 		.type	ret_from_irq,@function
-		lw	t0, softirq_state
-		lw	t1, softirq_state+4	# unused delay slot
+		lw	t0, irq_stat		# softirq_active
+		lw	t1, irq_stat+4		# softirq_mask.  unused delay slot
 		and	t0, t1
 		bnez	t0, handle_softirq
 

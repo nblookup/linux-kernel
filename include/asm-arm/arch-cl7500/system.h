@@ -6,23 +6,18 @@
 #ifndef __ASM_ARCH_SYSTEM_H
 #define __ASM_ARCH_SYSTEM_H
 
-#include <asm/iomd.h>
+#include <asm/hardware/iomd.h>
 
-#define arch_do_idle()							\
-	outb(0, IOMD_SUSMODE)
+static void arch_idle(void)
+{
+	while (!current->need_resched && !hlt_counter)
+		outb(0, IOMD_SUSMODE);
+}
 
-#define arch_reset(mode) {						\
-	outb (0, IOMD_ROMCR0);						\
-	cli();								\
-	__asm__ __volatile__("msr  spsr, r1;"				\
-			     "mcr  p15, 0, %0, c1, c0, 0;"		\
-			     "movs pc, #0"				\
-			 : 						\
-			 : "r" (cpu_reset()));				\
-	}
-
-#define arch_power_off()	do { } while (0)
-
-#define arch_power_off()	do { } while (0)
+#define arch_reset(mode)			\
+	do {					\
+		outb (0, IOMD_ROMCR0);		\
+		cpu_reset(0);			\
+	} while (0);
 
 #endif

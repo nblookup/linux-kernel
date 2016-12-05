@@ -25,6 +25,7 @@
 #define RX_DMA_SKBUFF 1
 #define PKT_COPY_THRESHOLD 512
 
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/types.h>
@@ -76,8 +77,8 @@ static inline void netif_start_queue(struct net_device *dev)
 #else
 #define NET_BH              0
 #define rr_mark_net_bh(foo) {do{} while(0);}
-#define rr_if_busy(dev)     test_bit(LINK_STATE_XOFF, &dev->state)
-#define rr_if_running(dev)  test_bit(LINK_STATE_START, &dev->state)
+#define rr_if_busy(dev)     netif_queue_stopped(dev)
+#define rr_if_running(dev)  netif_running(dev)
 #define rr_if_down(dev)     {do{} while(0);}
 #endif
 
@@ -101,7 +102,7 @@ static inline void netif_start_queue(struct net_device *dev)
  * stack will need to know about I/O vectors or something similar.
  */
 
-static const char __initdata *version = "rrunner.c: v0.22 03/01/2000  Jes Sorensen (Jes.Sorensen@cern.ch)\n";
+static char version[] __initdata = "rrunner.c: v0.22 03/01/2000  Jes Sorensen (Jes.Sorensen@cern.ch)\n";
 
 static struct net_device *root_dev = NULL;
 
@@ -145,6 +146,9 @@ int __init rr_hippi_probe (struct net_device *dev)
 				      PCI_DEVICE_ID_ESSENTIAL_ROADRUNNER,
 				      pdev)))
 	{
+		if (pci_enable_device(pdev))
+			continue;
+
 		if (pdev == opdev)
 			return 0;
 
@@ -166,7 +170,7 @@ int __init rr_hippi_probe (struct net_device *dev)
 		rrpriv = (struct rr_private *)dev->priv;
 		memset(rrpriv, 0, sizeof(*rrpriv));
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 		spin_lock_init(&rrpriv->lock);
 #endif
 		sprintf(rrpriv->name, "RoadRunner serial HIPPI");
@@ -1544,74 +1548,76 @@ static int rr_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	unsigned int i;
 	int error = -EOPNOTSUPP;
 
-	rrpriv = (struct rr_private *)dev->priv;
-
-	spin_lock(&rrpriv->lock);
+	rrpriv = dev->priv;
 
 	switch(cmd){
 	case SIOCRRGFW:
-		if (!suser()){
-			error = -EPERM;
-			goto out;
-		}
-
-		if (rrpriv->fw_running){
-			printk("%s: Firmware already running\n", dev->name);
-			error = -EPERM;
-			goto out;
+		if (!capable(CAP_SYS_RAWIO)){
+			return -EPERM;
 		}
 
 		image = kmalloc(EEPROM_WORDS * sizeof(u32), GFP_KERNEL);
 		if (!image){
 			printk(KERN_ERR "%s: Unable to allocate memory "
 			       "for EEPROM image\n", dev->name);
-			error = -ENOMEM;
-			goto out;
+			return -ENOMEM;
 		}
+		
+		spin_lock(&rrpriv->lock);
+		
+		if (rrpriv->fw_running){
+			printk("%s: Firmware already running\n", dev->name);
+			error = -EPERM;
+			goto out_spin;
+		}
+
 		i = rr_read_eeprom(rrpriv, 0, image, EEPROM_BYTES);
 		if (i != EEPROM_BYTES){
-			kfree(image);
-			printk(KERN_ERR "%s: Error reading EEPROM\n",
-			       dev->name);
+			printk(KERN_ERR "%s: Error reading EEPROM\n", dev->name);
 			error = -EFAULT;
-			goto out;
+			goto out_spin;
 		}
+		spin_unlock(&rrpriv->lock);
 		error = copy_to_user(rq->ifr_data, image, EEPROM_BYTES);
 		if (error)
 			error = -EFAULT;
 		kfree(image);
-		break;
+		return error;
+		
 	case SIOCRRPFW:
-		if (!suser()){
-			error = -EPERM;
-			goto out;
-		}
-
-		if (rrpriv->fw_running){
-			printk("%s: Firmware already running\n", dev->name);
-			error = -EPERM;
-			goto out;
+		if (!capable(CAP_SYS_RAWIO)){
+			return -EPERM;
 		}
 
 		image = kmalloc(EEPROM_WORDS * sizeof(u32), GFP_KERNEL);
 		if (!image){
 			printk(KERN_ERR "%s: Unable to allocate memory "
 			       "for EEPROM image\n", dev->name);
-			error = -ENOMEM;
-			goto out;
+			return -ENOMEM;
 		}
 
 		oldimage = kmalloc(EEPROM_WORDS * sizeof(u32), GFP_KERNEL);
 		if (!oldimage){
+			kfree(image);
 			printk(KERN_ERR "%s: Unable to allocate memory "
 			       "for old EEPROM image\n", dev->name);
-			error = -ENOMEM;
-			goto out;
+			return -ENOMEM;
 		}
 
 		error = copy_from_user(image, rq->ifr_data, EEPROM_BYTES);
-		if (error)
-			error = -EFAULT;
+		if (error) {
+			kfree(image);
+			kfree(oldimage);
+			return -EFAULT;
+		}
+
+		spin_lock(&rrpriv->lock);
+		if (rrpriv->fw_running){
+			kfree(oldimage);
+			printk("%s: Firmware already running\n", dev->name);
+			error = -EPERM;
+			goto out_spin;
+		}
 
 		printk("%s: Updating EEPROM firmware\n", dev->name);
 
@@ -1625,6 +1631,7 @@ static int rr_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 			printk(KERN_ERR "%s: Error reading back EEPROM "
 			       "image\n", dev->name);
 
+		spin_unlock(&rrpriv->lock);
 		error = memcmp(image, oldimage, EEPROM_BYTES);
 		if (error){
 			printk(KERN_ERR "%s: Error verifying EEPROM image\n",
@@ -1633,16 +1640,16 @@ static int rr_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		}
 		kfree(image);
 		kfree(oldimage);
-		break;
+		return error;
+		
 	case SIOCRRID:
-		error = put_user(0x52523032, (int *)(&rq->ifr_data[0]));
-		if (error)
-			error = -EFAULT;
-		break;
+		return put_user(0x52523032, (int *)(&rq->ifr_data[0]));
 	default:
+		return error;
 	}
 
- out:
+ out_spin:
+	kfree(image);
 	spin_unlock(&rrpriv->lock);
 	return error;
 }
@@ -1650,6 +1657,6 @@ static int rr_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 
 /*
  * Local variables:
- * compile-command: "gcc -D__SMP__ -D__KERNEL__ -I../../include -Wall -Wstrict-prototypes -O2 -pipe -fomit-frame-pointer -fno-strength-reduce -m486 -malign-loops=2 -malign-jumps=2 -malign-functions=2 -DCPU=686 -DMODULE -DMODVERSIONS -include ../../include/linux/modversions.h -c rrunner.c"
+ * compile-command: "gcc -D__KERNEL__ -I../../include -Wall -Wstrict-prototypes -O2 -pipe -fomit-frame-pointer -fno-strength-reduce -m486 -malign-loops=2 -malign-jumps=2 -malign-functions=2 -DMODULE -DMODVERSIONS -include ../../include/linux/modversions.h -c rrunner.c"
  * End:
  */

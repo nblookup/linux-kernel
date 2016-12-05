@@ -1,6 +1,6 @@
 /* linux/net/inet/arp.c
  *
- * Version:	$Id: arp.c,v 1.84 2000/01/18 08:24:14 davem Exp $
+ * Version:	$Id: arp.c,v 1.90 2000/10/04 09:20:56 anton Exp $
  *
  * Copyright (C) 1994 by Florian  La Roche
  *
@@ -122,9 +122,6 @@
 #include <asm/system.h>
 #include <asm/uaccess.h>
 
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
-static char *ax2asc2(ax25_address *a, char *buf);
-#endif
 
 
 /*
@@ -295,7 +292,7 @@ static int arp_constructor(struct neighbour *neigh)
 			neigh->output = neigh->ops->output;
 			return 0;
 #endif
-		}
+		;}
 #endif
 		if (neigh->type == RTN_MULTICAST) {
 			neigh->nud_state = NUD_NOARP;
@@ -424,20 +421,24 @@ int arp_find(unsigned char *haddr, struct sk_buff *skb)
 int arp_bind_neighbour(struct dst_entry *dst)
 {
 	struct net_device *dev = dst->dev;
+	struct neighbour *n = dst->neighbour;
 
 	if (dev == NULL)
-		return 0;
-	if (dst->neighbour == NULL) {
+		return -EINVAL;
+	if (n == NULL) {
 		u32 nexthop = ((struct rtable*)dst)->rt_gateway;
 		if (dev->flags&(IFF_LOOPBACK|IFF_POINTOPOINT))
 			nexthop = 0;
-		dst->neighbour = __neigh_lookup(
+		n = __neigh_lookup_errno(
 #ifdef CONFIG_ATM_CLIP
 		    dev->type == ARPHRD_ATM ? &clip_tbl :
 #endif
-		    &arp_tbl, &nexthop, dev, 1);
+		    &arp_tbl, &nexthop, dev);
+		if (IS_ERR(n))
+			return PTR_ERR(n);
+		dst->neighbour = n;
 	}
-	return (dst->neighbour != NULL);
+	return 0;
 }
 
 /*
@@ -847,9 +848,9 @@ int arp_req_set(struct arpreq *r, struct net_device * dev)
 	if (r->arp_ha.sa_family != dev->type)	
 		return -EINVAL;
 
-	err = -ENOBUFS;
-	neigh = __neigh_lookup(&arp_tbl, &ip, dev, 1);
-	if (neigh) {
+	neigh = __neigh_lookup_errno(&arp_tbl, &ip, dev);
+	err = PTR_ERR(neigh);
+	if (!IS_ERR(neigh)) {
 		unsigned state = NUD_STALE;
 		if (r->arp_flags & ATF_PERM)
 			state = NUD_PERMANENT;
@@ -1011,6 +1012,9 @@ out:
 #ifndef CONFIG_PROC_FS
 static int arp_get_info(char *buffer, char **start, off_t offset, int length) { return 0; }
 #else
+#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
+static char *ax2asc2(ax25_address *a, char *buf);
+#endif
 #define HBUFFERLEN 30
 
 static int arp_get_info(char *buffer, char **start, off_t offset, int length)
@@ -1021,7 +1025,6 @@ static int arp_get_info(char *buffer, char **start, off_t offset, int length)
 	char hbuffer[HBUFFERLEN];
 	int i,j,k;
 	const char hexbuf[] =  "0123456789ABCDEF";
-	char abuf[16];
 
 	size = sprintf(buffer,"IP address       HW type     Flags       HW address            Mask     Device\n");
 
@@ -1060,15 +1063,18 @@ static int arp_get_info(char *buffer, char **start, off_t offset, int length)
 		}
 #endif
 
-			size = sprintf(buffer+len,
-				"%-17s0x%-10x0x%-10x%s",
-				in_ntoa2(*(u32*)n->primary_key, abuf),
-				hatype,
-				arp_state_to_flags(n), 
-				hbuffer);
-			size += sprintf(buffer+len+size,
-				 "     %-17s %s\n",
-				 "*", dev->name);
+			{
+				char tbuf[16];
+				sprintf(tbuf, "%u.%u.%u.%u", NIPQUAD(*(u32*)n->primary_key));
+				size = sprintf(buffer+len, "%-16s 0x%-10x0x%-10x%s"
+							"     *        %s\n",
+					tbuf,
+					hatype,
+					arp_state_to_flags(n), 
+					hbuffer,
+					dev->name);
+			}
+
 			read_unlock(&n->lock);
 
 			len += size;
@@ -1090,15 +1096,17 @@ static int arp_get_info(char *buffer, char **start, off_t offset, int length)
 			struct net_device *dev = n->dev;
 			int hatype = dev ? dev->type : 0;
 
-			size = sprintf(buffer+len,
-				"%-17s0x%-10x0x%-10x%s",
-				in_ntoa2(*(u32*)n->key, abuf),
-				hatype,
- 				ATF_PUBL|ATF_PERM,
-				"00:00:00:00:00:00");
-			size += sprintf(buffer+len+size,
-				 "     %-17s %s\n",
-				 "*", dev ? dev->name : "*");
+			{
+				char tbuf[16];
+				sprintf(tbuf, "%u.%u.%u.%u", NIPQUAD(*(u32*)n->key));
+				size = sprintf(buffer+len, "%-16s 0x%-10x0x%-10x%s"
+							"     *        %s\n",
+					tbuf,
+					hatype,
+ 					ATF_PUBL|ATF_PERM,
+					"00:00:00:00:00:00",
+					dev ? dev->name : "*");
+			}
 
 			len += size;
 			pos += size;
@@ -1159,6 +1167,7 @@ void __init arp_init (void)
 }
 
 
+#ifdef CONFIG_PROC_FS
 #if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 
 /*
@@ -1192,4 +1201,5 @@ char *ax2asc2(ax25_address *a, char *buf)
 
 }
 
+#endif
 #endif

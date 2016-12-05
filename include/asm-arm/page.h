@@ -14,6 +14,9 @@
 #define clear_page(page)	memzero((void *)(page), PAGE_SIZE)
 extern void copy_page(void *to, void *from);
 
+#define clear_user_page(page, vaddr)	clear_page(page)
+#define copy_user_page(to, from, vaddr)	copy_page(to, from)
+
 #ifdef STRICT_MM_TYPECHECKS
 /*
  * These are used to make use of C type-checking..
@@ -81,11 +84,17 @@ extern __inline__ int get_order(unsigned long size)
 
 #endif /* !__ASSEMBLY__ */
 
+#include <linux/config.h>
 #include <asm/arch/memory.h>
 
 #define __pa(x)			__virt_to_phys((unsigned long)(x))
 #define __va(x)			((void *)__phys_to_virt((unsigned long)(x)))
-#define MAP_NR(addr)		((__pa(addr) - PHYS_OFFSET) >> PAGE_SHIFT)
+
+#ifndef CONFIG_DISCONTIGMEM
+#define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT) - \
+				 (PHYS_OFFSET >> PAGE_SHIFT))
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
+#endif
 
 #endif
 

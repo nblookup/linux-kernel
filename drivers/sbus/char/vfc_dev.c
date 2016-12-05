@@ -21,6 +21,7 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/fs.h>
+#include <linux/smp_lock.h>
 
 #include <asm/openprom.h>
 #include <asm/oplib.h>
@@ -41,7 +42,8 @@
 #include "vfc.h"
 #include <asm/vfc_ioctls.h>
 
-static devfs_handle_t devfs_handle = NULL;  /*  For the directory  */
+static struct file_operations vfc_fops;
+static devfs_handle_t devfs_handle;  /*  For the directory  */
 struct vfc_dev **vfc_dev_lst;
 static char vfcstr[]="vfc";
 static unsigned char saa9051_init_array[VFC_SAA9051_NR] = {
@@ -166,9 +168,9 @@ int init_vfc_device(struct sbus_dev *sdev,struct vfc_dev *dev, int instance)
 		return -EIO;
 
 	sprintf (devname, "%d", instance);
-	dev->de = devfs_register (devfs_handle, devname, 0, DEVFS_FL_DEFAULT,
+	dev->de = devfs_register (devfs_handle, devname, DEVFS_FL_DEFAULT,
 				  VFC_MAJOR, instance,
-				  S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+				  S_IFCHR | S_IRUSR | S_IWUSR,
 				  &vfc_fops, NULL);
 	return 0;
 }
@@ -190,7 +192,6 @@ static int vfc_open(struct inode *inode, struct file *file)
 		return -EBUSY;
 
 	dev->busy = 1;
-	MOD_INC_USE_COUNT;
 	vfc_lock_device(dev);
 	
 	vfc_csr_init(dev);
@@ -204,17 +205,19 @@ static int vfc_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static void vfc_release(struct inode *inode,struct file *file) 
+static int vfc_release(struct inode *inode,struct file *file) 
 {
 	struct vfc_dev *dev;
 
+	lock_kernel();
 	dev = vfc_get_dev_ptr(MINOR(inode->i_rdev));
-	if (dev == NULL)
-		return;
-	if (!dev->busy)
-		return;
+	if (!dev || !dev->busy) {
+		unlock_kernel();
+		return -EINVAL;
+	}
 	dev->busy = 0;
-	MOD_DEC_USE_COUNT;
+	unlock_kernel();
+	return 0;
 }
 
 static int vfc_debug(struct vfc_dev *dev, int cmd, unsigned long arg) 
@@ -236,7 +239,7 @@ static int vfc_debug(struct vfc_dev *dev, int cmd, unsigned long arg)
 
 		if(copy_from_user(buffer, inout.buffer, 
 				  inout.len*sizeof(char))) {
-			kfree_s(buffer, inout.len * sizeof(char));
+			kfree(buffer);
 			return -EFAULT;
 		}
 		
@@ -247,7 +250,7 @@ static int vfc_debug(struct vfc_dev *dev, int cmd, unsigned long arg)
 					inout.buffer,inout.len);
 
 		if (copy_to_user((void *)arg,&inout,sizeof(inout))) {
-			kfree_s(buffer, inout.len);
+			kfree(buffer);
 			return -EFAULT;
 		}
 		vfc_unlock_device(dev);
@@ -269,14 +272,14 @@ static int vfc_debug(struct vfc_dev *dev, int cmd, unsigned long arg)
 		vfc_unlock_device(dev);
 		
 		if (copy_to_user(inout.buffer, buffer, inout.len)) {
-			kfree_s(buffer,inout.len);
+			kfree(buffer);
 			return -EFAULT;
 		}
 		if (copy_to_user((void *)arg,&inout,sizeof(inout))) {
-			kfree_s(buffer,inout.len);
+			kfree(buffer);
 			return -EFAULT;
 		}
-		kfree_s(buffer,inout.len);
+		kfree(buffer);
 		break;
 	default:
 		return -EINVAL;
@@ -608,10 +611,12 @@ static int vfc_mmap(struct inode *inode, struct file *file,
 	unsigned int map_size, ret, map_offset;
 	struct vfc_dev *dev;
 	
+	lock_kernel();
 	dev = vfc_get_dev_ptr(MINOR(inode->i_rdev));
-	if(dev == NULL)
+	if(dev == NULL) {
+		unlock_kernel();
 		return -ENODEV;
-	
+	}
 	map_size = vma->vm_end - vma->vm_start;
 	if(map_size > sizeof(struct vfc_regs)) 
 		map_size = sizeof(struct vfc_regs);
@@ -621,6 +626,7 @@ static int vfc_mmap(struct inode *inode, struct file *file,
 	map_offset = (unsigned int) (long)dev->phys_regs;
 	ret = io_remap_page_range(vma->vm_start, map_offset, map_size, 
 				  vma->vm_page_prot, dev->which_io);
+	unlock_kernel();
 	if(ret)
 		return -EAGAIN;
 
@@ -635,6 +641,7 @@ static int vfc_lseek(struct inode *inode, struct file *file,
 }
 
 static struct file_operations vfc_fops = {
+	owner:		THIS_MODULE,
 	llseek:		vfc_lseek,
 	ioctl:		vfc_ioctl,
 	mmap:		vfc_mmap,
@@ -673,7 +680,7 @@ static int vfc_probe(void)
 		kfree(vfc_dev_lst);
 		return -EIO;
 	}
-	devfs_handle = devfs_mk_dir (NULL, "vfc", 3, NULL);
+	devfs_handle = devfs_mk_dir (NULL, "vfc", NULL);
 
 	instance = 0;
 	for_all_sbusdev(sdev, sbus) {

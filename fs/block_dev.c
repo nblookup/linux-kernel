@@ -5,12 +5,14 @@
  */
 
 #include <linux/config.h>
+#include <linux/init.h>
 #include <linux/mm.h>
 #include <linux/locks.h>
 #include <linux/fcntl.h>
 #include <linux/malloc.h>
 #include <linux/kmod.h>
 #include <linux/devfs_fs_kernel.h>
+#include <linux/smp_lock.h>
 
 #include <asm/uaccess.h>
 
@@ -28,17 +30,17 @@ ssize_t block_write(struct file * filp, const char * buf,
 	ssize_t block, blocks;
 	loff_t offset;
 	ssize_t chars;
-	ssize_t written = 0;
+	ssize_t written;
 	struct buffer_head * bhlist[NBUF];
 	size_t size;
-	kdev_t dev;
+	kdev_t dev = inode->i_rdev;
 	struct buffer_head * bh, *bufferlist[NBUF];
 	register char * p;
 
-	write_error = buffercount = 0;
-	dev = inode->i_rdev;
-	if ( is_read_only( inode->i_rdev ))
+	if (is_read_only(dev))
 		return -EPERM;
+
+	written = write_error = buffercount = 0;
 	blocksize = BLOCK_SIZE;
 	if (blksize_size[MAJOR(dev)] && blksize_size[MAJOR(dev)][MINOR(dev)])
 		blocksize = blksize_size[MAJOR(dev)][MINOR(dev)];
@@ -127,7 +129,7 @@ ssize_t block_write(struct file * filp, const char * buf,
 		p += chars;
 		buf += chars;
 		mark_buffer_uptodate(bh, 1);
-		mark_buffer_dirty(bh, 0);
+		mark_buffer_dirty(bh);
 		if (filp->f_flags & O_SYNC)
 			bufferlist[buffercount++] = bh;
 		else
@@ -309,11 +311,44 @@ ssize_t block_read(struct file * filp, char * buf, size_t count, loff_t *ppos)
 }
 
 /*
+ * private llseek:
+ * for a block special file file->f_dentry->d_inode->i_size is zero
+ * so we compute the size by hand (just as in block_read/write above)
+ */
+static loff_t block_llseek(struct file *file, loff_t offset, int origin)
+{
+	long long retval;
+	kdev_t dev;
+
+	switch (origin) {
+		case 2:
+			dev = file->f_dentry->d_inode->i_rdev;
+			if (blk_size[MAJOR(dev)])
+				offset += (loff_t) blk_size[MAJOR(dev)][MINOR(dev)] << BLOCK_SIZE_BITS;
+			/* else?  return -EINVAL? */
+			break;
+		case 1:
+			offset += file->f_pos;
+	}
+	retval = -EINVAL;
+	if (offset >= 0) {
+		if (offset != file->f_pos) {
+			file->f_pos = offset;
+			file->f_reada = 0;
+			file->f_version = ++event;
+		}
+		retval = offset;
+	}
+	return retval;
+}
+	
+
+/*
  *	Filp may be NULL when we are called by an msync of a vma
  *	since the vma has no handle.
  */
  
-static int block_fsync(struct file *filp, struct dentry *dentry)
+static int block_fsync(struct file *filp, struct dentry *dentry, int datasync)
 {
 	return fsync_dev(dentry->d_inode->i_rdev);
 }
@@ -346,7 +381,7 @@ static void init_once(void * foo, kmem_cache_t * cachep, unsigned long flags)
 	}
 }
 
-void bdev_init(void)
+void __init bdev_init(void)
 {
 	int i;
 	struct list_head *head = bdev_hashtable;
@@ -363,7 +398,7 @@ void bdev_init(void)
 					 0, SLAB_HWCACHE_ALIGN, init_once,
 					 NULL);
 	if (!bdev_cachep)
-		panic("cannot create bdev slab cache");
+		panic("Cannot create bdev_cache SLAB cache");
 }
 
 /*
@@ -433,9 +468,7 @@ void bdput(struct block_device *bdev)
 static struct {
 	const char *name;
 	struct block_device_operations *bdops;
-} blkdevs[MAX_BLKDEV] = {
-	{ NULL, NULL },
-};
+} blkdevs[MAX_BLKDEV];
 
 int get_blkdev_list(char * p)
 {
@@ -528,7 +561,7 @@ int check_disk_change(kdev_t dev)
 	if (bdops == NULL) {
 		devfs_handle_t de;
 
-		de = devfs_find_handle (NULL, NULL, 0, i, MINOR (dev),
+		de = devfs_find_handle (NULL, NULL, i, MINOR (dev),
 					DEVFS_SPECIAL_BLK, 0);
 		if (de) bdops = devfs_get_ops (de);
 	}
@@ -581,6 +614,8 @@ int blkdev_get(struct block_device *bdev, mode_t mode, unsigned flags, int kind)
 		/*
 		 * This crockload is due to bad choice of ->open() type.
 		 * It will go away.
+		 * For now, block device ->open() routine must _not_
+		 * examine anything in 'inode' argument except ->i_rdev.
 		 */
 		struct file fake_file = {};
 		struct dentry fake_dentry = {};
@@ -597,6 +632,8 @@ int blkdev_get(struct block_device *bdev, mode_t mode, unsigned flags, int kind)
 				ret = bdev->bd_op->open(fake_inode, &fake_file);
 			if (!ret)
 				atomic_inc(&bdev->bd_openers);
+			else if (!atomic_read(&bdev->bd_openers))
+				bdev->bd_op = NULL;
 			iput(fake_inode);
 		}
 	}
@@ -606,9 +643,10 @@ int blkdev_get(struct block_device *bdev, mode_t mode, unsigned flags, int kind)
 
 int blkdev_open(struct inode * inode, struct file * filp)
 {
-	int ret = -ENODEV;
+	int ret = -ENXIO;
 	struct block_device *bdev = inode->i_bdev;
 	down(&bdev->bd_sem);
+	lock_kernel();
 	if (!bdev->bd_op)
 		bdev->bd_op = get_blkfops(MAJOR(inode->i_rdev));
 	if (bdev->bd_op) {
@@ -617,7 +655,10 @@ int blkdev_open(struct inode * inode, struct file * filp)
 			ret = bdev->bd_op->open(inode,filp);
 		if (!ret)
 			atomic_inc(&bdev->bd_openers);
+		else if (!atomic_read(&bdev->bd_openers))
+			bdev->bd_op = NULL;
 	}	
+	unlock_kernel();
 	up(&bdev->bd_sem);
 	return ret;
 }	
@@ -628,6 +669,7 @@ int blkdev_put(struct block_device *bdev, int kind)
 	kdev_t rdev = to_kdev_t(bdev->bd_dev); /* this should become bdev */
 	down(&bdev->bd_sem);
 	/* syncing will go here */
+	lock_kernel();
 	if (kind == BDEV_FILE || kind == BDEV_FS)
 		fsync_dev(rdev);
 	if (atomic_dec_and_test(&bdev->bd_openers)) {
@@ -646,6 +688,7 @@ int blkdev_put(struct block_device *bdev, int kind)
 	if (!atomic_read(&bdev->bd_openers))
 		bdev->bd_op = NULL;	/* we can't rely on driver being */
 					/* kind to stay around. */
+	unlock_kernel();
 	up(&bdev->bd_sem);
 	return ret;
 }
@@ -666,6 +709,7 @@ static int blkdev_ioctl(struct inode *inode, struct file *file, unsigned cmd,
 struct file_operations def_blk_fops = {
 	open:		blkdev_open,
 	release:	blkdev_close,
+	llseek:		block_llseek,
 	read:		block_read,
 	write:		block_write,
 	fsync:		block_fsync,

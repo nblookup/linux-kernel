@@ -100,8 +100,8 @@ static int  sbni_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static void sbni_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static int  sbni_close(struct net_device *dev);
 static void sbni_drop_tx_queue(struct net_device *dev);
-static struct enet_statistics *sbni_get_stats(struct net_device *dev);
-void card_start(struct net_device *dev);
+static struct net_device_stats *sbni_get_stats(struct net_device *dev);
+static void card_start(struct net_device *dev);
 static inline unsigned short sbni_recv(struct net_device *dev);
 void change_level(struct net_device *dev);
 static inline void sbni_xmit(struct net_device *dev);
@@ -334,7 +334,7 @@ int __init sbni_probe(struct net_device *dev)
 	if(base_addr > 0x1ff)	/* Check a single specified location. */
 		return sbni_probe1(dev, base_addr);
 	else if(base_addr != 0)	/* Don't probe at all. */
-		return ENXIO;
+		return -ENXIO;
 	for(i = 0; (base_addr = netcard_portlist[i]); i++)
 	{ 
 		if(!check_region(base_addr, SBNI_IO_EXTENT) && base_addr != 1)
@@ -345,7 +345,7 @@ int __init sbni_probe(struct net_device *dev)
 				return 0;
 		}
 	}
-	return ENODEV;
+	return -ENODEV;
 }
 
 #endif /* have devlist*/
@@ -408,7 +408,7 @@ static int __init sbni_probe1(struct net_device *dev, int ioaddr)
 	}
 
 	if(bad_card)
-		return ENODEV;
+		return -ENODEV;
 	else
 		outb(0, ioaddr + CSR0); 
 	if(dev->irq < 2)
@@ -422,7 +422,7 @@ static int __init sbni_probe1(struct net_device *dev, int ioaddr)
 		if(autoirq == 0)
 		{
 			printk("sbni probe at %#x failed to detect IRQ line\n", ioaddr);
-			return EAGAIN;
+			return -EAGAIN;
 		}
 	}
 	/* clear FIFO buffer */
@@ -436,7 +436,7 @@ static int __init sbni_probe1(struct net_device *dev, int ioaddr)
 		if (irqval) 
 		{
 			printk (" unable to get IRQ %d (irqval=%d).\n", dev->irq, irqval);
-			return EAGAIN;
+			return -EAGAIN;
 		}
 	}
      
@@ -448,6 +448,7 @@ static int __init sbni_probe1(struct net_device *dev, int ioaddr)
 	if(dev->priv == NULL)
 	{
 		DP( printk("%s: cannot allocate memory\n", dev->name); )
+		free_irq(dev->irq, dev);
 		return -ENOMEM;
 	}
    
@@ -647,7 +648,7 @@ static int sbni_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	return 0;
 }
 
-void card_start(struct net_device *dev)
+static void card_start(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local*)dev->priv;
    
@@ -952,7 +953,7 @@ static void sbni_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	spin_unlock(&lp->lock);
 }
 
-static struct enet_statistics *sbni_get_stats(struct net_device *dev)
+static struct net_device_stats *sbni_get_stats(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	return &lp->stats;
@@ -1200,6 +1201,8 @@ static int sbni_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		}
 		case SIOCDEVRESINSTATS:
 		{
+			if(!capable(CAP_NET_ADMIN))
+				return -EPERM;
 			DP( printk("%s: SIOCDEVRESINSTATS\n",dev->name); )
 			lp->in_stats.all_rx_number = 0;
 			lp->in_stats.bad_rx_number = 0;

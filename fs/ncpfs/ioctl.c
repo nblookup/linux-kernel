@@ -16,6 +16,7 @@
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/highuid.h>
+#include <linux/vmalloc.h>
 
 #include <linux/ncp_fs.h>
 
@@ -25,6 +26,8 @@
 #define NCP_OBJECT_NAME_MAX_LEN	4096
 /* maximum limit for ncp_privatedata_ioctl */
 #define NCP_PRIVATE_DATA_MAX_LEN 8192
+/* maximum negotiable packet size */
+#define NCP_PACKET_SIZE_INTERNAL 65536
 
 int ncp_ioctl(struct inode *inode, struct file *filp,
 	      unsigned int cmd, unsigned long arg)
@@ -50,11 +53,11 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		  NCP_PACKET_SIZE - sizeof(struct ncp_request_header))) {
 			return -EINVAL;
 		}
-		bouncebuffer = kmalloc(NCP_PACKET_SIZE, GFP_NFS);
+		bouncebuffer = vmalloc(NCP_PACKET_SIZE_INTERNAL);
 		if (!bouncebuffer)
 			return -ENOMEM;
 		if (copy_from_user(bouncebuffer, request.data, request.size)) {
-			kfree(bouncebuffer);
+			vfree(bouncebuffer);
 			return -EFAULT;
 		}
 		ncp_lock_server(server);
@@ -67,7 +70,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		memcpy(server->packet, bouncebuffer, request.size);
 
 		result = ncp_request2(server, request.function, 
-			bouncebuffer, NCP_PACKET_SIZE);
+			bouncebuffer, NCP_PACKET_SIZE_INTERNAL);
 		if (result < 0)
 			result = -EIO;
 		else
@@ -78,15 +81,13 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		if (result >= 0)
 			if (copy_to_user(request.data, bouncebuffer, result))
 				result = -EFAULT;
-		kfree(bouncebuffer);
+		vfree(bouncebuffer);
 		return result;
 
 	case NCP_IOC_CONN_LOGGED_IN:
 
-		if ((permission(inode, MAY_WRITE) != 0)
-		    && (current->uid != server->m.mounted_uid)) {
+		if (!capable(CAP_SYS_ADMIN))
 			return -EACCES;
-		}
 		if (!(server->m.int_flags & NCP_IMOUNT_LOGGEDIN_POSSIBLE))
 			return -EINVAL;
 		if (server->root_setuped)
@@ -164,7 +165,6 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 			return 0;
 		}
 
-#ifdef CONFIG_NCPFS_MOUNT_SUBDIR
 	case NCP_IOC_GETROOT:
 		{
 			struct ncp_setroot_ioctl sr;
@@ -204,8 +204,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 			struct nw_info_struct i;
 			struct dentry* dentry;
 
-			if (   (permission(inode, MAY_WRITE) != 0)
-			    && (current->uid != server->m.mounted_uid))
+			if (!capable(CAP_SYS_ADMIN))
 			{
 				return -EACCES;
 			}
@@ -241,7 +240,6 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 
 			return 0;
 		}
-#endif	/* CONFIG_NCPFS_MOUNT_SUBDIR */
 
 #ifdef CONFIG_NCPFS_PACKET_SIGNING	
 	case NCP_IOC_SIGN_INIT:
@@ -250,21 +248,21 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		{
 			return -EACCES;
 		}
-		if (server->sign_active)
-		{
-			return -EINVAL;
-		}
-		if (server->sign_wanted)
-		{
-			struct ncp_sign_init sign;
+		if (arg) {
+			if (server->sign_wanted)
+			{
+				struct ncp_sign_init sign;
 
-			if (copy_from_user(&sign, (struct ncp_sign_init *) arg,
-			      sizeof(sign))) return -EFAULT;
-			memcpy(server->sign_root,sign.sign_root,8);
-			memcpy(server->sign_last,sign.sign_last,16);
-			server->sign_active = 1;
+				if (copy_from_user(&sign, (struct ncp_sign_init *) arg,
+				      sizeof(sign))) return -EFAULT;
+				memcpy(server->sign_root,sign.sign_root,8);
+				memcpy(server->sign_last,sign.sign_last,16);
+				server->sign_active = 1;
+			}
+			/* ignore when signatures not wanted */
+		} else {
+			server->sign_active = 0;
 		}
-		/* ignore when signatures not wanted */
 		return 0;		
 		
         case NCP_IOC_SIGN_WANTED:
@@ -287,7 +285,8 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 				return -EACCES;
 			}
 			/* get only low 8 bits... */
-			get_user_ret(newstate, (unsigned char*)arg, -EFAULT);
+			if (get_user(newstate, (unsigned char *) arg))
+				return -EFAULT;
 			if (server->sign_active) {
 				/* cannot turn signatures OFF when active */
 				if (!newstate) return -EINVAL;
@@ -335,18 +334,12 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 			{
 				return result;
 			}
+			result = -EIO;
 			if (!ncp_conn_valid(server))
-			{
-				return -EIO;
-			}
+				goto outrel;
+			result = -EISDIR;
 			if (!S_ISREG(inode->i_mode))
-			{
-				return -EISDIR;
-			}
-			if (!NCP_FINFO(inode)->opened)
-			{
-				return -EBADFD;
-			}
+				goto outrel;
 			if (rqdata.cmd == NCP_LOCK_CLEAR)
 			{
 				result = ncp_ClearPhysicalRecord(NCP_SERVER(inode),
@@ -373,11 +366,12 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 							rqdata.timeout);
 				if (result > 0) result = -EAGAIN;
 			}
+outrel:			
+			ncp_inode_close(inode);
 			return result;
 		}
 #endif	/* CONFIG_NCPFS_IOCTL_LOCKING */
 
-#ifdef CONFIG_NCPFS_NDS_DOMAINS
 	case NCP_IOC_GETOBJECTNAME:
 		if (current->uid != server->m.mounted_uid) {
 			return -EACCES;
@@ -506,15 +500,13 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 			if (old) ncp_kfree_s(old, oldlen);
 			return 0;
 		}
-#endif	/* CONFIG_NCPFS_NDS_DOMAINS */
 
 #ifdef CONFIG_NCPFS_NLS
 /* Here we are select the iocharset and the codepage for NLS.
  * Thanks Petr Vandrovec for idea and many hints.
  */
 	case NCP_IOC_SETCHARSETS:
-		if ((permission(inode, MAY_WRITE) != 0) &&
-				 (current->uid != server->m.mounted_uid))
+		if (!capable(CAP_SYS_ADMIN))
 			return -EACCES;
 		if (server->root_setuped)
 			return -EBUSY;

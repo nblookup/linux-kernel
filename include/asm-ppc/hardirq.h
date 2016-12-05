@@ -1,31 +1,48 @@
+#ifdef __KERNEL__
 #ifndef __ASM_HARDIRQ_H
 #define __ASM_HARDIRQ_H
 
 #include <linux/config.h>
 #include <asm/smp.h>
 
-extern unsigned int local_irq_count[NR_CPUS];
+/* entry.S is sensitive to the offsets of these fields */
+/* The __last_jiffy_stamp field is needed to ensure that no decrementer 
+ * interrupt is lost on SMP machines. Since on most CPUs it is in the same 
+ * cache line as local_irq_count, it is cheap to access and is also used on UP 
+ * for uniformity.
+ */
+typedef struct {
+	unsigned int __softirq_active;
+	unsigned int __softirq_mask;
+	unsigned int __local_irq_count;
+	unsigned int __local_bh_count;
+	unsigned int __syscall_count;
+	unsigned int __last_jiffy_stamp;
+} ____cacheline_aligned irq_cpustat_t;
 
+#include <linux/irq_cpustat.h>	/* Standard mappings for irq_cpustat_t above */
+
+#define last_jiffy_stamp(cpu) __IRQ_STAT((cpu), __last_jiffy_stamp)
 /*
  * Are we in an interrupt context? Either doing bottom half
  * or hardware interrupt processing?
  */
 #define in_interrupt() ({ int __cpu = smp_processor_id(); \
-	(local_irq_count[__cpu] + local_bh_count[__cpu] != 0); })
+	(local_irq_count(__cpu) + local_bh_count(__cpu) != 0); })
 
-#define in_irq() (local_irq_count[smp_processor_id()] != 0)
+#define in_irq() (local_irq_count(smp_processor_id()) != 0)
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 
-#define hardirq_trylock(cpu)	(local_irq_count[cpu] == 0)
+#define hardirq_trylock(cpu)	(local_irq_count(cpu) == 0)
 #define hardirq_endlock(cpu)	do { } while (0)
 
-#define hardirq_enter(cpu)	(local_irq_count[cpu]++)
-#define hardirq_exit(cpu)	(local_irq_count[cpu]--)
+#define hardirq_enter(cpu)	(local_irq_count(cpu)++)
+#define hardirq_exit(cpu)	(local_irq_count(cpu)--)
 
 #define synchronize_irq()	do { } while (0)
 
-#else /* __SMP__ */
+#else /* CONFIG_SMP */
 
 #include <asm/atomic.h>
 
@@ -46,7 +63,7 @@ static inline void hardirq_enter(int cpu)
 {
 	unsigned int loops = 10000000;
 	
-	++local_irq_count[cpu];
+	++local_irq_count(cpu);
 	atomic_inc(&global_irq_count);
 	while (test_bit(0,&global_irq_lock)) {
 		if (smp_processor_id() == global_irq_holder) {
@@ -68,7 +85,7 @@ static inline void hardirq_enter(int cpu)
 static inline void hardirq_exit(int cpu)
 {
 	atomic_dec(&global_irq_count);
-	--local_irq_count[cpu];
+	--local_irq_count(cpu);
 }
 
 static inline int hardirq_trylock(int cpu)
@@ -80,6 +97,7 @@ static inline int hardirq_trylock(int cpu)
 
 extern void synchronize_irq(void);
 
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 
 #endif /* __ASM_HARDIRQ_H */
+#endif /* __KERNEL__ */

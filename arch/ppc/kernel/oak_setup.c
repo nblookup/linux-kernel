@@ -28,7 +28,7 @@
 
 #include "local_irq.h"
 #include "ppc4xx_pic.h"
-#include "time.h"
+#include <asm/time.h>
 #include "oak_setup.h"
 
 
@@ -231,10 +231,11 @@ oak_halt(void)
 /*
  * Document me.
  */
-void __init
+long __init
 oak_time_init(void)
 {
 	/* XXX - Implement me */
+	return 0;
 }
 
 /*

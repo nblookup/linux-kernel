@@ -60,13 +60,19 @@
  *
  * This program is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
  * Version 2 (June 1991). See the "COPYING" file distributed with this software
- * for more info.  */
+ * for more info.
+ *
+ * Changes:
+ * 11-10-2000	Bartlomiej Zolnierkiewicz <bkz@linux-ide.org>
+ *		Added some __init and __initdata to entries in yss225.c
+ */
 
 #include <linux/module.h>
 
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/sched.h>
+#include <linux/smp_lock.h>
 #include <linux/ptrace.h>
 #include <linux/fcntl.h>
 #include <linux/ioport.h>    
@@ -77,7 +83,6 @@
 #include <linux/delay.h>
 
 #include "sound_config.h"
-#include "soundmodule.h"
 
 #include <linux/wavefront.h>
 
@@ -87,14 +92,14 @@
  
 #if defined(__alpha__)
 #ifdef CONFIG_SMP
-#define LOOPS_PER_SEC cpu_data[smp_processor_id()].loops_per_sec
+#define LOOPS_PER_TICK cpu_data[smp_processor_id()].loops_per_jiffy
 #else
-#define LOOPS_PER_SEC	loops_per_sec
+#define LOOPS_PER_TICK	loops_per_sec
 #endif
 #endif
 
 #if defined(__i386__)
-#define LOOPS_PER_SEC current_cpu_data.loops_per_sec
+#define LOOPS_PER_TICK current_cpu_data.loops_per_jiffy
 #endif
  
 #define _MIDI_SYNTH_C_
@@ -455,7 +460,7 @@ wavefront_wait (int mask)
 
 	if (short_loop_cnt == 0) {
 		short_loop_cnt = wait_usecs *
-			(LOOPS_PER_SEC / 1000000);
+			(LOOPS_PER_TICK / (1000000 / HZ));
 	}
 
 	/* Spin for a short period of time, because >99% of all
@@ -1953,16 +1958,16 @@ wavefront_open (struct inode *inode, struct file *file)
 {
 	/* XXX fix me */
 	dev.opened = file->f_flags;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static int
 wavefront_release(struct inode *inode, struct file *file)
 {
+	lock_kernel();
 	dev.opened = 0;
 	dev.debug = 0;
-	MOD_DEC_USE_COUNT;
+	unlock_kernel();
 	return 0;
 }
 
@@ -1996,6 +2001,7 @@ wavefront_ioctl(struct inode *inode, struct file *file,
 }
 
 static /*const*/ struct file_operations wavefront_fops = {
+	owner:		THIS_MODULE,
 	llseek:		wavefront_llseek,
 	ioctl:		wavefront_ioctl,
 	open:		wavefront_open,
@@ -2113,28 +2119,25 @@ wavefront_oss_load_patch (int devno, int format, const char *addr,
 
 static struct synth_operations wavefront_operations =
 {
-	"WaveFront",
-	&wavefront_info,
-	0,
-	SYNTH_TYPE_SAMPLE,
-	SAMPLE_TYPE_WAVEFRONT,
-	wavefront_oss_open,
-	wavefront_oss_close,
-	wavefront_oss_ioctl,
-
-	midi_synth_kill_note,
-	midi_synth_start_note,
-	midi_synth_set_instr,
-	midi_synth_reset,
-	NULL, /* hw_control */
-	midi_synth_load_patch,
-	midi_synth_aftertouch,
-	midi_synth_controller,
-	midi_synth_panning,
-	NULL, /* volume method */
-	midi_synth_bender,
-	NULL, /* alloc voice */
-	midi_synth_setup_voice
+	owner:		THIS_MODULE,
+	id:		"WaveFront",
+	info:		&wavefront_info,
+	midi_dev:	0,
+	synth_type:	SYNTH_TYPE_SAMPLE,
+	synth_subtype:	SAMPLE_TYPE_WAVEFRONT,
+	open:		wavefront_oss_open,
+	close:		wavefront_oss_close,
+	ioctl:		wavefront_oss_ioctl,
+	kill_note:	midi_synth_kill_note,
+	start_note:	midi_synth_start_note,
+	set_instr:	midi_synth_set_instr,
+	reset:		midi_synth_reset,
+	load_patch:	midi_synth_load_patch,
+	aftertouch:	midi_synth_aftertouch,
+	controller:	midi_synth_controller,
+	panning:	midi_synth_panning,
+	bender:		midi_synth_bender,
+	setup_voice:	midi_synth_setup_voice
 };
 #endif OSS_SUPPORT_SEQ
 
@@ -2249,9 +2252,7 @@ wavefront_should_cause_interrupt (int val, int port, int timeout)
 	restore_flags (flags);
 }
 
-static int
-wavefront_hw_reset (void)
-
+static int __init wavefront_hw_reset (void)
 {
 	int bits;
 	int hwv[2];
@@ -2705,8 +2706,7 @@ static int __init wavefront_config_midi (void)
 	return 0;
 }
 
-static int
-wavefront_do_reset (int atboot)
+static int __init wavefront_do_reset (int atboot)
 {
 	char voices[1];
 
@@ -3078,7 +3078,7 @@ wffx_ioctl (wavefront_fx_info *r)
    a somewhat "algorithmic" approach.
 */
 
-static int wffx_init (void)
+static int __init wffx_init (void)
 {
 	int i;
 	int j;
@@ -3567,14 +3567,12 @@ static int __init init_wavfront (void)
 		return -EIO;
 	}
 
-	SOUND_LOCK;
 	return 0;
 }
 
 static void __exit cleanup_wavfront (void)
 {
 	uninstall_wavefront ();
-	SOUND_LOCK_END;
 }
 
 module_init(init_wavfront);

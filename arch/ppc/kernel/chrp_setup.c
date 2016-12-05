@@ -49,22 +49,26 @@
 #include <asm/irq.h>
 #include <asm/hydra.h>
 #include <asm/keyboard.h>
+#include <asm/init.h>
 
-#include "time.h"
+#include <asm/time.h>
 #include "local_irq.h"
 #include "i8259.h"
 #include "open_pic.h"
+#include "xics.h"
 
 extern volatile unsigned char *chrp_int_ack_special;
 
 unsigned long chrp_get_rtc_time(void);
 int chrp_set_rtc_time(unsigned long nowtime);
 void chrp_calibrate_decr(void);
-void chrp_time_init(void);
+long chrp_time_init(void);
 
 void chrp_setup_pci_ptrs(void);
-extern void chrp_progress(char *, unsigned short);
 void chrp_event_scan(void);
+void rtas_display_progress(char *, unsigned short);
+void rtas_indicator_progress(char *, unsigned short);
+void bootx_text_progress(char *, unsigned short);
 
 extern int pckbd_setkeycode(unsigned int scancode, unsigned int keycode);
 extern int pckbd_getkeycode(unsigned int scancode);
@@ -89,6 +93,8 @@ extern PTE *Hash, *Hash_end;
 extern unsigned long Hash_size, Hash_mask;
 extern int probingmem;
 extern unsigned long loops_per_sec;
+extern int bootx_text_mapped;
+static int max_width;
 
 unsigned long empty_zero_page[1024];
 
@@ -112,7 +118,7 @@ static const char *gg2_cachemodes[4] = {
 	"Disabled", "Write-Through", "Copy-Back", "Transparent Mode"
 };
 
-int
+int __chrp
 chrp_get_cpuinfo(char *buffer)
 {
 	int i, len, sdramen;
@@ -250,14 +256,8 @@ chrp_setup_arch(void)
 #endif
 		ROOT_DEV = to_kdev_t(0x0802); /* sda2 (sda1 is for the kernel) */
 	printk("Boot arguments: %s\n", cmd_line);
-	
-	request_region(0x20,0x20,"pic1");
-	request_region(0xa0,0x20,"pic2");
-	request_region(0x00,0x20,"dma1");
-	request_region(0x40,0x20,"timer");
-	request_region(0x80,0x10,"dma page reg");
-	request_region(0xc0,0x20,"dma2");
 
+#ifndef CONFIG_PPC64BRIDGE
 	/* PCI bridge config space access area -
 	 * appears to be not in devtree on longtrail. */
 	ioremap(GG2_PCI_CONFIG_BASE, 0x80000);
@@ -266,14 +266,23 @@ chrp_setup_arch(void)
 	 *  -- Geert
 	 */
 	hydra_init();		/* Mac I/O */
+#endif /* CONFIG_PPC64BRIDGE */
 
+#ifndef CONFIG_POWER4
 	/* Some IBM machines don't have the hydra -- Cort */
 	if ( !OpenPIC )
 	{
-		OpenPIC = (struct OpenPIC *)*(unsigned long *)get_property(
-			find_path_device("/"), "platform-open-pic", NULL);
-		OpenPIC = ioremap((unsigned long)OpenPIC, sizeof(struct OpenPIC));
+		unsigned long *opprop;
+
+		opprop = (unsigned long *)get_property(find_path_device("/"),
+						"platform-open-pic", NULL);
+		if (opprop != 0) {
+			printk("OpenPIC addrs: %lx %lx %lx\n",
+			       opprop[0], opprop[1], opprop[2]);
+			OpenPIC = ioremap(opprop[0], sizeof(struct OpenPIC));
+		}
 	}
+#endif
 
 	/*
 	 *  Fix the Super I/O configuration
@@ -282,7 +291,10 @@ chrp_setup_arch(void)
 #ifdef CONFIG_DUMMY_CONSOLE
 	conswitchp = &dummy_con;
 #endif
+
+#ifndef CONFIG_PPC64BRIDGE
 	pmac_find_bridges();
+#endif /* CONFIG_PPC64BRIDGE */
 
 	/* Get the event scan rate for the rtas so we know how
 	 * often it expects a heartbeat. -- Cort
@@ -306,7 +318,7 @@ chrp_setup_arch(void)
 	}
 }
 
-void
+void __chrp
 chrp_event_scan(void)
 {
 	unsigned char log[1024];
@@ -317,7 +329,7 @@ chrp_event_scan(void)
 	ppc_md.heartbeat_count = ppc_md.heartbeat_reset;
 }
 	
-void
+void __chrp
 chrp_restart(char *cmd)
 {
 	printk("RTAS system-reboot returned %d\n",
@@ -325,7 +337,7 @@ chrp_restart(char *cmd)
 	for (;;);
 }
 
-void
+void __chrp
 chrp_power_off(void)
 {
 	/* allow power on only with power button press */
@@ -334,13 +346,13 @@ chrp_power_off(void)
 	for (;;);
 }
 
-void
+void __chrp
 chrp_halt(void)
 {
 	chrp_power_off();
 }
 
-u_int
+u_int __chrp
 chrp_irq_cannonicalize(u_int irq)
 {
 	if (irq == 2)
@@ -353,7 +365,7 @@ chrp_irq_cannonicalize(u_int irq)
 	}
 }
 
-int chrp_get_irq( struct pt_regs *regs )
+int __chrp chrp_get_irq( struct pt_regs *regs )
 {
         int irq;
 
@@ -383,7 +395,7 @@ int chrp_get_irq( struct pt_regs *regs )
 	return irq;
 }
 
-void chrp_post_irq(struct pt_regs* regs, int irq)
+void __chrp chrp_post_irq(struct pt_regs* regs, int irq)
 {
 	/*
 	 * If it's an i8259 irq then we've already done the
@@ -401,15 +413,15 @@ void __init chrp_init_IRQ(void)
 {
 	struct device_node *np;
 	int i;
+	unsigned long *addrp;
 
-	if ( !(np = find_devices("pci") ) )
+	if (!(np = find_devices("pci"))
+	    || !(addrp = (unsigned long *)
+		 get_property(np, "8259-interrupt-acknowledge", NULL)))
 		printk("Cannot find pci to get ack address\n");
 	else
-	{
 		chrp_int_ack_special = (volatile unsigned char *)
-			(*(unsigned long *)get_property(np,
-							"8259-interrupt-acknowledge", NULL));
-	}
+			ioremap(*addrp, 1);
 	open_pic_irq_offset = 16;
 	for ( i = 16 ; i < NR_IRQS ; i++ )
 		irq_desc[i].handler = &open_pic;
@@ -422,18 +434,52 @@ void __init chrp_init_IRQ(void)
 	request_irq(openpic_to_irq(HYDRA_INT_ADB_NMI),
 		    xmon_irq, 0, "NMI", 0);
 #endif	/* CONFIG_XMON */
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	request_irq(openpic_to_irq(OPENPIC_VEC_IPI),
 		    openpic_ipi_action, 0, "IPI0", 0);
-#endif	/* __SMP__ */
+#endif	/* CONFIG_SMP */
 }
 
 void __init
 chrp_init2(void)
 {
+#if defined(CONFIG_VT) && defined(CONFIG_ADB_KEYBOARD)
+	struct device_node *kbd;
+#endif
 #ifdef CONFIG_NVRAM  
 	pmac_nvram_init();
 #endif
+
+	request_region(0x20,0x20,"pic1");
+	request_region(0xa0,0x20,"pic2");
+	request_region(0x00,0x20,"dma1");
+	request_region(0x40,0x20,"timer");
+	request_region(0x80,0x10,"dma page reg");
+	request_region(0xc0,0x20,"dma2");
+
+	if (ppc_md.progress)
+		ppc_md.progress("  Have fun!    ", 0x7777);
+
+#if defined(CONFIG_VT) && defined(CONFIG_ADB_KEYBOARD)
+	/* see if there is a keyboard in the device tree
+	   with a parent of type "adb" */
+	for (kbd = find_devices("keyboard"); kbd; kbd = kbd->next)
+		if (kbd->parent && kbd->parent->type
+		    && strcmp(kbd->parent->type, "adb") == 0)
+			break;
+	if (kbd) {
+		ppc_md.kbd_setkeycode    = mackbd_setkeycode;
+		ppc_md.kbd_getkeycode    = mackbd_getkeycode;
+		ppc_md.kbd_translate     = mackbd_translate;
+		ppc_md.kbd_unexpected_up = mackbd_unexpected_up;
+		ppc_md.kbd_leds          = mackbd_leds;
+		ppc_md.kbd_init_hw       = mackbd_init_hw;
+#ifdef CONFIG_MAGIC_SYSRQ
+		ppc_md.ppc_kbd_sysrq_xlate	 = mackbd_sysrq_xlate;
+		SYSRQ_KEY = 0x69;
+#endif /* CONFIG_MAGIC_SYSRQ */
+	}
+#endif /* CONFIG_VT && CONFIG_ADB_KEYBOARD */
 }
 
 #if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
@@ -445,7 +491,7 @@ int chrp_ide_ports_known = 0;
 ide_ioreg_t chrp_ide_regbase[MAX_HWIFS];
 ide_ioreg_t chrp_idedma_regbase;
 
-void
+void __chrp
 chrp_ide_probe(void)
 {
         struct pci_dev *pdev = pci_find_device(PCI_VENDOR_ID_WINBOND, PCI_DEVICE_ID_WINBOND_82C105, NULL);
@@ -460,19 +506,19 @@ chrp_ide_probe(void)
         }
 }
 
-void
+void __chrp
 chrp_ide_insw(ide_ioreg_t port, void *buf, int ns)
 {
 	ide_insw(port+_IO_BASE, buf, ns);
 }
 
-void
+void __chrp
 chrp_ide_outsw(ide_ioreg_t port, void *buf, int ns)
 {
 	ide_outsw(port+_IO_BASE, buf, ns);
 }
 
-int
+int __chrp
 chrp_ide_default_irq(ide_ioreg_t base)
 {
         if (chrp_ide_ports_known == 0)
@@ -480,7 +526,7 @@ chrp_ide_default_irq(ide_ioreg_t base)
 	return chrp_ide_irq;
 }
 
-ide_ioreg_t
+ide_ioreg_t __chrp
 chrp_ide_default_io_base(int index)
 {
         if (chrp_ide_ports_known == 0)
@@ -488,13 +534,13 @@ chrp_ide_default_io_base(int index)
 	return chrp_ide_regbase[index];
 }
 
-int
+int __chrp
 chrp_ide_check_region(ide_ioreg_t from, unsigned int extent)
 {
         return check_region(from, extent);
 }
 
-void
+void __chrp
 chrp_ide_request_region(ide_ioreg_t from,
 			unsigned int extent,
 			const char *name)
@@ -502,20 +548,20 @@ chrp_ide_request_region(ide_ioreg_t from,
         request_region(from, extent, name);
 }
 
-void
+void __chrp
 chrp_ide_release_region(ide_ioreg_t from,
 			unsigned int extent)
 {
         release_region(from, extent);
 }
 
-void
+void __chrp
 chrp_ide_fix_driveid(struct hd_driveid *id)
 {
         ppc_generic_ide_fix_driveid(id);
 }
 
-void
+void __chrp
 chrp_ide_init_hwif_ports(hw_regs_t *hw, ide_ioreg_t data_port, ide_ioreg_t ctrl_port, int *irq)
 {
 	ide_ioreg_t reg = data_port;
@@ -559,10 +605,16 @@ void __init
 	ppc_md.setup_residual = NULL;
 	ppc_md.get_cpuinfo    = chrp_get_cpuinfo;
 	ppc_md.irq_cannonicalize = chrp_irq_cannonicalize;
+#ifndef CONFIG_POWER4
 	ppc_md.init_IRQ       = chrp_init_IRQ;
 	ppc_md.get_irq        = chrp_get_irq;
 	ppc_md.post_irq	      = chrp_post_irq;
-		
+#else
+	ppc_md.init_IRQ	      = xics_init_IRQ;
+	ppc_md.get_irq	      = xics_get_irq;
+	ppc_md.post_irq	      = NULL;
+#endif /* CONFIG_POWER4 */
+
 	ppc_md.init           = chrp_init2;
 
 	ppc_md.restart        = chrp_restart;
@@ -575,40 +627,40 @@ void __init
 	ppc_md.calibrate_decr = chrp_calibrate_decr;
 
 #ifdef CONFIG_VT
-#ifdef CONFIG_MAC_KEYBOARD
-	if (adb_driver == NULL)
-	{
-#endif /* CONFIG_MAC_KEYBOAD */
-		ppc_md.kbd_setkeycode    = pckbd_setkeycode;
-		ppc_md.kbd_getkeycode    = pckbd_getkeycode;
-		ppc_md.kbd_translate     = pckbd_translate;
-		ppc_md.kbd_unexpected_up = pckbd_unexpected_up;
-		ppc_md.kbd_leds          = pckbd_leds;
-		ppc_md.kbd_init_hw       = pckbd_init_hw;
+	/* these are adjusted in chrp_init2 if we have an ADB keyboard */
+	ppc_md.kbd_setkeycode    = pckbd_setkeycode;
+	ppc_md.kbd_getkeycode    = pckbd_getkeycode;
+	ppc_md.kbd_translate     = pckbd_translate;
+	ppc_md.kbd_unexpected_up = pckbd_unexpected_up;
+	ppc_md.kbd_leds          = pckbd_leds;
+	ppc_md.kbd_init_hw       = pckbd_init_hw;
 #ifdef CONFIG_MAGIC_SYSRQ
-		ppc_md.ppc_kbd_sysrq_xlate	 = pckbd_sysrq_xlate;
-		SYSRQ_KEY = 0x54;
+	ppc_md.ppc_kbd_sysrq_xlate	 = pckbd_sysrq_xlate;
+	SYSRQ_KEY = 0x54;
 #endif /* CONFIG_MAGIC_SYSRQ */
-#ifdef CONFIG_MAC_KEYBOARD
-	}
-	else
-	{
-		ppc_md.kbd_setkeycode    = mackbd_setkeycode;
-		ppc_md.kbd_getkeycode    = mackbd_getkeycode;
-		ppc_md.kbd_translate     = mackbd_translate;
-		ppc_md.kbd_unexpected_up = mackbd_unexpected_up;
-		ppc_md.kbd_leds          = mackbd_leds;
-		ppc_md.kbd_init_hw       = mackbd_init_hw;
-#ifdef CONFIG_MAGIC_SYSRQ
-		ppc_md.ppc_kbd_sysrq_xlate	 = mackbd_sysrq_xlate;
-		SYSRQ_KEY = 0x69;
-#endif /* CONFIG_MAGIC_SYSRQ */
-	}
-#endif /* CONFIG_MAC_KEYBOARD */
 #endif /* CONFIG_VT */
-	if ( rtas_data )
-		ppc_md.progress = chrp_progress;
-	
+
+	if (rtas_data) {
+		struct device_node *rtas;
+		unsigned int *p;
+
+		rtas = find_devices("rtas");
+		if (rtas != NULL) {
+			if (get_property(rtas, "display-character", NULL)) {
+				ppc_md.progress = rtas_display_progress;
+				p = (unsigned int *) get_property
+				       (rtas, "ibm,display-line-length", NULL);
+				if (p)
+					max_width = *p;
+			} else if (get_property(rtas, "set-indicator", NULL))
+				ppc_md.progress = rtas_indicator_progress;
+		}
+	}
+#ifdef CONFIG_BOOTX_TEXT
+	if (ppc_md.progress == NULL && bootx_text_mapped)
+		ppc_md.progress = bootx_text_progress;
+#endif
+
 #if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
         ppc_ide_md.insw = chrp_ide_insw;
         ppc_ide_md.outsw = chrp_ide_outsw;
@@ -629,30 +681,14 @@ void __init
 	if ( ppc_md.progress ) ppc_md.progress("Linux/PPC "UTS_RELEASE"\n", 0x0);
 }
 
-void
-chrp_progress(char *s, unsigned short hex)
+void __chrp
+rtas_display_progress(char *s, unsigned short hex)
 {
-	extern unsigned int rtas_data;
-	int max_width, width;
-	struct device_node *root;
+	int width;
 	char *os = s;
-	unsigned long *p;
 
-	if ( (root = find_path_device("/rtas")) &&
-	     (p = (unsigned long *)get_property(root,
-						"ibm,display-line-length",
-						NULL)) )
-		max_width = *p;
-	else
-		max_width = 0x10;
-
-	if ( (_machine != _MACH_chrp) || !rtas_data )
-		return;
 	if ( call_rtas( "display-character", 1, 1, NULL, '\r' ) )
-	{
-		/* assume no display-character RTAS method - use hex display */
 		return;
-	}
 
 	width = max_width;
 	while ( *os )
@@ -672,3 +708,17 @@ chrp_progress(char *s, unsigned short hex)
 	call_rtas( "display-character", 1, 1, NULL, ' ' );
 }
 
+void __chrp
+rtas_indicator_progress(char *s, unsigned short hex)
+{
+	call_rtas("set-indicator", 3, 1, NULL, 6, 0, hex);
+}
+
+#ifdef CONFIG_BOOTX_TEXT
+void
+bootx_text_progress(char *s, unsigned short hex)
+{
+	prom_print(s);
+	prom_print("\n");
+}
+#endif /* CONFIG_BOOTX_TEXT */

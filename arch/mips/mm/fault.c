@@ -1,10 +1,9 @@
-/* $Id: fault.c,v 1.16 2000/02/18 00:24:30 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995, 1996, 1997, 1998 by Ralf Baechle
+ * Copyright (C) 1995 - 2000 by Ralf Baechle
  */
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -47,9 +46,10 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long write,
 	struct vm_area_struct * vma;
 	struct task_struct *tsk = current;
 	struct mm_struct *mm = tsk->mm;
-	int si_code = SEGV_MAPERR;
 	unsigned long fixup;
+	siginfo_t info;
 
+	info.si_code = SEGV_MAPERR;
 	/*
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
@@ -75,7 +75,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long write,
  * we can handle it..
  */
 good_area:
-	si_code = SEGV_ACCERR;
+	info.si_code = SEGV_ACCERR;
 
 	if (write) {
 		if (!(vma->vm_flags & VM_WRITE))
@@ -90,12 +90,17 @@ good_area:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
-	{
-		int fault = handle_mm_fault(tsk, vma, address, write);
-		if (fault < 0)
-			goto out_of_memory;
-		if (!fault)
-			goto do_sigbus;
+	switch (handle_mm_fault(mm, vma, address, write)) {
+	case 1:
+		tsk->min_flt++;
+		break;
+	case 2:
+		tsk->maj_flt++;
+		break;
+	case 0:
+		goto do_sigbus;
+	default:
+		goto out_of_memory;
 	}
 
 	up(&mm->mmap_sem);
@@ -109,7 +114,6 @@ bad_area:
 	up(&mm->mmap_sem);
 
 	if (user_mode(regs)) {
-		struct siginfo si;
 		tsk->thread.cp0_badvaddr = address;
 		tsk->thread.error_code = write;
 #if 0
@@ -121,10 +125,11 @@ bad_area:
 		       (unsigned long) regs->cp0_epc,
 		       (unsigned long) regs->regs[31]);
 #endif
-		si.si_signo = SIGSEGV;
-		si.si_code = si_code;
-		si.si_addr = (void *) address;
-		force_sig_info(SIGSEGV, &si, tsk);
+		info.si_signo = SIGSEGV;
+		info.si_errno = 0;
+		/* info.si_code has been set above */
+		info.si_addr = (void *) address;
+		force_sig_info(SIGSEGV, &info, tsk);
 		return;
 	}
 
@@ -172,7 +177,11 @@ do_sigbus:
 	 * or user mode.
 	 */
 	tsk->thread.cp0_badvaddr = address;
-	force_sig(SIGBUS, tsk);
+	info.si_code = SIGBUS;
+	info.si_errno = 0;
+	info.si_code = BUS_ADRERR;
+	info.si_addr = (void *) address;
+	force_sig_info(SIGBUS, &info, tsk);
 
 	/* Kernel mode? Handle exceptions or die */
 	if (!user_mode(regs))

@@ -677,6 +677,8 @@ int sym53c416_detect(Scsi_Host_Template *tpnt)
       if(hosts[i].irq && !check_region(hosts[i].base, IO_RANGE))
         {
         shpnt = scsi_register(tpnt, 0);
+        if(shpnt==NULL)
+        	continue;
         save_flags(flags);
         cli();
         /* Request for specified IRQ */
@@ -813,7 +815,8 @@ MODULE_PARM(sym53c416_1, "1-2i");
 MODULE_PARM(sym53c416_2, "1-2i");
 MODULE_PARM(sym53c416_3, "1-2i");
 
-Scsi_Host_Template driver_template = SYM53C416;
+#endif
+
+static Scsi_Host_Template driver_template = SYM53C416;
 
 #include "scsi_module.c"
-#endif

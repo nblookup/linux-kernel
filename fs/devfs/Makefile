@@ -8,7 +8,10 @@
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
 O_TARGET := devfs.o
-OX_OBJS  := base.o util.o
+
+export-objs := base.o util.o
+
+obj-y   := base.o util.o
 
 # Special case to support building documentation
 ifndef TOPDIR
@@ -36,4 +39,4 @@ doc:	base.c util.c
 test:
 	gcc -o /tmp/base.o -D__KERNEL__ -I../../include -Wall \
 	-Wstrict-prototypes -O2 -fomit-frame-pointer -pipe \
-	-fno-strength-reduce -DCPU=686   -DEXPORT_SYMTAB -c base.c
+	-fno-strength-reduce   -DEXPORT_SYMTAB -c base.c

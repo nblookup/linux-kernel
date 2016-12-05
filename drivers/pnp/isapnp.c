@@ -20,6 +20,8 @@
  *  Changelog:
  *  2000-01-01	Added quirks handling for buggy hardware
  *		Peter Denison <peterd@pnd-pc.demon.co.uk>
+ *  2000-06-14	Added isapnp_probe_devs() and isapnp_activate_dev()
+ *		Christoph Hellwig <hch@caldera.de>
  */
 
 #include <linux/config.h>
@@ -48,14 +50,14 @@ LIST_HEAD(isapnp_devices);
 #define ISAPNP_DEBUG
 #endif
 
-struct resource *pidxr_res = NULL;
-struct resource *pnpwrp_res = NULL;
-struct resource *isapnp_rdp_res = NULL;
+struct resource *pidxr_res;
+struct resource *pnpwrp_res;
+struct resource *isapnp_rdp_res;
 
-int isapnp_disable = 0;			/* Disable ISA PnP */
-int isapnp_rdp = 0;			/* Read Data Port */
+int isapnp_disable;			/* Disable ISA PnP */
+int isapnp_rdp;			/* Read Data Port */
 int isapnp_reset = 1;			/* reset all PnP cards (deactivate) */
-int isapnp_skip_pci_scan = 0;		/* skip PCI resource scanning */
+int isapnp_skip_pci_scan;		/* skip PCI resource scanning */
 int isapnp_verbose = 1;			/* verbose mode */
 int isapnp_reserve_irq[16] = { [0 ... 15] = -1 };	/* reserve (don't use) some IRQ */
 int isapnp_reserve_dma[8] = { [0 ... 7] = -1 };		/* reserve (don't use) some DMA */
@@ -108,7 +110,7 @@ MODULE_PARM_DESC(isapnp_reserve_mem, "ISA Plug & Play - reserve memory region(s)
 
 static unsigned char isapnp_checksum_value;
 static DECLARE_MUTEX(isapnp_cfg_mutex);
-static int isapnp_detected = 0;
+static int isapnp_detected;
 
 /* some prototypes */
 
@@ -244,14 +246,15 @@ static void __init isapnp_peek(unsigned char *data, int bytes)
 	unsigned char d=0;
 
 	for (i = 1; i <= bytes; i++) {
-		for (j = 0; j < 10; j++) {
+		for (j = 0; j < 20; j++) {
 			d = isapnp_read_byte(0x05);
 			if (d & 1)
 				break;
 			udelay(100);
 		}
 		if (!(d & 1)) {
-			*data++ = 0xff;
+			if (data != NULL)
+				*data++ = 0xff;
 			continue;
 		}
 		d = isapnp_read_byte(0x04);	/* PRESDI */
@@ -267,17 +270,16 @@ static int isapnp_next_rdp(void)
 {
 	int rdp = isapnp_rdp;
 	while (rdp <= 0x3ff) {
-		if (!check_region(rdp, 1)) {
-			isapnp_rdp = rdp;
-			return 0;
-		}
-		rdp += RDP_STEP;
 		/*
 		 *	We cannot use NE2000 probe spaces for ISAPnP or we
 		 *	will lock up machines.
 		 */
-		if(rdp >= 0x280 && rdp <= 0x380)
-			continue;
+		if ((rdp < 0x280 || rdp >  0x380) && !check_region(rdp, 1)) 
+		{
+			isapnp_rdp = rdp;
+			return 0;
+		}
+		rdp += RDP_STEP;
 	}
 	return -1;
 }
@@ -500,6 +502,7 @@ static void __init isapnp_add_irq_resource(struct pci_dev *dev,
                                                int dependent, int size)
 {
 	unsigned char tmp[3];
+	int i;
 	struct isapnp_irq *irq, *ptr;
 
 	isapnp_peek(tmp, size);
@@ -526,6 +529,11 @@ static void __init isapnp_add_irq_resource(struct pci_dev *dev,
 		ptr->next = irq;
 	else
 		(*res)->irq = irq;
+#ifdef CONFIG_PCI
+	for (i=0; i<16; i++)
+		if (irq->map & (1<<i))
+			pcibios_penalize_isa_irq(i);
+#endif
 }
 
 /*
@@ -739,6 +747,25 @@ static void __init isapnp_add_fixed_mem32_resource(struct pci_dev *dev,
 }
 
 /*
+ *  Parse card name for ISA PnP device.
+ */ 
+ 
+static void __init 
+isapnp_parse_name(char *name, unsigned int name_max, unsigned short *size)
+{
+	if (name[0] == '\0') {
+		unsigned short size1 = *size >= name_max ? (name_max - 1) : *size;
+		isapnp_peek(name, size1);
+		name[size1] = '\0';
+		*size -= size1;
+		
+		/* clean whitespace from end of string */
+		while (size1 > 0  &&  name[--size1] == ' ') 
+			name[size1] = '\0';
+	}	
+}
+
+/*
  *  Parse resource map for logical device.
  */
 
@@ -835,12 +862,7 @@ static int __init isapnp_create_device(struct pci_bus *card,
 			size = 0;
 			break;
 		case _LTAG_ANSISTR:
-			if (dev->name[0] == '\0') {
-				unsigned short size1 = size > 47 ? 47 : size;
-				isapnp_peek(dev->name, size1);
-				dev->name[size1] = '\0';
-				size -= size1;
-			}
+			isapnp_parse_name(dev->name, sizeof(dev->name), &size);
 			break;
 		case _LTAG_UNICODESTR:
 			/* silently ignore */
@@ -906,12 +928,7 @@ static void __init isapnp_parse_resource_map(struct pci_bus *card)
 		case _STAG_VENDOR:
 			break;
 		case _LTAG_ANSISTR:
-			if (card->name[0] == '\0') {
-				unsigned short size1 = size > 47 ? 47 : size;
-				isapnp_peek(card->name, size1);
-				card->name[size1] = '\0';
-				size -= size1;
-			}
+			isapnp_parse_name(card->name, sizeof(card->name), &size);
 			break;
 		case _LTAG_UNICODESTR:
 			/* silently ignore */
@@ -1206,6 +1223,100 @@ struct pci_dev *isapnp_find_dev(struct pci_bus *card,
 		}
 	}
 	return NULL;
+}
+
+static const struct isapnp_card_id *
+isapnp_match_card(const struct isapnp_card_id *ids, struct pci_bus *card)
+{
+	int idx;
+
+	while (ids->card_vendor || ids->card_device) {
+		if ((ids->card_vendor == ISAPNP_ANY_ID || ids->card_vendor == card->vendor) &&
+		    (ids->card_device == ISAPNP_ANY_ID || ids->card_device == card->device)) {
+			for (idx = 0; idx < ISAPNP_CARD_DEVS; idx++) {
+				if (ids->devs[idx].vendor == 0 &&
+				    ids->devs[idx].function == 0)
+					return ids;
+				if (isapnp_find_dev(card,
+						    ids->devs[idx].vendor,
+						    ids->devs[idx].function,
+						    NULL) == NULL)
+					goto __next;
+			}
+			return ids;
+		}
+	      __next:
+		ids++;
+	}
+	return NULL;
+}
+
+int isapnp_probe_cards(const struct isapnp_card_id *ids,
+		       int (*probe)(struct pci_bus *_card,
+		       		    const struct isapnp_card_id *_id))
+{
+	struct pci_bus *card;	
+	const struct isapnp_card_id *id;
+	int count = 0;
+
+	if (ids == NULL || probe == NULL)
+		return -EINVAL;
+	isapnp_for_each_card(card) {
+		id = isapnp_match_card(ids, card);
+		if (id != NULL && probe(card, id) >= 0)
+			count++;
+	}
+	return count;
+}
+
+static const struct isapnp_device_id *
+isapnp_match_dev(const struct isapnp_device_id *ids, struct pci_dev *dev)
+{
+	while (ids->card_vendor || ids->card_device) {
+		if ((ids->card_vendor == ISAPNP_ANY_ID || ids->card_vendor == dev->bus->vendor) &&
+		    (ids->card_device == ISAPNP_ANY_ID || ids->card_device == dev->bus->device) &&
+                    (ids->vendor == ISAPNP_ANY_ID || ids->vendor == dev->vendor) &&
+                    (ids->function == ISAPNP_ANY_ID || ids->function == dev->device))
+			return ids;
+		ids++;
+	}
+	return NULL;
+}
+
+int isapnp_probe_devs(const struct isapnp_device_id *ids,
+		      int (*probe)(struct pci_dev *dev,
+		                   const struct isapnp_device_id *id))
+{
+	
+	struct pci_dev *dev;
+	const struct isapnp_device_id *id;
+	int count = 0;
+
+	if (ids == NULL || probe == NULL)
+		return -EINVAL;
+	isapnp_for_each_dev(dev) {
+		id = isapnp_match_dev(ids, dev);
+		if (id != NULL && probe(dev, id) >= 0)
+			count++;
+	}
+	return count;
+}
+
+int isapnp_activate_dev(struct pci_dev *dev, const char *name)
+{
+	int err;
+	
+	/* Device already active? Let's use it and inform the caller */
+	if (dev->active)
+		return -EBUSY;
+
+	if ((err = dev->activate(dev)) < 0) {
+		printk(KERN_ERR "isapnp: config of %s failed (out of resources?)[%d]\n", name, err);
+		dev->deactivate(dev);
+		return err;
+	}
+
+	return 0;
 }
 
 static unsigned int isapnp_dma_resource_flags(struct isapnp_dma *dma)
@@ -1559,6 +1670,14 @@ static int isapnp_check_interrupt(struct isapnp_cfgtmp *cfg, int irq, int idx)
 				return 1;
 		}
 	}
+#ifdef CONFIG_PCI
+	if (!isapnp_skip_pci_scan) {
+		pci_for_each_dev(dev) {
+			if (dev->irq == irq)
+				return 1;
+		}
+	}
+#endif
 	if (request_irq(irq, isapnp_test_handler, SA_INTERRUPT, "isapnp", NULL))
 		return 1;
 	free_irq(irq, NULL);
@@ -2009,62 +2128,27 @@ static void isapnp_free_card(struct pci_bus *card)
 static void isapnp_free_all_resources(void)
 {
 #ifdef ISAPNP_REGION_OK
-	release_resource(pidxr_res);
+	if (pidxr_res)
+		release_resource(pidxr_res);
 #endif
-	release_resource(pnpwrp_res);
-	if (isapnp_rdp >= 0x203 && isapnp_rdp <= 0x3ff)
+	if (pnpwrp_res)
+		release_resource(pnpwrp_res);
+	if (isapnp_rdp >= 0x203 && isapnp_rdp <= 0x3ff && isapnp_rdp_res)
 		release_resource(isapnp_rdp_res);
 #ifdef MODULE
+#ifdef CONFIG_PROC_FS
+	isapnp_proc_done();
+#endif
 	while (!list_empty(&isapnp_cards)) {
 		struct list_head *list = isapnp_cards.next;
 		list_del(list);
 		isapnp_free_card(pci_bus_b(list));
 	}
-#ifdef CONFIG_PROC_FS
-	isapnp_proc_done();
-#endif
 #endif
 }
 
-static int __init isapnp_do_reserve_irq(int irq)
-{
-	int i;
-	
-	if (irq < 0 || irq > 15)
-		return -EINVAL;
-	for (i = 0; i < 16; i++) {
-		if (isapnp_reserve_irq[i] == irq)
-			return 0;
-	}
-	for (i = 0; i < 16; i++) {
-		if (isapnp_reserve_irq[i] < 0) {
-			isapnp_reserve_irq[i] = irq;
-#ifdef ISAPNP_DEBUG
-			printk("isapnp: IRQ %i is reserved now.\n", irq);
-#endif
-			return 0;
-		}
-	}
-	return -ENOMEM;
-}
-
-#ifdef CONFIG_PCI
-
-static void __init isapnp_pci_init(void)
-{
-	struct pci_dev *dev;
-
-	pci_for_each_dev(dev) {
-#ifdef ISAPNP_DEBUG
-		printk("isapnp: PCI: reserved IRQ: %i\n", dev->irq);
-#endif
-		if (dev->irq > 0)
-			isapnp_do_reserve_irq(dev->irq);
-	}
-}
-
-#endif /* CONFIG_PCI */
-
+EXPORT_SYMBOL(isapnp_cards);
+EXPORT_SYMBOL(isapnp_devices);
 EXPORT_SYMBOL(isapnp_present);
 EXPORT_SYMBOL(isapnp_cfg_begin);
 EXPORT_SYMBOL(isapnp_cfg_end);
@@ -2080,6 +2164,9 @@ EXPORT_SYMBOL(isapnp_activate);
 EXPORT_SYMBOL(isapnp_deactivate);
 EXPORT_SYMBOL(isapnp_find_card);
 EXPORT_SYMBOL(isapnp_find_dev);
+EXPORT_SYMBOL(isapnp_probe_cards);
+EXPORT_SYMBOL(isapnp_probe_devs);
+EXPORT_SYMBOL(isapnp_activate_dev);
 EXPORT_SYMBOL(isapnp_resource_change);
 
 int __init isapnp_init(void)
@@ -2153,10 +2240,6 @@ int __init isapnp_init(void)
 	} else {
 		printk("isapnp: No Plug & Play card found\n");
 	}
-#ifdef CONFIG_PCI
-	if (!isapnp_skip_pci_scan)
-		isapnp_pci_init();
-#endif
 #ifdef CONFIG_PROC_FS
 	isapnp_proc_init();
 #endif

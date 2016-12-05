@@ -91,36 +91,27 @@ static struct sgivwfb_par par_current = {
  */
 int sgivwfb_setup(char*);
 
-static int sgivwfb_open(struct fb_info *info, int user);
-static int sgivwfb_release(struct fb_info *info, int user);
 static int sgivwfb_get_fix(struct fb_fix_screeninfo *fix, int con,
 			   struct fb_info *info);
 static int sgivwfb_get_var(struct fb_var_screeninfo *var, int con,
 			   struct fb_info *info);
 static int sgivwfb_set_var(struct fb_var_screeninfo *var, int con,
 			   struct fb_info *info);
-static int sgivwfb_pan_display(struct fb_var_screeninfo *var, int con,
-			       struct fb_info *info);
 static int sgivwfb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			    struct fb_info *info);
 static int sgivwfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			    struct fb_info *info);
-static int sgivwfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-			 u_long arg, int con, struct fb_info *info);
 static int sgivwfb_mmap(struct fb_info *info, struct file *file,
                         struct vm_area_struct *vma);
 
 static struct fb_ops sgivwfb_ops = {
-  sgivwfb_open,
-  sgivwfb_release,
-  sgivwfb_get_fix,
-  sgivwfb_get_var,
-  sgivwfb_set_var,
-  sgivwfb_get_cmap,
-  sgivwfb_set_cmap,
-  sgivwfb_pan_display,
-  sgivwfb_ioctl,
-  sgivwfb_mmap
+	owner:		THIS_MODULE,
+	fb_get_fix:	sgivwfb_get_fix,
+	fb_get_var:	sgivwfb_get_var,
+	fb_set_var:	sgivwfb_set_var,
+	fb_get_cmap:	sgivwfb_get_cmap,
+	fb_set_cmap:	sgivwfb_set_cmap,
+	fb_mmap:	sgivwfb_mmap,
 };
 
 /*
@@ -579,24 +570,6 @@ static void do_install_cmap(int con, struct fb_info *info)
 /* ---------------------------------------------------- */
 
 /*
- *  Open/Release the frame buffer device
- */
-static int sgivwfb_open(struct fb_info *info, int user)
-{
-  /*
-   *  Nothing, only a usage count for the moment
-   */
-  MOD_INC_USE_COUNT;
-  return(0);
-}
-
-static int sgivwfb_release(struct fb_info *info, int user)
-{
-  MOD_DEC_USE_COUNT;
-  return(0);
-}
-
-/*
  *  Get the Fixed Part of the Display
  */
 static int sgivwfb_get_fix(struct fb_fix_screeninfo *fix, int con,
@@ -826,39 +799,6 @@ static int sgivwfb_set_var(struct fb_var_screeninfo *var, int con,
 }
 
 /*
- *  Pan or Wrap the Display
- *
- *  This call looks only at xoffset, yoffset and the FB_VMODE_YWRAP flag
- */
-
-static int sgivwfb_pan_display(struct fb_var_screeninfo *var, int con,
-			       struct fb_info *info)
-{
-#if 0
-  if (var->vmode & FB_VMODE_YWRAP) {
-    if (var->yoffset < 0 ||
-	var->yoffset >= fb_display[con].var.yres_virtual ||
-	var->xoffset)
-      return -EINVAL;
-  } else {
-    if (var->xoffset+fb_display[con].var.xres >
-	fb_display[con].var.xres_virtual ||
-	var->yoffset+fb_display[con].var.yres >
-	fb_display[con].var.yres_virtual)
-      return -EINVAL;
-  }
-  fb_display[con].var.xoffset = var->xoffset;
-  fb_display[con].var.yoffset = var->yoffset;
-  if (var->vmode & FB_VMODE_YWRAP)
-    fb_display[con].var.vmode |= FB_VMODE_YWRAP;
-  else
-    fb_display[con].var.vmode &= ~FB_VMODE_YWRAP;
-  return 0;
-#endif
-  return -EINVAL;
-}
-
-/*
  *  Get the Colormap
  */
 static int sgivwfb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
@@ -883,8 +823,8 @@ static int sgivwfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
   int err;
 
   if (!fb_display[con].cmap.len) {	/* no colormap allocated? */
-    if ((err = fb_alloc_cmap(&fb_display[con].cmap,
-			     1<<fb_display[con].var.bits_per_pixel, 0)))
+    int size = fb_display[con].var.bits_per_pixel == 16 ? 32 : 256;
+    if ((err = fb_alloc_cmap(&fb_display[con].cmap, size, 0)))
       return err;
   }
   if (con == currcon)			/* current console? */
@@ -892,15 +832,6 @@ static int sgivwfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
   else
     fb_copy_cmap(cmap, &fb_display[con].cmap, kspc ? 0 : 1);
   return 0;
-}
-
-/*
- *  Virtual Frame Buffer Specific ioctls
- */
-static int sgivwfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-			 u_long arg, int con, struct fb_info *info)
-{
-  return -EINVAL;
 }
 
 static int sgivwfb_mmap(struct fb_info *info, struct file *file,

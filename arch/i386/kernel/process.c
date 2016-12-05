@@ -2,6 +2,9 @@
  *  linux/arch/i386/kernel/process.c
  *
  *  Copyright (C) 1995  Linus Torvalds
+ *
+ *  Pentium III FXSR, SSE support
+ *	Gareth Hughes <gareth@valinux.com>, May 2000
  */
 
 /*
@@ -29,6 +32,7 @@
 #include <linux/delay.h>
 #include <linux/reboot.h>
 #include <linux/init.h>
+#include <linux/mc146818rtc.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -36,6 +40,7 @@
 #include <asm/io.h>
 #include <asm/ldt.h>
 #include <asm/processor.h>
+#include <asm/i387.h>
 #include <asm/desc.h>
 #include <asm/mmu_context.h>
 #ifdef CONFIG_MATH_EMULATION
@@ -46,17 +51,17 @@
 
 asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
 
-int hlt_counter=0;
+int hlt_counter;
 
 /*
  * Powermanagement idle function, if any..
  */
-void (*pm_idle)(void) = NULL;
+void (*pm_idle)(void);
 
 /*
  * Power off function, if any
  */
-void (*pm_power_off)(void) = NULL;
+void (*pm_power_off)(void);
 
 void disable_hlt(void)
 {
@@ -84,16 +89,42 @@ static void default_idle(void)
 }
 
 /*
+ * On SMP it's slightly faster (but much more power-consuming!)
+ * to poll the ->need_resched flag instead of waiting for the
+ * cross-CPU IPI to arrive. Use this option with caution.
+ */
+static void poll_idle (void)
+{
+	int oldval;
+
+	__sti();
+
+	/*
+	 * Deal with another CPU just having chosen a thread to
+	 * run here:
+	 */
+	oldval = xchg(&current->need_resched, -1);
+
+	if (!oldval)
+		asm volatile(
+			"2:"
+			"cmpl $-1, %0;"
+			"rep; nop;"
+			"je 2b;"
+				: :"m" (current->need_resched));
+}
+
+/*
  * The idle thread. There's no useful work to be
  * done, so just try to conserve power and have a
  * low exit latency (ie sit in a loop waiting for
  * somebody to say that they'd like to reschedule)
  */
-void cpu_idle(void)
+void cpu_idle (void)
 {
 	/* endless idle loop with no priority at all */
 	init_idle();
-	current->priority = 0;
+	current->nice = 20;
 	current->counter = -100;
 
 	while (1) {
@@ -107,9 +138,21 @@ void cpu_idle(void)
 	}
 }
 
-static long no_idt[2] = {0, 0};
-static int reboot_mode = 0;
-static int reboot_thru_bios = 0;
+static int __init idle_setup (char *str)
+{
+	if (!strncmp(str, "poll", 4)) {
+		printk("using polling idle threads.\n");
+		pm_idle = poll_idle;
+	}
+
+	return 1;
+}
+
+__setup("idle=", idle_setup);
+
+static long no_idt[2];
+static int reboot_mode;
+static int reboot_thru_bios;
 
 static int __init reboot_setup(char *str)
 {
@@ -215,6 +258,8 @@ static inline void kb_wait(void)
  */
 void machine_real_restart(unsigned char *code, int length)
 {
+	unsigned long flags;
+
 	cli();
 
 	/* Write zero to CMOS register number 0x0f, which the BIOS POST
@@ -224,10 +269,12 @@ void machine_real_restart(unsigned char *code, int length)
 	   disable NMIs by setting the top bit in the CMOS address register,
 	   as we're about to do peculiar things to the CPU.  I'm not sure if
 	   `outb_p' is needed instead of just `outb'.  Use it to be on the
-	   safe side. */
+	   safe side.  (Yes, CMOS_WRITE does outb_p's. -  Paul G.)
+	 */
 
-	outb_p (0x8f, 0x70);
-	outb_p (0x00, 0x71);
+	spin_lock_irqsave(&rtc_lock, flags);
+	CMOS_WRITE(0x00, 0x8f);
+	spin_unlock_irqrestore(&rtc_lock, flags);
 
 	/* Remap the kernel at virtual address zero, as well as offset zero
 	   from the kernel segment.  This assumes the kernel segment starts at
@@ -337,13 +384,14 @@ void machine_power_off(void)
 		pm_power_off();
 }
 
+extern void show_trace(unsigned long* esp);
 
 void show_regs(struct pt_regs * regs)
 {
-	long cr0 = 0L, cr2 = 0L, cr3 = 0L;
+	unsigned long cr0 = 0L, cr2 = 0L, cr3 = 0L, cr4 = 0L;
 
 	printk("\n");
-	printk("EIP: %04x:[<%08lx>]",0xffff & regs->xcs,regs->eip);
+	printk("EIP: %04x:[<%08lx>] CPU: %d",0xffff & regs->xcs,regs->eip, smp_processor_id());
 	if (regs->xcs & 3)
 		printk(" ESP: %04x:%08lx",0xffff & regs->xss,regs->esp);
 	printk(" EFLAGS: %08lx\n",regs->eflags);
@@ -357,7 +405,15 @@ void show_regs(struct pt_regs * regs)
 	__asm__("movl %%cr0, %0": "=r" (cr0));
 	__asm__("movl %%cr2, %0": "=r" (cr2));
 	__asm__("movl %%cr3, %0": "=r" (cr3));
-	printk("CR0: %08lx CR2: %08lx CR3: %08lx\n", cr0, cr2, cr3);
+	/* This could fault if %cr4 does not exist */
+	__asm__("1: movl %%cr4, %0		\n"
+		"2:				\n"
+		".section __ex_table,\"a\"	\n"
+		".long 1b,2b			\n"
+		".previous			\n"
+		: "=r" (cr4): "0" (0));
+	printk("CR0: %08lx CR2: %08lx CR3: %08lx CR4: %08lx\n", cr0, cr2, cr3, cr4);
+	show_trace(&regs->esp);
 }
 
 /*
@@ -365,13 +421,13 @@ void show_regs(struct pt_regs * regs)
  */
 void release_segments(struct mm_struct *mm)
 {
-	void * ldt = mm->segments;
+	void * ldt = mm->context.segments;
 
 	/*
 	 * free the LDT
 	 */
 	if (ldt) {
-		mm->segments = NULL;
+		mm->context.segments = NULL;
 		clear_LDT();
 		vfree(ldt);
 	}
@@ -429,7 +485,7 @@ void flush_thread(void)
 void release_thread(struct task_struct *dead_task)
 {
 	if (dead_task->mm) {
-		void * ldt = dead_task->mm->segments;
+		void * ldt = dead_task->mm->context.segments;
 
 		// temporary debugging check
 		if (ldt) {
@@ -446,27 +502,22 @@ void release_thread(struct task_struct *dead_task)
  */
 void copy_segments(struct task_struct *p, struct mm_struct *new_mm)
 {
-	struct mm_struct * old_mm = current->mm;
-	void * old_ldt = old_mm->segments, * ldt = old_ldt;
+	struct mm_struct * old_mm;
+	void *old_ldt, *ldt;
 
-	if (!old_mm->segments) {
+	ldt = NULL;
+	old_mm = current->mm;
+	if (old_mm && (old_ldt = old_mm->context.segments) != NULL) {
 		/*
-		 * default LDT - use the one from init_task
+		 * Completely new LDT, we initialize it from the parent:
 		 */
-		new_mm->segments = NULL;
-		return;
+		ldt = vmalloc(LDT_ENTRIES*LDT_ENTRY_SIZE);
+		if (!ldt)
+			printk(KERN_WARNING "ldt allocation failed\n");
+		else
+			memcpy(ldt, old_ldt, LDT_ENTRIES*LDT_ENTRY_SIZE);
 	}
-
-	/*
-	 * Completely new LDT, we initialize it from the parent:
-	 */
-	ldt = vmalloc(LDT_ENTRIES*LDT_ENTRY_SIZE);
-	if (!ldt)
-		printk(KERN_WARNING "ldt allocation failed\n");
-	else
-		memcpy(ldt, old_ldt, LDT_ENTRIES*LDT_ENTRY_SIZE);
-	new_mm->segments = ldt;
-	return;
+	new_mm->context.segments = ldt;
 }
 
 /*
@@ -476,6 +527,7 @@ void copy_segments(struct task_struct *p, struct mm_struct *new_mm)
 	asm volatile("movl %%" #seg ",%0":"=m" (*(int *)&(value)))
 
 int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
+	unsigned long unused,
 	struct task_struct * p, struct pt_regs * regs)
 {
 	struct pt_regs * childregs;
@@ -497,23 +549,6 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
 	struct_cpy(&p->thread.i387, &current->thread.i387);
 
 	return 0;
-}
-
-/*
- * fill in the FPU structure for a core dump.
- */
-int dump_fpu (struct pt_regs * regs, struct user_i387_struct* fpu)
-{
-	int fpvalid;
-	struct task_struct *tsk = current;
-
-	fpvalid = tsk->used_math;
-	if (fpvalid) {
-		unlazy_fpu(tsk);
-		memcpy(fpu,&tsk->thread.i387.hard,sizeof(*fpu));
-	}
-
-	return fpvalid;
 }
 
 /*
@@ -589,7 +624,6 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
  * More important, however, is the fact that this allows us much
  * more flexibility.
  */
-extern int cpus_initialized;
 void __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 {
 	struct thread_struct *prev = &prev_p->thread,
@@ -655,7 +689,7 @@ void __switch_to(struct task_struct *prev_p, struct task_struct *next_p)
 
 asmlinkage int sys_fork(struct pt_regs regs)
 {
-	return do_fork(SIGCHLD, regs.esp, &regs);
+	return do_fork(SIGCHLD, regs.esp, &regs, 0);
 }
 
 asmlinkage int sys_clone(struct pt_regs regs)
@@ -667,7 +701,7 @@ asmlinkage int sys_clone(struct pt_regs regs)
 	newsp = regs.ecx;
 	if (!newsp)
 		newsp = regs.esp;
-	return do_fork(clone_flags, newsp, &regs);
+	return do_fork(clone_flags, newsp, &regs, 0);
 }
 
 /*
@@ -682,7 +716,7 @@ asmlinkage int sys_clone(struct pt_regs regs)
  */
 asmlinkage int sys_vfork(struct pt_regs regs)
 {
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs.esp, &regs);
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs.esp, &regs, 0);
 }
 
 /*
@@ -699,7 +733,7 @@ asmlinkage int sys_execve(struct pt_regs regs)
 		goto out;
 	error = do_execve(filename, (char **) regs.ecx, (char **) regs.edx, &regs);
 	if (error == 0)
-		current->flags &= ~PF_DTRACE;
+		current->ptrace &= ~PT_DTRACE;
 	putname(filename);
 out:
 	return error;

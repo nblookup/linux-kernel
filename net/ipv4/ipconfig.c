@@ -1,5 +1,5 @@
 /*
- *  $Id: ipconfig.c,v 1.27 2000/02/21 15:51:41 davem Exp $
+ *  $Id: ipconfig.c,v 1.34 2000/07/26 01:04:18 davem Exp $
  *
  *  Automatic Configuration of IP -- use BOOTP or RARP or user-supplied
  *  information to configure own IP address and routes.
@@ -40,7 +40,6 @@
 #include <net/ip.h>
 #include <net/ipconfig.h>
 
-#include <asm/segment.h>
 #include <asm/uaccess.h>
 #include <asm/checksum.h>
 
@@ -77,7 +76,7 @@ u8 root_server_path[256] __initdata = { 0, };		/* Path to mount as root */
 
 #define CONFIG_IP_PNP_DYNAMIC
 
-static int ic_proto_enabled __initdata = 0			/* Protocols enabled */
+int ic_proto_enabled __initdata = 0			/* Protocols enabled */
 #ifdef CONFIG_IP_PNP_BOOTP
 			| IC_BOOTP
 #endif
@@ -167,6 +166,7 @@ static void __init ic_close_devs(void)
 	struct ic_device *d, *next;
 	struct net_device *dev;
 
+	rtnl_shlock();
 	next = ic_first_dev;
 	while ((d = next)) {
 		next = d->next;
@@ -175,8 +175,9 @@ static void __init ic_close_devs(void)
 			DBG(("IP-Config: Downing %s\n", dev->name));
 			dev_change_flags(dev, d->flags);
 		}
-		kfree_s(d, sizeof(struct ic_device));
+		kfree(d);
 	}
+	rtnl_shunlock();
 }
 
 /*
@@ -294,10 +295,11 @@ static int __init ic_defaults(void)
 		else if (IN_CLASSC(ntohl(ic_myaddr)))
 			ic_netmask = htonl(IN_CLASSC_NET);
 		else {
-			printk(KERN_ERR "IP-Config: Unable to guess netmask for address %08x\n", ic_myaddr);
+			printk(KERN_ERR "IP-Config: Unable to guess netmask for address %u.%u.%u.%u\n",
+				NIPQUAD(ic_myaddr));
 			return -1;
 		}
-		printk("IP-Config: Guessing netmask %s\n", in_ntoa(ic_netmask));
+		printk("IP-Config: Guessing netmask %u.%u.%u.%u\n", NIPQUAD(ic_netmask));
 	}
 
 	return 0;
@@ -781,7 +783,7 @@ static int __init ic_dynamic(void)
 		printk(".");
 		jiff = jiffies + timeout;
 		while (jiffies < jiff && !ic_got_reply)
-			;
+			barrier();
 		if (ic_got_reply) {
 			printk(" OK\n");
 			break;
@@ -807,10 +809,10 @@ static int __init ic_dynamic(void)
 	if (!ic_got_reply)
 		return -1;
 
-	printk("IP-Config: Got %s answer from %s, ",
+	printk("IP-Config: Got %s answer from %u.%u.%u.%u, ",
 		(ic_got_reply & IC_BOOTP) ? "BOOTP" : "RARP",
-		in_ntoa(ic_servaddr));
-	printk("my address is %s\n", in_ntoa(ic_myaddr));
+		NIPQUAD(ic_servaddr));
+	printk("my address is %u.%u.%u.%u\n", NIPQUAD(ic_myaddr));
 
 	return 0;
 }
@@ -986,7 +988,7 @@ static int __init ip_auto_config_setup(char *addrs)
 		num++;
 	}
 
-	return 0;
+	return 1;
 }
 
 static int __init nfsaddrs_config_setup(char *addrs)

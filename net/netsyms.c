@@ -30,6 +30,9 @@
 #include <net/scm.h>
 #include <linux/if_bridge.h>
 #include <linux/random.h>
+#ifdef CONFIG_NET_DIVERT
+#include <linux/divert.h>
+#endif /* CONFIG_NET_DIVERT */
 
 #ifdef CONFIG_NET
 extern __u32 sysctl_wmem_max;
@@ -68,17 +71,6 @@ extern int udp_port_rover;
 extern int netdev_finish_unregister(struct net_device *dev);
 
 #include <linux/rtnetlink.h>
-
-#if	defined(CONFIG_ULTRA)	||	defined(CONFIG_WD80x3)		|| \
-	defined(CONFIG_EL2)	||	defined(CONFIG_NE2000)		|| \
-	defined(CONFIG_E2100)	||	defined(CONFIG_HPLAN_PLUS)	|| \
-	defined(CONFIG_HPLAN)	||	defined(CONFIG_AC3200)		|| \
-	defined(CONFIG_ES3210)	||	defined(CONFIG_ULTRA32)		|| \
-	defined(CONFIG_LNE390)	||	defined(CONFIG_NE3210)		|| \
-	defined(CONFIG_NE2K_PCI) ||	defined(CONFIG_APNE)		|| \
-	defined(CONFIG_DAYNAPORT)
-#include "../drivers/net/8390.h"
-#endif
 
 #ifdef CONFIG_IPX_MODULE
 extern struct datalink_proto   *make_EII_client(void);
@@ -134,7 +126,6 @@ EXPORT_SYMBOL(sock_no_listen);
 EXPORT_SYMBOL(sock_no_shutdown);
 EXPORT_SYMBOL(sock_no_getsockopt);
 EXPORT_SYMBOL(sock_no_setsockopt);
-EXPORT_SYMBOL(sock_no_fcntl);
 EXPORT_SYMBOL(sock_no_sendmsg);
 EXPORT_SYMBOL(sock_no_recvmsg);
 EXPORT_SYMBOL(sock_no_mmap);
@@ -142,7 +133,6 @@ EXPORT_SYMBOL(sock_rfree);
 EXPORT_SYMBOL(sock_wfree);
 EXPORT_SYMBOL(sock_wmalloc);
 EXPORT_SYMBOL(sock_rmalloc);
-EXPORT_SYMBOL(sock_rspace);
 EXPORT_SYMBOL(skb_recv_datagram);
 EXPORT_SYMBOL(skb_free_datagram);
 EXPORT_SYMBOL(skb_copy_datagram);
@@ -197,8 +187,7 @@ EXPORT_SYMBOL(__scm_send);
 
 /* Needed by unix.o */
 EXPORT_SYMBOL(scm_fp_dup);
-EXPORT_SYMBOL(max_files);
-EXPORT_SYMBOL(do_mknod);
+EXPORT_SYMBOL(files_stat);
 EXPORT_SYMBOL(memcpy_toiovec);
 EXPORT_SYMBOL(csum_partial);
 
@@ -221,14 +210,21 @@ EXPORT_SYMBOL(br_ioctl_hook);
 #endif
 #endif
 
+#ifdef CONFIG_NET_DIVERT
+EXPORT_SYMBOL(alloc_divert_blk);
+EXPORT_SYMBOL(free_divert_blk);
+EXPORT_SYMBOL(divert_ioctl);
+#endif /* CONFIG_NET_DIVERT */
+
 #ifdef CONFIG_INET
 /* Internet layer registration */
 EXPORT_SYMBOL(inetdev_lock);
 EXPORT_SYMBOL(inet_add_protocol);
 EXPORT_SYMBOL(inet_del_protocol);
-EXPORT_SYMBOL(ip_route_output);
+EXPORT_SYMBOL(ip_route_output_key);
 EXPORT_SYMBOL(ip_route_input);
 EXPORT_SYMBOL(icmp_send);
+EXPORT_SYMBOL(icmp_reply);
 EXPORT_SYMBOL(ip_options_compile);
 EXPORT_SYMBOL(ip_options_undo);
 EXPORT_SYMBOL(arp_send);
@@ -253,6 +249,8 @@ EXPORT_SYMBOL(ip_defrag);
 /* Route manipulation */
 EXPORT_SYMBOL(ip_rt_ioctl);
 EXPORT_SYMBOL(devinet_ioctl);
+EXPORT_SYMBOL(register_inetaddr_notifier);
+EXPORT_SYMBOL(unregister_inetaddr_notifier);
 
 /* needed for ip_gre -cw */
 EXPORT_SYMBOL(ip_statistics);
@@ -287,16 +285,8 @@ EXPORT_SYMBOL(inet_sock_destruct);
 EXPORT_SYMBOL(inet_sock_release);
 
 /* Socket demultiplexing. */
-EXPORT_SYMBOL(tcp_ehash);
-EXPORT_SYMBOL(tcp_ehash_size);
-EXPORT_SYMBOL(tcp_listening_hash);
-EXPORT_SYMBOL(tcp_lhash_lock);
-EXPORT_SYMBOL(tcp_lhash_users);
-EXPORT_SYMBOL(tcp_lhash_wait);
+EXPORT_SYMBOL(tcp_hashinfo);
 EXPORT_SYMBOL(tcp_listen_wlock);
-EXPORT_SYMBOL(tcp_bhash);
-EXPORT_SYMBOL(tcp_bhash_size);
-EXPORT_SYMBOL(tcp_portalloc_lock);
 EXPORT_SYMBOL(udp_hash);
 EXPORT_SYMBOL(udp_hash_lock);
 
@@ -325,7 +315,6 @@ EXPORT_SYMBOL(tcp_recvmsg);
 EXPORT_SYMBOL(tcp_send_synack);
 EXPORT_SYMBOL(tcp_check_req);
 EXPORT_SYMBOL(tcp_child_process);
-EXPORT_SYMBOL(tcp_reset_xmit_timer);
 EXPORT_SYMBOL(tcp_parse_options);
 EXPORT_SYMBOL(tcp_rcv_established);
 EXPORT_SYMBOL(tcp_init_xmit_timers);
@@ -365,11 +354,17 @@ EXPORT_SYMBOL(tcp_port_rover);
 EXPORT_SYMBOL(udp_port_rover);
 EXPORT_SYMBOL(tcp_sync_mss);
 EXPORT_SYMBOL(net_statistics); 
+EXPORT_SYMBOL(__tcp_mem_reclaim);
+EXPORT_SYMBOL(tcp_sockets_allocated);
+EXPORT_SYMBOL(sysctl_tcp_reordering);
+EXPORT_SYMBOL(sysctl_tcp_rmem);
+EXPORT_SYMBOL(sysctl_tcp_wmem);
+EXPORT_SYMBOL(sysctl_tcp_ecn);
+EXPORT_SYMBOL(tcp_cwnd_application_limited);
 
 EXPORT_SYMBOL(xrlim_allow);
 
 EXPORT_SYMBOL(tcp_write_xmit);
-EXPORT_SYMBOL(dev_loopback_xmit);
 
 EXPORT_SYMBOL(tcp_v4_remember_stamp); 
 
@@ -435,22 +430,6 @@ EXPORT_SYMBOL(arp_find);
 
 #endif  /* CONFIG_INET */
 
-#if	defined(CONFIG_ULTRA)	||	defined(CONFIG_WD80x3)		|| \
-	defined(CONFIG_EL2)	||	defined(CONFIG_NE2000)		|| \
-	defined(CONFIG_E2100)	||	defined(CONFIG_HPLAN_PLUS)	|| \
-	defined(CONFIG_HPLAN)	||	defined(CONFIG_AC3200)		|| \
-	defined(CONFIG_ES3210)	||	defined(CONFIG_ULTRA32)		|| \
-	defined(CONFIG_LNE390)	||	defined(CONFIG_NE3210)		|| \
-	defined(CONFIG_NE2K_PCI) ||	defined(CONFIG_APNE)		|| \
-	defined(CONFIG_DAYNAPORT)
-/* If 8390 NIC support is built in, we will need these. */
-EXPORT_SYMBOL(ei_open);
-EXPORT_SYMBOL(ei_close);
-EXPORT_SYMBOL(ei_interrupt);
-EXPORT_SYMBOL(ethdev_init);
-EXPORT_SYMBOL(NS8390_init);
-#endif
-
 #ifdef CONFIG_TR
 EXPORT_SYMBOL(tr_setup);
 EXPORT_SYMBOL(tr_type_trans);
@@ -490,6 +469,7 @@ EXPORT_SYMBOL(eth_type_trans);
 #ifdef CONFIG_FDDI
 EXPORT_SYMBOL(fddi_type_trans);
 EXPORT_SYMBOL(fddi_setup);
+EXPORT_SYMBOL(init_fddidev);
 #endif /* CONFIG_FDDI */
 #if 0
 EXPORT_SYMBOL(eth_copy_and_sum);
@@ -511,6 +491,7 @@ EXPORT_SYMBOL(dev_load);
 EXPORT_SYMBOL(dev_ioctl);
 EXPORT_SYMBOL(dev_queue_xmit);
 #ifdef CONFIG_NET_HW_FLOWCONTROL
+EXPORT_SYMBOL(netdev_dropping);
 EXPORT_SYMBOL(netdev_register_fc);
 EXPORT_SYMBOL(netdev_unregister_fc);
 EXPORT_SYMBOL(netdev_fc_xoff);
@@ -523,7 +504,7 @@ EXPORT_SYMBOL(dev_mc_delete);
 EXPORT_SYMBOL(dev_mc_upload);
 EXPORT_SYMBOL(n_tty_ioctl);
 EXPORT_SYMBOL(tty_register_ldisc);
-EXPORT_SYMBOL(kill_fasync);
+EXPORT_SYMBOL(__kill_fasync);
 
 EXPORT_SYMBOL(if_port_text);
 
@@ -597,7 +578,6 @@ EXPORT_SYMBOL(nf_getsockopt);
 EXPORT_SYMBOL(register_gifconf);
 
 EXPORT_SYMBOL(net_call_rx_atomic);
-EXPORT_SYMBOL(softirq_state);
 EXPORT_SYMBOL(softnet_data);
 
 #endif  /* CONFIG_NET */

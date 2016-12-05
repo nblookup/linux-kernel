@@ -1,4 +1,22 @@
+/*
+ *  linux/arch/arm/kernel/entry-common.S
+ *
+ *  Copyright (C) 2000 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
 #include <linux/config.h>
+
+#define PT_TRACESYS	0x00000002
+
+@ OS version number used in SWIs
+@  RISC OS is 0
+@  RISC iX is 8
+@
+#define OS_NUMBER	9
+
 /*============================================================================
  * All exits to user mode from the kernel go through this code.
  */
@@ -6,10 +24,10 @@
 #define S_OFF		8
 
 		.macro	get_softirq, rd
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #error SMP not supported
 #else
-		ldr	\rd, __softirq_state
+		ldr	\rd, __irq_stat
 #endif
 		.endm
 
@@ -22,25 +40,23 @@ slow_syscall_return:
 		add	sp, sp, #S_OFF
 ret_from_sys_call:				@ external entry
 		get_softirq r0
-		ldmia	r0, {r0, r1}
+		get_current_task r5
+		ldmia	r0, {r0, r1}		@ softirq_active, softirq_mask
 		mov	r4, #1			@ flag this as being syscall return
 		tst	r0, r1
 		blne	SYMBOL_NAME(do_softirq)
-ret_with_reschedule:				@ external entry (__irq_usr)
-		get_current_task r5
+ret_with_reschedule:				@ external entry (r5 must be set) (__irq_usr)
 		ldr	r0, [r5, #TSK_NEED_RESCHED]
 		ldr	r1, [r5, #TSK_SIGPENDING]
 		teq	r0, #0
 		bne	ret_reschedule
 		teq	r1, #0			@ check for signals
-		bne	ret_signal
-
+		blne	ret_signal
 ret_from_all:	restore_user_regs		@ internal
 
 ret_signal:	mov	r1, sp			@ internal
-		adrsvc	al, lr, ret_from_all
 		mov	r2, r4
-		b	SYMBOL_NAME(do_signal)
+		b	SYMBOL_NAME(do_signal)	@ note the bl above sets lr
 
 ret_reschedule:	adrsvc	al, lr, ret_with_reschedule	@ internal
 		b	SYMBOL_NAME(schedule)
@@ -48,12 +64,13 @@ ret_reschedule:	adrsvc	al, lr, ret_with_reschedule	@ internal
 		.globl	ret_from_exception
 ret_from_exception:				@ external entry
 		get_softirq r0
-		ldmia	r0, {r0, r1}
+		get_current_task r5
+		ldmia	r0, {r0, r1}		@ softirq_active, softirq_mask
 		mov	r4, #0
 		tst	r0, r1
+		ldr	r6, [sp, #S_PSR]
 		blne	SYMBOL_NAME(do_softirq)
-		ldr	r0, [sp, #S_PSR]
-		tst	r0, #3			@ returning to user mode?
+		tst	r6, #3			@ returning to user mode?
 		beq	ret_with_reschedule
 		b	ret_from_all
 
@@ -94,9 +111,9 @@ vector_swi:	save_user_regs
 		bcs	2f
 
 		get_current_task ip
-		ldr	ip, [ip, #TSK_FLAGS]	@ check for syscall tracing
+		ldr	ip, [ip, #TSK_PTRACE]	@ check for syscall tracing
 		adr	tbl, SYMBOL_NAME(sys_call_table)
-		tst	ip, #PF_TRACESYS
+		tst	ip, #PT_TRACESYS
 		ldreq	pc, [tbl, scno, lsl #2]	@ call sys routine
 
 		ldr	tip, [sp, #S_IP + S_OFF]	@ save old IP
@@ -129,9 +146,9 @@ vector_swi:	save_user_regs
 		b	SYMBOL_NAME(deferred)
 
 		.align	5
-		.type	__softirq_state, #object
-__softirq_state:
-		.word	SYMBOL_NAME(softirq_state)
+		.type	__irq_stat, #object
+__irq_stat:
+		.word	SYMBOL_NAME(irq_stat)
 
 		.type	sys_call_table, #object
 ENTRY(sys_call_table)

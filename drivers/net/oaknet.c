@@ -140,17 +140,7 @@ static int __init oaknet_init(void)
 		dev->base_addr = 0;
 
 		release_region(dev->base_addr, OAKNET_IO_SIZE);
-		return (ENODEV);
-	}
-
-	/*
-	 * We're dependent on the 8390 generic driver module, make
-	 * sure its symbols are loaded.
-	 */
-
-	if (load_8390_module("oaknet.c")) {
-		release_region(dev->base_addr, OAKNET_IO_SIZE);
-		return (-ENOSYS);
+		return (-ENODEV);
 	}
 
 	/*
@@ -158,7 +148,12 @@ static int __init oaknet_init(void)
 	 * our own device structure.
 	 */
 
-	dev = init_etherdev(0, 0);
+	dev = init_etherdev(NULL, 0);
+	if (!dev) {
+		release_region(dev->base_addr, OAKNET_IO_SIZE);
+		return (-ENOMEM);
+	}
+	SET_MODULE_OWNER(dev);
 	oaknet_devs = dev;
 
 	/*
@@ -248,7 +243,6 @@ static int
 oaknet_open(struct net_device *dev)
 {
 	int status = ei_open(dev);
-	MOD_INC_USE_COUNT;
 	return (status);
 }
 
@@ -275,7 +269,6 @@ static int
 oaknet_close(struct net_device *dev)
 {
 	int status = ei_close(dev);
-	MOD_DEC_USE_COUNT;
 	return (status);
 }
 
@@ -674,17 +667,10 @@ oaknet_dma_error(struct net_device *dev, const char *name)
  */
 static int __init oaknet_init_module (void)
 {
-	int status;
-
 	if (oaknet_devs != NULL)
 		return (-EBUSY);
 
-	status = oaknet_init()
-
-	if (status == 0)
-		lock_8390_module();
-
-	return (status);
+	return (oaknet_init());
 }
 
 /*
@@ -706,7 +692,6 @@ static void __exit oaknet_cleanup_module (void)
 
 	oaknet_devs = NULL;
 
-	unlock_8390_module();
 }
 
 module_init(oaknet_init_module);

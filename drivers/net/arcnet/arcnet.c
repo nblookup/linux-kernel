@@ -41,7 +41,7 @@
  *     <jojo@repas.de>
  */
 
-#define VERSION "arcnet: v3.92 BETA 2000/02/13 - by Avery Pennarun et al.\n"
+#define VERSION "arcnet: v3.93 BETA 2000/04/29 - by Avery Pennarun et al.\n"
 
 #include <linux/module.h>
 #include <linux/config.h>
@@ -107,7 +107,7 @@ static int go_tx(struct net_device *dev);
 
 void __init arcnet_init(void)
 {
-	static int arcnet_inited __initdata = 0;
+	static int arcnet_inited = 0;
 	int count;
 
 	if (arcnet_inited++)
@@ -154,9 +154,6 @@ void __init arcnet_init(void)
 	printk("\n");
 #ifdef CONFIG_ARCNET_COM90xx
 	com90xx_probe(NULL);
-#endif
-#ifdef CONFIG_ARCNET_COM20020_PCI
-	com20020pci_probe_all();
 #endif
 #endif
 }
@@ -584,6 +581,8 @@ static int arcnet_send_packet(struct sk_buff *skb, struct net_device *dev)
 	soft = &pkt->soft.rfc1201;
 	proto = arc_proto_map[soft->proto];
 
+	BUGMSG(D_SKB_SIZE, "skb: transmitting %d bytes to %02X\n",
+		skb->len, pkt->hard.dest);
 	BUGLVL(D_SKB) arcnet_dump_skb(dev, skb, "tx");
 
 	/* fits in one packet? */
@@ -670,21 +669,20 @@ static void arcnet_timeout(struct net_device *dev)
 	unsigned long flags;
 	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
 	int status = ASTATUS();
+	char *msg;
 
 	save_flags(flags);
 	cli();
 
 	if (status & TXFREEflag) {	/* transmit _DID_ finish */
-		BUGMSG(D_NORMAL, "tx timeout - missed IRQ? (status=%Xh, mask=%Xh, dest=%02Xh)\n",
-		       status, lp->intmask, lp->lasttrans_dest);
-		lp->stats.tx_errors++;
+		msg = " - missed IRQ?";
 	} else {
-		BUGMSG(D_EXTRA, "tx timed out (status=%Xh, intmask=%Xh, dest=%02Xh)\n",
-		       status, lp->intmask, lp->lasttrans_dest);
-		lp->stats.tx_errors++;
+		msg = "";
 		lp->stats.tx_aborted_errors++;
+		lp->timed_out = 1;
 		ACOMMAND(NOTXcmd | (lp->cur_tx << 3));
 	}
+	lp->stats.tx_errors++;
 
 	/* make sure we didn't miss a TX IRQ */
 	AINTMASK(0);
@@ -692,6 +690,12 @@ static void arcnet_timeout(struct net_device *dev)
 	AINTMASK(lp->intmask);
 
 	restore_flags(flags);
+
+	if (jiffies - lp->last_timeout > 10*HZ) {
+		BUGMSG(D_EXTRA, "tx timed out%s (status=%Xh, intmask=%Xh, dest=%02Xh)\n",
+		       msg, status, lp->intmask, lp->lasttrans_dest);
+		lp->last_timeout = jiffies;
+	}
 }
 
 
@@ -776,12 +780,12 @@ void arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			didsomething++;
 		}
 		/* a transmit finished, and we're interested in it. */
-		if (status & lp->intmask & TXFREEflag) {
+		if ((status & lp->intmask & TXFREEflag) || lp->timed_out) {
 			lp->intmask &= ~TXFREEflag;
 
 			BUGMSG(D_DURING, "TX IRQ (stat=%Xh)\n", status);
 
-			if (lp->cur_tx != -1 && !(status & TXACKflag)) {
+			if (lp->cur_tx != -1 && !(status & TXACKflag) && !lp->timed_out) {
 				if (lp->lasttrans_dest != 0) {
 					BUGMSG(D_EXTRA, "transmit was not acknowledged! "
 					    "(status=%Xh, dest=%02Xh)\n",
@@ -799,6 +803,7 @@ void arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 				release_arcbuf(dev, lp->cur_tx);
 
 			lp->cur_tx = -1;
+			lp->timed_out = 0;
 			didsomething++;
 
 			/* send another packet if there is one */

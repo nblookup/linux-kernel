@@ -16,6 +16,7 @@
 #include <linux/fs.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
+#include <linux/smp_lock.h>
 #include <linux/timer.h>
 #include <linux/ioport.h>
 #include <linux/major.h>
@@ -456,10 +457,13 @@ static int bpp_open(struct inode *inode, struct file *f)
 static int bpp_release(struct inode *inode, struct file *f)
 {
       unsigned minor = MINOR(inode->i_rdev);
+
+      lock_kernel();
       instances[minor].opened = 0;
 
       if (instances[minor].mode != COMPATIBILITY)
       terminate(minor);
+      unlock_kernel();
       return 0;
 }
 
@@ -503,7 +507,8 @@ static long read_nibble(unsigned minor, char *c, unsigned long cnt)
           if (pins & BPP_GP_PError) byte |= 0x40;
           if (pins & BPP_GP_Busy)   byte |= 0x80;
 
-          put_user_ret(byte, c, -EFAULT);
+          if (put_user(byte, c))
+		  return -EFAULT;
           c += 1;
           remaining -= 1;
 
@@ -555,7 +560,8 @@ static long read_ecp(unsigned minor, char *c, unsigned long cnt)
               for (idx = 0 ;  idx < repeat ;  idx += 1)
                 buffer[idx] = instances[minor].repeat_byte;
 
-              copy_to_user_ret(c, buffer, repeat, -EFAULT);
+              if (copy_to_user(c, buffer, repeat))
+		      return -EFAULT;
               remaining -= repeat;
               c += repeat;
               instances[minor].run_length -= repeat;
@@ -571,7 +577,8 @@ static long read_ecp(unsigned minor, char *c, unsigned long cnt)
           if (rc & BPP_GP_Busy) {
                 /* OK, this is data. read it in. */
               unsigned char byte = bpp_inb(base_addrs[minor]);
-              put_user_ret(byte, c, -EFAULT);
+              if (put_user(byte, c))
+		      return -EFAULT;
               c += 1;
               remaining -= 1;
 
@@ -681,7 +688,8 @@ static long write_compat(unsigned minor, const char *c, unsigned long cnt)
       while (remaining > 0) {
             unsigned char byte;
 
-            get_user_ret(byte, c, -EFAULT);
+            if (get_user(byte, c))
+		    return -EFAULT;
             c += 1;
 
             rc = wait_for(BPP_GP_nAck, BPP_GP_Busy, TIME_IDLE_LIMIT, minor);
@@ -731,7 +739,8 @@ static long write_ecp(unsigned minor, const char *c, unsigned long cnt)
           unsigned char byte;
           int rc;
 
-          get_user_ret(byte, c, -EFAULT);
+          if (get_user(byte, c))
+		  return -EFAULT;
 
           rc = wait_for(0, BPP_GP_Busy, TIME_PResponse, minor);
           if (rc == -1) return -ETIMEDOUT;
@@ -835,6 +844,7 @@ static int bpp_ioctl(struct inode *inode, struct file *f, unsigned int cmd,
 }
 
 static struct file_operations bpp_fops = {
+	owner:		THIS_MODULE,
 	read:		bpp_read,
 	write:		bpp_write,
 	ioctl:		bpp_ioctl,
@@ -1005,13 +1015,9 @@ static inline void freeLptPort(int idx)
 
 #endif
 
-static devfs_handle_t devfs_handle = NULL;
+static devfs_handle_t devfs_handle;
 
-#ifdef MODULE
-int init_module(void)
-#else
-int __init bpp_init(void)
-#endif
+static int __init bpp_init(void)
 {
 	int rc;
 	unsigned idx;
@@ -1028,16 +1034,15 @@ int __init bpp_init(void)
 		instances[idx].opened = 0;
 		probeLptPort(idx);
 	}
-	devfs_handle = devfs_mk_dir (NULL, "bpp", 3, NULL);
+	devfs_handle = devfs_mk_dir (NULL, "bpp", NULL);
 	devfs_register_series (devfs_handle, "%u", BPP_NO, DEVFS_FL_DEFAULT,
-			       BPP_MAJOR, 0, S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			       BPP_MAJOR, 0, S_IFCHR | S_IRUSR | S_IWUSR,
 			       &bpp_fops, NULL);
 
 	return 0;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit bpp_cleanup(void)
 {
 	unsigned idx;
 
@@ -1049,4 +1054,6 @@ void cleanup_module(void)
 			freeLptPort(idx);
 	}
 }
-#endif
+
+module_init(bpp_init);
+module_exit(bpp_cleanup);

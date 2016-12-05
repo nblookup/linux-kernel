@@ -87,6 +87,8 @@ int scsi_insert_special_cmd(Scsi_Cmnd * SCpnt, int at_head)
 	SCpnt->request.cmd = SPECIAL;
 	SCpnt->request.special = (void *) SCpnt;
 	SCpnt->request.q = NULL;
+	SCpnt->request.free_list = NULL;
+	SCpnt->request.nr_segments = 0;
 
 	/*
 	 * We have the option of inserting the head or the tail of the queue.
@@ -155,6 +157,8 @@ int scsi_insert_special_req(Scsi_Request * SRpnt, int at_head)
 	q = &SRpnt->sr_device->request_queue;
 	SRpnt->sr_request.cmd = SPECIAL;
 	SRpnt->sr_request.special = (void *) SRpnt;
+	SRpnt->sr_request.q = NULL;
+	SRpnt->sr_request.nr_segments = 0;
 
 	/*
 	 * We have the option of inserting the head or the tail of the queue.
@@ -229,6 +233,7 @@ int scsi_init_cmd_errh(Scsi_Cmnd * SCpnt)
 	SCpnt->old_use_sg = SCpnt->use_sg;
 	SCpnt->old_cmd_len = SCpnt->cmd_len;
 	SCpnt->sc_old_data_direction = SCpnt->sc_data_direction;
+	SCpnt->old_underflow = SCpnt->underflow;
 	memcpy((void *) SCpnt->data_cmnd,
 	       (const void *) SCpnt->cmnd, sizeof(SCpnt->cmnd));
 	SCpnt->buffer = SCpnt->request_buffer;
@@ -376,6 +381,8 @@ void scsi_queue_next_request(request_queue_t * q, Scsi_Cmnd * SCpnt)
  *              uptodate - 1 if I/O indicates success, 0 for I/O error.
  *              sectors  - number of sectors we want to mark.
  *		requeue  - indicates whether we should requeue leftovers.
+ *		frequeue - indicates that if we release the command block
+ *			   that the queue request function should be called.
  *
  * Lock status: Assumed that lock is not held upon entry.
  *
@@ -390,10 +397,12 @@ void scsi_queue_next_request(request_queue_t * q, Scsi_Cmnd * SCpnt)
 static Scsi_Cmnd *__scsi_end_request(Scsi_Cmnd * SCpnt, 
 				     int uptodate, 
 				     int sectors,
-				     int requeue)
+				     int requeue,
+				     int frequeue)
 {
 	struct request *req;
 	struct buffer_head *bh;
+        Scsi_Device * SDpnt;
 
 	ASSERT_LOCK(&io_request_lock, 0);
 
@@ -453,11 +462,20 @@ static Scsi_Cmnd *__scsi_end_request(Scsi_Cmnd * SCpnt,
 	}
 	add_blkdev_randomness(MAJOR(req->rq_dev));
 
+        SDpnt = SCpnt->device;
+
 	/*
 	 * This will goose the queue request function at the end, so we don't
 	 * need to worry about launching another command.
 	 */
-	scsi_release_command(SCpnt);
+	__scsi_release_command(SCpnt);
+
+	if( frequeue ) {
+		request_queue_t *q;
+
+		q = &SDpnt->request_queue;
+		scsi_queue_next_request(q, NULL);                
+	}
 	return NULL;
 }
 
@@ -483,7 +501,7 @@ static Scsi_Cmnd *__scsi_end_request(Scsi_Cmnd * SCpnt,
  */
 Scsi_Cmnd *scsi_end_request(Scsi_Cmnd * SCpnt, int uptodate, int sectors)
 {
-	return __scsi_end_request(SCpnt, uptodate, sectors, 1);
+	return __scsi_end_request(SCpnt, uptodate, sectors, 1, 1);
 }
 
 /*
@@ -643,7 +661,8 @@ void scsi_io_completion(Scsi_Cmnd * SCpnt, int good_sectors,
 		SCpnt = __scsi_end_request(SCpnt, 
 					   1, 
 					   good_sectors,
-					   result == 0);
+					   result == 0,
+					   1);
 
 		/*
 		 * If the command completed without error, then either finish off the
@@ -713,8 +732,8 @@ void scsi_io_completion(Scsi_Cmnd * SCpnt, int good_sectors,
 			}
 			break;
 		case NOT_READY:
-			printk(KERN_INFO "Device %x not ready.\n",
-			       SCpnt->request.rq_dev);
+			printk(KERN_INFO "Device %s not ready.\n",
+			       kdevname(SCpnt->request.rq_dev));
 			SCpnt = scsi_end_request(SCpnt, 0, this_count);
 			return;
 			break;
@@ -851,10 +870,9 @@ void scsi_request_fn(request_queue_t * q)
 	 * if the device itself is blocked, or if the host is fully
 	 * occupied.
 	 */
-	if (SHpnt->in_recovery
-	    || q->plugged) {
+	if (SHpnt->in_recovery || q->plugged)
 		return;
-	}
+
 	/*
 	 * To start with, we keep looping until the queue is empty, or until
 	 * the host is no longer able to accept any more requests.
@@ -865,10 +883,8 @@ void scsi_request_fn(request_queue_t * q)
 		 * released the lock and grabbed it again, so each time
 		 * we need to check to see if the queue is plugged or not.
 		 */
-		if (SHpnt->in_recovery
-		    || q->plugged) {
+		if (SHpnt->in_recovery || q->plugged)
 			return;
-		}
 
 		/*
 		 * If the device cannot accept another request, then quit.
@@ -909,6 +925,9 @@ void scsi_request_fn(request_queue_t * q)
 			 * be in an interrupt handler.  Only do this
 			 * from user space, since we do not want to
 			 * sleep from an interrupt.
+			 *
+			 * FIXME(eric) - have the error handler thread do
+			 * this work.
 			 */
 			SDpnt->was_reset = 0;
 			if (SDpnt->removable && !in_interrupt()) {
@@ -950,10 +969,14 @@ void scsi_request_fn(request_queue_t * q)
 			if( SRpnt->sr_magic == SCSI_REQ_MAGIC ) {
 				SCpnt = scsi_allocate_device(SRpnt->sr_device, 
 							     FALSE, FALSE);
+				if( !SCpnt ) {
+					break;
+				}
 				scsi_init_cmd_from_req(SCpnt, SRpnt);
 			}
 
 		} else {
+			SRpnt = NULL;
 			STpnt = scsi_get_request_dev(req);
 			if (!STpnt) {
 				panic("Unable to find device associated with request");
@@ -1002,15 +1025,14 @@ void scsi_request_fn(request_queue_t * q)
 		 */
 		blkdev_dequeue_request(req);
 
-		if (req != &SCpnt->request) {
+		if (req != &SCpnt->request && req != &SRpnt->sr_request ) {
 			memcpy(&SCpnt->request, req, sizeof(struct request));
 
 			/*
 			 * We have copied the data out of the request block - it is now in
 			 * a field in SCpnt.  Release the request block.
 			 */
-			req->rq_status = RQ_INACTIVE;
-			wake_up(&wait_for_request);
+			blkdev_release_request(req);
 		}
 		/*
 		 * Now it is finally safe to release the lock.  We are
@@ -1041,8 +1063,12 @@ void scsi_request_fn(request_queue_t * q)
 			 * get those allocated here.  
 			 */
 			if (!SDpnt->scsi_init_io_fn(SCpnt)) {
-				scsi_end_request(SCpnt, 0, 
-						 SCpnt->request.nr_sectors);
+				SCpnt = __scsi_end_request(SCpnt, 0, 
+							   SCpnt->request.nr_sectors, 0, 0);
+				if( SCpnt != NULL )
+				{
+					panic("Should not have leftover blocks\n");
+				}
 				spin_lock_irq(&io_request_lock);
 				SHpnt->host_busy--;
 				SDpnt->device_busy--;
@@ -1053,8 +1079,12 @@ void scsi_request_fn(request_queue_t * q)
 			 */
 			if (!STpnt->init_command(SCpnt)) {
 				scsi_release_buffers(SCpnt);
-				scsi_end_request(SCpnt, 0, 
-						 SCpnt->request.nr_sectors);
+				SCpnt = __scsi_end_request(SCpnt, 0, 
+							   SCpnt->request.nr_sectors, 0, 0);
+				if( SCpnt != NULL )
+				{
+					panic("Should not have leftover blocks\n");
+				}
 				spin_lock_irq(&io_request_lock);
 				SHpnt->host_busy--;
 				SDpnt->device_busy--;

@@ -85,7 +85,6 @@ int __init cyberII_esp_detect(Scsi_Host_Template *tpnt)
 					   sizeof(struct ESP_regs));
 			return 0; /* Bail out if address did not hold data */
 		}
-		strcpy(z->name, "CyberStorm Mk II SCSI Host Adapter");
 
 		/* Do command transfer with programmed I/O */
 		esp->do_pio_cmds = 1;
@@ -251,17 +250,14 @@ static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write)
 	}
 }
 
-#ifdef MODULE
-
 #define HOSTS_C
 
 #include "cyberstormII.h"
 
-Scsi_Host_Template driver_template = SCSI_CYBERSTORMII;
+static Scsi_Host_Template driver_template = SCSI_CYBERSTORMII;
 
 #include "scsi_module.c"
 
-#endif
 
 int cyberII_esp_release(struct Scsi_Host *instance)
 {

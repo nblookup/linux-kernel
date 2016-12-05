@@ -182,7 +182,7 @@ static char tocUpToDate;
 static char mcdVersion;
 
 static void mcd_transfer(void);
-static void mcd_poll(void);
+static void mcd_poll(unsigned long dummy);
 static void mcd_invalidate_buffers(void);
 static void hsg2msf(long hsg, struct msf *msf);
 static void bin2bcd(unsigned char *p);
@@ -203,38 +203,24 @@ int mcd_audio_ioctl(struct cdrom_device_info * cdi, unsigned int cmd,
                       void * arg);
 int mcd_drive_status(struct cdrom_device_info * cdi, int slot_nr);
 
+static struct timer_list mcd_timer;
+
 static struct cdrom_device_ops mcd_dops = {
-  mcd_open,                   /* open */
-  mcd_release,                /* release */
-  mcd_drive_status,           /* drive status */
-  //NULL,           /* drive status */
-  mcd_media_changed,          /* media changed */
-  mcd_tray_move,              /* tray move */
-  NULL,                       /* lock door */
-  NULL,                       /* select speed */
-  NULL,                       /* select disc */
-  NULL,                       /* get last session */
-  NULL,                       /* get universal product code */
-  NULL,                       /* hard reset */
-  mcd_audio_ioctl,            /* audio ioctl */
-  NULL,                  /* device-specific ioctl */
-  CDC_OPEN_TRAY | CDC_MEDIA_CHANGED | CDC_PLAY_AUDIO
-  | CDC_DRIVE_STATUS, /* capability */
-  0,                            /* number of minor devices */
+	open:			mcd_open,
+	release:		mcd_release,
+	drive_status:		mcd_drive_status,
+	media_changed:		mcd_media_changed,
+	tray_move:		mcd_tray_move,
+	audio_ioctl:		mcd_audio_ioctl,
+	capability:		CDC_OPEN_TRAY | CDC_MEDIA_CHANGED |
+				CDC_PLAY_AUDIO | CDC_DRIVE_STATUS,
 };
 
 static struct cdrom_device_info mcd_info = {
-  &mcd_dops,                    /* device operations */
-  NULL,                         /* link */
-  NULL,                         /* handle */
-  0,		                /* dev */
-  0,                            /* mask */
-  2,                            /* maximum speed */
-  1,                            /* number of discs */
-  0,                            /* options, not owned */
-  0,                            /* mc_flags, not owned */
-  0,                            /* use count, not owned */
-  "mcd",                         /* name of the device type */
+	ops:			&mcd_dops,
+	speed:			2,
+	capacity:		1,
+	name:			"mcd",
 };
 
 #ifndef MODULE
@@ -289,7 +275,7 @@ static int mcd_media_changed(struct cdrom_device_info * cdi, int disc_nr)
 static int
 statusCmd(void)
 {
-	int st, retry;
+	int st = -1, retry;
 
 	for (retry = 0; retry < MCD_RETRY_ATTEMPTS; retry++)
 	{
@@ -311,7 +297,7 @@ statusCmd(void)
 static int
 mcdPlay(struct mcd_Play_msf *arg)
 {
-	int retry, st;
+	int retry, st = -1;
 
 	for (retry = 0; retry < MCD_RETRY_ATTEMPTS; retry++)
 	{
@@ -705,7 +691,7 @@ do_mcd_request(request_queue_t * q)
 
 
 static void
-mcd_poll(void)
+mcd_poll(unsigned long dummy)
 {
   int st;
 
@@ -787,7 +773,7 @@ mcd_poll(void)
 #ifdef TEST3
     printk("MCD_S_IDLE\n");
 #endif
-    return;
+    goto out;
 
 
 
@@ -829,7 +815,7 @@ mcd_poll(void)
 	mcd_state = MCD_S_IDLE;
 	while (CURRENT_VALID)
 	  end_request(0);
-	return;
+	goto out;
       }
 
       outb(MCMD_SET_MODE, MCDPORT(0));
@@ -869,7 +855,7 @@ mcd_poll(void)
 	mcd_state = MCD_S_IDLE;
 	while (CURRENT_VALID)
 	  end_request(0);
-	return;
+	goto out;
       }
 
       if (CURRENT_VALID) {
@@ -1071,13 +1057,13 @@ mcd_poll(void)
       }
     } else {
       mcd_state = MCD_S_IDLE;
-      return;
+      goto out;
     }
     break;
 
   default:
     printk("mcd: invalid state %d\n", mcd_state);
-    return;
+    goto out;
   }
 
  ret:
@@ -1087,6 +1073,8 @@ mcd_poll(void)
   }
 
   SET_TIMER(mcd_poll, 1);
+out:
+  return;
 }
 
 
@@ -1110,12 +1098,16 @@ static int mcd_open(struct cdrom_device_info * cdi, int purpose)
 	if (mcdPresent == 0)
 		return -ENXIO;			/* no hardware */
 
-        if (!mcd_open_count && mcd_state == MCD_S_IDLE) {
+        MOD_INC_USE_COUNT;
+
+        if (mcd_open_count || mcd_state != MCD_S_IDLE)
+		goto bump_count;
+
         mcd_invalidate_buffers();
         do {
                 st = statusCmd();               /* check drive status */
                 if (st == -1)
-                        return -EIO;            /* drive doesn't respond */
+                        goto err_out;            /* drive doesn't respond */
                 if ((st & MST_READY) == 0) {    /* no disk? wait a sec... */
                         current->state = TASK_INTERRUPTIBLE;
                         schedule_timeout(HZ);
@@ -1123,11 +1115,15 @@ static int mcd_open(struct cdrom_device_info * cdi, int purpose)
         } while (((st & MST_READY) == 0) && count++ < MCD_RETRY_ATTEMPTS);
 
         if (updateToc() < 0)
-                       return -EIO;
-        }
+                       goto err_out;
+
+bump_count:
 	++mcd_open_count;
-        MOD_INC_USE_COUNT;
 	return 0;
+
+err_out:
+        MOD_DEC_USE_COUNT;
+	return -EIO;
 }
 
 
@@ -1161,6 +1157,7 @@ static void cleanup(int level)
       printk(KERN_WARNING "Can't unregister major mcd\n");
       return;
     }
+    blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
   default:
   }
 }
@@ -1221,7 +1218,7 @@ int __init mcd_init(void)
 	outb(MCMD_GET_VERSION,MCDPORT(0));
 	for(count=0;count<3;count++)
 		if(getValue(result+count)) {
-			printk("mitsumi get version failed at 0x%d\n",
+			printk("mitsumi get version failed at 0x%x\n",
 			       mcd_port);
                         cleanup(1);
                         return -EIO;
@@ -1361,7 +1358,7 @@ sendMcdCmd(int cmd, struct mcd_Play_msf *params)
  */
 
 static void
-mcdStatTimer(void)
+mcdStatTimer(unsigned long dummy)
 {
 	if (!(inb(MCDPORT(1)) & MFL_STATUS))
 	{
@@ -1651,6 +1648,7 @@ Toc[i].diskTime.min, Toc[i].diskTime.sec, Toc[i].diskTime.frame);
 void __exit mcd_exit(void)
 {
   cleanup(3);
+  del_timer_sync(&mcd_timer);
 }
 
 #ifdef MODULE

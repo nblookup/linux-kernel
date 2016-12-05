@@ -1,4 +1,4 @@
-/* $Id: pgalloc.h,v 1.4 2000/02/24 00:13:19 ralf Exp $
+/* $Id: pgalloc.h,v 1.3 2000/02/23 00:41:38 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -9,6 +9,8 @@
  */
 #ifndef _ASM_PGALLOC_H
 #define _ASM_PGALLOC_H
+
+#include <linux/config.h>
 
 /* TLB flushing:
  *
@@ -188,7 +190,7 @@ extern inline void set_pgdir(unsigned long address, pgd_t entry)
 {
 	struct task_struct * p;
 	pgd_t *pgd;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	int i;
 #endif	
 
@@ -199,7 +201,7 @@ extern inline void set_pgdir(unsigned long address, pgd_t entry)
 		*pgd_offset(p->mm,address) = entry;
 	}
 	read_unlock(&tasklist_lock);
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	for (pgd = (pgd_t *)pgd_quicklist; pgd; pgd = (pgd_t *)*(unsigned long *)pgd)
 		pgd[address >> PGDIR_SHIFT] = entry;
 #else

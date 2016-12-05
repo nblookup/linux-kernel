@@ -39,7 +39,13 @@
  * read/write	read or write in current IEEE 1284 protocol
  * select	wait for interrupt (in readfds)
  *
+ * Changes:
  * Added SETTIME/GETTIME ioctl, Fred Barnes 1999.
+ *
+ * Arnaldo Carvalho de Melo <acme@conectiva.com.br> 2000/08/25
+ * - On error, copy_from_user and copy_to_user do not return -EFAULT,
+ *   They return the positive number of bytes *not* copied due to address
+ *   space errors.
  */
 
 #include <linux/module.h>
@@ -52,6 +58,7 @@
 #include <linux/poll.h>
 #include <asm/uaccess.h>
 #include <linux/ppdev.h>
+#include <linux/smp_lock.h>
 
 #define PP_VERSION "ppdev: user-space parallel port driver"
 #define CHRDEV "ppdev"
@@ -178,7 +185,7 @@ static ssize_t pp_write (struct file * file, const char * buf, size_t count,
 
 		wrote = parport_write (pp->pdev->port, kbuffer, n);
 
-		if (wrote < 0) {
+		if (wrote <= 0) {
 			if (!bytes_written)
 				bytes_written = wrote;
 			break;
@@ -216,7 +223,7 @@ static void pp_irq (int irq, void * private, struct pt_regs * unused)
 
 static int register_device (int minor, struct pp_struct *pp)
 {
-	struct parport * port;
+	struct parport *port;
 	struct pardevice * pdev = NULL;
 	char *name;
 	int fl;
@@ -226,11 +233,8 @@ static int register_device (int minor, struct pp_struct *pp)
 		return -ENOMEM;
 
 	sprintf (name, CHRDEV "%x", minor);
-	port = parport_enumerate (); /* FIXME: use attach/detach */
 
-	while (port && port->number != minor)
-		port = port->next;
-
+	port = parport_find_number (minor);
 	if (!port) {
 		printk (KERN_WARNING "%s: no associated port!\n", name);
 		kfree (name);
@@ -238,8 +242,9 @@ static int register_device (int minor, struct pp_struct *pp)
 	}
 
 	fl = (pp->flags & PP_EXCL) ? PARPORT_FLAG_EXCL : 0;
-	pdev = parport_register_device (port, name, NULL, NULL, pp_irq, fl,
-					pp);
+	pdev = parport_register_device (port, name, NULL,
+					NULL, pp_irq, fl, pp);
+	parport_put_port (port);
 
 	if (!pdev) {
 		printk (KERN_WARNING "%s: failed to register device!\n", name);
@@ -370,19 +375,19 @@ static int pp_ioctl(struct inode *inode, struct file *file,
 
 	case PPRSTATUS:
 		reg = parport_read_status (port);
-		return copy_to_user ((unsigned char *) arg, &reg,
-				     sizeof (reg));
-
+		if (copy_to_user ((unsigned char *) arg, &reg, sizeof (reg)))
+			return -EFAULT;
+		return 0;
 	case PPRDATA:
 		reg = parport_read_data (port);
-		return copy_to_user ((unsigned char *) arg, &reg,
-				     sizeof (reg));
-
+		if (copy_to_user ((unsigned char *) arg, &reg, sizeof (reg)))
+			return -EFAULT;
+		return 0;
 	case PPRCONTROL:
 		reg = parport_read_control (port);
-		return copy_to_user ((unsigned char *) arg, &reg,
-				     sizeof (reg));
-
+		if (copy_to_user ((unsigned char *) arg, &reg, sizeof (reg)))
+			return -EFAULT;
+		return 0;
 	case PPYIELD:
 		parport_yield_blocking (pp->pdev);
 		return 0;
@@ -507,13 +512,9 @@ static int pp_open (struct inode * inode, struct file * file)
 	if (minor >= PARPORT_MAX)
 		return -ENXIO;
 
-	MOD_INC_USE_COUNT;
-
 	pp = kmalloc (sizeof (struct pp_struct), GFP_KERNEL);
-	if (!pp) {
-		MOD_DEC_USE_COUNT;
+	if (!pp)
 		return -ENOMEM;
-	}
 
 	pp->state.mode = IEEE1284_MODE_COMPAT;
 	pp->state.phase = init_phase (pp->state.mode);
@@ -537,6 +538,18 @@ static int pp_release (struct inode * inode, struct file * file)
 	unsigned int minor = MINOR (inode->i_rdev);
 	struct pp_struct *pp = file->private_data;
 
+	lock_kernel();
+	if (pp->pdev && pp->pdev->port->ieee1284.mode != IEEE1284_MODE_COMPAT) {
+		if (!(pp->flags & PP_CLAIMED)) {
+			parport_claim_or_block (pp->pdev);
+			pp->flags |= PP_CLAIMED;
+		}
+		parport_negotiate (pp->pdev->port, IEEE1284_MODE_COMPAT);
+		printk (KERN_DEBUG CHRDEV
+			"%x: negotiated back to compatibility mode because "
+			"user-space forgot\n", minor);
+	}
+
 	if (pp->flags & PP_CLAIMED) {
 		parport_release (pp->pdev);
 		printk (KERN_DEBUG CHRDEV "%x: released pardevice because "
@@ -551,26 +564,28 @@ static int pp_release (struct inode * inode, struct file * file)
 		printk (KERN_DEBUG CHRDEV "%x: unregistered pardevice\n",
 			minor);
 	}
+	unlock_kernel();
 
 	kfree (pp);
 
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
+/* No kernel lock held - fine */
 static unsigned int pp_poll (struct file * file, poll_table * wait)
 {
 	struct pp_struct *pp = file->private_data;
 	unsigned int mask = 0;
 
+	poll_wait (file, &pp->irq_wait, wait);
 	if (atomic_read (&pp->irqc))
 		mask |= POLLIN | POLLRDNORM;
 
-	poll_wait (file, &pp->irq_wait, wait);
 	return mask;
 }
 
 static struct file_operations pp_fops = {
+	owner:		THIS_MODULE,
 	llseek:		pp_lseek,
 	read:		pp_read,
 	write:		pp_write,
@@ -580,7 +595,7 @@ static struct file_operations pp_fops = {
 	release:	pp_release,
 };
 
-static devfs_handle_t devfs_handle = NULL;
+static devfs_handle_t devfs_handle;
 
 static int __init ppdev_init (void)
 {
@@ -589,10 +604,10 @@ static int __init ppdev_init (void)
 			PP_MAJOR);
 		return -EIO;
 	}
-	devfs_handle = devfs_mk_dir (NULL, "parports", 0, NULL);
+	devfs_handle = devfs_mk_dir (NULL, "parports", NULL);
 	devfs_register_series (devfs_handle, "%u", PARPORT_MAX,
 			       DEVFS_FL_DEFAULT, PP_MAJOR, 0,
-			       S_IFCHR | S_IRUGO | S_IWUGO, 0, 0,
+			       S_IFCHR | S_IRUGO | S_IWUGO,
 			       &pp_fops, NULL);
 
 	printk (KERN_INFO PP_VERSION "\n");

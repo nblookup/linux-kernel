@@ -1,4 +1,4 @@
-/* $Id: oplib.h,v 1.12 1999/11/19 05:53:12 davem Exp $
+/* $Id: oplib.h,v 1.13 2000/05/09 17:40:15 davem Exp $
  * oplib.h:  Describes the interface and available routines in the
  *           Linux Prom library.
  *
@@ -9,6 +9,7 @@
 #ifndef __SPARC64_OPLIB_H
 #define __SPARC64_OPLIB_H
 
+#include <linux/config.h>
 #include <asm/openprom.h>
 
 /* Enumeration to describe the prom major version we have detected. */
@@ -175,7 +176,7 @@ enum prom_output_device {
 extern enum prom_output_device prom_query_output_device(void);
 
 /* Multiprocessor operations... */
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 /* Start the CPU with the given device tree node, context table, and context
  * at the passed program counter.
  */

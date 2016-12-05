@@ -21,6 +21,18 @@
  ******************************************************************************/
 
 
+/**** IMPORTANT INFORMATION ***************************************************
+ *
+ * There are currently three types of spinlocks:
+ *
+ * 1 - Per card interrupt spinlock (to protect structures and such)
+ * 2 - Per SCQ scq spinlock
+ * 3 - Per card resource spinlock (to access registers, etc.)
+ *
+ * These must NEVER be grabbed in reverse order.
+ *
+ ******************************************************************************/
+
 /* Header files ***************************************************************/
 
 #include <linux/module.h>
@@ -37,8 +49,10 @@
 #include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
+#include <linux/bitops.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
+#include <asm/atomic.h>
 #include "nicstar.h"
 #include "nicstarmac.h"
 #ifdef CONFIG_ATM_NICSTAR_USE_SUNI
@@ -113,6 +127,85 @@
 #define ATM_SKB(s) (&(s)->atm)
 #endif
 
+   /* Spinlock debugging stuff */
+#ifdef NS_DEBUG_SPINLOCKS /* See nicstar.h */
+#define ns_grab_int_lock(card,flags) \
+ do { \
+    unsigned long nsdsf, nsdsf2; \
+    local_irq_save(flags); \
+    save_flags(nsdsf); cli();\
+    if (nsdsf & (1<<9)) printk ("nicstar.c: ints %sabled -> enabled.\n", \
+                                (flags)&(1<<9)?"en":"dis"); \
+    if (spin_is_locked(&(card)->int_lock) && \
+        (card)->cpu_int == smp_processor_id()) { \
+       printk("nicstar.c: line %d (cpu %d) int_lock already locked at line %d (cpu %d)\n", \
+              __LINE__, smp_processor_id(), (card)->has_int_lock, \
+              (card)->cpu_int); \
+       printk("nicstar.c: ints were %sabled.\n", ((flags)&(1<<9)?"en":"dis")); \
+    } \
+    if (spin_is_locked(&(card)->res_lock) && \
+        (card)->cpu_res == smp_processor_id()) { \
+       printk("nicstar.c: line %d (cpu %d) res_lock locked at line %d (cpu %d)(trying int)\n", \
+              __LINE__, smp_processor_id(), (card)->has_res_lock, \
+              (card)->cpu_res); \
+       printk("nicstar.c: ints were %sabled.\n", ((flags)&(1<<9)?"en":"dis")); \
+    } \
+    spin_lock_irq(&(card)->int_lock); \
+    (card)->has_int_lock = __LINE__; \
+    (card)->cpu_int = smp_processor_id(); \
+    restore_flags(nsdsf); } while (0)
+#define ns_grab_res_lock(card,flags) \
+ do { \
+    unsigned long nsdsf, nsdsf2; \
+    local_irq_save(flags); \
+    save_flags(nsdsf); cli();\
+    if (nsdsf & (1<<9)) printk ("nicstar.c: ints %sabled -> enabled.\n", \
+                                (flags)&(1<<9)?"en":"dis"); \
+    if (spin_is_locked(&(card)->res_lock) && \
+        (card)->cpu_res == smp_processor_id()) { \
+       printk("nicstar.c: line %d (cpu %d) res_lock already locked at line %d (cpu %d)\n", \
+              __LINE__, smp_processor_id(), (card)->has_res_lock, \
+              (card)->cpu_res); \
+       printk("nicstar.c: ints were %sabled.\n", ((flags)&(1<<9)?"en":"dis")); \
+    } \
+    spin_lock_irq(&(card)->res_lock); \
+    (card)->has_res_lock = __LINE__; \
+    (card)->cpu_res = smp_processor_id(); \
+    restore_flags(nsdsf); } while (0)
+#define ns_grab_scq_lock(card,scq,flags) \
+ do { \
+    unsigned long nsdsf, nsdsf2; \
+    local_irq_save(flags); \
+    save_flags(nsdsf); cli();\
+    if (nsdsf & (1<<9)) printk ("nicstar.c: ints %sabled -> enabled.\n", \
+                                (flags)&(1<<9)?"en":"dis"); \
+    if (spin_is_locked(&(scq)->lock) && \
+        (scq)->cpu_lock == smp_processor_id()) { \
+       printk("nicstar.c: line %d (cpu %d) this scq_lock already locked at line %d (cpu %d)\n", \
+              __LINE__, smp_processor_id(), (scq)->has_lock, \
+              (scq)->cpu_lock); \
+       printk("nicstar.c: ints were %sabled.\n", ((flags)&(1<<9)?"en":"dis")); \
+    } \
+    if (spin_is_locked(&(card)->res_lock) && \
+        (card)->cpu_res == smp_processor_id()) { \
+       printk("nicstar.c: line %d (cpu %d) res_lock locked at line %d (cpu %d)(trying scq)\n", \
+              __LINE__, smp_processor_id(), (card)->has_res_lock, \
+              (card)->cpu_res); \
+       printk("nicstar.c: ints were %sabled.\n", ((flags)&(1<<9)?"en":"dis")); \
+    } \
+    spin_lock_irq(&(scq)->lock); \
+    (scq)->has_lock = __LINE__; \
+    (scq)->cpu_lock = smp_processor_id(); \
+    restore_flags(nsdsf); } while (0)
+#else /* !NS_DEBUG_SPINLOCKS */
+#define ns_grab_int_lock(card,flags) \
+        spin_lock_irqsave(&(card)->int_lock,(flags))
+#define ns_grab_res_lock(card,flags) \
+        spin_lock_irqsave(&(card)->res_lock,(flags))
+#define ns_grab_scq_lock(card,scq,flags) \
+        spin_lock_irqsave(&(scq)->lock,flags)
+#endif /* NS_DEBUG_SPINLOCKS */
+
 
 /* Version definition *********************************************************/
 /*
@@ -166,7 +259,7 @@ static unsigned char ns_phy_get(struct atm_dev *dev, unsigned long addr);
 /* Global variables ***********************************************************/
 
 static struct ns_dev *cards[NS_MAX_CARDS];
-static unsigned num_cards = 0;
+static unsigned num_cards;
 static struct atmdev_ops atm_ops =
 {
    open:	ns_open,
@@ -175,27 +268,12 @@ static struct atmdev_ops atm_ops =
    send:	ns_send,
    phy_put:	ns_phy_put,
    phy_get:	ns_phy_get,
-   proc_read:	ns_proc_read
+   proc_read:	ns_proc_read,
+   owner:	THIS_MODULE,
 };
 static struct timer_list ns_timer;
-static char *mac[NS_MAX_CARDS] = { NULL
-#if NS_MAX_CARDS > 1
-                                 , NULL
-#endif /* NS_MAX_CARDS > 1 */
-#if NS_MAX_CARDS > 2
-                                 , NULL
-#endif /* NS_MAX_CARDS > 2 */
-#if NS_MAX_CARDS > 3
-                                 , NULL
-#endif /* NS_MAX_CARDS > 3 */
-#if NS_MAX_CARDS > 4
-                                 , NULL
-#endif /* NS_MAX_CARDS > 4 */
-                                        };
-
-#ifdef MODULE
+static char *mac[NS_MAX_CARDS];
 MODULE_PARM(mac, "1-" __MODULE_STRING(NS_MAX_CARDS) "s");
-#endif /* MODULE */
 
 
 /* Functions*******************************************************************/
@@ -284,7 +362,7 @@ void cleanup_module(void)
       card = cards[i];
 
 #ifdef CONFIG_ATM_NICSTAR_USE_IDT77105
-      if (card->max_pcr == IDT_25_PCR) {
+      if (card->max_pcr == ATM_25_PCR) {
         idt77105_stop(card->atmdev);
       }
 #endif /* CONFIG_ATM_NICSTAR_USE_IDT77105 */
@@ -311,7 +389,7 @@ void cleanup_module(void)
       PRINTK("nicstar%d: freeing %d huge buffers.\n", i, card->hbpool.count);
       while ((hb = skb_dequeue(&card->hbpool.queue)) != NULL)
       {
-         kfree_skb(hb);
+         dev_kfree_skb_any(hb);
 	 j++;
       }
       PRINTK("nicstar%d: %d huge buffers freed.\n", i, j);
@@ -319,14 +397,14 @@ void cleanup_module(void)
       PRINTK("nicstar%d: freeing %d iovec buffers.\n", i, card->iovpool.count);
       while ((iovb = skb_dequeue(&card->iovpool.queue)) != NULL)
       {
-         kfree_skb(iovb);
+         dev_kfree_skb_any(iovb);
          j++;
       }
       PRINTK("nicstar%d: %d iovec buffers freed.\n", i, j);
       while ((lb = skb_dequeue(&card->lbpool.queue)) != NULL)
-         kfree_skb(lb);
+         dev_kfree_skb_any(lb);
       while ((sb = skb_dequeue(&card->sbpool.queue)) != NULL)
-         kfree_skb(sb);
+         dev_kfree_skb_any(sb);
       free_scq(card->scq0, NULL);
       for (j = 0; j < NS_FRSCD_NUM; j++)
       {
@@ -404,12 +482,12 @@ static u32 ns_read_sram(ns_dev *card, u32 sram_address)
    sram_address <<= 2;
    sram_address &= 0x0007FFFC;	/* address must be dword aligned */
    sram_address |= 0x50000000;	/* SRAM read command */
-   save_flags(flags); cli();
+   ns_grab_res_lock(card, flags);
    while (CMD_BUSY(card));
    writel(sram_address, card->membase + CMD);
    while (CMD_BUSY(card));
    data = readl(card->membase + DR0);
-   restore_flags(flags);
+   spin_unlock_irqrestore(&card->res_lock, flags);
    return data;
 }
 
@@ -422,7 +500,7 @@ static void ns_write_sram(ns_dev *card, u32 sram_address, u32 *value, int count)
    count--;	/* count range now is 0..3 instead of 1..4 */
    c = count;
    c <<= 2;	/* to use increments of 4 */
-   save_flags(flags); cli();
+   ns_grab_res_lock(card, flags);
    while (CMD_BUSY(card));
    for (i = 0; i <= c; i += 4)
       writel(*(value++), card->membase + i);
@@ -432,14 +510,14 @@ static void ns_write_sram(ns_dev *card, u32 sram_address, u32 *value, int count)
    sram_address &= 0x0007FFFC;
    sram_address |= (0x40000000 | count);
    writel(sram_address, card->membase + CMD);
-   restore_flags(flags);
+   spin_unlock_irqrestore(&card->res_lock, flags);
 }
 
 
 static int ns_init_card(int i, struct pci_dev *pcidev)
 {
    int j;
-   struct ns_dev *card;
+   struct ns_dev *card = NULL;
    unsigned short pci_command;
    unsigned char pci_latency;
    unsigned error;
@@ -450,6 +528,14 @@ static int ns_init_card(int i, struct pci_dev *pcidev)
 
    error = 0;
 
+   if (pci_enable_device(pcidev))
+   {
+      printk("nicstar%d: can't enable PCI device\n", i);
+      error = 2;
+      ns_init_card_error(card, error);
+      return error;
+   }
+
    if ((card = kmalloc(sizeof(ns_dev), GFP_KERNEL)) == NULL)
    {
       printk("nicstar%d: can't allocate memory for device structure.\n", i);
@@ -458,11 +544,13 @@ static int ns_init_card(int i, struct pci_dev *pcidev)
       return error;
    }
    cards[i] = card;
+   spin_lock_init(&card->int_lock);
+   spin_lock_init(&card->res_lock);
       
    card->index = i;
    card->atmdev = NULL;
    card->pcidev = pcidev;
-   card->membase = pcidev->resource[1].start;
+   card->membase = pci_resource_start(pcidev, 1);
 #ifdef __powerpc__
    /* Compensate for different memory map between host CPU and PCI bus.
       Shouldn't we use a macro for this? */
@@ -547,7 +635,7 @@ static int ns_init_card(int i, struct pci_dev *pcidev)
    switch(data) {
       case 0x00000009:
          printk("nicstar%d: PHY seems to be 25 Mbps.\n", i);
-         card->max_pcr = IDT_25_PCR;
+         card->max_pcr = ATM_25_PCR;
          while(CMD_BUSY(card));
          writel(0x00000008, card->membase + DR0);
          writel(NS_CMD_WRITE_UTILITY | 0x00000200, card->membase + CMD);
@@ -843,9 +931,6 @@ static int ns_init_card(int i, struct pci_dev *pcidev)
       card->iovpool.count++;
    }
 
-
-   card->in_handler = 0;
-   card->in_poll = 0;
    card->intcnt = 0;
 
    /* Configure NICStAR */
@@ -857,7 +942,7 @@ static int ns_init_card(int i, struct pci_dev *pcidev)
    card->efbie = 1;
 
    /* Register device */
-   card->atmdev = atm_dev_register("nicstar", &atm_ops, -1, 0UL);
+   card->atmdev = atm_dev_register("nicstar", &atm_ops, -1, NULL);
    if (card->atmdev == NULL)
    {
       printk("nicstar%d: can't register device.\n", i);
@@ -883,15 +968,14 @@ static int ns_init_card(int i, struct pci_dev *pcidev)
 #ifdef CONFIG_ATM_NICSTAR_USE_SUNI
    if (card->max_pcr == ATM_OC3_PCR) {
       suni_init(card->atmdev);
-#ifdef MODULE
+
       MOD_INC_USE_COUNT;
       /* Can't remove the nicstar driver or the suni driver would oops */
-#endif /* MODULE */
    }
 #endif /* CONFIG_ATM_NICSTAR_USE_SUNI */
 
 #ifdef CONFIG_ATM_NICSTAR_USE_IDT77105
-   if (card->max_pcr == IDT_25_PCR) {
+   if (card->max_pcr == ATM_25_PCR) {
       idt77105_init(card->atmdev);
       /* Note that for the IDT77105 PHY we don't need the awful
        * module count hack that the SUNI needs because we can
@@ -936,26 +1020,26 @@ static void ns_init_card_error(ns_dev *card, int error)
    {
       struct sk_buff *iovb;
       while ((iovb = skb_dequeue(&card->iovpool.queue)) != NULL)
-         kfree_skb(iovb);
+         dev_kfree_skb_any(iovb);
    }
    if (error >= 15)
    {
       struct sk_buff *sb;
       while ((sb = skb_dequeue(&card->sbpool.queue)) != NULL)
-         kfree_skb(sb);
+         dev_kfree_skb_any(sb);
       free_scq(card->scq0, NULL);
    }
    if (error >= 14)
    {
       struct sk_buff *lb;
       while ((lb = skb_dequeue(&card->lbpool.queue)) != NULL)
-         kfree_skb(lb);
+         dev_kfree_skb_any(lb);
    }
    if (error >= 13)
    {
       struct sk_buff *hb;
       while ((hb = skb_dequeue(&card->hbpool.queue)) != NULL)
-         kfree_skb(hb);
+         dev_kfree_skb_any(hb);
    }
    if (error >= 12)
    {
@@ -1016,6 +1100,7 @@ static scq_info *get_scq(int size, u32 scd)
    scq->tbd_count = 0;
    init_waitqueue_head(&scq->scqfull_waitq);
    scq->full = 0;
+   spin_lock_init(&scq->lock);
 
    for (i = 0; i < scq->num_entries; i++)
       scq->skb[i] = NULL;
@@ -1039,7 +1124,7 @@ static void free_scq(scq_info *scq, struct atm_vcc *vcc)
             if (vcc->pop != NULL)
 	       vcc->pop(vcc, scq->skb[i]);
 	    else
-               dev_kfree_skb(scq->skb[i]);
+               dev_kfree_skb_any(scq->skb[i]);
          }
       }
    else /* vcc must be != NULL */
@@ -1048,7 +1133,7 @@ static void free_scq(scq_info *scq, struct atm_vcc *vcc)
       {
          printk("nicstar: free_scq() called with vcc == NULL for fixed rate scq.");
          for (i = 0; i < scq->num_entries; i++)
-            dev_kfree_skb(scq->skb[i]);
+            dev_kfree_skb_any(scq->skb[i]);
       }
       else
          for (i = 0; i < scq->num_entries; i++)
@@ -1058,7 +1143,7 @@ static void free_scq(scq_info *scq, struct atm_vcc *vcc)
                if (vcc->pop != NULL)
                   vcc->pop(vcc, scq->skb[i]);
                else
-                  dev_kfree_skb(scq->skb[i]);
+                  dev_kfree_skb_any(scq->skb[i]);
             }
          }
    }
@@ -1130,9 +1215,9 @@ static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
          if (card->sbfqc >= card->sbnr.max)
          {
             skb_unlink((struct sk_buff *) handle1);
-            kfree_skb((struct sk_buff *) handle1);
+            dev_kfree_skb_any((struct sk_buff *) handle1);
             skb_unlink((struct sk_buff *) handle2);
-            kfree_skb((struct sk_buff *) handle2);
+            dev_kfree_skb_any((struct sk_buff *) handle2);
             return;
          }
 	 else
@@ -1143,16 +1228,16 @@ static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
          if (card->lbfqc >= card->lbnr.max)
          {
             skb_unlink((struct sk_buff *) handle1);
-            kfree_skb((struct sk_buff *) handle1);
+            dev_kfree_skb_any((struct sk_buff *) handle1);
             skb_unlink((struct sk_buff *) handle2);
-            kfree_skb((struct sk_buff *) handle2);
+            dev_kfree_skb_any((struct sk_buff *) handle2);
             return;
          }
          else
             card->lbfqc += 2;
       }
 
-      save_flags(flags); cli();
+      ns_grab_res_lock(card, flags);
 
       while (CMD_BUSY(card));
       writel(addr2, card->membase + DR3);
@@ -1161,7 +1246,7 @@ static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
       writel(handle1, card->membase + DR0);
       writel(NS_CMD_WRITE_FREEBUFQ | (u32) type, card->membase + CMD);
  
-      restore_flags(flags);
+      spin_unlock_irqrestore(&card->res_lock, flags);
 
       XPRINTK("nicstar%d: Pushing %s buffers at 0x%x and 0x%x.\n", card->index,
               (type == BUF_SM ? "small" : "large"), addr1, addr2);
@@ -1184,6 +1269,7 @@ static void ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs)
    u32 stat_r;
    ns_dev *card;
    struct atm_dev *dev;
+   unsigned long flags;
 
    card = (ns_dev *) dev_id;
    dev = card->atmdev;
@@ -1191,19 +1277,7 @@ static void ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs)
 
    PRINTK("nicstar%d: NICStAR generated an interrupt\n", card->index);
 
-   if (card->in_handler)
-   {
-      printk("nicstar%d: Re-entering ns_irq_handler()???\n", card->index);
-      return;
-   }
-   card->in_handler = 1;
-   if (card->in_poll)
-   {
-      card->in_handler = 0;
-      printk("nicstar%d: Called irq handler while in ns_poll()!?\n",
-             card->index);
-      return;
-   }
+   ns_grab_int_lock(card, flags);
    
    stat_r = readl(card->membase + STAT);
 
@@ -1368,7 +1442,7 @@ static void ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs)
       process_rsq(card);
    }
    
-   card->in_handler = 0;
+   spin_unlock_irqrestore(&card->int_lock, flags);
    PRINTK("nicstar%d: end of interrupt service\n", card->index);
 }
 
@@ -1420,16 +1494,16 @@ static int ns_open(struct atm_vcc *vcc, short vpi, int vci)
       return -EINVAL;
    }
 
-   vcc->flags |= ATM_VF_ADDR;
+   set_bit(ATM_VF_ADDR,&vcc->flags);
 
    /* NOTE: You are not allowed to modify an open connection's QOS. To change
       that, remove the ATM_VF_PARTIAL flag checking. There may be other changes
       needed to do that. */
-   if (!(vcc->flags & ATM_VF_PARTIAL))
+   if (!test_bit(ATM_VF_PARTIAL,&vcc->flags))
    {
       scq_info *scq;
       
-      vcc->flags |= ATM_VF_PARTIAL;
+      set_bit(ATM_VF_PARTIAL,&vcc->flags);
       if (vcc->qos.txtp.traffic_class == ATM_CBR)
       {
          /* Check requested cell rate and availability of SCD */
@@ -1438,7 +1512,8 @@ static int ns_open(struct atm_vcc *vcc, short vpi, int vci)
          {
             PRINTK("nicstar%d: trying to open a CBR vc with cell rate = 0 \n",
 	           card->index);
-            vcc->flags &= ~(ATM_VF_ADDR | ATM_VF_PARTIAL);
+	    clear_bit(ATM_VF_PARTIAL,&vcc->flags);
+	    clear_bit(ATM_VF_ADDR,&vcc->flags);
             return -EINVAL;
          }
 
@@ -1461,7 +1536,8 @@ static int ns_open(struct atm_vcc *vcc, short vpi, int vci)
             if ((n = (card->tst_free_entries - NS_TST_RESERVED)) <= 0)
 	    {
                PRINTK("nicstar%d: no CBR bandwidth free.\n", card->index);
-	       vcc->flags &= ~(ATM_VF_ADDR | ATM_VF_PARTIAL);
+	       clear_bit(ATM_VF_PARTIAL,&vcc->flags);
+	       clear_bit(ATM_VF_ADDR,&vcc->flags);
                return -EINVAL;
             }
          }
@@ -1469,14 +1545,16 @@ static int ns_open(struct atm_vcc *vcc, short vpi, int vci)
          if (n == 0)
          {
             printk("nicstar%d: selected bandwidth < granularity.\n", card->index);
-            vcc->flags &= ~(ATM_VF_ADDR | ATM_VF_PARTIAL);
+	    clear_bit(ATM_VF_PARTIAL,&vcc->flags);
+	    clear_bit(ATM_VF_ADDR,&vcc->flags);
             return -EINVAL;
          }
 
          if (n > (card->tst_free_entries - NS_TST_RESERVED))
          {
             PRINTK("nicstar%d: not enough free CBR bandwidth.\n", card->index);
-	    vcc->flags &= ~(ATM_VF_ADDR | ATM_VF_PARTIAL);
+	    clear_bit(ATM_VF_PARTIAL,&vcc->flags);
+	    clear_bit(ATM_VF_ADDR,&vcc->flags);
             return -EINVAL;
          }
          else
@@ -1495,7 +1573,8 @@ static int ns_open(struct atm_vcc *vcc, short vpi, int vci)
          {
             PRINTK("nicstar%d: no SCD available for CBR channel.\n", card->index);
             card->tst_free_entries += n;
-            vcc->flags &= ~(ATM_VF_ADDR | ATM_VF_PARTIAL);
+	    clear_bit(ATM_VF_PARTIAL,&vcc->flags);
+	    clear_bit(ATM_VF_ADDR,&vcc->flags);
 	    return -EBUSY;
          }
 
@@ -1507,7 +1586,8 @@ static int ns_open(struct atm_vcc *vcc, short vpi, int vci)
             PRINTK("nicstar%d: can't get fixed rate SCQ.\n", card->index);
             card->scd2vc[frscdi] = NULL;
             card->tst_free_entries += n;
-            vcc->flags &= ~(ATM_VF_ADDR | ATM_VF_PARTIAL);
+	    clear_bit(ATM_VF_PARTIAL,&vcc->flags);
+	    clear_bit(ATM_VF_ADDR,&vcc->flags);
             return -ENOMEM;
          }
 	 vc->scq = scq;
@@ -1553,8 +1633,7 @@ static int ns_open(struct atm_vcc *vcc, short vpi, int vci)
       
    }
    
-   vcc->flags |= ATM_VF_READY;
-   MOD_INC_USE_COUNT;
+   set_bit(ATM_VF_READY,&vcc->flags);
    return 0;
 }
 
@@ -1572,7 +1651,7 @@ static void ns_close(struct atm_vcc *vcc)
    PRINTK("nicstar%d: closing vpi.vci %d.%d \n", card->index,
           (int) vcc->vpi, vcc->vci);
 
-   vcc->flags &= ~(ATM_VF_READY);
+   clear_bit(ATM_VF_READY,&vcc->flags);
    
    if (vcc->qos.rxtp.traffic_class != ATM_NONE)
    {
@@ -1580,10 +1659,10 @@ static void ns_close(struct atm_vcc *vcc)
       unsigned long flags;
       
       addr = NS_RCT + (vcc->vpi << card->vcibits | vcc->vci) * NS_RCT_ENTRY_SIZE;
-      save_flags(flags); cli();
+      ns_grab_res_lock(card, flags);
       while(CMD_BUSY(card));
       writel(NS_CMD_CLOSE_CONNECTION | addr << 2, card->membase + CMD);
-      restore_flags(flags);
+      spin_unlock_irqrestore(&card->res_lock, flags);
       
       vc->rx = 0;
       if (vc->rx_iov != NULL)
@@ -1602,9 +1681,9 @@ static void ns_close(struct atm_vcc *vcc)
 	                       ATM_SKB(iovb)->iovcnt);
          ATM_SKB(iovb)->iovcnt = 0;
          ATM_SKB(iovb)->vcc = NULL;
-         save_flags(flags); cli();
+         ns_grab_int_lock(card, flags);
          recycle_iov_buf(card, iovb);
-         restore_flags(flags);
+         spin_unlock_irqrestore(&card->int_lock, flags);
          vc->rx_iov = NULL;
       }
    }
@@ -1624,7 +1703,7 @@ static void ns_close(struct atm_vcc *vcc)
 
       for (;;)
       {
-         save_flags(flags); cli();
+         ns_grab_scq_lock(card, scq, flags);
          scqep = scq->next;
          if (scqep == scq->base)
             scqep = scq->last;
@@ -1632,7 +1711,7 @@ static void ns_close(struct atm_vcc *vcc)
             scqep--;
          if (scqep == scq->tail)
          {
-            restore_flags(flags);
+            spin_unlock_irqrestore(&scq->lock, flags);
             break;
          }
          /* If the last entry is not a TSR, place one in the SCQ in order to
@@ -1660,8 +1739,8 @@ static void ns_close(struct atm_vcc *vcc)
             data = (u32) virt_to_bus(scq->next);
             ns_write_sram(card, scq->scd, &data, 1);
          }
+         spin_unlock_irqrestore(&scq->lock, flags);
          schedule();
-         restore_flags(flags);
       }
 
       /* Free all TST entries */
@@ -1681,8 +1760,8 @@ static void ns_close(struct atm_vcc *vcc)
    }
 
    vcc->dev_data = NULL;
-   vcc->flags &= ~(ATM_VF_PARTIAL | ATM_VF_ADDR);
-   MOD_DEC_USE_COUNT;
+   clear_bit(ATM_VF_PARTIAL,&vcc->flags);
+   clear_bit(ATM_VF_ADDR,&vcc->flags);
 
 #ifdef RX_DEBUG
    {
@@ -1778,32 +1857,32 @@ static int ns_send(struct atm_vcc *vcc, struct sk_buff *skb)
    if ((vc = (vc_map *) vcc->dev_data) == NULL)
    {
       printk("nicstar%d: vcc->dev_data == NULL on ns_send().\n", card->index);
-      vcc->stats->tx_err++;
-      dev_kfree_skb(skb);
+      atomic_inc(&vcc->stats->tx_err);
+      dev_kfree_skb_any(skb);
       return -EINVAL;
    }
    
    if (!vc->tx)
    {
       printk("nicstar%d: Trying to transmit on a non-tx VC.\n", card->index);
-      vcc->stats->tx_err++;
-      dev_kfree_skb(skb);
+      atomic_inc(&vcc->stats->tx_err);
+      dev_kfree_skb_any(skb);
       return -EINVAL;
    }
    
    if (vcc->qos.aal != ATM_AAL5 && vcc->qos.aal != ATM_AAL0)
    {
       printk("nicstar%d: Only AAL0 and AAL5 are supported.\n", card->index);
-      vcc->stats->tx_err++;
-      dev_kfree_skb(skb);
+      atomic_inc(&vcc->stats->tx_err);
+      dev_kfree_skb_any(skb);
       return -EINVAL;
    }
    
    if (ATM_SKB(skb)->iovcnt != 0)
    {
       printk("nicstar%d: No scatter-gather yet.\n", card->index);
-      vcc->stats->tx_err++;
-      dev_kfree_skb(skb);
+      atomic_inc(&vcc->stats->tx_err);
+      dev_kfree_skb_any(skb);
       return -EINVAL;
    }
    
@@ -1847,11 +1926,11 @@ static int ns_send(struct atm_vcc *vcc, struct sk_buff *skb)
 
    if (push_scqe(card, vc, scq, &scqe, skb) != 0)
    {
-      vcc->stats->tx_err++;
-      dev_kfree_skb(skb);
+      atomic_inc(&vcc->stats->tx_err);
+      dev_kfree_skb_any(skb);
       return -EIO;
    }
-   vcc->stats->tx++;
+   atomic_inc(&vcc->stats->tx);
 
    return 0;
 }
@@ -1868,19 +1947,22 @@ static int push_scqe(ns_dev *card, vc_map *vc, scq_info *scq, ns_scqe *tbd,
    u32 data;
    int index;
    
-   if (scq->tail == scq->next)
+   ns_grab_scq_lock(card, scq, flags);
+   while (scq->tail == scq->next)
    {
       if (in_interrupt()) {
+         spin_unlock_irqrestore(&scq->lock, flags);
          printk("nicstar%d: Error pushing TBD.\n", card->index);
          return 1;
       }
 
-      save_flags(flags); cli();
       scq->full = 1;
+      spin_unlock_irqrestore(&scq->lock, flags);
       interruptible_sleep_on_timeout(&scq->scqfull_waitq, SCQFULL_TIMEOUT);
-      restore_flags(flags);
+      ns_grab_scq_lock(card, scq, flags);
 
       if (scq->full) {
+         spin_unlock_irqrestore(&scq->lock, flags);
          printk("nicstar%d: Timeout pushing TBD.\n", card->index);
          return 1;
       }
@@ -1910,19 +1992,23 @@ static int push_scqe(ns_dev *card, vc_map *vc, scq_info *scq, ns_scqe *tbd,
 
    if (vc->tbd_count >= MAX_TBD_PER_VC || scq->tbd_count >= MAX_TBD_PER_SCQ)
    {
-      if (scq->tail == scq->next)
+      int has_run = 0;
+
+      while (scq->tail == scq->next)
       {
          if (in_interrupt()) {
             data = (u32) virt_to_bus(scq->next);
             ns_write_sram(card, scq->scd, &data, 1);
+            spin_unlock_irqrestore(&scq->lock, flags);
             printk("nicstar%d: Error pushing TSR.\n", card->index);
             return 0;
          }
 
-         save_flags(flags); cli();
          scq->full = 1;
+         if (has_run++) break;
+         spin_unlock_irqrestore(&scq->lock, flags);
          interruptible_sleep_on_timeout(&scq->scqfull_waitq, SCQFULL_TIMEOUT);
-         restore_flags(flags);
+         ns_grab_scq_lock(card, scq, flags);
       }
 
       if (!scq->full)
@@ -1954,9 +2040,10 @@ static int push_scqe(ns_dev *card, vc_map *vc, scq_info *scq, ns_scqe *tbd,
       else
          PRINTK("nicstar%d: Timeout pushing TSR.\n", card->index);
    }
-   
    data = (u32) virt_to_bus(scq->next);
    ns_write_sram(card, scq->scd, &data, 1);
+   
+   spin_unlock_irqrestore(&scq->lock, flags);
    
    return 0;
 }
@@ -2048,6 +2135,7 @@ static void drain_scq(ns_dev *card, scq_info *scq, int pos)
    struct atm_vcc *vcc;
    struct sk_buff *skb;
    int i;
+   unsigned long flags;
    
    XPRINTK("nicstar%d: drain_scq() called, scq at 0x%x, pos %d.\n",
            card->index, (u32) scq, pos);
@@ -2057,6 +2145,7 @@ static void drain_scq(ns_dev *card, scq_info *scq, int pos)
       return;
    }
 
+   ns_grab_scq_lock(card, scq, flags);
    i = (int) (scq->tail - scq->base);
    if (++i == scq->num_entries)
       i = 0;
@@ -2068,16 +2157,18 @@ static void drain_scq(ns_dev *card, scq_info *scq, int pos)
       if (skb != NULL)
       {
          vcc = ATM_SKB(skb)->vcc;
-	 if (vcc->pop != NULL)
+	 if (vcc->pop != NULL) {
 	    vcc->pop(vcc, skb);
-	 else
-	    dev_kfree_skb(skb);
+	 } else {
+	    dev_kfree_skb_irq(skb);
+         }
 	 scq->skb[i] = NULL;
       }
       if (++i == scq->num_entries)
          i = 0;
    }
    scq->tail = scq->base + pos;
+   spin_unlock_irqrestore(&scq->lock, flags);
 }
 
 
@@ -2155,15 +2246,15 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
          {
             printk("nicstar%d: Can't allocate buffers for aal0.\n",
                    card->index);
-            vcc->stats->rx_drop += i;
+            atomic_add(i,&vcc->stats->rx_drop);
             break;
          }
          if (!atm_charge(vcc, sb->truesize))
          {
             RXPRINTK("nicstar%d: atm_charge() dropped aal0 packets.\n",
                      card->index);
-            vcc->stats->rx_drop += i - 1;	/* already increased by 1 */
-            kfree_skb(sb);
+            atomic_add(i-1,&vcc->stats->rx_drop); /* already increased by 1 */
+            dev_kfree_skb_any(sb);
             break;
          }
          /* Rebuild the header */
@@ -2177,7 +2268,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
          ATM_SKB(sb)->vcc = vcc;
          sb->stamp = xtime;
          vcc->push(vcc, sb);
-         vcc->stats->rx++;
+         atomic_inc(&vcc->stats->rx);
          cell += ATM_CELL_PAYLOAD;
       }
 
@@ -2196,7 +2287,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
 	 if (iovb == NULL)
 	 {
 	    printk("nicstar%d: Out of iovec buffers.\n", card->index);
-            vcc->stats->rx_drop++;
+            atomic_inc(&vcc->stats->rx_drop);
             recycle_rx_buf(card, skb);
             return;
 	 }
@@ -2223,7 +2314,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
    else if (ATM_SKB(iovb)->iovcnt >= NS_MAX_IOVECS)
    {
       printk("nicstar%d: received too big AAL5 SDU.\n", card->index);
-      vcc->stats->rx_err++;
+      atomic_inc(&vcc->stats->rx_err);
       recycle_iovec_rx_bufs(card, (struct iovec *) iovb->data, NS_MAX_IOVECS);
       ATM_SKB(iovb)->iovcnt = 0;
       iovb->len = 0;
@@ -2242,7 +2333,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
          printk("nicstar%d: Expected a small buffer, and this is not one.\n",
 	        card->index);
          which_list(card, skb);
-         vcc->stats->rx_err++;
+         atomic_inc(&vcc->stats->rx_err);
          recycle_rx_buf(card, skb);
          vc->rx_iov = NULL;
          recycle_iov_buf(card, iovb);
@@ -2256,7 +2347,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
          printk("nicstar%d: Expected a large buffer, and this is not one.\n",
 	        card->index);
          which_list(card, skb);
-         vcc->stats->rx_err++;
+         atomic_inc(&vcc->stats->rx_err);
          recycle_iovec_rx_bufs(card, (struct iovec *) iovb->data,
 	                       ATM_SKB(iovb)->iovcnt);
          vc->rx_iov = NULL;
@@ -2280,7 +2371,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
             printk(" - PDU size mismatch.\n");
          else
             printk(".\n");
-         vcc->stats->rx_err++;
+         atomic_inc(&vcc->stats->rx_err);
          recycle_iovec_rx_bufs(card, (struct iovec *) iovb->data,
 	   ATM_SKB(iovb)->iovcnt);
 	 vc->rx_iov = NULL;
@@ -2308,7 +2399,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
             ATM_SKB(skb)->vcc = vcc;
             skb->stamp = xtime;
             vcc->push(vcc, skb);
-            vcc->stats->rx++;
+            atomic_inc(&vcc->stats->rx);
          }
       }
       else if (ATM_SKB(iovb)->iovcnt == 2)	/* One small plus one large buffer */
@@ -2335,7 +2426,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
                ATM_SKB(sb)->vcc = vcc;
                sb->stamp = xtime;
                vcc->push(vcc, sb);
-               vcc->stats->rx++;
+               atomic_inc(&vcc->stats->rx);
             }
 
             push_rxbufs(card, BUF_LG, (u32) skb,
@@ -2361,7 +2452,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
                ATM_SKB(skb)->vcc = vcc;
                skb->stamp = xtime;
                vcc->push(vcc, skb);
-               vcc->stats->rx++;
+               atomic_inc(&vcc->stats->rx);
             }
 
             push_rxbufs(card, BUF_SM, (u32) sb, (u32) virt_to_bus(sb->data),
@@ -2384,7 +2475,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
             if (hb == NULL)
             {
                printk("nicstar%d: Out of huge buffers.\n", card->index);
-               vcc->stats->rx_drop++;
+               atomic_inc(&vcc->stats->rx_drop);
                recycle_iovec_rx_bufs(card, (struct iovec *) iovb->data,
 	                             ATM_SKB(iovb)->iovcnt);
                vc->rx_iov = NULL;
@@ -2431,7 +2522,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
                card->hbpool.count++;
             }
 	    else
-	       kfree_skb(hb);
+	       dev_kfree_skb_any(hb);
          }
          else
 	 {
@@ -2467,7 +2558,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
 #endif /* NS_USE_DESTRUCTORS */
             hb->stamp = xtime;
             vcc->push(vcc, hb);
-            vcc->stats->rx++;
+            atomic_inc(&vcc->stats->rx);
          }
       }
 
@@ -2556,7 +2647,7 @@ static void recycle_rx_buf(ns_dev *card, struct sk_buff *skb)
    else
    {
       printk("nicstar%d: What kind of rx buffer is this?\n", card->index);
-      kfree_skb(skb);
+      dev_kfree_skb_any(skb);
    }
 }
 
@@ -2578,7 +2669,7 @@ static void recycle_iovec_rx_bufs(ns_dev *card, struct iovec *iov, int count)
       else
       {
          printk("nicstar%d: What kind of rx buffer is this?\n", card->index);
-         kfree_skb(skb);
+         dev_kfree_skb_any(skb);
       }
    }
 }
@@ -2593,7 +2684,7 @@ static void recycle_iov_buf(ns_dev *card, struct sk_buff *iovb)
       card->iovpool.count++;
    }
    else
-      kfree_skb(iovb);
+      dev_kfree_skb_any(iovb);
 }
 
 
@@ -2700,7 +2791,7 @@ static int ns_proc_read(struct atm_dev *dev, loff_t *pos, char *page)
    /* Dump 25.6 Mbps PHY registers */
    /* Now there's a 25.6 Mbps PHY driver this code isn't needed. I left it
       here just in case it's needed for debugging. */
-   if (card->max_pcr == IDT_25_PCR && !left--)
+   if (card->max_pcr == ATM_25_PCR && !left--)
    {
       u32 phy_regs[4];
       u32 i;
@@ -2787,7 +2878,7 @@ static int ns_ioctl(struct atm_dev *dev, unsigned int cmd, void *arg)
 	    return -EFAULT;
 
       case NS_SETBUFLEV:
-         if (!suser())
+         if (!capable(CAP_NET_ADMIN))
 	    return -EPERM;
          if (copy_from_user(&pl, (pool_levels *) arg, sizeof(pl)))
 	    return -EFAULT;
@@ -2836,7 +2927,7 @@ static int ns_ioctl(struct atm_dev *dev, unsigned int cmd, void *arg)
          return 0;
 
       case NS_ADJBUFLEV:
-         if (!suser())
+         if (!capable(CAP_NET_ADMIN))
 	    return -EPERM;
          btype = (int) arg;	/* an int is the same size as a pointer */
          switch (btype)
@@ -2874,15 +2965,15 @@ static int ns_ioctl(struct atm_dev *dev, unsigned int cmd, void *arg)
 	       {
                   struct sk_buff *hb;
 
-                  save_flags(flags); cli();
+                  ns_grab_int_lock(card, flags);
 		  hb = skb_dequeue(&card->hbpool.queue);
 		  card->hbpool.count--;
-		  restore_flags(flags);
+                  spin_unlock_irqrestore(&card->int_lock, flags);
                   if (hb == NULL)
 		     printk("nicstar%d: huge buffer count inconsistent.\n",
 		            card->index);
                   else
-		     kfree_skb(hb);
+		     dev_kfree_skb_any(hb);
 		  
 	       }
                while (card->hbpool.count < card->hbnr.init)
@@ -2892,10 +2983,10 @@ static int ns_ioctl(struct atm_dev *dev, unsigned int cmd, void *arg)
                   hb = alloc_skb(NS_HBUFSIZE, GFP_KERNEL);
                   if (hb == NULL)
                      return -ENOMEM;
-                  save_flags(flags); cli();
+                  ns_grab_int_lock(card, flags);
                   skb_queue_tail(&card->hbpool.queue, hb);
                   card->hbpool.count++;
-		  restore_flags(flags);
+                  spin_unlock_irqrestore(&card->int_lock, flags);
                }
 	       break;
 
@@ -2904,15 +2995,15 @@ static int ns_ioctl(struct atm_dev *dev, unsigned int cmd, void *arg)
 	       {
 	          struct sk_buff *iovb;
 
-                  save_flags(flags); cli();
+                  ns_grab_int_lock(card, flags);
 		  iovb = skb_dequeue(&card->iovpool.queue);
 		  card->iovpool.count--;
-		  restore_flags(flags);
+                  spin_unlock_irqrestore(&card->int_lock, flags);
                   if (iovb == NULL)
 		     printk("nicstar%d: iovec buffer count inconsistent.\n",
 		            card->index);
                   else
-		     kfree_skb(iovb);
+		     dev_kfree_skb_any(iovb);
 
 	       }
                while (card->iovpool.count < card->iovnr.init)
@@ -2922,10 +3013,10 @@ static int ns_ioctl(struct atm_dev *dev, unsigned int cmd, void *arg)
                   iovb = alloc_skb(NS_IOVBUFSIZE, GFP_KERNEL);
                   if (iovb == NULL)
                      return -ENOMEM;
-                  save_flags(flags); cli();
+                  ns_grab_int_lock(card, flags);
                   skb_queue_tail(&card->iovpool.queue, iovb);
                   card->iovpool.count++;
-		  restore_flags(flags);
+                  spin_unlock_irqrestore(&card->int_lock, flags);
 	       }
 	       break;
 
@@ -2970,22 +3061,11 @@ static void ns_poll(unsigned long arg)
    for (i = 0; i < num_cards; i++)
    {
       card = cards[i];
-      save_flags(flags); cli();
-      if (card->in_poll)
-      {
-         printk("nicstar: Re-entering ns_poll()???\n");
-         restore_flags(flags);
+      if (spin_is_locked(&card->int_lock)) {
+      /* Probably it isn't worth spinning */
          continue;
       }
-      card->in_poll = 1;
-      if (card->in_handler)
-      {
-         card->in_poll = 0;
-         printk("nicstar%d: ns_poll called while in interrupt handler!?\n",
-                card->index);
-         restore_flags(flags);
-         continue;
-      }
+      ns_grab_int_lock(card, flags);
 
       stat_w = 0;
       stat_r = readl(card->membase + STAT);
@@ -2998,8 +3078,7 @@ static void ns_poll(unsigned long arg)
       process_rsq(card);
 
       writel(stat_w, card->membase + STAT);
-      card->in_poll = 0;
-      restore_flags(flags);
+      spin_unlock_irqrestore(&card->int_lock, flags);
    }
    mod_timer(&ns_timer, jiffies + NS_POLL_PERIOD);
    PRINTK("nicstar: Leaving ns_poll().\n");
@@ -3053,12 +3132,12 @@ static void ns_phy_put(struct atm_dev *dev, unsigned char value,
    unsigned long flags;
 
    card = dev->dev_data;
-   save_flags(flags); cli();
+   ns_grab_res_lock(card, flags);
    while(CMD_BUSY(card));
    writel((unsigned long) value, card->membase + DR0);
    writel(NS_CMD_WRITE_UTILITY | 0x00000200 | (addr & 0x000000FF),
           card->membase + CMD);
-   restore_flags(flags);
+   spin_unlock_irqrestore(&card->res_lock, flags);
 }
 
 
@@ -3070,12 +3149,12 @@ static unsigned char ns_phy_get(struct atm_dev *dev, unsigned long addr)
    unsigned long data;
 
    card = dev->dev_data;
-   save_flags(flags); cli();
+   ns_grab_res_lock(card, flags);
    while(CMD_BUSY(card));
    writel(NS_CMD_READ_UTILITY | 0x00000200 | (addr & 0x000000FF),
           card->membase + CMD);
    while(CMD_BUSY(card));
    data = readl(card->membase + DR0) & 0x000000FF;
-   restore_flags(flags);
+   spin_unlock_irqrestore(&card->res_lock, flags);
    return (unsigned char) data;
 }

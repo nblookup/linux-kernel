@@ -1,8 +1,8 @@
 /* fops.c -- File operations for DRM -*- linux-c -*-
  * Created: Mon Jan  4 08:58:31 1999 by faith@precisioninsight.com
- * Revised: Fri Dec  3 10:26:26 1999 by faith@precisioninsight.com
  *
  * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
+ * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
  * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -24,13 +24,15 @@
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  * 
- * $PI: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/fops.c,v 1.3 1999/08/20 15:36:45 faith Exp $
- * $XFree86: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/fops.c,v 1.1 1999/09/25 14:37:59 dawes Exp $
+ * Authors:
+ *    Rickard E. (Rik) Faith <faith@valinux.com>
+ *    Daryll Strauss <daryll@valinux.com>
  *
  */
 
 #define __NO_VERSION__
 #include "drmP.h"
+#include <linux/poll.h>
 
 /* drm_open is called whenever a process opens /dev/drm. */
 
@@ -92,7 +94,8 @@ int drm_release(struct inode *inode, struct file *filp)
 	DRM_DEBUG("pid = %d, device = 0x%x, open_count = %d\n",
 		  current->pid, dev->device, dev->open_count);
 
-	if (_DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)
+	if (dev->lock.hw_lock
+	    && _DRM_LOCK_IS_HELD(dev->lock.hw_lock->lock)
 	    && dev->lock.pid == current->pid) {
 		DRM_ERROR("Process %d dead, freeing lock for context %d\n",
 			  current->pid,
@@ -173,7 +176,8 @@ ssize_t drm_read(struct file *filp, char *buf, size_t count, loff_t *off)
 		} else {
 			cur = DRM_MIN(send, dev->buf_end - dev->buf_rp);
 		}
-		copy_to_user_ret(buf, dev->buf_rp, cur, -EINVAL);
+		if (copy_to_user(buf, dev->buf_rp, cur))
+			return -EFAULT;
 		dev->buf_rp += cur;
 		if (dev->buf_rp == dev->buf_end) dev->buf_rp = dev->buf;
 		send -= cur;
@@ -212,13 +216,35 @@ int drm_write_string(drm_device_t *dev, const char *s)
 		send -= count;
 	}
 
-#if LINUX_VERSION_CODE < 0x020315
+#if LINUX_VERSION_CODE < 0x020315 && !defined(KILLFASYNCHASTHREEPARAMETERS)
+	/* The extra parameter to kill_fasync was added in 2.3.21, and is
+           _not_ present in _stock_ 2.2.14 and 2.2.15.  However, some
+           distributions patch 2.2.x kernels to add this parameter.  The
+           Makefile.linux attempts to detect this addition and defines
+           KILLFASYNCHASTHREEPARAMETERS if three parameters are found. */
 	if (dev->buf_async) kill_fasync(dev->buf_async, SIGIO);
 #else
-				/* Parameter added in 2.3.21 */
+
+				/* Parameter added in 2.3.21. */
+#if LINUX_VERSION_CODE < 0x020400
 	if (dev->buf_async) kill_fasync(dev->buf_async, SIGIO, POLL_IN);
+#else
+				/* Type of first parameter changed in
+                                   Linux 2.4.0-test2... */
+	if (dev->buf_async) kill_fasync(&dev->buf_async, SIGIO, POLL_IN);
+#endif
 #endif
 	DRM_DEBUG("waking\n");
 	wake_up_interruptible(&dev->buf_readers);
+	return 0;
+}
+
+unsigned int drm_poll(struct file *filp, struct poll_table_struct *wait)
+{
+	drm_file_t   *priv = filp->private_data;
+	drm_device_t *dev  = priv->dev;
+
+	poll_wait(filp, &dev->buf_readers, wait);
+	if (dev->buf_wp != dev->buf_rp) return POLLIN | POLLRDNORM;
 	return 0;
 }

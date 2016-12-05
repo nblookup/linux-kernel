@@ -43,8 +43,6 @@
  *	NOTE! 	NOTE!	NOTE!	NOTE!
  */
 
-extern int sound_started;
-
 struct driver_info 
 {
 	char *driver_id;
@@ -135,9 +133,6 @@ struct dma_buffparms
 	char	neutral_byte;
 	int	dma;		/* DMA channel */
 
-#ifdef OS_DMA_PARMS
-	OS_DMA_PARMS
-#endif
 	int     applic_profile;	/* Application profile (APF_*) */
 	/* Interrupt callback stuff */
 	void (*audio_callback) (int dev, int parm);
@@ -165,6 +160,7 @@ typedef struct coproc_operations
 
 struct audio_driver 
 {
+	struct module *owner;
 	int (*open) (int dev, int mode);
 	void (*close) (int dev);
 	void (*output_block) (int dev, unsigned long buf, 
@@ -244,6 +240,7 @@ int *load_mixer_volumes(char *name, int *levels, int present);
 
 struct mixer_operations 
 {
+	struct module *owner;
 	char id[16];
 	char name[64];
 	int (*ioctl) (int dev, unsigned int cmd, caddr_t arg);
@@ -254,6 +251,7 @@ struct mixer_operations
 
 struct synth_operations 
 {
+	struct module *owner;
 	char *id;	/* Unique identifier (ASCII) max 29 char */
 	struct synth_info *info;
 	int midi_dev;
@@ -306,6 +304,7 @@ struct midi_input_info
 
 struct midi_operations 
 {
+	struct module *owner;
 	struct midi_info info;
 	struct synth_operations *converter;
 	struct midi_input_info in_info;
@@ -337,6 +336,7 @@ struct sound_lowlev_timer
 
 struct sound_timer_operations 
 {
+	struct module *owner;
 	struct sound_timer_info info;
 	int priority;
 	int devlink;
@@ -349,43 +349,34 @@ struct sound_timer_operations
 };
 
 #ifdef _DEV_TABLE_C_   
+struct audio_operations *audio_devs[MAX_AUDIO_DEV] = {NULL};
+int num_audiodevs = 0;
+struct mixer_operations *mixer_devs[MAX_MIXER_DEV] = {NULL};
+int num_mixers = 0;
+struct synth_operations *synth_devs[MAX_SYNTH_DEV+MAX_MIDI_DEV] = {NULL};
+int num_synths = 0;
+struct midi_operations *midi_devs[MAX_MIDI_DEV] = {NULL};
+int num_midis = 0;
 
-struct audio_operations *audio_devs[MAX_AUDIO_DEV] = {NULL}; int num_audiodevs = 0;
-struct mixer_operations *mixer_devs[MAX_MIXER_DEV] = {NULL}; int num_mixers = 0;
-struct synth_operations *synth_devs[MAX_SYNTH_DEV+MAX_MIDI_DEV] = {NULL}; int num_synths = 0;
-struct midi_operations *midi_devs[MAX_MIDI_DEV] = {NULL}; int num_midis = 0;
-
-#ifndef EXCLUDE_TIMERS
 extern struct sound_timer_operations default_sound_timer;
 struct sound_timer_operations *sound_timer_devs[MAX_TIMER_DEV] = {
 	&default_sound_timer, NULL
 }; 
 int num_sound_timers = 1;
 #else
-struct sound_timer_operations *sound_timer_devs[MAX_TIMER_DEV] = {
-	NULL
-};
-int num_sound_timers = 0;
-#endif
-
-
-#else
-extern struct audio_operations * audio_devs[MAX_AUDIO_DEV]; extern int num_audiodevs;
-extern struct mixer_operations * mixer_devs[MAX_MIXER_DEV]; extern int num_mixers;
-extern struct synth_operations * synth_devs[MAX_SYNTH_DEV+MAX_MIDI_DEV]; extern int num_synths;
-extern struct midi_operations * midi_devs[MAX_MIDI_DEV]; extern int num_midis;
-extern struct sound_timer_operations * sound_timer_devs[MAX_TIMER_DEV]; extern int num_sound_timers;
+extern struct audio_operations *audio_devs[MAX_AUDIO_DEV];
+extern int num_audiodevs;
+extern struct mixer_operations *mixer_devs[MAX_MIXER_DEV];
+extern int num_mixers;
+extern struct synth_operations *synth_devs[MAX_SYNTH_DEV+MAX_MIDI_DEV];
+extern int num_synths;
+extern struct midi_operations *midi_devs[MAX_MIDI_DEV];
+extern int num_midis;
+extern struct sound_timer_operations * sound_timer_devs[MAX_TIMER_DEV];
+extern int num_sound_timers;
 #endif	/* _DEV_TABLE_C_ */
-void setup_cards(void);
-int sndtable_get_cardcount (void);
-void sound_chconf(int card_type, int ioaddr, int irq, int dma);
-int snd_find_driver(int type);
-void sound_unload_driver(int type);
-int sndtable_identify_card(char *name);
 
 extern int sound_map_buffer (int dev, struct dma_buffparms *dmap, buffmem_desc *info);
-int sndtable_probe (int unit, struct address_info *hw_config);
-int sndtable_start_card (int unit, struct address_info *hw_config);
 void sound_timer_init (struct sound_lowlev_timer *t, char *name);
 void sound_dma_intr (int dev, struct dma_buffparms *dmap, int chan);
 

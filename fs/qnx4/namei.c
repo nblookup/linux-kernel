@@ -171,10 +171,6 @@ int qnx4_rmdir(struct inode *dir, struct dentry *dentry)
 		goto end_rmdir;
 	}
 #endif
-	if (!d_unhashed(dentry)) {
-		retval = -EBUSY;
-		goto end_rmdir;
-	}
 	if (inode->i_nlink != 2) {
 		QNX4DEBUG(("empty directory has nlink!=2 (%d)\n", inode->i_nlink));
 	}
@@ -182,13 +178,12 @@ int qnx4_rmdir(struct inode *dir, struct dentry *dentry)
 	de->di_status = 0;
 	memset(de->di_fname, 0, sizeof de->di_fname);
 	de->di_mode = 0;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	inode->i_nlink = 0;
 	mark_inode_dirty(inode);
 	inode->i_ctime = dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	dir->i_nlink--;
 	mark_inode_dirty(dir);
-	d_delete(dentry);
 	retval = 0;
 
       end_rmdir:
@@ -226,13 +221,12 @@ int qnx4_unlink(struct inode *dir, struct dentry *dentry)
 	de->di_status = 0;
 	memset(de->di_fname, 0, sizeof de->di_fname);
 	de->di_mode = 0;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	mark_inode_dirty(dir);
 	inode->i_nlink--;
 	inode->i_ctime = dir->i_ctime;
 	mark_inode_dirty(inode);
-	d_delete(dentry);
 	retval = 0;
 
       end_unlink:

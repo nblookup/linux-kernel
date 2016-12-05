@@ -9,6 +9,8 @@
  * Copyright (C) 1994 - 2000 by Ralf Baechle
  * Copyright (C) 1999, 2000 Silicon Graphics
  */
+#include <linux/config.h>
+
 #include <asm/asm.h>
 #include <asm/regdef.h>
 #include <asm/mipsregs.h>
@@ -33,13 +35,14 @@ reschedule:	jal	schedule
 
 FEXPORT(ret_from_sys_call)
 FEXPORT(ret_from_irq)
-#ifdef __SMP__
-#error Barffff...
-#else
-		la	t1, softirq_state
+		la	t1, irq_stat		# softirq_active
+#ifdef CONFIG_SMP
+		lwu	t0, TASK_PROCESSOR($28)
+		dsll	t0, t0, 5
+		daddu	t1, t0
 #endif
-		lw	t0, 0 (t1)
-		lw	t1, 4 (t1)		# unused delay slot
+		lw	t0, 0 (t1)		# softirq_active
+		lw	t1, 4 (t1)		# softirq_mask.  unused delay slot
 		and	t0, t1
 		bnez	t0, handle_softirq
 9:		 ld	t0, PT_STATUS(sp)	# returning to kernel mode?

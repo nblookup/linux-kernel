@@ -5,6 +5,9 @@
  *
  * Copyright (C) 1999 Andreas E. Bombe
  * Copyright (C) 1999 Emanuel Pirker
+ *
+ * This code is licensed under the GPL.  See the file COPYING in the root
+ * directory of the kernel sources for details.
  */
 
 #include <linux/config.h>
@@ -58,8 +61,9 @@ int hpsb_inc_host_usage(struct hpsb_host *host)
         struct hpsb_host_template *tmpl;
         struct hpsb_host *h;
         int retval = 0;
+	unsigned long flags;
 
-        spin_lock(&templates_lock);
+        spin_lock_irqsave(&templates_lock, flags);
 
         for (tmpl = templates; (tmpl != NULL) && !retval; tmpl = tmpl->next) {
                 for (h = tmpl->hosts; h != NULL; h = h->next) {
@@ -71,7 +75,7 @@ int hpsb_inc_host_usage(struct hpsb_host *host)
                 }
         }
 
-        spin_unlock(&templates_lock);
+        spin_unlock_irqrestore(&templates_lock, flags);
 
         return retval;
 }
@@ -96,11 +100,11 @@ struct hpsb_host *hpsb_get_host(struct hpsb_host_template *tmpl,
         }
 
         memset(h, 0, sizeof(struct hpsb_host) + hd_size);
-        h->tlabel_count = 64;
         INIT_LIST_HEAD(&h->pending_packets);
         spin_lock_init(&h->pending_pkt_lock);
+
+        sema_init(&h->tlabel_count, 64);
         spin_lock_init(&h->tlabel_lock);
-        init_waitqueue_head(&h->tlabel_wait);
 
         h->timeout_tq.routine = (void (*)(void*))abort_timedouts;
         h->timeout_tq.data = h;
@@ -151,10 +155,7 @@ static void init_hosts(struct hpsb_host_template *tmpl)
                         host->initialized = 1;
 
                         highlevel_add_host(host);
-                        reset_host_bus(host);
-
-                        //kernel_thread(hpsb_host_thread, host, 
-                        //              CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
+                        hpsb_reset_bus(host);
                 }
         }
 

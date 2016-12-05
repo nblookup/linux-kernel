@@ -92,7 +92,7 @@ static int sb1000_open(struct net_device *dev);
 static int sb1000_dev_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd);
 static int sb1000_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static void sb1000_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-static struct enet_statistics *sb1000_stats(struct net_device *dev);
+static struct net_device_stats *sb1000_stats(struct net_device *dev);
 static int sb1000_close(struct net_device *dev);
 
 
@@ -210,6 +210,9 @@ sb1000_probe(struct net_device *dev)
 				dev->rmem_end, serial_number, dev->irq);
 
 		dev = init_etherdev(dev, 0);
+		if (!dev)
+			return -ENOMEM;
+		SET_MODULE_OWNER(dev);
 
 		/* Make up a SB1000-specific-data structure. */
 		dev->priv = kmalloc(sizeof(struct sb1000_private), GFP_KERNEL);
@@ -760,7 +763,7 @@ sb1000_rx(struct net_device *dev)
 	unsigned int skbsize;
 	struct sk_buff *skb;
 	struct sb1000_private *lp = (struct sb1000_private *)dev->priv;
-	struct enet_statistics *stats = &lp->stats;
+	struct net_device_stats *stats = &lp->stats;
 
 	/* SB1000 frame constants */
 	const int FrameSize = FRAMESIZE;
@@ -1004,7 +1007,6 @@ sb1000_open(struct net_device *dev)
 
 
 	netif_start_queue(dev);
-	MOD_INC_USE_COUNT;
 	return 0;					/* Always succeed */
 }
 
@@ -1052,7 +1054,7 @@ static int sb1000_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		break;
 
 	case SIOCSCMFREQUENCY:		/* set frequency */
-		if (!suser())
+		if (!capable(CAP_NET_ADMIN))
 			return -EPERM;
 		if(get_user(frequency, (int*) ifr->ifr_data))
 			return -EFAULT;
@@ -1068,7 +1070,7 @@ static int sb1000_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		break;
 
 	case SIOCSCMPIDS:			/* set PIDs */
-		if (!suser())
+		if (!capable(CAP_NET_ADMIN))
 			return -EPERM;
 		if(copy_from_user(PID, ifr->ifr_data, sizeof(PID)))
 			return -EFAULT;
@@ -1195,7 +1197,6 @@ static int sb1000_close(struct net_device *dev)
 			dev_kfree_skb(lp->rx_skb[i]);
 		}
 	}
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -1205,28 +1206,23 @@ MODULE_DESCRIPTION("General Instruments SB1000 driver");
 MODULE_PARM(io, "1-2i");
 MODULE_PARM(irq, "i");
 
-static char devname[8] = {0, };
-static struct net_device dev_sb1000 = {
-        devname,
-        0, 0, 0, 0,
-        0, 0,
-        0, 0, 0, NULL, sb1000_probe };
-
-static int io[2]  = {0, 0};
-static int irq = 0;
+static struct net_device dev_sb1000;
+static int io[2];
+static int irq;
 
 int
 init_module(void)
 {
 	int i;
 	for (i = 0; i < 100; i++) {
-		sprintf(devname, "cm%d", i);
-		if (dev_get(devname) == 0) break;
+		sprintf(dev_sb1000.name, "cm%d", i);
+		if (dev_get(dev_sb1000.name) == 0) break;
 	}
 	if (i == 100) {
 		printk(KERN_ERR "sb1000: can't register any device cm<n>\n");
 		return -ENFILE;
 	}
+	dev_sb1000.init = sb1000_probe;
 	dev_sb1000.base_addr = io[0];
 	/* rmem_end holds the second I/O address - fv */
 	dev_sb1000.rmem_end = io[1];
@@ -1244,7 +1240,7 @@ void cleanup_module(void)
 	unregister_netdev(&dev_sb1000);
 	release_region(dev_sb1000.base_addr, 16);
 	release_region(dev_sb1000.rmem_end, 16);
-	kfree_s(dev_sb1000.priv, sizeof(struct sb1000_private));
+	kfree(dev_sb1000.priv);
 	dev_sb1000.priv = NULL;
 }
 #endif /* MODULE */

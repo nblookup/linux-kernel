@@ -1,22 +1,20 @@
-CFLAGS	= -D__KERNEL__ -g -O2 -Wall -I$(TOPDIR)/include
-
-ifdef CONFIG_SMP
- CFLAGS += -D__SMP__
-endif
+CFLAGS	= -g -O2 -Wall $(CPPFLAGS)
 
 TARGET	= $(TOPDIR)/include/asm-ia64/offsets.h
 
 all: 
+
+mrproper:
 
 clean:
 	rm -f print_offsets.s print_offsets offsets.h
 
 fastdep: offsets.h
 	@if ! cmp -s offsets.h ${TARGET}; then	\
-		echo "Updating ${TARGET}...";	\
+		echo -e "*** Updating ${TARGET}...";	\
 		cp offsets.h ${TARGET};		\
 	else					\
-		echo "${TARGET} is up to date";	\
+		echo "*** ${TARGET} is up to date";	\
 	fi
 
 #
@@ -33,8 +31,10 @@ ifeq ($(CROSS_COMPILE),)
 offsets.h: print_offsets
 	./print_offsets > offsets.h
 
-print_offsets: print_offsets.c
+print_offsets: print_offsets.c FORCE_RECOMPILE
 	$(CC) $(CFLAGS) print_offsets.c -o $@
+
+FORCE_RECOMPILE:
 
 else
 
@@ -46,4 +46,4 @@ print_offsets.s: print_offsets.c
 
 endif
 
-.PHONY: all
+.PHONY: all modules modules_install

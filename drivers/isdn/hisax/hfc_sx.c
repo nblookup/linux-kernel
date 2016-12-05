@@ -1,4 +1,4 @@
-/* $Id: hfc_sx.c,v 1.4 2000/02/26 00:35:12 keil Exp $
+/* $Id: hfc_sx.c,v 1.9 2000/11/24 17:05:37 kai Exp $
 
  * hfc_sx.c     low level driver for CCD´s hfc-s+/sp based cards
  *
@@ -21,27 +21,10 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * $Log: hfc_sx.c,v $
- * Revision 1.4  2000/02/26 00:35:12  keil
- * Fix skb freeing in interrupt context
- *
- * Revision 1.3  2000/01/20 19:49:36  keil
- * Support teles 13.3c vendor version 2.1
- *
- * Revision 1.2  1999/12/19 13:09:42  keil
- * changed TASK_INTERRUPTIBLE into TASK_UNINTERRUPTIBLE for
- * signal proof delays
- *
- * Revision 1.1  1999/11/18 00:09:18  werner
- *
- * Initial release of files for HFC-S+ and HFC-SP cards with 32K-RAM.
- * Audio and Echo are supported.
- *
- *
- *
  */
 
 #define __NO_VERSION__
+#include <linux/init.h>
 #include "hisax.h"
 #include "hfc_sx.h"
 #include "isdnl1.h"
@@ -49,7 +32,7 @@
 
 extern const char *CardType[];
 
-static const char *hfcsx_revision = "$Revision: 1.4 $";
+static const char *hfcsx_revision = "$Revision: 1.9 $";
 
 /***************************************/
 /* IRQ-table for CCDs demo board       */
@@ -1433,8 +1416,8 @@ hfcsx_bh(struct IsdnCardState *cs)
 /********************************/
 /* called for card init message */
 /********************************/
-__initfunc(void
-	   inithfcsx(struct IsdnCardState *cs))
+void __devinit
+inithfcsx(struct IsdnCardState *cs)
 {
 	cs->setstack_d = setstack_hfcsx;
 	cs->dbusytimer.function = (void *) hfcsx_dbusy_timer;
@@ -1490,8 +1473,8 @@ hfcsx_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 
 
 
-__initfunc(int
-	   setup_hfcsx(struct IsdnCard *card))
+int __devinit
+setup_hfcsx(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];
@@ -1504,7 +1487,8 @@ __initfunc(int
 	cs->hw.hfcsx.int_s1 = 0;
 	cs->dc.hfcsx.ph_state = 0;
 	cs->hw.hfcsx.fifo = 255;
-	if (cs->typ == ISDN_CTYPE_HFC_SX) {
+	if ((cs->typ == ISDN_CTYPE_HFC_SX) || 
+	    (cs->typ == ISDN_CTYPE_HFC_SP_PCMCIA)) {
 	        if ((!cs->hw.hfcsx.base) || 
 		    check_region((cs->hw.hfcsx.base), 2)) {
 		  printk(KERN_WARNING

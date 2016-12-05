@@ -1,4 +1,4 @@
-/* $Id: zs.c,v 1.55 2000/02/09 21:11:24 davem Exp $
+/* $Id: zs.c,v 1.61 2001/01/03 08:08:49 ecd Exp $
  * zs.c: Zilog serial port driver for the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -824,20 +824,6 @@ static void do_serial_hangup(void *private_)
 	tty_hangup(tty);
 }
 
-
-/*
- * This subroutine is called when the RS_TIMER goes off.  It is used
- * by the serial driver to handle ports that do not have an interrupt
- * (irq=0).  This doesn't work at all for 16450's, as a sun has a Z8530.
- */
- 
-static void zs_timer(void)
-{
-	printk("zs_timer called\n");
-	prom_halt();
-	return;
-}
-
 static int startup(struct sun_serial * info)
 {
 	unsigned long flags;
@@ -913,14 +899,6 @@ static int startup(struct sun_serial * info)
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
 
 	/*
-	 * Set up serial timers...
-	 */
-#if 0  /* Works well and stops the machine. */
-	timer_table[RS_TIMER].expires = jiffies + 2;
-	timer_active |= 1 << RS_TIMER;
-#endif
-
-	/*
 	 * and set the speed of the serial port
 	 */
 	change_speed(info);
@@ -966,7 +944,6 @@ static void shutdown(struct sun_serial * info)
  */
 static void change_speed(struct sun_serial *info)
 {
-	unsigned short port;
 	unsigned cflag;
 	int	quot = 0;
 	int	i;
@@ -975,7 +952,7 @@ static void change_speed(struct sun_serial *info)
 	if (!info->tty || !info->tty->termios)
 		return;
 	cflag = info->tty->termios->c_cflag;
-	if (!(port = info->port))
+	if (!info->port)
 		return;
 	i = cflag & CBAUD;
 	if (cflag & CBAUDEX) {
@@ -1341,7 +1318,8 @@ static int get_serial_info(struct sun_serial * info,
 	tmp.close_delay = info->close_delay;
 	tmp.closing_wait = info->closing_wait;
 	tmp.custom_divisor = info->custom_divisor;
-	copy_to_user_ret(retinfo,&tmp,sizeof(*retinfo), -EFAULT);
+	if (copy_to_user(retinfo,&tmp,sizeof(*retinfo)))
+		return -EFAULT;
 	return 0;
 }
 
@@ -1412,7 +1390,8 @@ static int get_lsr_info(struct sun_serial * info, unsigned int *value)
 	ZSDELAY();
 	ZSLOG(REGCTRL, status, 0);
 	sti();
-	put_user_ret(status, value, -EFAULT);
+	if (put_user(status, value))
+		return -EFAULT;
 	return 0;
 }
 
@@ -1431,7 +1410,8 @@ static int get_modem_info(struct sun_serial * info, unsigned int *value)
 		| ((status  & DCD) ? TIOCM_CAR : 0)
 		| ((status  & SYNC) ? TIOCM_DSR : 0)
 		| ((status  & CTS) ? TIOCM_CTS : 0);
-	put_user_ret(result, value, -EFAULT);
+	if (put_user(result, value))
+		return -EFAULT;
 	return 0;
 }
 
@@ -1440,7 +1420,8 @@ static int set_modem_info(struct sun_serial * info, unsigned int cmd,
 {
 	unsigned int arg;
 
-	get_user_ret(arg, value, -EFAULT);
+	if (get_user(arg, value))
+		return -EFAULT;
 	switch (cmd) {
 	case TIOCMBIS: 
 		if (arg & TIOCM_RTS)
@@ -1516,11 +1497,13 @@ static int zs_ioctl(struct tty_struct *tty, struct file * file,
 			send_break(info, arg ? arg*(HZ/10) : HZ/4);
 			return 0;
 		case TIOCGSOFTCAR:
-			put_user_ret(C_CLOCAL(tty) ? 1 : 0,
-				     (unsigned long *) arg, -EFAULT);
+			if (put_user(C_CLOCAL(tty) ? 1 : 0,
+				     (unsigned long *) arg))
+				return -EFAULT;
 			return 0;
 		case TIOCSSOFTCAR:
-			get_user_ret(arg, (unsigned long *) arg, -EFAULT);
+			if (get_user(arg, (unsigned long *) arg))
+				return -EFAULT;
 			tty->termios->c_cflag =
 				((tty->termios->c_cflag & ~CLOCAL) |
 				 (arg ? CLOCAL : 0));
@@ -1541,8 +1524,9 @@ static int zs_ioctl(struct tty_struct *tty, struct file * file,
 			return get_lsr_info(info, (unsigned int *) arg);
 
 		case TIOCSERGSTRUCT:
-			copy_to_user_ret((struct sun_serial *) arg,
-				    info, sizeof(struct sun_serial), -EFAULT);
+			if (copy_to_user((struct sun_serial *) arg,
+				    info, sizeof(struct sun_serial)))
+				return -EFAULT;
 			return 0;
 			
 		default:
@@ -1928,7 +1912,7 @@ int zs_open(struct tty_struct *tty, struct file * filp)
 
 static void show_serial_version(void)
 {
-	char *revision = "$Revision: 1.55 $";
+	char *revision = "$Revision: 1.61 $";
 	char *version, *p;
 
 	version = strchr(revision, ' ');
@@ -2404,8 +2388,6 @@ int __init zs_init(void)
 
 	/* Setup base handler, and timer table. */
 	init_bh(SERIAL_BH, do_serial_bh);
-	timer_table[RS_TIMER].fn = zs_timer;
-	timer_table[RS_TIMER].expires = 0;
 
 	show_serial_version();
 
@@ -2415,7 +2397,11 @@ int __init zs_init(void)
 	memset(&serial_driver, 0, sizeof(struct tty_driver));
 	serial_driver.magic = TTY_DRIVER_MAGIC;
 	serial_driver.driver_name = "serial";
+#ifdef CONFIG_DEVFS_FS
+	serial_driver.name = "tts/%d";
+#else
 	serial_driver.name = "ttyS";
+#endif
 	serial_driver.major = TTY_MAJOR;
 	serial_driver.minor_start = 64;
 	serial_driver.num = NUM_CHANNELS;
@@ -2454,7 +2440,7 @@ int __init zs_init(void)
 	 * major number and the subtype code.
 	 */
 	callout_driver = serial_driver;
-	callout_driver.name = "cua";
+	callout_driver.name = "cua/%d";
 	callout_driver.major = TTYAUX_MAJOR;
 	callout_driver.subtype = SERIAL_TYPE_CALLOUT;
 
@@ -2843,17 +2829,13 @@ static int __init zs_console_setup(struct console *con, char *options)
 }
 
 static struct console zs_console = {
-	"ttyS",
-	zs_console_write,
-	NULL,
-	zs_console_device,
-	zs_console_wait_key,
-	NULL,
-	zs_console_setup,
-	CON_PRINTBUFFER,
-	-1,
-	0,
-	NULL
+	name:		"ttyS",
+	write:		zs_console_write,
+	device:		zs_console_device,
+	wait_key:	zs_console_wait_key,
+	setup:		zs_console_setup,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
 };
 
 static int __init zs_console_init(void)

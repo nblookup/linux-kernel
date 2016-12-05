@@ -1203,7 +1203,10 @@ static int sdla_xfer(struct net_device *dev, struct sdla_mem *info, int read)
 			return(-ENOMEM);
 		sdla_read(dev, mem.addr, temp, mem.len);
 		if(copy_to_user(mem.data, temp, mem.len))
+		{
+			kfree(temp);
 			return -EFAULT;
+		}
 		kfree(temp);
 	}
 	else
@@ -1212,7 +1215,10 @@ static int sdla_xfer(struct net_device *dev, struct sdla_mem *info, int read)
 		if (!temp)
 			return(-ENOMEM);
 		if(copy_from_user(temp, mem.data, mem.len))
+		{
+			kfree(temp);
 			return -EFAULT;
+		}
 		sdla_write(dev, mem.addr, temp, mem.len);
 		kfree(temp);
 	}
@@ -1247,7 +1253,7 @@ static int sdla_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 {
 	struct frad_local *flp;
 
-	if(!suser())
+	if(!capable(CAP_NET_ADMIN))
 		return -EPERM;
 		
 	flp = dev->priv;

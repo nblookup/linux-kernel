@@ -1,25 +1,15 @@
-/* $Id: swift.S,v 1.4 2000/02/12 03:08:47 zaitcev Exp $
+/* $Id: swift.S,v 1.7 2000/07/16 21:48:52 anton Exp $
  * swift.S: MicroSparc-II mmu/cache operations.
  *
  * Copyright (C) 1999 David S. Miller (davem@redhat.com)
  */
 
+#include <linux/config.h>
 #include <asm/psr.h>
 #include <asm/asi.h>
 #include <asm/page.h>
 #include <asm/pgtsrmmu.h>
 #include <asm/asm_offsets.h>
-
-#define WINDOW_FLUSH(tmp1, tmp2)					\
-	mov	0, tmp1;						\
-98:	ld	[%g6 + AOFF_task_thread + AOFF_thread_uwinmask], tmp2;	\
-	orcc	%g0, tmp2, %g0;						\
-	add	tmp1, 1, tmp1;						\
-	bne	98b;							\
-	 save	%sp, -64, %sp;						\
-99:	subcc	tmp1, 1, tmp1;						\
-	bne	99b;							\
-	 restore %g0, %g0, %g0;
 
 	.text
 	.align	4
@@ -29,7 +19,7 @@
 	 */
 	.globl	swift_flush_cache_all, swift_flush_cache_mm
 	.globl	swift_flush_cache_range, swift_flush_cache_page
-	.globl	swift_flush_page_for_dma, swift_flush_chunk
+	.globl	swift_flush_page_for_dma
 	.globl	swift_flush_page_to_ram
 
 swift_flush_cache_all:
@@ -37,7 +27,6 @@ swift_flush_cache_mm:
 swift_flush_cache_range:
 swift_flush_cache_page:
 swift_flush_page_for_dma:
-swift_flush_chunk:
 swift_flush_page_to_ram:
 	sethi	%hi(0x2000), %o0
 1:	subcc	%o0, 0x10, %o0
@@ -64,7 +53,7 @@ swift_flush_cache_all:
 
 	.globl	swift_flush_cache_mm
 swift_flush_cache_mm:
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	ld	[%o0 + AOFF_mm_context], %g2
 	cmp	%g2, -1
 	be	swift_flush_cache_mm_out
@@ -131,7 +120,7 @@ swift_flush_cache_range:
 swift_flush_cache_page:
 	ld	[%o0 + 0x0], %o0		/* XXX vma->vm_mm, GROSS XXX */
 70:
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	ld	[%o0 + AOFF_mm_context], %g2
 	cmp	%g2, -1
 	be	swift_flush_cache_page_out
@@ -189,10 +178,8 @@ swift_flush_cache_page_out:
 	 * caches which are virtually indexed and tagged.
 	 */
 	.globl	swift_flush_page_for_dma
-	.globl	swift_flush_chunk
 	.globl	swift_flush_page_to_ram
 swift_flush_page_for_dma:
-swift_flush_chunk:
 swift_flush_page_to_ram:
 	andn	%o0, (PAGE_SIZE - 1), %o1
 #if 1
@@ -237,7 +224,7 @@ swift_flush_sig_insns:
 	.globl	swift_flush_tlb_all
 swift_flush_tlb_mm:
 swift_flush_tlb_range:
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	ld	[%o0 + AOFF_mm_context], %g2
 	cmp	%g2, -1
 	be	swift_flush_tlb_all_out
@@ -255,7 +242,7 @@ swift_flush_tlb_page:
 	mov	SRMMU_CTX_REG, %g1
 	ld	[%o0 + AOFF_mm_context], %o3
 	andn	%o1, (PAGE_SIZE - 1), %o1
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	cmp	%o3, -1
 	be	swift_flush_tlb_page_out
 	 nop

@@ -146,7 +146,7 @@ static struct tty_driver	stl_callout;
 static struct tty_struct	*stl_ttys[STL_MAXDEVS];
 static struct termios		*stl_termios[STL_MAXDEVS];
 static struct termios		*stl_termioslocked[STL_MAXDEVS];
-static int			stl_refcount = 0;
+static int			stl_refcount;
 
 /*
  *	We will need to allocate a temporary write buffer for chars that
@@ -192,7 +192,7 @@ static char		stl_unwanted[SC26198_RXFIFOSIZE];
  *	shared with another Stallion board.
  */
 static int	stl_gotintrs[STL_MAXBRDS];
-static int	stl_numintrs = 0;
+static int	stl_numintrs;
 
 /*****************************************************************************/
 
@@ -511,8 +511,6 @@ static void	stl_breakctl(struct tty_struct *tty, int state);
 static void	stl_waituntilsent(struct tty_struct *tty, int timeout);
 static void	stl_sendxchar(struct tty_struct *tty, char ch);
 static void	stl_hangup(struct tty_struct *tty);
-static int	stl_memopen(struct inode *ip, struct file *fp);
-static int	stl_memclose(struct inode *ip, struct file *fp);
 static int	stl_memioctl(struct inode *ip, struct file *fp, unsigned int cmd, unsigned long arg);
 static int	stl_portinfo(stlport_t *portp, int portnr, char *pos);
 static int	stl_readproc(char *page, char **start, off_t off, int count, int *eof, void *data);
@@ -744,14 +742,13 @@ static unsigned int	sc26198_baudtable[] = {
  *	to get at port stats - only not using the port device itself.
  */
 static struct file_operations	stl_fsiomem = {
+	owner:		THIS_MODULE,
 	ioctl:		stl_memioctl,
-	open:		stl_memopen,
-	release:	stl_memclose,
 };
 
 /*****************************************************************************/
 
-static devfs_handle_t devfs_handle = NULL;
+static devfs_handle_t devfs_handle;
 
 #ifdef MODULE
 
@@ -783,7 +780,7 @@ void cleanup_module()
 	stlpanel_t	*panelp;
 	stlport_t	*portp;
 	unsigned long	flags;
-	int		i, j, k, l;
+	int		i, j, k;
 
 #if DEBUG
 	printk("cleanup_module()\n");
@@ -815,7 +812,7 @@ void cleanup_module()
 			"errno=%d\n", -i);
 
 	if (stl_tmpwritebuf != (char *) NULL)
-		kfree_s(stl_tmpwritebuf, STL_TXBUFSIZE);
+		kfree(stl_tmpwritebuf);
 
 	for (i = 0; (i < stl_nrbrds); i++) {
 		if ((brdp = stl_brds[i]) == (stlbrd_t *) NULL)
@@ -831,17 +828,17 @@ void cleanup_module()
 				if (portp->tty != (struct tty_struct *) NULL)
 					stl_hangup(portp->tty);
 				if (portp->tx.buf != (char *) NULL)
-					kfree_s(portp->tx.buf, STL_TXBUFSIZE);
-				kfree_s(portp, sizeof(stlport_t));
+					kfree(portp->tx.buf);
+				kfree(portp);
 			}
-			kfree_s(panelp, sizeof(stlpanel_t));
+			kfree(panelp);
 		}
 
 		release_region(brdp->ioaddr1, brdp->iosize1);
 		if (brdp->iosize2 > 0)
 			release_region(brdp->ioaddr2, brdp->iosize2);
 
-		kfree_s(brdp, sizeof(stlbrd_t));
+		kfree(brdp);
 		stl_brds[i] = (stlbrd_t *) NULL;
 	}
 
@@ -1244,7 +1241,7 @@ static void stl_close(struct tty_struct *tty, struct file *filp)
 	stl_flushbuffer(tty);
 	portp->istate = 0;
 	if (portp->tx.buf != (char *) NULL) {
-		kfree_s(portp->tx.buf, STL_TXBUFSIZE);
+		kfree(portp->tx.buf);
 		portp->tx.buf = (char *) NULL;
 		portp->tx.head = (char *) NULL;
 		portp->tx.tail = (char *) NULL;
@@ -1833,7 +1830,7 @@ static void stl_hangup(struct tty_struct *tty)
 	portp->istate = 0;
 	set_bit(TTY_IO_ERROR, &tty->flags);
 	if (portp->tx.buf != (char *) NULL) {
-		kfree_s(portp->tx.buf, STL_TXBUFSIZE);
+		kfree(portp->tx.buf);
 		portp->tx.buf = (char *) NULL;
 		portp->tx.head = (char *) NULL;
 		portp->tx.tail = (char *) NULL;
@@ -2234,11 +2231,11 @@ static void stl_offintr(void *private)
 #endif
 
 	if (portp == (stlport_t *) NULL)
-		return;
+		goto out;
 
 	tty = portp->tty;
 	if (tty == (struct tty_struct *) NULL)
-		return;
+		goto out;
 
 	lock_kernel();
 	if (test_bit(ASYI_TXLOW, &portp->istate)) {
@@ -2257,12 +2254,14 @@ static void stl_offintr(void *private)
 			if (portp->flags & ASYNC_CHECK_CD) {
 				if (! ((portp->flags & ASYNC_CALLOUT_ACTIVE) &&
 				    (portp->flags & ASYNC_CALLOUT_NOHUP))) {
-					tty_hangup(tty);
+					tty_hangup(tty);	/* FIXME: module removal race here - AKPM */
 				}
 			}
 		}
 	}
 	unlock_kernel();
+out:
+	MOD_DEC_USE_COUNT;
 }
 
 /*****************************************************************************/
@@ -2778,6 +2777,8 @@ static inline int stl_initpcibrd(int brdtype, struct pci_dev *devp)
 		devp->bus->number, devp->devfn);
 #endif
 
+	if (pci_enable_device(devp))
+		return(-EIO);
 	if ((brdp = stl_allocbrd()) == (stlbrd_t *) NULL)
 		return(-ENOMEM);
 	if ((brdp->brdnr = stl_getbrdnr()) < 0) {
@@ -2793,8 +2794,8 @@ static inline int stl_initpcibrd(int brdtype, struct pci_dev *devp)
  */
 #if DEBUG
 	printk("%s(%d): BAR[]=%x,%x,%x,%x IRQ=%x\n", __FILE__, __LINE__,
-		devp->resource[0].start, devp->resource[1].start,
-		devp->resource[2].start, devp->resource[3].start, devp->irq);
+		pci_resource_start(devp, 0), pci_resource_start(devp, 1),
+		pci_resource_start(devp, 2), pci_resource_start(devp, 3), devp->irq);
 #endif
 
 /*
@@ -2803,22 +2804,16 @@ static inline int stl_initpcibrd(int brdtype, struct pci_dev *devp)
  */
 	switch (brdtype) {
 	case BRD_ECHPCI:
-		brdp->ioaddr2 = (devp->resource[0].start &
-			PCI_BASE_ADDRESS_IO_MASK);
-		brdp->ioaddr1 = (devp->resource[1].start &
-			PCI_BASE_ADDRESS_IO_MASK);
+		brdp->ioaddr2 = pci_resource_start(devp, 0);
+		brdp->ioaddr1 = pci_resource_start(devp, 1);
 		break;
 	case BRD_ECH64PCI:
-		brdp->ioaddr2 = (devp->resource[2].start &
-			PCI_BASE_ADDRESS_IO_MASK);
-		brdp->ioaddr1 = (devp->resource[1].start &
-			PCI_BASE_ADDRESS_IO_MASK);
+		brdp->ioaddr2 = pci_resource_start(devp, 2);
+		brdp->ioaddr1 = pci_resource_start(devp, 1);
 		break;
 	case BRD_EASYIOPCI:
-		brdp->ioaddr1 = (devp->resource[2].start &
-			PCI_BASE_ADDRESS_IO_MASK);
-		brdp->ioaddr2 = (devp->resource[1].start &
-			PCI_BASE_ADDRESS_IO_MASK);
+		brdp->ioaddr1 = pci_resource_start(devp, 2);
+		brdp->ioaddr2 = pci_resource_start(devp, 1);
 		break;
 	default:
 		printk("STALLION: unknown PCI board type=%d\n", brdtype);
@@ -3121,27 +3116,6 @@ static int stl_getbrdstruct(unsigned long arg)
 /*****************************************************************************/
 
 /*
- *	Memory device open code. Need to keep track of opens and close
- *	for module handling.
- */
-
-static int stl_memopen(struct inode *ip, struct file *fp)
-{
-	MOD_INC_USE_COUNT;
-	return(0);
-}
-
-/*****************************************************************************/
-
-static int stl_memclose(struct inode *ip, struct file *fp)
-{
-	MOD_DEC_USE_COUNT;
-	return(0);
-}
-
-/*****************************************************************************/
-
-/*
  *	The "staliomem" device is also required to do some special operations
  *	on the board and/or ports. In this driver it is mostly used for stats
  *	collection.
@@ -3219,10 +3193,10 @@ int __init stl_init(void)
  */
 	if (devfs_register_chrdev(STL_SIOMEMMAJOR, "staliomem", &stl_fsiomem))
 		printk("STALLION: failed to register serial board device\n");
-	devfs_handle = devfs_mk_dir (NULL, "staliomem", 9, NULL);
+	devfs_handle = devfs_mk_dir (NULL, "staliomem", NULL);
 	devfs_register_series (devfs_handle, "%u", 4, DEVFS_FL_DEFAULT,
 			       STL_SIOMEMMAJOR, 0,
-			       S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			       S_IFCHR | S_IRUSR | S_IWUSR,
 			       &stl_fsiomem, NULL);
 
 /*
@@ -4136,7 +4110,9 @@ static void stl_cd1400txisr(stlpanel_t *panelp, int ioaddr)
 	if ((len == 0) || ((len < STL_TXBUFLOW) &&
 	    (test_bit(ASYI_TXLOW, &portp->istate) == 0))) {
 		set_bit(ASYI_TXLOW, &portp->istate);
-		queue_task(&portp->tqueue, &tq_scheduler);
+		MOD_INC_USE_COUNT;
+		if (schedule_task(&portp->tqueue) == 0)
+			MOD_DEC_USE_COUNT;
 	}
 
 	if (len == 0) {
@@ -4316,7 +4292,9 @@ static void stl_cd1400mdmisr(stlpanel_t *panelp, int ioaddr)
 	misr = inb(ioaddr + EREG_DATA);
 	if (misr & MISR_DCD) {
 		set_bit(ASYI_DCDCHANGE, &portp->istate);
-		queue_task(&portp->tqueue, &tq_scheduler);
+		MOD_INC_USE_COUNT;
+		if (schedule_task(&portp->tqueue) == 0)
+			MOD_DEC_USE_COUNT;
 		portp->stats.modem++;
 	}
 
@@ -5113,7 +5091,9 @@ static void stl_sc26198txisr(stlport_t *portp)
 	if ((len == 0) || ((len < STL_TXBUFLOW) &&
 	    (test_bit(ASYI_TXLOW, &portp->istate) == 0))) {
 		set_bit(ASYI_TXLOW, &portp->istate);
-		queue_task(&portp->tqueue, &tq_scheduler);
+		MOD_INC_USE_COUNT;
+		if (schedule_task(&portp->tqueue) == 0)
+			MOD_DEC_USE_COUNT;
 	}
 
 	if (len == 0) {
@@ -5330,7 +5310,9 @@ static void stl_sc26198otherisr(stlport_t *portp, unsigned int iack)
 		ipr = stl_sc26198getreg(portp, IPR);
 		if (ipr & IPR_DCDCHANGE) {
 			set_bit(ASYI_DCDCHANGE, &portp->istate);
-			queue_task(&portp->tqueue, &tq_scheduler);
+			MOD_INC_USE_COUNT;
+			if (schedule_task(&portp->tqueue) == 0)
+				MOD_DEC_USE_COUNT;
 			portp->stats.modem++;
 		}
 		break;

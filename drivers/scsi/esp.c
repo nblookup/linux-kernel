@@ -1,4 +1,4 @@
-/* $Id: esp.c,v 1.92 2000/02/18 13:49:58 davem Exp $
+/* $Id: esp.c,v 1.98 2000/11/02 22:34:16 davem Exp $
  * esp.c:  EnhancedScsiProcessor Sun SCSI driver code.
  *
  * Copyright (C) 1995, 1998 David S. Miller (davem@caip.rutgers.edu)
@@ -32,13 +32,16 @@
 #include <asm/sbus.h>
 #include <asm/dma.h>
 #include <asm/system.h>
-#include <asm/machines.h>
 #include <asm/ptrace.h>
 #include <asm/pgtable.h>
 #include <asm/oplib.h>
 #include <asm/io.h>
 #include <asm/irq.h>
+
+#ifndef __sparc_v9__
+#include <asm/machines.h>
 #include <asm/idprom.h>
+#endif
 
 #include <linux/module.h>
 
@@ -397,7 +400,7 @@ extern inline void esp_cmd(struct esp *esp, u8 cmd)
  *
  * struct scsi_cmnd:
  *
- *   We keep track of the syncronous capabilities of a target
+ *   We keep track of the synchronous capabilities of a target
  *   in the device member, using sync_min_period and
  *   sync_max_offset.  These are the values we directly write
  *   into the ESP registers while running a command.  If offset
@@ -1596,7 +1599,9 @@ static void esp_exec_cmd(struct esp *esp)
 
 	if (SDptr->sync) {
 		/* this targets sync is known */
+#ifndef __sparc_v9__
 do_sync_known:
+#endif
 		if (SDptr->disconnect)
 			*cmdp++ = IDENTIFY(1, lun);
 		else
@@ -1634,6 +1639,7 @@ do_sync_known:
 		 */
 		int cdrom_hwbug_wkaround = 0;
 
+#ifndef __sparc_v9__
 		/* Never allow disconnects or synchronous transfers on
 		 * SparcStation1 and SparcStation1+.  Allowing those
 		 * to be enabled seems to lockup the machine completely.
@@ -1654,6 +1660,7 @@ do_sync_known:
 			esp->snip = 0;
 			goto do_sync_known;
 		}
+#endif /* !(__sparc_v9__) */
 
 		/* We've talked to this guy before,
 		 * but never negotiated.  Let's try,
@@ -2578,6 +2585,8 @@ static int esp_do_data(struct esp *esp)
 	esp_advance_phase(SCptr, thisphase);
 	ESPDATA(("newphase<%s> ", (thisphase == in_datain) ? "DATAIN" : "DATAOUT"));
 	hmuch = dma_can_transfer(esp, SCptr);
+	if (hmuch > (64 * 1024) && (esp->erev != fashme))
+		hmuch = (64 * 1024);
 	ESPDATA(("hmuch<%d> ", hmuch));
 	esp->current_transfer_size = hmuch;
 
@@ -2652,7 +2661,7 @@ static int esp_do_data_finale(struct esp *esp)
 	 * on HME broken adapters because we skip the HME fifo
 	 * workaround code in esp_handle() if we are doing data
 	 * phase things.  We don't want to fuck directly with
-	 * the fifo like that, especially if doing syncronous
+	 * the fifo like that, especially if doing synchronous
 	 * transfers!  Also, will need to double the count on
 	 * HME if we are doing wide transfers, as the HME fifo
 	 * will move and count 16-bit quantities during wide data.
@@ -4348,10 +4357,15 @@ static void esp_intr(int irq, void *dev_id, struct pt_regs *pregs)
 	spin_unlock_irqrestore(&esp->lock, flags);
 }
 
-#ifdef MODULE
-Scsi_Host_Template driver_template = SCSI_SPARC_ESP;
+int esp_revoke(Scsi_Device* SDptr)
+{
+	struct esp *esp = (struct esp *) SDptr->host->hostdata;
+	esp->targets_present &= ~(1 << SDptr->id);
+	return 0;
+}
+
+static Scsi_Host_Template driver_template = SCSI_SPARC_ESP;
 
 #include "scsi_module.c"
 
 EXPORT_NO_SYMBOLS;
-#endif /* MODULE */

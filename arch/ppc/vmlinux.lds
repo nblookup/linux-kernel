@@ -41,6 +41,7 @@ SECTIONS
     *(.rodata)
     *(.rodata1)
   }
+  .kstrtab   : { *(.kstrtab) }
   .fini      : { *(.fini)    } =0
   .ctors     : { *(.ctors)   }
   .dtors     : { *(.dtors)   }
@@ -63,6 +64,10 @@ SECTIONS
   __start___ex_table = .;
   __ex_table : { *(__ex_table) }
   __stop___ex_table = .;
+
+  __start___ksymtab = .;	/* Kernel symbol table */
+  __ksymtab : { *(__ksymtab) }
+  __stop___ksymtab = .;
 
   . = ALIGN(32);
   .data.cacheline_aligned : { *(.data.cacheline_aligned) }
@@ -104,6 +109,13 @@ SECTIONS
   __prep_end = .;
 
   . = ALIGN(4096);
+  __chrp_begin = .;
+  .text.chrp : { *(.text.chrp) }
+  .data.chrp : { *(.data.chrp) }
+  . = ALIGN(4096);
+  __chrp_end = .;
+
+  . = ALIGN(4096);
   __apus_begin = .;
   .text.apus : { *(.text.apus) }
   .data.apus : { *(.data.apus) }
@@ -135,4 +147,3 @@ SECTIONS
   _end = . ;
   PROVIDE (end = .);
 }
-

@@ -11,7 +11,7 @@
 static const char *arlan_version = "C.Jennigs 97 & Elmer.Joandi@ut.ee  Oct'98, http://www.ylenurme.ee/~elmer/655/";
 
 struct net_device *arlan_device[MAX_ARLANS];
-int last_arlan = 0;
+int last_arlan;
 
 static int SID = SIDUNKNOWN;
 static int radioNodeId = radioNodeIdUNKNOWN;
@@ -26,22 +26,22 @@ static int channelNumber = channelNumberUNKNOWN;
 static int channelSet = channelSetUNKNOWN;
 static int systemId = systemIdUNKNOWN;
 static int registrationMode = registrationModeUNKNOWN;
-static int keyStart = 0;
-static int tx_delay_ms = 0;
+static int keyStart;
+static int tx_delay_ms;
 static int retries = 5;
 static int async = 1;
 static int tx_queue_len = 1;
-static int arlan_EEPROM_bad = 0;
-int arlan_entry_and_exit_debug = 0;
+static int arlan_EEPROM_bad;
+int arlan_entry_and_exit_debug;
 
 #ifdef ARLAN_DEBUGING
 
-static int arlan_entry_debug = 0;
-static int arlan_exit_debug = 0;
+static int arlan_entry_debug;
+static int arlan_exit_debug;
 static int testMemory = testMemoryUNKNOWN;
 static int irq = irqUNKNOWN;
 static int txScrambled = 1;
-static int mdebug = 0;
+static int mdebug;
 #endif
 
 #if LINUX_VERSION_CODE > 0x20100
@@ -87,14 +87,14 @@ EXPORT_SYMBOL(last_arlan);
 #endif
 
 struct arlan_conf_stru arlan_conf[MAX_ARLANS];
-int arlans_found = 0;
+int arlans_found;
 
 static  int 	arlan_probe_here(struct net_device *dev, int ioaddr);
 static  int 	arlan_open(struct net_device *dev);
 static  int 	arlan_tx(struct sk_buff *skb, struct net_device *dev);
 static  void 	arlan_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static  int 	arlan_close(struct net_device *dev);
-static  struct enet_statistics *
+static  struct net_device_stats *
 		arlan_statistics		(struct net_device *dev);
 static  void 	arlan_set_multicast		(struct net_device *dev);
 static  int 	arlan_hw_tx			(struct net_device* dev, char *buf, int length );
@@ -205,7 +205,7 @@ int arlan_command(struct net_device *dev, int command_p)
 		priv->card_polling_interval = 1;
 
 	if (arlan_debug & ARLAN_DEBUG_CHAIN_LOCKS)
-		printk(KERN_DEBUG "arlan_command, %lx lock %x  commandByte %x waiting %x incoming %x \n",
+		printk(KERN_DEBUG "arlan_command, %lx lock %lx  commandByte %x waiting %x incoming %x \n",
 		jiffies, priv->command_lock, READSHMB(arlan->commandByte),
 		       priv->waiting_command_mask, command_p);
 
@@ -1069,6 +1069,8 @@ int __init arlan_probe_everywhere(struct net_device *dev)
 	int probed = 0;
 	int found = 0;
 
+	SET_MODULE_OWNER(dev);
+
 	ARLAN_DEBUG_ENTRY("arlan_probe_everywhere");
 	if (mem != 0 && numDevices == 1)	/* Check a single specified location. */
 	{
@@ -1091,14 +1093,14 @@ int __init arlan_probe_everywhere(struct net_device *dev)
 	{
 		if (lastFoundAt == 0xbe000)
 			printk(KERN_ERR "arlan: No Arlan devices found \n");
-		return ENODEV;
+		return -ENODEV;
 	}
 	else
 		return 0;
 
 	ARLAN_DEBUG_EXIT("arlan_probe_everywhere");
 
-	return ENODEV;
+	return -ENODEV;
 }
 
 int __init arlan_find_devices(void)
@@ -1276,11 +1278,12 @@ static int arlan_open(struct net_device *dev)
 		return ret;
 
 	arlan = ((struct arlan_private *) dev->priv)->card;
-	if (request_irq(dev->irq, &arlan_interrupt, 0, dev->name, dev))
+	ret = request_irq(dev->irq, &arlan_interrupt, 0, dev->name, dev);
+	if (ret)
 	{
 		printk(KERN_ERR "%s: unable to get IRQ %d .\n",
 			dev->name, dev->irq);
-		return -EAGAIN;
+		return ret;
 	}
 
 
@@ -1320,10 +1323,9 @@ static int arlan_open(struct net_device *dev)
 	priv->timer.function = &arlan_registration_timer;	/* timer handler */
 
 	arlan_command(dev, ARLAN_COMMAND_POWERUP | ARLAN_COMMAND_LONG_WAIT_NOW);
-	udelay(200000);
+	mdelay(200);
 	add_timer(&priv->timer);
 
-	MOD_INC_USE_COUNT;
 #ifdef CONFIG_PROC_FS
 #ifndef MODULE
 	if (arlan_device[0])
@@ -1887,7 +1889,6 @@ static int arlan_close(struct net_device *dev)
 	priv->open_time = 0;
 	netif_stop_queue(dev);
 	free_irq(dev->irq, dev);
-	MOD_DEC_USE_COUNT;
 
 	ARLAN_DEBUG_EXIT("arlan_close");
 	return 0;
@@ -1907,7 +1908,7 @@ static long alignLong(volatile u_char * ptr)
  * This may be called with the card open or closed.
  */
 
-static struct enet_statistics *arlan_statistics(struct net_device *dev)
+static struct net_device_stats *arlan_statistics(struct net_device *dev)
 {
 	struct arlan_private *priv = (struct arlan_private *) dev->priv;
 	volatile struct arlan_shmem *arlan = ((struct arlan_private *) dev->priv)->card;
@@ -1975,7 +1976,7 @@ int __init arlan_probe(struct net_device *dev)
 	printk("Arlan driver %s\n", arlan_version);
 
 	if (arlan_probe_everywhere(dev))
-		return ENODEV;
+		return -ENODEV;
 
 	arlans_found++;
 

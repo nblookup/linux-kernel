@@ -27,9 +27,9 @@ struct buffer_head *bigblock_fat_bread(struct super_block *, int);
 void default_fat_brelse(struct super_block *, struct buffer_head *);
 void bigblock_fat_brelse(struct super_block *, struct buffer_head *);
 void default_fat_mark_buffer_dirty (struct super_block *,
-	struct buffer_head *, int);
+	struct buffer_head *);
 void bigblock_fat_mark_buffer_dirty (struct super_block *,
-	struct buffer_head *, int);
+	struct buffer_head *);
 void default_fat_set_uptodate (struct super_block *, struct buffer_head *,int);
 void bigblock_fat_set_uptodate (struct super_block *, struct buffer_head *,int);
 int default_fat_is_uptodate(struct super_block *, struct buffer_head *);
@@ -98,8 +98,8 @@ struct cvf_format bigblock_cvf = {
 	NULL
 };
 
-struct cvf_format *cvf_formats[MAX_CVF_FORMATS]={NULL,NULL,NULL};
-int cvf_format_use_count[MAX_CVF_FORMATS]={0,0,0};
+struct cvf_format *cvf_formats[MAX_CVF_FORMATS];
+int cvf_format_use_count[MAX_CVF_FORMATS];
 
 int register_cvf_format(struct cvf_format*cvf_format)
 { int i,j;

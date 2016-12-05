@@ -1,6 +1,6 @@
 /*
  *	include/linux/bfs_fs.h - BFS data structures on disk.
- *	Copyright (C) 1999 Tigran Aivazian <tigran@ocston.org>
+ *	Copyright (C) 1999 Tigran Aivazian <tigran@veritas.com>
  */
 
 #ifndef _LINUX_BFS_FS_H
@@ -77,9 +77,6 @@ struct bfs_super_block {
 	((bfs_sb->s_from != -1) && (bfs_sb->s_to != -1) && !(sb->s_flags & MS_RDONLY))
 
 #ifdef __KERNEL__
-
-/* inode.c */
-extern int init_bfs_fs(void);
 
 /* file.c */
 extern struct inode_operations bfs_file_inops;

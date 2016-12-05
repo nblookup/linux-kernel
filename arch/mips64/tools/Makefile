@@ -1,4 +1,4 @@
-# $Id: Makefile,v 1.2 1999/12/04 03:59:01 ralf Exp $
+# $Id: Makefile,v 1.1 1999/08/18 21:46:53 ralf Exp $
 #
 # Makefile for MIPS kernel build tools.
 #
@@ -13,17 +13,19 @@ TARGET	:= $(TOPDIR)/include/asm-$(ARCH)/offset.h
 .S.o:
 	$(CC) $(CFLAGS) -c $< -o $*.o
 
-all: $(TARGET)
-
 $(TARGET): offset.h
 	cmp -s $^ $@ || (cp $^ $(TARGET).new && mv $(TARGET).new $(TARGET))
 
 offset.h: offset.s
 	sed -n '/^@@@/s///p' $^ >$@
 
-offset.s: offset.c
+offset.s: offset.c $(TOPDIR)/include/linux/autoconf.h
 
 clean:
 	rm -f offset.[hs] $(TARGET).new
+	
+mrproper:	
+	rm -f offset.[hs] $(TARGET).new
+	rm -f $(TARGET)
 
 include $(TOPDIR)/Rules.make

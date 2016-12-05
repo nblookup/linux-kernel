@@ -60,7 +60,7 @@ static const char *awc_version =
 #include <linux/pci.h>
 
 
-static int reverse_probe =0 ;
+static int reverse_probe;
 
 
 static int awc_pci_init(struct net_device * dev, struct pci_dev *pdev,
@@ -70,7 +70,7 @@ static int awc_pci_init(struct net_device * dev, struct pci_dev *pdev,
 int awc4500_pci_probe(struct net_device *dev)
 {
 	int cards_found = 0;
-	static int pci_index = 0;	/* Static, for multiple probe calls. */
+	static int pci_index;	/* Static, for multiple probe calls. */
 	u8 pci_irq_line = 0;
 //	int p;
 
@@ -98,6 +98,8 @@ int awc4500_pci_probe(struct net_device *dev)
 		pdev = pci_find_slot(awc_pci_bus, awc_pci_dev);
 		if (!pdev)
 			continue;
+		if (pci_enable_device(pdev))
+			continue;
 		vendor = pdev->vendor;
 		device = pdev->device;
 	        pci_irq_line = pdev->irq;
@@ -121,7 +123,8 @@ int awc4500_pci_probe(struct net_device *dev)
 //				printk(KERN_ERR "aironet4X00 mem addrs not available for maping \n");
 //				continue;
 //		}
-		request_region(pci_ioaddr, AIRONET4X00_IO_SIZE, "aironet4x00 ioaddr");
+		if (!request_region(pci_ioaddr, AIRONET4X00_IO_SIZE, "aironet4x00 ioaddr"))
+			continue;
 //		request_region(pci_cisaddr, AIRONET4X00_CIS_SIZE, "aironet4x00 cis");
 //		request_region(pci_memaddr, AIRONET4X00_MEM_SIZE, "aironet4x00 mem");
 
@@ -161,16 +164,23 @@ int awc4500_pci_probe(struct net_device *dev)
 static int awc_pci_init(struct net_device * dev, struct pci_dev *pdev,
  			int ioaddr, int cis_addr, int mem_addr, u8 pci_irq_line) {
 
-	int i;
+	int i, allocd_dev = 0;
 
 	if (!dev) {
-		dev = init_etherdev(dev, 0 );	
+		dev = init_etherdev(NULL, 0);	
+		if (!dev)
+			return -ENOMEM;
+		allocd_dev = 1;
 	}
 	dev->priv = kmalloc(sizeof(struct awc_private),GFP_KERNEL );
 	memset(dev->priv,0,sizeof(struct awc_private));
 	if (!dev->priv) {
 		printk(KERN_CRIT "aironet4x00: could not allocate device private, some unstability may follow\n");
-		return -1;
+		if (allocd_dev) {
+			unregister_netdev(dev);
+			kfree(dev);
+		}
+		return -ENOMEM;
 	};
 
 //	ether_setup(dev);
@@ -191,7 +201,16 @@ static int awc_pci_init(struct net_device * dev, struct pci_dev *pdev,
 	dev->watchdog_timeo = AWC_TX_TIMEOUT;
 	
 
-	request_irq(dev->irq,awc_interrupt, SA_SHIRQ | SA_INTERRUPT ,"Aironet 4X00",dev);
+	i = request_irq(dev->irq,awc_interrupt, SA_SHIRQ | SA_INTERRUPT, dev->name, dev);
+	if (i) {
+		kfree(dev->priv);
+		dev->priv = NULL;
+		if (allocd_dev) {
+			unregister_netdev(dev);
+			kfree(dev);
+		}
+		return i;
+	}
 
 	awc_private_init( dev);
 	awc_init(dev);
@@ -241,8 +260,8 @@ static void awc_pci_release(void) {
 
 		unregister_netdev(aironet4500_devices[i]);
 		free_irq(aironet4500_devices[i]->irq,aironet4500_devices[i]);
-		kfree_s(aironet4500_devices[i]->priv, sizeof(struct awc_private));
-		kfree_s(aironet4500_devices[i], sizeof(struct net_device));
+		kfree(aironet4500_devices[i]->priv);
+		kfree(aironet4500_devices[i]);
 
 		aironet4500_devices[i]=0;
 
@@ -454,8 +473,8 @@ static void awc_pnp_release(void) {
 
 		unregister_netdev(aironet4500_devices[i]);
 		free_irq(aironet4500_devices[i]->irq,aironet4500_devices[i]);
-		kfree_s(aironet4500_devices[i]->priv, sizeof(struct awc_private));
-		kfree_s(aironet4500_devices[i], sizeof(struct net_device));
+		kfree(aironet4500_devices[i]->priv);
+		kfree(aironet4500_devices[i]);
 
 		aironet4500_devices[i]=0;
 
@@ -488,7 +507,7 @@ MODULE_PARM_DESC(io,"Aironet 4x00 ISA non-PNP ioports,required");
 int awc4500_isa_probe(struct net_device *dev)
 {
 //	int cards_found = 0;
-//	static int isa_index = 0;	/* Static, for multiple probe calls. */
+//	static int isa_index;	/* Static, for multiple probe calls. */
 	int isa_irq_line = 0;
 	int isa_ioaddr = 0;
 //	int p;
@@ -592,8 +611,8 @@ static void awc_isa_release(void) {
 
 		unregister_netdev(aironet4500_devices[i]);
 		free_irq(aironet4500_devices[i]->irq,aironet4500_devices[i]);
-		kfree_s(aironet4500_devices[i]->priv, sizeof(struct awc_private));
-		kfree_s(aironet4500_devices[i], sizeof(struct net_device));
+		kfree(aironet4500_devices[i]->priv);
+		kfree(aironet4500_devices[i]);
 
 		aironet4500_devices[i]=0;
 
@@ -862,8 +881,8 @@ static void awc_i365_release(void) {
 
 		unregister_netdev(aironet4500_devices[i]);
 
-		//kfree_s(aironet4500_devices[i]->priv, sizeof(struct awc_private));
-		kfree_s(aironet4500_devices[i], sizeof(struct net_device));
+		//kfree(aironet4500_devices[i]->priv);
+		kfree(aironet4500_devices[i]);
 
 		aironet4500_devices[i]=0;
 

@@ -28,6 +28,7 @@
 #include <asm/softirq.h>
 #include <asm/uaccess.h>
 #include <asm/timer.h>
+#include <asm/starfire.h>
 
 #define __KERNEL_SYSCALLS__
 #include <linux/unistd.h>
@@ -78,8 +79,8 @@ int smp_bogo(char *buf)
 		if(cpu_present_map & (1UL << i))
 			len += sprintf(buf + len,
 				       "Cpu%dBogo\t: %lu.%02lu\n",
-				       i, cpu_data[i].udelay_val / 500000,
-				       (cpu_data[i].udelay_val / 5000) % 100);
+				       i, cpu_data[i].udelay_val / (500000/HZ),
+				       (cpu_data[i].udelay_val / (5000/HZ)) % 100);
 	return len;
 }
 
@@ -87,11 +88,9 @@ void __init smp_store_cpu_info(int id)
 {
 	int i;
 
-	cpu_data[id].irq_count			= 0;
-	cpu_data[id].bh_count			= 0;
 	/* multiplier and counter set by
 	   smp_setup_percpu_timer()  */
-	cpu_data[id].udelay_val			= loops_per_sec;
+	cpu_data[id].udelay_val			= loops_per_jiffy;
 
 	cpu_data[id].pgcache_size		= 0;
 	cpu_data[id].pte_cache[0]		= NULL;
@@ -304,9 +303,17 @@ void __init smp_boot_cpus(void)
 
 static inline void xcall_deliver(u64 data0, u64 data1, u64 data2, u64 pstate, unsigned long cpu)
 {
-	u64 result, target = (cpu << 14) | 0x70;
+	u64 result, target;
 	int stuck, tmp;
 
+	if (this_is_starfire) {
+		/* map to real upaid */
+		cpu = (((cpu & 0x3c) << 1) |
+			((cpu & 0x40) >> 4) |
+			(cpu & 0x3));
+	}
+
+	target = (cpu << 14) | 0x70;
 #ifdef XCALL_DEBUG
 	printk("CPU[%d]: xcall(data[%016lx:%016lx:%016lx],tgt[%016lx])\n",
 	       smp_processor_id(), data0, data1, data2, target);
@@ -385,6 +392,46 @@ void smp_cross_call(unsigned long *func, u32 ctx, u64 data1, u64 data2)
 		}
 		/* NOTE: Caller runs local copy on master. */
 	}
+}
+
+struct call_data_struct {
+	void (*func) (void *info);
+	void *info;
+	atomic_t finished;
+	int wait;
+};
+
+extern unsigned long xcall_call_function;
+
+int smp_call_function(void (*func)(void *info), void *info,
+		      int nonatomic, int wait)
+{
+	struct call_data_struct data;
+	int cpus = smp_num_cpus - 1;
+
+	if (!cpus)
+		return 0;
+
+	data.func = func;
+	data.info = info;
+	atomic_set(&data.finished, 0);
+	data.wait = wait;
+
+	smp_cross_call(&xcall_call_function,
+		       0, (u64) &data, 0);
+	if (wait) {
+		while (atomic_read(&data.finished) != cpus)
+			barrier();
+	}
+
+	return 0;
+}
+
+void smp_call_function_client(struct call_data_struct *call_data)
+{
+	call_data->func(call_data->info);
+	if (call_data->wait)
+		atomic_inc(&call_data->finished);
 }
 
 extern unsigned long xcall_flush_tlb_page;
@@ -469,52 +516,83 @@ void smp_flush_tlb_all(void)
  */
 void smp_flush_tlb_mm(struct mm_struct *mm)
 {
-	u32 ctx = CTX_HWBITS(mm->context);
+	if (CTX_VALID(mm->context)) {
+		u32 ctx = CTX_HWBITS(mm->context);
+		int cpu = smp_processor_id();
 
-	if (mm == current->active_mm &&
-	    atomic_read(&mm->mm_users) == 1 &&
-	    (mm->cpu_vm_mask == (1UL << smp_processor_id())))
-		goto local_flush_and_out;
+		if (mm == current->active_mm && atomic_read(&mm->mm_users) == 1) {
+			/* See smp_flush_tlb_page for info about this. */
+			mm->cpu_vm_mask = (1UL << cpu);
+			goto local_flush_and_out;
+		}
 
-	smp_cross_call(&xcall_flush_tlb_mm, ctx, 0, 0);
+		smp_cross_call(&xcall_flush_tlb_mm, ctx, 0, 0);
 
-local_flush_and_out:
-	__flush_tlb_mm(ctx, SECONDARY_CONTEXT);
+	local_flush_and_out:
+		__flush_tlb_mm(ctx, SECONDARY_CONTEXT);
+	}
 }
 
 void smp_flush_tlb_range(struct mm_struct *mm, unsigned long start,
 			 unsigned long end)
 {
-	u32 ctx = CTX_HWBITS(mm->context);
+	if (CTX_VALID(mm->context)) {
+		u32 ctx = CTX_HWBITS(mm->context);
+		int cpu = smp_processor_id();
 
-	start &= PAGE_MASK;
-	end   &= PAGE_MASK;
-	if(mm == current->active_mm &&
-	   atomic_read(&mm->mm_users) == 1 &&
-	   (mm->cpu_vm_mask == (1UL << smp_processor_id())))
-		goto local_flush_and_out;
+		start &= PAGE_MASK;
+		end   &= PAGE_MASK;
 
-	smp_cross_call(&xcall_flush_tlb_range, ctx, start, end);
+		if (mm == current->active_mm && atomic_read(&mm->mm_users) == 1) {
+			mm->cpu_vm_mask = (1UL << cpu);
+			goto local_flush_and_out;
+		}
 
-local_flush_and_out:
-	__flush_tlb_range(ctx, start, SECONDARY_CONTEXT, end, PAGE_SIZE, (end-start));
+		smp_cross_call(&xcall_flush_tlb_range, ctx, start, end);
+
+	local_flush_and_out:
+		__flush_tlb_range(ctx, start, SECONDARY_CONTEXT, end, PAGE_SIZE, (end-start));
+	}
 }
 
 void smp_flush_tlb_page(struct mm_struct *mm, unsigned long page)
 {
-	u32 ctx = CTX_HWBITS(mm->context);
+	if (CTX_VALID(mm->context)) {
+		u32 ctx = CTX_HWBITS(mm->context);
+		int cpu = smp_processor_id();
 
-	page &= PAGE_MASK;
-	if(mm == current->active_mm &&
-	   atomic_read(&mm->mm_users) == 1 &&
-	   (mm->cpu_vm_mask == (1UL << smp_processor_id()))) {
-		goto local_flush_and_out;
+		page &= PAGE_MASK;
+		if (mm == current->active_mm && atomic_read(&mm->mm_users) == 1) {
+			/* By virtue of being the current address space, and
+			 * having the only reference to it, the following operation
+			 * is safe.
+			 *
+			 * It would not be a win to perform the xcall tlb flush in
+			 * this case, because even if we switch back to one of the
+			 * other processors in cpu_vm_mask it is almost certain that
+			 * all TLB entries for this context will be replaced by the
+			 * time that happens.
+			 */
+			mm->cpu_vm_mask = (1UL << cpu);
+			goto local_flush_and_out;
+		} else {
+			/* By virtue of running under the mm->page_table_lock,
+			 * and mmu_context.h:switch_mm doing the same, the following
+			 * operation is safe.
+			 */
+			if (mm->cpu_vm_mask == (1UL << cpu))
+				goto local_flush_and_out;
+		}
+
+		/* OK, we have to actually perform the cross call.  Most likely
+		 * this is a cloned mm or kswapd is kicking out pages for a task
+		 * which has run recently on another cpu.
+		 */
+		smp_cross_call(&xcall_flush_tlb_page, ctx, page, 0);
+
+	local_flush_and_out:
+		__flush_tlb_page(ctx, page, SECONDARY_CONTEXT);
 	}
-
-	smp_cross_call(&xcall_flush_tlb_page, ctx, page, 0);
-
-local_flush_and_out:
-	__flush_tlb_page(ctx, page, SECONDARY_CONTEXT);
 }
 
 /* CPU capture. */
@@ -528,7 +606,7 @@ static unsigned long penguins_are_doing_time = 0;
 void smp_capture(void)
 {
 	if (smp_processors_ready) {
-		int result = atomic_add_return(1, &smp_capture_depth);
+		int result = __atomic_add(1, &smp_capture_depth);
 
 		membar("#StoreStore | #LoadStore");
 		if(result == 1) {
@@ -596,36 +674,12 @@ void smp_promstop_others(void)
 		smp_cross_call(&xcall_promstop, 0, 0, 0);
 }
 
-static inline void sparc64_do_profile(unsigned long pc, unsigned long g3)
-{
-	if (prof_buffer && current->pid) {
-		extern int _stext;
-		extern int rwlock_impl_begin, rwlock_impl_end;
-		extern int atomic_impl_begin, atomic_impl_end;
-
-		if ((pc >= (unsigned long) &rwlock_impl_begin &&
-		     pc < (unsigned long) &rwlock_impl_end) ||
-		    (pc >= (unsigned long) &atomic_impl_begin &&
-		     pc < (unsigned long) &atomic_impl_end))
-			pc = g3;
-
-		pc -= (unsigned long) &_stext;
-		pc >>= prof_shift;
-
-		if(pc >= prof_len)
-			pc = prof_len - 1;
-		atomic_inc((atomic_t *)&prof_buffer[pc]);
-	}
-}
+extern void sparc64_do_profile(unsigned long pc, unsigned long o7);
 
 static unsigned long current_tick_offset;
 
 #define prof_multiplier(__cpu)		cpu_data[(__cpu)].multiplier
 #define prof_counter(__cpu)		cpu_data[(__cpu)].counter
-
-extern void update_one_process(struct task_struct *p, unsigned long ticks,
-			       unsigned long user, unsigned long system,
-			       int cpu);
 
 void smp_percpu_timer_interrupt(struct pt_regs *regs)
 {
@@ -645,53 +699,20 @@ void smp_percpu_timer_interrupt(struct pt_regs *regs)
 
 	clear_softint((1UL << 0));
 	do {
-		if(!user)
-			sparc64_do_profile(regs->tpc, regs->u_regs[UREG_G3]);
-		if(!--prof_counter(cpu))
-		{
+		if (!user)
+			sparc64_do_profile(regs->tpc, regs->u_regs[UREG_RETPC]);
+		if (!--prof_counter(cpu)) {
 			if (cpu == boot_cpu_id) {
-/* XXX Keep this in sync with irq.c --DaveM */
-#define irq_enter(cpu, irq)			\
-do {	hardirq_enter(cpu);			\
-	spin_unlock_wait(&global_irq_lock);	\
-} while(0)
-#define irq_exit(cpu, irq)	hardirq_exit(cpu)
-
 				irq_enter(cpu, 0);
-				kstat.irqs[cpu][0]++;
 
+				kstat.irqs[cpu][0]++;
 				timer_tick_interrupt(regs);
 
 				irq_exit(cpu, 0);
-
-#undef irq_enter
-#undef irq_exit
 			}
 
-			if(current->pid) {
-				unsigned int *inc, *inc2;
+			update_process_times(user);
 
-				update_one_process(current, 1, user, !user, cpu);
-				if(--current->counter <= 0) {
-					current->counter = 0;
-					current->need_resched = 1;
-				}
-
-				if(user) {
-					if(current->priority < DEF_PRIORITY) {
-						inc = &kstat.cpu_nice;
-						inc2 = &kstat.per_cpu_nice[cpu];
-					} else {
-						inc = &kstat.cpu_user;
-						inc2 = &kstat.per_cpu_user[cpu];
-					}
-				} else {
-					inc = &kstat.cpu_system;
-					inc2 = &kstat.per_cpu_system[cpu];
-				}
-				atomic_inc((atomic_t *)inc);
-				atomic_inc((atomic_t *)inc2);
-			}
 			prof_counter(cpu) = prof_multiplier(cpu);
 		}
 
@@ -805,14 +826,14 @@ static inline unsigned long find_flush_base(unsigned long size)
 
 	size = PAGE_ALIGN(size);
 	found = size;
-	base = page_address(p);
+	base = (unsigned long) page_address(p);
 	while(found != 0) {
 		/* Failure. */
 		if(p >= (mem_map + max_mapnr))
 			return 0UL;
 		if(PageReserved(p)) {
 			found = size;
-			base = page_address(p);
+			base = (unsigned long) page_address(p);
 		} else {
 			found -= PAGE_SIZE;
 		}
@@ -825,7 +846,7 @@ cycles_t cacheflush_time;
 
 static void __init smp_tune_scheduling (void)
 {
-	unsigned long flush_base, flags, *p;
+	unsigned long orig_flush_base, flush_base, flags, *p;
 	unsigned int ecache_size, order;
 	cycles_t tick1, tick2, raw;
 
@@ -844,7 +865,8 @@ static void __init smp_tune_scheduling (void)
 					 "ecache-size", (512 * 1024));
 	if (ecache_size > (4 * 1024 * 1024))
 		ecache_size = (4 * 1024 * 1024);
-	flush_base = __get_free_pages(GFP_KERNEL, order = get_order(ecache_size));
+	orig_flush_base = flush_base =
+		__get_free_pages(GFP_KERNEL, order = get_order(ecache_size));
 
 	if (flush_base != 0UL) {
 		__save_and_cli(flags);
@@ -886,7 +908,7 @@ static void __init smp_tune_scheduling (void)
 		 */
 		cacheflush_time = (raw - (raw >> 2));
 
-		free_pages(flush_base, order);
+		free_pages(orig_flush_base, order);
 	} else {
 		cacheflush_time = ((ecache_size << 2) +
 				   (ecache_size << 1));

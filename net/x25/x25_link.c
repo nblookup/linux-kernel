@@ -13,8 +13,11 @@
  *		2 of the License, or (at your option) any later version.
  *
  *	History
- *	X.25 001	Jonathan Naylor	Started coding.
- *	X.25 002	Jonathan Naylor	New timer architecture.
+ *	X.25 001	Jonathan Naylor	  Started coding.
+ *	X.25 002	Jonathan Naylor	  New timer architecture.
+ *	mar/20/00	Daniela Squassoni Disabling/enabling of facilities 
+ *					  negotiation.
+ *	2000-09-04	Henner Eisen	  dev_hold() / dev_put() for x25_neigh.
  */
 
 #include <linux/config.h>
@@ -73,18 +76,25 @@ static void x25_stop_t20timer(struct x25_neigh *neigh)
 	del_timer(&neigh->t20timer);
 }
 
+static int x25_t20timer_pending(struct x25_neigh *neigh)
+{
+	return timer_pending(&neigh->t20timer);
+}
+
 /*
  *	This handles all restart and diagnostic frames.
  */
 void x25_link_control(struct sk_buff *skb, struct x25_neigh *neigh, unsigned short frametype)
 {
 	struct sk_buff *skbn;
+	int confirm;
 
 	switch (frametype) {
 		case X25_RESTART_REQUEST:
+			confirm = !x25_t20timer_pending(neigh);
 			x25_stop_t20timer(neigh);
 			neigh->state = X25_LINK_STATE_3;
-			x25_transmit_restart_confirmation(neigh);
+			if (confirm) x25_transmit_restart_confirmation(neigh);
 			break;
 
 		case X25_RESTART_CONFIRMATION:
@@ -283,9 +293,11 @@ void x25_link_device_up(struct net_device *dev)
 
 	init_timer(&x25_neigh->t20timer);
 
+	dev_hold(dev);
 	x25_neigh->dev      = dev;
 	x25_neigh->state    = X25_LINK_STATE_0;
 	x25_neigh->extended = 0;
+	x25_neigh->global_facil_mask = (X25_MASK_REVERSE | X25_MASK_THROUGHPUT | X25_MASK_PACKET_SIZE | X25_MASK_WINDOW_SIZE); /* enables negotiation */
 	x25_neigh->t20      = sysctl_x25_restart_request_timeout;
 
 	save_flags(flags); cli();
@@ -339,8 +351,10 @@ void x25_link_device_down(struct net_device *dev)
 		neigh     = x25_neigh;
 		x25_neigh = x25_neigh->next;
 
-		if (neigh->dev == dev)
+		if (neigh->dev == dev){
 			x25_remove_neigh(neigh);
+			dev_put(dev);
+		}
 	}
 }
 
@@ -370,6 +384,8 @@ int x25_subscr_ioctl(unsigned int cmd, void *arg)
 	switch (cmd) {
 
 		case SIOCX25GSUBSCRIP:
+			if (copy_from_user(&x25_subscr, arg, sizeof(struct x25_subscrip_struct)))
+				return -EFAULT;
 			if ((dev = x25_dev_get(x25_subscr.device)) == NULL)
 				return -EINVAL;
 			if ((x25_neigh = x25_get_neigh(dev)) == NULL) {
@@ -378,6 +394,7 @@ int x25_subscr_ioctl(unsigned int cmd, void *arg)
 			}
 			dev_put(dev);
 			x25_subscr.extended = x25_neigh->extended;
+			x25_subscr.global_facil_mask = x25_neigh->global_facil_mask;
 			if (copy_to_user(arg, &x25_subscr, sizeof(struct x25_subscrip_struct)))
 				return -EFAULT;
 			break;
@@ -395,6 +412,7 @@ int x25_subscr_ioctl(unsigned int cmd, void *arg)
 			if (x25_subscr.extended != 0 && x25_subscr.extended != 1)
 				return -EINVAL;
 			x25_neigh->extended = x25_subscr.extended;
+			x25_neigh->global_facil_mask = x25_subscr.global_facil_mask;
 			break;
 
 		default:

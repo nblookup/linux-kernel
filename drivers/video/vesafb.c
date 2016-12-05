@@ -30,6 +30,7 @@
 #include <video/fbcon-cfb16.h>
 #include <video/fbcon-cfb24.h>
 #include <video/fbcon-cfb32.h>
+#include <video/fbcon-mac.h>
 
 #define dac_reg	(0x3c8)
 #define dac_val	(0x3c9)
@@ -46,14 +47,14 @@ int   video_size;
 char *video_vbase;        /* mapped */
 
 /* mode */
-int  video_bpp;
-int  video_width;
-int  video_height;
-int  video_height_virtual;
-int  video_type = FB_TYPE_PACKED_PIXELS;
-int  video_visual;
-int  video_linelength;
-int  video_cmap_len;
+static int  video_bpp;
+static int  video_width;
+static int  video_height;
+static int  video_height_virtual;
+static int  video_type = FB_TYPE_PACKED_PIXELS;
+static int  video_visual;
+static int  video_linelength;
+static int  video_cmap_len;
 
 /* --------------------------------------------------------------------- */
 
@@ -104,25 +105,6 @@ static void            (*pmi_pal)(void);
 static struct display_switch vesafb_sw;
 
 /* --------------------------------------------------------------------- */
-
-	/*
-	 * Open/Release the frame buffer device
-	 */
-
-static int vesafb_open(struct fb_info *info, int user)
-{
-	/*
-	 * Nothing, only a usage count for the moment
-	 */
-	MOD_INC_USE_COUNT;
-	return(0);
-}
-
-static int vesafb_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return(0);
-}
 
 static int vesafb_pan_display(struct fb_var_screeninfo *var, int con,
                               struct fb_info *info)
@@ -239,8 +221,13 @@ static void vesafb_set_disp(int con)
 		break;
 #endif
 	default:
+#ifdef FBCON_HAS_MAC
+		sw = &fbcon_mac;
+		break;
+#else
 		sw = &fbcon_dummy;
 		return;
+#endif
 	}
 	memcpy(&vesafb_sw, sw, sizeof(*sw));
 	display->dispsw = &vesafb_sw;
@@ -451,26 +438,17 @@ static int vesafb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 	return 0;
 }
 
-static int vesafb_ioctl(struct inode *inode, struct file *file,
-		       unsigned int cmd, unsigned long arg, int con,
-		       struct fb_info *info)
-{
-	return -EINVAL;
-}
-
 static struct fb_ops vesafb_ops = {
-	vesafb_open,
-	vesafb_release,
-	vesafb_get_fix,
-	vesafb_get_var,
-	vesafb_set_var,
-	vesafb_get_cmap,
-	vesafb_set_cmap,
-	vesafb_pan_display,
-	vesafb_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	vesafb_get_fix,
+	fb_get_var:	vesafb_get_var,
+	fb_set_var:	vesafb_set_var,
+	fb_get_cmap:	vesafb_get_cmap,
+	fb_set_cmap:	vesafb_set_cmap,
+	fb_pan_display:	vesafb_pan_display,
 };
 
-int vesafb_setup(char *options)
+int __init vesafb_setup(char *options)
 {
 	char *this_opt;
 	
@@ -543,12 +521,19 @@ int __init vesafb_init(void)
 
 	if (!request_mem_region(video_base, video_size, "vesafb")) {
 		printk(KERN_ERR
-		       "vesafb: abort, cannot reserve video memory at 0x%lu\n",
+		       "vesafb: abort, cannot reserve video memory at 0x%lx\n",
 			video_base);
-		return -1;
+		return -EBUSY;
 	}
 
         video_vbase = ioremap(video_base, video_size);
+	if (!video_vbase) {
+		release_mem_region(video_base, video_size);
+		printk(KERN_ERR
+		       "vesafb: abort, cannot ioremap video memory 0x%x @ 0x%lx\n",
+			video_size, video_base);
+		return -EIO;
+	}
 
 	printk(KERN_INFO "vesafb: framebuffer at 0x%lx, mapped to 0x%p, size %dk\n",
 	       video_base, video_vbase, video_size/1024);

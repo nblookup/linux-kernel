@@ -7,6 +7,22 @@
  *
  * (C) Copyright 1999 Johannes Erdfelt
  * (C) Copyright 1999 Randy Dunlap
+ *
+ * 5/24/00 Removed optional (and unnecessary) locking of the driver while
+ * the device remains plugged in. Corrected race conditions in ibmcam_open
+ * and ibmcam_probe() routines using this as a guideline:
+ *
+ * (2) The big kernel lock is automatically released when a process sleeps
+ *   in the kernel and is automatically reacquired on reschedule if the
+ *   process had the lock originally.  Any code that can be compiled as
+ *   a module and is entered with the big kernel lock held *MUST*
+ *   increment the use count to activate the indirect module protection
+ *   before doing anything that might sleep.
+ *
+ *   In practice, this means that all routines that live in modules and
+ *   are invoked under the big kernel lock should do MOD_INC_USE_COUNT
+ *   as their very first action.  And all failure paths from that
+ *   routine must do MOD_DEC_USE_COUNT before returning.
  */
 
 #include <linux/kernel.h>
@@ -19,27 +35,13 @@
 #include <linux/vmalloc.h>
 #include <linux/wrapper.h>
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/spinlock.h>
 #include <linux/usb.h>
 
 #include <asm/io.h>
 
 #include "ibmcam.h"
-
-/*
- * IBMCAM_LOCKS_DRIVER_WHILE_DEVICE_IS_PLUGGED: This symbol controls
- * the locking of the driver. If non-zero, the driver counts the
- * probe() call as usage and increments module usage counter; this
- * effectively prevents removal of the module (with rmmod) until the
- * device is unplugged (then disconnect() callback reduces the module
- * usage counter back, and module can be removed).
- *
- * This behavior may be useful if you prefer to lock the driver in
- * memory until device is unplugged. However you can't reload the
- * driver if you want to alter some parameters - you'd need to unplug
- * the camera first. Therefore, I recommend setting 0.
- */
-#define IBMCAM_LOCKS_DRIVER_WHILE_DEVICE_IS_PLUGGED	0
 
 #define	ENABLE_HEXDUMP	0	/* Enable if you need it */
 static int debug = 0;
@@ -58,6 +60,8 @@ typedef enum {
 #define FLAGS_DISPLAY_HINTS		(1 << 2)
 #define FLAGS_OVERLAY_STATS		(1 << 3)
 #define FLAGS_FORCE_TESTPATTERN		(1 << 4)
+#define FLAGS_SEPARATE_FRAMES		(1 << 5)
+#define FLAGS_CLEAN_FRAMES		(1 << 6)
 
 static int flags = 0; /* FLAGS_DISPLAY_HINTS | FLAGS_OVERLAY_STATS; */
 
@@ -124,21 +128,36 @@ static int init_model2_sat = -1;
 static int init_model2_yb = -1;
 
 MODULE_PARM(debug, "i");
+MODULE_PARM_DESC(debug, "Debug level: 0-9 (default=0)");
 MODULE_PARM(flags, "i");
+MODULE_PARM_DESC(flags, "Bitfield: 0=VIDIOCSYNC, 1=B/W, 2=show hints, 3=show stats, 4=test pattern, 5=seperate frames, 6=clean frames");
 MODULE_PARM(framerate, "i");
+MODULE_PARM_DESC(framerate, "Framerate setting: 0=slowest, 6=fastest (default=2)");
 MODULE_PARM(lighting, "i");
+MODULE_PARM_DESC(lighting, "Photosensitivity: 0=bright, 1=medium (default), 2=low light");
 MODULE_PARM(sharpness, "i");
+MODULE_PARM_DESC(sharpness, "Model1 noise reduction: 0=smooth, 6=sharp (default=4)");
 MODULE_PARM(videosize, "i");
+MODULE_PARM_DESC(videosize, "Image size: 0=128x96, 1=176x144, 2=352x288, 3=320x240, 4=352x240 (default=1)");
 MODULE_PARM(init_brightness, "i");
+MODULE_PARM_DESC(init_brightness, "Brightness preconfiguration: 0-255 (default=128)");
 MODULE_PARM(init_contrast, "i");
+MODULE_PARM_DESC(init_contrast, "Contrast preconfiguration: 0-255 (default=192)");
 MODULE_PARM(init_color, "i");
+MODULE_PARM_DESC(init_color, "Dolor preconfiguration: 0-255 (default=128)");
 MODULE_PARM(init_hue, "i");
+MODULE_PARM_DESC(init_hue, "Hue preconfiguration: 0-255 (default=128)");
 MODULE_PARM(hue_correction, "i");
+MODULE_PARM_DESC(hue_correction, "YUV colorspace regulation: 0-255 (default=128)");
 
 MODULE_PARM(init_model2_rg, "i");
+MODULE_PARM_DESC(init_model2_rg, "Model2 preconfiguration: 0-255 (default=112)");
 MODULE_PARM(init_model2_rg2, "i");
+MODULE_PARM_DESC(init_model2_rg2, "Model2 preconfiguration: 0-255 (default=47)");
 MODULE_PARM(init_model2_sat, "i");
+MODULE_PARM_DESC(init_model2_sat, "Model2 preconfiguration: 0-255 (default=52)");
 MODULE_PARM(init_model2_yb, "i");
+MODULE_PARM_DESC(init_model2_yb, "Model2 preconfiguration: 0-255 (default=160)");
 
 MODULE_AUTHOR ("module author");
 MODULE_DESCRIPTION ("IBM/Xirlink C-it USB Camera Driver for Linux (c) 2000");
@@ -187,8 +206,10 @@ static inline unsigned long uvirt_to_kva(pgd_t *pgd, unsigned long adr)
 		if (!pmd_none(*pmd)) {
 			ptep = pte_offset(pmd, adr);
 			pte = *ptep;
-			if (pte_present(pte))
-				ret = page_address(pte_page(pte)) | (adr & (PAGE_SIZE-1));
+			if (pte_present(pte)) {
+				ret = (unsigned long) page_address(pte_page(pte));
+				ret |= (adr & (PAGE_SIZE - 1));
+			}
 		}
 	}
 	MDEBUG(printk("uv2kva(%lx-->%lx)", adr, ret));
@@ -240,7 +261,7 @@ static void *rvmalloc(unsigned long size)
 	size += (PAGE_SIZE - 1);
 	size &= ~(PAGE_SIZE - 1);
 
-	mem = vmalloc(size);
+	mem = vmalloc_32(size);
 	if (!mem)
 		return NULL;
 
@@ -248,7 +269,7 @@ static void *rvmalloc(unsigned long size)
 	adr = (unsigned long) mem;
 	while (size > 0) {
 		page = kvirt_to_pa(adr);
-		mem_map_reserve(MAP_NR(__va(page)));
+		mem_map_reserve(virt_to_page(__va(page)));
 		adr += PAGE_SIZE;
 		if (size > PAGE_SIZE)
 			size -= PAGE_SIZE;
@@ -272,7 +293,7 @@ static void rvfree(void *mem, unsigned long size)
 	adr=(unsigned long) mem;
 	while (size > 0) {
 		page = kvirt_to_pa(adr);
-		mem_map_unreserve(MAP_NR(__va(page)));
+		mem_map_unreserve(virt_to_page(__va(page)));
 		adr += PAGE_SIZE;
 		if (size > PAGE_SIZE)
 			size -= PAGE_SIZE;
@@ -2238,6 +2259,12 @@ static void ibmcam_stop_isoc(struct usb_ibmcam *ibmcam)
 	}
 }
 
+/*
+ * ibmcam_new_frame()
+ *
+ * History:
+ * 29-Mar-00 Added copying of previous frame into the current one.
+ */
 static int ibmcam_new_frame(struct usb_ibmcam *ibmcam, int framenum)
 {
 	struct ibmcam_frame *frame;
@@ -2258,10 +2285,33 @@ static int ibmcam_new_frame(struct usb_ibmcam *ibmcam, int framenum)
 	frame->scanstate = STATE_SCANNING;
 	frame->scanlength = 0;		/* Accumulated in ibmcam_parse_data() */
 	ibmcam->curframe = framenum;
-#if 0
-	/* This provides a "clean" frame but slows things down */
-	memset(frame->data, 0, MAX_FRAME_SIZE);
-#endif
+
+	/*
+	 * Normally we would want to copy previous frame into the current one
+	 * before we even start filling it with data; this allows us to stop
+	 * filling at any moment; top portion of the frame will be new and
+	 * bottom portion will stay as it was in previous frame. If we don't
+	 * do that then missing chunks of video stream will result in flickering
+	 * portions of old data whatever it was before.
+	 *
+	 * If we choose not to copy previous frame (to, for example, save few
+	 * bus cycles - the frame can be pretty large!) then we have an option
+	 * to clear the frame before using. If we experience losses in this
+	 * mode then missing picture will be black (no flickering).
+	 *
+	 * Finally, if user chooses not to clean the current frame before
+	 * filling it with data then the old data will be visible if we fail
+	 * to refill entire frame with new data.
+	 */
+	if (!(flags & FLAGS_SEPARATE_FRAMES)) {
+		/* This copies previous frame into this one to mask losses */
+		memmove(frame->data, ibmcam->frame[1-framenum].data,  MAX_FRAME_SIZE);
+	} else {
+		if (flags & FLAGS_CLEAN_FRAMES) {
+			/* This provides a "clean" frame but slows things down */
+			memset(frame->data, 0, MAX_FRAME_SIZE);
+		}
+	}
 	switch (videosize) {
 	case VIDEOSIZE_128x96:
 		frame->frmwidth = 128;
@@ -2315,6 +2365,7 @@ static int ibmcam_new_frame(struct usb_ibmcam *ibmcam, int framenum)
  *          camera is also initialized here (once per connect), at
  *          expense of V4L client (it waits on open() call).
  * 1/27/00  Used IBMCAM_NUMSBUF as number of URB buffers.
+ * 5/24/00  Corrected to prevent race condition (MOD_xxx_USE_COUNT).
  */
 static int ibmcam_open(struct video_device *dev, int flags)
 {
@@ -2322,6 +2373,7 @@ static int ibmcam_open(struct video_device *dev, int flags)
 	const int sb_size = FRAMES_PER_DESC * ibmcam->iso_packet_len;
 	int i, err = 0;
 
+	MOD_INC_USE_COUNT;
 	down(&ibmcam->lock);
 
 	if (ibmcam->user)
@@ -2394,14 +2446,13 @@ static int ibmcam_open(struct video_device *dev, int flags)
 				else
 					err = -EBUSY;
 			}
-			if (!err) {
+			if (!err)
 				ibmcam->user++;
-				MOD_INC_USE_COUNT;
-			}
 		}
 	}
-
 	up(&ibmcam->lock);
+	if (err)
+		MOD_DEC_USE_COUNT;
 	return err;
 }
 
@@ -2415,6 +2466,7 @@ static int ibmcam_open(struct video_device *dev, int flags)
  * History:
  * 1/22/00  Moved scratch buffer deallocation here.
  * 1/27/00  Used IBMCAM_NUMSBUF as number of URB buffers.
+ * 5/24/00  Moved MOD_DEC_USE_COUNT outside of code that can sleep.
  */
 static void ibmcam_close(struct video_device *dev)
 {
@@ -2431,18 +2483,13 @@ static void ibmcam_close(struct video_device *dev)
 		kfree(ibmcam->sbuf[i].data);
 
 	ibmcam->user--;
-	MOD_DEC_USE_COUNT;
 
 	if (ibmcam->remove_pending) {
 		printk(KERN_INFO "ibmcam_close: Final disconnect.\n");
 		usb_ibmcam_release(ibmcam);
 	}
 	up(&ibmcam->lock);
-}
-
-static int ibmcam_init_done(struct video_device *dev)
-{
-	return 0;
+	MOD_DEC_USE_COUNT;
 }
 
 static long ibmcam_write(struct video_device *dev, const char *buf, unsigned long count, int noblock)
@@ -2803,20 +2850,15 @@ static int ibmcam_mmap(struct video_device *dev, const char *adr, unsigned long 
 }
 
 static struct video_device ibmcam_template = {
-	"CPiA USB Camera",
-	VID_TYPE_CAPTURE,
-	VID_HARDWARE_CPIA,
-	ibmcam_open,
-	ibmcam_close,
-	ibmcam_read,
-	ibmcam_write,
-	NULL,
-	ibmcam_ioctl,
-	ibmcam_mmap,
-	ibmcam_init_done,
-	NULL,
-	0,
-	0
+	name:		"CPiA USB Camera",
+	type:		VID_TYPE_CAPTURE,
+	hardware:	VID_HARDWARE_CPIA,
+	open:		ibmcam_open,
+	close:		ibmcam_close,
+	read:		ibmcam_read,
+	write:		ibmcam_write,
+	ioctl:		ibmcam_ioctl,
+	mmap:		ibmcam_mmap,
 };
 
 static void usb_ibmcam_configure_video(struct usb_ibmcam *ibmcam)
@@ -2860,7 +2902,7 @@ static void usb_ibmcam_configure_video(struct usb_ibmcam *ibmcam)
 }
 
 /*
- * usb_ibmcam_release()
+ * ibmcam_find_struct()
  *
  * This code searches the array of preallocated (static) structures
  * and returns index of the first one that isn't in use. Returns -1
@@ -2898,11 +2940,13 @@ static int ibmcam_find_struct(void)
  * History:
  * 1/22/00  Moved camera init code to ibmcam_open()
  * 1/27/00  Changed to use static structures, added locking.
+ * 5/24/00  Corrected to prevent race condition (MOD_xxx_USE_COUNT).
+ * 7/3/00   Fixed endianness bug.
  */
-static void *usb_ibmcam_probe(struct usb_device *dev, unsigned int ifnum)
+static void *usb_ibmcam_probe(struct usb_device *dev, unsigned int ifnum,
+			 const struct usb_device_id *id)
 {
 	struct usb_ibmcam *ibmcam = NULL;
-	const unsigned char *p_rev;
 	const struct usb_interface_descriptor *interface;
 	const struct usb_endpoint_descriptor *endpoint;
 	int devnum, model=0;
@@ -2914,27 +2958,25 @@ static void *usb_ibmcam_probe(struct usb_device *dev, unsigned int ifnum)
 	if (dev->descriptor.bNumConfigurations != 1)
 		return NULL;
 
-	/* Is it an IBM camera? */
-	if ((dev->descriptor.idVendor != 0x0545) ||
-	    (dev->descriptor.idProduct != 0x8080))
-		return NULL;
-
 	/* Check the version/revision */
-	p_rev = (const unsigned char *) &dev->descriptor.bcdDevice;
-	if (p_rev[1] == 0x00 && p_rev[0] == 0x02) {
+	switch (dev->descriptor.bcdDevice) {
+	case 0x0002:
 		if (ifnum != 2)
 			return NULL;
-		printk(KERN_INFO "IBM USB camera found (model 1).\n");
+		printk(KERN_INFO "IBM USB camera found (model 1, rev. 0x%04x).\n",
+			dev->descriptor.bcdDevice);
 		model = IBMCAM_MODEL_1;
-	} else if (p_rev[1] == 0x03 && p_rev[0] == 0x0A) {
+		break;
+	case 0x030A:
 		if (ifnum != 0)
 			return NULL;
-		printk(KERN_INFO "IBM USB camera found (model 2).\n");
+		printk(KERN_INFO "IBM USB camera found (model 2, rev. 0x%04x).\n",
+			dev->descriptor.bcdDevice);
 		model = IBMCAM_MODEL_2;
-	} else {
-		printk(KERN_ERR "IBM camera revision=%02x.%02x not supported\n",
-		       p_rev[1], p_rev[0]);
-		return NULL;
+		break;
+
+	/* ibmcam_table contents prevents any other values from ever
+	   being passed to us, so no need for "default" case. */
 	}
 
 	/* Validate found interface: must have one ISO endpoint */
@@ -2963,10 +3005,14 @@ static void *usb_ibmcam_probe(struct usb_device *dev, unsigned int ifnum)
 		RESTRICT_TO_RANGE(videosize, VIDEOSIZE_176x144, VIDEOSIZE_352x240);
 	}
 
+	/* Code below may sleep, need to lock module while we are here */
+	MOD_INC_USE_COUNT;
+
 	devnum = ibmcam_find_struct();
 	if (devnum == -1) {
 		printk(KERN_INFO "IBM USB camera driver: Too many devices!\n");
-		return NULL;
+		ibmcam = NULL; /* Do not free, it's preallocated */
+		goto probe_done;
 	}
 	ibmcam = &cams[devnum];
 
@@ -2986,17 +3032,14 @@ static void *usb_ibmcam_probe(struct usb_device *dev, unsigned int ifnum)
 	usb_ibmcam_configure_video(ibmcam);
 	up (&ibmcam->lock);
 
-#if IBMCAM_LOCKS_DRIVER_WHILE_DEVICE_IS_PLUGGED
-	MOD_INC_USE_COUNT;
-#endif
-
 	if (video_register_device(&ibmcam->vdev, VFL_TYPE_GRABBER) == -1) {
 		printk(KERN_ERR "video_register_device failed\n");
-		return NULL;
+		ibmcam = NULL; /* Do not free, it's preallocated */
 	}
 	if (debug > 1)
 		printk(KERN_DEBUG "video_register_device() successful\n");
-
+probe_done:
+	MOD_DEC_USE_COUNT;
 	return ibmcam;
 }
 
@@ -3015,6 +3058,7 @@ static void usb_ibmcam_release(struct usb_ibmcam *ibmcam)
 	if (debug > 0)
 		printk(KERN_DEBUG "usb_ibmcam_release: Video unregistered.\n");
 	ibmcam->ibmcam_used = 0;
+	ibmcam->initialized = 0;
 }
 
 /*
@@ -3024,16 +3068,25 @@ static void usb_ibmcam_release(struct usb_ibmcam *ibmcam)
  * structure (pointed by 'ptr') and after that driver should be removable
  * with no ill consequences.
  *
- * TODO: This code behaves badly on surprise removal!
+ * This code handles surprise removal. The ibmcam->user is a counter which
+ * increments on open() and decrements on close(). If we see here that
+ * this counter is not 0 then we have a client who still has us opened.
+ * We set ibmcam->remove_pending flag as early as possible, and after that
+ * all access to the camera will gracefully fail. These failures should
+ * prompt client to (eventually) close the video device, and then - in
+ * ibmcam_close() - we decrement ibmcam->ibmcam_used and usage counter.
  *
  * History:
  * 1/22/00  Added polling of MOD_IN_USE to delay removal until all users gone.
  * 1/27/00  Reworked to allow pending disconnects; see ibmcam_close()
+ * 5/24/00  Corrected to prevent race condition (MOD_xxx_USE_COUNT).
  */
 static void usb_ibmcam_disconnect(struct usb_device *dev, void *ptr)
 {
 	static const char proc[] = "usb_ibmcam_disconnect";
 	struct usb_ibmcam *ibmcam = (struct usb_ibmcam *) ptr;
+
+	MOD_INC_USE_COUNT;
 
 	if (debug > 0)
 		printk(KERN_DEBUG "%s(%p,%p.)\n", proc, dev, ptr);
@@ -3046,23 +3099,29 @@ static void usb_ibmcam_disconnect(struct usb_device *dev, void *ptr)
 
 	ibmcam->dev = NULL;    	    /* USB device is no more */
 
-#if IBMCAM_LOCKS_DRIVER_WHILE_DEVICE_IS_PLUGGED
-	MOD_DEC_USE_COUNT;
-#endif
 	if (ibmcam->user)
 		printk(KERN_INFO "%s: In use, disconnect pending.\n", proc);
 	else
 		usb_ibmcam_release(ibmcam);
 	up(&ibmcam->lock);
-
 	printk(KERN_INFO "IBM USB camera disconnected.\n");
+
+	MOD_DEC_USE_COUNT;
 }
 
+static struct usb_device_id ibmcam_table [] = {
+	{ USB_DEVICE_VER(0x0545, 0x8080, 0x0002, 0x0002) },
+	{ USB_DEVICE_VER(0x0545, 0x8080, 0x030a, 0x030a) },
+	{ }						/* Terminating entry */
+};
+
+MODULE_DEVICE_TABLE (usb, ibmcam_table);
+
 static struct usb_driver ibmcam_driver = {
-	"ibmcam",
-	usb_ibmcam_probe,
-	usb_ibmcam_disconnect,
-	{ NULL, NULL }
+	name:		"ibmcam",
+	probe:		usb_ibmcam_probe,
+	disconnect:	usb_ibmcam_disconnect,
+	id_table:	ibmcam_table,
 };
 
 /*
@@ -3073,7 +3132,7 @@ static struct usb_driver ibmcam_driver = {
  * History:
  * 1/27/00  Reworked to use statically allocated usb_ibmcam structures.
  */
-int usb_ibmcam_init(void)
+static int __init usb_ibmcam_init(void)
 {
 	unsigned u;
 
@@ -3085,19 +3144,12 @@ int usb_ibmcam_init(void)
 	return usb_register(&ibmcam_driver);
 }
 
-void usb_ibmcam_cleanup(void)
+static void __exit usb_ibmcam_cleanup(void)
 {
 	usb_deregister(&ibmcam_driver);
 }
 
-#ifdef MODULE
-int init_module(void)
-{
-	return usb_ibmcam_init();
-}
+module_init(usb_ibmcam_init);
+module_exit(usb_ibmcam_cleanup);
 
-void cleanup_module(void)
-{
-	usb_ibmcam_cleanup();
-}
-#endif
+

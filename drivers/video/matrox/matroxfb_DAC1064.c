@@ -4,14 +4,14 @@
  *
  * (c) 1998,1999,2000 Petr Vandrovec <vandrove@vc.cvut.cz>
  *
- * Version: 1.21 1999/01/09
+ * Version: 1.50 2000/08/10
  *
  * MTRR stuff: 1998 Tom Rini <trini@kernel.crashing.org>
  *
  * Contributors: "menion?" <menion@mindless.com>
  *                     Betatesting, fixes, ideas
  *
- *               "Kurt Garloff" <garloff@kg1.ping.de>
+ *               "Kurt Garloff" <garloff@suse.de>
  *                     Betatesting, fixes, ideas, videomodes, videomodes timmings
  *
  *               "Tom Rini" <trini@kernel.crashing.org>
@@ -62,6 +62,9 @@
  *
  *               "Mark Vojkovich" <mvojkovi@ucsd.edu>
  *                     G400 support
+ *
+ *               "Ken Aaker" <kdaaker@rchland.vnet.ibm.com>
+ *                     memtype extension (needed for GXT130P RS/6000 adapter)
  *
  * (following author is not in any relation with this code, but his code
  *  is included in this driver)
@@ -169,9 +172,9 @@ static void matroxfb_DAC1064_cursor(struct display* p, int mode, int x, int y) {
 
 	if (mode == CM_ERASE) {
 		if (ACCESS_FBINFO(cursor.state) != CM_ERASE) {
+			del_timer_sync(&ACCESS_FBINFO(cursor.timer));
 			matroxfb_DAC_lock_irqsave(flags);
 			ACCESS_FBINFO(cursor.state) = CM_ERASE;
-			del_timer(&ACCESS_FBINFO(cursor.timer));
 			outDAC1064(PMINFO M1064_XCURCTRL, M1064_XCURCTRL_DIS);
 			matroxfb_DAC_unlock_irqrestore(flags);
 		}
@@ -184,6 +187,7 @@ static void matroxfb_DAC1064_cursor(struct display* p, int mode, int x, int y) {
 	y -= p->var.yoffset;
 	if (p->var.vmode & FB_VMODE_DOUBLE)
 		y *= 2;
+	del_timer_sync(&ACCESS_FBINFO(cursor.timer));
 	matroxfb_DAC_lock_irqsave(flags);
 	if ((x != ACCESS_FBINFO(cursor.x)) || (y != ACCESS_FBINFO(cursor.y)) || ACCESS_FBINFO(cursor.redraw)) {
 		ACCESS_FBINFO(cursor.redraw) = 0;
@@ -223,15 +227,35 @@ static void DAC1064_calcclock(CPMINFO unsigned int freq, unsigned int fmax, unsi
 	DBG("DAC1064_calcclock")
 
 	fvco = PLL_calcclock(PMINFO freq, fmax, in, feed, &p);
-	p = (1 << p) - 1;
-	if (fvco <= 100000)
-		;
-	else if (fvco <= 140000)
-		p |= 0x08;
-	else if (fvco <= 180000)
-		p |= 0x10;
-	else
-		p |= 0x18;
+	
+	if (ACCESS_FBINFO(devflags.g450dac)) {
+		if (fvco <= 300000)		/* 276-324 */
+			;
+		else if (fvco <= 400000)	/* 378-438 */
+			p |= 0x08;
+		else if (fvco <= 550000)	/* 540-567 */
+			p |= 0x10;
+		else if (fvco <= 690000)	/* 675-695 */
+			p |= 0x18;
+		else if (fvco <= 800000)	/* 776-803 */
+			p |= 0x20;
+		else if (fvco <= 891000)	/* 891-891 */
+			p |= 0x28;
+		else if (fvco <= 940000)	/* 931-945 */
+			p |= 0x30;
+		else				/* <959 */
+			p |= 0x38;
+	} else {
+		p = (1 << p) - 1;
+		if (fvco <= 100000)
+			;
+		else if (fvco <= 140000)
+			p |= 0x08;
+		else if (fvco <= 180000)
+			p |= 0x10;
+		else
+			p |= 0x18;
+	}
 	*post = p;
 }
 
@@ -336,19 +360,25 @@ void DAC1064_global_init(CPMINFO struct matrox_hw_state* hw) {
 	hw->DACreg[POS1064_XMISCCTRL] &= M1064_XMISCCTRL_DAC_WIDTHMASK;
 	hw->DACreg[POS1064_XMISCCTRL] |= M1064_XMISCCTRL_LUT_EN;
 	hw->DACreg[POS1064_XPIXCLKCTRL] = M1064_XPIXCLKCTRL_PLL_UP | M1064_XPIXCLKCTRL_EN | M1064_XPIXCLKCTRL_SRC_PLL;
-#if defined(CONFIG_FB_MATROX_MAVEN) || defined(CONFIG_FB_MATROX_MAVEN_MODULE)
+	hw->DACreg[POS1064_XOUTPUTCONN] = 0x01;	/* output #1 enabled */
 	if (ACCESS_FBINFO(output.ph) & MATROXFB_OUTPUT_CONN_SECONDARY) {
-		hw->DACreg[POS1064_XPIXCLKCTRL] = M1064_XPIXCLKCTRL_PLL_UP | M1064_XPIXCLKCTRL_EN | M1064_XPIXCLKCTRL_SRC_EXT;
-		hw->DACreg[POS1064_XMISCCTRL] |= G400_XMISCCTRL_MFC_MAFC | G400_XMISCCTRL_VDO_MAFC12;
-	} else if (ACCESS_FBINFO(output.sh) & MATROXFB_OUTPUT_CONN_SECONDARY)
-		hw->DACreg[POS1064_XMISCCTRL] |= G400_XMISCCTRL_MFC_MAFC | G400_XMISCCTRL_VDO_C2_MAFC12;
+		if (ACCESS_FBINFO(devflags.g450dac)) {
+			hw->DACreg[POS1064_XPIXCLKCTRL] = M1064_XPIXCLKCTRL_PLL_UP | M1064_XPIXCLKCTRL_EN | M1064_XPIXCLKCTRL_SRC_PLL2;
+			hw->DACreg[POS1064_XOUTPUTCONN] = 0x05;	/* output #1 enabled; CRTC1 connected to output #2 */
+		} else {
+			hw->DACreg[POS1064_XPIXCLKCTRL] = M1064_XPIXCLKCTRL_PLL_UP | M1064_XPIXCLKCTRL_EN | M1064_XPIXCLKCTRL_SRC_EXT;
+			hw->DACreg[POS1064_XMISCCTRL] |= GX00_XMISCCTRL_MFC_MAFC | G400_XMISCCTRL_VDO_MAFC12;
+		}
+	} else if (ACCESS_FBINFO(output.sh) & MATROXFB_OUTPUT_CONN_SECONDARY) {
+		hw->DACreg[POS1064_XMISCCTRL] |= GX00_XMISCCTRL_MFC_MAFC | G400_XMISCCTRL_VDO_C2_MAFC12;
+		hw->DACreg[POS1064_XOUTPUTCONN] = 0x09; /* output #1 enabled; CRTC2 connected to output #2 */
+	} else if (ACCESS_FBINFO(output.ph) & MATROXFB_OUTPUT_CONN_DFP)
+		hw->DACreg[POS1064_XMISCCTRL] |= GX00_XMISCCTRL_MFC_PANELLINK | G400_XMISCCTRL_VDO_MAFC12;
 	else
-		hw->DACreg[POS1064_XMISCCTRL] |= G400_XMISCCTRL_MFC_DIS;
+		hw->DACreg[POS1064_XMISCCTRL] |= GX00_XMISCCTRL_MFC_DIS;
+
 	if ((ACCESS_FBINFO(output.ph) | ACCESS_FBINFO(output.sh)) & MATROXFB_OUTPUT_CONN_PRIMARY)
 		hw->DACreg[POS1064_XMISCCTRL] |= M1064_XMISCCTRL_DAC_EN;
-#else
-	hw->DACreg[POS1064_XMISCCTRL] |= M1064_XMISCCTRL_MFC_DIS | M1064_XMISCCTRL_DAC_EN;
-#endif
 }
 
 void DAC1064_global_restore(CPMINFO const struct matrox_hw_state* hw) {
@@ -357,6 +387,10 @@ void DAC1064_global_restore(CPMINFO const struct matrox_hw_state* hw) {
 	if (ACCESS_FBINFO(devflags.accelerator) == FB_ACCEL_MATROX_MGAG400) {
 		outDAC1064(PMINFO 0x20, 0x04);
 		outDAC1064(PMINFO 0x1F, 0x00);
+		if (ACCESS_FBINFO(devflags.g450dac)) {
+			outDAC1064(PMINFO M1064_X8B, 0xCC);	/* only matrox know... */
+			outDAC1064(PMINFO M1064_XOUTPUTCONN, hw->DACreg[POS1064_XOUTPUTCONN]);
+		}
 	}
 }
 
@@ -732,7 +766,11 @@ static int MGAG100_preinit(WPMINFO struct matrox_hw_state* hw){
 	DBG("MGAG100_preinit")
 
 	/* there are some instabilities if in_div > 19 && vco < 61000 */
-	ACCESS_FBINFO(features.pll.vco_freq_min) = 62000;
+	if (ACCESS_FBINFO(devflags.g450dac)) {
+		ACCESS_FBINFO(features.pll.vco_freq_min) = 130000;	/* my sample: >118 */
+	} else {
+		ACCESS_FBINFO(features.pll.vco_freq_min) = 62000;
+	}
 	ACCESS_FBINFO(features.pll.ref_freq)	 = 27000;
 	ACCESS_FBINFO(features.pll.feed_div_min) = 7;
 	ACCESS_FBINFO(features.pll.feed_div_max) = 127;
@@ -752,7 +790,7 @@ static int MGAG100_preinit(WPMINFO struct matrox_hw_state* hw){
 	if (ACCESS_FBINFO(devflags.noinit))
 		return 0;
 	hw->MXoptionReg &= 0xC0000100;
-	hw->MXoptionReg |= 0x00078020;
+	hw->MXoptionReg |= 0x00000020;
 	if (ACCESS_FBINFO(devflags.novga))
 		hw->MXoptionReg &= ~0x00000100;
 	if (ACCESS_FBINFO(devflags.nobios))
@@ -760,13 +798,13 @@ static int MGAG100_preinit(WPMINFO struct matrox_hw_state* hw){
 	if (ACCESS_FBINFO(devflags.nopciretry))
 		hw->MXoptionReg |=  0x20000000;
 	pci_write_config_dword(ACCESS_FBINFO(pcidev), PCI_OPTION_REG, hw->MXoptionReg);
-	pci_read_config_dword(ACCESS_FBINFO(pcidev), 0x50, &reg50);
-	reg50 &= ~0x3000;
-	pci_write_config_dword(ACCESS_FBINFO(pcidev), 0x50, reg50);
-
 	DAC1064_setmclk(PMINFO hw, DAC1064_OPT_MDIV2 | DAC1064_OPT_GDIV3 | DAC1064_OPT_SCLK_PCI, 133333);
 
 	if (ACCESS_FBINFO(devflags.accelerator) == FB_ACCEL_MATROX_MGAG100) {
+		pci_read_config_dword(ACCESS_FBINFO(pcidev), 0x50, &reg50);
+		reg50 &= ~0x3000;
+		pci_write_config_dword(ACCESS_FBINFO(pcidev), 0x50, reg50);
+
 		hw->MXoptionReg |= 0x1080;
 		pci_write_config_dword(ACCESS_FBINFO(pcidev), PCI_OPTION_REG, hw->MXoptionReg);
 		mga_outl(M_CTLWTST, 0x00000300);
@@ -794,20 +832,45 @@ static int MGAG100_preinit(WPMINFO struct matrox_hw_state* hw){
 			hw->MXoptionReg &= ~0x1000;
 		}
 #endif
-	} else {
-		hw->MXoptionReg |= 0x00000C00;
+		hw->MXoptionReg |= 0x00078020;
+	} else 	if (ACCESS_FBINFO(devflags.accelerator) == FB_ACCEL_MATROX_MGAG200) {
+		pci_read_config_dword(ACCESS_FBINFO(pcidev), 0x50, &reg50);
+		reg50 &= ~0x3000;
+		pci_write_config_dword(ACCESS_FBINFO(pcidev), 0x50, reg50);
+
+		if (ACCESS_FBINFO(devflags.memtype) == -1)
+			ACCESS_FBINFO(devflags.memtype) = 3;
+		hw->MXoptionReg |= (ACCESS_FBINFO(devflags.memtype) & 7) << 10;
 		if (ACCESS_FBINFO(devflags.sgram))
 			hw->MXoptionReg |= 0x4000;
 		mga_outl(M_CTLWTST, 0x042450A1);
-		mga_outb(0x1E47, 0x00);
-		mga_outb(0x1E46, 0x00);
-		udelay(10);
-		mga_outb(0x1C05, 0x00);
-		mga_outb(0x1C05, 0x80);
+		mga_outl(M_MEMRDBK, 0x00000108);
+		udelay(200);
+		mga_outl(M_MACCESS, 0x00000000);
+		mga_outl(M_MACCESS, 0x00008000);
 		udelay(100);
-		mga_outw(0x1E44, 0x0108);
+		mga_outw(M_MEMRDBK, 0x00000108);
+		hw->MXoptionReg |= 0x00078020;
+	} else {
+		pci_read_config_dword(ACCESS_FBINFO(pcidev), 0x50, &reg50);
+		reg50 &= ~0x00000100;
+		reg50 |=  0x00000000;
+		pci_write_config_dword(ACCESS_FBINFO(pcidev), 0x50, reg50);
+
+		if (ACCESS_FBINFO(devflags.memtype) == -1)
+			ACCESS_FBINFO(devflags.memtype) = 0;
+		hw->MXoptionReg |= (ACCESS_FBINFO(devflags.memtype) & 7) << 10;
+		if (ACCESS_FBINFO(devflags.sgram))
+			hw->MXoptionReg |= 0x4000;
+		mga_outl(M_CTLWTST, 0x042450A1);
+		mga_outl(M_MEMRDBK, 0x00000108);
+		udelay(200);
+		mga_outl(M_MACCESS, 0x00000000);
+		mga_outl(M_MACCESS, 0x00008000);
+		udelay(100);
+		mga_outl(M_MEMRDBK, 0x00000108);
+		hw->MXoptionReg |= 0x00040020;
 	}
-	hw->MXoptionReg = (hw->MXoptionReg & ~0x1F8000) | 0x78000;
 	pci_write_config_dword(ACCESS_FBINFO(pcidev), PCI_OPTION_REG, hw->MXoptionReg);
 	return 0;
 }

@@ -85,8 +85,6 @@ static int sbusfb_get_var(struct fb_var_screeninfo *var, int con,
 			struct fb_info *info);
 static int sbusfb_set_var(struct fb_var_screeninfo *var, int con,
 			struct fb_info *info);
-static int sbusfb_pan_display(struct fb_var_screeninfo *var, int con,
-			struct fb_info *info);
 static int sbusfb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			struct fb_info *info);
 static int sbusfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
@@ -117,10 +115,17 @@ static int sbusfb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 static void do_install_cmap(int con, struct fb_info *info);
 
 static struct fb_ops sbusfb_ops = {
-	sbusfb_open, sbusfb_release, sbusfb_get_fix, sbusfb_get_var, sbusfb_set_var,
-	sbusfb_get_cmap, sbusfb_set_cmap, sbusfb_pan_display, sbusfb_ioctl, sbusfb_mmap
+	owner:		THIS_MODULE,
+	fb_open:	sbusfb_open,
+	fb_release:	sbusfb_release,
+	fb_get_fix:	sbusfb_get_fix,
+	fb_get_var:	sbusfb_get_var,
+	fb_set_var:	sbusfb_set_var,
+	fb_get_cmap:	sbusfb_get_cmap,
+	fb_set_cmap:	sbusfb_set_cmap,
+	fb_ioctl:	sbusfb_ioctl,
+	fb_mmap:	sbusfb_mmap,
 };
-
 
     /*
      *  Open/Release the frame buffer device
@@ -131,13 +136,13 @@ static int sbusfb_open(struct fb_info *info, int user)
 	struct fb_info_sbusfb *fb = sbusfbinfo(info);
 	
 	if (user) {
-		if (fb->open) return -EBUSY;
-		fb->mmaped = 0;
-		fb->open = 1;
-		fb->vtconsole = -1;
+		if (fb->open == 0) {
+			fb->mmaped = 0;
+			fb->vtconsole = -1;
+		}
+		fb->open++;
 	} else
 		fb->consolecnt++;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -146,19 +151,20 @@ static int sbusfb_release(struct fb_info *info, int user)
 	struct fb_info_sbusfb *fb = sbusfbinfo(info);
 
 	if (user) {	
-		if (fb->vtconsole != -1) {
-			vt_cons[fb->vtconsole]->vc_mode = KD_TEXT;
-			if (fb->mmaped) {
-				fb->graphmode--;
-				sbusfb_clear_margin(&fb_display[fb->vtconsole], 0);
+		fb->open--;
+		if (fb->open == 0) {
+			if (fb->vtconsole != -1) {
+				vt_cons[fb->vtconsole]->vc_mode = KD_TEXT;
+				if (fb->mmaped) {
+					fb->graphmode--;
+					sbusfb_clear_margin(&fb_display[fb->vtconsole], 0);
+				}
 			}
+			if (fb->reset)
+				fb->reset(fb);
 		}
-		if (fb->reset)
-			fb->reset(fb);
-		fb->open = 0;
 	} else
 		fb->consolecnt--;
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -393,21 +399,6 @@ static int sbusfb_set_var(struct fb_var_screeninfo *var, int con,
 }
 
     /*
-     *  Pan or Wrap the Display
-     *
-     *  This call looks only at xoffset, yoffset and the FB_VMODE_YWRAP flag
-     */
-
-static int sbusfb_pan_display(struct fb_var_screeninfo *var, int con,
-			      struct fb_info *info)
-{
-	if (var->xoffset || var->yoffset)
-		return -EINVAL;
-	else
-		return 0;
-}
-
-    /*
      *  Hardware cursor
      */
      
@@ -593,22 +584,26 @@ static int sbusfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
 	
 	switch (cmd){
 	case FBIOGTYPE:		/* return frame buffer type */
-		copy_to_user_ret((struct fbtype *)arg, &fb->type, sizeof(struct fbtype), -EFAULT);
+		if (copy_to_user((struct fbtype *)arg, &fb->type, sizeof(struct fbtype)))
+			return -EFAULT;
 		break;
 	case FBIOGATTR: {
 		struct fbgattr *fba = (struct fbgattr *) arg;
 		
 		i = verify_area (VERIFY_WRITE, (void *) arg, sizeof (struct fbgattr));
 		if (i) return i;
-		__put_user_ret(fb->emulations[0], &fba->real_type, -EFAULT);
-		__put_user_ret(0, &fba->owner, -EFAULT);
-		__copy_to_user_ret(&fba->fbtype, &fb->type,
-				   sizeof(struct fbtype), -EFAULT);
-		__put_user_ret(0, &fba->sattr.flags, -EFAULT);
-		__put_user_ret(fb->type.fb_type, &fba->sattr.emu_type, -EFAULT);
-		__put_user_ret(-1, &fba->sattr.dev_specific[0], -EFAULT);
-		for (i = 0; i < 4; i++)
-			put_user_ret(fb->emulations[i], &fba->emu_types[i], -EFAULT);
+		if (__put_user(fb->emulations[0], &fba->real_type) ||
+		    __put_user(0, &fba->owner) ||
+		    __copy_to_user(&fba->fbtype, &fb->type,
+				   sizeof(struct fbtype)) ||
+		    __put_user(0, &fba->sattr.flags) ||
+		    __put_user(fb->type.fb_type, &fba->sattr.emu_type) ||
+		    __put_user(-1, &fba->sattr.dev_specific[0]))
+			return -EFAULT;
+		for (i = 0; i < 4; i++) {
+			if (put_user(fb->emulations[i], &fba->emu_types[i]))
+				return -EFAULT;
+		}
 		break;
 	}
 	case FBIOSATTR:
@@ -621,7 +616,8 @@ static int sbusfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
 			if (vt_cons[lastconsole]->vc_mode == KD_TEXT)
  				break;
  		}
-		get_user_ret(i, (int *)arg, -EFAULT);
+		if (get_user(i, (int *)arg))
+			return -EFAULT;
 		if (i){
 			if (!fb->blanked || !fb->unblank)
 				break;
@@ -636,7 +632,8 @@ static int sbusfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
 		}
 		break;
 	case FBIOGVIDEO:
-		put_user_ret(fb->blanked, (int *) arg, -EFAULT);
+		if (put_user(fb->blanked, (int *) arg))
+			return -EFAULT;
 		break;
 	case FBIOGETCMAP_SPARC: {
 		char *rp, *gp, *bp;
@@ -648,23 +645,29 @@ static int sbusfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
 		i = verify_area (VERIFY_READ, (void *) arg, sizeof (struct fbcmap));
 		if (i) return i;
 		cmap = (struct fbcmap *) arg;
-		__get_user_ret(count, &cmap->count, -EFAULT);
-		__get_user_ret(index, &cmap->index, -EFAULT);
+		if (__get_user(count, &cmap->count) ||
+		    __get_user(index, &cmap->index))
+			return -EFAULT;
 		if ((index < 0) || (index > 255))
 			return -EINVAL;
 		if (index + count > 256)
 			count = 256 - index;
-		__get_user_ret(rp, &cmap->red, -EFAULT);
-		__get_user_ret(gp, &cmap->green, -EFAULT);
-		__get_user_ret(bp, &cmap->blue, -EFAULT);
-		if(verify_area (VERIFY_WRITE, rp, count))  return -EFAULT;
-		if(verify_area (VERIFY_WRITE, gp, count))  return -EFAULT;
-		if(verify_area (VERIFY_WRITE, bp, count))  return -EFAULT;
+		if (__get_user(rp, &cmap->red) ||
+		    __get_user(gp, &cmap->green) ||
+		    __get_user(bp, &cmap->blue))
+			return -EFAULT;
+		if (verify_area (VERIFY_WRITE, rp, count))
+			return -EFAULT;
+		if (verify_area (VERIFY_WRITE, gp, count))
+			return -EFAULT;
+		if (verify_area (VERIFY_WRITE, bp, count))
+			return -EFAULT;
 		end = index + count;
 		for (i = index; i < end; i++){
-			__put_user_ret(fb->color_map CM(i,0), rp, -EFAULT);
-			__put_user_ret(fb->color_map CM(i,1), gp, -EFAULT);
-			__put_user_ret(fb->color_map CM(i,2), bp, -EFAULT);
+			if (__put_user(fb->color_map CM(i,0), rp) ||
+			    __put_user(fb->color_map CM(i,1), gp) ||
+			    __put_user(fb->color_map CM(i,2), bp))
+				return -EFAULT;
 			rp++; gp++; bp++;
 		}
 		(*fb->loadcmap)(fb, NULL, index, count);
@@ -680,24 +683,32 @@ static int sbusfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
 		i = verify_area (VERIFY_READ, (void *) arg, sizeof (struct fbcmap));
 		if (i) return i;
 		cmap = (struct fbcmap *) arg;
-		__get_user_ret(count, &cmap->count, -EFAULT);
-		__get_user_ret(index, &cmap->index, -EFAULT);
+		if (__get_user(count, &cmap->count) ||
+		    __get_user(index, &cmap->index))
+			return -EFAULT;
 		if ((index < 0) || (index > 255))
 			return -EINVAL;
 		if (index + count > 256)
 			count = 256 - index;
-		__get_user_ret(rp, &cmap->red, -EFAULT);
-		__get_user_ret(gp, &cmap->green, -EFAULT);
-		__get_user_ret(bp, &cmap->blue, -EFAULT);
-		if(verify_area (VERIFY_READ, rp, count)) return -EFAULT;
-		if(verify_area (VERIFY_READ, gp, count)) return -EFAULT;
-		if(verify_area (VERIFY_READ, bp, count)) return -EFAULT;
+		if (__get_user(rp, &cmap->red) ||
+		    __get_user(gp, &cmap->green) ||
+		    __get_user(bp, &cmap->blue))
+			return -EFAULT;
+		if (verify_area (VERIFY_READ, rp, count))
+			return -EFAULT;
+		if (verify_area (VERIFY_READ, gp, count))
+			return -EFAULT;
+		if (verify_area (VERIFY_READ, bp, count))
+			return -EFAULT;
 
 		end = index + count;
 		for (i = index; i < end; i++){
-			__get_user_ret(fb->color_map CM(i,0), rp, -EFAULT);
-			__get_user_ret(fb->color_map CM(i,1), gp, -EFAULT);
-			__get_user_ret(fb->color_map CM(i,2), bp, -EFAULT);
+			if (__get_user(fb->color_map CM(i,0), rp))
+				return -EFAULT;
+			if (__get_user(fb->color_map CM(i,1), gp))
+				return -EFAULT;
+			if (__get_user(fb->color_map CM(i,2), bp))
+				return -EFAULT;
 			rp++; gp++; bp++;
 		}
 		(*fb->loadcmap)(fb, NULL, index, count);
@@ -708,8 +719,9 @@ static int sbusfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
 		if (!fb->setcursor) return -EINVAL;
 		if(verify_area (VERIFY_WRITE, p, sizeof (struct fbcurpos)))
 			return -EFAULT;
-		__put_user_ret(fb->cursor.hwsize.fbx, &p->fbx, -EFAULT);
-		__put_user_ret(fb->cursor.hwsize.fby, &p->fby, -EFAULT);
+		if (__put_user(fb->cursor.hwsize.fbx, &p->fbx) ||
+		    __put_user(fb->cursor.hwsize.fby, &p->fby))
+			return -EFAULT;
 		break;
 	}
 	case FBIOSCURSOR:

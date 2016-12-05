@@ -128,7 +128,11 @@ int __init fcal_detect(Scsi_Host_Template *tpnt)
 		if (!ages) continue;
 				
 		host = scsi_register (tpnt, sizeof (struct fcal));
-		if (!host) panic ("Cannot register FCAL host\n");
+		if (!host) 
+		{
+			kfree(ages);
+			continue;
+		}
 				
 		nfcals++;
 				
@@ -292,11 +296,8 @@ static int fcal_encode_addr(Scsi_Cmnd *SCpnt, u16 *addr, fc_channel *fc, fcp_cmn
 	return 0;
 }
 
-#ifdef MODULE
-
-Scsi_Host_Template driver_template = FCAL;
+static Scsi_Host_Template driver_template = FCAL;
 
 #include "scsi_module.c"
 
 EXPORT_NO_SYMBOLS;
-#endif /* MODULE */

@@ -1,6 +1,8 @@
 #ifndef __ALPHA_PCI_H
 #define __ALPHA_PCI_H
 
+#ifdef __KERNEL__
+
 #include <linux/spinlock.h>
 #include <asm/scatterlist.h>
 #include <asm/machvec.h>
@@ -22,7 +24,17 @@ struct pci_controler {
 	struct resource *io_space;
 	struct resource *mem_space;
 
-	unsigned long config_space;
+	/* The following are for reporting to userland.  The invariant is
+	   that if we report a BWX-capable dense memory, we do not report
+	   a sparse memory at all, even if it exists.  */
+	unsigned long sparse_mem_base;
+	unsigned long dense_mem_base;
+	unsigned long sparse_io_base;
+	unsigned long dense_io_base;
+
+	/* This one's for the kernel only.  It's in KSEG somewhere.  */
+	unsigned long config_space_base;
+
 	unsigned int index;
 	unsigned int first_busno;
 	unsigned int last_busno;
@@ -38,6 +50,13 @@ struct pci_controler {
 
 #define PCIBIOS_MIN_IO		alpha_mv.min_io_address
 #define PCIBIOS_MIN_MEM		alpha_mv.min_mem_address
+
+extern void pcibios_set_master(struct pci_dev *dev);
+
+extern inline void pcibios_penalize_isa_irq(int irq)
+{
+	/* We don't do dynamic PCI IRQ allocation */
+}
 
 /* IOMMU controls.  */
 
@@ -126,5 +145,16 @@ pci_dma_sync_sg(struct pci_dev *dev, struct scatterlist *sg, int nents,
    you would pass 0x00ffffff as the mask to this function.  */
 
 extern int pci_dma_supported(struct pci_dev *hwdev, dma_addr_t mask);
+
+#endif /* __KERNEL__ */
+
+/* Values for the `which' argument to sys_pciconfig_iobase.  */
+#define IOBASE_HOSE		0
+#define IOBASE_SPARSE_MEM	1
+#define IOBASE_DENSE_MEM	2
+#define IOBASE_SPARSE_IO	3
+#define IOBASE_DENSE_IO		4
+#define IOBASE_ROOT_BUS		5
+#define IOBASE_FROM_HOSE	0x10000
 
 #endif /* __ALPHA_PCI_H */

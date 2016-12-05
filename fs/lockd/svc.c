@@ -39,12 +39,12 @@
 #define ALLOWED_SIGS		(sigmask(SIGKILL))
 
 extern struct svc_program	nlmsvc_program;
-struct nlmsvc_binding *		nlmsvc_ops = NULL;
+struct nlmsvc_binding *		nlmsvc_ops;
 static DECLARE_MUTEX(nlmsvc_sema);
-static unsigned int		nlmsvc_users = 0;
-static pid_t			nlmsvc_pid = 0;
-unsigned long			nlmsvc_grace_period = 0;
-unsigned long			nlmsvc_timeout = 0;
+static unsigned int		nlmsvc_users;
+static pid_t			nlmsvc_pid;
+unsigned long			nlmsvc_grace_period;
+unsigned long			nlmsvc_timeout;
 
 static DECLARE_MUTEX_LOCKED(lockd_start);
 static DECLARE_WAIT_QUEUE_HEAD(lockd_exit);
@@ -53,7 +53,7 @@ static DECLARE_WAIT_QUEUE_HEAD(lockd_exit);
  * Currently the following can be set only at insmod time.
  * Ideally, they would be accessible through the sysctl interface.
  */
-unsigned long			nlm_grace_period = 0;
+unsigned long			nlm_grace_period;
 unsigned long			nlm_timeout = LOCKD_DFLT_TIMEO;
 
 /*
@@ -235,7 +235,10 @@ lockd_up(void)
 	}
 
 	if ((error = svc_makesock(serv, IPPROTO_UDP, 0)) < 0 
-	 || (error = svc_makesock(serv, IPPROTO_TCP, 0)) < 0) {
+#ifdef CONFIG_NFSD_TCP
+	 || (error = svc_makesock(serv, IPPROTO_TCP, 0)) < 0
+#endif
+		) {
 		if (warned++ == 0) 
 			printk(KERN_WARNING
 				"lockd_up: makesock failed, error=%d\n", error);
@@ -309,7 +312,6 @@ out:
 #ifdef MODULE
 /* New module support in 2.1.18 */
 
-EXPORT_NO_SYMBOLS;
 MODULE_AUTHOR("Olaf Kirch <okir@monad.swb.de>");
 MODULE_DESCRIPTION("NFS file locking service version " LOCKD_VERSION ".");
 MODULE_PARM(nlm_grace_period, "10-240l");

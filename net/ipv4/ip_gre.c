@@ -27,6 +27,7 @@
 #include <linux/in6.h>
 #include <linux/inetdevice.h>
 #include <linux/igmp.h>
+#include <linux/netfilter_ipv4.h>
 
 #include <net/sock.h>
 #include <net/ip.h>
@@ -35,6 +36,7 @@
 #include <net/ipip.h>
 #include <net/arp.h>
 #include <net/checksum.h>
+#include <net/inet_ecn.h>
 
 #ifdef CONFIG_IPV6
 #include <net/ipv6.h>
@@ -118,7 +120,7 @@ static int ipgre_tunnel_init(struct net_device *dev);
 static int ipgre_fb_tunnel_init(struct net_device *dev);
 
 static struct net_device ipgre_fb_tunnel_dev = {
-	NULL, 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NULL, ipgre_fb_tunnel_init,
+	"gre0", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NULL, ipgre_fb_tunnel_init,
 };
 
 static struct ip_tunnel ipgre_fb_tunnel = {
@@ -268,10 +270,10 @@ static struct ip_tunnel * ipgre_tunnel_locate(struct ip_tunnel_parm *parms, int 
 	dev->priv = (void*)(dev+1);
 	nt = (struct ip_tunnel*)dev->priv;
 	nt->dev = dev;
-	dev->name = nt->parms.name;
 	dev->init = ipgre_tunnel_init;
-	dev->new_style = 1;
+	dev->features |= NETIF_F_DYNALLOC;
 	memcpy(&nt->parms, parms, sizeof(*parms));
+	strcpy(dev->name, nt->parms.name);
 	if (dev->name[0] == 0) {
 		int i;
 		for (i=1; i<100; i++) {
@@ -529,6 +531,34 @@ out:
 #endif
 }
 
+static inline void ipgre_ecn_decapsulate(struct iphdr *iph, struct sk_buff *skb)
+{
+	if (INET_ECN_is_ce(iph->tos)) {
+		if (skb->protocol == __constant_htons(ETH_P_IP)) {
+			if (INET_ECN_is_not_ce(skb->nh.iph->tos))
+				IP_ECN_set_ce(skb->nh.iph);
+		} else if (skb->protocol == __constant_htons(ETH_P_IPV6)) {
+			if (INET_ECN_is_not_ce(ip6_get_dsfield(skb->nh.ipv6h)))
+				IP6_ECN_set_ce(skb->nh.ipv6h);
+		}
+	}
+}
+
+static inline u8
+ipgre_ecn_encapsulate(u8 tos, struct iphdr *old_iph, struct sk_buff *skb)
+{
+#ifdef CONFIG_INET_ECN
+	u8 inner = 0;
+	if (skb->protocol == __constant_htons(ETH_P_IP))
+		inner = old_iph->tos;
+	else if (skb->protocol == __constant_htons(ETH_P_IPV6))
+		inner = ip6_get_dsfield((struct ipv6hdr*)old_iph);
+	return INET_ECN_encapsulate(tos, inner);
+#else
+	return tos;
+#endif
+}
+
 int ipgre_rcv(struct sk_buff *skb, unsigned short len)
 {
 	struct iphdr *iph = skb->nh.iph;
@@ -599,6 +629,14 @@ int ipgre_rcv(struct sk_buff *skb, unsigned short len)
 		skb->dev = tunnel->dev;
 		dst_release(skb->dst);
 		skb->dst = NULL;
+#ifdef CONFIG_NETFILTER
+		nf_conntrack_put(skb->nfct);
+		skb->nfct = NULL;
+#ifdef CONFIG_NETFILTER_DEBUG
+		skb->nf_debug = 0;
+#endif
+#endif
+		ipgre_ecn_decapsulate(iph, skb);
 		netif_rx(skb);
 		read_unlock(&ipgre_lock);
 		return(0);
@@ -610,6 +648,12 @@ drop:
 drop_nolock:
 	kfree_skb(skb);
 	return(0);
+}
+
+/* Need this wrapper because NF_HOOK takes the function address */
+static inline int do_ip_send(struct sk_buff *skb)
+{
+	return ip_send(skb);
 }
 
 static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
@@ -778,7 +822,7 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 	iph->ihl		=	sizeof(struct iphdr) >> 2;
 	iph->frag_off		=	df;
 	iph->protocol		=	IPPROTO_GRE;
-	iph->tos		=	tos;
+	iph->tos		=	ipgre_ecn_encapsulate(tos, old_iph, skb);
 	iph->daddr		=	rt->rt_dst;
 	iph->saddr		=	rt->rt_src;
 
@@ -814,13 +858,15 @@ static int ipgre_tunnel_xmit(struct sk_buff *skb, struct net_device *dev)
 		}
 	}
 
-	iph->tot_len		=	htons(skb->len);
-	ip_select_ident(iph, &rt->u.dst);
-	ip_send_check(iph);
+#ifdef CONFIG_NETFILTER
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#ifdef CONFIG_NETFILTER_DEBUG
+	skb->nf_debug = 0;
+#endif
+#endif
 
-	stats->tx_bytes += skb->len;
-	stats->tx_packets++;
-	ip_send(skb);
+	IPTUNNEL_XMIT();
 	tunnel->recursion--;
 	return 0;
 
@@ -1217,11 +1263,12 @@ int __init ipgre_init(void)
 	printk(KERN_INFO "GRE over IPv4 tunneling driver\n");
 
 	ipgre_fb_tunnel_dev.priv = (void*)&ipgre_fb_tunnel;
-	ipgre_fb_tunnel_dev.name = ipgre_fb_tunnel.parms.name;
 #ifdef MODULE
 	register_netdev(&ipgre_fb_tunnel_dev);
 #else
+	rtnl_lock();
 	register_netdevice(&ipgre_fb_tunnel_dev);
+	rtnl_unlock();
 #endif
 
 	inet_add_protocol(&ipgre_protocol);

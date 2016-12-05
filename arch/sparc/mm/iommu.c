@@ -1,4 +1,4 @@
-/* $Id: iommu.c,v 1.19 2000/02/06 22:55:45 zaitcev Exp $
+/* $Id: iommu.c,v 1.20 2000/08/09 00:00:15 davem Exp $
  * iommu.c:  IOMMU specific routines for memory management.
  *
  * Copyright (C) 1995 David S. Miller  (davem@caip.rutgers.edu)
@@ -247,7 +247,7 @@ static void iommu_map_dma_area(unsigned long va, __u32 addr, int len)
 			pmdp = pmd_offset(pgdp, addr);
 			ptep = pte_offset(pmdp, addr);
 
-			set_pte(ptep, mk_pte(mem_map + MAP_NR(page), dvma_prot));
+			set_pte(ptep, mk_pte(virt_to_page(page), dvma_prot));
 			if (ipte_cache != 0) {
 				iopte_val(*iopte++) = MKIOPTE(__pa(page));
 			} else {

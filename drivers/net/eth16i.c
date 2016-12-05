@@ -440,41 +440,42 @@ int __init eth16i_probe(struct net_device *dev)
 {
 	int i;
 	int ioaddr;
-	int base_addr = dev ? dev->base_addr : 0;
+	int base_addr = dev->base_addr;
     
+	SET_MODULE_OWNER(dev);
+
 	if(eth16i_debug > 4) 
 		printk(KERN_DEBUG "Probing started for %s\n", cardname);
 
 	if(base_addr > 0x1ff)           /* Check only single location */
 		return eth16i_probe1(dev, base_addr);
 	else if(base_addr != 0)         /* Don't probe at all */
-		return ENXIO;
+		return -ENXIO;
 
 	/* Seek card from the ISA io address space */
-	for(i = 0; (ioaddr = eth16i_portlist[i]) ; i++) {
-		if(check_region(ioaddr, ETH16I_IO_EXTENT))
-			continue;
+	for(i = 0; (ioaddr = eth16i_portlist[i]) ; i++)
 		if(eth16i_probe1(dev, ioaddr) == 0)
 			return 0;
-	}
 
 	/* Seek card from the EISA io address space */
-	for(i = 0; (ioaddr = eth32i_portlist[i]) ; i++) {
-		if(check_region(ioaddr, ETH16I_IO_EXTENT))
-			continue;
+	for(i = 0; (ioaddr = eth32i_portlist[i]) ; i++)
 		if(eth16i_probe1(dev, ioaddr) == 0)
 			return 0;
-	}
 
-	return ENODEV;
+	return -ENODEV;
 }
 
 static int __init eth16i_probe1(struct net_device *dev, int ioaddr)
 {
 	struct eth16i_local *lp;
-	
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
+	int retval;
+
 	boot = 1;  /* To inform initilization that we are in boot probe */
+
+	/* Let's grab the region */
+	if (!request_region(ioaddr, ETH16I_IO_EXTENT, dev->name))
+		return -EBUSY;
 
 	/*
 	  The MB86985 chip has on register which holds information in which 
@@ -484,16 +485,19 @@ static int __init eth16i_probe1(struct net_device *dev, int ioaddr)
 	  */
 
 	if(ioaddr < 0x1000) {
-	
 		if(eth16i_portlist[(inb(ioaddr + JUMPERLESS_CONFIG) & 0x07)] 
-		   != ioaddr)
-			return -ENODEV;
+		   != ioaddr) {
+			retval = -ENODEV;
+			goto out;
+		}
 	}
 
 	/* Now we will go a bit deeper and try to find the chip's signature */
 
-	if(eth16i_check_signature(ioaddr) != 0) 
-		return -ENODEV;
+	if(eth16i_check_signature(ioaddr) != 0) {
+		retval = -ENODEV;
+		goto out;
+	}
 
 	/* 
 	   Now it seems that we have found a ethernet chip in this particular
@@ -509,9 +513,6 @@ static int __init eth16i_probe1(struct net_device *dev, int ioaddr)
 	outb(0x00, ioaddr + RESET);             /* Reset some parts of chip */
 	BITSET(ioaddr + CONFIG_REG_0, BIT(7));  /* Disable the data link */
 
-	if(dev == NULL)
-		dev = init_etherdev(0, 0);
-
 	if( (eth16i_debug & version_printed++) == 0)
 		printk(KERN_INFO "%s", version);
 
@@ -520,17 +521,15 @@ static int __init eth16i_probe1(struct net_device *dev, int ioaddr)
 
 	/* Try to obtain interrupt vector */
 
-	if (request_irq(dev->irq, (void *)&eth16i_interrupt, 0, "eth16i", dev)) {	
+	if ((retval = request_irq(dev->irq, (void *)&eth16i_interrupt, 0, dev->name, dev))) {
 		printk(KERN_WARNING "%s: %s at %#3x, but is unusable due conflicting IRQ %d.\n", 
 		       dev->name, cardname, ioaddr, dev->irq);
-		return -EAGAIN;
+		goto out;
 	}
 
 	printk(KERN_INFO "%s: %s at %#3x, IRQ %d, ",
 	       dev->name, cardname, ioaddr, dev->irq);
 
-	/* Let's grab the region */
-	request_region(ioaddr, ETH16I_IO_EXTENT, "eth16i");
 
 	/* Now we will have to lock the chip's io address */
 	eth16i_select_regbank(TRANSCEIVER_MODE_RB, ioaddr);
@@ -544,8 +543,11 @@ static int __init eth16i_probe1(struct net_device *dev, int ioaddr)
 	/* Initialize the device structure */
 	if(dev->priv == NULL) {
 		dev->priv = kmalloc(sizeof(struct eth16i_local), GFP_KERNEL);
-		if(dev->priv == NULL)
-			return -ENOMEM;
+		if(dev->priv == NULL) {
+			free_irq(dev->irq, dev);
+			retval = -ENOMEM;
+			goto out;
+		}
 	}
 
 	memset(dev->priv, 0, sizeof(struct eth16i_local));
@@ -566,6 +568,9 @@ static int __init eth16i_probe1(struct net_device *dev, int ioaddr)
 	boot = 0;
 
 	return 0;
+out:
+	release_region(ioaddr, ETH16I_IO_EXTENT);
+	return retval;
 }
 
 
@@ -663,7 +668,7 @@ static int eth16i_probe_port(int ioaddr)
 {
 	int i;
 	int retcode;
-	unsigned char dummy_packet[64] = { 0 };
+	unsigned char dummy_packet[64];
 
 	/* Powerup the chip */
 	outb(0xc0 | POWERUP, ioaddr + CONFIG_REG_1);
@@ -679,6 +684,7 @@ static int eth16i_probe_port(int ioaddr)
 
 	dummy_packet[12] = 0x00;
 	dummy_packet[13] = 0x04;
+	memset(dummy_packet + 14, 0, sizeof(dummy_packet) - 14);
 
 	eth16i_select_regbank(2, ioaddr);
 
@@ -975,8 +981,6 @@ static int eth16i_open(struct net_device *dev)
 	outw(ETH16I_INTR_ON, ioaddr + TX_INTR_REG);  
 
 	netif_start_queue(dev);
-	MOD_INC_USE_COUNT;
-
 	return 0;
 }
 
@@ -1002,8 +1006,6 @@ static int eth16i_close(struct net_device *dev)
 	/* outw(0xffff, ioaddr + TX_STATUS_REG);    */
 	
 	outb(0x00, ioaddr + CONFIG_REG_1);
-
-	MOD_DEC_USE_COUNT;
 
 	return 0;
 }
@@ -1390,23 +1392,13 @@ static ushort eth16i_parse_mediatype(const char* s)
 }
 
 #define MAX_ETH16I_CARDS 4  /* Max number of Eth16i cards per module */
-#define NAMELEN          8  /* number of chars for storing dev->name */
 
-static char namelist[NAMELEN * MAX_ETH16I_CARDS] = { 0, };
-static struct net_device dev_eth16i[MAX_ETH16I_CARDS] = {
-	{
-		NULL,
-		0, 0, 0, 0,
-		0, 0,
-		0, 0, 0, NULL, NULL
-	},
-};
-
-static int io[MAX_ETH16I_CARDS] = { 0, };
+static struct net_device dev_eth16i[MAX_ETH16I_CARDS];
+static int io[MAX_ETH16I_CARDS];
 #if 0
-static int irq[MAX_ETH16I_CARDS] = { 0, };
+static int irq[MAX_ETH16I_CARDS];
 #endif
-static char* mediatype[MAX_ETH16I_CARDS] = { 0, };
+static char* mediatype[MAX_ETH16I_CARDS];
 static int debug = -1;
 
 #if (LINUX_VERSION_CODE >= 0x20115) 
@@ -1436,7 +1428,6 @@ int init_module(void)
 	{
 		struct net_device *dev = &dev_eth16i[this_dev];
 	
-		dev->name = namelist + (NAMELEN*this_dev);
 		dev->irq = 0; /* irq[this_dev]; */
 		dev->base_addr = io[this_dev];
 		dev->init = eth16i_probe;

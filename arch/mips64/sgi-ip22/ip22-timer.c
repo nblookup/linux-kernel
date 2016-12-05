@@ -79,8 +79,8 @@ static int set_rtc_mmss(unsigned long nowtime)
 	return retval;
 }
 
-static long last_rtc_update = 0;
-unsigned long missed_heart_beats = 0;
+static long last_rtc_update;
+unsigned long missed_heart_beats;
 
 void indy_timer_interrupt(struct pt_regs *regs)
 {
@@ -149,37 +149,6 @@ static unsigned long dosample(volatile unsigned char *tcwp,
 	 * for every one HZ.
 	 */
 	return ct1 - ct0;
-}
-
-/* Converts Gregorian date to seconds since 1970-01-01 00:00:00.
- * Assumes input in normal date format, i.e. 1980-12-31 23:59:59
- * => year=1980, mon=12, day=31, hour=23, min=59, sec=59.
- *
- * [For the Julian calendar (which was used in Russia before 1917,
- * Britain & colonies before 1752, anywhere else before 1582,
- * and is still in use by some communities) leave out the
- * -year/100+year/400 terms, and add 10.]
- *
- * This algorithm was first published by Gauss (I think).
- *
- * WARNING: this function will overflow on 2106-02-07 06:28:16 on
- * machines were long is 32-bit! (However, as time_t is signed, we
- * will already get problems at other places on 2038-01-19 03:14:08)
- */
-static inline unsigned long mktime(unsigned int year, unsigned int mon,
-	unsigned int day, unsigned int hour,
-	unsigned int min, unsigned int sec)
-{
-	if (0 >= (int) (mon -= 2)) {	/* 1..12 -> 11,12,1..10 */
-		mon += 12;	/* Puts Feb last since it has leap day */
-		year -= 1;
-	}
-	return (((
-	    (unsigned long)(year/4 - year/100 + year/400 + 367*mon/12 + day) +
-	      year*365 - 719499
-	    )*24 + hour /* now have hours */
-	   )*60 + min /* now have minutes */
-	  )*60 + sec; /* finally seconds */
 }
 
 static unsigned long __init get_indy_time(void)
@@ -267,12 +236,12 @@ void indy_8254timer_irq(void)
 	int cpu = smp_processor_id();
 	int irq = 4;
 
-	irq_enter(cpu);
+	irq_enter(cpu, irq);
 	kstat.irqs[0][irq]++;
 	printk("indy_8254timer_irq: Whoops, should not have gotten this IRQ\n");
 	prom_getchar();
 	ArcEnterInteractiveMode();
-	irq_exit(cpu);
+	irq_exit(cpu, irq);
 }
 
 void do_gettimeofday(struct timeval *tv)
@@ -288,8 +257,9 @@ void do_settimeofday(struct timeval *tv)
 {
 	write_lock_irq(&xtime_lock);
 	xtime = *tv;
-	time_state = TIME_BAD;
-	time_maxerror = MAXPHASE;
-	time_esterror = MAXPHASE;
+	time_adjust = 0;		/* stop active adjtime() */
+	time_status |= STA_UNSYNC;
+	time_maxerror = NTP_PHASE_LIMIT;
+	time_esterror = NTP_PHASE_LIMIT;
 	write_unlock_irq(&xtime_lock);
 }

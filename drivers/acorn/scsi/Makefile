@@ -2,8 +2,9 @@
 # Makefile for drivers/acorn/scsi
 #
 
+USE_STANDARD_AS_RULE := true
+
 L_TARGET	:= acorn-scsi.a
-MOD_LIST_NAME	:= ACORN_SCSI_MODULES
 
 obj-y		:=
 obj-m		:=
@@ -48,9 +49,6 @@ M_OBJS		:= $(sort $(filter-out $(export-objs), $(obj-m)))
 MX_OBJS		:= $(sort $(filter     $(export-objs), $(obj-m)))
 
 include $(TOPDIR)/Rules.make
-
-.S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c -o $*.o $<
 
 acornscsi_mod.o: acornscsi.o acornscsi-io.o
 	$(LD) $(LD_RFLAG) -r -o $@ acornscsi.o acornscsi-io.o

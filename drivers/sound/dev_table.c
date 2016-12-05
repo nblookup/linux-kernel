@@ -16,10 +16,6 @@
 #define _DEV_TABLE_C_
 #include "sound_config.h"
 
-int softoss_dev = 0;
-int sound_started = 0;
-int sndtable_get_cardcount(void);
-
 int sound_install_audiodrv(int vers, char *name, struct audio_driver *driver,
 			int driver_size, int flags, unsigned int format_mask,
 			void *devc, int dma1, int dma2)
@@ -28,15 +24,13 @@ int sound_install_audiodrv(int vers, char *name, struct audio_driver *driver,
 	struct audio_operations *op;
 	int l, num;
 
-	if (vers != AUDIO_DRIVER_VERSION || driver_size > sizeof(struct audio_driver))
-	{
+	if (vers != AUDIO_DRIVER_VERSION || driver_size > sizeof(struct audio_driver)) {
 		printk(KERN_ERR "Sound: Incompatible audio driver for %s\n", name);
 		return -(EINVAL);
 	}
 	num = sound_alloc_audiodev();
 
-	if (num == -1)
-	{
+	if (num == -1) {
 		printk(KERN_ERR "sound: Too many audio drivers\n");
 		return -(EBUSY);
 	}
@@ -49,8 +43,7 @@ int sound_install_audiodrv(int vers, char *name, struct audio_driver *driver,
 
 	if (sound_nblocks < 1024)
 		sound_nblocks++;
-	if (d == NULL || op == NULL)
-	{
+	if (d == NULL || op == NULL) {
 		printk(KERN_ERR "Sound: Can't allocate driver for (%s)\n", name);
 		sound_unload_audiodev(num);
 		return -(ENOMEM);
@@ -93,14 +86,12 @@ int sound_install_mixer(int vers, char *name, struct mixer_operations *driver,
 
 	int n = sound_alloc_mixerdev();
 
-	if (n == -1)
-	{
+	if (n == -1) {
 		printk(KERN_ERR "Sound: Too many mixer drivers\n");
 		return -EBUSY;
 	}
 	if (vers != MIXER_DRIVER_VERSION ||
-		driver_size > sizeof(struct mixer_operations))
-	{
+		driver_size > sizeof(struct mixer_operations)) {
 		printk(KERN_ERR "Sound: Incompatible mixer driver for %s\n", name);
 		return -EINVAL;
 	}
@@ -112,8 +103,7 @@ int sound_install_mixer(int vers, char *name, struct mixer_operations *driver,
 
 	if (sound_nblocks < 1024)
 		sound_nblocks++;
-	if (op == NULL)
-	{
+	if (op == NULL) {
 		printk(KERN_ERR "Sound: Can't allocate mixer driver for (%s)\n", name);
 		return -ENOMEM;
 	}
@@ -133,8 +123,7 @@ int sound_install_mixer(int vers, char *name, struct mixer_operations *driver,
 
 void sound_unload_audiodev(int dev)
 {
-	if (dev != -1)
-	{
+	if (dev != -1) {
 		DMAbuf_deinit(dev);
 		audio_devs[dev] = NULL;
 		unregister_sound_dsp((dev<<4)+3);
@@ -167,10 +156,8 @@ int sound_alloc_synthdev(void)
 {
 	int i;
 
-	for (i = 0; i < MAX_SYNTH_DEV; i++)
-	{
-		if (synth_devs[i] == NULL)
-		{
+	for (i = 0; i < MAX_SYNTH_DEV; i++) {
+		if (synth_devs[i] == NULL) {
 			if (i >= num_synths)
 				num_synths++;
 			return i;
@@ -194,10 +181,8 @@ int sound_alloc_timerdev(void)
 {
 	int i;
 
-	for (i = 0; i < MAX_TIMER_DEV; i++)
-	{
-		if (sound_timer_devs[i] == NULL)
-		{
+	for (i = 0; i < MAX_TIMER_DEV; i++) {
+		if (sound_timer_devs[i] == NULL) {
 			if (i >= num_sound_timers)
 				num_sound_timers++;
 			return i;
@@ -208,17 +193,16 @@ int sound_alloc_timerdev(void)
 
 void sound_unload_mixerdev(int dev)
 {
-	if (dev != -1)
-	{
+	if (dev != -1) {
 		mixer_devs[dev] = NULL;
 		unregister_sound_mixer(dev<<4);
+		num_mixers--;
 	}
 }
 
 void sound_unload_mididev(int dev)
 {
-	if (dev != -1)
-	{
+	if (dev != -1) {
 		midi_devs[dev] = NULL;
 		unregister_sound_midi((dev<<4)+2);
 	}

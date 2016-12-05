@@ -10,6 +10,7 @@
  *  	Max Cohan: Fixed invalid FSINFO offset when info_sector is 0
  */
 
+#include <linux/config.h>
 #include <linux/version.h>
 #define __NO_VERSION__
 #include <linux/module.h>
@@ -27,6 +28,7 @@
 #include <linux/locks.h>
 #include <linux/fat_cvf.h>
 #include <linux/malloc.h>
+#include <linux/smp_lock.h>
 
 #include "msbuffer.h"
 
@@ -136,13 +138,11 @@ struct inode *fat_build_inode(struct super_block *sb,
 	inode = fat_iget(sb, ino);
 	if (inode)
 		goto out;
-	inode = get_empty_inode();
+	inode = new_inode(sb);
 	*res = -ENOMEM;
 	if (!inode)
 		goto out;
 	*res = 0;
-	inode->i_sb = sb;
-	inode->i_dev = sb->s_dev;
 	inode->i_ino = iunique(sb, MSDOS_ROOT_INO);
 	fat_fill_inode(inode, de);
 	fat_attach(inode, ino);
@@ -153,17 +153,21 @@ out:
 
 void fat_delete_inode(struct inode *inode)
 {
+	lock_kernel();
 	inode->i_size = 0;
 	fat_truncate(inode);
+	unlock_kernel();
 	clear_inode(inode);
 }
 
 void fat_clear_inode(struct inode *inode)
 {
+	lock_kernel();
 	spin_lock(&fat_inode_lock);
 	fat_cache_inval_inode(inode);
 	list_del(&MSDOS_I(inode)->i_fat_hash);
 	spin_unlock(&fat_inode_lock);
+	unlock_kernel();
 }
 
 void fat_put_super(struct super_block *sb)
@@ -212,6 +216,7 @@ static int parse_options(char *options,int *fat, int *blksize, int *debug,
 	opts->fs_umask = current->fs->umask;
 	opts->quiet = opts->sys_immutable = opts->dotsOK = opts->showexec = 0;
 	opts->codepage = 0;
+	opts->nocase = 0;
 	opts->utf8 = 0;
 	opts->iocharset = NULL;
 	*debug = *fat = 0;
@@ -251,6 +256,9 @@ static int parse_options(char *options,int *fat, int *blksize, int *debug,
 		}
 		else if (!strcmp(this_char,"dots")) {
 			opts->dotsOK = 1;
+		}
+		else if (!strcmp(this_char,"nocase")) {
+			opts->nocase = 1;
 		}
 		else if (!strcmp(this_char,"nodots")) {
 			opts->dotsOK = 0;
@@ -638,7 +646,7 @@ fat_read_super(struct super_block *sb, void *data, int silent,
 
 	sbi->nls_io = NULL;
 	if (sbi->options.isvfat && !opts.utf8) {
-		p = opts.iocharset ? opts.iocharset : "iso8859-1";
+		p = opts.iocharset ? opts.iocharset : CONFIG_NLS_DEFAULT;
 		sbi->nls_io = load_nls(p);
 		if (! sbi->nls_io)
 			/* Fail only if explicit charset specified */
@@ -648,11 +656,9 @@ fat_read_super(struct super_block *sb, void *data, int silent,
 	if (! sbi->nls_io)
 		sbi->nls_io = load_nls_default();
 
-	root_inode=get_empty_inode();
+	root_inode=new_inode(sb);
 	if (!root_inode)
 		goto out_unload_nls;
-	root_inode->i_sb = sb;
-	root_inode->i_dev = sb->s_dev;
 	root_inode->i_ino = MSDOS_ROOT_INO;
 	fat_read_root(root_inode);
 	insert_inode_hash(root_inode);
@@ -729,18 +735,18 @@ static int is_exec(char *extension)
 	return 0;
 }
 
-static int fat_writepage(struct dentry *dentry, struct page *page)
+static int fat_writepage(struct page *page)
 {
 	return block_write_full_page(page,fat_get_block);
 }
-static int fat_readpage(struct dentry *dentry, struct page *page)
+static int fat_readpage(struct file *file, struct page *page)
 {
 	return block_read_full_page(page,fat_get_block);
 }
-static int fat_prepare_write(struct page *page, unsigned from, unsigned to)
+static int fat_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
 {
 	return cont_prepare_write(page,from,to,fat_get_block,
-		&MSDOS_I((struct inode*)page->mapping->host)->mmu_private);
+		&MSDOS_I(page->mapping->host)->mmu_private);
 }
 static int _fat_bmap(struct address_space *mapping, long block)
 {
@@ -749,6 +755,7 @@ static int _fat_bmap(struct address_space *mapping, long block)
 static struct address_space_operations fat_aops = {
 	readpage: fat_readpage,
 	writepage: fat_writepage,
+	sync_page: block_sync_page,
 	prepare_write: fat_prepare_write,
 	commit_write: generic_commit_write,
 	bmap: _fat_bmap
@@ -787,7 +794,6 @@ static void fat_fill_inode(struct inode *inode, struct msdos_dir_entry *de)
 			inode->i_nlink = 1;
 		}
 #endif
-		inode->i_size = 0;
 		if ((nr = MSDOS_I(inode)->i_start) != 0)
 			while (nr != -1) {
 				inode->i_size += SECTOR_SIZE*sbi->cluster_size;
@@ -811,7 +817,6 @@ static void fat_fill_inode(struct inode *inode, struct msdos_dir_entry *de)
 				(CF_LE_W(de->starthi) << 16);
 		}
 		MSDOS_I(inode)->i_logstart = MSDOS_I(inode)->i_start;
-		inode->i_nlink = 1;
 		inode->i_size = CF_LE_L(de->size);
 	        inode->i_op = &fat_file_inode_operations;
 	        inode->i_fop = &fat_file_operations;
@@ -836,7 +841,7 @@ static void fat_fill_inode(struct inode *inode, struct msdos_dir_entry *de)
 	MSDOS_I(inode)->i_ctime_ms = de->ctime_ms;
 }
 
-void fat_write_inode(struct inode *inode)
+void fat_write_inode(struct inode *inode, int wait)
 {
 	struct super_block *sb = inode->i_sb;
 	struct buffer_head *bh;
@@ -845,16 +850,21 @@ void fat_write_inode(struct inode *inode)
 
 retry:
 	i_pos = MSDOS_I(inode)->i_location;
-	if (inode->i_ino == MSDOS_ROOT_INO || !i_pos) return;
+	if (inode->i_ino == MSDOS_ROOT_INO || !i_pos) {
+		return;
+	}
+	lock_kernel();
 	if (!(bh = fat_bread(sb, i_pos >> MSDOS_DPB_BITS))) {
 		printk("dev = %s, ino = %d\n", kdevname(inode->i_dev), i_pos);
 		fat_fs_panic(sb, "msdos_write_inode: unable to read i-node block");
+		unlock_kernel();
 		return;
 	}
 	spin_lock(&fat_inode_lock);
 	if (i_pos != MSDOS_I(inode)->i_location) {
 		spin_unlock(&fat_inode_lock);
 		fat_brelse(sb, bh);
+		unlock_kernel();
 		goto retry;
 	}
 
@@ -882,8 +892,9 @@ retry:
 		raw_entry->cdate = CT_LE_W(raw_entry->cdate);
 	}
 	spin_unlock(&fat_inode_lock);
-	fat_mark_buffer_dirty(sb, bh, 1);
+	fat_mark_buffer_dirty(sb, bh);
 	fat_brelse(sb, bh);
+	unlock_kernel();
 }
 
 
@@ -892,6 +903,12 @@ int fat_notify_change(struct dentry * dentry, struct iattr * attr)
 	struct super_block *sb = dentry->d_sb;
 	struct inode *inode = dentry->d_inode;
 	int error;
+
+	/* FAT cannot truncate to a longer file */
+	if (attr->ia_valid & ATTR_SIZE) {
+		if (attr->ia_size > inode->i_size)
+			return -EPERM;
+	}
 
 	error = inode_change_ok(inode, attr);
 	if (error)
@@ -920,19 +937,3 @@ int fat_notify_change(struct dentry * dentry, struct iattr * attr)
 	    ~MSDOS_SB(sb)->options.fs_umask;
 	return 0;
 }
-
-
-#ifdef MODULE
-int init_module(void)
-{
-	return init_fat_fs();
-}
-
-
-void cleanup_module(void)
-{
-	/* Nothing to be done, really! */
-	return;
-}
-#endif
-

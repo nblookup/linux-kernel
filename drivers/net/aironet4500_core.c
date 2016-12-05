@@ -45,8 +45,8 @@ int bap_sleep_after_setup = 1;
 int sleep_before_command  = 1;
 int bap_sleep_before_write= 1;
 int sleep_in_command	  = 1;
-int both_bap_lock	 =0;	/* activated at awc_init in this */
-int bap_setup_spinlock   =0;	/* file if numcpu >1 */
+int both_bap_lock;		/* activated at awc_init in this */
+int bap_setup_spinlock;		/* file if numcpu >1 */
 
 EXPORT_SYMBOL(bap_sleep);
 EXPORT_SYMBOL(bap_sleep_after_setup);
@@ -1386,7 +1386,7 @@ awc_802_11_find_copy_path(struct net_device * dev, struct awc_fid * rx_buff){
 */ 
 
 
-int parse_not_8023= 0;
+int parse_not_8023;
        
 void
 awc_802_11_router_rx(struct net_device * dev,struct awc_fid * rx_buff){
@@ -2539,25 +2539,25 @@ bad_end:
 static const char *aironet4500_core_version =
 "aironet4500.c v0.1 1/1/99 Elmer Joandi, elmer@ylenurme.ee.\n";
 
-struct net_device * aironet4500_devices[MAX_AWCS]  = {NULL,NULL,NULL,NULL};
+struct net_device * aironet4500_devices[MAX_AWCS];
 
-int awc_debug = 0; //  0xffffff;
-static int p802_11_send  =  0; // 1
+int awc_debug; //  0xffffff;
+static int p802_11_send; // 1
 
-static int awc_process_tx_results = 0;
+static int awc_process_tx_results;
 int tx_queue_len = 10;
-int tx_rate = 0;
+int tx_rate;
 int channel = 5;
-//static int tx_full_rate = 0;
+//static int tx_full_rate;
 int max_mtu = 2312;
-int adhoc = 0;
+int adhoc;
 int large_buff_mem = 1700 * 10;
 int small_buff_no	= 20;
-int awc_full_stats = 0;
-char SSID[33] = {0};
-int master= 0;
-int slave = 0;
-int awc_simple_bridge = 0;
+int awc_full_stats;
+char SSID[33];
+int master;
+int slave;
+int awc_simple_bridge;
 // int debug =0;
 
 #if LINUX_VERSION_CODE >= 0x20100
@@ -2574,7 +2574,7 @@ MODULE_PARM(awc_simple_bridge,"i");
 MODULE_PARM(max_mtu,"i");
 MODULE_PARM(large_buff_mem,"i");
 MODULE_PARM(small_buff_no,"i");
-MODULE_PARM(SSID,"1-4c31");
+MODULE_PARM(SSID,"c33");
 #endif
 
 /*EXPORT_SYMBOL(tx_queue_len);
@@ -2613,7 +2613,7 @@ EXPORT_SYMBOL(awc_unregister_proc);
 
 	long long jiff;
 
-	DEBUG(2, " awc_reset dev %x \n", (int)dev);
+	DEBUG(2, " awc_reset dev %p \n", dev);
 	DEBUG(2, "%s: awc_reset \n",  dev->name);
 	
 	awc_issue_soft_reset(dev);
@@ -2868,7 +2868,7 @@ int awc_private_init(struct net_device * dev){
 	
 	priv->command_semaphore_on = 0;
 	priv->unlock_command_postponed = 0;
-	priv->immediate_bh.next 	= NULL;
+	INIT_LIST_HEAD(&priv->immediate_bh.list);
 	priv->immediate_bh.sync 	= 0;
 	priv->immediate_bh.routine 	= (void *)(void *)awc_bh;
 	priv->immediate_bh.data 	= dev;
@@ -3029,7 +3029,7 @@ void awc_tx_timeout (struct net_device *dev)
 }
 
 
-long long last_tx_q_hack = 0;
+long long last_tx_q_hack;
 int direction = 1;
 
 int awc_start_xmit(struct sk_buff *skb, struct net_device *dev) {
@@ -3118,7 +3118,7 @@ inline int awc_rx(struct net_device *dev, struct awc_fid * rx_fid) {
 
 
 
- struct enet_statistics *awc_get_stats(struct net_device *dev)
+ struct net_device_stats *awc_get_stats(struct net_device *dev)
 {
 	struct awc_private *priv = (struct awc_private *)dev->priv;
 //        unsigned long flags;
@@ -3213,8 +3213,8 @@ awc_set_multicast_list(struct net_device *dev) {
 
 
 
-int (* awc_proc_set_fun) (int) = NULL;
-int (* awc_proc_unset_fun) (int) = NULL;
+int (* awc_proc_set_fun) (int);
+int (* awc_proc_unset_fun) (int);
 
 
 int awc_register_proc(int (*awc_proc_set_device)(int),int (*awc_proc_unset_device)(int)){

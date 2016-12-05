@@ -1,4 +1,4 @@
-/* $Id: ide.h,v 1.3 2000/03/10 04:46:47 davem Exp $
+/* $Id: ide.h,v 1.6 2000/05/27 00:49:37 davem Exp $
  * ide.h: SPARC PCI specific IDE glue.
  *
  * Copyright (C) 1997  David S. Miller (davem@caip.rutgers.edu)
@@ -52,6 +52,7 @@ static __inline__ void ide_init_hwif_ports(hw_regs_t *hw, ide_ioreg_t data_port,
 	}
 	if (irq != NULL)
 		*irq = 0;
+	hw->io_ports[IDE_IRQ_OFFSET] = 0;
 }
 
 /*
@@ -65,7 +66,7 @@ static __inline__ void ide_init_default_hwifs(void)
 	int index;
 
 	for (index = 0; index < MAX_HWIFS; index++) {
-		ide_init_hwif_ports(&hw, ide_default_io_base(index), 0, 0);
+		ide_init_hwif_ports(&hw, ide_default_io_base(index), 0, NULL);
 		hw.irq = ide_default_irq(ide_default_io_base(index));
 		ide_register_hw(&hw, NULL);
 	}

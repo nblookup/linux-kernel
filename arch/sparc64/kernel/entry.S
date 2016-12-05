@@ -1,4 +1,4 @@
-/* $Id: entry.S,v 1.113 2000/03/06 22:33:42 davem Exp $
+/* $Id: entry.S,v 1.120 2000/09/08 13:58:12 jj Exp $
  * arch/sparc64/kernel/entry.S:  Sparc64 trap low-level entry points.
  *
  * Copyright (C) 1995,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -867,8 +867,8 @@ sys_ptrace:	add		%sp, STACK_BIAS + REGWIN_SZ, %o0
 		 add		%o7, 1f-.-4, %o7
 		nop
 		.align		32
-1:		ldx		[%curptr + AOFF_task_flags], %l5
-		andcc		%l5, 0x20, %g0
+1:		ldx		[%curptr + AOFF_task_ptrace], %l5
+		andcc		%l5, 0x02, %g0
 		be,pt		%icc, rtrap
 		 clr		%l6
 		call		syscall_trace
@@ -911,7 +911,7 @@ sys_fork:	 clr		%o1
 		mov		SIGCHLD, %o0
 sys_clone:	flushw
 		movrz		%o1, %fp, %o1
-		nop
+		mov		0, %o3
 		ba,pt		%xcc, do_fork
 		 add		%sp, STACK_BIAS + REGWIN_SZ, %o2
 ret_from_syscall:
@@ -940,8 +940,8 @@ ret_from_syscall:
 
 1:		b,pt		%xcc, ret_sys_call
 		 ldx		[%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I0], %o0
-sparc_exit:	rdpr		%otherwin, %g1
-		wrpr		%g0, (PSTATE_RMO | PSTATE_PEF | PSTATE_PRIV), %pstate
+sparc_exit:	wrpr		%g0, (PSTATE_RMO | PSTATE_PEF | PSTATE_PRIV), %pstate
+		rdpr		%otherwin, %g1
 		rdpr		%cansave, %g3
 		add		%g3, %g1, %g3
 		wrpr		%g3, 0x0, %cansave
@@ -980,7 +980,7 @@ linux_syscall_trace:
 	.align	32
 	.globl	linux_sparc_syscall32
 linux_sparc_syscall32:
-	/* Direct access to user regs, must faster. */
+	/* Direct access to user regs, much faster. */
 	cmp		%g1, NR_SYSCALLS			! IEU1	Group
 	bgeu,pn		%xcc, linux_sparc_ni_syscall		! CTI
 	 srl		%i0, 0, %o0				! IEU0
@@ -994,22 +994,22 @@ linux_sparc_syscall32:
 	mov		%i4, %o4				! IEU1
 	lduw		[%l7 + %l4], %l7			! Load
 	srl		%i1, 0, %o1				! IEU0	Group
-	ldx		[%curptr + AOFF_task_flags], %l0	! Load
+	ldx		[%curptr + AOFF_task_ptrace], %l0	! Load
 
 	mov		%i5, %o5				! IEU1
 	srl		%i2, 0, %o2				! IEU0	Group
-	mov		%i0, %l5				! IEU1
-	andcc		%l0, 0x20, %g0				! IEU1	Group
+	andcc		%l0, 0x02, %g0				! IEU0	Group
 	bne,pn		%icc, linux_syscall_trace32		! CTI
-	 srl		%i3, 0, %o3				! IEU0
+	 mov		%i0, %l5				! IEU1
 	call		%l7					! CTI	Group brk forced
-	 add		%o7, 3f-.-4, %o7			! IEU0
+	 srl		%i3, 0, %o3				! IEU0
+	ba,a,pt		%xcc, 3f
 
 	/* Linux native and SunOS system calls enter here... */
 	.align	32
 	.globl	linux_sparc_syscall, ret_sys_call
 linux_sparc_syscall:
-	/* Direct access to user regs, must faster. */
+	/* Direct access to user regs, much faster. */
 	cmp		%g1, NR_SYSCALLS			! IEU1	Group
 	bgeu,pn		%xcc, linux_sparc_ni_syscall		! CTI
 	 mov		%i0, %o0				! IEU0
@@ -1023,39 +1023,40 @@ linux_sparc_syscall:
 	mov		%i1, %o1				! IEU1
 	lduw		[%l7 + %l4], %l7			! Load
 4:	mov		%i2, %o2				! IEU0	Group
-	ldx		[%curptr + AOFF_task_flags], %l0	! Load
+	ldx		[%curptr + AOFF_task_ptrace], %l0	! Load
 
 	mov		%i3, %o3				! IEU1
 	mov		%i4, %o4				! IEU0	Group
-	andcc		%l0, 0x20, %g0				! IEU1	Group+1 bubble
+	andcc		%l0, 0x02, %g0				! IEU1	Group+1 bubble
 	bne,pn		%icc, linux_syscall_trace		! CTI	Group
 	 mov		%i0, %l5				! IEU0
 2:	call		%l7					! CTI	Group brk forced
 	 mov		%i5, %o5				! IEU0
+	nop
+
 3:	stx		%o0, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I0]
 ret_sys_call:
 #ifdef SYSCALL_TRACING
 	call		syscall_trace_exit
 	 add		%sp, STACK_BIAS + REGWIN_SZ, %o1
 #endif
-	ldx		[%curptr + AOFF_task_flags], %l6
+	ldx		[%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TSTATE], %g3
+	ldx		[%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TNPC], %l1 ! pc = npc
 	sra		%o0, 0, %o0
 	mov		%ulo(TSTATE_XCARRY | TSTATE_ICARRY), %g2
-	ldx		[%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TSTATE], %g3
 	cmp		%o0, -ENOIOCTLCMD
 	sllx		%g2, 32, %g2
 	bgeu,pn		%xcc, 1f
-	 andcc		%l6, 0x20, %l6	
 
-	/* System call success, clear Carry condition code. */
-	andn		%g3, %g2, %g3
+	 andcc		%l0, 0x02, %l6	
+	andn		%g3, %g2, %g3		/* System call success, clear Carry condition code. */
 	stx		%g3, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TSTATE]	
 	bne,pn		%icc, linux_syscall_trace2
-	 ldx		[%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TNPC], %l1 ! pc = npc
-	add		%l1, 0x4, %l2				         !npc = npc+4
+	 add		%l1, 0x4, %l2				         ! npc = npc+4
 	stx		%l1, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TPC]
-	b,pt		%xcc, rtrap_clr_l6
+	ba,pt		%xcc, rtrap_clr_l6
 	 stx		%l2, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TNPC]
+
 1:
 	/* System call failure, set Carry condition code.
 	 * Also, get abs(errno) to return to the process.
@@ -1066,15 +1067,14 @@ ret_sys_call:
 	mov		1, %l6
 	stx		%g3, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TSTATE]
 	bne,pn		%icc, linux_syscall_trace2
-	 ldx		[%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TNPC], %l1 ! pc = npc
-	add		%l1, 0x4, %l2				         !npc = npc+4
-
+	 add		%l1, 0x4, %l2				         !npc = npc+4
 	stx		%l1, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TPC]
+
 	b,pt		%xcc, rtrap
 	 stx		%l2, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TNPC]
 linux_syscall_trace2:
 	call		syscall_trace
-	 add		%l1, 0x4, %l2			/* npc = npc+4 */
+	 nop
 	stx		%l1, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TPC]
 	ba,pt		%xcc, rtrap
 	 stx		%l2, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TNPC]
@@ -1082,6 +1082,9 @@ linux_syscall_trace2:
 	.align		32
 	.globl		__flushw_user
 __flushw_user:
+	rdpr		%otherwin, %g1
+	brz,pn		%g1, 2f
+	 clr		%g2
 1:	save		%sp, -128, %sp
 	rdpr		%otherwin, %g1
 	brnz,pt		%g1, 1b
@@ -1090,4 +1093,59 @@ __flushw_user:
 	brnz,pt		%g2, 1b
 	 restore	%g0, %g0, %g0
 2:	retl
-	 mov		%g3, %o7
+	 nop
+
+/* This need not obtain the xtime_lock as it is coded in
+ * an implicitly SMP safe way already.
+ */
+	.align		64
+	.globl		do_gettimeofday
+do_gettimeofday:	/* %o0 = timevalp */
+	/* Load doubles must be used on xtime so that what we get
+	 * is guarenteed to be atomic, this is why we can run this
+	 * with interrupts on full blast.  Don't touch this... -DaveM
+	 *
+	 * Note with time_t changes to the timeval type, I must now use
+	 * nucleus atomic quad 128-bit loads.
+	 */
+	sethi	%hi(timer_tick_offset), %g3
+	sethi	%hi(xtime), %g2
+	sethi	%hi(timer_tick_compare), %g1
+	ldx	[%g3 + %lo(timer_tick_offset)], %g3
+	or	%g2, %lo(xtime), %g2
+	or	%g1, %lo(timer_tick_compare), %g1
+1:	ldda	[%g2] ASI_NUCLEUS_QUAD_LDD, %o4
+	rd	%tick, %o1
+	ldx	[%g1], %g7
+	ldda	[%g2] ASI_NUCLEUS_QUAD_LDD, %o2
+	xor	%o4, %o2, %o2
+	xor	%o5, %o3, %o3
+	orcc	%o2, %o3, %g0
+	bne,pn	%xcc, 1b
+	 sethi	%hi(wall_jiffies), %o2
+	sethi	%hi(jiffies), %o3
+	ldx	[%o2 + %lo(wall_jiffies)], %o2
+	ldx	[%o3 + %lo(jiffies)], %o3
+	sub	%o3, %o2, %o2
+	sethi	%hi(timer_ticks_per_usec_quotient), %o3
+	add	%g3, %o1, %o1
+	ldx	[%o3 + %lo(timer_ticks_per_usec_quotient)], %o3
+	sub	%o1, %g7, %o1
+	mulx	%o3, %o1, %o1
+	brz,pt	%o2, 1f
+	 srlx	%o1, 32, %o1
+	sethi	%hi(10000), %g2
+	or	%g2, %lo(10000), %g2
+	add	%o1, %g2, %o1
+1:	sethi	%hi(1000000), %o2
+	srlx	%o5, 32, %o5
+	or	%o2, %lo(1000000), %o2
+	add	%o5, %o1, %o5
+	cmp	%o5, %o2
+	bl,a,pn	%xcc, 1f
+	 stx	%o4, [%o0 + 0x0]
+	add	%o4, 0x1, %o4
+	sub	%o5, %o2, %o5
+	stx	%o4, [%o0 + 0x0]
+1:	retl
+	 st	%o5, [%o0 + 0x8]

@@ -34,6 +34,7 @@ default_handler (void)
 }
 
 ia64_sal_handler ia64_sal = (ia64_sal_handler) default_handler;
+ia64_sal_desc_ptc_t *ia64_ptc_domain_info;
 
 const char *
 ia64_sal_strerror (long status)
@@ -103,9 +104,11 @@ ia64_sal_init (struct ia64_sal_systab *systab)
 	if (strncmp(systab->signature, "SST_", 4) != 0)
 		printk("bad signature in system table!");
 
-	printk("SAL v%u.%02u: ia32bios=%s, oem=%.32s, product=%.32s\n",
+	/* 
+	 * revisions are coded in BCD, so %x does the job for us
+	 */
+	printk("SAL v%x.%02x: oem=%.32s, product=%.32s\n",
 	       systab->sal_rev_major, systab->sal_rev_minor,
-	       systab->ia32_bios_present ? "present" : "absent",
 	       systab->oem_id, systab->product_id);
 
 	min = ~0UL;
@@ -127,6 +130,10 @@ ia64_sal_init (struct ia64_sal_systab *systab)
 			ia64_sal_handler_init(__va(ep->sal_proc), __va(ep->gp));
 			break;
 
+		      case SAL_DESC_PTC:
+			ia64_ptc_domain_info = (ia64_sal_desc_ptc_t *)p;
+			break;
+
 		      case SAL_DESC_AP_WAKEUP:
 #ifdef CONFIG_SMP
 		      {
@@ -139,7 +146,7 @@ ia64_sal_init (struct ia64_sal_systab *systab)
 				    case IA64_SAL_AP_EXTERNAL_INT:
 				      ap_wakeup_vector = ap->vector;
 # ifdef SAL_DEBUG
-				      printk("SAL: AP wakeup using external interrupt; "
+				      printk("SAL: AP wakeup using external interrupt "
 					     "vector 0x%lx\n", ap_wakeup_vector);
 # endif
 				      break;
@@ -151,6 +158,44 @@ ia64_sal_init (struct ia64_sal_systab *systab)
 			      break;
 		      }
 #endif
+		      case SAL_DESC_PLATFORM_FEATURE:
+		      {
+			      struct ia64_sal_desc_platform_feature *pf = (void *) p;
+			      printk("SAL: Platform features ");
+
+#ifdef CONFIG_IA64_HAVE_IRQREDIR
+			      /*
+			       * Early versions of SAL say we don't have
+			       * IRQ redirection, even though we do...
+			       */
+			      pf->feature_mask |= (1 << 1);
+#endif
+
+			      if (pf->feature_mask & (1 << 0))
+				      printk("BusLock ");
+
+			      if (pf->feature_mask & (1 << 1)) {
+				      printk("IRQ_Redirection ");
+#ifdef CONFIG_SMP
+				      if (no_int_routing) 
+					      smp_int_redirect &= ~SMP_IRQ_REDIRECTION;
+				      else
+					      smp_int_redirect |= SMP_IRQ_REDIRECTION;
+#endif
+			      }
+			      if (pf->feature_mask & (1 << 2)) {
+				      printk("IPI_Redirection ");
+#ifdef CONFIG_SMP
+				      if (no_int_routing) 
+					      smp_int_redirect &= ~SMP_IPI_REDIRECTION;
+				      else
+					      smp_int_redirect |= SMP_IPI_REDIRECTION;
+#endif
+			      }
+			      printk("\n");
+			      break;
+ 		      }
+
 		}
 		p += SAL_DESC_SIZE(*p);
 	}

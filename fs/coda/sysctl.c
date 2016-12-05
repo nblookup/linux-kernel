@@ -76,9 +76,9 @@ int                             coda_upcall_timestamping = 0;
 /* keep this in sync with coda.h! */
 char *coda_upcall_names[] = {
 	"totals      ",   /*  0 */
-	"noop        ",   /*  1 */
+	"-           ",   /*  1 */
 	"root        ",   /*  2 */
-	"sync        ",   /*  3 */
+	"open_by_fd  ",   /*  3 */
 	"open        ",   /*  4 */
 	"close       ",   /*  5 */
 	"ioctl       ",   /*  6 */
@@ -96,7 +96,7 @@ char *coda_upcall_names[] = {
 	"symlink     ",   /* 18 */
 	"readlink    ",   /* 19 */
 	"fsync       ",   /* 20 */
-	"inactive    ",   /* 21 */
+	"-           ",   /* 21 */
 	"vget        ",   /* 22 */
 	"signal      ",   /* 23 */
 	"replace     ",   /* 24 */
@@ -104,13 +104,12 @@ char *coda_upcall_names[] = {
 	"purgeuser   ",   /* 26 */
 	"zapfile     ",   /* 27 */
 	"zapdir      ",   /* 28 */
-	"noop2       ",   /* 29 */
+	"-           ",   /* 29 */
 	"purgefid    ",   /* 30 */
 	"open_by_path",   /* 31 */
 	"resolve     ",   /* 32 */
 	"reintegrate ",   /* 33 */
-	"statfs      ",   /* 34 */
-	"make_cinode "    /* 35 */
+	"statfs      "    /* 34 */
 };
 
 
@@ -297,9 +296,6 @@ int coda_vfs_stats_get_info( char * buffer, char ** start, off_t offset,
 			"Coda VFS statistics\n"
 			"===================\n\n"
 			"File Operations:\n"
-			"\tfile_read\t%9d\n"
-			"\tfile_write\t%9d\n"
-			"\tfile_mmap\t%9d\n"
 			"\topen\t\t%9d\n"
 			"\trelase\t\t%9d\n"
 			"\tfsync\t\t%9d\n\n"
@@ -314,13 +310,9 @@ int coda_vfs_stats_get_info( char * buffer, char ** start, off_t offset,
 			"\tmkdir\t\t%9d\n"
 			"\trmdir\t\t%9d\n"
 			"\trename\t\t%9d\n"
-			"\tpermission\t%9d\n"
-			"\treadpage\t%9d\n",
+			"\tpermission\t%9d\n",
 
 			/* file operations */
-			ps->file_read,
-			ps->file_write,
-			ps->file_mmap,
 			ps->open,
 			ps->release,
 			ps->fsync,
@@ -337,9 +329,8 @@ int coda_vfs_stats_get_info( char * buffer, char ** start, off_t offset,
 			ps->mkdir,
 			ps->rmdir,
 			ps->rename,
-			ps->permission,
-			ps->readpage );
-  
+			ps->permission); 
+
 	begin = offset;
 	*start = buffer + begin;
 	len -= begin;

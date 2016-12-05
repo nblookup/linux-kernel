@@ -127,61 +127,20 @@ struct udf_options
 	uid_t uid;
 };
 
-#if defined(MODULE)
-	
-/*
- * cleanup_module
- *
- * PURPOSE
- *	Unregister the UDF filesystem type.
- *
- * DESCRIPTION
- *	Clean-up before the module is unloaded.
- *	This routine only applies when compiled as a module.
- *
- * HISTORY
- *	July 1, 1997 - Andrew E. Mileski
- *	Written, tested, and released.
- */
-int
-cleanup_module(void)
-{
-	printk(KERN_NOTICE "udf: unregistering filesystem\n");
-	return unregister_filesystem(&udf_fstype);
-}
-
-/*
- * init_module / init_udf_fs
- *
- * PURPOSE
- *	Register the UDF filesystem type.
- *
- * HISTORY
- *	July 1, 1997 - Andrew E. Mileski
- *	Written, tested, and released.
- */
-int init_module(void)
-#else /* if !defined(MODULE) */
-int __init init_udf_fs(void)
-#endif
+static int __init init_udf_fs(void)
 {
 	printk(KERN_NOTICE "udf: registering filesystem\n");
-	{
-		struct super_block sb;
-		int size;
-
-		size = sizeof(struct super_block) +
-			(long)&sb.u - (long)&sb;
-		if ( size < sizeof(struct udf_sb_info) )
-		{
-			printk(KERN_ERR "udf: Danger! Kernel was compiled without enough room for udf_sb_info\n");
-			printk(KERN_ERR "udf: Kernel has room for %u bytes, udf needs %lu\n",
-				size, (unsigned long)sizeof(struct udf_sb_info));
-			return 0;
-		}
-	}
 	return register_filesystem(&udf_fstype);
 }
+
+static void __exit exit_udf_fs(void)
+{
+	printk(KERN_NOTICE "udf: unregistering filesystem\n");
+	unregister_filesystem(&udf_fstype);
+}
+
+module_init(init_udf_fs)
+module_exit(exit_udf_fs)
 
 /*
  * udf_parse_options
@@ -785,8 +744,9 @@ udf_load_pvoldesc(struct super_block *sb, struct buffer_head *bh)
 	{
 		if (udf_CS0toUTF8(&outstr, &instr))
 		{
-			udf_debug("volIdent[] = '%s'\n", outstr.u_name);
-			strncpy( UDF_SB_VOLIDENT(sb), outstr.u_name, outstr.u_len);
+			strncpy( UDF_SB_VOLIDENT(sb), outstr.u_name,
+				outstr.u_len > 31 ? 31 : outstr.u_len);
+			udf_debug("volIdent[] = '%s'\n", UDF_SB_VOLIDENT(sb));
 		}
 	}
 
@@ -828,7 +788,6 @@ udf_load_partdesc(struct super_block *sb, struct buffer_head *bh)
 		{
 			UDF_SB_PARTLEN(sb,i) = le32_to_cpu(p->partitionLength); /* blocks */
 			UDF_SB_PARTROOT(sb,i) = le32_to_cpu(p->partitionStartingLocation) + UDF_SB_SESSION(sb);
-			UDF_SB_PARTMAPS(sb)[i].s_uspace_bitmap = 0xFFFFFFFF;
 
 			if (UDF_SB_PARTTYPE(sb,i) == UDF_SPARABLE_MAP15)
 				udf_fill_spartable(sb, &UDF_SB_TYPESPAR(sb,i), UDF_SB_PARTLEN(sb,i));
@@ -843,17 +802,24 @@ udf_load_partdesc(struct super_block *sb, struct buffer_head *bh)
 					udf_debug("unallocatedSpaceTable (part %d)\n", i);
 				if (phd->unallocatedSpaceBitmap.extLength)
 				{
-					UDF_SB_PARTMAPS(sb)[i].s_uspace_bitmap =
+					UDF_SB_PARTMAPS(sb)[i].s_uspace.bitmap =
 						le32_to_cpu(phd->unallocatedSpaceBitmap.extPosition);
+					UDF_SB_PARTFLAGS(sb,i) |= UDF_PART_FLAG_UNALLOC_BITMAP;
 					udf_debug("unallocatedSpaceBitmap (part %d) @ %d\n",
-						i, UDF_SB_PARTMAPS(sb)[i].s_uspace_bitmap);
+						i, UDF_SB_PARTMAPS(sb)[i].s_uspace.bitmap);
 				}
 				if (phd->partitionIntegrityTable.extLength)
 					udf_debug("partitionIntegrityTable (part %d)\n", i);
 				if (phd->freedSpaceTable.extLength)
 					udf_debug("freedSpaceTable (part %d)\n", i);
 				if (phd->freedSpaceBitmap.extLength)
-					udf_debug("freedSpaceBitmap (part %d\n", i);
+				{
+					UDF_SB_PARTMAPS(sb)[i].s_fspace.bitmap =
+						le32_to_cpu(phd->freedSpaceBitmap.extPosition);
+					UDF_SB_PARTFLAGS(sb,i) |= UDF_PART_FLAG_FREED_BITMAP;
+					udf_debug("freedSpaceBitmap (part %d) @ %d\n",
+						i, UDF_SB_PARTMAPS(sb)[i].s_fspace.bitmap);
+				}
 			}
 			break;
 		}
@@ -1224,7 +1190,6 @@ udf_load_partition(struct super_block *sb, lb_addr *fileset)
 				}
 				UDF_SB_PARTROOT(sb,i) = udf_get_pblock(sb, 0, i, 0);
 				UDF_SB_PARTLEN(sb,i) = UDF_SB_PARTLEN(sb,ino.partitionReferenceNum);
-				UDF_SB_PARTMAPS(sb)[i].s_uspace_bitmap = 0xFFFFFFFF;
 			}
 		}
 	}
@@ -1254,7 +1219,7 @@ static void udf_open_lvid(struct super_block *sb)
 				UDF_SB_LVID(sb)->descTag.tagChecksum +=
 					((Uint8 *)&(UDF_SB_LVID(sb)->descTag))[i];
 
-		mark_buffer_dirty(UDF_SB_LVIDBH(sb), 1);
+		mark_buffer_dirty(UDF_SB_LVIDBH(sb));
 		sb->s_dirt = 0;
 	}
 }
@@ -1289,7 +1254,7 @@ static void udf_close_lvid(struct super_block *sb)
 				UDF_SB_LVID(sb)->descTag.tagChecksum +=
 					((Uint8 *)&(UDF_SB_LVID(sb)->descTag))[i];
 
-		mark_buffer_dirty(UDF_SB_LVIDBH(sb), 1);
+		mark_buffer_dirty(UDF_SB_LVIDBH(sb));
 	}
 }
 
@@ -1454,7 +1419,6 @@ udf_read_super(struct super_block *sb, void *options, int silent)
 	return sb;
 
 error_out:
-	sb->s_dev = NODEV;
 	if (UDF_SB_VAT(sb))
 		iput(UDF_SB_VAT(sb));
 	if (!(sb->s_flags & MS_RDONLY))
@@ -1560,34 +1524,27 @@ static unsigned int
 udf_count_free(struct super_block *sb)
 {
 	struct buffer_head *bh = NULL;
-	unsigned int accum=0;
-	int index;
-	int block=0, newblock;
+	unsigned int accum = 0;
 	lb_addr loc;
-	Uint32  bytes;
-	Uint8   value;
-	Uint8 * ptr;
-	Uint16 ident;
+	Uint32 bitmap;
 
-	if (UDF_SB_PARTMAPS(sb)[UDF_SB_PARTITION(sb)].s_uspace_bitmap == 0xFFFFFFFF)
-	{
-		if (UDF_SB_LVIDBH(sb))
-		{
-			if (le32_to_cpu(UDF_SB_LVID(sb)->numOfPartitions) > UDF_SB_PARTITION(sb))
-				accum = le32_to_cpu(UDF_SB_LVID(sb)->freeSpaceTable[UDF_SB_PARTITION(sb)]);
-
-			if (accum == 0xFFFFFFFF)
-				accum = 0;
-
-			return accum;
-		}
-		else
-			return 0;
-	}
+	if (UDF_SB_PARTFLAGS(sb,UDF_SB_PARTITION(sb)) & UDF_PART_FLAG_UNALLOC_BITMAP)
+		bitmap = UDF_SB_PARTMAPS(sb)[UDF_SB_PARTITION(sb)].s_uspace.bitmap;
+	else if (UDF_SB_PARTFLAGS(sb,UDF_SB_PARTITION(sb)) & UDF_PART_FLAG_FREED_BITMAP)
+		bitmap = UDF_SB_PARTMAPS(sb)[UDF_SB_PARTITION(sb)].s_fspace.bitmap;
 	else
+		bitmap = 0xFFFFFFFF;
+
+	if (bitmap != 0xFFFFFFFF)
 	{
 		struct SpaceBitmapDesc *bm;
-		loc.logicalBlockNum = UDF_SB_PARTMAPS(sb)[UDF_SB_PARTITION(sb)].s_uspace_bitmap;
+		int block = 0, newblock, index;
+		Uint16 ident;
+		Uint32 bytes;
+		Uint8 value;
+		Uint8 * ptr;
+
+		loc.logicalBlockNum = bitmap;
 		loc.partitionReferenceNum = UDF_SB_PARTITION(sb);
 		bh = udf_read_ptagged(sb, loc, 0, &ident);
 
@@ -1633,6 +1590,18 @@ udf_count_free(struct super_block *sb)
 			}
 		}
 		udf_release_data(bh);
-		return accum;
 	}
+	else
+	{
+		if (UDF_SB_LVIDBH(sb))
+		{
+			if (le32_to_cpu(UDF_SB_LVID(sb)->numOfPartitions) > UDF_SB_PARTITION(sb))
+				accum = le32_to_cpu(UDF_SB_LVID(sb)->freeSpaceTable[UDF_SB_PARTITION(sb)]);
+
+			if (accum == 0xFFFFFFFF)
+				accum = 0;
+		}
+	}
+
+	return accum;
 }

@@ -1,4 +1,4 @@
-/* $Id: indy_int.c,v 1.17 2000/02/04 07:40:23 ralf Exp $
+/* $Id: indy_int.c,v 1.18 2000/03/02 02:36:50 ralf Exp $
  *
  * indy_int.c: Routines for generic manipulation of the INT[23] ASIC
  *             found on INDY workstations..
@@ -39,6 +39,22 @@
 #include <asm/sgialib.h>
 #include <asm/gdb-stub.h>
 
+/*
+ * Linux has a controller-independent x86 interrupt architecture.
+ * every controller has a 'controller-template', that is used
+ * by the main code to do the right thing. Each driver-visible
+ * interrupt source is transparently wired to the apropriate
+ * controller. Thus drivers need not be aware of the
+ * interrupt-controller.
+ *
+ * Various interrupt controllers we handle: 8259 PIC, SMP IO-APIC,
+ * PIIX4's internal 8259 PIC and SGI's Visual Workstation Cobalt (IO-)APIC.
+ * (IO-APICs assumed to be messaging to Pentium local-APICs)
+ *
+ * the code is designed to be easily extended with new/different
+ * interrupt controllers, without having to do assembly magic.
+ */
+
 /* #define DEBUG_SGINT */
 
 struct sgi_int2_regs *sgi_i2regs;
@@ -54,8 +70,6 @@ static char lc3msk_to_irqnr[256];
 
 extern asmlinkage void indyIRQ(void);
 
-unsigned int local_bh_count[NR_CPUS];
-unsigned int local_irq_count[NR_CPUS];
 unsigned long spurious_count = 0;
 
 /* Local IRQ's are layed out logically like this:

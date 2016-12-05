@@ -104,28 +104,7 @@ static struct { u_short blue, green, red, pad; } palette[256];
 
 static int             currcon   = 0;
 
-static int release_io_ports = 0;
-
 /* --------------------------------------------------------------------- */
-
-	/*
-	 * Open/Release the frame buffer device
-	 */
-
-static int vga16fb_open(struct fb_info *info, int user)
-{
-	/*
-	 * Nothing, only a usage count for the moment
-	 */
-	MOD_INC_USE_COUNT;
-	return(0);
-}
-
-static int vga16fb_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return(0);
-}
 
 static void vga16fb_pan_var(struct fb_info *info, struct fb_var_screeninfo *var)
 {
@@ -389,7 +368,7 @@ static int vga16fb_decode_var(const struct fb_var_screeninfo *var,
 	if (pos & 0x200)
 		r7 |= 0x80;
 	pos += vslen;
-	par->crtc[VGA_CRTC_V_SYNC_END] = (pos & 0x0F) | 0x10; /* disabled IRQ */
+	par->crtc[VGA_CRTC_V_SYNC_END] = (pos & 0x0F) & ~0x10; /* disabled IRQ */
 	pos += upper - 1; /* blank_end + 1 <= ytotal + 2 */
 	par->crtc[VGA_CRTC_V_BLANK_END] = pos & 0xFF; /* 0x7F for original VGA,
                      but some SVGA chips requires all 8 bits to set */
@@ -694,23 +673,14 @@ static int vga16fb_pan_display(struct fb_var_screeninfo *var, int con,
 	return 0;
 }
 
-static int vga16fb_ioctl(struct inode *inode, struct file *file,
-		       unsigned int cmd, unsigned long arg, int con,
-		       struct fb_info *info)
-{
-	return -EINVAL;
-}
-
 static struct fb_ops vga16fb_ops = {
-	vga16fb_open,
-	vga16fb_release,
-	vga16fb_get_fix,
-	vga16fb_get_var,
-	vga16fb_set_var,
-	vga16fb_get_cmap,
-	vga16fb_set_cmap,
-	vga16fb_pan_display,
-	vga16fb_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	vga16fb_get_fix,
+	fb_get_var:	vga16fb_get_var,
+	fb_set_var:	vga16fb_set_var,
+	fb_get_cmap:	vga16fb_get_cmap,
+	fb_set_cmap:	vga16fb_set_cmap,
+	fb_pan_display:	vga16fb_pan_display,
 };
 
 int vga16fb_setup(char *options)
@@ -918,16 +888,13 @@ static void vga16fb_blank(int blank, struct fb_info *fb_info)
 	}
 }
 
-int __init vga16_init(void)
+int __init vga16fb_init(void)
 {
 	int i,j;
 
 	printk(KERN_DEBUG "vga16fb: initializing\n");
 
-	if (!request_mem_region(VGA_FB_PHYS, VGA_FB_PHYS_LEN, "vga16fb")) {
-		printk (KERN_ERR "vga16fb: unable to reserve VGA memory, exiting\n");
-		return -1;
-	}
+	/* XXX share VGA_FB_PHYS region with vgacon */
 
         vga16fb.video_vbase = ioremap(VGA_FB_PHYS, VGA_FB_PHYS_LEN);
 	printk(KERN_INFO "vga16fb: mapped to 0x%p\n", vga16fb.video_vbase);
@@ -948,10 +915,7 @@ int __init vga16_init(void)
 		palette[i].blue  = default_blu[j];
 	}
 
-	/* note - does not cause failure, b/c vgacon probably still owns this 
-	 * region (FIXME) */
-	if (request_region(0x3C0, 32, "vga16fb"))
-		release_io_ports = 1;
+	/* XXX share VGA I/O region with vgacon and others */
 
 	disp.var = vga16fb_defined;
 
@@ -976,29 +940,18 @@ int __init vga16_init(void)
 	return 0;
 }
 
-#ifndef MODULE
-int __init vga16fb_init(void)
-{
-    return vga16_init();
-}
-
-#else /* MODULE */
-
-int init_module(void)
-{
-    return vga16_init();
-}
-
-void cleanup_module(void)
+static void __exit vga16fb_exit(void)
 {
     unregister_framebuffer(&vga16fb.fb_info);
     iounmap(vga16fb.video_vbase);
-    release_mem_region(VGA_FB_PHYS, VGA_FB_PHYS_LEN);
-    if (release_io_ports)
-    	release_region(0x3c0, 32);
+    /* XXX unshare VGA regions */
 }
 
+#ifdef MODULE
+module_init(vga16fb_init);
 #endif
+module_exit(vga16fb_exit);
+
 
 /*
  * Overrides for Emacs so that we follow Linus's tabbing style.

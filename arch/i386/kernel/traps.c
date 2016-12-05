@@ -2,6 +2,9 @@
  *  linux/arch/i386/traps.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
+ *
+ *  Pentium III FXSR, SSE support
+ *	Gareth Hughes <gareth@valinux.com>, May 2000
  */
 
 /*
@@ -16,8 +19,6 @@
 #include <linux/ptrace.h>
 #include <linux/timer.h>
 #include <linux/mm.h>
-#include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/spinlock.h>
@@ -34,6 +35,7 @@
 #include <asm/atomic.h>
 #include <asm/debugreg.h>
 #include <asm/desc.h>
+#include <asm/i387.h>
 
 #include <asm/smp.h>
 #include <asm/pgalloc.h>
@@ -60,46 +62,7 @@ struct desc_struct default_ldt[] = { { 0, 0 }, { 0, 0 }, { 0, 0 },
  */
 struct desc_struct idt_table[256] __attribute__((__section__(".data.idt"))) = { {0, 0}, };
 
-extern int console_loglevel;
-
-static inline void console_silent(void)
-{
-	console_loglevel = 0;
-}
-
-static inline void console_verbose(void)
-{
-	if (console_loglevel)
-		console_loglevel = 15;
-}
-
-#define DO_ERROR(trapnr, signr, str, name, tsk) \
-asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
-{ \
-	tsk->thread.error_code = error_code; \
-	tsk->thread.trap_no = trapnr; \
-	die_if_no_fixup(str,regs,error_code); \
-	force_sig(signr, tsk); \
-}
-
-#define DO_VM86_ERROR(trapnr, signr, str, name, tsk) \
-asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
-{ \
-	lock_kernel(); \
-	if (regs->eflags & VM_MASK) { \
-		if (!handle_vm86_trap((struct kernel_vm86_regs *) regs, error_code, trapnr)) \
-			goto out; \
-		/* else fall through */ \
-	} \
-	tsk->thread.error_code = error_code; \
-	tsk->thread.trap_no = trapnr; \
-	force_sig(signr, tsk); \
-	die_if_kernel(str,regs,error_code); \
-out: \
-	unlock_kernel(); \
-}
-
-void page_exception(void);
+extern void bust_spinlocks(void);
 
 asmlinkage void divide_error(void);
 asmlinkage void debug(void);
@@ -117,41 +80,27 @@ asmlinkage void stack_segment(void);
 asmlinkage void general_protection(void);
 asmlinkage void page_fault(void);
 asmlinkage void coprocessor_error(void);
-asmlinkage void reserved(void);
+asmlinkage void simd_coprocessor_error(void);
 asmlinkage void alignment_check(void);
 asmlinkage void spurious_interrupt_bug(void);
+asmlinkage void machine_check(void);
 
 int kstack_depth_to_print = 24;
 
 /*
  * These constants are for searching for possible module text
- * segments. MODULE_RANGE is a guess of how much space is likely
- * to be vmalloced.
+ * segments.
  */
-#define MODULE_RANGE (8*1024*1024)
 
-void show_stack(unsigned long * esp)
+void show_trace(unsigned long * stack)
 {
-	unsigned long *stack, addr, module_start, module_end;
 	int i;
+	unsigned long addr, module_start, module_end;
 
-	// debugging aid: "show_stack(NULL);" prints the
-	// back trace for this cpu.
+	if (!stack)
+		stack = (unsigned long*)&stack;
 
-	if(esp==NULL)
-		esp=(unsigned long*)&esp;
-
-	stack = esp;
-	for(i=0; i < kstack_depth_to_print; i++) {
-		if (((long) stack & (THREAD_SIZE-1)) == 0)
-			break;
-		if (i && ((i % 8) == 0))
-			printk("\n       ");
-		printk("%08lx ", *stack++);
-	}
-
-	printk("\nCall Trace: ");
-	stack = esp;
+	printk("Call Trace: ");
 	i = 1;
 	module_start = VMALLOC_START;
 	module_end = VMALLOC_END;
@@ -174,6 +123,30 @@ void show_stack(unsigned long * esp)
 			i++;
 		}
 	}
+	printk("\n");
+}
+
+void show_stack(unsigned long * esp)
+{
+	unsigned long *stack;
+	int i;
+
+	// debugging aid: "show_stack(NULL);" prints the
+	// back trace for this cpu.
+
+	if(esp==NULL)
+		esp=(unsigned long*)&esp;
+
+	stack = esp;
+	for(i=0; i < kstack_depth_to_print; i++) {
+		if (((long) stack & (THREAD_SIZE-1)) == 0)
+			break;
+		if (i && ((i % 8) == 0))
+			printk("\n       ");
+		printk("%08lx ", *stack++);
+	}
+	printk("\n");
+	show_trace(esp);
 }
 
 static void show_registers(struct pt_regs *regs)
@@ -246,48 +219,96 @@ static inline void die_if_kernel(const char * str, struct pt_regs * regs, long e
 		die(str, regs, err);
 }
 
-static void die_if_no_fixup(const char * str, struct pt_regs * regs, long err)
+static inline unsigned long get_cr2(void)
 {
-	if (!(regs->eflags & VM_MASK) && !(3 & regs->xcs))
-	{
-		unsigned long fixup;
-		fixup = search_exception_table(regs->eip);
-		if (fixup) {
-			regs->eip = fixup;
-			return;
-		}
-		die(str, regs, err);
-	}
+	unsigned long address;
+
+	/* get the address */
+	__asm__("movl %%cr2,%0":"=r" (address));
+	return address;
 }
 
-DO_VM86_ERROR( 0, SIGFPE,  "divide error", divide_error, current)
-DO_VM86_ERROR( 3, SIGTRAP, "int3", int3, current)
-DO_VM86_ERROR( 4, SIGSEGV, "overflow", overflow, current)
-DO_VM86_ERROR( 5, SIGSEGV, "bounds", bounds, current)
-DO_ERROR( 6, SIGILL,  "invalid operand", invalid_op, current)
-DO_VM86_ERROR( 7, SIGSEGV, "device not available", device_not_available, current)
-DO_ERROR( 8, SIGSEGV, "double fault", double_fault, current)
-DO_ERROR( 9, SIGFPE,  "coprocessor segment overrun", coprocessor_segment_overrun, current)
-DO_ERROR(10, SIGSEGV, "invalid TSS", invalid_TSS, current)
-DO_ERROR(11, SIGBUS,  "segment not present", segment_not_present, current)
-DO_ERROR(12, SIGBUS,  "stack segment", stack_segment, current)
-DO_ERROR(17, SIGSEGV, "alignment check", alignment_check, current)
-DO_ERROR(18, SIGSEGV, "reserved", reserved, current)
-/* I don't have documents for this but it does seem to cover the cache
-   flush from user space exception some people get. */
-DO_ERROR(19, SIGSEGV, "cache flush denied", cache_flush_denied, current)
-
-asmlinkage void cache_flush_denied(struct pt_regs * regs, long error_code)
+static void inline do_trap(int trapnr, int signr, char *str, int vm86,
+			   struct pt_regs * regs, long error_code, siginfo_t *info)
 {
-	if (regs->eflags & VM_MASK) {
-		handle_vm86_fault((struct kernel_vm86_regs *) regs, error_code);
+	if (vm86 && regs->eflags & VM_MASK)
+		goto vm86_trap;
+	if (!(regs->xcs & 3))
+		goto kernel_trap;
+
+	trap_signal: {
+		struct task_struct *tsk = current;
+		tsk->thread.error_code = error_code;
+		tsk->thread.trap_no = trapnr;
+		if (info)
+			force_sig_info(signr, info, tsk);
+		else
+			force_sig(signr, tsk);
 		return;
 	}
-	die_if_kernel("cache flush denied",regs,error_code);
-	current->thread.error_code = error_code;
-	current->thread.trap_no = 19;
-	force_sig(SIGSEGV, current);
+
+	kernel_trap: {
+		unsigned long fixup = search_exception_table(regs->eip);
+		if (fixup)
+			regs->eip = fixup;
+		else	
+			die(str, regs, error_code);
+		return;
+	}
+
+	vm86_trap: {
+		int ret = handle_vm86_trap((struct kernel_vm86_regs *) regs, error_code, trapnr);
+		if (ret) goto trap_signal;
+		return;
+	}
 }
+
+#define DO_ERROR(trapnr, signr, str, name) \
+asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
+{ \
+	do_trap(trapnr, signr, str, 0, regs, error_code, NULL); \
+}
+
+#define DO_ERROR_INFO(trapnr, signr, str, name, sicode, siaddr) \
+asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
+{ \
+	siginfo_t info; \
+	info.si_signo = signr; \
+	info.si_errno = 0; \
+	info.si_code = sicode; \
+	info.si_addr = (void *)siaddr; \
+	do_trap(trapnr, signr, str, 0, regs, error_code, &info); \
+}
+
+#define DO_VM86_ERROR(trapnr, signr, str, name) \
+asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
+{ \
+	do_trap(trapnr, signr, str, 1, regs, error_code, NULL); \
+}
+
+#define DO_VM86_ERROR_INFO(trapnr, signr, str, name, sicode, siaddr) \
+asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
+{ \
+	siginfo_t info; \
+	info.si_signo = signr; \
+	info.si_errno = 0; \
+	info.si_code = sicode; \
+	info.si_addr = (void *)siaddr; \
+	do_trap(trapnr, signr, str, 1, regs, error_code, &info); \
+}
+
+DO_VM86_ERROR_INFO( 0, SIGFPE,  "divide error", divide_error, FPE_INTDIV, regs->eip)
+DO_VM86_ERROR( 3, SIGTRAP, "int3", int3)
+DO_VM86_ERROR( 4, SIGSEGV, "overflow", overflow)
+DO_VM86_ERROR( 5, SIGSEGV, "bounds", bounds)
+DO_ERROR_INFO( 6, SIGILL,  "invalid operand", invalid_op, ILL_ILLOPN, regs->eip)
+DO_VM86_ERROR( 7, SIGSEGV, "device not available", device_not_available)
+DO_ERROR( 8, SIGSEGV, "double fault", double_fault)
+DO_ERROR( 9, SIGFPE,  "coprocessor segment overrun", coprocessor_segment_overrun)
+DO_ERROR(10, SIGSEGV, "invalid TSS", invalid_TSS)
+DO_ERROR(11, SIGBUS,  "segment not present", segment_not_present)
+DO_ERROR(12, SIGBUS,  "stack segment", stack_segment)
+DO_ERROR_INFO(17, SIGBUS, "alignment check", alignment_check, BUS_ADRALN, get_cr2())
 
 asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
 {
@@ -303,9 +324,7 @@ asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
 	return;
 
 gp_in_vm86:
-	lock_kernel();
 	handle_vm86_fault((struct kernel_vm86_regs *) regs, error_code);
-	unlock_kernel();
 	return;
 
 gp_in_kernel:
@@ -373,7 +392,6 @@ static int __init setup_nmi_watchdog(char *str)
 
 __setup("nmi_watchdog=", setup_nmi_watchdog);
 
-extern spinlock_t console_lock;
 static spinlock_t nmi_print_lock = SPIN_LOCK_UNLOCKED;
 
 inline void nmi_watchdog_tick(struct pt_regs * regs)
@@ -393,8 +411,8 @@ inline void nmi_watchdog_tick(struct pt_regs * regs)
 	 *  here too!]
 	 */
 
-	static unsigned int last_irq_sums [NR_CPUS] = { 0, },
-				alert_counter [NR_CPUS] = { 0, };
+	static unsigned int last_irq_sums [NR_CPUS],
+				alert_counter [NR_CPUS];
 
 	/*
 	 * Since current-> is always on the stack, and we always switch
@@ -416,8 +434,7 @@ inline void nmi_watchdog_tick(struct pt_regs * regs)
 			 * We are in trouble anyway, lets at least try
 			 * to get a message out.
 			 */
-			spin_trylock(&console_lock);
-			spin_unlock(&console_lock);
+			bust_spinlocks();
 			printk("NMI Watchdog detected LOCKUP on CPU%d, registers:\n", cpu);
 			show_registers(regs);
 			printk("console shuts up ...\n");
@@ -437,7 +454,7 @@ asmlinkage void do_nmi(struct pt_regs * regs, long error_code)
 	unsigned char reason = inb(0x61);
 
 
-	atomic_inc(&nmi_counter(smp_processor_id()));
+	++nmi_count(smp_processor_id());
 	if (!(reason & 0xc0)) {
 #if CONFIG_X86_IO_APIC
 		/*
@@ -469,22 +486,32 @@ asmlinkage void do_nmi(struct pt_regs * regs, long error_code)
 }
 
 /*
- * Careful - we must not do a lock-kernel until we have checked that the
- * debug fault happened in user mode. Getting debug exceptions while
- * in the kernel has to be handled without locking, to avoid deadlocks..
+ * Our handling of the processor debug registers is non-trivial.
+ * We do not clear them on entry and exit from the kernel. Therefore
+ * it is possible to get a watchpoint trap here from inside the kernel.
+ * However, the code in ./ptrace.c has ensured that the user can
+ * only set watchpoints on userspace addresses. Therefore the in-kernel
+ * watchpoint trap can only occur in code which is reading/writing
+ * from user space. Such code must not hold kernel locks (since it
+ * can equally take a page fault), therefore it is safe to call
+ * force_sig_info even though that claims and releases locks.
+ * 
+ * Code in ./signal.c ensures that the debug control register
+ * is restored before we deliver any signal, and therefore that
+ * user code runs with the correct debug control register even though
+ * we clear it here.
  *
  * Being careful here means that we don't have to be as careful in a
  * lot of more complicated places (task switching can be a bit lazy
  * about restoring all the debug state, and ptrace doesn't have to
  * find every occurrence of the TF bit that could be saved away even
- * by user code - and we don't have to be careful about what values
- * can be written to the debug registers because there are no really
- * bad cases).
+ * by user code)
  */
 asmlinkage void do_debug(struct pt_regs * regs, long error_code)
 {
 	unsigned int condition;
 	struct task_struct *tsk = current;
+	siginfo_t info;
 
 	__asm__ __volatile__("movl %%db6,%0" : "=r" (condition));
 
@@ -497,41 +524,49 @@ asmlinkage void do_debug(struct pt_regs * regs, long error_code)
 	if (regs->eflags & VM_MASK)
 		goto debug_vm86;
 
+	/* Save debug status register where ptrace can see it */
+	tsk->thread.debugreg[6] = condition;
+
 	/* Mask out spurious TF errors due to lazy TF clearing */
 	if (condition & DR_STEP) {
 		/*
 		 * The TF error should be masked out only if the current
 		 * process is not traced and if the TRAP flag has been set
 		 * previously by a tracing process (condition detected by
-		 * the PF_DTRACE flag); remember that the i386 TRAP flag
+		 * the PT_DTRACE flag); remember that the i386 TRAP flag
 		 * can be modified by the process itself in user mode,
 		 * allowing programs to debug themselves without the ptrace()
 		 * interface.
 		 */
-		if ((tsk->flags & (PF_DTRACE|PF_PTRACED)) == PF_DTRACE)
+		if ((tsk->ptrace & (PT_DTRACE|PT_PTRACED)) == PT_DTRACE)
 			goto clear_TF;
 	}
-
-	/* If this is a kernel mode trap, we need to reset db7 to allow us to continue sanely */
-	if ((regs->xcs & 3) == 0)
-		goto clear_dr7;
 
 	/* Ok, finally something we can handle */
 	tsk->thread.trap_no = 1;
 	tsk->thread.error_code = error_code;
-	force_sig(SIGTRAP, tsk);
-	return;
+	info.si_signo = SIGTRAP;
+	info.si_errno = 0;
+	info.si_code = TRAP_BRKPT;
+	
+	/* If this is a kernel mode trap, save the user PC on entry to 
+	 * the kernel, that's what the debugger can make sense of.
+	 */
+	info.si_addr = ((regs->xcs & 3) == 0) ? (void *)tsk->thread.eip : 
+	                                        (void *)regs->eip;
+	force_sig_info(SIGTRAP, &info, tsk);
 
-debug_vm86:
-	lock_kernel();
-	handle_vm86_trap((struct kernel_vm86_regs *) regs, error_code, 1);
-	unlock_kernel();
-	return;
-
+	/* Disable additional traps. They'll be re-enabled when
+	 * the signal is delivered.
+	 */
 clear_dr7:
 	__asm__("movl %0,%%db7"
 		: /* no output */
 		: "r" (0));
+	return;
+
+debug_vm86:
+	handle_vm86_trap((struct kernel_vm86_regs *) regs, error_code, 1);
 	return;
 
 clear_TF:
@@ -544,25 +579,137 @@ clear_TF:
  * the correct behaviour even in the presence of the asynchronous
  * IRQ13 behaviour
  */
-void math_error(void)
+void math_error(void *eip)
 {
 	struct task_struct * task;
+	siginfo_t info;
+	unsigned short cwd, swd;
 
 	/*
-	 * Save the info for the exception handler
-	 * (this will also clear the error)
+	 * Save the info for the exception handler and clear the error.
 	 */
 	task = current;
-	save_fpu(task);
+	save_init_fpu(task);
 	task->thread.trap_no = 16;
 	task->thread.error_code = 0;
-	force_sig(SIGFPE, task);
+	info.si_signo = SIGFPE;
+	info.si_errno = 0;
+	info.si_code = __SI_FAULT;
+	info.si_addr = eip;
+	/*
+	 * (~cwd & swd) will mask out exceptions that are not set to unmasked
+	 * status.  0x3f is the exception bits in these regs, 0x200 is the
+	 * C1 reg you need in case of a stack fault, 0x040 is the stack
+	 * fault bit.  We should only be taking one exception at a time,
+	 * so if this combination doesn't produce any single exception,
+	 * then we have a bad program that isn't syncronizing its FPU usage
+	 * and it will suffer the consequences since we won't be able to
+	 * fully reproduce the context of the exception
+	 */
+	cwd = get_fpu_cwd(task);
+	swd = get_fpu_swd(task);
+	switch (((~cwd) & swd & 0x3f) | (swd & 0x240)) {
+		case 0x000:
+		default:
+			break;
+		case 0x001: /* Invalid Op */
+		case 0x040: /* Stack Fault */
+		case 0x240: /* Stack Fault | Direction */
+			info.si_code = FPE_FLTINV;
+			break;
+		case 0x002: /* Denormalize */
+		case 0x010: /* Underflow */
+			info.si_code = FPE_FLTUND;
+			break;
+		case 0x004: /* Zero Divide */
+			info.si_code = FPE_FLTDIV;
+			break;
+		case 0x008: /* Overflow */
+			info.si_code = FPE_FLTOVF;
+			break;
+		case 0x020: /* Precision */
+			info.si_code = FPE_FLTRES;
+			break;
+	}
+	force_sig_info(SIGFPE, &info, task);
 }
 
 asmlinkage void do_coprocessor_error(struct pt_regs * regs, long error_code)
 {
 	ignore_irq13 = 1;
-	math_error();
+	math_error((void *)regs->eip);
+}
+
+void simd_math_error(void *eip)
+{
+	struct task_struct * task;
+	siginfo_t info;
+	unsigned short mxcsr;
+
+	/*
+	 * Save the info for the exception handler and clear the error.
+	 */
+	task = current;
+	save_init_fpu(task);
+	task->thread.trap_no = 19;
+	task->thread.error_code = 0;
+	info.si_signo = SIGFPE;
+	info.si_errno = 0;
+	info.si_code = __SI_FAULT;
+	info.si_addr = eip;
+	/*
+	 * The SIMD FPU exceptions are handled a little differently, as there
+	 * is only a single status/control register.  Thus, to determine which
+	 * unmasked exception was caught we must mask the exception mask bits
+	 * at 0x1f80, and then use these to mask the exception bits at 0x3f.
+	 */
+	mxcsr = get_fpu_mxcsr(task);
+	switch (~((mxcsr & 0x1f80) >> 7) & (mxcsr & 0x3f)) {
+		case 0x000:
+		default:
+			break;
+		case 0x001: /* Invalid Op */
+			info.si_code = FPE_FLTINV;
+			break;
+		case 0x002: /* Denormalize */
+		case 0x010: /* Underflow */
+			info.si_code = FPE_FLTUND;
+			break;
+		case 0x004: /* Zero Divide */
+			info.si_code = FPE_FLTDIV;
+			break;
+		case 0x008: /* Overflow */
+			info.si_code = FPE_FLTOVF;
+			break;
+		case 0x020: /* Precision */
+			info.si_code = FPE_FLTRES;
+			break;
+	}
+	force_sig_info(SIGFPE, &info, task);
+}
+
+asmlinkage void do_simd_coprocessor_error(struct pt_regs * regs,
+					  long error_code)
+{
+	if (cpu_has_xmm) {
+		/* Handle SIMD FPU exceptions on PIII+ processors. */
+		ignore_irq13 = 1;
+		simd_math_error((void *)regs->eip);
+	} else {
+		/*
+		 * Handle strange cache flush from user space exception
+		 * in all other cases.  This is undocumented behaviour.
+		 */
+		if (regs->eflags & VM_MASK) {
+			handle_vm86_fault((struct kernel_vm86_regs *)regs,
+					  error_code);
+			return;
+		}
+		die_if_kernel("cache flush denied", regs, error_code);
+		current->thread.trap_no = 19;
+		current->thread.error_code = error_code;
+		force_sig(SIGSEGV, current);
+	}
 }
 
 asmlinkage void do_spurious_interrupt_bug(struct pt_regs * regs,
@@ -585,29 +732,22 @@ asmlinkage void math_state_restore(struct pt_regs regs)
 {
 	__asm__ __volatile__("clts");		/* Allow maths ops (or we recurse) */
 
-	if(current->used_math)
-		__asm__("frstor %0": :"m" (current->thread.i387));
-	else
-	{
-		/*
-		 *	Our first FPU usage, clean the chip.
-		 */
-		__asm__("fninit");
-		current->used_math = 1;
+	if (current->used_math) {
+		restore_fpu(current);
+	} else {
+		init_fpu();
 	}
-	current->flags|=PF_USEDFPU;		/* So we fnsave on switch_to() */
+	current->flags |= PF_USEDFPU;	/* So we fnsave on switch_to() */
 }
 
 #ifndef CONFIG_MATH_EMULATION
 
 asmlinkage void math_emulate(long arg)
 {
-	lock_kernel();
 	printk("math-emulation not enabled and no coprocessor found.\n");
 	printk("killing %s.\n",current->comm);
 	force_sig(SIGFPE,current);
 	schedule();
-	unlock_kernel();
 }
 
 #endif /* CONFIG_MATH_EMULATION */
@@ -696,7 +836,7 @@ static void __init set_call_gate(void *a, void *addr)
 		((limit) & 0x0ffff); }
 
 #define _set_tssldt_desc(n,addr,limit,type) \
-__asm__ __volatile__ ("movw %3,0(%2)\n\t" \
+__asm__ __volatile__ ("movw %w3,0(%2)\n\t" \
 	"movw %%ax,2(%2)\n\t" \
 	"rorl $16,%%eax\n\t" \
 	"movb %%al,4(%2)\n\t" \
@@ -790,7 +930,7 @@ cobalt_init(void)
 	 * On normal SMP PC this is used only with SMP, but we have to
 	 * use it and set it up here to start the Cobalt clock
 	 */
-	set_fixmap(FIX_APIC_BASE, APIC_PHYS_BASE);
+	set_fixmap(FIX_APIC_BASE, APIC_DEFAULT_PHYS_BASE);
 	printk("Local APIC ID %lx\n", apic_read(APIC_ID));
 	printk("Local APIC Version %lx\n", apic_read(APIC_LVR));
 
@@ -808,8 +948,10 @@ cobalt_init(void)
 #endif
 void __init trap_init(void)
 {
+#ifdef CONFIG_EISA
 	if (isa_readl(0x0FFFD9) == 'E'+('I'<<8)+('S'<<16)+('A'<<24))
 		EISA_bus = 1;
+#endif
 
 	set_trap_gate(0,&divide_error);
 	set_trap_gate(1,&debug);
@@ -829,6 +971,9 @@ void __init trap_init(void)
 	set_trap_gate(15,&spurious_interrupt_bug);
 	set_trap_gate(16,&coprocessor_error);
 	set_trap_gate(17,&alignment_check);
+	set_trap_gate(18,&machine_check);
+	set_trap_gate(19,&simd_coprocessor_error);
+
 	set_system_gate(SYSCALL_VECTOR,&system_call);
 
 	/*

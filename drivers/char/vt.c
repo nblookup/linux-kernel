@@ -27,6 +27,10 @@
 #include <asm/io.h>
 #include <asm/uaccess.h>
 
+#if defined(__mc68000__) || defined(CONFIG_APUS)
+#include <asm/machdep.h>
+#endif
+
 #include <linux/kbd_kern.h>
 #include <linux/vt_kern.h>
 #include <linux/kbd_diacr.h>
@@ -36,7 +40,7 @@
 #include <asm/vc_ioctl.h>
 #endif /* CONFIG_FB_COMPAT_XPMAC */
 
-char vt_dont_switch = 0;
+char vt_dont_switch;
 extern struct tty_driver console_driver;
 
 #define VT_IS_IN_USE(i)	(console_driver.table[i] && console_driver.table[i]->count)
@@ -62,7 +66,7 @@ struct vt_struct *vt_cons[MAX_NR_CONSOLES];
  */
 unsigned char keyboard_type = KB_101;
 
-#if !defined(__alpha__) && !defined(__mips__) && !defined(__arm__)
+#if !defined(__alpha__) && !defined(__ia64__) && !defined(__mips__) && !defined(__arm__) && !defined(__sh__)
 asmlinkage long sys_ioperm(unsigned long from, unsigned long num, int on);
 #endif
 
@@ -104,8 +108,7 @@ kd_nosound(unsigned long ignored)
 void
 _kd_mksound(unsigned int hz, unsigned int ticks)
 {
-	static struct timer_list sound_timer = { NULL, NULL, 0, 0,
-						 kd_nosound };
+	static struct timer_list sound_timer = { function: kd_nosound };
 	unsigned int count = 0;
 	unsigned long flags;
 
@@ -179,7 +182,7 @@ do_kdsk_ioctl(int cmd, struct kbentry *user_kbe, int perm, struct kbd_struct *kb
 			if (s && key_map) {
 			    key_maps[s] = 0;
 			    if (key_map[0] == U(K_ALLOCATED)) {
-					kfree_s(key_map, sizeof(plain_map));
+					kfree(key_map);
 					keymap_count--;
 			    }
 			}
@@ -336,7 +339,7 @@ do_kdgkb_ioctl(int cmd, struct kbsentry *user_kdgkb, int perm)
 			    func_table[k] = fnw + (func_table[k] - funcbufptr) + delta;
 		    }
 		    if (funcbufptr != func_buf)
-		      kfree_s(funcbufptr, funcbufsize);
+		      kfree(funcbufptr);
 		    funcbufptr = fnw;
 		    funcbufleft = funcbufleft - delta + sz - funcbufsize;
 		    funcbufsize = sz;
@@ -473,7 +476,7 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 		ucval = keyboard_type;
 		goto setchar;
 
-#if !defined(__alpha__) && !defined(__mips__) && !defined(__arm__)
+#if !defined(__alpha__) && !defined(__ia64__) && !defined(__mips__) && !defined(__arm__) && !defined(__sh__)
 		/*
 		 * These cannot be implemented on any machine that implements
 		 * ioperm() in user level (such as Alpha PCs).
@@ -492,6 +495,27 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 	case KDDISABIO:
 		return sys_ioperm(GPFIRST, GPNUM,
 				  (cmd == KDENABIO)) ? -ENXIO : 0;
+#endif
+
+#if defined(__mc68000__) || defined(CONFIG_APUS)
+	/* Linux/m68k interface for setting the keyboard delay/repeat rate */
+		
+	case KDKBDREP:
+	{
+		struct kbd_repeat kbrep;
+		
+		if (!mach_kbdrate) return( -EINVAL );
+		if (!suser()) return( -EPERM );
+
+		if (copy_from_user(&kbrep, (void *)arg,
+				   sizeof(struct kbd_repeat)))
+			return -EFAULT;
+		if ((i = mach_kbdrate( &kbrep ))) return( i );
+		if (copy_to_user((void *)arg, &kbrep,
+				 sizeof(struct kbd_repeat)))
+			return -EFAULT;
+		return 0;
+	}
 #endif
 
 	case KDSETMODE:
@@ -593,6 +617,8 @@ int vt_ioctl(struct tty_struct *tty, struct file * file,
 
 	case KDGETKEYCODE:
 	case KDSETKEYCODE:
+		if(!capable(CAP_SYS_ADMIN))
+			perm=0;
 		return do_kbkeycode_ioctl(cmd, (struct kbkeycode *)arg, perm);
 
 	case KDGKBENT:

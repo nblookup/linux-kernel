@@ -1,8 +1,8 @@
 /* vm.c -- Memory mapping for DRM -*- linux-c -*-
  * Created: Mon Jan  4 08:58:31 1999 by faith@precisioninsight.com
- * Revised: Mon Dec  6 16:54:35 1999 by faith@precisioninsight.com
  *
  * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
+ * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
  * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -24,8 +24,8 @@
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  * 
- * $PI: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/vm.c,v 1.7 1999/08/21 02:48:34 faith Exp $
- * $XFree86: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/vm.c,v 1.1 1999/09/25 14:38:02 dawes Exp $
+ * Authors:
+ *    Rickard E. (Rik) Faith <faith@valinux.com>
  *
  */
 
@@ -40,6 +40,12 @@ struct vm_operations_struct   drm_vm_ops = {
 
 struct vm_operations_struct   drm_vm_shm_ops = {
 	nopage:	 drm_vm_shm_nopage,
+	open:	 drm_vm_open,
+	close:	 drm_vm_close,
+};
+
+struct vm_operations_struct   drm_vm_shm_lock_ops = {
+	nopage:	 drm_vm_shm_nopage_lock,
 	open:	 drm_vm_open,
 	close:	 drm_vm_close,
 };
@@ -61,8 +67,6 @@ struct page *drm_vm_nopage(struct vm_area_struct *vma,
 			   int write_access)
 #endif
 {
-	DRM_DEBUG("0x%08lx, %d\n", address, write_access);
-
 	return NOPAGE_SIGBUS;		/* Disallow mremap */
 }
 
@@ -77,6 +81,40 @@ struct page *drm_vm_shm_nopage(struct vm_area_struct *vma,
 			       int write_access)
 #endif
 {
+#if LINUX_VERSION_CODE >= 0x020300
+	drm_map_t	 *map	 = (drm_map_t *)vma->vm_private_data;
+#else
+	drm_map_t	 *map	 = (drm_map_t *)vma->vm_pte;
+#endif
+	unsigned long	 physical;
+	unsigned long	 offset;
+
+	if (address > vma->vm_end) return NOPAGE_SIGBUS; /* Disallow mremap */
+	if (!map)    		   return NOPAGE_OOM;  /* Nothing allocated */
+
+	offset	 = address - vma->vm_start;
+	physical = (unsigned long)map->handle + offset;
+	atomic_inc(&virt_to_page(physical)->count); /* Dec. by kernel */
+
+	DRM_DEBUG("0x%08lx => 0x%08lx\n", address, physical);
+#if LINUX_VERSION_CODE < 0x020317
+	return physical;
+#else
+	return virt_to_page(physical);
+#endif
+}
+
+#if LINUX_VERSION_CODE < 0x020317
+unsigned long drm_vm_shm_nopage_lock(struct vm_area_struct *vma,
+				     unsigned long address,
+				     int write_access)
+#else
+				/* Return type changed in 2.3.23 */
+struct page *drm_vm_shm_nopage_lock(struct vm_area_struct *vma,
+				    unsigned long address,
+				    int write_access)
+#endif
+{
 	drm_file_t	 *priv	 = vma->vm_file->private_data;
 	drm_device_t	 *dev	 = priv->dev;
 	unsigned long	 physical;
@@ -88,14 +126,14 @@ struct page *drm_vm_shm_nopage(struct vm_area_struct *vma,
 
 	offset	 = address - vma->vm_start;
 	page	 = offset >> PAGE_SHIFT;
-	physical = (unsigned long)dev->lock.hw_lock + (offset & (~PAGE_MASK));
-	atomic_inc(&mem_map[MAP_NR(physical)].count); /* Dec. by kernel */
+	physical = (unsigned long)dev->lock.hw_lock + offset;
+	atomic_inc(&virt_to_page(physical)->count); /* Dec. by kernel */
 
 	DRM_DEBUG("0x%08lx (page %lu) => 0x%08lx\n", address, page, physical);
 #if LINUX_VERSION_CODE < 0x020317
 	return physical;
 #else
-	return mem_map + MAP_NR(physical);
+	return virt_to_page(physical);
 #endif
 }
 
@@ -124,13 +162,13 @@ struct page *drm_vm_dma_nopage(struct vm_area_struct *vma,
 	offset	 = address - vma->vm_start; /* vm_[pg]off[set] should be 0 */
 	page	 = offset >> PAGE_SHIFT;
 	physical = dma->pagelist[page] + (offset & (~PAGE_MASK));
-	atomic_inc(&mem_map[MAP_NR(physical)].count); /* Dec. by kernel */
+	atomic_inc(&virt_to_page(physical)->count); /* Dec. by kernel */
 
 	DRM_DEBUG("0x%08lx (page %lu) => 0x%08lx\n", address, page, physical);
 #if LINUX_VERSION_CODE < 0x020317
 	return physical;
 #else
-	return mem_map + MAP_NR(physical);
+	return virt_to_page(physical);
 #endif
 }
 
@@ -145,7 +183,11 @@ void drm_vm_open(struct vm_area_struct *vma)
 	DRM_DEBUG("0x%08lx,0x%08lx\n",
 		  vma->vm_start, vma->vm_end - vma->vm_start);
 	atomic_inc(&dev->vma_count);
-	MOD_INC_USE_COUNT;
+#if LINUX_VERSION_CODE < 0x020333
+				/* The map can exist after the fd is closed. */
+	MOD_INC_USE_COUNT; /* Needed before Linux 2.3.51 */
+#endif
+
 
 #if DRM_DEBUG_CODE
 	vma_entry = drm_alloc(sizeof(*vma_entry), DRM_MEM_VMAS);
@@ -170,7 +212,9 @@ void drm_vm_close(struct vm_area_struct *vma)
 
 	DRM_DEBUG("0x%08lx,0x%08lx\n",
 		  vma->vm_start, vma->vm_end - vma->vm_start);
-	MOD_DEC_USE_COUNT;
+#if LINUX_VERSION_CODE < 0x020333
+	MOD_DEC_USE_COUNT; /* Needed before Linux 2.3.51 */
+#endif
 	atomic_dec(&dev->vma_count);
 
 #if DRM_DEBUG_CODE
@@ -193,15 +237,22 @@ void drm_vm_close(struct vm_area_struct *vma)
 int drm_mmap_dma(struct file *filp, struct vm_area_struct *vma)
 {
 	drm_file_t	 *priv	 = filp->private_data;
-	drm_device_t	 *dev	 = priv->dev;
-	drm_device_dma_t *dma	 = dev->dma;
+	drm_device_t	 *dev;
+	drm_device_dma_t *dma;
 	unsigned long	 length	 = vma->vm_end - vma->vm_start;
 	
+	lock_kernel();
+	dev	 = priv->dev;
+	dma	 = dev->dma;
 	DRM_DEBUG("start = 0x%lx, end = 0x%lx, offset = 0x%lx\n",
 		  vma->vm_start, vma->vm_end, VM_OFFSET(vma));
 
 				/* Length must match exact page count */
-	if ((length >> PAGE_SHIFT) != dma->page_count) return -EINVAL;
+	if (!dma || (length >> PAGE_SHIFT) != dma->page_count) {
+		unlock_kernel();
+		return -EINVAL;
+	}
+	unlock_kernel();
 
 	vma->vm_ops   = &drm_vm_dma_ops;
 	vma->vm_flags |= VM_LOCKED | VM_SHM; /* Don't swap */
@@ -247,37 +298,8 @@ int drm_mmap(struct file *filp, struct vm_area_struct *vma)
 				/* Check for valid size. */
 	if (map->size != vma->vm_end - vma->vm_start) return -EINVAL;
 	
-
-	switch (map->type) {
-	case _DRM_FRAME_BUFFER:
-	case _DRM_REGISTERS:
-		if (VM_OFFSET(vma) >= __pa(high_memory)) {
-#if defined(__i386__)
-			if (boot_cpu_data.x86 > 3) {
-				pgprot_val(vma->vm_page_prot) |= _PAGE_PCD;
-				pgprot_val(vma->vm_page_prot) &= ~_PAGE_PWT;
-			}
-#endif
-			vma->vm_flags |= VM_IO;	/* not in core dump */
-		}
-		if (remap_page_range(vma->vm_start,
-				     VM_OFFSET(vma),
-				     vma->vm_end - vma->vm_start,
-				     vma->vm_page_prot))
-				return -EAGAIN;
-		vma->vm_ops = &drm_vm_ops;
-		break;
-	case _DRM_SHM:
-		vma->vm_ops = &drm_vm_shm_ops;
-				/* Don't let this area swap.  Change when
-				   DRM_KERNEL advisory is supported. */
-		vma->vm_flags |= VM_LOCKED;
-		break;
-	default:
-		return -EINVAL;	/* This should never happen. */
-	}
-	vma->vm_flags |= VM_LOCKED | VM_SHM; /* Don't swap */
-	if (map->flags & _DRM_READ_ONLY) {
+	if (!capable(CAP_SYS_ADMIN) && (map->flags & _DRM_READ_ONLY)) {
+		vma->vm_flags &= VM_MAYWRITE;
 #if defined(__i386__)
 		pgprot_val(vma->vm_page_prot) &= ~_PAGE_RW;
 #else
@@ -289,7 +311,54 @@ int drm_mmap(struct file *filp, struct vm_area_struct *vma)
 #endif
 	}
 
-	
+	switch (map->type) {
+	case _DRM_FRAME_BUFFER:
+	case _DRM_REGISTERS:
+	case _DRM_AGP:
+		if (VM_OFFSET(vma) >= __pa(high_memory)) {
+#if defined(__i386__)
+			if (boot_cpu_data.x86 > 3 && map->type != _DRM_AGP) {
+				pgprot_val(vma->vm_page_prot) |= _PAGE_PCD;
+				pgprot_val(vma->vm_page_prot) &= ~_PAGE_PWT;
+			}
+#elif defined(__ia64__)
+			if (map->type != _DRM_AGP)
+				vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+#endif
+			vma->vm_flags |= VM_IO;	/* not in core dump */
+		}
+		if (remap_page_range(vma->vm_start,
+				     VM_OFFSET(vma),
+				     vma->vm_end - vma->vm_start,
+				     vma->vm_page_prot))
+				return -EAGAIN;
+		DRM_DEBUG("   Type = %d; start = 0x%lx, end = 0x%lx,"
+			  " offset = 0x%lx\n",
+			  map->type,
+			  vma->vm_start, vma->vm_end, VM_OFFSET(vma));
+		vma->vm_ops = &drm_vm_ops;
+		break;
+	case _DRM_SHM:
+		if (map->flags & _DRM_CONTAINS_LOCK)
+			vma->vm_ops = &drm_vm_shm_lock_ops;
+		else {
+			vma->vm_ops = &drm_vm_shm_ops;
+#if LINUX_VERSION_CODE >= 0x020300
+			vma->vm_private_data = (void *)map;
+#else
+			vma->vm_pte = (unsigned long)map;
+#endif
+		}
+
+				/* Don't let this area swap.  Change when
+				   DRM_KERNEL advisory is supported. */
+		vma->vm_flags |= VM_LOCKED;
+		break;
+	default:
+		return -EINVAL;	/* This should never happen. */
+	}
+	vma->vm_flags |= VM_LOCKED | VM_SHM; /* Don't swap */
+
 #if LINUX_VERSION_CODE < 0x020203 /* KERNEL_VERSION(2,2,3) */
 				/* In Linux 2.2.3 and above, this is
 				   handled in do_mmap() in mm/mmap.c. */

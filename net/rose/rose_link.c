@@ -14,8 +14,6 @@
  *	ROSE 003	Jonathan(G4KLX)	New timer architecture.
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_ROSE) || defined(CONFIG_ROSE_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -76,12 +74,12 @@ void rose_stop_t0timer(struct rose_neigh *neigh)
 
 int rose_ftimer_running(struct rose_neigh *neigh)
 {
-	return (neigh->ftimer.prev != NULL || neigh->ftimer.next != NULL);
+	return timer_pending(&neigh->ftimer);
 }
 
 int rose_t0timer_running(struct rose_neigh *neigh)
 {
-	return (neigh->t0timer.prev != NULL || neigh->t0timer.next != NULL);
+	return timer_pending(&neigh->t0timer);
 }
 
 static void rose_ftimer_expiry(unsigned long param)
@@ -322,5 +320,3 @@ void rose_transmit_link(struct sk_buff *skb, struct rose_neigh *neigh)
 		}
 	}
 }
-
-#endif

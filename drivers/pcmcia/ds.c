@@ -2,7 +2,7 @@
 
     PC Card Driver Services
     
-    ds.c 1.104 2000/01/11 01:18:02
+    ds.c 1.108 2000/08/07 19:06:15
     
     The contents of this file are subject to the Mozilla Public
     License Version 1.1 (the "License"); you may not use this file
@@ -15,7 +15,7 @@
     rights and limitations under the License.
 
     The initial developer of the original code is David A. Hinds
-    <dhinds@pcmcia.sourceforge.org>.  Portions created by David A. Hinds
+    <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
     are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
 
     Alternatively, the contents of this file may be used under the
@@ -42,6 +42,7 @@
 #include <linux/mm.h>
 #include <linux/fcntl.h>
 #include <linux/sched.h>
+#include <linux/smp_lock.h>
 #include <linux/timer.h>
 #include <linux/ioctl.h>
 #include <linux/proc_fs.h>
@@ -60,12 +61,12 @@ int pc_debug = PCMCIA_DEBUG;
 MODULE_PARM(pc_debug, "i");
 #define DEBUG(n, args...) if (pc_debug>(n)) printk(KERN_DEBUG args)
 static const char *version =
-"ds.c 1.104 2000/01/11 01:18:02 (David Hinds)";
+"ds.c 1.108 2000/08/07 19:06:15 (David Hinds)";
 #else
 #define DEBUG(n, args...)
 #endif
 
-MODULE_AUTHOR("David Hinds <dhinds@pcmcia.sourceforge.org>");
+MODULE_AUTHOR("David Hinds <dahinds@users.sourceforge.net>");
 MODULE_DESCRIPTION("PCMCIA Driver Services " CS_RELEASE);
 
 /*====================================================================*/
@@ -80,6 +81,7 @@ typedef struct driver_info_t {
 
 typedef struct socket_bind_t {
     driver_info_t	*driver;
+    u_char		function;
     dev_link_t		*instance;
     struct socket_bind_t *next;
 } socket_bind_t;
@@ -390,7 +392,8 @@ static int bind_request(int i, bind_info_t *bind_info)
     }
 
     for (b = s->bind; b; b = b->next)
-	if (driver == b->driver)
+	if ((driver == b->driver) &&
+	    (bind_info->function == b->function))
 	    break;
     if (b != NULL) {
 	bind_info->instance = b->instance;
@@ -412,6 +415,7 @@ static int bind_request(int i, bind_info_t *bind_info)
     driver->use_count++;
     b = kmalloc(sizeof(socket_bind_t), GFP_KERNEL);
     b->driver = driver;
+    b->function = bind_info->function;
     b->instance = NULL;
     b->next = s->bind;
     s->bind = b;
@@ -474,16 +478,14 @@ static int get_device_info(int i, bind_info_t *bind_info, int first)
 #endif
 
     for (b = s->bind; b; b = b->next)
-	if (strcmp((char *)b->driver->dev_info,
-		   (char *)bind_info->dev_info) == 0)
+	if ((strcmp((char *)b->driver->dev_info,
+		    (char *)bind_info->dev_info) == 0) &&
+	    (b->function == bind_info->function))
 	    break;
     if (b == NULL) return -ENODEV;
-
-    if (b->instance == NULL)
+    if ((b->instance == NULL) ||
+	(b->instance->state & DEV_CONFIG_PENDING))
 	return -EAGAIN;
-    if (b->instance->state & DEV_CONFIG_PENDING)
-	return -EAGAIN;
-
     if (first)
 	node = b->instance->dev;
     else
@@ -510,8 +512,9 @@ static int unbind_request(int i, bind_info_t *bind_info)
     DEBUG(2, "unbind_request(%d, '%s')\n", i,
 	  (char *)bind_info->dev_info);
     for (b = &s->bind; *b; b = &(*b)->next)
-	if (strcmp((char *)(*b)->driver->dev_info,
-		   (char *)bind_info->dev_info) == 0)
+	if ((strcmp((char *)(*b)->driver->dev_info,
+		    (char *)bind_info->dev_info) == 0) &&
+	    ((*b)->function == bind_info->function))
 	    break;
     if (*b == NULL)
 	return -ENODEV;
@@ -561,7 +564,6 @@ static int ds_open(struct inode *inode, struct file *file)
     
     user = kmalloc(sizeof(user_info_t), GFP_KERNEL);
     if (!user) return -ENOMEM;
-    MOD_INC_USE_COUNT;
     user->event_tail = user->event_head = 0;
     user->next = s->user;
     user->user_magic = USER_MAGIC;
@@ -584,10 +586,11 @@ static int ds_release(struct inode *inode, struct file *file)
     DEBUG(0, "ds_release(socket %d)\n", i);
     if ((i >= sockets) || (sockets == 0))
 	return 0;
+    lock_kernel();
     s = &socket_table[i];
     user = file->private_data;
     if (CHECK_USER(user))
-	return 0;
+	goto out;
 
     /* Unlink user data structure */
     if ((file->f_flags & O_ACCMODE) != O_RDONLY)
@@ -596,12 +599,12 @@ static int ds_release(struct inode *inode, struct file *file)
     for (link = &s->user; *link; link = &(*link)->next)
 	if (*link == user) break;
     if (link == NULL)
-	return 0;
+	goto out;
     *link = user->next;
     user->user_magic = 0;
     kfree(user);
-    
-    MOD_DEC_USE_COUNT;
+out:
+    unlock_kernel();
     return 0;
 } /* ds_release */
 
@@ -669,6 +672,7 @@ static ssize_t ds_write(struct file *file, const char *buf,
 
 /*====================================================================*/
 
+/* No kernel lock - fine */
 static u_int ds_poll(struct file *file, poll_table *wait)
 {
     socket_t i = MINOR(file->f_dentry->d_inode->i_rdev);
@@ -853,12 +857,13 @@ static int ds_ioctl(struct inode * inode, struct file * file,
 /*====================================================================*/
 
 static struct file_operations ds_fops = {
-	 open:		ds_open,
-	 release:	ds_release,
-	 ioctl:		ds_ioctl,
-	 read:		ds_read,
-	 write:		ds_write,
-	 poll:		ds_poll,
+	owner:		THIS_MODULE,
+	open:		ds_open,
+	release:	ds_release,
+	ioctl:		ds_ioctl,
+	read:		ds_read,
+	write:		ds_write,
+	poll:		ds_poll,
 };
 
 EXPORT_SYMBOL(register_pccard_driver);
@@ -875,7 +880,14 @@ int __init init_pcmcia_ds(void)
     int i, ret;
     
     DEBUG(0, "%s\n", version);
-    
+ 
+    /*
+     * Ugly. But we want to wait for the socket threads to have started up.
+     * We really should let the drivers themselves drive some of this..
+     */
+    current->state = TASK_INTERRUPTIBLE;
+    schedule_timeout(HZ/10);
+
     pcmcia_get_card_services_info(&serv);
     if (serv.Revision != CS_RELEASE_CODE) {
 	printk(KERN_NOTICE "ds: Card Services release does not match!\n");
@@ -896,7 +908,7 @@ int __init init_pcmcia_ds(void)
 	init_waitqueue_head(&s->queue);
 	init_waitqueue_head(&s->request);
 	s->handle = NULL;
-	s->removal.prev = s->removal.next = NULL;
+	init_timer(&s->removal);
 	s->removal.data = i;
 	s->removal.function = &handle_removal;
 	s->bind = NULL;

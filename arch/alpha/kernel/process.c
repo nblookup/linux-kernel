@@ -74,7 +74,7 @@ void
 cpu_idle(void)
 {
 	/* An endless idle loop with no priority at all.  */
-	current->priority = 0;
+	current->nice = 20;
 	current->counter = -100;
 
 	while (1) {
@@ -116,7 +116,7 @@ common_shutdown_1(void *generic_ptr)
 	/* Clear reason to "default"; clear "bootstrap in progress". */
 	flags &= ~0x00ff0001UL;
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	/* Secondaries halt here. */
 	if (cpuid != boot_cpuid) {
 		flags |= 0x00040000UL; /* "remain halted" */
@@ -145,7 +145,7 @@ common_shutdown_1(void *generic_ptr)
 	}
 	*pflags = flags;
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	/* Wait for the secondaries to halt. */
 	clear_bit(boot_cpuid, &cpu_present_mask);
 	while (cpu_present_mask)
@@ -184,7 +184,7 @@ common_shutdown(int mode, char *restart_cmd)
 	struct halt_info args;
 	args.mode = mode;
 	args.restart_cmd = restart_cmd;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	smp_call_function(common_shutdown_1, &args, 1, 0);
 #endif
 	common_shutdown_1(&args);
@@ -251,12 +251,9 @@ void
 flush_thread(void)
 {
 	/* Arrange for each exec'ed process to start off with a clean slate
-	   with respect to the FPU.  This is all exceptions disabled.  Note
-           that EV6 defines UNFD valid only with UNDZ, which we don't want
-	   for IEEE conformance -- so that disabled bit remains in software.  */
-
+	   with respect to the FPU.  This is all exceptions disabled.  */
 	current->thread.flags &= ~IEEE_SW_MASK;
-	wrfpcr(FPCR_DYN_NORMAL | FPCR_INVD | FPCR_DZED | FPCR_OVFD | FPCR_INED);
+	wrfpcr(FPCR_DYN_NORMAL | ieee_swcr_to_fpcr(0));
 }
 
 void
@@ -279,14 +276,14 @@ alpha_clone(unsigned long clone_flags, unsigned long usp,
 {
 	if (!usp)
 		usp = rdusp();
-	return do_fork(clone_flags, usp, (struct pt_regs *) (swstack+1));
+	return do_fork(clone_flags, usp, (struct pt_regs *) (swstack+1), 0);
 }
 
 int
 alpha_vfork(struct switch_stack * swstack)
 {
 	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, rdusp(),
-			(struct pt_regs *) (swstack+1));
+			(struct pt_regs *) (swstack+1), 0);
 }
 
 /*
@@ -302,6 +299,7 @@ alpha_vfork(struct switch_stack * swstack)
 
 int
 copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
+	    unsigned long unused,
 	    struct task_struct * p, struct pt_regs * regs)
 {
 	extern void ret_from_sys_call(void);
@@ -324,7 +322,7 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	stack = ((struct switch_stack *) regs) - 1;
 	childstack = ((struct switch_stack *) childregs) - 1;
 	*childstack = *stack;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	childstack->r26 = (unsigned long) ret_from_smp_fork;
 #else
 	childstack->r26 = (unsigned long) ret_from_sys_call;

@@ -64,7 +64,7 @@
 #include <linux/irq.h>
 
 
-unsigned long cpu_hz;	/* Detected as we calibrate the TSC */
+unsigned long cpu_khz;	/* Detected as we calibrate the TSC */
 
 /* Number of usecs that the last interrupt was delayed */
 static int delay_at_last_interrupt;
@@ -76,9 +76,12 @@ static unsigned long last_tsc_low; /* lsb 32 bits of Time Stamp Counter */
  * Equal to 2^32 * (1 / (clocks per usec) ).
  * Initialized in time_init.
  */
-unsigned long fast_gettimeoffset_quotient=0;
+unsigned long fast_gettimeoffset_quotient;
 
 extern rwlock_t xtime_lock;
+extern unsigned long wall_jiffies;
+
+spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
 
 static inline unsigned long do_fast_gettimeoffset(void)
 {
@@ -102,7 +105,7 @@ static inline unsigned long do_fast_gettimeoffset(void)
 
 	__asm__("mull %2"
 		:"=a" (eax), "=d" (edx)
-		:"g" (fast_gettimeoffset_quotient),
+		:"rm" (fast_gettimeoffset_quotient),
 		 "0" (eax));
 
 	/* our adjusted time offset in microseconds */
@@ -110,6 +113,10 @@ static inline unsigned long do_fast_gettimeoffset(void)
 }
 
 #define TICK_SIZE tick
+
+spinlock_t i8253_lock = SPIN_LOCK_UNLOCKED;
+
+extern spinlock_t i8259A_lock;
 
 #ifndef CONFIG_X86_TSC
 
@@ -157,6 +164,8 @@ static unsigned long do_slow_gettimeoffset(void)
 	 */
 	unsigned long jiffies_t;
 
+	/* gets recalled with irq locally disabled */
+	spin_lock(&i8253_lock);
 	/* timer count may underflow right here */
 	outb_p(0x00, 0x43);	/* latch the count ASAP */
 
@@ -169,6 +178,7 @@ static unsigned long do_slow_gettimeoffset(void)
  	jiffies_t = jiffies;
 
 	count |= inb_p(0x40) << 8;
+	spin_unlock(&i8253_lock);
 
 	/*
 	 * avoiding timer inconsistencies (they are rare, but they happen)...
@@ -187,10 +197,18 @@ static unsigned long do_slow_gettimeoffset(void)
 		if( count > count_p ) {
 			/* the nutcase */
 
-			outb_p(0x0A, 0x20);
+			int i;
 
-			/* assumption about timer being IRQ1 */
-			if( inb(0x20) & 0x01 ) {
+			spin_lock(&i8259A_lock);
+			/*
+			 * This is tricky when I/O APICs are used;
+			 * see do_timer_interrupt().
+			 */
+			i = inb(0x20);
+			spin_unlock(&i8259A_lock);
+
+			/* assumption about timer being IRQ0 */
+			if (i & 0x01) {
 				/*
 				 * We cannot detect lost timer interrupts ... 
 				 * well, that's why we call them lost, don't we? :)
@@ -238,14 +256,13 @@ static unsigned long (*do_gettimeoffset)(void) = do_slow_gettimeoffset;
  */
 void do_gettimeofday(struct timeval *tv)
 {
-	extern volatile unsigned long lost_ticks;
 	unsigned long flags;
 	unsigned long usec, sec;
 
 	read_lock_irqsave(&xtime_lock, flags);
 	usec = do_gettimeoffset();
 	{
-		unsigned long lost = lost_ticks;
+		unsigned long lost = jiffies - wall_jiffies;
 		if (lost)
 			usec += lost * (1000000 / HZ);
 	}
@@ -265,13 +282,14 @@ void do_gettimeofday(struct timeval *tv)
 void do_settimeofday(struct timeval *tv)
 {
 	write_lock_irq(&xtime_lock);
-	/* This is revolting. We need to set the xtime.tv_usec
-	 * correctly. However, the value in this location is
-	 * is value at the last tick.
-	 * Discover what correction gettimeofday
-	 * would have done, and then undo it!
+	/*
+	 * This is revolting. We need to set "xtime" correctly. However, the
+	 * value in this location is the value at the most recent update of
+	 * wall time.  Discover what correction gettimeofday() would have
+	 * made, and then undo it!
 	 */
 	tv->tv_usec -= do_gettimeoffset();
+	tv->tv_usec -= (jiffies - wall_jiffies) * (1000000 / HZ);
 
 	while (tv->tv_usec < 0) {
 		tv->tv_usec += 1000000;
@@ -302,6 +320,8 @@ static int set_rtc_mmss(unsigned long nowtime)
 	int real_seconds, real_minutes, cmos_minutes;
 	unsigned char save_control, save_freq_select;
 
+	/* gets recalled with irq locally disabled */
+	spin_lock(&rtc_lock);
 	save_control = CMOS_READ(RTC_CONTROL); /* tell the clock it's being set */
 	CMOS_WRITE((save_control|RTC_SET), RTC_CONTROL);
 
@@ -347,12 +367,15 @@ static int set_rtc_mmss(unsigned long nowtime)
 	 */
 	CMOS_WRITE(save_control, RTC_CONTROL);
 	CMOS_WRITE(save_freq_select, RTC_FREQ_SELECT);
+	spin_unlock(&rtc_lock);
 
 	return retval;
 }
 
 /* last time the cmos clock got updated */
-static long last_rtc_update = 0;
+static long last_rtc_update;
+
+int timer_ack;
 
 /*
  * timer_interrupt() needs to keep up the real-time clock,
@@ -360,6 +383,22 @@ static long last_rtc_update = 0;
  */
 static inline void do_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
+#ifdef CONFIG_X86_IO_APIC
+	if (timer_ack) {
+		/*
+		 * Subtle, when I/O APICs are used we have to ack timer IRQ
+		 * manually to reset the IRR bit for do_slow_gettimeoffset().
+		 * This will also deassert NMI lines for the watchdog if run
+		 * on an 82489DX-based system.
+		 */
+		spin_lock(&i8259A_lock);
+		outb(0x0c, 0x20);
+		/* Ack the IRQ; AEOI will end it automatically. */
+		inb(0x20);
+		spin_unlock(&i8259A_lock);
+	}
+#endif
+
 #ifdef CONFIG_VISWS
 	/* Clear the interrupt */
 	co_cpu_write(CO_CPU_STAT,co_cpu_read(CO_CPU_STAT) & ~CO_STAT_TIMEINTR);
@@ -410,7 +449,7 @@ static inline void do_timer_interrupt(int irq, void *dev_id, struct pt_regs *reg
 #endif
 }
 
-static int use_tsc = 0;
+static int use_tsc;
 
 /*
  * This is the same as the above, except we _also_ save the current
@@ -448,10 +487,12 @@ static void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 		rdtscl(last_tsc_low);
 
+		spin_lock(&i8253_lock);
 		outb_p(0x00, 0x43);     /* latch the count ASAP */
 
 		count = inb_p(0x40);    /* read the latched count */
 		count |= inb(0x40) << 8;
+		spin_unlock(&i8253_lock);
 
 		count = ((LATCH-1) - count) * TICK_SIZE;
 		delay_at_last_interrupt = (count + LATCH/2) / LATCH;
@@ -461,37 +502,6 @@ static void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	write_unlock(&xtime_lock);
 
-}
-
-/* Converts Gregorian date to seconds since 1970-01-01 00:00:00.
- * Assumes input in normal date format, i.e. 1980-12-31 23:59:59
- * => year=1980, mon=12, day=31, hour=23, min=59, sec=59.
- *
- * [For the Julian calendar (which was used in Russia before 1917,
- * Britain & colonies before 1752, anywhere else before 1582,
- * and is still in use by some communities) leave out the
- * -year/100+year/400 terms, and add 10.]
- *
- * This algorithm was first published by Gauss (I think).
- *
- * WARNING: this function will overflow on 2106-02-07 06:28:16 on
- * machines were long is 32-bit! (However, as time_t is signed, we
- * will already get problems at other places on 2038-01-19 03:14:08)
- */
-static inline unsigned long mktime(unsigned int year, unsigned int mon,
-	unsigned int day, unsigned int hour,
-	unsigned int min, unsigned int sec)
-{
-	if (0 >= (int) (mon -= 2)) {	/* 1..12 -> 11,12,1..10 */
-		mon += 12;	/* Puts Feb last since it has leap day */
-		year -= 1;
-	}
-	return (((
-	    (unsigned long)(year/4 - year/100 + year/400 + 367*mon/12 + day) +
-	      year*365 - 719499
-	    )*24 + hour /* now have hours */
-	   )*60 + min /* now have minutes */
-	  )*60 + sec; /* finally seconds */
 }
 
 /* not static: needed by APM */
@@ -615,6 +625,8 @@ bad_ctc:
 
 void __init time_init(void)
 {
+	extern int x86_udelay_tsc;
+	
 	xtime.tv_sec = get_cmos_time();
 	xtime.tv_usec = 0;
 
@@ -645,11 +657,16 @@ void __init time_init(void)
  
  	dodgy_tsc();
  	
-	if (boot_cpu_data.x86_capability & X86_FEATURE_TSC) {
+	if (cpu_has_tsc) {
 		unsigned long tsc_quotient = calibrate_tsc();
 		if (tsc_quotient) {
 			fast_gettimeoffset_quotient = tsc_quotient;
 			use_tsc = 1;
+			/*
+			 *	We could be more selective here I suspect
+			 *	and just enable this for the next intel chips ?
+			 */
+			x86_udelay_tsc = 1;
 #ifndef do_gettimeoffset
 			do_gettimeoffset = do_fast_gettimeoffset;
 #endif
@@ -659,12 +676,12 @@ void __init time_init(void)
 			 * The formula is (10^6 * 2^32) / (2^32 * 1 / (clocks/us)) =
 			 * clock/second. Our precision is about 100 ppm.
 			 */
-			{	unsigned long eax=0, edx=1000000;
+			{	unsigned long eax=0, edx=1000;
 				__asm__("divl %2"
-		       		:"=a" (cpu_hz), "=d" (edx)
+		       		:"=a" (cpu_khz), "=d" (edx)
         	       		:"r" (tsc_quotient),
 	                	"0" (eax), "1" (edx));
-				printk("Detected %ld Hz processor.\n", cpu_hz);
+				printk("Detected %lu.%03lu MHz processor.\n", cpu_khz / 1000, cpu_khz % 1000);
 			}
 		}
 	}

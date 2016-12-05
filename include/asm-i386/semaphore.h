@@ -3,6 +3,8 @@
 
 #include <linux/linkage.h>
 
+#ifdef __KERNEL__
+
 /*
  * SMP- and interrupt-safe semaphores..
  *
@@ -21,6 +23,12 @@
  *                     Optimized "0(ecx)" -> "(ecx)" (the assembler does not
  *                     do this). Changed calling sequences from push/jmp to
  *                     traditional call/ret.
+ * Modified 2001-01-01 Andreas Franck <afranck@gmx.de>
+ *		       Some hacks to ensure compatibility with recent
+ *		       GCC snapshots, to avoid stack corruption when compiling
+ *		       with -fomit-frame-pointer. It's not sure if this will
+ *		       be fixed in GCC, as our previous implementation was a
+ *		       bit dubious.
  *
  * If you would like to see an analysis of this implementation, please
  * ftp to gcom.com and download the file
@@ -62,7 +70,7 @@ struct semaphore {
 #define DECLARE_MUTEX(name) __DECLARE_SEMAPHORE_GENERIC(name,1)
 #define DECLARE_MUTEX_LOCKED(name) __DECLARE_SEMAPHORE_GENERIC(name,0)
 
-extern inline void sema_init (struct semaphore *sem, int val)
+static inline void sema_init (struct semaphore *sem, int val)
 {
 /*
  *	*sem = (struct semaphore)__SEMAPHORE_INITIALIZER((*sem),val);
@@ -100,10 +108,10 @@ asmlinkage void __up(struct semaphore * sem);
 
 /*
  * This is ugly, but we want the default case to fall through.
- * "down_failed" is a special asm handler that calls the C
- * routine that actually waits. See arch/i386/lib/semaphore.S
+ * "__down_failed" is a special asm handler that calls the C
+ * routine that actually waits. See arch/i386/kernel/semaphore.c
  */
-extern inline void down(struct semaphore * sem)
+static inline void down(struct semaphore * sem)
 {
 #if WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
@@ -111,19 +119,19 @@ extern inline void down(struct semaphore * sem)
 
 	__asm__ __volatile__(
 		"# atomic down operation\n\t"
-		LOCK "decl (%0)\n\t"     /* --sem->count */
+		LOCK "decl %0\n\t"     /* --sem->count */
 		"js 2f\n"
 		"1:\n"
 		".section .text.lock,\"ax\"\n"
 		"2:\tcall __down_failed\n\t"
 		"jmp 1b\n"
 		".previous"
-		:/* no outputs */
+		:"=m" (sem->count)
 		:"c" (sem)
 		:"memory");
 }
 
-extern inline int down_interruptible(struct semaphore * sem)
+static inline int down_interruptible(struct semaphore * sem)
 {
 	int result;
 
@@ -133,7 +141,7 @@ extern inline int down_interruptible(struct semaphore * sem)
 
 	__asm__ __volatile__(
 		"# atomic interruptible down operation\n\t"
-		LOCK "decl (%1)\n\t"     /* --sem->count */
+		LOCK "decl %1\n\t"     /* --sem->count */
 		"js 2f\n\t"
 		"xorl %0,%0\n"
 		"1:\n"
@@ -141,13 +149,13 @@ extern inline int down_interruptible(struct semaphore * sem)
 		"2:\tcall __down_failed_interruptible\n\t"
 		"jmp 1b\n"
 		".previous"
-		:"=a" (result)
+		:"=a" (result), "=m" (sem->count)
 		:"c" (sem)
 		:"memory");
 	return result;
 }
 
-extern inline int down_trylock(struct semaphore * sem)
+static inline int down_trylock(struct semaphore * sem)
 {
 	int result;
 
@@ -157,7 +165,7 @@ extern inline int down_trylock(struct semaphore * sem)
 
 	__asm__ __volatile__(
 		"# atomic interruptible down operation\n\t"
-		LOCK "decl (%1)\n\t"     /* --sem->count */
+		LOCK "decl %1\n\t"     /* --sem->count */
 		"js 2f\n\t"
 		"xorl %0,%0\n"
 		"1:\n"
@@ -165,7 +173,7 @@ extern inline int down_trylock(struct semaphore * sem)
 		"2:\tcall __down_failed_trylock\n\t"
 		"jmp 1b\n"
 		".previous"
-		:"=a" (result)
+		:"=a" (result), "=m" (sem->count)
 		:"c" (sem)
 		:"memory");
 	return result;
@@ -177,21 +185,21 @@ extern inline int down_trylock(struct semaphore * sem)
  * The default case (no contention) will result in NO
  * jumps for both down() and up().
  */
-extern inline void up(struct semaphore * sem)
+static inline void up(struct semaphore * sem)
 {
 #if WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
 	__asm__ __volatile__(
 		"# atomic up operation\n\t"
-		LOCK "incl (%0)\n\t"     /* ++sem->count */
+		LOCK "incl %0\n\t"     /* ++sem->count */
 		"jle 2f\n"
 		"1:\n"
 		".section .text.lock,\"ax\"\n"
 		"2:\tcall __up_wakeup\n\t"
 		"jmp 1b\n"
 		".previous"
-		:/* no outputs */
+		:"=m" (sem->count)
 		:"c" (sem)
 		:"memory");
 }
@@ -250,7 +258,7 @@ struct rw_semaphore {
 #define DECLARE_RWSEM_READ_LOCKED(name) __DECLARE_RWSEM_GENERIC(name,RW_LOCK_BIAS-1)
 #define DECLARE_RWSEM_WRITE_LOCKED(name) __DECLARE_RWSEM_GENERIC(name,0)
 
-extern inline void init_rwsem(struct rw_semaphore *sem)
+static inline void init_rwsem(struct rw_semaphore *sem)
 {
 	atomic_set(&sem->count, RW_LOCK_BIAS);
 	sem->read_bias_granted = 0;
@@ -269,7 +277,7 @@ extern struct rw_semaphore *FASTCALL(__down_read_failed(struct rw_semaphore *sem
 extern struct rw_semaphore *FASTCALL(__down_write_failed(struct rw_semaphore *sem));
 extern struct rw_semaphore *FASTCALL(__rwsem_wake(struct rw_semaphore *sem));
 
-extern inline void down_read(struct rw_semaphore *sem)
+static inline void down_read(struct rw_semaphore *sem)
 {
 #if WAITQUEUE_DEBUG
 	if (sem->__magic != (long)&sem->__magic)
@@ -285,7 +293,7 @@ extern inline void down_read(struct rw_semaphore *sem)
 #endif
 }
 
-extern inline void down_write(struct rw_semaphore *sem)
+static inline void down_write(struct rw_semaphore *sem)
 {
 #if WAITQUEUE_DEBUG
 	if (sem->__magic != (long)&sem->__magic)
@@ -309,18 +317,19 @@ extern inline void down_write(struct rw_semaphore *sem)
  * case is when there was a writer waiting, and we've
  * bumped the count to 0: we must wake the writer up.
  */
-extern inline void __up_read(struct rw_semaphore *sem)
+static inline void __up_read(struct rw_semaphore *sem)
 {
 	__asm__ __volatile__(
 		"# up_read\n\t"
-		LOCK "incl (%%eax)\n\t"
+		LOCK "incl %0\n\t"
 		"jz 2f\n"			/* only do the wake if result == 0 (ie, a writer) */
 		"1:\n\t"
 		".section .text.lock,\"ax\"\n"
 		"2:\tcall __rwsem_wake\n\t"
 		"jmp 1b\n"
 		".previous"
-		::"a" (sem)
+		:"=m" (sem->count)
+		:"a" (sem)
 		:"memory"
 		);
 }
@@ -328,23 +337,24 @@ extern inline void __up_read(struct rw_semaphore *sem)
 /* releasing the writer is easy -- just release it and
  * wake up any sleepers.
  */
-extern inline void __up_write(struct rw_semaphore *sem)
+static inline void __up_write(struct rw_semaphore *sem)
 {
 	__asm__ __volatile__(
 		"# up_write\n\t"
-		LOCK "addl $" RW_LOCK_BIAS_STR ",(%%eax)\n"
+		LOCK "addl $" RW_LOCK_BIAS_STR ",%0\n"
 		"jc 2f\n"			/* only do the wake if the result was -'ve to 0/+'ve */
 		"1:\n\t"
 		".section .text.lock,\"ax\"\n"
 		"2:\tcall __rwsem_wake\n\t"
 		"jmp 1b\n"
 		".previous"
-		::"a" (sem)
+		:"=m" (sem->count)
+		:"a" (sem)
 		:"memory"
 		);
 }
 
-extern inline void up_read(struct rw_semaphore *sem)
+static inline void up_read(struct rw_semaphore *sem)
 {
 #if WAITQUEUE_DEBUG
 	if (sem->write_bias_granted)
@@ -356,7 +366,7 @@ extern inline void up_read(struct rw_semaphore *sem)
 	__up_read(sem);
 }
 
-extern inline void up_write(struct rw_semaphore *sem)
+static inline void up_write(struct rw_semaphore *sem)
 {
 #if WAITQUEUE_DEBUG
 	if (sem->read_bias_granted)
@@ -372,4 +382,5 @@ extern inline void up_write(struct rw_semaphore *sem)
 	__up_write(sem);
 }
 
+#endif
 #endif

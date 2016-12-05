@@ -29,6 +29,7 @@
 
 #include <linux/major.h>
 #include <linux/malloc.h>
+#include <linux/vmalloc.h>
 #include <linux/blk.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -165,12 +166,16 @@ z2_open( struct inode *inode, struct file *filp )
 	sizeof( z2ram_map[0] );
     int max_chip_map = ( amiga_chip_size / Z2RAM_CHUNKSIZE ) *
 	sizeof( z2ram_map[0] );
+    int rc = -ENOMEM;
+
+    MOD_INC_USE_COUNT;
 
     device = DEVICE_NR( inode->i_rdev );
 
     if ( current_device != -1 && current_device != device )
     {
-	return -EBUSY;
+	rc = -EBUSY;
+	goto err_out;
     }
 
     if ( current_device == -1 )
@@ -188,7 +193,7 @@ z2_open( struct inode *inode, struct file *filp )
 		if (index >= m68k_realnum_memory) {
 			printk( KERN_ERR DEVICE_NAME
 				": no such entry in z2ram_map\n" );
-			return -ENOMEM;
+		        goto err_out;
 		}
 
 		paddr = m68k_memory[index].addr;
@@ -197,8 +202,6 @@ z2_open( struct inode *inode, struct file *filp )
 #ifdef __powerpc__
 		/* FIXME: ioremap doesn't build correct memory tables. */
 		{
-			extern void* vmalloc (unsigned long);
-			extern void vfree (void*);
 			vfree(vmalloc (size));
 		}
 
@@ -215,7 +218,7 @@ z2_open( struct inode *inode, struct file *filp )
 		{
 		    printk( KERN_ERR DEVICE_NAME
 			": cannot get mem for z2ram_map\n" );
-		    return -ENOMEM;
+		    goto err_out;
 		}
 
 		while (size) {
@@ -240,7 +243,7 @@ z2_open( struct inode *inode, struct file *filp )
 		{
 		    printk( KERN_ERR DEVICE_NAME
 			": cannot get mem for z2ram_map\n" );
-		    return -ENOMEM;
+		    goto err_out;
 		}
 
 		get_z2ram();
@@ -261,7 +264,7 @@ z2_open( struct inode *inode, struct file *filp )
 		{
 		    printk( KERN_ERR DEVICE_NAME
 			": cannot get mem for z2ram_map\n" );
-		    return -ENOMEM;
+		    goto err_out;
 		}
 
 		get_z2ram();
@@ -279,7 +282,7 @@ z2_open( struct inode *inode, struct file *filp )
 		{
 		    printk( KERN_ERR DEVICE_NAME
 			": cannot get mem for z2ram_map\n" );
-		    return -ENOMEM;
+		    goto err_out;
 		}
 
 		get_chipram();
@@ -292,15 +295,17 @@ z2_open( struct inode *inode, struct file *filp )
 	    break;
 
 	    default:
-		return -ENODEV;
+		rc = -ENODEV;
+		goto err_out;
+	
+	    break;
 	}
 
 	if ( z2ram_size == 0 )
 	{
-	    kfree( z2ram_map );
 	    printk( KERN_NOTICE DEVICE_NAME
 		": no unused ZII/Chip RAM found\n" );
-	    return -ENOMEM;
+	    goto err_out_kfree;
 	}
 
 	current_device = device;
@@ -309,9 +314,13 @@ z2_open( struct inode *inode, struct file *filp )
 	blk_size[ MAJOR_NR ] = z2_sizes;
     }
 
-    MOD_INC_USE_COUNT;
-
     return 0;
+
+err_out_kfree:
+    kfree( z2ram_map );
+err_out:
+    MOD_DEC_USE_COUNT;
+    return rc;
 }
 
 static int
@@ -388,6 +397,8 @@ cleanup_module( void )
 
     if ( unregister_blkdev( MAJOR_NR, DEVICE_NAME ) != 0 )
 	printk( KERN_ERR DEVICE_NAME ": unregister of device failed\n");
+
+    blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 
     if ( current_device != -1 )
     {

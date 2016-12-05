@@ -104,7 +104,6 @@ extern unsigned long qnx4_block_map(struct inode *inode, long iblock);
 extern struct buffer_head *qnx4_getblk(struct inode *, int, int);
 extern struct buffer_head *qnx4_bread(struct inode *, int, int);
 
-extern int init_qnx4_fs(void);
 extern int qnx4_create(struct inode *dir, struct dentry *dentry, int mode);
 extern struct inode_operations qnx4_file_inode_operations;
 extern struct inode_operations qnx4_dir_inode_operations;
@@ -117,7 +116,7 @@ extern void qnx4_truncate(struct inode *inode);
 extern void qnx4_free_inode(struct inode *inode);
 extern int qnx4_unlink(struct inode *dir, struct dentry *dentry);
 extern int qnx4_rmdir(struct inode *dir, struct dentry *dentry);
-extern int qnx4_sync_file(struct file *file, struct dentry *dentry);
+extern int qnx4_sync_file(struct file *file, struct dentry *dentry, int);
 extern int qnx4_sync_inode(struct inode *inode);
 extern int qnx4_get_block(struct inode *inode, long iblock, struct buffer_head *bh, int create);
 

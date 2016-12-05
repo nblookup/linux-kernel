@@ -13,23 +13,9 @@
 #include <asm/smp.h>
 #include <asm/hardirq.h>
 
+#define local_bh_disable()	(local_bh_count(smp_processor_id())++)
+#define local_bh_enable()	(local_bh_count(smp_processor_id())--)
 
-#ifdef __SMP__
-extern unsigned int local_bh_count[NR_CPUS];
-
-#define local_bh_disable()	(local_bh_count[smp_processor_id()]++)
-#define local_bh_enable()	(local_bh_count[smp_processor_id()]--)
-
-#define in_softirq() (local_bh_count[smp_processor_id()] != 0)
-
-#else
-extern unsigned int local_bh_count;
-
-#define local_bh_disable()	(local_bh_count++)
-#define local_bh_enable()	(local_bh_count--)
-
-#define in_softirq() (local_bh_count != 0)
-
-#endif	/* SMP */
+#define in_softirq() (local_bh_count(smp_processor_id()) != 0)
 
 #endif	/* __SPARC_SOFTIRQ_H */

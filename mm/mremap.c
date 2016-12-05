@@ -63,14 +63,14 @@ static inline int copy_one_pte(struct mm_struct *mm, pte_t * src, pte_t * dst)
 	pte_t pte;
 
 	spin_lock(&mm->page_table_lock);
-	pte = *src;
-	if (!pte_none(pte)) {
-		error++;
-		if (dst) {
-			pte_clear(src);
-			set_pte(dst, pte);
-			error--;
+	if (!pte_none(*src)) {
+		pte = ptep_get_and_clear(src);
+		if (!dst) {
+			/* No dest?  We must put it back. */
+			dst = src;
+			error++;
 		}
+		set_pte(dst, pte);
 	}
 	spin_unlock(&mm->page_table_lock);
 	return error;
@@ -135,17 +135,14 @@ static inline unsigned long move_vma(struct vm_area_struct * vma,
 			*new_vma = *vma;
 			new_vma->vm_start = new_addr;
 			new_vma->vm_end = new_addr+new_len;
-			new_vma->vm_pgoff = vma->vm_pgoff;
 			new_vma->vm_pgoff += (addr - vma->vm_start) >> PAGE_SHIFT;
+			new_vma->vm_raend = 0;
 			if (new_vma->vm_file)
 				get_file(new_vma->vm_file);
 			if (new_vma->vm_ops && new_vma->vm_ops->open)
 				new_vma->vm_ops->open(new_vma);
-			vmlist_modify_lock(current->mm);
 			insert_vm_struct(current->mm, new_vma);
-			merge_segments(current->mm, new_vma->vm_start, new_vma->vm_end);
-			vmlist_modify_unlock(vma->vm_mm);
-			do_munmap(addr, old_len);
+			do_munmap(current->mm, addr, old_len);
 			current->mm->total_vm += new_len >> PAGE_SHIFT;
 			if (new_vma->vm_flags & VM_LOCKED) {
 				current->mm->locked_vm += new_len >> PAGE_SHIFT;
@@ -201,7 +198,7 @@ unsigned long do_mremap(unsigned long addr,
 		if ((addr <= new_addr) && (addr+old_len) > new_addr)
 			goto out;
 
-		do_munmap(new_addr, new_len);
+		do_munmap(current->mm, new_addr, new_len);
 	}
 
 	/*
@@ -210,7 +207,7 @@ unsigned long do_mremap(unsigned long addr,
 	 */
 	ret = addr;
 	if (old_len >= new_len) {
-		do_munmap(addr+new_len, old_len - new_len);
+		do_munmap(current->mm, addr+new_len, old_len - new_len);
 		if (!(flags & MREMAP_FIXED) || (new_addr == addr))
 			goto out;
 	}
@@ -225,6 +222,10 @@ unsigned long do_mremap(unsigned long addr,
 	/* We can't remap across vm area boundaries */
 	if (old_len > vma->vm_end - addr)
 		goto out;
+	if (vma->vm_flags & VM_DONTEXPAND) {
+		if (new_len > old_len)
+			goto out;
+	}
 	if (vma->vm_flags & VM_LOCKED) {
 		unsigned long locked = current->mm->locked_vm << PAGE_SHIFT;
 		locked += new_len - old_len;
@@ -254,9 +255,9 @@ unsigned long do_mremap(unsigned long addr,
 		/* can we just expand the current mapping? */
 		if (max_addr - addr >= new_len) {
 			int pages = (new_len - old_len) >> PAGE_SHIFT;
-			vmlist_modify_lock(vma->vm_mm);
+			spin_lock(&vma->vm_mm->page_table_lock);
 			vma->vm_end = addr + new_len;
-			vmlist_modify_unlock(vma->vm_mm);
+			spin_unlock(&vma->vm_mm->page_table_lock);
 			current->mm->total_vm += pages;
 			if (vma->vm_flags & VM_LOCKED) {
 				current->mm->locked_vm += pages;

@@ -58,10 +58,7 @@
 #define SJCD_VERSION_MAJOR 1
 #define SJCD_VERSION_MINOR 7
 
-#ifdef MODULE
 #include <linux/module.h>
-#endif /* MODULE */
-
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -153,7 +150,7 @@ static struct sjcd_stat statistic;
 /*
  * Timer.
  */
-static struct timer_list sjcd_delay_timer = { NULL, NULL, 0, 0, NULL };
+static struct timer_list sjcd_delay_timer;
 
 #define SJCD_SET_TIMER( func, tmout )           \
     ( sjcd_delay_timer.expires = jiffies+tmout,         \
@@ -1339,6 +1336,8 @@ int sjcd_open( struct inode *ip, struct file *fp ){
    */
   if( fp->f_mode & 2 ) return( -EROFS );
   
+  MOD_INC_USE_COUNT;
+
   if( sjcd_open_count == 0 ){
     int s, sjcd_open_tries;
 /* We don't know that, do we? */
@@ -1360,7 +1359,7 @@ int sjcd_open( struct inode *ip, struct file *fp ){
 #if defined( SJCD_DIAGNOSTIC )
 	printk( "SJCD: open: timed out when check status.\n" );
 #endif
-	return( -EIO );
+	goto err_out;
       } else if( !sjcd_media_is_available ){
 #if defined( SJCD_DIAGNOSTIC )
 	printk("SJCD: open: no disk in drive\n");
@@ -1375,10 +1374,10 @@ int sjcd_open( struct inode *ip, struct file *fp ){
 #if defined( SJCD_DIAGNOSTIC )
 	    printk("SJCD: open: tray close attempt failed\n");
 #endif
-	    return( -EIO );
+	    goto err_out;
 	  }
 	  continue;
-	} else return( -EIO );
+	} else goto err_out;
       }
       break;
     }
@@ -1387,17 +1386,19 @@ int sjcd_open( struct inode *ip, struct file *fp ){
 #if defined( SJCD_DIAGNOSTIC )
       printk("SJCD: open: tray lock attempt failed\n");
 #endif
-      return( -EIO );
+      goto err_out;
     }
 #if defined( SJCD_TRACE )
     printk( "SJCD: open: done\n" );
 #endif
   }
-#ifdef MODULE
-  MOD_INC_USE_COUNT;
-#endif
+
   ++sjcd_open_count;
   return( 0 );
+
+err_out:
+  MOD_DEC_USE_COUNT;
+  return( -EIO );
 }
 
 /*
@@ -1564,8 +1565,8 @@ int __init sjcd_init( void ){
   }
 
   printk(KERN_INFO "SJCD: Status: port=0x%x.\n", sjcd_base);
-  devfs_register (NULL, "sjcd", 0, DEVFS_FL_DEFAULT, MAJOR_NR, 0,
-		  S_IFBLK | S_IRUGO | S_IWUGO, 0, 0, &sjcd_fops, NULL);
+  devfs_register (NULL, "sjcd", DEVFS_FL_DEFAULT, MAJOR_NR, 0,
+		  S_IFBLK | S_IRUGO | S_IWUGO, &sjcd_fops, NULL);
 
   sjcd_present++;
   return( 0 );
@@ -1576,8 +1577,10 @@ sjcd_cleanup(void)
 {
   if( (devfs_unregister_blkdev(MAJOR_NR, "sjcd") == -EINVAL) )
     printk( "SJCD: cannot unregister device.\n" );
-  else
+  else {
     release_region( sjcd_base, 4 );
+    blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
+  }
 
   return(0);
 }
@@ -1585,8 +1588,7 @@ sjcd_cleanup(void)
 
 void __exit sjcd_exit(void)
 {
-  devfs_unregister(devfs_find_handle(NULL, "sjcd", 0, 0, 0, DEVFS_SPECIAL_BLK,
-				     0));
+  devfs_unregister(devfs_find_handle(NULL, "sjcd", 0, 0, DEVFS_SPECIAL_BLK,0));
   if ( sjcd_cleanup() )
     printk( "SJCD: module: cannot be removed.\n" );
   else

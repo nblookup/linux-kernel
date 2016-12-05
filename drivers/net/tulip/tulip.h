@@ -17,6 +17,22 @@
 #include <linux/spinlock.h>
 #include <linux/netdevice.h>
 #include <linux/timer.h>
+#include <asm/io.h>
+
+
+
+/* undefine, or define to various debugging levels (>4 == obscene levels) */
+#undef TULIP_DEBUG
+
+
+#ifdef TULIP_DEBUG
+/* note: prints function name for you */
+#define DPRINTK(fmt, args...) printk(KERN_DEBUG "%s: " fmt, __FUNCTION__ , ## args)
+#else
+#define DPRINTK(fmt, args...)
+#endif
+
+
 
 
 struct tulip_chip_table {
@@ -36,8 +52,10 @@ enum tbl_flag {
 	HAS_ACPI = 0x10,
 	MC_HASH_ONLY = 0x20,	/* Hash-only multicast filter. */
 	HAS_PNICNWAY = 0x80,
-	HAS_NWAY143 = 0x40,	/* Uses internal NWay xcvr. */
-	HAS_8023X = 0x100,
+	HAS_NWAY = 0x40,	/* Uses internal NWay xcvr. */
+	HAS_INTR_MITIGATION = 0x100,
+	IS_ASIX = 0x200,
+	HAS_8023X = 0x400,
 };
 
 
@@ -58,7 +76,7 @@ enum chips {
 	COMET,
 	COMPEX9881,
 	I21145,
-	X3201_3,
+	DM910X,
 };
 
 
@@ -137,6 +155,72 @@ enum desc_status_bits {
 };
 
 
+enum t21041_csr13_bits {
+	csr13_eng = (0xEF0<<4), /* for eng. purposes only, hardcode at EF0h */
+	csr13_aui = (1<<3), /* clear to force 10bT, set to force AUI/BNC */
+	csr13_cac = (1<<2), /* CSR13/14/15 autoconfiguration */
+	csr13_srl = (1<<0), /* When reset, resets all SIA functions, machines */
+
+	csr13_mask_auibnc = (csr13_eng | csr13_aui | csr13_cac | csr13_srl),
+	csr13_mask_10bt = (csr13_eng | csr13_cac | csr13_srl),
+};
+
+enum t21143_csr6_bits {
+	csr6_sc = (1<<31),
+	csr6_ra = (1<<30),
+	csr6_ign_dest_msb = (1<<26),
+	csr6_mbo = (1<<25),
+	csr6_scr = (1<<24),  /* scramble mode flag: can't be set */
+	csr6_pcs = (1<<23),  /* Enables PCS functions (symbol mode requires csr6_ps be set) default is set */
+	csr6_ttm = (1<<22),  /* Transmit Threshold Mode, set for 10baseT, 0 for 100BaseTX */
+	csr6_sf = (1<<21),   /* Store and forward. If set ignores TR bits */
+	csr6_hbd = (1<<19),  /* Heart beat disable. Disables SQE function in 10baseT */
+	csr6_ps = (1<<18),   /* Port Select. 0 (defualt) = 10baseT, 1 = 100baseTX: can't be set */
+	csr6_ca = (1<<17),   /* Collision Offset Enable. If set uses special algorithm in low collision situations */
+	csr6_trh = (1<<15),  /* Transmit Threshold high bit */
+	csr6_trl = (1<<14),  /* Transmit Threshold low bit */
+
+	/***************************************************************
+	 * This table shows transmit threshold values based on media   *
+	 * and these two registers (from PNIC1 & 2 docs) Note: this is *
+	 * all meaningless if sf is set.                               *
+	 ***************************************************************/
+
+	/***********************************
+	 * (trh,trl) * 100BaseTX * 10BaseT *
+	 ***********************************
+	 *   (0,0)   *     128   *    72   *
+	 *   (0,1)   *     256   *    96   *
+	 *   (1,0)   *     512   *   128   *
+	 *   (1,1)   *    1024   *   160   *
+	 ***********************************/
+
+	csr6_st = (1<<13),   /* Transmit conrol: 1 = transmit, 0 = stop */
+	csr6_fc = (1<<12),   /* Forces a collision in next transmission (for testing in loopback mode) */
+	csr6_om_int_loop = (1<<10), /* internal (FIFO) loopback flag */
+	csr6_om_ext_loop = (1<<11), /* external (PMD) loopback flag */
+	/* set both and you get (PHY) loopback */
+	csr6_fd = (1<<9),    /* Full duplex mode, disables hearbeat, no loopback */
+	csr6_pm = (1<<7),    /* Pass All Multicast */
+	csr6_pr = (1<<6),    /* Promiscuous mode */
+	csr6_sb = (1<<5),    /* Start(1)/Stop(0) backoff counter */
+	csr6_if = (1<<4),    /* Inverse Filtering, rejects only addresses in address table: can't be set */
+	csr6_pb = (1<<3),    /* Pass Bad Frames, (1) causes even bad frames to be passed on */
+	csr6_ho = (1<<2),    /* Hash-only filtering mode: can't be set */
+	csr6_sr = (1<<1),    /* Start(1)/Stop(0) Receive */
+	csr6_hp = (1<<0),    /* Hash/Perfect Receive Filtering Mode: can't be set */
+
+	csr6_mask_capture = (csr6_sc | csr6_ca),
+	csr6_mask_defstate = (csr6_mask_capture | csr6_mbo),
+	csr6_mask_hdcap = (csr6_mask_defstate | csr6_hbd | csr6_ps),
+	csr6_mask_hdcaptt = (csr6_mask_hdcap  | csr6_trh | csr6_trl),
+	csr6_mask_fullcap = (csr6_mask_hdcaptt | csr6_fd),
+	csr6_mask_fullpromisc = (csr6_pr | csr6_pm),
+	csr6_mask_filters = (csr6_hp | csr6_ho | csr6_if),
+	csr6_mask_100bt = (csr6_scr | csr6_pcs | csr6_hbd),
+};
+
+
 /* Keep the ring sizes a power of two for efficiency.
    Making the Tx ring too large decreases the effectiveness of channel
    bonding and packet priority.
@@ -204,12 +288,6 @@ enum desc_status_bits {
 #define get_u16(ptr) (((u8*)(ptr))[0] + (((u8*)(ptr))[1]<<8))
 #endif
 
-
-/* Condensed operations for readability. */
-#define virt_to_le32desc(addr)  cpu_to_le32(virt_to_bus(addr))
-#define le32desc_to_virt(addr)  bus_to_virt(le32_to_cpu(addr))
-
-
 struct medialeaf {
 	u8 type;
 	u8 media;
@@ -237,6 +315,11 @@ struct mediainfo {
 	unsigned char *info;
 };
 
+struct ring_info {
+	struct sk_buff	*skb;
+	dma_addr_t	mapping;
+};
+
 
 struct tulip_private {
 	const char *product_name;
@@ -246,10 +329,9 @@ struct tulip_private {
 	dma_addr_t rx_ring_dma;
 	dma_addr_t tx_ring_dma;
 	/* The saved address of a sent-in-place packet/buffer, for skfree(). */
-	struct sk_buff *tx_skbuff[TX_RING_SIZE];
+	struct ring_info tx_buffers[TX_RING_SIZE];
 	/* The addresses of receive-in-place skbuffs. */
-	struct sk_buff *rx_skbuff[RX_RING_SIZE];
-	char *rx_buffs;		/* Address of temporary Rx buffers. */
+	struct ring_info rx_buffers[RX_RING_SIZE];
 	u16 setup_frame[96];	/* Pseudo-Tx frame to init address table. */
 	int chip_id;
 	int revision;
@@ -259,7 +341,6 @@ struct tulip_private {
 	spinlock_t lock;
 	unsigned int cur_rx, cur_tx;	/* The next free ring entry */
 	unsigned int dirty_rx, dirty_tx;	/* The ring entries to be free()ed. */
-	unsigned int tx_full:1;	/* The Tx queue is full. */
 	unsigned int full_duplex:1;	/* Full-duplex operation requested. */
 	unsigned int full_duplex_lock:1;
 	unsigned int fake_addr:1;	/* Multiport board faked address. */
@@ -308,7 +389,7 @@ void tulip_parse_eeprom(struct net_device *dev);
 int tulip_read_eeprom(long ioaddr, int location, int addr_len);
 
 /* interrupt.c */
-extern int tulip_max_interrupt_work;
+extern unsigned int tulip_max_interrupt_work;
 extern int tulip_rx_copybreak;
 void tulip_interrupt(int irq, void *dev_instance, struct pt_regs *regs);
 
@@ -337,7 +418,22 @@ extern u8 t21040_csr13[];
 extern u16 t21041_csr13[];
 extern u16 t21041_csr14[];
 extern u16 t21041_csr15[];
-void tulip_outl_CSR6 (struct tulip_private *tp, u32 newcsr6);
 
+
+static inline void tulip_outl_csr (struct tulip_private *tp, u32 newValue, enum tulip_offsets offset)
+{
+	outl (newValue, tp->base_addr + offset);
+}
+
+static inline void tulip_stop_rxtx(struct tulip_private *tp, u32 csr6mask)
+{
+	tulip_outl_csr(tp, csr6mask & ~(csr6_st | csr6_sr), CSR6);
+}
+
+static inline void tulip_restart_rxtx(struct tulip_private *tp, u32 csr6mask)
+{
+	tulip_outl_csr(tp, csr6mask | csr6_sr, CSR6);
+	tulip_outl_csr(tp, csr6mask | csr6_st | csr6_sr, CSR6);
+}
 
 #endif /* __NET_TULIP_H__ */

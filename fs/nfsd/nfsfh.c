@@ -25,8 +25,8 @@
 /* #define NFSD_DEBUG_VERBOSE 1 */
 
 
-static int nfsd_nr_verified = 0;
-static int nfsd_nr_put = 0;
+static int nfsd_nr_verified;
+static int nfsd_nr_put;
 
 
 struct nfsd_getdents_callback {
@@ -41,7 +41,7 @@ struct nfsd_getdents_callback {
  * the name matching the specified inode number.
  */
 static int filldir_one(void * __buf, const char * name, int len,
-			off_t pos, ino_t ino)
+			off_t pos, ino_t ino, unsigned int d_type)
 {
 	struct nfsd_getdents_callback *buf = __buf;
 	struct qstr *qs = buf->name;
@@ -141,24 +141,27 @@ static struct dentry *nfsd_iget(struct super_block *sb, unsigned long ino, __u32
 		/* we didn't find the right inode.. */
 		dprintk("fh_verify: Inode %lu, Bad count: %d %d or version  %u %u\n",
 			inode->i_ino,
-			inode->i_nlink, inode->i_count,
+			inode->i_nlink, atomic_read(&inode->i_count),
 			inode->i_generation,
 			generation);
 
 		iput(inode);
-		return NULL;
+		return ERR_PTR(-ESTALE);
 	}
 	/* now to find a dentry.
 	 * If possible, get a well-connected one
 	 */
+	spin_lock(&dcache_lock);
 	for (lp = inode->i_dentry.next; lp != &inode->i_dentry ; lp=lp->next) {
 		result = list_entry(lp,struct dentry, d_alias);
 		if (! (result->d_flags & DCACHE_NFSD_DISCONNECTED)) {
-			dget(result);
+			dget_locked(result);
+			spin_unlock(&dcache_lock);
 			iput(inode);
 			return result;
 		}
 	}
+	spin_unlock(&dcache_lock);
 	result = d_alloc_root(inode);
 	if (result == NULL) {
 		iput(inode);
@@ -191,8 +194,10 @@ int d_splice(struct dentry *target, struct dentry *parent, struct qstr *name)
 	/* tdentry will have been made a "child" of target (the parent of target)
 	 * make it an IS_ROOT instead
 	 */
+	spin_lock(&dcache_lock);
 	list_del(&tdentry->d_child);
 	tdentry->d_parent = tdentry;
+	spin_unlock(&dcache_lock);
 	d_rehash(target);
 	dput(tdentry);
 
@@ -204,6 +209,7 @@ int d_splice(struct dentry *target, struct dentry *parent, struct qstr *name)
 		while (target) {
 			target->d_flags &= ~DCACHE_NFSD_DISCONNECTED;
 			parent = target;
+			spin_lock(&dcache_lock);
 			if (list_empty(&parent->d_subdirs))
 				target = NULL;
 			else {
@@ -216,6 +222,7 @@ int d_splice(struct dentry *target, struct dentry *parent, struct qstr *name)
 					       parent->d_name.name, target->d_name.name);
 #endif
 			}
+			spin_unlock(&dcache_lock);
 		}
 	}
 	return 0;
@@ -246,14 +253,16 @@ struct dentry *nfsd_findparent(struct dentry *child)
 		 * else make a root dentry
 		 */
 		struct list_head *aliases = &tdentry->d_inode->i_dentry;
+		spin_lock(&dcache_lock);
 		if (aliases->next != aliases) {
 			pdentry = list_entry(aliases->next, struct dentry, d_alias);
 			if (pdentry == tdentry)
 				pdentry = list_entry(aliases->prev, struct dentry, d_alias);
 			if (pdentry == tdentry)
 				pdentry = NULL;
-			if (pdentry) dget(pdentry);
+			if (pdentry) dget_locked(pdentry);
 		}
+		spin_unlock(&dcache_lock);
 		if (pdentry == NULL) {
 			pdentry = d_alloc_root(igrab(tdentry->d_inode));
 			if (pdentry) {
@@ -288,16 +297,20 @@ static struct dentry *splice(struct dentry *child, struct dentry *parent)
 	 * to a lookup (though nobody does this yet).  In this case, just succeed.
 	 */
 	if (child->d_parent == parent) goto out;
-	/* Possibly a new dentry has been made for this child->d_inode in parent by
-	 * a lookup.  In this case return that dentry. caller must notice and act accordingly
+	/* Possibly a new dentry has been made for this child->d_inode in
+	 * parent by a lookup.  In this case return that dentry. caller must
+	 * notice and act accordingly
 	 */
+	spin_lock(&dcache_lock);
 	for (lp = child->d_inode->i_dentry.next; lp != &child->d_inode->i_dentry ; lp=lp->next) {
 		tmp = list_entry(lp,struct dentry, d_alias);
 		if (tmp->d_parent == parent) {
-			child = dget(tmp);
+			child = dget_locked(tmp);
+			spin_unlock(&dcache_lock);
 			goto out;
 		}
 	}
+	spin_unlock(&dcache_lock);
 	/* well, if we can find a name for child in parent, it should be safe to splice it in */
 	err = get_ino_name(parent, &qs, child->d_inode->i_ino);
 	if (err)
@@ -333,7 +346,7 @@ find_fh_dentry(struct super_block *sb, ino_t ino, int generation, ino_t dirino, 
 	struct dentry *dentry, *result = NULL;
 	struct dentry *tmp;
 	int  found =0;
-	int err;
+	int err = -ESTALE;
 	/* the sb->s_nfsd_free_path_sem semaphore is needed to make sure that only one unconnected (free)
 	 * dcache path ever exists, as otherwise two partial paths might get
 	 * joined together, which would be very confusing.
@@ -347,23 +360,18 @@ find_fh_dentry(struct super_block *sb, ino_t ino, int generation, ino_t dirino, 
 	 * Attempt to find the inode.
 	 */
  retry:
+	down(&sb->s_nfsd_free_path_sem);
 	result = nfsd_iget(sb, ino, generation);
-	err = PTR_ERR(result);
-	if (IS_ERR(result))
-		goto err_out;
-	err = -ESTALE;
-	if (!result) {
-		dprintk("find_fh_dentry: No inode found.\n");
-		goto err_out;
-	}
-	if (! (result->d_flags & DCACHE_NFSD_DISCONNECTED))
-		return result;
-
-	/* result is now an anonymous dentry, which may be adequate as it stands, or else
-	 * will get spliced into the dcache tree */
-
-	if (!S_ISDIR(result->d_inode->i_mode) && ! needpath) {
-		nfsdstats.fh_anon++;
+	if (IS_ERR(result)
+	    || !(result->d_flags & DCACHE_NFSD_DISCONNECTED)
+	    || (!S_ISDIR(result->d_inode->i_mode) && ! needpath)) {
+		up(&sb->s_nfsd_free_path_sem);
+	    
+		err = PTR_ERR(result);
+		if (IS_ERR(result))
+			goto err_out;
+		if ((result->d_flags & DCACHE_NFSD_DISCONNECTED))
+			nfsdstats.fh_anon++;
 		return result;
 	}
 
@@ -371,14 +379,6 @@ find_fh_dentry(struct super_block *sb, ino_t ino, int generation, ino_t dirino, 
 	 * location in the tree.
 	 */
 	dprintk("nfs_fh: need to look harder for %d/%ld\n",sb->s_dev,ino);
-	down(&sb->s_nfsd_free_path_sem);
-
-	/* claiming the semaphore might have allowed things to get fixed up */
-	if (! (result->d_flags & DCACHE_NFSD_DISCONNECTED)) {
-		up(&sb->s_nfsd_free_path_sem);
-		return result;
-	}
-
 
 	found = 0;
 	if (!S_ISDIR(result->d_inode->i_mode)) {
@@ -396,7 +396,7 @@ find_fh_dentry(struct super_block *sb, ino_t ino, int generation, ino_t dirino, 
 			    || !S_ISDIR(dentry->d_inode->i_mode)) {
 				goto err_dentry;
 			}
-			if ((!dentry->d_flags & DCACHE_NFSD_DISCONNECTED))
+			if (!(dentry->d_flags & DCACHE_NFSD_DISCONNECTED))
 				found = 1;
 			tmp = splice(result, dentry);
 			err = PTR_ERR(tmp);
@@ -498,17 +498,15 @@ fh_verify(struct svc_rqst *rqstp, struct svc_fh *fhp, int type, int access)
 
 	dprintk("nfsd: fh_verify(%s)\n", SVCFH_fmt(fhp));
 
-	if (!fhp->fh_dverified) {
+	if (!fhp->fh_dentry) {
 		kdev_t xdev;
 		ino_t xino;
 		__u32 *datap=NULL;
 		int data_left = fh->fh_size/4;
 		int nfsdev;
 		error = nfserr_stale;
-#if CONFIG_NFSD_V3		
 		if (rqstp->rq_vers == 3)
 			error = nfserr_badhandle;
-#endif
 		if (fh->fh_version == 1) {
 			
 			datap = fh->fh_auth;
@@ -565,10 +563,8 @@ fh_verify(struct svc_rqst *rqstp, struct svc_fh *fhp, int type, int access)
 		 * Look up the dentry using the NFS file handle.
 		 */
 		error = nfserr_stale;
-#if CONFIG_NFSD_V3		
 		if (rqstp->rq_vers == 3)
 			error = nfserr_badhandle;
-#endif
 
 		if (fh->fh_version == 1) {
 			/* if fileid_type != 0, and super_operations provide fh_to_dentry lookup,
@@ -614,7 +610,6 @@ fh_verify(struct svc_rqst *rqstp, struct svc_fh *fhp, int type, int access)
 
 		fhp->fh_dentry = dentry;
 		fhp->fh_export = exp;
-		fhp->fh_dverified = 1;
 		nfsd_nr_verified++;
 	} else {
 		/* just rechecking permissions
@@ -734,7 +729,7 @@ fh_compose(struct svc_fh *fhp, struct svc_export *exp, struct dentry *dentry)
 		parent->d_name.name, dentry->d_name.name,
 		(inode ? inode->i_ino : 0));
 
-	if (fhp->fh_dverified || fhp->fh_locked || fhp->fh_dentry) {
+	if (fhp->fh_locked || fhp->fh_dentry) {
 		printk(KERN_ERR "fh_compose: fh %s/%s not initialized!\n",
 			parent->d_name.name, dentry->d_name.name);
 	}
@@ -760,8 +755,6 @@ fh_compose(struct svc_fh *fhp, struct svc_export *exp, struct dentry *dentry)
 	fhp->fh_handle.fh_size = (datap-fhp->fh_handle.fh_auth+1)*4;
 
 
-	/* We stuck it there, we know it's good. */
-	fhp->fh_dverified = 1;
 	nfsd_nr_verified++;
 	if (fhp->fh_handle.fh_fileid_type == 255)
 		return nfserr_opnotsupp;
@@ -778,7 +771,7 @@ fh_update(struct svc_fh *fhp)
 	struct dentry *dentry;
 	__u32 *datap;
 	
-	if (!fhp->fh_dverified)
+	if (!fhp->fh_dentry)
 		goto out_bad;
 
 	dentry = fhp->fh_dentry;
@@ -814,18 +807,11 @@ void
 fh_put(struct svc_fh *fhp)
 {
 	struct dentry * dentry = fhp->fh_dentry;
-	if (fhp->fh_dverified) {
+	if (dentry) {
 		fh_unlock(fhp);
-		fhp->fh_dverified = 0;
-		if (!dentry->d_count)
-			goto out_bad;
+		fhp->fh_dentry = NULL;
 		dput(dentry);
 		nfsd_nr_put++;
 	}
-	return;
-
-out_bad:
-	printk(KERN_ERR "fh_put: %s/%s has d_count 0!\n",
-		dentry->d_parent->d_name.name, dentry->d_name.name);
 	return;
 }

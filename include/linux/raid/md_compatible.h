@@ -31,7 +31,7 @@
 /* 001 */
 extern __inline__ int md_cpu_has_mmx(void)
 {
-	return boot_cpu_data.x86_capability & X86_FEATURE_MMX;
+	return test_bit(X86_FEATURE_MMX,  &boot_cpu_data.x86_capability);
 }
 #endif
 
@@ -77,11 +77,7 @@ extern inline void md_init_signals (void)
 /* 011 */
 #define md_signal_pending signal_pending
 
-/* 012 */
-extern inline void md_set_global_readahead(int * table)
-{
-	max_readahead[MD_MAJOR] = table;
-}
+/* 012 - md_set_global_readahead - nowhere used */
 
 /* 013 */
 #define md_mdelay(x) mdelay(x)
@@ -156,5 +152,5 @@ typedef wait_queue_head_t md_wait_queue_head_t;
 
 /* END */
 
-#endif _MD_COMPATIBLE_H
+#endif 
 

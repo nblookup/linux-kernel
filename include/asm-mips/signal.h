@@ -1,4 +1,4 @@
-/* $Id: signal.h,v 1.7 1999/09/28 22:27:17 ralf Exp $
+/* $Id: signal.h,v 1.6 1999/08/18 23:37:49 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -17,7 +17,7 @@
 #define _NSIG_WORDS	(_NSIG / _NSIG_BPW)
 
 typedef struct {
-	__u32 sig[_NSIG_WORDS];
+	unsigned long sig[_NSIG_WORDS];
 } sigset_t;
 
 typedef unsigned long old_sigset_t;		/* at least 32 bits */

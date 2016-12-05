@@ -1,4 +1,4 @@
-/* $Id: io-unit.c,v 1.21 2000/02/06 22:55:45 zaitcev Exp $
+/* $Id: io-unit.c,v 1.22 2000/08/09 00:00:15 davem Exp $
  * io-unit.c:  IO-UNIT specific routines for memory management.
  *
  * Copyright (C) 1997,1998 Jakub Jelinek    (jj@sunsite.mff.cuni.cz)
@@ -190,7 +190,7 @@ static void iounit_map_dma_area(unsigned long va, __u32 addr, int len)
 			pmdp = pmd_offset(pgdp, addr);
 			ptep = pte_offset(pmdp, addr);
 
-			set_pte(ptep, pte_val(mk_pte(mem_map + MAP_NR(page), dvma_prot)));
+			set_pte(ptep, pte_val(mk_pte(virt_to_page(page), dvma_prot)));
 			
 			i = ((addr - IOUNIT_DMA_BASE) >> PAGE_SHIFT);
 

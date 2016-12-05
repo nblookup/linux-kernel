@@ -1,7 +1,11 @@
 /*
- * include/asm-arm/processor.h
+ *  linux/include/asm-arm/processor.h
  *
- * Copyright (C) 1995 Russell King
+ *  Copyright (C) 1995 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 
 #ifndef __ASM_ARM_PROCESSOR_H
@@ -32,12 +36,12 @@ typedef unsigned long mm_segment_t;		/* domain register	*/
 
 #ifdef __KERNEL__
 
-#define NR_DEBUGS	5
+#define EISA_bus 0
+#define MCA_bus 0
 
 #include <asm/atomic.h>
 #include <asm/ptrace.h>
 #include <asm/arch/memory.h>
-#include <asm/arch/processor.h>
 #include <asm/proc/processor.h>
 
 struct debug_info {
@@ -63,18 +67,16 @@ struct thread_struct {
 	EXTRA_THREAD_STRUCT
 };
 
-#define INIT_MMAP \
-{ &init_mm, 0, 0, NULL, PAGE_SHARED, VM_READ | VM_WRITE | VM_EXEC, 1, NULL, NULL }
+#define INIT_MMAP {					\
+	vm_mm:		&init_mm,			\
+	vm_page_prot:	PAGE_SHARED,			\
+	vm_flags:	VM_READ | VM_WRITE | VM_EXEC,	\
+	vm_avl_height:	1,				\
+}
 
-#define INIT_THREAD  {				\
-	ATOMIC_INIT(1),				\
-	0,					\
-	0,					\
-	0,					\
-	{ { { 0, }, }, },			\
-	{ 0, },					\
-	(struct context_save_struct *)0	\
-	EXTRA_THREAD_STRUCT_INIT		\
+#define INIT_THREAD  {					\
+	refcount:	ATOMIC_INIT(1),			\
+	EXTRA_THREAD_STRUCT_INIT			\
 }
 
 /*
@@ -100,7 +102,6 @@ extern __inline__ void init_thread_css(struct context_save_struct *save)
 
 /* Forward declaration, a strange C thing */
 struct task_struct;
-struct mm_struct;
 
 /* Free all resources held by a thread. */
 extern void release_thread(struct task_struct *);
@@ -108,7 +109,6 @@ extern void release_thread(struct task_struct *);
 /* Copy and release all segment info associated with a VM */
 #define copy_segments(tsk, mm)		do { } while (0)
 #define release_segments(mm)		do { } while (0)
-#define forget_segments()		do { } while (0)
 
 unsigned long get_wchan(struct task_struct *p);
 

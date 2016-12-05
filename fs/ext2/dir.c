@@ -19,6 +19,11 @@
  */
 
 #include <linux/fs.h>
+#include <linux/ext2_fs.h>
+
+static unsigned char ext2_filetype_table[] = {
+	DT_UNKNOWN, DT_REG, DT_DIR, DT_CHR, DT_BLK, DT_FIFO, DT_SOCK, DT_LNK
+};
 
 static int ext2_readdir(struct file *, void *, filldir_t);
 
@@ -137,8 +142,8 @@ revalidate:
 						   bh, offset)) {
 				/* On error, skip the f_pos to the
                                    next block. */
-				filp->f_pos = (filp->f_pos & (sb->s_blocksize - 1))
-					      + sb->s_blocksize;
+				filp->f_pos = (filp->f_pos | (sb->s_blocksize - 1))
+					      + 1;
 				brelse (bh);
 				return stored;
 			}
@@ -151,14 +156,19 @@ revalidate:
 				 * not the directory has been modified
 				 * during the copy operation.
 				 */
-				unsigned long version = inode->i_version;
+				unsigned long version = filp->f_version;
+				unsigned char d_type = DT_UNKNOWN;
 
+				if (EXT2_HAS_INCOMPAT_FEATURE(sb, EXT2_FEATURE_INCOMPAT_FILETYPE)
+				    && de->file_type < EXT2_FT_MAX)
+					d_type = ext2_filetype_table[de->file_type];
 				error = filldir(dirent, de->name,
 						de->name_len,
-						filp->f_pos, le32_to_cpu(de->inode));
+						filp->f_pos, le32_to_cpu(de->inode),
+						d_type);
 				if (error)
 					break;
-				if (version != inode->i_version)
+				if (version != filp->f_version)
 					goto revalidate;
 				stored ++;
 			}

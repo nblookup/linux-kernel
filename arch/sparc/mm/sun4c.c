@@ -1,10 +1,10 @@
-/* $Id: sun4c.c,v 1.190 2000/02/14 04:52:34 jj Exp $
+/* $Id: sun4c.c,v 1.202 2000/12/01 03:17:31 anton Exp $
  * sun4c.c: Doing in software what should be done in hardware.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
  * Copyright (C) 1996 Eddie C. Dost (ecd@skynet.be)
  * Copyright (C) 1996 Andrew Tridgell (Andrew.Tridgell@anu.edu.au)
- * Copyright (C) 1997,99 Anton Blanchard (anton@progsoc.uts.edu.au)
+ * Copyright (C) 1997-2000 Anton Blanchard (anton@linuxcare.com)
  * Copyright (C) 1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  */
 
@@ -44,6 +44,8 @@
  */
 
 extern int num_segmaps, num_contexts;
+
+extern unsigned long page_kernel;
 
 #ifdef CONFIG_SUN4
 #define SUN4C_VAC_SIZE sun4c_vacinfo.num_bytes
@@ -597,14 +599,6 @@ static void sun4c_unmap_dma_area(unsigned long busa, int len)
 	/* XXX Implement this */
 }
 
-static void sun4c_inval_dma_area(unsigned long virt, int len)
-{
-}
-
-static void sun4c_flush_dma_area(unsigned long virt, int len)
-{
-}
-
 /* TLB management. */
 
 /* Don't change this struct without changing entry.S. This is used
@@ -1011,13 +1005,6 @@ void sun4c_grow_kernel_ring(void)
 	}
 }
 
-/* This is now a fast in-window trap handler to avoid any and all races. */
-static void sun4c_quick_kernel_fault(unsigned long address)
-{
-        printk("Kernel faults at addr 0x%08lx\n", address);
-        panic("sun4c kernel fault handler bolixed...");
-}
-
 /* 2 page buckets for task struct and kernel stack allocation.
  *
  * TASK_STACK_BEGIN
@@ -1333,7 +1320,7 @@ static __u32 sun4c_get_scsi_one(char *bufptr, unsigned long len, struct sbus_bus
 	unsigned long page;
 
 	page = ((unsigned long)bufptr) & PAGE_MASK;
-	if (MAP_NR(page) > max_mapnr) {
+	if (!VALID_PAGE(virt_to_page(page))) {
 		sun4c_flush_page(page);
 		return (__u32)bufptr; /* already locked */
 	}
@@ -1917,6 +1904,10 @@ static void sun4c_pgd_set(pgd_t * pgdp, pmd_t * pmdp)
 {
 }
 
+static void sun4c_pmd_set(pmd_t * pmdp, pte_t * ptep)
+{
+}
+
 void sun4c_mapioaddr(unsigned long physaddr, unsigned long virt_addr,
 		     int bus_type, int rdonly)
 {
@@ -2108,7 +2099,7 @@ static int sun4c_pmd_none(pmd_t pmd)		{ return !pmd_val(pmd); }
 static int sun4c_pmd_bad(pmd_t pmd)
 {
 	return (((pmd_val(pmd) & ~PAGE_MASK) != PGD_TABLE) ||
-		(MAP_NR(pmd_val(pmd)) > max_mapnr));
+		(!VALID_PAGE(virt_to_page(pmd_val(pmd)))));
 }
 
 static int sun4c_pmd_present(pmd_t pmd)
@@ -2169,9 +2160,9 @@ static pte_t sun4c_mk_pte_io(unsigned long page, pgprot_t pgprot, int space)
 	return __pte(((page - PAGE_OFFSET) >> PAGE_SHIFT) | pgprot_val(pgprot));
 }
 
-static unsigned long sun4c_pte_pagenr(pte_t pte)
+static struct page *sun4c_pte_page(pte_t pte)
 {
-	return (pte_val(pte) & SUN4C_PFN_MASK);
+	return (mem_map + (unsigned long)(pte_val(pte) & SUN4C_PFN_MASK));
 }
 
 static inline unsigned long sun4c_pmd_page(pmd_t pmd)
@@ -2280,27 +2271,6 @@ extern __inline__ pgd_t *sun4c_get_pgd_fast(void)
 	return (pgd_t *)ret;
 }
 
-static int sun4c_check_pgt_cache(int low, int high)
-{
-	int freed = 0;
-	if (pgtable_cache_size > high) {
-		do {
-			if (pgd_quicklist)
-				free_pgd_slow(get_pgd_fast()), freed++;
-			if (pmd_quicklist)
-				free_pmd_slow(get_pmd_fast()), freed++;
-			if (pte_quicklist)
-				free_pte_slow(get_pte_fast()), freed++;
-		} while (pgtable_cache_size > low);
-	}
-	return freed;
-}
-
-static void sun4c_set_pgdir(unsigned long address, pgd_t entry)
-{
-	/* Nothing to do */
-}
-
 extern __inline__ void sun4c_free_pgd_fast(pgd_t *pgd)
 {
 	*(unsigned long *)pgd = (unsigned long) pgd_quicklist;
@@ -2361,11 +2331,6 @@ static pte_t *sun4c_pte_alloc(pmd_t * pmd, unsigned long address)
 	return (pte_t *) sun4c_pmd_page(*pmd) + address;
 }
 
-static pte_t *sun4c_pte_get(void)
-{
-	return sun4c_get_pte_fast();
-}
-
 /*
  * allocating and freeing a pmd is trivial: the 1-entry pmd is
  * inside the pgd, so has no extra memory associated with it.
@@ -2389,80 +2354,23 @@ static pgd_t *sun4c_pgd_alloc(void)
 	return sun4c_get_pgd_fast();
 }
 
-/* There are really two cases of aliases to watch out for, and these
- * are:
- *
- *     1) A user's page which can be aliased with the kernels virtual
- *        mapping of the physical page.
- *
- *     2) Multiple user mappings of the same inode/anonymous object
- *        such that two copies of the same data for the same phys page
- *        can live (writable) in the cache at the same time.
- *
- * We handle number 1 by flushing the kernel copy of the page always
- * after COW page operations.
- *
- * NOTE: We are a bit slowed down now because the VMA arg is indeed used
- *       now, so our ref/mod bit tracking quick userfaults eat a few more
- *       cycles than they used to.
- */
-static void sun4c_vac_alias_fixup(struct vm_area_struct *vma, unsigned long address, pte_t pte)
+static int sun4c_check_pgt_cache(int low, int high)
 {
-	struct dentry *dentry = NULL;
-	struct inode *inode = NULL;
-	pgd_t *pgdp;
-	pte_t *ptep;
-
-	if (vma->vm_file)
-		dentry = vma->vm_file->f_dentry;
-	if(dentry)
-		inode = dentry->d_inode;
-	if(inode) {
-		struct address_space *mapping = inode->i_mapping;
-		unsigned long offset = (address & PAGE_MASK) - vma->vm_start;
-		struct vm_area_struct *vmaring;
-		int alias_found = 0;
-		spin_lock(&mapping->i_shared_lock);
-		vmaring = mapping->i_mmap; 
+	int freed = 0;
+	if (pgtable_cache_size > high) {
 		do {
-			unsigned long vaddr = vmaring->vm_start + offset;
-			unsigned long start;
-
-			/* Do not mistake ourselves as another mapping. */
-			if (vmaring == vma)
-				continue;
-
-			if (S4CVAC_BADALIAS(vaddr, address)) {
-				alias_found++;
-				start = vmaring->vm_start;
-				while (start < vmaring->vm_end) {
-					pgdp = sun4c_pgd_offset(vmaring->vm_mm, start);
-					if (!pgdp)
-						goto next;
-					ptep = sun4c_pte_offset((pmd_t *) pgdp, start);
-					if (!ptep)
-						goto next;
-
-					if (pte_val(*ptep) & _SUN4C_PAGE_PRESENT) {
-						flush_cache_page(vmaring, start);
-						*ptep = __pte(pte_val(*ptep) |
-							      _SUN4C_PAGE_NOCACHE);
-						flush_tlb_page(vmaring, start);
-					}
-				next:
-					start += PAGE_SIZE;
-				}
-			}
-		} while ((vmaring = vmaring->vm_next_share) != NULL);
-		spin_unlock(&mapping->i_shared_lock);
-
-		if (alias_found && !(pte_val(pte) & _SUN4C_PAGE_NOCACHE)) {
-			pgdp = sun4c_pgd_offset(vma->vm_mm, address);
-			ptep = sun4c_pte_offset((pmd_t *) pgdp, address);
-			*ptep = __pte(pte_val(*ptep) | _SUN4C_PAGE_NOCACHE);
-			pte = *ptep;
-		}
+			if (pgd_quicklist)
+				sun4c_free_pgd_slow(sun4c_get_pgd_fast()), freed++;
+	/* Only two level page tables at the moment, sun4 3 level mmu is not supported - Anton */
+#if 0
+			if (pmd_quicklist)
+				sun4c_free_pmd_slow(sun4c_get_pmd_fast()), freed++;
+#endif
+			if (pte_quicklist)
+				sun4c_free_pte_slow(sun4c_get_pte_fast()), freed++;
+		} while (pgtable_cache_size > low);
 	}
+	return freed;
 }
 
 /* An experiment, turn off by default for now... -DaveM */
@@ -2506,8 +2414,6 @@ void sun4c_update_mmu_cache(struct vm_area_struct *vma, unsigned long address, p
 #endif
 			start += PAGE_SIZE;
 		}
-		if ((vma->vm_flags & (VM_WRITE|VM_SHARED)) == (VM_WRITE|VM_SHARED))
-			sun4c_vac_alias_fixup(vma, address, pte);
 #ifndef SUN4C_PRELOAD_PSEG
 		sun4c_put_pte(address, pte_val(pte));
 #endif
@@ -2520,16 +2426,13 @@ void sun4c_update_mmu_cache(struct vm_area_struct *vma, unsigned long address, p
 		add_lru(entry);
 	}
 
-	if ((vma->vm_flags & (VM_WRITE|VM_SHARED)) == (VM_WRITE|VM_SHARED))
-		sun4c_vac_alias_fixup(vma, address, pte);
-
 	sun4c_put_pte(address, pte_val(pte));
 	restore_flags(flags);
 }
 
 extern void sparc_context_init(int);
 extern unsigned long end;
-extern unsigned long bootmem_init(void);
+extern void bootmem_init(void);
 extern unsigned long last_valid_pfn;
 extern void sun_serial_setup(void);
 
@@ -2544,7 +2447,8 @@ void __init sun4c_paging_init(void)
 	kernel_end += (SUN4C_REAL_PGDIR_SIZE * 4);
 	kernel_end = SUN4C_REAL_PGDIR_ALIGN(kernel_end);
 
-	last_valid_pfn = end_pfn = bootmem_init();
+	bootmem_init();
+	end_pfn = last_valid_pfn;
 
 	/* This does not logically belong here, but we need to
 	 * call it at the moment we are able to use the bootmem
@@ -2572,7 +2476,7 @@ void __init sun4c_paging_init(void)
 	memset(pg3, 0, PAGE_SIZE);
 
 	/* Save work later. */
-	vaddr = SUN4C_VMALLOC_START;
+	vaddr = VMALLOC_START;
 	swapper_pg_dir[vaddr>>SUN4C_PGDIR_SHIFT] = __pgd(PGD_TABLE | (unsigned long) pg0);
 	vaddr += SUN4C_PGDIR_SIZE;
 	swapper_pg_dir[vaddr>>SUN4C_PGDIR_SHIFT] = __pgd(PGD_TABLE | (unsigned long) pg1);
@@ -2625,21 +2529,16 @@ void __init ld_mmu_sun4c(void)
 	BTFIXUPSET_INT(page_copy, pgprot_val(SUN4C_PAGE_COPY));
 	BTFIXUPSET_INT(page_readonly, pgprot_val(SUN4C_PAGE_READONLY));
 	BTFIXUPSET_INT(page_kernel, pgprot_val(SUN4C_PAGE_KERNEL));
+	page_kernel = pgprot_val(SUN4C_PAGE_KERNEL);
 	pg_iobits = _SUN4C_PAGE_PRESENT | _SUN4C_READABLE | _SUN4C_WRITEABLE |
 		    _SUN4C_PAGE_IO | _SUN4C_PAGE_NOCACHE;
 	
 	/* Functions */
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	BTFIXUPSET_CALL(___xchg32, ___xchg32_sun4c, BTFIXUPCALL_NORM);
 #endif
-	BTFIXUPSET_CALL(get_pte_fast, sun4c_pte_get, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(get_pgd_fast, sun4c_pgd_alloc, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(free_pte_slow, sun4c_free_pte_slow, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(free_pgd_slow, sun4c_free_pgd_slow, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(do_check_pgt_cache, sun4c_check_pgt_cache, BTFIXUPCALL_NORM);
 	
-	BTFIXUPSET_CALL(set_pgdir, sun4c_set_pgdir, BTFIXUPCALL_NOP);
-
 	BTFIXUPSET_CALL(flush_cache_all, sun4c_flush_cache_all, BTFIXUPCALL_NORM);
 
 	if (sun4c_vacinfo.do_hwflushes) {
@@ -2672,7 +2571,7 @@ void __init ld_mmu_sun4c(void)
 
 	BTFIXUPSET_CALL(set_pte, sun4c_set_pte, BTFIXUPCALL_STO1O0);
 
-	BTFIXUPSET_CALL(pte_pagenr, sun4c_pte_pagenr, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(pte_page, sun4c_pte_page, BTFIXUPCALL_NORM);
 #if PAGE_SHIFT <= 12	
 	BTFIXUPSET_CALL(pmd_page, sun4c_pmd_page, BTFIXUPCALL_ANDNINT(PAGE_SIZE - 1));
 #else
@@ -2731,17 +2630,15 @@ void __init ld_mmu_sun4c(void)
 	BTFIXUPSET_CALL(mmu_map_dma_area, sun4c_map_dma_area, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(mmu_unmap_dma_area, sun4c_unmap_dma_area, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(mmu_translate_dvma, sun4c_translate_dvma, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(mmu_flush_dma_area, sun4c_flush_dma_area, BTFIXUPCALL_NOP);
-	BTFIXUPSET_CALL(mmu_inval_dma_area, sun4c_inval_dma_area, BTFIXUPCALL_NORM);
 
 	/* Task struct and kernel stack allocating/freeing. */
 	BTFIXUPSET_CALL(alloc_task_struct, sun4c_alloc_task_struct, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(get_task_struct, sun4c_get_task_struct, BTFIXUPCALL_NORM);
 
-	BTFIXUPSET_CALL(quick_kernel_fault, sun4c_quick_kernel_fault, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(mmu_info, sun4c_mmu_info, BTFIXUPCALL_NORM);
 
 	/* These should _never_ get called with two level tables. */
 	BTFIXUPSET_CALL(pgd_set, sun4c_pgd_set, BTFIXUPCALL_NOP);
 	BTFIXUPSET_CALL(pgd_page, sun4c_pgd_page, BTFIXUPCALL_RETO0);
+	BTFIXUPSET_CALL(pmd_set, sun4c_pmd_set, BTFIXUPCALL_NOP);
 }

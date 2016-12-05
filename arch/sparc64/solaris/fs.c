@@ -1,4 +1,4 @@
-/* $Id: fs.c,v 1.17 2000/03/10 04:43:30 davem Exp $
+/* $Id: fs.c,v 1.23 2000/08/29 07:01:54 davem Exp $
  * fs.c: fs related syscall emulation for Solaris
  *
  * Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -9,6 +9,7 @@
 
 #include <linux/types.h>
 #include <linux/sched.h>
+#include <linux/malloc.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/file.h>
@@ -24,8 +25,6 @@
 
 #include "conv.h"
 
-extern char * getname32(u32 filename);
- 
 #define R4_DEV(DEV) ((DEV & 0xff) | ((DEV & 0xff00) << 10))
 #define R4_MAJOR(DEV) (((DEV) >> 18) & 0x3fff)
 #define R4_MINOR(DEV) ((DEV) & 0x3ffff)
@@ -135,7 +134,7 @@ asmlinkage int solaris_stat(u32 filename, u32 statbuf)
 	int (*sys_newstat)(char *,struct stat *) = 
 		(int (*)(char *,struct stat *))SYS(stat);
 	
-	filenam = getname32 (filename);
+	filenam = getname ((char *)A(filename));
 	ret = PTR_ERR(filenam);
 	if (!IS_ERR(filenam)) {
 		set_fs (KERNEL_DS);
@@ -163,7 +162,7 @@ asmlinkage int solaris_stat64(u32 filename, u32 statbuf)
 	int (*sys_newstat)(char *,struct stat *) = 
 		(int (*)(char *,struct stat *))SYS(stat);
 	
-	filenam = getname32 (filename);
+	filenam = getname ((char *)A(filename));
 	ret = PTR_ERR(filenam);
 	if (!IS_ERR(filenam)) {
 		set_fs (KERNEL_DS);
@@ -185,7 +184,7 @@ asmlinkage int solaris_lstat(u32 filename, u32 statbuf)
 	int (*sys_newlstat)(char *,struct stat *) = 
 		(int (*)(char *,struct stat *))SYS(lstat);
 	
-	filenam = getname32 (filename);
+	filenam = getname ((char *)A(filename));
 	ret = PTR_ERR(filenam);
 	if (!IS_ERR(filenam)) {
 		set_fs (KERNEL_DS);
@@ -212,7 +211,7 @@ asmlinkage int solaris_lstat64(u32 filename, u32 statbuf)
 	int (*sys_newlstat)(char *,struct stat *) = 
 		(int (*)(char *,struct stat *))SYS(lstat);
 	
-	filenam = getname32 (filename);
+	filenam = getname ((char *)A(filename));
 	ret = PTR_ERR(filenam);
 	if (!IS_ERR(filenam)) {
 		set_fs (KERNEL_DS);
@@ -477,60 +476,44 @@ static int report_statvfs64(struct inode *inode, u32 buf)
 
 asmlinkage int solaris_statvfs(u32 path, u32 buf)
 {
-	struct dentry * dentry;
+	struct nameidata nd;
 	int error;
 
-	lock_kernel();
-	dentry = namei((const char *)A(path));
-	error = PTR_ERR(dentry);
-	if (!IS_ERR(dentry)) {
-		struct inode * inode = dentry->d_inode;
-
+	error = user_path_walk((const char *)A(path),&nd);
+	if (!error) {
+		struct inode * inode = nd.dentry->d_inode;
 		error = report_statvfs(inode, buf);
-		dput(dentry);
+		path_release(&nd);
 	}
-	unlock_kernel();
 	return error;
 }
 
 asmlinkage int solaris_fstatvfs(unsigned int fd, u32 buf)
 {
-	struct inode * inode;
-	struct dentry * dentry;
 	struct file * file;
 	int error;
 
-	lock_kernel();
 	error = -EBADF;
 	file = fget(fd);
-	if (!file)
-		goto out;
+	if (file) {
+		error = report_statvfs(file->f_dentry->d_inode, buf);
+		fput(file);
+	}
 
-	if (!(dentry = file->f_dentry))
-		error = -ENOENT;
-	else if (!(inode = dentry->d_inode))
-		error = -ENOENT;
-	else
-		error = report_statvfs(inode, buf);
-	fput(file);
-out:
-	unlock_kernel();
 	return error;
 }
 
 asmlinkage int solaris_statvfs64(u32 path, u32 buf)
 {
-	struct dentry * dentry;
+	struct nameidata nd;
 	int error;
 
 	lock_kernel();
-	dentry = namei((const char *)A(path));
-	error = PTR_ERR(dentry);
-	if (!IS_ERR(dentry)) {
-		struct inode * inode = dentry->d_inode;
-
+	error = user_path_walk((const char *)A(path), &nd);
+	if (!error) {
+		struct inode * inode = nd.dentry->d_inode;
 		error = report_statvfs64(inode, buf);
-		dput(dentry);
+		path_release(&nd);
 	}
 	unlock_kernel();
 	return error;
@@ -538,26 +521,17 @@ asmlinkage int solaris_statvfs64(u32 path, u32 buf)
 
 asmlinkage int solaris_fstatvfs64(unsigned int fd, u32 buf)
 {
-	struct inode * inode;
-	struct dentry * dentry;
 	struct file * file;
 	int error;
 
-	lock_kernel();
 	error = -EBADF;
 	file = fget(fd);
-	if (!file)
-		goto out;
-
-	if (!(dentry = file->f_dentry))
-		error = -ENOENT;
-	else if (!(inode = dentry->d_inode))
-		error = -ENOENT;
-	else
-		error = report_statvfs64(inode, buf);
-	fput(file);
-out:
-	unlock_kernel();
+	if (file) {
+		lock_kernel();
+		error = report_statvfs64(file->f_dentry->d_inode, buf);
+		unlock_kernel();
+		fput(file);
+	}
 	return error;
 }
 
@@ -638,20 +612,25 @@ asmlinkage int solaris_fcntl(unsigned fd, unsigned cmd, u32 arg)
 			case SOL_F_SETLKW: cmd = F_SETLKW; break;
 			}
 
-			get_user_ret (f.l_type, &((struct sol_flock *)A(arg))->l_type, -EFAULT);
-			__get_user_ret (f.l_whence, &((struct sol_flock *)A(arg))->l_whence, -EFAULT);
-			__get_user_ret (f.l_start, &((struct sol_flock *)A(arg))->l_start, -EFAULT);
-			__get_user_ret (f.l_len, &((struct sol_flock *)A(arg))->l_len, -EFAULT);
-			__get_user_ret (f.l_pid, &((struct sol_flock *)A(arg))->l_sysid, -EFAULT);
+			if (get_user (f.l_type, &((struct sol_flock *)A(arg))->l_type) ||
+			    __get_user (f.l_whence, &((struct sol_flock *)A(arg))->l_whence) ||
+			    __get_user (f.l_start, &((struct sol_flock *)A(arg))->l_start) ||
+			    __get_user (f.l_len, &((struct sol_flock *)A(arg))->l_len) ||
+			    __get_user (f.l_pid, &((struct sol_flock *)A(arg))->l_sysid))
+				return -EFAULT;
+
 			set_fs(KERNEL_DS);
 			ret = sys_fcntl(fd, cmd, (unsigned long)&f);
 			set_fs(old_fs);
-			__put_user_ret (f.l_type, &((struct sol_flock *)A(arg))->l_type, -EFAULT);
-			__put_user_ret (f.l_whence, &((struct sol_flock *)A(arg))->l_whence, -EFAULT);
-			__put_user_ret (f.l_start, &((struct sol_flock *)A(arg))->l_start, -EFAULT);
-			__put_user_ret (f.l_len, &((struct sol_flock *)A(arg))->l_len, -EFAULT);
-			__put_user_ret (f.l_pid, &((struct sol_flock *)A(arg))->l_pid, -EFAULT);
-			__put_user_ret (0, &((struct sol_flock *)A(arg))->l_sysid, -EFAULT);
+
+			if (__put_user (f.l_type, &((struct sol_flock *)A(arg))->l_type) ||
+			    __put_user (f.l_whence, &((struct sol_flock *)A(arg))->l_whence) ||
+			    __put_user (f.l_start, &((struct sol_flock *)A(arg))->l_start) ||
+			    __put_user (f.l_len, &((struct sol_flock *)A(arg))->l_len) ||
+			    __put_user (f.l_pid, &((struct sol_flock *)A(arg))->l_pid) ||
+			    __put_user (0, &((struct sol_flock *)A(arg))->l_sysid))
+				return -EFAULT;
+
 			return ret;
 		}
 	case SOL_F_FREESP:
@@ -660,7 +639,9 @@ asmlinkage int solaris_fcntl(unsigned fd, unsigned cmd, u32 arg)
 		    int (*sys_newftruncate)(unsigned int, unsigned long)=
 			    (int (*)(unsigned int, unsigned long))SYS(ftruncate);
 
-		    get_user_ret(length, &((struct sol_flock*)A(arg))->l_start, -EFAULT);
+		    if (get_user(length, &((struct sol_flock*)A(arg))->l_start))
+			    return -EFAULT;
+
 		    return sys_newftruncate(fd, length);
 		}
 	};

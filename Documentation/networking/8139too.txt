@@ -1,6 +1,6 @@
 
 		"8139too" Fast Ethernet driver for Linux
-	  Improved support for RTL-8139 Fast Ethernet adapters
+	  Improved support for RTL-8139 10/100 Fast Ethernet adapters
 
 	 Copyright 2000 Jeff Garzik <jgarzik@mandrakesoft.com>
 
@@ -8,6 +8,7 @@
 	      Architectures supported (all PCI platforms):
 		    x86, Alpha AXP, PowerPC, Sparc64
 
+		    Kernel versions supported: 2.4.x
 
 
 
@@ -130,6 +131,22 @@ James Fidell, Taso Hatzi, Peter K - intrepid test team
 
 And thanks to every supporter free software.
 
+(see top of 8139too.c for further credits and kudos)
+
+
+
+Submitting Bug Reports
+----------------------
+Obtain and compile the modified rtl8139-diag source code from the 
+8139too driver Web site.  This diagnostics programs, originally
+from Donald Becker, has been modified to display all registers
+on your RTL8139 chip, not just the first 0x80.
+
+If possible, send the output of a working and broken driver with
+	rtl8139-diag -mmmaaavvveefN > my-output-file.txt
+
+Send "lspci -vvv" or "cat /proc/pci" output for PCI information.
+
 
 
 Known Bugs / Errata / To-Do
@@ -142,33 +159,122 @@ the list, please report it.  That's why we do beta releases, after all...
 
 1) Work with Donald to merge fixes and updates into his driver.
 
-2) 2.2.x COMPATIBILITY SUPPORT IS BROKEN.  DO NOT USE IT.
-It is included only for enterprising hackers willing to help fix it.
+2) ethtool support
 
-3) PPC platform has stability problems.
+3) PPC platform has stability problems. (XXX: verify this is still true)
 
 4) Sparc64 platform not tested at all.
 
-5) Identify and fix "rx wedge" when ping flooded.
-
-7) N-Way auto-negotiation is known to fail in some cases.  This problem
-also occurs in the rtl8139 driver in kernels 2.2.x/2.3.x.  Solution:
-Following technique in sunhme and sunbmac, use a kernel timer to
-manually perform autonegotiation in case the network or card cannot do
-it automatically.  (patches welcome)
-
 8) Much improved command line / module parameter setup.  (patches and
-suggestions welcome)
+suggestions welcome)  (WIP)
 
 9) Better documentation.  (patches welcome)
 
-10) User-mode (or maybe optional /proc) diagnostics program.
+11) RTL8139C support untested.
+
+12) 10base-T support flaky or slow (todo: verify this is still true)
 
 
 
 
 Change History
 --------------
+
+Version 0.9.11 - October 28, 2000
+
+* Do not fail when PIO and MMIO region lengths do not match.
+  (They don't on some CardBus models, at least)
+* Sanity check Rx packet status and size (Tobias)
+* When handling a Tx timeout, disable Tx ASAP if not already.
+* Do not inline Tx interrupt handler (better register usage)
+* Handle dirty_tx signed integer wrap
+* Do not abort Rx processing on lack of memory, keep going
+  until the current Rx ring is completely handling. (Tobias)
+* Clean up rtl8139_close
+* Whitespace correction for dev_kfree_skb_irq call
+
+
+Version 0.9.10 - September 12, 2000
+
+* Never wrap an Rx packet (faster Rx interrupt handling)
+* Clear all TxAborted conditions (bug fix)
+* Correct copyright
+* More credits
+* Update NWay doc URL
+* Clean up commonly used ifdef switches
+* Reorg info displayed at bootup/modprobe time
+* Remove some unneeded spinlocks
+* Misc cosmetic code cleanup
+* Always print interrupt status for abnormal interrupts
+* Use RealTek-recommended FIFO and DMA burst settings (1024 bytes)
+
+
+Version 0.9.9 - September 9, 2000
+
+* Fix oops-able bug in Rx ring wrap calculation (David Ford)
+* Use PIO instead of MMIO when USE_IO_OPS is defined
+* Move Rx error handling out of Rx interrupt handler, resulting in
+  tighter Rx interrupt processing
+
+
+Version 0.9.8 - September 7, 2000
+
+* Propagate request_irq error value (andrew morton)
+* Correct potential oops bug in PCI DMA unmap code
+* Fix bugs related to counting/discounting of 32-bit CRC in each Rx packet
+* Fix 16/32-bit bug in interrupt status check
+* Timer cleanups (andrew morton)
+
+
+Version 0.9.7 - June 11, 2000
+
+* Fix support for older chips (RTL8139 early chips should now work again)
+
+
+Version 0.9.6 - May 30, 2000
+
+* Fix 4-extra-bytes bug
+  (thanks to Markus Westergren, via Santiago Garcia Mantinan)
+* Yet more improved chip recognition
+
+
+Version 0.9.5 - May 17, 2000
+
+* Improved chip version recognition
+* Continue banging away at receiver hang problem
+* Use spin_lock_irq in another spot
+* Don't print anything on pci_enable_device, it does so for us
+* Disable buggy NWay code
+* Define TxConfig bitmasks
+
+
+Version 0.9.4.1 - April 27, 2000 - third public beta release
+
+* Replace several "magic numbers" with symbolic constants
+* Differentiate between board-specific info and chip-specific info
+  (allows for easier support of specific boards or chips)
+* Move some of the transmit side outside of the spinlock
+  by using atomic variables.  Use spin_lock_irq instead of
+  spin_lock_irq{save,restore} in select places, for better performance.
+* New module option "media" for forcing media selection.  Functions the
+  same as "options" in other drivers, and will soon be renamed
+  'options' to be homogeneous.
+* New power management wake-up code
+* Slightly more verbose chip id messages in kernel log
+* Add/correct chip register constant list
+* New chipset wake up (open) logic
+* No longer locks CONFIGx updates
+* Do not set Interfame Gap (IFG) bits in TxConfig
+* Better Rx reset logic in case of Rx FIFO Overflow
+* For chips which support it, enable bit to automatically clear Rx
+  FIFO overflow
+* No longer enable and disable interrupts in interrupt handler
+  (technique borrowed from BSD driver, appears to have problems
+   with some chips)
+* H/W spinlock now protects ioctl
+* Chipset-dependent RxConfig settings
+
+
 Version 0.9.3.3.2 - Feb 22, 2000 - second public beta release
 
 * Begin integration of Daniel Kobras' MMIO flush patch (disabled for now)
@@ -187,8 +293,9 @@ Version 0.9.3.3.2 - Feb 22, 2000 - second public beta release
 * Reset NWay registers to sane defaults on rtl8139_open/hw_start
 * Miscellaneous code cleanup
 
-Version 0.7.0 - Feb 7, 2000 - first public beta release
 
+Version 0.7.0 - Feb 7, 2000 - first public beta release
+* Initial public version, derived from Donald Becker's rtl8139.c v1.08r
 
 [EOF]
 

@@ -4,11 +4,10 @@
 #ifndef __ARCH_I386_CACHE_H
 #define __ARCH_I386_CACHE_H
 
-/* bytes per L1 cache line */
-#if    CPU==586 || CPU==686
-#define        L1_CACHE_BYTES  32
-#else
-#define        L1_CACHE_BYTES  16
-#endif
+#include <linux/config.h>
+
+/* L1 cache line size */
+#define L1_CACHE_SHIFT	(CONFIG_X86_L1_CACHE_SHIFT)
+#define L1_CACHE_BYTES	(1 << L1_CACHE_SHIFT)
 
 #endif

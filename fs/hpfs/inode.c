@@ -6,6 +6,8 @@
  *  inode VFS functions
  */
 
+#include <linux/sched.h>
+#include <linux/smp_lock.h>
 #include "hpfs_fn.h"
 
 static struct file_operations hpfs_file_ops =
@@ -233,7 +235,7 @@ void hpfs_write_inode(struct inode *i)
 	struct inode *parent;
 	if (!i->i_nlink) return;
 	if (i->i_ino == i->i_sb->s_hpfs_root) return;
-	if (i->i_hpfs_rddir_off && !i->i_count) {
+	if (i->i_hpfs_rddir_off && !atomic_read(&i->i_count)) {
 		if (*i->i_hpfs_rddir_off) printk("HPFS: write_inode: some position still there\n");
 		kfree(i->i_hpfs_rddir_off);
 		i->i_hpfs_rddir_off = NULL;
@@ -289,7 +291,7 @@ void hpfs_write_inode_nolock(struct inode *i)
 			hpfs_brelse4(&qbh);
 		} else hpfs_error(i->i_sb, "directory %08x doesn't have '.' entry", i->i_ino);
 	}
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 }
 
@@ -313,5 +315,8 @@ void hpfs_write_if_changed(struct inode *inode)
 
 void hpfs_delete_inode(struct inode *inode)
 {
+	lock_kernel();
 	hpfs_remove_fnode(inode->i_sb, inode->i_ino);
+	unlock_kernel();
+	clear_inode(inode);
 }

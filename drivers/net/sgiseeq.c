@@ -1,4 +1,4 @@
-/* $Id: sgiseeq.c,v 1.9 1998/10/14 23:40:46 ralf Exp $
+/* $Id: sgiseeq.c,v 1.17 2000/03/27 23:02:57 ralf Exp $
  *
  * sgiseeq.c: Seeq8003 ethernet driver for SGI machines.
  *
@@ -107,7 +107,7 @@ struct sgiseeq_private {
 	unsigned char control;
 	unsigned char mode;
 
-	struct enet_statistics stats;
+	struct net_device_stats stats;
 };
 
 static inline void hpc3_eth_reset(volatile struct hpc3_ethregs *hregs)
@@ -326,6 +326,7 @@ static inline void sgiseeq_rx(struct net_device *dev, struct sgiseeq_private *sp
 				skb->protocol = eth_type_trans(skb, dev);
 				netif_rx(skb);
 				sp->stats.rx_packets++;
+				sp->stats.rx_bytes += len;
 			} else {
 				printk ("%s: Memory squeeze, deferring packet.\n",
 					dev->name);
@@ -500,6 +501,7 @@ static int sgiseeq_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	/* Setup... */
 	skblen = skb->len;
 	len = (skblen <= ETH_ZLEN) ? ETH_ZLEN : skblen;
+	sp->stats.tx_bytes += len;
 	entry = sp->tx_new;
 	td = &sp->srings.tx_desc[entry];
 
@@ -550,7 +552,7 @@ static void timeout(struct net_device *dev)
 	netif_wake_queue(dev);
 }
 
-static struct enet_statistics *sgiseeq_get_stats(struct net_device *dev)
+static struct net_device_stats *sgiseeq_get_stats(struct net_device *dev)
 {
 	struct sgiseeq_private *sp = (struct sgiseeq_private *) dev->priv;
 
@@ -597,13 +599,9 @@ int sgiseeq_init(struct net_device *dev, struct sgiseeq_regs *sregs,
 	int i;
 	struct sgiseeq_private *sp;
 
-	if (dev == NULL) {
-		dev = init_etherdev(0, sizeof(struct sgiseeq_private));
-	} else {
-		dev->priv = (struct sgiseeq_private *) get_free_page(GFP_KERNEL);
-		if (dev->priv == NULL)
-			return -ENOMEM;
-	}
+	dev->priv = (struct sgiseeq_private *) get_free_page(GFP_KERNEL);
+	if (dev->priv == NULL)
+		return -ENOMEM;
 
 	if (!version_printed++)
 		printk(version);
@@ -690,19 +688,18 @@ static inline void str2eaddr(unsigned char *ea, unsigned char *str)
 
 int sgiseeq_probe(struct net_device *dev)
 {
-	static int initialized;
+	static int initialized = 0;
 	char *ep;
 
 	if (initialized)	/* Already initialized? */
-		return 0;
+		return 1;
 	initialized++;
 
-	/* First get the ethernet address of the onboard
-	 * interface from ARCS.
+	/* First get the ethernet address of the onboard interface from ARCS.
 	 * This is fragile; PROM doesn't like running from cache.
-	 * On MIPS64 it crashes for some other, yet unknown reason.
+	 * On MIPS64 it crashes for some other, yet unknown reason ...
 	 */
-	ep = romvec->get_evar("eaddr");
+	ep = ArcGetEnvironmentVariable("eaddr");
 	str2eaddr(onboard_eth_addr, ep);
 	return sgiseeq_init(dev,
 			    (struct sgiseeq_regs *) (KSEG1ADDR(0x1fbd4000)),

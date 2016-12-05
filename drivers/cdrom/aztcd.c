@@ -310,7 +310,7 @@ static char  azt_auto_eject = AZT_AUTO_EJECT;
 
 static int AztTimeout, AztTries;
 static DECLARE_WAIT_QUEUE_HEAD(azt_waitq);
-static struct timer_list delay_timer = { NULL, NULL, 0, 0, NULL };
+static struct timer_list delay_timer;
 
 static struct azt_DiskInfo DiskInfo;
 static struct azt_Toc Toc[MAX_TRACKS];
@@ -1543,14 +1543,17 @@ int aztcd_open(struct inode *ip, struct file *fp)
 #ifdef AZT_DEBUG
 	printk("aztcd: starting aztcd_open\n");
 #endif
+
 	if (aztPresent == 0)
 		return -ENXIO;                  /* no hardware */
+
+        MOD_INC_USE_COUNT;
 
 	if (!azt_open_count && azt_state == AZT_S_IDLE) 
 	  { azt_invalidate_buffers();
 
 	    st = getAztStatus();                    /* check drive status */
-	    if (st == -1) return -EIO;              /* drive doesn't respond */
+	    if (st == -1) goto err_out;              /* drive doesn't respond */
 
             if (st & AST_DOOR_OPEN)
                { /* close door, then get the status again. */
@@ -1563,18 +1566,20 @@ int aztcd_open(struct inode *ip, struct file *fp)
 	       { printk("aztcd: Disk Changed or No Disk in Drive?\n");
                  aztTocUpToDate=0;
                }
-            if (aztUpdateToc())	return -EIO;
+            if (aztUpdateToc())	goto err_out;
 	       
 	  }
 	++azt_open_count;
-        MOD_INC_USE_COUNT;
 	aztLockDoor();
-
 
 #ifdef AZT_DEBUG
 	printk("aztcd: exiting aztcd_open\n");
 #endif
 	return 0;
+
+err_out:
+	MOD_DEC_USE_COUNT;
+	return -EIO;
 }
 
 
@@ -1726,10 +1731,10 @@ int __init aztcd_init(void)
 	               { printk("aztcd: no AZTECH CD-ROM drive found\n");
                          return -EIO;
 	               } 
-	            for (count = 0; count < AZT_TIMEOUT; count++); 
-	               { count=count*2;          /* delay a bit */
-	                 count=count/2;
-	               }                        
+	            
+	            for (count = 0; count < AZT_TIMEOUT; count++)
+	            	barrier();	/* Stop gcc 2.96 being smart */
+	            
 	            if ((st=getAztStatus())==-1)
 	               { printk("aztcd: Drive Status Error Status=%x\n",st);
                          return -EIO;
@@ -1786,8 +1791,8 @@ int __init aztcd_init(void)
                return -EIO;
 	     }
 	 }
-	devfs_register (NULL, "aztcd", 0, DEVFS_FL_DEFAULT, MAJOR_NR, 0,
-			S_IFBLK | S_IRUGO | S_IWUGO, 0, 0, &azt_fops, NULL);
+	devfs_register (NULL, "aztcd", DEVFS_FL_DEFAULT, MAJOR_NR, 0,
+			S_IFBLK | S_IRUGO | S_IWUGO, &azt_fops, NULL);
 	if (devfs_register_blkdev(MAJOR_NR, "aztcd", &azt_fops) != 0)
 	{
 		printk("aztcd: Unable to get major %d for Aztech CD-ROM\n",
@@ -1814,12 +1819,13 @@ int __init aztcd_init(void)
 
 void __exit aztcd_exit(void)
 {
-  devfs_unregister(devfs_find_handle(NULL, "aztcd", 0, 0, 0, DEVFS_SPECIAL_BLK,
+  devfs_unregister(devfs_find_handle(NULL, "aztcd", 0, 0, DEVFS_SPECIAL_BLK,
 				     0));
   if ((devfs_unregister_blkdev(MAJOR_NR, "aztcd") == -EINVAL))    
     { printk("What's that: can't unregister aztcd\n");
       return;
     }
+  blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
   if ((azt_port==0x1f0)||(azt_port==0x170))  
     { SWITCH_IDE_MASTER;
       release_region(azt_port,8);  /*IDE-interface*/

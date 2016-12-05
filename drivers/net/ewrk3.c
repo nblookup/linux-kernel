@@ -350,6 +350,8 @@ int __init ewrk3_probe(struct net_device *dev)
 	int tmp = num_ewrk3s, status = -ENODEV;
 	u_long iobase = dev->base_addr;
 
+	SET_MODULE_OWNER(dev);
+
 	if ((iobase == 0) && loading_module) {
 		printk("Autoprobing is not supported when loading a module based driver.\n");
 		status = -EIO;
@@ -681,8 +683,6 @@ static int ewrk3_open(struct net_device *dev)
 		return -EINVAL;
 	}
 
-	MOD_INC_USE_COUNT;
-
 	return status;
 }
 
@@ -843,6 +843,7 @@ static int ewrk3_queue_pkt(struct sk_buff *skb, struct net_device *dev)
 					}
 				}
 
+				lp->stats.tx_bytes += skb->len;
 				dev->trans_start = jiffies;
 				dev_kfree_skb(skb);
 			} else {	/* return unused page to the free memory queue */
@@ -1010,6 +1011,7 @@ static int ewrk3_rx(struct net_device *dev)
 						   ** Update stats
 						 */
 						lp->stats.rx_packets++;
+						lp->stats.rx_bytes += pkt_len;
 						for (i = 1; i < EWRK3_PKT_STAT_SZ - 1; i++) {
 							if (pkt_len < i * EWRK3_PKT_BIN_SZ) {
 								lp->pktStats.bins[i]++;
@@ -1130,8 +1132,6 @@ static int ewrk3_close(struct net_device *dev)
 	if (!lp->hard_strapped) {
 		free_irq(dev->irq, dev);
 	}
-	MOD_DEC_USE_COUNT;
-
 	return 0;
 }
 
@@ -1409,7 +1409,6 @@ insert_device(struct net_device *dev, u_long iobase, int (*init) (struct net_dev
 		new->next = dev->next;
 		dev->next = new;
 		dev = dev->next;	/* point to the new device */
-		dev->name = (char *) (dev + 1);
 		if (num_eth > 9999) {
 			sprintf(dev->name, "eth????");	/* New device name */
 		} else {
@@ -1836,7 +1835,7 @@ static int ewrk3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 			status = -EFAULT;
 		break;
 	case EWRK3_SET_TX_CUT_THRU:	/* Set TX cut through mode */
-		if (suser()) {
+		if (capable(CAP_NET_ADMIN)) {
 			lp->txc = 1;
 		} else {
 			status = -EPERM;
@@ -1844,7 +1843,7 @@ static int ewrk3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 
 		break;
 	case EWRK3_CLR_TX_CUT_THRU:	/* Clear TX cut through mode */
-		if (suser()) {
+		if (capable(CAP_NET_ADMIN)) {
 			lp->txc = 0;
 		} else {
 			status = -EPERM;
@@ -1859,15 +1858,7 @@ static int ewrk3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 }
 
 #ifdef MODULE
-static char devicename[9] =
-{0,};
-static struct net_device thisEthwrk =
-{
-	devicename,		/* device name is inserted by /linux/drivers/net/net_init.c */
-	0, 0, 0, 0,
-	0x300, 5,		/* I/O address, IRQ */
-	0, 0, 0, NULL, ewrk3_probe};
-
+static struct net_device thisEthwrk;
 static int io = 0x300;		/* <--- EDIT THESE LINES FOR YOUR CONFIGURATION */
 static int irq = 5;		/* or use the insmod io= irq= options           */
 
@@ -1878,6 +1869,7 @@ int init_module(void)
 {
 	thisEthwrk.base_addr = io;
 	thisEthwrk.irq = irq;
+	thisEthwrk.init = ewrk3_probe;
 	if (register_netdev(&thisEthwrk) != 0)
 		return -EIO;
 	return 0;

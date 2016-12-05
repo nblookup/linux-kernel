@@ -1,4 +1,4 @@
-/* $Id: processor.h,v 1.77 2000/01/21 11:39:17 jj Exp $
+/* $Id: processor.h,v 1.80 2000/12/31 10:05:43 davem Exp $
  * include/asm-sparc/processor.h
  *
  * Copyright (C) 1994 David S. Miller (davem@caip.rutgers.edu)
@@ -90,6 +90,7 @@ struct thread_struct {
 
 #define SPARC_FLAG_KTHREAD      0x1    /* task is a kernel thread */
 #define SPARC_FLAG_UNALIGNED    0x2    /* is allowed to do unaligned accesses */
+#define SPARC_FLAG_MMAPSHARED	0x4    /* task wants a shared mmap */
 
 #define INIT_MMAP { &init_mm, (0), (0), \
 		    NULL, __pgprot(0x0) , VM_READ | VM_WRITE | VM_EXEC, 1, NULL, NULL }
@@ -152,12 +153,8 @@ extern __inline__ void start_thread(struct pt_regs * regs, unsigned long pc,
 extern pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 
 
-#define copy_segments(__tsk, __mm)		\
-	if((__tsk) == current &&		\
-	   (__mm) != NULL)			\
-		flush_user_windows()
+#define copy_segments(tsk, mm)		do { } while (0)
 #define release_segments(mm)		do { } while (0)
-#define forget_segments()		do { } while (0)
 
 #define get_wchan(__TSK) \
 ({	extern void scheduling_functions_start_here(void); \

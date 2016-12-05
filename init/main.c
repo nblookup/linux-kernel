@@ -47,8 +47,12 @@
 #  include <asm/mtrr.h>
 #endif
 
-#ifdef CONFIG_MAC
-extern void nubus_init(void);
+#ifdef CONFIG_3215_CONSOLE
+extern int con3215_activate(void);
+#endif
+
+#ifdef CONFIG_NUBUS
+#include <linux/nubus.h>
 #endif
 
 #ifdef CONFIG_ISAPNP
@@ -69,14 +73,12 @@ extern void nubus_init(void);
  * To avoid associated bogus bug reports, we flatly refuse to compile
  * with a gcc that is known to be too old from the very beginning.
  */
-#if __GNUC__ < 2 || (__GNUC__ == 2 && __GNUC_MINOR__ < 6)
-#error sorry, your GCC is too old. It builds incorrect kernels.
+#if __GNUC__ < 2 || (__GNUC__ == 2 && __GNUC_MINOR__ < 91)
+#error Sorry, your GCC is too old. It builds incorrect kernels.
 #endif
 
 extern char _stext, _etext;
 extern char *linux_banner;
-
-extern int console_loglevel;
 
 static int init(void *);
 
@@ -88,14 +90,17 @@ extern void mca_init(void);
 extern void sbus_init(void);
 extern void ppc_init(void);
 extern void sysctl_init(void);
-extern void filescache_init(void);
 extern void signals_init(void);
 extern void bdev_init(void);
 extern int init_pcmcia_ds(void);
-extern int usb_init(void);
+extern void net_notifier_init(void);
 
 extern void free_initmem(void);
 extern void filesystem_setup(void);
+
+#ifdef CONFIG_TC
+extern void tc_init(void);
+#endif
 
 extern void ecard_init(void);
 
@@ -122,50 +127,12 @@ kdev_t real_root_dev;
 #endif
 
 int root_mountflags = MS_RDONLY;
-char *execute_command = NULL;
+char *execute_command;
 char root_device_name[64];
 
 
 static char * argv_init[MAX_INIT_ARGS+2] = { "init", NULL, };
 static char * envp_init[MAX_INIT_ENVS+2] = { "HOME=/", "TERM=linux", NULL, };
-
-/*
- * Read an int from an option string; if available accept a subsequent
- * comma as well.
- *
- * Return values:
- * 0 : no int in string
- * 1 : int found, no subsequent comma
- * 2 : int found including a subsequent comma
- */
-int get_option(char **str, int *pint)
-{
-    char *cur = *str;
-
-    if (!cur || !(*cur)) return 0;
-    *pint = simple_strtol(cur,str,0);
-    if (cur==*str) return 0;
-    if (**str==',') {
-        (*str)++;
-        return 2;
-    }
-
-    return 1;
-}
-
-char *get_options(char *str, int nints, int *ints)
-{
-	int res,i=1;
-
-    while (i<nints) {
-        res = get_option(&str, ints+i);
-        if (res==0) break;
-        i++;
-        if (res==1) break;
-    }
-	ints[0] = i-1;
-	return(str);
-}
 
 static int __init profile_setup(char *str)
 {
@@ -246,6 +213,66 @@ static struct dev_name_struct {
 	{ "pf",		0x2f00 },
 	{ "apblock", APBLOCK_MAJOR << 8},
 	{ "ddv", DDV_MAJOR << 8},
+	{ "jsfd",    JSFD_MAJOR << 8},
+#ifdef CONFIG_MDISK
+        { "mnda", (MDISK_MAJOR << MINORBITS)},
+        { "mndb", (MDISK_MAJOR << MINORBITS) + 1},
+        { "mndc", (MDISK_MAJOR << MINORBITS) + 2},
+        { "mndd", (MDISK_MAJOR << MINORBITS) + 3},
+        { "mnde", (MDISK_MAJOR << MINORBITS) + 4},
+        { "mndf", (MDISK_MAJOR << MINORBITS) + 5},
+        { "mndg", (MDISK_MAJOR << MINORBITS) + 6},
+        { "mndh", (MDISK_MAJOR << MINORBITS) + 7},
+#endif
+#ifdef CONFIG_DASD
+	{ "dasda", (DASD_MAJOR << MINORBITS) },
+	{ "dasdb", (DASD_MAJOR << MINORBITS) + (1 << 2) },
+	{ "dasdc", (DASD_MAJOR << MINORBITS) + (2 << 2) },
+	{ "dasdd", (DASD_MAJOR << MINORBITS) + (3 << 2) },
+	{ "dasde", (DASD_MAJOR << MINORBITS) + (4 << 2) },
+	{ "dasdf", (DASD_MAJOR << MINORBITS) + (5 << 2) },
+	{ "dasdg", (DASD_MAJOR << MINORBITS) + (6 << 2) },
+	{ "dasdh", (DASD_MAJOR << MINORBITS) + (7 << 2) },
+#endif
+#if defined(CONFIG_BLK_CPQ_DA) || defined(CONFIG_BLK_CPQ_DA_MODULE)
+	{ "ida/c0d0p",0x4800 },
+	{ "ida/c0d1p",0x4810 },
+	{ "ida/c0d2p",0x4820 },
+	{ "ida/c0d3p",0x4830 },
+	{ "ida/c0d4p",0x4840 },
+	{ "ida/c0d5p",0x4850 },
+	{ "ida/c0d6p",0x4860 },
+	{ "ida/c0d7p",0x4870 },
+	{ "ida/c0d8p",0x4880 },
+	{ "ida/c0d9p",0x4890 },
+	{ "ida/c0d10p",0x48A0 },
+	{ "ida/c0d11p",0x48B0 },
+	{ "ida/c0d12p",0x48C0 },
+	{ "ida/c0d13p",0x48D0 },
+	{ "ida/c0d14p",0x48E0 },
+	{ "ida/c0d15p",0x48F0 },
+#endif
+#if defined(CONFIG_BLK_CPQ_CISS_DA) || defined(CONFIG_BLK_CPQ_CISS_DA_MODULE)
+	{ "cciss/c0d0p",0x6800 },
+	{ "cciss/c0d1p",0x6810 },
+	{ "cciss/c0d2p",0x6820 },
+	{ "cciss/c0d3p",0x6830 },
+	{ "cciss/c0d4p",0x6840 },
+	{ "cciss/c0d5p",0x6850 },
+	{ "cciss/c0d6p",0x6860 },
+	{ "cciss/c0d7p",0x6870 },
+	{ "cciss/c0d8p",0x6880 },
+	{ "cciss/c0d9p",0x6890 },
+	{ "cciss/c0d10p",0x68A0 },
+	{ "cciss/c0d11p",0x68B0 },
+	{ "cciss/c0d12p",0x68C0 },
+	{ "cciss/c0d13p",0x68D0 },
+	{ "cciss/c0d14p",0x68E0 },
+	{ "cciss/c0d15p",0x68F0 },
+#endif
+#ifdef CONFIG_NFTL
+	{ "nftla", 0x5d00 },
+#endif
 	{ NULL, 0 }
 };
 
@@ -306,9 +333,9 @@ static int __init checksetup(char *line)
 
 /* this should be approx 2 Bo*oMips to start (note initial shift), and will
    still work even if initially too large, it will just take slightly longer */
-unsigned long loops_per_sec = (1<<12);
+unsigned long loops_per_jiffy = (1<<12);
 
-/* This is the number of bits of precision for the loops_per_second.  Each
+/* This is the number of bits of precision for the loops_per_jiffy.  Each
    bit takes on average 1.5/HZ seconds.  This (like the original) is a little
    better than 1% */
 #define LPS_PREC 8
@@ -318,42 +345,40 @@ void __init calibrate_delay(void)
 	unsigned long ticks, loopbit;
 	int lps_precision = LPS_PREC;
 
-	loops_per_sec = (1<<12);
+	loops_per_jiffy = (1<<12);
 
 	printk("Calibrating delay loop... ");
-	while (loops_per_sec <<= 1) {
+	while (loops_per_jiffy <<= 1) {
 		/* wait for "start of" clock tick */
 		ticks = jiffies;
 		while (ticks == jiffies)
 			/* nothing */;
 		/* Go .. */
 		ticks = jiffies;
-		__delay(loops_per_sec);
+		__delay(loops_per_jiffy);
 		ticks = jiffies - ticks;
 		if (ticks)
 			break;
 	}
 
-/* Do a binary approximation to get loops_per_second set to equal one clock
+/* Do a binary approximation to get loops_per_jiffy set to equal one clock
    (up to lps_precision bits) */
-	loops_per_sec >>= 1;
-	loopbit = loops_per_sec;
+	loops_per_jiffy >>= 1;
+	loopbit = loops_per_jiffy;
 	while ( lps_precision-- && (loopbit >>= 1) ) {
-		loops_per_sec |= loopbit;
+		loops_per_jiffy |= loopbit;
 		ticks = jiffies;
 		while (ticks == jiffies);
 		ticks = jiffies;
-		__delay(loops_per_sec);
+		__delay(loops_per_jiffy);
 		if (jiffies != ticks)	/* longer than 1 tick */
-			loops_per_sec &= ~loopbit;
+			loops_per_jiffy &= ~loopbit;
 	}
 
-/* finally, adjust loops per second in terms of seconds instead of clocks */	
-	loops_per_sec *= HZ;
 /* Round the value and print it */	
 	printk("%lu.%02lu BogoMIPS\n",
-		(loops_per_sec+2500)/500000,
-		((loops_per_sec+2500)/5000) % 100);
+		loops_per_jiffy/(500000/HZ),
+		(loops_per_jiffy/(5000/HZ)) % 100);
 }
 
 static int __init readonly(char *str)
@@ -380,9 +405,18 @@ static int __init debug_kernel(char *str)
 	return 1;
 }
 
+static int __init quiet_kernel(char *str)
+{
+	if (*str)
+		return 0;
+	console_loglevel = 4;
+	return 1;
+}
+
 __setup("ro", readonly);
 __setup("rw", readwrite);
 __setup("debug", debug_kernel);
+__setup("quiet", quiet_kernel);
 
 /*
  * This is a simple kernel command line parsing function: it parses
@@ -395,7 +429,7 @@ __setup("debug", debug_kernel);
  */
 static void __init parse_options(char *line)
 {
-	char *next;
+	char *next,*quote;
 	int args, envs;
 
 	if (!*line)
@@ -404,8 +438,20 @@ static void __init parse_options(char *line)
 	envs = 1;	/* TERM is set to 'linux' by default */
 	next = line;
 	while ((line = next) != NULL) {
-		if ((next = strchr(line,' ')) != NULL)
-			*next++ = 0;
+                quote = strchr(line,'"');
+                next = strchr(line, ' ');
+                while (next != NULL && quote != NULL && quote < next) {
+                        /* we found a left quote before the next blank
+                         * now we have to find the matching right quote
+                         */
+                        next = strchr(quote+1, '"');
+                        if (next != NULL) {
+                                quote = strchr(next+1, '"');
+                                next = strchr(next+1, ' ');
+                        }
+                }
+                if (next != NULL)
+                        *next++ = 0;
 		if (!strncmp(line,"init=",5)) {
 			line += 5;
 			execute_command = line;
@@ -431,7 +477,8 @@ static void __init parse_options(char *line)
 		} else {
 			if (args >= MAX_INIT_ARGS)
 				break;
-			argv_init[++args] = line;
+			if (*line)
+				argv_init[++args] = line;
 		}
 	}
 	argv_init[args+1] = NULL;
@@ -442,7 +489,7 @@ static void __init parse_options(char *line)
 extern void setup_arch(char **);
 extern void cpu_idle(void);
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 
 #ifdef CONFIG_X86_IO_APIC
 static void __init smp_init(void)
@@ -474,6 +521,7 @@ asmlinkage void __init start_kernel(void)
 {
 	char * command_line;
 	unsigned long mempages;
+	extern char saved_command_line[];
 /*
  * Interrupts are still disabled. Do necessary setups, then
  * enable them
@@ -481,12 +529,13 @@ asmlinkage void __init start_kernel(void)
 	lock_kernel();
 	printk(linux_banner);
 	setup_arch(&command_line);
+	printk("Kernel command line: %s\n", saved_command_line);
+	parse_options(command_line);
 	trap_init();
 	init_IRQ();
 	sched_init();
 	time_init();
 	softirq_init();
-	parse_options(command_line);
 
 	/*
 	 * HACK ALERT! This is early. We're enabling the console before
@@ -510,34 +559,33 @@ asmlinkage void __init start_kernel(void)
 	kmem_cache_init();
 	sti();
 	calibrate_delay();
-#if 0000
 #ifdef CONFIG_BLK_DEV_INITRD
-	// FIXME, use the bootmem.h interface.
-	if (initrd_start && !initrd_below_start_ok && initrd_start < memory_start) {
+	if (initrd_start && !initrd_below_start_ok &&
+			initrd_start < min_low_pfn << PAGE_SHIFT) {
 		printk(KERN_CRIT "initrd overwritten (0x%08lx < 0x%08lx) - "
-		    "disabling it.\n",initrd_start,memory_start);
+		    "disabling it.\n",initrd_start,min_low_pfn << PAGE_SHIFT);
 		initrd_start = 0;
 	}
 #endif
-#endif /* 0000 */
 	mem_init();
 	kmem_cache_sizes_init();
+#ifdef CONFIG_3215_CONSOLE
+        con3215_activate();
+#endif
 #ifdef CONFIG_PROC_FS
 	proc_root_init();
 #endif
 	mempages = num_physpages;
 
 	fork_init(mempages);
-	filescache_init();
-	dcache_init();
-	vma_init();
+	proc_caches_init();
+	vfs_caches_init(mempages);
 	buffer_init(mempages);
 	page_cache_init(mempages);
 	kiobuf_setup();
 	signals_init();
 	bdev_init();
-	inode_init();
-	file_table_init();
+	inode_init(mempages);
 #if defined(CONFIG_SYSVIPC)
 	ipc_init();
 #endif
@@ -553,7 +601,7 @@ asmlinkage void __init start_kernel(void)
 	 *	make syscalls (and thus be locked).
 	 */
 	smp_init();
-	kernel_thread(init, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
+	kernel_thread(init, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGNAL);
 	unlock_kernel();
 	current->need_resched = 1;
  	cpu_idle();
@@ -572,14 +620,6 @@ static int do_linuxrc(void * shell)
 	return execve(shell, argv, envp_init);
 }
 
-static int __init no_initrd(char *s)
-{
-	mount_initrd = 0;
-	return 1;
-}
-
-__setup("noinitrd", no_initrd);
-
 #endif
 
 struct task_struct *child_reaper = &init_task;
@@ -593,6 +633,9 @@ static void __init do_initcalls(void)
 		(*call)();
 		call++;
 	} while (call < &__initcall_end);
+
+	/* Make sure there is no pending stuff from the initcall sequence */
+	flush_scheduled_tasks();
 }
 
 /*
@@ -656,15 +699,14 @@ static void __init do_basic_setup(void)
 #ifdef CONFIG_DIO
 	dio_init();
 #endif
-#ifdef CONFIG_MAC
+#ifdef CONFIG_NUBUS
 	nubus_init();
 #endif
 #ifdef CONFIG_ISAPNP
 	isapnp_init();
 #endif
-#ifdef CONFIG_USB
-	usb_init();	/* Do this before doing initcalls, so that we can make
-			usbcore initialize here, and all drivers initialize later */
+#ifdef CONFIG_TC
+	tc_init();
 #endif
 
 	/* Networking initialization needs a process context */ 
@@ -677,6 +719,7 @@ static void __init do_basic_setup(void)
 	else mount_initrd =0;
 #endif
 
+	start_context_thread();
 	do_initcalls();
 
 	/* .. filesystems .. */
@@ -688,6 +731,7 @@ static void __init do_basic_setup(void)
 #ifdef CONFIG_PCMCIA
 	init_pcmcia_ds();		/* Do this last */
 #endif
+
 	/* Mount the root filesystem.. */
 	mount_root();
 
@@ -705,9 +749,6 @@ static void __init do_basic_setup(void)
 			while (pid != wait(&i));
 		if (MAJOR(real_root_dev) != RAMDISK_MAJOR
 		     || MINOR(real_root_dev) != 0) {
-#ifdef CONFIG_BLK_DEV_MD
-			autodetect_raid();
-#endif
 			error = change_root(real_root_dev,"/initrd");
 			if (error)
 				printk(KERN_ERR "Change root to /initrd: "

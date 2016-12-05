@@ -78,11 +78,11 @@
 /* ----------------- Begin global definitions ------------------- */
 
 static char mesg[100];
-static int pc_refcount, nbdevs = 0, num_cards = 0, liloconfig = 0;
+static int pc_refcount, nbdevs, num_cards, liloconfig;
 static int digi_poller_inhibited = 1 ;
 
-static int setup_error_code = 0;
-static int invalid_lilo_config = 0;
+static int setup_error_code;
+static int invalid_lilo_config;
 
 /* -----------------------------------------------------------------------
 	MAXBOARDS is typically 12, but ISA and EISA cards are restricted to 
@@ -126,6 +126,8 @@ static struct channel digi_channels[MAX_ALLOC];
 	the addresses of various channels located in digi_channels.
 -------------------------------------------------------------------------- */
 static struct channel *card_ptr[MAXCARDS];
+
+static struct timer_list epca_timer;
 
 /* ---------------------- Begin function prototypes --------------------- */
 
@@ -481,7 +483,9 @@ static inline void pc_sched_event(struct channel *ch, int event)
 	-------------------------------------------------------------------------*/
 
 	ch->event |= 1 << event;
-	queue_task(&ch->tqueue, &tq_scheduler);
+	MOD_INC_USE_COUNT;
+	if (schedule_task(&ch->tqueue) == 0)
+		MOD_DEC_USE_COUNT;
 
 
 } /* End pc_sched_event */
@@ -1564,11 +1568,10 @@ void cleanup_module()
 	struct channel    *ch;
 	unsigned long     flags;
 
+	del_timer_sync(&epca_timer);
 
 	save_flags(flags);
 	cli();
-
-	timer_table[DIGI_TIMER].fn = 0;
 
 	if ((tty_unregister_driver(&pc_driver)) ||  
 	    (tty_unregister_driver(&pc_callout)))
@@ -1598,7 +1601,7 @@ void cleanup_module()
 			{
 				if (ch->tty)
 					tty_hangup(ch->tty);
-				kfree_s(ch->tmp_buf, ch->txbufsize);
+				kfree(ch->tmp_buf);
 			}
 
 		} /* End for each port */
@@ -1633,7 +1636,7 @@ int __init pc_init(void)
 		memory.
 	------------------------------------------------------------------*/
 
-	ulong flags, save_loops_per_sec; 
+	ulong flags;
 	int crd;
 	struct board_info *bd;
 	unsigned char board_id = 0;
@@ -1774,13 +1777,6 @@ int __init pc_init(void)
 	pc_info.subtype = SERIAL_TYPE_INFO;
 
 
-	/* --------------------------------------------------------------------- 
-	   loops_per_sec hasn't been set at this point :-(, so fake it out... 
-	   I set it, so that I can use the __delay() function.
-	------------------------------------------------------------------------ */
-	save_loops_per_sec = loops_per_sec;
-	loops_per_sec = 13L * 500000L;
-
 	save_flags(flags);
 	cli();
 
@@ -1912,18 +1908,16 @@ int __init pc_init(void)
 	if (tty_register_driver(&pc_info))
 		panic("Couldn't register Digi PC/ info ");
 
-	loops_per_sec = save_loops_per_sec;  /* reset it to what it should be */
-
 	/* -------------------------------------------------------------------
 	   Start up the poller to check for events on all enabled boards
 	---------------------------------------------------------------------- */
 
-	timer_table[DIGI_TIMER].fn = (void *)epcapoll;
-	timer_table[DIGI_TIMER].expires = 0;
+	init_timer(&epca_timer);
+	epca_timer.function = epcapoll;
+	mod_timer(&epca_timer, jiffies + HZ/25);
 
 	restore_flags(flags);
 
-	timer_active |= 1 << DIGI_TIMER;
 	return 0;
 
 } /* End pc_init */
@@ -2267,12 +2261,9 @@ static void epcapoll(unsigned long ignored)
 
 	} /* End for each card */
 
-	timer_table[DIGI_TIMER].fn = (void *)epcapoll;
-	timer_table[DIGI_TIMER].expires = jiffies + (HZ / 25);
-	timer_active |= 1 << DIGI_TIMER;
+	mod_timer(&epca_timer, jiffies + (HZ / 25));
 
 	restore_flags(flags);
-
 } /* End epcapoll */
 
 /* --------------------- Begin doevent  ------------------------ */
@@ -3437,7 +3428,7 @@ static void do_softint(void *private_)
 			if (test_and_clear_bit(EPCA_EVENT_HANGUP, &ch->event)) 
 			{ /* Begin if clear_bit */
 
-				tty_hangup(tty);
+				tty_hangup(tty);	/* FIXME: module removal race here - AKPM */
 				wake_up_interruptible(&ch->open_wait);
 				ch->asyncflags &= ~(ASYNC_NORMAL_ACTIVE | ASYNC_CALLOUT_ACTIVE);
 
@@ -3445,7 +3436,7 @@ static void do_softint(void *private_)
 		}
 
 	} /* End EPCA_MAGIC */
-
+	MOD_DEC_USE_COUNT;
 } /* End do_softint */
 
 /* ------------------------------------------------------------
@@ -4007,6 +3998,9 @@ static int __init epca_init_one (struct pci_dev *pdev,
 	int board_idx, info_idx = ent->driver_data;
 	unsigned long addr;
 
+	if (pci_enable_device(pdev))
+		return -EIO;
+
 	board_num++;
 	board_idx = board_num + num_cards;
 	if (board_idx >= MAXBOARDS)
@@ -4080,9 +4074,10 @@ static struct pci_device_id epca_pci_tbl[] __initdata = {
 	{ PCI_VENDOR_DIGI, PCI_DEVICE_XEM, PCI_ANY_ID, PCI_ANY_ID, 0, 0, brd_xem },
 	{ PCI_VENDOR_DIGI, PCI_DEVICE_CX, PCI_ANY_ID, PCI_ANY_ID, 0, 0, brd_cx },
 	{ PCI_VENDOR_DIGI, PCI_DEVICE_XRJ, PCI_ANY_ID, PCI_ANY_ID, 0, 0, brd_xrj },
-	{ 0, }, /* terminate list */
+	{ 0, }
 };
 
+MODULE_DEVICE_TABLE(pci, epca_pci_tbl);
 
 int __init init_PCI (void)
 { /* Begin init_PCI */

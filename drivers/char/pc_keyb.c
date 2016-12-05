@@ -31,6 +31,7 @@
 #include <linux/miscdevice.h>
 #include <linux/malloc.h>
 #include <linux/kbd_kern.h>
+#include <linux/smp_lock.h>
 
 #include <asm/keyboard.h>
 #include <asm/bitops.h>
@@ -59,14 +60,18 @@ unsigned char pckbd_sysrq_xlate[128] =
 
 static void kbd_write_command_w(int data);
 static void kbd_write_output_w(int data);
+#ifdef CONFIG_PSMOUSE
+static void aux_write_ack(int val);
+static void __aux_write_ack(int val);
+#endif
 
-spinlock_t kbd_controller_lock = SPIN_LOCK_UNLOCKED;
+static spinlock_t kbd_controller_lock = SPIN_LOCK_UNLOCKED;
 static unsigned char handle_kbd_event(void);
 
 /* used only by send_data - set by keyboard_interrupt */
-static volatile unsigned char reply_expected = 0;
-static volatile unsigned char acknowledge = 0;
-static volatile unsigned char resend = 0;
+static volatile unsigned char reply_expected;
+static volatile unsigned char acknowledge;
+static volatile unsigned char resend;
 
 
 #if defined CONFIG_PSMOUSE
@@ -76,10 +81,12 @@ static volatile unsigned char resend = 0;
 
 static int __init psaux_init(void);
 
+#define AUX_RECONNECT 170 /* scancode when ps2 device is plugged (back) in */
+ 
 static struct aux_queue *queue;	/* Mouse data buffer. */
-static int aux_count = 0;
+static int aux_count;
 /* used when we send commands to the mouse that expect an ACK. */
-static unsigned char mouse_reply_expected = 0;
+static unsigned char mouse_reply_expected;
 
 #define AUX_INTS_OFF (KBD_MODE_KCC | KBD_MODE_DISABLE_MOUSE | KBD_MODE_SYS | KBD_MODE_KBD_INT)
 #define AUX_INTS_ON  (KBD_MODE_KCC | KBD_MODE_SYS | KBD_MODE_MOUSE_INT | KBD_MODE_KBD_INT)
@@ -284,7 +291,7 @@ static int do_acknowledge(unsigned char scancode)
 int pckbd_translate(unsigned char scancode, unsigned char *keycode,
 		    char raw_mode)
 {
-	static int prev_scancode = 0;
+	static int prev_scancode;
 
 	/* special prefix scancodes.. */
 	if (scancode == 0xe0 || scancode == 0xe1) {
@@ -396,6 +403,11 @@ static inline void handle_mouse_event(unsigned char scancode)
 		}
 		mouse_reply_expected = 0;
 	}
+	else if(scancode == AUX_RECONNECT){
+		queue->head = queue->tail = 0;  /* Flush input queue */
+		__aux_write_ack(AUX_ENABLE_DEV);  /* ping the mouse :) */
+		return;
+	}
 
 	add_mouse_randomness(scancode);
 	if (aux_count) {
@@ -405,8 +417,7 @@ static inline void handle_mouse_event(unsigned char scancode)
 		head = (head + 1) & (AUX_BUF_SIZE-1);
 		if (head != queue->tail) {
 			queue->head = head;
-			if (queue->fasync)
-				kill_fasync(queue->fasync, SIGIO, POLL_IN);
+			kill_fasync(&queue->fasync, SIGIO, POLL_IN);
 			wake_up_interruptible(&queue->proc_list);
 		}
 	}
@@ -437,13 +448,18 @@ static unsigned char handle_kbd_event(void)
 	unsigned char status = kbd_read_status();
 	unsigned int work = 10000;
 
-	while (status & KBD_STAT_OBF) {
+	while ((--work > 0) && (status & KBD_STAT_OBF)) {
 		unsigned char scancode;
 
 		scancode = kbd_read_input();
 
+		/* Error bytes must be ignored to make the 
+		   Synaptics touchpads compaq use work */
+#if 1
 		/* Ignore error bytes */
-		if (!(status & (KBD_STAT_GTO | KBD_STAT_PERR))) {
+		if (!(status & (KBD_STAT_GTO | KBD_STAT_PERR)))
+#endif
+		{
 			if (status & KBD_STAT_MOUSE_OBF)
 				handle_mouse_event(scancode);
 			else
@@ -451,13 +467,10 @@ static unsigned char handle_kbd_event(void)
 		}
 
 		status = kbd_read_status();
-		
-		if (!--work) {
-			printk(KERN_ERR "pc_keyb: controller jammed (0x%02X).\n",
-				status);
-			break;
-		}
 	}
+		
+	if (!work)
+		printk(KERN_ERR "pc_keyb: controller jammed (0x%02X).\n", status);
 
 	return status;
 }
@@ -465,14 +478,13 @@ static unsigned char handle_kbd_event(void)
 
 static void keyboard_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-	unsigned long flags;
-
 #ifdef CONFIG_VT
 	kbd_pt_regs = regs;
 #endif
-	spin_lock_irqsave(&kbd_controller_lock, flags);
+
+	spin_lock_irq(&kbd_controller_lock);
 	handle_kbd_event();
-	spin_unlock_irqrestore(&kbd_controller_lock, flags);
+	spin_unlock_irq(&kbd_controller_lock);
 }
 
 /*
@@ -807,11 +819,8 @@ static void aux_write_dev(int val)
 /*
  * Send a byte to the mouse & handle returned ack
  */
-static void aux_write_ack(int val)
+static void __aux_write_ack(int val)
 {
-	unsigned long flags;
-
-	spin_lock_irqsave(&kbd_controller_lock, flags);
 	kb_wait();
 	kbd_write_command(KBD_CCMD_WRITE_MOUSE);
 	kb_wait();
@@ -819,6 +828,14 @@ static void aux_write_ack(int val)
 	/* we expect an ACK in response. */
 	mouse_reply_expected++;
 	kb_wait();
+}
+
+static void aux_write_ack(int val)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&kbd_controller_lock, flags);
+	__aux_write_ack(val);
 	spin_unlock_irqrestore(&kbd_controller_lock, flags);
 }
 
@@ -858,12 +875,16 @@ static int fasync_aux(int fd, struct file *filp, int on)
 
 static int release_aux(struct inode * inode, struct file * file)
 {
+	lock_kernel();
 	fasync_aux(-1, file, 0);
-	if (--aux_count)
+	if (--aux_count) {
+		unlock_kernel();
 		return 0;
+	}
 	kbd_write_cmd(AUX_INTS_OFF);			    /* Disable controller ints */
 	kbd_write_command_w(KBD_CCMD_MOUSE_DISABLE);
 	aux_free_irq(AUX_DEV);
+	unlock_kernel();
 	return 0;
 }
 
@@ -961,6 +982,7 @@ static ssize_t write_aux(struct file * file, const char * buffer,
 	return retval;
 }
 
+/* No kernel lock held - fine */
 static unsigned int aux_poll(struct file *file, poll_table * wait)
 {
 	poll_wait(file, &queue->proc_list, wait);

@@ -1,23 +1,47 @@
 /*
- * linux/include/asm-arm/arch-ebsa285/system.h
+ *  linux/include/asm-arm/arch-ebsa285/system.h
  *
- * Copyright (c) 1996-1999 Russell King.
+ *  Copyright (C) 1996-1999 Russell King.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
-#include <asm/dec21285.h>
+#include <asm/hardware/dec21285.h>
 #include <asm/io.h>
 #include <asm/hardware.h>
 #include <asm/leds.h>
+#include <asm/mach-types.h>
 
-#define arch_do_idle()		cpu_do_idle()
-#define arch_power_off()	do { } while (0)
+static void arch_idle(void)
+{
+	unsigned long start_idle;
+
+	start_idle = jiffies;
+
+	do {
+		if (current->need_resched || hlt_counter)
+			goto slow_out;
+		cpu_do_idle(IDLE_WAIT_FAST);
+	} while (time_before(jiffies, start_idle + HZ/50));
+
+	cpu_do_idle(IDLE_CLOCK_SLOW);
+
+	while (!current->need_resched && !hlt_counter) {
+		cpu_do_idle(IDLE_WAIT_SLOW);
+	}
+
+	cpu_do_idle(IDLE_CLOCK_FAST);
+slow_out:
+}
 
 extern __inline__ void arch_reset(char mode)
 {
 	if (mode == 's') {
-		__asm__ volatile (
-		"mcr	p15, 0, %0, c1, c0, 0	@ MMU off
-		 mov	pc, #0x41000000		@ jump to ROM" : :
-		"r" (cpu_reset()) : "cc");
+		/*
+		 * Jump into the ROM
+		 */
+		cpu_reset(0x41000000);
 	} else {
 		if (machine_is_netwinder()) {
 			/* open up the SuperIO chip

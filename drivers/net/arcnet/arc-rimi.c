@@ -163,6 +163,7 @@ static int __init arcrimi_found(struct net_device *dev)
 		BUGMSG(D_NORMAL, "Can't allocate device data!\n");
 		goto err_free_irq;
 	}
+	lp->card_name = "RIM I";
 	lp->hw.command = arcrimi_command;
 	lp->hw.status = arcrimi_status;
 	lp->hw.intmask = arcrimi_setmask;
@@ -344,9 +345,8 @@ static int __init arcrimi_setup(char *s)
 	s = get_options(s, 8, ints);
 	if (!ints[0])
 		return 1;
-	dev = alloc_bootmem(sizeof(struct net_device) + 10);
-	memset(dev, 0, sizeof(struct net_device) + 10);
-	dev->name = (char *) (dev + 1);
+	dev = alloc_bootmem(sizeof(struct net_device));
+	memset(dev, 0, sizeof(struct net_device));
 	dev->init = arcrimi_probe;
 
 	switch (ints[0]) {

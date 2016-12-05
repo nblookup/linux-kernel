@@ -1,3 +1,4 @@
+#include <linux/config.h>
 /* Prototypes of functions used across modules here in this directory.  */
 
 #define vucp	volatile unsigned char  *
@@ -20,7 +21,9 @@ extern void apecs_pci_tbi(struct pci_controler *, dma_addr_t, dma_addr_t);
 
 /* core_cia.c */
 extern struct pci_ops cia_pci_ops;
+extern void cia_init_pci(void);
 extern void cia_init_arch(void);
+extern void pyxis_init_arch(void);
 extern void cia_machine_check(u64, u64, struct pt_regs *);
 extern void cia_pci_tbi(struct pci_controler *, dma_addr_t, dma_addr_t);
 
@@ -52,17 +55,18 @@ extern void polaris_init_arch(void);
 extern void polaris_machine_check(u64, u64, struct pt_regs *);
 #define polaris_pci_tbi ((void *)0)
 
-/* core_pyxis.c */
-extern struct pci_ops pyxis_pci_ops;
-extern void pyxis_init_arch(void);
-extern void pyxis_machine_check(u64, u64, struct pt_regs *);
-extern void pyxis_pci_tbi(struct pci_controler *, dma_addr_t, dma_addr_t);
-
 /* core_t2.c */
 extern struct pci_ops t2_pci_ops;
 extern void t2_init_arch(void);
 extern void t2_machine_check(u64, u64, struct pt_regs *);
 #define t2_pci_tbi ((void *)0)
+
+/* core_titan.c */
+extern struct pci_ops titan_pci_ops;
+extern void titan_init_arch(void);
+extern void titan_kill_arch(int);
+extern void titan_machine_check(u64, u64, struct pt_regs *);
+extern void titan_pci_tbi(struct pci_controler *, dma_addr_t, dma_addr_t);
 
 /* core_tsunami.c */
 extern struct pci_ops tsunami_pci_ops;
@@ -71,9 +75,19 @@ extern void tsunami_kill_arch(int);
 extern void tsunami_machine_check(u64, u64, struct pt_regs *);
 extern void tsunami_pci_tbi(struct pci_controler *, dma_addr_t, dma_addr_t);
 
+/* core_wildfire.c */
+extern struct pci_ops wildfire_pci_ops;
+extern void wildfire_init_arch(void);
+extern void wildfire_kill_arch(int);
+extern void wildfire_machine_check(u64, u64, struct pt_regs *);
+extern void wildfire_pci_tbi(struct pci_controler *, dma_addr_t, dma_addr_t);
+
 /* setup.c */
 extern unsigned long srm_hae;
 extern int boot_cpuid;
+extern int srmcons_output;
+extern void register_srm_console(void);
+extern void unregister_srm_console(void);
 
 /* smp.c */
 extern void setup_smp(void);
@@ -132,11 +146,12 @@ extern void dik_show_regs(struct pt_regs *regs, unsigned long *r9_15);
 extern void die_if_kernel(char *, struct pt_regs *, long, unsigned long *);
 
 /* ../mm/init.c */
-void srm_paging_stop(void);
+extern void switch_to_system_map(void);
+extern void srm_paging_stop(void);
 
 /* irq.c */
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #define mcheck_expected(cpu)	(cpu_data[cpu].mcheck_expected)
 #define mcheck_taken(cpu)	(cpu_data[cpu].mcheck_taken)
 #define mcheck_extra(cpu)	(cpu_data[cpu].mcheck_extra)

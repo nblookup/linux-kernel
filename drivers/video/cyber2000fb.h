@@ -1,10 +1,15 @@
 /*
- * linux/drivers/video/cyber2000fb.h
+ *  linux/drivers/video/cyber2000fb.h
+ *
+ *  Copyright (C) 1998-2000 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  * Integraphics Cyber2000 frame buffer device
  */
-
-#define arraysize(x)    (sizeof(x)/sizeof(*(x)))
+#include <linux/config.h>
 
 #define cyber2000_outb(dat,reg)	writeb(dat, CyberRegs + reg)
 #define cyber2000_outw(dat,reg)	writew(dat, CyberRegs + reg)
@@ -13,6 +18,30 @@
 #define cyber2000_inb(reg)	readb(CyberRegs + reg)
 #define cyber2000_inw(reg)	readw(CyberRegs + reg)
 #define cyber2000_inl(reg)	readl(CyberRegs + reg)
+
+/*
+ * Internal CyberPro sizes and offsets.
+ */
+#define MMIO_OFFSET	0x00800000
+#define MMIO_SIZE	0x000c0000
+
+#define NR_PALETTE	256
+
+#if defined(DEBUG) && defined(CONFIG_DEBUG_LL)
+static void debug_printf(char *fmt, ...)
+{
+	char buffer[128];
+	va_list ap;
+
+	va_start(ap, fmt);
+	vsprintf(buffer, fmt, ap);
+	va_end(ap);
+
+	printascii(buffer);
+}
+#else
+#define debug_printf(x...) do { } while (0)
+#endif
 
 static inline void cyber2000_crtcw(int reg, int val)
 {
@@ -24,6 +53,12 @@ static inline void cyber2000_grphw(int reg, int val)
 {
 	cyber2000_outb(reg, 0x3ce);
 	cyber2000_outb(val, 0x3cf);
+}
+
+static inline unsigned int cyber2000_grphr(int reg)
+{
+	cyber2000_outb(reg, 0x3ce);
+	return cyber2000_inb(0x3cf);
 }
 
 static inline void cyber2000_attrw(int reg, int val)
@@ -39,41 +74,6 @@ static inline void cyber2000_seqw(int reg, int val)
 	cyber2000_outb(reg, 0x3c4);
 	cyber2000_outb(val, 0x3c5);
 }
-
-struct cyber2000fb_par {
-	char *		screen_base;
-	unsigned long	screen_base_p;
-	unsigned long	regs_base;
-	unsigned long	regs_base_p;
-	unsigned long	screen_end;
-	unsigned long	screen_size;
-	unsigned int	palette_size;
-	  signed int	currcon;
-	char		dev_name[32];
-	unsigned int	initialised;
-	unsigned int	dev_id;
-	unsigned int	bus_64bit:1;
-
-	/*
-	 * palette
-	 */
-	struct {
-		u8			red;
-		u8			green;
-		u8			blue;
-	} palette[256];
-	/*
-	 * colour mapping table
-	 */
-	union {
-#ifdef FBCON_HAS_CFB16
-		u16			cfb16[16];
-#endif
-#ifdef FBCON_HAS_CFB24
-		u32			cfb24[16];
-#endif
-	} c_table;
-};
 
 #define PIXFORMAT_8BPP		0
 #define PIXFORMAT_16BPP		1
@@ -133,6 +133,14 @@ struct cyber2000fb_par {
 #define CAP_DDA_Y_INIT		0x6c
 #define CAP_DDA_Y_INC		0x6e
 
+#define MEM_CTL1		0x71
+
+#define MEM_CTL2		0x72
+#define MEM_CTL2_SIZE_2MB		0x01
+#define MEM_CTL2_SIZE_4MB		0x02
+#define MEM_CTL2_SIZE_MASK		0x03
+#define MEM_CTL2_64BIT			0x04
+
 #define EXT_FIFO_CTL		0x74
 
 #define CAP_PIP_X_START		0x80
@@ -144,6 +152,9 @@ struct cyber2000fb_par {
 
 #define CAP_NEW_CTL2		0x89
 
+#define BM_CTRL0		0x9c
+#define BM_CTRL1		0x9d
+
 #define CAP_MODE1		0xa4
 #define CAP_MODE1_8BIT			0x01	/* enable 8bit capture mode		*/
 #define CAP_MODE1_CCIR656		0x02	/* CCIR656 mode				*/
@@ -152,6 +163,11 @@ struct cyber2000fb_par {
 #define CAP_MODE1_SWAPUV		0x20	/* swap UV bytes			*/
 #define CAP_MODE1_MIRRORY		0x40	/* mirror vertically			*/
 #define CAP_MODE1_MIRRORX		0x80	/* mirror horizontally			*/
+
+#define DCLK_MULT		0xb0
+#define DCLK_DIV		0xb1
+#define MCLK_MULT		0xb2
+#define MCLK_DIV		0xb3
 
 #define CAP_MODE2		0xa5
 
@@ -243,11 +259,14 @@ struct cyber2000fb_par {
 /*
  * Bus-master
  */
+#define BM_VID_ADDR_LOW		0xbc040
+#define BM_VID_ADDR_HIGH	0xbc044
 #define BM_ADDRESS_LOW		0xbc080
 #define BM_ADDRESS_HIGH		0xbc084
 #define BM_LENGTH		0xbc088
 #define BM_CONTROL		0xbc08c
 #define BM_CONTROL_ENABLE		0x01	/* enable transfer			*/
+#define BM_CONTROL_IRQEN		0x02	/* enable IRQ at end of transfer	*/
 #define BM_CONTROL_INIT			0x04	/* initialise status & count		*/
 #define BM_COUNT		0xbc090		/* read-only				*/
 
@@ -275,17 +294,40 @@ struct cyber2000fb_par {
 #define CO_REG_DEST_PTR		0xbf178
 #define CO_REG_DEST_WIDTH	0xbf218
 
+/*
+ * Private structure
+ */
+struct cfb_info;
+
 struct cyberpro_info {
+	struct pci_dev	*dev;
 	unsigned char	*regs;
 	char		*fb;
 	char		dev_name[32];
 	unsigned int	fb_size;
+
+	/*
+	 * The following is a pointer to be passed into the
+	 * functions below.  The modules outside the main
+	 * cyber2000fb.c driver have no knowledge as to what
+	 * is within this structure.
+	 */
+	struct cfb_info *info;
+
+	/*
+	 * Use these to enable the BM or TV registers.  In an SMP
+	 * environment, these two function pointers should only be
+	 * called from the module_init() or module_exit()
+	 * functions.
+	 */
+	void (*enable_extregs)(struct cfb_info *);
+	void (*disable_extregs)(struct cfb_info *);
 };
 
 /*
  * Note! Writing to the Cyber20x0 registers from an interrupt
  * routine is definitely a bad idea atm.
  */
-int cyber2000fb_attach(struct cyberpro_info *info);
-void cyber2000fb_detach(void);
+int cyber2000fb_attach(struct cyberpro_info *info, int idx);
+void cyber2000fb_detach(int idx);
 

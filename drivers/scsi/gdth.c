@@ -533,6 +533,8 @@ static int __init gdth_search_pci(gdth_pci_str *pcistr)
         pdev = NULL;
         while ((pdev = pci_find_device(PCI_VENDOR_ID_VORTEX,device_id,pdev)) 
                != NULL) {
+	    if (pci_enable_device(pdev))
+	    	continue;
             if (cnt >= MAXHA)
                 return cnt;
             /* GDT PCI controller found, resources are already in pdev */
@@ -1491,7 +1493,7 @@ static int __init gdth_search_drives(int hanum)
     ha->more_proc = FALSE;
     if (gdth_internal_cmd(hanum,CACHESERVICE,GDT_IOCTL,BOARD_INFO,
                           INVALID_CHANNEL,sizeof(gdth_binfo_str))) {
-        ha->binfo = *(gdth_binfo_str *)ha->pscratch;
+        memcpy(&ha->binfo, (gdth_binfo_str *)ha->pscratch, sizeof(gdth_binfo_str));
         if (gdth_internal_cmd(hanum,CACHESERVICE,GDT_IOCTL,BOARD_FEATURES,
                               INVALID_CHANNEL,sizeof(gdth_bfeat_str))) {
             TRACE2(("BOARD_INFO/BOARD_FEATURES supported\n"));
@@ -3123,6 +3125,8 @@ int __init gdth_detect(Scsi_Host_Template *shtp)
             break;
         if (gdth_search_isa(isa_bios)) {        /* controller found */
             shp = scsi_register(shtp,sizeof(gdth_ext_str));
+            if(shp == NULL)
+            	continue;
             ha = HADATA(shp);
             if (!gdth_init_isa(isa_bios,ha)) {
                 scsi_unregister(shp);
@@ -3195,6 +3199,8 @@ int __init gdth_detect(Scsi_Host_Template *shtp)
             break;
         if (gdth_search_eisa(eisa_slot)) {      /* controller found */
             shp = scsi_register(shtp,sizeof(gdth_ext_str));
+            if(shp == NULL)
+            	continue;
             ha = HADATA(shp);
             if (!gdth_init_eisa(eisa_slot,ha)) {
                 scsi_unregister(shp);
@@ -3266,6 +3272,8 @@ int __init gdth_detect(Scsi_Host_Template *shtp)
             if (gdth_ctr_count >= MAXHA)
                 break;
             shp = scsi_register(shtp,sizeof(gdth_ext_str));
+            if(shp == NULL)
+            	continue;
             ha = HADATA(shp);
             if (!gdth_init_pci(&pcistr[ctr],ha)) {
                 scsi_unregister(shp);
@@ -3569,24 +3577,29 @@ static void gdth_flush(int hanum)
     ha = HADATA(gdth_ctr_tab[hanum]);
 
     sdev = scsi_get_host_dev(gdth_ctr_tab[hanum]);
+    if (!sdev)
+	return;
+
     scp  = scsi_allocate_device(sdev, 1, FALSE);
 
-    scp->cmd_len = 12;
-    scp->use_sg = 0;
+    if (scp) {
+        scp->cmd_len = 12;
+        scp->use_sg = 0;
 
-    for (i = 0; i < MAX_HDRIVES; ++i) {
-        if (ha->hdr[i].present) {
-            gdtcmd.BoardNode = LOCALBOARD;
-            gdtcmd.Service = CACHESERVICE;
-            gdtcmd.OpCode = GDT_FLUSH;
-            gdtcmd.u.cache.DeviceNo = i;
-            gdtcmd.u.cache.BlockNo = 1;
-            gdtcmd.u.cache.sg_canz = 0;
-            TRACE2(("gdth_flush(): flush ha %d drive %d\n", hanum, i));
-            gdth_do_cmd(scp, &gdtcmd, 30);
+        for (i = 0; i < MAX_HDRIVES; ++i) {
+            if (ha->hdr[i].present) {
+                gdtcmd.BoardNode = LOCALBOARD;
+                gdtcmd.Service = CACHESERVICE;
+                gdtcmd.OpCode = GDT_FLUSH;
+                gdtcmd.u.cache.DeviceNo = i;
+                gdtcmd.u.cache.BlockNo = 1;
+                gdtcmd.u.cache.sg_canz = 0;
+                TRACE2(("gdth_flush(): flush ha %d drive %d\n", hanum, i));
+                 gdth_do_cmd(scp, &gdtcmd, 30);
+            }
         }
+    	scsi_release_command(scp);
     }
-    scsi_release_command(scp);
     scsi_free_host_dev(sdev);
 }
 
@@ -3702,7 +3715,5 @@ void __init gdth_setup(char *str,int *ints)
 }
 
 
-#ifdef MODULE
-Scsi_Host_Template driver_template = GDTH;
+static Scsi_Host_Template driver_template = GDTH;
 #include "scsi_module.c"
-#endif

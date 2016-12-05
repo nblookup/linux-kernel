@@ -37,6 +37,7 @@ extern struct hwrpb_struct *hwrpb;
 extern void dump_thread(struct pt_regs *, struct user *);
 extern int dump_fpu(struct pt_regs *, elf_fpregset_t *);
 extern spinlock_t kernel_flag;
+extern spinlock_t rtc_lock;
 
 /* these are C runtime functions with special calling conventions: */
 extern void __divl (void);
@@ -106,6 +107,7 @@ EXPORT_SYMBOL(pci_map_single);
 EXPORT_SYMBOL(pci_unmap_single);
 EXPORT_SYMBOL(pci_map_sg);
 EXPORT_SYMBOL(pci_unmap_sg);
+EXPORT_SYMBOL(pci_dma_supported);
 
 EXPORT_SYMBOL(dump_thread);
 EXPORT_SYMBOL(dump_fpu);
@@ -158,21 +160,26 @@ EXPORT_SYMBOL_NOVERS(__do_clear_user);
 EXPORT_SYMBOL(__strncpy_from_user);
 EXPORT_SYMBOL(__strnlen_user);
 
-/*
- * The following are specially called from the semaphore assembly stubs.
- */
-EXPORT_SYMBOL_NOVERS(__down_failed);
-EXPORT_SYMBOL_NOVERS(__down_failed_interruptible);
-EXPORT_SYMBOL_NOVERS(__up_wakeup);
-EXPORT_SYMBOL_NOVERS(__down_read_failed);
-EXPORT_SYMBOL_NOVERS(__down_write_failed);
-EXPORT_SYMBOL_NOVERS(__rwsem_wake);
+/* Semaphore helper functions.  */
+EXPORT_SYMBOL(__down_failed);
+EXPORT_SYMBOL(__down_failed_interruptible);
+EXPORT_SYMBOL(__up_wakeup);
+EXPORT_SYMBOL(down);
+EXPORT_SYMBOL(down_interruptible);
+EXPORT_SYMBOL(up);
+EXPORT_SYMBOL(__down_read_failed);
+EXPORT_SYMBOL(__down_write_failed);
+EXPORT_SYMBOL(__rwsem_wake);
+EXPORT_SYMBOL(down_read);
+EXPORT_SYMBOL(down_write);
+EXPORT_SYMBOL(up_read);
+EXPORT_SYMBOL(up_write);
 
 /* 
  * SMP-specific symbols.
  */
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 EXPORT_SYMBOL(kernel_flag);
 EXPORT_SYMBOL(synchronize_irq);
 EXPORT_SYMBOL(flush_tlb_all);
@@ -197,10 +204,9 @@ EXPORT_SYMBOL(debug_spin_trylock);
 EXPORT_SYMBOL(write_lock);
 EXPORT_SYMBOL(read_lock);
 #endif
-#else /* __SMP__ */
-EXPORT_SYMBOL(__local_bh_count);
-EXPORT_SYMBOL(__local_irq_count);
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
+
+EXPORT_SYMBOL(rtc_lock);
 
 /*
  * The following are special because they're not called

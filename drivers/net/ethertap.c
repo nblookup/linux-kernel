@@ -67,6 +67,8 @@ struct net_local
  
 int __init ethertap_probe(struct net_device *dev)
 {
+	SET_MODULE_OWNER(dev);
+
 	memcpy(dev->dev_addr, "\xFE\xFD\x00\x00\x00\x00", 6);
 	if (dev->mem_start & 0xf)
 		ethertap_debug = dev->mem_start & 0x7;
@@ -116,13 +118,9 @@ static int ethertap_open(struct net_device *dev)
 	if (ethertap_debug > 2)
 		printk("%s: Doing ethertap_open()...", dev->name);
 
-	MOD_INC_USE_COUNT;
-
 	lp->nl = netlink_kernel_create(dev->base_addr, ethertap_rx);
-	if (lp->nl == NULL) {
-		MOD_DEC_USE_COUNT;
+	if (lp->nl == NULL)
 		return -ENOBUFS;
-	}
 	netif_start_queue(dev);
 	return 0;
 }
@@ -324,7 +322,6 @@ static int ethertap_close(struct net_device *dev)
 		sock_release(sk->socket);
 	}
 
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -339,11 +336,9 @@ static struct net_device_stats *ethertap_get_stats(struct net_device *dev)
 static int unit;
 MODULE_PARM(unit,"i");
 
-static char devicename[9] = { 0, };
-
 static struct net_device dev_ethertap =
 {
-	devicename,
+	" ",
 	0, 0, 0, 0,
 	1, 5,
 	0, 0, 0, NULL, ethertap_probe
@@ -352,10 +347,10 @@ static struct net_device dev_ethertap =
 int init_module(void)
 {
 	dev_ethertap.base_addr=unit+NETLINK_TAPBASE;
-	sprintf(devicename,"tap%d",unit);
-	if (dev_get(devicename))
+	sprintf(dev_ethertap.name,"tap%d",unit);
+	if (dev_get(dev_ethertap.name))
 	{
-		printk(KERN_INFO "%s already loaded.\n", devicename);
+		printk(KERN_INFO "%s already loaded.\n", dev_ethertap.name);
 		return -EBUSY;
 	}
 	if (register_netdev(&dev_ethertap) != 0)

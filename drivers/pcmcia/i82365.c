@@ -859,6 +859,28 @@ static void __init isa_probe(void)
 
 /*====================================================================*/
 
+static u_int pending_events[8];
+static spinlock_t pending_event_lock = SPIN_LOCK_UNLOCKED;
+
+static void pcic_bh(void *dummy)
+{
+	u_int events;
+	int i;
+
+	for (i=0; i < sockets; i++) {
+		spin_lock_irq(&pending_event_lock);
+		events = pending_events[i];
+		pending_events[i] = 0;
+		spin_unlock_irq(&pending_event_lock);
+		if (socket[i].handler)
+			socket[i].handler(socket[i].info, events);
+	}
+}
+
+static struct tq_struct pcic_task = {
+	routine:	pcic_bh
+};
+
 static void pcic_interrupt(int irq, void *dev,
 				    struct pt_regs *regs)
 {
@@ -893,8 +915,13 @@ static void pcic_interrupt(int irq, void *dev,
 	    }
 	    ISA_UNLOCK(i, flags);
 	    DEBUG(2, "i82365: socket %d event 0x%02x\n", i, events);
-	    if (events)
-		socket[i].handler(socket[i].info, events);
+
+	    if (events) {
+		    spin_lock(&pending_event_lock);
+		    pending_events[i] |= events;
+		    spin_unlock(&pending_event_lock);
+		    schedule_task(&pcic_task);
+	    }
 	    active |= events;
 	}
 	if (!active) break;
@@ -1518,7 +1545,7 @@ static int __init init_i82365(void)
     if (poll_interval != 0) {
 	poll_timer.function = pcic_interrupt_wrapper;
 	poll_timer.data = 0;
-	poll_timer.prev = poll_timer.next = NULL;
+	init_timer(&poll_timer);
     	poll_timer.expires = jiffies + poll_interval;
 	add_timer(&poll_timer);
     }

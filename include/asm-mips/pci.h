@@ -1,4 +1,4 @@
-/* $Id: pci.h,v 1.9 2000/02/24 00:13:19 ralf Exp $
+/* $Id: pci.h,v 1.10 2000/03/23 02:26:00 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -6,6 +6,8 @@
  */
 #ifndef _ASM_PCI_H
 #define _ASM_PCI_H
+
+#ifdef __KERNEL__
 
 /* Can be used to override the logic in pci_scan_bus for skipping
    already-configured bus numbers - to be used for buggy BIOSes
@@ -16,7 +18,15 @@
 #define PCIBIOS_MIN_IO		0x1000
 #define PCIBIOS_MIN_MEM		0x10000000
 
-#ifdef __KERNEL__
+extern inline void pcibios_set_master(struct pci_dev *dev)
+{
+	/* No special bus mastering setup handling */
+}
+
+extern inline void pcibios_penalize_isa_irq(int irq)
+{
+	/* We don't do dynamic PCI IRQ allocation */
+}
 
 /*
  * Dynamic DMA mapping stuff.
@@ -29,6 +39,13 @@
 #include <asm/scatterlist.h>
 #include <linux/string.h>
 #include <asm/io.h>
+
+#ifdef CONFIG_DDB5074
+#undef PCIBIOS_MIN_IO
+#undef PCIBIOS_MIN_MEM
+#define PCIBIOS_MIN_IO		0x0100000
+#define PCIBIOS_MIN_MEM		0x1000000
+#endif
 
 struct pci_dev;
 

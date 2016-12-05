@@ -33,6 +33,7 @@
 #include <linux/if_arp.h>
 #include <linux/init.h> /* for __init */
 #include <asm/uaccess.h>
+#include <asm/atomic.h>
 #include <asm/param.h> /* for HZ */
 #include "resources.h"
 #include "common.h" /* atm_proc_init prototype */
@@ -64,10 +65,12 @@ static struct file_operations proc_spec_atm_operations = {
 };
 
 static void add_stats(char *buf,const char *aal,
-  const struct atm_aal_stats *stats)
+  const struct k_atm_aal_stats *stats)
 {
-	sprintf(strchr(buf,0),"%s ( %d %d %d %d %d )",aal,stats->tx,
-	    stats->tx_err,stats->rx,stats->rx_err,stats->rx_drop);
+	sprintf(strchr(buf,0),"%s ( %d %d %d %d %d )",aal,
+	    atomic_read(&stats->tx),atomic_read(&stats->tx_err),
+	    atomic_read(&stats->rx),atomic_read(&stats->rx_err),
+	    atomic_read(&stats->rx_drop));
 }
 
 
@@ -101,7 +104,7 @@ static int svc_addr(char *buf,struct sockaddr_atmsvc *addr)
 		strcpy(buf,addr->sas_addr.pub);
 		len = strlen(addr->sas_addr.pub);
 		buf += len;
-		if (*addr->sas_addr.pub) {
+		if (*addr->sas_addr.prv) {
 			*buf++ = '+';
 			len++;
 		}
@@ -217,7 +220,7 @@ static void vc_info(struct atm_vcc *vcc,char *buf)
 		default:
 			here += sprintf(here,"%3d",vcc->family);
 	}
-	here += sprintf(here," %04x  %5d %7d/%7d %7d/%7d\n",vcc->flags,
+	here += sprintf(here," %04lx  %5d %7d/%7d %7d/%7d\n",vcc->flags.bits,
 	    vcc->reply,
 	    atomic_read(&vcc->tx_inuse),vcc->sk->sndbuf,
 	    atomic_read(&vcc->rx_inuse),vcc->sk->rcvbuf);
@@ -230,9 +233,10 @@ static void svc_info(struct atm_vcc *vcc,char *buf)
 	int i;
 
 	if (!vcc->dev)
-		sprintf(buf,sizeof(void *) == 4 ? "N/A@%p%6s" : "N/A@%p%2s",
+		sprintf(buf,sizeof(void *) == 4 ? "N/A@%p%10s" : "N/A@%p%2s",
 		    vcc,"");
-	else sprintf(buf,"%3d %3d %5d ",vcc->dev->number,vcc->vpi,vcc->vci);
+	else sprintf(buf,"%3d %3d %5d         ",vcc->dev->number,vcc->vpi,
+		    vcc->vci);
 	here = strchr(buf,0);
 	here += sprintf(here,"%-10s ",vcc_state(vcc));
 	here += sprintf(here,"%s%s",vcc->remote.sas_addr.pub,
@@ -373,7 +377,7 @@ static int atm_svc_info(loff_t pos,char *buf)
 	int left;
 
 	if (!pos)
-		return sprintf(buf,"Itf VPI VCI   State      Remote\n");
+		return sprintf(buf,"Itf VPI VCI           State      Remote\n");
 	left = pos-1;
 	for (dev = atm_devs; dev; dev = dev->next)
 		for (vcc = dev->vccs; vcc; vcc = vcc->next)
@@ -555,6 +559,7 @@ int atm_proc_dev_register(struct atm_dev *dev)
 		goto fail0;
 	dev->proc_entry->data = dev;
 	dev->proc_entry->proc_fops = &proc_dev_atm_operations;
+	dev->proc_entry->owner = THIS_MODULE;
 	return 0;
 	kfree(dev->proc_entry);
 fail0:
@@ -575,7 +580,8 @@ void atm_proc_dev_deregister(struct atm_dev *dev)
     name = create_proc_entry(#name,0,atm_proc_root); \
     if (!name) goto cleanup; \
     name->data = atm_##name##_info; \
-    name->proc_fops = &proc_spec_atm_operations
+    name->proc_fops = &proc_spec_atm_operations; \
+    name->owner = THIS_MODULE
 
 
 int __init atm_proc_init(void)
@@ -583,7 +589,7 @@ int __init atm_proc_init(void)
 	struct proc_dir_entry *devices = NULL,*pvc = NULL,*svc = NULL;
 	struct proc_dir_entry *arp = NULL,*lec = NULL,*vc = NULL;
 
-	atm_proc_root = proc_mkdir("atm", &proc_root);
+	atm_proc_root = proc_mkdir("net/atm",NULL);
 	if (!atm_proc_root)
 		return -ENOMEM;
 	CREATE_ENTRY(devices);
@@ -605,6 +611,6 @@ cleanup:
 	if (arp) remove_proc_entry("arp",atm_proc_root);
 	if (lec) remove_proc_entry("lec",atm_proc_root);
 	if (vc) remove_proc_entry("vc",atm_proc_root);
-	remove_proc_entry("atm",&proc_root);
+	remove_proc_entry("net/atm",NULL);
 	return -ENOMEM;
 }

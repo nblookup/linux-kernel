@@ -20,8 +20,6 @@
 #include <asm/amigahw.h>
 
 
-extern void zorro_namedevice(struct zorro_dev *dev);
-
     /*
      *  Zorro Expansion Devices
      */
@@ -30,20 +28,22 @@ u_int zorro_num_autocon = 0;
 struct zorro_dev zorro_autocon[ZORRO_NUM_AUTO];
 
 
-#if 0
     /*
      *  Zorro Bus Resources
      *  Order _does_ matter! (see code below)
      */
 
 static struct resource zorro_res[4] = {
+    /* Zorro II regions (on Zorro II/III) */
     { "Zorro II exp", 0x00e80000, 0x00efffff },
     { "Zorro II mem", 0x00200000, 0x009fffff },
+    /* Zorro III regions (on Zorro III only) */
     { "Zorro III exp", 0xff000000, 0xffffffff },
     { "Zorro III cfg", 0x40000000, 0x7fffffff }
 };
-#endif
-   
+
+static u_int zorro_num_res __initdata = 0;
+
 
     /*
      *  Find Zorro Devices
@@ -56,8 +56,9 @@ struct zorro_dev *zorro_find_device(zorro_id id, struct zorro_dev *from)
     if (!MACH_IS_AMIGA || !AMIGAHW_PRESENT(ZORRO))
 	return NULL;
 
-    dev = from ? from+1 : &zorro_autocon[0];
-    for (; dev < zorro_autocon+zorro_num_autocon; dev++)
+    for (dev = from ? from+1 : &zorro_autocon[0];
+	 dev < zorro_autocon+zorro_num_autocon;
+	 dev++)
 	if (id == ZORRO_WILDCARD || id == dev->id)
 	    return dev;
     return NULL;
@@ -107,6 +108,18 @@ static void __init mark_region(unsigned long start, unsigned long end,
 }
 
 
+static struct resource __init *zorro_find_parent_resource(struct zorro_dev *z)
+{
+    int i;
+
+    for (i = 0; i < zorro_num_res; i++)
+	if (z->resource.start >= zorro_res[i].start &&
+	    z->resource.end <= zorro_res[i].end)
+		return &zorro_res[i];
+    return &iomem_resource;
+}
+
+
     /*
      *  Initialization
      */
@@ -123,10 +136,9 @@ void __init zorro_init(void)
 	   zorro_num_autocon, zorro_num_autocon == 1 ? "" : "s");
 
     /* Request the resources */
-#if 0
-    for (i = 0; i < (AMIGAHW_PRESENT(ZORRO3) ? 4 : 2); i++)
+    zorro_num_res = AMIGAHW_PRESENT(ZORRO3) ? 4 : 2;
+    for (i = 0; i < zorro_num_res; i++)
 	request_resource(&iomem_resource, &zorro_res[i]);
-#endif
     for (i = 0; i < zorro_num_autocon; i++) {
 	dev = &zorro_autocon[i];
 	dev->id = (dev->rom.er_Manufacturer<<16) | (dev->rom.er_Product<<8);
@@ -135,10 +147,13 @@ void __init zorro_init(void)
 	    unsigned long magic = dev->resource.start+0x8000;
 	    dev->id |= *(u16 *)ZTWO_VADDR(magic) & GVP_PRODMASK;
 	}
+	sprintf(dev->name, "Zorro device %08x", dev->id);
+	zorro_name_device(dev);
 	dev->resource.name = dev->name;
-	zorro_namedevice(dev);
-	if (request_resource(&iomem_resource, &dev->resource))
-	    printk("zorro_init: cannot request resource for board %d\n", i);
+	if (request_resource(zorro_find_parent_resource(dev), &dev->resource))
+	    printk(KERN_ERR "Zorro: Address space collision on device %s "
+		   "[%lx:%lx]\n",
+		   dev->name, dev->resource.start, dev->resource.end);
     }
 
     /* Mark all available Zorro II memory */

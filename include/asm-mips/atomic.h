@@ -11,14 +11,14 @@
  *
  * Copyright (C) 1996, 1997 by Ralf Baechle
  *
- * $Id: atomic.h,v 1.7 1999/08/13 17:07:27 harald Exp $
+ * $Id: atomic.h,v 1.6 1999/07/26 19:42:42 harald Exp $
  */
-#ifndef __ASM_MIPS_ATOMIC_H
-#define __ASM_MIPS_ATOMIC_H
+#ifndef __ASM_ATOMIC_H
+#define __ASM_ATOMIC_H
 
 #include <linux/config.h>
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 typedef struct { volatile int counter; } atomic_t;
 #else
 typedef struct { int counter; } atomic_t;

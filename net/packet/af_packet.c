@@ -5,7 +5,7 @@
  *
  *		PACKET - implements raw packet sockets.
  *
- * Version:	$Id: af_packet.c,v 1.32 2000/02/21 16:25:55 davem Exp $
+ * Version:	$Id: af_packet.c,v 1.47 2000/12/08 17:15:54 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -33,6 +33,7 @@
  *		Alan Cox	:	Protocol setting support
  *	Alexey Kuznetsov	:	Untied from IPv4 stack.
  *	Cyrus Durgin		:	Fixed kerneld for kmod.
+ *	Michal Ostrowski        :       Module initialization cleanup.
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -67,6 +68,10 @@
 #include <linux/init.h>
 #include <linux/if_bridge.h>
 
+#ifdef CONFIG_NET_DIVERT
+#include <linux/divert.h>
+#endif /* CONFIG_NET_DIVERT */
+
 #ifdef CONFIG_INET
 #include <net/inet_common.h>
 #endif
@@ -75,11 +80,6 @@
 extern int dlci_ioctl(unsigned int, void*);
 #endif
 
-/*
-   Old SOCK_PACKET. Do exist programs, which use it?
-   (not counting tcpdump) - lots of them yes - AC. 
-   
- */
 #define CONFIG_SOCK_PACKET	1
 
 /*
@@ -89,22 +89,10 @@ extern int dlci_ioctl(unsigned int, void*);
    It is more expensive, but I believe,
    it is really correct solution: reentereble, safe and fault tolerant.
 
-   Differences:
-   - Changing IFF_ALLMULTI from user level is disabled.
-     It could only confused multicast routing daemons, not more.
-   - IFF_PROMISC is faked by keeping reference count and
-     global flag, so that real IFF_PROMISC == (gflag|(count != 0))
-     I'd remove it too, but it would require recompilation tcpdump
-     and another applications, using promiscuous mode.
-   - SIOC{ADD/DEL}MULTI are moved to deprecated state,
-     they work, but complain. I do know who uses them.
-     
- 
-*************FIXME***************
-  Alexey : This doesnt cook Im afraid. We need the low level SIOCADD/DELMULTI
-  and also IFF_ALLMULTI for DECNET, Appletalk and other stuff as well as
-  BSD compatibility issues.
-  
+   IFF_PROMISC/IFF_ALLMULTI/SIOC{ADD/DEL}MULTI are faked by keeping
+   reference count and global flag, so that real status is
+   (gflag|(count != 0)), so that we can use obsolete faulty interface
+   not harming clever users.
  */
 #define CONFIG_PACKET_MULTICAST	1
 
@@ -206,6 +194,7 @@ struct packet_opt
 	unsigned int		frame_size;
 	unsigned int		iovmax;
 	unsigned int		head;
+	int			copy_thresh;
 #endif
 };
 
@@ -274,11 +263,6 @@ static int packet_rcv_spkt(struct sk_buff *skb, struct net_device *dev,  struct 
 	spkt->spkt_family = dev->type;
 	strncpy(spkt->spkt_device, dev->name, sizeof(spkt->spkt_device));
 	spkt->spkt_protocol = skb->protocol;
-
-	if (skb->rx_dev) {
-		dev_put(skb->rx_dev);
-		skb->rx_dev = NULL;
-	}
 
 	/*
 	 *	Charge the memory to the socket. This is done specifically
@@ -493,17 +477,13 @@ static int packet_rcv(struct sk_buff *skb, struct net_device *dev,  struct packe
 	if (dev->hard_header_parse)
 		sll->sll_halen = dev->hard_header_parse(skb, sll->sll_addr);
 
-	if (skb->rx_dev) {
-		dev_put(skb->rx_dev);
-		skb->rx_dev = NULL;
-	}
-
 #ifdef CONFIG_FILTER
 	if (skb->len > snaplen)
 		__skb_trim(skb, snaplen);
 #endif
 
 	skb_set_owner_r(skb, sk);
+	skb->dev = NULL;
 	spin_lock(&sk->receive_queue.lock);
 	po->stats.tp_packets++;
 	__skb_queue_tail(&sk->receive_queue, skb);
@@ -537,7 +517,9 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,  struct pack
 	struct tpacket_hdr *h;
 	u8 * skb_head = skb->data;
 	unsigned snaplen;
-	unsigned long losing;
+	unsigned long status = TP_STATUS_LOSING|TP_STATUS_USER;
+	unsigned short macoff, netoff;
+	struct sk_buff *copy_skb = NULL;
 
 	if (skb->pkt_type == PACKET_LOOPBACK)
 		goto drop;
@@ -572,6 +554,32 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,  struct pack
 			snaplen = res;
 	}
 #endif
+
+	if (sk->type == SOCK_DGRAM) {
+		macoff = netoff = TPACKET_ALIGN(TPACKET_HDRLEN) + 16;
+	} else {
+		unsigned maclen = skb->nh.raw - skb->data;
+		netoff = TPACKET_ALIGN(TPACKET_HDRLEN + (maclen < 16 ? 16 : maclen));
+		macoff = netoff - maclen;
+	}
+
+	if (macoff + snaplen > po->frame_size) {
+		if (po->copy_thresh &&
+		    atomic_read(&sk->rmem_alloc) + skb->truesize < (unsigned)sk->rcvbuf) {
+			if (skb_shared(skb)) {
+				copy_skb = skb_clone(skb, GFP_ATOMIC);
+			} else {
+				copy_skb = skb_get(skb);
+				skb_head = skb->data;
+			}
+			if (copy_skb)
+				skb_set_owner_r(copy_skb, sk);
+		}
+		snaplen = po->frame_size - macoff;
+		if ((int)snaplen < 0)
+			snaplen = 0;
+	}
+
 	spin_lock(&sk->receive_queue.lock);
 	h = po->iovec[po->head];
 
@@ -579,31 +587,22 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,  struct pack
 		goto ring_is_full;
 	po->head = po->head != po->iovmax ? po->head+1 : 0;
 	po->stats.tp_packets++;
-	losing = TP_STATUS_LOSING;
+	if (copy_skb) {
+		status |= TP_STATUS_COPY;
+		__skb_queue_tail(&sk->receive_queue, copy_skb);
+	}
 	if (!po->stats.tp_drops)
-		losing = 0;
+		status &= ~TP_STATUS_LOSING;
 	spin_unlock(&sk->receive_queue.lock);
 
-	if (sk->type == SOCK_DGRAM) {
-		h->tp_mac = h->tp_net = TPACKET_ALIGN(TPACKET_HDRLEN) + 16;
-	} else {
-		unsigned maclen = skb->nh.raw - skb->data;
-		h->tp_net = TPACKET_ALIGN(TPACKET_HDRLEN + (maclen < 16 ? 16 : maclen));
-		h->tp_mac = h->tp_net - maclen;
-	}
+	memcpy((u8*)h + macoff, skb->data, snaplen);
 
-	if (h->tp_mac + snaplen > po->frame_size) {
-		snaplen = po->frame_size - h->tp_mac;
-		if ((int)snaplen < 0)
-			snaplen = 0;
-	}
-
-	memcpy((u8*)h + h->tp_mac, skb->data, snaplen);
-
-	h->tp_sec = skb->stamp.tv_sec;
-	h->tp_usec = skb->stamp.tv_usec;
 	h->tp_len = skb->len;
 	h->tp_snaplen = snaplen;
+	h->tp_mac = macoff;
+	h->tp_net = netoff;
+	h->tp_sec = skb->stamp.tv_sec;
+	h->tp_usec = skb->stamp.tv_usec;
 
 	sll = (struct sockaddr_ll*)((u8*)h + TPACKET_ALIGN(sizeof(*h)));
 	sll->sll_halen = 0;
@@ -615,7 +614,7 @@ static int tpacket_rcv(struct sk_buff *skb, struct net_device *dev,  struct pack
 	sll->sll_pkttype = skb->pkt_type;
 	sll->sll_ifindex = dev->ifindex;
 
-	h->tp_status = losing|TP_STATUS_USER;
+	h->tp_status = status;
 	mb();
 
 	sk->data_ready(sk, 0);
@@ -634,6 +633,8 @@ ring_is_full:
 	spin_unlock(&sk->receive_queue.lock);
 
 	sk->data_ready(sk, 0);
+	if (copy_skb)
+		kfree_skb(copy_skb);
 	goto drop_n_restore;
 }
 
@@ -1053,7 +1054,8 @@ static int packet_recvmsg(struct socket *sock, struct msghdr *msg, int len,
 	err = memcpy_toiovec(msg->msg_iov, skb->data, copied);
 	if (err)
 		goto out_free;
-	sk->stamp=skb->stamp;
+
+	sock_recv_timestamp(msg, sk, skb);
 
 	if (msg->msg_name)
 		memcpy(msg->msg_name, skb->cb, msg->msg_namelen);
@@ -1137,7 +1139,7 @@ static void packet_dev_mc(struct net_device *dev, struct packet_mclist *i, int w
 	case PACKET_MR_ALLMULTI:
 		dev_set_allmulti(dev, what);
 		break;
-	default:
+	default:;
 	}
 }
 
@@ -1217,7 +1219,7 @@ static int packet_mc_drop(struct sock *sk, struct packet_mreq *mreq)
 					packet_dev_mc(dev, ml, -1);
 					dev_put(dev);
 				}
-				kfree_s(ml, sizeof(*ml));
+				kfree(ml);
 			}
 			rtnl_unlock();
 			return 0;
@@ -1242,7 +1244,7 @@ static void packet_flush_mclist(struct sock *sk)
 			packet_dev_mc(dev, ml, -1);
 			dev_put(dev);
 		}
-		kfree_s(ml, sizeof(*ml));
+		kfree(ml);
 	}
 	rtnl_unlock();
 }
@@ -1284,6 +1286,18 @@ packet_setsockopt(struct socket *sock, int level, int optname, char *optval, int
 		if (copy_from_user(&req,optval,sizeof(req)))
 			return -EFAULT;
 		return packet_set_ring(sk, &req, 0);
+	}
+	case PACKET_COPY_THRESH:
+	{
+		int val;
+
+		if (optlen!=sizeof(val))
+			return -EINVAL;
+		if (copy_from_user(&val,optval,sizeof(val)))
+			return -EFAULT;
+
+		sk->protinfo.af_packet->copy_thresh = val;
+		return 0;
 	}
 #endif
 	default:
@@ -1392,6 +1406,23 @@ static int packet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg
 
 	switch(cmd) 
 	{
+		case SIOCOUTQ:
+		{
+			int amount = atomic_read(&sk->wmem_alloc);
+			return put_user(amount, (int *)arg);
+		}
+		case SIOCINQ:
+		{
+			struct sk_buff *skb;
+			int amount = 0;
+
+			spin_lock_bh(&sk->receive_queue.lock);
+			skb = skb_peek(&sk->receive_queue);
+			if (skb)
+				amount = skb->len;
+			spin_unlock_bh(&sk->receive_queue.lock);
+			return put_user(amount, (int *)arg);
+		}
 		case FIOSETOWN:
 		case SIOCSPGRP:
 			err = get_user(pid, (int *) arg);
@@ -1439,6 +1470,7 @@ static int packet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg
 		case SIOCGIFBR:
 		case SIOCSIFBR:
 #if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+#ifdef CONFIG_INET
 #ifdef CONFIG_KMOD
 			if (br_ioctl_hook == NULL)
 				request_module("bridge");
@@ -1446,6 +1478,15 @@ static int packet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg
 			if (br_ioctl_hook != NULL)
 				return br_ioctl_hook(arg);
 #endif
+#endif				
+
+		case SIOCGIFDIVERT:
+		case SIOCSIFDIVERT:
+#ifdef CONFIG_NET_DIVERT
+			return(divert_ioctl(cmd, (struct divert_cf *) arg));
+#else
+			return -ENOPKG;
+#endif /* CONFIG_NET_DIVERT */
 
 			return -ENOPKG;
 			
@@ -1544,11 +1585,11 @@ static void free_pg_vec(unsigned long *pg_vec, unsigned order, unsigned len)
 
 	for (i=0; i<len; i++) {
 		if (pg_vec[i]) {
-			unsigned long map, mapend;
+			struct page *page, *pend;
 
-			mapend = MAP_NR(pg_vec[i] + (PAGE_SIZE << order) - 1);
-			for (map = MAP_NR(pg_vec[i]); map <= mapend; map++)
-				clear_bit(PG_reserved, &mem_map[map].flags);
+			pend = virt_to_page(pg_vec[i] + (PAGE_SIZE << order) - 1);
+			for (page = virt_to_page(pg_vec[i]); page <= pend; page++)
+				ClearPageReserved(page);
 			free_pages(pg_vec[i], order);
 		}
 	}
@@ -1596,14 +1637,14 @@ static int packet_set_ring(struct sock *sk, struct tpacket_req *req, int closing
 		memset(pg_vec, 0, req->tp_block_nr*sizeof(unsigned long*));
 
 		for (i=0; i<req->tp_block_nr; i++) {
-			unsigned long map, mapend;
+			struct page *page, *pend;
 			pg_vec[i] = __get_free_pages(GFP_KERNEL, order);
 			if (!pg_vec[i])
 				goto out_free_pgvec;
 
-			mapend = MAP_NR(pg_vec[i] + (PAGE_SIZE << order) - 1);
-			for (map = MAP_NR(pg_vec[i]); map <= mapend; map++)
-				set_bit(PG_reserved, &mem_map[map].flags);
+			pend = virt_to_page(pg_vec[i] + (PAGE_SIZE << order) - 1);
+			for (page = virt_to_page(pg_vec[i]); page <= pend; page++)
+				SetPageReserved(page);
 		}
 		/* Page vector is allocated */
 
@@ -1721,46 +1762,44 @@ out:
 
 #ifdef CONFIG_SOCK_PACKET
 struct proto_ops packet_ops_spkt = {
-	PF_PACKET,
+	family:		PF_PACKET,
 
-	packet_release,
-	packet_bind_spkt,
-	sock_no_connect,
-	sock_no_socketpair,
-	sock_no_accept,
-	packet_getname_spkt,
-	datagram_poll,
-	packet_ioctl,
-	sock_no_listen,
-	sock_no_shutdown,
-	sock_no_setsockopt,
-	sock_no_getsockopt,
-	sock_no_fcntl,
-	packet_sendmsg_spkt,
-	packet_recvmsg,
-	sock_no_mmap
+	release:	packet_release,
+	bind:		packet_bind_spkt,
+	connect:	sock_no_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		sock_no_accept,
+	getname:	packet_getname_spkt,
+	poll:		datagram_poll,
+	ioctl:		packet_ioctl,
+	listen:		sock_no_listen,
+	shutdown:	sock_no_shutdown,
+	setsockopt:	sock_no_setsockopt,
+	getsockopt:	sock_no_getsockopt,
+	sendmsg:	packet_sendmsg_spkt,
+	recvmsg:	packet_recvmsg,
+	mmap:		sock_no_mmap,
 };
 #endif
 
 struct proto_ops packet_ops = {
-	PF_PACKET,
+	family:		PF_PACKET,
 
-	packet_release,
-	packet_bind,
-	sock_no_connect,
-	sock_no_socketpair,
-	sock_no_accept,
-	packet_getname, 
-	packet_poll,
-	packet_ioctl,
-	sock_no_listen,
-	sock_no_shutdown,
-	packet_setsockopt,
-	packet_getsockopt,
-	sock_no_fcntl,
-	packet_sendmsg,
-	packet_recvmsg,
-	packet_mmap,
+	release:	packet_release,
+	bind:		packet_bind,
+	connect:	sock_no_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		sock_no_accept,
+	getname:	packet_getname, 
+	poll:		packet_poll,
+	ioctl:		packet_ioctl,
+	listen:		sock_no_listen,
+	shutdown:	sock_no_shutdown,
+	setsockopt:	packet_setsockopt,
+	getsockopt:	packet_getsockopt,
+	sendmsg:	packet_sendmsg,
+	recvmsg:	packet_recvmsg,
+	mmap:		packet_mmap,
 };
 
 static struct net_proto_family packet_family_ops = {
@@ -1796,8 +1835,8 @@ static int packet_read_proc(char *buffer, char **start, off_t offset,
 			     s->protinfo.af_packet->ifindex,
 			     s->protinfo.af_packet->running,
 			     atomic_read(&s->rmem_alloc),
-			     s->socket->inode->i_uid,
-			     s->socket->inode->i_ino
+			     sock_i_uid(s),
+			     sock_i_ino(s)
 			     );
 
 		buffer[len++]='\n';
@@ -1825,8 +1864,8 @@ done:
 #endif
 
 
-#ifdef MODULE
-void cleanup_module(void)
+
+static void __exit packet_exit(void)
 {
 #ifdef CONFIG_PROC_FS
 	remove_proc_entry("net/packet", 0);
@@ -1837,17 +1876,16 @@ void cleanup_module(void)
 }
 
 
-int init_module(void)
-#else
-void __init packet_proto_init(struct net_proto *pro)
-#endif
+static int __init packet_init(void)
 {
 	sock_register(&packet_family_ops);
 	register_netdevice_notifier(&packet_netdev_notifier);
 #ifdef CONFIG_PROC_FS
 	create_proc_read_entry("net/packet", 0, 0, packet_read_proc, NULL);
 #endif
-#ifdef MODULE
 	return 0;
-#endif
 }
+
+
+module_init(packet_init);
+module_exit(packet_exit);

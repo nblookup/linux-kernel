@@ -4,6 +4,7 @@
 
 #include <linux/wait.h>
 #include <linux/tqueue.h>
+#include <asm/semaphore.h>
 
 #include "ieee1394_types.h"
 #include "csr.h"
@@ -22,9 +23,8 @@ struct hpsb_host {
         /* A bitmask where a set bit means that this tlabel is in use.
          * FIXME - should be handled per node instead of per bus. */
         u32 tlabel_pool[2];
-        int tlabel_count;
+        struct semaphore tlabel_count;
         spinlock_t tlabel_lock;
-        wait_queue_head_t tlabel_wait;
 
         int reset_retries;
         quadlet_t *topology_map;
@@ -150,6 +150,16 @@ struct hpsb_host_template {
          * command, though that should never happen.
          */
         int (*devctl) (struct hpsb_host *host, enum devctl_cmd command, int arg);
+
+        /* This function is mainly to redirect local CSR reads/locks to the iso
+         * management registers (bus manager id, bandwidth available, channels
+         * available) to the hardware registers in OHCI.  reg is 0,1,2,3 for bus
+         * mgr, bwdth avail, ch avail hi, ch avail lo respectively (the same ids
+         * as OHCI uses).  data and compare are the new data and expected data
+         * respectively, return value is the old value.
+         */
+        quadlet_t (*hw_csr_reg) (struct hpsb_host *host, int reg,
+                                 quadlet_t data, quadlet_t compare);
 };
 
 

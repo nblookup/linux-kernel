@@ -28,8 +28,6 @@
 #include <video/fbcon-cfb4.h>
 #include <video/fbcon-cfb8.h>
 
-#define arraysize(x)    (sizeof(x)/sizeof(*(x)))
-
 static struct display disp;
 static struct fb_info fb_info;
 
@@ -107,7 +105,7 @@ static void hpfb_encode_var(struct fb_var_screeninfo *var,
 	var->lower_margin=0;
 	var->hsync_len=0;
 	var->vsync_len=0;
-	for(i=0;i<arraysize(var->reserved);i++)
+	for(i=0;i<ARRAY_SIZE(var->reserved);i++)
 		var->reserved[i]=0;
 }
 
@@ -225,13 +223,6 @@ static void topcat_blit(int x0, int y0, int x1, int y1, int w, int h)
 	writeb(fb_bitmask, fb_regs + WMOVE);
 }
 
-static int hpfb_ioctl(struct inode *inode, struct file *file, 
-		       unsigned int cmd, unsigned long arg, int con,
-		       struct fb_info *info)
-{
-	return -EINVAL;
-}
-
 static int hpfb_switch(int con, struct fb_info *info)
 {
 	do_fb_set_var(&fb_display[con].var,1);
@@ -244,15 +235,6 @@ static int hpfb_switch(int con, struct fb_info *info)
 static void hpfb_blank(int blank, struct fb_info *info)
 {
 	/* Not supported */
-}
-
-static int hpfb_open(struct fb_info *info, int user)
-{
-	/*
-	 * Nothing, only a usage count for the moment
-	 */
-	MOD_INC_USE_COUNT;
-	return(0);
 }
 
 static void hpfb_set_disp(int con)
@@ -281,22 +263,13 @@ static void hpfb_set_disp(int con)
 	display->dispsw = &fbcon_cfb8;
 }
 
-static int hpfb_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return(0);
-}
-
 static struct fb_ops hpfb_ops = {
-	hpfb_open,
-	hpfb_release,
-	hpfb_get_fix,
-	hpfb_get_var,
-	hpfb_set_var,
-	hpfb_get_cmap,
-	hpfb_set_cmap,
-	NULL,
-	hpfb_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	hpfb_get_fix,
+	fb_get_var:	hpfb_get_var,
+	fb_set_var:	hpfb_set_var,
+	fb_get_cmap:	hpfb_get_cmap,
+	fb_set_cmap:	hpfb_set_cmap,
 };
 
 #define TOPCAT_FBOMSB	0x5d
@@ -422,10 +395,5 @@ int __init hpfb_init(void)
 		}
 	}
 
-	return 0;
-}
-
-int __init hpfb_setup(char *options)
-{
 	return 0;
 }

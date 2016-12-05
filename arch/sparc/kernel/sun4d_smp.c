@@ -8,7 +8,6 @@
 
 #include <asm/head.h>
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/threads.h>
@@ -29,7 +28,6 @@
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/oplib.h>
-#include <asm/atops.h>
 #include <asm/hardirq.h>
 #include <asm/softirq.h>
 #include <asm/sbus.h>
@@ -299,20 +297,20 @@ void __init smp4d_boot_cpus(void)
 	}
 
 	/* Free unneeded trap tables */
-	ClearPageReserved(mem_map + MAP_NR(trapbase_cpu1));
-	set_page_count(mem_map + MAP_NR(trapbase_cpu1), 1);
+	ClearPageReserved(virt_to_page(trapbase_cpu1));
+	set_page_count(virt_to_page(trapbase_cpu1), 1);
 	free_page((unsigned long)trapbase_cpu1);
 	totalram_pages++;
 	num_physpages++;
 
-	ClearPageReserved(mem_map + MAP_NR(trapbase_cpu2));
-	set_page_count(mem_map + MAP_NR(trapbase_cpu2), 1);
+	ClearPageReserved(virt_to_page(trapbase_cpu2));
+	set_page_count(virt_to_page(trapbase_cpu2), 1);
 	free_page((unsigned long)trapbase_cpu2);
 	totalram_pages++;
 	num_physpages++;
 
-	ClearPageReserved(mem_map + MAP_NR(trapbase_cpu3));
-	set_page_count(mem_map + MAP_NR(trapbase_cpu3), 1);
+	ClearPageReserved(virt_to_page(trapbase_cpu3));
+	set_page_count(virt_to_page(trapbase_cpu3), 1);
 	free_page((unsigned long)trapbase_cpu3);
 	totalram_pages++;
 	num_physpages++;
@@ -377,9 +375,6 @@ void smp4d_cross_call(smpfunc_t func, unsigned long arg1, unsigned long arg2,
 			}
 		}
 
-		/* First, run local copy. */
-		func(arg1, arg2, arg3, arg4, arg5);
-
 		{
 			register int i;
 
@@ -397,8 +392,7 @@ void smp4d_cross_call(smpfunc_t func, unsigned long arg1, unsigned long arg2,
 		}
 
 		spin_unlock_irqrestore(&cross_call_lock, flags);
-	} else
-		func(arg1, arg2, arg3, arg4, arg5); /* Just need to run local copy. */
+	}
 }
 
 /* Running cross calls. */
@@ -443,38 +437,10 @@ void smp4d_message_pass(int target, int msg, unsigned long data, int wait)
 	panic("Bogon SMP message pass.");
 }
 
-/* Protects counters touched during level14 ticker */
-static spinlock_t ticker_lock = SPIN_LOCK_UNLOCKED;
-
-#ifdef CONFIG_PROFILE
-
-/* 32-bit Sparc specific profiling function. */
-static inline void sparc_do_profile(unsigned long pc)
-{
-	if(prof_buffer && current->pid) {
-		extern int _stext;
-
-		pc -= (unsigned long) &_stext;
-		pc >>= prof_shift;
-
-		spin_lock(&ticker_lock);
-		if(pc < prof_len)
-			prof_buffer[pc]++;
-		else
-			prof_buffer[prof_len - 1]++;
-		spin_unlock(&ticker_lock);
-	}
-}
-
-#endif
-
 extern unsigned int prof_multiplier[NR_CPUS];
 extern unsigned int prof_counter[NR_CPUS];
 
-extern void update_one_process(struct task_struct *p, unsigned long ticks,
-			       unsigned long user, unsigned long system,
-			       int cpu);
-			       
+extern void sparc_do_profile(unsigned long pc, unsigned long o7);
 
 void smp4d_percpu_timer_interrupt(struct pt_regs *regs)
 {
@@ -493,35 +459,16 @@ void smp4d_percpu_timer_interrupt(struct pt_regs *regs)
 		show_leds(cpu);
 	}
 
-#ifdef CONFIG_PROFILE
 	if(!user_mode(regs))
-		sparc_do_profile(regs->pc);
-#endif
+		sparc_do_profile(regs->pc, regs->u_regs[UREG_RETPC]);
+
 	if(!--prof_counter[cpu]) {
 		int user = user_mode(regs);
-		if(current->pid) {
-			update_one_process(current, 1, user, !user, cpu);
 
-			if(--current->counter <= 0) {
-				current->counter = 0;
-				current->need_resched = 1;
-			}
+		irq_enter(cpu, 0);
+		update_process_times(user);
+		irq_exit(cpu, 0);
 
-			spin_lock(&ticker_lock);
-			if(user) {
-				if(current->priority < DEF_PRIORITY) {
-					kstat.cpu_nice++;
-					kstat.per_cpu_nice[cpu]++;
-				} else {
-					kstat.cpu_user++;
-					kstat.per_cpu_user[cpu]++;
-				}
-			} else {
-				kstat.cpu_system++;
-				kstat.per_cpu_system[cpu]++;
-			}
-			spin_unlock(&ticker_lock);
-		}
 		prof_counter[cpu] = prof_multiplier[cpu];
 	}
 }

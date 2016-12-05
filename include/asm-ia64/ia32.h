@@ -5,6 +5,8 @@
 
 #ifdef CONFIG_IA32_SUPPORT
 
+#include <linux/param.h>
+
 /*
  * 32 bit structures for IA32 support.
  */
@@ -32,6 +34,8 @@ typedef __kernel_fsid_t	       __kernel_fsid_t32;
 
 #define IA32_PAGE_SHIFT		12	/* 4KB pages */
 #define IA32_PAGE_SIZE		(1ULL << IA32_PAGE_SHIFT)
+#define IA32_CLOCKS_PER_SEC	100	/* Cast in stone for IA32 Linux */
+#define IA32_TICK(tick)		((unsigned long long)(tick) * IA32_CLOCKS_PER_SEC / CLOCKS_PER_SEC)
 
 /* fcntl.h */
 struct flock32 {
@@ -40,7 +44,6 @@ struct flock32 {
        __kernel_off_t32 l_start;
        __kernel_off_t32 l_len;
        __kernel_pid_t32 l_pid;
-       short __unused;
 };
 
 
@@ -90,7 +93,7 @@ struct sigcontext_ia32 {
        unsigned int eflags;
        unsigned int esp_at_signal;
        unsigned short ss, __ssh;
-       struct _fpstate_ia32 * fpstate;
+       unsigned int fpstate;		/* really (struct _fpstate_ia32 *) */
        unsigned int oldmask;
        unsigned int cr2;
 };
@@ -105,17 +108,33 @@ typedef struct {
 } sigset32_t;
 
 struct sigaction32 {
-       unsigned int  sa_handler;       /* Really a pointer, but need to deal 
-					  with 32 bits */
+       unsigned int  sa_handler;	/* Really a pointer, but need to deal 
+					     with 32 bits */
        unsigned int sa_flags;
-       unsigned int sa_restorer;       /* Another 32 bit pointer */
-       sigset32_t sa_mask;     /* A 32 bit mask */
+       unsigned int sa_restorer;	/* Another 32 bit pointer */
+       sigset32_t sa_mask;		/* A 32 bit mask */
 };
 
+typedef unsigned int old_sigset32_t;	/* at least 32 bits */
+
+struct old_sigaction32 {
+       unsigned int  sa_handler;	/* Really a pointer, but need to deal 
+					     with 32 bits */
+       old_sigset32_t sa_mask;		/* A 32 bit mask */
+       unsigned int sa_flags;
+       unsigned int sa_restorer;	/* Another 32 bit pointer */
+};
+
+typedef struct sigaltstack_ia32 {
+	unsigned int	ss_sp;
+	int		ss_flags;
+	unsigned int	ss_size;
+} stack_ia32_t;
+
 struct ucontext_ia32 {
-	unsigned long	  uc_flags;
-	struct ucontext_ia32  *uc_link;
-	stack_t		  uc_stack;
+	unsigned int	  uc_flags;
+	unsigned int 	  uc_link;
+	stack_ia32_t	  uc_stack;
 	struct sigcontext_ia32 uc_mcontext;
 	sigset_t	  uc_sigmask;	/* mask last for extensibility */
 };
@@ -156,6 +175,61 @@ struct statfs32 {
        int f_spare[6];
 };
 
+typedef union sigval32 {
+	int sival_int;
+	unsigned int sival_ptr;
+} sigval_t32;
+
+typedef struct siginfo32 {
+	int si_signo;
+	int si_errno;
+	int si_code;
+
+	union {
+		int _pad[((128/sizeof(int)) - 3)];
+
+		/* kill() */
+		struct {
+			unsigned int _pid;	/* sender's pid */
+			unsigned int _uid;	/* sender's uid */
+		} _kill;
+
+		/* POSIX.1b timers */
+		struct {
+			unsigned int _timer1;
+			unsigned int _timer2;
+		} _timer;
+
+		/* POSIX.1b signals */
+		struct {
+			unsigned int _pid;	/* sender's pid */
+			unsigned int _uid;	/* sender's uid */
+			sigval_t32 _sigval;
+		} _rt;
+
+		/* SIGCHLD */
+		struct {
+			unsigned int _pid;	/* which child */
+			unsigned int _uid;	/* sender's uid */
+			int _status;		/* exit code */
+			__kernel_clock_t32 _utime;
+			__kernel_clock_t32 _stime;
+		} _sigchld;
+
+		/* SIGILL, SIGFPE, SIGSEGV, SIGBUS */
+		struct {
+			unsigned int _addr;	/* faulting insn/memory ref. */
+		} _sigfault;
+
+		/* SIGPOLL */
+		struct {
+			int _band;	/* POLL_IN, POLL_OUT, POLL_MSG */
+			int _fd;
+		} _sigpoll;
+	} _sifields;
+} siginfo_t32;
+
+
 /*
  * IA-32 ELF specific definitions for IA-64.
  */
@@ -168,7 +242,7 @@ struct statfs32 {
 /*
  * This is used to ensure we don't load something for the wrong architecture.
  */
-#define elf_check_arch(x) ((x) == EM_386)
+#define elf_check_arch(x) ((x)->e_machine == EM_386)
 
 /*
  * These are used to set parameters in the core dumps.
@@ -180,7 +254,7 @@ struct statfs32 {
 #define IA32_PAGE_OFFSET	0xc0000000
 
 #define USE_ELF_CORE_DUMP
-#define ELF_EXEC_PAGESIZE	PAGE_SIZE
+#define ELF_EXEC_PAGESIZE	IA32_PAGE_SIZE
 
 /*
  * This is the location that an ET_DYN program is loaded if exec'ed.
@@ -281,6 +355,8 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 		(granularity << IA32_SEG_G)		       |       \
 		(((base >> 24) & 0xFF) << IA32_SEG_HIGH_BASE)) 
 
+#define IA32_IOBASE    0x2000000000000000 /* Virtual addres for I/O space */
+
 #define IA32_CR0       0x80000001      /* Enable PG and PE bits */
 #define IA32_CR4       0	       /* No architectural extensions */
 
@@ -288,8 +364,13 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
  *  IA32 floating point control registers starting values
  */
 
-#define IA32_FSR_DEFAULT	0x555500000	/* set all tag bits */
-#define IA32_FCR_DEFAULT	0x33f		/* single precision, all masks */
+#define IA32_FSR_DEFAULT	0x55550000		/* set all tag bits */
+#define IA32_FCR_DEFAULT	0x17800000037fULL	/* extended precision, all masks */
+
+#define IA32_PTRACE_GETREGS	12
+#define IA32_PTRACE_SETREGS	13
+#define IA32_PTRACE_GETFPREGS	14
+#define IA32_PTRACE_SETFPREGS	15
 
 #define ia32_start_thread(regs,new_ip,new_sp) do {				\
 	set_fs(USER_DS);							\
@@ -303,10 +384,11 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 } while (0)
 
 extern void ia32_gdt_init (void);
-extern long ia32_setup_frame1 (int sig, struct k_sigaction *ka, siginfo_t *info,
+extern int ia32_setup_frame1 (int sig, struct k_sigaction *ka, siginfo_t *info,
 			       sigset_t *set, struct pt_regs *regs);
 extern void ia32_init_addr_space (struct pt_regs *regs);
 extern int ia32_setup_arg_pages (struct linux_binprm *bprm);
+extern int ia32_exception (struct pt_regs *regs, unsigned long isr);
 
 #endif /* !CONFIG_IA32_SUPPORT */
  

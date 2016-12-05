@@ -86,8 +86,6 @@ static char re_schedule = 1;
 static unsigned long tx_count = 0;
 #endif
 
-static int ISILoad_open(struct inode *inode, struct file *filp);
-static int ISILoad_release(struct inode *inode, struct file *filp);
 static int ISILoad_ioctl(struct inode *inode, struct file *filp, unsigned  int cmd, unsigned long arg);
 
 static void isicom_tx(unsigned long _data);
@@ -98,7 +96,7 @@ static DECLARE_MUTEX(tmp_buf_sem);
 
 /*   baud index mappings from linux defns to isi */
 
-static char linuxb_to_isib[] = {
+static signed char linuxb_to_isib[] = {
 	-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13, 15, 16, 17,     
 	18, 19
 };
@@ -109,9 +107,8 @@ static char linuxb_to_isib[] = {
  */
 
 static struct file_operations ISILoad_fops = {
+	owner:		THIS_MODULE,
 	ioctl:		ISILoad_ioctl,
-	open:		ISILoad_open,
-	release:	ISILoad_release,
 };
 
 struct miscdevice isiloader_device = {
@@ -127,24 +124,6 @@ extern inline int WaitTillCardIsFree(unsigned short base)
 		return 0;
 	else
 		return 1;
-}
-
-static int ISILoad_open(struct inode *inode, struct file *filp)
-{
-#ifdef ISICOM_DEBUG	
-	printk(KERN_DEBUG "ISILoad:Firmware loader Opened!!!\n");
-#endif	
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-static int ISILoad_release(struct inode *inode, struct file *filp)
-{
-#ifdef ISICOM_DEBUG
-	printk(KERN_DEBUG "ISILoad:Firmware loader Close(Release)d\n",);
-#endif	
-	MOD_DEC_USE_COUNT;
-	return 0;
 }
 
 static int ISILoad_ioctl(struct inode *inode, struct file *filp,
@@ -603,9 +582,11 @@ static void isicom_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 #endif							
 							port->status &= ~ISI_DCD;
 							if (!((port->flags & ASYNC_CALLOUT_ACTIVE) &&
-								(port->flags & ASYNC_CALLOUT_NOHUP)))
-								queue_task(&port->hangup_tq,
-									&tq_scheduler);
+								(port->flags & ASYNC_CALLOUT_NOHUP))) {
+								MOD_INC_USE_COUNT;
+								if (schedule_task(&port->hangup_tq) == 0)
+									MOD_DEC_USE_COUNT;
+							}
 						}
 					}
 					else {
@@ -1651,10 +1632,9 @@ static void do_isicom_hangup(void * data)
 	struct tty_struct * tty;
 	
 	tty = port->tty;
-	if (!tty)
-		return;
-		
-	tty_hangup(tty);	
+	if (tty)
+		tty_hangup(tty);	/* FIXME: module removal race here - AKPM */
+	MOD_DEC_USE_COUNT;
 }
 
 static void isicom_hangup(struct tty_struct * tty)
@@ -1995,12 +1975,14 @@ int init_module(void)
 				if (card >= BOARD_COUNT)
 					break;
 					
+				if (pci_enable_device(dev))
+					break;
+
 				/* found a PCI ISI card! */
-				ioaddr = dev->resource[3].start; /* i.e at offset 0x1c in the
-								* PCI configuration register
-								* space.
-								*/
-				ioaddr &= PCI_BASE_ADDRESS_IO_MASK;
+				ioaddr = pci_resource_start (dev, 3); /* i.e at offset 0x1c in the
+								       * PCI configuration register
+								       * space.
+								       */
 				pciirq = dev->irq;
 				printk(KERN_INFO "ISI PCI Card(Device ID 0x%x)\n", device_id[idx]);
 				/*

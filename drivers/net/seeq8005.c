@@ -104,12 +104,7 @@ static inline void wait_for_buffer(struct net_device *dev);
    If dev->base_addr == 2, allocate space for the device and return success
    (detachable devices only).
    */
-#ifdef HAVE_DEVLIST
-/* Support for an alternate probe manager, which will eliminate the
-   boilerplate below. */
-struct netdev_entry seeq8005_drv =
-{"seeq8005", seeq8005_probe1, SEEQ8005_IO_EXTENT, seeq8005_portlist};
-#else
+
 int __init 
 seeq8005_probe(struct net_device *dev)
 {
@@ -119,19 +114,14 @@ seeq8005_probe(struct net_device *dev)
 	if (base_addr > 0x1ff)		/* Check a single specified location. */
 		return seeq8005_probe1(dev, base_addr);
 	else if (base_addr != 0)	/* Don't probe at all. */
-		return ENXIO;
+		return -ENXIO;
 
-	for (i = 0; seeq8005_portlist[i]; i++) {
-		int ioaddr = seeq8005_portlist[i];
-		if (check_region(ioaddr, SEEQ8005_IO_EXTENT))
-			continue;
-		if (seeq8005_probe1(dev, ioaddr) == 0)
+	for (i = 0; seeq8005_portlist[i]; i++)
+		if (seeq8005_probe1(dev, seeq8005_portlist[i]) == 0)
 			return 0;
-	}
 
-	return ENODEV;
+	return -ENODEV;
 }
-#endif
 
 /* This is the real probe routine.  Linux has a history of friendly device
    probes on the ISA bus.  A good device probes avoids doing writes, and
@@ -139,7 +129,7 @@ seeq8005_probe(struct net_device *dev)
 
 static int __init seeq8005_probe1(struct net_device *dev, int ioaddr)
 {
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	int i,j;
 	unsigned char SA_prom[32];
 	int old_cfg1;
@@ -147,33 +137,42 @@ static int __init seeq8005_probe1(struct net_device *dev, int ioaddr)
 	int old_stat;
 	int old_dmaar;
 	int old_rear;
+	int retval;
+
+	if (!request_region(ioaddr, SEEQ8005_IO_EXTENT, "seeq8005"))
+		return -ENODEV;
 
 	if (net_debug>1)
 		printk("seeq8005: probing at 0x%x\n",ioaddr);
 
 	old_stat = inw(SEEQ_STATUS);					/* read status register */
-	if (old_stat == 0xffff)
-		return ENODEV;						/* assume that 0xffff == no device */
+	if (old_stat == 0xffff) {
+		retval = -ENODEV;
+		goto out;						/* assume that 0xffff == no device */
+	}
 	if ( (old_stat & 0x1800) != 0x1800 ) {				/* assume that unused bits are 1, as my manual says */
 		if (net_debug>1) {
 			printk("seeq8005: reserved stat bits != 0x1800\n");
 			printk("          == 0x%04x\n",old_stat);
 		}
-	 	return ENODEV;
+	 	retval = -ENODEV;
+		goto out;
 	}
 
 	old_rear = inw(SEEQ_REA);
 	if (old_rear == 0xffff) {
 		outw(0,SEEQ_REA);
 		if (inw(SEEQ_REA) == 0xffff) {				/* assume that 0xffff == no device */
-			return ENODEV;
+			retval = -ENODEV;
+			goto out;
 		}
 	} else if ((old_rear & 0xff00) != 0xff00) {			/* assume that unused bits are 1 */
 		if (net_debug>1) {
 			printk("seeq8005: unused rear bits != 0xff00\n");
 			printk("          == 0x%04x\n",old_rear);
 		}
-		return ENODEV;
+		retval = -ENODEV;
+		goto out;
 	}
 	
 	old_cfg2 = inw(SEEQ_CFG2);					/* read CFG2 register */
@@ -191,8 +190,8 @@ static int __init seeq8005_probe1(struct net_device *dev, int ioaddr)
 	outw( SEEQCMD_FIFO_WRITE | SEEQCMD_SET_ALL_OFF, SEEQ_CMD);	/* setup for reading PROM */
 	outw( 0, SEEQ_DMAAR);						/* set starting PROM address */
 	outw( SEEQCFG1_BUFFER_PROM, SEEQ_CFG1);				/* set buffer to look at PROM */
-	
-	
+
+
 	j=0;
 	for(i=0; i <32; i++) {
 		j+= SA_prom[i] = inw(SEEQ_BUFFER) & 0xff;
@@ -207,7 +206,8 @@ static int __init seeq8005_probe1(struct net_device *dev, int ioaddr)
 		outw( old_stat, SEEQ_STATUS);
 		outw( old_dmaar, SEEQ_DMAAR);
 		outw( old_cfg1, SEEQ_CFG1);
-		return ENODEV;
+		retval = -ENODEV;
+		goto out;
 	}
 #endif
 
@@ -270,10 +270,6 @@ static int __init seeq8005_probe1(struct net_device *dev, int ioaddr)
 	}
 #endif
 
-	/* Allocate a new 'dev' if needed. */
-	if (dev == NULL)
-		dev = init_etherdev(0, sizeof(struct net_local));
-
 	if (net_debug  &&  version_printed++ == 0)
 		printk(version);
 
@@ -289,11 +285,11 @@ static int __init seeq8005_probe1(struct net_device *dev, int ioaddr)
 	if (dev->irq == 0xff)
 		;			/* Do nothing: a user-level program will set it. */
 	else if (dev->irq < 2) {	/* "Auto-IRQ" */
-		autoirq_setup(0);
+		unsigned long cookie = probe_irq_on();
 		
 		outw( SEEQCMD_RX_INT_EN | SEEQCMD_SET_RX_ON | SEEQCMD_SET_RX_OFF, SEEQ_CMD );
 
-		dev->irq = autoirq_report(0);
+		dev->irq = probe_irq_off(cookie);
 		
 		if (net_debug >= 2)
 			printk(" autoirq is %d\n", dev->irq);
@@ -309,13 +305,11 @@ static int __init seeq8005_probe1(struct net_device *dev, int ioaddr)
 		 if (irqval) {
 			 printk ("%s: unable to get IRQ %d (irqval=%d).\n", dev->name,
 					 dev->irq, irqval);
-			 return EAGAIN;
+			 retval = -EAGAIN;
+			 goto out;
 		 }
 	}
 #endif
-
-	/* Grab the region so we can find another board if autoIRQ fails. */
-	request_region(ioaddr, SEEQ8005_IO_EXTENT,"seeq8005");
 
 	/* Initialize the device structure. */
 	dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
@@ -337,6 +331,9 @@ static int __init seeq8005_probe1(struct net_device *dev, int ioaddr)
 	dev->flags &= ~IFF_MULTICAST;
 
 	return 0;
+out:
+	release_region(ioaddr, SEEQ8005_IO_EXTENT);
+	return retval;
 }
 
 
@@ -356,7 +353,7 @@ static int seeq8005_open(struct net_device *dev)
 		 if (irqval) {
 			 printk ("%s: unable to get IRQ %d (irqval=%d).\n", dev->name,
 					 dev->irq, irqval);
-			 return EAGAIN;
+			 return -EAGAIN;
 		 }
 	}
 
@@ -712,18 +709,9 @@ inline void wait_for_buffer(struct net_device * dev)
 	
 #ifdef MODULE
 
-static char devicename[9] = { 0, };
-
-static struct net_device dev_seeq =
-{
-	devicename, /* device name is inserted by linux/drivers/net/net_init.c */
-	0, 0, 0, 0,
-	0x300, 5,
-	0, 0, 0, NULL, seeq8005_probe
-};
-
-static int io=0x320;
-static int irq=10;
+static struct net_device dev_seeq = { init: seeq8005_probe };
+static int io = 0x320;
+static int irq = 10;
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
 

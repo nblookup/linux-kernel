@@ -1,4 +1,4 @@
-/* $Id: promcon.c,v 1.16 1999/08/10 15:56:22 davem Exp $
+/* $Id: promcon.c,v 1.17 2000/07/26 23:02:52 davem Exp $
  * Console driver utilizing PROM sun terminal emulation
  *
  * Copyright (C) 1998  Eddie C. Dost  (ecd@skynet.be)
@@ -566,7 +566,7 @@ static int promcon_dummy(void)
 
 #define DUMMY (void *) promcon_dummy
 
-struct consw prom_con = {
+const struct consw prom_con = {
 	con_startup:		promcon_startup,
 	con_init:		promcon_init,
 	con_deinit:		promcon_deinit,
@@ -581,14 +581,9 @@ struct consw prom_con = {
 	con_font_op:		promcon_font_op,
 	con_set_palette:	DUMMY,
 	con_scrolldelta:	DUMMY,
-	con_set_origin:		NULL,
-	con_save_screen:	NULL,
-#if PROMCON_COLOR
-	con_build_attr:		NULL,
-#else
+#if !(PROMCON_COLOR)
 	con_build_attr:		promcon_build_attr,
 #endif
-	con_invert_region:	NULL,
 };
 
 void __init prom_con_init(void)

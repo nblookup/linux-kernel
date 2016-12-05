@@ -12,7 +12,10 @@
  * Author:
  * L. Haag
  *
- * $Log: r3964.c,v $
+ * $Log: n_r3964.c,v $
+ * Revision 1.8  2000/03/23 14:14:54  dwmw2
+ * Fix race in sleeping in r3964_read()
+ *
  * Revision 1.7  1999/28/08 11:41:50  dwmw2
  * Port to 2.3 kernel
  *
@@ -38,7 +41,6 @@
  *
  *
  */
-#define R3964_VERSION "1.7"
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -107,8 +109,6 @@
 #else
 #define TRACE_Q(fmt, arg...) /**/
 #endif
-
-void cleanup_module(void);
 
 static void on_timer_1(void*);
 static void on_timer_2(void*);
@@ -194,11 +194,7 @@ static void dump_block(const unsigned char *block, unsigned int length)
  * Module support routines
  *************************************************************/
 
-#ifdef MODULE
-
-#define r3964_init init_module
-
-void cleanup_module(void)
+static void __exit r3964_exit(void)
 {
    int status;
    
@@ -217,14 +213,11 @@ void cleanup_module(void)
    
 }
 
-
-#endif /* MODULE */
-
 static int __init r3964_init(void)
 {
    int status;
    
-   printk ("r3964: Philips r3964 Driver V%s\n", R3964_VERSION);
+   printk ("r3964: Philips r3964 Driver $Revision: 1.8 $\n");
 
    /*
     * Register the tty line discipline
@@ -246,9 +239,9 @@ static int __init r3964_init(void)
    return status;
 }
 
-#ifndef MODULE
-__initcall (r3964_init);
-#endif
+module_init(r3964_init);
+module_exit(r3964_exit);
+
 
 /*************************************************************
  * Protocol implementation routines
@@ -1164,12 +1157,12 @@ static int r3964_open(struct tty_struct *tty)
     * Add 'on_timer' to timer task queue
     * (will be called from timer bh)
     */
-   pInfo->bh_1.next = NULL;
+   INIT_LIST_HEAD(&pInfo->bh_1.list);
    pInfo->bh_1.sync = 0;
    pInfo->bh_1.routine = &on_timer_1;
    pInfo->bh_1.data = pInfo;
    
-   pInfo->bh_2.next = NULL;
+   INIT_LIST_HEAD(&pInfo->bh_2.list);
    pInfo->bh_2.sync = 0;
    pInfo->bh_2.routine = &on_timer_2;
    pInfo->bh_2.data = pInfo;
@@ -1181,7 +1174,6 @@ static int r3964_open(struct tty_struct *tty)
 
 static void r3964_close(struct tty_struct *tty)
 {
-   struct tq_struct *tq, *prev;
    struct r3964_info *pInfo=(struct r3964_info*)tty->disc_data;
    struct r3964_client_info *pClient, *pNext;
    struct r3964_message *pMsg;
@@ -1194,19 +1186,12 @@ static void r3964_close(struct tty_struct *tty)
      * Make sure that our task queue isn't activated.  If it
      * is, take it out of the linked list.
      */
-    save_flags(flags);
-    cli();
-
-    for (tq=tq_timer, prev=0; tq; prev=tq, tq=tq->next) {
-         if ((tq == &pInfo->bh_1) || (tq==&pInfo->bh_2)) {
-             if (prev)
-                 prev->next = tq->next;
-             else
-                 tq_timer = tq->next;
-             break;
-         }
-    }
-    restore_flags(flags);
+    spin_lock_irqsave(&tqueue_lock, flags);
+    if (pInfo->bh_1.sync)
+    	list_del(&pInfo->bh_1.list);
+    if (pInfo->bh_2.sync)
+    	list_del(&pInfo->bh_2.list);
+    spin_unlock_irqrestore(&tqueue_lock, flags);
 
    /* Remove client-structs and message queues: */
     pClient=pInfo->firstClient;
@@ -1280,8 +1265,8 @@ static int r3964_read(struct tty_struct *tty, struct file *file,
          /* block until there is a message: */
          add_wait_queue(&pInfo->read_wait, &wait);
 repeat:
-         pMsg = remove_msg(pInfo, pClient);
          current->state = TASK_INTERRUPTIBLE;
+         pMsg = remove_msg(pInfo, pClient);
 	 if (!pMsg && !signal_pending(current))
 		 {
             schedule();
@@ -1427,6 +1412,7 @@ static void r3964_set_termios(struct tty_struct *tty, struct termios * old)
    TRACE_L("set_termios");
 }
 
+/* Called without the kernel lock held - fine */
 static unsigned int r3964_poll(struct tty_struct * tty, struct file * file,
 		      struct poll_table_struct *wait)
 {

@@ -1,11 +1,10 @@
-/* $Id: scall_64.S,v 1.7 2000/02/23 00:41:00 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995, 1996, 1997, 1998, 1999 by Ralf Baechle
- * Copyright (C) 1999 Silicon Graphics, Inc.
+ * Copyright (C) 1995, 1996, 1997, 1998, 1999, 2000 by Ralf Baechle
+ * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
  */
 #include <linux/config.h>
 #include <asm/asm.h>
@@ -17,13 +16,10 @@
 #include <asm/unistd.h>
 
 /* This duplicates the definition from <linux/sched.h> */
-#define PF_TRACESYS	0x00000020	/* tracing system calls */
+#define PT_TRACESYS	0x00000002	/* tracing system calls */
 
 /* This duplicates the definition from <asm/signal.h> */
 #define SIGILL		4		/* Illegal instruction (ANSI).  */
-
-/* Highest syscall handled here.  */
-#define MAX_SYSCALL_NO	__NR_Linux + __NR_Linux_syscalls
 
 #ifndef CONFIG_MIPS32_COMPAT
 #define handle_sys64 handle_sys
@@ -35,23 +31,24 @@ NESTED(handle_sys64, PT_SIZE, sp)
 #ifndef CONFIG_MIPS32_COMPAT
 	.set	noat
 	SAVE_SOME
+	STI
 	.set	at
 #endif
 	ld	t1, PT_EPC(sp)		# skip syscall on return
 
-	sltiu	t0, v0, MAX_SYSCALL_NO + 1 # check syscall number
+	subu	t0, v0, __NR_Linux	# check syscall number
+	sltiu	t0, t0,	__NR_Linux_syscalls + 1
 	daddiu	t1, 4			# skip to next instruction
 	beqz	t0, illegal_syscall
 	sd	t1, PT_EPC(sp)
 
-	dsll	t0, v0, 3
+	dsll	t0, v0, 3		# offset into table
 	ld	t2, (sys_call_table - (__NR_Linux * 8))(t0) # syscall routine
-	beqz	t2, illegal_syscall;
 
 	sd	a3, PT_R26(sp)		# save a3 for syscall restarting
 
-	ld	t0, TASK_FLAGS($28)	# syscall tracing enabled?
-	andi	t0, PF_TRACESYS
+	ld	t0, TASK_PTRACE($28)	# syscall tracing enabled?
+	andi	t0, PT_TRACESYS
 	bnez	t0, trace_a_syscall
 
 	jalr	t2			# Do The Real Thing (TM)
@@ -66,8 +63,8 @@ NESTED(handle_sys64, PT_SIZE, sp)
 1:	sd	v0, PT_R2(sp)		# result
 
 FEXPORT(ret_from_sys_call_64)
-	lw	t0, softirq_state
-	lw	t1, softirq_state+4	# unused delay slot
+	lw	t0, irq_stat		# softirq_active
+	lw	t1, irq_stat+4		# softirq_mask.  unused delay slot
 	and	t0, t1
 	bnez	t0, handle_softirq_64
 
@@ -163,7 +160,7 @@ sys_call_table:
 	PTR	sys_ni_syscall		/* ptrace */
 	PTR	sys_alarm
 	PTR	sys_fstat
-	PTR	sys_ni_syscall
+	PTR	sys_pause
 	PTR	sys_utime				/* 4030 */
 	PTR	sys_ni_syscall
 	PTR	sys_ni_syscall
@@ -193,7 +190,7 @@ sys_call_table:
 	PTR	sys_ni_syscall
 	PTR	sys_setpgid
 	PTR	sys_ni_syscall
-	PTR	sys_olduname
+	PTR	sys_ni_syscall
 	PTR	sys_umask				/* 4060 */
 	PTR	sys_chroot
 	PTR	sys_ustat
@@ -223,7 +220,7 @@ sys_call_table:
 	PTR	sys_uselib
 	PTR	sys_swapon
 	PTR	sys_reboot
-	PTR	old_readdir
+	PTR	sys_ni_syscall			/* old_readdir */
 	PTR	sys_mmap				/* 4090 */
 	PTR	sys_munmap
 	PTR	sys_truncate
@@ -243,7 +240,7 @@ sys_call_table:
 	PTR	sys_newstat
 	PTR	sys_newlstat
 	PTR	sys_newfstat
-	PTR	sys_uname
+	PTR	sys_ni_syscall
 	PTR	sys_ni_syscall		/* sys_ioperm  *//* 4110 */
 	PTR	sys_vhangup
 	PTR	sys_ni_syscall		/* was sys_idle	 */
@@ -345,3 +342,6 @@ sys_call_table:
 	PTR	sys_ni_syscall
 	PTR	sys_ni_syscall
 	PTR	sys_pivot_root				/* 4210 */
+	PTR	sys_mincore
+	PTR	sys_madvise
+	PTR	sys_getdents64

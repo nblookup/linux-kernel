@@ -1,11 +1,35 @@
 /*
- * $Id: b1.c,v 1.13 2000/01/25 14:33:38 calle Exp $
+ * $Id: b1.c,v 1.20 2000/11/23 20:45:14 kai Exp $
  * 
  * Common module for AVM B1 cards.
  * 
  * (c) Copyright 1999 by Carsten Paeth (calle@calle.in-berlin.de)
  * 
  * $Log: b1.c,v $
+ * Revision 1.20  2000/11/23 20:45:14  kai
+ * fixed module_init/exit stuff
+ * Note: compiled-in kernel doesn't work pre 2.2.18 anymore.
+ *
+ * Revision 1.19  2000/11/19 17:02:47  kai
+ * compatibility cleanup - part 3
+ *
+ * Revision 1.18  2000/11/19 17:01:53  kai
+ * compatibility cleanup - part 2
+ *
+ * Revision 1.17  2000/11/01 14:05:02  calle
+ * - use module_init/module_exit from linux/init.h.
+ * - all static struct variables are initialized with "membername:" now.
+ * - avm_cs.c, let it work with newer pcmcia-cs.
+ *
+ * Revision 1.16  2000/08/04 15:36:31  calle
+ * copied wrong from file to file :-(
+ *
+ * Revision 1.15  2000/08/04 12:20:08  calle
+ * - Fix unsigned/signed warning in the right way ...
+ *
+ * Revision 1.14  2000/06/19 16:51:53  keil
+ * don't free skb in irq context
+ *
  * Revision 1.13  2000/01/25 14:33:38  calle
  * - Added Support AVM B1 PCI V4.0 (tested with prototype)
  *   - splitted up t1pci.c into b1dma.c for common function with b1pciv4
@@ -85,13 +109,15 @@
 #include <linux/ioport.h>
 #include <linux/capi.h>
 #include <asm/io.h>
+#include <linux/init.h>
 #include <asm/uaccess.h>
+#include <linux/netdevice.h>
 #include "capilli.h"
 #include "avmcard.h"
 #include "capicmd.h"
 #include "capiutil.h"
 
-static char *revision = "$Revision: 1.13 $";
+static char *revision = "$Revision: 1.20 $";
 
 /* ------------------------------------------------------------- */
 
@@ -420,7 +446,7 @@ void b1_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
 		b1_put_slice(port, skb->data, len);
 	}
 	restore_flags(flags);
-	dev_kfree_skb(skb);
+	dev_kfree_skb_any(skb);
 }
 
 /* ------------------------------------------------------------- */
@@ -593,25 +619,29 @@ void b1_handle_interrupt(avmcard * card)
 		ctrl->ready(ctrl);
 		break;
 
-        case RECEIVE_TASK_READY:
+	case RECEIVE_TASK_READY:
 		ApplId = (unsigned) b1_get_word(card->port);
 		MsgLen = b1_get_slice(card->port, card->msgbuf);
-		card->msgbuf[MsgLen--] = 0;
-		while (    MsgLen >= 0
-		       && (   card->msgbuf[MsgLen] == '\n'
-			   || card->msgbuf[MsgLen] == '\r'))
-			card->msgbuf[MsgLen--] = 0;
+		card->msgbuf[MsgLen] = 0;
+		while (    MsgLen > 0
+		       && (   card->msgbuf[MsgLen-1] == '\n'
+			   || card->msgbuf[MsgLen-1] == '\r')) {
+			card->msgbuf[MsgLen-1] = 0;
+			MsgLen--;
+		}
 		printk(KERN_INFO "%s: task %d \"%s\" ready.\n",
 				card->name, ApplId, card->msgbuf);
 		break;
 
-        case RECEIVE_DEBUGMSG:
+	case RECEIVE_DEBUGMSG:
 		MsgLen = b1_get_slice(card->port, card->msgbuf);
-		card->msgbuf[MsgLen--] = 0;
-		while (    MsgLen >= 0
-		       && (   card->msgbuf[MsgLen] == '\n'
-			   || card->msgbuf[MsgLen] == '\r'))
-			card->msgbuf[MsgLen--] = 0;
+		card->msgbuf[MsgLen] = 0;
+		while (    MsgLen > 0
+		       && (   card->msgbuf[MsgLen-1] == '\n'
+			   || card->msgbuf[MsgLen-1] == '\r')) {
+			card->msgbuf[MsgLen-1] = 0;
+			MsgLen--;
+		}
 		printk(KERN_INFO "%s: DEBUG: %s\n", card->name, card->msgbuf);
 		break;
 
@@ -714,12 +744,7 @@ EXPORT_SYMBOL(b1_handle_interrupt);
 
 EXPORT_SYMBOL(b1ctl_read_proc);
 
-#ifdef MODULE
-#define b1_init init_module
-void cleanup_module(void);
-#endif
-
-int b1_init(void)
+static int __init b1_init(void)
 {
 	char *p;
 	char rev[10];
@@ -736,8 +761,9 @@ int b1_init(void)
 	return 0;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit b1_exit(void)
 {
 }
-#endif
+
+module_init(b1_init);
+module_exit(b1_exit);

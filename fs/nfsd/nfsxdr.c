@@ -155,7 +155,7 @@ encode_fattr(struct svc_rqst *rqstp, u32 *p, struct inode *inode)
 	*p++ = htonl((u32) inode->i_ino);
 	*p++ = htonl((u32) inode->i_atime);
 	*p++ = 0;
-	*p++ = htonl((u32) inode->i_mtime);
+	*p++ = htonl((u32) lease_get_mtime(inode));
 	*p++ = 0;
 	*p++ = htonl((u32) inode->i_ctime);
 	*p++ = 0;
@@ -390,7 +390,7 @@ nfssvc_encode_statfsres(struct svc_rqst *rqstp, u32 *p,
 
 int
 nfssvc_encode_entry(struct readdir_cd *cd, const char *name,
-					int namlen, off_t offset, ino_t ino)
+		    int namlen, off_t offset, ino_t ino, unsigned int d_type)
 {
 	u32	*p = cd->buffer;
 	int	buflen, slen;
@@ -412,11 +412,9 @@ nfssvc_encode_entry(struct readdir_cd *cd, const char *name,
 		cd->eob = 1;
 		return -EINVAL;
 	}
-	*p++ = xdr_one;			/* mark entry present */
-	*p++ = htonl((u32) ino);	/* file id */
-	*p++ = htonl((u32) namlen);	/* name length & name */
-	memcpy(p, name, namlen);
-	p += slen;
+	*p++ = xdr_one;				/* mark entry present */
+	*p++ = htonl((u32) ino);		/* file id */
+	p    = xdr_encode_array(p, name, namlen);/* name length & name */
 	cd->offset = p;			/* remember pointer */
 	*p++ = ~(u32) 0;		/* offset of next entry */
 

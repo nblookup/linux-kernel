@@ -626,27 +626,28 @@ static int sb_mixer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 
 static struct mixer_operations sb_mixer_operations =
 {
-	"SB",
-	"Sound Blaster",
-	sb_mixer_ioctl
+	owner:	THIS_MODULE,
+	id:	"SB",
+	name:	"Sound Blaster",
+	ioctl:	sb_mixer_ioctl
 };
 
 static struct mixer_operations als007_mixer_operations =
 {
-	"ALS007",
-	"Avance ALS-007",
-	sb_mixer_ioctl
+	owner:	THIS_MODULE,
+	id:	"ALS007",
+	name:	"Avance ALS-007",
+	ioctl:	sb_mixer_ioctl
 };
 
 static void sb_mixer_reset(sb_devc * devc)
 {
 	char name[32];
 	int i;
-	extern int sm_games;
 
 	sprintf(name, "SB_%d", devc->sbmixnum);
 
-	if (sm_games)
+	if (devc->sbmo.sm_games)
 		devc->levels = load_mixer_volumes(name, smg_default_levels, 1);
 	else
 		devc->levels = load_mixer_volumes(name, sb_default_levels, 1);
@@ -659,7 +660,7 @@ static void sb_mixer_reset(sb_devc * devc)
 	};
 }
 
-int sb_mixer_init(sb_devc * devc)
+int sb_mixer_init(sb_devc * devc, struct module *owner)
 {
 	int mixer_type = 0;
 	int m;
@@ -736,7 +737,17 @@ int sb_mixer_init(sb_devc * devc)
 		memcpy ((char *) mixer_devs[m], (char *) &als007_mixer_operations, sizeof (struct mixer_operations));
 
 	mixer_devs[m]->devc = devc;
+
+	if (owner)
+			 mixer_devs[m]->owner = owner;
+	
 	devc->my_mixerdev = m;
 	sb_mixer_reset(devc);
 	return 1;
+}
+
+void sb_mixer_unload(sb_devc *devc)
+{
+	sound_unload_mixerdev(devc->my_mixerdev);
+	sbmixnum--;
 }

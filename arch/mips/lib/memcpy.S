@@ -3,8 +3,6 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * $Id: memcpy.S,v 1.4 2000/01/27 01:05:23 ralf Exp $
- *
  * Unified implementation of memcpy, memmove and the __copy_user backend.
  * For __rmemcpy and memmove an exception is always a kernel bug, therefore
  * they're not protected.  In order to keep the exception fixup routine
@@ -410,6 +408,7 @@ LEAF(memmove)
 	sltu	t0, v0, a1			# dst + len < src -> non-
 	bnez	t0, __memcpy			# overlapping, can use memcpy
 	 move	v0, a0				/* return value */
+	beqz	a2, r_out
 	END(memmove)
 
 LEAF(__rmemcpy)					/* a0=dst a1=src a2=len */

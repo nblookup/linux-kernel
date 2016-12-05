@@ -143,10 +143,8 @@
 unsigned int i91u_debug = DEBUG_DEFAULT;
 #endif
 
-#ifdef MODULE
-Scsi_Host_Template driver_template = INI9100U;
+static Scsi_Host_Template driver_template = INI9100U;
 #include "scsi_module.c"
-#endif
 
 char *i91uCopyright = "Copyright (C) 1996-98";
 char *i91uInitioName = "by Initio Corporation";
@@ -290,6 +288,8 @@ int tul_NewReturnNumberOfAdapters(void)
 	for (i = 0; i < TULSZ(i91u_pci_devices); i++)
 	{
 		while ((pDev = pci_find_device(i91u_pci_devices[i].vendor_id, i91u_pci_devices[i].device_id, pDev)) != NULL) {
+			if (pci_enable_device(pDev))
+				continue;
 			pci_read_config_dword(pDev, 0x44, (u32 *) & dRegValue);
 			wBIOS = (UWORD) (dRegValue & 0xFF);
 			if (((dRegValue & 0xFF00) >> 8) == 0xFF)
@@ -377,8 +377,6 @@ int i91u_detect(Scsi_Host_Template * tpnt)
 		pHCB->pSRB_head = NULL;		/* Initial SRB save queue       */
 		pHCB->pSRB_tail = NULL;		/* Initial SRB save queue       */
 		pHCB->pSRB_lock = SPIN_LOCK_UNLOCKED;	/* SRB save queue lock */
-		request_region(pHCB->HCS_Base, 0x100, "i91u");	/* Register */
-
 		get_tulipPCIConfig(pHCB, i);
 
 		dBiosAdr = pHCB->HCS_BIOS;
@@ -387,8 +385,15 @@ int i91u_detect(Scsi_Host_Template * tpnt)
 		pbBiosAdr = phys_to_virt(dBiosAdr);
 
 		init_tulip(pHCB, tul_scb + (i * tul_num_scb), tul_num_scb, pbBiosAdr, 10);
+		request_region(pHCB->HCS_Base, 256, "i91u"); /* Register */ 
+
 		pHCB->HCS_Index = i;	/* 7/29/98 */
 		hreg = scsi_register(tpnt, sizeof(HCS));
+		if(hreg == NULL)
+		{
+			release_region(pHCB->HCS_Base, 256);
+			return 0;
+		}
 		hreg->io_port = pHCB->HCS_Base;
 		hreg->n_io_port = 0xff;
 		hreg->can_queue = tul_num_scb;	/* 03/05/98                      */
@@ -403,28 +408,28 @@ int i91u_detect(Scsi_Host_Template * tpnt)
 		/* Initial tulip chip           */
 		switch (i) {
 		case 0:
-			ok = request_irq(pHCB->HCS_Intr, i91u_intr0, SA_INTERRUPT | SA_SHIRQ, "i91u", NULL);
+			ok = request_irq(pHCB->HCS_Intr, i91u_intr0, SA_INTERRUPT | SA_SHIRQ, "i91u", hreg);
 			break;
 		case 1:
-			ok = request_irq(pHCB->HCS_Intr, i91u_intr1, SA_INTERRUPT | SA_SHIRQ, "i91u", NULL);
+			ok = request_irq(pHCB->HCS_Intr, i91u_intr1, SA_INTERRUPT | SA_SHIRQ, "i91u", hreg);
 			break;
 		case 2:
-			ok = request_irq(pHCB->HCS_Intr, i91u_intr2, SA_INTERRUPT | SA_SHIRQ, "i91u", NULL);
+			ok = request_irq(pHCB->HCS_Intr, i91u_intr2, SA_INTERRUPT | SA_SHIRQ, "i91u", hreg);
 			break;
 		case 3:
-			ok = request_irq(pHCB->HCS_Intr, i91u_intr3, SA_INTERRUPT | SA_SHIRQ, "i91u", NULL);
+			ok = request_irq(pHCB->HCS_Intr, i91u_intr3, SA_INTERRUPT | SA_SHIRQ, "i91u", hreg);
 			break;
 		case 4:
-			ok = request_irq(pHCB->HCS_Intr, i91u_intr4, SA_INTERRUPT | SA_SHIRQ, "i91u", NULL);
+			ok = request_irq(pHCB->HCS_Intr, i91u_intr4, SA_INTERRUPT | SA_SHIRQ, "i91u", hreg);
 			break;
 		case 5:
-			ok = request_irq(pHCB->HCS_Intr, i91u_intr5, SA_INTERRUPT | SA_SHIRQ, "i91u", NULL);
+			ok = request_irq(pHCB->HCS_Intr, i91u_intr5, SA_INTERRUPT | SA_SHIRQ, "i91u", hreg);
 			break;
 		case 6:
-			ok = request_irq(pHCB->HCS_Intr, i91u_intr6, SA_INTERRUPT | SA_SHIRQ, "i91u", NULL);
+			ok = request_irq(pHCB->HCS_Intr, i91u_intr6, SA_INTERRUPT | SA_SHIRQ, "i91u", hreg);
 			break;
 		case 7:
-			ok = request_irq(pHCB->HCS_Intr, i91u_intr7, SA_INTERRUPT | SA_SHIRQ, "i91u", NULL);
+			ok = request_irq(pHCB->HCS_Intr, i91u_intr7, SA_INTERRUPT | SA_SHIRQ, "i91u", hreg);
 			break;
 		default:
 			i91u_panic("i91u: Too many host adapters\n");
@@ -812,4 +817,14 @@ static void i91u_panic(char *msg)
 {
 	printk("\ni91u_panic: %s\n", msg);
 	panic("i91u panic");
+}
+
+/*
+ * Release ressources
+ */
+int i91u_release(struct Scsi_Host *hreg)
+{
+	free_irq(hreg->irq, hreg);
+	release_region(hreg->io_port, 256);
+	return 0;
 }

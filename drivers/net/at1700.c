@@ -110,14 +110,13 @@ typedef unsigned char uchar;
 
 /* Information that need to be kept for each board. */
 struct net_local {
-	struct enet_statistics stats;
+	struct net_device_stats stats;
 	spinlock_t lock;
 	unsigned char mc_filter[8];
 	uint jumpered:1;			/* Set iff the board has jumper config. */
 	uint tx_started:1;			/* Packets are on the Tx queue. */
 	uint tx_queue_ready:1;			/* Tx queue is ready to be sent. */
 	uint rx_started:1;			/* Packets are Rxing. */
-	uint invalid_irq:1;
 	uchar tx_queue;				/* Number of packet on the Tx queue. */
 	char mca_slot;				/* -1 means ISA */
 	ushort tx_queue_len;			/* Current length of the Tx queue. */
@@ -164,7 +163,7 @@ static int	net_send_packet(struct sk_buff *skb, struct net_device *dev);
 static void net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void net_rx(struct net_device *dev);
 static int net_close(struct net_device *dev);
-static struct enet_statistics *net_get_stats(struct net_device *dev);
+static struct net_device_stats *net_get_stats(struct net_device *dev);
 static void set_rx_mode(struct net_device *dev);
 static void net_tx_timeout (struct net_device *dev);
 
@@ -191,33 +190,25 @@ struct at1720_mca_adapters_struct at1720_mca_adapters[] = {
    (detachable devices only).
    */
 
-#ifdef HAVE_DEVLIST
-/* Support for a alternate probe manager, which will eliminate the
-   boilerplate below. */
-struct netdev_entry at1700_drv =
-{"at1700", at1700_probe1, AT1700_IO_EXTENT, at1700_probe_list};
-#else
-
-int at1700_probe(struct net_device *dev)
+int __init at1700_probe(struct net_device *dev)
 {
 	int i;
-	int base_addr = dev ? dev->base_addr : 0;
+	int base_addr = dev->base_addr;
+
+	SET_MODULE_OWNER(dev);
 
 	if (base_addr > 0x1ff)		/* Check a single specified location. */
 		return at1700_probe1(dev, base_addr);
 	else if (base_addr != 0)	/* Don't probe at all. */
-		return ENXIO;
+		return -ENXIO;
 
 	for (i = 0; at1700_probe_list[i]; i++) {
 		int ioaddr = at1700_probe_list[i];
-		if (check_region(ioaddr, AT1700_IO_EXTENT))
-			continue;
 		if (at1700_probe1(dev, ioaddr) == 0)
 			return 0;
 	}
-	return ENODEV;
+	return -ENODEV;
 }
-#endif
 
 /* The Fujitsu datasheet suggests that the NIC be probed for by checking its
    "signature", the default bit pattern after a reset.  This *doesn't* work --
@@ -227,15 +218,18 @@ int at1700_probe(struct net_device *dev)
    that can be done is checking a few bits and then diving right into an
    EEPROM read. */
 
-int at1700_probe1(struct net_device *dev, int ioaddr)
+static int at1700_probe1(struct net_device *dev, int ioaddr)
 {
 	char fmv_irqmap[4] = {3, 7, 10, 15};
 	char fmv_irqmap_pnp[8] = {3, 4, 5, 7, 9, 10, 11, 15};
 	char at1700_irqmap[8] = {3, 4, 5, 9, 10, 11, 14, 15};
 	unsigned int i, irq, is_fmv18x = 0, is_at1700 = 0;
-	int slot;
+	int slot, ret = -ENODEV;
 	struct net_local *lp;
 	
+	if (!request_region(ioaddr, AT1700_IO_EXTENT, dev->name))
+		return -EBUSY;
+
 		/* Resetting the chip doesn't reset the ISA interface, so don't bother.
 	   That means we have to be careful with the register values we probe for.
 	   */
@@ -314,8 +308,10 @@ int at1700_probe1(struct net_device *dev, int ioaddr)
 		&& inb(ioaddr + SAPROM + 1) == 0x00
 		&& inb(ioaddr + SAPROM + 2) == 0x0e)
 		is_fmv18x = 1;
-	else
-		return -ENODEV;
+	else {
+		ret = -ENODEV;
+		goto err_out;
+	}
 			
 #ifdef CONFIG_MCA
 found:
@@ -323,10 +319,6 @@ found:
 
 		/* Reset the internal state machines. */
 	outb(0, ioaddr + RESET);
-
-	/* Allocate a new 'dev' if needed. */
-	if (dev == NULL)
-		dev = init_etherdev(0, sizeof(struct net_local));
 
 	if (is_at1700)
 		irq = at1700_irqmap[(read_eeprom(ioaddr, 12)&0x04)
@@ -340,18 +332,16 @@ found:
 				if (irq == fmv_irqmap_pnp[i])
 					break;
 			}
-			if (i == 8)
-				return -ENODEV;
+			if (i == 8) {
+				goto err_out;
+				ret = -ENODEV;
+			}
 		} else {
 			if (fmv18x_probe_list[inb(ioaddr + IOCONFIG) & 0x07] != ioaddr)
 				return -ENODEV;
 			irq = fmv_irqmap[(inb(ioaddr + IOCONFIG)>>6) & 0x03];
 		}
 	}
-
-	/* Grab the region so that we can find another board if the IRQ request
-	   fails. */
-	request_region(ioaddr, AT1700_IO_EXTENT, dev->name);
 
 	printk("%s: %s found at %#3x, IRQ %d, address ", dev->name,
 		   is_at1700 ? "AT1700" : "FMV-18X", ioaddr, irq);
@@ -425,8 +415,10 @@ found:
 
 	/* Initialize the device structure. */
 	dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
-	if (dev->priv == NULL)
-		return -ENOMEM;
+	if (dev->priv == NULL) {
+		ret = -ENOMEM;
+		goto err_out;
+	}
 	memset(dev->priv, 0, sizeof(struct net_local));
 
 	dev->open		= net_open;
@@ -446,14 +438,21 @@ found:
 	lp->jumpered = is_fmv18x;
 	lp->mca_slot = slot;
 	/* Snarf the interrupt vector now. */
-	if (request_irq(irq, &net_interrupt, 0, dev->name, dev)) {
+	ret = request_irq(irq, &net_interrupt, 0, dev->name, dev);
+	if (ret) {
 		printk ("  AT1700 at %#3x is unusable due to a conflict on"
 				"IRQ %d.\n", ioaddr, irq);
-		lp->invalid_irq = 1;
-		return 0;
+		goto err_out_priv;
 	}
 
 	return 0;
+
+err_out_priv:
+	kfree(dev->priv);
+	dev->priv = NULL;
+err_out:
+	release_region(ioaddr, AT1700_IO_EXTENT);
+	return ret;
 }
 
 
@@ -535,9 +534,6 @@ static int net_open(struct net_device *dev)
 	}
 
 	netif_start_queue(dev);
-
-	MOD_INC_USE_COUNT;
-
 	return 0;
 }
 
@@ -557,7 +553,8 @@ static void net_tx_timeout (struct net_device *dev)
 	/* ToDo: We should try to restart the adaptor... */
 	outw (0xffff, ioaddr + 24);
 	outw (0xffff, ioaddr + TX_STATUS);
-	outw (0xe85a, ioaddr + CONFIG_0);
+	outb (0x5a, ioaddr + CONFIG_0);
+	outb (0xe8, ioaddr + CONFIG_1);
 	outw (0x8182, ioaddr + TX_INTR);
 	outb (0x00, ioaddr + TX_START);
 	outb (0x03, ioaddr + COL16CNTL);
@@ -786,9 +783,6 @@ static int net_close(struct net_device *dev)
 
 	/* Power-down the chip.  Green, green, green! */
 	outb(0x00, ioaddr + CONFIG_1);
-
-	MOD_DEC_USE_COUNT;
-
 	return 0;
 }
 
@@ -796,7 +790,7 @@ static int net_close(struct net_device *dev)
    This may be called with the card open or closed.
    There are no on-chip counters, so this function is trivial.
 */
-static struct enet_statistics *
+static struct net_device_stats *
 net_get_stats(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
@@ -877,15 +871,9 @@ set_rx_mode(struct net_device *dev)
 }
 
 #ifdef MODULE
-static char devicename[9] = { 0, };
-static struct net_device dev_at1700 = {
-	devicename, /* device name is inserted by linux/drivers/net/net_init.c */
-	0, 0, 0, 0,
-	0, 0,
-	0, 0, 0, NULL, at1700_probe };
-
+static struct net_device dev_at1700;
 static int io = 0x260;
-static int irq = 0;
+static int irq;
 
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
@@ -897,6 +885,7 @@ int init_module(void)
 		printk("at1700: You should not use auto-probing with insmod!\n");
 	dev_at1700.base_addr = io;
 	dev_at1700.irq       = irq;
+	dev_at1700.init      = at1700_probe;
 	if (register_netdev(&dev_at1700) != 0) {
 		printk("at1700: register_netdev() returned non-zero.\n");
 		return -EIO;

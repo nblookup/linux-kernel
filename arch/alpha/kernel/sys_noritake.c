@@ -40,8 +40,10 @@ static inline void
 noritake_update_irq_hw(int irq, int mask)
 {
 	int port = 0x54a;
-	if (irq >= 16) mask >>= 16;
-	if (irq >= 16) port = 0x54c;
+	if (irq >= 32) {
+	    mask >>= 16;
+	    port = 0x54c;
+	}
 	outw(mask, port);
 }
 
@@ -203,7 +205,7 @@ noritake_init_irq(void)
 static int __init
 noritake_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[15][5] __initlocaldata = {
+	static char irq_tab[15][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
 		/* note: IDSELs 16, 17, and 25 are CORELLE only */
 		{ 16+1,  16+1,  16+1,  16+1,  16+1},  /* IdSel 16,  QLOGIC */
@@ -260,6 +262,35 @@ noritake_swizzle(struct pci_dev *dev, u8 *pinp)
 	return slot;
 }
 
+#if defined(CONFIG_ALPHA_GENERIC) || !defined(CONFIG_ALPHA_PRIMO)
+static void
+noritake_apecs_machine_check(unsigned long vector, unsigned long la_ptr,
+			     struct pt_regs * regs)
+{
+#define MCHK_NO_DEVSEL 0x205U
+#define MCHK_NO_TABT 0x204U
+
+        struct el_common *mchk_header;
+        unsigned int code;
+
+        mchk_header = (struct el_common *)la_ptr;
+
+        /* Clear the error before any reporting.  */
+        mb();
+        mb(); /* magic */
+        draina();
+        apecs_pci_clr_err();
+        wrmces(0x7);
+        mb();
+
+        code = mchk_header->code;
+        process_mcheck_info(vector, la_ptr, regs, "NORITAKE APECS",
+                            (mcheck_expected(0)
+                             && (code == MCHK_NO_DEVSEL
+                                 || code == MCHK_NO_TABT)));
+}
+#endif
+
 
 /*
  * The System Vectors
@@ -272,7 +303,7 @@ struct alpha_machine_vector noritake_mv __initmv = {
 	DO_DEFAULT_RTC,
 	DO_APECS_IO,
 	DO_APECS_BUS,
-	machine_check:		apecs_machine_check,
+	machine_check:		noritake_apecs_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
 	min_io_address:		EISA_DEFAULT_IO_BASE,
 	min_mem_address:	APECS_AND_LCA_DEFAULT_MEM_BASE,
@@ -309,7 +340,7 @@ struct alpha_machine_vector noritake_primo_mv __initmv = {
 	init_arch:		cia_init_arch,
 	init_irq:		noritake_init_irq,
 	init_rtc:		common_init_rtc,
-	init_pci:		common_init_pci,
+	init_pci:		cia_init_pci,
 	pci_map_irq:		noritake_map_irq,
 	pci_swizzle:		noritake_swizzle,
 };

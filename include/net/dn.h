@@ -6,8 +6,8 @@
 
 typedef unsigned short dn_address;
 
-#define dn_ntohs(x) le16_to_cpu(x)
-#define dn_htons(x) cpu_to_le16(x)
+#define dn_ntohs(x) le16_to_cpu((unsigned short)(x))
+#define dn_htons(x) cpu_to_le16((unsigned short)(x))
 
 struct dn_scp                                   /* Session Control Port */
 {
@@ -180,7 +180,7 @@ static __inline__ void dn_dn2eth(unsigned char *ethaddr, dn_address addr)
 
 extern struct sock *dn_sklist_find_listener(struct sockaddr_dn *addr);
 extern struct sock *dn_find_by_skb(struct sk_buff *skb);
-#define DN_ASCBUF_LEN 7
+#define DN_ASCBUF_LEN 9
 extern char *dn_addr2asc(dn_address, char *);
 extern int dn_destroy_timer(struct sock *sk);
 

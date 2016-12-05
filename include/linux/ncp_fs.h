@@ -212,13 +212,13 @@ static inline void *
 static inline void ncp_kfree_s(void *obj, int size)
 {
 	ncp_current_malloced -= 1;
-	kfree_s(obj, size);
+	kfree(obj);
 }
 
 #else				/* DEBUG_NCP_MALLOC */
 
 #define ncp_kmalloc(s,p) kmalloc(s,p)
-#define ncp_kfree_s(o,s) kfree_s(o,s)
+#define ncp_kfree_s(o,s) kfree(o)
 
 #endif				/* DEBUG_NCP_MALLOC */
 
@@ -228,7 +228,6 @@ struct super_block *ncp_read_super(struct super_block *, void *, int);
 struct inode *ncp_iget(struct super_block *, struct ncp_entry_info *);
 void ncp_update_inode(struct inode *, struct ncp_entry_info *);
 void ncp_update_inode2(struct inode *, struct ncp_entry_info *);
-extern int init_ncp_fs(void);
 
 /* linux/fs/ncpfs/dir.c */
 extern struct inode_operations ncp_dir_inode_operations;

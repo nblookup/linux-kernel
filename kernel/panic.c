@@ -8,6 +8,7 @@
  * This function is used through-out the kernel (including mm and fs)
  * to indicate a major problem.
  */
+#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/reboot.h>
@@ -18,11 +19,10 @@
 
 asmlinkage void sys_sync(void);	/* it's really int */
 extern void unblank_console(void);
-extern int C_A_D;
 
-int panic_timeout = 0;
+int panic_timeout;
 
-struct notifier_block *panic_notifier_list = NULL;
+struct notifier_block *panic_notifier_list;
 
 static int __init panic_setup(char *str)
 {
@@ -32,10 +32,24 @@ static int __init panic_setup(char *str)
 
 __setup("panic=", panic_setup);
 
+/**
+ *	panic - halt the system
+ *	@fmt: The text string to print
+ *
+ *	Display a message, then unblank the console and perform
+ *	cleanups. Functions in the panic notifier list are called
+ *	after the filesystem cache is flushed (when possible).
+ *
+ *	This function never returns.
+ */
+ 
 NORET_TYPE void panic(const char * fmt, ...)
 {
 	static char buf[1024];
 	va_list args;
+#if defined(CONFIG_ARCH_S390)
+        unsigned long caller = (unsigned long) __builtin_return_address(0);
+#endif
 
 	va_start(args, fmt);
 	vsprintf(buf, fmt, args);
@@ -50,7 +64,7 @@ NORET_TYPE void panic(const char * fmt, ...)
 
 	unblank_console();
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	smp_send_stop();
 #endif
 
@@ -78,6 +92,9 @@ NORET_TYPE void panic(const char * fmt, ...)
 		stop_a_enabled = 1;
 		printk("Press L1-A to return to the boot prom\n");
 	}
+#endif
+#if defined(CONFIG_ARCH_S390)
+        disabled_wait(caller);
 #endif
 	sti();
 	for(;;) {

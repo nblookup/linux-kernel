@@ -1,4 +1,4 @@
-/* $Id: mmu_context.h,v 1.8 2000/02/23 00:41:38 ralf Exp $
+/* $Id: mmu_context.h,v 1.7 2000/02/04 07:40:53 ralf Exp $
  *
  * Switch a MMU context.
  *
@@ -57,10 +57,11 @@ get_new_mmu_context(struct mm_struct *mm, unsigned long asid)
  * Initialize the context related info for a new mm_struct
  * instance.
  */
-extern inline void
+extern inline int
 init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 {
 	mm->context = 0;
+	return 0;
 }
 
 extern inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,

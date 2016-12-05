@@ -2,8 +2,8 @@
 #define _ASM_IA64_PTRACE_H
 
 /*
- * Copyright (C) 1998, 1999 Hewlett-Packard Co
- * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2000 Hewlett-Packard Co
+ * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
  * Copyright (C) 1998, 1999 Stephane Eranian <eranian@hpl.hp.com>
  *
  * 12/07/98	S. Eranian	added pt_regs & switch_stack
@@ -74,6 +74,9 @@
 
 #ifndef __ASSEMBLY__
 
+#include <asm/current.h>
+#include <asm/page.h>
+
 /*
  * This struct defines the way the registers are saved on system
  * calls.
@@ -136,8 +139,8 @@ struct pt_regs {
 	unsigned long r30;		/* scratch */
 	unsigned long r31;		/* scratch */
 
-	unsigned long ar_ccv;		/* compare/exchange value  */
-	unsigned long ar_fpsr;		/* floating point status*/
+	unsigned long ar_ccv;		/* compare/exchange value (scratch) */
+	unsigned long ar_fpsr;		/* floating point status (preserved) */
 
 	unsigned long b0;		/* return pointer (bp) */
 	unsigned long b7;		/* scratch */
@@ -219,22 +222,40 @@ struct switch_stack {
   extern void show_regs (struct pt_regs *);
   extern long ia64_peek (struct pt_regs *, struct task_struct *, unsigned long addr, long *val);
   extern long ia64_poke (struct pt_regs *, struct task_struct *, unsigned long addr, long val);
+  extern void ia64_flush_fph (struct task_struct *t);
+  extern void ia64_sync_fph (struct task_struct *t);
 
+#ifdef CONFIG_IA64_NEW_UNWIND
+  /* get nat bits for scratch registers such that bit N==1 iff scratch register rN is a NaT */
+  extern unsigned long ia64_get_scratch_nat_bits (struct pt_regs *pt, unsigned long scratch_unat);
+  /* put nat bits for scratch registers such that scratch register rN is a NaT iff bit N==1 */
+  extern unsigned long ia64_put_scratch_nat_bits (struct pt_regs *pt, unsigned long nat);
+#else
   /* get nat bits for r1-r31 such that bit N==1 iff rN is a NaT */
   extern long ia64_get_nat_bits (struct pt_regs *pt, struct switch_stack *sw);
   /* put nat bits for r1-r31 such that rN is a NaT iff bit N==1 */
   extern void ia64_put_nat_bits (struct pt_regs *pt, struct switch_stack *sw, unsigned long nat);
+#endif
 
   extern void ia64_increment_ip (struct pt_regs *pt);
   extern void ia64_decrement_ip (struct pt_regs *pt);
-#endif
+
+static inline void
+force_successful_syscall_return (void)
+{
+	ia64_task_regs(current)->r8 = 0;
+}
+
+#endif /* !__KERNEL__ */
 
 #endif /* !__ASSEMBLY__ */
 
 /*
- * The number chosen here is somewhat arbitrary but absolutely MUST
+ * The numbers chosen here are somewhat arbitrary but absolutely MUST
  * not overlap with any of the number assigned in <linux/ptrace.h>.
  */
 #define PTRACE_SINGLEBLOCK	12	/* resume execution until next branch */
+#define PTRACE_GETSIGINFO	13	/* get child's siginfo structure */
+#define PTRACE_SETSIGINFO	14	/* set child's siginfo structure */
 
 #endif /* _ASM_IA64_PTRACE_H */

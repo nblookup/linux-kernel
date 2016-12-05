@@ -25,7 +25,7 @@ extern void free_proc_entry(struct proc_dir_entry *);
 struct proc_dir_entry * de_get(struct proc_dir_entry *de)
 {
 	if (de)
-		de->count++;
+		atomic_inc(&de->count);
 	return de;
 }
 
@@ -34,32 +34,23 @@ struct proc_dir_entry * de_get(struct proc_dir_entry *de)
  */
 void de_put(struct proc_dir_entry *de)
 {
-	if (de) {
-		lock_kernel(); /* FIXME: count should be atomic_t */
-		if (!de->count) {
+	if (de) {	
+		lock_kernel();		
+		if (!atomic_read(&de->count)) {
 			printk("de_put: entry %s already free!\n", de->name);
+			unlock_kernel();
 			return;
 		}
 
-		if (!--de->count) {
+		if (atomic_dec_and_test(&de->count)) {
 			if (de->deleted) {
 				printk("de_put: deferred delete of %s\n",
 					de->name);
 				free_proc_entry(de);
 			}
-		}
+		}		
 		unlock_kernel();
 	}
-}
-
-static void proc_put_inode(struct inode *inode)
-{
-	/*
-	 * Kill off unused inodes ... VFS will unhash and
-	 * delete the inode if we set i_nlink to zero.
-	 */
-	if (inode->i_count == 1)
-		inode->i_nlink = 0;
 }
 
 /*
@@ -82,18 +73,7 @@ static void proc_delete_inode(struct inode *inode)
 	}
 }
 
-struct super_block *proc_super_blocks = NULL;
-
-static void proc_put_super(struct super_block *sb)
-{
-	struct super_block **p = &proc_super_blocks;
-	while (*p != sb) {
-		if (!*p)	/* should never happen */
-			return;
-		p = (struct super_block **)&(*p)->u.generic_sbp;
-	}
-	*p = (struct super_block *)(*p)->u.generic_sbp;
-}
+struct vfsmount *proc_mnt;
 
 static void proc_read_inode(struct inode * inode)
 {
@@ -113,9 +93,8 @@ static int proc_statfs(struct super_block *sb, struct statfs *buf)
 
 static struct super_operations proc_sops = { 
 	read_inode:	proc_read_inode,
-	put_inode:	proc_put_inode,
+	put_inode:	force_delete,
 	delete_inode:	proc_delete_inode,
-	put_super:	proc_put_super,
 	statfs:		proc_statfs,
 };
 
@@ -161,7 +140,7 @@ struct inode * proc_get_inode(struct super_block * sb, int ino,
 #if 1
 /* shouldn't ever happen */
 if (de && de->deleted)
-printk("proc_iget: using deleted entry %s, count=%d\n", de->name, de->count);
+printk("proc_iget: using deleted entry %s, count=%d\n", de->name, atomic_read(&de->count));
 #endif
 
 	inode = iget(sb, ino);
@@ -222,8 +201,6 @@ struct super_block *proc_read_super(struct super_block *s,void *data,
 	if (!s->s_root)
 		goto out_no_root;
 	parse_options(data, &root_inode->i_uid, &root_inode->i_gid);
-	s->u.generic_sbp = (void*) proc_super_blocks;
-	proc_super_blocks = s;
 	return s;
 
 out_no_root:

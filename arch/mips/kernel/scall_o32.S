@@ -1,10 +1,9 @@
-/* $Id: scall_o32.S,v 1.11 2000/02/23 01:33:55 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1997, 1998 by Ralf Baechle
+ * Copyright (C) 1997, 1998, 1999, 2000 by Ralf Baechle
  */
 #include <asm/asm.h>
 #include <linux/errno.h>
@@ -16,7 +15,7 @@
 #include <asm/unistd.h>
 
 /* This duplicates the definition from <linux/sched.h> */
-#define PF_TRACESYS	0x00000020	/* tracing system calls */
+#define PT_TRACESYS	0x00000002	/* tracing system calls */
 
 /* This duplicates the definition from <asm/signal.h> */
 #define SIGILL		4		/* Illegal instruction (ANSI).  */
@@ -50,8 +49,8 @@ NESTED(handle_sys, PT_SIZE, sp)
 
 stack_done:
         sw      a3, PT_R26(sp)          # save for syscall restart
-	lw	t0, TASK_FLAGS($28)	# syscall tracing enabled?
-	andi	t0, PF_TRACESYS
+	lw	t0, TASK_PTRACE($28)	# syscall tracing enabled?
+	andi	t0, PT_TRACESYS
 	bnez	t0, trace_a_syscall
 
 	jalr	t2			# Do The Real Thing (TM)
@@ -66,8 +65,8 @@ stack_done:
 1:	sw	v0, PT_R2(sp)		# result
 
 EXPORT(o32_ret_from_sys_call)
-	lw	t0, softirq_state
-	lw	t1, softirq_state+4	# unused delay slot
+	lw	t0, irq_stat		# softirq_active
+	lw	t1, irq_stat+4		# softirq_mask.  unused delay slot
 	and	t0, t1
 	bnez	t0, o32_handle_softirq
 
@@ -171,6 +170,7 @@ stackargs:
 
 	/*
 	 * The stackpointer for a call with more than 4 arguments is bad.
+	 * We probably should handle this case a bit more drastic.
 	 */
 bad_stack:
 	negu	v0				# error

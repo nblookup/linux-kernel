@@ -20,7 +20,9 @@
 
 #ifndef MODULE
 static int io[PARPORT_MAX+1] __initdata = { [0 ... PARPORT_MAX] = 0 };
+#ifdef CONFIG_PARPORT_PC
 static int io_hi[PARPORT_MAX+1] __initdata = { [0 ... PARPORT_MAX] = 0 };
+#endif
 static int irq[PARPORT_MAX] __initdata = { [0 ... PARPORT_MAX-1] = PARPORT_IRQ_PROBEONLY };
 static int dma[PARPORT_MAX] __initdata = { [0 ... PARPORT_MAX-1] = PARPORT_DMA_NONE };
 
@@ -49,13 +51,13 @@ static int __init parport_setup (char *str)
 	if (!str || !*str || (*str == '0' && !*(str+1))) {
 		/* Disable parport if "parport=0" in cmdline */
 		io[0] = PARPORT_DISABLE;
-		return 0;
+		return 1;
 	}
 
 	if (!strncmp (str, "auto", 4)) {
 		irq[0] = PARPORT_IRQ_AUTO;
 		dma[0] = PARPORT_DMA_AUTO;
-		return 0;
+		return 1;
 	}
 
 	val = simple_strtoul (str, &endptr, 0);
@@ -108,7 +110,7 @@ static int __init parport_setup (char *str)
 	}
 
 	parport_setup_ptr++;
-	return 0;
+	return 1;
 }
 
 __setup ("parport=", parport_setup);
@@ -178,6 +180,10 @@ EXPORT_SYMBOL(parport_unregister_driver);
 EXPORT_SYMBOL(parport_register_device);
 EXPORT_SYMBOL(parport_unregister_device);
 EXPORT_SYMBOL(parport_enumerate);
+EXPORT_SYMBOL(parport_get_port);
+EXPORT_SYMBOL(parport_put_port);
+EXPORT_SYMBOL(parport_find_number);
+EXPORT_SYMBOL(parport_find_base);
 EXPORT_SYMBOL(parport_negotiate);
 EXPORT_SYMBOL(parport_write);
 EXPORT_SYMBOL(parport_read);

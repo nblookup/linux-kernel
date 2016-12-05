@@ -91,7 +91,7 @@ struct smc_mca_adapters_t {
 	char *name;
 };
 
-const struct smc_mca_adapters_t smc_mca_adapters[] = {
+static const struct smc_mca_adapters_t smc_mca_adapters[] = {
     { 0x61c8, "SMC Ethercard PLUS Elite/A BNC/AUI (WD8013EP/A)" },
     { 0x61c9, "SMC Ethercard PLUS Elite/A UTP/AUI (WD8013WP/A)" },
     { 0x6fc0, "WD Ethercard PLUS/A (WD8003E/A or WD8003ET/A)" },
@@ -114,12 +114,14 @@ int __init ultramca_probe(struct net_device *dev)
 	int adapter = 0;
 	int tbase = 0;
 	int tirq = 0;
-	int base_addr = dev ? dev->base_addr : 0;
-	int irq = dev ? dev->irq : 0;
+	int base_addr = dev->base_addr;
+	int irq = dev->irq;
 
 	if (!MCA_bus) {
-		return ENODEV;
+		return -ENODEV;
 	}
+
+	SET_MODULE_OWNER(dev);
 
 	if (base_addr || irq) {
 		printk(KERN_INFO "Probing for SMC MCA adapter");
@@ -194,7 +196,7 @@ int __init ultramca_probe(struct net_device *dev)
 	}
 
 	if(!adapter_found) {
-		return ((base_addr || irq) ? ENXIO : ENODEV);
+		return ((base_addr || irq) ? -ENXIO : -ENODEV);
 	}
 
         /* Adapter found. */
@@ -249,11 +251,11 @@ int __init ultramca_probe(struct net_device *dev)
 	if (dev->mem_start == 0) /* sanity check, shouldn't happen */
 		return -ENODEV;
 
+	if (!request_region(ioaddr, ULTRA_IO_EXTENT, dev->name))
+		return -EBUSY;
+
 	reg4 = inb(ioaddr + 4) & 0x7f;
 	outb(reg4, ioaddr + 4);
-
-	if (load_8390_module("wd.c"))
-		return -ENOSYS;
 
 	printk(KERN_INFO "%s: Parameters: %#3x,", dev->name, ioaddr);
 
@@ -282,13 +284,9 @@ int __init ultramca_probe(struct net_device *dev)
 
 	if (ethdev_init(dev)) {
 		printk (KERN_INFO ", no memory for dev->priv.\n");
+		release_region(ioaddr, ULTRA_IO_EXTENT);
 		return -ENOMEM;
 	}
-
-	/* OK, we are certain this is going to work.  Setup the device.
-	 */
-
-	request_region(ioaddr, ULTRA_IO_EXTENT, "smc-mca");
 
 	/* The 8390 isn't at the base address, so fake the offset
 	 */
@@ -325,9 +323,10 @@ int __init ultramca_probe(struct net_device *dev)
 static int ultramca_open(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - ULTRA_NIC_OFFSET; /* ASIC addr */
+	int retval;
 
-	if (request_irq(dev->irq, ei_interrupt, 0, ei_status.name, dev))
-		return -EAGAIN;
+	if ((retval = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev)))
+		return retval;
 
 	outb(ULTRA_MEMENB, ioaddr); /* Enable memory */
 	outb(0x80, ioaddr + 5);     /* ??? */
@@ -343,7 +342,6 @@ static int ultramca_open(struct net_device *dev)
 	 */
 
 	ei_open(dev);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -427,8 +425,6 @@ static int ultramca_close_card(struct net_device *dev)
          * "just in case"...
 	 */
 
-	MOD_DEC_USE_COUNT;
-
 	return 0;
 }
 
@@ -437,22 +433,10 @@ static int ultramca_close_card(struct net_device *dev)
 #undef MODULE        /* don't want to bother now! */
 
 #define MAX_ULTRAMCA_CARDS 4	/* Max number of Ultra cards per module */
-#define NAMELEN 8		/* # of chars for storing dev->name */
 
-static char namelist[NAMELEN * MAX_ULTRAMCA_CARDS] = { 0, };
-
-static struct net_device dev_ultra[MAX_ULTRAMCA_CARDS] =
-{
-	{
-		NULL,       /* assign a chunk of namelist[] below */
-	        0, 0, 0, 0,
-	        0, 0,
-	        0, 0, 0, NULL, NULL
-	},
-};
-
-static int io[MAX_ULTRAMCA_CARDS] = { 0, };
-static int irq[MAX_ULTRAMCA_CARDS]  = { 0, };
+static struct net_device dev_ultra[MAX_ULTRAMCA_CARDS];
+static int io[MAX_ULTRAMCA_CARDS];
+static int irq[MAX_ULTRAMCA_CARDS];
 
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_ULTRAMCA_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_ULTRAMCA_CARDS) "i");
@@ -463,14 +447,12 @@ int init_module(void)
 
 	for (this_dev = 0; this_dev < MAX_ULTRAMCA_CARDS; this_dev++) {
 		struct net_device *dev = &dev_ultra[this_dev];
-		dev->name = namelist + (NAMELEN * this_dev);
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
 		dev->init = ultramca_probe;
 
 		if (register_netdev(dev) != 0) {
 			if (found != 0) {	/* Got at least one. */
-				lock_8390_module();
 				return 0;
 			}
 			printk(KERN_NOTICE "smc-mca.c: No SMC Ultra card found (i/o = 0x%x).\n", io[this_dev]);
@@ -478,7 +460,6 @@ int init_module(void)
 		}
 		found++;
 	}
-	lock_8390_module();
 	return 0;
 }
 
@@ -498,7 +479,6 @@ void cleanup_module(void)
 			kfree(priv);
 		}
 	}
-	unlock_8390_module();
 }
 #endif /* MODULE */
 

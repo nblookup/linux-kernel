@@ -72,60 +72,42 @@ struct usb_hub_status {
 #define HUB_CHANGE_LOCAL_POWER	0x0001
 #define HUB_CHANGE_OVERCURRENT	0x0002
 
+#define HUB_DESCRIPTOR_MAX_SIZE	39	/* enough for 127 ports on a hub */
+
 /* Hub descriptor */
 struct usb_hub_descriptor {
 	__u8  bLength;
 	__u8  bDescriptorType;
 	__u8  bNbrPorts;
 	__u16 wHubCharacteristics;
-#if 0
-	__u8  wHubCharacteristics[2];   /* __u16 but not aligned! */
-#endif
 	__u8  bPwrOn2PwrGood;
 	__u8  bHubContrCurrent;
+
 	/* DeviceRemovable and PortPwrCtrlMask want to be variable-length 
 	   bitmaps that hold max 256 entries, but for now they're ignored */
-#if 0
-	__u8  filler;
-#endif
+	__u8  bitmap[0];
 } __attribute__ ((packed));
 
 struct usb_device;
 
-typedef enum {
-	USB_PORT_UNPOWERED = 0,		/* Default state */
-	USB_PORT_POWERED,		/* When we've put power to it */
-	USB_PORT_ENABLED,		/* When it's been enabled */
-	USB_PORT_DISABLED,		/* If it's been disabled */
-	USB_PORT_ADMINDISABLED,		/* Forced down */
-} usb_hub_port_state;
-
-struct usb_hub_port {
-	usb_hub_port_state cstate;	/* Configuration state */
-
-	struct usb_device *child;	/* Device attached to this port */
-
-	struct usb_hub *parent;		/* Parent hub */
-};
-
 struct usb_hub {
-	/* Device structure */
 	struct usb_device *dev;
 
-	/* Reference to the hub's polling IRQ and its associated pipe */
-	void *irq_handle;
-	unsigned int irqpipe;
+	struct urb *urb;		/* Interrupt polling pipe */
 
-	/* List of hubs */
+	char buffer[(USB_MAXCHILDREN + 1 + 7) / 8]; /* add 1 bit for hub status change */
+					/* and add 7 bits to round up to byte boundary */
+	int error;
+	int nerrors;
+
 	struct list_head hub_list;
 
-	/* Temporary event list */
 	struct list_head event_list;
 
 	/* Number of ports on the hub */
 	int nports;
 
-	struct usb_hub_port ports[0];	/* Dynamically allocated */
+	struct usb_hub_descriptor *descriptor;
 };
 
 #endif

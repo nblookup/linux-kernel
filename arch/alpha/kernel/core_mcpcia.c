@@ -189,7 +189,7 @@ mk_conf_addr(struct pci_dev *dev, int where, struct pci_controler *hose,
 		bus = 0;
 	addr = (bus << 16) | (devfn << 8) | (where);
 	addr <<= 5; /* swizzle for SPARSE */
-	addr |= hose->config_space;
+	addr |= hose->config_space_base;
 
 	*pci_addr = addr;
 	DBG_CFG(("mk_conf_addr: returning pci_addr 0x%lx\n", addr));
@@ -308,6 +308,7 @@ mcpcia_probe_hose(int h)
 	mb();
 	draina();
 	wrmces(7);
+
 	mcheck_expected(cpu) = 2;	/* indicates probing */
 	mcheck_taken(cpu) = 0;
 	mcheck_extra(cpu) = mid;
@@ -337,13 +338,19 @@ mcpcia_new_hose(int h)
 	int mid = MCPCIA_HOSE2MID(h);
 
 	hose = alloc_pci_controler();
+	if (h == 0)
+		pci_isa_hose = hose;
 	io = alloc_resource();
 	mem = alloc_resource();
 	hae_mem = alloc_resource();
 			
 	hose->io_space = io;
 	hose->mem_space = hae_mem;
-	hose->config_space = MCPCIA_CONF(mid);
+	hose->sparse_mem_base = MCPCIA_SPARSE(mid) - IDENT_ADDR;
+	hose->dense_mem_base = MCPCIA_DENSE(mid) - IDENT_ADDR;
+	hose->sparse_io_base = MCPCIA_IO(mid) - IDENT_ADDR;
+	hose->dense_io_base = 0;
+	hose->config_space_base = MCPCIA_CONF(mid);
 	hose->index = h;
 
 	io->start = MCPCIA_IO(mid) - MCPCIA_IO_BIAS;
@@ -403,19 +410,19 @@ mcpcia_startup_hose(struct pci_controler *hose)
 	 * Window 2 is direct access 2GB at 2GB
 	 * ??? We ought to scale window 1 with memory.
 	 */
-
 	hose->sg_isa = iommu_arena_new(hose, 0x00800000, 0x00800000, 0);
 	hose->sg_pci = iommu_arena_new(hose, 0x40000000, 0x08000000, 0);
+
 	__direct_map_base = 0x80000000;
 	__direct_map_size = 0x80000000;
 
 	*(vuip)MCPCIA_W0_BASE(mid) = hose->sg_isa->dma_base | 3;
 	*(vuip)MCPCIA_W0_MASK(mid) = (hose->sg_isa->size - 1) & 0xfff00000;
-	*(vuip)MCPCIA_T0_BASE(mid) = virt_to_phys(hose->sg_isa->ptes) >> 2;
+	*(vuip)MCPCIA_T0_BASE(mid) = virt_to_phys(hose->sg_isa->ptes) >> 8;
 
 	*(vuip)MCPCIA_W1_BASE(mid) = hose->sg_pci->dma_base | 3;
 	*(vuip)MCPCIA_W1_MASK(mid) = (hose->sg_pci->size - 1) & 0xfff00000;
-	*(vuip)MCPCIA_T1_BASE(mid) = virt_to_phys(hose->sg_pci->ptes) >> 2;
+	*(vuip)MCPCIA_T1_BASE(mid) = virt_to_phys(hose->sg_pci->ptes) >> 8;
 
 	*(vuip)MCPCIA_W2_BASE(mid) = __direct_map_base | 1;
 	*(vuip)MCPCIA_W2_MASK(mid) = (__direct_map_size - 1) & 0xfff00000;
@@ -458,9 +465,11 @@ void __init
 mcpcia_init_hoses(void)
 {
 	struct pci_controler *hose;
-	int h, hose_count = 0;
+	int hose_count;
+	int h;
 
 	/* First, find how many hoses we have.  */
+	hose_count = 0;
 	for (h = 0; h < MCPCIA_MAX_HOSES; ++h) {
 		if (mcpcia_probe_hose(h)) {
 			if (h != 0)
@@ -548,6 +557,65 @@ mcpcia_print_uncorrectable(struct el_MCPCIA_uncorrected_frame_mcheck *logout)
 	       frame->ld_lock);
 }
 
+static void
+mcpcia_print_system_area(unsigned long la_ptr)
+{
+	struct el_common *frame;
+	struct pci_controler *hose;
+
+	struct IOD_subpacket {
+	  unsigned long base;
+	  unsigned int whoami;
+	  unsigned int rsvd1;
+	  unsigned int pci_rev;
+	  unsigned int cap_ctrl;
+	  unsigned int hae_mem;
+	  unsigned int hae_io;
+	  unsigned int int_ctl;
+	  unsigned int int_reg;
+	  unsigned int int_mask0;
+	  unsigned int int_mask1;
+	  unsigned int mc_err0;
+	  unsigned int mc_err1;
+	  unsigned int cap_err;
+	  unsigned int rsvd2;
+	  unsigned int pci_err1;
+	  unsigned int mdpa_stat;
+	  unsigned int mdpa_syn;
+	  unsigned int mdpb_stat;
+	  unsigned int mdpb_syn;
+	  unsigned int rsvd3;
+	  unsigned int rsvd4;
+	  unsigned int rsvd5;
+	} *iodpp;
+
+	frame = (struct el_common *)la_ptr;
+	iodpp = (struct IOD_subpacket *) (la_ptr + frame->sys_offset);
+
+	for (hose = hose_head; hose; hose = hose->next, iodpp++) {
+
+	  printk("IOD %d Register Subpacket - Bridge Base Address %16lx\n",
+		 hose->index, iodpp->base);
+	  printk("  WHOAMI      = %8x\n", iodpp->whoami);
+	  printk("  PCI_REV     = %8x\n", iodpp->pci_rev);
+	  printk("  CAP_CTRL    = %8x\n", iodpp->cap_ctrl);
+	  printk("  HAE_MEM     = %8x\n", iodpp->hae_mem);
+	  printk("  HAE_IO      = %8x\n", iodpp->hae_io);
+	  printk("  INT_CTL     = %8x\n", iodpp->int_ctl);
+	  printk("  INT_REG     = %8x\n", iodpp->int_reg);
+	  printk("  INT_MASK0   = %8x\n", iodpp->int_mask0);
+	  printk("  INT_MASK1   = %8x\n", iodpp->int_mask1);
+	  printk("  MC_ERR0     = %8x\n", iodpp->mc_err0);
+	  printk("  MC_ERR1     = %8x\n", iodpp->mc_err1);
+	  printk("  CAP_ERR     = %8x\n", iodpp->cap_err);
+	  printk("  PCI_ERR1    = %8x\n", iodpp->pci_err1);
+	  printk("  MDPA_STAT   = %8x\n", iodpp->mdpa_stat);
+	  printk("  MDPA_SYN    = %8x\n", iodpp->mdpa_syn);
+	  printk("  MDPB_STAT   = %8x\n", iodpp->mdpb_stat);
+	  printk("  MDPB_SYN    = %8x\n", iodpp->mdpb_syn);
+	}
+}
+
 void
 mcpcia_machine_check(unsigned long vector, unsigned long la_ptr,
 		     struct pt_regs * regs)
@@ -588,6 +656,8 @@ mcpcia_machine_check(unsigned long vector, unsigned long la_ptr,
 	mb();
 
 	process_mcheck_info(vector, la_ptr, regs, "MCPCIA", expected != 0);
-	if (!expected && vector != 0x620 && vector != 0x630)
+	if (!expected && vector != 0x620 && vector != 0x630) {
 		mcpcia_print_uncorrectable(mchk_logout);
+		mcpcia_print_system_area(la_ptr);
+	}
 }

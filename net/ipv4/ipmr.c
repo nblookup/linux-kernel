@@ -9,7 +9,7 @@
  *	as published by the Free Software Foundation; either version
  *	2 of the License, or (at your option) any later version.
  *
- *	Version: $Id: ipmr.c,v 1.50 2000/01/09 02:19:32 davem Exp $
+ *	Version: $Id: ipmr.c,v 1.55 2000/11/28 13:13:27 davem Exp $
  *
  *	Fixes:
  *	Michael Chastain	:	Incorrect size of copying.
@@ -189,7 +189,7 @@ struct net_device *ipmr_reg_vif(struct vifctl *v)
 	struct in_device *in_dev;
 	int size;
 
-	size = sizeof(*dev) + IFNAMSIZ + sizeof(struct net_device_stats);
+	size = sizeof(*dev) + sizeof(struct net_device_stats);
 	dev = kmalloc(size, GFP_KERNEL);
 	if (!dev)
 		return NULL;
@@ -197,7 +197,6 @@ struct net_device *ipmr_reg_vif(struct vifctl *v)
 	memset(dev, 0, size);
 
 	dev->priv = dev + 1;
-	dev->name = dev->priv + sizeof(struct net_device_stats);
 
 	strcpy(dev->name, "pimreg");
 
@@ -206,7 +205,7 @@ struct net_device *ipmr_reg_vif(struct vifctl *v)
 	dev->flags		= IFF_NOARP;
 	dev->hard_start_xmit	= reg_vif_xmit;
 	dev->get_stats		= reg_vif_get_stats;
-	dev->new_style		= 1;
+	dev->features		|= NETIF_F_DYNALLOC;
 
 	if (register_netdevice(dev)) {
 		kfree(dev);
@@ -321,7 +320,7 @@ void ipmr_expire_process(unsigned long dummy)
 	struct mfc_cache *c, **cp;
 
 	if (!spin_trylock(&mfc_unres_lock)) {
-		mod_timer(&ipmr_expire_timer, jiffies + HZ/10);
+		mod_timer(&ipmr_expire_timer, jiffies+HZ/10);
 		return;
 	}
 
@@ -661,9 +660,7 @@ ipmr_cache_unresolved(vifi_t vifi, struct sk_buff *skb)
 		c->next = mfc_unres_queue;
 		mfc_unres_queue = c;
 
-		if (!del_timer(&ipmr_expire_timer))
-			ipmr_expire_timer.expires = c->mfc_un.unres.expires;
-		add_timer(&ipmr_expire_timer);
+		mod_timer(&ipmr_expire_timer, c->mfc_un.unres.expires);
 	}
 
 	/*
@@ -1100,6 +1097,10 @@ static void ip_encap(struct sk_buff *skb, u32 saddr, u32 daddr)
 
 	skb->h.ipiph = skb->nh.iph;
 	skb->nh.iph = iph;
+#ifdef CONFIG_NETFILTER
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#endif
 }
 
 static inline int ipmr_forward_finish(struct sk_buff *skb)
@@ -1433,6 +1434,10 @@ int pim_rcv_v1(struct sk_buff * skb, unsigned short len)
 	skb->dst = NULL;
 	((struct net_device_stats*)reg_dev->priv)->rx_bytes += skb->len;
 	((struct net_device_stats*)reg_dev->priv)->rx_packets++;
+#ifdef CONFIG_NETFILTER
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#endif
 	netif_rx(skb);
 	dev_put(reg_dev);
 	return 0;
@@ -1488,6 +1493,10 @@ int pim_rcv(struct sk_buff * skb, unsigned short len)
 	((struct net_device_stats*)reg_dev->priv)->rx_bytes += skb->len;
 	((struct net_device_stats*)reg_dev->priv)->rx_packets++;
 	skb->dst = NULL;
+#ifdef CONFIG_NETFILTER
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#endif
 	netif_rx(skb);
 	dev_put(reg_dev);
 	return 0;
@@ -1572,6 +1581,7 @@ int ipmr_get_route(struct sk_buff *skb, struct rtmsg *rtm, int nowait)
 }
 #endif
 
+#ifdef CONFIG_PROC_FS	
 /*
  *	The /proc interfaces to multicast routing /proc/ip_mr_cache /proc/ip_mr_vif
  */
@@ -1702,7 +1712,6 @@ done:
   	return len;
 }
 
-#ifdef CONFIG_PROC_FS	
 #endif	
 
 #ifdef CONFIG_IP_PIMSM_V2

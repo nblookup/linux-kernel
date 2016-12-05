@@ -23,7 +23,7 @@ typedef struct
 	wait_queue_head_t wait;
 	wait_queue_head_t remove_ok;
 	spinlock_t lock;
-	volatile atomic_t pending_io;
+	atomic_t pending_io;
 	driver_state_t state;
 	int remove_pending;
 	int got_mem;
@@ -49,7 +49,7 @@ typedef struct
 
 
 #define _DABUSB_IF 2
-#define _DABUSB_ISOPIPE 0x89
+#define _DABUSB_ISOPIPE 0x09
 #define _ISOPIPESIZE	16384
 
 #define _BULK_DATA_LEN 64

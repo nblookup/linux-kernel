@@ -28,7 +28,6 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include "sound_config.h"
-#include "soundmodule.h"
 
 /*
  * Sanity checks
@@ -242,6 +241,9 @@
    - Module informations added.
    - Removed aedsp16_delay_10msec(), now using mdelay(10)
    - All data and funcs moved to .*.init section.
+   v1.3
+   Arnaldo Carvalho de Melo <acme@conectiva.com.br> - 2000/09/27
+   - got rid of check_region
 
    Known Problems:
    - Audio Excel DSP 16 III don't work with this driver.
@@ -253,7 +255,7 @@
  */
 
 
-#define VERSION "1.2"		/* Version of Audio Excel DSP 16 driver */
+#define VERSION "1.3"		/* Version of Audio Excel DSP 16 driver */
 
 #undef	AEDSP16_DEBUG 1		/* Define this to enable debug code     */
 #undef	AEDSP16_DEBUG_MORE 1	/* Define this to enable more debug     */
@@ -1175,24 +1177,17 @@ static int __init init_aedsp16_mss(void)
 	if (ae_config.init & INIT_MSS)
 		return FALSE;
 /*
- * We must check the CONFIG_AEDSP16_BASE region too because these are the I/O 
- * ports to access card's control registers.
+ * We must allocate the CONFIG_AEDSP16_BASE region too because these are the 
+ * I/O ports to access card's control registers.
  */
 	if (!(ae_config.init & INIT_MPU401)) {
-		if (check_region(ae_config.base_io, IOBASE_REGION_SIZE)) {
+		if (!request_region(ae_config.base_io, IOBASE_REGION_SIZE,
+				"aedsp16 (base)")) {
 			printk(
 			"AEDSP16 BASE I/O port region is already in use.\n");
 			return FALSE;
 		}
 	}
-
-/*
- * We must allocate the CONFIG_AEDSP16_BASE region too because these are the 
- * I/O ports to access card's control registers.
- */
-	if (!(ae_config.init & INIT_MPU401))
-		request_region(ae_config.base_io, IOBASE_REGION_SIZE,
-				"aedsp16 (base)");
 
 	ae_config.init |= INIT_MSS;
 
@@ -1223,20 +1218,17 @@ static int __init init_aedsp16_mpu(void)
 		return FALSE;
 
 /*
- * We must check the CONFIG_AEDSP16_BASE region too because these are the I/O 
+ * We must request the CONFIG_AEDSP16_BASE region too because these are the I/O 
  * ports to access card's control registers.
  */
 	if (!(ae_config.init & (INIT_MSS | INIT_SBPRO))) {
-		if (check_region(ae_config.base_io, IOBASE_REGION_SIZE)) {
+		if (!request_region(ae_config.base_io, IOBASE_REGION_SIZE,
+					"aedsp16 (base)")) {
 			printk(
 			"AEDSP16 BASE I/O port region is already in use.\n");
 			return FALSE;
 		}
 	}
-
-	if (!(ae_config.init & (INIT_MSS | INIT_SBPRO)))
-		request_region(ae_config.base_io, IOBASE_REGION_SIZE,
-				"aedsp16 (base)");
 
 	ae_config.init |= INIT_MPU401;
 
@@ -1357,13 +1349,11 @@ static int __init do_init_aedsp16(void) {
 		 */
 		return -EINVAL;
 	}
-	SOUND_LOCK;
 	return 0;
 }
 
 static void __exit cleanup_aedsp16(void) {
 	uninit_aedsp16();
-	SOUND_LOCK_END;
 }
 
 module_init(do_init_aedsp16);
@@ -1383,6 +1373,7 @@ static int __init setup_aedsp16(char *str)
 	mss_base = ints[4];
 	mpu_base = ints[5];
 	mpu_irq	 = ints[6];
+	return 1;
 }
 
 __setup("aedsp16=", setup_aedsp16);

@@ -1,4 +1,4 @@
-/* $Id: ebus.c,v 1.9 2000/01/22 07:35:25 zaitcev Exp $
+/* $Id: ebus.c,v 1.15 2000/11/08 05:06:21 davem Exp $
  * ebus.c: PCI to EBus bridge device.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -24,20 +24,8 @@
 
 struct linux_ebus *ebus_chain = 0;
 
-#ifdef CONFIG_SUN_OPENPROMIO
-extern int openprom_init(void);
-#endif
-#ifdef CONFIG_SPARCAUDIO
-extern int sparcaudio_init(void);
-#endif
 #ifdef CONFIG_SUN_AUXIO
 extern void auxio_probe(void);
-#endif
-#ifdef CONFIG_OBP_FLASH
-extern int flash_init(void);
-#endif
-#ifdef CONFIG_ENVCTRL
-extern int envctrl_init(void);
 #endif
 
 /* We are together with pcic.c under CONFIG_PCI. */
@@ -127,13 +115,13 @@ void __init fill_ebus_child(int node, struct linux_prom_registers *preg,
 	if ((dev->irqs[0] = ebus_blacklist_irq(dev->prom_name)) != 0) {
 		dev->num_irqs = 1;
 	} else if ((len = prom_getproperty(node, "interrupts",
-	    (char *)&irqs, sizeof(irqs)) == -1) || (len == 0)) {
+	    (char *)&irqs, sizeof(irqs))) == -1 || len == 0) {
 		dev->num_irqs = 0;
 		dev->irqs[0] = 0;
 		if (dev->parent->num_irqs != 0) {
 			dev->num_irqs = 1;
 			dev->irqs[0] = dev->parent->irqs[0];
-/* P3 remove */ printk("EBUS: dev %s irq %d from parent\n", dev->prom_name, dev->irqs[0]);
+/* P3 */ /* printk("EBUS: dev %s irq %d from parent\n", dev->prom_name, dev->irqs[0]); */
 		}
 	} else {
 		dev->num_irqs = len / sizeof(irqs[0]);
@@ -219,11 +207,11 @@ void __init fill_ebus_device(int node, struct linux_ebus_device *dev)
 	if ((dev->irqs[0] = ebus_blacklist_irq(dev->prom_name)) != 0) {
 		dev->num_irqs = 1;
 	} else if ((len = prom_getproperty(node, "interrupts",
-	    (char *)&irqs, sizeof(irqs)) == -1) || (len == 0)) {
+	    (char *)&irqs, sizeof(irqs))) == -1 || len == 0) {
 		dev->num_irqs = 0;
 		if ((dev->irqs[0] = dev->bus->self->irq) != 0) {
 			 dev->num_irqs = 1;
-/* P3 remove */ printk("EBUS: child %s irq %d from parent\n", dev->prom_name, dev->irqs[0]);
+/* P3 */ /* printk("EBUS: child %s irq %d from parent\n", dev->prom_name, dev->irqs[0]); */
 		}
 	} else {
 		dev->num_irqs = 1;  /* dev->num_irqs = len / sizeof(irqs[0]); */
@@ -370,23 +358,7 @@ void __init ebus_init(void)
 		++num_ebus;
 	}
 
-#ifdef CONFIG_SUN_OPENPROMIO
-	openprom_init();
-#endif
-
-#ifdef CONFIG_SPARCAUDIO
-	sparcaudio_init();
-#endif
-#ifdef CONFIG_SUN_BPP
-	bpp_init();
-#endif
 #ifdef CONFIG_SUN_AUXIO
 	auxio_probe();
-#endif
-#ifdef CONFIG_ENVCTRL
-	envctrl_init();
-#endif
-#ifdef CONFIG_OBP_FLASH
-	flash_init();
 #endif
 }

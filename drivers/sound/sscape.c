@@ -14,13 +14,13 @@
  * Thomas Sailer   	: ioctl code reworked (vmalloc/vfree removed)
  * Sergey Smitienko	: ensoniq p'n'p support
  * Christoph Hellwig	: adapted to module_init/module_exit
+ * Bartlomiej Zolnierkiewicz : added __init to attach_sscape()
  */
 
 #include <linux/init.h>
 #include <linux/module.h>
 
 #include "sound_config.h"
-#include "soundmodule.h"
 #include "sound_firmware.h"
 
 #include <linux/types.h>
@@ -38,6 +38,7 @@
 #include <linux/ioport.h>
 #include <linux/delay.h>
 #include <linux/proc_fs.h>
+#include <linux/wrapper.h>
 
 #include "coproc.h"
 
@@ -272,12 +273,14 @@ static int host_read(struct sscape_info *devc)
 	return data;
 }
 
+#if 0 /* unused */
 static int host_command1(struct sscape_info *devc, int cmd)
 {
 	unsigned char buf[10];
 	buf[0] = (unsigned char) (cmd & 0xff);
 	return host_write(devc, buf, 1);
 }
+#endif /* unused */
 
 
 static int host_command2(struct sscape_info *devc, int cmd, int parm1)
@@ -607,7 +610,7 @@ static coproc_operations sscape_coproc_operations =
 static int sscape_detected = 0;
 static int sscape_is_pnp   = 0;
 
-void attach_sscape(struct address_info *hw_config)
+void __init attach_sscape(struct address_info *hw_config)
 {
 #ifndef SSCAPE_REGS
 	/*
@@ -725,7 +728,7 @@ void attach_sscape(struct address_info *hw_config)
 	hw_config->name = "SoundScape";
 
 	hw_config->irq *= -1;	/* Negative value signals IRQ sharing */
-	attach_mpu401(hw_config);
+	attach_mpu401(hw_config, THIS_MODULE);
 	hw_config->irq *= -1;	/* Restore it */
 
 	if (hw_config->slots[1] != -1)	/* The MPU driver installed itself */
@@ -808,8 +811,9 @@ static	void sscape_write_host_ctrl2(sscape_info *devc, int a, int b)
 static int sscape_alloc_dma(sscape_info *devc)
 {
 	char *start_addr, *end_addr;
-	int i, dma_pagesize;
+	int dma_pagesize;
 	int sz, size;
+	struct page *page;
 
 	if (devc->raw_buf != NULL) return 0;	/* Already done */
 	dma_pagesize = (devc->dma < 4) ? (64 * 1024) : (128 * 1024);
@@ -846,23 +850,24 @@ static int sscape_alloc_dma(sscape_info *devc)
 	devc->raw_buf = start_addr;
 	devc->raw_buf_phys = virt_to_bus(start_addr);
 
-	for (i = MAP_NR(start_addr); i <= MAP_NR(end_addr); i++)
-		set_bit(PG_reserved, &mem_map[i].flags);;
+	for (page = virt_to_page(start_addr); page <= virt_to_page(end_addr); page++)
+		mem_map_reserve(page);
 	return 1;
 }
 
 static void sscape_free_dma(sscape_info *devc)
 {
-	int sz, size, i;
+	int sz, size;
 	unsigned long start_addr, end_addr;
+	struct page *page;
 
 	if (devc->raw_buf == NULL) return;
 	for (sz = 0, size = PAGE_SIZE; size < devc->buffsize; sz++, size <<= 1);
 	start_addr = (unsigned long) devc->raw_buf;
 	end_addr = start_addr + devc->buffsize;
 
-	for (i = MAP_NR(start_addr); i <= MAP_NR(end_addr); i++)
-		clear_bit(PG_reserved, &mem_map[i].flags);;
+	for (page = virt_to_page(start_addr); page <= virt_to_page(end_addr); page++)
+		mem_map_unreserve(page);
 
 	free_pages((unsigned long) devc->raw_buf, sz);
 	devc->raw_buf = NULL;
@@ -1373,21 +1378,16 @@ static void __init attach_ss_ms_sound(struct address_info *hw_config)
  	if (hw_config->irq == devc->irq)
  		printk(KERN_WARNING "soundscape: Warning! The WSS mode can't share IRQ with MIDI\n");
  				
- 	if (! sscape_is_pnp )
-		hw_config->slots[0] = ad1848_init("SoundScape", hw_config->io_base,
-						  hw_config->irq,
-						  hw_config->dma,
-						  hw_config->dma,
-						  0,
-						  devc->osp);
+	hw_config->slots[0] = ad1848_init(
+			sscape_is_pnp ? "SoundScape" : "SoundScape PNP",
+			hw_config->io_base,
+			hw_config->irq,
+			hw_config->dma,
+			hw_config->dma,
+			0,
+			devc->osp,
+			THIS_MODULE);
 
-	else 
-		hw_config->slots[0] = ad1848_init("SoundScape PNP", hw_config->io_base,
-	 					  hw_config->irq,
-	 					  hw_config->dma,
-	 					  hw_config->dma,
-	 					  0,
-	 					  devc->osp);
  					  
 	if (hw_config->slots[0] != -1)	/* The AD1848 driver installed itself */
 	{
@@ -1492,7 +1492,7 @@ static int __init init_sscape(void)
 
 	if (mss)
 		attach_ss_ms_sound(&cfg);
-	SOUND_LOCK;
+
 	return 0;
 }
 
@@ -1500,7 +1500,6 @@ static void __exit cleanup_sscape(void)
 {
 	if (mss)
 		unload_ss_ms_sound(&cfg);
-	SOUND_LOCK_END;
 	unload_sscape(&cfg_mpu);
 }
 

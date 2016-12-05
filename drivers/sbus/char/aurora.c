@@ -1,4 +1,4 @@
-/*	$Id: aurora.c,v 1.7 1999/09/21 14:37:46 davem Exp $
+/*	$Id: aurora.c,v 1.10 2000/12/07 04:35:38 anton Exp $
  *	linux/drivers/sbus/char/aurora.c -- Aurora multiport driver
  *
  *	Copyright (c) 1999 by Oliver Aldulea (oli@bv.ro)
@@ -666,9 +666,11 @@ static void aurora_check_modem(struct Aurora_board const * bp, int chip)
 		if (sbus_readb(&bp->r[chip]->r[CD180_MSVR]) & MSVR_CD) 
 			wake_up_interruptible(&port->open_wait);
 		else if (!((port->flags & ASYNC_CALLOUT_ACTIVE) &&
-			   (port->flags & ASYNC_CALLOUT_NOHUP)))
-			queue_task(&port->tqueue_hangup,  
-					   &tq_scheduler);      
+			   (port->flags & ASYNC_CALLOUT_NOHUP))) {
+			MOD_INC_USE_COUNT;
+			if (schedule_task(&port->tqueue_hangup) == 0)
+				MOD_DEC_USE_COUNT;
+		}
 	}
 	
 /* We don't have such things yet. My aurora board has DTR and RTS swapped, but that doesn't count in this driver. Let's hope
@@ -2211,13 +2213,13 @@ static void do_aurora_hangup(void *private_)
 	printk("do_aurora_hangup: start\n");
 #endif
 	tty = port->tty;
-	if (tty == NULL)
-		return;
-
-	tty_hangup(tty);
+	if (tty != NULL) {
+		tty_hangup(tty);	/* FIXME: module removal race - AKPM */
 #ifdef AURORA_DEBUG
-	printk("do_aurora_hangup: end\n");
+		printk("do_aurora_hangup: end\n");
 #endif
+	}
+	MOD_DEC_USE_COUNT;
 }
 
 static void aurora_hangup(struct tty_struct * tty)
@@ -2387,7 +2389,6 @@ static void aurora_release_drivers(void)
 #endif
 }
 
-#ifndef MODULE
 /*
  * Called at boot time.
  *
@@ -2406,10 +2407,7 @@ void __init aurora_setup(char *str, int *ints)
 		}
 }
 
-int __init aurora_init(void)
-#else
-int aurora_init(void)
-#endif
+static int __init aurora_real_init(void)
 {
 	int found;
 	int i;
@@ -2439,7 +2437,6 @@ int aurora_init(void)
 	return 0;
 }
 
-#ifdef MODULE
 int irq  = 0;
 int irq1 = 0;
 int irq2 = 0;
@@ -2449,16 +2446,16 @@ MODULE_PARM(irq1, "i");
 MODULE_PARM(irq2, "i");
 MODULE_PARM(irq3, "i");
 
-int init_module(void) 
+static int __init aurora_init(void) 
 {
 	if (irq ) irqs[0]=irq ;
 	if (irq1) irqs[1]=irq1;
 	if (irq2) irqs[2]=irq2;
 	if (irq3) irqs[3]=irq3;
-	return aurora_init();
+	return aurora_real_init();
 }
 	
-void cleanup_module(void)
+static void __exit aurora_cleanup(void)
 {
 	int i;
 	
@@ -2473,4 +2470,6 @@ printk("cleanup_module: aurora_release_drivers\n");
 			aurora_release_io_range(&aurora_board[i]);
 		}
 }
-#endif /* MODULE */
+
+module_init(aurora_init);
+module_exit(aurora_cleanup);

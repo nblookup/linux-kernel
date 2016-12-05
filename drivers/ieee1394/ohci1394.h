@@ -1,19 +1,50 @@
+/*
+ * ohci1394.h - driver for OHCI 1394 boards
+ * Copyright (C)1999,2000 Sebastien Rougeaux <sebastien.rougeaux@anu.edu.au>
+ *                        Gord Peters <GordPeters@smarttech.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software Foundation,
+ * Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
+ */
 
 #ifndef _OHCI1394_H
 #define _OHCI1394_H
 
 #include "ieee1394_types.h"
 
-#define OHCI1394_DEBUG 1
+#define IEEE1394_USE_BOTTOM_HALVES 1
 
 #define OHCI1394_DRIVER_NAME      "ohci1394"
 
-#ifndef PCI_DEVICE_ID_TI_OHCI1394
-#define PCI_DEVICE_ID_TI_OHCI1394 0x8009
-#endif 
+#define USE_DEVICE 0
 
-#ifndef PCI_DEVICE_ID_TI_OHCI1394_2
-#define PCI_DEVICE_ID_TI_OHCI1394_2 0x8019
+#if USE_DEVICE
+
+#ifndef PCI_DEVICE_ID_TI_OHCI1394_LV22
+#define PCI_DEVICE_ID_TI_OHCI1394_LV22 0x8009
+#endif
+
+#ifndef PCI_DEVICE_ID_TI_OHCI1394_LV23
+#define PCI_DEVICE_ID_TI_OHCI1394_LV23 0x8019
+#endif
+
+#ifndef PCI_DEVICE_ID_TI_OHCI1394_LV26
+#define PCI_DEVICE_ID_TI_OHCI1394_LV26 0x8020
+#endif
+
+#ifndef PCI_DEVICE_ID_TI_OHCI1394_PCI4450
+#define PCI_DEVICE_ID_TI_OHCI1394_PCI4450 0x8011
 #endif
 
 #ifndef PCI_DEVICE_ID_VIA_OHCI1394
@@ -28,23 +59,59 @@
 #define PCI_DEVICE_ID_SONY_CXD3222 0x8039
 #endif
 
+#ifndef PCI_DEVICE_ID_NEC_1394
+#define PCI_DEVICE_ID_NEC_1394 0x00cd
+#endif
+
+#ifndef PCI_DEVICE_ID_NEC_UPD72862
+#define PCI_DEVICE_ID_NEC_UPD72862      0x0063
+#endif
+
+#ifndef PCI_DEVICE_ID_NEC_UPD72870
+#define PCI_DEVICE_ID_NEC_UPD72870      0x00cd
+#endif
+
+#ifndef PCI_DEVICE_ID_NEC_UPD72871
+#define PCI_DEVICE_ID_NEC_UPD72871      0x00ce
+#endif
+
+#ifndef PCI_DEVICE_ID_APPLE_UNI_N_FW
+#define PCI_DEVICE_ID_APPLE_UNI_N_FW	0x0018
+#endif
+
+#ifndef PCI_DEVICE_ID_ALI_OHCI1394_M5251
+#define PCI_DEVICE_ID_ALI_OHCI1394_M5251 0x5251
+#endif
+
+#ifndef PCI_VENDOR_ID_LUCENT
+#define PCI_VENDOR_ID_LUCENT 0x11c1
+#endif
+
+#ifndef PCI_DEVICE_ID_LUCENT_FW323
+#define PCI_DEVICE_ID_LUCENT_FW323 0x5811
+#endif
+
+#endif /* USE_DEVICE */
+
+
 #define MAX_OHCI1394_CARDS        4
 
 #define OHCI1394_MAX_AT_REQ_RETRIES       0x2
 #define OHCI1394_MAX_AT_RESP_RETRIES      0x2
 #define OHCI1394_MAX_PHYS_RESP_RETRIES    0x8
+#define OHCI1394_MAX_SELF_ID_ERRORS       16
 
 #define AR_REQ_NUM_DESC                   4 /* number of AR req descriptors */
-#define AR_REQ_BUF_SIZE                4096 /* size of AR req buffers */
-#define AR_REQ_SPLIT_BUF_SIZE          4096 /* split packet buffer */
+#define AR_REQ_BUF_SIZE           PAGE_SIZE /* size of AR req buffers */
+#define AR_REQ_SPLIT_BUF_SIZE     PAGE_SIZE /* split packet buffer */
 
 #define AR_RESP_NUM_DESC                  4 /* number of AR resp descriptors */
-#define AR_RESP_BUF_SIZE               4096 /* size of AR resp buffers */
-#define AR_RESP_SPLIT_BUF_SIZE         4096 /* split packet buffer */
+#define AR_RESP_BUF_SIZE          PAGE_SIZE /* size of AR resp buffers */
+#define AR_RESP_SPLIT_BUF_SIZE    PAGE_SIZE /* split packet buffer */
 
 #define IR_NUM_DESC                      16 /* number of IR descriptors */
-#define IR_BUF_SIZE                    6480 /* 6480 bytes/buffer */
-#define IR_SPLIT_BUF_SIZE              8192 /* split packet buffer */
+#define IR_BUF_SIZE               PAGE_SIZE /* 4096 bytes/buffer */
+#define IR_SPLIT_BUF_SIZE         PAGE_SIZE /* split packet buffer */
 
 #define AT_REQ_NUM_DESC                  32 /* number of AT req descriptors */
 #define AT_RESP_NUM_DESC                 32 /* number of AT resp descriptors */
@@ -56,10 +123,17 @@ struct dma_cmd {
         u32 status;
 };
 
+/*
+ * FIXME:
+ * It is important that a single at_dma_prg does not cross a page boundary
+ * The proper way to do it would be to do the check dynamically as the
+ * programs are inserted into the AT fifo.
+ */
 struct at_dma_prg {
 	struct dma_cmd begin;
 	quadlet_t data[4];
 	struct dma_cmd end;
+	quadlet_t pad[4]; /* FIXME: quick hack for memory alignment */
 };
 
 /* DMA receive context */
@@ -69,8 +143,15 @@ struct dma_rcv_ctx {
 	unsigned int num_desc;
 	unsigned int buf_size;
 	unsigned int split_buf_size;
-        struct dma_cmd **prg;
-        quadlet_t **buf;
+
+	/* dma block descriptors */
+        struct dma_cmd **prg_cpu;
+        dma_addr_t *prg_bus;
+
+	/* dma buffers */
+        quadlet_t **buf_cpu;
+        dma_addr_t *buf_bus;
+
         unsigned int buf_ind;
         unsigned int buf_offset;
         quadlet_t *spb;
@@ -86,19 +167,37 @@ struct dma_trm_ctx {
 	void *ohci;
 	int ctx;
 	unsigned int num_desc;
-        struct at_dma_prg *prg;
+
+	/* dma block descriptors */
+        struct at_dma_prg **prg_cpu;
+	dma_addr_t *prg_bus;
+
         unsigned int prg_ind;
         unsigned int sent_ind;
 	int free_prgs;
         quadlet_t *branchAddrPtr;
-        struct hpsb_packet *first;
-        struct hpsb_packet *last;
+
+	/* list of packets inserted in the AT FIFO */
+        struct hpsb_packet *fifo_first;
+        struct hpsb_packet *fifo_last;
+
+	/* list of pending packets to be inserted in the AT FIFO */
+        struct hpsb_packet *pending_first;
+        struct hpsb_packet *pending_last;
+
         spinlock_t lock;
         struct tq_struct task;
 	int ctrlClear;
 	int ctrlSet;
 	int cmdPtr;
 };
+
+/* video device template */
+struct video_template {
+	void (*irq_handler) (int card, quadlet_t isoRecvEvent, 
+			     quadlet_t isoXmitEvent);
+};
+
 
 struct ti_ohci {
         int id; /* sequential card number */
@@ -110,8 +209,15 @@ struct ti_ohci {
         /* remapped memory spaces */
         void *registers; 
 
-        quadlet_t *self_id_buffer; /* dma buffer for self-id packets */
-        quadlet_t *csr_config_rom; /* buffer for csr config rom */
+	/* dma buffer for self-id packets */
+        quadlet_t *selfid_buf_cpu;
+        dma_addr_t selfid_buf_bus;
+	
+	/* buffer for csr config rom */
+        quadlet_t *csr_config_rom_cpu; 
+        dma_addr_t csr_config_rom_bus; 
+
+	unsigned int max_packet_size;
 
         /* async receive */
 	struct dma_rcv_ctx *ar_resp_context;
@@ -123,8 +229,13 @@ struct ti_ohci {
 
         /* iso receive */
 	struct dma_rcv_ctx *ir_context;
-        u64 IR_channel_usage;
         spinlock_t IR_channel_lock;
+	int nb_iso_rcv_ctx;
+
+        /* iso transmit */
+	int nb_iso_xmit_ctx;
+
+        u64 ISO_channel_usage;
 
         /* IEEE-1394 part follows */
         struct hpsb_host *host;
@@ -133,8 +244,24 @@ struct ti_ohci {
 
         spinlock_t phy_reg_lock;
 
+	int self_id_errors;
         int NumBusResets;
+
+	/* video device */
+	struct video_template *video_tmpl;
 };
+
+inline static int cross_bound(unsigned long addr, unsigned int size)
+{
+	int cross=0;
+	if (size>PAGE_SIZE) {
+		cross = size/PAGE_SIZE;
+		size -= cross*PAGE_SIZE;
+	}
+	if ((PAGE_SIZE-addr%PAGE_SIZE)<size)
+		cross++;
+	return cross;
+}
 
 /*
  * Register read and write helper functions.
@@ -230,7 +357,7 @@ quadlet_t ohci_csr_rom[] = {
 #define OHCI1394_Version                      0x000
 #define OHCI1394_GUID_ROM                     0x004
 #define OHCI1394_ATRetries                    0x008
-#define OHCI1394_CSRReadData                  0x00C
+#define OHCI1394_CSRData                      0x00C
 #define OHCI1394_CSRCompareData               0x010
 #define OHCI1394_CSRControl                   0x014
 #define OHCI1394_ConfigROMhdr                 0x018
@@ -290,12 +417,18 @@ quadlet_t ohci_csr_rom[] = {
 #define OHCI1394_AsRspRcvContextControlClear  0x1E4
 #define OHCI1394_AsRspRcvCommandPtr           0x1EC
 
+/* Isochronous transmit registers */
+/* Add (32 * n) for context n */
+#define OHCI1394_IsoXmitContextControlSet     0x200
+#define OHCI1394_IsoXmitContextControlClear   0x204
+#define OHCI1394_IsoXmitCommandPtr            0x20C
+
 /* Isochronous receive registers */
 /* Add (32 * n) for context n */
-#define OHCI1394_IrRcvContextControlSet       0x400
-#define OHCI1394_IrRcvContextControlClear     0x404
-#define OHCI1394_IrRcvCommandPtr              0x40C
-#define OHCI1394_IrRcvContextMatch            0x410
+#define OHCI1394_IsoRcvContextControlSet      0x400
+#define OHCI1394_IsoRcvContextControlClear    0x404
+#define OHCI1394_IsoRcvCommandPtr             0x40C
+#define OHCI1394_IsoRcvContextMatch           0x410
 
 /* Interrupts Mask/Events */
 
@@ -307,8 +440,8 @@ quadlet_t ohci_csr_rom[] = {
 #define OHCI1394_RSPkt                   0x00000020
 #define OHCI1394_isochTx                 0x00000040
 #define OHCI1394_isochRx                 0x00000080
-#define OHCI1394_postedWriteErr          0x00001000
-#define OHCI1394_lockRespErr             0x00002000
+#define OHCI1394_postedWriteErr          0x00000100
+#define OHCI1394_lockRespErr             0x00000200
 #define OHCI1394_selfIDComplete          0x00010000
 #define OHCI1394_busReset                0x00020000
 #define OHCI1394_phy                     0x00080000
@@ -329,6 +462,15 @@ quadlet_t ohci_csr_rom[] = {
 #define DMA_SPEED_100                    0x0
 #define DMA_SPEED_200                    0x1
 #define DMA_SPEED_400                    0x2
+
+#define OHCI1394_TCODE_PHY               0xE
+
+void ohci1394_stop_context(struct ti_ohci *ohci, int reg, char *msg);
+struct ti_ohci *ohci1394_get_struct(int card_num);
+int ohci1394_register_video(struct ti_ohci *ohci,
+			    struct video_template *tmpl);
+void ohci1394_unregister_video(struct ti_ohci *ohci,
+			       struct video_template *tmpl);
 
 #endif
 

@@ -1480,3 +1480,136 @@ Work sponsored by SGI
   <devfs_readdir>
 
 - Only set auto-ownership for /dev/pty/s*
+===============================================================================
+Changes for patch v162
+
+Work sponsored by SGI
+
+- Set inode->i_size to correct size for symlinks
+  Thanks to Jeremy Fitzhardinge <jeremy@goop.org>
+
+- Only give lookup() method to directories to comply with new VFS
+  assumptions
+
+- Remove unnecessary tests in symlink methods
+
+- Don't kill existing block ops in <devfs_read_inode>
+
+- Restore auto-ownership for /dev/pty/m*
+===============================================================================
+Changes for patch v163
+
+Work sponsored by SGI
+
+- Don't create missing directories in <devfs_find_handle>
+
+- Removed Documentation/filesystems/devfs/mk-devlinks
+
+- Updated Documentation/filesystems/devfs/README
+===============================================================================
+Changes for patch v164
+
+Work sponsored by SGI
+
+- Fixed CONFIG_DEVFS breakage in drivers/char/serial.c introduced in
+  linux-2.3.99-pre6-7
+===============================================================================
+Changes for patch v165
+
+Work sponsored by SGI
+
+- Ported to kernel 2.3.99-pre6
+===============================================================================
+Changes for patch v166
+
+Work sponsored by SGI
+
+- Added CONFIG_DEVFS_MOUNT
+===============================================================================
+Changes for patch v167
+
+Work sponsored by SGI
+
+- Updated Documentation/filesystems/devfs/README
+
+- Updated sample modules.conf
+===============================================================================
+Changes for patch v168
+
+Work sponsored by SGI
+
+- Disabled multi-mount capability (use VFS bindings instead)
+
+- Updated README from master HTML file
+===============================================================================
+Changes for patch v169
+
+Work sponsored by SGI
+
+- Removed multi-mount code
+
+- Removed compatibility macros: VFS has changed too much
+===============================================================================
+Changes for patch v170
+
+Work sponsored by SGI
+
+- Updated README from master HTML file
+
+- Merged devfs inode into devfs entry
+===============================================================================
+Changes for patch v171
+
+Work sponsored by SGI
+
+- Updated sample modules.conf
+
+- Removed dead code in <devfs_register> which used to call
+  <free_dentries>
+
+- Ported to kernel 2.4.0-test2-pre3
+===============================================================================
+Changes for patch v172
+
+Work sponsored by SGI
+
+- Changed interface to <devfs_register>
+
+- Changed interface to <devfs_register_series>
+===============================================================================
+Changes for patch v173
+
+Work sponsored by SGI
+
+- Simplified interface to <devfs_mk_symlink>
+
+- Simplified interface to <devfs_mk_dir>
+
+- Simplified interface to <devfs_find_handle>
+===============================================================================
+Changes for patch v174
+
+Work sponsored by SGI
+
+- Updated README from master HTML file
+===============================================================================
+Changes for patch v175
+
+Work sponsored by SGI
+
+- DocBook update for fs/devfs/base.c
+  Thanks to Tim Waugh <twaugh@redhat.com>
+
+- Removed stale fs/tunnel.c (was never used or completed)
+===============================================================================
+Changes for patch v176
+
+Work sponsored by SGI
+
+- Updated ToDo list
+
+- Removed sample modules.conf: now distributed with devfsd
+
+- Updated README from master HTML file
+
+- Ported to kernel 2.4.0-test3-pre4 (which had devfs-patch-v174)

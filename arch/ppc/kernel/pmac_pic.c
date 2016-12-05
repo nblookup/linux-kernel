@@ -61,14 +61,32 @@ static void pmac_openpic_unmask_irq(unsigned int irq_nr)
 	openpic_enable_irq(irq_nr);
 }
 
+static void pmac_openpic_ack_irq(unsigned int irq_nr)
+{
+	if ((irq_desc[irq_nr].status & IRQ_LEVEL) == 0)
+		openpic_eoi(smp_processor_id());
+	openpic_disable_irq(irq_nr);
+}
+
+static void pmac_openpic_end_irq(unsigned int irq_nr)
+{
+	if ((irq_desc[irq_nr].status & IRQ_LEVEL) != 0)
+		openpic_eoi(smp_processor_id());
+	openpic_enable_irq(irq_nr);
+}
+
 struct hw_interrupt_type pmac_open_pic = {
 	" OpenPIC  ",
 	NULL,
 	NULL,
 	pmac_openpic_unmask_irq,
 	pmac_openpic_mask_irq,
-	pmac_openpic_mask_irq,
-	0
+	/* Theorically, the mask&ack should be NULL for OpenPIC. However, doing
+	 * so shows tons of bogus interrupts coming in.
+	 */
+	pmac_openpic_ack_irq,
+	pmac_openpic_end_irq,
+	NULL
 };
 
 static void __pmac pmac_mask_and_ack_irq(unsigned int irq_nr)
@@ -141,7 +159,8 @@ struct hw_interrupt_type pmac_pic = {
         pmac_unmask_irq,
         pmac_mask_irq,
         pmac_mask_and_ack_irq,
-        0
+        pmac_unmask_irq,
+        NULL
 };
 
 struct hw_interrupt_type gatwick_pic = {
@@ -151,20 +170,21 @@ struct hw_interrupt_type gatwick_pic = {
 	pmac_unmask_irq,
 	pmac_mask_irq,
 	pmac_mask_and_ack_irq,
-	0
+	pmac_unmask_irq,
+	NULL
 };
 
 static void gatwick_action(int cpl, void *dev_id, struct pt_regs *regs)
 {
 	int irq, bits;
 	
-	for (irq = max_irqs - 1; irq > max_real_irqs; irq -= 32) {
+	for (irq = max_irqs; (irq -= 32) >= max_real_irqs; ) {
 		int i = irq >> 5;
 		bits = ld_le32(&pmac_irq_hw[i]->flag)
 			| ppc_lost_interrupts[i];
 		if (bits == 0)
 			continue;
-		irq -= cntlzw(bits);
+		irq += __ilog2(bits);
 		break;
 	}
 	/* The previous version of this code allowed for this case, we
@@ -183,43 +203,34 @@ pmac_get_irq(struct pt_regs *regs)
 	int irq;
 	unsigned long bits = 0;
 
-#ifdef __SMP__
-	void pmac_smp_message_recv(void);
+#ifdef CONFIG_SMP
+	void pmac_smp_message_recv(struct pt_regs *);
 	
         /* IPI's are a hack on the powersurge -- Cort */
         if ( smp_processor_id() != 0 )
         {
-#ifdef CONFIG_XMON
-		static int xmon_2nd;
-		if (xmon_2nd)
-			xmon(regs);
-#endif
-		pmac_smp_message_recv();
+		pmac_smp_message_recv(regs);
 		return -2;	/* ignore, already handled */
         }
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 
-	/* Yeah, I know, this could be a separate get_irq function */
-	if (has_openpic)
-	{
+	if (has_openpic) {
 		irq = openpic_irq(smp_processor_id());
 		if (irq == OPENPIC_VEC_SPURIOUS)
 			/* We get those when doing polled ADB requests,
 			 * using -2 is a temp hack to disable the printk
 			 */
 			irq = -2; /*-1; */
-		else
-			openpic_eoi(smp_processor_id());
 	}
 	else
 	{
-		for (irq = max_real_irqs - 1; irq > 0; irq -= 32) {
+		for (irq = max_real_irqs; (irq -= 32) >= 0; ) {
 			int i = irq >> 5;
 			bits = ld_le32(&pmac_irq_hw[i]->flag)
 				| ppc_lost_interrupts[i];
 			if (bits == 0)
 				continue;
-			irq -= cntlzw(bits);
+			irq += __ilog2(bits);
 			break;
 		}
 	}
@@ -489,11 +500,9 @@ sleep_save_intrs(int viaint)
 	if (max_real_irqs > 32)
 		out_le32(&pmac_irq_hw[1]->enable, ppc_cached_irq_mask[1]);
 	(void)in_le32(&pmac_irq_hw[0]->flag);
-        do {
-                /* make sure mask gets to controller before we
-                   return to user */
-                mb();
-        } while(in_le32(&pmac_irq_hw[0]->enable) != ppc_cached_irq_mask[0]);
+	/* make sure mask gets to controller before we return to caller */
+	mb();
+        (void)in_le32(&pmac_irq_hw[0]->enable);
 }
 
 void

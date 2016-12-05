@@ -32,9 +32,6 @@
 #include <video/fbcon-cfb32.h>
 
 
-#define arraysize(x)	(sizeof(x)/sizeof(*(x)))
-
-
     /*
      *  RAM we reserve for the frame buffer. This defines the maximum screen
      *  size
@@ -80,8 +77,6 @@ static int vfb_enable = 0;	/* disabled by default */
 
 int vfb_setup(char*);
 
-static int vfb_open(struct fb_info *info, int user);
-static int vfb_release(struct fb_info *info, int user);
 static int vfb_get_fix(struct fb_fix_screeninfo *fix, int con,
 		       struct fb_info *info);
 static int vfb_get_var(struct fb_var_screeninfo *var, int con,
@@ -94,8 +89,6 @@ static int vfb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			struct fb_info *info);
 static int vfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			struct fb_info *info);
-static int vfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-		     u_long arg, int con, struct fb_info *info);
 
 
     /*
@@ -124,31 +117,14 @@ static void do_install_cmap(int con, struct fb_info *info);
 
 
 static struct fb_ops vfb_ops = {
-    vfb_open, vfb_release, vfb_get_fix, vfb_get_var, vfb_set_var, vfb_get_cmap,
-    vfb_set_cmap, vfb_pan_display, vfb_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	vfb_get_fix,
+	fb_get_var:	vfb_get_var,
+	fb_set_var:	vfb_set_var,
+	fb_get_cmap:	vfb_get_cmap,
+	fb_set_cmap:	vfb_set_cmap,
+	fb_pan_display:	vfb_pan_display,
 };
-
-
-    /*
-     *  Open/Release the frame buffer device
-     */
-
-static int vfb_open(struct fb_info *info, int user)
-{
-    /*                                                                     
-     *  Nothing, only a usage count for the moment                          
-     */                                                                    
-
-    MOD_INC_USE_COUNT;
-    return(0);                              
-}
-        
-static int vfb_release(struct fb_info *info, int user)
-{
-    MOD_DEC_USE_COUNT;
-    return(0);                                                    
-}
-
 
     /*
      *  Get the Fixed Part of the Display
@@ -392,17 +368,6 @@ static int vfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
     else
 	fb_copy_cmap(cmap, &fb_display[con].cmap, kspc ? 0 : 1);
     return 0;
-}
-
-
-    /*
-     *  Virtual Frame Buffer Specific ioctls
-     */
-
-static int vfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-		     u_long arg, int con, struct fb_info *info)
-{
-    return -EINVAL;
 }
 
 

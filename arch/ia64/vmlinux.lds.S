@@ -8,7 +8,7 @@ OUTPUT_ARCH(ia64)
 ENTRY(_start)
 SECTIONS
 {
-  v = PAGE_OFFSET;	/* this symbol is here to make debugging with kdb easier... */
+  v = PAGE_OFFSET;	/* this symbol is here to make debugging easier... */
 
   . = KERNEL_START;
 
@@ -32,6 +32,13 @@ SECTIONS
 #endif
   _etext = .;
 
+  /* Read-only data */
+
+  __gp = ALIGN(8) + 0x200000;
+
+  /* Global data */
+  _data = .;
+
   /* Exception table */
   . = ALIGN(16);
   __start___ex_table = .;
@@ -39,34 +46,42 @@ SECTIONS
 	{ *(__ex_table) }
   __stop___ex_table = .;
 
-#if defined(CONFIG_KDB)
-  /* Kernel symbols and strings for kdb */
-# define KDB_MEAN_SYMBOL_SIZE	48
-# define KDB_SPACE		(CONFIG_KDB_STBSIZE * KDB_MEAN_SYMBOL_SIZE)
-  . = ALIGN(8);
-  _skdb = .;
-  .kdb : AT(ADDR(.kdb) - PAGE_OFFSET)
-    {
-	*(kdbsymtab)
-	*(kdbstrings)
-    }
-  _ekdb = .;
-  . = _skdb + KDB_SPACE;
+#if defined(CONFIG_IA64_GENERIC)
+  /* Machine Vector */
+  . = ALIGN(16);
+  machvec_start = .;
+  .machvec : AT(ADDR(.machvec) - PAGE_OFFSET)
+	{ *(.machvec) }
+  machvec_end = .;
 #endif
 
-  /* Kernel symbol names for modules: */
+  __start___ksymtab = .;	/* Kernel symbol table */
+  __ksymtab : AT(ADDR(__ksymtab) - PAGE_OFFSET)
+	{ *(__ksymtab) }
+  __stop___ksymtab = .;
+
+  /* Unwind table */
+  ia64_unw_start = .;
+  .IA_64.unwind : AT(ADDR(.IA_64.unwind) - PAGE_OFFSET)
+	{ *(.IA_64.unwind) }
+  ia64_unw_end = .;
+  .IA_64.unwind_info : AT(ADDR(.IA_64.unwind_info) - PAGE_OFFSET)
+	{ *(.IA_64.unwind_info) }
+
+  .rodata : AT(ADDR(.rodata) - PAGE_OFFSET)
+	{ *(.rodata) }
   .kstrtab : AT(ADDR(.kstrtab) - PAGE_OFFSET)
 	{ *(.kstrtab) }
+  .opd : AT(ADDR(.opd) - PAGE_OFFSET)
+	{ *(.opd) }
 
-  /* The initial task and kernel stack */
+  /* Initialization code and data: */
+
   . = ALIGN(PAGE_SIZE);
-  init_task : AT(ADDR(init_task) - PAGE_OFFSET)
-	{ *(init_task) }
-
-  /* Startup code */
   __init_begin = .;
   .text.init : AT(ADDR(.text.init) - PAGE_OFFSET)
 	{ *(.text.init) }
+
   .data.init : AT(ADDR(.data.init) - PAGE_OFFSET)
 	{ *(.data.init) }
    . = ALIGN(16);
@@ -81,6 +96,10 @@ SECTIONS
   . = ALIGN(PAGE_SIZE);
   __init_end = .;
 
+  /* The initial task and kernel stack */
+  init_task : AT(ADDR(init_task) - PAGE_OFFSET)
+	{ *(init_task) }
+
   .data.page_aligned : AT(ADDR(.data.page_aligned) - PAGE_OFFSET)
         { *(.data.idt) }
 
@@ -88,17 +107,12 @@ SECTIONS
   .data.cacheline_aligned : AT(ADDR(.data.cacheline_aligned) - PAGE_OFFSET)
         { *(.data.cacheline_aligned) }
 
-  /* Global data */
-  _data = .;
+  /* Kernel symbol names for modules: */
+  .kstrtab : AT(ADDR(.kstrtab) - PAGE_OFFSET)
+	{ *(.kstrtab) }
 
-  .rodata : AT(ADDR(.rodata) - PAGE_OFFSET)
-	{ *(.rodata) }
-  .opd : AT(ADDR(.opd) - PAGE_OFFSET)
-	{ *(.opd) }
   .data : AT(ADDR(.data) - PAGE_OFFSET)
 	{ *(.data) *(.gnu.linkonce.d*) CONSTRUCTORS }
-
-  __gp = ALIGN (8) + 0x200000;
 
   .got : AT(ADDR(.got) - PAGE_OFFSET)
 	{ *(.got.plt) *(.got) }
@@ -120,6 +134,7 @@ SECTIONS
   /DISCARD/ : {
 	*(.text.exit)
 	*(.data.exit)
+	*(.exitcall.exit)
 	}
 
   /* Stabs debugging sections.  */

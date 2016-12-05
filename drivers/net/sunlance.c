@@ -1,4 +1,4 @@
-/* $Id: sunlance.c,v 1.100 2000/02/27 09:38:12 anton Exp $
+/* $Id: sunlance.c,v 1.105 2000/10/22 16:08:38 davem Exp $
  * lance.c: Linux/Sparc/Lance driver
  *
  *	Written 1995, 1996 by Miguel de Icaza
@@ -108,8 +108,6 @@ static char *lancestr = "LANCE";
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-
-#include <asm/machines.h>
 
 /* Define: 2^4 Tx buffers and 2^4 Rx buffers */
 #ifndef LANCE_LOG_TX_BUFFERS
@@ -293,9 +291,7 @@ int sparc_lance_debug = 2;
 
 #define LANCE_ADDR(x) ((long)(x) & ~0xff000000)
 
-#ifdef MODULE
 static struct lance_private *root_lance_dev = NULL;
-#endif
 
 /* Load the CSR registers */
 static void load_csrs(struct lance_private *lp)
@@ -1287,10 +1283,8 @@ static void lance_set_multicast(struct net_device *dev)
 static void lance_set_multicast_retry(unsigned long _opaque)
 {
 	struct net_device *dev = (struct net_device *) _opaque;
-	struct lance_private *lp = (struct lance_private *) dev->priv;
 
 	lance_set_multicast(dev);
-	timer_exit(&lp->multicast_timer);
 }
 
 static void lance_free_hwresources(struct lance_private *lp)
@@ -1336,6 +1330,7 @@ static int __init sparc_lance_init(struct net_device *dev,
 	/* Make certain the data structures used by the LANCE are aligned. */
 	dev->priv = (void *)(((unsigned long)dev->priv + 7) & ~7);
 	lp = (struct lance_private *) dev->priv;
+	spin_lock_init(&lp->lock);
 
 	/* Copy the IDPROM ethernet address to the device structure, later we
 	 * will copy the address in the device structure to the lance
@@ -1492,17 +1487,16 @@ no_link_test:
 	lp->multicast_timer.data = (unsigned long) dev;
 	lp->multicast_timer.function = &lance_set_multicast_retry;
 
-#ifdef MODULE
 	dev->ifindex = dev_new_index();
 	lp->next_module = root_lance_dev;
 	root_lance_dev = lp;
-#endif
+
 	return 0;
 
 fail:
 	if (lp != NULL)
 		lance_free_hwresources(lp);
-	return ENODEV;
+	return -ENODEV;
 }
 
 /* On 4m, find the associated dma for the lance chip */
@@ -1527,12 +1521,10 @@ static int __init sparc_lance_probe(void)
 	static struct sbus_dev sdev;
 	static int called = 0;
 
-#ifdef MODULE
 	root_lance_dev = NULL;
-#endif
 
 	if (called)
-		return ENODEV;
+		return -ENODEV;
 	called++;
 
 	if ((idprom->id_machtype == (SM_SUN4|SM_4_330)) ||
@@ -1542,7 +1534,7 @@ static int __init sparc_lance_probe(void)
 		sdev.irqs[0] = 6;
 		return sparc_lance_init(NULL, &sdev, 0, 0);
 	}
-	return ENODEV;
+	return -ENODEV;
 }
 
 #else /* !CONFIG_SUN4 */
@@ -1557,12 +1549,10 @@ static int __init sparc_lance_probe(void)
 	static int called = 0;
 	int cards = 0, v;
 
-#ifdef MODULE
 	root_lance_dev = NULL;
-#endif
 
 	if (called)
-		return ENODEV;
+		return -ENODEV;
 	called++;
 
 	for_each_sbus (bus) {
@@ -1593,14 +1583,13 @@ static int __init sparc_lance_probe(void)
 		} /* for each sbusdev */
 	} /* for each sbus */
 	if (!cards)
-		return ENODEV;
+		return -ENODEV;
 	return 0;
 }
 #endif /* !CONFIG_SUN4 */
 
 static void __exit sparc_lance_cleanup(void)
 {
-#ifdef MODULE
 	struct lance_private *lp;
 
 	while (root_lance_dev) {
@@ -1611,7 +1600,6 @@ static void __exit sparc_lance_cleanup(void)
 		kfree(root_lance_dev->dev);
 		root_lance_dev = lp;
 	}
-#endif /* MODULE */
 }
 
 module_init(sparc_lance_probe);

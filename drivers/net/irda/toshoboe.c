@@ -272,8 +272,14 @@ toshoboe_hard_xmit (struct sk_buff *skb, struct net_device *dev)
     );
 
   /* Check if we need to change the speed */
-  if ((speed = irda_get_speed(skb)) != self->io.speed)
-	  self->new_speed = speed;
+  if ((speed = irda_get_speed(skb)) != self->io.speed) {
+	/* Check for empty frame */
+	if (!skb->len) {
+	    toshoboe_setbaud(self, speed); 
+	    return 0;
+	} else
+	    self->new_speed = speed;
+  }
 
   netif_stop_queue(dev);
   
@@ -603,11 +609,15 @@ static int toshoboe_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	
 	switch (cmd) {
 	case SIOCSBANDWIDTH: /* Set bandwidth */
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
 		/* toshoboe_setbaud(self, irq->ifr_baudrate); */
                 /* Just change speed once - inserted by Paul Bristow */
 	        self->new_speed = irq->ifr_baudrate;
 		break;
 	case SIOCSMEDIABUSY: /* Set media busy */
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
 		irda_device_set_media_busy(self->netdev, TRUE);
 		break;
 	case SIOCGRECEIVING: /* Check if we are receiving right now */
@@ -624,7 +634,10 @@ static int toshoboe_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 
 #ifdef MODULE
 
+MODULE_DESCRIPTION("Toshiba OBOE IrDA Device Driver");
+MODULE_AUTHOR("James McKenzie <james@fishsoup.dhs.org>");
 MODULE_PARM (max_baud, "i");
+MODULE_PARM_DESC(max_baus, "Maximum baud rate");
 
 static int
 toshoboe_close (struct toshoboe_cb *self)
@@ -883,7 +896,7 @@ toshoboe_gotosleep (struct toshoboe_cb *self)
 /*FIXME: can't sleep here wait one second */
 
   while ((i--) && (self->txpending))
-    udelay (100000);
+    mdelay (100);
 
   toshoboe_stopchip (self);
   toshoboe_disablebm (self);
@@ -896,7 +909,6 @@ toshoboe_gotosleep (struct toshoboe_cb *self)
 static void 
 toshoboe_wakeup (struct toshoboe_cb *self)
 {
-  struct net_device *dev = self->netdev;
   unsigned long flags;
 
   if (!self->stopped)

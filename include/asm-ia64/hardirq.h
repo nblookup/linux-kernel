@@ -11,23 +11,17 @@
 #include <linux/threads.h>
 #include <linux/irq.h>
 
+/* entry.S is sensitive to the offsets of these fields */
 typedef struct {
+	unsigned int __softirq_active;
+	unsigned int __softirq_mask;
 	unsigned int __local_irq_count;
 	unsigned int __local_bh_count;
-	atomic_t __nmi_counter;
-# if NR_CPUS > 1
-	unsigned int __pad[13];		/* this assumes 64-byte cache-lines... */
-# endif
+	unsigned int __syscall_count;
+	unsigned int __nmi_count;	/* arch dependent */
 } ____cacheline_aligned irq_cpustat_t;
 
-extern irq_cpustat_t irq_stat[NR_CPUS];
-
-/*
- * Simple wrappers reducing source bloat
- */
-#define local_irq_count(cpu)	(irq_stat[(cpu)].__local_irq_count)
-#define local_bh_count(cpu)	(irq_stat[(cpu)].__local_bh_count)
-#define nmi_counter(cpu)	(irq_stat[(cpu)].__nmi_counter)
+#include <linux/irq_cpustat.h>	/* Standard mappings for irq_cpustat_t above */
 
 /*
  * Are we in an interrupt context? Either doing bottom half
@@ -45,8 +39,8 @@ extern irq_cpustat_t irq_stat[NR_CPUS];
 # define hardirq_trylock(cpu)		(local_irq_count(cpu) == 0)
 # define hardirq_endlock(cpu)		do { } while (0)
 
-# define irq_enter(cpu, irq)		(++local_irq_count(cpu))
-# define irq_exit(cpu, irq)		(--local_irq_count(cpu))
+# define irq_enter(cpu, irq)		(local_irq_count(cpu)++)
+# define irq_exit(cpu, irq)		(local_irq_count(cpu)--)
 
 # define synchronize_irq()		barrier()
 #else
@@ -54,8 +48,8 @@ extern irq_cpustat_t irq_stat[NR_CPUS];
 #include <asm/atomic.h>
 #include <asm/smp.h>
 
-extern unsigned char global_irq_holder;
-extern unsigned volatile int global_irq_lock;
+extern unsigned int global_irq_holder;
+extern volatile unsigned long global_irq_lock;
 
 static inline int irqs_running (void)
 {
@@ -78,7 +72,7 @@ static inline void release_irqlock(int cpu)
 
 static inline void irq_enter(int cpu, int irq)
 {
-	++local_irq_count(cpu);
+	local_irq_count(cpu)++;
 
 	while (test_bit(0,&global_irq_lock)) {
 		/* nothing */;
@@ -87,7 +81,7 @@ static inline void irq_enter(int cpu, int irq)
 
 static inline void irq_exit(int cpu, int irq)
 {
-	--local_irq_count(cpu);
+	local_irq_count(cpu)--;
 }
 
 static inline int hardirq_trylock(int cpu)

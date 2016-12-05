@@ -5,7 +5,7 @@
  *
  *		PF_INET protocol family socket handler.
  *
- * Version:	$Id: af_inet.c,v 1.108 2000/02/21 16:25:59 davem Exp $
+ * Version:	$Id: af_inet.c,v 1.127 2000/12/22 19:51:50 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -107,6 +107,9 @@
 #ifdef CONFIG_KMOD
 #include <linux/kmod.h>
 #endif
+#ifdef CONFIG_NET_DIVERT
+#include <linux/divert.h>
+#endif /* CONFIG_NET_DIVERT */
 #if defined(CONFIG_NET_RADIO) || defined(CONFIG_NET_PCMCIA_RADIO)
 #include <linux/wireless.h>		/* Note : will define WIRELESS_EXT */
 #endif	/* CONFIG_NET_RADIO || CONFIG_NET_PCMCIA_RADIO */
@@ -159,6 +162,8 @@ void inet_sock_destruct(struct sock *sk)
 
 	BUG_TRAP(atomic_read(&sk->rmem_alloc) == 0);
 	BUG_TRAP(atomic_read(&sk->wmem_alloc) == 0);
+	BUG_TRAP(sk->wmem_queued == 0);
+	BUG_TRAP(sk->forward_alloc == 0);
 
 	if (sk->protinfo.af_inet.opt)
 		kfree(sk->protinfo.af_inet.opt);
@@ -256,7 +261,6 @@ static int inet_autobind(struct sock *sk)
 			return -EAGAIN;
 		}
 		sk->sport = htons(sk->num);
-		sk->prot->hash(sk);
 	}
 	release_sock(sk);
 	return 0;
@@ -300,9 +304,6 @@ out:
 
 /*
  *	Create an inet socket.
- *
- *	FIXME: Gcc would generate much better code if we set the parameters
- *	up in in-memory structure order. Gcc68K even more so
  */
 
 static int inet_create(struct socket *sock, int protocol)
@@ -391,7 +392,6 @@ static int inet_create(struct socket *sock, int protocol)
 	if (sk->prot->init) {
 		int err = sk->prot->init(sk);
 		if (err != 0) {
-			sk->dead = 1;
 			inet_sock_release(sk);
 			return(err);
 		}
@@ -447,6 +447,9 @@ int inet_release(struct socket *sock)
 	return(0);
 }
 
+/* It is off by default, see below. */
+int sysctl_ip_nonlocal_bind;
+
 static int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 {
 	struct sockaddr_in *addr=(struct sockaddr_in *)uaddr;
@@ -461,8 +464,23 @@ static int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 
 	if (addr_len < sizeof(struct sockaddr_in))
 		return -EINVAL;
-		
+
 	chk_addr_ret = inet_addr_type(addr->sin_addr.s_addr);
+
+	/* Not specified by any standard per-se, however it breaks too
+	 * many applications when removed.  It is unfortunate since
+	 * allowing applications to make a non-local bind solves
+	 * several problems with systems using dynamic addressing.
+	 * (ie. your servers still start up even if your ISDN link
+	 *  is temporarily down)
+	 */
+	if (sysctl_ip_nonlocal_bind == 0 && 
+	    sk->protinfo.af_inet.freebind == 0 &&
+	    addr->sin_addr.s_addr != INADDR_ANY &&
+	    chk_addr_ret != RTN_LOCAL &&
+	    chk_addr_ret != RTN_MULTICAST &&
+	    chk_addr_ret != RTN_BROADCAST)
+		return -EADDRNOTAVAIL;
 
 	snum = ntohs(addr->sin_port);
 	if (snum && snum < PROT_SOCK && !capable(CAP_NET_BIND_SERVICE))
@@ -494,10 +512,13 @@ static int inet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 		goto out;
 	}
 
+	if (sk->rcv_saddr)
+		sk->userlocks |= SOCK_BINDADDR_LOCK;
+	if (snum)
+		sk->userlocks |= SOCK_BINDPORT_LOCK;
 	sk->sport = htons(sk->num);
 	sk->daddr = 0;
 	sk->dport = 0;
-	sk->prot->hash(sk);
 	sk_dst_reset(sk);
 	err = 0;
 out:
@@ -607,7 +628,7 @@ int inet_stream_connect(struct socket *sock, struct sockaddr * uaddr,
 		if (!timeo || !inet_wait_for_connect(sk, timeo))
 			goto out;
 
-		err = -ERESTARTSYS;
+		err = sock_intr_errno(timeo);
 		if (signal_pending(current))
 			goto out;
 	}
@@ -702,11 +723,7 @@ int inet_recvmsg(struct socket *sock, struct msghdr *msg, int size,
 	struct sock *sk = sock->sk;
 	int addr_len = 0;
 	int err;
-	
-	/* We may need to bind the socket. */
-	/* It is pretty strange. I would return error in this case --ANK */
-	if (sk->num==0 && inet_autobind(sk) != 0)
-		return -EAGAIN;
+
 	err = sk->prot->recvmsg(sk, msg, size, flags&MSG_DONTWAIT,
 				flags&~MSG_DONTWAIT, &addr_len);
 	if (err >= 0)
@@ -750,13 +767,14 @@ int inet_shutdown(struct socket *sock, int how)
 	}
 
 	switch (sk->state) {
-	default:	
+	case TCP_CLOSE:
+		err = -ENOTCONN;
+		/* Hack to wake up other listeners, who can poll for
+		   POLLHUP, even on eg. unconnected UDP sockets -- RR */
+	default:
 		sk->shutdown |= how;
 		if (sk->prot->shutdown)
 			sk->prot->shutdown(sk, how);
-		break;
-	case TCP_CLOSE:
-		err = -ENOTCONN;
 		break;
 
 	/* Remaining two branches are temporary solution for missing
@@ -847,6 +865,13 @@ static int inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			if (br_ioctl_hook != NULL)
 				return br_ioctl_hook(arg);
 #endif
+		case SIOCGIFDIVERT:
+		case SIOCSIFDIVERT:
+#ifdef CONFIG_NET_DIVERT
+			return(divert_ioctl(cmd, (struct divert_cf *) arg));
+#else
+			return -ENOPKG;
+#endif	/* CONFIG_NET_DIVERT */
 			return -ENOPKG;
 			
 		case SIOCADDDLCI:
@@ -893,45 +918,43 @@ static int inet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 }
 
 struct proto_ops inet_stream_ops = {
-	PF_INET,
+	family:		PF_INET,
 
-	inet_release,
-	inet_bind,
-	inet_stream_connect,
-	sock_no_socketpair,
-	inet_accept,
-	inet_getname, 
-	tcp_poll,
-	inet_ioctl,
-	inet_listen,
-	inet_shutdown,
-	inet_setsockopt,
-	inet_getsockopt,
-	sock_no_fcntl,
-	inet_sendmsg,
-	inet_recvmsg,
-	sock_no_mmap
+	release:	inet_release,
+	bind:		inet_bind,
+	connect:	inet_stream_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		inet_accept,
+	getname:	inet_getname, 
+	poll:		tcp_poll,
+	ioctl:		inet_ioctl,
+	listen:		inet_listen,
+	shutdown:	inet_shutdown,
+	setsockopt:	inet_setsockopt,
+	getsockopt:	inet_getsockopt,
+	sendmsg:	inet_sendmsg,
+	recvmsg:	inet_recvmsg,
+	mmap:		sock_no_mmap
 };
 
 struct proto_ops inet_dgram_ops = {
-	PF_INET,
+	family:		PF_INET,
 
-	inet_release,
-	inet_bind,
-	inet_dgram_connect,
-	sock_no_socketpair,
-	sock_no_accept,
-	inet_getname, 
-	datagram_poll,
-	inet_ioctl,
-	sock_no_listen,
-	inet_shutdown,
-	inet_setsockopt,
-	inet_getsockopt,
-	sock_no_fcntl,
-	inet_sendmsg,
-	inet_recvmsg,
-	sock_no_mmap
+	release:	inet_release,
+	bind:		inet_bind,
+	connect:	inet_dgram_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		sock_no_accept,
+	getname:	inet_getname, 
+	poll:		datagram_poll,
+	ioctl:		inet_ioctl,
+	listen:		sock_no_listen,
+	shutdown:	inet_shutdown,
+	setsockopt:	inet_setsockopt,
+	getsockopt:	inet_getsockopt,
+	sendmsg:	inet_sendmsg,
+	recvmsg:	inet_recvmsg,
+	mmap:		sock_no_mmap,
 };
 
 struct net_proto_family inet_family_ops = {
@@ -948,7 +971,7 @@ extern void tcp_v4_init(struct net_proto_family *);
  *	Called by socket.c on kernel startup.  
  */
  
-void __init inet_proto_init(struct net_proto *pro)
+static int __init inet_init(void)
 {
 	struct sk_buff *dummy_skb;
 	struct inet_protocol *p;
@@ -958,7 +981,7 @@ void __init inet_proto_init(struct net_proto *pro)
 	if (sizeof(struct inet_skb_parm) > sizeof(dummy_skb->cb))
 	{
 		printk(KERN_CRIT "inet_proto_init: panic\n");
-		return;
+		return -EINVAL;
 	}
 
 	/*
@@ -1032,4 +1055,6 @@ void __init inet_proto_init(struct net_proto *pro)
 	proc_net_create ("tcp", 0, tcp_get_info);
 	proc_net_create ("udp", 0, udp_get_info);
 #endif		/* CONFIG_PROC_FS */
+	return 0;
 }
+module_init(inet_init);

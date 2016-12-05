@@ -7,7 +7,7 @@
  * 
  * (In all truth, Jed Schimmel wrote all this code.)
  *
- * $Id: sgiwd93.c,v 1.20 2000/02/21 15:05:48 ralf Exp $
+ * $Id: sgiwd93.c,v 1.19 2000/02/04 07:40:47 ralf Exp $
  */
 #include <linux/init.h>
 #include <linux/types.h>
@@ -234,7 +234,7 @@ static void dma_stop(struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
 #endif
 }
 
-void sgiwd93_reset(uchar *base)
+void sgiwd93_reset(unsigned long base)
 {
 	struct hpc3_scsiregs *hregs = (struct hpc3_scsiregs *) base;
 
@@ -275,7 +275,9 @@ int __init sgiwd93_detect(Scsi_Host_Template *SGIblows)
 	SGIblows->proc_name = "SGIWD93";
 
 	sgiwd93_host = scsi_register(SGIblows, sizeof(struct WD33C93_hostdata));
-	sgiwd93_host->base = (unsigned char *) hregs;
+	if(sgiwd93_host == NULL)
+		return 0;
+	sgiwd93_host->base = (unsigned long) hregs;
 	sgiwd93_host->irq = SGI_WD93_0_IRQ;
 
 	buf = (uchar *) get_free_page(GFP_KERNEL);
@@ -294,22 +296,25 @@ int __init sgiwd93_detect(Scsi_Host_Template *SGIblows)
         /* set up second controller on the Indigo2 */
 	if(!sgi_guiness) {
 		sgiwd93_host1 = scsi_register(SGIblows, sizeof(struct WD33C93_hostdata));
-		sgiwd93_host1->base = (unsigned char *) hregs1;
-		sgiwd93_host1->irq = SGI_WD93_1_IRQ;
-
-		buf = (uchar *) get_free_page(GFP_KERNEL);
-		init_hpc_chain(buf);
-		dma_cache_wback_inv((unsigned long) buf, PAGE_SIZE);
-		/* HPC_SCSI_REG1 | 0x03 | KSEG1 */
-		wd33c93_init(sgiwd93_host1, (wd33c93_regs *) 0xbfbc8003,
-			     dma_setup, dma_stop, WD33C93_FS_16_20);
-
-		hdata1 = (struct WD33C93_hostdata *)sgiwd93_host1->hostdata;
-		hdata1->no_sync = 0;
-		hdata1->dma_bounce_buffer = (uchar *) (KSEG1ADDR(buf));
-		dma_cache_wback_inv((unsigned long) buf, PAGE_SIZE);
-
-		request_irq(SGI_WD93_1_IRQ, sgiwd93_intr, 0, "SGI WD93", (void *) sgiwd93_host1);
+		if(sgiwd93_host1 != NULL)
+		{
+			sgiwd93_host1->base = (unsigned long) hregs1;
+			sgiwd93_host1->irq = SGI_WD93_1_IRQ;
+	
+			buf = (uchar *) get_free_page(GFP_KERNEL);
+			init_hpc_chain(buf);
+			dma_cache_wback_inv((unsigned long) buf, PAGE_SIZE);
+			/* HPC_SCSI_REG1 | 0x03 | KSEG1 */
+			wd33c93_init(sgiwd93_host1, (wd33c93_regs *) 0xbfbc8003,
+				     dma_setup, dma_stop, WD33C93_FS_16_20);
+	
+			hdata1 = (struct WD33C93_hostdata *)sgiwd93_host1->hostdata;
+			hdata1->no_sync = 0;
+			hdata1->dma_bounce_buffer = (uchar *) (KSEG1ADDR(buf));
+			dma_cache_wback_inv((unsigned long) buf, PAGE_SIZE);
+	
+			request_irq(SGI_WD93_1_IRQ, sgiwd93_intr, 0, "SGI WD93", (void *) sgiwd93_host1);
+		}
 	}
 	
 	called = 1;
@@ -317,17 +322,13 @@ int __init sgiwd93_detect(Scsi_Host_Template *SGIblows)
 	return 1; /* Found one. */
 }
 
-#ifdef MODULE
-
 #define HOSTS_C
 
 #include "sgiwd93.h"
 
-Scsi_Host_Template driver_template = SGIWD93_SCSI;
+static Scsi_Host_Template driver_template = SGIWD93_SCSI;
 
 #include "scsi_module.c"
-
-#endif
 
 int sgiwd93_release(struct Scsi_Host *instance)
 {

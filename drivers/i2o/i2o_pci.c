@@ -6,6 +6,7 @@
  *	
  *	Written by Alan Cox, Building Number Three Ltd
  * 	Modified by Deepak Saxena <deepak@plexity.net>
+ * 	Modified by Boji T Kannanthanam <boji.t.kannanthanam@intel.com>
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -53,8 +54,10 @@ static void i2o_pci_dispose(struct i2o_controller *c)
 	iounmap(((u8 *)c->post_port)-0x40);
 
 #ifdef CONFIG_MTRR
-	if(c->bus.pci.mtrr_reg > 0)
-		mtrr_del(c->bus.pci.mtrr_reg, 0, 0);
+	if(c->bus.pci.mtrr_reg0 > 0)
+		mtrr_del(c->bus.pci.mtrr_reg0, 0, 0);
+	if(c->bus.pci.mtrr_reg1 > 0)
+		mtrr_del(c->bus.pci.mtrr_reg1, 0, 0);
 #endif
 }
 
@@ -129,9 +132,9 @@ int __init i2o_pci_install(struct pci_dev *dev)
 	for(i=0; i<6; i++)
 	{
 		/* Skip I/O spaces */
-		if(!(dev->resource[i].flags&PCI_BASE_ADDRESS_SPACE))
+		if(!(pci_resource_flags(dev, i) & IORESOURCE_IO))
 		{
-			memptr=dev->resource[i].start;
+			memptr = pci_resource_start(dev, i);
 			break;
 		}
 	}
@@ -176,8 +179,22 @@ int __init i2o_pci_install(struct pci_dev *dev)
 	 * Enable Write Combining MTRR for IOP's memory region
 	 */
 #ifdef CONFIG_MTRR
-	c->bus.pci.mtrr_reg = 
+	c->bus.pci.mtrr_reg0 =
 		mtrr_add(c->mem_phys, size, MTRR_TYPE_WRCOMB, 1);
+/*
+* If it is an INTEL i960 I/O processor then set the first 64K to Uncacheable
+* since the region contains the Messaging unit which shouldn't be cached.
+*/
+	c->bus.pci.mtrr_reg1 = -1;
+	if(dev->vendor == PCI_VENDOR_ID_INTEL)
+	{
+	printk(KERN_INFO "I2O: MTRR workaround for Intel i960 processor\n"); 
+	c->bus.pci.mtrr_reg1 =
+		mtrr_add(c->mem_phys, 65536, MTRR_TYPE_UNCACHABLE, 1);
+	if(c->bus.pci.mtrr_reg1< 0)
+		printk(KERN_INFO "i2o_pci: Error in setting MTRR_TYPE_UNCACHABLE\n");
+	}
+
 #endif
 
 	I2O_IRQ_WRITE32(c,0xFFFFFFFF);
@@ -230,7 +247,8 @@ int __init i2o_pci_scan(void)
 	
 	printk(KERN_INFO "i2o: Checking for PCI I2O controllers...\n");
 
-	pci_for_each_dev(dev) {
+	pci_for_each_dev(dev)	
+	{
 		if((dev->class>>8)!=PCI_CLASS_INTELLIGENT_I2O)
 			continue;
 		if((dev->class&0xFF)>1)
@@ -238,6 +256,8 @@ int __init i2o_pci_scan(void)
 			printk(KERN_INFO "i2o: I2O Controller found but does not support I2O 1.5 (skipping).\n");
 			continue;
 		}
+		if (pci_enable_device(dev))
+			continue;
 		printk(KERN_INFO "i2o: I2O controller on bus %d at %d.\n",
 			dev->bus->number, dev->devfn);
 		pci_set_master(dev);

@@ -63,31 +63,25 @@
 static int __init eth_setup(char *str)
 {
 	int ints[5];
-	struct net_device *d;
+	struct ifmap map;
 
 	str = get_options(str, ARRAY_SIZE(ints), ints);
-
 	if (!str || !*str)
 		return 0;
 
-	d = dev_base;
-	while (d) 
-	{
-		if (!strcmp(str,d->name)) 
-		{
-			if (ints[0] > 0)
-				d->irq=ints[1];
-			if (ints[0] > 1)
-				d->base_addr=ints[2];
-			if (ints[0] > 2)
-				d->mem_start=ints[3];
-			if (ints[0] > 3)
-				d->mem_end=ints[4];
-			break;
-		}
-		d=d->next;
-	}
-	return 1;
+ 	/* Save settings */
+ 	memset(&map, -1, sizeof(map));
+	if (ints[0] > 0)
+		map.irq = ints[1];
+	if (ints[0] > 1)
+		map.base_addr = ints[2];
+	if (ints[0] > 2)
+		map.mem_start = ints[3];
+	if (ints[0] > 3)
+		map.mem_end = ints[4];
+
+	/* Add new entry to the list */
+	return netdev_boot_setup_add(str, &map);
 }
 
 __setup("ether=", eth_setup);
@@ -264,43 +258,3 @@ void eth_header_cache_update(struct hh_cache *hh, struct net_device *dev, unsign
 {
 	memcpy(((u8*)hh->hh_data) + 2, haddr, dev->addr_len);
 }
-
-#if 0 /*ndef CONFIG_IP_ROUTER*/
-/* This one is only slowdown with checksumming in user process context. --ANK */
-
-/*
- *	Copy from an ethernet device memory space to an sk_buff while checksumming if IP
- */
- 
-void eth_copy_and_sum(struct sk_buff *dest, unsigned char *src, int length, int base)
-{
-	struct ethhdr *eth;
-	struct iphdr *iph;
-	int ip_length;
-
-	eth=(struct ethhdr *)src;
-	if(eth->h_proto!=htons(ETH_P_IP))
-	{
-		memcpy(dest->data,src,length);
-		return;
-	}
-	/*
-	 * We have to watch for padded packets. The csum doesn't include the
-	 * padding, and there is no point in copying the padding anyway.
-	 * We have to use the smaller of length and ip_length because it
-	 * can happen that ip_length > length.
-	 */
-	memcpy(dest->data,src,sizeof(struct iphdr)+ETH_HLEN);	/* ethernet is always >= 34 */
-	length -= sizeof(struct iphdr) + ETH_HLEN;
-	iph=(struct iphdr*)(src+ETH_HLEN);
-	ip_length = ntohs(iph->tot_len) - sizeof(struct iphdr);
-
-	/* Also watch out for bogons - min IP size is 8 (rfc-1042) */
-	if ((ip_length <= length) && (ip_length > 7))
-		length=ip_length;
-
-	dest->csum=csum_partial_copy_nocheck(src+sizeof(struct iphdr)+ETH_HLEN,dest->data+sizeof(struct iphdr)+ETH_HLEN,length,base);
-	dest->ip_summed=1;
-}
-
-#endif /* !(CONFIG_IP_ROUTER) */

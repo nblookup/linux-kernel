@@ -7,7 +7,7 @@
  *
  *	Based on linux/ipv4/udp.c
  *
- *	$Id: udp.c,v 1.51 2000/02/27 19:51:51 davem Exp $
+ *	$Id: udp.c,v 1.59 2000/11/28 13:38:38 davem Exp $
  *
  *	Fixes:
  *	Hideaki YOSHIFUJI	:	sin6_scope_id support
@@ -83,7 +83,7 @@ static int udp_v6_get_port(struct sock *sk, unsigned short snum)
 			} while ((sk = sk->next) != NULL);
 			best_size_so_far = size;
 			best = result;
-		next:
+		next:;
 		}
 		result = best;
 		for(;; result += UDP_HTABLE_SIZE) {
@@ -109,13 +109,25 @@ gotit:
 			    (!sk2->rcv_saddr ||
 			     addr_type == IPV6_ADDR_ANY ||
 			     !ipv6_addr_cmp(&sk->net_pinfo.af_inet6.rcv_saddr,
-					    &sk2->net_pinfo.af_inet6.rcv_saddr)) &&
+					    &sk2->net_pinfo.af_inet6.rcv_saddr) ||
+			     (addr_type == IPV6_ADDR_MAPPED &&
+			      sk2->family == AF_INET &&
+			      sk->rcv_saddr == sk2->rcv_saddr)) &&
 			    (!sk2->reuse || !sk->reuse))
 				goto fail;
 		}
 	}
 
 	sk->num = snum;
+	if (sk->pprev == NULL) {
+		struct sock **skp = &udp_hash[snum & (UDP_HTABLE_SIZE - 1)];
+		if ((sk->next = *skp) != NULL)
+			(*skp)->pprev = &sk->next;
+		*skp = sk;
+		sk->pprev = skp;
+		sock_prot_inc_use(sk->prot);
+		sock_hold(sk);
+	}
 	write_unlock_bh(&udp_hash_lock);
 	return 0;
 
@@ -126,16 +138,7 @@ fail:
 
 static void udp_v6_hash(struct sock *sk)
 {
-	struct sock **skp = &udp_hash[sk->num & (UDP_HTABLE_SIZE - 1)];
-
-	write_lock_bh(&udp_hash_lock);
-	if ((sk->next = *skp) != NULL)
-		(*skp)->pprev = &sk->next;
-	*skp = sk;
-	sk->pprev = skp;
-	sock_prot_inc_use(sk->prot);
- 	sock_hold(sk);
- 	write_unlock_bh(&udp_hash_lock);
+	BUG();
 }
 
 static void udp_v6_unhash(struct sock *sk)
@@ -146,6 +149,7 @@ static void udp_v6_unhash(struct sock *sk)
 			sk->next->pprev = sk->pprev;
 		*sk->pprev = sk->next;
 		sk->pprev = NULL;
+		sk->num = 0;
 		sock_prot_dec_use(sk->prot);
 		__sock_put(sk);
 	}
@@ -270,7 +274,6 @@ ipv4_connected:
 			ipv6_addr_set(&np->saddr, 0, 0, 
 				      __constant_htonl(0x0000ffff),
 				      sk->saddr);
-
 		}
 
 		if(ipv6_addr_any(&np->rcv_saddr)) {
@@ -343,7 +346,7 @@ ipv4_connected:
 
 		if(ipv6_addr_any(&np->rcv_saddr)) {
 			ipv6_addr_copy(&np->rcv_saddr, &saddr);
-			sk->rcv_saddr = 0xffffffff;
+			sk->rcv_saddr = LOOPBACK4_IPV6;
 		}
 		sk->state = TCP_ESTABLISHED;
 	}
@@ -400,7 +403,7 @@ int udpv6_recvmsg(struct sock *sk, struct msghdr *msg, int len,
 	if (err)
 		goto out_free;
 
-	sk->stamp=skb->stamp;
+	sock_recv_timestamp(msg, sk, skb);
 
 	/* Copy the address. */
 	if (msg->msg_name) {
@@ -868,6 +871,8 @@ static int udpv6_sendmsg(struct sock *sk, struct msghdr *msg, int ulen)
 
 	fl.proto = IPPROTO_UDP;
 	fl.fl6_dst = daddr;
+	if (fl.fl6_src == NULL && !ipv6_addr_any(&np->saddr))
+		fl.fl6_src = &np->saddr;
 	fl.uli_u.ports.dport = udh.uh.dest;
 	fl.uli_u.ports.sport = udh.uh.source;
 
@@ -901,15 +906,11 @@ static void get_udp6_sock(struct sock *sp, char *tmpbuf, int i)
 {
 	struct in6_addr *dest, *src;
 	__u16 destp, srcp;
-	int timer_active;
-	unsigned long timer_expires;
 
 	dest  = &sp->net_pinfo.af_inet6.daddr;
 	src   = &sp->net_pinfo.af_inet6.rcv_saddr;
 	destp = ntohs(sp->dport);
 	srcp  = ntohs(sp->sport);
-	timer_active = (sp->timer.prev != NULL) ? 2 : 0;
-	timer_expires = (timer_active == 2 ? sp->timer.expires : jiffies);
 	sprintf(tmpbuf,
 		"%4d: %08X%08X%08X%08X:%04X %08X%08X%08X%08X:%04X "
 		"%02X %08X:%08X %02X:%08lX %08X %5d %8d %ld %d %p",
@@ -920,9 +921,9 @@ static void get_udp6_sock(struct sock *sp, char *tmpbuf, int i)
 		dest->s6_addr32[2], dest->s6_addr32[3], destp,
 		sp->state, 
 		atomic_read(&sp->wmem_alloc), atomic_read(&sp->rmem_alloc),
-		timer_active, timer_expires-jiffies, 0,
-		sp->socket->inode->i_uid, 0,
-		sp->socket ? sp->socket->inode->i_ino : 0,
+		0, 0L, 0,
+		sock_i_uid(sp), 0,
+		sock_i_ino(sp),
 		atomic_read(&sp->refcnt), sp);
 }
 
@@ -951,7 +952,7 @@ int udp6_get_info(char *buffer, char **start, off_t offset, int length)
 			if (sk->family != PF_INET6)
 				continue;
 			pos += LINE_LEN+1;
-			if (pos < offset)
+			if (pos <= offset)
 				continue;
 			get_udp6_sock(sk, tmpbuf, i);
 			len += sprintf(buffer+len, LINE_FMT, tmpbuf);
@@ -972,24 +973,20 @@ out:
 }
 
 struct proto udpv6_prot = {
-	udpv6_close,			/* close */
-	udpv6_connect,			/* connect */
-	udp_disconnect,			/* disconnect */
-	NULL,				/* accept */
-	udp_ioctl,			/* ioctl */
-	NULL,				/* init */
-	inet6_destroy_sock,		/* destroy */
-	NULL,				/* shutdown */
-	ipv6_setsockopt,		/* setsockopt */
-	ipv6_getsockopt,		/* getsockopt */
-	udpv6_sendmsg,			/* sendmsg */
-	udpv6_recvmsg,			/* recvmsg */
-	NULL,				/* bind */
-	udpv6_queue_rcv_skb,		/* backlog_rcv */
-	udp_v6_hash,			/* hash */
-	udp_v6_unhash,			/* unhash */
-	udp_v6_get_port,		/* get_port */
-	"UDP",				/* name */
+	name:		"UDP",
+	close:		udpv6_close,
+	connect:	udpv6_connect,
+	disconnect:	udp_disconnect,
+	ioctl:		udp_ioctl,
+	destroy:	inet6_destroy_sock,
+	setsockopt:	ipv6_setsockopt,
+	getsockopt:	ipv6_getsockopt,
+	sendmsg:	udpv6_sendmsg,
+	recvmsg:	udpv6_recvmsg,
+	backlog_rcv:	udpv6_queue_rcv_skb,
+	hash:		udp_v6_hash,
+	unhash:		udp_v6_unhash,
+	get_port:	udp_v6_get_port,
 };
 
 void __init udpv6_init(void)

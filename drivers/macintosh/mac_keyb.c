@@ -16,7 +16,7 @@
  *
  * - Standard 1 button mouse
  * - All standard Apple Extended protocol (handler ID 4)
- * - mouseman and trackman mice & trackballs 
+ * - mouseman and trackman mice & trackballs
  * - PowerBook Trackpad (default setup: enable tapping)
  * - MicroSpeed mouse & trackball (needs testing)
  * - CH Products Trackball Pro (needs testing)
@@ -50,6 +50,10 @@
 #include <linux/pmu.h>
 #include <linux/kbd_kern.h>
 #include <linux/kbd_ll.h>
+
+#ifdef CONFIG_PMAC_BACKLIGHT
+#include <asm/backlight.h>
+#endif
 
 #define KEYB_KEYREG	0	/* register # for key up/down data */
 #define KEYB_LEDREG	2	/* register # for leds on ADB keyboard */
@@ -225,7 +229,7 @@ static u_short macctrl_alt_map[NR_KEYS] __initdata = {
 
 
 static void kbd_repeat(unsigned long);
-static struct timer_list repeat_timer = { NULL, NULL, 0, 0, kbd_repeat };
+static struct timer_list repeat_timer = { function: kbd_repeat };
 static int last_keycode;
 
 static void mackeyb_probe(void);
@@ -250,8 +254,6 @@ int adb_emulate_buttons = 0;
 int adb_button2_keycode = 0x7d;	/* right control key */
 int adb_button3_keycode = 0x7c; /* right option key */
 #endif
-
-extern int console_loglevel;
 
 extern struct kbd_struct kbd_table[];
 extern wait_queue_head_t keypress_wait;
@@ -344,7 +346,7 @@ input_keycode(int keycode, int repeat)
 #ifdef CONFIG_ADBMOUSE
 	/*
 	 * XXX: Add mouse button 2+3 fake codes here if mouse open.
-	 *	Keep track of 'button' states here as we only send 
+	 *	Keep track of 'button' states here as we only send
 	 *	single up/down events!
 	 *	Really messy; might need to check if keyboard is in
 	 *	VC_RAW mode.
@@ -585,70 +587,50 @@ mouse_input(unsigned char *data, int nb, struct pt_regs *regs, int autopoll)
 }
 #endif /* CONFIG_ADBMOUSE */
 
-/* XXX Needs to get rid of this, see comments in pmu.c */
-extern int backlight_level;
-
 static void
 buttons_input(unsigned char *data, int nb, struct pt_regs *regs, int autopoll)
 {
+#ifdef CONFIG_PMAC_BACKLIGHT
+	int backlight = get_backlight_level();
+
 	/*
 	 * XXX: Where is the contrast control for the passive?
 	 *  -- Cort
 	 */
-	 
+
 	/* Ignore data from register other than 0 */
-#if 0
-	if ((adb_hardware != ADB_VIAPMU) || (data[0] & 0x3) || (nb < 2))
-#else
 	if ((data[0] & 0x3) || (nb < 2))
-#endif
 		return;
-		
-	switch (data[1]&0xf )
-	{
-		/* mute */
-		case 0x8:
-			/* down event */
-			if ( data[1] == (data[1]&0xf) ) {
-			}
+
+	switch (data[1]) {
+	case 0x8:		/* mute */
+		break;
+
+	case 0x7:		/* contrast decrease */
+		break;
+
+	case 0x6:		/* contrast increase */
+		break;
+
+	case 0xa:		/* brightness decrease */
+		if (backlight < 0)
 			break;
-		/* contrast decrease */
-		case 0x7:
-			/* down event */
-			if ( data[1] == (data[1]&0xf) ) {
-			}
+		if (backlight > BACKLIGHT_OFF)
+			set_backlight_level(backlight-1);
+		else
+			set_backlight_level(BACKLIGHT_OFF);
+		break;
+
+	case 0x9:		/* brightness increase */
+		if (backlight < 0)
 			break;
-		/* contrast increase */
-		case 0x6:
-			/* down event */
-			if ( data[1] == (data[1]&0xf) ) {
-			}
-			break;
-		/* brightness decrease */
-		case 0xa:
-			/* down event */
-#ifdef CONFIG_PPC
-			if ( data[1] == (data[1]&0xf) ) {
-				if (backlight_level > 2)
-					pmu_set_brightness(backlight_level-2);
-				else
-					pmu_set_brightness(0);
-			}
-#endif
-			break;
-		/* brightness increase */
-		case 0x9:
-			/* down event */
-#ifdef CONFIG_PPC
-			if ( data[1] == (data[1]&0xf) ) {
-				if (backlight_level < 0x1e)
-					pmu_set_brightness(backlight_level+2);
-				else 
-					pmu_set_brightness(0x1f);
-			}
-#endif
-			break;
+		if (backlight < BACKLIGHT_MAX)
+			set_backlight_level(backlight+1);
+		else 
+			set_backlight_level(BACKLIGHT_MAX);
+		break;
 	}
+#endif /* CONFIG_PMAC_BACKLIGHT */
 }
 
 /* Map led flags as defined in kbd_kern.h to bits for Apple keyboard. */
@@ -736,7 +718,7 @@ void __init mackbd_init_hw(void)
 	led_request.complete = 1;
 
 	mackeyb_probe();
-	
+
 	notifier_chain_register(&adb_client_list, &mackeyb_adb_notifier);
 }
 
@@ -744,11 +726,11 @@ static int
 adb_message_handler(struct notifier_block *this, unsigned long code, void *x)
 {
 	unsigned long flags;
-	
+
 	switch (code) {
 	case ADB_MSG_PRE_RESET:
 	case ADB_MSG_POWERDOWN:
-	    	/* Stop the repeat timer. Autopoll is already off at this point */
+		/* Stop the repeat timer. Autopoll is already off at this point */
 		save_flags(flags);
 		cli();
 		del_timer(&repeat_timer);
@@ -758,7 +740,7 @@ adb_message_handler(struct notifier_block *this, unsigned long code, void *x)
 		while(!led_request.complete)
 			adb_poll();
 		break;
-			
+
 	case ADB_MSG_POST_RESET:
 		mackeyb_probe();
 		break;
@@ -841,7 +823,7 @@ mackeyb_probe(void)
 		    || (adb_mouse_kinds[id] == ADBMOUSE_MICROSPEED)) {
 			init_microspeed(id);
 		} else if (adb_mouse_kinds[id] == ADBMOUSE_MS_A3) {
-			init_ms_a3(id);	
+			init_ms_a3(id);
 		}  else if (adb_mouse_kinds[id] ==  ADBMOUSE_EXTENDED) {
 			/*
 			 * Register 1 is usually used for device
@@ -854,7 +836,7 @@ mackeyb_probe(void)
 
 			if ((req.reply_len) &&
 			    (req.reply[1] == 0x9a) && ((req.reply[2] == 0x21)
-			    	|| (req.reply[2] == 0x20)))
+				|| (req.reply[2] == 0x20)))
 				init_trackball(id);
 			else if ((req.reply_len >= 4) &&
 			    (req.reply[1] == 0x74) && (req.reply[2] == 0x70) &&
@@ -877,10 +859,10 @@ mackeyb_probe(void)
         }
 }
 
-static void 
+static void
 init_trackpad(int id)
 {
-	struct adb_request req;	
+	struct adb_request req;
 	unsigned char r1_buffer[8];
 
 	printk(" (trackpad)");
@@ -907,15 +889,15 @@ init_trackpad(int id)
 
             adb_request(&req, NULL, ADBREQ_SYNC, 9,
 	        ADB_WRITEREG(id,2),
-	    	    0x99,
-	    	    0x94,
-	    	    0x19,
-	    	    0xff,
-	    	    0xb2,
-	    	    0x8a,
-	    	    0x1b,
-	    	    0x50);
-	    
+		    0x99,
+		    0x94,
+		    0x19,
+		    0xff,
+		    0xb2,
+		    0x8a,
+		    0x1b,
+		    0x50);
+
 	    adb_request(&req, NULL, ADBREQ_SYNC, 9,
 	        ADB_WRITEREG(id,1),
 	            r1_buffer[0],
@@ -929,13 +911,13 @@ init_trackpad(int id)
         }
 }
 
-static void 
+static void
 init_trackball(int id)
 {
 	struct adb_request req;
-	
+
 	printk(" (trackman/mouseman)");
-	
+
 	adb_mouse_kinds[id] = ADBMOUSE_TRACKBALL;
 
 	adb_request(&req, NULL, ADBREQ_SYNC, 3,
@@ -971,7 +953,7 @@ init_turbomouse(int id)
         printk(" (TurboMouse 5)");
 
 	adb_mouse_kinds[id] = ADBMOUSE_TURBOMOUSE5;
-	
+
 	adb_request(&req, NULL, ADBREQ_SYNC, 1, ADB_FLUSH(id));
 
 	adb_request(&req, NULL, ADBREQ_SYNC, 1, ADB_FLUSH(3));
@@ -1012,7 +994,7 @@ init_microspeed(int id)
 
 	/* This will initialize mice using the Microspeed, MacPoint and
 	   other compatible firmware. Bit 12 enables extended protocol.
-	   
+
 	   Register 1 Listen (4 Bytes)
             0 -  3     Button is mouse (set also for double clicking!!!)
             4 -  7     Button is locking (affects change speed also)
@@ -1027,7 +1009,7 @@ init_microspeed(int id)
             0 -  7     Product code
             8 - 23     undefined, reserved
            24 - 31     Version number
-        
+
        Speed 0 is max. 1 to 255 set speed in increments of 1/256 of max.
  */
 	adb_request(&req, NULL, ADBREQ_SYNC, 5,
@@ -1051,7 +1033,7 @@ init_ms_a3(int id)
 	ADB_WRITEREG(id, 0x2),
 	    0x00,
 	    0x07);
- 
+
  	adb_request(&req, NULL, ADBREQ_SYNC, 1, ADB_FLUSH(id));
  }
 

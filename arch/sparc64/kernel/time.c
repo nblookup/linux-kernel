@@ -1,4 +1,4 @@
-/* $Id: time.c,v 1.24 2000/03/02 02:00:25 davem Exp $
+/* $Id: time.c,v 1.32 2000/09/22 23:02:13 davem Exp $
  * time.c: UltraSparc timer and TOD clock support.
  *
  * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -30,6 +30,7 @@
 #include <asm/fhc.h>
 #include <asm/pbm.h>
 #include <asm/ebus.h>
+#include <asm/starfire.h>
 
 extern rwlock_t xtime_lock;
 
@@ -46,8 +47,8 @@ static int set_rtc_mmss(unsigned long);
  *       interrupts, one at level14 and one with softint bit 0.
  */
 unsigned long timer_tick_offset;
-static unsigned long timer_tick_compare;
-static unsigned long timer_ticks_per_usec_quotient;
+unsigned long timer_tick_compare;
+unsigned long timer_ticks_per_usec_quotient;
 
 static __inline__ void timer_check_rtc(void)
 {
@@ -67,6 +68,34 @@ static __inline__ void timer_check_rtc(void)
 	}
 }
 
+void sparc64_do_profile(unsigned long pc, unsigned long o7)
+{
+	if (prof_buffer && current->pid) {
+		extern int _stext;
+		extern int rwlock_impl_begin, rwlock_impl_end;
+		extern int atomic_impl_begin, atomic_impl_end;
+		extern int __memcpy_begin, __memcpy_end;
+		extern int __bitops_begin, __bitops_end;
+
+		if ((pc >= (unsigned long) &atomic_impl_begin &&
+		     pc < (unsigned long) &atomic_impl_end) ||
+		    (pc >= (unsigned long) &rwlock_impl_begin &&
+		     pc < (unsigned long) &rwlock_impl_end) ||
+		    (pc >= (unsigned long) &__memcpy_begin &&
+		     pc < (unsigned long) &__memcpy_end) ||
+		    (pc >= (unsigned long) &__bitops_begin &&
+		     pc < (unsigned long) &__bitops_end))
+			pc = o7;
+
+		pc -= (unsigned long) &_stext;
+		pc >>= prof_shift;
+
+		if(pc >= prof_len)
+			pc = prof_len - 1;
+		atomic_inc((atomic_t *)&prof_buffer[pc]);
+	}
+}
+
 static void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	unsigned long ticks, pstate;
@@ -74,6 +103,10 @@ static void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	write_lock(&xtime_lock);
 
 	do {
+#ifndef CONFIG_SMP
+		if ((regs->tstate & TSTATE_PRIV) != 0)
+			sparc64_do_profile(regs->tpc, regs->u_regs[UREG_RETPC]);
+#endif
 		do_timer(regs);
 
 		/* Guarentee that the following sequences execute
@@ -123,7 +156,7 @@ static void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	write_unlock(&xtime_lock);
 }
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 void timer_tick_interrupt(struct pt_regs *regs)
 {
 	write_lock(&xtime_lock);
@@ -144,37 +177,6 @@ void timer_tick_interrupt(struct pt_regs *regs)
 	write_unlock(&xtime_lock);
 }
 #endif
-
-/* Converts Gregorian date to seconds since 1970-01-01 00:00:00.
- * Assumes input in normal date format, i.e. 1980-12-31 23:59:59
- * => year=1980, mon=12, day=31, hour=23, min=59, sec=59.
- *
- * [For the Julian calendar (which was used in Russia before 1917,
- * Britain & colonies before 1752, anywhere else before 1582,
- * and is still in use by some communities) leave out the
- * -year/100+year/400 terms, and add 10.]
- *
- * This algorithm was first published by Gauss (I think).
- *
- * WARNING: this function will overflow on 2106-02-07 06:28:16 on
- * machines were long is 32-bit! (However, as time_t is signed, we
- * will already get problems at other places on 2038-01-19 03:14:08)
- */
-static inline unsigned long mktime(unsigned int year, unsigned int mon,
-	unsigned int day, unsigned int hour,
-	unsigned int min, unsigned int sec)
-{
-	if (0 >= (int) (mon -= 2)) {	/* 1..12 -> 11,12,1..10 */
-		mon += 12;	/* Puts Feb last since it has leap day */
-		year -= 1;
-	}
-	return (((
-	    (unsigned long)(year/4 - year/100 + year/400 + 367*mon/12 + day) +
-	      year*365 - 719499
-	    )*24 + hour /* now have hours */
-	   )*60 + min /* now have minutes */
-	  )*60 + sec; /* finally seconds */
-}
 
 /* Kick start a stopped clock (procedure from the Sun NVRAM/hostid FAQ). */
 static void __init kick_start_clock(void)
@@ -303,6 +305,20 @@ void __init clock_probe(void)
 #ifdef CONFIG_PCI
 	struct linux_ebus *ebus = NULL;
 #endif
+
+
+	if (this_is_starfire) {
+		/* davem suggests we keep this within the 4M locked kernel image */
+		static char obp_gettod[256];
+		static u32 unix_tod;
+
+		sprintf(obp_gettod, "h# %08x unix-gettod",
+			(unsigned int) (long) &unix_tod);
+		prom_feval(obp_gettod);
+		xtime.tv_sec = unix_tod;
+		xtime.tv_usec = 0;
+		return;
+	}
 
 	__save_and_cli(flags);
 
@@ -470,60 +486,11 @@ static __inline__ unsigned long do_gettimeoffset(void)
 	return (ticks * timer_ticks_per_usec_quotient) >> 32UL;
 }
 
-/* This need not obtain the xtime_lock as it is coded in
- * an implicitly SMP safe way already.
- */
-void do_gettimeofday(struct timeval *tv)
-{
-	/* Load doubles must be used on xtime so that what we get
-	 * is guarenteed to be atomic, this is why we can run this
-	 * with interrupts on full blast.  Don't touch this... -DaveM
-	 *
-	 * Note with time_t changes to the timeval type, I must now use
-	 * nucleus atomic quad 128-bit loads.
-	 */
-	__asm__ __volatile__("
-	sethi	%hi(timer_tick_offset), %g3
-	sethi	%hi(xtime), %g2
-	sethi	%hi(timer_tick_compare), %g1
-	ldx	[%g3 + %lo(timer_tick_offset)], %g3
-	or	%g2, %lo(xtime), %g2
-	or	%g1, %lo(timer_tick_compare), %g1
-1:	ldda	[%g2] 0x24, %o4
-	rd	%tick, %o1
-	ldx	[%g1], %g7
-	ldda	[%g2] 0x24, %o2
-	xor	%o4, %o2, %o2
-	xor	%o5, %o3, %o3
-	orcc	%o2, %o3, %g0
-	bne,pn	%xcc, 1b
-	 sethi	%hi(lost_ticks), %o2
-	sethi	%hi(timer_ticks_per_usec_quotient), %o3
-	ldx	[%o2 + %lo(lost_ticks)], %o2
-	add	%g3, %o1, %o1
-	ldx	[%o3 + %lo(timer_ticks_per_usec_quotient)], %o3
-	sub	%o1, %g7, %o1
-	mulx	%o3, %o1, %o1
-	brz,pt	%o2, 1f
-	 srlx	%o1, 32, %o1
-	sethi	%hi(10000), %g2
-	or	%g2, %lo(10000), %g2
-	add	%o1, %g2, %o1
-1:	sethi	%hi(1000000), %o2
-	srlx	%o5, 32, %o5
-	or	%o2, %lo(1000000), %o2
-	add	%o5, %o1, %o5
-	cmp	%o5, %o2
-	bl,a,pn	%xcc, 1f
-	 stx	%o4, [%o0 + 0x0]
-	add	%o4, 0x1, %o4
-	sub	%o5, %o2, %o5
-	stx	%o4, [%o0 + 0x0]
-1:	st	%o5, [%o0 + 0x8]");
-}
-
 void do_settimeofday(struct timeval *tv)
 {
+	if (this_is_starfire)
+		return;
+
 	write_lock_irq(&xtime_lock);
 
 	tv->tv_usec -= do_gettimeoffset();
@@ -547,7 +514,10 @@ static int set_rtc_mmss(unsigned long nowtime)
 	unsigned long regs = mstk48t02_regs;
 	u8 tmp;
 
-	/* Not having a register set can lead to trouble. */
+	/* 
+	 * Not having a register set can lead to trouble.
+	 * Also starfire doesnt have a tod clock.
+	 */
 	if (!regs) 
 		return -1;
 

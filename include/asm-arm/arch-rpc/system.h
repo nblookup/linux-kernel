@@ -1,14 +1,37 @@
 /*
- * linux/include/asm-arm/arch-rpc/system.h
+ *  linux/include/asm-arm/arch-rpc/system.h
  *
- * Copyright (c) 1996-1999 Russell King.
+ *  Copyright (C) 1996-1999 Russell King.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 #include <asm/arch/hardware.h>
-#include <asm/iomd.h>
+#include <asm/hardware/iomd.h>
 #include <asm/io.h>
 
-#define arch_do_idle()		cpu_do_idle()
-#define arch_power_off()	do { } while (0)
+static void arch_idle(void)
+{
+	unsigned long start_idle;
+
+	start_idle = jiffies;
+
+	do {
+		if (current->need_resched || hlt_counter)
+			goto slow_out;
+		cpu_do_idle(IDLE_WAIT_FAST);
+	} while (time_before(jiffies, start_idle + HZ/50));
+
+	cpu_do_idle(IDLE_CLOCK_SLOW);
+
+	while (!current->need_resched && !hlt_counter) {
+		cpu_do_idle(IDLE_WAIT_SLOW);
+	}
+
+	cpu_do_idle(IDLE_CLOCK_FAST);
+slow_out:
+}
 
 extern __inline__ void arch_reset(char mode)
 {
@@ -18,8 +41,8 @@ extern __inline__ void arch_reset(char mode)
 
 	outb(0, IOMD_ROMCR0);
 
-	__asm__ __volatile__(
-		"mcr p15, 0, %0, c1, c0, 0\n\t"
-		"mov pc, #0"
-		 : : "r" (cpu_reset()));
+	/*
+	 * Jump into the ROM
+	 */
+	cpu_reset(0);
 }

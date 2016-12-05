@@ -11,25 +11,35 @@
  * Copyright (C) 1999 Don Dugger <Don.Dugger@intel.com>
  */
 /*
+ * ia64_switch_to now places correct virtual mapping in in TR2 for
+ * kernel stack. This allows us to handle interrupts without changing
+ * to physical mode.
+ *
+ * ar.k4 is now used to hold last virtual map address
+ * 
+ * Jonathan Nickin	<nicklin@missioncriticallinux.com>
+ * Patrick O'Rourke	<orourke@missioncriticallinux.com>
+ * 11/07/2000
+ /
+/*
  * Global (preserved) predicate usage on syscall entry/exit path:
  *
- * 
- *	pEOI:		See entry.h.
  *	pKern:		See entry.h.
  *	pSys:		See entry.h.
  *	pNonSys:	!pSys
  *	p2:		(Alias of pKern!) True if any signals are pending.
- *	p16/p17:	Used by stubs calling ia64_do_signal to indicate if current task
- *			has PF_PTRACED flag bit set.  p16 is true if so, p17 is the complement.
  */
 
 #include <linux/config.h>
 
+#include <asm/cache.h>
 #include <asm/errno.h>
 #include <asm/offsets.h>
 #include <asm/processor.h>
 #include <asm/unistd.h>
-
+#include <asm/asmmacro.h>
+#include <asm/pgtable.h>
+	
 #include "entry.h"
 
 	.text
@@ -41,11 +51,11 @@
 	 * execve() is special because in case of success, we need to
 	 * setup a null register window frame.
 	 */
-	.align 16
-	.proc ia64_execve
-ia64_execve:
-	alloc loc0=ar.pfs,3,2,4,0
-	mov loc1=rp
+ENTRY(ia64_execve)
+	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(3))
+	alloc loc1=ar.pfs,3,2,4,0
+	mov loc0=rp
+	UNW(.body)
 	mov out0=in0			// filename
 	;;				// stop bit between alloc and call
 	mov out1=in1			// argv
@@ -53,135 +63,166 @@ ia64_execve:
 	add out3=16,sp			// regs
 	br.call.sptk.few rp=sys_execve
 .ret0:	cmp4.ge p6,p0=r8,r0
-	mov ar.pfs=loc0			// restore ar.pfs
+	mov ar.pfs=loc1			// restore ar.pfs
 	;;
 (p6)	mov ar.pfs=r0			// clear ar.pfs in case of success
 	sxt4 r8=r8			// return 64-bit result
-	mov rp=loc1
+	mov rp=loc0
 
 	br.ret.sptk.few rp
-	.endp ia64_execve
+END(ia64_execve)
 
-	.align 16
-	.global sys_clone
-	.proc sys_clone
-sys_clone:
-	alloc r16=ar.pfs,2,2,3,0;;
-	movl r28=1f
-	mov loc1=rp
-	br.cond.sptk.many save_switch_stack
-1:
-	mov loc0=r16				// save ar.pfs across do_fork
-	adds out2=IA64_SWITCH_STACK_SIZE+16,sp
-	adds r2=IA64_SWITCH_STACK_SIZE+IA64_PT_REGS_R12_OFFSET+16,sp
-	cmp.eq p8,p9=in1,r0			// usp == 0?
+GLOBAL_ENTRY(sys_clone2)
+	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(2))
+	alloc r16=ar.pfs,3,2,4,0
+	DO_SAVE_SWITCH_STACK
+	mov loc0=rp
+	mov loc1=r16				// save ar.pfs across do_fork
+	UNW(.body)
+	mov out1=in1
+	mov out3=in2
+	adds out2=IA64_SWITCH_STACK_SIZE+16,sp	// out2 = &regs
 	mov out0=in0				// out0 = clone_flags
-	;;
-(p8)	ld8 out1=[r2]				// fetch usp from pt_regs.r12
-(p9)	mov out1=in1
 	br.call.sptk.few rp=do_fork
-.ret1:
-	mov ar.pfs=loc0
+.ret1:	UNW(.restore sp)
 	adds sp=IA64_SWITCH_STACK_SIZE,sp	// pop the switch stack
-	mov rp=loc1
-	;;
+	mov ar.pfs=loc1
+	mov rp=loc0
 	br.ret.sptk.many rp
-	.endp sys_clone
+END(sys_clone2)
+
+GLOBAL_ENTRY(sys_clone)
+	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(2))
+	alloc r16=ar.pfs,2,2,4,0
+	DO_SAVE_SWITCH_STACK
+	mov loc0=rp
+	mov loc1=r16				// save ar.pfs across do_fork
+	UNW(.body)
+	mov out1=in1
+	mov out3=0
+	adds out2=IA64_SWITCH_STACK_SIZE+16,sp	// out2 = &regs
+	mov out0=in0				// out0 = clone_flags
+	br.call.sptk.few rp=do_fork
+.ret2:	UNW(.restore sp)
+	adds sp=IA64_SWITCH_STACK_SIZE,sp	// pop the switch stack
+	mov ar.pfs=loc1
+	mov rp=loc0
+	br.ret.sptk.many rp
+END(sys_clone)
+
+#define KSTACK_TR	2
 
 /*
- * prev_task <- switch_to(struct task_struct *next)
+ * prev_task <- ia64_switch_to(struct task_struct *next)
  */
-	.align 16
-	.global ia64_switch_to
-	.proc ia64_switch_to
-ia64_switch_to:
+GLOBAL_ENTRY(ia64_switch_to)
+	UNW(.prologue)
 	alloc r16=ar.pfs,1,0,0,0
-	movl r28=1f
-	br.cond.sptk.many save_switch_stack
-1:
-	// disable interrupts to ensure atomicity for next few instructions:
-	mov r17=psr		// M-unit
-	;;
-	rsm psr.i		// M-unit
-	dep r18=-1,r0,0,61	// build mask 0x1fffffffffffffff
-	;;
-	srlz.d
-	;;
+	DO_SAVE_SWITCH_STACK
+	UNW(.body)
+
 	adds r22=IA64_TASK_THREAD_KSP_OFFSET,r13
+	mov r27=ar.k4
+	dep r20=0,in0,61,3		// physical address of "current"
+	;;
+	st8 [r22]=sp			// save kernel stack pointer of old task
+	shr.u r26=r20,_PAGE_SIZE_256M
+	;;
+	cmp.eq p7,p6=r26,r0		// check < 256M
 	adds r21=IA64_TASK_THREAD_KSP_OFFSET,in0
 	;;
-	st8 [r22]=sp		// save kernel stack pointer of old task
-	ld8 sp=[r21]		// load kernel stack pointer of new task
-	and r20=in0,r18		// physical address of "current"
+	/*
+	 * If we've already mapped this task's page, we can skip doing it
+	 * again.
+	 */
+(p6)	cmp.eq p7,p6=r26,r27
+(p6)	br.cond.dpnt.few .map
 	;;
-	mov r8=r13		// return pointer to previously running task
-	mov r13=in0		// set "current" pointer
-	mov ar.k6=r20		// copy "current" into ar.k6
+.done:	ld8 sp=[r21]			// load kernel stack pointer of new task
+(p6)	ssm psr.ic			// if we we had to map, renable the psr.ic bit FIRST!!!
 	;;
-	// restore interrupts
-	mov psr.l=r17
+(p6)	srlz.d
+	mov ar.k6=r20			// copy "current" into ar.k6
+	mov r8=r13			// return pointer to previously running task
+	mov r13=in0			// set "current" pointer
+	;;
+(p6)	ssm psr.i			// renable psr.i AFTER the ic bit is serialized
+	DO_LOAD_SWITCH_STACK( )
+
+#ifdef CONFIG_SMP
+	sync.i				// ensure "fc"s done by this CPU are visible on other CPUs
+#endif 
+	br.ret.sptk.few rp		// boogie on out in new context
+
+.map:
+	rsm psr.i | psr.ic
+	movl r25=__DIRTY_BITS|_PAGE_PL_0|_PAGE_AR_RWX
 	;;
 	srlz.d
+	or r23=r25,r20			// construct PA | page properties
+	mov r25=_PAGE_SIZE_256M<<2
+	;;
+	mov cr.itir=r25
+	mov cr.ifa=in0			// VA of next task...
+	;;
+	mov r25=KSTACK_TR		// use tr entry #2...
+	mov ar.k4=r26			// remember last page we mapped...
+	;;
+	itr.d dtr[r25]=r23		// wire in new mapping...
+	br.cond.sptk.many .done
+	;;
+END(ia64_switch_to)
 
-	movl r28=1f
-	br.cond.sptk.many load_switch_stack
-1:
-	br.ret.sptk.few rp
-	.endp ia64_switch_to
-
+#ifndef CONFIG_IA64_NEW_UNWIND
 	/*
 	 * Like save_switch_stack, but also save the stack frame that is active
 	 * at the time this function is called.
 	 */
-	.align 16
-	.proc save_switch_stack_with_current_frame
-save_switch_stack_with_current_frame:
-1:	{
-	  alloc r16=ar.pfs,0,0,0,0		// pass ar.pfs to save_switch_stack
-	  mov r28=ip
-	}
-	;;
-	adds r28=1f-1b,r28
-	br.cond.sptk.many save_switch_stack
-1:	br.ret.sptk.few rp
-	.endp save_switch_stack_with_current_frame
+ENTRY(save_switch_stack_with_current_frame)
+	UNW(.prologue)
+	alloc r16=ar.pfs,0,0,0,0		// pass ar.pfs to save_switch_stack
+	DO_SAVE_SWITCH_STACK
+	br.ret.sptk.few rp
+END(save_switch_stack_with_current_frame)
+#endif /* !CONFIG_IA64_NEW_UNWIND */
+
 /*
  * Note that interrupts are enabled during save_switch_stack and
  * load_switch_stack.  This means that we may get an interrupt with
  * "sp" pointing to the new kernel stack while ar.bspstore is still
  * pointing to the old kernel backing store area.  Since ar.rsc,
  * ar.rnat, ar.bsp, and ar.bspstore are all preserved by interrupts,
- * this is not a problem.
+ * this is not a problem.  Also, we don't need to specify unwind
+ * information for preserved registers that are not modified in
+ * save_switch_stack as the right unwind information is already
+ * specified at the call-site of save_switch_stack.
  */
 
 /*
  * save_switch_stack:
  *	- r16 holds ar.pfs
- *	- r28 holds address to return to
+ *	- b7 holds address to return to
  *	- rp (b0) holds return address to save
  */
-	.align 16
-	.global save_switch_stack
-	.proc save_switch_stack
-save_switch_stack:
+GLOBAL_ENTRY(save_switch_stack)
+	UNW(.prologue)
+	UNW(.altrp b7)
 	flushrs			// flush dirty regs to backing store (must be first in insn group)
 	mov r17=ar.unat		// preserve caller's
-	adds r2=-IA64_SWITCH_STACK_SIZE+16,sp	// r2 = &sw->caller_unat
+	adds r2=16,sp		// r2 = &sw->caller_unat
 	;;
 	mov r18=ar.fpsr		// preserve fpsr
 	mov ar.rsc=r0		// put RSE in mode: enforced lazy, little endian, pl 0
 	;;
 	mov r19=ar.rnat
-	adds r3=-IA64_SWITCH_STACK_SIZE+24,sp	// r3 = &sw->ar_fpsr
-
-	// Note: the instruction ordering is important here: we can't
-	// store anything to the switch stack before sp is updated
-	// as otherwise an interrupt might overwrite the memory!
-	adds sp=-IA64_SWITCH_STACK_SIZE,sp
+	adds r3=24,sp		// r3 = &sw->ar_fpsr
 	;;
+	.savesp ar.unat,SW(CALLER_UNAT)
 	st8 [r2]=r17,16
+	.savesp ar.fpsr,SW(AR_FPSR)
 	st8 [r3]=r18,24
 	;;
+	UNW(.body)
 	stf.spill [r2]=f2,32
 	stf.spill [r3]=f3,32
 	mov r21=b0
@@ -228,11 +269,11 @@ save_switch_stack:
 	stf.spill [r2]=f30,32
 	stf.spill [r3]=f31,24
 	;;
-	st8.spill [r2]=r4,16
-	st8.spill [r3]=r5,16
+.mem.offset 0,0;	st8.spill [r2]=r4,16
+.mem.offset 8,0;	st8.spill [r3]=r5,16
 	;;
-	st8.spill [r2]=r6,16
-	st8.spill [r3]=r7,16
+.mem.offset 0,0;	st8.spill [r2]=r6,16
+.mem.offset 8,0;	st8.spill [r3]=r7,16
 	;;
 	st8 [r2]=r21,16		// save b0
 	st8 [r3]=r22,16		// save b1
@@ -258,16 +299,17 @@ save_switch_stack:
 	st8 [r3]=r21		// save predicate registers
 	mov ar.rsc=3		// put RSE back into eager mode, pl 0
 	br.cond.sptk.few b7
-	.endp save_switch_stack
+END(save_switch_stack)
 
 /*
  * load_switch_stack:
- *	- r28 holds address to return to
+ *	- b7 holds address to return to
  */
-	.align 16
-	.proc load_switch_stack
-load_switch_stack:
+ENTRY(load_switch_stack)
+	UNW(.prologue)
+	UNW(.altrp b7)
 	invala			// invalidate ALAT
+	UNW(.body)
 	adds r2=IA64_SWITCH_STACK_B0_OFFSET+16,sp	// get pointer to switch_stack.b0
 	mov ar.rsc=r0		// put RSE into enforced lazy mode
 	adds r3=IA64_SWITCH_STACK_B0_OFFSET+24,sp	// get pointer to switch_stack.b1
@@ -352,21 +394,16 @@ load_switch_stack:
 	;;
 	ld8.fill r4=[r2],16
 	ld8.fill r5=[r3],16
-	mov b7=r28
 	;;
 	ld8.fill r6=[r2],16
 	ld8.fill r7=[r3],16
 	mov ar.unat=r18				// restore caller's unat
 	mov ar.fpsr=r19				// restore fpsr
 	mov ar.rsc=3				// put RSE back into eager mode, pl 0
-	adds sp=IA64_SWITCH_STACK_SIZE,sp	// pop switch_stack
 	br.cond.sptk.few b7
-	.endp load_switch_stack
+END(load_switch_stack)
 
-	.align 16
-	.global __ia64_syscall
-	.proc __ia64_syscall
-__ia64_syscall:
+GLOBAL_ENTRY(__ia64_syscall)
 	.regstk 6,0,0,0
 	mov r15=in5				// put syscall number in place
 	break __BREAK_SYSCALL
@@ -376,30 +413,42 @@ __ia64_syscall:
 (p6)	st4 [r2]=r8
 (p6)	mov r8=-1
 	br.ret.sptk.few rp
-	.endp __ia64_syscall
+END(__ia64_syscall)
 
 	//
 	// We invoke syscall_trace through this intermediate function to
 	// ensure that the syscall input arguments are not clobbered.  We
 	// also use it to preserve b6, which contains the syscall entry point.
 	//
-	.align 16
-	.global invoke_syscall_trace
-	.proc invoke_syscall_trace
-invoke_syscall_trace:
-	alloc loc0=ar.pfs,8,3,0,0
-	;;			// WAW on CFM at the br.call
-	mov loc1=rp
-	br.call.sptk.many rp=save_switch_stack_with_current_frame	// must preserve b6!!
-.ret2:	mov loc2=b6
+GLOBAL_ENTRY(invoke_syscall_trace)
+#ifdef CONFIG_IA64_NEW_UNWIND
+	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8))
+	alloc loc1=ar.pfs,8,3,0,0
+	mov loc0=rp
+	UNW(.body)
+	mov loc2=b6
+	;;
 	br.call.sptk.few rp=syscall_trace
-.ret3:	adds sp=IA64_SWITCH_STACK_SIZE,sp	// drop switch_stack frame
-	mov rp=loc1
-	mov ar.pfs=loc0
+.ret3:	mov rp=loc0
+	mov ar.pfs=loc1
+	mov b6=loc2
+	br.ret.sptk.few rp
+#else /* !CONFIG_IA64_NEW_SYSCALL */
+	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8))
+	alloc loc1=ar.pfs,8,3,0,0
+	;;			// WAW on CFM at the br.call
+	mov loc0=rp
+	br.call.sptk.many rp=save_switch_stack_with_current_frame	// must preserve b6!!
+.ret4:	mov loc2=b6
+	br.call.sptk.few rp=syscall_trace
+.ret5:	adds sp=IA64_SWITCH_STACK_SIZE,sp	// drop switch_stack frame
+	mov rp=loc0
+	mov ar.pfs=loc1
 	mov b6=loc2
 	;;
 	br.ret.sptk.few rp
-	.endp invoke_syscall_trace
+#endif /* !CONFIG_IA64_NEW_SYSCALL */
+END(invoke_syscall_trace)
 
 	//
 	// Invoke a system call, but do some tracing before and after the call.
@@ -411,37 +460,25 @@ invoke_syscall_trace:
 	//	r15 = syscall number
 	//	b6  = syscall entry point
 	//
-	.global ia64_trace_syscall
 	.global ia64_strace_leave_kernel
-	.global ia64_strace_clear_r8
 
-	.proc ia64_strace_clear_r8
-ia64_strace_clear_r8:		// this is where we return after cloning when PF_TRACESYS is on
-# ifdef CONFIG_SMP
-	br.call.sptk.few rp=invoke_schedule_tail
-# endif
-	mov r8=0
-	br strace_check_retval
-	.endp ia64_strace_clear_r8
-
-	.proc ia64_trace_syscall
-ia64_trace_syscall:
+GLOBAL_ENTRY(ia64_trace_syscall)
+	PT_REGS_UNWIND_INFO(0)
 	br.call.sptk.few rp=invoke_syscall_trace // give parent a chance to catch syscall args
-.ret4:	br.call.sptk.few rp=b6			// do the syscall
+.ret6:	br.call.sptk.few rp=b6			// do the syscall
 strace_check_retval:
-.ret5:	cmp.lt p6,p0=r8,r0			// syscall failed?
-	;;
+	cmp.lt p6,p0=r8,r0			// syscall failed?
 	adds r2=IA64_PT_REGS_R8_OFFSET+16,sp	// r2 = &pt_regs.r8
 	adds r3=IA64_PT_REGS_R8_OFFSET+32,sp	// r3 = &pt_regs.r10
 	mov r10=0
 (p6)	br.cond.sptk.few strace_error		// syscall failed ->
 	;;					// avoid RAW on r10
 strace_save_retval:
-	st8.spill [r2]=r8			// store return value in slot for r8
-	st8.spill [r3]=r10			// clear error indication in slot for r10
+.mem.offset 0,0;	st8.spill [r2]=r8	// store return value in slot for r8
+.mem.offset 8,0;	st8.spill [r3]=r10	// clear error indication in slot for r10
 ia64_strace_leave_kernel:
 	br.call.sptk.few rp=invoke_syscall_trace // give parent a chance to catch return value
-.ret6:	br.cond.sptk.many ia64_leave_kernel
+.rety:	br.cond.sptk.many ia64_leave_kernel
 
 strace_error:
 	ld8 r3=[r2]				// load pt_regs.r8
@@ -453,7 +490,7 @@ strace_error:
 (p6)	mov r10=-1
 (p6)	mov r8=r9
 	br.cond.sptk.few strace_save_retval
-	.endp ia64_trace_syscall
+END(ia64_trace_syscall)
 
 /*
  * A couple of convenience macros to help implement/understand the state
@@ -471,45 +508,56 @@ strace_error:
 #define rKRBS		r22
 #define rB6		r21
 
-	.align 16
-	.global ia64_ret_from_syscall
-	.global ia64_ret_from_syscall_clear_r8
-	.global ia64_leave_kernel
-	.proc ia64_ret_from_syscall
-ia64_ret_from_syscall_clear_r8:
+GLOBAL_ENTRY(ia64_ret_from_clone)
+	PT_REGS_UNWIND_INFO(0)
 #ifdef CONFIG_SMP
 	// In SMP mode, we need to call schedule_tail to complete the scheduling process.
 	// Called by ia64_switch_to after do_fork()->copy_thread().  r8 contains the
 	// address of the previously executing task.
 	br.call.sptk.few rp=invoke_schedule_tail
-.ret7:
-#endif                  
+.ret8:
+#endif
+	adds r2=IA64_TASK_PTRACE_OFFSET,r13
+	;;
+	ld8 r2=[r2]
+	;;
 	mov r8=0
+	tbit.nz p6,p0=r2,PT_TRACESYS_BIT
+(p6)	br strace_check_retval
 	;;					// added stop bits to prevent r8 dependency
-ia64_ret_from_syscall:
+END(ia64_ret_from_clone)
+	// fall through
+GLOBAL_ENTRY(ia64_ret_from_syscall)
+	PT_REGS_UNWIND_INFO(0)
 	cmp.ge p6,p7=r8,r0			// syscall executed successfully?
 	adds r2=IA64_PT_REGS_R8_OFFSET+16,sp	// r2 = &pt_regs.r8
 	adds r3=IA64_PT_REGS_R8_OFFSET+32,sp	// r3 = &pt_regs.r10
 	;;
+	.mem.offset 0,0
 (p6)	st8.spill [r2]=r8	// store return value in slot for r8 and set unat bit
+	.mem.offset 8,0
 (p6)	st8.spill [r3]=r0	// clear error indication in slot for r10 and set unat bit
 (p7)	br.cond.spnt.few handle_syscall_error	// handle potential syscall failure
-
-ia64_leave_kernel:
+END(ia64_ret_from_syscall)
+	// fall through
+GLOBAL_ENTRY(ia64_leave_kernel)
 	// check & deliver software interrupts:
 
+	PT_REGS_UNWIND_INFO(0)
 #ifdef CONFIG_SMP
-	adds	r2=IA64_TASK_PROCESSOR_OFFSET,r13
-	movl	r3=softirq_state
+	adds r2=IA64_TASK_PROCESSOR_OFFSET,r13
+	movl r3=irq_stat		// softirq_active
 	;;
-	ld4	r2=[r2]
+	ld4 r2=[r2]
 	;;
-	shladd	r3=r2,3,r3
+	shl r2=r2,SMP_CACHE_SHIFT	// can't use shladd here...
+	;;
+	add r3=r2,r3
 #else
-	movl r3=softirq_state
+	movl r3=irq_stat		// softirq_active
 #endif
 	;;
-	ld8 r2=[r3]		// r3 is guaranteed to be 8-byte aligned!
+	ld8 r2=[r3]		// r3 (softirq_active+softirq_mask) is guaranteed to be 8-byte aligned!
 	;;
 	shr r3=r2,32
 	;;
@@ -533,23 +581,31 @@ back_from_resched:
 	ld4 r14=[r14]
 	mov rp=r3			// arrange for schedule() to return to back_from_resched
 	;;
-	/*
-	 * If pEOI is set, we need to write the cr.eoi now and then
-	 * clear pEOI because both invoke_schedule() and
-	 * handle_signal_delivery() may call the scheduler.  Since
-	 * we're returning to user-level, we get at most one nested
-	 * interrupt of the same priority level, which doesn't tax the
-	 * kernel stack too much.
-	 */
-(pEOI)	mov cr.eoi=r0
 	cmp.ne p6,p0=r2,r0
 	cmp.ne p2,p0=r14,r0		// NOTE: pKern is an alias for p2!!
-(pEOI)	cmp.ne pEOI,p0=r0,r0		// clear pEOI before calling schedule()
 	srlz.d
 (p6)	br.call.spnt.many b6=invoke_schedule	// ignore return value
 2:
 	// check & deliver pending signals:
 (p2)	br.call.spnt.few rp=handle_signal_delivery
+.ret9:
+#ifdef CONFIG_IA64_SOFTSDV_HACKS
+	// Check for lost ticks
+	rsm psr.i
+	mov r2 = ar.itc
+	movl r14 = 1000			// latency tolerance
+	mov r3 = cr.itm
+	;;
+	sub r2 = r2, r3
+	;;
+	sub r2 = r2, r14
+	;;
+	cmp.ge p6,p7 = r2, r0
+(p6)	br.call.spnt.few rp=invoke_ia64_reset_itm
+.ret10:
+	;;
+	ssm psr.i
+#endif 
 restore_all:
 
 	// start restoring the state saved on the kernel stack (struct pt_regs):
@@ -602,14 +658,13 @@ restore_all:
 	mov ar.ccv=r1
 	mov ar.fpsr=r13
 	mov b0=r14
-	// turn off interrupts, interrupt collection, & data translation
-	rsm psr.i | psr.ic | psr.dt
+	// turn off interrupts, interrupt collection
+	rsm psr.i | psr.ic
 	;;
 	srlz.i			// EAS 2.5
 	mov b7=r15
 	;;
 	invala			// invalidate ALAT
-	dep r12=0,r12,61,3	// convert sp to physical address
 	bsw.0;;			// switch back to bank 0 (must be last in insn group)
 	;;
 #ifdef CONFIG_ITANIUM_ASTEP_SPECIFIC
@@ -677,18 +732,6 @@ restore_all:
 	;;
 	add r18=r16,r18			// adjust the loadrs value
 	;;
-#ifdef CONFIG_IA64_SOFTSDV_HACKS
-	// Reset ITM if we've missed a timer tick.  Workaround for SoftSDV bug
-	mov r16 = r2
-	mov r2 = ar.itc
-	mov r17 = cr.itm
-	;; 
-	cmp.gt p6,p7 = r2, r17
-(p6)	addl r17 = 100, r2
-	;;
-	mov cr.itm = r17
-	mov r2 = r16
-#endif
 dont_preserve_current_frame:
 	alloc r16=ar.pfs,0,0,0,0	// drop the current call frame (noop for syscalls)
 	;;
@@ -709,14 +752,14 @@ skip_rbs_switch:
 	mov ar.rsc=rARRSC
 	mov ar.unat=rARUNAT
 	mov cr.ifs=rCRIFS	// restore cr.ifs only if not a (synchronous) syscall
-(pEOI)	mov cr.eoi=r0
 	mov pr=rARPR,-1
 	mov cr.iip=rCRIIP
 	mov cr.ipsr=rCRIPSR
 	;;
 	rfi;;			// must be last instruction in an insn group
+END(ia64_leave_kernel)
 
-handle_syscall_error:
+ENTRY(handle_syscall_error)
 	/*
 	 * Some system calls (e.g., ptrace, mmap) can return arbitrary
 	 * values which could lead us to mistake a negative return
@@ -725,6 +768,7 @@ handle_syscall_error:
 	 * If pt_regs.r8 is zero, we assume that the call completed
 	 * successfully.
 	 */
+	PT_REGS_UNWIND_INFO(0)
 	ld8 r3=[r2]		// load pt_regs.r8
 	sub r9=0,r8		// negate return value to get errno
 	;;
@@ -735,280 +779,278 @@ handle_syscall_error:
 (p6)	mov r9=r8
 (p6)	mov r10=0
 	;;
-	st8.spill [r2]=r9	// store errno in pt_regs.r8 and set unat bit
-	st8.spill [r3]=r10	// store error indication in pt_regs.r10 and set unat bit
+.mem.offset 0,0; st8.spill [r2]=r9	// store errno in pt_regs.r8 and set unat bit
+.mem.offset 8,0; st8.spill [r3]=r10	// store error indication in pt_regs.r10 and set unat bit
 	br.cond.sptk.many ia64_leave_kernel
-	.endp handle_syscall_error
+END(handle_syscall_error)
 
 #ifdef CONFIG_SMP
 	/*
 	 * Invoke schedule_tail(task) while preserving in0-in7, which may be needed
 	 * in case a system call gets restarted.
 	 */
-	.proc invoke_schedule_tail
-invoke_schedule_tail:
-	alloc loc0=ar.pfs,8,2,1,0
-	mov loc1=rp
+ENTRY(invoke_schedule_tail)
+	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8))
+	alloc loc1=ar.pfs,8,2,1,0
+	mov loc0=rp
 	mov out0=r8				// Address of previous task
 	;;
 	br.call.sptk.few rp=schedule_tail
-.ret8:
-	mov ar.pfs=loc0
-	mov rp=loc1
+.ret11:	mov ar.pfs=loc1
+	mov rp=loc0
 	br.ret.sptk.many rp
-	.endp invoke_schedule_tail
+END(invoke_schedule_tail)
+
 #endif /* CONFIG_SMP */
+
+#ifdef CONFIG_IA64_SOFTSDV_HACKS
+
+ENTRY(invoke_ia64_reset_itm)
+	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8))
+	alloc loc1=ar.pfs,8,2,0,0
+	mov loc0=rp
+	;;
+	UNW(.body)
+	br.call.sptk.many rp=ia64_reset_itm
+.ret12:	;;
+	mov ar.pfs=loc1
+	mov rp=loc0
+	br.ret.sptk.many rp
+END(invoke_ia64_reset_itm)
+
+#endif /* CONFIG_IA64_SOFTSDV_HACKS */
 
 	/*
 	 * Invoke do_softirq() while preserving in0-in7, which may be needed
 	 * in case a system call gets restarted.
 	 */
-	.proc invoke_do_softirq
-invoke_do_softirq:
-	alloc loc0=ar.pfs,8,2,0,0
-	mov loc1=rp
-(pEOI)	mov cr.eoi=r0
+ENTRY(invoke_do_softirq)
+	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8))
+	alloc loc1=ar.pfs,8,2,0,0
+	mov loc0=rp
 	;;
-(pEOI)	cmp.ne pEOI,p0=r0,r0
+	UNW(.body)
 	br.call.sptk.few rp=do_softirq
-.ret9:
-	mov ar.pfs=loc0
-	mov rp=loc1
+.ret13:	mov ar.pfs=loc1
+	mov rp=loc0
 	br.ret.sptk.many rp
-	.endp invoke_do_softirq
+END(invoke_do_softirq)
 
 	/*
 	 * Invoke schedule() while preserving in0-in7, which may be needed
 	 * in case a system call gets restarted.
 	 */
-	.proc invoke_schedule
-invoke_schedule:
-	alloc loc0=ar.pfs,8,2,0,0
-	mov loc1=rp
+ENTRY(invoke_schedule)
+	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8))
+	alloc loc1=ar.pfs,8,2,0,0
+	mov loc0=rp
 	;;
+	UNW(.body)
 	br.call.sptk.few rp=schedule
-.ret10:
-	mov ar.pfs=loc0
-	mov rp=loc1
+.ret14:	mov ar.pfs=loc1
+	mov rp=loc0
 	br.ret.sptk.many rp
-	.endp invoke_schedule
+END(invoke_schedule)
 
 	//
 	// Setup stack and call ia64_do_signal.  Note that pSys and pNonSys need to
 	// be set up by the caller.  We declare 8 input registers so the system call
 	// args get preserved, in case we need to restart a system call.
 	//
-	.align 16
-	.proc handle_signal_delivery
-handle_signal_delivery:
-	alloc loc0=ar.pfs,8,2,3,0 // preserve all eight input regs in case of syscall restart!
+ENTRY(handle_signal_delivery)
+#ifdef CONFIG_IA64_NEW_UNWIND
+	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8)
+	alloc loc1=ar.pfs,8,2,3,0 // preserve all eight input regs in case of syscall restart!
 	mov r9=ar.unat
-
-	// If the process is being ptraced, the signal may not actually be delivered to
-	// the process.  Instead, SIGCHLD will be sent to the parent.  We need to
-	// setup a switch_stack so ptrace can inspect the processes state if necessary.
-	adds r2=IA64_TASK_FLAGS_OFFSET,r13
-	;;
-	ld8 r2=[r2]
+	mov loc0=rp				// save return address
 	mov out0=0				// there is no "oldset"
-	adds out1=16,sp				// out1=&pt_regs
-	;;
+	adds out1=0,sp				// out1=&sigscratch
 (pSys)	mov out2=1				// out2==1 => we're in a syscall
-	tbit.nz p16,p17=r2,PF_PTRACED_BIT
-(p16)	br.cond.spnt.many setup_switch_stack
 	;;
-back_from_setup_switch_stack:
 (pNonSys) mov out2=0				// out2==0 => not a syscall
-	adds r3=-IA64_SWITCH_STACK_SIZE+IA64_SWITCH_STACK_CALLER_UNAT_OFFSET+16,sp
-(p17)	adds sp=-IA64_SWITCH_STACK_SIZE,sp	// make space for (dummy) switch_stack
-	;;
-(p17)	st8 [r3]=r9				// save ar.unat in sw->caller_unat
-	mov loc1=rp				// save return address
+	.fframe 16
+	.spillpsp ar.unat, 16			// (note that offset is relative to psp+0x10!)
+	st8 [sp]=r9,-16				// allocate space for ar.unat and save it
+	.body
 	br.call.sptk.few rp=ia64_do_signal
-.ret11:
-	adds r3=IA64_SWITCH_STACK_CALLER_UNAT_OFFSET+16,sp
+.ret15:	.restore sp
+	adds sp=16,sp				// pop scratch stack space
 	;;
-	ld8 r9=[r3]				// load new unat from sw->caller_unat
-	mov rp=loc1
+	ld8 r9=[sp]				// load new unat from sw->caller_unat
+	mov rp=loc0
 	;;
-(p17)	adds sp=IA64_SWITCH_STACK_SIZE,sp	// drop (dummy) switch_stack
-(p17)	mov ar.unat=r9
-(p17)	mov ar.pfs=loc0
-(p17)	br.ret.sptk.many rp
+	mov ar.unat=r9
+	mov ar.pfs=loc1
+	br.ret.sptk.many rp
+#else /* !CONFIG_IA64_NEW_UNWIND */
+	.prologue
+	alloc r16=ar.pfs,8,0,3,0 // preserve all eight input regs in case of syscall restart!
+	DO_SAVE_SWITCH_STACK
+	UNW(.body)
 
-	// restore the switch stack (ptrace may have modified it):
-	movl r28=1f
-	br.cond.sptk.many load_switch_stack
-1:	br.ret.sptk.many rp
-	// NOT REACHED
+	mov out0=0				// there is no "oldset"
+	adds out1=16,sp				// out1=&sigscratch
+	.pred.rel.mutex pSys, pNonSys
+(pSys)	mov out2=1				// out2==1 => we're in a syscall
+(pNonSys) mov out2=0				// out2==0 => not a syscall
+	br.call.sptk.few rp=ia64_do_signal
+.ret16:	// restore the switch stack (ptrace may have modified it)
+	DO_LOAD_SWITCH_STACK( )
+	br.ret.sptk.many rp
+#endif /* !CONFIG_IA64_NEW_UNWIND */
+END(handle_signal_delivery)
 
-setup_switch_stack:
-	movl r28=back_from_setup_switch_stack
-	mov r16=loc0
-	br.cond.sptk.many save_switch_stack
-	// NOT REACHED
-
-	.endp handle_signal_delivery
-
-	.align 16
-	.proc sys_rt_sigsuspend
-	.global sys_rt_sigsuspend
-sys_rt_sigsuspend:
-	alloc loc0=ar.pfs,2,2,3,0
+GLOBAL_ENTRY(sys_rt_sigsuspend)
+#ifdef CONFIG_IA64_NEW_UNWIND
+	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8)
+	alloc loc1=ar.pfs,8,2,3,0 // preserve all eight input regs in case of syscall restart!
 	mov r9=ar.unat
-
-	// If the process is being ptraced, the signal may not actually be delivered to
-	// the process.  Instead, SIGCHLD will be sent to the parent.  We need to
-	// setup a switch_stack so ptrace can inspect the processes state if necessary.
-	adds r2=IA64_TASK_FLAGS_OFFSET,r13
-	;;
-	ld8 r2=[r2]
+	mov loc0=rp				// save return address
 	mov out0=in0				// mask
 	mov out1=in1				// sigsetsize
+	adds out2=0,sp				// out2=&sigscratch
 	;;
-	adds out2=16,sp				// out1=&pt_regs
-	tbit.nz p16,p17=r2,PF_PTRACED_BIT
-(p16)	br.cond.spnt.many sigsuspend_setup_switch_stack
+	.fframe 16
+	.spillpsp ar.unat, 16			// (note that offset is relative to psp+0x10!)
+	st8 [sp]=r9,-16				// allocate space for ar.unat and save it
+	.body
+	br.call.sptk.few rp=ia64_rt_sigsuspend
+.ret17:	.restore sp
+	adds sp=16,sp				// pop scratch stack space
 	;;
-back_from_sigsuspend_setup_switch_stack:
-	adds r3=-IA64_SWITCH_STACK_SIZE+IA64_SWITCH_STACK_CALLER_UNAT_OFFSET+16,sp
-(p17)	adds sp=-IA64_SWITCH_STACK_SIZE,sp	// make space for (dummy) switch_stack
+	ld8 r9=[sp]				// load new unat from sw->caller_unat
+	mov rp=loc0
 	;;
-(p17)	st8 [r3]=r9				// save ar.unat in sw->caller_unat
-	mov loc1=rp				// save return address
+	mov ar.unat=r9
+	mov ar.pfs=loc1
+	br.ret.sptk.many rp
+#else /* !CONFIG_IA64_NEW_UNWIND */
+	UNW(.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(2))
+	alloc r16=ar.pfs,2,0,3,0
+	DO_SAVE_SWITCH_STACK
+	UNW(.body)
+
+	mov out0=in0				// mask
+	mov out1=in1				// sigsetsize
+	adds out2=16,sp				// out1=&sigscratch
 	br.call.sptk.many rp=ia64_rt_sigsuspend
-.ret12:
-	adds r3=IA64_SWITCH_STACK_CALLER_UNAT_OFFSET+16,sp
+.ret18:	// restore the switch stack (ptrace may have modified it)
+	DO_LOAD_SWITCH_STACK( )
+	br.ret.sptk.many rp
+#endif /* !CONFIG_IA64_NEW_UNWIND */
+END(sys_rt_sigsuspend)
+
+ENTRY(sys_rt_sigreturn)
+#ifdef CONFIG_IA64_NEW_UNWIND
+	.regstk 0,0,3,0	// inherited from gate.s:invoke_sighandler()
+	PT_REGS_UNWIND_INFO(0)
+	.prologue
+	PT_REGS_SAVES(16)
+	adds sp=-16,sp
+	.body
+	cmp.eq pNonSys,p0=r0,r0			// sigreturn isn't a normal syscall...
 	;;
-	ld8 r9=[r3]				// load new unat from sw->caller_unat
-	mov rp=loc1
-	;;
-(p17)	adds sp=IA64_SWITCH_STACK_SIZE,sp	// drop (dummy) switch_stack
-(p17)	mov ar.unat=r9
-(p17)	mov ar.pfs=loc0
-(p17)	br.ret.sptk.many rp
-
-	// restore the switch stack (ptrace may have modified it):
-	movl r28=1f
-	br.cond.sptk.many load_switch_stack
-1:	br.ret.sptk.many rp
-	// NOT REACHED
-
-sigsuspend_setup_switch_stack:
-	movl r28=back_from_sigsuspend_setup_switch_stack
-	mov r16=loc0
-	br.cond.sptk.many save_switch_stack
-	// NOT REACHED
-
-	.endp sys_rt_sigsuspend
-
-	.align 16
-	.proc sys_rt_sigreturn
-sys_rt_sigreturn:
-	alloc loc0=ar.pfs,8,1,1,0 // preserve all eight input regs in case of syscall restart!
-	adds out0=16,sp				// out0 = &pt_regs
-	;;
-	adds sp=-IA64_SWITCH_STACK_SIZE,sp	// make space for unat and padding
+	adds out0=16,sp				// out0 = &sigscratch
 	br.call.sptk.few rp=ia64_rt_sigreturn
-.ret13:
-	adds r3=IA64_SWITCH_STACK_CALLER_UNAT_OFFSET+16,sp
+.ret19:	adds sp=16,sp		// doesn't drop pt_regs, so don't mark it as restoring sp!
+	PT_REGS_UNWIND_INFO(0)	// instead, create a new body section with the smaller frame
+	;;
+	ld8 r9=[sp]				// load new ar.unat
+	mov b7=r8
+	;;
+	mov ar.unat=r9
+	br b7
+#else /* !CONFIG_IA64_NEW_UNWIND */
+	.regstk 0,0,3,0	// inherited from gate.s:invoke_sighandler()
+	PT_REGS_UNWIND_INFO(0)
+	UNW(.prologue)
+	UNW(.fframe IA64_PT_REGS_SIZE+IA64_SWITCH_STACK_SIZE)
+	UNW(.spillsp rp, PT(CR_IIP)+IA64_SWITCH_STACK_SIZE)
+	UNW(.spillsp ar.pfs, PT(CR_IFS)+IA64_SWITCH_STACK_SIZE)
+	UNW(.spillsp ar.unat, PT(AR_UNAT)+IA64_SWITCH_STACK_SIZE)
+	UNW(.spillsp pr, PT(PR)+IA64_SWITCH_STACK_SIZE)
+	adds sp=-IA64_SWITCH_STACK_SIZE,sp
+	cmp.eq pNonSys,p0=r0,r0			// sigreturn isn't a normal syscall...
+	;;
+	UNW(.body)
+
+	adds out0=16,sp				// out0 = &sigscratch
+	br.call.sptk.few rp=ia64_rt_sigreturn
+.ret20:	adds r3=IA64_SWITCH_STACK_CALLER_UNAT_OFFSET+16,sp
 	;;
 	ld8 r9=[r3]			// load new ar.unat
-	mov rp=r8
+	mov b7=r8
 	;;
+	PT_REGS_UNWIND_INFO(0)
 	adds sp=IA64_SWITCH_STACK_SIZE,sp	// drop (dummy) switch-stack frame
 	mov ar.unat=r9
-	mov ar.pfs=loc0
-	br.ret.sptk.many rp
-	.endp sys_rt_sigreturn
+	br b7
+#endif /* !CONFIG_IA64_NEW_UNWIND */
+END(sys_rt_sigreturn)
 
-	.align 16
-	.global ia64_prepare_handle_unaligned
-	.proc ia64_prepare_handle_unaligned
-ia64_prepare_handle_unaligned:
-	movl r28=1f
+GLOBAL_ENTRY(ia64_prepare_handle_unaligned)
 	//
 	// r16 = fake ar.pfs, we simply need to make sure 
 	// privilege is still 0
 	//
+	PT_REGS_UNWIND_INFO(0)
 	mov r16=r0 				
-	br.cond.sptk.few save_switch_stack
-1: 	br.call.sptk.few rp=ia64_handle_unaligned // stack frame setup in ivt
-.ret14:
-	movl r28=2f
-	br.cond.sptk.many load_switch_stack
-2:	br.cond.sptk.many rp			  // goes to ia64_leave_kernel
-	.endp ia64_prepare_handle_unaligned
+	UNW(.prologue)
+	DO_SAVE_SWITCH_STACK
+	br.call.sptk.few rp=ia64_handle_unaligned // stack frame setup in ivt
+.ret21:	.body
+	DO_LOAD_SWITCH_STACK(PT_REGS_UNWIND_INFO(0))
+	br.cond.sptk.many rp			  // goes to ia64_leave_kernel
+END(ia64_prepare_handle_unaligned)
 
-#ifdef CONFIG_KDB
-	//
-	// This gets called from ivt.S with:
-	//	SAVE MIN with cover done
-	//	SAVE REST done
-	//	no parameters
-	//	r15 has return value = ia64_leave_kernel
-	//
-	.align 16
-	.global ia64_invoke_kdb
-	.proc ia64_invoke_kdb
-ia64_invoke_kdb:
-	alloc r16=ar.pfs,0,0,4,0
-	movl r28=1f				// save_switch_stack protocol
-	;;			// avoid WAW on CFM
-	br.cond.sptk.many save_switch_stack	// to flushrs
-1:	mov out0=4				// kdb entry reason
-	mov out1=0				// err number
-	adds out2=IA64_SWITCH_STACK_SIZE+16,sp	// pt_regs
-	add out3=16,sp				// switch_stack
-	br.call.sptk.few rp=kdb
-.ret15:
-	movl r28=1f				// load_switch_stack proto
-	br.cond.sptk.many load_switch_stack
-1:	br.ret.sptk.many rp
-	.endp ia64_invoke_kdb
+#ifdef CONFIG_IA64_NEW_UNWIND
 
 	//
-	// When KDB is compiled in, we intercept each fault and give
-	// kdb a chance to run before calling the normal fault handler.
+	// unw_init_running(void (*callback)(info, arg), void *arg)
 	//
-        .align 16
-        .global ia64_invoke_kdb_fault_handler
-        .proc ia64_invoke_kdb_fault_handler
-ia64_invoke_kdb_fault_handler:
-        alloc r16=ar.pfs,5,1,5,0
-        movl r28=1f
-	mov loc0=rp			// save this
-	br.cond.sptk.many save_switch_stack // to flushrs
-	;;			// avoid WAW on CFM
-1:	mov out0=in0			// vector number
-	mov out1=in1			// cr.isr
-	mov out2=in2			// cr.ifa
-	mov out3=in3			// cr.iim
-	mov out4=in4			// cr.itir
-	br.call.sptk.few rp=ia64_kdb_fault_handler
-.ret16:
+#	define EXTRA_FRAME_SIZE	((UNW_FRAME_INFO_SIZE+15)&~15)
 
-	movl r28=1f
-	br.cond.sptk.many load_switch_stack
-1:	cmp.ne p6,p0=r8,r0		// did ia64_kdb_fault_handler return 0?
-	mov rp=loc0
-(p6)	br.ret.spnt.many rp		// no, we're done
-	;;		// avoid WAW on rp
-	mov out0=in0			// vector number
-	mov out1=in1			// cr.isr
-	mov out2=in2			// cr.ifa
-	mov out3=in3			// cr.iim
-	mov out4=in4			// cr.itir
-	mov in0=ar.pfs			// preserve ar.pfs returned by load_switch_stack
-	br.call.sptk.few rp=ia64_fault	// yup -> we need to invoke normal fault handler now
-.ret17:
-	mov ar.pfs=in0
+GLOBAL_ENTRY(unw_init_running)
+	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(2)
+	alloc loc1=ar.pfs,2,3,3,0
+	;;
+	ld8 loc2=[in0],8
+	mov loc0=rp
+	mov r16=loc1
+	DO_SAVE_SWITCH_STACK
+	.body
+
+	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(2)
+	.fframe IA64_SWITCH_STACK_SIZE+EXTRA_FRAME_SIZE
+	SWITCH_STACK_SAVES(EXTRA_FRAME_SIZE)
+	adds sp=-EXTRA_FRAME_SIZE,sp
+	.body
+	;;
+	adds out0=16,sp				// &info
+	mov out1=r13				// current
+	adds out2=16+EXTRA_FRAME_SIZE,sp	// &switch_stack
+	br.call.sptk.few rp=unw_init_frame_info
+1:	adds out0=16,sp				// &info
+	mov b6=loc2
+	mov loc2=gp				// save gp across indirect function call
+	;;
+	ld8 gp=[in0]
+	mov out1=in1				// arg
+	br.call.sptk.few rp=b6			// invoke the callback function
+1:	mov gp=loc2				// restore gp
+
+	// For now, we don't allow changing registers from within
+	// unw_init_running; if we ever want to allow that, we'd
+	// have to do a load_switch_stack here:
+	.restore sp
+	adds sp=IA64_SWITCH_STACK_SIZE+EXTRA_FRAME_SIZE,sp
+
+	mov ar.pfs=loc1
 	mov rp=loc0
 	br.ret.sptk.many rp
+END(unw_init_running)
 
-	.endp ia64_invoke_kdb_fault_handler
-
-#endif /* CONFIG_KDB */
+#endif
 
 	.rodata
 	.align 8
@@ -1095,7 +1137,7 @@ sys_call_table:
 	data8 sys_setpriority
 	data8 sys_statfs
 	data8 sys_fstatfs
-	data8 sys_ioperm			// 1105
+	data8 ia64_ni_syscall			// 1105
 	data8 sys_semget
 	data8 sys_semop
 	data8 sys_semctl
@@ -1110,9 +1152,9 @@ sys_call_table:
 	data8 sys_syslog
 	data8 sys_setitimer
 	data8 sys_getitimer
-	data8 sys_newstat			// 1120
-	data8 sys_newlstat
-	data8 sys_newfstat
+	data8 ia64_oldstat			// 1120
+	data8 ia64_oldlstat
+	data8 ia64_oldfstat
 	data8 sys_vhangup
 	data8 sys_lchown
 	data8 sys_vm86				// 1125
@@ -1122,7 +1164,7 @@ sys_call_table:
 	data8 sys_setdomainname
 	data8 sys_newuname			// 1130
 	data8 sys_adjtimex
-	data8 sys_create_module
+	data8 ia64_create_module
 	data8 sys_init_module
 	data8 sys_delete_module
 	data8 sys_get_kernel_syms		// 1135
@@ -1198,13 +1240,13 @@ sys_call_table:
 	data8 sys_sendmsg			// 1205
 	data8 sys_recvmsg
 	data8 sys_pivot_root
-	data8 ia64_ni_syscall
-	data8 ia64_ni_syscall
-	data8 ia64_ni_syscall			// 1210
-	data8 ia64_ni_syscall
-	data8 ia64_ni_syscall
-	data8 ia64_ni_syscall
-	data8 ia64_ni_syscall
+	data8 sys_mincore
+	data8 sys_madvise
+	data8 sys_newstat			// 1210
+	data8 sys_newlstat
+	data8 sys_newfstat
+	data8 sys_clone2
+	data8 sys_getdents64
 	data8 ia64_ni_syscall			// 1215
 	data8 ia64_ni_syscall
 	data8 ia64_ni_syscall
@@ -1269,4 +1311,3 @@ sys_call_table:
 	data8 ia64_ni_syscall
 	data8 ia64_ni_syscall
 	data8 ia64_ni_syscall
-

@@ -56,8 +56,6 @@
 #define PAT_MEM_SIZE 16*3
 #define PAT_MEM_OFF  (4*1024*1024 - PAT_MEM_SIZE)
 
-#define arraysize(x)    (sizeof(x)/sizeof(*(x)))
-
 struct retz3fb_par {
 	int xres;
 	int yres;
@@ -253,7 +251,7 @@ static struct {
 };
 
 
-#define NUM_TOTAL_MODES    arraysize(retz3fb_predefined)
+#define NUM_TOTAL_MODES    ARRAY_SIZE(retz3fb_predefined)
 
 static struct fb_var_screeninfo retz3fb_default;
 
@@ -267,8 +265,6 @@ static int z3fb_mode __initdata = 0;
 
 int retz3fb_setup(char *options);
 
-static int retz3fb_open(struct fb_info *info, int user);
-static int retz3fb_release(struct fb_info *info, int user);
 static int retz3fb_get_fix(struct fb_fix_screeninfo *fix, int con,
 			   struct fb_info *info);
 static int retz3fb_get_var(struct fb_var_screeninfo *var, int con,
@@ -279,11 +275,6 @@ static int retz3fb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			    struct fb_info *info);
 static int retz3fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			    struct fb_info *info);
-static int retz3fb_pan_display(struct fb_var_screeninfo *var, int con,
-			       struct fb_info *info);
-static int retz3fb_ioctl(struct inode *inode, struct file *file,
-			 unsigned int cmd, unsigned long arg, int con,
-			 struct fb_info *info);
 
 
 /*
@@ -1122,28 +1113,6 @@ static void do_install_cmap(int con, struct fb_info *info)
 					    1, retz3_setcolreg, info);
 }
 
-
-/*
- *    Open/Release the frame buffer device
- */
-
-static int retz3fb_open(struct fb_info *info, int user)
-{
-	/*
-	 * Nothing, only a usage count for the moment
-	 */
-
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-static int retz3fb_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return 0;
-}
-
-
 /*
  *    Get the Fixed Part of the Display
  */
@@ -1362,35 +1331,13 @@ static int retz3fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 }
 
 
-/*
- *    Pan or Wrap the Display
- *
- *    This call looks only at xoffset, yoffset and the FB_VMODE_YWRAP flag
- */
-
-static int retz3fb_pan_display(struct fb_var_screeninfo *var, int con,
-				struct fb_info *info)
-{
-	return -EINVAL;
-}
-
-
-/*
- *    RetinaZ3 Frame Buffer Specific ioctls
- */
-
-static int retz3fb_ioctl(struct inode *inode, struct file *file,
-                         unsigned int cmd, unsigned long arg, int con,
-                         struct fb_info *info)
-{
-	return -EINVAL;
-}
-
-
 static struct fb_ops retz3fb_ops = {
-	retz3fb_open, retz3fb_release, retz3fb_get_fix, retz3fb_get_var,
-	retz3fb_set_var, retz3fb_get_cmap, retz3fb_set_cmap,
-	retz3fb_pan_display, retz3fb_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	retz3fb_get_fix,
+	fb_get_var:	retz3fb_get_var,
+	fb_set_var:	retz3fb_set_var,
+	fb_get_cmap:	retz3fb_get_cmap,
+	fb_set_cmap:	retz3fb_set_cmap,
 };
 
 
@@ -1442,7 +1389,6 @@ int __init retz3fb_init(void)
 			release_mem_region(board_addr, 0x00c00000);
 			continue;
 		}
-		strcpy(z->name, "Retina Z3 Graphics ");
 		if (!(zinfo = kmalloc(sizeof(struct retz3_fb_info),
 				      GFP_KERNEL)))
 			return -ENOMEM;
@@ -1504,7 +1450,7 @@ int __init retz3fb_init(void)
 		       "video memory\n", GET_FB_IDX(fb_info->node),
 		       fb_info->modename, zinfo->fbsize>>10);
 
-		/* TODO: This driver cannot be unloaded yet */
+		/* FIXME: This driver cannot be unloaded yet */
 		MOD_INC_USE_COUNT;
 
 		res = 0;
@@ -1598,9 +1544,9 @@ void cleanup_module(void)
 	/*
 	 * Not reached because the usecount will never
 	 * be decremented to zero
+	 *
+	 * FIXME: clean up ... *
 	 */
-	unregister_framebuffer(&fb_info);
-	/* TODO: clean up ... */
 }
 #endif
 
@@ -1688,8 +1634,13 @@ static void retz3_clear_margins(struct vc_data* conp, struct display* p,
 
 
 static struct display_switch fbcon_retz3_8 = {
-    fbcon_cfb8_setup, retz3_8_bmove, retz3_8_clear,
-    retz3_putc, retz3_putcs, retz3_revc, NULL, NULL,
-    retz3_clear_margins, FONTWIDTH(8)
+    setup:		fbcon_cfb8_setup,
+    bmove:		retz3_8_bmove,
+    clear:		retz3_8_clear,
+    putc:		retz3_putc,
+    putcs:		retz3_putcs,
+    revc:		retz3_revc,
+    clear_margins:	retz3_clear_margins,
+    fontwidthmask:	FONTWIDTH(8)
 };
 #endif

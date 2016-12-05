@@ -9,8 +9,9 @@
 # parent makefile.
 #
 
+USE_STANDARD_AS_RULE := true
+
 L_TARGET	:= acorn-block.a
-MOD_LIST_NAME	:= ACORN_BLOCK_MODULES
 
 obj-y		:=
 obj-m		:=
@@ -50,9 +51,6 @@ M_OBJS		:= $(sort $(filter-out $(export-objs), $(obj-m)))
 MX_OBJS		:= $(sort $(filter     $(export-objs), $(obj-m)))
 
 include $(TOPDIR)/Rules.make
-
-.S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c -o $*.o $<
 
 fd1772_mod.o: $(FLOPPY)
 	$(LD) -r -o $@ $(FLOPPY)

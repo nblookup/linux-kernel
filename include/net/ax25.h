@@ -159,15 +159,13 @@ typedef struct {
 	unsigned short		slave_timeout;		/* when? */
 } ax25_dama_info;
 
-#ifndef _LINUX_SYSCTL_H
-#include <linux/sysctl.h>
-#endif
+struct ctl_table;
 
 typedef struct ax25_dev {
 	struct ax25_dev		*next;
-	struct net_device		*dev;
-	struct net_device		*forward;
-	struct ctl_table	systable[AX25_MAX_VALUES+1];
+	struct net_device	*dev;
+	struct net_device	*forward;
+	struct ctl_table	*systable;
 	int			values[AX25_MAX_VALUES];
 #if defined(CONFIG_AX25_DAMA_SLAVE) || defined(CONFIG_AX25_DAMA_MASTER)
 	ax25_dama_info		dama;
@@ -252,8 +250,6 @@ extern void ax25_ds_t1_timeout(ax25_cb *);
 extern void ax25_ds_heartbeat_expiry(ax25_cb *);
 extern void ax25_ds_t3timer_expiry(ax25_cb *);
 extern void ax25_ds_idletimer_expiry(ax25_cb *);
-
-#include <net/ax25call.h>
 
 /* ax25_iface.c */
 extern int  ax25_protocol_register(unsigned int, int (*)(struct sk_buff *, ax25_cb *));
@@ -343,7 +339,12 @@ extern int  ax25_uid_get_info(char *, char **, off_t, int);
 extern void ax25_uid_free(void);
 
 /* sysctl_net_ax25.c */
+#ifdef CONFIG_SYSCTL
 extern void ax25_register_sysctl(void);
 extern void ax25_unregister_sysctl(void);
+#else
+extern inline void ax25_register_sysctl(void) {};
+extern inline void ax25_unregister_sysctl(void) {};
+#endif /* CONFIG_SYSCTL */
 
 #endif

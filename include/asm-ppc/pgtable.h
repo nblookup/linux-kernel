@@ -1,3 +1,4 @@
+#ifdef __KERNEL__
 #ifndef _PPC_PGTABLE_H
 #define _PPC_PGTABLE_H
 
@@ -65,15 +66,16 @@ extern inline void flush_tlb_pgtables(struct mm_struct *mm,
 #define flush_cache_mm(mm)		do { } while (0)
 #define flush_cache_range(mm, a, b)	do { } while (0)
 #define flush_cache_page(vma, p)	do { } while (0)
+#define flush_icache_page(vma, page)	do { } while (0)
 
 extern void flush_icache_range(unsigned long, unsigned long);
 extern void __flush_page_to_ram(unsigned long page_va);
-#define flush_page_to_ram(page)	__flush_page_to_ram(page_address(page))
-extern void __flush_icache_page(unsigned long page_va);
-#define flush_icache_page(vma, page) __flush_icache_page(page_address(page))
+extern void flush_page_to_ram(struct page *page);
+
+#define flush_dcache_page(page)			do { } while (0)
 
 extern unsigned long va_to_phys(unsigned long address);
-extern pte_t *va_to_pte(struct task_struct *tsk, unsigned long address);
+extern pte_t *va_to_pte(unsigned long address);
 extern unsigned long ioremap_bot, ioremap_base;
 #endif /* __ASSEMBLY__ */
 
@@ -197,21 +199,17 @@ extern unsigned long ioremap_bot, ioremap_base;
 #define _PAGE_NO_CACHE	0x0002	/* I: cache inhibit */
 #define _PAGE_SHARED	0x0004	/* No ASID (context) compare */
 
-/* These four software bits must be masked out when the entry is loaded
+/* These five software bits must be masked out when the entry is loaded
  * into the TLB.
  */
+#define _PAGE_DIRTY	0x0008	/* software: page changed */
 #define _PAGE_GUARDED	0x0010	/* software: guarded access */
 #define _PAGE_WRITETHRU 0x0020	/* software: use writethrough cache */
 #define _PAGE_RW	0x0040	/* software: user write access allowed */
 #define _PAGE_ACCESSED	0x0080	/* software: page referenced */
 
-#define _PAGE_DIRTY	0x0100	/* C: page changed (write protect) */
+#define _PAGE_HWWRITE	0x0100	/* C: page changed (write protect) */
 #define _PAGE_USER	0x0800	/* One of the PP bits, the other must be 0 */
-
-/* This is used to enable or disable the actual hardware write
- * protection.
- */
-#define _PAGE_HWWRITE	_PAGE_DIRTY
 
 #else /* CONFIG_6xx */
 /* Definitions for 60x, 740/750, etc. */
@@ -230,7 +228,7 @@ extern unsigned long ioremap_bot, ioremap_base;
 
 #define _PAGE_CHG_MASK	(PAGE_MASK | _PAGE_ACCESSED | _PAGE_DIRTY)
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #define _PAGE_BASE	_PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_COHERENT
 #else
 #define _PAGE_BASE	_PAGE_PRESENT | _PAGE_ACCESSED
@@ -277,7 +275,7 @@ extern unsigned long ioremap_bot, ioremap_base;
  * for zero-mapped memory areas etc..
  */
 extern unsigned long empty_zero_page[1024];
-#define ZERO_PAGE(vaddr) (mem_map + MAP_NR(empty_zero_page))
+#define ZERO_PAGE(vaddr) (virt_to_page(empty_zero_page))
 
 /*
  * BAD_PAGETABLE is used when we need a bogus page-table, while
@@ -306,7 +304,6 @@ extern pte_t * __bad_pagetable(void);
 #define pte_none(pte)		(!pte_val(pte))
 #define pte_present(pte)	(pte_val(pte) & _PAGE_PRESENT)
 #define pte_clear(ptep)		do { pte_val(*(ptep)) = 0; } while (0)
-#define pte_pagenr(x)		((unsigned long)((pte_val(x) >> PAGE_SHIFT)))
 
 #define pmd_none(pmd)		(!pmd_val(pmd))
 #define	pmd_bad(pmd)		((pmd_val(pmd) & ~PAGE_MASK) != 0)
@@ -316,9 +313,9 @@ extern pte_t * __bad_pagetable(void);
 /*
  * Permanent address of a page.
  */
-#define page_address(page)  ({ if (!(page)->virtual) BUG(); (page)->virtual; })
+#define page_address(page)  ((page)->virtual)
 #define pages_to_mb(x)		((x) >> (20-PAGE_SHIFT))
-#define pte_page(x)		(mem_map+pte_pagenr(x))
+#define pte_page(x)		(mem_map+(unsigned long)((pte_val(x) >> PAGE_SHIFT)))
 
 #ifndef __ASSEMBLY__
 /*
@@ -432,6 +429,7 @@ extern inline pte_t * pte_offset(pmd_t * dir, unsigned long address)
 }
 
 extern pgd_t swapper_pg_dir[1024];
+extern void paging_init(void);
 
 /*
  * Page tables may have changed.  We don't need to do anything here
@@ -453,9 +451,6 @@ extern void flush_hash_page(unsigned context, unsigned long va);
 #define SWP_ENTRY(type, offset)		((swp_entry_t) { ((type) << 1) | ((offset) << 8) })
 #define pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
 #define swp_entry_to_pte(x)		((pte_t) { (x).val })
-
-#define module_map      vmalloc
-#define module_unmap    vfree
 
 /* CONFIG_APUS */
 /* For virtual address to physical address conversion */
@@ -491,6 +486,8 @@ extern void kernel_set_cachemode (unsigned long address, unsigned long size,
 
 #define io_remap_page_range remap_page_range 
 
+#include <asm-generic/pgtable.h>
 
 #endif __ASSEMBLY__
 #endif /* _PPC_PGTABLE_H */
+#endif /* __KERNEL__ */

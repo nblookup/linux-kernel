@@ -13,6 +13,7 @@
  *		Donald J. Becker, <becker@cesdis.gsfc.nasa.gov>
  *		Alan Cox, <Alan.Cox@linux.org>
  *		Bjorn Ekwall. <bj0rn@blox.se>
+ *              Pekka Riikonen <priikone@poseidon.pspt.fi>
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -38,10 +39,23 @@
 #include <net/profile.h>
 #endif
 
+struct divert_blk;
+
 #define NET_XMIT_SUCCESS	0
 #define NET_XMIT_DROP		1	/* skb dropped			*/
 #define NET_XMIT_CN		2	/* congestion notification	*/
 #define NET_XMIT_POLICED	3	/* skb is shot by police	*/
+#define NET_XMIT_BYPASS		4	/* packet does not leave via dequeue;
+					   (TC use only - dev_queue_xmit
+					   returns this as NET_XMIT_SUCCESS) */
+
+/* Backlog congestion levels */
+#define NET_RX_SUCCESS		0   /* keep 'em coming, baby */
+#define NET_RX_DROP		1  /* packet dropped */
+#define NET_RX_CN_LOW		2   /* storm alert, just in case */
+#define NET_RX_CN_MOD		3   /* Storm on its way! */
+#define NET_RX_CN_HIGH		4   /* The storm is here */
+#define NET_RX_BAD		5  /* packet dropped due to kernel error */
 
 #define net_xmit_errno(e)	((e) != NET_XMIT_CN ? -ENOBUFS : 0)
 
@@ -190,6 +204,17 @@ enum netdev_state_t
 
 
 /*
+ * This structure holds at boot time configured netdevice settings. They
+ * are then used in the device probing. 
+ */
+struct netdev_boot_setup {
+	char name[IFNAMSIZ];
+	struct ifmap map;
+};
+#define NETDEV_BOOT_SETUP_MAX 8
+
+
+/*
  *	The DEVICE structure.
  *	Actually, this whole structure is a big mistake.  It mixes I/O
  *	data with strictly "high-level" data, and it has to know about
@@ -207,7 +232,7 @@ struct net_device
 	 * (i.e. as seen by users in the "Space.c" file).  It is the name
 	 * the interface.
 	 */
-	char			*name;
+	char			name[IFNAMSIZ];
 
 	/*
 	 *	I/O specific fields
@@ -308,11 +333,17 @@ struct net_device
 	atomic_t		refcnt;
 	/* The flag marking that device is unregistered, but held by an user */
 	int			deadbeaf;
-	/* New style devices allow asynchronous destruction;
-	   netdevice_unregister for old style devices blocks until
-	   the last user will dereference this device.
-	 */
-	int			new_style;
+
+	/* Net device features */
+	int			features;
+#define NETIF_F_SG		1	/* Scatter/gather IO. */
+#define NETIF_F_IP_CSUM		2	/* Can checksum only TCP/UDP over IPv4. */
+#define NETIF_F_NO_CSUM		4	/* Does not require checksum. F.e. loopack. */
+#define NETIF_F_HW_CSUM		8	/* Can checksum all the packets. */
+#define NETIF_F_DYNALLOC	16	/* Self-dectructable device. */
+#define NETIF_F_HIGHDMA		32	/* Can DMA to high memory. */
+#define NETIF_F_FRAGLIST	1	/* Scatter/gather IO. */
+
 	/* Called after device is detached from network. */
 	void			(*uninit)(struct net_device *dev);
 	/* Called after last user reference disappears. */
@@ -350,13 +381,16 @@ struct net_device
 #define HAVE_CHANGE_MTU
 	int			(*change_mtu)(struct net_device *dev, int new_mtu);
 
-#define HAVE_TX_TIMOUT
+#define HAVE_TX_TIMEOUT
 	void			(*tx_timeout) (struct net_device *dev);
 
 	int			(*hard_header_parse)(struct sk_buff *skb,
 						     unsigned char *haddr);
 	int			(*neigh_setup)(struct net_device *dev, struct neigh_parms *);
 	int			(*accept_fastpath)(struct net_device *, struct dst_entry*);
+
+	/* open/release and usage marking */
+	struct module *owner;
 
 	/* bridge stuff */
 	struct net_bridge_port	*br_port;
@@ -367,6 +401,10 @@ struct net_device
 	rwlock_t		fastpath_lock;
 	struct dst_entry	*fastpath[NETDEV_FASTROUTE_HMASK+1];
 #endif
+#ifdef CONFIG_NET_DIVERT
+	/* this will get initialized at each interface type init routine */
+	struct divert_blk	*divert;
+#endif /* CONFIG_NET_DIVERT */
 };
 
 
@@ -386,8 +424,10 @@ struct packet_type
 
 extern struct net_device		loopback_dev;		/* The loopback */
 extern struct net_device		*dev_base;		/* All devices */
-extern rwlock_t			dev_base_lock;		/* Device list lock */
+extern rwlock_t				dev_base_lock;		/* Device list lock */
 
+extern int			netdev_boot_setup_add(char *name, struct ifmap *map);
+extern int 			netdev_boot_setup_check(struct net_device *dev);
 extern struct net_device    *dev_getbyhwaddr(unsigned short type, char *hwaddr);
 extern void		dev_add_pack(struct packet_type *pt);
 extern void		dev_remove_pack(struct packet_type *pt);
@@ -399,7 +439,6 @@ extern int		dev_alloc_name(struct net_device *dev, const char *name);
 extern int		dev_open(struct net_device *dev);
 extern int		dev_close(struct net_device *dev);
 extern int		dev_queue_xmit(struct sk_buff *skb);
-extern void		dev_loopback_xmit(struct sk_buff *skb);
 extern int		register_netdevice(struct net_device *dev);
 extern int		unregister_netdevice(struct net_device *dev);
 extern int 		register_netdevice_notifier(struct notifier_block *nb);
@@ -411,7 +450,7 @@ extern int		dev_restart(struct net_device *dev);
 
 typedef int gifconf_func_t(struct net_device * dev, char * bufptr, int len);
 extern int		register_gifconf(unsigned int family, gifconf_func_t * gifconf);
-extern __inline__ int unregister_gifconf(unsigned int family)
+static inline int unregister_gifconf(unsigned int family)
 {
 	return register_gifconf(family, 0);
 }
@@ -424,6 +463,8 @@ extern __inline__ int unregister_gifconf(unsigned int family)
 struct softnet_data
 {
 	int			throttle;
+	int			cng_level;
+	int			avg_blog;
 	struct sk_buff_head	input_pkt_queue;
 	struct net_device	*output_queue;
 	struct sk_buff		*completion_queue;
@@ -434,7 +475,7 @@ extern struct softnet_data softnet_data[NR_CPUS];
 
 #define HAVE_NETIF_QUEUE
 
-extern __inline__ void __netif_schedule(struct net_device *dev)
+static inline void __netif_schedule(struct net_device *dev)
 {
 	if (!test_and_set_bit(__LINK_STATE_SCHED, &dev->state)) {
 		unsigned long flags;
@@ -448,34 +489,34 @@ extern __inline__ void __netif_schedule(struct net_device *dev)
 	}
 }
 
-extern __inline__ void netif_schedule(struct net_device *dev)
+static inline void netif_schedule(struct net_device *dev)
 {
 	if (!test_bit(__LINK_STATE_XOFF, &dev->state))
 		__netif_schedule(dev);
 }
 
-extern __inline__ void netif_start_queue(struct net_device *dev)
+static inline void netif_start_queue(struct net_device *dev)
 {
 	clear_bit(__LINK_STATE_XOFF, &dev->state);
 }
 
-extern __inline__ void netif_wake_queue(struct net_device *dev)
+static inline void netif_wake_queue(struct net_device *dev)
 {
 	if (test_and_clear_bit(__LINK_STATE_XOFF, &dev->state))
 		__netif_schedule(dev);
 }
 
-extern __inline__ void netif_stop_queue(struct net_device *dev)
+static inline void netif_stop_queue(struct net_device *dev)
 {
 	set_bit(__LINK_STATE_XOFF, &dev->state);
 }
 
-extern __inline__ int netif_queue_stopped(struct net_device *dev)
+static inline int netif_queue_stopped(struct net_device *dev)
 {
 	return test_bit(__LINK_STATE_XOFF, &dev->state);
 }
 
-extern __inline__ int netif_running(struct net_device *dev)
+static inline int netif_running(struct net_device *dev)
 {
 	return test_bit(__LINK_STATE_START, &dev->state);
 }
@@ -483,7 +524,7 @@ extern __inline__ int netif_running(struct net_device *dev)
 /* Use this variant when it is known for sure that it
  * is executing from interrupt context.
  */
-extern __inline__ void dev_kfree_skb_irq(struct sk_buff *skb)
+static inline void dev_kfree_skb_irq(struct sk_buff *skb)
 {
 	if (atomic_dec_and_test(&skb->users)) {
 		int cpu =smp_processor_id();
@@ -500,7 +541,7 @@ extern __inline__ void dev_kfree_skb_irq(struct sk_buff *skb)
 /* Use this variant in places where it could be invoked
  * either from interrupt or non-interrupt context.
  */
-extern __inline__ void dev_kfree_skb_any(struct sk_buff *skb)
+static inline void dev_kfree_skb_any(struct sk_buff *skb)
 {
 	if (in_irq())
 		dev_kfree_skb_irq(skb);
@@ -510,7 +551,7 @@ extern __inline__ void dev_kfree_skb_any(struct sk_buff *skb)
 
 extern void		net_call_rx_atomic(void (*fn)(void));
 #define HAVE_NETIF_RX 1
-extern void		netif_rx(struct sk_buff *skb);
+extern int		netif_rx(struct sk_buff *skb);
 extern int		dev_ioctl(unsigned int cmd, void *);
 extern int		dev_change_flags(struct net_device *, unsigned);
 extern void		dev_queue_xmit_nit(struct sk_buff *skb, struct net_device *dev);
@@ -519,14 +560,14 @@ extern void		dev_init(void);
 
 extern int		netdev_nit;
 
-extern __inline__ void dev_init_buffers(struct net_device *dev)
+static inline void dev_init_buffers(struct net_device *dev)
 {
 	/* DO NOTHING */
 }
 
 extern int netdev_finish_unregister(struct net_device *dev);
 
-extern __inline__ void dev_put(struct net_device *dev)
+static inline void dev_put(struct net_device *dev)
 {
 	if (atomic_dec_and_test(&dev->refcnt))
 		netdev_finish_unregister(dev);
@@ -540,32 +581,32 @@ extern __inline__ void dev_put(struct net_device *dev)
  * who is responsible for serialization of these calls.
  */
 
-extern __inline__ int netif_carrier_ok(struct net_device *dev)
+static inline int netif_carrier_ok(struct net_device *dev)
 {
 	return !test_bit(__LINK_STATE_NOCARRIER, &dev->state);
 }
 
 extern void __netdev_watchdog_up(struct net_device *dev);
 
-extern __inline__ void netif_carrier_on(struct net_device *dev)
+static inline void netif_carrier_on(struct net_device *dev)
 {
 	clear_bit(__LINK_STATE_NOCARRIER, &dev->state);
 	if (netif_running(dev))
 		__netdev_watchdog_up(dev);
 }
 
-extern __inline__ void netif_carrier_off(struct net_device *dev)
+static inline void netif_carrier_off(struct net_device *dev)
 {
 	set_bit(__LINK_STATE_NOCARRIER, &dev->state);
 }
 
 /* Hot-plugging. */
-extern __inline__ int netif_device_present(struct net_device *dev)
+static inline int netif_device_present(struct net_device *dev)
 {
 	return test_bit(__LINK_STATE_PRESENT, &dev->state);
 }
 
-extern __inline__ void netif_device_detach(struct net_device *dev)
+static inline void netif_device_detach(struct net_device *dev)
 {
 	if (test_and_clear_bit(__LINK_STATE_PRESENT, &dev->state) &&
 	    netif_running(dev)) {
@@ -573,7 +614,7 @@ extern __inline__ void netif_device_detach(struct net_device *dev)
 	}
 }
 
-extern __inline__ void netif_device_attach(struct net_device *dev)
+static inline void netif_device_attach(struct net_device *dev)
 {
 	if (!test_and_set_bit(__LINK_STATE_PRESENT, &dev->state) &&
 	    netif_running(dev)) {
@@ -612,6 +653,7 @@ extern int		netdev_register_fc(struct net_device *dev, void (*stimul)(struct net
 extern void		netdev_unregister_fc(int bit);
 extern int		netdev_max_backlog;
 extern unsigned long	netdev_fc_xoff;
+extern atomic_t netdev_dropping;
 extern int		netdev_set_master(struct net_device *dev, struct net_device *master);
 #ifdef CONFIG_NET_FASTROUTE
 extern int		netdev_fastroute;

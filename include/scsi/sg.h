@@ -11,9 +11,28 @@ Original driver (sg.h):
 Version 2 and 3 extensions to driver:
 *       Copyright (C) 1998 - 2000 Douglas Gilbert
 
-    Version: 3.1.12 (20000222)
-    This version is for 2.3/2.4 series kernels.
+    Version: 3.1.17 (20000921)
+    This version is for 2.4 series kernels.
 
+    Changes since 3.1.16 (20000716)
+    	- changes for new scsi subsystem initialization
+    	- change Scsi_Cmnd usage to Scsi_Request
+    	- cleanup for no procfs
+    Changes since 3.1.15 (20000528)
+    	- further (scatter gather) buffer length changes
+    Changes since 3.1.14 (20000503)
+        - fix aha1542 odd length buffer problem
+        - make multiple readers on same fd safe
+    Changes since 3.1.13 (20000324)
+        - revert change so sg_header interface doesn't send _UNKNOWN
+        - "discon" and "tq" in /proc/scsi/sg/devices replaced with
+          "bopens" and "busy"; correct duration output in procfs
+        - provision for SG_RESET
+        - lock file descriptor and request lists
+    Changes since 3.1.12 (20000222)
+    	- make sg_header interface use SCSI_DATA_UNKNOWN
+    	- add SG_DXFER_UNKNOWN define to sg interface
+    	- stop allocating data buffers to non data transfer commands
     Changes since 3.1.10 (20000123)
     	- make device allocation dynamic (get rid of SG_EXTRA_DEVS)
 	- move to sg0,sg1,sg2 rather than sga,sgb,sgc
@@ -45,10 +64,9 @@ Map of SG verions to the Linux kernels in which they appear:
        2.1.31            2.2.6 and 2.2.7
        2.1.32            2.2.8 and 2.2.9
        2.1.34            2.2.10 to 2.2.13
-       2.1.36            2.2.14 
-       2.3.35            2.3.x development series kernels (starting 2.3.20)
+       2.1.36            2.2.14 and 2.2.15
        3.0.x             optional version 3 sg driver for 2.2 series
-       3.1.x             candidate version 3 sg driver for 2.3 series
+       3.1.x             first appeared in lk 2.3.43
 
 Major new features in SG 3.x driver (cf SG 2.x drivers)
 	- SG_IO ioctl() combines function if write() and read()
@@ -96,10 +114,10 @@ Major features in SG 2.x driver (cf original SG driver)
  The main documents are still based on 2.x versions:
 	http://www.torque.net/sg/p/scsi-generic.txt
 	http://www.torque.net/sg/p/scsi-generic_long.txt
- The first document can also be found in the kernel source tree, probably at:
-	/usr/src/linux/Documentation/scsi-generic.txt .
  Documentation on the changes and additions in 3.x version of the sg driver
  can be found at: http://www.torque.net/sg/p/scsi-generic_v3.txt
+ This document can also be found in the kernel source tree, probably at:
+        /usr/src/linux/Documentation/scsi-generic.txt .
  Utility and test programs are also available at that web site.
 */
 
@@ -147,6 +165,7 @@ typedef struct sg_io_hdr
 				   additional property than during indirect
 				   IO the user buffer is copied into the
 				   kernel buffers before the transfer */
+#define SG_DXFER_UNKNOWN -5     /* Unknown data direction */
 
 /* following flag values can be "or"-ed together */
 #define SG_FLAG_DIRECT_IO 1     /* default is indirect IO */

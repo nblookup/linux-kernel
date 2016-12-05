@@ -17,6 +17,10 @@
  * OSS/Free for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
  * Version 2 (June 1991). See the "COPYING" file distributed with this software
  * for more info.
+ *
+ * Changes:
+ * 11-10-2000	Bartlomiej Zolnierkiewicz <bkz@linux-ide.org>
+ *		Added __init to waveartist_init()
  */
 
 /* Debugging */
@@ -38,11 +42,10 @@
 #include <linux/smp.h>
 #include <linux/spinlock.h>
 
-#include <asm/dec21285.h>
 #include <asm/hardware.h>
+#include <asm/mach-types.h>
 #include <asm/system.h>
 
-#include "soundmodule.h"
 #include "sound_config.h"
 #include "waveartist.h"
 
@@ -801,22 +804,21 @@ waveartist_set_bits(int dev, unsigned int arg)
 }
 
 static struct audio_driver waveartist_audio_driver = {
-	waveartist_open,
-	waveartist_close,
-	waveartist_output_block,
-	waveartist_start_input,
-	waveartist_ioctl,
-	waveartist_prepare_for_input,
-	waveartist_prepare_for_output,
-	waveartist_halt,
-	NULL,
-	NULL,
-	waveartist_halt_input,
-	waveartist_halt_output,
-	waveartist_trigger,
-	waveartist_set_speed,
-	waveartist_set_bits,
-	waveartist_set_channels
+	owner:		THIS_MODULE,
+	open:		waveartist_open,
+	close:		waveartist_close,
+	output_block:	waveartist_output_block,
+	start_input:	waveartist_start_input,
+	ioctl:		waveartist_ioctl,
+	prepare_for_input:	waveartist_prepare_for_input,
+	prepare_for_output:	waveartist_prepare_for_output,
+	halt_io:	waveartist_halt,
+	halt_input:	waveartist_halt_input,
+	halt_output:	waveartist_halt_output,
+	trigger:	waveartist_trigger,
+	set_speed:	waveartist_set_speed,
+	set_bits:	waveartist_set_bits,
+	set_channels:	waveartist_set_channels
 };
 
 
@@ -1186,13 +1188,13 @@ waveartist_mixer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 
 static struct mixer_operations waveartist_mixer_operations =
 {
-	"WaveArtist",
-	"WaveArtist NetWinder",
-	waveartist_mixer_ioctl
+	owner:	THIS_MODULE,
+	id:	"WaveArtist",
+	name:	"WaveArtist NetWinder",
+	ioctl:	waveartist_mixer_ioctl
 };
 
-static int
-waveartist_init(wavnc_info *devc)
+static int __init waveartist_init(wavnc_info *devc)
 {
 	wavnc_port_info *portc;
 	char rev[3], dev_name[64];
@@ -1628,7 +1630,8 @@ vnc_private_ioctl(int dev, unsigned int cmd, caddr_t arg)
 		u_int prev_spkr_mute, prev_line_mute, prev_auto_state;
 		int val;
 
-		get_user_ret(val, (int *)arg, -EFAULT);
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
 
 		/* check if parameter is logical */
 		if (val & ~(VNC_MUTE_INTERNAL_SPKR |
@@ -1657,7 +1660,8 @@ vnc_private_ioctl(int dev, unsigned int cmd, caddr_t arg)
 	}
 
 	case SOUND_MIXER_PRIVATE2:
-		get_user_ret(val, (int *)arg, -EFAULT);
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
 
 		switch (val) {
 #define VNC_SOUND_PAUSE         0x53    //to pause the DSP
@@ -1681,8 +1685,10 @@ vnc_private_ioctl(int dev, unsigned int cmd, caddr_t arg)
 		unsigned long	flags;
 		int		mixer_reg[15], i, val;
 
-		get_user_ret(val, (int *)arg, -EFAULT);
-		copy_from_user_ret(mixer_reg, (void *)val, sizeof(mixer_reg), -EFAULT);
+		if (get_user(val, (int *)arg))
+			return -EFAULT;
+		if (copy_from_user(mixer_reg, (void *)val, sizeof(mixer_reg)))
+			return -EFAULT;
 
 		switch (mixer_reg[14]) {
 		case MIXER_PRIVATE3_RESET:
@@ -1708,7 +1714,8 @@ vnc_private_ioctl(int dev, unsigned int cmd, caddr_t arg)
 
 			spin_unlock_irqrestore(&waveartist_lock, flags);
 
-			copy_to_user_ret((void *)val, mixer_reg, sizeof(mixer_reg), -EFAULT);
+			if (copy_to_user((void *)val, mixer_reg, sizeof(mixer_reg)))
+				return -EFAULT;
 			break;
 
 		default:
@@ -1758,10 +1765,10 @@ static struct address_info cfg;
 
 static int attached;
 
-static int __initdata io;
-static int __initdata irq;
-static int __initdata dma;
-static int __initdata dma2;
+static int __initdata io = 0;
+static int __initdata irq = 0;
+static int __initdata dma = 0;
+static int __initdata dma2 = 0;
 
 
 MODULE_PARM(io, "i");		/* IO base */
@@ -1771,6 +1778,18 @@ MODULE_PARM(dma2, "i");		/* DMA2 */
 
 static int __init init_waveartist(void)
 {
+	if (!io && machine_is_netwinder()) {
+		/*
+		 * The NetWinder WaveArtist is at a fixed address.
+		 * If the user does not supply an address, use the
+		 * well-known parameters.
+		 */
+		io   = 0x250;
+		irq  = 12;
+		dma  = 3;
+		dma2 = 7;
+	}
+
 	cfg.io_base = io;
 	cfg.irq = irq;
 	cfg.dma = dma;
@@ -1782,16 +1801,13 @@ static int __init init_waveartist(void)
 	attach_waveartist(&cfg);
 	attached = 1;
 
-	SOUND_LOCK;
 	return 0;
 }
 
 static void __exit cleanup_waveartist(void)
 {
-	if (attached) {
-		SOUND_LOCK_END;
+	if (attached)
 		unload_waveartist(&cfg);
-	}
 }
 
 module_init(init_waveartist);

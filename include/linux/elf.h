@@ -72,6 +72,8 @@ typedef __u64	Elf64_Word;
 
 #define EM_IA_64	50	/* HP/Intel IA-64 */
 
+#define EM_X8664	62	/* AMD x86-64 */
+
 /*
  * This is an interim value that we will use until the committee comes
  * up with a final number.
@@ -163,6 +165,7 @@ typedef __u64	Elf64_Word;
 #define AT_EGID   14	/* effective gid */
 #define AT_PLATFORM 15  /* string identifying CPU for optimizations */
 #define AT_HWCAP  16    /* arch dependent hints at CPU capabilities */
+#define AT_CLKTCK 17	/* frequency at which times() increments */
 
 typedef struct dynamic{
   Elf32_Sword d_tag;
@@ -565,6 +568,7 @@ typedef struct elf64_shdr {
 #define NT_PRFPREG	2
 #define NT_PRPSINFO	3
 #define NT_TASKSTRUCT	4
+#define NT_PRFPXREG	20
 
 /* Note header in a PT_NOTE section */
 typedef struct elf32_note {

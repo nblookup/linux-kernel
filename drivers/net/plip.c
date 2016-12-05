@@ -286,6 +286,7 @@ plip_init_dev(struct net_device *dev, struct parport *pb)
 	struct net_local *nl;
 	struct pardevice *pardev;
 
+	SET_MODULE_OWNER(dev);
 	dev->irq = pb->irq;
 	dev->base_addr = pb->base;
 
@@ -348,18 +349,18 @@ plip_init_dev(struct net_device *dev, struct parport *pb)
 	nl->nibble	= PLIP_NIBBLE_WAIT;
 
 	/* Initialize task queue structures */
-	nl->immediate.next = NULL;
+	INIT_LIST_HEAD(&nl->immediate.list);
 	nl->immediate.sync = 0;
 	nl->immediate.routine = (void (*)(void *))plip_bh;
 	nl->immediate.data = dev;
 
-	nl->deferred.next = NULL;
+	INIT_LIST_HEAD(&nl->deferred.list);
 	nl->deferred.sync = 0;
 	nl->deferred.routine = (void (*)(void *))plip_kick_bh;
 	nl->deferred.data = dev;
 
 	if (dev->irq == -1) {
-		nl->timer.next = NULL;
+		INIT_LIST_HEAD(&nl->timer.list);
 		nl->timer.sync = 0;
 		nl->timer.routine = (void (*)(void *))plip_timer_bh;
 		nl->timer.data = dev;
@@ -583,6 +584,61 @@ plip_receive(unsigned short nibble_timeout, struct net_device *dev,
 	return OK;
 }
 
+/*
+ *	Determine the packet's protocol ID. The rule here is that we 
+ *	assume 802.3 if the type field is short enough to be a length.
+ *	This is normal practice and works for any 'now in use' protocol.
+ *
+ *	PLIP is ethernet ish but the daddr might not be valid if unicast.
+ *	PLIP fortunately has no bus architecture (its Point-to-point).
+ *
+ *	We can't fix the daddr thing as that quirk (more bug) is embedded
+ *	in far too many old systems not all even running Linux.
+ */
+ 
+static unsigned short plip_type_trans(struct sk_buff *skb, struct net_device *dev)
+{
+	struct ethhdr *eth;
+	unsigned char *rawp;
+	
+	skb->mac.raw=skb->data;
+	skb_pull(skb,dev->hard_header_len);
+	eth= skb->mac.ethernet;
+	
+	if(*eth->h_dest&1)
+	{
+		if(memcmp(eth->h_dest,dev->broadcast, ETH_ALEN)==0)
+			skb->pkt_type=PACKET_BROADCAST;
+		else
+			skb->pkt_type=PACKET_MULTICAST;
+	}
+	
+	/*
+	 *	This ALLMULTI check should be redundant by 1.4
+	 *	so don't forget to remove it.
+	 */
+	 
+	if (ntohs(eth->h_proto) >= 1536)
+		return eth->h_proto;
+		
+	rawp = skb->data;
+	
+	/*
+	 *	This is a magic hack to spot IPX packets. Older Novell breaks
+	 *	the protocol design and runs IPX over 802.3 without an 802.2 LLC
+	 *	layer. We look for FFFF which isn't a used 802.2 SSAP/DSAP. This
+	 *	won't work for fault tolerant netware but does for the rest.
+	 */
+	if (*(unsigned short *)rawp == 0xFFFF)
+		return htons(ETH_P_802_3);
+		
+	/*
+	 *	Real 802.2 LLC
+	 */
+	return htons(ETH_P_802_2);
+}
+
+
 /* PLIP_RECEIVE_PACKET --- receive a packet */
 static int
 plip_receive_packet(struct net_device *dev, struct net_local *nl,
@@ -632,11 +688,12 @@ plip_receive_packet(struct net_device *dev, struct net_local *nl,
 			return ERROR;
 		}
 		/* Malloc up new buffer. */
-		rcv->skb = dev_alloc_skb(rcv->length.h);
+		rcv->skb = dev_alloc_skb(rcv->length.h + 2);
 		if (rcv->skb == NULL) {
 			printk(KERN_ERR "%s: Memory squeeze.\n", dev->name);
 			return ERROR;
 		}
+		skb_reserve(rcv->skb, 2);	/* Align IP on 16 byte boundaries */
 		skb_put(rcv->skb,rcv->length.h);
 		rcv->skb->dev = dev;
 		rcv->state = PLIP_PK_DATA;
@@ -669,7 +726,7 @@ plip_receive_packet(struct net_device *dev, struct net_local *nl,
 
 	case PLIP_PK_DONE:
 		/* Inform the upper layer for the arrival of a packet. */
-		rcv->skb->protocol=eth_type_trans(rcv->skb, dev);
+		rcv->skb->protocol=plip_type_trans(rcv->skb, dev);
 		netif_rx(rcv->skb);
 		nl->enet_stats.rx_bytes += rcv->length.h;
 		nl->enet_stats.rx_packets++;
@@ -934,7 +991,7 @@ plip_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 
 	switch (nl->connection) {
 	case PLIP_CN_CLOSING:
-		netif_start_queue (dev);
+		netif_wake_queue (dev);
 	case PLIP_CN_NONE:
 	case PLIP_CN_SEND:
 		dev->last_rx = jiffies;
@@ -980,7 +1037,7 @@ plip_tx_packet(struct sk_buff *skb, struct net_device *dev)
 	if (skb->len > dev->mtu + dev->hard_header_len) {
 		printk(KERN_WARNING "%s: packet too big, %d.\n", dev->name, (int)skb->len);
 		netif_start_queue (dev);
-		return 0;
+		return 1;
 	}
 
 	if (net_debug > 2)
@@ -999,7 +1056,6 @@ plip_tx_packet(struct sk_buff *skb, struct net_device *dev)
 	mark_bh(IMMEDIATE_BH);
 	spin_unlock_irq(&nl->lock);
 	
-	netif_start_queue (dev);
 	return 0;
 }
 
@@ -1109,7 +1165,6 @@ plip_open(struct net_device *dev)
 
 	netif_start_queue (dev);
 
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -1157,7 +1212,6 @@ plip_close(struct net_device *dev)
 	/* Reset. */
 	outb(0x00, PAR_CONTROL(dev));
 #endif
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -1227,6 +1281,8 @@ plip_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 		pc->nibble  = nl->nibble;
 		break;
 	case PLIP_SET_TIMEOUT:
+		if(!capable(CAP_NET_ADMIN))
+			return -EPERM;
 		nl->trigger = pc->trigger;
 		nl->nibble  = pc->nibble;
 		break;
@@ -1244,9 +1300,65 @@ MODULE_PARM(timid, "1i");
 
 static struct net_device *dev_plip[PLIP_MAX] = { NULL, };
 
+static int inline 
+plip_searchfor(int list[], int a)
+{
+	int i;
+	for (i = 0; i < PLIP_MAX && list[i] != -1; i++) {
+		if (list[i] == a) return 1;
+	}
+	return 0;
+}
+
+/* plip_attach() is called (by the parport code) when a port is
+ * available to use. */
+static void plip_attach (struct parport *port)
+{
+	static int i = 0;
+
+	if ((parport[0] == -1 && (!timid || !port->devices)) || 
+	    plip_searchfor(parport, port->number)) {
+		if (i == PLIP_MAX) {
+			printk(KERN_ERR "plip: too many devices\n");
+			return;
+		}
+		dev_plip[i] = kmalloc(sizeof(struct net_device),
+				      GFP_KERNEL);
+		if (!dev_plip[i]) {
+			printk(KERN_ERR "plip: memory squeeze\n");
+			return;
+		}
+		memset(dev_plip[i], 0, sizeof(struct net_device));
+		sprintf(dev_plip[i]->name, "plip%d", i);
+		dev_plip[i]->priv = port;
+		if (plip_init_dev(dev_plip[i],port) ||
+		    register_netdev(dev_plip[i])) {
+			kfree(dev_plip[i]);
+			dev_plip[i] = NULL;
+		} else {
+			i++;
+		}
+	}
+}
+
+/* plip_detach() is called (by the parport code) when a port is
+ * no longer available to use. */
+static void plip_detach (struct parport *port)
+{
+	/* Nothing to do */
+}
+
+static struct parport_driver plip_driver = {
+	name:	"plip",
+	attach:	plip_attach,
+	detach:	plip_detach
+};
+
 static void __exit plip_cleanup_module (void)
 {
 	int i;
+
+	parport_unregister_driver (&plip_driver);
 
 	for (i=0; i < PLIP_MAX; i++) {
 		if (dev_plip[i]) {
@@ -1257,7 +1369,6 @@ static void __exit plip_cleanup_module (void)
 				parport_release(nl->pardev);
 			parport_unregister_device(nl->pardev);
 			kfree(dev_plip[i]->priv);
-			kfree(dev_plip[i]->name);
 			kfree(dev_plip[i]);
 			dev_plip[i] = NULL;
 		}
@@ -1268,7 +1379,7 @@ static void __exit plip_cleanup_module (void)
 
 static int parport_ptr = 0;
 
-static void __init plip_setup(char *str)
+static int __init plip_setup(char *str)
 {
 	int ints[4];
 
@@ -1293,27 +1404,15 @@ static void __init plip_setup(char *str)
 			       ints[1]);
 		}
 	}
+	return 1;
 }
 
 __setup("plip=", plip_setup);
 
 #endif /* !MODULE */
 
-static int inline 
-plip_searchfor(int list[], int a)
-{
-	int i;
-	for (i = 0; i < PLIP_MAX && list[i] != -1; i++) {
-		if (list[i] == a) return 1;
-	}
-	return 0;
-}
-
 static int __init plip_init (void)
 {
-	struct parport *pb = parport_enumerate();
-	int i=0;
-
 	if (parport[0] == -2)
 		return 0;
 
@@ -1322,46 +1421,11 @@ static int __init plip_init (void)
 		timid = 0;
 	}
 
-	/* If the user feeds parameters, use them */
-	while (pb) {
-		if ((parport[0] == -1 && (!timid || !pb->devices)) || 
-		    plip_searchfor(parport, pb->number)) {
-			if (i == PLIP_MAX) {
-				printk(KERN_ERR "plip: too many devices\n");
-				break;
-			}
-			dev_plip[i] = kmalloc(sizeof(struct net_device),
-					      GFP_KERNEL);
-			if (!dev_plip[i]) {
-				printk(KERN_ERR "plip: memory squeeze\n");
-				break;
-			}
-			memset(dev_plip[i], 0, sizeof(struct net_device));
-			dev_plip[i]->name = 
-				kmalloc(strlen("plipXXX"), GFP_KERNEL);
-			if (!dev_plip[i]->name) {
-				printk(KERN_ERR "plip: memory squeeze.\n");
-				kfree(dev_plip[i]);
-				dev_plip[i] = NULL;
-				break;
-			}
-			sprintf(dev_plip[i]->name, "plip%d", i);
-			dev_plip[i]->priv = pb;
-			if (plip_init_dev(dev_plip[i],pb) || register_netdev(dev_plip[i])) {
-				kfree(dev_plip[i]->name);
-				kfree(dev_plip[i]);
-				dev_plip[i] = NULL;
-			} else {
-				i++;
-			}
-		}
-		pb = pb->next;
-  	}
-
-	if (i == 0) {
-		printk(KERN_INFO "plip: no devices registered\n");
-		return -EIO;
+	if (parport_register_driver (&plip_driver)) {
+		printk (KERN_WARNING "plip: couldn't register driver\n");
+		return 1;
 	}
+
 	return 0;
 }
 

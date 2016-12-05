@@ -1,4 +1,4 @@
-/* $Id: parport.h,v 1.7 2000/01/28 13:43:14 jj Exp $
+/* $Id: parport.h,v 1.9 2000/03/16 07:47:27 davem Exp $
  * parport.h: sparc64 specific parport initialization and dma.
  *
  * Copyright (C) 1999  Eddie C. Dost  (ecd@skynet.be)
@@ -7,17 +7,8 @@
 #ifndef _ASM_SPARC64_PARPORT_H
 #define _ASM_SPARC64_PARPORT_H 1
 
-#include <linux/config.h>
 #include <asm/ebus.h>
 #include <asm/ns87303.h>
-
-#ifdef CONFIG_PARPORT_PC_PCMCIA
-#define __maybe_init
-#define __maybe_initdata
-#else
-#define __maybe_init __init
-#define __maybe_initdata __initdata
-#endif
 
 #define PARPORT_PC_MAX_PORTS	PARPORT_MAX
 
@@ -108,12 +99,7 @@ get_dma_residue(unsigned int dmanr)
 	return res;
 }
 
-static int __maybe_init parport_pc_init_pci(int irq, int dma);
-
-static int user_specified __initdata = 0;
-
-int __init
-parport_pc_init(int *io, int *io_hi, int *irq, int *dma)
+static int parport_pc_find_nonpci_ports (int autoirq, int autodma)
 {
 	struct linux_ebus *ebus;
 	struct linux_ebus_device *edev;
@@ -155,7 +141,6 @@ parport_pc_init(int *io, int *io_hi, int *irq, int *dma)
 		}
 	}
 
-	count += parport_pc_init_pci(PARPORT_IRQ_AUTO, PARPORT_DMA_NONE);
 	return count;
 }
 

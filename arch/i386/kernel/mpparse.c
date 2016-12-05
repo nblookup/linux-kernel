@@ -9,7 +9,7 @@
  *		Erich Boleyn	:	MP v1.4 and additional changes.
  *		Alan Cox	:	Added EBDA scanning
  *		Ingo Molnar	:	various cleanups and rewrites
- *	Maciej W. Rozycki	:	Bits for genuine 82489DX APICs
+ *	Maciej W. Rozycki	:	Bits for default MP configurations
  */
 
 #include <linux/mm.h>
@@ -28,31 +28,26 @@
 #include <asm/pgalloc.h>
 
 /* Have we found an MP table */
-int smp_found_config = 0;
+int smp_found_config;
 
 /*
  * Various Linux-internal data structures created from the
  * MP-table.
  */
-int apic_version [NR_CPUS];
-int mp_bus_id_to_type [MAX_MP_BUSSES] = { -1, };
+int apic_version [MAX_APICS];
+int mp_bus_id_to_type [MAX_MP_BUSSES];
 int mp_bus_id_to_pci_bus [MAX_MP_BUSSES] = { -1, };
-int mp_current_pci_id = 0;
+int mp_current_pci_id;
 int pic_mode;
-unsigned long mp_lapic_addr = 0;
+unsigned long mp_lapic_addr;
 
 /* Processor that is doing the boot up */
-unsigned int boot_cpu_id = 0;
+unsigned int boot_cpu_id = -1U;
 /* Internal processor count */
-static unsigned int num_processors = 1;
+static unsigned int num_processors;
 
 /* Bitmask of physically existing CPUs */
-unsigned long phys_cpu_present_map = 0;
-
-/*
- * IA s/w dev Vol 3, Section 7.4
- */
-#define APIC_DEFAULT_PHYS_BASE 0xfee00000
+unsigned long phys_cpu_present_map;
 
 /*
  * Intel MP BIOS table parsing routines:
@@ -65,10 +60,12 @@ unsigned long phys_cpu_present_map = 0;
 
 static int __init mpf_checksum(unsigned char *mp, int len)
 {
-	int sum=0;
-	while(len--)
-		sum+=*mp++;
-	return sum&0xFF;
+	int sum = 0;
+
+	while (len--)
+		sum += *mp++;
+
+	return sum & 0xFF;
 }
 
 /*
@@ -100,6 +97,8 @@ static char __init *mpc_family(int family,int model)
 			return("Pentium(tm) Pro");
 
 		case 0x0F:
+			if (model == 0x00)
+				return("Pentium 4(tm)");
 			if (model == 0x0F)
 				return("Special controller");
 	}
@@ -128,17 +127,54 @@ static void __init MP_processor_info (struct mpc_config_processor *m)
 		Dprintk("    64 bit compare & exchange supported.\n");
 	if (m->mpc_featureflag&(1<<9))
 		Dprintk("    Internal APIC present.\n");
+	if (m->mpc_featureflag&(1<<11))
+		Dprintk("    SEP present.\n");
+	if (m->mpc_featureflag&(1<<12))
+		Dprintk("    MTRR  present.\n");
+	if (m->mpc_featureflag&(1<<13))
+		Dprintk("    PGE  present.\n");
+	if (m->mpc_featureflag&(1<<14))
+		Dprintk("    MCA  present.\n");
+	if (m->mpc_featureflag&(1<<15))
+		Dprintk("    CMOV  present.\n");
+	if (m->mpc_featureflag&(1<<16))
+		Dprintk("    PAT  present.\n");
+	if (m->mpc_featureflag&(1<<17))
+		Dprintk("    PSE  present.\n");
+	if (m->mpc_featureflag&(1<<18))
+		Dprintk("    PSN  present.\n");
+	if (m->mpc_featureflag&(1<<19))
+		Dprintk("    Cache Line Flush Instruction present.\n");
+	/* 20 Reserved */
+	if (m->mpc_featureflag&(1<<21))
+		Dprintk("    Debug Trace and EMON Store present.\n");
+	if (m->mpc_featureflag&(1<<22))
+		Dprintk("    ACPI Thermal Throttle Registers  present.\n");
+	if (m->mpc_featureflag&(1<<23))
+		Dprintk("    MMX  present.\n");
+	if (m->mpc_featureflag&(1<<24))
+		Dprintk("    FXSR  present.\n");
+	if (m->mpc_featureflag&(1<<25))
+		Dprintk("    XMM  present.\n");
+	if (m->mpc_featureflag&(1<<26))
+		Dprintk("    Willamette New Instructions  present.\n");
+	if (m->mpc_featureflag&(1<<27))
+		Dprintk("    Self Snoop  present.\n");
+	/* 28 Reserved */
+	if (m->mpc_featureflag&(1<<29))
+		Dprintk("    Thermal Monitor present.\n");
+	/* 30, 31 Reserved */
+
 
 	if (m->mpc_cpuflag & CPU_BOOTPROCESSOR) {
 		Dprintk("    Bootup CPU\n");
 		boot_cpu_id = m->mpc_apicid;
-	} else
-		/* Boot CPU already counted */
-		num_processors++;
+	}
+	num_processors++;
 
-	if (m->mpc_apicid > NR_CPUS) {
-		printk("Processor #%d unused. (Max %d processors).\n",
-			m->mpc_apicid, NR_CPUS);
+	if (m->mpc_apicid > MAX_APICS) {
+		printk("Processor #%d INVALID. (Max ID: %d).\n",
+			m->mpc_apicid, MAX_APICS);
 		return;
 	}
 	ver = m->mpc_apicver;
@@ -162,20 +198,19 @@ static void __init MP_bus_info (struct mpc_config_bus *m)
 	str[6] = 0;
 	Dprintk("Bus #%d is %s\n", m->mpc_busid, str);
 
-	if (strncmp(str, "ISA", 3) == 0) {
+	if (strncmp(str, BUSTYPE_ISA, sizeof(BUSTYPE_ISA)-1) == 0) {
 		mp_bus_id_to_type[m->mpc_busid] = MP_BUS_ISA;
-	} else {
-	if (strncmp(str, "EISA", 4) == 0) {
+	} else if (strncmp(str, BUSTYPE_EISA, sizeof(BUSTYPE_EISA)-1) == 0) {
 		mp_bus_id_to_type[m->mpc_busid] = MP_BUS_EISA;
-	} else {
-	if (strncmp(str, "PCI", 3) == 0) {
+	} else if (strncmp(str, BUSTYPE_PCI, sizeof(BUSTYPE_PCI)-1) == 0) {
 		mp_bus_id_to_type[m->mpc_busid] = MP_BUS_PCI;
 		mp_bus_id_to_pci_bus[m->mpc_busid] = mp_current_pci_id;
 		mp_current_pci_id++;
+	} else if (strncmp(str, BUSTYPE_MCA, sizeof(BUSTYPE_MCA)-1) == 0) {
+		mp_bus_id_to_type[m->mpc_busid] = MP_BUS_MCA;
 	} else {
-		printk("Unknown bustype %s\n", str);
-		panic("cannot handle bus - mail to linux-smp@vger.rutgers.edu");
-	} } }
+		printk("Unknown bustype %s - ignoring\n", str);
+	}
 }
 
 static void __init MP_ioapic_info (struct mpc_config_ioapic *m)
@@ -197,12 +232,22 @@ static void __init MP_ioapic_info (struct mpc_config_ioapic *m)
 static void __init MP_intsrc_info (struct mpc_config_intsrc *m)
 {
 	mp_irqs [mp_irq_entries] = *m;
+	Dprintk("Int: type %d, pol %d, trig %d, bus %d,"
+		" IRQ %02x, APIC ID %x, APIC INT %02x\n",
+			m->mpc_irqtype, m->mpc_irqflag & 3,
+			(m->mpc_irqflag >> 2) & 3, m->mpc_srcbus,
+			m->mpc_srcbusirq, m->mpc_dstapic, m->mpc_dstirq);
 	if (++mp_irq_entries == MAX_IRQ_SOURCES)
 		panic("Max # of irq sources exceeded!!\n");
 }
 
 static void __init MP_lintsrc_info (struct mpc_config_lintsrc *m)
 {
+	Dprintk("Lint: type %d, pol %d, trig %d, bus %d,"
+		" IRQ %02x, APIC ID %x, APIC LINT %02x\n",
+			m->mpc_irqtype, m->mpc_irqflag & 3,
+			(m->mpc_irqflag >> 2) &3, m->mpc_srcbusid,
+			m->mpc_srcbusirq, m->mpc_destapic, m->mpc_destapiclint);
 	/*
 	 * Well it seems all SMP boards in existence
 	 * use ExtINT/LVT1 == LINT0 and
@@ -316,6 +361,122 @@ static int __init smp_read_mpc(struct mp_config_table *mpc)
 	return num_processors;
 }
 
+static void __init construct_default_ioirq_mptable(int mpc_default_type)
+{
+	struct mpc_config_intsrc intsrc;
+	int i;
+
+	intsrc.mpc_type = MP_INTSRC;
+	intsrc.mpc_irqflag = 0;			/* conforming */
+	intsrc.mpc_srcbus = 0;
+	intsrc.mpc_dstapic = mp_ioapics[0].mpc_apicid;
+
+	intsrc.mpc_irqtype = mp_INT;
+	for (i = 0; i < 16; i++) {
+		switch (mpc_default_type) {
+		case 2:
+			if (i == 0 || i == 13)
+				continue;	/* IRQ0 & IRQ13 not connected */
+			/* fall through */
+		default:
+			if (i == 2)
+				continue;	/* IRQ2 is never connected */
+		}
+
+		intsrc.mpc_srcbusirq = i;
+		intsrc.mpc_dstirq = i ? i : 2;		/* IRQ0 to INTIN2 */
+		MP_intsrc_info(&intsrc);
+	}
+
+	intsrc.mpc_irqtype = mp_ExtINT;
+	intsrc.mpc_srcbusirq = 0;
+	intsrc.mpc_dstirq = 0;				/* 8259A to INTIN0 */
+	MP_intsrc_info(&intsrc);
+}
+
+static inline void __init construct_default_ISA_mptable(int mpc_default_type)
+{
+	struct mpc_config_processor processor;
+	struct mpc_config_bus bus;
+	struct mpc_config_ioapic ioapic;
+	struct mpc_config_lintsrc lintsrc;
+	int linttypes[2] = { mp_ExtINT, mp_NMI };
+	int i;
+
+	/*
+	 * local APIC has default address
+	 */
+	mp_lapic_addr = APIC_DEFAULT_PHYS_BASE;
+
+	/*
+	 * 2 CPUs, numbered 0 & 1.
+	 */
+	processor.mpc_type = MP_PROCESSOR;
+	/* Either an integrated APIC or a discrete 82489DX. */
+	processor.mpc_apicver = mpc_default_type > 4 ? 0x10 : 0x01;
+	processor.mpc_cpuflag = CPU_ENABLED;
+	processor.mpc_cpufeature = (boot_cpu_data.x86 << 8) |
+				   (boot_cpu_data.x86_model << 4) |
+				   boot_cpu_data.x86_mask;
+	processor.mpc_featureflag = boot_cpu_data.x86_capability[0];
+	processor.mpc_reserved[0] = 0;
+	processor.mpc_reserved[1] = 0;
+	for (i = 0; i < 2; i++) {
+		processor.mpc_apicid = i;
+		MP_processor_info(&processor);
+	}
+
+	bus.mpc_type = MP_BUS;
+	bus.mpc_busid = 0;
+	switch (mpc_default_type) {
+		default:
+			printk("???\nUnknown standard configuration %d\n",
+				mpc_default_type);
+			/* fall through */
+		case 1:
+		case 5:
+			memcpy(bus.mpc_bustype, "ISA   ", 6);
+			break;
+		case 2:
+		case 6:
+		case 3:
+			memcpy(bus.mpc_bustype, "EISA  ", 6);
+			break;
+		case 4:
+		case 7:
+			memcpy(bus.mpc_bustype, "MCA   ", 6);
+	}
+	MP_bus_info(&bus);
+	if (mpc_default_type > 4) {
+		bus.mpc_busid = 1;
+		memcpy(bus.mpc_bustype, "PCI   ", 6);
+		MP_bus_info(&bus);
+	}
+
+	ioapic.mpc_type = MP_IOAPIC;
+	ioapic.mpc_apicid = 2;
+	ioapic.mpc_apicver = mpc_default_type > 4 ? 0x10 : 0x01;
+	ioapic.mpc_flags = MPC_APIC_USABLE;
+	ioapic.mpc_apicaddr = 0xFEC00000;
+	MP_ioapic_info(&ioapic);
+
+	/*
+	 * We set up most of the low 16 IO-APIC pins according to MPS rules.
+	 */
+	construct_default_ioirq_mptable(mpc_default_type);
+
+	lintsrc.mpc_type = MP_LINTSRC;
+	lintsrc.mpc_irqflag = 0;		/* conforming */
+	lintsrc.mpc_srcbusid = 0;
+	lintsrc.mpc_srcbusirq = 0;
+	lintsrc.mpc_destapic = MP_APIC_ALL;
+	for (i = 0; i < 2; i++) {
+		lintsrc.mpc_irqtype = linttypes[i];
+		lintsrc.mpc_destapiclint = i;
+		MP_lintsrc_info(&lintsrc);
+	}
+}
+
 static struct intel_mp_floating *mpf_found;
 
 /*
@@ -332,83 +493,43 @@ void __init get_smp_config (void)
 		printk("    Virtual Wire compatibility mode.\n");
 		pic_mode = 0;
 	}
-	/*
-	 * default CPU id - if it's different in the mptable
-	 * then we change it before first using it.
-	 */
-	boot_cpu_id = 0;
+
 	/*
 	 * Now see if we need to read further.
 	 */
 	if (mpf->mpf_feature1 != 0) {
+
 		printk("Default MP configuration #%d\n", mpf->mpf_feature1);
+		construct_default_ISA_mptable(mpf->mpf_feature1);
+
+	} else if (mpf->mpf_physptr) {
 
 		/*
-		 * local APIC has default address
+		 * Read the physical hardware table.  Anything here will
+		 * override the defaults.
 		 */
-		mp_lapic_addr = APIC_DEFAULT_PHYS_BASE;
-
-		/*
-		 * 2 CPUs, numbered 0 & 1.
-		 */
-		phys_cpu_present_map = 3;
-		num_processors = 2;
-
-		nr_ioapics = 1;
-		mp_ioapics[0].mpc_apicaddr = 0xFEC00000;
-		mp_ioapics[0].mpc_apicid = 2;
-		/*
-		 * Save the default type number, we
-		 * need it later to set the IO-APIC
-		 * up properly:
-		 */
-		mpc_default_type = mpf->mpf_feature1;
-
-		printk("Bus #0 is ");
-	}
-
-	switch (mpf->mpf_feature1) {
-		case 1:
-		case 5:
-			printk("ISA\n");
-			break;
-		case 2:
-			printk("EISA with no IRQ0 and no IRQ13 DMA chaining\n");
-			break;
-		case 6:
-		case 3:
-			printk("EISA\n");
-			break;
-		case 4:
-		case 7:
-			printk("MCA\n");
-			break;
-		case 0:
-			if (!mpf->mpf_physptr)
-				BUG();
-			break;
-		default:
-			printk("???\nUnknown standard configuration %d\n",
-				mpf->mpf_feature1);
-			return;
-	}
-	if (mpf->mpf_feature1 > 4) {
-		printk("Bus #1 is PCI\n");
-
-		/*
-		 * Set local APIC version to the integrated form.
-		 * It's initialized to zero otherwise, representing
-		 * a discrete 82489DX.
-		 */
-		apic_version[0] = 0x10;
-		apic_version[1] = 0x10;
-	}
-	/*
-	 * Read the physical hardware table. Anything here will override the
-	 * defaults.
-	 */
-	if (mpf->mpf_physptr)
 		smp_read_mpc((void *)mpf->mpf_physptr);
+
+		/*
+		 * If there are no explicit MP IRQ entries, then we are
+		 * broken.  We set up most of the low 16 IO-APIC pins to
+		 * ISA defaults and hope it will work.
+		 */
+		if (!mp_irq_entries) {
+			struct mpc_config_bus bus;
+
+			printk("BIOS bug, no explicit IRQ entries, using default mptable. (tell your hw vendor)\n");
+
+			bus.mpc_type = MP_BUS;
+			bus.mpc_busid = 0;
+			memcpy(bus.mpc_bustype, "ISA   ", 6);
+			MP_bus_info(&bus);
+
+			construct_default_ioirq_mptable(0);
+		}
+
+	} else
+		BUG();
 
 	printk("Processors: %d\n", num_processors);
 	/*
@@ -483,7 +604,7 @@ void __init find_intel_smp (void)
 	address <<= 4;
 	smp_scan_config(address, 0x1000);
 	if (smp_found_config)
-		printk(KERN_WARNING "WARNING: MP table in the EBDA can be UNSAFE, contact linux-smp@vger.rutgers.edu if you experience SMP problems!\n");
+		printk(KERN_WARNING "WARNING: MP table in the EBDA can be UNSAFE, contact linux-smp@vger.kernel.org if you experience SMP problems!\n");
 }
 
 #else

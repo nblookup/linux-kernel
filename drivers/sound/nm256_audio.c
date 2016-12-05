@@ -11,6 +11,10 @@
  * This driver was written by someone who wishes to remain anonymous. 
  * It is in the public domain, so share and enjoy.  Try to make a profit
  * off of it; go on, I dare you.  
+ *
+ * Changes:
+ * 11-10-2000	Bartlomiej Zolnierkiewicz <bkz@linux-ide.org>
+ *		Added some __init
  */
 
 #define __NO_VERSION__
@@ -18,8 +22,8 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/pm.h>
+#include <linux/delay.h>
 #include "sound_config.h"
-#include "soundmodule.h"
 #include "nm256.h"
 #include "nm256_coeff.h"
 
@@ -58,9 +62,7 @@ nm256_release_ports (struct nm256_info *card)
 
     for (x = 0; x < 2; x++) {
 	if (card->port[x].ptr != NULL) {
-	    u32 size = 
-		card->port[x].end_offset - card->port[x].start_offset;
-	    release_region ((unsigned long) card->port[x].ptr, size);
+	    iounmap (card->port[x].ptr);
 	    card->port[x].ptr = NULL;
 	}
     }
@@ -378,7 +380,7 @@ nm256_write_block (struct nm256_info *card, char *buffer, u32 amt)
 			      card->abuf1 + card->curPlayPos,
 			      rem);
 	if (amt > rem)
-	    nm256_writeBuffer8 (card, buffer, 1, card->abuf1,
+	    nm256_writeBuffer8 (card, buffer + rem, 1, card->abuf1,
 				  amt - rem);
     } 
     else
@@ -925,9 +927,10 @@ nm256_default_mixer_ioctl (int dev, unsigned int cmd, caddr_t arg)
 }
 
 static struct mixer_operations nm256_mixer_operations = {
-    "NeoMagic",
-    "NM256AC97Mixer",
-    nm256_default_mixer_ioctl
+    owner:	THIS_MODULE,
+    id:		"NeoMagic",
+    name:	"NM256AC97Mixer",
+    ioctl:	nm256_default_mixer_ioctl
 };
 
 /*
@@ -946,7 +949,7 @@ static struct ac97_mixer_value_list mixer_defaults[] = {
 
 
 /* Installs the AC97 mixer into CARD.  */
-static int
+static int __init
 nm256_install_mixer (struct nm256_info *card)
 {
     int mixer;
@@ -990,7 +993,7 @@ nm256_full_reset (struct nm256_info *card)
  * RAM.
  */
 
-static void
+static void __init
 nm256_peek_for_sig (struct nm256_info *card)
 {
     u32 port1offset 
@@ -1024,7 +1027,7 @@ nm256_peek_for_sig (struct nm256_info *card)
 		pointer);
     }
 
-    release_region ((unsigned long) temp, 16);
+    iounmap (temp);
 }
 
 /* 
@@ -1032,7 +1035,7 @@ nm256_peek_for_sig (struct nm256_info *card)
  * VERSTR is a human-readable version string.
  */
 
-static int
+static int __init
 nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
 {
     struct nm256_info *card;
@@ -1065,7 +1068,7 @@ nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
     /* Yuck.  But we have to map in port 2 so we can check how much RAM the
        card has.  */
     if (nm256_remap_ports (card)) {
-	kfree_s (card, sizeof (struct nm256_info));
+	kfree (card);
 	return 0;
     }
 
@@ -1091,7 +1094,7 @@ nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
 		printk (KERN_ERR "       IRQ and/or DMA for the sound card, this is *not* the correct\n");
 		printk (KERN_ERR "       driver to use.)\n");
 		nm256_release_ports (card);
-		kfree_s (card, sizeof (struct nm256_info));
+		kfree (card);
 		return 0;
 	    }
 	    else {
@@ -1129,7 +1132,7 @@ nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
 	    card->port[0].start_offset, card->port[0].end_offset);
 
     if (nm256_remap_ports (card)) {
-	kfree_s (card, sizeof (struct nm256_info));
+	kfree (card);
 	return 0;
     }
 
@@ -1140,7 +1143,7 @@ nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
 
     if (nm256_grabInterrupt (card) != 0) {
 	nm256_release_ports (card);
-	kfree_s (card, sizeof (struct nm256_info));
+	kfree (card);
 	return 0;
     }
 
@@ -1193,7 +1196,7 @@ nm256_install(struct pci_dev *pcidev, enum nm256rev rev, char *verstr)
 	else {
 	    printk(KERN_ERR "NM256: Too many PCM devices available\n");
 	    nm256_release_ports (card);
-	    kfree_s (card, sizeof (struct nm256_info));
+	    kfree (card);
 	    return 0;
 	}
     }
@@ -1253,7 +1256,7 @@ handle_pm_event (struct pm_dev *dev, pm_request_t rqst, void *data)
  *	the sound cards are.
  */
  
-int
+int __init
 init_nm256(void)
 {
     struct pci_dev *pcidev = NULL;
@@ -1418,7 +1421,8 @@ nm256_audio_ioctl(int dev, unsigned int cmd, caddr_t arg)
     switch (cmd)
 	{
 	case SOUND_PCM_WRITE_RATE:
-	    get_user_ret(ret, (int *) arg, -EFAULT);
+	    if (get_user(ret, (int *) arg))
+		return -EFAULT;
 
 	    if (ret != 0) {
 		oldinfo = card->sinfo[w].samplerate;
@@ -1436,7 +1440,8 @@ nm256_audio_ioctl(int dev, unsigned int cmd, caddr_t arg)
 	    break;
 
 	case SNDCTL_DSP_STEREO:
-	    get_user_ret(ret, (int *) arg, -EFAULT);
+	    if (get_user(ret, (int *) arg))
+		return -EFAULT;
 
 	    card->sinfo[w].stereo = ret ? 1 : 0;
 	    ret = nm256_setInfo (dev, card);
@@ -1446,7 +1451,8 @@ nm256_audio_ioctl(int dev, unsigned int cmd, caddr_t arg)
 	    break;
 
 	case SOUND_PCM_WRITE_CHANNELS:
-	    get_user_ret(ret, (int *) arg, -EFAULT);
+	    if (get_user(ret, (int *) arg))
+		return -EFAULT;
 
 	    if (ret < 1 || ret > 3)
 		ret = card->sinfo[w].stereo + 1;
@@ -1463,7 +1469,8 @@ nm256_audio_ioctl(int dev, unsigned int cmd, caddr_t arg)
 	    break;
 
 	case SNDCTL_DSP_SETFMT:
-	    get_user_ret(ret, (int *) arg, -EFAULT);
+	    if (get_user(ret, (int *) arg))
+		return -EFAULT;
 
 	    if (ret != 0) {
 		oldinfo = card->sinfo[w].bits;
@@ -1620,22 +1627,16 @@ nm256_audio_local_qlen(int dev)
 
 static struct audio_driver nm256_audio_driver =
 {
-    nm256_audio_open,			/* open                 */
-    nm256_audio_close,			/* close                */
-    nm256_audio_output_block,		/* output_block         */
-    nm256_audio_start_input,    	/* start_input          */
-    nm256_audio_ioctl,			/* ioctl                */
-    nm256_audio_prepare_for_input,	/* prepare_for_input    */
-    nm256_audio_prepare_for_output,	/* prepare_for_output   */
-    nm256_audio_reset,			/* reset                */
-    nm256_audio_local_qlen,		/*+local_qlen           */
-    NULL,				/*+copy_from_user       */
-    NULL,				/*+halt_input           */
-    NULL,				/* halt_output          */
-    NULL,				/*+trigger              */
-    NULL,				/*+set_speed            */
-    NULL,				/*+set_bits             */
-    NULL,				/*+set_channels         */
+    owner:		THIS_MODULE,
+    open:		nm256_audio_open,
+    close:		nm256_audio_close,
+    output_block:	nm256_audio_output_block,
+    start_input:	nm256_audio_start_input,
+    ioctl:		nm256_audio_ioctl,
+    prepare_for_input:	nm256_audio_prepare_for_input,
+    prepare_for_output:nm256_audio_prepare_for_output,
+    halt_io:		nm256_audio_reset,
+    local_qlen:		nm256_audio_local_qlen,
 };
 
 EXPORT_SYMBOL(init_nm256);
@@ -1653,7 +1654,6 @@ static int __init do_init_nm256(void)
     printk (KERN_INFO "NeoMagic 256AV/256ZX audio driver, version 1.1\n");
 
     if (init_nm256 () == 0) {
-	SOUND_LOCK;
 	loaded = 1;
 	return 0;
     }
@@ -1667,8 +1667,6 @@ static void __exit cleanup_nm256 (void)
 	struct nm256_info *card;
 	struct nm256_info *next_card;
 
-	SOUND_LOCK_END;
-
 	for (card = nmcard_list; card != NULL; card = next_card) {
 	    stopPlay (card);
 	    stopRecord (card);
@@ -1679,7 +1677,7 @@ static void __exit cleanup_nm256 (void)
 	    sound_unload_audiodev (card->dev[0]);
 	    sound_unload_audiodev (card->dev[1]);
 	    next_card = card->next_card;
-	    kfree_s (card, sizeof (struct nm256_info));
+	    kfree (card);
 	}
 	nmcard_list = NULL;
     }

@@ -3,14 +3,15 @@
 #
 
 .S.s:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -E -o $*.s $<
+	$(CPP) $(AFLAGS) $(AFLAGS_KERNEL) -o $*.s $<
 .S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -c -o $*.o $<
+	$(CC) $(AFLAGS) $(AFLAGS_KERNEL) -c -o $*.o $<
 
 all: ia32.o
 
 O_TARGET := ia32.o
-O_OBJS	 := ia32_entry.o ia32_signal.o sys_ia32.o ia32_support.o binfmt_elf32.o
+
+obj-y := ia32_entry.o sys_ia32.o ia32_ioctl.o ia32_signal.o ia32_support.o ia32_traps.o binfmt_elf32.o
 
 clean::
 

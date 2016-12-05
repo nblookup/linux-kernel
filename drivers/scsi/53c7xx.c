@@ -1125,6 +1125,7 @@ ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
     int script_len = 0, dsa_len = 0, size = 0, max_cmd_size = 0,
 	schedule_size = 0, ok = 0;
     void *tmp;
+    unsigned long page;
 
     switch (chip) {
     case 710:
@@ -1191,6 +1192,12 @@ ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
        */
 	(sizeof(void *) - sizeof(u32)) + max_cmd_size + schedule_size;
 
+    page = __get_free_pages(GFP_ATOMIC,1);
+    if(page==0)
+    {
+    	printk(KERN_ERR "53c7xx: out of memory.\n");
+    	return -ENOMEM;
+    }
 #ifdef FORCE_DSA_ALIGNMENT
     /*
      * 53c710 rev.0 doesn't have an add-with-carry instruction.
@@ -1203,10 +1210,11 @@ ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
       panic("53c7xx: hostdata > 8K");
     instance = scsi_register (tpnt, 4);
     if (!instance)
+    {
+        free_page(page);
 	return -1;
-    instance->hostdata[0] = __get_free_pages(GFP_ATOMIC, 1);
-    if (instance->hostdata[0] == 0)
-        panic ("53c7xx: Couldn't get hostdata memory");
+    }
+    instance->hostdata[0] = page;
     memset((void *)instance->hostdata[0], 0, 8192);
     cache_push(virt_to_phys((void *)(instance->hostdata[0])), 8192);
     cache_clear(virt_to_phys((void *)(instance->hostdata[0])), 8192);
@@ -3087,7 +3095,7 @@ allocate_cmd (Scsi_Cmnd *cmd) {
             panic ("53c7xx: allocate_cmd size > 4K");
         real = get_free_page(GFP_ATOMIC);
         if (real == 0)
-            panic ("53c7xx: Couldn't get memory for allocate_cmd");
+        	return NULL;
         memset((void *)real, 0, 4096);
         cache_push(virt_to_phys((void *)real), 4096);
         cache_clear(virt_to_phys((void *)real), 4096);
@@ -5068,9 +5076,10 @@ print_insn (struct Scsi_Host *host, const u32 *insn,
      * to use vverify()?
      */
 
-    if (MAP_NR(insn) < 1 || MAP_NR(insn + 8) > MAP_NR(high_memory) ||
+    if (virt_to_phys((void *)insn) < PAGE_SIZE || 
+	virt_to_phys((void *)(insn + 8)) > virt_to_phys(high_memory) ||
 	((((dcmd = (insn[0] >> 24) & 0xff) & DCMD_TYPE_MMI) == DCMD_TYPE_MMI) &&
-	MAP_NR(insn + 12) > MAP_NR(high_memory))) {
+	virt_to_phys((void *)(insn + 12)) > virt_to_phys(high_memory))) {
 	size = 0;
 	sprintf (buf, "%s%p: address out of range\n",
 	    prefix, insn);
@@ -6052,8 +6061,7 @@ dump_events (struct Scsi_Host *host, int count) {
 
 static int 
 check_address (unsigned long addr, int size) {
-    return (MAP_NR(addr) < 1 || MAP_NR(addr + size) > MAP_NR(high_memory) ?
-	    -1 : 0);
+    return (virt_to_phys((void *)addr) < PAGE_SIZE || virt_to_phys((void *)(addr + size)) > virt_to_phys(high_memory) ?  -1 : 0);
 }
 
 #ifdef MODULE
@@ -6102,6 +6110,7 @@ NCR53c7x0_release(struct Scsi_Host *host) {
     free_pages ((u32)hostdata, 1);
     return 1;
 }
-Scsi_Host_Template driver_template = NCR53c7xx;
-#include "scsi_module.c"
 #endif /* def MODULE */
+
+static Scsi_Host_Template driver_template = NCR53c7xx;
+#include "scsi_module.c"

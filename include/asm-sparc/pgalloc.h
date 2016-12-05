@@ -1,7 +1,8 @@
-/* $Id: pgalloc.h,v 1.3 2000/02/03 10:13:31 jj Exp $ */
+/* $Id: pgalloc.h,v 1.11 2000/10/16 14:32:49 anton Exp $ */
 #ifndef _SPARC_PGALLOC_H
 #define _SPARC_PGALLOC_H
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 
@@ -9,7 +10,7 @@
 #include <asm/btfixup.h>
 
 /* Fine grained cache/tlb flushing. */
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 BTFIXUPDEF_CALL(void, local_flush_cache_all, void)
 BTFIXUPDEF_CALL(void, local_flush_cache_mm, struct mm_struct *)
 BTFIXUPDEF_CALL(void, local_flush_cache_range, struct mm_struct *, unsigned long, unsigned long)
@@ -84,41 +85,23 @@ BTFIXUPDEF_CALL(void, flush_sig_insns, struct mm_struct *, unsigned long)
 #define __flush_page_to_ram(addr) BTFIXUP_CALL(__flush_page_to_ram)(addr)
 #define flush_sig_insns(mm,insn_addr) BTFIXUP_CALL(flush_sig_insns)(mm,insn_addr)
 
-#define flush_page_to_ram(page)    __flush_page_to_ram(page_address(page))
+extern void flush_page_to_ram(struct page *page);
+
+#define flush_dcache_page(page)			do { } while (0)
 
 extern struct pgtable_cache_struct {
 	unsigned long *pgd_cache;
 	unsigned long *pte_cache;
 	unsigned long pgtable_cache_sz;
 	unsigned long pgd_cache_sz;
-	spinlock_t pgd_spinlock;
-	spinlock_t pte_spinlock;
 } pgt_quicklists;
 #define pgd_quicklist           (pgt_quicklists.pgd_cache)
 #define pmd_quicklist           ((unsigned long *)0)
 #define pte_quicklist           (pgt_quicklists.pte_cache)
-#define pgd_spinlock		(pgt_quicklists.pgd_spinlock)
-#define pte_spinlock		(pgt_quicklists.pte_spinlock)
 #define pgtable_cache_size      (pgt_quicklists.pgtable_cache_sz)
 #define pgd_cache_size		(pgt_quicklists.pgd_cache_sz)
 
-BTFIXUPDEF_CALL(pte_t *, get_pte_fast, void)
-BTFIXUPDEF_CALL(pgd_t *, get_pgd_fast, void)
-BTFIXUPDEF_CALL(void,    free_pte_slow, pte_t *)
-BTFIXUPDEF_CALL(void,    free_pgd_slow, pgd_t *)
 BTFIXUPDEF_CALL(int,	 do_check_pgt_cache, int, int)
-
-#define get_pte_fast() BTFIXUP_CALL(get_pte_fast)()
-extern __inline__ pmd_t *get_pmd_fast(void)
-{
-	return (pmd_t *)0;
-}
-#define get_pgd_fast() BTFIXUP_CALL(get_pgd_fast)()
-#define free_pte_slow(pte) BTFIXUP_CALL(free_pte_slow)(pte)
-extern __inline__ void free_pmd_slow(pmd_t *pmd)
-{
-}
-#define free_pgd_slow(pgd) BTFIXUP_CALL(free_pgd_slow)(pgd)
 #define do_check_pgt_cache(low,high) BTFIXUP_CALL(do_check_pgt_cache)(low,high)
 
 /*
@@ -155,9 +138,5 @@ BTFIXUPDEF_CALL(pgd_t *, pgd_alloc, void)
 
 #define pgd_free(pgd) BTFIXUP_CALL(pgd_free)(pgd)
 #define pgd_alloc() BTFIXUP_CALL(pgd_alloc)()
-
-BTFIXUPDEF_CALL(void, set_pgdir, unsigned long, pgd_t)
-
-#define set_pgdir(address,entry) BTFIXUP_CALL(set_pgdir)(address,entry)
 
 #endif /* _SPARC64_PGALLOC_H */

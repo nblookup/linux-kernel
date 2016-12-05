@@ -1,8 +1,8 @@
 /*
  * Initialize MMU support.
  *
- * Copyright (C) 1998, 1999 Hewlett-Packard Co
- * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2000 Hewlett-Packard Co
+ * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 #include <linux/config.h>
 #include <linux/kernel.h>
@@ -14,10 +14,12 @@
 #include <linux/slab.h>
 #include <linux/swap.h>
 
+#include <asm/bitops.h>
 #include <asm/dma.h>
 #include <asm/efi.h>
 #include <asm/ia32.h>
 #include <asm/io.h>
+#include <asm/machvec.h>
 #include <asm/pgalloc.h>
 #include <asm/sal.h>
 #include <asm/system.h>
@@ -172,13 +174,60 @@ free_initmem (void)
 
 	addr = (unsigned long) &__init_begin;
 	for (; addr < (unsigned long) &__init_end; addr += PAGE_SIZE) {
-		clear_bit(PG_reserved, &mem_map[MAP_NR(addr)].flags);
-		set_page_count(&mem_map[MAP_NR(addr)], 1);
+		clear_bit(PG_reserved, &virt_to_page(addr)->flags);
+		set_page_count(virt_to_page(addr), 1);
 		free_page(addr);
 		++totalram_pages;
 	}
 	printk ("Freeing unused kernel memory: %ldkB freed\n",
 		(&__init_end - &__init_begin) >> 10);
+}
+
+void
+free_initrd_mem(unsigned long start, unsigned long end)
+{
+	/*
+	 * EFI uses 4KB pages while the kernel can use 4KB  or bigger.
+	 * Thus EFI and the kernel may have different page sizes. It is 
+	 * therefore possible to have the initrd share the same page as 
+	 * the end of the kernel (given current setup). 
+	 *
+	 * To avoid freeing/using the wrong page (kernel sized) we:
+	 * 	- align up the beginning of initrd
+	 *	- keep the end untouched
+	 *
+	 *  |             |
+	 *  |=============| a000
+	 *  |             |
+	 *  |             |
+	 *  |             | 9000
+	 *  |/////////////| 
+	 *  |/////////////| 
+	 *  |=============| 8000
+	 *  |///INITRD////|
+	 *  |/////////////|
+	 *  |/////////////| 7000
+	 *  |             |
+	 *  |KKKKKKKKKKKKK|
+	 *  |=============| 6000
+	 *  |KKKKKKKKKKKKK|
+	 *  |KKKKKKKKKKKKK| 
+	 *  K=kernel using 8KB pages
+	 * 
+	 * In this example, we must free page 8000 ONLY. So we must align up
+	 * initrd_start and keep initrd_end as is.
+	 */
+	start = PAGE_ALIGN(start);
+
+	if (start < end)
+		printk ("Freeing initrd memory: %ldkB freed\n", (end - start) >> 10);
+
+	for (; start < end; start += PAGE_SIZE) {
+		clear_bit(PG_reserved, &virt_to_page(start)->flags);
+		set_page_count(virt_to_page(start), 1);
+		free_page(start);
+		++totalram_pages;
+	}
 }
 
 void
@@ -197,7 +246,7 @@ si_meminfo (struct sysinfo *val)
 void
 show_mem (void)
 {
-	int i,free = 0,total = 0,reserved = 0;
+	int i, total = 0, reserved = 0;
 	int shared = 0, cached = 0;
 
 	printk("Mem-info:\n");
@@ -210,9 +259,7 @@ show_mem (void)
 			reserved++;
 		else if (PageSwapCache(mem_map+i))
 			cached++;
-		else if (!page_count(mem_map + i))
-			free++;
-		else
+		else if (page_count(mem_map + i))
 			shared += page_count(mem_map + i) - 1;
 	}
 	printk("%d pages of RAM\n", total);
@@ -235,8 +282,9 @@ put_gate_page (struct page *page, unsigned long address)
 	pte_t *pte;
 
 	if (!PageReserved(page))
-		printk("put_gate_page: gate page at 0x%lx not in reserved memory\n",
+		printk("put_gate_page: gate page at 0x%p not in reserved memory\n",
 		       page_address(page));
+
 	pgd = pgd_offset_k(address);		/* note: this is NOT pgd_offset()! */
 	pmd = pmd_alloc(pgd, address);
 	if (!pmd) {
@@ -256,7 +304,7 @@ put_gate_page (struct page *page, unsigned long address)
 		return 0;
 	}
 	flush_page_to_ram(page);
-	set_pte(pte, page_pte_prot(page, PAGE_GATE));
+	set_pte(pte, mk_pte(page, PAGE_GATE));
 	/* no need for flush_tlb */
 	return page;
 }
@@ -264,7 +312,12 @@ put_gate_page (struct page *page, unsigned long address)
 void __init
 ia64_rid_init (void)
 {
-	unsigned long flags, rid, pta;
+	unsigned long flags, rid, pta, impl_va_bits;
+#ifdef CONFIG_DISABLE_VHPT
+#	define VHPT_ENABLE_BIT	0
+#else
+#	define VHPT_ENABLE_BIT	1
+#endif
 
 	/* Set up the kernel identity mappings (regions 6 & 7) and the vmalloc area (region 5): */
 	ia64_clear_ic(flags);
@@ -281,85 +334,47 @@ ia64_rid_init (void)
 	__restore_flags(flags);
 
 	/*
-	 * Check if the virtually mapped linear page table (VMLPT)
-	 * overlaps with a mapped address space.  The IA-64
-	 * architecture guarantees that at least 50 bits of virtual
-	 * address space are implemented but if we pick a large enough
-	 * page size (e.g., 64KB), the VMLPT is big enough that it
-	 * will overlap with the upper half of the kernel mapped
-	 * region.  I assume that once we run on machines big enough
-	 * to warrant 64KB pages, IMPL_VA_MSB will be significantly
-	 * bigger, so we can just adjust the number below to get
-	 * things going.  Alternatively, we could truncate the upper
-	 * half of each regions address space to not permit mappings
-	 * that would overlap with the VMLPT.  --davidm 99/11/13
+	 * Check if the virtually mapped linear page table (VMLPT) overlaps with a mapped
+	 * address space.  The IA-64 architecture guarantees that at least 50 bits of
+	 * virtual address space are implemented but if we pick a large enough page size
+	 * (e.g., 64KB), the mapped address space is big enough that it will overlap with
+	 * VMLPT.  I assume that once we run on machines big enough to warrant 64KB pages,
+	 * IMPL_VA_MSB will be significantly bigger, so this is unlikely to become a
+	 * problem in practice.  Alternatively, we could truncate the top of the mapped
+	 * address space to not permit mappings that would overlap with the VMLPT.
+	 * --davidm 00/12/06
 	 */
-#	define ld_pte_size		3
-#	define ld_max_addr_space_pages	3*(PAGE_SHIFT - ld_pte_size) /* max # of mappable pages */
-#	define ld_max_addr_space_size	(ld_max_addr_space_pages + PAGE_SHIFT)
-#	define ld_max_vpt_size		(ld_max_addr_space_pages + ld_pte_size)
+#	define pte_bits			3
+#	define mapped_space_bits	(3*(PAGE_SHIFT - pte_bits) + PAGE_SHIFT)
+	/*
+	 * The virtual page table has to cover the entire implemented address space within
+	 * a region even though not all of this space may be mappable.  The reason for
+	 * this is that the Access bit and Dirty bit fault handlers perform
+	 * non-speculative accesses to the virtual page table, so the address range of the
+	 * virtual page table itself needs to be covered by virtual page table.
+	 */
+#	define vmlpt_bits		(impl_va_bits - PAGE_SHIFT + pte_bits)
 #	define POW2(n)			(1ULL << (n))
-#	define IMPL_VA_MSB		50
-	if (POW2(ld_max_addr_space_size - 1) + POW2(ld_max_vpt_size) > POW2(IMPL_VA_MSB))
+
+	impl_va_bits = ffz(~my_cpu_data.unimpl_va_mask);
+
+	if (impl_va_bits < 51 || impl_va_bits > 61)
+		panic("CPU has bogus IMPL_VA_MSB value of %lu!\n", impl_va_bits - 1);
+
+	/* place the VMLPT at the end of each page-table mapped region: */
+	pta = POW2(61) - POW2(vmlpt_bits);
+
+	if (POW2(mapped_space_bits) >= pta)
 		panic("mm/init: overlap between virtually mapped linear page table and "
 		      "mapped kernel space!");
-	pta = POW2(61) - POW2(IMPL_VA_MSB);
 	/*
 	 * Set the (virtually mapped linear) page table address.  Bit
 	 * 8 selects between the short and long format, bits 2-7 the
 	 * size of the table, and bit 0 whether the VHPT walker is
 	 * enabled.
 	 */
-	ia64_set_pta(pta | (0<<8) | ((3*(PAGE_SHIFT-3)+3)<<2) | 1);
+	ia64_set_pta(pta | (0 << 8) | (vmlpt_bits << 2) | VHPT_ENABLE_BIT);
 }
-
-#ifdef CONFIG_IA64_VIRTUAL_MEM_MAP
-
-static int
-create_mem_map_page_table (u64 start, u64 end, void *arg)
-{
-	unsigned long address, start_page, end_page;
-	struct page *map_start, *map_end;
-	pgd_t *pgd;
-	pmd_t *pmd;
-	pte_t *pte;
-	void *page;
-
-	map_start = mem_map + MAP_NR(start);
-	map_end   = mem_map + MAP_NR(end);
-
-	start_page = (unsigned long) map_start & PAGE_MASK;
-	end_page = PAGE_ALIGN((unsigned long) map_end);
-
-	printk("[%lx,%lx) -> %lx-%lx\n", start, end, start_page, end_page);
-
-	for (address = start_page; address < end_page; address += PAGE_SIZE) {
-		pgd = pgd_offset_k(address);
-		if (pgd_none(*pgd)) {
-			pmd = alloc_bootmem_pages(PAGE_SIZE);
-			clear_page(pmd);
-			pgd_set(pgd, pmd);
-			pmd += (address >> PMD_SHIFT) & (PTRS_PER_PMD - 1);
-		} else
-			pmd = pmd_offset(pgd, address);
-		if (pmd_none(*pmd)) {
-			pte = alloc_bootmem_pages(PAGE_SIZE);
-			clear_page(pte);
-			pmd_set(pmd, pte);
-			pte += (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
-		} else
-			pte = pte_offset(pmd, address);
-
-		if (pte_none(*pte)) {
-			page = alloc_bootmem_pages(PAGE_SIZE);
-			clear_page(page);
-			set_pte(pte, mk_pte_phys(__pa(page), PAGE_KERNEL));
-		}
-	}
-	return 0;
-}
-
-#endif /* CONFIG_IA64_VIRTUAL_MEM_MAP */
 
 /*
  * Set up the page tables.
@@ -371,14 +386,11 @@ paging_init (void)
 
 	clear_page((void *) ZERO_PAGE_ADDR);
 
-	ia64_rid_init();
-	__flush_tlb_all();
-
 	/* initialize mem_map[] */
 
 	memset(zones_size, 0, sizeof(zones_size));
 
-	max_dma = virt_to_phys((void *) MAX_DMA_ADDRESS);
+	max_dma = (PAGE_ALIGN(MAX_DMA_ADDRESS) >> PAGE_SHIFT);
 	if (max_low_pfn < max_dma)
 		zones_size[ZONE_DMA] = max_low_pfn;
 	else {
@@ -404,7 +416,7 @@ count_reserved_pages (u64 start, u64 end, void *arg)
 	unsigned long *count = arg;
 	struct page *pg;
 
-	for (pg = mem_map + MAP_NR(start); pg < mem_map + MAP_NR(end); ++pg)
+	for (pg = virt_to_page(start); pg < virt_to_page(end); ++pg)
 		if (PageReserved(pg))
 			++num_reserved;
 	*count += num_reserved;
@@ -417,6 +429,15 @@ mem_init (void)
 	extern char __start_gate_section[];
 	long reserved_pages, codesize, datasize, initsize;
 
+#ifdef CONFIG_PCI
+	/*
+	 * This needs to be called _after_ the command line has been parsed but _before_
+	 * any drivers that may need the PCI DMA interface are initialized or bootmem has
+	 * been freed.
+	 */
+	platform_pci_dma_init();
+#endif
+
 	if (!mem_map)
 		BUG();
 
@@ -425,8 +446,6 @@ mem_init (void)
 
 	max_mapnr = max_low_pfn;
 	high_memory = __va(max_low_pfn * PAGE_SIZE);
-
-	ia64_tlb_init();
 
 	totalram_pages += free_all_bootmem();
 
@@ -443,19 +462,9 @@ mem_init (void)
 	       datasize >> 10, initsize >> 10);
 
 	/* install the gate page in the global page table: */
-	put_gate_page(mem_map + MAP_NR(__start_gate_section), GATE_ADDR);
-
-#ifndef CONFIG_IA64_SOFTSDV_HACKS
-	/*
-	 * (Some) SoftSDVs seem to have a problem with this call.
-	 * Since it's mostly a performance optimization, just don't do
-	 * it for now...  --davidm 99/12/6
-	 */
-	efi_enter_virtual_mode();
-#endif
+	put_gate_page(virt_to_page(__start_gate_section), GATE_ADDR);
 
 #ifdef CONFIG_IA32_SUPPORT
 	ia32_gdt_init();
 #endif
-	return;
 }

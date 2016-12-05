@@ -149,6 +149,7 @@ static int pt_drive_count;
 #include <linux/malloc.h>
 #include <linux/mtio.h>
 #include <linux/wait.h>
+#include <linux/smp_lock.h>
 
 #include <asm/uaccess.h>
 
@@ -263,6 +264,7 @@ static char pt_scratch[512];            /* scratch block buffer */
 /* kernel glue structures */
 
 static struct file_operations pt_fops = {
+	owner:		THIS_MODULE,
 	read:		pt_read,
 	write:		pt_write,
 	ioctl:		pt_ioctl,
@@ -291,7 +293,7 @@ void pt_init_units( void )
         }
 } 
 
-static devfs_handle_t devfs_handle = NULL;
+static devfs_handle_t devfs_handle;
 
 int pt_init (void)      /* preliminary initialisation */
 
@@ -311,12 +313,12 @@ int pt_init (void)      /* preliminary initialisation */
                 return -1;
         }
 
-	devfs_handle = devfs_mk_dir (NULL, "pt", 2, NULL);
+	devfs_handle = devfs_mk_dir (NULL, "pt", NULL);
 	devfs_register_series (devfs_handle, "%u", 4, DEVFS_FL_DEFAULT,
-			       major, 0, S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			       major, 0, S_IFCHR | S_IRUSR | S_IWUSR,
 			       &pt_fops, NULL);
 	devfs_register_series (devfs_handle, "%un", 4, DEVFS_FL_DEFAULT,
-			       major, 128, S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			       major, 128, S_IFCHR | S_IRUSR | S_IWUSR,
 			       &pt_fops, NULL);
         return 0;
 }
@@ -701,19 +703,15 @@ static int pt_open (struct inode *inode, struct file *file)
 		return -EBUSY;
 	}
 
-        MOD_INC_USE_COUNT;
-
 	pt_identify(unit);
 
 	if (!PT.flags & PT_MEDIA) {
 		PT.access--;
-		MOD_DEC_USE_COUNT;
 		return -ENODEV;
 		}
 
 	if ((!PT.flags & PT_WRITE_OK) && (file ->f_mode & 2)) {
 		PT.access--;
-		MOD_DEC_USE_COUNT;
 		return -EROFS;
 		}
 
@@ -723,7 +721,6 @@ static int pt_open (struct inode *inode, struct file *file)
 	PT.bufptr = kmalloc(PT_BUFSIZE,GFP_KERNEL);
 	if (PT.bufptr == NULL) {
 		PT.access--;
-		MOD_DEC_USE_COUNT;
 		printk("%s: buffer allocation failed\n",PT.name);
 		return -ENOMEM;
 	}
@@ -777,6 +774,7 @@ static int pt_release (struct inode *inode, struct file *file)
         if ((unit >= PT_UNITS) || (PT.access <= 0)) 
                 return -EINVAL;
 
+	lock_kernel();
 	if (PT.flags & PT_WRITING) pt_write_fm(unit);
 
 	if (PT.flags & PT_REWIND) pt_rewind(unit);	
@@ -785,8 +783,7 @@ static int pt_release (struct inode *inode, struct file *file)
 
 	kfree(PT.bufptr);
 	PT.bufptr = NULL;
-
-        MOD_DEC_USE_COUNT;
+	unlock_kernel();
 
 	return 0;
 

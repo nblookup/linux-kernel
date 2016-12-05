@@ -4,12 +4,20 @@
  *
  * Copyright (C) 1996 Paul Mackerras.
  */
+#ifdef __KERNEL__
+#ifndef _PPC_PROM_H
+#define _PPC_PROM_H
+
+#include <linux/config.h>
 
 typedef void *phandle;
 typedef void *ihandle;
 
 extern char *prom_display_paths[];
 extern unsigned int prom_num_displays;
+#ifndef CONFIG_MACH_SPECIFIC
+extern int have_of;
+#endif
 
 struct address_range {
 	unsigned int space;
@@ -86,3 +94,9 @@ extern int call_rtas(const char *service, int nargs, int nret,
 extern void prom_drawstring(const char *c);
 extern void prom_drawhex(unsigned long v);
 extern void prom_drawchar(char c);
+
+extern void map_bootx_text(void);
+
+
+#endif /* _PPC_PROM_H */
+#endif /* __KERNEL__ */

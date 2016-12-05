@@ -102,18 +102,11 @@ static char drvname[]	= "wanpipe";
 static char fullname[]	= "WANPIPE(tm) Multiprotocol Driver";
 static char copyright[]	= "(c) 1995-1999 Sangoma Technologies Inc.";
 static int ncards = CONFIG_WANPIPE_CARDS;
-static int active = 0;			/* number of active cards */
-static sdla_t* card_array = NULL;	/* adapter data space */
+static int active;			/* number of active cards */
+static sdla_t* card_array;	/* adapter data space */
 
 /* Task queue element for creating a 'thread' */
-static struct tq_struct sdla_tq =
-{
-	NULL,		/* .next */
-	0,		/* .sync */
-	&sdla_poll,	/* .routine */
-	NULL		/* .data */
-}; 
-
+static struct tq_struct sdla_tq = { routine: sdla_poll };
 
 /******* Kernel Loadable Module Entry Points ********************************/
 
@@ -391,7 +384,7 @@ static int setup (wan_device_t* wandev, wandev_conf_t* conf)
 
 	if (!card->configured){
 
-	#ifdef __SMP__
+	#ifdef CONFIG_SMP
 		/* Initialize the Spin lock */
 		printk(KERN_INFO "%s: Initializing SMP\n",wandev->name);
 		spin_lock_init(&card->lock);
@@ -480,8 +473,11 @@ static int setup (wan_device_t* wandev, wandev_conf_t* conf)
         if(card->hw.type != SDLA_S514 && !card->wandev.piggyback)
                 request_region(card->hw.port, card->hw.io_range, wandev->name);
 
-	if (++active == 1)
-		queue_task(&sdla_tq, &tq_scheduler);
+	if (++active == 1) {
+		MOD_INC_USE_COUNT;
+		if (schedule_task(&sdla_tq) == 0)
+			MOD_DEC_USE_COUNT;
+	}
 		
 	wandev->critical = 0;
 	return 0;
@@ -825,13 +821,13 @@ STATIC void sdla_isr (int irq, void* dev_id, struct pt_regs *regs)
 
 		/* Use spin lock only for S508 */
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 		spin_lock(&card->lock);
 #endif
 		sdla_intack(&card->hw);
 		if (card->isr)
 			card->isr(card);
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 		spin_unlock(&card->lock);
 #endif
 
@@ -859,8 +855,12 @@ STATIC void sdla_poll (void* data)
 			card->poll(card);
 		}
 	}
-	if (active)
-		queue_task(&sdla_tq, &tq_scheduler);
+	if (active) {
+		MOD_INC_USE_COUNT;
+		if (schedule_task(&sdla_tq) == 0)	/* Surely not? */
+			MOD_DEC_USE_COUNT;
+	}
+	MOD_DEC_USE_COUNT;
 }
 
 /*============================================================================

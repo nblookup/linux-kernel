@@ -28,9 +28,6 @@ static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
 	int			slot, namelen;
 	char			*nameptr;
 
-	if (!inode || !S_ISDIR(inode->i_mode))
-		return -EBADF;
-
 	if (inode->i_size & (EFS_DIRBSIZE-1))
 		printk(KERN_WARNING "EFS: WARNING: readdir(): directory size not a multiple of EFS_DIRBSIZE\n");
 
@@ -78,7 +75,7 @@ static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
 				filp->f_pos = (block << EFS_DIRBSIZE_BITS) | slot;
 
 				/* copy filename and data in dirslot */
-				filldir(dirent, nameptr, namelen, filp->f_pos, inodenum);
+				filldir(dirent, nameptr, namelen, filp->f_pos, inodenum, DT_UNKNOWN);
 
 				/* sanity check */
 				if (nameptr - (char *) dirblock + namelen > EFS_DIRBSIZE) {

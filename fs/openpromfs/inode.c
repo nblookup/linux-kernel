@@ -1,4 +1,4 @@
-/* $Id: inode.c,v 1.7 2000/03/10 04:45:50 davem Exp $
+/* $Id: inode.c,v 1.13 2000/08/12 13:25:46 davem Exp $
  * openpromfs.c: /proc/openprom handling routines
  *
  * Copyright (C) 1996-1999 Jakub Jelinek  (jakub@redhat.com)
@@ -13,6 +13,7 @@
 #include <linux/locks.h>
 #include <linux/init.h>
 #include <linux/malloc.h>
+#include <linux/smp_lock.h>
 
 #include <asm/openprom.h>
 #include <asm/oplib.h>
@@ -507,6 +508,7 @@ int property_release (struct inode *inode, struct file *filp)
 	
 	if (!op)
 		return 0;
+	lock_kernel();
 	node = nodes[(u16)((long)inode->u.generic_ip)].node;
 	if ((u16)((long)inode->u.generic_ip) == aliases) {
 		if ((op->flag & OPP_DIRTY) && (op->flag & OPP_STRING)) {
@@ -548,6 +550,7 @@ int property_release (struct inode *inode, struct file *filp)
 				op->name);
 		}
 	}
+	unlock_kernel();
 	kfree (filp->private_data);
 	return 0;
 }
@@ -754,14 +757,14 @@ static int openpromfs_readdir(struct file * filp, void * dirent, filldir_t filld
 	i = filp->f_pos;
 	switch (i) {
 	case 0:
-		if (filldir(dirent, ".", 1, i, ino) < 0) return 0;
+		if (filldir(dirent, ".", 1, i, ino, DT_DIR) < 0) return 0;
 		i++;
 		filp->f_pos++;
 		/* fall thru */
 	case 1:
 		if (filldir(dirent, "..", 2, i, 
 			(NODE(ino).parent == 0xffff) ? 
-			OPENPROM_ROOT_INO : NODE2INO(NODE(ino).parent)) < 0) 
+			OPENPROM_ROOT_INO : NODE2INO(NODE(ino).parent), DT_DIR) < 0) 
 			return 0;
 		i++;
 		filp->f_pos++;
@@ -777,14 +780,14 @@ static int openpromfs_readdir(struct file * filp, void * dirent, filldir_t filld
 			if (prom_getname (nodes[node].node, buffer, 128) < 0)
 				return 0;
 			if (filldir(dirent, buffer, strlen(buffer),
-				    filp->f_pos, NODE2INO(node)) < 0)
+				    filp->f_pos, NODE2INO(node), DT_DIR) < 0)
 				return 0;
 			filp->f_pos++;
 			node = nodes[node].next;
 		}
 		j = NODEP2INO(NODE(ino).first_prop);
 		if (!i) {
-			if (filldir(dirent, ".node", 5, filp->f_pos, j) < 0)
+			if (filldir(dirent, ".node", 5, filp->f_pos, j, DT_REG) < 0)
 				return 0;
 			filp->f_pos++;
 		} else
@@ -795,7 +798,7 @@ static int openpromfs_readdir(struct file * filp, void * dirent, filldir_t filld
 				if (alias_names [i]) {
 					if (filldir (dirent, alias_names [i], 
 						strlen (alias_names [i]), 
-						filp->f_pos, j) < 0) return 0;
+						filp->f_pos, j, DT_REG) < 0) return 0;
 					filp->f_pos++;
 				}
 			}
@@ -807,7 +810,7 @@ static int openpromfs_readdir(struct file * filp, void * dirent, filldir_t filld
 				if (i) i--;
 				else {
 					if (filldir(dirent, p, strlen(p),
-						    filp->f_pos, j) < 0)
+						    filp->f_pos, j, DT_REG) < 0)
 						return 0;
 					filp->f_pos++;
 				}
@@ -870,7 +873,6 @@ static int openpromfs_unlink (struct inode *dir, struct dentry *dentry)
 			buffer [10 + len] = 0;
 			prom_feval (buffer);
 		}
-	d_delete(dentry);
 	return 0;
 }
 
@@ -980,10 +982,6 @@ static void openprom_read_inode(struct inode * inode)
 	}
 }
 
-static void openprom_put_super(struct super_block *sb)
-{
-}
-
 static int openprom_statfs(struct super_block *sb, struct statfs *buf)
 {
 	buf->f_type = OPENPROM_SUPER_MAGIC;
@@ -997,7 +995,6 @@ static int openprom_statfs(struct super_block *sb, struct statfs *buf)
 
 static struct super_operations openprom_sops = { 
 	read_inode:	openprom_read_inode,
-	put_super:	openprom_put_super,
 	statfs:		openprom_statfs,
 };
 
@@ -1026,7 +1023,7 @@ out_no_root:
 
 static DECLARE_FSTYPE(openprom_fs_type, "openpromfs", openprom_read_super, 0);
 
-int init_openprom_fs(void)
+static int __init init_openprom_fs(void)
 {
 	nodes = (openpromfs_node *)__get_free_pages(GFP_KERNEL, 0);
 	if (!nodes) {
@@ -1041,25 +1038,7 @@ int init_openprom_fs(void)
 	return register_filesystem(&openprom_fs_type);
 }
 
-#ifdef MODULE
-
-EXPORT_NO_SYMBOLS;
-
-int init_module (void)
-{
-	return init_openprom_fs();
-}
-
-#else
-
-void __init openpromfs_init (void)
-{
-	init_openprom_fs();
-}
-#endif
-
-#ifdef MODULE
-void cleanup_module (void)
+static void __exit exit_openprom_fs(void)
 {
 	int i;
 	unregister_filesystem(&openprom_fs_type);
@@ -1069,4 +1048,8 @@ void cleanup_module (void)
 			kfree (alias_names [i]);
 	nodes = NULL;
 }
-#endif
+
+EXPORT_NO_SYMBOLS;
+
+module_init(init_openprom_fs)
+module_exit(exit_openprom_fs)

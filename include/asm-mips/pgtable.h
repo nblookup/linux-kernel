@@ -1,5 +1,4 @@
-/* $Id: pgtable.h,v 1.30 2000/02/24 00:13:19 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -35,6 +34,8 @@ extern void (*_flush_cache_page)(struct vm_area_struct *vma, unsigned long page)
 extern void (*_flush_cache_sigtramp)(unsigned long addr);
 extern void (*_flush_page_to_ram)(struct page * page);
 
+#define flush_dcache_page(page)			do { } while (0)
+
 #define flush_cache_all()		_flush_cache_all()
 #define flush_cache_mm(mm)		_flush_cache_mm(mm)
 #define flush_cache_range(mm,start,end)	_flush_cache_range(mm,start,end)
@@ -43,7 +44,13 @@ extern void (*_flush_page_to_ram)(struct page * page);
 #define flush_page_to_ram(page)		_flush_page_to_ram(page)
 
 #define flush_icache_range(start, end)	flush_cache_all()
-#define flush_icache_page(start,page)	do { } while(0)
+
+#define flush_icache_page(vma, page)					\
+do {									\
+	unsigned long addr;						\
+	addr = (unsigned long) page_address(page);			\
+	_flush_cache_page(vma, addr);					\
+} while (0)
 
 
 /*
@@ -209,7 +216,7 @@ extern unsigned long zero_page_mask;
 #define BAD_PAGETABLE __bad_pagetable()
 #define BAD_PAGE __bad_page()
 #define ZERO_PAGE(vaddr) \
-	(mem_map + MAP_NR(empty_zero_page + (((unsigned long)(vaddr)) & zero_page_mask)))
+	(virt_to_page(empty_zero_page + (((unsigned long)(vaddr)) & zero_page_mask)))
 
 /* number of bits that fit into a memory pointer */
 #define BITS_PER_PTR			(8*sizeof(unsigned long))
@@ -234,11 +241,6 @@ extern pmd_t invalid_pte_table[PAGE_SIZE/sizeof(pmd_t)];
  * Conversion functions: convert a page and protection to a page entry,
  * and a page entry and page directory to the page they refer to.
  */
-extern inline unsigned long pte_page(pte_t pte)
-{
-	return PAGE_OFFSET + (pte_val(pte) & PAGE_MASK);
-}
-
 extern inline unsigned long pmd_page(pmd_t pmd)
 {
 	return pmd_val(pmd);
@@ -305,8 +307,7 @@ extern inline void pgd_clear(pgd_t *pgdp)	{ }
  * is simple.
  */
 #define page_address(page)	((page)->virtual)
-#define pte_pagenr(x)		((unsigned long)((pte_val(x) >> PAGE_SHIFT)))
-#define pte_page(x)		(mem_map+pte_pagenr(x))
+#define pte_page(x)		(mem_map+(unsigned long)((pte_val(x) >> PAGE_SHIFT)))
 
 /*
  * The following only work if pte_present() is true.
@@ -439,6 +440,7 @@ extern void __bad_pte_kernel(pmd_t *pmd);
 extern int do_check_pgt_cache(int, int);
 
 extern pgd_t swapper_pg_dir[1024];
+extern void paging_init(void);
 
 extern void update_mmu_cache(struct vm_area_struct *vma,
 				unsigned long address, pte_t pte);
@@ -449,9 +451,6 @@ extern void update_mmu_cache(struct vm_area_struct *vma,
 #define pte_to_swp_entry(pte)	((swp_entry_t) { pte_val(pte) })
 #define swp_entry_to_pte(x)	((pte_t) { (x).val })
 
-
-#define module_map      vmalloc
-#define module_unmap    vfree
 
 /* Needs to be defined here and not in linux/mm.h, as it is arch dependent */
 #define PageSkip(page)		(0)
@@ -711,6 +710,8 @@ extern inline void set_context(unsigned long val)
 		".set pop"
 		: : "r" (val));
 }
+
+#include <asm-generic/pgtable.h>
 
 #endif /* !defined (_LANGUAGE_ASSEMBLY) */
 

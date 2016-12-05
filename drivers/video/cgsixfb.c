@@ -1,4 +1,4 @@
-/* $Id: cgsixfb.c,v 1.22 2000/02/14 08:44:26 jj Exp $
+/* $Id: cgsixfb.c,v 1.23 2000/07/26 23:02:51 davem Exp $
  * cgsixfb.c: CGsix (GX,GXplus) frame buffer driver
  *
  * Copyright (C) 1996,1998 Jakub Jelinek (jj@ultra.linux.cz)
@@ -517,8 +517,13 @@ static void cg6_restore_palette (struct fb_info_sbusfb *fb)
 }
 
 static struct display_switch cg6_dispsw __initdata = {
-	cg6_setup, fbcon_redraw_bmove, cg6_clear, cg6_putc, cg6_putcs, cg6_revc, 
-	NULL, NULL, NULL, FONTWIDTHRANGE(1,16) /* Allow fontwidths up to 16 */
+	setup:		cg6_setup,
+	bmove:		fbcon_redraw_bmove,
+	clear:		cg6_clear,
+	putc:		cg6_putc,
+	putcs:		cg6_putcs,
+	revc:		cg6_revc, 
+	fontwidthmask:	FONTWIDTHRANGE(1,16) /* Allow fontwidths up to 16 */
 };
 
 static void cg6_setcursormap (struct fb_info_sbusfb *fb, u8 *red, u8 *green, u8 *blue)

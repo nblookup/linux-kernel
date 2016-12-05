@@ -5,7 +5,7 @@
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>	
  *
- *	$Id: route.c,v 1.45 2000/01/16 05:11:38 davem Exp $
+ *	$Id: route.c,v 1.49 2000/11/03 01:11:58 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -93,7 +93,7 @@ struct dst_ops ip6_dst_ops = {
 
 struct rt6_info ip6_null_entry = {
 	{{NULL, ATOMIC_INIT(1), 1, &loopback_dev,
-	  -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	  -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 	  -ENETUNREACH, NULL, NULL,
 	  ip6_pkt_discard, ip6_pkt_discard,
 #ifdef CONFIG_NET_CLS_ROUTE
@@ -769,10 +769,12 @@ int ip6_route_add(struct in6_rtmsg *rtmsg)
 		goto out;
 
 	if (rtmsg->rtmsg_flags & (RTF_GATEWAY|RTF_NONEXTHOP)) {
-		rt->rt6i_nexthop = ndisc_get_neigh(dev, &rt->rt6i_gateway);
-		err = -ENOMEM;
-		if (rt->rt6i_nexthop == NULL)
+		rt->rt6i_nexthop = __neigh_lookup_errno(&nd_tbl, &rt->rt6i_gateway, dev);
+		if (IS_ERR(rt->rt6i_nexthop)) {
+			err = PTR_ERR(rt->rt6i_nexthop);
+			rt->rt6i_nexthop = NULL;
 			goto out;
+		}
 	}
 
 	if (ipv6_addr_is_multicast(&rt->rt6i_dst.addr))
@@ -1900,22 +1902,22 @@ ctl_table ipv6_route_table[] = {
          &proc_dointvec},
 	{NET_IPV6_ROUTE_GC_MIN_INTERVAL, "gc_min_interval",
          &ip6_rt_gc_min_interval, sizeof(int), 0644, NULL,
-         &proc_dointvec_jiffies},
+         &proc_dointvec_jiffies, &sysctl_jiffies},
 	{NET_IPV6_ROUTE_GC_TIMEOUT, "gc_timeout",
          &ip6_rt_gc_timeout, sizeof(int), 0644, NULL,
-         &proc_dointvec_jiffies},
+         &proc_dointvec_jiffies, &sysctl_jiffies},
 	{NET_IPV6_ROUTE_GC_INTERVAL, "gc_interval",
          &ip6_rt_gc_interval, sizeof(int), 0644, NULL,
-         &proc_dointvec_jiffies},
+         &proc_dointvec_jiffies, &sysctl_jiffies},
 	{NET_IPV6_ROUTE_GC_ELASTICITY, "gc_elasticity",
          &ip6_rt_gc_elasticity, sizeof(int), 0644, NULL,
-         &proc_dointvec_jiffies},
+         &proc_dointvec_jiffies, &sysctl_jiffies},
 	{NET_IPV6_ROUTE_MTU_EXPIRES, "mtu_expires",
          &ip6_rt_mtu_expires, sizeof(int), 0644, NULL,
-         &proc_dointvec_jiffies},
+         &proc_dointvec_jiffies, &sysctl_jiffies},
 	{NET_IPV6_ROUTE_MIN_ADVMSS, "min_adv_mss",
          &ip6_rt_min_advmss, sizeof(int), 0644, NULL,
-         &proc_dointvec_jiffies},
+         &proc_dointvec_jiffies, &sysctl_jiffies},
 	 {0}
 };
 

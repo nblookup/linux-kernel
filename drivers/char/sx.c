@@ -4,7 +4,7 @@
  *  This driver will also support the older SI, and XIO cards.
  *
  *
- *   (C) 1998 R.E.Wolff@BitWizard.nl
+ *   (C) 1998 - 2000  R.E.Wolff@BitWizard.nl
  *
  *  Simon Allen (simonallen@cix.compulink.co.uk) wrote a previous
  *  version of this driver. Some fragments may have been copied. (none
@@ -33,6 +33,21 @@
  *
  * Revision history:
  * $Log: sx.c,v $
+ * Revision 1.33  2000/03/09 10:00:00  pvdl,wolff
+ * - Fixed module and port counting
+ * - Fixed signal handling
+ * - Fixed an Ooops
+ * 
+ * Revision 1.32  2000/03/07 09:00:00  wolff,pvdl
+ * - Fixed some sx_dprintk typos
+ * - added detection for an invalid board/module configuration
+ *
+ * Revision 1.31  2000/03/06 12:00:00  wolff,pvdl
+ * - Added support for EISA
+ *
+ * Revision 1.30  2000/01/21 17:43:06  wolff
+ * - Added support for SX+
+ *
  * Revision 1.26  1999/08/05 15:22:14  wolff
  * - Port to 2.3.x
  * - Reformatted to Linus' liking.
@@ -185,8 +200,8 @@
  * */
 
 
-#define RCS_ID "$Id: sx.c,v 1.26 1999/08/05 15:22:14 wolff Exp $"
-#define RCS_REV "$Revision: 1.26 $"
+#define RCS_ID "$Id: sx.c,v 1.33 2000/03/08 10:01:02 wolff, pvdl Exp $"
+#define RCS_REV "$Revision: 1.33 $"
 
 
 #include <linux/module.h>
@@ -208,7 +223,8 @@
 #include <linux/tqueue.h>
 #include <linux/version.h>
 #include <linux/pci.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
+#include <linux/init.h>
 #include <linux/miscdevice.h>
 
 /* The 3.0.0 version of sxboards/sxwindow.h  uses BYTE and WORD.... */
@@ -222,153 +238,24 @@
 #include "sxboards.h"
 #include "sxwindow.h"
 
+#include <linux/compatmac.h>
+#include <linux/generic_serial.h>
+#include "sx.h"
+
 
 /* I don't think that this driver can handle more than 256 ports on
    one machine. You'll have to increase the number of boards in sx.h
    if you want more than 4 boards.  */
 
 
-/* ************************************************************** */
-/* * This section can be removed when 2.0 becomes outdated....  * */
-/* ************************************************************** */
-
-
-#if LINUX_VERSION_CODE < 0x020100    /* Less than 2.1.0 */
-#define TWO_ZERO
-#else
-#if LINUX_VERSION_CODE < 0x020200   /* less than 2.2.x */
-#warning "Please use a 2.2.x kernel. "
-#else
-#if LINUX_VERSION_CODE < 0x020300   /* less than 2.3.x */
-#define TWO_TWO
-#else
-#define TWO_THREE
-#endif
-#endif
-#endif
-
-#ifdef TWO_ZERO
-
-/* Here is the section that makes the 2.2 compatible driver source 
-   work for 2.0 too! We mostly try to adopt the "new thingies" from 2.2, 
-   and provide for compatibility stuff here if possible. */
-
-#include <linux/bios32.h>
-
-#define Get_user(a,b)                a = get_user(b)
-#define Put_user(a,b)                0,put_user(a,b)
-#define copy_to_user(a,b,c)          memcpy_tofs(a,b,c)
-
-static inline int copy_from_user(void *to,const void *from, int c) 
-{
-  memcpy_fromfs(to, from, c);
-  return 0;
-}
-
-#define pci_present                  pcibios_present
-#define pci_read_config_word         pcibios_read_config_word
-#define pci_read_config_dword        pcibios_read_config_dword
-
-static inline unsigned char get_irq (unsigned char bus, unsigned char fn)
-{
-	unsigned char t; 
-	pcibios_read_config_byte (bus, fn, PCI_INTERRUPT_LINE, &t);
-	return t;
-}
-
-static inline void *ioremap(unsigned long base, long length)
-{
-	if (base < 0x100000) return (void *)base;
-	return vremap (base, length);
-}
-
-#define my_iounmap(x, b)             (((long)x<0x100000)?0:vfree ((void*)x))
-
-#define capable(x)                   suser()
-
-#define queue_task                   queue_task_irq_off
-#define tty_flip_buffer_push(tty)    queue_task(&tty->flip.tqueue, &tq_timer)
-#define signal_pending(current)      (current->signal & ~current->blocked)
-#define schedule_timeout(to)         do {current->timeout = jiffies + (to);schedule ();} while (0)
-#define time_after(t1,t2)            (((long)t1-t2) > 0)
-
-
-#define test_and_set_bit(nr, addr)   set_bit(nr, addr)
-#define test_and_clear_bit(nr, addr) clear_bit(nr, addr)
-
-/* Not yet implemented on 2.0 */
-#define ASYNC_SPD_SHI  -1
-#define ASYNC_SPD_WARP -1
-
-
-/* Ugly hack: the driver_name doesn't exist in 2.0.x . So we define it
-   to the "name" field that does exist. As long as the assignments are
-   done in the right order, there is nothing to worry about. */
-#define driver_name           name 
-
-/* Should be in a header somewhere. They are in tty.h on 2.2 */
-#define TTY_HW_COOK_OUT       14 /* Flag to tell ntty what we can handle */
-#define TTY_HW_COOK_IN        15 /* in hardware - output and input       */
-
-/* The return type of a "close" routine. */
-#define INT                   void
-#define NO_ERROR              /* Nothing */
-
-#else
-
-/* The 2.2.x compatibility section. */
-#include <asm/uaccess.h>
-
-
-#define Get_user(a,b)         get_user(a,b)
-#define Put_user(a,b)         put_user(a,b)
-#define get_irq(pdev)         pdev->irq
-
-#define INT                   int
-#define NO_ERROR              0
-
-#define my_iounmap(x,b)       (iounmap((char *)(b)))
-
-#endif
-
-#ifndef TWO_THREE
-/* These are new in 2.3. The source now uses 2.3 syntax, and here is 
-   the compatibility define... */
-#define wait_queue_head_t struct wait_queue *
-#define DECLARE_MUTEX(name) struct semaphore name = MUTEX
-#define DECLARE_WAITQUEUE(wait, current) struct wait_queue wait = { current, NULL }
-
-#endif
-
-#undef RS_EVENT_WRITE_WAKEUP
-#define RS_EVENT_WRITE_WAKEUP	0
-
-
-#include "generic_serial.h"
-#include "sx.h"
-
-
-/* ************************************************************** */
-/* *                End of compatibility section..              * */
-/* ************************************************************** */
-
-
-
 /* Why the hell am I defining these here? */
 #define SX_TYPE_NORMAL 1
 #define SX_TYPE_CALLOUT 2
 
-#ifndef SX_NORMAL_MAJOR
-/* This allows overriding on the compiler commandline, or in a "major.h" 
-   include or something like that */
-#define SX_NORMAL_MAJOR  32
-#define SX_CALLOUT_MAJOR 33
-#endif
 
 #ifndef PCI_DEVICE_ID_SPECIALIX_SX_XIO_IO8
 #define PCI_DEVICE_ID_SPECIALIX_SX_XIO_IO8 0x2000
 #endif
-
 
 
 /* Configurable options: 
@@ -410,33 +297,29 @@ static void sx_disable_rx_interrupts (void * ptr);
 static void sx_enable_rx_interrupts (void * ptr); 
 static int  sx_get_CD (void * ptr); 
 static void sx_shutdown_port (void * ptr);
-static void sx_set_real_termios (void  *ptr);
+static int  sx_set_real_termios (void  *ptr);
 static void sx_hungup (void  *ptr);
 static void sx_close (void  *ptr);
 static int sx_chars_in_buffer (void * ptr);
 static int sx_init_board (struct sx_board *board);
 static int sx_init_portstructs (int nboards, int nports);
 static int sx_fw_ioctl (struct inode *inode, struct file *filp,
-		         unsigned int cmd, unsigned long arg);
-static int sx_fw_open(struct inode *inode, struct file *filp);
-static INT sx_fw_release(struct inode *inode, struct file *filp);
+                        unsigned int cmd, unsigned long arg);
 static int sx_init_drivers(void);
-void my_hd (unsigned char *addr, int len);
-
 
 
 static struct tty_driver sx_driver, sx_callout_driver;
 
-static struct tty_struct * sx_table[SX_NPORTS] = { NULL, };
+static struct tty_struct * sx_table[SX_NPORTS];
 static struct termios ** sx_termios;
 static struct termios ** sx_termios_locked;
 
-struct sx_board boards[SX_NBOARDS];
-struct sx_port *sx_ports;
-int sx_refcount;
-int sx_initialized = 0;
-int sx_nports = 0;
-int sx_debug = 0;
+static struct sx_board boards[SX_NBOARDS];
+static struct sx_port *sx_ports;
+static int sx_refcount;
+static int sx_initialized;
+static int sx_nports;
+static int sx_debug;
 
 
 /* You can have the driver poll your card. 
@@ -447,22 +330,24 @@ int sx_debug = 0;
       the driver misses an interrupt (report this if it DOES happen to you!)
       everything will continue to work.... 
  */
-int sx_poll = 1;
-int sx_slowpoll = 0;
+static int sx_poll = 1;
+static int sx_slowpoll;
 
 /* The card limits the number of interrupts per second. 
    At 115k2 "100" should be sufficient. 
    If you're using higher baudrates, you can increase this...
  */
 
-int sx_maxints = 100;
+static int sx_maxints = 100;
 
 /* These are the only open spaces in my computer. Yours may have more
-   or less.... */
-int sx_probe_addrs[]= {0xc0000, 0xd0000, 0xe0000, 
-                       0xc8000, 0xd8000, 0xe8000};
-int si_probe_addrs[]= {0xc0000, 0xd0000, 0xe0000, 
-                       0xc8000, 0xd8000, 0xe8000};
+   or less.... -- REW 
+   duh: Card at 0xa0000 is possible on HP Netserver?? -- pvdl
+*/
+static int sx_probe_addrs[]= {0xc0000, 0xd0000, 0xe0000, 
+                              0xc8000, 0xd8000, 0xe8000};
+static int si_probe_addrs[]= {0xc0000, 0xd0000, 0xe0000, 
+                              0xc8000, 0xd8000, 0xe8000, 0xa0000};
 
 #define NR_SX_ADDRS (sizeof(sx_probe_addrs)/sizeof (int))
 #define NR_SI_ADDRS (sizeof(si_probe_addrs)/sizeof (int))
@@ -470,17 +355,15 @@ int si_probe_addrs[]= {0xc0000, 0xd0000, 0xe0000,
 
 /* Set the mask to all-ones. This alas, only supports 32 interrupts. 
    Some architectures may need more. */
-int sx_irqmask = -1;
+static int sx_irqmask = -1;
 
-#ifndef TWO_ZERO
-#ifdef MODULE
+MODULE_PARM(sx_probe_addrs, "i");
+MODULE_PARM(si_probe_addrs, "i");
 MODULE_PARM(sx_poll, "i");
 MODULE_PARM(sx_slowpoll, "i");
 MODULE_PARM(sx_maxints, "i");
 MODULE_PARM(sx_debug, "i");
 MODULE_PARM(sx_irqmask, "i");
-#endif
-#endif
 
 static struct real_driver sx_real_driver = {
 	sx_disable_tx_interrupts,
@@ -493,7 +376,6 @@ static struct real_driver sx_real_driver = {
 	sx_chars_in_buffer,
 	sx_close,
 	sx_hungup,
-	NULL
 };
 
 
@@ -531,12 +413,11 @@ static struct real_driver sx_real_driver = {
  */
 
 static struct file_operations sx_fw_fops = {
+	owner:		THIS_MODULE,
 	ioctl:		sx_fw_ioctl,
-	open:		sx_fw_open,
-	release:	sx_fw_release,
 };
 
-struct miscdevice sx_fw_device = {
+static struct miscdevice sx_fw_device = {
 	SXCTL_MISC_MINOR, "sxctl", &sx_fw_fops
 };
 
@@ -580,34 +461,53 @@ static inline int sx_paranoia_check(struct sx_port const * port,
 #define TIMEOUT_2 1000000
 
 
+#ifdef DEBUG
+static void my_hd (unsigned char *addr, int len)
+{
+	int i, j, ch;
+
+	for (i=0;i<len;i+=16) {
+		printk ("%08x ", (int) addr+i);
+		for (j=0;j<16;j++) {
+			printk ("%02x %s", addr[j+i], (j==7)?" ":"");
+		}
+		for (j=0;j<16;j++) {
+			ch = addr[j+i];
+			printk ("%c", (ch < 0x20)?'.':((ch > 0x7f)?'.':ch));
+		}
+		printk ("\n");
+	}
+}
+#endif
+
+
+
 /* This needs redoing for Alpha -- REW -- Done. */
 
-inline void write_sx_byte (struct sx_board *board, int offset, u8 byte)
+static inline void write_sx_byte (struct sx_board *board, int offset, u8 byte)
 {
 	writeb (byte, board->base+offset);
 }
 
-inline u8 read_sx_byte (struct sx_board *board, int offset)
+static inline u8 read_sx_byte (struct sx_board *board, int offset)
 {
 	return readb (board->base+offset);
 }
 
 
-inline void write_sx_word (struct sx_board *board, int offset, u16 word)
+static inline void write_sx_word (struct sx_board *board, int offset, u16 word)
 {
 	writew (word, board->base+offset);
 }
 
-inline u16 read_sx_word (struct sx_board *board, int offset)
+static inline u16 read_sx_word (struct sx_board *board, int offset)
 {
 	return readw (board->base + offset);
 }
 
 
-int sx_busy_wait_eq (struct sx_board *board, 
-                     int offset,
-                     int mask,
-                     int correctval)
+static int sx_busy_wait_eq (struct sx_board *board, 
+                     	    int offset, int mask, int correctval)
 {
 	int i;
 
@@ -632,10 +532,8 @@ int sx_busy_wait_eq (struct sx_board *board,
 }
 
 
-int sx_busy_wait_neq (struct sx_board *board, 
-                      int offset,
-                      int mask,
-                      int badval)
+static int sx_busy_wait_neq (struct sx_board *board, 
+                      	     int offset, int mask, int badval)
 {
 	int i;
 
@@ -662,7 +560,7 @@ int sx_busy_wait_neq (struct sx_board *board,
 
 
 /* 5.6.4 of 6210028 r2.3 */
-int sx_reset (struct sx_board *board)
+static int sx_reset (struct sx_board *board)
 {
 	func_enter ();
 
@@ -675,6 +573,8 @@ int sx_reset (struct sx_board *board)
 			printk (KERN_INFO "sx: Card doesn't respond to reset....\n");
 			return 0;
 		}
+	} else if (IS_EISA_BOARD(board)) {
+		outb(board->irq<<4, board->eisa_base+0xc02);
 	} else {
 		/* Gory details of the SI/ISA board */
 		write_sx_byte (board, SI2_ISA_RESET,    SI2_ISA_RESET_SET);
@@ -742,13 +642,16 @@ int sx_reset (struct sx_board *board)
    read_sx_word (board, BRD_OFFSET (board, elem))
 
 
-int sx_start_board (struct sx_board *board)
+static int sx_start_board (struct sx_board *board)
 {
 	if (IS_SX_BOARD (board)) {
 		write_sx_byte (board, SX_CONFIG, SX_CONF_BUSEN);
+	} else if (IS_EISA_BOARD(board)) {
+		write_sx_byte(board, SI2_EISA_OFF, SI2_EISA_VAL);
+		outb((board->irq<<4)|4, board->eisa_base+0xc02);
 	} else {
 		/* Don't bug me about the clear_set. 
-		   I haven't the foggiest idea what it's about -- REW*/
+		   I haven't the foggiest idea what it's about -- REW */
 		write_sx_byte (board, SI2_ISA_RESET,    SI2_ISA_RESET_CLEAR);
 		write_sx_byte (board, SI2_ISA_INTCLEAR, SI2_ISA_INTCLEAR_SET);
 	}
@@ -760,7 +663,7 @@ int sx_start_board (struct sx_board *board)
 
 /* Note. The SX register is write-only. Therefore, we have to enable the
    bus too. This is a no-op, if you don't mess with this driver... */
-int sx_start_interrupts (struct sx_board *board)
+static int sx_start_interrupts (struct sx_board *board)
 {
 
 	/* Don't call this with board->irq == 0 */
@@ -769,6 +672,8 @@ int sx_start_interrupts (struct sx_board *board)
 		write_sx_byte (board, SX_CONFIG, SX_IRQ_REG_VAL (board) | 
 		                                 SX_CONF_BUSEN | 
 		                                 SX_CONF_HOSTIRQ);
+	} else if (IS_EISA_BOARD(board)) {
+		inb(board->eisa_base+0xc03);  
 	} else {
 		switch (board->irq) {
 		case 11:write_sx_byte (board, SI2_ISA_IRQ11, SI2_ISA_IRQ11_SET);break;
@@ -785,10 +690,8 @@ int sx_start_interrupts (struct sx_board *board)
 }
 
 
-int sx_send_command (struct sx_port *port, 
-                     int command,
-                     int mask,
-                     int newstat)
+static int sx_send_command (struct sx_port *port, 
+                     	    int command, int mask, int newstat)
 {
 	func_enter2 ();
 	write_sx_byte (port->board, CHAN_OFFSET (port, hi_hstat), command);
@@ -797,7 +700,7 @@ int sx_send_command (struct sx_port *port,
 }
 
 
-char *mod_type_s (int module_type)
+static char *mod_type_s (int module_type)
 {
 	switch (module_type) {
 	case TA4:       return "TA4";
@@ -811,7 +714,7 @@ char *mod_type_s (int module_type)
 }
 
 
-char *pan_type_s (int pan_type)
+static char *pan_type_s (int pan_type)
 {
 	switch (pan_type) {
 	case MOD_RS232DB25:     return "MOD_RS232DB25";
@@ -829,11 +732,23 @@ char *pan_type_s (int pan_type)
 }
 
 
-int mod_compat_type (int module_type)
+static int mod_compat_type (int module_type)
 {
 	return module_type >> 4;
 }
 
+static void sx_reconfigure_port(struct sx_port *port)
+{
+	if (sx_read_channel_byte (port, hi_hstat) == HS_IDLE_OPEN) {
+		if (sx_send_command (port, HS_CONFIG, -1, HS_IDLE_OPEN) != 1) {
+			printk (KERN_WARNING "sx: Sent reconfigure command, but card didn't react.\n");
+		}
+	} else {
+		sx_dprintk (SX_DEBUG_TERMIOS, 
+		            "sx: Not sending reconfigure: port isn't open (%02x).\n", 
+		            sx_read_channel_byte (port, hi_hstat));
+	}	
+}
 
 static void sx_setsignals (struct sx_port *port, int dtr, int rts)
 {
@@ -845,6 +760,7 @@ static void sx_setsignals (struct sx_port *port, int dtr, int rts)
 	if (rts >= 0) t = rts? (t | OP_RTS): (t & ~OP_RTS);
 	sx_write_channel_byte (port, hi_op, t);
 	sx_dprintk (SX_DEBUG_MODEMSIGNALS, "setsignals: %d/%d\n", dtr, rts);
+
 	func_exit ();
 }
 
@@ -954,11 +870,14 @@ static void sx_set_baud (struct sx_port *port)
 /* Simon Allen's version of this routine was 225 lines long. 85 is a lot
    better. -- REW */
 
-static void sx_set_real_termios (void *ptr)
+static int sx_set_real_termios (void *ptr)
 {
 	struct sx_port *port = ptr;
 
 	func_enter2();
+
+	if (!port->gs.tty)
+		return 0;
 
 	/* What is this doing here? -- REW
 	   Ha! figured it out. It is to allow you to get DTR active again
@@ -1008,16 +927,7 @@ static void sx_set_real_termios (void *ptr)
 	sx_write_channel_byte (port, hi_txoff, STOP_CHAR  (port->gs.tty));
 	sx_write_channel_byte (port, hi_rxoff, STOP_CHAR  (port->gs.tty));
 
-	if (sx_read_channel_byte (port, hi_hstat) == HS_IDLE_OPEN) {
-		if (sx_send_command (port, HS_CONFIG, -1, HS_IDLE_OPEN) != 1) {
-			printk (KERN_WARNING "sx: Sent reconfigure command, but card didn't react.\n");
-		}
-	} else {
-		sx_dprintk (SX_DEBUG_TERMIOS, 
-		            "sx: Not sending reconfigure: port isn't open (%02x).\n", 
-		            sx_read_channel_byte (port, hi_hstat));
-	}
-
+	sx_reconfigure_port(port);
 
 	/* Tell line discipline whether we will do input cooking */
 	if(I_OTHER(port->gs.tty)) {
@@ -1045,6 +955,7 @@ static void sx_set_real_termios (void *ptr)
 	            O_OTHER(port->gs.tty));
 	/* port->c_dcd = sx_get_CD (port); */
 	func_exit ();
+	return 0;
 }
 
 
@@ -1065,7 +976,7 @@ static void sx_set_real_termios (void *ptr)
    case.  */
 
 
-void sx_transmit_chars (struct sx_port *port)
+static void sx_transmit_chars (struct sx_port *port)
 {
 	int c;
 	int tx_ip;
@@ -1102,9 +1013,9 @@ void sx_transmit_chars (struct sx_port *port)
 
 		/* Don't copy pas the end of the source buffer */
 		if (c > SERIAL_XMIT_SIZE - port->gs.xmit_tail) 
-                	c = SERIAL_XMIT_SIZE - port->gs.xmit_tail;
+			c = SERIAL_XMIT_SIZE - port->gs.xmit_tail;
 
-		sx_dprintk (SX_DEBUG_TRANSMIT, " %d(%d) \n", 
+		sx_dprintk (SX_DEBUG_TRANSMIT, " %d(%ld) \n", 
 		            c, SERIAL_XMIT_SIZE- port->gs.xmit_tail);
 
 		/* If for one reason or another, we can't copy more data, we're done! */
@@ -1129,7 +1040,7 @@ void sx_transmit_chars (struct sx_port *port)
 		sx_disable_tx_interrupts (port);
 	}
 
-	if (port->gs.xmit_cnt <= port->gs.wakeup_chars) {
+	if ((port->gs.xmit_cnt <= port->gs.wakeup_chars) && port->gs.tty) {
 		if ((port->gs.tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
 		    port->gs.tty->ldisc.write_wakeup)
 			(port->gs.tty->ldisc.write_wakeup)(port->gs.tty);
@@ -1148,14 +1059,14 @@ void sx_transmit_chars (struct sx_port *port)
    a transmit buffer. */
 
 /* Inlined: Called only once. Remove the inline when you add another call */
-inline void sx_receive_chars (struct sx_port *port)
+static inline void sx_receive_chars (struct sx_port *port)
 {
 	int c;
 	int rx_op;
 	struct tty_struct *tty;
 	int copied=0;
 
-	/* func_enter2 (); */
+	func_enter2 ();
 	tty = port->gs.tty;
 	while (1) {
 		rx_op = sx_read_channel_byte (port, hi_rxopos);
@@ -1210,12 +1121,12 @@ inline void sx_receive_chars (struct sx_port *port)
 		/*    tty_schedule_flip (tty); */
 	}
 
-	/* func_exit (); */
+	func_exit ();
 }
 
 /* Inlined: it is called only once. Remove the inline if you add another 
    call */
-inline void sx_check_modem_signals (struct sx_port *port)
+static inline void sx_check_modem_signals (struct sx_port *port)
 {
 	int hi_state;
 	int c_dcd;
@@ -1331,6 +1242,9 @@ static void sx_interrupt (int irq, void *ptr, struct pt_regs *regs)
 		sx_write_board_word (board, cc_int_pending, 0);
 		if (IS_SX_BOARD (board)) {
 			write_sx_byte (board, SX_RESET_IRQ, 1);
+		} else if (IS_EISA_BOARD(board)) {
+			inb(board->eisa_base+0xc03);
+			write_sx_word(board, 8, 0); 
 		} else {
 			write_sx_byte (board, SI2_ISA_INTCLEAR, SI2_ISA_INTCLEAR_CLEAR);
 			write_sx_byte (board, SI2_ISA_INTCLEAR, SI2_ISA_INTCLEAR_SET);
@@ -1376,6 +1290,8 @@ static void sx_pollfunc (unsigned long data)
 	func_enter ();
 
 	sx_interrupt (0, board, NULL);
+
+	init_timer(&board->timer);
 
 	board->timer.expires = jiffies + sx_poll;
 	add_timer (&board->timer);
@@ -1472,8 +1388,9 @@ static void sx_shutdown_port (void * ptr)
 	func_enter();
 
 	port->gs.flags &= ~ GS_ACTIVE;
-	if (port->gs.tty && port->gs.tty->termios->c_cflag & HUPCL) {
+	if (port->gs.tty && (port->gs.tty->termios->c_cflag & HUPCL)) {
 		sx_setsignals (port, 0, 0);
+		sx_reconfigure_port(port);
 	}
 
 	func_exit();
@@ -1487,25 +1404,6 @@ static void sx_shutdown_port (void * ptr)
  *                Here are the routines that actually                     *
  *               interface with the rest of the system                    *
  * ********************************************************************** */
-
-
-static int sx_fw_open(struct inode *inode, struct file *filp)
-{
-	func_enter ();
-	MOD_INC_USE_COUNT;
-	func_exit ();
-	return 0;
-}
-
-
-static INT sx_fw_release(struct inode *inode, struct file *filp)
-{
-	func_enter ();
-	MOD_DEC_USE_COUNT;
-	func_exit ();
-	return NO_ERROR;
-}
-
 
 static int sx_open  (struct tty_struct * tty, struct file * filp)
 {
@@ -1534,6 +1432,8 @@ static int sx_open  (struct tty_struct * tty, struct file * filp)
 
 	tty->driver_data = port;
 	port->gs.tty = tty;
+	if (!port->gs.count)
+		MOD_INC_USE_COUNT;
 	port->gs.count++;
 
 	sx_dprintk (SX_DEBUG_OPEN, "starting port\n");
@@ -1545,18 +1445,12 @@ static int sx_open  (struct tty_struct * tty, struct file * filp)
 	sx_dprintk (SX_DEBUG_OPEN, "done gs_init\n");
 	if (retval) {
 		port->gs.count--;
+		if (port->gs.count) MOD_DEC_USE_COUNT;
 		return retval;
 	}
 
 	port->gs.flags |= GS_ACTIVE;
 	sx_setsignals (port, 1,1);
-
-	sx_dprintk (SX_DEBUG_OPEN, "before inc_use_count (count=%d.\n", 
-	            port->gs.count);
-	if (port->gs.count == 1) {
-		MOD_INC_USE_COUNT;
-	}
-	sx_dprintk (SX_DEBUG_OPEN, "after inc_use_count\n");
 
 #if 0
 	if (sx_debug & SX_DEBUG_OPEN)
@@ -1569,18 +1463,20 @@ static int sx_open  (struct tty_struct * tty, struct file * filp)
 
 	if (sx_send_command (port, HS_LOPEN, -1, HS_IDLE_OPEN) != 1) {
 		printk (KERN_ERR "sx: Card didn't respond to LOPEN command.\n");
-		MOD_DEC_USE_COUNT;
 		port->gs.count--;
+		if (!port->gs.count) MOD_DEC_USE_COUNT;
 		return -EIO;
 	}
 
-	retval = block_til_ready(port, filp);
+	retval = gs_block_til_ready(port, filp);
 	sx_dprintk (SX_DEBUG_OPEN, "Block til ready returned %d. Count=%d\n", 
 	            retval, port->gs.count);
 
 	if (retval) {
-		MOD_DEC_USE_COUNT;
-		port->gs.count--;
+		/* 
+		 * Don't lower gs.count here because sx_close() will be called later
+		 */ 
+
 		return retval;
 	}
 	/* tty->low_latency = 1; */
@@ -1612,7 +1508,26 @@ static int sx_open  (struct tty_struct * tty, struct file * filp)
    exit minicom.  I expect an "oops".  -- REW */
 static void sx_hungup (void *ptr)
 {
+  /*
+	struct sx_port *port = ptr; 
+  */
 	func_enter ();
+
+	/* Don't force the SX card to close. mgetty doesn't like it !!!!!! -- pvdl */
+	/* For some reson we added this code. Don't know why anymore ;-( -- pvdl */
+	/*
+	sx_setsignals (port, 0, 0);
+	sx_reconfigure_port(port);	
+	sx_send_command (port, HS_CLOSE, 0, 0);
+
+	if (sx_read_channel_byte (port, hi_hstat) != HS_IDLE_CLOSED) {
+		if (sx_send_command (port, HS_FORCE_CLOSED, -1, HS_IDLE_CLOSED) != 1) {
+			printk (KERN_ERR 
+			        "sx: sent the force_close command, but card didn't react\n");
+		} else
+			sx_dprintk (SX_DEBUG_CLOSE, "sent the force_close command.\n");
+	}
+	*/
 	MOD_DEC_USE_COUNT;
 	func_exit ();
 }
@@ -1625,6 +1540,9 @@ static void sx_close (void *ptr)
 	int to = 5 * HZ; 
 
 	func_enter ();
+
+	sx_setsignals (port, 0, 0);
+	sx_reconfigure_port(port);	
 	sx_send_command (port, HS_CLOSE, 0, 0);
 
 	while (to-- && (sx_read_channel_byte (port, hi_hstat) != HS_IDLE_CLOSED)) {
@@ -1645,6 +1563,11 @@ static void sx_close (void *ptr)
 	sx_dprintk (SX_DEBUG_CLOSE, "waited %d jiffies for close. count=%d\n", 
 	            5 * HZ - to - 1, port->gs.count);
 
+	if(port->gs.count) {
+		sx_dprintk(SX_DEBUG_CLOSE, "WARNING port count:%d\n", port->gs.count);
+		port->gs.count = 0;
+	}
+
 	MOD_DEC_USE_COUNT;
 	func_exit ();
 }
@@ -1661,7 +1584,7 @@ static void sx_close (void *ptr)
 
 /* This memtest takes a human-noticable time. You normally only do it
    once a boot, so I guess that it is worth it. */
-int do_memtest (struct sx_board *board, int min, int max)
+static int do_memtest (struct sx_board *board, int min, int max)
 {
 	int i;
 
@@ -1696,7 +1619,7 @@ int do_memtest (struct sx_board *board, int min, int max)
 
 /* This memtest takes a human-noticable time. You normally only do it
    once a boot, so I guess that it is worth it. */
-int do_memtest_w (struct sx_board *board, int min, int max)
+static int do_memtest_w (struct sx_board *board, int min, int max)
 {
 	int i;
 
@@ -1711,7 +1634,7 @@ int do_memtest_w (struct sx_board *board, int min, int max)
 
 
 static int sx_fw_ioctl (struct inode *inode, struct file *filp,
-		         unsigned int cmd, unsigned long arg)
+                        unsigned int cmd, unsigned long arg)
 {
 	int rc = 0;
 	int *descr = (int *)arg, i;
@@ -1754,7 +1677,11 @@ static int sx_fw_ioctl (struct inode *inode, struct file *filp,
 		board = &boards[arg];
 		break;
 	case SXIO_GET_TYPE:
-		rc = IS_SX_BOARD (board)? SX_TYPE_SX:SX_TYPE_SI;
+		rc = -ENOENT; /* If we manage to miss one, return error. */
+		if (IS_SX_BOARD (board)) rc = SX_TYPE_SX;
+		if (IS_CF_BOARD (board)) rc = SX_TYPE_CF;
+		if (IS_SI_BOARD (board)) rc = SX_TYPE_SI;
+		if (IS_EISA_BOARD (board)) rc = SX_TYPE_SI;
 		sx_dprintk (SX_DEBUG_FIRMWARE, "returning type= %d\n", rc);
 		break;
 	case SXIO_DO_RAMTEST:
@@ -1786,7 +1713,7 @@ static int sx_fw_ioctl (struct inode *inode, struct file *filp,
 			for (i=0;i<nbytes;i += SX_CHUNK_SIZE) {
 				copy_from_user (tmp, (char *)data+i, 
 				                (i+SX_CHUNK_SIZE>nbytes)?nbytes-i:SX_CHUNK_SIZE);
-				memcpy_toio    ((char *) (board->base + offset + i), tmp, 
+				memcpy_toio    ((char *) (board->base2 + offset + i), tmp, 
 				                (i+SX_CHUNK_SIZE>nbytes)?nbytes-i:SX_CHUNK_SIZE);
 			}
 
@@ -1824,11 +1751,12 @@ static int sx_fw_ioctl (struct inode *inode, struct file *filp,
 	case SXIO_GETDEBUG:
 		rc = sx_debug;
 		break;
-	case SXIO_SETGSDEBUG:
-		gs_debug = arg;
-		break;
 	case SXIO_GETGSDEBUG:
-		rc = gs_debug;
+	case SXIO_SETGSDEBUG:
+		rc = -EINVAL;
+		break;
+	case SXIO_GETNPORTS:
+		rc = sx_nports;
 		break;
 	default:
 		printk (KERN_WARNING "Unknown ioctl on firmware device (%x).\n", cmd);
@@ -1886,6 +1814,7 @@ static int sx_ioctl (struct tty_struct * tty, struct file * filp,
 			Get_user(ival, (unsigned int *) arg);
 			sx_setsignals(port, ((ival & TIOCM_DTR) ? 1 : -1),
 			                     ((ival & TIOCM_RTS) ? 1 : -1));
+			sx_reconfigure_port(port);
 		}
 		break;
 	case TIOCMBIC:
@@ -1894,6 +1823,7 @@ static int sx_ioctl (struct tty_struct * tty, struct file * filp,
 			Get_user(ival, (unsigned int *) arg);
 			sx_setsignals(port, ((ival & TIOCM_DTR) ? 0 : -1),
 			                     ((ival & TIOCM_RTS) ? 0 : -1));
+			sx_reconfigure_port(port);
 		}
 		break;
 	case TIOCMSET:
@@ -1902,6 +1832,7 @@ static int sx_ioctl (struct tty_struct * tty, struct file * filp,
 			Get_user(ival, (unsigned int *) arg);
 			sx_setsignals(port, ((ival & TIOCM_DTR) ? 1 : 0),
 			                     ((ival & TIOCM_RTS) ? 1 : 0));
+			sx_reconfigure_port(port);
 		}
 		break;
 
@@ -1980,13 +1911,17 @@ static int sx_init_board (struct sx_board *board)
 
 	board->flags |= SX_BOARD_INITIALIZED;
 
+	if (read_sx_byte (board, 0))
+		/* CF boards may need this. */
+		write_sx_byte(board,0, 0);
+
 	/* This resets the processor again, to make sure it didn't do any
 	   foolish things while we were downloading the image */
 	if (!sx_reset (board))
 		return 0;
 
 	sx_start_board (board);
-
+	udelay (10);
 	if (!sx_busy_wait_neq (board, 0, 0xff, 0)) {
 		printk (KERN_ERR "sx: Ooops. Board won't initialize.\n");
 		return 0;
@@ -2050,7 +1985,8 @@ static int sx_init_board (struct sx_board *board)
 			chans=0;
 			break;
 		}
-		if (IS_SI_BOARD(board) && (mod_compat_type(type) == 4)) {
+		if ((IS_EISA_BOARD(board) || 
+		     IS_SI_BOARD(board)) && (mod_compat_type(type) == 4)) {
 			printk (KERN_ERR "sx: This is an invalid configuration.\n"
 			        "Don't use SXDCs on an SI/XIO adapter.\n");
 			chans=0;
@@ -2127,9 +2063,9 @@ static int sx_init_board (struct sx_board *board)
 }
 
 
-void printheader(void)
+static void printheader(void)
 {
-	static int header_printed = 0;
+	static int header_printed;
 
 	if (!header_printed) {
 		printk (KERN_INFO "Specialix SX driver "
@@ -2140,58 +2076,62 @@ void printheader(void)
 }
 
 
-int probe_sx (struct sx_board *board)
+static int probe_sx (struct sx_board *board)
 {
 	struct vpd_prom vpdp;
 	char *p;
 	int i;
 
 	func_enter();
-	sx_dprintk (SX_DEBUG_PROBE, "Going to verify vpd prom at %x.\n", 
-	            board->base + SX_VPD_ROM);
 
-	if (sx_debug & SX_DEBUG_PROBE)
-		my_hd ((char *)(board->base + SX_VPD_ROM), 0x40);
+	if (!IS_CF_BOARD (board)) {    
+		sx_dprintk (SX_DEBUG_PROBE, "Going to verify vpd prom at %x.\n", 
+		            board->base + SX_VPD_ROM);
 
-	p = (char *) &vpdp;
-	for (i=0;i< sizeof (struct vpd_prom);i++)
-		*p++ = read_sx_byte (board, SX_VPD_ROM + i*2);
+		if (sx_debug & SX_DEBUG_PROBE)
+			my_hd ((char *)(board->base + SX_VPD_ROM), 0x40);
 
-	if (sx_debug & SX_DEBUG_PROBE)
-		my_hd ((char *)&vpdp, 0x20);
+		p = (char *) &vpdp;
+		for (i=0;i< sizeof (struct vpd_prom);i++)
+			*p++ = read_sx_byte (board, SX_VPD_ROM + i*2);
 
-	sx_dprintk (SX_DEBUG_PROBE, "checking identifier...\n");
+		if (sx_debug & SX_DEBUG_PROBE)
+			my_hd ((char *)&vpdp, 0x20);
 
-	if (strncmp (vpdp.identifier, SX_VPD_IDENT_STRING, 16) != 0) {
-		sx_dprintk (SX_DEBUG_PROBE, "Got non-SX identifier: '%s'\n", 
-		            vpdp.identifier); 
-		return 0;
+		sx_dprintk (SX_DEBUG_PROBE, "checking identifier...\n");
+
+		if (strncmp (vpdp.identifier, SX_VPD_IDENT_STRING, 16) != 0) {
+			sx_dprintk (SX_DEBUG_PROBE, "Got non-SX identifier: '%s'\n", 
+			            vpdp.identifier); 
+			return 0;
+		}
 	}
 
 	printheader ();
 
-	printk (KERN_DEBUG "sx: Found an SX board at %x\n", board->hw_base);
-	printk (KERN_DEBUG "sx: hw_rev: %d, assembly level: %d, uniq ID:%08x, ", 
-	        vpdp.hwrev, vpdp.hwass, vpdp.uniqid);
-	printk (           "Manufactured: %d/%d\n", 
-	        1970 + vpdp.myear, vpdp.mweek);
+	if (!IS_CF_BOARD (board)) {
+		printk (KERN_DEBUG "sx: Found an SX board at %x\n", board->hw_base);
+		printk (KERN_DEBUG "sx: hw_rev: %d, assembly level: %d, uniq ID:%08x, ", 
+		        vpdp.hwrev, vpdp.hwass, vpdp.uniqid);
+		printk (           "Manufactured: %d/%d\n", 
+		        1970 + vpdp.myear, vpdp.mweek);
 
 
-	if ((((vpdp.uniqid >> 24) & SX_UNIQUEID_MASK) != SX_PCI_UNIQUEID1) &&
-	    (((vpdp.uniqid >> 24) & SX_UNIQUEID_MASK) != SX_ISA_UNIQUEID1)) {
-		/* This might be a bit harsh. This was the primary reason the
-		   SX/ISA card didn't work at first... */
-		printk (KERN_ERR "sx: Hmm. Not an SX/PCI or SX/ISA card. Sorry: giving up.\n");
-		return (0);
-	}
+		if ((((vpdp.uniqid >> 24) & SX_UNIQUEID_MASK) != SX_PCI_UNIQUEID1) &&
+		    (((vpdp.uniqid >> 24) & SX_UNIQUEID_MASK) != SX_ISA_UNIQUEID1)) {
+			/* This might be a bit harsh. This was the primary reason the
+			   SX/ISA card didn't work at first... */
+			printk (KERN_ERR "sx: Hmm. Not an SX/PCI or SX/ISA card. Sorry: giving up.\n");
+			return (0);
+		}
 
-	if (((vpdp.uniqid >> 24) & SX_UNIQUEID_MASK) == SX_ISA_UNIQUEID1) {
-		if (board->base & 0x8000) {
-			printk (KERN_WARNING "sx: Warning: There may be hardware problems with the card at %x.\n", board->base);
-			printk (KERN_WARNING "sx: Read sx.txt for more info.\n");
+		if (((vpdp.uniqid >> 24) & SX_UNIQUEID_MASK) == SX_ISA_UNIQUEID1) {
+			if (board->base & 0x8000) {
+				printk (KERN_WARNING "sx: Warning: There may be hardware problems with the card at %x.\n", board->base);
+				printk (KERN_WARNING "sx: Read sx.txt for more info.\n");
+			}
 		}
 	}
-
 
 	board->nports = -1;
 
@@ -2214,7 +2154,7 @@ int probe_sx (struct sx_board *board)
    card. 0xe0000 and 0xf0000 are taken by the BIOS. That only leaves 
    0xc0000, 0xc8000, 0xd0000 and 0xd8000 . */
 
-int probe_si (struct sx_board *board)
+static int probe_si (struct sx_board *board)
 {
 	int i;
 
@@ -2225,9 +2165,11 @@ int probe_si (struct sx_board *board)
 	if (sx_debug & SX_DEBUG_PROBE)
 		my_hd ((char *)(board->base + SI2_ISA_ID_BASE), 0x8);
 
-	for (i=0;i<8;i++) {
-		if ((read_sx_byte (board, SI2_ISA_ID_BASE+7-i) & 7) != i) {
-			return 0;
+	if (!IS_EISA_BOARD(board)) {
+		for (i=0;i<8;i++) {
+			if ((read_sx_byte (board, SI2_ISA_ID_BASE+7-i) & 7) != i) {
+				return 0;
+			}
 		}
 	}
 
@@ -2312,7 +2254,7 @@ static int sx_init_drivers(void)
 }
 
 
-void * ckmalloc (int size)
+static void * ckmalloc (int size)
 {
 	void *p;
 
@@ -2372,6 +2314,12 @@ static int sx_init_portstructs (int nboards, int nports)
 #ifdef NEW_WRITE_LOCKING
 			port->gs.port_write_sem = MUTEX;
 #endif
+			/*
+			 * Initializing wait queue
+			 */
+			init_waitqueue_head(&port->gs.open_wait);
+			init_waitqueue_head(&port->gs.close_wait); 		
+			
 			port++;
 		}
 	}
@@ -2413,8 +2361,7 @@ static int sx_init_portstructs (int nboards, int nports)
 	return 0;
 }
 
-
-static void sx_release_drivers(void)
+static void __exit sx_release_drivers(void)
 {
 	func_enter();
 	tty_unregister_driver(&sx_driver);
@@ -2442,14 +2389,14 @@ static void sx_release_drivers(void)
    EEprom.  As the bit is read/write for the CPU, we can fix it here,
    if we detect that it isn't set correctly. -- REW */
 
-void fix_sx_pci (PDEV, struct sx_board *board)
+static void fix_sx_pci (PDEV, struct sx_board *board)
 {
 	unsigned int hwbase;
 	unsigned long rebase;
 	unsigned int t;
 
 #define CNTRL_REG_OFFSET        0x50
-#define CNTRL_REG_GOODVALUE     0x00260000
+#define CNTRL_REG_GOODVALUE     0x18260000
 
 	pci_read_config_dword(pdev, PCI_BASE_ADDRESS_0, &hwbase);
 	hwbase &= PCI_BASE_ADDRESS_MEM_MASK;
@@ -2464,14 +2411,11 @@ void fix_sx_pci (PDEV, struct sx_board *board)
 #endif
 
 
-#ifdef MODULE
-#define sx_init init_module
-#endif
-
-int sx_init(void) 
+static int __init sx_init(void) 
 {
 	int i;
 	int found = 0;
+	int eisa_slot;
 	struct sx_board *board;
 
 #ifdef CONFIG_PCI
@@ -2500,6 +2444,8 @@ int sx_init(void)
 		while ((pdev = pci_find_device (PCI_VENDOR_ID_SPECIALIX, 
 		                                PCI_DEVICE_ID_SPECIALIX_SX_XIO_IO8, 
 			                              pdev))) {
+			if (pci_enable_device(pdev))
+				continue;
 #else
 			for (i=0;i< SX_NBOARDS;i++) {
 				if (pcibios_find_device (PCI_VENDOR_ID_SPECIALIX, 
@@ -2518,22 +2464,37 @@ int sx_init(void)
 			tshort = (tint >> 16) & 0xffff;
 			sx_dprintk (SX_DEBUG_PROBE, "Got a specialix card: %x.\n", tint);
 			/* sx_dprintk (SX_DEBUG_PROBE, "pdev = %d/%d	(%x)\n", pdev, tint); */ 
-			if (tshort != 0x0200) {
+			if ((tshort != 0x0200) && (tshort != 0x0300)) {
 				sx_dprintk (SX_DEBUG_PROBE, "But it's not an SX card (%d)...\n", 
 				            tshort);
 				continue;
 			}
 			board = &boards[found];
 
-			pci_read_config_dword(pdev, PCI_BASE_ADDRESS_2, &tint);
-			board->hw_base = tint & PCI_BASE_ADDRESS_MEM_MASK;
-			board->base = (ulong) ioremap(board->hw_base, SX_WINDOW_LEN);
-			board->irq = get_irq (pdev);
 			board->flags &= ~SX_BOARD_TYPE;
-			board->flags |=  SX_PCI_BOARD;
+			board->flags |= (tshort == 0x200)?SX_PCI_BOARD:
+			                                  SX_CFPCI_BOARD;
 
-			sx_dprintk (SX_DEBUG_PROBE, "Got a specialix card: %x/%x(%d).\n", 
-			            tint, boards[found].base, board->irq);
+			/* CF boards use base address 3.... */
+			if (IS_CF_BOARD (board))
+				board->hw_base = pci_resource_start (pdev, 3);
+			else
+				board->hw_base = pci_resource_start (pdev, 2);
+			board->base2 = 
+			board->base = (ulong) ioremap(board->hw_base, WINDOW_LEN (board));
+			if (!board->base) {
+				printk(KERN_ERR "ioremap failed\n");
+				/* XXX handle error */
+			}
+
+			/* Most of the stuff on the CF board is offset by
+			   0x18000 ....  */
+			if (IS_CF_BOARD (board)) board->base += 0x18000;
+
+			board->irq = get_irq (pdev);
+
+			sx_dprintk (SX_DEBUG_PROBE, "Got a specialix card: %x/%x(%d) %x.\n", 
+			            tint, boards[found].base, board->irq, board->flags);
 
 			if (probe_sx (board)) {
 				found++;
@@ -2547,6 +2508,7 @@ int sx_init(void)
 	for (i=0;i<NR_SX_ADDRS;i++) {
 		board = &boards[found];
 		board->hw_base = sx_probe_addrs[i];
+		board->base2 =
 		board->base = (ulong) ioremap(board->hw_base, SX_WINDOW_LEN);
 		board->flags &= ~SX_BOARD_TYPE;
 		board->flags |=	SX_ISA_BOARD;
@@ -2562,6 +2524,7 @@ int sx_init(void)
 	for (i=0;i<NR_SI_ADDRS;i++) {
 		board = &boards[found];
 		board->hw_base = si_probe_addrs[i];
+		board->base2 =
 		board->base = (ulong) ioremap(board->hw_base, SI2_ISA_WINDOW_LEN);
 		board->flags &= ~SX_BOARD_TYPE;
 		board->flags |=  SI_ISA_BOARD;
@@ -2574,6 +2537,34 @@ int sx_init(void)
 		}
 	}
 
+        sx_dprintk(SX_DEBUG_PROBE, "Probing for EISA cards\n");
+        for(eisa_slot=0x1000; eisa_slot<0x10000; eisa_slot+=0x1000)
+        {
+                if((inb(eisa_slot+0xc80)==0x4d) &&
+                   (inb(eisa_slot+0xc81)==0x98))
+                {
+			sx_dprintk(SX_DEBUG_PROBE, "%s : Signature found in EISA slot %d, Product %d Rev %d\n",
+			                        "XIO", (eisa_slot>>12), inb(eisa_slot+0xc82), inb(eisa_slot+0xc83));
+
+			board = &boards[found];
+			board->eisa_base = eisa_slot;
+			board->flags &= ~SX_BOARD_TYPE;
+			board->flags |= SI_EISA_BOARD;
+
+			board->hw_base = (((inb(0xc01+eisa_slot) << 8) + inb(0xc00+eisa_slot)) << 16);
+			board->base2 =
+			board->base = (ulong) ioremap(board->hw_base, SI2_EISA_WINDOW_LEN);
+
+			sx_dprintk(SX_DEBUG_PROBE, "IO hw_base address: %x\n", board->hw_base);
+			sx_dprintk(SX_DEBUG_PROBE, "base: %x\n", board->base);
+			board->irq = inb(board->eisa_base+0xc02)>>4; 
+			sx_dprintk(SX_DEBUG_PROBE, "IRQ: %d\n", board->irq);
+			
+			probe_si(board);
+
+			found++;
+		}
+	}
 	if (found) {
 		printk (KERN_INFO "sx: total of %d boards detected.\n", found);
 
@@ -2588,8 +2579,7 @@ int sx_init(void)
 }
 
 
-
-void cleanup_module(void)
+static void __exit sx_exit (void)
 {
 	int i; 
 	struct sx_board *board;
@@ -2623,51 +2613,6 @@ void cleanup_module(void)
 	func_exit();
 }
 
+module_init(sx_init);
+module_exit(sx_exit);
 
-#ifdef DEBUG
-void my_hd (unsigned char *addr, int len)
-{
-	int i, j, ch;
-
-	for (i=0;i<len;i+=16) {
-		printk ("%08x ", (int) addr+i);
-		for (j=0;j<16;j++) {
-			printk ("%02x %s", addr[j+i], (j==7)?" ":"");
-		}
-		for (j=0;j<16;j++) {
-			ch = addr[j+i];
-			printk ("%c", (ch < 0x20)?'.':((ch > 0x7f)?'.':ch));
-		}
-		printk ("\n");
-	}
-}
-#endif
-
-#ifdef MODULE
-#undef func_enter
-#undef func_exit
-
-#include "generic_serial.c"
-#endif
-
-
-/*
- * Anybody who knows why this doesn't work for me, please tell me -- REW.
- * Snatched from scsi.c (fixed one spelling error):
- * Overrides for Emacs so that we follow Linus' tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-indent-level: 4
- * c-brace-imaginary-offset: 0
- * c-brace-offset: -4
- * c-argdecl-indent: 4
- * c-label-offset: -4
- * c-continued-statement-offset: 4
- * c-continued-brace-offset: 0
- * indent-tabs-mode: nil
- * tab-width: 8
- * End:
- */

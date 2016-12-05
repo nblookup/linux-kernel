@@ -70,7 +70,6 @@ struct teql_master
 	struct net_device dev;
 	struct Qdisc *slaves;
 	struct net_device_stats stats;
-	char name[IFNAMSIZ];
 };
 
 struct teql_sched_data
@@ -243,9 +242,9 @@ __teql_resolve(struct sk_buff *skb, struct sk_buff *skb_res, struct net_device *
 	    memcmp(n->primary_key, mn->primary_key, mn->tbl->key_len) == 0) {
 		atomic_inc(&n->refcnt);
 	} else {
-		n = __neigh_lookup(mn->tbl, mn->primary_key, dev, 1);
-		if (n == NULL)
-			return -ENOBUFS;
+		n = __neigh_lookup_errno(mn->tbl, mn->primary_key, dev);
+		if (IS_ERR(n))
+			return PTR_ERR(n);
 	}
 	if (neigh_event_send(n, skb_res) == 0) {
 		int err;
@@ -469,11 +468,10 @@ int __init teql_init(void)
 	rtnl_lock();
 
 	the_master.dev.priv = (void*)&the_master;
-	the_master.dev.name = (void*)&the_master.name;
 	err = dev_alloc_name(&the_master.dev, "teql%d");
 	if (err < 0)
 		return err;
-	memcpy(the_master.qops.id, the_master.name, IFNAMSIZ);
+	memcpy(the_master.qops.id, the_master.dev.name, IFNAMSIZ);
 	the_master.dev.init = teql_master_init;
 
 	err = register_netdevice(&the_master.dev);

@@ -7,9 +7,12 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1998 Paul Mackerras.
+ * Copyright (C) 1998 Paul Mackerras &
+ *                    Ben. Herrenschmidt.
+ *
  * 
  */
+#ifdef __KERNEL__
 #ifndef __ASM_PPC_FEATURE_H
 #define __ASM_PPC_FEATURE_H
 
@@ -32,8 +35,8 @@ enum system_feature {
 	FEATURE_Mediabay_reset,
 	FEATURE_Mediabay_power,
 	FEATURE_Mediabay_PCI_enable,
-	FEATURE_Mediabay_IDE_enable,	/* Also IDE 1 */
-	FEATURE_Mediabay_IDE_reset,	/* Also IDE 1 */
+	FEATURE_IDE1_enable,		/* MediaBay IDE */
+	FEATURE_IDE1_reset,		/* MediaBay IDE */
 	FEATURE_Mediabay_floppy_enable,
 	FEATURE_BMac_reset,
 	FEATURE_BMac_IO_enable,
@@ -43,6 +46,9 @@ enum system_feature {
 	FEATURE_Sound_CLK_enable,
 	FEATURE_IDE2_enable,
 	FEATURE_IDE2_reset,
+	FEATURE_Mediabay_IDE_switch,	/* MB IDE bus switch */
+	FEATURE_Mediabay_content,	/* MB content indicator enable */
+	FEATURE_Airport_reset,		/* Is it actually a reset ? */
 	FEATURE_last,
 };
 
@@ -68,4 +74,24 @@ extern int	feature_clear(struct device_node* device, enum system_feature f);
 extern void	feature_init(void);
 
 
+/*
+ * Additional functions related to Core99 machines
+ */
+extern void	feature_set_gmac_power(struct device_node* device, int power);
+
+	/* use constants in KeyLargo.h for the reset parameter */
+extern void	feature_set_gmac_phy_reset(struct device_node* device, int reset);
+
+extern void	feature_set_usb_power(struct device_node* device, int power);
+
+extern void 	feature_set_firewire_power(struct device_node* device, int power);
+
+/*
+ * Sleep related functions. At term, they should be high-priority notifiers
+ */
+extern void	feature_prepare_for_sleep(void);
+
+extern void	feature_wake_up(void);
+
 #endif /* __ASM_PPC_FEATURE_H */
+#endif /* __KERNEL__ */

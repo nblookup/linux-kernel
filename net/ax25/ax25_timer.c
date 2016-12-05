@@ -26,7 +26,6 @@
  */
 
 #include <linux/config.h>
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -140,12 +139,12 @@ void ax25_stop_idletimer(ax25_cb *ax25)
 
 int ax25_t1timer_running(ax25_cb *ax25)
 {
-	return (ax25->t1timer.prev != NULL || ax25->t1timer.next != NULL);
+	return timer_pending(&ax25->t1timer);
 }
 
 unsigned long ax25_display_timer(struct timer_list *timer)
 {
-	if (timer->prev == NULL && timer->next == NULL)
+	if (!timer_pending(timer))
 		return 0;
 
 	return timer->expires - jiffies;
@@ -255,5 +254,3 @@ static void ax25_idletimer_expiry(unsigned long param)
 #endif
 	}
 }
-
-#endif

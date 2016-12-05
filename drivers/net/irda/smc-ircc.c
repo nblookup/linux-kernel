@@ -7,7 +7,7 @@
  * Author:        Thomas Davis (tadavis@jps.net)
  * Created at:    
  * Modified at:   Tue Feb 22 10:05:06 2000
- * Modified by:   Dag Brattli <dagb@cs.uit.no>
+ * Modified by:   Dag Brattli <dag@brattli.net>
  * 
  *     Copyright (c) 1999-2000 Dag Brattli
  *     Copyright (c) 1998-1999 Thomas Davis, 
@@ -83,7 +83,9 @@ static int  ircc_hard_xmit(struct sk_buff *skb, struct net_device *dev);
 static void ircc_dma_xmit(struct ircc_cb *self, int iobase, int bofs);
 static void ircc_change_speed(void *priv, __u32 speed);
 static void ircc_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+#if 0 /* unused */
 static int  ircc_is_receiving(struct ircc_cb *self);
+#endif /* unused */
 
 static int  ircc_net_open(struct net_device *dev);
 static int  ircc_net_close(struct net_device *dev);
@@ -93,6 +95,7 @@ static int  ircc_pmproc(struct pm_dev *dev, pm_request_t rqst, void *data);
 static smc_chip_t chips[] =
 {
 	{ "FDC37C669", 0x55, 0x55, 0x0d, 0x04, ircc_probe_69 },
+	{ "FDC37N769", 0x55, 0x55, 0x0d, 0x28, ircc_probe_69 },
 	{ "FDC37N869", 0x55, 0x00, 0x0d, 0x29, ircc_probe_69 },
 	{ "FDC37N958", 0x55, 0x55, 0x20, 0x09, ircc_probe_58 },
 	{ NULL }
@@ -250,6 +253,7 @@ static int ircc_open(int i, unsigned int fir_base, unsigned int sir_base)
 		IR_115200|IR_576000|IR_1152000|(IR_4000000 << 8);
 
 	irport->qos.min_turn_time.bits = 0x07;
+	irport->qos.window_size.bits = 0x01;
 	irda_qos_bits_to_value(&irport->qos);
 
 	irport->flags = IFF_FIR|IFF_MIR|IFF_SIR|IFF_DMA|IFF_PIO;
@@ -506,6 +510,10 @@ static void ircc_change_speed(void *priv, __u32 speed)
 	outb(0x00, iobase+IRCC_MASTER);
 
 	switch (speed) {
+	default:
+		IRDA_DEBUG(0, __FUNCTION__ "(), unknown baud rate of %d\n", 
+			   speed);
+		/* FALLTHROUGH */
 	case 9600:
 	case 19200:
 	case 38400:
@@ -533,10 +541,6 @@ static void ircc_change_speed(void *priv, __u32 speed)
 		fast = IRCC_LCR_A_FAST;
 		IRDA_DEBUG(0, __FUNCTION__ "(), handling baud of 4000000\n");
 		break;
-	default:
-		IRDA_DEBUG(0, __FUNCTION__ "(), unknown baud rate of %d\n", 
-			   speed);
-		return;
 	}
 	
 	register_bank(iobase, 0);
@@ -587,6 +591,8 @@ static void ircc_change_speed(void *priv, __u32 speed)
 	
 	register_bank(iobase, 0);
 	outb(fast, iobase+IRCC_LCR_A);
+	
+	netif_start_queue(dev);
 }
 
 /*
@@ -610,13 +616,19 @@ static int ircc_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	iobase = self->io.fir_base;
 
-	spin_lock_irqsave(&self->lock, flags);
+	netif_stop_queue(dev);
 
 	/* Check if we need to change the speed after this frame */
-	if ((speed = irda_get_speed(skb)) != self->io.speed)
-		self->new_speed = speed;
+	if ((speed = irda_get_speed(skb)) != self->io.speed) {
+		/* Check for empty frame */
+		if (!skb->len) {
+			ircc_change_speed(self, speed); 
+			return 0;
+		} else
+			self->new_speed = speed;
+	}
 	
-	netif_stop_queue(dev);
+	spin_lock_irqsave(&self->lock, flags);
 
 	memcpy(self->tx_buff.head, skb->data, skb->len);
 
@@ -628,7 +640,7 @@ static int ircc_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 		int bofs;
 
 		/* 
-		 * Compute who many BOFS (STA or PA's) we need to waste the
+		 * Compute how many BOFs (STA or PA's) we need to waste the
 		 * min turn time given the speed of the link.
 		 */
 		bofs = mtt * (self->io.speed / 1000) / 8000;
@@ -640,7 +652,6 @@ static int ircc_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 		/* Transmit frame */
 		ircc_dma_xmit(self, iobase, 0);
 	}
-	
 	spin_unlock_irqrestore(&self->lock, flags);
 	dev_kfree_skb(skb);
 
@@ -757,6 +768,7 @@ static int ircc_dma_receive(struct ircc_cb *self, int iobase)
 
 	setup_dma(self->io.dma, self->rx_buff.data, self->rx_buff.truesize, 
 		  DMA_RX_MODE);
+
 	/* Set max Rx frame size */
 	register_bank(iobase, 4);
 	outb((2050 >> 8) & 0x0f, iobase+IRCC_RX_SIZE_HI);
@@ -785,11 +797,9 @@ static int ircc_dma_receive(struct ircc_cb *self, int iobase)
  *
  *    Finished with receiving frames
  *
- *    
  */
 static void ircc_dma_receive_complete(struct ircc_cb *self, int iobase)
 {
-	unsigned long flags;
 	struct sk_buff *skb;
 	int len, msgcnt;
 
@@ -813,7 +823,7 @@ static void ircc_dma_receive_complete(struct ircc_cb *self, int iobase)
 	else
 		len -= 4;
 
-	if ((len < 2) && (len > 2050)) {
+	if ((len < 2) || (len > 2050)) {
 		WARNING(__FUNCTION__ "(), bogus len=%d\n", len);
 		return;
 	}
@@ -893,6 +903,7 @@ static void ircc_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	spin_unlock(&self->lock);
 }
 
+#if 0 /* unused */
 /*
  * Function ircc_is_receiving (self)
  *
@@ -915,6 +926,7 @@ static int ircc_is_receiving(struct ircc_cb *self)
 	
 	return status;
 }
+#endif /* unused */
 
 /*
  * Function ircc_net_open (dev)
@@ -990,8 +1002,6 @@ static int ircc_net_close(struct net_device *dev)
 
 static void ircc_suspend(struct ircc_cb *self)
 {
-	int i = 10;
-
 	MESSAGE("%s, Suspending\n", driver_name);
 
 	if (self->io.suspended)
@@ -1004,7 +1014,6 @@ static void ircc_suspend(struct ircc_cb *self)
 
 static void ircc_wakeup(struct ircc_cb *self)
 {
-	struct net_device *dev = self->netdev;
 	unsigned long flags;
 
 	if (!self->io.suspended)
@@ -1039,7 +1048,9 @@ static int ircc_pmproc(struct pm_dev *dev, pm_request_t rqst, void *data)
 MODULE_AUTHOR("Thomas Davis <tadavis@jps.net>");
 MODULE_DESCRIPTION("SMC IrCC controller driver");
 MODULE_PARM(ircc_dma, "1i");
+MODULE_PARM_DESC(ircc_dma, "DMA channel");
 MODULE_PARM(ircc_irq, "1i");
+MODULE_PARM_DESC(ircc_irq, "IRQ line");
 
 int init_module(void)
 {

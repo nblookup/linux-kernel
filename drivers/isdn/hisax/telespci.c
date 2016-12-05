@@ -1,47 +1,15 @@
-/* $Id: telespci.c,v 2.11 1999/12/23 15:09:32 keil Exp $
-
+/* $Id: telespci.c,v 2.16.6.2 2000/11/29 16:00:14 kai Exp $
+ *
  * telespci.c     low level stuff for Teles PCI isdn cards
  *
  * Author       Ton van Rosmalen 
  *              Karsten Keil (keil@isdn4linux.de)
  *
- *
- * $Log: telespci.c,v $
- * Revision 2.11  1999/12/23 15:09:32  keil
- * change email
- *
- * Revision 2.10  1999/11/15 14:20:05  keil
- * 64Bit compatibility
- *
- * Revision 2.9  1999/08/11 21:01:34  keil
- * new PCI codefix
- *
- * Revision 2.8  1999/08/10 16:02:10  calle
- * struct pci_dev changed in 2.3.13. Made the necessary changes.
- *
- * Revision 2.7  1999/07/12 21:05:34  keil
- * fix race in IRQ handling
- * added watchdog for lost IRQs
- *
- * Revision 2.6  1999/07/01 08:12:15  keil
- * Common HiSax version for 2.0, 2.1, 2.2 and 2.3 kernel
- *
- * Revision 2.5  1998/11/15 23:55:28  keil
- * changes from 2.0
- *
- * Revision 2.4  1998/10/05 09:38:08  keil
- * Fix register addressing
- *
- * Revision 2.3  1998/05/25 12:58:26  keil
- * HiSax golden code from certification, Don't use !!!
- * No leased lines, no X75, but many changes.
- *
- * Revision 2.1  1998/04/15 16:38:23  keil
- * Add S0Box and Teles PCI support
- *
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
 #define __NO_VERSION__
+#include <linux/init.h>
 #include <linux/config.h>
 #include "hisax.h"
 #include "isac.h"
@@ -50,7 +18,7 @@
 #include <linux/pci.h>
 
 extern const char *CardType[];
-const char *telespci_revision = "$Revision: 2.11 $";
+const char *telespci_revision = "$Revision: 2.16.6.2 $";
 
 #define ZORAN_PO_RQ_PEN	0x02000000
 #define ZORAN_PO_WR	0x00800000
@@ -307,14 +275,17 @@ TelesPCI_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-static 	struct pci_dev *dev_tel __initdata = NULL;
+static struct pci_dev *dev_tel __initdata = NULL;
 
-__initfunc(int
-setup_telespci(struct IsdnCard *card))
+int __init
+setup_telespci(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];
 
+#ifdef __BIG_ENDIAN
+#error "not running on big endian machines now"
+#endif
 	strcpy(tmp, telespci_revision);
 	printk(KERN_INFO "HiSax: Teles/PCI driver Rev. %s\n", HiSax_getrev(tmp));
 	if (cs->typ != ISDN_CTYPE_TELESPCI)
@@ -324,16 +295,18 @@ setup_telespci(struct IsdnCard *card))
 		printk(KERN_ERR "TelesPCI: no PCI bus present\n");
 		return(0);
 	}
-	if ((dev_tel = pci_find_device (0x11DE, 0x6120, dev_tel))) {
+	if ((dev_tel = pci_find_device (PCI_VENDOR_ID_ZORAN, PCI_DEVICE_ID_ZORAN_36120, dev_tel))) {
+		if (pci_enable_device(dev_tel))
+			return(0);
 		cs->irq = dev_tel->irq;
 		if (!cs->irq) {
 			printk(KERN_WARNING "Teles: No IRQ for PCI card found\n");
 			return(0);
 		}
-		cs->hw.teles0.membase = (u_long) ioremap(dev_tel->resource[ 0].start,
+		cs->hw.teles0.membase = (u_long) ioremap(pci_resource_start(dev_tel, 0),
 			PAGE_SIZE);
 		printk(KERN_INFO "Found: Zoran, base-address: 0x%lx, irq: 0x%x\n",
-			dev_tel->resource[ 0].start, dev_tel->irq);
+			pci_resource_start(dev_tel, 0), dev_tel->irq);
 	} else {
 		printk(KERN_WARNING "TelesPCI: No PCI card found\n");
 		return(0);

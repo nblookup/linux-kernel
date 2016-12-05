@@ -2,43 +2,14 @@
  * Xircom CreditCard Ethernet Adapter IIps driver
  * Xircom Realport 10/100 (RE-100) driver 
  *
- * This driver originally was made by Werner Koch. Since the driver was left
- * unmaintained for some time, there have been some improvements and changes
- * since. These include supporting some of the "Realport" cards and develop-
- * ing enhancements to support the new ones.
- * It is made for CE2, CEM28, CEM33, CE33 and 
- * CEM56 cards. The CEM56 cards work both with their modem and ethernet
- * interface. The RealPort 10/100 Modem and similar cards are supported but
- * with some bugs which are being corrected as they are detected. 
+ * This driver supports various Xircom CreditCard Ethernet adapters
+ * including the CE2, CE IIps, RE-10, CEM28, CEM33, CE33, CEM56,
+ * CE3-100, CE3B, RE-100, REM10BT, and REM56G-100.
  * 
- * Code revised and maintained by Allan Baker Ortegon
- * al527261@prodigy.net.mx
  * Written originally by Werner Koch based on David Hinds' skeleton of the
- * PCMCIA driver. The code has been modified as to make the newer cards
- * available.
+ * PCMCIA driver.
  *
- * The latest code for the driver, information on the development project
- * for the Xircom RealPort and CE cards for the PCMCIA driver, and other
- * related material, can be found at the following URL, which is underway:
- * 
- * "http://xirc2ps.linuxbox.com/index.html"
- *
- * Any bugs regarding this driver, please send them to:
- * alanyuu@linuxbox.com
- *
- * The driver is still evolving and there are many cards which will benefit
- * from having alpha testers. If you have a particular card and would like
- * to be involved in this ongoing effort, please send mail to the maintainer.
- * 
- * Special thanks to David Hinds, to Xircom for the specifications and their
- * software development kit, and all others who may have colaborated in the
- * development of the driver: Koen Van Herck (Koen.Van.Herck@xircom.com),
- * 4PC GmbH Duesseldorf, David Luger, et al.
- * 
- *
- ************************************************************************
  * Copyright (c) 1997,1998 Werner Koch (dd9jn)
- * Copyright (c) 1999 Allan Baker Ortegon 
  *
  * This driver is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -87,9 +58,6 @@
  * OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-/* Enable the bug fix for CEM56 to use modem and ethernet simultaneously */
-#define CEM56_FIX
-
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
@@ -118,15 +86,9 @@
 #include <pcmcia/cisreg.h>
 #include <pcmcia/ciscode.h>
 
-#ifndef MANFID_XIRCOM
-  #define MANFID_XIRCOM 	   0x0105
-#endif
 #ifndef MANFID_COMPAQ
   #define MANFID_COMPAQ 	   0x0138
   #define MANFID_COMPAQ2	   0x0183  /* is this correct? */
-#endif
-#ifndef MANFID_INTEL
-  #define MANFID_INTEL		   0x0089
 #endif
 
 #include <pcmcia/ds.h>
@@ -285,25 +247,16 @@ static char *version =
 /*====================================================================*/
 
 /* Parameters that can be set with 'insmod' */
-static int if_port = 0;
-MODULE_PARM(if_port, "i");
 
-/* Bit map of interrupts to choose from */
-/* This means pick from 15, 14, 12, 11, 10, 9, 7, 5, 4, and 3 */
-static u_long irq_mask = 0xdeb8;
-MODULE_PARM(irq_mask, "i");
+#define INT_MODULE_PARM(n, v) static int n = v; MODULE_PARM(n, "i")
 
 static int irq_list[4] = { -1 };
 MODULE_PARM(irq_list, "1-4i");
-
-static int do_sound = 1;
-MODULE_PARM(do_sound, "i");
-
-static int card_type = 0;
-MODULE_PARM(card_type, "i");  /* dummy, not used anymore */
-
-static int lockup_hack = 0;
-MODULE_PARM(lockup_hack, "i");  /* anti lockup hack */
+INT_MODULE_PARM(irq_mask,	0xdeb8);
+INT_MODULE_PARM(if_port,	0);
+INT_MODULE_PARM(full_duplex,	0);
+INT_MODULE_PARM(do_sound, 	1);
+INT_MODULE_PARM(lockup_hack,	0);  /* anti lockup hack */
 
 /*====================================================================*/
 
@@ -398,7 +351,7 @@ typedef struct local_info_t {
     dev_link_t link;
     struct net_device dev;
     dev_node_t node;
-    struct enet_statistics stats;
+    struct net_device_stats stats;
     int card_type;
     int probe_port;
     int silicon; /* silicon revision. 0=old CE2, 1=Scipper, 4=Mohawk */
@@ -407,20 +360,18 @@ typedef struct local_info_t {
     int new_mii; /* has full 10baseT/100baseT MII */
     int modem;	 /* is a multi function card (i.e with a modem) */
     caddr_t dingo_ccr; /* only used for CEM56 cards */
-    int suspended;
     unsigned last_ptr_value; /* last packets transmitted value */
     const char *manf_str;
-    spinlock_t lock;
 } local_info_t;
 
 /****************
  * Some more prototypes
  */
 static int do_start_xmit(struct sk_buff *skb, struct net_device *dev);
-static struct enet_statistics *do_get_stats(struct net_device *dev);
+static void do_tx_timeout(struct net_device *dev);
+static struct net_device_stats *do_get_stats(struct net_device *dev);
 static void set_addresses(struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
-static int do_init(struct net_device *dev);
 static int set_card_type(dev_link_t *link, const void *s);
 static int do_config(struct net_device *dev, struct ifmap *map);
 static int do_open(struct net_device *dev);
@@ -430,7 +381,6 @@ static void do_reset(struct net_device *dev, int full);
 static int init_mii(struct net_device *dev);
 static void do_powerdown(struct net_device *dev);
 static int do_stop(struct net_device *dev);
-static void xirc_tx_timeout (struct net_device *dev);
 
 /*=============== Helper functions =========================*/
 static void
@@ -642,29 +592,6 @@ mii_wr(ioaddr_t ioaddr, u_char phyaddr, u_char phyreg, unsigned data, int len)
     mii_idle(ioaddr);
 }
 
-#ifdef PCMCIA_DEBUG
-static void
-mii_dump(struct net_device *dev)
-{
-    ioaddr_t ioaddr = dev->base_addr;
-    int i;
-
-    /* Note that registers 14, 1d,1e and 1f are reserved and should
-     * not be read according to the DP83840A specs.
-     */
-    printk(KERN_DEBUG "%s: MII register dump:\n", dev->name);
-    for (i=0; i < 32; i++) {
-	if (!(i % 8)) {
-	    if (i)
-		printk("\n");
-	    printk(KERN_DEBUG "%s:", dev->name);
-	}
-	printk(" %04x", mii_rd(ioaddr, 0, i));
-    }
-    printk("\n");
-}
-#endif
-
 /*============= Main bulk of functions	=========================*/
 
 /****************
@@ -693,8 +620,6 @@ xirc2ps_attach(void)
     local = kmalloc(sizeof(*local), GFP_KERNEL);
     if (!local) return NULL;
     memset(local, 0, sizeof(*local));
-    
-    local->lock = SPIN_LOCK_UNLOCKED;
     link = &local->link; dev = &local->dev;
     link->priv = dev->priv = local;
 
@@ -717,13 +642,10 @@ xirc2ps_attach(void)
     dev->do_ioctl = &do_ioctl;
     dev->set_multicast_list = &set_multicast_list;
     ether_setup(dev);
-    dev->name = local->node.dev_name;
-    dev->init = &do_init;
     dev->open = &do_open;
     dev->stop = &do_stop;
-    dev->tx_timeout = xirc_tx_timeout;
+    dev->tx_timeout = do_tx_timeout;
     dev->watchdog_timeo = TX_TIMEOUT;
-    netif_start_queue(dev);
 
     /* Register with Card Services */
     link->next = dev_list;
@@ -758,7 +680,6 @@ xirc2ps_detach(dev_link_t * link)
 {
     local_info_t *local = link->priv;
     dev_link_t **linkp;
-    long flags;
 
     DEBUG(0, "detach(0x%p)\n", link);
 
@@ -771,20 +692,13 @@ xirc2ps_detach(dev_link_t * link)
 	return;
     }
 
-    save_flags(flags);
-    cli();
-    if (link->state & DEV_RELEASE_PENDING) {
-	del_timer(&link->release);
-	link->state &= ~DEV_RELEASE_PENDING;
-    }
-    restore_flags(flags);
-
     /*
      * If the device is currently configured and active, we won't
      * actually delete it yet.	Instead, it is marked so that when
      * the release() function is called, that will trigger a proper
      * detach().
      */
+    del_timer(&link->release);
     if (link->state & DEV_CONFIG) {
 	DEBUG(0, "detach postponed, '%s' still locked\n",
 	      link->dev->dev_name);
@@ -952,26 +866,26 @@ xirc2ps_config(dev_link_t * link)
     switch(parse.manfid.manf) {
       case MANFID_XIRCOM:
 	local->manf_str = "Xircom";
-	DEBUG(0, "found xircom card\n");
 	break;
       case MANFID_ACCTON:
 	local->manf_str = "Accton";
-	DEBUG(0, "found Accton card\n");
 	break;
       case MANFID_COMPAQ:
       case MANFID_COMPAQ2:
 	local->manf_str = "Compaq";
-	DEBUG(0, "found Compaq card\n");
 	break;
       case MANFID_INTEL:
 	local->manf_str = "Intel";
-	DEBUG(0, "found Intel card\n");
+	break;
+      case MANFID_TOSHIBA:
+	local->manf_str = "Toshiba";
 	break;
       default:
 	printk(KNOT_XIRC "Unknown Card Manufacturer ID: 0x%04x\n",
 	       (unsigned)parse.manfid.manf);
 	goto failure;
     }
+    DEBUG(0, "found %s card\n", local->manf_str);
 
     if (!set_card_type(link, buf)) {
 	printk(KNOT_XIRC "this card is not supported\n");
@@ -1136,13 +1050,10 @@ xirc2ps_config(dev_link_t * link)
     }
 
     if (local->dingo) {
-      #ifdef CEM56_FIX
 	conf_reg_t reg;
-      #endif
 	win_req_t req;
 	memreq_t mem;
 
-      #ifdef CEM56_FIX
 	/* Reset the modem's BAR to the correct value
 	 * This is necessary because in the RequestConfiguration call,
 	 * the base address of the ethernet port (BasePort1) is written
@@ -1164,15 +1075,13 @@ xirc2ps_config(dev_link_t * link)
 	    cs_error(link->handle, AccessConfigurationRegister, err);
 	    goto config_error;
 	}
-     #endif
 
 	/* There is no config entry for the Ethernet part which
 	 * is at 0x0800. So we allocate a window into the attribute
 	 * memory and write direct to the CIS registers
 	 */
 	req.Attributes = WIN_DATA_WIDTH_8|WIN_MEMORY_TYPE_AM|WIN_ENABLE;
-	req.Base = 0;
-	req.Size = 0x1000; /* 4k window */
+	req.Base = req.Size = 0;
 	req.AccessSpeed = 0;
 	link->win = (window_handle_t)link->handle;
 	if ((err = CardServices(RequestWindow, &link->win, &req))) {
@@ -1239,14 +1148,14 @@ xirc2ps_config(dev_link_t * link)
     /* we can now register the device with the net subsystem */
     dev->irq = link->irq.AssignedIRQ;
     dev->base_addr = link->io.BasePort1;
-    netif_start_queue(dev);
     if ((err=register_netdev(dev))) {
 	printk(KNOT_XIRC "register_netdev() failed\n");
 	goto config_error;
     }
 
-    link->state &= ~DEV_CONFIG_PENDING;
+    strcpy(local->node.dev_name, dev->name);
     link->dev = &local->node;
+    link->state &= ~DEV_CONFIG_PENDING;
 
     if (local->dingo)
 	do_reset(dev, 1); /* a kludge to make the cem56 work */
@@ -1305,7 +1214,7 @@ xirc2ps_release(u_long arg)
     CardServices(ReleaseConfiguration, link->handle);
     CardServices(ReleaseIO, link->handle, &link->io);
     CardServices(ReleaseIRQ, link->handle, &link->irq);
-    link->state &= ~(DEV_CONFIG | DEV_RELEASE_PENDING);
+    link->state &= ~DEV_CONFIG;
 
 } /* xirc2ps_release */
 
@@ -1334,47 +1243,44 @@ xirc2ps_event(event_t event, int priority,
     DEBUG(0, "event(%d)\n", (int)event);
 
     switch (event) {
-      case CS_EVENT_REGISTRATION_COMPLETE:
-	  DEBUG(0, "registration complete\n");
-	  break;
-      case CS_EVENT_CARD_REMOVAL:
-	  link->state &= ~DEV_PRESENT;
-	  if (link->state & DEV_CONFIG) {
-	      netif_device_detach(dev);
-	      link->release.expires = jiffies + HZ / 20;
-	      add_timer(&link->release);
-	  }
-	  break;
-      case CS_EVENT_CARD_INSERTION:
-	  link->state |= DEV_PRESENT | DEV_CONFIG_PENDING;
-	  xirc2ps_config(link);
-	  break;
-      case CS_EVENT_PM_SUSPEND:
-	  link->state |= DEV_SUSPEND;
-	  /* Fall through... */
-      case CS_EVENT_RESET_PHYSICAL:
-	  if (link->state & DEV_CONFIG) {
-	      if (link->open) {
-		  netif_device_detach(dev);
-		  lp->suspended=1;
-		  do_powerdown(dev);
-	      }
-	      CardServices(ReleaseConfiguration, link->handle);
-	  }
-	  break;
-      case CS_EVENT_PM_RESUME:
-	  link->state &= ~DEV_SUSPEND;
-	  /* Fall through... */
-      case CS_EVENT_CARD_RESET:
-	  if (link->state & DEV_CONFIG) {
-	     CardServices(RequestConfiguration, link->handle, &link->conf);
-	     if (link->open) {
-		 do_reset(dev,1);
-		 lp->suspended=0;
-		 netif_device_attach(dev);
-	     }
-	  }
-	  break;
+    case CS_EVENT_REGISTRATION_COMPLETE:
+	DEBUG(0, "registration complete\n");
+	break;
+    case CS_EVENT_CARD_REMOVAL:
+	link->state &= ~DEV_PRESENT;
+	if (link->state & DEV_CONFIG) {
+	    netif_device_detach(dev);
+	    mod_timer(&link->release, jiffies + HZ/20);
+	}
+	break;
+    case CS_EVENT_CARD_INSERTION:
+	link->state |= DEV_PRESENT | DEV_CONFIG_PENDING;
+	xirc2ps_config(link);
+	break;
+    case CS_EVENT_PM_SUSPEND:
+	link->state |= DEV_SUSPEND;
+	/* Fall through... */
+    case CS_EVENT_RESET_PHYSICAL:
+	if (link->state & DEV_CONFIG) {
+	    if (link->open) {
+		netif_device_detach(dev);
+		do_powerdown(dev);
+	    }
+	    CardServices(ReleaseConfiguration, link->handle);
+	}
+	break;
+    case CS_EVENT_PM_RESUME:
+	link->state &= ~DEV_SUSPEND;
+	/* Fall through... */
+    case CS_EVENT_CARD_RESET:
+	if (link->state & DEV_CONFIG) {
+	    CardServices(RequestConfiguration, link->handle, &link->conf);
+	    if (link->open) {
+		do_reset(dev,1);
+		netif_device_attach(dev);
+	    }
+	}
+	break;
     }
     return 0;
 } /* xirc2ps_event */
@@ -1399,7 +1305,6 @@ xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 				  * -- on a laptop?
 				  */
 
-    spin_lock (&lp->lock);
     if (!netif_device_present(dev))
 	return;
 
@@ -1596,9 +1501,6 @@ xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	    goto loop_entry;
     }
     SelectPage(saved_page);
-
-    spin_unlock (&lp->lock);
-
     PutByte(XIRCREG_CR, EnableIntr);  /* re-enable interrupts */
     /* Instead of dropping packets during a receive, we could
      * force an interrupt with this command:
@@ -1608,25 +1510,17 @@ xirc2ps_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 /*====================================================================*/
 
-static void xirc_tx_timeout (struct net_device *dev)
+static void
+do_tx_timeout(struct net_device *dev)
 {
-	local_info_t *lp = dev->priv;
-
-	if (lp->suspended) {
-	    dev->trans_start = jiffies;
-	    lp->stats.tx_dropped++;
-	    netif_start_queue(dev);
-	    return;
-	}
-
-	printk(KERN_NOTICE "%s: transmit timed out\n", dev->name);
-	lp->stats.tx_errors++;
-	/* reset the card */
-	do_reset(dev,1);
-	dev->trans_start = jiffies;
-	netif_start_queue(dev);
+    local_info_t *lp = dev->priv;
+    printk(KERN_NOTICE "%s: transmit timed out\n", dev->name);
+    lp->stats.tx_errors++;
+    /* reset the card */
+    do_reset(dev,1);
+    dev->trans_start = jiffies;
+    netif_start_queue(dev);
 }
-
 
 static int
 do_start_xmit(struct sk_buff *skb, struct net_device *dev)
@@ -1675,12 +1569,12 @@ do_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
     dev_kfree_skb (skb);
     dev->trans_start = jiffies;
-    netif_start_queue(dev);
     lp->stats.tx_bytes += pktlen;
+    netif_start_queue(dev);
     return 0;
 }
 
-static struct enet_statistics *
+static struct net_device_stats *
 do_get_stats(struct net_device *dev)
 {
     local_info_t *lp = dev->priv;
@@ -1760,17 +1654,6 @@ set_multicast_list(struct net_device *dev)
     SelectPage(0);
 }
 
-/****************
- * We never need to do anything when a IIps device is "initialized"
- * by the net software, because we only register already-found cards.
- */
-static int
-do_init(struct net_device *dev)
-{
-    DEBUG(0, "do_init(%p)\n", dev);
-    return 0;
-}
-
 static int
 do_config(struct net_device *dev, struct ifmap *map)
 {
@@ -1791,12 +1674,6 @@ do_config(struct net_device *dev, struct ifmap *map)
 	       dev->name, if_names[dev->if_port]);
 	do_reset(dev,1);  /* not the fine way :-) */
     }
-  #ifdef PCMCIA_DEBUG
-    else if (local->mohawk) {
-	/* kludge to print the mii regsiters */
-	mii_dump(dev);
-    }
-  #endif
     return 0;
 }
 
@@ -1821,7 +1698,6 @@ do_open(struct net_device *dev)
     MOD_INC_USE_COUNT;
 
     netif_start_queue(dev);
-    lp->suspended = 0;
     do_reset(dev,1);
 
     return 0;
@@ -1989,6 +1865,8 @@ do_reset(struct net_device *dev, int full)
 		PutByte(XIRCREG42_SWC1, 0x80);
 	    busy_loop(HZ/25);	/* wait 40 msec to let it complete */
 	}
+	if (full_duplex)
+	    PutByte(XIRCREG1_ECR, GetByte(XIRCREG1_ECR | FullDuplex));
     } else {  /* No MII */
 	SelectPage(0);
 	value = GetByte(XIRCREG_ESR);	 /* read the ESR */
@@ -2042,12 +1920,6 @@ init_mii(struct net_device *dev)
     ioaddr_t ioaddr = dev->base_addr;
     unsigned control, status, linkpartner;
     int i;
-
-  #ifdef PCMCIA_DEBUG
-    if (pc_debug>1) {
-	mii_dump(dev);
-    }
-  #endif
 
     status = mii_rd(ioaddr,  0, 1);
     if ((status & 0xff00) != 0x7800)
@@ -2105,11 +1977,6 @@ init_mii(struct net_device *dev)
 	}
     }
 
-  #ifdef PCMCIA_DEBUG
-    if (pc_debug)
-	mii_dump(dev);
-  #endif
-
     return 1;
 }
 
@@ -2149,11 +2016,8 @@ do_stop(struct net_device *dev)
     SelectPage(0);
 
     link->open--;
-    if (link->state & DEV_STALE_CONFIG) {
-	link->release.expires = jiffies + HZ/20;
-	link->state |= DEV_RELEASE_PENDING;
-	add_timer(&link->release);
-    }
+    if (link->state & DEV_STALE_CONFIG)
+	mod_timer(&link->release, jiffies + HZ/20);
 
     MOD_DEC_USE_COUNT;
 
@@ -2166,8 +2030,6 @@ init_xirc2ps_cs(void)
     servinfo_t serv;
 
     printk(KERN_INFO "%s\n", version);
-    if (card_type)
-	printk(KINF_XIRC "option card_type is obsolete\n");
     if (lockup_hack)
 	printk(KINF_XIRC "lockup hack is enabled\n");
     CardServices(GetCardServicesInfo, &serv);

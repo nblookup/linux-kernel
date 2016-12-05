@@ -1,4 +1,4 @@
-/* $Id: sunbmac.c,v 1.18 2000/02/18 13:49:21 davem Exp $
+/* $Id: sunbmac.c,v 1.21 2000/10/22 16:08:38 davem Exp $
  * sunbmac.c: Driver for Sparc BigMAC 100baseT ethernet adapters.
  *
  * Copyright (C) 1997, 1998, 1999 David S. Miller (davem@redhat.com)
@@ -63,9 +63,7 @@ static char *version =
 #define DIRQ(x)
 #endif
 
-#ifdef MODULE
 static struct bigmac *root_bigmac_dev = NULL;
-#endif
 
 #define DEFAULT_JAMSIZE    4 /* Toe jam */
 
@@ -164,7 +162,7 @@ static void bigmac_stop(struct bigmac *bp)
 
 static void bigmac_get_counters(struct bigmac *bp, unsigned long bregs)
 {
-	struct enet_statistics *stats = &bp->enet_stats;
+	struct net_device_stats *stats = &bp->enet_stats;
 
 	stats->rx_crc_errors += sbus_readl(bregs + BMAC_RCRCECTR);
 	sbus_writel(0, bregs + BMAC_RCRCECTR);
@@ -974,7 +972,7 @@ static int bigmac_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	return 0;
 }
 
-static struct enet_statistics *bigmac_get_stats(struct net_device *dev)
+static struct net_device_stats *bigmac_get_stats(struct net_device *dev)
 {
 	struct bigmac *bp = (struct bigmac *) dev->priv;
 
@@ -1197,11 +1195,12 @@ static int __init bigmac_ether_init(struct net_device *dev, struct sbus_dev *qec
 	dev->dma = 0;
 	ether_setup(dev);
 
-#ifdef MODULE
-	/* Put us into the list of instances attached for later module unloading. */
+	/* Put us into the list of instances attached for later driver
+	 * exit.
+	 */
 	bp->next_module = root_bigmac_dev;
 	root_bigmac_dev = bp;
-#endif
+
 	return 0;
 
 fail_and_cleanup:
@@ -1257,12 +1256,10 @@ static int __init bigmac_probe(void)
 	static int called = 0;
 	int cards = 0, v;
 
-#ifdef MODULE
 	root_bigmac_dev = NULL;
-#endif
 
 	if (called)
-		return ENODEV;
+		return -ENODEV;
 	called++;
 
 	for_each_sbus(sbus) {
@@ -1278,14 +1275,12 @@ static int __init bigmac_probe(void)
 		}
 	}
 	if (!cards)
-		return ENODEV;
+		return -ENODEV;
 	return 0;
 }
 
 static void __exit bigmac_cleanup(void)
 {
-#ifdef MODULE
-	/* No need to check MOD_IN_USE, as sys_delete_module() checks. */
 	while (root_bigmac_dev) {
 		struct bigmac *bp = root_bigmac_dev;
 		struct bigmac *bp_nxt = root_bigmac_dev->next_module;
@@ -1303,7 +1298,6 @@ static void __exit bigmac_cleanup(void)
 		kfree(bp->dev);
 		root_bigmac_dev = bp_nxt;
 	}
-#endif /* MODULE */
 }
 
 module_init(bigmac_probe);

@@ -2,7 +2,7 @@
  *
  * Hardware accelerated Matrox Millennium I, II, Mystique, G100, G200 and G400
  *
- * (c) 1998,1999 Petr Vandrovec <vandrove@vc.cvut.cz>
+ * (c) 1998,1999,2000 Petr Vandrovec <vandrove@vc.cvut.cz>
  *
  */
 #ifndef __MATROXFB_H__
@@ -56,10 +56,10 @@
 #include <video/fbcon-cfb24.h>
 #include <video/fbcon-cfb32.h>
 
-#if defined(CONFIG_FB_OF)
 #if defined(CONFIG_FB_COMPAT_XPMAC)
 #include <asm/vc_ioctl.h>
 #endif
+#if defined(CONFIG_PPC)
 #include <asm/prom.h>
 #include <asm/pci-bridge.h>
 #include <video/macmodes.h>
@@ -374,7 +374,7 @@ struct mavenregs {
 struct matrox_hw_state {
 	u_int32_t	MXoptionReg;
 	unsigned char	DACclk[6];
-	unsigned char	DACreg[64];
+	unsigned char	DACreg[80];
 	unsigned char	MiscOutReg;
 	unsigned char	DACpal[768];
 	unsigned char	CRTC[25];
@@ -530,6 +530,8 @@ struct matrox_fb_info {
 		unsigned int	textvram;	/* character cells */
 		unsigned int	ydstorg;	/* offset in bytes from video start to usable memory */
 						/* 0 except for 6MB Millenium */
+		int		memtype;
+		int		g450dac;
 			      } devflags;
 	struct display_switch	dispsw;
 	struct {
@@ -544,7 +546,7 @@ struct matrox_fb_info {
 		struct timer_list timer;
 			      } cursor;
 	struct { unsigned red, green, blue, transp; } palette[256];
-#if defined(CONFIG_FB_OF) && defined(CONFIG_FB_COMPAT_XPMAC)
+#if defined(CONFIG_FB_COMPAT_XPMAC)
 	char	matrox_name[32];
 #endif
 /* These ifdefs must be last! They differ for module & non-module compiles */
@@ -695,6 +697,7 @@ void matroxfb_unregister_driver(struct matroxfb_driver* drv);
 #define M_VCOUNT	0x1E20
 
 #define M_RESET		0x1E40
+#define M_MEMRDBK	0x1E44
 
 #define M_AGP2PLL	0x1E4C
 

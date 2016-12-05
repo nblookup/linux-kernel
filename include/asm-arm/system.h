@@ -1,133 +1,25 @@
 #ifndef __ASM_ARM_SYSTEM_H
 #define __ASM_ARM_SYSTEM_H
 
-#include <linux/kernel.h>
-
 #ifdef __KERNEL__
 
 #include <linux/config.h>
+#include <linux/kernel.h>
 
 /* information about the system we're running on */
 extern unsigned int system_rev;
 extern unsigned int system_serial_low;
 extern unsigned int system_serial_high;
-
-/* The type of machine we're running on */
-extern unsigned int __machine_arch_type;
-
-/* see arch/arm/kernel/setup.c for a description of these */
-#define MACH_TYPE_EBSA110	0
-#define MACH_TYPE_RISCPC	1
-#define MACH_TYPE_NEXUSPCI	3
-#define MACH_TYPE_EBSA285	4
-#define MACH_TYPE_NETWINDER	5
-#define MACH_TYPE_CATS		6
-#define MACH_TYPE_TBOX		7
-#define MACH_TYPE_CO285		8
-#define MACH_TYPE_CLPS7110	9
-#define MACH_TYPE_ARCHIMEDES	10
-#define MACH_TYPE_A5K		11
-#define MACH_TYPE_ETOILE	12
-#define MACH_TYPE_LACIE_NAS	13
-#define MACH_TYPE_CLPS7500	14
-#define MACH_TYPE_SHARK		15
-#define MACH_TYPE_SA1100	16
+extern unsigned int mem_fclk_21285;
 
 /*
- * Sort out a definition for machine_arch_type
- * The rules are:
- * 1. If one architecture is selected, then all machine_is_xxx()
- *    are constant.
- * 2. If two or more architectures are selected, then the selected
- *    machine_is_xxx() are variable, and the unselected machine_is_xxx()
- *    are constant zero.
+ * This tells us if we have an ISA bridge
+ * present in a PCI system.
  */
-#ifdef CONFIG_ARCH_EBSA110
-# ifdef machine_arch_type
-#  undef machine_arch_type
-#  define machine_arch_type	__machine_arch_type
-# else
-#  define machine_arch_type	MACH_TYPE_EBSA110
-# endif
-# define machine_is_ebsa110()	(machine_arch_type == MACH_TYPE_EBSA110)
+#ifdef CONFIG_PCI
+extern int have_isa_bridge;
 #else
-# define machine_is_ebsa110()	(0)
-#endif
-
-#ifdef CONFIG_ARCH_RPC
-# ifdef machine_arch_type
-#  undef machine_arch_type
-#  define machine_arch_type	__machine_arch_type
-# else
-#  define machine_arch_type	MACH_TYPE_RISCPC
-# endif
-# define machine_is_riscpc()	(machine_arch_type == MACH_TYPE_RISCPC)
-#else
-# define machine_is_riscpc()	(0)
-#endif
-
-#ifdef CONFIG_ARCH_EBSA285
-# ifdef machine_arch_type
-#  undef machine_arch_type
-#  define machine_arch_type	__machine_arch_type
-# else
-#  define machine_arch_type	MACH_TYPE_EBSA285
-# endif
-# define machine_is_ebsa285()	(machine_arch_type == MACH_TYPE_EBSA285)
-#else
-# define machine_is_ebsa285()	(0)
-#endif
-
-#ifdef CONFIG_ARCH_NETWINDER
-# ifdef machine_arch_type
-#  undef machine_arch_type
-#  define machine_arch_type	__machine_arch_type
-# else
-#  define machine_arch_type	MACH_TYPE_NETWINDER
-# endif
-# define machine_is_netwinder()	(machine_arch_type == MACH_TYPE_NETWINDER)
-#else
-# define machine_is_netwinder()	(0)
-#endif
-
-#ifdef CONFIG_CATS
-# ifdef machine_arch_type
-#  undef machine_arch_type
-#  define machine_arch_type	__machine_arch_type
-# else
-#  define machine_arch_type	MACH_TYPE_CATS
-# endif
-# define machine_is_cats()	(machine_arch_type == MACH_TYPE_CATS)
-#else
-# define machine_is_cats()	(0)
-#endif
-
-#ifdef CONFIG_ARCH_CO285
-# ifdef machine_arch_type
-#  undef machine_arch_type
-#  define machine_arch_type	__machine_arch_type
-# else
-#  define machine_arch_type	MACH_TYPE_CO285
-# endif
-# define machine_is_co285()	(machine_arch_type == MACH_TYPE_CO285)
-#else
-# define machine_is_co285()	(0)
-#endif
-
-#ifdef CONFIG_ARCH_SA1100
-# ifdef machine_arch_type
-#  undef machine_arch_type
-#  define machine_arch_type	__machine_arch_type
-# else
-#  define machine_arch_type	MACH_TYPE_SA1100
-# endif
-# define machine_is_sa1100()	(machine_arch_type == MACH_TYPE_SA1100
-#else
-# define machine_is_sa1100()	(0)
-#endif
-
-#ifndef machine_arch_type
-#define machine_arch_type	__machine_arch_type
+#define have_isa_bridge		(0)
 #endif
 
 #include <asm/proc-fns.h>
@@ -137,7 +29,6 @@ extern unsigned int __machine_arch_type;
 
 #define tas(ptr) (xchg((ptr),1))
 
-extern void arm_malalignedptr(const char *, void *, volatile void *);
 extern asmlinkage void __backtrace(void);
 
 /*
@@ -165,6 +56,35 @@ extern struct task_struct *__switch_to(struct task_struct *prev, struct task_str
 		mb();				\
 	} while (0)
 
-#endif
+/* For spinlocks etc */
+#define local_irq_save(x)	__save_flags_cli(x)
+#define local_irq_restore(x)	__restore_flags(x)
+#define local_irq_disable()	__cli()
+#define local_irq_enable()	__sti()
+
+#ifdef CONFIG_SMP
+#error SMP not supported
+
+#define smp_mb()		mb()
+#define smp_rmb()		rmb()
+#define smp_wmb()		wmb()
+
+#else
+
+#define smp_mb()		barrier()
+#define smp_rmb()		barrier()
+#define smp_wmb()		barrier()
+
+#define cli()			__cli()
+#define sti()			__sti()
+#define clf()			__clf()
+#define stf()			__stf()
+#define save_flags(x)		__save_flags(x)
+#define restore_flags(x)	__restore_flags(x)
+#define save_flags_cli(x)	__save_flags_cli(x)
+
+#endif /* CONFIG_SMP */
+
+#endif /* __KERNEL__ */
 
 #endif

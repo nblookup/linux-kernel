@@ -1,5 +1,5 @@
-/* $Id: w6692.c,v 1.2 2000/02/26 00:35:13 keil Exp $
-
+/* $Id: w6692.c,v 1.12.6.2 2000/11/29 16:00:14 kai Exp $
+ *
  * w6692.c   Winbond W6692 specific routines
  *
  * Author       Petr Novak <petr.novak@i.cz>
@@ -7,31 +7,16 @@
  *
  *              This file is (c) under GNU PUBLIC LICENSE
  *
- * $Log: w6692.c,v $
- * Revision 1.2  2000/02/26 00:35:13  keil
- * Fix skb freeing in interrupt context
- *
- * Revision 1.1  1999/09/04 06:28:58  keil
- * first revision
- *
- *
- *
  */
 
 #include <linux/config.h>
+#include <linux/init.h>
 #define __NO_VERSION__
 #include "hisax.h"
 #include "w6692.h"
 #include "isdnl1.h"
 #include <linux/interrupt.h>
 #include <linux/pci.h>
-
-#define	PCI_VEND_ASUSCOM	0x675
-#define	PCI_DEV_ASUSCOMPCI1	0x1702
-#ifndef PCI_VENDOR_ID_WINBOND2
-#define PCI_VENDOR_ID_WINBOND2	0x1050
-#endif
-#define	PCI_DEVICE_W6692	0x6692
 
 /* table entry in the PCI devices list */
 typedef struct {
@@ -43,18 +28,18 @@ typedef struct {
 
 static const PCI_ENTRY id_list[] =
 {
-	{PCI_VEND_ASUSCOM, PCI_DEV_ASUSCOMPCI1, "AsusCom", "TA XXX"},
-	{PCI_VENDOR_ID_WINBOND2, PCI_DEVICE_W6692, "Winbond", "W6692"},
+	{PCI_VENDOR_ID_DYNALINK, PCI_DEVICE_ID_DYNALINK_IS64PH, "Dynalink/AsusCom", "IS64PH"},
+	{PCI_VENDOR_ID_WINBOND2, PCI_DEVICE_ID_WINBOND2_6692, "Winbond", "W6692"},
 	{0, 0, NULL, NULL}
 };
 
 extern const char *CardType[];
 
-const char *w6692_revision = "$Revision: 1.2 $";
+const char *w6692_revision = "$Revision: 1.12.6.2 $";
 
 #define DBUSY_TIMER_VALUE 80
 
-static char *W6692Ver[] HISAX_INITDATA =
+static char *W6692Ver[] __initdata =
 {"W6692 V00", "W6692 V01", "W6692 V10",
  "W6692 V11"};
 
@@ -248,7 +233,7 @@ W6692B_empty_fifo(struct BCState *bcs, int count)
 	if (bcs->hw.w6692.rcvidx + count > HSCX_BUFMAX) {
 		if (cs->debug & L1_DEB_WARN)
 			debugl1(cs, "W6692B_empty_fifo: incoming packet too large");
-		cs->BC_Write_Reg(cs, bcs->hw.w6692.bchan, W_B_CMDR, W_B_CMDR_RACK | W_B_CMDR_RACT);
+		cs->BC_Write_Reg(cs, bcs->channel, W_B_CMDR, W_B_CMDR_RACK | W_B_CMDR_RACT);
 		bcs->hw.w6692.rcvidx = 0;
 		return;
 	}
@@ -256,14 +241,14 @@ W6692B_empty_fifo(struct BCState *bcs, int count)
 	bcs->hw.w6692.rcvidx += count;
 	save_flags(flags);
 	cli();
-	READW6692BFIFO(cs, bcs->hw.w6692.bchan, ptr, count);
-	cs->BC_Write_Reg(cs, bcs->hw.w6692.bchan, W_B_CMDR, W_B_CMDR_RACK | W_B_CMDR_RACT);
+	READW6692BFIFO(cs, bcs->channel, ptr, count);
+	cs->BC_Write_Reg(cs, bcs->channel, W_B_CMDR, W_B_CMDR_RACK | W_B_CMDR_RACT);
 	restore_flags(flags);
 	if (cs->debug & L1_DEB_HSCX_FIFO) {
 		char *t = bcs->blog;
 
 		t += sprintf(t, "W6692B_empty_fifo %c cnt %d",
-			     bcs->hw.w6692.bchan ? 'B' : 'A', count);
+			     bcs->channel + '1', count);
 		QuickHex(t, ptr, count);
 		debugl1(cs, bcs->blog);
 	}
@@ -299,14 +284,14 @@ W6692B_fill_fifo(struct BCState *bcs)
 	skb_pull(bcs->tx_skb, count);
 	bcs->tx_cnt -= count;
 	bcs->hw.w6692.count += count;
-	WRITEW6692BFIFO(cs, bcs->hw.w6692.bchan, ptr, count);
-	cs->BC_Write_Reg(cs, bcs->hw.w6692.bchan, W_B_CMDR, W_B_CMDR_RACT | W_B_CMDR_XMS | (more ? 0 : W_B_CMDR_XME));
+	WRITEW6692BFIFO(cs, bcs->channel, ptr, count);
+	cs->BC_Write_Reg(cs, bcs->channel, W_B_CMDR, W_B_CMDR_RACT | W_B_CMDR_XMS | (more ? 0 : W_B_CMDR_XME));
 	restore_flags(flags);
 	if (cs->debug & L1_DEB_HSCX_FIFO) {
 		char *t = bcs->blog;
 
 		t += sprintf(t, "W6692B_fill_fifo %c cnt %d",
-			     bcs->hw.w6692.bchan ? 'B' : 'A', count);
+			     bcs->channel + '1', count);
 		QuickHex(t, ptr, count);
 		debugl1(cs, bcs->blog);
 	}
@@ -317,10 +302,11 @@ W6692B_interrupt(struct IsdnCardState *cs, u_char bchan)
 {
 	u_char val;
 	u_char r;
-	struct BCState *bcs = cs->bcs + bchan;
+	struct BCState *bcs;
 	struct sk_buff *skb;
 	int count;
 
+	bcs = (cs->bcs->channel == bchan) ? cs->bcs : (cs->bcs+1);
 	val = cs->BC_Read_Reg(cs, bchan, W_B_EXIR);
 	debugl1(cs, "W6692B chan %d B_EXIR 0x%02X", bchan, val);
 
@@ -407,7 +393,7 @@ W6692B_interrupt(struct IsdnCardState *cs, u_char bchan)
 				bcs->tx_cnt += bcs->hw.w6692.count;
 				bcs->hw.w6692.count = 0;
 			}
-			cs->BC_Write_Reg(cs, bcs->hw.w6692.bchan, W_B_CMDR, W_B_CMDR_XRST | W_B_CMDR_RACT);
+			cs->BC_Write_Reg(cs, bchan, W_B_CMDR, W_B_CMDR_XRST | W_B_CMDR_RACT);
 			if (cs->debug & L1_DEB_WARN)
 				debugl1(cs, "W6692 B EXIR %x Lost TX", val);
 		}
@@ -721,16 +707,16 @@ dbusy_timer_handler(struct IsdnCardState *cs)
 }
 
 static void
-W6692Bmode(struct BCState *bcs, int mode, int bc)
+W6692Bmode(struct BCState *bcs, int mode, int bchan)
 {
 	struct IsdnCardState *cs = bcs->cs;
-	int bchan = bcs->hw.w6692.bchan;
 
 	if (cs->debug & L1_DEB_HSCX)
 		debugl1(cs, "w6692 %c mode %d ichan %d",
-			'1' + bchan, mode, bc);
+			'1' + bchan, mode, bchan);
 	bcs->mode = mode;
-	bcs->channel = bc;
+	bcs->channel = bchan;
+	bcs->hw.w6692.bchan = bchan;
 
 	switch (mode) {
 		case (L1_MODE_NULL):
@@ -872,7 +858,7 @@ setstack_w6692(struct PStack *st, struct BCState *bcs)
 	return (0);
 }
 
-HISAX_INITFUNC(void initW6692(struct IsdnCardState *cs, int part))
+void __init initW6692(struct IsdnCardState *cs, int part)
 {
 	if (part & 1) {
 		cs->tqueue.routine = (void *) (void *) W6692_bh;
@@ -899,8 +885,6 @@ HISAX_INITFUNC(void initW6692(struct IsdnCardState *cs, int part))
 		cs->bcs[1].BC_SetStack = setstack_w6692;
 		cs->bcs[0].BC_Close = close_w6692state;
 		cs->bcs[1].BC_Close = close_w6692state;
-		cs->bcs[0].hw.w6692.bchan = 0;
-		cs->bcs[1].hw.w6692.bchan = 1;
 		W6692Bmode(cs->bcs, 0, 0);
 		W6692Bmode(cs->bcs + 1, 0, 0);
 	}
@@ -971,11 +955,12 @@ w6692_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return (0);
 }
 
-static int id_idx = 0;
+static int id_idx ;
 
 static struct pci_dev *dev_w6692 __initdata = NULL;
 
-__initfunc(int setup_w6692(struct IsdnCard *card))
+int __init 
+setup_w6692(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];
@@ -983,6 +968,9 @@ __initfunc(int setup_w6692(struct IsdnCard *card))
 	u_char pci_irq = 0;
 	u_int pci_ioaddr = 0;
 
+#ifdef __BIG_ENDIAN
+#error "not running on big endian machines now"
+#endif
 	strcpy(tmp, w6692_revision);
 	printk(KERN_INFO "HiSax: W6692 driver Rev. %s\n", HiSax_getrev(tmp));
 	if (cs->typ != ISDN_CTYPE_W6692)
@@ -996,8 +984,11 @@ __initfunc(int setup_w6692(struct IsdnCard *card))
 		dev_w6692 = pci_find_device(id_list[id_idx].vendor_id,
 					    id_list[id_idx].device_id,
 					    dev_w6692);
-		if (dev_w6692)
+		if (dev_w6692) {
+			if (pci_enable_device(dev_w6692))
+				continue;
 			break;
+		}
 		id_idx++;
 	}
 	if (dev_w6692) {
@@ -1005,7 +996,7 @@ __initfunc(int setup_w6692(struct IsdnCard *card))
 		pci_irq = dev_w6692->irq;
 		/* I think address 0 is allways the configuration area */
 		/* and address 1 is the real IO space KKe 03.09.99 */
-		pci_ioaddr = dev_w6692->resource[ 1].start;
+		pci_ioaddr = pci_resource_start(dev_w6692, 1);
 	}
 	if (!found) {
 		printk(KERN_WARNING "W6692: No PCI card found\n");
@@ -1016,7 +1007,6 @@ __initfunc(int setup_w6692(struct IsdnCard *card))
 		printk(KERN_WARNING "W6692: No IRQ for PCI card found\n");
 		return (0);
 	}
-	pci_ioaddr &= PCI_BASE_ADDRESS_IO_MASK;
 	if (!pci_ioaddr) {
 		printk(KERN_WARNING "W6692: NO I/O Base Address found\n");
 		return (0);
@@ -1056,6 +1046,7 @@ __initfunc(int setup_w6692(struct IsdnCard *card))
 	cs->BC_Send_Data = &W6692B_fill_fifo;
 	cs->cardmsg = &w6692_card_msg;
 	cs->irq_func = &W6692_interrupt;
+	cs->irq_flags |= SA_SHIRQ;
 	W6692Version(cs, "W6692:");
 	printk(KERN_INFO "W6692 ISTA=0x%X\n", ReadW6692(cs, W_ISTA));
 	printk(KERN_INFO "W6692 IMASK=0x%X\n", ReadW6692(cs, W_IMASK));

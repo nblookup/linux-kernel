@@ -15,18 +15,45 @@
 #ifdef __KERNEL__
 
 #include <linux/config.h>
+#include <asm/machvec.h>
 
 #ifndef MAX_HWIFS
-#define MAX_HWIFS	1	/* XXX: For my board -- gniibe */
+/* Should never have less than 2, ide-pci.c(ide_match_hwif) requires it */
+#define MAX_HWIFS	2
 #endif
 
 #define ide__sti()	__sti()
 
-static __inline__ int ide_default_irq(ide_ioreg_t base)
+static __inline__ int ide_default_irq_hp600(ide_ioreg_t base)
 {
 	switch (base) {
-		case 0xba0001f0: return 14;
-		case 0xba000170: return 14;
+		case 0x01f0: return 77;
+		case 0x0170: return 77;
+		default:
+			return 0;
+	}
+}
+
+static __inline__ int ide_default_irq(ide_ioreg_t base)
+{
+	if (MACH_HP600) {
+		return ide_default_irq_hp600(base);
+	}
+	switch (base) {
+		case 0x01f0: return 14;
+		case 0x0170: return 15;
+		default:
+			return 0;
+	}
+}
+
+static __inline__ ide_ioreg_t ide_default_io_base_hp600(int index)
+{
+	switch (index) {
+		case 0:	
+			return 0x01f0;
+		case 1:	
+			return 0x0170;
 		default:
 			return 0;
 	}
@@ -34,11 +61,14 @@ static __inline__ int ide_default_irq(ide_ioreg_t base)
 
 static __inline__ ide_ioreg_t ide_default_io_base(int index)
 {
+	if (MACH_HP600) {
+		return ide_default_io_base_hp600(index);
+	}
 	switch (index) {
 		case 0:	
-			return 0xba0001f0;
+			return 0x1f0;
 		case 1:	
-			return 0xba000170;
+			return 0x170;
 		default:
 			return 0;
 	}
@@ -60,6 +90,7 @@ static __inline__ void ide_init_hwif_ports(hw_regs_t *hw, ide_ioreg_t data_port,
 	}
 	if (irq != NULL)
 		*irq = 0;
+	hw->io_ports[IDE_IRQ_OFFSET] = 0;
 }
 
 static __inline__ void ide_init_default_hwifs(void)

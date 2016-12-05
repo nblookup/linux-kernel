@@ -1154,6 +1154,8 @@ int aha1542_detect(Scsi_Host_Template * tpnt)
 			shpnt = scsi_register(tpnt,
 					sizeof(struct aha1542_hostdata));
 
+			if(shpnt==NULL)
+				continue;
 			/* For now we do this - until kmalloc is more intelligent
 			   we are resigned to stupid hacks like this */
 			if (SCSI_PA(shpnt) >= ISA_DMA_THRESHOLD) {
@@ -1414,6 +1416,7 @@ int aha1542_dev_reset(Scsi_Cmnd * SCpnt)
 			SCtmp = HOSTDATA(SCpnt->host)->SCint[i];
 			if (SCtmp->host_scribble) {
 				scsi_free(SCtmp->host_scribble, 512);
+				SCtmp->host_scribble = NULL;
 			}
 			HOSTDATA(SCpnt->host)->SCint[i] = NULL;
 			HOSTDATA(SCpnt->host)->mb[i].status = 0;
@@ -1476,6 +1479,7 @@ int aha1542_bus_reset(Scsi_Cmnd * SCpnt)
 			}
 			if (SCtmp->host_scribble) {
 				scsi_free(SCtmp->host_scribble, 512);
+				SCtmp->host_scribble = NULL;
 			}
 			HOSTDATA(SCpnt->host)->SCint[i] = NULL;
 			HOSTDATA(SCpnt->host)->mb[i].status = 0;
@@ -1544,6 +1548,7 @@ int aha1542_host_reset(Scsi_Cmnd * SCpnt)
 			}
 			if (SCtmp->host_scribble) {
 				scsi_free(SCtmp->host_scribble, 512);
+				SCtmp->host_scribble = NULL;
 			}
 			HOSTDATA(SCpnt->host)->SCint[i] = NULL;
 			HOSTDATA(SCpnt->host)->mb[i].status = 0;
@@ -1679,8 +1684,10 @@ int aha1542_old_reset(Scsi_Cmnd * SCpnt, unsigned int reset_flags)
 				Scsi_Cmnd *SCtmp;
 				SCtmp = HOSTDATA(SCpnt->host)->SCint[i];
 				SCtmp->result = DID_RESET << 16;
-				if (SCtmp->host_scribble)
+				if (SCtmp->host_scribble) {
 					scsi_free(SCtmp->host_scribble, 512);
+					SCtmp->host_scribble = NULL;
+				}
 				printk(KERN_WARNING "Sending DID_RESET for target %d\n", SCpnt->target);
 				SCtmp->scsi_done(SCpnt);
 
@@ -1723,8 +1730,10 @@ fail:
 						Scsi_Cmnd *SCtmp;
 						SCtmp = HOSTDATA(SCpnt->host)->SCint[i];
 						SCtmp->result = DID_RESET << 16;
-						if (SCtmp->host_scribble)
+						if (SCtmp->host_scribble) {
 							scsi_free(SCtmp->host_scribble, 512);
+							SCtmp->host_scribble = NULL;
+						}
 						printk(KERN_WARNING "Sending DID_RESET for target %d\n", SCpnt->target);
 						SCtmp->scsi_done(SCpnt);
 
@@ -1764,9 +1773,7 @@ int aha1542_biosparam(Scsi_Disk * disk, kdev_t dev, int *ip)
 }
 
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = AHA1542;
+static Scsi_Host_Template driver_template = AHA1542;
 
 #include "scsi_module.c"
-#endif

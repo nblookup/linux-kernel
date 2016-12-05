@@ -20,6 +20,7 @@
 #include <linux/hfs_fs_sb.h>
 #include <linux/hfs_fs_i.h>
 #include <linux/hfs_fs.h>
+#include <linux/smp_lock.h>
 
 /*================ Variable-like macros ================*/
 
@@ -79,8 +80,9 @@ void hfs_put_inode(struct inode * inode)
 {
 	struct hfs_cat_entry *entry = HFS_I(inode)->entry;
 
+	lock_kernel();
 	hfs_cat_put(entry);
-	if (inode->i_count == 1) {
+	if (atomic_read(&inode->i_count) == 1) {
 	  struct hfs_hdr_layout *tmp = HFS_I(inode)->layout;
 
 	  if (tmp) {
@@ -88,6 +90,7 @@ void hfs_put_inode(struct inode * inode)
 		HFS_DELETE(tmp);
 	  }
 	}
+	unlock_kernel();
 }
 
 /*
@@ -217,18 +220,18 @@ int hfs_notify_change_hdr(struct dentry *dentry, struct iattr * attr)
 	return __hfs_notify_change(dentry, attr, HFS_HDR);
 }
 
-static int hfs_writepage(struct dentry *dentry, struct page *page)
+static int hfs_writepage(struct page *page)
 {
 	return block_write_full_page(page,hfs_get_block);
 }
-static int hfs_readpage(struct dentry *dentry, struct page *page)
+static int hfs_readpage(struct file *file, struct page *page)
 {
 	return block_read_full_page(page,hfs_get_block);
 }
-static int hfs_prepare_write(struct page *page, unsigned from, unsigned to)
+static int hfs_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
 {
 	return cont_prepare_write(page,from,to,hfs_get_block,
-		&((struct inode*)page->mapping->host)->u.hfs_i.mmu_private);
+		&page->mapping->host->u.hfs_i.mmu_private);
 }
 static int hfs_bmap(struct address_space *mapping, long block)
 {
@@ -237,6 +240,7 @@ static int hfs_bmap(struct address_space *mapping, long block)
 struct address_space_operations hfs_aops = {
 	readpage: hfs_readpage,
 	writepage: hfs_writepage,
+	sync_page: block_sync_page,
 	prepare_write: hfs_prepare_write,
 	commit_write: generic_commit_write,
 	bmap: hfs_bmap

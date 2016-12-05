@@ -598,8 +598,6 @@ static u_short maxfmode, chipset;
 #define highw(x)	((u_long)(x)>>16 & 0xffff)
 #define loww(x)		((u_long)(x) & 0xffff)
 
-#define arraysize(x)	(sizeof(x)/sizeof(*(x)))
-
 #define VBlankOn()	custom.intena = IF_SETCLR|IF_COPER
 #define VBlankOff()	custom.intena = IF_COPER
 
@@ -750,13 +748,6 @@ static struct display disp;
 
 static struct fb_info fb_info;
 
-
-	/*
-	 * The minimum period for audio depends on htotal (for OCS/ECS/AGA)
-	 * (Imported from arch/m68k/amiga/amisound.c)
-	 */
-
-extern volatile u_short amiga_audio_min_period;
 
 	/*
 	 * Since we can't read the palette on OCS/ECS, and since reading one
@@ -921,7 +912,7 @@ static struct fb_videomode ami_modedb[] __initdata = {
 #endif
 };
 
-#define NUM_TOTAL_MODES  arraysize(ami_modedb)
+#define NUM_TOTAL_MODES  ARRAY_SIZE(ami_modedb)
 
 static const char *mode_option __initdata = NULL;
 static int round_down_bpp = 1;	/* for mode probing */
@@ -1102,8 +1093,6 @@ static u_short sprfetchmode[3] = {
 
 int amifb_setup(char*);
 
-static int amifb_open(struct fb_info *info, int user);
-static int amifb_release(struct fb_info *info, int user);
 static int amifb_get_fix(struct fb_fix_screeninfo *fix, int con,
 			 struct fb_info *info);
 static int amifb_get_var(struct fb_var_screeninfo *var, int con,
@@ -1185,9 +1174,14 @@ static void ami_rebuild_copper(void);
 
 
 static struct fb_ops amifb_ops = {
-	amifb_open, amifb_release, amifb_get_fix, amifb_get_var,
-	amifb_set_var, amifb_get_cmap, amifb_set_cmap,
-	amifb_pan_display, amifb_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	amifb_get_fix,
+	fb_get_var:	amifb_get_var,
+	fb_set_var:	amifb_set_var,
+	fb_get_cmap:	amifb_get_cmap,
+	fb_set_cmap:	amifb_set_cmap,
+	fb_pan_display:	amifb_pan_display,
+	fb_ioctl:	amifb_ioctl,
 };
 
 int __init amifb_setup(char *options)
@@ -1205,6 +1199,8 @@ int __init amifb_setup(char *options)
 		if (!strcmp(this_opt, "inverse")) {
 			amifb_inverse = 1;
 			fb_invert_cmaps();
+		} else if (!strcmp(this_opt, "off")) {
+			amifb_video_off();
 		} else if (!strcmp(this_opt, "ilbm"))
 			amifb_ilbm = 1;
 		else if (!strncmp(this_opt, "monitorcap:", 11))
@@ -1259,27 +1255,6 @@ cap_invalid:
 	}
 	return 0;
 }
-
-	/*
-	 * Open/Release the frame buffer device
-	 */
-
-static int amifb_open(struct fb_info *info, int user)
-{
-	/*
-	 * Nothing, only a usage count for the moment
-	 */
-
-	MOD_INC_USE_COUNT;
-	return(0);
-}
-
-static int amifb_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return(0);
-}
-
 
 	/*
 	 * Get the Fixed Part of the Display
@@ -1765,37 +1740,11 @@ default_chipset:
 	fb_info.flags = FBINFO_FLAG_DEFAULT;
 	memset(&var, 0, sizeof(var));
 
-#ifdef MODULE
-	var.xres = ami_modedb[defmode].xres;
-	var.yres = ami_modedb[defmode].yres;
-	var.xres_virtual = ami_modedb[defmode].xres;
-	var.yres_virtual = ami_modedb[defmode].yres;
-	var.xoffset = 0;
-	var.yoffset = 0;
-	var.bits_per_pixel = 4;
-	var.activate |= FB_ACTIVATE_TEST;
-	var.pixclock = ami_modedb[defmode].pixclock;
-	var.left_margin = ami_modedb[defmode].left_margin;
-	var.right_margin = ami_modedb[defmode].right_margin;
-	var.upper_margin = ami_modedb[defmode].upper_margin;
-	var.lower_margin = ami_modedb[defmode].lower_margin;
-	var.hsync_len = ami_modedb[defmode].hsync_len;
-	var.vsync_len = ami_modedb[defmode].vsync_len;
-	var.sync = ami_modedb[defmode].sync;
-	var.vmode = ami_modedb[defmode].vmode;
-	err = fb_info.fbops->fb_set_var(&var, -1, &fb_info);
-	var.activate &= ~FB_ACTIVATE_TEST;
-	if (err) {
-		err = -EINVAL;
-		goto amifb_error;
-	}
-#else
 	if (!fb_find_mode(&var, &fb_info, mode_option, ami_modedb,
 			  NUM_TOTAL_MODES, &ami_modedb[defmode], 4)) {
 		err = -EINVAL;
 		goto amifb_error;
 	}
-#endif
 
 	round_down_bpp = 0;
 	chipptr = chipalloc(videomemorysize+
@@ -1838,15 +1787,11 @@ default_chipset:
 
 	ami_init_copper();
 
-	if (request_irq(IRQ_AMIGA_AUTO_3, amifb_interrupt, 0,
-	                "fb vertb handler", NULL)) {
+	if (request_irq(IRQ_AMIGA_VERTB, amifb_interrupt, 0,
+	                "fb vertb handler", &currentpar)) {
 		err = -EBUSY;
 		goto amifb_error;
 	}
-	amiga_intena_vals[IRQ_AMIGA_VERTB] = IF_COPER;
-	amiga_intena_vals[IRQ_AMIGA_COPPER] = 0;
-	custom.intena = IF_VERTB;
-	custom.intena = IF_SETCLR | IF_COPER;
 
 	amifb_set_var(&var, -1, &fb_info);
 
@@ -1941,57 +1886,33 @@ static int flash_cursor(void)
 
 static void amifb_interrupt(int irq, void *dev_id, struct pt_regs *fp)
 {
-	u_short ints = custom.intreqr & custom.intenar;
-	static struct irq_server server = {0, 0};
-	unsigned long flags;
+	if (do_vmode_pan || do_vmode_full)
+		ami_update_display();
 
-	if (ints & IF_BLIT) {
-		custom.intreq = IF_BLIT;
-		amiga_do_irq(IRQ_AMIGA_BLIT, fp);
-	}
+	if (do_vmode_full)
+		ami_init_display();
 
-	if (ints & IF_COPER) {
-		custom.intreq = IF_COPER;
-		if (do_vmode_pan || do_vmode_full)
-			ami_update_display();
-
-		if (do_vmode_full)
-			ami_init_display();
-
-		if (do_vmode_pan) {
-			flash_cursor();
-			ami_rebuild_copper();
-			do_cursor = do_vmode_pan = 0;
-		} else if (do_cursor) {
-			flash_cursor();
+	if (do_vmode_pan) {
+		flash_cursor();
+		ami_rebuild_copper();
+		do_cursor = do_vmode_pan = 0;
+	} else if (do_cursor) {
+		flash_cursor();
+		ami_set_sprite();
+		do_cursor = 0;
+	} else {
+		if (flash_cursor())
 			ami_set_sprite();
-			do_cursor = 0;
-		} else {
-			if (flash_cursor())
-				ami_set_sprite();
-		}
-
-		save_flags(flags);
-		cli();
-		if (get_vbpos() < down2(currentpar.diwstrt_v - 6))
-			custom.copjmp2 = 0;
-		restore_flags(flags);
-
-		if (do_blank) {
-			ami_do_blank();
-			do_blank = 0;
-		}
-
-		if (do_vmode_full) {
-			ami_reinit_copper();
-			do_vmode_full = 0;
-		}
-		amiga_do_irq_list(IRQ_AMIGA_VERTB, fp, &server);
 	}
 
-	if (ints & IF_VERTB) {
-		printk("%s: Warning: IF_VERTB was enabled\n", __FUNCTION__);
-		custom.intena = IF_VERTB;
+	if (do_blank) {
+		ami_do_blank();
+		do_blank = 0;
+	}
+
+	if (do_vmode_full) {
+		ami_reinit_copper();
+		do_vmode_full = 0;
 	}
 }
 
@@ -2441,11 +2362,13 @@ static int ami_decode_var(struct fb_var_screeninfo *var,
 	par->crsr.spot_x = par->crsr.spot_y = 0;
 	par->crsr.height = par->crsr.width = 0;
 
+#if 0	/* fbmon not done.  uncomment for 2.5.x -brad */
 	if (!fbmon_valid_timings(pixclock[clk_shift], htotal, vtotal,
 				 &fb_info)) {
 		DPRINTK("mode doesn't fit for monitor\n");
 		return -EINVAL;
 	}
+#endif
 
 	return 0;
 }
@@ -3423,5 +3346,6 @@ void cleanup_module(void)
 {
 	unregister_framebuffer(&fb_info);
 	amifb_deinit();
+	amifb_video_off();
 }
 #endif /* MODULE */

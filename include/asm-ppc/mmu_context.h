@@ -1,5 +1,6 @@
 #include <linux/config.h>
 
+#ifdef __KERNEL__
 #ifndef __PPC_MMU_CONTEXT_H
 #define __PPC_MMU_CONTEXT_H
 
@@ -48,8 +49,12 @@ extern void mmu_context_overflow(void);
  * Set the current MMU context.
  * On 32-bit PowerPCs (other than the 8xx embedded chips), this is done by
  * loading up the segment registers for the user part of the address space.
+ *
+ * On the 8xx parts, the context currently includes the page directory,
+ * and once I implement a real TLB context manager this will disappear.
+ * The PGD is ignored on other processors. - Dan
  */
-extern void set_context(int context);
+extern void set_context(int context, void *pgd);
 
 #ifdef CONFIG_8xx
 extern inline void mmu_context_overflow(void)
@@ -73,7 +78,7 @@ do { 								\
 /*
  * Set up the context for a new address space.
  */
-#define init_new_context(tsk,mm)	((mm)->context = NO_CONTEXT)
+#define init_new_context(tsk,mm)	(((mm)->context = NO_CONTEXT), 0)
 
 /*
  * We're finished using the context for an address space.
@@ -85,7 +90,7 @@ static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
 {
 	tsk->thread.pgdir = next->pgd;
 	get_mmu_context(next);
-	set_context(next->context);
+	set_context(next->context, next->pgd);
 }
 
 /*
@@ -96,7 +101,7 @@ static inline void activate_mm(struct mm_struct *active_mm, struct mm_struct *mm
 {
 	current->thread.pgdir = mm->pgd;
 	get_mmu_context(mm);
-	set_context(mm->context);
+	set_context(mm->context, mm->pgd);
 }
 
 /*
@@ -108,3 +113,4 @@ static inline void activate_mm(struct mm_struct *active_mm, struct mm_struct *mm
    ((segment < 8) ? ((segment) | (context)<<4) : (segment))
 
 #endif
+#endif /* __KERNEL__ */

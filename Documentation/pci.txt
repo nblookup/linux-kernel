@@ -43,7 +43,10 @@ contains:
 
 	name		Name of the driver
 	id_table	Pointer to table of device ID's the driver is
-			interested in
+			interested in.  Most drivers should export this
+			table using MODULE_DEVICE_TABLE(pci,...).
+			Set to NULL to call probe() function for every
+			PCI device known to the system.
 	probe		Pointer to a probing function which gets called (during
 			execution of pci_register_driver for already existing
 			devices or later if a new device gets inserted) for all
@@ -59,9 +62,8 @@ contains:
 			deregistration of the driver or when it's manually pulled
 			out of a hot-pluggable slot). This function can be called
 			from interrupt context.
-	suspend,	Power management hooks (currently used only for CardBus
-	resume		cards) -- called when the device goes to sleep or is
-			resumed.
+	suspend,	Power management hooks -- called when the device goes to
+	resume		sleep or is resumed.
 
 The ID table is an array of struct pci_device_id ending with a all-zero entry.
 Each entry consists of:
@@ -86,6 +88,16 @@ Please mark the initialization and cleanup functions where appropriate
 			the kernel is not compiled with CONFIG_HOTPLUG, normal
 			function otherwise.
 	__devexit	The same for __exit.
+
+Tips:
+	The module_init()/module_exit() functions (and all initialization
+        functions called only from these) should be marked __init/exit.
+	The struct pci_driver shouldn't be marked with any of these tags.
+	The ID table array should be marked __devinitdata.
+	The probe() and remove() functions (and all initialization
+	functions called only from these) should be marked __devinit/exit.
+	If you are sure the driver is not a hotplug driver then use only 
+	__init/exit __initdata/exitdata.
 
 
 2. How to find PCI devices manually (the old style)
@@ -176,6 +188,11 @@ pci_find_capability()		Find specified capability in device's capability
 				list.
 pci_module_init()		Inline helper function for ensuring correct
 				pci_driver initialization and error handling.
+pci_resource_start()		Returns bus start address for a given PCI region
+pci_resource_end()		Returns bus end address for a given PCI region
+pci_resource_len()		Returns the byte length of a PCI region
+pci_set_drvdata()		Set private driver data pointer for a pci_dev
+pci_get_drvdata()		Return private driver data pointer for a pci_dev
 
 
 7. Miscellaneous hints

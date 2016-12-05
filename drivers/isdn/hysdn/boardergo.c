@@ -1,4 +1,4 @@
-/* $Id: boardergo.c,v 1.1 2000/02/10 19:45:18 werner Exp $
+/* $Id: boardergo.c,v 1.5.6.1 2000/12/10 22:01:04 kai Exp $
 
  * Linux driver for HYSDN cards, specific routines for ergo type boards.
  *
@@ -24,15 +24,10 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * $Log: boardergo.c,v $
- * Revision 1.1  2000/02/10 19:45:18  werner
- *
- * Initial release
- *
- *
  */
 
 #define __NO_VERSION__
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/version.h>
 #include <asm/io.h>
@@ -153,6 +148,9 @@ ergo_stopcard(hysdn_card * card)
 	uchar val;
 
 	hysdn_net_release(card);	/* first release the net device if existing */
+#ifdef CONFIG_HYSDN_CAPI
+	hycapi_capi_stop(card);
+#endif /* CONFIG_HYSDN_CAPI */
 	save_flags(flags);
 	cli();
 	val = bytein(card->iobase + PCI9050_INTR_REG);	/* get actual value */
@@ -238,7 +236,7 @@ ergo_writebootimg(struct HYSDN_CARD *card, uchar * buf, ulong offs)
 	uchar *dst;
 	tErgDpram *dpram;
 	int cnt = (BOOT_IMG_SIZE >> 2);		/* number of words to move and swap (byte order!) */
-
+	
 	if (card->debug_flags & LOG_POF_CARD)
 		hysdn_addlog(card, "ERGO: write bootldr offs=0x%lx ", offs);
 
@@ -334,7 +332,6 @@ ergo_writebootseq(struct HYSDN_CARD *card, uchar * buf, int len)
 		}		/* while (nr_write) */
 
 	}			/* while (len) */
-
 	return (0);
 }				/* ergo_writebootseq */
 
@@ -354,7 +351,6 @@ ergo_waitpofready(struct HYSDN_CARD *card)
 
 	if (card->debug_flags & LOG_POF_CARD)
 		hysdn_addlog(card, "ERGO: waiting for pof ready");
-
 	while (timecnt--) {
 		/* wait until timeout  */
 
@@ -375,7 +371,6 @@ ergo_waitpofready(struct HYSDN_CARD *card)
 
 			if (card->debug_flags & LOG_POF_RECORD)
 				hysdn_addlog(card, "ERGO: pof boot success");
-
 			save_flags(flags);
 			cli();
 
@@ -396,6 +391,11 @@ ergo_waitpofready(struct HYSDN_CARD *card)
 				card->state = CARD_STATE_BOOTERR;
 				return (i);
 			}
+#ifdef CONFIG_HYSDN_CAPI
+			if((i = hycapi_capi_create(card))) {
+				printk(KERN_WARNING "HYSDN: failed to create capi-interface.\n");
+			}
+#endif /* CONFIG_HYSDN_CAPI */
 			return (0);	/* success */
 		}		/* data has arrived */
 		sti();
@@ -447,7 +447,7 @@ ergo_inithardware(hysdn_card * card)
 	request_region(card->iobase + PCI9050_USER_IO, 1, "HYSDN");
 	ergo_stopcard(card);	/* disable interrupts */
 	if (request_irq(card->irq, ergo_interrupt, SA_SHIRQ, "HYSDN", card)) {
-		ergo_releasehardware(card);	/* return the aquired hardware */
+		ergo_releasehardware(card); /* return the acquired hardware */
 		return (-1);
 	}
 	/* success, now setup the function pointers */
@@ -458,7 +458,6 @@ ergo_inithardware(hysdn_card * card)
 	card->writebootseq = ergo_writebootseq;
 	card->waitpofready = ergo_waitpofready;
 	card->set_errlog_state = ergo_set_errlog_state;
-	card->irq_queue.next = 0;
 	card->irq_queue.sync = 0;
 	card->irq_queue.data = card;	/* init task queue for interrupt */
 	card->irq_queue.routine = (void *) (void *) ergo_irq_bh;

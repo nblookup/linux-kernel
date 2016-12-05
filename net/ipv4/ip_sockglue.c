@@ -5,7 +5,7 @@
  *
  *		The IP to API glue.
  *		
- * Version:	$Id: ip_sockglue.c,v 1.47 2000/01/16 05:11:23 davem Exp $
+ * Version:	$Id: ip_sockglue.c,v 1.54 2000/11/28 13:34:56 davem Exp $
  *
  * Authors:	see ip.c
  *
@@ -327,6 +327,8 @@ int ip_recv_error(struct sock *sk, struct msghdr *msg, int len)
 	if (err)
 		goto out_free_skb;
 
+	sock_recv_timestamp(msg, sk, skb);
+
 	serr = SKB_EXT_ERR(skb);
 
 	sin = (struct sockaddr_in *)msg->msg_name;
@@ -354,10 +356,14 @@ int ip_recv_error(struct sock *sk, struct msghdr *msg, int len)
 	err = copied;
 
 	/* Reset and regenerate socket error */
+	spin_lock_irq(&sk->error_queue.lock);
 	sk->err = 0;
 	if ((skb2 = skb_peek(&sk->error_queue)) != NULL) {
 		sk->err = SKB_EXT_ERR(skb2)->ee.ee_errno;
+		spin_unlock_irq(&sk->error_queue.lock);
 		sk->error_report(sk);
+	} else {
+		spin_unlock_irq(&sk->error_queue.lock);
 	}
 
 out_free_skb:	
@@ -370,39 +376,46 @@ out:
 /*
  *	Socket option code for IP. This is the end of the line after any TCP,UDP etc options on
  *	an IP socket.
- *
- *	We implement IP_TOS (type of service), IP_TTL (time to live).
  */
 
 int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int optlen)
 {
 	int val=0,err;
 
-	if(optlen>=sizeof(int)) {
-		if(get_user(val, (int *) optval))
-			return -EFAULT;
-	} else if(optlen>=sizeof(char)) {
-		unsigned char ucval;
-		if(get_user(ucval, (unsigned char *) optval))
-			return -EFAULT;
-		val = (int)ucval;
-	}
-	/* If optlen==0, it is equivalent to val == 0 */
-	
-	if(level!=SOL_IP)
+	if (level != SOL_IP)
 		return -ENOPROTOOPT;
-#ifdef CONFIG_IP_MROUTE
-	if(optname>=MRT_BASE && optname <=MRT_BASE+10)
-	{
-		return ip_mroute_setsockopt(sk,optname,optval,optlen);
+
+	if (((1<<optname) & ((1<<IP_PKTINFO) | (1<<IP_RECVTTL) | 
+			    (1<<IP_RECVOPTS) | (1<<IP_RECVTOS) | 
+			    (1<<IP_RETOPTS) | (1<<IP_TOS) | 
+			    (1<<IP_TTL) | (1<<IP_HDRINCL) | 
+			    (1<<IP_MTU_DISCOVER) | (1<<IP_RECVERR) | 
+			    (1<<IP_ROUTER_ALERT) | (1<<IP_FREEBIND))) || 
+				optname == IP_MULTICAST_TTL || 
+				optname == IP_MULTICAST_LOOP) { 
+		if (optlen >= sizeof(int)) {
+			if (get_user(val, (int *) optval))
+				return -EFAULT;
+		} else if (optlen >= sizeof(char)) {
+			unsigned char ucval;
+
+			if (get_user(ucval, (unsigned char *) optval))
+				return -EFAULT;
+			val = (int) ucval;
+		}
 	}
+
+	/* If optlen==0, it is equivalent to val == 0 */
+
+#ifdef CONFIG_IP_MROUTE
+	if (optname >= MRT_BASE && optname <= (MRT_BASE + 10))
+		return ip_mroute_setsockopt(sk,optname,optval,optlen);
 #endif
 
 	err = 0;
 	lock_sock(sk);
 
-	switch(optname)
-	{
+	switch (optname) {
 		case IP_OPTIONS:
 		{
 			struct ip_options * opt = NULL;
@@ -427,7 +440,7 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 			}
 			opt = xchg(&sk->protinfo.af_inet.opt, opt);
 			if (opt)
-				kfree_s(opt, sizeof(struct ip_options) + opt->optlen);
+				kfree(opt);
 			break;
 		}
 		case IP_PKTINFO:
@@ -462,8 +475,15 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 			break;
 		case IP_TOS:	/* This sets both TOS and Precedence */
 			  /* Reject setting of unused bits */
+#ifndef CONFIG_INET_ECN
 			if (val & ~(IPTOS_TOS_MASK|IPTOS_PREC_MASK))
 				goto e_inval;
+#else
+			if (sk->type == SOCK_STREAM) {
+				val &= ~3;
+				val |= sk->protinfo.af_inet.tos & 3;
+			}
+#endif
 			if (IPTOS_PREC(val) >= IPTOS_PREC_CRITIC_ECP && 
 			    !capable(CAP_NET_ADMIN)) {
 				err = -EPERM;
@@ -595,6 +615,12 @@ int ip_setsockopt(struct sock *sk, int level, int optname, char *optval, int opt
 		case IP_ROUTER_ALERT:	
 			err = ip_ra_control(sk, val ? 1 : 0, NULL);
 			break;
+
+		case IP_FREEBIND:
+			if (optlen<1)
+				goto e_inval;
+			sk->protinfo.af_inet.freebind = !!val; 
+	                break;			
  
 		default:
 #ifdef CONFIG_NETFILTER
@@ -715,16 +741,14 @@ int ip_getsockopt(struct sock *sk, int level, int optname, char *optval, int *op
 			break;
 		case IP_MULTICAST_IF:
 		{
-			struct ip_mreqn mreq;
-			len = min(len,sizeof(struct ip_mreqn));
-			mreq.imr_ifindex = sk->protinfo.af_inet.mc_index;
-			mreq.imr_address.s_addr = sk->protinfo.af_inet.mc_addr;
-			mreq.imr_multiaddr.s_addr = 0;
+			struct in_addr addr;
+			len = min(len,sizeof(struct in_addr));
+			addr.s_addr = sk->protinfo.af_inet.mc_addr;
 			release_sock(sk);
 
   			if(put_user(len, optlen))
   				return -EFAULT;
-			if(copy_to_user((void *)optval, &mreq, len))
+			if(copy_to_user((void *)optval, &addr, len))
 				return -EFAULT;
 			return 0;
 		}
@@ -756,6 +780,9 @@ int ip_getsockopt(struct sock *sk, int level, int optname, char *optval, int *op
 			len -= msg.msg_controllen;
 			return put_user(len, optlen);
 		}
+		case IP_FREEBIND: 
+			val = sk->protinfo.af_inet.freebind; 
+			break; 
 		default:
 #ifdef CONFIG_NETFILTER
 			val = nf_getsockopt(sk, PF_INET, optname, optval, 

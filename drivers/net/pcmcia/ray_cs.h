@@ -33,8 +33,8 @@ typedef struct ray_dev_t {
     UCHAR *rmem;                   /* pointer to receive buffer window       */
     dev_link_t *finder;            /* pointer back to dev_link_t for card    */
     struct timer_list timer;
-    int tx_ccs_lock;
-    int ccs_lock;
+    long tx_ccs_lock;
+    long ccs_lock;
     int   dl_param_ccs;
     union {
         struct b4_startup_params b4;
@@ -50,7 +50,7 @@ typedef struct ray_dev_t {
     UCHAR auth_id[6];
     UCHAR net_default_tx_rate;
     UCHAR encryption;
-    struct enet_statistics stats;
+    struct net_device_stats stats;
 
     UCHAR net_type;
     UCHAR sta_type;

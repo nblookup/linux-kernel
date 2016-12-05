@@ -9,11 +9,13 @@
  * Rewritten. Old one was good in 2.2, but in 2.3 it was immoral. --ANK (990903)
  */
 
+#include <linux/config.h>
 #include <linux/mm.h>
 #include <linux/kernel_stat.h>
 #include <linux/interrupt.h>
 #include <linux/smp_lock.h>
 #include <linux/init.h>
+#include <linux/tqueue.h>
 
 /*
    - No shared variables, all the data are CPU local.
@@ -38,9 +40,12 @@
    - Bottom halves: globally serialized, grr...
  */
 
+/* No separate irq_stat for s390, it is part of PSA */
+#if !defined(CONFIG_ARCH_S390)
+irq_cpustat_t irq_stat[NR_CPUS];
+#endif	/* CONFIG_ARCH_S390 */
 
-struct softirq_state softirq_state[NR_CPUS];
-static struct softirq_action softirq_vec[32];
+static struct softirq_action softirq_vec[32] __cacheline_aligned;
 
 asmlinkage void do_softirq()
 {
@@ -53,15 +58,15 @@ asmlinkage void do_softirq()
 	local_bh_disable();
 
 	local_irq_disable();
-	mask = softirq_state[cpu].mask;
-	active = softirq_state[cpu].active & mask;
+	mask = softirq_mask(cpu);
+	active = softirq_active(cpu) & mask;
 
 	if (active) {
 		struct softirq_action *h;
 
 restart:
 		/* Reset active bitmask before enabling irqs */
-		softirq_state[cpu].active &= ~active;
+		softirq_active(cpu) &= ~active;
 
 		local_irq_enable();
 
@@ -77,7 +82,7 @@ restart:
 
 		local_irq_disable();
 
-		active = softirq_state[cpu].active;
+		active = softirq_active(cpu);
 		if ((active &= mask) != 0)
 			goto retry;
 	}
@@ -107,7 +112,7 @@ void open_softirq(int nr, void (*action)(struct softirq_action*), void *data)
 	softirq_vec[nr].action = action;
 
 	for (i=0; i<NR_CPUS; i++)
-		softirq_state[i].mask |= (1<<nr);
+		softirq_mask(i) |= (1<<nr);
 	spin_unlock_irqrestore(&softirq_mask_lock, flags);
 }
 
@@ -136,6 +141,14 @@ static void tasklet_action(struct softirq_action *a)
 				clear_bit(TASKLET_STATE_SCHED, &t->state);
 
 				t->func(t->data);
+				/*
+				 * talklet_trylock() uses test_and_set_bit that imply
+				 * an mb when it returns zero, thus we need the explicit
+				 * mb only here: while closing the critical section.
+				 */
+#ifdef CONFIG_SMP
+				smp_mb__before_clear_bit();
+#endif
 				tasklet_unlock(t);
 				continue;
 			}
@@ -198,10 +211,15 @@ void tasklet_init(struct tasklet_struct *t,
 
 void tasklet_kill(struct tasklet_struct *t)
 {
+	if (in_interrupt())
+		printk("Attempt to kill tasklet from interrupt\n");
+
 	while (test_and_set_bit(TASKLET_STATE_SCHED, &t->state)) {
-		if (in_interrupt())
-			panic("Attempt to kill tasklet from interrupt\n");
-		schedule();
+		current->state = TASK_RUNNING;
+		do {
+			current->policy |= SCHED_YIELD;
+			schedule();
+		} while (test_bit(TASKLET_STATE_SCHED, &t->state));
 	}
 	tasklet_unlock_wait(t);
 	clear_bit(TASKLET_STATE_SCHED, &t->state);
@@ -271,4 +289,29 @@ void __init softirq_init()
 	open_softirq(HI_SOFTIRQ, tasklet_hi_action, NULL);
 }
 
+void __run_task_queue(task_queue *list)
+{
+	struct list_head head, *next;
+	unsigned long flags;
 
+	spin_lock_irqsave(&tqueue_lock, flags);
+	list_add(&head, list);
+	list_del_init(list);
+	spin_unlock_irqrestore(&tqueue_lock, flags);
+
+	next = head.next;
+	while (next != &head) {
+		void (*f) (void *);
+		struct tq_struct *p;
+		void *data;
+
+		p = list_entry(next, struct tq_struct, list);
+		next = next->next;
+		f = p->routine;
+		data = p->data;
+		wmb();
+		p->sync = 0;
+		if (f)
+			f(data);
+	}
+}

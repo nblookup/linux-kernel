@@ -312,7 +312,7 @@ STATIC void qla1280_abort_queue_single(scsi_qla_host_t *,uint32_t,uint32_t,uint3
 STATIC int qla1280_return_status( sts_entry_t *sts, Scsi_Cmnd       *cp);
 STATIC void qla1280_removeq(scsi_lu_t *q, srb_t *sp);
 STATIC void qla1280_mem_free(scsi_qla_host_t *ha);
-void qla1280_do_dpc(void *p);
+static void qla1280_do_dpc(void *p);
 #ifdef  QLA1280_UNUSED 
 static void qla1280_set_flags(char * s);
 #endif
@@ -801,13 +801,13 @@ qla1280_detect(Scsi_Host_Template *template)
 	for( i=0; bdp->device_id != 0 && i < NUM_OF_ISP_DEVICES; i++, bdp++ ) {
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,1,95)
 		while ((pdev = pci_find_device(QLA1280_VENDOR_ID,
-			bdp->device_id, pdev ) ))  
+			bdp->device_id, pdev ) ))  {
+		if (pci_enable_device(pdev)) continue;
 #else
 		while (!(pcibios_find_device(QLA1280_VENDOR_ID,
 			bdp->device_id,
-			index++, &pci_bus, &pci_devfn)) )  
+			index++, &pci_bus, &pci_devfn)) )  {
 #endif
-                {
                 /* found a adapter */
 		host = scsi_register(template, sizeof(scsi_qla_host_t));
 		ha = (scsi_qla_host_t *) host->hostdata;
@@ -817,9 +817,7 @@ qla1280_detect(Scsi_Host_Template *template)
 		/* Sanitize the information from PCI BIOS.  */
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,1,95)
 		host->irq = pdev->irq;
-/* this depends on release 2.3.18 */
-		host->io_port = pdev->resource[0].start;
-/* MRS	host->io_port = (unsigned int) pdev->base_address[0]; */
+		host->io_port = pci_resource_start(pdev, 0);
 		ha->pci_bus = pdev->bus->number;
 		ha->pci_device_fn = pdev->devfn;
 		ha->pdev = pdev;
@@ -828,14 +826,13 @@ qla1280_detect(Scsi_Host_Template *template)
 		pcibios_read_config_dword(pci_bus, pci_devfn, OFFSET(cfgp->base_port), &piobase);
 		host->irq = pci_irq;
 		host->io_port = (unsigned int) piobase;
+		host->io_port &= PCI_BASE_ADDRESS_IO_MASK;
 		ha->pci_bus = pci_bus;
 		ha->pci_device_fn = pci_devfn;
 #endif
 		ha->device_id = bdp->device_id;
-		host->io_port &= PCI_BASE_ADDRESS_IO_MASK;
     
                 ha->devnum = i;
-                host->io_port &= PCI_BASE_ADDRESS_IO_MASK;
 		if( qla1280_mem_alloc(ha) ) {
 			printk(KERN_INFO "qla1280: Failed to allocate memory for adapter\n");
 		}
@@ -1085,7 +1082,8 @@ qla1280_queuecommand(Scsi_Cmnd *cmd, void (*fn)(Scsi_Cmnd *))
         {
             CMD_RESULT(cmd) = (int) (DID_BUS_BUSY << 16);
             qla1280_done_q_put(sp, &ha->done_q_first, &ha->done_q_last);
-            queue_task(&ha->run_qla_bh,&tq_scheduler); 
+
+            schedule_task(&ha->run_qla_bh);
             ha->flags.dpc_sched = TRUE;
             DRIVER_UNLOCK
             return(0);
@@ -1583,7 +1581,7 @@ void qla1280_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
             ha->run_qla_bh.routine = qla1280_do_dpc; 
 
              COMTRACE('P') 
-            queue_task_irq(&ha->run_qla_bh,&tq_scheduler); 
+            schedule_task(&ha->run_qla_bh);
             ha->flags.dpc_sched = TRUE;
         }
         clear_bit(QLA1280_IN_ISR_BIT, (int *)&ha->flags);
@@ -1607,7 +1605,7 @@ void qla1280_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
  * "host->can_queue". This can cause a panic if we were in our interrupt
  * code .
  **************************************************************************/
-void qla1280_do_dpc(void *p)
+static void qla1280_do_dpc(void *p)
 {
     scsi_qla_host_t *ha = (scsi_qla_host_t *) p;
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,1,95)
@@ -6166,11 +6164,9 @@ qla1280_debounce_register(volatile uint16_t *addr)
 /*
  * Declarations for load module
  */
-#ifdef MODULE
-Scsi_Host_Template driver_template = QLA1280_LINUX_TEMPLATE;
+static Scsi_Host_Template driver_template = QLA1280_LINUX_TEMPLATE;
 
 #include "scsi_module.c"
-#endif
 
 /************************************************************************
  * qla1280_check_for_dead_scsi_bus                                      *

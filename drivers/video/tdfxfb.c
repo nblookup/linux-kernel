@@ -86,23 +86,7 @@
 #include <video/fbcon-cfb24.h>
 #include <video/fbcon-cfb32.h>
 
-#ifndef LINUX_VERSION_CODE
-#include <linux/version.h>
-#endif
-
-#ifndef KERNEL_VERSION
-#define KERNEL_VERSION(x,y,z) (((x)<<16)+((y)<<8)+(z))
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-#define PCI_DEVICE_ID_3DFX_VOODOO3      0x0005
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-/* nothing? */
-#else
 #include <linux/spinlock.h>
-#endif
 
 /* membase0 register offsets */
 #define STATUS		0x00
@@ -332,10 +316,10 @@ struct fb_info_tdfx {
   u32 max_pixclock;
 
   unsigned long regbase_phys;
-  unsigned long regbase_virt;
+  void *regbase_virt;
   unsigned long regbase_size;
   unsigned long bufbase_phys;
-  unsigned long bufbase_virt;
+  void *bufbase_virt;
   unsigned long bufbase_size;
   unsigned long iobase;
 
@@ -343,7 +327,6 @@ struct fb_info_tdfx {
   struct tdfxfb_par default_par;
   struct tdfxfb_par current_par;
   struct display disp;
-  struct display_switch dispsw;
 #if defined(FBCON_HAS_CFB16) || defined(FBCON_HAS_CFB24) || defined(FBCON_HAS_CFB32)  
   union {
 #ifdef FBCON_HAS_CFB16
@@ -368,15 +351,14 @@ struct fb_info_tdfx {
   } cursor;
  
   spinlock_t DAClock; 
+#ifdef CONFIG_MTRR
+  int mtrr_idx;
+#endif
 };
 
 /*
  *  Frame buffer device API
  */
-static int tdfxfb_open(struct fb_info* info, 
-		       int user);
-static int tdfxfb_release(struct fb_info* info, 
-			  int user);
 static int tdfxfb_get_fix(struct fb_fix_screeninfo* fix, 
 			  int con,
 			  struct fb_info* fb);
@@ -429,10 +411,10 @@ static int  tdfxfb_encode_var(struct fb_var_screeninfo* var,
 static int  tdfxfb_encode_fix(struct fb_fix_screeninfo* fix,
 			      const struct tdfxfb_par* par,
 			      const struct fb_info_tdfx* info);
-static void tdfxfb_set_disp(struct display* disp, 
-			    struct fb_info_tdfx* info,
-			    int bpp, 
-			    int accel);
+static void tdfxfb_set_dispsw(struct display* disp, 
+			      struct fb_info_tdfx* info,
+			      int bpp, 
+			      int accel);
 static int  tdfxfb_getcolreg(u_int regno,
 			     u_int* red, 
 			     u_int* green, 
@@ -472,28 +454,21 @@ static unsigned long do_lfb_size(void);
 /*
  *  Interface used by the world
  */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-void tdfxfb_init(void);
-#else
 int tdfxfb_init(void);
-#endif
 void tdfxfb_setup(char *options, 
 		  int *ints);
 
 static int currcon = 0;
 
 static struct fb_ops tdfxfb_ops = {
-  tdfxfb_open, 
-  tdfxfb_release, 
-  tdfxfb_get_fix, 
-  tdfxfb_get_var, 
-  tdfxfb_set_var,
-  tdfxfb_get_cmap, 
-  tdfxfb_set_cmap, 
-  tdfxfb_pan_display, 
-  tdfxfb_ioctl,
-  NULL,           // fb_mmap
-  NULL            // fb_rasterimg
+	owner:		THIS_MODULE,
+	fb_get_fix:	tdfxfb_get_fix,
+	fb_get_var:	tdfxfb_get_var,
+	fb_set_var:	tdfxfb_set_var,
+	fb_get_cmap:	tdfxfb_get_cmap,
+	fb_set_cmap:	tdfxfb_set_cmap,
+	fb_pan_display:	tdfxfb_pan_display,
+	fb_ioctl:	tdfxfb_ioctl,
 };
 
 struct mode {
@@ -512,70 +487,7 @@ struct mode default_mode[] = {
       0, FB_VMODE_NONINTERLACED
     }
   }
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-  ,
-  { "800x600-8@56", /* @ 56 Hz */
-    {
-      800, 600, 800, 600, 0, 0, 8, 0,
-      {0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
-      0, FB_ACTIVATE_NOW, -1, -1, FB_ACCELF_TEXT, 
-      27778, 128, 24, 22, 1, 72, 2,
-      0, FB_VMODE_NONINTERLACED
-    }
-  },
-  { "1024x768-8@60", /* @ 60 Hz */
-    {
-      1024, 768, 1024, 768, 0, 0, 8, 0,
-      {0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
-      0, FB_ACTIVATE_NOW, -1, -1, FB_ACCELF_TEXT, 
-      15385, 168, 8, 29, 3, 144, 6,
-      0, FB_VMODE_NONINTERLACED
-    }
-  },
-  { "1280x1024-8@61", /* @ 61 Hz */
-    {
-      1280, 1024, 1280, 1024, 0, 0, 8, 0,
-      {0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
-      0, FB_ACTIVATE_NOW, -1, -1, FB_ACCELF_TEXT, 
-      9091, 200, 48, 26, 1, 184, 3,
-      0, FB_VMODE_NONINTERLACED
-    }
-  },
-  { "1024x768-16@60", /* @ 60 Hz */ /* basically for testing */
-    {
-      1024, 768, 1024, 768, 0, 0, 16, 0,
-      {11, 5, 0}, {5, 6, 0}, {0, 5, 0}, {0, 0, 0},
-      0, FB_ACTIVATE_NOW, -1, -1, FB_ACCELF_TEXT, 
-      15385, 168, 8, 29, 3, 144, 6,
-      0, FB_VMODE_NONINTERLACED
-    }
-  },
-  { "1024x768-24@60", /* @ 60 Hz */ 
-    {
-      1024, 768, 1024, 768, 0, 0, 24, 0,
-      {16, 8, 0}, {8, 8, 0}, {0, 8, 0}, {0, 0, 0},
-      0, FB_ACTIVATE_NOW, -1, -1, FB_ACCELF_TEXT, 
-      15385, 168, 8, 29, 3, 144, 6,
-      0, FB_VMODE_NONINTERLACED
-    }
-  },
-  { "1024x768-32@60", /* @ 60 Hz */ 
-    {
-      1024, 768, 1024, 768, 0, 0, 32, 0,
-      {16, 8, 0}, {8, 8, 0}, {0, 8, 0}, {0, 0, 0},
-      0, FB_ACTIVATE_NOW, -1, -1, FB_ACCELF_TEXT, 
-      15385, 168, 8, 29, 3, 144, 6,
-      0, FB_VMODE_NONINTERLACED
-    }
-  }   
-   
-#endif
 };
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-static int modes = sizeof(default_mode)/sizeof(struct mode);
-static int default_mode_index = 0;
-#endif
 
 static struct fb_info_tdfx fb_info;
 
@@ -583,7 +495,9 @@ static int  noaccel = 0;
 static int  nopan   = 0;
 static int  nowrap  = 1;      // not implemented (yet)
 static int  inverse = 0;
+#ifdef CONFIG_MTRR
 static int  nomtrr = 0;
+#endif
 static int  nohwcursor = 0;
 static char __initdata fontname[40] = { 0 };
 static const char *mode_option __initdata = NULL;
@@ -1255,6 +1169,9 @@ static void tdfx_cfbX_cursor(struct display *p, int mode, int x, int y)
           banshee_make_room(2);
 	  tdfx_outl(VIDPROCCFG, info->cursor.disable);
 	  tdfx_outl(HWCURLOC, (y << 16) + x);
+	  /* fix cursor color - XFree86 forgets to restore it properly */
+	  tdfx_outl(HWCURC0, 0);
+	  tdfx_outl(HWCURC1, 0xffffff);
    }
    info->cursor.state = CM_DRAW;
    mod_timer(&info->cursor.timer,jiffies+HZ/2);
@@ -1265,58 +1182,54 @@ static void tdfx_cfbX_cursor(struct display *p, int mode, int x, int y)
 }
 #ifdef FBCON_HAS_CFB8
 static struct display_switch fbcon_banshee8 = {
-   fbcon_cfb8_setup, 
-   tdfx_cfbX_bmove, 
-   tdfx_cfb8_clear, 
-   tdfx_cfb8_putc,
-   tdfx_cfb8_putcs, 
-   tdfx_cfbX_revc,   
-   tdfx_cfbX_cursor, 
-   NULL, 
-   tdfx_cfbX_clear_margins,
-   FONTWIDTH(8)
+   setup:		fbcon_cfb8_setup, 
+   bmove:		tdfx_cfbX_bmove, 
+   clear:		tdfx_cfb8_clear, 
+   putc:		tdfx_cfb8_putc,
+   putcs:		tdfx_cfb8_putcs, 
+   revc:		tdfx_cfbX_revc,   
+   cursor:		tdfx_cfbX_cursor, 
+   clear_margins:	tdfx_cfbX_clear_margins,
+   fontwidthmask:	FONTWIDTH(8)
 };
 #endif
 #ifdef FBCON_HAS_CFB16
 static struct display_switch fbcon_banshee16 = {
-   fbcon_cfb16_setup, 
-   tdfx_cfbX_bmove, 
-   tdfx_cfb16_clear, 
-   tdfx_cfb16_putc,
-   tdfx_cfb16_putcs, 
-   tdfx_cfbX_revc, 
-   tdfx_cfbX_cursor, 
-   NULL, 
-   tdfx_cfbX_clear_margins,
-   FONTWIDTH(8)
+   setup:		fbcon_cfb16_setup, 
+   bmove:		tdfx_cfbX_bmove, 
+   clear:		tdfx_cfb16_clear, 
+   putc:		tdfx_cfb16_putc,
+   putcs:		tdfx_cfb16_putcs, 
+   revc:		tdfx_cfbX_revc, 
+   cursor:		tdfx_cfbX_cursor, 
+   clear_margins:	tdfx_cfbX_clear_margins,
+   fontwidthmask:	FONTWIDTH(8)
 };
 #endif
 #ifdef FBCON_HAS_CFB24
 static struct display_switch fbcon_banshee24 = {
-   fbcon_cfb24_setup, 
-   tdfx_cfbX_bmove, 
-   tdfx_cfb24_clear, 
-   tdfx_cfb24_putc,
-   tdfx_cfb24_putcs, 
-   tdfx_cfbX_revc, 
-   tdfx_cfbX_cursor, 
-   NULL, 
-   tdfx_cfbX_clear_margins,
-   FONTWIDTH(8)
+   setup:		fbcon_cfb24_setup, 
+   bmove:		tdfx_cfbX_bmove, 
+   clear:		tdfx_cfb24_clear, 
+   putc:		tdfx_cfb24_putc,
+   putcs:		tdfx_cfb24_putcs, 
+   revc:		tdfx_cfbX_revc, 
+   cursor:		tdfx_cfbX_cursor, 
+   clear_margins:	tdfx_cfbX_clear_margins,
+   fontwidthmask:	FONTWIDTH(8)
 };
 #endif
 #ifdef FBCON_HAS_CFB32
 static struct display_switch fbcon_banshee32 = {
-   fbcon_cfb32_setup, 
-   tdfx_cfbX_bmove, 
-   tdfx_cfb32_clear, 
-   tdfx_cfb32_putc,
-   tdfx_cfb32_putcs, 
-   tdfx_cfbX_revc, 
-   tdfx_cfbX_cursor, 
-   NULL, 
-   tdfx_cfbX_clear_margins,
-   FONTWIDTH(8)
+   setup:		fbcon_cfb32_setup, 
+   bmove:		tdfx_cfbX_bmove, 
+   clear:		tdfx_cfb32_clear, 
+   putc:		tdfx_cfb32_putc,
+   putcs:		tdfx_cfb32_putcs, 
+   revc:		tdfx_cfbX_revc, 
+   cursor:		tdfx_cfbX_cursor, 
+   clear_margins:	tdfx_cfbX_clear_margins,
+   fontwidthmask:	FONTWIDTH(8)
 };
 #endif
 
@@ -1664,19 +1577,6 @@ static int tdfxfb_encode_var(struct fb_var_screeninfo* var,
   return 0;
 }
 
-static int tdfxfb_open(struct fb_info* info, 
-		       int user) {
-  MOD_INC_USE_COUNT;
-  return(0);
-}
-
-static int tdfxfb_release(struct fb_info* info, 
-			  int user) {
-  MOD_DEC_USE_COUNT;
-  return(0);
-}
-
-
 static int tdfxfb_encode_fix(struct fb_fix_screeninfo*  fix,
 			     const struct tdfxfb_par*   par,
 			     const struct fb_info_tdfx* info) {
@@ -1689,17 +1589,10 @@ static int tdfxfb_encode_fix(struct fb_fix_screeninfo*  fix,
 	   info->dev == PCI_DEVICE_ID_3DFX_BANSHEE 
 	   ? "3Dfx Banshee"
 	   : "3Dfx Voodoo3");
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-    fix->smem_start  = (char*)info->bufbase_phys;
-    fix->smem_len    = info->bufbase_size;
-    fix->mmio_start  = (char*)info->regbase_phys;
-    fix->mmio_len    = info->regbase_size;
-#else
     fix->smem_start  = info->bufbase_phys;
     fix->smem_len    = info->bufbase_size;
     fix->mmio_start  = info->regbase_phys;
     fix->mmio_len    = info->regbase_size;
-#endif
     fix->accel       = FB_ACCEL_3DFX_BANSHEE;
     fix->type        = FB_TYPE_PACKED_PIXELS;
     fix->type_aux    = 0;
@@ -1746,48 +1639,43 @@ static int tdfxfb_get_var(struct fb_var_screeninfo *var,
   return 0;
 }
  
-static void tdfxfb_set_disp(struct display *disp, 
-			    struct fb_info_tdfx *info,
-			    int bpp, 
-			    int accel) {
+static void tdfxfb_set_dispsw(struct display *disp, 
+			      struct fb_info_tdfx *info,
+			      int bpp, 
+			      int accel) {
 
   if (disp->dispsw && disp->conp) 
      fb_con.con_cursor(disp->conp, CM_ERASE);
   switch(bpp) {
 #ifdef FBCON_HAS_CFB8
   case 8:
-    info->dispsw = noaccel ? fbcon_cfb8 : fbcon_banshee8;
-    disp->dispsw = &info->dispsw;
+    disp->dispsw = noaccel ? &fbcon_cfb8 : &fbcon_banshee8;
     if (nohwcursor) fbcon_banshee8.cursor = NULL;
     break;
 #endif
 #ifdef FBCON_HAS_CFB16
   case 16:
-    info->dispsw = noaccel ? fbcon_cfb16 : fbcon_banshee16;
-    disp->dispsw = &info->dispsw;
+    disp->dispsw = noaccel ? &fbcon_cfb16 : &fbcon_banshee16;
     disp->dispsw_data = info->fbcon_cmap.cfb16;
     if (nohwcursor) fbcon_banshee16.cursor = NULL;
     break;
 #endif
 #ifdef FBCON_HAS_CFB24
   case 24:
-    info->dispsw = noaccel ? fbcon_cfb24 : fbcon_banshee24; 
-    disp->dispsw = &info->dispsw;
+    disp->dispsw = noaccel ? &fbcon_cfb24 : &fbcon_banshee24; 
     disp->dispsw_data = info->fbcon_cmap.cfb24;
     if (nohwcursor) fbcon_banshee24.cursor = NULL;
     break;
 #endif
 #ifdef FBCON_HAS_CFB32
   case 32:
-    info->dispsw = noaccel ? fbcon_cfb32 : fbcon_banshee32;
-    disp->dispsw = &info->dispsw;
+    disp->dispsw = noaccel ? &fbcon_cfb32 : &fbcon_banshee32;
     disp->dispsw_data = info->fbcon_cmap.cfb32;
     if (nohwcursor) fbcon_banshee32.cursor = NULL;
     break;
 #endif
   default:
-    info->dispsw = fbcon_dummy;
-    disp->dispsw = &info->dispsw;
+    disp->dispsw = &fbcon_dummy;
   }
    
 }
@@ -1830,7 +1718,7 @@ static int tdfxfb_set_var(struct fb_var_screeninfo *var,
 	 struct fb_fix_screeninfo fix;
 	 
 	 tdfxfb_encode_fix(&fix, &par, info);
-	 display->screen_base    = (char *)info->bufbase_virt;
+	 display->screen_base    = info->bufbase_virt;
 	 display->visual         = fix.visual;
 	 display->type           = fix.type;
 	 display->type_aux       = fix.type_aux;
@@ -1841,7 +1729,7 @@ static int tdfxfb_set_var(struct fb_var_screeninfo *var,
 	 display->can_soft_blank = 1;
 	 display->inverse        = inverse;
 	 accel = var->accel_flags & FB_ACCELF_TEXT;
-	 tdfxfb_set_disp(display, info, par.bpp, accel);
+	 tdfxfb_set_dispsw(display, info, par.bpp, accel);
 	 
 	 if(nopan) display->scrollmode = SCROLL_YREDRAW;
 	
@@ -1955,20 +1843,10 @@ static int tdfxfb_ioctl(struct inode *inode,
    return -EINVAL;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-__initfunc(void tdfxfb_init(void)) {
-#else
 int __init tdfxfb_init(void) {
-#endif
   struct pci_dev *pdev = NULL;
   struct fb_var_screeninfo var;
   
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-  if(!pcibios_present()) return;
-#else
-  if(!pcibios_present()) return -ENXIO;
-#endif
-
   while ((pdev = pci_find_device(PCI_VENDOR_ID_3DFX, PCI_ANY_ID, pdev))) {
     if(((pdev->class >> 16) == PCI_BASE_CLASS_DISPLAY) &&
        ((pdev->device == PCI_DEVICE_ID_3DFX_BANSHEE) ||
@@ -1983,77 +1861,48 @@ int __init tdfxfb_init(void) {
 	? BANSHEE_MAX_PIXCLOCK
 	: VOODOO3_MAX_PIXCLOCK;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-      fb_info.regbase_phys = pdev->base_address[0] & PCI_BASE_ADDRESS_MEM_MASK;
+      fb_info.regbase_phys = pci_resource_start(pdev, 0);
       fb_info.regbase_size = 1 << 24;
-      fb_info.regbase_virt = 
-	(u32)ioremap_nocache(fb_info.regbase_phys, 1 << 24);
-      if(!fb_info.regbase_virt) {
-	printk("fb: Can't remap %s register area.\n", name);
-	return;
-      }
-
-      fb_info.bufbase_phys = pdev->base_address[1] & PCI_BASE_ADDRESS_MEM_MASK;
-      if(!(fb_info.bufbase_size = do_lfb_size())) {
-	printk("fb: Can't count %s memory.\n", name);
-	iounmap((void*)fb_info.regbase_virt);
-	return;
-      }
-      fb_info.bufbase_virt    = 
-	(u32)ioremap_nocache(fb_info.bufbase_phys, fb_info.bufbase_size);
-      if(!fb_info.regbase_virt) {
-	printk("fb: Can't remap %s framebuffer.\n", name);
-	iounmap((void*)fb_info.regbase_virt);
-	return;
-      }
-
-      fb_info.iobase = pdev->base_address[2] & PCI_BASE_ADDRESS_IO_MASK;
-#else
-      fb_info.regbase_phys = pdev->resource[0].start;
-      fb_info.regbase_size = 1 << 24;
-      fb_info.regbase_virt = 
-	(u32)ioremap_nocache(fb_info.regbase_phys, 1 << 24);
+      fb_info.regbase_virt = ioremap_nocache(fb_info.regbase_phys, 1 << 24);
       if(!fb_info.regbase_virt) {
 	printk("fb: Can't remap %s register area.\n", name);
 	return -ENXIO;
       }
       
-      fb_info.bufbase_phys = pdev->resource[1].start;
+      fb_info.bufbase_phys = pci_resource_start (pdev, 1);
       if(!(fb_info.bufbase_size = do_lfb_size())) {
-	iounmap((void*)fb_info.regbase_virt);
+	iounmap(fb_info.regbase_virt);
 	printk("fb: Can't count %s memory.\n", name);
 	return -ENXIO;
       }
-      fb_info.bufbase_virt    = 
-	(u32)ioremap_nocache(fb_info.bufbase_phys, fb_info.bufbase_size);
+      fb_info.bufbase_virt = ioremap_nocache(fb_info.bufbase_phys, fb_info.bufbase_size);
       if(!fb_info.regbase_virt) {
 	printk("fb: Can't remap %s framebuffer.\n", name);
-	iounmap((void*)fb_info.regbase_virt);
+	iounmap(fb_info.regbase_virt);
 	return -ENXIO;
       }
 
-      fb_info.iobase = pdev->resource[2].start;
-#endif
+      fb_info.iobase = pci_resource_start (pdev, 2);
       
       printk("fb: %s memory = %ldK\n", name, fb_info.bufbase_size >> 10);
 
 #ifdef CONFIG_MTRR
        if (!nomtrr) {
-	  if (mtrr_add(fb_info.bufbase_phys, fb_info.bufbase_size, 
-		       MTRR_TYPE_WRCOMB, 1)>=0)
+          fb_info.mtrr_idx = mtrr_add(fb_info.bufbase_phys, fb_info.bufbase_size,
+	  			      MTRR_TYPE_WRCOMB, 1);
 	    printk("fb: MTRR's  turned on\n");
        }
-#endif	  	 
+#endif
 
       /* clear framebuffer memory */
       memset_io(fb_info.bufbase_virt, 0, fb_info.bufbase_size);
       currcon = -1;
       if (!nohwcursor) tdfxfb_hwcursor_init();
        
+      init_timer(&fb_info.cursor.timer);
       fb_info.cursor.timer.function = do_flashcursor; 
-      fb_info.cursor.state = CM_ERASE;
-      fb_info.cursor.timer.prev = fb_info.cursor.timer.next=NULL;
       fb_info.cursor.timer.data = (unsigned long)(&fb_info);
+      fb_info.cursor.state = CM_ERASE;
       spin_lock_init(&fb_info.DAClock);
        
       strcpy(fb_info.fb_info.modename, "3Dfx "); 
@@ -2068,16 +1917,10 @@ int __init tdfxfb_init(void) {
       fb_info.fb_info.blank      = &tdfxfb_blank;
       fb_info.fb_info.flags      = FBINFO_FLAG_DEFAULT;
       
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-      var = default_mode[default_mode_index < modes
-			? default_mode_index
-			: 0].var;
-#else
       memset(&var, 0, sizeof(var));
       if(!mode_option || 
 	 !fb_find_mode(&var, &fb_info.fb_info, mode_option, NULL, 0, NULL, 8))
 	var = default_mode[0].var;
-#endif
       
       if(noaccel) var.accel_flags &= ~FB_ACCELF_TEXT;
       else var.accel_flags |= FB_ACCELF_TEXT;
@@ -2096,57 +1939,73 @@ int __init tdfxfb_init(void) {
 	if(tdfxfb_decode_var(&var, &fb_info.default_par, &fb_info)) {
 	  /* this is getting really bad!... */
 	  printk("tdfxfb: can't decode default video mode\n");
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-	  return;
-#else
 	  return -ENXIO;
-#endif
 	}
       }
       
-      fb_info.disp.screen_base    = (void*)fb_info.bufbase_virt;
+      fb_info.disp.screen_base    = fb_info.bufbase_virt;
       fb_info.disp.var            = var;
       
       if(tdfxfb_set_var(&var, -1, &fb_info.fb_info)) {
 	printk("tdfxfb: can't set default video mode\n");
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-	return;
-#else
 	return -ENXIO;
-#endif
       }
       
       if(register_framebuffer(&fb_info.fb_info) < 0) {
 	printk("tdfxfb: can't register framebuffer\n");
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-	return;
-#else
 	return -ENXIO;
-#endif
       }
 
       printk("fb%d: %s frame buffer device\n", 
 	     GET_FB_IDX(fb_info.fb_info.node),
 	     fb_info.fb_info.modename);
       
+      /* FIXME: module cannot be unloaded */
+      /* verify tdfxfb_exit before removing this */
       MOD_INC_USE_COUNT;
       
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-      return;
-#else
       return 0;
-#endif
     }
   }
 
   /* hmm, no frame suitable buffer found ... */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-  return;
-#else
   return -ENXIO;
-#endif
 }
 
+/**
+ *	tdfxfb_exit - Driver cleanup
+ *
+ *	Releases all resources allocated during the
+ *	course of the driver's lifetime.
+ *
+ *	FIXME - do results of fb_alloc_cmap need disposal?
+ */
+static void __exit tdfxfb_exit (void)
+{
+	unregister_framebuffer(&fb_info.fb_info);
+	del_timer_sync(&fb_info.cursor.timer);
+
+#ifdef CONFIG_MTRR
+       if (!nomtrr) {
+          mtrr_del(fb_info.mtrr_idx, fb_info.bufbase_phys, fb_info.bufbase_size);
+	    printk("fb: MTRR's  turned off\n");
+       }
+#endif
+
+	iounmap(fb_info.regbase_virt);
+	iounmap(fb_info.bufbase_virt);
+}
+
+MODULE_AUTHOR("Hannu Mallat <hmallat@cc.hut.fi>");
+MODULE_DESCRIPTION("3Dfx framebuffer device driver");
+
+#ifdef MODULE
+module_init(tdfxfb_init);
+#endif
+module_exit(tdfxfb_exit);
+
+
+#ifndef MODULE
 void tdfxfb_setup(char *options, 
 		  int *ints) {
   char* this_opt;
@@ -2175,24 +2034,18 @@ void tdfxfb_setup(char *options,
     } else if (!strncmp(this_opt, "font:", 5)) {
       strncpy(fontname, this_opt + 5, 40);
     } else {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,1)
-      int i;
-      for(i = 0; i < modes; i++) {
-	if(!strcmp(this_opt, default_mode[i].name)) {
-	  default_mode_index = i;
-	}
-      }
-#else
       mode_option = this_opt;
-#endif
     }
   } 
 }
+#endif
 
 static int tdfxfb_switch_con(int con, 
 			     struct fb_info *fb) {
    struct fb_info_tdfx *info = (struct fb_info_tdfx*)fb;
    struct tdfxfb_par par;
+   int old_con = currcon;
+   int set_par = 1;
 
    /* Do we have to save the colormap? */
    if (currcon>=0)
@@ -2202,7 +2055,16 @@ static int tdfxfb_switch_con(int con,
    currcon = con;
    fb_display[currcon].var.activate = FB_ACTIVATE_NOW; 
    tdfxfb_decode_var(&fb_display[con].var, &par, info);
-   tdfxfb_set_par(&par, info);
+   if (old_con>=0 && vt_cons[old_con]->vc_mode!=KD_GRAPHICS) {
+     /* check if we have to change video registers */
+     struct tdfxfb_par old_par;
+     tdfxfb_decode_var(&fb_display[old_con].var, &old_par, info);
+     if (!memcmp(&par,&old_par,sizeof(par)))
+	set_par = 0;	/* avoid flicker */
+   }
+   if (set_par)
+     tdfxfb_set_par(&par, info);
+
    if (fb_display[con].dispsw && fb_display[con].conp)
      fb_con.con_cursor(fb_display[con].conp, CM_ERASE);
    
@@ -2215,10 +2077,10 @@ static int tdfxfb_switch_con(int con,
    
    info->cursor.redraw=1;
    
-   tdfxfb_set_disp(&fb_display[con], 
-		   info, 
-		   par.bpp,
-		   par.accel_flags & FB_ACCELF_TEXT);
+   tdfxfb_set_dispsw(&fb_display[con], 
+		     info, 
+		     par.bpp,
+		     par.accel_flags & FB_ACCELF_TEXT);
    
    tdfxfb_install_cmap(&fb_display[con], fb);
    tdfxfb_updatevar(con, fb);
@@ -2442,7 +2304,7 @@ static void tdfxfb_hwcursor_init(void)
    start = (fb_info.bufbase_size-1024) & PAGE_MASK;
    fb_info.bufbase_size=start; 
    fb_info.cursor.cursorimage=fb_info.bufbase_size;
-   printk("tdfxfb: reserving 1024 bytes for the hwcursor at 0x%08lx\n",
+   printk("tdfxfb: reserving 1024 bytes for the hwcursor at %p\n",
 	  fb_info.regbase_virt+fb_info.cursor.cursorimage);
 }
 

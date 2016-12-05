@@ -6,18 +6,16 @@
 #
 
 .S.s:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -E -o $*.s $<
+	$(CPP) $(AFLAGS) -o $*.s $<
 .S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -c -o $*.o $<
+	$(CC) $(AFLAGS) -c -o $*.o $<
 
 all: dig.a
 
-O_TARGET        = dig.a
-O_OBJS          = iosapic.o setup.o
+O_TARGET := dig.a
 
-ifeq ($(CONFIG_IA64_GENERIC),y)
-O_OBJS		+= machvec.o
-endif
+obj-y := setup.o
+obj-$(CONFIG_IA64_GENERIC) += machvec.o
 
 clean::
 

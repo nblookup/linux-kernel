@@ -1,8 +1,8 @@
 /* drm.h -- Header for Direct Rendering Manager -*- linux-c -*-
  * Created: Mon Jan  4 10:05:05 1999 by faith@precisioninsight.com
- * Revised: Mon Dec  6 17:11:19 1999 by faith@precisioninsight.com
  *
  * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
+ * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
  * All rights reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -11,11 +11,11 @@
  * the rights to use, copy, modify, merge, publish, distribute, sublicense,
  * and/or sell copies of the Software, and to permit persons to whom the
  * Software is furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice (including the next
  * paragraph) shall be included in all copies or substantial portions of the
  * Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
@@ -23,9 +23,9 @@
  * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
- * 
- * $PI: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/drm.h,v 1.46 1999/08/20 20:00:53 faith Exp $
- * $XFree86: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/drm.h,v 1.1 1999/09/25 14:37:58 dawes Exp $
+ *
+ * Authors:
+ *    Rickard E. (Rik) Faith <faith@valinux.com>
  *
  * Acknowledgements:
  * Dec 1999, Richard Henderson <rth@twiddle.net>, move to generic cmpxchg.
@@ -35,7 +35,14 @@
 #ifndef _DRM_H_
 #define _DRM_H_
 
+#include <linux/config.h>
+#if defined(__linux__)
 #include <asm/ioctl.h>		/* For _IO* macros */
+#define DRM_IOCTL_NR(n)	     _IOC_NR(n)
+#elif defined(__FreeBSD__)
+#include <sys/ioccom.h>
+#define DRM_IOCTL_NR(n)	     ((n) & 0xff)
+#endif
 
 #define DRM_PROC_DEVICES "/proc/devices"
 #define DRM_PROC_MISC	 "/proc/misc"
@@ -62,6 +69,23 @@ typedef unsigned int  drm_context_t;
 typedef unsigned int  drm_drawable_t;
 typedef unsigned int  drm_magic_t;
 
+/* Warning: If you change this structure, make sure you change
+ * XF86DRIClipRectRec in the server as well */
+
+typedef struct drm_clip_rect {
+           unsigned short x1;
+           unsigned short y1;
+           unsigned short x2;
+           unsigned short y2;
+} drm_clip_rect_t;
+
+/* Seperate include files for the i810/mga/r128 specific structures */
+#include "mga_drm.h"
+#include "i810_drm.h"
+#include "r128_drm.h"
+#ifdef CONFIG_DRM_SIS
+#include "sis_drm.h"
+#endif
 
 typedef struct drm_version {
 	int    version_major;	  /* Major version			    */
@@ -102,7 +126,8 @@ typedef struct drm_control {
 typedef enum drm_map_type {
 	_DRM_FRAME_BUFFER = 0,	  /* WC (no caching), no core dump	    */
 	_DRM_REGISTERS	  = 1,	  /* no caching, no core dump		    */
-	_DRM_SHM	  = 2	  /* shared, cached			    */
+	_DRM_SHM	  = 2,	  /* shared, cached			    */
+	_DRM_AGP          = 3	  /* AGP/GART                               */
 } drm_map_type_t;
 
 typedef enum drm_map_flags {
@@ -166,8 +191,11 @@ typedef struct drm_buf_desc {
 	int	      low_mark;	 /* Low water mark			     */
 	int	      high_mark; /* High water mark			     */
 	enum {
-		DRM_PAGE_ALIGN = 0x01  /* Align on page boundaries for DMA   */
+		_DRM_PAGE_ALIGN = 0x01, /* Align on page boundaries for DMA  */
+		_DRM_AGP_BUFFER = 0x02  /* Buffer is in agp space            */
 	}	      flags;
+	unsigned long agp_start; /* Start address of where the agp buffers
+				  * are in the agp aperture */
 } drm_buf_desc_t;
 
 typedef struct drm_buf_info {
@@ -238,8 +266,39 @@ typedef struct drm_irq_busid {
 	int funcnum;
 } drm_irq_busid_t;
 
+typedef struct drm_agp_mode {
+	unsigned long mode;
+} drm_agp_mode_t;
+
+				/* For drm_agp_alloc -- allocated a buffer */
+typedef struct drm_agp_buffer {
+	unsigned long size;	/* In bytes -- will round to page boundary */
+	unsigned long handle;	/* Used for BIND/UNBIND ioctls */
+	unsigned long type;     /* Type of memory to allocate  */
+        unsigned long physical; /* Physical used by i810       */
+} drm_agp_buffer_t;
+
+				/* For drm_agp_bind */
+typedef struct drm_agp_binding {
+	unsigned long handle;   /* From drm_agp_buffer */
+	unsigned long offset;	/* In bytes -- will round to page boundary */
+} drm_agp_binding_t;
+
+typedef struct drm_agp_info {
+	int            agp_version_major;
+	int            agp_version_minor;
+	unsigned long  mode;
+	unsigned long  aperture_base;  /* physical address */
+	unsigned long  aperture_size;  /* bytes */
+	unsigned long  memory_allowed; /* bytes */
+	unsigned long  memory_used;
+
+				/* PCI information */
+	unsigned short id_vendor;
+	unsigned short id_device;
+} drm_agp_info_t;
+
 #define DRM_IOCTL_BASE	     'd'
-#define DRM_IOCTL_NR(n)	     _IOC_NR(n)
 #define DRM_IO(nr)	     _IO(DRM_IOCTL_BASE,nr)
 #define DRM_IOR(nr,size)     _IOR(DRM_IOCTL_BASE,nr,size)
 #define DRM_IOW(nr,size)     _IOW(DRM_IOCTL_BASE,nr,size)
@@ -248,7 +307,7 @@ typedef struct drm_irq_busid {
 
 #define DRM_IOCTL_VERSION    DRM_IOWR(0x00, drm_version_t)
 #define DRM_IOCTL_GET_UNIQUE DRM_IOWR(0x01, drm_unique_t)
-#define DRM_IOCTL_GET_MAGIC  DRM_IOW( 0x02, drm_auth_t)
+#define DRM_IOCTL_GET_MAGIC  DRM_IOR( 0x02, drm_auth_t)
 #define DRM_IOCTL_IRQ_BUSID  DRM_IOWR(0x03, drm_irq_busid_t)
 
 #define DRM_IOCTL_SET_UNIQUE DRM_IOW( 0x10, drm_unique_t)
@@ -276,5 +335,63 @@ typedef struct drm_irq_busid {
 #define DRM_IOCTL_LOCK	     DRM_IOW( 0x2a, drm_lock_t)
 #define DRM_IOCTL_UNLOCK     DRM_IOW( 0x2b, drm_lock_t)
 #define DRM_IOCTL_FINISH     DRM_IOW( 0x2c, drm_lock_t)
+
+#define DRM_IOCTL_AGP_ACQUIRE DRM_IO(  0x30)
+#define DRM_IOCTL_AGP_RELEASE DRM_IO(  0x31)
+#define DRM_IOCTL_AGP_ENABLE  DRM_IOW( 0x32, drm_agp_mode_t)
+#define DRM_IOCTL_AGP_INFO    DRM_IOR( 0x33, drm_agp_info_t)
+#define DRM_IOCTL_AGP_ALLOC   DRM_IOWR(0x34, drm_agp_buffer_t)
+#define DRM_IOCTL_AGP_FREE    DRM_IOW( 0x35, drm_agp_buffer_t)
+#define DRM_IOCTL_AGP_BIND    DRM_IOW( 0x36, drm_agp_binding_t)
+#define DRM_IOCTL_AGP_UNBIND  DRM_IOW( 0x37, drm_agp_binding_t)
+
+/* Mga specific ioctls */
+#define DRM_IOCTL_MGA_INIT    DRM_IOW( 0x40, drm_mga_init_t)
+#define DRM_IOCTL_MGA_SWAP    DRM_IOW( 0x41, drm_mga_swap_t)
+#define DRM_IOCTL_MGA_CLEAR   DRM_IOW( 0x42, drm_mga_clear_t)
+#define DRM_IOCTL_MGA_ILOAD   DRM_IOW( 0x43, drm_mga_iload_t)
+#define DRM_IOCTL_MGA_VERTEX  DRM_IOW( 0x44, drm_mga_vertex_t)
+#define DRM_IOCTL_MGA_FLUSH   DRM_IOW( 0x45, drm_lock_t )
+#define DRM_IOCTL_MGA_INDICES DRM_IOW( 0x46, drm_mga_indices_t)
+#define DRM_IOCTL_MGA_BLIT    DRM_IOW( 0x47, drm_mga_blit_t)
+
+/* I810 specific ioctls */
+#define DRM_IOCTL_I810_INIT    DRM_IOW( 0x40, drm_i810_init_t)
+#define DRM_IOCTL_I810_VERTEX  DRM_IOW( 0x41, drm_i810_vertex_t)
+#define DRM_IOCTL_I810_CLEAR   DRM_IOW( 0x42, drm_i810_clear_t)
+#define DRM_IOCTL_I810_FLUSH   DRM_IO ( 0x43)
+#define DRM_IOCTL_I810_GETAGE  DRM_IO ( 0x44)
+#define DRM_IOCTL_I810_GETBUF  DRM_IOWR(0x45, drm_i810_dma_t)
+#define DRM_IOCTL_I810_SWAP    DRM_IO ( 0x46)
+#define DRM_IOCTL_I810_COPY    DRM_IOW( 0x47, drm_i810_copy_t)
+#define DRM_IOCTL_I810_DOCOPY  DRM_IO ( 0x48)
+
+/* Rage 128 specific ioctls */
+#define DRM_IOCTL_R128_INIT	 DRM_IOW( 0x40, drm_r128_init_t)
+#define DRM_IOCTL_R128_CCE_START DRM_IO(  0x41)
+#define DRM_IOCTL_R128_CCE_STOP	 DRM_IOW( 0x42, drm_r128_cce_stop_t)
+#define DRM_IOCTL_R128_CCE_RESET DRM_IO(  0x43)
+#define DRM_IOCTL_R128_CCE_IDLE	 DRM_IO(  0x44)
+#define DRM_IOCTL_R128_RESET	 DRM_IO(  0x46)
+#define DRM_IOCTL_R128_SWAP	 DRM_IO(  0x47)
+#define DRM_IOCTL_R128_CLEAR	 DRM_IOW( 0x48, drm_r128_clear_t)
+#define DRM_IOCTL_R128_VERTEX	 DRM_IOW( 0x49, drm_r128_vertex_t)
+#define DRM_IOCTL_R128_INDICES	 DRM_IOW( 0x4a, drm_r128_indices_t)
+#define DRM_IOCTL_R128_BLIT	 DRM_IOW( 0x4b, drm_r128_blit_t)
+#define DRM_IOCTL_R128_DEPTH	 DRM_IOW( 0x4c, drm_r128_depth_t)
+#define DRM_IOCTL_R128_STIPPLE	 DRM_IOW( 0x4d, drm_r128_stipple_t)
+#define DRM_IOCTL_R128_PACKET	 DRM_IOWR(0x4e, drm_r128_packet_t)
+
+#ifdef CONFIG_DRM_SIS
+/* SiS specific ioctls */
+#define SIS_IOCTL_FB_ALLOC     DRM_IOWR( 0x44, drm_sis_mem_t)
+#define SIS_IOCTL_FB_FREE      DRM_IOW( 0x45, drm_sis_mem_t)
+#define SIS_IOCTL_AGP_INIT     DRM_IOWR( 0x53, drm_sis_agp_t)
+#define SIS_IOCTL_AGP_ALLOC    DRM_IOWR( 0x54, drm_sis_mem_t)
+#define SIS_IOCTL_AGP_FREE     DRM_IOW( 0x55, drm_sis_mem_t)
+#define SIS_IOCTL_FLIP         DRM_IOW( 0x48, drm_sis_flip_t)
+#define SIS_IOCTL_FLIP_INIT    DRM_IO( 0x49)
+#define SIS_IOCTL_FLIP_FINAL   DRM_IO( 0x50)
+#endif
 
 #endif

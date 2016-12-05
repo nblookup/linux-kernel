@@ -1,4 +1,4 @@
-/* $Id: init.c,v 1.27 2000/02/23 01:33:56 ralf Exp $
+/* $Id: init.c,v 1.26 2000/02/23 00:41:00 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -39,7 +39,7 @@
 #endif
 #include <asm/mmu_context.h>
 
-static unsigned long totalram_pages = 0;
+static unsigned long totalram_pages;
 
 extern void prom_fixup_mem_map(unsigned long start, unsigned long end);
 extern void prom_free_prom_memory(void);
@@ -120,7 +120,8 @@ unsigned long empty_zero_page, zero_page_mask;
 
 static inline unsigned long setup_zero_pages(void)
 {
-	unsigned long order, size, pg;
+	unsigned long order, size;
+	struct page *page;
 
 	switch (mips_cputype) {
 	case CPU_R4000SC:
@@ -137,11 +138,11 @@ static inline unsigned long setup_zero_pages(void)
 	if (!empty_zero_page)
 		panic("Oh boy, that early out of memory?");
 
-	pg = MAP_NR(empty_zero_page);
-	while (pg < MAP_NR(empty_zero_page) + (1 << order)) {
-		set_bit(PG_reserved, &mem_map[pg].flags);
-		set_page_count(mem_map + pg, 0);
-		pg++;
+	page = virt_to_page(empty_zero_page);
+	while (page < virt_to_page(empty_zero_page + (PAGE_SIZE << order))) {
+		set_bit(PG_reserved, &page->flags);
+		set_page_count(page, 0);
+		page++;
 	}
 
 	size = PAGE_SIZE << order;
@@ -256,12 +257,16 @@ void __init paging_init(void)
 	max_dma = virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
 	low = max_low_pfn;
 
+#if defined(CONFIG_PCI) || defined(CONFIG_ISA)
 	if (low < max_dma)
 		zones_size[ZONE_DMA] = low;
 	else {
 		zones_size[ZONE_DMA] = max_dma;
 		zones_size[ZONE_NORMAL] = low - max_dma;
 	}
+#else
+	zones_size[ZONE_DMA] = low;
+#endif
 
 	free_area_init(zones_size);
 }
@@ -305,8 +310,8 @@ void __init mem_init(void)
 void free_initrd_mem(unsigned long start, unsigned long end)
 {
 	for (; start < end; start += PAGE_SIZE) {
-		ClearPageReserved(mem_map + MAP_NR(start));
-		set_page_count(mem_map+MAP_NR(start), 1);
+		ClearPageReserved(virt_to_page(start));
+		set_page_count(virt_to_page(start), 1);
 		free_page(start);
 		totalram_pages++;
 	}
@@ -325,8 +330,8 @@ void free_initmem(void)
     
 	addr = (unsigned long) &__init_begin;
 	while (addr < (unsigned long) &__init_end) {
-		ClearPageReserved(mem_map + MAP_NR(addr));
-		set_page_count(mem_map + MAP_NR(addr), 1);
+		ClearPageReserved(virt_to_page(addr));
+		set_page_count(virt_to_page(addr), 1);
 		free_page(addr);
 		totalram_pages++;
 		addr += PAGE_SIZE;

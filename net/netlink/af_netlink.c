@@ -15,6 +15,7 @@
 #include <linux/module.h>
 
 #include <linux/kernel.h>
+#include <linux/init.h>
 #include <linux/major.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -95,7 +96,7 @@ static void netlink_sock_destruct(struct sock *sk)
 #endif
 }
 
-/* This lock without TASK_EXCLUSIVE is good on UP and it is _very_ bad on SMP.
+/* This lock without WQ_FLAG_EXCLUSIVE is good on UP and it is _very_ bad on SMP.
  * Look, when several writers sleep and reader wakes them up, all but one
  * immediately hit write lock and grab all the cpus. Exclusive sleep solves
  * this, _but_ remember, it adds useless work on UP machines.
@@ -110,7 +111,7 @@ static void netlink_table_grab(void)
 
 		add_wait_queue_exclusive(&nl_table_wait, &wait);
 		for(;;) {
-			set_current_state(TASK_UNINTERRUPTIBLE|TASK_EXCLUSIVE);
+			set_current_state(TASK_UNINTERRUPTIBLE);
 			if (atomic_read(&nl_table_users) == 0)
 				break;
 			write_unlock_bh(&nl_table_lock);
@@ -436,7 +437,7 @@ retry:
 
 		if (signal_pending(current)) {
 			kfree_skb(skb);
-			return -ERESTARTSYS;
+			return sock_intr_errno(timeo);
 		}
 		goto retry;
 	}
@@ -576,6 +577,9 @@ static int netlink_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 			goto out;
 	}
 
+	err = -EMSGSIZE;
+	if ((unsigned)len > sk->sndbuf-32)
+		goto out;
 	err = -ENOBUFS;
 	skb = alloc_skb(len, GFP_KERNEL);
 	if (skb==NULL)
@@ -941,24 +945,23 @@ done:
 #endif
 
 struct proto_ops netlink_ops = {
-	PF_NETLINK,
+	family:		PF_NETLINK,
 
-	netlink_release,
-	netlink_bind,
-	netlink_connect,
-	sock_no_socketpair,
-	sock_no_accept,
-	netlink_getname,
-	datagram_poll,
-	sock_no_ioctl,
-	sock_no_listen,
-	sock_no_shutdown,
-	sock_no_setsockopt,
-	sock_no_getsockopt,
-	sock_no_fcntl,
-	netlink_sendmsg,
-	netlink_recvmsg,
-	sock_no_mmap
+	release:	netlink_release,
+	bind:		netlink_bind,
+	connect:	netlink_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		sock_no_accept,
+	getname:	netlink_getname,
+	poll:		datagram_poll,
+	ioctl:		sock_no_ioctl,
+	listen:		sock_no_listen,
+	shutdown:	sock_no_shutdown,
+	setsockopt:	sock_no_setsockopt,
+	getsockopt:	sock_no_getsockopt,
+	sendmsg:	netlink_sendmsg,
+	recvmsg:	netlink_recvmsg,
+	mmap:		sock_no_mmap,
 };
 
 struct net_proto_family netlink_family_ops = {
@@ -966,16 +969,19 @@ struct net_proto_family netlink_family_ops = {
 	netlink_create
 };
 
-void netlink_proto_init(struct net_proto *pro)
+static int __init netlink_proto_init(void)
 {
 	struct sk_buff *dummy_skb;
 
 	if (sizeof(struct netlink_skb_parms) > sizeof(dummy_skb->cb)) {
-		printk(KERN_CRIT "netlink_proto_init: panic\n");
-		return;
+		printk(KERN_CRIT "netlink_init: panic\n");
+		return -1;
 	}
 	sock_register(&netlink_family_ops);
 #ifdef CONFIG_PROC_FS
 	create_proc_read_entry("net/netlink", 0, 0, netlink_read_proc, NULL);
 #endif
+	return 0;
 }
+
+module_init(netlink_proto_init);

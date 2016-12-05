@@ -1,4 +1,4 @@
-/* $Id: systbls.S,v 1.94 2000/02/16 07:31:30 davem Exp $
+/* $Id: systbls.S,v 1.99 2000/08/12 20:49:49 jj Exp $
  * systbls.S: System call entry point tables for OS compatibility.
  *            The native Linux system call table lives here also.
  *
@@ -33,7 +33,7 @@ sys_call_table:
 /*60*/	.long sys_umask, sys_chroot, sys_newfstat, sys_fstat64, sys_getpagesize
 /*65*/	.long sys_msync, sys_vfork, sys_pread, sys_pwrite, sys_geteuid
 /*70*/	.long sys_getegid, sys_mmap, sys_setreuid, sys_munmap, sys_mprotect
-/*75*/	.long sys_nis_syscall, sys_vhangup, sys_truncate64, sys_nis_syscall, sys_getgroups16
+/*75*/	.long sys_madvise, sys_vhangup, sys_truncate64, sys_mincore, sys_getgroups16
 /*80*/	.long sys_setgroups16, sys_getpgrp, sys_setgroups, sys_setitimer, sys_ftruncate64
 /*85*/	.long sys_swapon, sys_getitimer, sys_setuid, sys_sethostname, sys_setgid
 /*90*/	.long sys_dup2, sys_setfsuid, sys_fcntl, sys_select, sys_setfsgid
@@ -48,8 +48,8 @@ sys_call_table:
 /*135*/	.long sys_nis_syscall, sys_mkdir, sys_rmdir, sys_utimes, sys_stat64
 /*140*/	.long sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_getrlimit
 /*145*/	.long sys_setrlimit, sys_pivot_root, sys_prctl, sys_pciconfig_read, sys_pciconfig_write
-/*150*/	.long sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_poll, sys_nis_syscall
-/*155*/	.long sys_nis_syscall, sys_nis_syscall, sys_statfs, sys_fstatfs, sys_oldumount
+/*150*/	.long sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_poll, sys_getdents64
+/*155*/	.long sys_fcntl64, sys_nis_syscall, sys_statfs, sys_fstatfs, sys_oldumount
 /*160*/	.long sys_nis_syscall, sys_nis_syscall, sys_getdomainname, sys_setdomainname, sys_nis_syscall
 /*165*/	.long sys_quotactl, sys_nis_syscall, sys_mount, sys_ustat, sys_nis_syscall
 /*170*/	.long sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_nis_syscall, sys_getdents
@@ -79,7 +79,7 @@ sys_call_table:
 	.globl sunos_sys_table
 sunos_sys_table:
 /*0*/	.long sunos_indir, sys_exit, sys_fork
-	.long sunos_read, sunos_write, sunos_open
+	.long sunos_read, sunos_write, sys_open
 	.long sys_close, sunos_wait4, sys_creat
 	.long sys_link, sys_unlink, sunos_execv
 	.long sys_chdir, sunos_nosys, sys_mknod
@@ -103,8 +103,8 @@ sunos_sys_table:
 	.long sys_msync, sys_vfork, sunos_nosys
 	.long sunos_nosys, sunos_sbrk, sunos_sstk
 	.long sunos_mmap, sunos_vadvise, sys_munmap
-	.long sys_mprotect, sunos_madvise, sys_vhangup
-	.long sunos_nosys, sunos_mincore, sys_getgroups16
+	.long sys_mprotect, sys_madvise, sys_vhangup
+	.long sunos_nosys, sys_mincore, sys_getgroups16
 	.long sys_setgroups16, sys_getpgrp, sunos_setpgrp
 	.long sys_setitimer, sunos_nosys, sys_swapon
 	.long sys_getitimer, sys_gethostname, sys_sethostname

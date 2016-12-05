@@ -61,7 +61,7 @@
 */
 
 static int
-  BusLogic_DriverOptionsCount =			0;
+  BusLogic_DriverOptionsCount;
 
 
 /*
@@ -79,7 +79,7 @@ static BusLogic_DriverOptions_T
 */
 
 #ifdef MODULE
-static char *BusLogic =	NULL;
+static char *BusLogic;
 MODULE_PARM(BusLogic, "s");
 #endif
 
@@ -90,7 +90,7 @@ MODULE_PARM(BusLogic, "s");
 */
 
 static BusLogic_ProbeOptions_T
-  BusLogic_ProbeOptions =			{ 0 };
+  BusLogic_ProbeOptions;
 
 
 /*
@@ -99,7 +99,7 @@ static BusLogic_ProbeOptions_T
 */
 
 static BusLogic_GlobalOptions_T
-  BusLogic_GlobalOptions =			{ 0 };
+  BusLogic_GlobalOptions;
 
 
 /*
@@ -108,8 +108,8 @@ static BusLogic_GlobalOptions_T
 */
 
 static BusLogic_HostAdapter_T
-  *BusLogic_FirstRegisteredHostAdapter =	NULL,
-  *BusLogic_LastRegisteredHostAdapter =		NULL;
+  *BusLogic_FirstRegisteredHostAdapter,
+  *BusLogic_LastRegisteredHostAdapter;
 
 
 /*
@@ -117,7 +117,7 @@ static BusLogic_HostAdapter_T
 */
 
 static int
-  BusLogic_ProbeInfoCount =			0;
+  BusLogic_ProbeInfoCount;
 
 
 /*
@@ -128,7 +128,7 @@ static int
 */
 
 static BusLogic_ProbeInfo_T
-  *BusLogic_ProbeInfoList =			NULL;
+  *BusLogic_ProbeInfoList;
 
 
 /*
@@ -771,12 +771,15 @@ static int BusLogic_InitializeMultiMasterProbeInfo(BusLogic_HostAdapter_T
       unsigned char Bus = PCI_Device->bus->number;
       unsigned char Device = PCI_Device->devfn >> 3;
       unsigned int IRQ_Channel = PCI_Device->irq;
-      unsigned long BaseAddress0 = PCI_Device->resource[0].start;
-      unsigned long BaseAddress1 = PCI_Device->resource[1].start;
+      unsigned long BaseAddress0 = pci_resource_start(PCI_Device, 0);
+      unsigned long BaseAddress1 = pci_resource_start(PCI_Device, 1);
       BusLogic_IO_Address_T IO_Address = BaseAddress0;
       BusLogic_PCI_Address_T PCI_Address = BaseAddress1;
+
+      if (pci_enable_device(PCI_Device))
+      	continue;
       
-      if (!(PCI_Device->resource[0].flags & PCI_BASE_ADDRESS_SPACE_IO))
+      if (pci_resource_flags(PCI_Device, 0) & IORESOURCE_MEM)
 	{
 	  BusLogic_Error("BusLogic: Base Address0 0x%X not I/O for "
 			 "MultiMaster Host Adapter\n", NULL, BaseAddress0);
@@ -784,7 +787,7 @@ static int BusLogic_InitializeMultiMasterProbeInfo(BusLogic_HostAdapter_T
 			 NULL, Bus, Device, IO_Address);
 	  continue;
 	}
-      if (PCI_Device->resource[1].flags & PCI_BASE_ADDRESS_SPACE_IO)
+      if (pci_resource_flags(PCI_Device,1) & IORESOURCE_IO)
 	{
 	  BusLogic_Error("BusLogic: Base Address1 0x%X not Memory for "
 			 "MultiMaster Host Adapter\n", NULL, BaseAddress1);
@@ -973,7 +976,10 @@ static int BusLogic_InitializeMultiMasterProbeInfo(BusLogic_HostAdapter_T
       unsigned char Bus = PCI_Device->bus->number;
       unsigned char Device = PCI_Device->devfn >> 3;
       unsigned int IRQ_Channel = PCI_Device->irq;
-      BusLogic_IO_Address_T IO_Address = PCI_Device->resource[0].start;
+      BusLogic_IO_Address_T IO_Address = pci_resource_start(PCI_Device, 0);
+
+      if (pci_enable_device(PCI_Device))
+		continue;
 
       if (IO_Address == 0 || IRQ_Channel == 0) continue;
       for (i = 0; i < BusLogic_ProbeInfoCount; i++)
@@ -1017,12 +1023,16 @@ static int BusLogic_InitializeFlashPointProbeInfo(BusLogic_HostAdapter_T
       unsigned char Bus = PCI_Device->bus->number;
       unsigned char Device = PCI_Device->devfn >> 3;
       unsigned int IRQ_Channel = PCI_Device->irq;
-      unsigned long BaseAddress0 = PCI_Device->resource[0].start;
-      unsigned long BaseAddress1 = PCI_Device->resource[1].start;
+      unsigned long BaseAddress0 = pci_resource_start(PCI_Device, 0);
+      unsigned long BaseAddress1 = pci_resource_start(PCI_Device, 1);
       BusLogic_IO_Address_T IO_Address = BaseAddress0;
       BusLogic_PCI_Address_T PCI_Address = BaseAddress1;
+
+      if (pci_enable_device(PCI_Device))
+		continue;
+
 #ifndef CONFIG_SCSI_OMIT_FLASHPOINT
-      if (!(PCI_Device->resource[0].flags & PCI_BASE_ADDRESS_SPACE_IO))
+      if (pci_resource_flags(PCI_Device, 0) & IORESOURCE_MEM)
 	{
 	  BusLogic_Error("BusLogic: Base Address0 0x%X not I/O for "
 			 "FlashPoint Host Adapter\n", NULL, BaseAddress0);
@@ -1030,7 +1040,7 @@ static int BusLogic_InitializeFlashPointProbeInfo(BusLogic_HostAdapter_T
 			 NULL, Bus, Device, IO_Address);
 	  continue;
 	}
-      if (PCI_Device->resource[1].flags & PCI_BASE_ADDRESS_SPACE_IO)
+      if (pci_resource_flags(PCI_Device, 1) & IORESOURCE_IO)
 	{
 	  BusLogic_Error("BusLogic: Base Address1 0x%X not Memory for "
 			 "FlashPoint Host Adapter\n", NULL, BaseAddress1);
@@ -1072,8 +1082,8 @@ static int BusLogic_InitializeFlashPointProbeInfo(BusLogic_HostAdapter_T
 #else
       BusLogic_Error("BusLogic: FlashPoint Host Adapter detected at "
 		     "PCI Bus %d Device %d\n", NULL, Bus, Device);
-      BusLogic_Error("BusLogic: I/O Address 0x%X PCI Address 0x%X, "
-		     "but FlashPoint\n", NULL, IO_Address, PCI_Address);
+      BusLogic_Error("BusLogic: I/O Address 0x%X PCI Address 0x%X, irq %d, "
+		     "but FlashPoint\n", NULL, IO_Address, PCI_Address, IRQ_Channel);
       BusLogic_Error("BusLogic: support was omitted in this kernel "
 		     "configuration.\n", NULL);
 #endif
@@ -2783,6 +2793,11 @@ int BusLogic_DetectHostAdapter(SCSI_Host_Template_T *HostTemplate)
 	Register the SCSI Host structure.
       */
       Host = scsi_register(HostTemplate, sizeof(BusLogic_HostAdapter_T));
+      if(Host==NULL)
+      {
+      	release_region(HostAdapter->IO_Address, HostAdapter->AddressCount);
+      	continue;
+      }
       HostAdapter = (BusLogic_HostAdapter_T *) Host->hostdata;
       memcpy(HostAdapter, PrototypeHostAdapter, sizeof(BusLogic_HostAdapter_T));
       HostAdapter->SCSI_Host = Host;
@@ -4354,7 +4369,8 @@ Target	Requested Completed  Requested Completed  Requested Completed\n\
 		   HostAdapter, Length, BusLogic_MessageBufferSize);
   if ((Length -= Offset) <= 0) return 0;
   if (Length >= BytesAvailable) Length = BytesAvailable;
-  *StartPointer = &HostAdapter->MessageBuffer[Offset];
+  memcpy(ProcBuffer, HostAdapter->MessageBuffer + Offset, Length);
+  *StartPointer = ProcBuffer;
   return Length;
 }
 
@@ -4971,13 +4987,9 @@ BusLogic_Setup(char *str)
 __setup("BusLogic=", BusLogic_Setup);
 
 /*
-  Include Module support if requested.
+  Get it all started
 */
 
-#ifdef MODULE
-
-SCSI_Host_Template_T driver_template = BUSLOGIC;
+static SCSI_Host_Template_T driver_template = BUSLOGIC;
 
 #include "scsi_module.c"
-
-#endif

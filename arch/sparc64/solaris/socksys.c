@@ -1,4 +1,4 @@
-/* $Id: socksys.c,v 1.12 2000/02/17 05:50:11 davem Exp $
+/* $Id: socksys.c,v 1.17 2000/10/19 00:49:53 davem Exp $
  * socksys.c: /dev/inet/ stuff for Solaris emulation.
  *
  * Copyright (C) 1997 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -17,6 +17,7 @@
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/malloc.h>
+#include <linux/in.h>
 #include <linux/devfs_fs_kernel.h>
 
 #include <asm/uaccess.h>
@@ -117,6 +118,7 @@ static int socksys_release(struct inode * inode, struct file * filp)
         struct T_primsg *it;
 
 	/* XXX: check this */
+	lock_kernel();
 	sock = (struct sol_socket_struct *)filp->private_data;
 	SOLDD(("sock release %016lx(%016lx)\n", sock, filp));
 	it = sock->pfirst;
@@ -130,6 +132,7 @@ static int socksys_release(struct inode * inode, struct file * filp)
 	filp->private_data = NULL;
 	SOLDD(("socksys_release %016lx\n", sock));
 	mykfree((char*)sock);
+	unlock_kernel();
 	return 0;
 }
 
@@ -158,7 +161,7 @@ static struct file_operations socksys_fops = {
 	release:	socksys_release,
 };
 
-static devfs_handle_t devfs_handle = NULL;
+static devfs_handle_t devfs_handle;
 
 int __init
 init_socksys(void)
@@ -180,9 +183,9 @@ init_socksys(void)
 		printk ("Couldn't create socket\n");
 		return ret;
 	}
-	devfs_handle = devfs_register (NULL, "socksys", 0, DEVFS_FL_NONE,
+	devfs_handle = devfs_register (NULL, "socksys", DEVFS_FL_DEFAULT,
 				       30, 0,
-				       S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+				       S_IFCHR | S_IRUSR | S_IWUSR,
 				       &socksys_fops, NULL);
 	file = fcheck(ret);
 	/* N.B. Is this valid? Suppose the f_ops are in a module ... */

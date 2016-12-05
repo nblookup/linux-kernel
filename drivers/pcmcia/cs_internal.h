@@ -1,5 +1,5 @@
 /*
- * cs_internal.h 1.46 1999/11/08 20:46:49
+ * cs_internal.h 1.54 2000/10/26 20:10:55
  *
  * The contents of this file are subject to the Mozilla Public License
  * Version 1.1 (the "License"); you may not use this file except in
@@ -12,7 +12,7 @@
  * limitations under the License. 
  *
  * The initial developer of the original code is David A. Hinds
- * <dhinds@pcmcia.sourceforge.org>.  Portions created by David A. Hinds
+ * <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
  *  are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
  */
 
@@ -130,8 +130,6 @@ typedef struct socket_info_t {
     client_handle_t		clients;
     u_int			real_clients;
     client_handle_t		reset_handle;
-    struct timer_list		setup, shutdown;
-    u_long			setup_timeout;
     pccard_mem_map		cis_mem;
     u_char			*cis_virt;
     config_t			*config;
@@ -160,6 +158,7 @@ typedef struct socket_info_t {
 #ifdef CONFIG_PROC_FS
     struct proc_dir_entry	*proc;
 #endif
+    int				use_bus_pm;
 } socket_info_t;
 
 /* Flags in config state */
@@ -205,14 +204,13 @@ void cb_enable(socket_info_t *s);
 void cb_disable(socket_info_t *s);
 void read_cb_mem(socket_info_t *s, u_char fn, int space,
 		 u_int addr, u_int len, void *ptr);
-void cb_release_cis_mem(socket_info_t * s);
+void cb_release_cis_mem(socket_info_t *s);
 
 /* In cistpl.c */
 void read_cis_mem(socket_info_t *s, int attr,
 		  u_int addr, u_int len, void *ptr);
 void write_cis_mem(socket_info_t *s, int attr,
 		   u_int addr, u_int len, void *ptr);
-int setup_cis_mem(socket_info_t *s);
 void release_cis_mem(socket_info_t *s);
 int verify_cis_cache(socket_info_t *s);
 void preload_cis_cache(socket_info_t *s);

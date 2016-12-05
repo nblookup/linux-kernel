@@ -355,6 +355,7 @@ struct fb_info_imstt {
 	struct imstt_regvals init;
 	struct imstt_cursor cursor;
 	unsigned long frame_buffer_phys;
+	unsigned long board_size;
 	__u8 *frame_buffer;
 	unsigned long dc_regs_phys;
 	__u32 *dc_regs;
@@ -1115,30 +1116,58 @@ imsttfbcon_revc (struct display *disp, int sx, int sy)
 
 #ifdef FBCON_HAS_CFB8
 static struct display_switch fbcon_imstt8 = {
-	fbcon_cfb8_setup, imsttfbcon_bmove, imsttfbcon_clear, fbcon_cfb8_putc,
-	fbcon_cfb8_putcs, imsttfbcon_revc, imsttfbcon_cursor, imsttfbcon_set_font, fbcon_cfb8_clear_margins,
-	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
+	setup:		fbcon_cfb8_setup,
+	bmove:		imsttfbcon_bmove,
+	clear:		imsttfbcon_clear,
+	putc:		fbcon_cfb8_putc,
+	putcs:		fbcon_cfb8_putcs,
+	revc:		imsttfbcon_revc,
+	cursor:		imsttfbcon_cursor,
+	set_font:	imsttfbcon_set_font,
+	clear_margins:	fbcon_cfb8_clear_margins,
+	fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
 };
 #endif
 #ifdef FBCON_HAS_CFB16
 static struct display_switch fbcon_imstt16 = {
-	fbcon_cfb16_setup, imsttfbcon_bmove, imsttfbcon_clear, fbcon_cfb16_putc,
-	fbcon_cfb16_putcs, imsttfbcon_revc, imsttfbcon_cursor, imsttfbcon_set_font, fbcon_cfb16_clear_margins,
-	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
+	setup:		fbcon_cfb16_setup,
+	bmove:		imsttfbcon_bmove,
+	clear:		imsttfbcon_clear,
+	putc:		fbcon_cfb16_putc,
+	putcs:		fbcon_cfb16_putcs,
+	revc:		imsttfbcon_revc,
+	cursor:		imsttfbcon_cursor,
+	set_font:	imsttfbcon_set_font,
+	clear_margins:	fbcon_cfb16_clear_margins,
+	fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
 };
 #endif
 #ifdef FBCON_HAS_CFB24
 static struct display_switch fbcon_imstt24 = {
-	fbcon_cfb24_setup, imsttfbcon_bmove, imsttfbcon_clear, fbcon_cfb24_putc,
-	fbcon_cfb24_putcs, imsttfbcon_revc, imsttfbcon_cursor, imsttfbcon_set_font, fbcon_cfb24_clear_margins,
-	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
+	setup:		fbcon_cfb24_setup,
+	bmove:		imsttfbcon_bmove,
+	clear:		imsttfbcon_clear,
+	putc:		fbcon_cfb24_putc,
+	putcs:		fbcon_cfb24_putcs,
+	revc:		imsttfbcon_revc,
+	cursor:		imsttfbcon_cursor,
+	set_font:	imsttfbcon_set_font,
+	clear_margins:	fbcon_cfb24_clear_margins,
+	fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
 };
 #endif
 #ifdef FBCON_HAS_CFB32
 static struct display_switch fbcon_imstt32 = {
-	fbcon_cfb32_setup, imsttfbcon_bmove, imsttfbcon_clear, fbcon_cfb32_putc,
-	fbcon_cfb32_putcs, imsttfbcon_revc, imsttfbcon_cursor, imsttfbcon_set_font, fbcon_cfb32_clear_margins,
-	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
+	setup:		fbcon_cfb32_setup,
+	bmove:		imsttfbcon_bmove,
+	clear:		imsttfbcon_clear,
+	putc:		fbcon_cfb32_putc,
+	putcs:		fbcon_cfb32_putcs,
+	revc:		imsttfbcon_revc,
+	cursor:		imsttfbcon_cursor,
+	set_font:	imsttfbcon_set_font,
+	clear_margins:	fbcon_cfb32_clear_margins,
+	fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
 };
 #endif
 
@@ -1262,20 +1291,6 @@ do_install_cmap (int con, struct fb_info *info)
 		u_int size = fb_display[con].var.bits_per_pixel == 16 ? 32 : 256;
 		fb_set_cmap(fb_default_cmap(size), 1, imsttfb_setcolreg, info);
 	}
-}
-
-static int
-imsttfb_open (struct fb_info *info, int user)
-{
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-static int
-imsttfb_release (struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return 0;
 }
 
 static int
@@ -1608,15 +1623,14 @@ imsttfb_ioctl (struct inode *inode, struct file *file, u_int cmd,
 }
 
 static struct fb_ops imsttfb_ops = {
-	imsttfb_open,
-	imsttfb_release,
-	imsttfb_get_fix,
-	imsttfb_get_var,
-	imsttfb_set_var,
-	imsttfb_get_cmap,
-	imsttfb_set_cmap,
-	imsttfb_pan_display,
-	imsttfb_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	imsttfb_get_fix,
+	fb_get_var:	imsttfb_get_var,
+	fb_set_var:	imsttfb_set_var,
+	fb_get_cmap:	imsttfb_get_cmap,
+	fb_set_cmap:	imsttfb_set_cmap,
+	fb_pan_display:	imsttfb_pan_display,
+	fb_ioctl:	imsttfb_ioctl,
 };
 
 static int
@@ -1866,70 +1880,23 @@ init_imstt(struct fb_info_imstt *p)
 #endif /* CONFIG_FB_COMPAT_XPMAC */
 }
 
-#if defined(CONFIG_FB_OF) && !defined(MODULE)
-void __init 
-imsttfb_of_init(struct device_node *dp)
-{
-	struct fb_info_imstt *p;
-	int i;
-	__u32 addr = 0;
-	__u8 bus, devfn;
-	__u16 cmd;
-
-	for (i = 0; i < dp->n_addrs; i++) {
-		if (dp->addrs[i].size >= 0x02000000)
-			addr = dp->addrs[i].address;
-	}
-	if (!addr)
-		return;
-
-	if (!pci_device_loc(dp, &bus, &devfn)) {
-		if (!pcibios_read_config_word(bus, devfn, PCI_COMMAND, &cmd) && !(cmd & PCI_COMMAND_MEMORY)) {
-			cmd |= PCI_COMMAND_MEMORY;
-			pcibios_write_config_word(bus, devfn, PCI_COMMAND, cmd);
-		}
-	}
-
-	p = kmalloc(sizeof(struct fb_info_imstt), GFP_ATOMIC);
-	if (!p)
-		return;
-	memset(p, 0, sizeof(struct fb_info_imstt));
-
-	if (dp->name[11] == '8' || (dp->name[6] == '3' && dp->name[7] == 'd'))
-		p->ramdac = TVP;
-	else
-		p->ramdac = IBM;
-
-	p->frame_buffer_phys = addr;
-	p->frame_buffer = (__u8 *)ioremap(addr, p->ramdac == IBM ? 0x400000 : 0x800000);
-	p->dc_regs_phys = addr + 0x800000;
-	p->dc_regs = (__u32 *)ioremap(addr + 0x800000, 0x1000);
-	p->cmap_regs_phys = addr + 0x840000;
-	p->cmap_regs = (__u8 *)ioremap(addr + 0x840000, 0x1000);
-
-	init_imstt(p);
-}
-#endif
-
 int __init 
 imsttfb_init(void)
 {
 	int i;
-#if defined(CONFIG_FB_OF) && !defined(MODULE)
-	/* We don't want to be called like this. */
-	/* We rely on Open Firmware (offb) instead. */
-#elif defined(CONFIG_PCI)
 	struct pci_dev *pdev = NULL;
 	struct fb_info_imstt *p;
-	__u32 addr;
+	unsigned long addr, size;
 	__u16 cmd;
 
 	while ((pdev = pci_find_device(PCI_VENDOR_ID_IMS, PCI_ANY_ID, pdev))) {
 		if ((pdev->class >> 16) != PCI_BASE_CLASS_DISPLAY)
 			continue;
-		pci_enable_device(pdev);
+		if (pci_enable_device(pdev))
+			continue;
 
-		addr = pdev->resource[0].start;
+		addr = pci_resource_start (pdev, 0);
+		size = pci_resource_len (pdev, 0);
 		if (!addr)
 			continue;
 
@@ -1938,6 +1905,10 @@ imsttfb_init(void)
 			continue;
 		memset(p, 0, sizeof(struct fb_info_imstt));
 
+		if (!request_mem_region(addr, size, "imsttfb")) {
+			kfree(p);
+			continue;
+		}
 		printk("imsttfb: device=%04x\n", pdev->device);
 
 		switch (pdev->device) {
@@ -1951,6 +1922,7 @@ imsttfb_init(void)
 		}
 
 		p->frame_buffer_phys = addr;
+		p->board_size = size;
 		p->frame_buffer = (__u8 *)ioremap(addr, p->ramdac == IBM ? 0x400000 : 0x800000);
 		p->dc_regs_phys = addr + 0x800000;
 		p->dc_regs = (__u32 *)ioremap(addr + 0x800000, 0x1000);
@@ -1959,7 +1931,6 @@ imsttfb_init(void)
 
 		init_imstt(p);
 	}
-#endif /* CONFIG_PCI */
 	for (i = 0; i < FB_MAX; i++) {
 		if (fb_info_imstt_p[i])
 			return 0;
@@ -2045,6 +2016,7 @@ cleanup_module (void)
 		iounmap(p->dc_regs);
 		iounmap(p->frame_buffer);
 		kfree(p);
+		release_mem_region(p->frame_buffer_phys, p->board_size);
 	}
 }
 

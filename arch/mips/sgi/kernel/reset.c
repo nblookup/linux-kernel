@@ -1,4 +1,4 @@
-/* $Id: reset.c,v 1.8 1999/10/21 00:23:05 ralf Exp $
+/* $Id: reset.c,v 1.7 1999/08/11 20:26:51 andrewb Exp $
  *
  * Reset a SGI.
  *
@@ -88,9 +88,7 @@ static void blink_timeout(unsigned long data)
 	sgi_hpc_write1 ^= (HPC3_WRITE1_LC0OFF|HPC3_WRITE1_LC1OFF);
 	hpc3mregs->write1 = sgi_hpc_write1;
 
-	del_timer(&blink_timer);
-	blink_timer.expires = jiffies + data;
-	add_timer(&blink_timer);
+	mod_timer(&blink_timer, jiffies+data);
 }
 
 static void debounce(unsigned long data)

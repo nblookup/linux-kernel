@@ -1,10 +1,10 @@
-/* $Id: syscall.c,v 1.13 2000/02/04 07:40:23 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995 - 1999 by Ralf Baechle
+ * Copyright (C) 1995 - 2000 by Ralf Baechle
+ * Copyright (C) 2000 Silicon Graphics, Inc.
  *
  * TODO:  Implement the compatibility syscalls.
  *        Don't waste that much memory for empty entries in the syscall
@@ -21,6 +21,7 @@
 #include <linux/mman.h>
 #include <linux/sched.h>
 #include <linux/file.h>
+#include <linux/slab.h>
 #include <linux/utsname.h>
 #include <linux/unistd.h>
 #include <asm/branch.h>
@@ -42,7 +43,6 @@ asmlinkage int sys_pipe(struct pt_regs regs)
 	int fd[2];
 	int error, res;
 
-	lock_kernel();
 	error = do_pipe(fd);
 	if (error) {
 		res = error;
@@ -51,7 +51,6 @@ asmlinkage int sys_pipe(struct pt_regs regs)
 	regs.regs[3] = fd[1];
 	res = fd[0];
 out:
-	unlock_kernel();
 	return res;
 }
 
@@ -71,11 +70,7 @@ do_mmap2(unsigned long addr, unsigned long len, unsigned long prot,
 	}
 
 	down(&current->mm->mmap_sem);
-	lock_kernel();
-
 	error = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
-
-	unlock_kernel();
 	up(&current->mm->mmap_sem);
 
 	if (file)
@@ -102,7 +97,7 @@ asmlinkage int sys_fork(struct pt_regs regs)
 	int res;
 
 	save_static(&regs);
-	res = do_fork(SIGCHLD, regs.regs[29], &regs);
+	res = do_fork(SIGCHLD, regs.regs[29], &regs, 0);
 	return res;
 }
 
@@ -117,7 +112,7 @@ asmlinkage int sys_clone(struct pt_regs regs)
 	newsp = regs.regs[5];
 	if (!newsp)
 		newsp = regs.regs[29];
-	res = do_fork(clone_flags, newsp, &regs);
+	res = do_fork(clone_flags, newsp, &regs, 0);
 	return res;
 }
 
@@ -129,7 +124,6 @@ asmlinkage int sys_execve(struct pt_regs regs)
 	int error;
 	char * filename;
 
-	lock_kernel();
 	filename = getname((char *) (long)regs.regs[4]);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
@@ -139,7 +133,6 @@ asmlinkage int sys_execve(struct pt_regs regs)
 	putname(filename);
 
 out:
-	unlock_kernel();
 	return error;
 }
 

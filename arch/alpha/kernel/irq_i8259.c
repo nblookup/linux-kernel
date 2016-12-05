@@ -126,6 +126,8 @@ init_i8259a_irqs(void)
 # define IACK_SC	CIA_IACK_SC
 #elif defined(CONFIG_ALPHA_PYXIS)
 # define IACK_SC	PYXIS_IACK_SC
+#elif defined(CONFIG_ALPHA_TITAN)
+# define IACK_SC	TITAN_IACK_SC
 #elif defined(CONFIG_ALPHA_TSUNAMI)
 # define IACK_SC	TSUNAMI_IACK_SC
 #elif defined(CONFIG_ALPHA_POLARIS)
@@ -146,12 +148,6 @@ isa_device_interrupt(unsigned long vector, struct pt_regs *regs)
 	 */
 	int j = *(vuip) IACK_SC;
 	j &= 0xff;
-	if (j == 7) {
-		if (!(inb(0x20) & 0x80)) {
-			/* It's only a passive release... */
-			return;
-		}
-	}
 	handle_irq(j, regs);
 }
 #endif

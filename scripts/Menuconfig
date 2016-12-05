@@ -404,7 +404,7 @@ function help () {
 		$DIALOG	--backtitle "$backtitle" \
 			--textbox help.out $ROWS $COLS
 	fi
-	rm help.out
+	rm -f help.out
 }
 
 #
@@ -545,7 +545,7 @@ function l_int () {
 
 			# Semantics of + and ? in GNU expr changed, so
 			# we avoid them:
-			if expr "$answer" : '0$\|-[1-9][0-9]*$\|[1-9][0-9]*$' >/dev/null
+			if expr "$answer" : '0$' '|' "$answer" : '[1-9][0-9]*$' '|' "$answer" : '-[1-9][0-9]*$' >/dev/null
 			then
 				eval $2="$answer"
 			else
@@ -634,6 +634,7 @@ function l_choice () {
 	title="$1"
 	choices="$2"
 	current="$3"
+        chosen=
 
 	#
 	# Scan current value of choices and set radiolist switches.
@@ -644,7 +645,12 @@ function l_choice () {
 	while [ -n "$2" ]
 	do
 		case "$1" in
-		"$current")	list="$list $2 $1 ON "  ;;
+		"$current"*)	if [ -z "$chosen" ]; then
+					list="$list $2 $1 ON "
+					chosen=1
+				else
+					list="$list $2 $1 OFF "
+				fi  ;;
 		*)		list="$list $2 $1 OFF " ;;
 		esac
 			
@@ -722,13 +728,13 @@ function parser(ifile,menu) {
 
 			parser(ifile, newmenu)
 		}
+		else if ($0 ~ /^#|\$MAKE|mainmenu_name/) {
+			printf("") >>menu
+		}
 		else if ($1 ~ "endmenu") {
 			printf("}\n") >>menu
 			return
 		} 
-		else if ($0 ~ /^#|\$MAKE|mainmenu_name/) {
-			printf("") >>menu
-		}
 		else if ($1 == "source") {
 			parser($2,menu)
 		}
@@ -751,12 +757,12 @@ BEGIN {
 function parser(ifile,menu) {
 
 	while (getline <ifile) {
-		if ($1 ~ /mainmenu_option|endmenu/) {
-			printf("") >>menu
-		} 
-		else if ($0 ~ /^#|$MAKE|mainmenu_name/) {
+		if ($0 ~ /^#|$MAKE|mainmenu_name/) {
 			printf("") >>menu
 		}
+		else if ($1 ~ /mainmenu_option|endmenu/) {
+			printf("") >>menu
+		} 
 		else if ($1 == "source") {
 			parser($2,menu)
 		}
@@ -834,7 +840,7 @@ EOM
 			cat <<EOM
 
 Please report this to the maintainer <mec@shout.net>.  You may also
-send a problem report to <linux-kernel@vger.rutgers.edu>.
+send a problem report to <linux-kernel@vger.kernel.org>.
 
 Please indicate the kernel version you are trying to configure and
 which menu you were trying to enter when this error occurred.
@@ -897,7 +903,7 @@ the /usr/src/linux/scripts/lxdialog directory and issuing the
 
 If you have verified that your ncurses install is correct, you may email
 the maintainer <mec@shout.net> or post a message to
-<linux-kernel@vger.rutgers.edu> for additional assistance. 
+<linux-kernel@vger.kernel.org> for additional assistance. 
 
 EOM
 			cleanup
@@ -1192,6 +1198,7 @@ save_configuration () {
 		choices="$2"
 		default="$3"
 		current=
+		chosen=
 
 		set -- $choices
 		while [ -n "$2" ]
@@ -1215,12 +1222,15 @@ save_configuration () {
 		set -- $choices
 		while [ -n "$2" ]
 		do
-			if eval [ "$1" = "$current" ]
-			then
-			    define_bool "$2" "y"
-			else
-			    define_bool "$2" "n"
-			fi
+			case "$1" in
+			"$current"*)	if [ -z "$chosen" ]; then
+						define_bool "$2" "y"
+						chosen=1
+					else
+						define_bool "$2" "n"
+					fi ;;
+			*)		define_bool "$2" "n" ;;
+			esac
 			shift ; shift
 		done
 	}
@@ -1362,7 +1372,7 @@ Use the <TAB> key to move from the input field to the buttons below it."
 
 DIALOG="./scripts/lxdialog/lxdialog"
 
-kernel_version="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
+kernel_version="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}${EXTRAVERSION}"
 
 backtitle="Linux Kernel v$kernel_version Configuration"
 
@@ -1441,7 +1451,7 @@ then
 	if [ ! -f .hdepend -o "$CONFIG_MODVERSIONS" = "y" ] ; then
 	    echo "*** Next, you must run 'make dep'."
 	else
-	    echo "*** Next, you may run 'make zImage', 'make zdisk', or 'make zlilo.'"
+	    echo "*** Next, you may run 'make bzImage', 'make bzdisk', or 'make install'."
 	fi
 	echo
 else
@@ -1450,4 +1460,10 @@ else
 	echo Your kernel configuration changes were NOT saved.
 	echo
 fi
+
+# Remove log if empty.
+if [ ! -s .menuconfig.log ] ; then
+	rm -f .menuconfig.log
+fi
+
 exit 0

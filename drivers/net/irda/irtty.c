@@ -6,7 +6,7 @@
  * Status:        Experimental.
  * Author:        Dag Brattli <dagb@cs.uit.no>
  * Created at:    Tue Dec  9 21:18:38 1997
- * Modified at:   Fri Jan 14 21:02:27 2000
+ * Modified at:   Sat Mar 11 07:43:30 2000
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * Sources:       slip.c by Laurence Culhane,   <loz@holmes.demon.co.uk>
  *                          Fred N. van Kempen, <waltje@uwalt.nl.mugnet.org>
@@ -176,7 +176,7 @@ static int irtty_open(struct tty_struct *tty)
 		MINOR(tty->device) - tty->driver.minor_start +
 		tty->driver.name_base);
 
-	hashbin_insert(irtty, (queue_t *) self, (int) self, NULL);
+	hashbin_insert(irtty, (irda_queue_t *) self, (int) self, NULL);
 
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
@@ -233,8 +233,6 @@ static int irtty_open(struct tty_struct *tty)
 		ERROR(__FUNCTION__ "(), dev_alloc() failed!\n");
 		return -ENOMEM;
 	}
-	/* dev_alloc doesn't clear the struct */
-	memset(((__u8*)dev)+sizeof(char*),0,sizeof(struct net_device)-sizeof(char*));
 
 	dev->priv = (void *) self;
 	self->netdev = dev;
@@ -640,8 +638,16 @@ static int irtty_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 	netif_stop_queue(dev);
 	
 	/* Check if we need to change the speed */
-	if ((speed = irda_get_speed(skb)) != self->io.speed)
-		self->new_speed = speed;
+	if ((speed = irda_get_speed(skb)) != self->io.speed) {
+		/* Check for empty frame */
+		if (!skb->len) {
+			irda_task_execute(self, irtty_change_speed, 
+					  irtty_change_speed_complete, 
+					  NULL, (void *) speed);
+			return 0;
+		} else
+			self->new_speed = speed;
+	}
 
 	/* Init tx buffer*/
 	self->tx_buff.data = self->tx_buff.head;
@@ -954,7 +960,7 @@ static int irtty_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	ASSERT(self != NULL, return -1;);
 	ASSERT(self->magic == IRTTY_MAGIC, return -1;);
 
-	IRDA_DEBUG(2, __FUNCTION__ "(), %s, (cmd=0x%X)\n", dev->name, cmd);
+	IRDA_DEBUG(3, __FUNCTION__ "(), %s, (cmd=0x%X)\n", dev->name, cmd);
 	
 	/* Disable interrupts & save flags */
 	save_flags(flags);
@@ -962,10 +968,14 @@ static int irtty_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	
 	switch (cmd) {
 	case SIOCSBANDWIDTH: /* Set bandwidth */
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
 		irda_task_execute(self, irtty_change_speed, NULL, NULL, 
 				  (void *) irq->ifr_baudrate);
 		break;
 	case SIOCSDONGLE: /* Set dongle */
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
 		/* Initialize dongle */
 		dongle = irda_device_dongle_init(dev, irq->ifr_dongle);
 		if (!dongle)
@@ -986,15 +996,21 @@ static int irtty_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 				  NULL);	
 		break;
 	case SIOCSMEDIABUSY: /* Set media busy */
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
 		irda_device_set_media_busy(self->netdev, TRUE);
 		break;
 	case SIOCGRECEIVING: /* Check if we are receiving right now */
 		irq->ifr_receiving = irtty_is_receiving(self);
 		break;
 	case SIOCSDTRRTS:
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
 		irtty_set_dtr_rts(dev, irq->ifr_dtr, irq->ifr_rts);
 		break;
 	case SIOCSMODE:
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
 		irtty_set_mode(dev, irq->ifr_mode);
 		break;
 	default:
@@ -1019,6 +1035,7 @@ MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("IrDA TTY device driver");
 
 MODULE_PARM(qos_mtt_bits, "i");
+MODULE_PARM_DESC(qos_mtt_bits, "Minimum Turn Time");
 
 /*
  * Function init_module (void)

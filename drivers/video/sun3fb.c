@@ -70,22 +70,16 @@ static int currcon;
 static char fontname[40] __initdata = { 0 };
 static int curblink __initdata = 1;
 
-static int sun3fb_open(struct fb_info *info, int user);
-static int sun3fb_release(struct fb_info *info, int user);
 static int sun3fb_get_fix(struct fb_fix_screeninfo *fix, int con,
 			struct fb_info *info);
 static int sun3fb_get_var(struct fb_var_screeninfo *var, int con,
 			struct fb_info *info);
 static int sun3fb_set_var(struct fb_var_screeninfo *var, int con,
 			struct fb_info *info);
-static int sun3fb_pan_display(struct fb_var_screeninfo *var, int con,
-			struct fb_info *info);
 static int sun3fb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			struct fb_info *info);
 static int sun3fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			struct fb_info *info);
-static int sun3fb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-			    u_long arg, int con, struct fb_info *info);
 static void sun3fb_cursor(struct display *p, int mode, int x, int y);
 static void sun3fb_clear_margin(struct display *p, int s);
 			    
@@ -110,26 +104,13 @@ static int sun3fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 static void do_install_cmap(int con, struct fb_info *info);
 
 static struct fb_ops sun3fb_ops = {
-	sun3fb_open, sun3fb_release, sun3fb_get_fix, sun3fb_get_var, sun3fb_set_var,
-	sun3fb_get_cmap, sun3fb_set_cmap, sun3fb_pan_display, sun3fb_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	sun3fb_get_fix,
+	fb_get_var:	sun3fb_get_var,
+	fb_set_var:	sun3fb_set_var,
+	fb_get_cmap:	sun3fb_get_cmap,
+	fb_set_cmap:	sun3fb_set_cmap,
 };
-
-
-    /*
-     *  Open/Release the frame buffer device
-     */
-
-static int sun3fb_open(struct fb_info *info, int user)
-{
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-static int sun3fb_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return 0;
-}
 
 static void sun3fb_clear_margin(struct display *p, int s)
 {
@@ -244,21 +225,6 @@ static int sun3fb_set_var(struct fb_var_screeninfo *var, int con,
 }
 
     /*
-     *  Pan or Wrap the Display
-     *
-     *  This call looks only at xoffset, yoffset and the FB_VMODE_YWRAP flag
-     */
-
-static int sun3fb_pan_display(struct fb_var_screeninfo *var, int con,
-			      struct fb_info *info)
-{
-	if (var->xoffset || var->yoffset)
-		return -EINVAL;
-	else
-		return 0;
-}
-
-    /*
      *  Hardware cursor
      */
      
@@ -364,17 +330,11 @@ static int sun3fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 	return 0;
 }
 
-static int sun3fb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-			u_long arg, int con, struct fb_info *info)
-{
-	return -EINVAL;
-}
-
     /*
      *  Setup: parse used options
      */
 
-__initfunc(void sun3fb_setup(char *options))
+void __init sun3fb_setup(char *options)
 {
 	char *p;
 	
@@ -561,7 +521,7 @@ void sun3fb_palette(int enter)
     /*
      *  Initialisation
      */
-__initfunc(static void sun3fb_init_fb(int fbtype, unsigned long addr))
+static void __init sun3fb_init_fb(int fbtype, unsigned long addr)
 {
 	static struct linux_sbus_device sdb;
 	struct fb_fix_screeninfo *fix;
@@ -688,7 +648,7 @@ sizechange:
 }
 
 
-__initfunc(int sun3fb_init(void))
+int __init sun3fb_init(void)
 {
 	extern int con_is_present(void);
 	unsigned long addr;

@@ -111,10 +111,7 @@ struct nfsctl_arg {
 		struct nfsctl_uidmap	u_umap;
 		struct nfsctl_fhparm	u_getfh;
 		struct nfsctl_fdparm	u_getfd;
-#ifdef notyet
 		struct nfsctl_fsparm	u_getfs;
-#endif
-		unsigned int		u_debug;
 	} u;
 #define ca_svc		u.u_svc
 #define ca_client	u.u_client
@@ -124,15 +121,11 @@ struct nfsctl_arg {
 #define ca_getfd	u.u_getfd
 #define	ca_getfs	u.u_getfs
 #define ca_authd	u.u_authd
-#define ca_debug	u.u_debug
 };
 
 union nfsctl_res {
 	__u8			cr_getfh[NFS_FHSIZE];
-#ifdef notyet
 	struct knfsd_fh		cr_getfs;
-#endif
-	unsigned int		cr_debug;
 };
 
 #ifdef __KERNEL__
@@ -140,7 +133,7 @@ union nfsctl_res {
  * Kernel syscall implementation.
  */
 #if defined(CONFIG_NFSD) || defined(CONFIG_NFSD_MODULE)
-extern asmlinkage int	sys_nfsservctl(int, void *, void *);
+extern asmlinkage long	sys_nfsservctl(int, void *, void *);
 #else
 #define sys_nfsservctl		sys_ni_syscall
 #endif

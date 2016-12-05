@@ -48,7 +48,6 @@ static struct ctrl_inquiry {
 } *fcs __initdata = { 0 };
 static int fcscount __initdata = 0;
 static atomic_t fcss __initdata = ATOMIC_INIT(0);
-static struct timer_list fc_timer __initdata = { 0 };
 DECLARE_MUTEX_LOCKED(fc_sem);
 
 static int pluto_encode_addr(Scsi_Cmnd *SCpnt, u16 *addr, fc_channel *fc, fcp_cmnd *fcmd);
@@ -92,6 +91,7 @@ int __init pluto_detect(Scsi_Host_Template *tpnt)
 	int i, retry, nplutos;
 	fc_channel *fc;
 	Scsi_Device dev;
+	struct timer_list fc_timer = { function: pluto_detect_timeout };
 
 	tpnt->proc_name = "pluto";
 	fcscount = 0;
@@ -121,7 +121,6 @@ int __init pluto_detect(Scsi_Host_Template *tpnt)
 	memset (fcs, 0, sizeof (struct ctrl_inquiry) * fcscount);
 	memset (&dev, 0, sizeof(dev));
 	atomic_set (&fcss, fcscount);
-	fc_timer.function = pluto_detect_timeout;
 	
 	i = 0;
 	for_each_online_fc_channel(fc) {
@@ -192,7 +191,7 @@ int __init pluto_detect(Scsi_Host_Template *tpnt)
 		if (!atomic_read(&fcss))
 			break; /* All fc channels have answered us */
 	}
-	del_timer(&fc_timer);
+	del_timer_sync(&fc_timer);
 
 	PLND(("Finished search\n"))
 	for (i = 0, nplutos = 0; i < fcscount; i++) {
@@ -222,7 +221,11 @@ int __init pluto_detect(Scsi_Host_Template *tpnt)
 				if (!ages) continue;
 				
 				host = scsi_register (tpnt, sizeof (struct pluto));
-				if (!host) panic ("Cannot register PLUTO host\n");
+				if(!host)
+				{
+					kfree(ages);
+					continue;
+				}
 				
 				nplutos++;
 				
@@ -332,11 +335,8 @@ static int pluto_encode_addr(Scsi_Cmnd *SCpnt, u16 *addr, fc_channel *fc, fcp_cm
 	return 0;
 }
 
-#ifdef MODULE
-
-Scsi_Host_Template driver_template = PLUTO;
+static Scsi_Host_Template driver_template = PLUTO;
 
 #include "scsi_module.c"
 
 EXPORT_NO_SYMBOLS;
-#endif /* MODULE */

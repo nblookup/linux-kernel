@@ -111,10 +111,6 @@
 #define LOGO_W			80
 #define LOGO_LINE	(LOGO_W/8)
 
-static int first_fb_vc = 0;
-static int last_fb_vc = MAX_NR_CONSOLES-1;
-static int fbcon_is_default = 1;
-
 struct display fb_display[MAX_NR_CONSOLES];
 char con2fb_map[MAX_NR_CONSOLES];
 static int logo_lines;
@@ -132,8 +128,6 @@ static int softback_lines;
 #define FNTSUM(fd)	(((int *)(fd))[-4])
 #define FONT_EXTRA_WORDS 4
 
-static char fontname[40] __initdata = { 0 };     /* default font name */
-
 #define CM_SOFTBACK	(8)
 
 #define advance_row(p, delta) (unsigned short *)((unsigned long)(p) + (delta) * conp->vc_size_row)
@@ -149,7 +143,7 @@ static int fbcon_set_origin(struct vc_data *);
  * if dispsw->cursor is NULL, use Atari alike software cursor
  */
 
-static int cursor_drawn = 0;
+static int cursor_drawn;
 
 #define CURSOR_DRAW_DELAY		(1)
 
@@ -160,8 +154,8 @@ static int cursor_drawn = 0;
 #define MAC_CURSOR_BLINK_RATE		(32)
 #define DEFAULT_CURSOR_BLINK_RATE	(20)
 
-static int vbl_cursor_cnt = 0;
-static int cursor_on = 0;
+static int vbl_cursor_cnt;
+static int cursor_on;
 static int cursor_blink_rate;
 
 static inline void cursor_undrawn(void)
@@ -203,8 +197,7 @@ static int fbcon_scrolldelta(struct vc_data *conp, int lines);
  *  Internal routines
  */
 
-static int __init fbcon_setup(char *options);
-static void fbcon_set_disp(int con, int init, int logo);
+static void fbcon_setup(int con, int init, int logo);
 static __inline__ int real_y(struct display *p, int ypos);
 static void fbcon_vbl_handler(int irq, void *dummy, struct pt_regs *fp);
 static __inline__ void updatescrollmode(struct display *p);
@@ -225,7 +218,7 @@ static int fbcon_show_logo(void);
 /*
  * On the Macintoy, there may or may not be a working VBL int. We need to probe
  */
-static int vbl_detected = 0;
+static int vbl_detected;
 
 static void fbcon_vbl_detect(int irq, void *dummy, struct pt_regs *fp)
 {
@@ -236,15 +229,13 @@ static void fbcon_vbl_detect(int irq, void *dummy, struct pt_regs *fp)
 static void cursor_timer_handler(unsigned long dev_addr);
 
 static struct timer_list cursor_timer = {
-    NULL, NULL, 0, 0L, cursor_timer_handler
+    function: cursor_timer_handler
 };
 
 static void cursor_timer_handler(unsigned long dev_addr)
 {
       fbcon_vbl_handler(0, NULL, NULL);
       cursor_timer.expires = jiffies+HZ/50;
-      cursor_timer.data = 0;
-      cursor_timer.next = cursor_timer.prev = NULL;
       add_timer(&cursor_timer);
 }
 
@@ -298,11 +289,17 @@ void set_con2fb_map(int unit, int newidx)
     if (newidx != con2fb_map[unit]) {
        oldfb = registered_fb[oldidx];
        newfb = registered_fb[newidx];
-       if (newfb->fbops->fb_open(newfb,0))
-           return;
-       newfb->count++;
-       oldfb->count--;		
-       oldfb->fbops->fb_release(oldfb,0);
+	if (newfb->fbops->owner)
+		__MOD_INC_USE_COUNT(newfb->fbops->owner);
+	if (newfb->fbops->fb_open && newfb->fbops->fb_open(newfb,0)) {
+		if (newfb->fbops->owner)
+			__MOD_DEC_USE_COUNT(newfb->fbops->owner);
+		return;
+	}
+	if (oldfb->fbops->fb_release)
+		oldfb->fbops->fb_release(oldfb,0);
+	if (oldfb->fbops->owner)
+		__MOD_DEC_USE_COUNT(oldfb->fbops->owner);
        conp = fb_display[unit].conp;
        fontdata = fb_display[unit].fontdata;
        fontwidth = fb_display[unit]._fontwidth;
@@ -331,57 +328,6 @@ void set_con2fb_map(int unit, int newidx)
            newfb->changevar(unit);
    }
 }
-
-static int __init fbcon_setup(char *options)
-{
-    int i, j;
-
-    if (!options || !*options)
-            return 0;
-
-    if (!strncmp(options, "font:", 5))
-        strcpy(fontname, options+5);
-
-    if (!strncmp(options, "scrollback:", 11)) {
-            options += 11;
-            if (*options) {
-                fbcon_softback_size = simple_strtoul(options, &options, 0);
-                if (*options == 'k' || *options == 'K') {
-                        fbcon_softback_size *= 1024;
-                        options++;
-                }
-                if (*options != ',')
-                        return 0;
-                options++;
-            } else
-                return 0;
-    }
-
-    if (!strncmp(options, "map:", 4)) {
-            options += 4;
-            if (*options)
-                    for (i = 0, j = 0; i < MAX_NR_CONSOLES; i++) {
-                            if (!options[j])
-                                    j = 0;
-                            con2fb_map[i] = (options[j++]-'0') % FB_MAX;
-                    }
-            return 0;
-    }
-
-    if (!strncmp(options, "vc:", 3)) {
-            options += 3;
-            if (*options)
-                first_fb_vc = simple_strtoul(options, &options, 10) - 1;
-            if (first_fb_vc < 0)
-                first_fb_vc = 0;
-            if (*options++ == '-')
-                last_fb_vc = simple_strtoul(options, &options, 10) - 1;
-            fbcon_is_default = 0;
-    }
-    return 0;
-}
-
-__setup("fbcon=", fbcon_setup);
 
 /*
  *  Low Level Operations
@@ -471,30 +417,20 @@ static const char *fbcon_startup(void)
     if (irqres) {
 	cursor_blink_rate = DEFAULT_CURSOR_BLINK_RATE;
 	cursor_timer.expires = jiffies+HZ/50;
-	cursor_timer.data = 0;
-	cursor_timer.next = cursor_timer.prev = NULL;
 	add_timer(&cursor_timer);
     }
 
     return display_desc;
 }
 
+
 static void fbcon_init(struct vc_data *conp, int init)
 {
-    int j, unit = conp->vc_num;
+    int unit = conp->vc_num;
     struct fb_info *info;
-	
+
     /* on which frame buffer will we open this console? */
     info = registered_fb[(int)con2fb_map[unit]];
-
-    /*
-     *  We assume initial frame buffer devices can be opened this
-     *  many times
-     */
-    for (j = 0; j < (last_fb_vc - first_fb_vc + 1); j++) {
-        info->fbops->fb_open(info,0);
-	info->count++;	
-    } 	
 
     info->changevar = &fbcon_changevar;
     fb_display[unit] = *(info->disp);	/* copy from default */
@@ -511,8 +447,8 @@ static void fbcon_init(struct vc_data *conp, int init)
     fb_display[unit].cmap.green = 0;
     fb_display[unit].cmap.blue = 0;
     fb_display[unit].cmap.transp = 0;
-    fbcon_set_disp(unit, init, !init);
-    /* Must be done after fbcon_set_disp to prevent excess updates */
+    fbcon_setup(unit, init, !init);
+    /* Must be done after fbcon_setup to prevent excess updates */
     conp->vc_display_fg = &info->display_fg;
     if (!info->display_fg)
         info->display_fg = conp;
@@ -526,7 +462,6 @@ static void fbcon_deinit(struct vc_data *conp)
 
     fbcon_free_font(p);
     p->dispsw = &fbcon_dummy;
-    p->fb_info->count = 0;	
     p->conp = 0;
 }
 
@@ -534,7 +469,7 @@ static void fbcon_deinit(struct vc_data *conp)
 static int fbcon_changevar(int con)
 {
     if (fb_display[con].conp)
-	    fbcon_set_disp(con, 0, 0);
+	    fbcon_setup(con, 0, 0);
     return 0;
 }
 
@@ -573,7 +508,7 @@ static void fbcon_font_widths(struct display *p)
 
 #define fontwidthvalid(p,w) ((p)->dispsw->fontwidthmask & FONTWIDTH(w))
 
-static void fbcon_set_disp(int con, int init, int logo)
+static void fbcon_setup(int con, int init, int logo)
 {
     struct display *p = &fb_display[con];
     struct vc_data *conp = p->conp;
@@ -637,8 +572,9 @@ static void fbcon_set_disp(int con, int init, int logo)
     }
 
     if (!p->fontdata) {
-        if (!fontname[0] || !(font = fbcon_find_font(fontname)))
-	    font = fbcon_get_default_font(p->var.xres, p->var.yres);
+        if (!p->fb_info->fontname[0] ||
+	    !(font = fbcon_find_font(p->fb_info->fontname)))
+	        font = fbcon_get_default_font(p->var.xres, p->var.yres);
         p->_fontwidth = font->width;
         p->_fontheight = font->height;
         p->fontdata = font->data;
@@ -654,7 +590,7 @@ static void fbcon_set_disp(int con, int init, int logo)
 #endif
 	{
 	    /* ++Geert: changed from panic() to `correct and continue' */
-	    printk(KERN_ERR "fbcon_set_disp: No support for fontwidth %d\n", fontwidth(p));
+	    printk(KERN_ERR "fbcon_setup: No support for fontwidth %d\n", fontwidth(p));
 	    p->dispsw = &fbcon_dummy;
 	}
     }
@@ -737,7 +673,7 @@ static void fbcon_set_disp(int con, int init, int logo)
     }
 
     if (p->dispsw == &fbcon_dummy)
-	printk(KERN_WARNING "fbcon_set_disp: type %d (aux %d, depth %d) not "
+	printk(KERN_WARNING "fbcon_setup: type %d (aux %d, depth %d) not "
 	       "supported\n", p->type, p->type_aux, p->var.bits_per_pixel);
     p->dispsw->setup(p);
 
@@ -1186,6 +1122,15 @@ static void fbcon_redraw(struct vc_data *conp, struct display *p,
 		d -= conp->vc_size_row;
 	}
     }
+}
+
+void fbcon_redraw_clear(struct vc_data *conp, struct display *p, int sy, int sx,
+		     int height, int width)
+{
+    int x, y;
+    for (y=0; y<height; y++)
+	for (x=0; x<width; x++)
+	    fbcon_putc(conp, ' ', sy+y, sx+x);
 }
 
 /* This cannot be used together with ypan or ywrap */
@@ -1962,12 +1907,13 @@ static unsigned long fbcon_getxy(struct vc_data *conp, unsigned long pos, int *p
     	    y += softback_lines;
     	ret = pos + (conp->vc_cols - x) * 2;
     } else if (conp->vc_num == fg_console && softback_lines) {
-    	unsigned long offset = (pos - softback_curr) / 2;
+    	unsigned long offset = pos - softback_curr;
     	
+    	if (pos < softback_curr)
+    	    offset += softback_end - softback_buf;
+    	offset /= 2;
     	x = offset % conp->vc_cols;
     	y = offset / conp->vc_cols;
-    	if (pos < softback_curr)
-	    y += (softback_end - softback_buf) / conp->vc_size_row;
 	ret = pos + (conp->vc_cols - x) * 2;
 	if (ret == softback_end)
 	    ret = softback_buf;
@@ -2439,7 +2385,7 @@ static int __init fbcon_show_logo( void )
  *  The console `switch' structure for the frame buffer based console
  */
  
-struct consw fb_con = {
+const struct consw fb_con = {
     con_startup: 	fbcon_startup, 
     con_init: 		fbcon_init,
     con_deinit: 	fbcon_deinit,
@@ -2455,20 +2401,11 @@ struct consw fb_con = {
     con_set_palette: 	fbcon_set_palette,
     con_scrolldelta: 	fbcon_scrolldelta,
     con_set_origin: 	fbcon_set_origin,
-    con_save_screen: 	NULL,
-    con_build_attr:	NULL,
     con_invert_region:	fbcon_invert_region,
     con_screen_pos:	fbcon_screen_pos,
     con_getxy:		fbcon_getxy,
 };
 
-void __init fbconsole_init(void)
-{
-	if (!num_registered_fb || (first_fb_vc > last_fb_vc))
-                return;
-
-	take_over_console(&fb_con, first_fb_vc, last_fb_vc, fbcon_is_default);
-}
 
 /*
  *  Dummy Low Level Operations
@@ -2476,14 +2413,15 @@ void __init fbconsole_init(void)
 
 static void fbcon_dummy_op(void) {}
 
+#define DUMMY	(void *)fbcon_dummy_op
+
 struct display_switch fbcon_dummy = {
-    (void *)fbcon_dummy_op,	/* fbcon_dummy_setup */
-    (void *)fbcon_dummy_op,	/* fbcon_dummy_bmove */
-    (void *)fbcon_dummy_op,	/* fbcon_dummy_clear */
-    (void *)fbcon_dummy_op,	/* fbcon_dummy_putc */
-    (void *)fbcon_dummy_op,	/* fbcon_dummy_putcs */
-    (void *)fbcon_dummy_op,	/* fbcon_dummy_revc */
-    NULL,			/* fbcon_dummy_cursor */
+    setup:	DUMMY,
+    bmove:	DUMMY,
+    clear:	DUMMY,
+    putc:	DUMMY,
+    putcs:	DUMMY,
+    revc:	DUMMY,
 };
 
 
@@ -2493,5 +2431,6 @@ struct display_switch fbcon_dummy = {
 
 EXPORT_SYMBOL(fb_display);
 EXPORT_SYMBOL(fbcon_redraw_bmove);
+EXPORT_SYMBOL(fbcon_redraw_clear);
 EXPORT_SYMBOL(fbcon_dummy);
 EXPORT_SYMBOL(fb_con);

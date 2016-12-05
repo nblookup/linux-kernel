@@ -104,8 +104,8 @@ static void dn_run_flush(unsigned long dummy);
 static struct dn_rt_hash_bucket *dn_rt_hash_table;
 static unsigned dn_rt_hash_mask;
 
-static struct timer_list dn_route_timer = { NULL, NULL, 0, 0L, NULL };
-static struct timer_list dn_rt_flush_timer = { NULL, NULL, 0, 0L, dn_run_flush };
+static struct timer_list dn_route_timer;
+static struct timer_list dn_rt_flush_timer = { function: dn_run_flush };
 int decnet_dst_gc_interval = 2;
 
 static struct dst_ops dn_dst_ops = {
@@ -131,7 +131,7 @@ static __inline__ unsigned dn_hash(unsigned short src, unsigned short dst)
 	return dn_rt_hash_mask & (unsigned)tmp;
 }
 
-static void dn_dst_check_expire(unsigned long dummy)
+static void SMP_TIMER_NAME(dn_dst_check_expire)(unsigned long dummy)
 {
 	int i;
 	struct dn_route *rt, **rtp;
@@ -142,10 +142,12 @@ static void dn_dst_check_expire(unsigned long dummy)
 		rtp = &dn_rt_hash_table[i].chain;
 
 		write_lock(&dn_rt_hash_table[i].lock);
-		for(;(rt=*rtp); rtp = &rt->u.rt_next) {
+		while((rt=*rtp) != NULL) {
 			if (atomic_read(&rt->u.dst.__refcnt) ||
-					(now - rt->u.dst.lastuse) < expire)
+					(now - rt->u.dst.lastuse) < expire) {
+				rtp = &rt->u.rt_next;
 				continue;
+			}
 			*rtp = rt->u.rt_next;
 			rt->u.rt_next = NULL;
 			dst_free(&rt->u.dst);
@@ -156,9 +158,10 @@ static void dn_dst_check_expire(unsigned long dummy)
 			break;
 	}
 
-	dn_route_timer.expires = now + decnet_dst_gc_interval * HZ;
-	add_timer(&dn_route_timer);
+	mod_timer(&dn_route_timer, now + decnet_dst_gc_interval * HZ);
 }
+
+SMP_TIMER_DEFINE(dn_dst_check_expire, dn_dst_task);
 
 static int dn_dst_gc(void)
 {
@@ -172,10 +175,12 @@ static int dn_dst_gc(void)
 		write_lock_bh(&dn_rt_hash_table[i].lock);
 		rtp = &dn_rt_hash_table[i].chain;
 
-		for(; (rt=*rtp); rtp = &rt->u.rt_next) {
+		while((rt=*rtp) != NULL) {
 			if (atomic_read(&rt->u.dst.__refcnt) ||
-					(now - rt->u.dst.lastuse) < expire)
+					(now - rt->u.dst.lastuse) < expire) {
+				rtp = &rt->u.rt_next;
 				continue;
+			}
 			*rtp = rt->u.rt_next;
 			rt->u.rt_next = NULL;
 			dst_free(&rt->u.dst);
@@ -229,7 +234,7 @@ static void dn_insert_route(struct dn_route *rt, unsigned hash)
 	write_unlock_bh(&dn_rt_hash_table[hash].lock);
 }
 
-void dn_run_flush(unsigned long dummy)
+void SMP_TIMER_NAME(dn_run_flush)(unsigned long dummy)
 {
 	int i;
 	struct dn_route *rt, *next;
@@ -250,6 +255,8 @@ nothing_to_declare:
 		write_unlock_bh(&dn_rt_hash_table[i].lock);
 	}
 }
+
+SMP_TIMER_DEFINE(dn_run_flush, dn_flush_task);
 
 static spinlock_t dn_rt_flush_lock = SPIN_LOCK_UNLOCKED;
 
@@ -519,6 +526,7 @@ static int dn_forward(struct sk_buff *skb)
 {
 	struct dn_skb_cb *cb = (struct dn_skb_cb *)skb->cb;
 	struct dst_entry *dst = skb->dst;
+	struct net_device *dev = skb->dev;
 	struct neighbour *neigh;
 	int err = -EINVAL;
 
@@ -544,7 +552,7 @@ static int dn_forward(struct sk_buff *skb)
 	else
 		cb->rt_flags &= ~DN_RT_F_IE;
 
-	return NF_HOOK(PF_DECnet, NF_DN_FORWARD, skb, skb->rx_dev, skb->dev, neigh->output);
+	return NF_HOOK(PF_DECnet, NF_DN_FORWARD, skb, dev, skb->dev, neigh->output);
 
 
 error:
@@ -782,13 +790,14 @@ static int dn_route_input_slow(struct sk_buff *skb)
 	if (dn_db->router && ((neigh = neigh_clone(dn_db->router)) != NULL))
 		goto add_entry;
 
-	if ((neigh = neigh_create(&dn_neigh_table, &cb->src, dev)) != NULL) {
+	neigh = neigh_create(&dn_neigh_table, &cb->src, dev);
+	if (!IS_ERR(neigh)) {
 		if (dev->type == ARPHRD_ETHER)
 			memcpy(neigh->ha, skb->mac.ethernet->h_source, ETH_ALEN);
 		goto add_entry;
 	}
 
-	return -ENOBUFS;
+	return PTR_ERR(neigh);
 
 non_local_input:
 
@@ -804,11 +813,8 @@ non_local_input:
 	key.oif = 0;
 	key.scope = RT_SCOPE_UNIVERSE;
 
-#ifdef CONFIG_DECNET_ROUTE_FWMASK
-	if (skb->nfreason == NF_REASON_FOR_ROUTING)
-		key.fwmark = skb->fwmark;
-	else
-		key.fwmark = 0;
+#ifdef CONFIG_DECNET_ROUTE_FWMARK
+	key.fwmark = skb->nfmark;
 #else
 	key.fwmark = 0;
 #endif
@@ -885,10 +891,8 @@ int dn_route_input(struct sk_buff *skb)
 		if ((rt->key.saddr == cb->src) &&
 				(rt->key.daddr == cb->dst) &&
 				(rt->key.oif == 0) &&
-#ifdef CONFIG_DECNET_ROUTE_FWMASK
-				(rt->key.fwmark == (skb->nfreason ==
-							NF_REASON_FOR_ROUTING
-							? skb->nfmark : 0)) &&
+#ifdef CONFIG_DECNET_ROUTE_FWMARK
+				(rt->key.fwmark == skb->nfmark) &&
 #endif
 				(rt->key.iif == cb->iif)) {
 			rt->u.dst.lastuse = jiffies;
@@ -982,7 +986,6 @@ int dn_cache_getroute(struct sk_buff *in_skb, struct nlmsghdr *nlh, void *arg)
 		}
 		skb->protocol = __constant_htons(ETH_P_DNA_RT);
 		skb->dev = dev;
-		skb->rx_dev = dev;
 		cb->src = src;
 		cb->dst = dst;
 		local_bh_disable();
@@ -999,7 +1002,6 @@ int dn_cache_getroute(struct sk_buff *in_skb, struct nlmsghdr *nlh, void *arg)
 	if (skb->dev)
 		dev_put(skb->dev);
 	skb->dev = NULL;
-	skb->rx_dev = NULL;
 	if (err)
 		goto out_free;
 	skb->dst = &rt->u.dst;

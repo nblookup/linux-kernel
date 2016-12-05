@@ -74,7 +74,7 @@ static char *driver_name = "nsc-ircc";
 
 /* Module parameters */
 static int qos_mtt_bits = 0x07;  /* 1 ms or more */
-static int dongle_id = 0;
+static int dongle_id;
 
 /* Use BIOS settions by default, but user may supply module parameters */
 static unsigned int io[]  = { ~0, ~0, ~0, ~0 };
@@ -708,9 +708,12 @@ static int nsc_ircc_setup(chipio_t *info)
 	switch_bank(iobase, BANK0);
 	
 	/* Set FIFO threshold to TX17, RX16, reset and enable FIFO's */
-	switch_bank(iobase, BANK0);	
+	switch_bank(iobase, BANK0);
 	outb(FCR_RXTH|FCR_TXTH|FCR_TXSR|FCR_RXSR|FCR_FIFO_EN, iobase+FCR);
-	
+
+	outb(0x03, iobase+LCR); 	/* 8 bit word length */
+	outb(MCR_SIR, iobase+MCR); 	/* Start at SIR-mode, also clears LSR*/
+
 	/* Set FIFO size to 32 */
 	switch_bank(iobase, BANK2);
 	outb(EXCR2_RFSIZ|EXCR2_TFSIZ, iobase+EXCR2);
@@ -723,7 +726,7 @@ static int nsc_ircc_setup(chipio_t *info)
 	switch_bank(iobase, BANK6);
 	outb(0x20, iobase+0); /* Set 32 bits FIR CRC */
 	outb(0x0a, iobase+1); /* Set MIR pulse width */
-	outb(0x0d, iobase+2); /* Set SIR pulse width */
+	outb(0x0d, iobase+2); /* Set SIR pulse width to 1.6us */
 	outb(0x2a, iobase+4); /* Set beginning frag, and preamble length */
 
 	MESSAGE("%s, driver loaded (Dag Brattli)\n", driver_name);
@@ -804,8 +807,6 @@ static void nsc_ircc_init_dongle_interface (int iobase, int dongle_id)
 			   dongle_types[dongle_id]); 
 		break;
 	case 0x04: /* Sharp RY5HD01 */
-		IRDA_DEBUG(0, __FUNCTION__ "(), %s not supported yet\n",
-			   dongle_types[dongle_id]); 
 		break;
 	case 0x05: /* Reserved, but this is what the Thinkpad reports */
 		IRDA_DEBUG(0, __FUNCTION__ "(), %s not defined by irda yet\n",
@@ -892,8 +893,7 @@ static void nsc_ircc_change_dongle_speed(int iobase, int speed, int dongle_id)
 			   dongle_types[dongle_id]); 
 		break;
 	case 0x04: /* Sharp RY5HD01 */
-		IRDA_DEBUG(0, __FUNCTION__ "(), %s not supported yet\n",
-			   dongle_types[dongle_id]); 
+		break;
 	case 0x05: /* Reserved */
 		IRDA_DEBUG(0, __FUNCTION__ "(), %s not defined by irda yet\n",
 			   dongle_types[dongle_id]); 
@@ -1076,9 +1076,15 @@ static int nsc_ircc_hard_xmit_sir(struct sk_buff *skb, struct net_device *dev)
 	netif_stop_queue(dev);
 		
 	/* Check if we need to change the speed */
-	if ((speed = irda_get_speed(skb)) != self->io.speed)
-		self->new_speed = speed;
-	
+	if ((speed = irda_get_speed(skb)) != self->io.speed) {
+		/* Check for empty frame */
+		if (!skb->len) {
+			nsc_ircc_change_speed(self, speed); 
+			return 0;
+		} else
+			self->new_speed = speed;
+	}
+
 	spin_lock_irqsave(&self->lock, flags);
 	
 	/* Save current bank */
@@ -1120,8 +1126,14 @@ static int nsc_ircc_hard_xmit_fir(struct sk_buff *skb, struct net_device *dev)
 	netif_stop_queue(dev);
 	
 	/* Check if we need to change the speed */
-	if ((speed = irda_get_speed(skb)) != self->io.speed)
-		self->new_speed = speed;
+	if ((speed = irda_get_speed(skb)) != self->io.speed) {
+		/* Check for empty frame */
+		if (!skb->len) {
+			nsc_ircc_change_speed(self, speed); 
+			return 0;
+		} else
+			self->new_speed = speed;
+	}
 
 	spin_lock_irqsave(&self->lock, flags);
 
@@ -1947,9 +1959,13 @@ static int nsc_ircc_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	
 	switch (cmd) {
 	case SIOCSBANDWIDTH: /* Set bandwidth */
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
 		nsc_ircc_change_speed(self, irq->ifr_baudrate);
 		break;
 	case SIOCSMEDIABUSY: /* Set media busy */
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
 		irda_device_set_media_busy(self->netdev, TRUE);
 		break;
 	case SIOCGRECEIVING: /* Check if we are receiving right now */
@@ -1985,7 +2001,6 @@ static void nsc_ircc_suspend(struct nsc_ircc_cb *self)
 
 static void nsc_ircc_wakeup(struct nsc_ircc_cb *self)
 {
-	struct net_device *dev = self->netdev;
 	int iobase;
 
 	if (!self->io.suspended)
@@ -2026,10 +2041,15 @@ MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("NSC IrDA Device Driver");
 
 MODULE_PARM(qos_mtt_bits, "i");
+MODULE_PARM_DESC(qos_mtt_bits, "Minimum Turn Time");
 MODULE_PARM(io,  "1-4i");
+MODULE_PARM_DESC(io, "Base I/O addresses");
 MODULE_PARM(irq, "1-4i");
+MODULE_PARM_DESC(irq, "IRQ lines");
 MODULE_PARM(dma, "1-4i");
+MODULE_PARM_DESC(dma, "DMA channels");
 MODULE_PARM(dongle_id, "i");
+MODULE_PARM_DESC(dongle_id, "Type-id of used dongle");
 
 int init_module(void)
 {

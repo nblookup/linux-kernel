@@ -468,13 +468,13 @@ static int wss_open(struct net_device *dev, struct sm_state *sm)
 		sm->mode_rx->init(sm);
 
 	if (request_dma(dev->dma, sm->hwdrv->hw_name)) {
-		kfree_s(sm->dma.obuf, dmasz);
+		kfree(sm->dma.obuf);
 		return -EBUSY;
 	}
 	if (request_irq(dev->irq, wss_interrupt, SA_INTERRUPT, 
 			sm->hwdrv->hw_name, dev)) {
 		free_dma(dev->dma);
-		kfree_s(sm->dma.obuf, dmasz);
+		kfree(sm->dma.obuf);
 		return -EBUSY;
 	}
 	request_region(dev->base_addr, WSS_EXTENT, sm->hwdrv->hw_name);
@@ -637,7 +637,7 @@ static int wss_ioctl(struct net_device *dev, struct sm_state *sm, struct ifreq *
 		return i;
 
 	case SMCTL_SETMIXER:
-		if (!suser())
+		if (!capable(CAP_SYS_RAWIO))
 			return -EACCES;
 		if ((bi.data.mix.mixer_type != SM_MIXER_CRYSTAL || 
 		     !SCSTATE->crystal) &&

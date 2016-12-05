@@ -6,24 +6,15 @@
 #include <linux/types.h>
 #include <linux/version.h>
 #include <linux/list.h>
+#include <asm/byteorder.h>
 
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0)
-
-#define DECLARE_WAITQUEUE(name, task) struct wait_queue name = { task, NULL }
-
-typedef struct wait_queue *wait_queue_head_t;
-
-inline static void init_waitqueue_head(wait_queue_head_t *wh)
-{
-        *wh = NULL;
-}
-
-static __inline__ void list_add_tail(struct list_head *new, struct list_head *head)
-{
-        __list_add(new, head->prev, head);
-}
-
+#include "linux22compat.h"
+#else
+#define V22_COMPAT_MOD_INC_USE_COUNT do {} while (0)
+#define V22_COMPAT_MOD_DEC_USE_COUNT do {} while (0)
+#define OWNER_THIS_MODULE owner: THIS_MODULE,
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,18)
@@ -36,10 +27,13 @@ static __inline__ void list_add_tail(struct list_head *new, struct list_head *he
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 #endif
 
+#ifndef MAX
+#define MAX(a,b) ((a) > (b) ? (a) : (b))
+#endif
 
-typedef __u32 quadlet_t;
-typedef __u64 octlet_t;
-typedef __u16 nodeid_t;
+typedef u32 quadlet_t;
+typedef u64 octlet_t;
+typedef u16 nodeid_t;
 
 #define BUS_MASK  0xffc0
 #define NODE_MASK 0x003f

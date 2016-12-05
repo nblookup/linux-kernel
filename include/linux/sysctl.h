@@ -24,7 +24,11 @@
 #ifndef _LINUX_SYSCTL_H
 #define _LINUX_SYSCTL_H
 
+#include <linux/kernel.h>
+#include <linux/types.h>
 #include <linux/list.h>
+
+struct file;
 
 #define CTL_MAXNAME 10
 
@@ -112,6 +116,7 @@ enum
 	KERN_OVERFLOWUID=46,	/* int: overflow UID */
 	KERN_OVERFLOWGID=47,	/* int: overflow GID */
 	KERN_SHMPATH=48,	/* string: path to shm fs */
+	KERN_HOTPLUG=49,	/* string: path to hotplug policy agent */
 };
 
 
@@ -119,7 +124,7 @@ enum
 enum
 {
 	VM_SWAPCTL=1,		/* struct: Set vm swapping control */
-	VM_SWAPOUT=2,		/* int: Background pageout interval */
+	VM_SWAPOUT=2,		/* int: Linear or sqrt() swapout for hogs */
 	VM_FREEPG=3,		/* struct: Set free page thresholds */
 	VM_BDFLUSH=4,		/* struct: Control buffer cache flushing */
 	VM_OVERCOMMIT_MEMORY=5,	/* Turn off the virtual memory safety limit */
@@ -185,7 +190,12 @@ enum
 	NET_CORE_MSG_COST=8,
 	NET_CORE_MSG_BURST=9,
 	NET_CORE_OPTMEM_MAX=10,
-	NET_CORE_HOT_LIST_LENGTH=11
+	NET_CORE_HOT_LIST_LENGTH=11,
+	NET_CORE_DIVERT_VERSION=12,
+	NET_CORE_NO_CONG_THRESH=13,
+	NET_CORE_NO_CONG=14,
+	NET_CORE_LO_CONG=15,
+	NET_CORE_MOD_CONG=16
 };
 
 /* /proc/sys/net/ethernet */
@@ -259,6 +269,16 @@ enum
 	NET_TCP_SYNACK_RETRIES=76,
 	NET_TCP_MAX_ORPHANS=77,
 	NET_TCP_MAX_TW_BUCKETS=78,
+	NET_TCP_FACK=79,
+	NET_TCP_REORDERING=80,
+	NET_TCP_ECN=81,
+	NET_TCP_DSACK=82,
+	NET_TCP_MEM=83,
+	NET_TCP_WMEM=84,
+	NET_TCP_RMEM=85,
+	NET_TCP_APP_WIN=86,
+	NET_TCP_ADV_WIN_SCALE=87,
+	NET_IPV4_NONLOCAL_BIND=88,
 };
 
 enum {
@@ -502,7 +522,10 @@ enum
 	FS_NRSUPER=9,	/* int:current number of allocated super_blocks */
 	FS_MAXSUPER=10,	/* int:maximum number of super_blocks that can be allocated */
 	FS_OVERFLOWUID=11,	/* int: overflow UID */
-	FS_OVERFLOWGID=12	/* int: overflow GID */
+	FS_OVERFLOWGID=12,	/* int: overflow GID */
+	FS_LEASES=13,	/* int: leases enabled */
+	FS_DIR_NOTIFY=14,	/* int: directory notification enabled */
+	FS_LEASE_TIME=15,	/* int: maximum time to wait for a lease break */
 };
 
 /* CTL_DEBUG names: */
@@ -511,7 +534,9 @@ enum
 enum {
 	DEV_CDROM=1,
 	DEV_HWMON=2,
-	DEV_PARPORT=3
+	DEV_PARPORT=3,
+	DEV_RAID=4,
+	DEV_MAC_HID=5
 };
 
 /* /proc/sys/dev/cdrom */
@@ -529,6 +554,12 @@ enum {
 	DEV_PARPORT_DEFAULT=-3
 };
 
+/* /proc/sys/dev/raid */
+enum {
+	DEV_RAID_SPEED_LIMIT_MIN=1,
+	DEV_RAID_SPEED_LIMIT_MAX=2
+};
+
 /* /proc/sys/dev/parport/default */
 enum {
 	DEV_PARPORT_DEFAULT_TIMESLICE=1,
@@ -538,8 +569,11 @@ enum {
 /* /proc/sys/dev/parport/parport n */
 enum {
 	DEV_PARPORT_SPINTIME=1,
-	DEV_PARPORT_HARDWARE=2,
-	DEV_PARPORT_DEVICES=3,
+	DEV_PARPORT_BASE_ADDR=2,
+	DEV_PARPORT_IRQ=3,
+	DEV_PARPORT_DMA=4,
+	DEV_PARPORT_MODES=5,
+	DEV_PARPORT_DEVICES=6,
 	DEV_PARPORT_AUTOPROBE=16
 };
 
@@ -551,6 +585,16 @@ enum {
 /* /proc/sys/dev/parport/parport n/devices/device n */
 enum {
 	DEV_PARPORT_DEVICE_TIMESLICE=1,
+};
+
+/* /proc/sys/dev/mac_hid */
+enum {
+	DEV_MAC_HID_KEYBOARD_SENDS_LINUX_KEYCODES=1,
+	DEV_MAC_HID_KEYBOARD_LOCK_KEYCODES=2,
+	DEV_MAC_HID_MOUSE_BUTTON_EMULATION=3,
+	DEV_MAC_HID_MOUSE_BUTTON2_KEYCODE=4,
+	DEV_MAC_HID_MOUSE_BUTTON3_KEYCODE=5,
+	DEV_MAC_HID_ADB_MOUSE_SENDS_KEYCODES=6
 };
 
 #ifdef __KERNEL__
@@ -595,16 +639,6 @@ extern int do_sysctl_strategy (ctl_table *table,
 extern ctl_handler sysctl_string;
 extern ctl_handler sysctl_intvec;
 extern ctl_handler sysctl_jiffies;
-
-extern int do_string (
-	void *oldval, size_t *oldlenp, void *newval, size_t newlen,
-	int rdwr, char *data, size_t max);
-extern int do_int (
-	void *oldval, size_t *oldlenp, void *newval, size_t newlen,
-	int rdwr, int *data);
-extern int do_struct (
-	void *oldval, size_t *oldlenp, void *newval, size_t newlen,
-	int rdwr, void *data, size_t len);
 
 
 /*

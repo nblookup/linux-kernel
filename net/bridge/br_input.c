@@ -5,7 +5,7 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br_input.c,v 1.3 2000/02/24 19:48:06 davem Exp $
+ *	$Id: br_input.c,v 1.7 2000/12/13 16:44:14 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -19,7 +19,7 @@
 #include <linux/if_bridge.h>
 #include "br_private.h"
 
-unsigned char bridge_ula[5] = { 0x01, 0x80, 0xc2, 0x00, 0x00 };
+unsigned char bridge_ula[6] = { 0x01, 0x80, 0xc2, 0x00, 0x00, 0x00 };
 
 static void br_pass_frame_up(struct net_bridge *br, struct sk_buff *skb)
 {
@@ -28,8 +28,7 @@ static void br_pass_frame_up(struct net_bridge *br, struct sk_buff *skb)
 
 	skb->dev = &br->dev;
 	skb->pkt_type = PACKET_HOST;
-	skb->mac.raw = skb->data;
-	skb_pull(skb, skb->nh.raw - skb->data);
+	skb_pull(skb, skb->mac.raw - skb->data);
 	skb->protocol = eth_type_trans(skb, &br->dev);
 	netif_rx(skb);
 }
@@ -42,7 +41,6 @@ static void __br_handle_frame(struct sk_buff *skb)
 	struct net_bridge_port *p;
 	int passedup;
 
-	skb->nh.raw = skb->mac.raw;
 	dest = skb->mac.ethernet->h_dest;
 
 	p = skb->dev->br_port;
@@ -52,6 +50,8 @@ static void __br_handle_frame(struct sk_buff *skb)
 	if (!(br->dev.flags & IFF_UP) ||
 	    p->state == BR_STATE_DISABLED)
 		goto freeandout;
+
+	skb_push(skb, skb->data - skb->mac.raw);
 
 	if (br->dev.flags & IFF_PROMISC) {
 		struct sk_buff *skb2;
@@ -78,10 +78,10 @@ static void __br_handle_frame(struct sk_buff *skb)
 		}
 	}
 
-	if (!memcmp(dest, bridge_ula, 5) && !(dest[5] & 0xF0))
+	if (br->stp_enabled &&
+	    !memcmp(dest, bridge_ula, 5) &&
+	    !(dest[5] & 0xF0))
 		goto handle_special_frame;
-
-	skb_push(skb, skb->data - skb->mac.raw);
 
 	if (p->state == BR_STATE_LEARNING ||
 	    p->state == BR_STATE_FORWARDING)
@@ -94,6 +94,8 @@ static void __br_handle_frame(struct sk_buff *skb)
 		br_flood(br, skb, 1);
 		if (!passedup)
 			br_pass_frame_up(br, skb);
+		else
+			kfree_skb(skb);
 		return;
 	}
 
@@ -102,6 +104,8 @@ static void __br_handle_frame(struct sk_buff *skb)
 	if (dst != NULL && dst->is_local) {
 		if (!passedup)
 			br_pass_frame_up(br, skb);
+		else
+			kfree_skb(skb);
 		br_fdb_put(dst);
 		return;
 	}

@@ -11,13 +11,14 @@
 #include <linux/malloc.h>
 #include <linux/binfmts.h>
 #include <linux/init.h>
+#include <linux/file.h>
 #include <linux/smp_lock.h>
 
-static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
+static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 {
 	char *cp, *i_name, *i_arg;
-	struct dentry * dentry;
-	char interp[128];
+	struct file *file;
+	char interp[BINPRM_BUF_SIZE];
 	int retval;
 
 	if ((bprm->buf[0] != '#') || (bprm->buf[1] != '!') || (bprm->sh_bang)) 
@@ -28,14 +29,13 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	 */
 
 	bprm->sh_bang++;
-	lock_kernel();
-	dput(bprm->dentry);
-	unlock_kernel();
-	bprm->dentry = NULL;
+	allow_write_access(bprm->file);
+	fput(bprm->file);
+	bprm->file = NULL;
 
-	bprm->buf[127] = '\0';
+	bprm->buf[BINPRM_BUF_SIZE - 1] = '\0';
 	if ((cp = strchr(bprm->buf, '\n')) == NULL)
-		cp = bprm->buf+127;
+		cp = bprm->buf+BINPRM_BUF_SIZE-1;
 	*cp = '\0';
 	while (cp > bprm->buf) {
 		cp--;
@@ -81,26 +81,15 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	/*
 	 * OK, now restart the process with the interpreter's dentry.
 	 */
-	lock_kernel();
-	dentry = open_namei(interp, 0, 0);
-	unlock_kernel();
-	if (IS_ERR(dentry))
-		return PTR_ERR(dentry);
+	file = open_exec(interp);
+	if (IS_ERR(file))
+		return PTR_ERR(file);
 
-	bprm->dentry = dentry;
+	bprm->file = file;
 	retval = prepare_binprm(bprm);
 	if (retval < 0)
 		return retval;
 	return search_binary_handler(bprm,regs);
-}
-
-static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
-{
-	int retval;
-	MOD_INC_USE_COUNT;
-	retval = do_load_script(bprm,regs);
-	MOD_DEC_USE_COUNT;
-	return retval;
 }
 
 struct linux_binfmt script_format = {

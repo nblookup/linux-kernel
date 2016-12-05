@@ -105,11 +105,12 @@ __setup("maxcpus", maxcpus);
 static inline void __init
 smp_store_cpu_info(int cpuid)
 {
-	cpu_data[cpuid].loops_per_sec = loops_per_sec;
-	cpu_data[cpuid].last_asn
-	  = (cpuid << WIDTH_HARDWARE_ASN) + ASN_FIRST_VERSION;
-	cpu_data[cpuid].irq_count = 0;
-	cpu_data[cpuid].bh_count = 0;
+	cpu_data[cpuid].loops_per_jiffy = loops_per_jiffy;
+	cpu_data[cpuid].last_asn = ASN_FIRST_VERSION;
+	cpu_data[cpuid].need_new_asn = 0;
+	cpu_data[cpuid].asn_lock = 0;
+	local_irq_count(cpuid) = 0;
+	local_bh_count(cpuid) = 0;
 }
 
 /*
@@ -212,8 +213,19 @@ smp_tune_scheduling (void)
 
 	freq = hwrpb->cycle_freq ? : est_cycle_freq;
 
+#if 0
 	/* Magic estimation stolen from x86 port.  */
-	cacheflush_time = freq / 1024 * on_chip_cache / 5000;
+	cacheflush_time = freq / 1024L * on_chip_cache / 5000L;
+
+        printk("Using heuristic of %d cycles.\n",
+               cacheflush_time);
+#else
+	/* Magic value to force potential preemption of other CPUs.  */
+	cacheflush_time = INT_MAX;
+
+        printk("Using heuristic of %d cycles.\n",
+               cacheflush_time);
+#endif
 }
 
 /*
@@ -325,8 +337,8 @@ recv_secondary_console_msg(void)
 			}
 		}
 
-		printk(KERN_INFO "recv_secondary_console_msg: on %d "
-		       "message is '%s'\n", mycpu, buf);
+		DBGS((KERN_INFO "recv_secondary_console_msg: on %d "
+		      "message is '%s'\n", mycpu, buf));
 	}
 
 	hwrpb->txrdy = 0;
@@ -361,8 +373,10 @@ secondary_cpu_start(int cpuid, struct task_struct *idle)
 	hwpcb->flags = idle->thread.pal_flags;
 	hwpcb->res1 = hwpcb->res2 = 0;
 
+#if 0
 	DBGS(("KSP 0x%lx PTBR 0x%lx VPTBR 0x%lx UNIQUE 0x%lx\n",
 	      hwpcb->ksp, hwpcb->ptbr, hwrpb->vptb, hwcpb->unique));
+#endif
 	DBGS(("Starting secondary cpu %d: state 0x%lx pal_flags 0x%lx\n",
 	      cpuid, idle->state, idle->thread.pal_flags));
 
@@ -407,7 +421,7 @@ static int __init fork_by_hand(void)
 	 * don't care about the regs settings since
 	 * we'll never reschedule the forked task.
 	 */
-	return do_fork(CLONE_VM|CLONE_PID, 0, &regs);
+	return do_fork(CLONE_VM|CLONE_PID, 0, &regs, 0);
 }
 
 /*
@@ -587,12 +601,12 @@ smp_boot_cpus(void)
 	bogosum = 0;
 	for (i = 0; i < NR_CPUS; i++) {
 		if (cpu_present_mask & (1L << i))
-			bogosum += cpu_data[i].loops_per_sec;
+			bogosum += cpu_data[i].loops_per_jiffy;
 	}
 	printk(KERN_INFO "SMP: Total of %d processors activated "
 	       "(%lu.%02lu BogoMIPS).\n",
-	       cpu_count, (bogosum + 2500) / 500000,
-	       ((bogosum + 2500) / 5000) % 100);
+	       cpu_count, (bogosum + 2500) / (500000/HZ),
+	       ((bogosum + 2500) / (5000/HZ)) % 100);
 
 	smp_num_cpus = cpu_count;
 }
@@ -609,10 +623,6 @@ smp_commence(void)
 }
 
 
-extern void update_one_process(struct task_struct *p, unsigned long ticks,
-			       unsigned long user, unsigned long system,
-			       int cpu);
-
 void
 smp_percpu_timer_interrupt(struct pt_regs *regs)
 {
@@ -630,26 +640,7 @@ smp_percpu_timer_interrupt(struct pt_regs *regs)
 		   which would be a Bad Thing.  */
 		irq_enter(cpu, RTC_IRQ);
 
-		update_one_process(current, 1, user, !user, cpu);
-		if (current->pid) {
-			if (--current->counter <= 0) {
-				current->counter = 0;
-				current->need_resched = 1;
-			}
-
-			if (user) {
-				if (current->priority < DEF_PRIORITY) {
-					kstat.cpu_nice++;
-					kstat.per_cpu_nice[cpu]++;
-				} else {
-					kstat.cpu_user++;
-					kstat.per_cpu_user[cpu]++;
-				}
-			} else {
-				kstat.cpu_system++;
-				kstat.per_cpu_system[cpu]++;
-			}
-		}
+		update_process_times(user);
 
 		data->prof_counter = data->prof_multiplier;
 		irq_exit(cpu, RTC_IRQ);
@@ -738,8 +729,10 @@ handle_ipi(struct pt_regs *regs)
 	unsigned long *pending_ipis = &ipi_data[this_cpu].bits;
 	unsigned long ops;
 
-	DBGS(("handle_ipi: on CPU %d ops 0x%x PC 0x%lx\n",
+#if 0
+	DBGS(("handle_ipi: on CPU %d ops 0x%lx PC 0x%lx\n",
 	      this_cpu, *pending_ipis, regs->pc));
+#endif
 
 	mb();	/* Order interrupt and bit testing. */
 	while ((ops = xchg(pending_ipis, 0)) != 0) {
@@ -906,12 +899,16 @@ flush_tlb_all(void)
 	tbia();
 }
 
+#define asn_locked() (cpu_data[smp_processor_id()].asn_lock)
+
 static void
 ipi_flush_tlb_mm(void *x)
 {
 	struct mm_struct *mm = (struct mm_struct *) x;
-	if (mm == current->active_mm)
+	if (mm == current->active_mm && !asn_locked())
 		flush_tlb_current(mm);
+	else
+		flush_tlb_other(mm);
 }
 
 void
@@ -919,10 +916,18 @@ flush_tlb_mm(struct mm_struct *mm)
 {
 	if (mm == current->active_mm) {
 		flush_tlb_current(mm);
-		if (atomic_read(&mm->mm_users) <= 1)
+		if (atomic_read(&mm->mm_users) <= 1) {
+			int i, cpu, this_cpu = smp_processor_id();
+			for (i = 0; i < smp_num_cpus; i++) {
+				cpu = cpu_logical_map(i);
+				if (cpu == this_cpu)
+					continue;
+				if (mm->context[cpu])
+					mm->context[cpu] = 0;
+			}
 			return;
-	} else
-		flush_tlb_other(mm);
+		}
+	}
 
 	if (smp_call_function(ipi_flush_tlb_mm, mm, 1, 1)) {
 		printk(KERN_CRIT "flush_tlb_mm: timed out\n");
@@ -939,8 +944,12 @@ static void
 ipi_flush_tlb_page(void *x)
 {
 	struct flush_tlb_page_struct *data = (struct flush_tlb_page_struct *)x;
-	if (data->mm == current->active_mm)
-		flush_tlb_current_page(data->mm, data->vma, data->addr);
+	struct mm_struct * mm = data->mm;
+
+	if (mm == current->active_mm && !asn_locked())
+		flush_tlb_current_page(mm, data->vma, data->addr);
+	else
+		flush_tlb_other(mm);
 }
 
 void
@@ -951,10 +960,18 @@ flush_tlb_page(struct vm_area_struct *vma, unsigned long addr)
 
 	if (mm == current->active_mm) {
 		flush_tlb_current_page(mm, vma, addr);
-		if (atomic_read(&mm->mm_users) <= 1)
+		if (atomic_read(&mm->mm_users) <= 1) {
+			int i, cpu, this_cpu = smp_processor_id();
+			for (i = 0; i < smp_num_cpus; i++) {
+				cpu = cpu_logical_map(i);
+				if (cpu == this_cpu)
+					continue;
+				if (mm->context[cpu])
+					mm->context[cpu] = 0;
+			}
 			return;
-	} else
-		flush_tlb_other(mm);
+		}
+	}
 
 	data.vma = vma;
 	data.mm = mm;
@@ -976,8 +993,10 @@ static void
 ipi_flush_icache_page(void *x)
 {
 	struct mm_struct *mm = (struct mm_struct *) x;
-	if (mm == current->active_mm)
+	if (mm == current->active_mm && !asn_locked())
 		__load_new_mm_context(mm);
+	else
+		flush_tlb_other(mm);
 }
 
 void
@@ -988,11 +1007,19 @@ flush_icache_page(struct vm_area_struct *vma, struct page *page)
 	if ((vma->vm_flags & VM_EXEC) == 0)
 		return;
 
-	mm->context = 0;
 	if (mm == current->active_mm) {
 		__load_new_mm_context(mm);
-		if (atomic_read(&mm->mm_users) <= 1)
+		if (atomic_read(&mm->mm_users) <= 1) {
+			int i, cpu, this_cpu = smp_processor_id();
+			for (i = 0; i < smp_num_cpus; i++) {
+				cpu = cpu_logical_map(i);
+				if (cpu == this_cpu)
+					continue;
+				if (mm->context[cpu])
+					mm->context[cpu] = 0;
+			}
 			return;
+		}
 	}
 
 	if (smp_call_function(ipi_flush_icache_page, mm, 1, 1)) {
@@ -1003,15 +1030,11 @@ flush_icache_page(struct vm_area_struct *vma, struct page *page)
 int
 smp_info(char *buffer)
 {
-	long i;
-	unsigned long sum = 0;
-	for (i = 0; i < NR_CPUS; i++)
-		sum += cpu_data[i].ipi_count;
-
-	return sprintf(buffer, "CPUs probed %d active %d map 0x%lx IPIs %ld\n",
-		       smp_num_probed, smp_num_cpus, cpu_present_mask, sum);
+	return sprintf(buffer,
+		       "cpus active\t\t: %d\n"
+		       "cpu active mask\t\t: %016lx\n",
+		       smp_num_cpus, cpu_present_mask);
 }
-
 
 #if DEBUG_SPINLOCK
 void
@@ -1058,8 +1081,8 @@ debug_spin_lock(spinlock_t * lock, const char *base_file, int line_no)
 	"	blbs	%0,2b\n"
 	"	br	1b\n"
 	".previous"
-	: "=r" (tmp), "=m" (__dummy_lock(lock)), "=r" (stuck)
-	: "1" (__dummy_lock(lock)), "2" (stuck));
+	: "=r" (tmp), "=m" (lock->lock), "=r" (stuck)
+	: "1" (lock->lock), "2" (stuck) : "memory");
 
 	if (stuck < 0) {
 		printk(KERN_WARNING
@@ -1136,9 +1159,9 @@ void write_lock(rwlock_t * lock)
 	"	blt	%1,8b\n"
 	"	br	1b\n"
 	".previous"
-	: "=m" (__dummy_lock(lock)), "=&r" (regx), "=&r" (regy),
+	: "=m" (*(volatile int *)lock), "=&r" (regx), "=&r" (regy),
 	  "=&r" (stuck_lock), "=&r" (stuck_reader)
-	: "0" (__dummy_lock(lock)), "3" (stuck_lock), "4" (stuck_reader));
+	: "0" (*(volatile int *)lock), "3" (stuck_lock), "4" (stuck_reader) : "memory");
 
 	if (stuck_lock < 0) {
 		printk(KERN_WARNING "write_lock stuck at %p\n", inline_pc);
@@ -1175,8 +1198,8 @@ void read_lock(rwlock_t * lock)
 	"	blbs	%1,6b;"
 	"	br	1b\n"
 	".previous"
-	: "=m" (__dummy_lock(lock)), "=&r" (regx), "=&r" (stuck_lock)
-	: "0" (__dummy_lock(lock)), "2" (stuck_lock));
+	: "=m" (*(volatile int *)lock), "=&r" (regx), "=&r" (stuck_lock)
+	: "0" (*(volatile int *)lock), "2" (stuck_lock) : "memory");
 
 	if (stuck_lock < 0) {
 		printk(KERN_WARNING "read_lock stuck at %p\n", inline_pc);

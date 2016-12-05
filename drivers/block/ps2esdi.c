@@ -114,14 +114,14 @@ static DECLARE_WAIT_QUEUE_HEAD(ps2esdi_int);
 static DECLARE_WAIT_QUEUE_HEAD(ps2esdi_wait_open);
 
 int no_int_yet;
-static int access_count[MAX_HD] = {0,};
-static char ps2esdi_valid[MAX_HD] = {0,};
-static int ps2esdi_sizes[MAX_HD << 6] = {0,};
-static int ps2esdi_blocksizes[MAX_HD << 6] = {0,};
-static int ps2esdi_drives = 0;
+static int access_count[MAX_HD];
+static char ps2esdi_valid[MAX_HD];
+static int ps2esdi_sizes[MAX_HD << 6];
+static int ps2esdi_blocksizes[MAX_HD << 6];
+static int ps2esdi_drives;
 static struct hd_struct ps2esdi[MAX_HD << 6];
 static u_short io_base;
-static struct timer_list esdi_timer = {NULL, NULL, 0, 0L, ps2esdi_reset_timer};
+static struct timer_list esdi_timer = { function: ps2esdi_reset_timer };
 static int reset_status;
 static int ps2esdi_slot = -1;
 int tp720esdi = 0;		/* Is it Integrated ESDI of ThinkPad-720? */
@@ -232,6 +232,7 @@ cleanup_module(void)
 	free_dma(dma_arb_level);
   	free_irq(PS2ESDI_IRQ, NULL)
 	devfs_unregister_blkdev(MAJOR_NR, "ed");
+	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 }
 #endif /* MODULE */
 
@@ -379,9 +380,9 @@ static void __init ps2esdi_geninit(void)
 	reset_status = 0;
 	reset_start = jiffies;
 	while (!reset_status) {
-		esdi_timer.expires = HZ;
+		init_timer(&esdi_timer);
+		esdi_timer.expires = jiffies + HZ;
 		esdi_timer.data = 0;
-		esdi_timer.next = esdi_timer.prev = NULL;
 		add_timer(&esdi_timer);
 		sleep_on(&ps2esdi_int);
 	}

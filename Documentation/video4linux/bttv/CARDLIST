@@ -37,6 +37,22 @@ bttv.o
   card=35 - Chronos Video Shuttle II
   card=36 - Typhoon TView TV/FM Tuner
   card=37 - PixelView PlayTV pro
+  card=38 - TView99 CPH063
+  card=39 - Pinnacle PCTV Rave
+  card=40 - STB2
+  card=41 - AVerMedia TVPhone 98
+  card=42 - ProVideo PV951
+  card=43 - Little OnAir TV
+  card=44 - Sigma TVII-FM
+  card=45 - MATRIX-Vision MV-Delta 2
+  card=46 - Zoltrix Genie TV
+  card=47 - Terratec TV/Radio+
+  card=48 - Dynalink Magic TView 
+  card=49 - GV-BCTV3
+  card=50 - Prolink PV-BT878P+4E (PixelView PlayTV PAK)
+  card=51 - Eagle Wireless Capricorn2 (bt878A)
+  card=52 - Pinnacle Studio PCTV Pro
+  card=53 - Typhoon TView RDS
 
 tuner.o
   type=0 - Temic PAL
@@ -53,3 +69,5 @@ tuner.o
   type=11 - Alps TSBB5
   type=12 - Alps TSBE5
   type=13 - Alps TSBC5
+  type=14 - Temic 4006FH5
+  type=15 - Alps TSCH6

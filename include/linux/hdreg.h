@@ -96,6 +96,8 @@
 #define SMART_AUTOSAVE		0xd2
 #define SMART_SAVE		0xd3
 #define SMART_IMMEDIATE_OFFLINE	0xd4
+#define SMART_READ_LOG_SECTOR	0xd5
+#define SMART_WRITE_LOG_SECTOR	0xd6
 #define SMART_ENABLE		0xd8
 #define SMART_DISABLE		0xd9
 #define SMART_STATUS		0xda
@@ -179,7 +181,13 @@ struct hd_geometry {
 #define HDIO_GET_DMA		0x030b	/* get use-dma flag */
 #define HDIO_GET_NICE		0x030c	/* get nice flags */
 #define HDIO_GET_IDENTITY	0x030d	/* get IDE identification info */
+
+#define HDIO_DRIVE_RESET	0x031c	/* execute a device reset */
+#define HDIO_TRISTATE_HWIF	0x031d	/* execute a channel tristate */
+#define HDIO_DRIVE_TASK		0x031e	/* execute task and special drive command */
 #define HDIO_DRIVE_CMD		0x031f	/* execute a special drive command */
+
+#define HDIO_DRIVE_CMD_AEB	HDIO_DRIVE_TASK
 
 /* hd/ide ctl's that pass (arg) non-ptr values are numbered 0x032n/0x033n */
 #define HDIO_SET_MULTCOUNT	0x0321	/* change IDE blockmode */
@@ -193,6 +201,19 @@ struct hd_geometry {
 #define HDIO_SET_NICE		0x0329	/* set nice flags */
 #define HDIO_UNREGISTER_HWIF	0x032a  /* unregister interface */
 
+/* BIG GEOMETRY */
+struct hd_big_geometry {
+	unsigned char heads;
+	unsigned char sectors;
+	unsigned int cylinders;
+	unsigned long start;
+};
+
+/* hd/ide ctl's that pass (arg) ptrs to user space are numbered 0x033n/0x033n */
+#define HDIO_GETGEO_BIG		0x0330	/* */
+#define HDIO_GETGEO_BIG_RAW	0x0331	/* */
+
+#define __NEW_HD_DRIVE_ID
 /* structure returned by HDIO_GET_IDENTITY, as per ANSI ATA2 rev.2f spec */
 struct hd_driveid {
 	unsigned short	config;		/* lots of obsolete bit flags */
@@ -256,7 +277,7 @@ struct hd_driveid {
 	unsigned short	CurAPMvalues;	/* current APM values */
 	unsigned short	word92;		/* reserved (word 92) */
 	unsigned short	hw_config;	/* hardware config */
-	unsigned short  words94_125[33];/* reserved words 94-125 */
+	unsigned short  words94_125[32];/* reserved words 94-125 */
 	unsigned short	last_lun;	/* reserved (word 126) */
 	unsigned short	word127;	/* reserved (word 127) */
 	unsigned short	dlf;		/* device lock function
@@ -277,8 +298,10 @@ struct hd_driveid {
 					 * 1	read-look-ahead
 					 * 0	write cache
 					 */
-	unsigned short	words130_159[30];/* reserved vendor words 130-159 */
-	unsigned short	words160_255[96];/* reserved words 160-255 */
+	unsigned short	words130_155[26];/* reserved vendor words 130-155 */
+	unsigned short	word156;
+	unsigned short	words157_159[3];/* reserved vendor words 157-159 */
+	unsigned short	words160_255[95];/* reserved words 160-255 */
 };
 
 /*
@@ -297,10 +320,6 @@ struct hd_driveid {
  * These routines are used for kernel command line parameters from main.c:
  */
 #include <linux/config.h>
-
-#ifdef CONFIG_BLK_DEV_HD
-void hd_setup(char *, int *);
-#endif	/* CONFIG_BLK_DEV_HD */
 
 #if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
 int ide_register(int io_port, int ctl_port, int irq);

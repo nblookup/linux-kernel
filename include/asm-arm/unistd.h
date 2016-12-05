@@ -65,7 +65,7 @@
 #define __NR_mpx			(__NR_SYSCALL_BASE+ 56)
 #define __NR_setpgid			(__NR_SYSCALL_BASE+ 57)
 #define __NR_ulimit			(__NR_SYSCALL_BASE+ 58)
-#define __NR_oldolduname		(__NR_SYSCALL_BASE+ 59)
+
 #define __NR_umask			(__NR_SYSCALL_BASE+ 60)
 #define __NR_chroot			(__NR_SYSCALL_BASE+ 61)
 #define __NR_ustat			(__NR_SYSCALL_BASE+ 62)
@@ -115,8 +115,8 @@
 #define __NR_stat			(__NR_SYSCALL_BASE+106)
 #define __NR_lstat			(__NR_SYSCALL_BASE+107)
 #define __NR_fstat			(__NR_SYSCALL_BASE+108)
-#define __NR_olduname			(__NR_SYSCALL_BASE+109)
-#define __NR_iopl			(__NR_SYSCALL_BASE+110)
+
+
 #define __NR_vhangup			(__NR_SYSCALL_BASE+111)
 #define __NR_idle			(__NR_SYSCALL_BASE+112)
 #define __NR_syscall			(__NR_SYSCALL_BASE+113) /* syscall to call a syscall! */
@@ -223,6 +223,7 @@
 #define __NR_setgid32			(__NR_SYSCALL_BASE+214)
 #define __NR_setfsuid32			(__NR_SYSCALL_BASE+215)
 #define __NR_setfsgid32			(__NR_SYSCALL_BASE+216)
+#define __NR_getdents64			(__NR_SYSCALL_BASE+217)
 
 #define __sys2(x) #x
 #define __sys1(x) __sys2(x)

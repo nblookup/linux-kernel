@@ -28,7 +28,7 @@
 
 #include "local_irq.h"
 #include "ppc4xx_pic.h"
-#include "time.h"
+#include <asm/time.h>
 #include "walnut_setup.h"
 
 
@@ -226,10 +226,11 @@ walnut_halt(void)
 /*
  * Document me.
  */
-void __init
+long __init
 walnut_time_init(void)
 {
 	/* XXX - Implement me */
+	return 0;
 }
 
 /*

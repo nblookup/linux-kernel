@@ -1,4 +1,4 @@
-/* $Id: btfixup.c,v 1.9 1999/12/27 06:30:02 anton Exp $
+/* $Id: btfixup.c,v 1.10 2000/05/09 17:40:13 davem Exp $
  * btfixup.c: Boot time code fixup and relocator, so that
  * we can get rid of most indirect calls to achieve single
  * image sun4c and srmmu kernel.
@@ -322,7 +322,7 @@ void __init btfixup(void)
 		} else
 			p = q + count;
 	}
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	flush_cacheall = (void (*)(void))BTFIXUPVAL_CALL(local_flush_cache_all);
 #else
 	flush_cacheall = (void (*)(void))BTFIXUPVAL_CALL(flush_cache_all);

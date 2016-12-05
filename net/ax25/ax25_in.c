@@ -39,7 +39,6 @@
  */
 
 #include <linux/config.h>
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -426,7 +425,7 @@ static int ax25_rcv(struct sk_buff *skb, struct net_device *dev, ax25_address *d
 		}
 	} else {
 		/* Reverse the source SABM's path */
-		*ax25->digipeat = reverse_dp;
+		memcpy(&ax25->digipeat, &reverse_dp, sizeof(ax25_digi));
 	}
 
 	if ((*skb->data & ~AX25_PF) == AX25_SABME) {
@@ -480,4 +479,3 @@ int ax25_kiss_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_typ
 	return ax25_rcv(skb, dev, (ax25_address *)dev->dev_addr, ptype);
 }
 
-#endif

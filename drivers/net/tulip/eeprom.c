@@ -15,7 +15,6 @@
 
 #include "tulip.h"
 #include <linux/init.h>
-#include <asm/io.h>
 #include <asm/unaligned.h>
 
 
@@ -30,31 +29,31 @@
 /* Known cards that have old-style EEPROMs. */
 static struct eeprom_fixup eeprom_fixups[] __devinitdata = {
   {"Asante", 0, 0, 0x94, {0x1e00, 0x0000, 0x0800, 0x0100, 0x018c,
-						  0x0000, 0x0000, 0xe078, 0x0001, 0x0050, 0x0018 }},
+			  0x0000, 0x0000, 0xe078, 0x0001, 0x0050, 0x0018 }},
   {"SMC9332DST", 0, 0, 0xC0, { 0x1e00, 0x0000, 0x0800, 0x041f,
-							   0x0000, 0x009E, /* 10baseT */
-							   0x0004, 0x009E, /* 10baseT-FD */
-							   0x0903, 0x006D, /* 100baseTx */
-							   0x0905, 0x006D, /* 100baseTx-FD */ }},
+			   0x0000, 0x009E, /* 10baseT */
+			   0x0004, 0x009E, /* 10baseT-FD */
+			   0x0903, 0x006D, /* 100baseTx */
+			   0x0905, 0x006D, /* 100baseTx-FD */ }},
   {"Cogent EM100", 0, 0, 0x92, { 0x1e00, 0x0000, 0x0800, 0x063f,
-								 0x0107, 0x8021, /* 100baseFx */
-								 0x0108, 0x8021, /* 100baseFx-FD */
-								 0x0100, 0x009E, /* 10baseT */
-								 0x0104, 0x009E, /* 10baseT-FD */
-								 0x0103, 0x006D, /* 100baseTx */
-								 0x0105, 0x006D, /* 100baseTx-FD */ }},
+				 0x0107, 0x8021, /* 100baseFx */
+				 0x0108, 0x8021, /* 100baseFx-FD */
+				 0x0100, 0x009E, /* 10baseT */
+				 0x0104, 0x009E, /* 10baseT-FD */
+				 0x0103, 0x006D, /* 100baseTx */
+				 0x0105, 0x006D, /* 100baseTx-FD */ }},
   {"Maxtech NX-110", 0, 0, 0xE8, { 0x1e00, 0x0000, 0x0800, 0x0513,
-							   0x1001, 0x009E, /* 10base2, CSR12 0x10*/
-							   0x0000, 0x009E, /* 10baseT */
-							   0x0004, 0x009E, /* 10baseT-FD */
-							   0x0303, 0x006D, /* 100baseTx, CSR12 0x03 */
-							   0x0305, 0x006D, /* 100baseTx-FD CSR12 0x03 */}},
+				   0x1001, 0x009E, /* 10base2, CSR12 0x10*/
+				   0x0000, 0x009E, /* 10baseT */
+				   0x0004, 0x009E, /* 10baseT-FD */
+				   0x0303, 0x006D, /* 100baseTx, CSR12 0x03 */
+				   0x0305, 0x006D, /* 100baseTx-FD CSR12 0x03 */}},
   {"Accton EN1207", 0, 0, 0xE8, { 0x1e00, 0x0000, 0x0800, 0x051F,
-								  0x1B01, 0x0000, /* 10base2,   CSR12 0x1B */
-								  0x0B00, 0x009E, /* 10baseT,   CSR12 0x0B */
-								  0x0B04, 0x009E, /* 10baseT-FD,CSR12 0x0B */
-								  0x1B03, 0x006D, /* 100baseTx, CSR12 0x1B */
-								  0x1B05, 0x006D, /* 100baseTx-FD CSR12 0x1B */
+				  0x1B01, 0x0000, /* 10base2,   CSR12 0x1B */
+				  0x0B00, 0x009E, /* 10baseT,   CSR12 0x0B */
+				  0x0B04, 0x009E, /* 10baseT-FD,CSR12 0x0B */
+				  0x1B03, 0x006D, /* 100baseTx, CSR12 0x1B */
+				  0x1B05, 0x006D, /* 100baseTx-FD CSR12 0x1B */
    }},
   {"NetWinder", 0x00, 0x10, 0x57,
 	/* Default media = MII
@@ -163,6 +162,13 @@ subsequent_board:
 		if (tp->flags & CSR12_IN_SROM)
 			csr12dir = *p++;
 		count = *p++;
+
+	        /* there is no phy information, don't even try to build mtable */
+	        if (count == 0) {
+			DPRINTK("no phy info, aborting mtable build\n");
+		        return;
+		}
+
 		mtable = (struct mediatable *)
 			kmalloc(sizeof(struct mediatable) + count*sizeof(struct medialeaf),
 					GFP_KERNEL);
@@ -192,12 +198,23 @@ subsequent_board:
 				if (p[1] == 0x05) {
 					mtable->has_reset = i;
 					leaf->media = p[2] & 0x0f;
+				} else if (tp->chip_id == DM910X && p[1] == 0x80) {
+					/* Hack to ignore Davicom delay period block */
+					mtable->leafcount--;
+					count--;
+					i--;
+					leaf->leafdata = p + 2;
+					p += (p[0] & 0x3f) + 1;
+					continue;
 				} else if (p[1] & 1) {
 					mtable->has_mii = 1;
 					leaf->media = 11;
 				} else {
 					mtable->has_nonmii = 1;
 					leaf->media = p[2] & 0x0f;
+					/* Davicom's media number for 100BaseTX is strange */
+					if (tp->chip_id == DM910X && leaf->media == 1)
+						leaf->media = 3;
 					switch (leaf->media) {
 					case 0: new_advertise |= 0x0020; break;
 					case 4: new_advertise |= 0x0040; break;
@@ -231,6 +248,7 @@ subsequent_board:
 			printk(KERN_INFO "%s:  Index #%d - Media %s (#%d) described "
 				   "by a %s (%d) block.\n",
 				   dev->name, i, medianame[leaf->media], leaf->media,
+				   leaf->type >= ARRAY_SIZE(block_name) ? "UNKNOWN" :
 				   block_name[leaf->type], leaf->type);
 		}
 		if (new_advertise)

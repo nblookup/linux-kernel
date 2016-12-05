@@ -1,5 +1,4 @@
-/* $Id: andes.c,v 1.11 2000/02/24 00:12:40 ralf Exp $
- *
+/*
  * andes.c: MMU and cache operations for the R10000 (ANDES).
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)

@@ -1,4 +1,4 @@
-/* $Id: uctrl.c,v 1.7 2000/02/09 22:33:28 davem Exp $
+/* $Id: uctrl.c,v 1.9 2000/11/08 05:04:06 davem Exp $
  * uctrl.c: TS102 Microcontroller interface on Tadpole Sparcbook 3
  *
  * Copyright 1999 Derrick J Brashear (shadow@dementia.org)
@@ -218,16 +218,8 @@ uctrl_ioctl(struct inode *inode, struct file *file,
 static int
 uctrl_open(struct inode *inode, struct file *file)
 {
-	MOD_INC_USE_COUNT;
 	uctrl_get_event_status();
 	uctrl_get_external_status();
-	return 0;
-}
-
-static int
-uctrl_release(struct inode *inode, struct file *file)
-{
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -238,10 +230,10 @@ void uctrl_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 }
 
 static struct file_operations uctrl_fops = {
+	owner:		THIS_MODULE,
 	llseek:		uctrl_llseek,
 	ioctl:		uctrl_ioctl,
 	open:		uctrl_open,
-	release:	uctrl_release,
 };
 
 static struct miscdevice uctrl_dev = {
@@ -371,11 +363,7 @@ void uctrl_get_external_status()
 	
 }
 
-#ifdef MODULE
-int init_module(void)
-#else
-int __init ts102_uctrl_init(void)
-#endif
+static int __init ts102_uctrl_init(void)
 {
 	struct uctrl_driver *driver = &drv;
 	int len, i;
@@ -427,9 +415,7 @@ int __init ts102_uctrl_init(void)
         return 0;
 }
 
-
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit ts102_uctrl_cleanup(void)
 {
 	struct uctrl_driver *driver = &drv;
 
@@ -441,4 +427,6 @@ void cleanup_module(void)
 	if (driver->regs)
 		driver->regs = 0;
 }
-#endif
+
+module_init(ts102_uctrl_init);
+module_exit(ts102_uctrl_cleanup);

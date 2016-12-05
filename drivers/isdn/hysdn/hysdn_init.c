@@ -1,4 +1,4 @@
-/* $Id: hysdn_init.c,v 1.1 2000/02/10 19:45:18 werner Exp $
+/* $Id: hysdn_init.c,v 1.6.6.1 2000/11/28 12:02:47 kai Exp $
 
  * Linux driver for HYSDN cards, init functions.
  * written by Werner Cornelius (werner@titro.de) for Hypercope GmbH
@@ -19,16 +19,11 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * $Log: hysdn_init.c,v $
- * Revision 1.1  2000/02/10 19:45:18  werner
- *
- * Initial release
- *
- *
  */
 
 #include <linux/config.h>
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/version.h>
 #include <linux/poll.h>
 #include <linux/vmalloc.h>
@@ -37,7 +32,7 @@
 
 #include "hysdn_defs.h"
 
-static char *hysdn_init_revision = "$Revision: 1.1 $";
+static char *hysdn_init_revision = "$Revision: 1.6.6.1 $";
 int cardmax;			/* number of found cards */
 hysdn_card *card_root = NULL;	/* pointer to first card */
 
@@ -51,21 +46,30 @@ static struct {
 } pci_subid_map[] = {
 
 	{
-		PCI_SUB_ID_METRO, BD_METRO
+		PCI_SUBDEVICE_ID_HYPERCOPE_METRO, BD_METRO
 	},
 	{
-		PCI_SUB_ID_CHAMP2, BD_CHAMP2
+		PCI_SUBDEVICE_ID_HYPERCOPE_CHAMP2, BD_CHAMP2
 	},
 	{
-		PCI_SUB_ID_ERGO, BD_ERGO
+		PCI_SUBDEVICE_ID_HYPERCOPE_ERGO, BD_ERGO
 	},
 	{
-		PCI_SUB_ID_OLD_ERGO, BD_ERGO
+		PCI_SUBDEVICE_ID_HYPERCOPE_OLD_ERGO, BD_ERGO
 	},
 	{
 		0, 0
 	}			/* terminating entry */
 };
+
+static struct pci_device_id hysdn_pci_tbl[] __initdata = {
+	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_METRO},
+	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_CHAMP2},
+	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_ERGO},
+	{PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX, PCI_ANY_ID, PCI_SUBDEVICE_ID_HYPERCOPE_OLD_ERGO},
+	{ }				/* Terminating entry */
+};
+MODULE_DEVICE_TABLE(pci, hysdn_pci_tbl);
 
 /*********************************************************************/
 /* search_cards searches for available cards in the pci config data. */
@@ -77,14 +81,14 @@ search_cards(void)
 {
 	struct pci_dev *akt_pcidev = NULL;
 	hysdn_card *card, *card_last;
-	uchar irq;
 	int i;
 
 	card_root = NULL;
 	card_last = NULL;
-	while ((akt_pcidev = pci_find_device(PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_PLX,
+	while ((akt_pcidev = pci_find_device(PCI_VENDOR_ID_HYPERCOPE, PCI_DEVICE_ID_HYPERCOPE_PLX,
 					     akt_pcidev)) != NULL) {
-
+		if (pci_enable_device(akt_pcidev))
+			continue;
 		if (!(card = kmalloc(sizeof(hysdn_card), GFP_KERNEL))) {
 			printk(KERN_ERR "HYSDN: unable to alloc device mem \n");
 			return;
@@ -93,12 +97,11 @@ search_cards(void)
 		card->myid = cardmax;	/* set own id */
 		card->bus = akt_pcidev->bus->number;
 		card->devfn = akt_pcidev->devfn;	/* slot + function */
-		pcibios_read_config_word(card->bus, card->devfn, PCI_SUBSYSTEM_ID, &card->subsysid);
-		pcibios_read_config_byte(card->bus, card->devfn, PCI_INTERRUPT_LINE, &irq);
-		card->irq = irq;
-		card->iobase = akt_pcidev->resource[ PCI_REG_PLX_IO_BASE].start & PCI_BASE_ADDRESS_IO_MASK;
-		card->plxbase = akt_pcidev->resource[ PCI_REG_PLX_MEM_BASE].start;
-		card->membase = akt_pcidev->resource[ PCI_REG_MEMORY_BASE].start;
+		card->subsysid = akt_pcidev->subsystem_device;
+		card->irq = akt_pcidev->irq;
+		card->iobase = pci_resource_start(akt_pcidev, PCI_REG_PLX_IO_BASE);
+		card->plxbase = pci_resource_start(akt_pcidev, PCI_REG_PLX_MEM_BASE);
+		card->membase = pci_resource_start(akt_pcidev, PCI_REG_MEMORY_BASE);
 		card->brdtype = BD_NONE;	/* unknown */
 		card->debug_flags = DEF_DEB_FLAGS;	/* set default debug */
 		card->faxchans = 0;	/* default no fax channels */
@@ -218,6 +221,14 @@ init_module(void)
 		free_resources();	/* proc file_sys not created */
 		return (-1);
 	}
+#ifdef CONFIG_HYSDN_CAPI
+	if(cardmax > 0) {
+		if(hycapi_init()) {
+			printk(KERN_ERR "HYCAPI: init failed\n");
+			return(-1);
+		}
+	}
+#endif /* CONFIG_HYSDN_CAPI */
 	return (0);		/* no error */
 }				/* init_module */
 
@@ -233,8 +244,18 @@ init_module(void)
 void
 cleanup_module(void)
 {
-
+#ifdef CONFIG_HYSDN_CAPI
+	hysdn_card *card;
+#endif /* CONFIG_HYSDN_CAPI */
 	stop_cards();
+#ifdef CONFIG_HYSDN_CAPI
+	card = card_root;	/* first in chain */
+	while (card) {
+		hycapi_capi_release(card);
+		card = card->next;	/* remove card from chain */
+	}			/* while card */
+	hycapi_cleanup();
+#endif /* CONFIG_HYSDN_CAPI */
 	hysdn_procconf_release();
 	free_resources();
 	printk(KERN_NOTICE "HYSDN: module unloaded\n");

@@ -42,6 +42,7 @@
 #include <asm/segment.h>
 #include <asm/bitops.h>
 #include <asm/uaccess.h>
+#include <asm/wbflush.h>
 #include <asm/dec/interrupts.h>
 #include <asm/dec/machtype.h>
 #include <asm/dec/tc.h>
@@ -155,7 +156,7 @@ static struct termios *serial_termios_locked[NUM_CHANNELS];
  * memory if large numbers of serial ports are open.
  */
 static unsigned char tmp_buf[4096]; /* This is cheating */
-static struct semaphore tmp_buf_sem = MUTEX;
+static DECLARE_MUTEX(tmp_buf_sem);
 
 static inline int serial_paranoia_check(struct dec_serial *info,
 					dev_t device, const char *routine)
@@ -195,7 +196,7 @@ static inline unsigned char read_zsreg(struct dec_zschannel *channel,
 
 	if (reg != 0) {
 		*channel->control = reg & 0xf;
-		RECOVERY_DELAY;
+		wbflush(); RECOVERY_DELAY;
 	}
 	retval = *channel->control;
 	RECOVERY_DELAY;
@@ -207,10 +208,10 @@ static inline void write_zsreg(struct dec_zschannel *channel,
 {
 	if (reg != 0) {
 		*channel->control = reg & 0xf;
-		RECOVERY_DELAY;
+		wbflush(); RECOVERY_DELAY;
 	}
 	*channel->control = value;
-	RECOVERY_DELAY;
+	wbflush(); RECOVERY_DELAY;
 	return;
 }
 
@@ -227,7 +228,7 @@ static inline void write_zsdata(struct dec_zschannel *channel,
 				unsigned char value)
 {
 	*channel->data = value;
-	RECOVERY_DELAY;
+	wbflush(); RECOVERY_DELAY;
 	return;
 }
 
@@ -556,10 +557,6 @@ static void do_softint(void *private_)
 			(tty->ldisc.write_wakeup)(tty);
 		wake_up_interruptible(&tty->write_wait);
 	}
-}
-
-static void rs_timer(void)
-{
 }
 
 static int startup(struct dec_serial * info)
@@ -1313,7 +1310,7 @@ static void rs_wait_until_sent(struct tty_struct *tty, int timeout)
 		char_time = 1;
 	if (timeout)
 		char_time = MIN(char_time, timeout);
-	while ((read_zsreg(info->zs_channel, 1) & ALL_SNT) == 0) {
+	while ((read_zsreg(info->zs_channel, 1) & Tx_BUF_EMP) == 0) {
 		current->state = TASK_INTERRUPTIBLE;
 		schedule_timeout(char_time);
 		if (signal_pending(current))
@@ -1351,7 +1348,7 @@ void rs_hangup(struct tty_struct *tty)
 static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			   struct dec_serial *info)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	int		retval;
 	int		do_clocal = 0;
 
@@ -1575,7 +1572,6 @@ static void __init probe_sccs(void)
 {
 	struct dec_serial **pp;
 	int i, n, n_chips = 0, n_channels, chip, channel;
-	unsigned long flags;
 
 	/*
 	 * did we get here by accident?
@@ -1664,8 +1660,6 @@ int __init zs_init(void)
 
 	/* Setup base handler, and timer table. */
 	init_bh(SERIAL_BH, do_serial_bh);
-	timer_table[RS_TIMER].fn = rs_timer;
-	timer_table[RS_TIMER].expires = 0;
 
 	/* Find out how many Z8530 SCCs we have */
 	if (zs_chain == 0)
@@ -1773,8 +1767,8 @@ int __init zs_init(void)
 		info->tqueue.data = info;
 		info->callout_termios =callout_driver.init_termios;
 		info->normal_termios = serial_driver.init_termios;
-		info->open_wait = 0;
-		info->close_wait = 0;
+		init_waitqueue_head(&info->open_wait);
+		init_waitqueue_head(&info->close_wait);
 		printk("tty%02d at 0x%08x (irq = %d)", info->line, 
 		       info->port, info->irq);
 		printk(" is a Z85C30 SCC\n");
@@ -1828,7 +1822,7 @@ zs_console_putchar(struct dec_serial *info, char ch)
 	while (!(*(info->zs_channel->control) & Tx_BUF_EMP) && --loops)
 		RECOVERY_DELAY;
 	*(info->zs_channel->data) = ch;
-	RECOVERY_DELAY;
+	wbflush(); RECOVERY_DELAY;
 
 	restore_flags(flags);
 }
@@ -1838,7 +1832,6 @@ static void serial_console_write(struct console *co, const char *s,
 {
 	struct dec_serial *info;
 	int i;
-	unsigned char nine;
 
 	info = zs_soft + co->index;
 
@@ -2005,26 +1998,21 @@ static int __init serial_console_setup(struct console *co, char *options)
 }
 
 static struct console sercons = {
-	"ttyS",
-	serial_console_write,
-	NULL,
-	serial_console_device,
-	serial_console_wait_key,
-	NULL,
-	serial_console_setup,
-	CON_PRINTBUFFER,
-	-1,
-	0,
-	NULL
+	name:		"ttyS",
+	write:		serial_console_write,
+	device:		serial_console_device,
+	wait_key:	serial_console_wait_key,
+	setup:		serial_console_setup,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
 };
 
 /*
  *	Register console.
  */
-long __init zs_serial_console_init(long kmem_start, long kmem_end)
+void __init zs_serial_console_init(void)
 {
 	register_console(&sercons);
-	return kmem_start;
 }
 #endif /* ifdef CONFIG_SERIAL_CONSOLE */
 

@@ -19,6 +19,7 @@
 #include <linux/swap.h>
 #include <linux/init.h>
 #include <linux/bootmem.h> /* max_low_pfn */
+#include <linux/vmalloc.h>
 #ifdef CONFIG_BLK_DEV_INITRD
 #include <linux/blk.h>
 #endif
@@ -30,6 +31,7 @@
 #include <asm/hwrpb.h>
 #include <asm/dma.h>
 #include <asm/mmu_context.h>
+#include <asm/console.h>
 
 static unsigned long totalram_pages;
 
@@ -37,7 +39,7 @@ extern void die_if_kernel(char *,struct pt_regs *,long);
 
 struct thread_struct original_pcb;
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 struct pgtable_cache_struct quicklists;
 #endif
 
@@ -53,6 +55,29 @@ __bad_pte(pmd_t *pmd)
 {
 	printk("Bad pmd in pte_alloc: %08lx\n", pmd_val(*pmd));
 	pmd_set(pmd, (pte_t *) BAD_PAGETABLE);
+}
+
+pgd_t *
+get_pgd_slow(void)
+{
+	pgd_t *ret, *init;
+
+	ret = (pgd_t *)__get_free_page(GFP_KERNEL);
+	init = pgd_offset(&init_mm, 0UL);
+	if (ret) {
+		clear_page(ret);
+#ifdef CONFIG_ALPHA_LARGE_VMALLOC
+		memcpy (ret + USER_PTRS_PER_PGD, init + USER_PTRS_PER_PGD,
+			(PTRS_PER_PGD - USER_PTRS_PER_PGD - 1)*sizeof(pgd_t));
+#else
+		pgd_val(ret[PTRS_PER_PGD-2]) = pgd_val(init[PTRS_PER_PGD-2]);
+#endif
+
+		/* The last PGD entry is the VPTB self-map.  */
+		pgd_val(ret[PTRS_PER_PGD-1])
+		  = pte_val(mk_pte(virt_to_page(ret), PAGE_KERNEL));
+	}
+	return ret;
 }
 
 pmd_t *
@@ -141,7 +166,7 @@ pte_t
 __bad_page(void)
 {
 	memset((void *) EMPTY_PGE, 0, PAGE_SIZE);
-	return pte_mkdirty(mk_pte(mem_map + MAP_NR(EMPTY_PGE), PAGE_SHARED));
+	return pte_mkdirty(mk_pte(virt_to_page(EMPTY_PGE), PAGE_SHARED));
 }
 
 void
@@ -160,7 +185,7 @@ show_mem(void)
 			reserved++;
 		else if (PageSwapCache(mem_map+i))
 			cached++;
-		else if (!atomic_read(&mem_map[i].count))
+		else if (!page_count(mem_map+i))
 			free++;
 		else
 			shared += atomic_read(&mem_map[i].count) - 1;
@@ -182,43 +207,16 @@ load_PCB(struct thread_struct * pcb)
 	return __reload_thread(pcb);
 }
 
-/*
- * paging_init() sets up the page tables: in the alpha version this actually
- * unmaps the bootup page table (as we're now in KSEG, so we don't need it).
- */
-void
-paging_init(void)
+/* Set up initial PCB, VPTB, and other such nicities.  */
+
+static inline void
+switch_to_system_map(void)
 {
 	unsigned long newptbr;
 	unsigned long original_pcb_ptr;
-	unsigned long zones_size[MAX_NR_ZONES] = {0, 0, 0};
-	unsigned long dma_pfn, high_pfn;
-
-	dma_pfn = virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
-	high_pfn = max_low_pfn;
-
-#define ORDER_MASK (~((1 << (MAX_ORDER-1))-1))
-#define ORDER_ALIGN(n)	(((n) +  ~ORDER_MASK) & ORDER_MASK)
-
-	dma_pfn = ORDER_ALIGN(dma_pfn);
-	high_pfn = ORDER_ALIGN(high_pfn);
-
-#undef ORDER_MASK
-#undef ORDER_ALIGN
-
-	if (dma_pfn > high_pfn)
-		zones_size[ZONE_DMA] = high_pfn;
-	else {
-		zones_size[ZONE_DMA] = dma_pfn;
-		zones_size[ZONE_NORMAL] = high_pfn - dma_pfn;
-	}
-
-	/* Initialize mem_map[].  */
-	free_area_init(zones_size);
 
 	/* Initialize the kernel's page tables.  Linux puts the vptb in
 	   the last slot of the L1 page table.  */
-	memset((void *)ZERO_PGE, 0, PAGE_SIZE);
 	memset(swapper_pg_dir, 0, PAGE_SIZE);
 	newptbr = ((unsigned long) swapper_pg_dir - PAGE_OFFSET) >> PAGE_SHIFT;
 	pgd_val(swapper_pg_dir[1023]) =
@@ -251,6 +249,119 @@ paging_init(void)
 			phys_to_virt(original_pcb_ptr);
 	}
 	original_pcb = *(struct thread_struct *) original_pcb_ptr;
+}
+
+int callback_init_done;
+
+void * __init
+callback_init(void * kernel_end)
+{
+	struct crb_struct * crb;
+	pgd_t *pgd;
+	pmd_t *pmd;
+	void *two_pages;
+
+	/* Starting at the HWRPB, locate the CRB. */
+	crb = (struct crb_struct *)((char *)hwrpb + hwrpb->crb_offset);
+
+	if (alpha_using_srm) {
+		/* Tell the console whither it is to be remapped. */
+		if (srm_fixup(VMALLOC_START, (unsigned long)hwrpb))
+			__halt();		/* "We're boned."  --Bender */
+
+		/* Edit the procedure descriptors for DISPATCH and FIXUP. */
+		crb->dispatch_va = (struct procdesc_struct *)
+			(VMALLOC_START + (unsigned long)crb->dispatch_va
+			 - crb->map[0].va);
+		crb->fixup_va = (struct procdesc_struct *)
+			(VMALLOC_START + (unsigned long)crb->fixup_va
+			 - crb->map[0].va);
+	}
+
+	switch_to_system_map();
+
+	/* Allocate one PGD and one PMD.  In the case of SRM, we'll need
+	   these to actually remap the console.  There is an assumption
+	   here that only one of each is needed, and this allows for 8MB.
+	   Currently (late 1999), big consoles are still under 4MB.
+
+	   In the case of not SRM, but not CONFIG_ALPHA_LARGE_VMALLOC,
+	   we need to allocate the PGD we use for vmalloc before we start
+	   forking other tasks.  */
+
+	two_pages = (void *)
+	  (((unsigned long)kernel_end + ~PAGE_MASK) & PAGE_MASK);
+	kernel_end = two_pages + 2*PAGE_SIZE;
+	memset(two_pages, 0, 2*PAGE_SIZE);
+
+	pgd = pgd_offset_k(VMALLOC_START);
+	pgd_set(pgd, (pmd_t *)two_pages);
+	pmd = pmd_offset(pgd, VMALLOC_START);
+	pmd_set(pmd, (pte_t *)(two_pages + PAGE_SIZE));
+
+	if (alpha_using_srm) {
+		static struct vm_struct console_remap_vm;
+		unsigned long vaddr = VMALLOC_START;
+		long i, j;
+
+		/* Set up the third level PTEs and update the virtual
+		   addresses of the CRB entries.  */
+		for (i = 0; i < crb->map_entries; ++i) {
+			unsigned long paddr = crb->map[i].pa;
+			crb->map[i].va = vaddr;
+			for (j = 0; j < crb->map[i].count; ++j) {
+				set_pte(pte_offset(pmd, vaddr),
+					mk_pte_phys(paddr, PAGE_KERNEL));
+				paddr += PAGE_SIZE;
+				vaddr += PAGE_SIZE;
+			}
+		}
+
+		/* Let vmalloc know that we've allocated some space.  */
+		console_remap_vm.flags = VM_ALLOC;
+		console_remap_vm.addr = VMALLOC_START;
+		console_remap_vm.size = vaddr - VMALLOC_START;
+		vmlist = &console_remap_vm;
+	}
+
+	callback_init_done = 1;
+	return kernel_end;
+}
+
+
+/*
+ * paging_init() sets up the memory map.
+ */
+void
+paging_init(void)
+{
+	unsigned long zones_size[MAX_NR_ZONES] = {0, 0, 0};
+	unsigned long dma_pfn, high_pfn;
+
+	dma_pfn = virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
+	high_pfn = max_low_pfn;
+
+#define ORDER_MASK (~((1L << (MAX_ORDER-1))-1))
+#define ORDER_ALIGN(n)	(((n) +  ~ORDER_MASK) & ORDER_MASK)
+
+	dma_pfn = ORDER_ALIGN(dma_pfn);
+	high_pfn = ORDER_ALIGN(high_pfn);
+
+#undef ORDER_MASK
+#undef ORDER_ALIGN
+
+	if (dma_pfn > high_pfn)
+		zones_size[ZONE_DMA] = high_pfn;
+	else {
+		zones_size[ZONE_DMA] = dma_pfn;
+		zones_size[ZONE_NORMAL] = high_pfn - dma_pfn;
+	}
+
+	/* Initialize mem_map[].  */
+	free_area_init(zones_size);
+
+	/* Initialize the kernel's ZERO_PGE. */
+	memset((void *)ZERO_PGE, 0, PAGE_SIZE);
 }
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SRM)
@@ -318,8 +429,8 @@ free_initmem (void)
 
 	addr = (unsigned long)(&__init_begin);
 	for (; addr < (unsigned long)(&__init_end); addr += PAGE_SIZE) {
-		ClearPageReserved(mem_map + MAP_NR(addr));
-		set_page_count(mem_map+MAP_NR(addr), 1);
+		ClearPageReserved(virt_to_page(addr));
+		set_page_count(virt_to_page(addr), 1);
 		free_page(addr);
 		totalram_pages++;
 	}
@@ -332,8 +443,8 @@ void
 free_initrd_mem(unsigned long start, unsigned long end)
 {
 	for (; start < end; start += PAGE_SIZE) {
-		ClearPageReserved(mem_map + MAP_NR(start));
-		set_page_count(mem_map+MAP_NR(start), 1);
+		ClearPageReserved(virt_to_page(start));
+		set_page_count(virt_to_page(start), 1);
 		free_page(start);
 		totalram_pages++;
 	}

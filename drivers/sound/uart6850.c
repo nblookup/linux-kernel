@@ -13,8 +13,11 @@
  * Alan Cox:		Updated for new modular code. Removed snd_* irq handling. Now
  *			uses native linux resources
  * Christoph Hellwig:	Adapted to module_init/module_exit
+ * Jeff Garzik:		Made it work again, in theory
+ *			FIXME: If the request_irq() succeeds, the probe succeeds. Ug.
  *
- *	Status: Testing required
+ *	Status: Testing required (no shit -jgarzik)
+ *
  *
  */
 
@@ -26,7 +29,6 @@
  */
 
 #include "sound_config.h"
-#include "soundmodule.h"
 
 static int uart6850_base = 0x330;
 
@@ -65,18 +67,17 @@ static void uart6850_write(unsigned char byte)
 #define	UART_RESET	0x95
 #define	UART_MODE_ON	0x03
 
-static int uart6850_opened = 0;
+static int uart6850_opened;
 static int uart6850_irq;
-static int uart6850_detected = 0;
+static int uart6850_detected;
 static int my_dev;
 
-static int reset_uart6850(void);
 static void (*midi_input_intr) (int dev, unsigned char data);
 static void poll_uart6850(unsigned long dummy);
 
 
 static struct timer_list uart6850_timer = {
-	NULL, NULL, 0, 0, poll_uart6850
+	function: poll_uart6850
 };
 
 static void uart6850_input_loop(void)
@@ -148,7 +149,6 @@ static int uart6850_open(int dev, int mode,
 		  return -EBUSY;
 	};
 
-	MOD_INC_USE_COUNT;
 	uart6850_cmd(UART_RESET);
 	uart6850_input_loop();
 	midi_input_intr = input;
@@ -165,7 +165,6 @@ static void uart6850_close(int dev)
 	uart6850_cmd(UART_MODE_ON);
 	del_timer(&uart6850_timer);
 	uart6850_opened = 0;
-	MOD_DEC_USE_COUNT;
 }
 
 static int uart6850_out(int dev, unsigned char midi_byte)
@@ -234,18 +233,18 @@ static inline int uart6850_buffer_status(int dev)
 
 static struct midi_operations uart6850_operations =
 {
-	{"6850 UART", 0, 0, SNDCARD_UART6850},
-	&std_midi_synth,
-	{0},
-	uart6850_open,
-	uart6850_close,
-	NULL, /* ioctl */
-	uart6850_out,
-	uart6850_start_read,
-	uart6850_end_read,
-	uart6850_kick,
-	uart6850_command,
-	uart6850_buffer_status
+	owner:		THIS_MODULE,
+	info:		{"6850 UART", 0, 0, SNDCARD_UART6850},
+	converter:	&std_midi_synth,
+	in_info:	{0},
+	open:		uart6850_open,
+	close:		uart6850_close,
+	outputc:	uart6850_out,
+	start_read:	uart6850_start_read,
+	end_read:	uart6850_end_read,
+	kick:		uart6850_kick,
+	command:	uart6850_command,
+	buffer_status:	uart6850_buffer_status
 };
 
 
@@ -253,6 +252,9 @@ static void __init attach_uart6850(struct address_info *hw_config)
 {
 	int ok, timeout;
 	unsigned long   flags;
+
+	if (!uart6850_detected)
+		return;
 
 	if ((my_dev = sound_alloc_mididev()) == -1)
 	{
@@ -263,11 +265,6 @@ static void __init attach_uart6850(struct address_info *hw_config)
 	uart6850_osp = hw_config->osp;
 	uart6850_irq = hw_config->irq;
 
-	if (!uart6850_detected)
-	{
-		sound_unload_mididev(my_dev);
-		return;
-	}
 	save_flags(flags);
 	cli();
 
@@ -286,7 +283,7 @@ static void __init attach_uart6850(struct address_info *hw_config)
 	sequencer_init();
 }
 
-static int reset_uart6850(void)
+static inline int reset_uart6850(void)
 {
 	uart6850_read();
 	return 1;		/*
@@ -294,10 +291,9 @@ static int reset_uart6850(void)
 				 */
 }
 
-
 static int __init probe_uart6850(struct address_info *hw_config)
 {
-	int ok = 0;
+	int ok;
 
 	uart6850_osp = hw_config->osp;
 	uart6850_base = hw_config->io_base;
@@ -337,15 +333,14 @@ static int __init init_uart6850(void)
 
 	if (probe_uart6850(&cfg_mpu))
 		return -ENODEV;
+	attach_uart6850(&cfg_mpu);
 
-	SOUND_LOCK;
 	return 0;
 }
 
 static void __exit cleanup_uart6850(void)
 {
 	unload_uart6850(&cfg_mpu);
-	SOUND_LOCK_END;
 }
 
 module_init(init_uart6850);

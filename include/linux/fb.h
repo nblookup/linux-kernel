@@ -25,6 +25,13 @@
 #define FBIOPUT_CON2FBMAP	0x4610
 #define FBIOBLANK		0x4611		/* arg: 0 or vesa level + 1 */
 #define FBIOGET_VBLANK		_IOR('F', 0x12, struct fb_vblank)
+#define FBIO_ALLOC              0x4613
+#define FBIO_FREE               0x4614
+#define FBIOGET_GLYPH           0x4615
+#define FBIOGET_HWCINFO         0x4616
+#define FBIOPUT_MODEINFO        0x4617
+#define FBIOGET_DISPINFO        0x4618
+
 
 #define FB_TYPE_PACKED_PIXELS		0	/* Packed Pixels	*/
 #define FB_TYPE_PLANES			1	/* Non interleaved planes */
@@ -82,6 +89,10 @@
 #define FB_ACCEL_CT_6555x	30	/* C&T 6555x			*/
 #define FB_ACCEL_3DFX_BANSHEE	31	/* 3Dfx Banshee			*/
 #define FB_ACCEL_ATI_RAGE128	32	/* ATI Rage128 family		*/
+#define FB_ACCEL_IGS_CYBER2000	33	/* CyberPro 2000		*/
+#define FB_ACCEL_IGS_CYBER2010	34	/* CyberPro 2010		*/
+#define FB_ACCEL_IGS_CYBER5000	35	/* CyberPro 5000		*/
+#define FB_ACCEL_SIS_GLAMOUR    36	/* SiS 300/630/540              */
 
 struct fb_fix_screeninfo {
 	char id[16];			/* identification string eg "TT Builtin" */
@@ -232,7 +243,7 @@ struct fb_vblank {
 
 #ifdef __KERNEL__
 
-#if 1 /* to go away in 2.4.0 */
+#if 1 /* to go away in 2.5.0 */
 extern int GET_FB_IDX(kdev_t rdev);
 #else
 #define GET_FB_IDX(node)	(MINOR(node))
@@ -254,6 +265,7 @@ struct file;
 
 struct fb_ops {
     /* open/release and usage marking */
+    struct module *owner;
     int (*fb_open)(struct fb_info *info, int user);
     int (*fb_release)(struct fb_info *info, int user);
     /* get non settable parameters */
@@ -271,10 +283,10 @@ struct fb_ops {
     /* set colormap */
     int (*fb_set_cmap)(struct fb_cmap *cmap, int kspc, int con,
 		       struct fb_info *info);
-    /* pan display */
+    /* pan display (optional) */
     int (*fb_pan_display)(struct fb_var_screeninfo *var, int con,
 			  struct fb_info *info);
-    /* perform fb specific ioctl */
+    /* perform fb specific ioctl (optional) */
     int (*fb_ioctl)(struct inode *inode, struct file *file, unsigned int cmd,
 		    unsigned long arg, int con, struct fb_info *info);
     /* perform fb specific mmap */
@@ -283,15 +295,12 @@ struct fb_ops {
     int (*fb_rasterimg)(struct fb_info *info, int start);
 };
 
-/* fb_info flags */
-#define FBINFO_FLAG_MODULE      1       /* Low-level driver is a module */
-#define FBINFO_FLAG_OPEN        2       /* Has this been open already ? */ 
-
 struct fb_info {
    char modename[40];			/* default video mode */
    kdev_t node;
    int flags;
-   int count;                           /* How many using the hardware */
+   int open;                            /* Has this been open already ? */
+#define FBINFO_FLAG_MODULE	1	/* Low-level driver is a module */
    struct fb_var_screeninfo var;        /* Current var */
    struct fb_fix_screeninfo fix;        /* Current fix */
    struct fb_monspecs monspecs;         /* Current Monitor specs */
@@ -378,9 +387,6 @@ extern int fbgen_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			  struct fb_info *info);
 extern int fbgen_pan_display(struct fb_var_screeninfo *var, int con,
 			     struct fb_info *info);
-extern int fbgen_ioctl(struct inode *inode, struct file *file,
-		       unsigned int cmd, unsigned long arg, int con,
-		       struct fb_info *info);
 
     /*
      *  Helper functions
@@ -438,12 +444,41 @@ struct fb_videomode {
     u32 vmode;
 };
 
+#ifdef MODULE
+static inline int fb_find_mode(struct fb_var_screeninfo *var,
+			       struct fb_info *info, const char *mode_option,
+			       const struct fb_videomode *db,
+			       unsigned int dbsize,
+			       const struct fb_videomode *default_mode,
+			       unsigned int default_bpp)
+{
+    extern int __fb_try_mode(struct fb_var_screeninfo *var,
+	    		     struct fb_info *info,
+			     const struct fb_videomode *mode,
+			     unsigned int bpp);
+    /*
+     *  FIXME: How to make the compiler optimize vga640x400 away if
+     *         default_mode is non-NULL?
+     */
+    static const struct fb_videomode vga640x400 = {
+	/* 640x400 @ 70 Hz, 31.5 kHz hsync */
+	NULL, 70, 640, 400, 39721, 40, 24, 39, 9, 96, 2,
+	0, FB_VMODE_NONINTERLACED
+    };
+    if (!default_mode)
+	default_mode = &vga640x400;
+    if (!default_bpp)
+	default_bpp = 8;
+    return __fb_try_mode(var, info, default_mode, default_bpp);
+}
+#else
 extern int __init fb_find_mode(struct fb_var_screeninfo *var,
 			       struct fb_info *info, const char *mode_option,
 			       const struct fb_videomode *db,
 			       unsigned int dbsize,
 			       const struct fb_videomode *default_mode,
 			       unsigned int default_bpp);
+#endif
 
 #endif /* __KERNEL__ */
 

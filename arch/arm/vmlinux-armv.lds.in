@@ -8,11 +8,15 @@ SECTIONS
 {
 	. = TEXTADDR;
 	.init : {			/* Init code and data		*/
+		_stext = .;
 		__init_begin = .;
 			*(.text.init)
 		__proc_info_begin = .;
 			*(.proc.info)
 		__proc_info_end = .;
+		__arch_info_begin = .;
+			*(.arch.info)
+		__arch_info_end = .;
 			*(.data.init)
 		. = ALIGN(16);
 		__setup_start = .;
@@ -25,6 +29,12 @@ SECTIONS
 		__init_end = .;
 	}
 
+	/DISCARD/ : {			/* Exit code and data		*/
+		*(.text.exit)
+		*(.data.exit)
+		*(.exitcall.exit)
+	}
+
 	.text : {			/* Real text segment		*/
 		_text = .;		/* Text and read-only data	*/
 			*(.text)
@@ -33,8 +43,8 @@ SECTIONS
 			*(.text.lock)	/* out-of-line lock text */
 			*(.rodata)
 			*(.kstrtab)
-		. = ALIGN(16);		/* Exception table		*/
-		__start___ex_table = .;
+		. = ALIGN(16);
+		__start___ex_table = .;	/* Exception table		*/
 			*(__ex_table)
 		__stop___ex_table = .;
 

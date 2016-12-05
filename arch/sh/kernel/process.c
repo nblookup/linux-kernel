@@ -1,4 +1,4 @@
-/* $Id: process.c,v 1.28 2000/03/05 02:16:15 gniibe Exp $
+/* $Id: process.c,v 1.33 2000/03/25 00:06:15 gniibe Exp $
  *
  *  linux/arch/sh/kernel/process.c
  *
@@ -63,7 +63,7 @@ void cpu_idle(void *unused)
 {
 	/* endless idle loop with no priority at all */
 	init_idle();
-	current->priority = 0;
+	current->nice = 20;
 	current->counter = -100;
 
 	while (1) {
@@ -94,7 +94,7 @@ void show_regs(struct pt_regs * regs)
 {
 	printk("\n");
 	printk("PC  : %08lx SP  : %08lx SR  : %08lx TEA : %08lx\n",
-	       regs->pc, regs->sp, regs->sr, ctrl_inl(MMU_TEA));
+	       regs->pc, regs->regs[15], regs->sr, ctrl_inl(MMU_TEA));
 	printk("R0  : %08lx R1  : %08lx R2  : %08lx R3  : %08lx\n",
 	       regs->regs[0],regs->regs[1],
 	       regs->regs[2],regs->regs[3]);
@@ -136,25 +136,26 @@ void free_task_struct(struct task_struct *p)
  */
 int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {	/* Don't use this in BL=1(cli).  Or else, CPU resets! */
-	register unsigned long __sc0 __asm__ ("$r0") = __NR_clone;
-	register unsigned long __sc4 __asm__ ("$r4") = (long) flags | CLONE_VM;
-	register unsigned long __sc5 __asm__ ("$r5") = 0;
-	register unsigned long __sc8 __asm__ ("$r8") = (long) arg;
-	register unsigned long __sc9 __asm__ ("$r9") = (long) fn;
+	register unsigned long __sc0 __asm__ ("r0");
+	register unsigned long __sc3 __asm__ ("r3") = __NR_clone;
+	register unsigned long __sc4 __asm__ ("r4") = (long) flags | CLONE_VM;
+	register unsigned long __sc5 __asm__ ("r5") = 0;
+	register unsigned long __sc8 __asm__ ("r8") = (long) arg;
+	register unsigned long __sc9 __asm__ ("r9") = (long) fn;
 
-	__asm__("trapa	#0\n\t" 	/* Linux/SH system call */
+	__asm__("trapa	#0x12\n\t" 	/* Linux/SH system call */
 		"tst	#0xff, $r0\n\t"	/* child or parent? */
 		"bf	1f\n\t"		/* parent - jump */
 		"jsr	@$r9\n\t"	/* call fn */
 		" mov	$r8, $r4\n\t"	/* push argument */
 		"mov	$r0, $r4\n\t"	/* return value to arg of exit */
-		"mov	%2, $r0\n\t"	/* exit */
-		"trapa	#0\n"
+		"mov	%1, $r3\n\t"	/* exit */
+		"trapa	#0x11\n"
 		"1:"
 		: "=z" (__sc0)
-		: "0" (__sc0), "i" (__NR_exit),
-		  "r" (__sc4), "r" (__sc5), "r" (__sc8), "r" (__sc9)
-		: "memory");
+		: "i" (__NR_exit), "r" (__sc3), "r" (__sc4), "r" (__sc5), 
+		  "r" (__sc8), "r" (__sc9)
+		: "memory", "t");
 	return __sc0;
 }
 
@@ -194,7 +195,11 @@ int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpu)
 
 	fpvalid = tsk->used_math;
 	if (fpvalid) {
+		unsigned long flags;
+
+		save_and_cli(flags);
 		unlazy_fpu(tsk);
+		restore_flags(flags);
 		memcpy(fpu, &tsk->thread.fpu.hard, sizeof(*fpu));
 	}
 
@@ -207,25 +212,30 @@ int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpu)
 asmlinkage void ret_from_fork(void);
 
 int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
+		unsigned long unused,
 		struct task_struct *p, struct pt_regs *regs)
 {
 	struct pt_regs *childregs;
+#if defined(__SH4__)
 	struct task_struct *tsk = current;
 
-	childregs = ((struct pt_regs *)(THREAD_SIZE + (unsigned long) p)) - 1;
-	struct_cpy(childregs, regs);
-
-#if defined(__SH4__)
 	if (tsk != &init_task) {
+		unsigned long flags;
+
+		save_and_cli(flags);
 		unlazy_fpu(tsk);
-		struct_cpy(&p->thread.fpu, &current->thread.fpu);
+		restore_flags(flags);
+		p->thread.fpu = current->thread.fpu;
 		p->used_math = tsk->used_math;
 	}
 #endif
+	childregs = ((struct pt_regs *)(THREAD_SIZE + (unsigned long) p)) - 1;
+	*childregs = *regs;
+
 	if (user_mode(regs)) {
-		childregs->sp = usp;
+		childregs->regs[15] = usp;
 	} else {
-		childregs->sp = (unsigned long)p+2*PAGE_SIZE;
+		childregs->regs[15] = (unsigned long)p+2*PAGE_SIZE;
 	}
 	childregs->regs[0] = 0; /* Set return value for child */
 	childregs->sr |= SR_FD; /* Invalidate FPU flag */
@@ -244,7 +254,7 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 	dump->magic = CMAGIC;
 	dump->start_code = current->mm->start_code;
 	dump->start_data  = current->mm->start_data;
-	dump->start_stack = regs->sp & ~(PAGE_SIZE - 1);
+	dump->start_stack = regs->regs[15] & ~(PAGE_SIZE - 1);
 	dump->u_tsize = (current->mm->end_code - dump->start_code) >> PAGE_SHIFT;
 	dump->u_dsize = (current->mm->brk + (PAGE_SIZE-1) - dump->start_data) >> PAGE_SHIFT;
 	dump->u_ssize = (current->mm->start_stack - dump->start_stack +
@@ -263,23 +273,28 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 void __switch_to(struct task_struct *prev, struct task_struct *next)
 {
 #if defined(__SH4__)
-	if (prev != &init_task)
+	if (prev != &init_task) {
+		unsigned long flags;
+
+		save_and_cli(flags);
 		unlazy_fpu(prev);
+		restore_flags(flags);
+	}
 #endif
 	/*
-	 * Restore the kernel stack onto kernel mode register
-	 *   	k4 (r4_bank1)
+	 * Restore the kernel mode register
+	 *   	k7 (r7_bank1)
 	 */
-	asm volatile("ldc	%0, $r4_bank"
+	asm volatile("ldc	%0, $r7_bank"
 		     : /* no output */
-		     :"r" ((unsigned long)next+8192));
+		     :"r" (next));
 }
 
 asmlinkage int sys_fork(unsigned long r4, unsigned long r5,
 			unsigned long r6, unsigned long r7,
 			struct pt_regs regs)
 {
-	return do_fork(SIGCHLD, regs.sp, &regs);
+	return do_fork(SIGCHLD, regs.regs[15], &regs, 0);
 }
 
 asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp,
@@ -287,8 +302,8 @@ asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp,
 			 struct pt_regs regs)
 {
 	if (!newsp)
-		newsp = regs.sp;
-	return do_fork(clone_flags, newsp, &regs);
+		newsp = regs.regs[15];
+	return do_fork(clone_flags, newsp, &regs, 0);
 }
 
 /*
@@ -305,7 +320,7 @@ asmlinkage int sys_vfork(unsigned long r4, unsigned long r5,
 			 unsigned long r6, unsigned long r7,
 			 struct pt_regs regs)
 {
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs.sp, &regs);
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs.regs[15], &regs, 0);
 }
 
 /*
@@ -318,7 +333,6 @@ asmlinkage int sys_execve(char *ufilename, char **uargv,
 	int error;
 	char *filename;
 
-	lock_kernel();
 	filename = getname(ufilename);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
@@ -326,10 +340,9 @@ asmlinkage int sys_execve(char *ufilename, char **uargv,
 
 	error = do_execve(filename, uargv, uenvp, &regs);
 	if (error == 0)
-		current->flags &= ~PF_DTRACE;
+		current->ptrace &= ~PT_DTRACE;
 	putname(filename);
 out:
-	unlock_kernel();
 	return error;
 }
 
@@ -369,4 +382,23 @@ asmlinkage void print_syscall(int x)
 	       (current->flags&PF_USEDFPU)?'C':' ',
 	       (init_task.flags&PF_USEDFPU)?'K':' ', (sr&SR_FD)?' ':'F');
 	restore_flags(flags);
+}
+
+asmlinkage void break_point_trap(unsigned long r4, unsigned long r5,
+				 unsigned long r6, unsigned long r7,
+				 struct pt_regs regs)
+{
+	/* Clear tracing.  */
+	ctrl_outw(0, UBC_BBRA);
+	ctrl_outw(0, UBC_BBRB);
+
+	force_sig(SIGTRAP, current);
+}
+
+asmlinkage void break_point_trap_software(unsigned long r4, unsigned long r5,
+					  unsigned long r6, unsigned long r7,
+					  struct pt_regs regs)
+{
+	regs.pc -= 2;
+	force_sig(SIGTRAP, current);
 }

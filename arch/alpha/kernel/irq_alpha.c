@@ -6,6 +6,7 @@
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/irq.h>
+#include <linux/kernel_stat.h>
 
 #include <asm/machvec.h>
 #include <asm/dma.h>
@@ -13,11 +14,7 @@
 #include "proto.h"
 #include "irq_impl.h"
 
-/* Only uniprocessor needs this IRQ/BH locking depth, on SMP it lives
-   in the per-cpu structure for cache reasons.  */
 #ifndef CONFIG_SMP
-int __local_irq_count;
-int __local_bh_count;
 unsigned long __irq_attempt[NR_IRQS];
 #endif
 
@@ -61,14 +58,22 @@ do_entInt(unsigned long type, unsigned long vector, unsigned long la_ptr,
 		break;
 	case 1:
 #ifdef CONFIG_SMP
-		cpu_data[smp_processor_id()].smp_local_irq_count++;
+	  {
+		long cpu;
 		smp_percpu_timer_interrupt(&regs);
-		if (smp_processor_id() == boot_cpuid)
-#endif
+		cpu = smp_processor_id();
+		if (cpu != boot_cpuid) {
+		        irq_attempt(cpu, RTC_IRQ)++;
+		        kstat.irqs[cpu][RTC_IRQ]++;
+		} else {
 			handle_irq(RTC_IRQ, &regs);
+		}
+	  }
+#else
+		handle_irq(RTC_IRQ, &regs);
+#endif
 		return;
 	case 2:
-		irq_err_count++;
 		alpha_mv.machine_check(vector, la_ptr, &regs);
 		return;
 	case 3:
@@ -96,8 +101,18 @@ common_init_isa_dma(void)
 void __init
 init_IRQ(void)
 {
-	alpha_mv.init_irq();
+	/* Uh, this really MUST come first, just in case
+	 * the platform init_irq() causes interrupts/mchecks
+	 * (as is the case with RAWHIDE, at least).
+	 */
 	wrent(entInt, 0);
+
+	alpha_mv.init_irq();
+
+	/* If we had wanted SRM console printk echoing early, undo it now. */
+	if (alpha_using_srm && srmcons_output) {
+		unregister_srm_console();
+	}
 }
 
 /*
@@ -161,7 +176,7 @@ process_mcheck_info(unsigned long vector, unsigned long la_ptr,
 	case 0x202: reason = "system detected hard error"; break;
 	case 0x203: reason = "system detected uncorrectable ECC error"; break;
 	case 0x204: reason = "SIO SERR occurred on PCI bus"; break;
-	case 0x205: reason = "parity error detected by CIA"; break;
+	case 0x205: reason = "parity error detected by core logic"; break;
 	case 0x206: reason = "SIO IOCHK occurred on ISA bus"; break;
 	case 0x207: reason = "non-existent memory error"; break;
 	case 0x208: reason = "MCHK_K_DCSR"; break;

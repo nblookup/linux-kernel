@@ -1,4 +1,4 @@
-/* $Id: ioport.c,v 1.35 2000/02/27 08:16:25 davem Exp $
+/* $Id: ioport.c,v 1.42 2000/12/05 00:56:36 anton Exp $
  * ioport.c:  Simple io mapping allocator.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -43,6 +43,8 @@
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 
+#define mmu_inval_dma_area(p, l)	/* Anton pulled it out for 2.4.0-xx */
+
 struct resource *_sparc_find_resource(struct resource *r, unsigned long);
 
 static void *_sparc_ioremap(struct resource *res, u32 bus, u32 pa, int sz);
@@ -52,11 +54,11 @@ static void _sparc_free_io(struct resource *res);
 
 /* This points to the next to use virtual memory for DVMA mappings */
 static struct resource _sparc_dvma = {
-	"sparc_dvma", DVMA_VADDR, DVMA_VADDR + DVMA_LEN - 1
+	"sparc_dvma", DVMA_VADDR, DVMA_END - 1
 };
 /* This points to the start of I/O mappings, cluable from outside. */
 /*ext*/ struct resource sparc_iomap = {
-	"sparc_iomap", IOBASE_VADDR, IOBASE_END-1
+	"sparc_iomap", IOBASE_VADDR, IOBASE_END - 1
 };
 
 /*
@@ -242,6 +244,7 @@ static void _sparc_free_io(struct resource *res)
 	unsigned long plen;
 
 	plen = res->end - res->start + 1;
+	plen = (plen + PAGE_SIZE-1) & PAGE_MASK;
 	while (plen != 0) {
 		plen -= PAGE_SIZE;
 		(*_sparc_unmapioaddr)(res->start + plen);
@@ -321,7 +324,7 @@ void sbus_free_consistent(struct sbus_dev *sdev, long n, void *p, u32 ba)
 		return;
 	}
 
-	if (((unsigned long)p & (PAGE_MASK-1)) != 0) {
+	if (((unsigned long)p & (PAGE_SIZE-1)) != 0) {
 		printk("sbus_free_consistent: unaligned va %p\n", p);
 		return;
 	}
@@ -444,6 +447,7 @@ void sbus_unmap_sg(struct sbus_dev *sdev, struct scatterlist *sg, int n, int dir
  */
 void sbus_dma_sync_single(struct sbus_dev *sdev, u32 ba, long size, int direction)
 {
+#if 0
 	unsigned long va;
 	struct resource *res;
 
@@ -453,7 +457,12 @@ void sbus_dma_sync_single(struct sbus_dev *sdev, u32 ba, long size, int directio
 		panic("sbus_dma_sync_single: 0x%x\n", ba);
 
 	va = (unsigned long) phys_to_virt(mmu_translate_dvma(ba));
-	mmu_inval_dma_area(va, (size + PAGE_SIZE-1) & PAGE_MASK);
+	/*
+	 * XXX This bogosity will be fixed with the iommu rewrite coming soon
+	 * to a kernel near you. - Anton
+	 */
+	/* mmu_inval_dma_area(va, (size + PAGE_SIZE-1) & PAGE_MASK); */
+#endif
 }
 
 void sbus_dma_sync_sg(struct sbus_dev *sdev, struct scatterlist *sg, int n, int direction)
@@ -490,7 +499,7 @@ void *pci_alloc_consistent(struct pci_dev *pdev, size_t len, dma_addr_t *pba)
 
 	if ((res = kmalloc(sizeof(struct resource), GFP_KERNEL)) == NULL) {
 		free_pages(va, order);
-		printk("sbus_alloc_consistent: no core\n");
+		printk("pci_alloc_consistent: no core\n");
 		return NULL;
 	}
 	memset((char*)res, 0, sizeof(struct resource));
@@ -540,18 +549,18 @@ void pci_free_consistent(struct pci_dev *pdev, size_t n, void *p, dma_addr_t ba)
 
 	if ((res = _sparc_find_resource(&_sparc_dvma,
 	    (unsigned long)p)) == NULL) {
-		printk("sbus_free_consistent: cannot free %p\n", p);
+		printk("pci_free_consistent: cannot free %p\n", p);
 		return;
 	}
 
-	if (((unsigned long)p & (PAGE_MASK-1)) != 0) {
-		printk("sbus_free_consistent: unaligned va %p\n", p);
+	if (((unsigned long)p & (PAGE_SIZE-1)) != 0) {
+		printk("pci_free_consistent: unaligned va %p\n", p);
 		return;
 	}
 
 	n = (n + PAGE_SIZE-1) & PAGE_MASK;
 	if ((res->end-res->start)+1 != n) {
-		printk("sbus_free_consistent: region 0x%lx asked 0x%lx\n",
+		printk("pci_free_consistent: region 0x%lx asked 0x%lx\n",
 		    (long)((res->end-res->start)+1), (long)n);
 		return;
 	}
@@ -577,10 +586,12 @@ void pci_free_consistent(struct pci_dev *pdev, size_t n, void *p, dma_addr_t ba)
  * Once the device is given the dma address, the device owns this memory
  * until either pci_unmap_single or pci_dma_sync_single is performed.
  */
-dma_addr_t pci_map_single(struct pci_dev *hwdev, void *ptr, size_t size, int direction)
+dma_addr_t pci_map_single(struct pci_dev *hwdev, void *ptr, size_t size,
+    int direction)
 {
 	if (direction == PCI_DMA_NONE)
 		BUG();
+	/* IIep is write-through, not flushing. */
 	return virt_to_bus(ptr);
 }
 
@@ -591,11 +602,15 @@ dma_addr_t pci_map_single(struct pci_dev *hwdev, void *ptr, size_t size, int dir
  * After this call, reads by the cpu to the buffer are guarenteed to see
  * whatever the device wrote there.
  */
-void pci_unmap_single(struct pci_dev *hwdev, dma_addr_t dma_addr, size_t size, int direction)
+void pci_unmap_single(struct pci_dev *hwdev, dma_addr_t ba, size_t size,
+    int direction)
 {
 	if (direction == PCI_DMA_NONE)
 		BUG();
-	/* Nothing to do... */
+	if (direction != PCI_DMA_TODEVICE) {
+		mmu_inval_dma_area((unsigned long)bus_to_virt(ba),
+		    (size + PAGE_SIZE-1) & PAGE_MASK);
+	}
 }
 
 /* Map a set of buffers described by scatterlist in streaming
@@ -613,13 +628,14 @@ void pci_unmap_single(struct pci_dev *hwdev, dma_addr_t dma_addr, size_t size, i
  * Device ownership issues as mentioned above for pci_map_single are
  * the same here.
  */
-int pci_map_sg(struct pci_dev *hwdev, struct scatterlist *sg, int nents, int direction)
+int pci_map_sg(struct pci_dev *hwdev, struct scatterlist *sg, int nents,
+    int direction)
 {
 	int n;
 
 	if (direction == PCI_DMA_NONE)
 		BUG();
-
+	/* IIep is write-through, not flushing. */
 	for (n = 0; n < nents; n++) {
 		sg->dvma_address = virt_to_bus(sg->address);
 		sg->dvma_length = sg->length;
@@ -632,15 +648,24 @@ int pci_map_sg(struct pci_dev *hwdev, struct scatterlist *sg, int nents, int dir
  * Again, cpu read rules concerning calls here are the same as for
  * pci_unmap_single() above.
  */
-void pci_unmap_sg(struct pci_dev *hwdev, struct scatterlist *sg, int nhwents, int direction)
+void pci_unmap_sg(struct pci_dev *hwdev, struct scatterlist *sg, int nents,
+    int direction)
 {
+	int n;
+
 	if (direction == PCI_DMA_NONE)
 		BUG();
-	/* Nothing to do... */
+	if (direction != PCI_DMA_TODEVICE) {
+		for (n = 0; n < nents; n++) {
+			mmu_inval_dma_area((unsigned long)sg->address,
+			    (sg->length + PAGE_SIZE-1) & PAGE_MASK);
+			sg++;
+		}
+	}
 }
 
 /* Make physical memory consistent for a single
- * streaming mode DMA translation after a transfer.
+ * streaming mode DMA translation before or after a transfer.
  *
  * If you perform a pci_map_single() but wish to interrogate the
  * buffer using the cpu, yet do not wish to teardown the PCI dma
@@ -652,8 +677,10 @@ void pci_dma_sync_single(struct pci_dev *hwdev, dma_addr_t ba, size_t size, int 
 {
 	if (direction == PCI_DMA_NONE)
 		BUG();
-	mmu_inval_dma_area((unsigned long)bus_to_virt(ba),
-	    (size + PAGE_SIZE-1) & PAGE_MASK);
+	if (direction != PCI_DMA_TODEVICE) {
+		mmu_inval_dma_area((unsigned long)bus_to_virt(ba),
+		    (size + PAGE_SIZE-1) & PAGE_MASK);
+	}
 }
 
 /* Make physical memory consistent for a set of streaming
@@ -664,13 +691,16 @@ void pci_dma_sync_single(struct pci_dev *hwdev, dma_addr_t ba, size_t size, int 
  */
 void pci_dma_sync_sg(struct pci_dev *hwdev, struct scatterlist *sg, int nents, int direction)
 {
+	int n;
+
 	if (direction == PCI_DMA_NONE)
 		BUG();
-	while (nents) {
-		--nents;
-		mmu_inval_dma_area((unsigned long)sg->address,
-		    (sg->dvma_length + PAGE_SIZE-1) & PAGE_MASK);
-		sg++;
+	if (direction != PCI_DMA_TODEVICE) {
+		for (n = 0; n < nents; n++) {
+			mmu_inval_dma_area((unsigned long)sg->address,
+			    (sg->length + PAGE_SIZE-1) & PAGE_MASK);
+			sg++;
+		}
 	}
 }
 #endif CONFIG_PCI
@@ -745,6 +775,10 @@ void ioport_init(void)
 		halt();
 	};
 
+}
+
+void register_proc_sparc_ioport(void)
+{
 #ifdef CONFIG_PROC_FS
 	create_proc_read_entry("io_map",0,0,_sparc_io_get_info,&sparc_iomap);
 	create_proc_read_entry("dvma_map",0,0,_sparc_io_get_info,&_sparc_dvma);

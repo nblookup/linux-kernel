@@ -9,12 +9,13 @@
 #include <linux/string.h>
 #include <linux/efs_fs.h>
 #include <linux/pagemap.h>
+#include <linux/smp_lock.h>
 
-static int efs_symlink_readpage(struct dentry *dentry, struct page *page)
+static int efs_symlink_readpage(struct file *file, struct page *page)
 {
-	char *link = (char*)kmap(page);
+	char *link = kmap(page);
 	struct buffer_head * bh;
-	struct inode * inode = dentry->d_inode;
+	struct inode * inode = page->mapping->host;
 	efs_block_t size = inode->i_size;
 	int err;
   
@@ -22,6 +23,7 @@ static int efs_symlink_readpage(struct dentry *dentry, struct page *page)
 	if (size > 2 * EFS_BLOCKSIZE)
 		goto fail;
   
+	lock_kernel();
 	/* read first 512 bytes of link target */
 	err = -EIO;
 	bh = bread(inode->i_dev, efs_bmap(inode, 0), EFS_BLOCKSIZE);
@@ -37,11 +39,13 @@ static int efs_symlink_readpage(struct dentry *dentry, struct page *page)
 		brelse(bh);
 	}
 	link[size] = '\0';
+	unlock_kernel();
 	SetPageUptodate(page);
 	kunmap(page);
 	UnlockPage(page);
 	return 0;
 fail:
+	unlock_kernel();
 	SetPageError(page);
 	kunmap(page);
 	UnlockPage(page);

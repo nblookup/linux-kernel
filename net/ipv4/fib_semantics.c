@@ -5,7 +5,7 @@
  *
  *		IPv4 Forwarding Information Base: semantics.
  *
- * Version:	$Id: fib_semantics.c,v 1.15 1999/08/20 11:05:07 davem Exp $
+ * Version:	$Id: fib_semantics.c,v 1.17 2000/08/19 23:22:56 davem Exp $
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
@@ -764,25 +764,20 @@ fib_convert_rtentry(int cmd, struct nlmsghdr *nl, struct rtmsg *rtm,
 	rtm->rtm_type = RTN_UNICAST;
 
 	if (r->rt_dev) {
-#ifdef CONFIG_IP_ALIAS
 		char *colon;
-#endif
 		struct net_device *dev;
 		char   devname[IFNAMSIZ];
 
 		if (copy_from_user(devname, r->rt_dev, IFNAMSIZ-1))
 			return -EFAULT;
 		devname[IFNAMSIZ-1] = 0;
-#ifdef CONFIG_IP_ALIAS
 		colon = strchr(devname, ':');
 		if (colon)
 			*colon = 0;
-#endif
 		dev = __dev_get_by_name(devname);
 		if (!dev)
 			return -ENODEV;
 		rta->rta_oif = &dev->ifindex;
-#ifdef CONFIG_IP_ALIAS
 		if (colon) {
 			struct in_ifaddr *ifa;
 			struct in_device *in_dev = __in_dev_get(dev);
@@ -796,7 +791,6 @@ fib_convert_rtentry(int cmd, struct nlmsghdr *nl, struct rtmsg *rtm,
 				return -ENODEV;
 			rta->rta_prefsrc = &ifa->ifa_local;
 		}
-#endif
 	}
 
 	ptr = &((struct sockaddr_in*)&r->rt_gateway)->sin_addr.s_addr;
@@ -925,7 +919,7 @@ int fib_sync_up(struct net_device *dev)
 			nh->nh_flags &= ~RTNH_F_DEAD;
 		} endfor_nexthops(fi)
 
-		if (alive == fi->fib_nhs) {
+		if (alive > 0) {
 			fi->fib_flags &= ~RTNH_F_DEAD;
 			ret++;
 		}

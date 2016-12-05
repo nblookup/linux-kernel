@@ -1,4 +1,4 @@
-/* $Id: socket.c,v 1.2 1999/09/22 09:28:50 davem Exp $
+/* $Id: socket.c,v 1.4 2000/11/18 02:11:00 davem Exp $
  * socket.c: Socket syscall emulation for Solaris 2.6+
  *
  * Copyright (C) 1998 Jakub Jelinek (jj@ultra.linux.cz)
@@ -18,7 +18,6 @@
 #include <asm/string.h>
 #include <asm/oplib.h>
 #include <asm/idprom.h>
-#include <asm/machines.h>
 
 #include "conv.h"
 
@@ -266,7 +265,7 @@ extern __inline__ struct socket *sockfd_lookup(int fd, int *err)
 	}
 
 	inode = file->f_dentry->d_inode;
-	if (!inode || !inode->i_sock || !socki_lookup(inode)) {
+	if (!inode->i_sock || !socki_lookup(inode)) {
 		*err = -ENOTSOCK;
 		fput(file);
 		return NULL;

@@ -1,4 +1,4 @@
-/* $Id: page.h,v 1.48 2000/02/16 07:34:51 davem Exp $
+/* $Id: page.h,v 1.55 2000/10/30 21:01:41 davem Exp $
  * page.h:  Various defines and such for MMU operations on the Sparc for
  *          the Linux kernel.
  *
@@ -14,7 +14,12 @@
 #else
 #define PAGE_SHIFT   12
 #endif
+#ifndef __ASSEMBLY__
+/* I have my suspicions... -DaveM */
+#define PAGE_SIZE    (1UL << PAGE_SHIFT)
+#else
 #define PAGE_SIZE    (1 << PAGE_SHIFT)
+#endif
 #define PAGE_MASK    (~(PAGE_SIZE-1))
 
 #ifdef __KERNEL__
@@ -27,14 +32,30 @@
 
 #ifndef __ASSEMBLY__
 
-#define BUG() do { printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); *(int *)0=0; } while (0)
-
-#define PAGE_BUG(page) do { \
-	BUG(); \
+/*
+ * XXX I am hitting compiler bugs with __builtin_trap. This has
+ * hit me before and rusty was blaming his netfilter bugs on
+ * this so lets disable it. - Anton
+ */
+#if 0
+/* We need the mb()'s so we don't trigger a compiler bug - Anton */
+#define BUG() do { \
+	mb(); \
+	__builtin_trap(); \
+	mb(); \
+} while(0)
+#else
+#define BUG() do { \
+	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); *(int *)0=0; \
 } while (0)
+#endif
 
-#define clear_page(page)	memset((void *)(page), 0, PAGE_SIZE)
-#define copy_page(to,from)	memcpy((void *)(to), (void *)(from), PAGE_SIZE)
+#define PAGE_BUG(page)	BUG()
+
+#define clear_page(page)	 memset((void *)(page), 0, PAGE_SIZE)
+#define copy_page(to,from) 	memcpy((void *)(to), (void *)(from), PAGE_SIZE)
+#define clear_user_page(page, vaddr)	clear_page(page)
+#define copy_user_page(to, from, vaddr)	copy_page(to, from)
 
 /* The following structure is used to hold the physical
  * memory configuration of the machine.  This is filled in
@@ -155,7 +176,8 @@ extern __inline__ int get_order(unsigned long size)
 #define PAGE_OFFSET	0xf0000000
 #define __pa(x)                 ((unsigned long)(x) - PAGE_OFFSET)
 #define __va(x)                 ((void *)((unsigned long) (x) + PAGE_OFFSET))
-#define MAP_NR(addr)            (__pa(addr) >> PAGE_SHIFT)
+#define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT))
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
 #endif /* __KERNEL__ */
 

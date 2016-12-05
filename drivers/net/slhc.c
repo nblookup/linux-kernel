@@ -56,6 +56,7 @@
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <net/slhc_vj.h>
 
 #ifdef CONFIG_INET
 /* Entire module is for IP only */
@@ -77,9 +78,7 @@
 #include <linux/timer.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
-#include <linux/init.h>
 #include <net/checksum.h>
-#include <net/slhc_vj.h>
 #include <asm/unaligned.h>
 
 int last_retran;
@@ -749,12 +748,6 @@ int init_module(void)
 void cleanup_module(void)
 {
 	return;
-}
-
-#else /* MODULE */
-int __init slhc_install(void)
-{
-	return 0;
 }
 
 #endif /* MODULE */

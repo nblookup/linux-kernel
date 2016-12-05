@@ -69,6 +69,7 @@ static __inline__ void ide_init_hwif_ports(hw_regs_t *hw, ide_ioreg_t data_port,
 	}
 	if (irq != NULL)
 		*irq = 0;
+	hw->io_ports[IDE_IRQ_OFFSET] = 0;
 }
 
 static __inline__ void ide_init_default_hwifs(void)

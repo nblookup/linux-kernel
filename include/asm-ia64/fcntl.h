@@ -3,8 +3,8 @@
 /*
  * This is mostly compatible with Linux/x86.
  *
- * Copyright (C) 1998, 1999 Hewlett-Packard Co
- * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2000 Hewlett-Packard Co
+ * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 /*
@@ -30,10 +30,10 @@
 #define O_NOFOLLOW	0400000 /* don't follow links */
 
 #define F_DUPFD		0	/* dup */
-#define F_GETFD		1	/* get f_flags */
-#define F_SETFD		2	/* set f_flags */
-#define F_GETFL		3	/* more flags (cloexec) */
-#define F_SETFL		4
+#define F_GETFD		1	/* get close_on_exec */
+#define F_SETFD		2	/* set/clear close_on_exec */
+#define F_GETFL		3	/* get file->f_flags */
+#define F_SETFL		4	/* set file->f_flags */
 #define F_GETLK		5
 #define F_SETLK		6
 #define F_SETLKW	7
@@ -55,12 +55,20 @@
 #define F_EXLCK		4	/* or 3 */
 #define F_SHLCK		8	/* or 4 */
 
+/* for leases */
+#define F_INPROGRESS	16
+
 /* operations for bsd flock(), also used by the kernel implementation */
 #define LOCK_SH		1	/* shared lock */
 #define LOCK_EX		2	/* exclusive lock */
 #define LOCK_NB		4	/* or'd with one of the above to prevent
 				   blocking */
 #define LOCK_UN		8	/* remove lock */
+
+#define LOCK_MAND	32	/* This is a mandatory flock */
+#define LOCK_READ	64	/* ... Which allows concurrent read operations */
+#define LOCK_WRITE	128	/* ... Which allows concurrent write operations */
+#define LOCK_RW		192	/* ... Which allows concurrent read & write ops */
 
 struct flock {
 	short l_type;
@@ -70,4 +78,9 @@ struct flock {
 	pid_t l_pid;
 };
 
+#ifdef __KERNEL__
+# define flock64	flock
+#endif
+
+#define F_LINUX_SPECIFIC_BASE	1024
 #endif /* _ASM_IA64_FCNTL_H */

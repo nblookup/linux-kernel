@@ -16,6 +16,7 @@
  * handle GCR disks
  */
 
+#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -245,6 +246,13 @@ static int floppy_check_change(kdev_t dev);
 static int floppy_revalidate(kdev_t dev);
 static int swim3_add_device(struct device_node *swims);
 int swim3_init(void);
+
+#ifndef CONFIG_PMAC_PBOOK
+static inline int check_media_bay(struct device_node *which_bay, int what)
+{
+	return 1;
+}
+#endif
 
 static void swim3_select(struct floppy_state *fs, int sel)
 {
@@ -799,6 +807,16 @@ static int fd_eject(struct floppy_state *fs)
 	fs->ejected = 1;
 	release_drive(fs);
 	return err;
+}
+
+int swim3_fd_eject(int devnum)
+{
+	if (devnum >= floppy_count)
+		return -ENODEV;
+	/* Do not check this - this function should ONLY be called early
+	 * in the boot process! */
+	/* if (floppy_states[devnum].ref_count != 1) return -EBUSY; */
+	return fd_eject(&floppy_states[devnum]);
 }
 
 static struct floppy_struct floppy_type =

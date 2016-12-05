@@ -14,9 +14,9 @@
 
 static inline int mlock_fixup_all(struct vm_area_struct * vma, int newflags)
 {
-	vmlist_modify_lock(vma->vm_mm);
+	spin_lock(&vma->vm_mm->page_table_lock);
 	vma->vm_flags = newflags;
-	vmlist_modify_unlock(vma->vm_mm);
+	spin_unlock(&vma->vm_mm->page_table_lock);
 	return 0;
 }
 
@@ -31,15 +31,18 @@ static inline int mlock_fixup_start(struct vm_area_struct * vma,
 	*n = *vma;
 	n->vm_end = end;
 	n->vm_flags = newflags;
+	n->vm_raend = 0;
 	if (n->vm_file)
 		get_file(n->vm_file);
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
-	vmlist_modify_lock(vma->vm_mm);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
 	vma->vm_pgoff += (end - vma->vm_start) >> PAGE_SHIFT;
 	vma->vm_start = end;
-	insert_vm_struct(current->mm, n);
-	vmlist_modify_unlock(vma->vm_mm);
+	__insert_vm_struct(current->mm, n);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -55,14 +58,17 @@ static inline int mlock_fixup_end(struct vm_area_struct * vma,
 	n->vm_start = start;
 	n->vm_pgoff += (n->vm_start - vma->vm_start) >> PAGE_SHIFT;
 	n->vm_flags = newflags;
+	n->vm_raend = 0;
 	if (n->vm_file)
 		get_file(n->vm_file);
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
-	vmlist_modify_lock(vma->vm_mm);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
 	vma->vm_end = start;
-	insert_vm_struct(current->mm, n);
-	vmlist_modify_unlock(vma->vm_mm);
+	__insert_vm_struct(current->mm, n);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -85,6 +91,8 @@ static inline int mlock_fixup_middle(struct vm_area_struct * vma,
 	right->vm_start = end;
 	right->vm_pgoff += (right->vm_start - left->vm_start) >> PAGE_SHIFT;
 	vma->vm_flags = newflags;
+	left->vm_raend = 0;
+	right->vm_raend = 0;
 	if (vma->vm_file)
 		atomic_add(2, &vma->vm_file->f_count);
 
@@ -92,14 +100,17 @@ static inline int mlock_fixup_middle(struct vm_area_struct * vma,
 		vma->vm_ops->open(left);
 		vma->vm_ops->open(right);
 	}
-	vmlist_modify_lock(vma->vm_mm);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
 	vma->vm_pgoff += (start - vma->vm_start) >> PAGE_SHIFT;
 	vma->vm_start = start;
 	vma->vm_end = end;
 	vma->vm_flags = newflags;
-	insert_vm_struct(current->mm, left);
-	insert_vm_struct(current->mm, right);
-	vmlist_modify_unlock(vma->vm_mm);
+	vma->vm_raend = 0;
+	__insert_vm_struct(current->mm, left);
+	__insert_vm_struct(current->mm, right);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -178,9 +189,6 @@ static int do_mlock(unsigned long start, size_t len, int on)
 			break;
 		}
 	}
-	vmlist_modify_lock(current->mm);
-	merge_segments(current->mm, start, end);
-	vmlist_modify_unlock(current->mm);
 	return error;
 }
 
@@ -252,9 +260,6 @@ static int do_mlockall(int flags)
 		if (error)
 			break;
 	}
-	vmlist_modify_lock(current->mm);
-	merge_segments(current->mm, 0, TASK_SIZE);
-	vmlist_modify_unlock(current->mm);
 	return error;
 }
 

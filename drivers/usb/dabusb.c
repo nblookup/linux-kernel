@@ -21,7 +21,7 @@
  *
  *
  *
- *  $Id: dabusb.c,v 1.45 2000/01/31 10:23:44 fliegl Exp $
+ *  $Id: dabusb.c,v 1.54 2000/07/24 21:39:39 deti Exp $
  *
  */
 
@@ -38,6 +38,7 @@
 #include <asm/atomic.h>
 #include <linux/delay.h>
 #include <linux/usb.h>
+#include <linux/smp_lock.h>
 
 #include "dabusb.h"
 #include "dabfirmware.h"
@@ -271,16 +272,22 @@ static int dabusb_bulk (pdabusb_t s, pbulk_transfer_t pb)
 	else
 		pipe = usb_sndbulkpipe (s->usbdev, 2);
 
-	ret=usb_bulk_msg(s->usbdev, pipe, pb->data, pb->size, &actual_length, 1000);
+	ret=usb_bulk_msg(s->usbdev, pipe, pb->data, pb->size, &actual_length, 100);
 	if(ret<0) {
 		err("dabusb: usb_bulk_msg failed(%d)",ret);
+
+		if (usb_set_interface (s->usbdev, _DABUSB_IF, 1) < 0) {
+			err("set_interface failed");
+			return -EINVAL;
+		}
+
 	}
 	
 	if( ret == -EPIPE ) {
 		warn("CLEAR_FEATURE request to remove STALL condition.");
 		if(usb_clear_halt(s->usbdev, usb_pipeendpoint(pipe)))
 			err("request failed");
-		}
+	}
 
 	pb->size = actual_length;
 	return ret;
@@ -573,10 +580,9 @@ static int dabusb_open (struct inode *inode, struct file *file)
 	int devnum = MINOR (inode->i_rdev);
 	pdabusb_t s;
 
-	if (devnum < DABUSB_MINOR || devnum > (DABUSB_MINOR + NRDABUSB))
+	if (devnum < DABUSB_MINOR || devnum >= (DABUSB_MINOR + NRDABUSB))
 		return -EIO;
 
-	MOD_INC_USE_COUNT;
 	s = &dabusb[devnum - DABUSB_MINOR];
 
 	dbg("dabusb_open");
@@ -586,20 +592,17 @@ static int dabusb_open (struct inode *inode, struct file *file)
 		up (&s->mutex);
 
 		if (file->f_flags & O_NONBLOCK) {
-			MOD_DEC_USE_COUNT;
 			return -EBUSY;
 		}
 		schedule_timeout (HZ / 2);
 
 		if (signal_pending (current)) {
-			MOD_DEC_USE_COUNT;
 			return -EAGAIN;
 		}
 		down (&s->mutex);
 	}
 	if (usb_set_interface (s->usbdev, _DABUSB_IF, 1) < 0) {
 		err("set_interface failed");
-		MOD_DEC_USE_COUNT;
 		return -EINVAL;
 	}
 	s->opened = 1;
@@ -617,6 +620,7 @@ static int dabusb_release (struct inode *inode, struct file *file)
 
 	dbg("dabusb_release");
 
+	lock_kernel();
 	down (&s->mutex);
 	dabusb_stop (s);
 	dabusb_free_buffers (s);
@@ -629,8 +633,8 @@ static int dabusb_release (struct inode *inode, struct file *file)
 	else
 		wake_up (&s->remove_ok);
 
-	MOD_DEC_USE_COUNT;
 	s->opened = 0;
+	unlock_kernel();
 	return 0;
 }
 
@@ -669,8 +673,9 @@ static int dabusb_ioctl (struct inode *inode, struct file *file, unsigned int cm
 			break;
 		}
 
-		dabusb_bulk (s, pbulk);
-		ret = copy_to_user ((void *) arg, pbulk, sizeof (bulk_transfer_t));
+		ret=dabusb_bulk (s, pbulk);
+		if(ret==0)
+			ret = copy_to_user ((void *) arg, pbulk, sizeof (bulk_transfer_t));
 		kfree (pbulk);
 		break;
 
@@ -692,6 +697,7 @@ static int dabusb_ioctl (struct inode *inode, struct file *file, unsigned int cm
 
 static struct file_operations dabusb_fops =
 {
+	owner:		THIS_MODULE,
 	llseek:		dabusb_llseek,
 	read:		dabusb_read,
 	ioctl:		dabusb_ioctl,
@@ -712,18 +718,14 @@ static int dabusb_find_struct (void)
 }
 
 /* --------------------------------------------------------------------- */
-static void *dabusb_probe (struct usb_device *usbdev, unsigned int ifnum)
+static void *dabusb_probe (struct usb_device *usbdev, unsigned int ifnum,
+			   const struct usb_device_id *id)
 {
 	int devnum;
 	pdabusb_t s;
 
 	dbg("dabusb: probe: vendor id 0x%x, device id 0x%x ifnum:%d",
 	  usbdev->descriptor.idVendor, usbdev->descriptor.idProduct, ifnum);
-
-	/* the 1234:5678 is just a self assigned test ID */
-	if ((usbdev->descriptor.idVendor != 0x0547 || usbdev->descriptor.idProduct != 0x2131) &&
-	    (usbdev->descriptor.idVendor != 0x0547 || usbdev->descriptor.idProduct != 0x9999))
-		return NULL;
 
 	/* We don't handle multiple configurations */
 	if (usbdev->descriptor.bNumConfigurations != 1)
@@ -784,25 +786,29 @@ static void dabusb_disconnect (struct usb_device *usbdev, void *ptr)
 	MOD_DEC_USE_COUNT;
 }
 
+static struct usb_device_id dabusb_ids [] = {
+	{ USB_DEVICE(0x0547, 0x2131) },
+	{ USB_DEVICE(0x0547, 0x9999) },
+	{ }						/* Terminating entry */
+};
+
+MODULE_DEVICE_TABLE (usb, dabusb_ids);
+
 static struct usb_driver dabusb_driver =
 {
-	"dabusb",
-	dabusb_probe,
-	dabusb_disconnect,
-	{NULL, NULL},
-	&dabusb_fops,
-	DABUSB_MINOR
+	name:		"dabusb",
+	probe:		dabusb_probe,
+	disconnect:	dabusb_disconnect,
+	fops:		&dabusb_fops,
+	minor:		DABUSB_MINOR,
+	id_table:	dabusb_ids,
 };
 
 /* --------------------------------------------------------------------- */
 
-int __init dabusb_init (void)
+static int __init dabusb_init (void)
 {
 	unsigned u;
-
-	/* register misc device */
-	if (usb_register(&dabusb_driver))
-		return -1;
 
 	/* initialize struct */
 	for (u = 0; u < NRDABUSB; u++) {
@@ -818,11 +824,15 @@ int __init dabusb_init (void)
 		INIT_LIST_HEAD (&s->rec_buff_list);
 	}
 
+	/* register misc device */
+	if (usb_register(&dabusb_driver))
+		return -1;
+
 	dbg("dabusb_init: driver registered");
 	return 0;
 }
 
-void __exit dabusb_cleanup (void)
+static void __exit dabusb_cleanup (void)
 {
 	dbg("dabusb_cleanup");
 
@@ -831,21 +841,12 @@ void __exit dabusb_cleanup (void)
 
 /* --------------------------------------------------------------------- */
 
-#ifdef MODULE
 MODULE_AUTHOR ("Deti Fliegl, deti@fliegl.de");
 MODULE_DESCRIPTION ("DAB-USB Interface Driver for Linux (c)1999");
 MODULE_PARM (buffers, "i");
+MODULE_PARM_DESC (buffers, "Number of buffers (default=256)");
 
-int __init init_module (void)
-{
-	return dabusb_init ();
-}
-
-void __exit cleanup_module (void)
-{
-	dabusb_cleanup ();
-}
-
-#endif
+module_init (dabusb_init);
+module_exit (dabusb_cleanup);
 
 /* --------------------------------------------------------------------- */

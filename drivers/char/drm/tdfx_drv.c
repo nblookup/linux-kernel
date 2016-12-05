@@ -1,8 +1,8 @@
-/* tdfx.c -- tdfx driver -*- linux-c -*-
+/* tdfx_drv.c -- tdfx driver -*- linux-c -*-
  * Created: Thu Oct  7 10:38:32 1999 by faith@precisioninsight.com
- * Revised: Tue Oct 12 08:51:35 1999 by faith@precisioninsight.com
  *
  * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
+ * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
  * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -11,11 +11,11 @@
  * the rights to use, copy, modify, merge, publish, distribute, sublicense,
  * and/or sell copies of the Software, and to permit persons to whom the
  * Software is furnished to do so, subject to the following conditions:
- * 
+ *
  * The above copyright notice and this permission notice (including the next
  * paragraph) shall be included in all copies or substantial portions of the
  * Software.
- * 
+ *
  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
@@ -23,29 +23,32 @@
  * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
- * 
- * $PI$
- * $XFree86$
+ *
+ * Authors:
+ *    Rickard E. (Rik) Faith <faith@valinux.com>
+ *    Daryll Strauss <daryll@valinux.com>
  *
  */
 
 #include <linux/config.h>
 #include "drmP.h"
 #include "tdfx_drv.h"
-EXPORT_SYMBOL(tdfx_init);
-EXPORT_SYMBOL(tdfx_cleanup);
 
 #define TDFX_NAME	 "tdfx"
-#define TDFX_DESC	 "tdfx"
-#define TDFX_DATE	 "19991009"
-#define TDFX_MAJOR	 0
+#define TDFX_DESC	 "3dfx Banshee/Voodoo3+"
+#define TDFX_DATE	 "20000928"
+#define TDFX_MAJOR	 1
 #define TDFX_MINOR	 0
-#define TDFX_PATCHLEVEL  1
+#define TDFX_PATCHLEVEL  0
 
 static drm_device_t	      tdfx_device;
 drm_ctx_t	              tdfx_res_ctx;
 
 static struct file_operations tdfx_fops = {
+#if LINUX_VERSION_CODE >= 0x020400
+				/* This started being used during 2.4.0-test */
+	owner:   THIS_MODULE,
+#endif
 	open:	 tdfx_open,
 	flush:	 drm_flush,
 	release: tdfx_release,
@@ -53,6 +56,7 @@ static struct file_operations tdfx_fops = {
 	mmap:	 drm_mmap,
 	read:	 drm_read,
 	fasync:	 drm_fasync,
+	poll:	 drm_poll,
 };
 
 static struct miscdevice      tdfx_misc = {
@@ -72,7 +76,7 @@ static drm_ioctl_desc_t	      tdfx_ioctls[] = {
 	[DRM_IOCTL_NR(DRM_IOCTL_UNBLOCK)]    = { drm_unblock,	  1, 1 },
 	[DRM_IOCTL_NR(DRM_IOCTL_AUTH_MAGIC)] = { drm_authmagic,	  1, 1 },
 	[DRM_IOCTL_NR(DRM_IOCTL_ADD_MAP)]    = { drm_addmap,	  1, 1 },
-	
+
 	[DRM_IOCTL_NR(DRM_IOCTL_ADD_CTX)]    = { tdfx_addctx,	  1, 1 },
 	[DRM_IOCTL_NR(DRM_IOCTL_RM_CTX)]     = { tdfx_rmctx,	  1, 1 },
 	[DRM_IOCTL_NR(DRM_IOCTL_MOD_CTX)]    = { tdfx_modctx,	  1, 1 },
@@ -85,6 +89,16 @@ static drm_ioctl_desc_t	      tdfx_ioctls[] = {
 	[DRM_IOCTL_NR(DRM_IOCTL_LOCK)]	     = { tdfx_lock,	  1, 0 },
 	[DRM_IOCTL_NR(DRM_IOCTL_UNLOCK)]     = { tdfx_unlock,	  1, 0 },
 	[DRM_IOCTL_NR(DRM_IOCTL_FINISH)]     = { drm_finish,	  1, 0 },
+#if defined(CONFIG_AGP) || defined(CONFIG_AGP_MODULE)
+	[DRM_IOCTL_NR(DRM_IOCTL_AGP_ACQUIRE)]   = {drm_agp_acquire, 1, 1},
+	[DRM_IOCTL_NR(DRM_IOCTL_AGP_RELEASE)]   = {drm_agp_release, 1, 1},
+	[DRM_IOCTL_NR(DRM_IOCTL_AGP_ENABLE)]    = {drm_agp_enable,  1, 1},
+	[DRM_IOCTL_NR(DRM_IOCTL_AGP_INFO)]      = {drm_agp_info,    1, 1},
+	[DRM_IOCTL_NR(DRM_IOCTL_AGP_ALLOC)]     = {drm_agp_alloc,   1, 1},
+	[DRM_IOCTL_NR(DRM_IOCTL_AGP_FREE)]      = {drm_agp_free,    1, 1},
+	[DRM_IOCTL_NR(DRM_IOCTL_AGP_BIND)]      = {drm_agp_unbind,  1, 1},
+	[DRM_IOCTL_NR(DRM_IOCTL_AGP_UNBIND)]    = {drm_agp_bind,    1, 1},
+#endif
 };
 #define TDFX_IOCTL_COUNT DRM_ARRAY_SIZE(tdfx_ioctls)
 
@@ -92,14 +106,29 @@ static drm_ioctl_desc_t	      tdfx_ioctls[] = {
 static char		      *tdfx = NULL;
 #endif
 
-MODULE_AUTHOR("Precision Insight, Inc., Cedar Park, Texas.");
+MODULE_AUTHOR("VA Linux Systems, Inc.");
 MODULE_DESCRIPTION("tdfx");
 MODULE_PARM(tdfx, "s");
+
+#ifndef MODULE
+/* tdfx_options is called by the kernel to parse command-line options
+ * passed via the boot-loader (e.g., LILO).  It calls the insmod option
+ * routine, drm_parse_drm.
+ */
+
+static int __init tdfx_options(char *str)
+{
+	drm_parse_options(str);
+	return 1;
+}
+
+__setup("tdfx=", tdfx_options);
+#endif
 
 static int tdfx_setup(drm_device_t *dev)
 {
 	int i;
-	
+
 	atomic_set(&dev->ioctl_count, 0);
 	atomic_set(&dev->vma_count, 0);
 	dev->buf_use	  = 0;
@@ -141,7 +170,7 @@ static int tdfx_setup(drm_device_t *dev)
 
 	dev->ctx_start	    = 0;
 	dev->lck_start	    = 0;
-	
+
 	dev->buf_rp	  = dev->buf;
 	dev->buf_wp	  = dev->buf;
 	dev->buf_end	  = dev->buf + DRM_BSZ;
@@ -150,15 +179,15 @@ static int tdfx_setup(drm_device_t *dev)
 	init_waitqueue_head(&dev->buf_writers);
 
 	tdfx_res_ctx.handle=-1;
-			
+
 	DRM_DEBUG("\n");
-			
+
 	/* The kernel's context could be created here, but is now created
 	   in drm_dma_enqueue.	This is more resource-efficient for
 	   hardware that does not do DMA, but may mean that
 	   drm_select_queue fails between the time the interrupt is
 	   initialized and the time the queues are initialized. */
-			
+
 	return 0;
 }
 
@@ -174,12 +203,12 @@ static int tdfx_takedown(drm_device_t *dev)
 
 	down(&dev->struct_sem);
 	del_timer(&dev->timer);
-	
+
 	if (dev->devname) {
 		drm_free(dev->devname, strlen(dev->devname)+1, DRM_MEM_DRIVER);
 		dev->devname = NULL;
 	}
-	
+
 	if (dev->unique) {
 		drm_free(dev->unique, strlen(dev->unique)+1, DRM_MEM_DRIVER);
 		dev->unique = NULL;
@@ -193,7 +222,22 @@ static int tdfx_takedown(drm_device_t *dev)
 		}
 		dev->magiclist[i].head = dev->magiclist[i].tail = NULL;
 	}
-	
+#if defined(CONFIG_AGP) || defined(CONFIG_AGP_MODULE)
+				/* Clear AGP information */
+	if (dev->agp) {
+		drm_agp_mem_t *temp;
+		drm_agp_mem_t *temp_next;
+
+		temp = dev->agp->memory;
+		while(temp != NULL) {
+			temp_next = temp->next;
+			drm_free_agp(temp->memory, temp->pages);
+			drm_free(temp, sizeof(*temp), DRM_MEM_AGPLISTS);
+			temp = temp_next;
+		}
+		if (dev->agp->acquired) _drm_agp_release();
+	}
+#endif
 				/* Clear vma list (only built for debugging) */
 	if (dev->vmalist) {
 		for (vma = dev->vmalist; vma; vma = vma_next) {
@@ -202,7 +246,7 @@ static int tdfx_takedown(drm_device_t *dev)
 		}
 		dev->vmalist = NULL;
 	}
-	
+
 				/* Clear map area and mtrr information */
 	if (dev->maplist) {
 		for (i = 0; i < dev->map_count; i++) {
@@ -227,6 +271,10 @@ static int tdfx_takedown(drm_device_t *dev)
 					       - PAGE_SHIFT,
 					       DRM_MEM_SAREA);
 				break;
+			case _DRM_AGP:
+				/* Do nothing here, because this is all
+                                   handled in the AGP/GART driver. */
+				break;
 			}
 			drm_free(map, sizeof(*map), DRM_MEM_MAPS);
 		}
@@ -236,21 +284,21 @@ static int tdfx_takedown(drm_device_t *dev)
 		dev->maplist   = NULL;
 		dev->map_count = 0;
 	}
-	
+
 	if (dev->lock.hw_lock) {
 		dev->lock.hw_lock    = NULL; /* SHM removed */
 		dev->lock.pid	     = 0;
 		wake_up_interruptible(&dev->lock.lock_queue);
 	}
 	up(&dev->struct_sem);
-	
+
 	return 0;
 }
 
 /* tdfx_init is called via init_module at module load time, or via
  * linux/init/main.c (this is not currently supported). */
 
-int tdfx_init(void)
+static int __init tdfx_init(void)
 {
 	int		      retcode;
 	drm_device_t	      *dev = &tdfx_device;
@@ -260,7 +308,7 @@ int tdfx_init(void)
 	memset((void *)dev, 0, sizeof(*dev));
 	dev->count_lock	  = SPIN_LOCK_UNLOCKED;
 	sema_init(&dev->struct_sem, 1);
-	
+
 #ifdef MODULE
 	drm_parse_options(tdfx);
 #endif
@@ -274,6 +322,16 @@ int tdfx_init(void)
 
 	drm_mem_init();
 	drm_proc_init(dev);
+#if defined(CONFIG_AGP) || defined(CONFIG_AGP_MODULE)
+	dev->agp    = drm_agp_init();
+#endif
+	if((retcode = drm_ctxbitmap_init(dev))) {
+		DRM_ERROR("Cannot allocate memory for context bitmap.\n");
+		drm_proc_cleanup();
+		misc_deregister(&tdfx_misc);
+		tdfx_takedown(dev);
+		return retcode;
+	}
 
 	DRM_INFO("Initialized %s %d.%d.%d %s on minor %d\n",
 		 TDFX_NAME,
@@ -282,26 +340,38 @@ int tdfx_init(void)
 		 TDFX_PATCHLEVEL,
 		 TDFX_DATE,
 		 tdfx_misc.minor);
-	
+
 	return 0;
 }
 
 /* tdfx_cleanup is called via cleanup_module at module unload time. */
 
-void tdfx_cleanup(void)
+static void __exit tdfx_cleanup(void)
 {
 	drm_device_t	      *dev = &tdfx_device;
 
 	DRM_DEBUG("\n");
-	
+
 	drm_proc_cleanup();
 	if (misc_deregister(&tdfx_misc)) {
 		DRM_ERROR("Cannot unload module\n");
 	} else {
 		DRM_INFO("Module unloaded\n");
 	}
+	drm_ctxbitmap_cleanup(dev);
 	tdfx_takedown(dev);
+#if defined(CONFIG_AGP) || defined(CONFIG_AGP_MODULE)
+	if (dev->agp) {
+		drm_agp_uninit();
+		drm_free(dev->agp, sizeof(*dev->agp), DRM_MEM_AGPLISTS);
+		dev->agp = NULL;
+	}
+#endif
 }
+
+module_init(tdfx_init);
+module_exit(tdfx_cleanup);
+
 
 int tdfx_version(struct inode *inode, struct file *filp, unsigned int cmd,
 		  unsigned long arg)
@@ -309,17 +379,18 @@ int tdfx_version(struct inode *inode, struct file *filp, unsigned int cmd,
 	drm_version_t version;
 	int	      len;
 
-	copy_from_user_ret(&version,
+	if (copy_from_user(&version,
 			   (drm_version_t *)arg,
-			   sizeof(version),
-			   -EFAULT);
+			   sizeof(version)))
+		return -EFAULT;
 
 #define DRM_COPY(name,value)				     \
 	len = strlen(value);				     \
 	if (len > name##_len) len = name##_len;		     \
 	name##_len = strlen(value);			     \
 	if (len && name) {				     \
-		copy_to_user_ret(name, value, len, -EFAULT); \
+		if (copy_to_user(name, value, len))	     \
+			return -EFAULT;			     \
 	}
 
 	version.version_major	   = TDFX_MAJOR;
@@ -330,10 +401,10 @@ int tdfx_version(struct inode *inode, struct file *filp, unsigned int cmd,
 	DRM_COPY(version.date, TDFX_DATE);
 	DRM_COPY(version.desc, TDFX_DESC);
 
-	copy_to_user_ret((drm_version_t *)arg,
+	if (copy_to_user((drm_version_t *)arg,
 			 &version,
-			 sizeof(version),
-			 -EFAULT);
+			 sizeof(version)))
+		return -EFAULT;
 	return 0;
 }
 
@@ -341,10 +412,12 @@ int tdfx_open(struct inode *inode, struct file *filp)
 {
 	drm_device_t  *dev    = &tdfx_device;
 	int	      retcode = 0;
-	
+
 	DRM_DEBUG("open_count = %d\n", dev->open_count);
 	if (!(retcode = drm_open_helper(inode, filp, dev))) {
-		MOD_INC_USE_COUNT;
+#if LINUX_VERSION_CODE < 0x020333
+		MOD_INC_USE_COUNT; /* Needed before Linux 2.3.51 */
+#endif
 		atomic_inc(&dev->total_open);
 		spin_lock(&dev->count_lock);
 		if (!dev->open_count++) {
@@ -359,12 +432,17 @@ int tdfx_open(struct inode *inode, struct file *filp)
 int tdfx_release(struct inode *inode, struct file *filp)
 {
 	drm_file_t    *priv   = filp->private_data;
-	drm_device_t  *dev    = priv->dev;
+	drm_device_t  *dev;
 	int	      retcode = 0;
+
+	lock_kernel();
+	dev = priv->dev;
 
 	DRM_DEBUG("open_count = %d\n", dev->open_count);
 	if (!(retcode = drm_release(inode, filp))) {
-		MOD_DEC_USE_COUNT;
+#if LINUX_VERSION_CODE < 0x020333
+		MOD_DEC_USE_COUNT; /* Needed before Linux 2.3.51 */
+#endif
 		atomic_inc(&dev->total_close);
 		spin_lock(&dev->count_lock);
 		if (!--dev->open_count) {
@@ -373,13 +451,17 @@ int tdfx_release(struct inode *inode, struct file *filp)
 					  atomic_read(&dev->ioctl_count),
 					  dev->blocked);
 				spin_unlock(&dev->count_lock);
+				unlock_kernel();
 				return -EBUSY;
 			}
 			spin_unlock(&dev->count_lock);
+			unlock_kernel();
 			return tdfx_takedown(dev);
 		}
 		spin_unlock(&dev->count_lock);
 	}
+
+	unlock_kernel();
 	return retcode;
 }
 
@@ -398,7 +480,7 @@ int tdfx_ioctl(struct inode *inode, struct file *filp, unsigned int cmd,
 	atomic_inc(&dev->ioctl_count);
 	atomic_inc(&dev->total_ioctl);
 	++priv->ioctl_count;
-	
+
 	DRM_DEBUG("pid = %d, cmd = 0x%02x, nr = 0x%02x, dev 0x%x, auth = %d\n",
 		  current->pid, cmd, nr, dev->device, priv->authenticated);
 
@@ -418,7 +500,7 @@ int tdfx_ioctl(struct inode *inode, struct file *filp, unsigned int cmd,
 			retcode = (func)(inode, filp, cmd, arg);
 		}
 	}
-	
+
 	atomic_dec(&dev->ioctl_count);
 	return retcode;
 }
@@ -437,7 +519,8 @@ int tdfx_lock(struct inode *inode, struct file *filp, unsigned int cmd,
         dev->lck_start = start = get_cycles();
 #endif
 
-        copy_from_user_ret(&lock, (drm_lock_t *)arg, sizeof(lock), -EFAULT);
+        if (copy_from_user(&lock, (drm_lock_t *)arg, sizeof(lock)))
+		return -EFAULT;
 
         if (lock.context == DRM_KERNEL_CONTEXT) {
                 DRM_ERROR("Process %d using kernel context %d\n",
@@ -455,7 +538,7 @@ int tdfx_lock(struct inode *inode, struct file *filp, unsigned int cmd,
         if (lock.context < 0 || lock.context >= dev->queue_count)
                 return -EINVAL;
 #endif
-        
+
         if (!ret) {
 #if 0
                 if (_DRM_LOCKING_CONTEXT(dev->lock.hw_lock->lock)
@@ -467,7 +550,7 @@ int tdfx_lock(struct inode *inode, struct file *filp, unsigned int cmd,
                                 /* Can't take lock if we just had it and
                                    there is contention. */
                                 DRM_DEBUG("%d (pid %d) delayed j=%d dev=%d jiffies=%d\n",
-					lock.context, current->pid, j, 
+					lock.context, current->pid, j,
 					dev->lock.lock_time, jiffies);
                                 current->state = TASK_INTERRUPTIBLE;
 				current->policy |= SCHED_YIELD;
@@ -478,6 +561,7 @@ int tdfx_lock(struct inode *inode, struct file *filp, unsigned int cmd,
 #endif
                 add_wait_queue(&dev->lock.lock_queue, &entry);
                 for (;;) {
+                        current->state = TASK_INTERRUPTIBLE;
                         if (!dev->lock.hw_lock) {
                                 /* Device has been unregistered */
                                 ret = -EINTR;
@@ -490,11 +574,12 @@ int tdfx_lock(struct inode *inode, struct file *filp, unsigned int cmd,
                                 atomic_inc(&dev->total_locks);
                                 break;  /* Got lock */
                         }
-                        
+
                                 /* Contention */
                         atomic_inc(&dev->total_sleeps);
-                        current->state = TASK_INTERRUPTIBLE;
+#if 1
 			current->policy |= SCHED_YIELD;
+#endif
                         schedule();
                         if (signal_pending(current)) {
                                 ret = -ERESTARTSYS;
@@ -532,6 +617,15 @@ int tdfx_lock(struct inode *inode, struct file *filp, unsigned int cmd,
 #endif
 
         if (!ret) {
+		sigemptyset(&dev->sigmask);
+		sigaddset(&dev->sigmask, SIGSTOP);
+		sigaddset(&dev->sigmask, SIGTSTP);
+		sigaddset(&dev->sigmask, SIGTTIN);
+		sigaddset(&dev->sigmask, SIGTTOU);
+		dev->sigdata.context = lock.context;
+		dev->sigdata.lock    = dev->lock.hw_lock;
+		block_all_signals(drm_notifier, &dev->sigdata, &dev->sigmask);
+
                 if (lock.flags & _DRM_LOCK_READY) {
 				/* Wait for space in DMA/FIFO */
 		}
@@ -542,12 +636,19 @@ int tdfx_lock(struct inode *inode, struct file *filp, unsigned int cmd,
 #endif
 		}
         }
+
+#if LINUX_VERSION_CODE < 0x020400
+	if (lock.context != tdfx_res_ctx.handle) {
+		current->counter = 5;
+		current->priority = DEF_PRIORITY/4;
+	}
+#endif
         DRM_DEBUG("%d %s\n", lock.context, ret ? "interrupted" : "has lock");
 
 #if DRM_DMA_HISTOGRAM
         atomic_inc(&dev->histo.lacq[drm_histogram_slot(get_cycles() - start)]);
 #endif
-        
+
         return ret;
 }
 
@@ -559,8 +660,9 @@ int tdfx_unlock(struct inode *inode, struct file *filp, unsigned int cmd,
 	drm_device_t	  *dev	  = priv->dev;
 	drm_lock_t	  lock;
 
-	copy_from_user_ret(&lock, (drm_lock_t *)arg, sizeof(lock), -EFAULT);
-	
+	if (copy_from_user(&lock, (drm_lock_t *)arg, sizeof(lock)))
+		return -EFAULT;
+
 	if (lock.context == DRM_KERNEL_CONTEXT) {
 		DRM_ERROR("Process %d using kernel context %d\n",
 			  current->pid, lock.context);
@@ -581,24 +683,14 @@ int tdfx_unlock(struct inode *inode, struct file *filp, unsigned int cmd,
 			DRM_ERROR("\n");
 		}
 	}
-	
+
+#if LINUX_VERSION_CODE < 0x020400
+	if (lock.context != tdfx_res_ctx.handle) {
+		current->counter = 5;
+		current->priority = DEF_PRIORITY;
+	}
+#endif
+
+	unblock_all_signals();
 	return 0;
 }
-
-module_init(tdfx_init);
-module_exit(tdfx_cleanup);
-
-#ifndef MODULE
-/*
- * tdfx_setup is called by the kernel to parse command-line options passed
- * via the boot-loader (e.g., LILO).  It calls the insmod option routine,
- * drm_parse_options.
- */
-static int __init tdfx_options(char *str)
-{
-	drm_parse_options(str);
-	return 1;
-}
-
-__setup("tdfx=", tdfx_options);
-#endif

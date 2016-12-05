@@ -1,22 +1,49 @@
-/* $Id: processor.h,v 1.10 2000/02/24 00:13:20 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
  * Copyright (C) 1994 Waldorf GMBH
- * Copyright (C) 1995, 1996, 1997, 1998, 1999 Ralf Baechle
+ * Copyright (C) 1995, 1996, 1997, 1998, 1999, 2000 Ralf Baechle
  * Modified further for R[236]000 compatibility by Paul M. Antoine
- * Copyright (C) 1999 Silicon Graphics, Inc.
+ * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
  */
 #ifndef _ASM_PROCESSOR_H
 #define _ASM_PROCESSOR_H
 
+#include <linux/config.h>
+
 /*
- * Default implementation of macro that returns current
- * instruction pointer ("program counter").
+ * Return current * instruction pointer ("program counter").
+ *
+ * Two implementations.  The ``la'' version results in shorter code for
+ * the kernel which we assume to reside in the 32-bit compat address space.
+ * The  ``jal'' version is for use by modules which live in outer space.
+ * This is just a single instruction unlike the long dla macro expansion.
  */
-#define current_text_addr() ({ __label__ _l; _l: &&_l;})
+#ifdef MODULE
+#define current_text_addr()						\
+({									\
+	void *_a;							\
+									\
+	__asm__ ("jal\t1f, 1f\n\t"					\
+		"1:"							\
+		: "=r" (_a));						\
+									\
+	_a;								\
+})
+#else
+#define current_text_addr()						\
+({									\
+	void *_a;							\
+									\
+	__asm__ ("dla\t%0, 1f\n\t"					\
+		"1:"							\
+		: "=r" (_a));						\
+									\
+	_a;								\
+})
+#endif
 
 #if !defined (_LANGUAGE_ASSEMBLY)
 #include <asm/cachectl.h>
@@ -24,13 +51,27 @@
 #include <asm/reg.h>
 #include <asm/system.h>
 
-struct mips_cpuinfo {
+#if (defined(CONFIG_SGI_IP27))
+#include <asm/sn/types.h>
+#include <asm/sn/intr_public.h>
+#endif
+
+struct cpuinfo_mips {
 	unsigned long udelay_val;
 	unsigned long *pgd_quick;
 	unsigned long *pmd_quick;
 	unsigned long *pte_quick;
 	unsigned long pgtable_cache_sz;
-};
+	unsigned long last_asn;
+	unsigned long asid_cache;
+#if defined(CONFIG_SGI_IP27)
+	cpuid_t		p_cpuid;	/* PROM assigned cpuid */
+	cnodeid_t	p_nodeid;	/* my node ID in compact-id-space */
+	nasid_t		p_nasid;	/* my node ID in numa-as-id-space */
+	unsigned char	p_slice;	/* Physical position on node board */
+	hub_intmasks_t	p_intmasks;	/* SN0 per-CPU interrupt masks */
+#endif
+} __attribute__((aligned(128)));
 
 /*
  * System setup and hardware flags..
@@ -42,15 +83,13 @@ extern char dedicated_iv_available;	/* some embedded MIPS like Nevada */
 extern char vce_available;		/* Supports VCED / VCEI exceptions */
 extern char mips4_available;		/* CPU has MIPS IV ISA or better */
 
-extern struct mips_cpuinfo boot_cpu_data;
 extern unsigned int vced_count, vcei_count;
+extern struct cpuinfo_mips cpu_data[];
 
-#ifdef __SMP__
-extern struct mips_cpuinfo cpu_data[];
+#ifdef CONFIG_SMP
 #define current_cpu_data cpu_data[smp_processor_id()]
 #else
-#define cpu_data &boot_cpu_data
-#define current_cpu_data boot_cpu_data
+#define current_cpu_data cpu_data[0]
 #endif
 
 /*
@@ -72,6 +111,14 @@ extern int EISA_bus;
 
 /* Lazy FPU handling on uni-processor */
 extern struct task_struct *last_task_used_math;
+
+#ifndef CONFIG_SMP
+#define IS_FPU_OWNER()		(last_task_used_math == current)
+#define CLEAR_FPU_OWNER()	last_task_used_math = NULL;
+#else
+#define IS_FPU_OWNER()		(current->flags & PF_USEDFPU)
+#define CLEAR_FPU_OWNER()	current->flags &= ~PF_USEDFPU;
+#endif
 
 /*
  * User space process size: 1TB. This is hardcoded into a few places,
@@ -204,23 +251,27 @@ extern inline unsigned long thread_saved_pc(struct thread_struct *t)
 	if (t->reg31 == (unsigned long) ret_from_sys_call)
 		return t->reg31;
 
-	return ((unsigned long*)t->reg29)[17];
+	return ((unsigned long*)t->reg29)[11];
 }
 
-struct pt_regs;
-extern int (*_user_mode)(struct pt_regs *);
-#define user_mode(regs)	_user_mode(regs)
+#define user_mode(regs)	(((regs)->cp0_status & ST0_KSU) == KSU_USER)
 
 /*
  * Do necessary setup to start up a newly executed thread.
  */
-#define start_thread(regs, new_pc, new_sp) do {				\
+#define start_thread(regs, pc, sp) 					\
+do {									\
+	unsigned long __status;						\
+									\
 	/* New thread looses kernel privileges. */			\
-	regs->cp0_status = (regs->cp0_status & ~(ST0_CU0|ST0_KSU)) | KSU_USER;\
-	regs->cp0_epc = new_pc;						\
-	regs->regs[29] = new_sp;					\
+	__status = regs->cp0_status & ~(ST0_CU0|ST0_FR|ST0_KSU);	\
+	__status |= KSU_USER;						\
+	__status |= (current->thread.mflags & MF_32BIT) ? 0 : ST0_FR;	\
+	regs->cp0_status = __status;					\
+	regs->cp0_epc = pc;						\
+	regs->regs[29] = sp;						\
 	current->thread.current_ds = USER_DS;				\
-} while (0)
+} while(0)
 
 unsigned long get_wchan(struct task_struct *p);
 
@@ -237,7 +288,7 @@ unsigned long get_wchan(struct task_struct *p);
 #define alloc_task_struct() \
 	((struct task_struct *) __get_free_pages(GFP_KERNEL, 2))
 #define free_task_struct(p)	free_pages((unsigned long)(p), 2)
-#define get_task_struct(tsk)	atomic_inc(&mem_map[MAP_NR(tsk)].count)
+#define get_task_struct(tsk)	atomic_inc(&virt_to_page(tsk)->count)
 
 #define init_task	(init_task_union.task)
 #define init_stack	(init_task_union.stack)

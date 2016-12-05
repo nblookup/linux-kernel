@@ -5,13 +5,6 @@
 #include <asm/atomic.h>
 #include <asm/hardirq.h>
 
-#ifndef __SMP__
-extern int __local_bh_count;
-#define local_bh_count(cpu)	((void)(cpu), __local_bh_count)
-#else
-#define local_bh_count(cpu)	(cpu_data[cpu].bh_count)
-#endif
-
 extern inline void cpu_bh_disable(int cpu)
 {
 	local_bh_count(cpu)++;

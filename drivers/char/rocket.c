@@ -138,13 +138,6 @@
 
 #define _INLINE_ inline
 
-/*
- * Until we get a formal timer assignment
- */
-#ifndef COMTROL_TIMER
-#define COMTROL_TIMER 26
-#endif
-
 #ifndef NEW_MODULES
 /*
  * NB. we must include the kernel idenfication string in to install the module.
@@ -161,24 +154,26 @@ static void rp_wait_until_sent(struct tty_struct *tty, int timeout);
 static void rp_flush_buffer(struct tty_struct *tty);
 
 static struct tty_driver rocket_driver, callout_driver;
-static int rocket_refcount = 0;
+static int rocket_refcount;
 
-static int rp_num_ports_open = 0;
+static int rp_num_ports_open;
 
-unsigned long board1 = 0;
-unsigned long board2 = 0;
-unsigned long board3 = 0;
-unsigned long board4 = 0;
-unsigned long controller = 0;
-unsigned long support_low_speed = 0;
+static struct timer_list rocket_timer;
+
+unsigned long board1;
+unsigned long board2;
+unsigned long board3;
+unsigned long board4;
+unsigned long controller;
+unsigned long support_low_speed;
 int rp_baud_base = 460800;
 static unsigned long rcktpt_io_addr[NUM_BOARDS];
 static int max_board;
 #ifdef TIME_STAT
-static unsigned long long time_stat = 0;
-static unsigned long time_stat_short = 0;
-static unsigned long time_stat_long = 0;
-static unsigned long time_counter = 0;
+static unsigned long long time_stat;
+static unsigned long time_stat_short;
+static unsigned long time_stat_long;
+static unsigned long time_counter;
 #endif
 
 #if ((LINUX_VERSION_CODE > 0x020111) && defined(MODULE))
@@ -223,7 +218,7 @@ int copy_to_user(void *to_user, const void *from, unsigned long len)
 
 static inline int signal_pending(struct task_struct *p)
 {
-	return (p->signal & (~p->blocked != 0));
+	return (p->signal & ~p->blocked) != 0;
 }
 
 #else
@@ -504,7 +499,7 @@ static _INLINE_ void rp_handle_port(struct r_port *info)
 /*
  * The top level polling routine.
  */
-static void rp_do_poll(void)
+static void rp_do_poll(unsigned long dummy)
 {
 	CONTROLLER_t *ctlp;
 	int ctrl, aiop, ch, line;
@@ -556,7 +551,7 @@ static void rp_do_poll(void)
 	 * Reset the timer so we get called at the next clock tick.
 	 */
 	if (rp_num_ports_open) {
-		timer_active |= 1 << COMTROL_TIMER;
+		mod_timer(&rocket_timer, jiffies + 1);
 	}
 #ifdef TIME_STAT
 	__asm__(".byte 0x0f,0x31"
@@ -1044,7 +1039,7 @@ static int rp_open(struct tty_struct *tty, struct file * filp)
 		sSetRTS(cp);
 	}
 	
-	timer_active |= 1 << COMTROL_TIMER;
+	mod_timer(&rocket_timer, jiffies + 1);
 
 	retval = block_til_ready(tty, filp, info);
 	if (retval) {
@@ -1957,7 +1952,10 @@ int __init register_PCI(int i, unsigned int bus, unsigned int device_fn)
 	if (!dev)
 		return 0;
 
-	rcktpt_io_addr[i] = dev->resource[0].start;
+	if (pci_enable_device(dev))
+		return 0;
+
+	rcktpt_io_addr[i] = pci_resource_start (dev, 0);
 	switch(dev->device) {
 	case PCI_DEVICE_ID_RP4QUAD:
 		str = "Quadcable";
@@ -2142,13 +2140,12 @@ int __init rp_init(void)
 	 * Set up the timer channel.  If it is already in use by
 	 * some other driver, give up.
 	 */
-	if (timer_table[COMTROL_TIMER].fn) {
-		printk("rocket.o: Timer channel %d already in use!\n",
-		       COMTROL_TIMER);
+	if (rocket_timer.function) {
+		printk("rocket.o: Timer already in use!\n");
 		return -EBUSY;
 	}
-	timer_table[COMTROL_TIMER].fn = rp_do_poll;
-	timer_table[COMTROL_TIMER].expires = 0;
+	init_timer(&rocket_timer);
+	rocket_timer.function = rp_do_poll;
 	
 	/*
 	 * Initialize the array of pointers to our own internal state
@@ -2205,7 +2202,7 @@ int __init rp_init(void)
 	
 	if (max_board == 0) {
 		printk("No rocketport ports found; unloading driver.\n");
-		timer_table[COMTROL_TIMER].fn = 0;
+		rocket_timer.function = 0;
 		return -ENODEV;
 	}
 
@@ -2297,7 +2294,9 @@ cleanup_module( void) {
 	int	retval;
 	int	i;
 	int	released_controller = 0;
-	
+
+	del_timer_sync(&rocket_timer);
+
 	retval = tty_unregister_driver(&callout_driver);
 	if (retval) {
 		printk("Error %d while trying to unregister "
@@ -2325,7 +2324,7 @@ cleanup_module( void) {
 	}
 	if (tmp_buf)
 		free_page((unsigned long) tmp_buf);
-	timer_table[COMTROL_TIMER].fn = 0;
+	rocket_timer.function = 0;
 }
 #endif
 

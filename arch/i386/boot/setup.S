@@ -70,7 +70,7 @@ start:
 # This is the setup header, and it must start at %cs:2 (old 0x9020:2)
 
 		.ascii	"HdrS"		# header signature
-		.word	0x0201		# header version number (>= 0x0105)
+		.word	0x0202		# header version number (>= 0x0105)
 					# or else old loadlin-1.5 will fail)
 realmode_swtch:	.word	0, 0		# default_switch, SETUPSEG
 start_sys_seg:	.word	SYSSEG
@@ -81,7 +81,7 @@ start_sys_seg:	.word	SYSSEG
 
 type_of_loader:	.byte	0		# = 0, old one (LILO, Loadlin,
 					#      Bootlin, SYSLX, bootsect...)
-					# else it is set by the loader:
+					# Else it is set by the loader:
 					# 0xTV: T=0 for LILO
 					#	T=1 for Loadlin
 					#	T=2 for bootsect-loader
@@ -91,8 +91,8 @@ type_of_loader:	.byte	0		# = 0, old one (LILO, Loadlin,
 
 # flags, unused bits must be zero (RFU) bit within loadflags
 loadflags:
-LOADED_HIGH	= 1			# if set, the kernel is loaded high
-CAN_USE_HEAP	= 0x80			# if set, the loader also has set
+LOADED_HIGH	= 1			# If set, the kernel is loaded high
+CAN_USE_HEAP	= 0x80			# If set, the loader also has set
 					# heap_end_ptr to tell how much
 					# space behind setup.S can be used for
 					# heap purposes.
@@ -128,9 +128,27 @@ ramdisk_size:	.long	0		# its size in bytes
 bootsect_kludge:
 		.word  bootsect_helper, SETUPSEG
 
-heap_end_ptr:	.word	modelist+1024	# space from here (exclusive) down to
+heap_end_ptr:	.word	modelist+1024	# (Header version 0x0201 or later)
+					# space from here (exclusive) down to
 					# end of setup code can be used by setup
 					# for local heap purposes.
+
+pad1:		.word	0
+cmd_line_ptr:	.long 0			# (Header version 0x0202 or later)
+					# If nonzero, a 32-bit pointer
+					# to the kernel command line.
+					# The command line should be
+					# located between the start of
+					# setup and the end of low
+					# memory (0xa0000), or it may
+					# get overwritten before it
+					# gets read.  If this field is
+					# used, there is no longer
+					# anything magical about the
+					# 0x90000 segment; the setup
+					# can be located anywhere in
+					# low memory 0x10000 or higher.
+
 trampoline:	call	start_of_setup
 		.space	1024
 # End of setup header #####################################################
@@ -271,10 +289,11 @@ loader_ok:
 # a whole bunch of different types, and allows memory holes and
 # everything.  We scan through this memory map and build a list
 # of the first 32 memory areas, which we return at [E820MAP].
-#
+# This is documented at http://www.teleport.com/~acpi/acpihtml/topic245.htm
+
+#define SMAP  0x534d4150
 
 meme820:
-	movl	$0x534d4150, %edx		# ascii `SMAP'
 	xorl	%ebx, %ebx			# continuation counter
 	movw	$E820MAP, %di			# point into the whitelist
 						# so we can have the bios
@@ -282,13 +301,14 @@ meme820:
 
 jmpe820:
 	movl	$0x0000e820, %eax		# e820, upper word zeroed
+	movl	$SMAP, %edx			# ascii 'SMAP'
 	movl	$20, %ecx			# size of the e820rec
 	pushw	%ds				# data record.
 	popw	%es
 	int	$0x15				# make the call
 	jc	bail820				# fall to e801 if it fails
 
-	cmpl	$0x534d4150, %eax		# check the return is `SMAP'
+	cmpl	$SMAP, %eax			# check the return is `SMAP'
 	jne	bail820				# fall to e801 if it fails
 
 #	cmpl	$1, 16(%di)			# is this usable memory?
@@ -551,7 +571,14 @@ end_move:
 # then we load the segment descriptors
 	movw	%cs, %ax			# aka SETUPSEG
 	movw	%ax, %ds
+		
+# Check whether we need to be downward compatible with version <=201
+	cmpl	$0, cmd_line_ptr
+	jne	end_move_self		# loader uses version >=202 features
+	cmpb	$0x20, type_of_loader
+	je	end_move_self		# bootsect loader, we know of it
 
+# Boot loader doesnt support boot protocol version 2.02.
 # If we have our code not at 0x90000, we need to move it there now.
 # We also then need to move the params behind it (commandline)
 # Because we would overwrite the code on the current IP, we move
@@ -597,6 +624,11 @@ move_self_here:
 	movw	%dx, %ss
 end_move_self:					# now we are at the right place
 	lidt	idt_48				# load idt with 0,0
+	xorl	%eax, %eax			# Compute gdt_base
+	movw	%ds, %ax			# (Convert %ds:gdt to a linear ptr)
+	shll	$4, %eax
+	addl	$gdt, %eax
+	movl	%eax, (gdt_48+2)
 	lgdt	gdt_48				# load gdt with whatever is
 						# appropriate
 
@@ -611,12 +643,20 @@ end_move_self:					# now we are at the right place
 	outb	%al, $0x60
 	call	empty_8042
 
+#
+#	You must preserve the other bits here. Otherwise embarrasing things
+#	like laptops powering off on boot happen. Corrected version by Kira
+#	Brown from Linux 2.2
+#
+	inb	$0x92, %al			# 
+	orb	$02, %al			# "fast A20" version
+	outb	%al, $0x92			# some chips have only this
+
 # wait until a20 really *is* enabled; it can take a fair amount of
 # time on certain systems; Toshiba Tecras are known to have this
 # problem.  The memory location used here (0x200) is the int 0x80
 # vector, which should be safe to use.
-	push    %ds
-	push    %es
+
 	xorw	%ax, %ax			# segment 0x0000
 	movw	%ax, %fs
 	decw	%ax				# segment 0xffff (HMA)
@@ -663,7 +703,10 @@ a20_wait:
 
 flush_instr:
 	xorw	%bx, %bx			# Flag to indicate a boot
-
+	xorl	%esi, %esi			# Pointer to real-mode code
+	movw	%cs, %si
+	subw	$DELTA_INITSEG, %si
+	shll	$4, %esi			# Convert to 32-bit pointer
 # NOTE: For high loaded big kernels we need a
 #	jmpi    0x100000,__KERNEL_CS
 #
@@ -784,10 +827,18 @@ bootsect_panic_mess:
 #
 # Some machines have delusions that the keyboard buffer is always full
 # with no keyboard attached...
+#
+# If there is no keyboard controller, we will usually get 0xff
+# to all the reads.  With each IO taking a microsecond and
+# a timeout of 100,000 iterations, this can take about half a
+# second ("delay" == outb to port 0x80). That should be ok,
+# and should also be plenty of time for a real keyboard controller
+# to empty.
+#
 
 empty_8042:
 	pushl	%ecx
-	movl	$0x00FFFFFF, %ecx
+	movl	$100000, %ecx
 
 empty_8042_loop:
 	decl	%ecx
@@ -826,7 +877,7 @@ gettime:
 
 # Delay is needed after doing I/O
 delay:
-	jmp	.+2				# jmp $+2
+	outb	%al,$0x80
 	ret
 
 # Descriptor tables
@@ -852,7 +903,7 @@ gdt_48:
 	.word	0x8000				# gdt limit=2048,
 						#  256 GDT entries
 
-	.word	512+gdt, 0x9			# gdt base = 0X9xxxx
+	.word	0, 0				# gdt base (filled in later)
 
 # Include video setup & detection code
 

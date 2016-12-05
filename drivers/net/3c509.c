@@ -129,7 +129,7 @@ enum RxFilter {
 #define SKB_QUEUE_SIZE	64
 
 struct el3_private {
-	struct enet_statistics stats;
+	struct net_device_stats stats;
 	struct net_device *next_dev;
 	spinlock_t lock;
 	/* skb send-queue */
@@ -146,7 +146,7 @@ static int el3_open(struct net_device *dev);
 static int el3_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static void el3_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void update_stats(struct net_device *dev);
-static struct enet_statistics *el3_get_stats(struct net_device *dev);
+static struct net_device_stats *el3_get_stats(struct net_device *dev);
 static int el3_rx(struct net_device *dev);
 static int el3_close(struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
@@ -168,12 +168,12 @@ struct el3_mca_adapters_struct el3_mca_adapters[] = {
 };
 #endif
 
-#ifdef CONFIG_ISAPNP
+#ifdef __ISAPNP__
 struct el3_isapnp_adapters_struct {
 	unsigned short vendor, function;
 	char *name;
 };
-struct el3_isapnp_adapters_struct el3_isapnp_adapters[] = {
+static struct el3_isapnp_adapters_struct el3_isapnp_adapters[] = {
 	{ISAPNP_VENDOR('T', 'C', 'M'), ISAPNP_FUNCTION(0x5090), "3Com Etherlink III (TP)"},
 	{ISAPNP_VENDOR('T', 'C', 'M'), ISAPNP_FUNCTION(0x5091), "3Com Etherlink III"},
 	{ISAPNP_VENDOR('T', 'C', 'M'), ISAPNP_FUNCTION(0x5094), "3Com Etherlink III (combo)"},
@@ -182,25 +182,25 @@ struct el3_isapnp_adapters_struct el3_isapnp_adapters[] = {
 	{ISAPNP_VENDOR('P', 'N', 'P'), ISAPNP_FUNCTION(0x80f8), "3Com Etherlink III compatible"},
 	{0, }
 };
-u16 el3_isapnp_phys_addr[8][3] = {
-	{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},
-	{0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0}
-};
+static u16 el3_isapnp_phys_addr[8][3];
 #endif /* CONFIG_ISAPNP */
-#if defined(CONFIG_ISAPNP) || defined(MODULE)
-static int nopnp = 0;
+#ifdef __ISAPNP__
+static int nopnp;
 #endif
 
 int el3_probe(struct net_device *dev)
 {
+	struct el3_private *lp;
 	short lrs_state = 0xff, i;
 	int ioaddr, irq, if_port;
 	u16 phys_addr[3];
 	static int current_tag = 0;
 	int mca_slot = -1;
-#ifdef CONFIG_ISAPNP
+#ifdef __ISAPNP__
 	static int pnp_cards = 0;
-#endif
+#endif /* __ISAPNP__ */
+
+	if (dev) SET_MODULE_OWNER(dev);
 
 	/* First check all slots of the EISA bus.  The next slot address to
 	   probe is kept in 'eisa_addr' to support multiple probe() calls. */
@@ -292,9 +292,9 @@ int el3_probe(struct net_device *dev)
 		/* if we get here, we didn't find an MCA adapter */
 		return -ENODEV;
 	}
-#endif
+#endif /* CONFIG_MCA */
 
-#ifdef CONFIG_ISAPNP
+#ifdef __ISAPNP__
 	if (nopnp == 1)
 		goto no_pnp;
 
@@ -310,9 +310,11 @@ int el3_probe(struct net_device *dev)
 			   with "nopnp=1" before, does not harm if not. */
 			idev->deactivate(idev);
 			idev->activate(idev);
-			if (!idev->resource[0].start || check_region(idev->resource[0].start,16))
+			if (!idev->resource[0].start || check_region(idev->resource[0].start, EL3_IO_EXTENT))
 				continue;
 			ioaddr = idev->resource[0].start;
+			if (!request_region(ioaddr, EL3_IO_EXTENT, "3c509 PnP"))
+				return -EBUSY;
 			irq = idev->irq_resource[0].start;
 			if (el3_debug > 3)
 				printk ("ISAPnP reports %s at i/o 0x%x, irq %d\n",
@@ -328,7 +330,7 @@ int el3_probe(struct net_device *dev)
 		}
 	}
 no_pnp:
-#endif
+#endif /* __ISAPNP__ */
 
 	/* Select an open I/O location at 0x1*0 to do contention select. */
 	for ( ; id_port < 0x200; id_port += 0x10) {
@@ -374,7 +376,7 @@ no_pnp:
 		phys_addr[i] = htons(id_read_eeprom(i));
 	}
 
-#ifdef CONFIG_ISAPNP
+#ifdef __ISAPNP__
 	if (nopnp == 0) {
 		/* The ISA PnP 3c509 cards respond to the ID sequence.
 		   This check is needed in order not to register them twice. */
@@ -394,7 +396,7 @@ no_pnp:
 			}
 		}
 	}
-#endif
+#endif /* __ISAPNP__ */
 
 	{
 		unsigned int iobase = id_read_eeprom(8);
@@ -440,6 +442,7 @@ no_pnp:
 			release_region(ioaddr, EL3_IO_EXTENT);
 			return -ENOMEM;
 		}
+		SET_MODULE_OWNER(dev);
 	}
 	memcpy(dev->dev_addr, phys_addr, sizeof(phys_addr));
 	dev->base_addr = ioaddr;
@@ -464,9 +467,10 @@ no_pnp:
 		return -ENOMEM;
 	memset(dev->priv, 0, sizeof(struct el3_private));
 	
-	((struct el3_private *)dev->priv)->mca_slot = mca_slot;
-	((struct el3_private *)dev->priv)->next_dev = el3_root_dev;
-	((struct el3_private *)dev->priv)->lock = (spinlock_t) SPIN_LOCK_UNLOCKED;
+	lp = dev->priv;
+	lp->mca_slot = mca_slot;
+	lp->next_dev = el3_root_dev;
+	spin_lock_init(&lp->lock);
 	el3_root_dev = dev;
 
 	if (el3_debug > 0)
@@ -529,9 +533,8 @@ el3_open(struct net_device *dev)
 	outw(RxReset, ioaddr + EL3_CMD);
 	outw(SetStatusEnb | 0x00, ioaddr + EL3_CMD);
 
-	if (request_irq(dev->irq, &el3_interrupt, 0, dev->name, dev)) {
-		return -EAGAIN;
-	}
+	i = request_irq(dev->irq, &el3_interrupt, 0, dev->name, dev);
+	if (i) return i;
 
 	EL3WINDOW(0);
 	if (el3_debug > 3)
@@ -590,8 +593,7 @@ el3_open(struct net_device *dev)
 		printk("%s: Opened 3c509  IRQ %d  status %4.4x.\n",
 			   dev->name, dev->irq, inw(ioaddr + EL3_STATUS));
 
-	MOD_INC_USE_COUNT;
-	return 0;					/* Always succeed */
+	return 0;
 }
 
 static void
@@ -787,7 +789,7 @@ el3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 }
 
 
-static struct enet_statistics *
+static struct net_device_stats *
 el3_get_stats(struct net_device *dev)
 {
 	struct el3_private *lp = (struct el3_private *)dev->priv;
@@ -968,7 +970,6 @@ el3_close(struct net_device *dev)
 	outw(0x0f00, ioaddr + WN0_IRQ);
 
 	update_stats(dev);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -982,7 +983,9 @@ MODULE_PARM(debug,"i");
 MODULE_PARM(irq,"1-8i");
 MODULE_PARM(xcvr,"1-8i");
 MODULE_PARM(max_interrupt_work, "i");
+#ifdef __ISAPNP__
 MODULE_PARM(nopnp, "i");
+#endif
 
 int
 init_module(void)

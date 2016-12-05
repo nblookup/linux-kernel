@@ -1,4 +1,4 @@
-# $Id: Makefile,v 1.2 1999/12/23 12:13:53 gniibe Exp gniibe $
+# $Id: Makefile,v 1.6 2000/06/10 03:03:52 gniibe Exp $
 #
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
@@ -15,21 +15,26 @@
 #
 # Select the object file format to substitute into the linker script.
 #
-tool-prefix	= sh-linux-gnu-
+tool_prefix	= sh-linux-gnu-
 
-ifdef CONFIG_LITTLE_ENDIAN
+ifdef CONFIG_CPU_LITTLE_ENDIAN
 CFLAGS		+= -ml
 AFLAGS		+= -ml
 # LINKFLAGS	+= -EL
 LDFLAGS		:= -EL
+else
+CFLAGS		+= -mb
+AFLAGS		+= -mb
+# LINKFLAGS	+= -EB
+LDFLAGS		:= -EB
 endif
 
 # ifdef CONFIG_CROSSCOMPILE
-CROSS_COMPILE  = $(tool-prefix)
+CROSS_COMPILE  = $(tool_prefix)
 # endif
 
 LD	=$(CROSS_COMPILE)ld $(LDFLAGS)
-OBJCOPY=$(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -S
+OBJCOPY=$(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -R .stab -R .stabstr -S
 
 MODFLAGS	+=
 
@@ -41,8 +46,8 @@ CFLAGS		+= -m3
 AFLAGS		+= -m3
 endif
 ifdef CONFIG_CPU_SH4
-CFLAGS		+= -m4
-AFLAGS		+= -m4
+CFLAGS		+= -m4-nofpu
+AFLAGS		+= -m4-nofpu
 endif
 
 #
@@ -73,7 +78,7 @@ MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
 vmlinux: arch/sh/vmlinux.lds
 
 arch/sh/vmlinux.lds: arch/sh/vmlinux.lds.S FORCE
-	$(CPP) -C -P -I$(HPATH) -Ush arch/sh/vmlinux.lds.S >arch/sh/vmlinux.lds
+	$(CPP) -traditional -C -P -I$(HPATH) -Ush arch/sh/vmlinux.lds.S >arch/sh/vmlinux.lds
 
 FORCE: ;
 

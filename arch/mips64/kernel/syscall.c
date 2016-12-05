@@ -1,11 +1,10 @@
-/* $Id: syscall.c,v 1.3 2000/02/04 07:40:24 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995 - 1999 by Ralf Baechle
- * Copyright (C) 1999 Silicon Graphics, Inc.
+ * Copyright (C) 1995 - 2000 by Ralf Baechle
+ * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
  */
 #include <linux/errno.h>
 #include <linux/linkage.h>
@@ -21,6 +20,7 @@
 #include <linux/sem.h>
 #include <linux/msg.h>
 #include <linux/shm.h>
+#include <linux/slab.h>
 #include <asm/ipc.h>
 #include <asm/cachectl.h>
 #include <asm/offset.h>
@@ -31,12 +31,13 @@
 #include <asm/sysmips.h>
 #include <asm/uaccess.h>
 
+extern asmlinkage void syscall_trace(void);
+
 asmlinkage int sys_pipe(abi64_no_regargs, struct pt_regs regs)
 {
 	int fd[2];
 	int error, res;
 
-	lock_kernel();
 	error = do_pipe(fd);
 	if (error) {
 		res = error;
@@ -45,7 +46,6 @@ asmlinkage int sys_pipe(abi64_no_regargs, struct pt_regs regs)
 	regs.regs[3] = fd[1];
 	res = fd[0];
 out:
-	unlock_kernel();
 	return res;
 }
 
@@ -56,8 +56,6 @@ sys_mmap(unsigned long addr, size_t len, unsigned long prot,
 	struct file * file = NULL;
 	unsigned long error = -EFAULT;
 
-	down(&current->mm->mmap_sem);
-	lock_kernel();
 	if (!(flags & MAP_ANONYMOUS)) {
 		error = -EBADF;
 		file = fget(fd);
@@ -66,12 +64,12 @@ sys_mmap(unsigned long addr, size_t len, unsigned long prot,
 	}
         flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 
+	down(&current->mm->mmap_sem);
         error = do_mmap(file, addr, len, prot, flags, offset);
+	up(&current->mm->mmap_sem);
         if (file)
                 fput(file);
 out:
-	unlock_kernel();
-	up(&current->mm->mmap_sem);
 
 	return error;
 }
@@ -81,7 +79,7 @@ asmlinkage int sys_fork(abi64_no_regargs, struct pt_regs regs)
 	int res;
 
 	save_static(&regs);
-	res = do_fork(SIGCHLD, regs.regs[29], &regs);
+	res = do_fork(SIGCHLD, regs.regs[29], &regs, 0);
 	return res;
 }
 
@@ -96,7 +94,7 @@ asmlinkage int sys_clone(abi64_no_regargs, struct pt_regs regs)
 	newsp = regs.regs[5];
 	if (!newsp)
 		newsp = regs.regs[29];
-	res = do_fork(clone_flags, newsp, &regs);
+	res = do_fork(clone_flags, newsp, &regs, 0);
 	return res;
 }
 
@@ -108,7 +106,6 @@ asmlinkage int sys_execve(abi64_no_regargs, struct pt_regs regs)
 	int error;
 	char * filename;
 
-	lock_kernel();
 	filename = getname((char *) (long)regs.regs[4]);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
@@ -118,44 +115,6 @@ asmlinkage int sys_execve(abi64_no_regargs, struct pt_regs regs)
 	putname(filename);
 
 out:
-	unlock_kernel();
-	return error;
-}
-
-/*
- * Compacrapability ...
- */
-asmlinkage int sys_uname(struct old_utsname * name)
-{
-	if (name && !copy_to_user(name, &system_utsname, sizeof (*name)))
-		return 0;
-	return -EFAULT;
-}
-
-/*
- * Compacrapability ...
- */
-asmlinkage int sys_olduname(struct oldold_utsname * name)
-{
-	int error;
-
-	if (!name)
-		return -EFAULT;
-	if (!access_ok(VERIFY_WRITE,name,sizeof(struct oldold_utsname)))
-		return -EFAULT;
-  
-	error = __copy_to_user(&name->sysname,&system_utsname.sysname,__OLD_UTS_LEN);
-	error -= __put_user(0,name->sysname+__OLD_UTS_LEN);
-	error -= __copy_to_user(&name->nodename,&system_utsname.nodename,__OLD_UTS_LEN);
-	error -= __put_user(0,name->nodename+__OLD_UTS_LEN);
-	error -= __copy_to_user(&name->release,&system_utsname.release,__OLD_UTS_LEN);
-	error -= __put_user(0,name->release+__OLD_UTS_LEN);
-	error -= __copy_to_user(&name->version,&system_utsname.version,__OLD_UTS_LEN);
-	error -= __put_user(0,name->version+__OLD_UTS_LEN);
-	error -= __copy_to_user(&name->machine,&system_utsname.machine,__OLD_UTS_LEN);
-	error = __put_user(0,name->machine+__OLD_UTS_LEN);
-	error = error ? -EFAULT : 0;
-
 	return error;
 }
 
@@ -174,41 +133,72 @@ sys_sysmips(int cmd, long arg1, int arg2, int arg3)
 {
 	int	*p;
 	char	*name;
-	int	flags, tmp, len, errno;
+	int	tmp, len, errno;
 
-	switch(cmd)
-	{
-	case SETNAME:
+	switch(cmd) {
+	case SETNAME: {
+		char nodename[__NEW_UTS_LEN + 1];
+
 		if (!capable(CAP_SYS_ADMIN))
 			return -EPERM;
 
 		name = (char *) arg1;
-		len = strlen_user(name);
 
-		if (len == 0 || len > __NEW_UTS_LEN)
-			return -EINVAL;
-		down(&uts_sem);
-		errno = -EFAULT;
-		if (!copy_from_user(system_utsname.nodename, name, len)) {
-			system_utsname.nodename[len] = '\0';
-			errno = 0;
-		}
-		up(&uts_sem);
-		return errno;
+		len = strncpy_from_user(nodename, name, sizeof(nodename));
+		if (len < 0)
+			return -EFAULT;
 
-	case MIPS_ATOMIC_SET:
-		/* This is broken in case of page faults and SMP ...
-		   Risc/OS fauls after maximum 20 tries with EAGAIN.  */
+		down_write(&uts_sem);
+		strncpy(system_utsname.nodename, name, len);
+		up_write(&uts_sem);
+		system_utsname.nodename[len] = '\0';
+		return 0;
+	}
+
+	case MIPS_ATOMIC_SET: {
+		unsigned int tmp;
+
 		p = (int *) arg1;
 		errno = verify_area(VERIFY_WRITE, p, sizeof(*p));
 		if (errno)
 			return errno;
-		save_and_cli(flags);
-		errno = *p;
-		*p = arg2;
-		restore_flags(flags);
+		errno = 0;
 
-		return errno;		/* This is broken ...  */
+		__asm__(".set\tpush\t\t\t# sysmips(MIPS_ATOMIC, ...)\n\t"
+			".set\tnoreorder\n\t"
+			".set\tnoat\n\t"
+			"1:\tll\t%0, %4\n\t"
+			"2:\tmove\t$1, %3\n\t"
+			"3:\tsc\t$1, %1\n\t"
+			"beqzl\t$1, 2b\n\t"
+			"4:\t ll\t%0, %4\n\t"
+			".set\tpop\n\t"
+			".section\t.fixup,\"ax\"\n"
+			"5:\tli\t%2, 1\t\t\t# error\n\t"
+			".previous\n\t"
+			".section\t__ex_table,\"a\"\n\t"
+			".dword\t1b, 5b\n\t"
+			".dword\t3b, 5b\n\t"
+			".dword\t4b, 5b\n\t"
+			".previous\n\t"
+			: "=&r" (tmp), "=o" (* (u32 *) p), "=r" (errno)
+			: "r" (arg2), "o" (* (u32 *) p), "2" (errno)
+			: "$1");
+
+		if (errno)
+			return -EFAULT;
+
+		/* We're skipping error handling etc.  */
+		if (current->ptrace & PT_TRACESYS)
+			syscall_trace();
+
+		__asm__ __volatile__(
+			"move\t$29, %0\n\t"
+			"j\tret_from_sys_call"
+			: /* No outputs */
+			: "r" (&cmd));
+		/* Unreached */
+	}
 
 	case MIPS_FIXADE:
 		tmp = current->thread.mflags & ~3;
@@ -216,7 +206,7 @@ sys_sysmips(int cmd, long arg1, int arg2, int arg3)
 		return 0;
 
 	case FLUSH_CACHE:
-		flush_cache_all();
+		_flush_cache_l2();
 		return 0;
 
 	case MIPS_RDNVRAM:
@@ -232,7 +222,7 @@ sys_sysmips(int cmd, long arg1, int arg2, int arg3)
  * This is really horribly ugly.
  */
 asmlinkage int sys_ipc (uint call, int first, int second,
-			int third, void *ptr, long fifth)
+			unsigned long third, void *ptr, long fifth)
 {
 	int version, ret;
 
@@ -322,4 +312,11 @@ sys_cachectl(char *addr, int nbytes, int op)
 asmlinkage void bad_stack(void)
 {
 	do_exit(SIGSEGV);
+}
+
+asmlinkage int sys_pause(void)
+{
+	current->state = TASK_INTERRUPTIBLE;
+	schedule();
+	return -ERESTARTNOHAND;
 }

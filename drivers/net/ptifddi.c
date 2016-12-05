@@ -1,4 +1,4 @@
-/* $Id: ptifddi.c,v 1.11 1999/10/25 01:50:16 zaitcev Exp $
+/* $Id: ptifddi.c,v 1.13 2000/07/11 22:35:22 davem Exp $
  * ptifddi.c: Network driver for Performance Technologies single-attach
  *            and dual-attach FDDI sbus cards.
  *
@@ -142,7 +142,7 @@ static int pti_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	struct ptifddi *pp = (struct ptifddi *) dev->priv;
 }
 
-static struct enet_statistics *pti_get_stats(struct net_device *dev)
+static struct net_device_stats *pti_get_stats(struct net_device *dev)
 { return &(((struct ptifddi *)dev->priv)->enet_stats); }
 
 static void pti_set_multicast(struct net_device *dev)
@@ -165,7 +165,7 @@ static inline int pti_fddi_init(struct net_device *dev, struct sbus_dev *sdev, i
 	    &sdep->resource[0], 0, sizeof(sturct dfddi_ram), "PTI FDDI DPRAM");
 	if(!pp->dpram) {
 		printk("ptiFDDI: Cannot map DPRAM I/O area.\n");
-		return ENODEV;
+		return -ENODEV;
 	}
 
 	/* Next, register 1 contains reset byte. */
@@ -173,7 +173,7 @@ static inline int pti_fddi_init(struct net_device *dev, struct sbus_dev *sdev, i
 	    &sdep->resource[1], 0, 1, "PTI FDDI RESET Byte");
 	if(!pp->reset) {
 		printk("ptiFDDI: Cannot map RESET byte.\n");
-		return ENODEV;
+		return -ENODEV;
 	}
 
 	/* Register 2 contains unreset byte. */
@@ -181,7 +181,7 @@ static inline int pti_fddi_init(struct net_device *dev, struct sbus_dev *sdev, i
 	    &sdep->resource[2], 0, 1, "PTI FDDI UNRESET Byte");
 	if(!pp->unreset) {
 		printk("ptiFDDI: Cannot map UNRESET byte.\n");
-		return ENODEV;
+		return -ENODEV;
 	}
 
 	/* Reset the card. */
@@ -191,7 +191,7 @@ static inline int pti_fddi_init(struct net_device *dev, struct sbus_dev *sdev, i
 	i = pti_card_test(pp);
 	if(i) {
 		printk("ptiFDDI: Bootup card test fails.\n");
-		return ENODEV;
+		return -ENODEV;
 	}
 
 	/* Clear DPRAM, start afresh. */
@@ -212,7 +212,7 @@ int __init ptifddi_sbus_probe(struct net_device *dev)
 	int cards = 0, v;
 
 	if(called)
-		return ENODEV;
+		return -ENODEV;
 	called++;
 
 	for_each_sbus(bus) {
@@ -228,7 +228,7 @@ int __init ptifddi_sbus_probe(struct net_device *dev)
 		}
 	}
 	if(!cards)
-		return ENODEV;
+		return -ENODEV;
 	return 0;
 }
 

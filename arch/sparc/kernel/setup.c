@@ -1,7 +1,8 @@
-/*  $Id: setup.c,v 1.115 2000/02/26 04:24:31 davem Exp $
+/*  $Id: setup.c,v 1.122 2001/01/01 01:46:15 davem Exp $
  *  linux/arch/sparc/kernel/setup.c
  *
  *  Copyright (C) 1995  David S. Miller (davem@caip.rutgers.edu)
+ *  Copyright (C) 2000  Anton Blanchard (anton@linuxcare.com)
  */
 
 #include <linux/errno.h>
@@ -45,6 +46,8 @@
 #include <asm/hardirq.h>
 #include <asm/machines.h>
 
+#undef PROM_DEBUG_CONSOLE
+
 struct screen_info screen_info = {
 	0, 0,			/* orig-x, orig-y */
 	0,			/* unused */
@@ -56,8 +59,6 @@ struct screen_info screen_info = {
 	0,                      /* orig-video-isVGA */
 	16                      /* orig-video-points */
 };
-
-unsigned int phys_bytes_of_ram, end_of_phys_memory;
 
 /* Typing sync at the prom prompt calls the function pointed to by
  * romvec->pv_synchook which I set to the following function.
@@ -78,12 +79,8 @@ void prom_sync_me(void)
 {
 	unsigned long prom_tbr, flags;
 
-#ifdef __SMP__
-	global_irq_holder = NO_PROC_ID;
-	*((unsigned char *)&global_irq_lock) = 0;
-	*((unsigned char *)&global_bh_lock) = 0;
-#endif
-	__save_and_cli(flags);
+	/* XXX Badly broken. FIX! - Anton */
+	save_and_cli(flags);
 	__asm__ __volatile__("rd %%tbr, %0\n\t" : "=r" (prom_tbr));
 	__asm__ __volatile__("wr %0, 0x0, %%tbr\n\t"
 			     "nop\n\t"
@@ -97,9 +94,9 @@ void prom_sync_me(void)
 	prom_printf("PROM SYNC COMMAND...\n");
 	show_free_areas();
 	if(current->pid != 0) {
-		__sti();
+		sti();
 		sys_sync();
-		__cli();
+		cli();
 	}
 	prom_printf("Returning to prom\n");
 
@@ -107,14 +104,14 @@ void prom_sync_me(void)
 			     "nop\n\t"
 			     "nop\n\t"
 			     "nop\n\t" : : "r" (prom_tbr));
-	__restore_flags(flags);
+	restore_flags(flags);
 
 	return;
 }
 
 extern void rs_kgdb_hook(int tty_num); /* sparc/serial.c */
 
-unsigned int boot_flags;
+unsigned int boot_flags __initdata = 0;
 #define BOOTME_DEBUG  0x1
 #define BOOTME_SINGLE 0x2
 #define BOOTME_KGDBA  0x4
@@ -122,7 +119,7 @@ unsigned int boot_flags;
 #define BOOTME_KGDB   0xc
 
 #ifdef CONFIG_SUN_CONSOLE
-static int console_fb = 0;
+static int console_fb __initdata = 0;
 #endif
 
 /* Exported for mm/init.c:paging_init. */
@@ -166,7 +163,7 @@ static void __init process_switch(char c)
 		break;
 	case 'h':
 		prom_printf("boot_flags_init: Halt!\n");
-		halt();
+		prom_halt();
 		break;
 	default:
 		printk("Unknown boot switch (-%c)\n", c);
@@ -268,8 +265,6 @@ extern void sun_serial_setup(void);
 extern unsigned short root_flags;
 extern unsigned short root_dev;
 extern unsigned short ram_flags;
-extern unsigned sparc_ramdisk_image;
-extern unsigned sparc_ramdisk_size;
 #define RAMDISK_IMAGE_START_MASK	0x07FF
 #define RAMDISK_PROMPT_FLAG		0x8000
 #define RAMDISK_LOAD_FLAG		0x4000
@@ -282,17 +277,22 @@ enum sparc_cpu sparc_cpu_model;
 
 struct tt_entry *sparc_ttable;
 
-struct pt_regs fake_swapper_regs = { 0, 0, 0, 0, { 0, } };
+struct pt_regs fake_swapper_regs;
 
-static void prom_cons_write(struct console *con, const char *str, unsigned count)
+#ifdef PROM_DEBUG_CONSOLE
+static void
+prom_console_write(struct console *con, const char *s, unsigned n)
 {
-	while (count--)
-		prom_printf("%c", *str++);
+	prom_printf("%s", s);
 }
 
 static struct console prom_console = {
-	"PROM", prom_cons_write, 0, 0, 0, 0, 0, CON_PRINTBUFFER, 0, 0, 0
+	name:		"debug",
+	write:		prom_console_write,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
 };
+#endif
 
 extern void paging_init(void);
 
@@ -347,6 +347,9 @@ void __init setup_arch(char **cmdline_p)
 		printk("UNKNOWN!\n");
 		break;
 	};
+#ifdef PROM_DEBUG_CONSOLE
+	register_console(&prom_console);
+#endif
 
 #ifdef CONFIG_DUMMY_CONSOLE
 	conswitchp = &dummy_con;
@@ -382,42 +385,9 @@ void __init setup_arch(char **cmdline_p)
 	rd_prompt = ((ram_flags & RAMDISK_PROMPT_FLAG) != 0);
 	rd_doload = ((ram_flags & RAMDISK_LOAD_FLAG) != 0);	
 #endif
-#ifdef CONFIG_BLK_DEV_INITRD
-// FIXME needs to do the new bootmem alloc stuff
-	if (sparc_ramdisk_image) {
-		initrd_start = sparc_ramdisk_image;
-		if (initrd_start < KERNBASE) initrd_start += KERNBASE;
-		initrd_end = initrd_start + sparc_ramdisk_size;
-		if (initrd_end > *memory_end_p) {
-			printk(KERN_CRIT "initrd extends beyond end of memory "
-		                 	 "(0x%08lx > 0x%08lx)\ndisabling initrd\n",
-		       			 initrd_end,*memory_end_p);
-			initrd_start = 0;
-		}
-		if (initrd_start >= *memory_start_p && initrd_start < *memory_start_p + 2 * PAGE_SIZE) {
-			initrd_below_start_ok = 1;
-			*memory_start_p = PAGE_ALIGN (initrd_end);
-		} else if (initrd_start && sparc_ramdisk_image < KERNBASE) {
-			switch (sparc_cpu_model) {
-			case sun4m:
-			case sun4d:
-				initrd_start -= KERNBASE;
-				initrd_end -= KERNBASE;
-				break;
-			default:
-				break;
-			}
-		}
-	}
-#endif	
+
 	prom_setsync(prom_sync_me);
 
-#ifdef CONFIG_SUN_SERIAL
-#if 0
-	/* XXX We can't do this until the bootmem allocator is working. */
-	sun_serial_setup(); /* set this up ASAP */
-#endif
-#endif
 	{
 #if !CONFIG_SUN_SERIAL
 		serial_console = 0;
@@ -506,7 +476,7 @@ int get_cpuinfo(char *buffer)
             "type\t\t: %s\n"
 	    "ncpus probed\t: %d\n"
 	    "ncpus active\t: %d\n"
-#ifndef __SMP__
+#ifndef CONFIG_SMP
             "BogoMips\t: %lu.%02lu\n"
 #endif
 	    ,
@@ -515,15 +485,15 @@ int get_cpuinfo(char *buffer)
             romvec->pv_romvers, prom_rev, romvec->pv_printrev >> 16, (short)romvec->pv_printrev,
             &cputypval,
 	    linux_num_cpus, smp_num_cpus
-#ifndef __SMP__
-	    , loops_per_sec/500000, (loops_per_sec/5000) % 100
+#ifndef CONFIG_SMP
+	    , loops_per_jiffy/(500000/HZ), (loops_per_jiffy/(5000/HZ)) % 100
 #endif
 	    );
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	len += smp_bogo_info(buffer + len);
 #endif
 	len += mmu_info(buffer + len);
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	len += smp_info(buffer + len);
 #endif
 	return len;

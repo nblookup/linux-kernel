@@ -96,6 +96,7 @@ static const char *version = "tms380tr.c: v1.07 21/01/2000 by Christoph Goos, Ad
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/delay.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -143,7 +144,7 @@ static void 	tms380tr_exec_cmd(struct net_device *dev, unsigned short Command);
 static void 	tms380tr_exec_sifcmd(struct net_device *dev, unsigned int WriteValue);
 /* "F" */
 /* "G" */
-static struct enet_statistics *tms380tr_get_stats(struct net_device *dev);
+static struct net_device_stats *tms380tr_get_stats(struct net_device *dev);
 /* "H" */
 static void 	tms380tr_hardware_send_packet(struct net_device *dev,
 			struct net_local* tp);
@@ -270,8 +271,6 @@ int tms380tr_open(struct net_device *dev)
 	tp->timer.expires	= jiffies + 30*HZ;
 	tp->timer.function	= tms380tr_timer_end_wait;
 	tp->timer.data		= (unsigned long)dev;
-	tp->timer.next		= NULL;
-	tp->timer.prev		= NULL;
 	add_timer(&tp->timer);
 
 	printk(KERN_INFO "%s: Adapter RAM size: %dK\n", 
@@ -1168,11 +1167,11 @@ int tms380tr_close(struct net_device *dev)
  * Get the current statistics. This may be called with the card open
  * or closed.
  */
-static struct enet_statistics *tms380tr_get_stats(struct net_device *dev)
+static struct net_device_stats *tms380tr_get_stats(struct net_device *dev)
 {
 	struct net_local *tp = (struct net_local *)dev->priv;
 
-	return ((struct enet_statistics *)&tp->MacStat);
+	return ((struct net_device_stats *)&tp->MacStat);
 }
 
 /*

@@ -1,8 +1,8 @@
 /* proc.c -- /proc support for DRM -*- linux-c -*-
  * Created: Mon Jan 11 09:48:47 1999 by faith@precisioninsight.com
- * Revised: Fri Dec  3 09:44:16 1999 by faith@precisioninsight.com
  *
  * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
+ * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
  * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -23,10 +23,9 @@
  * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
- * 
- * $PI: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/proc.c,v 1.4 1999/08/20 15:36:46 faith Exp $
- * $XFree86: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/proc.c,v 1.1 1999/09/25 14:38:02 dawes Exp $
  *
+ * Authors:
+ *    Rickard E. (Rik) Faith <faith@valinux.com>
  */
 
 #define __NO_VERSION__
@@ -79,26 +78,26 @@ int drm_proc_init(drm_device_t *dev)
 	struct proc_dir_entry *ent;
 	int		      i, j;
 
-	drm_root = create_proc_entry("graphics", S_IFDIR, NULL);
+	drm_root = create_proc_entry("dri", S_IFDIR, NULL);
 	if (!drm_root) {
-		DRM_ERROR("Cannot create /proc/graphics\n");
+		DRM_ERROR("Cannot create /proc/dri\n");
 		return -1;
 	}
 
 				/* Instead of doing this search, we should
-				   add some global support for /proc/graphics. */
+				   add some global support for /proc/dri. */
 	for (i = 0; i < 8; i++) {
-		sprintf(drm_slot_name, "graphics/%d", i);
+		sprintf(drm_slot_name, "dri/%d", i);
 		drm_dev_root = create_proc_entry(drm_slot_name, S_IFDIR, NULL);
 		if (!drm_dev_root) {
 			DRM_ERROR("Cannot create /proc/%s\n", drm_slot_name);
-			remove_proc_entry("graphics", NULL);
+			remove_proc_entry("dri", NULL);
 		}
 		if (drm_dev_root->nlink == 2) break;
 		drm_dev_root = NULL;
 	}
 	if (!drm_dev_root) {
-		DRM_ERROR("Cannot find slot in /proc/graphics\n");
+		DRM_ERROR("Cannot find slot in /proc/dri\n");
 		return -1;
 	}
 
@@ -112,7 +111,7 @@ int drm_proc_init(drm_device_t *dev)
 				remove_proc_entry(drm_proc_list[i].name,
 						  drm_dev_root);
 			remove_proc_entry(drm_slot_name, NULL);
-			remove_proc_entry("graphics", NULL);
+			remove_proc_entry("dri", NULL);
 			return -1;
 		}
 		ent->read_proc = drm_proc_list[i].f;
@@ -135,7 +134,7 @@ int drm_proc_cleanup(void)
 			}
 			remove_proc_entry(drm_slot_name, NULL);
 		}
-		remove_proc_entry("graphics", NULL);
+		remove_proc_entry("dri", NULL);
 		remove_proc_entry(DRM_NAME, NULL);
 	}
 	drm_root = drm_dev_root = NULL;
@@ -165,7 +164,10 @@ static int _drm_vm_info(char *buf, char **start, off_t offset, int len,
 {
 	drm_device_t *dev = (drm_device_t *)data;
 	drm_map_t    *map;
-	const char   *types[] = { "FB", "REG", "SHM" };
+				/* Hardcoded from _DRM_FRAME_BUFFER,
+                                   _DRM_REGISTERS, _DRM_SHM, and
+                                   _DRM_AGP. */
+	const char   *types[] = { "FB", "REG", "SHM", "AGP" };
 	const char   *type;
 	int	     i;
 
@@ -176,7 +178,7 @@ static int _drm_vm_info(char *buf, char **start, off_t offset, int len,
 		       "address mtrr\n\n");
 	for (i = 0; i < dev->map_count; i++) {
 		map = dev->maplist[i];
-		if (map->type < 0 || map->type > 2) type = "??";
+		if (map->type < 0 || map->type > 3) type = "??";
 		else				    type = types[map->type];
 		DRM_PROC_PRINT("%4d 0x%08lx 0x%08lx %4.4s  0x%02x 0x%08lx ",
 			       i,
@@ -226,7 +228,7 @@ static int _drm_queues_info(char *buf, char **start, off_t offset, int len,
 		atomic_inc(&q->use_count);
 		DRM_PROC_PRINT_RET(atomic_dec(&q->use_count),
 				   "%5d/0x%03x %5d %5d"
-				   " %5d/%c%c/%c%c%c %5d %10d %10d %10d\n",
+				   " %5d/%c%c/%c%c%c %5Zd %10d %10d %10d\n",
 				   i,
 				   q->flags,
 				   atomic_read(&q->use_count),
@@ -349,17 +351,21 @@ static int drm_clients_info(char *buf, char **start, off_t offset, int len,
 
 #if DRM_DEBUG_CODE
 
+#define DRM_VMA_VERBOSE 0
+
 static int _drm_vma_info(char *buf, char **start, off_t offset, int len,
 			 int *eof, void *data)
 {
 	drm_device_t	      *dev = (drm_device_t *)data;
 	drm_vma_entry_t	      *pt;
+	struct vm_area_struct *vma;
+#if DRM_VMA_VERBOSE
+	unsigned long	      i;
+	unsigned long	      address;
 	pgd_t		      *pgd;
 	pmd_t		      *pmd;
 	pte_t		      *pte;
-	unsigned long	      i;
-	struct vm_area_struct *vma;
-	unsigned long	      address;
+#endif
 #if defined(__i386__)
 	unsigned int	      pgprot;
 #endif
@@ -398,6 +404,7 @@ static int _drm_vma_info(char *buf, char **start, off_t offset, int len,
 			       pgprot & _PAGE_GLOBAL   ? 'g' : 'l' );
 #endif		
 		DRM_PROC_PRINT("\n");
+#if 0
 		for (i = vma->vm_start; i < vma->vm_end; i += PAGE_SIZE) {
 			pgd = pgd_offset(vma->vm_mm, i);
 			pmd = pmd_offset(pgd, i);
@@ -418,6 +425,7 @@ static int _drm_vma_info(char *buf, char **start, off_t offset, int len,
 				DRM_PROC_PRINT("      0x%08lx\n", i);
 			}
 		}
+#endif
 	}
 	
 	return len;
@@ -513,9 +521,9 @@ static int _drm_histo_info(char *buf, char **start, off_t offset, int len,
 	} else {
 		DRM_PROC_PRINT("lock		     none\n");
 	}
-	DRM_PROC_PRINT("context_flag   0x%08x\n", dev->context_flag);
-	DRM_PROC_PRINT("interrupt_flag 0x%08x\n", dev->interrupt_flag);
-	DRM_PROC_PRINT("dma_flag       0x%08x\n", dev->dma_flag);
+	DRM_PROC_PRINT("context_flag   0x%08lx\n", dev->context_flag);
+	DRM_PROC_PRINT("interrupt_flag 0x%08lx\n", dev->interrupt_flag);
+	DRM_PROC_PRINT("dma_flag       0x%08lx\n", dev->dma_flag);
 
 	DRM_PROC_PRINT("queue_count    %10d\n",	 dev->queue_count);
 	DRM_PROC_PRINT("last_context   %10d\n",	 dev->last_context);

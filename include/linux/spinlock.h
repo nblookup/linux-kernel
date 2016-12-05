@@ -1,6 +1,8 @@
 #ifndef __LINUX_SPINLOCK_H
 #define __LINUX_SPINLOCK_H
 
+#include <linux/config.h>
+
 /*
  * These are the generic versions of the spinlocks and read-write
  * locks..
@@ -29,7 +31,7 @@
 #define write_unlock_irq(lock)			do { write_unlock(lock); local_irq_enable();       } while (0)
 #define write_unlock_bh(lock)			do { write_unlock(lock); local_bh_enable();        } while (0)
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #include <asm/spinlock.h>
 
 #else /* !SMP */
@@ -37,6 +39,8 @@
 #define DEBUG_SPINLOCKS	0	/* 0 == no debugging, 1 == maintain lock state, 2 == full debug */
 
 #if (DEBUG_SPINLOCKS < 1)
+
+#define atomic_dec_and_lock(atomic,lock) atomic_dec_and_test(atomic)
 
 /*
  * Your basic spinlocks, allowing only a single CPU anywhere
@@ -61,7 +65,7 @@
 #elif (DEBUG_SPINLOCKS < 2)
 
 typedef struct {
-	volatile unsigned int lock;
+	volatile unsigned long lock;
 } spinlock_t;
 #define SPIN_LOCK_UNLOCKED (spinlock_t) { 0 }
 
@@ -76,7 +80,7 @@ typedef struct {
 #else /* (DEBUG_SPINLOCKS >= 2) */
 
 typedef struct {
-	volatile unsigned int lock;
+	volatile unsigned long lock;
 	volatile unsigned int babble;
 	const char *module;
 } spinlock_t;
@@ -114,10 +118,18 @@ typedef struct {
   #define RW_LOCK_UNLOCKED (rwlock_t) { 0 }
 #endif
 
+#define rwlock_init(lock)	do { } while(0)
 #define read_lock(lock)		(void)(lock) /* Not "unused variable". */
 #define read_unlock(lock)	do { } while(0)
 #define write_lock(lock)	(void)(lock) /* Not "unused variable". */
 #define write_unlock(lock)	do { } while(0)
 
 #endif /* !SMP */
+
+/* "lock on reference count zero" */
+#ifndef atomic_dec_and_lock
+#include <asm/atomic.h>
+extern int atomic_dec_and_lock(atomic_t *atomic, spinlock_t *lock);
+#endif
+
 #endif /* __LINUX_SPINLOCK_H */

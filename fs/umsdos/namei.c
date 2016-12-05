@@ -279,14 +279,14 @@ static int umsdos_create_any (struct inode *dir, struct dentry *dentry,
 		goto out_remove_dput;
 
 	inode = fake->d_inode;
-	inode->i_count++;
+	atomic_inc(&inode->i_count);
 	d_instantiate (dentry, inode);
 	dput(fake);
-	if (inode->i_count > 1) {
+	if (atomic_read(&inode->i_count) > 1) {
 		printk(KERN_WARNING
 			"umsdos_create_any: %s/%s, ino=%ld, icount=%d??\n",
 			dentry->d_parent->d_name.name, dentry->d_name.name,
-			inode->i_ino, inode->i_count);
+			inode->i_ino, atomic_read(&inode->i_count));
 	}
 	umsdos_lookup_patch_new(dentry, &info);
 
@@ -334,19 +334,6 @@ static void umsdos_ren_init (struct umsdos_info *new_info,
 	new_info->entry.flags = old_info->entry.flags;
 	new_info->entry.nlink = old_info->entry.nlink;
 }
-
-#ifdef OBSOLETE
-#define chkstk() \
-if (STACK_MAGIC != *(unsigned long *)current->kernel_stack_page){\
-    printk(KERN_ALERT "UMSDOS: %s magic %x != %lx ligne %d\n" \
-	   , current->comm,STACK_MAGIC \
-	   ,*(unsigned long *)current->kernel_stack_page \
-	   ,__LINE__); \
-}
-
-#undef chkstk
-#define chkstk() do { } while (0);
-#endif
 
 /*
  * Rename a file (move) in the file system.
@@ -496,10 +483,6 @@ static int umsdos_symlink_x (struct inode *dir, struct dentry *dentry,
 			const char *symname, int mode, char flags)
 {
 	int ret, len;
-	struct file filp;
-
-Printk(("umsdos_symlink: %s/%s to %s\n",
-dentry->d_parent->d_name.name, dentry->d_name.name, symname));
 
 	ret = umsdos_create_any (dir, dentry, mode, 0, flags);
 	if (ret) {
@@ -508,22 +491,17 @@ dentry->d_parent->d_name.name, dentry->d_name.name, symname));
 		goto out;
 	}
 
-	fill_new_filp (&filp, dentry);
 	len = strlen (symname);
-	ret = umsdos_file_write_kmem_real (&filp, symname, len);
+	ret = block_symlink(dentry->d_inode, symname, len);
 	if (ret < 0)
 		goto out_unlink;
-	if (ret != len)
-		goto out_error;
-	ret = 0;
 out:
 	return ret;
 
-out_error:
-	ret = -EIO;
 out_unlink:
 	printk(KERN_WARNING "umsdos_symlink: write failed, unlinking\n");
 	UMSDOS_unlink (dir, dentry);
+	d_drop(dentry);
 	goto out;
 }
 
@@ -808,7 +786,7 @@ dentry->d_parent->d_name.name, info.fake.fname);
 	inode = temp->d_inode;
 	down(&inode->i_sem);
 
-	inode->i_count++;
+	atomic_inc(&inode->i_count);
 	d_instantiate(dentry, inode);
 
 	/* N.B. this should have an option to create the EMD ... */
@@ -898,9 +876,11 @@ if (err)
 printk("umsdos_rmdir: EMD %s/%s unlink failed, err=%d\n",
 demd->d_parent->d_name.name, demd->d_name.name, err);
 #endif
-			dput(demd);
-			if (!err)
+			if (!err) {
+				d_delete(demd);
 				ret = 0;
+			}
+			dput(demd);
 		}
 	} else if (empty == 2)
 		ret = 0;
@@ -921,6 +901,7 @@ demd->d_parent->d_name.name, demd->d_name.name, err);
 	if (ret && ret != -ENOENT)
 		goto out_dput;
 
+	d_delete(temp);
 	/* OK so far ... remove the name from the EMD */
 	ret = umsdos_delentry (dentry->d_parent, &info, 1);
 #ifdef UMSDOS_PARANOIA
@@ -1009,6 +990,8 @@ Printk (("UMSDOS_unlink %.*s ", info.fake.len, info.fake.fname));
 	}
 
 	ret = msdos_unlink(dir, temp);
+	if (!ret)
+		d_delete(temp);
 #ifdef UMSDOS_PARANOIA
 if (ret)
 printk("umsdos_unlink: %s/%s unlink failed, ret=%d\n",
@@ -1018,8 +1001,6 @@ temp->d_parent->d_name.name, temp->d_name.name, ret);
 	/* dput() temp if we didn't do it above */
 out_dput:
 	dput(temp);
-	if (!ret)
-		d_delete (dentry);
 
 out_unlock:
 	umsdos_unlockcreate (dir);
@@ -1065,7 +1046,8 @@ link->d_parent->d_name.name, link->d_name.name, ret));
 			printk(KERN_WARNING
 				"umsdos_unlink: link removal failed, ret=%d\n",
 				 ret);
-		}
+		} else
+			d_delete(link);
 	} else {
 		struct iattr newattrs;
 		inode->i_nlink--;
@@ -1100,11 +1082,13 @@ int UMSDOS_rename (struct inode *old_dir, struct dentry *old_dentry,
 		 * If the target already exists, delete it first.
 		 */
 	if (new_dentry->d_inode) {
-		new_dentry->d_count++;
+		dget(new_dentry);
 		if (S_ISDIR(old_dentry->d_inode->i_mode))
 			ret = UMSDOS_rmdir (new_dir, new_dentry);
 		else
 			ret = UMSDOS_unlink (new_dir, new_dentry);
+		if (!ret)
+			d_drop(new_dentry);
 		dput(new_dentry);
 		if (ret)
 			return ret;

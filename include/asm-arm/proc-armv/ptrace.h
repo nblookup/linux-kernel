@@ -1,10 +1,16 @@
 /*
- * linux/include/asm-arm/proc-armv/ptrace.h
+ *  linux/include/asm-arm/proc-armv/ptrace.h
  *
- * Copyright (C) 1996-1999 Russell King
+ *  Copyright (C) 1996-1999 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 #ifndef __ASM_PROC_PTRACE_H
 #define __ASM_PROC_PTRACE_H
+
+#include <linux/config.h>
 
 #define USR26_MODE	0x00
 #define FIQ26_MODE	0x01
@@ -18,6 +24,7 @@
 #define UND_MODE	0x1b
 #define SYSTEM_MODE	0x1f
 #define MODE_MASK	0x1f
+#define T_BIT		0x20
 #define F_BIT		0x40
 #define I_BIT		0x80
 #define CC_V_BIT	(1 << 28)
@@ -58,6 +65,13 @@ struct pt_regs {
 
 #define user_mode(regs)	\
 	(((regs)->ARM_cpsr & 0xf) == 0)
+
+#ifdef CONFIG_ARM_THUMB
+#define thumb_mode(regs) \
+	(((regs)->ARM_cpsr & T_BIT))
+#else
+#define thumb_mode(regs) (0)
+#endif
 
 #define processor_mode(regs) \
 	((regs)->ARM_cpsr & MODE_MASK)

@@ -437,15 +437,15 @@ de620_get_register(struct net_device *dev, byte reg)
  */
 static int de620_open(struct net_device *dev)
 {
-	if (request_irq(dev->irq, de620_interrupt, 0, "de620", dev)) {
+	int ret = request_irq(dev->irq, de620_interrupt, 0, dev->name, dev);
+	if (ret) {
 		printk (KERN_ERR "%s: unable to get IRQ %d\n", dev->name, dev->irq);
-		return 1;
+		return ret;
 	}
 
 	if (adapter_init(dev))
-		return 1;
+		return -EIO;
 
-	MOD_INC_USE_COUNT;
 	netif_start_queue(dev);
 	return 0;
 }
@@ -462,7 +462,6 @@ static int de620_close(struct net_device *dev)
 	/* disable recv */
 	de620_set_register(dev, W_TCR, RXOFF);
 	free_irq(dev->irq, dev);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -812,6 +811,8 @@ int __init de620_probe(struct net_device *dev)
 	int i;
 	byte checkbyte = 0xa5;
 
+	SET_MODULE_OWNER(dev);
+
 	/*
 	 * This is where the base_addr and irq gets set.
 	 * Tunable at compile-time and insmod-time
@@ -834,13 +835,13 @@ int __init de620_probe(struct net_device *dev)
 
 	if ((checkbyte != 0xa5) || (read_eeprom(dev) != 0)) {
 		printk(" not identified in the printer port\n");
-		return ENODEV;
+		return -ENODEV;
 	}
 
 #if 0 /* Not yet */
 	if (check_region(dev->base_addr, 3)) {
 		printk(", port 0x%x busy\n", dev->base_addr);
-		return EBUSY;
+		return -EBUSY;
 	}
 #endif
 	request_region(dev->base_addr, 3, "de620");
@@ -985,12 +986,11 @@ static int __init read_eeprom(struct net_device *dev)
  *
  */
 #ifdef MODULE
-static char nullname[8] = "";
-static struct net_device de620_dev = {
-	nullname, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, de620_probe };
+static struct net_device de620_dev;
 
 int init_module(void)
 {
+	de620_dev.init = de620_probe;
 	if (register_netdev(&de620_dev) != 0)
 		return -EIO;
 	return 0;

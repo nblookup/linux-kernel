@@ -5,7 +5,7 @@
  *
  *		RAW - implementation of IP "raw" sockets.
  *
- * Version:	$Id: raw.c,v 1.48 2000/01/18 08:24:15 davem Exp $
+ * Version:	$Id: raw.c,v 1.56 2000/11/28 13:38:38 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -227,11 +227,11 @@ static int raw_rcv_skb(struct sock * sk, struct sk_buff * skb)
 	{
 		IP_INC_STATS(IpInDiscards);
 		kfree_skb(skb);
-		return -1;
+		return NET_RX_DROP;
 	}
 
 	IP_INC_STATS(IpInDelivers);
-	return 0;
+	return NET_RX_SUCCESS;
 }
 
 /*
@@ -502,7 +502,7 @@ int raw_recvmsg(struct sock *sk, struct msghdr *msg, int len,
 	if (err)
 		goto done;
 
-	sk->stamp=skb->stamp;
+	sock_recv_timestamp(msg, sk, skb);
 
 	/* Copy the address. */
 	if (sin) {
@@ -580,26 +580,52 @@ static int raw_getsockopt(struct sock *sk, int level, int optname,
 	return -ENOPROTOOPT;
 }
 
+static int raw_ioctl(struct sock *sk, int cmd, unsigned long arg)
+{
+	switch(cmd) {
+		case SIOCOUTQ:
+		{
+			int amount = atomic_read(&sk->wmem_alloc);
+			return put_user(amount, (int *)arg);
+		}
+		case SIOCINQ:
+		{
+			struct sk_buff *skb;
+			int amount = 0;
+
+			spin_lock_irq(&sk->receive_queue.lock);
+			skb = skb_peek(&sk->receive_queue);
+			if (skb != NULL)
+				amount = skb->len;
+			spin_unlock_irq(&sk->receive_queue.lock);
+			return put_user(amount, (int *)arg);
+		}
+
+		default:
+#ifdef CONFIG_IP_MROUTE
+			return ipmr_ioctl(sk, cmd, arg);
+#else
+			return -ENOIOCTLCMD;
+#endif
+	}
+}
+
 static void get_raw_sock(struct sock *sp, char *tmpbuf, int i)
 {
 	unsigned int dest, src;
 	__u16 destp, srcp;
-	int timer_active;
-	unsigned long timer_expires;
 
 	dest  = sp->daddr;
 	src   = sp->rcv_saddr;
 	destp = 0;
 	srcp  = sp->num;
-	timer_active = (sp->timer.prev != NULL) ? 2 : 0;
-	timer_expires = (timer_active == 2 ? sp->timer.expires : jiffies);
 	sprintf(tmpbuf, "%4d: %08X:%04X %08X:%04X"
 		" %02X %08X:%08X %02X:%08lX %08X %5d %8d %ld %d %p",
 		i, src, srcp, dest, destp, sp->state, 
 		atomic_read(&sp->wmem_alloc), atomic_read(&sp->rmem_alloc),
-		timer_active, timer_expires-jiffies, 0,
-		sp->socket->inode->i_uid, 0,
-		sp->socket ? sp->socket->inode->i_ino : 0,
+		0, 0L, 0,
+		sock_i_uid(sp), 0,
+		sock_i_ino(sp),
 		atomic_read(&sp->refcnt), sp);
 }
 
@@ -623,7 +649,7 @@ int raw_get_info(char *buffer, char **start, off_t offset, int length)
 			if (sk->family != PF_INET)
 				continue;
 			pos += 128;
-			if (pos < offset)
+			if (pos <= offset)
 				continue;
 			get_raw_sock(sk, tmpbuf, i);
 			len += sprintf(buffer+len, "%-127s\n", tmpbuf);
@@ -644,26 +670,18 @@ out:
 }
 
 struct proto raw_prot = {
-	raw_close,			/* close */
-	udp_connect,			/* connect */
-	udp_disconnect,			/* disconnect */
-	NULL,				/* accept */
-#ifdef CONFIG_IP_MROUTE
-	ipmr_ioctl,			/* ioctl */
-#else
-	NULL,				/* ioctl */
-#endif
-	raw_init,			/* init */
-	NULL,				/* destroy */
-	NULL,				/* shutdown */
-	raw_setsockopt,			/* setsockopt */
-	raw_getsockopt,			/* getsockopt */
-	raw_sendmsg,			/* sendmsg */
-	raw_recvmsg,			/* recvmsg */
-	raw_bind,			/* bind */
-	raw_rcv_skb,			/* backlog_rcv */
-	raw_v4_hash,			/* hash */
-	raw_v4_unhash,			/* unhash */
-	NULL,				/* get_port */
-	"RAW",				/* name */
+	name:		"RAW",
+	close:		raw_close,
+	connect:	udp_connect,
+	disconnect:	udp_disconnect,
+	ioctl:		raw_ioctl,
+	init:		raw_init,
+	setsockopt:	raw_setsockopt,
+	getsockopt:	raw_getsockopt,
+	sendmsg:	raw_sendmsg,
+	recvmsg:	raw_recvmsg,
+	bind:		raw_bind,
+	backlog_rcv:	raw_rcv_skb,
+	hash:		raw_v4_hash,
+	unhash:		raw_v4_unhash,
 };

@@ -1,4 +1,3 @@
-
 /*
  * A collection of structures, addresses, and values associated with
  * the Motorola MBX boards.  This was originally created for the
@@ -8,6 +7,7 @@
  *
  * Copyright (c) 1997 Dan Malek (dmalek@jlc.net)
  */
+#ifdef __KERNEL__
 #ifndef __MACH_MBX_DEFS
 #define __MACH_MBX_DEFS
 
@@ -25,6 +25,7 @@ typedef struct bd_info {
 	unsigned int	bi_busfreq;	/* Bus Freq, in Hz */
 	unsigned int	bi_clun;	/* Boot device controller */
 	unsigned int	bi_dlun;	/* Boot device logical dev */
+	unsigned int	bi_baudrate;	/* ...to be like everyone else */
 } bd_t;
 
 /* Memory map for the MBX as configured by EPPC-Bug.  We could reprogram
@@ -86,3 +87,4 @@ typedef struct bd_info {
 */
 #define _MACH_8xx (_MACH_mbx)
 #endif
+#endif /* __KERNEL__ */

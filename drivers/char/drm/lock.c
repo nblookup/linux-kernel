@@ -1,8 +1,8 @@
 /* lock.c -- IOCTLs for locking -*- linux-c -*-
  * Created: Tue Feb  2 08:37:54 1999 by faith@precisioninsight.com
- * Revised: Mon Dec  6 16:04:44 1999 by faith@precisioninsight.com
  *
  * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
+ * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
  * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -24,8 +24,8 @@
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  * 
- * $PI: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/lock.c,v 1.5 1999/08/30 13:05:00 faith Exp $
- * $XFree86: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/lock.c,v 1.1 1999/09/25 14:38:01 dawes Exp $
+ * Authors:
+ *    Rickard E. (Rik) Faith <faith@valinux.com>
  *
  */
 
@@ -50,7 +50,6 @@ int drm_lock_take(__volatile__ unsigned int *lock, unsigned int context)
 {
 	unsigned int old, new, prev;
 
-	DRM_DEBUG("%d attempts\n", context);
 	do {
 		old = *lock;
 		if (old & _DRM_LOCK_HELD) new = old | _DRM_LOCK_CONT;
@@ -68,11 +67,8 @@ int drm_lock_take(__volatile__ unsigned int *lock, unsigned int context)
 	}
 	if (new == (context | _DRM_LOCK_HELD)) {
 				/* Have lock */
-		DRM_DEBUG("%d\n", context);
 		return 1;
 	}
-	DRM_DEBUG("%d unable to get lock held by %d\n",
-		  context, _DRM_LOCKING_CONTEXT(old));
 	return 0;
 }
 
@@ -89,7 +85,6 @@ int drm_lock_transfer(drm_device_t *dev,
 		new  = context | _DRM_LOCK_HELD;
 		prev = cmpxchg(lock, old, new);
 	} while (prev != old);
-	DRM_DEBUG("%d => %d\n", _DRM_LOCKING_CONTEXT(old), context);
 	return 1;
 }
 
@@ -99,7 +94,6 @@ int drm_lock_free(drm_device_t *dev,
 	unsigned int old, new, prev;
 	pid_t        pid = dev->lock.pid;
 
-	DRM_DEBUG("%d\n", context);
 	dev->lock.pid = 0;
 	do {
 		old  = *lock;
@@ -128,10 +122,10 @@ static int drm_flush_queue(drm_device_t *dev, int context)
 	atomic_inc(&q->use_count);
 	if (atomic_read(&q->use_count) > 1) {
 		atomic_inc(&q->block_write);
-		current->state = TASK_INTERRUPTIBLE;
 		add_wait_queue(&q->flush_queue, &entry);
 		atomic_inc(&q->block_count);
 		for (;;) {
+			current->state = TASK_INTERRUPTIBLE;
 			if (!DRM_BUFCOUNT(&q->waitlist)) break;
 			schedule();
 			if (signal_pending(current)) {
@@ -218,8 +212,41 @@ int drm_finish(struct inode *inode, struct file *filp, unsigned int cmd,
 
 	DRM_DEBUG("\n");
 
-	copy_from_user_ret(&lock, (drm_lock_t *)arg, sizeof(lock), -EFAULT);
+	if (copy_from_user(&lock, (drm_lock_t *)arg, sizeof(lock)))
+		return -EFAULT;
 	ret = drm_flush_block_and_flush(dev, lock.context, lock.flags);
 	drm_flush_unblock(dev, lock.context, lock.flags);
 	return ret;
+}
+
+/* If we get here, it means that the process has called DRM_IOCTL_LOCK
+   without calling DRM_IOCTL_UNLOCK.
+   
+   If the lock is not held, then let the signal proceed as usual.
+   
+   If the lock is held, then set the contended flag and keep the signal
+   blocked.
+   
+
+   Return 1 if the signal should be delivered normally.
+   Return 0 if the signal should be blocked.  */
+
+int drm_notifier(void *priv)
+{
+	drm_sigdata_t *s = (drm_sigdata_t *)priv;
+	unsigned int  old, new, prev;
+
+
+				/* Allow signal delivery if lock isn't held */
+	if (!_DRM_LOCK_IS_HELD(s->lock->lock)
+	    || _DRM_LOCKING_CONTEXT(s->lock->lock) != s->context) return 1;
+	
+				/* Otherwise, set flag to force call to
+                                   drmUnlock */
+	do {
+		old  = s->lock->lock;
+		new  = old | _DRM_LOCK_CONT;
+		prev = cmpxchg(&s->lock->lock, old, new);
+	} while (prev != old);
+	return 0;
 }

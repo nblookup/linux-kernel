@@ -665,19 +665,6 @@ static void do_serial_hangup(void *private_)
 }
 
 
-/*
- * This subroutine is called when the RS_TIMER goes off.  It is used
- * by the serial driver to handle ports that do not have an interrupt
- * (irq=0).  This doesn't work at all for 16450's, as a sun has a Z8530.
- */
- 
-static void rs_timer(void)
-{
-	printk("rs_timer called\n");
-	prom_halt();
-	return;
-}
-
 static int startup(struct sgi_serial * info)
 {
 	volatile unsigned char junk;
@@ -749,14 +736,6 @@ static int startup(struct sgi_serial * info)
 	if (info->tty)
 		clear_bit(TTY_IO_ERROR, &info->tty->flags);
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
-
-	/*
-	 * Set up serial timers...
-	 */
-#if 0  /* Works well and stops the machine. */
-	timer_table[RS_TIMER].expires = jiffies + 2;
-	timer_active |= 1 << RS_TIMER;
-#endif
 
 	/*
 	 * and set the speed of the serial port
@@ -1842,8 +1821,6 @@ int rs_init(void)
 
 	/* Setup base handler, and timer table. */
 	init_bh(SERIAL_BH, do_serial_bh);
-	timer_table[RS_TIMER].fn = rs_timer;
-	timer_table[RS_TIMER].expires = 0;
 
 	show_serial_version();
 
@@ -2231,23 +2208,20 @@ static int __init zs_console_setup(struct console *con, char *options)
 }
 
 static struct console sgi_console_driver = {
-        "ttyS",
-        zs_console_write,       /* write */
-        NULL,                   /* read */
-        zs_console_device,      /* device */
-        zs_console_wait_key,    /* wait_key */
-        NULL,                   /* unblank */
-        zs_console_setup,       /* setup */
-        CON_PRINTBUFFER,
-        -1,
-        0,
-        NULL
+	name:		"ttyS",
+	write:		zs_console_write,
+	device:		zs_console_device,
+	wait_key:	zs_console_wait_key,
+	setup:		zs_console_setup,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
 };
 
 /*
  *	Register console.
  */
-void __init serial_console_init(void)
+void __init sgi_serial_console_init(void)
 {
 	register_console(&sgi_console_driver);
 }
+__initcall(rs_init);

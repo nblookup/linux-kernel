@@ -1,4 +1,4 @@
-/* $Id: page.h,v 1.30 2000/02/16 07:34:54 davem Exp $ */
+/* $Id: page.h,v 1.36 2000/08/10 01:04:53 davem Exp $ */
 
 #ifndef _SPARC64_PAGE_H
 #define _SPARC64_PAGE_H
@@ -21,8 +21,12 @@
 #define BUG()		__builtin_trap()
 #define PAGE_BUG(page)	BUG()
 
-extern void clear_page(void *page);
-extern void copy_page(void *to, void *from);
+extern void _clear_page(void *page);
+extern void _copy_page(void *to, void *from);
+#define clear_page(X)	_clear_page((void *)(X))
+#define copy_page(X,Y)	_copy_page((void *)(X), (void *)(Y))
+extern void clear_user_page(void *page, unsigned long vaddr);
+extern void copy_user_page(void *to, void *from, unsigned long vaddr);
 
 /* GROSS, defining this makes gcc pass these types as aggregates,
  * and thus on the stack, turn this crap off... -DaveM
@@ -94,15 +98,15 @@ typedef unsigned long iopgprot_t;
 
 #ifndef __ASSEMBLY__
 /* Do prdele, look what happens to be in %g4... */
-register unsigned long page_offset asm("g4");
-#define PAGE_OFFSET		page_offset
+register unsigned long PAGE_OFFSET asm("g4");
 #else
 #define PAGE_OFFSET		0xFFFFF80000000000
 #endif
 
 #define __pa(x)			((unsigned long)(x) - PAGE_OFFSET)
 #define __va(x)			((void *)((unsigned long) (x) + PAGE_OFFSET))
-#define MAP_NR(addr)		(__pa(addr) >> PAGE_SHIFT)
+#define virt_to_page(kaddr)	(mem_map + ((__pa(kaddr)-phys_base) >> PAGE_SHIFT))
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
 #define virt_to_phys __pa
 #define phys_to_virt __va
@@ -118,8 +122,8 @@ register unsigned long page_offset asm("g4");
  */
 
 struct sparc_phys_banks {
-  unsigned long base_addr;
-  unsigned long num_bytes;
+	unsigned long base_addr;
+	unsigned long num_bytes;
 };
 
 #define SPARC_PHYS_BANKS 32

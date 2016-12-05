@@ -1,5 +1,4 @@
-/* $Id: traps.c,v 1.5 2000/02/24 00:12:41 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -28,22 +27,9 @@
 #include <asm/uaccess.h>
 #include <asm/mmu_context.h>
 
-extern int console_loglevel;
-
-static inline void console_silent(void)
-{
-	console_loglevel = 0;
-}
-
-static inline void console_verbose(void)
-{
-	if (console_loglevel)
-		console_loglevel = 15;
-}
-
-extern asmlinkage void __xtlb_mod_debug(void);
-extern asmlinkage void __xtlb_tlbl_debug(void);
-extern asmlinkage void __xtlb_tlbs_debug(void);
+extern asmlinkage void __xtlb_mod(void);
+extern asmlinkage void __xtlb_tlbl(void);
+extern asmlinkage void __xtlb_tlbs(void);
 extern asmlinkage void handle_adel(void);
 extern asmlinkage void handle_ades(void);
 extern asmlinkage void handle_ibe(void);
@@ -77,10 +63,10 @@ int kstack_depth_to_print = 24;
  * This routine abuses get_user()/put_user() to reference pointers
  * with at least a bit of error checking ...
  */
-void show_stack(unsigned int *sp)
+void show_stack(unsigned long *sp)
 {
 	int i;
-	unsigned int *stack;
+	unsigned long *stack;
 
 	stack = sp;
 	i = 0;
@@ -94,22 +80,22 @@ void show_stack(unsigned int *sp)
 			break;
 		}
 
-		printk(" %08lx", stackdata);
+		printk(" %016lx", stackdata);
 
 		if (++i > 40) {
 			printk(" ...");
 			break;
 		}
 
-		if (i % 8 == 0)
+		if (i % 4 == 0)
 			printk("\n      ");
 	}
 }
 
-void show_trace(unsigned int *sp)
+void show_trace(unsigned long *sp)
 {
 	int i;
-	unsigned int *stack;
+	unsigned long *stack;
 	unsigned long kernel_start, kernel_end;
 	unsigned long module_start, module_end;
 	extern char _stext, _etext;
@@ -144,7 +130,11 @@ void show_trace(unsigned int *sp)
 		if ((addr >= kernel_start && addr < kernel_end) ||
 		    (addr >= module_start && addr < module_end)) { 
 
-			printk(" [<%08lx>]", addr);
+			/* Since our kernel is still at KSEG0,
+			 * truncate the address so that ksymoops
+			 * understands it.
+			 */
+			printk(" [<%08x>]", (unsigned int) addr);
 			if (++i > 40) {
 				printk(" ...");
 				break;
@@ -160,12 +150,12 @@ void show_code(unsigned int *pc)
 	printk("\nCode:");
 
 	for(i = -3 ; i < 6 ; i++) {
-		unsigned long insn;
+		unsigned int insn;
 		if (__get_user(insn, pc + i)) {
 			printk(" (Bad address in epc)\n");
 			break;
 		}
-		printk("%c%08lx%c",(i?' ':'<'),insn,(i?' ':'>'));
+		printk("%c%08x%c",(i?' ':'<'),insn,(i?' ':'>'));
 	}
 }
 
@@ -180,10 +170,10 @@ void die(const char * str, struct pt_regs * regs, unsigned long err)
 	spin_lock_irq(&die_lock);
 	printk("%s: %04lx\n", str, err & 0xffff);
 	show_regs(regs);
-	printk("Process %s (pid: %ld, stackpage=%08lx)\n",
+	printk("Process %s (pid: %d, stackpage=%08lx)\n",
 		current->comm, current->pid, (unsigned long) current);
-	show_stack((unsigned int *) regs->regs[29]);
-	show_trace((unsigned int *) regs->regs[29]);
+	show_stack((unsigned long *) regs->regs[29]);
+	show_trace((unsigned long *) regs->regs[29]);
 	show_code((unsigned int *) regs->cp0_epc);
 	printk("\n");
 	spin_unlock_irq(&die_lock);
@@ -230,6 +220,7 @@ void do_fpe(struct pt_regs *regs, unsigned long fcr31)
 {
 	unsigned long pc;
 	unsigned int insn;
+	extern void simfp(unsigned int);
 
 #ifdef CONFIG_MIPS_FPE_MODULE
 	if (fpe_handler != NULL) {
@@ -237,7 +228,6 @@ void do_fpe(struct pt_regs *regs, unsigned long fcr31)
 		return;
 	}
 #endif
-	lock_kernel();
 	if (fcr31 & 0x20000) {
 		/* Retry instruction with flush to zero ...  */
 		if (!(fcr31 & (1<<24))) {
@@ -249,7 +239,7 @@ void do_fpe(struct pt_regs *regs, unsigned long fcr31)
 				"ctc1\t%0,$31"
 				: /* No outputs */
 				: "r" (fcr31));
-			goto out;
+			return;
 		}
 		pc = regs->cp0_epc + ((regs->cp0_cause & CAUSEF_BD) ? 4 : 0);
 		if (get_user(insn, (unsigned int *)pc)) {
@@ -263,12 +253,9 @@ void do_fpe(struct pt_regs *regs, unsigned long fcr31)
 	}
 
 	if (compute_return_epc(regs))
-		goto out;
+		return;
 	//force_sig(SIGFPE, current);
 	printk(KERN_DEBUG "Should send SIGFPE to %s\n", current->comm);
-
-out:
-	unlock_kernel();
 }
 
 static inline int get_insn_opcode(struct pt_regs *regs, unsigned int *opcode)
@@ -327,10 +314,9 @@ void do_tr(struct pt_regs *regs)
 
 void do_ri(struct pt_regs *regs)
 {
-	lock_kernel();
-	printk("[%s:%ld] Illegal instruction at %08lx ra=%08lx\n",
-	       current->comm, current->pid, regs->cp0_epc, regs->regs[31]);
-	unlock_kernel();
+	printk("Cpu%d[%s:%d] Illegal instruction at %08lx ra=%08lx\n",
+	        smp_processor_id(), current->comm, current->pid, regs->cp0_epc, 
+		regs->regs[31]);
 	if (compute_return_epc(regs))
 		return;
 	force_sig(SIGILL, current);
@@ -345,16 +331,27 @@ void do_cpu(struct pt_regs *regs)
 		goto bad_cid;
 
 	regs->cp0_status |= ST0_CU1;
+#ifndef CONFIG_SMP
 	if (last_task_used_math == current)
 		return;
 
 	if (current->used_math) {		/* Using the FPU again.  */
-		lazy_fpu_switch(last_task_used_math);
+		lazy_fpu_switch(last_task_used_math, current);
 	} else {				/* First time FPU user.  */
+		lazy_fpu_switch(last_task_used_math, 0);
 		init_fpu();
 		current->used_math = 1;
 	}
 	last_task_used_math = current;
+#else
+	if (current->used_math) {
+		lazy_fpu_switch(0, current);
+	} else {
+		init_fpu();
+		current->used_math = 1;
+	}
+	current->flags |= PF_USEDFPU;
+#endif
 	return;
 
 bad_cid:
@@ -378,7 +375,7 @@ void do_reserved(struct pt_regs *regs)
 	 * caused by a new unknown cpu type or after another deadly
 	 * hard/software error.
 	 */
-	panic("Caught reserved exception %d - should not happen.",
+	panic("Caught reserved exception %ld - should not happen.",
 	      (regs->cp0_cause & 0x1f) >> 2);
 }
 
@@ -446,7 +443,6 @@ static inline void mips4_setup(void)
 		mips4_available = 1;
 		set_cp0_status(ST0_XX, ST0_XX);
 	}
-	mips4_available = 0;
 }
 
 static inline void go_64(void)
@@ -460,8 +456,8 @@ static inline void go_64(void)
 
 void __init trap_init(void)
 {
-	extern char __tlb_refill_debug_tramp;
-	extern char __xtlb_refill_debug_tramp;
+	extern char except_vec0;
+	extern char except_vec1_r10k;
 	extern char except_vec2_generic;
 	extern char except_vec3_generic, except_vec3_r4000;
 	extern void bus_error_init(void);
@@ -517,8 +513,8 @@ void __init trap_init(void)
 	case CPU_NEVADA:
 r4k:
 		/* Debug TLB refill handler.  */
-		memcpy((void *)KSEG0, &__tlb_refill_debug_tramp, 0x80);
-		memcpy((void *)KSEG0 + 0x080, &__xtlb_refill_debug_tramp, 0x80);
+		memcpy((void *)KSEG0, &except_vec0, 0x80);
+		memcpy((void *)KSEG0 + 0x080, &except_vec1_r10k, 0x80);
 
 		/* Cache error vector  */
 		memcpy((void *)(KSEG0 + 0x100), (void *) KSEG0, 0x80);
@@ -531,9 +527,9 @@ r4k:
 			       0x100);
 		}
 
-		set_except_vector(1, __xtlb_mod_debug);
-		set_except_vector(2, __xtlb_tlbl_debug);
-		set_except_vector(3, __xtlb_tlbs_debug);
+		set_except_vector(1, __xtlb_mod);
+		set_except_vector(2, __xtlb_tlbl);
+		set_except_vector(3, __xtlb_tlbs);
 		set_except_vector(4, handle_adel);
 		set_except_vector(5, handle_ades);
 
@@ -561,5 +557,4 @@ r4k:
 
 	atomic_inc(&init_mm.mm_count);	/* XXX UP?  */
 	current->active_mm = &init_mm;
-	current_pgd = init_mm.pgd;
 }

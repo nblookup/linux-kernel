@@ -19,6 +19,8 @@
  * 2000/01/18 - separated sb_card and sb_common -
  * Jeff Garzik <jgarzik@mandrakesoft.com>
  *
+ * 2000/09/18 - got rid of attach_uart401
+ * Arnaldo Carvalho de Melo <acme@conectiva.com.br>
  */
 
 #include <linux/config.h>
@@ -28,7 +30,6 @@
 
 #include "sound_config.h"
 #include "sound_firmware.h"
-#include "soundmodule.h"
 
 #include "mpu401.h"
 
@@ -52,14 +53,6 @@ static unsigned char jazz_irq_bits[] = {
 static unsigned char jazz_dma_bits[] = {
 	0, 1, 0, 2, 0, 3, 0, 4
 };
-
-/* Do acer notebook init? */
-int acer = 0;
-
-/* soundman games? */
-int sm_games = 0;
-
-extern int esstype;
 
 void *smw_free = NULL;
 
@@ -503,12 +496,16 @@ static void relocate_ess1688(sb_devc * devc)
 #endif
 }
 
-int sb_dsp_detect(struct address_info *hw_config, int pci, int pciio)
+int sb_dsp_detect(struct address_info *hw_config, int pci, int pciio, struct sb_module_options *sbmo)
 {
 	sb_devc sb_info;
 	sb_devc *devc = &sb_info;
 
 	memset((char *) &sb_info, 0, sizeof(sb_info));	/* Zero everything */
+
+	/* Copy module options in place */
+	if(sbmo) memcpy(&devc->sbmo, sbmo, sizeof(struct sb_module_options));
+
 	sb_info.my_mididev = -1;
 	sb_info.my_mixerdev = -1;
 	sb_info.dev = -1;
@@ -553,7 +550,7 @@ int sb_dsp_detect(struct address_info *hw_config, int pci, int pciio)
 		printk("Yamaha PCI mode.\n");
 	}
 	
-	if (acer)
+	if (devc->sbmo.acer)
 	{
 		cli();
 		inb(devc->base + 0x09);
@@ -639,7 +636,7 @@ int sb_dsp_detect(struct address_info *hw_config, int pci, int pciio)
 	return 1;
 }
 
-int sb_dsp_init(struct address_info *hw_config)
+int sb_dsp_init(struct address_info *hw_config, struct module *owner)
 {
 	sb_devc *devc;
 	char name[100];
@@ -817,10 +814,10 @@ int sb_dsp_init(struct address_info *hw_config)
 
 	if (!(devc->caps & SB_NO_MIXER))
 		if (devc->major == 3 || devc->major == 4)
-			sb_mixer_init(devc);
+			sb_mixer_init(devc, owner);
 
 	if (!(devc->caps & SB_NO_MIDI))
-		sb_dsp_midi_init(devc);
+		sb_dsp_midi_init(devc, owner);
 
 	if (hw_config->name == NULL)
 		hw_config->name = "Sound Blaster (8 BIT/MONO ONLY)";
@@ -866,7 +863,7 @@ int sb_dsp_init(struct address_info *hw_config)
 			if (sound_alloc_dma(devc->dma16, "SoundBlaster16"))
 				printk(KERN_WARNING "Sound Blaster:  can't allocate 16 bit DMA channel %d.\n", devc->dma16);
 		}
-		sb_audio_init(devc, name);
+		sb_audio_init(devc, name, owner);
 		hw_config->slots[0]=devc->dev;
 	}
 	else
@@ -911,7 +908,7 @@ void sb_dsp_unload(struct address_info *hw_config, int sbmpu)
 			if (devc->irq > 0)
 				free_irq(devc->irq, devc);
 
-			sound_unload_mixerdev(devc->my_mixerdev);
+			sb_mixer_unload(devc);
 			/* We don't have to do this bit any more the UART401 is its own
 				master  -- Krzysztof Halasa */
 			/* But we have to do it, if UART401 is not detected */
@@ -1195,24 +1192,10 @@ static int init_Jazz16_midi(sb_devc * devc, struct address_info *hw_config)
 	return 1;
 }
 
-void attach_sbmpu(struct address_info *hw_config)
-{
-	if (last_sb->model == MDL_ESS) {
-#if defined(CONFIG_SOUND_MPU401)
-		attach_mpu401(hw_config);
-		if (last_sb->irq == -hw_config->irq) {
-			last_sb->midi_irq_cookie=(void *)hw_config->slots[1];
-		}
-#endif
-		return;
-	}
-	attach_uart401(hw_config);
-	last_sb->midi_irq_cookie=midi_devs[hw_config->slots[4]]->devc;
-}
-
-int probe_sbmpu(struct address_info *hw_config)
+int probe_sbmpu(struct address_info *hw_config, struct module *owner)
 {
 	sb_devc *devc = last_devc;
+	int ret;
 
 	if (last_devc == NULL)
 		return 0;
@@ -1244,15 +1227,15 @@ int probe_sbmpu(struct address_info *hw_config)
 			return 0;
 		hw_config->name = "ESS1xxx MPU";
 		devc->midi_irq_cookie = -1;
-		return probe_mpu401(hw_config);
+		if (!probe_mpu401(hw_config))
+			return 0;
+		attach_mpu401(hw_config, owner);
+		if (last_sb->irq == -hw_config->irq)
+			last_sb->midi_irq_cookie=(void *)hw_config->slots[1];
+		return 1;
 	}
 #endif
 
-	if (check_region(hw_config->io_base, 4))
-	{
-		printk(KERN_ERR "sbmpu: I/O port conflict (%x)\n", hw_config->io_base);
-		return 0;
-	}
 	switch (devc->model)
 	{
 		case MDL_SB16:
@@ -1262,7 +1245,8 @@ int probe_sbmpu(struct address_info *hw_config)
 				return 0;
 			}
 			hw_config->name = "Sound Blaster 16";
-			hw_config->irq = -devc->irq;
+			if (hw_config->irq < 3 || hw_config->irq == devc->irq)
+				hw_config->irq = -devc->irq;
 			if (devc->minor > 12)		/* What is Vibra's version??? */
 				sb16_set_mpu_port(devc, hw_config);
 			break;
@@ -1281,7 +1265,11 @@ int probe_sbmpu(struct address_info *hw_config)
 		default:
 			return 0;
 	}
-	return probe_uart401(hw_config);
+	
+	ret = probe_uart401(hw_config, owner);
+	if (ret)
+		last_sb->midi_irq_cookie=midi_devs[hw_config->slots[4]]->devc;
+	return ret;
 }
 
 void unload_sbmpu(struct address_info *hw_config)
@@ -1295,16 +1283,11 @@ void unload_sbmpu(struct address_info *hw_config)
 	unload_uart401(hw_config);
 }
 
-MODULE_PARM(acer, "i");
-MODULE_PARM(sm_games, "i");
-MODULE_PARM(esstype, "i");
-
 EXPORT_SYMBOL(sb_dsp_init);
 EXPORT_SYMBOL(sb_dsp_detect);
 EXPORT_SYMBOL(sb_dsp_unload);
 EXPORT_SYMBOL(sb_dsp_disable_midi);
 EXPORT_SYMBOL(sb_be_quiet);
-EXPORT_SYMBOL(attach_sbmpu);
 EXPORT_SYMBOL(probe_sbmpu);
 EXPORT_SYMBOL(unload_sbmpu);
 EXPORT_SYMBOL(smw_free);

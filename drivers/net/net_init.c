@@ -1,4 +1,4 @@
-/* netdrv_init.c: Initialization for network devices. */
+/* net_init.c: Initialization for network devices. */
 /*
 	Written 1993,1994,1995 by Donald Becker.
 
@@ -27,6 +27,8 @@
 	08/11/99 - Alan Cox: Got fed up of the mess in this file and cleaned it
 			up. We now share common code and have regularised name
 			allocation setups. Abolished the 16 card limits.
+	03/19/2000 - jgarzik and Urban Widmark: init_etherdev 32-byte align
+
 */
 
 #include <linux/config.h>
@@ -70,10 +72,9 @@ static struct net_device *init_alloc_dev(int sizeof_priv)
 {
 	struct net_device *dev;
 	int alloc_size;
-	
-	/* 32-byte alignment */
-	alloc_size = sizeof (*dev) + IFNAMSIZ + sizeof_priv + 31;
-	alloc_size &= ~31;		
+
+	/* ensure 32-byte alignment of the private area */
+	alloc_size = sizeof (*dev) + sizeof_priv + 31;
 
 	dev = (struct net_device *) kmalloc (alloc_size, GFP_KERNEL);
 	if (dev == NULL)
@@ -85,9 +86,8 @@ static struct net_device *init_alloc_dev(int sizeof_priv)
 	memset(dev, 0, alloc_size);
 
 	if (sizeof_priv)
-		dev->priv = (void *) (dev + 1);
+		dev->priv = (void *) (((long)(dev + 1) + 31) & ~31);
 
-	dev->name = sizeof_priv + (char *)(dev + 1);
 	return dev;
 }
 
@@ -96,7 +96,8 @@ static struct net_device *init_alloc_dev(int sizeof_priv)
  *	setup.
  */
 
-static struct net_device *init_netdev(struct net_device *dev, int sizeof_priv, char *mask, void (*setup)(struct net_device *))
+static struct net_device *init_netdev(struct net_device *dev, int sizeof_priv,
+				      char *mask, void (*setup)(struct net_device *))
 {
 	int new_device = 0;
 
@@ -115,15 +116,16 @@ static struct net_device *init_netdev(struct net_device *dev, int sizeof_priv, c
 	 *	Allocate a name
 	 */
 	 
-	if (dev->name && (dev->name[0] == '\0' || dev->name[0] == ' '))
-	{
-		if(dev_alloc_name(dev, mask)<0)
-		{
-			if(new_device)
+	if (dev->name[0] == '\0' || dev->name[0] == ' ') {
+		strcpy(dev->name, mask);
+		if (dev_alloc_name(dev, mask)<0) {
+			if (new_device)
 				kfree(dev);
 			return NULL;
 		}
 	}
+
+	netdev_boot_setup_check(dev);
 	
 	/*
 	 *	Configure via the caller provided setup function then
@@ -140,14 +142,21 @@ static struct net_device *init_netdev(struct net_device *dev, int sizeof_priv, c
 	return dev;
 }
 
-/* Fill in the fields of the device structure with ethernet-generic values.
-
-   If no device structure is passed, a new one is constructed, complete with
-   a SIZEOF_PRIVATE private data area.
-
-   If an empty string area is passed as dev->name, or a new structure is made,
-   a new name string is constructed.  The passed string area should be 8 bytes
-   long.
+/**
+ * init_etherdev - Register ethernet device
+ * @dev: An ethernet device structure to be filled in, or %NULL if a new
+ *	struct should be allocated.
+ * @sizeof_priv: Size of additional driver-private structure to be allocated
+ *	for this ethernet device
+ *
+ * Fill in the fields of the device structure with ethernet-generic values.
+ *
+ * If no device structure is passed, a new one is constructed, complete with
+ * a private data area of size @sizeof_priv.  A 32-byte (not bit)
+ * alignment is enforced for this private data area.
+ *
+ * If an empty string area is passed as dev->name, or a new structure is made,
+ * a new name string is constructed.
  */
 
 struct net_device *init_etherdev(struct net_device *dev, int sizeof_priv)
@@ -175,6 +184,11 @@ static int eth_change_mtu(struct net_device *dev, int new_mtu)
 
 #ifdef CONFIG_FDDI
 
+struct net_device *init_fddidev(struct net_device *dev, int sizeof_priv)
+{
+	return init_netdev(dev, sizeof_priv, "fddi%d", fddi_setup);
+}
+
 static int fddi_change_mtu(struct net_device *dev, int new_mtu)
 {
 	if ((new_mtu < FDDI_K_SNAP_HLEN) || (new_mtu > FDDI_K_SNAP_DLEN))
@@ -183,7 +197,7 @@ static int fddi_change_mtu(struct net_device *dev, int new_mtu)
 	return(0);
 }
 
-#endif
+#endif /* CONFIG_FDDI */
 
 #ifdef CONFIG_HIPPI
 
@@ -241,7 +255,7 @@ static int hippi_neigh_setup_dev(struct net_device *dev, struct neigh_parms *p)
 	return 0;
 }
 
-#endif
+#endif /* CONFIG_HIPPI */
 
 void ether_setup(struct net_device *dev)
 {
@@ -299,7 +313,7 @@ void fddi_setup(struct net_device *dev)
 	return;
 }
 
-#endif
+#endif /* CONFIG_FDDI */
 
 #ifdef CONFIG_HIPPI
 void hippi_setup(struct net_device *dev)
@@ -335,7 +349,7 @@ void hippi_setup(struct net_device *dev)
 
 	dev_init_buffers(dev);
 }
-#endif
+#endif /* CONFIG_HIPPI */
 
 #if defined(CONFIG_ATALK) || defined(CONFIG_ATALK_MODULE)
 
@@ -374,7 +388,7 @@ void ltalk_setup(struct net_device *dev)
 	dev_init_buffers(dev);
 }
 
-#endif
+#endif /* CONFIG_ATALK || CONFIG_ATALK_MODULE */
 
 int ether_config(struct net_device *dev, struct ifmap *map)
 {
@@ -395,6 +409,8 @@ int ether_config(struct net_device *dev, struct ifmap *map)
 
 int register_netdev(struct net_device *dev)
 {
+	int err;
+
 	rtnl_lock();
 
 	/*
@@ -402,29 +418,34 @@ int register_netdev(struct net_device *dev)
 	 *	do a name allocation
 	 */
 	 
-	if (dev->name && strchr(dev->name, '%'))
+	if (strchr(dev->name, '%'))
 	{
+		err = -EBUSY;
 		if(dev_alloc_name(dev, dev->name)<0)
-			return -EBUSY;
+			goto out;
 	}
 	
 	/*
 	 *	Back compatibility hook. Kill this one in 2.5
 	 */
 	
-	if (dev->name && (dev->name[0]==0 || dev->name[0]==' '))
+	if (dev->name[0]==0 || dev->name[0]==' ')
 	{
+		err = -EBUSY;
 		if(dev_alloc_name(dev, "eth%d")<0)
-			return -EBUSY;
+			goto out;
 	}
 		
 		
-	if (register_netdevice(dev)) {
-		rtnl_unlock();
-		return -EIO;
-	}
+	err = -EIO;
+	if (register_netdevice(dev))
+		goto out;
+
+	err = 0;
+
+out:
 	rtnl_unlock();
-	return 0;
+	return err;
 }
 
 void unregister_netdev(struct net_device *dev)
@@ -484,7 +505,7 @@ void unregister_trdev(struct net_device *dev)
 	unregister_netdevice(dev);
 	rtnl_unlock();
 }
-#endif
+#endif /* CONFIG_TR */
 
 
 #ifdef CONFIG_NET_FC
@@ -533,10 +554,3 @@ void unregister_fcdev(struct net_device *dev)
 
 #endif /* CONFIG_NET_FC */
 
-/*
- * Local variables:
- *  compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/net/inet -Wall -Wstrict-prototypes -O6 -m486 -c net_init.c"
- *  version-control: t
- *  kept-new-versions: 5
- * End:
- */

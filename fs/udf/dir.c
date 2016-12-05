@@ -86,15 +86,9 @@ int udf_readdir(struct file *filp, void *dirent, filldir_t filldir)
 	struct inode *dir = filp->f_dentry->d_inode;
 	int result;
 
-	if (!dir)
-	   return -EBADF;
-
- 	if (!S_ISDIR(dir->i_mode))
-	   return -ENOTDIR;
-
 	if ( filp->f_pos == 0 ) 
 	{
-		if (filldir(dirent, ".", 1, filp->f_pos, dir->i_ino))
+		if (filldir(dirent, ".", 1, filp->f_pos, dir->i_ino, DT_DIR))
 			return 0;
 	}
  
@@ -206,7 +200,7 @@ do_udf_readdir(struct inode * dir, struct file *filp, filldir_t filldir, void *d
  
  		if (!lfi) /* parent directory */
  		{
-			if (filldir(dirent, "..", 2, filp->f_pos, filp->f_dentry->d_parent->d_inode->i_ino))
+			if (filldir(dirent, "..", 2, filp->f_pos, filp->f_dentry->d_parent->d_inode->i_ino, DT_DIR))
 			{
 				if (fibh.sbh != fibh.ebh)
 					udf_release_data(fibh.ebh);
@@ -219,7 +213,7 @@ do_udf_readdir(struct inode * dir, struct file *filp, filldir_t filldir, void *d
 		{
 			if ((flen = udf_get_filename(nameptr, fname, lfi)))
 			{
-				if (filldir(dirent, fname, flen, filp->f_pos, iblock))
+				if (filldir(dirent, fname, flen, filp->f_pos, iblock, DT_UNKNOWN))
 				{
 					if (fibh.sbh != fibh.ebh)
 						udf_release_data(fibh.ebh);

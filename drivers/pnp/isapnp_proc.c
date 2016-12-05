@@ -28,6 +28,7 @@
 #include <linux/poll.h>
 #include <linux/vmalloc.h>
 #include <asm/uaccess.h>
+#include <linux/smp_lock.h>
 #include <linux/isapnp.h>
 
 struct isapnp_info_buffer {
@@ -169,11 +170,12 @@ static int isapnp_info_entry_open(struct inode *inode, struct file *file)
 		kfree(buffer);
 		return -ENOMEM;
 	}
+	lock_kernel();
 	buffer->curr = buffer->buffer;
 	file->private_data = buffer;
-	MOD_INC_USE_COUNT;
 	if (mode == O_RDONLY)
 		isapnp_info_read(buffer);
+	unlock_kernel();
 	return 0;
 }
 
@@ -185,11 +187,12 @@ static int isapnp_info_entry_release(struct inode *inode, struct file *file)
 	if ((buffer = (isapnp_info_buffer_t *) file->private_data) == NULL)
 		return -EINVAL;
 	mode = file->f_flags & O_ACCMODE;
+	lock_kernel();
 	if (mode == O_WRONLY)
 		isapnp_info_write(buffer);
 	vfree(buffer->buffer);
 	kfree(buffer);
-	MOD_DEC_USE_COUNT;
+	unlock_kernel();
 	return 0;
 }
 
@@ -286,6 +289,7 @@ static int isapnp_proc_attach_device(struct pci_dev *dev)
 	if (!e)
 		return -ENOMEM;
 	e->proc_fops = &isapnp_proc_bus_file_operations;
+	e->owner = THIS_MODULE;
 	e->data = dev;
 	e->size = 256;
 	return 0;
@@ -367,8 +371,10 @@ int __init isapnp_proc_init(void)
 
 	isapnp_proc_entry = NULL;
 	p = create_proc_entry("isapnp", S_IFREG | S_IRUGO | S_IWUSR, &proc_root);
-	if (p)
+	if (p) {
 		p->proc_fops = &isapnp_info_entry_operations;
+		p->owner = THIS_MODULE;
+	}
 	isapnp_proc_entry = p;
 	isapnp_proc_bus_dir = proc_mkdir("isapnp", proc_bus);
 	isapnp_proc_devices_entry = create_proc_info_entry("devices", 0,

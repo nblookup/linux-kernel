@@ -390,6 +390,17 @@ int __init generic_NCR5380_detect(Scsi_Host_Template * tpnt){
 					NCR5380_region_size, "ncr5380");
 #endif
 	instance = scsi_register (tpnt, sizeof(struct NCR5380_hostdata));
+	if(instance == NULL)
+	{
+#ifdef CONFIG_SCSI_G_NCR5380_PORT
+		release_region(overrides[current_override].NCR5380_map_name,
+	                                        NCR5380_region_size);
+#else
+		release_mem_region(overrides[current_override].NCR5380_map_name,
+	                                  	NCR5380_region_size);
+#endif
+	}
+	
 	instance->NCR5380_instance_name = overrides[current_override].NCR5380_map_name;
 
 	NCR5380_init(instance, flags);
@@ -885,12 +896,13 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
 #undef PRINTP
 #undef ANDP
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = GENERIC_NCR5380;
+static Scsi_Host_Template driver_template = GENERIC_NCR5380;
 
 #include <linux/module.h>
 #include "scsi_module.c"
+
+#ifdef MODULE 
 
 MODULE_PARM(ncr_irq, "i");
 MODULE_PARM(ncr_dma, "i");
@@ -901,3 +913,4 @@ MODULE_PARM(ncr_53c400a, "i");
 MODULE_PARM(dtc_3181e, "i");
 
 #endif
+

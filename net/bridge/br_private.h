@@ -4,7 +4,7 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br_private.h,v 1.1 2000/02/18 16:47:12 davem Exp $
+ *	$Id: br_private.h,v 1.3 2000/05/05 02:17:17 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -82,7 +82,6 @@ struct net_bridge
 	struct net_bridge		*next;
 	rwlock_t			lock;
 	struct net_bridge_port		*port_list;
-	char				name[IFNAMSIZ];
 	struct net_device		dev;
 	struct net_device_stats		statistics;
 	rwlock_t			hash_lock;
@@ -114,7 +113,7 @@ struct net_bridge
 };
 
 struct notifier_block br_device_notifier;
-unsigned char bridge_ula[5];
+unsigned char bridge_ula[6];
 
 /* br.c */
 void br_dec_use_count(void);

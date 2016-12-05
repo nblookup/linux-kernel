@@ -67,10 +67,11 @@ get_mmu_context(struct mm_struct *mm)
  * Initialize the context related info for a new mm_struct
  * instance.
  */
-extern __inline__ void init_new_context(struct task_struct *tsk,
+extern __inline__ int init_new_context(struct task_struct *tsk,
 					struct mm_struct *mm)
 {
 	mm->context = NO_CONTEXT;
+	return 0;
 }
 
 /*
@@ -103,6 +104,7 @@ extern __inline__ void destroy_context(struct mm_struct *mm)
 #define MMU_PTEL	0xFF000004	/* Page table entry register LOW */
 #define MMU_TTB		0xFF000008	/* Translation table base register */
 #define MMU_TEA		0xFF00000C	/* TLB Exception Address */
+#define MMU_PTEA	0xFF000034	/* Page table entry assistance register */
 
 #define MMUCR		0xFF000010	/* MMU Control Register */
 
@@ -112,6 +114,16 @@ extern __inline__ void destroy_context(struct mm_struct *mm)
 
 #define MMU_NTLB_ENTRIES	64	/* for 7750 */
 #define MMU_CONTROL_INIT	0x205	/* SQMD=1, SV=0, TI=1, AT=1 */
+
+#define MMU_ITLB_DATA_ARRAY	0xF3000000
+#define MMU_UTLB_DATA_ARRAY	0xF7000000
+
+#define MMU_UTLB_ENTRIES	   64
+#define MMU_U_ENTRY_SHIFT	    8
+#define MMU_UTLB_VALID		0x100
+#define MMU_ITLB_ENTRIES	    4
+#define MMU_I_ENTRY_SHIFT	    8
+#define MMU_ITLB_VALID		0x100
 #endif
 
 extern __inline__ void set_asid(unsigned long asid)
@@ -154,15 +166,15 @@ extern __inline__ void switch_mm(struct mm_struct *prev,
 				 struct mm_struct *next,
 				 struct task_struct *tsk, unsigned int cpu)
 {
-	set_bit(cpu, &next->cpu_vm_mask);
 	if (prev != next) {
 		unsigned long __pgdir = (unsigned long)next->pgd;
 
+		clear_bit(cpu, &prev->cpu_vm_mask);
+		set_bit(cpu, &next->cpu_vm_mask);
 		__asm__ __volatile__("mov.l	%0, %1"
 				     : /* no output */
 				     : "r" (__pgdir), "m" (__m(MMU_TTB)));
 		activate_context(next);
-		clear_bit(cpu, &prev->cpu_vm_mask);
 	}
 }
 

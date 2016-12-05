@@ -27,11 +27,13 @@
 
 extern void wakeup_bdflush(int);
 extern void reset_vc(unsigned int);
-extern int console_loglevel;
-extern struct vfsmount *vfsmntlist;
+extern struct list_head super_blocks;
+
+/* Whether we react on sysrq keys or just ignore them */
+int sysrq_enabled = 1;
 
 /* Machine specific power off function */
-void (*sysrq_power_off)(void) = NULL;
+void (*sysrq_power_off)(void);
 
 EXPORT_SYMBOL(sysrq_power_off);
 
@@ -59,6 +61,9 @@ void handle_sysrq(int key, struct pt_regs *pt_regs,
 		  struct kbd_struct *kbd, struct tty_struct *tty)
 {
 	int orig_log_level = console_loglevel;
+
+	if (!sysrq_enabled)
+		return;
 
 	if (!key)
 		return;
@@ -174,22 +179,16 @@ static int is_local_disk(kdev_t dev)	    /* Guess if the device is a local hard 
 	}
 }
 
-static void go_sync(kdev_t dev, int remount_flag)
+static void go_sync(struct super_block *sb, int remount_flag)
 {
 	printk(KERN_INFO "%sing device %s ... ",
 	       remount_flag ? "Remount" : "Sync",
-	       kdevname(dev));
+	       kdevname(sb->s_dev));
 
 	if (remount_flag) {				    /* Remount R/O */
-		struct super_block *sb = get_super(dev);
-		struct vfsmount *vfsmnt;
 		int ret, flags;
 		struct list_head *p;
 
-		if (!sb) {
-			printk("Superblock not found\n");
-			return;
-		}
 		if (sb->s_flags & MS_RDONLY) {
 			printk("R/O\n");
 			return;
@@ -203,8 +202,8 @@ static void go_sync(kdev_t dev, int remount_flag)
 				file->f_mode &= ~2;
 		}
 		file_list_unlock();
-		DQUOT_OFF(dev);
-		fsync_dev(dev);
+		DQUOT_OFF(sb);
+		fsync_dev(sb->s_dev);
 		flags = MS_RDONLY;
 		if (sb->s_op && sb->s_op->remount_fs) {
 			ret = sb->s_op->remount_fs(sb, &flags, NULL);
@@ -212,14 +211,12 @@ static void go_sync(kdev_t dev, int remount_flag)
 				printk("error %d\n", ret);
 			else {
 				sb->s_flags = (sb->s_flags & ~MS_RMT_MASK) | (flags & MS_RMT_MASK);
-				if ((vfsmnt = lookup_vfsmnt(sb->s_dev)))
-					vfsmnt->mnt_flags = sb->s_flags;
 				printk("OK\n");
 			}
 		} else
 			printk("nothing to do\n");
 	} else {
-		fsync_dev(dev);				    /* Sync only */
+		fsync_dev(sb->s_dev);			    /* Sync only */
 		printk("OK\n");
 	}
 }
@@ -235,20 +232,24 @@ int emergency_sync_scheduled;
 
 void do_emergency_sync(void)
 {
-	struct vfsmount *mnt;
+	struct super_block *sb;
 	int remount_flag;
 
 	lock_kernel();
 	remount_flag = (emergency_sync_scheduled == EMERG_REMOUNT);
 	emergency_sync_scheduled = 0;
 
-	for (mnt = vfsmntlist; mnt; mnt = mnt->mnt_next)
-		if (is_local_disk(mnt->mnt_dev))
-			go_sync(mnt->mnt_dev, remount_flag);
+	for (sb = sb_entry(super_blocks.next);
+	     sb != sb_entry(&super_blocks); 
+	     sb = sb_entry(sb->s_list.next))
+		if (is_local_disk(sb->s_dev))
+			go_sync(sb, remount_flag);
 
-	for (mnt = vfsmntlist; mnt; mnt = mnt->mnt_next)
-		if (!is_local_disk(mnt->mnt_dev) && MAJOR(mnt->mnt_dev))
-			go_sync(mnt->mnt_dev, remount_flag);
+	for (sb = sb_entry(super_blocks.next);
+	     sb != sb_entry(&super_blocks); 
+	     sb = sb_entry(sb->s_list.next))
+		if (!is_local_disk(sb->s_dev) && MAJOR(sb->s_dev))
+			go_sync(sb, remount_flag);
 
 	unlock_kernel();
 	printk(KERN_INFO "Done.\n");

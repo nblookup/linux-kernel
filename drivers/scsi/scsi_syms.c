@@ -6,8 +6,6 @@
 #include <linux/config.h>
 #include <linux/module.h>
 
-#ifdef CONFIG_MODULES
-
 #include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
@@ -43,7 +41,6 @@ EXPORT_SYMBOL(scsicam_bios_param);
 EXPORT_SYMBOL(scsi_partsize);
 EXPORT_SYMBOL(scsi_allocate_device);
 EXPORT_SYMBOL(scsi_do_cmd);
-EXPORT_SYMBOL(scsi_wait_cmd);
 EXPORT_SYMBOL(scsi_command_size);
 EXPORT_SYMBOL(scsi_ioctl);
 EXPORT_SYMBOL(print_command);
@@ -94,4 +91,3 @@ EXPORT_SYMBOL(scsi_hosts);
 EXPORT_SYMBOL(scsi_devicelist);
 EXPORT_SYMBOL(scsi_device_types);
 
-#endif				/* CONFIG_MODULES */

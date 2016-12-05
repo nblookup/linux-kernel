@@ -21,6 +21,7 @@
 #include <linux/in.h> /* for struct sockaddr_in */
 #include <linux/if.h> /* for IFF_UP */
 #include <linux/inetdevice.h>
+#include <linux/bitops.h>
 #include <net/route.h> /* for struct rtable and routing */
 #include <net/icmp.h> /* icmp_send */
 #include <asm/param.h> /* for HZ */
@@ -171,7 +172,7 @@ static int clip_arp_rcv(struct sk_buff *skb)
 	DPRINTK("clip_arp_rcv\n");
 	vcc = ATM_SKB(skb)->vcc;
 	if (!vcc || !atm_charge(vcc,skb->truesize)) {
-		kfree_skb(skb);
+		dev_kfree_skb_any(skb);
 		return 0;
 	}
 	DPRINTK("pushing to %p\n",vcc);
@@ -197,7 +198,7 @@ void clip_push(struct atm_vcc *vcc,struct sk_buff *skb)
 	skb->dev = clip_vcc->entry ? clip_vcc->entry->neigh->dev : clip_devs;
 		/* clip_vcc->entry == NULL if we don't have an IP address yet */
 	if (!skb->dev) {
-		kfree_skb(skb);
+		dev_kfree_skb_any(skb);
 		return;
 	}
 	ATM_SKB(skb)->vcc = vcc;
@@ -230,18 +231,20 @@ void clip_push(struct atm_vcc *vcc,struct sk_buff *skb)
 static void clip_pop(struct atm_vcc *vcc,struct sk_buff *skb)
 {
 	struct clip_vcc *clip_vcc = CLIP_VCC(vcc);
+	struct net_device *dev = skb->dev;
 	int old;
+	unsigned long flags;
 
 	DPRINTK("clip_pop(vcc %p)\n",vcc);
 	clip_vcc->old_pop(vcc,skb);
 	/* skb->dev == NULL in outbound ARP packets */
-	if (!skb->dev) return;
-	spin_lock(&PRIV(skb->dev)->xoff_lock);
+	if (!dev) return;
+	spin_lock_irqsave(&PRIV(dev)->xoff_lock,flags);
 	if (atm_may_send(vcc,0)) {
 		old = xchg(&clip_vcc->xoff,0);
-		if (old) netif_wake_queue(skb->dev);
+		if (old) netif_wake_queue(dev);
 	}
-	spin_unlock(&PRIV(skb->dev)->xoff_lock);
+	spin_unlock_irqrestore(&PRIV(dev)->xoff_lock,flags);
 }
 
 
@@ -271,14 +274,14 @@ static void clip_neigh_error(struct neighbour *neigh,struct sk_buff *skb)
 
 
 static struct neigh_ops clip_neigh_ops = {
-	AF_INET,		/* family */
-	clip_neigh_destroy,	/* destructor */
-	clip_neigh_solicit,	/* solicit */
-	clip_neigh_error,	/* error_report */
-	dev_queue_xmit,		/* output */
-	dev_queue_xmit,		/* connected_output */
-	dev_queue_xmit,		/* hh_output */
-	dev_queue_xmit		/* queue_xmit */
+	family:			AF_INET,
+	destructor:		clip_neigh_destroy,
+	solicit:		clip_neigh_solicit,
+	error_report:		clip_neigh_error,
+	output:			dev_queue_xmit,
+	connected_output:	dev_queue_xmit,
+	hh_output:		dev_queue_xmit,
+	queue_xmit:		dev_queue_xmit,
 };
 
 
@@ -375,11 +378,13 @@ static int clip_start_xmit(struct sk_buff *skb,struct net_device *dev)
 	struct atmarp_entry *entry;
 	struct atm_vcc *vcc;
 	int old;
+	unsigned long flags;
 
 	DPRINTK("clip_start_xmit (skb %p)\n",skb);
 	if (!skb->dst) {
 		printk(KERN_ERR "clip_start_xmit: skb->dst == NULL\n");
 		dev_kfree_skb(skb);
+		clip_priv->stats.tx_dropped++;
 		return 0;
 	}
 	if (!skb->dst->neighbour) {
@@ -391,8 +396,10 @@ static int clip_start_xmit(struct sk_buff *skb,struct net_device *dev)
 			return 0;
 		}
 #endif
-printk("clip_start_xmit: NO NEIGHBOUR !\n");
-return 0;
+		printk(KERN_ERR "clip_start_xmit: NO NEIGHBOUR !\n");
+		dev_kfree_skb(skb);
+		clip_priv->stats.tx_dropped++;
+		return 0;
 	}
 	entry = NEIGH2ENTRY(skb->dst->neighbour);
 	if (!entry->vccs) {
@@ -431,13 +438,12 @@ return 0;
 	}
 	clip_priv->stats.tx_packets++;
 	clip_priv->stats.tx_bytes += skb->len;
-	(void) vcc->dev->ops->send(vcc,skb);
+	(void) vcc->send(vcc,skb);
 	if (atm_may_send(vcc,0)) {
 		entry->vccs->xoff = 0;
 		return 0;
 	}
-	if (old) return 0;
-	spin_lock(&clip_priv->xoff_lock);
+	spin_lock_irqsave(&clip_priv->xoff_lock,flags);
 	netif_stop_queue(dev); /* XOFF -> throttle immediately */
 	barrier();
 	if (!entry->vccs->xoff)
@@ -446,7 +452,7 @@ return 0;
 		   good enough, because nothing should really be asleep because
 		   of the brief netif_stop_queue. If this isn't true or if it
 		   changes, use netif_wake_queue instead. */
-	spin_unlock(&clip_priv->xoff_lock);
+	spin_unlock_irqrestore(&clip_priv->xoff_lock,flags);
 	return 0;
 }
 
@@ -462,7 +468,6 @@ int clip_mkip(struct atm_vcc *vcc,int timeout)
 	struct clip_vcc *clip_vcc;
 	struct sk_buff_head copy;
 	struct sk_buff *skb;
-	unsigned long flags;
 
 	if (!vcc->push) return -EBADFD;
 	clip_vcc = kmalloc(sizeof(struct clip_vcc),GFP_KERNEL);
@@ -477,12 +482,10 @@ int clip_mkip(struct atm_vcc *vcc,int timeout)
 	clip_vcc->idle_timeout = timeout*HZ;
 	clip_vcc->old_push = vcc->push;
 	clip_vcc->old_pop = vcc->pop;
-	save_flags(flags);
-	cli();
 	vcc->push = clip_push;
 	vcc->pop = clip_pop;
+	skb_queue_head_init(&copy);
 	skb_migrate(&vcc->recvq,&copy);
-	restore_flags(flags);
 	/* re-process everything received between connection setup and MKIP */
 	while ((skb = skb_dequeue(&copy)))
 		if (!clip_devs) {
@@ -594,7 +597,6 @@ int clip_create(int number)
 	if (!dev) return -ENOMEM;
 	memset(dev,0,sizeof(struct net_device)+sizeof(struct clip_priv));
 	clip_priv = PRIV(dev);
-	dev->name = clip_priv->name;
 	sprintf(dev->name,"atm%d",number);
 	dev->init = clip_init;
 	spin_lock_init(&clip_priv->xoff_lock);
@@ -623,7 +625,7 @@ static int clip_device_event(struct notifier_block *this,unsigned long event,
 			DPRINTK("clip_device_event NETDEV_UP\n");
 			(void) to_atmarpd(act_up,PRIV(dev)->number,0);
 			break;
-		case NETDEV_DOWN:
+		case NETDEV_GOING_DOWN:
 			DPRINTK("clip_device_event NETDEV_DOWN\n");
 			(void) to_atmarpd(act_down,PRIV(dev)->number,0);
 			break;
@@ -634,6 +636,7 @@ static int clip_device_event(struct notifier_block *this,unsigned long event,
 			break;
 		case NETDEV_REBOOT:
 		case NETDEV_REGISTER:
+		case NETDEV_DOWN:
 			DPRINTK("clip_device_event %ld\n",event);
 			/* ignore */
 			break;
@@ -710,7 +713,7 @@ static struct atm_dev atmarpd_dev = {
 	999,		/* dummy device number */
 	NULL,NULL,	/* pretend not to have any VCCs */
 	NULL,NULL,	/* no data */
-	0,		/* no flags */
+	{ 0 },		/* no flags */
 	NULL,		/* no local address */
 	{ 0 }		/* no ESI, no statistics */
 };
@@ -729,7 +732,8 @@ int atm_init_atmarp(struct atm_vcc *vcc)
 		add_timer(&idle_timer);
 	}
 	atmarpd = vcc;
-	vcc->flags |= ATM_VF_READY | ATM_VF_META;
+	set_bit(ATM_VF_META,&vcc->flags);
+	set_bit(ATM_VF_READY,&vcc->flags);
 	    /* allow replies and avoid getting closed if signaling dies */
 	bind_vcc(vcc,&atmarpd_dev);
 	vcc->push = NULL;

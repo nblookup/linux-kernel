@@ -217,16 +217,16 @@ static unsigned short command_reg;
 static unsigned short read_status_reg;
 static unsigned short data_reg;
 
-static int initialized = 0;			/* Has the drive been initialized? */
+static int initialized;			/* Has the drive been initialized? */
 static int sony_disc_changed = 1;	/* Has the disk been changed
 					   since the last check? */
-static int sony_toc_read = 0;		/* Has the table of contents been
+static int sony_toc_read;		/* Has the table of contents been
 					   read? */
 static unsigned int sony_buffer_size;	/* Size in bytes of the read-ahead
 					   buffer. */
 static unsigned int sony_buffer_sectors;	/* Size (in 2048 byte records) of
 						   the read-ahead buffer. */
-static unsigned int sony_usage = 0;	/* How many processes have the
+static unsigned int sony_usage;		/* How many processes have the
 					   drive open. */
 
 static int sony_first_block = -1;	/* First OS block (512 byte) in
@@ -242,7 +242,7 @@ static struct s535_sony_subcode *last_sony_subcode;		/* Points to the last
 static Byte **sony_buffer;		/* Points to the pointers
 					   to the sector buffers */
 
-static int sony_inuse = 0;		/* is the drive in use? Only one
+static int sony_inuse;			/* is the drive in use? Only one
 					   open at a time allowed */
 
 /*
@@ -260,8 +260,8 @@ static int sony_audio_status = CDROM_AUDIO_NO_STATUS;
  *   I just kept the CDU-31A driver behavior rather than using the PAUSE
  * command on the CDU-535.
  */
-static Byte cur_pos_msf[3] = {0, 0, 0};
-static Byte final_pos_msf[3] = {0, 0, 0};
+static Byte cur_pos_msf[3];
+static Byte final_pos_msf[3];
 
 /* What IRQ is the drive using?  0 if none. */
 static int sony535_irq_used = CDU535_INTERRUPT;
@@ -1587,11 +1587,11 @@ sony535_init(void)
 					printk("IRQ%d, ", tmp_irq);
 				printk("using %d byte buffer\n", sony_buffer_size);
 
-				devfs_register (NULL, CDU535_HANDLE, 0,
+				devfs_register (NULL, CDU535_HANDLE,
 						DEVFS_FL_DEFAULT,
 						MAJOR_NR, 0,
 						S_IFBLK | S_IRUGO | S_IWUGO,
-						0, 0, &cdu_fops, NULL);
+						&cdu_fops, NULL);
 				if (devfs_register_blkdev(MAJOR_NR, CDU535_HANDLE, &cdu_fops)) {
 					printk("Unable to get major %d for %s\n",
 							MAJOR_NR, CDU535_MESSAGE_NAME);
@@ -1603,17 +1603,21 @@ sony535_init(void)
 
 				sony_toc = (struct s535_sony_toc *)
 					kmalloc(sizeof *sony_toc, GFP_KERNEL);
-				if (sony_toc == NULL)
+				if (sony_toc == NULL) {
+					blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 					return -ENOMEM;
+				}
 				last_sony_subcode = (struct s535_sony_subcode *)
 					kmalloc(sizeof *last_sony_subcode, GFP_KERNEL);
 				if (last_sony_subcode == NULL) {
+					blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 					kfree(sony_toc);
 					return -ENOMEM;
 				}
 				sony_buffer = (Byte **)
 					kmalloc(4 * sony_buffer_sectors, GFP_KERNEL);
 				if (sony_buffer == NULL) {
+					blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 					kfree(sony_toc);
 					kfree(last_sony_subcode);
 					return -ENOMEM;
@@ -1624,6 +1628,7 @@ sony535_init(void)
 					if (sony_buffer[i] == NULL) {
 						while (--i>=0)
 							kfree(sony_buffer[i]);
+						blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 						kfree(sony_buffer);
 						kfree(sony_toc);
 						kfree(last_sony_subcode);
@@ -1686,11 +1691,11 @@ sony535_exit(void)
 
 	release_region(sony535_cd_base_io, 4);
 	for (i = 0; i < sony_buffer_sectors; i++)
-		kfree_s(sony_buffer[i], CDU535_BLOCK_SIZE);
-	kfree_s(sony_buffer, 4 * sony_buffer_sectors);
-	kfree_s(last_sony_subcode, sizeof *last_sony_subcode);
-	kfree_s(sony_toc, sizeof *sony_toc);
-	devfs_unregister(devfs_find_handle(NULL, CDU535_HANDLE, 0, 0, 0,
+		kfree(sony_buffer[i]);
+	kfree(sony_buffer);
+	kfree(last_sony_subcode);
+	kfree(sony_toc);
+	devfs_unregister(devfs_find_handle(NULL, CDU535_HANDLE, 0, 0,
 					   DEVFS_SPECIAL_BLK, 0));
 	if (devfs_unregister_blkdev(MAJOR_NR, CDU535_HANDLE) == -EINVAL)
 		printk("Uh oh, couldn't unregister " CDU535_HANDLE "\n");

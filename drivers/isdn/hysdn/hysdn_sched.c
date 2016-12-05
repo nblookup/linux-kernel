@@ -1,4 +1,4 @@
-/* $Id: hysdn_sched.c,v 1.1 2000/02/10 19:45:18 werner Exp $
+/* $Id: hysdn_sched.c,v 1.5 2000/11/22 17:13:13 kai Exp $
 
  * Linux driver for HYSDN cards, scheduler routines for handling exchange card <-> pc.
  *
@@ -20,15 +20,10 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * $Log: hysdn_sched.c,v $
- * Revision 1.1  2000/02/10 19:45:18  werner
- *
- * Initial release
- *
- *
  */
 
 #define __NO_VERSION__
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/version.h>
 #include <asm/io.h>
@@ -60,7 +55,12 @@ hysdn_sched_rx(hysdn_card * card, uchar * buf, word len, word chan)
 			if (card->err_log_state == ERRLOG_STATE_ON)
 				card->err_log_state = ERRLOG_STATE_START;	/* start new fetch */
 			break;
-
+#ifdef CONFIG_HYSDN_CAPI
+         	case CHAN_CAPI:
+/* give packet to CAPI handler */
+			hycapi_rx_capipkt(card, buf, len);
+			break;
+#endif /* CONFIG_HYSDN_CAPI */
 		default:
 			printk(KERN_INFO "irq message channel %d len %d unhandled \n", chan, len);
 			break;
@@ -125,6 +125,17 @@ hysdn_sched_tx(hysdn_card * card, uchar * buf, word volatile *len, word volatile
 		} else
 			hysdn_tx_netack(card);	/* aknowledge packet -> throw away */
 	}			/* send a network packet if available */
+#ifdef CONFIG_HYSDN_CAPI
+	if((skb = hycapi_tx_capiget(card)) != NULL) {
+		if (skb->len <= maxlen) {
+			memcpy(buf, skb->data, skb->len);
+			*len = skb->len;
+			*chan = CHAN_CAPI;
+			hycapi_tx_capiack(card);
+			return (1);	/* go and send the data */
+		}
+	}
+#endif /* CONFIG_HYSDN_CAPI */
 	return (0);		/* nothing to send */
 }				/* hysdn_sched_tx */
 

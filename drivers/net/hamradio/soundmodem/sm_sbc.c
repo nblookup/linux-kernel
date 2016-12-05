@@ -1,4 +1,4 @@
-/*****************************************************************************/
+
 
 /*
  *	sm_sbc.c  -- soundcard radio modem driver soundblaster hardware driver
@@ -433,13 +433,13 @@ static int sbc_open(struct net_device *dev, struct sm_state *sm)
 		sm->mode_rx->init(sm);
 
 	if (request_dma(dev->dma, sm->hwdrv->hw_name)) {
-		kfree_s(sm->dma.obuf, dmasz);
+		kfree(sm->dma.obuf);
 		return -EBUSY;
 	}
 	if (request_irq(dev->irq, sbc_interrupt, SA_INTERRUPT, 
 			sm->hwdrv->hw_name, dev)) {
 		free_dma(dev->dma);
-		kfree_s(sm->dma.obuf, dmasz);
+		kfree(sm->dma.obuf);
 		return -EBUSY;
 	}
 	request_region(dev->base_addr, SBC_EXTENT, sm->hwdrv->hw_name);
@@ -576,7 +576,7 @@ static int sbc_ioctl(struct net_device *dev, struct sm_state *sm, struct ifreq *
 		return i;
 		
 	case SMCTL_SETMIXER:
-		if (!suser())
+		if (!capable(CAP_SYS_RAWIO))
 			return -EACCES;
 		switch (SCSTATE->revhi) {
 		case 2:

@@ -70,6 +70,7 @@
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/cache.h>
+#include <linux/module.h>
 
 #if defined(CONFIG_KMOD) && defined(CONFIG_NET)
 #include <linux/kmod.h>
@@ -130,7 +131,7 @@ static struct file_operations socket_file_ops = {
 
 static struct net_proto_family *net_families[NPROTO];
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 static atomic_t net_family_lockct = ATOMIC_INIT(0);
 static spinlock_t net_family_lock = SPIN_LOCK_UNLOCKED;
 
@@ -198,6 +199,17 @@ static union {
 					   the AF_UNIX size (see net/unix/af_unix.c
 					   :unix_mkname()).  
 					 */
+					 
+/**
+ *	move_addr_to_kernel	-	copy a socket address into kernel space
+ *	@uaddr: Address in user space
+ *	@kaddr: Address in kernel space
+ *	@ulen: Length in user space
+ *
+ *	The address is copied into kernel space. If the provided address is
+ *	too long an error code of -EINVAL is returned. If the copy gives
+ *	invalid addresses -EFAULT is returned. On a success 0 is returned.
+ */
 
 int move_addr_to_kernel(void *uaddr, int ulen, void *kaddr)
 {
@@ -210,6 +222,23 @@ int move_addr_to_kernel(void *uaddr, int ulen, void *kaddr)
 	return 0;
 }
 
+/**
+ *	move_addr_to_user	-	copy an address to user space
+ *	@kaddr: kernel space address
+ *	@klen: length of address in kernel
+ *	@uaddr: user space address
+ *	@ulen: pointer to user length field
+ *
+ *	The value pointed to by ulen on entry is the buffer length available.
+ *	This is overwritten with the buffer space used. -EINVAL is returned
+ *	if an overlong buffer is specified or a negative buffer size. -EFAULT
+ *	is returned if either the buffer or the length field are not
+ *	accessible.
+ *	After copying the data up to the limit the user specifies, the true
+ *	length of the data is written over the length limit the user
+ *	specified. Zero is returned for a success.
+ */
+ 
 int move_addr_to_user(void *kaddr, int klen, void *uaddr, int *ulen)
 {
 	int err;
@@ -233,6 +262,53 @@ int move_addr_to_user(void *kaddr, int klen, void *uaddr, int *ulen)
 	return __put_user(klen, ulen);
 }
 
+#define SOCKFS_MAGIC 0x534F434B
+static int sockfs_statfs(struct super_block *sb, struct statfs *buf)
+{
+	buf->f_type = SOCKFS_MAGIC;
+	buf->f_bsize = 1024;
+	buf->f_namelen = 255;
+	return 0;
+}
+
+static struct super_operations sockfs_ops = {
+	statfs:		sockfs_statfs,
+};
+
+static struct super_block * sockfs_read_super(struct super_block *sb, void *data, int silent)
+{
+	struct inode *root = new_inode(sb);
+	if (!root)
+		return NULL;
+	root->i_mode = S_IFDIR | S_IRUSR | S_IWUSR;
+	root->i_uid = root->i_gid = 0;
+	root->i_atime = root->i_mtime = root->i_ctime = CURRENT_TIME;
+	sb->s_blocksize = 1024;
+	sb->s_blocksize_bits = 10;
+	sb->s_magic = SOCKFS_MAGIC;
+	sb->s_op	= &sockfs_ops;
+	sb->s_root = d_alloc(NULL, &(const struct qstr) { "socket:", 7, 0 });
+	if (!sb->s_root) {
+		iput(root);
+		return NULL;
+	}
+	sb->s_root->d_sb = sb;
+	sb->s_root->d_parent = sb->s_root;
+	d_instantiate(sb->s_root, root);
+	return sb;
+}
+
+static struct vfsmount *sock_mnt;
+static DECLARE_FSTYPE(sock_fs_type, "sockfs", sockfs_read_super,
+	FS_NOMOUNT|FS_SINGLE);
+static int sockfs_delete_dentry(struct dentry *dentry)
+{
+	return 1;
+}
+static struct dentry_operations sockfs_dentry_operations = {
+	d_delete:	sockfs_delete_dentry,
+};
+
 /*
  *	Obtains the first available file descriptor and sets it up for use.
  *
@@ -253,6 +329,8 @@ int move_addr_to_user(void *kaddr, int klen, void *uaddr, int *ulen)
 static int sock_map_fd(struct socket *sock)
 {
 	int fd;
+	struct qstr this;
+	char name[32];
 
 	/*
 	 *	Find a file descriptor suitable for return to the user. 
@@ -268,16 +346,24 @@ static int sock_map_fd(struct socket *sock)
 			goto out;
 		}
 
-		file->f_dentry = d_alloc_root(sock->inode);
+		sprintf(name, "[%lu]", sock->inode->i_ino);
+		this.name = name;
+		this.len = strlen(name);
+		this.hash = sock->inode->i_ino;
+
+		file->f_dentry = d_alloc(sock_mnt->mnt_sb->s_root, &this);
 		if (!file->f_dentry) {
 			put_filp(file);
 			put_unused_fd(fd);
 			fd = -ENOMEM;
 			goto out;
 		}
+		file->f_dentry->d_op = &sockfs_dentry_operations;
+		d_add(file->f_dentry, sock->inode);
+		file->f_vfsmnt = mntget(sock_mnt);
 
 		sock->file = file;
-		file->f_op = &socket_file_ops;
+		file->f_op = sock->inode->i_fop = &socket_file_ops;
 		file->f_mode = 3;
 		file->f_flags = O_RDWR;
 		file->f_pos = 0;
@@ -293,11 +379,20 @@ extern __inline__ struct socket *socki_lookup(struct inode *inode)
 	return &inode->u.socket_i;
 }
 
-/*
- *	Go from a file number to its socket slot.
+/**
+ *	sockfd_lookup	- 	Go from a file number to its socket slot
+ *	@fd: file handle
+ *	@err: pointer to an error code return
+ *
+ *	The file handle passed in is locked and the socket it is bound
+ *	too is returned. If an error occurs the err pointer is overwritten
+ *	with a negative errno code and NULL is returned. The function checks
+ *	for both invalid handles and passing a handle which is not a socket.
+ *
+ *	On a success the socket object pointer is returned.
  */
 
-extern struct socket *sockfd_lookup(int fd, int *err)
+struct socket *sockfd_lookup(int fd, int *err)
 {
 	struct file *file;
 	struct inode *inode;
@@ -310,7 +405,7 @@ extern struct socket *sockfd_lookup(int fd, int *err)
 	}
 
 	inode = file->f_dentry->d_inode;
-	if (!inode || !inode->i_sock || !(sock = socki_lookup(inode)))
+	if (!inode->i_sock || !(sock = socki_lookup(inode)))
 	{
 		*err = -ENOTSOCK;
 		fput(file);
@@ -329,8 +424,12 @@ extern __inline__ void sockfd_put(struct socket *sock)
 	fput(sock->file);
 }
 
-/*
- *	Allocate a socket.
+/**
+ *	sock_alloc	-	allocate a socket
+ *	
+ *	Allocate a new inode and socket object. The two are bound together
+ *	and initialised. The socket is then returned. If we are out of inodes
+ *	NULL is returned.
  */
 
 struct socket *sock_alloc(void)
@@ -342,6 +441,7 @@ struct socket *sock_alloc(void)
 	if (!inode)
 		return NULL;
 
+	inode->i_sb = sock_mnt->mnt_sb;
 	sock = socki_lookup(inode);
 
 	inode->i_mode = S_IFSOCK|S_IRWXUGO;
@@ -373,6 +473,15 @@ static int sock_no_open(struct inode *irrelevant, struct file *dontcare)
 	return -ENXIO;
 }
 
+/**
+ *	sock_release	-	close a socket
+ *	@sock: socket to close
+ *
+ *	The socket is released from the protocol stack if it has a release
+ *	callback, and the inode is then released if the socket is bound to
+ *	an inode not a file. 
+ */
+ 
 void sock_release(struct socket *sock)
 {
 	if (sock->ops) 
@@ -561,21 +670,16 @@ int sock_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 }
 
 
+/* No kernel lock held - perfect */
 static unsigned int sock_poll(struct file *file, poll_table * wait)
 {
 	struct socket *sock;
-	int err;
-
-	unlock_kernel();
-	sock = socki_lookup(file->f_dentry->d_inode);
 
 	/*
 	 *	We can't return errors to poll, so it's either yes or no. 
 	 */
-
-	err = sock->ops->poll(file, sock, wait);
-	lock_kernel();
-	return err;
+	sock = socki_lookup(file->f_dentry->d_inode);
+	return sock->ops->poll(file, sock, wait);
 }
 
 static int sock_mmap(struct file * file, struct vm_area_struct * vma)
@@ -597,10 +701,8 @@ int sock_close(struct inode *inode, struct file *filp)
 		printk(KERN_DEBUG "sock_close: NULL inode\n");
 		return 0;
 	}
-	unlock_kernel();
 	sock_fasync(-1, filp, 0);
 	sock_release(socki_lookup(inode));
-	lock_kernel();
 	return 0;
 }
 
@@ -654,7 +756,7 @@ static int sock_fasync(int fd, struct file *filp, int on)
 			fa->fa_fd=fd;
 			write_unlock_bh(&sk->callback_lock);
 
-			kfree_s(fna,sizeof(struct fasync_struct));
+			kfree(fna);
 			goto out;
 		}
 		fna->fa_file=filp;
@@ -672,7 +774,7 @@ static int sock_fasync(int fd, struct file *filp, int on)
 			write_lock_bh(&sk->callback_lock);
 			*prev=fa->fa_next;
 			write_unlock_bh(&sk->callback_lock);
-			kfree_s(fa,sizeof(struct fasync_struct));
+			kfree(fa);
 		}
 	}
 
@@ -690,23 +792,20 @@ int sock_wake_async(struct socket *sock, int how, int band)
 	switch (how)
 	{
 	case 1:
-		if (sock->flags & SO_WAITDATA)
+		
+		if (test_bit(SOCK_ASYNC_WAITDATA, &sock->flags))
 			break;
 		goto call_kill;
 	case 2:
-		if (!(sock->flags & SO_NOSPACE))
+		if (!test_and_clear_bit(SOCK_ASYNC_NOSPACE, &sock->flags))
 			break;
-		sock->flags &= ~SO_NOSPACE;
 		/* fall through */
 	case 0:
 	call_kill:
-		/* read_lock(&sock->sk->callback_lock); */
-		if(sock->fasync_list != NULL)
-			kill_fasync(sock->fasync_list, SIGIO, band);
-		/* read_unlock(&sock->sk->callback_lock); */
+		__kill_fasync(sock->fasync_list, SIGIO, band);
 		break;
 	case 3:
-		kill_fasync(sock->fasync_list, SIGURG, band);
+		__kill_fasync(sock->fasync_list, SIGURG, band);
 	}
 	return 0;
 }
@@ -721,7 +820,7 @@ int sock_create(int family, int type, int protocol, struct socket **res)
 	 *	Check protocol is in range
 	 */
 	if(family<0 || family>=NPROTO)
-		return -EINVAL;
+		return -EAFNOSUPPORT;
 
 	/* Compatibility.
 
@@ -754,7 +853,7 @@ int sock_create(int family, int type, int protocol, struct socket **res)
 
 	net_family_read_lock();
 	if (net_families[family] == NULL) {
-		i = -EINVAL;
+		i = -EAFNOSUPPORT;
 		goto out;
 	}
 
@@ -1272,7 +1371,6 @@ asmlinkage long sys_sendmsg(int fd, struct msghdr *msg, unsigned flags)
 	{
 		if (ctl_len > sizeof(ctl))
 		{
-			err = -ENOBUFS;
 			ctl_buf = sock_kmalloc(sock->sk, ctl_len, GFP_KERNEL);
 			if (ctl_buf == NULL) 
 				goto out_freeiov;
@@ -1390,7 +1488,7 @@ out:
 /*
  *	Perform a file control on a socket file descriptor.
  *
- *	Doesn't aquire a fd lock, because no network fcntl
+ *	Doesn't acquire a fd lock, because no network fcntl
  *	function sleeps currently.
  */
 
@@ -1400,7 +1498,7 @@ int sock_fcntl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 	sock = socki_lookup (filp->f_dentry->d_inode);
 	if (sock && sock->ops)
-		return sock->ops->fcntl(sock, cmd, arg);
+		return sock_no_fcntl(sock, cmd, arg);
 	return(-EINVAL);
 }
 
@@ -1538,22 +1636,9 @@ int sock_unregister(int family)
 	return 0;
 }
 
-void __init proto_init(void)
-{
-	extern struct net_proto protocols[];	/* Network protocols */
-	struct net_proto *pro;
-
-	/* Kick all configured protocols. */
-	pro = protocols;
-	while (pro->name != NULL) 
-	{
-		(*pro->init_func)(pro);
-		pro++;
-	}
-	/* We're all done... */
-}
 
 extern void sk_init(void);
+
 #ifdef CONFIG_WAN_ROUTER
 extern void wanrouter_init(void);
 #endif
@@ -1562,7 +1647,7 @@ void __init sock_init(void)
 {
 	int i;
 
-	printk(KERN_INFO "Linux NET4.0 for Linux 2.3\n");
+	printk(KERN_INFO "Linux NET4.0 for Linux 2.4\n");
 	printk(KERN_INFO "Based upon Swansea University Computer Society NET3.039\n");
 
 	/*
@@ -1585,7 +1670,6 @@ void __init sock_init(void)
 	skb_init();
 #endif
 
-
 	/*
 	 *	Wan router layer. 
 	 */
@@ -1598,10 +1682,15 @@ void __init sock_init(void)
 	 *	Initialize the protocols module. 
 	 */
 
-	proto_init();
+	register_filesystem(&sock_fs_type);
+	sock_mnt = kern_mount(&sock_fs_type);
+	/* The real protocol initialization is performed when
+	 *  do_initcalls is run.  
+	 */
+
 
 	/*
-	 *	The netlink device handler may be needed early.
+	 * The netlink device handler may be needed early.
 	 */
 
 #ifdef  CONFIG_RTNETLINK
@@ -1621,7 +1710,7 @@ int socket_get_info(char *buffer, char **start, off_t offset, int length)
 	int counter = 0;
 
 	for (cpu=0; cpu<smp_num_cpus; cpu++)
-		counter += sockets_in_use[cpu].counter;
+		counter += sockets_in_use[cpu_logical_map(cpu)].counter;
 
 	/* It can be negative, by the way. 8) */
 	if (counter < 0)

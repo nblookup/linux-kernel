@@ -3,7 +3,11 @@
  *
  * Copyright (C) 1998-2000 Hewlett-Packard Co
  * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ *
+ * 05/12/00 grao <goutham.rao@intel.com> : added isr in siginfo for SIGFPE
  */
+
+#define FPSWA_DEBUG	1
 
 /*
  * The fpu_fault() handler needs to be able to access and update all
@@ -32,10 +36,7 @@ register double f30 asm ("f30"); register double f31 asm ("f31");
 #include <linux/init.h>
 #include <linux/sched.h>
 
-#ifdef CONFIG_KDB
-# include <linux/kdb.h>
-#endif
-
+#include <asm/ia32.h>
 #include <asm/processor.h>
 #include <asm/uaccess.h>
 
@@ -77,7 +78,7 @@ void
 die_if_kernel (char *str, struct pt_regs *regs, long err)
 {
 	if (user_mode(regs)) {
-#if 1
+#if 0
 		/* XXX for debugging only */
 		printk ("!!die_if_kernel: %s(%d): %s %ld\n",
 			current->comm, current->pid, str, err);
@@ -87,13 +88,6 @@ die_if_kernel (char *str, struct pt_regs *regs, long err)
 	}
 
 	printk("%s[%d]: %s %ld\n", current->comm, current->pid, str, err);
-
-#ifdef CONFIG_KDB
-	while (1) {
-                kdb(KDB_REASON_PANIC, 0, regs);
-                printk("Cant go anywhere from Panic!\n");
-	}
-#endif
 
 	show_regs(regs);
 
@@ -178,7 +172,7 @@ ia64_bad_break (unsigned long break_num, struct pt_regs *regs)
 	siginfo.si_signo = sig;
 	siginfo.si_errno = 0;
 	siginfo.si_code = code;
-	send_sig_info(sig, &siginfo, current);
+	force_sig_info(sig, &siginfo, current);
 }
 
 /*
@@ -198,31 +192,45 @@ ia64_ni_syscall (unsigned long arg0, unsigned long arg1, unsigned long arg2, uns
 }
 
 /*
- * disabled_fp_fault() is called when a user-level process attempts to
- * access one of the registers f32..f127 while it doesn't own the
+ * disabled_fph_fault() is called when a user-level process attempts
+ * to access one of the registers f32..f127 when it doesn't own the
  * fp-high register partition.  When this happens, we save the current
  * fph partition in the task_struct of the fpu-owner (if necessary)
  * and then load the fp-high partition of the current task (if
- * necessary).
+ * necessary).  Note that the kernel has access to fph by the time we
+ * get here, as the IVT's "Diabled FP-Register" handler takes care of
+ * clearing psr.dfh.
  */
 static inline void
 disabled_fph_fault (struct pt_regs *regs)
 {
-	struct task_struct *fpu_owner = ia64_get_fpu_owner();
+	struct ia64_psr *psr = ia64_psr(regs);
 
-	regs->cr_ipsr &= ~(IA64_PSR_DFH | IA64_PSR_MFH);
-	if (fpu_owner != current) {
+	/* first, grant user-level access to fph partition: */
+	psr->dfh = 0;
+#ifndef CONFIG_SMP
+	{
+		struct task_struct *fpu_owner = ia64_get_fpu_owner();
+
+		if (fpu_owner == current)
+			return;
+
+		if (fpu_owner)
+			ia64_flush_fph(fpu_owner);
+
 		ia64_set_fpu_owner(current);
-
-		if (fpu_owner && ia64_psr(ia64_task_regs(fpu_owner))->mfh) {
-			fpu_owner->thread.flags |= IA64_THREAD_FPH_VALID;
-			__ia64_save_fpu(fpu_owner->thread.fph);
-		}
-		if ((current->thread.flags & IA64_THREAD_FPH_VALID) != 0) {
-			__ia64_load_fpu(current->thread.fph);
-		} else {
-			__ia64_init_fpu();
-		}
+	}
+#endif /* !CONFIG_SMP */
+	if ((current->thread.flags & IA64_THREAD_FPH_VALID) != 0) {
+		__ia64_load_fpu(current->thread.fph);
+		psr->mfh = 0;
+	} else {
+		__ia64_init_fpu();
+		/*
+		 * Set mfh because the state in thread.fph does not match the state in
+		 * the fph partition.
+		 */
+		psr->mfh = 1;
 	}
 }
 
@@ -246,20 +254,21 @@ fp_emulate (int fp_fault, void *bundle, long *ipsr, long *fpsr, long *isr, long 
 	 * kernel, so set those bits in the mask and set the low volatile
 	 * pointer to point to these registers.
 	 */
-	fp_state.bitmask_low64 = 0xffc0;  /* bit6..bit15 */
 #ifndef FPSWA_BUG
-	fp_state.fp_state_low_volatile = &regs->f6;
+	fp_state.bitmask_low64 = 0x3c0;  /* bit 6..9 */
+	fp_state.fp_state_low_volatile = (fp_state_low_volatile_t *) &regs->f6;
 #else
+	fp_state.bitmask_low64 = 0xffc0;  /* bit6..bit15 */
 	f6_15[0] = regs->f6;
 	f6_15[1] = regs->f7;
 	f6_15[2] = regs->f8;
 	f6_15[3] = regs->f9;
- 	__asm__ ("stf.spill %0=f10" : "=m"(f6_15[4]));
- 	__asm__ ("stf.spill %0=f11" : "=m"(f6_15[5]));
- 	__asm__ ("stf.spill %0=f12" : "=m"(f6_15[6]));
- 	__asm__ ("stf.spill %0=f13" : "=m"(f6_15[7]));
- 	__asm__ ("stf.spill %0=f14" : "=m"(f6_15[8]));
- 	__asm__ ("stf.spill %0=f15" : "=m"(f6_15[9]));
+ 	__asm__ ("stf.spill %0=f10%P0" : "=m"(f6_15[4]));
+ 	__asm__ ("stf.spill %0=f11%P0" : "=m"(f6_15[5]));
+ 	__asm__ ("stf.spill %0=f12%P0" : "=m"(f6_15[6]));
+ 	__asm__ ("stf.spill %0=f13%P0" : "=m"(f6_15[7]));
+ 	__asm__ ("stf.spill %0=f14%P0" : "=m"(f6_15[8]));
+ 	__asm__ ("stf.spill %0=f15%P0" : "=m"(f6_15[9]));
 	fp_state.fp_state_low_volatile = (fp_state_low_volatile_t *) f6_15;
 #endif
         /*
@@ -278,12 +287,12 @@ fp_emulate (int fp_fault, void *bundle, long *ipsr, long *fpsr, long *isr, long 
 					(unsigned long *) isr, (unsigned long *) pr,
 					(unsigned long *) ifs, &fp_state);
 #ifdef FPSWA_BUG
- 	__asm__ ("ldf.fill f10=%0" :: "m"(f6_15[4]));
- 	__asm__ ("ldf.fill f11=%0" :: "m"(f6_15[5]));
- 	__asm__ ("ldf.fill f12=%0" :: "m"(f6_15[6]));
- 	__asm__ ("ldf.fill f13=%0" :: "m"(f6_15[7]));
- 	__asm__ ("ldf.fill f14=%0" :: "m"(f6_15[8]));
- 	__asm__ ("ldf.fill f15=%0" :: "m"(f6_15[9]));
+ 	__asm__ ("ldf.fill f10=%0%P0" :: "m"(f6_15[4]));
+ 	__asm__ ("ldf.fill f11=%0%P0" :: "m"(f6_15[5]));
+ 	__asm__ ("ldf.fill f12=%0%P0" :: "m"(f6_15[6]));
+ 	__asm__ ("ldf.fill f13=%0%P0" :: "m"(f6_15[7]));
+ 	__asm__ ("ldf.fill f14=%0%P0" :: "m"(f6_15[8]));
+ 	__asm__ ("ldf.fill f15=%0%P0" :: "m"(f6_15[9]));
 	regs->f6 = f6_15[0];
 	regs->f7 = f6_15[1];
 	regs->f8 = f6_15[2];
@@ -310,6 +319,7 @@ handle_fpu_swa (int fp_fault, struct pt_regs *regs, unsigned long isr)
 	if (copy_from_user(bundle, (void *) fault_ip, sizeof(bundle)))
 		return -1;
 
+#ifdef FPSWA_DEBUG
 	if (fpu_swa_count > 5 && jiffies - last_time > 5*HZ)
 		fpu_swa_count = 0;
 	if (++fpu_swa_count < 5) {
@@ -317,7 +327,7 @@ handle_fpu_swa (int fp_fault, struct pt_regs *regs, unsigned long isr)
 		printk("%s(%d): floating-point assist fault at ip %016lx\n",
 		       current->comm, current->pid, regs->cr_iip + ia64_psr(regs)->ri);
 	}
-
+#endif
 	exception = fp_emulate(fp_fault, bundle, &regs->cr_ipsr, &regs->ar_fpsr, &isr, &regs->pr,
  			       &regs->cr_ifs, regs);
 	if (fp_fault) {
@@ -341,7 +351,8 @@ handle_fpu_swa (int fp_fault, struct pt_regs *regs, unsigned long isr)
 			} else if (isr & 0x44) {
 				siginfo.si_code = FPE_FLTDIV;
 			}
-			send_sig_info(SIGFPE, &siginfo, current);
+			siginfo.si_isr = isr;
+			force_sig_info(SIGFPE, &siginfo, current);
 		}
 	} else {
 		if (exception == -1) {
@@ -360,10 +371,47 @@ handle_fpu_swa (int fp_fault, struct pt_regs *regs, unsigned long isr)
 			} else if (isr & 0x2200) {
 				siginfo.si_code = FPE_FLTRES;
 			}
-			send_sig_info(SIGFPE, &siginfo, current);
+			siginfo.si_isr = isr;
+			force_sig_info(SIGFPE, &siginfo, current);
 		}
 	}
 	return 0;
+}
+
+struct illegal_op_return {
+	unsigned long fkt, arg1, arg2, arg3;
+};
+
+struct illegal_op_return
+ia64_illegal_op_fault (unsigned long ec, unsigned long arg1, unsigned long arg2,
+		       unsigned long arg3, unsigned long arg4, unsigned long arg5,
+		       unsigned long arg6, unsigned long arg7, unsigned long stack)
+{
+	struct pt_regs *regs = (struct pt_regs *) &stack;
+	struct illegal_op_return rv;
+	struct siginfo si;
+	char buf[128];
+
+#ifdef CONFIG_IA64_BRL_EMU	
+	{
+		extern struct illegal_op_return ia64_emulate_brl (struct pt_regs *, unsigned long);
+
+		rv = ia64_emulate_brl(regs, ec);
+		if (rv.fkt != (unsigned long) -1)
+			return rv;
+	}
+#endif
+
+	sprintf(buf, "IA-64 Illegal operation fault");
+	die_if_kernel(buf, regs, 0);
+
+	memset(&si, 0, sizeof(si));
+	si.si_signo = SIGILL;
+	si.si_code = ILL_ILLOPC;
+	si.si_addr = (void *) (regs->cr_iip + ia64_psr(regs)->ri);
+	force_sig_info(SIGILL, &si, current);
+	rv.fkt = 0;
+	return rv;
 }
 
 void
@@ -436,11 +484,36 @@ ia64_fault (unsigned long vector, unsigned long isr, unsigned long ifa,
 		sprintf(buf, "Disabled FPL fault---not supposed to happen!");
 		break;
 
+	      case 26: /* NaT Consumption */
+	      case 31: /* Unsupported Data Reference */
+		if (user_mode(regs)) {
+			siginfo.si_signo = SIGILL;
+			siginfo.si_code = ILL_ILLOPN;
+			siginfo.si_errno = 0;
+			siginfo.si_addr = (void *) (regs->cr_iip + ia64_psr(regs)->ri);
+			siginfo.si_imm = vector;
+			force_sig_info(SIGILL, &siginfo, current);
+			return;
+		}
+		sprintf(buf, (vector == 26) ? "NaT consumption" : "Unsupported data reference");
+		break;
+
 	      case 29: /* Debug */
 	      case 35: /* Taken Branch Trap */
 	      case 36: /* Single Step Trap */
 		switch (vector) {
-		      case 29: siginfo.si_code = TRAP_BRKPT; break;
+		      case 29: 
+			siginfo.si_code = TRAP_HWBKPT;
+#ifdef CONFIG_ITANIUM
+			/*
+			 * Erratum 10 (IFA may contain incorrect address) now has
+			 * "NoFix" status.  There are no plans for fixing this.
+			 */
+			if (ia64_psr(regs)->is == 0)
+			  ifa = regs->cr_iip;
+#endif
+			siginfo.si_addr = (void *) ifa;
+		        break;
 		      case 35: siginfo.si_code = TRAP_BRANCH; break;
 		      case 36: siginfo.si_code = TRAP_TRACE; break;
 		}
@@ -448,11 +521,6 @@ ia64_fault (unsigned long vector, unsigned long isr, unsigned long ifa,
 		siginfo.si_errno = 0;
 		force_sig_info(SIGTRAP, &siginfo, current);
 		return;
-
-	      case 30: /* Unaligned fault */
-		sprintf(buf, "Kernel unaligned trap accessing %016lx (ip=%016lx)!",
-			ifa, regs->cr_iip + ia64_psr(regs)->ri);
-		break;
 
 	      case 32: /* fp fault */
 	      case 33: /* fp trap */
@@ -468,10 +536,10 @@ ia64_fault (unsigned long vector, unsigned long isr, unsigned long ifa,
 
 	      case 34:		/* Unimplemented Instruction Address Trap */
 		if (user_mode(regs)) {
-			printk("Woah! Unimplemented Instruction Address Trap!\n");
-			siginfo.si_code = ILL_BADIADDR;
 			siginfo.si_signo = SIGILL;
+			siginfo.si_code = ILL_BADIADDR;
 			siginfo.si_errno = 0;
+			siginfo.si_addr = (void *) (regs->cr_iip + ia64_psr(regs)->ri);
 			force_sig_info(SIGILL, &siginfo, current);
 			return;
 		}
@@ -479,12 +547,19 @@ ia64_fault (unsigned long vector, unsigned long isr, unsigned long ifa,
 		break;
 
 	      case 45:
-		printk("Unexpected IA-32 exception\n");
+#ifdef CONFIG_IA32_SUPPORT
+		if (ia32_exception(regs, isr) == 0)
+			return;
+#endif
+		printk("Unexpected IA-32 exception (Trap 45)\n");
+		printk("  iip - 0x%lx, ifa - 0x%lx, isr - 0x%lx\n", regs->cr_iip, ifa, isr);
 		force_sig(SIGSEGV, current);
-		return;
+		break;
 
 	      case 46:
-		printk("Unexpected IA-32 intercept trap\n");
+		printk("Unexpected IA-32 intercept trap (Trap 46)\n");
+		printk("  iip - 0x%lx, ifa - 0x%lx, isr - 0x%lx, iim - 0x%lx\n",
+		       regs->cr_iip, ifa, isr, iim);
 		force_sig(SIGSEGV, current);
 		return;
 

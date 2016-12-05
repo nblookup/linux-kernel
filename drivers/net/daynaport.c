@@ -25,7 +25,7 @@
 
 static const char *version =
 	"daynaport.c: v0.02 1999-05-17 Alan Cox (Alan.Cox@linux.org) and others\n";
-static int version_printed = 0;
+static int version_printed;
 
 #include <linux/module.h>
 #include <linux/init.h>
@@ -43,8 +43,6 @@ static int version_printed = 0;
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include "8390.h"
-
-extern int console_loglevel;
 
 int ns8390_probe1(struct net_device *dev, int word16, char *name, int id,
 				  int prom, struct nubus_dev *ndev);
@@ -633,6 +631,7 @@ int __init ns8390_probe1(struct net_device *dev, int word16, char *model_name,
 
 static int ns8390_open(struct net_device *dev)
 {
+	MOD_INC_USE_COUNT;
 	ei_open(dev);
 
 	/* At least on my card (a Focus Enhancements PDS card) I start */
@@ -644,10 +643,9 @@ static int ns8390_open(struct net_device *dev)
 	if (request_irq(dev->irq, ei_interrupt, 0, "8390 Ethernet", dev)) 
 	{
 		printk ("%s: unable to get IRQ %d.\n", dev->name, dev->irq);
-		return EAGAIN;
+		MOD_DEC_USE_COUNT;
+		return -EAGAIN;
 	}
-	
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 

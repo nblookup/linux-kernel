@@ -428,9 +428,9 @@ extern int register_sparcaudio_driver(struct sparcaudio_driver *, int);
 extern int unregister_sparcaudio_driver(struct sparcaudio_driver *, int);
 extern void sparcaudio_output_done(struct sparcaudio_driver *, int);
 extern void sparcaudio_input_done(struct sparcaudio_driver *, int);
-extern int sparcaudio_init(void);
 extern int amd7930_init(void);
 extern int cs4231_init(void);
+extern int dbri_init(void);
 
 #endif
 
@@ -586,6 +586,7 @@ int BAL_TO_OSS(int value, unsigned char balance)
   return ((r << 8) + l);
 }
 
+#ifdef __KERNEL__
 /* OSS mixer ioctl port handling */
 static __inline__
 int OSS_PORT_AUDIO(struct sparcaudio_driver *drv, unsigned int set) 
@@ -642,4 +643,5 @@ void OSS_TWIDDLE_IPORT(struct sparcaudio_driver *drv, unsigned int ioctl,
     }
   }
 }
+#endif /* __KERNEL__ */
 #endif /* _AUDIOIO_H_ */

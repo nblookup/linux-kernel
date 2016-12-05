@@ -32,6 +32,7 @@ int decnet_time_wait = 30;
 int decnet_dn_count = 1;
 int decnet_di_count = 3;
 int decnet_dr_count = 3;
+int decnet_log_martians = 1;
 
 #ifdef CONFIG_SYSCTL
 extern int decnet_dst_gc_interval;
@@ -53,6 +54,22 @@ static struct ctl_table_header *dn_table_header = NULL;
 #define ISUPPER(x) (((x) >= 'A') && ((x) <= 'Z'))
 #define ISALPHA(x) (ISLOWER(x) || ISUPPER(x))
 #define INVALID_END_CHAR(x) (ISNUM(x) || ISALPHA(x))
+
+static void strip_it(char *str)
+{
+	for(;;) {
+		switch(*str) {
+			case ' ':
+			case '\n':
+			case '\r':
+			case ':':
+				*str = 0;
+			case 0:
+				return;
+		}
+		str++;
+	}
+}
 
 /*
  * Simple routine to parse an ascii DECnet address
@@ -159,8 +176,9 @@ static int dn_node_address_handler(ctl_table *table, int write,
 			return -EFAULT;
 
 		addr[len] = 0;
+		strip_it(addr);
 
-		if (parse_addr(&dnaddr, buffer))
+		if (parse_addr(&dnaddr, addr))
 			return -EINVAL;
 
 		dn_dev_devices_off();
@@ -257,8 +275,6 @@ static int dn_def_dev_handler(ctl_table *table, int write,
 	}
 
 	if (write) {
-		int i;
-
 		if (*lenp > 16)
 			return -E2BIG;
 
@@ -266,9 +282,7 @@ static int dn_def_dev_handler(ctl_table *table, int write,
 			return -EFAULT;
 
 		devname[*lenp] = 0;
-		for(i = 0; i < (*lenp); i++)
-			if (devname[i] == '\n')
-				devname[i] = 0;
+		strip_it(devname);
 
 		if ((dev = __dev_get_by_name(devname)) == NULL)
 			return -ENODEV;

@@ -195,25 +195,6 @@ static void iga_blank_border(struct fb_info_iga *info)
  *  Frame buffer device API
  */
 
-/*
- * Open/Release the frame buffer device
- */
-
-static int igafb_open(struct fb_info *info, int user)
-{
-        /*
-         * Nothing, only a usage count for the moment
-         */
-        MOD_INC_USE_COUNT;
-        return(0);
-}
-
-static int igafb_release(struct fb_info *info, int user)
-{
-        MOD_DEC_USE_COUNT;
-        return(0);
-}
-
 static int igafb_update_var(int con, struct fb_info *info)
 {
         return 0;
@@ -375,7 +356,7 @@ static int iga_setcolreg(unsigned regno, unsigned red, unsigned green,
 	pci_outb(info, green, DAC_DATA);
 	pci_outb(info, blue,  DAC_DATA);
 
-	if (regno < 16)
+	if (regno < 16) {
 		switch (default_var.bits_per_pixel) {
 #ifdef FBCON_HAS_CFB16
 		case 16:
@@ -391,11 +372,14 @@ static int iga_setcolreg(unsigned regno, unsigned red, unsigned green,
 #endif
 #ifdef FBCON_HAS_CFB32
 		case 32:
+			{ int i;
 			i = (regno << 8) | regno;
 			info->fbcon_cmap.cfb32[regno] = (i << 16) | i;
+			}
 			break;
 #endif
 		}
+	}
 	return 0;
 }
 
@@ -447,36 +431,18 @@ static int igafb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
         return 0;
 }
 
-static int igafb_pan_display(struct fb_var_screeninfo *var, int con,
-                             struct fb_info *info)
-{
-        /* no panning */
-        return -EINVAL;
-}
-
-static int igafb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-		       u_long arg, int con, struct fb_info *info)
-{
-	return -EINVAL;
-}
-
 /*
  * Framebuffer option structure
  */
 static struct fb_ops igafb_ops = {
-    igafb_open, 
-    igafb_release, 
-    igafb_get_fix, 
-    igafb_get_var, 
-    igafb_set_var,
-    igafb_get_cmap, 
-    igafb_set_cmap, 
-    igafb_pan_display, 
-    igafb_ioctl,
+	owner:		THIS_MODULE,
+	fb_get_fix:	igafb_get_fix,
+	fb_get_var:	igafb_get_var,
+	fb_set_var:	igafb_set_var,
+	fb_get_cmap:	igafb_get_cmap,
+	fb_set_cmap:	igafb_set_cmap,
 #ifdef __sparc__
-    igafb_mmap
-#else
-    NULL
+	fb_mmap:	igafb_mmap,
 #endif
 };
 
@@ -532,6 +498,8 @@ static void igafb_set_disp(int con, struct fb_info_iga *info)
                 break;
 #endif
         default:
+		printk(KERN_WARNING "igafb_set_disp: unknown resolution %d\n",
+		    default_var.bits_per_pixel);
                 return;
         }
         memcpy(&info->dispsw, sw, sizeof(*sw));

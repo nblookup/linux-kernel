@@ -9,6 +9,7 @@
 
 #include <linux/config.h>
 #include <linux/spinlock.h>
+#include <linux/list.h>
 
 #ifdef __GENKSYMS__
 #  define _set_ver(sym) sym
@@ -78,11 +79,17 @@ struct module
 	unsigned long gp;
 #endif
 	/* Members past this point are extensions to the basic
-	   module support and are optional.  Use mod_opt_member()
+	   module support and are optional.  Use mod_member_present()
 	   to examine them.  */
 	const struct module_persist *persist_start;
 	const struct module_persist *persist_end;
 	int (*can_unload)(void);
+	int runsize;			/* In modutils, not currently used */
+	const char *kallsyms_start;	/* All symbols for kernel debugging */
+	const char *kallsyms_end;
+	const char *archdata_start;	/* arch specific data for module */
+	const char *archdata_end;
+	const char *kernel_data;	/* Reserved for kernel internal use */
 };
 
 struct module_info
@@ -123,6 +130,10 @@ struct module_info
 	((unsigned long)(&((struct module *)0L)->member + 1)		\
 	 <= (mod)->size_of_struct)
 
+/* Check if an address p with number of entries n is within the body of module m */
+#define mod_bound(p, n, m) ((unsigned long)(p) >= ((unsigned long)(m) + ((m)->size_of_struct)) && \
+	         (unsigned long)((p)+(n)) <= (unsigned long)(m) + (m)->size)
+
 /* Backwards compatibility definition.  */
 
 #define GET_USE_COUNT(module)	(atomic_read(&(module)->uc.usecount))
@@ -142,10 +153,38 @@ struct module_info
 #define __MODULE_STRING_1(x)	#x
 #define __MODULE_STRING(x)	__MODULE_STRING_1(x)
 
-/* Find a symbol exported by the kernel or another module */
-extern unsigned long get_module_symbol(char *, char *);
+/* Generic inter module communication.
+ *
+ * NOTE: This interface is intended for small amounts of data that are
+ *       passed between two objects and either or both of the objects
+ *       might be compiled as modules.  Do not over use this interface.
+ *
+ *       If more than two objects need to communicate then you probably
+ *       need a specific interface instead of abusing this generic
+ *       interface.  If both objects are *always* built into the kernel
+ *       then a global extern variable is good enough, you do not need
+ *       this interface.
+ *
+ * Keith Owens <kaos@ocs.com.au> 28 Oct 2000.
+ */
+
+#ifdef __KERNEL__
+#define HAVE_INTER_MODULE
+extern void inter_module_register(const char *, struct module *, const void *);
+extern void inter_module_unregister(const char *);
+extern const void *inter_module_get(const char *);
+extern const void *inter_module_get_request(const char *, const char *);
+extern void inter_module_put(const char *);
+
+struct inter_module_entry {
+	struct list_head list;
+	const char *im_name;
+	struct module *owner;
+	const void *userdata;
+};
 
 extern int try_inc_mod_count(struct module *mod);
+#endif /* __KERNEL__ */
 
 #if defined(MODULE) && !defined(__GENKSYMS__)
 
@@ -190,8 +229,26 @@ const char __module_parm_desc_##var[]		\
 __attribute__((section(".modinfo"))) =		\
 "parm_desc_" __MODULE_STRING(var) "=" desc
 
-#define MODULE_DEVICE_TABLE(type,name)	\
-const struct type##_device_id * __module_##type##_device_table = name
+/*
+ * MODULE_DEVICE_TABLE exports information about devices
+ * currently supported by this module.  A device type, such as PCI,
+ * is a C-like identifier passed as the first arg to this macro.
+ * The second macro arg is the variable containing the device
+ * information being made public.
+ *
+ * The following is a list of known device types (arg 1),
+ * and the C types which are to be passed as arg 2.
+ * pci - struct pci_device_id - List of PCI ids supported by this module
+ * isapnp - struct isapnp_device_id - List of ISA PnP ids supported by this module
+ * usb - struct usb_device_id - List of USB ids supported by this module
+ */
+#define MODULE_GENERIC_TABLE(gtype,name)	\
+static const unsigned long __module_##gtype##_size \
+  __attribute__ ((unused)) = sizeof(struct gtype##_id); \
+static const struct gtype##_id * __module_##gtype##_table \
+  __attribute__ ((unused)) = name
+#define MODULE_DEVICE_TABLE(type,name)		\
+  MODULE_GENERIC_TABLE(type##_device,name)
 /* not put to .modinfo section to avoid section type conflicts */
 
 /* The attributes of a section are set the first time the section is
@@ -207,14 +264,12 @@ extern struct module __this_module;
 #define MOD_DEC_USE_COUNT	__MOD_DEC_USE_COUNT(THIS_MODULE)
 #define MOD_IN_USE		__MOD_IN_USE(THIS_MODULE)
 
-#ifndef __NO_VERSION__
 #include <linux/version.h>
-const char __module_kernel_version[] __attribute__((section(".modinfo"))) =
+static const char __module_kernel_version[] __attribute__((section(".modinfo"))) =
 "kernel_version=" UTS_RELEASE;
 #ifdef MODVERSIONS
-const char __module_using_checksums[] __attribute__((section(".modinfo"))) =
+static const char __module_using_checksums[] __attribute__((section(".modinfo"))) =
 "using_checksums=1";
-#endif
 #endif
 
 #else /* MODULE */
@@ -224,6 +279,7 @@ const char __module_using_checksums[] __attribute__((section(".modinfo"))) =
 #define MODULE_SUPPORTED_DEVICE(name)
 #define MODULE_PARM(var,type)
 #define MODULE_PARM_DESC(var,desc)
+#define MODULE_GENERIC_TABLE(gtype,name)
 #define MODULE_DEVICE_TABLE(type,name)
 
 #ifndef __GENKSYMS__
@@ -264,14 +320,6 @@ extern struct module *module_list;
 #define EXPORT_SYMBOL(var)
 #define EXPORT_SYMBOL_NOVERS(var)
 
-#elif !defined(EXPORT_SYMTAB)
-
-/* If things weren't set up in the Makefiles to get EXPORT_SYMTAB defined,
-   then they weren't set up to run genksyms properly so MODVERSIONS breaks.  */
-#define __EXPORT_SYMBOL(sym,str)   error EXPORT_SYMTAB_not_defined
-#define EXPORT_SYMBOL(var)	   error EXPORT_SYMTAB_not_defined
-#define EXPORT_SYMBOL_NOVERS(var)  error EXPORT_SYMTAB_not_defined
-
 #else
 
 #define __EXPORT_SYMBOL(sym, str)			\
@@ -297,5 +345,11 @@ __attribute__((section("__ksymtab"))) =			\
 #else
 #define EXPORT_NO_SYMBOLS
 #endif /* MODULE */
+
+#ifdef CONFIG_MODULES
+#define SET_MODULE_OWNER(some_struct) do { (some_struct)->owner = THIS_MODULE; } while (0)
+#else
+#define SET_MODULE_OWNER(some_struct) do { } while (0)
+#endif
 
 #endif /* _LINUX_MODULE_H */

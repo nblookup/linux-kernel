@@ -51,8 +51,7 @@ static u_char *shadow_buf=&debug_buf2[0];
 static short debug_buf_count=0;
 static int debug_buf_overrun=0,debug_timer_running=0;
 static unsigned long debug_buffer_updated=0;
-static struct timer_list debug_keyb_timer = { NULL, NULL, 0, 0,
-											  debug_keyb_timer_handler };
+static struct timer_list debug_keyb_timer = { function: debug_keyb_timer_handler };
 #endif
 
 static u_short dnplain_map[NR_KEYS] __initdata = {
@@ -357,17 +356,14 @@ static void dn_keyb_process_mouse_event(unsigned char mouse_data) {
 				mouse_dy+=mouse_packet[2] == 0xff ? 0 : (signed char)mouse_packet[2];
 				wake_up_interruptible(&mouse_wait);
 				if (mouse_dx < -2048)
-              		mouse_dx = -2048;
-          		else
-          		if (mouse_dx >  2048)
-              		mouse_dx =  2048;
-          		if (mouse_dy < -2048)
-              		mouse_dy = -2048;
-          		else
-          		if (mouse_dy >  2048)
-              		mouse_dy =  2048;
-				if (mouse_fasyncptr)
-              		kill_fasync(mouse_fasyncptr, SIGIO, POLL_IN);
+              				mouse_dx = -2048;
+          			else if (mouse_dx >  2048)
+              				mouse_dx =  2048;
+         	 		if (mouse_dy < -2048)
+              				mouse_dy = -2048;
+          			else if (mouse_dy >  2048)
+             			 	mouse_dy =  2048;
+              			kill_fasync(&mouse_fasyncptr, SIGIO, POLL_IN);
 			}
 			mouse_byte_count=0;
 /*			printk("mouse: %d, %d, %x\n",mouse_x,mouse_y,buttons); */
@@ -450,20 +446,8 @@ void write_keyb_cmd(u_short length, u_char *cmd) {
 
 }
 
-static int release_mouse(struct inode * inode, struct file * file)
-{
-        MOD_DEC_USE_COUNT;
-        return 0;
-}
-
-static int open_mouse(struct inode * inode, struct file * file)
-{
-        MOD_INC_USE_COUNT;
-        return 0;
-}
-
 static struct busmouse apollo_mouse = {
-        APOLLO_MOUSE_MINOR, "apollomouse", open_mouse, release_mouse,7
+        APOLLO_MOUSE_MINOR, "apollomouse", THIS_MODULE, NULL, NULL, 7
 };
 
 int __init dn_keyb_init(void){

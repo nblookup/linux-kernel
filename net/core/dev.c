@@ -17,6 +17,7 @@
  *		David Hinds <dhinds@allegro.stanford.edu>
  *		Alexey Kuznetsov <kuznet@ms2.inr.ac.ru>
  *		Adam Sulmicki <adam@cfar.umd.edu>
+ *              Pekka Riikonen <priikone@poesidon.pspt.fi>
  *
  *	Changes:
  *		Alan Cox	:	device private ioctl copies fields back.
@@ -56,6 +57,10 @@
  *					A network device unload needs to purge
  *					the backlog queue.
  *	Paul Rusty Russell	:	SIOCSIFNAME
+ *              Pekka Riikonen  :	Netdev boot-time settings code
+ *              Andrew Morton   :       Make unregister_netdevice wait indefinitely on dev->refcnt
+ * 		J Hadi Salim	:	- Backlog queue sampling
+ *				        - netif_rx() feedback	
  */
 
 #include <asm/uaccess.h>
@@ -79,21 +84,34 @@
 #include <linux/brlock.h>
 #include <net/sock.h>
 #include <linux/rtnetlink.h>
-#include <net/slhc.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <linux/if_bridge.h>
+#include <linux/divert.h>
 #include <net/dst.h>
 #include <net/pkt_sched.h>
 #include <net/profile.h>
 #include <linux/init.h>
 #include <linux/kmod.h>
+#include <linux/module.h>
 #if defined(CONFIG_NET_RADIO) || defined(CONFIG_NET_PCMCIA_RADIO)
 #include <linux/wireless.h>		/* Note : will define WIRELESS_EXT */
 #endif	/* CONFIG_NET_RADIO || CONFIG_NET_PCMCIA_RADIO */
 #ifdef CONFIG_PLIP
 extern int plip_init(void);
 #endif
+
+/* This define, if set, will randomly drop a packet when congestion
+ * is more than moderate.  It helps fairness in the multi-interface
+ * case when one of them is a hog, but it kills performance for the
+ * single interface case so it is off now by default.
+ */
+#undef RAND_LIE
+
+/* Setting this will sample the queue lengths and thus congestion
+ * via a timer instead of as each packet is received.
+ */
+#undef OFFLINE_SAMPLE
 
 NET_PROFILE_DEFINE(dev_queue_xmit)
 NET_PROFILE_DEFINE(softnet_process)
@@ -130,6 +148,17 @@ const char *if_port_text[] = {
 
 static struct packet_type *ptype_base[16];		/* 16 way hashed list */
 static struct packet_type *ptype_all = NULL;		/* Taps */
+
+#ifdef OFFLINE_SAMPLE
+static void sample_queue(unsigned long dummy);
+static struct timer_list samp_timer = { function: sample_queue };
+#endif
+
+#ifdef CONFIG_HOTPLUG
+static int net_run_sbin_hotplug(struct net_device *dev, char *action);
+#else
+#define net_run_sbin_hotplug(dev, action) ({ 0; })
+#endif
 
 /*
  *	Our notifier list
@@ -176,6 +205,15 @@ int netdev_nit=0;
  *	change it and subsequent readers will get broken packet.
  *							--ANK (980803)
  */
+
+/**
+ *	dev_add_pack - add packet handler
+ *	@pt: packet type declaration
+ * 
+ *	Add a protocol handler to the networking stack. The passed &packet_type
+ *	is linked into kernel lists and may not be freed until it has been
+ *	removed from the kernel lists.
+ */
  
 void dev_add_pack(struct packet_type *pt)
 {
@@ -203,8 +241,14 @@ void dev_add_pack(struct packet_type *pt)
 }
 
 
-/*
- *	Remove a protocol ID from the list.
+/**
+ *	dev_remove_pack	 - remove packet handler
+ *	@pt: packet type declaration
+ * 
+ *	Remove a protocol handler that was previously added to the kernel
+ *	protocol handlers by dev_add_pack(). The passed &packet_type is removed
+ *	from the kernel lists and can be freed or reused once this function
+ *	returns.
  */
  
 void dev_remove_pack(struct packet_type *pt)
@@ -235,15 +279,117 @@ void dev_remove_pack(struct packet_type *pt)
 	printk(KERN_WARNING "dev_remove_pack: %p not found.\n", pt);
 }
 
+/******************************************************************************
+
+		      Device Boot-time Settings Routines
+
+*******************************************************************************/
+
+/* Boot time configuration table */
+static struct netdev_boot_setup dev_boot_setup[NETDEV_BOOT_SETUP_MAX];
+
+/**
+ *	netdev_boot_setup_add	- add new setup entry
+ *	@name: name of the device
+ *	@map: configured settings for the device
+ *
+ *	Adds new setup entry to the dev_boot_setup list.  The function
+ *	returns 0 on error and 1 on success.  This is a generic routine to
+ *	all netdevices.
+ */
+int netdev_boot_setup_add(char *name, struct ifmap *map)
+{
+	struct netdev_boot_setup *s;
+	int i;
+
+	s = dev_boot_setup;
+	for (i = 0; i < NETDEV_BOOT_SETUP_MAX; i++) {
+		if (s[i].name[0] == '\0' || s[i].name[0] == ' ') {
+			memset(s[i].name, 0, sizeof(s[i].name));
+			strcpy(s[i].name, name);
+			memcpy(&s[i].map, map, sizeof(s[i].map));
+			break;
+		}
+	}
+
+	if (i >= NETDEV_BOOT_SETUP_MAX)
+		return 0;
+
+	return 1;
+}
+
+/**
+ *	netdev_boot_setup_check	- check boot time settings
+ *	@dev: the netdevice
+ *
+ * 	Check boot time settings for the device.
+ *	The found settings are set for the device to be used
+ *	later in the device probing.
+ *	Returns 0 if no settings found, 1 if they are.
+ */
+int netdev_boot_setup_check(struct net_device *dev)
+{
+	struct netdev_boot_setup *s;
+	int i;
+
+	s = dev_boot_setup;
+	for (i = 0; i < NETDEV_BOOT_SETUP_MAX; i++) {
+		if (s[i].name[0] != '\0' && s[i].name[0] != ' ' &&
+		    !strncmp(dev->name, s[i].name, strlen(s[i].name))) {
+			dev->irq 	= s[i].map.irq;
+			dev->base_addr 	= s[i].map.base_addr;
+			dev->mem_start 	= s[i].map.mem_start;
+			dev->mem_end 	= s[i].map.mem_end;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Saves at boot time configured settings for any netdevice.
+ */
+static int __init netdev_boot_setup(char *str)
+{
+	int ints[5];
+	struct ifmap map;
+
+	str = get_options(str, ARRAY_SIZE(ints), ints);
+	if (!str || !*str)
+		return 0;
+
+	/* Save settings */
+	memset(&map, -1, sizeof(map));
+	if (ints[0] > 0)
+		map.irq = ints[1];
+	if (ints[0] > 1)
+		map.base_addr = ints[2];
+	if (ints[0] > 2)
+		map.mem_start = ints[3];
+	if (ints[0] > 3)
+		map.mem_end = ints[4];
+
+	/* Add new entry to the list */	
+	return netdev_boot_setup_add(str, &map);
+}
+
+__setup("netdev=", netdev_boot_setup);
+
 /*****************************************************************************************
 
 			    Device Interface Subroutines
 
 ******************************************************************************************/
 
-/* 
- *	Find an interface by name. May be called under rtnl semaphore
- *	or dev_base_lock.
+/**
+ *	__dev_get_by_name	- find a device by its name 
+ *	@name: name to find
+ *
+ *	Find an interface by name. Must be called under RTNL semaphore
+ *	or @dev_base_lock. If the name is found a pointer to the device
+ *	is returned. If the name is not found then %NULL is returned. The
+ *	reference counters are not incremented so the caller must be
+ *	careful with locks.
  */
  
 
@@ -258,8 +404,15 @@ struct net_device *__dev_get_by_name(const char *name)
 	return NULL;
 }
 
-/* 
- *	Find an interface by name. Any context, dev_put() to release.
+/**
+ *	dev_get_by_name		- find a device by its name
+ *	@name: name to find
+ *
+ *	Find an interface by name. This can be called from any 
+ *	context and does its own locking. The returned handle has
+ *	the usage count incremented and the caller must use dev_put() to
+ *	release it when it is no longer needed. %NULL is returned if no
+ *	matching device is found.
  */
 
 struct net_device *dev_get_by_name(const char *name)
@@ -282,6 +435,18 @@ struct net_device *dev_get_by_name(const char *name)
    is meaningless, if it was not issued under rtnl semaphore.
  */
 
+/**
+ *	dev_get	-	test if a device exists
+ *	@name:	name to test for
+ *
+ *	Test if a name exists. Returns true if the name is found. In order
+ *	to be sure the name is not allocated or removed during the test the
+ *	caller must hold the rtnl semaphore.
+ *
+ *	This function primarily exists for back compatibility with older
+ *	drivers. 
+ */
+ 
 int dev_get(const char *name)
 {
 	struct net_device *dev;
@@ -292,9 +457,15 @@ int dev_get(const char *name)
 	return dev != NULL;
 }
 
-/* 
- *	Find an interface by index. May be called under rtnl semaphore
- *	or dev_base_lock.
+/**
+ *	__dev_get_by_index - find a device by its ifindex
+ *	@ifindex: index of device
+ *
+ *	Search for an interface by index. Returns %NULL if the device
+ *	is not found or a pointer to the device. The device has not
+ *	had its reference counter increased so the caller must be careful
+ *	about locking. The caller must hold either the RTNL semaphore
+ *	or @dev_base_lock.
  */
 
 struct net_device * __dev_get_by_index(int ifindex)
@@ -308,8 +479,15 @@ struct net_device * __dev_get_by_index(int ifindex)
 	return NULL;
 }
 
-/* 
- *	Find an interface by index. Any context, dev_put() to release.
+
+/**
+ *	dev_get_by_index - find a device by its ifindex
+ *	@ifindex: index of device
+ *
+ *	Search for an interface by index. Returns NULL if the device
+ *	is not found or a pointer to the device. The device returned has 
+ *	had a reference added and the pointer is safe until the user calls
+ *	dev_put to indicate they have finished with it.
  */
 
 struct net_device * dev_get_by_index(int ifindex)
@@ -324,8 +502,18 @@ struct net_device * dev_get_by_index(int ifindex)
 	return dev;
 }
 
-/* 
- *	Find an interface by ll addr. May be called only under rtnl semaphore.
+/**
+ *	dev_getbyhwaddr - find a device by its hardware addres
+ *	@type: media type of device
+ *	@ha: hardware address
+ *
+ *	Search for an interface by MAC address. Returns NULL if the device
+ *	is not found or a pointer to the device. The caller must hold the
+ *	rtnl semaphore. The returned device has not had its ref count increased
+ *	and the caller must therefore be careful about locking
+ *
+ *	BUGS:
+ *	If the API was consistent this would be __dev_get_by_hwaddr
  */
 
 struct net_device *dev_getbyhwaddr(unsigned short type, char *ha)
@@ -342,9 +530,16 @@ struct net_device *dev_getbyhwaddr(unsigned short type, char *ha)
 	return NULL;
 }
 
-/*
+/**
+ *	dev_alloc_name - allocate a name for a device
+ *	@dev: device 
+ *	@name: name format string
+ *
  *	Passed a format string - eg "lt%d" it will try and find a suitable
- *	id. Not efficient for many devices, not called a lot..
+ *	id. Not efficient for many devices, not called a lot. The caller
+ *	must hold the dev_base or rtnl lock while allocating the name and
+ *	adding the device in order to avoid duplicates. Returns the number
+ *	of the unit assigned or a negative errno code.
  */
 
 int dev_alloc_name(struct net_device *dev, const char *name)
@@ -365,15 +560,30 @@ int dev_alloc_name(struct net_device *dev, const char *name)
 	return -ENFILE;	/* Over 100 of the things .. bail out! */
 }
 
+/**
+ *	dev_alloc - allocate a network device and name
+ *	@name: name format string
+ *	@err: error return pointer
+ *
+ *	Passed a format string, eg. "lt%d", it will allocate a network device
+ *	and space for the name. %NULL is returned if no memory is available.
+ *	If the allocation succeeds then the name is assigned and the 
+ *	device pointer returned. %NULL is returned if the name allocation
+ *	failed. The cause of an error is returned as a negative errno code
+ *	in the variable @err points to.
+ *
+ *	The caller must hold the @dev_base or RTNL locks when doing this in
+ *	order to avoid duplicate name allocations.
+ */
+
 struct net_device *dev_alloc(const char *name, int *err)
 {
-	struct net_device *dev=kmalloc(sizeof(struct net_device)+16, GFP_KERNEL);
+	struct net_device *dev=kmalloc(sizeof(struct net_device), GFP_KERNEL);
 	if (dev == NULL) {
 		*err = -ENOBUFS;
 		return NULL;
 	}
 	memset(dev, 0, sizeof(struct net_device));
-	dev->name = (char *)(dev + 1);	/* Name string space */
 	*err = dev_alloc_name(dev, name);
 	if (*err < 0) {
 		kfree(dev);
@@ -382,6 +592,15 @@ struct net_device *dev_alloc(const char *name, int *err)
 	return dev;
 }
 
+/**
+ *	netdev_state_change - device changes state
+ *	@dev: device to cause notification
+ *
+ *	Called to indicate a device has changed state. This function calls
+ *	the notifier chains for netdev_chain and sends a NEWLINK message
+ *	to the routing socket.
+ */
+ 
 void netdev_state_change(struct net_device *dev)
 {
 	if (dev->flags&IFF_UP) {
@@ -391,15 +610,20 @@ void netdev_state_change(struct net_device *dev)
 }
 
 
-/*
- *	Find and possibly load an interface.
- */
- 
 #ifdef CONFIG_KMOD
+
+/**
+ *	dev_load 	- load a network module
+ *	@name: name of interface
+ *
+ *	If a network interface is not present and the process has suitable
+ *	privileges this function loads the module. If module loading is not
+ *	available in this kernel then it becomes a nop.
+ */
 
 void dev_load(const char *name)
 {
-	if (!__dev_get_by_name(name) && capable(CAP_SYS_MODULE))
+	if (!dev_get(name) && capable(CAP_SYS_MODULE))
 		request_module(name);
 }
 
@@ -416,8 +640,17 @@ static int default_rebuild_header(struct sk_buff *skb)
 	return 1;
 }
 
-/*
- *	Prepare an interface for use. 
+/**
+ *	dev_open	- prepare an interface for use. 
+ *	@dev:	device to open
+ *
+ *	Takes a device from down to up state. The device's private open
+ *	function is invoked and then the multicast lists are loaded. Finally
+ *	the device is moved into the up state and a %NETDEV_UP message is
+ *	sent to the netdev notifier chain.
+ *
+ *	Calling this function on an active interface is a nop. On a failure
+ *	a negative errno code is returned.
  */
  
 int dev_open(struct net_device *dev)
@@ -440,9 +673,15 @@ int dev_open(struct net_device *dev)
 	/*
 	 *	Call device private open method
 	 */
-	 
-	if (dev->open) 
-  		ret = dev->open(dev);
+	if (try_inc_mod_count(dev->owner)) {
+		if (dev->open) {
+			ret = dev->open(dev);
+			if (ret != 0 && dev->owner)
+				__MOD_DEC_USE_COUNT(dev->owner);
+		}
+	} else {
+		ret = -ENODEV;
+	}
 
 	/*
 	 *	If it went open OK then:
@@ -508,8 +747,14 @@ void dev_clear_fastroute(struct net_device *dev)
 }
 #endif
 
-/*
- *	Completely shutdown an interface.
+/**
+ *	dev_close - shutdown an interface.
+ *	@dev: device to shutdown
+ *
+ *	This function moves an active device into down state. A 
+ *	%NETDEV_GOING_DOWN is sent to the netdev notifier chain. The device
+ *	is then deactivated and finally a %NETDEV_DOWN is sent to the notifier
+ *	chain.
  */
  
 int dev_close(struct net_device *dev)
@@ -552,6 +797,12 @@ int dev_close(struct net_device *dev)
 	 */
 	notifier_call_chain(&netdev_chain, NETDEV_DOWN, dev);
 
+	/*
+	 * Drop the module refcount
+	 */
+	if (dev->owner)
+		__MOD_DEC_USE_COUNT(dev->owner);
+
 	return(0);
 }
 
@@ -560,11 +811,31 @@ int dev_close(struct net_device *dev)
  *	Device change register/unregister. These are not inline or static
  *	as we export them to the world.
  */
+ 
+/**
+ *	register_netdevice_notifier - register a network notifier block
+ *	@nb: notifier
+ *
+ *	Register a notifier to be called when network device events occur.
+ *	The notifier passed is linked into the kernel structures and must
+ *	not be reused until it has been unregistered. A negative errno code
+ *	is returned on a failure.
+ */
 
 int register_netdevice_notifier(struct notifier_block *nb)
 {
 	return notifier_chain_register(&netdev_chain, nb);
 }
+
+/**
+ *	unregister_netdevice_notifier - unregister a network notifier block
+ *	@nb: notifier
+ *
+ *	Unregister a notifier previously registered by
+ *	register_netdevice_notifier(). The notifier is unlinked into the
+ *	kernel structures and may then be reused. A negative errno code
+ *	is returned on a failure.
+ */
 
 int unregister_netdevice_notifier(struct notifier_block *nb)
 {
@@ -610,33 +881,25 @@ void dev_queue_xmit_nit(struct sk_buff *skb, struct net_device *dev)
 
 			skb2->h.raw = skb2->nh.raw;
 			skb2->pkt_type = PACKET_OUTGOING;
-			skb2->rx_dev = skb->dev;
-			dev_hold(skb2->rx_dev);
 			ptype->func(skb2, skb->dev, ptype);
 		}
 	}
 	br_read_unlock(BR_NETPROTO_LOCK);
 }
 
-/*
- *	Fast path for loopback frames.
+/**
+ *	dev_queue_xmit - transmit a buffer
+ *	@skb: buffer to transmit
+ *	
+ *	Queue a buffer for transmission to a network device. The caller must
+ *	have set the device and priority and built the buffer before calling this 
+ *	function. The function can be called from an interrupt.
+ *
+ *	A negative errno code is returned on a failure. A success does not
+ *	guarantee the frame will be transmitted as it may be dropped due
+ *	to congestion or traffic shaping.
  */
  
-void dev_loopback_xmit(struct sk_buff *skb)
-{
-	struct sk_buff *newskb=skb_clone(skb, GFP_ATOMIC);
-	if (newskb==NULL)
-		return;
-
-	newskb->mac.raw = newskb->data;
-	skb_pull(newskb, newskb->nh.raw - newskb->data);
-	newskb->pkt_type = PACKET_LOOPBACK;
-	newskb->ip_summed = CHECKSUM_UNNECESSARY;
-	if (newskb->dst==NULL)
-		printk(KERN_DEBUG "BUG: packet without dst looped back 1\n");
-	netif_rx(newskb);
-}
-
 int dev_queue_xmit(struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;
@@ -651,7 +914,7 @@ int dev_queue_xmit(struct sk_buff *skb)
 		qdisc_run(dev);
 
 		spin_unlock_bh(&dev->queue_lock);
-		return ret;
+		return ret == NET_XMIT_BYPASS ? NET_XMIT_SUCCESS : ret;
 	}
 
 	/* The device has no queue. Common case for software devices:
@@ -703,16 +966,24 @@ int dev_queue_xmit(struct sk_buff *skb)
 
 
 /*=======================================================================
-			Receiver rotutines
+			Receiver routines
   =======================================================================*/
 
 int netdev_max_backlog = 300;
+/* These numbers are selected based on intuition and some
+ * experimentatiom, if you have more scientific way of doing this
+ * please go ahead and fix things.
+ */
+int no_cong_thresh = 10;
+int no_cong = 20;
+int lo_cong = 100;
+int mod_cong = 290;
 
 struct netif_rx_stats netdev_rx_stat[NR_CPUS];
 
 
 #ifdef CONFIG_NET_HW_FLOWCONTROL
-static atomic_t netdev_dropping = ATOMIC_INIT(0);
+atomic_t netdev_dropping = ATOMIC_INIT(0);
 static unsigned long netdev_fc_mask = 1;
 unsigned long netdev_fc_xoff = 0;
 spinlock_t netdev_fc_lock = SPIN_LOCK_UNLOCKED;
@@ -770,12 +1041,76 @@ static void netdev_wakeup(void)
 }
 #endif
 
-/*
- *	Receive a packet from a device driver and queue it for the upper
- *	(protocol) levels.  It always succeeds. 
+static void get_sample_stats(int cpu)
+{
+#ifdef RAND_LIE
+	unsigned long rd;
+	int rq;
+#endif
+	int blog = softnet_data[cpu].input_pkt_queue.qlen;
+	int avg_blog = softnet_data[cpu].avg_blog;
+
+	avg_blog = (avg_blog >> 1)+ (blog >> 1);
+
+	if (avg_blog > mod_cong) {
+		/* Above moderate congestion levels. */
+		softnet_data[cpu].cng_level = NET_RX_CN_HIGH;
+#ifdef RAND_LIE
+		rd = net_random();
+		rq = rd % netdev_max_backlog;
+		if (rq < avg_blog) /* unlucky bastard */
+			softnet_data[cpu].cng_level = NET_RX_DROP;
+#endif
+	} else if (avg_blog > lo_cong) {
+		softnet_data[cpu].cng_level = NET_RX_CN_MOD;
+#ifdef RAND_LIE
+		rd = net_random();
+		rq = rd % netdev_max_backlog;
+			if (rq < avg_blog) /* unlucky bastard */
+				softnet_data[cpu].cng_level = NET_RX_CN_HIGH;
+#endif
+	} else if (avg_blog > no_cong) 
+		softnet_data[cpu].cng_level = NET_RX_CN_LOW;
+	else  /* no congestion */
+		softnet_data[cpu].cng_level = NET_RX_SUCCESS;
+
+	softnet_data[cpu].avg_blog = avg_blog;
+}
+
+#ifdef OFFLINE_SAMPLE
+static void sample_queue(unsigned long dummy)
+{
+/* 10 ms 0r 1ms -- i dont care -- JHS */
+	int next_tick = 1;
+	int cpu = smp_processor_id();
+
+	get_sample_stats(cpu);
+	next_tick += jiffies;
+	mod_timer(&samp_timer, next_tick);
+}
+#endif
+
+
+/**
+ *	netif_rx	-	post buffer to the network code
+ *	@skb: buffer to post
+ *
+ *	This function receives a packet from a device driver and queues it for
+ *	the upper (protocol) levels to process.  It always succeeds. The buffer
+ *	may be dropped during processing for congestion control or by the 
+ *	protocol layers.
+ *      
+ *	return values:
+ *	NET_RX_SUCCESS	(no congestion)           
+ *	NET_RX_CN_LOW     (low congestion) 
+ *	NET_RX_CN_MOD     (moderate congestion)
+ *	NET_RX_CN_HIGH    (high congestion) 
+ *	NET_RX_DROP    (packet was dropped)
+ *      
+ *      
  */
 
-void netif_rx(struct sk_buff *skb)
+int netif_rx(struct sk_buff *skb)
 {
 	int this_cpu = smp_processor_id();
 	struct softnet_data *queue;
@@ -798,14 +1133,14 @@ void netif_rx(struct sk_buff *skb)
 				goto drop;
 
 enqueue:
-			if (skb->rx_dev)
-				dev_put(skb->rx_dev);
-			skb->rx_dev = skb->dev;
-			dev_hold(skb->rx_dev);
+			dev_hold(skb->dev);
 			__skb_queue_tail(&queue->input_pkt_queue,skb);
 			__cpu_raise_softirq(this_cpu, NET_RX_SOFTIRQ);
 			local_irq_restore(flags);
-			return;
+#ifndef OFFLINE_SAMPLE
+			get_sample_stats(this_cpu);
+#endif
+			return softnet_data[this_cpu].cng_level;
 		}
 
 		if (queue->throttle) {
@@ -831,19 +1166,22 @@ drop:
 	local_irq_restore(flags);
 
 	kfree_skb(skb);
+	return NET_RX_DROP;
 }
 
 /* Deliver skb to an old protocol, which is not threaded well
    or which do not understand shared skbs.
  */
-static void deliver_to_old_ones(struct packet_type *pt, struct sk_buff *skb, int last)
+static int deliver_to_old_ones(struct packet_type *pt, struct sk_buff *skb, int last)
 {
 	static spinlock_t net_bh_lock = SPIN_LOCK_UNLOCKED;
+	int ret = NET_RX_DROP;
+
 
 	if (!last) {
 		skb = skb_clone(skb, GFP_ATOMIC);
 		if (skb == NULL)
-			return;
+			return ret;
 	}
 
 	/* The assumption (correct one) is that old protocols
@@ -856,10 +1194,11 @@ static void deliver_to_old_ones(struct packet_type *pt, struct sk_buff *skb, int
 	/* Disable timers and wait for all timers completion */
 	tasklet_disable(bh_task_vec+TIMER_BH);
 
-	pt->func(skb, skb->dev, pt);
+	ret = pt->func(skb, skb->dev, pt);
 
 	tasklet_enable(bh_task_vec+TIMER_BH);
 	spin_unlock(&net_bh_lock);
+	return ret;
 }
 
 /* Reparent skb to master device. This function is called
@@ -868,11 +1207,11 @@ static void deliver_to_old_ones(struct packet_type *pt, struct sk_buff *skb, int
  */
 static __inline__ void skb_bond(struct sk_buff *skb)
 {
-	struct net_device *dev = skb->rx_dev;
+	struct net_device *dev = skb->dev;
 	
 	if (dev->master) {
 		dev_hold(dev->master);
-		skb->dev = skb->rx_dev = dev->master;
+		skb->dev = dev->master;
 		dev_put(dev);
 	}
 }
@@ -910,6 +1249,7 @@ static void net_tx_action(struct softirq_action *h)
 			struct net_device *dev = head;
 			head = head->next_sched;
 
+			smp_mb__before_clear_bit();
 			clear_bit(__LINK_STATE_SCHED, &dev->state);
 
 			if (spin_trylock(&dev->queue_lock)) {
@@ -922,6 +1262,14 @@ static void net_tx_action(struct softirq_action *h)
 	}
 }
 
+/**
+ *	net_call_rx_atomic
+ *	@fn: function to call
+ *
+ *	Make a function call that is atomic with respect to the protocol
+ *	layers.
+ */
+ 
 void net_call_rx_atomic(void (*fn)(void))
 {
 	br_write_lock_bh(BR_NETPROTO_LOCK);
@@ -933,20 +1281,33 @@ void net_call_rx_atomic(void (*fn)(void))
 void (*br_handle_frame_hook)(struct sk_buff *skb) = NULL;
 #endif
 
-static void __inline__ handle_bridge(struct sk_buff *skb,
+static int __inline__ handle_bridge(struct sk_buff *skb,
 				     struct packet_type *pt_prev)
 {
+	int ret = NET_RX_DROP;
+
 	if (pt_prev) {
 		if (!pt_prev->data)
-			deliver_to_old_ones(pt_prev, skb, 0);
+			ret = deliver_to_old_ones(pt_prev, skb, 0);
 		else {
 			atomic_inc(&skb->users);
-			pt_prev->func(skb, skb->dev, pt_prev);
+			ret = pt_prev->func(skb, skb->dev, pt_prev);
 		}
 	}
 
 	br_handle_frame_hook(skb);
+	return ret;
 }
+
+
+#ifdef CONFIG_NET_DIVERT
+static inline void handle_diverter(struct sk_buff *skb)
+{
+	/* if diversion is supported on device, then divert */
+	if (skb->dev->divert && skb->dev->divert->divert)
+		divert_frame(skb);
+}
+#endif   /* CONFIG_NET_DIVERT */
 
 
 static void net_rx_action(struct softirq_action *h)
@@ -960,6 +1321,7 @@ static void net_rx_action(struct softirq_action *h)
 
 	for (;;) {
 		struct sk_buff *skb;
+		struct net_device *rx_dev;
 
 		local_irq_disable();
 		skb = __skb_dequeue(&queue->input_pkt_queue);
@@ -970,10 +1332,13 @@ static void net_rx_action(struct softirq_action *h)
 
 		skb_bond(skb);
 
+		rx_dev = skb->dev;
+
 #ifdef CONFIG_NET_FASTROUTE
 		if (skb->pkt_type == PACKET_FASTROUTE) {
 			netdev_rx_stat[this_cpu].fastroute_deferred_out++;
 			dev_queue_xmit(skb);
+			dev_put(rx_dev);
 			continue;
 		}
 #endif
@@ -999,10 +1364,17 @@ static void net_rx_action(struct softirq_action *h)
 				}
 			}
 
+#ifdef CONFIG_NET_DIVERT
+			if (skb->dev->divert && skb->dev->divert->divert)
+				handle_diverter(skb);
+#endif /* CONFIG_NET_DIVERT */
+
+			
 #if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
 			if (skb->dev->br_port != NULL &&
 			    br_handle_frame_hook != NULL) {
 				handle_bridge(skb, pt_prev);
+				dev_put(rx_dev);
 				continue;
 			}
 #endif
@@ -1033,8 +1405,21 @@ static void net_rx_action(struct softirq_action *h)
 				kfree_skb(skb);
 		}
 
+		dev_put(rx_dev);
+
 		if (bugdet-- < 0 || jiffies - start_time > 1)
 			goto softnet_break;
+
+#ifdef CONFIG_NET_HW_FLOWCONTROL
+	if (queue->throttle && queue->input_pkt_queue.qlen < no_cong_thresh ) {
+		if (atomic_dec_and_test(&netdev_dropping)) {
+			queue->throttle = 0;
+			netdev_wakeup();
+			goto softnet_break;
+		}
+	}
+#endif
+
 	}
 	br_read_unlock(BR_NETPROTO_LOCK);
 
@@ -1063,10 +1448,18 @@ softnet_break:
 	return;
 }
 
-/* Protocol dependent address dumping routines */
-
 static gifconf_func_t * gifconf_list [NPROTO];
 
+/**
+ *	register_gifconf	-	register a SIOCGIF handler
+ *	@family: Address family
+ *	@gifconf: Function handler
+ *
+ *	Register protocol dependent address dumping routines. The handler
+ *	that is passed must not be freed or reused until it has been replaced
+ *	by another handler.
+ */
+ 
 int register_gifconf(unsigned int family, gifconf_func_t * gifconf)
 {
 	if (family>=NPROTO)
@@ -1258,10 +1651,11 @@ static int dev_get_info(char *buffer, char **start, off_t offset, int length)
 static int dev_proc_stats(char *buffer, char **start, off_t offset,
 			  int length, int *eof, void *data)
 {
-	int i;
+	int i, lcpu;
 	int len=0;
 
-	for (i=0; i<smp_num_cpus; i++) {
+	for (lcpu=0; lcpu<smp_num_cpus; lcpu++) {
+		i = cpu_logical_map(lcpu);
 		len += sprintf(buffer+len, "%08x %08x %08x %08x %08x %08x %08x %08x %08x\n",
 			       netdev_rx_stat[i].total,
 			       netdev_rx_stat[i].dropped,
@@ -1381,6 +1775,18 @@ static int dev_get_wireless_info(char * buffer, char **start, off_t offset,
 #endif	/* CONFIG_PROC_FS */
 #endif	/* WIRELESS_EXT */
 
+/**
+ *	netdev_set_master	-	set up master/slave pair
+ *	@slave: slave device
+ *	@master: new master device
+ *
+ *	Changes the master device of the slave. Pass %NULL to break the
+ *	bonding. The caller must hold the RTNL semaphore. On a failure
+ *	a negative errno code is returned. On success the reference counts
+ *	are adjusted, %RTM_NEWLINK is sent to the routing socket and the
+ *	function returns zero.
+ */
+ 
 int netdev_set_master(struct net_device *slave, struct net_device *master)
 {
 	struct net_device *old = slave->master;
@@ -1409,6 +1815,17 @@ int netdev_set_master(struct net_device *slave, struct net_device *master)
 	return 0;
 }
 
+/**
+ *	dev_set_promiscuity	- update promiscuity count on a device
+ *	@dev: device
+ *	@inc: modifier
+ *
+ *	Add or remove promsicuity from a device. While the count in the device
+ *	remains above zero the interface remains promiscuous. Once it hits zero
+ *	the device reverts back to normal filtering operation. A negative inc
+ *	value is used to drop promiscuity on the device.
+ */
+ 
 void dev_set_promiscuity(struct net_device *dev, int inc)
 {
 	unsigned short old_flags = dev->flags;
@@ -1429,6 +1846,18 @@ void dev_set_promiscuity(struct net_device *dev, int inc)
 		       dev->name, (dev->flags&IFF_PROMISC) ? "entered" : "left");
 	}
 }
+
+/**
+ *	dev_set_allmulti	- update allmulti count on a device
+ *	@dev: device
+ *	@inc: modifier
+ *
+ *	Add or remove reception of all multicast frames to a device. While the
+ *	count in the device remains above zero the interface remains listening
+ *	to all interfaces. Once it hits zero the device reverts back to normal
+ *	filtering operation. A negative @inc value is used to drop the counter
+ *	when releasing a resource needing all multicasts.
+ */
 
 void dev_set_allmulti(struct net_device *dev, int inc)
 {
@@ -1648,8 +2077,9 @@ static int dev_ifsioc(struct ifreq *ifr, unsigned int cmd)
 		 */
 
 		default:
-			if (cmd >= SIOCDEVPRIVATE &&
-			    cmd <= SIOCDEVPRIVATE + 15) {
+			if ((cmd >= SIOCDEVPRIVATE &&
+			    cmd <= SIOCDEVPRIVATE + 15) ||
+			    cmd == SIOCETHTOOL) {
 				if (dev->do_ioctl) {
 					if (!netif_device_present(dev))
 						return -ENODEV;
@@ -1673,10 +2103,20 @@ static int dev_ifsioc(struct ifreq *ifr, unsigned int cmd)
 	return -EINVAL;
 }
 
-
 /*
  *	This function handles all "interface"-type I/O control requests. The actual
  *	'doing' part of this is dev_ifsioc above.
+ */
+
+/**
+ *	dev_ioctl	-	network device ioctl
+ *	@cmd: command to issue
+ *	@arg: pointer to a struct ifreq in user space
+ *
+ *	Issue ioctl functions to devices. This is normally called by the
+ *	user space syscall interfaces but can sometimes be useful for 
+ *	other purposes. The return value is the return from the syscall if
+ *	positive or a negative errno code on error.
  */
 
 int dev_ioctl(unsigned int cmd, void *arg)
@@ -1760,12 +2200,15 @@ int dev_ioctl(unsigned int cmd, void *arg)
 		case SIOCSIFHWBROADCAST:
 		case SIOCSIFTXQLEN:
 		case SIOCSIFNAME:
+		case SIOCETHTOOL:
 			if (!capable(CAP_NET_ADMIN))
 				return -EPERM;
 			dev_load(ifr.ifr_name);
+			dev_probe_lock();
 			rtnl_lock();
 			ret = dev_ifsioc(&ifr, cmd);
 			rtnl_unlock();
+			dev_probe_unlock();
 			return ret;
 	
 		case SIOCGIFMEM:
@@ -1784,20 +2227,26 @@ int dev_ioctl(unsigned int cmd, void *arg)
 			if (cmd >= SIOCDEVPRIVATE &&
 			    cmd <= SIOCDEVPRIVATE + 15) {
 				dev_load(ifr.ifr_name);
+				dev_probe_lock();
 				rtnl_lock();
 				ret = dev_ifsioc(&ifr, cmd);
 				rtnl_unlock();
+				dev_probe_unlock();
 				if (!ret && copy_to_user(arg, &ifr, sizeof(struct ifreq)))
 					return -EFAULT;
 				return ret;
 			}
 #ifdef WIRELESS_EXT
+			/* Take care of Wireless Extensions */
 			if (cmd >= SIOCIWFIRST && cmd <= SIOCIWLAST) {
-				dev_load(ifr.ifr_name);
-				if (IW_IS_SET(cmd)) {
-					if (!suser())
+				/* If command is `set a parameter', or
+				 * `get the encoding parameters', check if
+				 * the user has the right to do it */
+				if (IW_IS_SET(cmd) || (cmd == SIOCGIWENCODE)) {
+					if(!capable(CAP_NET_ADMIN))
 						return -EPERM;
 				}
+				dev_load(ifr.ifr_name);
 				rtnl_lock();
 				ret = dev_ifsioc(&ifr, cmd);
 				rtnl_unlock();
@@ -1811,6 +2260,15 @@ int dev_ioctl(unsigned int cmd, void *arg)
 	}
 }
 
+
+/**
+ *	dev_new_index	-	allocate an ifindex
+ *
+ *	Returns a suitable unique value for a new device interface
+ *	number.  The caller must hold the rtnl semaphore or the
+ *	dev_base_lock to be sure it remains unique.
+ */
+ 
 int dev_new_index(void)
 {
 	static int ifindex;
@@ -1824,10 +2282,30 @@ int dev_new_index(void)
 
 static int dev_boot_phase = 1;
 
+/**
+ *	register_netdevice	- register a network device
+ *	@dev: device to register
+ *	
+ *	Take a completed network device structure and add it to the kernel
+ *	interfaces. A %NETDEV_REGISTER message is sent to the netdev notifier
+ *	chain. 0 is returned on success. A negative errno code is returned
+ *	on a failure to set up the device, or if the name is a duplicate.
+ *
+ *	Callers must hold the rtnl semaphore.  See the comment at the
+ *	end of Space.c for details about the locking.  You may want
+ *	register_netdev() instead of this.
+ *
+ *	BUGS:
+ *	The locking appears insufficient to guarantee two parallel registers
+ *	will not get the same name.
+ */
 
 int register_netdevice(struct net_device *dev)
 {
 	struct net_device *d, **dp;
+#ifdef CONFIG_NET_DIVERT
+	int ret;
+#endif
 
 	spin_lock_init(&dev->queue_lock);
 	spin_lock_init(&dev->xmit_lock);
@@ -1837,6 +2315,12 @@ int register_netdevice(struct net_device *dev)
 #endif
 
 	if (dev_boot_phase) {
+#ifdef CONFIG_NET_DIVERT
+		ret = alloc_divert_blk(dev);
+		if (ret)
+			return ret;
+#endif /* CONFIG_NET_DIVERT */
+		
 		/* This is NOT bug, but I am not sure, that all the
 		   devices, initialized before netdev module is started
 		   are sane. 
@@ -1872,6 +2356,12 @@ int register_netdevice(struct net_device *dev)
 		return 0;
 	}
 
+#ifdef CONFIG_NET_DIVERT
+	ret = alloc_divert_blk(dev);
+	if (ret)
+		return ret;
+#endif /* CONFIG_NET_DIVERT */
+	
 	dev->iflink = -1;
 
 	/* Init, if this function is available */
@@ -1914,9 +2404,19 @@ int register_netdevice(struct net_device *dev)
 	/* Notify protocols, that a new device appeared. */
 	notifier_call_chain(&netdev_chain, NETDEV_REGISTER, dev);
 
+	net_run_sbin_hotplug(dev, "register");
+
 	return 0;
 }
 
+/**
+ *	netdev_finish_unregister - complete unregistration
+ *	@dev: device
+ *
+ *	Destroy and free a dead device. A value of zero is returned on
+ *	success.
+ */
+ 
 int netdev_finish_unregister(struct net_device *dev)
 {
 	BUG_TRAP(dev->ip_ptr==NULL);
@@ -1924,22 +2424,36 @@ int netdev_finish_unregister(struct net_device *dev)
 	BUG_TRAP(dev->dn_ptr==NULL);
 
 	if (!dev->deadbeaf) {
-		printk("Freeing alive device %p, %s\n", dev, dev->name);
+		printk(KERN_ERR "Freeing alive device %p, %s\n", dev, dev->name);
 		return 0;
 	}
 #ifdef NET_REFCNT_DEBUG
-	printk(KERN_DEBUG "netdev_finish_unregister: %s%s.\n", dev->name, dev->new_style?"":", old style");
+	printk(KERN_DEBUG "netdev_finish_unregister: %s%s.\n", dev->name,
+	       (dev->features & NETIF_F_DYNALLOC)?"":", old style");
 #endif
 	if (dev->destructor)
 		dev->destructor(dev);
-	if (dev->new_style)
+	if (dev->features & NETIF_F_DYNALLOC)
 		kfree(dev);
 	return 0;
 }
 
+/**
+ *	unregister_netdevice - remove device from the kernel
+ *	@dev: device
+ *
+ *	This function shuts down a device interface and removes it
+ *	from the kernel tables. On success 0 is returned, on a failure
+ *	a negative errno code is returned.
+ *
+ *	Callers must hold the rtnl semaphore.  See the comment at the
+ *	end of Space.c for details about the locking.  You may want
+ *	unregister_netdev() instead of this.
+ */
+
 int unregister_netdevice(struct net_device *dev)
 {
-	unsigned long now;
+	unsigned long now, warning_time;
 	struct net_device *d, **dp;
 
 	/* If device is running, close it first. */
@@ -1963,6 +2477,10 @@ int unregister_netdevice(struct net_device *dev)
 		return -ENODEV;
 	}
 
+	/* Synchronize to net_rx_action. */
+	br_write_lock_bh(BR_NETPROTO_LOCK);
+	br_write_unlock_bh(BR_NETPROTO_LOCK);
+
 	if (dev_boot_phase == 0) {
 #ifdef CONFIG_NET_FASTROUTE
 		dev_clear_fastroute(dev);
@@ -1970,6 +2488,8 @@ int unregister_netdevice(struct net_device *dev)
 
 		/* Shutdown queueing discipline. */
 		dev_shutdown(dev);
+
+		net_run_sbin_hotplug(dev, "unregister");
 
 		/* Notify protocols, that we are about to destroy
 		   this device. They should clean all the things.
@@ -1988,7 +2508,11 @@ int unregister_netdevice(struct net_device *dev)
 	/* Notifier chain MUST detach us from master device. */
 	BUG_TRAP(dev->master==NULL);
 
-	if (dev->new_style) {
+#ifdef CONFIG_NET_DIVERT
+	free_divert_blk(dev);
+#endif
+
+	if (dev->features & NETIF_F_DYNALLOC) {
 #ifdef NET_REFCNT_DEBUG
 		if (atomic_read(&dev->refcnt) != 1)
 			printk(KERN_DEBUG "unregister_netdevice: holding %s refcnt=%d\n", dev->name, atomic_read(&dev->refcnt)-1);
@@ -2007,31 +2531,30 @@ int unregister_netdevice(struct net_device *dev)
 	printk("unregister_netdevice: waiting %s refcnt=%d\n", dev->name, atomic_read(&dev->refcnt));
 #endif
 
-	/* EXPLANATION. If dev->refcnt is not 1 now (1 is our own reference)
-	   it means that someone in the kernel still has reference
+	/* EXPLANATION. If dev->refcnt is not now 1 (our own reference)
+	   it means that someone in the kernel still has a reference
 	   to this device and we cannot release it.
 
 	   "New style" devices have destructors, hence we can return from this
-	   function and destructor will do all the work later.
+	   function and destructor will do all the work later.  As of kernel 2.4.0
+	   there are very few "New Style" devices.
 
-	   "Old style" devices expect that device is free of any references
-	   upon exit from this function. WE CANNOT MAKE such release
-	   without delay. Note that it is not new feature. Referencing devices
-	   after they are released occured in 2.0 and 2.2.
-	   Now we just can know about each fact of illegal usage.
+	   "Old style" devices expect that the device is free of any references
+	   upon exit from this function.
+	   We cannot return from this function until all such references have
+	   fallen away.  This is because the caller of this function will probably
+	   immediately kfree(*dev) and then be unloaded via sys_delete_module.
 
-	   So, we linger for 10*HZ (it is an arbitrary number)
+	   So, we linger until all references fall away.  The duration of the
+	   linger is basically unbounded! It is driven by, for example, the
+	   current setting of sysctl_ipfrag_time.
 
 	   After 1 second, we start to rebroadcast unregister notifications
 	   in hope that careless clients will release the device.
 
-	   If timeout expired, we have no choice how to cross fingers
-	   and return. Real alternative would be block here forever
-	   and we will make it eventually, when all peaceful citizens
-	   will be notified and repaired.
 	 */
 
-	now = jiffies;
+	now = warning_time = jiffies;
 	while (atomic_read(&dev->refcnt) != 1) {
 		if ((jiffies - now) > 1*HZ) {
 			/* Rebroadcast unregister notification */
@@ -2040,12 +2563,13 @@ int unregister_netdevice(struct net_device *dev)
 		current->state = TASK_INTERRUPTIBLE;
 		schedule_timeout(HZ/4);
 		current->state = TASK_RUNNING;
-		if ((jiffies - now) > 10*HZ)
-			break;
+		if ((jiffies - warning_time) > 10*HZ) {
+			printk(KERN_EMERG "unregister_netdevice: waiting for %s to "
+					"become free. Usage count = %d\n",
+					dev->name, atomic_read(&dev->refcnt));
+			warning_time = jiffies;
+		}
 	}
-
-	if (atomic_read(&dev->refcnt) != 1)
-		printk("unregister_netdevice: Old style device %s leaked(refcnt=%d). Wait for crash.\n", dev->name, atomic_read(&dev->refcnt)-1);
 	dev_put(dev);
 	return 0;
 }
@@ -2060,7 +2584,15 @@ int unregister_netdevice(struct net_device *dev)
 
 extern void net_device_init(void);
 extern void ip_auto_config(void);
+#ifdef CONFIG_NET_DIVERT
+extern void dv_init(void);
+#endif /* CONFIG_NET_DIVERT */
 
+
+/*
+ *       Callers must hold the rtnl semaphore.  See the comment at the
+ *       end of Space.c for details about the locking.
+ */
 int __init net_dev_init(void)
 {
 	struct net_device *dev, **dp;
@@ -2070,6 +2602,10 @@ int __init net_dev_init(void)
 	pktsched_init();
 #endif
 
+#ifdef CONFIG_NET_DIVERT
+	dv_init();
+#endif /* CONFIG_NET_DIVERT */
+	
 	/*
 	 *	Initialise the packet receive queues.
 	 */
@@ -2080,6 +2616,8 @@ int __init net_dev_init(void)
 		queue = &softnet_data[i];
 		skb_queue_head_init(&queue->input_pkt_queue);
 		queue->throttle = 0;
+		queue->cng_level = 0;
+		queue->avg_blog = 10; /* arbitrary non-zero */
 		queue->completion_queue = NULL;
 	}
 	
@@ -2088,6 +2626,12 @@ int __init net_dev_init(void)
 	NET_PROFILE_REGISTER(dev_queue_xmit);
 	NET_PROFILE_REGISTER(softnet_process);
 #endif
+
+#ifdef OFFLINE_SAMPLE
+	samp_timer.expires = jiffies + (10 * HZ);
+	add_timer(&samp_timer);
+#endif
+
 	/*
 	 *	Add the devices.
 	 *	If the call to dev->init fails, the dev is removed
@@ -2108,21 +2652,27 @@ int __init net_dev_init(void)
 		dev->xmit_lock_owner = -1;
 		dev->iflink = -1;
 		dev_hold(dev);
+
 		/*
-		 *	We can allocate the name ahead of time. If the
-		 *	init fails the name will be reissued correctly.
+		 * Allocate name. If the init() fails
+		 * the name will be reissued correctly.
 		 */
 		if (strchr(dev->name, '%'))
 			dev_alloc_name(dev, dev->name);
+
+		/* 
+		 * Check boot time settings for the device.
+		 */
+		netdev_boot_setup_check(dev);
+
 		if (dev->init && dev->init(dev)) {
 			/*
-			 *	It failed to come up. Unhook it.
+			 * It failed to come up. It will be unhooked later.
+			 * dev_alloc_name can now advance to next suitable
+			 * name that is checked next.
 			 */
-			write_lock_bh(&dev_base_lock);
-			*dp = dev->next;
 			dev->deadbeaf = 1;
-			write_unlock_bh(&dev_base_lock);
-			dev_put(dev);
+			dp = &dev->next;
 		} else {
 			dp = &dev->next;
 			dev->ifindex = dev_new_index();
@@ -2132,6 +2682,21 @@ int __init net_dev_init(void)
 				dev->rebuild_header = default_rebuild_header;
 			dev_init_scheduler(dev);
 			set_bit(__LINK_STATE_PRESENT, &dev->state);
+		}
+	}
+
+	/*
+	 * Unhook devices that failed to come up
+	 */
+	dp = &dev_base;
+	while ((dev = *dp) != NULL) {
+		if (dev->deadbeaf) {
+			write_lock_bh(&dev_base_lock);
+			*dp = dev->next;
+			write_unlock_bh(&dev_base_lock);
+			dev_put(dev);
+		} else {
+			dp = &dev->next;
 		}
 	}
 
@@ -2159,3 +2724,35 @@ int __init net_dev_init(void)
 
 	return 0;
 }
+
+#ifdef CONFIG_HOTPLUG
+
+/* Notify userspace when a netdevice event occurs,
+ * by running '/sbin/hotplug net' with certain
+ * environment variables set.
+ */
+
+static int net_run_sbin_hotplug(struct net_device *dev, char *action)
+{
+	char *argv[3], *envp[5], ifname[12 + IFNAMSIZ], action_str[32];
+	int i;
+
+	sprintf(ifname, "INTERFACE=%s", dev->name);
+	sprintf(action_str, "ACTION=%s", action);
+
+        i = 0;
+        argv[i++] = hotplug_path;
+        argv[i++] = "net";
+        argv[i] = 0;
+
+	i = 0;
+	/* minimal command environment */
+	envp [i++] = "HOME=/";
+	envp [i++] = "PATH=/sbin:/bin:/usr/sbin:/usr/bin";
+	envp [i++] = ifname;
+	envp [i++] = action_str;
+	envp [i] = 0;
+	
+	return call_usermodehelper(argv [0], argv, envp);
+}
+#endif

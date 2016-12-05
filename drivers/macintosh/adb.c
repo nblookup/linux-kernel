@@ -25,6 +25,7 @@
 #include <linux/devfs_fs_kernel.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
+#include <linux/smp_lock.h>
 #include <linux/adb.h>
 #include <linux/cuda.h>
 #include <linux/pmu.h>
@@ -72,6 +73,7 @@ static struct adb_driver *adb_driver_list[] = {
 struct adb_driver *adb_controller;
 struct notifier_block *adb_client_list = NULL;
 static int adb_got_sleep = 0;
+static int adb_inited = 0;
 
 #ifdef CONFIG_PMAC_PBOOK
 static int adb_notify_sleep(struct pmu_sleep_notifier *self, int when);
@@ -213,6 +215,11 @@ int __init adb_init(void)
 		return 0;
 #endif
 
+	/* xmon may do early-init */
+	if (adb_inited)
+		return 0;
+	adb_inited = 1;
+		
 	adb_controller = NULL;
 
 	i = 0;
@@ -386,6 +393,15 @@ adb_register(int default_id, int handler_id, struct adb_ids *ids,
 	return ids->nids;
 }
 
+int
+adb_unregister(int index)
+{
+	if (!adb_handler[index].handler)
+		return -ENODEV;
+	adb_handler[index].handler = 0;
+	return 0;
+}
+
 void
 adb_input(unsigned char *buf, int nb, struct pt_regs *regs, int autopoll)
 {
@@ -510,6 +526,7 @@ static int adb_release(struct inode *inode, struct file *file)
 	struct adbdev_state *state = file->private_data;
 	unsigned long flags;
 
+	lock_kernel();
 	if (state) {
 		file->private_data = NULL;
 		spin_lock_irqsave(&state->lock, flags);
@@ -522,6 +539,7 @@ static int adb_release(struct inode *inode, struct file *file)
 			spin_unlock_irqrestore(&state->lock, flags);
 		}
 	}
+	unlock_kernel();
 	return 0;
 }
 
@@ -668,8 +686,8 @@ void adbdev_init()
 	if (devfs_register_chrdev(ADB_MAJOR, "adb", &adb_fops))
 		printk(KERN_ERR "adb: unable to get major %d\n", ADB_MAJOR);
 	else
-		devfs_register (NULL, "adb", 0, DEVFS_FL_NONE,
+		devfs_register (NULL, "adb", DEVFS_FL_DEFAULT,
 				ADB_MAJOR, 0,
-				S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+				S_IFCHR | S_IRUSR | S_IWUSR,
 				&adb_fops, NULL);
 }

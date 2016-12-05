@@ -171,6 +171,7 @@ static int pg_drive_count;
 #include <linux/mtio.h>
 #include <linux/pg.h>
 #include <linux/wait.h>
+#include <linux/smp_lock.h>
 
 #include <asm/uaccess.h>
 
@@ -261,6 +262,7 @@ static char pg_scratch[512];            /* scratch block buffer */
 /* kernel glue structures */
 
 static struct file_operations pg_fops = {
+	owner:		THIS_MODULE,
 	read:		pg_read,
 	write:		pg_write,
 	open:		pg_open,
@@ -287,7 +289,7 @@ void pg_init_units( void )
 	}
 } 
 
-static devfs_handle_t devfs_handle = NULL;
+static devfs_handle_t devfs_handle;
 
 int pg_init (void)      /* preliminary initialisation */
 
@@ -306,9 +308,9 @@ int pg_init (void)      /* preliminary initialisation */
 		  if (PG.present) pi_release(PI);
 		return -1;
 	}
-	devfs_handle = devfs_mk_dir (NULL, "pg", 2, NULL);
+	devfs_handle = devfs_mk_dir (NULL, "pg", NULL);
 	devfs_register_series (devfs_handle, "%u", 4, DEVFS_FL_DEFAULT,
-			       major, 0, S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			       major, 0, S_IFCHR | S_IRUSR | S_IWUSR,
 			       &pg_fops, NULL);
 	return 0;
 }
@@ -578,8 +580,6 @@ static int pg_open (struct inode *inode, struct file *file)
 		return -EBUSY;
 	}
 
-	MOD_INC_USE_COUNT;
-
 	if (PG.busy) {
 		pg_reset(unit);
 		PG.busy = 0;
@@ -591,7 +591,6 @@ static int pg_open (struct inode *inode, struct file *file)
 	PG.bufptr = kmalloc(PG_MAX_DATA,GFP_KERNEL);
 	if (PG.bufptr == NULL) {
 		PG.access--;
-		MOD_DEC_USE_COUNT;
 		printk("%s: buffer allocation failed\n",PG.name);
 		return -ENOMEM;
 	}
@@ -606,12 +605,12 @@ static int pg_release (struct inode *inode, struct file *file)
 	if ((unit >= PG_UNITS) || (PG.access <= 0)) 
 		return -EINVAL;
 
+	lock_kernel();
 	PG.access--;
 
 	kfree(PG.bufptr);
 	PG.bufptr = NULL;
-
-	MOD_DEC_USE_COUNT;
+	unlock_kernel();
 
 	return 0;
 

@@ -10,6 +10,7 @@
 #include <linux/file.h>
 #include <linux/uio.h>
 #include <linux/smp_lock.h>
+#include <linux/dnotify.h>
 
 #include <asm/uaccess.h>
 
@@ -64,17 +65,11 @@ asmlinkage off_t sys_lseek(unsigned int fd, off_t offset, unsigned int origin)
 {
 	off_t retval;
 	struct file * file;
-	struct dentry * dentry;
-	struct inode * inode;
 
 	retval = -EBADF;
 	file = fget(fd);
 	if (!file)
 		goto bad;
-	/* N.B. Shouldn't this be ENOENT?? */
-	if (!(dentry = file->f_dentry) ||
-	    !(inode = dentry->d_inode))
-		goto out_putf;
 	retval = -EINVAL;
 	if (origin <= 2) {
 		loff_t res = llseek(file, offset, origin);
@@ -82,7 +77,6 @@ asmlinkage off_t sys_lseek(unsigned int fd, off_t offset, unsigned int origin)
 		if (res != (loff_t)retval)
 			retval = -EOVERFLOW;	/* LFS: should only happen on 32 bit platforms */
 	}
-out_putf:
 	fput(file);
 bad:
 	return retval;
@@ -95,18 +89,12 @@ asmlinkage long sys_llseek(unsigned int fd, unsigned long offset_high,
 {
 	int retval;
 	struct file * file;
-	struct dentry * dentry;
-	struct inode * inode;
 	loff_t offset;
 
 	retval = -EBADF;
 	file = fget(fd);
 	if (!file)
 		goto bad;
-	/* N.B. Shouldn't this be ENOENT?? */
-	if (!(dentry = file->f_dentry) ||
-	    !(inode = dentry->d_inode))
-		goto out_putf;
 	retval = -EINVAL;
 	if (origin > 2)
 		goto out_putf;
@@ -145,6 +133,9 @@ asmlinkage ssize_t sys_read(unsigned int fd, char * buf, size_t count)
 					ret = read(file, buf, count, &file->f_pos);
 			}
 		}
+		if (ret > 0)
+			inode_dir_notify(file->f_dentry->d_parent->d_inode,
+				DN_ACCESS);
 		fput(file);
 	}
 	return ret;
@@ -169,6 +160,9 @@ asmlinkage ssize_t sys_write(unsigned int fd, const char * buf, size_t count)
 					ret = write(file, buf, count, &file->f_pos);
 			}
 		}
+		if (ret > 0)
+			inode_dir_notify(file->f_dentry->d_parent->d_inode,
+				DN_MODIFY);
 		fput(file);
 	}
 	return ret;
@@ -212,9 +206,19 @@ static ssize_t do_readv_writev(int type, struct file *file,
 	if (copy_from_user(iov, vector, count*sizeof(*vector)))
 		goto out;
 
+	/* BSD readv/writev returns EINVAL if one of the iov_len
+	   values < 0 or tot_len overflowed a 32-bit integer. -ink */
 	tot_len = 0;
-	for (i = 0 ; i < count ; i++)
-		tot_len += iov[i].iov_len;
+	ret = -EINVAL;
+	for (i = 0 ; i < count ; i++) {
+		size_t tmp = tot_len;
+		int len = iov[i].iov_len;
+		if (len < 0)
+			goto out;
+		(u32)tot_len += len;
+		if (tot_len < tmp || tot_len < (u32)len)
+			goto out;
+	}
 
 	inode = file->f_dentry->d_inode;
 	/* VERIFY_WRITE actually means a read, as we write to user space */
@@ -260,6 +264,10 @@ out:
 	if (iov != iovstack)
 		kfree(iov);
 out_nofree:
+	/* VERIFY_WRITE actually means a read, as we write to user space */
+	if ((ret + (type == VERIFY_WRITE)) > 0)
+		inode_dir_notify(file->f_dentry->d_parent->d_inode,
+			(type == VERIFY_WRITE) ? DN_MODIFY : DN_ACCESS);
 	return ret;
 }
 
@@ -330,6 +338,8 @@ asmlinkage ssize_t sys_pread(unsigned int fd, char * buf,
 	if (pos < 0)
 		goto out;
 	ret = read(file, buf, count, &pos);
+	if (ret > 0)
+		inode_dir_notify(file->f_dentry->d_parent->d_inode, DN_ACCESS);
 out:
 	fput(file);
 bad_file:
@@ -360,6 +370,8 @@ asmlinkage ssize_t sys_pwrite(unsigned int fd, const char * buf,
 		goto out;
 
 	ret = write(file, buf, count, &pos);
+	if (ret > 0)
+		inode_dir_notify(file->f_dentry->d_parent->d_inode, DN_MODIFY);
 out:
 	fput(file);
 bad_file:

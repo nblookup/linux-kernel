@@ -1,7 +1,7 @@
 /*
  * drivers/video/clgenfb.c - driver for Cirrus Logic chipsets
  *
- * Copyright 1999 Jeff Garzik <jgarzik@mandrakesoft.com>
+ * Copyright 1999,2000 Jeff Garzik <jgarzik@mandrakesoft.com>
  *
  * Contributors (thanks, all!)
  *
@@ -31,7 +31,7 @@
  *
  */
 
-#define CLGEN_VERSION "1.9.4.5"
+#define CLGEN_VERSION "1.9.8"
 
 #include <linux/config.h>
 #include <linux/module.h>
@@ -56,9 +56,6 @@
 #ifdef CONFIG_AMIGA
 #include <asm/amigahw.h>
 #endif
-#ifdef CONFIG_FB_OF
-#include <asm/prom.h>
-#endif
 
 #include <video/fbcon.h>
 #include <video/fbcon-mfb.h>
@@ -69,27 +66,6 @@
 
 #include "clgenfb.h"
 #include "vga.h"
-
-
-/*****************************************************************
- *
- * compatibility with older kernel versions
- *
- */
-
-#ifndef LINUX_VERSION_CODE
-#include <linux/version.h>
-#endif
-
-#ifndef KERNEL_VERSION
-#define KERNEL_VERSION(x,y,z) (((x)<<16)+((y)<<8)+(z))
-#endif
-
-#ifndef PCI_DEVICE_ID_CIRRUS_5462
-#define PCI_DEVICE_ID_CIRRUS_5462      0x00d0
-#endif
-
-
 
 
 /*****************************************************************
@@ -123,8 +99,6 @@
 #define assert(expr)
 #endif
 
-#define arraysize(x)    (sizeof(x)/sizeof(*(x)))
-
 #ifdef TRUE
 #undef TRUE
 #endif
@@ -137,8 +111,6 @@
 #define MB_ (1024*1024)
 
 #define MAX_NUM_BOARDS 7
-
-
 
 
 /*****************************************************************
@@ -159,7 +131,6 @@ typedef enum {
 	BT_GD5480,
 	BT_LAGUNA,	/* GD546x */
 } clgen_board_t;
-
 
 
 /*
@@ -309,7 +280,6 @@ static const struct {
 	{ BT_LAGUNA, "CL Laguna 3DA", PCI_DEVICE_ID_CIRRUS_5465 },
 };
 #endif /* CONFIG_PCI */
-
 
 
 #ifdef CONFIG_ZORRO
@@ -478,7 +448,7 @@ static const struct {
 	}
 };
 
-#define NUM_TOTAL_MODES    arraysize(clgenfb_predefined)
+#define NUM_TOTAL_MODES    ARRAY_SIZE(clgenfb_predefined)
 static struct fb_var_screeninfo clgenfb_default;
 
 /*
@@ -495,32 +465,20 @@ static const char *clgenfb_name = "CLgen";
 int clgenfb_init (void);
 int clgenfb_setup (char *options);
 
-#ifdef MODULE
-static void clgenfb_cleanup (struct clgenfb_info *info);
-#endif
-
 static int clgenfb_open (struct fb_info *info, int user);
 static int clgenfb_release (struct fb_info *info, int user);
-static int clgenfb_ioctl (struct inode *inode, struct file *file,
-		   unsigned int cmd, unsigned long arg, int con,
-		   struct fb_info *info);
-#if defined(CONFIG_FB_OF)
-int clgen_of_init (struct device_node *dp);
-#endif
 
 /* function table of the above functions */
-static struct fb_ops clgenfb_ops =
-{
-	clgenfb_open,
-	clgenfb_release,
-	fbgen_get_fix,		/* using the generic functions */
-	fbgen_get_var,		/* makes things much easier... */
-	fbgen_set_var,
-	fbgen_get_cmap,
-	fbgen_set_cmap,
-	fbgen_pan_display,
-	clgenfb_ioctl,
-	NULL
+static struct fb_ops clgenfb_ops = {
+	owner:		THIS_MODULE,
+	fb_open:	clgenfb_open,
+	fb_release:	clgenfb_release,
+	fb_get_fix:	fbgen_get_fix,
+	fb_get_var:	fbgen_get_var,
+	fb_set_var:	fbgen_set_var,
+	fb_get_cmap:	fbgen_get_cmap,
+	fb_set_cmap:	fbgen_set_cmap,
+	fb_pan_display:	fbgen_pan_display,
 };
 
 /*--- Hardware Specific Routines -------------------------------------------*/
@@ -570,18 +528,15 @@ static void fbcon_clgen8_bmove (struct display *p, int sy, int sx,
 static void fbcon_clgen8_clear (struct vc_data *conp, struct display *p,
 				int sy, int sx, int height, int width);
 
-static struct display_switch fbcon_clgen_8 =
-{
-	fbcon_cfb8_setup,
-	fbcon_clgen8_bmove,
-	fbcon_clgen8_clear,
-	fbcon_cfb8_putc,
-	fbcon_cfb8_putcs,
-	fbcon_cfb8_revc,
-	NULL,
-	NULL,
-	fbcon_cfb8_clear_margins,
-	FONTWIDTH (4) | FONTWIDTH (8) | FONTWIDTH (12) | FONTWIDTH (16)
+static struct display_switch fbcon_clgen_8 = {
+	setup:		fbcon_cfb8_setup,
+	bmove:		fbcon_clgen8_bmove,
+	clear:		fbcon_clgen8_clear,
+	putc:		fbcon_cfb8_putc,
+	putcs:		fbcon_cfb8_putcs,
+	revc:		fbcon_cfb8_revc,
+	clear_margins:	fbcon_cfb8_clear_margins,
+	fontwidthmask:	FONTWIDTH (4) | FONTWIDTH (8) | FONTWIDTH (12) | FONTWIDTH (16)
 };
 #endif
 #ifdef FBCON_HAS_CFB16
@@ -589,18 +544,15 @@ static void fbcon_clgen16_bmove (struct display *p, int sy, int sx,
 				 int dy, int dx, int height, int width);
 static void fbcon_clgen16_clear (struct vc_data *conp, struct display *p,
 				 int sy, int sx, int height, int width);
-static struct display_switch fbcon_clgen_16 =
-{
-	fbcon_cfb16_setup,
-	fbcon_clgen16_bmove,
-	fbcon_clgen16_clear,
-	fbcon_cfb16_putc,
-	fbcon_cfb16_putcs,
-	fbcon_cfb16_revc,
-	NULL,
-	NULL,
-	fbcon_cfb16_clear_margins,
-	FONTWIDTH (4) | FONTWIDTH (8) | FONTWIDTH (12) | FONTWIDTH (16)
+static struct display_switch fbcon_clgen_16 = {
+	setup:		fbcon_cfb16_setup,
+	bmove:		fbcon_clgen16_bmove,
+	clear:		fbcon_clgen16_clear,
+	putc:		fbcon_cfb16_putc,
+	putcs:		fbcon_cfb16_putcs,
+	revc:		fbcon_cfb16_revc,
+	clear_margins:	fbcon_cfb16_clear_margins,
+	fontwidthmask:	FONTWIDTH (4) | FONTWIDTH (8) | FONTWIDTH (12) | FONTWIDTH (16)
 };
 #endif
 #ifdef FBCON_HAS_CFB32
@@ -608,18 +560,15 @@ static void fbcon_clgen32_bmove (struct display *p, int sy, int sx,
 				 int dy, int dx, int height, int width);
 static void fbcon_clgen32_clear (struct vc_data *conp, struct display *p,
 				 int sy, int sx, int height, int width);
-static struct display_switch fbcon_clgen_32 =
-{
-	fbcon_cfb32_setup,
-	fbcon_clgen32_bmove,
-	fbcon_clgen32_clear,
-	fbcon_cfb32_putc,
-	fbcon_cfb32_putcs,
-	fbcon_cfb32_revc,
-	NULL,
-	NULL,
-	fbcon_cfb32_clear_margins,
-	FONTWIDTH (4) | FONTWIDTH (8) | FONTWIDTH (12) | FONTWIDTH (16)
+static struct display_switch fbcon_clgen_32 = {
+	setup:		fbcon_cfb32_setup,
+	bmove:		fbcon_clgen32_bmove,
+	clear:		fbcon_clgen32_clear,
+	putc:		fbcon_cfb32_putc,
+	putcs:		fbcon_cfb32_putcs,
+	revc:		fbcon_cfb32_revc,
+	clear_margins:	fbcon_cfb32_clear_margins,
+	fontwidthmask:	FONTWIDTH (4) | FONTWIDTH (8) | FONTWIDTH (12) | FONTWIDTH (16)
 };
 #endif
 
@@ -656,12 +605,6 @@ static void bestclock (long freq, long *best,
 		       long *nom, long *den,
 		       long *div, long maxfreq);
 
-#ifdef CONFIG_PCI
-static struct pci_dev *clgen_pci_dev_get (clgen_board_t *btype);
-static unsigned int clgen_get_memsize (caddr_t regbase);
-static int clgen_pci_setup (struct clgenfb_info *fb_info, clgen_board_t *btype);
-#endif				/* CONFIG_PCI */
-
 #ifdef CLGEN_DEBUG
 static void clgen_dump (void);
 static void clgen_dbg_reg_dump (caddr_t regbase);
@@ -678,7 +621,6 @@ static int opencount = 0;
 /*--- Open /dev/fbx ---------------------------------------------------------*/
 static int clgenfb_open (struct fb_info *info, int user)
 {
-	MOD_INC_USE_COUNT;
 	if (opencount++ == 0)
 		switch_monitor ((struct clgenfb_info *) info, 1);
 	return 0;
@@ -689,20 +631,9 @@ static int clgenfb_release (struct fb_info *info, int user)
 {
 	if (--opencount == 0)
 		switch_monitor ((struct clgenfb_info *) info, 0);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
-/*--- handle /dev/fbx ioctl calls ------------------------------------------*/
-static int clgenfb_ioctl (struct inode *inode, struct file *file,
-		   unsigned int cmd, unsigned long arg, int con,
-		   struct fb_info *info)
-{
-	DPRINTK ("ENTER\n");
-	/* Nothing exciting here... */
-	DPRINTK ("EXIT\n");
-	return -EINVAL;
-}
 /**** END   Interface used by the World *************************************/
 /****************************************************************************/
 /**** BEGIN Hardware specific Routines **************************************/
@@ -1064,10 +995,10 @@ static int clgen_decode_var (const struct fb_var_screeninfo *var, void *par,
 		vsync *= 2;
 		vback *= 2;
 	} else if (_par->var.vmode & FB_VMODE_INTERLACED) {
-		yres = ++yres / 2;
-		vfront = ++vfront / 2;
-		vsync = ++vsync / 2;
-		vback = ++vback / 2;
+		yres = (yres + 1) / 2;
+		vfront = (vfront + 1) / 2;
+		vsync = (vsync + 1) / 2;
+		vback = (vback + 1) / 2;
 	}
 	_par->HorizRes = xres;
 	_par->HorizTotal = (xres + hfront + hsync + hback) / 8 - 5;
@@ -1968,7 +1899,7 @@ static void __init init_vgachip (struct clgenfb_info *fb_info)
 		break;
 	case BT_PICASSO4:
 		vga_wcrt (fb_info->regs, CL_CRT51, 0x00);	/* disable flickerfixer */
-		udelay (100000);
+		mdelay (100);
 		vga_wgfx (fb_info->regs, CL_GR2F, 0x00);	/* from Klaus' NetBSD driver: */
 		vga_wgfx (fb_info->regs, CL_GR33, 0x00);	/* put blitter into 542x compat */
 		vga_wgfx (fb_info->regs, CL_GR31, 0x00);	/* mode */
@@ -2461,34 +2392,6 @@ static void __init get_prep_addrs (unsigned long *display, unsigned long *regist
 
 
 
-#ifdef CONFIG_FB_OF
-static void __init get_of_addrs (const struct device_node *dp,
-			  unsigned long *display, unsigned long *registers)
-{
-	int i;
-
-	DPRINTK ("ENTER\n");
-
-	/* Map in frame buffer and registers */
-	for (i = 0; i < dp->n_addrs; ++i) {
-		unsigned long addr = dp->addrs[i].address;
-		unsigned long size = dp->addrs[i].size;
-		printk ("dp->addrs[%d].address = %lx, dp->addrs[%d].size = %lx\n",
-			i, addr, i, size);
-		if (size >= 0x800000) {
-			*display = addr;
-		} else {
-			*registers = addr;
-		}
-	}
-
-	DPRINTK ("EXIT\n");
-}
-#endif				/* CONFIG_FB_OF */
-
-
-
-
 #ifdef CONFIG_PCI
 /* Pulled the logic from XFree86 Cirrus driver to get the memory size,
  * based on the DRAM bandwidth bit and DRAM bank switching bit.  This
@@ -2521,20 +2424,25 @@ static unsigned int __init clgen_get_memsize (caddr_t regbase)
 
 static struct pci_dev * __init clgen_pci_dev_get (clgen_board_t *btype)
 {
-	struct pci_dev *pdev = NULL;
+	struct pci_dev *pdev;
 	int i;
 
 	DPRINTK ("ENTER\n");
 	
-	for (i = 0; i < arraysize(clgen_pci_probe_list) && !pdev; i++)
-		pdev = pci_find_device (PCI_VENDOR_ID_CIRRUS,
-					clgen_pci_probe_list[i].device, NULL);
+	for (i = 0; i < ARRAY_SIZE(clgen_pci_probe_list); i++) {
+		pdev = NULL;
+		while ((pdev = pci_find_device (PCI_VENDOR_ID_CIRRUS,
+				clgen_pci_probe_list[i].device, pdev)) != NULL) {
+			if (pci_enable_device(pdev) == 0) {
+				*btype = clgen_pci_probe_list[i - 1].btype;
+				DPRINTK ("EXIT, returning pdev=%p\n", pdev);
+				return pdev;
+			}
+		}
+	}
 	
-	if (pdev)
-		*btype = clgen_pci_probe_list[i - 1].btype;
-
-	DPRINTK ("EXIT, returning %p\n", pdev);
-	return pdev;
+	DPRINTK ("EXIT, returning NULL\n");
+	return NULL;
 }
 
 
@@ -2554,28 +2462,13 @@ static void __init get_pci_addrs (const struct pci_dev *pdev,
 
 	/* This is a best-guess for now */
 
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,13)
-
-        *display = pdev->base_address[0];
-        if ((*display & PCI_BASE_ADDRESS_SPACE) == PCI_BASE_ADDRESS_SPACE_IO) {
-                *registers = *display;
-                *display = pdev->base_address[1];
-         } else {
-                *registers = pdev->base_address[1];
-	}
-
-#else
-
-	if (pdev->resource[0].flags & IORESOURCE_IO) {
-		*display = pdev->resource[1].start;
-		*registers = pdev->resource[0].start;
+	if (pci_resource_flags(pdev, 0) & IORESOURCE_IO) {
+		*display = pci_resource_start(pdev, 1);
+		*registers = pci_resource_start(pdev, 0);
 	} else {
-		*display = pdev->resource[0].start;
-		*registers = pdev->resource[1].start;
+		*display = pci_resource_start(pdev, 0);
+		*registers = pci_resource_start(pdev, 1);
 	}
-
-#endif		/* kernel older than 2.3.13 */
 
 	assert (*display != 0);
 
@@ -2583,32 +2476,25 @@ static void __init get_pci_addrs (const struct pci_dev *pdev,
 }
 
 
-
-
-/* clgen_pci_unmap only used in modules */
-#ifdef MODULE
-static void clgen_pci_unmap (struct clgenfb_info *info)
+static void __exit clgen_pci_unmap (struct clgenfb_info *info)
 {
 	iounmap (info->fbmem);
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,3,13)
 	release_mem_region(info->fbmem_phys, info->size);
+
+#if 0 /* if system didn't claim this region, we would... */
 	release_mem_region(0xA0000, 65535);
+#endif
+
 	if (release_io_ports)
 		release_region(0x3C0, 32);
-#endif
 }
-#endif /* MODULE */
 
 
 static int __init clgen_pci_setup (struct clgenfb_info *info,
 				   clgen_board_t *btype)
 {
-#ifdef CONFIG_FB_OF
-	struct device_node *dp;
-#endif				/* CONFIG_FB_OF */
 	struct pci_dev *pdev;
 	unsigned long board_addr, board_size;
-	u16 tmp16;
 
 	DPRINTK ("ENTER\n");
 
@@ -2629,35 +2515,12 @@ static int __init clgen_pci_setup (struct clgenfb_info *info,
 	pcibios_write_config_dword (0, pdev->devfn, PCI_BASE_ADDRESS_0, 0x00000000);
 #endif
 
-	pci_read_config_word (pdev, PCI_COMMAND, &tmp16);
-	if (!(tmp16 & (PCI_COMMAND_MEMORY | PCI_COMMAND_IO))) {
-		u16 tmp16_o = tmp16 | PCI_COMMAND_MEMORY | PCI_COMMAND_IO;
-		pci_write_config_word (pdev, PCI_COMMAND, tmp16_o);
-	}
-
-#ifdef CONFIG_FB_OF
-	/* Ok, so its an ugly hack, since we could have passed it down from
-	 * clgen_of_init() if we'd done it right. */
-	DPRINTK ("Attempt to get OF info for MacPicasso\n");
-	dp = find_devices ("MacPicasso");
-	if (dp != 0) {
-		if (dp->n_addrs != 2) {
-			printk (KERN_ERR "expecting 2 address for clgen (got %d)\n", dp->n_addrs);
-			DPRINTK ("EXIT, returning 1\n");
-			return 1;
-		}
-		get_of_addrs (dp, &board_addr, &info->fbregs_phys);
-	} else
-#endif
-	{
-
 #ifdef CONFIG_PREP
-		get_prep_addrs (&board_addr, &info->fbregs_phys);
+	get_prep_addrs (&board_addr, &info->fbregs_phys);
 #else				/* CONFIG_PREP */
-		DPRINTK ("Attempt to get PCI info for Cirrus Graphics Card\n");
-		get_pci_addrs (pdev, &board_addr, &info->fbregs_phys);
+	DPRINTK ("Attempt to get PCI info for Cirrus Graphics Card\n");
+	get_pci_addrs (pdev, &board_addr, &info->fbregs_phys);
 #endif				/* CONFIG_PREP */
-	}
 
 	DPRINTK ("Board address: 0x%lx, register address: 0x%lx\n", board_addr, info->fbregs_phys);
 
@@ -2674,25 +2537,21 @@ static int __init clgen_pci_setup (struct clgenfb_info *info,
 		board_size = clgen_get_memsize (info->regs);
 	}
 
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,3,13)
-
 	if (!request_mem_region(board_addr, board_size, "clgenfb")) {
-		pci_write_config_word (pdev, PCI_COMMAND, tmp16);
-		printk(KERN_ERR "clgen: cannot reserve region 0x%lu, abort\n",
+		printk(KERN_ERR "clgen: cannot reserve region 0x%lx, abort\n",
 		       board_addr);
 		return -1;
 	}
+#if 0 /* if the system didn't claim this region, we would... */
 	if (!request_mem_region(0xA0000, 65535, "clgenfb")) {
-		pci_write_config_word (pdev, PCI_COMMAND, tmp16);
-		printk(KERN_ERR "clgen: cannot reserve region 0x%lu, abort\n",
+		printk(KERN_ERR "clgen: cannot reserve region 0x%lx, abort\n",
 		       0xA0000L);
 		release_mem_region(board_addr, board_size);
 		return -1;
 	}
+#endif
 	if (request_region(0x3C0, 32, "clgenfb"))
 		release_io_ports = 1;
-
-#endif /* kernel > 2.3.13 */
 
 	info->fbmem = ioremap (board_addr, board_size);
 	info->fbmem_phys = board_addr;
@@ -2721,7 +2580,7 @@ static int __init clgen_zorro_find (struct zorro_dev **z_o,
 	assert (z_o != NULL);
 	assert (btype != NULL);
 
-	for (i = 0; i < arraysize(clgen_zorro_probe_list); i++)
+	for (i = 0; i < ARRAY_SIZE(clgen_zorro_probe_list); i++)
 		if ((z = zorro_find_device(clgen_zorro_probe_list[i].id, NULL)))
 			break;
 
@@ -2744,14 +2603,10 @@ static int __init clgen_zorro_find (struct zorro_dev **z_o,
 }
 
 
-
-/* clgen_zorro_unmap only used in modules */
-#ifdef MODULE
-static void clgen_zorro_unmap (struct clgenfb_info *info)
+static void __exit clgen_zorro_unmap (struct clgenfb_info *info)
 {
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,3,13)
 	release_mem_region(info->board_addr, info->board_size);
-#endif
+
 	if (info->btype == BT_PICASSO4) {
 		iounmap (info->board_addr);
 		iounmap (info->fbmem_phys);
@@ -2760,8 +2615,6 @@ static void clgen_zorro_unmap (struct clgenfb_info *info)
 			iounmap (info->board_addr);
 	}
 }
-#endif /* MODULE */
-
 
 
 static int __init clgen_zorro_setup (struct clgenfb_info *info,
@@ -2784,7 +2637,7 @@ static int __init clgen_zorro_setup (struct clgenfb_info *info,
 	info->board_size = board_size = z->resource.end-z->resource.start+1;
 
 	if (!request_mem_region(board_addr, board_size, "clgenfb")) {
-		printk(KERN_ERR "clgen: cannot reserve region 0x%lu, abort\n",
+		printk(KERN_ERR "clgen: cannot reserve region 0x%lx, abort\n",
 		       board_addr);
 		return -1;
 	}
@@ -2858,7 +2711,7 @@ int __init clgenfb_init(void)
 	}
 
 #else
-#error Unsupported bus.  Supported: PCI, Zorro
+#error This driver requires Zorro or PCI bus.
 #endif				/* !CONFIG_PCI, !CONFIG_ZORRO */
 
 	/* sanity checks */
@@ -2929,28 +2782,10 @@ int __init clgenfb_init(void)
 
 
 
-#if defined(CONFIG_FB_OF)
-int __init clgen_of_init (struct device_node *dp)
-{
-	int rc;
-	
-	DPRINTK ("ENTER\n");
-
-	rc = clgenfb_init ();
-
-	DPRINTK ("EXIT, returning %d\n", rc);
-
-	return rc;
-}
-#endif				/* CONFIG_FB_OF */
-
-
-
     /*
      *  Cleanup (only needed for module)
      */
-#ifdef MODULE
-static void clgenfb_cleanup (struct clgenfb_info *info)
+static void __exit clgenfb_cleanup (struct clgenfb_info *info)
 {
 	DPRINTK ("ENTER\n");
 
@@ -2967,9 +2802,6 @@ static void clgenfb_cleanup (struct clgenfb_info *info)
 
 	DPRINTK ("EXIT\n");
 }
-#endif
-
-
 
 
 #ifndef MODULE
@@ -2999,33 +2831,14 @@ int __init clgenfb_setup(char *options) {
 #endif
 
 
-
-
-
     /*
      *  Modularization
      */
 
-#ifdef MODULE
-MODULE_AUTHOR("Copyright 1999 Jeff Garzik <jgarzik@mandrakesoft.com>");
+MODULE_AUTHOR("Copyright 1999,2000 Jeff Garzik <jgarzik@mandrakesoft.com>");
 MODULE_DESCRIPTION("Accelerated FBDev driver for Cirrus Logic chips");
 
-int init_module (void)
-{
-#if defined(CONFIG_FB_OF)
-/* Nothing to do, must be called from offb */
-	return 0;
-#else
-	int i;
-	
-	DPRINTK ("ENTER\n");
-	i = clgenfb_init ();
-	DPRINTK ("EXIT\n");
-	return i;
-#endif
-}
-
-void cleanup_module (void)
+static void __exit clgenfb_exit (void)
 {
 	DPRINTK ("ENTER\n");
 
@@ -3034,7 +2847,10 @@ void cleanup_module (void)
 	DPRINTK ("EXIT\n");
 }
 
-#endif				/* MODULE */
+#ifdef MODULE
+module_init(clgenfb_init);
+#endif
+module_exit(clgenfb_exit);
 
 
 /**********************************************************************/
@@ -3144,7 +2960,6 @@ static void WHDR (const struct clgenfb_info *fb_info, unsigned char val)
 }
 
 
-
 /*** WSFR() - write to the "special function register" (SFR) ***/
 static void WSFR (struct clgenfb_info *fb_info, unsigned char val)
 {
@@ -3191,7 +3006,6 @@ static void WClut (struct clgenfb_info *fb_info, unsigned char regnum, unsigned 
 		vga_w (fb_info->regs, data, red);
 	}
 }
-
 
 
 #if 0
@@ -3322,6 +3136,7 @@ static void clgen_BitBLT (caddr_t regbase, u_short curx, u_short cury, u_short d
 	DPRINTK ("EXIT\n");
 }
 
+
 /*******************************************************************
 	clgen_RectFill()
 
@@ -3402,6 +3217,7 @@ static void clgen_RectFill (struct clgenfb_info *fb_info,
 	DPRINTK ("EXIT\n");
 }
 
+
 /**************************************************************************
  * bestclock() - determine closest possible clock lower(?) than the
  * desired pixel clock
@@ -3478,10 +3294,6 @@ static void bestclock (long freq, long *best, long *nom,
 }
 
 
-
-
-
-
 /* -------------------------------------------------------------------------
  *
  * debugging functions
@@ -3516,7 +3328,6 @@ void clgen_dbg_print_byte (const char *name, unsigned char val)
 		 val & 0x02 ? '1' : '0',
 		 val & 0x01 ? '1' : '0');
 }
-
 
 
 /**
@@ -3566,9 +3377,6 @@ void clgen_dbg_print_regs (caddr_t regbase, clgen_dbg_reg_class_t reg_class,...)
 }
 
 
-
-
-
 /**
  * clgen_dump
  * @clgeninfo:
@@ -3581,7 +3389,6 @@ void clgen_dump (void)
 {
 	clgen_dbg_reg_dump (NULL);
 }
-
 
 
 /**
@@ -3685,5 +3492,5 @@ void clgen_dbg_reg_dump (caddr_t regbase)
 	DPRINTK ("\n");
 }
 
-
 #endif				/* CLGEN_DEBUG */
+

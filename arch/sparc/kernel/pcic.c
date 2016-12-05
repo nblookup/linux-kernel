@@ -1,4 +1,4 @@
-/* $Id: pcic.c,v 1.14 2000/03/01 02:53:28 davem Exp $
+/* $Id: pcic.c,v 1.20 2000/12/05 00:56:36 anton Exp $
  * pcic.c: Sparc/PCI controller support
  *
  * Copyright (C) 1998 V. Roganov and G. Raiko
@@ -34,11 +34,6 @@
 #include <asm/uaccess.h>
 
 #ifndef CONFIG_PCI
-
-int pcibios_present(void)
-{
-	return 0;
-}
 
 asmlinkage int sys_pciconfig_read(unsigned long bus,
 				  unsigned long dfn,
@@ -155,8 +150,15 @@ static struct pcic_ca2irq pcic_i_se6[] = {
 
 /*
  * Krups (courtesy of Varol Kaptan)
- * No documentation available, so we guess it, based on Espresso layout.
- * Since we always run PROLL on Krups we may put map in there.
+ * No documentation available, but it was easy to guess
+ * because it was very similar to Espresso.
+ *  
+ * pin 0 - kbd, mouse, serial;
+ * pin 1 - Ethernet;
+ * pin 2 - igs (we do not use it);
+ * pin 3 - audio;
+ * pin 4,5,6 - unused;
+ * pin 7 - RTC (from P2 onwards as David B. says).
  */
 static struct pcic_ca2irq pcic_i_jk[] = {
 	{ 0, 0x00, 0, 13, 0 },		/* Ebus - serial and keyboard */
@@ -554,8 +556,8 @@ static void pcic_map_pci_device(struct linux_pcic *pcic,
 				 */
 				printk("PCIC: Skipping I/O space at 0x%lx,"
 				    "this will Oops if a driver attaches;"
-				    "device '%s' (%x,%x)\n", address, namebuf,
-	    			    dev->device, dev->vendor);
+				    "device '%s' at %02x:%02x)\n", address,
+				    namebuf, dev->bus->number, dev->devfn);
 			}
 		}
 	}
@@ -566,12 +568,12 @@ pcic_fill_irq(struct linux_pcic *pcic, struct pci_dev *dev, int node)
 {
 	struct pcic_ca2irq *p;
 	int i, ivec;
-	char namebuf[64];  /* P3 remove */
+	char namebuf[64];
 
 	if (node == 0 || node == -1) {
 		strcpy(namebuf, "???");
 	} else {
-		prom_getstring(node, "name", namebuf, sizeof(namebuf)); /* P3 remove */
+		prom_getstring(node, "name", namebuf, sizeof(namebuf));
 	}
 
 	if ((p = pcic->pcic_imap) == 0) {
@@ -600,18 +602,18 @@ pcic_fill_irq(struct linux_pcic *pcic, struct pci_dev *dev, int node)
 	} else {					/* Corrupted map */
 		printk("PCIC: BAD PIN %d\n", i); for (;;) {}
 	}
-/* P3 remove later */ printk("PCIC: device %s pin %d ivec 0x%x irq %x\n", namebuf, i, ivec, dev->irq);
+/* P3 */ /* printk("PCIC: device %s pin %d ivec 0x%x irq %x\n", namebuf, i, ivec, dev->irq); */
 
 	/*
-	 * dev->irq=0 means PROM did not bothered to program the upper
+	 * dev->irq=0 means PROM did not bother to program the upper
 	 * half of PCIC. This happens on JS-E with PROM 3.11, for instance.
 	 */
 	if (dev->irq == 0 || p->force) {
 		if (p->irq == 0 || p->irq >= 15) {	/* Corrupted map */
 			printk("PCIC: BAD IRQ %d\n", p->irq); for (;;) {}
 		}
-		printk("PCIC: setting irq %x for device (%x,%x)\n",
-		    p->irq, dev->device, dev->vendor);
+		printk("PCIC: setting irq %d at pin %d for device %02x:%02x\n",
+		    p->irq, p->pin, dev->bus->number, dev->devfn);
 		dev->irq = p->irq;
 
 		i = p->pin;
@@ -730,7 +732,7 @@ pcic_pin_to_irq(unsigned int pin, char *name)
 		printk("PCIC: BAD PIN %d FOR %s\n", pin, name);
 		for (;;) {}	/* XXX Cannot panic properly in case of PROLL */
 	}
-/* P3 remove later */ printk("PCIC: dev %s pin %d ivec 0x%x irq %x\n", name, pin, ivec, irq);
+/* P3 */ /* printk("PCIC: dev %s pin %d ivec 0x%x irq %x\n", name, pin, ivec, irq); */
 	return irq;
 }
 
@@ -801,7 +803,7 @@ static __inline__ unsigned long do_gettimeoffset(void)
 	return offset + count;
 }
 
-extern volatile unsigned long lost_ticks;
+extern volatile unsigned long wall_jiffies;
 
 static void pci_do_gettimeofday(struct timeval *tv)
 {
@@ -812,10 +814,11 @@ static void pci_do_gettimeofday(struct timeval *tv)
 	tv->tv_usec += do_gettimeoffset();
 
 	/*
-	 * xtime is atomically updated in timer_bh. lost_ticks is
-	 * nonzero if the timer bottom half hasnt executed yet.
+	 * xtime is atomically updated in timer_bh. The difference
+	 * between jiffies and wall_jiffies is nonzero if the timer
+	 * bottom half hasnt executed yet.
 	 */
-	if (lost_ticks)
+	if ((jiffies - wall_jiffies) != 0)
 		tv->tv_usec += USECS_PER_JIFFY;
 
 	restore_flags(flags);
@@ -862,23 +865,6 @@ void pcibios_update_resource(struct pci_dev *pdev, struct resource *res1,
 			     struct resource *res2, int index)
 {
 }
-
-#if 0
-void pcibios_update_irq(struct pci_dev *pdev, int irq)
-{
-}
-
-unsigned long resource_fixup(struct pci_dev *pdev, struct resource *res,
-			     unsigned long start, unsigned long size)
-{
-	return start;
-}
-
-void pcibios_fixup_pbus_ranges(struct pci_bus *pbus,
-			       struct pbus_set_ranges_data *pranges)
-{
-}
-#endif
 
 void pcibios_align_resource(void *data, struct resource *res, unsigned long size)
 {
@@ -932,7 +918,6 @@ asmlinkage int sys_pciconfig_read(unsigned long bus,
 	if(!suser())
 		return -EPERM;
 
-	lock_kernel();
 	switch(len) {
 	case 1:
 		pcibios_read_config_byte(bus, dfn, off, &ubyte);
@@ -951,7 +936,6 @@ asmlinkage int sys_pciconfig_read(unsigned long bus,
 		err = -EINVAL;
 		break;
 	};
-	unlock_kernel();
 
 	return err;
 }
@@ -970,7 +954,6 @@ asmlinkage int sys_pciconfig_write(unsigned long bus,
 	if(!suser())
 		return -EPERM;
 
-	lock_kernel();
 	switch(len) {
 	case 1:
 		err = get_user(ubyte, (unsigned char *)buf);
@@ -998,7 +981,6 @@ asmlinkage int sys_pciconfig_write(unsigned long bus,
 		break;
 
 	};
-	unlock_kernel();
 
 	return err;
 }			   

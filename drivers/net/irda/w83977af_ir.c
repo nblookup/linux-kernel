@@ -255,13 +255,12 @@ int w83977af_open(int i, unsigned int iobase, unsigned int irq,
 	dev->get_stats	     = w83977af_net_get_stats;
 
 	rtnl_lock();
-	err = register_netdev(dev);
+	err = register_netdevice(dev);
 	rtnl_unlock();
 	if (err) {
-		ERROR(__FUNCTION__ "(), register_netdev() failed!\n");
+		ERROR(__FUNCTION__ "(), register_netdevice() failed!\n");
 		return -1;
 	}
-
 	MESSAGE("IrDA: Registered device %s\n", dev->name);
 	
 	return 0;
@@ -514,8 +513,14 @@ int w83977af_hard_xmit(struct sk_buff *skb, struct net_device *dev)
 	netif_stop_queue(dev);
 	
 	/* Check if we need to change the speed */
-	if ((speed = irda_get_speed(skb)) != self->io.speed)
-		self->new_speed = speed;
+	if ((speed = irda_get_speed(skb)) != self->io.speed) {
+		/* Check for empty frame */
+		if (!skb->len) {
+			w83977af_change_speed(self, speed); 
+			return 0;
+		} else
+			self->new_speed = speed;
+	}
 
 	/* Save current set */
 	set = inb(iobase+SSR);
@@ -1332,9 +1337,13 @@ static int w83977af_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	
 	switch (cmd) {
 	case SIOCSBANDWIDTH: /* Set bandwidth */
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
 		w83977af_change_speed(self, irq->ifr_baudrate);
 		break;
 	case SIOCSMEDIABUSY: /* Set media busy */
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
 		irda_device_set_media_busy(self->netdev, TRUE);
 		break;
 	case SIOCGRECEIVING: /* Check if we are receiving right now */
@@ -1362,9 +1371,11 @@ MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
 MODULE_DESCRIPTION("Winbond W83977AF IrDA Device Driver");
 
 MODULE_PARM(qos_mtt_bits, "i");
+MODULE_PARM_DESC(qos_mtt_bits, "Mimimum Turn Time");
 MODULE_PARM(io, "1-4i");
-MODULE_PARM(io2, "1-4i");
+MODULE_PARM_DESC(io, "Base I/O addresses");
 MODULE_PARM(irq, "1-4i");
+MODULE_PARM_DESC(irq, "IRQ lines");
 
 /*
  * Function init_module (void)

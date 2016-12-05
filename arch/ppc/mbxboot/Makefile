@@ -16,20 +16,29 @@
 .c.o:
 	$(CC) $(CFLAGS)  -DINITRD_OFFSET=$(IOFF) -DINITRD_SIZE=$(ISZ) -DZIMAGE_OFFSET=$(ZOFF) -DZIMAGE_SIZE=$(ZSZ) -c -o $*.o $<
 .S.s:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -E -o $*.o $<
+	$(CPP) $(AFLAGS) -traditional -o $*.o $<
 .S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c -o $*.o $<
+	$(CC) $(AFLAGS) -traditional -c -o $*.o $<
 
 ZOFF = 0
 ZSZ = 0
 IOFF = 0
 ISZ = 0
 
-TFTPIMAGE=/tftpboot/zImage.mbx
-ZLINKFLAGS = -T ../vmlinux.lds -Ttext 0x00100000
+TFTPIMAGE=/tftpboot/zImage.embedded
 
+ifdef CONFIG_8xx
+ZLINKFLAGS = -T ../vmlinux.lds -Ttext 0x00180000
 OBJECTS := head.o misc.o ../coffboot/zlib.o m8xx_tty.o
 CFLAGS = $(CPPFLAGS) -O2 -DSTDC_HEADERS -fno-builtin -DCONFIG_8xx
+endif
+
+ifdef CONFIG_8260
+ZLINKFLAGS = -T ../vmlinux.lds -Ttext 0x00400000
+OBJECTS := head_8260.o misc.o ../coffboot/zlib.o m8260_tty.o embed_config.o
+CFLAGS = $(CPPFLAGS) -O2 -DSTDC_HEADERS -fno-builtin -DCONFIG_8260
+endif
+
 OBJCOPY_ARGS = -O elf32-powerpc
 
 ifeq ($(CONFIG_MBX),y)

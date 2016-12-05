@@ -14,13 +14,13 @@
 */
 
 #include "tulip.h"
-#include <asm/io.h>
+#include <linux/pci.h>
+#include <linux/delay.h>
 
 
 static u16 t21142_csr13[] = { 0x0001, 0x0009, 0x0009, 0x0000, 0x0001, };
-u16 t21142_csr14[] = { 0xFFFF, 0x0705, 0x0705, 0x0000, 0x7F3D, };
+u16 t21142_csr14[] =	    { 0xFFFF, 0x0705, 0x0705, 0x0000, 0x7F3D, };
 static u16 t21142_csr15[] = { 0x0008, 0x0006, 0x000E, 0x0008, 0x0008, };
-
 
 
 /* Handle the 21143 uniquely: do autoselect with NWay, not the EEPROM list
@@ -83,14 +83,15 @@ void t21142_timer(unsigned long data)
 			tp->csr6 &= 0x00D5;
 			tp->csr6 |= new_csr6;
 			outl(0x0301, ioaddr + CSR12);
-			tulip_outl_CSR6(tp, tp->csr6 | 0x0002);
-			tulip_outl_CSR6(tp, tp->csr6 | 0x2002);
+			tulip_restart_rxtx(tp, tp->csr6);
 		}
 		next_tick = 3*HZ;
 	}
 
-	tp->timer.expires = RUN_AT(next_tick);
-	add_timer(&tp->timer);
+	/* mod_timer synchronizes us with potential add_timer calls
+	 * from interrupts.
+	 */
+	mod_timer(&tp->timer, RUN_AT(next_tick));
 }
 
 
@@ -101,16 +102,22 @@ void t21142_start_nway(struct net_device *dev)
 	int csr14 = ((tp->to_advertise & 0x0780) << 9)  |
 		((tp->to_advertise&0x0020)<<1) | 0xffbf;
 
+	DPRINTK("ENTER\n");
+
 	dev->if_port = 0;
 	tp->nway = tp->mediasense = 1;
 	tp->nwayset = tp->lpar = 0;
 	if (tulip_debug > 1)
-		printk(KERN_DEBUG "%s: Restarting 21143 autonegotiation, %8.8x.\n",
+		printk(KERN_DEBUG "%s: Restarting 21143 autonegotiation, csr14=%8.8x.\n",
 			   dev->name, csr14);
 	outl(0x0001, ioaddr + CSR13);
+	udelay(100);
 	outl(csr14, ioaddr + CSR14);
-	tp->csr6 = 0x82420000 | (tp->to_advertise & 0x0040 ? 0x0200 : 0);
-	tulip_outl_CSR6(tp, tp->csr6);
+	if (tp->chip_id == PNIC2)
+	  tp->csr6 = 0x01a80000 | (tp->to_advertise & 0x0040 ? 0x0200 : 0);
+	else
+	  tp->csr6 = 0x82420000 | (tp->to_advertise & 0x0040 ? 0x0200 : 0);
+	tulip_outl_csr(tp, tp->csr6, CSR6);
 	if (tp->mtable  &&  tp->mtable->csr15dir) {
 		outl(tp->mtable->csr15dir, ioaddr + CSR15);
 		outl(tp->mtable->csr15val, ioaddr + CSR15);
@@ -176,12 +183,12 @@ void t21142_lnk_change(struct net_device *dev, int csr5)
 			outl(1, ioaddr + CSR13);
 		}
 #if 0							/* Restart shouldn't be needed. */
-		tulip_outl_CSR6(tp, tp->csr6 | 0x0000);
+		tulip_outl_csr(tp, tp->csr6 | csr6_sr, CSR6);
 		if (tulip_debug > 2)
 			printk(KERN_DEBUG "%s:  Restarting Tx and Rx, CSR5 is %8.8x.\n",
 				   dev->name, inl(ioaddr + CSR5));
 #endif
-		tulip_outl_CSR6(tp, tp->csr6 | 0x2002);
+		tulip_outl_csr(tp, tp->csr6 | csr6_st | csr6_sr, CSR6);
 		if (tulip_debug > 2)
 			printk(KERN_DEBUG "%s:  Setting CSR6 %8.8x/%x CSR12 %8.8x.\n",
 				   dev->name, tp->csr6, inl(ioaddr + CSR6),
@@ -191,7 +198,7 @@ void t21142_lnk_change(struct net_device *dev, int csr5)
 				&& (csr12 & 2) == 2) ||
 			   (tp->nway && (csr5 & (TPLnkFail)))) {
 		/* Link blew? Maybe restart NWay. */
-		del_timer(&tp->timer);
+		del_timer_sync(&tp->timer);
 		t21142_start_nway(dev);
 		tp->timer.expires = RUN_AT(3*HZ);
 		add_timer(&tp->timer);
@@ -201,7 +208,7 @@ void t21142_lnk_change(struct net_device *dev, int csr5)
 				   dev->name, medianame[dev->if_port],
 				   (csr12 & 2) ? "failed" : "good");
 		if ((csr12 & 2)  &&  ! tp->medialock) {
-			del_timer(&tp->timer);
+			del_timer_sync(&tp->timer);
 			t21142_start_nway(dev);
 			tp->timer.expires = RUN_AT(3*HZ);
 			add_timer(&tp->timer);
@@ -227,8 +234,7 @@ void t21142_lnk_change(struct net_device *dev, int csr5)
 		tp->csr6 = 0x83860000;
 		outl(0x0003FF7F, ioaddr + CSR14);
 		outl(0x0301, ioaddr + CSR12);
-		tulip_outl_CSR6(tp, tp->csr6 | 0x0002);
-		tulip_outl_CSR6(tp, tp->csr6 | 0x2002);
+		tulip_restart_rxtx(tp, tp->csr6);
 	}
 }
 

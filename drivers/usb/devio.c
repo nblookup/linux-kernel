@@ -41,9 +41,9 @@
 #include <linux/signal.h>
 #include <linux/poll.h>
 #include <linux/usb.h>
+#include <linux/usbdevice_fs.h>
 #include <asm/uaccess.h>
 
-#include "usbdevice_fs.h"
 
 struct async {
         struct list_head asynclist;
@@ -55,114 +55,7 @@ struct async {
         urb_t urb;
 };
 
-/*
- * my own sync control and bulk methods. Here to experiment
- * and because the kernel ones set the process to TASK_UNINTERRUPTIBLE.
- */
-
-struct sync {
-	wait_queue_head_t wait;
-};
-
-static void sync_completed(purb_t urb)
-{
-        struct sync *s = (struct sync *)urb->context;
- 
-        wake_up(&s->wait);	
-}
-
-static int do_sync(purb_t urb, int timeout)
-{
-        DECLARE_WAITQUEUE(wait, current);
-	unsigned long tm;
-	signed long tmdiff;
-	struct sync s;
-	int ret;
-
-	tm = jiffies+timeout;
-	init_waitqueue_head(&s.wait);
-	add_wait_queue(&s.wait, &wait);
-	urb->context = &s;
-	urb->complete = sync_completed;
-	set_current_state(TASK_INTERRUPTIBLE);
-	if ((ret = usb_submit_urb(urb)))
-		goto out;
-	while (urb->status == -EINPROGRESS) {
-		tmdiff = tm - jiffies;
-		if (tmdiff <= 0) {
-			ret = -ETIMEDOUT;
-			goto out;
-		}
-		if (signal_pending(current)) {
-			ret = -EINTR;
-			goto out;
-		}
-		schedule_timeout(tmdiff);
-	}
-	ret = urb->status;
- out:
-	set_current_state(TASK_RUNNING);
-	usb_unlink_urb(urb);
-	remove_wait_queue(&s.wait, &wait);
-	return ret;
-}
-
-static int my_usb_control_msg(struct usb_device *dev, unsigned int pipe, __u8 request, __u8 requesttype,
-			      __u16 value, __u16 index, void *data, __u16 size, int timeout)
-{
-	urb_t *urb;
-	int ret;
-
-	if (!(urb = usb_alloc_urb(0)))
-		return -ENOMEM;
-	if (!(urb->setup_packet = kmalloc(8, GFP_KERNEL))) {
-		usb_free_urb(urb);
-		return -ENOMEM;
-	}
-	urb->setup_packet[0] = requesttype;
-	urb->setup_packet[1] = request;
-	urb->setup_packet[2] = value;
-	urb->setup_packet[3] = value >> 8;
-	urb->setup_packet[4] = index;
-	urb->setup_packet[5] = index >> 8;
-	urb->setup_packet[6] = size;
-	urb->setup_packet[7] = size >> 8;
-	urb->dev = dev;
-        urb->pipe = pipe;
-        urb->transfer_buffer = data;
-        urb->transfer_buffer_length = size;
-	ret = do_sync(urb, timeout);
-	//if (ret >= 0)
-	//	ret = urb->status;
-	if (ret >= 0)
-		ret = urb->actual_length;
-	kfree(urb->setup_packet);
-	usb_free_urb(urb);
-	return ret;
-}
-
-static int my_usb_bulk_msg(struct usb_device *dev, unsigned int pipe, 
-			   void *data, int len, int *actual_length, int timeout)
-{
-	urb_t *urb;
-	int ret;
-
-	if (!(urb = usb_alloc_urb(0)))
-		return -ENOMEM;
-        urb->dev = dev;
-        urb->pipe = pipe;
-        urb->transfer_buffer = data;
-        urb->transfer_buffer_length = len;
-	ret = do_sync(urb, timeout);
-	//if (ret >= 0)
-	//	ret = urb->status;
-	if (ret >= 0 && actual_length != NULL)
-		*actual_length = urb->actual_length;
-	usb_free_urb(urb);
-	return ret;
-}
-
-static long long usbdev_lseek(struct file *file, long long offset, int orig)
+static loff_t usbdev_lseek(struct file *file, loff_t offset, int orig)
 {
 	switch (orig) {
 	case 0:
@@ -187,26 +80,60 @@ static ssize_t usbdev_read(struct file *file, char * buf, size_t nbytes, loff_t 
 	ssize_t ret = 0;
 	unsigned len;
 	loff_t pos;
+	int i;
 
 	pos = *ppos;
 	down_read(&ps->devsem);
-	if (!ps->dev)
+	if (!ps->dev) {
 		ret = -ENODEV;
-	else if (pos < 0)
+		goto err;
+	} else if (pos < 0) {
 		ret = -EINVAL;
-	else if (pos < sizeof(struct usb_device_descriptor)) {
+		goto err;
+	}
+
+	if (pos < sizeof(struct usb_device_descriptor)) {
 		len = sizeof(struct usb_device_descriptor) - pos;
 		if (len > nbytes)
 			len = nbytes;
-		if (copy_to_user(buf, ((char *)&ps->dev->descriptor) + pos, len))
+		if (copy_to_user(buf, ((char *)&ps->dev->descriptor) + pos, len)) {
 			ret = -EFAULT;
-		else {
+			goto err;
+		}
+
+		*ppos += len;
+		buf += len;
+		nbytes -= len;
+		ret += len;
+	}
+
+	pos = sizeof(struct usb_device_descriptor);
+	for (i = 0; nbytes && i < ps->dev->descriptor.bNumConfigurations; i++) {
+		struct usb_config_descriptor *config =
+			(struct usb_config_descriptor *)ps->dev->rawdescriptors[i];
+		unsigned int length = le16_to_cpu(config->wTotalLength);
+
+		if (*ppos < pos + length) {
+			len = length - (*ppos - pos);
+			if (len > nbytes)
+				len = nbytes;
+
+			if (copy_to_user(buf,
+			    ps->dev->rawdescriptors[i] + (*ppos - pos), len)) {
+				ret = -EFAULT;
+				goto err;
+			}
+
 			*ppos += len;
 			buf += len;
 			nbytes -= len;
 			ret += len;
 		}
+
+		pos += length;
 	}
+
+err:
 	up_read(&ps->devsem);
 	return ret;
 }
@@ -255,6 +182,8 @@ static void free_async(struct async *as)
 {
         if (as->urb.transfer_buffer)
                 kfree(as->urb.transfer_buffer);
+        if (as->urb.setup_packet)
+                kfree(as->urb.setup_packet);
         kfree(as);
 }
 
@@ -363,7 +292,8 @@ static void destroy_all_async(struct dev_state *ps)
  * interface claiming
  */
 
-static void *driver_probe(struct usb_device *dev, unsigned int intf)
+static void *driver_probe(struct usb_device *dev, unsigned int intf,
+			  const struct usb_device_id *id)
 {
 	return NULL;
 }
@@ -376,12 +306,9 @@ static void driver_disconnect(struct usb_device *dev, void *context)
 }
 
 struct usb_driver usbdevfs_driver = {
-	"usbdevfs",
-	driver_probe,
-	driver_disconnect,
-	LIST_HEAD_INIT(usbdevfs_driver.driver_list),
-	NULL,
-	0
+	name:		"usbdevfs",
+	probe:		driver_probe,
+	disconnect:	driver_disconnect,
 };
 
 static int claimintf(struct dev_state *ps, unsigned int intf)
@@ -481,6 +408,52 @@ static int findintfif(struct usb_device *dev, unsigned int ifn)
 	return -ENOENT; 
 }
 
+extern struct list_head usb_driver_list;
+
+#if 0
+static int finddriver(struct usb_driver **driver, char *name)
+{
+	struct list_head *tmp;
+
+	tmp = usb_driver_list.next;
+	while (tmp != &usb_driver_list) {
+		struct usb_driver *d = list_entry(tmp, struct usb_driver,
+							driver_list);
+
+		if (!strcmp(d->name, name)) {
+			*driver = d;
+			return 0;
+		}
+
+		tmp = tmp->next;
+	}
+
+	return -EINVAL;
+}
+#endif
+
+static int check_ctrlrecip(struct dev_state *ps, unsigned int recip, unsigned int index)
+{
+	int ret;
+
+	switch (recip & USB_RECIP_MASK) {
+	case USB_RECIP_ENDPOINT:
+		if ((ret = findintfep(ps->dev, index & 0xff)) < 0)
+			return ret;
+		if ((ret = checkintf(ps, ret)))
+			return ret;
+		break;
+
+	case USB_RECIP_INTERFACE:
+		if ((ret = findintfif(ps->dev, index & 0xff)) < 0)
+			return ret;
+		if ((ret = checkintf(ps, ret)))
+			return ret;
+		break;
+	}
+	return 0;
+}
+
 /*
  * file operations
  */
@@ -552,22 +525,10 @@ static int proc_control(struct dev_state *ps, void *arg)
 	unsigned char *tbuf;
 	int i, ret;
 
-	copy_from_user_ret(&ctrl, (void *)arg, sizeof(ctrl), -EFAULT);
-	switch (ctrl.requesttype & 0x1f) {
-	case USB_RECIP_ENDPOINT:
-		if ((ret = findintfep(ps->dev, ctrl.index & 0xff)) < 0)
-			return ret;
-		if ((ret = checkintf(ps, ret)))
-			return ret;
-		break;
-
-	case USB_RECIP_INTERFACE:
-		if ((ret = findintfif(ps->dev, ctrl.index & 0xff)) < 0)
-			return ret;
-		if ((ret = checkintf(ps, ret)))
-			return ret;
-		break;
-	}
+	if (copy_from_user(&ctrl, (void *)arg, sizeof(ctrl)))
+		return -EFAULT;
+	if ((ret = check_ctrlrecip(ps, ctrl.requesttype, ctrl.index)))
+		return ret;
 	if (ctrl.length > PAGE_SIZE)
 		return -EINVAL;
 	if (!(tbuf = (unsigned char *)__get_free_page(GFP_KERNEL)))
@@ -578,16 +539,22 @@ static int proc_control(struct dev_state *ps, void *arg)
 			free_page((unsigned long)tbuf);
 			return -EINVAL;
 		}
-		i = my_usb_control_msg(dev, usb_rcvctrlpipe(dev, 0), ctrl.request, ctrl.requesttype,
+		i = usb_control_msg(dev, usb_rcvctrlpipe(dev, 0), ctrl.request, ctrl.requesttype,
 				       ctrl.value, ctrl.index, tbuf, ctrl.length, tmo);
 		if ((i > 0) && ctrl.length) {
-			copy_to_user_ret(ctrl.data, tbuf, ctrl.length, -EFAULT);
+			if (copy_to_user(ctrl.data, tbuf, ctrl.length)) {
+				free_page((unsigned long)tbuf);
+				return -EFAULT;
+			}
 		}
 	} else {
 		if (ctrl.length) {
-			copy_from_user_ret(tbuf, ctrl.data, ctrl.length, -EFAULT);
+			if (copy_from_user(tbuf, ctrl.data, ctrl.length)) {
+				free_page((unsigned long)tbuf);
+				return -EFAULT;
+			}
 		}
-		i = my_usb_control_msg(dev, usb_sndctrlpipe(dev, 0), ctrl.request, ctrl.requesttype,
+		i = usb_control_msg(dev, usb_sndctrlpipe(dev, 0), ctrl.request, ctrl.requesttype,
 				       ctrl.value, ctrl.index, tbuf, ctrl.length, tmo);
 	}
 	free_page((unsigned long)tbuf);
@@ -607,7 +574,8 @@ static int proc_bulk(struct dev_state *ps, void *arg)
 	unsigned char *tbuf;
 	int i, ret;
 
-	copy_from_user_ret(&bulk, (void *)arg, sizeof(bulk), -EFAULT);
+	if (copy_from_user(&bulk, (void *)arg, sizeof(bulk)))
+		return -EFAULT;
 	if ((ret = findintfep(ps->dev, bulk.ep)) < 0)
 		return ret;
 	if ((ret = checkintf(ps, ret)))
@@ -620,7 +588,7 @@ static int proc_bulk(struct dev_state *ps, void *arg)
 		return -EINVAL;
 	len1 = bulk.len;
 	if (len1 > PAGE_SIZE)
-		len1 = PAGE_SIZE;
+		return -EINVAL;
 	if (!(tbuf = (unsigned char *)__get_free_page(GFP_KERNEL)))
 		return -ENOMEM;
 	tmo = (bulk.timeout * HZ + 999) / 1000;
@@ -629,15 +597,21 @@ static int proc_bulk(struct dev_state *ps, void *arg)
 			free_page((unsigned long)tbuf);
 			return -EINVAL;
 		}
-		i = my_usb_bulk_msg(dev, pipe, tbuf, len1, &len2, tmo);
+		i = usb_bulk_msg(dev, pipe, tbuf, len1, &len2, tmo);
 		if (!i && len2) {
-			copy_to_user_ret(bulk.data, tbuf, len2, -EFAULT);
+			if (copy_to_user(bulk.data, tbuf, len2)) {
+				free_page((unsigned long)tbuf);
+				return -EFAULT;
+			}
 		}
 	} else {
 		if (len1) {
-			copy_from_user_ret(tbuf, bulk.data, len1, -EFAULT);
+			if (copy_from_user(tbuf, bulk.data, len1)) {
+				free_page((unsigned long)tbuf);
+				return -EFAULT;
+			}
 		}
-		i = my_usb_bulk_msg(dev, pipe, tbuf, len1, &len2, tmo);
+		i = usb_bulk_msg(dev, pipe, tbuf, len1, &len2, tmo);
 	}
 	free_page((unsigned long)tbuf);
 	if (i < 0) {
@@ -653,7 +627,8 @@ static int proc_resetep(struct dev_state *ps, void *arg)
 	unsigned int ep;
 	int ret;
 
-	get_user_ret(ep, (unsigned int *)arg, -EFAULT);
+	if (get_user(ep, (unsigned int *)arg))
+		return -EFAULT;
 	if ((ret = findintfep(ps->dev, ep)) < 0)
 		return ret;
 	if ((ret = checkintf(ps, ret)))
@@ -662,16 +637,104 @@ static int proc_resetep(struct dev_state *ps, void *arg)
 	return 0;
 }
 
-static int proc_setintf(struct dev_state *ps, void *arg)
+static int proc_clearhalt(struct dev_state *ps, void *arg)
 {
-	struct usbdevfs_setinterface setintf;
+	unsigned int ep;
+	int pipe;
 	int ret;
 
-	copy_from_user_ret(&setintf, arg, sizeof(setintf), -EFAULT);
-	if ((ret = findintfif(ps->dev, setintf.interface)) < 0)
+	if (get_user(ep, (unsigned int *)arg))
+		return -EFAULT;
+	if ((ret = findintfep(ps->dev, ep)) < 0)
 		return ret;
 	if ((ret = checkintf(ps, ret)))
 		return ret;
+	if (ep & USB_DIR_IN)
+                pipe = usb_rcvbulkpipe(ps->dev, ep & 0x7f);
+        else
+                pipe = usb_sndbulkpipe(ps->dev, ep & 0x7f);
+
+	return usb_clear_halt(ps->dev, pipe);
+}
+		
+
+static int proc_getdriver(struct dev_state *ps, void *arg)
+{
+	struct usbdevfs_getdriver gd;
+	struct usb_interface *interface;
+	int ret;
+
+	if (copy_from_user(&gd, arg, sizeof(gd)))
+		return -EFAULT;
+	if ((ret = findintfif(ps->dev, gd.interface)) < 0)
+		return ret;
+	interface = usb_ifnum_to_if(ps->dev, gd.interface);
+	if (!interface)
+		return -EINVAL;
+	if (!interface->driver)
+		return -ENODATA;
+	strcpy(gd.driver, interface->driver->name);
+	if (copy_to_user(arg, &gd, sizeof(gd)))
+		return -EFAULT;
+	return 0;
+}
+
+static int proc_connectinfo(struct dev_state *ps, void *arg)
+{
+	struct usbdevfs_connectinfo ci;
+
+	ci.devnum = ps->dev->devnum;
+	ci.slow = ps->dev->slow;
+	if (copy_to_user(arg, &ci, sizeof(ci)))
+		return -EFAULT;
+	return 0;
+}
+
+static int proc_resetdevice(struct dev_state *ps)
+{
+	int i, ret;
+
+	ret = usb_reset_device(ps->dev);
+	if (ret < 0)
+		return ret;
+
+	for (i = 0; i < ps->dev->actconfig->bNumInterfaces; i++) {
+		struct usb_interface *intf = &ps->dev->actconfig->interface[i];
+
+		/* Don't simulate interfaces we've claimed */
+		if (test_bit(i, &ps->ifclaimed))
+			continue;
+
+		if (intf->driver) {
+			const struct usb_device_id *id;
+			down(&intf->driver->serialize);
+			intf->driver->disconnect(ps->dev, intf->private_data);
+			id = usb_match_id(ps->dev,intf,intf->driver->id_table);
+			intf->driver->probe(ps->dev, i, id);
+			up(&intf->driver->serialize);
+		}
+	}
+
+	return 0;
+}
+
+static int proc_setintf(struct dev_state *ps, void *arg)
+{
+	struct usbdevfs_setinterface setintf;
+	struct usb_interface *interface;
+	int ret;
+
+	if (copy_from_user(&setintf, arg, sizeof(setintf)))
+		return -EFAULT;
+	if ((ret = findintfif(ps->dev, setintf.interface)) < 0)
+		return ret;
+	interface = usb_ifnum_to_if(ps->dev, setintf.interface);
+	if (!interface)
+		return -EINVAL;
+	if (interface->driver) {
+		if ((ret = checkintf(ps, ret)))
+			return ret;
+	}
 	if (usb_set_interface(ps->dev, setintf.interface, setintf.altsetting))
 		return -EINVAL;
 	return 0;
@@ -681,7 +744,8 @@ static int proc_setconfig(struct dev_state *ps, void *arg)
 {
 	unsigned int u;
 
-	get_user_ret(u, (unsigned int *)arg, -EFAULT);
+	if (get_user(u, (unsigned int *)arg))
+		return -EFAULT;
 	if (usb_set_configuration(ps->dev, u) < 0)
 		return -EINVAL;
 	return 0;
@@ -691,22 +755,61 @@ static int proc_submiturb(struct dev_state *ps, void *arg)
 {
 	struct usbdevfs_urb uurb;
 	struct usbdevfs_iso_packet_desc *isopkt = NULL;
+	struct usb_endpoint_descriptor *ep_desc;
 	struct async *as;
+	devrequest *dr = NULL;
 	unsigned int u, totlen, isofrmlen;
 	int ret;
 
-	copy_from_user_ret(&uurb, arg, sizeof(uurb), -EFAULT);
-	if (uurb.flags & ~(USBDEVFS_URB_ISO_ASAP|USBDEVFS_URB_DISABLE_SPD))
+	if (copy_from_user(&uurb, arg, sizeof(uurb)))
+		return -EFAULT;
+	if (uurb.flags & ~(USBDEVFS_URB_ISO_ASAP|USBDEVFS_URB_DISABLE_SPD|USBDEVFS_URB_QUEUE_BULK))
 		return -EINVAL;
 	if (!uurb.buffer)
 		return -EINVAL;
 	if (uurb.signr != 0 && (uurb.signr < SIGRTMIN || uurb.signr > SIGRTMAX))
 		return -EINVAL;
-	if ((ret = findintfep(ps->dev, uurb.endpoint)) < 0)
-		return ret;
-	if ((ret = checkintf(ps, ret)))
-		return ret;
+	if (!(uurb.type == USBDEVFS_URB_TYPE_CONTROL && (uurb.endpoint & ~USB_ENDPOINT_DIR_MASK) == 0)) {
+		if ((ret = findintfep(ps->dev, uurb.endpoint)) < 0)
+			return ret;
+		if ((ret = checkintf(ps, ret)))
+			return ret;
+	}
 	switch(uurb.type) {
+	case USBDEVFS_URB_TYPE_CONTROL:
+		if ((uurb.endpoint & ~USB_ENDPOINT_DIR_MASK) != 0) {
+			if (!(ep_desc = usb_epnum_to_ep_desc(ps->dev, uurb.endpoint)))
+				return -ENOENT;
+			if ((ep_desc->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) != USB_ENDPOINT_XFER_CONTROL)
+				return -EINVAL;
+		}
+		/* min 8 byte setup packet, max arbitrary */
+		if (uurb.buffer_length < 8 || uurb.buffer_length > PAGE_SIZE)
+			return -EINVAL;
+		if (!(dr = kmalloc(sizeof(devrequest), GFP_KERNEL)))
+			return -ENOMEM;
+		if (copy_from_user(dr, (unsigned char*)uurb.buffer, 8)) {
+			kfree(dr);
+			return -EFAULT;
+		}
+		if (uurb.buffer_length < (le16_to_cpup(&dr->length) + 8)) {
+			kfree(dr);
+			return -EINVAL;
+		}
+		if ((ret = check_ctrlrecip(ps, dr->requesttype, le16_to_cpup(&dr->index)))) {
+			kfree(dr);
+			return ret;
+		}
+		uurb.endpoint = (uurb.endpoint & ~USB_ENDPOINT_DIR_MASK) | (dr->requesttype & USB_ENDPOINT_DIR_MASK);
+		uurb.number_of_packets = 0;
+		uurb.buffer_length = le16_to_cpup(&dr->length);
+		uurb.buffer += 8;
+		if (!access_ok((uurb.endpoint & USB_DIR_IN) ?  VERIFY_WRITE : VERIFY_READ, uurb.buffer, uurb.buffer_length)) {
+			kfree(dr);
+			return -EFAULT;
+		}
+		break;
+
 	case USBDEVFS_URB_TYPE_BULK:
 		uurb.number_of_packets = 0;
 		if (uurb.buffer_length > 16384)
@@ -746,11 +849,15 @@ static int proc_submiturb(struct dev_state *ps, void *arg)
 	if (!(as = alloc_async(uurb.number_of_packets))) {
 		if (isopkt)
 			kfree(isopkt);
+		if (dr)
+			kfree(dr);
 		return -ENOMEM;
 	}
 	if (!(as->urb.transfer_buffer = kmalloc(uurb.buffer_length, GFP_KERNEL))) {
 		if (isopkt)
 			kfree(isopkt);
+		if (dr)
+			kfree(dr);
 		free_async(as);
 		return -ENOMEM;
 	}
@@ -759,6 +866,7 @@ static int proc_submiturb(struct dev_state *ps, void *arg)
         as->urb.pipe = (uurb.type << 30) | __create_pipe(ps->dev, uurb.endpoint & 0xf) | (uurb.endpoint & USB_DIR_IN);
         as->urb.transfer_flags = uurb.flags;
 	as->urb.transfer_buffer_length = uurb.buffer_length;
+	as->urb.setup_packet = (unsigned char*)dr;
 	as->urb.start_frame = uurb.start_frame;
 	as->urb.number_of_packets = uurb.number_of_packets;
         as->urb.context = as;
@@ -812,18 +920,25 @@ static int processcompl(struct async *as)
 	if (as->userbuffer)
 		if (copy_to_user(as->userbuffer, as->urb.transfer_buffer, as->urb.transfer_buffer_length))
 			return -EFAULT;
-	put_user_ret(as->urb.status, &((struct usbdevfs_urb *)as->userurb)->status, -EFAULT);
-	put_user_ret(as->urb.actual_length, &((struct usbdevfs_urb *)as->userurb)->actual_length, -EFAULT);
-	put_user_ret(as->urb.error_count, &((struct usbdevfs_urb *)as->userurb)->error_count, -EFAULT);
+	if (put_user(as->urb.status,
+		     &((struct usbdevfs_urb *)as->userurb)->status))
+		return -EFAULT;
+	if (put_user(as->urb.actual_length,
+		     &((struct usbdevfs_urb *)as->userurb)->actual_length))
+		return -EFAULT;
+	if (put_user(as->urb.error_count,
+		     &((struct usbdevfs_urb *)as->userurb)->error_count))
+		return -EFAULT;
+
 	if (!(usb_pipeisoc(as->urb.pipe)))
 		return 0;
 	for (i = 0; i < as->urb.number_of_packets; i++) {
-		put_user_ret(as->urb.iso_frame_desc[i].actual_length, 
-			     &((struct usbdevfs_urb *)as->userurb)->iso_frame_desc[i].actual_length, 
-			     -EFAULT);
-		put_user_ret(as->urb.iso_frame_desc[i].status, 
-			     &((struct usbdevfs_urb *)as->userurb)->iso_frame_desc[i].status, 
-			     -EFAULT);
+		if (put_user(as->urb.iso_frame_desc[i].actual_length, 
+			     &((struct usbdevfs_urb *)as->userurb)->iso_frame_desc[i].actual_length))
+			return -EFAULT;
+		if (put_user(as->urb.iso_frame_desc[i].status, 
+			     &((struct usbdevfs_urb *)as->userurb)->iso_frame_desc[i].status))
+			return -EFAULT;
 	}
 	return 0;
 }
@@ -854,7 +969,8 @@ static int proc_reapurb(struct dev_state *ps, void *arg)
 		free_async(as);
 		if (ret)
 			return ret;
-		put_user_ret(addr, (void **)arg, -EFAULT);
+		if (put_user(addr, (void **)arg))
+			return -EFAULT;
 		return 0;
 	}
 	if (signal_pending(current))
@@ -875,7 +991,8 @@ static int proc_reapurbnonblock(struct dev_state *ps, void *arg)
 	free_async(as);
 	if (ret)
 		return ret;
-	put_user_ret(addr, (void **)arg, -EFAULT);
+	if (put_user(addr, (void **)arg))
+		return -EFAULT;
 	return 0;
 }
 
@@ -883,7 +1000,8 @@ static int proc_disconnectsignal(struct dev_state *ps, void *arg)
 {
 	struct usbdevfs_disconnectsignal ds;
 
-	copy_from_user_ret(&ds, arg, sizeof(ds), -EFAULT);
+	if (copy_from_user(&ds, arg, sizeof(ds)))
+		return -EFAULT;
 	if (ds.signr != 0 && (ds.signr < SIGRTMIN || ds.signr > SIGRTMAX))
 		return -EINVAL;
 	ps->discsignr = ds.signr;
@@ -896,7 +1014,8 @@ static int proc_claiminterface(struct dev_state *ps, void *arg)
 	unsigned int intf;
 	int ret;
 
-	get_user_ret(intf, (unsigned int *)arg, -EFAULT);
+	if (get_user(intf, (unsigned int *)arg))
+		return -EFAULT;
 	if ((ret = findintfif(ps->dev, intf)) < 0)
 		return ret;
 	return claimintf(ps, ret);
@@ -907,10 +1026,73 @@ static int proc_releaseinterface(struct dev_state *ps, void *arg)
 	unsigned int intf;
 	int ret;
 
-	get_user_ret(intf, (unsigned int *)arg, -EFAULT);
+	if (get_user(intf, (unsigned int *)arg))
+		return -EFAULT;
 	if ((ret = findintfif(ps->dev, intf)) < 0)
 		return ret;
 	return releaseintf(ps, intf);
+}
+
+static int proc_ioctl (struct dev_state *ps, void *arg)
+{
+	struct usbdevfs_ioctl	ctrl;
+	int			size;
+	void			*buf = 0;
+	int			retval = 0;
+
+	/* get input parameters and alloc buffer */
+	if (copy_from_user(&ctrl, (void *) arg, sizeof (ctrl)))
+		return -EFAULT;
+	if ((size = _IOC_SIZE (ctrl.ioctl_code)) > 0) {
+		if ((buf = kmalloc (size, GFP_KERNEL)) == 0)
+			return -ENOMEM;
+		if ((_IOC_DIR(ctrl.ioctl_code) & _IOC_WRITE)) {
+			if (copy_from_user (buf, ctrl.data, size)) {
+				kfree (buf);
+				return -EFAULT;
+			}
+		} else {
+			memset (buf, 0, size);
+		}
+	}
+
+	/* ioctl to device */
+	if (ctrl.ifno < 0) {
+		switch (ctrl.ioctl_code) {
+		/* access/release token for issuing control messages
+		 * ask a particular driver to bind/unbind, ... etc
+		 */
+		}
+		retval = -ENOSYS;
+
+	/* ioctl to the driver which has claimed a given interface */
+	} else {
+		struct usb_interface	*ifp = 0;
+		if (!ps->dev)
+			retval = -ENODEV;
+		else if (ctrl.ifno >= ps->dev->actconfig->bNumInterfaces)
+			retval = -EINVAL;
+		else {
+			if (!(ifp = usb_ifnum_to_if (ps->dev, ctrl.ifno)))
+				retval = -EINVAL;
+			else if (ifp->driver == 0 || ifp->driver->ioctl == 0)
+				retval = -ENOSYS;
+		}
+		if (retval == 0)
+			/* ifno might usefully be passed ... */
+			retval = ifp->driver->ioctl (ps->dev, ctrl.ioctl_code, buf);
+			/* size = min (size, retval)? */
+	}
+
+	/* cleanup and return */
+	if (retval >= 0
+			&& (_IOC_DIR (ctrl.ioctl_code) & _IOC_READ) != 0
+			&& size > 0
+			&& copy_to_user (ctrl.data, buf, size) != 0)
+		retval = -EFAULT;
+	if (buf != 0)
+		kfree (buf);
+	return retval;
 }
 
 static int usbdev_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
@@ -942,6 +1124,24 @@ static int usbdev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 		ret = proc_resetep(ps, (void *)arg);
 		if (ret >= 0)
 			inode->i_mtime = CURRENT_TIME;
+		break;
+
+	case USBDEVFS_RESET:
+		ret = proc_resetdevice(ps);
+		break;
+	
+	case USBDEVFS_CLEAR_HALT:
+		ret = proc_clearhalt(ps, (void *)arg);
+		if (ret >= 0)
+			inode->i_mtime = CURRENT_TIME;
+		break;
+
+	case USBDEVFS_GETDRIVER:
+		ret = proc_getdriver(ps, (void *)arg);
+		break;
+
+	case USBDEVFS_CONNECTINFO:
+		ret = proc_connectinfo(ps, (void *)arg);
 		break;
 
 	case USBDEVFS_SETINTERFACE:
@@ -982,6 +1182,9 @@ static int usbdev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 		ret = proc_releaseinterface(ps, (void *)arg);
 		break;
 
+	case USBDEVFS_IOCTL:
+		ret = proc_ioctl(ps, (void *) arg);
+		break;
 	}
 	up_read(&ps->devsem);
 	if (ret >= 0)
@@ -989,6 +1192,7 @@ static int usbdev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 	return ret;
 }
 
+/* No kernel lock - fine */
 static unsigned int usbdev_poll(struct file *file, struct poll_table_struct *wait)
 {
 	struct dev_state *ps = (struct dev_state *)file->private_data;

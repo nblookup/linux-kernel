@@ -66,6 +66,7 @@
  *   0.7  03.08.1999  adapt to Linus' new __setup/__initcall
  *   0.8  10.08.1999  use module_init/module_exit
  *   0.9  12.02.2000  adapted to softnet driver interface
+ *   0.10 03.07.2000  fix interface name handling
  */
 
 /*****************************************************************************/
@@ -88,7 +89,7 @@
 
 static const char bc_drvname[] = "baycom_ser_fdx";
 static const char bc_drvinfo[] = KERN_INFO "baycom_ser_fdx: (C) 1996-2000 Thomas Sailer, HB9JNX/AE4WA\n"
-KERN_INFO "baycom_ser_fdx: version 0.9 compiled " __TIME__ " " __DATE__ "\n";
+KERN_INFO "baycom_ser_fdx: version 0.10 compiled " __TIME__ " " __DATE__ "\n";
 
 /* --------------------------------------------------------------------- */
 
@@ -555,7 +556,7 @@ static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr,
 		return 0;
 
 	case HDLCDRVCTL_SETMODE:
-		if (netif_running(dev) || !suser())
+		if (netif_running(dev) || !capable(CAP_NET_ADMIN))
 			return -EACCES;
 		hi->data.modename[sizeof(hi->data.modename)-1] = '\0';
 		return baycom_setmode(bc, hi->data.modename);
@@ -621,8 +622,6 @@ static int __init init_baycomserfdx(void)
 	int i, j, found = 0;
 	char set_hw = 1;
 	struct baycom_state *bc;
-	char ifname[HDLCDRV_IFNAMELEN];
-
 
 	printk(bc_drvinfo);
 	/*
@@ -630,8 +629,9 @@ static int __init init_baycomserfdx(void)
 	 */
 	for (i = 0; i < NR_PORTS; i++) {
 		struct net_device *dev = baycom_device+i;
-		sprintf(ifname, "bcsf%d", i);
+		char ifname[IFNAMSIZ];
 
+		sprintf(ifname, "bcsf%d", i);
 		if (!mode[i])
 			set_hw = 0;
 		if (!set_hw)

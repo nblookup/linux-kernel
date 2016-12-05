@@ -1,7 +1,8 @@
-/* $Id */
+/* $Id: pgalloc.h,v 1.14 2000/12/09 04:15:24 anton Exp $ */
 #ifndef _SPARC64_PGALLOC_H
 #define _SPARC64_PGALLOC_H
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 
@@ -17,9 +18,23 @@
 #define flush_cache_page(vma, page) \
 	flush_cache_mm((vma)->vm_mm)
 
-/* These operations are unnecessary on the SpitFire since D-CACHE is write-through. */
-#define flush_icache_range(start, end)		do { } while (0)
+/* This is unnecessary on the SpitFire since D-CACHE is write-through. */
 #define flush_page_to_ram(page)			do { } while (0)
+
+/* 
+ * icache doesnt snoop local stores and we don't use block commit stores
+ * (which invalidate icache lines) during module load, so we need this.
+ */
+extern void flush_icache_range(unsigned long start, unsigned long end);
+
+extern void __flush_dcache_page(void *addr, int flush_icache);
+#define flush_dcache_page(page) \
+do {	if ((page)->mapping && !(page)->mapping->i_mmap && !(page)->mapping->i_mmap_shared) \
+		set_bit(PG_dcache_dirty, &(page)->flags); \
+	else \
+		__flush_dcache_page((page)->virtual, \
+				    (page)->mapping != NULL); \
+} while(0)
 
 extern void __flush_dcache_range(unsigned long start, unsigned long end);
 
@@ -32,7 +47,7 @@ extern void __flush_tlb_range(unsigned long context, unsigned long start,
 			      unsigned long pgsz, unsigned long size);
 extern void __flush_tlb_page(unsigned long context, unsigned long page, unsigned long r);
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 
 #define flush_cache_all()	__flush_cache_all()
 #define flush_tlb_all()		__flush_tlb_all()
@@ -59,7 +74,7 @@ do { struct mm_struct *__mm = (vma)->vm_mm; \
 			 SECONDARY_CONTEXT); \
 } while(0)
 
-#else /* __SMP__ */
+#else /* CONFIG_SMP */
 
 extern void smp_flush_cache_all(void);
 extern void smp_flush_tlb_all(void);
@@ -70,29 +85,13 @@ extern void smp_flush_tlb_page(struct mm_struct *mm, unsigned long page);
 
 #define flush_cache_all()	smp_flush_cache_all()
 #define flush_tlb_all()		smp_flush_tlb_all()
+#define flush_tlb_mm(mm)	smp_flush_tlb_mm(mm)
+#define flush_tlb_range(mm, start, end) \
+	smp_flush_tlb_range(mm, start, end)
+#define flush_tlb_page(vma, page) \
+	smp_flush_tlb_page((vma)->vm_mm, page)
 
-extern __inline__ void flush_tlb_mm(struct mm_struct *mm)
-{
-	if (CTX_VALID(mm->context))
-		smp_flush_tlb_mm(mm);
-}
-
-extern __inline__ void flush_tlb_range(struct mm_struct *mm, unsigned long start,
-				       unsigned long end)
-{
-	if (CTX_VALID(mm->context))
-		smp_flush_tlb_range(mm, start, end);
-}
-
-extern __inline__ void flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
-{
-	struct mm_struct *mm = vma->vm_mm;
-
-	if (CTX_VALID(mm->context))
-		smp_flush_tlb_page(mm, page);
-}
-
-#endif /* ! __SMP__ */
+#endif /* ! CONFIG_SMP */
 
 /* This will change for Cheetah and later chips. */
 #define VPTE_BASE	0xfffffffe00000000
@@ -117,7 +116,7 @@ extern __inline__ void flush_tlb_pgtables(struct mm_struct *mm, unsigned long st
 }
 
 /* Page table allocation/freeing. */
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 /* Sliiiicck */
 #define pgt_quicklists	cpu_data[smp_processor_id()]
 #else
@@ -134,11 +133,11 @@ extern struct pgtable_cache_struct {
 #define pgtable_cache_size	(pgt_quicklists.pgcache_size)
 #define pgd_cache_size		(pgt_quicklists.pgdcache_size)
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 
 extern __inline__ void free_pgd_fast(pgd_t *pgd)
 {
-	struct page *page = mem_map + MAP_NR(pgd);
+	struct page *page = virt_to_page(pgd);
 
 	if (!page->pprev_hash) {
 		(unsigned long *)page->next_hash = pgd_quicklist;
@@ -169,11 +168,11 @@ extern __inline__ pgd_t *get_pgd_fast(void)
                 ret = (struct page *)(__page_address(ret) + off);
                 pgd_cache_size--;
         } else {
-		ret = (struct page *) __get_free_page(GFP_KERNEL);
-		if(ret) {
-			struct page *page = mem_map + MAP_NR(ret);
-			
-			memset(ret, 0, PAGE_SIZE);
+		struct page *page = alloc_page(GFP_KERNEL);
+
+		if (page) {
+			ret = (struct page *)page_address(page);
+			clear_page(ret);
 			(unsigned long)page->pprev_hash = 2;
 			(unsigned long *)page->next_hash = pgd_quicklist;
 			pgd_quicklist = (unsigned long *)page;
@@ -183,7 +182,7 @@ extern __inline__ pgd_t *get_pgd_fast(void)
         return (pgd_t *)ret;
 }
 
-#else /* __SMP__ */
+#else /* CONFIG_SMP */
 
 extern __inline__ void free_pgd_fast(pgd_t *pgd)
 {
@@ -213,7 +212,7 @@ extern __inline__ void free_pgd_slow(pgd_t *pgd)
 	free_page((unsigned long)pgd);
 }
 
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 
 extern pmd_t *get_pmd_slow(pgd_t *pgd, unsigned long address_premasked);
 
@@ -316,8 +315,5 @@ extern inline pmd_t * pmd_alloc(pgd_t *pgd, unsigned long address)
 #define pmd_alloc_kernel(pgd, addr)	pmd_alloc(pgd, addr)
 
 extern int do_check_pgt_cache(int, int);
-
-/* Nothing to do on sparc64 :) */
-#define set_pgdir(address, entry)	do { } while(0)
 
 #endif /* _SPARC64_PGALLOC_H */

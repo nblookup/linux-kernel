@@ -66,6 +66,9 @@
  *
  * Resurrected character buffers in videoram plus lots of other trickery
  * by Martin Mares <mj@atrey.karlin.mff.cuni.cz>, July 1998
+ *
+ * Removed old-style timers, introduced console_timer, made timer
+ * deletion SMP-safe.  17Jun00, Andrew Morton <andrewm@uow.edu.au>
  */
 
 #include <linux/module.h>
@@ -105,7 +108,7 @@
 #include "console_macros.h"
 
 
-struct consw *conswitchp = NULL;
+const struct consw *conswitchp;
 
 /* A bitmap for codes <32. A bit of 1 indicates that the code
  * corresponding to that bit number invokes some special action
@@ -121,8 +124,6 @@ struct consw *conswitchp = NULL;
 #define DEFAULT_BELL_PITCH	750
 #define DEFAULT_BELL_DURATION	(HZ/8)
 
-extern int tty_register_devfs (struct tty_driver *driver, unsigned int flags,
-			       unsigned int minor);
 extern void vcs_make_devfs (unsigned int index, int unregister);
 
 #ifndef MIN
@@ -135,13 +136,13 @@ static struct termios *console_termios_locked[MAX_NR_CONSOLES];
 struct vc vc_cons [MAX_NR_CONSOLES];
 
 #ifndef VT_SINGLE_DRIVER
-static struct consw *con_driver_map[MAX_NR_CONSOLES];
+static const struct consw *con_driver_map[MAX_NR_CONSOLES];
 #endif
 
 static int con_open(struct tty_struct *, struct file *);
 static void vc_init(unsigned int console, unsigned int rows,
 		    unsigned int cols, int do_clear);
-static void blank_screen(void);
+static void blank_screen(unsigned long dummy);
 static void gotoxy(int currcons, int new_x, int new_y);
 static void save_cur(int currcons);
 static void reset_terminal(int currcons, int do_clear);
@@ -149,15 +150,16 @@ static void con_flush_chars(struct tty_struct *tty);
 static void set_vesa_blanking(unsigned long arg);
 static void set_cursor(int currcons);
 static void hide_cursor(int currcons);
+static void unblank_screen_t(unsigned long dummy);
 
-static int printable = 0;		/* Is console ready for printing? */
+static int printable;		/* Is console ready for printing? */
 
-int do_poke_blanked_console = 0;
-int console_blanked = 0;
+int do_poke_blanked_console;
+int console_blanked;
 
-static int vesa_blank_mode = 0; /* 0:none 1:suspendV 2:suspendH 3:powerdown */
+static int vesa_blank_mode; /* 0:none 1:suspendV 2:suspendH 3:powerdown */
 static int blankinterval = 10*60*HZ;
-static int vesa_off_interval = 0;
+static int vesa_off_interval;
 
 /*
  * fg_console is the current virtual console,
@@ -165,10 +167,10 @@ static int vesa_off_interval = 0;
  * want_console is the console we want to switch to,
  * kmsg_redirect is the console for kernel messages,
  */
-int fg_console = 0;
-int last_console = 0;
+int fg_console;
+int last_console;
 int want_console = -1;
-int kmsg_redirect = 0;
+int kmsg_redirect;
 
 /*
  * For each existing display, we have a pointer to console currently visible
@@ -176,7 +178,7 @@ int kmsg_redirect = 0;
  * appropriately. Unless the low-level driver supplies its own display_fg
  * variable, we use this one for the "master display".
  */
-static struct vc_data *master_display_fg = NULL;
+static struct vc_data *master_display_fg;
 
 /*
  * Unfortunately, we need to delay tty echo when we're currently writing to the
@@ -190,13 +192,15 @@ DECLARE_TASK_QUEUE(con_task_queue);
 /*
  * For the same reason, we defer scrollback to the console tasklet.
  */
-static int scrollback_delta = 0;
+static int scrollback_delta;
 
 /*
  * Hook so that the power management routines can (un)blank
  * the console on our behalf.
  */
-int (*console_blank_hook)(int) = NULL;
+int (*console_blank_hook)(int);
+
+static struct timer_list console_timer;
 
 /*
  *	Low-Level Functions
@@ -212,7 +216,7 @@ int (*console_blank_hook)(int) = NULL;
 #endif
 
 static int pm_con_request(struct pm_dev *dev, pm_request_t rqst, void *data);
-static struct pm_dev *pm_con = NULL;
+static struct pm_dev *pm_con;
 
 static inline unsigned short *screenpos(int currcons, int offset, int viewed)
 {
@@ -369,7 +373,7 @@ static u8 build_attr(int currcons, u8 _color, u8 _intensity, u8 _blink, u8 _unde
 static void update_attr(int currcons)
 {
 	attr = build_attr(currcons, color, intensity, blink, underline, reverse ^ decscnm);
-	video_erase_char = (build_attr(currcons, color, 1, 0, 0, decscnm) << 8) | ' ';
+	video_erase_char = (build_attr(currcons, color, 1, blink, 0, decscnm) << 8) | ' ';
 }
 
 /* Note: inverting the screen twice should revert to the original state */
@@ -411,9 +415,9 @@ void invert_screen(int currcons, int offset, int count, int viewed)
 /* used by selection: complement pointer position */
 void complement_pos(int currcons, int offset)
 {
-	static unsigned short *p = NULL;
-	static unsigned short old = 0;
-	static unsigned short oldx = 0, oldy = 0;
+	static unsigned short *p;
+	static unsigned short old;
+	static unsigned short oldx, oldy;
 
 	if (p) {
 		scr_writew(old, p);
@@ -582,10 +586,11 @@ void redraw_screen(int new_console, int is_switch)
 	}
 
 	if (redraw) {
+		int update;
 		set_origin(currcons);
+		update = sw->con_switch(vc_cons[currcons].d);
 		set_palette(currcons);
-		if (sw->con_switch(vc_cons[currcons].d) && vcmode != KD_GRAPHICS)
-			/* Update the screen contents */
+		if (update && vcmode != KD_GRAPHICS)
 			do_update_region(currcons, origin, screenbuf_size/2);
 	}
 	set_cursor(currcons);
@@ -654,7 +659,7 @@ int vc_allocate(unsigned int currcons)	/* return 0 on success */
 		con_set_default_unimap(currcons);
 	    q = (long)kmalloc(screenbuf_size, GFP_KERNEL);
 	    if (!q) {
-		kfree_s((char *) p, structsize);
+		kfree((char *) p);
 		vc_cons[currcons].d = NULL;
 		vt_cons[currcons] = NULL;
 		return -ENOMEM;
@@ -698,7 +703,7 @@ int vc_resize(unsigned int lines, unsigned int cols,
 			if (!p) {
 				for (i = first; i < currcons; i++)
 					if (newscreens[i])
-						kfree_s(newscreens[i], ss);
+						kfree(newscreens[i]);
 				return -ENOMEM;
 			}
 			newscreens[currcons] = p;
@@ -744,7 +749,7 @@ int vc_resize(unsigned int lines, unsigned int cols,
 		if (nlend > nl)
 			scr_memsetw((void *) nl, video_erase_char, nlend - nl);
 		if (kmalloced)
-			kfree_s(screenbuf, oss);
+			kfree(screenbuf);
 		screenbuf = newscreens[currcons];
 		kmalloced = 1;
 		screenbuf_size = ss;
@@ -780,9 +785,9 @@ void vc_disallocate(unsigned int currcons)
 	if (vc_cons_allocated(currcons)) {
 	    sw->con_deinit(vc_cons[currcons].d);
 	    if (kmalloced)
-		kfree_s(screenbuf, screenbuf_size);
+		kfree(screenbuf);
 	    if (currcons >= MIN_NR_CONSOLES)
-		kfree_s(vc_cons[currcons].d, structsize);
+		kfree(vc_cons[currcons].d);
 	    vc_cons[currcons].d = NULL;
 	}
 }
@@ -2051,7 +2056,7 @@ void vt_console_print(struct console *co, const char * b, unsigned count)
 {
 	int currcons = fg_console;
 	unsigned char c;
-	static unsigned long printing = 0;
+	static unsigned long printing;
 	const ushort *start;
 	ushort cnt = 0;
 	ushort myx;
@@ -2130,7 +2135,6 @@ void vt_console_print(struct console *co, const char * b, unsigned count)
 		}
 	}
 	set_cursor(currcons);
-	poke_blanked_console();
 
 quit:
 	clear_bit(0, &printing);
@@ -2142,17 +2146,13 @@ static kdev_t vt_console_device(struct console *c)
 }
 
 struct console vt_console_driver = {
-	"tty",
-	vt_console_print,
-	NULL,
-	vt_console_device,
-	keyboard_wait_for_keypress,
-	unblank_screen,
-	NULL,
-	CON_PRINTBUFFER,
-	-1,
-	0,
-	NULL
+	name:		"tty",
+	write:		vt_console_print,
+	device:		vt_console_device,
+	wait_key:	keyboard_wait_for_keypress,
+	unblank:	unblank_screen,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
 };
 #endif
 
@@ -2292,10 +2292,13 @@ static void con_start(struct tty_struct *tty)
 
 static void con_flush_chars(struct tty_struct *tty)
 {
+	unsigned long flags;
 	struct vt_struct *vt = (struct vt_struct *)tty->driver_data;
 
 	pm_access(pm_con);
+	spin_lock_irqsave(&console_lock, flags);
 	set_cursor(vt->vc_num);
+	spin_unlock_irqrestore(&console_lock, flags);
 }
 
 /*
@@ -2416,19 +2419,16 @@ void __init con_init(void)
 	if (tty_register_driver(&console_driver))
 		panic("Couldn't register console driver\n");
 
-	timer_table[BLANK_TIMER].fn = blank_screen;
-	timer_table[BLANK_TIMER].expires = 0;
+	init_timer(&console_timer);
+	console_timer.function = blank_screen;
 	if (blankinterval) {
-		timer_table[BLANK_TIMER].expires = jiffies + blankinterval;
-		timer_active |= 1<<BLANK_TIMER;
+		mod_timer(&console_timer, jiffies + blankinterval);
 	}
 
 	/*
 	 * kmalloc is not running yet - we use the bootmem allocator.
 	 */
 	for (currcons = 0; currcons < MIN_NR_CONSOLES; currcons++) {
-		int j, k ;
-
 		vc_cons[currcons].d = (struct vc_data *)
 				alloc_bootmem(sizeof(struct vc_data));
 		vt_cons[currcons] = (struct vt_struct *)
@@ -2438,11 +2438,6 @@ void __init con_init(void)
 		kmalloced = 0;
 		vc_init(currcons, video_num_lines, video_num_columns, 
 			currcons || !sw->con_save_screen);
-		for (j=k=0; j<16; j++) {
-			vc_cons[currcons].d->vc_palette[k++] = default_red[j] ;
-			vc_cons[currcons].d->vc_palette[k++] = default_grn[j] ;
-			vc_cons[currcons].d->vc_palette[k++] = default_blu[j] ;
-		}
 	}
 	currcons = fg_console = 0;
 	master_display_fg = vc_cons[currcons].d;
@@ -2484,7 +2479,7 @@ static void clear_buffer_attributes(int currcons)
  *	and become default driver for newly opened ones.
  */
 
-void take_over_console(struct consw *csw, int first, int last, int deflt)
+void take_over_console(const struct consw *csw, int first, int last, int deflt)
 {
 	int i, j = -1;
 	const char *desc;
@@ -2532,7 +2527,7 @@ void take_over_console(struct consw *csw, int first, int last, int deflt)
 		printk("to %s\n", desc);
 }
 
-void give_up_console(struct consw *csw)
+void give_up_console(const struct consw *csw)
 {
 	int i;
 
@@ -2588,15 +2583,14 @@ static void vesa_powerdown(void)
     }
 }
 
-static void vesa_powerdown_screen(void)
+static void vesa_powerdown_screen(unsigned long dummy)
 {
-	timer_active &= ~(1<<BLANK_TIMER);
-	timer_table[BLANK_TIMER].fn = unblank_screen;
+	console_timer.function = unblank_screen_t;	/* I don't have a clue why this is necessary */
 
 	vesa_powerdown();
 }
 
-void do_blank_screen(int entering_gfx)
+static void timer_do_blank_screen(int entering_gfx, int from_timer_handler)
 {
 	int currcons = fg_console;
 	int i;
@@ -2621,13 +2615,15 @@ void do_blank_screen(int entering_gfx)
 	}
 
 	hide_cursor(currcons);
+	if (!from_timer_handler)
+		del_timer_sync(&console_timer);
 	if (vesa_off_interval) {
-		timer_table[BLANK_TIMER].fn = vesa_powerdown_screen;
-		timer_table[BLANK_TIMER].expires = jiffies + vesa_off_interval;
-		timer_active |= (1<<BLANK_TIMER);
+		console_timer.function = vesa_powerdown_screen;
+		mod_timer(&console_timer, jiffies + vesa_off_interval);
 	} else {
-		timer_active &= ~(1<<BLANK_TIMER);
-		timer_table[BLANK_TIMER].fn = unblank_screen;
+		if (!from_timer_handler)
+			del_timer_sync(&console_timer);
+		console_timer.function = unblank_screen_t;
 	}
 
 	save_screen(currcons);
@@ -2643,6 +2639,16 @@ void do_blank_screen(int entering_gfx)
 		sw->con_blank(vc_cons[currcons].d, vesa_blank_mode + 1);
 }
 
+void do_blank_screen(int entering_gfx)
+{
+	timer_do_blank_screen(entering_gfx, 0);
+}
+
+static void unblank_screen_t(unsigned long dummy)
+{
+	unblank_screen();
+}
+
 void unblank_screen(void)
 {
 	int currcons;
@@ -2654,39 +2660,37 @@ void unblank_screen(void)
 		printk("unblank_screen: tty %d not allocated ??\n", fg_console+1);
 		return;
 	}
-	timer_table[BLANK_TIMER].fn = blank_screen;
+	console_timer.function = blank_screen;
 	if (blankinterval) {
-		timer_table[BLANK_TIMER].expires = jiffies + blankinterval;
-		timer_active |= 1<<BLANK_TIMER;
+		mod_timer(&console_timer, jiffies + blankinterval);
 	}
 
 	currcons = fg_console;
 	console_blanked = 0;
 	if (console_blank_hook)
 		console_blank_hook(0);
+	set_palette(currcons);
 	if (sw->con_blank(vc_cons[currcons].d, 0))
 		/* Low-level driver cannot restore -> do it ourselves */
 		update_screen(fg_console);
 	set_cursor(fg_console);
 }
 
-static void blank_screen(void)
+static void blank_screen(unsigned long dummy)
 {
-	do_blank_screen(0);
+	timer_do_blank_screen(0, 1);
 }
 
 void poke_blanked_console(void)
 {
-	timer_active &= ~(1<<BLANK_TIMER);
+	del_timer(&console_timer);	/* Can't use _sync here: called from tasklet */
 	if (vt_cons[fg_console]->vc_mode == KD_GRAPHICS)
 		return;
 	if (console_blanked) {
-		timer_table[BLANK_TIMER].fn = unblank_screen;
-		timer_table[BLANK_TIMER].expires = jiffies;	/* Now */
-		timer_active |= 1<<BLANK_TIMER;
+		console_timer.function = unblank_screen_t;
+		mod_timer(&console_timer, jiffies);	/* Now */
 	} else if (blankinterval) {
-		timer_table[BLANK_TIMER].expires = jiffies + blankinterval;
-		timer_active |= 1<<BLANK_TIMER;
+		mod_timer(&console_timer, jiffies + blankinterval);
 	}
 }
 
@@ -2852,7 +2856,7 @@ int con_font_op(int currcons, struct console_font_op *op)
 			rc = -EFAULT;
 	}
 quit:	if (temp)
-		kfree_s(temp, size);
+		kfree(temp);
 	return rc;
 }
 
@@ -2932,7 +2936,9 @@ EXPORT_SYMBOL(video_scan_lines);
 EXPORT_SYMBOL(vc_resize);
 EXPORT_SYMBOL(fg_console);
 EXPORT_SYMBOL(console_blank_hook);
-
+#ifdef CONFIG_VT
+EXPORT_SYMBOL(vt_cons);
+#endif
 #ifndef VT_SINGLE_DRIVER
 EXPORT_SYMBOL(take_over_console);
 EXPORT_SYMBOL(give_up_console);

@@ -9,6 +9,7 @@
 #include <linux/string.h>
 #include "hpfs_fn.h"
 #include <linux/module.h>
+#include <linux/init.h>
 
 /* Mark the filesystem dirty, so that chkdsk checks it when os/2 booted */
 
@@ -20,7 +21,7 @@ static void mark_dirty(struct super_block *s)
 		if ((sb = hpfs_map_sector(s, 17, &bh, 0))) {
 			sb->dirty = 1;
 			sb->old_wrote = 0;
-			mark_buffer_dirty(bh, 1);
+			mark_buffer_dirty(bh);
 			brelse(bh);
 		}
 	}
@@ -37,7 +38,7 @@ static void unmark_dirty(struct super_block *s)
 	if ((sb = hpfs_map_sector(s, 17, &bh, 0))) {
 		sb->dirty = s->s_hpfs_chkdsk > 1 - s->s_hpfs_was_error;
 		sb->old_wrote = s->s_hpfs_chkdsk >= 2 && !s->s_hpfs_was_error;
-		mark_buffer_dirty(bh, 1);
+		mark_buffer_dirty(bh);
 		brelse(bh);
 	}
 }
@@ -465,7 +466,7 @@ struct super_block *hpfs_read_super(struct super_block *s, void *options,
 	if (!(s->s_flags & MS_RDONLY)) {
 		spareblock->dirty = 1;
 		spareblock->old_wrote = 0;
-		mark_buffer_dirty(bh2, 1);
+		mark_buffer_dirty(bh2);
 	}
 
 	if (spareblock->hotfixes_used || spareblock->n_spares_used) {
@@ -557,26 +558,17 @@ bail0:
 
 DECLARE_FSTYPE_DEV(hpfs_fs_type, "hpfs", hpfs_read_super);
 
-int init_hpfs_fs(void)
+static int __init init_hpfs_fs(void)
 {
 	return register_filesystem(&hpfs_fs_type);
 }
 
-#ifdef MODULE
-
-/*int register_symtab_from(struct symbol_table *, long *);*/
-
-int init_module(void)
-{
-	/*int status;
-	if (!(status = init_hpfs_fs())) register_symtab(NULL);
-	return status;*/
-	return init_hpfs_fs();
-}
-
-void cleanup_module(void)
+static void __exit exit_hpfs_fs(void)
 {
 	unregister_filesystem(&hpfs_fs_type);
 }
 
-#endif
+EXPORT_NO_SYMBOLS;
+
+module_init(init_hpfs_fs)
+module_exit(exit_hpfs_fs)

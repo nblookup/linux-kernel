@@ -1,4 +1,4 @@
-/* -*- linux-c -*- --------------------------------------------------------- *
+/* -*- c -*- --------------------------------------------------------------- *
  *
  * linux/fs/autofs/waitq.c
  *
@@ -45,7 +45,6 @@ void autofs4_catatonic_mode(struct autofs_sb_info *sbi)
 		sbi->pipe = NULL;
 	}
 
-	autofs4_ihash_nuke(&sbi->ihash);
 	shrink_dcache_sb(sbi->sb);
 }
 
@@ -58,7 +57,7 @@ static int autofs4_write(struct file *file, const void *addr, int bytes)
 
 	/** WARNING: this is not safe for writing more than PIPE_BUF bytes! **/
 
-	sigpipe = sigismember(&current->signal, SIGPIPE);
+	sigpipe = sigismember(&current->pending.signal, SIGPIPE);
 
 	/* Save pointer to user space and point back to kernel space */
 	fs = get_fs();
@@ -76,7 +75,7 @@ static int autofs4_write(struct file *file, const void *addr, int bytes)
 	   SIGPIPE unless it was already supposed to get one */
 	if (wr == -EPIPE && !sigpipe) {
 		spin_lock_irqsave(&current->sigmask_lock, flags);
-		sigdelset(&current->signal, SIGPIPE);
+		sigdelset(&current->pending.signal, SIGPIPE);
 		recalc_sigpending(current);
 		spin_unlock_irqrestore(&current->sigmask_lock, flags);
 	}

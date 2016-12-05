@@ -55,7 +55,6 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 #define pgprot_val(x)	((x).pgprot)
 
 #define __pte(x)	((pte_t) { (x) } )
-#define __pgd(x)	((pgd_t) { (x) } )
 #define __pgprot(x)	((pgprot_t) { (x) } )
 
 #  else /* !STRICT_MM_TYPECHECKS */
@@ -79,7 +78,7 @@ typedef unsigned long pgprot_t;
 #  endif /* !STRICT_MM_TYPECHECKS */
 
 /*
- * Note: the MAP_NR() macro can't use __pa() because MAP_NR(X) MUST
+ * Note: the MAP_NR_*() macro can't use __pa() because MAP_NR_*(X) MUST
  * map to something >= max_mapnr if X is outside the identity mapped
  * kernel space.
  */
@@ -90,21 +89,17 @@ typedef unsigned long pgprot_t;
  */
 #define MAP_NR_DENSE(addr)	(((unsigned long) (addr) - PAGE_OFFSET) >> PAGE_SHIFT)
 
-/*
- * This variant works well for the SGI SN1 architecture (which does have huge
- * holes in the memory address space).
- */
-#define MAP_NR_SN1(addr)	(((unsigned long) (addr) - PAGE_OFFSET) >> PAGE_SHIFT)
-
 #ifdef CONFIG_IA64_GENERIC
-# define MAP_NR(addr)	platform_map_nr(addr)
-#elif defined (CONFIG_IA64_SN_SN1_SIM)
-# define MAP_NR(addr)	MAP_NR_SN1(addr)
+# include <asm/machvec.h>
+# define virt_to_page(kaddr)	(mem_map + platform_map_nr(kaddr))
+#elif defined (CONFIG_IA64_SGI_SN1)
+# ifndef CONFIG_DISCONTIGMEM
+#  define virt_to_page(kaddr)	(mem_map + MAP_NR_DENSE(kaddr))
+# endif
 #else
-# define MAP_NR(addr)	MAP_NR_DENSE(addr)
+# define virt_to_page(kaddr)	(mem_map + MAP_NR_DENSE(kaddr))
 #endif
-
-# endif /* __KERNEL__ */
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
 typedef union ia64_va {
 	struct {
@@ -124,10 +119,16 @@ typedef union ia64_va {
 #define __pa(x)		({ia64_va _v; _v.l = (long) (x); _v.f.reg = 0; _v.l;})
 #define __va(x)		({ia64_va _v; _v.l = (long) (x); _v.f.reg = -1; _v.p;})
 
+#define REGION_NUMBER(x)	({ia64_va _v; _v.l = (long) (x); _v.f.reg;})
+#define REGION_OFFSET(x)	({ia64_va _v; _v.l = (long) (x); _v.f.off;})
+
+#define REGION_SIZE		REGION_NUMBER(1)
+#define REGION_KERNEL	7
+
 #define BUG() do { printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); *(int *)0=0; } while (0)
 #define PAGE_BUG(page) do { BUG(); } while (0)
 
-extern __inline__ int
+static __inline__ int
 get_order (unsigned long size)
 {
 	double d = size - 1;
@@ -140,6 +141,7 @@ get_order (unsigned long size)
 	return order;
 }
 
+# endif /* __KERNEL__ */
 #endif /* !ASSEMBLY */
 
 #define PAGE_OFFSET		0xe000000000000000

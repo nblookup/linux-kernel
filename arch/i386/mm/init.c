@@ -37,8 +37,8 @@
 #include <asm/apic.h>
 
 unsigned long highstart_pfn, highend_pfn;
-static unsigned long totalram_pages = 0;
-static unsigned long totalhigh_pages = 0;
+static unsigned long totalram_pages;
+static unsigned long totalhigh_pages;
 
 /*
  * BAD_PAGE is the page that is used for page faults when linux
@@ -198,7 +198,7 @@ void __init kmap_init(void)
 
 void show_mem(void)
 {
-	int i,free = 0, total = 0, reserved = 0;
+	int i, total = 0, reserved = 0;
 	int shared = 0, cached = 0;
 	int highmem = 0;
 
@@ -214,9 +214,7 @@ void show_mem(void)
 			reserved++;
 		else if (PageSwapCache(mem_map+i))
 			cached++;
-		else if (!page_count(mem_map+i))
-			free++;
-		else
+		else if (page_count(mem_map+i))
 			shared += page_count(mem_map+i) - 1;
 	}
 	printk("%d pages of RAM\n", total);
@@ -242,8 +240,18 @@ static inline void set_pte_phys (unsigned long vaddr,
 	pte_t *pte;
 
 	pgd = swapper_pg_dir + __pgd_offset(vaddr);
+	if (pgd_none(*pgd)) {
+		printk("PAE BUG #00!\n");
+		return;
+	}
 	pmd = pmd_offset(pgd, vaddr);
+	if (pmd_none(*pmd)) {
+		printk("PAE BUG #01!\n");
+		return;
+	}
 	pte = pte_offset(pmd, vaddr);
+	if (pte_val(*pte))
+		pte_ERROR(*pte);
 	pgprot_val(prot) = pgprot_val(PAGE_KERNEL) | pgprot_val(flags);
 	set_pte(pte, mk_pte_phys(phys, prot));
 
@@ -271,53 +279,65 @@ static void __init fixrange_init (unsigned long start, unsigned long end, pgd_t 
 	pmd_t *pmd;
 	pte_t *pte;
 	int i, j;
+	unsigned long vaddr;
 
-	i = __pgd_offset(start);
-	j = __pmd_offset(start);
+	vaddr = start;
+	i = __pgd_offset(vaddr);
+	j = __pmd_offset(vaddr);
 	pgd = pgd_base + i;
 
-	for ( ; (i < PTRS_PER_PGD) && (start != end); pgd++, i++) {
+	for ( ; (i < PTRS_PER_PGD) && (vaddr != end); pgd++, i++) {
 #if CONFIG_X86_PAE
 		if (pgd_none(*pgd)) {
 			pmd = (pmd_t *) alloc_bootmem_low_pages(PAGE_SIZE);
 			set_pgd(pgd, __pgd(__pa(pmd) + 0x1));
-			if (pmd != pmd_offset(pgd, start))
-				BUG();
+			if (pmd != pmd_offset(pgd, 0))
+				printk("PAE BUG #02!\n");
 		}
-		pmd = pmd_offset(pgd, start);
+		pmd = pmd_offset(pgd, vaddr);
 #else
 		pmd = (pmd_t *)pgd;
 #endif
-		for (; (j < PTRS_PER_PMD) && start; pmd++, j++) {
+		for (; (j < PTRS_PER_PMD) && (vaddr != end); pmd++, j++) {
 			if (pmd_none(*pmd)) {
 				pte = (pte_t *) alloc_bootmem_low_pages(PAGE_SIZE);
 				set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(pte)));
 				if (pte != pte_offset(pmd, 0))
 					BUG();
 			}
-			start += PMD_SIZE;
+			vaddr += PMD_SIZE;
 		}
 		j = 0;
 	}
 }
 
-static void __init pagetable_init(void)
+static void __init pagetable_init (void)
 {
+	unsigned long vaddr, end;
 	pgd_t *pgd, *pgd_base;
+	int i, j, k;
 	pmd_t *pmd;
 	pte_t *pte;
-	int i, j, k;
-	unsigned long vaddr, end;
 
-	end = (unsigned long)__va(max_low_pfn*PAGE_SIZE) - 1;
+	/*
+	 * This can be zero as well - no problem, in that case we exit
+	 * the loops anyway due to the PTRS_PER_* conditions.
+	 */
+	end = (unsigned long)__va(max_low_pfn*PAGE_SIZE);
 
-	i = __pgd_offset(PAGE_OFFSET);
 	pgd_base = swapper_pg_dir;
+#if CONFIG_X86_PAE
+	for (i = 0; i < PTRS_PER_PGD; i++) {
+		pgd = pgd_base + i;
+		__pgd_clear(pgd);
+	}
+#endif
+	i = __pgd_offset(PAGE_OFFSET);
 	pgd = pgd_base + i;
 
 	for (; i < PTRS_PER_PGD; pgd++, i++) {
 		vaddr = i*PGDIR_SIZE;
-		if (vaddr >= end)
+		if (end && (vaddr >= end))
 			break;
 #if CONFIG_X86_PAE
 		pmd = (pmd_t *) alloc_bootmem_low_pages(PAGE_SIZE);
@@ -329,7 +349,7 @@ static void __init pagetable_init(void)
 			BUG();
 		for (j = 0; j < PTRS_PER_PMD; pmd++, j++) {
 			vaddr = i*PGDIR_SIZE + j*PMD_SIZE;
-			if (vaddr >= end)
+			if (end && (vaddr >= end))
 				break;
 			if (cpu_has_pse) {
 				unsigned long __pe;
@@ -354,7 +374,7 @@ static void __init pagetable_init(void)
 
 			for (k = 0; k < PTRS_PER_PTE; pte++, k++) {
 				vaddr = i*PGDIR_SIZE + j*PMD_SIZE + k*PAGE_SIZE;
-				if (vaddr >= end)
+				if (end && (vaddr >= end))
 					break;
 				*pte = mk_pte_phys(__pa(vaddr), PAGE_KERNEL);
 			}
@@ -415,7 +435,7 @@ void __init zap_low_mappings (void)
 }
 
 /*
- * paging_init() sets up the page tables - note that the first 4MB are
+ * paging_init() sets up the page tables - note that the first 8MB are
  * already mapped by head.S.
  *
  * This routines also unmaps the page at virtual kernel address 0, so
@@ -469,16 +489,21 @@ void __init paging_init(void)
  * before and after the test are here to work-around some nasty CPU bugs.
  */
 
+/*
+ * This function cannot be __init, since exceptions don't work in that
+ * section.
+ */
+static int do_test_wp_bit(unsigned long vaddr);
+
 void __init test_wp_bit(void)
 {
 /*
- * Ok, all PAE-capable CPUs are definitely handling the WP bit right.
+ * Ok, all PSE-capable CPUs are definitely handling the WP bit right.
  */
 	const unsigned long vaddr = PAGE_OFFSET;
 	pgd_t *pgd;
 	pmd_t *pmd;
 	pte_t *pte, old_pte;
-	char tmp_reg;
 
 	printk("Checking if this processor honours the WP bit even in supervisor mode... ");
 
@@ -489,27 +514,19 @@ void __init test_wp_bit(void)
 	*pte = mk_pte_phys(0, PAGE_READONLY);
 	local_flush_tlb();
 
-	__asm__ __volatile__(
-		"jmp 1f; 1:\n"
-		"movb %0,%1\n"
-		"movb %1,%0\n"
-		"jmp 1f; 1:\n"
-		:"=m" (*(char *) vaddr),
-		 "=q" (tmp_reg)
-		:/* no inputs */
-		:"memory");
+	boot_cpu_data.wp_works_ok = do_test_wp_bit(vaddr);
 
 	*pte = old_pte;
 	local_flush_tlb();
 
-	if (boot_cpu_data.wp_works_ok < 0) {
-		boot_cpu_data.wp_works_ok = 0;
+	if (!boot_cpu_data.wp_works_ok) {
 		printk("No.\n");
 #ifdef CONFIG_X86_WP_WORKS_OK
 		panic("This kernel doesn't support CPU's with broken WP. Recompile it for a 386!");
 #endif
-	} else
-		printk(".\n");
+	} else {
+		printk("Ok.\n");
+	}
 }
 
 static inline int page_is_ram (unsigned long pagenr)
@@ -544,8 +561,6 @@ void __init mem_init(void)
 
 #ifdef CONFIG_HIGHMEM
 	highmem_start_page = mem_map + highstart_pfn;
-	/* cache the highmem_mapnr */
-	highmem_mapnr = highstart_pfn;
 	max_mapnr = num_physpages = highend_pfn;
 #else
 	max_mapnr = num_physpages = max_low_pfn;
@@ -614,14 +629,38 @@ void __init mem_init(void)
 
 }
 
+/* Put this after the callers, so that it cannot be inlined */
+static int do_test_wp_bit(unsigned long vaddr)
+{
+	char tmp_reg;
+	int flag;
+
+	__asm__ __volatile__(
+		"	movb %0,%1	\n"
+		"1:	movb %1,%0	\n"
+		"	xorl %2,%2	\n"
+		"2:			\n"
+		".section __ex_table,\"a\"\n"
+		"	.align 4	\n"
+		"	.long 1b,2b	\n"
+		".previous		\n"
+		:"=m" (*(char *) vaddr),
+		 "=q" (tmp_reg),
+		 "=r" (flag)
+		:"2" (1)
+		:"memory");
+	
+	return flag;
+}
+
 void free_initmem(void)
 {
 	unsigned long addr;
 
 	addr = (unsigned long)(&__init_begin);
 	for (; addr < (unsigned long)(&__init_end); addr += PAGE_SIZE) {
-		ClearPageReserved(mem_map + MAP_NR(addr));
-		set_page_count(mem_map+MAP_NR(addr), 1);
+		ClearPageReserved(virt_to_page(addr));
+		set_page_count(virt_to_page(addr), 1);
 		free_page(addr);
 		totalram_pages++;
 	}
@@ -634,8 +673,8 @@ void free_initrd_mem(unsigned long start, unsigned long end)
 	if (start < end)
 		printk ("Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
 	for (; start < end; start += PAGE_SIZE) {
-		ClearPageReserved(mem_map + MAP_NR(start));
-		set_page_count(mem_map+MAP_NR(start), 1);
+		ClearPageReserved(virt_to_page(start));
+		set_page_count(virt_to_page(start), 1);
 		free_page(start);
 		totalram_pages++;
 	}

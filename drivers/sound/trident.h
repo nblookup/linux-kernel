@@ -32,6 +32,10 @@
 #define PCI_VENDOR_ID_SI			0x0139
 #endif
 
+#ifndef PCI_VENDOR_ID_ALI
+#define PCI_VENDOR_ID_ALI			0x10b9
+#endif
+
 #ifndef PCI_DEVICE_ID_TRIDENT_4DWAVE_DX
 #define PCI_DEVICE_ID_TRIDENT_4DWAVE_DX	0x2000
 #endif
@@ -42,6 +46,14 @@
 
 #ifndef PCI_DEVICE_ID_SI_7018
 #define PCI_DEVICE_ID_SI_7018		0x7018
+#endif
+
+#ifndef PCI_DEVICE_ID_ALI_5451
+#define PCI_DEVICE_ID_ALI_5451		0x5451
+#endif
+
+#ifndef PCI_DEVICE_ID_ALI_1533
+#define PCI_DEVICE_ID_ALI_1533		0x1533
 #endif
 
 #ifndef FALSE
@@ -62,6 +74,7 @@
 
 #define DAC_RUNNING	0x01
 #define ADC_RUNNING	0x02
+
 /* Register Addresses */
 
 /* operational registers common to DX, NX, 7018 */
@@ -78,6 +91,87 @@ enum trident_op_registers {
 	T4D_SBBL_SBCL	= 0xc0, T4D_SBCTRL_SBE2R_SBDD    = 0xc4,
 	T4D_STIMER	= 0xc8, T4D_LFO_B_I2S_DELTA      = 0xcc,
 	T4D_AINT_B	= 0xd8, T4D_AINTEN_B    = 0xdc
+};
+
+enum ali_op_registers {
+	ALI_SCTRL		= 0x48,
+	ALI_GLOBAL_CONTROL	= 0xd4,
+	ALI_STIMER		= 0xc8,
+	ALI_SPDIF_CS		= 0x70,
+	ALI_SPDIF_CTRL		= 0x74
+};
+
+enum ali_registers_number {
+	ALI_GLOBAL_REGS		= 56,
+	ALI_CHANNEL_REGS	= 8,
+	ALI_MIXER_REGS		= 20
+};
+
+enum ali_sctrl_control_bit {
+	ALI_SPDIF_OUT_ENABLE	= 0x20
+};
+
+enum ali_global_control_bit {
+	ALI_SPDIF_OUT_SEL_PCM	= 0x00000400,
+	ALI_SPDIF_IN_SUPPORT	= 0x00000800,
+	ALI_SPDIF_OUT_CH_ENABLE	= 0x00008000,
+	ALI_SPDIF_IN_CH_ENABLE	= 0x00080000,
+	ALI_PCM_IN_DISABLE	= 0x7fffffff,
+	ALI_PCM_IN_ENABLE	= 0x80000000,
+	ALI_SPDIF_IN_CH_DISABLE	= 0xfff7ffff,
+	ALI_SPDIF_OUT_CH_DISABLE = 0xffff7fff,
+	ALI_SPDIF_OUT_SEL_SPDIF	= 0xfffffbff
+	
+};
+
+enum ali_spdif_control_bit {
+	ALI_SPDIF_IN_FUNC_ENABLE	= 0x02,
+	ALI_SPDIF_IN_CH_STATUS		= 0x40,
+	ALI_SPDIF_OUT_CH_STATUS		= 0xbf
+	
+};
+
+enum ali_control_all {
+	ALI_DISABLE_ALL_IRQ	= 0,
+	ALI_CHANNELS		= 32,
+	ALI_STOP_ALL_CHANNELS	= 0xffffffff,
+	ALI_MULTI_CHANNELS_START_STOP	= 0x07800000
+
+};
+
+enum ali_pcm_in_channel_num {
+	ALI_NORMAL_CHANNEL	= 0,
+	ALI_SPDIF_OUT_CHANNEL	= 15,
+	ALI_SPDIF_IN_CHANNEL    = 19,
+	ALI_LEF_CHANNEL		= 23,
+	ALI_CENTER_CHANNEL	= 24,
+	ALI_SURR_RIGHT_CHANNEL	= 25,
+	ALI_SURR_LEFT_CHANNEL	= 26,
+	ALI_PCM_IN_CHANNEL	= 31
+};
+
+enum ali_pcm_out_channel_num {
+	ALI_PCM_OUT_CHANNEL_FIRST = 0,
+	ALI_PCM_OUT_CHANNEL_LAST = 31
+};
+
+enum ali_ac97_power_control_bit {
+	ALI_EAPD_POWER_DOWN	= 0x8000
+};
+
+enum ali_update_ptr_flags {
+	ALI_ADDRESS_INT_UPDATE	= 0x01
+};
+
+enum ali_revision {
+	ALI_5451_V02	= 0x02
+};
+
+enum ali_spdif_out_control {
+	ALI_PCM_TO_SPDIF_OUT		= 0,
+	ALI_SPDIF_OUT_TO_SPDIF_OUT	= 1,
+	ALI_SPDIF_OUT_PCM		= 0,
+	ALI_SPDIF_OUT_NON_PCM		= 2
 };
 
 /* S/PDIF Operational Registers for 4D-NX */
@@ -112,8 +206,20 @@ enum si_ac97_registers {
 	SI_SERIAL_INTF_CTRL = 0x48, SI_AC97_GPIO = 0x4c
 };
 
+enum ali_ac97_registers {
+	ALI_AC97_WRITE       = 0x40, ALI_AC97_READ = 0x44
+};
+
 /* Bit mask for operational registers */
 #define AC97_REG_ADDR      0x000000ff
+
+enum ali_ac97_bits {
+	ALI_AC97_BUSY_WRITE = 0x8000, ALI_AC97_BUSY_READ = 0x8000,
+	ALI_AC97_WRITE_ACTION = 0x8000, ALI_AC97_READ_ACTION = 0x8000,
+	ALI_AC97_AUDIO_BUSY = 0x4000, ALI_AC97_SECONDARY  = 0x0080,
+	ALI_AC97_READ_MIXER_REGISTER = 0xfeff,
+	ALI_AC97_WRITE_MIXER_REGISTER = 0x0100
+};
 
 enum sis7018_ac97_bits {
 	SI_AC97_BUSY_WRITE = 0x8000, SI_AC97_BUSY_READ = 0x8000,
@@ -130,7 +236,7 @@ enum trident_dx_ac97_bits {
 enum trident_nx_ac97_bits {
 	/* ACR1-3 */
 	NX_AC97_BUSY_WRITE = 0x0800, NX_AC97_BUSY_READ = 0x0800,
-	NX_AC97_WRITE_SECONDARY = 0x0100,
+	NX_AC97_BUSY_DATA  = 0x0400, NX_AC97_WRITE_SECONDARY = 0x0100,
 	/* ACR0 */
 	NX_AC97_SECONDARY_READY = 0x0040, NX_AC97_SECONDARY_RECORD = 0x0020,
 	NX_AC97_SURROUND_OUTPUT = 0x0010,
@@ -148,7 +254,7 @@ enum serial_intf_ctrl_bits {
 	MICIN       = 0x00000400, LINE2IN     = 0x00000800,
 	HEAD_SET_IN = 0x00001000, GPIOIN      = 0x00002000,
 	/* 7018 spec says id = 01 but the demo board routed to 10 
-	   SECONDARY_ID= 0x00008000, */
+	   SECONDARY_ID= 0x00004000, */
 	SECONDARY_ID= 0x00004000,
 	PCMOUT      = 0x00010000, SURROUT     = 0x00020000,
 	CENTEROUT   = 0x00040000, LFEOUT      = 0x00080000,
@@ -173,10 +279,18 @@ enum channel_control_bits {
 };
 
 enum channel_attribute {
-	MODEM_LINE1, MODEM_LINE2, PCM_LR, HSET,
-	I2SLR, CENTER_LFE, SURR_LR, SPDIF_LR,
-	CHANNEL_PB     = 0x00000000, CHANNEL_SPC_PB = 0x40000000,
-	CHANNEL_REC    = 0x80000000, CHANNEL_REC_PB = 0xc0000000
+	/* playback/record select */
+	CHANNEL_PB     = 0x0000, CHANNEL_SPC_PB = 0x4000,
+	CHANNEL_REC    = 0x8000, CHANNEL_REC_PB = 0xc000,
+	/* playback destination/record source select */
+	MODEM_LINE1    = 0x0000, MODEM_LINE2    = 0x0400,
+	PCM_LR         = 0x0800, HSET           = 0x0c00,
+	I2S_LR         = 0x1000, CENTER_LFE     = 0x1400,
+	SURR_LR        = 0x1800, SPDIF_LR       = 0x1c00,
+	MIC            = 0x1400,
+	/* mist stuff */
+	MONO_LEFT      = 0x0000, MONO_RIGHT     = 0x0100,
+	MONO_MIX       = 0x0200, SRC_ENABLE     = 0x0080,
 };
 
 enum miscint_bits {
@@ -189,12 +303,6 @@ enum miscint_bits {
 	ST_TARGET_REACHED = 0x00008000, PB_24K_MODE   = 0x00010000, 
 	ST_IRQ_EN       = 0x00800000, ACGPIO_IRQ      = 0x01000000
 };
-
-#define AC97_SIGMATEL_DAC2INVERT	0x6E
-#define AC97_SIGMATEL_BIAS1	0x70
-#define AC97_SIGMATEL_BIAS2	0x72
-#define AC97_SIGMATEL_CIC1	0x76
-#define AC97_SIGMATEL_CIC2	0x78
 
 #define TRID_REG( trident, x ) ( (trident) -> iobase + (x) )
 
@@ -209,7 +317,6 @@ enum miscint_bits {
 #define VALIDATE_STATE(a) VALIDATE_MAGIC(a,TRIDENT_STATE_MAGIC)
 #define VALIDATE_CARD(a) VALIDATE_MAGIC(a,TRIDENT_CARD_MAGIC)
 
- 
 extern __inline__ unsigned ld2(unsigned int x)
 {
 	unsigned r = 0;

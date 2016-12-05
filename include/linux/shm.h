@@ -2,7 +2,7 @@
 #define _LINUX_SHM_H_
 
 #include <linux/ipc.h>
-#include <linux/mm.h>
+#include <asm/page.h>
 
 /*
  * SHMMAX, SHMMNI and SHMALL are upper limits are defaults which can
@@ -10,9 +10,9 @@
  */
 
 #define SHMMAX 0x2000000		 /* max shared seg size (bytes) */
-#define SHMMIN 0			 /* min shared seg size (bytes) */
-#define SHMMNI 128			 /* max num of segs system wide */
-#define SHMALL (SHMMAX/PAGE_SIZE*SHMMNI) /* max shm system wide (pages) */
+#define SHMMIN 1			 /* min shared seg size (bytes) */
+#define SHMMNI 4096			 /* max num of segs system wide */
+#define SHMALL (SHMMAX/PAGE_SIZE*(SHMMNI/16)) /* max shm system wide (pages) */
 #define SHMSEG SHMMNI			 /* max shared segs per process */
 
 #include <asm/shmparam.h>

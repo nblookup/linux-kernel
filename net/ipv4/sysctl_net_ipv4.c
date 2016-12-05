@@ -1,7 +1,7 @@
 /*
  * sysctl_net_ipv4.c: sysctl interface to net IPV4 subsystem.
  *
- * $Id: sysctl_net_ipv4.c,v 1.43 2000/01/16 05:11:27 davem Exp $
+ * $Id: sysctl_net_ipv4.c,v 1.47 2000/10/19 15:51:02 davem Exp $
  *
  * Begun April 1, 1996, Mike Shaver.
  * Added /proc/sys/net/ipv4 directory entry (empty =) ). [MS]
@@ -15,18 +15,8 @@
 #include <net/route.h>
 #include <net/tcp.h>
 
-/*
- *	TCP configuration parameters
- */
-
-#define TCP_PMTU_DISC	0x00000001	/* perform PMTU discovery	  */
-#define TCP_CONG_AVOID	0x00000002	/* congestion avoidance algorithm */
-#define TCP_DELAY_ACKS	0x00000003	/* delayed ack stategy		  */
-
-#if 0
-static int boolean_min = 0;
-static int boolean_max = 1;
-#endif
+/* From af_inet.c */
+extern int sysctl_ip_nonlocal_bind;
 
 /* From icmp.c */
 extern int sysctl_icmp_echo_ignore_all;
@@ -57,7 +47,10 @@ extern int inet_peer_maxttl;
 extern int inet_peer_gc_mintime;
 extern int inet_peer_gc_maxtime;
 
-int tcp_retr1_max = 255; 
+static int tcp_retr1_max = 255; 
+
+static int ip_local_port_range_min[] = { 1, 1 };
+static int ip_local_port_range_max[] = { 65535, 65535 };
 
 struct ipv4_config ipv4_config;
 
@@ -120,6 +113,9 @@ ctl_table ipv4_table[] = {
         {NET_IPV4_NO_PMTU_DISC, "ip_no_pmtu_disc",
          &ipv4_config.no_pmtu_disc, sizeof(int), 0644, NULL,
          &proc_dointvec},
+	{NET_IPV4_NONLOCAL_BIND, "ip_nonlocal_bind",
+	 &sysctl_ip_nonlocal_bind, sizeof(int), 0644, NULL,
+	 &proc_dointvec},
 	{NET_IPV4_TCP_SYN_RETRIES, "tcp_syn_retries",
 	 &sysctl_tcp_syn_retries, sizeof(int), 0644, NULL, &proc_dointvec},
 	{NET_TCP_SYNACK_RETRIES, "tcp_synack_retries",
@@ -170,7 +166,8 @@ ctl_table ipv4_table[] = {
 	 sizeof(int), 0644, NULL, &proc_dointvec},
 	{NET_IPV4_LOCAL_PORT_RANGE, "ip_local_port_range",
 	 &sysctl_local_port_range, sizeof(sysctl_local_port_range), 0644, 
-	 NULL, &proc_dointvec},
+	 NULL, &proc_dointvec_minmax, &sysctl_intvec, NULL,
+	 ip_local_port_range_min, ip_local_port_range_max },
 	{NET_IPV4_ICMP_ECHO_IGNORE_ALL, "icmp_echo_ignore_all",
 	 &sysctl_icmp_echo_ignore_all, sizeof(int), 0644, NULL,
 	 &proc_dointvec},
@@ -209,6 +206,26 @@ ctl_table ipv4_table[] = {
 	 &proc_dointvec_jiffies, &sysctl_jiffies},
 	{NET_TCP_ORPHAN_RETRIES, "tcp_orphan_retries",
 	 &sysctl_tcp_orphan_retries, sizeof(int), 0644, NULL, &proc_dointvec},
+	{NET_TCP_FACK, "tcp_fack",
+	 &sysctl_tcp_fack, sizeof(int), 0644, NULL, &proc_dointvec},
+	{NET_TCP_REORDERING, "tcp_reordering",
+	 &sysctl_tcp_reordering, sizeof(int), 0644, NULL, &proc_dointvec},
+#ifdef CONFIG_INET_ECN
+	{NET_TCP_ECN, "tcp_ecn",
+	 &sysctl_tcp_ecn, sizeof(int), 0644, NULL, &proc_dointvec},
+#endif
+	{NET_TCP_DSACK, "tcp_dsack",
+	 &sysctl_tcp_dsack, sizeof(int), 0644, NULL, &proc_dointvec},
+	{NET_TCP_MEM, "tcp_mem",
+	 &sysctl_tcp_mem, sizeof(sysctl_tcp_mem), 0644, NULL, &proc_dointvec},
+	{NET_TCP_WMEM, "tcp_wmem",
+	 &sysctl_tcp_wmem, sizeof(sysctl_tcp_wmem), 0644, NULL, &proc_dointvec},
+	{NET_TCP_RMEM, "tcp_rmem",
+	 &sysctl_tcp_rmem, sizeof(sysctl_tcp_rmem), 0644, NULL, &proc_dointvec},
+	{NET_TCP_APP_WIN, "tcp_app_win",
+	 &sysctl_tcp_app_win, sizeof(int), 0644, NULL, &proc_dointvec},
+	{NET_TCP_ADV_WIN_SCALE, "tcp_adv_win_scale",
+	 &sysctl_tcp_adv_win_scale, sizeof(int), 0644, NULL, &proc_dointvec},
 	{0}
 };
 

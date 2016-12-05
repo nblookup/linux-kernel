@@ -56,6 +56,12 @@
 #define ETH_P_AARP	0x80F3		/* Appletalk AARP		*/
 #define ETH_P_IPX	0x8137		/* IPX over DIX			*/
 #define ETH_P_IPV6	0x86DD		/* IPv6 over bluebook		*/
+#define ETH_P_PPP_DISC	0x8863		/* PPPoE discovery messages     */
+#define ETH_P_PPP_SES	0x8864		/* PPPoE session messages	*/
+#define ETH_P_ATMMPOA	0x884c		/* MultiProtocol Over ATM	*/
+#define ETH_P_ATMFATE	0x8884		/* Frame-based ATM Transport
+					 * over Ethernet
+					 */
 
 /*
  *	Non DIX types. Won't clash for 1500 types.
@@ -87,13 +93,5 @@ struct ethhdr
 	unsigned char	h_source[ETH_ALEN];	/* source ether addr	*/
 	unsigned short	h_proto;		/* packet type ID field	*/
 };
-
-/*
- *	We Have changed the ethernet statistics collection data. This
- *	is just for partial compatibility for now.
- */
- 
- 
-#define enet_statistics net_device_stats
 
 #endif	/* _LINUX_IF_ETHER_H */

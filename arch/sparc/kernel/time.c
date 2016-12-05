@@ -1,4 +1,4 @@
-/* $Id: time.c,v 1.53 2000/02/09 21:11:04 davem Exp $
+/* $Id: time.c,v 1.57 2000/09/16 07:33:45 davem Exp $
  * linux/arch/sparc/kernel/time.c
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -70,6 +70,40 @@ struct intersil *intersil_clock;
 
 #endif
 
+static spinlock_t ticker_lock = SPIN_LOCK_UNLOCKED;
+
+/* 32-bit Sparc specific profiling function. */
+void sparc_do_profile(unsigned long pc, unsigned long o7)
+{
+	if(prof_buffer && current->pid) {
+		extern int _stext;
+		extern int __copy_user_begin, __copy_user_end;
+		extern int __atomic_begin, __atomic_end;
+		extern int __bzero_begin, __bzero_end;
+		extern int __bitops_begin, __bitops_end;
+
+		if ((pc >= (unsigned long) &__copy_user_begin &&
+		     pc < (unsigned long) &__copy_user_end) ||
+		    (pc >= (unsigned long) &__atomic_begin &&
+		     pc < (unsigned long) &__atomic_end) ||
+		    (pc >= (unsigned long) &__bzero_begin &&
+		     pc < (unsigned long) &__bzero_end) ||
+		    (pc >= (unsigned long) &__bitops_begin &&
+		     pc < (unsigned long) &__bitops_end))
+			pc = o7;
+
+		pc -= (unsigned long) &_stext;
+		pc >>= prof_shift;
+
+		spin_lock(&ticker_lock);
+		if(pc < prof_len)
+			prof_buffer[pc]++;
+		else
+			prof_buffer[prof_len - 1]++;
+		spin_unlock(&ticker_lock);
+	}
+}
+
 __volatile__ unsigned int *master_l10_counter;
 __volatile__ unsigned int *master_l10_limit;
 
@@ -81,6 +115,11 @@ void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	/* last time the cmos clock got updated */
 	static long last_rtc_update=0;
+
+#ifndef CONFIG_SMP
+	if(!user_mode(regs))
+		sparc_do_profile(regs->pc, regs->u_regs[UREG_RETPC]);
+#endif
 
 #ifdef CONFIG_SUN4
 	if((idprom->id_machtype == (SM_SUN4 | SM_4_260)) ||
@@ -108,37 +147,6 @@ void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	    last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
 	}
 	write_unlock(&xtime_lock);
-}
-
-/* Converts Gregorian date to seconds since 1970-01-01 00:00:00.
- * Assumes input in normal date format, i.e. 1980-12-31 23:59:59
- * => year=1980, mon=12, day=31, hour=23, min=59, sec=59.
- *
- * [For the Julian calendar (which was used in Russia before 1917,
- * Britain & colonies before 1752, anywhere else before 1582,
- * and is still in use by some communities) leave out the
- * -year/100+year/400 terms, and add 10.]
- *
- * This algorithm was first published by Gauss (I think).
- *
- * WARNING: this function will overflow on 2106-02-07 06:28:16 on
- * machines were long is 32-bit! (However, as time_t is signed, we
- * will already get problems at other places on 2038-01-19 03:14:08)
- */
-static inline unsigned long mktime(unsigned int year, unsigned int mon,
-	unsigned int day, unsigned int hour,
-	unsigned int min, unsigned int sec)
-{
-	if (0 >= (int) (mon -= 2)) {	/* 1..12 -> 11,12,1..10 */
-		mon += 12;	/* Puts Feb last since it has leap day */
-		year -= 1;
-	}
-	return (((
-	    (unsigned long)(year/4 - year/100 + year/400 + 367*mon/12 + day) +
-	      year*365 - 719499
-	    )*24 + hour /* now have hours */
-	   )*60 + min /* now have minutes */
-	  )*60 + sec; /* finally seconds */
 }
 
 /* Kick start a stopped clock (procedure from the Sun NVRAM/hostid FAQ). */

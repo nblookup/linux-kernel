@@ -1,9 +1,10 @@
-/* $Id: misc.c,v 1.22 2000/02/16 07:31:41 davem Exp $
+/* $Id: misc.c,v 1.31 2000/12/14 22:57:25 davem Exp $
  * misc.c: Miscelaneous syscall emulation for Solaris
  *
  * Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  */
 
+#include <linux/config.h>
 #include <linux/module.h> 
 #include <linux/types.h>
 #include <linux/smp_lock.h>
@@ -19,7 +20,6 @@
 #include <asm/string.h>
 #include <asm/oplib.h>
 #include <asm/idprom.h>
-#include <asm/machines.h>
 
 #include "conv.h"
 
@@ -53,8 +53,8 @@ static u32 do_solaris_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u64 o
 	struct file *file = NULL;
 	unsigned long retval, ret_type;
 
-	lock_kernel();
-	current->personality |= PER_SVR4;
+	/* Do we need it here? */
+	set_personality(PER_SVR4);
 	if (flags & MAP_NORESERVE) {
 		static int cnt = 0;
 		
@@ -72,7 +72,7 @@ static u32 do_solaris_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u64 o
  		file = fget(fd);
 		if (!file)
 			goto out;
-		if (file->f_dentry && file->f_dentry->d_inode) {
+		else {
 			struct inode * inode = file->f_dentry->d_inode;
 			if(MAJOR(inode->i_rdev) == MEM_MAJOR &&
 			   MINOR(inode->i_rdev) == 5) {
@@ -105,7 +105,6 @@ out_putf:
 	if (file)
 		fput(file);
 out:
-	unlock_kernel();
 	return (u32) retval;
 }
 
@@ -140,12 +139,14 @@ asmlinkage int solaris_brk(u32 brk)
 	int i, len = (countfrom) ? 					\
 		((sizeof(to) > sizeof(from) ? 				\
 			sizeof(from) : sizeof(to))) : sizeof(to); 	\
-	copy_to_user_ret(to, from, len, -EFAULT); 			\
+	if (copy_to_user(to, from, len))				\
+		return -EFAULT;						\
 	if (dotchop) 							\
 		for (p=from,i=0; *p && *p != '.' && --len; p++,i++); 	\
 	else 								\
 		i = len - 1; 						\
-	__put_user_ret('\0', (char *)(to+i), -EFAULT); 			\
+	if (__put_user('\0', (char *)(to+i)))				\
+		return -EFAULT;						\
 }
 
 struct sol_uname {
@@ -179,26 +180,7 @@ static char *machine(void)
 
 static char *platform(char *buffer)
 {
-	int i, len;
-	struct {
-		char *platform;
-		int id_machtype;
-	} platforms [] = {
-		{ "sun4", (SM_SUN4 | SM_4_110) },
-		{ "sun4", (SM_SUN4 | SM_4_260) },
-		{ "sun4", (SM_SUN4 | SM_4_330) },
-		{ "sun4", (SM_SUN4 | SM_4_470) },
-		{ "SUNW,Sun_4_60", (SM_SUN4C | SM_4C_SS1) },
-		{ "SUNW,Sun_4_40", (SM_SUN4C | SM_4C_IPC) },
-		{ "SUNW,Sun_4_65", (SM_SUN4C | SM_4C_SS1PLUS) },
-		{ "SUNW,Sun_4_20", (SM_SUN4C | SM_4C_SLC) },
-		{ "SUNW,Sun_4_75", (SM_SUN4C | SM_4C_SS2) },
-		{ "SUNW,Sun_4_25", (SM_SUN4C | SM_4C_ELC) },
-		{ "SUNW,Sun_4_50", (SM_SUN4C | SM_4C_IPX) },
-		{ "SUNW,Sun_4_600", (SM_SUN4M | SM_4M_SS60) },
-		{ "SUNW,SPARCstation-5", (SM_SUN4M | SM_4M_SS50) },
-		{ "SUNW,SPARCstation-20", (SM_SUN4M | SM_4M_SS40) }
-	};
+	int len;
 
 	*buffer = 0;
 	len = prom_getproperty(prom_root_node, "name", buffer, 256);
@@ -211,10 +193,8 @@ static char *platform(char *buffer)
 			if (*p == '/' || *p == ' ') *p = '_';
 		return buffer;
 	}
-	for (i = 0; i < sizeof (platforms)/sizeof (platforms[0]); i++)
-		if (platforms[i].id_machtype == idprom->id_machtype)
-			return platforms[i].platform;
-	return "sun4c";
+
+	return "sun4u";
 }
 
 static char *serial(char *buffer)
@@ -319,10 +299,13 @@ asmlinkage int solaris_sysinfo(int cmd, u32 buf, s32 count)
 	}
 	len = strlen(r) + 1;
 	if (count < len) {
-		copy_to_user_ret((char *)A(buf), r, count - 1, -EFAULT);
-		__put_user_ret(0, (char *)A(buf) + count - 1, -EFAULT);
-	} else
-		copy_to_user_ret((char *)A(buf), r, len, -EFAULT);
+		if (copy_to_user((char *)A(buf), r, count - 1) ||
+		    __put_user(0, (char *)A(buf) + count - 1))
+			return -EFAULT;
+	} else {
+		if (copy_to_user((char *)A(buf), r, len))
+			return -EFAULT;
+	}
 	return len;
 }
 
@@ -367,7 +350,7 @@ asmlinkage int solaris_sysconf(int id)
 	case SOLARIS_CONFIG_PROF_TCK:
 		return prom_getintdefault(prom_cpu_nodes[smp_processor_id()],
 					  "clock-frequency", 167000000);
-#ifdef __SMP__	
+#ifdef CONFIG_SMP	
 	case SOLARIS_CONFIG_NPROC_CONF:	return NR_CPUS;
 	case SOLARIS_CONFIG_NPROC_ONLN:	return smp_num_cpus;
 #else
@@ -719,14 +702,7 @@ asmlinkage int do_sol_unimplemented(struct pt_regs *regs)
 
 asmlinkage void solaris_register(void)
 {
-	lock_kernel();
-	current->personality = PER_SVR4;
-	if (current->exec_domain && current->exec_domain->module)
-		__MOD_DEC_USE_COUNT(current->exec_domain->module);
-	current->exec_domain = lookup_exec_domain(current->personality);
-	if (current->exec_domain && current->exec_domain->module)
-		__MOD_INC_USE_COUNT(current->exec_domain->module);
-	unlock_kernel();
+	set_personality(PER_SVR4);
 }
 
 extern long solaris_to_linux_signals[], linux_to_solaris_signals[];
@@ -787,6 +763,7 @@ int init_solaris_emul(void)
 {
 	register_exec_domain(&solaris_exec_domain);
 	init_socksys();
+	return 0;
 }
 #endif
 

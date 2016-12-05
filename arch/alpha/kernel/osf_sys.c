@@ -42,7 +42,6 @@
 #include <asm/hwrpb.h>
 #include <asm/processor.h>
 
-extern int do_mount(struct block_device *, const char *, const char *, char *, int, void *);
 extern int do_pipe(int *);
 
 extern asmlinkage int sys_swapon(const char *specialfile, int swap_flags);
@@ -105,7 +104,8 @@ struct osf_dirent_callback {
 	int error;
 };
 
-static int osf_filldir(void *__buf, const char *name, int namlen, off_t offset, ino_t ino)
+static int osf_filldir(void *__buf, const char *name, int namlen, off_t offset,
+		       ino_t ino, unsigned int d_type)
 {
 	struct osf_dirent *dirent;
 	struct osf_dirent_callback *buf = (struct osf_dirent_callback *) __buf;
@@ -147,7 +147,6 @@ asmlinkage int osf_getdirentries(unsigned int fd, struct osf_dirent *dirent,
 	buf.count = count;
 	buf.error = 0;
 
-	lock_kernel();
 	error = vfs_readdir(file, osf_filldir, &buf);
 	if (error < 0)
 		goto out_putf;
@@ -157,7 +156,6 @@ asmlinkage int osf_getdirentries(unsigned int fd, struct osf_dirent *dirent,
 		error = count - buf.count;
 
 out_putf:
-	unlock_kernel();
 	fput(file);
 out:
 	return error;
@@ -187,15 +185,6 @@ asmlinkage int osf_getpriority(int which, int who, int a2, int a3, int a4,
 		prio = 20 - prio;
 	}
 	return prio;
-}
-
-
-/*
- * Heh. As documented by DEC..
- */
-asmlinkage unsigned long sys_madvise(void)
-{
-	return 0;
 }
 
 /*
@@ -240,8 +229,6 @@ asmlinkage unsigned long osf_mmap(unsigned long addr, unsigned long len,
 	struct file *file = NULL;
 	unsigned long ret = -EBADF;
 
-	down(&current->mm->mmap_sem);
-	lock_kernel();
 #if 0
 	if (flags & (_MAP_HASSEMAPHORE | _MAP_INHERIT | _MAP_UNALIGNED))
 		printk("%s: unimplemented OSF mmap flags %04lx\n", 
@@ -253,12 +240,12 @@ asmlinkage unsigned long osf_mmap(unsigned long addr, unsigned long len,
 			goto out;
 	}
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+	down(&current->mm->mmap_sem);
 	ret = do_mmap(file, addr, len, prot, flags, off);
+	up(&current->mm->mmap_sem);
 	if (file)
 		fput(file);
 out:
-	unlock_kernel();
-	up(&current->mm->mmap_sem);
 	return ret;
 }
 
@@ -311,37 +298,28 @@ static int do_osf_statfs(struct dentry * dentry, struct osf_statfs *buffer, unsi
 
 asmlinkage int osf_statfs(char *path, struct osf_statfs *buffer, unsigned long bufsiz)
 {
-	struct dentry *dentry;
+	struct nameidata nd;
 	int retval;
 
-	lock_kernel();
-	dentry = namei(path);
-	retval = PTR_ERR(dentry);
-	if (!IS_ERR(dentry)) {
-		retval = do_osf_statfs(dentry, buffer, bufsiz);
-		dput(dentry);
+	retval = user_path_walk(path, &nd);
+	if (!retval) {
+		retval = do_osf_statfs(nd.dentry, buffer, bufsiz);
+		path_release(&nd);
 	}
-	unlock_kernel();
 	return retval;
 }
 
 asmlinkage int osf_fstatfs(unsigned long fd, struct osf_statfs *buffer, unsigned long bufsiz)
 {
 	struct file *file;
-	struct dentry *dentry;
 	int retval;
 
-	lock_kernel();
 	retval = -EBADF;
 	file = fget(fd);
-	if (!file)
-		goto out;
-	dentry = file->f_dentry;
-	if (dentry)
-		retval = do_osf_statfs(dentry, buffer, bufsiz);
-	fput(file);
-out:
-	unlock_kernel();
+	if (file) {
+		retval = do_osf_statfs(file->f_dentry, buffer, bufsiz);
+		fput(file);
+	}
 	return retval;
 }
 
@@ -372,32 +350,6 @@ struct procfs_args {
 	uid_t exroot;
 };
 
-static struct dentry *getdev(const char *name, int rdonly)
-{
-	struct dentry *dentry;
-	struct inode *inode;
-	int retval;
-
-	dentry = namei(name);
-	retval = PTR_ERR(dentry);
-	if (IS_ERR(dentry))
-		return dentry;
-
-	retval = -ENOTBLK;
-	inode = dentry->d_inode;
-	if (!S_ISBLK(inode->i_mode))
-		goto out_dput;
-
-	retval = -EACCES;
-	if (IS_NODEV(inode))
-		goto out_dput;
-	return dentry;
-
-out_dput:
-	dput(dentry);
-	return ERR_PTR(retval);
-}
-
 /*
  * We can't actually handle ufs yet, so we translate UFS mounts to
  * ext2fs mounts. I wouldn't mind a UFS filesystem, but the UFS
@@ -409,20 +361,18 @@ out_dput:
 static int osf_ufs_mount(char *dirname, struct ufs_args *args, int flags)
 {
 	int retval;
-	struct dentry *dentry;
 	struct cdfs_args tmp;
+	char *devname;
 
 	retval = -EFAULT;
 	if (copy_from_user(&tmp, args, sizeof(tmp)))
 		goto out;
-
-	dentry = getdev(tmp.devname, 0);
-	retval = PTR_ERR(dentry);
-	if (IS_ERR(dentry))
+	devname = getname(tmp.devname);
+	retval = PTR_ERR(devname);
+	if (IS_ERR(devname))
 		goto out;
-	retval = do_mount(dentry->d_inode->i_bdev, tmp.devname, dirname, 
-				"ext2", flags, NULL);
-	dput(dentry);
+	retval = do_mount(devname, dirname, "ext2", flags, NULL);
+	putname(devname);
 out:
 	return retval;
 }
@@ -430,20 +380,18 @@ out:
 static int osf_cdfs_mount(char *dirname, struct cdfs_args *args, int flags)
 {
 	int retval;
-	struct dentry * dentry;
 	struct cdfs_args tmp;
+	char *devname;
 
 	retval = -EFAULT;
 	if (copy_from_user(&tmp, args, sizeof(tmp)))
 		goto out;
-
-	dentry = getdev(tmp.devname, 1);
-	retval = PTR_ERR(dentry);
-	if (IS_ERR(dentry))
+	devname = getname(tmp.devname);
+	retval = PTR_ERR(devname);
+	if (IS_ERR(devname))
 		goto out;
-	retval = do_mount(dentry->d_inode->i_bdev, tmp.devname, dirname, 
-				"iso9660", flags, NULL);
-	dput(dentry);
+	retval = do_mount(devname, dirname, "iso9660", flags, NULL);
+	putname(devname);
 out:
 	return retval;
 }
@@ -454,27 +402,36 @@ static int osf_procfs_mount(char *dirname, struct procfs_args *args, int flags)
 
 	if (copy_from_user(&tmp, args, sizeof(tmp)))
 		return -EFAULT;
-	return do_mount(NULL, "", dirname, "proc", flags, NULL);
+
+	return do_mount("", dirname, "proc", flags, NULL);
 }
 
 asmlinkage int osf_mount(unsigned long typenr, char *path, int flag, void *data)
 {
 	int retval = -EINVAL;
+	char *name;
 
 	lock_kernel();
+
+	name = getname(path);
+	retval = PTR_ERR(name);
+	if (IS_ERR(name))
+		goto out;
 	switch (typenr) {
 	case 1:
-		retval = osf_ufs_mount(path, (struct ufs_args *) data, flag);
+		retval = osf_ufs_mount(name, (struct ufs_args *) data, flag);
 		break;
 	case 6:
-		retval = osf_cdfs_mount(path, (struct cdfs_args *) data, flag);
+		retval = osf_cdfs_mount(name, (struct cdfs_args *) data, flag);
 		break;
 	case 9:
-		retval = osf_procfs_mount(path, (struct procfs_args *) data, flag);
+		retval = osf_procfs_mount(name, (struct procfs_args *) data, flag);
 		break;
 	default:
 		printk("osf_mount(%ld, %x)\n", typenr, flag);
 	}
+	putname(name);
+out:
 	unlock_kernel();
 	return retval;
 }
@@ -529,14 +486,12 @@ asmlinkage int sys_pipe(int a0, int a1, int a2, int a3, int a4, int a5,
 	int fd[2];
 	int error;
 
-	lock_kernel();
 	error = do_pipe(fd);
 	if (error)
 		goto out;
 	(&regs)->r20 = fd[1];
 	error = fd[0];
 out:
-	unlock_kernel();
 	return error;
 }
 
@@ -820,21 +775,8 @@ asmlinkage unsigned long osf_getsysinfo(unsigned long op, void *buffer,
 		/* Return current software fp control & status bits.  */
 		/* Note that DU doesn't verify available space here.  */
 
-		/* EV6 implements most of the bits in hardware.  If
-		   UNDZ is not set, UNFD is maintained in software.  */
-		if (implver() == IMPLVER_EV6) {
-			unsigned long fpcr = rdfpcr();
-			w = ieee_fpcr_to_swcr(fpcr);
-			if (!(fpcr & FPCR_UNDZ)) {
-				w &= ~IEEE_TRAP_ENABLE_UNF;
-				w |= (current->thread.flags
-				      & IEEE_TRAP_ENABLE_UNF);
-			}
-		} else {
-			/* Otherwise we are forced to do everything in sw.  */
-			w = current->thread.flags & IEEE_SW_MASK;
-		}
-
+ 		w = current->thread.flags & IEEE_SW_MASK;
+ 		w = swcr_update_status(w, rdfpcr());
 		if (put_user(w, (unsigned long *) buffer))
 			return -EFAULT;
 		return 0;
@@ -885,7 +827,7 @@ asmlinkage unsigned long osf_setsysinfo(unsigned long op, void *buffer,
 {
 	switch (op) {
 	case SSI_IEEE_FP_CONTROL: {
-		unsigned long swcr, fpcr, undz;
+		unsigned long swcr, fpcr;
 
 		/* 
 		 * Alpha Architecture Handbook 4.7.7.3:
@@ -900,14 +842,18 @@ asmlinkage unsigned long osf_setsysinfo(unsigned long op, void *buffer,
 		current->thread.flags &= ~IEEE_SW_MASK;
 		current->thread.flags |= swcr & IEEE_SW_MASK;
 
-		/* Update the real fpcr.  Keep UNFD off if not UNDZ.  */
+		/* Update the real fpcr.  */
 		fpcr = rdfpcr();
-		undz = (fpcr & FPCR_UNDZ);
-		fpcr &= ~(FPCR_MASK | FPCR_DYN_MASK | FPCR_UNDZ);
+		fpcr &= FPCR_DYN_MASK;
 		fpcr |= ieee_swcr_to_fpcr(swcr);
-		fpcr &= ~(undz << 1);
 		wrfpcr(fpcr);
-		   
+
+ 		/* If any exceptions are now unmasked, send a signal.  */
+ 		if (((swcr & IEEE_STATUS_MASK)
+ 		     >> IEEE_STATUS_TO_EXCSUM_SHIFT) & swcr) {
+ 			send_sig(SIGFPE, current, 1);
+ 		}
+
 		return 0;
 	}
 
@@ -1131,7 +1077,7 @@ osf_select(int n, fd_set *inp, fd_set *outp, fd_set *exp,
 	}
 
 	ret = -EINVAL;
-	if (n < 0 || n > KFDS_NR)
+	if (n < 0 || n > current->files->max_fdset)
 		goto out_nofds;
 
 	/*
@@ -1373,9 +1319,4 @@ asmlinkage int sys_old_adjtimex(struct timex32 *txc_p)
 	  return -EFAULT;
 
 	return ret;
-}
-
-asmlinkage long osf_shmget (key_t key, int size, int flag)
-{
-	return sys_shmget (key, size, flag);
 }

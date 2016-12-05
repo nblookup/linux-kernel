@@ -89,8 +89,6 @@ int __init cyber_esp_detect(Scsi_Host_Template *tpnt)
 					   sizeof(struct ESP_regs));
 			return 0;
 		}
-		strcpy(z->name, "Cyberstorm SCSI Host Adapter");
-
 		esp = esp_allocate(tpnt, (void *)board+CYBER_ESP_ADDR);
 
 		/* Do command transfer with programmed I/O */
@@ -302,17 +300,13 @@ static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write)
 	}
 }
 
-#ifdef MODULE
-
 #define HOSTS_C
 
 #include "cyberstorm.h"
 
-Scsi_Host_Template driver_template = SCSI_CYBERSTORM;
+static Scsi_Host_Template driver_template = SCSI_CYBERSTORM;
 
 #include "scsi_module.c"
-
-#endif
 
 int cyber_esp_release(struct Scsi_Host *instance)
 {

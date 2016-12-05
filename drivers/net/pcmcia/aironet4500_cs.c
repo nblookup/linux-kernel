@@ -223,9 +223,9 @@ static dev_link_t *awc_attach(void)
 	dev->get_stats = 		&awc_get_stats;
 //	dev->set_multicast_list = 	&awc_set_multicast_list;
 
-	ether_setup(dev);
+	strcpy(dev->name, ((struct awc_private *)dev->priv)->node.dev_name);
 
-	dev->name = ((struct awc_private *)dev->priv)->node.dev_name;
+	ether_setup(dev);
 
 	dev->init = &awc_pcmcia_init;
 	dev->open = &awc_pcmcia_open;
@@ -321,11 +321,11 @@ static void awc_detach(dev_link_t *link)
 	if (link->priv) {
 		//struct net_device *dev = link->priv;
 		// dam dam damn mif (dev->priv)
-		//	kfree_s(dev->priv, sizeof(struct awc_private));
-		kfree_s(link->priv, sizeof(struct net_device));
+		//	kfree(dev->priv);
+		kfree(link->priv);
 	}
-	kfree_s(link->dev, sizeof(struct dev_node_t));
-	kfree_s(link, sizeof(struct dev_link_t));
+	kfree(link->dev);
+	kfree(link);
 
 } /* awc_detach */
 
@@ -602,7 +602,7 @@ static int awc_event(event_t event, int priority,
 
 
         
-static int aironet_cs_init(void)
+static int __init aironet_cs_init(void)
 {
 	servinfo_t serv;
 
@@ -619,7 +619,7 @@ static int aironet_cs_init(void)
 	return 0;
 }
 
-static void aironet_cs_exit(void)
+static void __exit aironet_cs_exit(void)
 {
 	DEBUG(0, "awc_cs: unloading %c ",'\n');
 	unregister_pcmcia_driver(&dev_info);
@@ -635,5 +635,5 @@ static void aironet_cs_exit(void)
 }
 
 module_init(aironet_cs_init);
-module_exit(aironet_cs_init);
+module_exit(aironet_cs_exit);
 

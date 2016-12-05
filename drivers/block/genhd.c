@@ -23,7 +23,6 @@ extern int blk_dev_init(void);
 #ifdef CONFIG_BLK_DEV_DAC960
 extern void DAC960_Initialize(void);
 #endif
-extern int scsi_dev_init(void);
 extern int net_dev_init(void);
 extern void console_map_init(void);
 extern int soc_probe(void);
@@ -37,25 +36,18 @@ void __init device_init(void)
 #ifdef CONFIG_PARPORT
 	parport_init();
 #endif
-	/*
-	 *	I2O must come before block and char as the I2O layer may
-	 *	in future claim devices that block/char most not touch.
-	 */
-#ifdef CONFIG_I2O
-	i2o_init();
-#endif
 	chr_dev_init();
 	blk_dev_init();
 	sti();
+#ifdef CONFIG_I2O
+	i2o_init();
+#endif
 #ifdef CONFIG_BLK_DEV_DAC960
 	DAC960_Initialize();
 #endif
 #ifdef CONFIG_FC4_SOC
 	/* This has to be done before scsi_dev_init */
 	soc_probe();
-#endif
-#ifdef CONFIG_SCSI
-	scsi_dev_init();
 #endif
 #ifdef CONFIG_IEEE1394
         ieee1394_init();

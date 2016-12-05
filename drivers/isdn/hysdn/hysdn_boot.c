@@ -1,4 +1,4 @@
-/* $Id: hysdn_boot.c,v 1.1 2000/02/10 19:45:18 werner Exp $
+/* $Id: hysdn_boot.c,v 1.4 2000/11/13 22:51:47 kai Exp $
 
  * Linux driver for HYSDN cards, specific routines for booting and pof handling.
  *
@@ -19,12 +19,6 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- * $Log: hysdn_boot.c,v $
- * Revision 1.1  2000/02/10 19:45:18  werner
- *
- * Initial release
- *
  *
  */
 
@@ -260,7 +254,6 @@ pof_write_buffer(hysdn_card * card, int datlen)
 			}
 			if ((boot->last_error = pof_handle_data(card, datlen)) < 0)
 				return (boot->last_error);	/* an error occured */
-
 			boot->pof_recoffset += datlen;
 			if (boot->pof_recoffset >= boot->pof_reclen) {
 				boot->pof_state = POF_READ_TAG_HEAD;	/* now start with single tags */

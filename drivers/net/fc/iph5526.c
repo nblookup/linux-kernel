@@ -1,7 +1,7 @@
 /**********************************************************************
  * iph5526.c: IP/SCSI driver for the Interphase 5526 PCI Fibre Channel
  *			  Card.
- * Copyright (C) 1999 Vineet M Abraham <vma@iol.unh.edu>
+ * Copyright (C) 1999 Vineet M Abraham <vmabraham@hotmail.com>
  *
  * This program is free software; you can redistribute it and/or 
  * modify it under the terms of the GNU General Public License as 
@@ -33,10 +33,9 @@ Vineet M Abraham
 */	
 
 static const char *version =
-    "iph5526.c:v1.0 07.08.99 Vineet Abraham (vma@iol.unh.edu)\n";
+    "iph5526.c:v1.0 07.08.99 Vineet Abraham (vmabraham@hotmail.com)\n";
 
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
@@ -112,9 +111,16 @@ static const char *version =
 #define ALIGNED_ADDR(addr, len) ((((unsigned long)(addr) + (len - 1)) & ~(len - 1)) - (unsigned long)(addr))
 
 
+static struct pci_device_id iph5526_pci_tbl[] __initdata = {
+	{ PCI_VENDOR_ID_INTERPHASE, PCI_DEVICE_ID_INTERPHASE_5526, PCI_ANY_ID, PCI_ANY_ID, },
+	{ PCI_VENDOR_ID_INTERPHASE, PCI_DEVICE_ID_INTERPHASE_55x6, PCI_ANY_ID, PCI_ANY_ID, },
+	{ }			/* Terminating entry */
+};
+MODULE_DEVICE_TABLE(pci, iph5526_pci_tbl);
+
 #define MAX_FC_CARDS 2
 static struct fc_info *fc[MAX_FC_CARDS+1];
-static unsigned int pci_irq_line = 0;
+static unsigned int pci_irq_line;
 static struct {
 	unsigned short vendor_id;
 	unsigned short device_id;
@@ -220,32 +226,23 @@ Scsi_Host_Template driver_template = IPH5526_SCSI_FC;
 
 static void iph5526_timeout(struct net_device *dev);
 
-#ifdef CONFIG_PCI
 static int iph5526_probe_pci(struct net_device *dev);
-#endif
-
 
 int __init iph5526_probe(struct net_device *dev)
 {
-#ifdef CONFIG_PCI
 	if (pci_present() && (iph5526_probe_pci(dev) == 0))
 		return 0;
-#endif
     return -ENODEV;
 }
 
-#ifdef CONFIG_PCI
 static int __init iph5526_probe_pci(struct net_device *dev)
 {
-#ifndef MODULE
-struct fc_info *fi;
-static int count = 0;
-#endif
 #ifdef MODULE
-struct fc_info *fi = (struct fc_info *)dev->priv;
-#endif
-
-#ifndef MODULE
+	struct fc_info *fi = (struct fc_info *)dev->priv;
+#else
+	struct fc_info *fi;
+	static int count = 0;
+ 
 	if(fc[count] != NULL) {
 		if (dev == NULL) {
 			dev = init_fcdev(NULL, 0);
@@ -277,7 +274,6 @@ struct fc_info *fi = (struct fc_info *)dev->priv;
 	display_cache(fi);
 	return 0;
 }
-#endif  /* CONFIG_PCI */
 
 static int __init fcdev_init(struct net_device *dev)
 {
@@ -2247,7 +2243,7 @@ static void reset_ichip(struct fc_info *fi)
 	/* (i)chip reset */
 	writel(ICHIP_HCR_RESET, fi->i_r.ptr_ichip_hw_control_reg);
 	/*wait for chip to get reset */
-	udelay(10000);
+	mdelay(10);
 	/*de-assert reset */
 	writel(ICHIP_HCR_DERESET, fi->i_r.ptr_ichip_hw_control_reg);
 	
@@ -3771,7 +3767,9 @@ struct pci_dev *pdev = NULL;
 
 	for (i = 0; i < clone_list[i].vendor_id != 0; i++)
 	while ((pdev = pci_find_device(clone_list[i].vendor_id, clone_list[i].device_id, pdev))) {
-	unsigned short pci_command;
+		unsigned short pci_command;
+		if (pci_enable_device(pdev))
+			continue;
 		if (count < MAX_FC_CARDS) {
 			fc[count] = kmalloc(sizeof(struct fc_info), GFP_ATOMIC);
 			if (fc[count] == NULL) {
@@ -3789,6 +3787,9 @@ struct pci_dev *pdev = NULL;
 		sprintf(fi->name, "fc%d", count);
 
 		host = scsi_register(tmpt, sizeof(struct iph5526_hostdata));
+		if(host==NULL)
+			return no_of_hosts;
+			
 		hostdata = (struct iph5526_hostdata *)host->hostdata;
 		memset(hostdata, 0 , sizeof(struct iph5526_hostdata));
 		for (j = 0; j < MAX_SCSI_TARGETS; j++)
@@ -3800,8 +3801,8 @@ struct pci_dev *pdev = NULL;
 		host->hostt->use_new_eh_code = 1;
 		host->this_id = tmpt->this_id;
 
-		pci_maddr = pdev->resource[0].start;
-		if ( (pdev->resource[0].flags & PCI_BASE_ADDRESS_SPACE) != PCI_BASE_ADDRESS_SPACE_MEMORY) {
+		pci_maddr = pci_resource_start(pdev, 0);
+		if (pci_resource_flags(pdev, 0) & IORESOURCE_IO) {
 			printk("iph5526.c : Cannot find proper PCI device base address.\n");
 			scsi_unregister(host);
 			kfree(fc[count]);
@@ -3877,7 +3878,7 @@ struct pci_dev *pdev = NULL;
 	/* This is to make sure that the ACC to the PRLI comes in 
 	 * for the last ALPA. 
 	 */
-	udelay(1000000); /* Ugly! Let the Gods forgive me */
+	mdelay(1000); /* Ugly! Let the Gods forgive me */
 
 	DPRINTK1("leaving iph5526_detect\n");
 	return no_of_hosts;
@@ -3950,8 +3951,10 @@ u_long flags;
 
 	/* Get an used OX_ID. We could have pending commands.
 	 */
-	if (get_scsi_oxid(fi))
+	if (get_scsi_oxid(fi)) {
+		spin_unlock_irqrestore(&fi->fc_lock, flags);
 		return 1;
+	}
 	fi->q.free_scsi_oxid[fi->g.scsi_oxid] = OXID_INUSE;	
 
 	/* Maintain a handler so that we can associate the done() function
@@ -4552,7 +4555,7 @@ int i = 0;
 		dev_fc[i]->priv = fc[i];
 		fc[i]->dev = dev_fc[i];
 		if (register_fcdev(dev_fc[i]) != 0) {
-			kfree_s(dev_fc[i], sizeof(struct net_device));
+			kfree(dev_fc[i]);
 			dev_fc[i] = NULL;
 			if (i == 0) {
 				printk("iph5526.c: IP registeration failed!!!\n");

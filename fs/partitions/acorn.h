@@ -6,42 +6,6 @@
 #include <linux/adfs_fs.h>
 
 /*
- * Offset in bytes of the boot block on the disk.
- */
-#define BOOT_SECTOR_ADDRESS 0xc00
-
-/*
- * Disc record size
- */
-#define RECSIZE 60
-
-/*
- * Disc record
- */
-struct disc_record {
-	unsigned char  log2secsize;
-	unsigned char  secspertrack;
-	unsigned char  heads;
-	unsigned char  density;
-	unsigned char  idlen;
-	unsigned char  log2bpmb;
-	unsigned char  skew;
-	unsigned char  bootoption;
-	unsigned char  lowsector;
-	unsigned char  nzones;
-	unsigned short zone_spare;
-	unsigned long  root;
-	unsigned long  disc_size;
-	unsigned short disc_id;
-	unsigned char  disc_name[10];
-	unsigned long  disc_type;
-	unsigned long  disc_size_high;
-	unsigned char  log2sharesize:4;
-	unsigned char  unused:4;
-	unsigned char  big_flag:1;
-};
-
-/*
  * Partition types. (Oh for reusability)
  */
 #define PARTITION_RISCIX_MFM	1
@@ -49,20 +13,43 @@ struct disc_record {
 #define PARTITION_LINUX		9
 
 struct riscix_part {
-	unsigned long  start;
-	unsigned long  length;
-	unsigned long  one;
+	__u32  start;
+	__u32  length;
+	__u32  one;
 	char name[16];
 };
 
 struct riscix_record {
-	unsigned long  magic;
+	__u32  magic;
 #define RISCIX_MAGIC	(0x4a657320)
-	unsigned long  date;
+	__u32  date;
 	struct riscix_part part[8];
 };
 
-int
-acorn_partition(struct gendisk *hd, kdev_t dev,
-		unsigned long first_sector, int first_part_minor);
+#define LINUX_NATIVE_MAGIC 0xdeafa1de
+#define LINUX_SWAP_MAGIC   0xdeafab1e
+
+struct linux_part {
+	__u32 magic;
+	__u32 start_sect;
+	__u32 nr_sects;
+};
+
+struct ics_part {
+	__u32 start;
+	__s32 size;
+};
+
+struct ptec_partition {
+	__u32 unused1;
+	__u32 unused2;
+	__u32 start;
+	__u32 size;
+	__u32 unused5;
+	char type[8];
+};
+	
+
+int acorn_partition(struct gendisk *hd, kdev_t dev,
+		   unsigned long first_sect, int first_minor);
 

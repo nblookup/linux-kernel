@@ -107,8 +107,6 @@ static void cv64_dump(void);
 #define DPRINTK(fmt, args...)
 #endif
 
-#define arraysize(x)    (sizeof(x)/sizeof(*(x)))
-
 #define wb_64(regs,reg,dat) (*(((volatile unsigned char *)regs) + reg) = dat)
 #define rb_64(regs, reg) (*(((volatile unsigned char *)regs) + reg))
 
@@ -221,7 +219,7 @@ static struct {
 	}}
 };
 
-#define NUM_TOTAL_MODES    arraysize(cyberfb_predefined)
+#define NUM_TOTAL_MODES    ARRAY_SIZE(cyberfb_predefined)
 
 static int Cyberfb_inverse = 0;
 
@@ -241,8 +239,6 @@ static int cyberfb_usermode __initdata = 0;
 
 int cyberfb_setup(char *options);
 
-static int cyberfb_open(struct fb_info *info, int user);
-static int cyberfb_release(struct fb_info *info, int user);
 static int cyberfb_get_fix(struct fb_fix_screeninfo *fix, int con,
 			   struct fb_info *info);
 static int cyberfb_get_var(struct fb_var_screeninfo *var, int con,
@@ -253,10 +249,6 @@ static int cyberfb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			    struct fb_info *info);
 static int cyberfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			    struct fb_info *info);
-static int cyberfb_pan_display(struct fb_var_screeninfo *var, int con,
-			       struct fb_info *info);
-static int cyberfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-			 u_long arg, int con, struct fb_info *info);
 
 /*
  *    Interface to the low level console driver
@@ -827,28 +819,6 @@ static void do_install_cmap(int con, struct fb_info *info)
 	DPRINTK("EXIT\n");
 }
 
-
-/*
- *  Open/Release the frame buffer device
- */
-
-static int cyberfb_open(struct fb_info *info, int user)
-{
-	/*
-	 * Nothing, only a usage count for the moment
-	 */
-
-	MOD_INC_USE_COUNT;
-	return(0);
-}
-
-static int cyberfb_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return(0);
-}
-
-
 /*
  *    Get the Fixed Part of the Display
  */
@@ -1031,36 +1001,14 @@ static int cyberfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 }
 
 
-/*
- *    Pan or Wrap the Display
- *
- *    This call looks only at xoffset, yoffset and the FB_VMODE_YWRAP flag
- */
-
-static int cyberfb_pan_display(struct fb_var_screeninfo *var, int con,
-			       struct fb_info *info)
-{
-	return -EINVAL;
-}
-
-
-/*
-    *	 Cybervision Frame Buffer Specific ioctls
-    */
-
-static int cyberfb_ioctl(struct inode *inode, struct file *file,
-			 u_int cmd, u_long arg, int con, struct fb_info *info)
-{
-	return -EINVAL;
-}
-
-
 static struct fb_ops cyberfb_ops = {
-	cyberfb_open, cyberfb_release, cyberfb_get_fix, cyberfb_get_var,
-	cyberfb_set_var, cyberfb_get_cmap, cyberfb_set_cmap,
-	cyberfb_pan_display, cyberfb_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	cyberfb_get_fix,
+	fb_get_var:	cyberfb_get_var,
+	fb_set_var:	cyberfb_set_var,
+	fb_get_cmap:	cyberfb_get_cmap,
+	fb_set_cmap:	cyberfb_set_cmap,
 };
-
 
 int __init cyberfb_setup(char *options)
 {
@@ -1116,11 +1064,10 @@ int __init cyberfb_init(void)
 	    CyberRegs_phys = CyberMem_phys + 0x00c00000;
 	    if (!request_mem_region(CyberRegs_phys, 0x10000, "S3 Trio64"))
 		continue;
-	    if (!request_mem_region(CyberMem_phys, 0x4000000, "RAM")) {
+	    if (!request_mem_region(CyberMem_phys, 0x400000, "RAM")) {
 		release_mem_region(CyberRegs_phys, 0x10000);
 		continue;
 	    }
-	    strcpy(z->name, "CyberVision64 Graphics Board");
 	    DPRINTK("board_addr=%08lx\n", board_addr);
 	    DPRINTK("board_size=%08lx\n", board_size);
 
@@ -1160,7 +1107,8 @@ int __init cyberfb_init(void)
 
 	    if (register_framebuffer(&fb_info) < 0) {
 		    DPRINTK("EXIT - register_framebuffer failed\n");
-		    release_mem_region(board_addr, board_size);
+		    release_mem_region(CyberMem_phys, 0x400000);
+		    release_mem_region(CyberRegs_phys, 0x10000);
 		    return -EINVAL;
 	    }
 
@@ -1290,9 +1238,14 @@ static void fbcon_cyber8_revc(struct display *p, int xx, int yy)
 }
 
 static struct display_switch fbcon_cyber8 = {
-   fbcon_cfb8_setup, fbcon_cyber8_bmove, fbcon_cyber8_clear, fbcon_cyber8_putc,
-   fbcon_cyber8_putcs, fbcon_cyber8_revc, NULL, NULL, fbcon_cfb8_clear_margins,
-   FONTWIDTH(8)
+	setup:		fbcon_cfb8_setup,
+	bmove:		fbcon_cyber8_bmove,
+	clear:		fbcon_cyber8_clear,
+	putc:		fbcon_cyber8_putc,
+	putcs:		fbcon_cyber8_putcs,
+	revc:		fbcon_cyber8_revc,
+	clear_margins:	fbcon_cfb8_clear_margins,
+	fontwidthmask:	FONTWIDTH(8)
 };
 #endif
 

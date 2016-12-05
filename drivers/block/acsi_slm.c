@@ -66,6 +66,7 @@ not be guaranteed. There are several ways to assure this:
 #include <linux/mm.h>
 #include <linux/malloc.h>
 #include <linux/devfs_fs_kernel.h>
+#include <linux/smp_lock.h>
 
 #include <asm/pgtable.h>
 #include <asm/system.h>
@@ -269,9 +270,10 @@ static int slm_get_pagesize( int device, int *w, int *h );
 /************************* End of Prototypes **************************/
 
 
-static struct timer_list slm_timer = { NULL, NULL, 0, 0, slm_test_ready };
+static struct timer_list slm_timer = { function: slm_test_ready };
 
 static struct file_operations slm_fops = {
+	owner:		THIS_MODULE,
 	read:		slm_read,
 	write:		slm_write,
 	ioctl:		slm_ioctl,
@@ -798,10 +800,12 @@ static int slm_release( struct inode *inode, struct file *file )
 	device = MINOR(inode->i_rdev);
 	sip = &slm_info[device];
 
+	lock_kernel();
 	if (file->f_mode & 2)
 		sip->wbusy = 0;
 	if (file->f_mode & 1)
 		sip->rbusy = 0;
+	unlock_kernel();
 	
 	return( 0 );
 }
@@ -938,7 +942,7 @@ static int slm_get_pagesize( int device, int *w, int *h )
 
 int attach_slm( int target, int lun )
 
-{	static int	did_register = 0;
+{	static int	did_register;
 	int			len;
 
 	if (N_SLM_Printers >= MAX_SLM) {
@@ -988,7 +992,7 @@ int attach_slm( int target, int lun )
 	return( 1 );
 }
 
-static devfs_handle_t devfs_handle = NULL;
+static devfs_handle_t devfs_handle;
 
 int slm_init( void )
 
@@ -1006,9 +1010,9 @@ int slm_init( void )
 	BufferP = SLMBuffer;
 	SLMState = IDLE;
 	
-	devfs_handle = devfs_mk_dir (NULL, "slm", 3, NULL);
+	devfs_handle = devfs_mk_dir (NULL, "slm", NULL);
 	devfs_register_series (devfs_handle, "%u", MAX_SLM, DEVFS_FL_DEFAULT,
-			       MAJOR_NR, 0, S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			       MAJOR_NR, 0, S_IFCHR | S_IRUSR | S_IWUSR,
 			       &slm_fops, NULL);
 	return 0;
 }

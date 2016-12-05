@@ -5,7 +5,7 @@
  *	Authors:
  *	Pedro Roque		<roque@di.fc.ul.pt>	
  *
- *	$Id: datagram.c,v 1.19 2000/02/27 19:51:47 davem Exp $
+ *	$Id: datagram.c,v 1.21 2000/11/28 13:42:08 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -127,6 +127,8 @@ int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 	if (err)
 		goto out_free_skb;
 
+	sock_recv_timestamp(msg, sk, skb);
+
 	serr = SKB_EXT_ERR(skb);
 
 	sin = (struct sockaddr_in6 *)msg->msg_name;
@@ -181,10 +183,14 @@ int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 	err = copied;
 
 	/* Reset and regenerate socket error */
+	spin_lock_irq(&sk->error_queue.lock);
 	sk->err = 0;
 	if ((skb2 = skb_peek(&sk->error_queue)) != NULL) {
 		sk->err = SKB_EXT_ERR(skb2)->ee.ee_errno;
+		spin_unlock_irq(&sk->error_queue.lock);
 		sk->error_report(sk);
+	} else {
+		spin_unlock_irq(&sk->error_queue.lock);
 	}
 
 out_free_skb:	

@@ -1,18 +1,17 @@
 /*
  *  linux/fs/adfs/map.c
  *
- * Copyright (C) 1997-1999 Russell King
+ *  Copyright (C) 1997-1999 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 #include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/adfs_fs.h>
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,0)
 #include <linux/spinlock.h>
-#else
-#include <asm/spinlock.h>
-#endif
 
 #include "adfs.h"
 

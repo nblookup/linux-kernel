@@ -1,8 +1,8 @@
 /* bufs.c -- IOCTLs to manage buffers -*- linux-c -*-
  * Created: Tue Feb  2 08:37:54 1999 by faith@precisioninsight.com
- * Revised: Fri Dec  3 12:11:11 1999 by faith@precisioninsight.com
  *
- * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
+ * Copyright 1999, 2000 Precision Insight, Inc., Cedar Park, Texas.
+ * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
  * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -24,8 +24,8 @@
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  * 
- * $PI: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/bufs.c,v 1.8 1999/08/30 13:05:00 faith Exp $
- * $XFree86: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/bufs.c,v 1.1 1999/09/25 14:37:57 dawes Exp $
+ * Authors:
+ *    Rickard E. (Rik) Faith <faith@valinux.com>
  *
  */
 
@@ -72,12 +72,14 @@ int drm_addmap(struct inode *inode, struct file *filp, unsigned int cmd,
 
 	switch (map->type) {
 	case _DRM_REGISTERS:
-	case _DRM_FRAME_BUFFER:	
+	case _DRM_FRAME_BUFFER:
+#ifndef __sparc__
 		if (map->offset + map->size < map->offset
 		    || map->offset < virt_to_phys(high_memory)) {
 			drm_free(map, sizeof(*map), DRM_MEM_MAPS);
 			return -EINVAL;
 		}
+#endif
 #ifdef CONFIG_MTRR
 		if (map->type == _DRM_FRAME_BUFFER
 		    || (map->flags & _DRM_WRITE_COMBINING)) {
@@ -104,6 +106,11 @@ int drm_addmap(struct inode *inode, struct file *filp, unsigned int cmd,
 			dev->lock.hw_lock = map->handle; /* Pointer to lock */
 		}
 		break;
+#if defined(CONFIG_AGP) || defined(CONFIG_AGP_MODULE)
+	case _DRM_AGP:
+		map->offset = map->offset + dev->agp->base;
+		break;
+#endif
 	default:
 		drm_free(map, sizeof(*map), DRM_MEM_MAPS);
 		return -EINVAL;
@@ -126,12 +133,13 @@ int drm_addmap(struct inode *inode, struct file *filp, unsigned int cmd,
 	dev->maplist[dev->map_count-1] = map;
 	up(&dev->struct_sem);
 
-	copy_to_user_ret((drm_map_t *)arg, map, sizeof(*map), -EFAULT);
+	if (copy_to_user((drm_map_t *)arg, map, sizeof(*map)))
+		return -EFAULT;
 	if (map->type != _DRM_SHM) {
-		copy_to_user_ret(&((drm_map_t *)arg)->handle,
+		if (copy_to_user(&((drm_map_t *)arg)->handle,
 				 &map->offset,
-				 sizeof(map->offset),
-				 -EFAULT);
+				 sizeof(map->offset)))
+			return -EFAULT;
 	}		
 	return 0;
 }
@@ -159,10 +167,10 @@ int drm_addbufs(struct inode *inode, struct file *filp, unsigned int cmd,
 
 	if (!dma) return -EINVAL;
 
-	copy_from_user_ret(&request,
+	if (copy_from_user(&request,
 			   (drm_buf_desc_t *)arg,
-			   sizeof(request),
-			   -EFAULT);
+			   sizeof(request)))
+		return -EFAULT;
 
 	count	   = request.count;
 	order	   = drm_order(request.size);
@@ -174,7 +182,7 @@ int drm_addbufs(struct inode *inode, struct file *filp, unsigned int cmd,
 	if (order < DRM_MIN_ORDER || order > DRM_MAX_ORDER) return -EINVAL;
 	if (dev->queue_count) return -EBUSY; /* Not while in use */
 
-	alignment  = (request.flags & DRM_PAGE_ALIGN) ? PAGE_ALIGN(size) :size;
+	alignment  = (request.flags & _DRM_PAGE_ALIGN) ? PAGE_ALIGN(size):size;
 	page_order = order - PAGE_SHIFT > 0 ? order - PAGE_SHIFT : 0;
 	total	   = PAGE_SIZE << page_order;
 
@@ -288,10 +296,10 @@ int drm_addbufs(struct inode *inode, struct file *filp, unsigned int cmd,
 	request.count = entry->buf_count;
 	request.size  = size;
 
-	copy_to_user_ret((drm_buf_desc_t *)arg,
+	if (copy_to_user((drm_buf_desc_t *)arg,
 			 &request,
-			 sizeof(request),
-			 -EFAULT);
+			 sizeof(request)))
+		return -EFAULT;
 	
 	atomic_dec(&dev->buf_alloc);
 	return 0;
@@ -317,10 +325,10 @@ int drm_infobufs(struct inode *inode, struct file *filp, unsigned int cmd,
 	++dev->buf_use;		/* Can't allocate more after this call */
 	spin_unlock(&dev->count_lock);
 
-	copy_from_user_ret(&request,
+	if (copy_from_user(&request,
 			   (drm_buf_info_t *)arg,
-			   sizeof(request),
-			   -EFAULT);
+			   sizeof(request)))
+		return -EFAULT;
 
 	for (i = 0, count = 0; i < DRM_MAX_ORDER+1; i++) {
 		if (dma->bufs[i].buf_count) ++count;
@@ -331,28 +339,26 @@ int drm_infobufs(struct inode *inode, struct file *filp, unsigned int cmd,
 	if (request.count >= count) {
 		for (i = 0, count = 0; i < DRM_MAX_ORDER+1; i++) {
 			if (dma->bufs[i].buf_count) {
-				copy_to_user_ret(&request.list[count].count,
+				if (copy_to_user(&request.list[count].count,
 						 &dma->bufs[i].buf_count,
 						 sizeof(dma->bufs[0]
-							.buf_count),
-						 -EFAULT);
-				copy_to_user_ret(&request.list[count].size,
+							.buf_count)) ||
+				    copy_to_user(&request.list[count].size,
 						 &dma->bufs[i].buf_size,
-						 sizeof(dma->bufs[0].buf_size),
-						 -EFAULT);
-				copy_to_user_ret(&request.list[count].low_mark,
+						 sizeof(dma->bufs[0].buf_size)) ||
+				    copy_to_user(&request.list[count].low_mark,
 						 &dma->bufs[i]
 						 .freelist.low_mark,
 						 sizeof(dma->bufs[0]
-							.freelist.low_mark),
-						 -EFAULT);
-				copy_to_user_ret(&request.list[count]
+							.freelist.low_mark)) ||
+				    copy_to_user(&request.list[count]
 						 .high_mark,
 						 &dma->bufs[i]
 						 .freelist.high_mark,
 						 sizeof(dma->bufs[0]
-							.freelist.high_mark),
-						 -EFAULT);
+							.freelist.high_mark)))
+					return -EFAULT;
+
 				DRM_DEBUG("%d %d %d %d %d\n",
 					  i,
 					  dma->bufs[i].buf_count,
@@ -365,10 +371,10 @@ int drm_infobufs(struct inode *inode, struct file *filp, unsigned int cmd,
 	}
 	request.count = count;
 
-	copy_to_user_ret((drm_buf_info_t *)arg,
+	if (copy_to_user((drm_buf_info_t *)arg,
 			 &request,
-			 sizeof(request),
-			 -EFAULT);
+			 sizeof(request)))
+		return -EFAULT;
 	
 	return 0;
 }
@@ -385,10 +391,10 @@ int drm_markbufs(struct inode *inode, struct file *filp, unsigned int cmd,
 
 	if (!dma) return -EINVAL;
 
-	copy_from_user_ret(&request,
+	if (copy_from_user(&request,
 			   (drm_buf_desc_t *)arg,
-			   sizeof(request),
-			   -EFAULT);
+			   sizeof(request)))
+		return -EFAULT;
 
 	DRM_DEBUG("%d, %d, %d\n",
 		  request.size, request.low_mark, request.high_mark);
@@ -420,17 +426,17 @@ int drm_freebufs(struct inode *inode, struct file *filp, unsigned int cmd,
 
 	if (!dma) return -EINVAL;
 
-	copy_from_user_ret(&request,
+	if (copy_from_user(&request,
 			   (drm_buf_free_t *)arg,
-			   sizeof(request),
-			   -EFAULT);
+			   sizeof(request)))
+		return -EFAULT;
 
 	DRM_DEBUG("%d\n", request.count);
 	for (i = 0; i < request.count; i++) {
-		copy_from_user_ret(&idx,
+		if (copy_from_user(&idx,
 				   &request.list[i],
-				   sizeof(idx),
-				   -EFAULT);
+				   sizeof(idx)))
+			return -EFAULT;
 		if (idx < 0 || idx >= dma->buf_count) {
 			DRM_ERROR("Index %d (of %d max)\n",
 				  idx, dma->buf_count - 1);
@@ -473,14 +479,16 @@ int drm_mapbufs(struct inode *inode, struct file *filp, unsigned int cmd,
 	++dev->buf_use;		/* Can't allocate more after this call */
 	spin_unlock(&dev->count_lock);
 
-	copy_from_user_ret(&request,
+	if (copy_from_user(&request,
 			   (drm_buf_map_t *)arg,
-			   sizeof(request),
-			   -EFAULT);
+			   sizeof(request)))
+		return -EFAULT;
 
 	if (request.count >= dma->buf_count) {
+		down(&current->mm->mmap_sem);
 		virtual = do_mmap(filp, 0, dma->byte_count,
 				  PROT_READ|PROT_WRITE, MAP_SHARED, 0);
+		up(&current->mm->mmap_sem);
 		if (virtual > -1024UL) {
 				/* Real error */
 			retcode = (signed long)virtual;
@@ -520,10 +528,10 @@ done:
 	request.count = dma->buf_count;
 	DRM_DEBUG("%d buffers, retcode = %d\n", request.count, retcode);
 
-	copy_to_user_ret((drm_buf_map_t *)arg,
+	if (copy_to_user((drm_buf_map_t *)arg,
 			 &request,
-			 sizeof(request),
-			 -EFAULT);
+			 sizeof(request)))
+		return -EFAULT;
 
 	return retcode;
 }

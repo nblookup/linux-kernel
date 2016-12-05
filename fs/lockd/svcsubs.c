@@ -34,7 +34,7 @@ static inline unsigned int file_hash(struct nfs_fh *f)
 {
 	unsigned int tmp=0;
 	int i;
-	for (i=0; i<NFS_FHSIZE;i++)
+	for (i=0; i<NFS2_FHSIZE;i++)
 		tmp += f->data[i];
 	return tmp & (FILE_NRHASH - 1);
 }
@@ -79,7 +79,7 @@ nlm_lookup_file(struct svc_rqst *rqstp, struct nlm_file **result,
 		goto out_unlock;
 
 	memset(file, 0, sizeof(*file));
-	file->f_handle = *f;
+	memcpy(&file->f_handle, f, sizeof(struct nfs_fh));
 	file->f_hash = hash;
 	init_MUTEX(&file->f_sema);
 
@@ -175,7 +175,7 @@ again:
 
 			lock.fl_type  = F_UNLCK;
 			lock.fl_start = 0;
-			lock.fl_end   = NLM_OFFSET_MAX;
+			lock.fl_end   = OFFSET_MAX;
 			if (posix_lock_file(&file->f_file, &lock, 0) < 0) {
 				printk("lockd: unlock failure in %s:%d\n",
 						__FILE__, __LINE__);

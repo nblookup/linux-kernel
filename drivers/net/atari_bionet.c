@@ -158,7 +158,7 @@ static int bionet_close(struct net_device *dev);
 static struct net_device_stats *net_get_stats(struct net_device *dev);
 static void bionet_tick(unsigned long);
 
-static struct timer_list bionet_timer = { NULL, NULL, 0, 0, bionet_tick };
+static struct timer_list bionet_timer = { function: bionet_tick };
 
 #define STRAM_ADDR(a)	(((a) & 0xff000000) == 0)
 
@@ -332,7 +332,7 @@ bionet_probe(struct net_device *dev){
 	int i;
 
 	if (!MACH_IS_ATARI || no_more_found)
-		return ENODEV;
+		return -ENODEV;
 
 	printk("Probing for BioNet 100 Adapter...\n");
 
@@ -350,12 +350,11 @@ bionet_probe(struct net_device *dev){
 	||  station_addr[2] != 'O' ) {
 		no_more_found = 1;
 		printk( "No BioNet 100 found.\n" );
-		return ENODEV;
+		return -ENODEV;
 	}
 
+	SET_MODULE_OWNER(dev);
 
-	if (dev == NULL)
-		return ENODEV;
 	if (bionet_debug > 0 && version_printed++ == 0)
 		printk(version);
 
@@ -425,7 +424,6 @@ bionet_open(struct net_device *dev) {
 	bionet_timer.data = (long)dev;
 	bionet_timer.expires = jiffies + lp->poll_time;
 	add_timer(&bionet_timer);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -629,7 +627,6 @@ bionet_close(struct net_device *dev) {
 	dev->start = 0;
 
 	stdma_release();
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -645,19 +642,13 @@ static struct net_device_stats *net_get_stats(struct net_device *dev)
 
 #ifdef MODULE
 
-static char bio_name[16];
-static struct net_device bio_dev =
-	{
-		bio_name,	/* filled in by register_netdev() */
-		0, 0, 0, 0,	/* memory */
-		0, 0,		/* base, irq */
-		0, 0, 0, NULL, bionet_probe,
-	};
+static struct net_device bio_dev;
 
 int
 init_module(void) {
 	int err;
 
+	bio_dev.init = bionet_probe;
 	if ((err = register_netdev(&bio_dev))) {
 		if (err == -EEXIST)  {
 			printk("BIONET: devices already present. Module not loaded.\n");

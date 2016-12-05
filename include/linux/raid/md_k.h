@@ -59,7 +59,6 @@ typedef struct mdk_rdev_s mdk_rdev_t;
 #error MD doesnt handle bigger kdev yet
 #endif
 
-#define MAX_REAL     12			/* Max number of disks per md dev */
 #define MAX_MD_DEVS  (1<<MINORBITS)	/* Max number of md dev */
 
 /*
@@ -89,7 +88,7 @@ extern inline mddev_t * kdev_to_mddev (kdev_t dev)
 /*
  * default readahead
  */
-#define MD_READAHEAD	(256 * 512)
+#define MD_READAHEAD	MAX_READAHEAD
 
 extern inline int disk_faulty(mdp_disk_t * d)
 {
@@ -162,15 +161,14 @@ struct mdk_rdev_s
 
 	kdev_t dev;			/* Device number */
 	kdev_t old_dev;			/*  "" when it was last imported */
-	int size;			/* Device size (in blocks) */
+	unsigned long size;		/* Device size (in blocks) */
 	mddev_t *mddev;			/* RAID array if running */
 	unsigned long last_events;	/* IO event timestamp */
 
-	struct inode *inode;		/* Lock inode */
-	struct file filp;		/* Lock file */
+	struct block_device *bdev;	/* block device handle */
 
 	mdp_super_t *sb;
-	int sb_offset;
+	unsigned long sb_offset;
 
 	int faulty;			/* if faulty do not issue IO requests */
 	int desc_nr;			/* descriptor index in the superblock */
@@ -199,30 +197,29 @@ struct mddev_s
 	int				sb_dirty;
 	mdu_param_t			param;
 	int				ro;
-	unsigned int			curr_resync;
-	unsigned long			resync_start;
+	unsigned long			curr_resync;	/* blocks scheduled */
+	unsigned long			resync_mark;	/* a recent timestamp */
+	unsigned long			resync_mark_cnt;/* blocks written at resync_mark */
 	char				*name;
 	int				recovery_running;
 	struct semaphore		reconfig_sem;
 	struct semaphore		recovery_sem;
 	struct semaphore		resync_sem;
+	atomic_t			active;
+
+	atomic_t			recovery_active; /* blocks scheduled, but not written */
+	md_wait_queue_head_t		recovery_wait;
+
 	struct md_list_head		all_mddevs;
-	request_queue_t			queue;
 };
 
 struct mdk_personality_s
 {
 	char *name;
-	int (*map)(mddev_t *mddev, kdev_t dev, kdev_t *rdev,
-		unsigned long *rsector, unsigned long size);
-	int (*make_request)(request_queue_t *q, mddev_t *mddev, int rw, struct buffer_head * bh);
-	void (*end_request)(struct buffer_head * bh, int uptodate);
+	int (*make_request)(mddev_t *mddev, int rw, struct buffer_head * bh);
 	int (*run)(mddev_t *mddev);
 	int (*stop)(mddev_t *mddev);
 	int (*status)(char *page, mddev_t *mddev);
-	int (*ioctl)(struct inode *inode, struct file *file,
-		unsigned int cmd, unsigned long arg);
-	int max_invalid_dev;
 	int (*error_handler)(mddev_t *mddev, kdev_t dev);
 
 /*
@@ -239,6 +236,7 @@ struct mdk_personality_s
 
 	int (*stop_resync)(mddev_t *mddev);
 	int (*restart_resync)(mddev_t *mddev);
+	int (*sync_request)(mddev_t *mddev, unsigned long block_nr);
 };
 
 
@@ -336,8 +334,36 @@ typedef struct mdk_thread_s {
 typedef struct dev_name_s {
 	struct md_list_head list;
 	kdev_t dev;
-	char name [MAX_DISKNAME_LEN];
+	char namebuf [MAX_DISKNAME_LEN];
+	char *name;
 } dev_name_t;
 
-#endif _MD_K_H
+
+#define __wait_event_lock_irq(wq, condition, lock) 			\
+do {									\
+	wait_queue_t __wait;						\
+	init_waitqueue_entry(&__wait, current);				\
+									\
+	add_wait_queue(&wq, &__wait);					\
+	for (;;) {							\
+		set_current_state(TASK_UNINTERRUPTIBLE);		\
+		if (condition)						\
+			break;						\
+		spin_unlock_irq(&lock);					\
+		run_task_queue(&tq_disk);				\
+		schedule();						\
+		spin_lock_irq(&lock);					\
+	}								\
+	current->state = TASK_RUNNING;					\
+	remove_wait_queue(&wq, &__wait);				\
+} while (0)
+
+#define wait_event_lock_irq(wq, condition, lock) 			\
+do {									\
+	if (condition)	 						\
+		break;							\
+	__wait_event_lock_irq(wq, condition, lock);			\
+} while (0)
+
+#endif 
 

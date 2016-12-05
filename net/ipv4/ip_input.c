@@ -5,7 +5,7 @@
  *
  *		The Internet Protocol (IP) module.
  *
- * Version:	$Id: ip_input.c,v 1.46 2000/02/22 23:54:26 davem Exp $
+ * Version:	$Id: ip_input.c,v 1.51 2000/12/08 17:15:53 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -162,7 +162,13 @@ int ip_call_ra_chain(struct sk_buff *skb)
 	read_lock(&ip_ra_lock);
 	for (ra = ip_ra_chain; ra; ra = ra->next) {
 		struct sock *sk = ra->sk;
-		if (sk && sk->num == protocol) {
+
+		/* If socket is bound to an interface, only report
+		 * the packet if it came  from that interface.
+		 */
+		if (sk && sk->num == protocol 
+		    && ((sk->bound_dev_if == 0) 
+			|| (sk->bound_dev_if == skb->dev->ifindex))) {
 			if (skb->nh.iph->frag_off & htons(IP_MF|IP_OFFSET)) {
 				skb = ip_defrag(skb);
 				if (skb == NULL) {
@@ -218,12 +224,6 @@ static inline int ip_local_deliver_finish(struct sk_buff *skb)
 #ifdef CONFIG_NETFILTER_DEBUG
 	nf_debug_ip_local_deliver(skb);
 #endif /*CONFIG_NETFILTER_DEBUG*/
-
-	/* Free rx_dev before enqueueing to sockets */
-	if (skb->rx_dev) {
-		dev_put(skb->rx_dev);
-		skb->rx_dev = NULL;
-	}
 
         /* Point into the IP datagram, just past the header. */
         skb->h.raw = skb->nh.raw + iph->ihl*4;
@@ -291,7 +291,6 @@ int ip_local_deliver(struct sk_buff *skb)
 		skb = ip_defrag(skb);
 		if (!skb)
 			return 0;
-		iph = skb->nh.iph;
 	}
 
 	return NF_HOOK(PF_INET, NF_IP_LOCAL_IN, skb, skb->dev, NULL,
@@ -336,7 +335,7 @@ static inline int ip_rcv_finish(struct sk_buff *skb)
 
 		skb = skb_cow(skb, skb_headroom(skb));
 		if (skb == NULL)
-			return 0;
+			return NET_RX_DROP;
 		iph = skb->nh.iph;
 
 		skb->ip_summed = 0;
@@ -349,7 +348,7 @@ static inline int ip_rcv_finish(struct sk_buff *skb)
 			if (in_dev) {
 				if (!IN_DEV_SOURCE_ROUTE(in_dev)) {
 					if (IN_DEV_LOG_MARTIANS(in_dev) && net_ratelimit())
-						printk(KERN_INFO "source route option %d.%d.%d.%d -> %d.%d.%d.%d\n",
+						printk(KERN_INFO "source route option %u.%u.%u.%u -> %u.%u.%u.%u\n",
 						       NIPQUAD(iph->saddr), NIPQUAD(iph->daddr));
 					in_dev_put(in_dev);
 					goto drop;
@@ -367,7 +366,7 @@ inhdr_error:
 	IP_INC_STATS_BH(IpInHdrErrors);
 drop:
         kfree_skb(skb);
-        return(0);
+        return NET_RX_DROP;
 }
 
 /*
@@ -424,6 +423,6 @@ inhdr_error:
 drop:
         kfree_skb(skb);
 out:
-        return(0);
+        return NET_RX_DROP;
 }
 

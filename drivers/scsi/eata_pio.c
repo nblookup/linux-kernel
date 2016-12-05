@@ -728,6 +728,12 @@ int register_pio_HBA(long base, struct get_conf *gc, Scsi_Host_Template * tpnt)
     size = sizeof(hostdata) + (sizeof(struct eata_ccb) * ntohs(gc->queuesiz));
     
     sh = scsi_register(tpnt, size);
+    if(sh == NULL)
+    {
+    	release_region(base, 8);
+    	return FALSE;
+    }
+    
     hd = SD(sh);                   
     
     memset(hd->ccb, 0, (sizeof(struct eata_ccb) * ntohs(gc->queuesiz)));
@@ -878,19 +884,21 @@ void find_pio_PCI(struct get_conf *buf, Scsi_Host_Template * tpnt)
 #ifndef CONFIG_PCI
     printk("eata_dma: kernel PCI support not enabled. Skipping scan for PCI HBAs.\n");
 #else
-    struct pci_dev *dev; 
+    struct pci_dev *dev = NULL; 
     u32 base, x;
 
-    for(dev=NULL; dev = pci_find_device(PCI_VENDOR_ID_DPT, PCI_DEVICE_ID_DPT, dev);) {
+    while ((dev = pci_find_device(PCI_VENDOR_ID_DPT, PCI_DEVICE_ID_DPT, dev)) != NULL) {
 	    DBG(DBG_PROBE && DBG_PCI, 
 		printk("eata_pio: find_PCI, HBA at %s\n", dev->name));
+	    if (pci_enable_device(dev))
+	    	continue;
 	    pci_set_master(dev);
-	    base = dev->resource[0].flags;
-	    if (!(base & PCI_BASE_ADDRESS_SPACE_IO)) {
+	    base = pci_resource_flags(dev, 0);
+	    if (base & IORESOURCE_MEM) {
 		printk("eata_pio: invalid base address of device %s\n", dev->name);
 		continue;
 	    }
-	    base = dev->resource[0].start;
+	    base = pci_resource_start(dev, 0);
             /* EISA tag there ? */
 	    if ((inb(base) == 0x12) && (inb(base + 1) == 0x14))
 		continue;   /* Jep, it's forced, so move on  */
@@ -983,12 +991,10 @@ int eata_pio_detect(Scsi_Host_Template * tpnt)
     return (registered_HBAs);
 }
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = EATA_PIO;
+static Scsi_Host_Template driver_template = EATA_PIO;
 
 #include "scsi_module.c"
-#endif
 
 /*
  * Overrides for Emacs so that we almost follow Linus's tabbing style.

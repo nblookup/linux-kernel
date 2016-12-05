@@ -1,4 +1,4 @@
-/* $Id: offset.c,v 1.12 1999/10/09 00:00:59 ralf Exp $
+/* $Id: offset.c,v 1.11 1999/09/28 22:25:50 ralf Exp $
  *
  * offset.c: Calculate pt_regs and task_struct offsets.
  *
@@ -80,8 +80,9 @@ void output_task_defines(void)
 	offset("#define TASK_FLAGS         ", struct task_struct, flags);
 	offset("#define TASK_SIGPENDING    ", struct task_struct, sigpending);
 	offset("#define TASK_NEED_RESCHED  ", struct task_struct, need_resched);
+	offset("#define TASK_PTRACE        ", struct task_struct, ptrace);
 	offset("#define TASK_COUNTER       ", struct task_struct, counter);
-	offset("#define TASK_PRIORITY      ", struct task_struct, priority);
+	offset("#define TASK_NICE          ", struct task_struct, nice);
 	offset("#define TASK_MM            ", struct task_struct, mm);
 	size("#define TASK_STRUCT_SIZE   ", struct task_struct);
 	linefeed;

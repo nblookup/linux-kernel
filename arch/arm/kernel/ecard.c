@@ -1,27 +1,30 @@
 /*
- * linux/arch/arm/kernel/ecard.c
+ *  linux/arch/arm/kernel/ecard.c
+ *
+ *  Copyright 1995-1998 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  *  Find all installed expansion cards, and handle interrupts from them.
  *
- * Copyright 1995-1998 Russell King
+ *  Created from information from Acorns RiscOS3 PRMs
  *
- * Created from information from Acorns RiscOS3 PRMs
- *
- * 08-Dec-1996	RMK	Added code for the 9'th expansion card - the ether
+ *  08-Dec-1996	RMK	Added code for the 9'th expansion card - the ether
  *			podule slot.
- * 06-May-1997  RMK	Added blacklist for cards whose loader doesn't work.
- * 12-Sep-1997	RMK	Created new handling of interrupt enables/disables
+ *  06-May-1997	RMK	Added blacklist for cards whose loader doesn't work.
+ *  12-Sep-1997	RMK	Created new handling of interrupt enables/disables
  *			- cards can now register their own routine to control
  *			interrupts (recommended).
- * 29-Sep-1997	RMK	Expansion card interrupt hardware not being re-enabled
+ *  29-Sep-1997	RMK	Expansion card interrupt hardware not being re-enabled
  *			on reset from Linux. (Caused cards not to respond
  *			under RiscOS without hard reset).
- * 15-Feb-1998	RMK	Added DMA support
- * 12-Sep-1998	RMK	Added EASI support
- * 10-Jan-1999	RMK	Run loaders in a simulated RISC OS environment.
- * 17-Apr-1999	RMK	Support for EASI Type C cycles.
+ *  15-Feb-1998	RMK	Added DMA support
+ *  12-Sep-1998	RMK	Added EASI support
+ *  10-Jan-1999	RMK	Run loaders in a simulated RISC OS environment.
+ *  17-Apr-1999	RMK	Support for EASI Type C cycles.
  */
-
 #define ECARD_C
 #define __KERNEL_SYSCALLS__
 
@@ -33,9 +36,7 @@
 #include <linux/interrupt.h>
 #include <linux/mm.h>
 #include <linux/malloc.h>
-#include <linux/errno.h>
 #include <linux/proc_fs.h>
-#include <linux/unistd.h>
 #include <linux/init.h>
 
 #include <asm/dma.h>
@@ -46,10 +47,8 @@
 #include <asm/pgalloc.h>
 #include <asm/mmu_context.h>
 
-#ifdef CONFIG_ARCH_ARC
-#include <asm/arch/oldlatches.h>
-#else
-#define oldlatch_init()
+#ifndef CONFIG_ARCH_RPC
+#define HAVE_EXPMASK
 #endif
 
 enum req {
@@ -141,15 +140,10 @@ ecard_task_reset(struct ecard_request *req)
 	if (req->ec == NULL) {
 		ecard_t *ec;
 
-		for (ec = cards; ec; ec = ec->next) {
-			printk(KERN_DEBUG "Resetting card %d\n",
-			       ec->slot_no);
-
+		for (ec = cards; ec; ec = ec->next)
 			if (ec->loader)
 				ecard_loader_reset(POD_INT_ADDR(ec->podaddr),
 						   ec->loader);
-		}
-		printk(KERN_DEBUG "All cards reset\n");
 	} else if (req->ec->loader)
 		ecard_loader_reset(POD_INT_ADDR(req->ec->podaddr),
 				   req->ec->loader);
@@ -269,8 +263,7 @@ static int exec_mmap(void)
  * Set up the expansion card
  * daemon's environment.
  */
-static void
-ecard_init_task(void)
+static void ecard_init_task(int force)
 {
 	/* We want to set up the page tables for the following mapping:
 	 *  Virtual	Physical
@@ -286,7 +279,8 @@ ecard_init_task(void)
 	pgd_t *src_pgd, *dst_pgd;
 	unsigned int dst_addr = IO_START;
 
-	exec_mmap();
+	if (!force)
+		exec_mmap();
 
 	src_pgd = pgd_offset(current->mm, IO_BASE);
 	dst_pgd = pgd_offset(current->mm, dst_addr);
@@ -313,21 +307,24 @@ ecard_init_task(void)
 static int
 ecard_task(void * unused)
 {
-	current->session = 1;
-	current->pgrp = 1;
+	struct task_struct *tsk = current;
+
+	tsk->session = 1;
+	tsk->pgrp = 1;
 
 	/*
 	 * We don't want /any/ signals, not even SIGKILL
 	 */
-	sigfillset(&current->blocked);
-	sigemptyset(&current->signal);
+	sigfillset(&tsk->blocked);
+	sigemptyset(&tsk->pending.signal);
+	recalc_sigpending(tsk);
 
-	strcpy(current->comm, "kecardd");
+	strcpy(tsk->comm, "kecardd");
 
 	/*
 	 * Set up the environment
 	 */
-	ecard_init_task();
+	ecard_init_task(0);
 
 	while (1) {
 		struct ecard_request *req;
@@ -336,7 +333,7 @@ ecard_task(void * unused)
 			req = xchg(&ecard_req, NULL);
 
 			if (req == NULL) {
-				sigemptyset(&current->signal);
+				sigemptyset(&tsk->pending.signal);
 				interruptible_sleep_on(&ecard_wait);
 			}
 		} while (req == NULL);
@@ -372,11 +369,12 @@ ecard_call(struct ecard_request *req)
 	 */
 	if ((current == &init_task || in_interrupt()) &&
 	    req->req == req_reset && req->ec == NULL) {
-		ecard_init_task();
+		ecard_init_task(1);
 		ecard_task_reset(req);
 	} else {
 		if (ecard_pid <= 0)
-			ecard_pid = kernel_thread(ecard_task, NULL, 0);
+			ecard_pid = kernel_thread(ecard_task, NULL,
+					CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
 
 		ecard_req = req;
 
@@ -909,7 +907,6 @@ ecard_probe(int slot, card_type_t type)
 	ecard_t **ecp;
 	ecard_t *ec;
 	struct ex_ecid cid;
-	char buffer[200];
 	int i, rc = -ENOMEM;
 
 	ec = kmalloc(sizeof(ecard_t), GFP_KERNEL);
@@ -990,12 +987,9 @@ ecard_probe(int slot, card_type_t type)
 nodev:
 	if (rc && ec)
 		kfree(ec);
-	else {
+	else
 		slot_to_expcard[slot] = ec;
 
-		ecard_prints(buffer, ec);
-		printk("%s", buffer);
-	}
 	return rc;
 }
 
@@ -1064,14 +1058,12 @@ void __init ecard_init(void)
 {
 	int slot;
 
-	oldlatch_init();
-
 #ifdef CONFIG_CPU_32
 	init_waitqueue_head(&ecard_wait);
 	init_waitqueue_head(&ecard_done);
 #endif
 
-	printk("Probing expansion cards: (does not imply support)\n");
+	printk("Probing expansion cards\n");
 
 	for (slot = 0; slot < 8; slot ++) {
 		if (ecard_probe(slot, ECARD_EASI) == -ENODEV)

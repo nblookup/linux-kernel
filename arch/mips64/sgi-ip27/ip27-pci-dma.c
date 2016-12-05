@@ -1,4 +1,4 @@
-/* $Id: ip27-pci-dma.c,v 1.1 2000/02/18 00:24:31 ralf Exp $
+/* $Id: ip27-pci-dma.c,v 1.1 2000/02/16 21:22:00 ralf Exp $
  *
  * Dynamic DMA mapping support.
  *
@@ -42,7 +42,7 @@ void *pci_alloc_consistent(struct pci_dev *hwdev, size_t size,
 
 	if (ret != NULL) {
 		memset(ret, 0, size);
-		*dma_handle = virt_to_bus(ret);
+		*dma_handle = (bus_to_baddr[hwdev->bus->number] | __pa(ret));
 	}
 
 	return ret;

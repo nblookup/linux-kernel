@@ -31,6 +31,7 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/malloc.h>
+#include <linux/vmalloc.h>
 #include <linux/types.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
@@ -56,7 +57,7 @@
 static multisound_dev_t		*devs[MSND_MAX_DEVS];
 static int			num_devs;
 
-int msnd_register(multisound_dev_t *dev)
+int __init msnd_register(multisound_dev_t *dev)
 {
 	int i;
 
@@ -180,7 +181,7 @@ int msnd_fifo_write(msnd_fifo *f, const char *buf, size_t len, int user)
 			if (copy_from_user(f->data + f->tail, buf, nwritten))
 				return -EFAULT;
 		} else
-			memcpy(f->data + f->tail, buf, nwritten);
+			isa_memcpy_fromio(f->data + f->tail, (unsigned long) buf, nwritten);
 
 		count += nwritten;
 		buf += nwritten;
@@ -218,7 +219,7 @@ int msnd_fifo_read(msnd_fifo *f, char *buf, size_t len, int user)
 			if (copy_to_user(buf, f->data + f->head, nread))
 				return -EFAULT;
 		} else
-			memcpy(buf, f->data + f->head, nread);
+			isa_memcpy_toio((unsigned long) buf, f->data + f->head, nread);
 
 		count += nread;
 		buf += nread;

@@ -306,10 +306,7 @@ struct ext2_inode {
 /*
  * Mount flags
  */
-#define EXT2_MOUNT_CHECK_NORMAL		0x0001	/* Do some more checks */
-#define EXT2_MOUNT_CHECK_STRICT		0x0002	/* Do again more checks */
-#define EXT2_MOUNT_CHECK		(EXT2_MOUNT_CHECK_NORMAL | \
-					 EXT2_MOUNT_CHECK_STRICT)
+#define EXT2_MOUNT_CHECK		0x0001	/* Do mount-time checks */
 #define EXT2_MOUNT_GRPID		0x0004	/* Create files with directory's group */
 #define EXT2_MOUNT_DEBUG		0x0008	/* Some debugging messages */
 #define EXT2_MOUNT_ERRORS_CONT		0x0010	/* Continue on errors */
@@ -432,11 +429,23 @@ struct ext2_super_block {
  */
 
 #define EXT2_HAS_COMPAT_FEATURE(sb,mask)			\
-	( EXT2_SB(sb)->s_feature_compat & (mask) )
+	( EXT2_SB(sb)->s_es->s_feature_compat & cpu_to_le32(mask) )
 #define EXT2_HAS_RO_COMPAT_FEATURE(sb,mask)			\
-	( EXT2_SB(sb)->s_feature_ro_compat & (mask) )
+	( EXT2_SB(sb)->s_es->s_feature_ro_compat & cpu_to_le32(mask) )
 #define EXT2_HAS_INCOMPAT_FEATURE(sb,mask)			\
-	( EXT2_SB(sb)->s_feature_incompat & (mask) )
+	( EXT2_SB(sb)->s_es->s_feature_incompat & cpu_to_le32(mask) )
+#define EXT2_SET_COMPAT_FEATURE(sb,mask)			\
+	EXT2_SB(sb)->s_es->s_feature_compat |= cpu_to_le32(mask)
+#define EXT2_SET_RO_COMPAT_FEATURE(sb,mask)			\
+	EXT2_SB(sb)->s_es->s_feature_ro_compat |= cpu_to_le32(mask)
+#define EXT2_SET_INCOMPAT_FEATURE(sb,mask)			\
+	EXT2_SB(sb)->s_es->s_feature_incompat |= cpu_to_le32(mask)
+#define EXT2_CLEAR_COMPAT_FEATURE(sb,mask)			\
+	EXT2_SB(sb)->s_es->s_feature_compat &= ~cpu_to_le32(mask)
+#define EXT2_CLEAR_RO_COMPAT_FEATURE(sb,mask)			\
+	EXT2_SB(sb)->s_es->s_feature_ro_compat &= ~cpu_to_le32(mask)
+#define EXT2_CLEAR_INCOMPAT_FEATURE(sb,mask)			\
+	EXT2_SB(sb)->s_es->s_feature_incompat &= ~cpu_to_le32(mask)
 
 #define EXT2_FEATURE_COMPAT_DIR_PREALLOC	0x0001
 
@@ -527,7 +536,8 @@ struct ext2_dir_entry_2 {
 extern int ext2_permission (struct inode *, int);
 
 /* balloc.c */
-extern int ext2_group_sparse(int group);
+extern int ext2_bg_has_super(struct super_block *sb, int group);
+extern unsigned long ext2_bg_num_gdb(struct super_block *sb, int group);
 extern int ext2_new_block (const struct inode *, unsigned long,
 			   __u32 *, __u32 *, int *);
 extern void ext2_free_blocks (const struct inode *, unsigned long,
@@ -551,10 +561,11 @@ extern int ext2_read (struct inode *, struct file *, char *, int);
 extern int ext2_write (struct inode *, struct file *, char *, int);
 
 /* fsync.c */
-extern int ext2_sync_file (struct file *, struct dentry *);
+extern int ext2_sync_file (struct file *, struct dentry *, int);
+extern int ext2_fsync_inode (struct inode *, int);
 
 /* ialloc.c */
-extern struct inode * ext2_new_inode (const struct inode *, int, int *);
+extern struct inode * ext2_new_inode (const struct inode *, int);
 extern void ext2_free_inode (struct inode *);
 extern unsigned long ext2_count_free_inodes (struct super_block *);
 extern void ext2_check_inodes_bitmap (struct super_block *);
@@ -565,7 +576,7 @@ extern struct buffer_head * ext2_getblk (struct inode *, long, int, int *);
 extern struct buffer_head * ext2_bread (struct inode *, int, int, int *);
 
 extern void ext2_read_inode (struct inode *);
-extern void ext2_write_inode (struct inode *);
+extern void ext2_write_inode (struct inode *, int);
 extern void ext2_put_inode (struct inode *);
 extern void ext2_delete_inode (struct inode *);
 extern int ext2_sync_inode (struct inode *);
@@ -586,6 +597,7 @@ extern NORET_TYPE void ext2_panic (struct super_block *, const char *,
 	__attribute__ ((NORET_AND format (printf, 3, 4)));
 extern void ext2_warning (struct super_block *, const char *, const char *, ...)
 	__attribute__ ((format (printf, 3, 4)));
+extern void ext2_update_dynamic_rev (struct super_block *sb);
 extern void ext2_put_super (struct super_block *);
 extern void ext2_write_super (struct super_block *);
 extern int ext2_remount (struct super_block *, int *, char *);

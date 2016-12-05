@@ -14,7 +14,7 @@
 /*
  * This is used to ensure we don't load something for the wrong architecture.
  */
-#define elf_check_arch(x) ((x) == EM_IA_64)
+#define elf_check_arch(x) ((x)->e_machine == EM_IA_64)
 
 /*
  * These are used to set parameters in the core dumps.
@@ -82,8 +82,7 @@ extern void ia64_elf_core_copy_regs (struct pt_regs *src, elf_gregset_t dst);
 #define ELF_PLATFORM	0
 
 #ifdef __KERNEL__
-# define SET_PERSONALITY(EX,IBCS2)				\
-	(current->personality = (IBCS2) ? PER_SVR4 : PER_LINUX)
+#define SET_PERSONALITY(ex, ibcs2) set_personality((ibcs2)?PER_SVR4:PER_LINUX)
 #endif
 
 #endif /* _ASM_IA64_ELF_H */

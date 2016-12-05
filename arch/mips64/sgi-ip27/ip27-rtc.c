@@ -34,9 +34,10 @@
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/proc_fs.h>
+#include <linux/smp_lock.h>
 
 #include <asm/m48t35.h>
-#include <asm/ioc3.h>
+#include <asm/sn/ioc3.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -59,8 +60,8 @@ static void get_rtc_time(struct rtc_time *rtc_tm);
 #define RTC_IS_OPEN		0x01	/* means /dev/rtc is in use	*/
 #define RTC_TIMER_ON		0x02	/* missed irq timer active	*/
 
-static unsigned char rtc_status = 0;	/* bitmapped status byte.	*/
-static unsigned long rtc_freq = 0;	/* Current periodic IRQ rate	*/
+static unsigned char rtc_status;	/* bitmapped status byte.	*/
+static unsigned long rtc_freq;	/* Current periodic IRQ rate	*/
 static struct m48t35_rtc *rtc;
 
 /*
@@ -168,8 +169,6 @@ static int rtc_open(struct inode *inode, struct file *file)
 	if(rtc_status & RTC_IS_OPEN)
 		return -EBUSY;
 
-	MOD_INC_USE_COUNT;
-
 	rtc_status |= RTC_IS_OPEN;
 	return 0;
 }
@@ -181,9 +180,9 @@ static int rtc_release(struct inode *inode, struct file *file)
 	 * in use, and clear the data.
 	 */
 
-	MOD_DEC_USE_COUNT;
-
+	lock_kernel();
 	rtc_status &= ~RTC_IS_OPEN;
+	unlock_kernel();
 	return 0;
 }
 
@@ -192,6 +191,7 @@ static int rtc_release(struct inode *inode, struct file *file)
  */
 
 static struct file_operations rtc_fops = {
+	owner:		THIS_MODULE,
 	ioctl:		rtc_ioctl,
 	open:		rtc_open,
 	release:	rtc_release,

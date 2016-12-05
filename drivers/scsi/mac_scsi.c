@@ -133,7 +133,7 @@ static volatile unsigned char *mac_scsi_nodrq = NULL;
  *
  */
 
-void mac_scsi_setup(char *str, int *ints) {
+static int __init mac_scsi_setup(char *str, int *ints) {
 #ifdef DRIVER_SETUP
 	/* Format of mac5380 parameter is:
 	 *   mac5380=<can_queue>,<cmd_per_lun>,<sg_tablesize>,<hostid>,<use_tags>
@@ -159,7 +159,7 @@ void mac_scsi_setup(char *str, int *ints) {
 	
 	if (ints[0] < 1) {
 		printk( "mac_scsi_setup: no arguments!\n" );
-		return;
+		return 0;
 	}
 
 	if (ints[0] >= 1) {
@@ -193,6 +193,7 @@ void mac_scsi_setup(char *str, int *ints) {
 	}
 #endif
 #endif
+	return 1; 
 }
 
 __setup("mac5380=", mac_scsi_setup);
@@ -257,6 +258,8 @@ int macscsi_detect(Scsi_Host_Template * tpnt)
     for (count = 0; count < mac_num_scsi; count++) {
 #endif
         instance = scsi_register (tpnt, sizeof(struct NCR5380_hostdata));
+        if(instance == NULL)
+        	continue;
 	default_instance = instance;
 
 	if (macintosh_config->ident == MAC_MODEL_IIFX) {
@@ -661,9 +664,6 @@ void scsi_mac_polled (void)
 
 
 
-#ifdef MODULE
-
-Scsi_Host_Template driver_template = MAC_NCR5380;
+static Scsi_Host_Template driver_template = MAC_NCR5380;
 
 #include "scsi_module.c"
-#endif

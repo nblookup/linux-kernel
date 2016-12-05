@@ -1,4 +1,4 @@
-/* $Id: string.h,v 1.15 1999/12/23 17:02:20 jj Exp $
+/* $Id: string.h,v 1.18 2000/10/30 21:01:41 davem Exp $
  * string.h: External definitions for optimized assembly string
  *           routines for the Linux Kernel.
  *
@@ -41,7 +41,7 @@ extern void *__builtin_memset(void *,int,__kernel_size_t);
 
 #define __HAVE_ARCH_MEMCPY
 
-extern inline void *__constant_memcpy(void *to, const void *from, __kernel_size_t n)
+static inline void *__constant_memcpy(void *to, const void *from, __kernel_size_t n)
 {
 	if(n) {
 		if(n <= 32) {
@@ -53,7 +53,7 @@ extern inline void *__constant_memcpy(void *to, const void *from, __kernel_size_
 	return to;
 }
 
-extern inline void *__nonconstant_memcpy(void *to, const void *from, __kernel_size_t n)
+static inline void *__nonconstant_memcpy(void *to, const void *from, __kernel_size_t n)
 {
 	__memcpy(to, from, n);
 	return to;
@@ -67,7 +67,7 @@ extern inline void *__nonconstant_memcpy(void *to, const void *from, __kernel_si
 
 #define __HAVE_ARCH_MEMSET
 
-extern inline void *__constant_memset(void *s, int c, __kernel_size_t count)
+static inline void *__constant_memset(void *s, int c, __kernel_size_t count)
 {
 	extern __kernel_size_t __bzero(void *, __kernel_size_t);
 
@@ -110,24 +110,13 @@ extern inline void *__constant_memset(void *s, int c, __kernel_size_t count)
 #define __HAVE_ARCH_STRLEN
 
 extern __kernel_size_t __strlen(const char *);
-
-#if __GNUC__ > 2 || __GNUC_MINOR__ >= 91
 extern __kernel_size_t strlen(const char *);
-#else /* !EGCS */
-/* Ugly but it works around a bug in our original sparc64-linux-gcc.  */
-#undef strlen
-#define strlen(__arg0)					\
-({	int __strlen_res = __strlen(__arg0) + 1;	\
-	__strlen_res -= 1;				\
-	__strlen_res;					\
-})
-#endif /* !EGCS */
 
 #define __HAVE_ARCH_STRNCMP
 
 extern int __strncmp(const char *, const char *, __kernel_size_t);
 
-extern inline int __constant_strncmp(const char *src, const char *dest, __kernel_size_t count)
+static inline int __constant_strncmp(const char *src, const char *dest, __kernel_size_t count)
 {
 	register int retval;
 	switch(count) {

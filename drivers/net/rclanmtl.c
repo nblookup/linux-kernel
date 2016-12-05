@@ -311,14 +311,7 @@ PAB, *PPAB;
  ** Indexed by a zero based (0-31) interface number.
  */ 
 #define MAX_ADAPTERS 32
-static PPAB  PCIAdapterBlock[MAX_ADAPTERS] = 
-{
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
-};
-
+static PPAB  PCIAdapterBlock[MAX_ADAPTERS];
 
 /*
 ** typedef NICSTAT
@@ -1568,7 +1561,7 @@ RC_RETURN
 RCResetLANCard(U16 AdapterID, U16 ResourceFlags, PU32 ReturnAddr, PFNCALLBACK CallbackFunction)
 {
     unsigned long off;
-    unsigned long *pMsg;
+    PU32 pMsg;
     PPAB pPab;
     int i;
     long timeout = 0;

@@ -100,7 +100,7 @@ extern inline unix_socket *unix_get_socket(struct file *filp)
 	/*
 	 *	Socket ?
 	 */
-	if (inode && inode->i_sock) {
+	if (inode->i_sock) {
 		struct socket * sock = &inode->u.socket_i;
 		struct sock * s = sock->sk;
 
@@ -177,7 +177,7 @@ void unix_gc(void)
 	 *	Avoid a recursive GC.
 	 */
 
-	if(!down_trylock(&unix_gc_sem))
+	if (down_trylock(&unix_gc_sem))
 		return;
 
 	read_lock(&unix_table_lock);

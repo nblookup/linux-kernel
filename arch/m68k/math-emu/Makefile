@@ -8,12 +8,13 @@
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
 .S.o:
-	$(CC) $(EXTRA_CFLAGS) -D__ASSEMBLY__ $(AFLAGS) -traditional -c $< -o $*.o
+	$(CC) $(EXTRA_CFLAGS) $(AFLAGS) -traditional -c $< -o $*.o
 
 #EXTRA_CFLAGS=-DFPU_EMU_DEBUG
 
 O_TARGET := mathemu.o
-O_OBJS := fp_entry.o fp_scan.o fp_util.o fp_move.o fp_movem.o \
-	  fp_cond.o fp_arith.o fp_log.o fp_trig.o
+
+obj-y		:= fp_entry.o fp_scan.o fp_util.o fp_move.o fp_movem.o \
+			fp_cond.o fp_arith.o fp_log.o fp_trig.o
 
 include $(TOPDIR)/Rules.make

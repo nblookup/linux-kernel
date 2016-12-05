@@ -1,4 +1,4 @@
-/* $Id: head.S,v 1.16 2000/03/02 00:01:15 gniibe Exp $
+/* $Id: head.S,v 1.17 2000/03/06 12:44:24 gniibe Exp $
  *
  *  arch/sh/kernel/head.S
  *
@@ -21,9 +21,9 @@ ENTRY(empty_zero_page)
 	.long	0x00360000	/* INITRD_START */
 	.long	0x000a0000	/* INITRD_SIZE */
 	.long	0
+	.balign 4096,0,4096
 
 	.text	
-	.balign 4096,0,4096
 /*
  * Condition at the entry of _stext:
  *
@@ -37,13 +37,25 @@ ENTRY(empty_zero_page)
  */
 ENTRY(_stext)
 	!			Initialize Status Register
-	mov.l	1f, $r0		! MD=1, RB=0, BL=1
+	mov.l	1f, $r0		! MD=1, RB=0, BL=0, IMASK=0xF
 	ldc	$r0, $sr
+	!			Initialize global interrupt mask
+	mov	#0, $r0
+	ldc	$r0, $r6_bank
 	!
 	mov.l	2f, $r0
 	mov	$r0, $r15	! Set initial r15 (stack pointer)
-	ldc	$r0, $r4_bank	!   and stack base
+	mov	#0x20, $r1	!
+	shll8	$r1		! $r1 = 8192
+	sub	$r1, $r0	!
+	ldc	$r0, $r7_bank	! ... and init_task
 	!
+#if defined(__SH4__)
+	!                       Initialize fpu
+	mov.l   7f, $r0
+	jsr     @$r0
+	 nop
+#endif
 	!			Enable cache
 	mov.l	6f, $r0
 	jsr	@$r0
@@ -62,9 +74,12 @@ ENTRY(_stext)
 	 nop
 
 	.balign 4
-1:	.long	0x50000000		! MD=1, RB=0, BL=1, FD=0
+1:	.long	0x400000F0		! MD=1, RB=0, BL=0, FD=0, IMASK=0xF
 2:	.long	SYMBOL_NAME(stack)
 3:	.long	SYMBOL_NAME(__bss_start)
 4:	.long	SYMBOL_NAME(_end)
 5:	.long	SYMBOL_NAME(start_kernel)
 6:	.long	SYMBOL_NAME(cache_init)
+#if defined(__SH4__)
+7:	.long   SYMBOL_NAME(fpu_init)
+#endif

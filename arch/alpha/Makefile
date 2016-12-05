@@ -8,9 +8,9 @@
 # Copyright (C) 1994 by Linus Torvalds
 #
 
-NM := nm -B
+NM := $(NM) -B
 
-LINKFLAGS = -static -T arch/alpha/vmlinux.lds #-N -relax
+LINKFLAGS = -static -T arch/alpha/vmlinux.lds -N #-relax
 CFLAGS := $(CFLAGS) -pipe -mno-fp-regs -ffixed-8
 
 # Determine if we can use the BWX instructions with GAS.
@@ -23,6 +23,8 @@ have_mcpu_pca56 := $(shell if $(CC) -mcpu=pca56 -S -o /dev/null -xc /dev/null > 
 
 have_mcpu_ev6 := $(shell if $(CC) -mcpu=ev6 -S -o /dev/null -xc /dev/null > /dev/null 2>&1; then echo y; else echo n; fi)
 
+have_mcpu_ev67 := $(shell if $(CC) -mcpu=ev67 -S -o /dev/null -xc /dev/null > /dev/null 2>&1; then echo y; else echo n; fi)
+
 # Turn on the proper cpu optimizations.
 ifeq ($(have_mcpu),y)
   # If GENERIC, make sure to turn off any instruction set extensions that
@@ -32,6 +34,10 @@ ifeq ($(have_mcpu),y)
   mcpu_done := n
   ifeq ($(CONFIG_ALPHA_GENERIC),y)
     CFLAGS := $(CFLAGS) -mcpu=ev5
+    mcpu_done := y
+  endif
+  ifeq ($(mcpu_done)$(CONFIG_ALPHA_SX164)$(have_mcpu_pca56),nyy)
+    CFLAGS := $(CFLAGS) -mcpu=pca56
     mcpu_done := y
   endif
   ifeq ($(mcpu_done)$(CONFIG_ALPHA_PYXIS),ny)
@@ -46,12 +52,12 @@ ifeq ($(have_mcpu),y)
     endif
     mcpu_done := y
   endif
-  ifeq ($(mcpu_done)$(CONFIG_ALPHA_NAUTILUS)$(have_mcpu_ev67),nyy)
-    CFLAGS := $(CFLAGS) -mcpu=ev67
-    mcpu_done := y
-  endif
   ifeq ($(mcpu_done)$(CONFIG_ALPHA_EV4),ny)
     CFLAGS := $(CFLAGS) -mcpu=ev4
+    mcpu_done := y
+  endif
+  ifeq ($(mcpu_done)$(CONFIG_ALPHA_EV67)$(have_mcpu_ev67),nyy)
+    CFLAGS := $(CFLAGS) -mcpu=ev67
     mcpu_done := y
   endif
   ifeq ($(mcpu_done)$(CONFIG_ALPHA_EV6),ny)
@@ -90,7 +96,7 @@ endif
 
 LIBS := $(TOPDIR)/arch/alpha/lib/lib.a $(LIBS) $(TOPDIR)/arch/alpha/lib/lib.a
 
-MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
+MAKEBOOT = $(MAKE) -C arch/alpha/boot
 
 rawboot:
 	@$(MAKEBOOT) rawboot
@@ -109,13 +115,19 @@ srmboot:
 	@$(MAKEBOOT) srmboot
 
 archclean:
-	@$(MAKE) -C arch/$(ARCH)/kernel clean
+	@$(MAKE) -C arch/alpha/kernel clean
 	@$(MAKEBOOT) clean
+	rm -f arch/alpha/vmlinux.lds
 
 archmrproper:
 
 archdep:
 	@$(MAKEBOOT) dep
+
+vmlinux: arch/alpha/vmlinux.lds
+
+arch/alpha/vmlinux.lds: arch/alpha/vmlinux.lds.in
+	$(CPP) $(CPPFLAGS) -xc -P arch/alpha/vmlinux.lds.in -o arch/alpha/vmlinux.lds
 
 bootpfile:
 	@$(MAKEBOOT) bootpfile

@@ -19,6 +19,7 @@
  *          Steve Whitehouse : SIOCGIFCONF is now a compile time option
  *          Steve Whitehouse : /proc/sys/net/decnet/conf/<sys>/forwarding
  *          Steve Whitehouse : Removed timer1 - its a user space issue now
+ *         Patrick Caulfield : Fixed router hello message format
  */
 
 #include <linux/config.h>
@@ -387,7 +388,7 @@ static struct dn_ifaddr *dn_dev_alloc_ifa(void)
 
 static __inline__ void dn_dev_free_ifa(struct dn_ifaddr *ifa)
 {
-	kfree_s(ifa, sizeof(*ifa));
+	kfree(ifa);
 }
 
 static void dn_dev_del_ifa(struct dn_dev *dn_db, struct dn_ifaddr **ifap, int destroy)
@@ -795,13 +796,14 @@ static void dn_send_router_hello(struct net_device *dev)
 			DN_RT_INFO_L1RT : DN_RT_INFO_L2RT;
 	*((unsigned short *)ptr) = dn_htons(dn_db->parms.blksize);
 	ptr += 2;
-	*ptr++ = 0; /* Priority */
+	*ptr++ = dn_db->parms.priority; /* Priority */ 
 	*ptr++ = 0; /* Area: Reserved */
 	*((unsigned short *)ptr) = dn_htons((unsigned short)dn_db->parms.t3);
 	ptr += 2;
 	*ptr++ = 0; /* MPD: Reserved */
 	i1 = ptr++;
 	memset(ptr, 0, 7); /* Name: Reserved */
+	ptr += 7;
 	i2 = ptr++;
 
 	n = dn_neigh_elist(dev, ptr, n);
@@ -809,7 +811,7 @@ static void dn_send_router_hello(struct net_device *dev)
 	*i2 = 7 * n;
 	*i1 = 8 + *i2;
 
-	skb_trim(skb, (26 + *i2));
+	skb_trim(skb, (27 + *i2));
 
 	pktlen = (unsigned short *)skb_push(skb, 2);
 	*pktlen = dn_htons(skb->len - 2);
@@ -911,7 +913,6 @@ static void dn_dev_timer_func(unsigned long arg)
 	}
 
 	dn_dev_set_timer(dev);
-	timer_exit(&dn_db->timer);
 }
 
 static void dn_dev_set_timer(struct net_device *dev)
@@ -1173,8 +1174,8 @@ static int decnet_dev_get_info(char *buffer, char **start, off_t offset, int len
 				dn_db->parms.blksize,
 				dn_db->parms.priority,
 				dn_db->parms.state, dn_db->parms.name,
-				dn_db->router ? dn_addr2asc(dn_eth2dn(dn_db->router->primary_key), router_buf) : "",
-				dn_db->peer ? dn_addr2asc(dn_eth2dn(dn_db->peer->primary_key), peer_buf) : "");
+				dn_db->router ? dn_addr2asc(dn_ntohs(*(dn_address *)dn_db->router->primary_key), router_buf) : "",
+				dn_db->peer ? dn_addr2asc(dn_ntohs(*(dn_address *)dn_db->peer->primary_key), peer_buf) : "");
 
 
                 pos = begin + len;

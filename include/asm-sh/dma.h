@@ -1,6 +1,7 @@
 #ifndef __ASM_SH_DMA_H
 #define __ASM_SH_DMA_H
 
+#include <linux/config.h>
 #include <asm/io.h>		/* need byte IO */
 
 #define MAX_DMA_CHANNELS 8
@@ -14,5 +15,12 @@
 
 extern int request_dma(unsigned int dmanr, const char * device_id);	/* reserve a DMA channel */
 extern void free_dma(unsigned int dmanr);	/* release it again */
+
+#ifdef CONFIG_PCI
+extern int isa_dma_bridge_buggy;
+#else
+#define isa_dma_bridge_buggy 	(0)
+#endif
+
 
 #endif /* __ASM_SH_DMA_H */

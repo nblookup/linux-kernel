@@ -9,15 +9,11 @@
 #include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/init.h>
+#include <linux/module.h>
 #include <linux/smp_lock.h>
 
-/* SLAB cache for filp's. */
-static kmem_cache_t *filp_cache;
-
 /* sysctl tunables... */
-int nr_files = 0;	/* read only */
-int nr_free_files = 0;	/* read only */
-int max_files = NR_FILE;/* tunable */
+struct files_stat_struct files_stat = {0, 0, NR_FILE};
 
 /* Here the new files go */
 static LIST_HEAD(anon_list);
@@ -25,20 +21,6 @@ static LIST_HEAD(anon_list);
 static LIST_HEAD(free_list);
 /* public *and* exported. Not pretty! */
 spinlock_t files_lock = SPIN_LOCK_UNLOCKED;
-
-void __init file_table_init(void)
-{
-	filp_cache = kmem_cache_create("filp", sizeof(struct file),
-				       0,
-				       SLAB_HWCACHE_ALIGN, NULL, NULL);
-	if(!filp_cache)
-		panic("VFS: Cannot alloc filp SLAB cache.");
-	/*
-	 * We could allocate the reserved files here, but really
-	 * shouldn't need to: the normal boot process will create
-	 * plenty of free files.
-	 */
-}
 
 /* Find an unused file structure and return a pointer to it.
  * Returns NULL, if there are no more free file structures or
@@ -52,19 +34,17 @@ struct file * get_empty_filp(void)
 	struct file * f;
 
 	file_list_lock();
-	if (nr_free_files > NR_RESERVED_FILES) {
+	if (files_stat.nr_free_files > NR_RESERVED_FILES) {
 	used_one:
 		f = list_entry(free_list.next, struct file, f_list);
 		list_del(&f->f_list);
-		nr_free_files--;
+		files_stat.nr_free_files--;
 	new_one:
-		file_list_unlock();
 		memset(f, 0, sizeof(*f));
 		atomic_set(&f->f_count,1);
 		f->f_version = ++event;
 		f->f_uid = current->fsuid;
 		f->f_gid = current->fsgid;
-		file_list_lock();
 		list_add(&f->f_list, &anon_list);
 		file_list_unlock();
 		return f;
@@ -72,25 +52,25 @@ struct file * get_empty_filp(void)
 	/*
 	 * Use a reserved one if we're the superuser
 	 */
-	if (nr_free_files && !current->euid)
+	if (files_stat.nr_free_files && !current->euid)
 		goto used_one;
 	/*
 	 * Allocate a new one if we're below the limit.
 	 */
-	if (nr_files < max_files) {
+	if (files_stat.nr_files < files_stat.max_files) {
 		file_list_unlock();
-		f = kmem_cache_alloc(filp_cache, SLAB_KERNEL);
+		f = kmem_cache_alloc(filp_cachep, SLAB_KERNEL);
 		file_list_lock();
 		if (f) {
-			nr_files++;
+			files_stat.nr_files++;
 			goto new_one;
 		}
 		/* Big problems... */
 		printk("VFS: filp allocation failed\n");
 
-	} else if (max_files > old_max) {
-		printk("VFS: file-max limit %d reached\n", max_files);
-		old_max = max_files;
+	} else if (files_stat.max_files > old_max) {
+		printk("VFS: file-max limit %d reached\n", files_stat.max_files);
+		old_max = files_stat.max_files;
 	}
 	file_list_unlock();
 	return NULL;
@@ -116,34 +96,43 @@ int init_private_file(struct file *filp, struct dentry *dentry, int mode)
 		return 0;
 }
 
-/*
- * Called when retiring the last use of a file pointer.
- */
-static void __fput(struct file *filp)
+void fput(struct file * file)
 {
-	struct dentry * dentry = filp->f_dentry;
+	struct dentry * dentry = file->f_dentry;
+	struct vfsmount * mnt = file->f_vfsmnt;
 	struct inode * inode = dentry->d_inode;
 
-	if (filp->f_op && filp->f_op->release)
-		filp->f_op->release(inode, filp);
-	filp->f_dentry = NULL;
-	if (filp->f_mode & FMODE_WRITE)
-		put_write_access(inode);
-	dput(dentry);
+	if (atomic_dec_and_test(&file->f_count)) {
+		locks_remove_flock(file);
+		if (file->f_op && file->f_op->release)
+			file->f_op->release(inode, file);
+		fops_put(file->f_op);
+		file->f_dentry = NULL;
+		file->f_vfsmnt = NULL;
+		if (file->f_mode & FMODE_WRITE)
+			put_write_access(inode);
+		dput(dentry);
+		if (mnt)
+			mntput(mnt);
+		file_list_lock();
+		list_del(&file->f_list);
+		list_add(&file->f_list, &free_list);
+		files_stat.nr_free_files++;
+		file_list_unlock();
+	}
 }
 
-void _fput(struct file *file)
+struct file * fget(unsigned int fd)
 {
-	lock_kernel();
-	locks_remove_flock(file);	/* Still need the */
-	__fput(file);			/* big lock here. */
-	unlock_kernel();
+	struct file * file;
+	struct files_struct *files = current->files;
 
-	file_list_lock();
-	list_del(&file->f_list);
-	list_add(&file->f_list, &free_list);
-	nr_free_files++;
-	file_list_unlock();
+	read_lock(&files->file_lock);
+	file = fcheck(fd);
+	if (file)
+		get_file(file);
+	read_unlock(&files->file_lock);
+	return file;
 }
 
 /* Here. put_filp() is SMP-safe now. */
@@ -154,7 +143,7 @@ void put_filp(struct file *file)
 		file_list_lock();
 		list_del(&file->f_list);
 		list_add(&file->f_list, &free_list);
-		nr_free_files++;
+		files_stat.nr_free_files++;
 		file_list_unlock();
 	}
 }
@@ -185,9 +174,12 @@ int fs_may_remount_ro(struct super_block *sb)
 	file_list_lock();
 	for (p = sb->s_files.next; p != &sb->s_files; p = p->next) {
 		struct file *file = list_entry(p, struct file, f_list);
-		struct inode *inode = file->f_dentry->d_inode;
-		if (!inode)
+		struct inode *inode;
+
+		if (!file->f_dentry)
 			continue;
+
+		inode = file->f_dentry->d_inode;
 
 		/* File with pending delete? */
 		if (inode->i_nlink == 0)

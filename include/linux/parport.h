@@ -1,5 +1,11 @@
 /* $Id: parport.h,v 1.1 1998/05/17 10:57:52 andrea Exp andrea $ */
 
+/*
+ * Any part of this program may be used in documents licensed under
+ * the GNU Free Documentation License, Version 1.1 or any later version
+ * published by the Free Software Foundation.
+ */
+
 #ifndef _PARPORT_H_
 #define _PARPORT_H_
 
@@ -302,6 +308,7 @@ struct parport {
 	rwlock_t cad_lock;
 
 	int spintime;
+	atomic_t ref_count;
 };
 
 #define DEFAULT_SPIN_TIME 500 /* us */
@@ -330,12 +337,9 @@ void parport_announce_port (struct parport *port);
 /* Unregister a port. */
 extern void parport_unregister_port(struct parport *port);
 
-/* parport_in_use returns nonzero if there are devices attached to a
-   port. */
-#define parport_in_use(x)  ((x)->devices != NULL)
-
 /* parport_enumerate returns a pointer to the linked list of all the
-   ports in this machine. */
+   ports in this machine.  DON'T USE THIS.  Use
+   parport_register_driver instead. */
 struct parport *parport_enumerate(void);
 
 /* Register a new high-level driver. */
@@ -343,6 +347,15 @@ extern int parport_register_driver (struct parport_driver *);
 
 /* Unregister a high-level driver. */
 extern void parport_unregister_driver (struct parport_driver *);
+
+/* If parport_register_driver doesn't fit your needs, perhaps
+ * parport_find_xxx does. */
+extern struct parport *parport_find_number (int);
+extern struct parport *parport_find_base (unsigned long);
+
+/* Reference counting for ports. */
+extern struct parport *parport_get_port (struct parport *);
+extern void parport_put_port (struct parport *);
 
 /* parport_register_device declares that a device is connected to a
    port, and tells the kernel all it needs to know.
@@ -380,8 +393,26 @@ extern int parport_claim_or_block(struct pardevice *dev);
 
 extern void parport_release(struct pardevice *dev);
 
-/* parport_yield relinquishes the port if it would be helpful to other
-   drivers.  The return value is the same as for parport_claim.  */
+/**
+ * parport_yield - relinquish a parallel port temporarily
+ * @dev: a device on the parallel port
+ *
+ * This function relinquishes the port if it would be helpful to other
+ * drivers to do so.  Afterwards it tries to reclaim the port using
+ * parport_claim(), and the return value is the same as for
+ * parport_claim().  If it fails, the port is left unclaimed and it is
+ * the driver's responsibility to reclaim the port.
+ *
+ * The parport_yield() and parport_yield_blocking() functions are for
+ * marking points in the driver at which other drivers may claim the
+ * port and use their devices.  Yielding the port is similar to
+ * releasing it and reclaiming it, but is more efficient because no
+ * action is taken if there are no other devices needing the port.  In
+ * fact, nothing is done even if there are other devices waiting but
+ * the current device is still within its "timeslice".  The default
+ * timeslice is half a second, but it can be adjusted via the /proc
+ * interface.
+ **/
 extern __inline__ int parport_yield(struct pardevice *dev)
 {
 	unsigned long int timeslip = (jiffies - dev->time);
@@ -391,8 +422,15 @@ extern __inline__ int parport_yield(struct pardevice *dev)
 	return parport_claim(dev);
 }
 
-/* parport_yield_blocking is the same but uses parport_claim_or_block
-   instead of parport_claim.  */
+/**
+ * parport_yield_blocking - relinquish a parallel port temporarily
+ * @dev: a device on the parallel port
+ *
+ * This function relinquishes the port if it would be helpful to other
+ * drivers to do so.  Afterwards it tries to reclaim the port using
+ * parport_claim_or_block(), and the return value is the same as for
+ * parport_claim_or_block().
+ **/
 extern __inline__ int parport_yield_blocking(struct pardevice *dev)
 {
 	unsigned long int timeslip = (jiffies - dev->time);

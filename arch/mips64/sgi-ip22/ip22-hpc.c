@@ -1,4 +1,4 @@
-/* $Id: ip22-hpc.c,v 1.2 1999/12/04 03:59:01 ralf Exp $
+/* $Id: ip22-hpc.c,v 1.2 1999/10/19 20:51:52 ralf Exp $
  *
  * ip22-hpc.c: Routines for generic manipulation of the HPC controllers.
  *
@@ -12,6 +12,7 @@
 #include <asm/sgi/sgihpc.h>
 #include <asm/sgi/sgint23.h>
 #include <asm/sgialib.h>
+#include <asm/bootinfo.h>
 
 #undef DEBUG_SGIHPC
 
@@ -50,10 +51,12 @@ void __init sgihpc_init(void)
 		prom_printf("GUINESS ");
 #endif
 		sgi_guiness = 1;
+		mips_machtype = MACH_SGI_INDY;
 	} else {
 #ifdef DEBUG_SGIHPC
 		prom_printf("FULLHOUSE ");
 #endif
+                mips_machtype = MACH_SGI_INDIGO2;
 		sgi_guiness = 0;
 	}
 	sgi_boardid = brev;

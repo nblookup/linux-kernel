@@ -237,8 +237,9 @@ static void tr_source_route(struct sk_buff *skb,struct trh_hdr *trh,struct net_d
 	rif_cache entry;
 	unsigned char *olddata;
 	unsigned char mcast_func_addr[] = {0xC0,0x00,0x00,0x04,0x00,0x00};
+	unsigned long flags ; 
 	
-	spin_lock_bh(&rif_lock);
+	spin_lock_irqsave(&rif_lock,flags);
 
 	/*
 	 *	Broadcasts are single route as stated in RFC 1042 
@@ -265,7 +266,7 @@ static void tr_source_route(struct sk_buff *skb,struct trh_hdr *trh,struct net_d
 		if(entry) 
 		{
 #if TR_SR_DEBUG
-printk("source routing for %02X %02X %02X %02X %02X %02X\n",trh->daddr[0],
+printk("source routing for %02X:%02X:%02X:%02X:%02X:%02X\n",trh->daddr[0],
 		  trh->daddr[1],trh->daddr[2],trh->daddr[3],trh->daddr[4],trh->daddr[5]);
 #endif
 			if(!entry->local_ring && (ntohs(entry->rcf) & TR_RCF_LEN_MASK) >> 8)
@@ -308,7 +309,7 @@ printk("source routing for %02X %02X %02X %02X %02X %02X\n",trh->daddr[0],
 	else 
 		slack = 18 - ((ntohs(trh->rcf) & TR_RCF_LEN_MASK)>>8);
 	olddata = skb->data;
-	spin_unlock_bh(&rif_lock);
+	spin_unlock_irqrestore(&rif_lock,flags);
 
 	skb_pull(skb, slack);
 	memmove(skb->data, olddata, sizeof(struct trh_hdr) - slack);
@@ -418,8 +419,9 @@ static void rif_check_expire(unsigned long dummy)
 {
 	int i;
 	unsigned long now=jiffies;
+	unsigned long flags ; 
 
-	spin_lock(&rif_lock);
+	spin_lock_irqsave(&rif_lock,flags);
 	
 	for(i=0; i < RIF_TABLE_SIZE;i++) 
 	{
@@ -432,14 +434,14 @@ static void rif_check_expire(unsigned long dummy)
 			if((now-entry->last_used) > sysctl_tr_rif_timeout) 
 			{
 				*pentry=entry->next;
-				kfree_s(entry,sizeof(struct rif_cache_s));
+				kfree(entry);
 			}
 			else
 				pentry=&entry->next;
 		}
 	}
 	
-	spin_unlock(&rif_lock);
+	spin_unlock_irqrestore(&rif_lock,flags);
 
 	/*
 	 *	Reset the timer
@@ -455,7 +457,7 @@ static void rif_check_expire(unsigned long dummy)
  */
  
 #ifndef CONFIG_PROC_FS
-static int rif_get_info(char *buffer,char **start, off_t offset, int length)  {}
+static int rif_get_info(char *buffer,char **start, off_t offset, int length)  { return 0;}
 #else
 static int rif_get_info(char *buffer,char **start, off_t offset, int length) 
 {
@@ -538,7 +540,7 @@ static int rif_get_info(char *buffer,char **start, off_t offset, int length)
  *	too much for this.
  */
 
-void __init rif_init(struct net_proto *unused)
+static int __init rif_init(void)
 {
 	rif_timer.expires  = RIF_TIMEOUT;
 	rif_timer.data     = 0L;
@@ -547,4 +549,7 @@ void __init rif_init(struct net_proto *unused)
 	add_timer(&rif_timer);
 
 	proc_net_create("tr_rif",0,rif_get_info);
+	return 0;
 }
+
+module_init(rif_init);

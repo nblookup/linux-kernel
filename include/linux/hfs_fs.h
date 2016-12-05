@@ -302,7 +302,6 @@ extern void hfs_sngl_ifill(struct inode *, ino_t, const int);
 
 /* super.c */
 extern struct super_block *hfs_read_super(struct super_block *,void *,int);
-extern int init_hfs_fs(void);
 
 /* trans.c */
 extern void hfs_colon2mac(struct hfs_name *, const char *, int);
@@ -321,12 +320,12 @@ extern void hfs_tolower(unsigned char *, int);
 #define	HFS_I(X)	(&((X)->u.hfs_i))
 #define	HFS_SB(X)	(&((X)->u.hfs_sb))
 
-extern __inline__ void hfs_nameout(struct inode *dir, struct hfs_name *out,
+static inline void hfs_nameout(struct inode *dir, struct hfs_name *out,
 				   const char *in, int len) {
 	HFS_SB(dir->i_sb)->s_nameout(out, in, len);
 }
 
-extern __inline__ int hfs_namein(struct inode *dir, char *out,
+static inline int hfs_namein(struct inode *dir, char *out,
 				 const struct hfs_name *in) {
 	int len = HFS_SB(dir->i_sb)->s_namein(out, in);
 	if (HFS_SB(dir->i_sb)->s_lowercase) {

@@ -241,6 +241,9 @@ int __init dtc_detect(Scsi_Host_Template * tpnt){
 	 break;
 
       instance = scsi_register (tpnt, sizeof(struct NCR5380_hostdata));
+      if(instance == NULL)
+      	break;
+      	
       instance->base = base;
 
       NCR5380_init(instance, 0);
@@ -432,9 +435,6 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance,
 
 #include "NCR5380.c"
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = DTC3x80;
-
+static Scsi_Host_Template driver_template = DTC3x80;
 #include "scsi_module.c"
-#endif

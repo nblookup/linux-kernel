@@ -14,24 +14,29 @@
  * We leave one page for the initial stack page, and one page for
  * the initial process structure. Also, the console eats 3 MB for
  * the initial bootloader (one of which we can reclaim later).
- * With a few other pages for various reasons, we'll use an initial
- * load address of PAGE_OFFSET+0x310000UL
  */
 #define BOOT_PCB	0x20000000
 #define BOOT_ADDR	0x20000000
 /* Remove when official MILO sources have ELF support: */
 #define BOOT_SIZE	(16*1024)
 
-#define KERNEL_START	(PAGE_OFFSET+0x300000)
-#define SWAPPER_PGD	(PAGE_OFFSET+0x300000)
-#define INIT_STACK	(PAGE_OFFSET+0x302000)
-#define EMPTY_PGT	(PAGE_OFFSET+0x304000)
-#define EMPTY_PGE	(PAGE_OFFSET+0x308000)
-#define ZERO_PGE	(PAGE_OFFSET+0x30A000)
+#ifdef CONFIG_ALPHA_LEGACY_START_ADDRESS
+#define KERNEL_START_PHYS	0x300000 /* Old bootloaders hardcoded this.  */
+#else
+#define KERNEL_START_PHYS	0x800000 /* Wildfire has a huge console */
+#endif
 
-#define START_ADDR	(PAGE_OFFSET+0x310000)
+#define KERNEL_START	(PAGE_OFFSET+KERNEL_START_PHYS)
+#define SWAPPER_PGD	KERNEL_START
+#define INIT_STACK	(PAGE_OFFSET+KERNEL_START_PHYS+0x02000)
+#define EMPTY_PGT	(PAGE_OFFSET+KERNEL_START_PHYS+0x04000)
+#define EMPTY_PGE	(PAGE_OFFSET+KERNEL_START_PHYS+0x08000)
+#define ZERO_PGE	(PAGE_OFFSET+KERNEL_START_PHYS+0x0A000)
+
+#define START_ADDR	(PAGE_OFFSET+KERNEL_START_PHYS+0x10000)
 
 #ifndef __ASSEMBLY__
+#include <linux/kernel.h>
 
 /*
  * This is the logout header that should be common to all platforms
@@ -111,6 +116,7 @@ struct el_common_EV6_mcheck {
 };
 
 extern void halt(void) __attribute__((noreturn));
+#define __halt() __asm__ __volatile__ ("call_pal %0 #halt" : : "i" (PAL_halt))
 
 #define prepare_to_switch()	do { } while(0)
 #define switch_to(prev,next,last)			\
@@ -119,6 +125,7 @@ do {							\
 	current = (next);				\
 	pcbb = virt_to_phys(&current->thread);		\
 	(last) = alpha_switch_to(pcbb, (prev));		\
+	check_mmu_context();				\
 } while (0)
 
 extern struct task_struct* alpha_switch_to(unsigned long, struct task_struct*);
@@ -132,11 +139,18 @@ __asm__ __volatile__("mb": : :"memory")
 #define wmb() \
 __asm__ __volatile__("wmb": : :"memory")
 
+#ifdef CONFIG_SMP
+#define smp_mb()	mb()
+#define smp_rmb()	rmb()
+#define smp_wmb()	wmb()
+#else
+#define smp_mb()	barrier()
+#define smp_rmb()	barrier()
+#define smp_wmb()	barrier()
+#endif
+
 #define set_mb(var, value) \
 do { var = value; mb(); } while (0)
-
-#define set_rmb(var, value) \
-do { var = value; rmb(); } while (0)
 
 #define set_wmb(var, value) \
 do { var = value; wmb(); } while (0)
@@ -279,18 +293,18 @@ extern int __min_ipl;
 #define getipl()		(rdps() & 7)
 #define setipl(ipl)		((void) swpipl(ipl))
 
-#define __cli()			setipl(IPL_MAX)
-#define __sti()			setipl(IPL_MIN)
+#define __cli()			do { setipl(IPL_MAX); barrier(); } while(0)
+#define __sti()			do { barrier(); setipl(IPL_MIN); } while(0)
 #define __save_flags(flags)	((flags) = rdps())
-#define __save_and_cli(flags)	((flags) = swpipl(IPL_MAX))
-#define __restore_flags(flags)	setipl(flags)
+#define __save_and_cli(flags)	do { (flags) = swpipl(IPL_MAX); barrier(); } while(0)
+#define __restore_flags(flags)	do { barrier(); setipl(flags); barrier(); } while(0)
 
 #define local_irq_save(flags)		__save_and_cli(flags)
 #define local_irq_restore(flags)	__restore_flags(flags)
 #define local_irq_disable()		__cli()
 #define local_irq_enable()		__sti()
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 
 extern int global_irq_holder;
 
@@ -306,7 +320,7 @@ extern void __global_restore_flags(unsigned long flags);
 #define save_flags(flags)	((flags) = __global_save_flags())
 #define restore_flags(flags)    __global_restore_flags(flags)
 
-#else /* __SMP__ */
+#else /* CONFIG_SMP */
 
 #define cli()			__cli()
 #define sti()			__sti()
@@ -314,7 +328,7 @@ extern void __global_restore_flags(unsigned long flags);
 #define save_and_cli(flags)	__save_and_cli(flags)
 #define restore_flags(flags)	__restore_flags(flags)
 
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 
 /*
  * TB routines..
@@ -339,6 +353,8 @@ extern void __global_restore_flags(unsigned long flags);
 
 /*
  * Atomic exchange.
+ * Since it can be used to implement critical sections
+ * it must clobber "memory" (also for interrupts in UP).
  */
 
 extern __inline__ unsigned long
@@ -347,16 +363,18 @@ __xchg_u32(volatile int *m, unsigned long val)
 	unsigned long dummy;
 
 	__asm__ __volatile__(
-	"1:	ldl_l %0,%2\n"
+	"1:	ldl_l %0,%4\n"
 	"	bis $31,%3,%1\n"
 	"	stl_c %1,%2\n"
 	"	beq %1,2f\n"
+#ifdef CONFIG_SMP
 	"	mb\n"
+#endif
 	".subsection 2\n"
 	"2:	br 1b\n"
 	".previous"
 	: "=&r" (val), "=&r" (dummy), "=m" (*m)
-	: "rI" (val), "m" (*m));
+	: "rI" (val), "m" (*m) : "memory");
 
 	return val;
 }
@@ -367,16 +385,18 @@ __xchg_u64(volatile long *m, unsigned long val)
 	unsigned long dummy;
 
 	__asm__ __volatile__(
-	"1:	ldq_l %0,%2\n"
+	"1:	ldq_l %0,%4\n"
 	"	bis $31,%3,%1\n"
 	"	stq_c %1,%2\n"
 	"	beq %1,2f\n"
+#ifdef CONFIG_SMP
 	"	mb\n"
+#endif
 	".subsection 2\n"
 	"2:	br 1b\n"
 	".previous"
 	: "=&r" (val), "=&r" (dummy), "=m" (*m)
-	: "rI" (val), "m" (*m));
+	: "rI" (val), "m" (*m) : "memory");
 
 	return val;
 }
@@ -411,6 +431,11 @@ __xchg(volatile void *ptr, unsigned long x, int size)
  * Atomic compare and exchange.  Compare OLD with MEM, if identical,
  * store NEW in MEM.  Return the initial value in MEM.  Success is
  * indicated by comparing RETURN with OLD.
+ *
+ * The memory barrier should be placed in SMP only when we actually
+ * make the change. If we don't change anything (so if the returned
+ * prev is equal to old) then we aren't acquiring anything new and
+ * we don't need any memory barrier as far I can tell.
  */
 
 #define __HAVE_ARCH_CMPXCHG 1
@@ -421,18 +446,21 @@ __cmpxchg_u32(volatile int *m, int old, int new)
 	unsigned long prev, cmp;
 
 	__asm__ __volatile__(
-	"1:	ldl_l %0,%2\n"
+	"1:	ldl_l %0,%5\n"
 	"	cmpeq %0,%3,%1\n"
 	"	beq %1,2f\n"
 	"	mov %4,%1\n"
 	"	stl_c %1,%2\n"
 	"	beq %1,3f\n"
-	"2:	mb\n"
+#ifdef CONFIG_SMP
+	"	mb\n"
+#endif
+	"2:\n"
 	".subsection 2\n"
 	"3:	br 1b\n"
 	".previous"
 	: "=&r"(prev), "=&r"(cmp), "=m"(*m)
-	: "r"((long) old), "r"(new), "m"(*m));
+	: "r"((long) old), "r"(new), "m"(*m) : "memory");
 
 	return prev;
 }
@@ -443,18 +471,21 @@ __cmpxchg_u64(volatile long *m, unsigned long old, unsigned long new)
 	unsigned long prev, cmp;
 
 	__asm__ __volatile__(
-	"1:	ldq_l %0,%2\n"
+	"1:	ldq_l %0,%5\n"
 	"	cmpeq %0,%3,%1\n"
 	"	beq %1,2f\n"
 	"	mov %4,%1\n"
 	"	stq_c %1,%2\n"
 	"	beq %1,3f\n"
-	"2:	mb\n"
+#ifdef CONFIG_SMP
+	"	mb\n"
+#endif
+	"2:\n"
 	".subsection 2\n"
 	"3:	br 1b\n"
 	".previous"
 	: "=&r"(prev), "=&r"(cmp), "=m"(*m)
-	: "r"((long) old), "r"(new), "m"(*m));
+	: "r"((long) old), "r"(new), "m"(*m) : "memory");
 
 	return prev;
 }

@@ -33,6 +33,7 @@
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/netlink.h>
+#include <linux/divert.h>
 
 #define	NEXT_DEV	NULL
 
@@ -79,29 +80,19 @@ extern int ni5010_probe(struct net_device *);
 extern int ni52_probe(struct net_device *);
 extern int ni65_probe(struct net_device *);
 extern int sonic_probe(struct net_device *);
-extern int ioc3_probe(struct net_device *);
 extern int SK_init(struct net_device *);
 extern int seeq8005_probe(struct net_device *);
 extern int smc_init( struct net_device * );
 extern int sgiseeq_probe(struct net_device *);
 extern int atarilance_probe(struct net_device *);
 extern int sun3lance_probe(struct net_device *);
-extern int a2065_probe(struct net_device *);
-extern int ariadne_probe(struct net_device *);
-extern int ariadne2_probe(struct net_device *);
-extern int hydra_probe(struct net_device *);
 extern int apne_probe(struct net_device *);
 extern int bionet_probe(struct net_device *);
 extern int pamsnet_probe(struct net_device *);
 extern int cs89x0_probe(struct net_device *dev);
 extern int ethertap_probe(struct net_device *dev);
-extern int ether1_probe (struct net_device *dev);
-extern int ether3_probe (struct net_device *dev);
-extern int etherh_probe (struct net_device *dev);
-extern int am79c961_probe(struct net_device *dev);
 extern int hplance_probe(struct net_device *dev);
 extern int bagetlance_probe(struct net_device *);
-extern int dec_lance_probe(struct net_device *);
 extern int mvme147lance_probe(struct net_device *dev);
 extern int tc515_probe(struct net_device *dev);
 extern int lance_probe(struct net_device *dev);
@@ -109,17 +100,16 @@ extern int mace68k_probe(struct net_device *dev);
 extern int macsonic_probe(struct net_device *dev);
 extern int mac8390_probe(struct net_device *dev);
 extern int mac89x0_probe(struct net_device *dev);
+extern int mc32_probe(struct net_device *dev);
   
-  /* Gigabit Ethernet adapters */
-  extern int yellowfin_probe(struct net_device *dev);
+/* Gigabit Ethernet adapters */
+extern int yellowfin_probe(struct net_device *dev);
 
 /* Detachable devices ("pocket adaptors") */
-extern int atp_init(struct net_device *);
 extern int de600_probe(struct net_device *);
 extern int de620_probe(struct net_device *);
 
 /* FDDI adapters */
-extern int dfx_probe(struct net_device *dev);
 extern int apfddi_init(struct net_device *dev);
 extern int skfp_probe(struct net_device *dev);
 
@@ -146,14 +136,28 @@ static int __init probe_list(struct net_device *dev, struct devprobe *plist)
 {
 	struct devprobe *p = plist;
 	unsigned long base_addr = dev->base_addr;
+#ifdef CONFIG_NET_DIVERT
+	int ret;
+#endif /* CONFIG_NET_DIVERT */
 
 	while (p->probe != NULL) {
-		if (base_addr && p->probe(dev) == 0)	/* probe given addr */
+		if (base_addr && p->probe(dev) == 0) {	/* probe given addr */
+#ifdef CONFIG_NET_DIVERT
+			ret = alloc_divert_blk(dev);
+			if (ret)
+				return ret;
+#endif /* CONFIG_NET_DIVERT */
 			return 0;
-		else if (p->status == 0) {		/* has autoprobe failed yet? */
+		} else if (p->status == 0) {		/* has autoprobe failed yet? */
 			p->status = p->probe(dev);	/* no, try autoprobe */
-			if (p->status == 0)
+			if (p->status == 0) {
+#ifdef CONFIG_NET_DIVERT
+				ret = alloc_divert_blk(dev);
+				if (ret)
+					return ret;
+#endif /* CONFIG_NET_DIVERT */
 				return 0;
+			}
 		}
 		p++;
 	}
@@ -198,6 +202,9 @@ struct devprobe mca_probes[] __initdata = {
 #endif
 #ifdef CONFIG_ELMC		/* 3c523 */
 	{elmc_probe, 0},
+#endif
+#ifdef CONFIG_ELMC_II		/* 3c527 */
+	{mc32_probe, 0},
 #endif
 #ifdef CONFIG_SKMC              /* SKnet Microchannel */
         {skmca_probe, 0},
@@ -319,9 +326,6 @@ struct devprobe parport_probes[] __initdata = {
 #ifdef CONFIG_DE620		/* D-Link DE-620 adapter */
 	{de620_probe, 0},
 #endif
-#ifdef CONFIG_ATP		/* AT-LAN-TEC (RealTek) pocket adaptor. */
-	{atp_init, 0},
-#endif
 	{NULL, 0},
 };
 
@@ -331,18 +335,6 @@ struct devprobe m68k_probes[] __initdata = {
 #endif
 #ifdef CONFIG_SUN3LANCE         /* sun3 onboard Lance chip */
 	{sun3lance_probe, 0},
-#endif
-#ifdef CONFIG_A2065		/* Commodore/Ameristar A2065 Ethernet Board */
-	{a2065_probe, 0},
-#endif
-#ifdef CONFIG_ARIADNE		/* Village Tronic Ariadne Ethernet Board */
-	{ariadne_probe, 0},
-#endif
-#ifdef CONFIG_ARIADNE2		/* Village Tronic Ariadne II Ethernet Board */
-	{ariadne2_probe, 0},
-#endif
-#ifdef CONFIG_HYDRA		/* Hydra Systems Amiganet Ethernet board */
-	{hydra_probe, 0},
 #endif
 #ifdef CONFIG_APNE		/* A1200 PCMCIA NE2000 */
 	{apne_probe, 0},
@@ -386,30 +378,8 @@ struct devprobe mips_probes[] __initdata = {
 #ifdef CONFIG_MIPS_JAZZ_SONIC
 	{sonic_probe, 0},
 #endif
-#ifdef CONFIG_SGI_IOC3_ETH
-	{ioc3_probe, 0},
-#endif
-#ifdef CONFIG_DECLANCE		/* DECstation on-board controller */
-	{dec_lance_probe, 0},   /* and maybe TURBOchannel option boards */
-#endif
 #ifdef CONFIG_BAGETLANCE        /* Lance-based Baget ethernet boards */
         {bagetlance_probe, 0},
-#endif
-	{NULL, 0},
-};
-
-struct devprobe arm_probes[] __initdata = {
-#ifdef CONFIG_ARM_ETHERH
-	{etherh_probe , 0},
-#endif
-#ifdef CONFIG_ARM_ETHER3
-	{ether3_probe , 0},
-#endif
-#ifdef CONFIG_ARM_ETHER1
-	{ether1_probe , 0},
-#endif
-#ifdef CONFIG_ARM_AM79C961A
-	{am79c961_probe, 0},
 #endif
 	{NULL, 0},
 };
@@ -434,8 +404,6 @@ static int __init ethif_probe(struct net_device *dev)
 	 * The arch specific probes are 1st so that any on-board ethernet
 	 * will be probed before other ISA/EISA/MCA/PCI bus cards.
 	 */
-	if (probe_list(dev, arm_probes) == 0)
-		return 0;
 	if (probe_list(dev, m68k_probes) == 0)
 		return 0;
 	if (probe_list(dev, mips_probes) == 0)
@@ -469,9 +437,6 @@ static int __init fddiif_probe(struct net_device *dev)
 	    return 1;		/* ENXIO */
 
     if (1
-#ifdef CONFIG_DEFXX
-	&& dfx_probe(dev)
-#endif
 #ifdef CONFIG_APFDDI
 	&& apfddi_init(dev)
 #endif
@@ -484,14 +449,6 @@ static int __init fddiif_probe(struct net_device *dev)
     return 0;
 }
 #endif
-
-
-/* Pad device name to IFNAMSIZ=16. F.e. __PAD6 is tring of 9 zeros. */
-#define __PAD6 "\0\0\0\0\0\0\0\0\0"
-#define __PAD5 __PAD6 "\0"
-#define __PAD4 __PAD5 "\0"
-#define __PAD3 __PAD4 "\0"
-#define __PAD2 __PAD3 "\0"
 
 
 #ifdef CONFIG_NET_FC
@@ -513,14 +470,14 @@ static int fcif_probe(struct net_device *dev)
 
 
 #ifdef CONFIG_ETHERTAP
-    static struct net_device tap0_dev = { "tap0" __PAD4, 0, 0, 0, 0, NETLINK_TAPBASE, 0, 0, 0, 0, NEXT_DEV, ethertap_probe, };
+    static struct net_device tap0_dev = { "tap0", 0, 0, 0, 0, NETLINK_TAPBASE, 0, 0, 0, 0, NEXT_DEV, ethertap_probe, };
 #   undef NEXT_DEV
 #   define NEXT_DEV	(&tap0_dev)
 #endif
 
 #ifdef CONFIG_SDLA
     extern int sdla_init(struct net_device *);
-    static struct net_device sdla0_dev = { "sdla0" __PAD5, 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV, sdla_init, };
+    static struct net_device sdla0_dev = { "sdla0", 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV, sdla_init, };
 
 #   undef NEXT_DEV
 #   define NEXT_DEV	(&sdla0_dev)
@@ -529,7 +486,7 @@ static int fcif_probe(struct net_device *dev)
 #if defined(CONFIG_LTPC)
     extern int ltpc_probe(struct net_device *);
     static struct net_device dev_ltpc = {
-        "lt0" __PAD3,
+        "lt0",
                 0, 0, 0, 0,
                 0x0, 0,
                 0, 0, 0, NEXT_DEV, ltpc_probe };
@@ -539,9 +496,9 @@ static int fcif_probe(struct net_device *dev)
 
 #if defined(CONFIG_COPS)
     extern int cops_probe(struct net_device *);
-    static struct net_device cops2_dev = { "lt2" __PAD3, 0, 0, 0, 0, 0x0, 0, 0, 0, 0, NEXT_DEV, cops_probe };
-    static struct net_device cops1_dev = { "lt1" __PAD3, 0, 0, 0, 0, 0x0, 0, 0, 0, 0, &cops2_dev, cops_probe };
-    static struct net_device cops0_dev = { "lt0" __PAD3, 0, 0, 0, 0, 0x0, 0, 0, 0, 0, &cops1_dev, cops_probe };
+    static struct net_device cops2_dev = { "lt2", 0, 0, 0, 0, 0x0, 0, 0, 0, 0, NEXT_DEV, cops_probe };
+    static struct net_device cops1_dev = { "lt1", 0, 0, 0, 0, 0x0, 0, 0, 0, 0, &cops2_dev, cops_probe };
+    static struct net_device cops0_dev = { "lt0", 0, 0, 0, 0, 0x0, 0, 0, 0, 0, &cops1_dev, cops_probe };
 #   undef NEXT_DEV
 #   define NEXT_DEV     (&cops0_dev)
 #endif  /* COPS */
@@ -562,22 +519,22 @@ static int fcif_probe(struct net_device *dev)
 #define ETH_NOPROBE_ADDR 0xffe0
 
 static struct net_device eth7_dev = {
-    "eth%d" __PAD5, 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, NEXT_DEV, ethif_probe };
+    "eth%d", 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, NEXT_DEV, ethif_probe };
 static struct net_device eth6_dev = {
-    "eth%d" __PAD5, 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, &eth7_dev, ethif_probe };
+    "eth%d", 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, &eth7_dev, ethif_probe };
 static struct net_device eth5_dev = {
-    "eth%d" __PAD5, 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, &eth6_dev, ethif_probe };
+    "eth%d", 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, &eth6_dev, ethif_probe };
 static struct net_device eth4_dev = {
-    "eth%d" __PAD5, 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, &eth5_dev, ethif_probe };
+    "eth%d", 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, &eth5_dev, ethif_probe };
 static struct net_device eth3_dev = {
-    "eth%d" __PAD5, 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, &eth4_dev, ethif_probe };
+    "eth%d", 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, &eth4_dev, ethif_probe };
 static struct net_device eth2_dev = {
-    "eth%d" __PAD5, 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, &eth3_dev, ethif_probe };
+    "eth%d", 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, &eth3_dev, ethif_probe };
 static struct net_device eth1_dev = {
-    "eth%d" __PAD5, 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, &eth2_dev, ethif_probe };
+    "eth%d", 0,0,0,0,ETH_NOPROBE_ADDR /* I/O base*/, 0,0,0,0, &eth2_dev, ethif_probe };
 
 static struct net_device eth0_dev = {
-    "eth%d" __PAD5, 0, 0, 0, 0, ETH0_ADDR, ETH0_IRQ, 0, 0, 0, &eth1_dev, ethif_probe };
+    "eth%d", 0, 0, 0, 0, ETH0_ADDR, ETH0_IRQ, 0, 0, 0, &eth1_dev, ethif_probe };
 
 #   undef NEXT_DEV
 #   define NEXT_DEV	(&eth0_dev)
@@ -609,21 +566,21 @@ trif_probe(struct net_device *dev)
     return 0;
 }
 static struct net_device tr7_dev = {
-    "tr%d" __PAD3,0,0,0,0,0,0,0,0,0, NEXT_DEV, trif_probe };
+    "tr%d",0,0,0,0,0,0,0,0,0, NEXT_DEV, trif_probe };
 static struct net_device tr6_dev = {
-    "tr%d" __PAD3,0,0,0,0,0,0,0,0,0, &tr7_dev, trif_probe };
+    "tr%d",0,0,0,0,0,0,0,0,0, &tr7_dev, trif_probe };
 static struct net_device tr5_dev = {
-    "tr%d" __PAD3,0,0,0,0,0,0,0,0,0, &tr6_dev, trif_probe };
+    "tr%d",0,0,0,0,0,0,0,0,0, &tr6_dev, trif_probe };
 static struct net_device tr4_dev = {
-    "tr%d" __PAD3,0,0,0,0,0,0,0,0,0, &tr5_dev, trif_probe };
+    "tr%d",0,0,0,0,0,0,0,0,0, &tr5_dev, trif_probe };
 static struct net_device tr3_dev = {
-    "tr%d" __PAD3,0,0,0,0,0,0,0,0,0, &tr4_dev, trif_probe };
+    "tr%d",0,0,0,0,0,0,0,0,0, &tr4_dev, trif_probe };
 static struct net_device tr2_dev = {
-    "tr%d" __PAD3,0,0,0,0,0,0,0,0,0, &tr3_dev, trif_probe };
+    "tr%d",0,0,0,0,0,0,0,0,0, &tr3_dev, trif_probe };
 static struct net_device tr1_dev = {
-    "tr%d" __PAD3,0,0,0,0,0,0,0,0,0, &tr2_dev, trif_probe };
+    "tr%d",0,0,0,0,0,0,0,0,0, &tr2_dev, trif_probe };
 static struct net_device tr0_dev = {
-    "tr%d" __PAD3,0,0,0,0,0,0,0,0,0, &tr1_dev, trif_probe };
+    "tr%d",0,0,0,0,0,0,0,0,0, &tr1_dev, trif_probe };
 #   undef       NEXT_DEV
 #   define      NEXT_DEV        (&tr0_dev)
 
@@ -631,21 +588,21 @@ static struct net_device tr0_dev = {
 
 #ifdef CONFIG_FDDI
 	static struct net_device fddi7_dev =
-		{"fddi7" __PAD5, 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV, fddiif_probe};
+		{"fddi7", 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV, fddiif_probe};
 	static struct net_device fddi6_dev =
-		{"fddi6" __PAD5, 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi7_dev, fddiif_probe};
+		{"fddi6", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi7_dev, fddiif_probe};
 	static struct net_device fddi5_dev =
-		{"fddi5" __PAD5, 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi6_dev, fddiif_probe};
+		{"fddi5", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi6_dev, fddiif_probe};
 	static struct net_device fddi4_dev =
-		{"fddi4" __PAD5, 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi5_dev, fddiif_probe};
+		{"fddi4", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi5_dev, fddiif_probe};
 	static struct net_device fddi3_dev =
-		{"fddi3" __PAD5, 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi4_dev, fddiif_probe};
+		{"fddi3", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi4_dev, fddiif_probe};
 	static struct net_device fddi2_dev =
-		{"fddi2" __PAD5, 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi3_dev, fddiif_probe};
+		{"fddi2", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi3_dev, fddiif_probe};
 	static struct net_device fddi1_dev =
-		{"fddi1" __PAD5, 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi2_dev, fddiif_probe};
+		{"fddi1", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi2_dev, fddiif_probe};
 	static struct net_device fddi0_dev =
-		{"fddi0" __PAD5, 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi1_dev, fddiif_probe};
+		{"fddi0", 0, 0, 0, 0, 0, 0, 0, 0, 0, &fddi1_dev, fddiif_probe};
 #undef	NEXT_DEV
 #define	NEXT_DEV	(&fddi0_dev)
 #endif 
@@ -683,8 +640,47 @@ static struct net_device tr0_dev = {
 #define	NEXT_DEV	(&sbni0_dev)
 #endif 
 	
-	
-	
+/* S/390 channels */
+#ifdef CONFIG_CTC
+    extern int ctc_probe(struct net_device *dev);
+    static struct net_device ctc7_dev =
+       {"ctc7", 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV,  ctc_probe};
+    static struct net_device ctc6_dev =
+       {"ctc6", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc7_dev, ctc_probe};
+    static struct net_device ctc5_dev =
+       {"ctc5", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc6_dev, ctc_probe};
+    static struct net_device ctc4_dev =
+       {"ctc4", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc5_dev, ctc_probe};
+    static struct net_device ctc3_dev =
+       {"ctc3", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc4_dev, ctc_probe};
+    static struct net_device ctc2_dev =
+       {"ctc2", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc3_dev, ctc_probe};
+    static struct net_device ctc1_dev =
+       {"ctc1", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc2_dev, ctc_probe};
+    static struct net_device ctc0_dev =
+       {"ctc0", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc1_dev, ctc_probe}; 
+
+    static struct net_device escon7_dev =
+       {"escon7", 0, 0, 0, 0, 0, 0, 0, 0, 0, &ctc0_dev,   ctc_probe};
+    static struct net_device escon6_dev =
+       {"escon6", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon7_dev, ctc_probe};
+    static struct net_device escon5_dev =
+       {"escon5", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon6_dev, ctc_probe};
+    static struct net_device escon4_dev =
+       {"escon4", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon5_dev, ctc_probe};
+    static struct net_device escon3_dev =
+       {"escon3", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon4_dev, ctc_probe};
+    static struct net_device escon2_dev =
+       {"escon2", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon3_dev, ctc_probe};
+    static struct net_device escon1_dev =
+       {"escon1", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon2_dev, ctc_probe};
+    static struct net_device escon0_dev =
+       {"escon0", 0, 0, 0, 0, 0, 0, 0, 0, 0, &escon1_dev, ctc_probe}; 
+
+#undef  NEXT_DEV
+#define NEXT_DEV        (&escon0_dev)                                  
+#endif  
+
 /*
  *	The loopback device is global so it can be directly referenced
  *	by the network code. Also, it must be first on device list.
@@ -694,6 +690,25 @@ extern int loopback_init(struct net_device *dev);
 struct net_device loopback_dev = 
 	{"lo", 0, 0, 0, 0, 0, 0, 0, 0, 0, NEXT_DEV, loopback_init};
 
+/*
+ * The @dev_base list is protected by @dev_base_lock and the rtln
+ * semaphore.
+ *
+ * Pure readers hold dev_base_lock for reading.
+ *
+ * Writers must hold the rtnl semaphore while they loop through the
+ * dev_base list, and hold dev_base_lock for writing when they do the
+ * actual updates.  This allows pure readers to access the list even
+ * while a writer is preparing to update it.
+ *
+ * To put it another way, dev_base_lock is held for writing only to
+ * protect against pure readers; the rtnl semaphore provides the
+ * protection against other writers.
+ *
+ * See, for example usages, register_netdevice() and
+ * unregister_netdevice(), which must be called with the rtnl
+ * semaphore held.
+ */
 struct net_device *dev_base = &loopback_dev;
 rwlock_t dev_base_lock = RW_LOCK_UNLOCKED;
 

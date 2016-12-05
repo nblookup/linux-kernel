@@ -11,7 +11,7 @@
 #define __ASM_ARCH_HARDWARE_H
 
 #include <asm/arch/memory.h>
-#include <asm/iomd.h>
+#include <asm/hardware/iomd.h>
 
 /*
  * What hardware must be present
@@ -44,10 +44,8 @@
 
 /* Let's define SCREEN_START for CL7500, even though it's a lie. */
 #define SCREEN_START		0x02000000	/* VRAM */
-#define SCREEN2_END		0xe0000000
-#define SCREEN2_BASE		0xd8000000
-#define SCREEN1_END		0xd8000000
-#define SCREEN1_BASE		0xd0000000
+#define SCREEN_END		0xdfc00000
+#define SCREEN_BASE		0xdf800000
 
 #define FLUSH_BASE		0xdf000000
 
@@ -69,6 +67,8 @@
 #define IOEB_BASE		((volatile unsigned char *)0xe0350050)
 #define PCIO_FLOPPYDMABASE	((volatile unsigned char *)0xe002a000)
 #define PCIO_BASE		0xe0010000
+/* in/out bias for the ISA slot region */
+#define ISASLOT_IO		0x80400000
 
 /*
  * RAM definitions
@@ -78,8 +78,6 @@
 						 p->u1.s.pages_in_bank[1] + \
 						 p->u1.s.pages_in_bank[2] + \
 						 p->u1.s.pages_in_bank[3]))
-
-#define PARAMS_BASE		0
 
 #define FLUSH_BASE_PHYS		0x00000000	/* ROM */
 

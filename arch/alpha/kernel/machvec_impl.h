@@ -9,12 +9,14 @@
 #include <linux/config.h>
 #include <asm/pgalloc.h>
 
-/* Whee.  IRONGATE, POLARIS and TSUNAMI don't have an HAE.  Fix things up for
-   the GENERIC kernel by defining the HAE address to be that of the cache.
-   Now we can read and write it as we like.  ;-)  */
+/* Whee.  IRONGATE, POLARIS, TSUNAMI, TITAN, and WILDFIRE don't have an HAE.
+   Fix things up for the GENERIC kernel by defining the HAE address
+   to be that of the cache. Now we can read and write it as we like.  ;-)  */
 #define IRONGATE_HAE_ADDRESS	(&alpha_mv.hae_cache)
 #define POLARIS_HAE_ADDRESS	(&alpha_mv.hae_cache)
 #define TSUNAMI_HAE_ADDRESS	(&alpha_mv.hae_cache)
+#define TITAN_HAE_ADDRESS	(&alpha_mv.hae_cache)
+#define WILDFIRE_HAE_ADDRESS	(&alpha_mv.hae_cache)
 
 #if CIA_ONE_HAE_WINDOW
 #define CIA_HAE_ADDRESS		(&alpha_mv.hae_cache)
@@ -28,6 +30,7 @@
    seems like such a pain.  Define this to get things to compile.  */
 #define JENSEN_IACK_SC		1
 #define T2_IACK_SC		1
+#define WILDFIRE_IACK_SC	1 /* FIXME */
 
 
 /*
@@ -77,15 +80,11 @@
 	mv_writew:		CAT(low,_writew),			\
 	mv_writel:		CAT(low,_writel),			\
 	mv_writeq:		CAT(low,_writeq),			\
-	mv_ioremap:		CAT(low,_ioremap),			\
-	mv_is_ioaddr:		CAT(low,_is_ioaddr)
+	mv_ioremap:		CAT(low,_ioremap)			\
 
 #define IO(UP,low)							\
 	IO_LITE(UP,low),						\
 	pci_ops:		&CAT(low,_pci_ops)
-
-/* Any assembler that can generate a GENERIC kernel can generate BWX
-   instructions.  So always use them for PYXIS I/O.  */
 
 #define DO_APECS_IO	IO(APECS,apecs)
 #define DO_CIA_IO	IO(CIA,cia)
@@ -93,11 +92,16 @@
 #define DO_LCA_IO	IO(LCA,lca)
 #define DO_MCPCIA_IO	IO(MCPCIA,mcpcia)
 #define DO_POLARIS_IO	IO(POLARIS,polaris)
-#define DO_PYXIS_IO	IO(PYXIS,pyxis)
 #define DO_T2_IO	IO(T2,t2)
 #define DO_TSUNAMI_IO	IO(TSUNAMI,tsunami)
+#define DO_TITAN_IO	IO(TITAN,titan)
+#define DO_WILDFIRE_IO	IO(WILDFIRE,wildfire)
+
+#define DO_PYXIS_IO	IO_LITE(CIA,cia_bwx), \
+			pci_ops: &CAT(cia,_pci_ops)
 
 #define BUS(which)					\
+	mv_is_ioaddr:	CAT(which,_is_ioaddr),		\
 	mv_pci_tbi:	CAT(which,_pci_tbi)
 
 #define DO_APECS_BUS	BUS(apecs)
@@ -105,10 +109,11 @@
 #define DO_IRONGATE_BUS	BUS(irongate)
 #define DO_LCA_BUS	BUS(lca)
 #define DO_MCPCIA_BUS	BUS(mcpcia)
-#define DO_PYXIS_BUS	BUS(pyxis)
 #define DO_POLARIS_BUS	BUS(polaris)
 #define DO_T2_BUS	BUS(t2)
 #define DO_TSUNAMI_BUS	BUS(tsunami)
+#define DO_TITAN_BUS	BUS(titan)
+#define DO_WILDFIRE_BUS	BUS(wildfire)
 
 
 /*
@@ -116,7 +121,7 @@
  * all but one of which we want to go away.  In a non-GENERIC kernel,
  * we want only one, ever.
  *
- * Accomplish this in the GENERIC kernel by puting all of the vectors
+ * Accomplish this in the GENERIC kernel by putting all of the vectors
  * in the .init.data section where they'll go away.  We'll copy the
  * one we want to the real alpha_mv vector in setup_arch.
  *

@@ -1,578 +1,885 @@
 /*
-**
 **	Pegasus: USB 10/100Mbps/HomePNA (1Mbps) Controller
 **
-**	Copyleft (L) 1999 Petko Manolov - Petkan (petkan@spct.net)
-** 	
-**	Distribute under GPL version 2 or later.
+**	Copyright (c) 1999,2000 Petko Manolov - Petkan (petkan@dce.bg)
+**	
+**
+**	ChangeLog:
+**		....	Most of the time spend reading sources & docs.
+**		v0.2.x	First official release for the Linux kernel.
+**		v0.3.0	Beutified and structured, some bugs fixed.
+**		v0.3.x	URBifying bulk requests and bugfixing. First relatively
+**			stable release. Still can touch device's registers only
+**			from top-halves.
+**		v0.4.0	Control messages remained unurbified are now URBs.
+**			Now we can touch the HW at any time.
+**		v0.4.9	Control urbs again use process context to wait. Argh...
+**			Some long standing bugs (enable_net_traffic) fixed.
+**			Also nasty trick about resubmiting control urb from
+**			interrupt context used. Please let me know how it
+**			behaves. Pegasus II support added since this version.
+**			TODO: suppressing HCD warnings spewage on disconnect.
+**		v0.4.13	Ethernet address is now set at probe(), not at open()
+**			time as this seems to break dhcpd. 
 */
 
+/*
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
+ */
 
-#include <linux/module.h>
+
 #include <linux/sched.h>
 #include <linux/malloc.h>
 #include <linux/init.h>
 #include <linux/delay.h>
-#include <linux/usb.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
-
-#if LINUX_VERSION_CODE<0x2032d || !defined(__KERNEL__) || !defined(__OPTIMIZE__)
-#error You can not compile this driver on this kernel with this C options!
-#endif
-
-
-#define	ADMTEK_VENDOR_ID	0x07a6
-#define	ADMTEK_HPNA_PEGASUS	0x0986
-
-#define	HPNA_MTU		1500
-#define MAX_MTU			1536
-
-#define	TX_TIMEOUT		(HZ*5)
-#define	SOMETHING		(jiffies + TX_TIMEOUT)
+#include <linux/usb.h>
+#include <linux/module.h>
+#include "pegasus.h"
 
 
-static const char version[] = "pegasus.c: v0.2.27 2000/02/29 Written by Petko Manolov (petkan@spct.net)\n";
+#define	PEGASUS_USE_INTR
+#define	PEGASUS_WRITE_EEPROM
+
+static const char *version = __FILE__ ": v0.4.17 2000/11/13 (C) 1999-2000 Petko Manolov (petkan@dce.bg)";
 
 
-typedef struct usb_hpna
-{
-	struct usb_device	*usb_dev;
-	struct net_device	*net_dev;
-	int			present;
-	int			active;
-	void			*irq_handler;
-	struct list_head	list;
-	struct net_device_stats	stats;
-	spinlock_t		hpna_lock;
-	struct timer_list	timer;
+static int loopback = 0;
+static int mii_mode = 0;
+static int multicast_filter_limit = 32;
 
-	unsigned int		rx_pipe;
-	unsigned char *		rx_buff;
-	urb_t 			rx_urb;
+static struct usb_eth_dev usb_dev_id[] = {
+#define	PEGASUS_DEV(pn, vid, pid, flags)	\
+	{name:pn, vendor:vid, device:pid, private:flags},
+#include "pegasus.h"
+#undef	PEGASUS_DEV
+	{NULL, 0, 0, 0}
+};
 
-	unsigned int		tx_pipe;
-	unsigned char *		tx_buff;
-	urb_t 			tx_urb;
-	struct sk_buff *	tx_skbuff;
-
-	__u8			intr_ival;
-	unsigned int		intr_pipe;
-	unsigned char 		intr_buff[8];
-	urb_t 			intr_urb;
-} usb_hpna_t;
+static struct usb_device_id pegasus_ids[] = {
+#define	PEGASUS_DEV(pn, vid, pid, flags) \
+	{match_flags: USB_DEVICE_ID_MATCH_DEVICE, idVendor:vid, idProduct:pid},
+#include "pegasus.h"
+#undef	PEGASUS_DEV
+	{ }
+};
 
 
-usb_hpna_t	usb_dev_hpna;
-static int	loopback = 0;
-int		multicast_filter_limit = 32;
-static LIST_HEAD(hpna_list);
-
-
-MODULE_AUTHOR("Petko Manolov <petkan@spct.net>");
-MODULE_DESCRIPTION("ADMtek \"Pegasus\" USB Ethernet driver");
+MODULE_AUTHOR("Petko Manolov <petkan@dce.bg>");
+MODULE_DESCRIPTION("ADMtek AN986 Pegasus USB Ethernet driver");
 MODULE_PARM(loopback, "i");
+MODULE_PARM(mii_mode, "i");
+MODULE_PARM_DESC(loopback, "Enable MAC loopback mode (bit 0)");
+MODULE_PARM_DESC(mii_mode, "Enable HomePNA mode (bit 0),default=MII mode = 0");
+
+MODULE_DEVICE_TABLE (usb, pegasus_ids);
 
 
-
-/*** vendor specific commands ***/
-static __inline__ int	hpna_get_registers( struct usb_device *dev, __u16 indx, __u16 size, void *data )
+static int update_eth_regs_async( pegasus_t * );
+/* Aargh!!! I _really_ hate such tweaks */
+static void ctrl_callback( urb_t *urb )
 {
-	return	usb_control_msg(dev, usb_rcvctrlpipe(dev,0), 0xf0, 0xc0, 0,
-				indx, data, size, HZ);
-}
+	pegasus_t	*pegasus = urb->context;
 
+	if ( !pegasus )
+		return;
 
-static __inline__ int	hpna_set_register( struct usb_device *dev, __u16 indx, __u8 value )
-{
-	__u8	data = value;
-	return	usb_control_msg(dev, usb_sndctrlpipe(dev,0), 0xf1, 0x40,
-				data, indx, &data, 1, HZ);
-}
-
-
-static __inline__ int	hpna_set_registers( struct usb_device *dev, __u16 indx, __u16 size, void *data )
-{
-	return	usb_control_msg(dev, usb_sndctrlpipe(dev,0), 0xf1, 0x40, 0,
-				indx, data, size, HZ);
-}
-
-
-static int read_phy_word( struct usb_device *dev, __u8 index, __u16 *regdata )
-{
-	int	i;
-	__u8	data[4];
-
-	data[0] = 1;
-	data[1] = 0;
-	data[2] = 0;
-	data[3] = 0x40 + index;
-	hpna_set_registers( dev, 0x25, 4, data );
-	for ( i=0; i<100; i++ ) {
-		hpna_get_registers( dev, 0x25, 4, data );
-		if ( data[3] & 0x80 ) {
-			*regdata = *(__u16 *)(data+1);
-			return	0;
-		}
-		udelay(100);
-	}
-	warn("read_phy_word() failed");
-	return	1;
-}
-
-
-static int write_phy_word( struct usb_device *dev, __u8 index, __u16 regdata )
-{
-	int	i;
-	__u8	data[4];
-
-	data[0] = 1;
-	data[1] = regdata;
-	data[2] = regdata >> 8;
-	data[3] = 0x20 + index;
-	hpna_set_registers( dev, 0x25, 4, data );
-	for ( i=0; i<100; i++ ) {
-		hpna_get_registers( dev, 0x28, 1, data );
-		if ( data[0] & 0x80 ) {
-			return	0;
-		}
-		udelay(100);
-	}
-	warn("write_phy_word() failed");
-	return	1;
-}
-
-
-int read_srom_word( struct usb_device *dev, __u8 index, __u16 *retdata)
-{
-	int	i;
-	__u8	data[4];
-
-	data[0] = index;
-	data[1] = data[2] = 0;
-	data[3] = 0x02;
-	hpna_set_registers(dev, 0x20, 4, data);
-	for ( i=0; i<100; i++ ) {
-		hpna_get_registers(dev, 0x23, 1, data);
-		if ( data[0] & 4 ) {
-			hpna_get_registers(dev, 0x21, 2, data);
-			*retdata = *(__u16 *)data;
-			return	0;		
-		}
-	}
-	warn("read_srom_word() failed");
-	return	1;
-}
-/*** end ***/
-
-
-
-
-int get_node_id( struct usb_device *dev, __u8 *id )
-{
-	int	i;
-
-	for ( i=0; i<3; i++ ) {
-		if ( read_srom_word(dev, i, (__u16 *)&id[i*2] ) )
-			return	1;
-	}
-	return	0;
-}
-
-
-static int reset_mac( struct usb_device *dev )
-{
-	__u8	data = 0x8;
-	int	i;
-	
-	hpna_set_register( dev, 1, 0x08 );
-	for ( i=0; i<100; i++ ) {
-		hpna_get_registers( dev, 1, 1, &data);
-		if ( !(data & 0x08) ) {
-			if ( loopback & 1 )
-				return	0;
-			else if ( loopback & 2 ) {
-				write_phy_word( dev, 0, 0x4000 );
-				/*return	0;*/
+	switch ( urb->status ) {
+		case USB_ST_NOERROR:
+			if ( pegasus->flags & ETH_REGS_CHANGE ) {
+				pegasus->flags &= ~ETH_REGS_CHANGE;
+				pegasus->flags |= ETH_REGS_CHANGED;
+				update_eth_regs_async( pegasus );
+				return;
 			}
-			hpna_set_register( dev, 0x7e, 0x24 );
-			hpna_set_register( dev, 0x7e, 0x27 );
-			return	0;
-		}
+			break;
+		case USB_ST_URB_PENDING:
+			return;
+		case USB_ST_URB_KILLED:
+			break;
+		default:
+			warn( __FUNCTION__ " status %d", urb->status);
 	}
+	pegasus->flags &= ~ETH_REGS_CHANGED;
+	if ( pegasus->flags & CTRL_URB_SLEEP ) {
+		pegasus->flags &= ~CTRL_URB_SLEEP;
+		wake_up_interruptible( &pegasus->ctrl_wait );
+	}
+}
+
+
+static int get_registers(pegasus_t *pegasus, __u16 indx, __u16 size, void *data)
+{
+	int	ret;
+
+	while ( pegasus->flags & ETH_REGS_CHANGED ) {
+		pegasus->flags |= CTRL_URB_SLEEP;
+		interruptible_sleep_on( &pegasus->ctrl_wait );
+	}
+	pegasus->dr.requesttype = PEGASUS_REQT_READ;
+	pegasus->dr.request = PEGASUS_REQ_GET_REGS;
+	pegasus->dr.value = 0;
+	pegasus->dr.index = cpu_to_le16p(&indx);
+	pegasus->dr.length = 
+	pegasus->ctrl_urb.transfer_buffer_length = cpu_to_le16p(&size);
+
+	FILL_CONTROL_URB( &pegasus->ctrl_urb, pegasus->usb,
+			  usb_rcvctrlpipe(pegasus->usb,0),
+			  (char *)&pegasus->dr,
+			  data, size, ctrl_callback, pegasus );
+
+	if ( (ret = usb_submit_urb( &pegasus->ctrl_urb )) ) {
+		err( __FUNCTION__ " BAD CTRLs %d", ret);
+		goto out;
+	}
+	pegasus->flags |= CTRL_URB_SLEEP;
+	interruptible_sleep_on( &pegasus->ctrl_wait );
+out:
+	return	ret;
+}
+
+
+static int set_registers(pegasus_t *pegasus, __u16 indx, __u16 size, void *data)
+{
+	int	ret;
+
+	while ( pegasus->flags & ETH_REGS_CHANGED ) {
+		pegasus->flags |= CTRL_URB_SLEEP ;
+		interruptible_sleep_on( &pegasus->ctrl_wait );
+	}
+	pegasus->dr.requesttype = PEGASUS_REQT_WRITE;
+	pegasus->dr.request = PEGASUS_REQ_SET_REGS;
+	pegasus->dr.value = 0;
+	pegasus->dr.index = cpu_to_le16p( &indx );
+	pegasus->dr.length = 
+	pegasus->ctrl_urb.transfer_buffer_length = cpu_to_le16p( &size );
+
+	FILL_CONTROL_URB( &pegasus->ctrl_urb, pegasus->usb,
+			  usb_sndctrlpipe(pegasus->usb,0),
+			  (char *)&pegasus->dr,
+			  data, size, ctrl_callback, pegasus );
+
+	if ( (ret = usb_submit_urb( &pegasus->ctrl_urb )) ) {
+		err( __FUNCTION__ " BAD CTRL %d", ret);
+		return	ret;
+	}
+	pegasus->flags |= CTRL_URB_SLEEP;
+	interruptible_sleep_on( &pegasus->ctrl_wait );
+
+	return	ret;
+}
+
+
+static int set_register( pegasus_t *pegasus, __u16 indx, __u8 data )
+{
+	int	ret;
+
+	while ( pegasus->flags & ETH_REGS_CHANGED ) {
+		pegasus->flags |= CTRL_URB_SLEEP;
+		interruptible_sleep_on( &pegasus->ctrl_wait );
+	}
+	pegasus->dr.requesttype = PEGASUS_REQT_WRITE;
+	pegasus->dr.request = PEGASUS_REQ_SET_REG;
+	pegasus->dr.value = data;
+	pegasus->dr.index = cpu_to_le16p( &indx );
+	pegasus->dr.length = pegasus->ctrl_urb.transfer_buffer_length = 1;
+
+	FILL_CONTROL_URB( &pegasus->ctrl_urb, pegasus->usb,
+			  usb_sndctrlpipe(pegasus->usb,0),
+			  (char *)&pegasus->dr,
+			  &data, 1, ctrl_callback, pegasus );
+
+	if ( (ret = usb_submit_urb( &pegasus->ctrl_urb )) ) {
+		err( __FUNCTION__ " BAD CTRL %d", ret);
+		return	ret;
+	}
+	pegasus->flags |= CTRL_URB_SLEEP;
+	interruptible_sleep_on( &pegasus->ctrl_wait );
+	
+	return	ret;
+}
+
+
+static int update_eth_regs_async( pegasus_t *pegasus )
+{
+	int	ret;
+
+	pegasus->dr.requesttype = PEGASUS_REQT_WRITE;
+	pegasus->dr.request = PEGASUS_REQ_SET_REGS;
+	pegasus->dr.value = 0;
+	pegasus->dr.index = EthCtrl0;
+	pegasus->dr.length = 
+	pegasus->ctrl_urb.transfer_buffer_length = 3;
+
+	FILL_CONTROL_URB( &pegasus->ctrl_urb, pegasus->usb,
+			  usb_sndctrlpipe(pegasus->usb,0),
+			  (char *)&pegasus->dr,
+			  pegasus->eth_regs, 3, ctrl_callback, pegasus );
+
+	if ( (ret = usb_submit_urb( &pegasus->ctrl_urb )) )
+		err( __FUNCTION__ " BAD CTRL %d, flags %x",ret,pegasus->flags );
+
+	return	ret;
+}
+
+
+static int read_mii_word( pegasus_t *pegasus, __u8 phy, __u8 indx, __u16 *regd )
+{
+	int	i;
+	__u8	data[4] = { phy, 0, 0, indx };
+
+	set_register( pegasus, PhyCtrl, 0 );
+	set_registers( pegasus, PhyAddr, sizeof(data), data );
+	set_register( pegasus, PhyCtrl, (indx | PHY_READ) );
+	for (i = 0; i < REG_TIMEOUT; i++) {
+		get_registers(pegasus, PhyCtrl, 1, data);
+		if ( data[0] & PHY_DONE ) 
+			break;
+	}
+	if ( i < REG_TIMEOUT ) {
+		get_registers( pegasus, PhyData, 2, regd );
+		return	0;
+	}
+	warn( __FUNCTION__ " failed" );
+	
 	return 1;
 }
 
 
-int start_net( struct net_device *dev, struct usb_device *usb_dev )
+static int write_mii_word( pegasus_t *pegasus, __u8 phy, __u8 indx, __u16 regd )
 {
-	__u16	partmedia, temp;
+	int	i;
+	__u8	data[4] = { phy, 0, 0, indx };
+	
+	*(data + 1) = cpu_to_le16p( &regd );
+	set_register( pegasus, PhyCtrl, 0 );
+	set_registers( pegasus, PhyAddr, 4, data );
+	set_register( pegasus, PhyCtrl, (indx | PHY_WRITE) );
+	for (i = 0; i < REG_TIMEOUT; i++) {
+		get_registers(pegasus, PhyCtrl, 1, data);
+		if ( data[0] & PHY_DONE ) 
+			break;
+	}
+	if ( i < REG_TIMEOUT )
+		return	0;
+	warn( __FUNCTION__ " failed" );
+
+	return 1;
+}
+
+
+static int read_eprom_word( pegasus_t *pegasus, __u8 index, __u16 *retdata )
+{
+	int	i, tmp;
+
+	set_register( pegasus, EpromCtrl, 0 );
+	set_register( pegasus, EpromOffset, index );
+	set_register( pegasus, EpromCtrl, EPROM_READ); 
+	for ( i=0; i < REG_TIMEOUT; i++ ) {
+		get_registers( pegasus, EpromCtrl, 1, &tmp );
+		if ( tmp & EPROM_DONE )
+			break;
+	}
+	if ( i < REG_TIMEOUT ) {
+		get_registers( pegasus, EpromData, 2, retdata );
+		return	0;
+	}
+	warn( __FUNCTION__ " failed" );
+
+	return -1;
+}
+
+#ifdef	PEGASUS_WRITE_EEPROM
+static inline void enable_eprom_write( pegasus_t *pegasus )
+{
+	__u8	tmp;
+
+	get_registers( pegasus, EthCtrl2, 1, &tmp );
+	set_register( pegasus, EthCtrl2, tmp | EPROM_WR_ENABLE );
+}
+
+
+static inline void disable_eprom_write( pegasus_t *pegasus )
+{
+	__u8 	tmp;
+
+	get_registers( pegasus, EthCtrl2, 1, &tmp );
+	set_register( pegasus, EpromCtrl, 0 );
+	set_register( pegasus, EthCtrl2, tmp & ~EPROM_WR_ENABLE );
+}
+
+
+static int write_eprom_word( pegasus_t *pegasus, __u8 index, __u16 data )
+{
+	int	i, tmp;
+	__u8	d[4] = {0x3f, 0, 0, EPROM_WRITE};
+
+	set_registers( pegasus, EpromOffset, 4, d );
+	enable_eprom_write( pegasus );
+	set_register( pegasus, EpromOffset, index );
+	set_registers( pegasus, EpromData, 2, &data );
+	set_register( pegasus, EpromCtrl, EPROM_WRITE );
+
+	for ( i=0; i < REG_TIMEOUT; i++ ) {
+		get_registers( pegasus, EpromCtrl, 1, &tmp );
+		if ( tmp & EPROM_DONE )
+			break;
+	}
+	disable_eprom_write( pegasus );
+	if ( i < REG_TIMEOUT )
+		return	0;
+	warn( __FUNCTION__ " failed" );
+	return	-1;
+}
+#endif	/* PEGASUS_WRITE_EEPROM */
+
+static inline void get_node_id( pegasus_t *pegasus, __u8 *id )
+{
+	int	i;
+
+	for (i = 0; i < 3; i++)
+		read_eprom_word( pegasus, i, (__u16 *)&id[i*2]);
+}
+
+
+static void set_ethernet_addr( pegasus_t *pegasus )
+{
 	__u8	node_id[6];
+
+	get_node_id(pegasus, node_id);
+	set_registers( pegasus, EthID, sizeof(node_id), node_id );
+	memcpy( pegasus->net->dev_addr, node_id, sizeof(node_id) );
+}
+
+
+static inline int reset_mac( pegasus_t *pegasus )
+{
+	__u8	data = 0x8;
+	int	i;
+
+	set_register(pegasus, EthCtrl1, data);
+	for (i = 0; i < REG_TIMEOUT; i++) {
+		get_registers(pegasus, EthCtrl1, 1, &data);
+		if (~data & 0x08) {
+			if (loopback & 1) 
+				break;
+			if ( mii_mode && (pegasus->features & HAS_HOME_PNA) )
+				set_register( pegasus, Gpio1, 0x34 );
+			else
+				set_register( pegasus, Gpio1, 0x26 );
+			set_register( pegasus, Gpio0, pegasus->features );
+			set_register( pegasus, Gpio0, DEFAULT_GPIO_SET );
+			break;
+		}
+	}
+	if ( i == REG_TIMEOUT )
+		return 1;
+
+	if ( usb_dev_id[pegasus->dev_index].vendor == VENDOR_LINKSYS ||
+	     usb_dev_id[pegasus->dev_index].vendor == VENDOR_DLINK1 ) {
+		__u16	auxmode;
+
+		read_mii_word( pegasus, 0, 0x1b, &auxmode );
+		write_mii_word( pegasus, 0, 0x1b, auxmode | 4 );
+	}
+
+	return	0;
+}
+
+
+static int enable_net_traffic( struct net_device *dev, struct usb_device *usb )
+{
+	__u16	linkpart, bmsr;
 	__u8	data[4];
-	
-	if ( get_node_id(usb_dev, node_id) )
-		return	1;
-	hpna_set_registers(usb_dev, 0x10, 6, node_id);
-	memcpy(dev->dev_addr, node_id, 6);
-	if ( read_phy_word(usb_dev, 1, &temp) )
-		return	2;
-	if ( !(temp & 4) ) {
-		if ( loopback )
-			goto ok;
-		err("link NOT established - %x", temp);
-		return	3;
-	}
-ok:
-	if ( read_phy_word(usb_dev, 5, &partmedia) )
-		return	4;
-	temp = partmedia;
-	partmedia &= 0x1f;
-	if ( partmedia != 1 ) {
-		err("party FAIL %x", temp);
-		return	5;
-	}
-	partmedia = temp;
-	if ( partmedia & 0x100 )
-		data[1] = 0x30;
-	else {
-		if ( partmedia & 0x80 )
-			data[1] = 0x10;
-		else 
-			data[1] = 0;
-	}
-	
+	pegasus_t *pegasus = dev->priv;
+
+
+	if ( read_mii_word(pegasus, pegasus->phy, MII_BMSR, &bmsr) ) 
+		return 1;
+	if ( !(bmsr & 0x20) && !loopback ) 
+		warn( "%s: link NOT established (0x%x) - check the cable.",
+			dev->name, bmsr );
+	if ( read_mii_word(pegasus, pegasus->phy, MII_ANLPA, &linkpart) )
+		return 2;
+	if ( !(linkpart & 1) )
+		warn( "link partner stat %x", linkpart );
+
 	data[0] = 0xc9;
-	data[2] = (loopback & 1) ? 0x08 : 0x00; 
-	
-	hpna_set_registers(usb_dev, 0, 3, data);
-	
-	return	0;
-}
+	data[1] = 0;
+	if ( linkpart & (ANLPA_100TX_FD | ANLPA_10T_FD) )
+		data[1] |= 0x20; /* set full duplex */
+	if ( linkpart & (ANLPA_100TX_FD | ANLPA_100TX_HD) )
+		data[1] |= 0x10; /* set 100 Mbps */
+	if ( mii_mode )
+		data[1] = 0;
+	data[2] = (loopback & 1) ? 0x09 : 0x01;
 
+	memcpy( pegasus->eth_regs, data, sizeof(data) );
 
-static void hpna_read_irq( purb_t urb )
-{
-	struct net_device *net_dev = urb->context;
-	usb_hpna_t *hpna = net_dev->priv;
-	int	count = urb->actual_length, res;
-	int	rx_status = *(int *)(hpna->rx_buff + count - 4);
-
-
-	if ( urb->status ) {
-		info( "%s: RX status %d\n", net_dev->name, urb->status );
-		goto goon;
-	}
-
-	if ( !count )
-		goto goon;
-/*	if ( rx_status & 0x00010000 )
-		goto goon;
-*/	
-	if ( rx_status & 0x000e0000 ) {
-		dbg("%s: error receiving packet %x",
-			net_dev->name, rx_status & 0xe0000);
-		hpna->stats.rx_errors++;
-		if(rx_status & 0x060000) hpna->stats.rx_length_errors++;
-		if(rx_status & 0x080000) hpna->stats.rx_crc_errors++;
-		if(rx_status & 0x100000) hpna->stats.rx_frame_errors++;
-	} else {
-		struct sk_buff	*skb;
-		__u16 		pkt_len = (rx_status & 0xfff) - 8;
-
-
-		if((skb = dev_alloc_skb(pkt_len+2)) != NULL ) {
-			skb->dev = net_dev;
-			skb_reserve(skb, 2);
-			eth_copy_and_sum(skb, hpna->rx_buff, pkt_len, 0);
-			skb_put(skb, pkt_len);
-		} else
-			goto	goon;
-		skb->protocol = eth_type_trans(skb, net_dev);
-		netif_rx(skb);
-		hpna->stats.rx_packets++;
-		hpna->stats.rx_bytes += pkt_len;
-	}
-goon:
-	if ( (res = usb_submit_urb( &hpna->rx_urb )) )
-		warn("failed rx_urb %d", res);
-}
-
-
-static void hpna_irq( urb_t *urb)
-{
-	if( urb->status ) {
-		__u8	*d = urb->transfer_buffer;
-		printk("txst0 %x, txst1 %x, rxst %x, rxlst0 %x, rxlst1 %x, wakest %x",
-			d[0], d[1], d[2], d[3], d[4], d[5] );
-	}
-}
-
-
-static void hpna_write_irq( purb_t urb )
-{
-	struct net_device *net_dev = urb->context;
-	usb_hpna_t *hpna = net_dev->priv;
-
-
-	spin_lock( &hpna->hpna_lock );
-	
-	if ( urb->status ) 
-		info("%s: TX status %d\n", net_dev->name, urb->status);
-	netif_wake_queue( net_dev );
-
-	spin_unlock( &hpna->hpna_lock );
-}
-
-
-static void tx_timeout( struct net_device *dev )
-{
-	usb_hpna_t	*hpna = dev->priv;
-
-	warn( "%s: Tx timed out. Reseting...", dev->name );
-	hpna->stats.tx_errors++;
-	dev->trans_start = jiffies;
-	netif_wake_queue( dev );
-}
-
-
-static int hpna_start_xmit( struct sk_buff *skb, struct net_device *net_dev )
-{
-	usb_hpna_t	*hpna = (usb_hpna_t *)net_dev->priv;
-	int		count = skb->len+2 % 64 ? skb->len+2 : skb->len+3;
-	int		res;
-
-	spin_lock( &hpna->hpna_lock );
-
-	netif_stop_queue( net_dev );
-	((__u16 *)hpna->tx_buff)[0] = skb->len;
-	memcpy(hpna->tx_buff+2, skb->data, skb->len);
-	(&hpna->tx_urb)->transfer_buffer_length = count;
-	if ( (res = usb_submit_urb( &hpna->tx_urb )) ) {
-		warn("failed tx_urb %d", res);
-		hpna->stats.tx_errors++;
-		netif_start_queue( net_dev );
-	} else {
-		hpna->stats.tx_packets++;
-		hpna->stats.tx_bytes += skb->len;
-		net_dev->trans_start = jiffies;
-	}
-	dev_kfree_skb( skb );
-	spin_unlock( &hpna->hpna_lock );
-	return	0;
-}
-
-
-static struct net_device_stats *hpna_netdev_stats( struct net_device *dev )
-{
-	return	&((usb_hpna_t *)dev->priv)->stats;
-}
-
-static int hpna_open( struct net_device *net_dev )
-{
-	usb_hpna_t *hpna = (usb_hpna_t *)net_dev->priv;
-	int	res;
-
-	if ( hpna->active )
-		return	-EBUSY;
-	else
-		hpna->active = 1;
-
-	if ( start_net(net_dev, hpna->usb_dev) ) {
-		err("can't start_net()");
-		return	-EIO;
-	}
-
-	if ( (res = usb_submit_urb( &hpna->rx_urb )) )
-		warn("failed rx_urb %d", res);
-
-/*	usb_submit_urb( &hpna->intr_urb );*/
-	netif_start_queue( net_dev );
-
-	MOD_INC_USE_COUNT;
+	set_registers( pegasus, EthCtrl0, 3, data );
 
 	return 0;
 }
 
 
-static int hpna_close( struct net_device *net_dev )
+static void read_bulk_callback( struct urb *urb )
 {
-	usb_hpna_t	*hpna = net_dev->priv;
+	pegasus_t *pegasus = urb->context;
+	struct net_device *net;
+	int count = urb->actual_length, res;
+	int rx_status;
+	struct sk_buff	*skb;
+	__u16 pkt_len;
+
+	if ( !pegasus || !(pegasus->flags & PEGASUS_RUNNING) )
+		return;
+
+	net = pegasus->net;
+	if ( !netif_device_present(net) )
+		return;
+
+	if ( pegasus->flags & PEGASUS_RX_BUSY ) {
+		pegasus->stats.rx_errors++;
+		dbg("pegasus Rx busy");
+		return;
+	}
+	pegasus->flags |= PEGASUS_RX_BUSY;
+
+	switch ( urb->status ) {
+		case USB_ST_NOERROR:
+			break;
+		case USB_ST_NORESPONSE:
+			dbg( "reset MAC" );
+			pegasus->flags &= ~PEGASUS_RX_BUSY;
+			break;
+		default:
+			dbg( "%s: RX status %d", net->name, urb->status );
+			goto goon;
+	}
+
+	if ( !count )
+		goto goon;
+
+	rx_status = *(int *)(pegasus->rx_buff + count - 4);
+	if ( rx_status & 0x000e0000 ) {
+		dbg("%s: RX packet error %x", net->name, rx_status & 0xe0000);
+		pegasus->stats.rx_errors++;
+		if ( rx_status & 0x060000 )
+			pegasus->stats.rx_length_errors++;
+		if ( rx_status & 0x080000 )
+			pegasus->stats.rx_crc_errors++;
+		if ( rx_status & 0x100000 )
+			pegasus->stats.rx_frame_errors++;
+		goto goon;
+	}
+
+	pkt_len = (rx_status & 0xfff) - 8;
+
+	if ( !(skb = dev_alloc_skb(pkt_len+2)) )
+		goto goon;
+
+	skb->dev = net;
+	skb_reserve(skb, 2);
+	eth_copy_and_sum(skb, pegasus->rx_buff, pkt_len, 0);
+	skb_put(skb, pkt_len);
+
+	skb->protocol = eth_type_trans(skb, net);
+	netif_rx(skb);
+	pegasus->stats.rx_packets++;
+	pegasus->stats.rx_bytes += pkt_len;
+
+goon:
+	FILL_BULK_URB( &pegasus->rx_urb, pegasus->usb,
+			usb_rcvbulkpipe(pegasus->usb, 1),
+			pegasus->rx_buff, PEGASUS_MAX_MTU, 
+			read_bulk_callback, pegasus );
+	if ( (res = usb_submit_urb(&pegasus->rx_urb)) )
+		warn( __FUNCTION__ " failed submint rx_urb %d", res);
+	pegasus->flags &= ~PEGASUS_RX_BUSY;
+}
 
 
-	netif_stop_queue( net_dev );
+static void write_bulk_callback( struct urb *urb )
+{
+	pegasus_t *pegasus = urb->context;
 
-	usb_unlink_urb( &hpna->rx_urb );
-	usb_unlink_urb( &hpna->tx_urb );
-/*	usb_unlink_urb( hpna->intr_urb );*/
+	if ( !pegasus || !(pegasus->flags & PEGASUS_RUNNING) )
+		return;
 
-	hpna->active = 0;
+	if ( !netif_device_present(pegasus->net) )
+		return;
+		
+	if ( urb->status )
+		info("%s: TX status %d", pegasus->net->name, urb->status);
 
+	pegasus->net->trans_start = jiffies;
+	netif_wake_queue( pegasus->net );
+}
+
+#ifdef	PEGASUS_USE_INTR
+static void intr_callback( struct urb *urb )
+{
+	pegasus_t *pegasus = urb->context;
+	struct net_device *net;
+	__u8	*d;
+
+	if ( !pegasus )
+		return;
+		
+	switch ( urb->status ) {
+		case USB_ST_NOERROR:
+			break;
+		case USB_ST_URB_KILLED:
+			return;
+		default:
+			info("intr status %d", urb->status);
+	}
+
+	d = urb->transfer_buffer;
+	net = pegasus->net;
+	if ( d[0] & 0xfc ) {
+		pegasus->stats.tx_errors++;
+		if ( d[0] & TX_UNDERRUN )
+			pegasus->stats.tx_fifo_errors++;
+		if ( d[0] & (EXCESSIVE_COL | JABBER_TIMEOUT) )
+			pegasus->stats.tx_aborted_errors++;
+		if ( d[0] & LATE_COL )
+			pegasus->stats.tx_window_errors++;
+		if ( d[0] & (NO_CARRIER | LOSS_CARRIER) )
+			pegasus->stats.tx_carrier_errors++;
+	}
+}
+#endif
+
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,3,48)
+static void pegasus_tx_timeout( struct net_device *net )
+{
+	pegasus_t *pegasus = net->priv;
+
+	if ( !pegasus )
+		return;
+		
+	warn("%s: Tx timed out.", net->name);
+	pegasus->tx_urb.transfer_flags |= USB_ASYNC_UNLINK;
+	usb_unlink_urb( &pegasus->tx_urb );
+	pegasus->stats.tx_errors++;
+}
+#endif
+
+
+static int pegasus_start_xmit( struct sk_buff *skb, struct net_device *net )
+{
+	pegasus_t	*pegasus = net->priv;
+	int 	count = ((skb->len+2) & 0x3f) ? skb->len+2 : skb->len+3;
+	int 	res;
+
+	netif_stop_queue( net );
+		
+	((__u16 *)pegasus->tx_buff)[0] = skb->len;
+	memcpy(pegasus->tx_buff+2, skb->data, skb->len);
+	FILL_BULK_URB( &pegasus->tx_urb, pegasus->usb,
+			usb_sndbulkpipe(pegasus->usb, 2),
+			pegasus->tx_buff, PEGASUS_MAX_MTU, 
+			write_bulk_callback, pegasus );
+	pegasus->tx_urb.transfer_buffer_length = count;
+	if ((res = usb_submit_urb(&pegasus->tx_urb))) {
+		warn("failed tx_urb %d", res);
+		pegasus->stats.tx_errors++;
+		netif_start_queue( net );
+	} else {
+		pegasus->stats.tx_packets++;
+		pegasus->stats.tx_bytes += skb->len;
+		net->trans_start = jiffies;
+	}
+
+	dev_kfree_skb(skb);
+
+	return 0;
+}
+
+
+static struct net_device_stats *pegasus_netdev_stats( struct net_device *dev )
+{
+	return &((pegasus_t *)dev->priv)->stats;
+}
+
+
+static inline void disable_net_traffic( pegasus_t *pegasus )
+{
+	int 	tmp=0;
+
+	set_registers( pegasus, EthCtrl0, 2, &tmp );
+}
+
+
+static inline void get_interrupt_interval( pegasus_t *pegasus )
+{
+	__u8	data[2];
+
+	read_eprom_word( pegasus, 4, (__u16 *)data );
+	if ( data[1] < 0x80 ) {
+		info( "intr interval will be changed from %ums to %ums",
+		     data[1], 0x80 );
+		data[1] = 0x80;
+#ifdef	PEGASUS_WRITE_EEPROM
+		write_eprom_word( pegasus, 4, *(__u16 *)data );
+#endif
+	}
+	pegasus->intr_interval = data[1];
+}
+
+
+static int pegasus_open(struct net_device *net)
+{
+	pegasus_t *pegasus = (pegasus_t *)net->priv;
+	int	res;
+
+	MOD_INC_USE_COUNT;
+	if ( (res = enable_net_traffic(net, pegasus->usb)) ) {
+		err("can't enable_net_traffic() - %d", res);
+		MOD_DEC_USE_COUNT;
+		return -EIO;
+	}
+	FILL_BULK_URB( &pegasus->rx_urb, pegasus->usb,
+			usb_rcvbulkpipe(pegasus->usb, 1),
+			pegasus->rx_buff, PEGASUS_MAX_MTU, 
+			read_bulk_callback, pegasus );
+	if ( (res = usb_submit_urb(&pegasus->rx_urb)) )
+		warn( __FUNCTION__ " failed rx_urb %d", res );
+#ifdef	PEGASUS_USE_INTR
+	FILL_INT_URB( &pegasus->intr_urb, pegasus->usb,
+			usb_rcvintpipe(pegasus->usb, 3),
+			pegasus->intr_buff, sizeof(pegasus->intr_buff),
+			intr_callback, pegasus, pegasus->intr_interval );
+	if ( (res = usb_submit_urb(&pegasus->intr_urb)) )
+		warn( __FUNCTION__ " failed intr_urb %d", res);
+#endif
+	netif_start_queue( net );
+	pegasus->flags |= PEGASUS_RUNNING;
+
+	return 0;
+}
+
+
+static int pegasus_close( struct net_device *net )
+{
+	pegasus_t	*pegasus = net->priv;
+
+	pegasus->flags &= ~PEGASUS_RUNNING;
+	netif_stop_queue( net );
+	if ( !(pegasus->flags & PEGASUS_UNPLUG) )
+		disable_net_traffic( pegasus );
+
+	usb_unlink_urb( &pegasus->rx_urb );
+	usb_unlink_urb( &pegasus->tx_urb );
+	usb_unlink_urb( &pegasus->ctrl_urb );
+#ifdef	PEGASUS_USE_INTR
+	usb_unlink_urb( &pegasus->intr_urb );
+#endif
 	MOD_DEC_USE_COUNT;
 
 	return 0;
 }
 
 
-static int hpna_ioctl( struct net_device *dev, struct ifreq *rq, int cmd )
+static int pegasus_ioctl( struct net_device *net, struct ifreq *rq, int cmd )
 {
-	__u16	*data = (__u16 *)&rq->ifr_data;
-	usb_hpna_t	*hpna = dev->priv;
+	__u16 *data = (__u16 *)&rq->ifr_data;
+	pegasus_t	*pegasus = net->priv;
 
-	switch( cmd ) {
-		case SIOCDEVPRIVATE: 
-			data[0] = 1;
+	switch(cmd) {
+		case SIOCDEVPRIVATE:
+			data[0] = pegasus->phy;
 		case SIOCDEVPRIVATE+1:
-			read_phy_word(hpna->usb_dev, data[1] & 0x1f, &data[3]);
-			return	0;
+			read_mii_word(pegasus, data[0], data[1]&0x1f, &data[3]);
+			return 0;
 		case SIOCDEVPRIVATE+2:
 			if ( !capable(CAP_NET_ADMIN) )
-				return	-EPERM;
-			write_phy_word(hpna->usb_dev, data[1] & 0x1f, data[2]);
-			return	0;
+				return -EPERM;
+			write_mii_word(pegasus, pegasus->phy, data[1] & 0x1f, data[2]);
+			return 0;
 		default:
-			return	-EOPNOTSUPP;
+			return -EOPNOTSUPP;
 	}
 }
 
 
-static void set_rx_mode( struct net_device *net_dev )
+static void pegasus_set_multicast( struct net_device *net )
 {
-	usb_hpna_t	*hpna=net_dev->priv;
+	pegasus_t *pegasus = net->priv;
 
-	netif_stop_queue( net_dev );
-	
-	if ( net_dev->flags & IFF_PROMISC ) {
-		info("%s: Promiscuous mode enabled", net_dev->name);
-		hpna_set_register( hpna->usb_dev, 2, 0x04 );
-	} else if ((net_dev->mc_count > multicast_filter_limit) ||
-			(net_dev->flags & IFF_ALLMULTI)) {
-		hpna_set_register(hpna->usb_dev, 0, 0xfa);
-		hpna_set_register(hpna->usb_dev, 2, 0);
+	netif_stop_queue(net);
+
+	if (net->flags & IFF_PROMISC) {
+		pegasus->eth_regs[EthCtrl2] |= RX_PROMISCUOUS;
+		info("%s: Promiscuous mode enabled", net->name);
+	} else if ((net->mc_count > multicast_filter_limit) ||
+			(net->flags & IFF_ALLMULTI)) {
+		pegasus->eth_regs[EthCtrl0] |= RX_MULTICAST;
+		pegasus->eth_regs[EthCtrl2] &= ~RX_PROMISCUOUS;
+		info("%s set allmulti", net->name);
 	} else {
-		dbg("%s: set Rx mode", net_dev->name);
+		pegasus->eth_regs[EthCtrl0] &= ~RX_MULTICAST;
+		pegasus->eth_regs[EthCtrl2] &= ~RX_PROMISCUOUS;
+		info("%s: set Rx mode", net->name);
 	}
 
-	netif_wake_queue( net_dev );
+	pegasus->flags |= ETH_REGS_CHANGE;
+	ctrl_callback( &pegasus->ctrl_urb );
+
+	netif_wake_queue(net);
 }
 
 
-static void * usb_hpna_probe( struct usb_device *dev, unsigned int ifnum )
+static __u8 mii_phy_probe( pegasus_t *pegasus )
 {
-	struct net_device 		*net_dev;
-	usb_hpna_t			*hpna = &usb_dev_hpna;
+	int	i;
+	__u16	tmp;
 
-
-
-	if ( dev->descriptor.idVendor != ADMTEK_VENDOR_ID ||
-	     dev->descriptor.idProduct != ADMTEK_HPNA_PEGASUS ) {
-		return	NULL;
+	for ( i=0; i < 32; i++ ) {
+		read_mii_word( pegasus, i, MII_BMSR, &tmp );
+		if ( tmp == 0 || tmp == 0xffff || (tmp & BMSR_MEDIA) == 0 )
+			continue;
+		else
+			return	i;
 	}
 
-	printk("USB HPNA Pegasus found\n");
+	return	0xff;
+}
 
-	if ( usb_set_configuration(dev, dev->config[0].bConfigurationValue)) {
+
+static inline void setup_pegasus_II( pegasus_t *pegasus )
+{
+	set_register( pegasus, Reg1d, 0 );
+	set_register( pegasus, Reg7b, 2 );
+	if ( pegasus->features & HAS_HOME_PNA  && mii_mode )
+		set_register( pegasus, Reg81, 6 );
+	else
+		set_register( pegasus, Reg81, 2 );
+}
+
+
+static void * pegasus_probe( struct usb_device *dev, unsigned int ifnum,
+			     const struct usb_device_id *id)
+{
+	struct net_device	*net;
+	pegasus_t		*pegasus;
+	int			dev_index = id - pegasus_ids;
+
+	if (usb_set_configuration(dev, dev->config[0].bConfigurationValue)) {
 		err("usb_set_configuration() failed");
 		return NULL;
 	}
 
-	hpna->usb_dev = dev;
+	if(!(pegasus = kmalloc(sizeof(struct pegasus), GFP_KERNEL))) {
+		err("out of memory allocating device structure");
+		return NULL;
+	}
 
-	hpna->rx_pipe = usb_rcvbulkpipe(hpna->usb_dev, 1);
-	hpna->tx_pipe = usb_sndbulkpipe(hpna->usb_dev, 2);
-	hpna->intr_pipe = usb_rcvintpipe(hpna->usb_dev, 0);
+	usb_inc_dev_use( dev );
+	memset(pegasus, 0, sizeof(struct pegasus));
+	pegasus->dev_index = dev_index;
+	init_waitqueue_head( &pegasus->ctrl_wait );
 
-	if ( reset_mac(dev) ) {
+	net = init_etherdev( NULL, 0 );
+	if ( !net ) {
+		kfree( pegasus );
+		return	NULL;
+	}
+	
+	pegasus->usb = dev;
+	pegasus->net = net;
+	net->priv = pegasus;
+	net->open = pegasus_open;
+	net->stop = pegasus_close;
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,3,48)
+	net->watchdog_timeo = PEGASUS_TX_TIMEOUT;
+	net->tx_timeout = pegasus_tx_timeout;
+#endif
+	net->do_ioctl = pegasus_ioctl;
+	net->hard_start_xmit = pegasus_start_xmit;
+	net->set_multicast_list = pegasus_set_multicast;
+	net->get_stats = pegasus_netdev_stats;
+	net->mtu = PEGASUS_MTU;
+
+	pegasus->features = usb_dev_id[dev_index].private;
+#ifdef	PEGASUS_USE_INTR
+	get_interrupt_interval( pegasus );
+#endif
+	if ( reset_mac(pegasus) ) {
 		err("can't reset MAC");
+		unregister_netdev( pegasus->net );
+		kfree(pegasus);
+		pegasus = NULL;
+		return NULL;
 	}
 
-	hpna->present = 1;
+	info( "%s: %s", net->name, usb_dev_id[dev_index].name );
 
-	if(!(hpna->rx_buff=kmalloc(MAX_MTU, GFP_KERNEL))) {
-		err("not enough mem for out buff");
-		return	NULL;
+	set_ethernet_addr( pegasus );
+
+	if ( pegasus->features & PEGASUS_II ) {
+		info( "setup Pegasus II specific registers" );
+		setup_pegasus_II( pegasus );
 	}
-	if(!(hpna->tx_buff=kmalloc(MAX_MTU, GFP_KERNEL))) {
-		kfree_s(hpna->rx_buff, MAX_MTU);
-		err("not enough mem for out buff");
-		return	NULL;
+	
+	pegasus->phy = mii_phy_probe( pegasus );
+	if ( pegasus->phy == 0xff ) {
+		warn( "can't locate MII phy, using default" );
+		pegasus->phy = 1;
 	}
 
-	net_dev = init_etherdev( 0, 0 );
-	hpna->net_dev = net_dev;
-	net_dev->priv = hpna;
-	net_dev->open = hpna_open;
-	net_dev->stop = hpna_close;
-	net_dev->watchdog_timeo = TX_TIMEOUT;
-	net_dev->tx_timeout = tx_timeout;
-	net_dev->do_ioctl = hpna_ioctl; 
-	net_dev->hard_start_xmit = hpna_start_xmit;
-	net_dev->set_multicast_list = set_rx_mode;
-	net_dev->get_stats = hpna_netdev_stats; 
-	net_dev->mtu = HPNA_MTU;
-	hpna->hpna_lock = SPIN_LOCK_UNLOCKED;
-	
-	FILL_BULK_URB( &hpna->rx_urb, hpna->usb_dev, hpna->rx_pipe, 
-			hpna->rx_buff, MAX_MTU, hpna_read_irq, net_dev );
-	FILL_BULK_URB( &hpna->tx_urb, hpna->usb_dev, hpna->tx_pipe, 
-			hpna->tx_buff, MAX_MTU, hpna_write_irq, net_dev );
-	FILL_INT_URB( &hpna->intr_urb, hpna->usb_dev, hpna->intr_pipe,
-			hpna->intr_buff, 8, hpna_irq, net_dev, 250 );
-	
-/*	list_add( &hpna->list, &hpna_list );*/
-	
-	return	net_dev; 
+	return pegasus;
 }
 
 
-static void usb_hpna_disconnect( struct usb_device *dev, void *ptr )
+static void pegasus_disconnect( struct usb_device *dev, void *ptr )
 {
-	struct net_device	*net_dev = ptr;
-	struct usb_hpna		*hpna = net_dev->priv;
+	struct pegasus *pegasus = ptr;
 
-
-	if ( net_dev->flags & IFF_UP )
-		dev_close(net_dev);
-	
-	unregister_netdev( net_dev );
-
-	if ( !hpna ) /* should never happen */
+	if ( !pegasus ) {
+		warn("unregistering non-existant device");
 		return;
-		
-	usb_unlink_urb( &hpna->rx_urb );
-	usb_unlink_urb( &hpna->tx_urb );
-/*	usb_unlink_urb( &hpna->intr_urb );*/
-	kfree_s(hpna->rx_buff, MAX_MTU);
-	kfree_s(hpna->tx_buff, MAX_MTU);
+	}
 
-	hpna->usb_dev = NULL;
-	hpna->present = 0;
-
-	printk("USB HPNA disconnected\n");
+	pegasus->flags |= PEGASUS_UNPLUG;
+	unregister_netdev( pegasus->net );
+	usb_dec_dev_use( dev );
+	kfree( pegasus );
+	pegasus = NULL;
 }
 
 
-static struct usb_driver usb_hpna_driver = {
-	"ADMtek \"Pegasus\" USB Ethernet",
-	usb_hpna_probe,
-	usb_hpna_disconnect,
-	{NULL, NULL}
+static struct usb_driver pegasus_driver = {
+	name:		"pegasus",
+	probe:		pegasus_probe,
+	disconnect:	pegasus_disconnect,
+	id_table:	pegasus_ids,
 };
 
-
-
-static int  __init start_hpna( void )
+int __init pegasus_init(void)
 {
-	printk( version );
-	return	usb_register( &usb_hpna_driver );
+	info( "%s", version );
+	return usb_register( &pegasus_driver );
 }
 
-
-static void __exit stop_hpna( void )
+void __exit pegasus_exit(void)
 {
-	usb_deregister( &usb_hpna_driver );
+	usb_deregister( &pegasus_driver );
 }
 
-
-module_init( start_hpna );
-module_exit( stop_hpna );
+module_init( pegasus_init );
+module_exit( pegasus_exit );

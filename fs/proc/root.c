@@ -22,40 +22,9 @@ struct proc_dir_entry *proc_net, *proc_bus, *proc_root_fs, *proc_root_driver;
 struct proc_dir_entry *proc_sys_root;
 #endif
 
-/*
- * /proc/self:
- */
-static int proc_self_readlink(struct dentry *dentry, char *buffer, int buflen)
-{
-	char tmp[30];
-	sprintf(tmp, "%d", current->pid);
-	return vfs_readlink(dentry,buffer,buflen,tmp);
-}
-
-static struct dentry * proc_self_follow_link(struct dentry *dentry,
-						struct dentry *base,
-						unsigned int follow)
-{
-	char tmp[30];
-	sprintf(tmp, "%d", current->pid);
-	return vfs_follow_link(dentry,base,follow,tmp);
-}	
-
-static struct inode_operations proc_self_inode_operations = {
-	readlink:	proc_self_readlink,
-	follow_link:	proc_self_follow_link
-};
-
-static struct proc_dir_entry proc_root_self = {
-	0, 4, "self",
-	S_IFLNK | S_IRUGO | S_IWUGO | S_IXUGO, 1, 0, 0,
-	64, &proc_self_inode_operations,
-};
-
 void __init proc_root_init(void)
 {
 	proc_misc_init();
-	proc_register(&proc_root, &proc_root_self);
 	proc_net = proc_mkdir("net", 0);
 #ifdef CONFIG_SYSVIPC
 	proc_mkdir("sysvipc", 0);
@@ -78,32 +47,12 @@ void __init proc_root_init(void)
 
 static struct dentry *proc_root_lookup(struct inode * dir, struct dentry * dentry)
 {
-	struct task_struct *p;
-
 	if (dir->i_ino == PROC_ROOT_INO) { /* check for safety... */
-		extern unsigned long total_forks;
-		static int last_timestamp = 0;
+		int nlink = proc_root.nlink;
 
-		/*
-		 * this one can be a serious 'ps' performance problem if
-		 * there are many threads running - thus we do 'lazy'
-		 * link-recalculation - we change it only if the number
-		 * of threads has increased.
-		 */
-		if (total_forks != last_timestamp) {
-			int nlink = proc_root.nlink;
+		nlink += nr_threads;
 
-			read_lock(&tasklist_lock);
-			last_timestamp = total_forks;
-			for_each_task(p)
-				nlink++;
-			read_unlock(&tasklist_lock);
-			/*
-			 * subtract the # of idle threads which
-			 * do not show up in /proc:
-			 */
-			dir->i_nlink = nlink - smp_num_cpus;
-		}
+		dir->i_nlink = nlink;
 	}
 
 	if (!proc_lookup(dir, dentry))
@@ -133,6 +82,7 @@ static int proc_root_readdir(struct file * filp,
  * directory handling functions for that..
  */
 static struct file_operations proc_root_operations = {
+	read:		 generic_read_dir,
 	readdir:	 proc_root_readdir,
 };
 
@@ -147,10 +97,12 @@ static struct inode_operations proc_root_inode_operations = {
  * This is the root "inode" in the /proc tree..
  */
 struct proc_dir_entry proc_root = {
-	PROC_ROOT_INO, 5, "/proc",
-	S_IFDIR | S_IRUGO | S_IXUGO, 2, 0, 0,
-	0, &proc_root_inode_operations, &proc_root_operations,
-	NULL, NULL,
-	NULL,
-	&proc_root, NULL
+	low_ino:	PROC_ROOT_INO, 
+	namelen:	5, 
+	name:		"/proc",
+	mode:		S_IFDIR | S_IRUGO | S_IXUGO, 
+	nlink:		2, 
+	proc_iops:	&proc_root_inode_operations, 
+	proc_fops:	&proc_root_operations,
+	parent:		&proc_root,
 };

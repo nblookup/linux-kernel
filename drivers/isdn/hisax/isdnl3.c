@@ -1,5 +1,5 @@
-/* $Id: isdnl3.c,v 2.10 1999/07/21 14:46:19 keil Exp $
-
+/* $Id: isdnl3.c,v 2.17 2000/11/24 17:05:38 kai Exp $
+ *
  * Author       Karsten Keil (keil@isdn4linux.de)
  *              based on the teles driver from Jan den Ouden
  *
@@ -10,69 +10,17 @@
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
  *
- * $Log: isdnl3.c,v $
- * Revision 2.10  1999/07/21 14:46:19  keil
- * changes from EICON certification
- *
- * Revision 2.9  1999/07/01 08:11:53  keil
- * Common HiSax version for 2.0, 2.1, 2.2 and 2.3 kernel
- *
- * Revision 2.8  1998/11/15 23:55:04  keil
- * changes from 2.0
- *
- * Revision 2.7  1998/05/25 14:10:15  keil
- * HiSax 3.0
- * X.75 and leased are working again.
- *
- * Revision 2.6  1998/05/25 12:58:11  keil
- * HiSax golden code from certification, Don't use !!!
- * No leased lines, no X75, but many changes.
- *
- * Revision 2.5  1998/02/12 23:07:52  keil
- * change for 2.1.86 (removing FREE_READ/FREE_WRITE from [dev]_kfree_skb()
- *
- * Revision 2.4  1997/11/06 17:09:25  keil
- * New 2.1 init code
- *
- * Revision 2.3  1997/10/29 19:07:53  keil
- * changes for 2.1
- *
- * Revision 2.2  1997/10/01 09:21:41  fritz
- * Removed old compatibility stuff for 2.0.X kernels.
- * From now on, this code is for 2.1.X ONLY!
- * Old stuff is still in the separate branch.
- *
- * Revision 2.1  1997/08/03 14:36:32  keil
- * Implement RESTART procedure
- *
- * Revision 2.0  1997/07/27 21:15:42  keil
- * New Callref based layer3
- *
- * Revision 1.11  1997/06/26 11:11:44  keil
- * SET_SKBFREE now on creation of a SKB
- *
- * Revision 1.10  1997/04/06 22:54:16  keil
- * Using SKB's
- *
- * Revision 1.9  1997/03/25 23:11:25  keil
- * US NI-1 protocol
- *
- * Revision 1.8  1997/03/21 18:53:44  keil
- * Report no protocol error to syslog too
- *
- * Remove old logs /KKe
- *
  */
+
 #define __NO_VERSION__
+#include <linux/init.h>
 #include "hisax.h"
 #include "isdnl3.h"
 #include <linux/config.h>
 
-const char *l3_revision = "$Revision: 2.10 $";
+const char *l3_revision = "$Revision: 2.17 $";
 
-static
-struct Fsm l3fsm =
-{NULL, 0, 0, NULL, NULL};
+static struct Fsm l3fsm;
 
 enum {
 	ST_L3_LC_REL,
@@ -234,7 +182,7 @@ int
 L3AddTimer(struct L3Timer *t,
 	   int millisec, int event)
 {
-	if (t->tl.next || t->tl.prev) {
+	if (timer_pending(&t->tl)) {
 		printk(KERN_WARNING "L3AddTimer: timer already active!\n");
 		return -1;
 	}
@@ -286,7 +234,7 @@ no_l3_proto_spec(struct PStack *st, isdn_ctrl *ic)
 extern void setstack_dss1(struct PStack *st);
 #endif
 
-#ifdef        CONFIG_HISAX_NI1
+#ifdef  CONFIG_HISAX_NI1
 extern void setstack_ni1(struct PStack *st);
 #endif
 
@@ -355,7 +303,10 @@ release_l3_process(struct l3_process *p)
 				if (!skb_queue_len(&p->st->l3.squeue)) {
 					if (p->debug)
 						l3_debug(p->st, "release_l3_process: release link");
-					FsmEvent(&p->st->l3.l3m, EV_RELEASE_REQ, NULL);
+					if (p->st->protocol != ISDN_PTYPE_NI1)
+						FsmEvent(&p->st->l3.l3m, EV_RELEASE_REQ, NULL);
+					else
+						FsmEvent(&p->st->l3.l3m, EV_RELEASE_IND, NULL);
 				} else {
 					if (p->debug)
 						l3_debug(p->st, "release_l3_process: not release link");
@@ -375,10 +326,13 @@ static void
 l3ml3p(struct PStack *st, int pr)
 {
 	struct l3_process *p = st->l3.proc;
+	struct l3_process *np;
 
 	while (p) {
+		/* p might be kfreed under us, so we need to save where we want to go on */
+		np = p->next;
 		st->l3.l3ml3(st, pr, p);
-		p = p->next;
+		p = np;
 	}
 }
 
@@ -405,7 +359,7 @@ setstack_l3dc(struct PStack *st, struct Channel *chanp)
 		setstack_dss1(st);
 	} else
 #endif
-#ifdef        CONFIG_HISAX_NI1
+#ifdef  CONFIG_HISAX_NI1
 	if (st->protocol == ISDN_PTYPE_NI1) {
 		setstack_ni1(st);
 	} else
@@ -532,6 +486,18 @@ lc_start_delay(struct FsmInst *fi, int event, void *arg)
 }
 
 static void
+lc_start_delay_check(struct FsmInst *fi, int event, void *arg)
+/* 20/09/00 - GE timer not user for NI-1 as layer 2 should stay up */
+{
+       struct PStack *st = fi->userdata;
+
+       FsmChangeState(fi, ST_L3_LC_REL_DELAY);
+       /* 19/09/00 - GE timer not user for NI-1 */
+       if (st->protocol != ISDN_PTYPE_NI1) 
+       		FsmAddTimer(&st->l3.l3m_timer, DREL_TIMER_VALUE, EV_TIMEOUT, NULL, 50);
+}
+
+static void
 lc_release_req(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
@@ -570,7 +536,7 @@ lc_release_cnf(struct FsmInst *fi, int event, void *arg)
 
 
 /* *INDENT-OFF* */
-static struct FsmNode L3FnList[] HISAX_INITDATA =
+static struct FsmNode L3FnList[] __initdata =
 {
 	{ST_L3_LC_REL,		EV_ESTABLISH_REQ,	lc_activate},
 	{ST_L3_LC_REL,		EV_ESTABLISH_IND,	lc_connect},
@@ -579,7 +545,7 @@ static struct FsmNode L3FnList[] HISAX_INITDATA =
 	{ST_L3_LC_ESTAB_WAIT,	EV_RELEASE_REQ,		lc_start_delay},
 	{ST_L3_LC_ESTAB_WAIT,	EV_RELEASE_IND,		lc_release_ind},
 	{ST_L3_LC_ESTAB,	EV_RELEASE_IND,		lc_release_ind},
-	{ST_L3_LC_ESTAB,	EV_RELEASE_REQ,		lc_start_delay},
+	{ST_L3_LC_ESTAB,	EV_RELEASE_REQ,		lc_start_delay_check},
         {ST_L3_LC_REL_DELAY,    EV_RELEASE_IND,         lc_release_ind},
         {ST_L3_LC_REL_DELAY,    EV_ESTABLISH_REQ,       lc_connected},
         {ST_L3_LC_REL_DELAY,    EV_TIMEOUT,             lc_release_req},
@@ -593,7 +559,6 @@ static struct FsmNode L3FnList[] HISAX_INITDATA =
 void
 l3_msg(struct PStack *st, int pr, void *arg)
 {
-	
 	switch (pr) {
 		case (DL_DATA | REQUEST):
 			if (st->l3.l3m.state == ST_L3_LC_ESTAB) {
@@ -626,8 +591,8 @@ l3_msg(struct PStack *st, int pr, void *arg)
 	}
 }
 
-HISAX_INITFUNC(void
-Isdnl3New(void))
+void __init
+Isdnl3New(void)
 {
 	l3fsm.state_count = L3_STATE_COUNT;
 	l3fsm.event_count = L3_EVENT_COUNT;

@@ -20,6 +20,18 @@
 #ifdef CONFIG_8xx
 #include <asm/mpc8xx.h>
 #endif
+#ifdef CONFIG_8260
+#include <asm/mpc8260.h>
+#endif
+
+/*
+ * The following references are needed to cause the linker to pull in the
+ * gzimage.o and rdimage.o files.  These object files are special,
+ * since they get placed into the .gzimage and .rdimage ELF sections 
+ * of the zvmlinux and zvmlinux.initrd files.
+ */
+extern char dummy_for_gzimage;
+extern char dummy_for_rdimage;
 
 /*
  * Please send me load/board info and such data for hardware not
@@ -213,7 +225,9 @@ void gunzip(void *dst, int dstlen, unsigned char *src, int *lenp)
 	s.avail_out = dstlen;
 	r = inflate(&s, Z_FINISH);
 	if (r != Z_OK && r != Z_STREAM_END) {
-		puts("inflate returned %d\n");
+		puts("inflate returned ");
+		puthex(r);
+		puts("\n");
 		exit();
 	}
 	*lenp = s.next_out - (unsigned char *) dst;
@@ -230,6 +244,13 @@ decompress_kernel(unsigned long load_addr, int num_words, unsigned long cksum, b
 	char *cp, ch;
 	unsigned long i;
 	char	*dp;
+
+#ifdef CONFIG_8260
+	/* I don't know why I didn't do it this way on the 8xx.......
+	*/
+	embed_config(bp);
+	serial_init(bp);
+#endif
 
 	/* These values must be variables.  If not, the compiler optimizer
 	 * will remove some code, causing the size of the code to vary
@@ -248,6 +269,11 @@ decompress_kernel(unsigned long load_addr, int num_words, unsigned long cksum, b
 	 */
 #ifdef CONFIG_MBX
 	cmd_line = (char *)(load_addr - 0x10000);
+
+	/* To be like everyone else, we need one too, although this
+	 * board information is passed from the boot rom.
+	 */
+	bp->bi_baudrate = 9600;
 #else
 	cmd_line = (char *)(0x200000);
 #endif

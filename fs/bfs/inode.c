@@ -1,7 +1,7 @@
 /*
  *	fs/bfs/inode.c
  *	BFS superblock and inode operations.
- *	Copyright (C) 1999 Tigran Aivazian <tigran@ocston.org>
+ *	Copyright (C) 1999,2000 Tigran Aivazian <tigran@veritas.com>
  *	From fs/minix, Copyright (C) 1991, 1992 Linus Torvalds.
  */
 
@@ -11,12 +11,13 @@
 #include <linux/init.h>
 #include <linux/locks.h>
 #include <linux/bfs_fs.h>
+#include <linux/smp_lock.h>
 
 #include <asm/uaccess.h>
 
 #include "bfs_defs.h"
 
-MODULE_AUTHOR("Tigran A. Aivazian");
+MODULE_AUTHOR("Tigran A. Aivazian <tigran@veritas.com>");
 MODULE_DESCRIPTION("SCO UnixWare BFS filesystem for Linux");
 EXPORT_NO_SYMBOLS;
 
@@ -76,7 +77,6 @@ static void bfs_read_inode(struct inode * inode)
 	inode->i_atime = di->i_atime;
 	inode->i_mtime = di->i_mtime;
 	inode->i_ctime = di->i_ctime;
-	inode->i_rdev = 0; /* BFS doesn't have special nodes */
 	inode->iu_dsk_ino = di->i_ino; /* can be 0 so we store a copy */
 	inode->iu_sblock = di->i_sblock;
 	inode->iu_eblock = di->i_eblock;
@@ -84,7 +84,7 @@ static void bfs_read_inode(struct inode * inode)
 	brelse(bh);
 }
 
-static void bfs_write_inode(struct inode * inode)
+static void bfs_write_inode(struct inode * inode, int unused)
 {
 	unsigned long ino = inode->i_ino;
 	kdev_t dev = inode->i_dev;
@@ -97,10 +97,12 @@ static void bfs_write_inode(struct inode * inode)
 		return;
 	}
 
+	lock_kernel();
 	block = (ino - BFS_ROOT_INO)/BFS_INODES_PER_BLOCK + 1;
 	bh = bread(dev, block, BFS_BSIZE);
 	if (!bh) {
 		printf("Unable to read inode %s:%08lx\n", bdevname(dev), ino);
+		unlock_kernel();
 		return;
 	}
 
@@ -124,8 +126,9 @@ static void bfs_write_inode(struct inode * inode)
 	di->i_eblock = inode->iu_eblock;
 	di->i_eoffset = di->i_sblock * BFS_BSIZE + inode->i_size - 1;
 
-	mark_buffer_dirty(bh, 0);
+	mark_buffer_dirty(bh);
 	brelse(bh);
+	unlock_kernel();
 }
 
 static void bfs_delete_inode(struct inode * inode)
@@ -139,8 +142,6 @@ static void bfs_delete_inode(struct inode * inode)
 
 	dprintf("ino=%08lx\n", inode->i_ino);
 
-	if (!inode || !inode->i_dev || inode->i_count > 1 || inode->i_nlink || !s)
-		return;
 	if (inode->i_ino < BFS_ROOT_INO || inode->i_ino > inode->i_sb->su_lasti) {
 		printf("invalid ino=%08lx\n", inode->i_ino);
 		return;
@@ -148,11 +149,13 @@ static void bfs_delete_inode(struct inode * inode)
 	
 	inode->i_size = 0;
 	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
+	lock_kernel();
 	mark_inode_dirty(inode);
 	block = (ino - BFS_ROOT_INO)/BFS_INODES_PER_BLOCK + 1;
 	bh = bread(dev, block, BFS_BSIZE);
 	if (!bh) {
 		printf("Unable to read inode %s:%08lx\n", bdevname(dev), ino);
+		unlock_kernel();
 		return;
 	}
 	off = (ino - BFS_ROOT_INO)%BFS_INODES_PER_BLOCK;
@@ -165,7 +168,7 @@ static void bfs_delete_inode(struct inode * inode)
 	}
 	di->i_ino = 0;
 	di->i_sblock = 0;
-	mark_buffer_dirty(bh, 0);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 
 	/* if this was the last file, make the previous 
@@ -173,8 +176,9 @@ static void bfs_delete_inode(struct inode * inode)
 	   saves us 1 gap */
 	if (s->su_lf_eblk == inode->iu_eblock) {
 		s->su_lf_eblk = inode->iu_sblock - 1;
-		mark_buffer_dirty(s->su_sbh, 1);
+		mark_buffer_dirty(s->su_sbh);
 	}
+	unlock_kernel();
 	clear_inode(inode);
 }
 
@@ -192,7 +196,7 @@ static int bfs_statfs(struct super_block *s, struct statfs *buf)
 	buf->f_bfree = buf->f_bavail = s->su_freeb;
 	buf->f_files = s->su_lasti + 1 - BFS_ROOT_INO;
 	buf->f_ffree = s->su_freei;
-	buf->f_fsid.val[0] = s->s_dev;
+	buf->f_fsid.val[0] = kdev_t_to_nr(s->s_dev);
 	buf->f_namelen = BFS_NAMELEN;
 	return 0;
 }
@@ -200,7 +204,7 @@ static int bfs_statfs(struct super_block *s, struct statfs *buf)
 static void bfs_write_super(struct super_block *s)
 {
 	if (!(s->s_flags & MS_RDONLY))
-		mark_buffer_dirty(s->su_sbh, 1);
+		mark_buffer_dirty(s->su_sbh);
 	s->s_dirt = 0;
 }
 
@@ -309,7 +313,7 @@ static struct super_block * bfs_read_super(struct super_block * s,
 		iput(inode);
 	}
 	if (!(s->s_flags & MS_RDONLY)) {
-		mark_buffer_dirty(bh, 1);
+		mark_buffer_dirty(bh);
 		s->s_dirt = 1;
 	} 
 	dump_imap("read_super", s);
@@ -320,18 +324,17 @@ out:
 	return NULL;
 }
 
-static DECLARE_FSTYPE_DEV( bfs_fs_type, "bfs", bfs_read_super);
+static DECLARE_FSTYPE_DEV(bfs_fs_type, "bfs", bfs_read_super);
 
-#ifdef MODULE
-#define init_bfs_fs init_module
-
-void cleanup_module(void)
-{
-	unregister_filesystem(&bfs_fs_type);
-}
-#endif
-
-int __init init_bfs_fs(void)
+static int __init init_bfs_fs(void)
 {
 	return register_filesystem(&bfs_fs_type);
 }
+
+static void __exit exit_bfs_fs(void)
+{
+	unregister_filesystem(&bfs_fs_type);
+}
+
+module_init(init_bfs_fs)
+module_exit(exit_bfs_fs)

@@ -76,6 +76,9 @@ static inline void clear_page(void *page)
 #define copy_page(to,from)	memcpy((to), (from), PAGE_SIZE)
 #endif
 
+#define clear_user_page(page, vaddr)	clear_page(page)
+#define copy_user_page(to, from, vaddr)	copy_page(to, from)
+
 /*
  * These are used to make use of C type-checking..
  */
@@ -157,6 +160,8 @@ static inline void *__va(unsigned long x)
 #endif	/* CONFIG_SUN3 */
 
 #define MAP_NR(addr)		(((unsigned long)(addr)-PAGE_OFFSET) >> PAGE_SHIFT)
+#define virt_to_page(kaddr)	(mem_map + (((unsigned long)(kaddr)-PAGE_OFFSET) >> PAGE_SHIFT))
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
 #ifndef CONFIG_SUN3
 #define BUG() do { \

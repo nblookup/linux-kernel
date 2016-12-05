@@ -250,6 +250,9 @@ int sun3scsi_detect(Scsi_Host_Template * tpnt)
 #endif
 
 	instance = scsi_register (tpnt, sizeof(struct NCR5380_hostdata));
+	if(instance == NULL)
+		return 0;
+		
 	default_instance = instance;
 
         instance->io_port = (unsigned long) ioaddr;
@@ -484,7 +487,10 @@ static inline unsigned long sun3scsi_dma_residual(struct Scsi_Host *instance)
 static inline unsigned long sun3scsi_dma_xfer_len(unsigned long wanted, Scsi_Cmnd *cmd,
 				    int write_flag)
 {
-		return wanted;
+	if((cmd->request.cmd == 0) || (cmd->request.cmd == 1))
+ 		return wanted;
+	else
+		return 0;
 }
 
 /* clean up after our dma is done */
@@ -529,10 +535,7 @@ static int sun3scsi_dma_finish(void)
 	
 #include "sun3_NCR5380.c"
 
-#ifdef MODULE
-
-Scsi_Host_Template driver_template = SUN3_NCR5380;
+static Scsi_Host_Template driver_template = SUN3_NCR5380;
 
 #include "scsi_module.c"
-#endif
 

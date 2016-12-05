@@ -18,7 +18,7 @@
 #include <asm/pgtable.h>
 
 spinlock_t swaplock = SPIN_LOCK_UNLOCKED;
-unsigned int nr_swapfiles = 0;
+unsigned int nr_swapfiles;
 
 struct swap_list_t swap_list = {-1, -1};
 
@@ -200,49 +200,6 @@ bad_count:
 	goto out;
 }
 
-/* needs the big kernel lock */
-swp_entry_t acquire_swap_entry(struct page *page)
-{
-	struct swap_info_struct * p;
-	unsigned long offset, type;
-	swp_entry_t entry;
-
-	if (!test_bit(PG_swap_entry, &page->flags))
-		goto new_swap_entry;
-
-	/* We have the old entry in the page offset still */
-	if (!page->index)
-		goto new_swap_entry;
-	entry.val = page->index;
-	type = SWP_TYPE(entry);
-	if (type >= nr_swapfiles)
-		goto new_swap_entry;
-	p = type + swap_info;
-	if ((p->flags & SWP_WRITEOK) != SWP_WRITEOK)
-		goto new_swap_entry;
-	offset = SWP_OFFSET(entry);
-	if (offset >= p->max)
-		goto new_swap_entry;
-	/* Has it been re-used for something else? */
-	swap_list_lock();
-	swap_device_lock(p);
-	if (p->swap_map[offset])
-		goto unlock_new_swap_entry;
-
-	/* We're cool, we can just use the old one */
-	p->swap_map[offset] = 1;
-	swap_device_unlock(p);
-	nr_swap_pages--;
-	swap_list_unlock();
-	return entry;
-
-unlock_new_swap_entry:
-	swap_device_unlock(p);
-	swap_list_unlock();
-new_swap_entry:
-	return get_swap_page();
-}
-
 /*
  * The swap entry has been read in advance, and we return 1 to indicate
  * that the page has been used or is no longer needed.
@@ -266,10 +223,10 @@ static inline void unuse_pte(struct vm_area_struct * vma, unsigned long address,
 		if (pte_page(pte) != page)
 			return;
 		/* We will be removing the swap cache in a moment, so... */
-		set_pte(dir, pte_mkdirty(pte));
+		ptep_mkdirty(dir);
 		return;
 	}
-	if (pte_val(pte) != entry.val)
+	if (pte_to_swp_entry(pte).val != entry.val)
 		return;
 	set_pte(dir, pte_mkdirty(mk_pte(page, vma->vm_page_prot)));
 	swap_free(entry);
@@ -358,10 +315,12 @@ static void unuse_process(struct mm_struct * mm,
 	 */
 	if (!mm)
 		return;
+	spin_lock(&mm->page_table_lock);
 	for (vma = mm->mmap; vma; vma = vma->vm_next) {
 		pgd_t * pgd = pgd_offset(mm, vma->vm_start);
 		unuse_vma(vma, pgd, entry, page);
 	}
+	spin_unlock(&mm->page_table_lock);
 	return;
 }
 
@@ -411,16 +370,16 @@ static int try_to_unuse(unsigned int type)
 			swap_free(entry);
   			return -ENOMEM;
 		}
+		if (PageSwapCache(page))
+			delete_from_swap_cache(page);
 		read_lock(&tasklist_lock);
 		for_each_task(p)
 			unuse_process(p->mm, entry, page);
 		read_unlock(&tasklist_lock);
-		shm_unuse(entry, page);
+		shmem_unuse(entry, page);
 		/* Now get rid of the extra reference to the temporary
                    page we've been using. */
-		if (PageSwapCache(page))
-			delete_from_swap_cache(page);
-		__free_page(page);
+		page_cache_release(page);
 		/*
 		 * Check for and clear any overflowed swap map counts.
 		 */
@@ -443,30 +402,29 @@ static int try_to_unuse(unsigned int type)
 asmlinkage long sys_swapoff(const char * specialfile)
 {
 	struct swap_info_struct * p = NULL;
-	struct dentry * dentry;
+	struct nameidata nd;
 	int i, type, prev;
 	int err;
 	
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
-	lock_kernel();
-	dentry = namei(specialfile);
-	err = PTR_ERR(dentry);
-	if (IS_ERR(dentry))
+	err = user_path_walk(specialfile, &nd);
+	if (err)
 		goto out;
 
+	lock_kernel();
 	prev = -1;
 	swap_list_lock();
 	for (type = swap_list.head; type >= 0; type = swap_info[type].next) {
 		p = swap_info + type;
 		if ((p->flags & SWP_WRITEOK) == SWP_WRITEOK) {
 			if (p->swap_file) {
-				if (p->swap_file == dentry)
+				if (p->swap_file == nd.dentry)
 				  break;
 			} else {
-				if (S_ISBLK(dentry->d_inode->i_mode)
-				    && (p->swap_device == dentry->d_inode->i_rdev))
+				if (S_ISBLK(nd.dentry->d_inode->i_mode)
+				    && (p->swap_device == nd.dentry->d_inode->i_rdev))
 				  break;
 			}
 		}
@@ -508,11 +466,13 @@ asmlinkage long sys_swapoff(const char * specialfile)
 		goto out_dput;
 	}
 	if (p->swap_device)
-		blkdev_put(dentry->d_inode->i_bdev, BDEV_SWAP);
-	dput(dentry);
+		blkdev_put(nd.dentry->d_inode->i_bdev, BDEV_SWAP);
+	path_release(&nd);
 
-	dentry = p->swap_file;
+	nd.dentry = p->swap_file;
 	p->swap_file = NULL;
+	nd.mnt = p->swap_vfsmnt;
+	p->swap_vfsmnt = NULL;
 	p->swap_device = 0;
 	vfree(p->swap_map);
 	p->swap_map = NULL;
@@ -520,9 +480,9 @@ asmlinkage long sys_swapoff(const char * specialfile)
 	err = 0;
 
 out_dput:
-	dput(dentry);
-out:
 	unlock_kernel();
+	path_release(&nd);
+out:
 	return err;
 }
 
@@ -538,7 +498,8 @@ int get_swaparea_info(char *buf)
 	len += sprintf(buf, "Filename\t\t\tType\t\tSize\tUsed\tPriority\n");
 	for (i = 0 ; i < nr_swapfiles ; i++, ptr++) {
 		if (ptr->flags & SWP_USED) {
-			char * path = d_path(ptr->swap_file, page, PAGE_SIZE);
+			char * path = d_path(ptr->swap_file, ptr->swap_vfsmnt,
+						page, PAGE_SIZE);
 
 			len += sprintf(buf + len, "%-31s ", path);
 
@@ -584,7 +545,8 @@ int is_swap_partition(kdev_t dev) {
 asmlinkage long sys_swapon(const char * specialfile, int swap_flags)
 {
 	struct swap_info_struct * p;
-	struct dentry * swap_dentry;
+	struct nameidata nd;
+	struct inode * swap_inode;
 	unsigned int type;
 	int i, j, prev;
 	int error;
@@ -610,6 +572,7 @@ asmlinkage long sys_swapon(const char * specialfile, int swap_flags)
 		nr_swapfiles = type+1;
 	p->flags = SWP_USED;
 	p->swap_file = NULL;
+	p->swap_vfsmnt = NULL;
 	p->swap_device = 0;
 	p->swap_map = NULL;
 	p->lowest_bit = 0;
@@ -624,24 +587,24 @@ asmlinkage long sys_swapon(const char * specialfile, int swap_flags)
 	} else {
 		p->prio = --least_priority;
 	}
-	swap_dentry = namei(specialfile);
-	error = PTR_ERR(swap_dentry);
-	if (IS_ERR(swap_dentry))
+	error = user_path_walk(specialfile, &nd);
+	if (error)
 		goto bad_swap_2;
 
-	p->swap_file = swap_dentry;
+	p->swap_file = nd.dentry;
+	p->swap_vfsmnt = nd.mnt;
+	swap_inode = nd.dentry->d_inode;
 	error = -EINVAL;
 
-	if (S_ISBLK(swap_dentry->d_inode->i_mode)) {
-		kdev_t dev = swap_dentry->d_inode->i_rdev;
+	if (S_ISBLK(swap_inode->i_mode)) {
+		kdev_t dev = swap_inode->i_rdev;
 		struct block_device_operations *bdops;
 
 		p->swap_device = dev;
 		set_blocksize(dev, PAGE_SIZE);
 		
-		bdev = swap_dentry->d_inode->i_bdev;
-		bdops = devfs_get_ops ( devfs_get_handle_from_inode
-					(swap_dentry->d_inode) );
+		bdev = swap_inode->i_bdev;
+		bdops = devfs_get_ops(devfs_get_handle_from_inode(swap_inode));
 		if (bdops) bdev->bd_op = bdops;
 
 		error = blkdev_get(bdev, FMODE_READ|FMODE_WRITE, 0, BDEV_SWAP);
@@ -663,15 +626,15 @@ asmlinkage long sys_swapon(const char * specialfile, int swap_flags)
 		if (blk_size[MAJOR(dev)])
 			swapfilesize = blk_size[MAJOR(dev)][MINOR(dev)]
 				>> (PAGE_SHIFT - 10);
-	} else if (S_ISREG(swap_dentry->d_inode->i_mode)) {
+	} else if (S_ISREG(swap_inode->i_mode)) {
 		error = -EBUSY;
 		for (i = 0 ; i < nr_swapfiles ; i++) {
 			if (i == type || !swap_info[i].swap_file)
 				continue;
-			if (swap_dentry->d_inode == swap_info[i].swap_file->d_inode)
+			if (swap_inode == swap_info[i].swap_file->d_inode)
 				goto bad_swap;
 		}
-		swapfilesize = swap_dentry->d_inode->i_size >> PAGE_SHIFT;
+		swapfilesize = swap_inode->i_size >> PAGE_SHIFT;
 	} else
 		goto bad_swap;
 
@@ -682,7 +645,7 @@ asmlinkage long sys_swapon(const char * specialfile, int swap_flags)
 		goto bad_swap;
 	}
 
-	lock_page(mem_map + MAP_NR(swap_header));
+	lock_page(virt_to_page(swap_header));
 	rw_swap_page_nolock(READ, SWP_ENTRY(type,0), (char *) swap_header, 1);
 
 	if (!memcmp("SWAP-SPACE",swap_header->magic.magic,10))
@@ -811,13 +774,16 @@ bad_swap:
 bad_swap_2:
 	if (p->swap_map)
 		vfree(p->swap_map);
-	dput(p->swap_file);
+	nd.mnt = p->swap_vfsmnt;
+	nd.dentry = p->swap_file;
 	p->swap_device = 0;
 	p->swap_file = NULL;
+	p->swap_vfsmnt = NULL;
 	p->swap_map = NULL;
 	p->flags = 0;
 	if (!(swap_flags & SWAP_FLAG_PREFER))
 		++least_priority;
+	path_release(&nd);
 out:
 	if (swap_header)
 		free_page((long) swap_header);

@@ -27,6 +27,7 @@
 #include <asm/processor.h>
 #include <asm/page.h>
 #include <linux/config.h>
+#include "mol.h"
 
 /*
  * Load a PTE into the hash table, if possible.
@@ -52,7 +53,14 @@ Hash_msk = (((1 << Hash_bits) - 1) * 64)
 	
 	.globl	hash_page
 hash_page:
-#ifdef __SMP__
+#ifdef CONFIG_PPC64BRIDGE
+	mfmsr	r0
+	clrldi	r0,r0,1		/* make sure it's in 32-bit mode */
+	sync
+	MTMSRD(r0)
+	isync
+#endif
+#ifdef CONFIG_SMP
 	SAVE_2GPRS(7,r21)
 	eieio
 	lis	r2,hash_table_lock@h
@@ -82,13 +90,18 @@ hash_page:
 	REST_2GPRS(7, r21)
 #endif
 	/* Get PTE (linux-style) and check access */
+	lis	r0,KERNELBASE@h		/* check if kernel address */
+	cmplw	0,r3,r0
 	mfspr	r2,SPRG3		/* current task's THREAD (phys) */
 	lwz	r5,PGDIR(r2)		/* virt page-table root */
-	tophys(r5,r5)			/* convert to phys addr */
+	blt+	112f			/* assume user more likely */
+	lis	r5,swapper_pg_dir@ha	/* if kernel address, use */
+	addi	r5,r5,swapper_pg_dir@l	/* kernel page table */
+112:	tophys(r5,r5)			/* convert to phys addr */
 	rlwimi	r5,r3,12,20,29		/* insert top 10 bits of address */
 	lwz	r5,0(r5)		/* get pmd entry */
 	rlwinm.	r5,r5,0,0,19		/* extract address of pte page */
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	beq-	hash_page_out		/* return if no mapping */
 #else
 	/* XXX it seems like the 601 will give a machine fault on the
@@ -102,7 +115,7 @@ hash_page:
 	lwz	r6,0(r2)		/* get linux-style pte */
 	ori	r4,r4,1			/* set _PAGE_PRESENT bit in access */
 	andc.	r0,r4,r6		/* check access & ~permission */
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	bne-	hash_page_out		/* return if access not permitted */
 #else
 	bnelr-
@@ -120,34 +133,38 @@ hash_page:
 	ori	r4,r4,0xe04		/* clear out reserved bits */
 	andc	r6,r6,r4		/* PP=2 or 0, when _PAGE_HWWRITE */
 
+#ifdef CONFIG_POWER4
+	/*
+	 * XXX hack hack hack - translate 32-bit "physical" addresses
+	 * in the linux page tables to 42-bit real addresses in such
+	 * a fashion that we can get at the I/O we need to access.
+	 *	-- paulus
+	 */
+	cmpwi	0,r6,0
+	rlwinm	r4,r6,16,16,30
+	bge	57f
+	cmplwi	0,r4,0xfe00
+	li	r5,0x3fd
+	bne	56f
+	li	r5,0x3ff
+56:	sldi	r5,r5,32
+	or	r6,r6,r5
+57:
+#endif
+
+#ifdef CONFIG_PPC64BRIDGE
 	/* Construct the high word of the PPC-style PTE */
 	mfsrin	r5,r3			/* get segment reg for segment */
-#ifdef CONFIG_PPC64
+	rlwinm	r5,r5,0,5,31
 	sldi	r5,r5,12
-#else /* CONFIG_PPC64 */
-	rlwinm	r5,r5,7,1,24		/* put VSID in 0x7fffff80 bits */
-#endif /* CONFIG_PPC64 */
-	
-#ifndef __SMP__				/* do this later for SMP */
-#ifdef CONFIG_PPC64
 	ori	r5,r5,1			/* set V (valid) bit */
-#else /* CONFIG_PPC64 */
-	oris	r5,r5,0x8000		/* set V (valid) bit */
-#endif /* CONFIG_PPC64 */
-#endif
-	
-#ifdef CONFIG_PPC64
-/* XXX:	 does this insert the api correctly? -- Cort */
-	rlwimi	r5,r3,17,21,25		/* put in API (abbrev page index) */
-#else /* CONFIG_PPC64 */
-	rlwimi	r5,r3,10,26,31		/* put in API (abbrev page index) */
-#endif /* CONFIG_PPC64 */
+	rlwimi	r5,r3,16,20,24		/* put in API (abbrev page index) */
 	/* Get the address of the primary PTE group in the hash table */
 	.globl	hash_page_patch_A
 hash_page_patch_A:
 	lis	r4,Hash_base@h		/* base address of hash table */
-	rlwimi	r4,r5,32-1,26-Hash_bits,25	/* (VSID & hash_mask) << 6 */
-	rlwinm	r0,r3,32-6,26-Hash_bits,25	/* (PI & hash_mask) << 6 */
+	rlwimi	r4,r5,32-5,25-Hash_bits,24	/* (VSID & hash_mask) << 7 */
+	rlwinm	r0,r3,32-5,25-Hash_bits,24	/* (PI & hash_mask) << 7 */
 	xor	r4,r4,r0		/* make primary hash */
 
 	/* See whether it was a PTE not found exception or a
@@ -157,92 +174,46 @@ hash_page_patch_A:
 	bne	10f			/* no PTE: go look for an empty slot */
 	tlbie	r3			/* invalidate TLB entry */
 
-	/* Search the primary PTEG for a PTE whose 1st word matches r5 */
+	/* Search the primary PTEG for a PTE whose 1st dword matches r5 */
 	mtctr	r2
-	addi	r3,r4,-8
-1:		
-#ifdef CONFIG_PPC64	
-	lwzu	r0,16(r3)		/* get next PTE */
-#else	
-	lwzu	r0,8(r3)		/* get next PTE */
-#endif	
-	cmp	0,r0,r5
+	addi	r3,r4,-16
+1:	ldu	r0,16(r3)		/* get next PTE */
+	cmpd	0,r0,r5
 	bdnzf	2,1b			/* loop while ctr != 0 && !cr0.eq */
 	beq+	found_slot
 
 	/* Search the secondary PTEG for a matching PTE */
-#ifdef CONFIG_PPC64
 	ori	r5,r5,0x2		/* set H (secondary hash) bit */
-#else	
-	ori	r5,r5,0x40		/* set H (secondary hash) bit */
-#endif	
 	.globl	hash_page_patch_B
 hash_page_patch_B:
 	xoris	r3,r4,Hash_msk>>16	/* compute secondary hash */
-	xori	r3,r3,0xffc0
-#ifdef CONFIG_PPC64
+	xori	r3,r3,0xff80
 	addi	r3,r3,-16
-#else	
-	addi	r3,r3,-8
-#endif	
 	mtctr	r2
-2:
-#ifdef CONFIG_PPC64
-	lwzu	r0,16(r3)
-#else	
-	lwzu	r0,8(r3)
-#endif	
-	cmp	0,r0,r5
+2:	ldu	r0,16(r3)
+	cmpd	0,r0,r5
 	bdnzf	2,2b
 	beq+	found_slot
-#ifdef CONFIG_PPC64
 	xori	r5,r5,0x2		/* clear H bit again */
-#else	
-	xori	r5,r5,0x40		/* clear H bit again */
-#endif	
 
 	/* Search the primary PTEG for an empty slot */
 10:	mtctr	r2
-#ifdef CONFIG_PPC64
 	addi	r3,r4,-16		/* search primary PTEG */
-#else	
-	addi	r3,r4,-8		/* search primary PTEG */
-#endif	
-1:
-#ifdef CONFIG_PPC64
-	lwzu	r0,16(r3)		/* get next PTE */
+1:	ldu	r0,16(r3)		/* get next PTE */
 	andi.	r0,r0,1
-#else	
-	lwzu	r0,8(r3)		/* get next PTE */
-	rlwinm.	r0,r0,0,0,0		/* only want to check valid bit */
-#endif	
 	bdnzf	2,1b			/* loop while ctr != 0 && !cr0.eq */
 	beq+	found_empty
 
 	/* Search the secondary PTEG for an empty slot */
-#ifdef CONFIG_PPC64
 	ori	r5,r5,0x2		/* set H (secondary hash) bit */
-#else	
-	ori	r5,r5,0x40		/* set H (secondary hash) bit */
-#endif	
 	.globl	hash_page_patch_C
 hash_page_patch_C:
 	xoris	r3,r4,Hash_msk>>16	/* compute secondary hash */
-	xori	r3,r3,0xffc0
-#ifdef CONFIG_PPC64
+	xori	r3,r3,0xff80
 	addi	r3,r3,-16
-#else	
-	addi	r3,r3,-8
-#endif	
 	mtctr	r2
-2:
-#ifdef CONFIG_PPC64
-	lwzu	r0,16(r3)
+2:	ldu	r0,16(r3)
 	andi.	r0,r0,1
-#else	
-	lwzu	r0,8(r3)
-	rlwinm.	r0,r0,0,0,0		/* only want to check valid bit */
-#endif	
 	bdnzf	2,2b
 	beq+	found_empty
 
@@ -255,24 +226,30 @@ hash_page_patch_C:
 	 * advantage to putting the PTE in the primary PTEG, we always
 	 * put the PTE in the primary PTEG.
 	 */
-#ifdef CONFIG_PPC64
 	xori	r5,r5,0x2		/* clear H bit again */
-#else
-	xori	r5,r5,0x40		/* clear H bit again */
-#endif		
 	lis	r3,next_slot@ha
 	tophys(r3,r3)
 	lwz	r2,next_slot@l(r3)
-#ifdef CONFIG_PPC64	
 	addi	r2,r2,16
-	andi.	r2,r2,0x78
-#else
-	addi	r2,r2,8
-	andi.	r2,r2,0x38
-#endif	
+	andi.	r2,r2,0x70
+#ifdef CONFIG_POWER4
+	/*
+	 * Since we don't have BATs on POWER4, we rely on always having
+	 * PTEs in the hash table to map the hash table and the code
+	 * that manipulates it in virtual mode, namely flush_hash_page and
+	 * flush_hash_segments.  Otherwise we can get a DSI inside those
+	 * routines which leads to a deadlock on the hash_table_lock on
+	 * SMP machines.  We avoid this by never overwriting the first
+	 * PTE of each PTEG if it is already valid.
+	 *	-- paulus.
+	 */
+	bne	102f
+	li	r2,0x10
+102:
+#endif /* CONFIG_POWER4 */
 	stw	r2,next_slot@l(r3)
 	add	r3,r4,r2
-11:		
+11:
 	/* update counter of evicted pages */
 	lis	r2,htab_evicts@ha
 	tophys(r2,r2)
@@ -280,23 +257,15 @@ hash_page_patch_C:
 	addi	r4,r4,1
 	stw	r4,htab_evicts@l(r2)
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	/* Store PTE in PTEG */
 found_empty:
-#ifdef CONFIG_PPC64
 	std	r5,0(r3)
-#else		
-	stw	r5,0(r3)
-#endif	
 found_slot:
-#ifdef CONFIG_PPC64
 	std	r6,8(r3)
-#else
-	stw	r6,4(r3)
-#endif	
 	sync
 
-#else /* __SMP__ */
+#else /* CONFIG_SMP */
 /*
  * Between the tlbie above and updating the hash table entry below,
  * another CPU could read the hash table entry and put it in its TLB.
@@ -316,7 +285,139 @@ found_slot:
  */
 found_empty:
 found_slot:
-	stw	r5,0(r3)	/* clear V (valid) bit in PTE */
+	li	r0,1
+	andc	r5,r5,r0	/* clear V (valid) bit in PTE */
+	std	r5,0(r3)
+	sync
+	tlbsync
+	sync
+	std	r6,8(r3)	/* put in correct RPN, WIMG, PP bits */
+	sync
+	ori	r5,r5,1
+	std	r5,0(r3)	/* finally set V bit in PTE */
+#endif /* CONFIG_SMP */
+
+#else /* CONFIG_PPC64BRIDGE */
+
+	/* Construct the high word of the PPC-style PTE */
+	mfsrin	r5,r3			/* get segment reg for segment */
+	rlwinm	r5,r5,7,1,24		/* put VSID in 0x7fffff80 bits */
+	oris	r5,r5,0x8000		/* set V (valid) bit */
+	rlwimi	r5,r3,10,26,31		/* put in API (abbrev page index) */
+	/* Get the address of the primary PTE group in the hash table */
+	.globl	hash_page_patch_A
+hash_page_patch_A:
+	lis	r4,Hash_base@h		/* base address of hash table */
+	rlwimi	r4,r5,32-1,26-Hash_bits,25	/* (VSID & hash_mask) << 6 */
+	rlwinm	r0,r3,32-6,26-Hash_bits,25	/* (PI & hash_mask) << 6 */
+	xor	r4,r4,r0		/* make primary hash */
+
+	/* See whether it was a PTE not found exception or a
+	   protection violation. */
+	andis.	r0,r20,0x4000
+	li	r2,8			/* PTEs/group */
+	bne	10f			/* no PTE: go look for an empty slot */
+	tlbie	r3			/* invalidate TLB entry */
+
+	/* Search the primary PTEG for a PTE whose 1st word matches r5 */
+	mtctr	r2
+	addi	r3,r4,-8
+1:	lwzu	r0,8(r3)		/* get next PTE */
+	cmp	0,r0,r5
+	bdnzf	2,1b			/* loop while ctr != 0 && !cr0.eq */
+	beq+	found_slot
+
+	/* Search the secondary PTEG for a matching PTE */
+	ori	r5,r5,0x40		/* set H (secondary hash) bit */
+	.globl	hash_page_patch_B
+hash_page_patch_B:
+	xoris	r3,r4,Hash_msk>>16	/* compute secondary hash */
+	xori	r3,r3,0xffc0
+	addi	r3,r3,-8
+	mtctr	r2
+2:	lwzu	r0,8(r3)
+	cmp	0,r0,r5
+	bdnzf	2,2b
+	beq+	found_slot
+	xori	r5,r5,0x40		/* clear H bit again */
+
+	/* Search the primary PTEG for an empty slot */
+10:	mtctr	r2
+	addi	r3,r4,-8		/* search primary PTEG */
+1:	lwzu	r0,8(r3)		/* get next PTE */
+	rlwinm.	r0,r0,0,0,0		/* only want to check valid bit */
+	bdnzf	2,1b			/* loop while ctr != 0 && !cr0.eq */
+	beq+	found_empty
+
+	/* Search the secondary PTEG for an empty slot */
+	ori	r5,r5,0x40		/* set H (secondary hash) bit */
+	.globl	hash_page_patch_C
+hash_page_patch_C:
+	xoris	r3,r4,Hash_msk>>16	/* compute secondary hash */
+	xori	r3,r3,0xffc0
+	addi	r3,r3,-8
+	mtctr	r2
+2:
+	lwzu	r0,8(r3)
+	rlwinm.	r0,r0,0,0,0		/* only want to check valid bit */
+	bdnzf	2,2b
+	beq+	found_empty
+
+	/*
+	 * Choose an arbitrary slot in the primary PTEG to overwrite.
+	 * Since both the primary and secondary PTEGs are full, and we
+	 * have no information that the PTEs in the primary PTEG are
+	 * more important or useful than those in the secondary PTEG,
+	 * and we know there is a definite (although small) speed
+	 * advantage to putting the PTE in the primary PTEG, we always
+	 * put the PTE in the primary PTEG.
+	 */
+	xori	r5,r5,0x40		/* clear H bit again */
+	lis	r3,next_slot@ha
+	tophys(r3,r3)
+	lwz	r2,next_slot@l(r3)
+	addi	r2,r2,8
+	andi.	r2,r2,0x38
+	stw	r2,next_slot@l(r3)
+	add	r3,r4,r2
+11:		
+	/* update counter of evicted pages */
+	lis	r2,htab_evicts@ha
+	tophys(r2,r2)
+	lwz	r4,htab_evicts@l(r2)
+	addi	r4,r4,1
+	stw	r4,htab_evicts@l(r2)
+
+#ifndef CONFIG_SMP
+	/* Store PTE in PTEG */
+found_empty:
+	stw	r5,0(r3)
+found_slot:
+	stw	r6,4(r3)
+	sync
+
+#else /* CONFIG_SMP */
+/*
+ * Between the tlbie above and updating the hash table entry below,
+ * another CPU could read the hash table entry and put it in its TLB.
+ * There are 3 cases:
+ * 1. using an empty slot
+ * 2. updating an earlier entry to change permissions (i.e. enable write)
+ * 3. taking over the PTE for an unrelated address
+ *
+ * In each case it doesn't really matter if the other CPUs have the old
+ * PTE in their TLB.  So we don't need to bother with another tlbie here,
+ * which is convenient as we've overwritten the register that had the
+ * address. :-)  The tlbie above is mainly to make sure that this CPU comes
+ * and gets the new PTE from the hash table.
+ *
+ * We do however have to make sure that the PTE is never in an invalid
+ * state with the V bit set.
+ */
+found_empty:
+found_slot:
+	rlwinm	r5,r5,0,1,31	/* clear V (valid) bit in PTE */
+	stw	r5,0(r3)
 	sync
 	tlbsync
 	sync
@@ -324,7 +425,8 @@ found_slot:
 	sync
 	oris	r5,r5,0x8000
 	stw	r5,0(r3)	/* finally set V bit in PTE */
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
+#endif /* CONFIG_PPC64BRIDGE */
 
 /*
  * Update the hash table miss count.  We only want misses here
@@ -342,7 +444,7 @@ found_slot:
 	addi	r3,r3,1
 	stw	r3,htab_reloads@l(r2)
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	lis	r2,hash_table_lock@ha
 	tophys(r2,r2)
 	li	r0,0
@@ -371,9 +473,9 @@ found_slot:
 	lwz	r22,GPR22(r21)
 	lwz	r23,GPR23(r21)
 	lwz	r21,GPR21(r21)
-	rfi
+	RFI
 	
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 hash_page_out:
 	lis	r2,hash_table_lock@ha
 	tophys(r2,r2)
@@ -386,7 +488,7 @@ hash_page_out:
 	.globl	hash_table_lock
 hash_table_lock:
 	.long	0
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 
 	.data
 next_slot:
@@ -404,13 +506,13 @@ _GLOBAL(flush_hash_segments)
 	bne+	99f
 	tlbia
 	sync
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	tlbsync
 	sync
 #endif
 	blr
 99:
-#ifdef __SMP__
+#if defined(CONFIG_SMP) || defined(CONFIG_PPC64BRIDGE)
 	/* Note - we had better not do anything which could generate
 	   a hash table miss while we have the hash table locked,
 	   or we'll get a deadlock.  -paulus */
@@ -419,6 +521,8 @@ _GLOBAL(flush_hash_segments)
 	rlwinm	r0,r10,0,17,15	/* clear bit 16 (MSR_EE) */
 	mtmsr	r0
 	SYNC
+#endif
+#ifdef CONFIG_SMP
 	lis	r9,hash_table_lock@h
 	ori	r9,r9,hash_table_lock@l
 	lwz	r8,PROCESSOR(r2)
@@ -430,6 +534,7 @@ _GLOBAL(flush_hash_segments)
 	bne-	10b
 	eieio
 #endif
+#ifndef CONFIG_PPC64BRIDGE
 	rlwinm	r3,r3,7,1,24		/* put VSID lower limit in position */
 	oris	r3,r3,0x8000		/* set V bit */
 	rlwinm	r4,r4,7,1,24		/* put VSID upper limit in position */
@@ -448,14 +553,36 @@ _GLOBAL(flush_hash_segments)
 	blt	2f			/* branch if out of range */
 	stw	r0,0(r5)		/* invalidate entry */
 2:	bdnz	1b			/* continue with loop */
+#else /* CONFIG_PPC64BRIDGE */
+	rldic	r3,r3,12,20		/* put VSID lower limit in position */
+	ori	r3,r3,1			/* set V bit */
+	rldic	r4,r4,12,20		/* put VSID upper limit in position */
+	ori	r4,r4,0xfff		/* set V bit, API etc. */
+	lis	r6,Hash_size@ha
+	lwz	r6,Hash_size@l(r6)	/* size in bytes */
+	srwi	r6,r6,4			/* # PTEs */
+	mtctr	r6
+	addi	r5,r5,-16
+	li	r0,0
+1:	ldu	r6,16(r5)		/* get next tag word */
+	cmpld	0,r6,r3
+	cmpld	1,r6,r4
+	cror	0,0,5			/* set cr0.lt if out of range */
+	blt	2f			/* branch if out of range */
+	std	r0,0(r5)		/* invalidate entry */
+2:	bdnz	1b			/* continue with loop */
+#endif /* CONFIG_PPC64BRIDGE */
+
 	sync
 	tlbia
 	sync
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	tlbsync
 	sync
 	lis	r3,hash_table_lock@ha
 	stw	r0,hash_table_lock@l(r3)
+#endif
+#if defined(CONFIG_SMP) || defined(CONFIG_PPC64BRIDGE)
 	mtmsr	r10
 	SYNC
 #endif
@@ -467,19 +594,24 @@ _GLOBAL(flush_hash_segments)
  * flush_hash_page(unsigned context, unsigned long va)
  */
 _GLOBAL(flush_hash_page)
+#ifdef CONFIG_MOL
+	mflr    r10
+	MOL_HOOK_MMU(10, r6)
+	mtlr    r10
+#endif
 	lis	r6,Hash@ha
 	lwz	r6,Hash@l(r6)		/* hash table base */
 	cmpwi	0,r6,0			/* hash table in use? */
 	bne+	99f
 	tlbie	r4			/* in hw tlb too */
 	sync
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	tlbsync
 	sync
 #endif
 	blr
 99:
-#ifdef __SMP__
+#if defined(CONFIG_SMP) || defined(CONFIG_PPC64BRIDGE)
 	/* Note - we had better not do anything which could generate
 	   a hash table miss while we have the hash table locked,
 	   or we'll get a deadlock.  -paulus */
@@ -488,6 +620,8 @@ _GLOBAL(flush_hash_page)
 	rlwinm	r0,r10,0,17,15		/* clear bit 16 (MSR_EE) */
 	mtmsr	r0
 	SYNC
+#endif
+#ifdef CONFIG_SMP
 	lis	r9,hash_table_lock@h
 	ori	r9,r9,hash_table_lock@l
 	lwz	r8,PROCESSOR(r2)
@@ -499,6 +633,7 @@ _GLOBAL(flush_hash_page)
 	bne-	10b
 	eieio
 #endif
+#ifndef CONFIG_PPC64BRIDGE
 	rlwinm	r3,r3,11,1,20		/* put context into vsid */
 	rlwimi	r3,r4,11,21,24		/* put top 4 bits of va into vsid */
 	oris	r3,r3,0x8000		/* set V (valid) bit */
@@ -528,14 +663,47 @@ _GLOBAL(flush_hash_page)
 	bne	4f			/* if we didn't find it */
 3:	li	r0,0
 	stw	r0,0(r7)		/* invalidate entry */
+#else /* CONFIG_PPC64BRIDGE */
+	rldic	r3,r3,16,16		/* put context into vsid (<< 12) */
+	rlwimi	r3,r4,16,16,24		/* top 4 bits of va and API */
+	ori	r3,r3,1			/* set V (valid) bit */
+	rlwinm	r7,r4,32-5,9,24		/* get page index << 7 */
+	srdi	r5,r3,5			/* vsid << 7 */
+	rlwinm	r5,r5,0,1,24		/* vsid << 7 (limited to 24 bits) */
+	xor	r7,r7,r5		/* primary hash << 7 */
+	lis	r5,Hash_mask@ha
+	lwz	r5,Hash_mask@l(r5)	/* hash mask */
+	slwi	r5,r5,7			/*  << 7 */
+	and	r7,r7,r5
+	add	r6,r6,r7		/* address of primary PTEG */
+	li	r8,8
+	mtctr	r8
+	addi	r7,r6,-16
+1:	ldu	r0,16(r7)		/* get next PTE */
+	cmpd	0,r0,r3			/* see if tag matches */
+	bdnzf	2,1b			/* while --ctr != 0 && !cr0.eq */
+	beq	3f			/* if we found it */
+	ori	r3,r3,2			/* set H (alt. hash) bit */
+	xor	r6,r6,r5		/* address of secondary PTEG */
+	mtctr	r8
+	addi	r7,r6,-16
+2:	ldu	r0,16(r7)		/* get next PTE */
+	cmpd	0,r0,r3			/* see if tag matches */
+	bdnzf	2,2b			/* while --ctr != 0 && !cr0.eq */
+	bne	4f			/* if we didn't find it */
+3:	li	r0,0
+	std	r0,0(r7)		/* invalidate entry */
+#endif /* CONFIG_PPC64BRIDGE */
 4:	sync
 	tlbie	r4			/* in hw tlb too */
 	sync
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	tlbsync
 	sync
 	li	r0,0
 	stw	r0,0(r9)		/* clear hash_table_lock */
+#endif
+#if defined(CONFIG_SMP) || defined(CONFIG_PPC64BRIDGE)
 	mtmsr	r10
 	SYNC
 #endif

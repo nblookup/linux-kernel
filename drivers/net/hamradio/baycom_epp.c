@@ -200,8 +200,6 @@ struct baycom_state {
 	unsigned int bitrate;
 	unsigned char stat;
 
-	char ifname[HDLCDRV_IFNAMELEN];
-
 	struct {
 		unsigned int intclk;
 		unsigned int fclk;
@@ -444,7 +442,7 @@ static void inline do_kiss_params(struct baycom_state *bc,
 {
 
 #ifdef KISS_VERBOSE
-#define PKP(a,b) printk(KERN_INFO "%s: channel params: " a "\n", bc->ifname, b)
+#define PKP(a,b) printk(KERN_INFO "baycomm_epp: channel params: " a "\n", b)
 #else /* KISS_VERBOSE */	      
 #define PKP(a,b) 
 #endif /* KISS_VERBOSE */	      
@@ -702,7 +700,7 @@ static void do_rxpacket(struct net_device *dev)
 		return;
 	pktlen = bc->hdlcrx.bufcnt-2+1; /* KISS kludge */
 	if (!(skb = dev_alloc_skb(pktlen))) {
-		printk("%s: memory squeeze, dropping packet\n", bc->ifname);
+		printk("%s: memory squeeze, dropping packet\n", dev->name);
 		bc->stats.rx_dropped++;
 		return;
 	}
@@ -816,7 +814,7 @@ static int receive(struct net_device *dev, int cnt)
 #ifdef __i386__
 #define GETTICK(x)                                                \
 ({                                                                \
-	if (current_cpu_data.x86_capability & X86_FEATURE_TSC)    \
+	if (cpu_has_tsc)                                          \
 		__asm__ __volatile__("rdtsc" : "=a" (x) : : "dx");\
 })
 #else /* __i386__ */
@@ -1025,7 +1023,8 @@ static int epp_open(struct net_device *dev)
 	struct baycom_state *bc;
         struct parport *pp;
 	const struct tq_struct run_bh = {
-		0, 0, (void *)(void *)epp_bh, dev
+		routine: (void *)(void *)epp_bh,
+		data: dev
 	};
 	unsigned int i, j;
 	unsigned char tmp[128];
@@ -1254,7 +1253,7 @@ static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		break;
 
 	case HDLCDRVCTL_SETCHANNELPAR:
-		if (!suser())
+		if (!capable(CAP_NET_ADMIN))
 			return -EACCES;
 		bc->ch_params.tx_delay = hi.data.cp.tx_delay;
 		bc->ch_params.tx_tail = hi.data.cp.tx_tail;
@@ -1275,7 +1274,7 @@ static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		break;
 
 	case HDLCDRVCTL_SETMODEMPAR:
-		if ((!suser()) || netif_running(dev))
+		if ((!capable(CAP_SYS_RAWIO)) || netif_running(dev))
 			return -EACCES;
 		dev->base_addr = hi.data.mp.iobase;
 		dev->irq = /*hi.data.mp.irq*/0;
@@ -1299,6 +1298,8 @@ static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		break;		
 
 	case HDLCDRVCTL_CALIBRATE:
+		if (!capable(CAP_SYS_RAWIO))
+			return -EACCES;
 		bc->hdlctx.calibrate = hi.data.calibrate * bc->bitrate / 8;
 		return 0;
 
@@ -1314,7 +1315,7 @@ static int baycom_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		break;
 
 	case HDLCDRVCTL_SETMODE:
-		if (!suser() || netif_running(dev))
+		if (!capable(CAP_NET_ADMIN) || netif_running(dev))
 			return -EACCES;
 		hi.data.modename[sizeof(hi.data.modename)-1] = '\0';
 		return baycom_setmode(bc, hi.data.modename);
@@ -1448,20 +1449,19 @@ static int __init init_baycomepp(void)
 		 */
 		memset(bc, 0, sizeof(struct baycom_state));
 		bc->magic = BAYCOM_MAGIC;
-		sprintf(bc->ifname, "bce%d", i);
+		sprintf(dev->name, "bce%d", i);
 		bc->cfg.fclk = 19666600;
 		bc->cfg.bps = 9600;
 		/*
 		 * initialize part of the device struct
 		 */
-		dev->name = bc->ifname;
 		dev->if_port = 0;
 		dev->init = baycom_probe;
 		dev->base_addr = iobase[i];
 		dev->irq = 0;
 		dev->dma = 0;
 		if (register_netdev(dev)) {
-			printk(KERN_WARNING "%s: cannot register net device %s\n", bc_drvname, bc->ifname);
+			printk(KERN_WARNING "%s: cannot register net device %s\n", bc_drvname, dev->name);
 			kfree(dev->priv);
 			return -ENXIO;
 		}

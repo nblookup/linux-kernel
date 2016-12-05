@@ -256,7 +256,7 @@ void hpfs_set_ea(struct inode *, struct fnode *, char *, char *, int);
 
 int hpfs_file_release(struct inode *, struct file *);
 int hpfs_open(struct inode *, struct file *);
-int hpfs_file_fsync(struct file *, struct dentry *);
+int hpfs_file_fsync(struct file *, struct dentry *, int);
 secno hpfs_bmap(struct inode *, unsigned);
 void hpfs_truncate(struct inode *);
 int hpfs_get_block(struct inode *inode, long iblock, struct buffer_head *bh_result, int create);
@@ -301,7 +301,7 @@ int hpfs_mknod(struct inode *, struct dentry *, int, int);
 int hpfs_symlink(struct inode *, struct dentry *, const char *);
 int hpfs_unlink(struct inode *, struct dentry *);
 int hpfs_rmdir(struct inode *, struct dentry *);
-int hpfs_symlink_readpage(struct dentry *, struct page *);
+int hpfs_symlink_readpage(struct file *, struct page *);
 int hpfs_rename(struct inode *, struct dentry *, struct inode *, struct dentry *);
 
 /* super.c */
@@ -312,6 +312,5 @@ int hpfs_remount_fs(struct super_block *, int *, char *);
 void hpfs_put_super(struct super_block *);
 unsigned hpfs_count_one_bitmap(struct super_block *, secno);
 int hpfs_statfs(struct super_block *, struct statfs *);
-struct super_block *hpfs_read_super(struct super_block *, void *, int);
 
 extern struct address_space_operations hpfs_aops;

@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1998 Harald Koerfgen, Frieder Streffer and Paul M. Antoine
  *
- * $Id: memory.c,v 1.4 2000/02/13 20:52:05 harald Exp $
+ * $Id: memory.c,v 1.3 1999/10/09 00:00:58 ralf Exp $
  */
 #include <linux/init.h>
 #include <linux/config.h>
@@ -149,12 +149,12 @@ void prom_free_prom_memory (void)
 
 	addr = PAGE_SIZE;
 	while (addr < end) {
-		ClearPageReserved(mem_map + MAP_NR(addr));
-		set_page_count(mem_map + MAP_NR(addr), 1);
+		ClearPageReserved(virt_to_page(addr));
+		set_page_count(virt_to_page(addr), 1);
 		free_page(addr);
 		addr += PAGE_SIZE;
 	}
 
-	printk("Freeing unused PROM memory: %dk freed\n",
+	printk("Freeing unused PROM memory: %ldk freed\n",
 	       (end - PAGE_SIZE) >> 10);
 }

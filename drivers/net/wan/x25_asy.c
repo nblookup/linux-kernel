@@ -9,6 +9,9 @@
  *	recommendations. Its primarily for testing purposes. If you wanted
  *	to do CCITT then in theory all you need is to nick the HDLC async
  *	checksum routines from ppp.c
+ *      Changes:
+ *
+ *	2000-10-29	Henner Eisen	lapb_data_indication() return status.
  */
 
 #include <linux/module.h>
@@ -32,7 +35,6 @@
 #include "x25_asy.h"
 
 typedef struct x25_ctrl {
-	char		if_name[8];	/* "xasy0\0" .. "xasy99999\0"	*/
 	struct x25_asy	ctrl;		/* X.25 things			*/
 	struct net_device	dev;		/* the device			*/
 } x25_asy_ctrl_t;
@@ -82,8 +84,7 @@ static inline struct x25_asy *x25_asy_alloc(void)
 		/* Initialize channel control data */
 		set_bit(SLF_INUSE, &slp->ctrl.flags);
 		slp->ctrl.tty         = NULL;
-		sprintf(slp->if_name, "x25asy%d", i);
-		slp->dev.name         = slp->if_name;
+		sprintf(slp->dev.name, "x25asy%d", i);
 		slp->dev.base_addr    = i;
 		slp->dev.priv         = (void*)&(slp->ctrl);
 		slp->dev.next         = NULL;
@@ -392,9 +393,9 @@ static int x25_asy_xmit(struct sk_buff *skb, struct net_device *dev)
  *	at the net layer.
  */
   
-static void x25_asy_data_indication(void *token, struct sk_buff *skb)
+static int x25_asy_data_indication(void *token, struct sk_buff *skb)
 {
-	netif_rx(skb);
+	return netif_rx(skb);
 }
 
 /*

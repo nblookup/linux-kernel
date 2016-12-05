@@ -1,4 +1,4 @@
-/* $Id: unaligned.c,v 1.18 1999/08/02 08:39:44 davem Exp $
+/* $Id: unaligned.c,v 1.20 2000/04/29 08:05:21 anton Exp $
  * unaligned.c: Unaligned load/store trap handling with special
  *              cases for the kernel to do them more quickly.
  *
@@ -360,10 +360,12 @@ void kernel_mna_trap_fault(struct pt_regs *regs, unsigned int insn)
         	} else
                 	printk(KERN_ALERT "Unable to handle kernel paging request in mna handler");
 	        printk(KERN_ALERT " at virtual address %016lx\n",address);
-        	printk(KERN_ALERT "current->mm->context = %016lx\n",
-	               (unsigned long) current->mm->context);
-	        printk(KERN_ALERT "current->mm->pgd = %016lx\n",
-        	       (unsigned long) current->mm->pgd);
+		printk(KERN_ALERT "current->{mm,active_mm}->context = %016lx\n",
+			(current->mm ? current->mm->context :
+			current->active_mm->context));
+		printk(KERN_ALERT "current->{mm,active_mm}->pgd = %016lx\n",
+			(current->mm ? (unsigned long) current->mm->pgd :
+			(unsigned long) current->active_mm->pgd));
 	        die_if_kernel("Oops", regs);
 		/* Not reached */
 	}
@@ -590,9 +592,19 @@ void handle_ld_nf(u32 insn, struct pt_regs *regs)
 	                        
 	maybe_flush_windows(0, 0, rd, from_kernel);
 	reg = fetch_reg_addr(rd, regs);
-	if ((insn & 0x780000) == 0x180000)
-		reg[1] = 0;
-	reg[0] = 0;
+	if (from_kernel || rd < 16) {
+		reg[0] = 0;
+		if ((insn & 0x780000) == 0x180000)
+			reg[1] = 0;
+	} else if (current->thread.flags & SPARC_FLAG_32BIT) {
+		put_user(0, (int *)reg);
+		if ((insn & 0x780000) == 0x180000)
+			put_user(0, ((int *)reg) + 1);
+	} else {
+		put_user(0, reg);
+		if ((insn & 0x780000) == 0x180000)
+			put_user(0, reg + 1);
+	}
 	advance(regs);
 }
 

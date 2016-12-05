@@ -31,6 +31,13 @@
 #include <asm/cache.h>
 #include <asm/pgtable.h>
 	
+/* XXX need definitions here for 16 byte cachelines on some/all 8xx
+   -- paulus */
+CACHELINE_BYTES = 32
+LG_CACHELINE_BYTES = 5
+CACHELINE_MASK = 0x1f
+CACHELINE_WORDS = 8
+
 	.text
 	.globl	_stext
 _stext:
@@ -90,6 +97,9 @@ __start:
 	li	r8, 0
 	mtspr	MI_CTR, r8	/* Set instruction control to zero */
 	lis	r8, MD_RESETVAL@h
+#ifndef CONFIG_8xx_COPYBACK
+	oris	r8, r8, MD_WTDEF@h
+#endif
 	mtspr	MD_CTR, r8	/* Set data TLB control */
 
 	/* Now map the lower 8 Meg into the TLBs.  For this quick hack,
@@ -136,7 +146,7 @@ __start:
 	mtspr	DC_CST, r8
 	lis	r8, IDC_ENABLE@h
 	mtspr	IC_CST, r8
-#if 0
+#ifdef CONFIG_8xx_COPYBACK
 	mtspr	DC_CST, r8
 #else
 	/* For a debug option, I left this here to easily enable
@@ -356,15 +366,36 @@ SystemCall:
  * only perform the attribute functions.
  */
 InstructionTLBMiss:
+#ifdef CONFIG_8xx_CPU6
+	stw	r3, 8(r0)
+	li	r3, 0x3f80
+	stw	r3, 12(r0)
+	lwz	r3, 12(r0)
+#endif
 	mtspr	M_TW, r20	/* Save a couple of working registers */
 	mfcr	r20
 	stw	r20, 0(r0)
 	stw	r21, 4(r0)
 	mfspr	r20, SRR0	/* Get effective address of fault */
+#ifdef CONFIG_8xx_CPU6
+	li	r3, 0x3780
+	stw	r3, 12(r0)
+	lwz	r3, 12(r0)
+#endif
 	mtspr	MD_EPN, r20	/* Have to use MD_EPN for walk, MI_EPN can't */
 	mfspr	r20, M_TWB	/* Get level 1 table entry address */
+
+	/* If we are faulting a kernel address, we have to use the
+	 * kernel page tables.
+	 */
+	andi.	r21, r20, 0x0800	/* Address >= 0x80000000 */
+	beq	3f
+	lis	r21, swapper_pg_dir@h
+	ori	r21, r21, swapper_pg_dir@l
+	rlwimi	r20, r21, 0, 2, 19
+3:
 	lwz	r21, 0(r20)	/* Get the level 1 entry */
-	rlwinm.	r20, r21,0,0,20	/* Extract page descriptor page address */
+	rlwinm.	r20, r21,0,0,19	/* Extract page descriptor page address */
 	beq	2f		/* If zero, don't try to find a pte */
 
 	/* We have a pte table, so load the MI_TWC with the attributes
@@ -372,88 +403,141 @@ InstructionTLBMiss:
 	 */
 	tophys(r21,r21)
 	ori	r21,r21,1		/* Set valid bit */
+#ifdef CONFIG_8xx_CPU6
+	li	r3, 0x2b80
+	stw	r3, 12(r0)
+	lwz	r3, 12(r0)
+#endif
 	mtspr	MI_TWC, r21	/* Set page attributes */
+#ifdef CONFIG_8xx_CPU6
+	li	r3, 0x3b80
+	stw	r3, 12(r0)
+	lwz	r3, 12(r0)
+#endif
 	mtspr	MD_TWC, r21	/* Load pte table base address */
 	mfspr	r21, MD_TWC	/* ....and get the pte address */
-	lwz	r21, 0(r21)	/* Get the pte */
+	lwz	r20, 0(r21)	/* Get the pte */
+#if 0
+	ori	r20, r20, _PAGE_ACCESSED
+	stw	r20, 0(r21)
+#endif
 
 	/* Set four subpage valid bits (24, 25, 26, and 27).
-	 * Since we currently run MI_CTR.PPCS = 0, the manual says,
-	 *	"If the page size is larger than 4k byte, then all the
-	 *	 4 bits should have the same value."
-	 * I don't really know what to do if the page size is 4k Bytes,
-	 * but I know setting them all to 0 does not work, and setting them
-	 * all to 1 does, so that is the way it is right now.
-	 * BTW, these four bits map to the software only bits in the
-	 * linux page table.  I used to turn them all of, but now just
-	 * set them all for the hardware.
-	li	r20, 0x00f0
-	andc	r20, r21, r20
-	ori	r20, r20, 0x0080
+	 * Clear bit 28 (which should be in the PTE, but we do this anyway).
 	 */
-	ori	r20, r21, 0x00f0
-
+	li	r21, 0x00f0
+	rlwimi	r20, r21, 0, 24, 28
+#ifdef CONFIG_8xx_CPU6
+	li	r3, 0x2d80
+	stw	r3, 12(r0)
+	lwz	r3, 12(r0)
+#endif
 	mtspr	MI_RPN, r20	/* Update TLB entry */
 
 	mfspr	r20, M_TW	/* Restore registers */
 	lwz	r21, 0(r0)
 	mtcr	r21
 	lwz	r21, 4(r0)
+#ifdef CONFIG_8xx_CPU6
+	lwz	r3, 8(r0)
+#endif
 	rfi
 
 2:	mfspr	r20, M_TW	/* Restore registers */
 	lwz	r21, 0(r0)
 	mtcr	r21
 	lwz	r21, 4(r0)
+#ifdef CONFIG_8xx_CPU6
+	lwz	r3, 8(r0)
+#endif
 	b	InstructionAccess
 
 	. = 0x1200
 DataStoreTLBMiss:
+#ifdef CONFIG_8xx_CPU6
+	stw	r3, 8(r0)
+	li	r3, 0x3f80
+	stw	r3, 12(r0)
+	lwz	r3, 12(r0)
+#endif
 	mtspr	M_TW, r20	/* Save a couple of working registers */
 	mfcr	r20
 	stw	r20, 0(r0)
 	stw	r21, 4(r0)
 	mfspr	r20, M_TWB	/* Get level 1 table entry address */
+
+	/* If we are faulting a kernel address, we have to use the
+	 * kernel page tables.
+	 */
+	andi.	r21, r20, 0x0800
+	beq	3f
+	lis	r21, swapper_pg_dir@h
+	ori	r21, r21, swapper_pg_dir@l
+	rlwimi r20, r21, 0, 2, 19
+3:
 	lwz	r21, 0(r20)	/* Get the level 1 entry */
-	rlwinm.	r20, r21,0,0,20	/* Extract page descriptor page address */
+	rlwinm.	r20, r21,0,0,19	/* Extract page descriptor page address */
 	beq	2f		/* If zero, don't try to find a pte */
 
 	/* We have a pte table, so load fetch the pte from the table.
 	 */
 	tophys(r21, r21)
 	ori	r21, r21, 1	/* Set valid bit in physical L2 page */
+#ifdef CONFIG_8xx_CPU6
+	li	r3, 0x3b80
+	stw	r3, 12(r0)
+	lwz	r3, 12(r0)
+#endif
 	mtspr	MD_TWC, r21	/* Load pte table base address */
-	mfspr	r21, MD_TWC	/* ....and get the pte address */
-	lwz	r21, 0(r21)	/* Get the pte */
+	mfspr	r20, MD_TWC	/* ....and get the pte address */
+	lwz	r20, 0(r20)	/* Get the pte */
+
+	/* Insert the Guarded flag into the TWC from the Linux PTE.
+	 * It is bit 27 of both the Linux PTE and the TWC (at least
+	 * I got that right :-).  It will be better when we can put
+	 * this into the Linux pgd/pmd and load it in the operation
+	 * above.
+	 */
+	rlwimi	r21, r20, 0, 27, 27
+#ifdef CONFIG_8xx_CPU6
+	li	r3, 0x3b80
+	stw	r3, 12(r0)
+	lwz	r3, 12(r0)
+#endif
+	mtspr	MD_TWC, r21
 
 	/* Set four subpage valid bits (24, 25, 26, and 27).
-	 * Since we currently run MD_CTR.PPCS = 0, the manual says,
-	 *	"If the page size is larger than 4k byte, then all the
-	 *	 4 bits should have the same value."
-	 * I don't really know what to do if the page size is 4k Bytes,
-	 * but I know setting them all to 0 does not work, and setting them
-	 * all to 1 does, so that is the way it is right now.
-	 * BTW, these four bits map to the software only bits in the
-	 * linux page table.  I used to turn them all of, but now just
-	 * set them all for the hardware.
-	li	r20, 0x00f0
-	andc	r20, r21, r20
-	ori	r20, r20, 0x0080
+	 * Clear bit 28 (which should be in the PTE, but we do this anyway).
 	 */
-	ori	r20, r21, 0x00f0
-
+#if 0
+	ori	r20, r20, 0x00f0
+#else
+	li	r21, 0x00f0
+	rlwimi	r20, r21, 0, 24, 28
+#endif
+#ifdef CONFIG_8xx_CPU6
+	li	r3, 0x3d80
+	stw	r3, 12(r0)
+	lwz	r3, 12(r0)
+#endif
 	mtspr	MD_RPN, r20	/* Update TLB entry */
 
 	mfspr	r20, M_TW	/* Restore registers */
 	lwz	r21, 0(r0)
 	mtcr	r21
 	lwz	r21, 4(r0)
+#ifdef CONFIG_8xx_CPU6
+	lwz	r3, 8(r0)
+#endif
 	rfi
 
 2:	mfspr	r20, M_TW	/* Restore registers */
 	lwz	r21, 0(r0)
 	mtcr	r21
 	lwz	r21, 4(r0)
+#ifdef CONFIG_8xx_CPU6
+	lwz	r3, 8(r0)
+#endif
 	b	DataAccess
 
 /* This is an instruction TLB error on the MPC8xx.  This could be due
@@ -474,6 +558,12 @@ InstructionTLBError:
  */
 	. = 0x1400
 DataTLBError:
+#ifdef CONFIG_8xx_CPU6
+	stw	r3, 8(r0)
+	li	r3, 0x3f80
+	stw	r3, 12(r0)
+	lwz	r3, 12(r0)
+#endif
 	mtspr	M_TW, r20	/* Save a couple of working registers */
 	mfcr	r20
 	stw	r20, 0(r0)
@@ -486,53 +576,70 @@ DataTLBError:
 	beq	2f
 
 	mfspr	r20, M_TWB	/* Get level 1 table entry address */
+
+	/* If we are faulting a kernel address, we have to use the
+	 * kernel page tables.
+	 */
+	andi.	r21, r20, 0x0800
+	beq	3f
+	lis	r21, swapper_pg_dir@h
+	ori	r21, r21, swapper_pg_dir@l
+	rlwimi	r20, r21, 0, 2, 19
+3:
 	lwz	r21, 0(r20)	/* Get the level 1 entry */
-	rlwinm.	r20, r21,0,0,20	/* Extract page descriptor page address */
+	rlwinm.	r20, r21,0,0,19	/* Extract page descriptor page address */
 	beq	2f		/* If zero, bail */
 
 	/* We have a pte table, so fetch the pte from the table.
 	 */
 	tophys(r21, r21)
 	ori	r21, r21, 1		/* Set valid bit in physical L2 page */
+#ifdef CONFIG_8xx_CPU6
+	li	r3, 0x3b80
+	stw	r3, 12(r0)
+	lwz	r3, 12(r0)
+#endif
 	mtspr	MD_TWC, r21		/* Load pte table base address */
 	mfspr	r21, MD_TWC		/* ....and get the pte address */
-	lwz	r21, 0(r21)		/* Get the pte */
+	lwz	r20, 0(r21)		/* Get the pte */
 
-	andi.	r20, r21, _PAGE_RW	/* Is it writeable? */
+	andi.	r21, r20, _PAGE_RW	/* Is it writeable? */
 	beq	2f			/* Bail out if not */
 
-	ori	r21, r21, _PAGE_DIRTY	/* Update changed bit */
-	mfspr	r20, MD_TWC		/* Get pte address again */
-	stw	r21, 0(r20)		/* and update pte in table */
+	/* Update 'changed', among others.
+	*/
+	ori	r20, r20, _PAGE_DIRTY|_PAGE_HWWRITE|_PAGE_ACCESSED
+	mfspr	r21, MD_TWC		/* Get pte address again */
+	stw	r20, 0(r21)		/* and update pte in table */
 
 	/* Set four subpage valid bits (24, 25, 26, and 27).
-	 * Since we currently run MD_CTR.PPCS = 0, the manual says,
-	 *	"If the page size is larger than 4k byte, then all the
-	 *	 4 bits should have the same value."
-	 * I don't really know what to do if the page size is 4k Bytes,
-	 * but I know setting them all to 0 does not work, and setting them
-	 * all to 1 does, so that is the way it is right now.
-	 * BTW, these four bits map to the software only bits in the
-	 * linux page table.  I used to turn them all of, but now just
-	 * set them all for the hardware.
-	li	r20, 0x00f0
-	andc	r20, r21, r20
-	ori	r20, r20, 0x0080
+	 * Clear bit 28 (which should be in the PTE, but we do this anyway).
 	 */
-	ori	r20, r21, 0x00f0
-
+	li	r21, 0x00f0
+	rlwimi	r20, r21, 0, 24, 28
+#ifdef CONFIG_8xx_CPU6
+	li	r3, 0x3d80
+	stw	r3, 12(r0)
+	lwz	r3, 12(r0)
+#endif
 	mtspr	MD_RPN, r20	/* Update TLB entry */
 
 	mfspr	r20, M_TW	/* Restore registers */
 	lwz	r21, 0(r0)
 	mtcr	r21
 	lwz	r21, 4(r0)
+#ifdef CONFIG_8xx_CPU6
+	lwz	r3, 8(r0)
+#endif
 	rfi
 2:
 	mfspr	r20, M_TW	/* Restore registers */
 	lwz	r21, 0(r0)
 	mtcr	r21
 	lwz	r21, 4(r0)
+#ifdef CONFIG_8xx_CPU6
+	lwz	r3, 8(r0)
+#endif
 	b	DataAccess
 
 	STD_EXCEPTION(0x1500, Trap_15, UnknownException)
@@ -542,6 +649,7 @@ DataTLBError:
 	STD_EXCEPTION(0x1900, Trap_19, UnknownException)
 	STD_EXCEPTION(0x1a00, Trap_1a, UnknownException)
 	STD_EXCEPTION(0x1b00, Trap_1b, UnknownException)
+
 /* On the MPC8xx, these next four traps are used for development
  * support of breakpoints and such.  Someday I will get around to
  * using them.
@@ -649,7 +757,7 @@ relocate_kernel:
 copy_and_flush:
 	addi	r5,r5,-4
 	addi	r6,r6,-4
-4:	li	r0,8
+4:	li	r0,CACHELINE_WORDS
 	mtctr	r0
 3:	addi	r6,r6,4			/* copy a cache line */
 	lwzx	r0,r6,r4
@@ -698,7 +806,7 @@ __secondary_hold:
  * This is where the main kernel code starts.
  */
 start_here:
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	/* if we're the second cpu stack and r2 are different
 	* and we want to not clear the bss -- Cort */
 	lis	r5,first_cpu_booted@h
@@ -715,7 +823,7 @@ start_here:
 	lwz	r2,0(r2)
 	b	10f
 99:	
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 	/* ptr to current */
 	lis	r2,init_task_union@h
 	ori	r2,r2,init_task_union@l
@@ -734,9 +842,9 @@ start_here:
 3:	stwu	r0,4(r8)
 	bdnz	3b
 2:
-#ifdef __SMP__	
+#ifdef CONFIG_SMP	
 10:
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 	/* stack */
 	addi	r1,r2,TASK_UNION_SIZE
 	li	r0,0
@@ -766,6 +874,13 @@ start_here:
 	lis	r6, swapper_pg_dir@h
 	tophys(r6,r6)
 	ori	r6, r6, swapper_pg_dir@l
+#ifdef CONFIG_8xx_CPU6
+	lis	r4, cpu6_errata_word@h
+	ori	r4, r4, cpu6_errata_word@l
+	li	r3, 0x3980
+	stw	r3, 12(r4)
+	lwz	r3, 12(r4)
+#endif
 	mtspr	M_TWB, r6
 	lis	r4,2f@h
 	ori	r4,r4,2f@l
@@ -779,7 +894,7 @@ start_here:
 	SYNC			/* Force all PTE updates to finish */
 	tlbia			/* Clear all TLB entries */
 	sync			/* wait for tlbia/tlbie to finish */
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	tlbsync			/* ... on all CPUs */
 	sync
 #endif
@@ -794,7 +909,7 @@ start_here:
 	li	r4,MSR_KERNEL
 	lis	r3,start_kernel@h
 	ori	r3,r3,start_kernel@l
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	/* the second time through here we go to
 	 * start_secondary(). -- Cort
 	 */
@@ -807,7 +922,7 @@ start_here:
 	lis	r3,start_secondary@h
 	ori	r3,r3,start_secondary@l
 10:	
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 	mtspr	SRR0,r3
 	mtspr	SRR1,r4
 	rfi			/* enable MMU and jump to start_kernel */
@@ -832,7 +947,23 @@ start_here:
  * ASID compare register with the new "context".
  */
 _GLOBAL(set_context)
+#ifdef CONFIG_8xx_CPU6
+	lis	r6, cpu6_errata_word@h
+	ori	r6, r6, cpu6_errata_word@l
+	tophys	(r4, r4)
+	li	r7, 0x3980
+	stw	r7, 12(r6)
+	lwz	r7, 12(r6)
+        mtspr   M_TWB, r4               /* Update MMU base address */
+	li	r7, 0x3380
+	stw	r7, 12(r6)
+	lwz	r7, 12(r6)
+        mtspr   M_CASID, r3             /* Update context */
+#else
         mtspr   M_CASID,r3		/* Update context */
+	tophys	(r4, r4)
+	mtspr	M_TWB, r4		/* and pgd */
+#endif
         tlbia
 	SYNC
 	blr
@@ -856,6 +987,24 @@ m8xx_gorom:
 2:
        mtlr    r4
        blr
+
+#ifdef CONFIG_8xx_CPU6
+/* It's here because it is unique to the 8xx.
+ * It is important we get called with interrupts disabled.  I used to
+ * do that, but it appears that all code that calls this already had
+ * interrupt disabled.
+ */
+	.globl	set_dec_cpu6
+set_dec_cpu6:
+	lis	r7, cpu6_errata_word@h
+	ori	r7, r7, cpu6_errata_word@l
+	li	r4, 0x2c00
+	stw	r4, 8(r7)
+	lwz	r4, 8(r7)
+        mtspr   22, r3		/* Update Decrementer */
+	SYNC
+	blr
+#endif
 	
 /*
  * We put a few things here that have to be page-aligned.
@@ -880,3 +1029,10 @@ swapper_pg_dir:
 	.globl	cmd_line
 cmd_line:
 	.space	512
+
+#ifdef CONFIG_8xx_CPU6
+	.globl	cpu6_errata_word
+cpu6_errata_word:
+	.space	16
+#endif
+

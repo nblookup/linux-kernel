@@ -29,6 +29,7 @@
  *     
  ********************************************************************/
 
+#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/fs.h>
@@ -69,9 +70,10 @@ static int ircomm_tty_control_indication(void *instance, void *sap,
 					 struct sk_buff *skb);
 static void ircomm_tty_flow_indication(void *instance, void *sap, 
 				       LOCAL_FLOW cmd);
+#ifdef CONFIG_PROC_FS
 static int ircomm_tty_read_proc(char *buf, char **start, off_t offset, int len,
 				int *eof, void *unused);
-
+#endif /* CONFIG_PROC_FS */
 static struct tty_driver driver;
 static int ircomm_tty_refcount;       /* If we manage several devices */
 
@@ -98,7 +100,11 @@ int __init ircomm_tty_init(void)
 	memset(&driver, 0, sizeof(struct tty_driver));
 	driver.magic           = TTY_DRIVER_MAGIC;
 	driver.driver_name     = "ircomm";
+#ifdef CONFIG_DEVFS_FS
+	driver.name            = "ircomm%d";
+#else
 	driver.name            = "ircomm";
+#endif
 	driver.major           = IRCOMM_TTY_MAJOR;
 	driver.minor_start     = IRCOMM_TTY_MINOR;
 	driver.num             = IRCOMM_TTY_PORTS;
@@ -126,8 +132,9 @@ int __init ircomm_tty_init(void)
 	driver.start           = ircomm_tty_start;
 	driver.hangup          = ircomm_tty_hangup;
 	driver.wait_until_sent = ircomm_tty_wait_until_sent;
+#ifdef CONFIG_PROC_FS
 	driver.read_proc       = ircomm_tty_read_proc;
-
+#endif /* CONFIG_PROC_FS */
 	if (tty_register_driver(&driver)) {
 		ERROR(__FUNCTION__ "Couldn't register serial driver\n");
 		return -1;
@@ -429,7 +436,7 @@ static int ircomm_tty_open(struct tty_struct *tty, struct file *filp)
 		tty->termios->c_oflag = 0;
 
 		/* Insert into hash */
-		hashbin_insert(ircomm_tty, (queue_t *) self, line, NULL);
+		hashbin_insert(ircomm_tty, (irda_queue_t *) self, line, NULL);
 	}
 	self->open_count++;
 
@@ -1319,6 +1326,7 @@ static int ircomm_tty_line_info(struct ircomm_tty_cb *self, char *buf)
  *    
  *
  */
+#ifdef CONFIG_PROC_FS
 static int ircomm_tty_read_proc(char *buf, char **start, off_t offset, int len,
 				int *eof, void *unused)
 {
@@ -1346,12 +1354,15 @@ static int ircomm_tty_read_proc(char *buf, char **start, off_t offset, int len,
 done:
         if (offset >= count+begin)
                 return 0;
-        *start = buf + (begin-offset);
+        *start = buf + (offset-begin);
         return ((len < begin+count-offset) ? len : begin+count-offset);
 }
-
+#endif /* CONFIG_PROC_FS */
 
 #ifdef MODULE
+MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no>");
+MODULE_DESCRIPTION("IrCOMM serial TTY driver");
+
 int init_module(void) 
 {
 	return ircomm_tty_init();

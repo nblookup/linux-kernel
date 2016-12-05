@@ -1,5 +1,5 @@
 /*
- * $Id: capiutil.c,v 1.10 1999/08/31 11:19:54 paul Exp $
+ * $Id: capiutil.c,v 1.13 2000/11/23 20:45:14 kai Exp $
  *
  * CAPI 2.0 convert capi message to capi message struct
  *
@@ -7,6 +7,26 @@
  * Rewritten for Linux 1996 by Carsten Paeth (calle@calle.in-berlin.de)
  *
  * $Log: capiutil.c,v $
+ * Revision 1.13  2000/11/23 20:45:14  kai
+ * fixed module_init/exit stuff
+ * Note: compiled-in kernel doesn't work pre 2.2.18 anymore.
+ *
+ * Revision 1.12  2000/11/01 14:05:02  calle
+ * - use module_init/module_exit from linux/init.h.
+ * - all static struct variables are initialized with "membername:" now.
+ * - avm_cs.c, let it work with newer pcmcia-cs.
+ *
+ * Revision 1.11  2000/03/03 15:50:42  calle
+ * - kernel CAPI:
+ *   - Changed parameter "param" in capi_signal from __u32 to void *.
+ *   - rewrote notifier handling in kcapi.c
+ *   - new notifier NCCI_UP and NCCI_DOWN
+ * - User CAPI:
+ *   - /dev/capi20 is now a cloning device.
+ *   - middleware extentions prepared.
+ * - capidrv.c
+ *   - locking of list operations and module count updates.
+ *
  * Revision 1.10  1999/08/31 11:19:54  paul
  * various spelling corrections (new checksums may be needed, Karsten!)
  *
@@ -70,6 +90,7 @@
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/init.h>
 #include <asm/segment.h>
 #include <linux/config.h>
 
@@ -794,7 +815,7 @@ static char *pnames[] =
     /*15 */ "Class",
     /*16 */ "ConnectedNumber",
     /*17 */ "ConnectedSubaddress",
-    /*18 */ "Data",
+    /*18 */ "Data32",
     /*19 */ "DataHandle",
     /*1a */ "DataLength",
     /*1b */ "FacilityConfirmationParameter",
@@ -892,13 +913,7 @@ static void protocol_message_2_pars(_cmsg * cmsg, int level)
 			cmsg->l += 2;
 			break;
 		case _CDWORD:
-			if (strcmp(NAME, "Data") == 0) {
-				bufprint("%-*s = ", slen, NAME);
-				printstructlen((__u8 *) * (__u32 *) (cmsg->m + cmsg->l),
-					       *(__u16 *) (cmsg->m + cmsg->l + sizeof(__u32)));
-				bufprint("\n");
-			} else
-				bufprint("%-*s = 0x%lx\n", slen, NAME, *(__u32 *) (cmsg->m + cmsg->l));
+			bufprint("%-*s = 0x%lx\n", slen, NAME, *(__u32 *) (cmsg->m + cmsg->l));
 			cmsg->l += 4;
 			break;
 		case _CSTRUCT:
@@ -973,7 +988,6 @@ char *capi_cmsg2str(_cmsg * cmsg)
 	return buf;
 }
 
-
 EXPORT_SYMBOL(capi_cmsg2message);
 EXPORT_SYMBOL(capi_message2cmsg);
 EXPORT_SYMBOL(capi_cmsg_header);
@@ -982,15 +996,14 @@ EXPORT_SYMBOL(capi_cmsg2str);
 EXPORT_SYMBOL(capi_message2str);
 EXPORT_SYMBOL(capi_info2str);
 
-#ifdef MODULE
-
-int init_module(void)
-{
-	return 0;
+static int __init capiutil_init(void)
+{ 
+	return 0; 
 }
 
-void cleanup_module(void)
+static void __exit capiutil_exit(void)
 {
 }
 
-#endif
+module_init(capiutil_init);
+module_exit(capiutil_exit);

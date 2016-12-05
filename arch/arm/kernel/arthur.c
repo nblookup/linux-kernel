@@ -1,10 +1,18 @@
 /*
  * Arthur personality
- * Copyright (C) 1998-1999 Philip Blundell
+ *
+ * Copyright (C) 1998, 1999, 2000 Philip Blundell
  */
 
-#include <linux/personality.h>
+/*
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version
+ * 2 of the License, or (at your option) any later version.
+ */
+
 #include <linux/module.h>
+#include <linux/personality.h>
 #include <linux/stddef.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -59,11 +67,7 @@ static struct exec_domain arthur_exec_domain = {
 	PER_RISCOS, PER_RISCOS,
 	arthur_to_linux_signals,
 	linux_to_arthur_signals,
-#ifdef MODULE
-	&__this_module,	/* No usage counter. */
-#else
-	NULL,
-#endif
+	THIS_MODULE,
 	NULL		/* Nothing after this in the list. */
 };
 

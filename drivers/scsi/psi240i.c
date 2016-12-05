@@ -597,6 +597,8 @@ int Psi240i_Detect (Scsi_Host_Template *tpnt)
 			continue;
 
 		pshost = scsi_register (tpnt, sizeof(ADAPTER240I));
+		if(pshost == NULL)
+			continue;
 
 		save_flags (flags);
 		cli ();
@@ -713,10 +715,8 @@ int Psi240i_BiosParam (Scsi_Disk *disk, kdev_t dev, int geom[])
 	}
 
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = PSI240I;
+static Scsi_Host_Template driver_template = PSI240I;
 
 #include "scsi_module.c"
-#endif
 

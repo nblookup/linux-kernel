@@ -1,4 +1,4 @@
-/* $Id: irq.h,v 1.17 1999/09/21 14:39:41 davem Exp $
+/* $Id: irq.h,v 1.19 2000/06/26 19:40:27 davem Exp $
  * irq.h: IRQ registers on the 64-bit Sparc.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -8,6 +8,7 @@
 #ifndef _SPARC64_IRQ_H
 #define _SPARC64_IRQ_H
 
+#include <linux/config.h>
 #include <linux/linkage.h>
 #include <linux/kernel.h>
 
@@ -41,10 +42,10 @@ struct ino_bucket {
 	/* Miscellaneous flags. */
 /*0x06*/unsigned char flags;
 
-	/* Unused right now, but we will use it for proper
-	 * enable_irq()/disable_irq() nesting.
+	/* This is used to deal with IBF_DMA_SYNC on
+	 * Sabre systems.
 	 */
-/*0x07*/unsigned char __unused;
+/*0x07*/unsigned char synctab_ent;
 
 	/* Reference to handler for this IRQ.  If this is
 	 * non-NULL this means it is active and should be
@@ -67,6 +68,12 @@ struct ino_bucket {
 /*0x18*/unsigned long imap;
 
 };
+
+#ifdef CONFIG_PCI
+extern unsigned long pci_dma_wsync;
+extern unsigned long dma_sync_reg_table[256];
+extern unsigned char dma_sync_reg_table_entry;
+#endif
 
 /* IMAP/ICLR register defines */
 #define IMAP_VALID		0x80000000	/* IRQ Enabled		*/
@@ -113,7 +120,7 @@ extern unsigned int build_irq(int pil, int inofixup, unsigned long iclr, unsigne
 extern unsigned int sbus_build_irq(void *sbus, unsigned int ino);
 extern unsigned int psycho_build_irq(void *psycho, int imap_off, int ino, int need_dma_sync);
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 extern void set_cpu_int(int, int);
 extern void clear_cpu_int(int, int);
 extern void set_irq_udt(int);

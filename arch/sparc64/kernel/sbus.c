@@ -1,4 +1,4 @@
-/* $Id: sbus.c,v 1.10 2000/03/10 07:52:08 davem Exp $
+/* $Id: sbus.c,v 1.12 2000/09/21 06:25:14 anton Exp $
  * sbus.c: UltraSparc SBUS controller support.
  *
  * Copyright (C) 1999 David S. Miller (davem@redhat.com)
@@ -18,6 +18,7 @@
 #include <asm/cache.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
+#include <asm/starfire.h>
 
 #include "iommu_common.h"
 
@@ -315,7 +316,7 @@ void sbus_free_consistent(struct sbus_dev *sdev, size_t size, void *cpu, dma_add
 dma_addr_t sbus_map_single(struct sbus_dev *sdev, void *ptr, size_t size, int dir)
 {
 	struct sbus_iommu *iommu = sdev->bus->iommu;
-	unsigned long npages, phys_base, flags;
+	unsigned long npages, pbase, flags;
 	iopte_t *iopte;
 	u32 dma_base, offset;
 	unsigned long iopte_bits;
@@ -323,10 +324,10 @@ dma_addr_t sbus_map_single(struct sbus_dev *sdev, void *ptr, size_t size, int di
 	if (dir == SBUS_DMA_NONE)
 		BUG();
 
-	phys_base = (unsigned long) ptr;
-	offset = (u32) (phys_base & ~PAGE_MASK);
-	size = (PAGE_ALIGN(phys_base + size) - (phys_base & PAGE_MASK));
-	phys_base = (unsigned long) __pa(phys_base & PAGE_MASK);
+	pbase = (unsigned long) ptr;
+	offset = (u32) (pbase & ~PAGE_MASK);
+	size = (PAGE_ALIGN(pbase + size) - (pbase & PAGE_MASK));
+	pbase = (unsigned long) __pa(pbase & PAGE_MASK);
 
 	spin_lock_irqsave(&iommu->lock, flags);
 	npages = size >> PAGE_SHIFT;
@@ -337,8 +338,8 @@ dma_addr_t sbus_map_single(struct sbus_dev *sdev, void *ptr, size_t size, int di
 	if (dir != SBUS_DMA_TODEVICE)
 		iopte_bits |= IOPTE_WRITE;
 	while (npages--) {
-		*iopte++ = __iopte(iopte_bits | (phys_base & IOPTE_PAGE));
-		phys_base += PAGE_SIZE;
+		*iopte++ = __iopte(iopte_bits | (pbase & IOPTE_PAGE));
+		pbase += PAGE_SIZE;
 	}
 	npages = size >> PAGE_SHIFT;
 	spin_unlock_irqrestore(&iommu->lock, flags);
@@ -1151,15 +1152,10 @@ void __init sbus_iommu_init(int prom_node, struct sbus_bus *sbus)
 	upa_writeq(control, iommu->sbus_control_reg);
 
 	/* Now some Xfire specific grot... */
-	{
-		extern void *starfire_hookup(int);
-		extern int this_is_starfire;
-
-		if (this_is_starfire)
-			sbus->starfire_cookie = starfire_hookup(sbus->portid);
-		else
-			sbus->starfire_cookie = NULL;
-	}
+	if (this_is_starfire)
+		sbus->starfire_cookie = starfire_hookup(sbus->portid);
+	else
+		sbus->starfire_cookie = NULL;
 
 	sysio_register_error_handlers(sbus);
 }

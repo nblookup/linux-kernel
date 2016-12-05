@@ -11,6 +11,7 @@
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/highmem.h>
+#include <linux/smp_lock.h>
 
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
@@ -18,13 +19,12 @@
 /*
  * Access another process' address space, one page at a time.
  */
-static int access_one_page(struct task_struct * tsk, struct vm_area_struct * vma, unsigned long addr, void *buf, int len, int write)
+static int access_one_page(struct mm_struct * mm, struct vm_area_struct * vma, unsigned long addr, void *buf, int len, int write)
 {
 	pgd_t * pgdir;
 	pmd_t * pgmiddle;
 	pte_t * pgtable;
-	unsigned long mapnr;
-	unsigned long maddr; 
+	char *maddr; 
 	struct page *page;
 
 repeat:
@@ -41,23 +41,26 @@ repeat:
 	pgtable = pte_offset(pgmiddle, addr);
 	if (!pte_present(*pgtable))
 		goto fault_in_page;
-	mapnr = pte_pagenr(*pgtable);
 	if (write && (!pte_write(*pgtable) || !pte_dirty(*pgtable)))
 		goto fault_in_page;
-	if (mapnr >= max_mapnr)
-		return 0;
-	page = mem_map + mapnr;
+	page = pte_page(*pgtable);
+
+	/* ZERO_PAGE is special: reads from it are ok even though it's marked reserved */
+	if (page != ZERO_PAGE(addr) || write) {
+		if ((!VALID_PAGE(page)) || PageReserved(page))
+			return 0;
+	}
 	flush_cache_page(vma, addr);
 
 	if (write) {
 		maddr = kmap(page);
-		memcpy((char *)maddr + (addr & ~PAGE_MASK), buf, len);
+		memcpy(maddr + (addr & ~PAGE_MASK), buf, len);
 		flush_page_to_ram(page);
 		flush_icache_page(vma, page);
 		kunmap(page);
 	} else {
 		maddr = kmap(page);
-		memcpy(buf, (char *)maddr + (addr & ~PAGE_MASK), len);
+		memcpy(buf, maddr + (addr & ~PAGE_MASK), len);
 		flush_page_to_ram(page);
 		kunmap(page);
 	}
@@ -65,7 +68,7 @@ repeat:
 
 fault_in_page:
 	/* -1: out of memory. 0 - unmapped page */
-	if (handle_mm_fault(tsk, vma, addr, write) > 0)
+	if (handle_mm_fault(mm, vma, addr, write) > 0)
 		goto repeat;
 	return 0;
 
@@ -78,18 +81,10 @@ bad_pmd:
 	return 0;
 }
 
-int access_process_vm(struct task_struct *tsk, unsigned long addr, void *buf, int len, int write)
+static int access_mm(struct mm_struct *mm, struct vm_area_struct * vma, unsigned long addr, void *buf, int len, int write)
 {
-	int copied;
-	struct vm_area_struct * vma;
+	int copied = 0;
 
-	down(&tsk->mm->mmap_sem);
-	vma = find_extend_vma(tsk, addr);
-	if (!vma) {
-		up(&tsk->mm->mmap_sem);
-		return 0;
-	}
-	copied = 0;
 	for (;;) {
 		unsigned long offset = addr & ~PAGE_MASK;
 		int this_len = PAGE_SIZE - offset;
@@ -97,7 +92,7 @@ int access_process_vm(struct task_struct *tsk, unsigned long addr, void *buf, in
 
 		if (this_len > len)
 			this_len = len;
-		retval = access_one_page(tsk, vma, addr, buf, this_len, write);
+		retval = access_one_page(mm, vma, addr, buf, this_len, write);
 		copied += retval;
 		if (retval != this_len)
 			break;
@@ -118,7 +113,32 @@ int access_process_vm(struct task_struct *tsk, unsigned long addr, void *buf, in
 	
 		vma = vma->vm_next;
 	}
-	up(&tsk->mm->mmap_sem);
+	return copied;
+}
+
+int access_process_vm(struct task_struct *tsk, unsigned long addr, void *buf, int len, int write)
+{
+	int copied;
+	struct mm_struct *mm;
+	struct vm_area_struct * vma;
+
+	/* Worry about races with exit() */
+	task_lock(tsk);
+	mm = tsk->mm;
+	if (mm)
+		atomic_inc(&mm->mm_users);
+	task_unlock(tsk);
+	if (!mm)
+		return 0;
+
+	down(&mm->mmap_sem);
+	vma = find_extend_vma(mm, addr);
+	copied = 0;
+	if (vma)
+		copied = access_mm(mm, vma, addr, buf, len, write);
+
+	up(&mm->mmap_sem);
+	mmput(mm);
 	return copied;
 }
 

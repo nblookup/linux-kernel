@@ -1,4 +1,4 @@
-/* $Id: sys_sparc.c,v 1.61 2000/02/16 07:31:29 davem Exp $
+/* $Id: sys_sparc.c,v 1.67 2000/11/30 08:37:31 anton Exp $
  * linux/arch/sparc/kernel/sys_sparc.c
  *
  * This file contains various random system calls that
@@ -34,6 +34,8 @@ asmlinkage unsigned long sys_getpagesize(void)
 	return PAGE_SIZE; /* Possibly older binaries want 8192 on sun4's? */
 }
 
+#define COLOUR_ALIGN(addr)      (((addr)+SHMLBA-1)&~(SHMLBA-1))
+
 unsigned long get_unmapped_area(unsigned long addr, unsigned long len)
 {
 	struct vm_area_struct * vmm;
@@ -45,7 +47,11 @@ unsigned long get_unmapped_area(unsigned long addr, unsigned long len)
 		return 0;
 	if (!addr)
 		addr = TASK_UNMAPPED_BASE;
-	addr = PAGE_ALIGN(addr);
+
+	if (current->thread.flags & SPARC_FLAG_MMAPSHARED)
+		addr = COLOUR_ALIGN(addr);
+	else
+		addr = PAGE_ALIGN(addr);
 
 	for (vmm = find_vma(current->mm, addr); ; vmm = vmm->vm_next) {
 		/* At this point:  (!vmm || addr < vmm->vm_end). */
@@ -58,6 +64,8 @@ unsigned long get_unmapped_area(unsigned long addr, unsigned long len)
 		if (!vmm || addr + len <= vmm->vm_start)
 			return addr;
 		addr = vmm->vm_end;
+		if (current->thread.flags & SPARC_FLAG_MMAPSHARED)
+			addr = COLOUR_ALIGN(addr);
 	}
 }
 
@@ -81,14 +89,12 @@ asmlinkage int sparc_pipe(struct pt_regs *regs)
 	int fd[2];
 	int error;
 
-	lock_kernel();
 	error = do_pipe(fd);
 	if (error)
 		goto out;
 	regs->u_regs[UREG_I1] = fd[1];
 	error = fd[0];
 out:
-	unlock_kernel();
 	return error;
 }
 
@@ -102,7 +108,6 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 {
 	int version, err;
 
-	lock_kernel();
 	version = call >> 16; /* hack for backward compatibility */
 	call &= 0xffff;
 
@@ -197,7 +202,6 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 	else
 		err = -EINVAL;
 out:
-	unlock_kernel();
 	return err;
 }
 
@@ -215,8 +219,6 @@ static unsigned long do_mmap2(unsigned long addr, unsigned long len,
 			goto out;
 	}
 
-	down(&current->mm->mmap_sem);
-	lock_kernel();
 	retval = -EINVAL;
 	len = PAGE_ALIGN(len);
 	if (ARCH_SUN4C_SUN4 &&
@@ -230,11 +232,17 @@ static unsigned long do_mmap2(unsigned long addr, unsigned long len,
 		goto out_putf;
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+
+	if (flags & MAP_SHARED)
+		current->thread.flags |= SPARC_FLAG_MMAPSHARED;
+
+	down(&current->mm->mmap_sem);
 	retval = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
+	up(&current->mm->mmap_sem);
+
+	current->thread.flags &= ~(SPARC_FLAG_MMAPSHARED);
 
 out_putf:
-	unlock_kernel();
-	up(&current->mm->mmap_sem);
 	if (file)
 		fput(file);
 out:
@@ -265,6 +273,7 @@ asmlinkage unsigned long sparc_mremap(unsigned long addr,
 	unsigned long old_len, unsigned long new_len,
 	unsigned long flags, unsigned long new_addr)
 {
+	struct vm_area_struct *vma;
 	unsigned long ret = -EINVAL;
 	if (ARCH_SUN4C_SUN4) {
 		if (old_len > 0x20000000 || new_len > 0x20000000)
@@ -276,6 +285,9 @@ asmlinkage unsigned long sparc_mremap(unsigned long addr,
 	    new_len > TASK_SIZE - PAGE_SIZE)
 		goto out;
 	down(&current->mm->mmap_sem);
+	vma = find_vma(current->mm, addr);
+	if (vma && (vma->vm_flags & VM_SHARED))
+		current->thread.flags |= SPARC_FLAG_MMAPSHARED;
 	if (flags & MREMAP_FIXED) {
 		if (ARCH_SUN4C_SUN4 &&
 		    new_addr < 0xe0000000 &&
@@ -296,6 +308,7 @@ asmlinkage unsigned long sparc_mremap(unsigned long addr,
 	}
 	ret = do_mremap(addr, old_len, new_len, flags, new_addr);
 out_sem:
+	current->thread.flags &= ~(SPARC_FLAG_MMAPSHARED);
 	up(&current->mm->mmap_sem);
 out:
 	return ret;       
@@ -308,12 +321,10 @@ c_sys_nis_syscall (struct pt_regs *regs)
 	static int count = 0;
 	
 	if (count++ > 5) return -ENOSYS;
-	lock_kernel();
 	printk ("%s[%d]: Unimplemented SPARC system call %d\n", current->comm, current->pid, (int)regs->u_regs[1]);
 #ifdef DEBUG_UNIMP_SYSCALL	
 	show_regs (regs);
 #endif
-	unlock_kernel();
 	return -ENOSYS;
 }
 

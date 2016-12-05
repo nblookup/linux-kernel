@@ -5,6 +5,7 @@
 #include <linux/kernel.h>
 #include <linux/string.h> 
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/proc_fs.h>
 #include <linux/time.h>
 #include <asm/uaccess.h>
@@ -154,7 +155,10 @@ static ssize_t proc_mpc_read(struct file *file, char *buff,
 	if (*pos >= length) length = 0;
 	else {
 	  if ((count + *pos) > length) count = length - *pos;
-	  copy_to_user(buff, (char *)page , count);
+	  if (copy_to_user(buff, (char *)page , count)) {
+ 		  free_page(page);
+		  return -EFAULT;
+          }
 	  *pos += count;
 	}
 
@@ -197,7 +201,7 @@ static ssize_t proc_mpc_write(struct file *file, const char *buff,
         *ppos += incoming;
 
         page[incoming] = '\0';
-	retval = parse_qos(buff, incoming);
+	retval = parse_qos(page, incoming);
         if (retval == 0)
                 printk("mpoa: proc_mpc_write: could not parse '%s'\n", page);
 
@@ -324,6 +328,7 @@ int mpc_proc_init(void)
                 return -ENOMEM;
         }
 	p->proc_fops = &mpc_file_operations;
+	p->owner = THIS_MODULE;
 	return 0;
 }
 

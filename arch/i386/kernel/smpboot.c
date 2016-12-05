@@ -28,6 +28,7 @@
  *					from Jose Renau
  *		Ingo Molnar	:	various cleanups and rewrites
  *		Tigran Aivazian	:	fixed "0.00 in /proc/uptime on SMP" bug.
+ *	Maciej W. Rozycki	:	Bits for genuine 82489DX APICs
  */
 
 #include <linux/config.h>
@@ -45,7 +46,7 @@
 #include <asm/pgalloc.h>
 
 /* Set if we find a B stepping CPU			*/
-static int smp_b_stepping = 0;
+static int smp_b_stepping;
 
 /* Setup configured maximum number of CPUs to activate */
 static int max_cpus = -1;
@@ -54,21 +55,21 @@ static int max_cpus = -1;
 int smp_num_cpus = 1;
 
 /* Bitmask of currently online CPUs */
-unsigned long cpu_online_map = 0;
+unsigned long cpu_online_map;
 
 /* which CPU (physical APIC ID) maps to which logical CPU number */
 volatile int x86_apicid_to_cpu[NR_CPUS];
 /* which logical CPU number maps to which CPU (physical APIC ID) */
 volatile int x86_cpu_to_apicid[NR_CPUS];
 
-static volatile unsigned long cpu_callin_map = 0;
-static volatile unsigned long cpu_callout_map = 0;
+static volatile unsigned long cpu_callin_map;
+static volatile unsigned long cpu_callout_map;
 
 /* Per CPU bogomips and other parameters */
 struct cpuinfo_x86 cpu_data[NR_CPUS];
 
 /* Set when the idlers are all forked */
-int smp_threads_ready = 0;
+int smp_threads_ready;
 
 /*
  * Setup routine for controlling SMP activation
@@ -193,7 +194,7 @@ void __init smp_commence(void)
 static atomic_t tsc_start_flag = ATOMIC_INIT(0);
 static atomic_t tsc_count_start = ATOMIC_INIT(0);
 static atomic_t tsc_count_stop = ATOMIC_INIT(0);
-static unsigned long long tsc_values[NR_CPUS] = { 0, };
+static unsigned long long tsc_values[NR_CPUS];
 
 #define NR_LOOPS 5
 
@@ -343,10 +344,20 @@ static void __init synchronize_tsc_ap (void)
 
 extern void calibrate_delay(void);
 
+static atomic_t init_deasserted;
+
 void __init smp_callin(void)
 {
 	int cpuid, phys_id;
 	unsigned long timeout;
+
+	/*
+	 * If waken up by an INIT in an 82489DX configuration
+	 * we may get here before an INIT-deassert IPI reaches
+	 * our local APIC.  We have to wait for the IPI or we'll
+	 * lock up on an APIC access.
+	 */
+	while (!atomic_read(&init_deasserted));
 
 	/*
 	 * (This works even if the APIC is not enabled.)
@@ -427,7 +438,7 @@ void __init smp_callin(void)
 		synchronize_tsc_ap();
 }
 
-int cpucount = 0;
+int cpucount;
 
 extern int cpu_idle(void);
 
@@ -444,7 +455,7 @@ int __init start_secondary(void *unused)
 	cpu_init();
 	smp_callin();
 	while (!atomic_read(&smp_commenced))
-		/* nothing */ ;
+		rep_nop();
 	/*
 	 * low-memory mappings have been cleared, flush them from
 	 * the local TLBs too.
@@ -486,14 +497,51 @@ static int __init fork_by_hand(void)
 	 * don't care about the eip and regs settings since
 	 * we'll never reschedule the forked task.
 	 */
-	return do_fork(CLONE_VM|CLONE_PID, 0, &regs);
+	return do_fork(CLONE_VM|CLONE_PID, 0, &regs, 0);
 }
+
+#if APIC_DEBUG
+static inline void inquire_remote_apic(int apicid)
+{
+	int i, regs[] = { APIC_ID >> 4, APIC_LVR >> 4, APIC_SPIV >> 4 };
+	char *names[] = { "ID", "VERSION", "SPIV" };
+	int timeout, status;
+
+	printk("Inquiring remote APIC #%d...\n", apicid);
+
+	for (i = 0; i < sizeof(regs) / sizeof(*regs); i++) {
+		printk("... APIC #%d %s: ", apicid, names[i]);
+
+		/*
+		 * Wait for idle.
+		 */
+		apic_wait_icr_idle();
+
+		apic_write_around(APIC_ICR2, SET_APIC_DEST_FIELD(apicid));
+		apic_write_around(APIC_ICR, APIC_DM_REMRD | regs[i]);
+
+		timeout = 0;
+		do {
+			udelay(100);
+			status = apic_read(APIC_ICR) & APIC_ICR_RR_MASK;
+		} while (status == APIC_ICR_RR_INPROG && timeout++ < 1000);
+
+		switch (status) {
+		case APIC_ICR_RR_VALID:
+			status = apic_read(APIC_RRR);
+			printk("%08x\n", status);
+			break;
+		default:
+			printk("failed\n");
+		}
+	}
+}
+#endif
 
 static void __init do_boot_cpu (int apicid)
 {
-	unsigned long cfg;
 	struct task_struct *idle;
-	unsigned long send_status, accept_status;
+	unsigned long send_status, accept_status, boot_status, maxlvt;
 	int timeout, num_starts, j, cpu;
 	unsigned long start_eip;
 
@@ -527,13 +575,15 @@ static void __init do_boot_cpu (int apicid)
 	start_eip = setup_trampoline();
 
 	/* So we see what's up   */
-	printk("Booting processor %d eip %lx\n", cpu, start_eip);
+	printk("Booting processor %d/%d eip %lx\n", cpu, apicid, start_eip);
 	stack_start.esp = (void *) (1024 + PAGE_SIZE + (char *)idle);
 
 	/*
 	 * This grunge runs the startup process for
 	 * the targeted processor.
 	 */
+
+	atomic_set(&init_deasserted, 0);
 
 	Dprintk("Setting warm reset code and vector.\n");
 
@@ -549,16 +599,17 @@ static void __init do_boot_cpu (int apicid)
 	 * Be paranoid about clearing APIC errors.
 	 */
 	if (APIC_INTEGRATED(apic_version[apicid])) {
-		apic_readaround(APIC_SPIV);
+		apic_read_around(APIC_SPIV);
 		apic_write(APIC_ESR, 0);
-		accept_status = (apic_read(APIC_ESR) & 0xEF);
+		apic_read(APIC_ESR);
 	}
 
 	/*
 	 * Status is now clean
 	 */
-	send_status = 	0;
+	send_status = 0;
 	accept_status = 0;
+	boot_status = 0;
 
 	/*
 	 * Starting actual IPI sequence...
@@ -567,37 +618,43 @@ static void __init do_boot_cpu (int apicid)
 	Dprintk("Asserting INIT.\n");
 
 	/*
-	 * Turn INIT on
+	 * Turn INIT on target chip
 	 */
-	cfg = apic_read(APIC_ICR2);
-	cfg &= 0x00FFFFFF;
-
-	/*
-	 * Target chip
-	 */
-	apic_write(APIC_ICR2, cfg | SET_APIC_DEST_FIELD(apicid));
+	apic_write_around(APIC_ICR2, SET_APIC_DEST_FIELD(apicid));
 
 	/*
 	 * Send IPI
 	 */
-	cfg = apic_read(APIC_ICR);
-	cfg &= ~0xCDFFF;
-	cfg |= (APIC_DEST_LEVELTRIG | APIC_DEST_ASSERT | APIC_DEST_DM_INIT);
-	apic_write(APIC_ICR, cfg);
+	apic_write_around(APIC_ICR, APIC_INT_LEVELTRIG | APIC_INT_ASSERT
+				| APIC_DM_INIT);
 
-	udelay(200);
+	Dprintk("Waiting for send to finish...\n");
+	timeout = 0;
+	do {
+		Dprintk("+");
+		udelay(100);
+		send_status = apic_read(APIC_ICR) & APIC_ICR_BUSY;
+	} while (send_status && (timeout++ < 1000));
+
+	mdelay(10);
+
 	Dprintk("Deasserting INIT.\n");
 
 	/* Target chip */
-	cfg = apic_read(APIC_ICR2);
-	cfg &= 0x00FFFFFF;
-	apic_write(APIC_ICR2, cfg|SET_APIC_DEST_FIELD(apicid));
+	apic_write_around(APIC_ICR2, SET_APIC_DEST_FIELD(apicid));
 
 	/* Send IPI */
-	cfg = apic_read(APIC_ICR);
-	cfg &= ~0xCDFFF;
-	cfg |= (APIC_DEST_LEVELTRIG | APIC_DEST_DM_INIT);
-	apic_write(APIC_ICR, cfg);
+	apic_write_around(APIC_ICR, APIC_INT_LEVELTRIG | APIC_DM_INIT);
+
+	Dprintk("Waiting for send to finish...\n");
+	timeout = 0;
+	do {
+		Dprintk("+");
+		udelay(100);
+		send_status = apic_read(APIC_ICR) & APIC_ICR_BUSY;
+	} while (send_status && (timeout++ < 1000));
+
+	atomic_set(&init_deasserted, 1);
 
 	/*
 	 * Should we send STARTUP IPIs ?
@@ -616,9 +673,11 @@ static void __init do_boot_cpu (int apicid)
 	 */
 	Dprintk("#startup loops: %d.\n", num_starts);
 
+	maxlvt = get_maxlvt();
+
 	for (j = 1; j <= num_starts; j++) {
 		Dprintk("Sending STARTUP #%d.\n",j);
-		apic_readaround(APIC_SPIV);
+		apic_read_around(APIC_SPIV);
 		apic_write(APIC_ESR, 0);
 		apic_read(APIC_ESR);
 		Dprintk("After apic_write.\n");
@@ -628,17 +687,17 @@ static void __init do_boot_cpu (int apicid)
 		 */
 
 		/* Target chip */
-		cfg = apic_read(APIC_ICR2);
-		cfg &= 0x00FFFFFF;
-		apic_write(APIC_ICR2, cfg | SET_APIC_DEST_FIELD(apicid));
+		apic_write_around(APIC_ICR2, SET_APIC_DEST_FIELD(apicid));
 
 		/* Boot on the stack */
-		cfg = apic_read(APIC_ICR);
-		cfg &= ~0xCDFFF;
-		cfg |= (APIC_DEST_DM_STARTUP | (start_eip >> 12));
-
 		/* Kick the second */
-		apic_write(APIC_ICR, cfg);
+		apic_write_around(APIC_ICR, APIC_DM_STARTUP
+					| (start_eip >> 12));
+
+		/*
+		 * Give the other CPU some time to accept the IPI.
+		 */
+		udelay(300);
 
 		Dprintk("Startup point 1.\n");
 
@@ -647,13 +706,20 @@ static void __init do_boot_cpu (int apicid)
 		do {
 			Dprintk("+");
 			udelay(100);
-			send_status = apic_read(APIC_ICR) & 0x1000;
+			send_status = apic_read(APIC_ICR) & APIC_ICR_BUSY;
 		} while (send_status && (timeout++ < 1000));
 
 		/*
 		 * Give the other CPU some time to accept the IPI.
 		 */
 		udelay(200);
+		/*
+		 * Due to the Pentium erratum 3AP.
+		 */
+		if (maxlvt > 3) {
+			apic_read_around(APIC_SPIV);
+			apic_write(APIC_ESR, 0);
+		}
 		accept_status = (apic_read(APIC_ESR) & 0xEF);
 		if (send_status || accept_status)
 			break;
@@ -676,7 +742,7 @@ static void __init do_boot_cpu (int apicid)
 		/*
 		 * Wait 5s total for a response
 		 */
-		for (timeout = 0; timeout < 1000000000; timeout++) {
+		for (timeout = 0; timeout < 50000; timeout++) {
 			if (test_bit(cpu, &cpu_callin_map))
 				break;	/* It has booted */
 			udelay(100);
@@ -687,15 +753,22 @@ static void __init do_boot_cpu (int apicid)
 			Dprintk("OK.\n");
 			printk("CPU%d: ", cpu);
 			print_cpu_info(&cpu_data[cpu]);
+			Dprintk("CPU has booted.\n");
 		} else {
+			boot_status = 1;
 			if (*((volatile unsigned char *)phys_to_virt(8192))
-					== 0xA5) /* trampoline code not run */
+					== 0xA5)
+				/* trampoline started but...? */
 				printk("Stuck ??\n");
 			else
-				printk("CPU booted but not responding.\n");
+				/* trampoline code not run */
+				printk("Not responding.\n");
+#if APIC_DEBUG
+			inquire_remote_apic(apicid);
+#endif
 		}
-		Dprintk("CPU has booted.\n");
-	} else {
+	}
+	if (send_status || accept_status || boot_status) {
 		x86_cpu_to_apicid[cpu] = -1;
 		x86_apicid_to_cpu[apicid] = -1;
 		cpucount--;
@@ -706,7 +779,7 @@ static void __init do_boot_cpu (int apicid)
 }
 
 cycles_t cacheflush_time;
-extern unsigned long cpu_hz;
+extern unsigned long cpu_khz;
 
 static void smp_tune_scheduling (void)
 {
@@ -723,7 +796,7 @@ static void smp_tune_scheduling (void)
 	 *  the cache size)
 	 */
 
-	if (!cpu_hz) {
+	if (!cpu_khz) {
 		/*
 		 * this basically disables processor-affinity
 		 * scheduling on SMP without a TSC.
@@ -737,12 +810,12 @@ static void smp_tune_scheduling (void)
 			bandwidth = 100;
 		}
 
-		cacheflush_time = (cpu_hz>>20) * (cachesize<<10) / bandwidth;
+		cacheflush_time = (cpu_khz>>10) * (cachesize<<10) / bandwidth;
 	}
 
 	printk("per-CPU timeslice cutoff: %ld.%02ld usecs.\n",
-		(long)cacheflush_time/(cpu_hz/1000000),
-		((long)cacheflush_time*100/(cpu_hz/1000000)) % 100);
+		(long)cacheflush_time/(cpu_khz/1000),
+		((long)cacheflush_time*100/(cpu_khz/1000)) % 100);
 }
 
 /*
@@ -816,48 +889,38 @@ void __init smp_boot_cpus(void)
 	}
 
 	/*
+	 * If we couldn't find a local APIC, then get out of here now!
+	 */
+	if (APIC_INTEGRATED(apic_version[boot_cpu_id]) &&
+	    !test_bit(X86_FEATURE_APIC, boot_cpu_data.x86_capability)) {
+		printk(KERN_ERR "BIOS bug, local APIC #%d not detected!...\n",
+			boot_cpu_id);
+		printk(KERN_ERR "... forcing use of dummy APIC emulation. (tell your hw vendor)\n");
+#ifndef CONFIG_VISWS
+		io_apic_irqs = 0;
+#endif
+		cpu_online_map = phys_cpu_present_map = 1;
+		smp_num_cpus = 1;
+		goto smp_done;
+	}
+
+	verify_local_APIC();
+
+	/*
 	 * If SMP should be disabled, then really disable it!
 	 */
 	if (!max_cpus) {
 		smp_found_config = 0;
 		printk(KERN_INFO "SMP mode deactivated, forcing use of dummy APIC emulation.\n");
+#ifndef CONFIG_VISWS
+		io_apic_irqs = 0;
+#endif
+		cpu_online_map = phys_cpu_present_map = 1;
+		smp_num_cpus = 1;
+		goto smp_done;
 	}
 
-	{
-		int reg;
-
-		/*
-		 * This is to verify that we're looking at
-		 * a real local APIC.  Check these against
-		 * your board if the CPUs aren't getting
-		 * started for no apparent reason.
-		 */
-
-		reg = apic_read(APIC_LVR);
-		Dprintk("Getting VERSION: %x\n", reg);
-
-		apic_write(APIC_LVR, 0);
-		reg = apic_read(APIC_LVR);
-		Dprintk("Getting VERSION: %x\n", reg);
-
-		/*
-		 * The two version reads above should print the same
-		 * NON-ZERO!!! numbers.  If the second one is zero,
-		 * there is a problem with the APIC write/read
-		 * definitions.
-		 *
-		 * The next two are just to see if we have sane values.
-		 * They're only really relevant if we're in Virtual Wire
-		 * compatibility mode, but most boxes are anymore.
-		 */
-
-		reg = apic_read(APIC_LVT0);
-		Dprintk("Getting LVT0: %x\n", reg);
-
-		reg = apic_read(APIC_LVT1);
-		Dprintk("Getting LVT1: %x\n", reg);
-	}
-
+	connect_bsp_APIC();
 	setup_local_APIC();
 
 	if (GET_APIC_ID(apic_read(APIC_ID)) != boot_cpu_id)
@@ -877,7 +940,7 @@ void __init smp_boot_cpus(void)
 
 		if (!(phys_cpu_present_map & (1 << apicid)))
 			continue;
-		if ((max_cpus >= 0) && (max_cpus < cpucount+1))
+		if ((max_cpus >= 0) && (max_cpus <= cpucount+1))
 			continue;
 
 		do_boot_cpu(apicid);
@@ -921,11 +984,11 @@ void __init smp_boot_cpus(void)
 		unsigned long bogosum = 0;
 		for (cpu = 0; cpu < NR_CPUS; cpu++)
 			if (cpu_online_map & (1<<cpu))
-				bogosum += cpu_data[cpu].loops_per_sec;
+				bogosum += cpu_data[cpu].loops_per_jiffy;
 		printk(KERN_INFO "Total of %d processors activated (%lu.%02lu BogoMIPS).\n",
 			cpucount+1,
-			(bogosum+2500)/500000,
-			((bogosum+2500)/5000)%100);
+			bogosum/(500000/HZ),
+			(bogosum/(5000/HZ))%100);
 		Dprintk("Before bogocount - setting activated=1.\n");
 	}
 	smp_num_cpus = cpucount + 1;
@@ -934,7 +997,6 @@ void __init smp_boot_cpus(void)
 		printk(KERN_WARNING "WARNING: SMP operation may be unreliable with B stepping processors.\n");
 	Dprintk("Boot done.\n");
 
-	cache_APIC_registers();
 #ifndef CONFIG_VISWS
 	/*
 	 * Here we can be sure that there is an IO-APIC in the system. Let's
@@ -944,7 +1006,6 @@ void __init smp_boot_cpus(void)
 		setup_IO_APIC();
 #endif
 
-smp_done:
 	/*
 	 * Set up all local APIC timers in the system:
 	 */
@@ -956,6 +1017,7 @@ smp_done:
 	if (cpu_has_tsc && cpucount)
 		synchronize_tsc_bp();
 
+smp_done:
 	zap_low_mappings();
 }
 

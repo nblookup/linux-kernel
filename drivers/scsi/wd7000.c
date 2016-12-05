@@ -951,7 +951,7 @@ static int mail_out (Adapter *host, Scb *scbptr)
 	    break;
 	}
 	else
-	    ogmb = (++ogmb) % OGMB_CNT;
+	    ogmb = (ogmb + 1) % OGMB_CNT;
     }
     restore_flags (flags);
 
@@ -1626,6 +1626,8 @@ int wd7000_detect (Scsi_Host_Template *tpnt)
 		 *  array hostdata.
 		 */
 		sh = scsi_register (tpnt, sizeof (Adapter));
+		if(sh==NULL)
+			continue;
 		host = (Adapter *) sh->hostdata;
 
 #ifdef WD7000_DEBUG
@@ -1778,9 +1780,7 @@ int wd7000_biosparam (Disk *disk, kdev_t dev, int *ip)
     return (0);
 }
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = WD7000;
+static Scsi_Host_Template driver_template = WD7000;
 
 #include "scsi_module.c"
-#endif

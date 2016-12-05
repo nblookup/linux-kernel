@@ -23,62 +23,75 @@ LINKFLAGS =-T $(TOPDIR)/arch/i386/vmlinux.lds $(LDFLAGS)
 
 CFLAGS += -pipe
 
-# only work around strength reduction bug(s) on older gcc versions
-CFLAGS += $(shell if ! $(CC) -march=i486 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-fno-strength-reduce"; fi)
-
 # prevent gcc from keeping the stack 16 byte aligned
 CFLAGS += $(shell if $(CC) -mpreferred-stack-boundary=2 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-mpreferred-stack-boundary=2"; fi)
 
 ifdef CONFIG_M386
-CFLAGS := $(CFLAGS) -m386 -DCPU=386
-AFLAGS := $(AFLAGS) -DCPU=386
+CFLAGS += -march=i386
 endif
 
 ifdef CONFIG_M486
-CFLAGS := $(CFLAGS) -DCPU=486
-CFLAGS += $(shell if $(CC) -march=i486 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=i486"; else echo "-m486"; fi)
-AFLAGS := $(AFLAGS) -DCPU=486
+CFLAGS += -march=i486
 endif
 
 ifdef CONFIG_M586
-CFLAGS := $(CFLAGS) -DCPU=586
-CFLAGS += $(shell if $(CC) -march=i586 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=i586"; fi)
-AFLAGS := $(AFLAGS) -DCPU=586
+CFLAGS += -march=i586
 endif
 
 ifdef CONFIG_M586TSC
-CFLAGS := $(CFLAGS) -DCPU=586
-CFLAGS += $(shell if $(CC) -march=i586 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=i586"; fi)
-AFLAGS := $(AFLAGS) -DCPU=586
+CFLAGS += -march=i586
+endif
+
+ifdef CONFIG_M586MMX
+CFLAGS += -march=i586
 endif
 
 ifdef CONFIG_M686
-CFLAGS := $(CFLAGS) -DCPU=686
-CFLAGS += $(shell if $(CC) -march=i686 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=i686"; fi)
-AFLAGS := $(AFLAGS) -DCPU=686
+CFLAGS += -march=i686
+endif
+
+ifdef CONFIG_M686FXSR
+CFLAGS += -march=i686
+endif
+
+ifdef CONFIG_MPENTIUM4
+CFLAGS += -march=i686
 endif
 
 ifdef CONFIG_MK6
-CFLAGS := $(CFLAGS) -DCPU=586
-CFLAGS += $(shell if $(CC) -march=k6 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=k6"; fi)
-AFLAGS := $(AFLAGS) -DCPU=586
+CFLAGS += $(shell if $(CC) -march=k6 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=k6"; else echo "-march=i586"; fi)
 endif
 
 ifdef CONFIG_MK7
-CFLAGS := $(CFLAGS) -DCPU=686 -march=pentiumpro -mpentiumpro -malign-functions=4 -fschedule-insns2 -mwide-multiply -fexpensive-optimizations
-CFLAGS += $(shell if $(CC) -march=i686 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=i686"; fi)
-AFLAGS := $(AFLAGS) -DCPU=686
+CFLAGS += $(shell if $(CC) -march=athlon -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo "-march=athlon"; else echo "-march=i686 -malign-functions=4"; fi) 
+endif
+
+ifdef CONFIG_MCRUSOE
+CFLAGS += -march=i686 -malign-functions=0 -malign-jumps=0 -malign-loops=0
+endif
+
+ifdef CONFIG_MWINCHIPC6
+CFLAGS += -march=i586
+endif
+
+ifdef CONFIG_MWINCHIP2
+CFLAGS += -march=i586
+endif
+
+ifdef CONFIG_MWINCHIP3D
+CFLAGS += -march=i586
 endif
 
 HEAD := arch/i386/kernel/head.o arch/i386/kernel/init_task.o
 
-SUBDIRS := $(SUBDIRS) arch/i386/kernel arch/i386/mm arch/i386/lib
+SUBDIRS += arch/i386/kernel arch/i386/mm arch/i386/lib
+
 CORE_FILES := arch/i386/kernel/kernel.o arch/i386/mm/mm.o $(CORE_FILES)
 LIBS := $(TOPDIR)/arch/i386/lib/lib.a $(LIBS) $(TOPDIR)/arch/i386/lib/lib.a
 
 ifdef CONFIG_MATH_EMULATION
-SUBDIRS := $(SUBDIRS) arch/i386/math-emu
-DRIVERS := $(DRIVERS) arch/i386/math-emu/math.a
+SUBDIRS += arch/i386/math-emu
+DRIVERS += arch/i386/math-emu/math.o
 endif
 
 arch/i386/kernel: dummy
@@ -107,6 +120,8 @@ compressed: zImage
 zlilo: vmlinux
 	@$(MAKEBOOT) BOOTIMAGE=zImage zlilo
 
+tmp:
+	@$(MAKEBOOT) BOOTIMAGE=bzImage zlilo
 bzlilo: vmlinux
 	@$(MAKEBOOT) BOOTIMAGE=bzImage zlilo
 

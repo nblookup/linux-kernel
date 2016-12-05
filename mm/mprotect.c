@@ -10,6 +10,7 @@
 
 #include <asm/uaccess.h>
 #include <asm/pgalloc.h>
+#include <asm/pgtable.h>
 
 static inline void change_pte_range(pmd_t * pmd, unsigned long address,
 	unsigned long size, pgprot_t newprot)
@@ -30,9 +31,16 @@ static inline void change_pte_range(pmd_t * pmd, unsigned long address,
 	if (end > PMD_SIZE)
 		end = PMD_SIZE;
 	do {
-		pte_t entry = *pte;
-		if (pte_present(entry))
+		if (pte_present(*pte)) {
+			pte_t entry;
+
+			/* Avoid an SMP race with hardware updated dirty/clean
+			 * bits by wiping the pte and then setting the new pte
+			 * into place.
+			 */
+			entry = ptep_get_and_clear(pte);
 			set_pte(pte, pte_modify(entry, newprot));
+		}
 		address += PAGE_SIZE;
 		pte++;
 	} while (address && (address < end));
@@ -86,10 +94,10 @@ static void change_protection(unsigned long start, unsigned long end, pgprot_t n
 static inline int mprotect_fixup_all(struct vm_area_struct * vma,
 	int newflags, pgprot_t prot)
 {
-	vmlist_modify_lock(vma->vm_mm);
+	spin_lock(&vma->vm_mm->page_table_lock);
 	vma->vm_flags = newflags;
 	vma->vm_page_prot = prot;
-	vmlist_modify_unlock(vma->vm_mm);
+	spin_unlock(&vma->vm_mm->page_table_lock);
 	return 0;
 }
 
@@ -105,16 +113,19 @@ static inline int mprotect_fixup_start(struct vm_area_struct * vma,
 	*n = *vma;
 	n->vm_end = end;
 	n->vm_flags = newflags;
+	n->vm_raend = 0;
 	n->vm_page_prot = prot;
 	if (n->vm_file)
 		get_file(n->vm_file);
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
-	vmlist_modify_lock(vma->vm_mm);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
 	vma->vm_pgoff += (end - vma->vm_start) >> PAGE_SHIFT;
 	vma->vm_start = end;
-	insert_vm_struct(current->mm, n);
-	vmlist_modify_unlock(vma->vm_mm);
+	__insert_vm_struct(current->mm, n);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -131,15 +142,18 @@ static inline int mprotect_fixup_end(struct vm_area_struct * vma,
 	n->vm_start = start;
 	n->vm_pgoff += (n->vm_start - vma->vm_start) >> PAGE_SHIFT;
 	n->vm_flags = newflags;
+	n->vm_raend = 0;
 	n->vm_page_prot = prot;
 	if (n->vm_file)
 		get_file(n->vm_file);
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
-	vmlist_modify_lock(vma->vm_mm);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
 	vma->vm_end = start;
-	insert_vm_struct(current->mm, n);
-	vmlist_modify_unlock(vma->vm_mm);
+	__insert_vm_struct(current->mm, n);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -162,21 +176,26 @@ static inline int mprotect_fixup_middle(struct vm_area_struct * vma,
 	left->vm_end = start;
 	right->vm_start = end;
 	right->vm_pgoff += (right->vm_start - left->vm_start) >> PAGE_SHIFT;
+	left->vm_raend = 0;
+	right->vm_raend = 0;
 	if (vma->vm_file)
 		atomic_add(2,&vma->vm_file->f_count);
 	if (vma->vm_ops && vma->vm_ops->open) {
 		vma->vm_ops->open(left);
 		vma->vm_ops->open(right);
 	}
-	vmlist_modify_lock(vma->vm_mm);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
 	vma->vm_pgoff += (start - vma->vm_start) >> PAGE_SHIFT;
 	vma->vm_start = start;
 	vma->vm_end = end;
 	vma->vm_flags = newflags;
+	vma->vm_raend = 0;
 	vma->vm_page_prot = prot;
-	insert_vm_struct(current->mm, left);
-	insert_vm_struct(current->mm, right);
-	vmlist_modify_unlock(vma->vm_mm);
+	__insert_vm_struct(current->mm, left);
+	__insert_vm_struct(current->mm, right);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -258,9 +277,6 @@ asmlinkage long sys_mprotect(unsigned long start, size_t len, unsigned long prot
 			break;
 		}
 	}
-	vmlist_modify_lock(current->mm);
-	merge_segments(current->mm, start, end);
-	vmlist_modify_unlock(current->mm);
 out:
 	up(&current->mm->mmap_sem);
 	return error;

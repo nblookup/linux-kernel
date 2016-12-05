@@ -1,7 +1,9 @@
+/* $Id: fore200e.h,v 1.4 2000/04/14 10:10:34 davem Exp $ */
 #ifndef _FORE200E_H
 #define _FORE200E_H
 
 #ifdef __KERNEL__
+#include <linux/config.h>
 
 /* rx buffer sizes */
 
@@ -559,6 +561,7 @@ typedef struct chunk {
     void* alloc_addr;    /* base address of allocated chunk */
     void* align_addr;    /* base address of aligned chunk   */
     u32   dma_addr;      /* DMA address of aligned chunk    */
+    int   direction;     /* direction of DMA mapping        */
     u32   alloc_size;    /* length of allocated chunk       */
     u32   align_size;    /* length of aligned chunk         */
 } chunk_t;
@@ -796,9 +799,9 @@ typedef struct fore200e_bus {
     const unsigned int*  fw_size;             /* address of firmware data size          */
     u32                  (*read)(volatile u32*);
     void                 (*write)(u32, volatile u32*);
-    u32                  (*dma_map)(struct fore200e*, void*, int);
-    void                 (*dma_unmap)(struct fore200e*, u32, int);
-    void                 (*dma_sync)(struct fore200e*, u32, int);
+    u32                  (*dma_map)(struct fore200e*, void*, int, int);
+    void                 (*dma_unmap)(struct fore200e*, u32, int, int);
+    void                 (*dma_sync)(struct fore200e*, u32, int, int);
     int                  (*dma_chunk_alloc)(struct fore200e*, struct chunk*, int, int, int);
     void                 (*dma_chunk_free)(struct fore200e*, struct chunk*);
     struct fore200e*     (*detect)(const struct fore200e_bus*, int);
@@ -812,6 +815,35 @@ typedef struct fore200e_bus {
     void                 (*irq_ack)(struct fore200e*);
     int                  (*proc_read)(struct fore200e*, char*);
 } fore200e_bus_t;
+
+
+#if defined(CONFIG_ATM_FORE200E_SBA)
+#  if defined(CONFIG_ATM_FORE200E_PCA)
+#    if (PCI_DMA_BIDIRECTIONAL == SBUS_DMA_BIDIRECTIONAL) && \
+        (PCI_DMA_TODEVICE      == SBUS_DMA_TODEVICE)      && \
+        (PCI_DMA_FROMDEVICE    == SBUS_DMA_FROMDEVICE)
+#      define FORE200E_DMA_BIDIRECTIONAL PCI_DMA_BIDIRECTIONAL
+#      define FORE200E_DMA_TODEVICE      PCI_DMA_TODEVICE
+#      define FORE200E_DMA_FROMDEVICE    PCI_DMA_FROMDEVICE
+#    else
+       /* in that case, we'll need to add an extra indirection, e.g.
+	  fore200e->bus->dma_direction[ fore200e_dma_direction ] */
+#      error PCI and SBUS DMA direction flags have different values!
+#    endif
+#  else
+#    define FORE200E_DMA_BIDIRECTIONAL SBUS_DMA_BIDIRECTIONAL
+#    define FORE200E_DMA_TODEVICE      SBUS_DMA_TODEVICE
+#    define FORE200E_DMA_FROMDEVICE    SBUS_DMA_FROMDEVICE
+#  endif
+#else
+#  ifndef CONFIG_ATM_FORE200E_PCA
+#    warning compiling the fore200e driver without any hardware support enabled!
+#    include <linux/pci.h>
+#  endif
+#  define FORE200E_DMA_BIDIRECTIONAL PCI_DMA_BIDIRECTIONAL
+#  define FORE200E_DMA_TODEVICE      PCI_DMA_TODEVICE
+#  define FORE200E_DMA_FROMDEVICE    PCI_DMA_FROMDEVICE
+#endif
 
 
 /* per-device data */
@@ -847,7 +879,7 @@ typedef struct fore200e {
     struct stats*              stats;                  /* last snapshot of the stats         */
     
     struct semaphore           rate_sf;                /* protects rate reservation ops      */
-    spinlock_t                 tx_lock;                /* protects tx ops                    */
+    struct tasklet_struct      tasklet;                /* performs interrupt work            */
 
 } fore200e_t;
 

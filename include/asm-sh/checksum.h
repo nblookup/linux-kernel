@@ -9,6 +9,8 @@
  * Copyright (C) 1999 by Kaz Kojima & Niibe Yutaka
  */
 
+#include <linux/config.h>
+
 /*
  * computes the checksum of a memory block at buff, length len,
  * and adds in "sum" (32-bit)
@@ -55,24 +57,6 @@ unsigned int csum_partial_copy_from_user ( const char *src, char *dst,
 	return csum_partial_copy_generic ( src, dst, len, sum, err_ptr, NULL);
 }
 
-#if 0
-
-/* Not used at the moment. It is difficult to imagine for what purpose
-   it can be used :-) Please, do not forget to verify_area before it --ANK
- */
-
-/*
- * This combination is currently not used, but possible:
- */
-
-extern __inline__
-unsigned int csum_partial_copy_to_user ( const char *src, char *dst,
-					int len, int sum, int *err_ptr)
-{
-	return csum_partial_copy_generic ( src, dst, len, sum, NULL, err_ptr);
-}
-#endif
-
 /*
  * These are the old (and unsafe) way of doing checksums, a warning message will be
  * printed if they are used and an exeption occurs.
@@ -90,16 +74,17 @@ unsigned int csum_partial_copy( const char *src, char *dst, int len, int sum);
 static __inline__ unsigned int csum_fold(unsigned int sum)
 {
 	unsigned int __dummy;
-	__asm__("clrt\n\t"
-		"mov	%0,%1\n\t"
-		"shll16	%0\n\t"
-		"addc	%0,%1\n\t"
-		"movt	%0\n\t"
-		"shlr16	%1\n\t"
-		"add	%1,%0"
+	__asm__("swap.w %0, %1\n\t"
+		"extu.w	%0, %0\n\t"
+		"extu.w	%1, %1\n\t"
+		"add	%1, %0\n\t"
+		"swap.w	%0, %1\n\t"
+		"add	%1, %0\n\t"
+		"not	%0, %0\n\t"
 		: "=r" (sum), "=&r" (__dummy)
-		: "0" (sum));
-	return ~sum;
+		: "0" (sum)
+		: "t");
+	return sum;
 }
 
 /*
@@ -111,32 +96,28 @@ static __inline__ unsigned int csum_fold(unsigned int sum)
  */
 static __inline__ unsigned short ip_fast_csum(unsigned char * iph, unsigned int ihl)
 {
-	unsigned int sum, __dummy;
+	unsigned int sum, __dummy0, __dummy1;
 
 	__asm__ __volatile__(
-		"mov.l	@%1+,%0\n\t"
-		"add	#-4,%2\n\t"
+		"mov.l	@%1+, %0\n\t"
+		"mov.l	@%1+, %3\n\t"
+		"add	#-2, %2\n\t"
 		"clrt\n\t"
-		"mov.l	@%1+,%3\n\t"
-		"addc	%3,%0\n\t"
-		"mov.l	@%1+,%3\n\t"
-		"addc	%3,%0\n\t"
-		"mov.l	@%1+,%3\n\t"
-		"addc	%3,%0\n"
 		"1:\t"
-		"mov.l	@%1+,%3\n\t"
-		"addc	%3,%0\n\t"
-		"movt	%3\n\t"
+		"addc	%3, %0\n\t"
+		"movt	%4\n\t"
+		"mov.l	@%1+, %3\n\t"
 		"dt	%2\n\t"
 		"bf/s	1b\n\t"
-		" cmp/eq #1,%3\n\t"
-		"mov	#0,%3\n\t"
-		"addc	%3,%0\n\t"
+		" cmp/eq #1, %4\n\t"
+		"addc	%3, %0\n\t"
+		"addc	%2, %0"	    /* Here %2 is 0, add carry-bit */
 	/* Since the input registers which are loaded with iph and ihl
 	   are modified, we must also specify them as outputs, or gcc
 	   will assume they contain their original values. */
-	: "=r" (sum), "=r" (iph), "=r" (ihl), "=&z" (__dummy)
-	: "1" (iph), "2" (ihl));
+	: "=r" (sum), "=r" (iph), "=r" (ihl), "=&r" (__dummy0), "=&z" (__dummy1)
+	: "1" (iph), "2" (ihl)
+	: "t");
 
 	return	csum_fold(sum);
 }
@@ -153,13 +134,14 @@ static __inline__ unsigned long csum_tcpudp_nofold(unsigned long saddr,
 	unsigned long len_proto = (proto<<16)+len;
 #endif
 	__asm__("clrt\n\t"
-		"addc	%0,%1\n\t"
-		"addc	%2,%1\n\t"
-		"addc	%3,%1\n\t"
+		"addc	%0, %1\n\t"
+		"addc	%2, %1\n\t"
+		"addc	%3, %1\n\t"
 		"movt	%0\n\t"
-		"add	%1,%0"
+		"add	%1, %0"
 		: "=r" (sum), "=r" (len_proto)
-		: "r" (daddr), "r" (saddr), "1" (len_proto), "0" (sum));
+		: "r" (daddr), "r" (saddr), "1" (len_proto), "0" (sum)
+		: "t");
 	return sum;
 }
 
@@ -187,6 +169,7 @@ static __inline__ unsigned short ip_compute_csum(unsigned char * buff, int len)
 }
 
 #define _HAVE_ARCH_IPV6_CSUM
+#ifdef CONFIG_IPV6
 static __inline__ unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
 						     struct in6_addr *daddr,
 						     __u32 len,
@@ -195,32 +178,34 @@ static __inline__ unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
 {
 	unsigned int __dummy;
 	__asm__("clrt\n\t"
-		"mov.l	@(0,%2),%1\n\t"
-		"addc	%1,%0\n\t"
-		"mov.l	@(4,%2),%1\n\t"
-		"addc	%1,%0\n\t"
-		"mov.l	@(8,%2),%1\n\t"
-		"addc	%1,%0\n\t"
-		"mov.l	@(12,%2),%1\n\t"
-		"addc	%1,%0\n\t"
-		"mov.l	@(0,%3),%1\n\t"
-		"addc	%1,%0\n\t"
-		"mov.l	@(4,%3),%1\n\t"
-		"addc	%1,%0\n\t"
-		"mov.l	@(8,%3),%1\n\t"
-		"addc	%1,%0\n\t"
-		"mov.l	@(12,%3),%1\n\t"
-		"addc	%1,%0\n\t"
-		"addc	%4,%0\n\t"
-		"addc	%5,%0\n\t"
+		"mov.l	@(0,%2), %1\n\t"
+		"addc	%1, %0\n\t"
+		"mov.l	@(4,%2), %1\n\t"
+		"addc	%1, %0\n\t"
+		"mov.l	@(8,%2), %1\n\t"
+		"addc	%1, %0\n\t"
+		"mov.l	@(12,%2), %1\n\t"
+		"addc	%1, %0\n\t"
+		"mov.l	@(0,%3), %1\n\t"
+		"addc	%1, %0\n\t"
+		"mov.l	@(4,%3), %1\n\t"
+		"addc	%1, %0\n\t"
+		"mov.l	@(8,%3), %1\n\t"
+		"addc	%1, %0\n\t"
+		"mov.l	@(12,%3), %1\n\t"
+		"addc	%1, %0\n\t"
+		"addc	%4, %0\n\t"
+		"addc	%5, %0\n\t"
 		"movt	%1\n\t"
-		"add	%1,%0\n"
+		"add	%1, %0\n"
 		: "=r" (sum), "=&r" (__dummy)
 		: "r" (saddr), "r" (daddr), 
-		  "r" (htonl(len)), "r" (htonl(proto)), "0" (sum));
+		  "r" (htonl(len)), "r" (htonl(proto)), "0" (sum)
+		: "t");
 
 	return csum_fold(sum);
 }
+#endif
 
 /* 
  *	Copy and checksum to user

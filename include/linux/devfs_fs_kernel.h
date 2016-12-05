@@ -35,6 +35,7 @@
 #define DEVFS_FL_REMOVABLE      0x020 /* This is a removable media device    */
 #define DEVFS_FL_WAIT           0x040 /* Wait for devfsd to finish           */
 #define DEVFS_FL_NO_PERSISTENCE 0x080 /* Forget changes after unregister     */
+#define DEVFS_FL_CURRENT_OWNER  0x100 /* Set initial ownership to current    */
 #define DEVFS_FL_DEFAULT        DEVFS_FL_NONE
 
 
@@ -52,22 +53,17 @@ typedef struct devfs_entry * devfs_handle_t;
 
 
 #ifdef CONFIG_DEVFS_FS
-extern devfs_handle_t devfs_register (devfs_handle_t dir,
-				      const char *name, unsigned int namelen,
+extern devfs_handle_t devfs_register (devfs_handle_t dir, const char *name,
 				      unsigned int flags,
 				      unsigned int major, unsigned int minor,
-				      umode_t mode, uid_t uid, gid_t gid,
-				      void *ops, void *info);
+				      umode_t mode, void *ops, void *info);
 extern void devfs_unregister (devfs_handle_t de);
-extern int devfs_mk_symlink (devfs_handle_t dir,
-			     const char *name, unsigned int namelen,
-			     unsigned int flags,
-			     const char *link, unsigned int linklength,
+extern int devfs_mk_symlink (devfs_handle_t dir, const char *name,
+			     unsigned int flags, const char *link,
 			     devfs_handle_t *handle, void *info);
 extern devfs_handle_t devfs_mk_dir (devfs_handle_t dir, const char *name,
-				    unsigned int namelen, void *info);
-extern devfs_handle_t devfs_find_handle (devfs_handle_t dir,
-					 const char *name,unsigned int namelen,
+				    void *info);
+extern devfs_handle_t devfs_find_handle (devfs_handle_t dir, const char *name,
 					 unsigned int major,unsigned int minor,
 					 char type, int traverse_symlinks);
 extern int devfs_get_flags (devfs_handle_t de, unsigned int *flags);
@@ -98,8 +94,7 @@ extern void devfs_register_series (devfs_handle_t dir, const char *format,
 				   unsigned int num_entries,
 				   unsigned int flags, unsigned int major,
 				   unsigned int minor_start,
-				   umode_t mode, uid_t uid, gid_t gid,
-				   void *ops, void *info);
+				   umode_t mode, void *ops, void *info);
 
 extern int init_devfs_fs (void);
 extern void mount_devfs_fs (void);
@@ -107,12 +102,10 @@ extern void devfs_make_root (const char *name);
 #else  /*  CONFIG_DEVFS_FS  */
 static inline devfs_handle_t devfs_register (devfs_handle_t dir,
 					     const char *name,
-					     unsigned int namelen,
 					     unsigned int flags,
 					     unsigned int major,
 					     unsigned int minor,
 					     umode_t mode,
-					     uid_t uid, gid_t gid,
 					     void *ops, void *info)
 {
     return NULL;
@@ -121,23 +114,19 @@ static inline void devfs_unregister (devfs_handle_t de)
 {
     return;
 }
-static inline int devfs_mk_symlink (devfs_handle_t dir,
-				    const char *name, unsigned int namelen,
-				    unsigned int flags,
-				    const char *link, unsigned int linklength,
+static inline int devfs_mk_symlink (devfs_handle_t dir, const char *name,
+				    unsigned int flags, const char *link,
 				    devfs_handle_t *handle, void *info)
 {
     return 0;
 }
 static inline devfs_handle_t devfs_mk_dir (devfs_handle_t dir,
-					   const char *name,
-					   unsigned int namelen, void *info)
+					   const char *name, void *info)
 {
     return NULL;
 }
 static inline devfs_handle_t devfs_find_handle (devfs_handle_t dir,
 						const char *name,
-						unsigned int namelen,
 						unsigned int major,
 						unsigned int minor,
 						char type,
@@ -239,8 +228,7 @@ static inline void devfs_register_series (devfs_handle_t dir,
 					  unsigned int flags,
 					  unsigned int major,
 					  unsigned int minor_start,
-					  umode_t mode, uid_t uid, gid_t gid,
-					  void *ops, void *info)
+					  umode_t mode, void *ops, void *info)
 {
     return;
 }

@@ -9,54 +9,69 @@
 #
 
 NM := $(CROSS_COMPILE)nm -B
+AWK := awk
+
+export AWK
 
 LINKFLAGS = -static -T arch/$(ARCH)/vmlinux.lds
-# next line is for HP compiler backend:
-#AFLAGS += -DGCC_RETVAL_POINTER_IN_R8
-# The next line is needed when compiling with the July snapshot of the Cygnus compiler:
-#EXTRA	= -D__GCC_DOESNT_KNOW_IN_REGS__
-# next two lines are for the September snapshot of the Cygnus compiler:
-AFLAGS += -D__GCC_MULTIREG_RETVALS__
-EXTRA	= -D__GCC_MULTIREG_RETVALS__
+AFLAGS += -Wa,-x 
+AFLAGS_KERNEL := -mconstant-gp
+EXTRA	=
 
-CFLAGS := $(CFLAGS) -pipe $(EXTRA) -ffixed-r13 -mfixed-range=f10-f15,f32-f127
+CFLAGS := $(CFLAGS) -pipe $(EXTRA) -Wa,-x -ffixed-r13 -mfixed-range=f10-f15,f32-f127 \
+	  -funwind-tables -falign-functions=32
+# -frename-registers
+CFLAGS_KERNEL := -mconstant-gp
+
+ifeq ($(CONFIG_ITANIUM_ASTEP_SPECIFIC),y)
+	CFLAGS += -ma-step
+endif
+ifeq ($(CONFIG_ITANIUM_BSTEP_SPECIFIC),y)
+	CFLAGS += -mb-step
+endif
 
 ifdef CONFIG_IA64_GENERIC
 	CORE_FILES      :=      arch/$(ARCH)/hp/hp.a	\
 				arch/$(ARCH)/sn/sn.a	\
 				arch/$(ARCH)/dig/dig.a	\
+				arch/$(ARCH)/sn/io/sgiio.o \
 				$(CORE_FILES)
 	SUBDIRS		:=	arch/$(ARCH)/hp		\
 				arch/$(ARCH)/sn/sn1	\
 				arch/$(ARCH)/sn		\
 				arch/$(ARCH)/dig	\
+				arch/$(ARCH)/sn/io	\
 				$(SUBDIRS)
 
 else # !GENERIC
 
-ifeq ($(CONFIG_IA64_HP_SIM),y)
+ifdef CONFIG_IA64_HP_SIM
         SUBDIRS         :=      arch/$(ARCH)/hp		\
                                 $(SUBDIRS)
         CORE_FILES      :=      arch/$(ARCH)/hp/hp.a	\
                                 $(CORE_FILES)
 endif
 
-ifeq ($(CONFIG_IA64_SGI_SN1_SIM),y)
+ifdef CONFIG_IA64_SGI_SN1
+CFLAGS += -DBRINGUP
         SUBDIRS         :=      arch/$(ARCH)/sn/sn1	\
 				arch/$(ARCH)/sn		\
+				arch/$(ARCH)/sn/io	\
+				arch/$(ARCH)/sn/fprom	\
 				$(SUBDIRS)
         CORE_FILES      :=      arch/$(ARCH)/sn/sn.a	\
+				arch/$(ARCH)/sn/io/sgiio.o\
 				$(CORE_FILES)
 endif
 
-ifeq ($(CONFIG_IA64_SOFTSDV),y)
+ifdef CONFIG_IA64_SOFTSDV
         SUBDIRS         :=      arch/$(ARCH)/dig	\
 				$(SUBDIRS)
         CORE_FILES      :=      arch/$(ARCH)/dig/dig.a	\
 				$(CORE_FILES)
 endif
 
-ifeq ($(CONFIG_IA64_DIG),y)
+ifdef CONFIG_IA64_DIG
         SUBDIRS         :=      arch/$(ARCH)/dig	\
 				$(SUBDIRS)
         CORE_FILES      :=      arch/$(ARCH)/dig/dig.a	\
@@ -65,14 +80,9 @@ endif
 
 endif # !GENERIC
 
-ifeq ($(CONFIG_IA32_SUPPORT),y)
+ifdef CONFIG_IA32_SUPPORT
 	SUBDIRS		:=	arch/$(ARCH)/ia32 $(SUBDIRS)
 	CORE_FILES	:=	arch/$(ARCH)/ia32/ia32.o $(CORE_FILES)
-endif
-
-ifdef CONFIG_KDB
-	LIBS := $(LIBS) $(TOPDIR)/arch/$(ARCH)/kdb/kdb.a
-	SUBDIRS := $(SUBDIRS) arch/$(ARCH)/kdb
 endif
 
 HEAD := arch/$(ARCH)/kernel/head.o arch/ia64/kernel/init_task.o
@@ -89,7 +99,7 @@ vmlinux: arch/$(ARCH)/vmlinux.lds
 
 arch/$(ARCH)/vmlinux.lds: arch/$(ARCH)/vmlinux.lds.S FORCE
 	$(CPP) -D__ASSEMBLY__ -C -P -I$(HPATH) -I$(HPATH)/asm-$(ARCH) \
-		arch/$(ARCH)/vmlinux.lds.S > $@
+		-traditional arch/$(ARCH)/vmlinux.lds.S > $@
 
 FORCE: ;
 

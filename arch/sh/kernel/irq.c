@@ -1,4 +1,4 @@
-/* $Id: irq.c,v 1.11 2000/02/29 11:03:40 gniibe Exp $
+/* $Id: irq.c,v 1.12 2000/03/06 14:07:50 gniibe Exp $
  *
  * linux/arch/sh/kernel/irq.c
  *
@@ -13,6 +13,7 @@
  * Naturally it's not a 1:1 relation, but there are similarities.
  */
 
+#include <linux/config.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/kernel_stat.h>
@@ -35,10 +36,6 @@
 #include <asm/delay.h>
 #include <asm/irq.h>
 #include <linux/irq.h>
-
-
-unsigned int local_bh_count[NR_CPUS];
-unsigned int local_irq_count[NR_CPUS];
 
 /*
  * Micro-access to controllers is serialized over the whole
@@ -93,6 +90,7 @@ struct hw_interrupt_type no_irq_type = {
  * Generic, controller-independent functions:
  */
 
+#if defined(CONFIG_PROC_FS)
 int get_irq_list(char *buf)
 {
 	int i, j;
@@ -104,7 +102,7 @@ int get_irq_list(char *buf)
 		p += sprintf(p, "CPU%d       ",j);
 	*p++ = '\n';
 
-	for (i = 0 ; i < NR_IRQS ; i++) {
+	for (i = 0 ; i < ACTUAL_NR_IRQS ; i++) {
 		action = irq_desc[i].action;
 		if (!action) 
 			continue;
@@ -119,6 +117,7 @@ int get_irq_list(char *buf)
 	}
 	return p - buf;
 }
+#endif
 
 /*
  * This should really return information about whether
@@ -179,7 +178,7 @@ void disable_irq(unsigned int irq)
 {
 	disable_irq_nosync(irq);
 
-	if (!local_irq_count[smp_processor_id()]) {
+	if (!local_irq_count(smp_processor_id())) {
 		do {
 			barrier();
 		} while (irq_desc[irq].status & IRQ_INPROGRESS);
@@ -235,15 +234,14 @@ asmlinkage int do_IRQ(unsigned long r4, unsigned long r5,
 	struct irqaction * action;
 	unsigned int status;
 
-	regs.syscall_nr = -1;	/* It's not system call */
-
 	/* Get IRQ number */
-	asm volatile("stc	r2_bank,%0\n\t"
+	asm volatile("stc	$r2_bank, %0\n\t"
 		     "shlr2	%0\n\t"
 		     "shlr2	%0\n\t"
 		     "shlr	%0\n\t"
-		     "add	#-16,%0\n\t"
+		     "add	#-16, %0\n\t"
 		     :"=z" (irq));
+	irq = irq_demux(irq);
 
 	kstat.irqs[cpu][irq]++;
 	desc = irq_desc + irq;
@@ -302,10 +300,10 @@ asmlinkage int do_IRQ(unsigned long r4, unsigned long r5,
 		desc->handler->end(irq);
 	spin_unlock(&irq_controller_lock);
 
-#if 1
+#if 0
 	__sti();
 #endif
-	if (softirq_state[cpu].active&softirq_state[cpu].mask)
+	if (softirq_active(cpu)&softirq_mask(cpu))
 		do_softirq();
 	return 1;
 }
@@ -319,7 +317,7 @@ int request_irq(unsigned int irq,
 	int retval;
 	struct irqaction * action;
 
-	if (irq >= NR_IRQS)
+	if (irq >= ACTUAL_NR_IRQS)
 		return -EINVAL;
 	if (!handler)
 		return -EINVAL;
@@ -347,7 +345,7 @@ void free_irq(unsigned int irq, void *dev_id)
 	struct irqaction **p;
 	unsigned long flags;
 
-	if (irq >= NR_IRQS)
+	if (irq >= ACTUAL_NR_IRQS)
 		return;
 
 	spin_lock_irqsave(&irq_controller_lock,flags);
@@ -397,7 +395,7 @@ unsigned long probe_irq_on(void)
 	for (i = NR_IRQS-1; i > 0; i--) {
 		if (!irq_desc[i].action) {
 			irq_desc[i].status |= IRQ_AUTODETECT | IRQ_WAITING;
-			if(irq_desc[i].handler->startup(i))
+			if (irq_desc[i].handler->startup(i))
 				irq_desc[i].status |= IRQ_PENDING;
 		}
 	}
@@ -419,7 +417,7 @@ unsigned long probe_irq_on(void)
 
 		if (!(status & IRQ_AUTODETECT))
 			continue;
-		
+
 		/* It triggered already - consider it spurious. */
 		if (!(status & IRQ_WAITING)) {
 			irq_desc[i].status = status & ~IRQ_AUTODETECT;
@@ -515,3 +513,10 @@ int setup_irq(unsigned int irq, struct irqaction * new)
 	spin_unlock_irqrestore(&irq_controller_lock,flags);
 	return 0;
 }
+
+#if defined(CONFIG_PROC_FS) && defined(CONFIG_SYSCTL)
+
+void init_irq_proc(void)
+{
+}
+#endif

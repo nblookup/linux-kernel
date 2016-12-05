@@ -1,5 +1,5 @@
 /*
- *  driver/usb/hid-debug.h
+ * $Id: hid-debug.h,v 1.2 2000/05/29 10:54:53 vojtech Exp $
  *
  *  (c) 1999 Andreas Gal	<gal@cs.uni-magdeburg.de>
  *  (c) 2000 Vojtech Pavlik	<vojtech@suse.cz>
@@ -105,6 +105,7 @@ static struct hid_usage_entry hid_usage_table[] = {
     {0, 0x35, "Tap"},
     {0, 0x39, "TabletFunctionKey"},
     {0, 0x3a, "ProgramChangeKey"},
+    {0, 0x3c, "Invert"},
     {0, 0x42, "TipSwitch"},
     {0, 0x43, "SecondaryTipSwitch"},
     {0, 0x44, "BarrelSwitch"},

@@ -1,4 +1,4 @@
-# $Id: Makefile,v 1.5 1999/12/21 04:02:26 davem Exp $
+# $Id: Makefile,v 1.7 2000/12/14 22:57:25 davem Exp $
 # Makefile for the Sun Boot PROM interface library under
 # Linux.
 #
@@ -8,22 +8,14 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
-OBJS  = bootstr.o devops.o init.o memory.o misc.o \
-        tree.o console.o printf.o p1275.o map.o
-
-all: promlib.a
-
-promlib.a: $(OBJS)
-	$(AR) rcs promlib.a $(OBJS)
-	sync
+L_TARGET = promlib.a
+obj-y   := bootstr.o devops.o init.o memory.o misc.o \
+	   tree.o console.o printf.o p1275.o map.o
 
 .S.s:
-	$(CPP) -D__ASSEMBLY__ $(AFLAGS) -ansi $< -o $*.s
+	$(CPP) $(AFLAGS) -ansi $< -o $*.s
 
 .S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -ansi -c $< -o $*.o
-
-dep:
-	$(CPP) $(CPPFLAGS) -M *.c > .depend
+	$(CC) $(AFLAGS) -ansi -c $< -o $*.o
 
 include $(TOPDIR)/Rules.make

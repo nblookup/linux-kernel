@@ -1,7 +1,10 @@
 /*
  *	Declarations of X.25 Packet Layer type objects.
  *
- *	Jonathan Naylor		17/11/96
+ * 	History
+ *	nov/17/96	Jonathan Naylor	  Initial version.		
+ *	mar/20/00	Daniela Squassoni Disabling/enabling of facilities 
+ *					  negotiation.
  */
 
 #ifndef _X25_H
@@ -113,6 +116,7 @@ struct x25_neigh {
 	struct sk_buff_head	queue;
 	unsigned long		t20;
 	struct timer_list	t20timer;
+	unsigned long		global_facil_mask;
 };
 
 typedef struct {
@@ -132,6 +136,7 @@ typedef struct {
 	struct x25_causediag	causediag;
 	struct x25_facilities	facilities;
 	struct x25_calluserdata	calluserdata;
+	unsigned long 		vc_facil_mask;	/* inc_call facilities mask */
 } x25_cb;
 
 /* af_x25.c */
@@ -149,8 +154,6 @@ extern void x25_destroy_socket(struct sock *);
 extern int  x25_rx_call_request(struct sk_buff *, struct x25_neigh *, unsigned int);
 extern void x25_kill_by_neigh(struct x25_neigh *);
 
-#include <net/x25call.h>
-
 /* x25_dev.c */
 extern void x25_send_frame(struct sk_buff *, struct x25_neigh *);
 extern int  x25_lapb_receive_frame(struct sk_buff *, struct net_device *, struct packet_type *);
@@ -159,13 +162,14 @@ extern void x25_establish_link(struct x25_neigh *);
 extern void x25_terminate_link(struct x25_neigh *);
 
 /* x25_facilities.c */
-extern int  x25_parse_facilities(struct sk_buff *, struct x25_facilities *);
-extern int  x25_create_facilities(unsigned char *, struct x25_facilities *);
+extern int  x25_parse_facilities(struct sk_buff *, struct x25_facilities *, unsigned long *);
+extern int  x25_create_facilities(unsigned char *, struct x25_facilities *, unsigned long);
 extern int  x25_negotiate_facilities(struct sk_buff *, struct sock *, struct x25_facilities *);
 extern void x25_limit_facilities(struct x25_facilities *, struct x25_neigh *);
 
 /* x25_in.c */
 extern int  x25_process_rx_frame(struct sock *, struct sk_buff *);
+extern int  x25_backlog_rcv(struct sock *, struct sk_buff *);
 
 /* x25_link.c */
 extern void x25_link_control(struct sk_buff *, struct x25_neigh *, unsigned short);
@@ -183,7 +187,7 @@ extern struct x25_neigh *x25_get_neigh(struct net_device *);
 extern void x25_link_free(void);
 
 /* x25_out.c */
-extern void x25_output(struct sock *, struct sk_buff *);
+extern  int x25_output(struct sock *, struct sk_buff *);
 extern void x25_kick(struct sock *);
 extern void x25_enquiry_response(struct sock *);
 
@@ -217,5 +221,8 @@ extern unsigned long x25_display_timer(struct sock *);
 /* sysctl_net_x25.c */
 extern void x25_register_sysctl(void);
 extern void x25_unregister_sysctl(void);
-
+struct x25_skb_cb {
+	unsigned flags;
+};
+#define X25_SKB_CB(s) ((struct x25_skb_cb *) ((s)->cb))
 #endif

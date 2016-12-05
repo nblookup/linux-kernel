@@ -1,22 +1,22 @@
 /*
- * linux/fs/adfs/dir.c
+ *  linux/fs/adfs/dir.c
  *
- * Copyright (C) 1999 Russell King
+ *  Copyright (C) 1999-2000 Russell King
  *
- * Common directory handling for ADFS
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Common directory handling for ADFS
  */
+#include <linux/config.h>
 #include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/adfs_fs.h>
 #include <linux/sched.h>
 #include <linux/stat.h>
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,0)
 #include <linux/spinlock.h>
-#else
-#include <asm/spinlock.h>
-#endif
 
 #include "adfs.h"
 
@@ -29,24 +29,27 @@ static int
 adfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
 	struct inode *inode = filp->f_dentry->d_inode;
-	struct super_block *sb = filp->f_dentry->d_sb;
+	struct super_block *sb = inode->i_sb;
 	struct adfs_dir_ops *ops = sb->u.adfs_sb.s_dir;
 	struct object_info obj;
 	struct adfs_dir dir;
-	int ret;
+	int ret = 0;
+
+	if (filp->f_pos >> 32)
+		goto out;
 
 	ret = ops->read(sb, inode->i_ino, inode->i_size, &dir);
 	if (ret)
 		goto out;
 
-	switch (filp->f_pos) {
+	switch ((unsigned long)filp->f_pos) {
 	case 0:
-		if (filldir(dirent, ".", 1, 0, inode->i_ino) < 0)
+		if (filldir(dirent, ".", 1, 0, inode->i_ino, DT_DIR) < 0)
 			goto free_out;
 		filp->f_pos += 1;
 
 	case 1:
-		if (filldir(dirent, "..", 2, 1, dir.parent_id) < 0)
+		if (filldir(dirent, "..", 2, 1, dir.parent_id, DT_DIR) < 0)
 			goto free_out;
 		filp->f_pos += 1;
 
@@ -61,7 +64,7 @@ adfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		goto unlock_out;
 	while (ops->getnext(&dir, &obj) == 0) {
 		if (filldir(dirent, obj.name, obj.name_len,
-			    filp->f_pos, obj.file_id) < 0)
+			    filp->f_pos, obj.file_id, DT_UNKNOWN) < 0)
 			goto unlock_out;
 		filp->f_pos += 1;
 	}
@@ -79,13 +82,14 @@ out:
 int
 adfs_dir_update(struct super_block *sb, struct object_info *obj)
 {
+	int ret = -EINVAL;
+#ifdef CONFIG_ADFS_FS_RW
 	struct adfs_dir_ops *ops = sb->u.adfs_sb.s_dir;
 	struct adfs_dir dir;
-	int ret = -EINVAL;
 
 	printk(KERN_INFO "adfs_dir_update: object %06X in dir %06X\n",
 		 obj->file_id, obj->parent_id);
-#if 0
+
 	if (!ops->update) {
 		ret = -EINVAL;
 		goto out;

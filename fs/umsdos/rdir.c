@@ -33,7 +33,8 @@ static int rdir_filldir (	void *buf,
 				const char *name,
 				int name_len,
 				off_t offset,
-				ino_t ino)
+				ino_t ino,
+				unsigned int d_type)
 {
 	int ret = 0;
 	struct RDIR_FILLDIR *d = (struct RDIR_FILLDIR *) buf;
@@ -48,11 +49,11 @@ static int rdir_filldir (	void *buf,
 				/* Make sure the .. entry points back to the pseudo_root */
 				ino = pseudo_root->i_ino;
 			}
-			ret = d->filldir (d->dirbuf, name, name_len, offset, ino);
+			ret = d->filldir (d->dirbuf, name, name_len, offset, ino, DT_UNKNOWN);
 		}
 	} else {
 		/* Any DOS directory */
-		ret = d->filldir (d->dirbuf, name, name_len, offset, ino);
+		ret = d->filldir (d->dirbuf, name, name_len, offset, ino, DT_UNKNOWN);
 	}
 	return ret;
 }
@@ -174,6 +175,8 @@ static int UMSDOS_rrmdir ( struct inode *dir, struct dentry *dentry)
 			ret = 0;
 			if (demd->d_inode)
 				ret = msdos_unlink (dentry->d_inode, demd);
+			if (!ret)
+				d_delete(demd);
 			dput(demd);
 		}
 	}

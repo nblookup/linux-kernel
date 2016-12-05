@@ -1,4 +1,4 @@
-/* $Id: dmy.c,v 1.5 1999/09/21 14:37:37 davem Exp $
+/* $Id: dmy.c,v 1.6 2000/12/13 05:06:26 davem Exp $
  * drivers/sbus/audio/dummy.c
  *
  * Copyright 1998 Derrick J Brashear (shadow@andrew.cmu.edu)
@@ -547,7 +547,7 @@ static void dummy_start_output(struct sparcaudio_driver *drv, __u8 * buffer,
         dummy_chip->perchip_info.play.active = 1;
 
         /* fake an "interrupt" to deal with this block */
-        dummy_chip->tqueue.next = NULL;
+        INIT_LIST_HEAD(&dummy_chip->tqueue.list);
         dummy_chip->tqueue.sync = 0;
         dummy_chip->tqueue.routine = dummy_output_done_task;
         dummy_chip->tqueue.data = drv;

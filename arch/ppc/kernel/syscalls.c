@@ -20,6 +20,7 @@
  *
  */
 
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -44,7 +45,7 @@ check_bugs(void)
 {
 }
 
-asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int on)
+int sys_ioperm(unsigned long from, unsigned long num, int on)
 {
 	printk(KERN_ERR "sys_ioperm()\n");
 	return -EIO;
@@ -52,25 +53,19 @@ asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int on)
 
 int sys_iopl(int a1, int a2, int a3, int a4)
 {
-	lock_kernel();
 	printk(KERN_ERR "sys_iopl(%x, %x, %x, %x)!\n", a1, a2, a3, a4);
-	unlock_kernel();
 	return (-ENOSYS);
 }
 
 int sys_vm86(int a1, int a2, int a3, int a4)
 {
-	lock_kernel();
 	printk(KERN_ERR "sys_vm86(%x, %x, %x, %x)!\n", a1, a2, a3, a4);
-	unlock_kernel();
 	return (-ENOSYS);
 }
 
 int sys_modify_ldt(int a1, int a2, int a3, int a4)
 {
-	lock_kernel();
 	printk(KERN_ERR "sys_modify_ldt(%x, %x, %x, %x)!\n", a1, a2, a3, a4);
-	unlock_kernel();
 	return (-ENOSYS);
 }
 
@@ -79,12 +74,11 @@ int sys_modify_ldt(int a1, int a2, int a3, int a4)
  *
  * This is really horribly ugly.
  */
-asmlinkage int 
+int
 sys_ipc (uint call, int first, int second, int third, void *ptr, long fifth)
 {
 	int version, ret;
 
-	lock_kernel();
 	version = call >> 16; /* hack for backward compatibility */
 	call &= 0xffff;
 
@@ -171,7 +165,6 @@ sys_ipc (uint call, int first, int second, int third, void *ptr, long fifth)
 		break;
 	}
 
-	unlock_kernel();
 	return ret;
 }
 
@@ -179,14 +172,12 @@ sys_ipc (uint call, int first, int second, int third, void *ptr, long fifth)
  * sys_pipe() is the normal C calling standard for creating
  * a pipe. It's not the way unix traditionally does this, though.
  */
-asmlinkage int sys_pipe(int *fildes)
+int sys_pipe(int *fildes)
 {
 	int fd[2];
 	int error;
 
-	lock_kernel();
 	error = do_pipe(fd);
-	unlock_kernel();
 	if (!error) {
 		if (copy_to_user(fildes, fd, 2*sizeof(int)))
 			error = -EFAULT;
@@ -194,31 +185,29 @@ asmlinkage int sys_pipe(int *fildes)
 	return error;
 }
 
-asmlinkage unsigned long sys_mmap(unsigned long addr, size_t len,
-				  unsigned long prot, unsigned long flags,
-				  unsigned long fd, off_t offset)
+unsigned long sys_mmap(unsigned long addr, size_t len,
+		       unsigned long prot, unsigned long flags,
+		       unsigned long fd, off_t offset)
 {
 	struct file * file = NULL;
 	int ret = -EBADF;
 
-	lock_kernel();
+	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	if (!(flags & MAP_ANONYMOUS)) {
 		if (!(file = fget(fd)))
 			goto out;
 	}
 	
-	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
 	down(&current->mm->mmap_sem);
 	ret = do_mmap(file, addr, len, prot, flags, offset);
 	up(&current->mm->mmap_sem);
 	if (file)
 		fput(file);
 out:
-	unlock_kernel();
 	return ret;
 }
 
-extern asmlinkage int sys_select(int, fd_set *, fd_set *, fd_set *, struct timeval *);
+extern int sys_select(int, fd_set *, fd_set *, fd_set *, struct timeval *);
 
 /*
  * Due to some executables calling the wrong select we sometimes
@@ -226,7 +215,7 @@ extern asmlinkage int sys_select(int, fd_set *, fd_set *, fd_set *, struct timev
  * (a single ptr to them all args passed) then calls
  * sys_select() with the appropriate args. -- Cort
  */
-asmlinkage int 
+int
 ppc_select(int n, fd_set *inp, fd_set *outp, fd_set *exp, struct timeval *tvp)
 {
 	if ( (unsigned long)n >= 4096 )
@@ -243,14 +232,14 @@ ppc_select(int n, fd_set *inp, fd_set *outp, fd_set *exp, struct timeval *tvp)
 	return sys_select(n, inp, outp, exp, tvp);
 }
 
-asmlinkage int sys_pause(void)
+int sys_pause(void)
 {
 	current->state = TASK_INTERRUPTIBLE;
 	schedule();
 	return -ERESTARTNOHAND;
 }
 
-asmlinkage int sys_uname(struct old_utsname * name)
+int sys_uname(struct old_utsname * name)
 {
 	int err = -EFAULT;
 
@@ -261,7 +250,7 @@ asmlinkage int sys_uname(struct old_utsname * name)
 	return err;
 }
 
-asmlinkage int sys_olduname(struct oldold_utsname * name)
+int sys_olduname(struct oldold_utsname * name)
 {
 	int error;
 
@@ -286,3 +275,13 @@ asmlinkage int sys_olduname(struct oldold_utsname * name)
 	error = error ? -EFAULT : 0;
 	return error;
 }
+
+#ifndef CONFIG_PCI
+/*
+ * Those are normally defined in arch/ppc/kernel/pci.c. But when CONFIG_PCI is
+ * not defined, this file is not linked at all, so here are the "empty" versions
+ */
+asmlinkage int sys_pciconfig_read() { return -ENOSYS; }
+asmlinkage int sys_pciconfig_write() { return -ENOSYS; }
+asmlinkage long sys_pciconfig_iobase() { return -ENOSYS; }
+#endif

@@ -280,24 +280,7 @@ int scsi_block_when_processing_errors(Scsi_Device * SDpnt)
 STATIC
 void scsi_eh_times_out(Scsi_Cmnd * SCpnt)
 {
-	unsigned long flags;
-	int rtn = FAILED;
-
 	SCpnt->eh_state = SCSI_STATE_TIMEOUT;
-	SCpnt->owner = SCSI_OWNER_LOWLEVEL;
-
-	/*
-	 * As far as the low level driver is concerned, this command is still
-	 * active, so we must give the low level driver a chance to abort it. (DB)
-	 */
-	spin_lock_irqsave(&io_request_lock, flags);
-	if (SCpnt->host->hostt->eh_abort_handler)
-		rtn = SCpnt->host->hostt->eh_abort_handler(SCpnt);
-	spin_unlock_irqrestore(&io_request_lock, flags);
-
-	SCpnt->request.rq_status = RQ_SCSI_DONE;
-	SCpnt->owner = SCSI_OWNER_ERROR_HANDLER;
-
 	SCSI_LOG_ERROR_RECOVERY(5, printk("In scsi_eh_times_out %p\n", SCpnt));
 
 	if (SCpnt->host->eh_action != NULL)
@@ -409,6 +392,7 @@ STATIC int scsi_eh_retry_command(Scsi_Cmnd * SCpnt)
 	SCpnt->use_sg = SCpnt->old_use_sg;
 	SCpnt->cmd_len = SCpnt->old_cmd_len;
 	SCpnt->sc_data_direction = SCpnt->sc_old_data_direction;
+	SCpnt->underflow = SCpnt->old_underflow;
 
 	scsi_send_eh_cmnd(SCpnt, SCpnt->timeout_per_command);
 
@@ -466,6 +450,7 @@ STATIC int scsi_request_sense(Scsi_Cmnd * SCpnt)
 	SCpnt->use_sg = 0;
 	SCpnt->cmd_len = COMMAND_SIZE(SCpnt->cmnd[0]);
 	SCpnt->sc_data_direction = SCSI_DATA_READ;
+	SCpnt->underflow = 0;
 
 	scsi_send_eh_cmnd(SCpnt, SENSE_TIMEOUT);
 
@@ -489,6 +474,7 @@ STATIC int scsi_request_sense(Scsi_Cmnd * SCpnt)
 	SCpnt->use_sg = SCpnt->old_use_sg;
 	SCpnt->cmd_len = SCpnt->old_cmd_len;
 	SCpnt->sc_data_direction = SCpnt->sc_old_data_direction;
+	SCpnt->underflow = SCpnt->old_underflow;
 
 	/*
 	 * Hey, we are done.  Let's look to see what happened.
@@ -533,8 +519,10 @@ STATIC int scsi_test_unit_ready(Scsi_Cmnd * SCpnt)
 	SCpnt->request_bufflen = 256;
 	SCpnt->use_sg = 0;
 	SCpnt->cmd_len = COMMAND_SIZE(SCpnt->cmnd[0]);
-	scsi_send_eh_cmnd(SCpnt, SENSE_TIMEOUT);
+	SCpnt->underflow = 0;
 	SCpnt->sc_data_direction = SCSI_DATA_NONE;
+
+	scsi_send_eh_cmnd(SCpnt, SENSE_TIMEOUT);
 
 	/* Last chance to have valid sense data */
 	if (!scsi_sense_valid(SCpnt))
@@ -556,6 +544,7 @@ STATIC int scsi_test_unit_ready(Scsi_Cmnd * SCpnt)
 	SCpnt->use_sg = SCpnt->old_use_sg;
 	SCpnt->cmd_len = SCpnt->old_cmd_len;
 	SCpnt->sc_data_direction = SCpnt->sc_old_data_direction;
+	SCpnt->underflow = SCpnt->old_underflow;
 
 	/*
 	 * Hey, we are done.  Let's look to see what happened.
@@ -645,6 +634,26 @@ STATIC void scsi_send_eh_cmnd(Scsi_Cmnd * SCpnt, int timeout)
 		 * In other words, we don't want a callback any more.
 		 */
 		if (SCpnt->eh_state == SCSI_STATE_TIMEOUT) {
+                        SCpnt->owner = SCSI_OWNER_LOWLEVEL;
+
+			/*
+			 * As far as the low level driver is
+			 * concerned, this command is still active, so
+			 * we must give the low level driver a chance
+			 * to abort it. (DB) 
+			 *
+			 * FIXME(eric) - we are not tracking whether we could
+			 * abort a timed out command or not.  Not sure how
+			 * we should treat them differently anyways.
+			 */
+			spin_lock_irqsave(&io_request_lock, flags);
+			if (SCpnt->host->hostt->eh_abort_handler)
+				SCpnt->host->hostt->eh_abort_handler(SCpnt);
+			spin_unlock_irqrestore(&io_request_lock, flags);
+			
+			SCpnt->request.rq_status = RQ_SCSI_DONE;
+			SCpnt->owner = SCSI_OWNER_ERROR_HANDLER;
+			
 			SCpnt->eh_state = FAILED;
 		}
 		SCSI_LOG_ERROR_RECOVERY(5, printk("send_eh_cmnd: %p eh_state:%x\n",
@@ -736,6 +745,7 @@ STATIC void scsi_eh_finish_command(Scsi_Cmnd ** SClist, Scsi_Cmnd * SCpnt)
 	 */
 	SCpnt->use_sg = SCpnt->old_use_sg;
 	SCpnt->sc_data_direction = SCpnt->sc_old_data_direction;
+	SCpnt->underflow = SCpnt->old_underflow;
 	*SClist = SCpnt;
 }
 

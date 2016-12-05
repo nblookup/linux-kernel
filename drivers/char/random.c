@@ -139,7 +139,7 @@
  * add_interrupt_randomness() uses the inter-interrupt timing as random
  * inputs to the entropy pool.  Note that not all interrupts are good
  * sources of randomness!  For example, the timer interrupts is not a
- * good choice, because the periodicity of the interrupts is to
+ * good choice, because the periodicity of the interrupts is too
  * regular, and hence predictable to an attacker.  Disk interrupts are
  * a better measure, since the timing of the disk interrupts are more
  * unpredictable.
@@ -509,7 +509,7 @@ static int create_entropy_store(int size, struct entropy_store **ret_bucket)
 
 	r->pool = kmalloc(poolwords*4, GFP_KERNEL);
 	if (!r->pool) {
-		kfree_s(r, sizeof(struct entropy_store));
+		kfree(r);
 		return -ENOMEM;
 	}
 	memset(r->pool, 0, poolwords*4);
@@ -531,7 +531,7 @@ static void free_entropy_store(struct entropy_store *r)
 {
 	if (r->pool)
 		kfree(r->pool);
-	kfree_s(r, sizeof(struct entropy_store));
+	kfree(r);
 }
 
 /*
@@ -710,7 +710,7 @@ static void add_timer_randomness(struct timer_rand_state *state, unsigned num)
 	int		entropy = 0;
 
 #if defined (__i386__)
-	if (boot_cpu_data.x86_capability & X86_FEATURE_TSC) {
+	if ( test_bit(X86_FEATURE_TSC, &boot_cpu_data.x86_capability) ) {
 		__u32 high;
 		__asm__(".byte 0x0f,0x31"
 			:"=a" (time), "=d" (high));
@@ -763,7 +763,12 @@ static void add_timer_randomness(struct timer_rand_state *state, unsigned num)
 
 void add_keyboard_randomness(unsigned char scancode)
 {
-	add_timer_randomness(&keyboard_timer_state, scancode);
+	static unsigned char last_scancode;
+	/* ignore autorepeat (multiple key down w/o key up) */
+	if (scancode != last_scancode) {
+		last_scancode = scancode;
+		add_timer_randomness(&keyboard_timer_state, scancode);
+	}
 }
 
 void add_mouse_randomness(__u32 mouse_data)
@@ -1993,8 +1998,8 @@ static __u32 twothirdsMD4Transform (__u32 const buf[4], __u32 const in[12])
 __u32 secure_tcpv6_sequence_number(__u32 *saddr, __u32 *daddr,
 				   __u16 sport, __u16 dport)
 {
-	static __u32	rekey_time = 0;
-	static __u32	count = 0;
+	static __u32	rekey_time;
+	static __u32	count;
 	static __u32	secret[12];
 	struct timeval 	tv;
 	__u32		seq;
@@ -2022,7 +2027,7 @@ __u32 secure_tcpv6_sequence_number(__u32 *saddr, __u32 *daddr,
 
 __u32 secure_ipv6_id(__u32 *daddr)
 {
-	static time_t	rekey_time = 0;
+	static time_t	rekey_time;
 	static __u32	secret[12];
 	time_t		t;
 
@@ -2045,8 +2050,8 @@ __u32 secure_ipv6_id(__u32 *daddr)
 __u32 secure_tcp_sequence_number(__u32 saddr, __u32 daddr,
 				 __u16 sport, __u16 dport)
 {
-	static __u32	rekey_time = 0;
-	static __u32	count = 0;
+	static __u32	rekey_time;
+	static __u32	count;
 	static __u32	secret[12];
 	struct timeval 	tv;
 	__u32		seq;
@@ -2100,7 +2105,7 @@ __u32 secure_tcp_sequence_number(__u32 saddr, __u32 daddr,
  */
 __u32 secure_ip_id(__u32 daddr)
 {
-	static time_t	rekey_time = 0;
+	static time_t	rekey_time;
 	static __u32	secret[12];
 	time_t		t;
 
@@ -2139,7 +2144,7 @@ __u32 secure_ip_id(__u32 daddr)
 #define COOKIEBITS 24	/* Upper bits store count */
 #define COOKIEMASK (((__u32)1 << COOKIEBITS) - 1)
 
-static int	syncookie_init = 0;
+static int	syncookie_init;
 static __u32	syncookie_secret[2][16-3+HASH_BUFFER_SIZE];
 
 __u32 secure_tcp_syn_cookie(__u32 saddr, __u32 daddr, __u16 sport,

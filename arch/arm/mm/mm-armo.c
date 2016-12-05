@@ -1,9 +1,13 @@
 /*
- * arch/arm/mm/mm-armo.c
+ *  linux/arch/arm/mm/mm-armo.c
  *
- * Page table sludge for older ARM processor architectures.
+ *  Copyright (C) 1998-2000 Russell King
  *
- * Copyright (C) 1998-1999 Russell King
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Page table sludge for older ARM processor architectures.
  */
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -15,7 +19,7 @@
 #include <asm/page.h>
 #include <asm/arch/memory.h>
 
-#include "map.h"
+#include <asm/mach/map.h>
 
 #define MEMC_TABLE_SIZE (256*sizeof(unsigned long))
 #define PGD_TABLE_SIZE	(PTRS_PER_PGD * BYTES_PER_PTR)
@@ -135,12 +139,19 @@ pte_t *get_pte_slow(pmd_t *pmd, unsigned long offset)
 }
 
 /*
+ * No special code is required here.
+ */
+void setup_mm_for_reboot(char mode)
+{
+}
+
+/*
  * This contains the code to setup the memory map on an ARM2/ARM250/ARM3
  * machine. This is both processor & architecture specific, and requires
  * some more work to get it to fit into our separate processor and
  * architecture structure.
  */
-void __init pagetable_init(void)
+void __init memtable_init(struct meminfo *mi)
 {
 	pte_t *pte;
 	int i;
@@ -155,6 +166,14 @@ void __init pagetable_init(void)
 		pgd_val(swapper_pg_dir[i]) = 0;
 }
 
-void __init create_memmap_holes(void)
+void __init iotable_init(struct map_desc *io_desc)
+{
+	/* nothing to do */
+}
+
+/*
+ * We never have holes in the memmap
+ */
+void __init create_memmap_holes(struct meminfo *mi)
 {
 }

@@ -33,7 +33,7 @@
 #include <asm/pgalloc.h>
 
 static int load_aout32_binary(struct linux_binprm *, struct pt_regs * regs);
-static int load_aout32_library(int fd);
+static int load_aout32_library(struct file*);
 static int aout32_core_dump(long signr, struct pt_regs * regs, struct file *file);
 
 extern void dump_thread(struct pt_regs *, struct user *);
@@ -82,8 +82,7 @@ if (file->f_op->llseek) { \
  * dumping of the process results in another error..
  */
 
-static inline int
-do_aout32_core_dump(long signr, struct pt_regs * regs, struct file *file)
+static int aout32_core_dump(long signr, struct pt_regs *regs, struct file *file)
 {
 	mm_segment_t fs;
 	int has_dumped = 0;
@@ -143,17 +142,6 @@ end_coredump:
 	return has_dumped;
 }
 
-static int
-aout32_core_dump(long signr, struct pt_regs * regs, struct file * file)
-{
-	int retval;
-
-	MOD_INC_USE_COUNT;
-	retval = do_aout32_core_dump(signr, regs, file);
-	MOD_DEC_USE_COUNT;
-	return retval;
-}
-
 /*
  * create_aout32_tables() parses the env- and arg-strings in new user
  * memory and creates the pointer tables from them, and puts their
@@ -207,12 +195,9 @@ static u32 *create_aout32_tables(char * p, struct linux_binprm * bprm)
  * libraries.  There is no binary dependent code anywhere else.
  */
 
-static inline int do_load_aout32_binary(struct linux_binprm * bprm,
-					struct pt_regs * regs)
+static int load_aout32_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 {
 	struct exec ex;
-	struct file * file;
-	int fd;
 	unsigned long error;
 	unsigned long fd_offset;
 	unsigned long rlim;
@@ -222,7 +207,7 @@ static inline int do_load_aout32_binary(struct linux_binprm * bprm,
 	if ((N_MAGIC(ex) != ZMAGIC && N_MAGIC(ex) != OMAGIC &&
 	     N_MAGIC(ex) != QMAGIC && N_MAGIC(ex) != NMAGIC) ||
 	    N_TRSIZE(ex) || N_DRSIZE(ex) ||
-	    bprm->dentry->d_inode->i_size < ex.a_text+ex.a_data+N_SYMSIZE(ex)+N_TXTOFF(ex)) {
+	    bprm->file->f_dentry->d_inode->i_size < ex.a_text+ex.a_data+N_SYMSIZE(ex)+N_TXTOFF(ex)) {
 		return -ENOEXEC;
 	}
 
@@ -244,7 +229,7 @@ static inline int do_load_aout32_binary(struct linux_binprm * bprm,
 		return retval;
 
 	/* OK, This is the point of no return */
-	current->personality = PER_LINUX;
+	set_personality(PER_SUNOS);
 
 	current->mm->end_code = ex.a_text +
 		(current->mm->start_code = N_TXTADDR(ex));
@@ -258,21 +243,23 @@ static inline int do_load_aout32_binary(struct linux_binprm * bprm,
 	compute_creds(bprm);
  	current->flags &= ~PF_FORKNOEXEC;
 	if (N_MAGIC(ex) == NMAGIC) {
+		loff_t pos = fd_offset;
 		/* Fuck me plenty... */
 		error = do_brk(N_TXTADDR(ex), ex.a_text);
-		read_exec(bprm->dentry, fd_offset, (char *) N_TXTADDR(ex),
-			  ex.a_text, 0);
+		bprm->file->f_op->read(bprm->file, (char *) N_TXTADDR(ex),
+			  ex.a_text, &pos);
 		error = do_brk(N_DATADDR(ex), ex.a_data);
-		read_exec(bprm->dentry, fd_offset + ex.a_text, (char *) N_DATADDR(ex),
-			  ex.a_data, 0);
+		bprm->file->f_op->read(bprm->file, (char *) N_DATADDR(ex),
+			  ex.a_data, &pos);
 		goto beyond_if;
 	}
 
 	if (N_MAGIC(ex) == OMAGIC) {
+		loff_t pos = fd_offset;
 		do_brk(N_TXTADDR(ex) & PAGE_MASK,
 			ex.a_text+ex.a_data + PAGE_SIZE - 1);
-		read_exec(bprm->dentry, fd_offset, (char *) N_TXTADDR(ex),
-			  ex.a_text+ex.a_data, 0);
+		bprm->file->f_op->read(bprm->file, (char *) N_TXTADDR(ex),
+			  ex.a_text+ex.a_data, &pos);
 	} else {
 		static unsigned long error_time;
 		if ((ex.a_text & 0xfff || ex.a_data & 0xfff) &&
@@ -282,54 +269,39 @@ static inline int do_load_aout32_binary(struct linux_binprm * bprm,
 			error_time = jiffies;
 		}
 
-		fd = open_dentry(bprm->dentry, O_RDONLY);
-		if (fd < 0)
-			return fd;
-		file = fget(fd);
-
-		if (!file->f_op || !file->f_op->mmap) {
-			fput(file);
-			sys_close(fd);
+		if (!bprm->file->f_op->mmap) {
+			loff_t pos = fd_offset;
 			do_brk(0, ex.a_text+ex.a_data);
-			read_exec(bprm->dentry, fd_offset,
-				  (char *) N_TXTADDR(ex), ex.a_text+ex.a_data, 0);
+			bprm->file->f_op->read(bprm->file,(char *)N_TXTADDR(ex),
+				  ex.a_text+ex.a_data, &pos);
 			goto beyond_if;
 		}
 
-		error = do_mmap(file, N_TXTADDR(ex), ex.a_text,
+	        down(&current->mm->mmap_sem);
+		error = do_mmap(bprm->file, N_TXTADDR(ex), ex.a_text,
 			PROT_READ | PROT_EXEC,
 			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 			fd_offset);
+	        up(&current->mm->mmap_sem);
 
 		if (error != N_TXTADDR(ex)) {
-			fput(file);
-			sys_close(fd);
 			send_sig(SIGKILL, current, 0);
 			return error;
 		}
 
- 		error = do_mmap(file, N_DATADDR(ex), ex.a_data,
+	        down(&current->mm->mmap_sem);
+ 		error = do_mmap(bprm->file, N_DATADDR(ex), ex.a_data,
 				PROT_READ | PROT_WRITE | PROT_EXEC,
 				MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 				fd_offset + ex.a_text);
-		fput(file);
-		sys_close(fd);
+	        up(&current->mm->mmap_sem);
 		if (error != N_DATADDR(ex)) {
 			send_sig(SIGKILL, current, 0);
 			return error;
 		}
 	}
 beyond_if:
-	if (current->exec_domain && current->exec_domain->module)
-		__MOD_DEC_USE_COUNT(current->exec_domain->module);
-	if (current->binfmt && current->binfmt->module)
-		__MOD_DEC_USE_COUNT(current->binfmt->module);
-	current->exec_domain = lookup_exec_domain(current->personality);
-	current->binfmt = &aout32_format;
-	if (current->exec_domain && current->exec_domain->module)
-		__MOD_INC_USE_COUNT(current->exec_domain->module);
-	if (current->binfmt && current->binfmt->module)
-		__MOD_INC_USE_COUNT(current->binfmt->module);
+	set_binfmt(&aout32_format);
 
 	set_brk(current->mm->start_brk, current->mm->brk);
 
@@ -353,66 +325,42 @@ beyond_if:
 		current->thread.flags |= SPARC_FLAG_32BIT;
 	}
 	start_thread32(regs, ex.a_entry, current->mm->start_stack);
-	if (current->flags & PF_PTRACED)
+	if (current->ptrace & PT_PTRACED)
 		send_sig(SIGTRAP, current, 0);
 	return 0;
 }
 
-
-static int
-load_aout32_binary(struct linux_binprm * bprm, struct pt_regs * regs)
-{
-	int retval;
-
-	MOD_INC_USE_COUNT;
-	retval = do_load_aout32_binary(bprm, regs);
-	MOD_DEC_USE_COUNT;
-	return retval;
-}
-
 /* N.B. Move to .h file and use code in fs/binfmt_aout.c? */
-static inline int
-do_load_aout32_library(int fd)
+static int load_aout32_library(struct file *file)
 {
-        struct file * file;
 	struct inode * inode;
 	unsigned long bss, start_addr, len;
 	unsigned long error;
 	int retval;
-	loff_t offset = 0;
 	struct exec ex;
 
-	retval = -EACCES;
-	file = fget(fd);
-	if (!file)
-		goto out;
-	if (!file->f_op)
-		goto out_putf;
 	inode = file->f_dentry->d_inode;
 
 	retval = -ENOEXEC;
-	/* N.B. Save current fs? */
-	set_fs(KERNEL_DS);
-	error = file->f_op->read(file, (char *) &ex, sizeof(ex), &offset);
-	set_fs(USER_DS);
+	error = kernel_read(file, 0, (char *) &ex, sizeof(ex));
 	if (error != sizeof(ex))
-		goto out_putf;
+		goto out;
 
 	/* We come in here for the regular a.out style of shared libraries */
 	if ((N_MAGIC(ex) != ZMAGIC && N_MAGIC(ex) != QMAGIC) || N_TRSIZE(ex) ||
 	    N_DRSIZE(ex) || ((ex.a_entry & 0xfff) && N_MAGIC(ex) == ZMAGIC) ||
 	    inode->i_size < ex.a_text+ex.a_data+N_SYMSIZE(ex)+N_TXTOFF(ex)) {
-		goto out_putf;
+		goto out;
 	}
 
 	if (N_MAGIC(ex) == ZMAGIC && N_TXTOFF(ex) &&
 	    (N_TXTOFF(ex) < inode->i_sb->s_blocksize)) {
 		printk("N_TXTOFF < BLOCK_SIZE. Please convert library\n");
-		goto out_putf;
+		goto out;
 	}
 
 	if (N_FLAGS(ex))
-		goto out_putf;
+		goto out;
 
 	/* For  QMAGIC, the starting address is 0x20 into the page.  We mask
 	   this off to get the starting address for the page */
@@ -420,13 +368,15 @@ do_load_aout32_library(int fd)
 	start_addr =  ex.a_entry & 0xfffff000;
 
 	/* Now use mmap to map the library into memory. */
+	down(&current->mm->mmap_sem);
 	error = do_mmap(file, start_addr, ex.a_text + ex.a_data,
 			PROT_READ | PROT_WRITE | PROT_EXEC,
 			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE,
 			N_TXTOFF(ex));
+	up(&current->mm->mmap_sem);
 	retval = error;
 	if (error != start_addr)
-		goto out_putf;
+		goto out;
 
 	len = PAGE_ALIGN(ex.a_text + ex.a_data);
 	bss = ex.a_text + ex.a_data + ex.a_bss;
@@ -434,24 +384,10 @@ do_load_aout32_library(int fd)
 		error = do_brk(start_addr + len, bss - len);
 		retval = error;
 		if (error != start_addr + len)
-			goto out_putf;
+			goto out;
 	}
 	retval = 0;
-
-out_putf:
-	fput(file);
 out:
-	return retval;
-}
-
-static int
-load_aout32_library(int fd)
-{
-	int retval;
-
-	MOD_INC_USE_COUNT;
-	retval = do_load_aout32_library(fd);
-	MOD_DEC_USE_COUNT;
 	return retval;
 }
 

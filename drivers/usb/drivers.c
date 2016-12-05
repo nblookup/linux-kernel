@@ -37,10 +37,8 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/usb.h>
+#include <linux/usbdevice_fs.h>
 #include <asm/uaccess.h>
-
-#include "usbdevice_fs.h"
-
 
 /*****************************************************************/
 
@@ -69,7 +67,11 @@ static ssize_t usb_driver_read(struct file *file, char *buf, size_t nbytes, loff
 	pos = *ppos;
 	for (; tmp != &usb_driver_list; tmp = tmp->next) {
 		struct usb_driver *driver = list_entry(tmp, struct usb_driver, driver_list);
-		start += sprintf (start, "%s\n", driver->name);
+		int minor = driver->fops ? driver->minor : -1;
+		if (minor == -1)
+			start += sprintf (start, "         %s\n", driver->name);
+		else
+			start += sprintf (start, "%3d-%3d: %s\n", minor, minor + 15, driver->name);
 		if (start > end) {
 			start += sprintf(start, "(truncated)\n");
 			break;
@@ -92,7 +94,7 @@ static ssize_t usb_driver_read(struct file *file, char *buf, size_t nbytes, loff
 	return ret;
 }
 
-static long long usb_driver_lseek(struct file * file, long long offset, int orig)
+static loff_t usb_driver_lseek(struct file * file, loff_t offset, int orig)
 {
 	switch (orig) {
 	case 0:

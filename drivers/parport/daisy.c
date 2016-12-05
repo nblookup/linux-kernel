@@ -14,6 +14,9 @@
  * 13-03-1999: Get DeviceID from non-IEEE 1284.3 devices too.
  * 22-02-2000: Count devices that are actually detected.
  *
+ * Any part of this program may be used in documents licensed under
+ * the GNU Free Documentation License, Version 1.1 or any later version
+ * published by the Free Software Foundation.
  */
 
 #include <linux/parport.h>
@@ -47,7 +50,7 @@ static int assign_addrs (struct parport *port);
 static void add_dev (int devnum, struct parport *port, int daisy)
 {
 	struct daisydev *newdev;
-	newdev = kmalloc (GFP_KERNEL, sizeof (struct daisydev));
+	newdev = kmalloc (sizeof (struct daisydev), GFP_KERNEL);
 	if (newdev) {
 		newdev->port = port;
 		newdev->daisy = daisy;
@@ -174,7 +177,26 @@ void parport_daisy_fini (struct parport *port)
 	return;
 }
 
-/* Find a device by canonical device number. */
+/**
+ *	parport_open - find a device by canonical device number
+ *	@devnum: canonical device number
+ *	@name: name to associate with the device
+ *	@pf: preemption callback
+ *	@kf: kick callback
+ *	@irqf: interrupt handler
+ *	@flags: registration flags
+ *	@handle: driver data
+ *
+ *	This function is similar to parport_register_device(), except
+ *	that it locates a device by its number rather than by the port
+ *	it is attached to.  See parport_find_device() and
+ *	parport_find_class().
+ *
+ *	All parameters except for @devnum are the same as for
+ *	parport_register_device().  The return value is the same as
+ *	for parport_register_device().
+ **/
+
 struct pardevice *parport_open (int devnum, const char *name,
 				int (*pf) (void *), void (*kf) (void *),
 				void (*irqf) (int, void *, struct pt_regs *),
@@ -219,13 +241,31 @@ struct pardevice *parport_open (int devnum, const char *name,
 	return dev;
 }
 
-/* The converse of parport_open. */
+/**
+ *	parport_close - close a device opened with parport_open()
+ *	@dev: device to close
+ *
+ *	This is to parport_open() as parport_unregister_device() is to
+ *	parport_register_device().
+ **/
+
 void parport_close (struct pardevice *dev)
 {
 	parport_unregister_device (dev);
 }
 
-/* Convert device coordinates into a canonical device number. */
+/**
+ *	parport_device_num - convert device coordinates
+ *	@parport: parallel port number
+ *	@mux: multiplexor port number (-1 for no multiplexor)
+ *	@daisy: daisy chain address (-1 for no daisy chain address)
+ *
+ *	This tries to locate a device on the given parallel port,
+ *	multiplexor port and daisy chain address, and returns its
+ *	device number or -NXIO if no device with those coordinates
+ *	exists.
+ **/
+
 int parport_device_num (int parport, int mux, int daisy)
 {
 	struct daisydev *dev = topology;
@@ -240,7 +280,31 @@ int parport_device_num (int parport, int mux, int daisy)
 	return dev->devnum;
 }
 
-/* Convert a canonical device number into device coordinates. */
+/**
+ *	parport_device_coords - convert canonical device number
+ *	@devnum: device number
+ *	@parport: pointer to storage for parallel port number
+ *	@mux: pointer to storage for multiplexor port number
+ *	@daisy: pointer to storage for daisy chain address
+ *
+ *	This function converts a device number into its coordinates in
+ *	terms of which parallel port in the system it is attached to,
+ *	which multiplexor port it is attached to if there is a
+ *	multiplexor on that port, and which daisy chain address it has
+ *	if it is in a daisy chain.
+ *
+ *	The caller must allocate storage for @parport, @mux, and
+ *	@daisy.
+ *
+ *	If there is no device with the specified device number, -ENXIO
+ *	is returned.  Otherwise, the values pointed to by @parport,
+ *	@mux, and @daisy are set to the coordinates of the device,
+ *	with -1 for coordinates with no value.
+ *
+ *	This function is not actually very useful, but this interface
+ *	was suggested by IEEE 1284.3.
+ **/
+
 int parport_device_coords (int devnum, int *parport, int *mux, int *daisy)
 {
 	struct daisydev *dev = topology;
@@ -262,6 +326,7 @@ static int cpp_daisy (struct parport *port, int cmd)
 {
 	unsigned char s;
 
+	parport_data_forward (port);
 	parport_write_data (port, 0xaa); udelay (2);
 	parport_write_data (port, 0x55); udelay (2);
 	parport_write_data (port, 0x00); udelay (2);
@@ -310,6 +375,7 @@ static int cpp_mux (struct parport *port, int cmd)
 	unsigned char s;
 	int rc;
 
+	parport_data_forward (port);
 	parport_write_data (port, 0xaa); udelay (2);
 	parport_write_data (port, 0x55); udelay (2);
 	parport_write_data (port, 0xf0); udelay (2);
@@ -365,8 +431,10 @@ static int assign_addrs (struct parport *port)
 	unsigned char s, last_dev;
 	unsigned char daisy;
 	int thisdev = numdevs;
+	int detected;
 	char *deviceid;
 
+	parport_data_forward (port);
 	parport_write_data (port, 0xaa); udelay (2);
 	parport_write_data (port, 0x55); udelay (2);
 	parport_write_data (port, 0x00); udelay (2);
@@ -420,8 +488,9 @@ static int assign_addrs (struct parport *port)
 	}
 
 	parport_write_data (port, 0xff); udelay (2);
+	detected = numdevs - thisdev;
 	DPRINTK (KERN_DEBUG "%s: Found %d daisy-chained devices\n", port->name,
-		numdevs - thisdev);
+		 detected);
 
 	/* Ask the new devices to introduce themselves. */
 	deviceid = kmalloc (1000, GFP_KERNEL);
@@ -431,12 +500,33 @@ static int assign_addrs (struct parport *port)
 		parport_device_id (thisdev, deviceid, 1000);
 
 	kfree (deviceid);
-	return numdevs - thisdev;
+	return detected;
 }
 
 /* Find a device with a particular manufacturer and model string,
    starting from a given device number.  Like the PCI equivalent,
    'from' itself is skipped. */
+
+/**
+ *	parport_find_device - find a specific device
+ *	@mfg: required manufacturer string
+ *	@mdl: required model string
+ *	@from: previous device number found in search, or %NULL for
+ *	       new search
+ *
+ *	This walks through the list of parallel port devices looking
+ *	for a device whose 'MFG' string matches @mfg and whose 'MDL'
+ *	string matches @mdl in their IEEE 1284 Device ID.
+ *
+ *	When a device is found matching those requirements, its device
+ *	number is returned; if there is no matching device, a negative
+ *	value is returned.
+ *
+ *	A new search it initiated by passing %NULL as the @from
+ *	argument.  If @from is not %NULL, the search continues from
+ *	that device.
+ **/
+
 int parport_find_device (const char *mfg, const char *mdl, int from)
 {
 	struct daisydev *d = topology; /* sorted by devnum */
@@ -462,8 +552,25 @@ int parport_find_device (const char *mfg, const char *mdl, int from)
 	return -1;
 }
 
-/* Find a device in a particular class.  Like the PCI equivalent,
-   'from' itself is skipped. */
+/**
+ *	parport_find_class - find a device in a specified class
+ *	@cls: required class
+ *	@from: previous device number found in search, or %NULL for
+ *	       new search
+ *
+ *	This walks through the list of parallel port devices looking
+ *	for a device whose 'CLS' string matches @cls in their IEEE
+ *	1284 Device ID.
+ *
+ *	When a device is found matching those requirements, its device
+ *	number is returned; if there is no matching device, a negative
+ *	value is returned.
+ *
+ *	A new search it initiated by passing %NULL as the @from
+ *	argument.  If @from is not %NULL, the search continues from
+ *	that device.
+ **/
+
 int parport_find_class (parport_device_class cls, int from)
 {
 	struct daisydev *d = topology; /* sorted by devnum */

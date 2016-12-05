@@ -95,7 +95,7 @@ enum HP_Option {
 	MemEnable = 0x40, ZeroWait = 0x80, MemDisable = 0x1000, };
 
 int hp_plus_probe(struct net_device *dev);
-int hpp_probe1(struct net_device *dev, int ioaddr);
+static int hpp_probe1(struct net_device *dev, int ioaddr);
 
 static void hpp_reset_8390(struct net_device *dev);
 static int hpp_open(struct net_device *dev);
@@ -116,56 +116,43 @@ static void hpp_io_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hd
 
 /*	Probe a list of addresses for an HP LAN+ adaptor.
 	This routine is almost boilerplate. */
-#ifdef HAVE_DEVLIST
-/* Support for an alternate probe manager, which will eliminate the
-   boilerplate below. */
-struct netdev_entry hpplus_drv =
-{"hpplus", hpp_probe1, HP_IO_EXTENT, hpplus_portlist};
-#else
 
 int __init hp_plus_probe(struct net_device *dev)
 {
 	int i;
-	int base_addr = dev ? dev->base_addr : 0;
+	int base_addr = dev->base_addr;
+
+	SET_MODULE_OWNER(dev);
 
 	if (base_addr > 0x1ff)		/* Check a single specified location. */
 		return hpp_probe1(dev, base_addr);
 	else if (base_addr != 0)	/* Don't probe at all. */
-		return ENXIO;
+		return -ENXIO;
 
-	for (i = 0; hpplus_portlist[i]; i++) {
-		int ioaddr = hpplus_portlist[i];
-		if (check_region(ioaddr, HP_IO_EXTENT))
-			continue;
-		if (hpp_probe1(dev, ioaddr) == 0)
+	for (i = 0; hpplus_portlist[i]; i++)
+		if (hpp_probe1(dev, hpplus_portlist[i]) == 0)
 			return 0;
-	}
 
-	return ENODEV;
+	return -ENODEV;
 }
-#endif
 
 /* Do the interesting part of the probe at a single address. */
-int __init hpp_probe1(struct net_device *dev, int ioaddr)
+static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 {
-	int i;
+	int i, retval;
 	unsigned char checksum = 0;
 	const char *name = "HP-PC-LAN+";
 	int mem_start;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
+
+	if (!request_region(ioaddr, HP_IO_EXTENT, dev->name))
+		return -EBUSY;
 
 	/* Check for the HP+ signature, 50 48 0x 53. */
 	if (inw(ioaddr + HP_ID) != 0x4850
-		|| (inw(ioaddr + HP_PAGING) & 0xfff0) != 0x5300)
-		return ENODEV;
-
-	if (load_8390_module("hp-plus.c"))
-		return -ENOSYS;
-
-	/* We should have a "dev" from Space.c or the static module table. */
-	if (dev == NULL) {
-		printk("hp-plus.c: Passed a NULL device.\n");
-		dev = init_etherdev(0, 0);
+		|| (inw(ioaddr + HP_PAGING) & 0xfff0) != 0x5300) {
+		retval = -ENODEV;
+		goto out;
 	}
 
 	if (ei_debug  &&  version_printed++ == 0)
@@ -186,7 +173,8 @@ int __init hpp_probe1(struct net_device *dev, int ioaddr)
 
 	if (checksum != 0xff) {
 		printk(" bad checksum %2.2x.\n", checksum);
-		return ENODEV;
+		retval = -ENODEV;
+		goto out;
 	} else {
 		/* Point at the Software Configuration Flags. */
 		outw(ID_Page, ioaddr + HP_PAGING);
@@ -196,11 +184,9 @@ int __init hpp_probe1(struct net_device *dev, int ioaddr)
 	/* Allocate dev->priv and fill in 8390 specific dev fields. */
 	if (ethdev_init(dev)) {
 		printk ("hp-plus.c: unable to allocate memory for dev->priv.\n");
-		return -ENOMEM;
+		retval = -ENOMEM;
+		goto out;
 	 }
-
-	/* Grab the region so we can find another board if something fails. */
-	request_region(ioaddr, HP_IO_EXTENT,"hp-plus");
 
 	/* Read the IRQ line. */
 	outw(HW_Page, ioaddr + HP_PAGING);
@@ -255,6 +241,9 @@ int __init hpp_probe1(struct net_device *dev, int ioaddr)
 	outw(inw(ioaddr + HPP_OPTION) & ~EnableIRQ, ioaddr + HPP_OPTION);
 
 	return 0;
+out:
+	release_region(ioaddr, HP_IO_EXTENT);
+	return retval;
 }
 
 static int
@@ -262,9 +251,10 @@ hpp_open(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - NIC_OFFSET;
 	int option_reg;
+	int retval;
 
-	if (request_irq(dev->irq, ei_interrupt, 0, "hp-plus", dev)) {
-	    return -EAGAIN;
+	if ((retval = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev))) {
+	    return retval;
 	}
 
 	/* Reset the 8390 and HP chip. */
@@ -282,7 +272,6 @@ hpp_open(struct net_device *dev)
 	outw(Perf_Page, ioaddr + HP_PAGING);
 
 	ei_open(dev);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -297,7 +286,6 @@ hpp_close(struct net_device *dev)
 	outw((option_reg & ~EnableIRQ) | MemDisable | NICReset | ChipReset,
 		 ioaddr + HPP_OPTION);
 
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -414,19 +402,9 @@ hpp_mem_block_output(struct net_device *dev, int count,
 
 #ifdef MODULE
 #define MAX_HPP_CARDS	4	/* Max number of HPP cards per module */
-#define NAMELEN		8	/* # of chars for storing dev->name */
-static char namelist[NAMELEN * MAX_HPP_CARDS] = { 0, };
-static struct net_device dev_hpp[MAX_HPP_CARDS] = {
-	{
-		NULL,		/* assign a chunk of namelist[] below */
-		0, 0, 0, 0,
-		0, 0,
-		0, 0, 0, NULL, NULL
-	},
-};
-
-static int io[MAX_HPP_CARDS] = { 0, };
-static int irq[MAX_HPP_CARDS]  = { 0, };
+static struct net_device dev_hpp[MAX_HPP_CARDS];
+static int io[MAX_HPP_CARDS];
+static int irq[MAX_HPP_CARDS];
 
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_HPP_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_HPP_CARDS) "i");
@@ -440,7 +418,6 @@ init_module(void)
 
 	for (this_dev = 0; this_dev < MAX_HPP_CARDS; this_dev++) {
 		struct net_device *dev = &dev_hpp[this_dev];
-		dev->name = namelist+(NAMELEN*this_dev);
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
 		dev->init = hp_plus_probe;
@@ -451,14 +428,12 @@ init_module(void)
 		if (register_netdev(dev) != 0) {
 			printk(KERN_WARNING "hp-plus.c: No HP-Plus card found (i/o = 0x%x).\n", io[this_dev]);
 			if (found != 0) {	/* Got at least one. */
-				lock_8390_module();
 				return 0;
 			}
 			return -ENXIO;
 		}
 		found++;
 	}
-	lock_8390_module();
 	return 0;
 }
 
@@ -478,7 +453,6 @@ cleanup_module(void)
 			kfree(priv);
 		}
 	}
-	unlock_8390_module();
 }
 #endif /* MODULE */
 

@@ -1,8 +1,10 @@
 /* ptrace.c */
 /* By Ross Biro 1/23/92 */
-/* edited by Linus Torvalds */
+/*
+ * Pentium III FXSR, SSE support
+ *	Gareth Hughes <gareth@valinux.com>, May 2000
+ */
 
-#include <linux/config.h> /* for CONFIG_MATH_EMULATION */
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -16,6 +18,7 @@
 #include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/processor.h>
+#include <asm/i387.h>
 #include <asm/debugreg.h>
 
 /*
@@ -96,6 +99,7 @@ static int putreg(struct task_struct *child,
 		case EFL:
 			value &= FLAG_MASK;
 			value |= get_stack_long(child, EFL_OFFSET) & ~FLAG_MASK;
+			break;
 	}
 	if (regno > GS*4)
 		regno -= 2*4;
@@ -134,32 +138,35 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 {
 	struct task_struct *child;
 	struct user * dummy = NULL;
-	unsigned long flags;
 	int i, ret;
 
 	lock_kernel();
 	ret = -EPERM;
 	if (request == PTRACE_TRACEME) {
 		/* are we already being traced? */
-		if (current->flags & PF_PTRACED)
+		if (current->ptrace & PT_PTRACED)
 			goto out;
 		/* set the ptrace bit in the process flags. */
-		current->flags |= PF_PTRACED;
+		current->ptrace |= PT_PTRACED;
 		ret = 0;
 		goto out;
 	}
 	ret = -ESRCH;
 	read_lock(&tasklist_lock);
 	child = find_task_by_pid(pid);
-	read_unlock(&tasklist_lock);	/* FIXME!!! */
+	if (child)
+		get_task_struct(child);
+	read_unlock(&tasklist_lock);
 	if (!child)
 		goto out;
+
 	ret = -EPERM;
 	if (pid == 1)		/* you may not mess with init */
-		goto out;
+		goto out_tsk;
+
 	if (request == PTRACE_ATTACH) {
 		if (child == current)
-			goto out;
+			goto out_tsk;
 		if ((!child->dumpable ||
 		    (current->uid != child->euid) ||
 		    (current->uid != child->suid) ||
@@ -168,34 +175,33 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	 	    (current->gid != child->sgid) ||
 	 	    (!cap_issubset(child->cap_permitted, current->cap_permitted)) ||
 	 	    (current->gid != child->gid)) && !capable(CAP_SYS_PTRACE))
-			goto out;
+			goto out_tsk;
 		/* the same process cannot be attached many times */
-		if (child->flags & PF_PTRACED)
-			goto out;
-		child->flags |= PF_PTRACED;
+		if (child->ptrace & PT_PTRACED)
+			goto out_tsk;
+		child->ptrace |= PT_PTRACED;
 
-		write_lock_irqsave(&tasklist_lock, flags);
+		write_lock_irq(&tasklist_lock);
 		if (child->p_pptr != current) {
 			REMOVE_LINKS(child);
 			child->p_pptr = current;
 			SET_LINKS(child);
 		}
-		write_unlock_irqrestore(&tasklist_lock, flags);
+		write_unlock_irq(&tasklist_lock);
 
 		send_sig(SIGSTOP, child, 1);
 		ret = 0;
-		goto out;
+		goto out_tsk;
 	}
 	ret = -ESRCH;
-	if (!(child->flags & PF_PTRACED))
-		goto out;
+	if (!(child->ptrace & PT_PTRACED))
+		goto out_tsk;
 	if (child->state != TASK_STOPPED) {
 		if (request != PTRACE_KILL)
-			goto out;
+			goto out_tsk;
 	}
 	if (child->p_pptr != current)
-		goto out;
-
+		goto out_tsk;
 	switch (request) {
 	/* when I and D space are separate, these will need to be fixed. */
 	case PTRACE_PEEKTEXT: /* read word at location addr. */ 
@@ -270,7 +276,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 				  data &= ~DR_CONTROL_RESERVED;
 				  for(i=0; i<4; i++)
 					  if ((0x5f54 >> ((data >> (16 + 4*i)) & 0xf)) & 1)
-						  goto out;
+						  goto out_tsk;
 			  }
 
 			  addr -= (long) &dummy->u_debugreg;
@@ -288,9 +294,9 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		if ((unsigned long) data > _NSIG)
 			break;
 		if (request == PTRACE_SYSCALL)
-			child->flags |= PF_TRACESYS;
+			child->ptrace |= PT_TRACESYS;
 		else
-			child->flags &= ~PF_TRACESYS;
+			child->ptrace &= ~PT_TRACESYS;
 		child->exit_code = data;
 	/* make sure the single step bit is not set. */
 		tmp = get_stack_long(child, EFL_OFFSET) & ~TRAP_FLAG;
@@ -325,10 +331,10 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		ret = -EIO;
 		if ((unsigned long) data > _NSIG)
 			break;
-		child->flags &= ~PF_TRACESYS;
-		if ((child->flags & PF_DTRACE) == 0) {
+		child->ptrace &= ~PT_TRACESYS;
+		if ((child->ptrace & PT_DTRACE) == 0) {
 			/* Spurious delayed TF traps may occur */
-			child->flags |= PF_DTRACE;
+			child->ptrace |= PT_DTRACE;
 		}
 		tmp = get_stack_long(child, EFL_OFFSET) | TRAP_FLAG;
 		put_stack_long(child, EFL_OFFSET, tmp);
@@ -345,13 +351,13 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		ret = -EIO;
 		if ((unsigned long) data > _NSIG)
 			break;
-		child->flags &= ~(PF_PTRACED|PF_TRACESYS);
+		child->ptrace = 0;
 		child->exit_code = data;
-		write_lock_irqsave(&tasklist_lock, flags);
+		write_lock_irq(&tasklist_lock);
 		REMOVE_LINKS(child);
 		child->p_pptr = child->p_opptr;
 		SET_LINKS(child);
-		write_unlock_irqrestore(&tasklist_lock, flags);
+		write_unlock_irq(&tasklist_lock);
 		/* make sure the single step bit is not set. */
 		tmp = get_stack_long(child, EFL_OFFSET) & ~TRAP_FLAG;
 		put_stack_long(child, EFL_OFFSET, tmp);
@@ -389,44 +395,67 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	}
 
 	case PTRACE_GETFPREGS: { /* Get the child FPU state. */
-		if (!access_ok(VERIFY_WRITE, (unsigned *)data, sizeof(struct user_i387_struct))) {
+		if (!access_ok(VERIFY_WRITE, (unsigned *)data,
+			       sizeof(struct user_i387_struct))) {
 			ret = -EIO;
 			break;
 		}
 		ret = 0;
 		if ( !child->used_math ) {
 			/* Simulate an empty FPU. */
-			child->thread.i387.hard.cwd = 0xffff037f;
-			child->thread.i387.hard.swd = 0xffff0000;
-			child->thread.i387.hard.twd = 0xffffffff;
+			set_fpu_cwd(child, 0x037f);
+			set_fpu_swd(child, 0x0000);
+			set_fpu_twd(child, 0xffff);
 		}
-#ifdef CONFIG_MATH_EMULATION
-		if ( boot_cpu_data.hard_math ) {
-#endif
-			__copy_to_user((void *)data, &child->thread.i387.hard, sizeof(struct user_i387_struct));
-#ifdef CONFIG_MATH_EMULATION
-		} else {
-			save_i387_soft(&child->thread.i387.soft, (struct _fpstate *)data);
-		}
-#endif
+		get_fpregs((struct user_i387_struct *)data, child);
 		break;
 	}
 
 	case PTRACE_SETFPREGS: { /* Set the child FPU state. */
-		if (!access_ok(VERIFY_READ, (unsigned *)data, sizeof(struct user_i387_struct))) {
+		if (!access_ok(VERIFY_READ, (unsigned *)data,
+			       sizeof(struct user_i387_struct))) {
 			ret = -EIO;
 			break;
 		}
 		child->used_math = 1;
-#ifdef CONFIG_MATH_EMULATION
-		if ( boot_cpu_data.hard_math ) {
-#endif
-			__copy_from_user(&child->thread.i387.hard, (void *)data, sizeof(struct user_i387_struct));
-#ifdef CONFIG_MATH_EMULATION
-		} else {
-			restore_i387_soft(&child->thread.i387.soft, (struct _fpstate *)data);
+		set_fpregs(child, (struct user_i387_struct *)data);
+		ret = 0;
+		break;
+	}
+
+	case PTRACE_GETFPXREGS: { /* Get the child extended FPU state. */
+		if (!access_ok(VERIFY_WRITE, (unsigned *)data,
+			       sizeof(struct user_fxsr_struct))) {
+			ret = -EIO;
+			break;
 		}
-#endif
+		if ( !child->used_math ) {
+			/* Simulate an empty FPU. */
+			set_fpu_cwd(child, 0x037f);
+			set_fpu_swd(child, 0x0000);
+			set_fpu_twd(child, 0xffff);
+			set_fpu_mxcsr(child, 0x1f80);
+		}
+		ret = get_fpxregs((struct user_fxsr_struct *)data, child);
+		break;
+	}
+
+	case PTRACE_SETFPXREGS: { /* Set the child extended FPU state. */
+		if (!access_ok(VERIFY_READ, (unsigned *)data,
+			       sizeof(struct user_fxsr_struct))) {
+			ret = -EIO;
+			break;
+		}
+		child->used_math = 1;
+		ret = set_fpxregs(child, (struct user_fxsr_struct *)data);
+		break;
+	}
+
+	case PTRACE_SETOPTIONS: {
+		if (data & PTRACE_O_TRACESYSGOOD)
+			child->ptrace |= PT_TRACESYSGOOD;
+		else
+			child->ptrace &= ~PT_TRACESYSGOOD;
 		ret = 0;
 		break;
 	}
@@ -435,6 +464,8 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		ret = -EIO;
 		break;
 	}
+out_tsk:
+	free_task_struct(child);
 out:
 	unlock_kernel();
 	return ret;
@@ -442,10 +473,13 @@ out:
 
 asmlinkage void syscall_trace(void)
 {
-	if ((current->flags & (PF_PTRACED|PF_TRACESYS))
-			!= (PF_PTRACED|PF_TRACESYS))
+	if ((current->ptrace & (PT_PTRACED|PT_TRACESYS)) !=
+			(PT_PTRACED|PT_TRACESYS))
 		return;
-	current->exit_code = SIGTRAP;
+	/* the 0x80 provides a way for the tracing parent to distinguish
+	   between a syscall stop and SIGTRAP delivery */
+	current->exit_code = SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
+					? 0x80 : 0);
 	current->state = TASK_STOPPED;
 	notify_parent(current, SIGCHLD);
 	schedule();

@@ -1,4 +1,4 @@
-/* $Id: loadmmu.c,v 1.6 2000/02/24 00:12:41 ralf Exp $
+/* $Id: loadmmu.c,v 1.5 2000/01/27 01:05:24 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -25,13 +25,17 @@ void (*_clear_page)(void * page);
 void (*_copy_page)(void * to, void * from);
 
 /* Cache operations. */
-void (*_flush_cache_all)(void);
 void (*_flush_cache_mm)(struct mm_struct *mm);
 void (*_flush_cache_range)(struct mm_struct *mm, unsigned long start,
                            unsigned long end);
 void (*_flush_cache_page)(struct vm_area_struct *vma, unsigned long page);
-void (*_flush_cache_sigtramp)(unsigned long addr);
 void (*_flush_page_to_ram)(struct page * page);
+
+/* MIPS specific cache operations */
+void (*_flush_cache_sigtramp)(unsigned long addr);
+void (*_flush_cache_l2)(void);
+void (*_flush_cache_l1)(void);
+
 
 /* DMA cache operations. */
 void (*_dma_cache_wback_inv)(unsigned long start, unsigned long size);
@@ -50,8 +54,6 @@ void (*update_mmu_cache)(struct vm_area_struct * vma,
 			 unsigned long address, pte_t pte);
 
 void (*_show_regs)(struct pt_regs *);
-
-int (*_user_mode)(struct pt_regs *);
 
 extern void ld_mmu_r4xx0(void);
 extern void ld_mmu_andes(void);

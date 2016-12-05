@@ -89,7 +89,7 @@ static unsigned int spx_datagram_poll(struct file * file, struct socket *sock, p
 	if (sock_writeable(sk))
 		mask |= POLLOUT | POLLWRNORM | POLLWRBAND;
 	else
-		sk->socket->flags |= SO_NOSPACE;
+		set_bit(SOCK_ASYNC_NOSPACE,&sk->socket->flags);
 
 	return mask;
 }
@@ -231,7 +231,7 @@ static int spx_listen(struct socket *sock, int backlog)
                 sk->ack_backlog = 0;
                 sk->state = TCP_LISTEN;
         }
-        sk->socket->flags |= SO_ACCEPTCON;
+        sk->socket->flags |= __SO_ACCEPTCON;
 
         return (0);
 }
@@ -248,7 +248,7 @@ static int spx_accept(struct socket *sock, struct socket *newsock, int flags)
 		return (-EINVAL);
 	sk = sock->sk;
 
-        if((sock->state != SS_UNCONNECTED) || !(sock->flags & SO_ACCEPTCON))
+        if((sock->state != SS_UNCONNECTED) || !(sock->flags & __SO_ACCEPTCON))
                 return (-EINVAL);
         if(sock->type != SOCK_SEQPACKET)
 		return (-EOPNOTSUPP);
@@ -441,8 +441,10 @@ static int spx_transmit(struct sock *sk, struct sk_buff *skb, int type, int len)
 		save_flags(flags);
 		cli();
         	skb = sock_alloc_send_skb(sk, size, 1, 0, &err);
-        	if(skb == NULL)
+        	if(skb == NULL) {
+			restore_flags(flags);
                 	return (-ENOMEM);
+		}
         	skb_reserve(skb, offset);
         	skb->h.raw = skb->nh.raw = skb_put(skb,sizeof(struct ipxspxhdr));
 		restore_flags(flags);
@@ -466,9 +468,7 @@ static int spx_transmit(struct sock *sk, struct sk_buff *skb, int type, int len)
         ipxh->spx.allocseq      = htons(pdata->alloc);
 
 	/* Reset/Set WD timer */
-        del_timer(&pdata->watchdog);
-        pdata->watchdog.expires = jiffies + VERIFY_TIMEOUT;
-        add_timer(&pdata->watchdog);
+        mod_timer(&pdata->watchdog, jiffies+VERIFY_TIMEOUT);
 
 	switch(type)
 	{
@@ -743,9 +743,9 @@ static int spx_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 
 	cli();
         skb  	= sock_alloc_send_skb(sk, size, 0, flags&MSG_DONTWAIT, &err);
+	sti();
         if(skb == NULL)
                 return (err);
-	sti();
 
 	skb->sk = sk;
         skb_reserve(skb, offset);
@@ -884,23 +884,23 @@ static int spx_getsockopt(struct socket *sock, int level, int optname,
 }
 
 static struct proto_ops SOCKOPS_WRAPPED(spx_ops) = {
-        PF_IPX,
-        spx_release,
-        spx_bind,
-        spx_connect,
-        sock_no_socketpair,
-        spx_accept,
-	spx_getname,
-        spx_datagram_poll,
-	spx_ioctl,
-        spx_listen,
-        sock_no_shutdown,
-	spx_setsockopt,
-	spx_getsockopt,
-        sock_no_fcntl,
-        spx_sendmsg,
-        spx_recvmsg,
-	sock_no_mmap
+	family:		PF_IPX,
+
+	release:	spx_release,
+	bind:		spx_bind,
+	connect:	spx_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		spx_accept,
+	getname:	spx_getname,
+	poll:		spx_datagram_poll,
+	ioctl:		spx_ioctl,
+	listen:		spx_listen,
+	shutdown:	sock_no_shutdown,
+	setsockopt:	spx_setsockopt,
+	getsockopt:	spx_getsockopt,
+	sendmsg:	spx_sendmsg,
+	recvmsg:	spx_recvmsg,
+	mmap:		sock_no_mmap,
 };
 
 #include <linux/smp_lock.h>

@@ -656,7 +656,7 @@ int atari_scsi_detect (Scsi_Host_Template *host)
 	 */
 	if (MACH_IS_ATARI && ATARIHW_PRESENT(ST_SCSI) &&
 	    !ATARIHW_PRESENT(EXTD_DMA) && m68k_num_memory > 1) {
-		atari_dma_buffer = atari_stram_alloc( STRAM_BUFFER_SIZE, NULL, "SCSI" );
+		atari_dma_buffer = atari_stram_alloc(STRAM_BUFFER_SIZE, "SCSI");
 		if (!atari_dma_buffer) {
 			printk( KERN_ERR "atari_scsi_detect: can't allocate ST-RAM "
 					"double buffer\n" );
@@ -667,6 +667,12 @@ int atari_scsi_detect (Scsi_Host_Template *host)
 	}
 #endif
 	instance = scsi_register (host, sizeof (struct NCR5380_hostdata));
+	if(instance == NULL)
+	{
+		atari_stram_free(atari_dma_buffer);
+		atari_dma_buffer = 0;
+		return 0;
+	}
 	atari_scsi_host = instance;
        /* Set irq to 0, to avoid that the mid-level code disables our interrupt
         * during queue_command calls. This is completely unnecessary, and even
@@ -1126,8 +1132,5 @@ static void atari_scsi_falcon_reg_write( unsigned char reg, unsigned char value 
 
 #include "atari_NCR5380.c"
 
-#ifdef MODULE
-Scsi_Host_Template driver_template = ATARI_SCSI;
-
+static Scsi_Host_Template driver_template = ATARI_SCSI;
 #include "scsi_module.c"
-#endif

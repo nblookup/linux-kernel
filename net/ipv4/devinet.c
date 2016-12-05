@@ -1,7 +1,7 @@
 /*
  *	NET3	IP device support routines.
  *
- *	Version: $Id: devinet.c,v 1.36 2000/01/09 02:19:46 davem Exp $
+ *	Version: $Id: devinet.c,v 1.39 2000/12/10 22:24:11 davem Exp $
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -99,7 +99,7 @@ static __inline__ void inet_free_ifa(struct in_ifaddr *ifa)
 {
 	if (ifa->ifa_dev)
 		__in_dev_put(ifa->ifa_dev);
-	kfree_s(ifa, sizeof(*ifa));
+	kfree(ifa);
 	inet_ifa_count--;
 }
 
@@ -118,7 +118,7 @@ void in_dev_finish_destroy(struct in_device *idev)
 		return;
 	}
 	inet_dev_count--;
-	kfree_s(idev, sizeof(*idev));
+	kfree(idev);
 }
 
 struct in_device *inetdev_init(struct net_device *dev)
@@ -470,9 +470,7 @@ int devinet_ioctl(unsigned int cmd, void *arg)
 	struct in_ifaddr **ifap = NULL;
 	struct in_ifaddr *ifa = NULL;
 	struct net_device *dev;
-#ifdef CONFIG_IP_ALIAS
 	char *colon;
-#endif
 	int ret = 0;
 
 	/*
@@ -483,11 +481,9 @@ int devinet_ioctl(unsigned int cmd, void *arg)
 		return -EFAULT;
 	ifr.ifr_name[IFNAMSIZ-1] = 0;
 
-#ifdef CONFIG_IP_ALIAS
 	colon = strchr(ifr.ifr_name, ':');
 	if (colon)
 		*colon = 0;
-#endif
 
 #ifdef CONFIG_KMOD
 	dev_load(ifr.ifr_name);
@@ -523,6 +519,7 @@ int devinet_ioctl(unsigned int cmd, void *arg)
 		return -EINVAL;
 	}
 
+	dev_probe_lock();
 	rtnl_lock();
 
 	if ((dev = __dev_get_by_name(ifr.ifr_name)) == NULL) {
@@ -530,10 +527,8 @@ int devinet_ioctl(unsigned int cmd, void *arg)
 		goto done;
 	}
 
-#ifdef CONFIG_IP_ALIAS
 	if (colon)
 		*colon = ':';
-#endif
 
 	if ((in_dev=__in_dev_get(dev)) != NULL) {
 		for (ifap=&in_dev->ifa_list; (ifa=*ifap) != NULL; ifap=&ifa->ifa_next)
@@ -564,7 +559,6 @@ int devinet_ioctl(unsigned int cmd, void *arg)
 			goto rarok;
 
 		case SIOCSIFFLAGS:
-#ifdef CONFIG_IP_ALIAS
 			if (colon) {
 				if (ifa == NULL) {
 					ret = -EADDRNOTAVAIL;
@@ -574,7 +568,6 @@ int devinet_ioctl(unsigned int cmd, void *arg)
 					inet_del_ifa(in_dev, ifap, 1);
 				break;
 			}
-#endif
 			ret = dev_change_flags(dev, ifr.ifr_flags);
 			break;
 	
@@ -589,12 +582,10 @@ int devinet_ioctl(unsigned int cmd, void *arg)
 					ret = -ENOBUFS;
 					break;
 				}
-#ifdef CONFIG_IP_ALIAS
 				if (colon)
 					memcpy(ifa->ifa_label, ifr.ifr_name, IFNAMSIZ);
 				else
-#endif
-				memcpy(ifa->ifa_label, dev->name, IFNAMSIZ);
+					memcpy(ifa->ifa_label, dev->name, IFNAMSIZ);
 			} else {
 				ret = 0;
 				if (ifa->ifa_local == sin->sin_addr.s_addr)
@@ -659,10 +650,12 @@ int devinet_ioctl(unsigned int cmd, void *arg)
 	}
 done:
 	rtnl_unlock();
+	dev_probe_unlock();
 	return ret;
 
 rarok:
 	rtnl_unlock();
+	dev_probe_unlock();
 	if (copy_to_user(arg, &ifr, sizeof(struct ifreq)))
 		return -EFAULT;
 	return 0;

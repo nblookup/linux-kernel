@@ -1,4 +1,6 @@
 /*
+ * +++ THIS DRIVER IS ORPHANED AND UNSUPPORTED +++
+ *
  * aic5800.c - Adaptec AIC-5800 PCI-IEEE1394 chip driver
  * Copyright (C)1999 Emanuel Pirker <epirker@edu.uni-klu.ac.at>
  *
@@ -646,7 +648,7 @@ static void aic_irq_handler(int irq, void *dev_id, struct pt_regs *regs)
 		phyid = phyid & 0x3F;
 		handle_selfid(aic, host, phyid, isroot, rcv_bytes);
 	    } else {
-		hpsb_packet_received(host, aic->rcv_page, rcv_bytes);
+		hpsb_packet_received(host, aic->rcv_page, rcv_bytes, 0);
 	    };
 	} else {
 	    PRINT(KERN_ERR, aic->id, 
@@ -723,14 +725,17 @@ inline static void * quadquadalign(void *buf)
 
 static int add_card(struct pci_dev *dev)
 {
-#define FAIL(fmt, args...) \
+#define FAIL(fmt, args...) do {\
         PRINT_G(KERN_ERR, fmt , ## args); \
         num_of_cards--; \
         remove_card(aic); \
-        return 1;
+        return 1; } while (0)
 
         struct aic5800 *aic; /* shortcut to currently handled device */
         unsigned long page;
+
+	if (pci_enable_device(dev))
+		return 1;
 
         if (num_of_cards == MAX_AIC5800_CARDS) {
                 PRINT_G(KERN_WARNING, "cannot handle more than %d cards.  "

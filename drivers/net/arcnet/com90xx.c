@@ -452,6 +452,7 @@ static int __init com90xx_found(struct net_device *dev0, int ioaddr, int airq,
 
 	/* Initialize the rest of the device structure. */
 	memset(lp, 0, sizeof(struct arcnet_local));
+	lp->card_name = "COM90xx";
 	lp->hw.command = com90xx_command;
 	lp->hw.status = com90xx_status;
 	lp->hw.intmask = com90xx_setmask;
@@ -561,7 +562,8 @@ int com90xx_reset(struct net_device *dev, int really_reset)
 
 	/* verify that the ARCnet signature byte is present */
 	if (readb(lp->mem_start) != TESTvalue) {
-		BUGMSG(D_NORMAL, "reset failed: TESTvalue not present.\n");
+		if (really_reset)
+			BUGMSG(D_NORMAL, "reset failed: TESTvalue not present.\n");
 		return 1;
 	}
 	/* enable extended (512-byte) packets */
@@ -676,9 +678,8 @@ static int __init com90xx_setup(char *s)
 		printk("com90xx: Disabled.\n");
 		return 1;
 	}
-	dev = alloc_bootmem(sizeof(struct net_device) + 10);
-	memset(dev, 0, sizeof(struct net_device) + 10);
-	dev->name = (char *) (dev + 1);
+	dev = alloc_bootmem(sizeof(struct net_device));
+	memset(dev, 0, sizeof(struct net_device));
 	dev->init = com90xx_probe;
 
 	switch (ints[0]) {

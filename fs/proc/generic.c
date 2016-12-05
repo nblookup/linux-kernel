@@ -14,6 +14,8 @@
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
+#define __NO_VERSION__
+#include <linux/module.h>
 #include <asm/bitops.h>
 
 static ssize_t proc_file_read(struct file * file, char * buf,
@@ -41,8 +43,8 @@ static struct file_operations proc_file_operations = {
 #define MIN(a,b) (((a) < (b)) ? (a) : (b))
 #endif
 
-/* 4K page size but our output routines use some slack for overruns */
-#define PROC_BLOCK_SIZE	(3*1024)
+/* buffer size is one page but our output routines use some slack for overruns */
+#define PROC_BLOCK_SIZE	(PAGE_SIZE - 1024)
 
 static ssize_t
 proc_file_read(struct file * file, char * buf, size_t nbytes, loff_t *ppos)
@@ -140,9 +142,13 @@ proc_file_lseek(struct file * file, loff_t offset, int orig)
 {
     switch (orig) {
     case 0:
+	if (offset < 0)
+	    return -EINVAL;    
 	file->f_pos = offset;
 	return(file->f_pos);
     case 1:
+	if (offset + file->f_pos < 0)
+	    return -EINVAL;    
 	file->f_pos += offset;
 	return(file->f_pos);
     case 2:
@@ -184,7 +190,7 @@ static int xlate_proc_name(const char *name,
 	return 0;
 }
 
-static unsigned char proc_alloc_map[PROC_NDYNAMIC / 8] = {0};
+static unsigned char proc_alloc_map[PROC_NDYNAMIC / 8];
 
 static int make_inode_number(void)
 {
@@ -201,15 +207,15 @@ static int proc_readlink(struct dentry *dentry, char *buffer, int buflen)
 	return vfs_readlink(dentry, buffer, buflen, s);
 }
 
-static struct dentry *proc_follow_link(struct dentry *dentry, struct dentry *base, unsigned flags)
+static int proc_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
 	char *s=((struct proc_dir_entry *)dentry->d_inode->u.generic_ip)->data;
-	return vfs_follow_link(dentry, base, flags, s);
+	return vfs_follow_link(nd, s);
 }
 
 static struct inode_operations proc_link_inode_operations = {
 	readlink:	proc_readlink,
-	follow_link:	proc_follow_link
+	follow_link:	proc_follow_link,
 };
 
 /*
@@ -218,10 +224,9 @@ static struct inode_operations proc_link_inode_operations = {
  * smarter: we could keep a "volatile" flag in the 
  * inode to indicate which ones to keep.
  */
-static void
-proc_delete_dentry(struct dentry * dentry)
+static int proc_delete_dentry(struct dentry * dentry)
 {
-	d_drop(dentry);
+	return 1;
 }
 
 static struct dentry_operations proc_dentry_operations =
@@ -289,15 +294,15 @@ int proc_readdir(struct file * filp,
 	i = filp->f_pos;
 	switch (i) {
 		case 0:
-			if (filldir(dirent, ".", 1, i, ino) < 0)
+			if (filldir(dirent, ".", 1, i, ino, DT_DIR) < 0)
 				return 0;
 			i++;
 			filp->f_pos++;
 			/* fall through */
 		case 1:
 			if (filldir(dirent, "..", 2, i,
-				    filp->f_dentry->d_parent->d_inode->i_ino
-				   ) < 0)
+				    filp->f_dentry->d_parent->d_inode->i_ino,
+				    DT_DIR) < 0)
 				return 0;
 			i++;
 			filp->f_pos++;
@@ -315,7 +320,8 @@ int proc_readdir(struct file * filp,
 			}
 
 			do {
-				if (filldir(dirent, de->name, de->namelen, filp->f_pos, de->low_ino) < 0)
+				if (filldir(dirent, de->name, de->namelen, filp->f_pos,
+					    de->low_ino, de->mode >> 12) < 0)
 					return 0;
 				filp->f_pos++;
 				de = de->next;
@@ -330,6 +336,7 @@ int proc_readdir(struct file * filp,
  * the /proc directory.
  */
 static struct file_operations proc_dir_operations = {
+	read:			generic_read_dir,
 	readdir:		proc_readdir,
 };
 
@@ -340,7 +347,7 @@ static struct inode_operations proc_dir_inode_operations = {
 	lookup:		proc_lookup,
 };
 
-int proc_register(struct proc_dir_entry * dir, struct proc_dir_entry * dp)
+static int proc_register(struct proc_dir_entry * dir, struct proc_dir_entry * dp)
 {
 	int	i;
 	
@@ -373,40 +380,33 @@ int proc_register(struct proc_dir_entry * dir, struct proc_dir_entry * dp)
 static void proc_kill_inodes(struct proc_dir_entry *de)
 {
 	struct list_head *p;
-	struct super_block *sb;
+	struct super_block *sb = proc_mnt->mnt_sb;
 
 	/*
-	 * Actually it's a partial revoke(). We have to go through all
-	 * copies of procfs. proc_super_blocks is protected by the big
-	 * lock for the time being.
+	 * Actually it's a partial revoke().
 	 */
-	for (sb = proc_super_blocks;
-	     sb;
-	     sb = (struct super_block*)sb->u.generic_sbp) {
-		file_list_lock();
-		for (p = sb->s_files.next; p != &sb->s_files; p = p->next) {
-			struct file * filp = list_entry(p, struct file, f_list);
-			struct dentry * dentry;
-			struct inode * inode;
+	file_list_lock();
+	for (p = sb->s_files.next; p != &sb->s_files; p = p->next) {
+		struct file * filp = list_entry(p, struct file, f_list);
+		struct dentry * dentry;
+		struct inode * inode;
 
-			dentry = filp->f_dentry;
-			if (!dentry)
-				continue;
-			if (dentry->d_op != &proc_dentry_operations)
-				continue;
-			inode = dentry->d_inode;
-			if (!inode)
-				continue;
-			if (inode->u.generic_ip != de)
-				continue;
-			filp->f_op = NULL;
-		}
-		file_list_unlock();
+		dentry = filp->f_dentry;
+		if (!dentry)
+			continue;
+		if (dentry->d_op != &proc_dentry_operations)
+			continue;
+		inode = dentry->d_inode;
+		if (inode->u.generic_ip != de)
+			continue;
+		fops_put(filp->f_op);
+		filp->f_op = NULL;
 	}
+	file_list_unlock();
 }
 
 struct proc_dir_entry *proc_symlink(const char *name,
-		struct proc_dir_entry *parent, char *dest)
+		struct proc_dir_entry *parent, const char *dest)
 {
 	struct proc_dir_entry *ent = NULL;
 	const char *fn = name;
@@ -538,7 +538,7 @@ void free_proc_entry(struct proc_dir_entry *de)
 {
 	int ino = de->low_ino;
 
-	if (ino < PROC_DYNAMIC_FIRST &&
+	if (ino < PROC_DYNAMIC_FIRST ||
 	    ino >= PROC_DYNAMIC_FIRST+PROC_NDYNAMIC)
 		return;
 	if (S_ISLNK(de->mode) && de->data)
@@ -572,12 +572,12 @@ void remove_proc_entry(const char *name, struct proc_dir_entry *parent)
 				(void *) proc_alloc_map);
 		proc_kill_inodes(de);
 		de->nlink = 0;
-		de->deleted = 1;
-		if (!de->count)
+		if (!atomic_read(&de->count))
 			free_proc_entry(de);
 		else {
+			de->deleted = 1;
 			printk("remove_proc_entry: %s/%s busy, count=%d\n",
-				parent->name, de->name, de->count);
+				parent->name, de->name, atomic_read(&de->count));
 		}
 		break;
 	}

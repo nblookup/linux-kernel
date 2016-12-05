@@ -73,7 +73,7 @@ int adfs_bmap(struct inode *inode, int block);
 #endif
 struct inode *adfs_iget(struct super_block *sb, struct object_info *obj);
 void adfs_read_inode(struct inode *inode);
-void adfs_write_inode(struct inode *inode);
+void adfs_write_inode(struct inode *inode,int unused);
 int adfs_notify_change(struct dentry *dentry, struct iattr *attr);
 
 /* map.c */
@@ -97,6 +97,7 @@ extern struct dentry *adfs_lookup(struct inode *dir, struct dentry *dentry);
 /* dir_*.c */
 extern struct inode_operations adfs_dir_inode_operations;
 extern struct file_operations adfs_dir_operations;
+extern struct dentry_operations adfs_dentry_operations;
 extern struct adfs_dir_ops adfs_f_dir_ops;
 extern struct adfs_dir_ops adfs_fplus_dir_ops;
 

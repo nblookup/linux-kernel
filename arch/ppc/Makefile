@@ -22,7 +22,7 @@ ASFLAGS		=
 LINKFLAGS	= -T arch/ppc/vmlinux.lds -Ttext $(KERNELLOAD) -Bstatic
 CPPFLAGS	:= $(CPPFLAGS) -D__powerpc__
 CFLAGS		:= $(CFLAGS) -D__powerpc__ -fsigned-char \
-		-msoft-float -pipe -fno-builtin -ffixed-r2 -Wno-uninitialized \
+		-msoft-float -pipe -ffixed-r2 -Wno-uninitialized \
 		-mmultiple -mstring
 CPP		= $(CC) -E $(CFLAGS)
 
@@ -34,8 +34,8 @@ ifdef CONFIG_8xx
 CFLAGS := $(CFLAGS) -mcpu=860 -I../8xx_io
 endif
 
-ifdef CONFIG_PPC64
-CFLAGS := $(CFLAGS) -Wa,-mppc64bridge #-mpowerpc64
+ifdef CONFIG_PPC64BRIDGE
+CFLAGS := $(CFLAGS) -Wa,-mppc64bridge
 endif
 
 ifdef CONFIG_4xx
@@ -72,7 +72,12 @@ MAKETREEBOOT = $(MAKE) -C arch/$(ARCH)/treeboot
 
 ifdef CONFIG_8xx
 SUBDIRS += arch/ppc/8xx_io
-DRIVERS += arch/ppc/8xx_io/8xx_io.a drivers/net/net.a
+DRIVERS += arch/ppc/8xx_io/8xx_io.o
+endif
+
+ifdef CONFIG_8260
+SUBDIRS += arch/ppc/8260_io
+DRIVERS += arch/ppc/8260_io/8260_io.o
 endif
 
 ifdef CONFIG_APUS
@@ -98,6 +103,7 @@ $(BOOT_TARGETS): $(CHECKS) vmlinux
 endif
 
 ifdef CONFIG_6xx
+ifndef CONFIG_8260
 $(BOOT_TARGETS): $(CHECKS) vmlinux
 	@$(MAKECOFFBOOT) $@
 	@$(MAKEBOOT) $@
@@ -114,9 +120,15 @@ endif
 	@$(MAKECOFFBOOT) $@
 	@$(MAKEBOOT) $@
 	@$(MAKECHRPBOOT) $@
+else
+# 8260 is custom 6xx
+$(BOOT_TARGETS): $(CHECKS) vmlinux
+	@$(MAKECOFFBOOT) $@
+	@$(MAKEMBXBOOT) $@
+endif
 endif
 
-ifdef CONFIG_PPC64
+ifdef CONFIG_PPC64BRIDGE
 $(BOOT_TARGETS): $(CHECKS) vmlinux
 	@$(MAKECOFFBOOT) $@
 	@$(MAKEBOOT) $@
@@ -159,6 +171,18 @@ oak_config: clean_config
 
 walnut_config: clean_config
 	cp -f arch/ppc/configs/walnut_defconfig arch/ppc/defconfig
+
+rpxlite_config: clean_config
+	cp -f arch/ppc/configs/rpxlite_defconfig arch/ppc/defconfig
+
+rpxcllf_config: clean_config
+	cp -f arch/ppc/configs/rpxcllf_defconfig arch/ppc/defconfig
+
+bseip_config: clean_config
+	cp -f arch/ppc/configs/bseip_defconfig arch/ppc/defconfig
+
+est8260_config: clean_config
+	cp -f arch/ppc/configs/est8260_defconfig arch/ppc/defconfig
 
 archclean:
 	rm -f arch/ppc/kernel/{mk_defs,ppc_defs.h,find_name,checks}

@@ -14,12 +14,13 @@
 #include <linux/affs_fs.h>
 #include <linux/amigaffs.h>
 #include <linux/pagemap.h>
+#include <linux/smp_lock.h>
 
-static int affs_symlink_readpage(struct dentry *dentry, struct page *page)
+static int affs_symlink_readpage(struct file *file, struct page *page)
 {
 	struct buffer_head *bh;
-	struct inode *inode = dentry->d_inode;
-	char *link = (char*)kmap(page);
+	struct inode *inode = page->mapping->host;
+	char *link = kmap(page);
 	struct slink_front *lf;
 	int err;
 	int			 i, j;
@@ -30,7 +31,9 @@ static int affs_symlink_readpage(struct dentry *dentry, struct page *page)
 	pr_debug("AFFS: follow_link(ino=%lu)\n",inode->i_ino);
 
 	err = -EIO;
+	lock_kernel();
 	bh = affs_bread(inode->i_dev,inode->i_ino,AFFS_I2BSIZE(inode));
+	unlock_kernel();
 	if (!bh)
 		goto fail;
 	i  = 0;
@@ -59,7 +62,9 @@ static int affs_symlink_readpage(struct dentry *dentry, struct page *page)
 		j++;
 	}
 	link[i] = '\0';
+	lock_kernel();
 	affs_brelse(bh);
+	unlock_kernel();
 	SetPageUptodate(page);
 	kunmap(page);
 	UnlockPage(page);

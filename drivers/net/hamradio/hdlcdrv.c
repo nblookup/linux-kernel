@@ -217,8 +217,7 @@ static void hdlc_rx_flag(struct net_device *dev, struct hdlcdrv_state *s)
 		return;
 	pkt_len = s->hdlcrx.len - 2 + 1; /* KISS kludge */
 	if (!(skb = dev_alloc_skb(pkt_len))) {
-		printk("%s: memory squeeze, dropping packet\n", 
-		       s->ifname);
+		printk("%s: memory squeeze, dropping packet\n", dev->name);
 		s->stats.rx_dropped++;
 		return;
 	}
@@ -288,12 +287,12 @@ void hdlcdrv_receiver(struct net_device *dev, struct hdlcdrv_state *s)
 
 /* ---------------------------------------------------------------------- */
 
-static void inline do_kiss_params(struct hdlcdrv_state *s,
+static inline void do_kiss_params(struct hdlcdrv_state *s,
 				  unsigned char *data, unsigned long len)
 {
 
 #ifdef KISS_VERBOSE
-#define PKP(a,b) printk(KERN_INFO "%s: channel params: " a "\n", s->ifname, b)
+#define PKP(a,b) printk(KERN_INFO "hdlcdrv.c: channel params: " a "\n", b)
 #else /* KISS_VERBOSE */	      
 #define PKP(a,b) 
 #endif /* KISS_VERBOSE */	      
@@ -635,7 +634,7 @@ static int hdlcdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		break;
 
 	case HDLCDRVCTL_SETCHANNELPAR:
-		if (!suser())
+		if (!capable(CAP_NET_ADMIN))
 			return -EACCES;
 		s->ch_params.tx_delay = bi.data.cp.tx_delay;
 		s->ch_params.tx_tail = bi.data.cp.tx_tail;
@@ -656,7 +655,7 @@ static int hdlcdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		break;
 
 	case HDLCDRVCTL_SETMODEMPAR:
-		if ((!suser()) || netif_running(dev))
+		if ((!capable(CAP_SYS_RAWIO)) || netif_running(dev))
 			return -EACCES;
 		dev->base_addr = bi.data.mp.iobase;
 		dev->irq = bi.data.mp.irq;
@@ -684,6 +683,8 @@ static int hdlcdrv_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		break;		
 
 	case HDLCDRVCTL_CALIBRATE:
+		if(!capable(CAP_SYS_RAWIO))
+			return -EPERM;
 		s->hdlctx.calibrate = bi.data.calibrate * s->par.bitrate / 16;
 		return 0;
 
@@ -838,12 +839,11 @@ int hdlcdrv_register_hdlcdrv(struct net_device *dev, const struct hdlcdrv_ops *o
 	 */
 	memset(s, 0, privsize);
 	s->magic = HDLCDRV_MAGIC;
-	strncpy(s->ifname, ifname, sizeof(s->ifname));
+	strncpy(dev->name, ifname, sizeof(dev->name));
 	s->ops = ops;
 	/*
 	 * initialize part of the device struct
 	 */
-	dev->name = s->ifname;
 	dev->if_port = 0;
 	dev->init = hdlcdrv_probe;
 	dev->base_addr = baseaddr;
@@ -851,7 +851,7 @@ int hdlcdrv_register_hdlcdrv(struct net_device *dev, const struct hdlcdrv_ops *o
 	dev->dma = dma;
 	if (register_netdev(dev)) {
 		printk(KERN_WARNING "hdlcdrv: cannot register net "
-		       "device %s\n", s->ifname);
+		       "device %s\n", dev->name);
 		kfree(dev->priv);
 		return -ENXIO;
 	}
@@ -889,14 +889,7 @@ EXPORT_SYMBOL(hdlcdrv_unregister_hdlcdrv);
 
 /* --------------------------------------------------------------------- */
 
-#ifdef MODULE
-
-MODULE_AUTHOR("Thomas M. Sailer, sailer@ife.ee.ethz.ch, hb9jnx@hb9w.che.eu");
-MODULE_DESCRIPTION("Packet Radio network interface HDLC encoder/decoder");
-
-/* --------------------------------------------------------------------- */
-
-int __init init_module(void)
+static int __init hdlcdrv_init_driver(void)
 {
 	printk(KERN_INFO "hdlcdrv: (C) 1996-2000 Thomas Sailer HB9JNX/AE4WA\n");
 	printk(KERN_INFO "hdlcdrv: version 0.8 compiled " __TIME__ " " __DATE__ "\n");
@@ -905,10 +898,16 @@ int __init init_module(void)
 
 /* --------------------------------------------------------------------- */
 
-void cleanup_module(void)
+static void __exit hdlcdrv_cleanup_driver(void)
 {
 	printk(KERN_INFO "hdlcdrv: cleanup\n");
 }
 
-#endif /* MODULE */
+/* --------------------------------------------------------------------- */
+
+MODULE_AUTHOR("Thomas M. Sailer, sailer@ife.ee.ethz.ch, hb9jnx@hb9w.che.eu");
+MODULE_DESCRIPTION("Packet Radio network interface HDLC encoder/decoder");
+module_init(hdlcdrv_init_driver);
+module_exit(hdlcdrv_cleanup_driver);
+
 /* --------------------------------------------------------------------- */

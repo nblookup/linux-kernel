@@ -1,7 +1,11 @@
 /*
- * linux/drivers/video/acornfb.c
+ *  linux/drivers/video/acornfb.c
  *
- * Copyright (C) 1998,1999 Russell King
+ *  Copyright (C) 1998-2000 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  * Frame buffer code for Acorn platforms
  *
@@ -96,6 +100,8 @@ extern int acornfb_depth;	/* set by setup.c */
 extern unsigned int vram_size;	/* set by setup.c */
 
 #ifdef HAS_VIDC
+
+#define MAX_SIZE	480*1024
 
 /* CTL     VIDC	Actual
  * 24.000  0	 8.000
@@ -334,6 +340,8 @@ acornfb_palette_decode(u_int regno, u_int *red, u_int *green, u_int *blue,
 
 #ifdef HAS_VIDC20
 #include <asm/arch/acornfb.h>
+
+#define MAX_SIZE	2*1024*1024
 
 /* VIDC20 has a different set of rules from the VIDC:
  *  hcr  : must be multiple of 4
@@ -669,20 +677,6 @@ acornfb_update_dma(struct fb_var_screeninfo *var)
 }
 
 static int
-acornfb_open(struct fb_info *info, int user)
-{
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-static int
-acornfb_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return 0;
-}
-
-static int
 acornfb_getcolreg(u_int regno, u_int *red, u_int *green, u_int *blue,
 		  u_int *trans, struct fb_info *info)
 {
@@ -958,9 +952,6 @@ acornfb_set_var(struct fb_var_screeninfo *var, int con, struct fb_info *info)
 	else
 		display = &global_disp;
 
-	if (!current_par.allow_modeset && con != -1)
-		return -EINVAL;
-
 	err = acornfb_decode_var(var, con, &visual);
 	if (err)
 		return err;
@@ -1088,9 +1079,7 @@ acornfb_set_var(struct fb_var_screeninfo *var, int con, struct fb_info *info)
 		outl(control, IOMD_VIDCR);
 #endif
 		acornfb_update_dma(var);
-
-		if (current_par.allow_modeset)
-			acornfb_set_timing(var);
+		acornfb_set_timing(var);
 
 		if (display->cmap.len)
 			cmap = &display->cmap;
@@ -1130,23 +1119,14 @@ acornfb_pan_display(struct fb_var_screeninfo *var, int con,
 	return 0;
 }
 
-static int
-acornfb_ioctl(struct inode *ino, struct file *file, unsigned int cmd,
-	      unsigned long arg, int con, struct fb_info *info)
-{
-	return -ENOIOCTLCMD;
-}
-
 static struct fb_ops acornfb_ops = {
-	acornfb_open,
-	acornfb_release,
-	acornfb_get_fix,
-	acornfb_get_var,
-	acornfb_set_var,
-	acornfb_get_cmap,
-	acornfb_set_cmap,
-	acornfb_pan_display,
-	acornfb_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	acornfb_get_fix,
+	fb_get_var:	acornfb_get_var,
+	fb_set_var:	acornfb_set_var,
+	fb_get_cmap:	acornfb_get_cmap,
+	fb_set_cmap:	acornfb_set_cmap,
+	fb_pan_display:	acornfb_pan_display,
 };
 
 static int
@@ -1375,37 +1355,49 @@ acornfb_parse_font(char *opt)
 static void __init
 acornfb_parse_mon(char *opt)
 {
+	char *p = opt;
+
 	current_par.montype = -2;
 
-	fb_info.monspecs.hfmin = simple_strtoul(opt, &opt, 0);
-	if (*opt == '-')
-		fb_info.monspecs.hfmax = simple_strtoul(opt + 1, &opt, 0);
+	fb_info.monspecs.hfmin = simple_strtoul(p, &p, 0);
+	if (*p == '-')
+		fb_info.monspecs.hfmax = simple_strtoul(p + 1, &p, 0);
 	else
 		fb_info.monspecs.hfmax = fb_info.monspecs.hfmin;
 
-	if (*opt != ':')
-		return;
+	if (*p != ':')
+		goto bad;
 
-	fb_info.monspecs.vfmin = simple_strtoul(opt + 1, &opt, 0);
-	if (*opt == '-')
-		fb_info.monspecs.vfmax = simple_strtoul(opt + 1, &opt, 0);
+	fb_info.monspecs.vfmin = simple_strtoul(p + 1, &p, 0);
+	if (*p == '-')
+		fb_info.monspecs.vfmax = simple_strtoul(p + 1, &p, 0);
 	else
 		fb_info.monspecs.vfmax = fb_info.monspecs.vfmin;
 
-	if (*opt != ':')
-		return;
+	if (*p != ':')
+		goto check_values;
 
-	fb_info.monspecs.dpms = simple_strtoul(opt + 1, &opt, 0);
+	fb_info.monspecs.dpms = simple_strtoul(p + 1, &p, 0);
 
-	if (*opt != ':')
-		return;
+	if (*p != ':')
+		goto check_values;
 
-	init_var.width = simple_strtoul(opt + 1, &opt, 0);
+	init_var.width = simple_strtoul(p + 1, &p, 0);
 
-	if (*opt != ':')
-		return;
+	if (*p != ':')
+		goto check_values;
 
-	init_var.height = simple_strtoul(opt + 1, NULL, 0);
+	init_var.height = simple_strtoul(p + 1, NULL, 0);
+
+check_values:
+	if (fb_info.monspecs.hfmax < fb_info.monspecs.hfmin ||
+	    fb_info.monspecs.vfmax < fb_info.monspecs.vfmin)
+		goto bad;
+	return;
+
+bad:
+	printk(KERN_ERR "Acornfb: bad monitor settings: %s\n", opt);
+	current_par.montype = -1;
 }
 
 static void __init
@@ -1543,13 +1535,16 @@ free_unused_pages(unsigned int virtual_start, unsigned int virtual_end)
 	virtual_end = PAGE_ALIGN(virtual_end);
 
 	while (virtual_start < virtual_end) {
+		struct page *page;
+
 		/*
 		 * Clear page reserved bit,
 		 * set count to 1, and free
 		 * the page.
 		 */
-		clear_bit(PG_reserved, &mem_map[MAP_NR(virtual_start)].flags);
-		atomic_set(&mem_map[MAP_NR(virtual_start)].count, 1);
+		page = virt_to_page(virtual_start);
+		ClearPageReserved(page);
+		atomic_set(&page->count, 1);
 		free_page(virtual_start);
 
 		virtual_start += PAGE_SIZE;
@@ -1574,9 +1569,10 @@ acornfb_init(void)
 	if (current_par.montype == -1 || current_par.montype > NR_MONTYPES)
 		current_par.montype = 4;
 
-	if (current_par.montype > 0)
+	if (current_par.montype >= 0) {
 		fb_info.monspecs = monspecs[current_par.montype];
-	fb_info.monspecs.dpms = current_par.dpms;
+		fb_info.monspecs.dpms = current_par.dpms;
+	}
 
 	/*
 	 * Try to select a suitable default mode
@@ -1599,7 +1595,7 @@ acornfb_init(void)
 	}
 
 	current_par.currcon	   = -1;
-	current_par.screen_base	   = SCREEN2_BASE;
+	current_par.screen_base	   = SCREEN_BASE;
 	current_par.screen_base_p  = SCREEN_START;
 	current_par.using_vram     = 0;
 
@@ -1615,8 +1611,13 @@ acornfb_init(void)
 	} else if (current_par.dram_size)
 		size = current_par.dram_size;
 	else
-		size = (init_var.xres * init_var.yres *
-			init_var.bits_per_pixel) / 8;
+		size = MAX_SIZE;
+
+	/*
+	 * Limit maximum screen size.
+	 */
+	if (size > MAX_SIZE)
+		size = MAX_SIZE;
 
 	size = PAGE_ALIGN(size);
 
@@ -1643,7 +1644,7 @@ acornfb_init(void)
 		for (page = current_par.screen_base; 
 		     page < PAGE_ALIGN(current_par.screen_base + size);
 		     page += PAGE_SIZE)
-			mem_map[MAP_NR(page)].flags |= (1 << PG_reserved);
+			SetPageReserved(virt_to_page(page));
 		/* Hand back any excess pages that we allocated. */
 		for (page = current_par.screen_base + size; page < top; page += PAGE_SIZE)
 			free_page(page);
@@ -1652,13 +1653,6 @@ acornfb_init(void)
 	}
 #endif
 #if defined(HAS_VIDC)
-#define MAX_SIZE	480*1024
-	/*
-	 * Limit maximum screen size.
-	 */
-	if (size > MAX_SIZE)
-		size = MAX_SIZE;
-
 	/*
 	 * Free unused pages
 	 */
@@ -1667,28 +1661,48 @@ acornfb_init(void)
 	
 	current_par.screen_size	   = size;
 	current_par.palette_size   = VIDC_PALETTE_SIZE;
-	current_par.allow_modeset  = 1;
 
 	/*
 	 * Lookup the timing for this resolution.  If we can't
 	 * find it, then we can't restore it if we change
 	 * the resolution, so we disable this feature.
 	 */
-	rc = fb_find_mode(&init_var, &fb_info, NULL, modedb,
-			 sizeof(modedb) / sizeof(*modedb),
-			 &acornfb_default_mode, DEFAULT_BPP);
+	do {
+		rc = fb_find_mode(&init_var, &fb_info, NULL, modedb,
+				 sizeof(modedb) / sizeof(*modedb),
+				 &acornfb_default_mode, DEFAULT_BPP);
+		/*
+		 * If we found an exact match, all ok.
+		 */
+		if (rc == 1)
+			break;
 
-	if (!rc && fb_find_mode(&init_var, &fb_info, NULL, NULL, 0,
-				&acornfb_default_mode, DEFAULT_BPP)) {
-		printk("Acornfb: no valid mode found\n");
-	}
+		rc = fb_find_mode(&init_var, &fb_info, NULL, NULL, 0,
+				  &acornfb_default_mode, DEFAULT_BPP);
+		/*
+		 * If we found an exact match, all ok.
+		 */
+		if (rc == 1)
+			break;
+
+		rc = fb_find_mode(&init_var, &fb_info, NULL, modedb,
+				 sizeof(modedb) / sizeof(*modedb),
+				 &acornfb_default_mode, DEFAULT_BPP);
+		if (rc)
+			break;
+
+		rc = fb_find_mode(&init_var, &fb_info, NULL, NULL, 0,
+				  &acornfb_default_mode, DEFAULT_BPP);
+	} while (0);
 
 	/*
-	 * Again, if this does not succeed, then we disallow
-	 * changes to the resolution parameters.
+	 * If we didn't find an exact match, try the
+	 * generic database.
 	 */
-	if (acornfb_set_var(&init_var, -1, &fb_info))
-		current_par.allow_modeset = 0;
+	if (rc == 0) {
+		printk("Acornfb: no valid mode found\n");
+		return -EINVAL;
+	}
 
 	h_sync = 1953125000 / init_var.pixclock;
 	h_sync = h_sync * 512 / (init_var.xres + init_var.left_margin +
@@ -1696,11 +1710,21 @@ acornfb_init(void)
 	v_sync = h_sync / (init_var.yres + init_var.upper_margin +
 		 init_var.lower_margin + init_var.vsync_len);
 
-	printk("Acornfb: %ldkB %cRAM, %s, using %dx%d, %d.%03dkHz, %dHz\n",
+	printk(KERN_INFO "Acornfb: %ldkB %cRAM, %s, using %dx%d, "
+		"%d.%03dkHz, %dHz\n",
 		current_par.screen_size / 1024,
 		current_par.using_vram ? 'V' : 'D',
 		VIDC_NAME, init_var.xres, init_var.yres,
 		h_sync / 1000, h_sync % 1000, v_sync);
+
+	printk(KERN_INFO "Acornfb: Monitor: %d.%03d-%d.%03dkHz, %d-%dHz%s\n",
+		fb_info.monspecs.hfmin / 1000, fb_info.monspecs.hfmin % 1000,
+		fb_info.monspecs.hfmax / 1000, fb_info.monspecs.hfmax % 1000,
+		fb_info.monspecs.vfmin, fb_info.monspecs.vfmax,
+		fb_info.monspecs.dpms ? ", DPMS" : "");
+
+	if (acornfb_set_var(&init_var, -1, &fb_info))
+		printk(KERN_ERR "Acornfb: unable to set display parameters\n");
 
 	if (register_framebuffer(&fb_info) < 0)
 		return -EINVAL;

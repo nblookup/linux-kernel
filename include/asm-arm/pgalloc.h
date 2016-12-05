@@ -1,11 +1,16 @@
 /*
- * linux/include/asm-arm/pgalloc.h
+ *  linux/include/asm-arm/pgalloc.h
+ *
+ *  Copyright (C) 2000 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 #ifndef _ASMARM_PGALLOC_H
 #define _ASMARM_PGALLOC_H
 
 #include <linux/config.h>
-#include <linux/threads.h>
 
 #include <asm/processor.h>
 
@@ -14,20 +19,19 @@
  */
 #include <asm/proc/cache.h>
 
-extern __inline__ void flush_tlb_pgtables(struct mm_struct *mm,
-					  unsigned long start,
-					  unsigned long end)
-{
-}
+/*
+ * ARM processors do not cache TLB tables in RAM.
+ */
+#define flush_tlb_pgtables(mm,start,end)	do { } while (0)
 
 /*
  * Page table cache stuff
  */
 #ifndef CONFIG_NO_PGT_CACHE
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #error Pgtable caches have to be per-CPU, so that no locking is needed.
-#endif	/* __SMP__ */
+#endif	/* CONFIG_SMP */
 
 extern struct pgtable_cache_struct {
 	unsigned long *pgd_cache;
@@ -51,7 +55,7 @@ extern __inline__ pgd_t *get_pgd_fast(void)
 	if ((ret = pgd_quicklist) != NULL) {
 		pgd_quicklist = (unsigned long *)__pgd_next(ret);
 		ret[1] = ret[2];
-		clean_cache_area(ret + 1, 4);
+		clean_dcache_entry(ret + 1);
 		pgtable_cache_size--;
 	}
 	return (pgd_t *)ret;
@@ -78,7 +82,7 @@ extern __inline__ pte_t *get_pte_fast(void)
 	if((ret = pte_quicklist) != NULL) {
 		pte_quicklist = (unsigned long *)__pte_next(ret);
 		ret[0] = ret[1];
-		clean_cache_area(ret, 4);
+		clean_dcache_entry(ret);
 		pgtable_cache_size--;
 	}
 	return (pte_t *)ret;

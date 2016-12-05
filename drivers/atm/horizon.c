@@ -42,6 +42,7 @@
 
 #include <asm/system.h>
 #include <asm/io.h>
+#include <asm/atomic.h>
 #include <asm/uaccess.h>
 #include <asm/string.h>
 #include <asm/byteorder.h>
@@ -50,7 +51,7 @@
 
 #define maintainer_string "Giuliano Procida at Madge Networks <gprocida@madge.com>"
 #define description_string "Madge ATM Horizon [Ultra] driver"
-#define version_string "1.2"
+#define version_string "1.2.1"
 
 static inline void __init show_version (void) {
   printk ("%s version %s\n", description_string, version_string);
@@ -246,7 +247,7 @@ static inline void __init show_version (void) {
   Atomic test and set tx_busy until we succeed; we should implement
   some sort of timeout so that tx_busy will never be stuck at true.
   
-  If no TX channel is setup for this VC we wait for an idle one (if
+  If no TX channel is set up for this VC we wait for an idle one (if
   necessary) and set it up.
   
   At this point we have a TX channel ready for use. We wait for enough
@@ -276,7 +277,7 @@ static inline void __init show_version (void) {
   available handler is locked out over the same period.
   
   Data available on the card triggers an interrupt. If the data is not
-  suitable for out existing RX channels or we cannot allocate a buffer
+  suitable for our existing RX channels or we cannot allocate a buffer
   it is flushed. Otherwise an RX receive is scheduled. Multiple RX
   transfers may be scheduled for the same frame.
   
@@ -321,7 +322,7 @@ static inline void __init show_version (void) {
   and the frame continues to be received.
   
   The solution is to make sure any received frames are flushed when
-  ready. This is currently done just before the solution to 3.
+  ready. This is currently done just before the solution to 2.
   
   4. PCI bus (original Horizon only, fixed in Ultra)
   
@@ -602,13 +603,14 @@ static int make_rate (const hrz_dev * dev, u32 c, rounding r,
   
   // note: rounding the rate down means rounding 'p' up
   
-  const unsigned long br = test_bit (ultra, &dev->flags) ? BR_ULT : BR_HRZ;
+  const unsigned long br = test_bit (ultra, (hrz_flags *) &dev->flags) ?
+    BR_ULT : BR_HRZ;
   
   u32 div = CR_MIND;
   u32 pre;
   
   // local fn to build the timer bits
-  inline int set_cr (void) {
+  int set_cr (void) {
     // paranoia
     if (div > CR_MAXD || (!pre) || pre > 1<<CR_MAXPEXP) {
       PRINTD (DBG_QOS, "set_cr internal failure: d=%u p=%u",
@@ -813,7 +815,7 @@ static inline void hrz_kfree_skb (struct sk_buff * skb) {
   if (ATM_SKB(skb)->vcc->pop) {
     ATM_SKB(skb)->vcc->pop (ATM_SKB(skb)->vcc, skb);
   } else {
-    dev_kfree_skb (skb);
+    dev_kfree_skb_any (skb);
   }
 }
 
@@ -961,12 +963,11 @@ static void hrz_close_rx (hrz_dev * dev, u16 vc) {
 static void rx_schedule (hrz_dev * dev, int irq) {
   unsigned int rx_bytes;
   
-  int pio_instead;
+  int pio_instead = 0;
 #ifndef TAILRECURSIONWORKS
-  do {
+  pio_instead = 1;
+  while (pio_instead) {
 #endif
-    pio_instead = 0;
-    
     // bytes waiting for RX transfer
     rx_bytes = dev->rx_bytes;
     
@@ -1047,7 +1048,7 @@ static void rx_schedule (hrz_dev * dev, int irq) {
 	{
 	  struct atm_vcc * vcc = ATM_SKB(skb)->vcc;
 	  // VC layer stats
-	  vcc->stats->rx++;
+	  atomic_inc(&vcc->stats->rx);
 	  skb->stamp = xtime;
 	  // end of our responsability
 	  vcc->push (vcc, skb);
@@ -1078,12 +1079,12 @@ static void rx_schedule (hrz_dev * dev, int irq) {
 #ifdef TAILRECURSIONWORKS
     // and we all bless optimised tail calls
     if (pio_instead)
-      rx_schedule (dev, 0);
+      return rx_schedule (dev, 0);
     return;
 #else
     // grrrrrrr!
     irq = 0;
-  } while (pio_instead);
+  }
   return;
 #endif
 }
@@ -1130,11 +1131,11 @@ static void tx_schedule (hrz_dev * const dev, int irq) {
   
   int append_desc = 0;
   
-  int pio_instead;
+  int pio_instead = 0;
 #ifndef TAILRECURSIONWORKS
-  do {
+  pio_instead = 1;
+  while (pio_instead) {
 #endif
-    pio_instead = 0;
     // bytes in current region waiting for TX transfer
     tx_bytes = dev->tx_bytes;
     
@@ -1201,7 +1202,7 @@ static void tx_schedule (hrz_dev * const dev, int irq) {
 	dev->tx_iovec = 0;
 	
 	// VC layer stats
-	ATM_SKB(skb)->vcc->stats->tx++;
+	atomic_inc(&ATM_SKB(skb)->vcc->stats->tx);
 	
 	// free the skb
 	hrz_kfree_skb (skb);
@@ -1236,12 +1237,12 @@ static void tx_schedule (hrz_dev * const dev, int irq) {
 #ifdef TAILRECURSIONWORKS
     // and we all bless optimised tail calls
     if (pio_instead)
-      tx_schedule (dev, 0);
+      return tx_schedule (dev, 0);
     return;
 #else
     // grrrrrrr!
     irq = 0;
-  } while (pio_instead);
+  }
   return;
 #endif
 }
@@ -1340,37 +1341,33 @@ static inline void rx_data_av_handler (hrz_dev * dev) {
       if (atm_vcc->qos.rxtp.traffic_class != ATM_NONE) {
 	
 	if (rx_len <= atm_vcc->qos.rxtp.max_sdu) {
-	  struct sk_buff *skb = atm_alloc_charge(atm_vcc,rx_len,GFP_ATOMIC);
-
-	  // If everyone has to call atm_pdu2... why isn't it part of
-	  // atm_charge? B'cos some people already have skb->truesize!
-	  // WA: well. even if they think they do, they might not ... :-)
-
-	    if (skb) {
-	      // remember this so we can push it later
-	      dev->rx_skb = skb;
-	      // remember this so we can flush it later
-	      dev->rx_channel = rx_channel;
-	      
-	      // prepare socket buffer
-	      skb_put (skb, rx_len);
-	      ATM_SKB(skb)->vcc = atm_vcc;
-	      
-	      // simple transfer
-	      // dev->rx_regions = 0;
-	      // dev->rx_iovec = 0;
-	      dev->rx_bytes = rx_len;
-	      dev->rx_addr = skb->data;
-	      PRINTD (DBG_RX, "RX start simple transfer (addr %p, len %d)",
-		      skb->data, rx_len);
-	      
-	      // do the business
-	      rx_schedule (dev, 0);
-	      return;
-	      
-	    } else {
-	      PRINTD (DBG_INFO, "failed to get skb");
-	    }
+	    
+	  struct sk_buff * skb = atm_alloc_charge (atm_vcc, rx_len, GFP_ATOMIC);
+	  if (skb) {
+	    // remember this so we can push it later
+	    dev->rx_skb = skb;
+	    // remember this so we can flush it later
+	    dev->rx_channel = rx_channel;
+	    
+	    // prepare socket buffer
+	    skb_put (skb, rx_len);
+	    ATM_SKB(skb)->vcc = atm_vcc;
+	    
+	    // simple transfer
+	    // dev->rx_regions = 0;
+	    // dev->rx_iovec = 0;
+	    dev->rx_bytes = rx_len;
+	    dev->rx_addr = skb->data;
+	    PRINTD (DBG_RX, "RX start simple transfer (addr %p, len %d)",
+		    skb->data, rx_len);
+	    
+	    // do the business
+	    rx_schedule (dev, 0);
+	    return;
+	    
+	  } else {
+	    PRINTD (DBG_SKB|DBG_WARN, "failed to get skb");
+	  }
 	  
 	} else {
 	  PRINTK (KERN_INFO, "frame received on TX-only VC %x", rx_channel);
@@ -1662,6 +1659,7 @@ static int hrz_send (struct atm_vcc * atm_vcc, struct sk_buff * skb) {
   
   if (!channel) {
     PRINTD (DBG_ERR|DBG_TX, "attempt to transmit on zero (rx_)channel");
+    hrz_kfree_skb (skb);
     return -EIO;
   }
   
@@ -1699,9 +1697,11 @@ static int hrz_send (struct atm_vcc * atm_vcc, struct sk_buff * skb) {
 #endif
   
   // wait until TX is free and grab lock
-  if (tx_hold (dev))
+  if (tx_hold (dev)) {
+    hrz_kfree_skb (skb);
     return -ERESTARTSYS;
-  
+  }
+ 
   // Wait for enough space to be available in transmit buffer memory.
   
   // should be number of cells needed + 2 (according to hardware docs)
@@ -1722,6 +1722,7 @@ static int hrz_send (struct atm_vcc * atm_vcc, struct sk_buff * skb) {
       PRINTD (DBG_TX|DBG_ERR, "spun out waiting for tx buffers, got %d of %d",
 	      free_buffers, buffers_required);
       tx_release (dev);
+      hrz_kfree_skb (skb);
       return -ERESTARTSYS;
     }
   }
@@ -1820,12 +1821,12 @@ static u16 __init read_bia (const hrz_dev * dev, u16 addr) {
   
   u32 ctrl = rd_regl (dev, CONTROL_0_REG);
   
-  inline void WRITE_IT_WAIT (void) {
+  void WRITE_IT_WAIT (void) {
     wr_regl (dev, CONTROL_0_REG, ctrl);
     udelay (5);
   }
   
-  inline void CLOCK_IT (void) {
+  void CLOCK_IT (void) {
     // DI must be valid around rising SK edge
     ctrl &= ~SEEPROM_SK;
     WRITE_IT_WAIT();
@@ -2530,16 +2531,17 @@ static int hrz_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
   
   // this is "immediately before allocating the connection identifier
   // in hardware" - so long as the next call does not fail :)
-  atm_vcc->flags |= ATM_VF_ADDR;
+  set_bit(ATM_VF_ADDR,&atm_vcc->flags);
   
   // any errors here are very serious and should never occur
   
   if (rxtp->traffic_class != ATM_NONE) {
     if (dev->rxer[channel]) {
       PRINTD (DBG_ERR|DBG_VCC, "VC already open for RX");
-      return -EBUSY;
+      error = -EBUSY;
     }
-    error = hrz_open_rx (dev, channel);
+    if (!error)
+      error = hrz_open_rx (dev, channel);
     if (error) {
       kfree (vccp);
       return error;
@@ -2554,9 +2556,8 @@ static int hrz_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
   atm_vcc->dev_data = (void *) vccp;
   
   // indicate readiness
-  atm_vcc->flags |= ATM_VF_READY;
+  set_bit(ATM_VF_READY,&atm_vcc->flags);
   
-  MOD_INC_USE_COUNT;
   return 0;
 }
 
@@ -2569,7 +2570,7 @@ static void hrz_close (struct atm_vcc * atm_vcc) {
   PRINTD (DBG_VCC|DBG_FLOW, "hrz_close");
   
   // indicate unreadiness
-  atm_vcc->flags &= ~ATM_VF_READY;
+  clear_bit(ATM_VF_READY,&atm_vcc->flags);
 
   if (atm_vcc->qos.txtp.traffic_class != ATM_NONE) {
     unsigned int i;
@@ -2611,8 +2612,7 @@ static void hrz_close (struct atm_vcc * atm_vcc) {
   // free our structure
   kfree (vcc);
   // say the VPI/VCI is free again
-  atm_vcc->flags &= ~ATM_VF_ADDR;
-  MOD_DEC_USE_COUNT;
+  clear_bit(ATM_VF_ADDR,&atm_vcc->flags);
 }
 
 #if 0
@@ -2743,7 +2743,8 @@ static const struct atmdev_ops hrz_ops = {
   close:	hrz_close,
   send:		hrz_send,
   sg_send:	hrz_sg_send,
-  proc_read:	hrz_proc_read
+  proc_read:	hrz_proc_read,
+  owner:	THIS_MODULE,
 };
 
 static int __init hrz_probe (void) {
@@ -2752,19 +2753,16 @@ static int __init hrz_probe (void) {
   
   PRINTD (DBG_FLOW, "hrz_probe");
   
-  if (!pci_present())
-    return 0;
-  
   devs = 0;
   pci_dev = NULL;
   while ((pci_dev = pci_find_device
-          (PCI_VENDOR_ID_MADGE, PCI_DEVICE_ID_MADGE_HORIZON, pci_dev)
-          )) {
+	  (PCI_VENDOR_ID_MADGE, PCI_DEVICE_ID_MADGE_HORIZON, pci_dev)
+	  )) {
     hrz_dev * dev;
     
     // adapter slot free, read resources from PCI configuration space
-    u32 iobase = pci_dev->resource[0].start;
-    u32 * membase = bus_to_virt(pci_dev->resource[1].start);
+    u32 iobase = pci_resource_start (pci_dev, 0);
+    u32 * membase = bus_to_virt (pci_resource_start (pci_dev, 1));
     u8 irq = pci_dev->irq;
     
     // check IO region
@@ -2772,7 +2770,10 @@ static int __init hrz_probe (void) {
       PRINTD (DBG_WARN, "IO range already in use");
       continue;
     }
-    
+
+    if (pci_enable_device (pci_dev))
+      continue;
+
     dev = kmalloc (sizeof(hrz_dev), GFP_KERNEL);
     if (!dev) {
       // perhaps we should be nice: deregister all adapters and abort?
@@ -2795,7 +2796,7 @@ static int __init hrz_probe (void) {
       PRINTD (DBG_INFO, "found Madge ATM adapter (hrz) at: IO %x, IRQ %u, MEM %p",
 	      iobase, irq, membase);
       
-      dev->atm_dev = atm_dev_register (DEV_LABEL, &hrz_ops, -1, 0);
+      dev->atm_dev = atm_dev_register (DEV_LABEL, &hrz_ops, -1, NULL);
       if (!(dev->atm_dev)) {
 	PRINTD (DBG_ERR, "failed to register Madge ATM adapter");
       } else {

@@ -1,5 +1,5 @@
-/* $Id: niccy.c,v 1.8 1999/08/11 21:01:33 keil Exp $
-
+/* $Id: niccy.c,v 1.15.6.2 2000/11/29 16:00:14 kai Exp $
+ *
  * niccy.c  low level stuff for Dr. Neuhaus NICCY PnP and NICCY PCI and
  *          compatible (SAGEM cybermodem)
  *
@@ -7,34 +7,14 @@
  * 
  * Thanks to Dr. Neuhaus and SAGEM for informations
  *
- * $Log: niccy.c,v $
- * Revision 1.8  1999/08/11 21:01:33  keil
- * new PCI codefix
- *
- * Revision 1.7  1999/08/10 16:02:04  calle
- * struct pci_dev changed in 2.3.13. Made the necessary changes.
- *
- * Revision 1.6  1999/07/12 21:05:23  keil
- * fix race in IRQ handling
- * added watchdog for lost IRQs
- *
- * Revision 1.5  1999/07/01 08:12:07  keil
- * Common HiSax version for 2.0, 2.1, 2.2 and 2.3 kernel
- *
- * Revision 1.4  1998/04/16 19:16:48  keil
- * need config.h
- *
- * Revision 1.3  1998/04/15 16:42:59  keil
- * new init code
- *
- * Revision 1.2  1998/02/11 17:31:04  keil
- * new file
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
 
 
 #define __NO_VERSION__
 #include <linux/config.h>
+#include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
@@ -42,7 +22,7 @@
 #include <linux/pci.h>
 
 extern const char *CardType[];
-const char *niccy_revision = "$Revision: 1.8 $";
+const char *niccy_revision = "$Revision: 1.15.6.2 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -59,8 +39,6 @@ const char *niccy_revision = "$Revision: 1.8 $";
 #define NICCY_PCI	2
 
 /* PCI stuff */
-#define PCI_VENDOR_DR_NEUHAUS	0x1267
-#define PCI_NICCY_ID		0x1016
 #define PCI_IRQ_CTRL_REG	0x38
 #define PCI_IRQ_ENABLE		0x1f00
 #define PCI_IRQ_DISABLE		0xff0000
@@ -228,12 +206,13 @@ release_io_niccy(struct IsdnCardState *cs)
 static void
 niccy_reset(struct IsdnCardState *cs)
 {
-	int val, nval;
-	
-	val = inl(cs->hw.niccy.cfg_reg + PCI_IRQ_CTRL_REG);
-	nval = val | PCI_IRQ_ENABLE;
-	outl(nval, cs->hw.niccy.cfg_reg + PCI_IRQ_CTRL_REG);
+	if (cs->subtyp == NICCY_PCI) {
+		int val;
 
+		val = inl(cs->hw.niccy.cfg_reg + PCI_IRQ_CTRL_REG);
+		val |= PCI_IRQ_ENABLE;
+		outl(val, cs->hw.niccy.cfg_reg + PCI_IRQ_CTRL_REG);
+	}
 	inithscxisac(cs, 3);
 }
 
@@ -256,10 +235,10 @@ niccy_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-static 	struct pci_dev *niccy_dev __initdata = NULL;
+static struct pci_dev *niccy_dev __initdata = NULL;
 
-__initfunc(int
-setup_niccy(struct IsdnCard *card))
+int __init
+setup_niccy(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];
@@ -304,24 +283,26 @@ setup_niccy(struct IsdnCard *card))
 			return(0);
 		}
 		cs->subtyp = 0;
-		if ((niccy_dev = pci_find_device(PCI_VENDOR_DR_NEUHAUS,
-			   PCI_NICCY_ID, niccy_dev))) {
+		if ((niccy_dev = pci_find_device(PCI_VENDOR_ID_SATSAGEM,
+			PCI_DEVICE_ID_SATSAGEM_NICCY, niccy_dev))) {
+			if (pci_enable_device(niccy_dev))
+				return(0);
 			/* get IRQ */
 			if (!niccy_dev->irq) {
 				printk(KERN_WARNING "Niccy: No IRQ for PCI card found\n");
 				return(0);
 			}
 			cs->irq = niccy_dev->irq;
-			if (!niccy_dev->resource[ 0].start) {
+			cs->hw.niccy.cfg_reg = pci_resource_start(niccy_dev, 0);
+			if (!cs->hw.niccy.cfg_reg) {
 				printk(KERN_WARNING "Niccy: No IO-Adr for PCI cfg found\n");
 				return(0);
 			}
-			cs->hw.niccy.cfg_reg = niccy_dev->resource[ 0].start & PCI_BASE_ADDRESS_IO_MASK;
-			if (!niccy_dev->resource[ 1].start) {
+			pci_ioaddr = pci_resource_start(niccy_dev, 1);
+			if (!pci_ioaddr) {
 				printk(KERN_WARNING "Niccy: No IO-Adr for PCI card found\n");
 				return(0);
 			}
-			pci_ioaddr = niccy_dev->resource[ 1].start & PCI_BASE_ADDRESS_IO_MASK;
 			cs->subtyp = NICCY_PCI;
 		} else {
 			printk(KERN_WARNING "Niccy: No PCI card found\n");

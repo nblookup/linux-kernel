@@ -60,7 +60,7 @@ pt_succ_return_linux(struct pt_regs *regs, unsigned long value, long *addr)
 static void
 pt_os_succ_return (struct pt_regs *regs, unsigned long val, long *addr)
 {
-	if (current->personality & PER_BSD)
+	if (current->personality == PER_SUNOS)
 		pt_succ_return (regs, val);
 	else
 		pt_succ_return_linux (regs, val, addr);
@@ -155,7 +155,7 @@ static inline void read_sunos_user(struct pt_regs *regs, unsigned long offset,
 		pt_error_return(regs, EIO);
 		return;
 	}
-	if (current->personality & PER_BSD)
+	if (current->personality == PER_SUNOS)
 		pt_succ_return (regs, v);
 	else
 		pt_succ_return_linux (regs, v, addr);
@@ -289,12 +289,12 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 #endif
 	if(request == PTRACE_TRACEME) {
 		/* are we already being traced? */
-		if (current->flags & PF_PTRACED) {
+		if (current->ptrace & PT_PTRACED) {
 			pt_error_return(regs, EPERM);
 			goto out;
 		}
 		/* set the ptrace bit in the process flags. */
-		current->flags |= PF_PTRACED;
+		current->ptrace |= PT_PTRACED;
 		pt_succ_return(regs, 0);
 		goto out;
 	}
@@ -310,8 +310,8 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 		goto out;
 	}
 
-	if (((current->personality & PER_BSD) && (request == PTRACE_SUNATTACH))
-	    || (!(current->personality & PER_BSD) && (request == PTRACE_ATTACH))) {
+	if ((current->personality == PER_SUNOS && request == PTRACE_SUNATTACH)
+	    || (current->personality != PER_SUNOS && request == PTRACE_ATTACH)) {
 		unsigned long flags;
 
 		if(child == current) {
@@ -333,11 +333,11 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 			goto out;
 		}
 		/* the same process cannot be attached many times */
-		if (child->flags & PF_PTRACED) {
+		if (child->ptrace & PT_PTRACED) {
 			pt_error_return(regs, EPERM);
 			goto out;
 		}
-		child->flags |= PF_PTRACED;
+		child->ptrace |= PT_PTRACED;
 		write_lock_irqsave(&tasklist_lock, flags);
 		if(child->p_pptr != current) {
 			REMOVE_LINKS(child);
@@ -349,9 +349,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 		pt_succ_return(regs, 0);
 		goto out;
 	}
-	if (!(child->flags & PF_PTRACED)
-	    && ((current->personality & PER_BSD) && (request != PTRACE_SUNATTACH))
-	    && (!(current->personality & PER_BSD) && (request != PTRACE_ATTACH))) {
+	if (!(child->ptrace & PT_PTRACED)) {
 		pt_error_return(regs, ESRCH);
 		goto out;
 	}
@@ -568,9 +566,9 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 		}
 
 		if (request == PTRACE_SYSCALL)
-			child->flags |= PF_TRACESYS;
+			child->ptrace |= PT_TRACESYS;
 		else
-			child->flags &= ~PF_TRACESYS;
+			child->ptrace &= ~PT_TRACESYS;
 
 		child->exit_code = data;
 #ifdef DEBUG_PTRACE
@@ -607,7 +605,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 			pt_error_return(regs, EIO);
 			goto out;
 		}
-		child->flags &= ~(PF_PTRACED|PF_TRACESYS);
+		child->ptrace &= ~(PT_PTRACED|PT_TRACESYS);
 		wake_up_process(child);
 		child->exit_code = data;
 		write_lock_irqsave(&tasklist_lock, flags);
@@ -634,8 +632,8 @@ asmlinkage void syscall_trace(void)
 #ifdef DEBUG_PTRACE
 	printk("%s [%d]: syscall_trace\n", current->comm, current->pid);
 #endif
-	if ((current->flags & (PF_PTRACED|PF_TRACESYS))
-			!= (PF_PTRACED|PF_TRACESYS))
+	if ((current->ptrace & (PT_PTRACED|PT_TRACESYS))
+			!= (PT_PTRACED|PT_TRACESYS))
 		return;
 	current->exit_code = SIGTRAP;
 	current->state = TASK_STOPPED;

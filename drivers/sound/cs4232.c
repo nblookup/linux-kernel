@@ -39,6 +39,9 @@
  *                                       Tropez+ (WaveFront) support
  *	Christoph Hellwig	Adapted to module_init/module_exit,
  * 					simple cleanups
+ * 	Arnaldo C. de Melo	got rid of attach_uart401
+ *	Bartlomiej Zolnierkiewicz
+ *				Added some __init/__initdata/__exit
  */
 
 #include <linux/config.h>
@@ -46,7 +49,6 @@
 #include <linux/init.h>
 
 #include "sound_config.h"
-#include "soundmodule.h"
 
 #include "cs4232.h"
 #include "ad1848.h"
@@ -67,7 +69,7 @@ static int mpu_base = 0, mpu_irq = 0;
 static int synth_base = 0, synth_irq = 0;
 static int mpu_detected = 0;
 
-int probe_cs4232_mpu(struct address_info *hw_config)
+int __init probe_cs4232_mpu(struct address_info *hw_config)
 {
 	/*
 	 *	Just write down the config values.
@@ -79,7 +81,7 @@ int probe_cs4232_mpu(struct address_info *hw_config)
 	return 1;
 }
 
-static unsigned char crystal_key[] =	/* A 32 byte magic key sequence */
+static unsigned char crystal_key[] __initdata =	/* A 32 byte magic key sequence */
 {
 	0x96, 0x35, 0x9a, 0xcd, 0xe6, 0xf3, 0x79, 0xbc,
 	0x5e, 0xaf, 0x57, 0x2b, 0x15, 0x8a, 0xc5, 0xe2,
@@ -93,7 +95,7 @@ static void sleep(unsigned howlong)
 	schedule_timeout(howlong);
 }
 
-int probe_cs4232(struct address_info *hw_config)
+int __init probe_cs4232(struct address_info *hw_config)
 {
 	int i, n;
 	int base = hw_config->io_base, irq = hw_config->irq;
@@ -209,7 +211,7 @@ int probe_cs4232(struct address_info *hw_config)
 	return 0;
 }
 
-void attach_cs4232(struct address_info *hw_config)
+void __init attach_cs4232(struct address_info *hw_config)
 {
 	int base = hw_config->io_base,
 		irq = hw_config->irq,
@@ -229,7 +231,8 @@ void attach_cs4232(struct address_info *hw_config)
 					  dma1,		/* Playback DMA */
 					  dma2,		/* Capture DMA */
 					  0,
-					  hw_config->osp);
+					  hw_config->osp,
+					  THIS_MODULE);
 
 	if (hw_config->slots[0] != -1 &&
 		audio_devs[hw_config->slots[0]]->mixer_dev!=-1)
@@ -255,10 +258,9 @@ void attach_cs4232(struct address_info *hw_config)
 		hw_config2.driver_use_2 = 0;
 		hw_config2.card_subtype = 0;
 
-		if (probe_uart401(&hw_config2))
+		if (probe_uart401(&hw_config2, THIS_MODULE))
 		{
 			mpu_detected = 1;
-			attach_uart401(&hw_config2);
 		}
 		else
 		{
@@ -266,10 +268,9 @@ void attach_cs4232(struct address_info *hw_config)
 		}
 		hw_config->slots[1] = hw_config2.slots[1];
 	}
-	SOUND_LOCK;
 }
 
-void unload_cs4232(struct address_info *hw_config)
+void __exit unload_cs4232(struct address_info *hw_config)
 {
 	int base = hw_config->io_base, irq = hw_config->irq;
 	int dma1 = hw_config->dma, dma2 = hw_config->dma2;
@@ -346,6 +347,11 @@ static int __init init_cs4232(void)
 	if(synthio != -1)
 		printk(KERN_WARNING "cs4232: wavefront support not enabled in this driver.\n");
 #endif
+	if(io==-1||irq==-1||dma==-1)
+	{
+		printk(KERN_ERR "cs4232: Must set io, irq and dma.\n");
+		return -ENODEV;
+	}
 
 	cfg.io_base = io;
 	cfg.irq = irq;
@@ -371,7 +377,6 @@ static int __init init_cs4232(void)
 static void __exit cleanup_cs4232(void)
 {
         unload_cs4232(&cfg); /* unloads MPU as well, if needed */
-	SOUND_LOCK_END;
 }
 
 module_init(init_cs4232);

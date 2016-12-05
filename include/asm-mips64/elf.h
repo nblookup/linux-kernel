@@ -1,5 +1,4 @@
-/* $Id: elf.h,v 1.4 2000/02/24 00:13:20 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -22,9 +21,23 @@ typedef double elf_fpreg_t;
 typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 
 /*
- * This is used to ensure we don't load something for the wrong architecture.
+ * This is used to ensure we don't load something for the wrong 
+ * architecture or OS.
  */
-#define elf_check_arch(x) ((x) == EM_MIPS || (x) == EM_MIPS_RS4_BE)
+#define elf_check_arch(hdr)						\
+({									\
+	int __res = 1;							\
+	struct elfhdr *__h = (hdr);					\
+									\
+	if ((__h->e_machine != EM_MIPS) &&				\
+	    (__h->e_machine != EM_MIPS_RS4_BE))				\
+		__res = 0;						\
+	if (sizeof(elf_caddr_t) == 8 &&					\
+	    __h->e_ident[EI_CLASS] == ELFCLASS32)			\
+	        __res = 0;						\
+									\
+	__res;								\
+})
 
 /*
  * These are used to set parameters in the core dumps.
@@ -91,9 +104,9 @@ do {	if ((ex).e_ident[EI_CLASS] == ELFCLASS32)	\
 	else						\
 		current->thread.mflags &= ~MF_32BIT;	\
 	if (ibcs2)					\
-		current->personality = PER_SVR4;	\
+		set_personality(PER_SVR4);		\
 	else if (current->personality != PER_LINUX32)	\
-		current->personality = PER_LINUX;	\
+		set_personality(PER_LINUX);		\
 } while (0)
 #endif
 

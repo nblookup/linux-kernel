@@ -38,6 +38,8 @@
 #include <linux/ioctl.h>
 #include <net/sock.h>
 
+#include <linux/devfs_fs_kernel.h>
+
 #include <asm/segment.h>
 #include <asm/uaccess.h>
 #include <asm/types.h>
@@ -53,6 +55,7 @@ static int nbd_sizes[MAX_NBD];
 static u64 nbd_bytesizes[MAX_NBD];
 
 static struct nbd_device nbd_dev[MAX_NBD];
+static devfs_handle_t devfs_handle;
 
 #define DEBUG( s )
 /* #define DEBUG( s ) printk( s ) 
@@ -103,7 +106,7 @@ static int nbd_xmit(int send, struct socket *sock, char *buf, int size)
 
 
 	do {
-		sock->sk->allocation = GFP_ATOMIC;
+		sock->sk->allocation = GFP_BUFFER;
 		iov.iov_base = buf;
 		iov.iov_len = size;
 		msg.msg_name = NULL;
@@ -299,7 +302,7 @@ void nbd_clear_que(struct nbd_device *lo)
 static void do_nbd_request(request_queue_t * q)
 {
 	struct request *req;
-	int dev;
+	int dev = 0;
 	struct nbd_device *lo;
 
 	while (!QUEUE_EMPTY) {
@@ -350,6 +353,7 @@ static int nbd_ioctl(struct inode *inode, struct file *file,
 {
 	struct nbd_device *lo;
 	int dev, error, temp;
+	struct request sreq ;
 
 	/* Anyone capable of this syscall can do *real bad* things */
 
@@ -363,6 +367,13 @@ static int nbd_ioctl(struct inode *inode, struct file *file,
 
 	lo = &nbd_dev[dev];
 	switch (cmd) {
+	case NBD_DISCONNECT:
+	        printk("NBD_DISCONNECT\n") ;
+                sreq.cmd=2 ; /* shutdown command */
+                if (!lo->sock) return -EINVAL ;
+                nbd_send_req(lo->sock,&sreq) ;
+                return 0 ;
+ 
 	case NBD_CLEAR_SOCK:
 		down(&lo->queue_lock);
 		nbd_clear_que(lo);
@@ -506,12 +517,21 @@ int nbd_init(void)
 		register_disk(NULL, MKDEV(MAJOR_NR,i), 1, &nbd_fops,
 				nbd_bytesizes[i]>>9);
 	}
+	devfs_handle = devfs_mk_dir (NULL, "nbd", NULL);
+	devfs_register_series (devfs_handle, "%u", MAX_NBD,
+			       DEVFS_FL_DEFAULT, MAJOR_NR, 0,
+			       S_IFBLK | S_IRUSR | S_IWUSR,
+			       &nbd_fops, NULL);
+
 	return 0;
 }
 
 #ifdef MODULE
 void cleanup_module(void)
 {
+	devfs_unregister (devfs_handle);
+	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
+
 	if (unregister_blkdev(MAJOR_NR, "nbd") != 0)
 		printk("nbd: cleanup_module failed\n");
 	else

@@ -60,7 +60,8 @@ static void irttp_flush_queues(struct tsap_cb *self);
 static void irttp_fragment_skb(struct tsap_cb *self, struct sk_buff *skb);
 static void irttp_start_todo_timer(struct tsap_cb *self, int timeout);
 static struct sk_buff *irttp_reassemble_skb(struct tsap_cb *self);
-static int irttp_param_max_sdu_size(void *instance, param_t *param, int get);
+static int irttp_param_max_sdu_size(void *instance, irda_param_t *param, 
+				    int get);
 
 /* Information for parsing parameters in IrTTP */
 static pi_minor_info_t pi_minor_call_table[] = {
@@ -155,6 +156,8 @@ struct tsap_cb *irttp_open_tsap(__u8 stsap_sel, int credit, notify_t *notify)
 	ttp_notify.disconnect_indication = irttp_disconnect_indication;
 	ttp_notify.data_indication = irttp_data_indication;
 	ttp_notify.udata_indication = irttp_udata_indication;
+	if(notify->status_indication != NULL)
+		ttp_notify.status_indication = irttp_status_indication;
 	ttp_notify.instance = self;
 	strncpy(ttp_notify.name, notify->name, NOTIFY_MAX_NAME);
 
@@ -184,7 +187,7 @@ struct tsap_cb *irttp_open_tsap(__u8 stsap_sel, int credit, notify_t *notify)
 	self->notify = *notify;
 	self->lsap = lsap;
 
-	hashbin_insert(irttp->tsaps, (queue_t *) self, (int) self, NULL);
+	hashbin_insert(irttp->tsaps, (irda_queue_t *) self, (int) self, NULL);
 
 	if (credit > TTP_MAX_QUEUE)
 		self->initial_credit = TTP_MAX_QUEUE;
@@ -607,6 +610,34 @@ static int irttp_data_indication(void *instance, void *sap,
 }
 
 /*
+ * Function irttp_status_indication (self, reason)
+ *
+ *    Status_indication, just pass to the higher layer...
+ *
+ */
+void irttp_status_indication(void *instance,
+			     LINK_STATUS link, LOCK_STATUS lock)
+{
+	struct tsap_cb *self;
+
+	IRDA_DEBUG(4, __FUNCTION__ "()\n");
+
+	self = (struct tsap_cb *) instance;
+	
+	ASSERT(self != NULL, return;);
+	ASSERT(self->magic == TTP_TSAP_MAGIC, return;);
+	
+	/*
+	 *  Inform service user if he has requested it
+	 */
+	if (self->notify.status_indication != NULL)
+		self->notify.status_indication(self->notify.instance, 
+					       link, lock);
+	else
+		IRDA_DEBUG(2, __FUNCTION__ "(), no handler\n");
+}
+
+/*
  * Function irttp_flow_request (self, command)
  *
  *    This funtion could be used by the upper layers to tell IrTTP to stop
@@ -1001,7 +1032,7 @@ struct tsap_cb *irttp_dup(struct tsap_cb *orig, void *instance)
 	skb_queue_head_init(&new->tx_queue);
 	skb_queue_head_init(&new->rx_fragments);
 
-	hashbin_insert(irttp->tsaps, (queue_t *) new, (int) new, NULL);
+	hashbin_insert(irttp->tsaps, (irda_queue_t *) new, (int) new, NULL);
 
 	return new;
 }
@@ -1405,7 +1436,8 @@ static void irttp_fragment_skb(struct tsap_cb *self, struct sk_buff *skb)
  *    will be called both when this parameter needs to be inserted into, and
  *    extracted from the connect frames
  */
-static int irttp_param_max_sdu_size(void *instance, param_t *param, int get)
+static int irttp_param_max_sdu_size(void *instance, irda_param_t *param, 
+				    int get)
 {
 	struct tsap_cb *self;
 

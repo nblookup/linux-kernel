@@ -3,10 +3,10 @@
  * Written by Niibe Yutaka
  */
 #include <linux/config.h>
-#ifdef CONFIG_LITTLE_ENDIAN
-OUTPUT_FORMAT("elf32-shl", "elf32-shl", "elf32-shl")
+#ifdef CONFIG_CPU_LITTLE_ENDIAN
+OUTPUT_FORMAT("elf32-sh-linux", "elf32-sh-linux", "elf32-sh-linux")
 #else
-OUTPUT_FORMAT("elf32-sh", "elf32-sh", "elf32-sh")
+OUTPUT_FORMAT("elf32-shbig-linux", "elf32-shbig-linux", "elf32-shbig-linux")
 #endif
 OUTPUT_ARCH(sh)
 ENTRY(_start)
@@ -15,12 +15,14 @@ SECTIONS
   . = 0x80000000 + CONFIG_MEMORY_START + 0x1000;
   _text = .;			/* Text and read-only data */
   text = .;			/* Text and read-only data */
-  .text : {
+  .empty_zero_page : {
 	*(.empty_zero_page)
+	} = 0
+  .text : {
 	*(.text)
 	*(.fixup)
 	*(.gnu.warning)
-	} = 0
+	} = 0x0009
   .text.lock : { *(.text.lock) }	/* out-of-line lock text */
   .rodata : { *(.rodata) }
   .kstrtab : { *(.kstrtab) }
@@ -33,6 +35,10 @@ SECTIONS
   __start___ksymtab = .;	/* Kernel symbol table */
   __ksymtab : { *(__ksymtab) }
   __stop___ksymtab = .;
+
+  __start___kallsyms = .;	/* All kernel symbols */
+  __kallsyms : { *(__kallsyms) }
+  __stop___kallsyms = .;
 
   _etext = .;			/* End of text section */
 
@@ -59,6 +65,9 @@ SECTIONS
   __initcall_start = .;
   .initcall.init : { *(.initcall.init) }
   __initcall_end = .;
+  __machvec_start = .;
+  .machvec.init : { *(.machvec.init) }
+  __machvec_end = .;
   . = ALIGN(4096);
   __init_end = .;
 
@@ -75,6 +84,17 @@ SECTIONS
 	}
   . = ALIGN(4);
   _end = . ;
+
+  /* When something in the kernel is NOT compiled as a module, the
+   * module cleanup code and data are put into these segments.  Both
+   * can then be thrown away, as cleanup code is never called unless
+   * it's a module.
+   */
+  /DISCARD/ : {
+	*(.text.exit)
+	*(.data.exit)
+	*(.exitcall.exit)
+	}
 
   /* Stabs debugging sections.  */
   .stab 0 : { *(.stab) }

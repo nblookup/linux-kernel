@@ -32,6 +32,7 @@
  *   0.3  10.08.99  fixing merge errors
  *   0.4  13.08.99  Added Vendor/Product ID of Brad Hard's cable
  *   0.5  20.09.99  usb_control_msg wrapper used
+ *        Nov01.00  usb_device_table support by Adam J. Richter
  *
  */
 
@@ -484,16 +485,12 @@ static size_t parport_uss720_write_compat(struct parport *pp, const void *buffer
 
 void parport_uss720_inc_use_count(void)
 {
-#ifdef MODULE
 	MOD_INC_USE_COUNT;
-#endif
 }
 
 void parport_uss720_dec_use_count(void)
 {
-#ifdef MODULE
 	MOD_DEC_USE_COUNT;
-#endif
 }
 
 /* --------------------------------------------------------------------- */
@@ -538,7 +535,8 @@ static struct parport_operations parport_uss720_ops =
 
 /* --------------------------------------------------------------------- */
 
-static void * uss720_probe(struct usb_device *usbdev, unsigned int ifnum)
+static void * uss720_probe(struct usb_device *usbdev, unsigned int ifnum,
+			   const struct usb_device_id *id)
 {
 	struct usb_interface_descriptor *interface;
 	struct usb_endpoint_descriptor *endpoint;
@@ -548,11 +546,6 @@ static void * uss720_probe(struct usb_device *usbdev, unsigned int ifnum)
 
 	printk(KERN_DEBUG "uss720: probe: vendor id 0x%x, device id 0x%x\n",
 	       usbdev->descriptor.idVendor, usbdev->descriptor.idProduct);
-
-	if ((usbdev->descriptor.idVendor != 0x047e || usbdev->descriptor.idProduct != 0x1001) &&
-	    (usbdev->descriptor.idVendor != 0x0557 || usbdev->descriptor.idProduct != 0x2001) &&
-	    (usbdev->descriptor.idVendor != 0x0729 || usbdev->descriptor.idProduct != 0x1284))
-		return NULL;
 
 	/* our known interfaces have 3 alternate settings */
 	if (usbdev->actconfig->interface[ifnum].num_altsetting != 3)
@@ -620,7 +613,9 @@ static void uss720_disconnect(struct usb_device *usbdev, void *ptr)
 	struct parport *pp = (struct parport *)ptr;
 	struct parport_uss720_private *priv = pp->private_data;
 
+#if 0
 	usb_release_irq(usbdev, priv->irqhandle, priv->irqpipe);
+#endif
 	priv->usbdev = NULL;
 	parport_proc_unregister(pp);
 	parport_unregister_port(pp);
@@ -628,11 +623,22 @@ static void uss720_disconnect(struct usb_device *usbdev, void *ptr)
 	MOD_DEC_USE_COUNT;
 }
 
+/* table of cables that work through this driver */
+static struct usb_device_id uss720_table [] = {
+	{ USB_DEVICE(0x047e, 0x1001) },
+	{ USB_DEVICE(0x0557, 0x2001) },
+	{ USB_DEVICE(0x0729, 0x1284) },
+	{ }						/* Terminating entry */
+};
+
+MODULE_DEVICE_TABLE (usb, uss720_table);
+
+
 static struct usb_driver uss720_driver = {
-	"uss720",
-	uss720_probe,
-	uss720_disconnect,
-	{ NULL, NULL }
+	name:		"uss720",
+	probe:		uss720_probe,
+	disconnect:	uss720_disconnect,
+	id_table:	uss720_table,
 };
 
 /* --------------------------------------------------------------------- */

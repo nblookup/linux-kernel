@@ -1,9 +1,13 @@
 /*
- * drivers/sound/vidc.c
+ *  linux/drivers/sound/vidc.c
  *
- * VIDC20 audio driver.
+ *  Copyright (C) 1997-2000 by Russell King <rmk@arm.linux.org.uk>
  *
- * Copyright (C) 1997-2000 by Russell King <rmk@arm.linux.org.uk>
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  VIDC20 audio driver.
  *
  * The VIDC20 sound hardware consists of the VIDC20 itself, a DAC and a DMA
  * engine.  The DMA transfers fixed-format (16-bit little-endian linear)
@@ -13,7 +17,6 @@
  * We currently support a mixer device, but it is currently non-functional.
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -21,11 +24,11 @@
 #include <asm/hardware.h>
 #include <asm/dma.h>
 #include <asm/io.h>
-#include <asm/iomd.h>
+#include <asm/hardware/iomd.h>
+#include <asm/irq.h>
 #include <asm/system.h>
 
 #include "sound_config.h"
-#include "soundmodule.h"
 #include "vidc.h"
 
 #ifndef _SIOC_TYPE
@@ -79,12 +82,11 @@ static unsigned int	vidc_audio_volume_r;	/* right PCM vol, 0 - 65536 */
 static void	(*old_mksound)(unsigned int hz, unsigned int ticks);
 extern void	(*kd_mksound)(unsigned int hz, unsigned int ticks);
 extern void	vidc_update_filler(int bits, int channels);
-extern int	softoss_dev;
 
 static void
 vidc_mksound(unsigned int hz, unsigned int ticks)
 {
-	printk("BEEP - %d %d!\n", hz, ticks);
+//	printk("BEEP - %d %d!\n", hz, ticks);
 }
 
 static void
@@ -287,10 +289,10 @@ vidc_audio_output_block(int dev, unsigned long buf, int total_count, int one)
 	struct dma_buffparms *dmap = audio_devs[dev]->dmap_out;
 	unsigned long flags;
 
-	save_flags_cli(flags);
+	local_irq_save(flags);
 	dma_start = buf - (unsigned long)dmap->raw_buf_phys + (unsigned long)dmap->raw_buf;
 	dma_count = total_count;
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 static void
@@ -345,7 +347,7 @@ static void vidc_audio_trigger(int dev, int enable_bits)
 		if (!(adev->flags & DMA_ACTIVE)) {
 			unsigned long flags;
 
-			save_flags_cli(flags);
+			local_irq_save(flags);
 
 			/* prevent recusion */
 			adev->flags |= DMA_ACTIVE;
@@ -354,13 +356,14 @@ static void vidc_audio_trigger(int dev, int enable_bits)
 			vidc_sound_dma_irq(0, NULL, NULL);
 			outb(DMA_CR_E | 0x10, IOMD_SD0CR);
 
-			restore_flags(flags);
+			local_irq_restore(flags);
 		}
 	}
 }
 
 static struct audio_driver vidc_audio_driver =
 {
+	owner:			THIS_MODULE,
 	open:			vidc_audio_open,
 	close:			vidc_audio_close,
 	output_block:		vidc_audio_output_block,
@@ -376,6 +379,7 @@ static struct audio_driver vidc_audio_driver =
 };
 
 static struct mixer_operations vidc_mixer_operations = {
+	owner:		THIS_MODULE,
 	id:		"VIDC",
 	name:		"VIDCsound",
 	ioctl:		vidc_mixer_ioctl
@@ -469,9 +473,6 @@ static void __init attach_vidc(struct address_info *hw_config)
 	vidc_adev = adev;
 	vidc_mixer_set(SOUND_MIXER_VOLUME, (85 | 85 << 8));
 
-#if defined(CONFIG_SOUND_SOFTOSS) || defined(CONFIG_SOUND_SOFTOSS_MODULE)
-	softoss_dev = adev;
-#endif
 	return;
 
 irq_failed:
@@ -518,16 +519,12 @@ static void __exit unload_vidc(struct address_info *hw_config)
 }
 
 static struct address_info cfg;
-/*
- * Note! Module use count is handled by SOUNDLOCK/SOUND_LOCK_END
- */
 
 static int __init init_vidc(void)
 {
 	if (probe_vidc(&cfg) == 0)
 		return -ENODEV;
 
-	SOUND_LOCK;
 	attach_vidc(&cfg);
 
 	return 0;
@@ -536,7 +533,6 @@ static int __init init_vidc(void)
 static void __exit cleanup_vidc(void)
 {
 	unload_vidc(&cfg);
-	SOUND_LOCK_END;
 }
 
 module_init(init_vidc);

@@ -26,12 +26,19 @@
 #include <linux/major.h>
 #include <linux/string.h>
 #include <linux/blk.h>
+
+#ifdef CONFIG_BLK_DEV_IDE
 #include <linux/ide.h>	/* IDE xlate */
+#endif /* CONFIG_BLK_DEV_IDE */
 
 #include <asm/system.h>
 
 #include "check.h"
 #include "msdos.h"
+
+#if CONFIG_BLK_DEV_MD && CONFIG_AUTODETECT_RAID
+extern void md_autodetect_dev(kdev_t dev);
+#endif
 
 static int current_minor;
 
@@ -129,6 +136,12 @@ static void extended_partition(struct gendisk *hd, kdev_t dev)
 			add_gd_partition(hd, current_minor,
 					 this_sector+START_SECT(p)*sector_size,
 					 NR_SECTS(p)*sector_size);
+#if CONFIG_BLK_DEV_MD && CONFIG_AUTODETECT_RAID
+			if (SYS_IND(p) == LINUX_RAID_PARTITION) {
+			    md_autodetect_dev(MKDEV(hd->major,current_minor));
+			}
+#endif
+
 			current_minor++;
 			loopct = 0;
 			if ((current_minor & mask) == 0)
@@ -423,7 +436,7 @@ check_table:
 			(void) ide_xlate_1024(dev, 2, heads, " [PTBL]");
 		}
 	}
-#endif	/* CONFIG_BLK_DEV_IDE */
+#endif /* CONFIG_BLK_DEV_IDE */
 
 	/* Look for partitions in two passes:
 	   First find the primary partitions, and the DOS-type extended partitions.
@@ -435,6 +448,11 @@ check_table:
 			continue;
 		add_gd_partition(hd, minor, first_sector+START_SECT(p)*sector_size,
 				 NR_SECTS(p)*sector_size);
+#if CONFIG_BLK_DEV_MD && CONFIG_AUTODETECT_RAID
+		if (SYS_IND(p) == LINUX_RAID_PARTITION) {
+			md_autodetect_dev(MKDEV(hd->major,minor));
+		}
+#endif
 		if (is_extended_partition(p)) {
 			printk(" <");
 			/*

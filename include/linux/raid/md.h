@@ -19,7 +19,6 @@
 #define _MD_H
 
 #include <linux/mm.h>
-#include <linux/config.h>
 #include <linux/fs.h>
 #include <linux/blkdev.h>
 #include <asm/semaphore.h>
@@ -29,13 +28,13 @@
 #include <asm/bitops.h>
 #include <linux/module.h>
 #include <linux/hdreg.h>
-#include <linux/sysctl.h>
 #include <linux/proc_fs.h>
 #include <linux/smp_lock.h>
 #include <linux/delay.h>
 #include <net/checksum.h>
 #include <linux/random.h>
 #include <linux/locks.h>
+#include <linux/kernel_stat.h>
 #include <asm/io.h>
 
 #include <linux/raid/md_compatible.h>
@@ -74,21 +73,19 @@ extern void md_wakeup_thread(mdk_thread_t *thread);
 extern void md_interrupt_thread (mdk_thread_t *thread);
 extern int md_update_sb (mddev_t *mddev);
 extern int md_do_sync(mddev_t *mddev, mdp_disk_t *spare);
+extern void md_done_sync(mddev_t *mddev, int blocks, int ok);
+extern void md_sync_acct(kdev_t dev, unsigned long nr_sectors);
 extern void md_recover_arrays (void);
 extern int md_check_ordering (mddev_t *mddev);
-extern void autodetect_raid(void);
 extern struct gendisk * find_gendisk (kdev_t dev);
 extern int md_notify_reboot(struct notifier_block *this,
 					unsigned long code, void *x);
 extern int md_error (kdev_t mddev, kdev_t rdev);
-
-#if CONFIG_BLK_DEV_MD
-extern void raid_setup(char *str,int *ints) md__init;
-#endif
+extern int md_run_setup(void);
 
 extern void md_print_devices (void);
 
 #define MD_BUG(x...) { printk("md: bug in file %s, line %d\n", __FILE__, __LINE__); md_print_devices(); }
 
-#endif _MD_H
+#endif 
 

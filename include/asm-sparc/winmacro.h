@@ -1,4 +1,4 @@
-/* $Id: winmacro.h,v 1.21 1999/08/14 03:52:13 anton Exp $
+/* $Id: winmacro.h,v 1.22 2000/05/09 17:40:15 davem Exp $
  * winmacro.h: Window loading-unloading macros.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -7,6 +7,7 @@
 #ifndef _SPARC_WINMACRO_H
 #define _SPARC_WINMACRO_H
 
+#include <linux/config.h>
 #include <asm/ptrace.h>
 #include <asm/psr.h>
 
@@ -111,7 +112,7 @@
         add      %scratch, 1, %scratch; \
         st       %scratch, [%cur_reg + AOFF_task_thread + AOFF_thread_w_saved];
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #define LOAD_CURRENT4M(dest_reg, idreg) \
         rd       %tbr, %idreg; \
 	sethi    %hi(C_LABEL(current_set)), %dest_reg; \

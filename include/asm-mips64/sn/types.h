@@ -1,4 +1,4 @@
-/* $Id: types.h,v 1.1 2000/01/13 00:17:02 ralf Exp $
+/* $Id$
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -12,12 +12,16 @@
 
 #include <linux/types.h>
 
+typedef unsigned long 	cpuid_t;
+typedef unsigned long 	cpumask_t;
+typedef unsigned long	cnodemask_t;
 typedef signed short	nasid_t;	/* node id in numa-as-id space */
 typedef signed short	cnodeid_t;	/* node id in compact-id space */
 typedef signed char	partid_t;	/* partition ID type */
 typedef signed short	moduleid_t;	/* user-visible module number type */
 typedef signed short	cmoduleid_t;	/* kernel compact module id type */
 typedef unsigned char	clusterid_t;	/* Clusterid of the cell */
+typedef unsigned long 	pfn_t;
 
 typedef dev_t		vertex_hdl_t;	/* hardware graph vertex handle */
 

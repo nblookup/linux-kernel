@@ -21,11 +21,12 @@
  *					Implemented idle timer.
  *					Added use count to neighbour.
  *                      Tomi(OH2BNS)    Fixed rose_getname().
+ *                      Arnaldo C. Melo s/suser/capable/ + micro cleanups
  */
 
 #include <linux/config.h>
-#if defined(CONFIG_ROSE) || defined(CONFIG_ROSE_MODULE)
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -55,7 +56,6 @@
 #include <linux/proc_fs.h>
 #include <net/ip.h>
 #include <net/arp.h>
-#include <linux/init.h>
 
 int rose_ndevs = 10;
 
@@ -510,10 +510,7 @@ static int rose_getsockopt(struct socket *sock, int level, int optname,
 	if (put_user(len, optlen))
 		return -EFAULT;
 
-	if (copy_to_user(optval, &val, len))
-		return -EFAULT;
-
-	return 0;
+	return copy_to_user(optval, &val, len) ? -EFAULT : 0;
 }
 
 static int rose_listen(struct socket *sock, int backlog)
@@ -695,7 +692,7 @@ static int rose_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 	source = &addr->srose_call;
 
 	if ((user = ax25_findbyuid(current->euid)) == NULL) {
-		if (ax25_uid_policy && !suser())
+		if (ax25_uid_policy && !capable(CAP_NET_BIND_SERVICE))
 			return -EACCES;
 		user = source;
 	}
@@ -1236,9 +1233,7 @@ static int rose_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			amount = sk->sndbuf - atomic_read(&sk->wmem_alloc);
 			if (amount < 0)
 				amount = 0;
-			if (put_user(amount, (unsigned int *)arg))
-				return -EFAULT;
-			return 0;
+			return put_user(amount, (unsigned int *)arg);
 		}
 
 		case TIOCINQ: {
@@ -1247,18 +1242,14 @@ static int rose_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			/* These two are safe on a single CPU system as only user tasks fiddle here */
 			if ((skb = skb_peek(&sk->receive_queue)) != NULL)
 				amount = skb->len;
-			if (put_user(amount, (unsigned int *)arg))
-				return -EFAULT;
-			return 0;
+			return put_user(amount, (unsigned int *)arg);
 		}
 
 		case SIOCGSTAMP:
 			if (sk != NULL) {
 				if (sk->stamp.tv_sec == 0)
 					return -ENOENT;
-				if (copy_to_user((void *)arg, &sk->stamp, sizeof(struct timeval)))
-					return -EFAULT;
-				return 0;
+				return copy_to_user((void *)arg, &sk->stamp, sizeof(struct timeval)) ? -EFAULT : 0;
 			}
 			return -EINVAL;
 
@@ -1284,9 +1275,7 @@ static int rose_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			struct rose_cause_struct rose_cause;
 			rose_cause.cause      = sk->protinfo.rose->cause;
 			rose_cause.diagnostic = sk->protinfo.rose->diagnostic;
-			if (copy_to_user((void *)arg, &rose_cause, sizeof(struct rose_cause_struct)))
-				return -EFAULT;
-			return 0;
+			return copy_to_user((void *)arg, &rose_cause, sizeof(struct rose_cause_struct)) ? -EFAULT : 0;
 		}
 
 		case SIOCRSSCAUSE: {
@@ -1299,7 +1288,7 @@ static int rose_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		}
 
 		case SIOCRSSL2CALL:
-			if (!suser()) return -EPERM;
+			if (!capable(CAP_NET_ADMIN)) return -EPERM;
 			if (ax25cmp(&rose_callsign, &null_ax25_address) != 0)
 				ax25_listen_release(&rose_callsign, NULL);
 			if (copy_from_user(&rose_callsign, (void *)arg, sizeof(ax25_address)))
@@ -1309,9 +1298,7 @@ static int rose_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			return 0;
 
 		case SIOCRSGL2CALL:
-			if (copy_to_user((void *)arg, &rose_callsign, sizeof(ax25_address)))
-				return -EFAULT;
-			return 0;
+			return copy_to_user((void *)arg, &rose_callsign, sizeof(ax25_address)) ? -EFAULT : 0;
 
 		case SIOCRSACCEPT:
 			if (sk->protinfo.rose->state == ROSE_STATE_5) {
@@ -1410,24 +1397,23 @@ static struct net_proto_family rose_family_ops = {
 };
 
 static struct proto_ops SOCKOPS_WRAPPED(rose_proto_ops) = {
-	PF_ROSE,
+	family:		PF_ROSE,
 
-	rose_release,
-	rose_bind,
-	rose_connect,
-	sock_no_socketpair,
-	rose_accept,
-	rose_getname,
-	datagram_poll,
-	rose_ioctl,
-	rose_listen,
-	sock_no_shutdown,
-	rose_setsockopt,
-	rose_getsockopt,
-	sock_no_fcntl,
-	rose_sendmsg,
-	rose_recvmsg,
-	sock_no_mmap
+	release:	rose_release,
+	bind:		rose_bind,
+	connect:	rose_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		rose_accept,
+	getname:	rose_getname,
+	poll:		datagram_poll,
+	ioctl:		rose_ioctl,
+	listen:		rose_listen,
+	shutdown:	sock_no_shutdown,
+	setsockopt:	rose_setsockopt,
+	getsockopt:	rose_getsockopt,
+	sendmsg:	rose_sendmsg,
+	recvmsg:	rose_recvmsg,
+	mmap:		sock_no_mmap,
 };
 
 #include <linux/smp_lock.h>
@@ -1440,7 +1426,7 @@ static struct notifier_block rose_dev_notifier = {
 
 static struct net_device *dev_rose;
 
-void __init rose_proto_init(struct net_proto *pro)
+static int __init rose_proto_init(void)
 {
 	int i;
 
@@ -1448,18 +1434,12 @@ void __init rose_proto_init(struct net_proto *pro)
 
 	if ((dev_rose = kmalloc(rose_ndevs * sizeof(struct net_device), GFP_KERNEL)) == NULL) {
 		printk(KERN_ERR "ROSE: rose_proto_init - unable to allocate device structure\n");
-		return;
+		return -1;
 	}
 
 	memset(dev_rose, 0x00, rose_ndevs * sizeof(struct net_device));
 
 	for (i = 0; i < rose_ndevs; i++) {
-		dev_rose[i].name = kmalloc(20, GFP_KERNEL);
-		if(dev_rose[i].name == NULL)
-		{
-			printk(KERN_ERR "Rose: unable to register ROSE devices.\n");
-			break;
-		}
 		sprintf(dev_rose[i].name, "rose%d", i);
 		dev_rose[i].init = rose_init;
 		register_netdev(&dev_rose[i]);
@@ -1467,7 +1447,7 @@ void __init rose_proto_init(struct net_proto *pro)
 
 	sock_register(&rose_family_ops);
 	register_netdevice_notifier(&rose_dev_notifier);
-	printk(KERN_INFO "F6FBB/G4KLX ROSE for Linux. Version 0.62 for AX25.037 Linux 2.1\n");
+	printk(KERN_INFO "F6FBB/G4KLX ROSE for Linux. Version 0.62 for AX25.037 Linux 2.4\n");
 
 	ax25_protocol_register(AX25_P_ROSE, rose_route_frame);
 	ax25_linkfail_register(rose_link_failed);
@@ -1479,15 +1459,14 @@ void __init rose_proto_init(struct net_proto *pro)
 
 	rose_add_loopback_neigh();
 
-#ifdef CONFIG_PROC_FS
 	proc_net_create("rose", 0, rose_get_info);
 	proc_net_create("rose_neigh", 0, rose_neigh_get_info);
 	proc_net_create("rose_nodes", 0, rose_nodes_get_info);
 	proc_net_create("rose_routes", 0, rose_routes_get_info);
-#endif
+	return 0;
 }
+module_init(rose_proto_init);
 
-#ifdef MODULE
 EXPORT_NO_SYMBOLS;
 
 MODULE_PARM(rose_ndevs, "i");
@@ -1496,23 +1475,14 @@ MODULE_PARM_DESC(rose_ndevs, "number of ROSE devices");
 MODULE_AUTHOR("Jonathan Naylor G4KLX <g4klx@g4klx.demon.co.uk>");
 MODULE_DESCRIPTION("The amateur radio ROSE network layer protocol");
 
-int init_module(void)
-{
-	rose_proto_init(NULL);
-
-	return 0;
-}
-
-void cleanup_module(void)
+static void __exit rose_exit(void)
 {
 	int i;
 
-#ifdef CONFIG_PROC_FS
 	proc_net_remove("rose");
 	proc_net_remove("rose_neigh");
 	proc_net_remove("rose_nodes");
 	proc_net_remove("rose_routes");
-#endif
 	rose_loopback_clear();
 
 	rose_rt_free();
@@ -1541,7 +1511,5 @@ void cleanup_module(void)
 
 	kfree(dev_rose);
 }
+module_exit(rose_exit);
 
-#endif
-
-#endif

@@ -17,13 +17,6 @@
 #include <asm/system.h>
 
 /*
- * Make sure gcc doesn't try to be clever and move things around
- * on us. We need to use _exactly_ the address the user gave us,
- * not some alias that contains the same information.
- */
-#define __atomic_fool_gcc(x) (*(volatile struct { int a[100]; } *)x)
-
-/*
  * On IA-64, counter must always be volatile to ensure that that the
  * memory accesses are ordered.
  */
@@ -44,7 +37,7 @@ ia64_atomic_add (int i, atomic_t *v)
 		CMPXCHG_BUGCHECK(v);
 		old = atomic_read(v);
 		new = old + i;
-	} while (ia64_cmpxchg(v, old, old + i, sizeof(atomic_t)) != old);
+	} while (ia64_cmpxchg("acq", v, old, old + i, sizeof(atomic_t)) != old);
 	return new;
 }
 
@@ -58,7 +51,7 @@ ia64_atomic_sub (int i, atomic_t *v)
 		CMPXCHG_BUGCHECK(v);
 		old = atomic_read(v);
 		new = old - i;
-	} while (ia64_cmpxchg(v, old, new, sizeof(atomic_t)) != old);
+	} while (ia64_cmpxchg("acq", v, old, new, sizeof(atomic_t)) != old);
 	return new;
 }
 

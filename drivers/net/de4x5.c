@@ -766,6 +766,20 @@ struct de4x5_desc {
 #define DE4X5_PKT_BIN_SZ  128            /* Should be >=100 unless you
                                             increase DE4X5_PKT_STAT_SZ */
 
+struct pkt_stats {
+	u_int bins[DE4X5_PKT_STAT_SZ];      /* Private stats counters       */
+	u_int unicast;
+	u_int multicast;
+	u_int broadcast;
+	u_int excessive_collisions;
+	u_int tx_underruns;
+	u_int excessive_underruns;
+	u_int rx_runt_frames;
+	u_int rx_collision;
+	u_int rx_dribble;
+	u_int rx_overflow;
+};
+
 struct de4x5_private {
     char adapter_name[80];                  /* Adapter name                 */
     u_long interrupt;                       /* Aligned ISR flag             */
@@ -779,19 +793,7 @@ struct de4x5_private {
     char frame[64];                         /* Min sized packet for loopback*/
     spinlock_t lock;                        /* Adapter specific spinlock    */
     struct net_device_stats stats;          /* Public stats                 */
-    struct {
-	u_int bins[DE4X5_PKT_STAT_SZ];      /* Private stats counters       */
-	u_int unicast;
-	u_int multicast;
-	u_int broadcast;
-	u_int excessive_collisions;
-	u_int tx_underruns;
-	u_int excessive_underruns;
-	u_int rx_runt_frames;
-	u_int rx_collision;
-	u_int rx_dribble;
-	u_int rx_overflow;
-    } pktStats;
+    struct pkt_stats pktStats;	            /* Private stats counters	    */
     char rxRingSize;
     char txRingSize;
     int  bus;                               /* EISA or PCI                  */
@@ -2229,7 +2231,7 @@ pci_probe(struct net_device *dev, u_long ioaddr)
 	lp->chipset = device;
 
 	/* Get the board I/O address (64 bits on sparc64) */
-	iobase = pdev->resource[0].start;
+	iobase = pci_resource_start(pdev, 0);
 
 	/* Fetch the IRQ to be used */
 	irq = pdev->irq;
@@ -2318,7 +2320,7 @@ srom_search(struct pci_dev *dev)
 	lp->chipset = device;
 
 	/* Get the board I/O address (64 bits on sparc64) */
-	iobase = this_dev->resource[0].start;
+	iobase = pci_resource_start(this_dev, 0);
 
 	/* Fetch the IRQ to be used */
 	irq = this_dev->irq;
@@ -3271,6 +3273,7 @@ srom_map_media(struct net_device *dev)
 
       case ANS:
 	lp->media = ANS;
+	lp->fdx = lp->params.fdx;
 	break;
 
       default: 
@@ -4356,12 +4359,11 @@ srom_command(u_int command, u_long addr)
 static void
 srom_address(u_int command, u_long addr, u_char offset)
 {
-    int i;
-    char a;
+    int i, a;
     
-    a = (char)(offset << 2);
+    a = offset << 2;
     for (i=0; i<6; i++, a <<= 1) {
-	srom_latch(command | ((a < 0) ? DT_IN : 0), addr);
+	srom_latch(command | ((a & 0x80) ? DT_IN : 0), addr);
     }
     de4x5_us_delay(1);
     
@@ -5639,6 +5641,7 @@ de4x5_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	break;
 
     case DE4X5_SAY_BOO:              /* Say "Boo!" to the kernel log file */
+	if (!capable(CAP_NET_ADMIN)) return -EPERM;
 	printk("%s: Boo!\n", dev->name);
 	break;
 
@@ -5650,12 +5653,16 @@ de4x5_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	break;
 
     case DE4X5_GET_STATS:            /* Get the driver statistics */
-	ioc->len = sizeof(lp->pktStats);
+    {
+        struct pkt_stats statbuf;
+	ioc->len = sizeof(statbuf);
 	spin_lock_irqsave(&lp->lock, flags);
-	if (copy_to_user(ioc->data, &lp->pktStats, ioc->len)) return -EFAULT; 
+	memcpy(&statbuf, &lp->pktStats, ioc->len);
 	spin_unlock_irqrestore(&lp->lock, flags);
+	if (copy_to_user(ioc->data, &statbuf, ioc->len)) 
+		return -EFAULT; 
 	break;
-
+    }
     case DE4X5_CLR_STATS:            /* Zero out the driver statistics */
 	if (!capable(CAP_NET_ADMIN)) return -EPERM;
 	spin_lock_irqsave(&lp->lock, flags);
@@ -5904,13 +5911,12 @@ insert_device(struct net_device *dev, u_long iobase, int (*init)(struct net_devi
 {
     struct net_device *new;
 
-    new = (struct net_device *)kmalloc(sizeof(struct net_device)+8, GFP_KERNEL);
+    new = (struct net_device *)kmalloc(sizeof(struct net_device), GFP_KERNEL);
     if (new == NULL) {
 	printk("de4x5.c: Device not initialised, insufficient memory\n");
 	return NULL;
     } else {
-	memset((char *)new, 0, sizeof(struct net_device)+8);
-	new->name = (char *)(new + 1);
+	memset((char *)new, 0, sizeof(struct net_device));
 	new->base_addr = iobase;       /* assign the io address */
 	new->init = init;              /* initialisation routine */
     }
@@ -5923,9 +5929,7 @@ insert_device(struct net_device *dev, u_long iobase, int (*init)(struct net_devi
 
 /*
  * Local variables:
- *  compile-command: "gcc -D__KERNEL__ -I/linux/include -Wall -Wstrict-prototypes -fomit-frame-pointer -fno-strength-reduce -malign-loops=2 -malign-jumps=2 -malign-functions=2 -O2 -m486 -c de4x5.c"
  *
- * Delete -D__SMP__ below if you didn't define this in your kernel
  * Delete -DMODVERSIONS below if you didn't define this in your kernel
  *
  *  compile-command: "gcc -D__KERNEL__ -DMODULE -I/linux/include -Wall -Wstrict-prototypes -fomit-frame-pointer -fno-strength-reduce -malign-loops=2 -malign-jumps=2 -malign-functions=2 -O2 -m486 -DMODVERSIONS -include /linux/include/linux/modversions.h -c de4x5.c"

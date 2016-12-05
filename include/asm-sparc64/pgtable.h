@@ -1,4 +1,4 @@
-/* $Id: pgtable.h,v 1.121 2000/03/02 20:37:41 davem Exp $
+/* $Id: pgtable.h,v 1.135 2000/11/08 04:49:24 davem Exp $
  * pgtable.h: SpitFire page table operations.
  *
  * Copyright 1996,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -18,6 +18,8 @@
 #include <asm/system.h>
 
 #ifndef __ASSEMBLY__
+
+#define PG_dcache_dirty		PG_arch_1
 
 /* Certain architectures need to do special things when pte's
  * within a page table are directly modified.  Thus, the following
@@ -56,9 +58,6 @@
 #define PTE_TABLE_SIZE	0x2000	/* 1024 entries 8 bytes each */
 #define PMD_TABLE_SIZE	0x2000	/* 2048 entries 4 bytes each */
 #define PGD_TABLE_SIZE	0x1000	/* 1024 entries 4 bytes each */
-
-/* the no. of pointers that fit on a page */
-#define PTRS_PER_PAGE	(1UL << (PAGE_SHIFT-3))
 
 /* NOTE: TLB miss handlers depend heavily upon where this is. */
 #define VMALLOC_START		0x0000000140000000UL
@@ -152,16 +151,13 @@ extern pte_t __bad_page(void);
 
 #define BAD_PAGE	__bad_page()
 
-/* First physical page can be anywhere, the following is needed so that
- * va-->pa and vice versa conversions work properly without performance
- * hit for all __pa()/__va() operations.
- */
 extern unsigned long phys_base;
-#define ZERO_PAGE(vaddr)	(mem_map + (phys_base>>PAGE_SHIFT))
+
+#define ZERO_PAGE(vaddr)	(mem_map)
 
 /* Warning: These take pointers to page structs now... */
 #define mk_pte(page, pgprot)		\
-	__pte(((page - mem_map) << PAGE_SHIFT) | pgprot_val(pgprot))
+	__pte((((page - mem_map) << PAGE_SHIFT)+phys_base) | pgprot_val(pgprot))
 #define page_pte_prot(page, prot)	mk_pte(page, prot)
 #define page_pte(page)			page_pte_prot(page, __pgprot(0))
 
@@ -180,7 +176,6 @@ extern inline pte_t pte_modify(pte_t orig_pte, pgprot_t new_prot)
 	(pmd_val(*(pmdp)) = (__pa((unsigned long) (ptep)) >> 11UL))
 #define pgd_set(pgdp, pmdp)	\
 	(pgd_val(*(pgdp)) = (__pa((unsigned long) (pmdp)) >> 11UL))
-#define pte_pagenr(pte)   ((unsigned long) ((pte_val(pte)&~PAGE_OFFSET)>>PAGE_SHIFT))
 #define pmd_page(pmd)			((unsigned long) __va((pmd_val(pmd)<<11UL)))
 #define pgd_page(pgd)			((unsigned long) __va((pgd_val(pgd)<<11UL)))
 #define pte_none(pte) 			(!pte_val(pte))
@@ -199,6 +194,7 @@ extern inline pte_t pte_modify(pte_t orig_pte, pgprot_t new_prot)
  * Undefined behaviour if not..
  */
 #define pte_read(pte)		(pte_val(pte) & _PAGE_READ)
+#define pte_exec(pte)		pte_read(pte)
 #define pte_write(pte)		(pte_val(pte) & _PAGE_WRITE)
 #define pte_dirty(pte)		(pte_val(pte) & _PAGE_MODIFIED)
 #define pte_young(pte)		(pte_val(pte) & _PAGE_ACCESSED)
@@ -211,29 +207,12 @@ extern inline pte_t pte_modify(pte_t orig_pte, pgprot_t new_prot)
 #define __page_address(page)	((page)->virtual)
 #define page_address(page)	({ __page_address(page); })
 
-#define pte_page(x) (mem_map+pte_pagenr(x))
+#define pte_page(x) (mem_map+(((pte_val(x)&_PAGE_PADDR)-phys_base)>>PAGE_SHIFT))
 
 /* Be very careful when you change these three, they are delicate. */
-static __inline__ pte_t pte_mkyoung(pte_t _pte)
-{	if(pte_val(_pte) & _PAGE_READ)
-		return __pte(pte_val(_pte)|(_PAGE_ACCESSED|_PAGE_R));
-	else
-		return __pte(pte_val(_pte)|(_PAGE_ACCESSED));
-}
-
-static __inline__ pte_t pte_mkwrite(pte_t _pte)
-{	if(pte_val(_pte) & _PAGE_MODIFIED)
-		return __pte(pte_val(_pte)|(_PAGE_WRITE|_PAGE_W));
-	else
-		return __pte(pte_val(_pte)|(_PAGE_WRITE));
-}
-
-static __inline__ pte_t pte_mkdirty(pte_t _pte)
-{	if(pte_val(_pte) & _PAGE_WRITE)
-		return __pte(pte_val(_pte)|(_PAGE_MODIFIED|_PAGE_W));
-	else
-		return __pte(pte_val(_pte)|(_PAGE_MODIFIED));
-}
+#define pte_mkyoung(pte)	(__pte(pte_val(pte) | _PAGE_ACCESSED | _PAGE_R))
+#define pte_mkwrite(pte)	(__pte(pte_val(pte) | _PAGE_WRITE))
+#define pte_mkdirty(pte)	(__pte(pte_val(pte) | _PAGE_MODIFIED | _PAGE_W))
 
 /* to find an entry in a page-table-directory. */
 #define pgd_index(address)	(((address) >> PGDIR_SHIFT) & (PTRS_PER_PGD))
@@ -256,41 +235,7 @@ extern pgd_t swapper_pg_dir[1];
 #define mmu_lockarea(vaddr, len)		(vaddr)
 #define mmu_unlockarea(vaddr, len)		do { } while(0)
 
-/* There used to be some funny code here which tried to guess which
- * TLB wanted the mapping, that wasn't accurate enough to justify it's
- * existance.  The real way to do that is to have each TLB miss handler
- * pass in a distinct code to do_sparc64_fault() and do it more accurately
- * there.
- *
- * What we do need to handle here is prevent I-cache corruption.  The
- * deal is that the I-cache snoops stores from other CPUs and all DMA
- * activity, however stores from the local processor are not snooped.
- * The dynamic linker and our signal handler mechanism take care of
- * the cases where they write into instruction space, but when a page
- * is copied in the kernel and then executed in user-space is not handled
- * right.  This leads to corruptions if things are "just right", consider
- * the following scenerio:
- * 1) Process 1 frees up a page that was used for the PLT of libc in
- *    it's address space.
- * 2) Process 2 writes into a page in the PLT of libc for the first
- *    time.  do_wp_page() copies the page locally, the local I-cache of
- *    the processor does not notice the writes during the page copy.
- *    The new page used just so happens to be the one just freed in #1.
- * 3) After the PLT write, later the cpu calls into an unresolved PLT
- *    entry, the CPU executes old instructions from process 1's PLT
- *    table.
- * 4) Splat.
- */
-extern void __flush_icache_page(unsigned long phys_page);
-#define update_mmu_cache(__vma, __address, _pte) \
-do { \
-	unsigned short __flags = ((__vma)->vm_flags); \
-	if ((__flags & VM_EXEC) != 0 && \
-	    ((pte_val(_pte) & (_PAGE_PRESENT | _PAGE_WRITE | _PAGE_MODIFIED)) == \
-	     (_PAGE_PRESENT | _PAGE_WRITE | _PAGE_MODIFIED))) { \
-		__flush_icache_page(pte_pagenr(_pte) << PAGE_SHIFT); \
-	} \
-} while(0)
+extern void update_mmu_cache(struct vm_area_struct *, unsigned long, pte_t);
 
 #define flush_icache_page(vma, pg)	do { } while(0)
 
@@ -341,8 +286,6 @@ __get_iospace (unsigned long addr)
 	return ((sun4u_get_pte (addr) & 0xf0000000) >> 28);
 }
 
-extern void * module_map (unsigned long size);
-extern void module_unmap (void *addr);
 extern unsigned long *sparc64_valid_addr_bitmap;
 
 /* Needs to be defined here and not in linux/mm.h, as it is arch dependent */
@@ -351,6 +294,8 @@ extern unsigned long *sparc64_valid_addr_bitmap;
 
 extern int io_remap_page_range(unsigned long from, unsigned long offset,
 			       unsigned long size, pgprot_t prot, int space);
+
+#include <asm-generic/pgtable.h>
 
 #endif /* !(__ASSEMBLY__) */
 

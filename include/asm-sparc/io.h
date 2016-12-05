@@ -1,5 +1,5 @@
 /*
- * $Id: io.h,v 1.25 2000/01/22 07:35:46 zaitcev Exp $
+ * $Id: io.h,v 1.28 2000/09/17 05:12:00 davem Exp $
  */
 #ifndef __SPARC_IO_H
 #define __SPARC_IO_H
@@ -47,6 +47,31 @@ extern __inline__ void writew(unsigned short b, unsigned long addr) {
 
 extern __inline__ void writel(unsigned int b, unsigned long addr) {
 	*(volatile unsigned long*)addr = flip_dword(b);
+}
+
+/* Now the 'raw' versions. */
+extern __inline__ unsigned long __raw_readb(unsigned long addr) {
+	return *(volatile unsigned char*)addr;
+}
+
+extern __inline__ unsigned long __raw_readw(unsigned long addr) {
+	return *(volatile unsigned short*)addr;
+}
+
+extern __inline__ unsigned long __raw_readl(unsigned long addr) {
+	return *(volatile unsigned long*)addr;
+}
+
+extern __inline__ void __raw_writeb(unsigned char b, unsigned long addr) {
+	*(volatile unsigned char*)addr = b;
+}
+
+extern __inline__ void __raw_writew(unsigned short b, unsigned long addr) {
+	*(volatile unsigned short*)addr = b;
+}
+
+extern __inline__ void __raw_writel(unsigned int b, unsigned long addr) {
+	*(volatile unsigned long*)addr = b;
 }
 
 /*
@@ -139,11 +164,14 @@ static inline void *sbus_memset_io(void *__dst, int c, __kernel_size_t n)
 	return (void *) dst;
 }
 
+#ifdef __KERNEL__
+
 /*
  * Bus number may be embedded in the higher bits of the physical address.
  * This is why we have no bus number argument to ioremap().
  */
 extern void *ioremap(unsigned long offset, unsigned long size);
+#define ioremap_nocache(X,Y)	ioremap((X),(Y))
 extern void iounmap(void *addr);
 
 /* P3: talk davem into dropping "name" argument in favor of res->name */
@@ -173,5 +201,7 @@ extern void sbus_iounmap(unsigned long vaddr, unsigned long size);
 #define dma_cache_inv(_start,_size)		do { } while (0)
 #define dma_cache_wback(_start,_size)		do { } while (0)
 #define dma_cache_wback_inv(_start,_size)	do { } while (0)
+
+#endif
 
 #endif /* !(__SPARC_IO_H) */

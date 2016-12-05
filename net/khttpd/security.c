@@ -113,15 +113,10 @@ struct file *OpenFileForSecurity(char *Filename)
 #endif
 	/* Rule no. 3 -- Does the file exist ? */
 
+	filp = filp_open(Filename, O_RDONLY, 0);
 	
-		
-	filp = filp_open(Filename,00,O_RDONLY);
-	
-	
-	if ((IS_ERR(filp))||(filp==NULL)||(filp->f_dentry==NULL))
-	{
+	if (IS_ERR(filp))
 		return NULL;
-	}
 
 #ifndef BENCHMARK		
 	permission = filp->f_dentry->d_inode->i_mode;

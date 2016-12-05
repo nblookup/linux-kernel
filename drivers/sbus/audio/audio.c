@@ -1,4 +1,4 @@
-/* $Id: audio.c,v 1.49 2000/02/17 05:52:41 davem Exp $
+/* $Id: audio.c,v 1.56 2000/10/19 00:50:02 davem Exp $
  * drivers/sbus/audio/audio.c
  *
  * Copyright 1996 Thomas K. Dyas (tdyas@noc.rutgers.edu)
@@ -24,6 +24,7 @@
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/smp_lock.h>
 #include <linux/mm.h>
 #include <linux/tqueue.h>
 #include <linux/major.h>
@@ -69,8 +70,9 @@ static int lis_del_from_elist( strevent_t **list, pid_t pid, short events );
 static void lis_free_elist( strevent_t **list);
 static void kill_procs( struct strevent *elist, int sig, short e);
 
-static struct sparcaudio_driver *drivers[SPARCAUDIO_MAX_DEVICES] = {NULL};
-
+static struct sparcaudio_driver *drivers[SPARCAUDIO_MAX_DEVICES];
+static devfs_handle_t devfs_handle;
+ 
 /* This crap to be pulled off into a local include file */
 #if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE < 0x20100
 
@@ -86,190 +88,9 @@ static struct sparcaudio_driver *drivers[SPARCAUDIO_MAX_DEVICES] = {NULL};
 #include <linux/poll.h>
 #define COPY_IN(arg, get) get_user(get, (int *)arg)
 #define COPY_OUT(arg, ret) put_user(ret, (int *)arg)
-#define sparcaudio_release_ret sparcaudio_release
-#define sparcaudioctl_release_ret sparcaudioctl_release
 #define sparcaudio_select sparcaudio_poll
 
 #endif
-
-int register_sparcaudio_driver(struct sparcaudio_driver *drv, int duplex)
-{
-	int i, dev;
-
-	/* If we've used up SPARCAUDIO_MAX_DEVICES, fail */
-	for (dev = 0; dev < SPARCAUDIO_MAX_DEVICES; dev++) {
-                if (drivers[dev] == NULL)
-                        break;
-	}
-
-	if (drivers[dev])
-                return -EIO;
-
-	/* Ensure that the driver has a proper operations structure. */
-	if (!drv->ops || !drv->ops->start_output || !drv->ops->stop_output ||
-	    !drv->ops->start_input || !drv->ops->stop_input)
-		return -EINVAL;
-
-        /* Setup the circular queues of output and input buffers
-         *
-         * Each buffer is a single page, but output buffers might
-         * be partially filled (by a write with count < output_buffer_size),
-         * so each output buffer also has a paired output size.
-         *
-         * Input buffers, on the other hand, always fill completely,
-         * so we don't need input counts - each contains input_buffer_size
-         * bytes of audio data.
-         *
-         * TODO: Make number of input/output buffers tunable parameters
-         */
-
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x202ff
-        init_waitqueue_head(&drv->open_wait);
-        init_waitqueue_head(&drv->output_write_wait);
-        init_waitqueue_head(&drv->output_drain_wait);
-        init_waitqueue_head(&drv->input_read_wait);
-#endif
-
-        drv->num_output_buffers = 8;
-	drv->output_buffer_size = (4096 * 2);
-	drv->playing_count = 0;
-	drv->output_offset = 0;
-	drv->output_eof = 0;
-        drv->output_front = 0;
-        drv->output_rear = 0;
-        drv->output_count = 0;
-        drv->output_active = 0;
-        drv->output_buffers = kmalloc(drv->num_output_buffers * 
-				      sizeof(__u8 *), GFP_KERNEL);
-        drv->output_sizes = kmalloc(drv->num_output_buffers * 
-				    sizeof(size_t), GFP_KERNEL);
-        drv->output_notify = kmalloc(drv->num_output_buffers * 
-				    sizeof(char), GFP_KERNEL);
-        if (!drv->output_buffers || !drv->output_sizes || !drv->output_notify)
-                goto kmalloc_failed1;
-
-	drv->output_buffer = kmalloc((drv->output_buffer_size * 
-                                      drv->num_output_buffers),
-                                     GFP_KERNEL);
-	if (!drv->output_buffer)
-                goto kmalloc_failed2;
-
-        /* Allocate the pages for each output buffer. */
-        for (i = 0; i < drv->num_output_buffers; i++) {
-	        drv->output_buffers[i] = (void *)(drv->output_buffer + 
-                                                  (i * drv->output_buffer_size));
-		drv->output_sizes[i] = 0;
-		drv->output_notify[i] = 0;
-        }
-
-        /* Setup the circular queue of input buffers. */
-        drv->num_input_buffers = 8;
-	drv->input_buffer_size = (4096 * 2);
-	drv->recording_count = 0;
-        drv->input_front = 0;
-        drv->input_rear = 0;
-        drv->input_count = 0;
-	drv->input_offset = 0;
-        drv->input_size = 0;
-        drv->input_active = 0;
-        drv->input_buffers = kmalloc(drv->num_input_buffers * sizeof(__u8 *),
-				     GFP_KERNEL);
-        drv->input_sizes = kmalloc(drv->num_input_buffers * 
-                                   sizeof(size_t), GFP_KERNEL);
-        if (!drv->input_buffers || !drv->input_sizes)
-                goto kmalloc_failed3;
-
-        /* Allocate the pages for each input buffer. */
-	if (duplex == 1) {
-                drv->input_buffer = kmalloc((drv->input_buffer_size * 
-                                             drv->num_input_buffers), 
-                                            GFP_DMA);
-                if (!drv->input_buffer)
-                        goto kmalloc_failed4;
-
-                for (i = 0; i < drv->num_input_buffers; i++)
-                        drv->input_buffers[i] = (void *)(drv->input_buffer + 
-                                                         (i * drv->input_buffer_size));
-	} else {
-                if (duplex == 2) {
-                        drv->input_buffer = drv->output_buffer;
-                        drv->input_buffer_size = drv->output_buffer_size;
-                        drv->num_input_buffers = drv->num_output_buffers;
-                        for (i = 0; i < drv->num_input_buffers; i++) 
-                                drv->input_buffers[i] = drv->output_buffers[i];
-                } else {
-                        for (i = 0; i < drv->num_input_buffers; i++) 
-                                drv->input_buffers[i] = NULL;
-                }
-	}
-
-	/* Take note of our duplexity */
-	drv->duplex = duplex;
-
-	/* Ensure that the driver is marked as not being open. */
-	drv->flags = 0;
-
-	MOD_INC_USE_COUNT;
-
-	/* Take driver slot, note which we took */
-	drv->index = dev;
-	drivers[dev] = drv;
-
-	return 0;
-
-kmalloc_failed4:
-	kfree(drv->input_buffer);
-
-kmalloc_failed3:
-        if (drv->input_sizes)
-                kfree(drv->input_sizes);
-        if (drv->input_buffers)
-                kfree(drv->input_buffers);
-        i = drv->num_output_buffers;
-
-kmalloc_failed2:
-	kfree(drv->output_buffer);
-
-kmalloc_failed1:
-        if (drv->output_buffers)
-                kfree(drv->output_buffers);
-        if (drv->output_sizes)
-                kfree(drv->output_sizes);
-        if (drv->output_notify)
-                kfree(drv->output_notify);
-
-        return -ENOMEM;
-}
-
-int unregister_sparcaudio_driver(struct sparcaudio_driver *drv, int duplex)
-{
-	/* Figure out which driver is unregistering */
-	if (drivers[drv->index] != drv)
-		return -EIO;
-
-	/* Deallocate the queue of output buffers. */
-	kfree(drv->output_buffer);
-	kfree(drv->output_buffers);
-	kfree(drv->output_sizes);
-	kfree(drv->output_notify);
-
-	/* Deallocate the queue of input buffers. */
-	if (duplex == 1) {
-                kfree(drv->input_buffer);
-                kfree(drv->input_sizes);
-	}
-	kfree(drv->input_buffers);
-
-	if (&(drv->sd_siglist) != NULL)
-                lis_free_elist( &(drv->sd_siglist) );
-
-	MOD_DEC_USE_COUNT;
-
-	/* Null the appropriate driver */
-	drivers[drv->index] = NULL;
-
-	return 0;
-}
 
 void sparcaudio_output_done(struct sparcaudio_driver * drv, int status)
 {
@@ -1945,24 +1766,10 @@ static int sparcaudio_ioctl(struct inode * inode, struct file * file,
 	return retval;
 }
 
-static int sparcaudioctl_release_ret(struct inode * inode, struct file * file)
-{
-        MOD_DEC_USE_COUNT;
-        return 0;
-}
-
-/* For 2.0 kernels */
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE < 0x20100
-static void sparcaudioctl_release(struct inode * inode, struct file * file)
-{
-        sparcaudioctl_release_ret(inode, file);
-}
-#endif
-
 static struct file_operations sparcaudioctl_fops = {
+	owner:		THIS_MODULE,
 	poll:		sparcaudio_select,
 	ioctl:		sparcaudio_ioctl,
-	release:	sparcaudioctl_release,
 };
 
 static int sparcaudio_open(struct inode * inode, struct file * file)
@@ -2095,17 +1902,16 @@ static int sparcaudio_open(struct inode * inode, struct file * file)
                 }          
         }
 
-	MOD_INC_USE_COUNT;
-
 	/* Success! */
 	return 0;
 }
 
-static int sparcaudio_release_ret(struct inode * inode, struct file * file)
+static int sparcaudio_release(struct inode * inode, struct file * file)
 {
         struct sparcaudio_driver *drv = drivers[(MINOR(inode->i_rdev) >>
                                                  SPARCAUDIO_DEVICE_SHIFT)];
 
+	lock_kernel();
         if (file->f_mode & FMODE_READ) {
                 /* Stop input */
                 drv->ops->stop_input(drv);
@@ -2146,22 +1952,14 @@ static int sparcaudio_release_ret(struct inode * inode, struct file * file)
         /* Status changed. Signal control device */
         kill_procs(drv->sd_siglist,SIGPOLL,S_MSG);
 
-        MOD_DEC_USE_COUNT;
-
         wake_up_interruptible(&drv->open_wait);
+	unlock_kernel();
 
         return 0;
 }
 
-/* For 2.0 kernels */
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE < 0x20100
-static void sparcaudio_release(struct inode * inode, struct file * file)
-{
-        sparcaudio_release_ret(inode, file);
-}
-#endif
-
 static struct file_operations sparcaudio_fops = {
+	owner:		THIS_MODULE,
 	llseek:		sparcaudio_lseek,
 	read:		sparcaudio_read,
 	write:		sparcaudio_write,
@@ -2171,36 +1969,241 @@ static struct file_operations sparcaudio_fops = {
 	release:	sparcaudio_release,
 };
 
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE < 0x20100
-static struct symbol_table sparcaudio_syms = {
-#include <linux/symtab_begin.h>
-	X(register_sparcaudio_driver),
-	X(unregister_sparcaudio_driver),
-	X(sparcaudio_output_done),
-	X(sparcaudio_input_done),
-#include <linux/symtab_end.h>
+static struct {
+	unsigned short minor;
+	char *name;
+	umode_t mode;
+} dev_list[] = {
+	{ SPARCAUDIO_MIXER_MINOR, "mixer", S_IWUSR | S_IRUGO },
+	{ SPARCAUDIO_DSP_MINOR, "dsp", S_IWUGO | S_IRUSR | S_IRGRP },
+	{ SPARCAUDIO_AUDIO_MINOR, "audio", S_IWUGO | S_IRUSR | S_IRGRP },
+	{ SPARCAUDIO_DSP16_MINOR, "dspW", S_IWUGO | S_IRUSR | S_IRGRP },
+	{ SPARCAUDIO_STATUS_MINOR, "status", S_IRUGO },
+	{ SPARCAUDIO_AUDIOCTL_MINOR, "audioctl", S_IRUGO }
 };
-#else
+
+static void sparcaudio_mkname (char *buf, char *name, int dev)
+{
+        if (dev)
+                sprintf (buf, "%s%d", name, dev);
+        else
+                sprintf (buf, "%s", name);
+}
+
+int register_sparcaudio_driver(struct sparcaudio_driver *drv, int duplex)
+{
+	int i, dev;
+	unsigned short minor;
+	char name_buf[32];
+
+	/* If we've used up SPARCAUDIO_MAX_DEVICES, fail */
+	for (dev = 0; dev < SPARCAUDIO_MAX_DEVICES; dev++) {
+                if (drivers[dev] == NULL)
+                        break;
+	}
+
+	if (drivers[dev])
+                return -EIO;
+
+	/* Ensure that the driver has a proper operations structure. */
+	if (!drv->ops || !drv->ops->start_output || !drv->ops->stop_output ||
+	    !drv->ops->start_input || !drv->ops->stop_input)
+		return -EINVAL;
+
+        /* Register ourselves with devfs */
+	for (i=0; i < sizeof (dev_list) / sizeof (*dev_list); i++) {
+		sparcaudio_mkname (name_buf, dev_list[i].name, dev);
+		minor = (dev << SPARCAUDIO_DEVICE_SHIFT) | dev_list[i].minor;
+		devfs_register (devfs_handle, name_buf, DEVFS_FL_NONE,
+				SOUND_MAJOR, minor, S_IFCHR | dev_list[i].mode,
+				&sparcaudio_fops, NULL);
+	}
+
+        /* Setup the circular queues of output and input buffers
+         *
+         * Each buffer is a single page, but output buffers might
+         * be partially filled (by a write with count < output_buffer_size),
+         * so each output buffer also has a paired output size.
+         *
+         * Input buffers, on the other hand, always fill completely,
+         * so we don't need input counts - each contains input_buffer_size
+         * bytes of audio data.
+         *
+         * TODO: Make number of input/output buffers tunable parameters
+         */
+
+#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE > 0x202ff
+        init_waitqueue_head(&drv->open_wait);
+        init_waitqueue_head(&drv->output_write_wait);
+        init_waitqueue_head(&drv->output_drain_wait);
+        init_waitqueue_head(&drv->input_read_wait);
+#endif
+
+        drv->num_output_buffers = 8;
+	drv->output_buffer_size = (4096 * 2);
+	drv->playing_count = 0;
+	drv->output_offset = 0;
+	drv->output_eof = 0;
+        drv->output_front = 0;
+        drv->output_rear = 0;
+        drv->output_count = 0;
+        drv->output_active = 0;
+        drv->output_buffers = kmalloc(drv->num_output_buffers * 
+				      sizeof(__u8 *), GFP_KERNEL);
+        drv->output_sizes = kmalloc(drv->num_output_buffers * 
+				    sizeof(size_t), GFP_KERNEL);
+        drv->output_notify = kmalloc(drv->num_output_buffers * 
+				    sizeof(char), GFP_KERNEL);
+        if (!drv->output_buffers || !drv->output_sizes || !drv->output_notify)
+                goto kmalloc_failed1;
+
+	drv->output_buffer = kmalloc((drv->output_buffer_size * 
+                                      drv->num_output_buffers),
+                                     GFP_KERNEL);
+	if (!drv->output_buffer)
+                goto kmalloc_failed2;
+
+        /* Allocate the pages for each output buffer. */
+        for (i = 0; i < drv->num_output_buffers; i++) {
+	        drv->output_buffers[i] = (void *)(drv->output_buffer + 
+                                                  (i * drv->output_buffer_size));
+		drv->output_sizes[i] = 0;
+		drv->output_notify[i] = 0;
+        }
+
+        /* Setup the circular queue of input buffers. */
+        drv->num_input_buffers = 8;
+	drv->input_buffer_size = (4096 * 2);
+	drv->recording_count = 0;
+        drv->input_front = 0;
+        drv->input_rear = 0;
+        drv->input_count = 0;
+	drv->input_offset = 0;
+        drv->input_size = 0;
+        drv->input_active = 0;
+        drv->input_buffers = kmalloc(drv->num_input_buffers * sizeof(__u8 *),
+				     GFP_KERNEL);
+        drv->input_sizes = kmalloc(drv->num_input_buffers * 
+                                   sizeof(size_t), GFP_KERNEL);
+        if (!drv->input_buffers || !drv->input_sizes)
+                goto kmalloc_failed3;
+
+        /* Allocate the pages for each input buffer. */
+	if (duplex == 1) {
+                drv->input_buffer = kmalloc((drv->input_buffer_size * 
+                                             drv->num_input_buffers), 
+                                            GFP_DMA);
+                if (!drv->input_buffer)
+                        goto kmalloc_failed4;
+
+                for (i = 0; i < drv->num_input_buffers; i++)
+                        drv->input_buffers[i] = (void *)(drv->input_buffer + 
+                                                         (i * drv->input_buffer_size));
+	} else {
+                if (duplex == 2) {
+                        drv->input_buffer = drv->output_buffer;
+                        drv->input_buffer_size = drv->output_buffer_size;
+                        drv->num_input_buffers = drv->num_output_buffers;
+                        for (i = 0; i < drv->num_input_buffers; i++) 
+                                drv->input_buffers[i] = drv->output_buffers[i];
+                } else {
+                        for (i = 0; i < drv->num_input_buffers; i++) 
+                                drv->input_buffers[i] = NULL;
+                }
+	}
+
+	/* Take note of our duplexity */
+	drv->duplex = duplex;
+
+	/* Ensure that the driver is marked as not being open. */
+	drv->flags = 0;
+
+	MOD_INC_USE_COUNT;
+
+	/* Take driver slot, note which we took */
+	drv->index = dev;
+	drivers[dev] = drv;
+
+	return 0;
+
+kmalloc_failed4:
+	kfree(drv->input_buffer);
+
+kmalloc_failed3:
+        if (drv->input_sizes)
+                kfree(drv->input_sizes);
+        if (drv->input_buffers)
+                kfree(drv->input_buffers);
+        i = drv->num_output_buffers;
+
+kmalloc_failed2:
+	kfree(drv->output_buffer);
+
+kmalloc_failed1:
+        if (drv->output_buffers)
+                kfree(drv->output_buffers);
+        if (drv->output_sizes)
+                kfree(drv->output_sizes);
+        if (drv->output_notify)
+                kfree(drv->output_notify);
+
+        return -ENOMEM;
+}
+
+int unregister_sparcaudio_driver(struct sparcaudio_driver *drv, int duplex)
+{
+	devfs_handle_t de;
+	int i;
+	char name_buf[32];
+
+	/* Figure out which driver is unregistering */
+	if (drivers[drv->index] != drv)
+		return -EIO;
+
+	/* Deallocate the queue of output buffers. */
+	kfree(drv->output_buffer);
+	kfree(drv->output_buffers);
+	kfree(drv->output_sizes);
+	kfree(drv->output_notify);
+
+	/* Deallocate the queue of input buffers. */
+	if (duplex == 1) {
+                kfree(drv->input_buffer);
+                kfree(drv->input_sizes);
+	}
+	kfree(drv->input_buffers);
+
+	if (&(drv->sd_siglist) != NULL)
+                lis_free_elist( &(drv->sd_siglist) );
+
+	/* Unregister ourselves with devfs */
+	for (i=0; i < sizeof (dev_list) / sizeof (*dev_list); i++) {
+		sparcaudio_mkname (name_buf, dev_list[i].name, drv->index);
+		de = devfs_find_handle (devfs_handle, name_buf, 0, 0,
+					DEVFS_SPECIAL_CHR, 0);
+		devfs_unregister (de);
+	}
+
+	MOD_DEC_USE_COUNT;
+
+	/* Null the appropriate driver */
+	drivers[drv->index] = NULL;
+
+	return 0;
+}
+
 EXPORT_SYMBOL(register_sparcaudio_driver);
 EXPORT_SYMBOL(unregister_sparcaudio_driver);
 EXPORT_SYMBOL(sparcaudio_output_done);
 EXPORT_SYMBOL(sparcaudio_input_done);
-#endif
 
-#ifdef MODULE
-int init_module(void)
-#else
-int __init sparcaudio_init(void)
-#endif
+static int __init sparcaudio_init(void)
 {
-#if defined (LINUX_VERSION_CODE) && LINUX_VERSION_CODE < 0x20100
-	/* Export symbols for use by the low-level drivers. */
-	register_symtab(&sparcaudio_syms);
-#endif
-
 	/* Register our character device driver with the VFS. */
 	if (devfs_register_chrdev(SOUND_MAJOR, "sparcaudio", &sparcaudio_fops))
 		return -EIO;
+
+	devfs_handle = devfs_mk_dir (NULL, "sound", NULL);
 	
 #ifdef CONFIG_SPARCAUDIO_AMD7930
 	amd7930_init();
@@ -2218,12 +2221,14 @@ int __init sparcaudio_init(void)
 	return 0;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit sparcaudio_exit(void)
 {
 	devfs_unregister_chrdev(SOUND_MAJOR, "sparcaudio");
+	devfs_unregister (devfs_handle);
 }
-#endif
+
+module_init(sparcaudio_init)
+module_exit(sparcaudio_exit)
 
 /*
  * Code from Linux Streams, Copyright 1995 by

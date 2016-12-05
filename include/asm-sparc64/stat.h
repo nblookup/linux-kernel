@@ -1,4 +1,4 @@
-/* $Id: stat.h,v 1.6 1999/12/21 14:09:48 jj Exp $ */
+/* $Id: stat.h,v 1.7 2000/08/04 05:35:55 davem Exp $ */
 #ifndef _SPARC64_STAT_H
 #define _SPARC64_STAT_H
 
@@ -48,9 +48,9 @@ struct stat {
 struct stat64 {
 	unsigned char	__pad0[6];
 	unsigned short	st_dev;
-	unsigned char	__pad1[4];
 
-	unsigned int	st_ino;
+	unsigned long long	st_ino;
+
 	unsigned int	st_mode;
 	unsigned int	st_nlink;
 

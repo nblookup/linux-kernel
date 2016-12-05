@@ -1,4 +1,4 @@
-/* $Id: sys_sunos.c,v 1.114 2000/03/07 22:27:27 davem Exp $
+/* $Id: sys_sunos.c,v 1.130 2000/08/12 13:25:41 davem Exp $
  * sys_sunos.c: SunOS specific syscall compatibility support.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -50,6 +50,7 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/nfs.h>
+#include <linux/nfs2.h>
 #include <linux/nfs_mount.h>
 
 /* for sunos_select */
@@ -67,9 +68,6 @@ asmlinkage unsigned long sunos_mmap(unsigned long addr, unsigned long len,
 	struct file * file = NULL;
 	unsigned long retval, ret_type;
 
-	down(&current->mm->mmap_sem);
-	lock_kernel();
-	current->personality |= PER_BSD;
 	if(flags & MAP_NORESERVE) {
 		static int cnt;
 		if (cnt++ < 10)
@@ -91,7 +89,7 @@ asmlinkage unsigned long sunos_mmap(unsigned long addr, unsigned long len,
 	 * of /dev/zero, transform it into an anonymous mapping.
 	 * SunOS is so stupid some times... hmph!
 	 */
-	if(file->f_dentry && file->f_dentry->d_inode) {
+	if (file) {
 		if(MAJOR(file->f_dentry->d_inode->i_rdev) == MEM_MAJOR &&
 		   MINOR(file->f_dentry->d_inode->i_rdev) == 5) {
 			flags |= MAP_ANONYMOUS;
@@ -118,7 +116,9 @@ asmlinkage unsigned long sunos_mmap(unsigned long addr, unsigned long len,
 	}
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+	down(&current->mm->mmap_sem);
 	retval = do_mmap(file, addr, len, prot, flags, off);
+	up(&current->mm->mmap_sem);
 	if(!ret_type)
 		retval = ((retval < PAGE_OFFSET) ? 0 : retval);
 
@@ -126,8 +126,6 @@ out_putf:
 	if (file)
 		fput(file);
 out:
-	unlock_kernel();
-	up(&current->mm->mmap_sem);
 	return retval;
 }
 
@@ -170,7 +168,7 @@ asmlinkage int sunos_brk(unsigned long brk)
 	 */
 	if (brk <= current->mm->brk) {
 		current->mm->brk = brk;
-		do_munmap(newbrk, oldbrk-newbrk);
+		do_munmap(current->mm, newbrk, oldbrk-newbrk);
 		goto out;
 	}
 	/*
@@ -267,86 +265,6 @@ asmlinkage void sunos_vadvise(unsigned long strategy)
 	unlock_kernel();
 }
 
-/* Same as vadvise, and just as bogus, but for a range of virtual
- * process address space.
- */
-#define MADV_NORMAL      0 /* Nothing special... */
-#define MADV_RANDOM      1 /* I am emacs... */
-#define MADV_SEQUENTIAL  2 /* I am researcher code... */
-#define MADV_WILLNEED    3 /* Pages in this range will be needed */
-#define MADV_DONTNEED    4 /* Pages in this range won't be needed */
-
-static char *mstrings[] = {
-	"MADV_NORMAL",
-	"MADV_RANDOM",
-	"MADV_SEQUENTIAL",
-	"MADV_WILLNEED",
-	"MADV_DONTNEED",
-};
-
-asmlinkage void sunos_madvise(unsigned long address, unsigned long len,
-			      unsigned long strategy)
-{
-	/* I wanna see who uses this... */
-	lock_kernel();
-	printk("%s: Advises us to use %s paging strategy for addr<%08lx> len<%08lx>\n",
-	       current->comm,
-	       strategy <= 4 ? mstrings[strategy] : "BOGUS",
-	       address, len);
-	unlock_kernel();
-}
-
-/* Places into character array, the status of all the pages in the passed
- * range from 'addr' to 'addr + len'.  -1 on failure, 0 on success...
- * The encoding in each character is:
- * low-bit is zero == Page is not in physical ram right now
- * low-bit is one  == Page is currently residing in core
- * All other bits are undefined within the character so there...
- * Also, if you try to get stats on an area outside of the user vm area
- * *or* the passed base address is not aligned on a page boundary you
- * get an error.
- */
-asmlinkage int sunos_mincore(unsigned long addr, unsigned long len, char *array)
-{
-	pgd_t *pgdp;
-	pmd_t *pmdp;
-	pte_t *ptep;
-	unsigned long limit;
-	int num_pages, pnum, retval = -EINVAL;
-
-	lock_kernel();
-	if(addr & ~(PAGE_MASK))
-		goto out;
-
-	num_pages = (len / PAGE_SIZE);
-	retval = -EFAULT;
-	if(verify_area(VERIFY_WRITE, array, num_pages))
-		goto out;
-	retval = -ENOMEM;
-	if((addr >= PAGE_OFFSET) || ((addr + len) > PAGE_OFFSET))
-		goto out; /* I'm sure you're curious about kernel mappings.. */
-
-	/* Wheee, go through pte's */
-	pnum = 0;
-	for(limit = addr + len; addr < limit; addr += PAGE_SIZE, pnum++) {
-		pgdp = pgd_offset(current->mm, addr);
-		if(pgd_none(*pgdp))
-			goto out; /* As per SunOS manpage */
-		pmdp = pmd_offset(pgdp, addr);
-		if(pmd_none(*pmdp))
-			goto out; /* As per SunOS manpage */
-		ptep = pte_offset(pmdp, addr);
-		if(pte_none(*ptep))
-			goto out; /* As per SunOS manpage */
-		/* Page in core or Swapped page? */
-		__put_user((pte_present(*ptep) ? 1 : 0), &array[pnum]);
-	}
-	retval = 0; /* Success... I think... */
-out:
-	unlock_kernel();
-	return retval;
-}
-
 /* This just wants the soft limit (ie. rlim_cur element) of the RLIMIT_NOFILE
  * resource limit and is for backwards compatibility with older sunos
  * revs.
@@ -404,7 +322,7 @@ struct sunos_dirent_callback {
 #define ROUND_UP(x) (((x)+sizeof(long)-1) & ~(sizeof(long)-1))
 
 static int sunos_filldir(void * __buf, const char * name, int namlen,
-			 off_t offset, ino_t ino)
+			 off_t offset, ino_t ino, unsigned int d_type)
 {
 	struct sunos_dirent * dirent;
 	struct sunos_dirent_callback * buf = (struct sunos_dirent_callback *) __buf;
@@ -443,7 +361,6 @@ asmlinkage int sunos_getdents(unsigned int fd, void * dirent, int cnt)
 	if (!file)
 		goto out;
 
-	lock_kernel();
 	error = -EINVAL;
 	if (cnt < (sizeof(struct sunos_dirent) + 255))
 		goto out_putf;
@@ -465,7 +382,6 @@ asmlinkage int sunos_getdents(unsigned int fd, void * dirent, int cnt)
 	}
 
 out_putf:
-	unlock_kernel();
 	fput(file);
 out:
 	return error;
@@ -487,7 +403,7 @@ struct sunos_direntry_callback {
 };
 
 static int sunos_filldirentry(void * __buf, const char * name, int namlen,
-			      off_t offset, ino_t ino)
+			      off_t offset, ino_t ino, unsigned int d_type)
 {
 	struct sunos_direntry * dirent;
 	struct sunos_direntry_callback * buf = (struct sunos_direntry_callback *) __buf;
@@ -524,7 +440,6 @@ asmlinkage int sunos_getdirentries(unsigned int fd, void * dirent, int cnt, unsi
 	if (!file)
 		goto out;
 
-	lock_kernel();
 	error = -EINVAL;
 	if(cnt < (sizeof(struct sunos_direntry) + 255))
 		goto out_putf;
@@ -546,7 +461,6 @@ asmlinkage int sunos_getdirentries(unsigned int fd, void * dirent, int cnt, unsi
 	}
 
 out_putf:
-	unlock_kernel();
 	fput(file);
 out:
 	return error;
@@ -607,7 +521,6 @@ asmlinkage int sunos_fpathconf(int fd, int name)
 {
 	int ret;
 
-	lock_kernel();
 	switch(name) {
 	case _PCONF_LINK:
 		ret = LINK_MAX;
@@ -638,7 +551,6 @@ asmlinkage int sunos_fpathconf(int fd, int name)
 		ret = -EINVAL;
 		break;
 	}
-	unlock_kernel();
 	return ret;
 }
 
@@ -646,9 +558,7 @@ asmlinkage int sunos_pathconf(char *path, int name)
 {
 	int ret;
 
-	lock_kernel();
 	ret = sunos_fpathconf(0, name); /* XXX cheese XXX */
-	unlock_kernel();
 	return ret;
 }
 
@@ -661,8 +571,6 @@ asmlinkage int sunos_select(int width, fd_set *inp, fd_set *outp, fd_set *exp, s
 	int ret;
 
 	/* SunOS binaries expect that select won't change the tvp contents */
-	lock_kernel();
-	current->personality |= STICKY_TIMEOUTS;
 	ret = sys_select (width, inp, outp, exp, tvp);
 	if (ret == -EINTR && tvp) {
 		time_t sec, usec;
@@ -673,7 +581,6 @@ asmlinkage int sunos_select(int width, fd_set *inp, fd_set *outp, fd_set *exp, s
 		if (sec == 0 && usec == 0)
 			ret = 0;
 	}
-	unlock_kernel();
 	return ret;
 }
 
@@ -713,10 +620,8 @@ struct sunos_nfs_mount_args {
 };
 
 
-extern int do_mount(struct block_device *, const char *, const char *, char *, int, void *);
 extern dev_t get_unnamed_dev(void);
 extern void put_unnamed_dev(dev_t);
-extern asmlinkage int sys_mount(char *, char *, char *, unsigned long, void *);
 extern asmlinkage int sys_connect(int fd, struct sockaddr *uservaddr, int addrlen);
 extern asmlinkage int sys_socket(int family, int type, int protocol);
 extern asmlinkage int sys_bind(int fd, struct sockaddr *umyaddr, int addrlen);
@@ -740,8 +645,8 @@ sunos_nfs_get_server_fd (int fd, struct sockaddr_in *addr)
 	file = fget(fd);
 	if (!file)
 		goto out;
-	if (!file->f_dentry || !(inode = file->f_dentry->d_inode))
-		goto out_putf;
+
+	inode = file->f_dentry->d_inode;
 
 	socket = &inode->u.socket_i;
 	local.sin_family = AF_INET;
@@ -782,13 +687,12 @@ static int get_default (int value, int def_value)
 	return def_value;
 }
 
-asmlinkage int sunos_nfs_mount(char *dir_name, int linux_flags, void *data)
+static int sunos_nfs_mount(char *dir_name, int linux_flags, void *data)
 {
-	int  ret = -ENODEV;
 	int  server_fd;
 	char *the_name;
 	struct nfs_mount_data linux_nfs_mount;
-	struct sunos_nfs_mount_args *sunos_mount = data;
+	struct sunos_nfs_mount_args sunos_mount;
 
 	/* Ok, here comes the fun part: Linux's nfs mount needs a
 	 * socket connection to the server, but SunOS mount does not
@@ -796,33 +700,42 @@ asmlinkage int sunos_nfs_mount(char *dir_name, int linux_flags, void *data)
 	 * address to create a socket and bind it to a reserved
 	 * port on this system
 	 */
+	if (copy_from_user(&sunos_mount, data, sizeof(sunos_mount)))
+		return -EFAULT;
+
 	server_fd = sys_socket (AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (server_fd < 0)
 		return -ENXIO;
 
-	if (!sunos_nfs_get_server_fd (server_fd, sunos_mount->addr)){
+	if (copy_from_user(&linux_nfs_mount.addr,sunos_mount.addr,
+				sizeof(*sunos_mount.addr)) ||
+	    copy_from_user(&linux_nfs_mount.root,sunos_mount.fh,
+				sizeof(*sunos_mount.fh))) {
+		sys_close (server_fd);
+		return -EFAULT;
+	}
+
+	if (!sunos_nfs_get_server_fd (server_fd, &linux_nfs_mount.addr)){
 		sys_close (server_fd);
 		return -ENXIO;
 	}
 
 	/* Now, bind it to a locally reserved port */
 	linux_nfs_mount.version  = NFS_MOUNT_VERSION;
-	linux_nfs_mount.flags    = sunos_mount->flags;
-	linux_nfs_mount.addr     = *sunos_mount->addr;
-	linux_nfs_mount.root     = *sunos_mount->fh;
+	linux_nfs_mount.flags    = sunos_mount.flags;
 	linux_nfs_mount.fd       = server_fd;
 	
-	linux_nfs_mount.rsize    = get_default (sunos_mount->rsize, 8192);
-	linux_nfs_mount.wsize    = get_default (sunos_mount->wsize, 8192);
-	linux_nfs_mount.timeo    = get_default (sunos_mount->timeo, 10);
-	linux_nfs_mount.retrans  = sunos_mount->retrans;
+	linux_nfs_mount.rsize    = get_default (sunos_mount.rsize, 8192);
+	linux_nfs_mount.wsize    = get_default (sunos_mount.wsize, 8192);
+	linux_nfs_mount.timeo    = get_default (sunos_mount.timeo, 10);
+	linux_nfs_mount.retrans  = sunos_mount.retrans;
 	
-	linux_nfs_mount.acregmin = sunos_mount->acregmin;
-	linux_nfs_mount.acregmax = sunos_mount->acregmax;
-	linux_nfs_mount.acdirmin = sunos_mount->acdirmin;
-	linux_nfs_mount.acdirmax = sunos_mount->acdirmax;
+	linux_nfs_mount.acregmin = sunos_mount.acregmin;
+	linux_nfs_mount.acregmax = sunos_mount.acregmax;
+	linux_nfs_mount.acdirmin = sunos_mount.acdirmin;
+	linux_nfs_mount.acdirmax = sunos_mount.acdirmax;
 
-	the_name = getname(sunos_mount->hostname);
+	the_name = getname(sunos_mount.hostname);
 	if(IS_ERR(the_name))
 		return PTR_ERR(the_name);
 
@@ -830,7 +743,7 @@ asmlinkage int sunos_nfs_mount(char *dir_name, int linux_flags, void *data)
 	linux_nfs_mount.hostname [255] = 0;
 	putname (the_name);
 	
-	return do_mount (NULL, "", dir_name, "nfs", linux_flags, &linux_nfs_mount);
+	return do_mount ("", dir_name, "nfs", linux_flags, &linux_nfs_mount);
 }
 
 asmlinkage int
@@ -839,6 +752,7 @@ sunos_mount(char *type, char *dir, int flags, void *data)
 	int linux_flags = MS_MGC_MSK; /* new semantics */
 	int ret = -EINVAL;
 	char *dev_fname = 0;
+	char *dir_page, *type_page;
 
 	if (!capable (CAP_SYS_ADMIN))
 		return -EPERM;
@@ -858,24 +772,44 @@ sunos_mount(char *type, char *dir, int flags, void *data)
 		linux_flags |= MS_RDONLY;
 	if(flags & SMNT_NOSUID)
 		linux_flags |= MS_NOSUID;
-	if(strcmp(type, "ext2") == 0) {
-		dev_fname = (char *) data;
-	} else if(strcmp(type, "iso9660") == 0) {
-		dev_fname = (char *) data;
-	} else if(strcmp(type, "minix") == 0) {
-		dev_fname = (char *) data;
-	} else if(strcmp(type, "nfs") == 0) {
-		ret = sunos_nfs_mount (dir, flags, data);
+
+	dir_page = getname(dir);
+	ret = PTR_ERR(dir_page);
+	if (IS_ERR(dir_page))
 		goto out;
-        } else if(strcmp(type, "ufs") == 0) {
+
+	type_page = getname(type);
+	ret = PTR_ERR(type_page);
+	if (IS_ERR(type_page))
+		goto out1;
+
+	if(strcmp(type_page, "ext2") == 0) {
+		dev_fname = getname(data);
+	} else if(strcmp(type_page, "iso9660") == 0) {
+		dev_fname = getname(data);
+	} else if(strcmp(type_page, "minix") == 0) {
+		dev_fname = getname(data);
+	} else if(strcmp(type_page, "nfs") == 0) {
+		ret = sunos_nfs_mount (dir_page, flags, data);
+		goto out2;
+        } else if(strcmp(type_page, "ufs") == 0) {
 		printk("Warning: UFS filesystem mounts unsupported.\n");
 		ret = -ENODEV;
-		goto out;
-	} else if(strcmp(type, "proc")) {
+		goto out2;
+	} else if(strcmp(type_page, "proc")) {
 		ret = -ENODEV;
-		goto out;
+		goto out2;
 	}
-	ret = sys_mount(dev_fname, dir, type, linux_flags, NULL);
+	ret = PTR_ERR(dev_fname);
+	if (IS_ERR(dev_fname))
+		goto out2;
+	ret = do_mount(dev_fname, dir_page, type_page, linux_flags, NULL);
+	if (dev_fname)
+		putname(dev_fname);
+out2:
+	putname(type_page);
+out1:
+	putname(dir_page);
 out:
 	unlock_kernel();
 	return ret;
@@ -889,7 +823,6 @@ asmlinkage int sunos_setpgrp(pid_t pid, pid_t pgid)
 	int ret;
 
 	/* So stupid... */
-	lock_kernel();
 	if((!pid || pid == current->pid) &&
 	   !pgid) {
 		sys_setsid();
@@ -897,7 +830,6 @@ asmlinkage int sunos_setpgrp(pid_t pid, pid_t pgid)
 	} else {
 		ret = sys_setpgid(pid, pgid);
 	}
-	unlock_kernel();
 	return ret;
 }
 
@@ -907,9 +839,7 @@ asmlinkage int sunos_wait4(pid_t pid, unsigned int *stat_addr, int options, stru
 {
 	int ret;
 
-	lock_kernel();
 	ret = sys_wait4((pid ? pid : -1), stat_addr, options, ru);
-	unlock_kernel();
 	return ret;
 }
 
@@ -957,7 +887,6 @@ extern asmlinkage long sunos_sysconf (int name)
 {
 	long ret;
 
-	lock_kernel();
 	switch (name){
 	case _SC_ARG_MAX:
 		ret = ARG_MAX;
@@ -990,7 +919,6 @@ extern asmlinkage long sunos_sysconf (int name)
 		ret = -1;
 		break;
 	};
-	unlock_kernel();
 	return ret;
 }
 
@@ -1000,7 +928,6 @@ asmlinkage int sunos_semsys(int op, unsigned long arg1, unsigned long arg2,
 	union semun arg4;
 	int ret;
 
-	lock_kernel();
 	switch (op) {
 	case 0:
 		/* Most arguments match on a 1:1 basis but cmd doesn't */
@@ -1036,7 +963,6 @@ asmlinkage int sunos_semsys(int op, unsigned long arg1, unsigned long arg2,
 		ret = -EINVAL;
 		break;
 	};
-	unlock_kernel();
 	return ret;
 }
 
@@ -1047,7 +973,6 @@ asmlinkage int sunos_msgsys(int op, unsigned long arg1, unsigned long arg2,
 	unsigned long arg5;
 	int rval;
 
-	lock_kernel();
 	switch(op) {
 	case 0:
 		rval = sys_msgget((key_t)arg1, (int)arg2);
@@ -1057,8 +982,10 @@ asmlinkage int sunos_msgsys(int op, unsigned long arg1, unsigned long arg2,
 				  (struct msqid_ds *)arg3);
 		break;
 	case 2:
+		lock_kernel();
 		sp = (struct sparc_stackf *)current->thread.kregs->u_regs[UREG_FP];
 		arg5 = sp->xxargs[0];
+		unlock_kernel();
 		rval = sys_msgrcv((int)arg1, (struct msgbuf *)arg2,
 				  (size_t)arg3, (long)arg4, (int)arg5);
 		break;
@@ -1070,7 +997,6 @@ asmlinkage int sunos_msgsys(int op, unsigned long arg1, unsigned long arg2,
 		rval = -EINVAL;
 		break;
 	}
-	unlock_kernel();
 	return rval;
 }
 
@@ -1080,7 +1006,6 @@ asmlinkage int sunos_shmsys(int op, unsigned long arg1, unsigned long arg2,
 	unsigned long raddr;
 	int rval;
 
-	lock_kernel();
 	switch(op) {
 	case 0:
 		/* sys_shmat(): attach a shared memory area */
@@ -1104,21 +1029,8 @@ asmlinkage int sunos_shmsys(int op, unsigned long arg1, unsigned long arg2,
 		rval = -EINVAL;
 		break;
 	};
-	unlock_kernel();
 	return rval;
 }
-
-asmlinkage int sunos_open(const char *filename, int flags, int mode)
-{
-	int ret;
-
-	lock_kernel();
-	current->personality |= PER_BSD;
-	ret = sys_open (filename, flags, mode);
-	unlock_kernel();
-	return ret;
-}
-
 
 #define SUNOS_EWOULDBLOCK 35
 
@@ -1130,9 +1042,12 @@ asmlinkage int sunos_open(const char *filename, int flags, int mode)
 static inline int check_nonblock(int ret, int fd)
 {
 	if (ret == -EAGAIN) {
-		struct file * file = fcheck(fd);
-		if (file && (file->f_flags & O_NDELAY))
-			ret = -SUNOS_EWOULDBLOCK;
+		struct file * file = fget(fd);
+		if (file) {
+			if (file->f_flags & O_NDELAY)
+				ret = -SUNOS_EWOULDBLOCK;
+			fput(file);
+		}
 	}
 	return ret;
 }
@@ -1150,9 +1065,7 @@ asmlinkage int sunos_read(unsigned int fd,char *buf,int count)
 {
 	int ret;
 
-	lock_kernel();
 	ret = check_nonblock(sys_read(fd,buf,count),fd);
-	unlock_kernel();
 	return ret;
 }
 
@@ -1160,9 +1073,7 @@ asmlinkage int sunos_readv(unsigned long fd, const struct iovec * vector, long c
 {
 	int ret;
 
-	lock_kernel();
 	ret = check_nonblock(sys_readv(fd,vector,count),fd);
-	unlock_kernel();
 	return ret;
 }
 
@@ -1170,9 +1081,7 @@ asmlinkage int sunos_write(unsigned int fd,char *buf,int count)
 {
 	int ret;
 
-	lock_kernel();
 	ret = check_nonblock(sys_write(fd,buf,count),fd);
-	unlock_kernel();
 	return ret;
 }
 
@@ -1180,9 +1089,7 @@ asmlinkage int sunos_writev(unsigned long fd, const struct iovec * vector, long 
 {
 	int ret;
 
-	lock_kernel();
 	ret = check_nonblock(sys_writev(fd,vector,count),fd);
-	unlock_kernel();
 	return ret;
 }
 
@@ -1190,9 +1097,7 @@ asmlinkage int sunos_recv(int fd, void * ubuf, int size, unsigned flags)
 {
 	int ret;
 
-	lock_kernel();
 	ret = check_nonblock(sys_recv(fd,ubuf,size,flags),fd);
-	unlock_kernel();
 	return ret;
 }
 
@@ -1200,9 +1105,7 @@ asmlinkage int sunos_send(int fd, void * buff, int len, unsigned flags)
 {
 	int ret;
 
-	lock_kernel();
 	ret = check_nonblock(sys_send(fd,buff,len,flags),fd);
-	unlock_kernel();
 	return ret;
 }
 
@@ -1213,7 +1116,6 @@ asmlinkage int sunos_socket(int family, int type, int protocol)
 {
 	int ret, one = 1;
 
-	lock_kernel();
 	ret = sys_socket(family, type, protocol);
 	if (ret < 0)
 		goto out;
@@ -1221,7 +1123,6 @@ asmlinkage int sunos_socket(int family, int type, int protocol)
 	sys_setsockopt(ret, SOL_SOCKET, SO_BSDCOMPAT,
 		       (char *)&one, sizeof(one));
 out:
-	unlock_kernel();
 	return ret;
 }
 
@@ -1229,7 +1130,6 @@ asmlinkage int sunos_accept(int fd, struct sockaddr *sa, int *addrlen)
 {
 	int ret, one = 1;
 
-	lock_kernel();
 	while (1) {
 		ret = check_nonblock(sys_accept(fd,sa,addrlen),fd);	
 		if (ret != -ENETUNREACH && ret != -EHOSTUNREACH)
@@ -1241,7 +1141,6 @@ asmlinkage int sunos_accept(int fd, struct sockaddr *sa, int *addrlen)
 	sys_setsockopt(ret, SOL_SOCKET, SO_BSDCOMPAT,
 		       (char *)&one, sizeof(one));
 out:
-	unlock_kernel();
 	return ret;
 }
 
@@ -1253,8 +1152,6 @@ sunos_sigaction(int sig, const struct old_sigaction *act,
 {
 	struct k_sigaction new_ka, old_ka;
 	int ret;
-
-	current->personality |= PER_BSD;
 
 	if(act) {
 		old_sigset_t mask;
@@ -1300,14 +1197,12 @@ asmlinkage int sunos_setsockopt(int fd, int level, int optname, char *optval,
 	int tr_opt = optname;
 	int ret;
 
-	lock_kernel();
 	if (level == SOL_IP) {
 		/* Multicast socketopts (ttl, membership) */
 		if (tr_opt >=2 && tr_opt <= 6)
 			tr_opt += 30;
 	}
 	ret = sys_setsockopt(fd, level, tr_opt, optval, optlen);
-	unlock_kernel();
 	return ret;
 }
 
@@ -1317,13 +1212,11 @@ asmlinkage int sunos_getsockopt(int fd, int level, int optname, char *optval,
 	int tr_opt = optname;
 	int ret;
 
-	lock_kernel();
 	if (level == SOL_IP) {
 		/* Multicast socketopts (ttl, membership) */
 		if (tr_opt >=2 && tr_opt <= 6)
 			tr_opt += 30;
 	}
 	ret = sys_getsockopt(fd, level, tr_opt, optval, optlen);
-	unlock_kernel();
 	return ret;
 }

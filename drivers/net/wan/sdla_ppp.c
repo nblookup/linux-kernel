@@ -74,6 +74,7 @@
 * Jan 06, 1997	Gene Kozin	Initial version.
 *****************************************************************************/
 
+#include <linux/config.h>
 #include <linux/version.h>
 #include <linux/kernel.h>	/* printk(), and other useful stuff */
 #include <linux/stddef.h>	/* offsetof(), etc. */
@@ -500,7 +501,7 @@ static int new_if(wan_device_t *wandev, struct net_device *dev, wanif_conf_t *co
 
 
 	/* prepare network device data space for registration */
-	dev->name = card->u.p.if_name;
+	strcpy(dev->name, card->u.p.if_name);
 	dev->init = &if_init;
 	dev->priv = ppp_priv_area;
 
@@ -2896,7 +2897,7 @@ static int chk_bcast_mcast_addr(sdla_t *card, struct net_device* dev,
 
 void s508_lock (sdla_t *card, unsigned long *smp_flags)
 {
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	spin_lock_irqsave(&card->lock, *smp_flags);
 #else
 	disable_irq(card->hw.irq);
@@ -2905,7 +2906,7 @@ void s508_lock (sdla_t *card, unsigned long *smp_flags)
 
 void s508_unlock (sdla_t *card, unsigned long *smp_flags)
 {
-#ifdef __SMP__
+#ifdef CONFIG_SMP
         spin_unlock_irqrestore(&card->lock, *smp_flags);
 #else
 	enable_irq(card->hw.irq);

@@ -82,13 +82,13 @@ char debug_device[6] __apusdata = "";
 
 extern void amiga_init_IRQ(void);
 
-void (*mach_sched_init) (void (*handler)(int, void *, struct pt_regs *)) __initdata;
+void (*mach_sched_init) (void (*handler)(int, void *, struct pt_regs *)) __initdata = NULL;
 /* machine dependent keyboard functions */
-int (*mach_keyb_init) (void) __initdata;
+int (*mach_keyb_init) (void) __initdata = NULL;
 int (*mach_kbdrate) (struct kbd_repeat *) __apusdata = NULL;
 void (*mach_kbd_leds) (unsigned int) __apusdata = NULL;
 /* machine dependent irq functions */
-void (*mach_init_IRQ) (void) __initdata;
+void (*mach_init_IRQ) (void) __initdata = NULL;
 void (*(*mach_default_handler)[]) (int, void *, struct pt_regs *) __apusdata = NULL;
 void (*mach_get_model) (char *model) __apusdata = NULL;
 int (*mach_get_hardware_list) (char *buffer) __apusdata = NULL;
@@ -108,18 +108,6 @@ void (*mach_floppy_eject) (void) __apusdata = NULL;
 #ifdef CONFIG_HEARTBEAT
 void (*mach_heartbeat) (int) __apusdata = NULL;
 extern void apus_heartbeat (void);
-static int heartbeat_enabled = 1;
-
-void enable_heartbeat(void)
-{
-	heartbeat_enabled = 1;
-}
-
-void disable_heartbeat(void)
-{
-	heartbeat_enabled = 0;
-	mach_heartbeat(0);
-}
 #endif
 
 extern unsigned long amiga_model;
@@ -316,7 +304,7 @@ __apus
 void apus_calibrate_decr(void)
 {
 #ifdef CONFIG_APUS
-	int freq, divisor;
+	unsigned long freq;
 
 	/* This algorithm for determining the bus speed was
            contributed by Ralph Schmidt. */
@@ -347,8 +335,8 @@ void apus_calibrate_decr(void)
 		bus_speed = 60;
 		freq = 15000000;
 	} else if ((bus_speed >= 63) && (bus_speed < 69)) {
-		bus_speed = 66;
-		freq = 16500000;
+		bus_speed = 67;
+		freq = 16666667;
 	} else {
 		printk ("APUS: Unable to determine bus speed (%d). "
 			"Defaulting to 50MHz", bus_speed);
@@ -387,12 +375,10 @@ void apus_calibrate_decr(void)
 
 	}
 
-	freq *= 60;	/* try to make freq/1e6 an integer */
-        divisor = 60;
-        printk("time_init: decrementer frequency = %d/%d\n", freq, divisor);
-        decrementer_count = freq / HZ / divisor;
-        count_period_num = divisor;
-        count_period_den = freq / 1000000;
+        printk("time_init: decrementer frequency = %lu.%.6lu MHz\n",
+	       freq/1000000, freq%1000000);
+	tb_ticks_per_jiffy = freq / HZ;
+	tb_to_us = mulhwu_scale_factor(freq, 1000000);
 
 	__bus_speed = bus_speed;
 	__speed_test_failed = speed_test_failed;

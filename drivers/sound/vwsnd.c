@@ -84,10 +84,9 @@
  * Locking Notes
  *
  *	INC_USE_COUNT and DEC_USE_COUNT keep track of the number of
- *	open descriptors to this driver.  When the driver is compiled
- *	as a module, they call MOD_{INC,DEC}_USE_COUNT; otherwise they
- *	bump vwsnd_use_count.  The global device list, vwsnd_dev_list,
- *	is immutable when the IN_USE is true.
+ *	open descriptors to this driver. They store it in vwsnd_use_count.
+ * 	The global device list, vwsnd_dev_list,	is immutable when the IN_USE
+ *	is true.
  *
  *	devc->open_lock is a semaphore that is used to enforce the
  *	single reader/single writer rule for /dev/audio.  The rule is
@@ -136,11 +135,20 @@
  *	For AFMT_S8, AFMT_MU_LAW and AFMT_A_LAW output, we have to XOR
  *	the 0x80 bit in software to compensate for Lithium's XOR.
  *	This happens in pcm_copy_{in,out}().
+ *
+ * Changes:
+ * 11-10-2000	Bartlomiej Zolnierkiewicz <bkz@linux-ide.org>
+ *		Added some __init/__exit
  */
 
 #include <linux/module.h>
+#include <linux/init.h>
+
+#include <linux/sched.h>
+#include <linux/semaphore.h>
 #include <linux/stddef.h>
 #include <linux/spinlock.h>
+#include <linux/smp_lock.h>
 #include <asm/fixmap.h>
 #include <asm/cobalt.h>
 #include <asm/semaphore.h>
@@ -1328,7 +1336,7 @@ static void ad1843_shutdown_adc(lithium_t *lith)
  *
  * return 0 on success, -errno on failure.  */
 
-static int ad1843_init(lithium_t *lith)
+static int __init ad1843_init(lithium_t *lith)
 {
 	unsigned long later;
 	int err;
@@ -1517,21 +1525,11 @@ typedef struct vwsnd_dev {
 
 static vwsnd_dev_t *vwsnd_dev_list;	/* linked list of all devices */
 
-#ifdef MODULE
-
-# define INC_USE_COUNT MOD_INC_USE_COUNT
-# define DEC_USE_COUNT MOD_DEC_USE_COUNT
-# define IN_USE        MOD_IN_USE
-
-#else
-
 static atomic_t vwsnd_use_count = ATOMIC_INIT(0);
 
 # define INC_USE_COUNT (atomic_inc(&vwsnd_use_count))
 # define DEC_USE_COUNT (atomic_dec(&vwsnd_use_count))
 # define IN_USE        (atomic_read(&vwsnd_use_count) != 0)
-
-#endif
 
 /*
  * Lithium can only DMA multiples of 32 bytes.  Its DMA buffer may
@@ -1830,8 +1828,8 @@ static void pcm_shutdown_port(vwsnd_dev_t *devc,
 
 	aport->swstate = SW_INITIAL;
 	add_wait_queue(&aport->queue, &wait);
-	current->state = TASK_UNINTERRUPTIBLE;
 	while (1) {
+		set_current_state(TASK_UNINTERRUPTIBLE);
 		spin_lock_irqsave(&aport->lock, flags);
 		{
 			hwstate = aport->hwstate;
@@ -2200,8 +2198,8 @@ static void pcm_write_sync(vwsnd_dev_t *devc)
 
 	DBGEV("(devc=0x%p)\n", devc);
 	add_wait_queue(&wport->queue, &wait);
-	current->state = TASK_UNINTERRUPTIBLE;
 	while (1) {
+		set_current_state(TASK_UNINTERRUPTIBLE);
 		spin_lock_irqsave(&wport->lock, flags);
 		{
 			hwstate = wport->hwstate;
@@ -2288,9 +2286,9 @@ static ssize_t vwsnd_audio_do_read(struct file *file,
 	while (count) {
 		DECLARE_WAITQUEUE(wait, current);
 		add_wait_queue(&rport->queue, &wait);
-		current->state = TASK_INTERRUPTIBLE;
 		while ((nb = swb_inc_u(rport, 0)) == 0) {
 			DBGPV("blocking\n");
+			set_current_state(TASK_INTERRUPTIBLE);
 			if (rport->flags & DISABLED ||
 			    file->f_flags & O_NONBLOCK) {
 				current->state = TASK_RUNNING;
@@ -2364,8 +2362,8 @@ static ssize_t vwsnd_audio_do_write(struct file *file,
 	while (count) {
 		DECLARE_WAITQUEUE(wait, current);
 		add_wait_queue(&wport->queue, &wait);
-		current->state = TASK_INTERRUPTIBLE;
 		while ((nb = swb_inc_u(wport, 0)) == 0) {
+			set_current_state(TASK_INTERRUPTIBLE);
 			if (wport->flags & DISABLED ||
 			    file->f_flags & O_NONBLOCK) {
 				current->state = TASK_RUNNING;
@@ -2409,6 +2407,7 @@ static ssize_t vwsnd_audio_write(struct file *file,
 	return ret;
 }
 
+/* No kernel lock - fine */
 static unsigned int vwsnd_audio_poll(struct file *file,
 				     struct poll_table_struct *wait)
 {
@@ -2485,7 +2484,8 @@ static int vwsnd_audio_do_ioctl(struct inode *inode,
 		return put_user(ival, (int *) arg);
 
 	case SNDCTL_DSP_SPEED:		/* _SIOWR('P', 2, int) */
-		get_user_ret(ival, (int *) arg, -EFAULT);
+		if (get_user(ival, (int *) arg))
+			return -EFAULT;
 		DBGX("SNDCTL_DSP_SPEED %d\n", ival);
 		if (ival) {
 			if (aport->swstate != SW_INITIAL) {
@@ -2506,7 +2506,8 @@ static int vwsnd_audio_do_ioctl(struct inode *inode,
 		return put_user(ival, (int *) arg);
 
 	case SNDCTL_DSP_STEREO:		/* _SIOWR('P', 3, int) */
-		get_user_ret(ival, (int *) arg, -EFAULT);
+		if (get_user(ival, (int *) arg))
+			return -EFAULT;
 		DBGX("SNDCTL_DSP_STEREO %d\n", ival);
 		if (ival != 0 && ival != 1)
 			return -EINVAL;
@@ -2519,7 +2520,8 @@ static int vwsnd_audio_do_ioctl(struct inode *inode,
 		return put_user(ival, (int *) arg);
 
 	case SNDCTL_DSP_CHANNELS:	/* _SIOWR('P', 6, int) */
-		get_user_ret(ival, (int *) arg, -EFAULT);
+		if (get_user(ival, (int *) arg))
+			return -EFAULT;
 		DBGX("SNDCTL_DSP_CHANNELS %d\n", ival);
 		if (ival != 1 && ival != 2)
 			return -EINVAL;
@@ -2542,7 +2544,8 @@ static int vwsnd_audio_do_ioctl(struct inode *inode,
 		return put_user(ival, (int *) arg);
 
 	case SNDCTL_DSP_SETFRAGMENT:	/* _SIOWR('P',10, int) */
-		get_user_ret(ival, (int *) arg, -EFAULT);
+		if (get_user(ival, (int *) arg))
+			return -EFAULT;
 		DBGX("SNDCTL_DSP_SETFRAGMENT %d:%d\n",
 		     ival >> 16, ival & 0xFFFF);
 		if (aport->swstate != SW_INITIAL)
@@ -2580,7 +2583,8 @@ static int vwsnd_audio_do_ioctl(struct inode *inode,
 		return put_user(ival, (int *) arg);
 
 	case SNDCTL_DSP_SUBDIVIDE:	/* _SIOWR('P', 9, int) */
-                get_user_ret(ival, (int *) arg, -EFAULT);
+                if (get_user(ival, (int *) arg))
+			return -EFAULT;
 		DBGX("SNDCTL_DSP_SUBDIVIDE %d\n", ival);
 		if (aport->swstate != SW_INITIAL)
 			return -EINVAL;
@@ -2610,7 +2614,8 @@ static int vwsnd_audio_do_ioctl(struct inode *inode,
 		return 0;
 
 	case SNDCTL_DSP_SETFMT:		/* _SIOWR('P',5, int) */
-		get_user_ret(ival, (int *) arg, -EFAULT);
+		if (get_user(ival, (int *) arg))
+			return -EFAULT;
 		DBGX("SNDCTL_DSP_SETFMT %d\n", ival);
 		if (ival != AFMT_QUERY) {
 			if (aport->swstate != SW_INITIAL) {
@@ -2818,7 +2823,8 @@ static int vwsnd_audio_do_ioctl(struct inode *inode,
 		return put_user(ival, (int *) arg);
 
 	case SNDCTL_DSP_SETTRIGGER:	/* _SIOW ('P',16, int) */
-		get_user_ret(ival, (int *) arg, -EFAULT);
+		if (get_user(ival, (int *) arg))
+			return -EFAULT;
 		DBGX("SNDCTL_DSP_SETTRIGGER %d\n", ival);
 
 		/*
@@ -2997,6 +3003,7 @@ static int vwsnd_audio_release(struct inode *inode, struct file *file)
 	vwsnd_port_t *wport = NULL, *rport = NULL;
 	int err = 0;
 
+	lock_kernel();
 	down(&devc->io_sema);
 	{
 		DBGEV("(inode=0x%p, file=0x%p)\n", inode, file);
@@ -3022,13 +3029,14 @@ static int vwsnd_audio_release(struct inode *inode, struct file *file)
 	}
 	up(&devc->open_sema);
 	wake_up(&devc->open_wait);
-	DBGDO(if (IN_USE))		/* see hack in vwsnd_mixer_release() */
-		DEC_USE_COUNT;
+	DEC_USE_COUNT;
 	DBGR();
+	unlock_kernel();
 	return err;
 }
 
 static struct file_operations vwsnd_audio_fops = {
+	owner:		THIS_MODULE,
 	llseek:		vwsnd_audio_llseek,
 	read:		vwsnd_audio_read,
 	write:		vwsnd_audio_write,
@@ -3068,15 +3076,7 @@ static int vwsnd_mixer_open(struct inode *inode, struct file *file)
 static int vwsnd_mixer_release(struct inode *inode, struct file *file)
 {
 	DBGEV("(inode=0x%p, file=0x%p)\n", inode, file);
-
-	/*
-	 * hack -- opening/closing the mixer device zeroes use count
-	 * so driver can be unloaded.
-	 * Use only while debugging module, and then use it carefully.
-	 */
-
-	DBGDO(while (IN_USE))
-		DEC_USE_COUNT;
+	DEC_USE_COUNT;
 	return 0;
 }
 
@@ -3233,6 +3233,7 @@ static int vwsnd_mixer_ioctl(struct inode *ioctl,
 }
 
 static struct file_operations vwsnd_mixer_fops = {
+	owner:		THIS_MODULE,
 	llseek:		vwsnd_mixer_llseek,
 	ioctl:		vwsnd_mixer_ioctl,
 	open:		vwsnd_mixer_open,
@@ -3244,7 +3245,7 @@ static struct file_operations vwsnd_mixer_fops = {
 
 /* driver probe routine.  Return nonzero if hardware is found. */
 
-static int probe_vwsnd(struct address_info *hw_config)
+static int __init probe_vwsnd(struct address_info *hw_config)
 {
 	lithium_t lith;
 	int w;
@@ -3296,7 +3297,7 @@ static int probe_vwsnd(struct address_info *hw_config)
  * Return +minor_dev on success, -errno on failure.
  */
 
-static int attach_vwsnd(struct address_info *hw_config)
+static int __init attach_vwsnd(struct address_info *hw_config)
 {
 	vwsnd_dev_t *devc = NULL;
 	int err = -ENOMEM;
@@ -3422,14 +3423,12 @@ static int attach_vwsnd(struct address_info *hw_config)
 	return err;
 }
 
-static int unload_vwsnd(struct address_info *hw_config)
+static int __exit unload_vwsnd(struct address_info *hw_config)
 {
 	vwsnd_dev_t *devc, **devcp;
 
 	DBGE("()\n");
 
-	if (IN_USE)
-		return -EBUSY;
 	devcp = &vwsnd_dev_list;
 	while ((devc = *devcp)) {
 		if (devc->audio_minor == hw_config->slots[0]) {
@@ -3461,12 +3460,10 @@ static struct address_info the_hw_config = {
 	CO_IRQ(CO_APIC_LI_AUDIO)	/* irq */
 };
 
-#ifdef MODULE
-
 MODULE_DESCRIPTION("SGI Visual Workstation sound module");
 MODULE_AUTHOR("Bob Miller <kbob@sgi.com>");
 
-extern int init_module(void)
+static int __init init_vwsnd(void)
 {
 	int err;
 
@@ -3481,27 +3478,12 @@ extern int init_module(void)
 	return 0;
 }
 
-extern void cleanup_module(void)
+static void __exit cleanup_vwsnd(void)
 {
 	DBGX("sound::vwsnd::cleanup_module()\n");
 
 	unload_vwsnd(&the_hw_config);
 }
 
-#else
-
-extern void init_vwsnd(void)
-{
-	DBGX("sound::vwsnd::init_vwsnd()\n");
-	if (probe_vwsnd(&the_hw_config))
-		(void) attach_vwsnd(&the_hw_config);
-}
-
-#endif /* !MODULE */
-
-/*
- * Local variables:
- * compile-command: "cd ../..; make modules SUBDIRS=drivers/sound"
- * c-basic-offset: 8
- * End:
- */
+module_init(init_vwsnd);
+module_exit(cleanup_vwsnd);

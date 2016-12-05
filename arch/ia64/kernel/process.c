@@ -1,8 +1,8 @@
 /*
  * Architecture-specific setup.
  *
- * Copyright (C) 1998, 1999 Hewlett-Packard Co
- * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2000 Hewlett-Packard Co
+ * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
  */
 #define __KERNEL_SYSCALLS__	/* see <asm/unistd.h> */
 #include <linux/config.h>
@@ -13,6 +13,7 @@
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/smp_lock.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
@@ -23,8 +24,44 @@
 #include <asm/processor.h>
 #include <asm/sal.h>
 #include <asm/uaccess.h>
+#include <asm/unwind.h>
 #include <asm/user.h>
 
+#ifdef CONFIG_IA64_NEW_UNWIND
+
+static void
+do_show_stack (struct unw_frame_info *info, void *arg)
+{
+	unsigned long ip, sp, bsp;
+
+	printk("\nCall Trace: ");
+	do {
+		unw_get_ip(info, &ip);
+		if (ip == 0)
+			break;
+
+		unw_get_sp(info, &sp);
+		unw_get_bsp(info, &bsp);
+		printk("[<%016lx>] sp=0x%016lx bsp=0x%016lx\n", ip, sp, bsp);
+	} while (unw_unwind(info) >= 0);
+}
+
+#endif
+
+void
+show_stack (struct task_struct *task)
+{
+#ifdef CONFIG_IA64_NEW_UNWIND
+	if (!task)
+		unw_init_running(do_show_stack, 0);
+	else {
+		struct unw_frame_info info;
+
+		unw_init_from_blocked_task(&info, task);
+		do_show_stack(&info, 0);
+	}
+#endif
+}
 
 void
 show_regs (struct pt_regs *regs)
@@ -71,6 +108,10 @@ show_regs (struct pt_regs *regs)
 			       ((i == sof - 1) || (i % 3) == 2) ? "\n" : " ");
 		}
 	}
+#ifdef CONFIG_IA64_NEW_UNWIND
+	if (!user_mode(regs))
+		show_stack(0);
+#endif
 }
 
 void __attribute__((noreturn))
@@ -78,18 +119,17 @@ cpu_idle (void *unused)
 {
 	/* endless idle loop with no priority at all */
 	init_idle();
-	current->priority = 0;
+	current->nice = 20;
 	current->counter = -100;
 
-#ifdef CONFIG_SMP
-	if (!current->need_resched)
-		min_xtp();
-#endif
 
 	while (1) {
-		while (!current->need_resched) {
+#ifdef CONFIG_SMP
+		if (!current->need_resched)
+			min_xtp();
+#endif
+		while (!current->need_resched)
 			continue;
-		}
 #ifdef CONFIG_SMP
 		normal_xtp();
 #endif
@@ -97,15 +137,33 @@ cpu_idle (void *unused)
 		check_pgt_cache();
 		if (pm_idle)
 			(*pm_idle)();
-#ifdef CONFIG_ITANIUM_ASTEP_SPECIFIC
-		if (ia64_get_itm() < ia64_get_itc()) {
-			extern void ia64_reset_itm (void);
-
-			printk("cpu_idle: ITM in past, resetting it...\n");
-			ia64_reset_itm();
-		}
-#endif
 	}
+}
+
+void
+ia64_save_extra (struct task_struct *task)
+{
+	if ((task->thread.flags & IA64_THREAD_DBG_VALID) != 0)
+		ia64_save_debug_regs(&task->thread.dbr[0]);
+#ifdef CONFIG_PERFMON
+	if ((task->thread.flags & IA64_THREAD_PM_VALID) != 0)
+		ia64_save_pm_regs(task);
+#endif
+	if (IS_IA32_PROCESS(ia64_task_regs(task)))
+		ia32_save_state(&task->thread);
+}
+
+void
+ia64_load_extra (struct task_struct *task)
+{
+	if ((task->thread.flags & IA64_THREAD_DBG_VALID) != 0)
+		ia64_load_debug_regs(&task->thread.dbr[0]);
+#ifdef CONFIG_PERFMON
+	if ((task->thread.flags & IA64_THREAD_PM_VALID) != 0)
+		ia64_load_pm_regs(task);
+#endif
+	if (IS_IA32_PROCESS(ia64_task_regs(task)))
+		ia32_load_state(&task->thread);
 }
 
 /*
@@ -135,24 +193,22 @@ cpu_idle (void *unused)
  * be copied as well.
  *
  * Observe that we copy the unat values that are in pt_regs and
- * switch_stack.  Since the interpretation of unat is dependent upon
- * the address to which the registers got spilled, doing this is valid
- * only as long as we preserve the alignment of the stack.  Since the
- * stack is always page aligned, we know this is the case.
- *
- * XXX Actually, the above isn't true when we create kernel_threads().
- * If we ever needs to create kernel_threads() that preserve the unat
- * values we'll need to fix this.  Perhaps an easy workaround would be
- * to always clear the unat bits in the child thread.
+ * switch_stack.  Spilling an integer to address X causes bit N in
+ * ar.unat to be set to the NaT bit of the register, with N=(X &
+ * 0x1ff)/8.  Thus, copying the unat value preserves the NaT bits ONLY
+ * if the pt_regs structure in the parent is congruent to that of the
+ * child, modulo 512.  Since the stack is page aligned and the page
+ * size is at least 4KB, this is always the case, so there is nothing
+ * to worry about.
  */
 int
-copy_thread (int nr, unsigned long clone_flags, unsigned long usp,
+copy_thread (int nr, unsigned long clone_flags,
+	     unsigned long user_stack_base, unsigned long user_stack_size,
 	     struct task_struct *p, struct pt_regs *regs)
 {
 	unsigned long rbs, child_rbs, rbs_size, stack_offset, stack_top, stack_used;
 	struct switch_stack *child_stack, *stack;
-	extern char ia64_ret_from_syscall_clear_r8;
-	extern char ia64_strace_clear_r8;
+	extern char ia64_ret_from_clone;
 	struct pt_regs *child_ptregs;
 
 #ifdef CONFIG_SMP
@@ -182,10 +238,14 @@ copy_thread (int nr, unsigned long clone_flags, unsigned long usp,
 	/* copy the parent's register backing store to the child: */
 	memcpy((void *) child_rbs, (void *) rbs, rbs_size);
 
-	child_ptregs->r8 = 0;			/* child gets a zero return value */
-	if (user_mode(child_ptregs))
-		child_ptregs->r12 = usp;			/* user stack pointer */
-	else {
+	if (user_mode(child_ptregs)) {
+		if (user_stack_base) {
+			child_ptregs->r12 = user_stack_base + user_stack_size;
+			child_ptregs->ar_bspstore = user_stack_base;
+			child_ptregs->ar_rnat = 0;
+			child_ptregs->loadrs = 0;
+		}
+	} else {
 		/*
 		 * Note: we simply preserve the relative position of
 		 * the stack pointer here.  There is no need to
@@ -196,13 +256,10 @@ copy_thread (int nr, unsigned long clone_flags, unsigned long usp,
 		child_ptregs->r12 = (unsigned long) (child_ptregs + 1); /* kernel sp */
 		child_ptregs->r13 = (unsigned long) p;		/* set `current' pointer */
 	}
-	if (p->flags & PF_TRACESYS)
-		child_stack->b0 = (unsigned long) &ia64_strace_clear_r8;
-	else
-		child_stack->b0 = (unsigned long) &ia64_ret_from_syscall_clear_r8;
+	child_stack->b0 = (unsigned long) &ia64_ret_from_clone;
 	child_stack->ar_bspstore = child_rbs + rbs_size;
 
-	/* copy the thread_struct: */
+	/* copy parts of thread_struct: */
 	p->thread.ksp = (unsigned long) child_stack - 16;
 	/*
 	 * NOTE: The calling convention considers all floating point
@@ -219,24 +276,129 @@ copy_thread (int nr, unsigned long clone_flags, unsigned long usp,
 	 * would be a slight deviation from the normal Linux system
 	 * call behavior where scratch registers are preserved across
 	 * system calls (unless used by the system call itself).
-	 *
-	 * If we wanted to inherit the fph state from the parent to the
-	 * child, we would have to do something along the lines of:
-	 *
-	 *	if (ia64_get_fpu_owner() == current && ia64_psr(regs)->mfh) {
-	 *		p->thread.flags |= IA64_THREAD_FPH_VALID;
-	 *		ia64_save_fpu(&p->thread.fph);
-	 *	} else if (current->thread.flags & IA64_THREAD_FPH_VALID) {
-	 *		memcpy(p->thread.fph, current->thread.fph, sizeof(p->thread.fph));
-	 *	}
 	 */
-	p->thread.flags = (current->thread.flags & ~IA64_THREAD_FPH_VALID);
+#	define THREAD_FLAGS_TO_CLEAR	(IA64_THREAD_FPH_VALID | IA64_THREAD_DBG_VALID \
+					 | IA64_THREAD_PM_VALID)
+#	define THREAD_FLAGS_TO_SET	0
+	p->thread.flags = ((current->thread.flags & ~THREAD_FLAGS_TO_CLEAR)
+			   | THREAD_FLAGS_TO_SET);
+#ifdef CONFIG_IA32_SUPPORT
+	/*
+	 * If we're cloning an IA32 task then save the IA32 extra
+	 * state from the current task to the new task
+	 */
+	if (IS_IA32_PROCESS(ia64_task_regs(current)))
+		ia32_save_state(&p->thread);
+#endif
 	return 0;
 }
+
+#ifdef CONFIG_IA64_NEW_UNWIND
+
+void
+do_copy_regs (struct unw_frame_info *info, void *arg)
+{
+	unsigned long ar_bsp, ndirty, *krbs, addr, mask, sp, nat_bits = 0, ip;
+	elf_greg_t *dst = arg;
+	struct pt_regs *pt;
+	char nat;
+	long val;
+	int i;
+
+	memset(dst, 0, sizeof(elf_gregset_t));	/* don't leak any kernel bits to user-level */
+
+	if (unw_unwind_to_user(info) < 0)
+		return;
+
+	unw_get_sp(info, &sp);
+	pt = (struct pt_regs *) (sp + 16);
+
+	krbs = (unsigned long *) current + IA64_RBS_OFFSET/8;
+	ndirty = ia64_rse_num_regs(krbs, krbs + (pt->loadrs >> 19));
+	ar_bsp = (unsigned long) ia64_rse_skip_regs((long *) pt->ar_bspstore, ndirty);
+
+	/*
+	 * Write portion of RSE backing store living on the kernel
+	 * stack to the VM of the process.
+	 */
+	for (addr = pt->ar_bspstore; addr < ar_bsp; addr += 8)
+		if (ia64_peek(pt, current, addr, &val) == 0)
+			access_process_vm(current, addr, &val, sizeof(val), 1);
+
+	/*
+	 * coredump format:
+	 *	r0-r31
+	 *	NaT bits (for r0-r31; bit N == 1 iff rN is a NaT)
+	 *	predicate registers (p0-p63)
+	 *	b0-b7
+	 *	ip cfm user-mask
+	 *	ar.rsc ar.bsp ar.bspstore ar.rnat
+	 *	ar.ccv ar.unat ar.fpsr ar.pfs ar.lc ar.ec
+	 */
+
+	/* r0 is zero */
+	for (i = 1, mask = (1UL << i); i < 32; ++i) {
+		unw_get_gr(info, i, &dst[i], &nat);
+		if (nat)
+			nat_bits |= mask;
+		mask <<= 1;
+	}
+	dst[32] = nat_bits;
+	unw_get_pr(info, &dst[33]);
+
+	for (i = 0; i < 8; ++i)
+		unw_get_br(info, i, &dst[34 + i]);
+
+	unw_get_rp(info, &ip);
+	dst[42] = ip + ia64_psr(pt)->ri;
+	dst[43] = pt->cr_ifs & 0x3fffffffff;
+	dst[44] = pt->cr_ipsr & IA64_PSR_UM;
+
+	unw_get_ar(info, UNW_AR_RSC, &dst[45]);
+	/*
+	 * For bsp and bspstore, unw_get_ar() would return the kernel
+	 * addresses, but we need the user-level addresses instead:
+	 */
+	dst[46] = ar_bsp;
+	dst[47] = pt->ar_bspstore;
+	unw_get_ar(info, UNW_AR_RNAT, &dst[48]);
+	unw_get_ar(info, UNW_AR_CCV, &dst[49]);
+	unw_get_ar(info, UNW_AR_UNAT, &dst[50]);
+	unw_get_ar(info, UNW_AR_FPSR, &dst[51]);
+	dst[52] = pt->ar_pfs;	/* UNW_AR_PFS is == to pt->cr_ifs for interrupt frames */
+	unw_get_ar(info, UNW_AR_LC, &dst[53]);
+	unw_get_ar(info, UNW_AR_EC, &dst[54]);
+}
+
+void
+do_dump_fpu (struct unw_frame_info *info, void *arg)
+{
+	elf_fpreg_t *dst = arg;
+	int i;
+
+	memset(dst, 0, sizeof(elf_fpregset_t));	/* don't leak any "random" bits */
+
+	if (unw_unwind_to_user(info) < 0)
+		return;
+
+	/* f0 is 0.0, f1 is 1.0 */
+
+	for (i = 2; i < 32; ++i)
+		unw_get_fr(info, i, dst + i);
+
+	ia64_flush_fph(current);
+	if ((current->thread.flags & IA64_THREAD_FPH_VALID) != 0)
+		memcpy(dst + 32, current->thread.fph, 96*16);
+}
+
+#endif /* CONFIG_IA64_NEW_UNWIND */
 
 void
 ia64_elf_core_copy_regs (struct pt_regs *pt, elf_gregset_t dst)
 {
+#ifdef CONFIG_IA64_NEW_UNWIND
+	unw_init_running(do_copy_regs, dst);
+#else
 	struct switch_stack *sw = ((struct switch_stack *) pt) - 1;
 	unsigned long ar_ec, cfm, ar_bsp, ndirty, *krbs, addr;
 
@@ -270,7 +432,7 @@ ia64_elf_core_copy_regs (struct pt_regs *pt, elf_gregset_t dst)
 	 *	ar.rsc ar.bsp ar.bspstore ar.rnat
 	 *	ar.ccv ar.unat ar.fpsr ar.pfs ar.lc ar.ec
 	 */
-	memset(dst, 0, sizeof (dst));	/* don't leak any "random" bits */
+	memset(dst, 0, sizeof(dst));	/* don't leak any "random" bits */
 
 	/* r0 is zero */   dst[ 1] =  pt->r1; dst[ 2] =  pt->r2; dst[ 3] = pt->r3;
 	dst[ 4] =  sw->r4; dst[ 5] =  sw->r5; dst[ 6] =  sw->r6; dst[ 7] = sw->r7;
@@ -285,19 +447,23 @@ ia64_elf_core_copy_regs (struct pt_regs *pt, elf_gregset_t dst)
 	dst[34] = pt->b0; dst[35] = sw->b1; dst[36] = sw->b2; dst[37] = sw->b3;
 	dst[38] = sw->b4; dst[39] = sw->b5; dst[40] = pt->b6; dst[41] = pt->b7;
 
-	dst[42] = pt->cr_iip; dst[43] = pt->cr_ifs;
-	dst[44] = pt->cr_ipsr;	/* XXX perhaps we should filter out some bits here? --davidm */
+	dst[42] = pt->cr_iip + ia64_psr(pt)->ri;
+	dst[43] = pt->cr_ifs;
+	dst[44] = pt->cr_ipsr & IA64_PSR_UM;
 
 	dst[45] = pt->ar_rsc; dst[46] = ar_bsp; dst[47] = pt->ar_bspstore;  dst[48] = pt->ar_rnat;
 	dst[49] = pt->ar_ccv; dst[50] = pt->ar_unat; dst[51] = sw->ar_fpsr; dst[52] = pt->ar_pfs;
 	dst[53] = sw->ar_lc; dst[54] = (sw->ar_pfs >> 52) & 0x3f;
+#endif /* !CONFIG_IA64_NEW_UNWIND */
 }
 
 int
 dump_fpu (struct pt_regs *pt, elf_fpregset_t dst)
 {
+#ifdef CONFIG_IA64_NEW_UNWIND
+	unw_init_running(do_dump_fpu, dst);
+#else
 	struct switch_stack *sw = ((struct switch_stack *) pt) - 1;
-	struct task_struct *fpu_owner = ia64_get_fpu_owner();
 
 	memset(dst, 0, sizeof (dst));	/* don't leak any "random" bits */
 
@@ -306,12 +472,10 @@ dump_fpu (struct pt_regs *pt, elf_fpregset_t dst)
 	dst[8] = pt->f8; dst[9] = pt->f9;
 	memcpy(dst + 10, &sw->f10, 22*16);	/* f10-f31 are contiguous */
 
-	if ((fpu_owner == current) || (current->thread.flags & IA64_THREAD_FPH_VALID)) {
-		if (fpu_owner == current) {
-			__ia64_save_fpu(current->thread.fph);
-		}
+	ia64_flush_fph(current);
+	if ((current->thread.flags & IA64_THREAD_FPH_VALID) != 0)
 		memcpy(dst + 32, current->thread.fph, 96*16);
-	}
+#endif
 	return 1;	/* f0-f31 are always valid so we always return 1 */
 }
 
@@ -334,14 +498,14 @@ pid_t
 kernel_thread (int (*fn)(void *), void *arg, unsigned long flags)
 {
 	struct task_struct *parent = current;
-	int result;
+	int result, tid;
 
-	clone(flags | CLONE_VM, 0);
+	tid = clone(flags | CLONE_VM, 0);
 	if (parent != current) {
 		result = (*fn)(arg);
 		_exit(result);
 	}
-	return 0;		/* parent: just return */
+	return tid;
 }
 
 /*
@@ -353,9 +517,10 @@ flush_thread (void)
 	/* drop floating-point and debug-register state if it exists: */
 	current->thread.flags &= ~(IA64_THREAD_FPH_VALID | IA64_THREAD_DBG_VALID);
 
-	if (ia64_get_fpu_owner() == current) {
+#ifndef CONFIG_SMP
+	if (ia64_get_fpu_owner() == current)
 		ia64_set_fpu_owner(0);
-	}
+#endif
 }
 
 /*
@@ -365,26 +530,34 @@ flush_thread (void)
 void
 exit_thread (void)
 {
-	if (ia64_get_fpu_owner() == current) {
+#ifndef CONFIG_SMP
+	if (ia64_get_fpu_owner() == current)
 		ia64_set_fpu_owner(0);
+#endif
+#ifdef CONFIG_PERFMON
+       /* stop monitoring */
+	if ((current->thread.flags & IA64_THREAD_PM_VALID) != 0) {
+		/*
+		 * we cannot rely on switch_to() to save the PMU
+		 * context for the last time. There is a possible race
+		 * condition in SMP mode between the child and the
+		 * parent.  by explicitly saving the PMU context here
+		 * we garantee no race.  this call we also stop
+		 * monitoring
+		 */
+		ia64_save_pm_regs(current);
+		/*
+		 * make sure that switch_to() will not save context again
+		 */
+		current->thread.flags &= ~IA64_THREAD_PM_VALID;
 	}
-}
-
-/*
- * Free remaining state associated with DEAD_TASK.  This is called
- * after the parent of DEAD_TASK has collected the exist status of the
- * task via wait().
- */
-void
-release_thread (struct task_struct *dead_task)
-{
-	/* nothing to do */
+#endif
 }
 
 unsigned long
 get_wchan (struct task_struct *p)
 {
-	struct ia64_frame_info info;
+	struct unw_frame_info info;
 	unsigned long ip;
 	int count = 0;
 	/*
@@ -403,11 +576,11 @@ get_wchan (struct task_struct *p)
 	 * gracefully if the process wasn't really blocked after all.
 	 * --davidm 99/12/15
 	 */
-	ia64_unwind_init_from_blocked_task(&info, p);
+	unw_init_from_blocked_task(&info, p);
 	do {
-		if (ia64_unwind_to_previous_frame(&info) < 0)
+		if (unw_unwind(&info) < 0)
 			return 0;
-		ip = ia64_unwind_get_ip(&info);
+		unw_get_ip(&info, &ip);
 		if (ip < first_sched || ip >= last_sched)
 			return ip;
 	} while (count++ < 16);

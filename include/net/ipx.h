@@ -41,12 +41,11 @@ struct ipxhdr
 	ipx_address	ipx_source __attribute__ ((packed));
 };
 
-#include <net/ipxcall.h>
-
 typedef struct ipx_interface {
 	/* IPX address */
 	__u32           if_netnum;
 	unsigned char	if_node[IPX_NODE_LEN];
+	atomic_t        refcnt;
 
 	/* physical device info */
 	struct net_device	*if_dev;
@@ -56,6 +55,7 @@ typedef struct ipx_interface {
 	/* socket support */
 	unsigned short	if_sknum;
 	struct sock	*if_sklist;
+	spinlock_t      if_sklist_lock;
 
 	/* administrative overhead */
 	int		if_ipx_offset;

@@ -506,14 +506,14 @@ void dev_shutdown(struct net_device *dev)
 	dev->qdisc = &noop_qdisc;
 	dev->qdisc_sleeping = &noop_qdisc;
 	qdisc_destroy(qdisc);
-#ifdef CONFIG_NET_SCH_INGRESS
+#if defined(CONFIG_NET_SCH_INGRESS) || defined(CONFIG_NET_SCH_INGRESS_MODULE)
         if ((qdisc = dev->qdisc_ingress) != NULL) {
 		dev->qdisc_ingress = NULL;
 		qdisc_destroy(qdisc);
         }
 #endif
 	BUG_TRAP(dev->qdisc_list == NULL);
-	BUG_TRAP(dev->watchdog_timer.prev == NULL);
+	BUG_TRAP(!timer_pending(&dev->watchdog_timer));
 	dev->qdisc_list = NULL;
 	spin_unlock_bh(&dev->queue_lock);
 	write_unlock(&qdisc_tree_lock);

@@ -26,11 +26,12 @@
 #include <linux/poll.h>
 #include <linux/init.h>
 #include <linux/devfs_fs_kernel.h>
+#include <linux/smp_lock.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
 
-static unsigned open_map = 0;
+static unsigned open_map;
 static struct socket *netlink_user[MAX_LINKS];
 
 /*
@@ -114,7 +115,6 @@ static int netlink_open(struct inode * inode, struct file * file)
 		return -EBUSY;
 
 	open_map |= (1<<minor);
-	MOD_INC_USE_COUNT;
 
 	err = sock_create(PF_NETLINK, SOCK_RAW, minor, &sock);
 	if (err < 0)
@@ -133,19 +133,20 @@ static int netlink_open(struct inode * inode, struct file * file)
 
 out:
 	open_map &= ~(1<<minor);
-	MOD_DEC_USE_COUNT;
 	return err;
 }
 
 static int netlink_release(struct inode * inode, struct file * file)
 {
 	unsigned int minor = MINOR(inode->i_rdev);
-	struct socket *sock = netlink_user[minor];
+	struct socket *sock;
 
+	lock_kernel();
+	sock = netlink_user[minor];
 	netlink_user[minor] = NULL;
 	open_map &= ~(1<<minor);
+	unlock_kernel();
 	sock_release(sock);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -167,6 +168,7 @@ static int netlink_ioctl(struct inode *inode, struct file *file,
 
 
 static struct file_operations netlink_fops = {
+	owner:		THIS_MODULE,
 	llseek:		netlink_lseek,
 	read:		netlink_read,
 	write:		netlink_write,
@@ -176,13 +178,13 @@ static struct file_operations netlink_fops = {
 	release:	netlink_release,
 };
 
-static devfs_handle_t devfs_handle = NULL;
+static devfs_handle_t devfs_handle;
 
 static void __init make_devfs_entries (const char *name, int minor)
 {
-	devfs_register (devfs_handle, name, 0, DEVFS_FL_DEFAULT,
+	devfs_register (devfs_handle, name, DEVFS_FL_DEFAULT,
 			NETLINK_MAJOR, minor,
-			S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			S_IFCHR | S_IRUSR | S_IWUSR,
 			&netlink_fops, NULL);
 }
 
@@ -192,7 +194,7 @@ int __init init_netlink(void)
 		printk(KERN_ERR "netlink: unable to get major %d\n", NETLINK_MAJOR);
 		return -EIO;
 	}
-	devfs_handle = devfs_mk_dir (NULL, "netlink", 7, NULL);
+	devfs_handle = devfs_mk_dir (NULL, "netlink", NULL);
 	/*  Someone tell me the official names for the uppercase ones  */
 	make_devfs_entries ("route", 0);
 	make_devfs_entries ("skip", 1);
@@ -203,7 +205,7 @@ int __init init_netlink(void)
 	make_devfs_entries ("IP6_FW", 13);
 	devfs_register_series (devfs_handle, "tap%u", 16, DEVFS_FL_DEFAULT,
 			       NETLINK_MAJOR, 16,
-			       S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+			       S_IFCHR | S_IRUSR | S_IWUSR,
 			       &netlink_fops, NULL);
 	return 0;
 }

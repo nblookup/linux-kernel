@@ -132,7 +132,13 @@ struct lance_private {
 	int burst_sizes;	      /* ledma SBus burst sizes */
 #endif
 	struct timer_list         multicast_timer;
+	struct net_device *dev;		/* Backpointer */
+	struct lance_private *next_module;
 };
+
+#ifdef MODULE
+static struct lance_private *root_a2065_dev = NULL;
+#endif
 
 #define TX_BUFFS_AVAIL ((lp->tx_old<=lp->tx_new)?\
 			lp->tx_old+lp->tx_ring_mod_mask-lp->tx_new:\
@@ -255,7 +261,7 @@ static int init_restart_lance (struct lance_private *lp)
 		barrier();
 	if ((i == 100) || (ll->rdp & LE_C0_ERR)) {
 		printk ("LANCE unopened after %d ticks, csr0=%4.4x.\n", i, ll->rdp);
-		return -1;
+		return -EIO;
 	}
 
 	/* Clear IDON by writing a "1", enable interrupts and start lance */
@@ -482,14 +488,14 @@ static int lance_open (struct net_device *dev)
 {
 	struct lance_private *lp = (struct lance_private *)dev->priv;
 	volatile struct lance_regs *ll = lp->ll;
-	int status = 0;
+	int ret;
 
 	last_dev = dev;
 
 	/* Install the Interrupt handler */
-	if (request_irq(IRQ_AMIGA_PORTS, lance_interrupt, SA_SHIRQ,
-			"a2065 Ethernet", dev))
-		return -EAGAIN;
+	ret = request_irq(IRQ_AMIGA_PORTS, lance_interrupt, SA_SHIRQ,
+			  dev->name, dev);
+	if (ret) return ret;
 
 	/* Stop the Lance */
 	ll->rap = LE_CSR0;
@@ -500,11 +506,7 @@ static int lance_open (struct net_device *dev)
 
 	netif_start_queue(dev);
 
-	status = init_restart_lance (lp);
-
-	MOD_INC_USE_COUNT;
-
-	return status;
+	return init_restart_lance (lp);
 }
 
 static int lance_close (struct net_device *dev)
@@ -520,9 +522,6 @@ static int lance_close (struct net_device *dev)
 	ll->rdp = LE_C0_STOP;
 
 	free_irq(IRQ_AMIGA_PORTS, dev);
-
-	MOD_DEC_USE_COUNT;
-
 	return 0;
 }
 
@@ -714,18 +713,15 @@ static void lance_set_multicast (struct net_device *dev)
 
 static int __init a2065_probe(void)
 {
-	struct net_device *dev = NULL;
-	static int called = 0;
 	struct zorro_dev *z = NULL;
-
-	if (called)
-		return -ENODEV;
-	called++;
+	struct net_device *dev;
+	struct lance_private *priv;
+	int res = -ENODEV;
 
 	while ((z = zorro_find_device(ZORRO_WILDCARD, z))) {
-		unsigned long board, base_addr, ram_start;
+		unsigned long board, base_addr, mem_start;
+		struct resource *r1, *r2;
 		int is_cbm;
-		struct lance_private *priv;
 
 		if (z->id == ZORRO_PROD_CBM_A2065_1 ||
 		    z->id == ZORRO_PROD_CBM_A2065_2)
@@ -737,35 +733,36 @@ static int __init a2065_probe(void)
 
 		board = z->resource.start;
 		base_addr = board+A2065_LANCE;
-		ram_start = board+A2065_RAM;
+		mem_start = board+A2065_RAM;
 
-		if (!request_mem_region(base_addr, sizeof(struct lance_regs),
-					"Am7990"))
-			continue;
-		if (!request_mem_region(ram_start, A2065_RAM_SIZE, "RAM")) {
-			release_mem_region(base_addr,
-					   sizeof(struct lance_regs));
+		r1 = request_mem_region(base_addr, sizeof(struct lance_regs),
+					"Am7990");
+		if (!r1) continue;
+		r2 = request_mem_region(mem_start, A2065_RAM_SIZE, "RAM");
+		if (!r2) {
+			release_resource(r1);
 			continue;
 		}
-		strcpy(z->name, "A2065 Ethernet Card");
 
 		dev = init_etherdev(NULL, sizeof(struct lance_private));
 
 		if (dev == NULL) {
-			release_mem_region(base_addr,
-					   sizeof(struct lance_regs));
-			release_mem_region(ram_start, A2065_RAM_SIZE);
+			release_resource(r1);
+			release_resource(r2);
 			return -ENOMEM;
 		}
-		priv = (struct lance_private *)dev->priv;
-		memset(priv, 0, sizeof(struct lance_private));
+		SET_MODULE_OWNER(dev);
+		priv = dev->priv;
 
+		r1->name = dev->name;
+		r2->name = dev->name;
+
+		priv->dev = dev;
+		dev->dev_addr[0] = 0x00;
 		if (is_cbm) {				/* Commodore */
-			dev->dev_addr[0] = 0x00;
 			dev->dev_addr[1] = 0x80;
 			dev->dev_addr[2] = 0x10;
 		} else {				/* Ameristar */
-			dev->dev_addr[0] = 0x00;
 			dev->dev_addr[1] = 0x00;
 			dev->dev_addr[2] = 0x9f;
 		}
@@ -778,7 +775,7 @@ static int __init a2065_probe(void)
 		       dev->dev_addr[3], dev->dev_addr[4], dev->dev_addr[5]);
 
 		dev->base_addr = ZTWO_VADDR(base_addr);
-		dev->mem_start = ZTWO_VADDR(ram_start);
+		dev->mem_start = ZTWO_VADDR(mem_start);
 		dev->mem_end = dev->mem_start+A2065_RAM_SIZE;
 
 		priv->ll = (volatile struct lance_regs *)dev->base_addr;
@@ -801,28 +798,38 @@ static int __init a2065_probe(void)
 		dev->set_multicast_list = &lance_set_multicast;
 		dev->dma = 0;
 
+#ifdef MODULE
+		priv->next_module = root_a2065_dev;
+		root_a2065_dev = priv;
+#endif
 		ether_setup(dev);
 		init_timer(&priv->multicast_timer);
 		priv->multicast_timer.data = (unsigned long) dev;
 		priv->multicast_timer.function =
 			(void (*)(unsigned long)) &lance_set_multicast;
 
-		return(0);
+		res = 0;
 	}
-	return(-ENODEV);
+	return res;
 }
 
 
 static void __exit a2065_cleanup(void)
 {
 #ifdef MODULE
-	struct lance_private *priv = (struct lance_private *)a2065_dev.priv;
+	struct lance_private *next;
+	struct net_device *dev;
 
-	unregister_netdev(&a2065_dev);
-	release_mem_region(ZTWO_PADDR(a2065_dev.base_addr),
-			   sizeof(struct lance_regs));
-	release_mem_region(ZTWO_PADDR(a2065_dev.mem_start), A2065_RAM_SIZE);
-	kfree(priv);
+	while (root_a2065_dev) {
+		next = root_a2065_dev->next_module;
+		dev = root_a2065_dev->dev;
+		unregister_netdev(dev);
+		release_mem_region(ZTWO_PADDR(dev->base_addr),
+				   sizeof(struct lance_regs));
+		release_mem_region(ZTWO_PADDR(dev->mem_start), A2065_RAM_SIZE);
+		kfree(dev);
+		root_a2065_dev = next;
+	}
 #endif
 }
 

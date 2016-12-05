@@ -35,6 +35,9 @@ SECTIONS
   __ksymtab  : { *(__ksymtab) }
   __stop___ksymtab = .;
   __kstrtab  : { *(.kstrtab) }
+  __start___kallsyms = .;	/* All kernel symbols */
+  __kallsyms : { *(__kallsyms) }
+  __stop___kallsyms = .;
   . = ALIGN(8192);
   __init_begin = .;
   .text.init : { *(.text.init) }
@@ -74,5 +77,5 @@ SECTIONS
   .debug_pubnames 0 : { *(.debug_pubnames) }
   .debug_sfnames  0 : { *(.debug_sfnames) }
   .line           0 : { *(.line) }
-  /DISCARD/ : { *(.text.exit) *(.data.exit) }
+  /DISCARD/ : { *(.text.exit) *(.data.exit) *(.exitcall.exit) }
 }

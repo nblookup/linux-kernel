@@ -1,4 +1,4 @@
-/* $Id: head.S,v 1.17 1999/12/04 03:58:59 ralf Exp $
+/* $Id: head.S,v 1.18 2000/03/03 22:17:07 kevink Exp $
  *
  * arch/mips/kernel/head.S
  *
@@ -29,7 +29,6 @@
 #include <asm/mipsregs.h>
 #include <asm/stackframe.h>
 #include <asm/bootinfo.h>
-#include <asm/cpu.h>
 
 	.text
 	/*
@@ -101,7 +100,16 @@
 	eret
 	END(except_vec0_r4600)
 
-	/* TLB refill, EXL == 0, R4xx0, non-R4600 version */
+	/* TLB refill, EXL == 0, R52x0 "Nevada" version */
+        /*
+         * This version has a bug workaround for the Nevada.  It seems
+         * as if under certain circumstances the move from cp0_context
+         * might produce a bogus result when the mfc0 instruction and
+         * it's consumer are in a different cacheline or a load instruction,
+         * probably any memory reference, is between them.  This is
+         * potencially slower than the R4000 version, so we use this
+         * special version.
+         */
 	.set	noreorder
 	.set	noat
 	LEAF(except_vec0_nevada)
@@ -122,9 +130,10 @@
 	mtc0	k0, CP0_ENTRYLO0		# load it
 	srl	k1, k1, 6			# convert to entrylo1
 	mtc0	k1, CP0_ENTRYLO1		# load it
+	nop					# QED specified nops
+	nop
 	tlbwr					# write random tlb entry
-	nop
-	nop
+	nop					# traditional nop
 	eret					# return from trap
 	END(except_vec0_nevada)
 
@@ -157,7 +166,7 @@
 	eret
 	END(except_vec0_r45k_bvahwbug)
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	/* TLB refill, EXL == 0, R4000 MP badvaddr hwbug version */
 	LEAF(except_vec0_r4k_mphwbug)
 	.set	mips3
@@ -216,7 +225,7 @@
 	eret
 	END(except_vec0_r4k_250MHZhwbug)
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	/* TLB refill, EXL == 0, R4000 MP 250MHZ entrylo[01]+badvaddr bug version */
 	LEAF(except_vec0_r4k_MP250MHZhwbug)
 	.set	mips3
@@ -393,12 +402,6 @@ NESTED(kernel_entry, 16, sp)
 	EXPORT(stext)
 	EXPORT(_stext)
 
-	/* Determine which MIPS variant we are running on. */
-	b	cpu_probe
-	 nop
-
-probe_done:
-
 	/*
 	 * Stack for kernel and init, current variable
 	 */
@@ -420,166 +423,9 @@ probe_done:
 	bne	t0, t1, 1b
 	 sw	zero, (t0)
 
-	jal	prom_init /* prom_init(argc, argv, envp); */
+	jal	init_arch
 	 nop
-#ifdef CONFIG_SGI_IP22
-	jal	sgi_sysinit
-	 nop
-#endif
-
-#ifdef CONFIG_COBALT_MICRO_SERVER
-	jal	SetUpBootInfo
-	 nop
-#endif
-
-	/*
-	 * Determine the mmu/cache attached to this machine,
-	 * then flush the tlb and caches.  On the r4xx0
-	 * variants this also sets CP0_WIRED to zero.
-	 */
-	jal	loadmmu
-	 nop
-
-	/* Disable coprocessors */
-	mfc0	t0, CP0_STATUS
-	li	t1, ~(ST0_CU1|ST0_CU2|ST0_CU3|ST0_KX|ST0_SX)
-	and	t0, t1
-	or	t0, ST0_CU0
-	mtc0	t0, CP0_STATUS
-
-1:	jal	start_kernel
-	 nop
-	/*
-	 * Main should never return here, but
-	 * just in case, we know what happens.
-	 */
-	b	1b
-	 nop					# delay slot
 	END(kernel_entry)
-
-	/* CPU type probing code, called at Kernel entry. */
-	LEAF(cpu_probe)
-	mfc0	t0, CP0_PRID
-	la	t3, mips_cputype
-	andi	t1, t0, 0xff00
-	li	t2, PRID_IMP_R2000
-	bne	t1, t2, 1f
-	 andi	t0, 0x00ff
-
-	li	t2, CPU_R2000
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R3000
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, PRID_REV_R3000A
-	bne	t0, t2, 9f
-	 nop
-
-	li	t2, CPU_R3000A
-	b	probe_done
-	sw	t2, (t3)
-9:
-	li	t2, CPU_R3000
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R6000
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R6000
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R4000
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, PRID_REV_R4400
-	bne	t0, t2, 9f
-	 nop
-
-	li	t2, CPU_R4400SC
-	b	probe_done
-	 sw	t2, (t3)
-9:
-	li	t2, CPU_R4000SC
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R6000A
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R6000A
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R10000
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R10000
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R8000
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R8000
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R4600
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R4600
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R4700
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R4700
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R4650
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R4650
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R5000
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R5000
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_NEVADA
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_NEVADA
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, CPU_UNKNOWN
-	sw	t2, (t3)
-
-	b	probe_done
-	 nop
-	END(cpu_probe)
 
 /*
  * This buffer is reserved for the use of the cache error handler.

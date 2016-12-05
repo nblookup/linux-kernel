@@ -1,4 +1,4 @@
-/* $Id: hysdn_net.c,v 1.3 2000/02/14 19:24:12 werner Exp $
+/* $Id: hysdn_net.c,v 1.8 2000/11/13 22:51:47 kai Exp $
 
  * Linux driver for HYSDN cards, net (ethernet type) handling routines.
  *
@@ -23,20 +23,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * $Log: hysdn_net.c,v $
- * Revision 1.3  2000/02/14 19:24:12  werner
- *
- * Removed superflous file
- *
- * Revision 1.2  2000/02/13 17:32:19  werner
- *
- * Added support for new network layer of 2.3.43 and 44 kernels and tested driver.
- *
- * Revision 1.1  2000/02/10 19:45:18  werner
- *
- * Initial release
- *
- *
  */
 
 #define __NO_VERSION__
@@ -52,7 +38,7 @@
 #include "hysdn_defs.h"
 
 /* store the actual version for log reporting */
-char *hysdn_net_revision = "$Revision: 1.3 $";
+char *hysdn_net_revision = "$Revision: 1.8 $";
 
 #define MAX_SKB_BUFFERS 20	/* number of buffers for keeping TX-data */
 
@@ -308,7 +294,10 @@ hysdn_net_create(hysdn_card * card)
 {
 	struct net_device *dev;
 	int i;
-
+	if(!card) {
+		printk(KERN_WARNING "No card-pt in hysdn_net_create!\n");
+		return (-ENOMEM);
+	}
 	hysdn_net_release(card);	/* release an existing net device */
 	if ((dev = kmalloc(sizeof(struct net_local), GFP_KERNEL)) == NULL) {
 		printk(KERN_WARNING "HYSDN: unable to allocate mem\n");
@@ -323,7 +312,9 @@ hysdn_net_create(hysdn_card * card)
 	dev->base_addr = card->iobase;	/* IO address */
 	dev->irq = card->irq;	/* irq */
 	dev->init = net_init;	/* the init function of the device */
-	dev->name = ((struct net_local *) dev)->dev_name;	/* device name */
+	if(dev->name) {
+		strcpy(dev->name, ((struct net_local *) dev)->dev_name);
+	} 
 	if ((i = register_netdev(dev))) {
 		printk(KERN_WARNING "HYSDN: unable to create network device\n");
 		kfree(dev);

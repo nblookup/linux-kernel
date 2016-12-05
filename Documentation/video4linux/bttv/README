@@ -1,4 +1,8 @@
 
+IMPORTANT:  Don't send me mails with images attached unless I ask you
+to do so.  Mails with images attached will go to /dev/null unseen.
+
+
 Release notes for bttv-0.7.x
 ============================
 
@@ -17,7 +21,7 @@ CONFIG_I2C=m
 CONFIG_I2C_ALGOBIT=m
 
 The latest bttv version is available here:
-	http://www.in-berlin.de/User/kraxel/v4l/
+	http://www.strusel007.de/linux/bttv/
 
 You'll find Ralphs original (mostly outdated) documentation in the
 ralphs-doc subdirectory.
@@ -27,8 +31,9 @@ Compile bttv
 ------------
 
 If you are compiling the kernel version, just say 'm' if you are asked
-for bttv.  I /strongly/ suggest to compile bttv as module, because
-there are some insmod options for configuring the driver.
+for bttv.  I /strongly/ recommend to compile bttv as module, because
+there are some insmod options for configuring the driver.  Starting
+with 0.7.49 the most important ones are available as kernel args too.
 
 If you downloaded the separate bttv bundle:  You need configured kernel
 sources to compile the bttv driver.  The driver uses some Makefile
@@ -38,6 +43,8 @@ kernel at least once, you probably don't have do worry about this.  If
 not, go to /usr/src/linux and run at least "make config".  Even
 better, compile your own kernel, you'll never become a real hacker
 else ;-)
+Note that you have to turn on video4linux support (CONFIG_VIDEO_DEV)
+in the kernel to get the videodev.o module which is required by bttv.
 
 
 Make bttv work with your card
@@ -66,7 +73,8 @@ correct card type.  If you get video but no sound you've very likely
 specified the wrong (or no) card type.  A list of supported cards is
 in CARDLIST.
 
-If your card isn't listed in CARDLIST, you should read the Sound-FAQ.
+If your card isn't listed in CARDLIST or if you have trouble making
+audio work, you should read the Sound-FAQ.
 
 
 Still doesn't work?
@@ -83,6 +91,13 @@ There is a mailing list: video4linux-list@redhat.com.  If you have
 trouble with some specific TV card, try to ask there instead of
 mailing me directly.  The chance that someone with the same card
 listens there is much higher...
+
+For problems with sound:  There are alot of different systems used
+for TV sound all over the world.  And there are also different chips
+which decode the audio signal.  Reports about sound problems ("stereo
+does'nt work") are pretty useless unless you include some details
+about your hardware and the TV sound scheme used in your country (or
+at least the country you are living in).
 
 
 Finally: If you mail some patches for bttv around the world (to

@@ -187,7 +187,7 @@ static int minix_add_entry(struct inode * dir,
 			for (i = 0; i < info->s_namelen ; i++)
 				de->name[i] = (i < namelen) ? name[i] : 0;
 			dir->i_version = ++event;
-			mark_buffer_dirty(bh, 1);
+			mark_buffer_dirty(bh);
 			*res_dir = de;
 			break;
 		}
@@ -210,10 +210,8 @@ static int minix_create(struct inode * dir, struct dentry *dentry, int mode)
 	struct minix_dir_entry * de;
 
 	inode = minix_new_inode(dir, &error);
-	if (error)
-		return error;
 	if (!inode)
-		return -ENOSPC;
+		return error;
 	inode->i_op = &minix_file_inode_operations;
 	inode->i_fop = &minix_file_operations;
 	inode->i_mapping->a_ops = &minix_aops;
@@ -228,7 +226,7 @@ static int minix_create(struct inode * dir, struct dentry *dentry, int mode)
 		return error;
 	}
 	de->inode = inode->i_ino;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 	d_instantiate(dentry, inode);
 	return 0;
@@ -242,10 +240,8 @@ static int minix_mknod(struct inode * dir, struct dentry *dentry, int mode, int 
 	struct minix_dir_entry * de;
 
 	inode = minix_new_inode(dir, &error);
-	if (error)
-		return error;
 	if (!inode)
-		return -ENOSPC;
+		return error;
 	inode->i_uid = current->fsuid;
 	init_special_inode(inode, mode, rdev);
 	mark_inode_dirty(inode);
@@ -257,7 +253,7 @@ static int minix_mknod(struct inode * dir, struct dentry *dentry, int mode, int 
 		return error;
 	}
 	de->inode = inode->i_ino;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 	d_instantiate(dentry, inode);
 	return 0;
@@ -275,10 +271,8 @@ static int minix_mkdir(struct inode * dir, struct dentry *dentry, int mode)
 	if (dir->i_nlink >= info->s_link_max)
 		return -EMLINK;
 	inode = minix_new_inode(dir, &error);
-	if (error)
-		return error;
 	if (!inode)
-		return -ENOSPC;
+		return error;
 	inode->i_op = &minix_dir_inode_operations;
 	inode->i_fop = &minix_dir_operations;
 	inode->i_size = 2 * info->s_dirsize;
@@ -296,7 +290,7 @@ static int minix_mkdir(struct inode * dir, struct dentry *dentry, int mode)
 	de->inode = dir->i_ino;
 	strcpy(de->name,"..");
 	inode->i_nlink = 2;
-	mark_buffer_dirty(dir_block, 1);
+	mark_buffer_dirty(dir_block);
 	brelse(dir_block);
 	inode->i_mode = S_IFDIR | mode;
 	if (dir->i_mode & S_ISGID)
@@ -310,7 +304,7 @@ static int minix_mkdir(struct inode * dir, struct dentry *dentry, int mode)
 		return error;
 	}
 	de->inode = inode->i_ino;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	dir->i_nlink++;
 	mark_inode_dirty(dir);
 	brelse(bh);
@@ -389,7 +383,6 @@ static int minix_rmdir(struct inode * dir, struct dentry *dentry)
 	if (!bh)
 		goto end_rmdir;
 	inode = dentry->d_inode;
-	DQUOT_INIT(inode);
 
 	if (!empty_dir(inode)) {
 		retval = -ENOTEMPTY;
@@ -399,21 +392,16 @@ static int minix_rmdir(struct inode * dir, struct dentry *dentry)
 		retval = -ENOENT;
 		goto end_rmdir;
 	}
-	if (!d_unhashed(dentry)) {
-		retval = -EBUSY;
-		goto end_rmdir;
-	}
 	if (inode->i_nlink != 2)
 		printk("empty directory has nlink!=2 (%d)\n",inode->i_nlink);
 	de->inode = 0;
 	dir->i_version = ++event;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	inode->i_nlink=0;
 	mark_inode_dirty(inode);
 	inode->i_ctime = dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	dir->i_nlink--;
 	mark_inode_dirty(dir);
-	d_delete(dentry);
 	retval = 0;
 end_rmdir:
 	brelse(bh);
@@ -429,7 +417,6 @@ static int minix_unlink(struct inode * dir, struct dentry *dentry)
 
 	retval = -ENOENT;
 	inode = dentry->d_inode;
-	DQUOT_INIT(inode);
 	bh = minix_find_entry(dir, dentry->d_name.name,
 			      dentry->d_name.len, &de);
 	if (!bh || de->inode != inode->i_ino)
@@ -442,13 +429,12 @@ static int minix_unlink(struct inode * dir, struct dentry *dentry)
 	}
 	de->inode = 0;
 	dir->i_version = ++event;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	mark_inode_dirty(dir);
 	inode->i_nlink--;
 	inode->i_ctime = dir->i_ctime;
 	mark_inode_dirty(inode);
-	d_delete(dentry);	/* This also frees the inode */
 	retval = 0;
 end_unlink:
 	brelse(bh);
@@ -469,9 +455,6 @@ static int minix_symlink(struct inode * dir, struct dentry *dentry,
 	if (i>1024)
 		goto out;
 	inode = minix_new_inode(dir, &err);
-	if (err)
-		goto out;
-	err = -ENOSPC;
 	if (!inode)
 		goto out;
 
@@ -488,7 +471,7 @@ static int minix_symlink(struct inode * dir, struct dentry *dentry,
 		goto fail;
 
 	de->inode = inode->i_ino;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 	d_instantiate(dentry, inode);
 out:
@@ -521,12 +504,12 @@ static int minix_link(struct dentry * old_dentry, struct inode * dir,
 		return error;
 	}
 	de->inode = inode->i_ino;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 	inode->i_nlink++;
 	inode->i_ctime = CURRENT_TIME;
 	mark_inode_dirty(inode);
-	inode->i_count++;
+	atomic_inc(&inode->i_count);
 	d_instantiate(dentry, inode);
 	return 0;
 }
@@ -563,15 +546,10 @@ static int minix_rename(struct inode * old_dir, struct dentry *old_dentry,
 		if (!new_inode) {
 			brelse(new_bh);
 			new_bh = NULL;
-		} else {
-			DQUOT_INIT(new_inode);
 		}
 	}
 	if (S_ISDIR(old_inode->i_mode)) {
 		if (new_inode) {
-			retval = -EBUSY;
-			if (!d_unhashed(new_dentry))
-				goto end_rename;
 			retval = -ENOTEMPTY;
 			if (!empty_dir(new_inode))
 				goto end_rename;
@@ -609,11 +587,11 @@ static int minix_rename(struct inode * old_dir, struct dentry *old_dentry,
 		new_inode->i_ctime = CURRENT_TIME;
 		mark_inode_dirty(new_inode);
 	}
-	mark_buffer_dirty(old_bh, 1);
-	mark_buffer_dirty(new_bh, 1);
+	mark_buffer_dirty(old_bh);
+	mark_buffer_dirty(new_bh);
 	if (dir_bh) {
 		PARENT_INO(dir_bh->b_data) = new_dir->i_ino;
-		mark_buffer_dirty(dir_bh, 1);
+		mark_buffer_dirty(dir_bh);
 		old_dir->i_nlink--;
 		mark_inode_dirty(old_dir);
 		if (new_inode) {

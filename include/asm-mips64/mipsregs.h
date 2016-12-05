@@ -1,4 +1,4 @@
-/* $Id: mipsregs.h,v 1.2 2000/01/17 23:32:47 ralf Exp $
+/* $Id: mipsregs.h,v 1.1 1999/08/18 23:37:51 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -165,42 +165,6 @@ __BUILD_SET_CP0(config,CP0_CONFIG)
 #endif /* defined (_LANGUAGE_ASSEMBLY) */
 
 /*
- * Inline code for use of the ll and sc instructions
- *
- * FIXME: This instruction is only available on MIPS ISA >=2.
- * Since these operations are only being used for atomic operations
- * the easiest workaround for the R[23]00 is to disable interrupts.
- * This fails for R3000 SMP machines which use that many different
- * technologies as replacement that it is difficult to create even
- * just a hook for for all machines to hook into.  The only good
- * thing is that there is currently no R3000 SMP machine on the
- * Linux/MIPS target list ...
- */
-#define load_linked(addr)                                       \
-({                                                              \
-	unsigned int __res;                                     \
-                                                                \
-	__asm__ __volatile__(                                   \
-	"ll\t%0,(%1)"                                           \
-	: "=r" (__res)                                          \
-	: "r" ((unsigned long) (addr)));                        \
-                                                                \
-	__res;                                                  \
-})
-
-#define store_conditional(addr,value)                           \
-({                                                              \
-	int	__res;                                          \
-                                                                \
-	__asm__ __volatile__(                                   \
-	"sc\t%0,(%2)"                                           \
-	: "=r" (__res)                                          \
-	: "0" (value), "r" (addr));                             \
-                                                                \
-	__res;                                                  \
-})
-
-/*
  * Bitfields in the R4xx0 cp0 status register
  */
 #define ST0_IE			0x00000001
@@ -213,6 +177,8 @@ __BUILD_SET_CP0(config,CP0_CONFIG)
 #define ST0_UX			0x00000020
 #define ST0_SX			0x00000040
 #define ST0_KX 			0x00000080
+#define ST0_DE			0x00010000
+#define ST0_CE			0x00020000
 
 /*
  * Status register bits available in all MIPS CPUs.
@@ -234,10 +200,9 @@ __BUILD_SET_CP0(config,CP0_CONFIG)
 #define  STATUSF_IP6		(1   << 14)
 #define  STATUSB_IP7		15
 #define  STATUSF_IP7		(1   << 15)
-#define ST0_DE			0x00010000
-#define ST0_CE			0x00020000
 #define ST0_CH			0x00040000
 #define ST0_SR			0x00100000
+#define ST0_TS			0x00200000
 #define ST0_BEV			0x00400000
 #define ST0_RE			0x02000000
 #define ST0_FR			0x04000000

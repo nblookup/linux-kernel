@@ -70,6 +70,7 @@
 #include <linux/init.h>
 #include <linux/amifdreg.h>
 #include <linux/amifd.h>
+#include <linux/ioport.h>
 
 #include <asm/setup.h>
 #include <asm/uaccess.h>
@@ -127,11 +128,6 @@ MODULE_PARM(fd_def_df0,"l");
 #define DESELECT(mask)  (ciab.prb |= mask)
 #define SELMASK(drive)  (1 << (3 + (drive & 3)))
 
-#define DRIVE(x) ((x) & 3)
-#define PROBE(x) ((x) >> 2) & 1)
-#define TYPE(x)  ((x) >> 3) & 2)
-#define DATA(x)  ((x) >> 5) & 3)
-
 static struct fd_drive_type drive_types[] = {
 /*  code	name	   tr he   rdsz   wrsz sm pc1 pc2 sd  st st*/
 /*  warning: times are now in milliseconds (ms)                    */
@@ -144,7 +140,7 @@ static int num_dr_types = sizeof(drive_types) / sizeof(drive_types[0]);
 
 /* defaults for 3 1/2" HD-Disks */
 static int floppy_sizes[256]={880,880,880,880,720,720,720,720,};
-static int floppy_blocksizes[256]={0,};
+static int floppy_blocksizes[256];
 /* hardsector size assumed to be 512 */
 
 static int amiga_read(int), dos_read(int);
@@ -155,7 +151,7 @@ static struct fd_data_type data_types[] = {
 };
 
 /* current info on each unit */
-static struct amiga_floppy_struct unit[FD_MAX_UNITS] = {{ 0,}};
+static struct amiga_floppy_struct unit[FD_MAX_UNITS];
 
 static struct timer_list flush_track_timer[FD_MAX_UNITS];
 static struct timer_list post_write_timer;
@@ -166,15 +162,15 @@ static int on_attempts;
 /* Synchronization of FDC access */
 /* request loop (trackbuffer) */
 static volatile int fdc_busy = -1;
-static volatile int fdc_nested = 0;
+static volatile int fdc_nested;
 static DECLARE_WAIT_QUEUE_HEAD(fdc_wait);
  
 static DECLARE_WAIT_QUEUE_HEAD(motor_wait);
 
 static volatile int selected = -1;	/* currently selected drive */
 
-static int writepending = 0;
-static int writefromint = 0;
+static int writepending;
+static int writefromint;
 static char *raw_buf;
 
 #define RAW_BUF_SIZE 30000  /* size of raw disk data */
@@ -184,7 +180,7 @@ static char *raw_buf;
  * information to interrupts. They are the data used for the current
  * request.
  */
-static volatile char block_flag = 0;
+static volatile char block_flag;
 static DECLARE_WAIT_QUEUE_HEAD(wait_fd_block);
 
 /* MS-Dos MFM Coding tables (should go quick and easy) */
@@ -1794,17 +1790,26 @@ int __init amiga_floppy_init(void)
 		printk("fd: Unable to get major %d for floppy\n",MAJOR_NR);
 		return -EBUSY;
 	}
-
+	/*
+	 *  We request DSKPTR, DSKLEN and DSKDATA only, because the other
+	 *  floppy registers are too spreaded over the custom register space
+	 */
+	if (!request_mem_region(CUSTOM_PHYSADDR+0x20, 8, "amiflop [Paula]")) {
+		printk("fd: cannot get floppy registers\n");
+		unregister_blkdev(MAJOR_NR,"fd");
+		return -EBUSY;
+	}
 	if ((raw_buf = (char *)amiga_chip_alloc (RAW_BUF_SIZE, "Floppy")) ==
 	    NULL) {
 		printk("fd: cannot get chip mem buffer\n");
+		release_mem_region(CUSTOM_PHYSADDR+0x20, 8);
 		unregister_blkdev(MAJOR_NR,"fd");
 		return -ENOMEM;
 	}
-
 	if (request_irq(IRQ_AMIGA_DSKBLK, fd_block_done, 0, "floppy_dma", NULL)) {
 		printk("fd: cannot get irq for dma\n");
 		amiga_chip_free(raw_buf);
+		release_mem_region(CUSTOM_PHYSADDR+0x20, 8);
 		unregister_blkdev(MAJOR_NR,"fd");
 		return -EBUSY;
 	}
@@ -1812,6 +1817,7 @@ int __init amiga_floppy_init(void)
 		printk("fd: cannot get irq for timer\n");
 		free_irq(IRQ_AMIGA_DSKBLK, NULL);
 		amiga_chip_free(raw_buf);
+		release_mem_region(CUSTOM_PHYSADDR+0x20, 8);
 		unregister_blkdev(MAJOR_NR,"fd");
 		return -EBUSY;
 	}
@@ -1819,24 +1825,22 @@ int __init amiga_floppy_init(void)
 		free_irq(IRQ_AMIGA_CIAA_TB, NULL);
 		free_irq(IRQ_AMIGA_DSKBLK, NULL);
 		amiga_chip_free(raw_buf);
+		release_mem_region(CUSTOM_PHYSADDR+0x20, 8);
 		unregister_blkdev(MAJOR_NR,"fd");
 		return -ENXIO;
 	}
 
 	/* initialize variables */
-	motor_on_timer.next = NULL;
-	motor_on_timer.prev = NULL;
+	init_timer(&motor_on_timer);
 	motor_on_timer.expires = 0;
 	motor_on_timer.data = 0;
 	motor_on_timer.function = motor_on_callback;
 	for (i = 0; i < FD_MAX_UNITS; i++) {
-		motor_off_timer[i].next = NULL;
-		motor_off_timer[i].prev = NULL;
+		init_timer(&motor_off_timer[i]);
 		motor_off_timer[i].expires = 0;
 		motor_off_timer[i].data = i|0x80000000;
 		motor_off_timer[i].function = fd_motor_off;
-		flush_track_timer[i].next = NULL;
-		flush_track_timer[i].prev = NULL;
+		init_timer(&flush_track_timer[i]);
 		flush_track_timer[i].expires = 0;
 		flush_track_timer[i].data = i;
 		flush_track_timer[i].function = flush_track_callback;
@@ -1844,8 +1848,7 @@ int __init amiga_floppy_init(void)
 		unit[i].track = -1;
 	}
 
-	post_write_timer.next = NULL;
-	post_write_timer.prev = NULL;
+	init_timer(&post_write_timer);
 	post_write_timer.expires = 0;
 	post_write_timer.data = 0;
 	post_write_timer.function = post_write;
@@ -1893,6 +1896,7 @@ void cleanup_module(void)
 	blk_size[MAJOR_NR] = NULL;
 	blksize_size[MAJOR_NR] = NULL;
 	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
+	release_mem_region(CUSTOM_PHYSADDR+0x20, 8);
 	unregister_blkdev(MAJOR_NR, "fd");
 }
 #endif

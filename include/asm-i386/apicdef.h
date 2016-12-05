@@ -7,13 +7,16 @@
  * Alan Cox <Alan.Cox@linux.org>, 1995.
  * Ingo Molnar <mingo@redhat.com>, 1999, 2000
  */
-#define		APIC_PHYS_BASE	0xfee00000 /* IA s/w dev Vol 3, Section 7.4 */
+
+#define		APIC_DEFAULT_PHYS_BASE	0xfee00000
  
 #define		APIC_ID		0x20
+#define			APIC_ID_MASK		(0x0F<<24)
 #define			GET_APIC_ID(x)		(((x)>>24)&0x0F)
 #define		APIC_LVR	0x30
+#define			APIC_LVR_MASK		0xFF00FF
 #define			GET_APIC_VERSION(x)	((x)&0xFF)
-#define			GET_APIC_MAXLVT(x)	(((x)>>16)&0x0F)
+#define			GET_APIC_MAXLVT(x)	(((x)>>16)&0xFF)
 #define			APIC_INTEGRATED(x)	((x)&0xF0)
 #define		APIC_TASKPRI	0x80
 #define			APIC_TPRI_MASK		0xFF
@@ -29,8 +32,6 @@
 #define			SET_APIC_LOGICAL_ID(x)	(((x)<<24))
 #define			APIC_ALL_CPUS		0xFF
 #define		APIC_DFR	0xE0
-#define			GET_APIC_DFR(x)		(((x)>>28)&0x0F)
-#define			SET_APIC_DFR(x)		((x)<<28)
 #define		APIC_SPIV	0xF0
 #define		APIC_ISR	0x100
 #define		APIC_TMR	0x180
@@ -47,22 +48,23 @@
 #define			APIC_DEST_SELF		0x40000
 #define			APIC_DEST_ALLINC	0x80000
 #define			APIC_DEST_ALLBUT	0xC0000
-#define			APIC_DEST_RR_MASK	0x30000
-#define			APIC_DEST_RR_INVALID	0x00000
-#define			APIC_DEST_RR_INPROG	0x10000
-#define			APIC_DEST_RR_VALID	0x20000
-#define			APIC_DEST_LEVELTRIG	0x08000
-#define			APIC_DEST_ASSERT	0x04000
-#define			APIC_DEST_BUSY		0x01000
+#define			APIC_ICR_RR_MASK	0x30000
+#define			APIC_ICR_RR_INVALID	0x00000
+#define			APIC_ICR_RR_INPROG	0x10000
+#define			APIC_ICR_RR_VALID	0x20000
+#define			APIC_INT_LEVELTRIG	0x08000
+#define			APIC_INT_ASSERT		0x04000
+#define			APIC_ICR_BUSY		0x01000
 #define			APIC_DEST_LOGICAL	0x00800
-#define			APIC_DEST_DM_FIXED	0x00000
-#define			APIC_DEST_DM_LOWEST	0x00100
-#define			APIC_DEST_DM_SMI	0x00200
-#define			APIC_DEST_DM_REMRD	0x00300
-#define			APIC_DEST_DM_NMI	0x00400
-#define			APIC_DEST_DM_INIT	0x00500
-#define			APIC_DEST_DM_STARTUP	0x00600
-#define			APIC_DEST_VECTOR_MASK	0x000FF
+#define			APIC_DM_FIXED		0x00000
+#define			APIC_DM_LOWEST		0x00100
+#define			APIC_DM_SMI		0x00200
+#define			APIC_DM_REMRD		0x00300
+#define			APIC_DM_NMI		0x00400
+#define			APIC_DM_INIT		0x00500
+#define			APIC_DM_STARTUP		0x00600
+#define			APIC_DM_EXTINT		0x00700
+#define			APIC_VECTOR_MASK	0x000FF
 #define		APIC_ICR2	0x310
 #define			GET_APIC_DEST_FIELD(x)	(((x)>>24)&0xFF)
 #define			SET_APIC_DEST_FIELD(x)	((x)<<24)

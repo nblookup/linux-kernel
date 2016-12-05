@@ -111,7 +111,7 @@ static void __aarp_expire(struct aarp_entry *a)
 	while ((skb=skb_dequeue(&a->packet_queue)) != NULL)
 		kfree_skb(skb);
 
-	kfree_s(a, sizeof(*a));
+	kfree(a);
 }
 
 /*
@@ -1017,7 +1017,10 @@ static int aarp_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_t
 				 * cycle during probing of a slow to respond host addr.
 				 */
 				if (a != NULL)
+				{
 					a->expires_at = jiffies - 1;
+					mod_timer(&aarp_timer, jiffies + sysctl_aarp_tick_time);
+				}
 			}
 
 			if (sa.s_node != ma->s_node)

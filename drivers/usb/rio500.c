@@ -36,6 +36,7 @@
 #include <linux/malloc.h>
 #include <linux/spinlock.h>
 #include <linux/usb.h>
+#include <linux/smp_lock.h>
 
 #include "rio500_usb.h"
 
@@ -44,7 +45,7 @@
 /* stall/wait timeout for rio */
 #define NAK_TIMEOUT (HZ)
 
-#define IBUF_SIZE 128
+#define IBUF_SIZE 0x1000
 
 /* Size of the rio buffer */
 #define OBUF_SIZE 0x10000
@@ -57,6 +58,7 @@ struct rio_usb_data {
         char *obuf, *ibuf;              /* transfer buffers */
         char bulk_in_ep, bulk_out_ep;   /* Endpoint assignments */
         wait_queue_head_t wait_q;       /* for timeouts */
+	struct semaphore lock;          /* general race avoidance */
 };
 
 static struct rio_usb_data rio_instance;
@@ -65,7 +67,10 @@ static int open_rio(struct inode *inode, struct file *file)
 {
 	struct rio_usb_data *rio = &rio_instance;
 
+	lock_kernel();
+
 	if (rio->isopen || !rio->present) {
+		unlock_kernel();
 		return -EBUSY;
 	}
 	rio->isopen = 1;
@@ -73,6 +78,8 @@ static int open_rio(struct inode *inode, struct file *file)
 	init_waitqueue_head(&rio->wait_q);
 
 	MOD_INC_USE_COUNT;
+
+	unlock_kernel();
 
 	info("Rio opened.");
 
@@ -101,6 +108,7 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 	unsigned char *buffer;
 	int result, requesttype;
 	int retries;
+	int retval;
 
         /* Sanity check to make sure rio is connected, powered, etc */
         if ( rio == NULL ||
@@ -113,15 +121,22 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 		data = (void *) arg;
 		if (data == NULL)
 			break;
-		copy_from_user_ret(&rio_cmd, data, sizeof(struct RioCommand),
-				   -EFAULT);
-		if (rio_cmd.length > PAGE_SIZE)
-			return -EINVAL;
+		if (copy_from_user(&rio_cmd, data, sizeof(struct RioCommand))) {
+			retval = -EFAULT;
+			goto err_out;
+		}
+		if (rio_cmd.length > PAGE_SIZE) {
+			retval = -EINVAL;
+			goto err_out;
+		}
 		buffer = (unsigned char *) __get_free_page(GFP_KERNEL);
 		if (buffer == NULL)
 			return -ENOMEM;
-		copy_from_user_ret(buffer, rio_cmd.buffer, rio_cmd.length,
-				   -EFAULT);
+		if (copy_from_user(buffer, rio_cmd.buffer, rio_cmd.length)) {
+			retval = -EFAULT;
+			free_page((unsigned long) buffer);
+			goto err_out;
+		}
 
 		requesttype = rio_cmd.requesttype | USB_DIR_IN |
 		    USB_TYPE_VENDOR | USB_RECIP_DEVICE;
@@ -131,6 +146,7 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 		     rio_cmd.index, rio_cmd.length);
 		/* Send rio control message */
 		retries = 3;
+		down(&(rio->lock));
 		while (retries) {
 			result = usb_control_msg(rio->rio_dev,
 						 usb_rcvctrlpipe(rio-> rio_dev, 0),
@@ -150,8 +166,13 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 				dbg("Executed ioctl. Result = %d (data=%04x)",
 				     le32_to_cpu(result),
 				     le32_to_cpu(*((long *) buffer)));
-				copy_to_user_ret(rio_cmd.buffer, buffer,
-						 rio_cmd.length, -EFAULT);
+				if (copy_to_user(rio_cmd.buffer, buffer,
+						 rio_cmd.length)) {
+					up(&(rio->lock));
+					free_page((unsigned long) buffer);
+					retval = -EFAULT;
+					goto err_out;
+				}
 				retries = 0;
 			}
 
@@ -163,6 +184,7 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 			   be swapped at the app level */
 
 		}
+		up(&(rio->lock));
 		free_page((unsigned long) buffer);
 		break;
 
@@ -170,15 +192,17 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 		data = (void *) arg;
 		if (data == NULL)
 			break;
-		copy_from_user_ret(&rio_cmd, data, sizeof(struct RioCommand),
-				   -EFAULT);
+		if (copy_from_user(&rio_cmd, data, sizeof(struct RioCommand)))
+			return -EFAULT;
 		if (rio_cmd.length > PAGE_SIZE)
 			return -EINVAL;
 		buffer = (unsigned char *) __get_free_page(GFP_KERNEL);
 		if (buffer == NULL)
 			return -ENOMEM;
-		copy_from_user_ret(buffer, rio_cmd.buffer, rio_cmd.length,
-				   -EFAULT);
+		if (copy_from_user(buffer, rio_cmd.buffer, rio_cmd.length)) {
+			free_page((unsigned long)buffer);
+			return -EFAULT;
+		}
 
 		requesttype = rio_cmd.requesttype | USB_DIR_OUT |
 		    USB_TYPE_VENDOR | USB_RECIP_DEVICE;
@@ -187,6 +211,7 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 		     rio_cmd.index, rio_cmd.length);
 		/* Send rio control message */
 		retries = 3;
+		down(&(rio->lock));
 		while (retries) {
 			result = usb_control_msg(rio->rio_dev,
 						 usb_sndctrlpipe(rio-> rio_dev, 0),
@@ -210,6 +235,7 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 			}
 
 		}
+		up(&(rio->lock));
 		free_page((unsigned long) buffer);
 		break;
 
@@ -219,6 +245,9 @@ ioctl_rio(struct inode *inode, struct file *file, unsigned int cmd,
 	}
 
 	return 0;
+
+err_out:
+	return retval;
 }
 
 static ssize_t
@@ -233,6 +262,7 @@ write_rio(struct file *file, const char *buffer,
 
 	int result = 0;
 	int maxretry;
+	int errn = 0;
 
         /* Sanity check to make sure rio is connected, powered, etc */
         if ( rio == NULL ||
@@ -240,19 +270,26 @@ write_rio(struct file *file, const char *buffer,
              rio->rio_dev == NULL )
           return -1;
 
+	down(&(rio->lock));
+
 	do {
 		unsigned long thistime;
 		char *obuf = rio->obuf;
 
 		thistime = copy_size =
 		    (count >= OBUF_SIZE) ? OBUF_SIZE : count;
-		if (copy_from_user(rio->obuf, buffer, copy_size))
-			return -EFAULT;
+		if (copy_from_user(rio->obuf, buffer, copy_size)) {
+			errn = -EFAULT;
+			goto error;
+		}
 		maxretry = 5;
 		while (thistime) {
-			if (!rio->rio_dev)
-				return -ENODEV;
+			if (!rio->rio_dev) {
+				errn = -ENODEV;
+				goto error;
+			}
 			if (signal_pending(current)) {
+				up(&(rio->lock));
 				return bytes_written ? bytes_written : -EINTR;
 			}
 
@@ -265,7 +302,8 @@ write_rio(struct file *file, const char *buffer,
 
 			if (result == USB_ST_TIMEOUT) {	/* NAK - so hold for a while */
 				if (!maxretry--) {
-					return -ETIME;
+					errn = -ETIME;
+					goto error;
 				}
 				interruptible_sleep_on_timeout(&rio-> wait_q, NAK_TIMEOUT);
 				continue;
@@ -277,14 +315,21 @@ write_rio(struct file *file, const char *buffer,
 		};
 		if (result) {
 			err("Write Whoops - %x", result);
-			return -EIO;
+			errn = -EIO;
+			goto error;
 		}
 		bytes_written += copy_size;
 		count -= copy_size;
 		buffer += copy_size;
 	} while (count > 0);
 
+	up(&(rio->lock));
+
 	return bytes_written ? bytes_written : -EIO;
+
+error:
+	up(&(rio->lock));
+	return errn;
 }
 
 static ssize_t
@@ -306,18 +351,23 @@ read_rio(struct file *file, char *buffer, size_t count, loff_t * ppos)
 
 	read_count = 0;
 
+	down(&(rio->lock));
+
 	while (count > 0) {
 		if (signal_pending(current)) {
+			up(&(rio->lock));
 			return read_count ? read_count : -EINTR;
 		}
-		if (!rio->rio_dev)
+		if (!rio->rio_dev) {
+			up(&(rio->lock));
 			return -ENODEV;
+		}
 		this_read = (count >= IBUF_SIZE) ? IBUF_SIZE : count;
 
 		result = usb_bulk_msg(rio->rio_dev,
 				      usb_rcvbulkpipe(rio->rio_dev, 1),
 				      ibuf, this_read, &partial,
-				      (int) (HZ * .1));
+				      (int) (HZ * 8));
 
 		dbg(KERN_DEBUG "read stats: result:%d this_read:%u partial:%u",
 		       result, this_read, partial);
@@ -326,6 +376,7 @@ read_rio(struct file *file, char *buffer, size_t count, loff_t * ppos)
 			count = this_read = partial;
 		} else if (result == USB_ST_TIMEOUT || result == 15) {	/* FIXME: 15 ??? */
 			if (!maxretry--) {
+				up(&(rio->lock));
 				err("read_rio: maxretry timeout");
 				return -ETIME;
 			}
@@ -333,36 +384,33 @@ read_rio(struct file *file, char *buffer, size_t count, loff_t * ppos)
 						       NAK_TIMEOUT);
 			continue;
 		} else if (result != USB_ST_DATAUNDERRUN) {
+			up(&(rio->lock));
 			err("Read Whoops - result:%u partial:%u this_read:%u",
 			     result, partial, this_read);
 			return -EIO;
 		} else {
+			unlock_kernel();
 			return (0);
 		}
 
 		if (this_read) {
-			if (copy_to_user(buffer, ibuf, this_read))
+			if (copy_to_user(buffer, ibuf, this_read)) {
+				up(&(rio->lock));
 				return -EFAULT;
+			}
 			count -= this_read;
 			read_count += this_read;
 			buffer += this_read;
 		}
 	}
+	up(&(rio->lock));
 	return read_count;
 }
 
-static void *probe_rio(struct usb_device *dev, unsigned int ifnum)
+static void *probe_rio(struct usb_device *dev, unsigned int ifnum,
+		       const struct usb_device_id *id)
 {
 	struct rio_usb_data *rio = &rio_instance;
-
-	if (dev->descriptor.idVendor != 0x841) {
-		return NULL;
-	}
-
-	if (dev->descriptor.idProduct != 0x1 /* RIO 500 */ ) {
-		warn(KERN_INFO "Rio player model not supported/tested.");
-		return NULL;
-	}
 
 	info("USB Rio found at address %d", dev->devnum);
 
@@ -381,6 +429,8 @@ static void *probe_rio(struct usb_device *dev, unsigned int ifnum)
 		return NULL;
 	}
 	dbg("probe_rio: ibuf address:%p", rio->ibuf);
+
+	init_MUTEX(&(rio->lock));
 
 	return rio;
 }
@@ -405,28 +455,27 @@ static void disconnect_rio(struct usb_device *dev, void *ptr)
 
 static struct
 file_operations usb_rio_fops = {
-	NULL,			/* seek */
-	read_rio,
-	write_rio,
-	NULL,			/* readdir */
-	NULL,			/* poll */
-	ioctl_rio,		/* ioctl */
-	NULL,			/* mmap */
-	open_rio,
-	NULL,			/* flush */
-	close_rio,
-	NULL,
-	NULL,			/* fasync */
+	read:		read_rio,
+	write:		write_rio,
+	ioctl:		ioctl_rio,
+	open:		open_rio,
+	release:	close_rio,
 };
 
-static struct
-usb_driver rio_driver = {
-	"rio500",
-	probe_rio,
-	disconnect_rio,
-	{NULL, NULL},
-	&usb_rio_fops,
-	RIO_MINOR
+static struct usb_device_id rio_table [] = {
+	{ USB_DEVICE(0x0841, 1) }, 		/* Rio 500 */
+	{ }					/* Terminating entry */
+};
+
+MODULE_DEVICE_TABLE (usb, rio_table);
+
+static struct usb_driver rio_driver = {
+	name:		"rio500",
+	probe:		probe_rio,
+	disconnect:	disconnect_rio,
+	fops:		&usb_rio_fops,
+	minor:		RIO_MINOR,
+	id_table:	rio_table,
 };
 
 int usb_rio_init(void)
@@ -452,3 +501,5 @@ void usb_rio_cleanup(void)
 module_init(usb_rio_init);
 module_exit(usb_rio_cleanup);
 
+MODULE_AUTHOR("Cesar Miquel <miquel@df.uba.ar>");
+MODULE_DESCRIPTION("USB Rio 500 driver");

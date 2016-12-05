@@ -152,33 +152,6 @@ fix:
 
 extern int do_check_pgt_cache(int, int);
 
-extern inline void set_pgdir(unsigned long address, pgd_t entry)
-{
-	struct task_struct * p;
-	pgd_t *pgd;
-#ifdef __SMP__
-	int i;
-#endif	
-
-	read_lock(&tasklist_lock);
-	for_each_task(p) {
-		if (!p->mm)
-			continue;
-		*pgd_offset(p->mm,address) = entry;
-	}
-	read_unlock(&tasklist_lock);
-#ifndef __SMP__
-	for (pgd = (pgd_t *)pgd_quicklist; pgd; pgd = (pgd_t *)*(unsigned long *)pgd)
-		pgd[address >> PGDIR_SHIFT] = entry;
-#else
-	/* To pgd_alloc/pgd_free, one holds master kernel lock and so does our callee, so we can
-	   modify pgd caches of other CPUs as well. -jj */
-	for (i = 0; i < NR_CPUS; i++)
-		for (pgd = (pgd_t *)cpu_data[i].pgd_quick; pgd; pgd = (pgd_t *)*(unsigned long *)pgd)
-			pgd[address >> PGDIR_SHIFT] = entry;
-#endif
-}
-
 /*
  * TLB flushing:
  *
@@ -193,7 +166,7 @@ extern inline void set_pgdir(unsigned long address, pgd_t entry)
  * and page-granular flushes are available only on i486 and up.
  */
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 
 #define flush_tlb() __flush_tlb()
 #define flush_tlb_all() __flush_tlb_all()
@@ -240,7 +213,6 @@ static inline void flush_tlb_range(struct mm_struct * mm, unsigned long start, u
 
 #define TLBSTATE_OK	1
 #define TLBSTATE_LAZY	2
-#define TLBSTATE_OLD	3
 
 struct tlb_state
 {

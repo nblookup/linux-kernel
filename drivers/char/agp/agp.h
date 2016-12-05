@@ -31,6 +31,7 @@ enum aper_size_type {
 	U8_APER_SIZE,
 	U16_APER_SIZE,
 	U32_APER_SIZE,
+	LVL2_APER_SIZE,
 	FIXED_APER_SIZE
 };
 
@@ -62,6 +63,12 @@ typedef struct _aper_size_info_32 {
 	int page_order;
 	u32 size_value;
 } aper_size_info_32;
+
+typedef struct _aper_size_info_lvl2 {
+	int size;
+	int num_entries;
+	u32 size_value;
+} aper_size_info_lvl2;
 
 typedef struct _aper_size_info_fixed {
 	int size;
@@ -124,18 +131,18 @@ struct agp_bridge_data {
 #define A_SIZE_8(x)	((aper_size_info_8 *) x)
 #define A_SIZE_16(x)	((aper_size_info_16 *) x)
 #define A_SIZE_32(x)	((aper_size_info_32 *) x)
+#define A_SIZE_LVL2(x)  ((aper_size_info_lvl2 *) x)
 #define A_SIZE_FIX(x)	((aper_size_info_fixed *) x)
 #define A_IDX8()	(A_SIZE_8(agp_bridge.aperture_sizes) + i)
 #define A_IDX16()	(A_SIZE_16(agp_bridge.aperture_sizes) + i)
 #define A_IDX32()	(A_SIZE_32(agp_bridge.aperture_sizes) + i)
+#define A_IDXLVL2()	(A_SIZE_LVL2(agp_bridge.aperture_sizes) + i)
 #define A_IDXFIX()	(A_SIZE_FIX(agp_bridge.aperture_sizes) + i)
 #define MAXKEY		(4096 * 32)
 
 #ifndef min
 #define min(a,b)	(((a)<(b))?(a):(b))
 #endif
-
-#define arraysize(x)            (sizeof(x)/sizeof(*(x)))
 
 #define AGPGART_MODULE_NAME	"agpgart"
 #define PFX			AGPGART_MODULE_NAME ": "
@@ -145,11 +152,20 @@ struct agp_bridge_data {
 #ifndef PCI_DEVICE_ID_VIA_82C691_0
 #define PCI_DEVICE_ID_VIA_82C691_0      0x0691
 #endif
-#ifndef PCI_DEVICE_ID_VIA_82C691_1
-#define PCI_DEVICE_ID_VIA_82C691_1      0x8691
+#ifndef PCI_DEVICE_ID_VIA_8371_0
+#define PCI_DEVICE_ID_VIA_8371_0      0x0391
+#endif
+#ifndef PCI_DEVICE_ID_VIA_8363_0
+#define PCI_DEVICE_ID_VIA_8363_0      0x0305
 #endif
 #ifndef PCI_DEVICE_ID_INTEL_810_0
 #define PCI_DEVICE_ID_INTEL_810_0       0x7120
+#endif
+#ifndef PCI_DEVICE_ID_INTEL_840_0
+#define PCI_DEVICE_ID_INTEL_840_0		0x1a21
+#endif
+#ifndef PCI_DEVICE_ID_INTEL_850_0
+#define PCI_DEVICE_ID_INTEL_850_0     0x2530
 #endif
 #ifndef PCI_DEVICE_ID_INTEL_810_DC100_0
 #define PCI_DEVICE_ID_INTEL_810_DC100_0 0x7122
@@ -168,6 +184,12 @@ struct agp_bridge_data {
 #endif
 #ifndef PCI_DEVICE_ID_INTEL_810_E_1
 #define PCI_DEVICE_ID_INTEL_810_E_1     0x7125
+#endif
+#ifndef PCI_DEVICE_ID_INTEL_815_0
+#define PCI_DEVICE_ID_INTEL_815_0       0x1130
+#endif
+#ifndef PCI_DEVICE_ID_INTEL_815_1
+#define PCI_DEVICE_ID_INTEL_815_1       0x1132
 #endif
 #ifndef PCI_DEVICE_ID_INTEL_82443GX_1
 #define PCI_DEVICE_ID_INTEL_82443GX_1   0x71a1
@@ -189,6 +211,14 @@ struct agp_bridge_data {
 #define INTEL_AGPCTRL   0xb0
 #define INTEL_NBXCFG    0x50
 #define INTEL_ERRSTS    0x91
+
+/* intel i840 registers */
+#define INTEL_I840_MCHCFG   0x50
+#define INTEL_I840_ERRSTS	0xc8
+
+/* intel i850 registers */
+#define INTEL_I850_MCHCFG   0x50
+#define INTEL_I850_ERRSTS   0xc8
 
 /* intel i810 registers */
 #define I810_GMADDR 0x10

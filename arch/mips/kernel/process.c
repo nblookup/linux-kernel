@@ -34,16 +34,14 @@
 void cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
-	current->priority = 0;
+	current->nice = 20;
 	current->counter = -100;
 	init_idle();
 
 	while (1) {
 		while (!current->need_resched)
-			if (wait_available)
-				__asm__(".set\tmips3\n\t"
-					"wait\n\t"
-					".set\tmips0");
+			if (cpu_wait)
+				(*cpu_wait)();
 		schedule();
 		check_pgt_cache();
 	}
@@ -74,6 +72,7 @@ void flush_thread(void)
 }
 
 int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
+		 unsigned long unused,
                  struct task_struct * p, struct pt_regs * regs)
 {
 	struct pt_regs * childregs;

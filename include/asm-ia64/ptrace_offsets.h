@@ -13,10 +13,12 @@
  *		struct ia64_fpreg fph[96];		// f32-f127
  *		struct switch_stack sw;
  *		struct pt_regs pt;
- *		unsigned long rsvd1[358];
+ *		unsigned long rsvd1[712];
  *		unsigned long dbr[8];
- *		unsigned long rsvd2[252];
+ *		unsigned long rsvd2[504];
  *		unsigned long ibr[8];
+ *		unsigned long rsvd3[504];
+ *		unsigned long pmd[4];
  *	}
  */
 
@@ -118,8 +120,8 @@
 #define PT_F126			0x05e0
 #define PT_F127			0x05f0
 /* switch stack: */
-#define PT_CALLER_UNAT		0x0600
-#define PT_KERNEL_FPSR		0x0608
+#define PT_NAT_BITS		0x0600
+
 #define PT_F2			0x0610
 #define PT_F3			0x0620
 #define PT_F4			0x0630
@@ -150,22 +152,20 @@
 #define PT_R5			0x07b8
 #define PT_R6			0x07c0
 #define PT_R7			0x07c8
-#define PT_K_B0			0x07d0
+
 #define PT_B1			0x07d8
 #define PT_B2			0x07e0
 #define PT_B3			0x07e8
 #define PT_B4			0x07f0
 #define PT_B5			0x07f8
-#define PT_K_AR_PFS		0x0800
+
+#define PT_AR_EC		0x0800
 #define PT_AR_LC		0x0808
-#define PT_K_AR_UNAT		0x0810
-#define PT_K_AR_RNAT		0x0818
-#define PT_K_AR_BSPSTORE	0x0820
-#define PT_K_PR			0x0828
+
 /* pt_regs */
 #define PT_CR_IPSR		0x0830
 #define PT_CR_IIP		0x0838
-#define PT_CR_IFS		0x0840
+#define PT_CFM			0x0840
 #define PT_AR_UNAT		0x0848
 #define PT_AR_PFS		0x0850
 #define PT_AR_RSC		0x0858
@@ -212,5 +212,6 @@
 
 #define PT_DBR			0x2000	/* data breakpoint registers */
 #define PT_IBR			0x3000	/* instruction breakpoint registers */
+#define PT_PMD			0x4000	/* performance monitoring counters */
 
 #endif /* _ASM_IA64_PTRACE_OFFSETS_H */

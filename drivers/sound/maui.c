@@ -14,6 +14,8 @@
  *		Alan Cox		General clean up, use kernel IRQ 
  *					system
  *		Christoph Hellwig	Adapted to module_init/module_exit
+ *		Bartlomiej Zolnierkiewicz
+ *					Added __init to download_code()
  *
  *	Status:
  *		Andrew J. Kroll		Tested 06/01/1999 with:
@@ -30,7 +32,6 @@
 #define USE_SIMPLE_MACROS
 
 #include "sound_config.h"
-#include "soundmodule.h"
 #include "sound_firmware.h"
 
 #include "mpu401.h"
@@ -105,7 +106,7 @@ static void mauiintr(int irq, void *dev_id, struct pt_regs *dummy)
 	irq_ok = 1;
 }
 
-static int download_code(void)
+static int __init download_code(void)
 {
 	int i, lines = 0;
 	int eol_seen = 0, done = 0;
@@ -375,7 +376,7 @@ static void __init attach_maui(struct address_info *hw_config)
 
 	hw_config->irq *= -1;
 	hw_config->name = "Maui";
-	attach_mpu401(hw_config);
+	attach_mpu401(hw_config, THIS_MODULE);
 
 	if (hw_config->slots[1] != -1)	/* The MPU401 driver installed itself */ {
 		struct synth_operations *synth;
@@ -443,7 +444,7 @@ static int __init init_maui(void)
 	if (probe_maui(&cfg) == 0)
 		return -ENODEV;
 	attach_maui(&cfg);
-	SOUND_LOCK;
+
 	return 0;
 }
 
@@ -452,7 +453,6 @@ static void __exit cleanup_maui(void)
 	if (fw_load && maui_os)
 		vfree(maui_os);
 	unload_maui(&cfg);
-	SOUND_LOCK_END;
 }
 
 module_init(init_maui);

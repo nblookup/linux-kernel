@@ -38,10 +38,9 @@
  *			Joerg(DL1BKE)	Moved BPQ Ethernet driver to separate device.
  *	AX.25 035	Frederic(F1OAT)	Support for pseudo-digipeating.
  *			Jonathan(G4KLX)	Support for packet forwarding.
+ *			Arnaldo C. Melo s/suser/capable/
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -63,8 +62,9 @@
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
+#include <linux/init.h>
 
-static ax25_route *ax25_route_list = NULL;
+static ax25_route *ax25_route_list;
 
 static ax25_route *ax25_find_route(ax25_address *, struct net_device *);
 
@@ -363,7 +363,7 @@ int ax25_rt_autobind(ax25_cb *ax25, ax25_address *addr)
 		return -EHOSTUNREACH;
 
 	if ((call = ax25_findbyuid(current->euid)) == NULL) {
-		if (ax25_uid_policy && !suser())
+		if (ax25_uid_policy && !capable(CAP_NET_BIND_SERVICE))
 			return -EPERM;
 		call = (ax25_address *)ax25->ax25_dev->dev->dev_addr;
 	}
@@ -373,7 +373,7 @@ int ax25_rt_autobind(ax25_cb *ax25, ax25_address *addr)
 	if (ax25_rt->digipeat != NULL) {
 		if ((ax25->digipeat = kmalloc(sizeof(ax25_digi), GFP_ATOMIC)) == NULL)
 			return -ENOMEM;
-		*ax25->digipeat = *ax25_rt->digipeat;
+		memcpy(ax25->digipeat, ax25_rt->digipeat, sizeof(ax25_digi));
 		ax25_adjust_path(addr, ax25->digipeat);
 	}
 
@@ -433,12 +433,10 @@ struct sk_buff *ax25_rt_build_path(struct sk_buff *skb, ax25_address *src, ax25_
 	return skb;
 }
 
-#ifdef MODULE
-
 /*
  *	Free all memory associated with routing structures.
  */
-void ax25_rt_free(void)
+void __exit ax25_rt_free(void)
 {
 	ax25_route *s, *ax25_rt = ax25_route_list;
 
@@ -452,7 +450,3 @@ void ax25_rt_free(void)
 		kfree(s);
 	}
 }
-
-#endif
-
-#endif

@@ -1,22 +1,15 @@
+/* 
+ * Low Level Driver for the IBM Microchannel SCSI Subsystem
+ * (Headerfile, see README.ibmmca for description of the IBM MCA SCSI-driver
+ * For use under the GNU public license within the Linux-kernel project.
+ * This include file works only correctly with kernel 2.4.0 or higher!!! */
+
 #ifndef _IBMMCA_H
 #define _IBMMCA_H
 
-#ifndef LINUX_VERSION_CODE
-#include <linux/version.h>
-#endif
-
-#ifndef ibmmca_header_linux_version
-#define ibmmca_header_linux_version(v,p,s) (((v)<<16)+((p)<<8)+(s))
-#endif
-
-/* 
- * Low Level Driver for the IBM Microchannel SCSI Subsystem
- * (Headerfile, see README.ibmmca for description of the IBM MCA SCSI-driver)
- */
-
 /* Common forward declarations for all Linux-versions: */
 
-/*services provided to the higher level of Linux SCSI driver */
+/* Interfaces to the midlevel Linux SCSI driver */
 extern int ibmmca_proc_info (char *, char **, off_t, int, int, int);
 extern int ibmmca_detect (Scsi_Host_Template *);
 extern int ibmmca_release (struct Scsi_Host *);
@@ -27,6 +20,7 @@ extern int ibmmca_reset (Scsi_Cmnd *, unsigned int);
 extern int ibmmca_biosparam (Disk *, kdev_t, int *);
 
 /*structure for /proc filesystem */
+extern struct proc_dir_entry proc_scsi_ibmmca;
 
 /*
  * 2/8/98
@@ -34,7 +28,7 @@ extern int ibmmca_biosparam (Disk *, kdev_t, int *);
  * the old format.  Please ask eric@andante.jic.com if you have any questions
  * about this, but it will break things in the future.
  */
-#define IBMMCA {						      \
+#define IBMMCA {                                                      \
           proc_name:      "ibmmca",             /*proc_name*/         \
 	  proc_info:	  ibmmca_proc_info,     /*proc info fn*/      \
           name:           "IBM SCSI-Subsystem", /*name*/              \

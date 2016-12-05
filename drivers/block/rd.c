@@ -59,6 +59,7 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/devfs_fs_kernel.h>
+#include <linux/smp_lock.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -98,8 +99,8 @@ static unsigned long rd_length[NUM_RAMDISKS];	/* Size of RAM disks in bytes   */
 static int rd_hardsec[NUM_RAMDISKS];		/* Size of real blocks in bytes */
 static int rd_blocksizes[NUM_RAMDISKS];		/* Size of 1024 byte blocks :)  */
 static int rd_kbsize[NUM_RAMDISKS];		/* Size in blocks of 1024 bytes */
-static devfs_handle_t devfs_handle = NULL;
-static struct inode *rd_inode[NUM_RAMDISKS];		/* Protected device inodes */
+static devfs_handle_t devfs_handle;
+static struct inode *rd_inode[NUM_RAMDISKS];	/* Protected device inodes */
 
 /*
  * Parameters for the boot-loading of the RAM disk.  These are set by
@@ -107,7 +108,7 @@ static struct inode *rd_inode[NUM_RAMDISKS];		/* Protected device inodes */
  * architecture-specific setup routine (from the stored boot sector
  * information). 
  */
-int rd_size = 4096;		/* Size of the RAM disks */
+int rd_size = CONFIG_BLK_DEV_RAM_SIZE;		/* Size of the RAM disks */
 /*
  * It would be very desiderable to have a soft-blocksize (that in the case
  * of the ramdisk driver is also the hardblocksize ;) of PAGE_SIZE because
@@ -119,7 +120,7 @@ int rd_size = 4096;		/* Size of the RAM disks */
  * behaviour. The default is still BLOCK_SIZE (needed by rd_load_image that
  * supposes the filesystem in the image uses a BLOCK_SIZE blocksize).
  */
-int rd_blocksize = BLOCK_SIZE;	/* Size of the RAM disks */
+int rd_blocksize = BLOCK_SIZE;			/* blocksize of the RAM disks */
 
 #ifndef MODULE
 
@@ -193,50 +194,53 @@ __setup("ramdisk_blocksize=", ramdisk_blocksize);
  * 19-JAN-1998  Richard Gooch <rgooch@atnf.csiro.au>  Added devfs support
  *
  */
-static void rd_request(request_queue_t * q)
+static int rd_make_request(request_queue_t * q, int rw, struct buffer_head *sbh)
 {
 	unsigned int minor;
 	unsigned long offset, len;
 	struct buffer_head *rbh;
-	struct buffer_head *sbh;
+	char *bdata;
 
-repeat:
-	INIT_REQUEST;
 	
-	minor = MINOR(CURRENT->rq_dev);
+	minor = MINOR(sbh->b_rdev);
 
-	if (minor >= NUM_RAMDISKS) {
-		end_request(0);
-		goto repeat;
-	}
+	if (minor >= NUM_RAMDISKS)
+		goto fail;
+
 	
-	offset = CURRENT->sector << 9;
-	len = CURRENT->current_nr_sectors << 9;
+	offset = sbh->b_rsector << 9;
+	len = sbh->b_size;
 
-	if ((offset + len) > rd_length[minor]) {
-		end_request(0);
-		goto repeat;
+	if ((offset + len) > rd_length[minor])
+		goto fail;
+
+	if (rw==READA)
+		rw=READ;
+	if ((rw != READ) && (rw != WRITE)) {
+		printk(KERN_INFO "RAMDISK: bad command: %d\n", rw);
+		goto fail;
 	}
 
-	if ((CURRENT->cmd != READ) && (CURRENT->cmd != WRITE)) {
-		printk(KERN_INFO "RAMDISK: bad command: %d\n", CURRENT->cmd);
-		end_request(0);
-		goto repeat;
-	}
-
-	sbh = CURRENT->bh;
-	rbh = getblk(sbh->b_dev, sbh->b_blocknr, sbh->b_size);
-	if (CURRENT->cmd == READ) {
+	rbh = getblk(sbh->b_rdev, sbh->b_rsector/(sbh->b_size>>9), sbh->b_size);
+	/* I think that it is safe to assume that rbh is not in HighMem, though
+	 * sbh might be - NeilBrown
+	 */
+	bdata = bh_kmap(sbh);
+	if (rw == READ) {
 		if (sbh != rbh)
-			memcpy(CURRENT->buffer, rbh->b_data, rbh->b_size);
+			memcpy(bdata, rbh->b_data, rbh->b_size);
 	} else
 		if (sbh != rbh)
-			memcpy(rbh->b_data, CURRENT->buffer, rbh->b_size);
+			memcpy(rbh->b_data, bdata, rbh->b_size);
+	bh_kunmap(sbh);
 	mark_buffer_protected(rbh);
 	brelse(rbh);
 
-	end_request(1);
-	goto repeat;
+	sbh->b_end_io(sbh,1);
+	return 0;
+ fail:
+	sbh->b_end_io(sbh,0);
+	return 0;
 } 
 
 static int rd_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
@@ -298,11 +302,14 @@ static int initrd_release(struct inode *inode,struct file *file)
 {
 	extern void free_initrd_mem(unsigned long, unsigned long);
 
-	if (--initrd_users) return 0;
-	blkdev_put(inode->i_bdev, BDEV_FILE);
-	iput(inode);
-	free_initrd_mem(initrd_start, initrd_end);
-	initrd_start = 0;
+	lock_kernel();
+	if (!--initrd_users) {
+		blkdev_put(inode->i_bdev, BDEV_FILE);
+		iput(inode);
+		free_initrd_mem(initrd_start, initrd_end);
+		initrd_start = 0;
+	}
+	unlock_kernel();
 	return 0;
 }
 
@@ -333,7 +340,8 @@ static int rd_open(struct inode * inode, struct file * filp)
 	 * Immunize device against invalidate_buffers() and prune_icache().
 	 */
 	if (rd_inode[DEVICE_NR(inode->i_rdev)] == NULL) {
-		if((rd_inode[DEVICE_NR(inode->i_rdev)] = igrab(inode)) != NULL)
+		if (!inode->i_bdev) return -ENXIO;
+		if ((rd_inode[DEVICE_NR(inode->i_rdev)] = igrab(inode)) != NULL)
 			atomic_inc(&rd_inode[DEVICE_NR(inode->i_rdev)]->i_bdev->bd_openers);
 	}
 
@@ -373,7 +381,6 @@ static void __exit rd_cleanup (void)
 
 	devfs_unregister (devfs_handle);
 	unregister_blkdev( MAJOR_NR, "ramdisk" );
-	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 	hardsect_size[MAJOR_NR] = NULL;
 	blksize_size[MAJOR_NR] = NULL;
 	blk_size[MAJOR_NR] = NULL;
@@ -398,7 +405,7 @@ int __init rd_init (void)
 		return -EIO;
 	}
 
-	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), &rd_request);
+	blk_queue_make_request(BLK_DEFAULT_QUEUE(MAJOR_NR), &rd_make_request);
 
 	for (i = 0; i < NUM_RAMDISKS; i++) {
 		/* rd_size is given in kB */
@@ -407,10 +414,10 @@ int __init rd_init (void)
 		rd_blocksizes[i] = rd_blocksize;
 		rd_kbsize[i] = rd_size;
 	}
-	devfs_handle = devfs_mk_dir (NULL, "rd", 0, NULL);
+	devfs_handle = devfs_mk_dir (NULL, "rd", NULL);
 	devfs_register_series (devfs_handle, "%u", NUM_RAMDISKS,
 			       DEVFS_FL_DEFAULT, MAJOR_NR, 0,
-			       S_IFBLK | S_IRUSR | S_IWUSR, 0, 0,
+			       S_IFBLK | S_IRUSR | S_IWUSR,
 			       &fd_fops, NULL);
 
 	for (i = 0; i < NUM_RAMDISKS; i++)
@@ -665,10 +672,12 @@ static void __init rd_load_image(kdev_t device, int offset, int unit)
 		}
 		infile.f_op->read(&infile, buf, BLOCK_SIZE, &infile.f_pos);
 		outfile.f_op->write(&outfile, buf, BLOCK_SIZE, &outfile.f_pos);
+#if !defined(CONFIG_ARCH_S390)
 		if (!(i % 16)) {
 			printk("%c\b", rotator[rotate & 0x3]);
 			rotate++;
 		}
+#endif
 	}
 	printk("done.\n");
 	kfree(buf);
@@ -690,6 +699,9 @@ free_inode:
 	iput(inode);
 }
 
+#ifdef CONFIG_MAC_FLOPPY
+int swim3_fd_eject(int devnum);
+#endif
 
 static void __init rd_load_disk(int n)
 {
@@ -710,6 +722,12 @@ static void __init rd_load_disk(int n)
 	if (rd_prompt) {
 #ifdef CONFIG_BLK_DEV_FD
 		floppy_eject();
+#endif
+#ifdef CONFIG_MAC_FLOPPY
+		if(MAJOR(ROOT_DEV) == FLOPPY_MAJOR)
+			swim3_fd_eject(MINOR(ROOT_DEV));
+		else if(MAJOR(real_root_dev) == FLOPPY_MAJOR)
+			swim3_fd_eject(MINOR(real_root_dev));
 #endif
 		printk(KERN_NOTICE
 		       "VFS: Insert root floppy disk to be loaded into RAM disk and press ENTER\n");
@@ -762,11 +780,11 @@ typedef unsigned long  ulg;
 static uch *inbuf;
 static uch *window;
 
-static unsigned insize = 0;  /* valid bytes in inbuf */
-static unsigned inptr = 0;   /* index of next byte to be processed in inbuf */
-static unsigned outcnt = 0;  /* bytes in output buffer */
-static int exit_code = 0;
-static long bytes_out = 0;
+static unsigned insize;  /* valid bytes in inbuf */
+static unsigned inptr;   /* index of next byte to be processed in inbuf */
+static unsigned outcnt;  /* bytes in output buffer */
+static int exit_code;
+static long bytes_out;
 static struct file *crd_infp, *crd_outfp;
 
 #define get_byte()  (inptr < insize ? inbuf[inptr++] : fill_inbuf())

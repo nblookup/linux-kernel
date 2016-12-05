@@ -1,4 +1,4 @@
-/* $Id: graphics.c,v 1.23 2000/02/23 00:41:21 ralf Exp $
+/* $Id: graphics.c,v 1.22 2000/02/18 00:24:43 ralf Exp $
  *
  * gfx.c: support for SGI's /dev/graphics, /dev/opengl
  *
@@ -33,6 +33,7 @@
 #include <linux/mman.h>
 #include <linux/malloc.h>
 #include <linux/module.h>
+#include <linux/smp_lock.h>
 #include <asm/uaccess.h>
 #include "gconsole.h"
 #include "graphics.h"
@@ -99,9 +100,10 @@ sgi_graphics_ioctl (struct inode *inode, struct file *file, unsigned int cmd, un
 		i = verify_area (VERIFY_READ, (void *) arg, sizeof (struct gfx_getboardinfo_args));
 		if (i) return i;
 		
-		__get_user_ret (board,    &bia->board, -EFAULT);
-		__get_user_ret (dest_buf, &bia->buf,   -EFAULT);
-		__get_user_ret (max_len,  &bia->len,   -EFAULT);
+		if (__get_user (board,    &bia->board) ||
+		    __get_user (dest_buf, &bia->buf) ||
+		    __get_user (max_len,  &bia->len))
+			return -EFAULT;
 
 		if (board >= boards)
 			return -EINVAL;
@@ -124,8 +126,9 @@ sgi_graphics_ioctl (struct inode *inode, struct file *file, unsigned int cmd, un
 		i = verify_area (VERIFY_READ, (void *)arg, sizeof (struct gfx_attach_board_args));
 		if (i) return i;
 
-		__get_user_ret (board, &att->board, -EFAULT);
-		__get_user_ret (vaddr, &att->vaddr, -EFAULT);
+		if (__get_user (board, &att->board) ||
+		    __get_user (vaddr, &att->vaddr))
+			return -EFAULT;
 
 		/* Ok for now we are assuming /dev/graphicsN -> head N even
 		 * if the ioctl api suggests that this is not quite the case.
@@ -150,9 +153,11 @@ sgi_graphics_ioctl (struct inode *inode, struct file *file, unsigned int cmd, un
 		 * sgi_graphics_mmap
 		 */
 		disable_gconsole ();
+		down(&current->mm->mmap_sem);
 		r = do_mmap (file, (unsigned long)vaddr,
 			     cards[board].g_regs_size, PROT_READ|PROT_WRITE,
 			     MAP_FIXED|MAP_PRIVATE, 0);
+		up(&current->mm->mmap_sem);
 		if (r)
 			return r;
 	}
@@ -192,6 +197,7 @@ sgi_graphics_close (struct inode *inode, struct file *file)
 	int board = GRAPHICS_CARD (inode->i_rdev);
 
 	/* Tell the rendering manager that one client is going away */
+	lock_kernel();
 	rrm_close (inode, file);
 
 	/* Was this file handle from the board owner?, clear it */
@@ -201,6 +207,7 @@ sgi_graphics_close (struct inode *inode, struct file *file)
 			(*cards [board].g_reset_console)();
 		enable_gconsole ();
 	}
+	unlock_kernel();
 	return 0;
 }
 

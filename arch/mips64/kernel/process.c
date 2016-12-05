@@ -1,11 +1,10 @@
-/* $Id: process.c,v 1.5 2000/01/29 01:41:59 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1994 - 1999 by Ralf Baechle and others.
- * Copyright (C) 1999 Silicon Graphics, Inc.
+ * Copyright (C) 1994 - 1999, 2000 by Ralf Baechle and others.
+ * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
  */
 #include <linux/errno.h>
 #include <linux/sched.h>
@@ -33,7 +32,8 @@
 asmlinkage int cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
-	current->priority = 0;
+	init_idle();
+	current->nice = 20;
 	current->counter = -100;
 	while (1) {
 		while (!current->need_resched)
@@ -51,24 +51,25 @@ asmlinkage void ret_from_fork(void);
 void exit_thread(void)
 {
 	/* Forget lazy fpu state */
-	if (last_task_used_math == current) {
+	if (IS_FPU_OWNER()) {
 		set_cp0_status(ST0_CU1, ST0_CU1);
 		__asm__ __volatile__("cfc1\t$0,$31");
-		last_task_used_math = NULL;
+		CLEAR_FPU_OWNER();
 	}
 }
 
 void flush_thread(void)
 {
 	/* Forget lazy fpu state */
-	if (last_task_used_math == current) {
+	if (IS_FPU_OWNER()) {
 		set_cp0_status(ST0_CU1, ST0_CU1);
 		__asm__ __volatile__("cfc1\t$0,$31");
-		last_task_used_math = NULL;
+		CLEAR_FPU_OWNER();
 	}
 }
 
 int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
+		 unsigned long unused,
                  struct task_struct * p, struct pt_regs * regs)
 {
 	struct pt_regs * childregs;
@@ -76,8 +77,7 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 
 	childksp = (unsigned long)p + KERNEL_STACK_SIZE - 32;
 
-	if (last_task_used_math == current) {
-		set_cp0_status(ST0_CU1, ST0_CU1);
+	if (IS_FPU_OWNER()) {
 		save_fp(p);
 	}
 	/* set up new TSS. */
@@ -186,28 +186,51 @@ extern void scheduling_functions_end_here(void);
 #define first_sched	((unsigned long) scheduling_functions_start_here)
 #define last_sched	((unsigned long) scheduling_functions_end_here)
 
+/* get_wchan - a maintenance nightmare ...  */
 unsigned long get_wchan(struct task_struct *p)
 {
-	unsigned long schedule_frame;
-	unsigned long pc;
+	unsigned long frame, pc;
 
 	if (!p || p == current || p->state == TASK_RUNNING)
 		return 0;
 
 	pc = thread_saved_pc(&p->thread);
-	if (pc == (unsigned long) interruptible_sleep_on
-	    || pc == (unsigned long) sleep_on) {
-		schedule_frame = ((unsigned long *)p->thread.reg30)[9];
-		return ((unsigned long *)schedule_frame)[15];
-	}
-	if (pc == (unsigned long) interruptible_sleep_on_timeout
-	    || pc == (unsigned long) sleep_on_timeout) {
-		schedule_frame = ((unsigned long *)p->thread.reg30)[9];
-		return ((unsigned long *)schedule_frame)[16];
-	}
+	if (pc < first_sched || pc >= last_sched)
+		goto out;
+
+	if (pc >= (unsigned long) sleep_on_timeout)
+		goto schedule_timeout_caller;
+	if (pc >= (unsigned long) sleep_on)
+		goto schedule_caller;
+	if (pc >= (unsigned long) interruptible_sleep_on_timeout)
+		goto schedule_timeout_caller;
+	if (pc >= (unsigned long)interruptible_sleep_on)
+		goto schedule_caller;
+	goto schedule_timeout_caller;
+
+schedule_caller:
+	frame = ((unsigned long *)p->thread.reg30)[10];
+	pc    = ((unsigned long *)frame)[7];
+	goto out;
+
+schedule_timeout_caller:
+	/* Must be schedule_timeout ...  */
+	pc    = ((unsigned long *)p->thread.reg30)[11];
+	frame = ((unsigned long *)p->thread.reg30)[10];
+
+	/* The schedule_timeout frame ...  */
+	pc    = ((unsigned long *)frame)[9];
+	frame = ((unsigned long *)frame)[8];
+
 	if (pc >= first_sched && pc < last_sched) {
-		printk(KERN_DEBUG "Bug in %s\n", __FUNCTION__);
+		/* schedule_timeout called by interruptible_sleep_on_timeout */
+		pc    = ((unsigned long *)frame)[7];
+		frame = ((unsigned long *)frame)[6];
 	}
+
+out:
+	if (current->thread.mflags & MF_32BIT)	/* Kludge for 32-bit ps  */
+		pc &= 0xffffffff;
 
 	return pc;
 }

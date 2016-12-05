@@ -16,14 +16,16 @@
  * OSS/Free for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
  * Version 2 (June 1991). See the "COPYING" file distributed with this software
  * for more info.
+ *
+ * Changes:
+ * 11-10-2000	Bartlomiej Zolnierkiewicz <bkz@linux-ide.org>
+ *		Added __init to sb_rst() and sb_cmd()
  */
 
 #include <linux/init.h>
 #include <linux/module.h>
 
 #include "sound_config.h"
-#include "soundmodule.h"
-
 #include "ad1848.h"
 
 static void sleep( unsigned howlong )
@@ -42,7 +44,7 @@ static void sleep( unsigned howlong )
 #define SBDSP_STATUS     SBDSP_COMMAND
 #define SBDSP_DATA_AVAIL 0xE
 
-static int sb_rst(int base)
+static int __init sb_rst(int base)
 {
 	int   i;
    
@@ -64,7 +66,7 @@ static int sb_rst(int base)
 	return 1;
 }
 
-static int sb_cmd( int base, unsigned char val )
+static int __init sb_cmd( int base, unsigned char val )
 {
 	int  i;
 
@@ -115,7 +117,7 @@ static void __init attach_sgalaxy( struct address_info *ai )
 	
 	request_region( ai->ai_sgbase, 0x10, "SoundGalaxy SB" );
  
-	attach_ms_sound( ai );
+	attach_ms_sound(ai, THIS_MODULE);
 	n=ai->slots[0];
 	
 	if (n!=-1 && audio_devs[n]->mixer_dev != -1 ) {
@@ -163,14 +165,12 @@ static int __init init_sgalaxy(void)
 
 	attach_sgalaxy(&cfg);
 
-	SOUND_LOCK;
 	return 0;
 }
 
 static void __exit cleanup_sgalaxy(void)
 {
 	unload_sgalaxy(&cfg);
-	SOUND_LOCK_END;
 }
 
 module_init(init_sgalaxy);

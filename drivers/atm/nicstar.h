@@ -28,6 +28,8 @@
 
 /* Options ********************************************************************/
 
+#undef NS_DEBUG_SPINLOCKS
+
 #define NS_MAX_CARDS 4		/* Maximum number of NICStAR based cards
 				   controlled by the device driver. Must
                                    be <= 5 */
@@ -99,8 +101,6 @@
 /* #defines *******************************************************************/
 
 #define NS_IOREMAP_SIZE 4096
-
-#define IDT_25_PCR ((25600000 / 8 - 8000) / 54)
 
 #define BUF_SM 0x00000000	/* These two are used for push_rxbufs() */
 #define BUF_LG 0x00000001       /* CMD, Write_FreeBufQ, LBUF bit */
@@ -707,6 +707,11 @@ typedef struct scq_info
    int tbd_count;			/* Only meaningful on variable rate */
    wait_queue_head_t scqfull_waitq;
    volatile char full;			/* SCQ full indicator */
+   spinlock_t lock;			/* SCQ spinlock */
+#ifdef NS_DEBUG_SPINLOCKS
+   volatile long has_lock;
+   volatile int cpu_lock;
+#endif /* NS_DEBUG_SPINLOCKS */
 } scq_info;
 
 
@@ -781,8 +786,14 @@ typedef struct ns_dev
    struct sk_buff *rcbuf;		/* Current raw cell buffer */
    u32 rawch;				/* Raw cell queue head */
    unsigned intcnt;			/* Interrupt counter */
-   volatile int in_handler: 1;
-   volatile int in_poll: 1;
+   spinlock_t int_lock;		/* Interrupt lock */
+   spinlock_t res_lock;		/* Card resource lock */
+#ifdef NS_DEBUG_SPINLOCKS
+   volatile long has_int_lock;
+   volatile int cpu_int;
+   volatile long has_res_lock;
+   volatile int cpu_res;
+#endif /* NS_DEBUG_SPINLOCKS */
 } ns_dev;
 
 

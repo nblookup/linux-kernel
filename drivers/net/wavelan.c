@@ -173,37 +173,29 @@ static inline void wv_16_on(unsigned long ioaddr, u16 hacr)
 /*------------------------------------------------------------------*/
 /*
  * Disable interrupts on the WaveLAN hardware.
+ * (called by wv_82586_stop())
  */
 static inline void wv_ints_off(device * dev)
 {
 	net_local *lp = (net_local *) dev->priv;
 	unsigned long ioaddr = dev->base_addr;
-	unsigned long flags;
-
-	wv_splhi(lp, &flags);
 	
 	lp->hacr &= ~HACR_INTRON;
 	hacr_write(ioaddr, lp->hacr);
-
-	wv_splx(lp, &flags);
 }				/* wv_ints_off */
 
 /*------------------------------------------------------------------*/
 /*
  * Enable interrupts on the WaveLAN hardware.
+ * (called by wv_hw_reset())
  */
 static inline void wv_ints_on(device * dev)
 {
 	net_local *lp = (net_local *) dev->priv;
 	unsigned long ioaddr = dev->base_addr;
-	unsigned long flags;
-
-	wv_splhi(lp, &flags);
 
 	lp->hacr |= HACR_INTRON;
 	hacr_write(ioaddr, lp->hacr);
-
-	wv_splx(lp, &flags);
 }				/* wv_ints_on */
 
 /******************* MODEM MANAGEMENT SUBROUTINES *******************/
@@ -871,14 +863,18 @@ if (lp->tx_n_in_use > 0)
 static inline void wv_82586_reconfig(device * dev)
 {
 	net_local *lp = (net_local *) dev->priv;
+	unsigned long flags;
 
 	/* Arm the flag, will be cleard in wv_82586_config() */
 	lp->reconfig_82586 = 1;
 
 	/* Check if we can do it now ! */
-	if((netif_running(dev)) && !(netif_queue_stopped(dev)))
+	if((netif_running(dev)) && !(netif_queue_stopped(dev))) {
+		wv_splhi(lp, &flags);
 		/* May fail */
 		wv_82586_config(dev);
+		wv_splx(lp, &flags);
+	}
 	else {
 #ifdef DEBUG_CONFIG_INFO
 		printk(KERN_DEBUG
@@ -1990,7 +1986,7 @@ static int wavelan_ioctl(struct net_device *dev,	/* device on which the ioctl is
 		}
 
 		/* only super-user can see encryption key */
-		if (!suser()) {
+		if (!capable(CAP_NET_ADMIN)) {
 			ret = -EPERM;
 			break;
 		}
@@ -2224,7 +2220,7 @@ static int wavelan_ioctl(struct net_device *dev,	/* device on which the ioctl is
 		/* ------------------ PRIVATE IOCTL ------------------ */
 
 	case SIOCSIPQTHR:
-		if (!suser()) {
+		if (!capable(CAP_NET_ADMIN)) {
 			ret = -EPERM;
 			break;
 		}
@@ -2248,7 +2244,7 @@ static int wavelan_ioctl(struct net_device *dev,	/* device on which the ioctl is
 #ifdef HISTOGRAM
 	case SIOCSIPHISTO:
 		/* Verify that the user is root. */
-		if (!suser()) {
+		if (!capable(CAP_NET_ADMIN)) {
 			ret = -EPERM;
 			break;
 		}
@@ -2806,6 +2802,7 @@ static inline int wv_packet_write(device * dev, void *buf, short length)
 static int wavelan_packet_xmit(struct sk_buff *skb, device * dev)
 {
 	net_local *lp = (net_local *) dev->priv;
+	unsigned long flags;
 
 #ifdef DEBUG_TX_TRACE
 	printk(KERN_DEBUG "%s: ->wavelan_packet_xmit(0x%X)\n", dev->name,
@@ -2822,7 +2819,9 @@ static int wavelan_packet_xmit(struct sk_buff *skb, device * dev)
 	 * we can do it now.
 	 */
 	if (lp->reconfig_82586) {
+		wv_splhi(lp, &flags);
 		wv_82586_config(dev);
+		wv_splx(lp, &flags);
 		/* Check that we can continue */
 		if (lp->tx_n_in_use == (NTXBLOCKS - 1))
 			return 1;
@@ -3369,21 +3368,17 @@ static void wv_82586_config(device * dev)
 	ac_ias_t ias;		/* IA-setup action */
 	ac_mcs_t mcs;		/* Multicast setup */
 	struct dev_mc_list *dmi;
-	unsigned long flags;
 
 #ifdef DEBUG_CONFIG_TRACE
 	printk(KERN_DEBUG "%s: ->wv_82586_config()\n", dev->name);
 #endif
 
-	wv_splhi(lp, &flags);
-	
 	/* Check nothing bad has happened */
 	if (lp->tx_n_in_use == (NTXBLOCKS - 1)) {
 #ifdef DEBUG_CONFIG_ERROR
 		printk(KERN_INFO "%s: wv_82586_config(): Tx queue full.\n",
 		       dev->name);
 #endif
-		wv_splx(lp, &flags);
 		return;
 	}
 
@@ -3524,8 +3519,6 @@ static void wv_82586_config(device * dev)
 	if (lp->tx_n_in_use == (NTXBLOCKS - 1))
 		netif_stop_queue(dev);
 
-	wv_splx(lp, &flags);
-
 #ifdef DEBUG_CONFIG_TRACE
 	printk(KERN_DEBUG "%s: <-wv_82586_config()\n", dev->name);
 #endif
@@ -3535,6 +3528,7 @@ static void wv_82586_config(device * dev)
 /*
  * This routine, called by wavelan_close(), gracefully stops the 
  * WaveLAN controller (i82586).
+ * (called by wavelan_close())
  */
 static inline void wv_82586_stop(device * dev)
 {
@@ -3571,6 +3565,7 @@ static inline void wv_82586_stop(device * dev)
  *	3. Reset & Configure LAN controller (using wv_82586_start)
  *	4. Start the LAN controller's command unit
  *	5. Start the LAN controller's receive unit
+ * (called by wavelan_interrupt(), wavelan_watchdog() & wavelan_open())
  */
 static int wv_hw_reset(device * dev)
 {
@@ -3623,7 +3618,7 @@ static int wv_check_ioaddr(unsigned long ioaddr, u8 * mac)
 
 	/* Check if the base address if available. */
 	if (check_region(ioaddr, sizeof(ha_t)))
-		return EADDRINUSE;	/* ioaddr already used */
+		return -EADDRINUSE;	/* ioaddr already used */
 
 	/* Reset host interface */
 	wv_hacr_reset(ioaddr);
@@ -3649,7 +3644,7 @@ static int wv_check_ioaddr(unsigned long ioaddr, u8 * mac)
 	       "WaveLAN (0x%3X): your MAC address might be %02X:%02X:%02X.\n",
 	       ioaddr, mac[0], mac[1], mac[2]);
 #endif
-	return ENODEV;
+	return -ENODEV;
 }
 
 /************************ INTERRUPT HANDLING ************************/
@@ -3676,16 +3671,18 @@ static void wavelan_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	lp = (net_local *) dev->priv;
 	ioaddr = dev->base_addr;
 
-#ifdef DEBUG_INTERRUPT_ERROR
-	/* Check state of our spinlock (it should be cleared) */
+#ifdef DEBUG_INTERRUPT_INFO
+	/* Check state of our spinlock */
 	if(spin_is_locked(&lp->spinlock))
-		printk(KERN_INFO
+		printk(KERN_DEBUG
 		       "%s: wavelan_interrupt(): spinlock is already locked !!!\n",
 		       dev->name);
 #endif
 
-	/* Prevent reentrancy. It is safe because wv_splhi disable interrupts
-	 * before aquiring the spinlock */
+	/* Prevent reentrancy. We need to do that because we may have
+	 * multiple interrupt handler running concurrently.
+	 * It is safe because wv_splhi() disables interrupts before acquiring
+	 * the spinlock. */
 	spin_lock(&lp->spinlock);
 
 	/* Check modem interupt */
@@ -3712,6 +3709,7 @@ static void wavelan_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		       "%s: wavelan_interrupt(): interrupt not coming from i82586\n",
 		       dev->name);
 #endif
+		spin_unlock (&lp->spinlock);
 		return;
 	}
 
@@ -3752,9 +3750,6 @@ static void wavelan_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		wv_receive(dev);
 	}
 
-	/* Release spinlock here so that wv_hw_reset() can grab it */
-	spin_unlock (&lp->spinlock);
-
 	/* Check the state of the command unit. */
 	if (((status & SCB_ST_CNA) == SCB_ST_CNA) ||
 	    (((status & SCB_ST_CUS) != SCB_ST_CUS_ACTV) &&
@@ -3778,6 +3773,9 @@ static void wavelan_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 #endif
 		wv_hw_reset(dev);
 	}
+
+	/* Release spinlock */
+	spin_unlock (&lp->spinlock);
 
 #ifdef DEBUG_INTERRUPT_TRACE
 	printk(KERN_DEBUG "%s: <-wavelan_interrupt()\n", dev->name);
@@ -3806,13 +3804,12 @@ static void wavelan_watchdog(device *	dev)
 	       dev->name);
 #endif
 
-	wv_splhi(lp, &flags);
-
 	/* Check that we came here for something */
 	if (lp->tx_n_in_use <= 0) {
-		wv_splx(lp, &flags);
 		return;
 	}
+
+	wv_splhi(lp, &flags);
 
 	/* Try to see if some buffers are not free (in case we missed
 	 * an interrupt */
@@ -3910,6 +3907,7 @@ static int wavelan_open(device * dev)
 		       "%s: wavelan_open(): impossible to start the card\n",
 		       dev->name);
 #endif
+		wv_splx(lp, &flags);
 		return -EAGAIN;
 	}
 	wv_splx(lp, &flags);
@@ -3929,6 +3927,9 @@ static int wavelan_open(device * dev)
  */
 static int wavelan_close(device * dev)
 {
+	net_local *lp = (net_local *) dev->priv;
+	unsigned long flags;
+
 #ifdef DEBUG_CALLBACK_TRACE
 	printk(KERN_DEBUG "%s: ->wavelan_close(dev=0x%x)\n", dev->name,
 	       (unsigned int) dev);
@@ -3939,7 +3940,9 @@ static int wavelan_close(device * dev)
 	/*
 	 * Flush the Tx and disable Rx.
 	 */
+	wv_splhi(lp, &flags);
 	wv_82586_stop(dev);
+	wv_splx(lp, &flags);
 
 	free_irq(dev->irq, dev);
 
@@ -3965,7 +3968,7 @@ static int __init wavelan_config(device * dev)
 	net_local *lp;
 
 #ifdef DEBUG_CALLBACK_TRACE
-	printk(KERN_DEBUG "%s: ->wavelan_config(dev=0x%x, ioaddr=0x%x)\n",
+	printk(KERN_DEBUG "%s: ->wavelan_config(dev=0x%x, ioaddr=0x%lx)\n",
 	       dev->name, (unsigned int) dev, ioaddr);
 #endif
 
@@ -4002,7 +4005,7 @@ static int __init wavelan_config(device * dev)
 		       "%s: wavelan_config(): could not wavelan_map_irq(%d).\n",
 		       dev->name, irq_mask);
 #endif
-		return EAGAIN;
+		return -EAGAIN;
 	}
 
 	dev->irq = irq;
@@ -4095,7 +4098,7 @@ int __init wavelan_probe(device * dev)
 		printk(KERN_WARNING
 		       "%s: wavelan_probe(): structure/compiler botch: \"%s\"\n",
 		       dev->name, wv_struct_check());
-		return ENODEV;
+		return -ENODEV;
 	}
 #endif				/* STRUCT_CHECK */
 
@@ -4109,7 +4112,7 @@ int __init wavelan_probe(device * dev)
 		       "%s: wavelan_probe(): invalid base address\n",
 		       dev->name);
 #endif
-		return ENXIO;
+		return -ENXIO;
 	}
 
 	/* Check a single specified location. */
@@ -4157,7 +4160,7 @@ int __init wavelan_probe(device * dev)
 	       dev->name);
 #endif
 
-	return ENODEV;
+	return -ENODEV;
 }
 
 /****************************** MODULE ******************************/
@@ -4211,7 +4214,7 @@ int init_module(void)
 				break;
 			}
 			memset(dev, 0x00, sizeof(struct net_device));
-			dev->name = name[i];
+			memcpy(dev->name, name[i], IFNAMSIZ);	/* Copy name */
 			dev->base_addr = io[i];
 			dev->irq = irq[i];
 			dev->init = &wavelan_config;
@@ -4221,7 +4224,7 @@ int init_module(void)
 			if (register_netdev(dev) != 0) {
 				/* Deallocate everything. */
 				/* Note: if dev->priv is mallocated, there is no way to fail. */
-				kfree_s(dev, sizeof(struct net_device));
+				kfree(dev);
 			} else {
 				/* If at least one device OK, we do not fail */
 				ret = 0;
@@ -4271,8 +4274,8 @@ void cleanup_module(void)
 		wavelan_list = wavelan_list->next;
 
 		/* Free pieces. */
-		kfree_s(dev->priv, sizeof(struct net_local));
-		kfree_s(dev, sizeof(struct net_device));
+		kfree(dev->priv);
+		kfree(dev);
 	}
 
 #ifdef DEBUG_MODULE_TRACE

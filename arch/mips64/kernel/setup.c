@@ -1,5 +1,4 @@
-/* $Id: setup.c,v 1.7 2000/02/04 07:40:24 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -35,12 +34,11 @@
 #include <asm/io.h>
 #include <asm/stackframe.h>
 #include <asm/system.h>
+#include <asm/pgalloc.h>
 
-#ifdef CONFIG_SGI_IP27
-#include <asm/sn/sn0/addrs.h>
+#ifndef CONFIG_SMP
+struct cpuinfo_mips cpu_data[1];
 #endif
-
-struct mips_cpuinfo boot_cpu_data;
 
 #ifdef CONFIG_VT
 struct screen_info screen_info;
@@ -102,7 +100,10 @@ extern char arcs_cmdline[CL_SIZE];
  * mips_io_port_base is the begin of the address space to which x86 style
  * I/O ports are mapped.
  */
+#ifdef CONFIG_SGI_IP27
+/* XXX Origin garbage has no business in this file  */
 unsigned long mips_io_port_base = IO_BASE;
+#endif
 
 extern void ip22_setup(void);
 extern void ip27_setup(void);
@@ -147,6 +148,9 @@ void __init setup_arch(char **cmdline_p)
 	unsigned long tmp;
 	unsigned long *initrd_header;
 #endif
+	int i;
+	pmd_t *pmd = kpmdtbl;
+	pte_t *pte = kptbl;
 
 	cpu_probe();
 	load_mmu();
@@ -183,4 +187,12 @@ void __init setup_arch(char **cmdline_p)
 			*memory_start_p = initrd_end;
 	}
 #endif
+
+	paging_init();
+
+	memset((void *)kptbl, 0, PAGE_SIZE << KPTBL_PAGE_ORDER);
+	memset((void *)kpmdtbl, 0, PAGE_SIZE);
+	pgd_set(swapper_pg_dir, kpmdtbl);
+	for (i = 0; i < (1 << KPTBL_PAGE_ORDER); pmd++,i++,pte+=PTRS_PER_PTE)
+		pmd_val(*pmd) = (unsigned long)pte;
 }

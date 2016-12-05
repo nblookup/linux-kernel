@@ -1,5 +1,3 @@
-#include <linux/config.h>
-
 #ifndef _PPC_PAGE_H
 #define _PPC_PAGE_H
 
@@ -8,11 +6,14 @@
 #define PAGE_SIZE	(1UL << PAGE_SHIFT)
 #define PAGE_MASK	(~(PAGE_SIZE-1))
 
+#ifdef __KERNEL__
+#include <linux/config.h>
+
 #define PAGE_OFFSET	0xc0000000
 #define KERNELBASE	PAGE_OFFSET
 
 #ifndef __ASSEMBLY__
-#ifdef __KERNEL__
+#include <asm/system.h> /* for xmon definition */
 
 #ifdef CONFIG_XMON
 #define BUG() do { \
@@ -78,6 +79,8 @@ typedef unsigned long pgprot_t;
 
 extern void clear_page(void *page);
 extern void copy_page(void *to, void *from);
+#define clear_user_page(page, vaddr)	clear_page(page)
+#define copy_user_page(to, from, vaddr)	copy_page(to, from)
 
 /* map phys->virtual and virtual->phys for RAM pages */
 static inline unsigned long ___pa(unsigned long v)
@@ -109,8 +112,9 @@ static inline void* ___va(unsigned long p)
 #define __pa(x) ___pa ((unsigned long)(x))
 #define __va(x) ___va ((unsigned long)(x))
 
-#define MAP_NR(addr)		(((unsigned long)addr-PAGE_OFFSET) >> PAGE_SHIFT)
 #define MAP_PAGE_RESERVED	(1<<15)
+#define virt_to_page(kaddr)	(mem_map + (((unsigned long)kaddr-PAGE_OFFSET) >> PAGE_SHIFT))
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
 extern unsigned long get_zero_page_fast(void);
 
@@ -128,6 +132,6 @@ extern __inline__ int get_order(unsigned long size)
 	return order;
 }
 
-#endif /* __KERNEL__ */
 #endif /* __ASSEMBLY__ */
+#endif /* __KERNEL__ */
 #endif /* _PPC_PAGE_H */

@@ -35,6 +35,7 @@
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/devfs_fs_kernel.h>
+#include <linux/smp_lock.h>
 
 #include <asm/segment.h>
 #include <asm/atarihw.h>
@@ -472,10 +473,6 @@ static int dsp56k_open(struct inode *inode, struct file *file)
 		return -ENXIO;
 	}
 
-#ifdef MODULE
-	MOD_INC_USE_COUNT;
-#endif /* MODULE */
-
 	return 0;
 }
 
@@ -487,7 +484,9 @@ static int dsp56k_release(struct inode *inode, struct file *file)
 	{
 	case DSP56K_DEV_56001:
 
+		lock_kernel();
 		dsp56k.in_use = 0;
+		unlock_kernel();
 
 		break;
 	default:
@@ -495,13 +494,11 @@ static int dsp56k_release(struct inode *inode, struct file *file)
 		return -ENXIO;
 	}
 
-#ifdef MODULE
-	MOD_DEC_USE_COUNT;
-#endif
 	return 0;
 }
 
 static struct file_operations dsp56k_fops = {
+	owner:		THIS_MODULE,
 	read:		dsp56k_read,
 	write:		dsp56k_write,
 	ioctl:		dsp56k_ioctl,
@@ -512,7 +509,7 @@ static struct file_operations dsp56k_fops = {
 
 /****** Init and module functions ******/
 
-static devfs_handle_t devfs_handle = NULL;
+static devfs_handle_t devfs_handle;
 
 int __init dsp56k_init(void)
 {
@@ -525,9 +522,9 @@ int __init dsp56k_init(void)
 		printk("DSP56k driver: Unable to register driver\n");
 		return -ENODEV;
 	}
-	devfs_handle = devfs_register (NULL, "dsp56k", 0, DEVFS_FL_NONE,
+	devfs_handle = devfs_register (NULL, "dsp56k", DEVFS_FL_DEFAULT,
 				       DSP56K_MAJOR, 0,
-				       S_IFCHR | S_IRUSR | S_IWUSR, 0, 0,
+				       S_IFCHR | S_IRUSR | S_IWUSR,
 				       &dsp56k_fops, NULL);
 
 	dsp56k.in_use = 0;

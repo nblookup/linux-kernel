@@ -20,6 +20,7 @@
 #define SUN_OPENPROM_MINOR 139
 #define NVRAM_MINOR 144
 #define I2O_MINOR 166
+#define MICROCODE_MINOR		184
 #define MISC_DYNAMIC_MINOR 255
 
 #define SGI_GRAPHICS_MINOR   146
@@ -29,6 +30,8 @@
 #define SGI_STREAMS_KEYBOARD 150
 /* drivers/sgi/char/usema.c */
 #define SGI_USEMACLONE	     151
+
+#define TUN_MINOR	     200
 
 extern int misc_init(void);
 

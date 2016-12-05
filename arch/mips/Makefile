@@ -1,4 +1,3 @@
-# $Id: Makefile,v 1.22 2000/01/26 00:07:44 ralf Exp $
 #
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
@@ -51,25 +50,25 @@ ifdef CONFIG_CPU_R3000
 CFLAGS		:= $(CFLAGS) -mcpu=r3000 -mips1
 endif
 ifdef CONFIG_CPU_R6000
-CFLAGS		:= $(CFLAGS) -mcpu=r6000 -mips2
+CFLAGS		:= $(CFLAGS) -mcpu=r6000 -mips2 -Wa,--trap
 endif
 ifdef CONFIG_CPU_R4300
-CFLAGS		:= $(CFLAGS) -mcpu=r4300 -mips2
+CFLAGS		:= $(CFLAGS) -mcpu=r4300 -mips2 -Wa,--trap
 endif
 ifdef CONFIG_CPU_R4X00
-CFLAGS		:= $(CFLAGS) -mcpu=r4600 -mips2
+CFLAGS		:= $(CFLAGS) -mcpu=r4600 -mips2 -Wa,--trap
 endif
 ifdef CONFIG_CPU_R5000
-CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2
+CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2 -Wa,--trap
 endif
 ifdef CONFIG_CPU_NEVADA
-CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2 -mmad
+CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2 -Wa,--trap -mmad
 endif
 ifdef CONFIG_CPU_R8000
-CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2
+CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2 -Wa,--trap
 endif
 ifdef CONFIG_CPU_R10000
-CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2
+CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2 -Wa,--trap
 endif
 
 #
@@ -101,6 +100,12 @@ LIBS          += arch/mips/arc/arclib.a
 LOADADDR      += 0x80080000
 endif
 
+ifdef CONFIG_COBALT_MICRO_SERVER
+ARCHIVES      += arch/mips/cobalt/cobalt.o
+SUBDIRS       += arch/mips/cobalt
+LOADADDR      += 0x80000000
+endif
+
 ifdef CONFIG_SNI_RM200_PCI
 CORE_FILES    += arch/mips/sni/sni.o
 SUBDIRS       += arch/mips/sni arch/mips/arc
@@ -125,6 +130,7 @@ endif
 ifdef CONFIG_BAGET_MIPS
 SUBDIRS       += arch/mips/baget arch/mips/baget/prom
 LIBS          += arch/mips/baget/baget.a arch/mips/baget/prom/bagetlib.a
+LOADADDR      += 0x80001000
 endif
 
 #
@@ -134,6 +140,15 @@ ifdef CONFIG_DDB5074
 SUBDIRS       += arch/mips/ddb5074
 LIBS          += arch/mips/ddb5074/ddb5074.a
 LOADADDR      += 0x80080000
+endif
+
+#
+# Orion Board
+#
+ifdef CONFIG_ORION
+LIBS          += arch/mips/orion/orionkern.a
+SUBDIRS       += arch/mips/orion
+LINKSCRIPT    = arch/mips/orion/ld.script.orion
 endif
 
 #
@@ -175,6 +190,13 @@ balo:  vmlinux
 
 endif
 
+ifdef CONFIG_ORION
+ORIONBOOT = $(MAKE) -C arch/$(ARCH)/orion
+
+orionboot:
+	$(ORIONBOOT) orionboot
+endif
+
 MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
 
 zImage: vmlinux
@@ -189,8 +211,14 @@ archclean:
 	@$(MAKEBOOT) clean
 	$(MAKE) -C arch/$(ARCH)/kernel clean
 	$(MAKE) -C arch/$(ARCH)/tools clean
+	$(MAKE) -C arch/mips/baget clean
 
 archmrproper:
+	@$(MAKEBOOT) mrproper
+	$(MAKE) -C arch/$(ARCH)/tools mrproper
 
 archdep:
+	if [ ! -f $(TOPDIR)/include/asm-$(ARCH)/offset.h ]; then \
+	 touch $(TOPDIR)/include/asm-$(ARCH)/offset.h; \
+	fi;
 	@$(MAKEBOOT) dep

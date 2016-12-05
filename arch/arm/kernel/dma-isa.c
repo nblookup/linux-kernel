@@ -1,24 +1,30 @@
 /*
- * arch/arm/kernel/dma-isa.c: ISA DMA primitives
+ *  linux/arch/arm/kernel/dma-isa.c
  *
- * Copyright (C) Russell King
+ *  Copyright (C) 1999-2000 Russell King
  *
- * Taken from various sources, including:
- *  linux/include/asm/dma.h: Defines for using and allocating dma channels.
- *    Written by Hennus Bergman, 1992.
- *    High DMA channel support & info by Hannu Savolainen and John Boyd, Nov. 1992.
- *  arch/arm/kernel/dma-ebsa285.c
- *  Copyright (C) 1998 Phil Blundell
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  ISA DMA primitives
+ *  Taken from various sources, including:
+ *   linux/include/asm/dma.h: Defines for using and allocating dma channels.
+ *     Written by Hennus Bergman, 1992.
+ *     High DMA channel support & info by Hannu Savolainen and John Boyd,
+ *     Nov. 1992.
+ *   arch/arm/kernel/dma-ebsa285.c
+ *   Copyright (C) 1998 Phil Blundell
  */
 #include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
+#include <linux/pci.h>
 
 #include <asm/dma.h>
 #include <asm/io.h>
 
-#include "dma.h"
-#include "dma-isa.h"
+#include <asm/mach/dma.h>
 
 #define ISA_DMA_MODE_READ	0x44
 #define ISA_DMA_MODE_WRITE	0x48
@@ -45,17 +51,7 @@ static unsigned int isa_dma_port[8][7] = {
 	{  0xd4,  0xd6,  0xd8,  0x48a,  0x08a,  0xcc, 0xce }
 };
 
-int isa_request_dma(int channel, dma_t *dma, const char *dev_name)
-{
-	return 0;
-}
-
-void isa_free_dma(int channel, dma_t *dma)
-{
-	/* nothing to do */
-}
-
-int isa_get_dma_residue(int channel, dma_t *dma)
+static int isa_get_dma_residue(dmach_t channel, dma_t *dma)
 {
 	unsigned int io_port = isa_dma_port[channel][ISA_DMA_COUNT];
 	int count;
@@ -66,13 +62,44 @@ int isa_get_dma_residue(int channel, dma_t *dma)
 	return channel < 4 ? count : (count << 1);
 }
 
-void isa_enable_dma(int channel, dma_t *dma)
+static void isa_enable_dma(dmach_t channel, dma_t *dma)
 {
 	if (dma->invalid) {
 		unsigned long address, length;
-		unsigned int mode;
+		unsigned int mode, direction;
 
-		address = dma->buf.address;
+		mode = channel & 3;
+		switch (dma->dma_mode & DMA_MODE_MASK) {
+		case DMA_MODE_READ:
+			mode |= ISA_DMA_MODE_READ;
+			direction = PCI_DMA_FROMDEVICE;
+			break;
+
+		case DMA_MODE_WRITE:
+			mode |= ISA_DMA_MODE_WRITE;
+			direction = PCI_DMA_TODEVICE;
+			break;
+
+		case DMA_MODE_CASCADE:
+			mode |= ISA_DMA_MODE_CASCADE;
+			direction = PCI_DMA_BIDIRECTIONAL;
+			break;
+
+		default:
+			break;
+		}
+
+		if (!dma->using_sg) {
+			/*
+			 * Cope with ISA-style drivers which expect cache
+			 * coherence.
+			 */
+			dma->buf.dma_address = pci_map_single(NULL,
+				dma->buf.address, dma->buf.length,
+				direction);
+		}
+
+		address = dma->buf.dma_address;
 		length  = dma->buf.length - 1;
 
 		outb(address >> 16, isa_dma_port[channel][ISA_DMA_PGLO]);
@@ -91,27 +118,6 @@ void isa_enable_dma(int channel, dma_t *dma)
 		outb(length, isa_dma_port[channel][ISA_DMA_COUNT]);
 		outb(length >> 8, isa_dma_port[channel][ISA_DMA_COUNT]);
 
-		mode = channel & 3;
-
-		switch (dma->dma_mode & DMA_MODE_MASK) {
-		case DMA_MODE_READ:
-			mode |= ISA_DMA_MODE_READ;
-			dma_cache_inv(__bus_to_virt(dma->buf.address), dma->buf.length);
-			break;
-
-		case DMA_MODE_WRITE:
-			mode |= ISA_DMA_MODE_WRITE;
-			dma_cache_wback(__bus_to_virt(dma->buf.address), dma->buf.length);
-			break;
-
-		case DMA_MODE_CASCADE:
-			mode |= ISA_DMA_MODE_CASCADE;
-			break;
-
-		default:
-			break;
-		}
-
 		if (dma->dma_mode & DMA_AUTOINIT)
 			mode |= ISA_DMA_AUTOINIT;
 
@@ -121,10 +127,17 @@ void isa_enable_dma(int channel, dma_t *dma)
 	outb(channel & 3, isa_dma_port[channel][ISA_DMA_MASK]);
 }
 
-void isa_disable_dma(int channel, dma_t *dma)
+static void isa_disable_dma(dmach_t channel, dma_t *dma)
 {
 	outb(channel | 4, isa_dma_port[channel][ISA_DMA_MASK]);
 }
+
+static struct dma_ops isa_dma_ops = {
+	type:		"ISA",
+	enable:		isa_enable_dma,
+	disable:	isa_disable_dma,
+	residue:	isa_get_dma_residue,
+};
 
 static struct resource dma_resources[] = {
 	{ "dma1",		0x0000, 0x000f },
@@ -133,7 +146,7 @@ static struct resource dma_resources[] = {
 	{ "dma high page",	0x0480, 0x048f }
 };
 
-int __init isa_init_dma(void)
+void __init isa_init_dma(dma_t *dma)
 {
 	int dmac_found;
 
@@ -148,8 +161,10 @@ int __init isa_init_dma(void)
 	if (dmac_found) {
 		int channel, i;
 
-		for (channel = 0; channel < 8; channel++)
+		for (channel = 0; channel < 8; channel++) {
+			dma[channel].d_ops = &isa_dma_ops;
 			isa_disable_dma(channel, NULL);
+		}
 
 		outb(0x40, 0x0b);
 		outb(0x41, 0x0b);
@@ -167,10 +182,9 @@ int __init isa_init_dma(void)
 		outb(0x10, 0xd0);
 
 		/*
-		 * Is this correct?  According to
-		 * my documentation, it doesn't
-		 * appear to be.  It should be
-		 * outb(0x3f, 0x40b); outb(0x3f, 0x4d6);
+		 * Is this correct?  According to my documentation, it
+		 * doesn't appear to be.  It should be:
+		 *  outb(0x3f, 0x40b); outb(0x3f, 0x4d6);
 		 */
 		outb(0x30, 0x40b);
 		outb(0x31, 0x40b);
@@ -185,6 +199,4 @@ int __init isa_init_dma(void)
 		for (i = 0; i < sizeof(dma_resources) / sizeof(dma_resources[0]); i++)
 			request_resource(&ioport_resource, dma_resources + i);
 	}
-
-	return dmac_found;
 }

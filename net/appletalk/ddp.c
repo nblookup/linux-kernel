@@ -292,7 +292,7 @@ static int atalk_get_info(char *buffer, char **start, off_t offset, int length)
 		if (pos > offset + length)	/* We have dumped enough */
 			break;
 	}
-	spin_lock_bh(&atalk_sockets_lock);
+	spin_unlock_bh(&atalk_sockets_lock);
 
 	/* The data in question runs from begin to begin+len */
 	*start = buffer + (offset - begin);	/* Start of wanted data */
@@ -335,7 +335,7 @@ static void atif_drop_device(struct net_device *dev)
 	while ((tmp = *iface) != NULL) {
 		if (tmp->dev == dev) {
 			*iface = tmp->next;
-			kfree_s(tmp, sizeof(struct atalk_iface));
+			kfree(tmp);
 			dev->atalk_ptr = NULL;
 			MOD_DEC_USE_COUNT;
 		} else
@@ -769,7 +769,7 @@ static int atrtr_delete(struct at_addr * addr)
 		    (!(tmp->flags&RTF_GATEWAY) ||
 		     tmp->target.s_node == addr->s_node)) {
 			*r = tmp->next;
-			kfree_s(tmp, sizeof(struct atalk_route));
+			kfree(tmp);
 			goto out;
 		}
 		r = &tmp->next;
@@ -793,7 +793,7 @@ void atrtr_device_down(struct net_device *dev)
 	while ((tmp = *r) != NULL) {
 		if (tmp->dev == dev) {
 			*r = tmp->next;
-			kfree_s(tmp, sizeof(struct atalk_route));
+			kfree(tmp);
 		} else {
 			r = &tmp->next;
 		}
@@ -1378,11 +1378,12 @@ static int atalk_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len)
 
 		if (n < 0)
 			return n;
-	} else
+	} else {
 		sk->protinfo.af_at.src_port = addr->sat_port;
 
-	if (atalk_find_or_insert_socket(sk, addr) != NULL)
-		return -EADDRINUSE;
+		if (atalk_find_or_insert_socket(sk, addr) != NULL)
+			return -EADDRINUSE;
+	}
 
 	sk->zapped = 0;
 
@@ -1606,8 +1607,15 @@ static int atalk_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_
 		 * Note. ddp-> becomes invalid at the realloc.
 		 */
 		if (skb_headroom(skb) < 22)
+		{
+			struct sk_buff *newskb;
 			/* 22 bytes - 12 ether, 2 len, 3 802.2 5 snap */
-			skb = skb_realloc_headroom(skb, 32);
+			newskb = skb_realloc_headroom(skb, 32);
+			kfree_skb(skb);
+			if (!newskb) 
+				return 0;
+			skb = newskb;
+		}
 		else
 			skb = skb_unshare(skb, GFP_ATOMIC);
 		
@@ -2054,24 +2062,23 @@ static struct net_proto_family atalk_family_ops=
 
 static struct proto_ops SOCKOPS_WRAPPED(atalk_dgram_ops)=
 {
-	PF_APPLETALK,
+	family:		PF_APPLETALK,
 
-	atalk_release,
-	atalk_bind,
-	atalk_connect,
-	sock_no_socketpair,
-	sock_no_accept,
-	atalk_getname,
-	datagram_poll,
-	atalk_ioctl,
-	sock_no_listen,
-	sock_no_shutdown,
-	sock_no_setsockopt,
-	sock_no_getsockopt,
-	sock_no_fcntl,
-	atalk_sendmsg,
-	atalk_recvmsg,
-	sock_no_mmap
+	release:	atalk_release,
+	bind:		atalk_bind,
+	connect:	atalk_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		sock_no_accept,
+	getname:	atalk_getname,
+	poll:		datagram_poll,
+	ioctl:		atalk_ioctl,
+	listen:		sock_no_listen,
+	shutdown:	sock_no_shutdown,
+	setsockopt:	sock_no_setsockopt,
+	getsockopt:	sock_no_getsockopt,
+	sendmsg:	atalk_sendmsg,
+	recvmsg:	atalk_recvmsg,
+	mmap:		sock_no_mmap,
 };
 
 #include <linux/smp_lock.h>
@@ -2113,7 +2120,7 @@ EXPORT_SYMBOL(atalk_find_dev_addr);
 
 /* Called by proto.c on kernel start up */
 
-void __init atalk_proto_init(struct net_proto *pro)
+static int __init atalk_init(void)
 {
 	(void) sock_register(&atalk_family_ops);
 	if((ddp_dl = register_snap_client(ddp_snap_id, atalk_rcv)) == NULL)
@@ -2141,16 +2148,11 @@ void __init atalk_proto_init(struct net_proto *pro)
 #endif /* CONFIG_SYSCTL */
 
 	printk(KERN_INFO "NET4: AppleTalk 0.18 for Linux NET4.0\n");
+	return 0;
 }
+module_init(atalk_init);
 
 #ifdef MODULE
-
-int init_module(void)
-{
-	atalk_proto_init(NULL);
-	return (0);
-}
-
 /*
  * Note on MOD_{INC,DEC}_USE_COUNT:
  *
@@ -2164,7 +2166,7 @@ int init_module(void)
  * sockets be closed from user space.
  */
 
-void cleanup_module(void)
+static void __exit atalk_exit(void)
 {
 #ifdef CONFIG_SYSCTL
 	atalk_unregister_sysctl();
@@ -2188,6 +2190,7 @@ void cleanup_module(void)
 
 	return;
 }
-
+module_exit(atalk_exit);
 #endif  /* MODULE */
+
 #endif  /* CONFIG_ATALK || CONFIG_ATALK_MODULE */

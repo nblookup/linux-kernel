@@ -1,8 +1,9 @@
 /* net/atm/ipcommon.c - Common items for all ways of doing IP over ATM */
 
-/* Written 1996,1997 by Werner Almesberger, EPFL LRC */
+/* Written 1996-2000 by Werner Almesberger, EPFL LRC/ICA */
 
 
+#include <linux/module.h>
 #include <linux/string.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
@@ -31,21 +32,39 @@ const unsigned char llc_oui[] = {
 
 
 /*
- * skb_migrate moves the list at FROM to TO, emptying FROM in the process.
- * This function should live in skbuff.c or skbuff.h. Note that skb_migrate
- * is not atomic, so turn off interrupts when using it.
+ * skb_migrate appends the list at "from" to "to", emptying "from" in the
+ * process. skb_migrate is atomic with respect to all other skb operations on
+ * "from" and "to". Note that it locks both lists at the same time, so beware
+ * of potential deadlocks.
+ *
+ * This function should live in skbuff.c or skbuff.h.
  */
 
 
 void skb_migrate(struct sk_buff_head *from,struct sk_buff_head *to)
 {
-	struct sk_buff *skb,*prev;
+	struct sk_buff *skb;
+	unsigned long flags;
+	struct sk_buff *skb_from = (struct sk_buff *) from;
+	struct sk_buff *skb_to = (struct sk_buff *) to;
+	struct sk_buff *prev;
 
-	for (skb = ((struct sk_buff *) from)->next;
-	    skb != (struct sk_buff *) from; skb = skb->next) skb->list = to;
+	spin_lock_irqsave(&from->lock,flags);
+	spin_lock(&to->lock);
 	prev = from->prev;
-	from->next->prev = (struct sk_buff *) to;
-	prev->next = (struct sk_buff *) to;
-	*to = *from;
-	skb_queue_head_init(from);
+	from->next->prev = to->prev;
+	prev->next = skb_to;
+	to->prev->next = from->next;
+	to->prev = from->prev;
+	for (skb = from->next; skb != skb_to; skb = skb->next)
+		skb->list = to;
+	to->qlen += from->qlen;
+	spin_unlock(&to->lock);
+	from->prev = skb_from;
+	from->next = skb_from;
+	from->qlen = 0;
+	spin_unlock_irqrestore(&from->lock,flags);
 }
+
+
+EXPORT_SYMBOL(skb_migrate);

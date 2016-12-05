@@ -1,4 +1,4 @@
-/* $Id: pci_common.c,v 1.6 2000/01/06 23:51:49 davem Exp $
+/* $Id: pci_common.c,v 1.12 2000/05/01 06:32:49 davem Exp $
  * pci_common.c: PCI controller common support.
  *
  * Copyright (C) 1999 David S. Miller (davem@redhat.com)
@@ -64,6 +64,27 @@ static void pci_device_delete(struct pci_dev *pdev)
 
 	/* Ok, all references are gone, free it up. */
 	kfree(pdev);
+}
+
+/* Older versions of OBP on PCI systems encode 64-bit MEM
+ * space assignments incorrectly, this fixes them up.
+ */
+static void __init fixup_obp_assignments(struct pcidev_cookie *pcp)
+{
+	int i;
+
+	for (i = 0; i < pcp->num_prom_assignments; i++) {
+		struct linux_prom_pci_registers *ap;
+		int space;
+
+		ap = &pcp->prom_assignments[i];
+		space = ap->phys_hi >> 24;
+		if ((space & 0x3) == 2 &&
+		    (space & 0x4) != 0) {
+			ap->phys_hi &= ~(0x7 << 24);
+			ap->phys_hi |= 0x3 << 24;
+		}
+	}
 }
 
 /* Fill in the PCI device cookie sysdata for the given
@@ -147,6 +168,8 @@ static void __init pdev_cookie_fillin(struct pci_pbm_info *pbm,
 				(err / sizeof(pcp->prom_assignments[0]));
 	}
 
+	fixup_obp_assignments(pcp);
+
 	pdev->sysdata = pcp;
 }
 
@@ -219,10 +242,15 @@ __init get_root_resource(struct linux_prom_pci_registers *ap,
 		return &pbm->mem_space;
 
 	case 3:
+		/* 64-bit MEM space, these are allocated out of
+		 * the 32-bit mem_space range for the PBM, ie.
+		 * we just zero out the upper 32-bits.
+		 */
+		return &pbm->mem_space;
+
 	default:
-		/* 64-bit MEM space, unsupported. */
-		printk("PCI: 64-bit MEM assignment??? "
-		       "Tell davem@redhat.com about it!\n");
+		printk("PCI: What is resource space %x? "
+		       "Tell davem@redhat.com about it!\n", space);
 		return NULL;
 	};
 }
@@ -231,6 +259,7 @@ static struct resource *
 __init get_device_resource(struct linux_prom_pci_registers *ap,
 			   struct pci_dev *pdev)
 {
+	struct resource *res;
 	int breg = (ap->phys_hi & 0xff);
 	int space = (ap->phys_hi >> 24) & 3;
 
@@ -240,7 +269,8 @@ __init get_device_resource(struct linux_prom_pci_registers *ap,
 		if (space != 2)
 			bad_assignment(ap, NULL, 0);
 
-		return &pdev->resource[PCI_ROM_RESOURCE];
+		res = &pdev->resource[PCI_ROM_RESOURCE];
+		break;
 
 	case PCI_BASE_ADDRESS_0:
 	case PCI_BASE_ADDRESS_1:
@@ -248,12 +278,16 @@ __init get_device_resource(struct linux_prom_pci_registers *ap,
 	case PCI_BASE_ADDRESS_3:
 	case PCI_BASE_ADDRESS_4:
 	case PCI_BASE_ADDRESS_5:
-		return &pdev->resource[(breg - PCI_BASE_ADDRESS_0) / 4];
+		res = &pdev->resource[(breg - PCI_BASE_ADDRESS_0) / 4];
+		break;
 
 	default:
 		bad_assignment(ap, NULL, 0);
-		return NULL;
+		res = NULL;
+		break;
 	};
+
+	return res;
 }
 
 static void __init pdev_record_assignments(struct pci_pbm_info *pbm,
@@ -280,6 +314,31 @@ static void __init pdev_record_assignments(struct pci_pbm_info *pbm,
 		 */
 		if ((res->start & 0xffffffffUL) != ap->phys_lo)
 			bad_assignment(ap, res, 1);
+
+		/* If it is a 64-bit MEM space assignment, verify that
+		 * the resource is too and that the upper 32-bits match.
+		 */
+		if (((ap->phys_hi >> 24) & 3) == 3) {
+			if (((res->flags & IORESOURCE_MEM) == 0) ||
+			    ((res->flags & PCI_BASE_ADDRESS_MEM_TYPE_MASK)
+			     != PCI_BASE_ADDRESS_MEM_TYPE_64))
+				bad_assignment(ap, res, 1);
+			if ((res->start >> 32) != ap->phys_mid)
+				bad_assignment(ap, res, 1);
+
+			/* PBM cannot generate cpu initiated PIOs
+			 * to the full 64-bit space.  Therefore the
+			 * upper 32-bits better be zero.  If it is
+			 * not, just skip it and we will assign it
+			 * properly ourselves.
+			 */
+			if ((res->start >> 32) != 0UL) {
+				printk(KERN_ERR "PCI: OBP assigns out of range MEM address "
+				       "%016lx for region %ld on device %s\n",
+				       res->start, (res - &pdev->resource[0]), pdev->name);
+				continue;
+			}
+		}
 
 		/* Adjust the resource into the physical address space
 		 * of this PBM.
@@ -425,15 +484,23 @@ static int __init pci_intmap_match(struct pci_dev *pdev, unsigned int *interrupt
 		return 0;
 
 	/* If we are underneath a PCI bridge, use PROM register
-	 * property of parent bridge.
+	 * property of the parent bridge which is closest to
+	 * the PBM.
 	 */
 	if (pdev->bus->number != pbm->pci_first_busno) {
 		struct pcidev_cookie *bus_pcp;
+		struct pci_dev *pwalk;
 		int offset;
 
-		bus_pcp = pdev->bus->self->sysdata;
+		pwalk = pdev->bus->self;
+		while (pwalk->bus &&
+		       pwalk->bus->number != pbm->pci_first_busno)
+			pwalk = pwalk->bus->self;
+
+		bus_pcp = pwalk->sysdata;
 		pregs = bus_pcp->prom_regs;
-		offset = prom_getint(bus_pcp->prom_node,
+
+		offset = prom_getint(dev_pcp->prom_node,
 				     "fcode-rom-offset");
 
 		/* Did PROM know better and assign an interrupt other
@@ -442,8 +509,8 @@ static int __init pci_intmap_match(struct pci_dev *pdev, unsigned int *interrupt
 		 * correct 'interrupts' property, unless it is quadhme.
 		 */
 		if (offset == -1 ||
-		    !strcmp(bus_pcp->prom_name, "SUNW,qfe") ||
-		    !strcmp(bus_pcp->prom_name, "qfe")) {
+		    !strcmp(dev_pcp->prom_name, "SUNW,qfe") ||
+		    !strcmp(dev_pcp->prom_name, "qfe")) {
 			/*
 			 * No, use low slot number bits of child as IRQ line.
 			 */
@@ -563,6 +630,165 @@ void __init pci_fixup_irq(struct pci_pbm_info *pbm,
 	walk = &pbus->children;
 	for (walk = walk->next; walk != &pbus->children; walk = walk->next)
 		pci_fixup_irq(pbm, pci_bus_b(walk));
+}
+
+#undef DEBUG_BUSMASTERING
+
+static void pdev_setup_busmastering(struct pci_dev *pdev, int is_66mhz)
+{
+	u16 cmd;
+	u8 hdr_type, min_gnt, ltimer;
+
+#ifdef DEBUG_BUSMASTERING
+	printk("PCI: Checking DEV(%s), ", pdev->name);
+#endif
+
+	pci_read_config_word(pdev, PCI_COMMAND, &cmd);
+	cmd |= PCI_COMMAND_MASTER;
+	pci_write_config_word(pdev, PCI_COMMAND, cmd);
+
+	/* Read it back, if the mastering bit did not
+	 * get set, the device does not support bus
+	 * mastering so we have nothing to do here.
+	 */
+	pci_read_config_word(pdev, PCI_COMMAND, &cmd);
+	if ((cmd & PCI_COMMAND_MASTER) == 0) {
+#ifdef DEBUG_BUSMASTERING
+		printk("no bus mastering...\n");
+#endif
+		return;
+	}
+
+	/* Set correct cache line size, 64-byte on all
+	 * Sparc64 PCI systems.  Note that the value is
+	 * measured in 32-bit words.
+	 */
+#ifdef DEBUG_BUSMASTERING
+	printk("set cachelinesize, ");
+#endif
+	pci_write_config_byte(pdev, PCI_CACHE_LINE_SIZE,
+			      64 / sizeof(u32));
+
+	pci_read_config_byte(pdev, PCI_HEADER_TYPE, &hdr_type);
+	hdr_type &= ~0x80;
+	if (hdr_type != PCI_HEADER_TYPE_NORMAL) {
+#ifdef DEBUG_BUSMASTERING
+		printk("hdr_type=%x, exit\n", hdr_type);
+#endif
+		return;
+	}
+
+	/* If the latency timer is already programmed with a non-zero
+	 * value, assume whoever set it (OBP or whoever) knows what
+	 * they are doing.
+	 */
+	pci_read_config_byte(pdev, PCI_LATENCY_TIMER, &ltimer);
+	if (ltimer != 0) {
+#ifdef DEBUG_BUSMASTERING
+		printk("ltimer was %x, exit\n", ltimer);
+#endif
+		return;
+	}
+
+	/* XXX Since I'm tipping off the min grant value to
+	 * XXX choose a suitable latency timer value, I also
+	 * XXX considered making use of the max latency value
+	 * XXX as well.  Unfortunately I've seen too many bogusly
+	 * XXX low settings for it to the point where it lacks
+	 * XXX any usefulness.  In one case, an ethernet card
+	 * XXX claimed a min grant of 10 and a max latency of 5.
+	 * XXX Now, if I had two such cards on the same bus I
+	 * XXX could not set the desired burst period (calculated
+	 * XXX from min grant) without violating the max latency
+	 * XXX bound.  Duh...
+	 * XXX
+	 * XXX I blame dumb PC bios implementors for stuff like
+	 * XXX this, most of them don't even try to do something
+	 * XXX sensible with latency timer values and just set some
+	 * XXX default value (usually 32) into every device.
+	 */
+
+	pci_read_config_byte(pdev, PCI_MIN_GNT, &min_gnt);
+
+	if (min_gnt == 0) {
+		/* If no min_gnt setting then use a default
+		 * value.
+		 */
+		if (is_66mhz)
+			ltimer = 16;
+		else
+			ltimer = 32;
+	} else {
+		int shift_factor;
+
+		if (is_66mhz)
+			shift_factor = 2;
+		else
+			shift_factor = 3;
+
+		/* Use a default value when the min_gnt value
+		 * is erroneously high.
+		 */
+		if (((unsigned int) min_gnt << shift_factor) > 512 ||
+		    ((min_gnt << shift_factor) & 0xff) == 0) {
+			ltimer = 8 << shift_factor;
+		} else {
+			ltimer = min_gnt << shift_factor;
+		}
+	}
+
+	pci_write_config_byte(pdev, PCI_LATENCY_TIMER, ltimer);
+#ifdef DEBUG_BUSMASTERING
+	printk("set ltimer to %x\n", ltimer);
+#endif
+}
+
+void pci_determine_66mhz_disposition(struct pci_pbm_info *pbm,
+				     struct pci_bus *pbus)
+{
+	struct list_head *walk;
+	int all_are_66mhz;
+	u16 status;
+
+	if (pbm->is_66mhz_capable == 0) {
+		all_are_66mhz = 0;
+		goto out;
+	}
+
+	walk = &pbus->devices;
+	all_are_66mhz = 1;
+	for (walk = walk->next; walk != &pbus->devices; walk = walk->next) {
+		struct pci_dev *pdev = pci_dev_b(walk);
+
+		pci_read_config_word(pdev, PCI_STATUS, &status);
+		if (!(status & PCI_STATUS_66MHZ)) {
+			all_are_66mhz = 0;
+			break;
+		}
+	}
+out:
+	pbm->all_devs_66mhz = all_are_66mhz;
+
+	printk("PCI%d(PBM%c): Bus running at %dMHz\n",
+	       pbm->parent->index,
+	       (pbm == &pbm->parent->pbm_A) ? 'A' : 'B',
+	       (all_are_66mhz ? 66 : 33));
+}
+
+void pci_setup_busmastering(struct pci_pbm_info *pbm,
+			    struct pci_bus *pbus)
+{
+	struct list_head *walk = &pbus->devices;
+	int is_66mhz;
+
+	is_66mhz = pbm->is_66mhz_capable && pbm->all_devs_66mhz;
+
+	for (walk = walk->next; walk != &pbus->devices; walk = walk->next)
+		pdev_setup_busmastering(pci_dev_b(walk), is_66mhz);
+
+	walk = &pbus->children;
+	for (walk = walk->next; walk != &pbus->children; walk = walk->next)
+		pci_setup_busmastering(pbm, pci_bus_b(walk));
 }
 
 /* Generic helper routines for PCI error reporting. */

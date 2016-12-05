@@ -4,6 +4,7 @@
  *  Copyright (C) 1995, 1996 by Paal-Kr. Engstad and Volker Lendecke
  *  Copyright (C) 1997 by Volker Lendecke
  *
+ *  Please add a note about your changes to smbfs in the ChangeLog file.
  */
 
 #include <linux/sched.h>
@@ -25,8 +26,8 @@
 
 #include <asm/uaccess.h>
 
-#define SMBFS_PARANOIA 1
-/* #define SMBFS_DEBUG_VERBOSE 1 */
+#include "smb_debug.h"
+
 
 static int
 _recvfrom(struct socket *socket, unsigned char *ubuf, int size,
@@ -110,25 +111,25 @@ smb_data_callback(void* ptr)
 	unsigned char peek_buf[4];
 	int result;
 	mm_segment_t fs;
+	int count = 100;   /* this is a lot, we should have some data waiting */
+	int found = 0;
 
 	fs = get_fs();
 	set_fs(get_ds());
 
 	lock_kernel();
-	while (1)
-	{
+	while (count-- > 0) {
+		peek_buf[0] = 0;
+
 		result = -EIO;
-		if (job->sk->dead)
-		{
-#ifdef SMBFS_PARANOIA
-			printk("smb_data_callback: sock dead!\n");
-#endif
+		if (job->sk->dead) {
+			PARANOIA("sock dead!\n");
 			break;
 		}
 
 		result = _recvfrom(socket, (void *) peek_buf, 1,
 				   MSG_PEEK | MSG_DONTWAIT);
-		if (result == -EAGAIN)
+		if (result < 0)
 			break;
 		if (peek_buf[0] != 0x85)
 			break;
@@ -137,15 +138,17 @@ smb_data_callback(void* ptr)
 		result = _recvfrom(socket, (void *) peek_buf, 4,
 				   MSG_DONTWAIT);
 
-		pr_debug("smb_data_callback: got SESSION KEEPALIVE\n");
+		DEBUG1("got SESSION KEEPALIVE\n");
 
-		if (result == -EAGAIN)
+		if (result < 0)
 			break;
+		found = 1;
 	}
 	unlock_kernel();
 	set_fs(fs);
 
-	if (result != -EAGAIN)
+	DEBUG1("found=%d, count=%d, result=%d\n", found, count, result);
+	if (found)
 		found_data(job->sk);
 	kfree(ptr);
 }
@@ -156,16 +159,16 @@ smb_data_ready(struct sock *sk, int len)
 	struct data_callback* job;
 	job = kmalloc(sizeof(struct data_callback),GFP_ATOMIC);
 	if(job == 0) {
-		printk("smb_data_ready(): lost SESSION KEEPALIVE due to OOM.\n");
+		printk("smb_data_ready: lost SESSION KEEPALIVE due to OOM.\n");
 		found_data(sk);
 		return;
 	}
-	job->cb.next = NULL;
+	INIT_LIST_HEAD(&job->cb.list);
 	job->cb.sync = 0;
 	job->cb.routine = smb_data_callback;
 	job->cb.data = job;
 	job->sk = sk;
-	queue_task(&job->cb, &tq_scheduler);
+	schedule_task(&job->cb);
 }
 
 int
@@ -184,7 +187,7 @@ server_sock(struct smb_sb_info *server)
 	{
 #ifdef SMBFS_PARANOIA
 		if (!smb_valid_socket(file->f_dentry->d_inode))
-			printk("smb_server_sock: bad socket!\n");
+			PARANOIA("bad socket!\n");
 #endif
 		return &file->f_dentry->d_inode->u.socket_i;
 	}
@@ -203,7 +206,7 @@ smb_catch_keepalive(struct smb_sb_info *server)
 	socket = server_sock(server);
 	if (!socket)
 	{
-		printk("smb_catch_keepalive: did not get valid server!\n");
+		printk(KERN_DEBUG "smb_catch_keepalive: did not get valid server!\n");
 		server->data_ready = NULL;
 		goto out;
 	}
@@ -211,11 +214,11 @@ smb_catch_keepalive(struct smb_sb_info *server)
 	sk = socket->sk;
 	if (sk == NULL)
 	{
-		pr_debug("smb_catch_keepalive: sk == NULL");
+		DEBUG1("sk == NULL");
 		server->data_ready = NULL;
 		goto out;
 	}
-	pr_debug("smb_catch_keepalive.: sk->d_r = %x, server->d_r = %x\n",
+	DEBUG1("sk->d_r = %x, server->d_r = %x\n",
 		 (unsigned int) (sk->data_ready),
 		 (unsigned int) (server->data_ready));
 
@@ -223,8 +226,7 @@ smb_catch_keepalive(struct smb_sb_info *server)
 	 * Install the callback atomically to avoid races ...
 	 */
 	data_ready = xchg(&sk->data_ready, smb_data_ready);
-	if (data_ready != smb_data_ready)
-	{
+	if (data_ready != smb_data_ready) {
 		server->data_ready = data_ready;
 		error = 0;
 	} else
@@ -245,27 +247,27 @@ smb_dont_catch_keepalive(struct smb_sb_info *server)
 	socket = server_sock(server);
 	if (!socket)
 	{
-		printk("smb_dont_catch_keepalive: did not get valid server!\n");
+		printk(KERN_DEBUG "smb_dont_catch_keepalive: did not get valid server!\n");
 		goto out;
 	}
 
 	sk = socket->sk;
 	if (sk == NULL)
 	{
-		printk("smb_dont_catch_keepalive: sk == NULL");
+		DEBUG1("sk == NULL");
 		goto out;
 	}
 
 	/* Is this really an error?? */
 	if (server->data_ready == NULL)
 	{
-		printk("smb_dont_catch_keepalive: "
+		printk(KERN_DEBUG "smb_dont_catch_keepalive: "
 		       "server->data_ready == NULL\n");
 		goto out;
 	}
-	pr_debug("smb_dont_catch_keepalive: sk->d_r = %x, server->d_r = %x\n",
-		 (unsigned int) (sk->data_ready),
-		 (unsigned int) (server->data_ready));
+	DEBUG1("smb_dont_catch_keepalive: sk->d_r = %x, server->d_r = %x\n",
+	       (unsigned int) (sk->data_ready),
+	       (unsigned int) (server->data_ready));
 
 	/*
 	 * Restore the original callback atomically to avoid races ...
@@ -274,7 +276,7 @@ smb_dont_catch_keepalive(struct smb_sb_info *server)
 	server->data_ready = NULL;
 	if (data_ready != smb_data_ready)
 	{
-		printk("smb_dont_catch_keepalive: "
+		printk(KERN_ERR "smb_dont_catch_keepalive: "
 		       "sk->data_ready != smb_data_ready\n");
 	}
 	error = 0;
@@ -292,12 +294,10 @@ smb_close_socket(struct smb_sb_info *server)
 
 	if (file)
 	{
-#ifdef SMBFS_DEBUG_VERBOSE
-printk("smb_close_socket: closing socket %p\n", server_sock(server));
-#endif
+		VERBOSE("closing socket %p\n", server_sock(server));
 #ifdef SMBFS_PARANOIA
-if (server_sock(server)->sk->data_ready == smb_data_ready)
-printk("smb_close_socket: still catching keepalives!\n");
+		if (server_sock(server)->sk->data_ready == smb_data_ready)
+			PARANOIA("still catching keepalives!\n");
 #endif
 		server->sock_file = NULL;
 		fput(file);
@@ -322,8 +322,7 @@ smb_send_raw(struct socket *socket, unsigned char *source, int length)
 		}
 		if (result < 0)
 		{
-			pr_debug("smb_send_raw: sendto error = %d\n",
-				 -result);
+			DEBUG1("smb_send_raw: sendto error = %d\n", -result);
 			return result;
 		}
 		already_sent += result;
@@ -349,8 +348,7 @@ smb_receive_raw(struct socket *socket, unsigned char *target, int length)
 		}
 		if (result < 0)
 		{
-			pr_debug("smb_receive_raw: recvfrom error = %d\n",
-				 -result);
+			DEBUG1("recvfrom error = %d\n", -result);
 			return result;
 		}
 		already_read += result;
@@ -373,9 +371,7 @@ smb_get_length(struct socket *socket, unsigned char *header)
 
 	if (result < 0)
 	{
-#ifdef SMBFS_PARANOIA
-printk("smb_get_length: recv error = %d\n", -result);
-#endif
+		PARANOIA("recv error = %d\n", -result);
 		return result;
 	}
 	switch (peek_buf[0])
@@ -385,13 +381,11 @@ printk("smb_get_length: recv error = %d\n", -result);
 		break;
 
 	case 0x85:
-		pr_debug("smb_get_length: Got SESSION KEEP ALIVE\n");
+		DEBUG1("Got SESSION KEEP ALIVE\n");
 		goto re_recv;
 
 	default:
-#ifdef SMBFS_PARANOIA
-printk("smb_get_length: Invalid NBT packet, code=%x\n", peek_buf[0]);
-#endif
+		PARANOIA("Invalid NBT packet, code=%x\n", peek_buf[0]);
 		return -EIO;
 	}
 
@@ -450,17 +444,15 @@ smb_receive(struct smb_sb_info *server)
 	result = smb_receive_raw(socket, packet + 4, len);
 	if (result < 0)
 	{
-#ifdef SMBFS_DEBUG_VERBOSE
-printk("smb_receive: receive error: %d\n", result);
-#endif
+		VERBOSE("receive error: %d\n", result);
 		goto out;
 	}
 	server->rcls = *(packet + smb_rcls);
 	server->err  = WVAL(packet, smb_err);
 
 #ifdef SMBFS_DEBUG_VERBOSE
-if (server->rcls != 0)
-printk("smb_receive: rcls=%d, err=%d\n", server->rcls, server->err);
+	if (server->rcls != 0)
+		VERBOSE("rcls=%d, err=%d\n", server->rcls, server->err);
 #endif
 out:
 	return result;
@@ -523,10 +515,9 @@ smb_receive_trans2(struct smb_sb_info *server,
 			 */
 			if (parm_count == parm_tot && data_count == data_tot)
 			{
-#ifdef SMBFS_DEBUG_VERBOSE
-printk("smb_receive_trans2: fast track, parm=%u %u %u, data=%u %u %u\n",
-parm_disp, parm_offset, parm_count, data_disp, data_offset, data_count);
-#endif
+				VERBOSE("fast track, parm=%u %u %u, data=%u %u %u\n",
+					parm_disp, parm_offset, parm_count,
+					data_disp, data_offset, data_count);
 				*parm  = base + parm_offset;
 				*data  = base + data_offset;
 				goto success;
@@ -563,10 +554,9 @@ parm_disp, parm_offset, parm_count, data_disp, data_offset, data_count);
 		memcpy(*parm + parm_disp, base + parm_offset, parm_count);
 		memcpy(*data + data_disp, base + data_offset, data_count);
 
-#ifdef SMBFS_PARANOIA
-printk("smb_receive_trans2: copied, parm=%u of %u, data=%u of %u\n",
-parm_len, parm_tot, data_len, data_tot);
-#endif
+		PARANOIA("copied, parm=%u of %u, data=%u of %u\n",
+			 parm_len, parm_tot, data_len, data_tot);
+
 		/*
 		 * Check whether we've received all of the data. Note that
 		 * we use the packet totals -- total lengths might shrink!
@@ -586,12 +576,9 @@ parm_len, parm_tot, data_len, data_tot);
 		server->packet_size = buf_len;
 		server->packet = rcv_buf;
 		rcv_buf = inbuf;
-	} else
-	{
-#ifdef SMBFS_PARANOIA
-printk("smb_receive_trans2: copying data, old size=%d, new size=%u\n",
-server->packet_size, buf_len);
-#endif
+	} else {
+		PARANOIA("copying data, old size=%d, new size=%u\n",
+			 server->packet_size, buf_len);
 		memcpy(inbuf, rcv_buf, parm_len + data_len);
 	}
 
@@ -604,24 +591,22 @@ out:
 	return result;
 
 out_no_mem:
-#ifdef SMBFS_PARANOIA
-	printk("smb_receive_trans2: couldn't allocate data area\n");
-#endif
+	PARANOIA("couldn't allocate data area\n");
 	result = -ENOMEM;
 	goto out;
 out_too_long:
-	printk("smb_receive_trans2: data/param too long, data=%d, parm=%d\n",
+	printk(KERN_ERR "smb_receive_trans2: data/param too long, data=%d, parm=%d\n",
 		data_tot, parm_tot);
 	goto out_error;
 out_data_grew:
-	printk("smb_receive_trans2: data/params grew!\n");
+	printk(KERN_ERR "smb_receive_trans2: data/params grew!\n");
 	goto out_error;
 out_bad_parm:
-	printk("smb_receive_trans2: invalid parms, disp=%d, cnt=%d, tot=%d\n",
+	printk(KERN_ERR "smb_receive_trans2: invalid parms, disp=%d, cnt=%d, tot=%d\n",
 		parm_disp, parm_count, parm_tot);
 	goto out_error;
 out_bad_data:
-	printk("smb_receive_trans2: invalid data, disp=%d, cnt=%d, tot=%d\n",
+	printk(KERN_ERR "smb_receive_trans2: invalid data, disp=%d, cnt=%d, tot=%d\n",
 		data_disp, data_count, data_tot);
 out_error:
 	result = -EIO;
@@ -653,10 +638,10 @@ smb_request(struct smb_sb_info *server)
 		goto bad_conn;
 
 	len = smb_len(buffer) + 4;
-	pr_debug("smb_request: len = %d cmd = 0x%X\n", len, buffer[8]);
+	DEBUG1("len = %d cmd = 0x%X\n", len, buffer[8]);
 
 	spin_lock_irqsave(&current->sigmask_lock, flags);
-	sigpipe = sigismember(&current->signal, SIGPIPE);
+	sigpipe = sigismember(&current->pending.signal, SIGPIPE);
 	old_set = current->blocked;
 	siginitsetinv(&current->blocked, sigmask(SIGKILL)|sigmask(SIGSTOP));
 	recalc_sigpending(current);
@@ -674,7 +659,7 @@ smb_request(struct smb_sb_info *server)
 	/* read/write errors are handled by errno */
 	spin_lock_irqsave(&current->sigmask_lock, flags);
 	if (result == -EPIPE && !sigpipe)
-		sigdelset(&current->signal, SIGPIPE);
+		sigdelset(&current->pending.signal, SIGPIPE);
 	current->blocked = old_set;
 	recalc_sigpending(current);
 	spin_unlock_irqrestore(&current->sigmask_lock, flags);
@@ -686,7 +671,7 @@ smb_request(struct smb_sb_info *server)
 		int result2 = smb_catch_keepalive(server);
 		if (result2 < 0)
 		{
-			printk("smb_request: catch keepalive failed\n");
+			printk(KERN_ERR "smb_request: catch keepalive failed\n");
 			result = result2;
 		}
 	}
@@ -698,28 +683,27 @@ smb_request(struct smb_sb_info *server)
 	if (server->rcls) {
 		int error = smb_errno(server);
 		if (error == EBADSLT) {
-			printk("smb_request: tree ID invalid\n");
+			printk(KERN_ERR "smb_request: tree ID invalid\n");
 			result = error;
 			goto bad_conn;
 		}
 	}
 
 out:
-	pr_debug("smb_request: result = %d\n", result);
+	DEBUG1("result = %d\n", result);
 	return result;
 	
 bad_conn:
-#ifdef SMBFS_PARANOIA
-printk("smb_request: result %d, setting invalid\n", result);
-#endif
+	PARANOIA("result %d, setting invalid\n", result);
 	server->state = CONN_INVALID;
 	smb_invalidate_inodes(server);
 	goto out;		
 bad_no_packet:
-	printk("smb_request: no packet!\n");
+	printk(KERN_ERR "smb_request: no packet!\n");
 	goto out;
 bad_no_conn:
-	printk("smb_request: connection %d not valid!\n", server->state);
+	printk(KERN_ERR "smb_request: connection %d not valid!\n",
+	       server->state);
 	goto out;
 }
 
@@ -738,13 +722,13 @@ smb_send_trans2(struct smb_sb_info *server, __u16 trans2_command,
 
 	const int smb_parameters = 15;
 	const int oparam =
-	ROUND_UP(SMB_HEADER_LEN + 2 * smb_parameters + 2 + 3);
+		ROUND_UP(SMB_HEADER_LEN + 2 * smb_parameters + 2 + 3);
 	const int odata =
-	ROUND_UP(oparam + lparam);
+		ROUND_UP(oparam + lparam);
 	const int bcc =
-	odata + ldata - (SMB_HEADER_LEN + 2 * smb_parameters + 2);
+		odata + ldata - (SMB_HEADER_LEN + 2 * smb_parameters + 2);
 	const int packet_length =
-	SMB_HEADER_LEN + 2 * smb_parameters + bcc + 2;
+		SMB_HEADER_LEN + 2 * smb_parameters + bcc + 2;
 
 	unsigned char padding[4] =
 	{0,};
@@ -821,8 +805,7 @@ smb_trans2_request(struct smb_sb_info *server, __u16 trans2_command,
 	mm_segment_t fs;
 	int result;
 
-	pr_debug("smb_trans2_request: com=%d, ld=%d, lp=%d\n",
-		 trans2_command, ldata, lparam);
+	DEBUG1("com=%d, ld=%d, lp=%d\n", trans2_command, ldata, lparam);
 
 	/*
 	 * These are initialized in smb_request_ok, but not here??
@@ -838,7 +821,7 @@ smb_trans2_request(struct smb_sb_info *server, __u16 trans2_command,
 		goto bad_conn;
 
 	spin_lock_irqsave(&current->sigmask_lock, flags);
-	sigpipe = sigismember(&current->signal, SIGPIPE);
+	sigpipe = sigismember(&current->pending.signal, SIGPIPE);
 	old_set = current->blocked;
 	siginitsetinv(&current->blocked, sigmask(SIGKILL)|sigmask(SIGSTOP));
 	recalc_sigpending(current);
@@ -858,7 +841,7 @@ smb_trans2_request(struct smb_sb_info *server, __u16 trans2_command,
 	/* read/write errors are handled by errno */
 	spin_lock_irqsave(&current->sigmask_lock, flags);
 	if (result == -EPIPE && !sigpipe)
-		sigdelset(&current->signal, SIGPIPE);
+		sigdelset(&current->pending.signal, SIGPIPE);
 	current->blocked = old_set;
 	recalc_sigpending(current);
 	spin_unlock_irqrestore(&current->sigmask_lock, flags);
@@ -881,7 +864,7 @@ smb_trans2_request(struct smb_sb_info *server, __u16 trans2_command,
 	if (server->rcls) {
 		int error = smb_errno(server);
 		if (error == EBADSLT) {
-			printk("smb_request: tree ID invalid\n");
+			printk(KERN_ERR "smb_request: tree ID invalid\n");
 			result = error;
 			goto bad_conn;
 		}
@@ -891,9 +874,7 @@ out:
 	return result;
 
 bad_conn:
-#ifdef SMBFS_PARANOIA
-printk("smb_trans2_request: result=%d, setting invalid\n", result);
-#endif
+	PARANOIA("result=%d, setting invalid\n", result);
 	server->state = CONN_INVALID;
 	smb_invalidate_inodes(server);
 	goto out;

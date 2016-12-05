@@ -9,8 +9,11 @@
  * OSS/Free for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
  * Version 2 (June 1991). See the "COPYING" file distributed with this software
  * for more info.
+ *
+ * Bartlomiej Zolnierkiewicz	: Added __init to pas_init_mixer()
  */
 
+#include <linux/init.h>
 #include "sound_config.h"
 
 #include "pas2.h"
@@ -191,22 +194,20 @@ static int pas_buffer_status(int dev)
 
 static struct midi_operations pas_midi_operations =
 {
-	{"Pro Audio Spectrum", 0, 0, SNDCARD_PAS},
-	&std_midi_synth,
-	{0},
-	pas_midi_open,
-	pas_midi_close,
-	NULL,
-	pas_midi_out,
-	pas_midi_start_read,
-	pas_midi_end_read,
-	pas_midi_kick,
-	NULL,
-	pas_buffer_status,
-	NULL
+	owner:		THIS_MODULE,
+	info:		{"Pro Audio Spectrum", 0, 0, SNDCARD_PAS},
+	converter:	&std_midi_synth,
+	in_info:	{0},
+	open:		pas_midi_open,
+	close:		pas_midi_close,
+	outputc:	pas_midi_out,
+	start_read:	pas_midi_start_read,
+	end_read:	pas_midi_end_read,
+	kick:		pas_midi_kick,
+	buffer_status:	pas_buffer_status,
 };
 
-void pas_midi_init(void)
+void __init pas_midi_init(void)
 {
 	int dev = sound_alloc_mididev();
 

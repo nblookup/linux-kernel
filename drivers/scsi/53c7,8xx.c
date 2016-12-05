@@ -1396,7 +1396,7 @@ ncr_pci_init (Scsi_Host_Template *tpnt, int board, int chip,
     int i, irq;
     struct pci_dev *pdev = pci_find_slot(bus, device_fn);
 
-    printk("scsi-ncr53c7,8xx : at PCI bus %d, device %d,  function %d\n",
+    printk("scsi-ncr53c7,8xx : at PCI bus %d, device %d, function %d\n",
 	bus, (int) (device_fn & 0xf8) >> 3, 
     	(int) device_fn & 7);
 
@@ -1406,16 +1406,16 @@ ncr_pci_init (Scsi_Host_Template *tpnt, int board, int chip,
 	return -1;
     }
 
-    if ((error = pcibios_read_config_word (bus, device_fn, PCI_COMMAND, 
-	    &command)) ||
-	(error = pcibios_read_config_byte (bus, device_fn, PCI_CLASS_REVISION,
-	    &revision))) {
+    if ((error = pci_read_config_word (pdev, PCI_COMMAND, &command)) ||
+	(error = pci_read_config_byte (pdev, PCI_CLASS_REVISION, &revision))) {
 	printk ("scsi-ncr53c7,8xx : error %d not initializing due to error reading configuration space\n"
 		"	 perhaps you specified an incorrect PCI bus, device, or function.\n", error);
 	return -1;
     }
-    io_port = pdev->resource[0].start;
-    base = pdev->resource[1].start;
+    if (pci_enable_device(pdev))
+	return -1;
+    io_port = pci_resource_start(pdev, 0);
+    base = pci_resource_start(pdev, 1);
     irq = pdev->irq;
 
     /* If any one ever clones the NCR chips, this will have to change */
@@ -1451,24 +1451,21 @@ ncr_pci_init (Scsi_Host_Template *tpnt, int board, int chip,
      */
 
     if (command & PCI_COMMAND_IO) { 
-	if ((io_port & 3) != 1) {
-	    printk ("scsi-ncr53c7,8xx : disabling I/O mapping since base address 0 (0x%x)\n"
-    	    	    "        bits 0..1 indicate a non-IO mapping\n",
-		(unsigned) io_port);
+	if (!(pdev->resource[0].flags & IORESOURCE_IO)) {
+	    printk ("scsi-ncr53c7,8xx : disabling I/O mapping since base "
+		    "address 0\n        contains a non-IO mapping\n");
 	    io_port = 0;
-	} else
-	    io_port &= PCI_BASE_ADDRESS_IO_MASK;
+	}
     } else {
     	io_port = 0;
     }
 
     if (command & PCI_COMMAND_MEMORY) {
-	if ((base & PCI_BASE_ADDRESS_SPACE) != PCI_BASE_ADDRESS_SPACE_MEMORY) {
-	    printk("scsi-ncr53c7,8xx : disabling memory mapping since base address 1\n"
-		   "        contains a non-memory mapping\n");
+	if (!(pdev->resource[1].flags & IORESOURCE_MEM)) {
+	    printk("scsi-ncr53c7,8xx : disabling memory mapping since base "
+		   "address 1\n        contains a non-memory mapping\n");
 	    base = 0;
-	} else 
-	    base &= PCI_BASE_ADDRESS_MEM_MASK;
+	}
     } else {
 	base = 0;
     }
@@ -3150,7 +3147,7 @@ debugger_fn_bl (struct Scsi_Host *host, struct debugger_token *token,
     save_flags(flags);
     cli();
     for (bp = (struct NCR53c7x0_break *) host->breakpoints;
-	    bp; bp = (struct NCR53c7x0_break *) bp->next); {
+	    bp; bp = (struct NCR53c7x0_break *) bp->next) {
 	    sprintf (buf, "scsi%d : bp : success : at %08x, replaces %08x %08x",
 		bp->addr, bp->old[0], bp->old[1]);
 	    len = strlen(buf);
@@ -5392,9 +5389,10 @@ print_insn (struct Scsi_Host *host, const u32 *insn,
      * to use vverify()?
      */
 
-    if (MAP_NR(insn) < 1 || MAP_NR(insn + 8) > MAP_NR(high_memory) || 
+    if (virt_to_phys((void *)insn) < PAGE_SIZE || 
+	virt_to_phys((void *)(insn + 8)) > virt_to_phys(high_memory) ||
 	((((dcmd = (insn[0] >> 24) & 0xff) & DCMD_TYPE_MMI) == DCMD_TYPE_MMI) &&
-	MAP_NR(insn + 12) > MAP_NR(high_memory))) {
+	virt_to_phys((void *)(insn + 12)) > virt_to_phys(high_memory))) {
 	size = 0;
 	sprintf (buf, "%s%p: address out of range\n",
 	    prefix, insn);
@@ -6384,8 +6382,7 @@ dump_events (struct Scsi_Host *host, int count) {
 
 static int 
 check_address (unsigned long addr, int size) {
-    return (MAP_NR(addr) < 1 || MAP_NR(addr + size) > MAP_NR(high_memory) ?
-	    -1 : 0);
+    return (virt_to_phys((void *)addr) < PAGE_SIZE || virt_to_phys((void *)(addr + size)) > virt_to_phys(high_memory) ?  -1 : 0);
 }
 
 #ifdef MODULE
@@ -6428,6 +6425,7 @@ NCR53c7x0_release(struct Scsi_Host *host) {
 	vfree ((void *)hostdata->events);
     return 1;
 }
-Scsi_Host_Template driver_template = NCR53c7xx;
-#include "scsi_module.c"
 #endif /* def MODULE */
+
+static Scsi_Host_Template driver_template = NCR53c7xx;
+#include "scsi_module.c"

@@ -62,35 +62,46 @@
 #include <asm/dma.h>
 #include <asm/bootx.h>
 
-#include "time.h"
+#include <asm/time.h>
 #include "local_irq.h"
 #include "pmac_pic.h"
 
 #undef SHOW_GATWICK_IRQS
 
-unsigned long pmac_get_rtc_time(void);
-int pmac_set_rtc_time(unsigned long nowtime);
-void pmac_read_rtc_time(void);
-void pmac_calibrate_decr(void);
-void pmac_setup_pci_ptrs(void);
+extern long pmac_time_init(void);
+extern unsigned long pmac_get_rtc_time(void);
+extern int pmac_set_rtc_time(unsigned long nowtime);
+extern void pmac_read_rtc_time(void);
+extern void pmac_calibrate_decr(void);
+extern void pmac_setup_pci_ptrs(void);
 
 extern int mackbd_setkeycode(unsigned int scancode, unsigned int keycode);
 extern int mackbd_getkeycode(unsigned int scancode);
-extern int mackbd_translate(unsigned char scancode, unsigned char *keycode,
-			   char raw_mode);
-extern char mackbd_unexpected_up(unsigned char keycode);
+extern int mackbd_translate(unsigned char keycode, unsigned char *keycodep,
+		     char raw_mode);
+extern int mackbd_unexpected_up(unsigned char keycode);
 extern void mackbd_leds(unsigned char leds);
-extern void mackbd_init_hw(void);
+extern void __init mackbd_init_hw(void);
+extern int mac_hid_kbd_translate(unsigned char scancode, unsigned char *keycode,
+				 char raw_mode);
+extern char mac_hid_kbd_unexpected_up(unsigned char keycode);
+extern void mac_hid_init_hw(void);
 #ifdef CONFIG_MAGIC_SYSRQ
-unsigned char mackbd_sysrq_xlate[128];
+extern unsigned char mac_hid_kbd_sysrq_xlate[128];
+extern unsigned char pckbd_sysrq_xlate[128];
+extern unsigned char mackbd_sysrq_xlate[128];
 #endif /* CONFIG_MAGIC_SYSRQ */
 extern int pckbd_setkeycode(unsigned int scancode, unsigned int keycode);
 extern int pckbd_getkeycode(unsigned int scancode);
 extern int pckbd_translate(unsigned char scancode, unsigned char *keycode,
 			   char raw_mode);
 extern char pckbd_unexpected_up(unsigned char keycode);
-extern void pckbd_leds(unsigned char leds);
-extern void pckbd_init_hw(void);
+extern int keyboard_sends_linux_keycodes;
+extern void pmac_nvram_update(void);
+
+extern void *pmac_pci_dev_io_base(unsigned char bus, unsigned char devfn, int physical);
+extern void *pmac_pci_dev_mem_base(unsigned char bus, unsigned char devfn);
+extern int pmac_pci_dev_root_bridge(unsigned char bus, unsigned char devfn);
 
 unsigned char drive_info;
 
@@ -98,17 +109,22 @@ int ppc_override_l2cr = 0;
 int ppc_override_l2cr_value;
 int has_l2cache = 0;
 
+static int current_root_goodness = -1;
+
 extern char saved_command_line[];
+
+extern int pmac_newworld;
 
 #define DEFAULT_ROOT_DEVICE 0x0801	/* sda1 - slightly silly choice */
 
 extern void zs_kgdb_hook(int tty_num);
 static void ohare_init(void);
 static void init_p2pbridge(void);
-static void init_uninorth(void);
 #ifdef CONFIG_BOOTX_TEXT
 void pmac_progress(char *s, unsigned short hex);
 #endif
+
+sys_ctrler_t sys_ctrler = SYS_CTRLER_UNKNOWN;
 
 __pmac
 int
@@ -198,6 +214,11 @@ pmac_get_cpuinfo(char *buffer)
 		}
 	}
 	
+	/* Indicate newworld/oldworld */
+	len += sprintf(buffer+len, "pmac-generation\t: %s\n",
+		pmac_newworld ? "NewWorld" : "OldWorld");		
+	
+
 	return len;
 }
 
@@ -259,7 +280,6 @@ pmac_setup_arch(void)
 
 	pmac_find_bridges();
 	init_p2pbridge();
-	init_uninorth();
 	
 	/* Checks "l2cr-value" property in the registry */
 	if ( (_get_PVR() >> 16) == 8 || (_get_PVR() >> 16) == 12 ) {
@@ -293,7 +313,9 @@ pmac_setup_arch(void)
 #ifdef CONFIG_ADB_PMU
 	find_via_pmu();
 #endif	
-
+#ifdef CONFIG_NVRAM
+	pmac_nvram_init();
+#endif
 #ifdef CONFIG_DUMMY_CONSOLE
 	conswitchp = &dummy_con;
 #endif
@@ -353,33 +375,6 @@ static void __init ohare_init(void)
 	}
 }
 
-static void __init
-init_uninorth(void)
-{
-	/* 
-	 * Turns on the gmac clock so that it responds to PCI cycles
-	 * later, the driver may want to turn it off again to save
-	 * power when interface is down
-	 */
-	struct device_node* uni_n = find_devices("uni-n");
-	struct device_node* gmac = find_devices("ethernet");
-	unsigned long* addr;
-	
-	if (!uni_n || uni_n->n_addrs < 1)
-		return;
-	addr = ioremap(uni_n->addrs[0].address, 0x300);
-
-	while(gmac) {
-		if (device_is_compatible(gmac, "gmac"))
-			break;
-		gmac = gmac->next;
-	}
-	if (gmac) {
-		*(addr + 8) |= 2;
-		eieio();
-	}
-}
-
 extern char *bootpath;
 extern char *bootdevice;
 void *boot_host;
@@ -387,17 +382,15 @@ int boot_target;
 int boot_part;
 kdev_t boot_dev;
 
-extern void via_pmu_start(void);
-
 void __init
 pmac_init2(void)
 {
 #ifdef CONFIG_ADB_PMU
 	via_pmu_start();
 #endif
-#ifdef CONFIG_NVRAM  
-	pmac_nvram_init();
-#endif	
+#ifdef CONFIG_ADB_CUDA
+	via_cuda_start();
+#endif
 #ifdef CONFIG_PMAC_PBOOK
 	media_bay_init();
 #endif	
@@ -469,13 +462,14 @@ void __init find_boot_device(void)
 
 /* can't be __init - can be called whenever a disk is first accessed */
 __pmac
-void note_bootable_part(kdev_t dev, int part)
+void note_bootable_part(kdev_t dev, int part, int goodness)
 {
 	static int found_boot = 0;
 	char *p;
 
 	/* Do nothing if the root has been set already. */
-	if (ROOT_DEV != to_kdev_t(DEFAULT_ROOT_DEVICE))
+	if ((goodness < current_root_goodness) &&
+		(ROOT_DEV != to_kdev_t(DEFAULT_ROOT_DEVICE)))
 		return;
 	p = strstr(saved_command_line, "root=");
 	if (p != NULL && (p == saved_command_line || p[-1] == ' '))
@@ -488,7 +482,7 @@ void note_bootable_part(kdev_t dev, int part)
 	if (boot_dev == 0 || dev == boot_dev) {
 		ROOT_DEV = MKDEV(MAJOR(dev), MINOR(dev) + part);
 		boot_dev = NODEV;
-		printk(" (root on %d)", part);
+		current_root_goodness = goodness;
 	}
 }
 
@@ -499,6 +493,8 @@ pmac_restart(char *cmd)
 	struct adb_request req;
 #endif /* CONFIG_ADB_CUDA */
 
+	pmac_nvram_update();
+	
 	switch (sys_ctrler) {
 #ifdef CONFIG_ADB_CUDA
 	case SYS_CTRLER_CUDA:
@@ -524,6 +520,8 @@ pmac_power_off(void)
 	struct adb_request req;
 #endif /* CONFIG_ADB_CUDA */
 
+	pmac_nvram_update();
+	
 	switch (sys_ctrler) {
 #ifdef CONFIG_ADB_CUDA
 	case SYS_CTRLER_CUDA:
@@ -655,12 +653,35 @@ pmac_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.power_off      = pmac_power_off;
 	ppc_md.halt           = pmac_halt;
 
-	ppc_md.time_init      = NULL;
+	ppc_md.time_init      = pmac_time_init;
 	ppc_md.set_rtc_time   = pmac_set_rtc_time;
 	ppc_md.get_rtc_time   = pmac_get_rtc_time;
 	ppc_md.calibrate_decr = pmac_calibrate_decr;
 
-#if defined(CONFIG_VT) && defined(CONFIG_ADB_KEYBOARD)
+	ppc_md.pci_dev_io_base          = pmac_pci_dev_io_base;
+	ppc_md.pci_dev_mem_base         = pmac_pci_dev_mem_base;
+	ppc_md.pci_dev_root_bridge      = pmac_pci_dev_root_bridge;
+
+#ifdef CONFIG_VT
+#ifdef CONFIG_INPUT_ADBHID
+	ppc_md.kbd_init_hw       = mac_hid_init_hw;
+	ppc_md.kbd_translate     = mac_hid_kbd_translate;
+	ppc_md.kbd_unexpected_up = mac_hid_kbd_unexpected_up;
+	ppc_md.kbd_setkeycode    = 0;
+	ppc_md.kbd_getkeycode    = 0;
+#ifdef CONFIG_MAGIC_SYSRQ
+#ifdef CONFIG_MAC_ADBKEYCODES
+	if (!keyboard_sends_linux_keycodes) {
+		ppc_md.ppc_kbd_sysrq_xlate = mac_hid_kbd_sysrq_xlate;
+		SYSRQ_KEY = 0x69;
+	} else
+#endif /* CONFIG_MAC_ADBKEYCODES */
+	{
+		ppc_md.ppc_kbd_sysrq_xlate = pckbd_sysrq_xlate;
+		SYSRQ_KEY = 0x54;
+	}
+#endif /* CONFIG_MAGIC_SYSRQ */
+#elif defined(CONFIG_ADB_KEYBOARD)
 	ppc_md.kbd_setkeycode    = mackbd_setkeycode;
 	ppc_md.kbd_getkeycode    = mackbd_getkeycode;
 	ppc_md.kbd_translate     = mackbd_translate;
@@ -668,10 +689,11 @@ pmac_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.kbd_leds          = mackbd_leds;
 	ppc_md.kbd_init_hw       = mackbd_init_hw;
 #ifdef CONFIG_MAGIC_SYSRQ
-	ppc_md.ppc_kbd_sysrq_xlate	 = mackbd_sysrq_xlate;
+	ppc_md.ppc_kbd_sysrq_xlate       = mackbd_sysrq_xlate;
 	SYSRQ_KEY = 0x69;
-#endif
-#endif
+#endif /* CONFIG_MAGIC_SYSRQ */
+#endif /* CONFIG_INPUT_ADBHID/CONFIG_ADB_KEYBOARD */
+#endif /* CONFIG_VT */
 
 #if defined(CONFIG_BLK_DEV_IDE) && defined(CONFIG_BLK_DEV_IDE_PMAC)
         ppc_ide_md.insw = pmac_ide_insw;

@@ -1,4 +1,4 @@
-/* $Id: pci_sabre.c,v 1.15 2000/03/10 02:42:16 davem Exp $
+/* $Id: pci_sabre.c,v 1.20 2000/06/26 19:40:27 davem Exp $
  * pci_sabre.c: Sabre specific PCI controller support.
  *
  * Copyright (C) 1997, 1998, 1999 David S. Miller (davem@caipfs.rutgers.edu)
@@ -641,14 +641,28 @@ static unsigned int __init sabre_irq_build(struct pci_controller_info *p,
 	bucket = __bucket(build_irq(pil, inofixup, iclr, imap));
 	bucket->flags |= IBF_PCI;
 
-	/* XXX We still need to code up support for this in irq.c
-	 * XXX It's easy to code up since only one SIMBA can exist
-	 * XXX in a machine and this is where the sync register is. -DaveM
-	 */
 	if (pdev) {
 		struct pcidev_cookie *pcp = pdev->sysdata;
-		if (pdev->bus->number != pcp->pbm->pci_first_busno)
+
+		/* When a device lives behind a bridge deeper in the
+		 * PCI bus topology than APB, a special sequence must
+		 * run to make sure all pending DMA transfers at the
+		 * time of IRQ delivery are visible in the coherency
+		 * domain by the cpu.  This sequence is to perform
+		 * a read on the far side of the non-APB bridge, then
+		 * perform a read of Sabre's DMA write-sync register.
+		 *
+		 * Currently, the PCI_CONFIG register for the device
+		 * is used for this read from the far side of the bridge.
+		 */
+		if (pdev->bus->number != pcp->pbm->pci_first_busno) {
 			bucket->flags |= IBF_DMA_SYNC;
+			bucket->synctab_ent = dma_sync_reg_table_entry++;
+			dma_sync_reg_table[bucket->synctab_ent] =
+				(unsigned long) sabre_pci_config_mkaddr(
+					pcp->pbm,
+					pdev->bus->number, pdev->devfn, PCI_COMMAND);
+		}
 	}
 	return __irq(bucket);
 }
@@ -1012,22 +1026,35 @@ static void __init sabre_base_address_update(struct pci_dev *pdev, int resource)
 	struct pcidev_cookie *pcp = pdev->sysdata;
 	struct pci_pbm_info *pbm = pcp->pbm;
 	struct pci_controller_info *p = pbm->parent;
-	struct resource *res = &pdev->resource[resource];
+	struct resource *res;
 	unsigned long base;
 	u32 reg;
-	int where, size;
+	int where, size, is_64bit;
 
+	res = &pdev->resource[resource];
+	where = PCI_BASE_ADDRESS_0 + (resource * 4);
+
+	is_64bit = 0;
 	if (res->flags & IORESOURCE_IO)
 		base = p->controller_regs + SABRE_IOSPACE;
-	else
+	else {
 		base = p->controller_regs + SABRE_MEMSPACE;
+		if ((res->flags & PCI_BASE_ADDRESS_MEM_TYPE_MASK)
+		    == PCI_BASE_ADDRESS_MEM_TYPE_64)
+			is_64bit = 1;
+	}
 
-	where = PCI_BASE_ADDRESS_0 + (resource * 4);
 	size = res->end - res->start;
 	pci_read_config_dword(pdev, where, &reg);
 	reg = ((reg & size) |
 	       (((u32)(res->start - base)) & ~size));
 	pci_write_config_dword(pdev, where, reg);
+
+	/* This knows that the upper 32-bits of the address
+	 * must be zero.  Our PCI common layer enforces this.
+	 */
+	if (is_64bit)
+		pci_write_config_dword(pdev, where + 4, 0);
 }
 
 static void __init apb_init(struct pci_controller_info *p, struct pci_bus *sabre_bus)
@@ -1050,6 +1077,20 @@ static void __init apb_init(struct pci_controller_info *p, struct pci_bus *sabre
 			/* Status register bits are "write 1 to clear". */
 			sabre_write_word(pdev, PCI_STATUS, 0xffff);
 			sabre_write_word(pdev, PCI_SEC_STATUS, 0xffff);
+
+			/* Use a primary/seconday latency timer value
+			 * of 64.
+			 */
+			sabre_write_byte(pdev, PCI_LATENCY_TIMER, 64);
+			sabre_write_byte(pdev, PCI_SEC_LATENCY_TIMER, 64);
+
+			/* Enable reporting/forwarding of master aborts,
+			 * parity, and SERR.
+			 */
+			sabre_write_byte(pdev, PCI_BRIDGE_CONTROL,
+					 (PCI_BRIDGE_CTL_PARITY |
+					  PCI_BRIDGE_CTL_SERR |
+					  PCI_BRIDGE_CTL_MASTER_ABORT));
 		}
 	}
 }
@@ -1059,6 +1100,13 @@ static void __init sabre_scan_bus(struct pci_controller_info *p)
 	static int once = 0;
 	struct pci_bus *sabre_bus;
 	struct list_head *walk;
+
+	/* The APB bridge speaks to the Sabre host PCI bridge
+	 * at 66Mhz, but the front side of APB runs at 33Mhz
+	 * for both segments.
+	 */
+	p->pbm_A.is_66mhz_capable = 0;
+	p->pbm_B.is_66mhz_capable = 0;
 
 	/* Unlike for PSYCHO, we can only have one SABRE
 	 * in a system.  Having multiple SABREs is thus
@@ -1099,6 +1147,8 @@ static void __init sabre_scan_bus(struct pci_controller_info *p)
 		pci_record_assignments(pbm, pbus);
 		pci_assign_unassigned(pbm, pbus);
 		pci_fixup_irq(pbm, pbus);
+		pci_determine_66mhz_disposition(pbm, pbus);
+		pci_setup_busmastering(pbm, pbus);
 	}
 
 	sabre_register_error_handlers(p);
@@ -1363,7 +1413,10 @@ void __init sabre_init(int pnode)
 	 * First REG in property is base of entire SABRE register space.
 	 */
 	p->controller_regs = pr_regs[0].phys_addr;
-	printk("PCI: Found SABRE, main regs at %016lx\n", p->controller_regs);
+	pci_dma_wsync = p->controller_regs + SABRE_WRSYNC;
+
+	printk("PCI: Found SABRE, main regs at %016lx, wsync at %016lx\n",
+	       p->controller_regs, pci_dma_wsync);
 
 	/* Error interrupts are enabled later after the bus scan. */
 	sabre_write(p->controller_regs + SABRE_PCICTRL,

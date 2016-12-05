@@ -28,6 +28,9 @@
  * 12/03/96 Jes: Currently we only support m68k single-cpu systems, so
  *               all pointers that used to be 'current' are now entry
  *               number 0 in the 'current_set' list.
+ *
+ *  6/05/00 RZ:	 addedd writeback completion after return from sighandler
+ *		 for 68040
  */
 
 #include <linux/sys.h>
@@ -104,8 +107,18 @@ do_trace:
 	jbsr	SYMBOL_NAME(syscall_trace)
 
 SYMBOL_NAME_LABEL(ret_from_signal)
-	RESTORE_SWITCH_STACK
+	RESTORE_SWITCH_STACK 
 	addql	#4,%sp
+/* on 68040 complete pending writebacks if any */	
+#ifdef CONFIG_M68040
+	bfextu	%sp@(PT_VECTOR){#0,#4},%d0  
+	subql	#7,%d0				| bus error frame ?
+	jbne	1f
+	movel	%sp,%sp@-
+	jbsr	SYMBOL_NAME(berr_040cleanup)
+	addql	#4,%sp
+1:	
+#endif	
 	jra	SYMBOL_NAME(ret_from_exception)
 
 ENTRY(system_call)
@@ -115,7 +128,7 @@ ENTRY(system_call)
 	| save top of frame
 	movel	%sp,%curptr@(TASK_THREAD+THREAD_ESP0)
 
-	btst	#PF_TRACESYS_BIT,%curptr@(TASK_FLAGS+PF_TRACESYS_OFF)
+	btst	#PT_TRACESYS_BIT,%curptr@(TASK_PTRACE+PT_TRACESYS_OFF)
 	jne	do_trace
 	cmpl	#NR_syscalls,%d0
 	jcc	badsys
@@ -136,7 +149,7 @@ SYMBOL_NAME_LABEL(ret_from_exception)
 	jeq	2f
 #endif
 					| check for delayed trace
-	bclr	#PF_DTRACE_BIT,%curptr@(TASK_FLAGS+PF_DTRACE_OFF)
+	bclr	#PT_DTRACE_BIT,%curptr@(TASK_PTRACE+PT_DTRACE_OFF)
 	jne	do_delayed_trace
 5:
 	tstl	%curptr@(TASK_STATE)	| state
@@ -171,7 +184,7 @@ do_delayed_trace:
 #if 0
 #if CONFIG_AMIGA
 SYMBOL_NAME_LABEL(ami_inthandler)
-	addql	#1,SYMBOL_NAME(local_irq_count)
+	addql	#1,SYMBOL_NAME(irq_stat)+8	| local_irq_count
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
 
@@ -203,7 +216,7 @@ ENTRY(nmi_handler)
 SYMBOL_NAME_LABEL(inthandler)
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-	addql	#1,SYMBOL_NAME(local_irq_count)
+	addql	#1,SYMBOL_NAME(irq_stat)+8	| local_irq_count
 					|  put exception # in d0
 	bfextu %sp@(PT_VECTOR){#4,#10},%d0
 
@@ -222,7 +235,7 @@ SYMBOL_NAME_LABEL(inthandler)
 3:     	addql	#8,%sp			|  pop parameters off stack
 
 SYMBOL_NAME_LABEL(ret_from_interrupt)
-	subql	#1,SYMBOL_NAME(local_irq_count)
+	subql	#1,SYMBOL_NAME(irq_stat)+8	| local_irq_count
 	jeq	1f
 2:
 	RESTORE_ALL
@@ -236,8 +249,8 @@ SYMBOL_NAME_LABEL(ret_from_interrupt)
 #endif
 	/* check if we need to do software interrupts */
 
-	movel	SYMBOL_NAME(softirq_state),%d0
-	andl	SYMBOL_NAME(softirq_state)+4,%d0
+	movel	SYMBOL_NAME(irq_stat),%d0	| softirq_active
+	andl	SYMBOL_NAME(irq_stat)+4,%d0	| softirq_mask
 	jeq	SYMBOL_NAME(ret_from_exception)
 
 	pea	SYMBOL_NAME(ret_from_exception)
@@ -578,7 +591,7 @@ SYMBOL_NAME_LABEL(sys_call_table)
 	.long SYMBOL_NAME(sys_mremap)
 	.long SYMBOL_NAME(sys_setresuid16)
 	.long SYMBOL_NAME(sys_getresuid16)	/* 165 */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* for vm86 */
+	.long SYMBOL_NAME(sys_getpagesize)
 	.long SYMBOL_NAME(sys_query_module)
 	.long SYMBOL_NAME(sys_poll)
 	.long SYMBOL_NAME(sys_nfsservctl)
@@ -629,6 +642,10 @@ SYMBOL_NAME_LABEL(sys_call_table)
 	.long SYMBOL_NAME(sys_setgid)
 	.long SYMBOL_NAME(sys_setfsuid)		/* 215 */
 	.long SYMBOL_NAME(sys_setfsgid)
+	.long SYMBOL_NAME(sys_ni_syscall)
+	.long SYMBOL_NAME(sys_ni_syscall)
+	.long SYMBOL_NAME(sys_ni_syscall)
+	.long SYMBOL_NAME(sys_getdents64)	/* 220 */
 
 	.rept NR_syscalls-(.-SYMBOL_NAME(sys_call_table))/4
 		.long SYMBOL_NAME(sys_ni_syscall)

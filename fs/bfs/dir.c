@@ -1,7 +1,7 @@
 /*
  *	fs/bfs/dir.c
  *	BFS directory operations.
- *	Copyright (C) 1999  Tigran Aivazian <tigran@ocston.org>
+ *	Copyright (C) 1999,2000  Tigran Aivazian <tigran@veritas.com>
  */
 
 #include <linux/sched.h>
@@ -32,11 +32,6 @@ static int bfs_readdir(struct file * f, void * dirent, filldir_t filldir)
 	unsigned int offset;
 	int block;
 
-	if (!dir || !dir->i_sb || !S_ISDIR(dir->i_mode)) {
-		printf("Bad inode or not a directory %s:%08lx\n", bdevname(dev), dir->i_ino);
-		return -EBADF;
-	}
-
 	if (f->f_pos & (BFS_DIRENT_SIZE-1)) {
 		printf("Bad f_pos=%08lx for %s:%08lx\n", (unsigned long)f->f_pos, 
 			bdevname(dev), dir->i_ino);
@@ -55,7 +50,7 @@ static int bfs_readdir(struct file * f, void * dirent, filldir_t filldir)
 			de = (struct bfs_dirent *)(bh->b_data + offset);
 			if (de->ino) {
 				int size = strnlen(de->name, BFS_NAMELEN);
-				if (filldir(dirent, de->name, size, f->f_pos, de->ino) < 0) {
+				if (filldir(dirent, de->name, size, f->f_pos, de->ino, DT_UNKNOWN) < 0) {
 					brelse(bh);
 					return 0;
 				}
@@ -85,10 +80,9 @@ static int bfs_create(struct inode * dir, struct dentry * dentry, int mode)
 	struct super_block * s = dir->i_sb;
 	unsigned long ino;
 
-	inode = get_empty_inode();
+	inode = new_inode(s);
 	if (!inode)
 		return -ENOSPC;
-	inode->i_sb = s;
 	ino = find_first_zero_bit(s->su_imap, s->su_lasti);
 	if (ino > s->su_lasti) {
 		iput(inode);
@@ -96,7 +90,6 @@ static int bfs_create(struct inode * dir, struct dentry * dentry, int mode)
 	}
 	set_bit(ino, s->su_imap);	
 	s->su_freei--;
-	inode->i_dev = s->s_dev;
 	inode->i_uid = current->fsuid;
 	inode->i_gid = (dir->i_mode & S_ISGID) ? dir->i_gid : current->fsgid;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
@@ -157,7 +150,7 @@ static int bfs_link(struct dentry * old, struct inode * dir, struct dentry * new
 	inode->i_nlink++;
 	inode->i_ctime = CURRENT_TIME;
 	mark_inode_dirty(inode);
-	inode->i_count++;
+	atomic_inc(&inode->i_count);
 	d_instantiate(new, inode);
 	return 0;
 }
@@ -182,13 +175,12 @@ static int bfs_unlink(struct inode * dir, struct dentry * dentry)
 	}
 	de->ino = 0;
 	dir->i_version = ++event;
-	mark_buffer_dirty(bh, 0);
+	mark_buffer_dirty(bh);
 	dir->i_ctime = dir->i_mtime = CURRENT_TIME;
 	mark_inode_dirty(dir);
 	inode->i_nlink--;
 	inode->i_ctime = dir->i_ctime;
 	mark_inode_dirty(inode);
-	d_delete(dentry);
 	error = 0;
 
 out_brelse:
@@ -242,7 +234,7 @@ static int bfs_rename(struct inode * old_dir, struct dentry * old_dentry,
 		new_inode->i_ctime = CURRENT_TIME;
 		mark_inode_dirty(new_inode);
 	}
-	mark_buffer_dirty(old_bh, 0);
+	mark_buffer_dirty(old_bh);
 	error = 0;
 
 end_rename:
@@ -294,7 +286,7 @@ static int bfs_add_entry(struct inode * dir, const char * name, int namelen, int
 				de->ino = ino;
 				for (i=0; i<BFS_NAMELEN; i++)
 					de->name[i] = (i < namelen) ? name[i] : 0;
-				mark_buffer_dirty(bh, 0);
+				mark_buffer_dirty(bh);
 				brelse(bh);
 				return 0;
 			}

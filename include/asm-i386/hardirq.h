@@ -1,24 +1,21 @@
 #ifndef __ASM_HARDIRQ_H
 #define __ASM_HARDIRQ_H
 
+#include <linux/config.h>
 #include <linux/threads.h>
 #include <linux/irq.h>
 
+/* entry.S is sensitive to the offsets of these fields */
 typedef struct {
+	unsigned int __softirq_active;
+	unsigned int __softirq_mask;
 	unsigned int __local_irq_count;
 	unsigned int __local_bh_count;
-	atomic_t __nmi_counter;
-	unsigned int __pad[5];
+	unsigned int __syscall_count;
+	unsigned int __nmi_count;	/* arch dependent */
 } ____cacheline_aligned irq_cpustat_t;
 
-extern irq_cpustat_t irq_stat [NR_CPUS];
-
-/*
- * Simple wrappers reducing source bloat
- */
-#define local_irq_count(cpu) (irq_stat[(cpu)].__local_irq_count)
-#define local_bh_count(cpu) (irq_stat[(cpu)].__local_bh_count)
-#define nmi_counter(cpu) (irq_stat[(cpu)].__nmi_counter)
+#include <linux/irq_cpustat.h>	/* Standard mappings for irq_cpustat_t above */
 
 /*
  * Are we in an interrupt context? Either doing bottom half
@@ -29,7 +26,7 @@ extern irq_cpustat_t irq_stat [NR_CPUS];
 
 #define in_irq() (local_irq_count(smp_processor_id()) != 0)
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 
 #define hardirq_trylock(cpu)	(local_irq_count(cpu) == 0)
 #define hardirq_endlock(cpu)	do { } while (0)
@@ -45,7 +42,7 @@ extern irq_cpustat_t irq_stat [NR_CPUS];
 #include <asm/smp.h>
 
 extern unsigned char global_irq_holder;
-extern unsigned volatile int global_irq_lock;
+extern unsigned volatile long global_irq_lock; /* long for set_bit -RR */
 
 static inline int irqs_running (void)
 {
@@ -89,6 +86,6 @@ static inline int hardirq_trylock(int cpu)
 
 extern void synchronize_irq(void);
 
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 
 #endif /* __ASM_HARDIRQ_H */

@@ -1,7 +1,13 @@
 /*
- * linux/drivers/net/ether3.h
+ *  linux/drivers/acorn/net/ether3.h
  *
- * network driver for Acorn/ANT Ether3 cards
+ *  Copyright (C) 1995-2000 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  network driver for Acorn/ANT Ether3 cards
  */
 
 #ifndef _LINUX_ether3_H
@@ -154,7 +160,7 @@ struct dev_priv {
     unsigned char tx_head;		/* buffer nr to insert next packet	 */
     unsigned char tx_tail;		/* buffer nr of transmitting packet	 */
     unsigned int rx_head;		/* address to fetch next packet from	 */
-    struct enet_statistics stats;
+    struct net_device_stats stats;
     struct timer_list timer;
     int broken;				/* 0 = ok, 1 = something went wrong	 */
 };

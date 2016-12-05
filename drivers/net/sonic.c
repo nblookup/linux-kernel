@@ -44,7 +44,7 @@ static int sonic_open(struct net_device *dev)
 //    if (sonic_request_irq(dev->irq, &sonic_interrupt, 0, "sonic", dev)) {
     if (sonic_request_irq(dev->irq, &sonic_interrupt, SA_INTERRUPT, "sonic", dev)) {
 	printk ("\n%s: unable to get IRQ %d .\n", dev->name, dev->irq);
-	return EAGAIN;
+	return -EAGAIN;
     }
 
     /*
@@ -377,7 +377,7 @@ sonic_rx(struct net_device *dev)
  * Get the current statistics.
  * This may be called with the device open or closed.
  */
-static struct enet_statistics *
+static struct net_device_stats *
 sonic_get_stats(struct net_device *dev)
 {
     struct sonic_local *lp = (struct sonic_local *)dev->priv;

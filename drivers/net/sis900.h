@@ -10,7 +10,10 @@
  *   http://www.sis.com.tw/support/databook.htm
  */
 
-/* MAC operationl registers of SiS 7016 and SiS 900 ehternet controller */
+/*
+ * SiS 7016 and SiS 900 ethernet controller registers
+ */
+
 /* The I/O extent, SiS 900 needs 256 bytes of io address */
 #define SIS900_TOTAL_SIZE 0x100
 
@@ -25,19 +28,20 @@ enum sis900_registers {
 	ier=0x18,               //Interrupt Enable Register
 	epar=0x18,              //Enhanced PHY Access Register
 	txdp=0x20,              //Transmit Descriptor Pointer Register
-	txcfg=0x24,             //Transmit Configuration Register
-	rxdp=0x30,              //Receive Descriptor Pointer Register
-	rxcfg=0x34,             //Receive Configuration Register
-	flctrl=0x38,            //Flow Control Register
-	rxlen=0x3c,             //Receive Packet Length Register
-	rfcr=0x48,              //Receive Filter Control Register
-	rfdr=0x4C,              //Receive Filter Data Register
-	pmctrl=0xB0,            //Power Management Control Register
-	pmer=0xB4               //Power Management Wake-up Event Register
+        txcfg=0x24,             //Transmit Configuration Register
+        rxdp=0x30,              //Receive Descriptor Pointer Register
+        rxcfg=0x34,             //Receive Configuration Register
+        flctrl=0x38,            //Flow Control Register
+        rxlen=0x3c,             //Receive Packet Length Register
+        rfcr=0x48,              //Receive Filter Control Register
+        rfdr=0x4C,              //Receive Filter Data Register
+        pmctrl=0xB0,            //Power Management Control Register
+        pmer=0xB4               //Power Management Wake-up Event Register
 };
 
 /* Symbolic names for bits in various registers */
 enum sis900_command_register_bits {
+	RELOAD  = 0x00000400,
 	RESET   = 0x00000100, SWI = 0x00000080, RxRESET = 0x00000020,
 	TxRESET = 0x00000010, RxDIS = 0x00000008, RxENA = 0x00000004,
 	TxDIS   = 0x00000002, TxENA = 0x00000001
@@ -164,7 +168,13 @@ enum mii_registers {
 /* mii registers specific to SiS 900 */
 enum sis_mii_registers {
 	MII_CONFIG1 = 0x0010, MII_CONFIG2 = 0x0011, MII_STSOUT = 0x0012,
-	MII_MASK    = 0x0013
+	MII_MASK    = 0x0013, MII_RESV    = 0x0014
+};
+
+/* mii registers specific to ICS 1893 */
+enum ics_mii_registers {
+	MII_EXTCTRL  = 0x0010, MII_QPDSTS = 0x0011, MII_10BTOP = 0x0012,
+	MII_EXTCTRL2 = 0x0013
 };
 
 /* mii registers specific to AMD 79C901 */
@@ -211,9 +221,24 @@ enum mii_stsout_register_bits {
 	MII_STSOUT_SPD       = 0x0080, MII_STSOUT_DPLX = 0x0040
 };
 
+enum mii_stsics_register_bits {
+	MII_STSICS_SPD  = 0x8000, MII_STSICS_DPLX = 0x4000,
+	MII_STSICS_LINKSTS = 0x0001
+};
+
 enum mii_stssum_register_bits {
 	MII_STSSUM_LINK = 0x0008, MII_STSSUM_DPLX = 0x0004,
 	MII_STSSUM_AUTO = 0x0002, MII_STSSUM_SPD  = 0x0001
+};
+
+enum sis900_revision_id {
+	SIS630A_900_REV = 0x80,		SIS630E_900_REV = 0x81,
+	SIS630S_900_REV = 0x82,		SIS630EA1_900_REV = 0x83
+};
+
+enum sis630_revision_id {
+	SIS630A0    = 0x00, SIS630A1      = 0x01,
+	SIS630B0    = 0x10, SIS630B1      = 0x11
 };
 
 #define FDX_CAPABLE_DUPLEX_UNKNOWN      0
@@ -235,14 +260,13 @@ enum mii_stssum_register_bits {
 #define NUM_TX_DESC     16      	/* Number of Tx descriptor registers. */
 #define NUM_RX_DESC     16       	/* Number of Rx descriptor registers. */
 
-#define TRUE            1
-#define FALSE           0
-
 /* PCI stuff, should be move to pic.h */
 #define PCI_DEVICE_ID_SI_900	0x900   
-#define PCI_DEVICE_ID_SI_7016	0x7016  
+#define PCI_DEVICE_ID_SI_7016	0x7016
+#define SIS630_VENDOR_ID        0x0630
+#define SIS630_DEVICE_ID        0x1039
 
-/* ioctl for accessing MII transveiver */
+/* ioctl for accessing MII transceiver */
 #define SIOCGMIIPHY (SIOCDEVPRIVATE)		/* Get the PHY in use. */
 #define SIOCGMIIREG (SIOCDEVPRIVATE+1)		/* Read a PHY register. */
 #define SIOCSMIIREG (SIOCDEVPRIVATE+2)		/* Write a PHY register */

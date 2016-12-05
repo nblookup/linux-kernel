@@ -72,14 +72,14 @@ affs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 
 	if (filp->f_pos == 0) {
 		filp->private_data = (void *)0;
-		if (filldir(dirent,".",1,filp->f_pos,inode->i_ino) < 0) {
+		if (filldir(dirent,".",1,filp->f_pos,inode->i_ino,DT_DIR) < 0) {
 			return 0;
 		}
 		++filp->f_pos;
 		stored++;
 	}
 	if (filp->f_pos == 1) {
-		if (filldir(dirent,"..",2,filp->f_pos,affs_parent_ino(inode)) < 0) {
+		if (filldir(dirent,"..",2,filp->f_pos,affs_parent_ino(inode),DT_DIR) < 0) {
 			return stored;
 		}
 		filp->f_pos = 2;
@@ -111,7 +111,7 @@ affs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		 * we can jump directly to where we left off.
 		 */
 		if (filp->private_data && filp->f_version == inode->i_version) {
-			i = (s32)filp->private_data;
+			i = (s32)(unsigned long)filp->private_data;
 			j = 0;
 			pr_debug("AFFS: readdir() left off=%d\n",i);
 		}
@@ -135,9 +135,9 @@ affs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 			pr_debug("AFFS: readdir(): filldir(\"%.*s\",ino=%lu), i=%d\n",
 				 namelen,name,ino,i);
 			filp->private_data = (void *)ino;
-			if (filldir(dirent,name,namelen,filp->f_pos,ino) < 0)
+			if (filldir(dirent,name,namelen,filp->f_pos,ino,DT_UNKNOWN) < 0)
 				goto readdir_done;
-			filp->private_data = (void *)i;
+			filp->private_data = (void *)(unsigned long)i;
 			affs_brelse(fh_bh);
 			fh_bh = NULL;
 			stored++;

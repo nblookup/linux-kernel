@@ -1,8 +1,8 @@
 /* gamma_dma.c -- DMA support for GMX 2000 -*- linux-c -*-
  * Created: Fri Mar 19 14:30:16 1999 by faith@precisioninsight.com
- * Revised: Thu Sep 16 12:55:37 1999 by faith@precisioninsight.com
  *
  * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
+ * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
  * All Rights Reserved.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -24,8 +24,8 @@
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
  * DEALINGS IN THE SOFTWARE.
  * 
- * $PI: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/gamma_dma.c,v 1.9 1999/09/16 16:56:18 faith Exp $
- * $XFree86: xc/programs/Xserver/hw/xfree86/os-support/linux/drm/kernel/gamma_dma.c,v 1.1 1999/09/25 14:38:00 dawes Exp $
+ * Authors:
+ *    Rickard E. (Rik) Faith <faith@valinux.com>
  *
  */
 
@@ -88,13 +88,31 @@ static inline void gamma_dma_dispatch(drm_device_t *dev, unsigned long address,
 	GAMMA_WRITE(GAMMA_DMACOUNT, length / 4);
 }
 
-static inline void gamma_dma_quiescent(drm_device_t *dev)
+static inline void gamma_dma_quiescent_single(drm_device_t *dev)
 {
 	while (GAMMA_READ(GAMMA_DMACOUNT))
 		;
 	while (GAMMA_READ(GAMMA_INFIFOSPACE) < 3)
 		;
+
+	GAMMA_WRITE(GAMMA_FILTERMODE, 1 << 10);
+	GAMMA_WRITE(GAMMA_SYNC, 0);
+	
+	do {
+		while (!GAMMA_READ(GAMMA_OUTFIFOWORDS))
+			;
+	} while (GAMMA_READ(GAMMA_OUTPUTFIFO) != GAMMA_SYNC_TAG);
+}
+
+static inline void gamma_dma_quiescent_dual(drm_device_t *dev)
+{
+	while (GAMMA_READ(GAMMA_DMACOUNT))
+		;
+	while (GAMMA_READ(GAMMA_INFIFOSPACE) < 3)
+		;
+
 	GAMMA_WRITE(GAMMA_BROADCASTMASK, 3);
+
 	GAMMA_WRITE(GAMMA_FILTERMODE, 1 << 10);
 	GAMMA_WRITE(GAMMA_SYNC, 0);
 	
@@ -104,7 +122,6 @@ static inline void gamma_dma_quiescent(drm_device_t *dev)
 			;
 	} while (GAMMA_READ(GAMMA_OUTPUTFIFO) != GAMMA_SYNC_TAG);
 	
-
 				/* Read from second MX */
 	do {
 		while (!GAMMA_READ(GAMMA_OUTFIFOWORDS + 0x10000))
@@ -525,10 +542,9 @@ static int gamma_dma_send_buffers(drm_device_t *dev, drm_dma_t *d)
 	
 	if (d->flags & _DRM_DMA_BLOCK) {
 		DRM_DEBUG("%d waiting\n", current->pid);
-		current->state = TASK_INTERRUPTIBLE;
 		for (;;) {
-			if (!last_buf->waiting
-			    && !last_buf->pending)
+			current->state = TASK_INTERRUPTIBLE;
+			if (!last_buf->waiting && !last_buf->pending)
 				break; /* finished */
 			schedule();
 			if (signal_pending(current)) {
@@ -569,7 +585,8 @@ int gamma_dma(struct inode *inode, struct file *filp, unsigned int cmd,
 	int		  retcode   = 0;
 	drm_dma_t	  d;
 
-	copy_from_user_ret(&d, (drm_dma_t *)arg, sizeof(d), -EFAULT);
+	if (copy_from_user(&d, (drm_dma_t *)arg, sizeof(d)))
+		return -EFAULT;
 	DRM_DEBUG("%d %d: %d send, %d req\n",
 		  current->pid, d.context, d.send_count, d.request_count);
 
@@ -604,7 +621,8 @@ int gamma_dma(struct inode *inode, struct file *filp, unsigned int cmd,
 
 	DRM_DEBUG("%d returning, granted = %d\n",
 		  current->pid, d.granted_count);
-	copy_to_user_ret((drm_dma_t *)arg, &d, sizeof(d), -EFAULT);
+	if (copy_to_user((drm_dma_t *)arg, &d, sizeof(d)))
+		return -EFAULT;
 
 	return retcode;
 }
@@ -633,7 +651,7 @@ int gamma_irq_install(drm_device_t *dev, int irq)
 	dev->dma->next_queue  = NULL;
 	dev->dma->this_buffer = NULL;
 
-	dev->tq.next	      = NULL;
+	INIT_LIST_HEAD(&dev->tq.list);
 	dev->tq.sync	      = 0;
 	dev->tq.routine	      = gamma_dma_schedule_tq_wrapper;
 	dev->tq.data	      = dev;
@@ -693,7 +711,8 @@ int gamma_control(struct inode *inode, struct file *filp, unsigned int cmd,
 	drm_control_t	ctl;
 	int		retcode;
 	
-	copy_from_user_ret(&ctl, (drm_control_t *)arg, sizeof(ctl), -EFAULT);
+	if (copy_from_user(&ctl, (drm_control_t *)arg, sizeof(ctl)))
+		return -EFAULT;
 	
 	switch (ctl.func) {
 	case DRM_INST_HANDLER:
@@ -725,7 +744,8 @@ int gamma_lock(struct inode *inode, struct file *filp, unsigned int cmd,
 	dev->lck_start = start = get_cycles();
 #endif
 
-	copy_from_user_ret(&lock, (drm_lock_t *)arg, sizeof(lock), -EFAULT);
+	if (copy_from_user(&lock, (drm_lock_t *)arg, sizeof(lock)))
+		return -EFAULT;
 
 	if (lock.context == DRM_KERNEL_CONTEXT) {
 		DRM_ERROR("Process %d using kernel context %d\n",
@@ -757,6 +777,7 @@ int gamma_lock(struct inode *inode, struct file *filp, unsigned int cmd,
 		}
 		add_wait_queue(&dev->lock.lock_queue, &entry);
 		for (;;) {
+			current->state = TASK_INTERRUPTIBLE;
 			if (!dev->lock.hw_lock) {
 				/* Device has been unregistered */
 				ret = -EINTR;
@@ -773,7 +794,6 @@ int gamma_lock(struct inode *inode, struct file *filp, unsigned int cmd,
 			
 				/* Contention */
 			atomic_inc(&dev->total_sleeps);
-			current->state = TASK_INTERRUPTIBLE;
 			schedule();
 			if (signal_pending(current)) {
 				ret = -ERESTARTSYS;
@@ -787,10 +807,24 @@ int gamma_lock(struct inode *inode, struct file *filp, unsigned int cmd,
 	drm_flush_unblock(dev, lock.context, lock.flags); /* cleanup phase */
 	
 	if (!ret) {
+		sigemptyset(&dev->sigmask);
+		sigaddset(&dev->sigmask, SIGSTOP);
+		sigaddset(&dev->sigmask, SIGTSTP);
+		sigaddset(&dev->sigmask, SIGTTIN);
+		sigaddset(&dev->sigmask, SIGTTOU);
+		dev->sigdata.context = lock.context;
+		dev->sigdata.lock    = dev->lock.hw_lock;
+		block_all_signals(drm_notifier, &dev->sigdata, &dev->sigmask);
+
 		if (lock.flags & _DRM_LOCK_READY)
 			gamma_dma_ready(dev);
-		if (lock.flags & _DRM_LOCK_QUIESCENT)
-			gamma_dma_quiescent(dev);
+		if (lock.flags & _DRM_LOCK_QUIESCENT) {
+			if (gamma_found() == 1) {
+				gamma_dma_quiescent_single(dev);
+			} else {
+				gamma_dma_quiescent_dual(dev);
+			}
+		}
 	}
 	DRM_DEBUG("%d %s\n", lock.context, ret ? "interrupted" : "has lock");
 

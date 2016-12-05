@@ -130,7 +130,7 @@ static const char * get_string( const char * pnt, char ** label )
 static const char * get_qstring( const char * pnt, char ** label )
 {
     char quote_char;
-    char newlabel [1024];
+    char newlabel [2048];
     char * pnt1;
 
     /* advance to the open quote */
@@ -168,6 +168,28 @@ static const char * get_qstring( const char * pnt, char ** label )
     while ( *pnt == ' ' || *pnt == '\t' )
 	pnt++;
     return pnt;
+}
+
+
+
+/*
+ * Get a quoted or unquoted string. It is recognized by the first 
+ * non-white character. '"' and '"' are not allowed inside the string.
+ */
+static const char * get_qnqstring( const char * pnt, char ** label )
+{
+    char quote_char;
+
+    while ( *pnt == ' ' || *pnt == '\t' )
+	pnt++;
+
+    if ( *pnt == '\0' )
+	return pnt;
+    quote_char = *pnt;
+    if ( quote_char == '"' || quote_char == '\'' )
+	return get_qstring( pnt, label );
+    else
+	return get_string( pnt, label );
 }
 
 
@@ -304,6 +326,7 @@ static struct condition * tokenize_if( const char * pnt )
 static const char * tokenize_choices( struct kconfig * cfg_choose,
     const char * pnt )
 {
+    int default_checked = 0;
     for ( ; ; )
     {
 	struct kconfig * cfg;
@@ -327,12 +350,20 @@ static const char * tokenize_choices( struct kconfig * cfg_choose,
 	cfg->token      = token_choice_item;
 	cfg->cfg_parent = cfg_choose;
 	pnt = get_string( pnt, &cfg->label );
+	if ( ! default_checked &&
+	     ! strncmp( cfg->label, cfg_choose->value, strlen( cfg_choose->value ) ) )
+	{
+	    default_checked = 1;
+	    free( cfg_choose->value );
+	    cfg_choose->value = cfg->label;
+	}
 	while ( *pnt == ' ' || *pnt == '\t' )
 	    pnt++;
 	pnt = get_string( pnt, &buffer );
 	cfg->nameindex = get_varnum( buffer );
     }
-
+    if ( ! default_checked )
+	syntax_error( "bad 'choice' default value" );
     return pnt;
 }
 
@@ -493,7 +524,6 @@ static void tokenize_line( const char * pnt )
 	    pnt = get_qstring ( pnt, &cfg->label  );
 	    pnt = get_qstring ( pnt, &choice_list );
 	    pnt = get_string  ( pnt, &cfg->value  );
-
 	    cfg->nameindex = -(choose_number++);
 	    tokenize_choices( cfg, choice_list );
 	    free( choice_list );
@@ -505,6 +535,8 @@ static void tokenize_line( const char * pnt )
 	if ( last_menuoption != NULL )
 	{
 	    pnt = get_qstring(pnt, &cfg->label);
+	    if (cfg->label == NULL)
+		syntax_error( "missing comment text" );
 	    last_menuoption->label = cfg->label;
 	    last_menuoption = NULL;
 	}
@@ -546,7 +578,9 @@ static void tokenize_line( const char * pnt )
     case token_define_string:
 	pnt = get_string( pnt, &buffer );
 	cfg->nameindex = get_varnum( buffer );
-	pnt = get_qstring( pnt, &cfg->value );
+	pnt = get_qnqstring( pnt, &cfg->value );
+	if (cfg->value == NULL)
+	    syntax_error( "missing value" );
 	break;
 
     case token_dep_bool:
@@ -659,7 +693,9 @@ static void tokenize_line( const char * pnt )
 	pnt = get_qstring ( pnt, &cfg->label );
 	pnt = get_string  ( pnt, &buffer );
 	cfg->nameindex = get_varnum( buffer );
-	pnt = get_qstring  ( pnt, &cfg->value );
+	pnt = get_qnqstring  ( pnt, &cfg->value );
+	if (cfg->value == NULL)
+	    syntax_error( "missing initial value" );
 	break;
 
     case token_if:
@@ -705,7 +741,7 @@ static void tokenize_line( const char * pnt )
  */
 static void do_source( const char * filename )
 {
-    char buffer [1024];
+    char buffer [2048];
     FILE * infile;
     const char * old_file;
     int old_lineno;

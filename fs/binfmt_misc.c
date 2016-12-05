@@ -27,6 +27,7 @@
 #include <linux/proc_fs.h>
 #include <linux/string.h>
 #include <linux/ctype.h>
+#include <linux/file.h>
 #include <linux/spinlock.h>
 #include <asm/uaccess.h>
 
@@ -67,9 +68,9 @@ static struct linux_binfmt misc_format = {
 	NULL, THIS_MODULE, load_misc_binary, NULL, NULL, 0
 };
 
-static struct proc_dir_entry *bm_dir = NULL;
+static struct proc_dir_entry *bm_dir;
 
-static struct binfmt_entry *entries = NULL;
+static struct binfmt_entry *entries;
 static int free_id = 1;
 static int enabled = 1;
 
@@ -180,12 +181,11 @@ static struct binfmt_entry *check_file(struct linux_binprm *bprm)
 static int load_misc_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 {
 	struct binfmt_entry *fmt;
-	struct dentry * dentry;
-	char iname[128];
+	struct file * file;
+	char iname[BINPRM_BUF_SIZE];
 	char *iname_addr = iname;
 	int retval;
 
-	MOD_INC_USE_COUNT;
 	retval = -ENOEXEC;
 	if (!enabled)
 		goto _ret;
@@ -194,15 +194,16 @@ static int load_misc_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 	read_lock(&entries_lock);
 	fmt = check_file(bprm);
 	if (fmt) {
-		strncpy(iname, fmt->interpreter, 127);
-		iname[127] = '\0';
+		strncpy(iname, fmt->interpreter, BINPRM_BUF_SIZE - 1);
+		iname[BINPRM_BUF_SIZE - 1] = '\0';
 	}
 	read_unlock(&entries_lock);
 	if (!fmt)
 		goto _ret;
 
-	dput(bprm->dentry);
-	bprm->dentry = NULL;
+	allow_write_access(bprm->file);
+	fput(bprm->file);
+	bprm->file = NULL;
 
 	/* Build args for interpreter */
 	remove_arg_zero(bprm);
@@ -214,17 +215,16 @@ static int load_misc_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 	bprm->argc++;
 	bprm->filename = iname;	/* for binfmt_script */
 
-	dentry = open_namei(iname, 0, 0);
-	retval = PTR_ERR(dentry);
-	if (IS_ERR(dentry))
+	file = open_exec(iname);
+	retval = PTR_ERR(file);
+	if (IS_ERR(file))
 		goto _ret;
-	bprm->dentry = dentry;
+	bprm->file = file;
 
 	retval = prepare_binprm(bprm);
 	if (retval >= 0)
 		retval = search_binary_handler(bprm, regs);
 _ret:
-	MOD_DEC_USE_COUNT;
 	return retval;
 }
 
@@ -324,7 +324,7 @@ static int proc_write_register(struct file *file, const char *buffer,
 
 	/* more sanity checks */
 	if (err || !(!cnt || (!(--cnt) && (*sp == '\n'))) ||
-	    (e->size < 1) || ((e->size + e->offset) > 127) ||
+	    (e->size < 1) || ((e->size + e->offset) > (BINPRM_BUF_SIZE - 1)) ||
 	    !(e->proc_name) || !(e->interpreter) || entry_proc_setup(e))
 		goto free_err;
 
